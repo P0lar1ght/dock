@@ -1,0 +1,15 @@
+[package]
+name = "cordis-spine"
+version = "0.1.0"
+edition = "2021"
+description = "DSH-shaped plugin spine with a Grok-shaped one-step agent turn"
+license = "MIT"
+
+[dependencies]
+cordis = { path = "../cordis-rust" }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

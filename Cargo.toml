@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "cordis-rust",
+    "cordis-markdown",
+    "cordis-spine",
+    "cordis-tui",
+    "cordis-app",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"

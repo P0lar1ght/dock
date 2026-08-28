@@ -1,0 +1,24 @@
+[package]
+name = "cordis-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Grok pager TUI as Cordis plugins (theme, scrollback, prompt, status, welcome, event loop)"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+anstyle = "1.0"
+cordis = { path = "../cordis-rust" }
+cordis-markdown = { path = "../cordis-markdown" }
+cordis-spine = { path = "../cordis-spine" }
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = { version = "0.29", features = ["crossterm"] }
+textwrap = "0.16"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

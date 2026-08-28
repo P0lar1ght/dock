@@ -1,0 +1,17 @@
+[package]
+name = "cordis-app"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone Grok-shaped TUI: fake spine + session actor + pager"
+license = "MIT"
+
+[[bin]]
+name = "cordis-tui"
+path = "src/main.rs"
+
+[dependencies]
+cordis = { path = "../cordis-rust" }
+cordis-spine = { path = "../cordis-spine" }
+cordis-tui = { path = "../cordis-tui" }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "time"] }
