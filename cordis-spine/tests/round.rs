@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use cordis::{plugin, Context, FiberState, Inject};
 use cordis_spine::{
-    agent_loop, install_fakes, Agent, Agents, BoxFuture, Driver, Error, LoopHandle, PreStep,
-    Sessions, TurnOutcome, AGENT_LOOP, AGENTS, LLM, PRE_STEP, SESSIONS, SYSTEM_PROMPT, TOOLS,
+    agent_loop, install_fakes, turn, Agent, Agents, BoxFuture, Driver, Error, LoopHandle, PreStep,
+    Sessions, TurnControl, TurnOutcome, AGENT_LOOP, AGENTS, LLM, PRE_STEP, SESSIONS, SYSTEM_PROMPT,
+    TOOLS, TURN,
 };
 
 async fn boot() -> Context {
@@ -88,6 +89,20 @@ async fn pre_step_can_reject() {
     assert!(matches!(err, Error::PreStepRejected));
 }
 
+#[tokio::test]
+async fn cancelled_turn_stops_before_sample() {
+    let root = boot().await;
+    root.plugin(turn(), ()).unwrap().wait().await.unwrap();
+    root.require::<TurnControl>(TURN).unwrap().cancel();
+    let err = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("hello")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Cancelled));
+}
+
 struct PromptOnly;
 
 impl Driver for PromptOnly {
@@ -110,7 +125,6 @@ impl Driver for PromptOnly {
                 history: sessions.events(),
                 tools: Vec::new(),
             }).await;
-            sessions.append(cordis_spine::LogEvent::LlmStream(out.clone()));
             Ok(TurnOutcome::Text(out.summary()))
         })
     }
@@ -178,47 +192,39 @@ async fn second_turn_does_not_reuse_previous_tool_result() {
     );
 }
 
-struct ExtraPing;
-
-impl cordis_spine::ExtraTools for ExtraPing {
-    fn handles(&self, name: &str) -> bool {
-        name == "docs__ping"
-    }
-
-    fn specs(&self) -> Vec<cordis_spine::ToolSpec> {
-        vec![cordis_spine::ToolSpec {
-            name: "docs__ping".into(),
-            description: "ping".into(),
-            parameters_json: r#"{"type":"object"}"#.into(),
-        }]
-    }
-
-    fn execute(&self, call: cordis_spine::ToolCall) -> BoxFuture<'_, cordis_spine::ToolResult> {
-        Box::pin(async move {
-            cordis_spine::ToolResult {
-                call_id: call.id,
-                name: call.name,
-                content: "pong".into(),
-            }
-        })
-    }
-}
-
-fn extra_mcp() -> cordis::Plugin {
+fn extra_ping() -> cordis::Plugin {
     plugin(
-        "fake-mcp",
-        Inject::new(),
+        "extra-ping",
+        Inject::from(["tools"]),
         |ctx, _: &()| {
-            Ok(Some(ctx.provide(
-                cordis_spine::TOOLS_MCP,
-                cordis_spine::ExtraToolsHandle::new(ExtraPing),
-            )?))
+            let tools = ctx.require::<cordis_spine::Tools>(cordis_spine::TOOLS).unwrap();
+            let body: cordis_spine::ToolBody = std::sync::Arc::new(|call| {
+                Box::pin(async move {
+                    cordis_spine::ToolResult {
+                        call_id: call.id,
+                        name: call.name,
+                        content: "pong".into(),
+                    }
+                })
+            });
+            cordis_spine::own_registered(
+                ctx,
+                vec![tools.register(
+                    cordis_spine::ToolSpec {
+                        name: "docs__ping".into(),
+                        description: "ping".into(),
+                        parameters_json: r#"{"type":"object"}"#.into(),
+                    },
+                    body,
+                )?],
+            )?;
+            Ok(None)
         },
     )
 }
 
 #[tokio::test]
-async fn tools_live_looks_up_extra_mcp() {
+async fn tools_register_is_live_and_disposed_with_fiber() {
     use cordis_spine::{install_without_llm, ToolCall, Tools, TOOLS};
 
     let root = Context::new();
@@ -234,7 +240,8 @@ async fn tools_live_looks_up_extra_mcp() {
     assert_eq!(before.content, "echo-me");
     assert!(!tools.specs().iter().any(|s| s.name == "docs__ping"));
 
-    root.plugin(extra_mcp(), ()).unwrap().wait().await.unwrap();
+    let fiber = root.plugin(extra_ping(), ()).unwrap();
+    fiber.wait().await.unwrap();
     assert!(tools.specs().iter().any(|s| s.name == "docs__ping"));
     let after = tools
         .execute(ToolCall {
@@ -244,4 +251,150 @@ async fn tools_live_looks_up_extra_mcp() {
         })
         .await;
     assert_eq!(after.content, "pong");
+
+    fiber.dispose().await.unwrap();
+    assert!(!tools.specs().iter().any(|s| s.name == "docs__ping"));
+}
+
+#[tokio::test]
+async fn install_fakes_echo_has_no_capability_tools() {
+    let root = boot().await;
+    let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
+    let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
+    for banned in [
+        "web_fetch",
+        "todo_write",
+        "ask_user_question",
+        "enter_plan_mode",
+        "get_task_output",
+        "scheduler_create",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == banned),
+            "{banned} must not be on echo tools: {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn install_app_registers_capability_tools_and_mcp_fail_open() {
+    let root = Context::new();
+    cordis_spine::install_app(&root).await.unwrap();
+    let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
+    let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
+    for need in [
+        "web_fetch",
+        "web_search",
+        "todo_write",
+        "ask_user_question",
+        "enter_plan_mode",
+        "exit_plan_mode",
+        "get_task_output",
+        "wait_tasks",
+        "kill_task",
+        "scheduler_create",
+        "scheduler_list",
+        "scheduler_delete",
+        "bash",
+        "list_dir",
+        "task",
+        "lsp",
+        "update_goal",
+        "memory_search",
+        "memory_get",
+        "monitor",
+    ] {
+        assert!(
+            names.iter().any(|n| n == need),
+            "missing {need} in {names:?}"
+        );
+    }
+    let mcp = root
+        .get::<cordis_spine::Mcp>(cordis_spine::MCP)
+        .expect("mcp-client must provide even with no servers");
+    let _ = mcp.list();
+    assert!(root.get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE).is_some());
+    assert!(root.get::<cordis_spine::Todos>(cordis_spine::TODOS).is_some());
+    assert!(root.get::<cordis_spine::Jobs>(cordis_spine::JOBS).is_some());
+    assert!(root.get::<cordis_spine::Ask>(cordis_spine::ASK).is_some());
+
+    let todo = tools
+        .execute(cordis_spine::ToolCall {
+            id: "t1".into(),
+            name: "todo_write".into(),
+            arguments: r#"{"merge":false,"todos":[{"id":"1","content":"copied grok merge","status":"pending"}]}"#.into(),
+        })
+        .await;
+    assert!(todo.content.contains("copied grok merge"), "{}", todo.content);
+
+    let plan = tools
+        .execute(cordis_spine::ToolCall {
+            id: "p1".into(),
+            name: "enter_plan_mode".into(),
+            arguments: "{}".into(),
+        })
+        .await;
+    assert!(plan.content.contains("exit_plan_mode"), "{}", plan.content);
+    assert!(plan.content.contains("ask_user_question"), "{}", plan.content);
+    assert!(root
+        .get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE)
+        .is_some_and(|p| p.active()));
+
+    let blocked = tools
+        .execute(cordis_spine::ToolCall {
+            id: "b1".into(),
+            name: "bash".into(),
+            arguments: r#"{"command":"echo should-block"}"#.into(),
+        })
+        .await;
+    assert!(
+        blocked.content.contains("blocked in plan mode"),
+        "{}",
+        blocked.content
+    );
+
+    assert!(root.get::<cordis_spine::Goal>(cordis_spine::GOAL).is_some());
+
+    let disabled = tools
+        .execute(cordis_spine::ToolCall {
+            id: "g0".into(),
+            name: "update_goal".into(),
+            arguments: r#"{"message":"before /goal"}"#.into(),
+        })
+        .await;
+    assert!(
+        disabled.content.contains("goal_update_harness_disabled")
+            && disabled.content.contains("no /goal"),
+        "{}",
+        disabled.content
+    );
+
+    root.get::<cordis_spine::Goal>(cordis_spine::GOAL)
+        .unwrap()
+        .start("ship lsp");
+    let progress = tools
+        .execute(cordis_spine::ToolCall {
+            id: "g1".into(),
+            name: "update_goal".into(),
+            arguments: r#"{"message":"working on it"}"#.into(),
+        })
+        .await;
+    assert!(
+        progress.content.contains("working on it"),
+        "{}",
+        progress.content
+    );
+
+    let done = tools
+        .execute(cordis_spine::ToolCall {
+            id: "g2".into(),
+            name: "update_goal".into(),
+            arguments: r#"{"completed":true,"message":"shipped"}"#.into(),
+        })
+        .await;
+    assert!(
+        done.content.contains("Goal marked complete"),
+        "{}",
+        done.content
+    );
 }

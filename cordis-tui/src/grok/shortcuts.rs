@@ -87,10 +87,31 @@ impl Widget for ShortcutsBar<'_> {
             let colon = Span::styled(":", action_style);
             buf.set_span(x, area.y, &colon, 1);
             x += 1;
-            let label = Span::styled(format!(" {}", hint.label), action_style);
-            let lw = hint.label.width() as u16 + 1;
+            let label = Span::styled(hint.label.as_ref(), action_style);
+            let lw = hint.label.width() as u16;
             buf.set_span(x, area.y, &label, lw);
             x += lw;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn grok_compact_has_no_space_after_colon() {
+        let hints = [HintItem::new("Enter", "send"), HintItem::new("Shift+Tab", "mode")];
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        ShortcutsBar::new(&hints).render(area, &mut buf);
+        let row: String = (0..60).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        let compact: String = row.split_whitespace().collect();
+        assert!(row.contains("Enter:send"), "{row}");
+        assert!(row.contains("Shift+Tab:mode"), "{row}");
+        assert!(!row.contains("Enter: send"), "{row}");
+        assert!(compact.contains("Enter:send"), "{compact}");
     }
 }

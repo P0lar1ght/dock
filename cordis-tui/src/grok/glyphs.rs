@@ -16,6 +16,31 @@ pub fn diamond_hollow() -> &'static str {
     "\u{25C7}"
 }
 
+/// `"┃"` — permission overlay accent. Always 1 column.
+pub fn accent_bar() -> &'static str {
+    "\u{2503}"
+}
+
+/// `"●"` selected radio. Always 1 column.
+pub fn filled_dot() -> &'static str {
+    "\u{25CF}"
+}
+
+/// `"○"` idle radio. Always 1 column.
+pub fn hollow_dot() -> &'static str {
+    "\u{25CB}"
+}
+
+/// `"⇣"` download tokens. Always 1 column.
+pub fn token_down() -> &'static str {
+    "\u{21E3}"
+}
+
+/// `"⇡"` upload tokens. Always 1 column.
+pub fn token_up() -> &'static str {
+    "\u{21E1}"
+}
+
 /// `"[✗]"` close button. Always 3 columns.
 pub fn ballot_x_button() -> &'static str {
     "[\u{2717}]"

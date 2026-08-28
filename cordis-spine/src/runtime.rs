@@ -7,10 +7,11 @@ use cordis::Context;
 use crate::agents::Agents;
 use crate::error::{Error, Result};
 use crate::llm::Llm;
-use crate::names::{AGENTS, LLM, PRE_STEP, SESSIONS, SYSTEM_PROMPT, TOOLS};
+use crate::names::{AGENTS, LLM, PRE_STEP, SESSIONS, SYSTEM_PROMPT, TOOLS, TURN};
 use crate::prompt::SystemPrompt;
 use crate::session::Sessions;
 use crate::tools::Tools;
+use crate::turn::TurnControl;
 use crate::types::{LogEvent, PreStep, PromptRequest, TurnOutcome};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -75,27 +76,45 @@ async fn grok_turn(ctx: &Context, prompt: String) -> Result<TurnOutcome> {
     sessions.append(LogEvent::Prompt(system.clone()));
 
     for _ in 0..MAX_STEPS {
+        if cancelled(ctx) {
+            return Err(Error::Cancelled);
+        }
         let output = llm
-            .stream(PromptRequest {
-                system: system.clone(),
-                history: sessions.events(),
-                tools: tools.specs(),
-            })
+            .stream_on(
+                ctx,
+                PromptRequest {
+                    system: system.clone(),
+                    history: sessions.events(),
+                    tools: tools.specs(),
+                },
+            )
             .await;
-        sessions.append(LogEvent::LlmStream(output.clone()));
+        if cancelled(ctx) {
+            return Err(Error::Cancelled);
+        }
         if output.tool_calls.is_empty() {
             return Ok(TurnOutcome::Text(output.text));
         }
         for call in output.tool_calls {
+            if cancelled(ctx) {
+                return Err(Error::Cancelled);
+            }
+            let arguments = call.arguments.clone();
             let result = tools.execute(call).await;
             sessions.append(LogEvent::ToolExecute {
                 id: result.call_id,
                 name: result.name,
+                arguments,
                 content: result.content,
             });
         }
     }
     Err(Error::MaxSteps { max: MAX_STEPS })
+}
+
+fn cancelled(ctx: &Context) -> bool {
+    ctx.get::<TurnControl>(TURN)
+        .is_some_and(|t| t.is_cancelled())
 }
 
 pub struct LoopHandle {

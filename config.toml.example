@@ -1,0 +1,40 @@
+# Copy to ~/.dock/config.toml (user) or .dock/config.toml (project).
+# Project file wins when both exist. Re-read on every /model and Settings open.
+#
+# Dotted ids must be quoted: [model."gpt-4.1"]
+# DOCK_MODEL still overrides [models].default at boot.
+# Per-model api_base_url / api_key (Grok shape) so free endpoints can sit
+# next to xAI without a global DOCK_API_BASE.
+
+[models]
+default = "minimax/minimax-m3:free"
+
+[[models.catalog]]
+id = "grok-4"
+name = "Grok 4"
+description = "xAI"
+
+# Adds or overrides a catalog row (Grok [model.<id>] shape).
+[model.grok-4]
+name = "Grok 4 pinned"
+
+# OpenRouter free — fill api_key or set OPENROUTER_API_KEY.
+[model."minimax/minimax-m3:free"]
+name = "MiniMax M3"
+description = "OpenRouter free"
+api_base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+api_key = ""
+
+# Empero community endpoint — prompts are stored (IP hash). Key can be anything.
+[model."glm-5.3-flash"]
+name = "GLM 5.3 Flash"
+description = "Empero free (logged)"
+api_base_url = "https://free.empero.org/v1"
+api_key = "free"
+
+[model."qwen3.8-flash"]
+name = "Qwen3.8 Flash-Next"
+description = "Empero free (logged)"
+api_base_url = "https://free.empero.org/v1"
+api_key = "free"

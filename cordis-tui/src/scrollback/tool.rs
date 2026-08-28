@@ -14,23 +14,30 @@ use crate::theme::Theme;
 
 pub fn lines(
     name: &str,
+    arguments: &str,
     content: &str,
     theme: &Theme,
     width: usize,
     expanded: bool,
+    running: bool,
 ) -> Vec<Line<'static>> {
-    let muted = !expanded;
-    let mut header = collapsed_line(name, "", theme, muted, Some(width.saturating_sub(2)));
+    let muted = !expanded && !running;
+    let summary = argument_summary(name, arguments);
+    let mut header = if is_shell(name) {
+        shell_header(&summary, theme, muted, width)
+    } else {
+        collapsed_line(name, &summary, theme, muted, Some(width.saturating_sub(2)))
+    };
     prepend_diamond(&mut header, theme);
+    if running && !expanded {
+        header.spans.push(Span::styled("  运行中…".to_string(), theme.muted()));
+        return vec![header];
+    }
     if !expanded {
         return vec![header];
     }
 
     let mut out = vec![header];
-    if content.is_empty() {
-        return out;
-    }
-
     let qa = parse_ask_user_qa_pairs(content);
     if !qa.is_empty() {
         for (i, (question, answer)) in qa.iter().enumerate() {
@@ -56,6 +63,25 @@ pub fn lines(
     }
 
     out.push(Line::from(""));
+    if !is_shell(name) && !arguments.trim().is_empty() {
+        out.push(Line::from(Span::styled("输入".to_string(), theme.dim())));
+        let input = pretty_args(arguments);
+        let styled: Vec<Line<'static>> = input
+            .lines()
+            .map(|line| Line::from(Span::styled(line.to_string(), theme.muted())))
+            .collect();
+        let wrap_w = width.saturating_sub(2).max(20);
+        out.extend(word_wrap_lines(styled, wrap_w));
+        out.push(Line::from(""));
+    }
+    if running && content.is_empty() {
+        out.push(Line::from(Span::styled("运行中…".to_string(), theme.muted())));
+        return out;
+    }
+    if content.is_empty() {
+        return out;
+    }
+    out.push(Line::from(Span::styled("输出".to_string(), theme.dim())));
     let styled: Vec<Line<'static>> = content
         .lines()
         .map(|line| Line::from(Span::styled(line.to_string(), theme.muted())))
@@ -63,6 +89,66 @@ pub fn lines(
     let wrap_w = width.saturating_sub(2).max(20);
     out.extend(word_wrap_lines(styled, wrap_w));
     out
+}
+
+fn is_shell(name: &str) -> bool {
+    matches!(name, "bash" | "run_terminal_cmd" | "execute")
+}
+
+fn shell_header(command: &str, theme: &Theme, muted: bool, width: usize) -> Line<'static> {
+    let cmd_style = if muted { theme.muted() } else { theme.primary() };
+    let cmd = if command.trim().is_empty() {
+        "\u{2026}".to_string()
+    } else {
+        command.replace('\n', " ")
+    };
+    let line = Line::from(vec![
+        Span::styled("$ ".to_string(), theme.dim()),
+        Span::styled(cmd, cmd_style),
+    ]);
+    if width == 0 {
+        line
+    } else {
+        truncate_line(line, width.saturating_sub(2).max(8))
+    }
+}
+
+fn pretty_args(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+fn json_str<'a>(v: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()))
+}
+
+fn argument_summary(name: &str, arguments: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+    let picked = match name {
+        "bash" | "run_terminal_cmd" | "execute" => json_str(&v, &["command"]),
+        "read_file" | "write_file" => json_str(&v, &["target_file", "path"]),
+        "list_dir" => json_str(&v, &["target_directory", "path"]),
+        "grep" => json_str(&v, &["pattern"]),
+        "glob" => json_str(&v, &["glob_pattern", "pattern"]),
+        "search_replace" => json_str(&v, &["file_path", "path"]),
+        _ => None,
+    };
+    if let Some(s) = picked {
+        return s.to_string();
+    }
+    if let Some(obj) = v.as_object() {
+        if let Some((_, serde_json::Value::String(s))) = obj.iter().next() {
+            return s.clone();
+        }
+    }
+    let flat = arguments.replace('\n', " ");
+    if flat.chars().count() > 60 {
+        format!("{}…", flat.chars().take(59).collect::<String>())
+    } else {
+        flat
+    }
 }
 
 /// Copied from grok `OtherToolCallBlock::collapsed_line`.

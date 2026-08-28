@@ -2,27 +2,70 @@ use std::sync::Arc;
 
 use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::names::{LLM, LLM_STREAM};
+use crate::http::HttpSampler;
+use crate::names::{LLM, LLM_STREAM, SESSIONS};
 use crate::runtime::BoxFuture;
+use crate::session::Sessions;
+use crate::stream_acc::StreamDelta;
 use crate::types::{LlmOutput, LogEvent, PromptRequest, ToolCall};
 
-/// Echo: always `echo`. Workspace: `list_dir` / `read_file`. Text: no tools.
+/// Echo: always `echo`. Workspace: `list_dir` / `read_file`. Text: no tools. Http: OpenAI-compatible.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LlmMode {
     #[default]
     Echo,
     Workspace,
     Text,
+    Http,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct LlmConfig {
     pub mode: LlmMode,
+    pub api_key: Option<String>,
+    pub api_base: Option<String>,
+    pub model: Option<String>,
+}
+
+impl LlmConfig {
+    pub fn from_env() -> Self {
+        let api_key = std::env::var("DOCK_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .or_else(|_| std::env::var("XAI_API_KEY"))
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let api_base = std::env::var("DOCK_API_BASE")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let model = std::env::var("DOCK_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(crate::config::load_default_model);
+        if api_key.is_some() || crate::config::catalog_has_http() {
+            Self {
+                mode: LlmMode::Http,
+                api_key,
+                api_base,
+                model,
+            }
+        } else {
+            Self {
+                mode: LlmMode::Workspace,
+                api_key: None,
+                api_base,
+                model,
+            }
+        }
+    }
 }
 
 /// Swap this to change the protocol (stub, Grok chat / resp / anthropic, …).
 pub trait Sampler: Send + Sync {
-    fn sample<'a>(&'a self, request: PromptRequest) -> BoxFuture<'a, LlmOutput>;
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput>;
 }
 
 /// Named `llm`. Loop live-looks this up; the inner [`Sampler`] is the adapter.
@@ -42,7 +85,29 @@ impl Llm {
     }
 
     pub async fn stream(&self, request: PromptRequest) -> LlmOutput {
-        let output = self.sampler.sample(request).await;
+        self.stream_on(&self.ctx, request).await
+    }
+
+    /// Sample against the caller's ctx so a nested isolate can own `"sessions"`.
+    pub async fn stream_on(&self, ctx: &Context, request: PromptRequest) -> LlmOutput {
+        if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+            sessions.begin_llm();
+        }
+        let ctx = ctx.clone();
+        let output = self
+            .sampler
+            .sample(
+                request,
+                Box::new(move |delta| {
+                    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+                        sessions.apply_llm_delta(&delta);
+                    }
+                }),
+            )
+            .await;
+        if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+            sessions.finish_llm(&output);
+        }
         self.ctx
             .waterfall(LLM_STREAM, output.clone(), move || output)
     }
@@ -53,17 +118,43 @@ struct FakeSampler {
 }
 
 impl Sampler for FakeSampler {
-    fn sample<'a>(&'a self, request: PromptRequest) -> BoxFuture<'a, LlmOutput> {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
         let mode = self.mode;
-        Box::pin(async move { hardcoded(mode, &request) })
+        Box::pin(async move {
+            let output = hardcoded(mode, &request);
+            if !output.text.is_empty() {
+                on_delta(StreamDelta::Text(output.text.clone()));
+            }
+            output
+        })
     }
 }
 
 pub fn llm() -> Plugin {
     plugin("llm", Inject::new(), |ctx, cfg: &LlmConfig| {
-        Ok(Some(
-            ctx.provide(LLM, Llm::fake(ctx.clone(), cfg.mode))?,
-        ))
+        let provided = match cfg.mode {
+            LlmMode::Http => {
+                let sampler = HttpSampler {
+                    ctx: ctx.clone(),
+                    api_key: cfg.api_key.clone().unwrap_or_default(),
+                    api_base: cfg
+                        .api_base
+                        .clone()
+                        .unwrap_or_else(|| "https://api.x.ai/v1".into()),
+                    fallback_model: cfg
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "grok-4".into()),
+                };
+                Llm::from_sampler(ctx.clone(), Arc::new(sampler))
+            }
+            mode => Llm::fake(ctx.clone(), mode),
+        };
+        Ok(Some(ctx.provide(LLM, provided)?))
     })
 }
 
@@ -131,11 +222,11 @@ fn hardcoded(mode: LlmMode, request: &PromptRequest) -> LlmOutput {
     }) {
         let text = match mode {
             LlmMode::Echo => format!("echoed: {content}"),
-            LlmMode::Workspace | LlmMode::Text => content,
+            LlmMode::Workspace | LlmMode::Text | LlmMode::Http => content,
         };
         return LlmOutput {
             text,
-            tool_calls: Vec::new(),
+            ..LlmOutput::default()
         };
     }
     let user = last_user(&request.history);
@@ -147,22 +238,28 @@ fn hardcoded(mode: LlmMode, request: &PromptRequest) -> LlmOutput {
                 name: "echo".into(),
                 arguments: user,
             }],
+            ..LlmOutput::default()
         },
         LlmMode::Workspace => match workspace_tool(&user) {
             Some(call) => LlmOutput {
                 text: String::new(),
                 tool_calls: vec![call],
+                ..LlmOutput::default()
             },
             None => LlmOutput {
                 text: format!("no workspace tool for: {user}"),
-                tool_calls: Vec::new(),
+                ..LlmOutput::default()
             },
+        },
+        LlmMode::Http => LlmOutput {
+            text: format!("http sampler missing for: {user}"),
+            ..LlmOutput::default()
         },
         LlmMode::Text => LlmOutput {
             text: format!(
                 "ok · {user}\n\nharness is up. tools come later via the tools plugin."
             ),
-            tool_calls: Vec::new(),
+            ..LlmOutput::default()
         },
     }
 }

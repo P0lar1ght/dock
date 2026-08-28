@@ -22,7 +22,7 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
                 return Vec::new();
             };
             prompt.clear();
-            vec![effect_for_slash(row.cmd)]
+            vec![effect_for_slash(row.cmd, "")]
         }
         Action::SlashInsert => {
             let snap = prompt.slash_snapshot();
@@ -33,17 +33,36 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
         }
         Action::OverlayClose | Action::OverlayMove(_) | Action::OverlayAccept
         | Action::OverlayChar(_) | Action::OverlayBackspace | Action::OverlayPaste(_)
-        | Action::OverlaySelect(_) => Vec::new(),
+        |         Action::OverlaySelect(_) | Action::OverlaySpace
+        | Action::PermissionAccept | Action::PermissionReject
+        | Action::MouseMove { .. } | Action::PasteClipboard | Action::CycleMode => Vec::new(),
+        Action::CancelTurn => vec![Effect::CancelTurn],
+        Action::SettingsModal => vec![Effect::SettingsModal],
         Action::HistoryPicker => vec![Effect::HistoryPicker],
         Action::Find => vec![Effect::Find],
+        Action::FileSearchMove(delta) => {
+            prompt.file_search_move(delta);
+            Vec::new()
+        }
+        Action::FileSearchAccept => {
+            prompt.accept_file_search();
+            Vec::new()
+        }
+        Action::FileSearchDismiss => {
+            prompt.file_search_dismiss();
+            Vec::new()
+        }
+        Action::CopyAssistant { n, file } => vec![Effect::CopyAssistant { n, file }],
+        Action::CopyText(text) => vec![Effect::CopyText(text)],
+        Action::OpenImage(path) => vec![Effect::OpenImage(path)],
         Action::SendPrompt(text) => {
             let text = text.trim().to_string();
             prompt.clear();
             if text.is_empty() {
                 return Vec::new();
             }
-            if let Some(cmd) = slash::command_for_submit(&text) {
-                return vec![effect_for_slash(cmd)];
+            if let Some((cmd, args)) = slash::command_for_submit(&text) {
+                return vec![effect_for_slash(cmd, &args)];
             }
             vec![Effect::SendPrompt {
                 text,
@@ -66,11 +85,39 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
             Vec::new()
         }
         Action::InsertText(s) => {
-            prompt.insert_str(&s);
+            prompt.handle_paste(&s);
             Vec::new()
         }
         Action::Backspace => {
             prompt.backspace();
+            Vec::new()
+        }
+        Action::Delete => {
+            prompt.delete();
+            Vec::new()
+        }
+        Action::MoveLeft => {
+            prompt.move_left();
+            Vec::new()
+        }
+        Action::MoveRight => {
+            prompt.move_right();
+            Vec::new()
+        }
+        Action::MoveHome => {
+            prompt.move_home();
+            Vec::new()
+        }
+        Action::MoveEnd => {
+            prompt.move_end();
+            Vec::new()
+        }
+        Action::MoveBufferStart => {
+            prompt.move_buffer_start();
+            Vec::new()
+        }
+        Action::MoveBufferEnd => {
+            prompt.move_buffer_end();
             Vec::new()
         }
         Action::HistoryPrev => {

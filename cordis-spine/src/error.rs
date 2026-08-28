@@ -12,4 +12,7 @@ pub enum Error {
 
     #[error("loop exceeded {max} sampling steps without a text reply")]
     MaxSteps { max: usize },
+
+    #[error("turn cancelled")]
+    Cancelled,
 }

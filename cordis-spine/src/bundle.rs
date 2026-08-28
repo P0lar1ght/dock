@@ -1,11 +1,27 @@
 use cordis::{Context, Fiber, Result};
 
 use crate::agents::agents;
+use crate::ask_user::tool_ask_user;
+use crate::cron::cron;
+use crate::goal::tool_goal;
+use crate::jobs::{jobs, tool_jobs};
 use crate::llm::{llm, LlmConfig, LlmMode};
 use crate::loop_plugin::agent_loop;
+use crate::lsp::tool_lsp;
+use crate::mcp::mcp_client;
+use crate::memory::tool_memory;
+use crate::monitor::tool_monitor;
+use crate::permissions::permissions;
+use crate::plan_mode::plan_mode;
 use crate::prompt::system_prompt;
+use crate::sched::tool_scheduler;
 use crate::session::sessions;
-use crate::tools::tools;
+use crate::settings::settings;
+use crate::task::tool_task;
+use crate::todo_write::tool_todo;
+use crate::tools::{tools, workspace_tools};
+use crate::turn::turn;
+use crate::web_fetch::tool_web;
 
 /// Sessions / systemPrompt / agents. No `llm` or `tools` — the harness mounts those.
 pub async fn install_core(ctx: &Context) -> Result<()> {
@@ -54,10 +70,37 @@ pub async fn install_foundation(ctx: &Context) -> Result<Fiber> {
         ctx,
         LlmConfig {
             mode: LlmMode::Text,
+            ..LlmConfig::default()
         },
     )
     .await?;
     let fiber = ctx.plugin(agent_loop(), ())?;
     fiber.wait().await?;
     Ok(fiber)
+}
+
+/// App bundle: workspace tools + capability plugins that `register` into `"tools"`.
+/// Settings + cron are live-looked-up; the loop is not included so the harness can swap it.
+pub async fn install_app(ctx: &Context) -> Result<()> {
+    install_core(ctx).await?;
+    ctx.plugin(settings(), ())?.wait().await?;
+    ctx.plugin(turn(), ())?.wait().await?;
+    ctx.plugin(permissions(), ())?.wait().await?;
+    ctx.plugin(cron(), ())?.wait().await?;
+    ctx.plugin(jobs(), ())?.wait().await?;
+    ctx.plugin(workspace_tools(), ())?.wait().await?;
+    ctx.plugin(tool_web(), ())?.wait().await?;
+    ctx.plugin(tool_todo(), ())?.wait().await?;
+    ctx.plugin(plan_mode(), ())?.wait().await?;
+    ctx.plugin(tool_ask_user(), ())?.wait().await?;
+    ctx.plugin(tool_jobs(), ())?.wait().await?;
+    ctx.plugin(tool_scheduler(), ())?.wait().await?;
+    ctx.plugin(tool_task(), ())?.wait().await?;
+    ctx.plugin(tool_memory(), ())?.wait().await?;
+    ctx.plugin(tool_monitor(), ())?.wait().await?;
+    ctx.plugin(tool_goal(), ())?.wait().await?;
+    ctx.plugin(tool_lsp(), ())?.wait().await?;
+    ctx.plugin(mcp_client(), ())?.wait().await?;
+    ctx.plugin(llm(), LlmConfig::from_env())?.wait().await?;
+    Ok(())
 }

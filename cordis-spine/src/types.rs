@@ -4,6 +4,14 @@ use std::fmt;
 /// a typed event log. This is the thin shared shape.
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserImage {
+    pub mime: String,
+    pub data: std::sync::Arc<[u8]>,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LogEvent {
     User(String),
     PreStep,
@@ -12,6 +20,7 @@ pub enum LogEvent {
     ToolExecute {
         id: String,
         name: String,
+        arguments: String,
         content: String,
     },
 }
@@ -67,9 +76,12 @@ pub struct ToolResult {
     pub content: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LlmOutput {
     pub text: String,
+    pub reasoning: String,
+    /// Elapsed thinking time in ms, set when the stream finishes.
+    pub reasoning_ms: Option<u64>,
     pub tool_calls: Vec<ToolCall>,
 }
 

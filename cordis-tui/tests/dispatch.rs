@@ -39,8 +39,44 @@ fn slash_accept_uses_highlighted_row() {
 }
 
 #[test]
-fn slash_history_maps_to_picker() {
+fn slash_plan_tasks_mcps_map() {
     let prompt = PromptWidget::default();
-    let effects = dispatch(Action::SendPrompt("/history".into()), &prompt);
-    assert!(matches!(effects.as_slice(), [Effect::HistoryPicker]));
+    let plan = dispatch(Action::SendPrompt("/plan".into()), &prompt);
+    assert!(matches!(
+        plan.as_slice(),
+        [Effect::EnterPlan { description: None }]
+    ));
+    let plan_desc = dispatch(
+        Action::SendPrompt("/plan refactor auth".into()),
+        &prompt,
+    );
+    assert!(matches!(
+        plan_desc.as_slice(),
+        [Effect::EnterPlan { description: Some(d) }] if d == "refactor auth"
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/tasks".into()), &prompt).as_slice(),
+        [Effect::ShowTasks]
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/mcps".into()), &prompt).as_slice(),
+        [Effect::ShowMcps]
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/goal".into()), &prompt).as_slice(),
+        [Effect::EnterGoal { objective: None }]
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/goal ship the lsp tool".into()), &prompt).as_slice(),
+        [Effect::EnterGoal { objective: Some(d) }] if d == "ship the lsp tool"
+    ));
+}
+
+#[test]
+fn insert_at_cursor() {
+    let prompt = PromptWidget::default();
+    prompt.insert_str("ac");
+    let _ = dispatch(Action::MoveLeft, &prompt);
+    let _ = dispatch(Action::InsertChar('b'), &prompt);
+    assert_eq!(prompt.text(), "abc");
 }

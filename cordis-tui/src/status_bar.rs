@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::Widget;
+use unicode_width::UnicodeWidthStr;
 
 use super::theme::Theme;
 
@@ -71,25 +72,45 @@ impl Widget for StatusBar<'_> {
         buf.set_style(area, Style::default().bg(theme.bg_base));
 
         // Left content
+        let left_w = UnicodeWidthStr::width(self.left) as u16;
         let left_span = Span::styled(self.left, style);
         buf.set_span(content_x, area.y, &left_span, content_width);
 
-        // Center content (if fits)
         if let Some(center) = self.center {
-            let center_width = center.len() as u16;
+            let center_width = UnicodeWidthStr::width(center) as u16;
             let center_x = content_x + (content_width.saturating_sub(center_width)) / 2;
-            if center_x > content_x + self.left.len() as u16 + 2 {
+            if center_x > content_x + left_w + 2 {
                 let center_span = Span::styled(center, style);
                 buf.set_span(center_x, area.y, &center_span, center_width);
             }
         }
 
-        // Right content
         if let Some(right) = self.right {
-            let right_width = right.len() as u16;
+            let right_width = UnicodeWidthStr::width(right) as u16;
             let right_x = content_x + content_width.saturating_sub(right_width);
             let right_span = Span::styled(right, style);
             buf.set_span(right_x, area.y, &right_span, right_width);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn chinese_right_aligns_by_display_width() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        StatusBar::new("cwd")
+            .right("空闲")
+            .render(area, &mut buf);
+        // Display width 4, so the pair starts at x=16 — not byte-len 6 at x=14.
+        assert_eq!(buf[(16, 0)].symbol(), "空");
+        assert_eq!(buf[(18, 0)].symbol(), "闲");
+        assert_eq!(UnicodeWidthStr::width("空闲"), 4);
+        assert_eq!("空闲".len(), 6);
     }
 }

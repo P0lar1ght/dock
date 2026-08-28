@@ -6,6 +6,12 @@ members = [
     "cordis-spine",
     "cordis-tui",
     "cordis-app",
+    "xai-grok-mermaid",
+    "vendor/ordered_hashmap",
+    "vendor/graphlib_rust",
+    "vendor/dagre_rust",
+    "vendor/mermaid-to-svg",
+    "vendor/xai-fuzzy-file-search",
 ]
 
 [workspace.package]

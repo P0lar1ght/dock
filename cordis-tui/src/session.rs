@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub trait SessionPort: Send + Sync {
     fn submit(&self, text: String, send_now: bool);
     fn working(&self) -> bool;
+    fn cancel(&self);
 }
 
 /// Named `"session.port"` service. Clone is cheap; each call looks through to the actor.
@@ -24,5 +25,9 @@ impl SessionRef {
 
     pub fn working(&self) -> bool {
         self.0.working()
+    }
+
+    pub fn cancel(&self) {
+        self.0.cancel();
     }
 }

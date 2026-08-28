@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Disposable, Inject, Plugin};
-use cordis_spine::{AGENT_LOOP, SESSIONS};
+use cordis_spine::{AGENT_LOOP, SESSIONS, TURN};
 use cordis_tui::{SessionPort, SessionRef, SESSION_PORT};
 use tokio::sync::mpsc;
 
@@ -14,7 +14,7 @@ use super::handle::SessionHandle;
 pub fn session_actor() -> Plugin {
     plugin(
         "session",
-        Inject::from([AGENT_LOOP, SESSIONS]),
+        Inject::from([AGENT_LOOP, SESSIONS, TURN]),
         |ctx, _: &()| {
             let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
             let current_prompt_id = Arc::new(Mutex::new(None));

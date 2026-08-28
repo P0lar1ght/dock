@@ -1,0 +1,23 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-mermaid"
+version = "0.1.0"
+edition = "2021"
+description = "Render Mermaid diagram source to a rasterized PNG (copied from grok-build, no path-dep)"
+
+[dependencies]
+resvg = { version = "0.47", default-features = false, features = ["text"] }
+tiny-skia = "0.12"
+fontdb = "0.23"
+thiserror = "2"
+tracing = "0.1"
+wait-timeout = "0.2"
+tempfile = "3"
+which = "7"
+mermaid-to-svg = { path = "../vendor/mermaid-to-svg" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

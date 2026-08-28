@@ -5,6 +5,10 @@ use ratatui::style::{Color, Modifier, Style};
 
 #[path = "groknight.rs"]
 mod groknight;
+#[path = "grokday.rs"]
+mod grokday;
+#[path = "tokyonight.rs"]
+mod tokyonight;
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -111,10 +115,59 @@ pub struct Theme {
     pub link_fg: Color,              // Clickable link text color
 }
 
+use std::sync::Mutex;
+
+static KIND: Mutex<ThemeKind> = Mutex::new(ThemeKind::GrokNight);
+
+/// Copied from grok pager-render `ThemeKind` (subset we baked palettes for).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThemeKind {
+    GrokNight,
+    GrokDay,
+    TokyoNight,
+}
+
+impl ThemeKind {
+    pub const ALL: &[ThemeKind] = &[
+        ThemeKind::GrokNight,
+        ThemeKind::GrokDay,
+        ThemeKind::TokyoNight,
+    ];
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::GrokNight => "groknight",
+            Self::GrokDay => "grokday",
+            Self::TokyoNight => "tokyonight",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "groknight" | "night" => Some(Self::GrokNight),
+            "grokday" | "day" | "light" => Some(Self::GrokDay),
+            "tokyonight" | "tokyo" => Some(Self::TokyoNight),
+            _ => None,
+        }
+    }
+}
+
 impl Theme {
-    /// Foundation cache: GrokNight only. Grok reads `cache::current_kind()`.
+    pub fn current_kind() -> ThemeKind {
+        *KIND.lock().unwrap()
+    }
+
+    pub fn apply_kind(kind: ThemeKind) {
+        *KIND.lock().unwrap() = kind;
+    }
+
+    /// Grok reads `cache::current_kind()`.
     pub fn current() -> Self {
-        Self::groknight()
+        match Self::current_kind() {
+            ThemeKind::GrokNight => Self::groknight(),
+            ThemeKind::GrokDay => Self::grokday(),
+            ThemeKind::TokyoNight => Self::tokyonight(),
+        }
     }
 
     /// Get a style with the given foreground color.

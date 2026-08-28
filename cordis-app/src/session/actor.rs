@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use cordis::Context;
-use cordis_spine::{LoopHandle, TurnOutcome, AGENT_LOOP};
+use cordis_spine::{LoopHandle, TurnControl, TurnOutcome, AGENT_LOOP, TURN};
 use tokio::sync::mpsc;
 
 use super::commands::{PromptTurnResult, SessionCommand};
@@ -30,6 +30,7 @@ pub(super) async fn run_session(
         if current.is_none() {
             match cmd_rx.recv().await {
                 Some(SessionCommand::Shutdown) | None => return,
+                Some(SessionCommand::Cancel) => continue,
                 Some(SessionCommand::Prompt {
                     prompt_id,
                     text,
@@ -48,6 +49,9 @@ pub(super) async fn run_session(
             continue;
         };
         *current_prompt_id.lock().unwrap() = Some(pending.prompt_id.clone());
+        if let Some(turn) = ctx.get::<TurnControl>(TURN) {
+            turn.reset();
+        }
         let turn = run_turn(&ctx, pending.text.clone());
         tokio::pin!(turn);
         let result = loop {
@@ -55,9 +59,17 @@ pub(super) async fn run_session(
                 outcome = &mut turn => break outcome,
                 cmd = cmd_rx.recv() => match cmd {
                     Some(SessionCommand::Shutdown) | None => {
+                        if let Some(gate) = ctx.get::<TurnControl>(TURN) {
+                            gate.cancel();
+                        }
                         let _ = pending.respond_to.send(Err("shutdown".into()));
                         *current_prompt_id.lock().unwrap() = None;
                         return;
+                    }
+                    Some(SessionCommand::Cancel) => {
+                        if let Some(gate) = ctx.get::<TurnControl>(TURN) {
+                            gate.cancel();
+                        }
                     }
                     Some(SessionCommand::Prompt {
                         prompt_id,

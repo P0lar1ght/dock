@@ -40,6 +40,10 @@ impl SessionHandle {
     pub fn working(&self) -> bool {
         self.current_prompt_id.lock().unwrap().is_some()
     }
+
+    pub fn cancel(&self) {
+        let _ = self.cmd_tx.send(SessionCommand::Cancel);
+    }
 }
 
 impl cordis_tui::SessionPort for SessionHandle {
@@ -49,6 +53,10 @@ impl cordis_tui::SessionPort for SessionHandle {
 
     fn working(&self) -> bool {
         SessionHandle::working(self)
+    }
+
+    fn cancel(&self) {
+        SessionHandle::cancel(self);
     }
 }
 

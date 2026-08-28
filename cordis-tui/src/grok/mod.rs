@@ -6,6 +6,7 @@ pub mod color;
 pub mod glyphs;
 pub mod line_utils;
 pub mod md_style;
+pub mod mermaid;
 pub mod picker;
 pub mod shortcuts;
 pub mod wrapping;

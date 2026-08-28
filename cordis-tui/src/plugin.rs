@@ -51,6 +51,10 @@ pub fn welcome() -> Plugin {
     )
 }
 
+pub fn shortcuts() -> Plugin {
+    crate::shortcuts::shortcuts()
+}
+
 /// Pager event loop. Injects session + view plugins; swap this plugin to
 /// change the UI without touching the loop.
 pub fn tui() -> Plugin {
@@ -63,6 +67,7 @@ pub fn tui() -> Plugin {
             ctx.plugin(prompt(), ())?.wait().await?;
             ctx.plugin(status_bar(), ())?.wait().await?;
             ctx.plugin(welcome(), ())?.wait().await?;
+            ctx.plugin(shortcuts(), ())?.wait().await?;
             event_loop::run(ctx)
                 .await
                 .map_err(|e| cordis::Error::message(e.to_string()))?;

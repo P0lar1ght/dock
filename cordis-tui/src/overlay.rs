@@ -7,7 +7,8 @@ use ratatui::layout::{Position, Rect};
 use crate::grok::picker::{
     render_floating_frame, render_fullscreen_frame, render_picker_list, PickerHits, PickerRow,
 };
-use crate::slash::SlashCmd;
+use crate::settings_modal::SettingsField;
+use crate::slash::{ArgKind, SlashCmd};
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, Default)]
@@ -30,6 +31,31 @@ pub enum Overlay {
         selected: usize,
         query: String,
     },
+    Args {
+        kind: ArgKind,
+        cmd: SlashCmd,
+        selected: usize,
+        query: String,
+    },
+    Settings {
+        selected: usize,
+        picking: Option<SettingsField>,
+    },
+    Permission {
+        selected: usize,
+    },
+    Ask {
+        selected: usize,
+        picked: Vec<bool>,
+    },
+    Tasks {
+        selected: usize,
+        query: String,
+    },
+    Mcps {
+        selected: usize,
+        query: String,
+    },
 }
 
 impl Overlay {
@@ -48,7 +74,12 @@ impl Overlay {
             Self::Resume { query, .. }
             | Self::Help { query, .. }
             | Self::History { query, .. }
-            | Self::Find { query, .. } => query,
+            | Self::Find { query, .. }
+            | Self::Args { query, .. } => query,
+            Self::Settings { .. }
+            | Self::Permission { .. }
+            | Self::Ask { .. } => "",
+            Self::Tasks { query, .. } | Self::Mcps { query, .. } => query,
         }
     }
 
@@ -87,7 +118,13 @@ impl Overlay {
             Self::Resume { selected, .. }
             | Self::Help { selected, .. }
             | Self::History { selected, .. }
-            | Self::Find { selected, .. } => *selected,
+            | Self::Find { selected, .. }
+            | Self::Args { selected, .. }
+            | Self::Settings { selected, .. }
+            | Self::Permission { selected, .. }
+            | Self::Ask { selected, .. }
+            | Self::Tasks { selected, .. }
+            | Self::Mcps { selected, .. } => *selected,
         }
     }
 
@@ -97,7 +134,13 @@ impl Overlay {
             Self::Resume { selected: s, .. }
             | Self::Help { selected: s, .. }
             | Self::History { selected: s, .. }
-            | Self::Find { selected: s, .. } => *s = selected,
+            | Self::Find { selected: s, .. }
+            | Self::Args { selected: s, .. }
+            | Self::Settings { selected: s, .. }
+            | Self::Permission { selected: s, .. }
+            | Self::Ask { selected: s, .. }
+            | Self::Tasks { selected: s, .. }
+            | Self::Mcps { selected: s, .. } => *s = selected,
         }
     }
 
@@ -107,7 +150,11 @@ impl Overlay {
             Self::Resume { query, .. }
             | Self::Help { query, .. }
             | Self::History { query, .. }
-            | Self::Find { query, .. } => Some(query),
+            | Self::Find { query, .. }
+            | Self::Args { query, .. }
+            | Self::Tasks { query, .. }
+            | Self::Mcps { query, .. } => Some(query),
+            Self::Settings { .. } | Self::Permission { .. } | Self::Ask { .. } => None,
         }
     }
 }
@@ -132,83 +179,168 @@ enum HelpEntry {
 }
 
 const HELP: &[HelpEntry] = &[
-    HelpEntry::Header("Essentials"),
+    HelpEntry::Header("常用"),
     HelpEntry::Row(HelpRow {
         key: "enter",
-        label: "Send prompt",
+        label: "发送",
         kind: HelpKind::Hint,
     }),
     HelpEntry::Row(HelpRow {
         key: "esc",
-        label: "Clear prompt / close",
+        label: "清空 / 取消当前轮 / 关闭",
+        kind: HelpKind::Hint,
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "shift+tab",
+        label: "切换模式（询问 / 始终允许）",
+        kind: HelpKind::Hint,
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "ctrl+x",
+        label: "快捷键帮助",
+        kind: HelpKind::Slash(SlashCmd::Help),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "ctrl+v",
+        label: "粘贴文字 / 图片",
         kind: HelpKind::Hint,
     }),
     HelpEntry::Row(HelpRow {
         key: "ctrl+q",
-        label: "Quit",
+        label: "退出",
         kind: HelpKind::Slash(SlashCmd::Quit),
     }),
     HelpEntry::Row(HelpRow {
         key: "ctrl+w",
-        label: "New session",
+        label: "新会话",
         kind: HelpKind::Slash(SlashCmd::New),
     }),
     HelpEntry::Row(HelpRow {
+        key: "f2",
+        label: "设置",
+        kind: HelpKind::Slash(SlashCmd::Settings),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "f3",
-        label: "Resume session",
+        label: "恢复会话",
         kind: HelpKind::Slash(SlashCmd::Resume),
     }),
     HelpEntry::Row(HelpRow {
         key: "ctrl+.",
-        label: "Shortcuts help",
+        label: "快捷键帮助",
         kind: HelpKind::Slash(SlashCmd::Help),
     }),
-    HelpEntry::Header("Session"),
+    HelpEntry::Header("会话"),
     HelpEntry::Row(HelpRow {
         key: "/new",
-        label: "Start a new session",
+        label: "开始新会话",
         kind: HelpKind::Slash(SlashCmd::New),
     }),
     HelpEntry::Row(HelpRow {
         key: "/resume",
-        label: "Resume a previous session",
+        label: "恢复上次会话",
         kind: HelpKind::Slash(SlashCmd::Resume),
     }),
     HelpEntry::Row(HelpRow {
         key: "/history",
-        label: "Search prompt history",
+        label: "搜索提示词历史",
         kind: HelpKind::Slash(SlashCmd::History),
     }),
     HelpEntry::Row(HelpRow {
         key: "/find",
-        label: "Search scrollback",
+        label: "搜索对话",
         kind: HelpKind::Slash(SlashCmd::Find),
     }),
     HelpEntry::Row(HelpRow {
+        key: "/copy",
+        label: "复制上一条回复",
+        kind: HelpKind::Slash(SlashCmd::Copy),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/theme",
+        label: "切换配色",
+        kind: HelpKind::Slash(SlashCmd::Theme),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/timestamps",
+        label: "开关时间戳",
+        kind: HelpKind::Slash(SlashCmd::Timestamps),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/model",
+        label: "切换模型",
+        kind: HelpKind::Slash(SlashCmd::Model),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/settings",
+        label: "设置",
+        kind: HelpKind::Slash(SlashCmd::Settings),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/loop",
+        label: "按间隔循环提问",
+        kind: HelpKind::Slash(SlashCmd::Loop),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/plan",
+        label: "进入计划模式",
+        kind: HelpKind::Slash(SlashCmd::Plan),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/goal",
+        label: "开始或查看目标",
+        kind: HelpKind::Slash(SlashCmd::Goal),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/tasks",
+        label: "后台任务与定时任务",
+        kind: HelpKind::Slash(SlashCmd::Tasks),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/mcps",
+        label: "MCP 服务器状态",
+        kind: HelpKind::Slash(SlashCmd::Mcps),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "/quit",
-        label: "Quit grok",
+        label: "退出",
         kind: HelpKind::Slash(SlashCmd::Quit),
     }),
-    HelpEntry::Header("Prompt"),
+    HelpEntry::Header("输入"),
     HelpEntry::Row(HelpRow {
         key: "↑↓",
-        label: "Recall history",
+        label: "翻历史提示词",
+        kind: HelpKind::Hint,
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "←→",
+        label: "移动光标",
+        kind: HelpKind::Hint,
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "shift+enter",
+        label: "换行",
+        kind: HelpKind::Hint,
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "@",
+        label: "搜索文件",
         kind: HelpKind::Hint,
     }),
     HelpEntry::Row(HelpRow {
         key: "tab",
-        label: "Complete slash command",
+        label: "补全斜杠命令或路径",
         kind: HelpKind::Hint,
     }),
-    HelpEntry::Header("Scrollback"),
+    HelpEntry::Header("对话"),
     HelpEntry::Row(HelpRow {
         key: "pgup",
-        label: "Scroll conversation",
+        label: "滚动对话",
         kind: HelpKind::Hint,
     }),
     HelpEntry::Row(HelpRow {
         key: "click",
-        label: "Expand tool card",
+        label: "展开工具 / 复制 mermaid",
         kind: HelpKind::Hint,
     }),
 ];
@@ -316,5 +448,21 @@ mod tests {
     fn help_filter_finds_resume() {
         let rows = filter_help("resume");
         assert!(rows.iter().any(|r| r.key.contains("resume") || r.label.contains("Resume")));
+    }
+
+    #[test]
+    fn help_lists_shift_tab_mode_and_ctrl_x() {
+        let rows = filter_help("");
+        assert!(
+            rows.iter().any(|r| r.key == "shift+tab"),
+            "{:?}",
+            rows.iter().map(|r| r.key).collect::<Vec<_>>()
+        );
+        assert!(rows.iter().any(|r| r.key == "ctrl+x"));
+        assert!(rows.iter().any(|r| r.label.contains("询问")));
+        assert!(rows.iter().any(|r| r.key == "/plan"));
+        assert!(rows.iter().any(|r| r.key == "/goal"));
+        assert!(rows.iter().any(|r| r.key == "/tasks"));
+        assert!(rows.iter().any(|r| r.key == "/mcps"));
     }
 }

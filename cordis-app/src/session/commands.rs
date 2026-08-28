@@ -10,5 +10,6 @@ pub enum SessionCommand {
         send_now: bool,
         respond_to: oneshot::Sender<PromptTurnResult>,
     },
+    Cancel,
     Shutdown,
 }
