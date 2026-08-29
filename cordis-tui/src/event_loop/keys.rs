@@ -76,9 +76,10 @@ pub(super) fn run_action(
                     perms.resolve(PermissionOptionKind::RejectOnce);
                 }
             }
-            if let Overlay::Ask { draft, .. } = overlay {
+            if let Overlay::Ask { draft, draft_cursor, .. } = overlay {
                 if !draft.is_empty() {
                     draft.clear();
+                    *draft_cursor = 0;
                     return Vec::new();
                 }
                 if let Some(ask) = ctx.get::<Ask>(ASK) {
@@ -314,10 +315,11 @@ pub(super) fn run_action(
                 selected,
                 picked,
                 draft,
+                draft_cursor,
             } = overlay
             {
                 if ask_other_active(ctx, *selected, picked) {
-                    ask_view::push_draft_char(draft, c);
+                    ask_view::push_draft_char(draft, draft_cursor, c);
                     return Vec::new();
                 }
                 if let Some(i) = c.to_digit(10) {
@@ -325,6 +327,7 @@ pub(super) fn run_action(
                     if (1..=picked.len().max(9)).contains(&i) {
                         *selected = i - 1;
                         if ask_other_active(ctx, *selected, picked) {
+                            ask_view::clamp_draft_cursor(draft, draft_cursor);
                             return Vec::new();
                         }
                         return accept_overlay(ctx, overlay);
@@ -339,7 +342,8 @@ pub(super) fn run_action(
             } = overlay
             {
                 if elicit_needs_draft(ctx, *selected, picked) {
-                    ask_view::push_draft_char(draft, c);
+                    let mut cur = draft.chars().count();
+                    ask_view::push_draft_char(draft, &mut cur, c);
                     return Vec::new();
                 }
                 if let Some(i) = c.to_digit(10) {
@@ -395,10 +399,11 @@ pub(super) fn run_action(
                 selected,
                 picked,
                 draft,
+                draft_cursor,
             } = overlay
             {
                 if ask_other_active(ctx, *selected, picked) {
-                    draft.pop();
+                    ask_view::backspace_draft(draft, draft_cursor);
                     return Vec::new();
                 }
             }
@@ -421,10 +426,11 @@ pub(super) fn run_action(
                 selected,
                 picked,
                 draft,
+                draft_cursor,
             } = overlay
             {
                 if ask_other_active(ctx, *selected, picked) {
-                    ask_view::push_draft(draft, &text);
+                    ask_view::push_draft(draft, draft_cursor, &text);
                     return Vec::new();
                 }
             }
@@ -435,7 +441,8 @@ pub(super) fn run_action(
             } = overlay
             {
                 if elicit_needs_draft(ctx, *selected, picked) {
-                    ask_view::push_draft(draft, &text);
+                    let mut cur = draft.chars().count();
+                    ask_view::push_draft(draft, &mut cur, &text);
                     return Vec::new();
                 }
             }
@@ -469,13 +476,14 @@ pub(super) fn run_action(
                 selected,
                 picked,
                 draft,
+                draft_cursor,
             } = overlay
             {
                 if ask_other_active(ctx, *selected, picked) {
                     if let Some(slot) = picked.get_mut(*selected) {
                         *slot = true;
                     }
-                    ask_view::push_draft_char(draft, ' ');
+                    ask_view::push_draft_char(draft, draft_cursor, ' ');
                     return Vec::new();
                 }
                 if let Some(slot) = picked.get_mut(*selected) {
@@ -493,7 +501,8 @@ pub(super) fn run_action(
                     if let Some(slot) = picked.get_mut(*selected) {
                         *slot = true;
                     }
-                    ask_view::push_draft_char(draft, ' ');
+                    let mut cur = draft.chars().count();
+                    ask_view::push_draft_char(draft, &mut cur, ' ');
                     return Vec::new();
                 }
                 if let Some(slot) = picked.get_mut(*selected) {
@@ -540,6 +549,24 @@ pub(super) fn run_action(
                         }];
                     }
                 }
+            }
+            return Vec::new();
+        }
+        Action::OverlayNavH(delta) => {
+            if let Overlay::Ask {
+                selected,
+                picked,
+                draft,
+                draft_cursor,
+            } = overlay
+            {
+                if ask_other_active(ctx, *selected, picked) {
+                    ask_view::move_draft_cursor(draft, draft_cursor, delta);
+                    return Vec::new();
+                }
+            }
+            if matches!(overlay, Overlay::Ask { .. }) {
+                navigate_ask(ctx, overlay, delta);
             }
             return Vec::new();
         }
@@ -843,6 +870,7 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
             selected,
             picked,
             draft,
+            ..
         } => Some((*selected, picked.clone(), draft.clone())),
         _ => None,
     };
@@ -1318,10 +1346,11 @@ pub(super) fn apply_paste(
                 selected,
                 picked,
                 draft,
+                draft_cursor,
             } = overlay
             {
                 if ask_other_active(ctx, *selected, picked) {
-                    ask_view::push_draft(draft, &text);
+                    ask_view::push_draft(draft, draft_cursor, &text);
                     return;
                 }
             }
@@ -1332,7 +1361,8 @@ pub(super) fn apply_paste(
             } = overlay
             {
                 if elicit_needs_draft(ctx, *selected, picked) {
-                    ask_view::push_draft(draft, &text);
+                    let mut cur = draft.chars().count();
+                    ask_view::push_draft(draft, &mut cur, &text);
                     return;
                 }
             }
@@ -1358,6 +1388,8 @@ pub(super) fn overlay_keys(code: KeyCode, ctrl: bool) -> Option<Action> {
         KeyCode::Enter => Some(Action::OverlayAccept),
         KeyCode::Up => Some(Action::OverlayMove(-1)),
         KeyCode::Down => Some(Action::OverlayMove(1)),
+        KeyCode::Left => Some(Action::OverlayNavH(-1)),
+        KeyCode::Right => Some(Action::OverlayNavH(1)),
         KeyCode::Backspace => Some(Action::OverlayBackspace),
         KeyCode::F(2) => Some(Action::SettingsModal),
         KeyCode::F(3) => Some(Action::ResumePicker),

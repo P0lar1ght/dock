@@ -41,15 +41,25 @@ impl Shortcuts {
             if typing {
                 return vec![
                     HintItem::new("type", "other"),
+                    HintItem::new("←→", "cursor"),
                     HintItem::new("Enter", "submit"),
-                    HintItem::new("Esc", "back"),
+                    HintItem::new("Esc", "clear"),
                 ];
             }
-            return vec![
+            let mut hints = vec![
                 HintItem::new("Enter", "select"),
                 HintItem::new("Esc", "reject"),
                 HintItem::new("1–9", "option"),
             ];
+            let multi_q = self
+                .ctx
+                .get::<Ask>(ASK)
+                .and_then(|a| a.front())
+                .is_some_and(|p| p.questions.len() > 1);
+            if multi_q {
+                hints.insert(1, HintItem::new("←→", "question"));
+            }
+            return hints;
         }
         if let Overlay::Elicit {
             selected, picked, ..

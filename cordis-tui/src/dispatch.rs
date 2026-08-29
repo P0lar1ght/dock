@@ -32,6 +32,7 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
         | Action::OverlaySelect(_)
         | Action::OverlaySpace
         | Action::OverlayTab
+        | Action::OverlayNavH(_)
         | Action::PermissionAccept
         | Action::PermissionReject
         | Action::MouseMove { .. }

@@ -50,20 +50,49 @@ pub fn other_active(labels: &[String], selected: usize, picked: &[bool], multi: 
                 .any(|(i, l)| picked.get(i).copied().unwrap_or(false) && is_other_label(l)))
 }
 
-pub fn push_draft(draft: &mut String, text: &str) {
+pub fn push_draft(draft: &mut String, cursor: &mut usize, text: &str) {
     for c in text.chars() {
-        push_draft_char(draft, c);
+        push_draft_char(draft, cursor, c);
     }
 }
 
-pub fn push_draft_char(draft: &mut String, c: char) {
+pub fn push_draft_char(draft: &mut String, cursor: &mut usize, c: char) {
     if c == '\n' || c == '\r' || c.is_control() {
         return;
     }
     if draft.chars().count() >= MAX_ASK_DRAFT {
         return;
     }
-    draft.push(c);
+    let byte = char_byte_index(draft, *cursor);
+    draft.insert(byte, c);
+    *cursor = cursor.saturating_add(1);
+}
+
+pub fn backspace_draft(draft: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let end = char_byte_index(draft, *cursor);
+    *cursor -= 1;
+    let start = char_byte_index(draft, *cursor);
+    draft.replace_range(start..end, "");
+}
+
+pub fn move_draft_cursor(draft: &str, cursor: &mut usize, delta: i16) {
+    let len = draft.chars().count();
+    let next = (*cursor as i32 + delta as i32).clamp(0, len as i32) as usize;
+    *cursor = next;
+}
+
+pub fn clamp_draft_cursor(draft: &str, cursor: &mut usize) {
+    *cursor = (*cursor).min(draft.chars().count());
+}
+
+fn char_byte_index(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
 }
 
 pub fn chrome_height(prompt: &AskPrompt, width: u16, selected: usize, picked: &[bool]) -> u16 {
@@ -90,6 +119,7 @@ pub fn render(
     selected: usize,
     picked: &[bool],
     draft: &str,
+    draft_cursor: usize,
 ) -> PickerHits {
     if area.height == 0 || area.width == 0 {
         return PickerHits::default();
@@ -114,11 +144,19 @@ pub fn render(
         .fg(theme.text_primary)
         .bg(theme.bg_light)
         .add_modifier(Modifier::BOLD);
-    let step = format!(
-        "问题 {}/{}",
-        prompt.index + 1,
-        prompt.questions.len().max(1)
-    );
+    let step = if prompt.questions.len() > 1 {
+        format!(
+            "问题 {}/{}  ← → 切换",
+            prompt.index + 1,
+            prompt.questions.len()
+        )
+    } else {
+        format!(
+            "问题 {}/{}",
+            prompt.index + 1,
+            prompt.questions.len().max(1)
+        )
+    };
     buf.set_line(
         content_x,
         y,
@@ -229,14 +267,33 @@ pub fn render(
             .fg(theme.text_primary)
             .bg(row_bg)
             .add_modifier(Modifier::BOLD);
-        let cursor_style = Style::default().fg(theme.accent_user).bg(row_bg);
-        let mut spans = vec![Span::styled("输入 ", label_style)];
+        let placeholder_style = Style::default().fg(theme.gray).bg(row_bg);
+        let cursor_style = Style::default()
+            .fg(theme.bg_light)
+            .bg(theme.accent_user)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![
+            Span::styled("› ", Style::default().fg(theme.accent_user).bg(row_bg)),
+            Span::styled("其他 ", label_style),
+        ];
+        let cursor = draft_cursor.min(draft.chars().count());
         if draft.is_empty() {
-            spans.push(Span::styled("具体内容", label_style));
             spans.push(Span::styled("█", cursor_style));
+            spans.push(Span::styled(" 输入具体内容…", placeholder_style));
         } else {
-            spans.push(Span::styled(draft.to_string(), text_style));
-            spans.push(Span::styled("█", cursor_style));
+            let before: String = draft.chars().take(cursor).collect();
+            let at = draft.chars().nth(cursor);
+            let after: String = draft.chars().skip(cursor.saturating_add(1)).collect();
+            if !before.is_empty() {
+                spans.push(Span::styled(before, text_style));
+            }
+            match at {
+                Some(ch) => spans.push(Span::styled(ch.to_string(), cursor_style)),
+                None => spans.push(Span::styled("█", cursor_style)),
+            }
+            if !after.is_empty() {
+                spans.push(Span::styled(after, text_style));
+            }
         }
         buf.set_line(content_x, y, &Line::from(spans), content_w);
     }
@@ -321,10 +378,29 @@ mod tests {
     #[test]
     fn push_draft_skips_newlines_and_caps() {
         let mut draft = String::new();
-        push_draft(&mut draft, "ab\ncd");
+        let mut cursor = 0;
+        push_draft(&mut draft, &mut cursor, "ab\ncd");
         assert_eq!(draft, "abcd");
+        assert_eq!(cursor, 4);
         let mut long = "x".repeat(MAX_ASK_DRAFT);
-        push_draft_char(&mut long, 'y');
+        let mut cur = long.chars().count();
+        push_draft_char(&mut long, &mut cur, 'y');
         assert_eq!(long.chars().count(), MAX_ASK_DRAFT);
+    }
+
+    #[test]
+    fn draft_cursor_insert_and_backspace() {
+        let mut draft = String::from("abc");
+        let mut cursor = 1;
+        push_draft_char(&mut draft, &mut cursor, 'X');
+        assert_eq!(draft, "aXbc");
+        assert_eq!(cursor, 2);
+        backspace_draft(&mut draft, &mut cursor);
+        assert_eq!(draft, "abc");
+        assert_eq!(cursor, 1);
+        move_draft_cursor(&draft, &mut cursor, -1);
+        assert_eq!(cursor, 0);
+        move_draft_cursor(&draft, &mut cursor, 99);
+        assert_eq!(cursor, 3);
     }
 }

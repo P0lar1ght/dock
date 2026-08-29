@@ -30,6 +30,8 @@ pub enum Action {
     OverlaySelect(usize),
     OverlaySpace,
     OverlayTab,
+    /// Horizontal nav inside an overlay (Ask multi-question ←/→).
+    OverlayNavH(i16),
     SettingsModal,
     PermissionAccept,
     PermissionReject,

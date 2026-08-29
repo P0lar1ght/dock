@@ -54,6 +54,8 @@ pub enum Overlay {
         selected: usize,
         picked: Vec<bool>,
         draft: String,
+        /// Char index into `draft` for the Other freeform field.
+        draft_cursor: usize,
     },
     Elicit {
         selected: usize,

@@ -23,6 +23,12 @@ pub use types::QuestionAnnotation;
 pub struct AskPrompt {
     pub questions: Vec<Question>,
     pub index: usize,
+    /// Wire labels already saved for the question at [`index`], if any.
+    pub current_labels: Vec<String>,
+    /// Freeform notes saved with an "Other" answer for the current question.
+    pub current_notes: Option<String>,
+    /// Highest question index the user may navigate to (answered prefix + frontier).
+    pub max_index: usize,
 }
 
 struct Pending {
@@ -48,9 +54,23 @@ impl Ask {
     }
 
     pub fn front(&self) -> Option<AskPrompt> {
-        self.queue.lock().unwrap().front().map(|p| AskPrompt {
-            questions: p.questions.clone(),
-            index: p.index,
+        self.queue.lock().unwrap().front().map(|p| {
+            let q = p.questions.get(p.index);
+            let current_labels = q
+                .and_then(|q| p.answers.get(&q.question).cloned())
+                .unwrap_or_default();
+            let current_notes = q.and_then(|q| {
+                p.annotations
+                    .get(&q.question)
+                    .and_then(|a| a.notes.clone())
+            });
+            AskPrompt {
+                questions: p.questions.clone(),
+                index: p.index,
+                current_labels,
+                current_notes,
+                max_index: max_reachable(p),
+            }
         })
     }
 
@@ -59,6 +79,26 @@ impl Ask {
             let _ = pending.tx.send(format::CANCEL_TEXT.to_string());
         }
         self.ctx.emit(ASK_EVENT, ());
+    }
+
+    /// Move between questions without submitting. Returns `true` if the index changed.
+    pub fn navigate(&self, delta: i32) -> bool {
+        let mut queue = self.queue.lock().unwrap();
+        let Some(pending) = queue.front_mut() else {
+            return false;
+        };
+        if pending.questions.len() <= 1 {
+            return false;
+        }
+        let max = max_reachable(pending) as i32;
+        let next = (pending.index as i32 + delta).clamp(0, max) as usize;
+        if next == pending.index {
+            return false;
+        }
+        pending.index = next;
+        drop(queue);
+        self.ctx.emit(ASK_EVENT, ());
+        true
     }
 
     pub fn answer_current(&self, labels: Vec<String>, notes: Option<String>) {
@@ -70,14 +110,22 @@ impl Ask {
         pending.answers.insert(q.question.clone(), labels);
         if notes.is_some() {
             pending.annotations.insert(
-                q.question,
+                q.question.clone(),
                 QuestionAnnotation {
                     preview: None,
                     notes,
                 },
             );
+        } else {
+            pending.annotations.remove(&q.question);
         }
-        pending.index += 1;
+        // Advance to the next unanswered question when possible; otherwise step
+        // forward one so Left can still revisit earlier answers.
+        if let Some(next) = first_unanswered(pending) {
+            pending.index = next;
+        } else {
+            pending.index = pending.questions.len();
+        }
         if pending.index >= pending.questions.len() {
             let pending = queue.pop_front().unwrap();
             let text = format::format_accepted_tool_result(
@@ -109,6 +157,26 @@ impl Ask {
             _ = tokio::time::sleep(timeout) => format::unanswered_text(false).to_string(),
         }
     }
+}
+
+/// Highest index the user may open: end of the answered prefix, or the first
+/// unanswered slot (so they can keep filling after going back).
+fn max_reachable(pending: &Pending) -> usize {
+    let n = pending.questions.len();
+    if n == 0 {
+        return 0;
+    }
+    match first_unanswered(pending) {
+        Some(i) => i,
+        None => n.saturating_sub(1),
+    }
+}
+
+fn first_unanswered(pending: &Pending) -> Option<usize> {
+    pending
+        .questions
+        .iter()
+        .position(|q| !pending.answers.contains_key(&q.question))
 }
 
 pub fn tool_ask_user() -> Plugin {
@@ -147,4 +215,76 @@ async fn ask_user(ctx: &Context, call: ToolCall) -> ToolResult {
     };
     let text = ask.ask(input.questions).await;
     tool_result(call, text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn q(text: &str, labels: &[&str]) -> Question {
+        Question {
+            question: text.into(),
+            options: labels
+                .iter()
+                .map(|l| QuestionOption {
+                    label: (*l).into(),
+                    description: String::new(),
+                    preview: None,
+                    id: None,
+                })
+                .collect(),
+            multi_select: None,
+            id: None,
+        }
+    }
+
+    #[test]
+    fn navigate_left_revisits_answered_question() {
+        let ask = Ask::new(cordis::Context::new());
+        let (tx, _rx) = oneshot::channel();
+        ask.queue.lock().unwrap().push_back(Pending {
+            questions: vec![
+                q("Q1", &["A", "B"]),
+                q("Q2", &["C", "D"]),
+                q("Q3", &["E"]),
+            ],
+            answers: IndexMap::new(),
+            annotations: HashMap::new(),
+            index: 0,
+            tx,
+        });
+        ask.answer_current(vec!["A".into()], None);
+        assert_eq!(ask.front().unwrap().index, 1);
+        assert!(ask.navigate(-1));
+        let front = ask.front().unwrap();
+        assert_eq!(front.index, 0);
+        assert_eq!(front.current_labels, vec!["A".to_string()]);
+        assert!(!ask.navigate(-1));
+        assert!(ask.navigate(1));
+        assert_eq!(ask.front().unwrap().index, 1);
+    }
+
+    #[test]
+    fn reanswer_overwrites_and_jumps_to_first_unanswered() {
+        let ask = Ask::new(cordis::Context::new());
+        let (tx, _rx) = oneshot::channel();
+        ask.queue.lock().unwrap().push_back(Pending {
+            questions: vec![q("Q1", &["A"]), q("Q2", &["B"]), q("Q3", &["C"])],
+            answers: IndexMap::new(),
+            annotations: HashMap::new(),
+            index: 0,
+            tx,
+        });
+        ask.answer_current(vec!["A".into()], None);
+        ask.answer_current(vec!["B".into()], None);
+        assert_eq!(ask.front().unwrap().index, 2);
+        assert!(ask.navigate(-2));
+        ask.answer_current(vec!["A2".into()], None);
+        let front = ask.front().unwrap();
+        assert_eq!(front.index, 2);
+        assert_eq!(
+            ask.queue.lock().unwrap().front().unwrap().answers.get("Q1"),
+            Some(&vec!["A2".to_string()])
+        );
+    }
 }

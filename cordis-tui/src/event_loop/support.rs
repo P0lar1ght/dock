@@ -122,17 +122,74 @@ pub(super) fn open_ask_if_needed(ctx: &Context, overlay: &mut Overlay) {
     let Some(front) = ctx.get::<Ask>(ASK).and_then(|a| a.front()) else {
         return;
     };
-    let n = front
-        .questions
-        .get(front.index)
-        .map(ask_view::labels)
-        .map(|l| l.len())
-        .unwrap_or(0);
-    *overlay = Overlay::Ask {
-        selected: 0,
-        picked: vec![false; n],
-        draft: String::new(),
+    *overlay = ask_overlay_from_prompt(&front);
+}
+
+pub(super) fn navigate_ask(ctx: &Context, overlay: &mut Overlay, delta: i16) {
+    if let Overlay::Ask {
+        selected,
+        picked,
+        ..
+    } = overlay
+    {
+        // Other freeform owns ←/→ for the caret; question nav only when not typing Other.
+        if ask_other_active(ctx, *selected, picked) {
+            return;
+        }
+    }
+    let Some(ask) = ctx.get::<Ask>(ASK) else {
+        return;
     };
+    if !ask.navigate(delta as i32) {
+        return;
+    }
+    let Some(front) = ask.front() else {
+        overlay.close();
+        return;
+    };
+    *overlay = ask_overlay_from_prompt(&front);
+}
+
+fn ask_overlay_from_prompt(front: &cordis_spine::AskPrompt) -> Overlay {
+    let Some(q) = front.questions.get(front.index) else {
+        return Overlay::Ask {
+            selected: 0,
+            picked: Vec::new(),
+            draft: String::new(),
+            draft_cursor: 0,
+        };
+    };
+    let labs = ask_view::labels(q);
+    let multi = q.multi_select.unwrap_or(false);
+    let mut picked = vec![false; labs.len()];
+    let mut selected = 0usize;
+    for wire in &front.current_labels {
+        if let Some(i) = labs
+            .iter()
+            .position(|l| ask_view::wire_label(l) == *wire || l == wire)
+        {
+            if multi {
+                picked[i] = true;
+            }
+            selected = i;
+        }
+    }
+    let draft = front.current_notes.clone().unwrap_or_default();
+    if !draft.is_empty() {
+        if let Some(i) = labs.iter().position(|l| ask_view::is_other_label(l)) {
+            selected = i;
+            if multi {
+                picked[i] = true;
+            }
+        }
+    }
+    let draft_cursor = draft.chars().count();
+    Overlay::Ask {
+        selected,
+        picked,
+        draft,
+        draft_cursor,
+    }
 }
 
 pub(super) fn elicit_front(ctx: &Context) -> Option<cordis_spine::ElicitPrompt> {
@@ -370,7 +427,11 @@ pub(super) fn accept_ask(
             .collect();
         ask.answer_current(chosen, notes);
     }
-    overlay.close();
+    if let Some(front) = ask.front() {
+        *overlay = ask_overlay_from_prompt(&front);
+    } else {
+        overlay.close();
+    }
 }
 
 pub(super) fn accept_elicit(

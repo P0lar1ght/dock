@@ -30,6 +30,7 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::grok::mermaid::{self, AffordanceKind};
 use crate::theme::Theme;
 
+mod ask;
 mod assistant;
 mod bg_task;
 mod edit;
@@ -951,6 +952,8 @@ fn tool_card_lines(
         sched::lines(name, arguments, content, theme, width, mode, running)
     } else if mcp::is_mcp_tool(name) {
         mcp::lines(name, arguments, content, theme, width, mode, running)
+    } else if ask::is_ask_tool(name) {
+        ask::lines(name, arguments, content, theme, width, mode, running)
     } else {
         tool::lines(name, arguments, content, theme, width, mode, running)
     }
