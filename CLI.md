@@ -22,7 +22,7 @@
 | `/plan [说明]` | 开计划模式；无说明只切模式（Pending，发第一条 prompt 后变 Active）。有说明则 Active 并提交 |
 | `/view-plan`（`show-plan` `plan-view`） | 查看 `.dock/plan.md`（打开时读一次，pretty markdown）；若 `exit_plan_mode` 正在等待批准则打开审批 chrome（`a` 批准 / `s` 修改 / `q` 放弃） |
 | `/goal` | 输入框留下用法（`用法: /goal <目标>` + `/goal `），不会清空。再发送即为目标 |
-| `/goal <目标>` | 开目标；用户气泡是目标文本；`goal_instruction` 走 system-prompt。模型只回一句文本时不会结束目标：注入隐藏 continuation（Grok `Goal NOT complete`），继续采样直到 `update_goal(completed)` / 暂停 / 取消 |
+| `/goal <目标>` | 开目标；用户气泡是目标文本；`goal_instruction` 走 system-prompt。模型只回一句文本时不会结束目标：注入隐藏 continuation（Grok `Goal NOT complete`），继续采样直到 `update_goal(completed)` / 暂停 / 取消。整轮结束后若目标仍在进行，再塞一条隐藏 GoalSummary 开下一轮。模型也可用 `update_goal(objective)` 自己开目标 |
 | `/goal status\|edit\|pause\|resume\|clear` | 打开目标 overlay / 暂停 / 继续 / 清除 |
 | `/tasks` | Grok 分组 pane：Workflows → Subagents → Tasks → Watchers。子代理行显示当前模式名册的角色名（如守望下的「岑」而不是 `Cen`）。Enter / 点击子代理或后台任务打开 **Grok 同款全屏边框**（子代理：工具卡折叠循环 + 框底输入 `send_message`）。Esc 从全屏回到本列表。子代理第一轮结束后显示 **idle**（不是 done）；idle 不算 running |
 | `/workflow` / `/workflow runs` | Grok `Workflow Runs` overlay |
@@ -78,9 +78,11 @@ order: 10
 | 动态插槽 `Overlay::Slot` | `"tui.slots"` 登记的纯文本 pane（复用 Notice 布局）。Esc 关闭；↑/↓ 滚动并把规范化键名转给 `on_key`（`esc` / `enter` / `up` / `down` / `char:x`）。脚本 `open_slot` 或 slash `kind: slot` 打开 |
 | 插槽 HUD | `hud: true` 的插槽每帧 `render` 第一行，live-look 进快捷键条，不替换 status bar |
 | `/preset` 画布 | 左侧完整目录（当前 `"tools"`，右侧工具简介）、右侧本预设工具集。身份区列出本模式 `agents/` id。Enter 左加右删。名册 `n`/`d` 新建或复制默认写项目 `.dock/presets/<id>/`；改内置会写到 `~/.dock/presets/<id>/agent.yml` 覆盖。Esc 从画布回名册 |
+| 欢迎页 | 空会话是 **Grok hero box**：圆角方框、左边 braille logo、右边 `Dock` + 版本 + 一句说明 + 菜单（新会话 / 恢复 / 退出）。窄窗改成框内上下叠。点击菜单行仍走原来的快捷键。 |
 | prompt 底栏 | **右对齐**画在输入框底边：模型 · **当前 Agent 预设名** · 权限（询问/始终允许）。计划模式加 `计划`；目标进行中或暂停加 `目标`。生成中输入框有字：`Enter:queue` / `Ctrl+Enter:send now`。空输入且生成中、没有排队：`Esc:cancel`。空输入且有排队：排队条钉在输入框上方（`#1` 正文 `[发送]`）；`Enter:send now` 立即发出最早一条，点 `[发送]` 发那一行；`Esc:edit` 把最新一条收回输入框改。**Esc 取消且本轮还没有模型/工具输出**时完整收回刚发送的正文和图片；约 1s 内再按 Esc 不会清空收回的草稿（Grok 双击 Esc 宽限）。有目标、输入框空、且没在生成时快捷键条加 `g:goal`。子代理 `report` 续跑父会话时也算 working，期间发的消息会排队，不会被丢掉。取消或立即发送时会给未完成的 tool call 补上「已中断。」结果，避免下一条采样 400 |
+| 目标状态条 | 有目标时钉在子代理头像和排队条之间（紧挨输入框上方）：标题 + `[暂停]`/`[继续]` `[修改]` `[关闭]`；第二行是进度备注和彩色扫光波。运行中随 80ms 刷新换色；暂停后冻结变灰。点标题打开 overlay，点 `[修改]` 直接改标题 |
 | 子代理头像条 | 未结束的子代理钉在输入框上方横排**正方形**头像（框里是显示名首字，无名字行）。运行中边框扫光并呼吸。点头像打开 **Grok 同款全屏边框**：标题栏 + 子代理自己的滚动区（工具卡折叠循环与主界面相同：收起 → 截断 → 展开）。框底可输入，Enter 经 `send_message`（urgent）发给该子代理以调整。Esc / q（输入为空时）/ [✗] 返回 |
-| 滚动区 | live-lookup `"todos"`；用户气泡灰带铺满行宽（Grok `with_background`）；图标抄 Grok `todo_pane`（`□` `▶` `✓` `✗`）。**`subagent` 是独立卡片**：当前模式名册角色名 + type id，始终折叠，点击打开全屏对话。Grok `task` 仍画成原来的子代理块。后台 bash / `monitor` 画成任务卡片。运行中 ◆ 会脉冲，活动与耗时随 80ms 刷新 |
+| 滚动区 | live-lookup `"todos"`；用户气泡灰带铺满行宽（Grok `with_background`）；图标抄 Grok `todo_pane`（`□` `▶` `✓` `✗`）。**`subagent` 是独立卡片**：当前模式名册角色名 + type id，始终折叠，点击打开全屏对话。Grok `task` 仍画成原来的子代理块。后台 bash / `monitor` 画成任务卡片。`update_goal` 画成 **Goal 卡**（设定 / 进展 / 完成 / 受阻）。运行中 ◆ 会脉冲，活动与耗时随 80ms 刷新 |
 | 顶栏 | `上下文 {used}/{window}` 是**上一轮** prompt+completion（上下文窗），不是 `/usage` 的会话累计账本 |
 | `enter_plan_mode` / `exit_plan_mode` 卡 | scrollback：`◆ Plan: Enter\|Exit`；Exit 展开 markdown。`exit` 会 park 审批，写闸保持到用户决定 |
 
@@ -99,7 +101,7 @@ order: 10
 
 ## 仍比 Grok 薄（CLI 面）
 
-- `/goal`：continuation 已接上；尚未自动 spawn Grok 的 `goal plan writer` / classifier / strategist
+- `/goal`：模型可用 `update_goal(objective)` 自己开目标；continuation 已接上（内循环 + 整轮结束后隐藏 GoalSummary）。尚未自动 spawn Grok 的 `goal plan writer` / classifier / strategist
 - 一轮采样安全上限 256 步（Grok 默认不限 `max_turns`）；撞上限时滚动区留下说明，而不是静默停
 - 提问 overlay：有 Other，自由输入比 Grok pager 简单
 - `/usage`：无 Context usage / Session info 三 tab，无账号额度条

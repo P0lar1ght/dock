@@ -13,6 +13,8 @@ pub struct GoalState {
     pub paused: AtomicBool,
     pub awaiting_composer: AtomicBool,
     pub title: Mutex<String>,
+    /// Last `update_goal` message / blocked note for TUI chrome.
+    pub status: Mutex<String>,
     pub blocked_streak: AtomicU32,
 }
 
@@ -23,6 +25,7 @@ impl GoalState {
             paused: AtomicBool::new(false),
             awaiting_composer: AtomicBool::new(false),
             title: Mutex::new(String::new()),
+            status: Mutex::new(String::new()),
             blocked_streak: AtomicU32::new(0),
         }
     }
@@ -34,6 +37,7 @@ impl GoalState {
         } else {
             title
         };
+        self.status.lock().unwrap().clear();
         self.active.store(true, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
         self.awaiting_composer.store(false, Ordering::SeqCst);
@@ -77,6 +81,15 @@ impl GoalState {
         self.awaiting_composer.store(false, Ordering::SeqCst);
         self.blocked_streak.store(0, Ordering::SeqCst);
         self.title.lock().unwrap().clear();
+        self.status.lock().unwrap().clear();
+    }
+
+    pub fn status(&self) -> String {
+        self.status.lock().unwrap().clone()
+    }
+
+    fn record_status(&self, text: impl Into<String>) {
+        *self.status.lock().unwrap() = text.into();
     }
 
     pub fn set_title(&self, title: impl Into<String>) {
@@ -116,6 +129,42 @@ pub fn drain_one(
     input: UpdateGoalInput,
     ack_tx: tokio::sync::oneshot::Sender<UpdateGoalAck>,
 ) {
+    let objective = input
+        .objective
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(title) = objective {
+        if !state.present() {
+            state.start(title.clone());
+            if let Some(message) = input
+                .message
+                .as_ref()
+                .map(|m| m.trim())
+                .filter(|m| !m.is_empty())
+            {
+                state.record_status(message.to_string());
+            }
+            send_ack(
+                ack_tx,
+                UpdateGoalAck::Accepted {
+                    summary: format!("Goal set: {title}."),
+                },
+            );
+            return;
+        }
+        state.set_title(&title);
+        if !state.harness_enabled() {
+            send_ack(
+                ack_tx,
+                UpdateGoalAck::Accepted {
+                    summary: format!("Goal retitled: {title}."),
+                },
+            );
+            return;
+        }
+    }
     if !state.harness_enabled() {
         send_ack(
             ack_tx,
@@ -130,6 +179,7 @@ pub fn drain_one(
     }
     if let Some(reason) = input.blocked_reason {
         let streak = state.blocked_streak.fetch_add(1, Ordering::Relaxed) + 1;
+        state.record_status(format!("受阻 {streak}/3：{reason}"));
         if streak < 3 {
             send_ack(
                 ack_tx,
@@ -153,6 +203,14 @@ pub fn drain_one(
         return;
     }
     if input.completed != Some(true) {
+        if let Some(message) = input
+            .message
+            .as_ref()
+            .map(|m| m.trim())
+            .filter(|m| !m.is_empty())
+        {
+            state.record_status(message.to_string());
+        }
         let summary = input
             .message
             .clone()
@@ -206,9 +264,8 @@ mod tests {
         drain_one(
             &state,
             UpdateGoalInput {
-                completed: None,
                 message: Some("hi".into()),
-                blocked_reason: None,
+                ..Default::default()
             },
             tx,
         );
@@ -240,5 +297,44 @@ mod tests {
         );
         assert!(d.contains("理解并分析 TUI"), "{d}");
         assert!(d.contains("<system-reminder>"), "{d}");
+    }
+
+    #[test]
+    fn update_stores_status_message() {
+        let state = GoalState::new();
+        state.start("ship");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drain_one(
+            &state,
+            UpdateGoalInput {
+                message: Some("  正在读 TUI  ".into()),
+                ..Default::default()
+            },
+            tx,
+        );
+        let _ = rx.blocking_recv().unwrap();
+        assert_eq!(state.status(), "正在读 TUI");
+        state.clear();
+        assert!(state.status().is_empty());
+    }
+
+    #[test]
+    fn objective_starts_goal_without_prior_slash() {
+        let state = GoalState::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drain_one(
+            &state,
+            UpdateGoalInput {
+                objective: Some("  理解 TUI  ".into()),
+                message: Some("开干".into()),
+                ..Default::default()
+            },
+            tx,
+        );
+        let ack = rx.blocking_recv().unwrap();
+        assert!(matches!(ack, UpdateGoalAck::Accepted { summary } if summary.contains("理解 TUI")));
+        assert!(state.active());
+        assert_eq!(state.title.lock().unwrap().as_str(), "理解 TUI");
+        assert_eq!(state.status(), "开干");
     }
 }

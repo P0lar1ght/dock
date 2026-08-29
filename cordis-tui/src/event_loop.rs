@@ -71,6 +71,7 @@ use super::status::{self, StatusLine};
 use super::status_bar::StatusBar;
 use super::welcome::{Welcome, WelcomeHit};
 use crate::goal_overlay;
+use crate::goal_pane::{self, GoalHit};
 use crate::grok::mermaid::AffordanceKind;
 use crate::inspect_overlay::{self, InspectClick};
 use crate::mermaid_png;
@@ -162,6 +163,7 @@ pub async fn run(ctx: Context) -> Result<()> {
     let mut overlay = Overlay::None;
     let mut hits = PickerHits::default();
     let mut dock_hits: Vec<(Rect, String)> = Vec::new();
+    let mut goal_hits: Vec<(Rect, GoalHit)> = Vec::new();
     let mut queue_hits: Vec<(Rect, QueueHit)> = Vec::new();
     let mut pointer = (0u16, 0u16);
     let mut quit = false;
@@ -172,6 +174,7 @@ pub async fn run(ctx: Context) -> Result<()> {
         &overlay,
         &mut hits,
         &mut dock_hits,
+        &mut goal_hits,
         &mut queue_hits,
         pointer,
     )?;
@@ -188,6 +191,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                         &overlay,
                         &mut hits,
                         &mut dock_hits,
+                        &mut goal_hits,
                         &mut queue_hits,
                         pointer,
                     )?;
@@ -203,6 +207,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                         &mut overlay,
                         &hits,
                         &dock_hits,
+                        &goal_hits,
                         &queue_hits,
                     )
                     .into();
@@ -589,6 +594,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                         &overlay,
                         &mut hits,
                         &mut dock_hits,
+                        &mut goal_hits,
                         &mut queue_hits,
                         pointer,
                     )?;
@@ -606,6 +612,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                     &overlay,
                     &mut hits,
                     &mut dock_hits,
+                    &mut goal_hits,
                     &mut queue_hits,
                     pointer,
                 )?;
@@ -618,6 +625,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                         &overlay,
                         &mut hits,
                         &mut dock_hits,
+                        &mut goal_hits,
                         &mut queue_hits,
                         pointer,
                     )?;
@@ -1003,6 +1011,7 @@ fn live_redraw(ctx: &Context, overlay: &Overlay) -> bool {
         || ctx
             .get::<Subagents>(SUBAGENTS)
             .is_some_and(|s| s.list().iter().any(|a| a.running()))
+        || ctx.get::<Goal>(GOAL).is_some_and(|g| g.active())
         || ctx
             .get::<Jobs>(JOBS)
             .is_some_and(|j| j.list().iter().any(|j| !j.done))
@@ -1241,6 +1250,22 @@ fn goal_pause_resume(ctx: &Context) -> Vec<Effect> {
     Vec::new()
 }
 
+fn apply_goal_hit(ctx: &Context, overlay: &mut Overlay, hit: GoalHit) -> Vec<Effect> {
+    match hit {
+        GoalHit::Pause => goal_pause_resume(ctx),
+        GoalHit::Edit => vec![Effect::ShowGoal { editing: true }],
+        GoalHit::Close => vec![Effect::GoalClear],
+        GoalHit::Open => {
+            if matches!(overlay, Overlay::Goal { .. }) {
+                overlay.close();
+                Vec::new()
+            } else {
+                vec![Effect::ShowGoal { editing: false }]
+            }
+        }
+    }
+}
+
 fn welcome_open(ctx: &Context) -> bool {
     ctx.get::<Welcome>(TUI_WELCOME)
         .is_some_and(|w| w.empty_session())
@@ -1311,6 +1336,7 @@ fn run_action(
     overlay: &mut Overlay,
     hits: &PickerHits,
     dock_hits: &[(Rect, String)],
+    goal_hits: &[(Rect, GoalHit)],
     queue_hits: &[(Rect, QueueHit)],
 ) -> Vec<Effect> {
     match action {
@@ -1653,6 +1679,9 @@ fn run_action(
             if queue_pane::hit(queue_hits, column, row).is_some() {
                 return Vec::new();
             }
+            if goal_pane::hit(goal_hits, column, row).is_some() {
+                return Vec::new();
+            }
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
                 scrollback.mouse_down(column, row);
             }
@@ -1670,6 +1699,9 @@ fn run_action(
                     QueueHit::Send(id) => vec![Effect::PromoteQueued { id: Some(id) }],
                     QueueHit::Edit(id) => vec![Effect::EditQueued { id: Some(id) }],
                 };
+            }
+            if let Some(hit) = goal_pane::hit(goal_hits, column, row) {
+                return apply_goal_hit(ctx, overlay, hit);
             }
             if let Some(id) = subagent_dock::hit(dock_hits, column, row) {
                 *overlay = Overlay::inspect_subagent(id, false);
@@ -1761,6 +1793,9 @@ fn run_action(
                     InspectClick::Close => return close_inspect(overlay),
                     InspectClick::Toggle | InspectClick::None => return Vec::new(),
                 }
+            }
+            if let Some(hit) = goal_pane::hit(goal_hits, column, row) {
+                return apply_goal_hit(ctx, overlay, hit);
             }
             if let Some(id) = subagent_dock::hit(dock_hits, column, row) {
                 *overlay = Overlay::inspect_subagent(id, false);
@@ -2432,12 +2467,14 @@ fn draw(
     overlay: &Overlay,
     hits: &mut PickerHits,
     dock_hits: &mut Vec<(Rect, String)>,
+    goal_hits: &mut Vec<(Rect, GoalHit)>,
     queue_hits: &mut Vec<(Rect, QueueHit)>,
     pointer: (u16, u16),
 ) -> Result<()> {
     let theme = Theme::current();
     *hits = PickerHits::default();
     dock_hits.clear();
+    goal_hits.clear();
     queue_hits.clear();
     terminal
         .draw(|frame| {
@@ -2492,6 +2529,11 @@ fn draw(
             } else {
                 subagent_dock::desired_height(ctx, inner.width)
             };
+            let goal_h = if inspect_open || perm_open || ask_open || plan_open {
+                0
+            } else {
+                goal_pane::desired_height(ctx.get::<Goal>(GOAL).is_some_and(|g| g.present()))
+            };
             let queued_items = ctx
                 .get::<SessionRef>(SESSION_PORT)
                 .map(|s| s.queued_prompts())
@@ -2506,6 +2548,7 @@ fn draw(
                 Constraint::Length(turn_h),
                 Constraint::Min(1),
                 Constraint::Length(dock_h),
+                Constraint::Length(goal_h),
                 Constraint::Length(queue_h),
                 Constraint::Length(prompt_h),
                 Constraint::Length(1),
@@ -2513,9 +2556,10 @@ fn draw(
             .split(inner);
             let scroll_area = chunks[2];
             let dock_area = chunks[3];
-            let queue_area = chunks[4];
-            let prompt_area = chunks[5];
-            let shortcuts_area = chunks[6];
+            let goal_area = chunks[4];
+            let queue_area = chunks[5];
+            let prompt_area = chunks[6];
+            let shortcuts_area = chunks[7];
             if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
                 let left = status.left();
                 let center = status.center();
@@ -2586,6 +2630,21 @@ fn draw(
                     _ => None,
                 };
                 *dock_hits = subagent_dock::paint(ctx, frame.buffer_mut(), dock_area, selected_sub);
+                if goal_h > 0 {
+                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
+                        *goal_hits = goal_pane::paint(
+                            frame.buffer_mut(),
+                            goal_area,
+                            &goal_pane::GoalChrome {
+                                title: goal.title(),
+                                status: goal.status(),
+                                paused: goal.paused(),
+                            },
+                            pointer,
+                            crate::grok::color::shimmer_tick(),
+                        );
+                    }
+                }
                 if queue_h > 0 {
                     let working = ctx
                         .get::<SessionRef>(SESSION_PORT)

@@ -400,9 +400,22 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         disabled.content
     );
 
-    root.get::<cordis_spine::Goal>(cordis_spine::GOAL)
-        .unwrap()
-        .start("ship lsp");
+    let started = tools
+        .execute(cordis_spine::ToolCall {
+            id: "gs".into(),
+            name: "update_goal".into(),
+            arguments: r#"{"objective":"ship lsp"}"#.into(),
+        })
+        .await;
+    assert!(
+        started.content.contains("Goal set") && started.content.contains("ship lsp"),
+        "{}",
+        started.content
+    );
+    assert!(root
+        .get::<cordis_spine::Goal>(cordis_spine::GOAL)
+        .is_some_and(|g| g.active() && g.title() == "ship lsp"));
+
     let progress = tools
         .execute(cordis_spine::ToolCall {
             id: "g1".into(),

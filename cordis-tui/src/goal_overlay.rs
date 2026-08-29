@@ -93,7 +93,24 @@ pub fn render(
         ]),
         w,
     );
-    y = y.saturating_add(2);
+    y = y.saturating_add(1);
+    let note = goal.map(|g| g.status()).unwrap_or_default();
+    if !note.trim().is_empty() && y < frame.content.y + frame.content.height {
+        buf.set_line(
+            x,
+            y,
+            &Line::from(vec![
+                Span::styled("进度: ", Style::default().fg(theme.gray)),
+                Span::styled(
+                    truncate_str(note.trim(), w.saturating_sub(4) as usize),
+                    Style::default().fg(theme.text_secondary),
+                ),
+            ]),
+            w,
+        );
+        y = y.saturating_add(1);
+    }
+    y = y.saturating_add(1);
 
     if present && y < frame.content.y + frame.content.height {
         let sel = selected.min(ACTION_COUNT.saturating_sub(1));

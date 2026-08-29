@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -60,6 +60,8 @@ pub struct Sessions {
     /// ignores this.
     auto_compact_suppressed: Arc<AtomicBool>,
     compacting: Arc<AtomicBool>,
+    /// User follow-up prompts waiting in the session actor (not GoalSummary).
+    queued_followups: Arc<AtomicUsize>,
 }
 
 /// Official SSE usage held until [`Sessions::finish_llm`] so one sample is
@@ -106,11 +108,20 @@ impl Sessions {
             identity: Arc::from(identity.into()),
             auto_compact_suppressed: Arc::new(AtomicBool::new(false)),
             compacting: Arc::new(AtomicBool::new(false)),
+            queued_followups: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub fn identity(&self) -> &str {
         &self.identity
+    }
+
+    pub fn set_queued_followups(&self, n: usize) {
+        self.queued_followups.store(n, Ordering::Relaxed);
+    }
+
+    pub fn has_queued_followups(&self) -> bool {
+        self.queued_followups.load(Ordering::Relaxed) > 0
     }
 
     /// Monotonic generation for scrollback / layout cache invalidation.

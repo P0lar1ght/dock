@@ -34,6 +34,7 @@ mod assistant;
 mod bg_task;
 mod edit;
 mod execute;
+mod goal;
 mod list_dir;
 pub(crate) mod live;
 mod plan;
@@ -942,6 +943,8 @@ fn tool_card_lines(
         web::lines(name, arguments, content, theme, width, mode, running)
     } else if plan::is_plan_tool(name) {
         plan::lines(name, arguments, content, theme, width, mode, running)
+    } else if goal::is_goal_tool(name) {
+        goal::lines(name, arguments, content, theme, width, mode, running)
     } else {
         tool::lines(name, arguments, content, theme, width, mode, running)
     }
@@ -1152,6 +1155,23 @@ mod tests {
         assert!(text.contains("src/lib.rs"), "{text}");
         assert!(text.contains("(1-20)"), "{text}");
         assert!(!text.contains("pub fn"), "collapsed hides body: {text}");
+    }
+
+    #[test]
+    fn update_goal_card_uses_goal_header() {
+        let lines = lines_from_events(&[LogEvent::ToolExecute {
+            id: "g1".into(),
+            name: "update_goal".into(),
+            arguments: r#"{"objective":"理解并分析 TUI"}"#.into(),
+            content: r#"{"success":true,"summary":"Goal set: 理解并分析 TUI."}"#.into(),
+        }]);
+        let text = plain(&lines);
+        assert!(text.contains("Goal: 设定"), "{text}");
+        assert!(text.contains("理解并分析 TUI"), "{text}");
+        assert!(
+            !text.contains("\"success\""),
+            "collapsed hides json body: {text}"
+        );
     }
 
     #[test]

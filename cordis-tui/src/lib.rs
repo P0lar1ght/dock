@@ -11,6 +11,7 @@ mod error;
 mod event_loop;
 mod file_search;
 mod goal_overlay;
+mod goal_pane;
 mod grok;
 mod image_meta;
 mod input;

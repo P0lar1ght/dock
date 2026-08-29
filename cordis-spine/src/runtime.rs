@@ -111,6 +111,21 @@ async fn grok_continue_mailbox(ctx: &Context) -> Result<TurnOutcome> {
     grok_sample_loop(ctx, &sessions, &llm, &tools, system).await
 }
 
+/// Grok `PromptOrigin::GoalSummary`: continue an active goal without a user bubble.
+async fn grok_continue_goal(ctx: &Context) -> Result<TurnOutcome> {
+    if !goal_keeps_working(ctx) {
+        return Ok(TurnOutcome::Text(String::new()));
+    }
+    let sessions = ctx.require::<Sessions>(SESSIONS)?;
+    sessions.seal_incomplete_tool_calls();
+    inject_goal_continuation(ctx, &sessions);
+    let llm = ctx.require::<Llm>(LLM)?;
+    let tools = ctx.require::<Tools>(TOOLS)?;
+    let system_prompt = ctx.require::<SystemPrompt>(SYSTEM_PROMPT)?;
+    let system = system_prompt.assemble_on(ctx);
+    grok_sample_loop(ctx, &sessions, &llm, &tools, system).await
+}
+
 async fn grok_sample_loop(
     ctx: &Context,
     sessions: &Sessions,
@@ -123,6 +138,7 @@ async fn grok_sample_loop(
     let mut goal_rounds = 0usize;
     let mut last_text = String::new();
     loop {
+        tokio::task::yield_now().await;
         let mut ended_with_text = false;
         for _ in 0..MAX_STEPS {
             abort_if_cancelled(ctx, sessions)?;
@@ -176,6 +192,9 @@ async fn grok_sample_loop(
             }
         }
         if ended_with_text {
+            if goal_keeps_working(ctx) && sessions.has_queued_followups() {
+                return Ok(TurnOutcome::Text(last_text));
+            }
             if goal_keeps_working(ctx) && goal_rounds < MAX_GOAL_ROUNDS {
                 goal_rounds += 1;
                 inject_goal_continuation(ctx, sessions);
@@ -271,5 +290,10 @@ impl LoopHandle {
     /// Drain `report` / first-idle notices into the parent session and sample.
     pub async fn continue_mailbox(&self) -> Result<TurnOutcome> {
         grok_continue_mailbox(&self.ctx).await
+    }
+
+    /// Hidden GoalSummary turn: reminder then sample, no user bubble.
+    pub async fn continue_goal(&self) -> Result<TurnOutcome> {
+        grok_continue_goal(&self.ctx).await
     }
 }

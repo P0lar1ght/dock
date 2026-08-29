@@ -7,17 +7,21 @@ use std::sync::{Arc, Mutex};
 
 use cordis::Context;
 use cordis_spine::{
-    Compact, LoopHandle, Subagents, TurnControl, TurnOutcome, AGENT_LOOP, COMPACT, SUBAGENTS, TURN,
+    Compact, Goal, LoopHandle, Sessions, Subagents, TurnControl, TurnOutcome, AGENT_LOOP, COMPACT,
+    GOAL, SESSIONS, SUBAGENTS, TURN,
 };
 use cordis_tui::QueuedItem;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::oneshot;
 
 use super::commands::{PromptTurnResult, SessionCommand};
 
 enum Job {
     Prompt(String),
     Compact(String),
+    /// Hidden Grok GoalSummary: no composer bubble, not shown in the queue pane.
+    GoalSummary,
 }
 
 struct Pending {
@@ -47,7 +51,7 @@ pub(super) async fn run_session(
         }
         if current.is_none() {
             if let Some(next) = queue.pop_front() {
-                sync_snaps(&queue, &queued, &queued_prompts);
+                sync_snaps(&ctx, &queue, &queued, &queued_prompts);
                 current = Some(next);
             }
         }
@@ -74,6 +78,44 @@ pub(super) async fn run_session(
                             return;
                         }
                         Drive::Done(result) => {
+                            maybe_queue_goal_summary(
+                                &ctx,
+                                &result,
+                                &mut queue,
+                                &queued,
+                                &queued_prompts,
+                            );
+                            let _ = pending.respond_to.send(result);
+                        }
+                    }
+                }
+                Job::GoalSummary => {
+                    let turn = run_goal_summary(&ctx);
+                    tokio::pin!(turn);
+                    match drive_job(
+                        &ctx,
+                        &current_prompt_id,
+                        prompt_id,
+                        turn,
+                        &mut cmd_rx,
+                        &mut queue,
+                        &queued,
+                        &queued_prompts,
+                    )
+                    .await
+                    {
+                        Drive::Shutdown => {
+                            let _ = pending.respond_to.send(Err("shutdown".into()));
+                            return;
+                        }
+                        Drive::Done(result) => {
+                            maybe_queue_goal_summary(
+                                &ctx,
+                                &result,
+                                &mut queue,
+                                &queued,
+                                &queued_prompts,
+                            );
                             let _ = pending.respond_to.send(result);
                         }
                     }
@@ -124,7 +166,10 @@ pub(super) async fn run_session(
             .await
             {
                 Drive::Shutdown => return,
-                Drive::Done(_) => continue,
+                Drive::Done(result) => {
+                    maybe_queue_goal_summary(&ctx, &result, &mut queue, &queued, &queued_prompts);
+                    continue;
+                }
             }
         }
         let wake = ctx.get::<Subagents>(SUBAGENTS).map(|s| s.parent_wake());
@@ -167,8 +212,14 @@ fn drain_cmds(
     }
 }
 
-fn sync_snaps(queue: &VecDeque<Pending>, queued: &AtomicUsize, snaps: &Mutex<Vec<QueuedItem>>) {
-    queued.store(queue.len(), Ordering::Relaxed);
+fn sync_snaps(
+    ctx: &Context,
+    queue: &VecDeque<Pending>,
+    queued: &AtomicUsize,
+    snaps: &Mutex<Vec<QueuedItem>>,
+) {
+    let followups = queue.iter().filter(|p| is_prompt(p)).count();
+    queued.store(followups, Ordering::Relaxed);
     let items: Vec<QueuedItem> = queue
         .iter()
         .filter_map(|p| match &p.job {
@@ -176,10 +227,13 @@ fn sync_snaps(queue: &VecDeque<Pending>, queued: &AtomicUsize, snaps: &Mutex<Vec
                 id: p.prompt_id.clone(),
                 text: text.clone(),
             }),
-            Job::Compact(_) => None,
+            Job::Compact(_) | Job::GoalSummary => None,
         })
         .collect();
     *snaps.lock().unwrap() = items;
+    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+        sessions.set_queued_followups(followups);
+    }
 }
 
 fn is_prompt(pending: &Pending) -> bool {
@@ -247,7 +301,7 @@ fn apply_cmd(
             } else {
                 queue.push_back(next);
             }
-            sync_snaps(queue, queued, snaps);
+            sync_snaps(ctx, queue, queued, snaps);
             if send_now {
                 request_cancel(ctx);
             }
@@ -262,18 +316,18 @@ fn apply_cmd(
                 job: Job::Compact(context),
                 respond_to,
             });
-            sync_snaps(queue, queued, snaps);
+            sync_snaps(ctx, queue, queued, snaps);
             false
         }
         Some(SessionCommand::Promote { id }) => {
             promote_in_queue(queue, id.as_deref());
-            sync_snaps(queue, queued, snaps);
+            sync_snaps(ctx, queue, queued, snaps);
             request_cancel(ctx);
             false
         }
         Some(SessionCommand::Take { id }) => {
             let _ = take_from_queue(queue, id.as_deref());
-            sync_snaps(queue, queued, snaps);
+            sync_snaps(ctx, queue, queued, snaps);
             false
         }
     }
@@ -350,6 +404,44 @@ async fn run_mailbox(ctx: &Context) -> PromptTurnResult {
     }
 }
 
+async fn run_goal_summary(ctx: &Context) -> PromptTurnResult {
+    let handle = ctx
+        .require::<LoopHandle>(AGENT_LOOP)
+        .map_err(|e| e.to_string())?;
+    match handle.continue_goal().await {
+        Ok(TurnOutcome::Text(reply)) => Ok(reply),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn maybe_queue_goal_summary(
+    ctx: &Context,
+    result: &PromptTurnResult,
+    queue: &mut VecDeque<Pending>,
+    queued: &AtomicUsize,
+    snaps: &Mutex<Vec<QueuedItem>>,
+) {
+    if result.is_err() {
+        return;
+    }
+    let Some(goal) = ctx.get::<Goal>(GOAL) else {
+        return;
+    };
+    if !goal.active() {
+        return;
+    }
+    if queue.iter().any(|p| matches!(p.job, Job::GoalSummary)) {
+        return;
+    }
+    let (respond_to, _) = oneshot::channel();
+    queue.push_back(Pending {
+        prompt_id: "goal-summary".into(),
+        job: Job::GoalSummary,
+        respond_to,
+    });
+    sync_snaps(ctx, queue, queued, snaps);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,8 +451,9 @@ mod tests {
 
     use cordis::Context;
     use cordis_spine::{
-        agent_loop, install_without_llm, tool_task, turn, BoxFuture, Llm, LlmOutput, LogEvent,
-        PromptRequest, Sampler, Sessions, StreamDelta, Subagents, LLM, SESSIONS, SUBAGENTS,
+        agent_loop, install_without_llm, tool_goal, tool_task, turn, BoxFuture, Goal, Llm,
+        LlmOutput, LogEvent, PromptRequest, Sampler, Sessions, StreamDelta, Subagents, GOAL, LLM,
+        SESSIONS, SUBAGENTS,
     };
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
@@ -556,6 +649,94 @@ mod tests {
         })
         .await
         .expect("send-now should cancel the first turn and run interrupt");
+        handle.cancel();
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    #[tokio::test]
+    async fn goal_summary_queued_after_turn_yields_to_user() {
+        let root = Context::new();
+        install_without_llm(&root).await.unwrap();
+        root.plugin(turn(), ()).unwrap().wait().await.unwrap();
+        root.plugin(tool_task(), ()).unwrap().wait().await.unwrap();
+        root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        root.provide(
+            LLM,
+            Llm::from_sampler(
+                root.clone(),
+                Arc::new(HoldThenText {
+                    started: started.clone(),
+                    release: release.clone(),
+                    holding: Arc::new(AtomicBool::new(true)),
+                }),
+            ),
+        )
+        .unwrap();
+        root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+        root.get::<Goal>(GOAL).unwrap().start("ship");
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let current_prompt_id = Arc::new(Mutex::new(None));
+        let queued = Arc::new(AtomicUsize::new(0));
+        let queued_prompts = Arc::new(Mutex::new(Vec::new()));
+        let handle = SessionHandle {
+            cmd_tx,
+            current_prompt_id: current_prompt_id.clone(),
+            queued: queued.clone(),
+            queued_prompts: queued_prompts.clone(),
+        };
+        tokio::spawn(run_session(
+            root.clone(),
+            cmd_rx,
+            current_prompt_id,
+            queued,
+            queued_prompts,
+        ));
+
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start");
+        handle.submit("second", false);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if handle.has_queued() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("second prompt queues while goal turn runs");
+        release.notify_waiters();
+
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let ev = sessions.events();
+                let users: Vec<_> = ev
+                    .iter()
+                    .filter_map(|e| match e {
+                        LogEvent::User(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let reminder = ev.iter().any(|e| {
+                    matches!(
+                        e,
+                        LogEvent::SystemReminder(t) if t.contains("Goal NOT complete")
+                    )
+                });
+                if users.contains(&"first") && users.contains(&"second") && reminder {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("user follow-up then hidden GoalSummary reminder");
         handle.cancel();
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
     }

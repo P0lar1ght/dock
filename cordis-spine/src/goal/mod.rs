@@ -14,9 +14,9 @@ use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use drain::GoalState;
 pub use grok_tool::{
-    goal_composer_fill, goal_continuation_directive, goal_instruction, goal_usage_message,
-    render_ack_into_output, GoalUpdateHandle, UpdateGoalInput, GOAL_RESERVED_SUBCOMMANDS,
-    UPDATE_GOAL_TOOL_NAME,
+    goal_composer_fill, goal_continuation_directive, goal_instruction, goal_offer_addon,
+    goal_usage_message, render_ack_into_output, GoalUpdateHandle, UpdateGoalInput,
+    GOAL_RESERVED_SUBCOMMANDS, UPDATE_GOAL_TOOL_NAME,
 };
 
 /// Named `"goal"` service. TUI live-looks `active()`.
@@ -41,6 +41,11 @@ impl Goal {
 
     pub fn title(&self) -> String {
         self.state.title.lock().unwrap().clone()
+    }
+
+    /// Last progress note from `update_goal` (empty until the first message).
+    pub fn status(&self) -> String {
+        self.state.status()
     }
 
     pub fn start(&self, title: impl Into<String>) {
@@ -104,8 +109,8 @@ pub fn tool_goal() -> Plugin {
             vec![tools.register(
                 ToolSpec {
                     name: UPDATE_GOAL_TOOL_NAME.into(),
-                    description: "Report progress on the active goal. Use the parameters to log a status message, mark the goal completed, or flag that you're blocked.".into(),
-                    parameters_json: r#"{"type":"object","properties":{"completed":{"type":"boolean","description":"Set to true ONLY when the goal is fully achieved. This ends goal mode. Use together with message to include a completion summary."},"message":{"type":"string"},"blocked_reason":{"type":"string"}}}"#.into(),
+                    description: "Set a goal for a multi-step task, or report progress on the active goal. Call with objective to start or retitle. Then message for progress, completed:true when done, blocked_reason when stuck after 3+ failures.".into(),
+                    parameters_json: r#"{"type":"object","properties":{"objective":{"type":"string","description":"Set or replace the goal. Call this when the task is multi-step and should run until complete. Omit for a one-shot question."},"completed":{"type":"boolean","description":"Set to true ONLY when the goal is fully achieved. This ends goal mode. Use together with message to include a completion summary."},"message":{"type":"string"},"blocked_reason":{"type":"string"}}}"#.into(),
                 },
                 body,
             )?],

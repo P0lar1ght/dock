@@ -47,7 +47,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 | `tool-subagent` | inject `"tools"` + `"subagents"` | `subagent` `send_message` `list_agents` `interrupt_agent` `report` | **独立 grain**，不是 `task` 的包装。`subagent_type` = 当前模式 `agents/<id>.yml` 角色 id（模型侧参数 enum 即这份名册）。写完新 YAML 后用同一工具 `reload_roster: true` 重读名册（不 spawn）。后台回 `send_message` / `list_agents` / `interrupt_agent`。`send_message`：idle 时 queued 与 urgent 都立刻开下一轮并在返回前把状态打成 running；urgent 只在 running 时才是 send-now。`report` 是子代理和主代理的**多轮通道**（同轮可多次），不是一次性交卷；助手正文到不了父级。mailbox 子代理若本轮未 `report` 就 idle，运行时代转发回合输出，避免主代理空等。必须挂在 `tool-task` 之后（live-look `"subagents"`）。`warden` 主代理只用这套，工具名单不含 `task` / `get_task_output` |
 | `tool-memory` | `"memory"` + `"tools"` | `memory_search` `memory_get` | 本地 `~/.dock/memory` / `.dock/memory` |
 | `tool-monitor` | → `"tools"`（live `"jobs"`） | `monitor` | 长命令 stdout 盯梢 |
-| `tool-goal` | `"goal"` + `"tools"` | `update_goal` | Grok oneshot ack + drain；无 `/goal` 时 `HarnessDisabled` |
+| `tool-goal` | `"goal"` + `"tools"` | `update_goal` | Grok oneshot ack + drain。`objective` 可在无 `/goal` 时由模型自己开目标；无目标且只有 message/completed 时仍 `HarnessDisabled`。进度卡在滚动区 |
 | `tool-lsp` | `"lsp"` + `"tools"` | `lsp` | Grok `LspManager`/`dispatch`。没 `lsp.json` 时 fail-open |
 | `tool-workflow` | `"workflows"` + `"tools"` | `workflow` | Grok Rhai 引擎（`vendor/xai-workflow`）+ 同款 oneshot ack。Host `SpawnAgent` live-lookup `"subagents"` |
 | `mcp-client` | `"mcp"` + `"tools"` | `{server}__{tool}` | stdio JSON-RPC，fail-open |

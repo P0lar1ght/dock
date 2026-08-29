@@ -34,6 +34,13 @@ pub fn goal_instruction(objective: &str) -> String {
     )
 }
 
+/// Injected when no goal is present so the model can start one itself.
+pub fn goal_offer_addon() -> &'static str {
+    "多步、需要持续推进直到完成的任务，先调用 update_goal(objective: \"…\") 设定目标。\
+     设定后用 update_goal(message) 记进度，全部完成时 update_goal(completed: true)。\
+     一次性问答或简单查询不要设目标。"
+}
+
 /// Grok `GOAL_CONTINUATION_SENTINEL` + slim Chinese body. Hidden from the
 /// pager (`LogEvent::SystemReminder`); the HTTP mapper sends it as the next
 /// user-role message so an active goal does not end on the first text sample.
@@ -73,8 +80,14 @@ impl GoalToolError {
 // Input schema
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateGoalInput {
+    #[serde(default)]
+    #[schemars(
+        description = "Set or replace the goal objective. Call this when the user's task is multi-step and should run until complete. Omit for a one-shot question. With no active goal this starts goal mode; with an active goal this retitles it."
+    )]
+    pub objective: Option<String>,
+
     #[serde(default, deserialize_with = "deserialize_lenient_option_bool")]
     #[schemars(
         description = "Set to true ONLY when the goal is fully achieved. This ends goal mode. Use together with `message` to include a completion summary."
@@ -354,6 +367,14 @@ pub fn render_ack_into_output(ack: UpdateGoalAck) -> Result<UpdateGoalOutput, Go
 
 pub fn build_summary(input: &UpdateGoalInput) -> String {
     let mut parts = Vec::new();
+    if let Some(obj) = input
+        .objective
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(format!("Goal set: {obj}"));
+    }
     if input.completed == Some(true) {
         parts.push("Goal marked complete".to_string());
     }
@@ -376,6 +397,7 @@ mod tests {
 
     fn empty_input() -> UpdateGoalInput {
         UpdateGoalInput {
+            objective: None,
             completed: None,
             message: None,
             blocked_reason: None,
@@ -436,6 +458,15 @@ mod tests {
         let summary = build_summary(&input);
         assert!(summary.contains("Goal marked complete"));
         assert!(summary.contains("All done"));
+    }
+
+    #[test]
+    fn build_summary_objective_only() {
+        let input = UpdateGoalInput {
+            objective: Some("ship lsp".into()),
+            ..empty_input()
+        };
+        assert_eq!(build_summary(&input), "Goal set: ship lsp.");
     }
 
     #[test]

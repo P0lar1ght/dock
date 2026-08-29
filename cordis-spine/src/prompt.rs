@@ -1,7 +1,7 @@
 use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::agent_presets::AgentPresets;
-use crate::goal::{goal_instruction, Goal};
+use crate::goal::{goal_instruction, goal_offer_addon, Goal};
 use crate::names::{AGENT_PRESETS, GOAL, PLAN_MODE, PROMPT_ASSEMBLE, SYSTEM_PROMPT};
 use crate::plan_mode::{plan_system_addon, PlanMode};
 
@@ -63,7 +63,13 @@ fn append_mode_addons(ctx: &Context, assembled: &mut String) {
         if goal.active() {
             assembled.push_str("\n\n");
             assembled.push_str(&goal_instruction(&goal.title()));
+        } else if !goal.present() {
+            assembled.push_str("\n\n");
+            assembled.push_str(goal_offer_addon());
         }
+    } else {
+        assembled.push_str("\n\n");
+        assembled.push_str(goal_offer_addon());
     }
 }
 
@@ -83,5 +89,30 @@ mod tests {
         assert!(assembled.contains("计划模式已开启"), "{assembled}");
         assert!(assembled.contains("exit_plan_mode"), "{assembled}");
         assert!(assembled.contains("ask_user_question"), "{assembled}");
+    }
+
+    #[tokio::test]
+    async fn assemble_offers_goal_when_idle() {
+        let ctx = cordis::Context::new();
+        let system = SystemPrompt::fake(ctx.clone());
+        let assembled = system.assemble();
+        assert!(assembled.contains("update_goal(objective"), "{assembled}");
+        assert!(!assembled.contains("已设定目标"), "{assembled}");
+    }
+
+    #[tokio::test]
+    async fn assemble_instructs_when_goal_active() {
+        let ctx = cordis::Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::tool_goal(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        ctx.get::<Goal>(GOAL).unwrap().start("理解 TUI");
+        let system = SystemPrompt::fake(ctx.clone());
+        let assembled = system.assemble();
+        assert!(assembled.contains("已设定目标：理解 TUI"), "{assembled}");
+        assert!(!assembled.contains("update_goal(objective"), "{assembled}");
     }
 }
