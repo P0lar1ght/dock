@@ -45,10 +45,30 @@ fn prompt_band_color_for(
     }
 }
 
-fn with_band(mut line: Line<'static>, band: Option<ratatui::style::Color>) -> Line<'static> {
+fn line_display_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
+}
+
+/// Grok `BlockLine::with_background`: fill the allocated row so the prompt
+/// band spans the pane, not just the glyph width.
+fn with_band(
+    mut line: Line<'static>,
+    band: Option<ratatui::style::Color>,
+    fill_width: usize,
+) -> Line<'static> {
     if let Some(c) = band {
         for span in &mut line.spans {
             span.style = span.style.bg(c);
+        }
+        let used = line_display_width(&line);
+        if used < fill_width {
+            line.spans.push(Span::styled(
+                " ".repeat(fill_width - used),
+                Style::default().bg(c),
+            ));
         }
         line.style = line.style.bg(c);
     }
@@ -65,10 +85,16 @@ fn skill_token_end(text: &str) -> Option<usize> {
     (end > 1).then_some(end)
 }
 
-pub fn lines(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+pub fn lines(
+    text: &str,
+    theme: &Theme,
+    wrap_width: usize,
+    fill_width: usize,
+) -> Vec<Line<'static>> {
     let terminal_native = false;
     let (prefix_style, text_style, skill_style) = prompt_styles(theme, terminal_native);
     let band = prompt_band_color_for(theme, false, terminal_native);
+    let fill_width = fill_width.max(wrap_width);
 
     let is_bash = text.starts_with('!');
     let is_cron = text.starts_with('\u{21BB}');
@@ -87,7 +113,7 @@ pub fn lines(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         glyphs::prompt_arrow()
     };
     let prefix_width = prefix.width();
-    let content_width = width.saturating_sub(prefix_width).max(1);
+    let content_width = wrap_width.saturating_sub(prefix_width).max(1);
     let skill_end = if is_bash || is_cron {
         None
     } else {
@@ -129,7 +155,7 @@ pub fn lines(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
                 content: s.content.to_string().into(),
                 style: s.style,
             }));
-            out.push(with_band(Line::from(spans), band));
+            out.push(with_band(Line::from(spans), band, fill_width));
         }
         byte_off += line_text.len() + 1;
     }
@@ -137,6 +163,7 @@ pub fn lines(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         out.push(with_band(
             Line::from(Span::styled(prefix.to_string(), prefix_style)),
             band,
+            fill_width,
         ));
     }
     out

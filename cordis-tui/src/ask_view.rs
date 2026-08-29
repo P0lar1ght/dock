@@ -68,7 +68,11 @@ pub fn render(
         .fg(theme.text_primary)
         .bg(theme.bg_light)
         .add_modifier(Modifier::BOLD);
-    let step = format!("问题 {}/{}", prompt.index + 1, prompt.questions.len().max(1));
+    let step = format!(
+        "问题 {}/{}",
+        prompt.index + 1,
+        prompt.questions.len().max(1)
+    );
     buf.set_line(
         content_x,
         y,
@@ -81,7 +85,10 @@ pub fn render(
         return PickerHits::default();
     };
     let summary_style = Style::default().fg(theme.gray).bg(theme.bg_light);
-    for line in wrap_line(&q.question, content_w as usize).into_iter().take(3) {
+    for line in wrap_line(&q.question, content_w as usize)
+        .into_iter()
+        .take(3)
+    {
         if y >= area.y + area.height {
             break;
         }

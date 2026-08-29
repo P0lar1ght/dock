@@ -40,11 +40,7 @@ impl Permissions {
     }
 
     pub fn front(&self) -> Option<PermissionPrompt> {
-        self.queue
-            .lock()
-            .unwrap()
-            .front()
-            .map(|p| p.prompt.clone())
+        self.queue.lock().unwrap().front().map(|p| p.prompt.clone())
     }
 
     pub fn resolve(&self, kind: PermissionOptionKind) {
@@ -53,10 +49,16 @@ impl Permissions {
         };
         match kind {
             PermissionOptionKind::AllowAlways => {
-                self.always.lock().unwrap().insert(pending.prompt.tool.clone());
+                self.always
+                    .lock()
+                    .unwrap()
+                    .insert(pending.prompt.tool.clone());
             }
             PermissionOptionKind::RejectAlways => {
-                self.never.lock().unwrap().insert(pending.prompt.tool.clone());
+                self.never
+                    .lock()
+                    .unwrap()
+                    .insert(pending.prompt.tool.clone());
             }
             _ => {}
         }
@@ -85,9 +87,7 @@ impl Permissions {
             tx,
         });
         self.ctx.emit(PERMISSION_EVENT, ());
-        rx.await
-            .ok()
-            .is_some_and(PermissionOptionKind::is_allow)
+        rx.await.ok().is_some_and(PermissionOptionKind::is_allow)
     }
 }
 

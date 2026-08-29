@@ -282,11 +282,7 @@ mod tests {
             &[upd("1", Some("Task A"), Some(TodoStatus::Pending))],
         )
         .unwrap();
-        apply_merge(
-            &mut state,
-            &[upd("1", None, Some(TodoStatus::Completed))],
-        )
-        .unwrap();
+        apply_merge(&mut state, &[upd("1", None, Some(TodoStatus::Completed))]).unwrap();
         let item = state.todo_items().next().unwrap();
         assert_eq!(item.content, "Task A");
         assert_eq!(item.status, TodoStatus::Completed);
@@ -294,10 +290,8 @@ mod tests {
 
     #[test]
     fn duplicate_ids_error() {
-        let err = validate_no_duplicate_ids(&[
-            upd("1", Some("a"), None),
-            upd("1", Some("b"), None),
-        ]);
+        let err =
+            validate_no_duplicate_ids(&[upd("1", Some("a"), None), upd("1", Some("b"), None)]);
         assert!(matches!(err, Err(TodoError::DuplicateTodoID(id)) if id == "1"));
     }
 }

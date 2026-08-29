@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::grok::glyphs;
 use crate::theme::Theme;
 
-use super::{SlashCmd, SlashSnapshot, MAX_VISIBLE_SUGGESTIONS};
+use super::{SlashPick, SlashSnapshot, MAX_VISIBLE_SUGGESTIONS};
 
 const LABEL_CAP: usize = 40;
 const LABEL_DESC_GAP: usize = 2;
@@ -22,7 +22,7 @@ const PREFIX_W: usize = 2;
 pub struct SuggestionRow {
     pub display: String,
     pub description: String,
-    pub cmd: SlashCmd,
+    pub pick: SlashPick,
 }
 
 pub fn desired_item_rows(items: &[SuggestionRow], _items_width: u16) -> u16 {

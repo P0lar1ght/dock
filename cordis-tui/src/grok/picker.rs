@@ -245,7 +245,10 @@ pub fn render_search_bar(
     buf.set_line(
         x,
         y,
-        &Line::from(Span::styled(label, bg_style(Style::default().fg(theme.gray)))),
+        &Line::from(Span::styled(
+            label,
+            bg_style(Style::default().fg(theme.gray)),
+        )),
         width,
     );
     let label_w = label.len() as u16;
@@ -474,7 +477,16 @@ mod tests {
     fn search_bar_paints_query() {
         let theme = Theme::groknight();
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
-        render_search_bar(&mut buf, 0, 0, 40, &theme, "hello", true, Some(theme.bg_base));
+        render_search_bar(
+            &mut buf,
+            0,
+            0,
+            40,
+            &theme,
+            "hello",
+            true,
+            Some(theme.bg_base),
+        );
         let line: String = (0..40)
             .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
             .collect();

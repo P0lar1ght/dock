@@ -22,8 +22,10 @@ const SEARCH_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"s
 pub fn tool_web() -> Plugin {
     plugin("tool-web", Inject::from([TOOLS]), |ctx, _: &()| {
         let tools = ctx.require::<Tools>(TOOLS)?;
-        let fetch: ToolBody = std::sync::Arc::new(|call| Box::pin(async move { web_fetch(call).await }));
-        let search: ToolBody = std::sync::Arc::new(|call| Box::pin(async move { web_search(call).await }));
+        let fetch: ToolBody =
+            std::sync::Arc::new(|call| Box::pin(async move { web_fetch(call).await }));
+        let search: ToolBody =
+            std::sync::Arc::new(|call| Box::pin(async move { web_search(call).await }));
         own_registered(
             ctx,
             vec![
@@ -59,7 +61,11 @@ fn arg_url(raw: &str) -> Option<String> {
 
 fn arg_query(raw: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    if let Some(q) = v.get("query").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(q) = v
+        .get("query")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
         return Some(q.to_string());
     }
     v.get("queries")

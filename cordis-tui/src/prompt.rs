@@ -1,5 +1,5 @@
 //! Prompt chrome copied from grok-build/.../prompt_widget/mod.rs `draw`
-//! (`╭──────────╮` / `│` / `╰─ model · flags ─╯`).
+//! (`╭──────────╮` / `│` / `╰─ model · flags ─╯`, flags right-aligned).
 //!
 //! Composer grows with content (Grok `desired_height`). Cursor editing,
 //! Shift+Enter newline, bracketed paste, and `@` file search sit on the
@@ -14,12 +14,17 @@ use ratatui::style::Style;
 use ratatui::widgets::Widget;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use cordis::Context;
+use cordis_spine::{Slash, SlashEntry, SLASH};
+
 use super::theme::Theme;
 use crate::clipboard::ClipboardImage;
 use crate::file_search::{self, FileSearchSnapshot};
 
 const IMAGE_CAP: usize = 10;
 const PASTE_CHIP_LINES: usize = 4;
+/// Grok `PromptStyle` default placeholder (`placeholder_override` unset).
+const PLACEHOLDER: &str = "Build anything";
 
 #[derive(Clone, Debug)]
 pub struct PastedImage {
@@ -80,9 +85,14 @@ struct State {
     file_dismissed: bool,
     last_at_query: String,
     chrome_info: String,
+    /// Grok `PromptStyle.focused`. Empty composer during a turn is unfocused
+    /// (`Build anything` placeholder, no cursor) so Enter does not steal the run.
+    unfocused: bool,
     images: Vec<PastedImage>,
     image_counter: u32,
     paste_bodies: Vec<(String, String)>,
+    /// Last submitted composer text (Grok `in_flight_prompt`), for Esc rewind.
+    last_sent: Option<String>,
 }
 
 impl State {
@@ -103,10 +113,26 @@ impl State {
 
 #[derive(Default)]
 pub struct PromptWidget {
+    ctx: Option<Context>,
     state: Mutex<State>,
 }
 
 impl PromptWidget {
+    pub fn with_context(ctx: Context) -> Self {
+        Self {
+            ctx: Some(ctx),
+            state: Mutex::new(State::default()),
+        }
+    }
+
+    pub fn slash_extras(&self) -> Vec<SlashEntry> {
+        self.ctx
+            .as_ref()
+            .and_then(|c| c.get::<Slash>(SLASH))
+            .map(|s| s.list())
+            .unwrap_or_default()
+    }
+
     pub fn text(&self) -> String {
         self.state.lock().unwrap().input.clone()
     }
@@ -131,6 +157,15 @@ impl PromptWidget {
 
     pub fn set_info(&self, info: impl Into<String>) {
         self.state.lock().unwrap().chrome_info = info.into();
+    }
+
+    /// Grok agent-view `prompt_focused`: unfocus the empty composer while a turn runs.
+    pub fn set_focused(&self, focused: bool) {
+        self.state.lock().unwrap().unfocused = !focused;
+    }
+
+    pub fn focused(&self) -> bool {
+        !self.state.lock().unwrap().unfocused
     }
 
     pub fn handle_paste(&self, text: &str) {
@@ -280,6 +315,7 @@ impl PromptWidget {
         state.images.clear();
         state.image_counter = 0;
         state.paste_bodies.clear();
+        state.last_sent = None;
     }
 
     pub fn take(&self) -> String {
@@ -307,14 +343,48 @@ impl PromptWidget {
         TakenPrompt { text, images }
     }
 
+    /// Remember the text actually submitted (after paste-chip expand / trim).
+    pub fn note_sent(&self, text: &str) {
+        self.state.lock().unwrap().last_sent = Some(text.to_string());
+    }
+
+    pub fn take_last_sent(&self) -> Option<String> {
+        self.state.lock().unwrap().last_sent.take()
+    }
+
+    /// Put a cancelled in-flight prompt back in the composer (full text + images).
+    pub fn restore_sent(&self, text: &str, images: Vec<PastedImage>) {
+        let mut state = self.state.lock().unwrap();
+        if state
+            .history
+            .last()
+            .is_some_and(|h| h == text || h.trim() == text)
+        {
+            state.history.pop();
+        }
+        state.input = text.to_string();
+        state.cursor = state.input.len();
+        state.slash_selected = 0;
+        state.file_selected = 0;
+        state.file_dismissed = false;
+        state.last_at_query.clear();
+        state.history_idx = None;
+        state.last_sent = None;
+        state.images = images;
+        state.image_counter = state.images.iter().map(|img| img.n).max().unwrap_or(0);
+        state.unfocused = false;
+    }
+
     pub fn slash_snapshot(&self) -> crate::slash::SlashSnapshot {
+        let extras = self.slash_extras();
         let state = self.state.lock().unwrap();
-        crate::slash::snapshot(&state.input, state.slash_selected)
+        crate::slash::snapshot_ex(&state.input, state.slash_selected, &extras)
     }
 
     pub fn slash_move(&self, delta: i16) {
+        let extras = self.slash_extras();
         let mut state = self.state.lock().unwrap();
-        let snap = crate::slash::snapshot(&state.input, state.slash_selected);
+        let snap = crate::slash::snapshot_ex(&state.input, state.slash_selected, &extras);
         if !snap.open || snap.matches.is_empty() {
             return;
         }
@@ -324,10 +394,23 @@ impl PromptWidget {
     }
 
     pub fn apply_slash_insert(&self, display: &str) {
+        self.set_text(display);
+    }
+
+    /// Grok `PromptWidget::set_text`: replace the composer, cursor at end.
+    pub fn set_text(&self, text: &str) {
         let mut state = self.state.lock().unwrap();
-        state.input = display.to_string();
+        state.input = text.to_string();
         state.cursor = state.input.len();
         state.slash_selected = 0;
+        state.file_selected = 0;
+        state.file_dismissed = false;
+        if text.is_empty() {
+            state.images.clear();
+            state.image_counter = 0;
+            state.paste_bodies.clear();
+            state.last_at_query.clear();
+        }
     }
 
     pub fn file_search_snapshot(&self) -> FileSearchSnapshot {
@@ -453,16 +536,24 @@ impl PromptWidget {
         }
         let inner = area.width.saturating_sub(4).max(1) as usize;
         let state = self.state.lock().unwrap();
+        if state.unfocused {
+            return None;
+        }
         let rows = visual_rows(&state.input, inner);
         let body_h = area.height.saturating_sub(2).max(1) as usize;
         let cursor_row = row_for_cursor(&rows, state.cursor);
         let start = (cursor_row + 1).saturating_sub(body_h);
         let vis = cursor_row.saturating_sub(start);
         let row = rows.get(cursor_row)?;
-        let col_text = &state.input[row.byte_start..state.cursor.min(row.byte_end).max(row.byte_start)];
-        let col = UnicodeWidthStr::width(row.prefix) as u16 + UnicodeWidthStr::width(col_text) as u16;
+        let col_text =
+            &state.input[row.byte_start..state.cursor.min(row.byte_end).max(row.byte_start)];
+        let col =
+            UnicodeWidthStr::width(row.prefix) as u16 + UnicodeWidthStr::width(col_text) as u16;
         Some(Position {
-            x: area.x.saturating_add(2).saturating_add(col.min(area.width.saturating_sub(4))),
+            x: area
+                .x
+                .saturating_add(2)
+                .saturating_add(col.min(area.width.saturating_sub(4))),
             y: area.y.saturating_add(1).saturating_add(vis as u16),
         })
     }
@@ -532,7 +623,15 @@ impl Widget for &PromptWidget {
         }
 
         let state = self.state.lock().unwrap();
-        paint_info_line(buf, chunks[2], area, &state.chrome_info, bg, &theme, div_style);
+        paint_info_line(
+            buf,
+            chunks[2],
+            area,
+            &state.chrome_info,
+            bg,
+            &theme,
+            div_style,
+        );
 
         let inner = area.width.saturating_sub(4).max(1) as usize;
         let rows = visual_rows(&state.input, inner);
@@ -550,7 +649,16 @@ impl Widget for &PromptWidget {
             }
             let Some(row) = rows.get(idx) else {
                 if vis == 0 && state.input.is_empty() {
-                    buf.set_stringn(text_x, y, "> ", body.width.saturating_sub(2) as usize, style);
+                    buf.set_stringn(
+                        text_x,
+                        y,
+                        "> ",
+                        body.width.saturating_sub(2) as usize,
+                        style,
+                    );
+                    if state.unfocused {
+                        paint_placeholder(buf, text_x, y, body.width, bg, &theme);
+                    }
                 }
                 break;
             };
@@ -565,8 +673,33 @@ impl Widget for &PromptWidget {
                 style,
                 chip_style,
             );
+            if state.input.is_empty() && vis == 0 && state.unfocused {
+                paint_placeholder(buf, text_x, y, body.width, bg, &theme);
+            }
         }
     }
+}
+
+fn paint_placeholder(
+    buf: &mut Buffer,
+    text_x: u16,
+    y: u16,
+    body_width: u16,
+    bg: ratatui::style::Color,
+    theme: &Theme,
+) {
+    let ph_x = text_x.saturating_add(2);
+    let avail = body_width.saturating_sub(4);
+    if avail == 0 {
+        return;
+    }
+    buf.set_stringn(
+        ph_x,
+        y,
+        PLACEHOLDER,
+        avail as usize,
+        Style::default().fg(theme.gray).bg(bg),
+    );
 }
 
 fn paint_info_line(
@@ -589,7 +722,8 @@ fn paint_info_line(
     let label = format!(" {info} ");
     let trunc = truncate_width(&label, max_w as usize);
     let w = UnicodeWidthStr::width(trunc.as_str()) as u16;
-    let x = area.x.saturating_add(1);
+    let right = area.x.saturating_add(area.width.saturating_sub(1));
+    let x = right.saturating_sub(w).max(area.x.saturating_add(1));
     let fg = crate::grok::color::blend_color(bg, theme.text_secondary, 0.6).unwrap_or(theme.gray);
     let style = Style::default().fg(fg).bg(bg);
     buf.set_stringn(x, row.y, &trunc, w as usize, style);
@@ -957,5 +1091,60 @@ mod tests {
         prompt.backspace();
         prompt.backspace();
         assert!(prompt.text().is_empty());
+    }
+
+    #[test]
+    fn unfocused_empty_composer_hides_cursor() {
+        let prompt = PromptWidget::default();
+        prompt.set_focused(false);
+        let area = Rect::new(0, 0, 80, 5);
+        assert!(prompt.cursor_position(area).is_none());
+        prompt.set_focused(true);
+        assert!(prompt.cursor_position(area).is_some());
+    }
+
+    #[test]
+    fn restore_sent_puts_back_full_prompt_and_pops_history() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("undo me [Image #1]");
+        let taken = prompt.take_prompt();
+        assert!(prompt.text().is_empty());
+        assert_eq!(
+            prompt.history().last().map(String::as_str),
+            Some("undo me [Image #1]")
+        );
+        prompt.restore_sent(&taken.text, taken.images);
+        assert_eq!(prompt.text(), "undo me [Image #1]");
+        assert!(prompt.history().is_empty());
+    }
+
+    #[test]
+    fn chrome_info_sits_on_the_right_of_the_bottom_border() {
+        use crate::theme::Theme;
+        use ratatui::style::Color;
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 40, 3);
+        let row = Rect::new(0, 0, 40, 1);
+        paint_info_line(
+            &mut buf,
+            row,
+            area,
+            "守望 · 询问",
+            Color::Black,
+            &theme,
+            Style::default(),
+        );
+        let first_content = (0..40).find(|&x| {
+            let s = buf[(x, 0)].symbol();
+            !s.is_empty() && s != " "
+        });
+        assert!(
+            first_content.is_some_and(|x| x > 15),
+            "expected right-aligned chrome, first glyph at {first_content:?}"
+        );
+        let joined: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(joined.contains('守') && joined.contains('问'), "{joined:?}");
     }
 }

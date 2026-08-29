@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use std::time::SystemTime;
+
 use cordis::{plugin, Inject, Plugin};
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
@@ -20,6 +22,11 @@ pub struct JobSnapshot {
     pub command: String,
     pub done: bool,
     pub output: String,
+    /// Tool-call description shown in the Grok tasks pane (`Task …` / `Monitor …`).
+    pub description: Option<String>,
+    /// True for `monitor` tool tasks. Watchers group in the tasks pane.
+    pub is_monitor: bool,
+    pub start_time: SystemTime,
 }
 
 struct Job {
@@ -27,6 +34,9 @@ struct Job {
     output: Mutex<String>,
     done: AtomicBool,
     child: AsyncMutex<Option<Child>>,
+    description: Option<String>,
+    is_monitor: bool,
+    start_time: SystemTime,
 }
 
 /// Named `"jobs"` service. Live-lookup; do not capture the Arc.
@@ -44,6 +54,15 @@ impl Jobs {
     }
 
     pub fn start(&self, command: impl Into<String>) -> String {
+        self.start_ex(command, None, false)
+    }
+
+    pub fn start_ex(
+        &self,
+        command: impl Into<String>,
+        description: Option<String>,
+        is_monitor: bool,
+    ) -> String {
         let command = command.into();
         let id = format!("job-{}", self.seq.fetch_add(1, Ordering::Relaxed));
         let job = Arc::new(Job {
@@ -51,6 +70,9 @@ impl Jobs {
             output: Mutex::new(String::new()),
             done: AtomicBool::new(false),
             child: AsyncMutex::new(None),
+            description,
+            is_monitor,
+            start_time: SystemTime::now(),
         });
         self.inner.lock().unwrap().insert(id.clone(), job.clone());
         let spawned_id = id.clone();
@@ -61,31 +83,38 @@ impl Jobs {
         id
     }
 
+    fn snap(id: &str, job: &Job) -> JobSnapshot {
+        JobSnapshot {
+            id: id.into(),
+            command: job.command.clone(),
+            done: job.done.load(Ordering::Relaxed),
+            output: job.output.lock().unwrap().clone(),
+            description: job.description.clone(),
+            is_monitor: job.is_monitor,
+            start_time: job.start_time,
+        }
+    }
+
     pub fn list(&self) -> Vec<JobSnapshot> {
         self.inner
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, job)| JobSnapshot {
-                id: id.clone(),
-                command: job.command.clone(),
-                done: job.done.load(Ordering::Relaxed),
-                output: job.output.lock().unwrap().clone(),
-            })
+            .map(|(id, job)| Self::snap(id, job))
             .collect()
     }
 
     pub fn snapshot(&self, id: &str) -> Option<JobSnapshot> {
-        self.inner.lock().unwrap().get(id).map(|job| JobSnapshot {
-            id: id.into(),
-            command: job.command.clone(),
-            done: job.done.load(Ordering::Relaxed),
-            output: job.output.lock().unwrap().clone(),
-        })
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|job| Self::snap(id, job))
     }
 
     pub async fn wait(&self, ids: &[String], timeout_ms: u64) -> Vec<JobSnapshot> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1));
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1));
         loop {
             let snaps: Vec<_> = ids.iter().filter_map(|id| self.snapshot(id)).collect();
             if snaps.iter().all(|s| s.done) || tokio::time::Instant::now() >= deadline {
@@ -95,7 +124,12 @@ impl Jobs {
                             id: id.clone(),
                             command: String::new(),
                             done: true,
-                            output: format!("Task {id} not found. No background tasks exist in this session."),
+                            output: format!(
+                                "Task {id} not found. No background tasks exist in this session."
+                            ),
+                            description: None,
+                            is_monitor: false,
+                            start_time: SystemTime::UNIX_EPOCH,
                         })
                         .collect()
                 } else {
@@ -190,36 +224,34 @@ pub fn jobs() -> Plugin {
 
 const OUTPUT_PARAMS: &str = r#"{"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"},"description":"Background task ids."},"timeout_ms":{"type":"integer","description":"Wait up to this many ms; omit or 0 for a snapshot."}}}"#;
 const WAIT_PARAMS: &str = r#"{"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["task_ids"]}"#;
-const KILL_PARAMS: &str = r#"{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}"#;
+const KILL_PARAMS: &str =
+    r#"{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}"#;
 
 pub fn tool_jobs() -> Plugin {
-    plugin(
-        "tool-jobs",
-        Inject::from([TOOLS, JOBS]),
-        |ctx, _: &()| {
-            let tools = ctx.require::<Tools>(TOOLS)?;
-            let output: ToolBody = {
+    plugin("tool-jobs", Inject::from([TOOLS, JOBS]), |ctx, _: &()| {
+        let tools = ctx.require::<Tools>(TOOLS)?;
+        let output: ToolBody = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move |call| {
                 let ctx = ctx.clone();
-                std::sync::Arc::new(move |call| {
-                    let ctx = ctx.clone();
-                    Box::pin(async move { job_output(&ctx, call).await })
-                })
-            };
-            let wait: ToolBody = {
+                Box::pin(async move { job_output(&ctx, call).await })
+            })
+        };
+        let wait: ToolBody = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move |call| {
                 let ctx = ctx.clone();
-                std::sync::Arc::new(move |call| {
-                    let ctx = ctx.clone();
-                    Box::pin(async move { wait_tasks(&ctx, call).await })
-                })
-            };
-            let kill: ToolBody = {
+                Box::pin(async move { wait_tasks(&ctx, call).await })
+            })
+        };
+        let kill: ToolBody = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move |call| {
                 let ctx = ctx.clone();
-                std::sync::Arc::new(move |call| {
-                    let ctx = ctx.clone();
-                    Box::pin(async move { kill_task(&ctx, call).await })
-                })
-            };
-            own_registered(
+                Box::pin(async move { kill_task(&ctx, call).await })
+            })
+        };
+        own_registered(
                 ctx,
                 vec![
                     tools.register(
@@ -248,9 +280,8 @@ pub fn tool_jobs() -> Plugin {
                     )?,
                 ],
             )?;
-            Ok(None)
-        },
-    )
+        Ok(None)
+    })
 }
 
 fn parse_ids(raw: &str) -> (Vec<String>, u64) {
@@ -272,16 +303,21 @@ fn parse_ids(raw: &str) -> (Vec<String>, u64) {
             }
         }
     }
-    let timeout = v
-        .get("timeout_ms")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0);
+    let timeout = v.get("timeout_ms").and_then(|x| x.as_u64()).unwrap_or(0);
     (ids, timeout)
 }
 
 fn render_snap(s: &JobSnapshot) -> String {
     let status = if s.done { "done" } else { "running" };
     format!("[{status}] {} {}\n{}", s.id, s.command, s.output)
+}
+
+fn mailbox_poll_error(id: &str) -> String {
+    format!(
+        "Error: {id} is a continuable subagent started with the subagent tool. \
+         Do not use get_task_output / wait_tasks. The child reports with report; \
+         you receive a system-reminder. Follow up with send_message / list_agents."
+    )
 }
 
 async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
@@ -294,7 +330,12 @@ async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
             parts.extend(jobs.list().iter().map(render_snap));
         }
         if let Some(sub) = &sub {
-            parts.extend(sub.list().iter().map(render_subagent));
+            parts.extend(
+                sub.list()
+                    .iter()
+                    .filter(|s| !s.mailbox)
+                    .map(render_subagent),
+            );
         }
         if parts.is_empty() {
             return tool_result(call, "No background tasks exist in this session.");
@@ -323,6 +364,14 @@ async fn kill_task(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         return tool_result(call, "Error: task_id is required");
     };
     if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
+        if sub.mailbox_child(id) {
+            return tool_result(
+                call,
+                format!(
+                    "Error: {id} is a continuable subagent. Stop its turn with interrupt_agent, not kill_task."
+                ),
+            );
+        }
         if let Some(msg) = sub.kill(id) {
             return tool_result(call, msg);
         }
@@ -346,8 +395,12 @@ async fn collect_output(
         let mut parts = Vec::new();
         let mut all_done = true;
         for id in ids {
+            if sub.is_some_and(|s| s.mailbox_child(id)) {
+                parts.push(mailbox_poll_error(id));
+                continue;
+            }
             if let Some(s) = sub.and_then(|s| s.snapshot(id)) {
-                if !s.done {
+                if s.running() {
                     all_done = false;
                 }
                 parts.push(render_subagent(&s));
@@ -363,6 +416,16 @@ async fn collect_output(
             }
         }
         if timeout_ms == 0 || all_done || tokio::time::Instant::now() >= deadline {
+            if let Some(sub) = sub {
+                for id in ids {
+                    if sub.mailbox_child(id) {
+                        continue;
+                    }
+                    if sub.snapshot(id).is_some_and(|s| !s.running()) {
+                        sub.consume_completion(id);
+                    }
+                }
+            }
             return parts.join("\n\n");
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

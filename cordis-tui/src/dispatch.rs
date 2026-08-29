@@ -1,7 +1,7 @@
 //! Copied from grok-build/.../xai-grok-pager/src/app/dispatch/prompt.rs:
 //! "The prompt is always pushed to the queue first."
 
-use super::actions::{effect_for_slash, Action, Effect};
+use super::actions::{effect_for_pick, Action, Effect};
 use super::prompt::PromptWidget;
 use super::slash;
 
@@ -16,27 +16,34 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
             prompt.slash_move(delta);
             Vec::new()
         }
-        Action::SlashAccept => {
-            let snap = prompt.slash_snapshot();
-            let Some(row) = snap.current() else {
-                return Vec::new();
-            };
-            prompt.clear();
-            vec![effect_for_slash(row.cmd, "")]
-        }
-        Action::SlashInsert => {
+        Action::SlashAccept | Action::SlashInsert => {
             let snap = prompt.slash_snapshot();
             if let Some(row) = snap.current() {
                 prompt.apply_slash_insert(&format!("{} ", row.display));
             }
             Vec::new()
         }
-        Action::OverlayClose | Action::OverlayMove(_) | Action::OverlayAccept
-        | Action::OverlayChar(_) | Action::OverlayBackspace | Action::OverlayPaste(_)
-        |         Action::OverlaySelect(_) | Action::OverlaySpace
-        | Action::PermissionAccept | Action::PermissionReject
-        | Action::MouseMove { .. } | Action::PasteClipboard | Action::CycleMode => Vec::new(),
+        Action::OverlayClose
+        | Action::OverlayMove(_)
+        | Action::OverlayAccept
+        | Action::OverlayChar(_)
+        | Action::OverlayBackspace
+        | Action::OverlayPaste(_)
+        | Action::OverlaySelect(_)
+        | Action::OverlaySpace
+        | Action::OverlayTab
+        | Action::PermissionAccept
+        | Action::PermissionReject
+        | Action::MouseMove { .. }
+        | Action::MouseDown { .. }
+        | Action::MouseDrag { .. }
+        | Action::MouseUp { .. }
+        | Action::PasteClipboard
+        | Action::CycleMode
+        | Action::ToggleGoalDetail => Vec::new(),
         Action::CancelTurn => vec![Effect::CancelTurn],
+        Action::PromoteQueued { id } => vec![Effect::PromoteQueued { id }],
+        Action::EditQueued { id } => vec![Effect::EditQueued { id }],
         Action::SettingsModal => vec![Effect::SettingsModal],
         Action::HistoryPicker => vec![Effect::HistoryPicker],
         Action::Find => vec![Effect::Find],
@@ -61,8 +68,9 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
             if text.is_empty() {
                 return Vec::new();
             }
-            if let Some((cmd, args)) = slash::command_for_submit(&text) {
-                return vec![effect_for_slash(cmd, &args)];
+            let extras = prompt.slash_extras();
+            if let Some((pick, args)) = slash::command_for_submit_ex(&text, &extras) {
+                return vec![effect_for_pick(pick, &args, &extras)];
             }
             vec![Effect::SendPrompt {
                 text,

@@ -3,10 +3,10 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-#[path = "groknight.rs"]
-mod groknight;
 #[path = "grokday.rs"]
 mod grokday;
+#[path = "groknight.rs"]
+mod groknight;
 #[path = "tokyonight.rs"]
 mod tokyonight;
 

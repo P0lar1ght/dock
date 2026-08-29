@@ -12,9 +12,13 @@ use crate::types::{LlmOutput, ToolCall};
 pub enum StreamDelta {
     Text(String),
     Reasoning(String),
+    /// Last-turn live display. `official` is SSE `usage`; estimates must not
+    /// hit the session ledger (Grok fail-closed: absence ≠ free).
     Usage {
-        prompt: u64,
-        completion: u64,
+        tokens: crate::usage::TokenUsage,
+        official: bool,
+        model: String,
+        cost_usd_ticks: Option<i64>,
     },
 }
 
@@ -66,8 +70,10 @@ impl ChatStreamAcc {
         if let Some(usage) = usage {
             if usage.prompt_tokens > 0 || usage.completion_tokens > 0 {
                 out.push(StreamDelta::Usage {
-                    prompt: usage.prompt_tokens,
-                    completion: usage.completion_tokens,
+                    tokens: usage.to_token_usage(),
+                    official: true,
+                    model: chunk.model,
+                    cost_usd_ticks: usage.cost_in_usd_ticks,
                 });
             }
         }
@@ -145,8 +151,10 @@ mod tests {
     #[test]
     fn accumulates_text_and_tool_fragments() {
         let mut acc = ChatStreamAcc::default();
-        let d1 = acc.ingest(serde_json::from_str(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#).unwrap());
-        let d2 = acc.ingest(serde_json::from_str(r#"{"choices":[{"delta":{"content":"lo"}}]}"#).unwrap());
+        let d1 = acc
+            .ingest(serde_json::from_str(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#).unwrap());
+        let d2 = acc
+            .ingest(serde_json::from_str(r#"{"choices":[{"delta":{"content":"lo"}}]}"#).unwrap());
         assert_eq!(d1, vec![StreamDelta::Text("Hel".into())]);
         assert_eq!(d2, vec![StreamDelta::Text("lo".into())]);
         acc.ingest(
@@ -186,8 +194,37 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(deltas.iter().any(|d| matches!(d, StreamDelta::Text(t) if t == "hi")));
-        assert!(deltas.iter().any(|d| matches!(d, StreamDelta::Usage { prompt: 10, completion: 2 })));
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::Text(t) if t == "hi")));
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            StreamDelta::Usage { tokens, official: true, .. } if tokens.prompt_tokens == 10 && tokens.completion_tokens == 2
+        )));
+    }
+
+    #[test]
+    fn ingest_emits_cache_and_reasoning() {
+        let mut acc = ChatStreamAcc::default();
+        let deltas = acc.ingest(
+            serde_json::from_str(
+                r#"{"model":"m","choices":[{"delta":{}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":8}}}"#,
+            )
+            .unwrap(),
+        );
+        match &deltas[0] {
+            StreamDelta::Usage {
+                tokens,
+                official: true,
+                model,
+                ..
+            } => {
+                assert_eq!(tokens.cached_prompt_tokens, 40);
+                assert_eq!(tokens.reasoning_tokens, 8);
+                assert_eq!(model, "m");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

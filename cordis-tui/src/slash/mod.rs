@@ -6,7 +6,7 @@ mod dropdown;
 mod interval;
 mod matcher;
 
-use cordis_spine::{load_catalog, AppSettings, ModelChoice};
+use cordis_spine::{load_catalog, AppSettings, ModelChoice, SlashEntry};
 
 pub use args::ArgItem;
 pub use dropdown::{desired_item_rows, render_dropdown, SuggestionRow};
@@ -34,9 +34,21 @@ pub enum SlashCmd {
     Timestamps,
     Effort,
     Plan,
+    ViewPlan,
     Goal,
     Tasks,
+    Workflow,
     Mcps,
+    Preset,
+    Usage,
+    Compact,
+}
+
+/// Builtin catalog entry or a live extra from `"slash"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlashPick {
+    Builtin(SlashCmd),
+    Extra(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +137,16 @@ pub const CATALOG: &[SlashDef] = &[
         arg_kind: None,
     },
     SlashDef {
+        cmd: SlashCmd::ViewPlan,
+        name: "view-plan",
+        aliases: &["show-plan", "plan-view"],
+        display: "/view-plan",
+        description: "查看或批准当前计划",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
         cmd: SlashCmd::Goal,
         name: "goal",
         aliases: &[],
@@ -145,12 +167,32 @@ pub const CATALOG: &[SlashDef] = &[
         arg_kind: None,
     },
     SlashDef {
+        cmd: SlashCmd::Workflow,
+        name: "workflow",
+        aliases: &[],
+        display: "/workflow",
+        description: "查看工作流运行",
+        takes_args: true,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
         cmd: SlashCmd::Mcps,
         name: "mcps",
         aliases: &[],
         display: "/mcps",
         description: "显示 MCP 服务器状态",
         takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Preset,
+        name: "preset",
+        aliases: &["presets", "agent", "agents"],
+        display: "/preset",
+        description: "组装 Agent 预设",
+        takes_args: true,
         args_required: false,
         arg_kind: None,
     },
@@ -181,6 +223,26 @@ pub const CATALOG: &[SlashDef] = &[
         display: "/find",
         description: "搜索对话",
         takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Usage,
+        name: "usage",
+        aliases: &["cost"],
+        display: "/usage",
+        description: "查看本会话用量",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Compact,
+        name: "compact",
+        aliases: &[],
+        display: "/compact",
+        description: "压缩旧对话",
+        takes_args: true,
         args_required: false,
         arg_kind: None,
     },
@@ -263,7 +325,9 @@ pub fn def_for(cmd: SlashCmd) -> &'static SlashDef {
 
 pub fn lookup(name: &str) -> Option<&'static SlashDef> {
     let n = name.trim_start_matches('/');
-    CATALOG.iter().find(|d| d.name == n || d.aliases.iter().any(|a| *a == n))
+    CATALOG
+        .iter()
+        .find(|d| d.name == n || d.aliases.iter().any(|a| *a == n))
 }
 
 #[derive(Debug, Clone)]
@@ -280,7 +344,12 @@ impl SlashSnapshot {
 }
 
 /// `text` is the composer buffer. `selected` is the highlighted match index.
+#[cfg(test)]
 pub fn snapshot(text: &str, selected: usize) -> SlashSnapshot {
+    snapshot_ex(text, selected, &[])
+}
+
+pub fn snapshot_ex(text: &str, selected: usize, extras: &[SlashEntry]) -> SlashSnapshot {
     let Some(query) = slash_query(text) else {
         return SlashSnapshot {
             open: false,
@@ -288,16 +357,17 @@ pub fn snapshot(text: &str, selected: usize) -> SlashSnapshot {
             matches: Vec::new(),
         };
     };
+    let sources = rank_sources(extras);
     let mut matcher = FuzzyMatcher::new();
-    let ranked = matcher.rank(CATALOG, query, CATALOG.len(), |d| d.name);
+    let ranked = matcher.rank(&sources, query, sources.len(), |d| d.name.as_str());
     let matches: Vec<SuggestionRow> = ranked
         .into_iter()
         .map(|(idx, _)| {
-            let d = &CATALOG[idx];
+            let d = &sources[idx];
             SuggestionRow {
-                display: d.display.to_string(),
-                description: d.description.to_string(),
-                cmd: d.cmd,
+                display: d.display.clone(),
+                description: d.description.clone(),
+                pick: d.pick.clone(),
             }
         })
         .collect();
@@ -313,15 +383,55 @@ pub fn snapshot(text: &str, selected: usize) -> SlashSnapshot {
     }
 }
 
+struct RankSource {
+    name: String,
+    display: String,
+    description: String,
+    pick: SlashPick,
+}
+
+fn rank_sources(extras: &[SlashEntry]) -> Vec<RankSource> {
+    let mut out: Vec<RankSource> = CATALOG
+        .iter()
+        .map(|d| RankSource {
+            name: d.name.into(),
+            display: d.display.into(),
+            description: d.description.into(),
+            pick: SlashPick::Builtin(d.cmd),
+        })
+        .collect();
+    for extra in extras {
+        if lookup(&extra.command).is_some() {
+            continue;
+        }
+        out.push(RankSource {
+            name: extra.command.clone(),
+            display: extra.display(),
+            description: extra.description.clone(),
+            pick: SlashPick::Extra(extra.command.clone()),
+        });
+    }
+    out
+}
+
 fn slash_query(text: &str) -> Option<&str> {
     if text.contains('\n') {
         return None;
     }
     let rest = text.strip_prefix('/')?;
-    Some(rest.split(char::is_whitespace).next().unwrap_or(""))
+    // `/cmd ` means the name is chosen; close the picker so Enter sends/parses.
+    if rest.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(rest)
 }
 
-pub fn command_for_submit(text: &str) -> Option<(SlashCmd, String)> {
+#[cfg(test)]
+pub fn command_for_submit(text: &str) -> Option<(SlashPick, String)> {
+    command_for_submit_ex(text, &[])
+}
+
+pub fn command_for_submit_ex(text: &str, extras: &[SlashEntry]) -> Option<(SlashPick, String)> {
     let rest = text.strip_prefix('/')?;
     if text.contains('\n') {
         return None;
@@ -332,7 +442,13 @@ pub fn command_for_submit(text: &str) -> Option<(SlashCmd, String)> {
         return None;
     }
     let args = parts.next().unwrap_or("").trim().to_string();
-    lookup(query).map(|d| (d.cmd, args))
+    if let Some(d) = lookup(query) {
+        return Some((SlashPick::Builtin(d.cmd), args));
+    }
+    extras
+        .iter()
+        .find(|e| e.command == query)
+        .map(|e| (SlashPick::Extra(e.command.clone()), args))
 }
 
 /// `/copy [N] [file]` — copied from grok `slash::commands::copy`.
@@ -359,9 +475,7 @@ pub fn theme_args() -> Vec<ArgItem> {
 }
 
 fn catalog_items(settings: Option<&AppSettings>) -> Vec<ModelChoice> {
-    settings
-        .map(|s| s.catalog())
-        .unwrap_or_else(load_catalog)
+    settings.map(|s| s.catalog()).unwrap_or_else(load_catalog)
 }
 
 pub fn model_args(settings: Option<&AppSettings>) -> Vec<ArgItem> {
@@ -448,7 +562,13 @@ mod tests {
         assert_eq!(lookup("plan").map(|d| d.cmd), Some(SlashCmd::Plan));
         assert_eq!(lookup("goal").map(|d| d.cmd), Some(SlashCmd::Goal));
         assert_eq!(lookup("tasks").map(|d| d.cmd), Some(SlashCmd::Tasks));
+        assert_eq!(lookup("workflow").map(|d| d.cmd), Some(SlashCmd::Workflow));
         assert_eq!(lookup("mcps").map(|d| d.cmd), Some(SlashCmd::Mcps));
+        assert_eq!(lookup("preset").map(|d| d.cmd), Some(SlashCmd::Preset));
+        assert_eq!(lookup("agent").map(|d| d.cmd), Some(SlashCmd::Preset));
+        assert_eq!(lookup("usage").map(|d| d.cmd), Some(SlashCmd::Usage));
+        assert_eq!(lookup("cost").map(|d| d.cmd), Some(SlashCmd::Usage));
+        assert_eq!(lookup("compact").map(|d| d.cmd), Some(SlashCmd::Compact));
     }
 
     #[test]
@@ -458,19 +578,76 @@ mod tests {
     }
 
     #[test]
+    fn args_close_the_picker() {
+        assert!(snapshot("/quit", 0).open);
+        assert!(!snapshot("/quit ", 0).open);
+        assert!(!snapshot("/quit now", 0).open);
+        let extras = [extra("standup")];
+        assert!(snapshot_ex("/standup", 0, &extras).open);
+        assert!(!snapshot_ex("/standup ", 0, &extras).open);
+    }
+
+    #[test]
     fn submit_maps_name() {
         assert_eq!(
             command_for_submit("/quit"),
-            Some((SlashCmd::Quit, String::new()))
+            Some((SlashPick::Builtin(SlashCmd::Quit), String::new()))
         );
         assert_eq!(
             command_for_submit("/copy 2 out.txt"),
-            Some((SlashCmd::Copy, "2 out.txt".into()))
+            Some((SlashPick::Builtin(SlashCmd::Copy), "2 out.txt".into()))
         );
         assert_eq!(
             command_for_submit("/theme grokday"),
-            Some((SlashCmd::Theme, "grokday".into()))
+            Some((SlashPick::Builtin(SlashCmd::Theme), "grokday".into()))
         );
+    }
+
+    fn extra(command: &str) -> SlashEntry {
+        SlashEntry {
+            command: command.into(),
+            description: "自定义".into(),
+            kind: cordis_spine::ExtraSlashKind::Prompt,
+            text: "hello {args}".into(),
+            title: String::new(),
+            send: true,
+        }
+    }
+
+    #[test]
+    fn extras_append_and_cannot_shadow_help() {
+        let extras = [extra("standup"), extra("help")];
+        let snap = snapshot_ex("/", 0, &extras);
+        assert!(snap.matches.iter().any(|r| r.display == "/standup"));
+        assert!(!snap
+            .matches
+            .iter()
+            .any(|r| matches!(&r.pick, SlashPick::Extra(n) if n == "help")));
+        assert_eq!(
+            command_for_submit_ex("/standup today", &extras),
+            Some((SlashPick::Extra("standup".into()), "today".into()))
+        );
+        assert_eq!(
+            command_for_submit_ex("/help", &extras),
+            Some((SlashPick::Builtin(SlashCmd::Help), String::new()))
+        );
+    }
+
+    #[test]
+    fn reserved_covers_catalog() {
+        for d in CATALOG {
+            assert!(
+                cordis_spine::slash_name_reserved(d.name),
+                "missing reserved {}",
+                d.name
+            );
+            for alias in d.aliases {
+                assert!(
+                    cordis_spine::slash_name_reserved(alias),
+                    "missing reserved alias {alias}"
+                );
+            }
+        }
     }
 
     #[test]

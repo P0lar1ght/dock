@@ -5,8 +5,8 @@
 //! and highlight index extraction.
 
 use nucleo::{
-    Config, Matcher, Utf32String,
     pattern::{CaseMatching, MultiPattern, Normalization},
+    Config, Matcher, Utf32String,
 };
 
 /// Fuzzy matcher backed by nucleo.

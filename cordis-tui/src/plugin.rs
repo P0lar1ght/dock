@@ -31,7 +31,10 @@ pub fn scrollback() -> Plugin {
 
 pub fn prompt() -> Plugin {
     plugin("tui.prompt", Inject::from([THEME]), |ctx, _: &()| {
-        Ok(Some(ctx.provide(TUI_PROMPT, PromptWidget::default())?))
+        Ok(Some(ctx.provide(
+            TUI_PROMPT,
+            PromptWidget::with_context(ctx.clone()),
+        )?))
     })
 }
 

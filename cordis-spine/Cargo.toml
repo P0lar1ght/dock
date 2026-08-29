@@ -15,17 +15,21 @@ htmd = "0.5.4"
 arc-swap = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 toml = "0.8"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "process", "io-util", "net", "fs"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
+uuid = { version = "1", features = ["v7"] }
 url = "2"
 indexmap = { version = "2", features = ["serde"] }
-async-lsp = { version = "0.2.3", features = ["tokio", "tracing"] }
+rhai = { version = "1.25", features = ["serde", "sync"] }
+async-lsp = { version = "=0.2.3", features = ["tokio", "tracing"] }
 async-trait = "0.1"
 tracing = "0.1"
 schemars = "0.8"
 libc = "0.2"
+xai-workflow = { path = "../vendor/xai-workflow" }
 
 [dev-dependencies]
 tempfile = "3"

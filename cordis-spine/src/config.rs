@@ -25,9 +25,17 @@ pub struct ModelChoice {
 
 impl ModelChoice {
     pub fn has_http(&self) -> bool {
-        self.api_base_url.as_deref().is_some_and(|s| !s.trim().is_empty())
-            || self.api_key.as_deref().is_some_and(|s| !s.trim().is_empty())
-            || self.env_key.as_deref().is_some_and(|s| !s.trim().is_empty())
+        self.api_base_url
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .api_key
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .env_key
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
     }
 
     pub fn resolved_api_key(&self) -> Option<String> {
@@ -339,7 +347,10 @@ description = "ollama"
         let list = load_catalog_from(&[path.clone()]);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "local-llm");
-        assert_eq!(load_default_model_from(&[path]).as_deref(), Some("local-llm"));
+        assert_eq!(
+            load_default_model_from(&[path]).as_deref(),
+            Some("local-llm")
+        );
     }
 
     #[test]
@@ -359,8 +370,12 @@ description = "custom"
         )
         .unwrap();
         let list = load_catalog_from(&[path]);
-        assert!(list.iter().any(|m| m.id == "grok-4" && m.name == "Grok 4 pinned"));
-        assert!(list.iter().any(|m| m.id == "mine" && m.description == "custom"));
+        assert!(list
+            .iter()
+            .any(|m| m.id == "grok-4" && m.name == "Grok 4 pinned"));
+        assert!(list
+            .iter()
+            .any(|m| m.id == "mine" && m.description == "custom"));
     }
 
     #[test]
@@ -421,10 +436,16 @@ api_key = "free"
         .unwrap();
         let list = load_catalog_from(&[path]);
         let glm = list.iter().find(|m| m.id == "glm-5.3-flash").unwrap();
-        assert_eq!(glm.api_base_url.as_deref(), Some("https://free.empero.org/v1"));
+        assert_eq!(
+            glm.api_base_url.as_deref(),
+            Some("https://free.empero.org/v1")
+        );
         assert_eq!(glm.api_key.as_deref(), Some("free"));
         let qwen = list.iter().find(|m| m.id == "qwen3.8-flash").unwrap();
-        assert_eq!(qwen.api_base_url.as_deref(), Some("https://free.empero.org/v1"));
+        assert_eq!(
+            qwen.api_base_url.as_deref(),
+            Some("https://free.empero.org/v1")
+        );
         assert!(glm.has_http());
     }
 
@@ -450,7 +471,10 @@ env_key = "OPENROUTER_API_KEY"
             .iter()
             .find(|m| m.id == "minimax/minimax-m3:free")
             .unwrap();
-        assert_eq!(m.api_base_url.as_deref(), Some("https://openrouter.ai/api/v1"));
+        assert_eq!(
+            m.api_base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
         assert_eq!(m.env_key.as_deref(), Some("OPENROUTER_API_KEY"));
         assert_eq!(
             load_default_model_from(&[path]).as_deref(),

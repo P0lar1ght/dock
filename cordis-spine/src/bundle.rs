@@ -1,8 +1,11 @@
 use cordis::{Context, Fiber, Result};
 
+use crate::agent_presets::agent_presets;
 use crate::agents::agents;
 use crate::ask_user::tool_ask_user;
+use crate::compact::compact;
 use crate::cron::cron;
+use crate::dynamic_runner::dynamic_runner;
 use crate::goal::tool_goal;
 use crate::jobs::{jobs, tool_jobs};
 use crate::llm::{llm, LlmConfig, LlmMode};
@@ -17,11 +20,15 @@ use crate::prompt::system_prompt;
 use crate::sched::tool_scheduler;
 use crate::session::sessions;
 use crate::settings::settings;
-use crate::task::tool_task;
+use crate::slash::slash;
+use crate::task::{tool_subagent, tool_task};
 use crate::todo_write::tool_todo;
+use crate::tool_cordis::tool_cordis;
 use crate::tools::{tools, workspace_tools};
+use crate::tui_slots::tui_slots;
 use crate::turn::turn;
 use crate::web_fetch::tool_web;
+use crate::workflow::tool_workflow;
 
 /// Sessions / systemPrompt / agents. No `llm` or `tools` — the harness mounts those.
 pub async fn install_core(ctx: &Context) -> Result<()> {
@@ -88,6 +95,9 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(permissions(), ())?.wait().await?;
     ctx.plugin(cron(), ())?.wait().await?;
     ctx.plugin(jobs(), ())?.wait().await?;
+    ctx.plugin(slash(), ())?.wait().await?;
+    ctx.plugin(tui_slots(), ())?.wait().await?;
+    ctx.plugin(agent_presets(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;
     ctx.plugin(tool_web(), ())?.wait().await?;
     ctx.plugin(tool_todo(), ())?.wait().await?;
@@ -96,11 +106,16 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_jobs(), ())?.wait().await?;
     ctx.plugin(tool_scheduler(), ())?.wait().await?;
     ctx.plugin(tool_task(), ())?.wait().await?;
+    ctx.plugin(tool_subagent(), ())?.wait().await?;
     ctx.plugin(tool_memory(), ())?.wait().await?;
     ctx.plugin(tool_monitor(), ())?.wait().await?;
     ctx.plugin(tool_goal(), ())?.wait().await?;
     ctx.plugin(tool_lsp(), ())?.wait().await?;
+    ctx.plugin(tool_workflow(), ())?.wait().await?;
     ctx.plugin(mcp_client(), ())?.wait().await?;
+    ctx.plugin(dynamic_runner(), ())?.wait().await?;
+    ctx.plugin(tool_cordis(), ())?.wait().await?;
     ctx.plugin(llm(), LlmConfig::from_env())?.wait().await?;
+    ctx.plugin(compact(), ())?.wait().await?;
     Ok(())
 }

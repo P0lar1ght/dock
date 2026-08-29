@@ -1,10 +1,12 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::names::{SESSION_EVENT, SESSIONS};
+use crate::names::{SESSIONS, SESSION_EVENT};
 use crate::types::LogEvent;
+use crate::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TokenUsage {
@@ -38,15 +40,51 @@ pub struct Sessions {
     archive: Arc<Mutex<Vec<ArchivedSession>>>,
     next_id: Arc<Mutex<u64>>,
     usage: Arc<Mutex<TokenUsage>>,
+    ledger: Arc<Mutex<UsageLedger>>,
+    pending_call: Arc<Mutex<Option<PendingCall>>>,
     turn_started: Arc<Mutex<Option<Instant>>>,
     pending_images: Arc<Mutex<Vec<crate::types::UserImage>>>,
     user_images: Arc<Mutex<Vec<Vec<crate::types::UserImage>>>>,
+    /// Set by [`Self::rewind_inflight_user`] so a dying turn cannot append
+    /// onto the previous assistant bubble (Grok cancel-rewind fence).
+    rewound: Arc<AtomicBool>,
+    /// Bumped on every log mutation so the TUI can invalidate layout caches
+    /// without cloning the event vector.
+    events_rev: Arc<AtomicU64>,
     /// Child isolates skip `session/event` so the parent TUI is not flooded.
     emit: bool,
+    /// Stable id for dynamic Cordis ownership (DSH `plugin.sessionId`).
+    identity: Arc<str>,
+    /// Set after auto-compact fails or stays over the threshold until the
+    /// next real user turn (Grok `auto_compact_suppressed`). Manual compact
+    /// ignores this.
+    auto_compact_suppressed: Arc<AtomicBool>,
+    compacting: Arc<AtomicBool>,
+}
+
+/// Official SSE usage held until [`Sessions::finish_llm`] so one sample is
+/// one ledger row even if the stream repeats the usage object.
+struct PendingCall {
+    usage: CallUsage,
+    model: String,
+    cost_usd_ticks: Option<i64>,
 }
 
 impl Sessions {
     pub fn new(ctx: Context) -> Self {
+        Self::with_identity(ctx, "main", true)
+    }
+
+    /// Nested subagent log: same API, no TUI events.
+    pub fn isolated(ctx: Context) -> Self {
+        Self::isolated_as(ctx, format!("child-{}", uuid::Uuid::now_v7().as_simple()))
+    }
+
+    pub fn isolated_as(ctx: Context, identity: impl Into<String>) -> Self {
+        Self::with_identity(ctx, identity, false)
+    }
+
+    fn with_identity(ctx: Context, identity: impl Into<String>, emit: bool) -> Self {
         Self {
             ctx,
             events: Arc::new(Mutex::new(Vec::new())),
@@ -57,28 +95,74 @@ impl Sessions {
                 window: 128_000,
                 ..TokenUsage::default()
             })),
+            ledger: Arc::new(Mutex::new(UsageLedger::default())),
+            pending_call: Arc::new(Mutex::new(None)),
             turn_started: Arc::new(Mutex::new(None)),
             pending_images: Arc::new(Mutex::new(Vec::new())),
             user_images: Arc::new(Mutex::new(Vec::new())),
-            emit: true,
+            rewound: Arc::new(AtomicBool::new(false)),
+            events_rev: Arc::new(AtomicU64::new(0)),
+            emit,
+            identity: Arc::from(identity.into()),
+            auto_compact_suppressed: Arc::new(AtomicBool::new(false)),
+            compacting: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Nested subagent log: same API, no TUI events.
-    pub fn isolated(ctx: Context) -> Self {
-        let mut s = Self::new(ctx);
-        s.emit = false;
-        s
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    /// Monotonic generation for scrollback / layout cache invalidation.
+    pub fn events_rev(&self) -> u64 {
+        self.events_rev.load(Ordering::Relaxed)
+    }
+
+    fn bump_events_rev(&self) {
+        self.events_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Borrow the live log without cloning. Do not re-enter `Sessions` from `f`.
+    pub fn with_log<R>(&self, f: impl FnOnce(&[LogEvent], &[SystemTime]) -> R) -> R {
+        let events = self.events.lock().unwrap();
+        let times = self.times.lock().unwrap();
+        f(&events, &times)
     }
 
     pub fn seed(&self, events: Vec<LogEvent>) {
         let n = events.len();
         *self.events.lock().unwrap() = events;
         *self.times.lock().unwrap() = vec![SystemTime::now(); n];
+        self.bump_events_rev();
     }
 
     pub fn usage(&self) -> TokenUsage {
         *self.usage.lock().unwrap()
+    }
+
+    pub fn ledger(&self) -> UsageLedger {
+        self.ledger.lock().unwrap().clone()
+    }
+
+    pub fn prompt_usage(&self) -> PromptUsage {
+        PromptUsage::from(&*self.ledger.lock().unwrap())
+    }
+
+    /// Fold a child isolate's ledger into this session. Does not bump
+    /// `main_loop_model_calls` (Grok `record_subagent`).
+    pub fn fold_subagent_ledger(&self, child: &UsageLedger) {
+        if child.totals.model_calls == 0 && !child.incomplete {
+            return;
+        }
+        let rows: Vec<(String, UsageTotals)> = child
+            .by_model
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.ledger
+            .lock()
+            .unwrap()
+            .record_subagent(&rows, child.incomplete);
     }
 
     pub fn turn_elapsed(&self) -> Option<std::time::Duration> {
@@ -93,11 +177,15 @@ impl Sessions {
 
     pub fn append(&self, event: LogEvent) {
         if matches!(event, LogEvent::User(_)) {
+            self.rewound.store(false, Ordering::Relaxed);
             let imgs = std::mem::take(&mut *self.pending_images.lock().unwrap());
             self.user_images.lock().unwrap().push(imgs);
+        } else if self.rewound.load(Ordering::Relaxed) {
+            return;
         }
         self.events.lock().unwrap().push(event.clone());
         self.times.lock().unwrap().push(SystemTime::now());
+        self.bump_events_rev();
         self.emit_session(event);
     }
 
@@ -125,16 +213,23 @@ impl Sessions {
 
     /// Empty `llm/stream` slot the HTTP sampler fills via [`Self::apply_llm_delta`].
     pub fn begin_llm(&self) {
+        if self.rewound.load(Ordering::Relaxed) {
+            return;
+        }
         {
             let mut usage = self.usage.lock().unwrap();
             usage.completion = 0;
             usage.official = false;
         }
+        *self.pending_call.lock().unwrap() = None;
         *self.turn_started.lock().unwrap() = Some(Instant::now());
         self.append(LogEvent::LlmStream(crate::types::LlmOutput::default()));
     }
 
     pub fn apply_llm_delta(&self, delta: &crate::stream_acc::StreamDelta) {
+        if self.rewound.load(Ordering::Relaxed) {
+            return;
+        }
         match delta {
             crate::stream_acc::StreamDelta::Text(text) => {
                 if text.is_empty() {
@@ -153,6 +248,7 @@ impl Sessions {
                 }
                 let event = events.last().cloned().unwrap();
                 drop(events);
+                self.bump_events_rev();
                 self.emit_session(event);
             }
             crate::stream_acc::StreamDelta::Reasoning(text) => {
@@ -166,29 +262,47 @@ impl Sessions {
                 out.reasoning.push_str(text);
                 let event = events.last().cloned().unwrap();
                 drop(events);
+                self.bump_events_rev();
                 self.emit_session(event);
             }
             crate::stream_acc::StreamDelta::Usage {
-                prompt,
-                completion,
+                tokens,
+                official,
+                model,
+                cost_usd_ticks,
             } => {
-                let mut usage = self.usage.lock().unwrap();
-                if *prompt > 0 {
-                    usage.prompt = *prompt;
+                {
+                    let mut usage = self.usage.lock().unwrap();
+                    if tokens.prompt_tokens > 0 {
+                        usage.prompt = tokens.prompt_tokens;
+                    }
+                    if tokens.completion_tokens > 0 {
+                        usage.completion = tokens.completion_tokens;
+                        if *official {
+                            usage.official = true;
+                        }
+                    }
                 }
-                if *completion > 0 {
-                    usage.completion = *completion;
-                    usage.official = true;
+                if *official && (tokens.prompt_tokens > 0 || tokens.completion_tokens > 0) {
+                    *self.pending_call.lock().unwrap() = Some(PendingCall {
+                        usage: tokens.clone(),
+                        model: model.clone(),
+                        cost_usd_ticks: *cost_usd_ticks,
+                    });
                 }
-                drop(usage);
                 self.emit_session(LogEvent::LlmStream(crate::types::LlmOutput::default()));
             }
         }
     }
 
     pub fn finish_llm(&self, output: &crate::types::LlmOutput) {
+        if self.rewound.load(Ordering::Relaxed) {
+            return;
+        }
         let mut events = self.events.lock().unwrap();
         let Some(LogEvent::LlmStream(out)) = events.last_mut() else {
+            drop(events);
+            self.commit_pending_call();
             return;
         };
         if out.text.is_empty() {
@@ -207,11 +321,89 @@ impl Sessions {
         out.tool_calls = output.tool_calls.clone();
         let event = events.last().cloned().unwrap();
         drop(events);
+        self.bump_events_rev();
+        self.commit_pending_call();
         self.emit_session(event);
+    }
+
+    fn commit_pending_call(&self) {
+        let Some(pending) = self.pending_call.lock().unwrap().take() else {
+            return;
+        };
+        let model = if pending.model.trim().is_empty() {
+            "unknown"
+        } else {
+            pending.model.as_str()
+        };
+        let duration_ms = self
+            .turn_started
+            .lock()
+            .unwrap()
+            .map(|t| t.elapsed().as_millis() as u64);
+        self.ledger.lock().unwrap().record_main_loop_call(
+            model,
+            &pending.usage,
+            duration_ms,
+            pending.cost_usd_ticks,
+        );
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {
         self.events().iter().map(LogEvent::kind).collect()
+    }
+
+    /// Grok `RewindIfNoOutput`: true once the last user turn has assistant
+    /// text, reasoning, tools, or a goal continuation.
+    pub fn last_turn_has_output(&self) -> bool {
+        let events = self.events.lock().unwrap();
+        match events.iter().rposition(|e| matches!(e, LogEvent::User(_))) {
+            None => false,
+            Some(i) => inflight_has_output(&events[i + 1..]),
+        }
+    }
+
+    /// Drop the in-flight user turn when it has no model/tool output yet.
+    /// Returns the restored prompt (Grok cancel-rewind).
+    pub fn rewind_inflight_user(&self) -> Option<(String, Vec<crate::types::UserImage>)> {
+        if self.last_turn_has_output() {
+            return None;
+        }
+        let mut events = self.events.lock().unwrap();
+        let Some(start) = events.iter().rposition(|e| matches!(e, LogEvent::User(_))) else {
+            self.rewound.store(true, Ordering::Relaxed);
+            *self.pending_call.lock().unwrap() = None;
+            *self.turn_started.lock().unwrap() = None;
+            return None;
+        };
+        if inflight_has_output(&events[start + 1..]) {
+            return None;
+        }
+        let text = match &events[start] {
+            LogEvent::User(t) => t.clone(),
+            _ => return None,
+        };
+        let mut times = self.times.lock().unwrap();
+        events.truncate(start);
+        times.truncate(start);
+        drop(times);
+        let leftover = events.last().cloned();
+        drop(events);
+        let images = self.user_images.lock().unwrap().pop().unwrap_or_default();
+        self.pending_images.lock().unwrap().clear();
+        *self.pending_call.lock().unwrap() = None;
+        *self.turn_started.lock().unwrap() = None;
+        self.rewound.store(true, Ordering::Relaxed);
+        self.bump_events_rev();
+        if let Some(event) = leftover {
+            self.emit_session(event);
+        } else {
+            self.emit_session(LogEvent::PreStep);
+        }
+        Some((text, images))
+    }
+
+    pub fn take_pending_images(&self) -> Vec<crate::types::UserImage> {
+        std::mem::take(&mut *self.pending_images.lock().unwrap())
     }
 
     pub fn clear(&self) {
@@ -220,6 +412,182 @@ impl Sessions {
         *self.turn_started.lock().unwrap() = None;
         self.pending_images.lock().unwrap().clear();
         self.user_images.lock().unwrap().clear();
+        *self.pending_call.lock().unwrap() = None;
+        self.rewound.store(false, Ordering::Relaxed);
+        self.auto_compact_suppressed.store(false, Ordering::Relaxed);
+        self.compacting.store(false, Ordering::Relaxed);
+        self.bump_events_rev();
+        *self.ledger.lock().unwrap() = UsageLedger::default();
+        {
+            let mut usage = self.usage.lock().unwrap();
+            let window = usage.window;
+            *usage = TokenUsage {
+                window,
+                ..TokenUsage::default()
+            };
+        }
+    }
+
+    pub fn auto_compact_suppressed(&self) -> bool {
+        self.auto_compact_suppressed.load(Ordering::Relaxed)
+    }
+
+    pub fn set_auto_compact_suppressed(&self, on: bool) {
+        self.auto_compact_suppressed.store(on, Ordering::Relaxed);
+    }
+
+    /// Drop a trailing empty `begin_llm` slot and insert interrupted
+    /// [`crate::types::INTERRUPTED_TOOL_RESULT`] rows for any assistant
+    /// `tool_calls` that never got a matching [`LogEvent::ToolExecute`].
+    /// Stubs sit immediately after that assistant (and any results that did
+    /// land), before a following user message.
+    pub fn seal_incomplete_tool_calls(&self) {
+        if self.rewound.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut events = self.events.lock().unwrap();
+        let mut times = self.times.lock().unwrap();
+        let mut changed = false;
+        loop {
+            match events.last() {
+                Some(LogEvent::LlmStream(out))
+                    if out.text.is_empty()
+                        && out.reasoning.is_empty()
+                        && out.tool_calls.is_empty() =>
+                {
+                    events.pop();
+                    times.pop();
+                    changed = true;
+                }
+                _ => break,
+            }
+        }
+        let Some(asst_idx) = events.iter().rposition(|e| match e {
+            LogEvent::LlmStream(out) => !out.tool_calls.is_empty(),
+            _ => false,
+        }) else {
+            drop(times);
+            if changed {
+                let leftover = events.last().cloned();
+                drop(events);
+                self.bump_events_rev();
+                if let Some(event) = leftover {
+                    self.emit_session(event);
+                }
+            }
+            return;
+        };
+        let calls = match &events[asst_idx] {
+            LogEvent::LlmStream(out) => out.tool_calls.clone(),
+            _ => return,
+        };
+        let mut have = std::collections::HashSet::new();
+        let mut insert_at = asst_idx + 1;
+        for (i, event) in events.iter().enumerate().skip(asst_idx + 1) {
+            match event {
+                LogEvent::ToolExecute { id, .. } => {
+                    have.insert(id.clone());
+                    insert_at = i + 1;
+                }
+                _ => break,
+            }
+        }
+        let missing: Vec<_> = calls
+            .into_iter()
+            .filter(|c| !have.contains(&c.id))
+            .collect();
+        if missing.is_empty() {
+            drop(times);
+            if changed {
+                let leftover = events.last().cloned();
+                drop(events);
+                self.bump_events_rev();
+                if let Some(event) = leftover {
+                    self.emit_session(event);
+                }
+            }
+            return;
+        }
+        let now = SystemTime::now();
+        for call in missing.into_iter().rev() {
+            events.insert(
+                insert_at,
+                LogEvent::ToolExecute {
+                    id: call.id,
+                    name: call.name,
+                    arguments: call.arguments,
+                    content: crate::types::INTERRUPTED_TOOL_RESULT.into(),
+                },
+            );
+            times.insert(insert_at, now);
+        }
+        let event = events.get(insert_at).cloned();
+        drop(times);
+        drop(events);
+        self.bump_events_rev();
+        if let Some(event) = event {
+            self.emit_session(event);
+        }
+    }
+
+    /// Exclusive compact lock so auto and `/compact` cannot overlap.
+    pub fn try_begin_compact(&self) -> bool {
+        self.compacting
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    pub fn end_compact(&self) {
+        self.compacting.store(false, Ordering::Relaxed);
+    }
+
+    /// Swap the live log for a compacted prefix. Keeps images for User rows
+    /// whose text still appears, in order.
+    pub fn replace_compacted(&self, events: Vec<LogEvent>) {
+        let (old_users, old_images) = {
+            let log = self.events.lock().unwrap();
+            let images = self.user_images.lock().unwrap();
+            let users: Vec<String> = log
+                .iter()
+                .filter_map(|e| match e {
+                    LogEvent::User(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect();
+            (users, images.clone())
+        };
+        let mut used = vec![false; old_users.len()];
+        let mut mapped = Vec::new();
+        for event in &events {
+            if let LogEvent::User(text) = event {
+                let img = old_users
+                    .iter()
+                    .enumerate()
+                    .find(|(i, u)| {
+                        !used[*i]
+                            && (*u == text
+                                || text.as_str() == format!("<user_query>\n{u}\n</user_query>"))
+                    })
+                    .map(|(i, _)| {
+                        used[i] = true;
+                        old_images.get(i).cloned().unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                mapped.push(img);
+            }
+        }
+        let n = events.len();
+        let last = events.last().cloned();
+        *self.times.lock().unwrap() = vec![SystemTime::now(); n];
+        *self.events.lock().unwrap() = events;
+        *self.user_images.lock().unwrap() = mapped;
+        self.pending_images.lock().unwrap().clear();
+        *self.pending_call.lock().unwrap() = None;
+        self.rewound.store(false, Ordering::Relaxed);
+        self.bump_events_rev();
+        if let Some(event) = last {
+            self.emit_session(event);
+        }
     }
 
     fn estimate_tokens(text: &str) -> u64 {
@@ -291,11 +659,25 @@ impl Sessions {
         *self.events.lock().unwrap() = item.events;
         *self.user_images.lock().unwrap() = vec![Vec::new(); user_n];
         self.pending_images.lock().unwrap().clear();
+        *self.pending_call.lock().unwrap() = None;
+        self.rewound.store(false, Ordering::Relaxed);
+        self.bump_events_rev();
+        *self.ledger.lock().unwrap() = UsageLedger::default();
         if let Some(event) = last {
             self.emit_session(event);
         }
         true
     }
+}
+
+fn inflight_has_output(tail: &[LogEvent]) -> bool {
+    tail.iter().any(|e| match e {
+        LogEvent::ToolExecute { .. } | LogEvent::SystemReminder(_) => true,
+        LogEvent::LlmStream(out) => {
+            !out.text.is_empty() || !out.reasoning.is_empty() || !out.tool_calls.is_empty()
+        }
+        LogEvent::User(_) | LogEvent::PreStep | LogEvent::Prompt(_) => false,
+    })
 }
 
 pub fn sessions() -> Plugin {
@@ -331,6 +713,21 @@ mod tests {
         assert!(sessions.archived().is_empty());
     }
 
+    #[test]
+    fn events_rev_bumps_on_append_and_clear() {
+        let root = Context::new();
+        let sessions = Sessions::new(root);
+        assert_eq!(sessions.events_rev(), 0);
+        sessions.append(LogEvent::User("a".into()));
+        let r1 = sessions.events_rev();
+        assert!(r1 > 0);
+        sessions.append(LogEvent::User("b".into()));
+        assert!(sessions.events_rev() > r1);
+        sessions.clear();
+        assert!(sessions.events_rev() > r1);
+        sessions.with_log(|events, _| assert!(events.is_empty()));
+    }
+
     #[tokio::test]
     async fn llm_deltas_patch_the_same_event() {
         let ctx = Context::new();
@@ -347,5 +744,204 @@ mod tests {
             LogEvent::LlmStream(out) => assert_eq!(out.text, "Hello"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn official_usage_accumulates_on_the_ledger() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        let mut tokens = crate::usage::TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            cached_prompt_tokens: 40,
+            reasoning_tokens: 3,
+            ..crate::usage::TokenUsage::default()
+        };
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
+            tokens: crate::usage::TokenUsage {
+                prompt_tokens: 80,
+                ..crate::usage::TokenUsage::default()
+            },
+            official: false,
+            model: String::new(),
+            cost_usd_ticks: None,
+        });
+        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
+            tokens: tokens.clone(),
+            official: true,
+            model: "grok-4".into(),
+            cost_usd_ticks: Some(70),
+        });
+        sessions.finish_llm(&crate::types::LlmOutput::default());
+        assert_eq!(sessions.ledger().totals.model_calls, 1);
+        assert_eq!(sessions.ledger().totals.input_tokens, 100);
+        assert_eq!(sessions.ledger().totals.cached_read_tokens, 40);
+        assert_eq!(sessions.ledger().totals.reasoning_tokens, 3);
+        assert_eq!(sessions.usage().prompt, 100);
+        assert!(sessions.usage().official);
+
+        tokens.prompt_tokens = 50;
+        tokens.completion_tokens = 5;
+        tokens.cached_prompt_tokens = 10;
+        tokens.reasoning_tokens = 1;
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
+            tokens,
+            official: true,
+            model: "grok-4".into(),
+            cost_usd_ticks: None,
+        });
+        sessions.finish_llm(&crate::types::LlmOutput::default());
+        let u = sessions.prompt_usage();
+        assert_eq!(u.totals.input_tokens, 150);
+        assert_eq!(u.totals.output_tokens, 15);
+        assert_eq!(u.totals.cached_read_tokens, 50);
+        assert_eq!(u.totals.reasoning_tokens, 4);
+        assert_eq!(u.num_turns, 2);
+        assert!(u.totals.cost_is_partial);
+        assert!(u.totals.cost_usd_ticks.is_none());
+
+        sessions.clear();
+        assert_eq!(sessions.ledger().totals.model_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn estimate_usage_does_not_hit_the_ledger() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
+            tokens: crate::usage::TokenUsage {
+                prompt_tokens: 12,
+                ..crate::usage::TokenUsage::default()
+            },
+            official: false,
+            model: String::new(),
+            cost_usd_ticks: None,
+        });
+        sessions.finish_llm(&crate::types::LlmOutput::default());
+        assert_eq!(sessions.ledger().totals.model_calls, 0);
+        assert_eq!(sessions.usage().prompt, 12);
+        assert!(!sessions.usage().official);
+    }
+
+    #[tokio::test]
+    async fn subagent_ledger_folds_without_bumping_turns() {
+        let ctx = Context::new();
+        let parent = Sessions::new(ctx.clone());
+        let child = Sessions::isolated(ctx);
+        child.begin_llm();
+        child.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
+            tokens: crate::usage::TokenUsage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                ..crate::usage::TokenUsage::default()
+            },
+            official: true,
+            model: "child-model".into(),
+            cost_usd_ticks: None,
+        });
+        child.finish_llm(&crate::types::LlmOutput::default());
+        parent.fold_subagent_ledger(&child.ledger());
+        assert_eq!(parent.ledger().main_loop_model_calls, 0);
+        assert_eq!(parent.ledger().totals.model_calls, 1);
+        assert_eq!(parent.ledger().totals.input_tokens, 5);
+        assert_eq!(parent.ledger().by_model["child-model"].input_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn rewind_inflight_user_drops_user_without_output() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("keep".into()));
+        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+            text: "reply".into(),
+            ..crate::types::LlmOutput::default()
+        }));
+        sessions.append(LogEvent::User("undo me".into()));
+        sessions.append(LogEvent::PreStep);
+        sessions.begin_llm();
+        let restored = sessions
+            .rewind_inflight_user()
+            .expect("no-output user rewinds");
+        assert_eq!(restored.0, "undo me");
+        assert_eq!(sessions.events().len(), 2);
+        match &sessions.events()[0] {
+            LogEvent::User(t) => assert_eq!(t, "keep"),
+            other => panic!("{other:?}"),
+        }
+        assert!(sessions.rewind_inflight_user().is_none());
+    }
+
+    #[tokio::test]
+    async fn rewind_skips_once_assistant_text_arrives() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("keep me".into()));
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Text("Hi".into()));
+        assert!(sessions.last_turn_has_output());
+        assert!(sessions.rewind_inflight_user().is_none());
+        assert_eq!(sessions.events().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn seal_inserts_interrupted_results_before_following_user() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+            tool_calls: vec![
+                crate::types::ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                },
+                crate::types::ToolCall {
+                    id: "c2".into(),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            ],
+            ..crate::types::LlmOutput::default()
+        }));
+        sessions.append(LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            content: "ok".into(),
+        });
+        sessions.append(LogEvent::User("follow-up".into()));
+        sessions.seal_incomplete_tool_calls();
+        let events = sessions.events();
+        match &events[2] {
+            LogEvent::ToolExecute { id, content, .. } => {
+                assert_eq!(id, "c1");
+                assert_eq!(content, "ok");
+            }
+            other => panic!("{other:?}"),
+        }
+        match &events[3] {
+            LogEvent::ToolExecute { id, content, .. } => {
+                assert_eq!(id, "c2");
+                assert_eq!(content, crate::types::INTERRUPTED_TOOL_RESULT);
+            }
+            other => panic!("{other:?}"),
+        }
+        match &events[4] {
+            LogEvent::User(t) => assert_eq!(t, "follow-up"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn seal_drops_trailing_empty_llm_stream() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.begin_llm();
+        sessions.seal_incomplete_tool_calls();
+        assert_eq!(sessions.events().len(), 1);
     }
 }

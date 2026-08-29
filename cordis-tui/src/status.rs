@@ -183,7 +183,20 @@ pub fn render_turn_status(buf: &mut Buffer, area: Rect, ctx: &Context, waiting_p
             .turn_elapsed()
             .map(format_duration_short)
             .unwrap_or_else(|| "0.0s".into());
-        format!("生成中  {timer}")
+        let queued = ctx
+            .get::<SessionRef>(SESSION_PORT)
+            .map(|s| s.queued_prompts().len())
+            .unwrap_or(0);
+        let can_send = ctx
+            .get::<crate::prompt::PromptWidget>(crate::names::TUI_PROMPT)
+            .is_some_and(|p| p.can_send());
+        let mut line = format!("生成中  {timer}");
+        if queued > 0 && !can_send {
+            line.push_str(&format!("  ·  {queued} queued, Enter to send now"));
+        } else if queued > 0 {
+            line.push_str(&format!("  ·  {queued} queued"));
+        }
+        line
     } else {
         return;
     };
@@ -237,11 +250,7 @@ mod tests {
             return;
         };
         if cwd.starts_with(&home) {
-            assert!(
-                cwd_label().starts_with('~'),
-                "cwd_label={}",
-                cwd_label()
-            );
+            assert!(cwd_label().starts_with('~'), "cwd_label={}", cwd_label());
         }
     }
 }

@@ -60,11 +60,7 @@ pub fn tool_memory() -> Plugin {
 
 fn memory_search(call: ToolCall) -> ToolResult {
     let v: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
-    let query = v
-        .get("query")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .trim();
+    let query = v.get("query").and_then(|x| x.as_str()).unwrap_or("").trim();
     if query.is_empty() {
         return tool_result(call, "Error: query is required");
     }
@@ -107,7 +103,12 @@ fn memory_search(call: ToolCall) -> ToolResult {
     tool_result(call, out)
 }
 
-fn walk_md(root: &Path, dir: &Path, terms: &[String], hits: &mut Vec<(f64, PathBuf, usize, usize, String)>) {
+fn walk_md(
+    root: &Path,
+    dir: &Path,
+    terms: &[String],
+    hits: &mut Vec<(f64, PathBuf, usize, usize, String)>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

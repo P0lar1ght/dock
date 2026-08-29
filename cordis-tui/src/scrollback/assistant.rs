@@ -53,7 +53,7 @@ fn render_uncached(text: &str, theme: &Theme, width: usize) -> Rendered {
     let syntect = cordis_markdown::default_syntect();
     let mut renderer = cordis_markdown::StreamingMarkdownRenderer::new(md_style::style(), true);
     renderer.push(text);
-    let output = renderer.finish_into_output(Some(&syntect));
+    let output = renderer.finish_into_output(Some(syntect));
     let mermaid_bodies: Vec<String> = output
         .code_blocks
         .iter()

@@ -103,7 +103,10 @@ mod tests {
 
     #[test]
     fn grok_compact_has_no_space_after_colon() {
-        let hints = [HintItem::new("Enter", "send"), HintItem::new("Shift+Tab", "mode")];
+        let hints = [
+            HintItem::new("Enter", "send"),
+            HintItem::new("Shift+Tab", "mode"),
+        ];
         let area = Rect::new(0, 0, 60, 1);
         let mut buf = Buffer::empty(area);
         ShortcutsBar::new(&hints).render(area, &mut buf);

@@ -15,4 +15,7 @@ pub enum Error {
 
     #[error("turn cancelled")]
     Cancelled,
+
+    #[error("{0}")]
+    Compact(String),
 }

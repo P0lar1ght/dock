@@ -14,6 +14,8 @@ pub struct CronJob {
     pub id: String,
     pub every: Duration,
     pub prompt: String,
+    pub created_at: Instant,
+    pub next: Instant,
 }
 
 #[derive(Debug)]
@@ -22,6 +24,7 @@ struct Inner {
     every: Duration,
     prompt: String,
     next: Instant,
+    created_at: Instant,
 }
 
 /// Named `"cron"` service. Live-lookup from the ticker; do not capture the Arc.
@@ -46,11 +49,13 @@ impl Cron {
         } else {
             every
         };
+        let now = Instant::now();
         self.jobs.lock().unwrap().push(Inner {
             id: id.clone(),
             every,
             prompt: prompt.into(),
-            next: Instant::now() + every,
+            next: now + every,
+            created_at: now,
         });
         id
     }
@@ -64,6 +69,8 @@ impl Cron {
                 id: j.id.clone(),
                 every: j.every,
                 prompt: j.prompt.clone(),
+                created_at: j.created_at,
+                next: j.next,
             })
             .collect()
     }
@@ -86,6 +93,8 @@ impl Cron {
                     id: job.id.clone(),
                     every: job.every,
                     prompt: job.prompt.clone(),
+                    created_at: job.created_at,
+                    next: job.next,
                 });
                 job.next = now + job.every;
             }

@@ -93,13 +93,13 @@ impl Llm {
         if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
             sessions.begin_llm();
         }
-        let ctx = ctx.clone();
+        let stream_ctx = ctx.clone();
         let output = self
             .sampler
             .sample(
                 request,
                 Box::new(move |delta| {
-                    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+                    if let Some(sessions) = stream_ctx.get::<Sessions>(SESSIONS) {
                         sessions.apply_llm_delta(&delta);
                     }
                 }),
@@ -145,10 +145,7 @@ pub fn llm() -> Plugin {
                         .api_base
                         .clone()
                         .unwrap_or_else(|| "https://api.x.ai/v1".into()),
-                    fallback_model: cfg
-                        .model
-                        .clone()
-                        .unwrap_or_else(|| "grok-4".into()),
+                    fallback_model: cfg.model.clone().unwrap_or_else(|| "grok-4".into()),
                 };
                 Llm::from_sampler(ctx.clone(), Arc::new(sampler))
             }
@@ -193,7 +190,10 @@ fn looks_like_list(user: &str) -> bool {
 }
 
 fn looks_like_read(user: &str) -> bool {
-    has_word(user, "read") || has_word(user, "cat") || user.contains("读取") || user.contains("打开")
+    has_word(user, "read")
+        || has_word(user, "cat")
+        || user.contains("读取")
+        || user.contains("打开")
 }
 
 fn workspace_tool(user: &str) -> Option<ToolCall> {
@@ -256,9 +256,7 @@ fn hardcoded(mode: LlmMode, request: &PromptRequest) -> LlmOutput {
             ..LlmOutput::default()
         },
         LlmMode::Text => LlmOutput {
-            text: format!(
-                "ok · {user}\n\nharness is up. tools come later via the tools plugin."
-            ),
+            text: format!("ok · {user}\n\nharness is up. tools come later via the tools plugin."),
             ..LlmOutput::default()
         },
     }

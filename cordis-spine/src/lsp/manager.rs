@@ -10,8 +10,8 @@ use async_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 use super::client::LspClient;
 use super::config::LspServerConfig;
 use super::pending::{PendingEdits, PendingPolicy};
-use super::{DiagnosticsNotify, file_uri};
 use super::process::ProcessScope;
+use super::{file_uri, DiagnosticsNotify};
 
 #[cfg(test)]
 use super::format::{format_locations_labeled, format_symbols};
@@ -255,13 +255,12 @@ impl LspManager {
                 }
                 Err(e) => {
                     tracing::warn!(server = %name, error = %e, "failed to start LSP server, skipping");
-                    self.notification_handle.send_lsp_failed(
-                        crate::lsp::notify::LspServerFailed {
+                    self.notification_handle
+                        .send_lsp_failed(crate::lsp::notify::LspServerFailed {
                             server_name: name.clone(),
                             error: e.to_string(),
                             attempts: 0,
-                        },
-                    );
+                        });
                 }
             }
         }

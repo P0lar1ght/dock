@@ -9,4 +9,7 @@ pub mod md_style;
 pub mod mermaid;
 pub mod picker;
 pub mod shortcuts;
+pub mod tasks_pane;
+pub mod todo_pane;
+pub mod workflows;
 pub mod wrapping;

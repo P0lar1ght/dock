@@ -76,7 +76,8 @@ impl AppSettings {
         *self.permission_mode.lock().unwrap() = mode;
     }
 
-    /// Grok `Shift+Tab`: Ask → Always-allow → Ask.
+    /// Settings modal Ask ↔ Always-allow. Shift+Tab session cycle lives in
+    /// the TUI (`mode_cycle`): Normal → Plan → Always-Approve → Normal.
     pub fn cycle_permission_mode(&self) -> PermissionMode {
         let next = match self.permission_mode() {
             PermissionMode::Ask => PermissionMode::Allow,
@@ -125,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_cycles_ask_and_allow() {
+    fn settings_modal_cycles_ask_and_allow() {
         let settings = AppSettings::new("x");
         assert_eq!(settings.permission_mode(), PermissionMode::Ask);
         assert_eq!(settings.cycle_permission_mode(), PermissionMode::Allow);

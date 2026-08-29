@@ -60,8 +60,13 @@ pub use style::{MarkdownStyle, TableBorders};
 pub use syntax::Syntect;
 
 /// Tokyo Night theme Grok ships with the renderer.
-pub fn default_syntect() -> Syntect {
-    Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme"))
+///
+/// Cached: `Syntect::new` loads two-face's 250+ language syntax set, which is
+/// far too expensive to rebuild every scrollback paint.
+pub fn default_syntect() -> &'static Syntect {
+    use std::sync::OnceLock;
+    static SYNTECT: OnceLock<Syntect> = OnceLock::new();
+    SYNTECT.get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme")))
 }
 
 // Re-export test helpers when fuzzing

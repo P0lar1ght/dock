@@ -11,12 +11,20 @@ use crate::jobs::Jobs;
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 const LIST_DIR_PARAMS: &str = r#"{"type":"object","properties":{"target_directory":{"type":"string","description":"Path to directory to list, relative to cwd or absolute."}},"required":["target_directory"]}"#;
-const READ_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{"type":"string","description":"Path of the file to read."},"offset":{"type":"integer","description":"1-based start line."},"limit":{"type":"integer","description":"Number of lines to read."}},"required":["target_file"]}"#;
+const READ_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{"type":"string","description":"Path of the file to read (relative to cwd or absolute)."},"offset":{"type":"integer","description":"1-based start line. Omit to start at line 1. Use with limit for large files."},"limit":{"type":"integer","description":"Max lines to return. Omit to use the default cap (1000). Pass a smaller value for a tight window."}},"required":["target_file"]}"#;
 const GREP_PARAMS: &str = r#"{"type":"object","properties":{"pattern":{"type":"string","description":"Regex pattern (rg --regexp)."},"path":{"type":"string","description":"File or directory to search."}},"required":["pattern"]}"#;
 const SEARCH_REPLACE_PARAMS: &str = r#"{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["file_path","old_string","new_string"]}"#;
 const BASH_PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The bash command to run."},"is_background":{"type":"boolean","description":"Set to true for long-running commands. Returns a task id immediately."},"block_until_ms":{"type":"integer","description":"Foreground wait in ms. 0 backgrounds immediately."}},"required":["command"]}"#;
 const GLOB_PARAMS: &str = r#"{"type":"object","properties":{"glob_pattern":{"type":"string"},"target_directory":{"type":"string"}},"required":["glob_pattern"]}"#;
 const WRITE_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{"type":"string"},"contents":{"type":"string"}},"required":["target_file","contents"]}"#;
+
+/// Default max lines when the model omits `limit` (grok `MAX_LINES_READ`).
+const MAX_LINES_READ: usize = 1_000;
+
+const READ_FILE_DESC: &str = "Read a file.\n\
+- By default reads up to 1000 lines from offset (default line 1).\n\
+- For large files, pass offset + limit to page through; the result notes how many lines remain.\n\
+- Line anchors appear as N→ on line 1 and every 10th line.";
 
 pub fn specs() -> Vec<ToolSpec> {
     vec![
@@ -27,7 +35,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file".into(),
-            description: "Read a file. Optional offset/limit are 1-based line numbers.".into(),
+            description: READ_FILE_DESC.into(),
             parameters_json: READ_FILE_PARAMS.into(),
         },
         ToolSpec {
@@ -182,18 +190,23 @@ fn read_file(args: &str) -> String {
         Err(e) => return format!("Error reading {}: {e}", path.display()),
     };
     let offset = int_field(&v, "offset").unwrap_or(1).max(1) as usize;
-    let limit = int_field(&v, "limit").map(|n| n.max(1) as usize);
+    // Explicit limit wins; otherwise cap at MAX_LINES_READ so omitting limit
+    // no longer dumps an entire large file into context.
+    let limit = int_field(&v, "limit")
+        .map(|n| n.max(1) as usize)
+        .unwrap_or(MAX_LINES_READ);
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let start = offset.saturating_sub(1).min(lines.len());
-    let end = match limit {
-        Some(n) => (start + n).min(lines.len()),
-        None => lines.len(),
-    };
+    let total = lines.len();
+    let start = offset.saturating_sub(1).min(total);
+    let end = (start + limit).min(total);
     let slice = &lines[start..end];
     if slice.is_empty() {
-        return format!("{}: no lines in range", path.display());
+        return format!(
+            "{}: no lines in range (file has {total} lines)",
+            path.display()
+        );
     }
-    slice
+    let mut out: String = slice
         .iter()
         .enumerate()
         .map(|(i, line)| {
@@ -204,7 +217,19 @@ fn read_file(args: &str) -> String {
                 (*line).to_string()
             }
         })
-        .collect()
+        .collect();
+    if end < total {
+        let shown = end - start;
+        let next = end + 1;
+        let remaining = total - end;
+        out.push_str(&format!(
+            "\n\n[… truncated: showed lines {}-{end} ({shown} of {total}). \
+             {remaining} lines remain — call read_file again with offset={next} \
+             and a limit, or raise limit.]",
+            start + 1
+        ));
+    }
+    out
 }
 
 fn grep(args: &str) -> String {
@@ -296,7 +321,10 @@ fn search_replace(args: &str) -> String {
     let path = resolve(&file_path);
     if old.is_empty() {
         if path.exists() {
-            return format!("Error: {} already exists; empty old_string cannot overwrite", path.display());
+            return format!(
+                "Error: {} already exists; empty old_string cannot overwrite",
+                path.display()
+            );
         }
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -468,10 +496,7 @@ fn write_file(args: &str) -> String {
     let Some(target) = str_field(&v, &["target_file", "file_path", "path"]) else {
         return "Error: target_file is required".into();
     };
-    let contents = v
-        .get("contents")
-        .and_then(|x| x.as_str())
-        .unwrap_or("");
+    let contents = v.get("contents").and_then(|x| x.as_str()).unwrap_or("");
     let path = resolve(&target);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -556,5 +581,72 @@ mod tests {
         let out = execute(call);
         assert!(out.content.contains("wrote"), "{}", out.content);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
+    #[test]
+    fn read_file_omitted_limit_caps_at_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let body: String = (1..=1_050).map(|i| format!("L{i}\n")).collect();
+        std::fs::write(&path, &body).unwrap();
+        let call = ToolCall {
+            id: "1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "target_file": path }).to_string(),
+        };
+        let out = execute(call);
+        assert!(
+            out.content.contains("1→L1\n"),
+            "{}",
+            &out.content[..80.min(out.content.len())]
+        );
+        assert!(
+            out.content.contains("truncated"),
+            "should note truncation: {}",
+            out.content.lines().last().unwrap_or("")
+        );
+        assert!(
+            out.content.contains("offset=1001"),
+            "hint next offset: {}",
+            out.content.lines().last().unwrap_or("")
+        );
+        assert!(!out.content.contains("L1050\n"), "must not dump past cap");
+    }
+
+    #[test]
+    fn read_file_explicit_limit_respected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
+        let call = ToolCall {
+            id: "1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({
+                "target_file": path,
+                "offset": 2,
+                "limit": 2,
+            })
+            .to_string(),
+        };
+        let out = execute(call);
+        assert!(out.content.contains("b\n"), "{}", out.content);
+        assert!(out.content.contains("c\n"), "{}", out.content);
+        assert!(!out.content.contains("d\n"), "{}", out.content);
+        assert!(out.content.contains("offset=4"), "{}", out.content);
+    }
+
+    #[test]
+    fn read_file_small_file_no_truncation_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny.txt");
+        std::fs::write(&path, "only\n").unwrap();
+        let call = ToolCall {
+            id: "1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "target_file": path }).to_string(),
+        };
+        let out = execute(call);
+        assert!(out.content.contains("1→only"), "{}", out.content);
+        assert!(!out.content.contains("truncated"), "{}", out.content);
     }
 }

@@ -2,7 +2,7 @@
 
 Grok-shaped TUI，独立 git 仓库，嵌在 AILab 里。**不 path-dep `grok-build/`。**
 
-外面的参考树（`cordis/`、`deepseek-harness/`、`grok-build/`）不属于本仓库。插件规则见 [AGENTS.md](AGENTS.md)；工具清单（已有 / 待做 / 不做）见 [TOOLS.md](TOOLS.md)。
+外面的参考树（`cordis/`、`deepseek-harness/`、`grok-build/`）不属于本仓库。插件规则见 [AGENTS.md](AGENTS.md)；模型工具见 [TOOLS.md](TOOLS.md)；斜杠 / TUI 见 [CLI.md](CLI.md)。
 
 ```
 cordis-rust      plugin kernel

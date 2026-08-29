@@ -13,7 +13,7 @@ pub const ASK: &str = "ask";
 pub const PLAN_MODE: &str = "planMode";
 /// MCP connection status for `/mcps`. Tools register into `"tools"`.
 pub const MCP: &str = "mcp";
-/// Subagent coordinator (`ctx.subagents`). `task` spawn + get/kill/wait.
+/// Subagent coordinator (`ctx.subagents`). `tool-task` provides it; `task` and `tool-subagent` live-look it.
 pub const SUBAGENTS: &str = "subagents";
 /// Local memory files (`ctx.memory`).
 pub const MEMORY: &str = "memory";
@@ -21,10 +21,23 @@ pub const MEMORY: &str = "memory";
 pub const GOAL: &str = "goal";
 /// Language-server client (`ctx.lsp`). Fail-open.
 pub const LSP: &str = "lsp";
+/// Rhai workflow coordinator (`ctx.workflows`). `workflow` + `/workflow`.
+pub const WORKFLOWS: &str = "workflows";
+/// Extra prompt-bar slash commands. TUI live-looks it; builtins stay in CATALOG.
+pub const SLASH: &str = "slash";
+/// Per-preset persona + tool allowlist. TUI `/preset` live-looks it.
+pub const AGENT_PRESETS: &str = "agentPresets";
+pub const DYNAMIC_CORDIS_RUNNER: &str = "dynamicCordisRunner";
+/// TUI slots owned by dynamic packages. TUI live-looks this; Rhai `register_slot`.
+pub const TUI_SLOTS: &str = "tui.slots";
+/// In-memory maps `provide`d by Rhai host halves.
+pub const RHAI_BAGS: &str = "rhaiBags";
 pub const SYSTEM_PROMPT: &str = "systemPrompt";
 pub const AGENTS: &str = "agents";
 pub const AGENT_LOOP: &str = "agentLoop";
 pub const SETTINGS: &str = "settings";
+/// Conversation history compaction (`/compact` + auto at 85% of the window).
+pub const COMPACT: &str = "compact";
 pub const CRON: &str = "cron";
 pub const PERMISSIONS: &str = "permissions";
 pub const TURN: &str = "turn";
@@ -36,3 +49,4 @@ pub const TOOLS_EXECUTE: &str = "tools/execute";
 pub const SESSION_EVENT: &str = "session/event";
 pub const PERMISSION_EVENT: &str = "permissions/pending";
 pub const ASK_EVENT: &str = "ask/pending";
+pub const PLAN_EVENT: &str = "plan/pending";

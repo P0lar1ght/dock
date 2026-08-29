@@ -10,7 +10,7 @@ pub use context::{detect, normalize_display_path};
 
 use xai_fuzzy_file_search::FuzzyFileMatcher;
 
-use crate::slash::{SuggestionRow, SlashCmd, MAX_VISIBLE_SUGGESTIONS};
+use crate::slash::{SlashCmd, SlashPick, SuggestionRow, MAX_VISIBLE_SUGGESTIONS};
 
 struct MatcherCache {
     root: PathBuf,
@@ -44,7 +44,7 @@ impl FileSearchSnapshot {
             .map(|hit| SuggestionRow {
                 display: hit.path.clone(),
                 description: if hit.is_dir { "dir" } else { "file" }.into(),
-                cmd: SlashCmd::Help,
+                pick: SlashPick::Builtin(SlashCmd::Help),
             })
             .collect()
     }
@@ -66,7 +66,12 @@ pub fn snapshot(text: &str, cursor: usize, selected: usize, dismissed: bool) -> 
         };
     };
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let hits = nucleo_hits(&root, ctx.matcher_query(), ctx.is_dir_mode(), ctx.is_hidden_mode());
+    let hits = nucleo_hits(
+        &root,
+        ctx.matcher_query(),
+        ctx.is_dir_mode(),
+        ctx.is_hidden_mode(),
+    );
     let selected = if hits.is_empty() {
         0
     } else {

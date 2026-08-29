@@ -4,8 +4,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::slash::{self, ArgKind, SlashCmd};
+use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
+use cordis_spine::{
+    goal_composer_fill, tool_slash_arguments, ExtraSlashKind, SlashEntry, GOAL_RESERVED_SUBCOMMANDS,
+};
 
 /// Synchronous, side-effect-free user intent.
 #[derive(Debug)]
@@ -26,10 +29,14 @@ pub enum Action {
     OverlayPaste(String),
     OverlaySelect(usize),
     OverlaySpace,
+    OverlayTab,
     SettingsModal,
     PermissionAccept,
     PermissionReject,
     MouseMove { column: u16, row: u16 },
+    MouseDown { column: u16, row: u16 },
+    MouseDrag { column: u16, row: u16 },
+    MouseUp { column: u16, row: u16 },
     HistoryPicker,
     Find,
     CancelTurn,
@@ -41,6 +48,8 @@ pub enum Action {
     OpenImage(PathBuf),
     SendPrompt(String),
     SendPromptNow { text: String },
+    PromoteQueued { id: Option<String> },
+    EditQueued { id: Option<String> },
     PasteClipboard,
     InsertChar(char),
     InsertText(String),
@@ -58,6 +67,7 @@ pub enum Action {
     ScrollPage(i16),
     Click { column: u16, row: u16 },
     CycleMode,
+    ToggleGoalDetail,
 }
 
 /// Produced by dispatch, consumed by the event loop.
@@ -72,24 +82,80 @@ pub enum Effect {
     RestoreSession(String),
     InsertHistory(String),
     JumpToLine(usize),
-    CopyAssistant { n: usize, file: Option<PathBuf> },
+    CopyAssistant {
+        n: usize,
+        file: Option<PathBuf>,
+    },
     CopyText(String),
     OpenImage(PathBuf),
-    ArgPicker { kind: ArgKind, cmd: SlashCmd },
+    ArgPicker {
+        kind: ArgKind,
+        cmd: SlashCmd,
+    },
     SetTheme(ThemeKind),
     SetModel(String),
     SetEffort(String),
     ToggleTimestamps,
-    CronAdd { every: Duration, prompt: String },
+    CronAdd {
+        every: Duration,
+        prompt: String,
+    },
     Export(Option<PathBuf>),
     ChangeDir(PathBuf),
     SettingsModal,
     CancelTurn,
-    SendPrompt { text: String, send_now: bool },
-    EnterPlan { description: Option<String> },
-    EnterGoal { objective: Option<String> },
+    SendPrompt {
+        text: String,
+        send_now: bool,
+    },
+    PromoteQueued {
+        id: Option<String>,
+    },
+    EditQueued {
+        id: Option<String>,
+    },
+    FillPrompt {
+        text: String,
+    },
+    EnterPlan {
+        description: Option<String>,
+    },
+    ViewPlan,
+    EnterGoal {
+        objective: Option<String>,
+    },
+    ShowGoal {
+        editing: bool,
+    },
+    GoalPause,
+    GoalResume,
+    GoalClear,
     ShowTasks,
+    ToggleWorkflows,
     ShowMcps,
+    ShowPresets {
+        focus: Option<String>,
+    },
+    ShowUsage,
+    Compact {
+        context: String,
+    },
+    ShowNotice {
+        title: String,
+        body: String,
+    },
+    OpenSlot {
+        id: String,
+    },
+    /// Async: TUI spawns `Tools::execute` then queues a Notice on `"slash"`.
+    RunTool {
+        name: String,
+        arguments: String,
+        title: String,
+    },
+    SetPrompt {
+        text: String,
+    },
 }
 
 pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
@@ -181,15 +247,78 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
                 Some(args.to_string())
             },
         },
-        SlashCmd::Goal => Effect::EnterGoal {
-            objective: if args.is_empty() {
+        SlashCmd::ViewPlan => Effect::ViewPlan,
+        SlashCmd::Goal => goal_effect(args),
+        SlashCmd::Tasks => Effect::ShowTasks,
+        SlashCmd::Workflow => {
+            if args.is_empty() || args.eq_ignore_ascii_case("runs") {
+                Effect::ToggleWorkflows
+            } else {
+                Effect::SendPrompt {
+                    text: workflow_instruction(args),
+                    send_now: true,
+                }
+            }
+        }
+        SlashCmd::Mcps => Effect::ShowMcps,
+        SlashCmd::Preset => {
+            let focus = if args.is_empty() {
                 None
             } else {
                 Some(args.to_string())
-            },
+            };
+            Effect::ShowPresets { focus }
+        }
+        SlashCmd::Usage => Effect::ShowUsage,
+        SlashCmd::Compact => Effect::Compact {
+            context: args.to_string(),
         },
-        SlashCmd::Tasks => Effect::ShowTasks,
-        SlashCmd::Mcps => Effect::ShowMcps,
+    }
+}
+
+pub fn effect_for_pick(pick: SlashPick, args: &str, extras: &[SlashEntry]) -> Effect {
+    match pick {
+        SlashPick::Builtin(cmd) => effect_for_slash(cmd, args),
+        SlashPick::Extra(name) => extras
+            .iter()
+            .find(|e| e.command == name)
+            .map(|e| effect_for_extra(e, args))
+            .unwrap_or_else(|| {
+                let args = args.trim();
+                Effect::SetPrompt {
+                    text: if args.is_empty() {
+                        format!("/{name}")
+                    } else {
+                        format!("/{name} {args}")
+                    },
+                }
+            }),
+    }
+}
+
+pub fn effect_for_extra(entry: &SlashEntry, args: &str) -> Effect {
+    let text = entry.expand(args);
+    match entry.kind {
+        ExtraSlashKind::Prompt => {
+            if entry.send {
+                Effect::SendPrompt {
+                    text,
+                    send_now: true,
+                }
+            } else {
+                Effect::SetPrompt { text }
+            }
+        }
+        ExtraSlashKind::Overlay => Effect::ShowNotice {
+            title: entry.overlay_title(),
+            body: text,
+        },
+        ExtraSlashKind::Slot => Effect::OpenSlot { id: text },
+        ExtraSlashKind::Tool => Effect::RunTool {
+            name: entry.text.trim().to_string(),
+            arguments: tool_slash_arguments(args),
+            title: entry.tool_title(),
+        },
     }
 }
 
@@ -205,5 +334,164 @@ fn apply_settings_arg(args: &str) -> Effect {
             kind: ArgKind::Settings,
             cmd: SlashCmd::Settings,
         },
+    }
+}
+
+/// `/workflow <name …>` 注入给模型的说明（工具名保持英文）。
+fn workflow_instruction(args: &str) -> String {
+    format!(
+        "# /workflow — 启动工作流\n\n\
+         用户请求：{args}\n\n\
+         用 workflow 工具启动。已有同名注册工作流就用 source.type=name；否则按 create-workflow 技能写脚本。\
+         进度看 /workflow runs。完成后会自动汇报，不要轮询 wait_tasks。"
+    )
+}
+
+fn goal_effect(args: &str) -> Effect {
+    let args = args.trim();
+    if args.is_empty() {
+        return Effect::FillPrompt {
+            text: goal_composer_fill(),
+        };
+    }
+    let first = args.split_whitespace().next().unwrap_or("");
+    match first {
+        "status" => Effect::ShowGoal { editing: false },
+        "edit" => Effect::ShowGoal { editing: true },
+        "pause" => Effect::GoalPause,
+        "resume" => Effect::GoalResume,
+        "clear" => Effect::GoalClear,
+        _ => Effect::EnterGoal {
+            objective: Some(args.to_string()),
+        },
+    }
+}
+
+#[derive(Debug)]
+pub enum GoalComposer {
+    Stub,
+    Objective(String),
+    Slash(String),
+}
+
+/// After bare `/goal`, the composer holds usage + `/goal `. Sending that
+/// blob (or a replacement) becomes the objective.
+#[cfg(test)]
+pub fn interpret_goal_composer(text: &str) -> GoalComposer {
+    interpret_goal_composer_ex(text, &[])
+}
+
+pub fn interpret_goal_composer_ex(text: &str, extras: &[SlashEntry]) -> GoalComposer {
+    let usage = cordis_spine::goal_usage_message();
+    let mut body = text.trim();
+    if let Some(rest) = body.strip_prefix(usage) {
+        body = rest.trim();
+    }
+    if body.is_empty() {
+        return GoalComposer::Stub;
+    }
+    let line = body.lines().last().unwrap_or(body).trim();
+    if let Some((pick, args)) = slash::command_for_submit_ex(line, extras) {
+        if matches!(pick, SlashPick::Builtin(SlashCmd::Goal)) {
+            let args = args.trim();
+            if args.is_empty() || args == "<目标>" {
+                return GoalComposer::Stub;
+            }
+            let first = args.split_whitespace().next().unwrap_or("");
+            if GOAL_RESERVED_SUBCOMMANDS.contains(&first) {
+                return GoalComposer::Slash(line.to_string());
+            }
+            return GoalComposer::Objective(args.to_string());
+        }
+        return GoalComposer::Slash(line.to_string());
+    }
+    if let Some(rest) = body.strip_prefix("/goal") {
+        let rest = rest.trim();
+        if rest.is_empty() || rest == "<目标>" {
+            return GoalComposer::Stub;
+        }
+        return GoalComposer::Objective(rest.to_string());
+    }
+    GoalComposer::Objective(body.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpret_stub_and_objective() {
+        assert!(matches!(
+            interpret_goal_composer(&goal_composer_fill()),
+            GoalComposer::Stub
+        ));
+        assert!(matches!(
+            interpret_goal_composer("/goal"),
+            GoalComposer::Stub
+        ));
+        assert!(matches!(
+            interpret_goal_composer("/goal <目标>"),
+            GoalComposer::Stub
+        ));
+        match interpret_goal_composer("/goal ship the lsp") {
+            GoalComposer::Objective(s) => assert_eq!(s, "ship the lsp"),
+            other => panic!("{other:?}"),
+        }
+        match interpret_goal_composer("实现 lsp") {
+            GoalComposer::Objective(s) => assert_eq!(s, "实现 lsp"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            interpret_goal_composer("/goal status"),
+            GoalComposer::Slash(_)
+        ));
+        assert!(matches!(
+            interpret_goal_composer("/plan"),
+            GoalComposer::Slash(_)
+        ));
+    }
+
+    #[test]
+    fn extra_slash_slot_opens_registered_id() {
+        let entry = SlashEntry {
+            command: "memo".into(),
+            description: "便签".into(),
+            kind: ExtraSlashKind::Slot,
+            text: "memo".into(),
+            title: String::new(),
+            send: false,
+        };
+        match effect_for_extra(&entry, "") {
+            Effect::OpenSlot { id } => assert_eq!(id, "memo"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn extra_slash_tool_runs_named_tool() {
+        let entry = SlashEntry {
+            command: "test".into(),
+            description: "试调".into(),
+            kind: ExtraSlashKind::Tool,
+            text: "dyn_echo".into(),
+            title: String::new(),
+            send: false,
+        };
+        match effect_for_extra(&entry, "") {
+            Effect::RunTool {
+                name,
+                arguments,
+                title,
+            } => {
+                assert_eq!(name, "dyn_echo");
+                assert_eq!(arguments, "{}");
+                assert_eq!(title, "/test → dyn_echo");
+            }
+            other => panic!("{other:?}"),
+        }
+        match effect_for_extra(&entry, r#"{"x":1}"#) {
+            Effect::RunTool { arguments, .. } => assert_eq!(arguments, r#"{"x":1}"#),
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -4,7 +4,7 @@ Dock 是 Grok 外形的 TUI，跑在 Cordis 插件树上。和 DeepSeek Harness 
 
 工作只在本仓库（`AILab/dock`）。不要改 `grok-build/`、`deepseek-harness/`、上游 `cordis/`（JS）。不要 path-dep `grok-build/`：需要 Grok 源码时复制进 dock 再改。
 
-已有工具 / 待做 / 明确不做：见 [TOOLS.md](TOOLS.md)。加工具前先改那份清单，不要只在 loop 里加名字。
+已有工具 / 待做 / 明确不做：见 [TOOLS.md](TOOLS.md)。斜杠、快捷键、overlay：见 [CLI.md](CLI.md)。加工具前先改那份清单，不要只在 loop 里加名字。
 
 ```bash
 cargo run -p cordis-app
@@ -17,8 +17,8 @@ cargo test -p cordis-spine -p cordis-tui -p cordis-app
 |---|---|---|
 | Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
-| 其它 spine | `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `subagents` `memory` | 同名 |
-| 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `mcp-client` | 向 `"tools"` `register` |
+| 其它 spine | `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `subagents` `memory` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名；`agentPresets` 定义是 YAML 目录（内置 `code` / `minimal` / `cordis` / `warden` < `~/.dock/presets/<id>/` 或显示名目录如 `创造/` < 项目 `.dock/presets/<id>/`；旧 `<id>.yml` 仍可读）。新建模式默认落到项目层 |
+| 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-subagent` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` | 同名 |
 | 事件循环 | `tui` inject `session` + `session.port` | — |
 
@@ -63,5 +63,5 @@ Chrome（快捷键条 `Key:label`、思考折叠、工具卡片输入/输出、p
 
 1. 先问：这是新插件、换现有插件，还是该接到已有 waterfall / named service？
 2. 不要为了方便在 `tui` / `agent-loop` 里加私有状态。
-3. 改工具面时同步 [TOOLS.md](TOOLS.md)。
+3. 改工具面时同步 [TOOLS.md](TOOLS.md)；改斜杠 / overlay 时同步 [CLI.md](CLI.md)。
 4. 用户没要求就不要 commit。

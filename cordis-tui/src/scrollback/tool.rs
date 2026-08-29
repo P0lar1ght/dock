@@ -1,8 +1,8 @@
-//! Generic tool card — copied from grok pager `OtherToolCallBlock`
-//! (`collapsed_line`, expanded muted output, AskUserQuestion Q&A).
+//! Generic tool card — grok pager `OtherToolCallBlock` chrome + Execute-style
+//! head/tail truncation for large output.
 //!
-//! Pager draws `◆` via `prepend_bullet` in the gutter. We have no gutter, so
-//! the same glyph is inserted on the header line.
+//! Fold cycle (click header): Collapsed → Truncated → Expanded → Collapsed.
+//! Truncated matches grok Execute defaults (`first_lines=2`, `last_lines=3`).
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -10,7 +10,31 @@ use ratatui::text::{Line, Span};
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
 use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::live;
 use crate::theme::Theme;
+
+/// Scrollback fold for a tool card (grok `DisplayMode` subset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolMode {
+    Collapsed,
+    Truncated,
+    Expanded,
+}
+
+impl ToolMode {
+    /// Click on the header: Collapsed → Truncated → Expanded → Collapsed.
+    pub fn next(self) -> Option<Self> {
+        match self {
+            Self::Collapsed => Some(Self::Truncated),
+            Self::Truncated => Some(Self::Expanded),
+            Self::Expanded => None,
+        }
+    }
+}
+
+/// Grok ExecuteConfig defaults for truncated shell/tool stdout.
+const FIRST_LINES: usize = 2;
+const LAST_LINES: usize = 3;
 
 pub fn lines(
     name: &str,
@@ -18,10 +42,11 @@ pub fn lines(
     content: &str,
     theme: &Theme,
     width: usize,
-    expanded: bool,
+    mode: ToolMode,
     running: bool,
 ) -> Vec<Line<'static>> {
-    let muted = !expanded && !running;
+    let open = mode != ToolMode::Collapsed;
+    let muted = !open && !running;
     let summary = argument_summary(name, arguments);
     let mut header = if is_shell(name) {
         shell_header(&summary, theme, muted, width)
@@ -29,11 +54,11 @@ pub fn lines(
         collapsed_line(name, &summary, theme, muted, Some(width.saturating_sub(2)))
     };
     prepend_diamond(&mut header, theme);
-    if running && !expanded {
-        header.spans.push(Span::styled("  运行中…".to_string(), theme.muted()));
+    if running && !open {
+        live::mark_running(&mut header, theme);
         return vec![header];
     }
-    if !expanded {
+    if !open {
         return vec![header];
     }
 
@@ -75,7 +100,7 @@ pub fn lines(
         out.push(Line::from(""));
     }
     if running && content.is_empty() {
-        out.push(Line::from(Span::styled("运行中…".to_string(), theme.muted())));
+        out.push(Line::from(live::running_body(theme)));
         return out;
     }
     if content.is_empty() {
@@ -87,7 +112,32 @@ pub fn lines(
         .map(|line| Line::from(Span::styled(line.to_string(), theme.muted())))
         .collect();
     let wrap_w = width.saturating_sub(2).max(20);
-    out.extend(word_wrap_lines(styled, wrap_w));
+    let wrapped = word_wrap_lines(styled, wrap_w);
+    out.extend(apply_truncation(wrapped, mode, theme));
+    out
+}
+
+/// Grok Execute `render_with_truncation`: head + `… +N lines` + tail.
+fn apply_truncation(
+    wrapped: Vec<Line<'static>>,
+    mode: ToolMode,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    if mode != ToolMode::Truncated {
+        return wrapped;
+    }
+    let total = wrapped.len();
+    let threshold = FIRST_LINES + LAST_LINES;
+    if total <= threshold {
+        return wrapped;
+    }
+    let hidden = total - threshold;
+    let mut out: Vec<Line<'static>> = wrapped.iter().take(FIRST_LINES).cloned().collect();
+    out.push(Line::from(Span::styled(
+        format!("\u{2026} +{hidden} lines"),
+        theme.muted(),
+    )));
+    out.extend(wrapped.into_iter().skip(total - LAST_LINES));
     out
 }
 
@@ -96,7 +146,11 @@ fn is_shell(name: &str) -> bool {
 }
 
 fn shell_header(command: &str, theme: &Theme, muted: bool, width: usize) -> Line<'static> {
-    let cmd_style = if muted { theme.muted() } else { theme.primary() };
+    let cmd_style = if muted {
+        theme.muted()
+    } else {
+        theme.primary()
+    };
     let cmd = if command.trim().is_empty() {
         "\u{2026}".to_string()
     } else {
@@ -280,4 +334,69 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
         }
     }
     vec![]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn truncated_hides_middle_lines() {
+        let theme = Theme::current();
+        let body: String = (1..=12).map(|i| format!("L{i:02}\n")).collect();
+        let lines = lines(
+            "bash",
+            r#"{"command":"seq 12"}"#,
+            &body,
+            &theme,
+            80,
+            ToolMode::Truncated,
+            false,
+        );
+        let text = plain(&lines);
+        assert!(text.contains("L01"), "{text}");
+        assert!(text.contains("L02"), "{text}");
+        assert!(text.contains("… +7 lines"), "{text}");
+        assert!(text.contains("L11"), "{text}");
+        assert!(text.contains("L12"), "{text}");
+        assert!(!text.contains("L05"), "{text}");
+    }
+
+    #[test]
+    fn expanded_keeps_middle_lines() {
+        let theme = Theme::current();
+        let body: String = (1..=12).map(|i| format!("L{i:02}\n")).collect();
+        let lines = lines(
+            "bash",
+            r#"{"command":"seq 12"}"#,
+            &body,
+            &theme,
+            80,
+            ToolMode::Expanded,
+            false,
+        );
+        let text = plain(&lines);
+        assert!(text.contains("L05"), "{text}");
+        assert!(!text.contains("+7 lines"), "{text}");
+    }
+
+    #[test]
+    fn mode_cycles_three_ways() {
+        assert_eq!(ToolMode::Collapsed.next(), Some(ToolMode::Truncated));
+        assert_eq!(ToolMode::Truncated.next(), Some(ToolMode::Expanded));
+        assert_eq!(ToolMode::Expanded.next(), None);
+    }
 }

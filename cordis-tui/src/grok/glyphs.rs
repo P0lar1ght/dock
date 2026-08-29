@@ -45,3 +45,15 @@ pub fn token_up() -> &'static str {
 pub fn ballot_x_button() -> &'static str {
     "[\u{2717}]"
 }
+
+/// `"✗"` (U+2717 BALLOT X). Always 1 column.
+/// Copied from grok-build/.../xai-grok-pager-render/src/glyphs.rs (`ballot_x`).
+pub fn ballot_x() -> &'static str {
+    "\u{2717}"
+}
+
+/// `"✓"` (U+2713 CHECK MARK). Always 1 column.
+/// Copied from grok-build/.../xai-grok-pager-render/src/glyphs.rs (`check_mark`).
+pub fn check_mark() -> &'static str {
+    "\u{2713}"
+}

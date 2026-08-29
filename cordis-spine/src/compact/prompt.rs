@@ -1,0 +1,119 @@
+//! grok-build's session-level summarization prompt.
+//!
+//! Copied from `xai-grok-compaction/src/code_compaction/prompt.rs`.
+
+/// Build grok-build's session-level summarization prompt (no chat history).
+///
+/// `user_context` is the optional `/compact <text>` user-provided context,
+/// spliced inline into the structured prompt. Ported verbatim from
+/// `xai-grok-shell::session::helpers::session_compact::build_compaction_prompt`
+/// (the `use_short_prompt == false` branch).
+pub fn build_summary_prompt(user_context: Option<&str>) -> String {
+    let user_context_section = match user_context {
+        Some(context) => format!(
+            "\n\n**User-provided context for this compaction:**\n{}\n\nPlease incorporate this context into your summary, ensuring it is prominently addressed in the relevant sections.\n\n",
+            context
+        ),
+        None => String::new(),
+    };
+
+    include_str!("templates/full_replace_summary_prompt.txt")
+        .replace("{user_context_section}", &user_context_section)
+}
+
+/// The short "self-summarization" prompt variant
+/// (mirrors `xai-grok-shell`'s `SELF_SUMMARIZATION_PROMPT`).
+pub const SELF_SUMMARIZATION_PROMPT: &str = r#"<summary_request>
+Please summarize the conversation so far. This summary (everything after your
+thinking) will be provided to another AI assistant to continue working on the
+task. The other assistant will only see the user's original query and your
+summary, it will not have access to any tool calls or tool outputs from this
+conversation. The purpose of the summary is to compress the conversation
+context while preserving the essential information needed to seamlessly
+continue. Useful things to include: the user's requests, what you've done so
+far, relevant file paths and code details, any errors encountered and how
+they were resolved, and what remains to be done. DO NOT call any tools in
+your response.
+</summary_request>"#;
+
+/// Which summarization prompt a full-replace pass should send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SummaryPromptKind {
+    /// grok-build's detailed, numbered-section summary prompt.
+    #[default]
+    Structured,
+    /// The short self-summarization prompt.
+    SelfSummary,
+}
+
+/// Build the full-replace summarization prompt for the given [`SummaryPromptKind`].
+///
+/// `user_context` is the optional `/compact <text>` user-provided context.
+pub fn build_summary_prompt_kind(kind: SummaryPromptKind, user_context: Option<&str>) -> String {
+    match kind {
+        SummaryPromptKind::Structured => build_summary_prompt(user_context),
+        SummaryPromptKind::SelfSummary => match user_context {
+            Some(ctx) => format!(
+                "{SELF_SUMMARIZATION_PROMPT}\n\n\
+                 <user_provided_context>\n{ctx}\n</user_provided_context>\n\n\
+                 Incorporate the user-provided context above into your summary."
+            ),
+            None => SELF_SUMMARIZATION_PROMPT.to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_prompt_splices_context_section_inline() {
+        let p = build_summary_prompt(Some("focus on auth"));
+        assert!(p.contains("**User-provided context for this compaction:**\nfocus on auth"));
+        assert!(p.contains("1. Primary Request and Intent"));
+        assert!(p.contains("9. Optional Next Step"));
+    }
+
+    #[test]
+    fn summary_prompt_without_context_has_no_context_header() {
+        let p = build_summary_prompt(None);
+        assert!(!p.contains("**User-provided context for this compaction:**"));
+        assert!(p.contains("6. All User Messages"));
+        assert!(p.contains("do NOT emit a separate analysis block"));
+        assert!(p.contains("faithful, concise summary"));
+    }
+
+    #[test]
+    fn kind_structured_matches_build_summary_prompt() {
+        assert_eq!(
+            build_summary_prompt_kind(SummaryPromptKind::Structured, None),
+            build_summary_prompt(None)
+        );
+        assert_eq!(
+            build_summary_prompt_kind(SummaryPromptKind::Structured, Some("focus on auth")),
+            build_summary_prompt(Some("focus on auth"))
+        );
+    }
+
+    #[test]
+    fn kind_self_summary_without_context_is_bare_prompt() {
+        let p = build_summary_prompt_kind(SummaryPromptKind::SelfSummary, None);
+        assert_eq!(p, SELF_SUMMARIZATION_PROMPT);
+        assert!(p.contains("<summary_request>"));
+        assert!(!p.contains("1. Primary Request and Intent"));
+    }
+
+    #[test]
+    fn kind_self_summary_with_context_appends_sibling_block() {
+        let p = build_summary_prompt_kind(SummaryPromptKind::SelfSummary, Some("focus on auth"));
+        assert!(p.starts_with(SELF_SUMMARIZATION_PROMPT));
+        assert!(p.contains("<user_provided_context>\nfocus on auth\n</user_provided_context>"));
+        assert!(p.contains("Incorporate the user-provided context above"));
+    }
+
+    #[test]
+    fn default_kind_is_structured() {
+        assert_eq!(SummaryPromptKind::default(), SummaryPromptKind::Structured);
+    }
+}

@@ -1,10 +1,18 @@
 //! Copied from grok-build/.../xai-grok-pager-render/src/render/color.rs
 //! (`blend_channel`, `blend_color`, `blend_area`, `dim_area`).
-//! Indexed→256 quantization omitted; GrokNight is RGB.
+//! `pulse_brightness` is Grok `tokyonight.rs`. Indexed→256 omitted; GrokNight is RGB.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
+
+/// Dock shimmer is 80ms (~12.5 fps). Grok `USER_WAITING_PULSE_SPEED` is 0.08 at
+/// ~30 fps; scale so a `sin²` cycle stays about 1.3s.
+const SHIMMER_PULSE_SPEED: f32 = 0.192;
+/// Grok appearance `dim_accent` default for collapsed running bullets.
+const DIM_ACCENT: f32 = 0.5;
 
 fn color_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
     match color {
@@ -28,6 +36,26 @@ pub fn blend_color(base: Color, original: Color, opacity: f32) -> Option<Color> 
         blend_channel(base_g, orig_g, opacity),
         blend_channel(base_b, orig_b, opacity),
     ))
+}
+
+/// Grok `pulse_brightness`: `sin²(tick * speed)` in `[0, 1]`.
+pub fn pulse_brightness(tick: u64, speed: f32) -> f32 {
+    let sin_val = (tick as f32 * speed).sin();
+    sin_val * sin_val
+}
+
+pub fn shimmer_tick() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64 / 80)
+        .unwrap_or(0)
+}
+
+/// Running ◆: pre-dim like Grok collapsed bullets, then pulse toward `bg`.
+pub fn pulse_fg(bg: Color, accent: Color) -> Color {
+    let dimmed = blend_color(bg, accent, DIM_ACCENT).unwrap_or(accent);
+    let brightness = pulse_brightness(shimmer_tick(), SHIMMER_PULSE_SPEED);
+    blend_color(bg, dimmed, 0.3 + brightness * 0.7).unwrap_or(dimmed)
 }
 
 /// Each parameter is `Option<(target, opacity)>`. Named ANSI colors are left
@@ -78,6 +106,15 @@ mod tests {
         assert_eq!(blend_channel(0, 255, 0.0), 0);
         assert_eq!(blend_channel(0, 255, 1.0), 255);
         assert_eq!(blend_channel(0, 100, 0.5), 50);
+    }
+
+    #[test]
+    fn pulse_brightness_range() {
+        assert!((pulse_brightness(0, 0.08) - 0.0).abs() < f32::EPSILON);
+        for tick in 0..200 {
+            let b = pulse_brightness(tick, 0.08);
+            assert!((0.0..=1.0).contains(&b), "tick={tick} b={b}");
+        }
     }
 
     #[test]

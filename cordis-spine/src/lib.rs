@@ -5,12 +5,15 @@
 //! disposing that one plugin and mounting another that injects the same five.
 
 mod acp;
+mod agent_presets;
 mod agents;
 mod ask_user;
 mod bundle;
 mod chat_chunk;
+mod compact;
 mod config;
 mod cron;
+mod dynamic_runner;
 mod error;
 mod goal;
 mod http;
@@ -29,26 +32,42 @@ mod runtime;
 mod sched;
 mod session;
 mod settings;
+mod slash;
 mod stream_acc;
 mod task;
 mod todo_write;
+mod tool_cordis;
 mod tools;
+mod tui_slots;
 mod turn;
 mod types;
+mod usage;
 mod web_fetch;
+mod workflow;
 mod workspace;
 
 pub use acp::PermissionOptionKind;
+pub use agent_presets::{
+    agent_presets, blocked_tool_message, is_shipped, AgentPreset, AgentPresets, PresetOrigin,
+    SubagentDef, CORDIS_PRESET_ID, DEFAULT_PRESET_ID, MINIMAL_PRESET_ID, WARDEN_PRESET_ID,
+};
 pub use agents::{agents, Agent, Agents};
 pub use ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
 pub use bundle::{
-    install_app, install_core, install_fakes, install_foundation, install_spine, install_without_llm,
+    install_app, install_core, install_fakes, install_foundation, install_spine,
+    install_without_llm,
 };
+pub use compact::{compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
 pub use config::{load_catalog, load_mcp_servers, McpServer, ModelChoice};
 pub use cron::{cron, Cron, CronJob};
+pub use dynamic_runner::{
+    builtins_lines, dynamic_runner, DynEcho, DynNote, DynamicRunner, PluginReference, RhaiBag,
+    RhaiBags, RunMode, DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
+};
 pub use error::{Error, Result};
 pub use goal::{
-    goal_instruction, goal_usage_message, tool_goal, Goal, GOAL_RESERVED_SUBCOMMANDS,
+    goal_composer_fill, goal_continuation_directive, goal_instruction, goal_usage_message,
+    tool_goal, Goal, GOAL_RESERVED_SUBCOMMANDS,
 };
 pub use jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
 pub use llm::{llm, Llm, LlmConfig, LlmMode, Sampler};
@@ -58,24 +77,36 @@ pub use mcp::{mcp_client, Mcp, McpStatus};
 pub use memory::tool_memory;
 pub use monitor::tool_monitor;
 pub use names::{
-    AGENT_LOOP, AGENTS, ASK, ASK_EVENT, CRON, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MEMORY,
-    PERMISSIONS, PERMISSION_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, SESSIONS, SESSION_EVENT,
-    SETTINGS, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TURN,
+    AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, COMPACT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL,
+    JOBS, LLM, LLM_STREAM, LSP, MCP, MEMORY, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE,
+    PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS, SESSIONS, SESSION_EVENT, SETTINGS, SLASH, SUBAGENTS,
+    SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TUI_SLOTS, TURN, WORKFLOWS,
 };
-pub use stream_acc::StreamDelta;
-pub use turn::{turn, TurnControl};
 pub use permissions::{permissions, PermissionPrompt, Permissions};
-pub use plan_mode::{plan_mode, PlanMode};
+pub use plan_mode::{
+    is_plan_file_edit, plan_instruction, plan_mode, plan_system_addon, PlanApprovalPrompt,
+    PlanDecision, PlanMode, PlanPhase, PLAN_REL,
+};
 pub use prompt::{system_prompt, SystemPrompt};
 pub use runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
 pub use sched::tool_scheduler;
 pub use session::{sessions, ArchivedSession, Sessions, TokenUsage};
 pub use settings::{settings, AppSettings, MermaidEngineKind, PermissionMode};
-pub use task::{tool_task, SubagentSnap, Subagents};
+pub use slash::{
+    slash, slash_name_reserved, tool_slash_arguments, ExtraSlashKind, Slash, SlashEntry,
+    RESERVED_SLASH,
+};
+pub use stream_acc::StreamDelta;
+pub use task::{tool_subagent, tool_task, SubagentSnap, Subagents};
 pub use todo_write::{tool_todo, TodoItem, TodoStatus, Todos};
+pub use tool_cordis::tool_cordis;
 pub use tools::{own_registered, tools, workspace_tools, ToolBody, Tools};
+pub use tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
+pub use turn::{turn, TurnControl};
 pub use types::{
     LlmOutput, LogEvent, PreStep, PromptRequest, ToolCall, ToolResult, ToolSpec, TurnOutcome,
-    UserImage,
+    UserImage, INTERRUPTED_TOOL_RESULT,
 };
+pub use usage::{session_usage_block_text, PromptUsage, UsageLedger};
 pub use web_fetch::tool_web;
+pub use workflow::{tool_workflow, WorkflowRunSnap, Workflows};

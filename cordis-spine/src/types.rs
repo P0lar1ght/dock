@@ -1,5 +1,10 @@
 use std::fmt;
 
+/// Fills a cancelled assistant `tool_calls` row so the next sample is a valid
+/// OpenAI conversation. Providers 400 with "tool call result does not follow
+/// tool call" if a user message follows unmatched `tool_calls`.
+pub const INTERRUPTED_TOOL_RESULT: &str = "已中断。";
+
 /// Durable session log events. Grok persists conversation items; DSH persists
 /// a typed event log. This is the thin shared shape.
 
@@ -16,6 +21,9 @@ pub enum LogEvent {
     User(String),
     PreStep,
     Prompt(String),
+    /// Grok `PromptOrigin::GoalSummary`: hidden from the pager, sent as a
+    /// user-role reminder so the model keeps an active `/goal` turn going.
+    SystemReminder(String),
     LlmStream(LlmOutput),
     ToolExecute {
         id: String,
@@ -31,6 +39,7 @@ impl LogEvent {
             Self::User(_) => "user",
             Self::PreStep => "pre-step",
             Self::Prompt(_) => "prompt",
+            Self::SystemReminder(_) => "system-reminder",
             Self::LlmStream(_) => "llm/stream",
             Self::ToolExecute { .. } => "tools/execute",
         }
@@ -43,6 +52,7 @@ impl fmt::Display for LogEvent {
             Self::User(text) => write!(f, "user: {text}"),
             Self::PreStep => write!(f, "pre-step"),
             Self::Prompt(text) => write!(f, "prompt: {text}"),
+            Self::SystemReminder(text) => write!(f, "reminder: {text}"),
             Self::LlmStream(out) => write!(f, "llm: {}", out.summary()),
             Self::ToolExecute { name, content, .. } => write!(f, "tool {name}: {content}"),
         }

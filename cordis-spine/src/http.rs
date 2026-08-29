@@ -14,7 +14,9 @@ use crate::session::Sessions;
 use crate::settings::AppSettings;
 use crate::stream_acc::{take_sse_data, ChatStreamAcc, StreamDelta};
 use crate::turn::TurnControl;
-use crate::types::{LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage};
+use crate::types::{
+    LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
+};
 
 use cordis::Context;
 
@@ -60,8 +62,13 @@ async fn sample_http(
     }
     let prompt_est = estimate_prompt_tokens(&request);
     on_delta(StreamDelta::Usage {
-        prompt: prompt_est,
-        completion: 0,
+        tokens: crate::usage::TokenUsage {
+            prompt_tokens: prompt_est,
+            ..crate::usage::TokenUsage::default()
+        },
+        official: false,
+        model: model.clone(),
+        cost_usd_ticks: None,
     });
     let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
     let user_images = sampler
@@ -81,8 +88,8 @@ async fn sample_http(
                 .tools
                 .iter()
                 .map(|t| {
-                    let parameters: Value =
-                        serde_json::from_str(&t.parameters_json).unwrap_or(json!({"type":"object"}));
+                    let parameters: Value = serde_json::from_str(&t.parameters_json)
+                        .unwrap_or(json!({"type":"object"}));
                     json!({
                         "type": "function",
                         "function": {
@@ -284,7 +291,9 @@ fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
     bump(&request.system, &mut ascii, &mut other);
     for event in &request.history {
         match event {
-            LogEvent::User(t) | LogEvent::Prompt(t) => bump(t, &mut ascii, &mut other),
+            LogEvent::User(t) | LogEvent::Prompt(t) | LogEvent::SystemReminder(t) => {
+                bump(t, &mut ascii, &mut other)
+            }
             LogEvent::LlmStream(out) => bump(&out.text, &mut ascii, &mut other),
             LogEvent::ToolExecute { content, .. } => bump(content, &mut ascii, &mut other),
             LogEvent::PreStep => {}
@@ -296,14 +305,21 @@ fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
 fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Value> {
     let mut out = vec![json!({"role":"system","content": request.system})];
     let mut user_i = 0usize;
+    let mut pending: Vec<String> = Vec::new();
     for event in &request.history {
         match event {
             LogEvent::User(text) => {
+                flush_unmatched_tools(&mut out, &mut pending);
                 let images = user_images.get(user_i).cloned().unwrap_or_default();
                 user_i += 1;
                 out.push(user_message(text, &images));
             }
+            LogEvent::SystemReminder(text) => {
+                flush_unmatched_tools(&mut out, &mut pending);
+                out.push(user_message(text, &[]));
+            }
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() => {
+                flush_unmatched_tools(&mut out, &mut pending);
                 let tool_calls: Vec<Value> = llm
                     .tool_calls
                     .iter()
@@ -326,19 +342,37 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Valu
                     msg["content"] = json!(llm.text);
                 }
                 out.push(msg);
+                pending = llm.tool_calls.iter().map(|c| c.id.clone()).collect();
             }
             LogEvent::LlmStream(llm) if !llm.text.is_empty() => {
+                flush_unmatched_tools(&mut out, &mut pending);
                 out.push(json!({"role":"assistant","content": llm.text}));
             }
-            LogEvent::ToolExecute { id, content, .. } => out.push(json!({
-                "role": "tool",
-                "tool_call_id": id,
-                "content": content,
-            })),
+            LogEvent::ToolExecute { id, content, .. } => {
+                if let Some(i) = pending.iter().position(|p| p == id) {
+                    pending.remove(i);
+                    out.push(json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": content,
+                    }));
+                }
+            }
             LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::LlmStream(_) => {}
         }
     }
+    flush_unmatched_tools(&mut out, &mut pending);
     out
+}
+
+fn flush_unmatched_tools(out: &mut Vec<Value>, pending: &mut Vec<String>) {
+    for id in pending.drain(..) {
+        out.push(json!({
+            "role": "tool",
+            "tool_call_id": id,
+            "content": INTERRUPTED_TOOL_RESULT,
+        }));
+    }
 }
 
 fn user_message(text: &str, images: &[UserImage]) -> Value {
@@ -374,10 +408,7 @@ fn parse_chat_completion(body: &str) -> LlmOutput {
         };
     };
     let message = &v["choices"][0]["message"];
-    let text = message["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let text = message["content"].as_str().unwrap_or("").to_string();
     let reasoning = message["reasoning_content"]
         .as_str()
         .or_else(|| message["reasoning"].as_str())
@@ -433,5 +464,49 @@ mod tests {
         let out = parse_chat_completion(body);
         assert_eq!(out.tool_calls[0].name, "list_dir");
         assert!(out.tool_calls[0].arguments.contains("target_directory"));
+    }
+
+    #[test]
+    fn messages_inserts_stubs_before_user_after_unmatched_tool_calls() {
+        let req = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "c1".into(),
+                            name: "bash".into(),
+                            arguments: "{}".into(),
+                        },
+                        ToolCall {
+                            id: "c2".into(),
+                            name: "read".into(),
+                            arguments: "{}".into(),
+                        },
+                    ],
+                    ..LlmOutput::default()
+                }),
+                LogEvent::ToolExecute {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    content: "ok".into(),
+                },
+                LogEvent::User("follow-up".into()),
+            ],
+            tools: vec![],
+        };
+        let msgs = messages(&req, &[]);
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["tool_call_id"], "c1");
+        assert_eq!(msgs[3]["content"], "ok");
+        assert_eq!(msgs[4]["role"], "tool");
+        assert_eq!(msgs[4]["tool_call_id"], "c2");
+        assert_eq!(msgs[4]["content"], INTERRUPTED_TOOL_RESULT);
+        assert_eq!(msgs[5]["role"], "user");
+        assert_eq!(msgs[5]["content"], "follow-up");
     }
 }

@@ -119,11 +119,17 @@ async fn connect_and_list(server: &McpServer) -> Result<(Vec<(String, String)>, 
     }));
     {
         let mut s = session.lock().await;
-        let init = tokio::time::timeout(Duration::from_secs(8), s.rpc("initialize", json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "dock", "version": "0.1.0" }
-        })))
+        let init = tokio::time::timeout(
+            Duration::from_secs(8),
+            s.rpc(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "dock", "version": "0.1.0" }
+                }),
+            ),
+        )
         .await
         .map_err(|_| "initialize timeout".to_string())?
         .map_err(|e| format!("initialize: {e}"))?;
@@ -164,10 +170,7 @@ async fn connect_and_list(server: &McpServer) -> Result<(Vec<(String, String)>, 
                 let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
                 let mut s = session.lock().await;
                 match s
-                    .rpc(
-                        "tools/call",
-                        json!({ "name": raw_name, "arguments": args }),
-                    )
+                    .rpc("tools/call", json!({ "name": raw_name, "arguments": args }))
                     .await
                 {
                     Ok(v) => {
@@ -221,7 +224,10 @@ impl McpSession {
             .write_all(head.as_bytes())
             .await
             .map_err(|e| e.to_string())?;
-        self.stdin.write_all(&body).await.map_err(|e| e.to_string())?;
+        self.stdin
+            .write_all(&body)
+            .await
+            .map_err(|e| e.to_string())?;
         self.stdin.flush().await.map_err(|e| e.to_string())
     }
 

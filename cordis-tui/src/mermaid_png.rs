@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xai_grok_mermaid::{
-    default_engine, render_checked, MmdcEngine, MermaidEngine, MermaidTheme, RenderLimits,
+    default_engine, render_checked, MermaidEngine, MermaidTheme, MmdcEngine, RenderLimits,
     RenderParams,
 };
 

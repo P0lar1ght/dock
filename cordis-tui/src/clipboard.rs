@@ -86,9 +86,7 @@ pub fn paste_from_clipboard() -> PastePayload {
     }
     match paste_image() {
         Some(img) => PastePayload::Image(img),
-        None => text
-            .map(PastePayload::Text)
-            .unwrap_or(PastePayload::Empty),
+        None => text.map(PastePayload::Text).unwrap_or(PastePayload::Empty),
     }
 }
 
@@ -151,7 +149,8 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
             {
                 out.push(v as char);
                 i += 3;

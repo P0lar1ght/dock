@@ -58,13 +58,19 @@ pub fn render(
     buf.set_line(
         content_x,
         y,
-        &Line::from(Span::styled(format!("允许使用 {}？", prompt.tool), title_style)),
+        &Line::from(Span::styled(
+            format!("允许使用 {}？", prompt.tool),
+            title_style,
+        )),
         content_w,
     );
     y = y.saturating_add(1);
 
     let summary_style = Style::default().fg(theme.gray).bg(theme.bg_light);
-    for line in wrap_line(&prompt.summary, content_w as usize).into_iter().take(3) {
+    for line in wrap_line(&prompt.summary, content_w as usize)
+        .into_iter()
+        .take(3)
+    {
         if y >= area.y + area.height {
             break;
         }

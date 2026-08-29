@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
 use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::live;
 use crate::theme::Theme;
 
 const TRUNCATED_LINES: usize = 3;
@@ -24,6 +25,9 @@ pub fn lines(
     }
     let mut header = header_line(elapsed_ms, streaming, expanded, theme);
     prepend_diamond(&mut header, theme);
+    if streaming {
+        live::pulse_diamond_color(&mut header, theme, theme.accent_thinking);
+    }
     if width > 0 {
         header = truncate_line(header, width);
     }
@@ -52,7 +56,10 @@ fn header_line(
         theme.muted().add_modifier(Modifier::BOLD)
     };
     let mut spans = if streaming {
-        vec![Span::styled("思考中…".to_string(), label_style)]
+        vec![Span::styled(
+            format!("思考中{}", live::running_dots()),
+            label_style,
+        )]
     } else if let Some(ms) = elapsed_ms {
         vec![
             Span::styled("思考".to_string(), label_style),
@@ -128,7 +135,12 @@ mod tests {
     fn plain(lines: &[Line<'_>]) -> String {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -218,17 +218,18 @@ mod tests {
         let m = DomainMatcher::new(&["vercel.com/docs".into()]);
         assert!(m.check(&url("https://vercel.com/docs")).is_none());
         assert!(m.check(&url("https://vercel.com/docs/foo")).is_none());
-        assert!(
-            m.check(&url("https://vercel.com/docs/platform/edge-functions"))
-                .is_none()
-        );
+        assert!(m
+            .check(&url("https://vercel.com/docs/platform/edge-functions"))
+            .is_none());
     }
 
     #[test]
     fn path_scoped_blocks_non_matching_path() {
         let m = DomainMatcher::new(&["vercel.com/docs".into()]);
         let blocked = m.check(&url("https://vercel.com/api"));
-        assert!(matches!(blocked, Some(DomainNotAllowed::DomainNotAllowed(h)) if h == "vercel.com"));
+        assert!(
+            matches!(blocked, Some(DomainNotAllowed::DomainNotAllowed(h)) if h == "vercel.com")
+        );
         assert!(m.check(&url("https://vercel.com/")).is_some());
     }
 
@@ -236,7 +237,9 @@ mod tests {
     fn path_scoped_blocks_wrong_host() {
         let m = DomainMatcher::new(&["vercel.com/docs".into()]);
         let blocked = m.check(&url("https://netlify.com/docs"));
-        assert!(matches!(blocked, Some(DomainNotAllowed::DomainNotAllowed(h)) if h == "netlify.com"));
+        assert!(
+            matches!(blocked, Some(DomainNotAllowed::DomainNotAllowed(h)) if h == "netlify.com")
+        );
     }
 
     #[test]
@@ -284,18 +287,15 @@ mod tests {
     #[test]
     fn multiple_path_prefixes_per_host() {
         let m = DomainMatcher::new(&["github.com/org-a".into(), "github.com/org-b".into()]);
-        assert!(
-            m.check(&url("https://github.com/org-a/project-one"))
-                .is_none()
-        );
-        assert!(
-            m.check(&url("https://github.com/org-b/project-two"))
-                .is_none()
-        );
-        assert!(
-            m.check(&url("https://github.com/evil-org/malware"))
-                .is_some()
-        );
+        assert!(m
+            .check(&url("https://github.com/org-a/project-one"))
+            .is_none());
+        assert!(m
+            .check(&url("https://github.com/org-b/project-two"))
+            .is_none());
+        assert!(m
+            .check(&url("https://github.com/evil-org/malware"))
+            .is_some());
     }
 
     #[test]
@@ -319,16 +319,14 @@ mod tests {
 
         // Should match.
         assert!(m.check(&url("https://react.dev")).is_none());
-        assert!(
-            m.check(&url("https://docs.python.org/3/library/asyncio.html"))
-                .is_none()
-        );
-        assert!(
-            m.check(&url(
+        assert!(m
+            .check(&url("https://docs.python.org/3/library/asyncio.html"))
+            .is_none());
+        assert!(m
+            .check(&url(
                 "https://developer.mozilla.org/en-US/docs/Web/API/fetch?v=2#syntax"
             ))
-            .is_none()
-        );
+            .is_none());
         assert!(m.check(&url("https://react.dev/")).is_none());
         assert!(m.check(&url("https://React.Dev/learn")).is_none());
         assert!(m.check(&url("https://api.example.com/v1/users")).is_none());
@@ -339,10 +337,9 @@ mod tests {
         assert!(m.check(&url("https://example.com/page")).is_some());
         assert!(m.check(&url("https://evil.example.com/")).is_some());
         assert!(m.check(&url("https://react-dev.com/")).is_some());
-        assert!(
-            m.check(&url("https://stackoverflow.com/questions/123"))
-                .is_some()
-        );
+        assert!(m
+            .check(&url("https://stackoverflow.com/questions/123"))
+            .is_some());
         assert!(m.check(&url("https://93.184.216.34/page")).is_some());
     }
 

@@ -281,15 +281,13 @@ mod tests {
         let start = Instant::now();
         pending.mark(1, A, 0, start);
 
-        assert!(
-            pending
-                .take_answered(
-                    SERVER,
-                    &store,
-                    start + VERDICT_TTL - Duration::from_millis(1)
-                )
-                .is_empty()
-        );
+        assert!(pending
+            .take_answered(
+                SERVER,
+                &store,
+                start + VERDICT_TTL - Duration::from_millis(1)
+            )
+            .is_empty());
         assert!(pending.contains(A), "still within its time");
 
         assert!(
@@ -317,11 +315,9 @@ mod tests {
         assert_eq!(pending.take_answered(SERVER, &store, start), vec![A]);
         assert_eq!(pending.len(), 1, "b is still owed");
 
-        assert!(
-            pending
-                .take_answered(SERVER, &store, start + VERDICT_TTL)
-                .is_empty()
-        );
+        assert!(pending
+            .take_answered(SERVER, &store, start + VERDICT_TTL)
+            .is_empty());
         assert!(pending.is_empty(), "and eventually let go of");
     }
 
@@ -377,8 +373,8 @@ mod tests {
         let mut now = start;
 
         pending.mark(1, A, 1, now); // never answered
-        // Several stretches longer than the server's patience, all well within
-        // the stuck file's own deadline.
+                                    // Several stretches longer than the server's patience, all well within
+                                    // the stuck file's own deadline.
         for round in 1..3 {
             pending.mark(1, B, round, now);
             store.install(B, Answer::new(vec![diagnostic()], round, None));

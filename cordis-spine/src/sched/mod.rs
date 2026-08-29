@@ -115,11 +115,7 @@ fn create_job(ctx: &Context, call: ToolCall) -> ToolResult {
     let id = cron.add(Duration::from_secs(secs), prompt);
     tool_result(
         call,
-        format!(
-            "scheduled {id} {}\n{}",
-            interval_to_human(secs),
-            prompt
-        ),
+        format!("scheduled {id} {}\n{}", interval_to_human(secs), prompt),
     )
 }
 

@@ -22,6 +22,7 @@ pub fn needs_permission(tool: &str) -> bool {
             | "scheduler_create"
             | "kill_task"
             | "monitor"
+            | "cordis_run"
     )
 }
 
@@ -36,6 +37,7 @@ pub fn blocked_in_plan(tool: &str) -> bool {
             | "scheduler_create"
             | "kill_task"
             | "monitor"
+            | "cordis_run"
     )
 }
 
@@ -55,6 +57,10 @@ mod tests {
         assert!(needs_permission("write_file"));
         assert!(!needs_permission("read_file"));
         assert!(!needs_permission("list_dir"));
+        assert!(needs_permission("cordis_run"));
+        assert!(!needs_permission("cordis_inspect"));
+        assert!(blocked_in_plan("cordis_run"));
+        assert!(!blocked_in_plan("cordis_inspect"));
     }
 
     #[test]

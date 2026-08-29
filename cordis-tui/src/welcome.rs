@@ -30,13 +30,15 @@ const MENU: [(&str, &str, WelcomeHit); 3] = [
     ("ctrl+q", "退出", WelcomeHit::Quit),
 ];
 
-const LOGO: &str = include_str!("../assets/logo/logo07.txt");
-const LOGO_SMALL: &str = include_str!("../assets/logo/logo05.txt");
+const LOGO: &str = include_str!("../assets/logo/logo16.txt");
+const LOGO_MID: &str = include_str!("../assets/logo/logo12.txt");
+const LOGO_SMALL: &str = include_str!("../assets/logo/logo07.txt");
 const TITLE: &str = "Dock";
 
 /// Thresholds are the welcome pane height (already minus status/prompt/hints).
-const SMALL_LOGO_MIN_HEIGHT: u16 = 10;
-const FULL_LOGO_MIN_HEIGHT: u16 = 14;
+const SMALL_LOGO_MIN_HEIGHT: u16 = 12;
+const MID_LOGO_MIN_HEIGHT: u16 = 18;
+const FULL_LOGO_MIN_HEIGHT: u16 = 24;
 
 pub struct Welcome {
     ctx: Context,
@@ -146,8 +148,10 @@ impl Widget for &Welcome {
 fn pick_logo(window_height: u16) -> Option<&'static str> {
     if window_height < SMALL_LOGO_MIN_HEIGHT {
         None
-    } else if window_height < FULL_LOGO_MIN_HEIGHT {
+    } else if window_height < MID_LOGO_MIN_HEIGHT {
         Some(LOGO_SMALL)
+    } else if window_height < FULL_LOGO_MIN_HEIGHT {
+        Some(LOGO_MID)
     } else {
         Some(LOGO)
     }
@@ -405,8 +409,11 @@ mod tests {
     }
 
     #[test]
-    fn short_pane_still_uses_full_logo() {
-        assert_eq!(pick_logo(18).map(count_lines), Some(7));
+    fn logo_tiers_grow_with_pane() {
+        assert_eq!(pick_logo(11), None);
+        assert_eq!(pick_logo(14).map(count_lines), Some(7));
+        assert_eq!(pick_logo(18).map(count_lines), Some(12));
+        assert_eq!(pick_logo(24).map(count_lines), Some(16));
     }
 
     #[test]

@@ -10,34 +10,45 @@ pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
 /// Copied from `xai-grok-tools-api::slash_commands`.
 pub const GOAL_RESERVED_SUBCOMMANDS: &[&str] = &["status", "pause", "resume", "clear", "edit"];
 
-/// Copied from `xai-grok-tools-api::slash_commands::goal_usage_message`.
+/// 斜杠 `/goal` 注入给模型的说明（工具名保持英文）。
 pub fn goal_usage_message() -> &'static str {
-    "Usage: /goal <objective>\n\
-     Set an objective to work toward until it is complete."
+    "用法: /goal <目标>\n\
+     设定一个目标，一直做到完成为止。"
 }
 
-/// Copied from `xai-grok-tools-api::slash_commands::goal_instruction`.
+/// Bare `/goal` 回车后留在输入框里：用法可见，光标在 `/goal ` 后。
+pub fn goal_composer_fill() -> String {
+    format!("{}\n/goal ", goal_usage_message())
+}
+
+/// 斜杠 `/goal` 注入给模型的说明（工具名保持英文）。
 pub fn goal_instruction(objective: &str) -> String {
     format!(
-        "# /goal -- pursue an objective\n\n\
-         A goal has been set: {objective}\n\n\
-         Work directly on this goal and carry it as far as you can. Deliver \
-         everything the user asked for yourself: no follow-up questions, no \
-         manual steps left for the user. If the conversation continues, keep \
-         pursuing the goal until it is complete.\n\n\
-         TRACKING: break the objective into concrete steps and track them \
-         (use your todo tool if one is available), marking each done as you \
-         finish it.\n\n\
-         VERIFY AS YOU GO: test each change on the real path before moving on. \
-         A completion claim must be backed by evidence produced in this \
-         session, not assumptions.\n\n\
-         Call update_goal(completed: true, message: \"summary\") ONLY when the \
-         goal is fully achieved. Call update_goal(blocked_reason: \"reason\") \
-         only when truly stuck after 3+ consecutive failed attempts at the \
-         same problem. Call update_goal(message: \"status note\") to log \
-         progress along the way. If update_goal returns an error, continue \
-         working the goal and report status in your reply instead.\n\n\
-         Start now."
+        "# /goal — 追求目标\n\n\
+         已设定目标：{objective}\n\n\
+         请直接推进这个目标，能做多远做多远。用户要的东西由你自己交付：不要追问、不要把手工步骤留给用户。如果对话继续，就一直做到目标完成为止。\n\n\
+         跟踪：把目标拆成具体步骤，有 todo 工具就用来跟踪，做完一项标完成一项。\n\n\
+         边做边验证：每改一处都要在真实路径上测过再往下走。声称完成必须有本会话里产出的证据，不能靠假设。\n\n\
+         只有目标真正达成时才调用 update_goal(completed: true, message: \"摘要\")。只有同一问题连续失败 3 次以上、确实卡住时才调用 update_goal(blocked_reason: \"原因\")。过程中可用 update_goal(message: \"进展\") 记一笔。如果 update_goal 返回错误，继续做目标，并在回复里报告状态。\n\n\
+         现在开始。"
+    )
+}
+
+/// Grok `GOAL_CONTINUATION_SENTINEL` + slim Chinese body. Hidden from the
+/// pager (`LogEvent::SystemReminder`); the HTTP mapper sends it as the next
+/// user-role message so an active goal does not end on the first text sample.
+pub const GOAL_CONTINUATION_SENTINEL: &str = "Goal NOT complete — continue working. Next step:";
+
+pub fn goal_continuation_directive(objective: &str) -> String {
+    format!(
+        "<system-reminder>\n\
+         <goal-state>\n\
+         Objective: {objective}\n\
+         Status: Active\n\
+         </goal-state>\n\n\
+         {GOAL_CONTINUATION_SENTINEL}\n\
+         继续推进这个目标，不要停下来向用户确认。有 todo 就看列表做下一步。只有真正完成时才调用 update_goal(completed: true)。\n\
+         </system-reminder>"
     )
 }
 
@@ -51,7 +62,10 @@ pub struct GoalToolError {
 
 impl GoalToolError {
     pub fn custom(kind: &'static str, detail: impl Into<String>) -> Self {
-        Self { kind, detail: detail.into() }
+        Self {
+            kind,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -61,10 +75,7 @@ impl GoalToolError {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateGoalInput {
-    #[serde(
-        default,
-        deserialize_with = "deserialize_lenient_option_bool"
-    )]
+    #[serde(default, deserialize_with = "deserialize_lenient_option_bool")]
     #[schemars(
         description = "Set to true ONLY when the goal is fully achieved. This ends goal mode. Use together with `message` to include a completion summary."
     )]
@@ -235,9 +246,7 @@ pub struct UpdateGoalOutput {
 
 /// Map an [`UpdateGoalAck`] to the model-facing tool result. Public
 /// so host session tests can assert the same model-facing strings.
-pub fn render_ack_into_output(
-    ack: UpdateGoalAck,
-) -> Result<UpdateGoalOutput, GoalToolError> {
+pub fn render_ack_into_output(ack: UpdateGoalAck) -> Result<UpdateGoalOutput, GoalToolError> {
     match ack {
         UpdateGoalAck::Accepted { summary } => Ok(UpdateGoalOutput {
             success: true,
@@ -299,16 +308,14 @@ pub fn render_ack_into_output(
                  — goal auto-paused. Review {details_path}; the user must resume."
             ),
         )),
-        UpdateGoalAck::ClassifierBlocked { details_path } => {
-            Err(GoalToolError::custom(
-                "goal_classifier_blocked",
-                format!(
-                    "Goal verification found no model-fixable path (objective/plan contradiction or \
+        UpdateGoalAck::ClassifierBlocked { details_path } => Err(GoalToolError::custom(
+            "goal_classifier_blocked",
+            format!(
+                "Goal verification found no model-fixable path (objective/plan contradiction or \
                  evidence that cannot be captured here) — goal paused for your decision. \
                  See {details_path}"
-                ),
-            ))
-        }
+            ),
+        )),
         UpdateGoalAck::ClassifierConcurrentInFlight {
             details_path,
             attempt,
@@ -339,10 +346,9 @@ pub fn render_ack_into_output(
                  again until you see it."
             ),
         }),
-        UpdateGoalAck::Rejected { reason, detail } => Err(GoalToolError::custom(
-            reason.error_code(),
-            detail,
-        )),
+        UpdateGoalAck::Rejected { reason, detail } => {
+            Err(GoalToolError::custom(reason.error_code(), detail))
+        }
     }
 }
 
@@ -439,5 +445,13 @@ mod tests {
             ..empty_input()
         };
         assert_eq!(build_summary(&input), "Goal updated.");
+    }
+
+    #[test]
+    fn composer_fill_keeps_usage_and_slash() {
+        let fill = goal_composer_fill();
+        assert!(fill.contains("用法: /goal <目标>"), "{fill}");
+        assert!(fill.contains('\n'), "{fill}");
+        assert!(fill.ends_with("/goal "), "{fill}");
     }
 }

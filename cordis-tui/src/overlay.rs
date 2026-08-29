@@ -1,12 +1,18 @@
 //! Resume / help / history / find overlays on Grok picker chrome.
 
-use cordis_spine::ArchivedSession;
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use cordis_spine::{ArchivedSession, PlanApprovalPrompt, SlashEntry};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 
 use crate::grok::picker::{
     render_floating_frame, render_fullscreen_frame, render_picker_list, PickerHits, PickerRow,
 };
+use crate::grok::tasks_pane::GroupKind;
+use crate::plan_approval_view::PlanWrapCache;
+use crate::preset_overlay::{CanvasState, PresetPane, PresetView};
 use crate::settings_modal::SettingsField;
 use crate::slash::{ArgKind, SlashCmd};
 use crate::theme::Theme;
@@ -51,14 +57,96 @@ pub enum Overlay {
     Tasks {
         selected: usize,
         query: String,
+        collapsed: HashSet<GroupKind>,
     },
     Mcps {
         selected: usize,
         query: String,
     },
+    Workflows {
+        selected: usize,
+        query: String,
+    },
+    Goal {
+        selected: usize,
+        editing: bool,
+        draft: String,
+    },
+    /// Plan approval / `/view-plan` preview (Permission-style chrome).
+    PlanApproval {
+        selected: usize,
+        view_only: bool,
+        /// Wrapped-line scroll offset into the plan body.
+        scroll: usize,
+        /// Disk / parked snapshot taken when the overlay opens.
+        prompt: Arc<PlanApprovalPrompt>,
+        wrap: PlanWrapCache,
+    },
+    /// `/usage` session token/cost overlay (no grok.com billing).
+    Usage {
+        scroll: usize,
+    },
+    /// Extra slash overlay (read-only title + body).
+    Notice {
+        title: String,
+        body: String,
+        scroll: usize,
+    },
+    /// Dynamic package TUI slot (generic; body comes from `"tui.slots"`).
+    Slot {
+        id: String,
+        scroll: usize,
+    },
+    /// `/preset` roster + assembly canvas.
+    Presets(PresetView),
+    /// Child conversation or background job (Grok fullscreen framed view).
+    Inspect {
+        target: InspectTarget,
+        scroll: usize,
+        from_tasks: bool,
+        composer: String,
+        composer_cursor: usize,
+    },
+}
+
+/// What [`Overlay::Inspect`] is showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InspectTarget {
+    Subagent(String),
+    Job(String),
 }
 
 impl Overlay {
+    pub fn plan_approval(prompt: PlanApprovalPrompt, view_only: bool) -> Self {
+        Self::PlanApproval {
+            selected: 0,
+            view_only,
+            scroll: 0,
+            prompt: Arc::new(prompt),
+            wrap: PlanWrapCache::new(),
+        }
+    }
+
+    pub fn inspect_subagent(id: impl Into<String>, from_tasks: bool) -> Self {
+        Self::Inspect {
+            target: InspectTarget::Subagent(id.into()),
+            scroll: 0,
+            from_tasks,
+            composer: String::new(),
+            composer_cursor: 0,
+        }
+    }
+
+    pub fn inspect_job(id: impl Into<String>, from_tasks: bool) -> Self {
+        Self::Inspect {
+            target: InspectTarget::Job(id.into()),
+            scroll: 0,
+            from_tasks,
+            composer: String::new(),
+            composer_cursor: 0,
+        }
+    }
+
     pub fn is_open(&self) -> bool {
         !matches!(self, Self::None)
     }
@@ -78,12 +166,42 @@ impl Overlay {
             | Self::Args { query, .. } => query,
             Self::Settings { .. }
             | Self::Permission { .. }
-            | Self::Ask { .. } => "",
-            Self::Tasks { query, .. } | Self::Mcps { query, .. } => query,
+            | Self::Ask { .. }
+            | Self::PlanApproval { .. }
+            | Self::Usage { .. }
+            | Self::Notice { .. }
+            | Self::Slot { .. }
+            | Self::Inspect { .. }
+            | Self::Goal { editing: false, .. } => "",
+            Self::Goal {
+                draft,
+                editing: true,
+                ..
+            } => draft,
+            Self::Tasks { query, .. }
+            | Self::Mcps { query, .. }
+            | Self::Workflows { query, .. } => query,
+            Self::Presets(PresetView::Canvas(CanvasState {
+                editing_persona: true,
+                persona_draft,
+                ..
+            })) => persona_draft,
+            Self::Presets(PresetView::Canvas(CanvasState { catalog_query, .. })) => catalog_query,
+            Self::Presets(PresetView::Roster { .. }) => "",
         }
     }
 
     pub fn push_char(&mut self, c: char) {
+        if let Overlay::Inspect {
+            target: InspectTarget::Subagent(_),
+            composer,
+            composer_cursor,
+            ..
+        } = self
+        {
+            crate::inspect_overlay::insert_composer(composer, composer_cursor, c);
+            return;
+        }
         if let Some(q) = self.query_mut() {
             q.push(c);
         }
@@ -91,6 +209,16 @@ impl Overlay {
     }
 
     pub fn push_str(&mut self, s: &str) {
+        if let Overlay::Inspect {
+            target: InspectTarget::Subagent(_),
+            composer,
+            composer_cursor,
+            ..
+        } = self
+        {
+            crate::inspect_overlay::composer_insert_str(composer, composer_cursor, s);
+            return;
+        }
         if let Some(q) = self.query_mut() {
             q.push_str(s);
         }
@@ -98,6 +226,16 @@ impl Overlay {
     }
 
     pub fn backspace(&mut self) {
+        if let Overlay::Inspect {
+            target: InspectTarget::Subagent(_),
+            composer,
+            composer_cursor,
+            ..
+        } = self
+        {
+            crate::inspect_overlay::composer_backspace(composer, composer_cursor);
+            return;
+        }
         if let Some(q) = self.query_mut() {
             q.pop();
         }
@@ -123,8 +261,20 @@ impl Overlay {
             | Self::Settings { selected, .. }
             | Self::Permission { selected, .. }
             | Self::Ask { selected, .. }
+            | Self::PlanApproval { selected, .. }
             | Self::Tasks { selected, .. }
-            | Self::Mcps { selected, .. } => *selected,
+            | Self::Mcps { selected, .. }
+            | Self::Workflows { selected, .. }
+            | Self::Goal { selected, .. } => *selected,
+            Self::Usage { .. } | Self::Notice { .. } | Self::Slot { .. } | Self::Inspect { .. } => {
+                0
+            }
+            Self::Presets(PresetView::Roster { selected }) => *selected,
+            Self::Presets(PresetView::Canvas(c)) => match c.pane {
+                PresetPane::Catalog => c.catalog_sel,
+                PresetPane::Assigned => c.assigned_sel,
+                PresetPane::Persona => 0,
+            },
         }
     }
 
@@ -139,8 +289,19 @@ impl Overlay {
             | Self::Settings { selected: s, .. }
             | Self::Permission { selected: s, .. }
             | Self::Ask { selected: s, .. }
+            | Self::PlanApproval { selected: s, .. }
             | Self::Tasks { selected: s, .. }
-            | Self::Mcps { selected: s, .. } => *s = selected,
+            | Self::Mcps { selected: s, .. }
+            | Self::Workflows { selected: s, .. }
+            | Self::Goal { selected: s, .. } => *s = selected,
+            Self::Usage { .. } | Self::Notice { .. } | Self::Slot { .. } | Self::Inspect { .. } => {
+            }
+            Self::Presets(PresetView::Roster { selected: s }) => *s = selected,
+            Self::Presets(PresetView::Canvas(c)) => match c.pane {
+                PresetPane::Catalog => c.catalog_sel = selected,
+                PresetPane::Assigned => c.assigned_sel = selected,
+                PresetPane::Persona => {}
+            },
         }
     }
 
@@ -153,8 +314,34 @@ impl Overlay {
             | Self::Find { query, .. }
             | Self::Args { query, .. }
             | Self::Tasks { query, .. }
-            | Self::Mcps { query, .. } => Some(query),
-            Self::Settings { .. } | Self::Permission { .. } | Self::Ask { .. } => None,
+            | Self::Mcps { query, .. }
+            | Self::Workflows { query, .. } => Some(query),
+            Self::Goal {
+                editing: true,
+                draft,
+                ..
+            } => Some(draft),
+            Self::Presets(PresetView::Canvas(CanvasState {
+                editing_persona: true,
+                persona_draft,
+                ..
+            })) => Some(persona_draft),
+            Self::Presets(PresetView::Canvas(CanvasState {
+                pane: PresetPane::Catalog,
+                catalog_query,
+                editing_persona: false,
+                ..
+            })) => Some(catalog_query),
+            Self::Settings { .. }
+            | Self::Permission { .. }
+            | Self::Ask { .. }
+            | Self::PlanApproval { .. }
+            | Self::Usage { .. }
+            | Self::Notice { .. }
+            | Self::Slot { .. }
+            | Self::Inspect { .. }
+            | Self::Goal { editing: false, .. }
+            | Self::Presets(_) => None,
         }
     }
 }
@@ -192,7 +379,7 @@ const HELP: &[HelpEntry] = &[
     }),
     HelpEntry::Row(HelpRow {
         key: "shift+tab",
-        label: "切换模式（询问 / 始终允许）",
+        label: "切换模式（询问 / 计划 / 始终允许）",
         kind: HelpKind::Hint,
     }),
     HelpEntry::Row(HelpRow {
@@ -252,6 +439,16 @@ const HELP: &[HelpEntry] = &[
         kind: HelpKind::Slash(SlashCmd::Find),
     }),
     HelpEntry::Row(HelpRow {
+        key: "/usage",
+        label: "本会话用量",
+        kind: HelpKind::Slash(SlashCmd::Usage),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/compact",
+        label: "压缩旧对话",
+        kind: HelpKind::Slash(SlashCmd::Compact),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "/copy",
         label: "复制上一条回复",
         kind: HelpKind::Slash(SlashCmd::Copy),
@@ -287,19 +484,34 @@ const HELP: &[HelpEntry] = &[
         kind: HelpKind::Slash(SlashCmd::Plan),
     }),
     HelpEntry::Row(HelpRow {
+        key: "/view-plan",
+        label: "查看 / 批准计划",
+        kind: HelpKind::Slash(SlashCmd::ViewPlan),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "/goal",
         label: "开始或查看目标",
         kind: HelpKind::Slash(SlashCmd::Goal),
     }),
     HelpEntry::Row(HelpRow {
         key: "/tasks",
-        label: "后台任务与定时任务",
+        label: "后台任务与子代理（对话中点击卡片查看）",
         kind: HelpKind::Slash(SlashCmd::Tasks),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/workflow",
+        label: "工作流运行",
+        kind: HelpKind::Slash(SlashCmd::Workflow),
     }),
     HelpEntry::Row(HelpRow {
         key: "/mcps",
         label: "MCP 服务器状态",
         kind: HelpKind::Slash(SlashCmd::Mcps),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/preset",
+        label: "组装 Agent 预设（人设与工具）",
+        kind: HelpKind::Slash(SlashCmd::Preset),
     }),
     HelpEntry::Row(HelpRow {
         key: "/quit",
@@ -383,8 +595,32 @@ pub fn filter_help(query: &str) -> Vec<&'static HelpRow> {
         .collect()
 }
 
-pub fn help_at(query: &str, selected: usize) -> Option<&'static HelpRow> {
-    filter_help(query).get(selected).copied()
+#[derive(Debug, Clone)]
+pub enum HelpItem {
+    Builtin(&'static HelpRow),
+    Extra {
+        key: String,
+        label: String,
+        command: String,
+    },
+}
+
+pub fn filter_help_items(query: &str, extras: &[SlashEntry]) -> Vec<HelpItem> {
+    let mut out: Vec<HelpItem> = filter_help(query)
+        .into_iter()
+        .map(HelpItem::Builtin)
+        .collect();
+    for extra in extras {
+        let key = extra.display();
+        if matches_query(&key, query) || matches_query(&extra.description, query) {
+            out.push(HelpItem::Extra {
+                key,
+                label: extra.description.clone(),
+                command: extra.command.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// `fullscreen` = welcome-screen session picker (Grok `PickerMode::FullScreen`).
@@ -414,10 +650,7 @@ pub fn render_overlay(
 }
 
 pub fn hit_index(hits: &PickerHits, column: u16, row: u16) -> Option<usize> {
-    let pos = Position {
-        x: column,
-        y: row,
-    };
+    let pos = Position { x: column, y: row };
     if hits.close_button.contains(pos) {
         return None;
     }
@@ -428,10 +661,7 @@ pub fn hit_index(hits: &PickerHits, column: u16, row: u16) -> Option<usize> {
 }
 
 pub fn hit_close(hits: &PickerHits, column: u16, row: u16) -> bool {
-    hits.close_button.contains(Position {
-        x: column,
-        y: row,
-    })
+    hits.close_button.contains(Position { x: column, y: row })
 }
 
 #[cfg(test)]
@@ -447,7 +677,9 @@ mod tests {
     #[test]
     fn help_filter_finds_resume() {
         let rows = filter_help("resume");
-        assert!(rows.iter().any(|r| r.key.contains("resume") || r.label.contains("Resume")));
+        assert!(rows
+            .iter()
+            .any(|r| r.key.contains("resume") || r.label.contains("Resume")));
     }
 
     #[test]
@@ -460,9 +692,56 @@ mod tests {
         );
         assert!(rows.iter().any(|r| r.key == "ctrl+x"));
         assert!(rows.iter().any(|r| r.label.contains("询问")));
+        assert!(rows.iter().any(|r| r.label.contains("计划")));
         assert!(rows.iter().any(|r| r.key == "/plan"));
         assert!(rows.iter().any(|r| r.key == "/goal"));
         assert!(rows.iter().any(|r| r.key == "/tasks"));
+        assert!(rows.iter().any(|r| r.key == "/workflow"));
         assert!(rows.iter().any(|r| r.key == "/mcps"));
+        assert!(rows.iter().any(|r| r.key == "/preset"));
+        assert!(rows.iter().any(|r| r.key == "/usage"));
+        assert!(rows.iter().any(|r| r.key == "/compact"));
+    }
+
+    #[test]
+    fn slot_overlay_opens_and_closes() {
+        let mut overlay = Overlay::Slot {
+            id: "memo".into(),
+            scroll: 0,
+        };
+        assert!(overlay.is_open());
+        overlay.close();
+        assert!(!overlay.is_open());
+    }
+
+    #[test]
+    fn inspect_overlay_opens_from_helper() {
+        let overlay = Overlay::inspect_subagent("kid-1", false);
+        assert!(overlay.is_open());
+        assert!(matches!(
+            overlay,
+            Overlay::Inspect {
+                target: InspectTarget::Subagent(id),
+                from_tasks: false,
+                ..
+            } if id == "kid-1"
+        ));
+    }
+
+    #[test]
+    fn help_appends_extra_slash() {
+        let extra = SlashEntry {
+            command: "standup".into(),
+            description: "站会".into(),
+            kind: cordis_spine::ExtraSlashKind::Prompt,
+            text: "x".into(),
+            title: String::new(),
+            send: true,
+        };
+        let rows = filter_help_items("", &[extra]);
+        assert!(rows.iter().any(|item| match item {
+            HelpItem::Extra { command, .. } => command == "standup",
+            _ => false,
+        }));
     }
 }

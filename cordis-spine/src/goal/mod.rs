@@ -14,8 +14,9 @@ use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use drain::GoalState;
 pub use grok_tool::{
-    goal_instruction, goal_usage_message, render_ack_into_output, GoalUpdateHandle,
-    UpdateGoalAck, UpdateGoalInput, GOAL_RESERVED_SUBCOMMANDS, UPDATE_GOAL_TOOL_NAME,
+    goal_composer_fill, goal_continuation_directive, goal_instruction, goal_usage_message,
+    render_ack_into_output, GoalUpdateHandle, UpdateGoalInput, GOAL_RESERVED_SUBCOMMANDS,
+    UPDATE_GOAL_TOOL_NAME,
 };
 
 /// Named `"goal"` service. TUI live-looks `active()`.
@@ -29,12 +30,49 @@ impl Goal {
         self.state.active()
     }
 
+    pub fn paused(&self) -> bool {
+        self.state.paused()
+    }
+
+    /// Running or paused — TUI chrome / overlay still have a goal.
+    pub fn present(&self) -> bool {
+        self.state.present()
+    }
+
     pub fn title(&self) -> String {
         self.state.title.lock().unwrap().clone()
     }
 
     pub fn start(&self, title: impl Into<String>) {
         self.state.start(title);
+    }
+
+    pub fn pause(&self) -> bool {
+        self.state.pause()
+    }
+
+    pub fn resume(&self) -> bool {
+        self.state.resume()
+    }
+
+    pub fn clear(&self) {
+        self.state.clear();
+    }
+
+    pub fn set_title(&self, title: impl Into<String>) {
+        self.state.set_title(title);
+    }
+
+    pub fn arm_composer(&self) {
+        self.state.arm_composer();
+    }
+
+    pub fn disarm_composer(&self) {
+        self.state.disarm_composer();
+    }
+
+    pub fn awaiting_composer(&self) -> bool {
+        self.state.awaiting_composer()
     }
 }
 

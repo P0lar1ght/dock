@@ -12,6 +12,7 @@ members = [
     "vendor/dagre_rust",
     "vendor/mermaid-to-svg",
     "vendor/xai-fuzzy-file-search",
+    "vendor/xai-workflow",
 ]
 
 [workspace.package]

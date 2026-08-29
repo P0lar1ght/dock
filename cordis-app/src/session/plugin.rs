@@ -1,8 +1,9 @@
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Disposable, Inject, Plugin};
 use cordis_spine::{AGENT_LOOP, SESSIONS, TURN};
-use cordis_tui::{SessionPort, SessionRef, SESSION_PORT};
+use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use tokio::sync::mpsc;
 
 use crate::names::SESSION;
@@ -18,11 +19,21 @@ pub fn session_actor() -> Plugin {
         |ctx, _: &()| {
             let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
             let current_prompt_id = Arc::new(Mutex::new(None));
+            let queued = Arc::new(AtomicUsize::new(0));
+            let queued_prompts = Arc::new(Mutex::new(Vec::<QueuedItem>::new()));
             let handle = SessionHandle {
                 cmd_tx: cmd_tx.clone(),
                 current_prompt_id: current_prompt_id.clone(),
+                queued: queued.clone(),
+                queued_prompts: queued_prompts.clone(),
             };
-            tokio::spawn(run_session(ctx.clone(), cmd_rx, current_prompt_id));
+            tokio::spawn(run_session(
+                ctx.clone(),
+                cmd_rx,
+                current_prompt_id,
+                queued,
+                queued_prompts,
+            ));
             ctx.effect("session-actor-task", move |scope| {
                 scope.own(Disposable::from_fn(move || {
                     let _ = cmd_tx.send(SessionCommand::Shutdown);

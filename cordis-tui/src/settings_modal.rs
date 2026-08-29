@@ -40,10 +40,12 @@ pub const ROWS: &[SettingsRow] = &[
 ];
 
 pub fn field_rows() -> Vec<SettingsField> {
-    ROWS.iter().filter_map(|r| match r {
-        SettingsRow::Field(f) => Some(*f),
-        SettingsRow::Header(_) => None,
-    }).collect()
+    ROWS.iter()
+        .filter_map(|r| match r {
+            SettingsRow::Field(f) => Some(*f),
+            SettingsRow::Header(_) => None,
+        })
+        .collect()
 }
 
 impl SettingsField {
@@ -201,9 +203,7 @@ fn render_settings_rows(
         }
         match row {
             SettingsRow::Header(title) => {
-                let style = Style::default()
-                    .fg(theme.gray)
-                    .add_modifier(Modifier::BOLD);
+                let style = Style::default().fg(theme.gray).add_modifier(Modifier::BOLD);
                 buf.set_line(
                     frame.content.x,
                     y,
@@ -214,7 +214,11 @@ fn render_settings_rows(
             }
             SettingsRow::Field(f) => {
                 let selected = sel_field == Some(*f);
-                let bg = if selected { theme.bg_visual } else { theme.bg_light };
+                let bg = if selected {
+                    theme.bg_visual
+                } else {
+                    theme.bg_light
+                };
                 let rect = Rect {
                     x: frame.content.x,
                     y,
@@ -222,14 +226,15 @@ fn render_settings_rows(
                     height: 1,
                 };
                 buf.set_style(rect, Style::default().bg(bg));
-                let label_style = Style::default()
-                    .fg(theme.text_primary)
-                    .bg(bg)
-                    .add_modifier(if selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    });
+                let label_style =
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .bg(bg)
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        });
                 let val = value_text(*f, settings);
                 buf.set_line(
                     rect.x + 1,

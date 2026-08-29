@@ -1,20 +1,18 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use cordis::{plugin, Context, FiberState, Inject};
 use cordis_spine::{
-    agent_loop, install_fakes, turn, Agent, Agents, BoxFuture, Driver, Error, LoopHandle, PreStep,
-    Sessions, TurnControl, TurnOutcome, AGENT_LOOP, AGENTS, LLM, PRE_STEP, SESSIONS, SYSTEM_PROMPT,
-    TOOLS, TURN,
+    agent_loop, install_fakes, install_without_llm, tool_goal, turn, Agent, Agents, BoxFuture,
+    Driver, Error, Goal, Llm, LlmOutput, LoopHandle, PreStep, PromptRequest, Sampler, Sessions,
+    StreamDelta, ToolCall, TurnControl, TurnOutcome, AGENTS, AGENT_LOOP, GOAL, LLM, PRE_STEP,
+    SESSIONS, SYSTEM_PROMPT, TOOLS, TURN,
 };
 
 async fn boot() -> Context {
     let root = Context::new();
     install_fakes(&root).await.unwrap();
-    root.plugin(agent_loop(), ())
-        .unwrap()
-        .wait()
-        .await
-        .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
     root
 }
 
@@ -74,11 +72,7 @@ async fn pre_step_can_reject() {
         enter: false,
     })
     .unwrap();
-    root.plugin(agent_loop(), ())
-        .unwrap()
-        .wait()
-        .await
-        .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
 
     let err = root
         .require::<LoopHandle>(AGENT_LOOP)
@@ -120,11 +114,13 @@ impl Driver for PromptOnly {
             sessions.append(cordis_spine::LogEvent::User(prompt));
             let assembled = system.assemble();
             sessions.append(cordis_spine::LogEvent::Prompt(assembled.clone()));
-            let out = llm.stream(cordis_spine::PromptRequest {
-                system: assembled,
-                history: sessions.events(),
-                tools: Vec::new(),
-            }).await;
+            let out = llm
+                .stream(cordis_spine::PromptRequest {
+                    system: assembled,
+                    history: sessions.events(),
+                    tools: Vec::new(),
+                })
+                .await;
             Ok(TurnOutcome::Text(out.summary()))
         })
     }
@@ -168,14 +164,8 @@ async fn swap_loop_plugin_keeps_the_five_services() {
         .unwrap();
 
     let kinds = root.require::<Sessions>(SESSIONS).unwrap().kinds();
-    assert_eq!(
-        kinds.iter().filter(|k| **k == "llm/stream").count(),
-        3
-    );
-    assert_eq!(
-        kinds.iter().filter(|k| **k == "tools/execute").count(),
-        1
-    );
+    assert_eq!(kinds.iter().filter(|k| **k == "llm/stream").count(), 3);
+    assert_eq!(kinds.iter().filter(|k| **k == "tools/execute").count(), 1);
 }
 
 #[tokio::test]
@@ -193,34 +183,32 @@ async fn second_turn_does_not_reuse_previous_tool_result() {
 }
 
 fn extra_ping() -> cordis::Plugin {
-    plugin(
-        "extra-ping",
-        Inject::from(["tools"]),
-        |ctx, _: &()| {
-            let tools = ctx.require::<cordis_spine::Tools>(cordis_spine::TOOLS).unwrap();
-            let body: cordis_spine::ToolBody = std::sync::Arc::new(|call| {
-                Box::pin(async move {
-                    cordis_spine::ToolResult {
-                        call_id: call.id,
-                        name: call.name,
-                        content: "pong".into(),
-                    }
-                })
-            });
-            cordis_spine::own_registered(
-                ctx,
-                vec![tools.register(
-                    cordis_spine::ToolSpec {
-                        name: "docs__ping".into(),
-                        description: "ping".into(),
-                        parameters_json: r#"{"type":"object"}"#.into(),
-                    },
-                    body,
-                )?],
-            )?;
-            Ok(None)
-        },
-    )
+    plugin("extra-ping", Inject::from(["tools"]), |ctx, _: &()| {
+        let tools = ctx
+            .require::<cordis_spine::Tools>(cordis_spine::TOOLS)
+            .unwrap();
+        let body: cordis_spine::ToolBody = std::sync::Arc::new(|call| {
+            Box::pin(async move {
+                cordis_spine::ToolResult {
+                    call_id: call.id,
+                    name: call.name,
+                    content: "pong".into(),
+                }
+            })
+        });
+        cordis_spine::own_registered(
+            ctx,
+            vec![tools.register(
+                cordis_spine::ToolSpec {
+                    name: "docs__ping".into(),
+                    description: "ping".into(),
+                    parameters_json: r#"{"type":"object"}"#.into(),
+                },
+                body,
+            )?],
+        )?;
+        Ok(None)
+    })
 }
 
 #[tokio::test]
@@ -268,6 +256,8 @@ async fn install_fakes_echo_has_no_capability_tools() {
         "enter_plan_mode",
         "get_task_output",
         "scheduler_create",
+        "cordis_define",
+        "cordis_run",
     ] {
         assert!(
             !names.iter().any(|n| n == banned),
@@ -278,6 +268,10 @@ async fn install_fakes_echo_has_no_capability_tools() {
 
 #[tokio::test]
 async fn install_app_registers_capability_tools_and_mcp_fail_open() {
+    // Isolated home so a live `roster.yml` (e.g. current: warden) cannot
+    // filter out enter_plan_mode / task on the default code preset.
+    let dock_home = tempfile::tempdir().unwrap();
+    std::env::set_var("DOCK_HOME", dock_home.path());
     let root = Context::new();
     cordis_spine::install_app(&root).await.unwrap();
     let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
@@ -298,11 +292,24 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "bash",
         "list_dir",
         "task",
+        "subagent",
+        "send_message",
+        "list_agents",
+        "interrupt_agent",
+        "report",
         "lsp",
         "update_goal",
         "memory_search",
         "memory_get",
         "monitor",
+        "workflow",
+        "cordis_inspect",
+        "cordis_inspect_self",
+        "cordis_define",
+        "cordis_run",
+        "cordis_call",
+        "cordis_stop",
+        "cordis_undefine",
     ] {
         assert!(
             names.iter().any(|n| n == need),
@@ -313,10 +320,26 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         .get::<cordis_spine::Mcp>(cordis_spine::MCP)
         .expect("mcp-client must provide even with no servers");
     let _ = mcp.list();
-    assert!(root.get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE).is_some());
-    assert!(root.get::<cordis_spine::Todos>(cordis_spine::TODOS).is_some());
+    assert!(root
+        .get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE)
+        .is_some());
+    assert!(root
+        .get::<cordis_spine::Todos>(cordis_spine::TODOS)
+        .is_some());
     assert!(root.get::<cordis_spine::Jobs>(cordis_spine::JOBS).is_some());
+    assert!(root
+        .get::<cordis_spine::Slash>(cordis_spine::SLASH)
+        .is_some());
+    assert!(root
+        .get::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
+        .is_some());
     assert!(root.get::<cordis_spine::Ask>(cordis_spine::ASK).is_some());
+    assert!(root
+        .get::<cordis_spine::Compact>(cordis_spine::COMPACT)
+        .is_some());
+    assert!(root
+        .get::<cordis_spine::DynamicRunner>(cordis_spine::DYNAMIC_CORDIS_RUNNER)
+        .is_some());
 
     let todo = tools
         .execute(cordis_spine::ToolCall {
@@ -325,7 +348,11 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
             arguments: r#"{"merge":false,"todos":[{"id":"1","content":"copied grok merge","status":"pending"}]}"#.into(),
         })
         .await;
-    assert!(todo.content.contains("copied grok merge"), "{}", todo.content);
+    assert!(
+        todo.content.contains("copied grok merge"),
+        "{}",
+        todo.content
+    );
 
     let plan = tools
         .execute(cordis_spine::ToolCall {
@@ -335,7 +362,11 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         })
         .await;
     assert!(plan.content.contains("exit_plan_mode"), "{}", plan.content);
-    assert!(plan.content.contains("ask_user_question"), "{}", plan.content);
+    assert!(
+        plan.content.contains("ask_user_question"),
+        "{}",
+        plan.content
+    );
     assert!(root
         .get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE)
         .is_some_and(|p| p.active()));
@@ -348,7 +379,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         })
         .await;
     assert!(
-        blocked.content.contains("blocked in plan mode"),
+        blocked.content.contains("计划模式已阻止"),
         "{}",
         blocked.content
     );
@@ -397,4 +428,212 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "{}",
         done.content
     );
+
+    assert!(root
+        .get::<cordis_spine::Workflows>(cordis_spine::WORKFLOWS)
+        .is_some());
+    let smoke = tools
+        .execute(cordis_spine::ToolCall {
+            id: "w1".into(),
+            name: "workflow".into(),
+            arguments: r#"{"source":{"type":"script","script":"let meta = #{ name: \"valid-name\", description: \"d\" };\ncomplete(\"ok\");"},"validate_only":true}"#.into(),
+        })
+        .await;
+    assert!(
+        smoke.content.contains("valid-name") && smoke.content.contains("冒烟"),
+        "{}",
+        smoke.content
+    );
+
+    assert!(root
+        .get::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
+        .is_some());
+    let unknown = tools
+        .execute(cordis_spine::ToolCall {
+            id: "sa0".into(),
+            name: "task".into(),
+            arguments: r#"{"prompt":"x","description":"bad type","subagent_type":"not-a-type"}"#
+                .into(),
+        })
+        .await;
+    assert!(
+        unknown.content.contains("Unknown subagent type")
+            && unknown.content.contains("general-purpose"),
+        "{}",
+        unknown.content
+    );
+    let started = tools
+        .execute(cordis_spine::ToolCall {
+            id: "sa1".into(),
+            name: "task".into(),
+            arguments: r#"{"prompt":"noop","description":"coord smoke","run_in_background":true}"#
+                .into(),
+        })
+        .await;
+    assert!(
+        started.content.contains("Subagent started in background")
+            && started.content.contains("subagent_id:")
+            && started.content.contains("get_task_output"),
+        "{}",
+        started.content
+    );
+}
+
+struct CountThenComplete {
+    n: Arc<AtomicUsize>,
+    ctx: Context,
+}
+
+impl Sampler for CountThenComplete {
+    fn sample<'a>(
+        &'a self,
+        _request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let n = self.n.clone();
+        let ctx = self.ctx.clone();
+        Box::pin(async move {
+            let i = n.fetch_add(1, Ordering::SeqCst);
+            if i >= 1 {
+                if let Some(goal) = ctx.get::<Goal>(GOAL) {
+                    goal.clear();
+                }
+            }
+            LlmOutput {
+                text: format!("round-{i}"),
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn active_goal_keeps_sampling_after_first_text() {
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+    let samples = Arc::new(AtomicUsize::new(0));
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(CountThenComplete {
+                n: samples.clone(),
+                ctx: root.clone(),
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root.require::<Goal>(GOAL).unwrap().start("理解并分析 TUI");
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("理解并分析 TUI")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("round-1".into()));
+    assert_eq!(
+        samples.load(Ordering::SeqCst),
+        2,
+        "goal must not stop on the first text-only sample"
+    );
+    let kinds = root.require::<Sessions>(SESSIONS).unwrap().kinds();
+    assert!(
+        kinds.iter().any(|k| *k == "system-reminder"),
+        "Grok goal continuation is a hidden reminder, got {kinds:?}"
+    );
+    let users = kinds.iter().filter(|k| **k == "user").count();
+    assert_eq!(
+        users, 1,
+        "continuation must not appear as a user bubble: {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn text_without_goal_samples_once() {
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    let samples = Arc::new(AtomicUsize::new(0));
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(CountThenComplete {
+                n: samples.clone(),
+                ctx: root.clone(),
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("hello")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("round-0".into()));
+    assert_eq!(samples.load(Ordering::SeqCst), 1);
+}
+
+struct ToolsThenText {
+    n: Arc<AtomicUsize>,
+    tool_rounds: usize,
+}
+
+impl Sampler for ToolsThenText {
+    fn sample<'a>(
+        &'a self,
+        _request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let n = self.n.clone();
+        let tool_rounds = self.tool_rounds;
+        Box::pin(async move {
+            let i = n.fetch_add(1, Ordering::SeqCst);
+            if i < tool_rounds {
+                LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: format!("c{i}"),
+                        name: "echo".into(),
+                        arguments: "x".into(),
+                    }],
+                    ..LlmOutput::default()
+                }
+            } else {
+                LlmOutput {
+                    text: "done".into(),
+                    ..LlmOutput::default()
+                }
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn coding_turn_survives_more_than_eight_tool_rounds() {
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    let samples = Arc::new(AtomicUsize::new(0));
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(ToolsThenText {
+                n: samples.clone(),
+                tool_rounds: 12,
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("work")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("done".into()));
+    assert_eq!(samples.load(Ordering::SeqCst), 13);
 }

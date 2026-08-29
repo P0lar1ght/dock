@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
 
-use async_lsp::LanguageServer;
 use async_lsp::lsp_types::{
     self, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, HoverParams, Location, ReferenceContext, ReferenceParams,
     SymbolInformation, TextDocumentIdentifier, TextDocumentPositionParams, WorkspaceSymbolParams,
 };
+use async_lsp::LanguageServer;
 
 use super::{LspToolInput, LspToolResult};
 
@@ -22,7 +22,7 @@ use super::format::{
     flatten_document_symbols, format_locations_labeled, format_symbols, markup_string_to_text,
 };
 use super::manager::LspManager;
-use super::{LspError, file_uri, text_document_position};
+use super::{file_uri, text_document_position, LspError};
 
 // ── Public adapter ──────────────────────────────────────────────────────
 

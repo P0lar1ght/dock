@@ -70,7 +70,7 @@ fn start_monitor(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     let Some(jobs) = ctx.get::<Jobs>(JOBS) else {
         return tool_result(call, "Error: jobs is not mounted");
     };
-    let id = jobs.start(command);
+    let id = jobs.start_ex(command, Some(description.to_string()), true);
     tool_result(
         call,
         format!(

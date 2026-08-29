@@ -84,9 +84,8 @@ fn is_github_host(host: &str) -> bool {
 /// Whether the `gh` CLI is available on `PATH`.
 fn gh_available() -> bool {
     std::env::var_os("PATH").is_some_and(|p| {
-        std::env::split_paths(&p).any(|dir| {
-            dir.join("gh").is_file() || dir.join("gh.exe").is_file()
-        })
+        std::env::split_paths(&p)
+            .any(|dir| dir.join("gh").is_file() || dir.join("gh.exe").is_file())
     })
 }
 

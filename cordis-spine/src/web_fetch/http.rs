@@ -103,6 +103,9 @@ mod tests {
             ..Default::default()
         };
         let err = HttpClient::new(&params).unwrap_err().to_string();
-        assert!(err.contains("proxy"), "Expected proxy-related error, got: {err}");
+        assert!(
+            err.contains("proxy"),
+            "Expected proxy-related error, got: {err}"
+        );
     }
 }

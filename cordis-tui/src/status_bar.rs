@@ -104,9 +104,7 @@ mod tests {
     fn chinese_right_aligns_by_display_width() {
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
-        StatusBar::new("cwd")
-            .right("空闲")
-            .render(area, &mut buf);
+        StatusBar::new("cwd").right("空闲").render(area, &mut buf);
         // Display width 4, so the pair starts at x=16 — not byte-len 6 at x=14.
         assert_eq!(buf[(16, 0)].symbol(), "空");
         assert_eq!(buf[(18, 0)].symbol(), "闲");
