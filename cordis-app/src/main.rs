@@ -1,5 +1,8 @@
 use cordis_app::session_actor;
-use cordis_spine::{agent_loop, install_app, Cron, CRON, PROMPT_ASSEMBLE};
+use cordis_spine::{
+    agent_loop, expired_task_notice, format_scheduled_task_reminder, install_app,
+    interval_to_human, Cron, LlmOutput, LogEvent, Sessions, CRON, PROMPT_ASSEMBLE, SESSIONS,
+};
 use cordis_tui::{tui, SessionRef, SESSION_PORT};
 
 const WORKSPACE_PROMPT: &str = "你是本地工作区里的编程助手。\
@@ -29,12 +32,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(cron) = tick_ctx.get::<Cron>(CRON) else {
                 continue;
             };
-            let due = cron.due();
+            let tick = cron.due();
+            if let Some(sessions) = tick_ctx.get::<Sessions>(SESSIONS) {
+                for job in &tick.expired {
+                    let human = interval_to_human(job.every.as_secs());
+                    sessions.append(LogEvent::LlmStream(LlmOutput {
+                        text: expired_task_notice(&job.prompt, &human),
+                        ..LlmOutput::default()
+                    }));
+                }
+            }
             let Some(session) = tick_ctx.get::<SessionRef>(SESSION_PORT) else {
                 continue;
             };
-            for job in due {
-                session.submit(format!("\u{21BB} {}", job.prompt), false);
+            for job in tick.fires {
+                if let Some(sessions) = tick_ctx.get::<Sessions>(SESSIONS) {
+                    let human = interval_to_human(job.every.as_secs());
+                    sessions.arm_user_addon(
+                        job.prompt.clone(),
+                        format_scheduled_task_reminder(&job.id, &human),
+                    );
+                }
+                session.submit(job.prompt, false);
             }
         }
     });

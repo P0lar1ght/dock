@@ -2,12 +2,12 @@
 //! Action = sync intent; Effect = async I/O.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
 use cordis_spine::{
-    goal_composer_fill, tool_slash_arguments, ExtraSlashKind, SlashEntry, GOAL_RESERVED_SUBCOMMANDS,
+    goal_composer_fill, loop_composer_fill, loop_usage_message, tool_slash_arguments,
+    ExtraSlashKind, SlashEntry, GOAL_RESERVED_SUBCOMMANDS,
 };
 
 /// Synchronous, side-effect-free user intent.
@@ -96,10 +96,6 @@ pub enum Effect {
     SetModel(String),
     SetEffort(String),
     ToggleTimestamps,
-    CronAdd {
-        every: Duration,
-        prompt: String,
-    },
     Export(Option<PathBuf>),
     ChangeDir(PathBuf),
     SettingsModal,
@@ -123,6 +119,9 @@ pub enum Effect {
     ViewPlan,
     EnterGoal {
         objective: Option<String>,
+    },
+    EnterLoop {
+        args: String,
     },
     ShowGoal {
         editing: bool,
@@ -152,6 +151,17 @@ pub enum Effect {
         name: String,
         arguments: String,
         title: String,
+    },
+    /// Async: persist + connect/disconnect an MCP server (`Space` on `/mcps` server row).
+    ToggleMcpServer {
+        name: String,
+        enabled: bool,
+    },
+    /// Async: persist + register/unregister one MCP tool (`Space` on `/mcps` tool row).
+    ToggleMcpTool {
+        server: String,
+        tool: String,
+        enabled: bool,
     },
     SetPrompt {
         text: String,
@@ -205,21 +215,12 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         }
         SlashCmd::Loop => {
             if args.is_empty() {
-                Effect::ArgPicker {
-                    kind: ArgKind::LoopInterval,
-                    cmd,
+                Effect::FillPrompt {
+                    text: loop_composer_fill(),
                 }
             } else {
-                let (tok, prompt) = slash::parse_loop_args(args);
-                match (tok.and_then(slash::token_to_duration), prompt) {
-                    (Some(every), p) if !p.is_empty() => Effect::CronAdd {
-                        every,
-                        prompt: p.to_string(),
-                    },
-                    _ => Effect::ArgPicker {
-                        kind: ArgKind::LoopInterval,
-                        cmd,
-                    },
+                Effect::EnterLoop {
+                    args: args.to_string(),
                 }
             }
         }
@@ -415,6 +416,51 @@ pub fn interpret_goal_composer_ex(text: &str, extras: &[SlashEntry]) -> GoalComp
     GoalComposer::Objective(body.to_string())
 }
 
+#[derive(Debug)]
+pub enum LoopComposer {
+    Stub,
+    Schedule(String),
+    Other,
+}
+
+/// After bare `/loop`, the composer holds usage + `/loop `. Sending that
+/// blob (or a filled last line) becomes `EnterLoop`.
+pub fn interpret_loop_composer(text: &str) -> LoopComposer {
+    let usage = loop_usage_message();
+    let mut body = text.trim();
+    if let Some(rest) = body.strip_prefix(usage) {
+        body = rest.trim();
+    } else if !body.contains("/loop") {
+        return LoopComposer::Other;
+    }
+    if body.is_empty() {
+        return LoopComposer::Stub;
+    }
+    let line = body.lines().last().unwrap_or(body).trim();
+    if let Some((pick, args)) = slash::command_for_submit_ex(line, &[]) {
+        if matches!(pick, SlashPick::Builtin(SlashCmd::Loop)) {
+            let args = args.trim();
+            if args.is_empty() {
+                return LoopComposer::Stub;
+            }
+            return LoopComposer::Schedule(args.to_string());
+        }
+        return LoopComposer::Other;
+    }
+    if let Some(rest) = line.strip_prefix("/loop") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return LoopComposer::Stub;
+        }
+        return LoopComposer::Schedule(rest.to_string());
+    }
+    if body.contains(usage) || text.contains(usage) {
+        LoopComposer::Stub
+    } else {
+        LoopComposer::Other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +494,26 @@ mod tests {
         assert!(matches!(
             interpret_goal_composer("/plan"),
             GoalComposer::Slash(_)
+        ));
+    }
+
+    #[test]
+    fn interpret_loop_stub_and_schedule() {
+        assert!(matches!(
+            interpret_loop_composer(&loop_composer_fill()),
+            LoopComposer::Stub
+        ));
+        assert!(matches!(
+            interpret_loop_composer("/loop"),
+            LoopComposer::Stub
+        ));
+        match interpret_loop_composer("/loop 5m check deploy") {
+            LoopComposer::Schedule(s) => assert_eq!(s, "5m check deploy"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            interpret_loop_composer("just a normal prompt"),
+            LoopComposer::Other
         ));
     }
 

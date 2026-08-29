@@ -45,7 +45,7 @@ pub fn render(
     let w = frame.content.width;
     let mut hits = PickerHits {
         close_button: frame.close_button,
-        rows: Vec::new(),
+        ..Default::default()
     };
 
     let present = goal.is_some_and(|g| g.present());

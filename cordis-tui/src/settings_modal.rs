@@ -194,7 +194,7 @@ fn render_settings_rows(
     let mut y = frame.content.y;
     let mut hits = PickerHits {
         close_button: frame.close_button,
-        rows: Vec::new(),
+        ..Default::default()
     };
     let mut field_i = 0usize;
     for row in ROWS {

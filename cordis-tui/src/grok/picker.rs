@@ -22,19 +22,13 @@ pub struct PickerFrame {
     pub close_button: Rect,
 }
 
+#[derive(Default)]
 pub struct PickerHits {
     pub close_button: Rect,
     /// `(data_index, row_rect)` for visible rows.
     pub rows: Vec<(usize, Rect)>,
-}
-
-impl Default for PickerHits {
-    fn default() -> Self {
-        Self {
-            close_button: Rect::default(),
-            rows: Vec::new(),
-        }
-    }
+    /// `(kill_rect, scheduled task_id)` for `/loop` rows in the tasks pane.
+    pub kill_buttons: Vec<(Rect, String)>,
 }
 
 /// A selectable leaf row (Grok non-expandable `PickerRow`).

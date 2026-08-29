@@ -270,7 +270,7 @@ fn paint_subagent(
     };
     PickerHits {
         close_button: close,
-        rows: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -306,7 +306,7 @@ fn paint_job(
     };
     PickerHits {
         close_button: close,
-        rows: Vec::new(),
+        ..Default::default()
     }
 }
 

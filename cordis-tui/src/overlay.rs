@@ -62,6 +62,8 @@ pub enum Overlay {
     Mcps {
         selected: usize,
         query: String,
+        tools_expanded: HashSet<usize>,
+        section_collapsed: bool,
     },
     Workflows {
         selected: usize,
@@ -505,7 +507,7 @@ const HELP: &[HelpEntry] = &[
     }),
     HelpEntry::Row(HelpRow {
         key: "/mcps",
-        label: "MCP 服务器状态",
+        label: "MCP 服务器（Space 开关 · Enter 展开）",
         kind: HelpKind::Slash(SlashCmd::Mcps),
     }),
     HelpEntry::Row(HelpRow {
@@ -646,6 +648,7 @@ pub fn render_overlay(
     PickerHits {
         close_button: frame.close_button,
         rows: row_hits,
+        ..Default::default()
     }
 }
 
@@ -662,6 +665,14 @@ pub fn hit_index(hits: &PickerHits, column: u16, row: u16) -> Option<usize> {
 
 pub fn hit_close(hits: &PickerHits, column: u16, row: u16) -> bool {
     hits.close_button.contains(Position { x: column, y: row })
+}
+
+pub fn hit_kill(hits: &PickerHits, column: u16, row: u16) -> Option<String> {
+    let pos = Position { x: column, y: row };
+    hits.kill_buttons
+        .iter()
+        .find(|(r, _)| r.contains(pos))
+        .map(|(_, id)| id.clone())
 }
 
 #[cfg(test)]

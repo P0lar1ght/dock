@@ -18,7 +18,7 @@ pub fn render(buf: &mut Buffer, area: Rect, title: &str, body: &str, scroll: usi
     if inner.height < 2 || inner.width < 10 {
         return PickerHits {
             close_button: frame.close_button,
-            rows: Vec::new(),
+            ..Default::default()
         };
     }
     render_header(buf, inner.x, inner.y, inner.width, &theme, title);
@@ -52,7 +52,7 @@ pub fn render(buf: &mut Buffer, area: Rect, title: &str, body: &str, scroll: usi
     Paragraph::new(visible).render(body_area, buf);
     PickerHits {
         close_button: frame.close_button,
-        rows: Vec::new(),
+        ..Default::default()
     }
 }
 

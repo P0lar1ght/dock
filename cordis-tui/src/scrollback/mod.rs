@@ -37,8 +37,10 @@ mod execute;
 mod goal;
 mod list_dir;
 pub(crate) mod live;
+mod mcp;
 mod plan;
 mod read;
+mod sched;
 mod search;
 mod subagent;
 mod text_selection;
@@ -945,6 +947,10 @@ fn tool_card_lines(
         plan::lines(name, arguments, content, theme, width, mode, running)
     } else if goal::is_goal_tool(name) {
         goal::lines(name, arguments, content, theme, width, mode, running)
+    } else if sched::is_scheduler_tool(name) {
+        sched::lines(name, arguments, content, theme, width, mode, running)
+    } else if mcp::is_mcp_tool(name) {
+        mcp::lines(name, arguments, content, theme, width, mode, running)
     } else {
         tool::lines(name, arguments, content, theme, width, mode, running)
     }
@@ -1171,6 +1177,23 @@ mod tests {
         assert!(
             !text.contains("\"success\""),
             "collapsed hides json body: {text}"
+        );
+    }
+
+    #[test]
+    fn scheduler_create_card_uses_loop_header() {
+        let lines = lines_from_events(&[LogEvent::ToolExecute {
+            id: "s1".into(),
+            name: "scheduler_create".into(),
+            arguments: r#"{"interval":"5m","prompt":"检查部署","fire_immediately":true}"#.into(),
+            content: "已设定 cron-1（every 5 minutes）".into(),
+        }]);
+        let text = plain(&lines);
+        assert!(text.contains("Loop: 设定"), "{text}");
+        assert!(text.contains("检查部署"), "{text}");
+        assert!(
+            !text.contains("fire_immediately"),
+            "collapsed hides json args: {text}"
         );
     }
 

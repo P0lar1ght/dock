@@ -111,6 +111,18 @@ fn slash_plan_tasks_mcps_map() {
         dispatch(Action::SendPrompt("/goal pause".into()), &prompt).as_slice(),
         [Effect::GoalPause]
     ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/loop".into()), &prompt).as_slice(),
+        [Effect::FillPrompt { text }] if text.contains("用法") && text.contains("/loop")
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/loop 5m check deploy".into()), &prompt).as_slice(),
+        [Effect::EnterLoop { args }] if args == "5m check deploy"
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/loop check deploy every hour".into()), &prompt).as_slice(),
+        [Effect::EnterLoop { args }] if args == "check deploy every hour"
+    ));
 }
 
 #[test]

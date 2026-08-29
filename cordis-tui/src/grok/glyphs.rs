@@ -11,6 +11,11 @@ pub fn diamond_filled() -> &'static str {
     "\u{25C6}"
 }
 
+/// `"›"` — collapsed fold indicator. Always 1 column.
+pub fn chevron() -> &'static str {
+    "\u{203A}"
+}
+
 /// `"◇"` — mermaid affordance marker. Always 1 column.
 pub fn diamond_hollow() -> &'static str {
     "\u{25C7}"

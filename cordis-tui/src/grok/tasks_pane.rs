@@ -14,6 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::grok::color::{blend_color, pulse_fg};
+use crate::grok::glyphs;
 use crate::grok::picker::{render_divider, render_floating_frame, render_search_bar, PickerHits};
 use crate::grok::workflows::WorkflowRunSnapshot;
 use crate::theme::Theme;
@@ -463,8 +464,15 @@ impl TaskEntry {
         }
     }
 
-    fn is_header_row(&self) -> bool {
+    pub fn is_header_row(&self) -> bool {
         matches!(self, TaskEntry::Header { .. })
+    }
+
+    pub fn scheduled_task_id(&self) -> Option<&str> {
+        match self {
+            TaskEntry::Scheduled { task_id, .. } => Some(task_id.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -578,7 +586,7 @@ pub fn render_tasks_overlay(
     if content.height <= 3 || content.width < 8 {
         return PickerHits {
             close_button: frame.close_button,
-            rows: Vec::new(),
+            ..Default::default()
         };
     }
     let title = Line::from(Span::styled(
@@ -630,14 +638,18 @@ pub fn render_tasks_overlay(
         );
         return PickerHits {
             close_button: frame.close_button,
-            rows: Vec::new(),
+            ..Default::default()
         };
     }
     let sel = selected.min(entries.len() - 1);
-    let visible = list_h as usize;
+    let has_loop = entries.iter().any(|e| e.scheduled_task_id().is_some());
+    let hint_h = if has_loop { 1 } else { 0 };
+    let visible = list_h.saturating_sub(hint_h) as usize;
     let start = sel.saturating_sub(visible.saturating_sub(1) / 2);
-    let start = start.min(entries.len().saturating_sub(visible));
+    let start = start.min(entries.len().saturating_sub(visible.max(1)));
     let mut hits = Vec::new();
+    let mut kill_buttons = Vec::new();
+    let kill_w: u16 = 3;
     for vis in 0..visible {
         let idx = start + vis;
         if idx >= entries.len() {
@@ -664,14 +676,50 @@ pub fn render_tasks_overlay(
             spans.extend(line.spans);
             line.spans = spans;
         }
-        let clipped =
-            crate::grok::line_utils::truncate_line(line, content.width.saturating_sub(1) as usize);
-        buf.set_line(content.x, y, &clipped, content.width);
+        let scheduled_id = entries[idx].scheduled_task_id();
+        let text_w = if scheduled_id.is_some() {
+            content.width.saturating_sub(kill_w + 1)
+        } else {
+            content.width.saturating_sub(1)
+        };
+        let clipped = crate::grok::line_utils::truncate_line(line, text_w as usize);
+        buf.set_line(content.x, y, &clipped, text_w.max(1));
+        if let Some(task_id) = scheduled_id {
+            let bx = content.x + content.width.saturating_sub(kill_w);
+            let kill_style = if selected_row {
+                Style::default().fg(theme.accent_error)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span(
+                bx,
+                y,
+                &Span::styled(glyphs::ballot_x_button(), kill_style),
+                kill_w,
+            );
+            kill_buttons.push((Rect::new(bx, y, kill_w, 1), task_id.to_string()));
+        }
         hits.push((idx, row_rect));
+    }
+    if has_loop {
+        let hint_y = list_y.saturating_add(visible as u16);
+        if hint_y < content.y.saturating_add(content.height) {
+            let hint = Line::from(Span::styled(
+                "x / [✗] 关闭 loop",
+                Style::default().fg(theme.gray),
+            ));
+            buf.set_line(
+                content.x + 1,
+                hint_y,
+                &hint,
+                content.width.saturating_sub(2),
+            );
+        }
     }
     PickerHits {
         close_button: frame.close_button,
         rows: hits,
+        kill_buttons,
     }
 }
 
@@ -755,6 +803,10 @@ mod tests {
         };
         let items = collect_items(&[mon], &[], &[loop_job], &[], None);
         assert!(items.iter().all(|i| i.group_kind() == GroupKind::Watchers));
+        assert_eq!(
+            items.iter().find_map(|i| i.scheduled_task_id()),
+            Some("cron-1")
+        );
         let rows = rebuild_entries(&items, &HashSet::new());
         assert_eq!(rows[0].header_group(), Some(GroupKind::Watchers));
         assert_eq!(rows.len(), 3);

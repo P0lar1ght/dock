@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
@@ -62,6 +63,10 @@ pub struct Sessions {
     compacting: Arc<AtomicBool>,
     /// User follow-up prompts waiting in the session actor (not GoalSummary).
     queued_followups: Arc<AtomicUsize>,
+    /// One-shot wire addons paired with a specific next user bubble
+    /// (display `/loop …` vs `loop_schedule_instruction`, or a scheduled-fire
+    /// reminder). Hidden from the pager as [`LogEvent::SystemReminder`].
+    pending_user_addons: Arc<Mutex<VecDeque<(String, String)>>>,
 }
 
 /// Official SSE usage held until [`Sessions::finish_llm`] so one sample is
@@ -109,7 +114,18 @@ impl Sessions {
             auto_compact_suppressed: Arc::new(AtomicBool::new(false)),
             compacting: Arc::new(AtomicBool::new(false)),
             queued_followups: Arc::new(AtomicUsize::new(0)),
+            pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    /// Queue a hidden model-only reminder for the next user bubble whose
+    /// visible text equals `expected_user` (so a queued `/loop` cannot steal
+    /// an unrelated follow-up).
+    pub fn arm_user_addon(&self, expected_user: impl Into<String>, text: impl Into<String>) {
+        self.pending_user_addons
+            .lock()
+            .unwrap()
+            .push_back((expected_user.into(), text.into()));
     }
 
     pub fn identity(&self) -> &str {
@@ -187,7 +203,8 @@ impl Sessions {
     }
 
     pub fn append(&self, event: LogEvent) {
-        if matches!(event, LogEvent::User(_)) {
+        let is_user = matches!(event, LogEvent::User(_));
+        if is_user {
             self.rewound.store(false, Ordering::Relaxed);
             let imgs = std::mem::take(&mut *self.pending_images.lock().unwrap());
             self.user_images.lock().unwrap().push(imgs);
@@ -197,7 +214,22 @@ impl Sessions {
         self.events.lock().unwrap().push(event.clone());
         self.times.lock().unwrap().push(SystemTime::now());
         self.bump_events_rev();
-        self.emit_session(event);
+        self.emit_session(event.clone());
+        if let LogEvent::User(user_text) = &event {
+            let addon = {
+                let mut q = self.pending_user_addons.lock().unwrap();
+                q.iter()
+                    .position(|(expected, _)| expected == user_text)
+                    .map(|i| q.remove(i).unwrap().1)
+            };
+            if let Some(addon) = addon {
+                let reminder = LogEvent::SystemReminder(addon);
+                self.events.lock().unwrap().push(reminder.clone());
+                self.times.lock().unwrap().push(SystemTime::now());
+                self.bump_events_rev();
+                self.emit_session(reminder);
+            }
+        }
     }
 
     fn emit_session(&self, event: LogEvent) {
@@ -722,6 +754,26 @@ mod tests {
         let sessions = Sessions::new(ctx);
         assert!(sessions.archive_current().is_none());
         assert!(sessions.archived().is_empty());
+    }
+
+    #[test]
+    fn user_addon_appends_hidden_reminder() {
+        let root = Context::new();
+        let sessions = Sessions::new(root);
+        sessions.arm_user_addon("/loop 5m check", "wire instruction");
+        sessions.append(LogEvent::User("/loop 5m check".into()));
+        let events = sessions.events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], LogEvent::User(t) if t == "/loop 5m check"));
+        assert!(matches!(&events[1], LogEvent::SystemReminder(t) if t == "wire instruction"));
+        sessions.arm_user_addon("/loop 1h x", "loop wire");
+        sessions.append(LogEvent::User("hello".into()));
+        assert_eq!(sessions.events().len(), 3);
+        sessions.append(LogEvent::User("/loop 1h x".into()));
+        assert!(matches!(
+            sessions.events().last(),
+            Some(LogEvent::SystemReminder(t)) if t == "loop wire"
+        ));
     }
 
     #[test]

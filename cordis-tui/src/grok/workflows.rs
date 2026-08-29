@@ -114,7 +114,7 @@ pub fn render_workflows_overlay(
     if content.height <= 3 || content.width < 8 {
         return PickerHits {
             close_button: frame.close_button,
-            rows: Vec::new(),
+            ..Default::default()
         };
     }
     let title = Line::from(Span::styled(
@@ -174,7 +174,7 @@ pub fn render_workflows_overlay(
         }
         return PickerHits {
             close_button: frame.close_button,
-            rows: Vec::new(),
+            ..Default::default()
         };
     }
     let sel = selected.min(runs.len() - 1);
@@ -209,6 +209,7 @@ pub fn render_workflows_overlay(
     PickerHits {
         close_button: frame.close_button,
         rows: hits,
+        ..Default::default()
     }
 }
 

@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    goal_composer_fill, AgentPresets, AppSettings, Ask, Cron, Goal, Jobs, LogEvent, Mcp,
-    MermaidEngineKind, PermissionMode, PermissionOptionKind, Permissions, PlanDecision, PlanMode,
-    Sessions, Slash, SlotKeyResult, Subagents, ToolCall, Tools, TuiSlots, UserImage, Workflows,
-    AGENT_PRESETS, ASK, ASK_EVENT, CRON, GOAL, JOBS, MCP, PERMISSIONS, PERMISSION_EVENT,
-    PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS, SLASH, SUBAGENTS, TOOLS, TUI_SLOTS,
-    WORKFLOWS,
+    goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
+    Ask, Cron, Goal, Jobs, LogEvent, LoopFireMode, Mcp, McpStatus, MermaidEngineKind,
+    PermissionMode, PermissionOptionKind, Permissions, PlanDecision, PlanMode, Sessions, Slash,
+    SlotKeyResult, Subagents, ToolCall, Tools, TuiSlots, UserImage, Workflows, AGENT_PRESETS, ASK,
+    ASK_EVENT, CRON, GOAL, JOBS, MCP, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE,
+    SESSIONS, SESSION_EVENT, SETTINGS, SLASH, SUBAGENTS, TOOLS, TUI_SLOTS, WORKFLOWS,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -39,6 +39,7 @@ use crate::ask_view;
 use crate::clipboard;
 use crate::error::{Error, Result};
 use crate::file_search;
+use crate::grok::mcps;
 use crate::grok::picker::{PickerHits, PickerRow};
 use crate::grok::shortcuts::ShortcutsBar;
 use crate::grok::tasks_pane::{self, GroupKind, TaskEntry};
@@ -63,7 +64,9 @@ use crate::text_overlay;
 use crate::theme::Theme;
 use crate::usage_overlay;
 
-use super::actions::{interpret_goal_composer_ex, Action, Effect, GoalComposer};
+use super::actions::{
+    interpret_goal_composer_ex, interpret_loop_composer, Action, Effect, GoalComposer, LoopComposer,
+};
 use super::dispatch::dispatch;
 use super::input::spawn_reader;
 use super::prompt::{PastedImage, PromptWidget};
@@ -278,6 +281,10 @@ pub async fn run(ctx: Context) -> Result<()> {
                                     for extra in more.into_iter().rev() {
                                         effects.push_front(extra);
                                     }
+                                } else if let Some(more) = intercept_loop_send(&text) {
+                                    for extra in more.into_iter().rev() {
+                                        effects.push_front(extra);
+                                    }
                                 } else if let Ok(session) =
                                     ctx.require::<SessionRef>(SESSION_PORT)
                                 {
@@ -289,8 +296,10 @@ pub async fn run(ctx: Context) -> Result<()> {
                             }
                             Effect::FillPrompt { text } => {
                                 overlay.close();
-                                if let Some(goal) = ctx.get::<Goal>(GOAL) {
-                                    goal.arm_composer();
+                                if text.contains("/goal") {
+                                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
+                                        goal.arm_composer();
+                                    }
                                 }
                                 if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
                                     prompt.set_text(&text);
@@ -362,21 +371,9 @@ pub async fn run(ctx: Context) -> Result<()> {
                                     },
                                 );
                             }
-                            Effect::CronAdd { every, prompt } => {
-                                match ctx.get::<Cron>(CRON) {
-                                    Some(cron) => {
-                                        let id = cron.add(every, prompt.clone());
-                                        overlay.close();
-                                        flash(
-                                            &ctx,
-                                            format!(
-                                                "cron {id} every {}s",
-                                                every.as_secs().max(1)
-                                            ),
-                                        );
-                                    }
-                                    None => flash(&ctx, "cron is not mounted"),
-                                }
+                            Effect::EnterLoop { args } => {
+                                overlay.close();
+                                start_loop(&ctx, args);
                             }
                             Effect::Export(path) => {
                                 let path = path.unwrap_or_else(|| {
@@ -524,6 +521,8 @@ pub async fn run(ctx: Context) -> Result<()> {
                                 overlay = Overlay::Mcps {
                                     selected: 0,
                                     query: String::new(),
+                                    tools_expanded: HashSet::new(),
+                                    section_collapsed: false,
                                 };
                             }
                             Effect::ShowPresets { focus } => {
@@ -580,6 +579,28 @@ pub async fn run(ctx: Context) -> Result<()> {
                                         let _ = redraw.send(());
                                     });
                                 }
+                            }
+                            Effect::ToggleMcpServer { name, enabled } => {
+                                spawn_mcp_toggle(
+                                    ctx.clone(),
+                                    redraw_tx.clone(),
+                                    McpToggleJob::Server { name, enabled },
+                                );
+                            }
+                            Effect::ToggleMcpTool {
+                                server,
+                                tool,
+                                enabled,
+                            } => {
+                                spawn_mcp_toggle(
+                                    ctx.clone(),
+                                    redraw_tx.clone(),
+                                    McpToggleJob::Tool {
+                                        server,
+                                        tool,
+                                        enabled,
+                                    },
+                                );
                             }
                         }
                     }
@@ -955,33 +976,108 @@ fn workflow_rows(ctx: &Context, query: &str) -> Vec<WorkflowRunSnapshot> {
         .collect()
 }
 
-fn mcp_rows(ctx: &Context, query: &str) -> Vec<(String, String)> {
-    let rows = ctx
-        .get::<Mcp>(MCP)
-        .map(|m| {
-            m.list()
-                .into_iter()
-                .map(|s| {
-                    let status = if s.ok { "已连接" } else { "失败" };
-                    (
-                        format!("{} {status}", s.name),
-                        if s.detail.is_empty() {
-                            s.command
-                        } else {
-                            s.detail
-                        },
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if query.is_empty() {
-        return rows;
+fn mcp_status_list(ctx: &Context) -> Vec<McpStatus> {
+    ctx.get::<Mcp>(MCP).map(|m| m.list()).unwrap_or_default()
+}
+
+fn mcp_overlay_rows(
+    ctx: &Context,
+    query: &str,
+    tools_expanded: &HashSet<usize>,
+    section_collapsed: bool,
+) -> Vec<mcps::McpRow> {
+    mcps::build_rows(
+        &mcp_status_list(ctx),
+        query,
+        tools_expanded,
+        section_collapsed,
+    )
+}
+
+enum McpToggleJob {
+    Server {
+        name: String,
+        enabled: bool,
+    },
+    Tool {
+        server: String,
+        tool: String,
+        enabled: bool,
+    },
+}
+
+fn spawn_mcp_toggle(
+    ctx: Context,
+    redraw: tokio::sync::mpsc::UnboundedSender<()>,
+    job: McpToggleJob,
+) {
+    if ctx.get::<Mcp>(MCP).is_none() {
+        flash(&ctx, "MCP 未挂载");
+        return;
     }
-    let q = query.to_ascii_lowercase();
-    rows.into_iter()
-        .filter(|(a, b)| a.to_ascii_lowercase().contains(&q) || b.to_ascii_lowercase().contains(&q))
-        .collect()
+    let pending = match &job {
+        McpToggleJob::Server { name, enabled } => {
+            if *enabled {
+                format!("正在启用 {name}…")
+            } else {
+                format!("正在禁用 {name}…")
+            }
+        }
+        McpToggleJob::Tool {
+            server,
+            tool,
+            enabled,
+        } => {
+            if *enabled {
+                format!("正在启用 {server}/{tool}…")
+            } else {
+                format!("正在禁用 {server}/{tool}…")
+            }
+        }
+    };
+    flash(&ctx, pending);
+    tokio::spawn(async move {
+        let Some(mcp) = ctx.get::<Mcp>(MCP) else {
+            flash(&ctx, "MCP 未挂载");
+            let _ = redraw.send(());
+            return;
+        };
+        let result = match &job {
+            McpToggleJob::Server { name, enabled } => mcp.set_server_enabled(name, *enabled).await,
+            McpToggleJob::Tool {
+                server,
+                tool,
+                enabled,
+            } => mcp.set_tool_enabled(server, tool, *enabled).await,
+        };
+        match result {
+            Ok(()) => {
+                let done = match &job {
+                    McpToggleJob::Server { name, enabled } => {
+                        if *enabled {
+                            format!("已启用 {name}")
+                        } else {
+                            format!("已禁用 {name}")
+                        }
+                    }
+                    McpToggleJob::Tool {
+                        server,
+                        tool,
+                        enabled,
+                    } => {
+                        if *enabled {
+                            format!("已启用 {server}/{tool}")
+                        } else {
+                            format!("已禁用 {server}/{tool}")
+                        }
+                    }
+                };
+                flash(&ctx, done);
+            }
+            Err(e) => flash(&ctx, e),
+        }
+        let _ = redraw.send(());
+    });
 }
 
 fn file_search_open(ctx: &Context) -> bool {
@@ -1216,6 +1312,38 @@ fn start_goal(ctx: &Context, raw: String) {
     }
 }
 
+fn start_loop(ctx: &Context, args: String) {
+    let visible = format!("/loop {args}");
+    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+        sessions.arm_user_addon(
+            visible.clone(),
+            loop_schedule_instruction(&args, LoopFireMode::InSession),
+        );
+    }
+    flash(ctx, "正在安排循环任务");
+    if let Ok(session) = ctx.require::<SessionRef>(SESSION_PORT) {
+        session.submit(visible, false);
+    }
+}
+
+fn intercept_loop_send(text: &str) -> Option<Vec<Effect>> {
+    match interpret_loop_composer(text) {
+        LoopComposer::Stub => Some(vec![Effect::FillPrompt {
+            text: loop_composer_fill(),
+        }]),
+        LoopComposer::Schedule(args) => Some(vec![Effect::EnterLoop { args }]),
+        LoopComposer::Other => None,
+    }
+}
+
+fn cancel_scheduled(ctx: &Context, id: &str) {
+    match ctx.get::<Cron>(CRON) {
+        Some(cron) if cron.cancel(id) => flash(ctx, format!("已关闭 {id}")),
+        Some(_) => flash(ctx, format!("没有定时任务 {id}")),
+        None => flash(ctx, "cron 未挂载"),
+    }
+}
+
 fn open_goal_overlay(ctx: &Context, overlay: &mut Overlay, editing: bool) {
     let Some(goal) = ctx.get::<Goal>(GOAL) else {
         flash(ctx, "目标服务未挂载");
@@ -1313,7 +1441,12 @@ fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
         Overlay::Tasks {
             query, collapsed, ..
         } => task_entries(ctx, query, collapsed).len(),
-        Overlay::Mcps { query, .. } => mcp_rows(ctx, query).len(),
+        Overlay::Mcps {
+            query,
+            tools_expanded,
+            section_collapsed,
+            ..
+        } => mcp_overlay_rows(ctx, query, tools_expanded, *section_collapsed).len(),
         Overlay::Workflows { query, .. } => workflow_rows(ctx, query).len(),
         Overlay::Goal { editing, .. } => {
             if *editing {
@@ -1599,6 +1732,20 @@ fn run_action(
                 }
                 return Vec::new();
             }
+            if let Overlay::Tasks {
+                selected,
+                query,
+                collapsed,
+            } = overlay
+            {
+                if c == 'x' || c == 'X' {
+                    let rows = task_entries(ctx, query, collapsed);
+                    if let Some(TaskEntry::Scheduled { task_id, .. }) = rows.get(*selected) {
+                        cancel_scheduled(ctx, task_id);
+                        return Vec::new();
+                    }
+                }
+            }
             overlay.push_char(c);
             return Vec::new();
         }
@@ -1648,6 +1795,34 @@ fn run_action(
                 if let Some(SettingsField::Timestamps) = fields.get(*selected).copied() {
                     if let Some(settings) = ctx.get::<AppSettings>(SETTINGS) {
                         settings.toggle_timestamps();
+                    }
+                }
+            }
+            if let Overlay::Mcps {
+                selected,
+                query,
+                tools_expanded,
+                section_collapsed,
+            } = overlay
+            {
+                let servers = mcp_status_list(ctx);
+                let rows = mcps::build_rows(&servers, query, tools_expanded, *section_collapsed);
+                if let Some(row) = rows.get(*selected) {
+                    if let Some(toggle) = mcps::toggle_target(row, &servers) {
+                        return vec![match toggle {
+                            mcps::McpToggle::Server { name, enabled } => {
+                                Effect::ToggleMcpServer { name, enabled }
+                            }
+                            mcps::McpToggle::Tool {
+                                server,
+                                tool,
+                                enabled,
+                            } => Effect::ToggleMcpTool {
+                                server,
+                                tool,
+                                enabled,
+                            },
+                        }];
                     }
                 }
             }
@@ -1830,6 +2005,12 @@ fn run_action(
                     overlay.close();
                     return Vec::new();
                 }
+                if let Some(id) = overlay::hit_kill(hits, column, row) {
+                    if matches!(overlay, Overlay::Tasks { .. }) {
+                        cancel_scheduled(ctx, &id);
+                        return Vec::new();
+                    }
+                }
                 if let Some(idx) = overlay::hit_index(hits, column, row) {
                     if matches!(overlay, Overlay::Presets(PresetView::Canvas(_))) {
                         let action = match overlay {
@@ -1982,7 +2163,26 @@ fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect> {
             }
             return Vec::new();
         }
-        Overlay::Mcps { .. } | Overlay::Workflows { .. } => {
+        Overlay::Mcps {
+            selected,
+            query,
+            tools_expanded,
+            section_collapsed,
+        } => {
+            let servers = mcp_status_list(ctx);
+            let rows = mcps::build_rows(&servers, query, tools_expanded, *section_collapsed);
+            if let Some(row) = rows.get(*selected) {
+                mcps::toggle_row(row, tools_expanded, section_collapsed, !query.is_empty());
+                let next = mcps::build_rows(&servers, query, tools_expanded, *section_collapsed);
+                *selected = if next.is_empty() {
+                    0
+                } else {
+                    (*selected).min(next.len() - 1)
+                };
+            }
+            return Vec::new();
+        }
+        Overlay::Workflows { .. } => {
             overlay.close();
             return Vec::new();
         }
@@ -2987,31 +3187,30 @@ fn paint_overlay(
             let runs = workflow_rows(ctx, query);
             workflows::render_workflows_overlay(buf, area, &runs, *selected, query)
         }
-        Overlay::Mcps { selected, query } => {
-            let filtered = mcp_rows(ctx, query);
-            let sel = if filtered.is_empty() {
-                0
-            } else {
-                (*selected).min(filtered.len() - 1)
+        Overlay::Mcps {
+            selected,
+            query,
+            tools_expanded,
+            section_collapsed,
+        } => {
+            let servers = mcp_status_list(ctx);
+            let sel = {
+                let n = mcps::build_rows(&servers, query, tools_expanded, *section_collapsed).len();
+                if n == 0 {
+                    0
+                } else {
+                    (*selected).min(n - 1)
+                }
             };
-            let rows: Vec<PickerRow> = if filtered.is_empty() {
-                vec![PickerRow {
-                    label: "(none)",
-                    right_label: "未配置 MCP 服务器",
-                    selected: true,
-                }]
-            } else {
-                filtered
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (left, right))| PickerRow {
-                        label: left.as_str(),
-                        right_label: right.as_str(),
-                        selected: i == sel,
-                    })
-                    .collect()
-            };
-            overlay::render_overlay(buf, area, "MCP", query, &rows, false)
+            mcps::render_mcp_overlay(
+                buf,
+                area,
+                &servers,
+                sel,
+                query,
+                tools_expanded,
+                *section_collapsed,
+            )
         }
         Overlay::Goal {
             selected,

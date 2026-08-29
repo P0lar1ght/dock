@@ -30,9 +30,16 @@ pub type ToolBody = Arc<dyn Fn(ToolCall) -> BoxFuture<'static, ToolResult> + Sen
 struct Entry {
     spec: ToolSpec,
     body: ToolBody,
-    /// Registered by a running dynamic Cordis package. Visible to the model
-    /// even when the current Agent preset allowlist omits the name.
-    dynamic: bool,
+    kind: ExtraKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtraKind {
+    Regular,
+    /// Running dynamic Cordis package — bypasses Agent preset allowlist.
+    Dynamic,
+    /// Live MCP tool — bypasses Agent preset allowlist while the server/tool is on.
+    Mcp,
 }
 
 /// Named `tools` service. Echo backend for tests; workspace backend for the app.
@@ -66,20 +73,26 @@ impl Tools {
     /// Workspace builtins cannot be shadowed. Disposed with the calling fiber
     /// when the returned handle is owned (via `ctx.effect` / apply return).
     pub fn register(&self, spec: ToolSpec, body: ToolBody) -> cordis::Result<Disposable> {
-        self.register_inner(spec, body, false)
+        self.register_inner(spec, body, ExtraKind::Regular)
     }
 
     /// Same as [`Self::register`], tagged so Agent preset allowlists still
     /// show and execute the tool while the dynamic package is running.
     pub fn register_dynamic(&self, spec: ToolSpec, body: ToolBody) -> cordis::Result<Disposable> {
-        self.register_inner(spec, body, true)
+        self.register_inner(spec, body, ExtraKind::Dynamic)
+    }
+
+    /// MCP tools: visible to the model even when the current Agent preset
+    /// allowlist omits the `mcp_{server}__{tool}` name.
+    pub fn register_mcp(&self, spec: ToolSpec, body: ToolBody) -> cordis::Result<Disposable> {
+        self.register_inner(spec, body, ExtraKind::Mcp)
     }
 
     fn register_inner(
         &self,
         spec: ToolSpec,
         body: ToolBody,
-        dynamic: bool,
+        kind: ExtraKind,
     ) -> cordis::Result<Disposable> {
         let name = spec.name.clone();
         if self.workspace && workspace::handles(&name) {
@@ -92,14 +105,7 @@ impl Tools {
             if extra.contains_key(&name) {
                 return Err(cordis::Error::plugin(format!("duplicate tool {name}")));
             }
-            extra.insert(
-                name.clone(),
-                Entry {
-                    spec,
-                    body,
-                    dynamic,
-                },
-            );
+            extra.insert(name.clone(), Entry { spec, body, kind });
         }
         let extra = self.extra.clone();
         Ok(Disposable::from_fn(move || {
@@ -112,7 +118,19 @@ impl Tools {
             .lock()
             .unwrap()
             .get(name)
-            .is_some_and(|e| e.dynamic)
+            .is_some_and(|e| e.kind == ExtraKind::Dynamic)
+    }
+
+    pub fn is_mcp(&self, name: &str) -> bool {
+        self.extra
+            .lock()
+            .unwrap()
+            .get(name)
+            .is_some_and(|e| e.kind == ExtraKind::Mcp)
+    }
+
+    fn bypasses_allowlist(&self, name: &str) -> bool {
+        self.is_dynamic(name) || self.is_mcp(name)
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -143,7 +161,7 @@ impl Tools {
         match exec.get::<AgentPresets>(AGENT_PRESETS) {
             Some(presets) => specs
                 .into_iter()
-                .filter(|s| self.is_dynamic(&s.name) || presets.allows(&s.name))
+                .filter(|s| self.bypasses_allowlist(&s.name) || presets.allows(&s.name))
                 .map(|mut spec| {
                     presets.bind_spawn_schema(&mut spec);
                     spec
@@ -159,7 +177,7 @@ impl Tools {
 
     pub async fn execute_on(&self, exec: &Context, call: ToolCall) -> ToolResult {
         if let Some(presets) = exec.get::<AgentPresets>(AGENT_PRESETS) {
-            if !self.is_dynamic(&call.name) && !presets.allows(&call.name) {
+            if !self.bypasses_allowlist(&call.name) && !presets.allows(&call.name) {
                 return finish(
                     exec,
                     ToolResult {

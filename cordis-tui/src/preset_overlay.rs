@@ -400,7 +400,7 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
         return PickerHits {
             close_button: frame.close_button,
-            rows: Vec::new(),
+            ..Default::default()
         };
     };
     let preset = presets
@@ -409,7 +409,7 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     let current = presets.current_id() == canvas.id;
     let mut hits = PickerHits {
         close_button: frame.close_button,
-        rows: Vec::new(),
+        ..Default::default()
     };
 
     let content = frame.content;

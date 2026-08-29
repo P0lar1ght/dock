@@ -25,7 +25,7 @@ cargo test -p cordis-spine -p cordis-tui -p cordis-app
 - **换插件，不改 loop。** 新 UI 面做成 `tui.*` 插件；新采样做成 `llm` 插件。工具能力插件 `inject: ["tools"]` 后 `ctx.tools.register()`（DSH 一个 `"tools"` 表，不是 `tools.mcp` ExtraTools）。不要把功能焊进 `event_loop` 或 `agent-loop`。
 - **循环本身也是插件。** 不要调用 `xai_grok_pager::app::run`，不要 spawn Grok `MvpAgent`。ACP 只是 pager 的权限表面（`PermissionOptionKind`），不是完整 ACP agent。
 - **扩展走 waterfall**（`agent/pre-step`、`llm/stream`、`tools/execute`、`system-prompt/assemble`）。拦截时接 `on_waterfall`；默认实现放在 `waterfall(..., || default)` 的闭包里。
-- **MCP 是 fail-open 插件。** `mcp-client` 连不上或没配置时仍 `Active`，往 `"mcp"` 写空/失败状态；工具名 `{server}__{tool}` 注册进 `"tools"`，不能盖掉 `bash`。
+- **MCP 是 fail-open 插件。** `mcp-client` 连不上或没配置时仍 `Active`，往 `"mcp"` 写空/失败状态；工具名 `mcp_{server}__{tool}` 注册进 `"tools"`（开启的 MCP 工具穿过 Agent 预设允许名单），不能盖掉 `bash`。
 
 ## Live-lookup，不捕获
 

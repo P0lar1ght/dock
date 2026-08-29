@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use indexmap::IndexMap;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,9 @@ struct FileConfig {
     mcp: McpSection,
     #[serde(default)]
     mcp_servers: BTreeMap<String, McpServerRow>,
+    /// Grok `[disabled_mcp_tools.<server>] = ["tool", …]` — raw MCP tool names.
+    #[serde(default)]
+    disabled_mcp_tools: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -67,6 +71,12 @@ struct McpSection {
     servers: Vec<McpServerRow>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Grok `[mcp_servers.<name>]` row: `command` → stdio, `url` → Streamable HTTP.
+/// Untagged order copied: a nonempty `command` wins if both are set.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct McpServerRow {
     #[serde(default)]
@@ -75,53 +85,274 @@ pub struct McpServerRow {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, alias = "urlTemplate", alias = "url_template")]
+    pub url: String,
+    #[serde(default, rename = "type")]
+    #[allow(dead_code)]
+    pub transport_type: Option<String>,
+    #[serde(default)]
+    pub bearer_token_env_var: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub startup_timeout_sec: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+/// Grok default `initialize` / `tools/list` budget (`DEFAULT_STARTUP_TIMEOUT_SECS`).
+pub const DEFAULT_MCP_STARTUP_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
+    Http {
+        url: String,
+        headers: BTreeMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServer {
     pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
+    pub transport: McpTransport,
+    pub startup_timeout_sec: u64,
+    pub enabled: bool,
+}
+
+impl McpServer {
+    pub fn endpoint(&self) -> &str {
+        match &self.transport {
+            McpTransport::Stdio { command, .. } => command,
+            McpTransport::Http { url, .. } => url,
+        }
+    }
 }
 
 /// Live-read MCP servers from config. Fail-open: missing files → empty.
+/// Later files overlay the same name (Grok project `< user`).
 pub fn load_mcp_servers() -> Vec<McpServer> {
     load_mcp_servers_from(&catalog_paths())
 }
 
 pub fn load_mcp_servers_from(paths: &[PathBuf]) -> Vec<McpServer> {
-    let mut out = Vec::new();
+    let mut rows: IndexMap<String, McpServerRow> = IndexMap::new();
     for path in paths {
         let Some(file) = read_file(path) else {
             continue;
         };
         for row in file.mcp.servers {
-            if row.command.trim().is_empty() {
+            let name = row_name(&row);
+            if name.is_empty() {
                 continue;
             }
-            let name = row
-                .name
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| row.command.clone());
-            out.push(McpServer {
-                name,
-                command: row.command,
-                args: row.args,
-            });
+            rows.insert(name, row);
         }
         for (key, row) in file.mcp_servers {
-            if row.command.trim().is_empty() {
+            if key.trim().is_empty() {
                 continue;
             }
-            out.push(McpServer {
-                name: key,
-                command: row.command,
+            rows.insert(key, row);
+        }
+    }
+    rows.into_iter()
+        .filter_map(|(name, row)| row_to_server(name, row))
+        .collect()
+}
+
+fn row_name(row: &McpServerRow) -> String {
+    row.name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let command = row.command.trim();
+            if !command.is_empty() {
+                command.to_string()
+            } else {
+                row.url.trim().to_string()
+            }
+        })
+}
+
+/// Grok `to_acp_mcp_server` + `blank_transport_field`, minus OAuth / SSE-as-separate-type.
+/// Disabled servers stay in the list so `/mcps` can toggle them.
+fn row_to_server(name: String, row: McpServerRow) -> Option<McpServer> {
+    let startup_timeout_sec = row
+        .startup_timeout_sec
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MCP_STARTUP_TIMEOUT_SECS);
+    let command = row.command.trim();
+    if !command.is_empty() {
+        return Some(McpServer {
+            name,
+            transport: McpTransport::Stdio {
+                command: command.to_string(),
                 args: row.args,
-            });
+                env: row.env,
+            },
+            startup_timeout_sec,
+            enabled: row.enabled,
+        });
+    }
+    let url = row.url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let mut headers = row.headers;
+    if let Some(env_var) = row.bearer_token_env_var {
+        match std::env::var(&env_var) {
+            Ok(token) => {
+                headers.insert("Authorization".into(), format!("Bearer {token}"));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    server = name.as_str(),
+                    env_var = env_var.as_str(),
+                    "MCP server bearer_token_env_var not set; proceeding without it"
+                );
+            }
+        }
+    }
+    Some(McpServer {
+        name,
+        transport: McpTransport::Http {
+            url: url.to_string(),
+            headers,
+        },
+        startup_timeout_sec,
+        enabled: row.enabled,
+    })
+}
+
+/// Overlay `[disabled_mcp_tools]` from catalog files (later path wins per server).
+pub fn load_disabled_mcp_tools() -> BTreeMap<String, Vec<String>> {
+    load_disabled_mcp_tools_from(&catalog_paths())
+}
+
+pub fn load_disabled_mcp_tools_from(paths: &[PathBuf]) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for path in paths {
+        let Some(file) = read_file(path) else {
+            continue;
+        };
+        for (server, tools) in file.disabled_mcp_tools {
+            if server.trim().is_empty() {
+                continue;
+            }
+            out.insert(server, tools);
         }
     }
     out
+}
+
+/// Persist `[mcp_servers.<name>].enabled` into the catalog file that defines it.
+pub fn persist_mcp_server_enabled(name: &str, enabled: bool) -> Result<(), String> {
+    persist_mcp_server_enabled_in(&catalog_paths(), name, enabled)
+}
+
+pub fn persist_mcp_server_enabled_in(
+    paths: &[PathBuf],
+    name: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let path = mcp_persist_target(paths, name)?;
+    patch_toml(&path, |doc| {
+        let Some(item) = doc.get_mut("mcp_servers").and_then(|t| t.get_mut(name)) else {
+            return Err(format!("config has no [mcp_servers.{name}]"));
+        };
+        item["enabled"] = toml_edit::value(enabled);
+        Ok(())
+    })
+}
+
+/// Persist `[disabled_mcp_tools.<server>]` as an array of raw tool names.
+pub fn persist_disabled_mcp_tools(server: &str, disabled: &[String]) -> Result<(), String> {
+    persist_disabled_mcp_tools_in(&catalog_paths(), server, disabled)
+}
+
+pub fn persist_disabled_mcp_tools_in(
+    paths: &[PathBuf],
+    server: &str,
+    disabled: &[String],
+) -> Result<(), String> {
+    let path = mcp_persist_target(paths, server).or_else(|_| mcp_persist_fallback(paths))?;
+    patch_toml(&path, |doc| {
+        if disabled.is_empty() {
+            if let Some(table) = doc
+                .get_mut("disabled_mcp_tools")
+                .and_then(|t| t.as_table_like_mut())
+            {
+                table.remove(server);
+                if table.is_empty() {
+                    doc.remove("disabled_mcp_tools");
+                }
+            }
+            return Ok(());
+        }
+        let mut arr = toml_edit::Array::new();
+        for name in disabled {
+            arr.push(name.as_str());
+        }
+        if doc.get("disabled_mcp_tools").is_none() {
+            doc["disabled_mcp_tools"] = toml_edit::table();
+        }
+        doc["disabled_mcp_tools"][server] = toml_edit::value(arr);
+        Ok(())
+    })
+}
+
+fn mcp_persist_target(paths: &[PathBuf], name: &str) -> Result<PathBuf, String> {
+    for path in paths.iter().rev() {
+        if file_defines_mcp_server(path, name) {
+            return Ok(path.clone());
+        }
+    }
+    Err(format!("no [mcp_servers.{name}] in catalog files"))
+}
+
+fn mcp_persist_fallback(paths: &[PathBuf]) -> Result<PathBuf, String> {
+    paths
+        .iter()
+        .rev()
+        .find(|p| p.exists() || p.parent().is_some_and(|d| d.exists()))
+        .cloned()
+        .ok_or_else(|| "no MCP config file to write".into())
+}
+
+fn file_defines_mcp_server(path: &Path, name: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    doc.get("mcp_servers").and_then(|t| t.get(name)).is_some()
+}
+
+fn patch_toml(
+    path: &Path,
+    f: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc = if text.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        text.parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("parse {}: {e}", path.display()))?
+    };
+    f(&mut doc)?;
+    std::fs::write(path, doc.to_string()).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -480,5 +711,178 @@ env_key = "OPENROUTER_API_KEY"
             load_default_model_from(&[path]).as_deref(),
             Some("minimax/minimax-m3:free")
         );
+    }
+
+    #[test]
+    fn mcp_url_only_is_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.local]
+url = "http://127.0.0.1:18989/mcp"
+"#,
+        )
+        .unwrap();
+        let list = load_mcp_servers_from(&[path]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "local");
+        assert_eq!(list[0].endpoint(), "http://127.0.0.1:18989/mcp");
+        assert!(matches!(list[0].transport, McpTransport::Http { .. }));
+    }
+
+    #[test]
+    fn mcp_blank_url_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.empty]
+url = ""
+"#,
+        )
+        .unwrap();
+        assert!(load_mcp_servers_from(&[path]).is_empty());
+    }
+
+    #[test]
+    fn mcp_stdio_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.fs]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+"#,
+        )
+        .unwrap();
+        let list = load_mcp_servers_from(&[path]);
+        assert_eq!(list.len(), 1);
+        match &list[0].transport {
+            McpTransport::Stdio { command, args, .. } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args.len(), 3);
+            }
+            other => panic!("expected stdio, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_command_wins_over_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.both]
+command = "npx"
+url = "http://127.0.0.1:18989/mcp"
+"#,
+        )
+        .unwrap();
+        let list = load_mcp_servers_from(&[path]);
+        assert!(matches!(list[0].transport, McpTransport::Stdio { .. }));
+    }
+
+    #[test]
+    fn mcp_later_file_overlays_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(
+            &user,
+            r#"
+[mcp_servers.local]
+command = "npx"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project,
+            r#"
+[mcp_servers.local]
+url = "http://127.0.0.1:18989/mcp"
+"#,
+        )
+        .unwrap();
+        let list = load_mcp_servers_from(&[user, project]);
+        assert_eq!(list.len(), 1);
+        assert!(matches!(list[0].transport, McpTransport::Http { .. }));
+    }
+
+    #[test]
+    fn mcp_disabled_stays_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.local]
+url = "http://127.0.0.1:18989/mcp"
+enabled = false
+"#,
+        )
+        .unwrap();
+        let list = load_mcp_servers_from(&[path]);
+        assert_eq!(list.len(), 1);
+        assert!(!list[0].enabled);
+    }
+
+    #[test]
+    fn persist_enabled_and_disabled_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+# keep this comment
+[mcp_servers.local]
+url = "http://127.0.0.1:18989/mcp"
+"#,
+        )
+        .unwrap();
+        persist_mcp_server_enabled_in(&[path.clone()], "local", false).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("keep this comment"), "{body}");
+        assert!(body.contains("enabled = false"), "{body}");
+        persist_disabled_mcp_tools_in(&[path.clone()], "local", &["echo".into()]).unwrap();
+        let tools = load_disabled_mcp_tools_from(&[path.clone()]);
+        assert_eq!(
+            tools.get("local").cloned().unwrap_or_default(),
+            vec!["echo".to_string()]
+        );
+        persist_disabled_mcp_tools_in(&[path.clone()], "local", &[]).unwrap();
+        assert!(!load_disabled_mcp_tools_from(&[path]).contains_key("local"));
+    }
+
+    #[test]
+    fn mcp_bearer_token_from_env() {
+        std::env::set_var("DOCK_TEST_MCP_BEARER", "tok-secret");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.local]
+url = "http://example/mcp"
+bearer_token_env_var = "DOCK_TEST_MCP_BEARER"
+"#,
+        )
+        .unwrap();
+        let list = load_mcp_servers_from(&[path]);
+        match &list[0].transport {
+            McpTransport::Http { headers, .. } => {
+                assert_eq!(
+                    headers.get("Authorization").map(String::as_str),
+                    Some("Bearer tok-secret")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        std::env::remove_var("DOCK_TEST_MCP_BEARER");
     }
 }

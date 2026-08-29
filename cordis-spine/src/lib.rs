@@ -58,8 +58,13 @@ pub use bundle::{
     install_without_llm,
 };
 pub use compact::{compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
-pub use config::{load_catalog, load_mcp_servers, McpServer, ModelChoice};
-pub use cron::{cron, Cron, CronJob};
+pub use config::{
+    load_catalog, load_disabled_mcp_tools, load_mcp_servers, persist_disabled_mcp_tools,
+    persist_mcp_server_enabled, McpServer, McpTransport, ModelChoice,
+};
+pub use cron::{
+    cron, Cron, CronError, CronJob, CronTick, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS,
+};
 pub use dynamic_runner::{
     builtins_lines, dynamic_runner, DynEcho, DynNote, DynamicRunner, PluginReference, RhaiBag,
     RhaiBags, RunMode, DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
@@ -73,7 +78,7 @@ pub use jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
 pub use llm::{llm, Llm, LlmConfig, LlmMode, Sampler};
 pub use loop_plugin::agent_loop;
 pub use lsp::tool_lsp;
-pub use mcp::{mcp_client, Mcp, McpStatus};
+pub use mcp::{is_mcp_public_name, mcp_client, public_tool_name, Mcp, McpStatus, McpToolStatus};
 pub use memory::tool_memory;
 pub use monitor::tool_monitor;
 pub use names::{
@@ -89,7 +94,11 @@ pub use plan_mode::{
 };
 pub use prompt::{system_prompt, SystemPrompt};
 pub use runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
-pub use sched::tool_scheduler;
+pub use sched::{
+    expired_task_notice, format_scheduled_task_prompt, format_scheduled_task_reminder,
+    interval_to_human, loop_composer_fill, loop_schedule_instruction, loop_usage_message,
+    parse_interval, tool_scheduler, LoopFireMode, SCHEDULER_CREATE_TOOL_NAME,
+};
 pub use session::{sessions, ArchivedSession, Sessions, TokenUsage};
 pub use settings::{settings, AppSettings, MermaidEngineKind, PermissionMode};
 pub use slash::{
