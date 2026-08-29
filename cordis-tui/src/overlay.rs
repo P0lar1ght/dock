@@ -53,6 +53,12 @@ pub enum Overlay {
     Ask {
         selected: usize,
         picked: Vec<bool>,
+        draft: String,
+    },
+    Elicit {
+        selected: usize,
+        picked: Vec<bool>,
+        draft: String,
     },
     Tasks {
         selected: usize,
@@ -169,6 +175,7 @@ impl Overlay {
             Self::Settings { .. }
             | Self::Permission { .. }
             | Self::Ask { .. }
+            | Self::Elicit { .. }
             | Self::PlanApproval { .. }
             | Self::Usage { .. }
             | Self::Notice { .. }
@@ -263,6 +270,7 @@ impl Overlay {
             | Self::Settings { selected, .. }
             | Self::Permission { selected, .. }
             | Self::Ask { selected, .. }
+            | Self::Elicit { selected, .. }
             | Self::PlanApproval { selected, .. }
             | Self::Tasks { selected, .. }
             | Self::Mcps { selected, .. }
@@ -291,6 +299,7 @@ impl Overlay {
             | Self::Settings { selected: s, .. }
             | Self::Permission { selected: s, .. }
             | Self::Ask { selected: s, .. }
+            | Self::Elicit { selected: s, .. }
             | Self::PlanApproval { selected: s, .. }
             | Self::Tasks { selected: s, .. }
             | Self::Mcps { selected: s, .. }
@@ -337,6 +346,7 @@ impl Overlay {
             Self::Settings { .. }
             | Self::Permission { .. }
             | Self::Ask { .. }
+            | Self::Elicit { .. }
             | Self::PlanApproval { .. }
             | Self::Usage { .. }
             | Self::Notice { .. }
@@ -507,7 +517,7 @@ const HELP: &[HelpEntry] = &[
     }),
     HelpEntry::Row(HelpRow {
         key: "/mcps",
-        label: "MCP 服务器（Space 开关 · Enter 展开）",
+        label: "MCP 服务器（Space 开关 · i 登录 · Enter 展开）",
         kind: HelpKind::Slash(SlashCmd::Mcps),
     }),
     HelpEntry::Row(HelpRow {

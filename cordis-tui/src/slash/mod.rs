@@ -181,7 +181,7 @@ pub const CATALOG: &[SlashDef] = &[
         name: "mcps",
         aliases: &[],
         display: "/mcps",
-        description: "MCP 服务器（Space 开关 · Enter 展开）",
+        description: "MCP 服务器（Space 开关 · i 登录 · Enter 展开）",
         takes_args: false,
         args_required: false,
         arg_kind: None,

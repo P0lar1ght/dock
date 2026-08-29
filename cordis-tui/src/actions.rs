@@ -163,6 +163,10 @@ pub enum Effect {
         tool: String,
         enabled: bool,
     },
+    /// Async: browser PKCE for an HTTP MCP server (`i` on `/mcps`).
+    McpAuth {
+        name: String,
+    },
     SetPrompt {
         text: String,
     },

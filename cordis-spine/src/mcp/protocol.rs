@@ -46,11 +46,21 @@ pub fn client_info() -> Value {
     })
 }
 
+/// Host capabilities advertised on `initialize` and in `_meta`.
+pub fn client_capabilities() -> Value {
+    json!({
+        "elicitation": {
+            "form": {},
+            "url": {}
+        }
+    })
+}
+
 pub fn request_meta(protocol: &str) -> Value {
     json!({
         META_PROTOCOL: protocol,
         META_CLIENT_INFO: client_info(),
-        META_CLIENT_CAPS: {},
+        META_CLIENT_CAPS: client_capabilities(),
     })
 }
 
@@ -109,6 +119,56 @@ pub fn id_matches(v: &Value, id: u64) -> bool {
         Some(Value::String(s)) => s.parse::<u64>().ok() == Some(id),
         _ => false,
     }
+}
+
+/// Server → client JSON-RPC on a shared stream (stdio / SSE).
+#[derive(Debug, Clone)]
+pub enum Incoming {
+    Response(Value),
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
+    Notification {
+        method: String,
+        params: Value,
+    },
+}
+
+pub fn classify(v: Value) -> Incoming {
+    let method = v
+        .get("method")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    if method.is_empty() {
+        return Incoming::Response(v);
+    }
+    if v.get("id").is_none_or(|id| id.is_null()) {
+        let params = v.get("params").cloned().unwrap_or(json!({}));
+        Incoming::Notification { method, params }
+    } else {
+        let id = v.get("id").cloned().unwrap_or(Value::Null);
+        let params = v.get("params").cloned().unwrap_or(json!({}));
+        Incoming::Request { id, method, params }
+    }
+}
+
+pub fn jsonrpc_result(id: Value, result: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+pub fn jsonrpc_method_not_found(id: Value, method: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": ERR_METHOD_NOT_FOUND, "message": method }
+    })
+}
+
+pub fn ping_result() -> Value {
+    json!({})
 }
 
 pub fn tools_from_list(server_name: &str, listed: &Value) -> Vec<ListedTool> {

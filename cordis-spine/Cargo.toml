@@ -7,6 +7,9 @@ license = "MIT"
 
 [dependencies]
 base64 = "0.22"
+getrandom = "0.2"
+sha2 = "0.10"
+webbrowser = "1"
 cordis = { path = "../cordis-rust" }
 futures-util = "0.3"
 regex = "1"

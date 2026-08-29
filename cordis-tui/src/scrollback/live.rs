@@ -1,5 +1,5 @@
 //! Live chrome for running cards: pulsing ◆, cycling dots, ticking elapsed.
-//! Rebuilds on the 80ms shimmer tick (`event_loop::live_redraw`).
+//! Rebuilds on the 80ms shimmer tick (`event_loop::support::live_redraw`).
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 

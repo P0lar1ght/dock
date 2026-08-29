@@ -17,6 +17,7 @@ mod image_meta;
 mod input;
 mod inspect_overlay;
 mod mermaid_png;
+mod mcp_elicit_view;
 mod mode_cycle;
 mod names;
 mod overlay;

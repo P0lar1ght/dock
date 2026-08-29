@@ -3,23 +3,31 @@
 //! Prefer protocol `2026-07-28` (no session, `_meta` + `MCP-Protocol-Version`
 //! + `Mcp-Method` / `Mcp-Name`). On a 400 that is not a modern JSON-RPC error,
 //! fall back to initialize-era `2025-11-25` with `Mcp-Session-Id`.
+//! Standing GET SSE + session 404 recover; POST SSE is processed in order
+//! (elicitation must complete before later events on that stream).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, USER_AGENT};
+use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde_json::{json, Value};
+use tokio::sync::{oneshot, watch};
 
 use crate::config::{McpServer, McpTransport};
 use crate::mcp::protocol::{
-    self, client_info, encode_header_value, id_matches, parse_sse_json_values, pick_version,
-    raw_tool_name, tools_from_list, unsupported_versions, with_meta, PROTOCOL_LATEST,
-    PROTOCOL_LEGACY,
+    self, client_capabilities, client_info, encode_header_value, id_matches, pick_version,
+    raw_tool_name, unsupported_versions, with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
 use crate::tools::tool_result;
 use crate::types::ToolCall;
 
-use super::CallFn;
+use super::incoming::{self, LiveHooks};
+use super::sse::{self, SseParser};
+use super::tools_list;
+use super::{CallFn, RelistFn};
 
 const JSON_MIME: &str = "application/json";
 const EVENT_STREAM_MIME: &str = "text/event-stream";
@@ -32,110 +40,176 @@ const RESERVED_HEADERS: &[&str] = &["accept", "mcp-session-id", "last-event-id"]
 
 pub(super) async fn connect(
     server: &McpServer,
-) -> Result<(Vec<protocol::ListedTool>, CallFn), String> {
+    hooks: LiveHooks,
+    stop: watch::Receiver<bool>,
+) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
     let McpTransport::Http { url, headers } = &server.transport else {
         return Err("not an HTTP MCP server".into());
     };
+    let skip_oauth = has_authorization_header(headers);
     let client = build_client(&server.name, url, headers)?;
-    let timeout = Duration::from_secs(server.startup_timeout_sec.max(1));
-    let session = std::sync::Arc::new(tokio::sync::Mutex::new(HttpSession {
-        client,
+    let (protocol_watch, proto_rx) = watch::channel(PROTOCOL_LATEST.to_string());
+    let (session_watch, sid_rx) = watch::channel(None);
+    let shared = Arc::new(HttpShared {
+        client: client.clone(),
         url: url.clone(),
-        protocol: PROTOCOL_LATEST.to_string(),
-        modern: true,
-        session_id: None,
-        next_id: 1,
-    }));
-    {
-        let mut s = session.lock().await;
-        let listed = tokio::time::timeout(timeout, handshake(&mut s))
-            .await
-            .map_err(|_| "MCP HTTP handshake timeout".to_string())??;
-        let out = tools_from_list(&server.name, &listed);
-        drop(s);
-        let session_call = session.clone();
-        let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
-            let session = session_call.clone();
-            Box::pin(async move {
-                let raw_name = raw_tool_name(&public);
-                let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
-                let mut s = session.lock().await;
-                match s
-                    .rpc("tools/call", json!({ "name": raw_name, "arguments": args }))
-                    .await
-                {
-                    Ok(v) => tool_result(c, protocol::format_call_result(&v)),
-                    Err(e) => tool_result(c, e),
-                }
-            })
-        });
-        Ok((out, call))
+        protocol_watch,
+        session_watch,
+        modern: AtomicBool::new(true),
+        next_id: AtomicU64::new(1),
+        server: server.clone(),
+        skip_oauth,
+        pending: Mutex::new(HashMap::new()),
+        hooks,
+        handshake: tokio::sync::Mutex::new(()),
+    });
+    let timeout = Duration::from_secs(server.startup_timeout_sec.max(1));
+    let listed = tokio::time::timeout(timeout, handshake(&shared))
+        .await
+        .map_err(|_| "MCP HTTP handshake timeout".to_string())??;
+
+    let (get_tx, mut get_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(sse::listen_get(
+        client,
+        url.clone(),
+        proto_rx,
+        sid_rx,
+        skip_oauth,
+        server.clone(),
+        get_tx,
+        stop,
+    ));
+    let get_shared = shared.clone();
+    tokio::spawn(async move {
+        while let Some(v) = get_rx.recv().await {
+            ingest(&get_shared, v, None).await;
+        }
+    });
+
+    let session_call = shared.clone();
+    let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
+        let session = session_call.clone();
+        Box::pin(async move {
+            let raw_name = raw_tool_name(&public);
+            let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
+            match rpc(&session, "tools/call", json!({ "name": raw_name, "arguments": args })).await
+            {
+                Ok(v) => tool_result(c, protocol::format_call_result(&v)),
+                Err(e) => tool_result(c, e),
+            }
+        })
+    });
+    let session_list = shared.clone();
+    let name = server.name.clone();
+    let relist: RelistFn = std::sync::Arc::new(move || {
+        let session = session_list.clone();
+        let name = name.clone();
+        Box::pin(async move { list_pages(&session, &name).await })
+    });
+    Ok((listed, call, relist))
+}
+
+struct HttpShared {
+    client: reqwest::Client,
+    url: String,
+    protocol_watch: watch::Sender<String>,
+    session_watch: watch::Sender<Option<String>>,
+    modern: AtomicBool,
+    next_id: AtomicU64,
+    server: McpServer,
+    skip_oauth: bool,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
+    hooks: LiveHooks,
+    handshake: tokio::sync::Mutex<()>,
+}
+
+impl HttpShared {
+    fn protocol(&self) -> String {
+        self.protocol_watch.borrow().clone()
+    }
+
+    fn set_protocol(&self, p: String) {
+        self.modern
+            .store(protocol::is_modern(&p), Ordering::Relaxed);
+        let _ = self.protocol_watch.send(p);
+    }
+
+    fn session_id(&self) -> Option<String> {
+        self.session_watch.borrow().clone()
+    }
+
+    fn set_session_id(&self, id: Option<String>) {
+        let _ = self.session_watch.send(id);
     }
 }
 
-async fn handshake(s: &mut HttpSession) -> Result<Value, String> {
-    match s.rpc("tools/list", json!({})).await {
-        Ok(v) if v.get("error").is_none() => Ok(v),
+async fn handshake(s: &HttpShared) -> Result<Vec<protocol::ListedTool>, String> {
+    match rpc(s, "tools/list", json!({})).await {
+        Ok(v) if v.get("error").is_none() => list_from_first(s, v).await,
         Ok(v) => {
             if let Some(supported) = unsupported_versions(&v) {
                 return negotiate(s, &supported).await;
             }
             if looks_legacy_error(&v) {
                 initialize_legacy(s).await?;
-                return list_after_legacy(s).await;
+                return list_pages(s, &s.server.name).await;
             }
             Err(v["error"].to_string())
         }
         Err(e) if looks_legacy_http(&e) => {
             initialize_legacy(s).await?;
-            list_after_legacy(s).await
+            list_pages(s, &s.server.name).await
         }
         Err(e) => Err(e),
     }
 }
 
-async fn negotiate(s: &mut HttpSession, supported: &[String]) -> Result<Value, String> {
+async fn negotiate(s: &HttpShared, supported: &[String]) -> Result<Vec<protocol::ListedTool>, String> {
     let picked = pick_version(supported)
         .ok_or_else(|| format!("server does not speak a protocol Dock supports: {supported:?}"))?;
-    s.protocol = picked.to_string();
-    s.modern = protocol::is_modern(picked);
-    if s.modern {
-        let listed = s.rpc("tools/list", json!({})).await?;
+    s.set_protocol(picked.to_string());
+    if s.modern.load(Ordering::Relaxed) {
+        let listed = rpc(s, "tools/list", json!({})).await?;
         if listed.get("error").is_some() {
             return Err(listed["error"].to_string());
         }
-        Ok(listed)
+        list_from_first(s, listed).await
     } else {
         initialize_legacy(s).await?;
-        list_after_legacy(s).await
+        list_pages(s, &s.server.name).await
     }
 }
 
-async fn list_after_legacy(s: &mut HttpSession) -> Result<Value, String> {
-    let listed = s.rpc("tools/list", json!({})).await?;
-    if listed.get("error").is_some() {
-        return Err(listed["error"].to_string());
-    }
-    Ok(listed)
-}
-
-async fn initialize_legacy(s: &mut HttpSession) -> Result<(), String> {
-    s.modern = false;
-    s.session_id = None;
-    if protocol::is_modern(&s.protocol) {
-        s.protocol = PROTOCOL_LEGACY.to_string();
-    }
-    let init = s
-        .rpc(
-            "initialize",
-            json!({
-                "protocolVersion": s.protocol,
-                "capabilities": {},
-                "clientInfo": client_info(),
-            }),
-        )
+async fn list_from_first(
+    s: &HttpShared,
+    first: Value,
+) -> Result<Vec<protocol::ListedTool>, String> {
+    tools_list::list_all_from_first(&s.server.name, first, |params| rpc(s, "tools/list", params))
         .await
-        .map_err(|e| format!("initialize: {e}"))?;
+}
+
+async fn list_pages(s: &HttpShared, server_name: &str) -> Result<Vec<protocol::ListedTool>, String> {
+    tools_list::list_all(server_name, |params| rpc(s, "tools/list", params)).await
+}
+
+async fn initialize_legacy(s: &HttpShared) -> Result<(), String> {
+    s.modern.store(false, Ordering::Relaxed);
+    s.set_session_id(None);
+    if protocol::is_modern(&s.protocol()) {
+        s.set_protocol(PROTOCOL_LEGACY.to_string());
+    }
+    let init = rpc_inner(
+        s,
+        "initialize",
+        json!({
+            "protocolVersion": s.protocol(),
+            "capabilities": client_capabilities(),
+            "clientInfo": client_info(),
+        }),
+        true,
+    )
+    .await
+    .map_err(|e| format!("initialize: {e}"))?;
     if init.get("error").is_some() {
         return Err(init["error"].to_string());
     }
@@ -143,10 +217,15 @@ async fn initialize_legacy(s: &mut HttpSession) -> Result<(), String> {
         .pointer("/result/protocolVersion")
         .and_then(|v| v.as_str())
     {
-        s.protocol = pv.to_string();
+        s.set_protocol(pv.to_string());
     }
-    s.notify("notifications/initialized", json!({})).await.ok();
+    notify(s, "notifications/initialized", json!({})).await.ok();
     Ok(())
+}
+
+async fn recover_session(s: &HttpShared) -> Result<(), String> {
+    let _g = s.handshake.lock().await;
+    initialize_legacy(s).await
 }
 
 fn looks_legacy_http(err: &str) -> bool {
@@ -179,6 +258,12 @@ fn build_client(
         .map_err(|e| format!("HTTP client: {e}"))
 }
 
+fn has_authorization_header(pairs: &BTreeMap<String, String>) -> bool {
+    pairs
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("authorization"))
+}
+
 fn parse_config_headers(server_name: &str, pairs: &BTreeMap<String, String>) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (key, value) in pairs {
@@ -203,84 +288,137 @@ fn parse_config_headers(server_name: &str, pairs: &BTreeMap<String, String>) -> 
     headers
 }
 
-struct HttpSession {
-    client: reqwest::Client,
-    url: String,
-    protocol: String,
-    modern: bool,
-    session_id: Option<String>,
-    next_id: u64,
+async fn rpc(s: &HttpShared, method: &str, params: Value) -> Result<Value, String> {
+    rpc_inner(s, method, params, false).await
 }
 
-enum PostOutcome {
-    Accepted,
-    Json(Value),
+async fn rpc_inner(
+    s: &HttpShared,
+    method: &str,
+    params: Value,
+    recovered: bool,
+) -> Result<Value, String> {
+    let id = s.next_id.fetch_add(1, Ordering::Relaxed);
+    let params = if s.modern.load(Ordering::Relaxed) && method != "initialize" {
+        with_meta(params, &s.protocol())
+    } else {
+        params
+    };
+    let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+    let (tx, rx) = oneshot::channel();
+    s.pending.lock().unwrap().insert(id, tx);
+    match post(s, Some(method), &params, &msg, Some(id), recovered).await {
+        Ok(Some(v)) => {
+            s.pending.lock().unwrap().remove(&id);
+            Ok(v)
+        }
+        Ok(None) => rx.await.map_err(|_| "MCP HTTP closed".into()),
+        Err(e) => {
+            s.pending.lock().unwrap().remove(&id);
+            Err(e)
+        }
+    }
 }
 
-impl HttpSession {
-    async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let params = if self.modern && method != "initialize" {
-            with_meta(params, &self.protocol)
-        } else {
-            params
-        };
-        let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        match self.post(method, &params, &msg).await? {
-            PostOutcome::Accepted => Err("empty MCP HTTP response".into()),
-            PostOutcome::Json(v) => {
-                if id_matches(&v, id) || v.get("id").is_none() {
-                    Ok(v)
-                } else {
-                    Ok(v)
-                }
+async fn notify(s: &HttpShared, method: &str, params: Value) -> Result<(), String> {
+    let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+    post(s, Some(method), &params, &msg, None, false)
+        .await
+        .map(|_| ())
+}
+
+async fn post_raw(s: &HttpShared, message: &Value) -> Result<(), String> {
+    post(s, None, &json!({}), message, None, false)
+        .await
+        .map(|_| ())
+}
+
+fn complete_pending(s: &HttpShared, v: Value) {
+    if let Some(id) = incoming::pending_id(&v) {
+        if let Some(tx) = s.pending.lock().unwrap().remove(&id) {
+            let _ = tx.send(v);
+        }
+    }
+}
+
+async fn ingest(s: &HttpShared, v: Value, want_id: Option<u64>) -> Option<Value> {
+    match protocol::classify(v) {
+        Incoming::Response(v) => {
+            if want_id.is_some_and(|id| id_matches(&v, id)) {
+                return Some(v);
             }
+            complete_pending(s, v);
+            None
+        }
+        Incoming::Notification { method, params } => {
+            incoming::note(&s.hooks, &method, &params);
+            None
+        }
+        Incoming::Request { id, method, params } => {
+            let reply = incoming::request(&s.hooks, id, method, params).await;
+            let _ = Box::pin(post_raw(s, &reply)).await;
+            None
         }
     }
+}
 
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
-        let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        match self.post(method, &params, &msg).await? {
-            PostOutcome::Accepted | PostOutcome::Json(_) => Ok(()),
-        }
-    }
-
-    async fn post(
-        &mut self,
-        method: &str,
-        params: &Value,
-        message: &Value,
-    ) -> Result<PostOutcome, String> {
-        let mut req = self
+/// `Ok(Some(v))` = JSON-RPC response on this POST. `Ok(None)` = 202, wait GET.
+async fn post(
+    s: &HttpShared,
+    method: Option<&str>,
+    params: &Value,
+    message: &Value,
+    want_id: Option<u64>,
+    mut recovered: bool,
+) -> Result<Option<Value>, String> {
+    let mut retried_auth = false;
+    loop {
+        let mut req = s
             .client
-            .post(&self.url)
+            .post(&s.url)
             .header(ACCEPT, format!("{EVENT_STREAM_MIME}, {JSON_MIME}"))
-            .header(HEADER_PROTOCOL, self.protocol.as_str());
-        if self.modern {
-            req = req.header(HEADER_METHOD, method);
-            if method == "tools/call" {
-                if let Some(name) = params.get("name").and_then(|n| n.as_str()) {
-                    req = req.header(HEADER_NAME, encode_header_value(name));
+            .header(HEADER_PROTOCOL, s.protocol());
+        if s.modern.load(Ordering::Relaxed) {
+            if let Some(method) = method {
+                req = req.header(HEADER_METHOD, method);
+                if method == "tools/call" {
+                    if let Some(name) = params.get("name").and_then(|n| n.as_str()) {
+                        req = req.header(HEADER_NAME, encode_header_value(name));
+                    }
                 }
             }
         }
-        if let Some(sid) = &self.session_id {
+        if let Some(sid) = s.session_id() {
             req = req.header(HEADER_SESSION_ID, sid.as_str());
         }
-        let had_session = self.session_id.is_some();
+        if !s.skip_oauth {
+            if let Some(token) = super::credentials::access_token(&s.server.name, &s.url) {
+                if let Ok(val) = HeaderValue::from_str(&format!("Bearer {token}")) {
+                    req = req.header(AUTHORIZATION, val);
+                }
+            }
+        }
+        let had_session = s.session_id().is_some();
         let response = req
             .json(message)
             .send()
             .await
             .map_err(|e| format!("MCP HTTP {e}"))?;
         let status = response.status();
+        if status.as_u16() == 401 && !s.skip_oauth && !retried_auth {
+            retried_auth = true;
+            drop(response);
+            if super::oauth::refresh_stored(&s.server).await.is_ok() {
+                continue;
+            }
+            return Err("MCP HTTP 401 unauthorized".into());
+        }
         if let Some(sid) = response
             .headers()
             .get(HEADER_SESSION_ID)
             .and_then(|v| v.to_str().ok())
         {
-            self.session_id = Some(sid.to_string());
+            s.set_session_id(Some(sid.to_string()));
         }
         let content_type = response
             .headers()
@@ -293,15 +431,21 @@ impl HttpSession {
         if status.as_u16() == 401 {
             return Err("MCP HTTP 401 unauthorized".into());
         }
-        if status.as_u16() == 404 && had_session {
-            return Err("MCP HTTP session expired".into());
+        if sse::is_session_expired(status.as_u16(), had_session) {
+            drop(response);
+            if recovered {
+                return Err("MCP HTTP session expired".into());
+            }
+            recovered = true;
+            Box::pin(recover_session(s)).await?;
+            continue;
         }
         if matches!(status.as_u16(), 202 | 204) {
-            return Ok(PostOutcome::Accepted);
+            return Ok(None);
         }
 
         if status.is_success() && content_length == Some(0) {
-            return Ok(PostOutcome::Accepted);
+            return Ok(None);
         }
 
         if !status.is_success() {
@@ -311,7 +455,10 @@ impl HttpSession {
                 .unwrap_or_else(|_| "<failed to read body>".into());
             if let Ok(v) = serde_json::from_str::<Value>(&body) {
                 if v.get("error").is_some() || v.get("result").is_some() {
-                    return Ok(PostOutcome::Json(v));
+                    if let Some(hit) = ingest(s, v.clone(), want_id).await {
+                        return Ok(Some(hit));
+                    }
+                    return Ok(Some(v));
                 }
             }
             return Err(format!("HTTP {status}: {body}"));
@@ -321,27 +468,46 @@ impl HttpSession {
             .as_bytes()
             .starts_with(EVENT_STREAM_MIME.as_bytes())
         {
-            let body = response.text().await.map_err(|e| e.to_string())?;
-            let id = message.get("id").and_then(|i| i.as_u64());
-            for v in parse_sse_json_values(&body) {
-                if id.is_none_or(|want| id_matches(&v, want)) {
-                    return Ok(PostOutcome::Json(v));
+            let mut stream = response.bytes_stream();
+            let mut parser = SseParser::default();
+            let mut carry = String::new();
+            let mut found = None;
+            while let Some(chunk) = stream.next().await {
+                let Ok(bytes) = chunk else {
+                    break;
+                };
+                let text = String::from_utf8_lossy(&bytes);
+                for v in parser.push_chunk(&text, &mut carry) {
+                    if let Some(hit) = ingest(s, v, want_id).await {
+                        found = Some(hit);
+                    }
                 }
             }
-            return Err("MCP HTTP SSE had no JSON-RPC response".into());
+            return Ok(found);
         }
         if content_type.as_bytes().starts_with(JSON_MIME.as_bytes()) {
             match response.json::<Value>().await {
-                Ok(v) => Ok(PostOutcome::Json(v)),
+                Ok(v) => {
+                    if let Some(hit) = ingest(s, v.clone(), want_id).await {
+                        return Ok(Some(hit));
+                    }
+                    if want_id.is_some_and(|id| id_matches(&v, id))
+                        || v.get("error").is_some()
+                        || v.get("result").is_some()
+                    {
+                        return Ok(Some(v));
+                    }
+                    return Ok(None);
+                }
                 Err(e) => {
                     tracing::warn!("MCP HTTP JSON parse failed, treating as accepted: {e}");
-                    Ok(PostOutcome::Accepted)
+                    return Ok(None);
                 }
             }
         } else {
-            Err(format!(
+            return Err(format!(
                 "MCP HTTP unexpected content type: {content_type:?}"
-            ))
+            ));
         }
     }
 }
@@ -349,9 +515,10 @@ impl HttpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::McpServer;
+    use crate::config::{McpOAuthConfig, McpServer};
     use serde_json::json;
     use std::io;
+    use std::sync::atomic::AtomicU32;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -360,19 +527,34 @@ mod tests {
         Modern,
         Legacy,
         UnsupportedThenLegacy,
+        Unauthorized,
+        Paged,
+        SessionDrop,
+    }
+
+    async fn connect_test(
+        server: &McpServer,
+    ) -> Result<(Vec<protocol::ListedTool>, CallFn), String> {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let hooks = incoming::dummy_hooks(&server.name);
+        let (listed, call, _) = connect(server, hooks, stop_rx).await?;
+        std::mem::forget(stop_tx);
+        Ok((listed, call))
     }
 
     async fn spawn_server(mode: Mode) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
         let handle = tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     break;
                 };
+                let calls = calls.clone();
                 tokio::spawn(async move {
                     while let Ok((headers, body)) = read_http(&mut stream).await {
-                        let resp = handle_req(mode, &headers, &body);
+                        let resp = handle_req(mode, &headers, &body, &calls);
                         if stream.write_all(&resp).await.is_err() {
                             break;
                         }
@@ -429,11 +611,60 @@ mod tests {
         .into_bytes()
     }
 
-    fn handle_req(mode: Mode, headers: &str, body: &[u8]) -> Vec<u8> {
+    fn handle_req(mode: Mode, headers: &str, body: &[u8], calls: &AtomicU32) -> Vec<u8> {
+        if headers.starts_with("GET ") {
+            return b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n".to_vec();
+        }
         let v: Value = serde_json::from_slice(body).unwrap_or(json!({}));
         let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let id = v.get("id").cloned().unwrap_or(Value::Null);
         match mode {
+            Mode::Unauthorized => {
+                return b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Length: 0\r\n\r\n".to_vec();
+            }
+            Mode::Paged => match method {
+                "tools/list" => {
+                    let cursor = v.pointer("/params/cursor").and_then(|c| c.as_str());
+                    let (tools, next) = if cursor == Some("2") {
+                        (
+                            json!([{
+                                "name": "b",
+                                "description": "b",
+                                "inputSchema": { "type": "object" }
+                            }]),
+                            None,
+                        )
+                    } else {
+                        (
+                            json!([{
+                                "name": "a",
+                                "description": "a",
+                                "inputSchema": { "type": "object" }
+                            }]),
+                            Some("2"),
+                        )
+                    };
+                    let mut result = json!({ "tools": tools });
+                    if let Some(c) = next {
+                        result["nextCursor"] = json!(c);
+                    }
+                    json_response(
+                        200,
+                        "",
+                        &json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
+                    )
+                }
+                _ => json_response(
+                    400,
+                    "",
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": method }
+                    })
+                    .to_string(),
+                ),
+            },
             Mode::Modern => match method {
                 "tools/list" => {
                     assert!(
@@ -497,7 +728,8 @@ mod tests {
                     .to_string(),
                 ),
             },
-            Mode::Legacy => legacy_handle(headers, &v, &id, false),
+            Mode::Legacy => legacy_handle(headers, &v, &id, false, calls, false),
+            Mode::SessionDrop => legacy_handle(headers, &v, &id, false, calls, true),
             Mode::UnsupportedThenLegacy => {
                 let proto = v
                     .pointer("/params/_meta/io.modelcontextprotocol/protocolVersion")
@@ -518,15 +750,25 @@ mod tests {
                         .to_string(),
                     )
                 } else {
-                    legacy_handle(headers, &v, &id, true)
+                    legacy_handle(headers, &v, &id, true, calls, false)
                 }
             }
         }
     }
 
-    fn legacy_handle(headers: &str, v: &Value, id: &Value, after_negotiate: bool) -> Vec<u8> {
+    fn legacy_handle(
+        headers: &str,
+        v: &Value,
+        id: &Value,
+        after_negotiate: bool,
+        calls: &AtomicU32,
+        drop_first_call: bool,
+    ) -> Vec<u8> {
         let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let has_session = headers.to_ascii_lowercase().contains("mcp-session-id:");
+        if drop_first_call && method == "tools/call" && calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            return b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec();
+        }
         match method {
             "initialize" => json_response(
                 200,
@@ -585,13 +827,25 @@ mod tests {
             },
             startup_timeout_sec: 5,
             enabled: true,
+            oauth: McpOAuthConfig::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn unauthorized_is_401() {
+        let (url, handle) = spawn_server(Mode::Unauthorized).await;
+        let err = match connect_test(&http_server(url)).await {
+            Ok(_) => panic!("expected 401"),
+            Err(e) => e,
+        };
+        assert!(err.contains("401"), "{err}");
+        handle.abort();
     }
 
     #[tokio::test]
     async fn modern_list_and_call() {
         let (url, handle) = spawn_server(Mode::Modern).await;
-        let (listed, call) = connect(&http_server(url)).await.expect("connect");
+        let (listed, call) = connect_test(&http_server(url)).await.expect("connect");
         assert_eq!(listed[0].0, "mcp_local__echo");
         assert!(listed[0].2.contains("text"));
         let result = call(
@@ -610,7 +864,9 @@ mod tests {
     #[tokio::test]
     async fn legacy_fallback_on_empty_400() {
         let (url, handle) = spawn_server(Mode::Legacy).await;
-        let (listed, call) = connect(&http_server(url)).await.expect("legacy connect");
+        let (listed, call) = connect_test(&http_server(url))
+            .await
+            .expect("legacy connect");
         assert_eq!(listed[0].0, "mcp_local__ping");
         let result = call(
             "mcp_local__ping".into(),
@@ -628,8 +884,36 @@ mod tests {
     #[tokio::test]
     async fn unsupported_version_negotiates_legacy() {
         let (url, handle) = spawn_server(Mode::UnsupportedThenLegacy).await;
-        let (listed, _) = connect(&http_server(url)).await.expect("negotiate");
+        let (listed, _) = connect_test(&http_server(url)).await.expect("negotiate");
         assert_eq!(listed[0].0, "mcp_local__ping");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn list_walks_next_cursor() {
+        let (url, handle) = spawn_server(Mode::Paged).await;
+        let (listed, _) = connect_test(&http_server(url)).await.expect("paged");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].0, "mcp_local__a");
+        assert_eq!(listed[1].0, "mcp_local__b");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn session_404_rehandshakes_and_retries() {
+        let (url, handle) = spawn_server(Mode::SessionDrop).await;
+        let (listed, call) = connect_test(&http_server(url)).await.expect("drop");
+        assert_eq!(listed[0].0, "mcp_local__ping");
+        let result = call(
+            "mcp_local__ping".into(),
+            ToolCall {
+                id: "1".into(),
+                name: "mcp_local__ping".into(),
+                arguments: "{}".into(),
+            },
+        )
+        .await;
+        assert_eq!(result.content, "pong");
         handle.abort();
     }
 }

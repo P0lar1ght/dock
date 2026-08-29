@@ -50,3 +50,5 @@ pub const SESSION_EVENT: &str = "session/event";
 pub const PERMISSION_EVENT: &str = "permissions/pending";
 pub const ASK_EVENT: &str = "ask/pending";
 pub const PLAN_EVENT: &str = "plan/pending";
+/// MCP `elicitation/create` waiting on the TUI.
+pub const MCP_ELICIT_EVENT: &str = "mcp/elicit";

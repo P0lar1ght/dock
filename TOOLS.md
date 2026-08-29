@@ -50,7 +50,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 | `tool-goal` | `"goal"` + `"tools"` | `update_goal` | Grok oneshot ack + drain。`objective` 可在无 `/goal` 时由模型自己开目标；无目标且只有 message/completed 时仍 `HarnessDisabled`。进度卡在滚动区 |
 | `tool-lsp` | `"lsp"` + `"tools"` | `lsp` | Grok `LspManager`/`dispatch`。没 `lsp.json` 时 fail-open |
 | `tool-workflow` | `"workflows"` + `"tools"` | `workflow` | Grok Rhai 引擎（`vendor/xai-workflow`）+ 同款 oneshot ack。Host `SpawnAgent` live-lookup `"subagents"` |
-| `mcp-client` | `"mcp"` + `"tools"` | `mcp_{server}__{tool}` | stdio + Streamable HTTP。先走 MCP `2026-07-28`（无 initialize / 无 session，`_meta` + `MCP-Protocol-Version`）；服务器仍是 initialize 时代则回退 `2025-11-25`。fail-open。`inputSchema` 原样注册。开启的 MCP 工具用 `register_mcp` 穿过 Agent 预设允许名单。`/mcps` Space 开关服务器（`[mcp_servers.<name>].enabled`）或单工具（`[disabled_mcp_tools.<server>]`） |
+| `mcp-client` | `"mcp"` + `"tools"` | `mcp_{server}__{tool}` | stdio + Streamable HTTP。先走 MCP `2026-07-28`（无 initialize / 无 session，`_meta` + `MCP-Protocol-Version`）；服务器仍是 initialize 时代则回退 `2025-11-25`。fail-open。`inputSchema` 原样注册。开启的 MCP 工具用 `register_mcp` 穿过 Agent 预设允许名单。`tools/list` 跟 `nextCursor`（最多 64 页）；`notifications/tools/list_changed` 50ms 合并后重列。advertise `elicitation.form` + `elicitation.url`；stdio 读循环 / HTTP POST SSE 按序 / GET SSE 收 `elicitation/create`。HTTP GET 长连接；initialize 时代 `Mcp-Session-Id` 的 POST 404 会重新握手再试一次。`/mcps` Space 开关服务器（`[mcp_servers.<name>].enabled`）或单工具（`[disabled_mcp_tools.<server>]`）；HTTP 服务器 `i` 浏览器 PKCE OAuth（DCR 或 `oauth.clientId`），token 在 `~/.dock/mcp_credentials.json`，启动不自动开浏览器 |
 | `dynamic-runner` | `"dynamicCordisRunner"` | — | 会话内注册表；热挂体走 `ctx.plugin` / `fiber.dispose`，不改内核。进程内存，不落盘。定义盖章 `Sessions::identity()`（主会话 `main`，子代理用其 id）；别的会话读起来像不存在 |
 | `compact` | `"compact"` | — | Grok 会话压缩。`install_app` 在 `llm` 之后挂。手动 `/compact [说明]`；上下文达到窗口 85% 时 `maybe_auto`（loop live-lookup，工具轮次结束后、下次采样前）。摘要 prompt / 清洗 / 阈值从 grok-build `xai-grok-compaction` 拷来 |
 | `tool-cordis` | → `"tools"`（inject `"dynamicCordisRunner"`） | `cordis_inspect` `cordis_inspect_self` `cordis_define` `cordis_run` `cordis_call` `cordis_stop` `cordis_undefine` | 预置工厂 `echo` / `note` / `hold` / `slash`，加上 `factory: "rhai"`（`source` 在 define 时 compile，run 时 eval `apply`）。`cordis_call` 经 `Tools::execute` 试调任意 live 工具（含 `register_dynamic`，不必等模型下一回合或 TUI slash）。`cordis_inspect` `what`: `services`（`tools` / `slash` / `tui.slots` 带方法签名，其余只列名）/ `builtins`（Rhai `host` 方法）/ `slots`。`inspect_self` 对 Rhai 包回传 source。用户文本 `@pluginId` 在 `agent/pre-step` 注入身份 reminder（不含源码）。审批走权限 overlay（`cordis_run`）。Skill：`skills/cordis-plugin-development/SKILL.md` |
@@ -77,7 +77,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 - `task`：`tool-task` 保持 Grok coordinator；无 worktree / ACP / MCP pool。不要把持续交流焊进 `task`
 - `subagent`：`tool-subagent` 独立 grain（inject `"subagents"`）。不要经 `task` / `execute.rs` 转发
 - `update_goal`：尚未自动 spawn Grok 的 `goal plan writer` / classifier / strategist
-- MCP：无 elicitation / OAuth；HTTP 不跟 GET SSE 长连接；`x-mcp-header` 自定义头未镜像
+- MCP：`x-mcp-header` 自定义头未镜像
 - `ask_user_question`：自由输入比 Grok 简单
 
 ---

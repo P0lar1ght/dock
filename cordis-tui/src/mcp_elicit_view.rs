@@ -1,9 +1,7 @@
-//! Ask-user overlay chrome, same radio layout as `permission_view`.
-//! Option labels come from Grok `ask_user_question`; "Other" is appended
-//! (Grok always offers a freeform choice). Display uses 其他.
-//! Selecting 其他 requires typed notes; the wire label stays `"Other"`.
+//! MCP elicitation overlay. Same radio chrome as ask/permission.
+//! Select fields append 「其他」 in spine; typing that row submits the draft.
 
-use cordis_spine::{AskPrompt, Question};
+use cordis_spine::ElicitPrompt;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -15,78 +13,34 @@ use crate::grok::glyphs;
 use crate::grok::picker::PickerHits;
 use crate::theme::Theme;
 
-const OTHER: &str = "其他";
-const OTHER_WIRE: &str = "Other";
-pub const MAX_ASK_DRAFT: usize = 4096;
-
-pub fn labels(q: &Question) -> Vec<String> {
-    let mut out: Vec<String> = q.options.iter().map(|o| o.label.clone()).collect();
-    let has_other = out.iter().any(|l| is_other_label(l));
-    if !has_other {
-        out.push(OTHER.into());
-    }
-    out
+pub fn other_active(prompt: &ElicitPrompt, selected: usize, picked: &[bool]) -> bool {
+    prompt.other_index == Some(selected)
+        || (prompt.multi
+            && prompt
+                .other_index
+                .is_some_and(|i| picked.get(i).copied().unwrap_or(false)))
 }
 
-pub fn is_other_label(label: &str) -> bool {
-    let t = label.trim();
-    t.eq_ignore_ascii_case(OTHER_WIRE) || t == OTHER
+pub fn needs_draft(prompt: &ElicitPrompt, selected: usize, picked: &[bool]) -> bool {
+    prompt.typing || other_active(prompt, selected, picked)
 }
 
-pub fn wire_label(display: &str) -> String {
-    if is_other_label(display) {
-        OTHER_WIRE.into()
-    } else {
-        display.to_string()
-    }
-}
-
-pub fn other_active(labels: &[String], selected: usize, picked: &[bool], multi: bool) -> bool {
-    labels.get(selected).is_some_and(|l| is_other_label(l))
-        || (multi
-            && labels
-                .iter()
-                .enumerate()
-                .any(|(i, l)| picked.get(i).copied().unwrap_or(false) && is_other_label(l)))
-}
-
-pub fn push_draft(draft: &mut String, text: &str) {
-    for c in text.chars() {
-        push_draft_char(draft, c);
-    }
-}
-
-pub fn push_draft_char(draft: &mut String, c: char) {
-    if c == '\n' || c == '\r' || c.is_control() {
-        return;
-    }
-    if draft.chars().count() >= MAX_ASK_DRAFT {
-        return;
-    }
-    draft.push(c);
-}
-
-pub fn chrome_height(prompt: &AskPrompt, width: u16, selected: usize, picked: &[bool]) -> u16 {
-    let Some(q) = prompt.questions.get(prompt.index) else {
-        return 8;
-    };
+pub fn chrome_height(prompt: &ElicitPrompt, width: u16, selected: usize, picked: &[bool]) -> u16 {
     let content_w = width.saturating_sub(5).max(8) as usize;
-    let q_rows = wrap_line(&q.question, content_w).len().min(3) as u16;
-    let opts = labels(q);
-    let n = opts.len() as u16;
-    let multi = q.multi_select.unwrap_or(false);
-    let extra = if other_active(&opts, selected, picked, multi) {
+    let msg_rows = wrap_line(&prompt.message, content_w).len().min(3) as u16;
+    let n = prompt.options.len() as u16;
+    let extra = if needs_draft(prompt, selected, picked) {
         2
     } else {
         0
     };
-    (2 + q_rows + 1 + n + 1 + extra).clamp(8, 18)
+    (2 + msg_rows + 1 + 1 + n + 1 + extra).clamp(8, 20)
 }
 
 pub fn render(
     buf: &mut Buffer,
     area: Rect,
-    prompt: &AskPrompt,
+    prompt: &ElicitPrompt,
     selected: usize,
     picked: &[bool],
     draft: &str,
@@ -114,24 +68,19 @@ pub fn render(
         .fg(theme.text_primary)
         .bg(theme.bg_light)
         .add_modifier(Modifier::BOLD);
-    let step = format!(
-        "问题 {}/{}",
-        prompt.index + 1,
-        prompt.questions.len().max(1)
-    );
     buf.set_line(
         content_x,
         y,
-        &Line::from(Span::styled(step, title_style)),
+        &Line::from(Span::styled(
+            format!("MCP · {}", prompt.server),
+            title_style,
+        )),
         content_w,
     );
     y = y.saturating_add(1);
 
-    let Some(q) = prompt.questions.get(prompt.index) else {
-        return PickerHits::default();
-    };
     let summary_style = Style::default().fg(theme.gray).bg(theme.bg_light);
-    for line in wrap_line(&q.question, content_w as usize)
+    for line in wrap_line(&prompt.message, content_w as usize)
         .into_iter()
         .take(3)
     {
@@ -146,19 +95,29 @@ pub fn render(
         );
         y = y.saturating_add(1);
     }
+    if !prompt.heading.is_empty() && y < area.y + area.height {
+        buf.set_line(
+            content_x,
+            y,
+            &Line::from(Span::styled(
+                prompt.heading.clone(),
+                Style::default().fg(theme.text_primary).bg(theme.bg_light),
+            )),
+            content_w,
+        );
+        y = y.saturating_add(1);
+    }
     y = y.saturating_add(1);
 
-    let opts = labels(q);
-    let multi = q.multi_select.unwrap_or(false);
-    let sel = selected.min(opts.len().saturating_sub(1));
+    let sel = selected.min(prompt.options.len().saturating_sub(1));
     let mut hits = PickerHits::default();
-    for (i, label) in opts.iter().enumerate() {
+    for (i, label) in prompt.options.iter().enumerate() {
         if y >= area.y + area.height {
             break;
         }
-        let selected = i == sel;
-        let on = picked.get(i).copied().unwrap_or(false) || (!multi && selected);
-        let row_bg = if selected {
+        let selected_row = i == sel;
+        let on = picked.get(i).copied().unwrap_or(false) || (!prompt.multi && selected_row);
+        let row_bg = if selected_row {
             theme.bg_visual
         } else {
             theme.bg_light
@@ -180,7 +139,7 @@ pub fn render(
         } else {
             glyphs::hollow_dot()
         };
-        let text_style = if selected {
+        let text_style = if selected_row {
             Style::default()
                 .fg(theme.text_primary)
                 .bg(row_bg)
@@ -210,7 +169,7 @@ pub fn render(
         y = y.saturating_add(1);
     }
 
-    if other_active(&opts, sel, picked, multi) && y.saturating_add(1) < area.y + area.height {
+    if needs_draft(prompt, sel, picked) && y.saturating_add(1) < area.y + area.height {
         y = y.saturating_add(1);
         let row_bg = theme.bg_visual;
         let row_rect = Rect {
@@ -281,50 +240,26 @@ fn wrap_line(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cordis_spine::{Question, QuestionOption};
 
-    fn sample(label: &str) -> Question {
-        Question {
-            question: "Which?".into(),
-            options: vec![QuestionOption {
-                label: label.into(),
-                description: String::new(),
-                preview: None,
-                id: None,
-            }],
-            multi_select: None,
-            id: None,
+    fn prompt() -> ElicitPrompt {
+        ElicitPrompt {
+            server: "local".into(),
+            message: "选环境".into(),
+            heading: "环境（1/1）".into(),
+            options: vec!["开发".into(), "其他".into()],
+            typing: false,
+            multi: false,
+            draft: String::new(),
+            other_index: Some(1),
+            selected: 0,
+            picked: Vec::new(),
         }
     }
 
     #[test]
-    fn appends_other_when_missing() {
-        let labs = labels(&sample("A"));
-        assert_eq!(labs.last().map(String::as_str), Some(OTHER));
-        assert!(other_active(&labs, labs.len() - 1, &[], false));
-        assert!(!other_active(&labs, 0, &[], false));
-    }
-
-    #[test]
-    fn wire_label_other_is_english() {
-        assert_eq!(wire_label("其他"), OTHER_WIRE);
-        assert_eq!(wire_label("Other"), OTHER_WIRE);
-        assert_eq!(wire_label("A"), "A");
-    }
-
-    #[test]
-    fn does_not_append_when_other_present() {
-        let labs = labels(&sample("Other"));
-        assert_eq!(labs, vec!["Other".to_string()]);
-    }
-
-    #[test]
-    fn push_draft_skips_newlines_and_caps() {
-        let mut draft = String::new();
-        push_draft(&mut draft, "ab\ncd");
-        assert_eq!(draft, "abcd");
-        let mut long = "x".repeat(MAX_ASK_DRAFT);
-        push_draft_char(&mut long, 'y');
-        assert_eq!(long.chars().count(), MAX_ASK_DRAFT);
+    fn other_row_needs_draft() {
+        let p = prompt();
+        assert!(!needs_draft(&p, 0, &[]));
+        assert!(needs_draft(&p, 1, &[]));
     }
 }

@@ -3,11 +3,13 @@
 
 use cordis::{plugin, Context, Inject, Plugin};
 
+use crate::ask_view;
 use crate::grok::shortcuts::HintItem;
 use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SHORTCUTS};
 use crate::overlay::Overlay;
 use crate::prompt::PromptWidget;
 use crate::session::SessionRef;
+use cordis_spine::{Ask, ASK};
 
 pub struct Shortcuts {
     ctx: Context,
@@ -20,7 +22,58 @@ impl Shortcuts {
 
     /// Live-look prompt / `session.port`. Overlay is event-loop local state.
     pub fn hints(&self, overlay: &Overlay, slash: bool, files: bool) -> Vec<HintItem> {
-        if matches!(overlay, Overlay::Permission { .. } | Overlay::Ask { .. }) {
+        if let Overlay::Ask {
+            selected, picked, ..
+        } = overlay
+        {
+            let typing = self
+                .ctx
+                .get::<Ask>(ASK)
+                .and_then(|a| a.front())
+                .and_then(|p| {
+                    p.questions.get(p.index).map(|q| {
+                        let labs = ask_view::labels(q);
+                        let multi = q.multi_select.unwrap_or(false);
+                        ask_view::other_active(&labs, *selected, picked, multi)
+                    })
+                })
+                .unwrap_or(false);
+            if typing {
+                return vec![
+                    HintItem::new("type", "other"),
+                    HintItem::new("Enter", "submit"),
+                    HintItem::new("Esc", "back"),
+                ];
+            }
+            return vec![
+                HintItem::new("Enter", "select"),
+                HintItem::new("Esc", "reject"),
+                HintItem::new("1–9", "option"),
+            ];
+        }
+        if let Overlay::Elicit {
+            selected, picked, ..
+        } = overlay
+        {
+            let typing = self
+                .ctx
+                .get::<cordis_spine::Mcp>(cordis_spine::MCP)
+                .and_then(|m| m.elicitation().front())
+                .is_some_and(|p| crate::mcp_elicit_view::needs_draft(&p, *selected, picked));
+            if typing {
+                return vec![
+                    HintItem::new("type", "other"),
+                    HintItem::new("Enter", "submit"),
+                    HintItem::new("Esc", "back"),
+                ];
+            }
+            return vec![
+                HintItem::new("Enter", "select"),
+                HintItem::new("Esc", "cancel"),
+                HintItem::new("1–9", "option"),
+            ];
+        }
+        if matches!(overlay, Overlay::Permission { .. }) {
             return vec![
                 HintItem::new("Enter", "select"),
                 HintItem::new("Esc", "reject"),

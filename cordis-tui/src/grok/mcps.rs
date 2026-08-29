@@ -1,6 +1,6 @@
 //! MCP servers overlay — Grok Extensions MCP-tab layout, Chinese copy.
-//! Space toggles a server or a tool (same as Grok). No grok.com connectors,
-//! OAuth, or marketplace.
+//! Space toggles a server or a tool. `i` starts HTTP MCP browser OAuth.
+//! No grok.com connectors or marketplace.
 
 use std::collections::HashSet;
 
@@ -22,10 +22,11 @@ const RIGHT_LOCAL: &str = "(本地)";
 const BADGE_READY: &str = "[就绪]";
 const BADGE_UNAVAILABLE: &str = "[不可用]";
 const BADGE_DISABLED: &str = "[已禁用]";
+const BADGE_NEEDS_AUTH: &str = "[需认证]";
 const NO_TOOLS: &str = "没有工具（服务器可能未连接）";
 const EMPTY: &str = "未配置 MCP 服务器";
 const NO_MATCH: &str = "无匹配";
-const FOOTER: &str = "Space 开关 · Enter 展开 · Esc 关闭";
+const FOOTER: &str = "Space 开关 · i 登录 · Enter 展开 · Esc 关闭";
 const DESC_INDENT: u16 = 4;
 const FOLD_WIDTH: u16 = 2;
 
@@ -58,11 +59,13 @@ pub fn tools_label(n: usize) -> String {
     }
 }
 
-pub fn badge_for(enabled: bool, ok: bool) -> &'static str {
+pub fn badge_for(enabled: bool, ok: bool, needs_auth: bool) -> &'static str {
     if !enabled {
         BADGE_DISABLED
     } else if ok {
         BADGE_READY
+    } else if needs_auth {
+        BADGE_NEEDS_AUTH
     } else {
         BADGE_UNAVAILABLE
     }
@@ -165,6 +168,15 @@ pub fn toggle_target(row: &McpRow, servers: &[McpStatus]) -> Option<McpToggle> {
                 enabled: !t.enabled,
             })
         }
+    }
+}
+
+/// `i` target: server row, or the parent of a tool row.
+pub fn auth_target(row: &McpRow, servers: &[McpStatus]) -> Option<String> {
+    match row {
+        McpRow::Section { .. } => None,
+        McpRow::Server { index } => servers.get(*index).map(|s| s.name.clone()),
+        McpRow::Tool { server, .. } => servers.get(*server).map(|s| s.name.clone()),
     }
 }
 
@@ -401,6 +413,8 @@ fn paint_row(
                 theme.gray
             } else if server.ok {
                 theme.accent_success
+            } else if server.needs_auth {
+                theme.warning
             } else {
                 theme.accent_error
             };
@@ -409,7 +423,7 @@ fn paint_row(
                 true,
                 expanded,
                 server.name.clone(),
-                badge_for(server.enabled, server.ok).to_string(),
+                badge_for(server.enabled, server.ok, server.needs_auth).to_string(),
                 Some(badge_fg),
                 RIGHT_LOCAL.to_string(),
                 if expanded {
@@ -624,6 +638,7 @@ mod tests {
             command: "http://127.0.0.1/mcp".into(),
             ok,
             enabled: true,
+            needs_auth: false,
             detail: if ok {
                 tools_label(tools.len())
             } else {
@@ -645,13 +660,14 @@ mod tests {
     fn chinese_copy() {
         assert_eq!(tools_label(0), "没有工具（服务器可能未连接）");
         assert_eq!(tools_label(2), "2 个工具");
-        assert_eq!(badge_for(true, true), "[就绪]");
-        assert_eq!(badge_for(true, false), "[不可用]");
-        assert_eq!(badge_for(false, false), "[已禁用]");
-        assert_eq!(badge_for(false, true), "[已禁用]");
+        assert_eq!(badge_for(true, true, false), "[就绪]");
+        assert_eq!(badge_for(true, false, false), "[不可用]");
+        assert_eq!(badge_for(true, false, true), "[需认证]");
+        assert_eq!(badge_for(false, false, true), "[已禁用]");
+        assert_eq!(badge_for(false, true, false), "[已禁用]");
         assert_eq!(TITLE, "MCP 服务器");
         assert_eq!(RIGHT_LOCAL, "(本地)");
-        assert_eq!(FOOTER, "Space 开关 · Enter 展开 · Esc 关闭");
+        assert_eq!(FOOTER, "Space 开关 · i 登录 · Enter 展开 · Esc 关闭");
     }
 
     #[test]
@@ -695,6 +711,18 @@ mod tests {
                 enabled: true,
             })
         );
+    }
+
+    #[test]
+    fn i_targets_server_or_parent() {
+        let servers = vec![server("linear", false, &[("list_issues", "")])];
+        let rows = build_rows(&servers, "", &HashSet::new(), false);
+        assert_eq!(auth_target(&rows[0], &servers), None);
+        assert_eq!(auth_target(&rows[1], &servers).as_deref(), Some("linear"));
+        let mut expanded = HashSet::new();
+        toggle_row(&rows[1], &mut expanded, &mut false, false);
+        let open = build_rows(&servers, "", &expanded, false);
+        assert_eq!(auth_target(&open[2], &servers).as_deref(), Some("linear"));
     }
 
     #[test]

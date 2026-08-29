@@ -60,7 +60,7 @@ pub use bundle::{
 pub use compact::{compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
 pub use config::{
     load_catalog, load_disabled_mcp_tools, load_mcp_servers, persist_disabled_mcp_tools,
-    persist_mcp_server_enabled, McpServer, McpTransport, ModelChoice,
+    persist_mcp_server_enabled, McpOAuthConfig, McpServer, McpTransport, ModelChoice,
 };
 pub use cron::{
     cron, Cron, CronError, CronJob, CronTick, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS,
@@ -78,12 +78,16 @@ pub use jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
 pub use llm::{llm, Llm, LlmConfig, LlmMode, Sampler};
 pub use loop_plugin::agent_loop;
 pub use lsp::tool_lsp;
-pub use mcp::{is_mcp_public_name, mcp_client, public_tool_name, Mcp, McpStatus, McpToolStatus};
+pub use mcp::{
+    is_mcp_public_name, mcp_client, public_tool_name, ElicitPrompt, Elicitation, Mcp, McpStatus,
+    McpToolStatus,
+};
 pub use memory::tool_memory;
 pub use monitor::tool_monitor;
 pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, COMPACT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL,
-    JOBS, LLM, LLM_STREAM, LSP, MCP, MEMORY, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE,
+    JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT,
+    PLAN_EVENT, PLAN_MODE,
     PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS, SESSIONS, SESSION_EVENT, SETTINGS, SLASH, SUBAGENTS,
     SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TUI_SLOTS, TURN, WORKFLOWS,
 };

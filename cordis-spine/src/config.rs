@@ -96,10 +96,41 @@ pub struct McpServerRow {
     pub bearer_token_env_var: Option<String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    #[serde(default)]
+    pub oauth_client_secret_env_var: Option<String>,
+    #[serde(default)]
+    pub oauth_scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub oauth: Option<McpOAuthBlock>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub startup_timeout_sec: Option<u64>,
+}
+
+/// Grok `[mcp_servers.<name>.oauth]` / JSON `oauth` block (camelCase aliases).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpOAuthBlock {
+    #[serde(default, alias = "clientId")]
+    pub client_id: Option<String>,
+    #[serde(default, alias = "clientSecretEnvVar")]
+    pub client_secret_env_var: Option<String>,
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    #[serde(default, alias = "callbackPort")]
+    pub callback_port: Option<u16>,
+}
+
+/// BYO OAuth client for an HTTP MCP server. Empty `client_id` still allows
+/// Dynamic Client Registration when the authorization server advertises it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpOAuthConfig {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub scopes: Vec<String>,
+    pub callback_port: Option<u16>,
 }
 
 /// Grok default `initialize` / `tools/list` budget (`DEFAULT_STARTUP_TIMEOUT_SECS`).
@@ -124,6 +155,7 @@ pub struct McpServer {
     pub transport: McpTransport,
     pub startup_timeout_sec: u64,
     pub enabled: bool,
+    pub oauth: McpOAuthConfig,
 }
 
 impl McpServer {
@@ -200,12 +232,14 @@ fn row_to_server(name: String, row: McpServerRow) -> Option<McpServer> {
             },
             startup_timeout_sec,
             enabled: row.enabled,
+            oauth: McpOAuthConfig::default(),
         });
     }
     let url = row.url.trim();
     if url.is_empty() {
         return None;
     }
+    let oauth = row_oauth(&row);
     let mut headers = row.headers;
     if let Some(env_var) = row.bearer_token_env_var {
         match std::env::var(&env_var) {
@@ -229,7 +263,33 @@ fn row_to_server(name: String, row: McpServerRow) -> Option<McpServer> {
         },
         startup_timeout_sec,
         enabled: row.enabled,
+        oauth,
     })
+}
+
+fn row_oauth(row: &McpServerRow) -> McpOAuthConfig {
+    let from_block = row.oauth.as_ref();
+    let client_id = nonempty(row.oauth_client_id.clone())
+        .or_else(|| from_block.and_then(|b| nonempty(b.client_id.clone())));
+    let secret_env = row
+        .oauth_client_secret_env_var
+        .as_ref()
+        .or_else(|| from_block.and_then(|b| b.client_secret_env_var.as_ref()));
+    let client_secret = secret_env
+        .and_then(|name| std::env::var(name).ok())
+        .and_then(|s| nonempty(Some(s)));
+    let scopes = row
+        .oauth_scopes
+        .clone()
+        .or_else(|| from_block.and_then(|b| b.scopes.clone()))
+        .unwrap_or_default();
+    let callback_port = from_block.and_then(|b| b.callback_port);
+    McpOAuthConfig {
+        client_id,
+        client_secret,
+        scopes,
+        callback_port,
+    }
 }
 
 /// Overlay `[disabled_mcp_tools]` from catalog files (later path wins per server).
@@ -884,5 +944,34 @@ bearer_token_env_var = "DOCK_TEST_MCP_BEARER"
             other => panic!("{other:?}"),
         }
         std::env::remove_var("DOCK_TEST_MCP_BEARER");
+    }
+
+    #[test]
+    fn mcp_oauth_block_and_transport_client_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.slack]
+url = "https://mcp.example/mcp"
+oauth_client_id = "transport-client"
+oauth_scopes = ["read"]
+
+[mcp_servers.linear]
+url = "https://mcp.linear.app/mcp"
+[mcp_servers.linear.oauth]
+clientId = "slack-byo-client"
+callbackPort = 3118
+"#,
+        )
+        .unwrap();
+        let list = load_mcp_servers_from(&[path]);
+        let slack = list.iter().find(|s| s.name == "slack").unwrap();
+        assert_eq!(slack.oauth.client_id.as_deref(), Some("transport-client"));
+        assert_eq!(slack.oauth.scopes, vec!["read"]);
+        let linear = list.iter().find(|s| s.name == "linear").unwrap();
+        assert_eq!(linear.oauth.client_id.as_deref(), Some("slack-byo-client"));
+        assert_eq!(linear.oauth.callback_port, Some(3118));
     }
 }
