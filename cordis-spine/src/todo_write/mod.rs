@@ -4,10 +4,10 @@ mod logic;
 
 use std::sync::Mutex;
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 
 use crate::names::{TODOS, TOOLS};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use logic::{TodoItem, TodoState, TodoStatus, TodoWriteInput};

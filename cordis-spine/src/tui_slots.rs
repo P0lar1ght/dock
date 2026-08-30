@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Disposable, Inject, Plugin};
+use cordis::{Disposable, Inject, Plugin, plugin};
 use indexmap::IndexMap;
 
 use crate::names::TUI_SLOTS;

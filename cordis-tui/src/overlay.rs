@@ -3,12 +3,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use cordis_spine::{ArchivedSession, PlanApprovalPrompt, SlashEntry};
+use cordis_spine::{ArchivedSession, OccupancyKind, PlanApprovalPrompt, SlashEntry};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 
 use crate::grok::picker::{
-    render_floating_frame, render_fullscreen_frame, render_picker_list, PickerHits, PickerRow,
+    PickerHits, PickerRow, render_floating_frame, render_fullscreen_frame, render_picker_list,
 };
 use crate::grok::tasks_pane::GroupKind;
 use crate::plan_approval_view::PlanWrapCache;
@@ -92,9 +92,11 @@ pub enum Overlay {
         prompt: Arc<PlanApprovalPrompt>,
         wrap: PlanWrapCache,
     },
-    /// `/usage` session token/cost overlay (no grok.com billing).
+    /// `/context` occupancy + `/usage` session ledger (no grok.com billing).
     Usage {
+        tab: UsageTab,
         scroll: usize,
+        detail: Option<OccupancyKind>,
     },
     /// Extra slash overlay (read-only title + body).
     Notice {
@@ -119,6 +121,30 @@ pub enum Overlay {
     },
 }
 
+/// Tabs inside [`Overlay::Usage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UsageTab {
+    #[default]
+    Context,
+    Session,
+}
+
+impl UsageTab {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Context => Self::Session,
+            Self::Session => Self::Context,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Context => "占用",
+            Self::Session => "用量",
+        }
+    }
+}
+
 /// What [`Overlay::Inspect`] is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectTarget {
@@ -127,6 +153,14 @@ pub enum InspectTarget {
 }
 
 impl Overlay {
+    pub fn usage(tab: UsageTab) -> Self {
+        Self::Usage {
+            tab,
+            scroll: 0,
+            detail: None,
+        }
+    }
+
     pub fn plan_approval(prompt: PlanApprovalPrompt, view_only: bool) -> Self {
         Self::PlanApproval {
             selected: 0,
@@ -458,6 +492,11 @@ const HELP: &[HelpEntry] = &[
         kind: HelpKind::Slash(SlashCmd::Usage),
     }),
     HelpEntry::Row(HelpRow {
+        key: "/context",
+        label: "查看上下文占用",
+        kind: HelpKind::Slash(SlashCmd::Context),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "/compact",
         label: "压缩旧对话",
         kind: HelpKind::Slash(SlashCmd::Compact),
@@ -700,9 +739,10 @@ mod tests {
     #[test]
     fn help_filter_finds_resume() {
         let rows = filter_help("resume");
-        assert!(rows
-            .iter()
-            .any(|r| r.key.contains("resume") || r.label.contains("Resume")));
+        assert!(
+            rows.iter()
+                .any(|r| r.key.contains("resume") || r.label.contains("Resume"))
+        );
     }
 
     #[test]
@@ -723,6 +763,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.key == "/mcps"));
         assert!(rows.iter().any(|r| r.key == "/preset"));
         assert!(rows.iter().any(|r| r.key == "/usage"));
+        assert!(rows.iter().any(|r| r.key == "/context"));
         assert!(rows.iter().any(|r| r.key == "/compact"));
     }
 

@@ -661,12 +661,14 @@ description = "custom"
         )
         .unwrap();
         let list = load_catalog_from(&[path]);
-        assert!(list
-            .iter()
-            .any(|m| m.id == "grok-4" && m.name == "Grok 4 pinned"));
-        assert!(list
-            .iter()
-            .any(|m| m.id == "mine" && m.description == "custom"));
+        assert!(
+            list.iter()
+                .any(|m| m.id == "grok-4" && m.name == "Grok 4 pinned")
+        );
+        assert!(
+            list.iter()
+                .any(|m| m.id == "mine" && m.description == "custom")
+        );
     }
 
     #[test]

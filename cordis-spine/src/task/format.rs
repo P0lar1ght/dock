@@ -33,8 +33,7 @@ pub fn wrap_reminder(text: &str) -> String {
 /// Injected into every mailbox child persona (not Grok `task`).
 pub(super) const MAILBOX_REPORT_MARK: &str = "# 子代理上报";
 
-pub(super) const MAILBOX_REPORT_TURN_REMINDER: &str =
-    "主代理看不到你的助手正文。report 是你和主代理的交流通道：有进展、失败、空结果、或需要主代理转发/改派时都要调用。同一轮可以多次。不要只写最终回复。";
+pub(super) const MAILBOX_REPORT_TURN_REMINDER: &str = "主代理看不到你的助手正文。report 是你和主代理的交流通道：有进展、失败、空结果、或需要主代理转发/改派时都要调用。同一轮可以多次。不要只写最终回复。";
 
 const MAILBOX_REPORT_DUTY: &str = "\
 # 子代理上报

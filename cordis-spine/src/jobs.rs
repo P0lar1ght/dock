@@ -6,14 +6,14 @@ use std::sync::{Arc, Mutex};
 
 use std::time::SystemTime;
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::names::{JOBS, SUBAGENTS, TOOLS};
-use crate::task::{render_subagent, Subagents};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::task::{Subagents, render_subagent};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 #[derive(Clone, Debug)]

@@ -1,8 +1,8 @@
 //! Drain copied from Grok `SessionActor::drain_goal_updates_with_extra`.
 //! Classifier policy is disabled (dock has no classifier) → `CompletedWithoutClassifier`.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tokio::sync::mpsc::UnboundedReceiver;
 

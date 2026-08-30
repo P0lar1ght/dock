@@ -2,17 +2,16 @@
 
 use cordis::Context;
 use cordis_spine::{
-    AgentPresets, AppSettings, Ask, Goal, PermissionMode, Permissions, PlanMode, Sessions,
-    TuiSlots, AGENT_PRESETS, ASK, GOAL, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TUI_SLOTS,
+    AGENT_PRESETS, ASK, AgentPresets, AppSettings, Ask, GOAL, Goal, PERMISSIONS, PLAN_MODE,
+    PermissionMode, Permissions, PlanMode, SESSIONS, SETTINGS, Sessions, TUI_SLOTS, TuiSlots,
 };
+use ratatui::Terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::Style;
 use ratatui::widgets::Block;
-use ratatui::Terminal;
 
 use crate::ask_view;
-use crate::mcp_elicit_view;
 use crate::error::{Error, Result};
 use crate::file_search;
 use crate::grok::mcps;
@@ -20,11 +19,12 @@ use crate::grok::picker::{PickerHits, PickerRow};
 use crate::grok::shortcuts::ShortcutsBar;
 use crate::grok::tasks_pane;
 use crate::grok::workflows;
+use crate::mcp_elicit_view;
 use crate::names::{
     SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
 };
 use crate::overlay::{
-    self, filter_help_items, filter_sessions, filter_strings, HelpItem, InspectTarget, Overlay,
+    self, HelpItem, InspectTarget, Overlay, filter_help_items, filter_sessions, filter_strings,
 };
 use crate::permission_view;
 use crate::plan_approval_view;
@@ -33,7 +33,7 @@ use crate::queue_pane::{self, QueueHit};
 use crate::scrollback::Scrollback;
 use crate::session::SessionRef;
 use crate::settings_modal;
-use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
+use crate::slash::{SlashSnapshot, desired_item_rows, filter_args, render_dropdown};
 use crate::subagent_dock;
 use crate::text_overlay;
 use crate::theme::Theme;
@@ -250,7 +250,12 @@ pub(super) fn draw(
                     bar = bar.center(c);
                 }
                 if let Some(r) = right.as_deref() {
-                    bar = bar.right(r);
+                    if status.right_is_flash() {
+                        bar = bar.right(r);
+                    } else {
+                        bar = bar.right_styled(r, status.occupancy_style());
+                    }
+                    status.remember_right_hit(chunks[0], r);
                 }
                 frame.render_widget(bar, chunks[0]);
             }
@@ -682,9 +687,7 @@ pub(super) fn paint_overlay(
         Overlay::Permission { .. }
         | Overlay::Ask { .. }
         | Overlay::Elicit { .. }
-        | Overlay::PlanApproval { .. } => {
-            PickerHits::default()
-        }
+        | Overlay::PlanApproval { .. } => PickerHits::default(),
         Overlay::Tasks {
             selected,
             query,
@@ -706,11 +709,7 @@ pub(super) fn paint_overlay(
             let servers = mcp_status_list(ctx);
             let sel = {
                 let n = mcps::build_rows(&servers, query, tools_expanded, *section_collapsed).len();
-                if n == 0 {
-                    0
-                } else {
-                    (*selected).min(n - 1)
-                }
+                if n == 0 { 0 } else { (*selected).min(n - 1) }
             };
             mcps::render_mcp_overlay(
                 buf,
@@ -730,13 +729,11 @@ pub(super) fn paint_overlay(
             let goal = ctx.get::<Goal>(GOAL);
             goal_overlay::render(buf, area, goal.as_deref(), *selected, *editing, draft)
         }
-        Overlay::Usage { scroll } => {
-            let usage = ctx
-                .get::<Sessions>(SESSIONS)
-                .map(|s| s.prompt_usage())
-                .unwrap_or_default();
-            usage_overlay::render(buf, area, &usage, *scroll)
-        }
+        Overlay::Usage {
+            tab,
+            scroll,
+            detail,
+        } => usage_overlay::render(buf, area, ctx, *tab, *scroll, *detail),
         Overlay::Notice {
             title,
             body,

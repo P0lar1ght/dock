@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
 use cordis_spine::{
-    goal_composer_fill, loop_composer_fill, loop_usage_message, tool_slash_arguments,
-    ExtraSlashKind, SlashEntry, GOAL_RESERVED_SUBCOMMANDS,
+    ExtraSlashKind, GOAL_RESERVED_SUBCOMMANDS, SlashEntry, goal_composer_fill, loop_composer_fill,
+    loop_usage_message, tool_slash_arguments,
 };
 
 /// Synchronous, side-effect-free user intent.
@@ -35,23 +35,44 @@ pub enum Action {
     SettingsModal,
     PermissionAccept,
     PermissionReject,
-    MouseMove { column: u16, row: u16 },
-    MouseDown { column: u16, row: u16 },
-    MouseDrag { column: u16, row: u16 },
-    MouseUp { column: u16, row: u16 },
+    MouseMove {
+        column: u16,
+        row: u16,
+    },
+    MouseDown {
+        column: u16,
+        row: u16,
+    },
+    MouseDrag {
+        column: u16,
+        row: u16,
+    },
+    MouseUp {
+        column: u16,
+        row: u16,
+    },
     HistoryPicker,
     Find,
     CancelTurn,
     FileSearchMove(i16),
     FileSearchAccept,
     FileSearchDismiss,
-    CopyAssistant { n: usize, file: Option<PathBuf> },
+    CopyAssistant {
+        n: usize,
+        file: Option<PathBuf>,
+    },
     CopyText(String),
     OpenImage(PathBuf),
     SendPrompt(String),
-    SendPromptNow { text: String },
-    PromoteQueued { id: Option<String> },
-    EditQueued { id: Option<String> },
+    SendPromptNow {
+        text: String,
+    },
+    PromoteQueued {
+        id: Option<String>,
+    },
+    EditQueued {
+        id: Option<String>,
+    },
     PasteClipboard,
     InsertChar(char),
     InsertText(String),
@@ -67,7 +88,10 @@ pub enum Action {
     HistoryNext,
     Scroll(i16),
     ScrollPage(i16),
-    Click { column: u16, row: u16 },
+    Click {
+        column: u16,
+        row: u16,
+    },
     CycleMode,
     ToggleGoalDetail,
 }
@@ -138,6 +162,7 @@ pub enum Effect {
         focus: Option<String>,
     },
     ShowUsage,
+    ShowContext,
     Compact {
         context: String,
     },
@@ -277,6 +302,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
             Effect::ShowPresets { focus }
         }
         SlashCmd::Usage => Effect::ShowUsage,
+        SlashCmd::Context => Effect::ShowContext,
         SlashCmd::Compact => Effect::Compact {
             context: args.to_string(),
         },

@@ -16,16 +16,16 @@ mod spawn;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 
 use super::admission::Admission;
 use super::coordinator_state::{
+    ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, InternalEvent,
+    ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture,
     active_summary, background_at_deadline, background_if_caller_gone, completed_snapshot,
-    completion_summary, sleep_until, workflow_outstanding, ActiveChild, BlockingWaiter,
-    BufferedCompletion, ChildRecord, CompletedChild, InternalEvent, ListRequest, PendingChild,
-    ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture,
+    completion_summary, sleep_until, workflow_outstanding,
 };
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
@@ -35,11 +35,11 @@ use super::types::{
 
 pub use super::coordinator_state::{
     ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner,
-    CompletionDisposition, CoordinatorConfig, LimitedSpawnOrigin, LocalBoxFuture, SendBoxFuture,
-    StartedChild, SubagentLimitDecision, SubagentLimitNotice, SubagentLimitSink, SubagentProgress,
-    MAX_COMPLETED_ENTRIES,
+    CompletionDisposition, CoordinatorConfig, LimitedSpawnOrigin, LocalBoxFuture,
+    MAX_COMPLETED_ENTRIES, SendBoxFuture, StartedChild, SubagentLimitDecision, SubagentLimitNotice,
+    SubagentLimitSink, SubagentProgress,
 };
-use queue::{QueuedCaller, SpawnQueue, StartOrigin, QUEUED_REAP_INTERVAL};
+use queue::{QUEUED_REAP_INTERVAL, QueuedCaller, SpawnQueue, StartOrigin};
 
 /// Channel-owned subagent lifecycle actor.
 pub struct SubagentCoordinator<R: ChildRunner> {

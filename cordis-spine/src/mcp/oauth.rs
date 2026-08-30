@@ -9,7 +9,7 @@ use std::time::Duration;
 use base64::Engine;
 use reqwest::header::{HeaderMap, WWW_AUTHENTICATE};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
@@ -109,8 +109,8 @@ pub fn parse_oauth_callback_params(
     })
 }
 
-fn in_flight(
-) -> &'static tokio::sync::Mutex<HashMap<String, watch::Receiver<Option<Result<(), String>>>>> {
+fn in_flight()
+-> &'static tokio::sync::Mutex<HashMap<String, watch::Receiver<Option<Result<(), String>>>>> {
     static CELL: OnceLock<
         tokio::sync::Mutex<HashMap<String, watch::Receiver<Option<Result<(), String>>>>>,
     > = OnceLock::new();
@@ -678,9 +678,11 @@ mod tests {
         let mut err = HashMap::new();
         err.insert("error".into(), "access_denied".into());
         err.insert("error_description".into(), "nope".into());
-        assert!(parse_oauth_callback_params(&err)
-            .unwrap_err()
-            .contains("access_denied"));
+        assert!(
+            parse_oauth_callback_params(&err)
+                .unwrap_err()
+                .contains("access_denied")
+        );
     }
 
     #[test]

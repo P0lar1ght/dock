@@ -6,10 +6,10 @@ mod dropdown;
 mod interval;
 mod matcher;
 
-use cordis_spine::{load_catalog, AppSettings, ModelChoice, SlashEntry};
+use cordis_spine::{AppSettings, ModelChoice, SlashEntry, load_catalog};
 
 pub use args::ArgItem;
-pub use dropdown::{desired_item_rows, render_dropdown, SuggestionRow};
+pub use dropdown::{SuggestionRow, desired_item_rows, render_dropdown};
 pub use interval::{interval_to_human, parse_loop_args, token_to_duration};
 pub use matcher::FuzzyMatcher;
 
@@ -41,6 +41,7 @@ pub enum SlashCmd {
     Mcps,
     Preset,
     Usage,
+    Context,
     Compact,
 }
 
@@ -231,7 +232,17 @@ pub const CATALOG: &[SlashDef] = &[
         name: "usage",
         aliases: &["cost"],
         display: "/usage",
-        description: "查看本会话用量",
+        description: "查看本会话用量（Tab 切到占用）",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Context,
+        name: "context",
+        aliases: &[],
+        display: "/context",
+        description: "查看上下文占用",
         takes_args: false,
         args_required: false,
         arg_kind: None,
@@ -568,6 +579,7 @@ mod tests {
         assert_eq!(lookup("agent").map(|d| d.cmd), Some(SlashCmd::Preset));
         assert_eq!(lookup("usage").map(|d| d.cmd), Some(SlashCmd::Usage));
         assert_eq!(lookup("cost").map(|d| d.cmd), Some(SlashCmd::Usage));
+        assert_eq!(lookup("context").map(|d| d.cmd), Some(SlashCmd::Context));
         assert_eq!(lookup("compact").map(|d| d.cmd), Some(SlashCmd::Compact));
     }
 
@@ -619,10 +631,12 @@ mod tests {
         let extras = [extra("standup"), extra("help")];
         let snap = snapshot_ex("/", 0, &extras);
         assert!(snap.matches.iter().any(|r| r.display == "/standup"));
-        assert!(!snap
-            .matches
-            .iter()
-            .any(|r| matches!(&r.pick, SlashPick::Extra(n) if n == "help")));
+        assert!(
+            !snap
+                .matches
+                .iter()
+                .any(|r| matches!(&r.pick, SlashPick::Extra(n) if n == "help"))
+        );
         assert_eq!(
             command_for_submit_ex("/standup today", &extras),
             Some((SlashPick::Extra("standup".into()), "today".into()))

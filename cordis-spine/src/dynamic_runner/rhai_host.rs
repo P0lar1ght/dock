@@ -4,13 +4,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Context, Inject, Plugin};
-use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
+use cordis::{Context, Inject, Plugin, plugin};
+use rhai::{AST, Array, Dynamic, Engine, FnPtr, ImmutableString, Map};
 use serde_json::Value;
 
 use crate::names::{RHAI_BAGS, SLASH, TOOLS, TUI_SLOTS};
-use crate::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::slash::{ExtraSlashKind, Slash, SlashEntry, slash_name_reserved};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::tui_slots::{SlotHandler, SlotKeyResult, TuiSlots};
 use crate::types::{ToolCall, ToolSpec};
 
@@ -18,8 +18,7 @@ const MAX_SOURCE: usize = 128 * 1024;
 const DEFINE_MAX_OPS: u64 = 100_000;
 const RUN_MAX_OPS: u64 = 1_000_000;
 
-const SOURCE_SHAPE_HINT: &str =
-    "source must be a map #{ inject: [...], apply: |host| { ... } }; define compiles and does not call apply.";
+const SOURCE_SHAPE_HINT: &str = "source must be a map #{ inject: [...], apply: |host| { ... } }; define compiles and does not call apply.";
 
 const PARAMETERS_MUST_BE_MAP: &str = "host.register_tool parameters must be a map, not a JSON string. Use:\n\
     parameters: #{ type: \"object\", properties: #{ text: #{ type: \"string\" } }, required: [\"text\"] }";
@@ -38,7 +37,9 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     (
         "host.register_tool",
         "Register a model-facing tool. execute is |args| -> String. parameters is a JSON-schema map (not a string). Stop unregisters it. Dynamic tools bypass the Agent preset allowlist.",
-        &["host.register_tool(#{ name, description, parameters: #{ type: \"object\", properties: #{ ... }, required: [...] }, execute })"],
+        &[
+            "host.register_tool(#{ name, description, parameters: #{ type: \"object\", properties: #{ ... }, required: [...] }, execute })",
+        ],
     ),
     (
         "host.register_slash",

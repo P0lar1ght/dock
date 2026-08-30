@@ -4,7 +4,7 @@
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, USER_AGENT};
 use url::Url;
 
-use super::config::{WebFetchParams, MAX_REDIRECTS, MAX_URL_LENGTH, USER_AGENT_STRING};
+use super::config::{MAX_REDIRECTS, MAX_URL_LENGTH, USER_AGENT_STRING, WebFetchParams};
 use super::domain::DomainMatcher;
 use super::error::WebFetchError;
 use super::http::HttpClient;

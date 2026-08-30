@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 use serde_json::Value;
 use tokio::sync::watch;
 
@@ -251,9 +251,6 @@ mod tests {
             &mut carry,
         );
         assert_eq!(vals.len(), 1);
-        assert_eq!(
-            vals[0]["method"],
-            "notifications/tools/list_changed"
-        );
+        assert_eq!(vals[0]["method"], "notifications/tools/list_changed");
     }
 }

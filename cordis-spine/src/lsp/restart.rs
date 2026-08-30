@@ -9,7 +9,7 @@ use super::client::LspClient;
 use super::config::LspServerConfig;
 use super::manager::LspManager;
 use super::process::ProcessScope;
-use super::{file_uri, DiagnosticsNotify};
+use super::{DiagnosticsNotify, file_uri};
 
 /// Waits for the current lifecycle to exit. Returns `None` (stop monitoring)
 /// when the manager is gone or the server's client has been removed.

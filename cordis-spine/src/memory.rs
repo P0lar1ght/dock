@@ -3,11 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 
 use crate::config::dock_home;
 use crate::names::{MEMORY, TOOLS};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 const SEARCH_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query. Prefer specific technical terms."},"max_results":{"type":"integer"},"min_score":{"type":"number"}},"required":["query"]}"#;

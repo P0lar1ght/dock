@@ -9,10 +9,10 @@ use crate::agent_presets::AgentPresets;
 use crate::agents::Agents;
 use crate::compact::Compact;
 use crate::error::{Error, Result};
-use crate::goal::{goal_continuation_directive, Goal};
+use crate::goal::{Goal, goal_continuation_directive};
 use crate::llm::Llm;
 use crate::names::{
-    AGENTS, AGENT_PRESETS, COMPACT, GOAL, LLM, PLAN_MODE, PRE_STEP, SESSIONS, SUBAGENTS,
+    AGENT_PRESETS, AGENTS, COMPACT, GOAL, LLM, PLAN_MODE, PRE_STEP, SESSIONS, SUBAGENTS,
     SYSTEM_PROMPT, TOOLS, TURN,
 };
 use crate::plan_mode::PlanMode;

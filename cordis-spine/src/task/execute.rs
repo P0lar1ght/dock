@@ -9,15 +9,15 @@ use crate::types::{ToolCall, ToolResult};
 
 use super::backend::SubagentBackend;
 use super::format::{
-    format_subagent_auto_backgrounded, format_subagent_completed,
-    format_subagent_started_background, sanitize_optional_arg, BackgroundNoticeNaming,
+    BackgroundNoticeNaming, format_subagent_auto_backgrounded, format_subagent_completed,
+    format_subagent_started_background, sanitize_optional_arg,
 };
 use super::runner::PARENT_SESSION_ID;
 use super::types::{
-    is_valid_resume_id, sanitize_cwd_value, ModelOverrideProvenance, SubagentIsolationMode,
-    SubagentOwner, SubagentRequest, SubagentRuntimeOverrides, SubagentValidateTypeOutcome,
+    ModelOverrideProvenance, SubagentIsolationMode, SubagentOwner, SubagentRequest,
+    SubagentRuntimeOverrides, SubagentValidateTypeOutcome, is_valid_resume_id, sanitize_cwd_value,
 };
-use super::{current_depth, Subagents, MAX_SUBAGENT_DEPTH};
+use super::{MAX_SUBAGENT_DEPTH, Subagents, current_depth};
 
 const TASK_PARAMS: &str = r#"{"type":"object","properties":{"prompt":{"type":"string","description":"The full task prompt for the subagent to execute."},"description":{"type":"string","description":"Short description of the task (3-5 words)."},"subagent_type":{"type":"string","description":"Id from the current Agent mode agents/ roster."},"run_in_background":{"type":"boolean","description":"Returns immediately with a subagent_id. Use get_task_output to retrieve results. Default true."},"resume_from":{"type":"string","description":"Resume a completed subagent_id with a new prompt."},"cwd":{"type":"string","description":"Explicit working directory. Mutually exclusive with isolation=worktree."},"isolation":{"type":"string","description":"none (default) or worktree."},"model":{"type":"string","description":"Optional model slug. Ignored when resume_from is set."}},"required":["prompt","description"]}"#;
 

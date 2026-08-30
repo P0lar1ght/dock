@@ -8,7 +8,7 @@ use crate::cron::cron;
 use crate::dynamic_runner::dynamic_runner;
 use crate::goal::tool_goal;
 use crate::jobs::{jobs, tool_jobs};
-use crate::llm::{llm, LlmConfig, LlmMode};
+use crate::llm::{LlmConfig, LlmMode, llm};
 use crate::loop_plugin::agent_loop;
 use crate::lsp::tool_lsp;
 use crate::mcp::mcp_client;

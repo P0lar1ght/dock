@@ -11,7 +11,7 @@ use super::client::LspClient;
 use super::config::LspServerConfig;
 use super::pending::{PendingEdits, PendingPolicy};
 use super::process::ProcessScope;
-use super::{file_uri, DiagnosticsNotify};
+use super::{DiagnosticsNotify, file_uri};
 
 #[cfg(test)]
 use super::format::{format_locations_labeled, format_symbols};

@@ -8,8 +8,8 @@ use cordis::{Fiber, FiberState};
 use indexmap::IndexMap;
 use tokio::sync::watch;
 
-use super::factories::FactoryInfo;
 use super::RunReceipt;
+use super::factories::FactoryInfo;
 use crate::slash::SlashEntry;
 
 pub type StartOutcome = Result<RunReceipt, String>;

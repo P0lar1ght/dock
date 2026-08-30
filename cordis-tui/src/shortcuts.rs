@@ -1,7 +1,7 @@
 //! Named `"tui.shortcuts"` service. The event loop live-looks this up each
 //! frame — swap the plugin to change the bar without touching `tui`.
 
-use cordis::{plugin, Context, Inject, Plugin};
+use cordis::{Context, Inject, Plugin, plugin};
 
 use crate::ask_view;
 use crate::grok::shortcuts::HintItem;
@@ -9,7 +9,7 @@ use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SHORTCUTS};
 use crate::overlay::Overlay;
 use crate::prompt::PromptWidget;
 use crate::session::SessionRef;
-use cordis_spine::{Ask, ASK};
+use cordis_spine::{ASK, Ask};
 
 pub struct Shortcuts {
     ctx: Context,
@@ -203,12 +203,23 @@ impl Shortcuts {
                 HintItem::new("q", "back"),
             ];
         }
+        if let Overlay::Usage {
+            detail: Some(_), ..
+        } = overlay
+        {
+            return vec![HintItem::new("Esc", "back"), HintItem::new("↑/↓", "scroll")];
+        }
+        if matches!(overlay, Overlay::Usage { .. }) {
+            return vec![
+                HintItem::new("click", "detail"),
+                HintItem::new("Tab", "tab"),
+                HintItem::new("↑/↓", "scroll"),
+                HintItem::new("Esc", "close"),
+            ];
+        }
         if matches!(
             overlay,
-            Overlay::Usage { .. }
-                | Overlay::Notice { .. }
-                | Overlay::Slot { .. }
-                | Overlay::Inspect { .. }
+            Overlay::Notice { .. } | Overlay::Slot { .. } | Overlay::Inspect { .. }
         ) {
             return vec![
                 HintItem::new("↑/↓", "scroll"),

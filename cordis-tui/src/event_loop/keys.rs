@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use cordis::Context;
 use cordis_spine::{
-    AppSettings, Ask, Goal, Mcp, PermissionMode, PermissionOptionKind, Permissions, PlanDecision,
-    PlanMode, Sessions, TuiSlots, UserImage, ASK, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSIONS,
-    SETTINGS, TUI_SLOTS,
+    ASK, AppSettings, Ask, GOAL, Goal, MCP, Mcp, PERMISSIONS, PLAN_MODE, PermissionMode,
+    PermissionOptionKind, Permissions, PlanDecision, PlanMode, SESSIONS, SETTINGS, Sessions,
+    TUI_SLOTS, TuiSlots, UserImage,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -15,9 +15,9 @@ use crate::ask_view;
 use crate::grok::mcps;
 use crate::grok::picker::PickerHits;
 use crate::grok::tasks_pane::TaskEntry;
-use crate::names::{TUI_PROMPT, TUI_SCROLLBACK, TUI_WELCOME};
+use crate::names::{TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
 use crate::overlay::{
-    self, filter_sessions, filter_strings, HelpItem, HelpKind, InspectTarget, Overlay,
+    self, HelpItem, HelpKind, InspectTarget, Overlay, UsageTab, filter_sessions, filter_strings,
 };
 use crate::permission_view;
 use crate::plan_approval_view;
@@ -36,6 +36,8 @@ use crate::goal_pane::{self, GoalHit};
 use crate::inspect_overlay::{self, InspectClick};
 use crate::mode_cycle;
 use crate::prompt::PromptWidget;
+use crate::status::StatusLine;
+use crate::usage_overlay;
 use crate::welcome::{Welcome, WelcomeHit};
 
 pub(super) fn run_action(
@@ -76,7 +78,12 @@ pub(super) fn run_action(
                     perms.resolve(PermissionOptionKind::RejectOnce);
                 }
             }
-            if let Overlay::Ask { draft, draft_cursor, .. } = overlay {
+            if let Overlay::Ask {
+                draft,
+                draft_cursor,
+                ..
+            } = overlay
+            {
                 if !draft.is_empty() {
                     draft.clear();
                     *draft_cursor = 0;
@@ -112,13 +119,25 @@ pub(super) fn run_action(
             if matches!(overlay, Overlay::Inspect { .. }) {
                 return close_inspect(overlay);
             }
+            if let Overlay::Usage { detail, scroll, .. } = overlay {
+                if detail.is_some() {
+                    *detail = None;
+                    *scroll = 0;
+                    return Vec::new();
+                }
+            }
             let _ = dispatch_slot_key(ctx, overlay, "esc");
             overlay.close();
             return Vec::new();
         }
         Action::OverlayMove(delta) => {
-            if let Overlay::Usage { scroll } = overlay {
-                scroll_usage(ctx, scroll, delta);
+            if let Overlay::Usage {
+                tab,
+                scroll,
+                detail,
+            } = overlay
+            {
+                scroll_usage(*tab, *detail, scroll, delta);
                 return Vec::new();
             }
             if let Overlay::Notice { body, scroll, .. } = overlay {
@@ -574,9 +593,22 @@ pub(super) fn run_action(
             if let Overlay::Presets(view) = overlay {
                 view.cycle_pane();
             }
+            if let Overlay::Usage {
+                tab,
+                scroll,
+                detail,
+            } = overlay
+            {
+                *tab = tab.next();
+                *detail = None;
+                *scroll = 0;
+            }
             return Vec::new();
         }
         Action::MouseMove { column, row } => {
+            if matches!(overlay, Overlay::Usage { .. }) {
+                usage_overlay::hover(column, row);
+            }
             if welcome_open(ctx) && !overlay.is_open() {
                 if let Ok(welcome) = ctx.require::<Welcome>(TUI_WELCOME) {
                     welcome.set_mouse(column, row);
@@ -597,6 +629,9 @@ pub(super) fn run_action(
                 return Vec::new();
             }
             if goal_pane::hit(goal_hits, column, row).is_some() {
+                return Vec::new();
+            }
+            if open_context_from_status(ctx, overlay, column, row) {
                 return Vec::new();
             }
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
@@ -660,8 +695,13 @@ pub(super) fn run_action(
                 scroll_plan_body(scroll, prompt, wrap, delta);
                 return Vec::new();
             }
-            if let Overlay::Usage { scroll } = overlay {
-                scroll_usage(ctx, scroll, delta);
+            if let Overlay::Usage {
+                tab,
+                scroll,
+                detail,
+            } = overlay
+            {
+                scroll_usage(*tab, *detail, scroll, delta);
                 return Vec::new();
             }
             if let Overlay::Notice { body, scroll, .. } = overlay {
@@ -752,6 +792,31 @@ pub(super) fn run_action(
                     overlay.close();
                     return Vec::new();
                 }
+                if let Overlay::Usage {
+                    tab,
+                    scroll,
+                    detail,
+                } = overlay
+                {
+                    if let Some(next) = usage_overlay::hit_tab(column, row) {
+                        *tab = next;
+                        *detail = None;
+                        *scroll = 0;
+                        return Vec::new();
+                    }
+                    if *tab == UsageTab::Context {
+                        if usage_overlay::hit_back(column, row) {
+                            *detail = None;
+                            *scroll = 0;
+                            return Vec::new();
+                        }
+                        if let Some(kind) = usage_overlay::hit_slice(column, row) {
+                            *detail = Some(kind);
+                            *scroll = 0;
+                            return Vec::new();
+                        }
+                    }
+                }
                 if let Some(id) = overlay::hit_kill(hits, column, row) {
                     if matches!(overlay, Overlay::Tasks { .. }) {
                         cancel_scheduled(ctx, &id);
@@ -788,6 +853,9 @@ pub(super) fn run_action(
                         return accept_overlay(ctx, overlay);
                     }
                 }
+                return Vec::new();
+            }
+            if open_context_from_status(ctx, overlay, column, row) {
                 return Vec::new();
             }
             if welcome_open(ctx) {
@@ -1382,6 +1450,18 @@ pub(super) fn apply_paste(
         },
     }
 }
+
+fn open_context_from_status(ctx: &Context, overlay: &mut Overlay, column: u16, row: u16) -> bool {
+    let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) else {
+        return false;
+    };
+    if !status.hit_right(column, row) {
+        return false;
+    }
+    *overlay = Overlay::usage(UsageTab::Context);
+    true
+}
+
 pub(super) fn overlay_keys(code: KeyCode, ctrl: bool) -> Option<Action> {
     match code {
         KeyCode::Esc => Some(Action::OverlayClose),

@@ -18,7 +18,7 @@ pub mod workspace_open;
 
 pub use dispatch::LspBackendAdapter;
 #[allow(unused_imports)]
-pub use manager::{drain_lsp_diagnostics, DiagnosticsSummary, LspManager};
+pub use manager::{DiagnosticsSummary, LspManager, drain_lsp_diagnostics};
 pub use restart::restart_monitor;
 #[allow(unused_imports)]
 pub use types::{
@@ -84,9 +84,9 @@ const LSP_UNAVAILABLE: &str = "LSP tool is unavailable. Configure ~/.dock/lsp.js
 
 pub fn tool_lsp() -> cordis::Plugin {
     use crate::names::{LSP, TOOLS};
-    use crate::tools::{own_registered, ToolBody, Tools};
+    use crate::tools::{ToolBody, Tools, own_registered};
     use crate::types::ToolSpec;
-    use cordis::{plugin, Inject};
+    use cordis::{Inject, plugin};
     use notify::ToolNotificationHandle;
     use tokio::sync::Mutex as TokioMutex;
 

@@ -3,7 +3,7 @@
 //! `chat_completion_stream` (SSE `data:` → `ChatCompletionChunk` deltas).
 
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::chat_chunk::ChatCompletionChunk;
 use crate::config;
@@ -12,10 +12,10 @@ use crate::names::{SESSIONS, SETTINGS, TURN};
 use crate::runtime::BoxFuture;
 use crate::session::Sessions;
 use crate::settings::AppSettings;
-use crate::stream_acc::{take_sse_data, ChatStreamAcc, StreamDelta};
+use crate::stream_acc::{ChatStreamAcc, StreamDelta, take_sse_data};
 use crate::turn::TurnControl;
 use crate::types::{
-    LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
+    INTERRUPTED_TOOL_RESULT, LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage,
 };
 
 use cordis::Context;

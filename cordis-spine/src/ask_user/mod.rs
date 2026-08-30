@@ -8,15 +8,15 @@ mod types;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use cordis::{plugin, Context, Inject, Plugin};
+use cordis::{Context, Inject, Plugin, plugin};
 use indexmap::IndexMap;
 use tokio::sync::oneshot;
 
 use crate::names::{ASK, ASK_EVENT, TOOLS};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
-pub use format::{unanswered_text, CANCEL_TEXT, NO_OPERATOR_TEXT};
+pub use format::{CANCEL_TEXT, NO_OPERATOR_TEXT, unanswered_text};
 pub use questions::{AskUserQuestionInput, Question, QuestionOption};
 pub use types::QuestionAnnotation;
 
@@ -59,11 +59,8 @@ impl Ask {
             let current_labels = q
                 .and_then(|q| p.answers.get(&q.question).cloned())
                 .unwrap_or_default();
-            let current_notes = q.and_then(|q| {
-                p.annotations
-                    .get(&q.question)
-                    .and_then(|a| a.notes.clone())
-            });
+            let current_notes =
+                q.and_then(|q| p.annotations.get(&q.question).and_then(|a| a.notes.clone()));
             AskPrompt {
                 questions: p.questions.clone(),
                 index: p.index,
@@ -243,11 +240,7 @@ mod tests {
         let ask = Ask::new(cordis::Context::new());
         let (tx, _rx) = oneshot::channel();
         ask.queue.lock().unwrap().push_back(Pending {
-            questions: vec![
-                q("Q1", &["A", "B"]),
-                q("Q2", &["C", "D"]),
-                q("Q3", &["E"]),
-            ],
+            questions: vec![q("Q1", &["A", "B"]), q("Q2", &["C", "D"]), q("Q3", &["E"])],
             answers: IndexMap::new(),
             annotations: HashMap::new(),
             index: 0,

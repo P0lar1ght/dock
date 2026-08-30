@@ -8,15 +8,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
 use tokio::sync::{oneshot, watch};
 
 use crate::config::{McpServer, McpTransport};
 use crate::mcp::protocol::{
-    self, client_capabilities, client_info, discover_versions, pick_version, raw_tool_name,
-    with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
+    self, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY, client_capabilities, client_info,
+    discover_versions, pick_version, raw_tool_name, with_meta,
 };
 use crate::tools::tool_result;
 use crate::types::ToolCall;
@@ -114,7 +114,8 @@ async fn handshake(s: &Shared, timeout: Duration) -> Result<(), String> {
             let versions = discover_versions(&v);
             if let Some(picked) = pick_version(&versions) {
                 *s.protocol.lock().unwrap() = picked.to_string();
-                s.modern.store(protocol::is_modern(picked), Ordering::Relaxed);
+                s.modern
+                    .store(protocol::is_modern(picked), Ordering::Relaxed);
             }
             if !s.modern.load(Ordering::Relaxed) {
                 initialize_legacy(s, timeout).await?;
@@ -127,7 +128,8 @@ async fn handshake(s: &Shared, timeout: Duration) -> Result<(), String> {
                     format!("server does not speak a protocol Dock supports: {supported:?}")
                 })?;
                 *s.protocol.lock().unwrap() = picked.to_string();
-                s.modern.store(protocol::is_modern(picked), Ordering::Relaxed);
+                s.modern
+                    .store(protocol::is_modern(picked), Ordering::Relaxed);
                 if !s.modern.load(Ordering::Relaxed) {
                     initialize_legacy(s, timeout).await?;
                 }

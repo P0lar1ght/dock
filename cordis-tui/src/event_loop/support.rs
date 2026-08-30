@@ -4,22 +4,22 @@ use std::collections::HashSet;
 
 use cordis::Context;
 use cordis_spine::{
-    goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
-    Ask, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind, Permissions, PlanMode,
-    Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage, Workflows, AGENT_PRESETS, ASK,
-    CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS,
-    WORKFLOWS,
+    AGENT_PRESETS, ASK, AgentPresets, AppSettings, Ask, CRON, Cron, GOAL, Goal, JOBS, Jobs,
+    LoopFireMode, MCP, Mcp, McpStatus, MermaidEngineKind, PERMISSIONS, PLAN_MODE, Permissions,
+    PlanMode, SESSIONS, SETTINGS, SLASH, SUBAGENTS, Sessions, Slash, SlotKeyResult, Subagents,
+    TUI_SLOTS, TuiSlots, UserImage, WORKFLOWS, Workflows, goal_composer_fill, loop_composer_fill,
+    loop_schedule_instruction,
 };
 
 use crate::ask_view;
-use crate::mcp_elicit_view;
 use crate::clipboard;
 use crate::error::Result;
 use crate::grok::mcps;
 use crate::grok::tasks_pane::{self, GroupKind, TaskEntry};
 use crate::grok::workflows::WorkflowRunSnapshot;
+use crate::mcp_elicit_view;
 use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
-use crate::overlay::{filter_help_items, filter_sessions, filter_strings, InspectTarget, Overlay};
+use crate::overlay::{InspectTarget, Overlay, filter_help_items, filter_sessions, filter_strings};
 use crate::permission_view;
 use crate::plan_approval_view;
 use crate::preset_overlay::{self, PresetAction, PresetView};
@@ -31,7 +31,7 @@ use crate::text_overlay;
 use crate::usage_overlay;
 
 use crate::actions::{
-    interpret_goal_composer_ex, interpret_loop_composer, Effect, GoalComposer, LoopComposer,
+    Effect, GoalComposer, LoopComposer, interpret_goal_composer_ex, interpret_loop_composer,
 };
 use crate::goal_overlay;
 use crate::goal_pane::GoalHit;
@@ -127,9 +127,7 @@ pub(super) fn open_ask_if_needed(ctx: &Context, overlay: &mut Overlay) {
 
 pub(super) fn navigate_ask(ctx: &Context, overlay: &mut Overlay, delta: i16) {
     if let Overlay::Ask {
-        selected,
-        picked,
-        ..
+        selected, picked, ..
     } = overlay
     {
         // Other freeform owns ←/→ for the caret; question nav only when not typing Other.
@@ -285,12 +283,13 @@ pub(super) fn scroll_plan_body(
     *scroll = next;
 }
 
-pub(super) fn scroll_usage(ctx: &Context, scroll: &mut usize, delta: i16) {
-    let usage = ctx
-        .get::<Sessions>(SESSIONS)
-        .map(|s| s.prompt_usage())
-        .unwrap_or_default();
-    let max = usage_overlay::max_scroll(&usage, 16);
+pub(super) fn scroll_usage(
+    tab: crate::overlay::UsageTab,
+    detail: Option<cordis_spine::OccupancyKind>,
+    scroll: &mut usize,
+    delta: i16,
+) {
+    let max = usage_overlay::max_scroll(tab, detail);
     let next = (*scroll as i32 + delta as i32).clamp(0, max as i32) as usize;
     *scroll = next;
 }
@@ -1019,13 +1018,7 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
             .map(|l| l.len())
             .unwrap_or(picked.len()),
         Overlay::Elicit { picked, .. } => elicit_front(ctx)
-            .map(|p| {
-                if p.typing {
-                    0
-                } else {
-                    p.options.len()
-                }
-            })
+            .map(|p| if p.typing { 0 } else { p.options.len() })
             .unwrap_or(picked.len()),
         Overlay::Tasks {
             query, collapsed, ..

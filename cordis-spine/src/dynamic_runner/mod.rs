@@ -9,7 +9,7 @@ mod rhai_host;
 
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Context, Disposable, Fiber, FiberState, Inject, Plugin};
+use cordis::{Context, Disposable, Fiber, FiberState, Inject, Plugin, plugin};
 use tokio::sync::watch;
 
 use crate::names::{DYNAMIC_CORDIS_RUNNER, RHAI_BAGS, SLASH, TOOLS, TUI_SLOTS};
@@ -17,18 +17,18 @@ use crate::slash::{Slash, SlashEntry};
 use crate::tools::Tools;
 use crate::tui_slots::TuiSlots;
 
-use factories::{list_factories, lookup_factory, DYN_HOLD_GATE};
+use factories::{DYN_HOLD_GATE, list_factories, lookup_factory};
 use lifecycle::{host_status, missing_services, start_host_half};
 use registry::{
-    fiber_label, package_from_factory, package_from_rhai, wait_start, PluginRec, Registry, Run,
-    StartJoin,
+    PluginRec, Registry, Run, StartJoin, fiber_label, package_from_factory, package_from_rhai,
+    wait_start,
 };
 
 pub use factories::{
-    DynEcho, DynNote, FactoryInfo, DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
+    DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, DynEcho, DynNote, FactoryInfo, RHAI_FACTORY,
 };
 pub use registry::{Attempt, AttemptStatus, Package, RunMode};
-pub use rhai_host::{builtins_lines, preflight, RhaiBag, RhaiBags};
+pub use rhai_host::{RhaiBag, RhaiBags, builtins_lines, preflight};
 
 #[derive(Clone, Debug)]
 pub struct DefineReceipt {

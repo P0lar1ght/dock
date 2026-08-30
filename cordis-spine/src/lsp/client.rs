@@ -17,6 +17,7 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Arc;
 
+use async_lsp::LanguageServer;
 use async_lsp::lsp_types::{
     self, ClientCapabilities, DiagnosticClientCapabilities, DiagnosticWorkspaceClientCapabilities,
     DidChangeTextDocumentParams, DidOpenTextDocumentParams, GotoCapability,
@@ -26,16 +27,15 @@ use async_lsp::lsp_types::{
     TextDocumentItem, TextDocumentSyncClientCapabilities, Url, VersionedTextDocumentIdentifier,
     WorkspaceClientCapabilities,
 };
-use async_lsp::LanguageServer;
 
 use super::capabilities::ServerPolicy;
 use super::config::{LspServerConfig, LspTransport};
 use super::diagnostics::DiagnosticsStore;
-use super::documents::{end_position, Documents, Update};
+use super::documents::{Documents, Update, end_position};
 use super::process::{ProcessGroup, ProcessScope};
 use super::pull::PullDiagnostics;
 use super::refresh::{ProjectInitializationComplete, RefreshTarget};
-use super::{file_uri, workspace_open, DiagnosticsNotify, LspError, LspMainLoop};
+use super::{DiagnosticsNotify, LspError, LspMainLoop, file_uri, workspace_open};
 
 #[cfg(test)]
 use super::config::REQUEST_TIMEOUT;

@@ -4,7 +4,7 @@
 
 use std::sync::Mutex;
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 use tokio_util::sync::CancellationToken;
 
 use crate::names::TURN;

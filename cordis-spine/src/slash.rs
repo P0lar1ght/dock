@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Disposable, Inject, Plugin};
+use cordis::{Disposable, Inject, Plugin, plugin};
 use indexmap::IndexMap;
 use serde_json::Value;
 
@@ -38,6 +38,7 @@ pub const RESERVED_SLASH: &[&str] = &[
     "find",
     "usage",
     "cost",
+    "context",
     "compact",
     "theme",
     "t",

@@ -4,22 +4,31 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use cordis::Context;
-use cordis_spine::{LogEvent, Sessions, SESSIONS};
+use cordis_spine::{ContextSnapshot, LogEvent, SESSIONS, Sessions, TokenUsage, snapshot_context};
+use ratatui::layout::{Position, Rect};
+use ratatui::style::Style;
+use unicode_width::UnicodeWidthStr;
 
 use crate::names::SESSION_PORT;
 use crate::session::SessionRef;
+use crate::status_bar;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 const FLASH_TTL: Duration = Duration::from_millis(2500);
+
+struct SnapMemo {
+    rev: u64,
+    usage: TokenUsage,
+    snap: ContextSnapshot,
+}
 
 pub struct StatusLine {
     ctx: Context,
     notice: Mutex<Option<(String, Instant)>>,
+    right_hit: Mutex<Option<Rect>>,
+    snap_memo: Mutex<Option<SnapMemo>>,
 }
 
 impl StatusLine {
@@ -27,6 +36,8 @@ impl StatusLine {
         Self {
             ctx,
             notice: Mutex::new(None),
+            right_hit: Mutex::new(None),
+            snap_memo: Mutex::new(None),
         }
     }
 
@@ -39,20 +50,7 @@ impl StatusLine {
     }
 
     pub fn left(&self) -> String {
-        let cwd = cwd_label();
-        let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) else {
-            return cwd;
-        };
-        if !has_turns(&sessions) {
-            return cwd;
-        }
-        let u = sessions.usage();
-        let window = if u.window == 0 { 128_000 } else { u.window };
-        format!(
-            "{cwd}  上下文 {}/{}",
-            format_tokens(u.context_used()),
-            format_tokens(window)
-        )
+        cwd_label()
     }
 
     pub fn center(&self) -> Option<String> {
@@ -75,27 +73,72 @@ impl StatusLine {
             }
             *notice = None;
         }
-        let sessions = self.ctx.get::<Sessions>(SESSIONS)?;
-        if !has_turns(&sessions) {
-            return None;
-        }
-        let working = self
+        Some(occupancy_label(&self.live_snapshot()))
+    }
+
+    pub fn right_is_flash(&self) -> bool {
+        self.notice
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() < FLASH_TTL)
+    }
+
+    pub fn occupancy_style(&self) -> Style {
+        let theme = Theme::current();
+        occupancy_style(self.live_snapshot().usage_pct, &theme)
+    }
+
+    fn live_snapshot(&self) -> ContextSnapshot {
+        let (rev, usage) = self
             .ctx
-            .get::<SessionRef>(SESSION_PORT)
-            .is_some_and(|h| h.working());
-        Some(if working {
-            "工作中".into()
-        } else {
-            "空闲".into()
-        })
+            .get::<Sessions>(SESSIONS)
+            .map(|s| s.occupancy_stamp())
+            .unwrap_or((0, TokenUsage::default()));
+        let mut memo = self.snap_memo.lock().unwrap();
+        if let Some(cached) = memo.as_ref() {
+            if cached.rev == rev && cached.usage == usage {
+                return cached.snap.clone();
+            }
+        }
+        let snap = snapshot_context(&self.ctx);
+        *memo = Some(SnapMemo {
+            rev,
+            usage,
+            snap: snap.clone(),
+        });
+        snap
+    }
+
+    pub fn remember_right_hit(&self, area: Rect, text: &str) {
+        *self.right_hit.lock().unwrap() = Some(status_bar::right_rect(area, text));
+    }
+
+    pub fn hit_right(&self, column: u16, row: u16) -> bool {
+        self.right_hit
+            .lock()
+            .unwrap()
+            .is_some_and(|r| r.contains(Position { x: column, y: row }))
     }
 }
 
-fn has_turns(sessions: &Sessions) -> bool {
-    sessions
-        .events()
-        .iter()
-        .any(|e| matches!(e, LogEvent::User(_)))
+pub fn occupancy_label(snap: &ContextSnapshot) -> String {
+    format!(
+        "上下文 {}/{}",
+        format_tokens(snap.used),
+        format_tokens(snap.total)
+    )
+}
+
+fn occupancy_style(pct: u8, theme: &Theme) -> Style {
+    let fg = if pct >= 85 {
+        theme.warning
+    } else if pct >= 70 {
+        theme.accent_user
+    } else {
+        theme.gray
+    };
+    Style::default().fg(fg).bg(theme.bg_base)
 }
 
 fn cwd_label() -> String {
@@ -252,5 +295,40 @@ mod tests {
         if cwd.starts_with(&home) {
             assert!(cwd_label().starts_with('~'), "cwd_label={}", cwd_label());
         }
+    }
+
+    #[test]
+    fn left_is_cwd_only() {
+        let line = StatusLine::new(Context::new());
+        assert!(!line.left().contains("上下文"), "left={}", line.left());
+    }
+
+    #[test]
+    fn right_shows_occupancy_without_flash() {
+        let line = StatusLine::new(Context::new());
+        let right = line.right().expect("occupancy");
+        assert!(right.starts_with("上下文 "), "right={right}");
+        assert!(right.contains('/'), "right={right}");
+    }
+
+    #[test]
+    fn occupancy_label_formats_window() {
+        let snap = ContextSnapshot {
+            used: 20_000,
+            total: 204_800,
+            model: String::new(),
+            system_prompt_tokens: 0,
+            message_tokens: 0,
+            tool_definitions_tokens: 0,
+            tool_definitions_count: 0,
+            free_tokens: 184_800,
+            usage_pct: 10,
+            auto_compact_threshold_percent: 85,
+            turn_count: 0,
+            tool_call_count: 0,
+            compaction_count: 0,
+            categories: Vec::new(),
+        };
+        assert_eq!(occupancy_label(&snap), "上下文 20.0k/204k");
     }
 }

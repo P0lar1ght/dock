@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::grok::glyphs;
 use crate::theme::Theme;
 
-use super::{SlashPick, SlashSnapshot, MAX_VISIBLE_SUGGESTIONS};
+use super::{MAX_VISIBLE_SUGGESTIONS, SlashPick, SlashSnapshot};
 
 const LABEL_CAP: usize = 40;
 const LABEL_DESC_GAP: usize = 2;

@@ -1,6 +1,6 @@
 //! Server → client JSON-RPC on a shared stream (stdio / POST SSE / GET SSE).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::elicitation::Elicitation;
@@ -92,11 +92,7 @@ mod tests {
             elicit: Elicitation::new(cordis::Context::new()),
             tools_changed: tx,
         };
-        note(
-            &hooks,
-            "notifications/tools/list_changed",
-            &json!({}),
-        );
+        note(&hooks, "notifications/tools/list_changed", &json!({}));
         assert_eq!(rx.try_recv().unwrap(), "local");
     }
 }

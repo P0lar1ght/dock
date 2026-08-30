@@ -7,7 +7,7 @@ use crate::agent_presets::AgentPresets;
 use crate::agents::Agents;
 use crate::ask_user::Ask;
 use crate::cron::Cron;
-use crate::dynamic_runner::{builtins_lines, DynamicRunner, SnapshotRow};
+use crate::dynamic_runner::{DynamicRunner, SnapshotRow, builtins_lines};
 use crate::goal::Goal;
 use crate::jobs::Jobs;
 use crate::llm::Llm;
@@ -15,7 +15,7 @@ use crate::lsp::LspBackendAdapter;
 use crate::mcp::Mcp;
 use crate::memory::Memory;
 use crate::names::{
-    AGENTS, AGENT_PRESETS, ASK, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LSP, MCP, MEMORY,
+    AGENT_PRESETS, AGENTS, ASK, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LSP, MCP, MEMORY,
     PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS,
     TUI_SLOTS, TURN, WORKFLOWS,
 };

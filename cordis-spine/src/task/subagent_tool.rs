@@ -5,13 +5,13 @@
 
 use std::sync::Arc;
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 use serde::Deserialize;
 
 use crate::agent_presets::AgentPresets;
 use crate::names::{AGENT_PRESETS, SESSIONS, SUBAGENTS, TOOLS};
 use crate::session::Sessions;
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{ToolCall, ToolResult};
 
 use super::backend::SubagentBackend;
@@ -22,7 +22,7 @@ use super::types::{
     ModelOverrideProvenance, SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
     SubagentValidateTypeOutcome,
 };
-use super::{current_depth, Subagents, MAX_SUBAGENT_DEPTH};
+use super::{MAX_SUBAGENT_DEPTH, Subagents, current_depth};
 
 const PARAMS: &str = r#"{"type":"object","properties":{"reload_roster":{"type":"boolean","description":"If true, re-read this mode's agents/*.yml and return the live subagent_type ids. Does not spawn. Use after writing a new agents/<id>.yml so the next model step's enum includes it. Omit description, prompt, and subagent_type."},"description":{"type":"string","description":"Short (3-5 word) label for the delegated work. Required when spawning."},"prompt":{"type":"string","description":"Complete standalone task for this role. The child does not see this conversation. Required when spawning."},"subagent_type":{"type":"string","description":"Role id from the live agents/ roster. The enum on this field is the callable set — extra YAML roles are included. Required when spawning."},"run_in_background":{"type":"boolean","description":"Default true. Returns a durable subagent_id immediately. Set false only when the next action needs the result now."}}}"#;
 

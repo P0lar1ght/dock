@@ -17,28 +17,27 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    goal_composer_fill, AgentPresets, AppSettings, Goal, LogEvent, PlanMode, Sessions, Slash,
-    ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, GOAL, MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT,
-    PLAN_MODE,
-    SESSIONS, SESSION_EVENT, SETTINGS, SLASH, TOOLS,
+    AGENT_PRESETS, ASK_EVENT, AgentPresets, AppSettings, GOAL, Goal, LogEvent, MCP_ELICIT_EVENT,
+    PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PlanMode, SESSION_EVENT, SESSIONS, SETTINGS, SLASH,
+    Sessions, Slash, TOOLS, ToolCall, Tools, goal_composer_fill,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, Event,
+    EnableFocusChange, EnableMouseCapture, Event, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::Terminal;
 use ratatui::layout::Rect;
 use ratatui::prelude::CrosstermBackend;
-use ratatui::Terminal;
 
 use crate::error::{Error, Result};
 use crate::grok::picker::PickerHits;
 use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS};
-use crate::overlay::Overlay;
+use crate::overlay::{Overlay, UsageTab};
 use crate::queue_pane::QueueHit;
 use crate::scrollback::Scrollback;
 use crate::session::SessionRef;
@@ -50,6 +49,7 @@ use crate::input::spawn_reader;
 use crate::mermaid_png;
 use crate::prompt::PromptWidget;
 use crate::status::StatusLine;
+use crate::usage_overlay;
 
 use frame::{chrome_model_label, draw};
 use keys::{run_action, to_action};
@@ -179,6 +179,12 @@ pub async fn run(ctx: Context) -> Result<()> {
                 }
                 if let Event::Mouse(m) = &event {
                     pointer = (m.column, m.row);
+                    if matches!(m.kind, MouseEventKind::Moved)
+                        && matches!(overlay, Overlay::Usage { .. })
+                        && !usage_overlay::hover(m.column, m.row)
+                    {
+                        continue;
+                    }
                 }
                 if let Some(action) = to_action(&ctx, event, &overlay, esc_suppress_until) {
                     let mut effects: VecDeque<Effect> = run_action(
@@ -506,7 +512,10 @@ pub async fn run(ctx: Context) -> Result<()> {
                                 overlay = open_presets_overlay(&ctx, focus);
                             }
                             Effect::ShowUsage => {
-                                overlay = Overlay::Usage { scroll: 0 };
+                                overlay = Overlay::usage(UsageTab::Session);
+                            }
+                            Effect::ShowContext => {
+                                overlay = Overlay::usage(UsageTab::Context);
                             }
                             Effect::Compact { context } => {
                                 flash(&ctx, "正在压缩上下文…");

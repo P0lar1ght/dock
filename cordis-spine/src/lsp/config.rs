@@ -316,7 +316,7 @@ impl LspServerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_project_lsp_when_untrusted, LspServerConfig};
+    use super::{LspServerConfig, filter_project_lsp_when_untrusted};
     use crate::lsp::config_source::ConfigSource;
     use std::collections::BTreeMap;
     use std::path::PathBuf;

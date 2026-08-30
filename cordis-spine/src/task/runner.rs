@@ -1,8 +1,8 @@
 //! Dock `ChildRunner`: Grok coordinator seam; child body is isolate
 //! `"sessions"`+`"turn"`+`"agentPresets"` + [`GrokStep`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use cordis::Context;
@@ -26,7 +26,7 @@ use super::types::{
     SubagentDescribeOutcome, SubagentOwner, SubagentResult, SubagentTypeSummary,
     SubagentValidateTypeOutcome,
 };
-use super::{current_depth, SubagentLife, DEPTH};
+use super::{DEPTH, SubagentLife, current_depth};
 
 pub(super) const PARENT_SESSION_ID: &str = "dock";
 

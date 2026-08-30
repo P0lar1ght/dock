@@ -12,14 +12,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
-use serde_json::{json, Value};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
+use serde_json::{Value, json};
 use tokio::sync::{oneshot, watch};
 
 use crate::config::{McpServer, McpTransport};
 use crate::mcp::protocol::{
-    self, client_capabilities, client_info, encode_header_value, id_matches, pick_version,
-    raw_tool_name, unsupported_versions, with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
+    self, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY, client_capabilities, client_info,
+    encode_header_value, id_matches, pick_version, raw_tool_name, unsupported_versions, with_meta,
 };
 use crate::tools::tool_result;
 use crate::types::ToolCall;
@@ -92,7 +92,12 @@ pub(super) async fn connect(
         Box::pin(async move {
             let raw_name = raw_tool_name(&public);
             let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
-            match rpc(&session, "tools/call", json!({ "name": raw_name, "arguments": args })).await
+            match rpc(
+                &session,
+                "tools/call",
+                json!({ "name": raw_name, "arguments": args }),
+            )
+            .await
             {
                 Ok(v) => tool_result(c, protocol::format_call_result(&v)),
                 Err(e) => tool_result(c, e),
@@ -164,7 +169,10 @@ async fn handshake(s: &HttpShared) -> Result<Vec<protocol::ListedTool>, String> 
     }
 }
 
-async fn negotiate(s: &HttpShared, supported: &[String]) -> Result<Vec<protocol::ListedTool>, String> {
+async fn negotiate(
+    s: &HttpShared,
+    supported: &[String],
+) -> Result<Vec<protocol::ListedTool>, String> {
     let picked = pick_version(supported)
         .ok_or_else(|| format!("server does not speak a protocol Dock supports: {supported:?}"))?;
     s.set_protocol(picked.to_string());
@@ -188,7 +196,10 @@ async fn list_from_first(
         .await
 }
 
-async fn list_pages(s: &HttpShared, server_name: &str) -> Result<Vec<protocol::ListedTool>, String> {
+async fn list_pages(
+    s: &HttpShared,
+    server_name: &str,
+) -> Result<Vec<protocol::ListedTool>, String> {
     tools_list::list_all(server_name, |params| rpc(s, "tools/list", params)).await
 }
 

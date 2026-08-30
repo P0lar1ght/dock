@@ -6,14 +6,23 @@ mod registry;
 
 use std::sync::Arc;
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 
 use crate::names::{TOOLS, WORKFLOWS};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use drain::WorkflowRunSnap;
-pub use grok_tool::{render_ack, WorkflowLaunchHandle, WorkflowToolInput, WORKFLOW_TOOL_NAME};
+pub use grok_tool::{WORKFLOW_TOOL_NAME, WorkflowLaunchHandle, WorkflowToolInput, render_ack};
+
+/// Names + descriptions of workflows the model can launch (builtin + disk).
+pub(crate) fn catalog_listing() -> Vec<(String, String)> {
+    let cwd = std::env::current_dir().ok();
+    registry::list_workflows(cwd.as_deref())
+        .into_iter()
+        .map(|w| (w.name, w.description))
+        .collect()
+}
 
 /// Named `"workflows"` service. TUI live-looks `list()`.
 pub struct Workflows {

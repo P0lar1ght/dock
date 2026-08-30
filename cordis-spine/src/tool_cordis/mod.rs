@@ -8,14 +8,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use cordis::{plugin, Context, Inject, Plugin};
+use cordis::{Context, Inject, Plugin, plugin};
 use serde_json::Value;
 
 use crate::dynamic_runner::{DynamicRunner, PluginSel, RunMode};
 use crate::names::{DYNAMIC_CORDIS_RUNNER, PRE_STEP, PROMPT_ASSEMBLE, SESSIONS, TOOLS};
 use crate::session::Sessions;
 use crate::slash::{contrib_fields_present, slash_entry_from_define};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 use inspect::{render_inspect, render_inspect_self};
@@ -233,7 +233,15 @@ fn define_tool(ctx: Context, call: ToolCall) -> ExecFut {
             .get("source")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
-        match runner.define(session_id(&ctx).as_str(), plugin, name, purpose, factory, contrib, source) {
+        match runner.define(
+            session_id(&ctx).as_str(),
+            plugin,
+            name,
+            purpose,
+            factory,
+            contrib,
+            source,
+        ) {
             Ok(r) => tool_result(
                 call,
                 format!(

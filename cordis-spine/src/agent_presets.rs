@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1434,19 +1434,23 @@ mod tests {
                 assert!(p.agents.contains_key("plan"), "{}", mode.id);
                 assert!(p.agents.contains_key("general-purpose"), "{}", mode.id);
                 let explore = p.agents.get("explore").unwrap();
-                assert!(!explore
-                    .tools
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .any(|n| n == "write_file"));
+                assert!(
+                    !explore
+                        .tools
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|n| n == "write_file")
+                );
                 assert!(!explore.tools.as_ref().unwrap().iter().any(|n| n == "bash"));
-                assert!(explore
-                    .tools
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .any(|n| n == "report"));
+                assert!(
+                    explore
+                        .tools
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|n| n == "report")
+                );
             }
         }
     }
@@ -1794,9 +1798,11 @@ mod tests {
         assert!(presets.subagent_role_hint().contains("explore"));
         assert!(presets.subagent_role_hint().contains("general-purpose"));
         assert!(presets.subagent_role_hint().contains("reload_roster"));
-        assert!(presets
-            .subagent_role_hint()
-            .contains(&expect.display().to_string()));
+        assert!(
+            presets
+                .subagent_role_hint()
+                .contains(&expect.display().to_string())
+        );
     }
 
     #[test]

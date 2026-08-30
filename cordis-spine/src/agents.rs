@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Context, Inject, Plugin};
+use cordis::{Context, Inject, Plugin, plugin};
 
 use crate::names::AGENTS;
 

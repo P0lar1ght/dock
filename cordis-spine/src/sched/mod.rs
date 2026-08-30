@@ -5,19 +5,19 @@ mod loop_cmd;
 
 use std::time::{Duration, Instant};
 
-use cordis::{plugin, Context, Inject, Plugin};
+use cordis::{Context, Inject, Plugin, plugin};
 use serde_json::Value;
 
 use crate::cron::{Cron, CronError, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS};
 use crate::names::{CRON, TOOLS};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use interval::{interval_to_human, parse_interval};
 pub use loop_cmd::{
-    expired_task_notice, format_scheduled_task_prompt, format_scheduled_task_reminder,
-    loop_composer_fill, loop_schedule_instruction, loop_usage_message, LoopFireMode,
-    SCHEDULER_CREATE_TOOL_NAME,
+    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, expired_task_notice, format_scheduled_task_prompt,
+    format_scheduled_task_reminder, loop_composer_fill, loop_schedule_instruction,
+    loop_usage_message,
 };
 
 #[derive(Debug, thiserror::Error)]

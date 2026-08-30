@@ -3,11 +3,11 @@
 
 use std::sync::Mutex;
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 
 use crate::names::{SLASH, TOOLS};
 use crate::slash::{Slash, SlashEntry};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{ToolBody, Tools, own_registered, tool_result};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub const DYN_ECHO: &str = "dynEcho";

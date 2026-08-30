@@ -7,7 +7,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use cordis::Context;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::sync::oneshot;
 
 use crate::names::MCP_ELICIT_EVENT;
@@ -333,9 +333,10 @@ fn job_prompt(job: &Job) -> ElicitPrompt {
             let heading = field
                 .map(|f| format!("{}（{}/{}）", f.title, *index + 1, fields.len().max(1)))
                 .unwrap_or_default();
-            let (options, typing, multi, draft, other_index) = field
-                .map(field_ui)
-                .unwrap_or((Vec::new(), false, false, String::new(), None));
+            let (options, typing, multi, draft, other_index) =
+                field
+                    .map(field_ui)
+                    .unwrap_or((Vec::new(), false, false, String::new(), None));
             let selected = field.map(default_selected).unwrap_or(0);
             ElicitPrompt {
                 server: job.server.clone(),

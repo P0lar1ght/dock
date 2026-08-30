@@ -2,7 +2,7 @@
 //! Initialize-era (`2025-11-25` and earlier) is a fallback only.
 
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Latest published MCP spec. Offered first on both stdio and Streamable HTTP.
 pub const PROTOCOL_LATEST: &str = "2026-07-28";

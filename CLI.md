@@ -31,7 +31,8 @@
 | `/history` | 搜索提示词历史 |
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
 | `/find` | 搜索对话 |
-| `/usage`（`cost`） | 本会话用量 overlay：输入 / 输出 / 缓存命中与占比 / 思考 / 调用次数 / API 耗时。接口若带 `cost_in_usd_ticks` 才显示费用，缺省为「未上报」（不是免费）。**没有** grok.com 账号额度、`/usage manage` |
+| `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入 / 输出 / 缓存命中与占比 / 思考 / 调用次数 / API 耗时。接口若带 `cost_in_usd_ticks` 才显示费用，缺省为「未上报」（不是免费）。**Tab** 切到占用。**没有** grok.com 账号额度、`/usage manage` |
+| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、MCP、工作流。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量 |
 | `/compact [说明]` | 压缩旧对话为摘要（Grok 同款 structured `<summary>` 九段）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩（Grok `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`）；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制 |
 | `/theme` `/t` | 切换配色 |
 | `/timestamps` | 开关滚动区时间戳 |
@@ -84,7 +85,7 @@ order: 10
 | 目标状态条 | 有目标时钉在子代理头像和排队条之间（紧挨输入框上方）：标题 + `[暂停]`/`[继续]` `[修改]` `[关闭]`；第二行是进度备注和彩色扫光波。运行中随 80ms 刷新换色；暂停后冻结变灰。点标题打开 overlay，点 `[修改]` 直接改标题 |
 | 子代理头像条 | 未结束的子代理钉在输入框上方横排**正方形**头像（框里是显示名首字，无名字行）。运行中边框扫光并呼吸。点头像打开 **Grok 同款全屏边框**：标题栏 + 子代理自己的滚动区（工具卡折叠循环与主界面相同：收起 → 截断 → 展开）。框底可输入，Enter 经 `send_message`（urgent）发给该子代理以调整。Esc / q（输入为空时）/ [✗] 返回 |
 | 滚动区 | live-lookup `"todos"`；用户气泡灰带铺满行宽（Grok `with_background`）；图标抄 Grok `todo_pane`（`□` `▶` `✓` `✗`）。**`subagent` 是独立卡片**：当前模式名册角色名 + type id，始终折叠，点击打开全屏对话。Grok `task` 仍画成原来的子代理块。后台 bash / `monitor` 画成任务卡片。`update_goal` 画成 **Goal 卡**（设定 / 进展 / 完成 / 受阻）。`scheduler_create` / `scheduler_list` / `scheduler_delete` 画成 **Loop 卡**（设定 / 列表 / 关闭）。MCP 调用（`mcp_{server}__{tool}`）画成 **Server Action** 卡（参数 kv + 输出）。运行中 ◆ 会脉冲，活动与耗时随 80ms 刷新 |
-| 顶栏 | `上下文 {used}/{window}` 是**上一轮** prompt+completion（上下文窗），不是 `/usage` 的会话累计账本 |
+| 顶栏 | 右上角 `上下文 {used}/{window}`：当前窗口占用（系统提示 + 消息 + 工具定义 + 图片 + 推理；有官方 prompt 则取较大值）。点击打开占用 overlay，再点分类看明细。不是 `/usage` 的会话累计账本 |
 | `enter_plan_mode` / `exit_plan_mode` 卡 | scrollback：`◆ Plan: Enter\|Exit`；Exit 展开 markdown。`exit` 会 park 审批，写闸保持到用户决定 |
 
 ---
@@ -93,7 +94,7 @@ order: 10
 
 抄 Grok `UsageLedger` + `session_usage_block_text`，不接 `x.ai/billing`。
 
-- 只把 SSE **官方** `usage` 折进账本（`prompt_tokens_details.cached_tokens`，缺省再认 `prompt_cache_hit_tokens` / `cache_read_input_tokens`；思考认 `completion_tokens_details.reasoning_tokens`）。开转前的本地估算只更新顶栏，不入账（Grok fail-closed：缺费用 ≠ 免费）。
+- 只把 SSE **官方** `usage` 折进账本（`prompt_tokens_details.cached_tokens`，缺省再认 `prompt_cache_hit_tokens` / `cache_read_input_tokens`；思考认 `completion_tokens_details.reasoning_tokens`）。开转前的本地估算只更新顶栏占用，不入账（Grok fail-closed：缺费用 ≠ 免费）。
 - **缓存占比** = 缓存命中 / 完整输入（Grok：`cached_prompt_tokens` 是 `prompt_tokens` 的子集，不要相减）。会话累计用总量相除，不是各轮百分比再平均。超过 100% 钳到 100%；输入为 0 显示 `-`。格式抄 Grok `/context` 的 `percent_of_window`（不足 10% 一位小数，否则整数）。
 - 主循环每次 `finish_llm` 记一笔；子代理 isolate 结束时 `record_subagent` 折进父会话，不增加 `numTurns`。
 - `/new` / `clear` / `/resume` 清零账本。
@@ -105,5 +106,5 @@ order: 10
 - `/goal`：模型可用 `update_goal(objective)` 自己开目标；continuation 已接上（内循环 + 整轮结束后隐藏 GoalSummary）。尚未自动 spawn Grok 的 `goal plan writer` / classifier / strategist
 - 一轮采样安全上限 256 步（Grok 默认不限 `max_turns`）；撞上限时滚动区留下说明，而不是静默停
 - 提问 overlay：有 Other，自由输入比 Grok pager 简单
-- `/usage`：无 Context usage / Session info 三 tab，无账号额度条
+- `/usage`：占用 + 用量两 tab；无 grok.com 账号额度条、无 Session info
 - `/compact`：Grok full-replace 一轮（structured 九段摘要 + 85% 自动）；无 two-pass / segments / transcript 落盘

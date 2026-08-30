@@ -194,9 +194,11 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(deltas
-            .iter()
-            .any(|d| matches!(d, StreamDelta::Text(t) if t == "hi")));
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, StreamDelta::Text(t) if t == "hi"))
+        );
         assert!(deltas.iter().any(|d| matches!(
             d,
             StreamDelta::Usage { tokens, official: true, .. } if tokens.prompt_tokens == 10 && tokens.completion_tokens == 2

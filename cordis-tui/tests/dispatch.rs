@@ -88,6 +88,10 @@ fn slash_plan_tasks_mcps_map() {
         [Effect::ShowUsage]
     ));
     assert!(matches!(
+        dispatch(Action::SendPrompt("/context".into()), &prompt).as_slice(),
+        [Effect::ShowContext]
+    ));
+    assert!(matches!(
         dispatch(Action::SendPrompt("/compact".into()), &prompt).as_slice(),
         [Effect::Compact { context }] if context.is_empty()
     ));

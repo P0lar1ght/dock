@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{Inject, Plugin, plugin};
 
 use crate::config::{self, ModelChoice};
 use crate::names::SETTINGS;

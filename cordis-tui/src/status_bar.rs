@@ -20,8 +20,10 @@ pub struct StatusBar<'a> {
     pub left: &'a str,
     /// Center content (e.g., "Turn 2/3")
     pub center: Option<&'a str>,
-    /// Right-aligned content (e.g., view mode indicator)
+    /// Right-aligned content (e.g. context occupancy).
     pub right: Option<&'a str>,
+    /// Optional style for the right span (usage-percent coloring).
+    pub right_style: Option<Style>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -31,6 +33,7 @@ impl<'a> StatusBar<'a> {
             left,
             center: None,
             right: None,
+            right_style: None,
         }
     }
 
@@ -43,6 +46,13 @@ impl<'a> StatusBar<'a> {
     /// Add right content.
     pub fn right(mut self, text: &'a str) -> Self {
         self.right = Some(text);
+        self
+    }
+
+    /// Right content with an explicit style (occupancy percent coloring).
+    pub fn right_styled(mut self, text: &'a str, style: Style) -> Self {
+        self.right = Some(text);
+        self.right_style = Some(style);
         self
     }
 }
@@ -88,16 +98,24 @@ impl Widget for StatusBar<'_> {
         if let Some(right) = self.right {
             let right_width = UnicodeWidthStr::width(right) as u16;
             let right_x = content_x + content_width.saturating_sub(right_width);
-            let right_span = Span::styled(right, style);
+            let right_span = Span::styled(right, self.right_style.unwrap_or(style));
             buf.set_span(right_x, area.y, &right_span, right_width);
         }
     }
+}
+
+/// Hit rect for the right-aligned status text (same math as [`StatusBar`]).
+pub fn right_rect(area: Rect, text: &str) -> Rect {
+    let w = UnicodeWidthStr::width(text) as u16;
+    let x = area.x + area.width.saturating_sub(w);
+    Rect::new(x, area.y, w.min(area.width), 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::buffer::Buffer;
+    use ratatui::layout::Position;
     use ratatui::layout::Rect;
 
     #[test]
@@ -110,5 +128,17 @@ mod tests {
         assert_eq!(buf[(18, 0)].symbol(), "闲");
         assert_eq!(UnicodeWidthStr::width("空闲"), 4);
         assert_eq!("空闲".len(), 6);
+    }
+
+    #[test]
+    fn occupancy_right_hit_covers_label() {
+        let area = Rect::new(0, 0, 40, 1);
+        let text = "上下文 20.0k/204k";
+        let hit = right_rect(area, text);
+        let w = UnicodeWidthStr::width(text) as u16;
+        assert_eq!(hit.width, w);
+        assert_eq!(hit.x, 40 - w);
+        assert!(hit.contains(Position { x: hit.x, y: 0 }));
+        assert!(!hit.contains(Position { x: 0, y: 0 }));
     }
 }

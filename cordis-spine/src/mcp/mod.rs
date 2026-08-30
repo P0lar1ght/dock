@@ -17,7 +17,7 @@ mod tools_list;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, plugin_async, Disposable, Inject, Plugin};
+use cordis::{Disposable, Inject, Plugin, plugin, plugin_async};
 
 use crate::config::{self, McpServer, McpTransport};
 use crate::names::{MCP, TOOLS};
@@ -220,7 +220,10 @@ impl Mcp {
     async fn connect_slot(&self, config: &McpServer) -> Result<(), String> {
         {
             let mut inner = self.inner.lock().unwrap();
-            if let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == config.name)
+            if let Some(slot) = inner
+                .slots
+                .iter_mut()
+                .find(|s| s.config.name == config.name)
             {
                 stop_slot(slot);
             }
@@ -325,10 +328,7 @@ fn stop_slot(slot: &mut Slot) {
     }
 }
 
-fn spawn_changed_refresh(
-    mcp: Mcp,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-) {
+fn spawn_changed_refresh(mcp: Mcp, mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
     tokio::spawn(async move {
         loop {
             let Some(first) = rx.recv().await else {
@@ -492,6 +492,9 @@ async fn connect_and_list(
 #[allow(dead_code)]
 pub fn mcp_empty() -> Plugin {
     plugin("mcp-client", Inject::new(), |ctx, _: &()| {
-        Ok(Some(ctx.provide(MCP, Mcp::new(None, Elicitation::new(ctx.clone())))?))
+        Ok(Some(ctx.provide(
+            MCP,
+            Mcp::new(None, Elicitation::new(ctx.clone())),
+        )?))
     })
 }

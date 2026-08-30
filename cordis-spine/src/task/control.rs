@@ -6,8 +6,8 @@ use crate::session::Sessions;
 use crate::tools::tool_result;
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
-use super::store::InterruptOutcome;
 use super::Subagents;
+use super::store::InterruptOutcome;
 
 pub(super) fn send_spec() -> ToolSpec {
     ToolSpec {
@@ -92,7 +92,7 @@ pub(super) async fn run_interrupt(sub: &Subagents, call: ToolCall) -> ToolResult
             return tool_result(
                 call,
                 format!("Error: invalid interrupt_agent arguments: {e}"),
-            )
+            );
         }
     };
     tool_result(call, sub.interrupt_agent(&input.agent_id))
@@ -206,14 +206,14 @@ fn send_ack(id: &str, urgent: bool, was_running: bool) -> String {
         (true, true) => format!(
             "urgent message delivered to running subagent {id}; it will steer on the current turn"
         ),
-        (true, false) => format!(
-            "urgent message delivered to idle subagent {id}; the next turn is starting now"
-        ),
+        (true, false) => {
+            format!("urgent message delivered to idle subagent {id}; the next turn is starting now")
+        }
         (false, true) => format!(
             "queued message accepted for running subagent {id}; it will run after the current turn ends"
         ),
-        (false, false) => format!(
-            "queued message delivered to idle subagent {id}; the next turn is starting now"
-        ),
+        (false, false) => {
+            format!("queued message delivered to idle subagent {id}; the next turn is starting now")
+        }
     }
 }

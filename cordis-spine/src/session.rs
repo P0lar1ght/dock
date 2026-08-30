@@ -3,13 +3,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
-use cordis::{plugin, Context, Inject, Plugin};
+use cordis::{Context, Inject, Plugin, plugin};
 
-use crate::names::{SESSIONS, SESSION_EVENT};
+use crate::names::{SESSION_EVENT, SESSIONS};
 use crate::types::LogEvent;
 use crate::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub prompt: u64,
     pub completion: u64,
@@ -145,6 +145,11 @@ impl Sessions {
         self.events_rev.load(Ordering::Relaxed)
     }
 
+    /// Cheap occupancy cache key: log generation + last token usage.
+    pub fn occupancy_stamp(&self) -> (u64, TokenUsage) {
+        (self.events_rev(), self.usage())
+    }
+
     fn bump_events_rev(&self) {
         self.events_rev.fetch_add(1, Ordering::Relaxed);
     }
@@ -244,6 +249,15 @@ impl Sessions {
 
     pub fn user_images(&self) -> Vec<Vec<crate::types::UserImage>> {
         self.user_images.lock().unwrap().clone()
+    }
+
+    pub fn user_image_count(&self) -> u64 {
+        self.user_images
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|row| row.len() as u64)
+            .sum()
     }
 
     pub fn events(&self) -> Vec<LogEvent> {
@@ -784,6 +798,7 @@ mod tests {
         sessions.append(LogEvent::User("a".into()));
         let r1 = sessions.events_rev();
         assert!(r1 > 0);
+        assert_eq!(sessions.occupancy_stamp().0, r1);
         sessions.append(LogEvent::User("b".into()));
         assert!(sessions.events_rev() > r1);
         sessions.clear();

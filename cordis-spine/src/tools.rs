@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Context, Disposable, Inject, Plugin};
+use cordis::{Context, Disposable, Inject, Plugin, plugin};
 
 use crate::acp;
-use crate::agent_presets::{blocked_tool_message, AgentPresets};
+use crate::agent_presets::{AgentPresets, blocked_tool_message};
 use crate::names::{AGENT_PRESETS, JOBS, PERMISSIONS, PLAN_MODE, TOOLS, TOOLS_EXECUTE, TURN};
 use crate::permissions::Permissions;
 use crate::plan_mode::PlanMode;

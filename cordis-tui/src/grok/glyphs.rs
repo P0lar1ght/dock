@@ -21,6 +21,11 @@ pub fn diamond_hollow() -> &'static str {
     "\u{25C7}"
 }
 
+/// `"◈"` — context occupancy info-row marker. Always 1 column.
+pub fn diamond_dotted() -> &'static str {
+    "\u{25C8}"
+}
+
 /// `"┃"` — permission overlay accent. Always 1 column.
 pub fn accent_bar() -> &'static str {
     "\u{2503}"
