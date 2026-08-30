@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::watch;
 
+use crate::dispose::EffectMeta;
 use crate::ids::{Epoch, FiberId, FiberState};
 use crate::logger::Logger;
-use crate::dispose::EffectMeta;
 use crate::scope::{InterceptScope, IsolateScope};
 
 use world::{DisposableList, FiberData, World};
@@ -122,7 +122,11 @@ impl Runtime {
             .collect()
     }
 
-    pub(crate) fn isolate_key(&self, ctx: &crate::Context, name: &str) -> Option<crate::IsolateKey> {
+    pub(crate) fn isolate_key(
+        &self,
+        ctx: &crate::Context,
+        name: &str,
+    ) -> Option<crate::IsolateKey> {
         self.lock().resolve_key(&ctx.isolate, name)
     }
 

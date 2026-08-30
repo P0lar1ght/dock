@@ -50,11 +50,11 @@ mod pure;
 mod raster;
 mod subprocess;
 
-pub use engine::{MermaidEngine, MermaidError, RenderLimits, render_checked};
+pub use engine::{render_checked, MermaidEngine, MermaidError, RenderLimits};
 pub use mmdc::{detect_mmdc, MmdcEngine, DEFAULT_MMDC_TIMEOUT};
 pub use pure::PureRustEngine;
-pub use raster::{MAX_OUTPUT_MEGAPIXELS, rasterize};
-pub use subprocess::{SubprocessError, detach_std_command, run_with_timeout};
+pub use raster::{rasterize, MAX_OUTPUT_MEGAPIXELS};
+pub use subprocess::{detach_std_command, run_with_timeout, SubprocessError};
 
 use std::sync::Arc;
 

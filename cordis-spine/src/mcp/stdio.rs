@@ -8,15 +8,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
 use tokio::sync::{oneshot, watch};
 
 use crate::config::{McpServer, McpTransport};
 use crate::mcp::protocol::{
-    self, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY, client_capabilities, client_info,
-    discover_versions, pick_version, raw_tool_name, with_meta,
+    self, client_capabilities, client_info, discover_versions, pick_version, raw_tool_name,
+    with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
 use crate::tools::tool_result;
 use crate::types::ToolCall;

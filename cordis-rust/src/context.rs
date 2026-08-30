@@ -2,11 +2,11 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::dispose::Disposable;
 use crate::error::{AggregateError, Error, Result};
 use crate::events::{EventArgs, EventOptions, Payload, SyncHandler};
 use crate::ids::{next_isolate, FiberId, IsolateKey};
 use crate::logger::Logger;
-use crate::dispose::Disposable;
 use crate::plugin::{Config, Inject, Plugin};
 use crate::runtime::{ListenerView, Runtime};
 use crate::scope::{InterceptScope, IsolateScope};
@@ -86,7 +86,9 @@ impl Context {
 
     /// Read intercept config for `name` on this context (plugin `Inject::require_with`).
     pub fn intercept_get<T: Send + Sync + 'static>(&self, name: &str) -> Option<Arc<T>> {
-        self.intercept.get(name).and_then(|v| v.downcast::<T>().ok())
+        self.intercept
+            .get(name)
+            .and_then(|v| v.downcast::<T>().ok())
     }
 
     /// Mount a plugin. The returned fiber settles with [`Fiber::wait`].

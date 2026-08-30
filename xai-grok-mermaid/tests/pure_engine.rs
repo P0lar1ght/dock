@@ -4,7 +4,7 @@
 //! exercise the real, always-compiled dagre-based engine end to end.
 
 use xai_grok_mermaid::{
-    MermaidError, MermaidTheme, RenderLimits, RenderParams, default_engine, render_checked,
+    default_engine, render_checked, MermaidError, MermaidTheme, RenderLimits, RenderParams,
 };
 
 #[test]

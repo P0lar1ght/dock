@@ -294,7 +294,8 @@ fn host_call<T>(
     }
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    ctx.lock().unwrap()
+    ctx.lock()
+        .unwrap()
         .host_tx
         .send(build(reply_tx))
         .map_err(|_| terminated(ControlToken::Fatal("workflow host channel closed".into())))?;
@@ -384,7 +385,8 @@ fn reserve_agent_calls(ctx: &Arc<Mutex<Ctx>>, count: usize) -> ScriptResult<()> 
     let count =
         u64::try_from(count).map_err(|_| runtime_error("workflow agent-call count overflowed"))?;
     let (reply_tx, reply_rx) = oneshot::channel();
-    ctx.lock().unwrap()
+    ctx.lock()
+        .unwrap()
         .host_tx
         .send(WorkflowHostRequest::ReserveAgentCalls {
             count,
@@ -420,7 +422,8 @@ fn release_agent_calls(ctx: &Arc<Mutex<Ctx>>, count: usize) {
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     if ctx
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .host_tx
         .send(WorkflowHostRequest::ReleaseAgentCalls {
             count,
@@ -565,7 +568,8 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Arc<Mutex<Ctx>>) {
                     Ok(Some(value)) => pending.push(PendingAgent::Replayed(value)),
                     Ok(None) => {
                         let (reply_tx, reply_rx) = oneshot::channel();
-                        if c.lock().unwrap()
+                        if c.lock()
+                            .unwrap()
                             .host_tx
                             .send(WorkflowHostRequest::SpawnAgent {
                                 opts,
@@ -662,7 +666,8 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Arc<Mutex<Ctx>>) {
                         continue;
                     };
                     if let Err(error) =
-                        c.lock().unwrap()
+                        c.lock()
+                            .unwrap()
                             .record(*seq, "spawn_agent", hash.clone(), value.clone())
                     {
                         terminal_error.get_or_insert(error);
@@ -766,7 +771,8 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Arc<Mutex<Ctx>>) {
             match replayed {
                 Ok(Some(_)) => Ok(()),
                 Ok(None) => {
-                    c.lock().unwrap()
+                    c.lock()
+                        .unwrap()
                         .record(seq, "await_user", hash, serde_json::Value::Null)?;
                     Err(terminated(ControlToken::Pause(parsed, message.to_string())))
                 }

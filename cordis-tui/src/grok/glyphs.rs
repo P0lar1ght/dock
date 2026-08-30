@@ -68,3 +68,12 @@ pub fn ballot_x() -> &'static str {
 pub fn check_mark() -> &'static str {
     "\u{2713}"
 }
+
+/// Braille spinner frames for the turn-status row.
+/// Copied from grok-build/.../xai-grok-pager-render/src/glyphs.rs.
+pub fn braille_spinner_frames() -> &'static [&'static str] {
+    &[
+        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+        "\u{2827}",
+    ]
+}

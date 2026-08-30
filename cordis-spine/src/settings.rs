@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use cordis::{Inject, Plugin, plugin};
+use cordis::{plugin, Inject, Plugin};
 
 use crate::config::{self, ModelChoice};
 use crate::names::SETTINGS;
@@ -22,6 +22,8 @@ pub enum MermaidEngineKind {
 pub struct AppSettings {
     model: Mutex<String>,
     effort: Mutex<String>,
+    /// When false, requests send `reasoning.exclude` / effort none (no think card).
+    thinking: Mutex<bool>,
     timestamps: Mutex<bool>,
     permission_mode: Mutex<PermissionMode>,
     mermaid_engine: Mutex<MermaidEngineKind>,
@@ -32,6 +34,7 @@ impl AppSettings {
         Self {
             model: Mutex::new(model.into()),
             effort: Mutex::new("medium".into()),
+            thinking: Mutex::new(true),
             timestamps: Mutex::new(true),
             permission_mode: Mutex::new(PermissionMode::Ask),
             mermaid_engine: Mutex::new(MermaidEngineKind::Pure),
@@ -52,6 +55,20 @@ impl AppSettings {
 
     pub fn set_effort(&self, effort: impl Into<String>) {
         *self.effort.lock().unwrap() = effort.into();
+    }
+
+    pub fn thinking(&self) -> bool {
+        *self.thinking.lock().unwrap()
+    }
+
+    pub fn set_thinking(&self, on: bool) {
+        *self.thinking.lock().unwrap() = on;
+    }
+
+    pub fn toggle_thinking(&self) -> bool {
+        let mut on = self.thinking.lock().unwrap();
+        *on = !*on;
+        *on
     }
 
     pub fn timestamps(&self) -> bool {
@@ -123,6 +140,14 @@ mod tests {
         assert!(settings.timestamps());
         assert!(!settings.toggle_timestamps());
         assert!(settings.toggle_timestamps());
+    }
+
+    #[test]
+    fn thinking_defaults_on_and_toggles() {
+        let settings = AppSettings::new("x");
+        assert!(settings.thinking());
+        assert!(!settings.toggle_thinking());
+        assert!(settings.toggle_thinking());
     }
 
     #[test]

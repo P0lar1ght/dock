@@ -180,11 +180,9 @@ mod tests {
     #[test]
     fn summarizer_prep_drops_tools_and_flattens_calls() {
         let prepared = prepare_conversation_for_summarization(&sample_history());
-        assert!(
-            !prepared
-                .iter()
-                .any(|e| matches!(e, LogEvent::ToolExecute { .. }))
-        );
+        assert!(!prepared
+            .iter()
+            .any(|e| matches!(e, LogEvent::ToolExecute { .. })));
         assert!(prepared.iter().any(|e| matches!(
             e,
             LogEvent::LlmStream(o) if o.tool_calls.is_empty() && o.text.contains("[Called tools: read_file]")
@@ -230,11 +228,9 @@ mod tests {
             e,
             LogEvent::SystemReminder(t) if t.contains("This session is being continued")
         )));
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, LogEvent::LlmStream(o) if o.text == VISIBLE_NOTICE))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, LogEvent::LlmStream(o) if o.text == VISIBLE_NOTICE)));
         assert!(!events.iter().any(|e| matches!(e, LogEvent::PreStep)));
     }
 

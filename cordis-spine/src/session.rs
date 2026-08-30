@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::names::{SESSION_EVENT, SESSIONS};
+use crate::names::{SESSIONS, SESSION_EVENT};
 use crate::types::LogEvent;
 use crate::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
 

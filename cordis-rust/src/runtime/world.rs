@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
+use crate::dispose::Disposable;
 use crate::events::SyncHandler;
 use crate::ids::{next_isolate, next_slot, Epoch, FiberId, FiberState, IsolateKey, PluginId};
-use crate::dispose::Disposable;
 use crate::plugin::{ApplyFn, Config};
 use crate::scope::{InterceptScope, IsolateScope};
 

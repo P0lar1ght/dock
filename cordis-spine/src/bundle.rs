@@ -5,15 +5,16 @@ use crate::agents::agents;
 use crate::ask_user::tool_ask_user;
 use crate::compact::compact;
 use crate::cron::cron;
-use crate::dynamic_runner::dynamic_runner;
+use crate::dynamic_runner::{dynamic_runner, DynamicRunner};
 use crate::goal::tool_goal;
 use crate::jobs::{jobs, tool_jobs};
-use crate::llm::{LlmConfig, LlmMode, llm};
+use crate::llm::{llm, LlmConfig, LlmMode};
 use crate::loop_plugin::agent_loop;
 use crate::lsp::tool_lsp;
 use crate::mcp::mcp_client;
 use crate::memory::tool_memory;
 use crate::monitor::tool_monitor;
+use crate::names::DYNAMIC_CORDIS_RUNNER;
 use crate::permissions::permissions;
 use crate::plan_mode::plan_mode;
 use crate::prompt::system_prompt;
@@ -114,6 +115,11 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_workflow(), ())?.wait().await?;
     ctx.plugin(mcp_client(), ())?.wait().await?;
     ctx.plugin(dynamic_runner(), ())?.wait().await?;
+    if let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) {
+        tokio::spawn(async move {
+            runner.boot_disk().await;
+        });
+    }
     ctx.plugin(tool_cordis(), ())?.wait().await?;
     ctx.plugin(llm(), LlmConfig::from_env())?.wait().await?;
     ctx.plugin(compact(), ())?.wait().await?;

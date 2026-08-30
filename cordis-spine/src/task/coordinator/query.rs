@@ -5,12 +5,13 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use super::super::coordinator_state::{
-    BlockingWaiter, CompletedChild, ListRequest, OUTPUT_UNAVAILABLE_PLACEHOLDER, ProgressFuture,
-    ProgressTarget, RunningSeed, completed_inspection, completed_snapshot, pending_inspection,
-    pending_snapshot, queued_inspection, queued_snapshot, running_inspection, running_seed,
+    completed_inspection, completed_snapshot, pending_inspection, pending_snapshot,
+    queued_inspection, queued_snapshot, running_inspection, running_seed, BlockingWaiter,
+    CompletedChild, ListRequest, ProgressFuture, ProgressTarget, RunningSeed,
+    OUTPUT_UNAVAILABLE_PLACEHOLDER,
 };
 use super::super::types::{SubagentInspection, SubagentSnapshot};
-use super::{ChildControl, ChildRunner, SubagentCoordinator, SubagentProgress, belongs_to_session};
+use super::{belongs_to_session, ChildControl, ChildRunner, SubagentCoordinator, SubagentProgress};
 
 const DEFAULT_QUERY_BLOCK_TIMEOUT_MS: u64 = 30_000;
 

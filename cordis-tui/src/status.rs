@@ -4,7 +4,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use cordis::Context;
-use cordis_spine::{ContextSnapshot, LogEvent, SESSIONS, Sessions, TokenUsage, snapshot_context};
+use cordis_spine::{
+    snapshot_context, ContextSnapshot, LlmOutput, LogEvent, Sessions, TokenUsage, SESSIONS,
+};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use unicode_width::UnicodeWidthStr;
@@ -188,6 +190,9 @@ pub fn format_duration_short(d: std::time::Duration) -> String {
     }
 }
 
+/// Show each braille spinner frame for this many shimmer ticks (~7.5fps at 30Hz).
+const SPINNER_DIVISOR: u64 = 4;
+
 /// Only while a turn is running or a permission prompt is open.
 /// Idle "就绪" is not a Grok chrome row — it sat on top of the user block.
 pub fn turn_status_height(ctx: &Context, waiting_permission: bool) -> u16 {
@@ -200,77 +205,160 @@ pub fn turn_status_height(ctx: &Context, waiting_permission: bool) -> u16 {
     )
 }
 
+/// Grok turn-status row: `⠧ Waiting…` … `↓15.7k [stop]`.
+/// Elapsed generation time lives on the prompt chrome bottom border.
 pub fn render_turn_status(buf: &mut Buffer, area: Rect, ctx: &Context, waiting_permission: bool) {
     if area.height == 0 || area.width == 0 {
         return;
     }
     let theme = Theme::current();
-    let style = Style::default().fg(theme.gray).bg(theme.bg_base);
+    let base = Style::default().fg(theme.gray).bg(theme.bg_base);
     for x in area.x..area.x + area.width {
         if let Some(cell) = buf.cell_mut((x, area.y)) {
             cell.reset();
-            cell.set_style(style);
+            cell.set_style(base);
         }
     }
     let working = ctx
         .get::<SessionRef>(SESSION_PORT)
         .is_some_and(|h| h.working());
+    if !waiting_permission && !working {
+        return;
+    }
     let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
         return;
     };
-    let usage = sessions.usage();
-    let mut left = if waiting_permission {
-        "等待授权".to_string()
-    } else if working {
-        let timer = sessions
-            .turn_elapsed()
-            .map(format_duration_short)
-            .unwrap_or_else(|| "0.0s".into());
-        let queued = ctx
-            .get::<SessionRef>(SESSION_PORT)
-            .map(|s| s.queued_prompts().len())
-            .unwrap_or(0);
-        let can_send = ctx
-            .get::<crate::prompt::PromptWidget>(crate::names::TUI_PROMPT)
-            .is_some_and(|p| p.can_send());
-        let mut line = format!("生成中  {timer}");
-        if queued > 0 && !can_send {
-            line.push_str(&format!("  ·  {queued} queued, Enter to send now"));
-        } else if queued > 0 {
-            line.push_str(&format!("  ·  {queued} queued"));
-        }
-        line
+    let (label, label_style) =
+        sessions.with_log(|events, _| turn_activity_label(events, waiting_permission, &theme));
+    let queued = ctx
+        .get::<SessionRef>(SESSION_PORT)
+        .map(|s| s.queued_prompts().len())
+        .unwrap_or(0);
+    let can_send = ctx
+        .get::<crate::prompt::PromptWidget>(crate::names::TUI_PROMPT)
+        .is_some_and(|p| p.can_send());
+    let queue_hint = if queued == 0 {
+        String::new()
+    } else if !can_send {
+        format!(" · {queued} queued, Enter to send now")
     } else {
-        return;
+        format!(" · {queued} queued")
     };
-    let up = crate::grok::glyphs::token_up();
+
+    let frames = crate::grok::glyphs::braille_spinner_frames();
+    let tick = crate::grok::color::shimmer_tick() / SPINNER_DIVISOR;
+    let spinner = frames[(tick as usize) % frames.len()];
+    let spinner_style = if waiting_permission {
+        Style::default().fg(theme.warning).bg(theme.bg_base)
+    } else {
+        label_style
+    };
+
+    let usage = sessions.usage();
     let down = crate::grok::glyphs::token_down();
-    let right = format!(
-        "上传 {}{}  下载 {}{}",
-        up,
-        format_tokens(usage.prompt),
-        down,
-        format_tokens(usage.completion)
-    );
-    let left_w = left.width() as u16;
-    let right_w = right.width() as u16;
-    if left_w + right_w + 2 > area.width {
-        left = if waiting_permission {
-            "等待授权".into()
-        } else {
-            "生成中".into()
-        };
+    let tokens = format!("{down}{}", format_tokens(usage.completion));
+    let stop = "[stop]";
+    let right_w = tokens.width() + 1 + stop.width();
+    let budget = area.width as usize;
+    let gap = 2usize;
+    let right_budget = if right_w + gap < budget {
+        budget - right_w - gap
+    } else {
+        budget
+    };
+
+    let spin = format!("{spinner} ");
+    let mut label = label;
+    let mut hint = queue_hint;
+    let mut left_w = spin.width() + label.width() + hint.width();
+    if left_w > right_budget {
+        hint.clear();
+        left_w = spin.width() + label.width();
     }
-    buf.set_line(
-        area.x,
-        area.y,
-        &Line::from(Span::styled(left, style)),
-        area.width,
-    );
-    if right_w < area.width {
-        let x = area.x + area.width.saturating_sub(right_w);
-        buf.set_line(x, area.y, &Line::from(Span::styled(right, style)), right_w);
+    if left_w > right_budget {
+        label = short_activity_label(waiting_permission);
     }
+    let mut left_spans = vec![
+        Span::styled(spin, spinner_style),
+        Span::styled(label, label_style),
+    ];
+    if !hint.is_empty() {
+        left_spans.push(Span::styled(hint, base));
+    }
+
+    buf.set_line(area.x, area.y, &Line::from(left_spans), area.width);
+
+    if right_w < budget {
+        let x = area.x + area.width.saturating_sub(right_w as u16);
+        buf.set_line(
+            x,
+            area.y,
+            &Line::from(vec![
+                Span::styled(tokens, base),
+                Span::styled(" ", base),
+                Span::styled(
+                    stop,
+                    Style::default().fg(theme.accent_error).bg(theme.bg_base),
+                ),
+            ]),
+            right_w as u16,
+        );
+    }
+}
+
+fn short_activity_label(waiting_permission: bool) -> String {
+    if waiting_permission {
+        "等待授权".into()
+    } else {
+        "生成中…".into()
+    }
+}
+
+fn turn_activity_label(
+    events: &[LogEvent],
+    waiting_permission: bool,
+    theme: &Theme,
+) -> (String, Style) {
+    let secondary = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
+    let tool = Style::default().fg(theme.accent_success).bg(theme.bg_base);
+    let warn = Style::default().fg(theme.warning).bg(theme.bg_base);
+
+    if waiting_permission {
+        return ("等待授权".into(), warn);
+    }
+
+    match events.last() {
+        Some(LogEvent::LlmStream(out)) => {
+            if let Some(name) = pending_tool_name(events, out) {
+                return (format!("运行 {name}…"), tool);
+            }
+            if !out.text.trim().is_empty() {
+                return ("生成中…".into(), secondary);
+            }
+            if !out.reasoning.trim().is_empty() {
+                return ("思考中…".into(), secondary);
+            }
+            ("等待响应…".into(), secondary)
+        }
+        Some(LogEvent::ToolExecute { name, .. }) => {
+            // Between tool result and the next sample.
+            let _ = name;
+            ("等待响应…".into(), secondary)
+        }
+        _ => ("等待响应…".into(), secondary),
+    }
+}
+
+fn pending_tool_name(events: &[LogEvent], out: &LlmOutput) -> Option<String> {
+    for call in out.tool_calls.iter().rev() {
+        let done = events
+            .iter()
+            .any(|e| matches!(e, LogEvent::ToolExecute { id, .. } if id == &call.id));
+        if !done {
+            return Some(call.name.clone());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -330,5 +418,53 @@ mod tests {
             categories: Vec::new(),
         };
         assert_eq!(occupancy_label(&snap), "上下文 20.0k/204k");
+    }
+
+    #[test]
+    fn activity_waiting_before_stream() {
+        let theme = Theme::current();
+        let (label, _) = turn_activity_label(&[LogEvent::User("hi".into())], false, &theme);
+        assert_eq!(label, "等待响应…");
+    }
+
+    #[test]
+    fn activity_thinking_and_responding() {
+        let theme = Theme::current();
+        let (think, _) = turn_activity_label(
+            &[LogEvent::LlmStream(LlmOutput {
+                reasoning: "hmm".into(),
+                ..LlmOutput::default()
+            })],
+            false,
+            &theme,
+        );
+        assert_eq!(think, "思考中…");
+        let (gen, _) = turn_activity_label(
+            &[LogEvent::LlmStream(LlmOutput {
+                text: "hello".into(),
+                ..LlmOutput::default()
+            })],
+            false,
+            &theme,
+        );
+        assert_eq!(gen, "生成中…");
+    }
+
+    #[test]
+    fn activity_pending_tool() {
+        let theme = Theme::current();
+        let (label, _) = turn_activity_label(
+            &[LogEvent::LlmStream(LlmOutput {
+                tool_calls: vec![cordis_spine::ToolCall {
+                    id: "1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }],
+                ..LlmOutput::default()
+            })],
+            false,
+            &theme,
+        );
+        assert_eq!(label, "运行 bash…");
     }
 }

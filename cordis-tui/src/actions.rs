@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
 use cordis_spine::{
-    ExtraSlashKind, GOAL_RESERVED_SUBCOMMANDS, SlashEntry, goal_composer_fill, loop_composer_fill,
-    loop_usage_message, tool_slash_arguments,
+    goal_composer_fill, loop_composer_fill, loop_usage_message, tool_slash_arguments,
+    ExtraSlashKind, SlashEntry, GOAL_RESERVED_SUBCOMMANDS,
 };
 
 /// Synchronous, side-effect-free user intent.
@@ -122,6 +122,7 @@ pub enum Effect {
     SetModel(String),
     SetEffort(String),
     ToggleTimestamps,
+    ToggleThinking,
     Export(Option<PathBuf>),
     ChangeDir(PathBuf),
     SettingsModal,
@@ -158,6 +159,7 @@ pub enum Effect {
     ShowTasks,
     ToggleWorkflows,
     ShowMcps,
+    ShowCordis,
     ShowPresets {
         focus: Option<String>,
     },
@@ -262,6 +264,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         }),
         SlashCmd::Cd => Effect::ChangeDir(PathBuf::from(if args.is_empty() { "." } else { args })),
         SlashCmd::Timestamps => Effect::ToggleTimestamps,
+        SlashCmd::Thinking => Effect::ToggleThinking,
         SlashCmd::Effort => {
             if args.is_empty() {
                 Effect::ArgPicker {
@@ -293,6 +296,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
             }
         }
         SlashCmd::Mcps => Effect::ShowMcps,
+        SlashCmd::Cordis => Effect::ShowCordis,
         SlashCmd::Preset => {
             let focus = if args.is_empty() {
                 None
@@ -361,8 +365,10 @@ fn apply_settings_arg(args: &str) -> Effect {
     let rest = parts.next().unwrap_or("").trim();
     match key {
         "timestamps" => Effect::ToggleTimestamps,
+        "think" | "thinking" => Effect::ToggleThinking,
         "theme" => effect_for_slash(SlashCmd::Theme, rest),
         "model" => effect_for_slash(SlashCmd::Model, rest),
+        "effort" => effect_for_slash(SlashCmd::Effort, rest),
         _ => Effect::ArgPicker {
             kind: ArgKind::Settings,
             cmd: SlashCmd::Settings,

@@ -4,15 +4,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use cordis::{Context, Inject, Plugin, plugin};
-use rhai::{AST, Array, Dynamic, Engine, FnPtr, ImmutableString, Map};
+use cordis::{plugin, Context, Inject, Plugin};
+use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
 use serde_json::Value;
 
-use crate::names::{RHAI_BAGS, SLASH, TOOLS, TUI_SLOTS};
-use crate::slash::{ExtraSlashKind, Slash, SlashEntry, slash_name_reserved};
-use crate::tools::{ToolBody, Tools, own_registered, tool_result};
+use crate::names::{RHAI_BAGS, SESSION_EVENT, SLASH, TOOLS, TUI_SLOTS};
+use crate::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::tui_slots::{SlotHandler, SlotKeyResult, TuiSlots};
-use crate::types::{ToolCall, ToolSpec};
+use crate::types::{LogEvent, ToolCall, ToolSpec};
 
 const MAX_SOURCE: usize = 128 * 1024;
 const DEFINE_MAX_OPS: u64 = 100_000;
@@ -60,6 +60,11 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         "host.call_tool",
         "Execute a live model tool (permissions still apply).",
         &["host.call_tool(name: String, args: Map | String) -> String"],
+    ),
+    (
+        "host.on",
+        "Observe a Host event. Only \"session/event\" is allowed (not a waterfall). Payload is a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…. Handlers run after emit returns; do not assume they can block the turn. Stop unregisters the listener.",
+        &["host.on(\"session/event\", |line| { ... })"],
     ),
     (
         "host.log",
@@ -238,6 +243,7 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("register_slot", Host::register_slot);
     engine.register_fn("open_slot", Host::open_slot);
     engine.register_fn("call_tool", Host::call_tool);
+    engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
 }
 
@@ -448,6 +454,57 @@ impl Host {
         Ok(text.into())
     }
 
+    fn on(
+        &mut self,
+        event: ImmutableString,
+        handler: FnPtr,
+    ) -> Result<(), Box<rhai::EvalAltResult>> {
+        let name = event.to_string();
+        if name != SESSION_EVENT {
+            return err(format!(
+                "host.on only supports \"{SESSION_EVENT}\" (got {name:?}); waterfall intercept is not allowed"
+            ));
+        }
+        let engine = self.inner.engine.clone();
+        let ast = self.inner.ast.clone();
+        let plugin_id = self.inner.plugin_id.clone();
+        let d = self
+            .inner
+            .ctx
+            .on(SESSION_EVENT, move |ev: &LogEvent| {
+                let Some(line) = event_line(ev) else {
+                    return;
+                };
+                let engine = engine.clone();
+                let ast = ast.clone();
+                let handler = handler.clone();
+                let plugin_id = plugin_id.clone();
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => {
+                        handle.spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                call_fnptr(&engine, &ast, &handler, Dynamic::from(line))
+                            })
+                            .await;
+                            if let Ok(Err(e)) = result {
+                                eprintln!("[cordis:{plugin_id}] host.on: {e}");
+                            } else if let Err(e) = result {
+                                eprintln!("[cordis:{plugin_id}] host.on: {e}");
+                            }
+                        });
+                    }
+                    Err(_) => {
+                        if let Err(e) = call_fnptr(&engine, &ast, &handler, Dynamic::from(line)) {
+                            eprintln!("[cordis:{plugin_id}] host.on: {e}");
+                        }
+                    }
+                }
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)?;
+        Ok(())
+    }
+
     fn log(&mut self, message: ImmutableString) {
         eprintln!("[cordis:{}] {message}", self.inner.plugin_id);
     }
@@ -510,6 +567,49 @@ impl SlotHandler for RhaiSlot {
             _ => SlotKeyResult::Keep,
         }
     }
+}
+
+fn event_line(ev: &LogEvent) -> Option<String> {
+    let line = match ev {
+        LogEvent::User(text) => format!("user\t{}", preview(text, 160)),
+        LogEvent::LlmStream(out) => {
+            if out.text.trim().is_empty() && !out.tool_calls.is_empty() {
+                let names = out
+                    .tool_calls
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("assistant\ttools:{names}")
+            } else {
+                format!("assistant\t{}", preview(&out.text, 160))
+            }
+        }
+        LogEvent::ToolExecute { name, .. } => format!("tool\t{name}"),
+        LogEvent::SystemReminder(text) => format!("reminder\t{}", preview(text, 80)),
+        LogEvent::PreStep | LogEvent::Prompt(_) => return None,
+    };
+    Some(line)
+}
+
+fn preview(text: &str, max: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let flat = flat.trim();
+    if flat.chars().count() <= max {
+        return flat.to_string();
+    }
+    let mut out = String::new();
+    for (i, c) in flat.chars().enumerate() {
+        if i >= max {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
 }
 
 fn call_fnptr(engine: &Engine, ast: &AST, fnptr: &FnPtr, arg: Dynamic) -> Result<String, String> {

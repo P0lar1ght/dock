@@ -4,11 +4,11 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 use tokio::sync::oneshot;
 
 use crate::acp::PermissionOptionKind;
-use crate::names::{PERMISSION_EVENT, PERMISSIONS, SETTINGS};
+use crate::names::{PERMISSIONS, PERMISSION_EVENT, SETTINGS};
 use crate::settings::{AppSettings, PermissionMode};
 
 #[derive(Clone, Debug)]

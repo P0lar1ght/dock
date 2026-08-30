@@ -7,7 +7,7 @@
 use cordis::Context;
 
 use crate::compact::{
-    DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, VISIBLE_NOTICE, estimate_context_tokens,
+    estimate_context_tokens, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, VISIBLE_NOTICE,
 };
 use crate::mcp::Mcp;
 use crate::names::{MCP, SESSIONS, SETTINGS, SYSTEM_PROMPT, TOOLS};

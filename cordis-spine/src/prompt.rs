@@ -1,9 +1,9 @@
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::agent_presets::AgentPresets;
-use crate::goal::{Goal, goal_instruction, goal_offer_addon};
+use crate::goal::{goal_instruction, goal_offer_addon, Goal};
 use crate::names::{AGENT_PRESETS, GOAL, PLAN_MODE, PROMPT_ASSEMBLE, SYSTEM_PROMPT};
-use crate::plan_mode::{PlanMode, plan_system_addon};
+use crate::plan_mode::{plan_system_addon, PlanMode};
 
 /// Abstract `systemPrompt`. Fake assemble returns a fixed string.
 /// Grok caches this on `Agent`; DSH assembles per step via the registry.

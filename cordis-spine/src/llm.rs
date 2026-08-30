@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::http::HttpSampler;
 use crate::names::{LLM, LLM_STREAM, SESSIONS};

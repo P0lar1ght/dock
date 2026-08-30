@@ -23,6 +23,7 @@ pub fn needs_permission(tool: &str) -> bool {
             | "kill_task"
             | "monitor"
             | "cordis_run"
+            | "cordis_promote"
     )
 }
 
@@ -38,6 +39,7 @@ pub fn blocked_in_plan(tool: &str) -> bool {
             | "kill_task"
             | "monitor"
             | "cordis_run"
+            | "cordis_promote"
     )
 }
 
@@ -58,8 +60,10 @@ mod tests {
         assert!(!needs_permission("read_file"));
         assert!(!needs_permission("list_dir"));
         assert!(needs_permission("cordis_run"));
+        assert!(needs_permission("cordis_promote"));
         assert!(!needs_permission("cordis_inspect"));
         assert!(blocked_in_plan("cordis_run"));
+        assert!(blocked_in_plan("cordis_promote"));
         assert!(!blocked_in_plan("cordis_inspect"));
     }
 

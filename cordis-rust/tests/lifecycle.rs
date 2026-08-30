@@ -2,9 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cordis::{
-    plugin, plugin_async, Context, Disposable, FiberState, Inject, UpdateEvent,
-};
+use cordis::{plugin, plugin_async, Context, Disposable, FiberState, Inject, UpdateEvent};
 
 fn hits() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))
@@ -242,17 +240,13 @@ async fn intercept_config_is_visible_on_plugin_ctx() {
     let root = Context::new();
     let _svc = root.provide("llm", "model".to_string()).unwrap();
     let seen = Arc::new(Mutex::new(None));
-    let p = plugin(
-        "p",
-        Inject::new().require_with("llm", 7u32),
-        {
-            let seen = seen.clone();
-            move |ctx, _: &()| {
-                *seen.lock().unwrap() = ctx.intercept_get::<u32>("llm").as_deref().copied();
-                Ok(None)
-            }
-        },
-    );
+    let p = plugin("p", Inject::new().require_with("llm", 7u32), {
+        let seen = seen.clone();
+        move |ctx, _: &()| {
+            *seen.lock().unwrap() = ctx.intercept_get::<u32>("llm").as_deref().copied();
+            Ok(None)
+        }
+    });
     root.plugin(p, ()).unwrap().wait().await.unwrap();
     assert_eq!(*seen.lock().unwrap(), Some(7));
 }

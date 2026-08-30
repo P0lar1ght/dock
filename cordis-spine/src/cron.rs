@@ -2,11 +2,11 @@
 //! interval + prompt surface (`/loop` → `scheduler_create`) and fires due jobs
 //! to the session.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use cordis::{Inject, Plugin, plugin};
+use cordis::{plugin, Inject, Plugin};
 
 use crate::names::CRON;
 

@@ -4,12 +4,13 @@
 
 mod factories;
 mod lifecycle;
+mod persist;
 mod registry;
 mod rhai_host;
 
 use std::sync::{Arc, Mutex};
 
-use cordis::{Context, Disposable, Fiber, FiberState, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Disposable, Fiber, FiberState, Inject, Plugin};
 use tokio::sync::watch;
 
 use crate::names::{DYNAMIC_CORDIS_RUNNER, RHAI_BAGS, SLASH, TOOLS, TUI_SLOTS};
@@ -17,18 +18,19 @@ use crate::slash::{Slash, SlashEntry};
 use crate::tools::Tools;
 use crate::tui_slots::TuiSlots;
 
-use factories::{DYN_HOLD_GATE, list_factories, lookup_factory};
+use factories::{list_factories, lookup_factory, DYN_HOLD_GATE};
 use lifecycle::{host_status, missing_services, start_host_half};
 use registry::{
-    PluginRec, Registry, Run, StartJoin, fiber_label, package_from_factory, package_from_rhai,
-    wait_start,
+    fiber_label, package_from_factory, package_from_rhai, wait_start, PluginRec, Registry, Run,
+    StartJoin,
 };
 
 pub use factories::{
-    DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, DynEcho, DynNote, FactoryInfo, RHAI_FACTORY,
+    DynEcho, DynNote, FactoryInfo, DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
 };
-pub use registry::{Attempt, AttemptStatus, Package, RunMode};
-pub use rhai_host::{RhaiBag, RhaiBags, builtins_lines, preflight};
+pub use persist::{plugin_roots, PromoteReceipt};
+pub use registry::{Attempt, AttemptStatus, Package, PersistScope, PluginOrigin, RunMode};
+pub use rhai_host::{builtins_lines, preflight, RhaiBag, RhaiBags};
 
 #[derive(Clone, Debug)]
 pub struct DefineReceipt {
@@ -88,6 +90,7 @@ pub struct FiberRow {
 #[derive(Clone, Debug)]
 pub struct SnapshotRow {
     pub plugin_id: String,
+    pub origin: PluginOrigin,
     pub current_package_id: Option<String>,
     pub next_package_id: Option<String>,
     pub packages: Vec<Package>,
@@ -105,8 +108,8 @@ pub struct RunView {
     pub waiting_for: Vec<String>,
 }
 
-struct Inner {
-    registry: Registry,
+pub(crate) struct Inner {
+    pub(crate) registry: Registry,
     group: Option<Fiber>,
     /// When set, Lead waits here after recording in-flight and before start_fresh
     /// so tests can overlap a second `cordis_run` on the same triple.
@@ -117,7 +120,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct DynamicRunner {
     ctx: Context,
-    inner: Arc<Mutex<Inner>>,
+    pub(crate) inner: Arc<Mutex<Inner>>,
 }
 
 impl DynamicRunner {
@@ -140,6 +143,23 @@ impl DynamicRunner {
         &self,
         session_id: &str,
         plugin: PluginSel,
+        name: &str,
+        purpose: &str,
+        factory: &str,
+        contrib: Option<SlashEntry>,
+        source: Option<String>,
+    ) -> Result<DefineReceipt, String> {
+        let target = match plugin {
+            PluginSel::New { id_prefix } => DefineTarget::New { id_prefix },
+            PluginSel::Existing { plugin_id } => DefineTarget::Existing { plugin_id },
+        };
+        self.define_at(session_id, target, name, purpose, factory, contrib, source)
+    }
+
+    pub(crate) fn define_at(
+        &self,
+        session_id: &str,
+        target: DefineTarget,
         name: &str,
         purpose: &str,
         factory: &str,
@@ -181,8 +201,8 @@ impl DynamicRunner {
         }
 
         let mut inner = self.inner.lock().unwrap();
-        let plugin_id = match plugin {
-            PluginSel::New { id_prefix } => {
+        let plugin_id = match target {
+            DefineTarget::New { id_prefix } => {
                 let prefix = id_prefix.trim();
                 if !valid_prefix(prefix) {
                     return Err(
@@ -194,6 +214,7 @@ impl DynamicRunner {
                 inner.registry.add(PluginRec {
                     plugin_id: plugin_id.clone(),
                     session_id: session_id.into(),
+                    origin: PluginOrigin::Session,
                     packages: indexmap::IndexMap::new(),
                     current_package_id: None,
                     next_package_id: None,
@@ -202,8 +223,29 @@ impl DynamicRunner {
                 });
                 plugin_id
             }
-            PluginSel::Existing { plugin_id } => {
+            DefineTarget::Existing { plugin_id } => {
                 owned(&inner.registry, session_id, &plugin_id)?;
+                plugin_id
+            }
+            DefineTarget::Exact { plugin_id, origin } => {
+                if !persist::valid_disk_id(&plugin_id) {
+                    return Err(format!(
+                        "disk plugin id {plugin_id:?} must be 2–32 chars, start with a-z, then a-z0-9-"
+                    ));
+                }
+                if inner.registry.get(&plugin_id).is_some() {
+                    return Err(format!("plugin \"{plugin_id}\" is already defined"));
+                }
+                inner.registry.add(PluginRec {
+                    plugin_id: plugin_id.clone(),
+                    session_id: session_id.into(),
+                    origin,
+                    packages: indexmap::IndexMap::new(),
+                    current_package_id: None,
+                    next_package_id: None,
+                    run: None,
+                    latest: None,
+                });
                 plugin_id
             }
         };
@@ -447,7 +489,7 @@ impl DynamicRunner {
         inner
             .registry
             .all()
-            .filter(|rec| rec.session_id == session_id)
+            .filter(|rec| visible_to(rec, session_id))
             .map(|rec| snapshot_row(&self.ctx, rec))
             .collect()
     }
@@ -510,7 +552,7 @@ impl DynamicRunner {
                 });
             }
         }
-        for rec in inner.registry.all().filter(|r| r.session_id == session_id) {
+        for rec in inner.registry.all().filter(|r| visible_to(r, session_id)) {
             let Some(run) = &rec.run else { continue };
             let Some(fiber) = &run.fiber else { continue };
             let waiting = missing_services(&run.inject, |n| service_present(&self.ctx, n));
@@ -675,6 +717,20 @@ pub enum PluginSel {
     Existing { plugin_id: String },
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum DefineTarget {
+    New {
+        id_prefix: String,
+    },
+    Existing {
+        plugin_id: String,
+    },
+    Exact {
+        plugin_id: String,
+        origin: PluginOrigin,
+    },
+}
+
 #[derive(Clone)]
 struct Plan {
     factory: String,
@@ -684,13 +740,17 @@ struct Plan {
     provides: Vec<String>,
 }
 
+fn visible_to(rec: &PluginRec, session_id: &str) -> bool {
+    rec.session_id == session_id || rec.session_id == persist::PERSIST_SESSION
+}
+
 fn owned<'a>(
     registry: &'a Registry,
     session_id: &str,
     plugin_id: &str,
 ) -> Result<&'a PluginRec, String> {
     match registry.get(plugin_id) {
-        Some(rec) if rec.session_id == session_id => Ok(rec),
+        Some(rec) if visible_to(rec, session_id) => Ok(rec),
         _ => Err(missing_plugin_message(plugin_id)),
     }
 }
@@ -759,6 +819,7 @@ fn snapshot_row(ctx: &Context, rec: &PluginRec) -> SnapshotRow {
     });
     SnapshotRow {
         plugin_id: rec.plugin_id.clone(),
+        origin: rec.origin.clone(),
         current_package_id: rec.current_package_id.clone(),
         next_package_id: rec.next_package_id.clone(),
         packages: rec.packages.values().cloned().collect(),

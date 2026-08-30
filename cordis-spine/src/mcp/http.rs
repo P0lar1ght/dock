@@ -12,14 +12,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
-use serde_json::{Value, json};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use serde_json::{json, Value};
 use tokio::sync::{oneshot, watch};
 
 use crate::config::{McpServer, McpTransport};
 use crate::mcp::protocol::{
-    self, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY, client_capabilities, client_info,
-    encode_header_value, id_matches, pick_version, raw_tool_name, unsupported_versions, with_meta,
+    self, client_capabilities, client_info, encode_header_value, id_matches, pick_version,
+    raw_tool_name, unsupported_versions, with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
 use crate::tools::tool_result;
 use crate::types::ToolCall;

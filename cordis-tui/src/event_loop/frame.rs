@@ -2,14 +2,14 @@
 
 use cordis::Context;
 use cordis_spine::{
-    AGENT_PRESETS, ASK, AgentPresets, AppSettings, Ask, GOAL, Goal, PERMISSIONS, PLAN_MODE,
-    PermissionMode, Permissions, PlanMode, SESSIONS, SETTINGS, Sessions, TUI_SLOTS, TuiSlots,
+    AgentPresets, AppSettings, Ask, Goal, PermissionMode, Permissions, PlanMode, Sessions,
+    TuiSlots, AGENT_PRESETS, ASK, GOAL, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TUI_SLOTS,
 };
-use ratatui::Terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::Style;
 use ratatui::widgets::Block;
+use ratatui::Terminal;
 
 use crate::ask_view;
 use crate::error::{Error, Result};
@@ -24,7 +24,7 @@ use crate::names::{
     SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
 };
 use crate::overlay::{
-    self, HelpItem, InspectTarget, Overlay, filter_help_items, filter_sessions, filter_strings,
+    self, filter_help_items, filter_sessions, filter_strings, HelpItem, InspectTarget, Overlay,
 };
 use crate::permission_view;
 use crate::plan_approval_view;
@@ -33,7 +33,7 @@ use crate::queue_pane::{self, QueueHit};
 use crate::scrollback::Scrollback;
 use crate::session::SessionRef;
 use crate::settings_modal;
-use crate::slash::{SlashSnapshot, desired_item_rows, filter_args, render_dropdown};
+use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
 use crate::subagent_dock;
 use crate::text_overlay;
 use crate::theme::Theme;
@@ -81,9 +81,33 @@ pub(super) fn prompt_chrome_info(ctx: &Context) -> String {
     });
     let plan = ctx.get::<PlanMode>(PLAN_MODE).is_some_and(|p| p.active());
     let goal = ctx.get::<Goal>(GOAL).is_some_and(|g| g.present());
-    let mut parts = vec![model];
+    // Generation timer sits on the dock bottom border (Grok keeps phase
+    // status above the prompt; elapsed moves down here).
+    let timer = ctx.get::<Sessions>(SESSIONS).and_then(|s| {
+        let working = ctx
+            .get::<SessionRef>(SESSION_PORT)
+            .is_some_and(|h| h.working());
+        working
+            .then(|| s.turn_elapsed().map(status::format_duration_short))
+            .flatten()
+    });
+    let mut parts = Vec::new();
+    if let Some(timer) = timer {
+        parts.push(timer);
+    }
+    parts.push(model);
     if let Some(preset) = preset {
         parts.push(preset);
+    }
+    if let Some(settings) = settings.as_ref() {
+        if settings.thinking() {
+            let effort = settings.effort();
+            if effort.is_empty() || effort == "medium" {
+                parts.push("思考".into());
+            } else {
+                parts.push(format!("思考·{effort}"));
+            }
+        }
     }
     parts.push(perm.to_string());
     if plan {
@@ -226,19 +250,21 @@ pub(super) fn draw(
             };
             let chunks = Layout::vertical([
                 Constraint::Length(1),
-                Constraint::Length(turn_h),
                 Constraint::Min(1),
                 Constraint::Length(dock_h),
                 Constraint::Length(goal_h),
                 Constraint::Length(queue_h),
+                // Grok: turn status sits between scrollback chrome and the composer.
+                Constraint::Length(turn_h),
                 Constraint::Length(prompt_h),
                 Constraint::Length(1),
             ])
             .split(inner);
-            let scroll_area = chunks[2];
-            let dock_area = chunks[3];
-            let goal_area = chunks[4];
-            let queue_area = chunks[5];
+            let scroll_area = chunks[1];
+            let dock_area = chunks[2];
+            let goal_area = chunks[3];
+            let queue_area = chunks[4];
+            let turn_area = chunks[5];
             let prompt_area = chunks[6];
             let shortcuts_area = chunks[7];
             if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
@@ -261,7 +287,7 @@ pub(super) fn draw(
             }
             status::render_turn_status(
                 frame.buffer_mut(),
-                chunks[1],
+                turn_area,
                 ctx,
                 perm_open || ask_open || elicit_open || plan_open,
             );
@@ -709,7 +735,11 @@ pub(super) fn paint_overlay(
             let servers = mcp_status_list(ctx);
             let sel = {
                 let n = mcps::build_rows(&servers, query, tools_expanded, *section_collapsed).len();
-                if n == 0 { 0 } else { (*selected).min(n - 1) }
+                if n == 0 {
+                    0
+                } else {
+                    (*selected).min(n - 1)
+                }
             };
             mcps::render_mcp_overlay(
                 buf,

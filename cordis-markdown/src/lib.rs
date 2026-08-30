@@ -26,10 +26,10 @@
 //! }
 //! ```
 
-pub mod core;
 mod buffers;
 pub mod checkpoint;
 mod colors;
+pub mod core;
 mod hyperlinks;
 mod latex;
 mod latex_delimiters;

@@ -10,11 +10,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 use tokio::sync::oneshot;
 
 use crate::names::{PLAN_EVENT, PLAN_MODE, TOOLS};
-use crate::tools::{ToolBody, Tools, own_registered, tool_result};
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub const PLAN_REL: &str = ".dock/plan.md";

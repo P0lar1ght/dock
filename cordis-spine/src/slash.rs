@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cordis::{Disposable, Inject, Plugin, plugin};
+use cordis::{plugin, Disposable, Inject, Plugin};
 use indexmap::IndexMap;
 use serde_json::Value;
 
@@ -29,6 +29,8 @@ pub const RESERVED_SLASH: &[&str] = &[
     "tasks",
     "workflow",
     "mcps",
+    "cordis",
+    "plugins",
     "preset",
     "presets",
     "agent",
@@ -43,6 +45,8 @@ pub const RESERVED_SLASH: &[&str] = &[
     "theme",
     "t",
     "timestamps",
+    "think",
+    "thinking",
     "effort",
     "export",
     "cd",

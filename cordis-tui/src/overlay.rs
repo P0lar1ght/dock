@@ -8,7 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 
 use crate::grok::picker::{
-    PickerHits, PickerRow, render_floating_frame, render_fullscreen_frame, render_picker_list,
+    render_floating_frame, render_fullscreen_frame, render_picker_list, PickerHits, PickerRow,
 };
 use crate::grok::tasks_pane::GroupKind;
 use crate::plan_approval_view::PlanWrapCache;
@@ -562,6 +562,11 @@ const HELP: &[HelpEntry] = &[
         kind: HelpKind::Slash(SlashCmd::Mcps),
     }),
     HelpEntry::Row(HelpRow {
+        key: "/cordis",
+        label: "动态 / 永久 Cordis 插件",
+        kind: HelpKind::Slash(SlashCmd::Cordis),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "/preset",
         label: "组装 Agent 预设（人设与工具）",
         kind: HelpKind::Slash(SlashCmd::Preset),
@@ -739,10 +744,9 @@ mod tests {
     #[test]
     fn help_filter_finds_resume() {
         let rows = filter_help("resume");
-        assert!(
-            rows.iter()
-                .any(|r| r.key.contains("resume") || r.label.contains("Resume"))
-        );
+        assert!(rows
+            .iter()
+            .any(|r| r.key.contains("resume") || r.label.contains("Resume")));
     }
 
     #[test]

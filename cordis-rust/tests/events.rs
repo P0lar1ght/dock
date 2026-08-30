@@ -151,7 +151,15 @@ async fn internal_plugin_and_status_events() {
         .any(|(old, new)| *old == FiberState::Pending && *new == FiberState::Loading));
 
     fiber.dispose().await.unwrap();
-    assert!(plugins.lock().unwrap().iter().filter(|n| *n == "named").count() >= 2);
+    assert!(
+        plugins
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|n| *n == "named")
+            .count()
+            >= 2
+    );
 }
 
 #[tokio::test]

@@ -37,17 +37,15 @@ impl ChatStreamAcc {
         let usage = chunk.usage;
         for choice in chunk.choices {
             let delta = choice.delta;
-            if let Some(text) = delta.content {
+            if let Some(ref text) = delta.content {
                 if !text.is_empty() {
-                    self.content.push_str(&text);
-                    out.push(StreamDelta::Text(text));
+                    self.content.push_str(text);
+                    out.push(StreamDelta::Text(text.clone()));
                 }
             }
-            if let Some(thought) = delta.reasoning_content {
-                if !thought.is_empty() {
-                    self.reasoning.push_str(&thought);
-                    out.push(StreamDelta::Reasoning(thought));
-                }
+            if let Some(thought) = delta.reasoning_text() {
+                self.reasoning.push_str(&thought);
+                out.push(StreamDelta::Reasoning(thought));
             }
             for tc_delta in delta.tool_calls {
                 let entry = self
@@ -194,11 +192,9 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(
-            deltas
-                .iter()
-                .any(|d| matches!(d, StreamDelta::Text(t) if t == "hi"))
-        );
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, StreamDelta::Text(t) if t == "hi")));
         assert!(deltas.iter().any(|d| matches!(
             d,
             StreamDelta::Usage { tokens, official: true, .. } if tokens.prompt_tokens == 10 && tokens.completion_tokens == 2
@@ -248,5 +244,32 @@ mod tests {
         let out = acc.finish();
         assert_eq!(out.text, "hi");
         assert_eq!(out.reasoning, "plan");
+    }
+
+    #[test]
+    fn openrouter_reasoning_string_field() {
+        let mut acc = ChatStreamAcc::default();
+        let deltas = acc.ingest(
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning":"step"}}]}"#).unwrap(),
+        );
+        assert_eq!(deltas, vec![StreamDelta::Reasoning("step".into())]);
+        assert_eq!(acc.finish().reasoning, "step");
+    }
+
+    #[test]
+    fn openrouter_reasoning_details_text() {
+        let mut acc = ChatStreamAcc::default();
+        let deltas = acc.ingest(
+            serde_json::from_str(
+                r#"{"choices":[{"delta":{"reasoning_details":[
+                    {"type":"reasoning.text","text":"Let me think"},
+                    {"type":"reasoning.encrypted","data":"xx"},
+                    {"type":"reasoning.summary","summary":"…"}
+                ]}}]}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(deltas, vec![StreamDelta::Reasoning("Let me think…".into())]);
+        assert_eq!(acc.finish().reasoning, "Let me think…");
     }
 }

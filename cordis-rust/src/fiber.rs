@@ -1,9 +1,9 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::dispose::EffectMeta;
 use crate::error::Result;
 use crate::ids::{FiberId, FiberState};
-use crate::dispose::EffectMeta;
 use crate::plugin::Config;
 use crate::runtime::Runtime;
 use crate::Context;

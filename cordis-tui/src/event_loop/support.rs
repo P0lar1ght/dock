@@ -4,11 +4,11 @@ use std::collections::HashSet;
 
 use cordis::Context;
 use cordis_spine::{
-    AGENT_PRESETS, ASK, AgentPresets, AppSettings, Ask, CRON, Cron, GOAL, Goal, JOBS, Jobs,
-    LoopFireMode, MCP, Mcp, McpStatus, MermaidEngineKind, PERMISSIONS, PLAN_MODE, Permissions,
-    PlanMode, SESSIONS, SETTINGS, SLASH, SUBAGENTS, Sessions, Slash, SlotKeyResult, Subagents,
-    TUI_SLOTS, TuiSlots, UserImage, WORKFLOWS, Workflows, goal_composer_fill, loop_composer_fill,
-    loop_schedule_instruction,
+    goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
+    Ask, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind, Permissions, PlanMode,
+    Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage, Workflows, AGENT_PRESETS, ASK,
+    CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS,
+    WORKFLOWS,
 };
 
 use crate::ask_view;
@@ -19,7 +19,7 @@ use crate::grok::tasks_pane::{self, GroupKind, TaskEntry};
 use crate::grok::workflows::WorkflowRunSnapshot;
 use crate::mcp_elicit_view;
 use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
-use crate::overlay::{InspectTarget, Overlay, filter_help_items, filter_sessions, filter_strings};
+use crate::overlay::{filter_help_items, filter_sessions, filter_strings, InspectTarget, Overlay};
 use crate::permission_view;
 use crate::plan_approval_view;
 use crate::preset_overlay::{self, PresetAction, PresetView};
@@ -31,7 +31,7 @@ use crate::text_overlay;
 use crate::usage_overlay;
 
 use crate::actions::{
-    Effect, GoalComposer, LoopComposer, interpret_goal_composer_ex, interpret_loop_composer,
+    interpret_goal_composer_ex, interpret_loop_composer, Effect, GoalComposer, LoopComposer,
 };
 use crate::goal_overlay;
 use crate::goal_pane::GoalHit;

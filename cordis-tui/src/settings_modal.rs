@@ -16,6 +16,7 @@ pub enum SettingsField {
     Theme,
     Timestamps,
     Model,
+    Thinking,
     Effort,
     PermissionMode,
     MermaidEngine,
@@ -33,6 +34,7 @@ pub const ROWS: &[SettingsRow] = &[
     SettingsRow::Field(SettingsField::Timestamps),
     SettingsRow::Header("模型"),
     SettingsRow::Field(SettingsField::Model),
+    SettingsRow::Field(SettingsField::Thinking),
     SettingsRow::Field(SettingsField::Effort),
     SettingsRow::Header("工具"),
     SettingsRow::Field(SettingsField::PermissionMode),
@@ -54,6 +56,7 @@ impl SettingsField {
             Self::Theme => "主题",
             Self::Timestamps => "时间戳",
             Self::Model => "模型",
+            Self::Thinking => "思考模式",
             Self::Effort => "推理强度",
             Self::PermissionMode => "权限",
             Self::MermaidEngine => "Mermaid 引擎",
@@ -61,22 +64,23 @@ impl SettingsField {
     }
 
     pub fn is_bool(self) -> bool {
-        matches!(self, Self::Timestamps)
+        matches!(self, Self::Timestamps | Self::Thinking)
     }
 }
 
 pub fn value_text(field: SettingsField, settings: &AppSettings) -> String {
     match field {
         SettingsField::Theme => Theme::current_kind().display_name().into(),
-        SettingsField::Timestamps => {
-            if settings.timestamps() {
-                "开".into()
+        SettingsField::Timestamps => bool_label(settings.timestamps()),
+        SettingsField::Thinking => bool_label(settings.thinking()),
+        SettingsField::Model => settings.model(),
+        SettingsField::Effort => {
+            if settings.thinking() {
+                settings.effort()
             } else {
-                "关".into()
+                "（思考已关）".into()
             }
         }
-        SettingsField::Model => settings.model(),
-        SettingsField::Effort => settings.effort(),
         SettingsField::PermissionMode => match settings.permission_mode() {
             PermissionMode::Ask => "询问".into(),
             PermissionMode::Allow => "自动允许".into(),
@@ -85,6 +89,14 @@ pub fn value_text(field: SettingsField, settings: &AppSettings) -> String {
             MermaidEngineKind::Pure => "pure".into(),
             MermaidEngineKind::Mmdc => "mmdc".into(),
         },
+    }
+}
+
+fn bool_label(on: bool) -> String {
+    if on {
+        "开".into()
+    } else {
+        "关".into()
     }
 }
 
@@ -118,7 +130,7 @@ pub fn enum_choices(field: SettingsField, settings: &AppSettings) -> Vec<(String
             ("pure".into(), "内置 dagre".into()),
             ("mmdc".into(), "PATH 上的 mermaid-cli".into()),
         ],
-        SettingsField::Timestamps => Vec::new(),
+        SettingsField::Timestamps | SettingsField::Thinking => Vec::new(),
     }
 }
 
@@ -147,7 +159,19 @@ pub fn apply_choice(field: SettingsField, value: &str, settings: &AppSettings) {
             };
             settings.set_mermaid_engine(kind);
         }
-        SettingsField::Timestamps => {}
+        SettingsField::Timestamps | SettingsField::Thinking => {}
+    }
+}
+
+pub fn toggle_bool(field: SettingsField, settings: &AppSettings) {
+    match field {
+        SettingsField::Timestamps => {
+            settings.toggle_timestamps();
+        }
+        SettingsField::Thinking => {
+            settings.toggle_thinking();
+        }
+        _ => {}
     }
 }
 

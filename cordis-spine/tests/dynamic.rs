@@ -1,9 +1,10 @@
 use cordis::Context;
 use cordis_spine::{
     agent_presets, dynamic_runner, permissions, settings, slash, tool_cordis, tools, tui_slots,
-    AgentPresets, DynEcho, DynamicRunner, LogEvent, PermissionMode, PreStep, RhaiBag, RunMode,
-    Sessions, Slash, ToolCall, Tools, AGENT_PRESETS, CORDIS_PRESET_ID, DYNAMIC_CORDIS_RUNNER,
-    DYN_ECHO, DYN_ECHO_TOOL, PRE_STEP, SESSIONS, SETTINGS, SLASH, TOOLS, TUI_SLOTS,
+    AgentPresets, DynEcho, DynamicRunner, LogEvent, PermissionMode, PersistScope, PluginOrigin,
+    PreStep, RhaiBag, RunMode, Sessions, Slash, ToolCall, Tools, AGENT_PRESETS, CORDIS_PRESET_ID,
+    DYNAMIC_CORDIS_RUNNER, DYN_ECHO, DYN_ECHO_TOOL, PRE_STEP, SESSIONS, SETTINGS, SLASH, TOOLS,
+    TUI_SLOTS,
 };
 use serde_json::json;
 
@@ -458,6 +459,7 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
 
     let builtins = exec(&root, "cordis_inspect", r#"{"what":"builtins"}"#).await;
     assert!(builtins.contains("host.register_tool"), "{builtins}");
+    assert!(builtins.contains("host.on"), "{builtins}");
     assert!(
         builtins.contains("JSON-schema map") || builtins.contains("parameters: #{"),
         "{builtins}"
@@ -1005,4 +1007,143 @@ async fn concurrent_different_package_is_already_starting() {
     hold_tx.send(true).unwrap();
     runner.test_set_start_hold(None);
     a.await.expect("join a").expect("run a");
+}
+
+const RHAI_ON_EVENT: &str = r#"#{
+    inject: ["tools"],
+    apply: |host| {
+        let store = #{ last: "" };
+        host.on("session/event", |line| {
+            store.last = line;
+        });
+        host.register_tool(#{
+            name: "last_evt",
+            description: "last session event line",
+            parameters: #{ type: "object", properties: #{} },
+            execute: |args| { store.last }
+        });
+    }
+}"#;
+
+#[tokio::test]
+async fn host_on_session_event_sees_user_line() {
+    let root = boot().await;
+    exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "obsv"},
+            "name": "Observer",
+            "purpose": "session/event",
+            "factory": "rhai",
+            "source": RHAI_ON_EVENT,
+        }),
+    )
+    .await;
+    let ran = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"obsv-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .append(LogEvent::User("hello cordis".into()));
+
+    let mut got = String::new();
+    for _ in 0..80 {
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        got = exec(&root, "last_evt", "{}").await;
+        if got.contains("user") && got.contains("hello cordis") {
+            break;
+        }
+    }
+    assert!(got.contains("user\thello cordis"), "{got}");
+
+    let events = exec(&root, "cordis_inspect", r#"{"what":"events"}"#).await;
+    assert!(events.contains("session/event"), "{events}");
+}
+
+#[tokio::test]
+async fn disk_plugin_autoloads_and_is_visible_to_other_sessions() {
+    let root = boot().await;
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_dir = dir.path().join("echo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        "name = \"Echo\"\npurpose = \"disk echo\"\nfactory = \"echo\"\nenabled = true\n",
+    )
+    .unwrap();
+
+    let runner = root
+        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap();
+    runner
+        .boot_disk_from(&[(PersistScope::Project, dir.path().to_path_buf())])
+        .await;
+
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
+    let row = runner
+        .inspect_plugin(MAIN, "echo")
+        .expect("visible to main");
+    assert!(matches!(row.origin, PluginOrigin::Disk { .. }));
+    assert!(runner.inspect_plugin("child-other", "echo").is_ok());
+
+    let listing =
+        runner.overlay_listing_from(MAIN, &[(PersistScope::Project, dir.path().to_path_buf())]);
+    assert!(listing.contains("echo"), "{listing}");
+    assert!(listing.contains("永久"), "{listing}");
+
+    let permanent = exec(&root, "cordis_inspect", r#"{"what":"permanent"}"#).await;
+    assert!(
+        permanent.contains("永久") || permanent.contains("echo") || permanent.contains("disk"),
+        "{permanent}"
+    );
+
+    let gone = exec(&root, "cordis_undefine", r#"{"pluginId":"echo"}"#).await;
+    assert!(gone.contains("Removed"), "{gone}");
+    assert!(plugin_dir.join("plugin.toml").exists());
+}
+
+#[tokio::test]
+async fn promote_writes_disk_and_stops_session_copy() {
+    let root = boot().await;
+    exec(
+        &root,
+        "cordis_define",
+        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
+    )
+    .await;
+    exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"echo-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
+
+    let dir = tempfile::tempdir().unwrap();
+    let runner = root
+        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap();
+    let receipt = runner
+        .promote_into(
+            MAIN,
+            "echo-1",
+            None,
+            PersistScope::Project,
+            dir.path().to_path_buf(),
+        )
+        .await
+        .expect("promote");
+    assert_eq!(receipt.plugin_id, "echo");
+    assert!(receipt.stopped_source);
+    assert!(dir.path().join("echo").join("plugin.toml").exists());
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
+    assert!(runner.inspect_plugin(MAIN, "echo").is_ok());
+    let session = runner.inspect_plugin(MAIN, "echo-1").unwrap();
+    assert!(session.active_run.is_none());
 }

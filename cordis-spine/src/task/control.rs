@@ -6,8 +6,8 @@ use crate::session::Sessions;
 use crate::tools::tool_result;
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
-use super::Subagents;
 use super::store::InterruptOutcome;
+use super::Subagents;
 
 pub(super) fn send_spec() -> ToolSpec {
     ToolSpec {

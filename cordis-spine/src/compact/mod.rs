@@ -10,7 +10,7 @@ mod history;
 mod prompt;
 mod summary;
 
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::error::{Error, Result};
 use crate::llm::Llm;
@@ -23,11 +23,11 @@ use crate::types::{LogEvent, PromptRequest};
 
 use history::{build_compacted_events, prepare_conversation_for_summarization};
 
-pub(crate) use history::{VISIBLE_NOTICE, estimate_context_tokens};
-use prompt::{SummaryPromptKind, build_summary_prompt_kind};
+pub(crate) use history::{estimate_context_tokens, VISIBLE_NOTICE};
+use prompt::{build_summary_prompt_kind, SummaryPromptKind};
 use summary::is_degenerate_summary;
 
-pub use config::{DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, FullReplaceConfig, exceeds_threshold};
+pub use config::{exceeds_threshold, FullReplaceConfig, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
 
 /// Named `"compact"`. Stateless; per-session flags live on [`Sessions`].
 #[derive(Clone, Default)]

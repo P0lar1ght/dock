@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::subprocess::{SubprocessError, run_with_timeout};
+use crate::subprocess::{run_with_timeout, SubprocessError};
 use crate::{MermaidEngine, MermaidError, MermaidTheme, RenderParams, RenderedDiagram};
 
 /// Default wall-clock budget for an `mmdc` invocation.

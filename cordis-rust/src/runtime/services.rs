@@ -1,9 +1,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use crate::dispose::Disposable;
 use crate::error::{Error, Result};
 use crate::ids::{FiberId, FiberState};
-use crate::dispose::Disposable;
 
 use super::world::Impl;
 use super::Runtime;

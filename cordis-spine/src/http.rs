@@ -3,7 +3,7 @@
 //! `chat_completion_stream` (SSE `data:` → `ChatCompletionChunk` deltas).
 
 use futures_util::StreamExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::chat_chunk::ChatCompletionChunk;
 use crate::config;
@@ -12,10 +12,10 @@ use crate::names::{SESSIONS, SETTINGS, TURN};
 use crate::runtime::BoxFuture;
 use crate::session::Sessions;
 use crate::settings::AppSettings;
-use crate::stream_acc::{ChatStreamAcc, StreamDelta, take_sse_data};
+use crate::stream_acc::{take_sse_data, ChatStreamAcc, StreamDelta};
 use crate::turn::TurnControl;
 use crate::types::{
-    INTERRUPTED_TOOL_RESULT, LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage,
+    LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
 };
 
 use cordis::Context;
@@ -53,6 +53,11 @@ async fn sample_http(
         .get::<AppSettings>(SETTINGS)
         .map(|s| s.effort())
         .unwrap_or_default();
+    let thinking = sampler
+        .ctx
+        .get::<AppSettings>(SETTINGS)
+        .map(|s| s.thinking())
+        .unwrap_or(true);
     let (api_base, api_key) = resolve_endpoint(sampler, &model);
     if let Some(sessions) = sampler.ctx.get::<Sessions>(SESSIONS) {
         let window = config::lookup_model(&model)
@@ -102,7 +107,16 @@ async fn sample_http(
                 .collect(),
         );
     }
-    if !effort.is_empty() && effort != "medium" {
+    if !thinking || effort == "none" {
+        body["reasoning"] = json!({ "effort": "none", "exclude": true });
+        body["reasoning_effort"] = json!("none");
+    } else if !effort.is_empty() {
+        // OpenRouter MiniMax / Claude / etc. need the unified `reasoning`
+        // object; legacy `reasoning_effort` alone is not enough for M3.
+        body["reasoning"] = json!({
+            "effort": effort,
+            "exclude": false,
+        });
         body["reasoning_effort"] = json!(effort);
     }
     let client = reqwest::Client::new();
@@ -341,12 +355,21 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Valu
                 if !llm.text.is_empty() {
                     msg["content"] = json!(llm.text);
                 }
+                if !llm.reasoning.is_empty() {
+                    msg["reasoning"] = json!(llm.reasoning);
+                    msg["reasoning_content"] = json!(llm.reasoning);
+                }
                 out.push(msg);
                 pending = llm.tool_calls.iter().map(|c| c.id.clone()).collect();
             }
-            LogEvent::LlmStream(llm) if !llm.text.is_empty() => {
+            LogEvent::LlmStream(llm) if !llm.text.is_empty() || !llm.reasoning.is_empty() => {
                 flush_unmatched_tools(&mut out, &mut pending);
-                out.push(json!({"role":"assistant","content": llm.text}));
+                let mut msg = json!({"role":"assistant","content": llm.text});
+                if !llm.reasoning.is_empty() {
+                    msg["reasoning"] = json!(llm.reasoning);
+                    msg["reasoning_content"] = json!(llm.reasoning);
+                }
+                out.push(msg);
             }
             LogEvent::ToolExecute { id, content, .. } => {
                 if let Some(i) = pending.iter().position(|p| p == id) {
@@ -412,8 +435,10 @@ fn parse_chat_completion(body: &str) -> LlmOutput {
     let reasoning = message["reasoning_content"]
         .as_str()
         .or_else(|| message["reasoning"].as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| reasoning_details_text(&message["reasoning_details"]))
+        .unwrap_or_default();
     let mut tool_calls = Vec::new();
     if let Some(calls) = message["tool_calls"].as_array() {
         for (i, call) in calls.iter().enumerate() {
@@ -443,6 +468,21 @@ fn parse_chat_completion(body: &str) -> LlmOutput {
     }
 }
 
+fn reasoning_details_text(details: &Value) -> Option<String> {
+    let arr = details.as_array()?;
+    let mut buf = String::new();
+    for item in arr {
+        let piece = item["text"]
+            .as_str()
+            .or_else(|| item["summary"].as_str())
+            .unwrap_or("");
+        if !piece.is_empty() {
+            buf.push_str(piece);
+        }
+    }
+    (!buf.is_empty()).then_some(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +504,23 @@ mod tests {
         let out = parse_chat_completion(body);
         assert_eq!(out.tool_calls[0].name, "list_dir");
         assert!(out.tool_calls[0].arguments.contains("target_directory"));
+    }
+
+    #[test]
+    fn parses_openrouter_reasoning_details_message() {
+        let body = r#"{
+            "choices":[{
+                "message":{
+                    "content":"answer",
+                    "reasoning_details":[
+                        {"type":"reasoning.text","text":"think hard"}
+                    ]
+                }
+            }]
+        }"#;
+        let out = parse_chat_completion(body);
+        assert_eq!(out.text, "answer");
+        assert_eq!(out.reasoning, "think hard");
     }
 
     #[test]

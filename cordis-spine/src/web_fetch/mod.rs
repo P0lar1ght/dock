@@ -7,10 +7,10 @@ mod fetch;
 mod http;
 mod ssrf;
 
-use cordis::{Inject, Plugin, plugin};
+use cordis::{plugin, Inject, Plugin};
 
 use crate::names::TOOLS;
-use crate::tools::{ToolBody, Tools, own_registered, tool_result};
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 use config::WebFetchParams;

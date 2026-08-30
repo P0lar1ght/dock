@@ -3,11 +3,11 @@
 
 use std::sync::Mutex;
 
-use cordis::{Inject, Plugin, plugin};
+use cordis::{plugin, Inject, Plugin};
 
 use crate::names::{SLASH, TOOLS};
 use crate::slash::{Slash, SlashEntry};
-use crate::tools::{ToolBody, Tools, own_registered, tool_result};
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub const DYN_ECHO: &str = "dynEcho";
@@ -99,7 +99,7 @@ const FACTORIES: &[FactoryInfo] = &[
     },
     FactoryInfo {
         id: RHAI_FACTORY,
-        purpose: "Evaluate model-authored Rhai source: host.provide / register_tool / register_slash / register_slot. Define compiles; run calls apply.",
+        purpose: "Evaluate model-authored Rhai source: host.provide / register_tool / register_slash / register_slot / on. Define compiles; run calls apply.",
         provides: &[],
         inject: &[TOOLS],
         tools: &[],

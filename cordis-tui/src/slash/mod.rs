@@ -32,6 +32,7 @@ pub enum SlashCmd {
     Export,
     Cd,
     Timestamps,
+    Thinking,
     Effort,
     Plan,
     ViewPlan,
@@ -39,6 +40,7 @@ pub enum SlashCmd {
     Tasks,
     Workflow,
     Mcps,
+    Cordis,
     Preset,
     Usage,
     Context,
@@ -188,6 +190,16 @@ pub const CATALOG: &[SlashDef] = &[
         arg_kind: None,
     },
     SlashDef {
+        cmd: SlashCmd::Cordis,
+        name: "cordis",
+        aliases: &["plugins"],
+        display: "/cordis",
+        description: "动态 / 永久 Cordis 插件",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
         cmd: SlashCmd::Preset,
         name: "preset",
         aliases: &["presets", "agent", "agents"],
@@ -273,6 +285,16 @@ pub const CATALOG: &[SlashDef] = &[
         aliases: &[],
         display: "/timestamps",
         description: "开关滚动区时间戳",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Thinking,
+        name: "think",
+        aliases: &["thinking"],
+        display: "/think",
+        description: "开关思考模式（推理过程）",
         takes_args: false,
         args_required: false,
         arg_kind: None,
@@ -575,6 +597,8 @@ mod tests {
         assert_eq!(lookup("tasks").map(|d| d.cmd), Some(SlashCmd::Tasks));
         assert_eq!(lookup("workflow").map(|d| d.cmd), Some(SlashCmd::Workflow));
         assert_eq!(lookup("mcps").map(|d| d.cmd), Some(SlashCmd::Mcps));
+        assert_eq!(lookup("cordis").map(|d| d.cmd), Some(SlashCmd::Cordis));
+        assert_eq!(lookup("plugins").map(|d| d.cmd), Some(SlashCmd::Cordis));
         assert_eq!(lookup("preset").map(|d| d.cmd), Some(SlashCmd::Preset));
         assert_eq!(lookup("agent").map(|d| d.cmd), Some(SlashCmd::Preset));
         assert_eq!(lookup("usage").map(|d| d.cmd), Some(SlashCmd::Usage));
@@ -631,12 +655,10 @@ mod tests {
         let extras = [extra("standup"), extra("help")];
         let snap = snapshot_ex("/", 0, &extras);
         assert!(snap.matches.iter().any(|r| r.display == "/standup"));
-        assert!(
-            !snap
-                .matches
-                .iter()
-                .any(|r| matches!(&r.pick, SlashPick::Extra(n) if n == "help"))
-        );
+        assert!(!snap
+            .matches
+            .iter()
+            .any(|r| matches!(&r.pick, SlashPick::Extra(n) if n == "help")));
         assert_eq!(
             command_for_submit_ex("/standup today", &extras),
             Some((SlashPick::Extra("standup".into()), "today".into()))

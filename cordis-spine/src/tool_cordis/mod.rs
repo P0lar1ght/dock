@@ -8,14 +8,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 use serde_json::Value;
 
-use crate::dynamic_runner::{DynamicRunner, PluginSel, RunMode};
+use crate::dynamic_runner::{DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode};
 use crate::names::{DYNAMIC_CORDIS_RUNNER, PRE_STEP, PROMPT_ASSEMBLE, SESSIONS, TOOLS};
 use crate::session::Sessions;
 use crate::slash::{contrib_fields_present, slash_entry_from_define};
-use crate::tools::{ToolBody, Tools, own_registered, tool_result};
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 use inspect::{render_inspect, render_inspect_self};
@@ -23,8 +23,8 @@ use prompt::CORDIS_SYSTEM_PROMPT;
 
 type ExecFut = Pin<Box<dyn Future<Output = ToolResult> + Send + 'static>>;
 
-const INSPECT_DESC: &str = "Read-only live Cordis directory for this session: fibers under cordis-dynamic, named services that are actually mounted (tools / slash / tui.slots include callable methods; other services are names only), model tools (names only), preset factories, Rhai host builtins, TUI slots, and this session's dynamic Plugins. Omit `what` for the full report. This does not execute apply or change version pointers. Before defining a Plugin, also read skills/cordis-plugin-development/SKILL.md.";
-const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"what":{"type":"string","enum":["services","fibers","tools","temporary","factories","builtins","slots"],"description":"Omit for the full live directory."}}}"#;
+const INSPECT_DESC: &str = "Read-only live Cordis directory for this session: fibers under cordis-dynamic, named services that are actually mounted (tools / slash / tui.slots include callable methods; other services are names only), model tools (names only), preset factories, Rhai host builtins, session/event contract, TUI slots, this session's dynamic Plugins, and disk plugins. Omit `what` for the full report. This does not execute apply or change version pointers. Before defining a Plugin, also read skills/cordis-plugin-development/SKILL.md.";
+const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"what":{"type":"string","enum":["services","fibers","tools","temporary","permanent","factories","builtins","events","slots"],"description":"Omit for the full live directory."}}}"#;
 
 const SELF_DESC: &str = "Inspect dynamic Cordis Plugins owned by this session. With no IDs, list Plugin summaries. With pluginId, return version pointers, the latest Run, and every Package. pluginId plus packageId returns that Package's factory id, Rhai source when present, and runtime diagnostics. Read-only: it does not execute code or change currentPackageId. Read skills/cordis-plugin-development/SKILL.md before modifying a Plugin.";
 const SELF_PARAMS: &str = r#"{"type":"object","properties":{"pluginId":{"type":"string","description":"Stable Plugin ID from cordis_define; omit to list every Plugin."},"packageId":{"type":"string","description":"Exact Package ID; requires pluginId."}}}"#;
@@ -38,13 +38,16 @@ const RUN_PARAMS: &str = r#"{"type":"object","required":["pluginId","packageId",
 const CALL_DESC: &str = "Execute one live model-facing tool by exact name, including tools a running dynamic Package registered with host.register_tool / register_dynamic. Use this after cordis_run to verify a dynamic tool in the same Host turn — do not wait for a later model step or a TUI slash like /test. `arguments` is a JSON object (or a JSON string of that object); omit for {}. Permissions, plan-mode gates, and Agent preset allowlists still apply (dynamic tools bypass the allowlist). Do not call cordis_call recursively.";
 const CALL_PARAMS: &str = r#"{"type":"object","required":["name"],"properties":{"name":{"type":"string","description":"Exact tool name from cordis_inspect what:\"tools\" or a dynamic register_tool name."},"arguments":{"description":"JSON object of tool arguments, or a JSON string. Default {}."}}}"#;
 
-const STOP_DESC: &str = "Stop the current Run of a dynamic Plugin. Retain the Plugin, every Package, and currentPackageId so it can later run or update. Stopping an already stopped Plugin succeeds. Use cordis_undefine for permanent removal.";
+const STOP_DESC: &str = "Stop the current Run of a dynamic Plugin. Retain the Plugin, every Package, and currentPackageId so it can later run or update. Stopping an already stopped Plugin succeeds. Disk files are not deleted; enabled disk plugins autoload on the next process start. Use cordis_undefine to drop the in-memory Plugin.";
 const STOP_PARAMS: &str =
     r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string"}}}"#;
 
-const UNDEFINE_DESC: &str = "Permanently remove a dynamic Plugin. If it is running, stop it first, then delete every Package and version pointer. Do not call this when versions must remain for restart or rollback; use cordis_stop instead.";
+const UNDEFINE_DESC: &str = "Remove a dynamic Plugin from this process. If it is running, stop it first, then delete every in-memory Package and version pointer. Does not delete disk files under .dock/plugins/<id>/; set enabled=false or delete that directory to stop autoload. Do not call this when versions must remain for restart or rollback; use cordis_stop instead.";
 const UNDEFINE_PARAMS: &str =
     r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string"}}}"#;
+
+const PROMOTE_DESC: &str = "Write the Plugin's current (or latest) Package to disk so it survives restart. Default id strips the minted -N suffix (echo-1 → echo). scope \"project\" writes {cwd}/.dock/plugins/<id>/; \"user\" writes ~/.dock/plugins/<id>/. Then autostarts that disk Plugin (no second permission prompt). If the disk id differs from the session Plugin, the session copy is stopped to avoid duplicate tools — undefine it if you no longer need the in-memory definition. Does not delete files on later cordis_undefine.";
+const PROMOTE_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string","description":"Session or already-loaded Plugin to persist."},"id":{"type":"string","description":"Disk directory / stable pluginId. Default: strip -N from pluginId."},"scope":{"type":"string","enum":["project","user"],"description":"project (default) = workspace .dock/plugins; user = ~/.dock/plugins."}}}"#;
 
 pub fn tool_cordis() -> Plugin {
     plugin(
@@ -126,6 +129,14 @@ pub fn tool_cordis() -> Plugin {
                         UNDEFINE_DESC,
                         UNDEFINE_PARAMS,
                         undefine_tool,
+                    )?,
+                    spec(
+                        ctx,
+                        tools.as_ref(),
+                        "cordis_promote",
+                        PROMOTE_DESC,
+                        PROMOTE_PARAMS,
+                        promote_tool,
                     )?,
                 ],
             )?;
@@ -389,14 +400,78 @@ fn undefine_tool(ctx: Context, call: ToolCall) -> ExecFut {
         if plugin_id.is_empty() {
             return tool_result(call, "Error: pluginId is required");
         }
-        match runner.undefine(&session_id(&ctx), &plugin_id).await {
-            Ok(r) => tool_result(
-                call,
-                format!(
-                    "Removed dynamic Plugin {} and all of its Packages. wasRunning={}",
-                    r.plugin_id, r.was_running
-                ),
-            ),
+        let sid = session_id(&ctx);
+        let origin = runner
+            .inspect_plugin(&sid, &plugin_id)
+            .ok()
+            .map(|row| row.origin);
+        match runner.undefine(&sid, &plugin_id).await {
+            Ok(r) => {
+                let disk = match origin {
+                    Some(PluginOrigin::Disk { path, .. }) => format!(
+                        " Disk files remain at {}; set enabled=false or delete that directory to stop autoload.",
+                        path.display()
+                    ),
+                    _ => String::new(),
+                };
+                tool_result(
+                    call,
+                    format!(
+                        "Removed dynamic Plugin {} and all of its Packages. wasRunning={}{disk}",
+                        r.plugin_id, r.was_running
+                    ),
+                )
+            }
+            Err(e) => tool_result(call, format!("Error: {e}")),
+        }
+    })
+}
+
+fn promote_tool(ctx: Context, call: ToolCall) -> ExecFut {
+    Box::pin(async move {
+        let v = json(&call);
+        let plugin_id = v
+            .get("pluginId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if plugin_id.is_empty() {
+            return tool_result(call, "Error: pluginId is required");
+        }
+        let disk_id = v.get("id").and_then(Value::as_str);
+        let scope = match PersistScope::parse(v.get("scope").and_then(Value::as_str).unwrap_or(""))
+        {
+            Ok(s) => s,
+            Err(e) => return tool_result(call, format!("Error: {e}")),
+        };
+        let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
+            return tool_result(call, "Error: dynamicCordisRunner is not mounted");
+        };
+        match runner
+            .promote(&session_id(&ctx), &plugin_id, disk_id, scope)
+            .await
+        {
+            Ok(r) => {
+                let stop_note = if r.stopped_source {
+                    format!(
+                        " Session Plugin {} was stopped to avoid duplicate tools; undefine it if you no longer need the in-memory copy.",
+                        r.source_plugin_id
+                    )
+                } else {
+                    String::new()
+                };
+                tool_result(
+                    call,
+                    format!(
+                        "Wrote {} plugin {} at {}. packageId={}; running={}.{stop_note} Restart autoloads this directory without a permission overlay.",
+                        r.scope.as_str(),
+                        r.plugin_id,
+                        r.path.display(),
+                        r.package_id,
+                        r.running
+                    ),
+                )
+            }
             Err(e) => tool_result(call, format!("Error: {e}")),
         }
     })
@@ -426,9 +501,10 @@ fn inject_plugin_mentions(ctx: &Context, user: &str) {
                 "# @{} context\npluginId: {}\npackageId: {} (baseline)\nname: {}\npurpose: {}\nrunning: {}\nCall cordis_inspect_self with these ids, then cordis_define kind existing. Do not create a replacement Plugin. Source is not included here.",
                 r.plugin_id, r.plugin_id, r.package_id, r.name, r.purpose, r.running
             ),
-            Err(_) => format!(
+            Err(_) if looks_like_minted_id(&id) => format!(
                 "@{id} is not a dynamic Plugin in this session — it may have been removed or lost on restart."
             ),
+            Err(_) => continue,
         };
         sessions.append(LogEvent::SystemReminder(text));
     }
@@ -441,18 +517,18 @@ fn mentioned_plugin_ids(user: &str) -> Vec<String> {
     while i < bytes.len() {
         if bytes[i] == b'@' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
             let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j].is_ascii_lowercase() {
-                j += 1;
-            }
-            let prefix_len = j - start;
-            if (3..=6).contains(&prefix_len) && j < bytes.len() && bytes[j] == b'-' {
-                j += 1;
-                let digits_at = j;
-                while j < bytes.len() && bytes[j].is_ascii_digit() {
+            if start < bytes.len() && bytes[start].is_ascii_lowercase() {
+                let mut j = start;
+                while j < bytes.len()
+                    && j - start < 32
+                    && (bytes[j].is_ascii_lowercase()
+                        || bytes[j].is_ascii_digit()
+                        || bytes[j] == b'-')
+                {
                     j += 1;
                 }
-                if j > digits_at && (j == bytes.len() || bytes[j].is_ascii_whitespace()) {
+                let len = j - start;
+                if (2..=32).contains(&len) && (j == bytes.len() || bytes[j].is_ascii_whitespace()) {
                     let id = user[start..j].to_string();
                     if !ids.contains(&id) {
                         ids.push(id);
@@ -465,6 +541,19 @@ fn mentioned_plugin_ids(user: &str) -> Vec<String> {
         i += 1;
     }
     ids
+}
+
+fn looks_like_minted_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    let Some(dash) = bytes.iter().position(|b| *b == b'-') else {
+        return false;
+    };
+    let prefix = &bytes[..dash];
+    let digits = &bytes[dash + 1..];
+    (3..=6).contains(&prefix.len())
+        && prefix.iter().all(|b| b.is_ascii_lowercase())
+        && !digits.is_empty()
+        && digits.iter().all(|b| b.is_ascii_digit())
 }
 
 fn parse_plugin_sel(v: &Value) -> Result<PluginSel, String> {

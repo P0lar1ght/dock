@@ -29,8 +29,8 @@ pub fn lines(
     let _ = name;
     let qa = parse_qa_pairs(content);
     let pending = parse_pending_questions(arguments);
-    let declined = content.starts_with("User declined")
-        || content.starts_with("No user is available");
+    let declined =
+        content.starts_with("User declined") || content.starts_with("No user is available");
     let failed = content.starts_with("Error");
 
     let open = mode != ToolMode::Collapsed;
@@ -77,10 +77,7 @@ pub fn lines(
                 Span::styled(question.clone(), theme.primary()),
             ]));
             let a_line = if answer.is_empty() {
-                Line::from(Span::styled(
-                    "     (no answer)".to_string(),
-                    theme.dim(),
-                ))
+                Line::from(Span::styled("     (no answer)".to_string(), theme.dim()))
             } else {
                 Line::from(vec![
                     Span::styled("     \u{2192} ".to_string(), theme.fg(theme.accent_user)),
@@ -168,12 +165,13 @@ fn header_line(
     };
     let mut spans = vec![Span::styled(
         format!("Ask{count_label} "),
-        Style::default()
-            .fg(label_fg)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(label_fg).add_modifier(Modifier::BOLD),
     )];
     if !title.is_empty() {
-        spans.push(Span::styled(title.to_string(), Style::default().fg(title_fg)));
+        spans.push(Span::styled(
+            title.to_string(),
+            Style::default().fg(title_fg),
+        ));
     }
     let line = Line::from(spans);
     if width == 0 {

@@ -8,7 +8,7 @@
 
 ## 斜杠
 
-目录在 `cordis-tui/src/slash/mod.rs` `CATALOG`。别名也能提交。动态插件可以通过 `"slash"` **追加**命令（工厂 `slash` 或 Rhai `host.register_slash`），不能替换本表里的内建项。追加的命令出现在下拉补全和 `/help`；`prompt` 种会填入或发送模板（`{args}` 换成键入的参数），`overlay` 种打开只读标题+正文 overlay，`slot` 种打开已登记的 `tui.slots` id（`text` = 插槽 id），`tool` 种直接跑 live 工具（`text` = 工具名；参数：空=`{}`、以 `{` 开头=原始 JSON、否则 `{"args":"…"}`），结果进 Notice，不经模型。停掉该动态 Plugin 或退出进程后额外命令消失。
+目录在 `cordis-tui/src/slash/mod.rs` `CATALOG`。别名也能提交。动态插件可以通过 `"slash"` **追加**命令（工厂 `slash` 或 Rhai `host.register_slash`），不能替换本表里的内建项。追加的命令出现在下拉补全和 `/help`；`prompt` 种会填入或发送模板（`{args}` 换成键入的参数），`overlay` 种打开只读标题+正文 overlay，`slot` 种打开已登记的 `tui.slots` id（`text` = 插槽 id），`tool` 种直接跑 live 工具（`text` = 工具名；参数：空=`{}`、以 `{` 开头=原始 JSON、否则 `{"args":"…"}`），结果进 Notice，不经模型。停掉该动态 Plugin 或退出进程后，**会话**额外命令消失；磁盘永久插件会在下次启动时再挂上。
 
 下拉打开时 Enter / Tab 只把 `/命令 ` 放进输入框，不执行。名字后面有空格后下拉关闭，再 Enter 才解析（有参数就带上）。
 
@@ -27,6 +27,7 @@
 | `/tasks` | Grok 分组 pane：Workflows → Subagents → Tasks → Watchers。子代理行显示当前模式名册的角色名（如守望下的「岑」而不是 `Cen`）。Enter / 点击子代理或后台任务打开 **Grok 同款全屏边框**（子代理：工具卡折叠循环 + 框底输入 `send_message`）。Esc 从全屏回到本列表。子代理第一轮结束后显示 **idle**（不是 done）；idle 不算 running。Watchers 里的 loop：`x` 或点 `[✗]` 关闭（`scheduler_delete` / `cron.cancel`） |
 | `/workflow` / `/workflow runs` | Grok `Workflow Runs` overlay |
 | `/mcps` | Grok 分组 pane：标题「MCP 服务器」、分组「本地 (N)」、徽章 `[就绪]` / `[需认证]` / `[不可用]` / `[已禁用]`、右侧 `(本地)`。Space 开关当前服务器或工具（写入 `config.toml`：`[mcp_servers.<name>].enabled` 与 `[disabled_mcp_tools.<server>]`）；`i` 对 HTTP 服务器打开浏览器 OAuth（PKCE，token 写 `~/.dock/mcp_credentials.json`，不是 grok.com 登录）；Enter 展开/收起工具（`N 个工具` / `N 个工具（M 个已启用）`）；Esc 关闭。stdio 或 Streamable HTTP。工具表跟 `tools/list` 翻页和 `tools/list_changed`；HTTP 跟 GET SSE，session 404 会重新握手 |
+| `/cordis`（`plugins`） | Notice「Cordis 插件」：磁盘永久层（项目 `.dock/plugins/<id>/` 覆盖用户 `~/.dock/plugins/<id>/`）和本会话内存插件。Esc 关闭。写成永久用模型工具 `cordis_promote` |
 | `/preset`（`presets` `agent` `agents`） | 打开 Agent 预设名册。定义全是 YAML 目录：内置 < `~/.dock/presets/<id>/agent.yml` < 项目 `.dock/presets/<id>/agent.yml`（后写覆盖；仍可读旧 `<id>.yml`）。**加一个目录就是一个 Agent**，不必改代码。子代理写在 `agents/<type>.yml`（人设 + 工具允许名单）。**`n` 新建 / `d` 复制默认写当前工作区** `.dock/presets/<id>/`（有项目层时 origin 为项目）；改内置模式仍写 `~/.dock/presets/` 覆盖。新建人设默认写 `.dock/presets/<当前模式>/agents/`。系统提示注入这两处的绝对路径（空名册也会注入）；只有用户明确要求保存到全局才写 `~/.dock/presets/`。省略 `tools` = 当前已注册全部工具；`[]` = 空；列表 = 允许名单（Dock 工具名）。`replace_prompt: true` 时 `persona` 整份替换系统提示。手写 `agents/<type>.yml` 后，`subagent` 校验、`/preset` 和下一采样步系统提示都会重读；本轮要立刻出现在 enum 里时用 `subagent`（`reload_roster: true`），不必新开会话。新建模式写完后用 `/preset` 应用该 id（`reload_roster` 不切模式）。名册列出子代理 id；`n` 新建、`d` 复制、`a` 应用、`x` 删除（内置不能删；删覆盖则恢复内置） |
 | `/history` | 搜索提示词历史 |
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
@@ -78,6 +79,7 @@ order: 10
 | 提问 overlay | 听 `ask/pending`，和权限 overlay 同款 |
 | MCP elicitation | 听 `mcp/elicit`。权限 / 提问 overlay 会抢前台（队列仍在）。表单逐步填：选项带「其他」、自由输入空内容闪「请输入具体内容」。URL 模式 Enter 开浏览器，等 `notifications/elicitation/complete` 或 Esc 取消 |
 | 动态插槽 `Overlay::Slot` | `"tui.slots"` 登记的纯文本 pane（复用 Notice 布局）。Esc 关闭；↑/↓ 滚动并把规范化键名转给 `on_key`（`esc` / `enter` / `up` / `down` / `char:x`）。脚本 `open_slot` 或 slash `kind: slot` 打开 |
+| `/cordis` | Notice：永久（磁盘）与会话（内存）插件一览 |
 | 插槽 HUD | `hud: true` 的插槽每帧 `render` 第一行，live-look 进快捷键条，不替换 status bar |
 | `/preset` 画布 | 左侧完整目录（当前 `"tools"`，右侧工具简介）、右侧本预设工具集。身份区列出本模式 `agents/` id。Enter 左加右删。名册 `n`/`d` 新建或复制默认写项目 `.dock/presets/<id>/`；改内置会写到 `~/.dock/presets/<id>/agent.yml` 覆盖。Esc 从画布回名册 |
 | 欢迎页 | 空会话是 **Grok hero box**：圆角方框、左边 braille logo、右边 `Dock` + 版本 + 一句说明 + 菜单（新会话 / 恢复 / 退出）。窄窗改成框内上下叠。点击菜单行仍走原来的快捷键。 |

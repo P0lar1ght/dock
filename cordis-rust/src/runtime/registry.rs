@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
+use crate::dispose::{run_steps_sync, CleanupStep, Disposable};
 use crate::error::{Error, Result};
 use crate::ids::{next_fiber, Epoch, FiberId, FiberState};
-use crate::dispose::{run_steps_sync, CleanupStep, Disposable};
 use crate::plugin::{Config, Plugin};
 
 use super::world::{DisposableList, FiberData, PluginRuntime};

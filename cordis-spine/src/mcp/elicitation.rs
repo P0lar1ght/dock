@@ -7,7 +7,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use cordis::Context;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
 
 use crate::names::MCP_ELICIT_EVENT;

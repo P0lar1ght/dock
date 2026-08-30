@@ -1,7 +1,7 @@
 //! Named `"tui.shortcuts"` service. The event loop live-looks this up each
 //! frame — swap the plugin to change the bar without touching `tui`.
 
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::ask_view;
 use crate::grok::shortcuts::HintItem;
@@ -9,7 +9,7 @@ use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SHORTCUTS};
 use crate::overlay::Overlay;
 use crate::prompt::PromptWidget;
 use crate::session::SessionRef;
-use cordis_spine::{ASK, Ask};
+use cordis_spine::{Ask, ASK};
 
 pub struct Shortcuts {
     ctx: Context,

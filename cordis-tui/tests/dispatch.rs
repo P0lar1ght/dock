@@ -72,6 +72,14 @@ fn slash_plan_tasks_mcps_map() {
         [Effect::ShowMcps]
     ));
     assert!(matches!(
+        dispatch(Action::SendPrompt("/cordis".into()), &prompt).as_slice(),
+        [Effect::ShowCordis]
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/plugins".into()), &prompt).as_slice(),
+        [Effect::ShowCordis]
+    ));
+    assert!(matches!(
         dispatch(Action::SendPrompt("/preset".into()), &prompt).as_slice(),
         [Effect::ShowPresets { focus: None }]
     ));

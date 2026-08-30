@@ -310,6 +310,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "cordis_call",
         "cordis_stop",
         "cordis_undefine",
+        "cordis_promote",
     ] {
         assert!(
             names.iter().any(|n| n == need),

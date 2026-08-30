@@ -6,17 +6,17 @@ mod serde_lenient;
 
 use std::sync::Arc;
 
-use cordis::{Inject, Plugin, plugin};
+use cordis::{plugin, Inject, Plugin};
 
 use crate::names::{GOAL, TOOLS};
-use crate::tools::{ToolBody, Tools, own_registered, tool_result};
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use drain::GoalState;
 pub use grok_tool::{
-    GOAL_RESERVED_SUBCOMMANDS, GoalUpdateHandle, UPDATE_GOAL_TOOL_NAME, UpdateGoalInput,
     goal_composer_fill, goal_continuation_directive, goal_instruction, goal_offer_addon,
-    goal_usage_message, render_ack_into_output,
+    goal_usage_message, render_ack_into_output, GoalUpdateHandle, UpdateGoalInput,
+    GOAL_RESERVED_SUBCOMMANDS, UPDATE_GOAL_TOOL_NAME,
 };
 
 /// Named `"goal"` service. TUI live-looks `active()`.

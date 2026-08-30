@@ -22,11 +22,11 @@ pub use subagent_tool::tool_subagent;
 use std::sync::Arc;
 use std::time::Instant;
 
-use cordis::{Inject, Plugin, plugin};
+use cordis::{plugin, Inject, Plugin};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::names::{SUBAGENTS, TOOLS};
-use crate::tools::{ToolBody, Tools, own_registered, tool_result};
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::ToolCall;
 
 use backend::{ChannelBackend, SubagentBackend};

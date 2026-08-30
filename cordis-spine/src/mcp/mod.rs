@@ -17,7 +17,7 @@ mod tools_list;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use cordis::{Disposable, Inject, Plugin, plugin, plugin_async};
+use cordis::{plugin, plugin_async, Disposable, Inject, Plugin};
 
 use crate::config::{self, McpServer, McpTransport};
 use crate::names::{MCP, TOOLS};

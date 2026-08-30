@@ -7,7 +7,7 @@ use crate::agent_presets::AgentPresets;
 use crate::agents::Agents;
 use crate::ask_user::Ask;
 use crate::cron::Cron;
-use crate::dynamic_runner::{DynamicRunner, SnapshotRow, builtins_lines};
+use crate::dynamic_runner::{builtins_lines, DynamicRunner, PluginOrigin, SnapshotRow};
 use crate::goal::Goal;
 use crate::jobs::Jobs;
 use crate::llm::Llm;
@@ -15,7 +15,7 @@ use crate::lsp::LspBackendAdapter;
 use crate::mcp::Mcp;
 use crate::memory::Memory;
 use crate::names::{
-    AGENT_PRESETS, AGENTS, ASK, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LSP, MCP, MEMORY,
+    AGENTS, AGENT_PRESETS, ASK, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LSP, MCP, MEMORY,
     PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS,
     TUI_SLOTS, TURN, WORKFLOWS,
 };
@@ -53,18 +53,24 @@ pub fn render_inspect(
     if all || what == Some("temporary") {
         sections.push(section("temporary", describe_temporary(runner, session_id)));
     }
+    if all || what == Some("permanent") {
+        sections.push(section("permanent", describe_permanent(runner)));
+    }
     if all || what == Some("factories") {
         sections.push(section("factories", describe_factories(runner)));
     }
     if all || what == Some("builtins") {
         sections.push(section("builtins", builtins_lines()));
     }
+    if all || what == Some("events") {
+        sections.push(section("events", describe_events()));
+    }
     if all || what == Some("slots") {
         sections.push(section("slots", describe_slots(ctx)));
     }
     if sections.is_empty() {
         return format!(
-            "unknown inspect what:{what:?}; use services, fibers, tools, temporary, factories, builtins, or slots"
+            "unknown inspect what:{what:?}; use services, fibers, tools, temporary, permanent, factories, builtins, events, or slots"
         );
     }
     sections.join("\n\n")
@@ -80,7 +86,7 @@ pub fn render_inspect_self(
         (None, None) => {
             let rows = runner.snapshot(session_id);
             if rows.is_empty() {
-                return Ok("No dynamic Plugins are defined in this session. Definitions live only in memory, so a restart clears them.".into());
+                return Ok("No dynamic Plugins are visible in this session. Session definitions live only in memory (a restart clears them). Disk plugins under .dock/plugins/ autoload at startup; inspect what:\"permanent\".".into());
             }
             let mut lines = vec!["mode: plugins".into()];
             for row in rows {
@@ -291,13 +297,34 @@ fn describe_tools(tools: &Tools) -> Vec<String> {
 }
 
 fn describe_temporary(runner: &DynamicRunner, session_id: &str) -> Vec<String> {
-    let rows = runner.snapshot(session_id);
+    let rows: Vec<_> = runner
+        .snapshot(session_id)
+        .into_iter()
+        .filter(|r| matches!(r.origin, PluginOrigin::Session))
+        .collect();
     if rows.is_empty() {
-        return vec!["No dynamic Plugins are defined in this session. Definitions live only in this process's memory, so a restart clears them.".into()];
+        return vec!["No session-local Plugins. Definitions live only in this process's memory, so a restart clears them. Lasting plugins: cordis_promote or .dock/plugins/<id>/.".into()];
     }
+    describe_plugin_rows(&rows)
+}
+
+fn describe_permanent(runner: &DynamicRunner) -> Vec<String> {
+    let disk = crate::dynamic_runner::plugin_roots();
+    let specs = {
+        // scan is in persist; overlay_listing already formats for humans.
+        // Compact inspect: list live persist rows plus disk scan via listing lines.
+        runner.overlay_listing_from("*", &disk)
+    };
+    if specs.trim().is_empty() {
+        return vec!["(no disk plugins)".into()];
+    }
+    specs.lines().map(|s| s.to_string()).collect()
+}
+
+fn describe_plugin_rows(rows: &[SnapshotRow]) -> Vec<String> {
     let mut lines = Vec::new();
     for row in rows {
-        lines.push(plugin_line(&row));
+        lines.push(plugin_line(row));
         for pkg in &row.packages {
             let active = row
                 .active_run
@@ -322,6 +349,14 @@ fn describe_temporary(runner: &DynamicRunner, session_id: &str) -> Vec<String> {
         }
     }
     lines
+}
+
+fn describe_events() -> Vec<String> {
+    vec![
+        "- session/event — session log after append. host.on(\"session/event\", |line| { ... })".into(),
+        "    line is user\\t… / assistant\\t… / tool\\tname / reminder\\t… (pre-step and prompt are skipped)".into(),
+        "    handler runs asynchronously; it must not intercept tools/execute or other waterfalls".into(),
+    ]
 }
 
 fn describe_factories(runner: &DynamicRunner) -> Vec<String> {
@@ -369,8 +404,9 @@ fn plugin_line(row: &SnapshotRow) -> String {
         None => "; stopped".into(),
     };
     format!(
-        "- Plugin {}; current: {current}; next: {next}{active}",
-        row.plugin_id
+        "- Plugin {} ({}); current: {current}; next: {next}{active}",
+        row.plugin_id,
+        row.origin.label()
     )
 }
 

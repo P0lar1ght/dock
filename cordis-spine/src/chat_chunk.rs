@@ -140,15 +140,61 @@ pub struct ToolCallFunctionDelta {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+pub struct ReasoningDetail {
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+impl ReasoningDetail {
+    /// Plaintext for the thinking card; skips encrypted / redacted blobs.
+    pub fn visible_text(&self) -> Option<&str> {
+        self.text
+            .as_deref()
+            .filter(|s| !s.is_empty() && *s != "[REDACTED]")
+            .or_else(|| self.summary.as_deref().filter(|s| !s.is_empty()))
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct ChatChunkDelta {
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
+    /// DeepSeek / some OpenAI-compat proxies.
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    /// OpenRouter normalized string field (alias of reasoning_content).
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    /// OpenRouter MiniMax / Claude structured reasoning chunks.
+    #[serde(default)]
+    pub reasoning_details: Vec<ReasoningDetail>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallDelta>,
+}
+
+impl ChatChunkDelta {
+    /// Prefer string fields, then concatenate visible `reasoning_details`.
+    pub fn reasoning_text(&self) -> Option<String> {
+        if let Some(s) = self.reasoning_content.as_deref().filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+        if let Some(s) = self.reasoning.as_deref().filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+        let mut buf = String::new();
+        for detail in &self.reasoning_details {
+            if let Some(t) = detail.visible_text() {
+                buf.push_str(t);
+            }
+        }
+        (!buf.is_empty()).then_some(buf)
+    }
 }
 
 #[cfg(test)]
@@ -200,5 +246,17 @@ mod tests {
             chunk.usage.unwrap().to_token_usage().cached_prompt_tokens,
             40
         );
+    }
+
+    #[test]
+    fn parses_openrouter_reasoning_fields() {
+        let raw = r#"{"choices":[{"delta":{
+            "reasoning":"a",
+            "reasoning_details":[{"type":"reasoning.text","text":"b"}]
+        }}]}"#;
+        let chunk: ChatCompletionChunk = serde_json::from_str(raw).unwrap();
+        let delta = &chunk.choices[0].delta;
+        assert_eq!(delta.reasoning.as_deref(), Some("a"));
+        assert_eq!(delta.reasoning_text().as_deref(), Some("a"));
     }
 }

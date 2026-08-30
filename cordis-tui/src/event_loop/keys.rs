@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use cordis::Context;
 use cordis_spine::{
-    ASK, AppSettings, Ask, GOAL, Goal, MCP, Mcp, PERMISSIONS, PLAN_MODE, PermissionMode,
-    PermissionOptionKind, Permissions, PlanDecision, PlanMode, SESSIONS, SETTINGS, Sessions,
-    TUI_SLOTS, TuiSlots, UserImage,
+    AppSettings, Ask, Goal, Mcp, PermissionMode, PermissionOptionKind, Permissions, PlanDecision,
+    PlanMode, Sessions, TuiSlots, UserImage, ASK, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSIONS,
+    SETTINGS, TUI_SLOTS,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -17,14 +17,14 @@ use crate::grok::picker::PickerHits;
 use crate::grok::tasks_pane::TaskEntry;
 use crate::names::{TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
 use crate::overlay::{
-    self, HelpItem, HelpKind, InspectTarget, Overlay, UsageTab, filter_sessions, filter_strings,
+    self, filter_sessions, filter_strings, HelpItem, HelpKind, InspectTarget, Overlay, UsageTab,
 };
 use crate::permission_view;
 use crate::plan_approval_view;
 use crate::preset_overlay::{self, PresetAction, PresetView};
 use crate::queue_pane::{self, QueueHit};
 use crate::scrollback::{ClickHit, MouseUpResult, Scrollback};
-use crate::settings_modal::{self, SettingsField};
+use crate::settings_modal;
 use crate::slash::filter_args;
 use crate::subagent_dock;
 
@@ -535,9 +535,11 @@ pub(super) fn run_action(
             } = overlay
             {
                 let fields = settings_modal::field_rows();
-                if let Some(SettingsField::Timestamps) = fields.get(*selected).copied() {
-                    if let Some(settings) = ctx.get::<AppSettings>(SETTINGS) {
-                        settings.toggle_timestamps();
+                if let Some(field) = fields.get(*selected).copied() {
+                    if field.is_bool() {
+                        if let Some(settings) = ctx.get::<AppSettings>(SETTINGS) {
+                            settings_modal::toggle_bool(field, &settings);
+                        }
                     }
                 }
             }
@@ -1153,7 +1155,7 @@ pub(super) fn accept_settings(ctx: &Context, overlay: &mut Overlay) {
         return;
     };
     if field.is_bool() {
-        settings.toggle_timestamps();
+        settings_modal::toggle_bool(field, &settings);
     } else {
         *picking = Some(field);
         *selected = 0;

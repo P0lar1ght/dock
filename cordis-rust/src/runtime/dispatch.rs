@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 
+use crate::dispose::Disposable;
 use crate::error::{AggregateError, Result};
 use crate::events::{EventArgs, EventOptions, Payload, SyncHandler};
 use crate::fiber::StatusEvent;
 use crate::ids::{next_hook, FiberId, FiberState};
 use crate::logger::Logger;
-use crate::dispose::Disposable;
 
 use super::world::Hook;
 use super::{ListenerView, Runtime};
@@ -103,12 +103,7 @@ impl Runtime {
         let w = self.lock();
         let mut out = Vec::new();
         if let Some(hooks) = w.hooks.get("internal/update") {
-            out.extend(
-                hooks
-                    .iter()
-                    .filter(|h| h.global)
-                    .map(|h| h.handler.clone()),
-            );
+            out.extend(hooks.iter().filter(|h| h.global).map(|h| h.handler.clone()));
         }
         if let Some(f) = w.fibers.get(&id) {
             out.extend(f.update_hooks.iter().map(|(_, h)| h.clone()));

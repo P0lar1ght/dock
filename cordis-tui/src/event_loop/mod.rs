@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    AGENT_PRESETS, ASK_EVENT, AgentPresets, AppSettings, GOAL, Goal, LogEvent, MCP_ELICIT_EVENT,
-    PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PlanMode, SESSION_EVENT, SESSIONS, SETTINGS, SLASH,
-    Sessions, Slash, TOOLS, ToolCall, Tools, goal_composer_fill,
+    goal_composer_fill, AgentPresets, AppSettings, DynamicRunner, Goal, LogEvent, PlanMode,
+    Sessions, Slash, ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL,
+    MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS,
+    SLASH, TOOLS,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -28,11 +29,11 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::layout::Rect;
 use ratatui::prelude::CrosstermBackend;
+use ratatui::Terminal;
 
 use crate::error::{Error, Result};
 use crate::grok::picker::PickerHits;
@@ -354,6 +355,21 @@ pub async fn run(ctx: Context) -> Result<()> {
                                     },
                                 );
                             }
+                            Effect::ToggleThinking => {
+                                let on = ctx
+                                    .get::<AppSettings>(SETTINGS)
+                                    .map(|s| s.toggle_thinking())
+                                    .unwrap_or(false);
+                                overlay.close();
+                                flash(
+                                    &ctx,
+                                    if on {
+                                        "思考模式已开"
+                                    } else {
+                                        "思考模式已关"
+                                    },
+                                );
+                            }
                             Effect::EnterLoop { args } => {
                                 overlay.close();
                                 start_loop(&ctx, args);
@@ -506,6 +522,23 @@ pub async fn run(ctx: Context) -> Result<()> {
                                     query: String::new(),
                                     tools_expanded: HashSet::new(),
                                     section_collapsed: false,
+                                };
+                            }
+                            Effect::ShowCordis => {
+                                let sid = ctx
+                                    .get::<Sessions>(SESSIONS)
+                                    .map(|s| s.identity().to_string())
+                                    .unwrap_or_else(|| "main".into());
+                                let body = ctx
+                                    .get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+                                    .map(|runner| runner.overlay_listing(&sid))
+                                    .unwrap_or_else(|| {
+                                        "dynamicCordisRunner 未挂载。".into()
+                                    });
+                                overlay = Overlay::Notice {
+                                    title: "Cordis 插件".into(),
+                                    body,
+                                    scroll: 0,
                                 };
                             }
                             Effect::ShowPresets { focus } => {

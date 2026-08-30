@@ -1,7 +1,7 @@
 //! Pure-Rust engine: Mermaid source -> SVG via the vendored `mermaid-to-svg`
 //! (a dagre layout port), then [`crate::rasterize`] to PNG.
 
-use mermaid_to_svg::{MermaidTheme as EngineTheme, render_mermaid_to_svg};
+use mermaid_to_svg::{render_mermaid_to_svg, MermaidTheme as EngineTheme};
 
 use crate::{MermaidEngine, MermaidError, MermaidTheme, RenderParams, RenderedDiagram};
 
@@ -74,7 +74,7 @@ fn theme_for(theme: MermaidTheme) -> EngineTheme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RenderLimits, render_checked};
+    use crate::{render_checked, RenderLimits};
 
     #[test]
     fn flowchart_svg_contains_node_labels() {

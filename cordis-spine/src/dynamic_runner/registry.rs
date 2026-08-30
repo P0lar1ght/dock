@@ -3,13 +3,14 @@
 //! mounts; packages are immutable; ids are `{prefix}-{n}` / `pkg-{n}` / `run-{n}`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use cordis::{Fiber, FiberState};
 use indexmap::IndexMap;
 use tokio::sync::watch;
 
-use super::RunReceipt;
 use super::factories::FactoryInfo;
+use super::RunReceipt;
 use crate::slash::SlashEntry;
 
 pub type StartOutcome = Result<RunReceipt, String>;
@@ -105,9 +106,50 @@ pub struct Attempt {
     pub host_error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PersistScope {
+    User,
+    Project,
+}
+
+impl PersistScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim() {
+            "" | "project" => Ok(Self::Project),
+            "user" => Ok(Self::User),
+            other => Err(format!(
+                "cordis_promote scope must be \"project\" or \"user\", got {other:?}"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PluginOrigin {
+    Session,
+    Disk { path: PathBuf, scope: PersistScope },
+}
+
+impl PluginOrigin {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Session => "session".into(),
+            Self::Disk { scope, .. } => format!("disk/{}", scope.as_str()),
+        }
+    }
+}
+
 pub struct PluginRec {
     pub plugin_id: String,
     pub session_id: String,
+    pub origin: PluginOrigin,
     pub packages: IndexMap<String, Package>,
     pub current_package_id: Option<String>,
     pub next_package_id: Option<String>,
