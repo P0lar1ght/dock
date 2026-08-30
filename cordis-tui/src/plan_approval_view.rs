@@ -132,6 +132,7 @@ pub fn body_viewport_rows(area_height: u16, view_only: bool) -> usize {
     area_height.saturating_sub(2 + 1 + 1 + opts + 1).max(4) as usize
 }
 
+#[cfg(test)]
 pub fn max_scroll(prompt: &PlanApprovalPrompt, width: usize, viewport: usize) -> usize {
     render_body(prompt, width.max(8))
         .len()

@@ -8,6 +8,8 @@
 //! The receiver is owned by the shared single-writer coordinator actor; only
 //! the child runner plugged into that actor differs by host.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};

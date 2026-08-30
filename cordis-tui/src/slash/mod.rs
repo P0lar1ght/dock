@@ -6,11 +6,11 @@ mod dropdown;
 mod interval;
 mod matcher;
 
-use cordis_spine::{AppSettings, ModelChoice, SlashEntry, load_catalog};
+use cordis_spine::{load_catalog, AppSettings, ModelChoice, SlashEntry};
 
 pub use args::ArgItem;
-pub use dropdown::{SuggestionRow, desired_item_rows, render_dropdown};
-pub use interval::{interval_to_human, parse_loop_args, token_to_duration};
+pub use dropdown::{desired_item_rows, render_dropdown, SuggestionRow};
+pub use interval::interval_to_human;
 pub use matcher::FuzzyMatcher;
 
 /// Copied from grok `slash::MAX_VISIBLE_SUGGESTIONS`.

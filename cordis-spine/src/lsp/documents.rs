@@ -8,6 +8,8 @@
 //! when it arrived. Both of those happen off the client's thread, so the
 //! versions live behind a shared handle rather than inside `LspClient`.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 

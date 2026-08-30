@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 /// Structured errors for the `web_fetch` tool.
 use std::net::IpAddr;
 

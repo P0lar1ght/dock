@@ -1,6 +1,8 @@
 //! Copied from grok-build xai-grok-tools grok_build/task/types.rs.
 //! `register_resource!` / `educe` / `xai_tool_types` stripped; local enums kept.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;

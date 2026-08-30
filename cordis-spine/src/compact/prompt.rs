@@ -2,6 +2,8 @@
 //!
 //! Copied from `xai-grok-compaction/src/code_compaction/prompt.rs`.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 /// Build grok-build's session-level summarization prompt (no chat history).
 ///
 /// `user_context` is the optional `/compact <text>` user-provided context,

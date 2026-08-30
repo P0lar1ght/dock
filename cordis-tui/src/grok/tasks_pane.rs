@@ -4,6 +4,8 @@
 //! ListPane / syntect / kill-button overlay omitted; rows render through the
 //! existing Grok picker chrome.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::time::{Instant, SystemTime};

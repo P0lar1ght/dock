@@ -1,6 +1,8 @@
 //! Server → client JSON-RPC on a shared stream (stdio / POST SSE / GET SSE).
 
-use serde_json::{Value, json};
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::elicitation::Elicitation;

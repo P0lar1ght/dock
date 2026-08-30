@@ -5,6 +5,8 @@
 //! the model's tool reply reflects the real outcome (classifier
 //! verdict / transition / rejection), not a misleading instant success.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
 
 /// Copied from `xai-grok-tools-api::slash_commands`.

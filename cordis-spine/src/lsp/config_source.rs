@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

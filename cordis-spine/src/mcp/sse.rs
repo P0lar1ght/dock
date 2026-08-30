@@ -4,10 +4,12 @@
 //! while no POST is in flight. A 404 on a POST that already had
 //! `Mcp-Session-Id` means the session is gone — handshake again.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
+use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION};
 use serde_json::Value;
 use tokio::sync::watch;
 

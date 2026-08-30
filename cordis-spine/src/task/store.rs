@@ -1,5 +1,7 @@
 //! TUI / jobs / resume cache. Spawn still goes through [`ChannelBackend`].
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

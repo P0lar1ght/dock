@@ -1,5 +1,7 @@
 //! Runtime-configurable parameters for the `web_fetch` tool.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};

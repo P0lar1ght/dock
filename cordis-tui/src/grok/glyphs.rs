@@ -47,6 +47,7 @@ pub fn token_down() -> &'static str {
 }
 
 /// `"⇡"` upload tokens. Always 1 column.
+#[allow(dead_code)]
 pub fn token_up() -> &'static str {
     "\u{21E1}"
 }

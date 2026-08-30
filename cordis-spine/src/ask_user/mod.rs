@@ -8,15 +8,14 @@ mod types;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use cordis::{Context, Inject, Plugin, plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 use indexmap::IndexMap;
 use tokio::sync::oneshot;
 
 use crate::names::{ASK, ASK_EVENT, TOOLS};
-use crate::tools::{ToolBody, Tools, own_registered, tool_result};
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
-pub use format::{CANCEL_TEXT, NO_OPERATOR_TEXT, unanswered_text};
 pub use questions::{AskUserQuestionInput, Question, QuestionOption};
 pub use types::QuestionAnnotation;
 

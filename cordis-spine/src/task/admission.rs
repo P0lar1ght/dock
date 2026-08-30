@@ -1,5 +1,7 @@
 //! Session-scoped subagent spawn limits, enforced by the coordinator.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use super::types::SubagentRequest;
 
 fn parse_positive_env(var: &str, value: Option<String>) -> Option<usize> {

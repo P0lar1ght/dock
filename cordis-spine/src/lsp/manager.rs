@@ -1,5 +1,7 @@
 //! Manages multiple LSP servers, routes by file extension, collects diagnostics.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +13,7 @@ use super::client::LspClient;
 use super::config::LspServerConfig;
 use super::pending::{PendingEdits, PendingPolicy};
 use super::process::ProcessScope;
-use super::{DiagnosticsNotify, file_uri};
+use super::{file_uri, DiagnosticsNotify};
 
 #[cfg(test)]
 use super::format::{format_locations_labeled, format_symbols};

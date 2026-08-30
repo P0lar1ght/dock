@@ -9,6 +9,8 @@
 //! Partial costs are scrubbed (absence ≠ free). Totals reset when the live
 //! session is cleared or restored.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::time::Duration;
 
 use indexmap::IndexMap;

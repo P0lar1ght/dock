@@ -10,19 +10,21 @@
 //! apart is what lets the transport be tested without a server, and what keeps
 //! the one judgement call, [`CONFIRM_DELAY`], in one readable place.
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
 
-use async_lsp::LanguageServer;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
 use async_lsp::lsp_types::{
     Diagnostic, DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportResult,
     TextDocumentIdentifier, Url,
 };
+use async_lsp::LanguageServer;
 
-use super::DiagnosticsNotify;
 use super::diagnostics::{Answer, DiagnosticsStore};
 use super::documents::Documents;
+use super::DiagnosticsNotify;
 
 /// How long to wait for a pull-diagnostics response before giving up on it.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

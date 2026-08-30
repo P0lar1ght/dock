@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 /// A single option within a question.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuestionOption {

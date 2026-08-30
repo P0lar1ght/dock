@@ -1,5 +1,7 @@
 //! Interval token parser copied from grok `slash/commands/loop_cmd.rs`.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 /// Split `/loop` args into an optional leading compact interval token and the prompt.
 pub fn parse_loop_args(args: &str) -> (Option<&str>, &str) {
     let trimmed = args.trim();

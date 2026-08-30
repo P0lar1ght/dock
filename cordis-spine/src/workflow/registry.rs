@@ -1,8 +1,10 @@
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use xai_workflow::{WorkflowMeta, extract_meta};
+use xai_workflow::{extract_meta, WorkflowMeta};
 
 pub(crate) const MAX_WORKFLOW_SOURCE_BYTES: u64 = 1024 * 1024;
 const MAX_WORKFLOW_NAME_BYTES: usize = 64;

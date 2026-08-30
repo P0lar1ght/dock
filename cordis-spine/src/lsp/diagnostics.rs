@@ -18,6 +18,8 @@
 //! arrival order — it is credited with the newest version we had sent when it
 //! arrived.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};

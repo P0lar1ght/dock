@@ -11,6 +11,8 @@
 //!
 //! Both mean the same thing to us: ask again about everything we have open.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 

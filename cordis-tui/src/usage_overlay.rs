@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use cordis::Context;
 use cordis_spine::{
-    ContextSnapshot, OccupancyDetail, OccupancyKind, SESSIONS, Sessions, TokenUsage,
-    occupancy_detail, session_usage_block_text, snapshot_context,
+    occupancy_detail, session_usage_block_text, snapshot_context, ContextSnapshot, OccupancyDetail,
+    OccupancyKind, Sessions, TokenUsage, SESSIONS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -18,7 +18,7 @@ use ratatui::widgets::{Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::grok::glyphs;
-use crate::grok::picker::{PickerHits, render_floating_frame};
+use crate::grok::picker::{render_floating_frame, PickerHits};
 use crate::overlay::UsageTab;
 use crate::theme::Theme;
 
@@ -622,6 +622,7 @@ struct ContextView {
 }
 
 impl ContextView {
+    #[cfg(test)]
     fn screen_hits(&self, body: Rect, scroll: usize) -> Vec<(Rect, OccupancyKind)> {
         body_hits(&self.legend, &self.bar, self.bar_row_len, body, scroll)
     }
@@ -697,6 +698,7 @@ fn category_kind(label: &str) -> OccupancyKind {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn context_lines(snapshot: &ContextSnapshot, width: u16) -> Vec<Line<'static>> {
     context_view(snapshot, width, None).lines
 }

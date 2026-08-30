@@ -12,6 +12,8 @@
 //! String lists (e.g. `task_ids`) may arrive as a bare string or number
 //! instead of an array; see [`lenient_string_list_from_json`].
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use serde::Deserialize;
 
 const TRUE_LITERALS: [&str; 3] = ["true", "yes", "1"];

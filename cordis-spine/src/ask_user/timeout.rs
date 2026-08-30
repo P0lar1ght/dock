@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 /// Default max time to wait for the user to answer the questionnaire (all
 /// questions in this tool call share one timer): 30 minutes. On expiry the
 /// tool returns the same skipped/cancel text as a user dismiss

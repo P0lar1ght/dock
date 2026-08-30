@@ -1,5 +1,7 @@
 //! LSP server configuration from `.grok/lsp.json`.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -316,7 +318,7 @@ impl LspServerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{LspServerConfig, filter_project_lsp_when_untrusted};
+    use super::{filter_project_lsp_when_untrusted, LspServerConfig};
     use crate::lsp::config_source::ConfigSource;
     use std::collections::BTreeMap;
     use std::path::PathBuf;

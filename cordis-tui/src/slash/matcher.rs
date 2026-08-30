@@ -4,9 +4,11 @@
 //! wrapper around nucleo's `MultiPattern` that provides ranked results
 //! and highlight index extraction.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use nucleo::{
-    Config, Matcher, Utf32String,
     pattern::{CaseMatching, MultiPattern, Normalization},
+    Config, Matcher, Utf32String,
 };
 
 /// Fuzzy matcher backed by nucleo.

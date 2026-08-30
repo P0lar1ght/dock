@@ -3,6 +3,8 @@
 //! Shape matches Grok `$GROK_HOME/mcp_credentials.json` so a copied file still
 //! loads. Isolated from model API keys in `config.toml`.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

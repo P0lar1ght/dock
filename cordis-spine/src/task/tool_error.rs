@@ -1,5 +1,7 @@
 //! Local stand-in for `xai_tool_runtime::ToolError` (not path-dep grok-build).
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::fmt;
 
 #[derive(Debug)]

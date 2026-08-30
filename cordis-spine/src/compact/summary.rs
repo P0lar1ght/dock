@@ -2,6 +2,8 @@
 //!
 //! Copied from `xai-grok-compaction/src/code_compaction/summary.rs`.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 /// Clean the compaction model's raw output into the plain-text `Summary:`
 /// block that seeds the next turn.
 ///

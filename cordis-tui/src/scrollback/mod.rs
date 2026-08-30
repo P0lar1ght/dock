@@ -25,7 +25,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::Widget;
 
 use crate::grok::mermaid::{self, AffordanceKind};
 use crate::theme::Theme;
@@ -538,6 +538,7 @@ impl Scrollback {
     }
 }
 
+#[cfg(test)]
 pub fn inspect_lines(events: &[LogEvent], width: usize, running: bool) -> Vec<Line<'static>> {
     child_transcript(
         events,
@@ -553,6 +554,7 @@ pub fn inspect_lines(events: &[LogEvent], width: usize, running: bool) -> Vec<Li
 }
 
 /// Child inspect: skip the spawn User prompt so the overlay starts at work + replies.
+#[cfg(test)]
 pub fn inspect_child_lines(events: &[LogEvent], width: usize, running: bool) -> Vec<Line<'static>> {
     child_transcript(
         events,
@@ -625,6 +627,7 @@ fn skip_first_user_event(events: &[LogEvent]) -> Vec<LogEvent> {
         .collect()
 }
 
+#[cfg(test)]
 pub fn markdown_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     assistant::render(text, &Theme::current(), width).lines
 }
@@ -1029,6 +1032,7 @@ fn paint_timestamps(
 mod tests {
     use super::*;
     use cordis_spine::{LlmOutput, ToolCall};
+    use ratatui::widgets::Paragraph;
 
     fn plain(lines: &[Line<'_>]) -> String {
         lines

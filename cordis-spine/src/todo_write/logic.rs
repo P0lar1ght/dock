@@ -5,6 +5,8 @@
 //! module. State is stored as `State<TodoState>` in Resources instead of
 //! `ToolState.todo_state`.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::fmt::Write;
 
 use indexmap::IndexMap;

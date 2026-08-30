@@ -6,6 +6,8 @@
 //! The tests below pin the exact output strings and serve as the
 //! source-of-truth specification.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::HashMap;
 
 use indexmap::IndexMap;

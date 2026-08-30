@@ -1,6 +1,8 @@
 //! SessionActor-shaped drain: oneshot ack then `xai_workflow::run_workflow`.
 //! Host `SpawnAgent` live-looks `"subagents"` (`ChannelBackend::spawn`, `await_to_completion`).
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -8,14 +10,14 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use xai_workflow::{
-    AgentResult, BudgetState, HostError, Journal, WorkflowHostRequest, WorkflowOutcome,
-    WorkflowRunParams, run_workflow, validate_script,
+    run_workflow, validate_script, AgentResult, BudgetState, HostError, Journal,
+    WorkflowHostRequest, WorkflowOutcome, WorkflowRunParams,
 };
 
 use super::grok_tool::{
     WorkflowLaunchAck, WorkflowLaunchEnvelope, WorkflowSource, WorkflowToolInput,
 };
-use super::registry::{ResolveError, resolve_by_name, resolve_by_path, resolve_inline};
+use super::registry::{resolve_by_name, resolve_by_path, resolve_inline, ResolveError};
 use crate::names::SUBAGENTS;
 use crate::task::Subagents;
 

@@ -1,6 +1,8 @@
 //! Copied from `xai-tty-utils` `ProcessScope` / unix `ProcessGroup`.
 //! `killpg` uses libc instead of nix. `detach_std_command` is the unix `setsid` path.
 
+#![allow(dead_code)] // Grok-copied API kept for later wiring.
+
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};

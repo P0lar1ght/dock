@@ -103,6 +103,7 @@ struct DiffBody {
 enum DiffRow {
     Del(String),
     Ins(String),
+    #[allow(dead_code)]
     Context(String),
 }
 
