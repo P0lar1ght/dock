@@ -11,6 +11,9 @@ export class SlashClient {
   }
 
   execute(text: string, threadId?: string) {
+    // Gateway currently has one live thread. `threadId` must be "live" or omitted;
+    // anything else is rejected. User/assistant text after `submitted` arrives
+    // on the existing `thread/subscribe` stream.
     return this.request<SlashExecuteResult>(SLASH_EXECUTE, {
       text,
       ...(threadId ? { threadId } : {})

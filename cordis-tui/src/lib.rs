@@ -54,3 +54,4 @@ pub use names::{
 pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui, welcome};
 pub use prompt::PromptWidget;
 pub use session::{QueuedItem, SessionPort, SessionRef};
+pub use slash::{resolve_slash, slash_catalog, SlashCatalogEntry};

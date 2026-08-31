@@ -1,9 +1,10 @@
 //! Slash catalog + execution for the web client.
 //!
-//! TUI builtins live in `cordis-tui` `CATALOG` and dispatch to overlays.
-//! The browser only parses/renders: `slash/list` is autocomplete, `slash/execute`
-//! talks to spine services. Capture commands (`/screenshot`) are listed here so
-//! embed does not keep a parallel harness catalog; the actual pixels stay in JS.
+//! Builtin names come from `cordis_tui::slash_catalog()` (the pager dropdown).
+//! `slash/list` is autocomplete; `slash/execute` talks to spine services.
+//! Capture commands (`/screenshot`) are listed here so embed does not keep a
+//! parallel harness catalog; the actual pixels stay in JS. `/cd` is listed
+//! but refused on this surface: it is process-global `set_current_dir`.
 
 use serde_json::{json, Value};
 
@@ -13,7 +14,7 @@ use cordis_spine::{
     Slash, SlashEntry, ToolCall, Tools, GOAL, GOAL_RESERVED_SUBCOMMANDS, PLAN_MODE, SESSIONS,
     SETTINGS, SLASH, TOOLS,
 };
-use cordis_tui::{SessionRef, SESSION_PORT};
+use cordis_tui::{resolve_slash, slash_catalog, SessionRef, SlashCatalogEntry, SESSION_PORT};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::{RpcError, LIVE_THREAD_ID};
@@ -29,233 +30,18 @@ struct Item {
     capture: Option<&'static str>,
 }
 
-/// Harness-facing builtins. Names/aliases stay aligned with TUI `CATALOG`.
-const BUILTINS: &[Item] = &[
-    Item {
-        name: "new",
-        aliases: &[],
-        description: "开始新会话",
-        takes_args: false,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "model",
-        aliases: &["m"],
-        description: "切换当前模型",
-        takes_args: true,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "resume",
-        aliases: &[],
-        description: "恢复上次会话",
-        takes_args: false,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "loop",
-        aliases: &["cron"],
-        description: "安排循环提问",
-        takes_args: true,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "plan",
-        aliases: &[],
-        description: "进入计划模式",
-        takes_args: true,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "view-plan",
-        aliases: &["show-plan", "plan-view"],
-        description: "查看或批准当前计划",
-        takes_args: false,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "goal",
-        aliases: &[],
-        description: "开始或查看目标",
-        takes_args: true,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "compact",
-        aliases: &[],
-        description: "压缩旧对话",
-        takes_args: true,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "effort",
-        aliases: &[],
-        description: "设置推理强度",
-        takes_args: true,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "think",
-        aliases: &["thinking"],
-        description: "开关思考模式（推理过程）",
-        takes_args: false,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "help",
-        aliases: &[],
-        description: "显示斜杠命令",
-        takes_args: false,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "usage",
-        aliases: &["cost"],
-        description: "查看本会话用量",
-        takes_args: false,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "context",
-        aliases: &[],
-        description: "查看上下文占用",
-        takes_args: false,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "workflow",
-        aliases: &[],
-        description: "查看或启动工作流",
-        takes_args: true,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "timestamps",
-        aliases: &[],
-        description: "开关滚动区时间戳",
-        takes_args: false,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "cd",
-        aliases: &[],
-        description: "切换工作目录",
-        takes_args: true,
-        surface: "gateway",
-        capture: None,
-    },
-    Item {
-        name: "settings",
-        aliases: &["config", "prefs"],
-        description: "打开设置",
-        takes_args: true,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "pair",
-        aliases: &["pairing"],
-        description: "浏览器配对与已绑来源",
-        takes_args: false,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "history",
-        aliases: &[],
-        description: "搜索提示词历史",
-        takes_args: false,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "find",
-        aliases: &[],
-        description: "搜索对话",
-        takes_args: false,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "copy",
-        aliases: &[],
-        description: "把上一条回复复制到剪贴板或文件",
-        takes_args: true,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "theme",
-        aliases: &["t"],
-        description: "切换配色",
-        takes_args: true,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "export",
-        aliases: &[],
-        description: "把对话导出到文件",
-        takes_args: true,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "tasks",
-        aliases: &[],
-        description: "列出后台任务与定时任务",
-        takes_args: false,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "mcps",
-        aliases: &[],
-        description: "MCP 服务器",
-        takes_args: false,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "cordis",
-        aliases: &["plugins"],
-        description: "动态 / 永久 Cordis 插件",
-        takes_args: false,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "preset",
-        aliases: &["presets", "agent", "agents"],
-        description: "组装 Agent 预设",
-        takes_args: true,
-        surface: "terminal",
-        capture: None,
-    },
-    Item {
-        name: "quit",
-        aliases: &["exit"],
-        description: "退出",
-        takes_args: false,
-        surface: "terminal",
-        capture: None,
-    },
-];
+/// Names the web client may run against spine / `session.port`.
+/// Everything else in the TUI catalog is terminal-only (overlays, `/quit`,
+/// and `/cd` — the last is process-global `set_current_dir`).
+fn surface_for(name: &str) -> &'static str {
+    match name {
+        "new" | "model" | "resume" | "loop" | "plan" | "view-plan" | "goal" | "compact"
+        | "effort" | "think" | "help" | "usage" | "context" | "workflow" | "timestamps" => {
+            "gateway"
+        }
+        _ => "terminal",
+    }
+}
 
 const GOAL_HINTS: &[Item] = &[
     Item {
@@ -337,7 +123,10 @@ const CAPTURE: &[Item] = &[
 
 pub fn list(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
     let mut commands = Vec::new();
-    for item in BUILTINS.iter().chain(GOAL_HINTS).chain(CAPTURE) {
+    for entry in slash_catalog() {
+        commands.push(catalog_json(&entry));
+    }
+    for item in GOAL_HINTS.iter().chain(CAPTURE) {
         commands.push(item_json(item));
     }
     if let Some(slash) = gateway.ctx().get::<Slash>(SLASH) {
@@ -349,6 +138,7 @@ pub fn list(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> 
 }
 
 pub async fn execute(gateway: GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    require_live_thread(&params)?;
     let text = params
         .get("text")
         .or_else(|| params.get("message"))
@@ -364,6 +154,19 @@ pub async fn execute(gateway: GatewayHandle, params: Value) -> Result<Value, Rpc
     }
 }
 
+fn require_live_thread(params: &Value) -> Result<(), RpcError> {
+    let Some(id) = params.get("threadId").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let id = id.trim();
+    if id.is_empty() || id == LIVE_THREAD_ID {
+        return Ok(());
+    }
+    Err(RpcError::invalid_params(format!(
+        "threadId must be \"{LIVE_THREAD_ID}\" or omitted"
+    )))
+}
+
 async fn dispatch_named(
     gateway: &GatewayHandle,
     name: &str,
@@ -372,8 +175,8 @@ async fn dispatch_named(
     if name == "screenshot" {
         return Ok(json!({ "ok": true, "kind": "capture" }));
     }
-    if let Some(item) = lookup_builtin(name) {
-        return execute_builtin(gateway, item.name, args).await;
+    if let Some(entry) = resolve_slash(name) {
+        return execute_builtin(gateway, entry.name, args).await;
     }
     if let Some(slash) = gateway.ctx().get::<Slash>(SLASH) {
         if let Some(entry) = slash.list().into_iter().find(|e| e.command == name) {
@@ -405,7 +208,7 @@ async fn execute_builtin(
         "context" => Ok(menu("context")),
         "workflow" => cmd_workflow(gateway, args),
         "timestamps" => cmd_timestamps(gateway),
-        "cd" => cmd_cd(args),
+        "cd" => Ok(terminal_only("cd")),
         "settings" => cmd_settings(gateway, args),
         other => Ok(terminal_only(other)),
     }
@@ -644,17 +447,6 @@ fn cmd_timestamps(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     }))
 }
 
-fn cmd_cd(args: &str) -> Result<Value, RpcError> {
-    let path = if args.is_empty() { "." } else { args };
-    match std::env::set_current_dir(path) {
-        Ok(()) => {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(path));
-            Ok(applied(format!("cwd {}", cwd.display())))
-        }
-        Err(e) => Ok(notice("工作目录", e.to_string())),
-    }
-}
-
 fn cmd_settings(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
     if args.is_empty() {
         return Ok(terminal_only("settings"));
@@ -676,6 +468,9 @@ fn submit_text(gateway: &GatewayHandle, text: String) -> Result<Value, RpcError>
     let port = session_port(gateway)?;
     let working = port.working();
     port.submit(text, false);
+    // Embed refreshes environment on `submitted`. User/assistant text arrives
+    // via `thread/subscribe` transcript events (SessionCoordinator.open already
+    // subscribes); this is not a PolarVigil Runtime replay.
     Ok(json!({
         "ok": true,
         "kind": "submitted",
@@ -710,11 +505,17 @@ fn parse_slash_line(text: &str) -> Option<(String, String)> {
     Some((name.to_string(), args))
 }
 
-fn lookup_builtin(name: &str) -> Option<&'static Item> {
-    let n = name.trim_start_matches('/');
-    BUILTINS
-        .iter()
-        .find(|d| d.name == n || d.aliases.iter().any(|a| *a == n))
+fn catalog_json(entry: &SlashCatalogEntry) -> Value {
+    json!({
+        "name": entry.name,
+        "display": format!("/{}", entry.name),
+        "aliases": entry.aliases,
+        "description": entry.description,
+        "takesArgs": entry.takes_args,
+        "surface": surface_for(entry.name),
+        "kind": "command",
+        "capture": Value::Null,
+    })
 }
 
 fn item_json(item: &Item) -> Value {
@@ -745,7 +546,10 @@ fn extra_json(entry: &SlashEntry) -> Value {
 
 fn help_body(gateway: &GatewayHandle) -> String {
     let mut lines = Vec::new();
-    for item in BUILTINS.iter().chain(CAPTURE) {
+    for entry in slash_catalog() {
+        lines.push(format!("/{}  {}", entry.name, entry.description));
+    }
+    for item in CAPTURE {
         lines.push(format!("/{}  {}", item.name, item.description));
     }
     if let Some(slash) = gateway.ctx().get::<Slash>(SLASH) {
@@ -803,4 +607,39 @@ fn session_port(gateway: &GatewayHandle) -> Result<std::sync::Arc<SessionRef>, R
         .ctx()
         .get::<SessionRef>(SESSION_PORT)
         .ok_or_else(|| RpcError::app("unavailable", "session.port is not mounted"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn tokens(entry: SlashCatalogEntry) -> impl Iterator<Item = &'static str> {
+        std::iter::once(entry.name).chain(entry.aliases.iter().copied())
+    }
+
+    #[test]
+    fn builtin_tokens_match_tui_catalog() {
+        let tui: HashSet<String> = slash_catalog()
+            .flat_map(tokens)
+            .map(str::to_string)
+            .collect();
+        let listed: HashSet<String> = slash_catalog()
+            .map(|entry| catalog_json(&entry))
+            .flat_map(|row| {
+                let name = row["name"].as_str().unwrap().to_string();
+                let aliases = row["aliases"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|a| a.as_str().map(str::to_string));
+                std::iter::once(name).chain(aliases)
+            })
+            .collect();
+        assert_eq!(listed, tui);
+        assert!(tui.contains("cd"));
+        assert_eq!(surface_for("cd"), "terminal");
+        assert_eq!(surface_for("new"), "gateway");
+        assert_eq!(surface_for("pair"), "terminal");
+    }
 }

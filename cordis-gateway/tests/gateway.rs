@@ -595,9 +595,41 @@ async fn slash_list_includes_harness_and_screenshot() {
         "screenshot --region",
         "memo",
         "pair",
+        "cd",
     ] {
         assert!(names.contains(&expected), "missing {expected} in {names:?}");
     }
+    let cd = listed["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "cd")
+        .unwrap();
+    assert_eq!(cd["surface"], "terminal");
+
+    use std::collections::HashSet;
+    let tui: HashSet<String> = cordis_tui::slash_catalog()
+        .flat_map(|e| {
+            std::iter::once(e.name.to_string()).chain(e.aliases.iter().map(|a| (*a).to_string()))
+        })
+        .collect();
+    let gw: HashSet<String> = listed["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "command")
+        .filter(|c| !c["name"].as_str().unwrap_or("").contains(' '))
+        .flat_map(|c| {
+            let name = c["name"].as_str().unwrap().to_string();
+            let aliases = c["aliases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str().map(str::to_string));
+            std::iter::once(name).chain(aliases)
+        })
+        .collect();
+    assert_eq!(gw, tui, "slash/list builtins drifted from TUI CATALOG");
 }
 
 #[tokio::test]
@@ -633,6 +665,33 @@ async fn slash_execute_dispatches_to_spine() {
         .as_str()
         .unwrap()
         .contains("终端"));
+
+    let cwd_before = std::env::current_dir().unwrap();
+    let cd = rpc
+        .call("slash/execute", json!({ "text": "/cd /tmp" }))
+        .await;
+    assert_eq!(cd["result"]["kind"], "notice");
+    assert!(cd["result"]["notice"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("终端"));
+    assert_eq!(std::env::current_dir().unwrap(), cwd_before);
+
+    let bad_thread = rpc
+        .call("slash/execute", json!({ "text": "/new", "threadId": "s1" }))
+        .await;
+    assert!(
+        bad_thread.get("error").is_some(),
+        "archived threadId must be rejected: {bad_thread}"
+    );
+
+    let live_ok = rpc
+        .call(
+            "slash/execute",
+            json!({ "text": "/help", "threadId": "live" }),
+        )
+        .await;
+    assert_eq!(live_ok["result"]["kind"], "notice");
 
     let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
     sessions.append(LogEvent::User("keep me".into()));

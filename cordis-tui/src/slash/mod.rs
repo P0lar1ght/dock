@@ -78,6 +78,39 @@ pub struct SlashDef {
     pub arg_kind: Option<ArgKind>,
 }
 
+/// Name / alias / description tokens for the TUI slash catalog.
+///
+/// Gateway `slash/list` iterates this so the browser autocomplete cannot
+/// drift from the pager dropdown. Does not expose overlay `Effect`s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlashCatalogEntry {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub description: &'static str,
+    pub takes_args: bool,
+}
+
+impl SlashDef {
+    fn catalog_entry(&self) -> SlashCatalogEntry {
+        SlashCatalogEntry {
+            name: self.name,
+            aliases: self.aliases,
+            description: self.description,
+            takes_args: self.takes_args,
+        }
+    }
+}
+
+/// Builtin catalog in dropdown order (TUI `CATALOG`).
+pub fn slash_catalog() -> impl Iterator<Item = SlashCatalogEntry> {
+    CATALOG.iter().map(SlashDef::catalog_entry)
+}
+
+/// Resolve a name or alias to the canonical catalog entry.
+pub fn resolve_slash(raw: &str) -> Option<SlashCatalogEntry> {
+    lookup(raw).map(SlashDef::catalog_entry)
+}
+
 /// Menu order copied from grok `builtin_commands()` (pager-local subset).
 pub const CATALOG: &[SlashDef] = &[
     SlashDef {
@@ -678,6 +711,35 @@ mod tests {
             command_for_submit_ex("/help", &extras),
             Some((SlashPick::Builtin(SlashCmd::Help), String::new()))
         );
+    }
+
+    #[test]
+    fn public_catalog_tokens_match_internal() {
+        let internal: Vec<_> = CATALOG
+            .iter()
+            .map(|d| (d.name, d.aliases, d.description, d.takes_args))
+            .collect();
+        let public: Vec<_> = slash_catalog()
+            .map(|e| (e.name, e.aliases, e.description, e.takes_args))
+            .collect();
+        assert_eq!(internal, public);
+        assert_eq!(resolve_slash("cron").map(|e| e.name), Some("loop"));
+        assert_eq!(resolve_slash("cd").map(|e| e.name), Some("cd"));
+    }
+
+    #[test]
+    fn catalog_names_and_aliases_unique() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for d in CATALOG {
+            assert!(seen.insert(d.name), "duplicate catalog name {}", d.name);
+            for alias in d.aliases {
+                assert!(
+                    seen.insert(*alias),
+                    "duplicate catalog token {alias} (name or alias)"
+                );
+            }
+        }
     }
 
     #[test]
