@@ -112,10 +112,7 @@ pub fn render_pending(
     buf.set_line(
         content_x,
         y,
-        &Line::from(Span::styled(
-            format!("应用  {}", prompt.application),
-            meta,
-        )),
+        &Line::from(Span::styled(format!("应用  {}", prompt.application), meta)),
         content_w,
     );
     y = y.saturating_add(1);
@@ -126,7 +123,12 @@ pub fn render_pending(
         if y >= area.y + area.height {
             break;
         }
-        buf.set_line(content_x, y, &Line::from(Span::styled(line, meta)), content_w);
+        buf.set_line(
+            content_x,
+            y,
+            &Line::from(Span::styled(line, meta)),
+            content_w,
+        );
         y = y.saturating_add(1);
     }
     buf.set_line(
@@ -184,7 +186,10 @@ pub fn render_pending(
             content_x,
             y,
             &Line::from(vec![
-                Span::styled(format!("{} ", i + 1), Style::default().fg(theme.accent_user).bg(row_bg)),
+                Span::styled(
+                    format!("{} ", i + 1),
+                    Style::default().fg(theme.accent_user).bg(row_bg),
+                ),
                 Span::styled(format!("{marker} {label}"), text_style),
             ]),
             content_w,
@@ -222,6 +227,7 @@ pub fn render_manage(
     pending: &[PairingPrompt],
     bindings: &[PairingBinding],
     selected: usize,
+    warning: Option<&str>,
 ) -> PickerHits {
     let rows = manage_rows(pending, bindings);
     let owned: Vec<(String, String, bool)> = if rows.is_empty() {
@@ -262,7 +268,14 @@ pub fn render_manage(
             selected: *selected,
         })
         .collect();
-    overlay::render_overlay(buf, area, "浏览器配对", "", &picker, false)
+    overlay::render_overlay(
+        buf,
+        area,
+        "浏览器配对",
+        warning.unwrap_or(""),
+        &picker,
+        false,
+    )
 }
 
 pub fn accept_manage(ui: &PairingUi, overlay: &mut Overlay) {

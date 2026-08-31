@@ -20,7 +20,7 @@ cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
 | 其它 spine | `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `subagents` `memory` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名；`agentPresets` 定义是 YAML 目录（内置 `code` / `minimal` / `cordis` / `warden` < `~/.dock/presets/<id>/` 或显示名目录如 `创造/` < 项目 `.dock/presets/<id>/`；旧 `<id>.yml` 仍可读）。新建模式默认落到项目层 |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-subagent` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` | 同名 |
-| 回环网关 | `gateway` | `"gateway"`（`GatewayRef`）；事件 `gateway/pairing`。只绑 loopback（默认 `127.0.0.1:18991`，同时尝试 `[::1]` 同端口；`DOCK_GATEWAY_BIND` 可覆盖）。CORS 反射 Origin 是有意的：鉴权靠配对 + 回环，不是 Origin 白名单。Approved 的 poll **不**回 ticket 明文，浏览器走 `POST /v1/pairing/exchanges`。斜杠：`slash/list` + `slash/execute`（live-lookup spine，不把 TUI overlay 搬进 web） |
+| 回环网关 | `gateway` | `"gateway"`（`GatewayRef`）；事件 `gateway/pairing`。只绑 loopback（默认 `127.0.0.1:18991`，同时尝试 `[::1]` 同端口；`DOCK_GATEWAY_BIND` 可覆盖）。`[::1]` 绑失败会打 stderr，并出现在 `/pair` overlay 与 `initialize.connection.companion`，不能静默。CORS 反射 Origin 是有意的：鉴权靠配对 + 回环，不是 Origin 白名单。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费。斜杠：`slash/list` + `slash/execute` |
 | 事件循环 | `tui` inject `session` + `session.port` | — |
 
 - **换插件，不改 loop。** 新 UI 面做成 `tui.*` 插件；新采样做成 `llm` 插件。工具能力插件 `inject: ["tools"]` 后 `ctx.tools.register()`（DSH 一个 `"tools"` 表，不是 `tools.mcp` ExtraTools）。不要把功能焊进 `event_loop` 或 `agent-loop`。
@@ -59,6 +59,7 @@ Chrome（快捷键条 `Key:label`、思考折叠、工具卡片输入/输出、p
 - 打开 MCP 的测试必须 fail-open；harness 默认 `mcp: false`。
 - 不要提交 `.dock/config.toml`、API key、`.env`。`DOCK_HOME` 覆盖用户配置目录。
 - `Context::new()` 需要 tokio runtime。
+- `cordis-gateway` 需要 **rustc 1.88+**（1.85 编不过）。本机不够时在 CI / 1.88 环境跑 `cargo test -p cordis-gateway`。
 
 ## 改代码时
 

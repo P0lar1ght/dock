@@ -9,7 +9,9 @@ use cordis_spine::{
     Ask, LogEvent, Mcp, Permissions, PlanMode, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS,
     PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT,
 };
-use cordis_tui::{GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt};
+use cordis_tui::{
+    CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
+};
 
 use crate::pairing::{IssuedTicket, PairingStatus, PairingStore};
 use crate::transcript::{ProjectedEvent, Transcript};
@@ -19,6 +21,7 @@ pub struct GatewayInner {
     pub pairing: Mutex<PairingStore>,
     pub transcript: Mutex<Transcript>,
     pub local_addr: SocketAddr,
+    pub companion: CompanionStatus,
 }
 
 #[derive(Clone)]
@@ -27,15 +30,24 @@ pub struct GatewayHandle {
 }
 
 impl GatewayHandle {
-    pub fn new(ctx: Context, local_addr: SocketAddr) -> Self {
+    pub fn new(ctx: Context, local_addr: SocketAddr, companion: CompanionStatus) -> Self {
         let inner = Arc::new(GatewayInner {
             pairing: Mutex::new(PairingStore::new(ctx.clone())),
             transcript: Mutex::new(Transcript::new()),
             local_addr,
+            companion,
             ctx: ctx.clone(),
         });
         listen_events(&inner);
         Self { inner }
+    }
+
+    pub fn companion_status(&self) -> CompanionStatus {
+        self.inner.companion.clone()
+    }
+
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.inner.local_addr
     }
 
     pub fn ctx(&self) -> &Context {
@@ -150,6 +162,10 @@ impl GatewayPort for GatewayHandle {
 
     fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr
+    }
+
+    fn companion_status(&self) -> CompanionStatus {
+        self.inner.companion.clone()
     }
 }
 

@@ -153,7 +153,7 @@ fn pairing_http_error(e: cordis_tui::PairingError) -> Response {
         "pairing_required" | "origin_mismatch" | "denied" => StatusCode::FORBIDDEN,
         "not_found" => StatusCode::NOT_FOUND,
         "expired" => StatusCode::GONE,
-        "pending" | "not_pending" | "not_ready" => StatusCode::CONFLICT,
+        "pending" | "not_pending" | "not_ready" | "consumed" => StatusCode::CONFLICT,
         _ => StatusCode::BAD_REQUEST,
     };
     (status, Json(http_error(e.code, e.message))).into_response()

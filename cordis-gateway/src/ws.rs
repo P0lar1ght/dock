@@ -148,7 +148,9 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
                 "application": auth.application,
                 "origin": auth.origin,
                 "defaultWorkspaceId": protocol::DEFAULT_WORKSPACE_ID,
-                "connectionLeaseId": uuid::Uuid::new_v4().to_string()
+                "connectionLeaseId": uuid::Uuid::new_v4().to_string(),
+                "listen": conn.gateway.listen_addr().to_string(),
+                "companion": companion_json(&conn.gateway.companion_status())
             }
         }));
     }
@@ -167,4 +169,18 @@ fn rpc_error_frame(id: Option<Value>, err: RpcError) -> String {
         "error": err.into_value()
     })
     .to_string()
+}
+
+fn companion_json(status: &cordis_tui::CompanionStatus) -> Value {
+    match status {
+        cordis_tui::CompanionStatus::Listening(addr) => json!({
+            "status": "listening",
+            "address": addr.to_string()
+        }),
+        cordis_tui::CompanionStatus::Failed { addr, error } => json!({
+            "status": "failed",
+            "address": addr.to_string(),
+            "error": error
+        }),
+    }
 }

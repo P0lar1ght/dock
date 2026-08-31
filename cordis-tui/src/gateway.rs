@@ -46,6 +46,24 @@ impl std::fmt::Display for PairingError {
 
 impl std::error::Error for PairingError {}
 
+/// Dual-stack companion bind (`127.0.0.1` ↔ `::1`). Failure must be visible.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompanionStatus {
+    Listening(SocketAddr),
+    Failed { addr: SocketAddr, error: String },
+}
+
+impl CompanionStatus {
+    pub fn warning(&self) -> Option<String> {
+        match self {
+            Self::Listening(_) => None,
+            Self::Failed { addr, error } => Some(format!(
+                "未能监听 {addr}（{error}）。本机 IPv6 / localhost 可能连不上。"
+            )),
+        }
+    }
+}
+
 /// Pairing surface on `"gateway"`. HTTP/WS keep extra methods on the crate type.
 pub trait GatewayPort: Send + Sync {
     fn pairing_front(&self) -> Option<PairingPrompt>;
@@ -55,6 +73,7 @@ pub trait GatewayPort: Send + Sync {
     fn pairing_deny(&self, id: &str) -> Result<(), PairingError>;
     fn pairing_revoke(&self, origin: &str) -> Result<(), PairingError>;
     fn local_addr(&self) -> SocketAddr;
+    fn companion_status(&self) -> CompanionStatus;
 }
 
 /// Named `"gateway"` service. Clone is cheap; each call looks through to the plugin.
@@ -92,5 +111,9 @@ impl GatewayRef {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.0.local_addr()
+    }
+
+    pub fn companion_status(&self) -> CompanionStatus {
+        self.0.companion_status()
     }
 }

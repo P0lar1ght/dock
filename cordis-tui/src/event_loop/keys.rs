@@ -305,7 +305,8 @@ pub(super) fn run_action(
             }
             if let Overlay::PairingManage { .. } = overlay {
                 if c == 'x' || c == 'X' {
-                    if let Some(ui) = ctx.get::<crate::pairing::PairingUi>(crate::names::TUI_PAIRING)
+                    if let Some(ui) =
+                        ctx.get::<crate::pairing::PairingUi>(crate::names::TUI_PAIRING)
                     {
                         crate::pairing::reject_manage(&ui, overlay);
                     }

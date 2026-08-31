@@ -124,7 +124,7 @@ impl PairingStore {
         self.gc();
         let req = self
             .pending
-            .iter()
+            .iter_mut()
             .find(|p| p.id == id)
             .ok_or_else(|| PairingError::new("not_found", "pairing request not found"))?;
         if req.origin != origin {
@@ -134,9 +134,17 @@ impl PairingStore {
             ));
         }
         match req.status {
-            PairingStatus::Approved => req.ticket.clone().ok_or_else(|| {
-                PairingError::new("not_ready", "pairing is approved but ticket is missing")
-            }),
+            PairingStatus::Approved => {
+                let ticket = req.ticket.take().ok_or_else(|| {
+                    PairingError::new("consumed", "pairing ticket was already exchanged")
+                })?;
+                if ticket.expires_at <= Instant::now() {
+                    req.status = PairingStatus::Expired;
+                    self.tickets.remove(&ticket.digest);
+                    return Err(PairingError::new("expired", "ticket expired"));
+                }
+                Ok(ticket)
+            }
             PairingStatus::Pending => Err(PairingError::new(
                 "pending",
                 "pairing request is still waiting for TUI confirmation",
@@ -293,8 +301,20 @@ impl PairingStore {
     fn gc(&mut self) {
         let now = Instant::now();
         for req in &mut self.pending {
-            if req.status == PairingStatus::Pending && req.expires_at <= now {
-                req.status = PairingStatus::Expired;
+            match req.status {
+                PairingStatus::Pending if req.expires_at <= now => {
+                    req.status = PairingStatus::Expired;
+                }
+                PairingStatus::Approved => {
+                    let ticket_dead = req.ticket.as_ref().is_some_and(|t| t.expires_at <= now);
+                    if ticket_dead {
+                        if let Some(t) = req.ticket.take() {
+                            self.tickets.remove(&t.digest);
+                        }
+                        req.status = PairingStatus::Expired;
+                    }
+                }
+                _ => {}
             }
         }
         self.tickets.retain(|_, t| t.expires_at > now);
@@ -378,4 +398,63 @@ pub fn require_origin(origin: &str) -> Result<String, PairingError> {
 
 fn unix_ms(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ORIGIN: &str = "http://localhost:5173";
+
+    fn store() -> PairingStore {
+        PairingStore::new(cordis::Context::new())
+    }
+
+    fn expire_plaintext(store: &mut PairingStore, id: &str) {
+        let past = Instant::now() - Duration::from_secs(1);
+        if let Some(req) = store.pending.iter_mut().find(|p| p.id == id) {
+            if let Some(t) = req.ticket.as_mut() {
+                t.expires_at = past;
+                if let Some(stored) = store.tickets.get_mut(&t.digest) {
+                    stored.expires_at = past;
+                }
+            }
+        }
+    }
+
+    fn holds_plaintext(store: &PairingStore, id: &str) -> bool {
+        store
+            .pending
+            .iter()
+            .any(|p| p.id == id && p.ticket.is_some())
+    }
+
+    #[tokio::test]
+    async fn exchange_is_one_shot() {
+        let mut store = store();
+        let (id, _) = store.request("example-app", ORIGIN).unwrap();
+        store.confirm(&id).unwrap();
+        let first = store.exchange(&id, ORIGIN).unwrap();
+        assert!(!first.token.is_empty());
+        let again = store.exchange(&id, ORIGIN).unwrap_err();
+        assert_eq!(again.code, "consumed");
+        assert!(!holds_plaintext(&store, &id));
+        store
+            .authenticate(&first.token, ORIGIN)
+            .expect("ticket remains valid for websocket authenticate");
+    }
+
+    #[tokio::test]
+    async fn expired_approved_drops_plaintext() {
+        let mut store = store();
+        let (id, _) = store.request("example-app", ORIGIN).unwrap();
+        store.confirm(&id).unwrap();
+        assert!(holds_plaintext(&store, &id));
+        expire_plaintext(&mut store, &id);
+        let err = store.exchange(&id, ORIGIN).unwrap_err();
+        assert_eq!(err.code, "expired");
+        assert!(!holds_plaintext(&store, &id));
+        let poll = store.poll(&id, ORIGIN).unwrap();
+        assert_eq!(poll.0, PairingStatus::Expired);
+    }
 }

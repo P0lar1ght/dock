@@ -14,11 +14,11 @@ use cordis_spine::{
 use crate::ask_view;
 use crate::clipboard;
 use crate::error::Result;
+use crate::gateway::GatewayRef;
 use crate::grok::mcps;
 use crate::grok::tasks_pane::{self, GroupKind, TaskEntry};
 use crate::grok::workflows::WorkflowRunSnapshot;
 use crate::mcp_elicit_view;
-use crate::gateway::GatewayRef;
 use crate::names::{GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
 use crate::overlay::{filter_help_items, filter_sessions, filter_strings, InspectTarget, Overlay};
 use crate::pairing;
@@ -1053,9 +1053,7 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
         Overlay::PairingManage { .. } => {
             let gw = ctx.get::<GatewayRef>(GATEWAY);
             pairing::overlay_len(
-                &gw.as_ref()
-                    .map(|g| g.pairing_pending())
-                    .unwrap_or_default(),
+                &gw.as_ref().map(|g| g.pairing_pending()).unwrap_or_default(),
                 &gw.as_ref()
                     .map(|g| g.pairing_bindings())
                     .unwrap_or_default(),

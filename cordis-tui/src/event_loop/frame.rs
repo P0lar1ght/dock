@@ -14,13 +14,13 @@ use ratatui::Terminal;
 use crate::ask_view;
 use crate::error::{Error, Result};
 use crate::file_search;
+use crate::gateway::GatewayRef;
 use crate::grok::mcps;
 use crate::grok::picker::{PickerHits, PickerRow};
 use crate::grok::shortcuts::ShortcutsBar;
 use crate::grok::tasks_pane;
 use crate::grok::workflows;
 use crate::mcp_elicit_view;
-use crate::gateway::GatewayRef;
 use crate::names::{
     GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
 };
@@ -380,8 +380,9 @@ pub(super) fn draw(
                     );
                 }
                 if pairing_pending {
-                    if let Some(prompt) =
-                        ctx.get::<GatewayRef>(GATEWAY).and_then(|g| g.pairing_front())
+                    if let Some(prompt) = ctx
+                        .get::<GatewayRef>(GATEWAY)
+                        .and_then(|g| g.pairing_front())
                     {
                         let selected = match overlay {
                             Overlay::PairingPending { selected } => *selected,
@@ -610,15 +611,20 @@ pub(super) fn paint_overlay(
         }
         Overlay::PairingManage { selected } => {
             let gw = ctx.get::<GatewayRef>(GATEWAY);
-            let pending = gw
-                .as_ref()
-                .map(|g| g.pairing_pending())
-                .unwrap_or_default();
+            let pending = gw.as_ref().map(|g| g.pairing_pending()).unwrap_or_default();
             let bindings = gw
                 .as_ref()
                 .map(|g| g.pairing_bindings())
                 .unwrap_or_default();
-            pairing::render_manage(buf, area, &pending, &bindings, *selected)
+            let warning = gw.as_ref().and_then(|g| g.companion_status().warning());
+            pairing::render_manage(
+                buf,
+                area,
+                &pending,
+                &bindings,
+                *selected,
+                warning.as_deref(),
+            )
         }
         Overlay::Help { selected, query } => {
             let extras = slash_extras(ctx);

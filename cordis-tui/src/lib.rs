@@ -44,7 +44,9 @@ mod welcome;
 
 pub use actions::{Action, Effect};
 pub use dispatch::dispatch;
-pub use gateway::{GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt};
+pub use gateway::{
+    CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
+};
 pub use names::{
     GATEWAY, GATEWAY_PAIRING, SESSION, SESSION_PORT, THEME, TUI, TUI_PAIRING, TUI_PROMPT,
     TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,

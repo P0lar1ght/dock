@@ -1,6 +1,6 @@
 use cordis::{plugin, Disposable, Inject, Plugin};
 use cordis_spine::{ASK, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TURN};
-use cordis_tui::{GATEWAY, SESSION_PORT};
+use cordis_tui::{CompanionStatus, GATEWAY, SESSION_PORT};
 
 use crate::bind;
 use crate::handle::GatewayHandle;
@@ -31,12 +31,17 @@ pub fn gateway_bind(bind_addr: impl Into<String>) -> Plugin {
             let (listener, local_addr) =
                 bind::listen(&bind_addr).map_err(|e| cordis::Error::message(e))?;
             let companion = bind::companion_listener(local_addr);
-            let handle = GatewayHandle::new(ctx.clone(), local_addr);
+            if let CompanionStatus::Failed { addr, error } = &companion.status {
+                eprintln!(
+                    "dock gateway: 未能监听 {addr}（{error}）。本机 IPv6 / localhost 可能连不上。"
+                );
+            }
+            let handle = GatewayHandle::new(ctx.clone(), local_addr, companion.status.clone());
             handle.reset_transcript();
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let app = http::router(handle.clone());
             spawn_http(listener, app.clone(), shutdown_rx.clone());
-            if let Some(v6) = companion {
+            if let Some(v6) = companion.listener {
                 spawn_http(v6, app, shutdown_rx);
             }
             ctx.effect("gateway-http", move |scope| {

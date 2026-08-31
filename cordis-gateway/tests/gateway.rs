@@ -281,6 +281,14 @@ async fn handshake_initialize_is_dock1() {
     assert_eq!(init["result"]["capabilities"]["threads"], true);
     assert_eq!(init["result"]["capabilities"]["hostTools"], false);
     assert_eq!(init["result"]["capabilities"]["slash"], true);
+    assert_eq!(
+        init["result"]["connection"]["companion"]["status"],
+        "listening"
+    );
+    let companion = init["result"]["connection"]["companion"]["address"]
+        .as_str()
+        .unwrap();
+    assert!(companion.starts_with("[::1]:"), "{companion}");
     let workspaces = rpc.call("workspace/list", json!({})).await;
     assert_eq!(workspaces["result"]["defaultWorkspaceId"], "default");
 }
@@ -671,4 +679,48 @@ async fn slash_execute_runs_extra_overlay() {
     assert_eq!(executed["result"]["kind"], "notice");
     assert_eq!(executed["result"]["notice"]["title"], "Memo");
     assert_eq!(executed["result"]["notice"]["body"], "hello overlay");
+}
+
+#[tokio::test]
+async fn companion_ipv6_serves_http() {
+    let h = Harness::boot().await;
+    let status = h.gateway().companion_status();
+    let addr = match status {
+        cordis_tui::CompanionStatus::Listening(addr) => addr,
+        cordis_tui::CompanionStatus::Failed { addr, error } => {
+            panic!("companion {addr} failed: {error}");
+        }
+    };
+    assert!(addr.is_ipv6(), "{addr}");
+    let res = h
+        .http
+        .get(format!("http://{addr}/nope"))
+        .header("Origin", PAGE_ORIGIN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 404, "expected HTTP on [::1]:{}", addr.port());
+}
+
+#[tokio::test]
+async fn pairing_exchange_is_one_shot() {
+    let h = Harness::boot().await;
+    let created = h
+        .post("/v1/pairing/requests", json!({ "application": APP }))
+        .await;
+    let body: Value = created.json().await.unwrap();
+    let id = body["pairingRequestId"].as_str().unwrap();
+    h.gateway().pairing_confirm(id).unwrap();
+    let first = h
+        .post("/v1/pairing/exchanges", json!({ "pairingRequestId": id }))
+        .await;
+    assert_eq!(first.status(), 200);
+    let ticket: Value = first.json().await.unwrap();
+    assert!(ticket["ticket"].as_str().unwrap().len() > 8);
+    let second = h
+        .post("/v1/pairing/exchanges", json!({ "pairingRequestId": id }))
+        .await;
+    assert_eq!(second.status(), 409);
+    let err: Value = second.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "consumed");
 }

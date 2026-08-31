@@ -2,6 +2,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 
+use cordis_tui::CompanionStatus;
+
 pub const DEFAULT_BIND: &str = "127.0.0.1:18991";
 
 pub fn parse_bind(raw: &str) -> Result<SocketAddr, String> {
@@ -30,9 +32,14 @@ pub fn listen(raw: &str) -> Result<(TcpListener, SocketAddr), String> {
     Ok((listener, local))
 }
 
+pub struct CompanionListener {
+    pub status: CompanionStatus,
+    pub listener: Option<TcpListener>,
+}
+
 /// The other loopback family on the same port (`127.0.0.1` ↔ `::1`).
-/// Fail-open: missing IPv6 (or a busy port) just skips the companion.
-pub fn companion_listener(local: SocketAddr) -> Option<TcpListener> {
+/// Failure is reported on `status` — never silent.
+pub fn companion_listener(local: SocketAddr) -> CompanionListener {
     let other = match local.ip() {
         IpAddr::V4(v4) if v4.is_loopback() => {
             SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), local.port())
@@ -40,11 +47,35 @@ pub fn companion_listener(local: SocketAddr) -> Option<TcpListener> {
         IpAddr::V6(v6) if v6.is_loopback() => {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port())
         }
-        _ => return None,
+        _ => {
+            return CompanionListener {
+                status: CompanionStatus::Failed {
+                    addr: local,
+                    error: "primary bind is not loopback".into(),
+                },
+                listener: None,
+            };
+        }
     };
-    let listener = TcpListener::bind(other).ok()?;
-    listener.set_nonblocking(true).ok()?;
-    Some(listener)
+    match TcpListener::bind(other).and_then(|listener| {
+        listener.set_nonblocking(true)?;
+        Ok(listener)
+    }) {
+        Ok(listener) => {
+            let addr = listener.local_addr().unwrap_or(other);
+            CompanionListener {
+                status: CompanionStatus::Listening(addr),
+                listener: Some(listener),
+            }
+        }
+        Err(e) => CompanionListener {
+            status: CompanionStatus::Failed {
+                addr: other,
+                error: e.to_string(),
+            },
+            listener: None,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -65,5 +96,42 @@ mod tests {
             "gateway bind must be loopback (127.0.0.1 or ::1)",
         );
         assert_eq!(err["error"]["code"], "invalid_bind");
+    }
+
+    #[test]
+    fn companion_binds_ipv6_localhost() {
+        let (_primary, addr) = listen("127.0.0.1:0").unwrap();
+        let companion = companion_listener(addr);
+        match companion.status {
+            CompanionStatus::Listening(v6) => {
+                assert!(v6.is_ipv6(), "{v6}");
+                assert_eq!(v6.port(), addr.port());
+                assert!(companion.listener.is_some());
+            }
+            CompanionStatus::Failed { addr, error } => {
+                panic!("companion {addr} failed (IPv6/localhost must bind in tests): {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn companion_reports_busy_port() {
+        let held = TcpListener::bind("[::1]:0").expect("test host must allow ::1");
+        let port = held.local_addr().unwrap().port();
+        let (_v4, addr) = listen(&format!("127.0.0.1:{port}")).unwrap();
+        let companion = companion_listener(addr);
+        match companion.status {
+            CompanionStatus::Failed {
+                addr: failed,
+                error,
+            } => {
+                assert_eq!(failed.port(), port);
+                assert!(!error.is_empty(), "{error}");
+                assert!(companion.listener.is_none());
+            }
+            CompanionStatus::Listening(v6) => {
+                panic!("companion silently bound {v6} while [::1]:{port} is held");
+            }
+        }
     }
 }
