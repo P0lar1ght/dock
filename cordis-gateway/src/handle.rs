@@ -62,7 +62,7 @@ impl GatewayHandle {
         &self,
         id: &str,
         origin: &str,
-    ) -> Result<(PairingStatus, Option<IssuedTicket>, u64), PairingError> {
+    ) -> Result<(PairingStatus, u64), PairingError> {
         self.inner.pairing.lock().unwrap().poll(id, origin)
     }
 

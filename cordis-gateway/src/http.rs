@@ -9,7 +9,6 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::handle::GatewayHandle;
-use crate::pairing::PairingStatus;
 use crate::protocol::{self, http_error};
 use crate::ws;
 
@@ -31,6 +30,10 @@ pub fn router(gateway: GatewayHandle) -> Router {
 }
 
 async fn cors(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    // Reflect Origin on purpose: any local page (vite, file-like http, another
+    // app) may call loopback bootstrap. Authorization is Origin pairing +
+    // loopback bind, not a CORS allowlist. A malicious page can hit the API
+    // but cannot get a ticket without TUI approval for that Origin.
     let origin = req.headers().get(header::ORIGIN).cloned();
     let is_options = req.method() == Method::OPTIONS;
     let mut res = if is_options {
@@ -88,17 +91,12 @@ async fn poll_pairing(
 ) -> Response {
     let origin = origin_header(&headers);
     match state.gateway.poll_pairing(&id, &origin) {
-        Ok((status, ticket, expires_at)) => {
-            let mut body = json!({
+        Ok((status, expires_at)) => {
+            // Ticket plaintext only leaves via POST /v1/pairing/exchanges.
+            let body = json!({
                 "status": status.as_str(),
                 "expiresAt": expires_at
             });
-            if status == PairingStatus::Approved {
-                if let Some(t) = ticket {
-                    body["ticket"] = json!(t.token);
-                    body["expiresAt"] = json!(t.expires_unix_ms);
-                }
-            }
             (StatusCode::OK, Json(body)).into_response()
         }
         Err(e) => pairing_http_error(e),

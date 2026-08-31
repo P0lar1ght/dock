@@ -2,7 +2,7 @@ import { DockClientError } from '../protocol/errors.js';
 
 export const DEFAULT_GATEWAY_URL = 'http://127.0.0.1:18991';
 
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
 export function normalizeGatewayUrl(value: unknown) {
   const input = String(value || '').trim() || DEFAULT_GATEWAY_URL;

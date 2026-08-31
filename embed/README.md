@@ -31,4 +31,4 @@ npm run build
 | `data-theme` | `auto` / `light` / `dark` |
 | `data-auto-connect` | `false` 时由宿主调用 `connect()` |
 
-公开事件：`dock:ready`、`dock:state`、`dock:toggle`、`dock:error`。首次连接会创建配对请求，**请在 Dock 终端确认**（`/pair` 或弹出 overlay），浏览器轮询直到拿到 ticket。没有 `dock pair` CLI。
+公开事件：`dock:ready`、`dock:state`、`dock:toggle`、`dock:error`。首次连接会创建配对请求，**请在 Dock 终端确认**（`/pair` 或弹出 overlay），浏览器轮询直到 `approved`，再 `POST /v1/pairing/exchanges` 拿 ticket。没有 `dock pair` CLI。

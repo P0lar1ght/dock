@@ -169,7 +169,16 @@ impl Harness {
         let polled = self.get(&format!("/v1/pairing/requests/{id}")).await;
         let poll: Value = polled.json().await.unwrap();
         assert_eq!(poll["status"], "approved");
-        poll["ticket"].as_str().unwrap().to_string()
+        assert!(poll.get("ticket").is_none() || poll["ticket"].is_null());
+        let exchanged = self
+            .post(
+                "/v1/pairing/exchanges",
+                json!({ "pairingRequestId": id }),
+            )
+            .await;
+        assert_eq!(exchanged.status(), 200);
+        let body: Value = exchanged.json().await.unwrap();
+        body["ticket"].as_str().unwrap().to_string()
     }
 }
 

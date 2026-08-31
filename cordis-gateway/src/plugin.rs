@@ -30,28 +30,40 @@ pub fn gateway_bind(bind_addr: impl Into<String>) -> Plugin {
         move |ctx, _: &()| {
             let (listener, local_addr) = bind::listen(&bind_addr)
                 .map_err(|e| cordis::Error::message(e))?;
+            let companion = bind::companion_listener(local_addr);
             let handle = GatewayHandle::new(ctx.clone(), local_addr);
             handle.reset_transcript();
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let app = http::router(handle.clone());
-            tokio::spawn(async move {
-                let listener = match tokio::net::TcpListener::from_std(listener) {
-                    Ok(l) => l,
-                    Err(_) => return,
-                };
-                let _ = axum::serve(listener, app)
-                    .with_graceful_shutdown(async {
-                        let _ = shutdown_rx.await;
-                    })
-                    .await;
-            });
+            spawn_http(listener, app.clone(), shutdown_rx.clone());
+            if let Some(v6) = companion {
+                spawn_http(v6, app, shutdown_rx);
+            }
             ctx.effect("gateway-http", move |scope| {
                 scope.own(Disposable::from_fn(move || {
-                    let _ = shutdown_tx.send(());
+                    let _ = shutdown_tx.send(true);
                 }));
                 Ok(())
             })?;
             Ok(Some(ctx.provide(GATEWAY, handle.as_ref_service())?))
         },
     )
+}
+
+fn spawn_http(
+    listener: std::net::TcpListener,
+    app: axum::Router,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::from_std(listener) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.wait_for(|stop| *stop).await;
+            })
+            .await;
+    });
 }

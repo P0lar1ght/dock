@@ -106,7 +106,7 @@ impl PairingStore {
         &mut self,
         id: &str,
         origin: &str,
-    ) -> Result<(PairingStatus, Option<IssuedTicket>, u64), PairingError> {
+    ) -> Result<(PairingStatus, u64), PairingError> {
         let origin = require_origin(origin)?;
         self.gc();
         let req = self
@@ -120,7 +120,7 @@ impl PairingStore {
                 "Origin does not match this pairing request",
             ));
         }
-        Ok((req.status, req.ticket.clone(), req.expires_unix_ms))
+        Ok((req.status, req.expires_unix_ms))
     }
 
     pub fn exchange(
@@ -128,9 +128,21 @@ impl PairingStore {
         id: &str,
         origin: &str,
     ) -> Result<IssuedTicket, PairingError> {
-        let (status, ticket, _) = self.poll(id, origin)?;
-        match status {
-            PairingStatus::Approved => ticket.ok_or_else(|| {
+        let origin = require_origin(origin)?;
+        self.gc();
+        let req = self
+            .pending
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| PairingError::new("not_found", "pairing request not found"))?;
+        if req.origin != origin {
+            return Err(PairingError::new(
+                "origin_mismatch",
+                "Origin does not match this pairing request",
+            ));
+        }
+        match req.status {
+            PairingStatus::Approved => req.ticket.clone().ok_or_else(|| {
                 PairingError::new("not_ready", "pairing is approved but ticket is missing")
             }),
             PairingStatus::Pending => Err(PairingError::new(
