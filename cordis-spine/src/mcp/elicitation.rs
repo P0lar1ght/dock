@@ -283,6 +283,23 @@ impl Elicitation {
         Ok(())
     }
 
+    /// Dual-resolve from the web gateway. Empty queue is an error.
+    pub fn resolve(&self, action: &str, content: Option<Value>) -> Result<(), String> {
+        let mut q = self.inner.queue.lock().unwrap();
+        let Some(job) = q.pop_front() else {
+            return Err("no pending elicitation".into());
+        };
+        let payload = match action {
+            "accept" | "approve" => accept_value(content.unwrap_or_else(|| json!({}))),
+            "decline" | "deny" => decline_value(),
+            _ => cancel_value(),
+        };
+        let _ = job.tx.send(payload);
+        drop(q);
+        self.inner.ctx.emit(MCP_ELICIT_EVENT, ());
+        Ok(())
+    }
+
     pub fn complete_url(&self, params: &Value) {
         let id = params
             .get("elicitationId")

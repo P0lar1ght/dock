@@ -104,12 +104,6 @@ function archivedThreadRow(
               actions.restoreArchivedThread(thread.id);
             }}
           >恢复</button>
-          <button
-            class="thread-action thread-delete"
-            type="button"
-            ?disabled=${Boolean(model.operation)}
-            @click=${() => actions.requestDeleteThread(thread.id)}
-          >永久删除</button>
         `}
       </span>
     </div>
@@ -146,28 +140,6 @@ function threadRow(
             <span class="thread-meta">${threadStatus(thread)}</span>
           </span>
         </button>
-        <span class="thread-row-actions">
-          <button
-            class="thread-rename"
-            type="button"
-            aria-label=${`Rename ${thread.title}`}
-            title="重命名 Thread"
-            ?disabled=${Boolean(model.operation)}
-            @click=${() => actions.beginRenameThread(thread.id)}
-          >✎</button>
-          <button
-            class="thread-archive"
-            type="button"
-            aria-label=${`Archive ${thread.title}`}
-            title=${thread.canArchive ? 'Archive Thread' : 'Thread is active'}
-            ?disabled=${Boolean(model.operation) || !thread.canArchive}
-            @click=${(event: Event) => {
-              event.stopPropagation();
-              closeMenu(event);
-              actions.archiveThread(thread.id);
-            }}
-          >归档</button>
-        </span>
       `}
     </div>
   `;

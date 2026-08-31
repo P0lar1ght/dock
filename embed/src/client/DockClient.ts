@@ -1,7 +1,8 @@
 import { HttpBootstrapClient } from '../bootstrap/HttpBootstrapClient.js';
 import { PairingFlow } from '../bootstrap/PairingFlow.js';
 import { TicketFlow } from '../bootstrap/TicketFlow.js';
-import type { PairingRequestResult } from '../bootstrap/types.js';
+import type { PairingRequestResult, TicketResult } from '../bootstrap/types.js';
+import { DEFAULT_GATEWAY_URL } from '../bootstrap/GatewayUrlPolicy.js';
 import { CONNECTION_AUTHENTICATE, INITIALIZE, WORKSPACE_LIST } from '../protocol/methods.js';
 import type {
   AuthorizedWorkspace,
@@ -82,7 +83,7 @@ export class DockClient {
       : options.storage || defaultSessionStorage();
     this.clientInstanceId = stableClientInstanceId(this.application, clientStorage);
     const http = new HttpBootstrapClient({
-      gatewayUrl: options.gatewayUrl || 'http://127.0.0.1:18990',
+      gatewayUrl: options.gatewayUrl || DEFAULT_GATEWAY_URL,
       fetch: options.fetch
     });
     this.gatewayUrl = http.gatewayUrl;
@@ -145,18 +146,31 @@ export class DockClient {
     return this.pairing.begin();
   }
 
-  async completePairing(pairingRequestId: string, tokenValue: string) {
+  pollPairing(pairingRequestId: string) {
+    return this.pairing.poll(pairingRequestId);
+  }
+
+  waitForPairingTicket(pairingRequestId: string): Promise<TicketResult> {
+    return this.pairing.waitUntilApproved(pairingRequestId);
+  }
+
+  async completePairing(pairingRequestId: string, _tokenValue?: string) {
     this.beginManualConnection();
-    let token = String(tokenValue || '').trim();
     try {
-      const exchanged = await this.pairing.complete(pairingRequestId, token);
+      const exchanged = await this.pairing.complete(pairingRequestId);
       return await this.connectWithTicket(exchanged.ticket);
     } catch (error) {
       this.events.set('error', error);
       throw error;
-    } finally {
-      token = '';
     }
+  }
+
+  connectWithIssuedTicket(ticket: string) {
+    this.beginManualConnection();
+    return this.connectWithTicket(ticket).catch((error) => {
+      this.events.set('error', error);
+      throw error;
+    });
   }
 
   async connect() {

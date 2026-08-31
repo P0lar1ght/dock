@@ -95,22 +95,26 @@ export function contextUsagePopover(
         </span>
         ${iconTemplate(faChevronRight)}
       </button>
-      <button class="composer-menu-row" data-testid="context-open-memory" type="button" @click=${openMemory}>
-        ${iconTemplate(faBookOpen)}
-        <span>
-          <strong>记忆</strong>
-          <small>${memorySummary(environment.memory)}</small>
-        </span>
-        ${iconTemplate(faChevronRight)}
-      </button>
-      <button class="composer-menu-row" data-testid="context-open-goal" type="button" @click=${openGoal}>
-        ${iconTemplate(faBullseye)}
-        <span>
-          <strong>目标</strong>
-          <small>${goalSummary(environment.goal)}</small>
-        </span>
-        ${iconTemplate(faChevronRight)}
-      </button>
+      ${environment.memory.canRead || environment.memory.canWrite ? html`
+        <button class="composer-menu-row" data-testid="context-open-memory" type="button" @click=${openMemory}>
+          ${iconTemplate(faBookOpen)}
+          <span>
+            <strong>记忆</strong>
+            <small>${memorySummary(environment.memory)}</small>
+          </span>
+          ${iconTemplate(faChevronRight)}
+        </button>
+      ` : nothing}
+      ${environment.goal.status !== 'none' ? html`
+        <button class="composer-menu-row" data-testid="context-open-goal" type="button" @click=${openGoal}>
+          ${iconTemplate(faBullseye)}
+          <span>
+            <strong>目标</strong>
+            <small>${goalSummary(environment.goal)}</small>
+          </span>
+          ${iconTemplate(faChevronRight)}
+        </button>
+      ` : nothing}
       <button class="composer-menu-row" data-testid="context-open-model" type="button" @click=${openModel}>
         ${iconTemplate(faCube)}
         <span><strong>模型</strong><small>${environment.model.label}</small></span>

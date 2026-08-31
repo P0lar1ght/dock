@@ -22,13 +22,12 @@
       <h1>Dock SDK 宿主 Context 闭环</h1>
       <p>普通 HTTP 页面通过 SDK 验证配对、Thread、不可变宿主 Context 和真实模型回复。</p>
       <label>Application <input id="application" value="sdk-fixture" /></label>
-      <label>本机 Gateway URL <input id="gateway-url" value="http://127.0.0.1:18990" /></label>
+      <label>本机 Gateway URL <input id="gateway-url" value="http://127.0.0.1:18991" /></label>
       <button id="connect">连接已配对 Gateway</button>
       <button id="request-pairing" class="secondary">申请首次配对</button>
-      <p id="pairing-help" hidden>请在本机运行：<code id="pairing-command"></code></p>
+      <p id="pairing-help" hidden>请在 Dock 终端确认：<code id="pairing-command"></code></p>
       <label>Pairing Request ID <input id="pairing-id" readonly /></label>
-      <label>一次性配对 Token <input id="pairing-token" type="password" autocomplete="one-time-code" /></label>
-      <button id="complete-pairing">提交 Token 并连接</button>
+      <button id="complete-pairing">等待终端确认后连接</button>
       <h2>连接结果</h2>
       <pre id="result" aria-live="polite">尚未连接</pre>
       <h2>Thread</h2>

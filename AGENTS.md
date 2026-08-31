@@ -19,7 +19,8 @@ cargo test -p cordis-spine -p cordis-tui -p cordis-app
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
 | 其它 spine | `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `subagents` `memory` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名；`agentPresets` 定义是 YAML 目录（内置 `code` / `minimal` / `cordis` / `warden` < `~/.dock/presets/<id>/` 或显示名目录如 `创造/` < 项目 `.dock/presets/<id>/`；旧 `<id>.yml` 仍可读）。新建模式默认落到项目层 |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-subagent` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
-| TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` | 同名 |
+| TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` | 同名 |
+| 回环网关 | `gateway` | `"gateway"`（`GatewayRef`）；事件 `gateway/pairing` |
 | 事件循环 | `tui` inject `session` + `session.port` | — |
 
 - **换插件，不改 loop。** 新 UI 面做成 `tui.*` 插件；新采样做成 `llm` 插件。工具能力插件 `inject: ["tools"]` 后 `ctx.tools.register()`（DSH 一个 `"tools"` 表，不是 `tools.mcp` ExtraTools）。不要把功能焊进 `event_loop` 或 `agent-loop`。

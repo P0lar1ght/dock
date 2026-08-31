@@ -134,6 +134,65 @@ impl Ask {
         self.ctx.emit(ASK_EVENT, ());
     }
 
+    /// Dual-resolve from the web gateway. Matches questions by id, text, or
+    /// projector `question_{n}` ids. Empty queue is an error so the second
+    /// resolver cannot silently succeed.
+    pub fn respond(
+        &self,
+        answers: &[(String, Vec<String>, Option<String>)],
+    ) -> Result<(), String> {
+        let mut queue = self.queue.lock().unwrap();
+        let Some(pending) = queue.front_mut() else {
+            return Err("no pending question".into());
+        };
+        if answers.is_empty() {
+            return Err("answers are required".into());
+        }
+        for (key, labels, notes) in answers {
+            let matched = pending
+                .questions
+                .iter()
+                .enumerate()
+                .find(|(i, q)| {
+                    q.id.as_deref() == Some(key.as_str())
+                        || q.question == *key
+                        || *key == format!("question_{}", i + 1)
+                })
+                .map(|(_, q)| q.clone());
+            let Some(q) = matched else {
+                continue;
+            };
+            pending.answers.insert(q.question.clone(), labels.clone());
+            if notes.is_some() {
+                pending.annotations.insert(
+                    q.question.clone(),
+                    QuestionAnnotation {
+                        preview: None,
+                        notes: notes.clone(),
+                    },
+                );
+            } else {
+                pending.annotations.remove(&q.question);
+            }
+        }
+        if let Some(next) = first_unanswered(pending) {
+            pending.index = next;
+        } else {
+            pending.index = pending.questions.len();
+        }
+        if pending.index >= pending.questions.len() {
+            let pending = queue.pop_front().unwrap();
+            let text = format::format_accepted_tool_result(
+                &pending.answers,
+                &Some(pending.annotations).filter(|m| !m.is_empty()),
+            );
+            let _ = pending.tx.send(text);
+        }
+        drop(queue);
+        self.ctx.emit(ASK_EVENT, ());
+        Ok(())
+    }
+
     pub async fn ask(&self, questions: Vec<Question>) -> String {
         if questions.is_empty() {
             return format::CANCEL_TEXT.to_string();
@@ -278,5 +337,25 @@ mod tests {
             ask.queue.lock().unwrap().front().unwrap().answers.get("Q1"),
             Some(&vec!["A2".to_string()])
         );
+    }
+
+    #[test]
+    fn respond_matches_id_or_text_and_errors_when_empty() {
+        let ask = Ask::new(cordis::Context::new());
+        assert!(ask
+            .respond(&[("Q1".into(), vec!["A".into()], None)])
+            .is_err());
+        let (tx, mut rx) = oneshot::channel();
+        ask.queue.lock().unwrap().push_back(Pending {
+            questions: vec![q("Q1", &["A"])],
+            answers: IndexMap::new(),
+            annotations: HashMap::new(),
+            index: 0,
+            tx,
+        });
+        ask.respond(&[("question_1".into(), vec!["A".into()], None)])
+            .unwrap();
+        assert!(ask.front().is_none());
+        assert!(rx.try_recv().is_ok());
     }
 }

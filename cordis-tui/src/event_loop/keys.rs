@@ -78,6 +78,16 @@ pub(super) fn run_action(
                     perms.resolve(PermissionOptionKind::RejectOnce);
                 }
             }
+            if matches!(overlay, Overlay::PairingPending { .. }) {
+                if let Some(id) = ctx
+                    .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                    .and_then(|g| g.pairing_front().map(|p| p.id))
+                {
+                    let _ = ctx
+                        .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                        .and_then(|g| g.pairing_deny(&id).ok());
+                }
+            }
             if let Overlay::Ask {
                 draft,
                 draft_cursor,
@@ -280,6 +290,26 @@ pub(super) fn run_action(
                         *selected = i - 1;
                         return accept_overlay(ctx, overlay);
                     }
+                }
+                return Vec::new();
+            }
+            if let Overlay::PairingPending { selected } = overlay {
+                if let Some(i) = c.to_digit(10) {
+                    let i = i as usize;
+                    if (1..=crate::pairing::PENDING_OPTIONS.len()).contains(&i) {
+                        *selected = i - 1;
+                        return accept_overlay(ctx, overlay);
+                    }
+                }
+                return Vec::new();
+            }
+            if let Overlay::PairingManage { .. } = overlay {
+                if c == 'x' || c == 'X' {
+                    if let Some(ui) = ctx.get::<crate::pairing::PairingUi>(crate::names::TUI_PAIRING)
+                    {
+                        crate::pairing::reject_manage(&ui, overlay);
+                    }
+                    return Vec::new();
                 }
                 return Vec::new();
             }
@@ -767,6 +797,16 @@ pub(super) fn run_action(
                             perms.resolve(PermissionOptionKind::RejectOnce);
                         }
                     }
+                    if matches!(overlay, Overlay::PairingPending { .. }) {
+                        if let Some(id) = ctx
+                            .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                            .and_then(|g| g.pairing_front().map(|p| p.id))
+                        {
+                            let _ = ctx
+                                .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                                .and_then(|g| g.pairing_deny(&id).ok());
+                        }
+                    }
                     if matches!(overlay, Overlay::Ask { .. }) {
                         if let Some(ask) = ctx.get::<Ask>(ASK) {
                             ask.cancel();
@@ -968,6 +1008,28 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
             overlay.close();
             return Vec::new();
         }
+        Overlay::PairingPending { selected } => {
+            if let Some(id) = ctx
+                .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                .and_then(|g| g.pairing_front().map(|p| p.id))
+            {
+                if let Some(gw) = ctx.get::<crate::gateway::GatewayRef>(crate::names::GATEWAY) {
+                    if *selected == 0 {
+                        let _ = gw.pairing_confirm(&id);
+                    } else {
+                        let _ = gw.pairing_deny(&id);
+                    }
+                }
+            }
+            overlay.close();
+            return Vec::new();
+        }
+        Overlay::PairingManage { .. } => {
+            if let Some(ui) = ctx.get::<crate::pairing::PairingUi>(crate::names::TUI_PAIRING) {
+                crate::pairing::accept_manage(&ui, overlay);
+            }
+            return Vec::new();
+        }
         Overlay::PlanApproval {
             selected,
             view_only,
@@ -1117,6 +1179,8 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         Overlay::None
         | Overlay::Settings { .. }
         | Overlay::Permission { .. }
+        | Overlay::PairingPending { .. }
+        | Overlay::PairingManage { .. }
         | Overlay::Ask { .. }
         | Overlay::Elicit { .. }
         | Overlay::PlanApproval { .. }

@@ -1,4 +1,5 @@
 use cordis_app::session_actor;
+use cordis_gateway::gateway;
 use cordis_spine::{
     agent_loop, expired_task_notice, format_scheduled_task_reminder, install_app,
     interval_to_human, Cron, LlmOutput, LogEvent, Sessions, CRON, PROMPT_ASSEMBLE, SESSIONS,
@@ -23,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     root.on_waterfall(PROMPT_ASSEMBLE, |_: String, _| WORKSPACE_PROMPT.to_string())?;
     root.plugin(agent_loop(), ())?.wait().await?;
     root.plugin(session_actor(), ())?.wait().await?;
+    root.plugin(gateway(), ())?.wait().await?;
 
     let tick_ctx = root.clone();
     tokio::spawn(async move {

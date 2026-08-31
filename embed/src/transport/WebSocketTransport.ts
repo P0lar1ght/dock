@@ -60,7 +60,7 @@ export class WebSocketTransport {
 }
 
 export function gatewayWebSocketUrl(gatewayUrl: string) {
-  const url = new URL('/api/runtime/ws', gatewayUrl);
+  const url = new URL('/api/ws', gatewayUrl);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return url.toString();
 }

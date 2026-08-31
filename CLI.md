@@ -18,6 +18,7 @@
 | `/new` | 归档当前会话并清空。账本用量一并清零 |
 | `/model` `/m` | 切换当前模型 |
 | `/resume` | 恢复上次会话。用量账本不随归档恢复（Grok：新进程 resume 清零） |
+| `/pair`（`pairing`） | 浏览器 Origin 配对管理：待批请求可批准，已绑来源可撤销。首次连接时也会弹出「允许浏览器连接？」overlay（和权限 overlay 同款打断） |
 | `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
 | `/plan [说明]` | 开计划模式；无说明只切模式（Pending，发第一条 prompt 后变 Active）。有说明则 Active 并提交 |
 | `/view-plan`（`show-plan` `plan-view`） | 查看 `.dock/plan.md`（打开时读一次，pretty markdown）；若 `exit_plan_mode` 正在等待批准则打开审批 chrome（`a` 批准 / `s` 修改 / `q` 放弃） |
@@ -77,6 +78,7 @@ order: 10
 |---|---|
 | `g`（输入框空、有目标、且当前没在生成） | 打开/关闭目标 overlay，可改标题、暂停、清除 |
 | 提问 overlay | 听 `ask/pending`，和权限 overlay 同款 |
+| 浏览器配对 overlay | 听 `gateway/pairing`。首次 Origin 请求弹出「允许浏览器连接？」；`/pair` 列出待批与已绑来源（Enter 批准 / `x` 拒绝或撤销） |
 | MCP elicitation | 听 `mcp/elicit`。权限 / 提问 overlay 会抢前台（队列仍在）。表单逐步填：选项带「其他」、自由输入空内容闪「请输入具体内容」。URL 模式 Enter 开浏览器，等 `notifications/elicitation/complete` 或 Esc 取消 |
 | 动态插槽 `Overlay::Slot` | `"tui.slots"` 登记的纯文本 pane（复用 Notice 布局）。Esc 关闭；↑/↓ 滚动并把规范化键名转给 `on_key`（`esc` / `enter` / `up` / `down` / `char:x`）。脚本 `open_slot` 或 slash `kind: slot` 打开 |
 | `/cordis` | Notice：永久（磁盘）与会话（内存）插件一览 |

@@ -10,6 +10,7 @@ mod dispatch;
 mod error;
 mod event_loop;
 mod file_search;
+mod gateway;
 mod goal_overlay;
 mod goal_pane;
 mod grok;
@@ -21,6 +22,7 @@ mod mermaid_png;
 mod mode_cycle;
 mod names;
 mod overlay;
+mod pairing;
 mod permission_view;
 mod plan_approval_view;
 mod plugin;
@@ -42,10 +44,11 @@ mod welcome;
 
 pub use actions::{Action, Effect};
 pub use dispatch::dispatch;
+pub use gateway::{GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt};
 pub use names::{
-    SESSION, SESSION_PORT, THEME, TUI, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS,
-    TUI_WELCOME,
+    GATEWAY, GATEWAY_PAIRING, SESSION, SESSION_PORT, THEME, TUI, TUI_PAIRING, TUI_PROMPT,
+    TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
 };
-pub use plugin::{prompt, scrollback, shortcuts, status_bar, theme, tui, welcome};
+pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui, welcome};
 pub use prompt::PromptWidget;
 pub use session::{QueuedItem, SessionPort, SessionRef};

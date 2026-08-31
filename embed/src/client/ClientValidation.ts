@@ -2,13 +2,6 @@ import { DockClientError } from '../protocol/errors.js';
 
 const REQUIRED_SESSION_CAPABILITIES = [
   'threads',
-  'threadArchive',
-  'threadModelSelection',
-  'modelCatalogDiscovery',
-  'threadPlanMode',
-  'threadMemoryControl',
-  'threadEnvironmentDetails',
-  'threadContextCompaction',
   'turns',
   'permissions',
   'transcriptEvents',

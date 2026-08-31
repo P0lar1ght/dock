@@ -27,6 +27,7 @@ pub struct Permissions {
     queue: Mutex<VecDeque<Pending>>,
     always: Mutex<HashSet<String>>,
     never: Mutex<HashSet<String>>,
+    last_resolve: Mutex<Option<PermissionOptionKind>>,
 }
 
 impl Permissions {
@@ -36,6 +37,7 @@ impl Permissions {
             queue: Mutex::new(VecDeque::new()),
             always: Mutex::new(HashSet::new()),
             never: Mutex::new(HashSet::new()),
+            last_resolve: Mutex::new(None),
         }
     }
 
@@ -43,9 +45,17 @@ impl Permissions {
         self.queue.lock().unwrap().front().map(|p| p.prompt.clone())
     }
 
-    pub fn resolve(&self, kind: PermissionOptionKind) {
+    /// Last decision that actually popped the queue. Gateway projects this
+    /// when `front()` is empty after a TUI (or web) resolve.
+    pub fn last_resolve(&self) -> Option<PermissionOptionKind> {
+        *self.last_resolve.lock().unwrap()
+    }
+
+    /// Resolve the front of the queue. Returns `false` when empty so a second
+    /// resolver (TUI vs web) can fail closed instead of auto-allowing.
+    pub fn resolve(&self, kind: PermissionOptionKind) -> bool {
         let Some(pending) = self.queue.lock().unwrap().pop_front() else {
-            return;
+            return false;
         };
         match kind {
             PermissionOptionKind::AllowAlways => {
@@ -62,8 +72,10 @@ impl Permissions {
             }
             _ => {}
         }
+        *self.last_resolve.lock().unwrap() = Some(kind);
         let _ = pending.tx.send(kind);
         self.ctx.emit(PERMISSION_EVENT, ());
+        true
     }
 
     pub async fn request(&self, tool: &str, summary: &str) -> bool {
@@ -97,4 +109,18 @@ pub fn permissions() -> Plugin {
             ctx.provide(PERMISSIONS, Permissions::new(ctx.clone()))?,
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cordis::Context;
+
+    #[test]
+    fn resolve_returns_false_when_empty() {
+        let ctx = Context::new();
+        let perms = Permissions::new(ctx);
+        assert!(!perms.resolve(PermissionOptionKind::AllowOnce));
+        assert!(perms.last_resolve().is_none());
+    }
 }

@@ -3,7 +3,6 @@ import { DockClient } from '../../dist/client.js';
 const applicationInput = document.querySelector('#application');
 const gatewayInput = document.querySelector('#gateway-url');
 const pairingIdInput = document.querySelector('#pairing-id');
-const pairingTokenInput = document.querySelector('#pairing-token');
 const pairingHelp = document.querySelector('#pairing-help');
 const pairingCommand = document.querySelector('#pairing-command');
 const result = document.querySelector('#result');
@@ -45,19 +44,14 @@ document.querySelector('#request-pairing').addEventListener('click', () => run(a
   const pairing = await client.requestPairing();
   pairingIdInput.value = pairing.pairingRequestId;
   pairingHelp.hidden = false;
-  pairingCommand.textContent = `dock pair ${pairing.pairingRequestId}`;
-  result.textContent = `配对申请已创建，有效期至 ${new Date(pairing.expiresAt).toLocaleTimeString()}`;
+  pairingCommand.textContent = '请在 Dock 终端批准该来源';
+  result.textContent = `配对申请已创建，有效期至 ${new Date(pairing.expiresAt).toLocaleTimeString()}。确认后会自动拿到 ticket。`;
 }));
 
 document.querySelector('#complete-pairing').addEventListener('click', () => run(async () => {
   client ||= createClient();
   const pairingRequestId = pairingIdInput.value.trim();
-  const token = pairingTokenInput.value.trim();
-  try {
-    await showConnection(await client.completePairing(pairingRequestId, token));
-  } finally {
-    pairingTokenInput.value = '';
-  }
+  await showConnection(await client.completePairing(pairingRequestId));
 }));
 
 document.querySelector('#list-threads').addEventListener('click', () => run(refreshThreads));

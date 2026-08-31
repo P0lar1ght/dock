@@ -69,10 +69,10 @@ function pairingGuide(model: PairingView, actions: ConnectionStatusActions) {
     >
       <span class="pairing-guide-heading">
         <strong>首次配对</strong>
-        <span>${model.phase === 'requesting' ? '正在创建本机请求…' : '在本机终端运行后点击重试'}</span>
+        <span>${model.phase === 'requesting' ? '正在创建本机请求…' : '请在 Dock 终端确认后会自动连接'}</span>
       </span>
-      ${model.command ? html`
-        <code data-testid="pairing-command">${model.command}</code>
+      ${model.hint ? html`
+        <code data-testid="pairing-command">${model.hint}</code>
       ` : nothing}
       ${model.error ? html`<span class="pairing-guide-error" role="alert">${model.error}</span>` : nothing}
       <button
@@ -104,7 +104,7 @@ function gatewayEditor(model: GatewayConnectionView, actions: ConnectionStatusAc
         inputmode="url"
         autocomplete="off"
         spellcheck="false"
-        placeholder="http://127.0.0.1:18990"
+        placeholder="http://127.0.0.1:18991"
         .value=${model.draft}
         ?disabled=${model.connecting}
         @input=${(event: InputEvent) => actions.gatewayDraft(

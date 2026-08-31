@@ -56,6 +56,7 @@ pub struct PlanMode {
     ctx: Context,
     phase: Mutex<PlanPhase>,
     approval: Mutex<Option<PendingApproval>>,
+    last_decision: Mutex<Option<PlanDecision>>,
 }
 
 impl PlanMode {
@@ -64,6 +65,7 @@ impl PlanMode {
             ctx,
             phase: Mutex::new(PlanPhase::Inactive),
             approval: Mutex::new(None),
+            last_decision: Mutex::new(None),
         }
     }
 
@@ -142,9 +144,16 @@ impl PlanMode {
         self.ctx.emit(PLAN_EVENT, ());
     }
 
-    pub fn resolve(&self, decision: PlanDecision) {
+    /// Last decision that actually popped a parked approval.
+    pub fn last_decision(&self) -> Option<PlanDecision> {
+        *self.last_decision.lock().unwrap()
+    }
+
+    /// Resolve parked approval. Returns `false` when nothing is waiting so a
+    /// second resolver (TUI vs web) can fail closed.
+    pub fn resolve(&self, decision: PlanDecision) -> bool {
         let Some(pending) = self.approval.lock().unwrap().take() else {
-            return;
+            return false;
         };
         match decision {
             PlanDecision::Approve | PlanDecision::Quit => {
@@ -154,8 +163,10 @@ impl PlanMode {
                 *self.phase.lock().unwrap() = PlanPhase::Active;
             }
         }
+        *self.last_decision.lock().unwrap() = Some(decision);
         let _ = pending.tx.send(decision);
         self.ctx.emit(PLAN_EVENT, ());
+        true
     }
 
     /// Park until the TUI resolves. Keeps the write gate on.
@@ -439,5 +450,13 @@ mod tests {
         assert!(!plan.gated());
         plan.promote_pending();
         assert!(plan.gated());
+    }
+
+    #[test]
+    fn resolve_returns_false_when_empty() {
+        let ctx = Context::new();
+        let plan = PlanMode::new(ctx);
+        assert!(!plan.resolve(PlanDecision::Approve));
+        assert!(plan.last_decision().is_none());
     }
 }

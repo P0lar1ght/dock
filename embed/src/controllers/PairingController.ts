@@ -1,5 +1,5 @@
 import { normalizeGatewayUrl } from '../bootstrap/GatewayUrlPolicy.js';
-import type { PairingRequestResult } from '../bootstrap/types.js';
+import type { PairingRequestResult, TicketResult } from '../bootstrap/types.js';
 
 export type PairingPhase = 'hidden' | 'requesting' | 'ready' | 'error';
 
@@ -7,7 +7,7 @@ export interface PairingView {
   phase: PairingPhase;
   visible: boolean;
   pairingRequestId?: string;
-  command?: string;
+  hint?: string;
   expiresAt?: number;
   error?: string;
 }
@@ -15,6 +15,8 @@ export interface PairingView {
 export interface PairingControllerOptions {
   gatewayUrl: string;
   request: () => Promise<PairingRequestResult>;
+  waitForTicket?: (pairingRequestId: string) => Promise<TicketResult>;
+  onTicket?: (ticket: string) => Promise<void> | void;
   now?: () => number;
 }
 
@@ -26,6 +28,7 @@ export class PairingController {
   private readonly now: () => number;
   private state: PairingView = hidden();
   private pending?: Promise<boolean>;
+  private waitGeneration = 0;
 
   constructor(
     private readonly options: PairingControllerOptions,
@@ -53,6 +56,7 @@ export class PairingController {
   }
 
   clear() {
+    this.waitGeneration += 1;
     if (this.state.phase === 'hidden') return;
     this.state = hidden();
     this.onChange();
@@ -65,6 +69,7 @@ export class PairingController {
   }
 
   private async requestPairing() {
+    const generation = ++this.waitGeneration;
     try {
       const result = await this.options.request();
       const pairingRequestId = String(result.pairingRequestId || '').trim();
@@ -75,9 +80,11 @@ export class PairingController {
         phase: 'ready',
         visible: true,
         pairingRequestId,
-        command: `dock pair ${pairingRequestId} --url ${this.gatewayUrl} --activate`,
+        hint: `请在 Dock 终端确认来自 ${this.gatewayUrl} 的连接请求`,
         expiresAt: result.expiresAt
       };
+      this.onChange();
+      void this.waitForApproval(pairingRequestId, generation);
       return true;
     } catch {
       this.state = {
@@ -85,8 +92,28 @@ export class PairingController {
         visible: true,
         error: '无法创建本机配对请求，请确认 Gateway 正在运行后重新生成。'
       };
+      this.onChange();
       return false;
-    } finally {
+    }
+  }
+
+  private async waitForApproval(pairingRequestId: string, generation: number) {
+    if (!this.options.waitForTicket) return;
+    try {
+      const ticket = await this.options.waitForTicket(pairingRequestId);
+      if (generation !== this.waitGeneration || this.state.pairingRequestId !== pairingRequestId) {
+        return;
+      }
+      await this.options.onTicket?.(ticket.ticket);
+    } catch {
+      if (generation !== this.waitGeneration || this.state.pairingRequestId !== pairingRequestId) {
+        return;
+      }
+      this.state = {
+        phase: 'error',
+        visible: true,
+        error: '配对被拒绝或已过期，请重新生成后在 Dock 终端确认。'
+      };
       this.onChange();
     }
   }

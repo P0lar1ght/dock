@@ -99,7 +99,7 @@ export class RecoveryController {
 
 function connectionError(connection: Readonly<ClientConnectionEvent>): RecoveryView {
   if (AUTHORIZATION_ERRORS.has(connection.code || '')) {
-    return visible('error', '本机授权已失效', '请完成下方本机 CLI 配对后重试。', true);
+    return visible('error', '本机授权已失效', '请在 Dock 终端确认浏览器配对后重试。', true);
   }
   if (COMPATIBILITY_ERRORS.has(connection.code || '')) {
     return visible('error', 'Gateway 版本不兼容', '请更新本机 Gateway 后重试。', true);

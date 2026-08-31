@@ -90,6 +90,20 @@ impl Shortcuts {
                 HintItem::new("1–9", "option"),
             ];
         }
+        if matches!(overlay, Overlay::PairingPending { .. }) {
+            return vec![
+                HintItem::new("Enter", "select"),
+                HintItem::new("Esc", "deny"),
+                HintItem::new("1–9", "option"),
+            ];
+        }
+        if matches!(overlay, Overlay::PairingManage { .. }) {
+            return vec![
+                HintItem::new("Enter", "confirm"),
+                HintItem::new("x", "deny/revoke"),
+                HintItem::new("Esc", "close"),
+            ];
+        }
         if matches!(
             overlay,
             Overlay::PlanApproval {

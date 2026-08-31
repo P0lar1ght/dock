@@ -93,7 +93,7 @@ export class GatewayConnectionController {
       this.onChange();
       return gatewayUrl;
     } catch {
-      this.error = '请输入本机 Gateway 地址，例如 http://127.0.0.1:18990';
+      this.error = '请输入本机 Gateway 地址，例如 http://127.0.0.1:18991';
       this.onChange();
       return undefined;
     }

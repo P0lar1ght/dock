@@ -37,7 +37,7 @@ use ratatui::Terminal;
 
 use crate::error::{Error, Result};
 use crate::grok::picker::PickerHits;
-use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS};
+use crate::names::{GATEWAY_PAIRING, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS};
 use crate::overlay::{Overlay, UsageTab};
 use crate::queue_pane::QueueHit;
 use crate::scrollback::Scrollback;
@@ -113,6 +113,7 @@ pub async fn run(ctx: Context) -> Result<()> {
     let redraw_ask = redraw_tx.clone();
     let redraw_elicit = redraw_tx.clone();
     let redraw_plan = redraw_tx.clone();
+    let redraw_pair = redraw_tx.clone();
     let _listen = ctx
         .on(SESSION_EVENT, move |_: &LogEvent| {
             let _ = redraw_session.send(());
@@ -136,6 +137,11 @@ pub async fn run(ctx: Context) -> Result<()> {
     let _plan = ctx
         .on(PLAN_EVENT, move |_: &()| {
             let _ = redraw_plan.send(());
+        })
+        .ok();
+    let _pair = ctx
+        .on(GATEWAY_PAIRING, move |_: &()| {
+            let _ = redraw_pair.send(());
         })
         .ok();
 
@@ -219,6 +225,9 @@ pub async fn run(ctx: Context) -> Result<()> {
                                     selected: 0,
                                     query: String::new(),
                                 };
+                            }
+                            Effect::PairingManage => {
+                                overlay = Overlay::PairingManage { selected: 0 };
                             }
                             Effect::Help => {
                                 overlay = Overlay::Help {
@@ -626,6 +635,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                             }
                         }
                     }
+                    open_pairing_if_needed(&ctx, &mut overlay);
                     open_permission_if_needed(&ctx, &mut overlay);
                     open_ask_if_needed(&ctx, &mut overlay);
                     open_elicit_if_needed(&ctx, &mut overlay);
@@ -645,6 +655,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                 }
             }
             Some(()) = redraw_rx.recv() => {
+                open_pairing_if_needed(&ctx, &mut overlay);
                 open_permission_if_needed(&ctx, &mut overlay);
                 open_ask_if_needed(&ctx, &mut overlay);
                 open_elicit_if_needed(&ctx, &mut overlay);

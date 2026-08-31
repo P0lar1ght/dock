@@ -102,6 +102,7 @@ pub enum Effect {
     Quit,
     NewSession,
     ResumePicker,
+    PairingManage,
     Help,
     HistoryPicker,
     Find,
@@ -206,6 +207,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
     match cmd {
         SlashCmd::New => Effect::NewSession,
         SlashCmd::Resume => Effect::ResumePicker,
+        SlashCmd::Pair => Effect::PairingManage,
         SlashCmd::Help => Effect::Help,
         SlashCmd::History => Effect::HistoryPicker,
         SlashCmd::Find => Effect::Find,

@@ -8,6 +8,14 @@ export interface TicketResult {
   expiresAt: number;
 }
 
+export type PairingStatus = 'pending' | 'approved' | 'denied' | 'expired';
+
+export interface PairingPollResult {
+  status: PairingStatus;
+  expiresAt: number;
+  ticket?: string;
+}
+
 export interface HttpBootstrapClientOptions {
   gatewayUrl: string;
   fetch?: typeof globalThis.fetch;

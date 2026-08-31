@@ -20,12 +20,14 @@ use crate::grok::shortcuts::ShortcutsBar;
 use crate::grok::tasks_pane;
 use crate::grok::workflows;
 use crate::mcp_elicit_view;
+use crate::gateway::GatewayRef;
 use crate::names::{
-    SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
+    GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
 };
 use crate::overlay::{
     self, filter_help_items, filter_sessions, filter_strings, HelpItem, InspectTarget, Overlay,
 };
+use crate::pairing;
 use crate::permission_view;
 use crate::plan_approval_view;
 use crate::preset_overlay;
@@ -170,6 +172,7 @@ pub(super) fn draw(
             let inner = inner_area(area);
             let inspect_open = matches!(overlay, Overlay::Inspect { .. });
             let perm_open = matches!(overlay, Overlay::Permission { .. });
+            let pairing_pending = matches!(overlay, Overlay::PairingPending { .. });
             let ask_open = matches!(overlay, Overlay::Ask { .. });
             let elicit_open = matches!(overlay, Overlay::Elicit { .. });
             let plan_open = matches!(overlay, Overlay::PlanApproval { .. });
@@ -182,6 +185,13 @@ pub(super) fn draw(
             );
             let prompt_h = if inspect_open {
                 0
+            } else if pairing_pending {
+                ctx.get::<GatewayRef>(GATEWAY)
+                    .and_then(|g| g.pairing_front())
+                    .map(|pr| pairing::chrome_height(&pr, inner.width))
+                    .unwrap_or(12)
+                    .min(inner.height.saturating_mul(2) / 3)
+                    .max(12)
             } else if perm_open {
                 ctx.get::<Permissions>(PERMISSIONS)
                     .and_then(|p| p.front())
@@ -223,7 +233,7 @@ pub(super) fn draw(
                     .map(|p| p.desired_height(inner.width, inner.height / 2))
                     .unwrap_or(3)
             };
-            let modal_open = perm_open || ask_open || elicit_open || plan_open;
+            let modal_open = perm_open || pairing_pending || ask_open || elicit_open || plan_open;
             let turn_h = if inspect_open {
                 0
             } else {
@@ -289,7 +299,7 @@ pub(super) fn draw(
                 frame.buffer_mut(),
                 turn_area,
                 ctx,
-                perm_open || ask_open || elicit_open || plan_open,
+                perm_open || pairing_pending || ask_open || elicit_open || plan_open,
             );
             let on_welcome = ctx
                 .get::<Welcome>(TUI_WELCOME)
@@ -369,7 +379,22 @@ pub(super) fn draw(
                         pointer,
                     );
                 }
-                if perm_open {
+                if pairing_pending {
+                    if let Some(prompt) =
+                        ctx.get::<GatewayRef>(GATEWAY).and_then(|g| g.pairing_front())
+                    {
+                        let selected = match overlay {
+                            Overlay::PairingPending { selected } => *selected,
+                            _ => 0,
+                        };
+                        *hits = pairing::render_pending(
+                            frame.buffer_mut(),
+                            prompt_area,
+                            &prompt,
+                            selected,
+                        );
+                    }
+                } else if perm_open {
                     if let Some(prompt) =
                         ctx.get::<Permissions>(PERMISSIONS).and_then(|p| p.front())
                     {
@@ -448,7 +473,7 @@ pub(super) fn draw(
                 let file_snap = ctx
                     .get::<PromptWidget>(TUI_PROMPT)
                     .map(|p| p.file_search_snapshot());
-                let blocking = perm_open || ask_open || elicit_open || plan_open;
+                let blocking = perm_open || pairing_pending || ask_open || elicit_open || plan_open;
                 slash_is_open = slash_snap.as_ref().is_some_and(|s| s.open) && !blocking;
                 files_open =
                     file_snap.as_ref().is_some_and(|s| s.open) && !slash_is_open && !blocking;
@@ -583,6 +608,18 @@ pub(super) fn paint_overlay(
             };
             overlay::render_overlay(buf, area, "恢复会话", query, &rows, on_welcome)
         }
+        Overlay::PairingManage { selected } => {
+            let gw = ctx.get::<GatewayRef>(GATEWAY);
+            let pending = gw
+                .as_ref()
+                .map(|g| g.pairing_pending())
+                .unwrap_or_default();
+            let bindings = gw
+                .as_ref()
+                .map(|g| g.pairing_bindings())
+                .unwrap_or_default();
+            pairing::render_manage(buf, area, &pending, &bindings, *selected)
+        }
         Overlay::Help { selected, query } => {
             let extras = slash_extras(ctx);
             let filtered = filter_help_items(query, &extras);
@@ -711,6 +748,7 @@ pub(super) fn paint_overlay(
             settings_modal::render(buf, area, *selected, *picking, &settings)
         }
         Overlay::Permission { .. }
+        | Overlay::PairingPending { .. }
         | Overlay::Ask { .. }
         | Overlay::Elicit { .. }
         | Overlay::PlanApproval { .. } => PickerHits::default(),

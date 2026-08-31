@@ -50,6 +50,14 @@ pub enum Overlay {
     Permission {
         selected: usize,
     },
+    /// Pending Origin pairing (same interrupt priority as Permission).
+    PairingPending {
+        selected: usize,
+    },
+    /// `/pair` management: pending queue + bindings.
+    PairingManage {
+        selected: usize,
+    },
     Ask {
         selected: usize,
         picked: Vec<bool>,
@@ -210,6 +218,8 @@ impl Overlay {
             | Self::Args { query, .. } => query,
             Self::Settings { .. }
             | Self::Permission { .. }
+            | Self::PairingPending { .. }
+            | Self::PairingManage { .. }
             | Self::Ask { .. }
             | Self::Elicit { .. }
             | Self::PlanApproval { .. }
@@ -305,6 +315,8 @@ impl Overlay {
             | Self::Args { selected, .. }
             | Self::Settings { selected, .. }
             | Self::Permission { selected, .. }
+            | Self::PairingPending { selected, .. }
+            | Self::PairingManage { selected, .. }
             | Self::Ask { selected, .. }
             | Self::Elicit { selected, .. }
             | Self::PlanApproval { selected, .. }
@@ -334,6 +346,8 @@ impl Overlay {
             | Self::Args { selected: s, .. }
             | Self::Settings { selected: s, .. }
             | Self::Permission { selected: s, .. }
+            | Self::PairingPending { selected: s, .. }
+            | Self::PairingManage { selected: s, .. }
             | Self::Ask { selected: s, .. }
             | Self::Elicit { selected: s, .. }
             | Self::PlanApproval { selected: s, .. }
@@ -381,6 +395,8 @@ impl Overlay {
             })) => Some(catalog_query),
             Self::Settings { .. }
             | Self::Permission { .. }
+            | Self::PairingPending { .. }
+            | Self::PairingManage { .. }
             | Self::Ask { .. }
             | Self::Elicit { .. }
             | Self::PlanApproval { .. }
@@ -475,6 +491,11 @@ const HELP: &[HelpEntry] = &[
         key: "/resume",
         label: "恢复上次会话",
         kind: HelpKind::Slash(SlashCmd::Resume),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/pair",
+        label: "浏览器配对与已绑来源",
+        kind: HelpKind::Slash(SlashCmd::Pair),
     }),
     HelpEntry::Row(HelpRow {
         key: "/history",

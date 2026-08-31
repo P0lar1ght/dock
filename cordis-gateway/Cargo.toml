@@ -1,0 +1,25 @@
+[package]
+name = "cordis-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Loopback HTTP/WS Cordis plugin: Origin pairing and dock.1 session projection"
+license = "MIT"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws", "json"] }
+cordis = { path = "../cordis-rust" }
+cordis-spine = { path = "../cordis-spine" }
+cordis-tui = { path = "../cordis-tui" }
+futures-util = "0.3"
+getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect"] }

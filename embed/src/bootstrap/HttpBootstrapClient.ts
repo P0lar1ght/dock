@@ -1,5 +1,10 @@
 import { clientError, DockClientError } from '../protocol/errors.js';
-import type { HttpBootstrapClientOptions, PairingRequestResult, TicketResult } from './types.js';
+import type {
+  HttpBootstrapClientOptions,
+  PairingPollResult,
+  PairingRequestResult,
+  TicketResult
+} from './types.js';
 import { normalizeGatewayUrl } from './GatewayUrlPolicy.js';
 
 export class HttpBootstrapClient {
@@ -15,22 +20,36 @@ export class HttpBootstrapClient {
     return this.post<PairingRequestResult>('/v1/pairing/requests', { application });
   }
 
-  exchangePairingRequest(pairingRequestId: string, token: string) {
-    return this.post<TicketResult>('/v1/pairing/exchanges', { pairingRequestId, token });
+  pollPairingRequest(pairingRequestId: string) {
+    return this.get<PairingPollResult>(
+      `/v1/pairing/requests/${encodeURIComponent(pairingRequestId)}`
+    );
+  }
+
+  exchangePairingRequest(pairingRequestId: string) {
+    return this.post<TicketResult>('/v1/pairing/exchanges', { pairingRequestId });
   }
 
   requestConnectionTicket(application: string) {
     return this.post<TicketResult>('/v1/connection/tickets', { application });
   }
 
+  private async get<T>(path: string): Promise<T> {
+    return this.send<T>(path, { method: 'GET' });
+  }
+
   private async post<T>(path: string, body: Record<string, unknown>): Promise<T> {
+    return this.send<T>(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  }
+
+  private async send<T>(path: string, init: RequestInit): Promise<T> {
     let response: Response;
     try {
-      response = await this.fetchImpl(`${this.gatewayUrl}${path}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body)
-      });
+      response = await this.fetchImpl(`${this.gatewayUrl}${path}`, init);
     } catch (error) {
       throw new DockClientError(
         'gateway_unreachable',

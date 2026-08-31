@@ -1,7 +1,7 @@
 use cordis::{plugin, plugin_async, Inject, Plugin};
 
 use crate::names::{
-    SESSION, SESSION_PORT, THEME, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME,
+    SESSION, SESSION_PORT, THEME, TUI_PAIRING, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME,
 };
 use crate::prompt::PromptWidget;
 use crate::scrollback::Scrollback;
@@ -58,6 +58,15 @@ pub fn shortcuts() -> Plugin {
     crate::shortcuts::shortcuts()
 }
 
+pub fn pairing() -> Plugin {
+    plugin("tui.pairing", Inject::from([THEME]), |ctx, _: &()| {
+        Ok(Some(ctx.provide(
+            TUI_PAIRING,
+            crate::pairing::PairingUi::new(ctx.clone()),
+        )?))
+    })
+}
+
 /// Pager event loop. Injects session + view plugins; swap this plugin to
 /// change the UI without touching the loop.
 pub fn tui() -> Plugin {
@@ -71,6 +80,7 @@ pub fn tui() -> Plugin {
             ctx.plugin(status_bar(), ())?.wait().await?;
             ctx.plugin(welcome(), ())?.wait().await?;
             ctx.plugin(shortcuts(), ())?.wait().await?;
+            ctx.plugin(pairing(), ())?.wait().await?;
             event_loop::run(ctx)
                 .await
                 .map_err(|e| cordis::Error::message(e.to_string()))?;

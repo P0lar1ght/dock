@@ -18,8 +18,10 @@ use crate::grok::mcps;
 use crate::grok::tasks_pane::{self, GroupKind, TaskEntry};
 use crate::grok::workflows::WorkflowRunSnapshot;
 use crate::mcp_elicit_view;
-use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
+use crate::gateway::GatewayRef;
+use crate::names::{GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
 use crate::overlay::{filter_help_items, filter_sessions, filter_strings, InspectTarget, Overlay};
+use crate::pairing;
 use crate::permission_view;
 use crate::plan_approval_view;
 use crate::preset_overlay::{self, PresetAction, PresetView};
@@ -42,7 +44,37 @@ use crate::prompt::{PastedImage, PromptWidget};
 use crate::status::StatusLine;
 use crate::welcome::Welcome;
 
+pub(super) fn open_pairing_if_needed(ctx: &Context, overlay: &mut Overlay) {
+    let front = ctx
+        .get::<GatewayRef>(GATEWAY)
+        .and_then(|g| g.pairing_front());
+    if matches!(overlay, Overlay::PairingPending { .. }) {
+        if front.is_none() {
+            overlay.close();
+        }
+        return;
+    }
+    if matches!(
+        overlay,
+        Overlay::Permission { .. }
+            | Overlay::Ask { .. }
+            | Overlay::PlanApproval { .. }
+            | Overlay::PairingManage { .. }
+    ) {
+        return;
+    }
+    if front.is_some() {
+        *overlay = Overlay::PairingPending { selected: 0 };
+    }
+}
+
 pub(super) fn open_permission_if_needed(ctx: &Context, overlay: &mut Overlay) {
+    if matches!(
+        overlay,
+        Overlay::PairingPending { .. } | Overlay::PairingManage { .. }
+    ) {
+        return;
+    }
     if matches!(overlay, Overlay::Elicit { .. }) {
         overlay.close();
     } else if overlay.is_open() {
@@ -105,7 +137,10 @@ pub(super) fn dispatch_slot_key(ctx: &Context, overlay: &mut Overlay, key: &str)
 pub(super) fn open_ask_if_needed(ctx: &Context, overlay: &mut Overlay) {
     if matches!(
         overlay,
-        Overlay::Permission { .. } | Overlay::Ask { .. } | Overlay::PlanApproval { .. }
+        Overlay::Permission { .. }
+            | Overlay::Ask { .. }
+            | Overlay::PlanApproval { .. }
+            | Overlay::PairingPending { .. }
     ) {
         if matches!(overlay, Overlay::Ask { .. })
             && ctx.get::<Ask>(ASK).and_then(|a| a.front()).is_none()
@@ -204,6 +239,7 @@ pub(super) fn open_elicit_if_needed(ctx: &Context, overlay: &mut Overlay) {
         Overlay::Permission { .. }
             | Overlay::Ask { .. }
             | Overlay::PlanApproval { .. }
+            | Overlay::PairingPending { .. }
             | Overlay::Elicit { .. }
     ) {
         if matches!(overlay, Overlay::Elicit { .. }) && elicit_front(ctx).is_none() {
@@ -231,7 +267,10 @@ pub(super) fn open_elicit_if_needed(ctx: &Context, overlay: &mut Overlay) {
 pub(super) fn open_plan_approval_if_needed(ctx: &Context, overlay: &mut Overlay) {
     if matches!(
         overlay,
-        Overlay::Permission { .. } | Overlay::Ask { .. } | Overlay::PlanApproval { .. }
+        Overlay::Permission { .. }
+            | Overlay::Ask { .. }
+            | Overlay::PlanApproval { .. }
+            | Overlay::PairingPending { .. }
     ) {
         if matches!(
             overlay,
@@ -1010,6 +1049,18 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
                 .unwrap_or(0),
         },
         Overlay::Permission { .. } => permission_view::OPTIONS.len(),
+        Overlay::PairingPending { .. } => pairing::PENDING_OPTIONS.len(),
+        Overlay::PairingManage { .. } => {
+            let gw = ctx.get::<GatewayRef>(GATEWAY);
+            pairing::overlay_len(
+                &gw.as_ref()
+                    .map(|g| g.pairing_pending())
+                    .unwrap_or_default(),
+                &gw.as_ref()
+                    .map(|g| g.pairing_bindings())
+                    .unwrap_or_default(),
+            )
+        }
         Overlay::PlanApproval { view_only, .. } => plan_approval_view::options(*view_only).len(),
         Overlay::Ask { picked, .. } => ctx
             .get::<Ask>(ASK)

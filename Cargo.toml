@@ -4,6 +4,7 @@ members = [
     "cordis-rust",
     "cordis-spine",
     "cordis-tui",
+    "cordis-gateway",
     "cordis-app",
     "cordis-render/markdown",
     "cordis-render/mermaid",

@@ -13,5 +13,6 @@ path = "src/main.rs"
 cordis = { path = "../cordis-rust" }
 cordis-spine = { path = "../cordis-spine" }
 cordis-tui = { path = "../cordis-tui" }
+cordis-gateway = { path = "../cordis-gateway" }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "time"] }

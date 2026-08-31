@@ -19,6 +19,8 @@ pub const RESERVED_SLASH: &[&str] = &[
     "model",
     "m",
     "resume",
+    "pair",
+    "pairing",
     "loop",
     "cron",
     "plan",
