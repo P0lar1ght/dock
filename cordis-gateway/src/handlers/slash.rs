@@ -628,11 +628,12 @@ mod tests {
             .map(|entry| catalog_json(&entry))
             .flat_map(|row| {
                 let name = row["name"].as_str().unwrap().to_string();
-                let aliases = row["aliases"]
+                let aliases: Vec<String> = row["aliases"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .filter_map(|a| a.as_str().map(str::to_string));
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect();
                 std::iter::once(name).chain(aliases)
             })
             .collect();

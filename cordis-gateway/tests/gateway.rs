@@ -621,11 +621,12 @@ async fn slash_list_includes_harness_and_screenshot() {
         .filter(|c| !c["name"].as_str().unwrap_or("").contains(' '))
         .flat_map(|c| {
             let name = c["name"].as_str().unwrap().to_string();
-            let aliases = c["aliases"]
+            let aliases: Vec<String> = c["aliases"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|a| a.as_str().map(str::to_string));
+                .filter_map(|a| a.as_str().map(str::to_string))
+                .collect();
             std::iter::once(name).chain(aliases)
         })
         .collect();
