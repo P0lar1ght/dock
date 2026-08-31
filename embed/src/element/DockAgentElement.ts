@@ -348,7 +348,9 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
       gatewayUrl: this.clientValue.gatewayUrl,
       request: () => this.requireClient().requestPairing(),
       waitForTicket: (id) => this.requireClient().waitForPairingTicket(id),
-      onTicket: (ticket) => this.requireClient().connectWithIssuedTicket(ticket)
+      onTicket: async (ticket) => {
+        await this.requireClient().connectWithIssuedTicket(ticket);
+      }
     }, () => this.requestUpdate());
     this.gatewayUrl = this.clientValue.gatewayUrl;
     this.threadController.bind(this.clientValue);
