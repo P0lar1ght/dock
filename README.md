@@ -1,23 +1,27 @@
 # dock
 
-Grok-shaped TUI，独立 git 仓库，嵌在 AILab 里。**不 path-dep `grok-build/`。**
+Grok 外形的本地 Agent。**不 path-dep `grok-build/`。** 外面的参考树（`cordis/`、`deepseek-harness/`、`grok-build/`）不属于本仓库。
 
-外面的参考树（`cordis/`、`deepseek-harness/`、`grok-build/`）不属于本仓库。插件规则见 [AGENTS.md](AGENTS.md)；模型工具见 [TOOLS.md](TOOLS.md)；斜杠 / TUI 见 [CLI.md](CLI.md)。
+第一方库统一 `cordis-*`。其余是入口、注入、冻结副本。
 
-```
-cordis-rust      plugin kernel
-cordis-markdown  baked Grok markdown renderer
-cordis-spine     sessions + stub llm/tools + agent loop
-cordis-tui       fullscreen Grok pager
-cordis-app       session actor + binary
-```
+| 目录 | 干什么 |
+|---|---|
+| [`cordis-rust/`](cordis-rust/) | 插件内核：`Context`、inject、named services（crate `cordis`） |
+| [`cordis-spine/`](cordis-spine/) | Agent 循环、工具、MCP、会话 |
+| [`cordis-tui/`](cordis-tui/) | 全屏终端 UI |
+| [`cordis-app/`](cordis-app/) | 二进制入口 |
+| [`cordis-render/`](cordis-render/) | 输出渲染：Markdown、Mermaid（后续同类往这里加） |
+| [`embed/`](embed/) | 宿主页 JS 注入（`dock-embed.js`） |
+| [`vendor/`](vendor/) | 冻结副本：[`mermaid/`](vendor/mermaid/) 布局栈、[`xai/`](vendor/xai/) Grok 拷贝 |
+| [`skills/`](skills/) | Agent skills |
+| [`assets/`](assets/) | 品牌图 |
+
+插件规则：[AGENTS.md](AGENTS.md)。模型工具：[TOOLS.md](TOOLS.md)。斜杠 / TUI：[CLI.md](CLI.md)。
 
 ```bash
 cargo run -p cordis-app
 ```
 
-Model picker (`/model`, F2 Settings) reads `~/.dock/config.toml` then `.dock/config.toml`. See `config.toml.example`. `DOCK_MODEL` overrides `[models].default`.
+Model picker（`/model`，F2 Settings）读 `~/.dock/config.toml` 再读 `.dock/config.toml`。见 `config.toml.example`。`DOCK_MODEL` 覆盖 `[models].default`。
 
-This workspace's `.dock/config.toml` defaults to OpenRouter **MiniMax M3 free** (`minimax/minimax-m3:free`). Fill `api_key` there or export `OPENROUTER_API_KEY`. Empero (`glm-5.3-flash` / `qwen3.8-flash`) stays in the picker; it is currently in maintenance.
-
-Stub LLM echoes. 产品只在这棵树里改。
+Stub LLM 会 echo。产品只在这棵树里改。

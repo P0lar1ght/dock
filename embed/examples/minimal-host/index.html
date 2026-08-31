@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dock SDK 宿主 Context 闭环</title>
+    <style>
+      body { margin: 0; font: 16px/1.5 system-ui, sans-serif; background: #f4f6f8; color: #18202a; }
+      main { width: min(720px, calc(100% - 32px)); margin: 40px auto; padding: 24px; background: white; border-radius: 12px; }
+      label { display: grid; gap: 6px; margin: 14px 0; }
+      input, select, textarea, button { box-sizing: border-box; min-height: 40px; padding: 8px 10px; font: inherit; }
+      input, select, textarea { width: 100%; border: 1px solid #aeb8c4; border-radius: 6px; }
+      textarea { min-height: 96px; resize: vertical; }
+      button { margin: 4px 8px 4px 0; border: 0; border-radius: 6px; background: #155eef; color: white; cursor: pointer; }
+      button.secondary { background: #475467; }
+      pre { min-height: 120px; padding: 16px; overflow: auto; background: #101828; color: #d1fadf; border-radius: 8px; }
+      code { overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Dock SDK 宿主 Context 闭环</h1>
+      <p>普通 HTTP 页面通过 SDK 验证配对、Thread、不可变宿主 Context 和真实模型回复。</p>
+      <label>Application <input id="application" value="sdk-fixture" /></label>
+      <label>本机 Gateway URL <input id="gateway-url" value="http://127.0.0.1:18990" /></label>
+      <button id="connect">连接已配对 Gateway</button>
+      <button id="request-pairing" class="secondary">申请首次配对</button>
+      <p id="pairing-help" hidden>请在本机运行：<code id="pairing-command"></code></p>
+      <label>Pairing Request ID <input id="pairing-id" readonly /></label>
+      <label>一次性配对 Token <input id="pairing-token" type="password" autocomplete="one-time-code" /></label>
+      <button id="complete-pairing">提交 Token 并连接</button>
+      <h2>连接结果</h2>
+      <pre id="result" aria-live="polite">尚未连接</pre>
+      <h2>Thread</h2>
+      <label>授权 Workspace <select id="workspace"></select></label>
+      <button id="list-threads" class="secondary">刷新 Thread 列表</button>
+      <button id="create-thread">创建 Thread</button>
+      <label>Thread <select id="thread"></select></label>
+      <button id="open-thread" class="secondary">恢复/切换 Thread</button>
+      <h2>宿主业务对象</h2>
+      <p>切换对象后发送同一个问题，Agent 必须只识别当前最新对象。</p>
+      <button id="select-object-a">选择 Object A</button>
+      <button id="select-object-b">选择 Object B</button>
+      <button id="clear-object" class="secondary">清空对象</button>
+      <p id="context-result" aria-live="polite">当前对象：无</p>
+      <h2>真实消息</h2>
+      <label>发送给 Agent <textarea id="message">只依据当前 Host Context，用一句中文回答当前对象名称；如果没有 selected_resource，请回答“无对象”。</textarea></label>
+      <button id="send-message">发送并接收流式事件</button>
+      <pre id="session" aria-live="polite">尚未选择 Thread</pre>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -33,7 +33,7 @@ async-trait = "0.1"
 tracing = "0.1"
 schemars = "0.8"
 libc = "0.2"
-xai-workflow = { path = "../vendor/xai-workflow" }
+xai-workflow = { path = "../vendor/xai/workflow" }
 
 [dev-dependencies]
 tempfile = "3"

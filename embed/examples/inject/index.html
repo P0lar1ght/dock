@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dock embed host</title>
+    <style>
+      body { margin: 0; min-height: 100vh; font: 16px/1.5 system-ui, sans-serif; background: #f4f6f8; color: #18202a; }
+      main { width: min(720px, calc(100% - 32px)); margin: 40px auto; padding: 24px; background: white; border-radius: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Dock 宿主注入</h1>
+      <p>页面只挂一份 <code>dock-embed.js</code>。宠物和 Chat 在 Shadow DOM 里，不改宿主样式。</p>
+    </main>
+    <script
+      src="../../dist/dock-embed.js"
+      data-dock-auto
+      data-application="example-app"
+      data-gateway-url="http://127.0.0.1:18990"
+      data-skin="dudu">
+    </script>
+  </body>
+</html>

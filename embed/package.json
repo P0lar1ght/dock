@@ -1,0 +1,68 @@
+{
+  "name": "dock-embed",
+  "version": "0.1.0",
+  "description": "Browser SDK for embedding the local Dock agent into a host page via one script tag.",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./embed": {
+      "types": "./dist/embed.d.ts",
+      "import": "./dist/embed.js"
+    },
+    "./standalone": {
+      "types": "./dist/embed.d.ts",
+      "import": "./dist/dock-embed.js"
+    }
+  },
+  "unpkg": "./dist/dock-embed.js",
+  "jsdelivr": "./dist/dock-embed.js",
+  "bin": {
+    "dock-pet-pack": "./scripts/package-dockskin.mjs"
+  },
+  "sideEffects": [
+    "./dist/embed.js",
+    "./dist/dock-embed.js"
+  ],
+  "files": [
+    "README.md",
+    "scripts/package-dockskin.mjs",
+    "templates/pet-skin/manifest.json",
+    "dist/**/*.js",
+    "dist/**/*.d.ts"
+  ],
+  "scripts": {
+    "clean": "node scripts/clean-dist.mjs",
+    "build:types": "tsc -b",
+    "build:bundle": "vite build && node scripts/build-standalone.mjs",
+    "build": "npm run clean && npm run build:types && npm run build:bundle",
+    "pack:skin": "node scripts/package-dockskin.mjs",
+    "dev:host": "vite --host 127.0.0.1 --port 19080 --strictPort examples/inject"
+  },
+  "dependencies": {
+    "@fortawesome/free-solid-svg-icons": "7.3.1",
+    "lit": "3.3.3",
+    "modern-screenshot": "4.7.0",
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.10",
+    "typescript": "^5.7.3",
+    "vite": "6.4.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

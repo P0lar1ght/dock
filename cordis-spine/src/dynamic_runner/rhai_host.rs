@@ -1,5 +1,5 @@
 //! Rhai host-half evaluator. Compile at define; eval `apply` at run.
-//! Engine setup copied from `vendor/xai-workflow` (DummyModuleResolver,
+//! Engine setup copied from `vendor/xai/workflow` (DummyModuleResolver,
 //! max ops, disable eval) — not the workflow agent-host channel.
 
 use std::sync::{Arc, Mutex};

@@ -9,7 +9,7 @@ readme = "README.md"
 [dependencies]
 anstyle = "1.0"
 cordis = { path = "../cordis-rust" }
-cordis-markdown = { path = "../cordis-markdown" }
+cordis-markdown = { path = "../cordis-render/markdown" }
 cordis-spine = { path = "../cordis-spine" }
 crossterm = { version = "0.28", features = ["event-stream"] }
 nucleo = { git = "https://github.com/helix-editor/nucleo.git", rev = "5b74652" }
@@ -21,8 +21,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
 syntect = "5.3"
-xai-fuzzy-file-search = { path = "../vendor/xai-fuzzy-file-search" }
-xai-grok-mermaid = { path = "../xai-grok-mermaid" }
+xai-fuzzy-file-search = { path = "../vendor/xai/fuzzy-file-search" }
+xai-grok-mermaid = { path = "../cordis-render/mermaid" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
