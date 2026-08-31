@@ -606,6 +606,13 @@ async fn slash_list_includes_harness_and_screenshot() {
         .find(|c| c["name"] == "cd")
         .unwrap();
     assert_eq!(cd["surface"], "terminal");
+    let settings = listed["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "settings")
+        .unwrap();
+    assert_eq!(settings["surface"], "terminal");
 
     use std::collections::HashSet;
     let tui: HashSet<String> = cordis_tui::slash_catalog()
@@ -677,6 +684,28 @@ async fn slash_execute_dispatches_to_spine() {
         .unwrap()
         .contains("终端"));
     assert_eq!(std::env::current_dir().unwrap(), cwd_before);
+
+    let settings_svc = h.ctx.require::<AppSettings>(SETTINGS).unwrap();
+    let ts_before = settings_svc.timestamps();
+    let settings_cmd = rpc
+        .call("slash/execute", json!({ "text": "/settings timestamps" }))
+        .await;
+    assert_eq!(settings_cmd["result"]["kind"], "notice");
+    assert!(settings_cmd["result"]["notice"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("终端"));
+    assert_eq!(settings_svc.timestamps(), ts_before);
+
+    let alias = rpc
+        .call("slash/execute", json!({ "text": "/config timestamps" }))
+        .await;
+    assert_eq!(alias["result"]["kind"], "notice");
+    assert!(alias["result"]["notice"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("终端"));
+    assert_eq!(settings_svc.timestamps(), ts_before);
 
     let bad_thread = rpc
         .call("slash/execute", json!({ "text": "/new", "threadId": "s1" }))

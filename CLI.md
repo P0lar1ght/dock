@@ -10,13 +10,13 @@
 
 目录在 `cordis-tui/src/slash/mod.rs` `CATALOG`。别名也能提交。动态插件可以通过 `"slash"` **追加**命令（工厂 `slash` 或 Rhai `host.register_slash`），不能替换本表里的内建项。追加的命令出现在下拉补全和 `/help`；`prompt` 种会填入或发送模板（`{args}` 换成键入的参数），`overlay` 种打开只读标题+正文 overlay，`slot` 种打开已登记的 `tui.slots` id（`text` = 插槽 id），`tool` 种直接跑 live 工具（`text` = 工具名；参数：空=`{}`、以 `{` 开头=原始 JSON、否则 `{"args":"…"}`），结果进 Notice，不经模型。停掉该动态 Plugin 或退出进程后，**会话**额外命令消失；磁盘永久插件会在下次启动时再挂上。
 
-浏览器 embed **不要**为每个斜杠单独适配。Gateway 暴露 `slash/list`（补全目录：TUI `slash_catalog()` + `"slash"` 追加 + 浏览器 `/screenshot*`）和 `slash/execute`（接到 spine / session.port）。JS 只做前缀过滤、截图采集、以及把 `{ kind: filled|notice|menu|capture|submitted|applied }` 画出来。TUI overlay 类命令（`/pair` `/theme` `/preset` …）和 **`/cd`** execute 会回 Notice「请在 Dock 终端使用」——`/cd` 是进程级 `set_current_dir`，配对页不能改整个 Dock 的 cwd。未知 `/foo` 为 `passthrough`，当作普通 prompt 发给模型。`slash/execute` 的 `threadId` 只能是 `live` 或省略。
+浏览器 embed **不要**为每个斜杠单独适配。Gateway 暴露 `slash/list`（补全目录：TUI `slash_catalog()` + `"slash"` 追加 + 浏览器 `/screenshot*`）和 `slash/execute`（接到 spine / session.port）。JS 只做前缀过滤、截图采集、以及把 `{ kind: filled|notice|menu|capture|submitted|applied }` 画出来。TUI overlay 类命令（`/pair` `/theme` `/preset` `/settings` …）和 **`/cd`** execute 会回 Notice「请在 Dock 终端使用」——list 标 `terminal` 的名字不会改进程状态（`/settings timestamps` 也不会）。`/timestamps` `/think` `/model` `/effort` 仍可从浏览器直接改。未知 `/foo` 为 `passthrough`，当作普通 prompt 发给模型。`slash/execute` 的 `threadId` 只能是 `live` 或省略。
 
 下拉打开时 Enter / Tab 只把 `/命令 ` 放进输入框，不执行。名字后面有空格后下拉关闭，再 Enter 才解析（有参数就带上）。
 
 | 命令 | 行为 |
 |---|---|
-| `/settings`（`config` `prefs`） | 设置 overlay；有参数则直接改（`timestamps` / `theme` / `model`） |
+| `/settings`（`config` `prefs`） | 设置 overlay；有参数则直接改（`timestamps` / `theme` / `model`）。浏览器 companion 一律拒绝（含带参），请用 `/timestamps` `/think` `/model` `/effort` |
 | `/new` | 归档当前会话并清空。账本用量一并清零 |
 | `/model` `/m` | 切换当前模型 |
 | `/resume` | 恢复上次会话。用量账本不随归档恢复（Grok：新进程 resume 清零） |

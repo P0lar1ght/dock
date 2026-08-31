@@ -3,8 +3,9 @@
 //! Builtin names come from `cordis_tui::slash_catalog()` (the pager dropdown).
 //! `slash/list` is autocomplete; `slash/execute` talks to spine services.
 //! Capture commands (`/screenshot`) are listed here so embed does not keep a
-//! parallel harness catalog; the actual pixels stay in JS. `/cd` is listed
-//! but refused on this surface: it is process-global `set_current_dir`.
+//! parallel harness catalog; the actual pixels stay in JS. `/cd` and `/settings`
+//! (including `/settings timestamps`) are listed but refused: list `terminal`
+//! never mutates process state. Use `/timestamps` `/think` `/model` `/effort`.
 
 use serde_json::{json, Value};
 
@@ -31,15 +32,33 @@ struct Item {
 }
 
 /// Names the web client may run against spine / `session.port`.
-/// Everything else in the TUI catalog is terminal-only (overlays, `/quit`,
-/// and `/cd` — the last is process-global `set_current_dir`).
+/// List `surface` and execute both use this: a terminal name never reaches
+/// `cmd_*` that mutate process state. `/settings` (even with args), `/cd`,
+/// overlays, and `/quit` stay terminal. New harness-facing names go here;
+/// anything omitted is fail-closed to terminal.
+const GATEWAY_COMMANDS: &[&str] = &[
+    "new",
+    "model",
+    "resume",
+    "loop",
+    "plan",
+    "view-plan",
+    "goal",
+    "compact",
+    "effort",
+    "think",
+    "help",
+    "usage",
+    "context",
+    "workflow",
+    "timestamps",
+];
+
 fn surface_for(name: &str) -> &'static str {
-    match name {
-        "new" | "model" | "resume" | "loop" | "plan" | "view-plan" | "goal" | "compact"
-        | "effort" | "think" | "help" | "usage" | "context" | "workflow" | "timestamps" => {
-            "gateway"
-        }
-        _ => "terminal",
+    if GATEWAY_COMMANDS.contains(&name) {
+        "gateway"
+    } else {
+        "terminal"
     }
 }
 
@@ -191,6 +210,9 @@ async fn execute_builtin(
     name: &str,
     args: &str,
 ) -> Result<Value, RpcError> {
+    if surface_for(name) != "gateway" {
+        return Ok(terminal_only(name));
+    }
     let args = args.trim();
     match name {
         "new" => cmd_new(gateway),
@@ -208,8 +230,6 @@ async fn execute_builtin(
         "context" => Ok(menu("context")),
         "workflow" => cmd_workflow(gateway, args),
         "timestamps" => cmd_timestamps(gateway),
-        "cd" => Ok(terminal_only("cd")),
-        "settings" => cmd_settings(gateway, args),
         other => Ok(terminal_only(other)),
     }
 }
@@ -422,6 +442,7 @@ fn cmd_usage(gateway: &GatewayHandle) -> Result<Value, RpcError> {
 }
 
 fn cmd_workflow(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    // Overlay (`/workflow` / `/workflow runs`) is TUI. A name submits a start prompt.
     if args.is_empty() || args.eq_ignore_ascii_case("runs") {
         return Ok(terminal_only("workflow"));
     }
@@ -445,23 +466,6 @@ fn cmd_timestamps(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     } else {
         "时间戳已关"
     }))
-}
-
-fn cmd_settings(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
-    if args.is_empty() {
-        return Ok(terminal_only("settings"));
-    }
-    let mut parts = args.splitn(2, char::is_whitespace);
-    let key = parts.next().unwrap_or("");
-    let rest = parts.next().unwrap_or("").trim();
-    match key {
-        "timestamps" => cmd_timestamps(gateway),
-        "think" | "thinking" => cmd_think(gateway),
-        "theme" => Ok(terminal_only("theme")),
-        "model" => cmd_model(gateway, rest),
-        "effort" => cmd_effort(gateway, rest),
-        _ => Ok(terminal_only("settings")),
-    }
 }
 
 fn submit_text(gateway: &GatewayHandle, text: String) -> Result<Value, RpcError> {
@@ -638,9 +642,19 @@ mod tests {
             })
             .collect();
         assert_eq!(listed, tui);
-        assert!(tui.contains("cd"));
         assert_eq!(surface_for("cd"), "terminal");
+        assert_eq!(surface_for("settings"), "terminal");
         assert_eq!(surface_for("new"), "gateway");
         assert_eq!(surface_for("pair"), "terminal");
+        for entry in slash_catalog() {
+            if surface_for(entry.name) != "gateway" {
+                continue;
+            }
+            assert!(
+                GATEWAY_COMMANDS.contains(&entry.name),
+                "gateway surface {} missing from GATEWAY_COMMANDS",
+                entry.name
+            );
+        }
     }
 }
