@@ -31,31 +31,52 @@ struct Item {
     capture: Option<&'static str>,
 }
 
-/// Names the web client may run against spine / `session.port`.
-/// List `surface` and execute both use this: a terminal name never reaches
-/// `cmd_*` that mutate process state. `/settings` (even with args), `/cd`,
-/// overlays, and `/quit` stay terminal. New harness-facing names go here;
-/// anything omitted is fail-closed to terminal.
-const GATEWAY_COMMANDS: &[&str] = &[
-    "new",
-    "model",
-    "resume",
-    "loop",
-    "plan",
-    "view-plan",
-    "goal",
-    "compact",
-    "effort",
-    "think",
-    "help",
-    "usage",
-    "context",
-    "workflow",
-    "timestamps",
-];
+/// Harness-facing builtins. List `surface` and execute both go through
+/// `gateway_cmd`: omitted TUI names are fail-closed to terminal (`/settings`
+/// with args, `/cd`, overlays, `/quit`). Adding a variant without an execute
+/// arm is a compile error.
+#[derive(Clone, Copy)]
+enum GatewayCmd {
+    New,
+    Resume,
+    Model,
+    Loop,
+    Plan,
+    ViewPlan,
+    Goal,
+    Compact,
+    Effort,
+    Think,
+    Help,
+    Usage,
+    Context,
+    Workflow,
+    Timestamps,
+}
+
+fn gateway_cmd(name: &str) -> Option<GatewayCmd> {
+    Some(match name {
+        "new" => GatewayCmd::New,
+        "resume" => GatewayCmd::Resume,
+        "model" => GatewayCmd::Model,
+        "loop" => GatewayCmd::Loop,
+        "plan" => GatewayCmd::Plan,
+        "view-plan" => GatewayCmd::ViewPlan,
+        "goal" => GatewayCmd::Goal,
+        "compact" => GatewayCmd::Compact,
+        "effort" => GatewayCmd::Effort,
+        "think" => GatewayCmd::Think,
+        "help" => GatewayCmd::Help,
+        "usage" => GatewayCmd::Usage,
+        "context" => GatewayCmd::Context,
+        "workflow" => GatewayCmd::Workflow,
+        "timestamps" => GatewayCmd::Timestamps,
+        _ => return None,
+    })
+}
 
 fn surface_for(name: &str) -> &'static str {
-    if GATEWAY_COMMANDS.contains(&name) {
+    if gateway_cmd(name).is_some() {
         "gateway"
     } else {
         "terminal"
@@ -210,27 +231,26 @@ async fn execute_builtin(
     name: &str,
     args: &str,
 ) -> Result<Value, RpcError> {
-    if surface_for(name) != "gateway" {
+    let Some(cmd) = gateway_cmd(name) else {
         return Ok(terminal_only(name));
-    }
+    };
     let args = args.trim();
-    match name {
-        "new" => cmd_new(gateway),
-        "resume" => cmd_resume(gateway),
-        "model" => cmd_model(gateway, args),
-        "loop" => cmd_loop(gateway, args),
-        "plan" => cmd_plan(gateway, args),
-        "view-plan" => cmd_view_plan(gateway),
-        "goal" => cmd_goal(gateway, args),
-        "compact" => cmd_compact(gateway, args),
-        "effort" => cmd_effort(gateway, args),
-        "think" => cmd_think(gateway),
-        "help" => Ok(notice("斜杠命令", help_body(gateway))),
-        "usage" => cmd_usage(gateway),
-        "context" => Ok(menu("context")),
-        "workflow" => cmd_workflow(gateway, args),
-        "timestamps" => cmd_timestamps(gateway),
-        other => Ok(terminal_only(other)),
+    match cmd {
+        GatewayCmd::New => cmd_new(gateway),
+        GatewayCmd::Resume => cmd_resume(gateway),
+        GatewayCmd::Model => cmd_model(gateway, args),
+        GatewayCmd::Loop => cmd_loop(gateway, args),
+        GatewayCmd::Plan => cmd_plan(gateway, args),
+        GatewayCmd::ViewPlan => cmd_view_plan(gateway),
+        GatewayCmd::Goal => cmd_goal(gateway, args),
+        GatewayCmd::Compact => cmd_compact(gateway, args),
+        GatewayCmd::Effort => cmd_effort(gateway, args),
+        GatewayCmd::Think => cmd_think(gateway),
+        GatewayCmd::Help => Ok(notice("斜杠命令", help_body(gateway))),
+        GatewayCmd::Usage => cmd_usage(gateway),
+        GatewayCmd::Context => Ok(menu("context")),
+        GatewayCmd::Workflow => cmd_workflow(gateway, args),
+        GatewayCmd::Timestamps => cmd_timestamps(gateway),
     }
 }
 
@@ -646,15 +666,14 @@ mod tests {
         assert_eq!(surface_for("settings"), "terminal");
         assert_eq!(surface_for("new"), "gateway");
         assert_eq!(surface_for("pair"), "terminal");
+        assert!(gateway_cmd("settings").is_none());
+        assert!(gateway_cmd("new").is_some());
         for entry in slash_catalog() {
-            if surface_for(entry.name) != "gateway" {
-                continue;
+            if gateway_cmd(entry.name).is_some() {
+                assert_eq!(surface_for(entry.name), "gateway");
+            } else {
+                assert_eq!(surface_for(entry.name), "terminal");
             }
-            assert!(
-                GATEWAY_COMMANDS.contains(&entry.name),
-                "gateway surface {} missing from GATEWAY_COMMANDS",
-                entry.name
-            );
         }
     }
 }
