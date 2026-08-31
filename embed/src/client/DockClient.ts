@@ -30,6 +30,7 @@ import { TurnClient } from './TurnClient.js';
 import { PermissionClient } from './PermissionClient.js';
 import { InteractionClient } from './InteractionClient.js';
 import { McpClient } from './McpClient.js';
+import { SlashClient } from './SlashClient.js';
 import { ContextClient } from './ContextClient.js';
 import { ContextController } from '../controllers/ContextController.js';
 import { ClientEventHub, type ClientConnectionListener } from './ClientEvents.js';
@@ -63,6 +64,7 @@ export class DockClient {
   private readonly turnApi: TurnClient;
   private readonly permissionApi: PermissionClient;
   private readonly interactionApi: InteractionClient;
+  private readonly slashApi: SlashClient;
   private readonly contextController: ContextController;
   private readonly sessionCoordinator: SessionCoordinator;
   private readonly reconnectPolicy?: ReconnectPolicy;
@@ -102,6 +104,7 @@ export class DockClient {
     this.turnApi = new TurnClient((method, params) => this.request(method, params));
     this.permissionApi = new PermissionClient((method, params) => this.request(method, params));
     this.interactionApi = new InteractionClient((method, params) => this.request(method, params));
+    this.slashApi = new SlashClient((method, params) => this.request(method, params));
     this.sessionCoordinator = new SessionCoordinator({
       threadApi: this.threadApi,
       threadStore: this.threadStore,
@@ -458,6 +461,8 @@ export class DockClient {
         selectedWorkspace,
         selection
       ),
+      listSlashCommands: () => this.slashApi.list(),
+      executeSlash: (text, threadId) => this.slashApi.execute(text, threadId),
       resolvePermission: (id, selectedWorkspace, requestId, turnId, decision) => this.permissionApi.resolve({
         requestId,
         threadId: id,

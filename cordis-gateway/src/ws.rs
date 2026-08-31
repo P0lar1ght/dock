@@ -17,7 +17,11 @@ use crate::pairing::IssuedTicket;
 use crate::protocol::{self, RpcError};
 use crate::rpc;
 
-pub async fn upgrade(ws: WebSocketUpgrade, headers: HeaderMap, State(state): State<AppState>) -> Response {
+pub async fn upgrade(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
     let origin = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
@@ -113,16 +117,9 @@ async fn dispatch_text(conn: &Arc<Mutex<Conn>>, text: &str) -> Option<String> {
     }
 }
 
-async fn dispatch_locked(
-    conn: &mut Conn,
-    method: &str,
-    params: Value,
-) -> Result<Value, RpcError> {
+async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result<Value, RpcError> {
     if method == protocol::CONNECTION_AUTHENTICATE {
-        let ticket = params
-            .get("ticket")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let ticket = params.get("ticket").and_then(Value::as_str).unwrap_or("");
         let auth = conn
             .gateway
             .authenticate(ticket, &conn.origin)

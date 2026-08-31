@@ -8,9 +8,10 @@ use std::time::Duration;
 use cordis::Context;
 use cordis_gateway::{gateway_bind, GATEWAY, PROTOCOL_VERSION};
 use cordis_spine::{
-    agent_loop, install_fakes, mcp_client, permissions, plan_mode, settings, tool_ask_user,
-    tool_goal, turn, AppSettings, Goal, LogEvent, LoopHandle, PermissionOptionKind, Permissions,
-    Sessions, TurnControl, AGENT_LOOP, GOAL, PERMISSIONS, SESSIONS, SETTINGS, TURN,
+    agent_loop, install_fakes, mcp_client, permissions, plan_mode, settings, slash, tool_ask_user,
+    tool_goal, turn, AppSettings, ExtraSlashKind, Goal, LogEvent, LoopHandle, PermissionOptionKind,
+    Permissions, PlanMode, Sessions, Slash, SlashEntry, TurnControl, AGENT_LOOP, GOAL, PERMISSIONS,
+    PLAN_MODE, SESSIONS, SETTINGS, SLASH, TURN,
 };
 use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use futures_util::{SinkExt, StreamExt};
@@ -80,10 +81,19 @@ impl Harness {
         install_fakes(&root).await.unwrap();
         root.plugin(settings(), ()).unwrap().wait().await.unwrap();
         root.plugin(turn(), ()).unwrap().wait().await.unwrap();
-        root.plugin(permissions(), ()).unwrap().wait().await.unwrap();
+        root.plugin(permissions(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
         root.plugin(plan_mode(), ()).unwrap().wait().await.unwrap();
-        root.plugin(tool_ask_user(), ()).unwrap().wait().await.unwrap();
+        root.plugin(tool_ask_user(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
         root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+        root.plugin(slash(), ()).unwrap().wait().await.unwrap();
         root.plugin(mcp_client(), ()).unwrap().wait().await.unwrap();
         root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
         let port = TestSession {
@@ -171,10 +181,7 @@ impl Harness {
         assert_eq!(poll["status"], "approved");
         assert!(poll.get("ticket").is_none() || poll["ticket"].is_null());
         let exchanged = self
-            .post(
-                "/v1/pairing/exchanges",
-                json!({ "pairingRequestId": id }),
-            )
+            .post("/v1/pairing/exchanges", json!({ "pairingRequestId": id }))
             .await;
         assert_eq!(exchanged.status(), 200);
         let body: Value = exchanged.json().await.unwrap();
@@ -222,7 +229,9 @@ impl Rpc {
         self.next_id += 1;
         self.write
             .send(Message::Text(
-                json!({ "id": id, "method": method, "params": params }).to_string().into(),
+                json!({ "id": id, "method": method, "params": params })
+                    .to_string()
+                    .into(),
             ))
             .await
             .unwrap();
@@ -271,6 +280,7 @@ async fn handshake_initialize_is_dock1() {
     assert_eq!(init["result"]["capabilities"]["threadSubscriptions"], true);
     assert_eq!(init["result"]["capabilities"]["threads"], true);
     assert_eq!(init["result"]["capabilities"]["hostTools"], false);
+    assert_eq!(init["result"]["capabilities"]["slash"], true);
     let workspaces = rpc.call("workspace/list", json!({})).await;
     assert_eq!(workspaces["result"]["defaultWorkspaceId"], "default");
 }
@@ -293,10 +303,7 @@ async fn pairing_deny_poll_has_no_ticket() {
     assert_eq!(poll["status"], "denied");
     assert!(poll.get("ticket").is_none() || poll["ticket"].is_null());
     let exchange = h
-        .post(
-            "/v1/pairing/exchanges",
-            json!({ "pairingRequestId": id }),
-        )
+        .post("/v1/pairing/exchanges", json!({ "pairingRequestId": id }))
         .await;
     assert_eq!(exchange.status(), 403);
 }
@@ -370,9 +377,7 @@ async fn turn_start_projects_echo() {
         .call("thread/subscribe", json!({ "threadId": "live" }))
         .await;
     assert_eq!(sub["result"]["ok"], true);
-    let started = rpc
-        .call("turn/start", json!({ "message": "hello" }))
-        .await;
+    let started = rpc.call("turn/start", json!({ "message": "hello" })).await;
     assert!(started.get("error").is_none(), "{started}");
     let user = rpc
         .wait_notification("item/user_message", Duration::from_secs(5))
@@ -447,7 +452,10 @@ async fn thread_archive_rename_delete_use_sessions() {
         .call("thread/archive", json!({ "threadId": "live" }))
         .await;
     assert!(archived.get("error").is_none(), "{archived}");
-    let id = archived["result"]["thread"]["id"].as_str().unwrap().to_string();
+    let id = archived["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(id.starts_with('s'));
     assert_eq!(archived["result"]["thread"]["title"], "hello archive");
     let renamed = rpc
@@ -515,7 +523,9 @@ async fn turn_intent_starts_goal_and_plan() {
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
     let _ = rpc.call("initialize", json!({})).await;
-    let _ = rpc.call("thread/subscribe", json!({ "threadId": "live" })).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
     let started = rpc
         .call(
             "turn/start",
@@ -541,4 +551,124 @@ async fn mcp_reload_and_model_refresh_are_implemented() {
         .call("thread/model/refresh", json!({ "threadId": "live" }))
         .await;
     assert!(refresh["result"]["model"]["id"].is_string());
+}
+
+#[tokio::test]
+async fn slash_list_includes_harness_and_screenshot() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let slash = h.ctx.require::<Slash>(SLASH).unwrap();
+    let _extra = slash
+        .register(SlashEntry {
+            command: "memo".into(),
+            description: "便签".into(),
+            kind: ExtraSlashKind::Overlay,
+            text: "hello overlay".into(),
+            title: "Memo".into(),
+            send: false,
+        })
+        .unwrap();
+    let listed = rpc.call("slash/list", json!({})).await;
+    assert!(listed.get("error").is_none(), "{listed}");
+    let names: Vec<&str> = listed["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    for expected in [
+        "new",
+        "plan",
+        "goal",
+        "compact",
+        "screenshot",
+        "screenshot --region",
+        "memo",
+        "pair",
+    ] {
+        assert!(names.contains(&expected), "missing {expected} in {names:?}");
+    }
+}
+
+#[tokio::test]
+async fn slash_execute_dispatches_to_spine() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+
+    let filled = rpc.call("slash/execute", json!({ "text": "/goal" })).await;
+    assert_eq!(filled["result"]["kind"], "filled");
+    assert!(filled["result"]["fill"].as_str().unwrap().contains("/goal"));
+
+    let capture = rpc
+        .call(
+            "slash/execute",
+            json!({ "text": "/screenshot --region 看这里" }),
+        )
+        .await;
+    assert_eq!(capture["result"]["kind"], "capture");
+
+    let passthrough = rpc
+        .call("slash/execute", json!({ "text": "/not-a-real-command" }))
+        .await;
+    assert_eq!(passthrough["result"]["kind"], "passthrough");
+
+    let terminal = rpc.call("slash/execute", json!({ "text": "/pair" })).await;
+    assert_eq!(terminal["result"]["kind"], "notice");
+    assert!(terminal["result"]["notice"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("终端"));
+
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("keep me".into()));
+    let fresh = rpc.call("slash/execute", json!({ "text": "/new" })).await;
+    assert_eq!(fresh["result"]["kind"], "applied");
+    assert!(sessions.events().is_empty());
+
+    let started = rpc
+        .call("slash/execute", json!({ "text": "/plan finish pairing" }))
+        .await;
+    assert_eq!(started["result"]["kind"], "submitted");
+    assert_eq!(
+        h.ctx.require::<PlanMode>(PLAN_MODE).unwrap().phase(),
+        cordis_spine::PlanPhase::Active
+    );
+
+    let goal = rpc
+        .call("slash/execute", json!({ "text": "/goal ship the gateway" }))
+        .await;
+    assert_eq!(goal["result"]["kind"], "submitted");
+    assert!(h.ctx.require::<Goal>(GOAL).unwrap().active());
+}
+
+#[tokio::test]
+async fn slash_execute_runs_extra_overlay() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _extra = h
+        .ctx
+        .require::<Slash>(SLASH)
+        .unwrap()
+        .register(SlashEntry {
+            command: "memo".into(),
+            description: "便签".into(),
+            kind: ExtraSlashKind::Overlay,
+            text: "hello overlay".into(),
+            title: "Memo".into(),
+            send: false,
+        })
+        .unwrap();
+    let executed = rpc.call("slash/execute", json!({ "text": "/memo" })).await;
+    assert_eq!(executed["result"]["kind"], "notice");
+    assert_eq!(executed["result"]["notice"]["title"], "Memo");
+    assert_eq!(executed["result"]["notice"]["body"], "hello overlay");
 }

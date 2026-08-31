@@ -20,6 +20,7 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("threads", true),
     ("hostTools", false),
     ("imageInputs", false),
+    ("slash", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -66,6 +67,8 @@ pub const INTERACTION_RESPOND: &str = "interaction/respond";
 pub const PLAN_RESOLVE: &str = "plan/resolve";
 pub const ELICIT_RESOLVE: &str = "elicit/resolve";
 pub const MCP_RELOAD: &str = "mcp/reload";
+pub const SLASH_LIST: &str = "slash/list";
+pub const SLASH_EXECUTE: &str = "slash/execute";
 
 #[derive(Clone, Debug)]
 pub struct RpcError {
@@ -129,6 +132,6 @@ pub fn http_error(code: &'static str, message: impl Into<String>) -> HttpErrorBo
         error: HttpErrorInner {
             code,
             message: message.into(),
-        }
+        },
     }
 }

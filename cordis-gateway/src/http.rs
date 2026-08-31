@@ -42,7 +42,8 @@ async fn cors(req: axum::extract::Request, next: axum::middleware::Next) -> Resp
         next.run(req).await
     };
     if let Some(origin) = origin {
-        res.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        res.headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
         res.headers_mut().insert(
             header::ACCESS_CONTROL_ALLOW_HEADERS,
             header::HeaderValue::from_static("content-type"),

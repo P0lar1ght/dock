@@ -5,12 +5,16 @@ import type { PermissionDecision } from '../protocol/permissions.js';
 import { cancellableTurn, TurnController } from './TurnController.js';
 import type { SessionRuntimeIssue } from '../session/RuntimeIssueModel.js';
 import { RuntimeIssueController } from './RuntimeIssueController.js';
-import type { ApprovalMode, ReasoningEffort } from '../protocol/responses.js';
+import type { ApprovalMode, ReasoningEffort, SlashExecuteResult } from '../protocol/responses.js';
 import {
   ThreadExecutionControlController,
   type ThreadMemorySelection
 } from './ThreadExecutionControlController.js';
-import { slashCommandSuggestions } from './SlashCommandModel.js';
+import {
+  mergeSlashCatalog,
+  slashCommandSuggestions,
+  type SlashCatalogEntry
+} from './SlashCommandModel.js';
 import { browserDisplayCaptureSupported } from '../image-inputs/DisplayScreenshotProvider.js';
 import type {
   ActiveTurnSendMode,
@@ -25,7 +29,6 @@ import {
 } from './ChatImageInputController.js';
 import { UserInputController } from './UserInputController.js';
 import type { SessionUserInputRequest } from '../session/UserInputModel.js';
-import { parseGoalCommand } from './GoalCommand.js';
 import { ChatGoalController } from './ChatGoalController.js';
 
 export type { ActiveTurnSendMode, ChatViewState } from './ChatViewState.js';
@@ -63,6 +66,8 @@ export class ChatController {
   private readonly executionControl: ThreadExecutionControlController;
   private readonly userInputController: UserInputController;
   private readonly goalControl: ChatGoalController;
+  private slashCatalog: readonly SlashCatalogEntry[] = [];
+  private slashCatalogLoaded = false;
 
   constructor(private readonly onChange: () => void) {
     this.permissionController = new PermissionController(onChange);
@@ -71,6 +76,7 @@ export class ChatController {
     this.executionControl = new ThreadExecutionControlController(onChange);
     this.userInputController = new UserInputController(onChange);
     this.goalControl = new ChatGoalController(onChange);
+    this.slashCatalog = mergeSlashCatalog(undefined);
   }
 
   get session() {
@@ -90,7 +96,7 @@ export class ChatController {
       this.stateValue?.runtimeIssues || [],
       this.stateValue?.messages || []
     );
-    const slashCommands = slashCommandSuggestions(this.draftValue, {
+    const slashCommands = slashCommandSuggestions(this.draftValue, this.slashCatalog, {
       activeTurn,
       imageSupported: this.stateValue?.environment?.model.inputModalities?.includes('image') === true,
       reusableImages: this.stateValue?.messages.some((message) =>
@@ -158,12 +164,17 @@ export class ChatController {
     this.executionControl.bind(session);
     this.userInputController.bind(session);
     this.stateValue = session?.state;
+    this.slashCatalogLoaded = false;
     this.removeSessionListener = session?.onChange((state) => {
       this.stateValue = state;
       this.turnController.update(state);
+      if (state.connection === 'live' && !this.slashCatalogLoaded) {
+        void this.refreshSlashCatalog();
+      }
       this.onChange();
     });
     this.turnController.update(this.stateValue);
+    void this.refreshSlashCatalog();
     this.onChange();
   }
 
@@ -419,53 +430,32 @@ export class ChatController {
       this.onChange();
       return false;
     }
-    let goalCommand: ReturnType<typeof parseGoalCommand>;
-    try {
-      goalCommand = parseGoalCommand(message);
-    } catch (error) {
-      this.localError = error instanceof Error ? error.message : 'Goal 命令参数无效';
-      this.onChange();
-      return false;
-    }
-    if (goalCommand?.action === 'show') {
-      this.draftValue = '';
-      this.openGoalMenu();
-      return true;
-    }
 
     this.draftValue = '';
     this.localError = '';
     this.submitting = true;
-    this.capturingScreenshot = /^\/screenshot(?:\s|$)/u.test(message);
     this.onChange();
     try {
-      if (goalCommand) {
-        await this.goalControl.execute(session, goalCommand);
-        return true;
+      if (looksLikeSlash(message)) {
+        const result = await session.executeSlash(message).catch((error) => {
+          if (slashUnavailable(error)) return { ok: true as const, kind: 'passthrough' as const };
+          throw error;
+        });
+        if (result.kind === 'capture') {
+          this.capturingScreenshot = true;
+          this.onChange();
+          await this.submitTurn(session, message);
+          return true;
+        }
+        if (result.kind !== 'passthrough') {
+          await this.applySlashResult(session, result);
+          return true;
+        }
       }
-      const planMatch = /^\/plan(?:\s+([\s\S]+))?$/u.exec(message);
-      if ((planMatch || this.turnIntentValue === 'plan') && cancellableTurn(session.state.turns)) {
-        throw new Error('Planning Turn 只能在空闲 Thread 中启动');
+      if (this.turnIntentValue === 'plan' && cancellableTurn(session.state.turns)) {
+        throw new Error('计划模式请在空闲 Thread 中启动');
       }
-      const planRequest = planMatch?.[1]?.trim() || '';
-      if (planMatch && !planRequest) {
-        throw new Error('/plan 后需要填写要规划的需求');
-      }
-      const prepared = this.imageInputs.submission(message);
-      const base = typeof prepared === 'string' ? { message: prepared } : prepared;
-      const submission = planMatch
-        ? { ...base, message: planRequest, intent: { mode: 'plan' as const } }
-        : this.turnIntentValue === 'plan'
-          ? { ...base, intent: { mode: 'plan' as const } }
-          : base;
-      if (cancellableTurn(session.state.turns)) {
-        if (this.sendModeValue === 'steer') await session.steerTurn(submission);
-        else await session.enqueueTurn(submission);
-      } else {
-        await session.startTurn(submission);
-      }
-      this.turnIntentValue = 'default';
-      this.imageInputs.clear();
+      await this.submitTurn(session, message);
       return true;
     } catch (error) {
       this.draftValue = originalDraft;
@@ -476,6 +466,75 @@ export class ChatController {
       this.capturingScreenshot = false;
       this.onChange();
     }
+  }
+
+  private async submitTurn(session: AgentSession, message: string) {
+    const prepared = this.imageInputs.submission(message);
+    const base = typeof prepared === 'string' ? { message: prepared } : prepared;
+    const submission = this.turnIntentValue === 'plan'
+      ? { ...base, intent: { mode: 'plan' as const } }
+      : base;
+    if (cancellableTurn(session.state.turns)) {
+      if (this.sendModeValue === 'steer') await session.steerTurn(submission);
+      else await session.enqueueTurn(submission);
+    } else {
+      await session.startTurn(submission);
+    }
+    this.turnIntentValue = 'default';
+    this.imageInputs.clear();
+  }
+
+  private async applySlashResult(session: AgentSession, result: SlashExecuteResult) {
+    if (result.kind === 'filled' && result.fill) {
+      this.draftValue = result.fill;
+      return;
+    }
+    if (result.kind === 'notice' && result.notice) {
+      this.localError = [result.notice.title, result.notice.body]
+        .filter((part) => part.trim())
+        .join('\n');
+      return;
+    }
+    if (result.kind === 'menu' && result.menu) {
+      this.openSlashMenu(result.menu);
+      return;
+    }
+    if (result.kind === 'applied' && result.notice?.body) {
+      this.localError = result.notice.body;
+    }
+    await session.refreshEnvironment().catch(() => undefined);
+  }
+
+  private openSlashMenu(id: string) {
+    const menus: ComposerMenu[] = [
+      'context',
+      'model',
+      'reasoning',
+      'approval',
+      'goal',
+      'plan',
+      'memory'
+    ];
+    if (!menus.includes(id as ComposerMenu)) return;
+    this.composerMenu = id as ComposerMenu;
+    if (id === 'goal') this.goalControl.reset();
+  }
+
+  private async refreshSlashCatalog() {
+    const session = this.sessionValue;
+    if (!session || session.state.connection !== 'live') {
+      this.slashCatalog = mergeSlashCatalog(undefined);
+      this.slashCatalogLoaded = false;
+      return;
+    }
+    try {
+      const listed = await session.listSlashCommands();
+      this.slashCatalog = mergeSlashCatalog(listed.commands);
+      this.slashCatalogLoaded = true;
+    } catch {
+      this.slashCatalog = mergeSlashCatalog(this.slashCatalog);
+    }
+    this.onChange();
   }
 
   resolvePermission(requestId: string, decision: PermissionDecision) {
@@ -557,6 +616,8 @@ export class ChatController {
     this.composerMenu = undefined;
     this.goalControl.reset();
     this.imageInputs.clear();
+    this.slashCatalog = mergeSlashCatalog(undefined);
+    this.slashCatalogLoaded = false;
   }
 
   private async finishThreadControl(operation: Promise<boolean>) {
@@ -565,4 +626,15 @@ export class ChatController {
     this.onChange();
     return changed;
   }
+}
+
+function looksLikeSlash(message: string) {
+  return message.startsWith('/') && !message.startsWith('//');
+}
+
+function slashUnavailable(error: unknown) {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String(error.code)
+    : '';
+  return code === 'method_not_found' || code === 'not_connected';
 }

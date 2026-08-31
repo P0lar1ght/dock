@@ -101,10 +101,7 @@ pub fn set_model(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcErr
 }
 
 pub fn set_approval(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let mode = params
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let mode = params.get("mode").and_then(Value::as_str).unwrap_or("");
     let settings = settings(gateway)?;
     match mode {
         "ask" => settings.set_permission_mode(PermissionMode::Ask),
@@ -121,7 +118,10 @@ pub fn set_approval(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
 }
 
 pub fn set_plan(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let enabled = params.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let enabled = params
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let plan = gateway
         .ctx()
         .get::<PlanMode>(PLAN_MODE)

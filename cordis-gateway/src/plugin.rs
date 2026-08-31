@@ -1,6 +1,6 @@
 use cordis::{plugin, Disposable, Inject, Plugin};
 use cordis_spine::{ASK, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TURN};
-use cordis_tui::{SESSION_PORT, GATEWAY};
+use cordis_tui::{GATEWAY, SESSION_PORT};
 
 use crate::bind;
 use crate::handle::GatewayHandle;
@@ -28,8 +28,8 @@ pub fn gateway_bind(bind_addr: impl Into<String>) -> Plugin {
             SETTINGS,
         ]),
         move |ctx, _: &()| {
-            let (listener, local_addr) = bind::listen(&bind_addr)
-                .map_err(|e| cordis::Error::message(e))?;
+            let (listener, local_addr) =
+                bind::listen(&bind_addr).map_err(|e| cordis::Error::message(e))?;
             let companion = bind::companion_listener(local_addr);
             let handle = GatewayHandle::new(ctx.clone(), local_addr);
             handle.reset_transcript();

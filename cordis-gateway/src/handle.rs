@@ -55,7 +55,11 @@ impl GatewayHandle {
         application: &str,
         origin: &str,
     ) -> Result<(String, u64), PairingError> {
-        self.inner.pairing.lock().unwrap().request(application, origin)
+        self.inner
+            .pairing
+            .lock()
+            .unwrap()
+            .request(application, origin)
     }
 
     pub fn poll_pairing(
@@ -66,11 +70,7 @@ impl GatewayHandle {
         self.inner.pairing.lock().unwrap().poll(id, origin)
     }
 
-    pub fn exchange_pairing(
-        &self,
-        id: &str,
-        origin: &str,
-    ) -> Result<IssuedTicket, PairingError> {
+    pub fn exchange_pairing(&self, id: &str, origin: &str) -> Result<IssuedTicket, PairingError> {
         self.inner.pairing.lock().unwrap().exchange(id, origin)
     }
 
@@ -86,11 +86,7 @@ impl GatewayHandle {
             .issue_for_binding(application, origin)
     }
 
-    pub fn authenticate(
-        &self,
-        ticket: &str,
-        origin: &str,
-    ) -> Result<IssuedTicket, PairingError> {
+    pub fn authenticate(&self, ticket: &str, origin: &str) -> Result<IssuedTicket, PairingError> {
         self.inner
             .pairing
             .lock()
@@ -99,7 +95,11 @@ impl GatewayHandle {
     }
 
     pub fn history_since(&self, since_seq: u64) -> Vec<ProjectedEvent> {
-        self.inner.transcript.lock().unwrap().history_since(since_seq)
+        self.inner
+            .transcript
+            .lock()
+            .unwrap()
+            .history_since(since_seq)
     }
 
     pub fn latest_seq(&self) -> u64 {

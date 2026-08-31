@@ -28,7 +28,8 @@ pub fn respond(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
             Some((id, vec![value], notes))
         })
         .collect();
-    ask.respond(&mapped).map_err(|e| RpcError::app("empty_queue", e))?;
+    ask.respond(&mapped)
+        .map_err(|e| RpcError::app("empty_queue", e))?;
     Ok(json!({ "ok": true, "resumed": true }))
 }
 

@@ -1,0 +1,806 @@
+//! Slash catalog + execution for the web client.
+//!
+//! TUI builtins live in `cordis-tui` `CATALOG` and dispatch to overlays.
+//! The browser only parses/renders: `slash/list` is autocomplete, `slash/execute`
+//! talks to spine services. Capture commands (`/screenshot`) are listed here so
+//! embed does not keep a parallel harness catalog; the actual pixels stay in JS.
+
+use serde_json::{json, Value};
+
+use cordis_spine::{
+    goal_composer_fill, loop_composer_fill, loop_schedule_instruction, session_usage_block_text,
+    tool_slash_arguments, AppSettings, ExtraSlashKind, Goal, LoopFireMode, PlanMode, Sessions,
+    Slash, SlashEntry, ToolCall, Tools, GOAL, GOAL_RESERVED_SUBCOMMANDS, PLAN_MODE, SESSIONS,
+    SETTINGS, SLASH, TOOLS,
+};
+use cordis_tui::{SessionRef, SESSION_PORT};
+
+use crate::handle::GatewayHandle;
+use crate::protocol::{RpcError, LIVE_THREAD_ID};
+
+#[derive(Clone, Copy)]
+struct Item {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    description: &'static str,
+    takes_args: bool,
+    /// `gateway` = this process. `terminal` = TUI overlay. `embed` = host capture.
+    surface: &'static str,
+    capture: Option<&'static str>,
+}
+
+/// Harness-facing builtins. Names/aliases stay aligned with TUI `CATALOG`.
+const BUILTINS: &[Item] = &[
+    Item {
+        name: "new",
+        aliases: &[],
+        description: "开始新会话",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "model",
+        aliases: &["m"],
+        description: "切换当前模型",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "resume",
+        aliases: &[],
+        description: "恢复上次会话",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "loop",
+        aliases: &["cron"],
+        description: "安排循环提问",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "plan",
+        aliases: &[],
+        description: "进入计划模式",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "view-plan",
+        aliases: &["show-plan", "plan-view"],
+        description: "查看或批准当前计划",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "goal",
+        aliases: &[],
+        description: "开始或查看目标",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "compact",
+        aliases: &[],
+        description: "压缩旧对话",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "effort",
+        aliases: &[],
+        description: "设置推理强度",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "think",
+        aliases: &["thinking"],
+        description: "开关思考模式（推理过程）",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "help",
+        aliases: &[],
+        description: "显示斜杠命令",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "usage",
+        aliases: &["cost"],
+        description: "查看本会话用量",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "context",
+        aliases: &[],
+        description: "查看上下文占用",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "workflow",
+        aliases: &[],
+        description: "查看或启动工作流",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "timestamps",
+        aliases: &[],
+        description: "开关滚动区时间戳",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "cd",
+        aliases: &[],
+        description: "切换工作目录",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "settings",
+        aliases: &["config", "prefs"],
+        description: "打开设置",
+        takes_args: true,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "pair",
+        aliases: &["pairing"],
+        description: "浏览器配对与已绑来源",
+        takes_args: false,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "history",
+        aliases: &[],
+        description: "搜索提示词历史",
+        takes_args: false,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "find",
+        aliases: &[],
+        description: "搜索对话",
+        takes_args: false,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "copy",
+        aliases: &[],
+        description: "把上一条回复复制到剪贴板或文件",
+        takes_args: true,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "theme",
+        aliases: &["t"],
+        description: "切换配色",
+        takes_args: true,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "export",
+        aliases: &[],
+        description: "把对话导出到文件",
+        takes_args: true,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "tasks",
+        aliases: &[],
+        description: "列出后台任务与定时任务",
+        takes_args: false,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "mcps",
+        aliases: &[],
+        description: "MCP 服务器",
+        takes_args: false,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "cordis",
+        aliases: &["plugins"],
+        description: "动态 / 永久 Cordis 插件",
+        takes_args: false,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "preset",
+        aliases: &["presets", "agent", "agents"],
+        description: "组装 Agent 预设",
+        takes_args: true,
+        surface: "terminal",
+        capture: None,
+    },
+    Item {
+        name: "quit",
+        aliases: &["exit"],
+        description: "退出",
+        takes_args: false,
+        surface: "terminal",
+        capture: None,
+    },
+];
+
+const GOAL_HINTS: &[Item] = &[
+    Item {
+        name: "goal pause",
+        aliases: &[],
+        description: "暂停自动推进",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "goal resume",
+        aliases: &[],
+        description: "恢复当前目标",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "goal clear",
+        aliases: &[],
+        description: "清除当前目标",
+        takes_args: false,
+        surface: "gateway",
+        capture: None,
+    },
+    Item {
+        name: "goal edit",
+        aliases: &[],
+        description: "在面板里修改当前目标",
+        takes_args: true,
+        surface: "gateway",
+        capture: None,
+    },
+];
+
+const CAPTURE: &[Item] = &[
+    Item {
+        name: "screenshot",
+        aliases: &[],
+        description: "截取当前 viewport；参数是发给模型的问题。",
+        takes_args: true,
+        surface: "embed",
+        capture: Some("viewport"),
+    },
+    Item {
+        name: "screenshot --region",
+        aliases: &[],
+        description: "拖动选择一个区域，只把该区域发给本轮模型。",
+        takes_args: true,
+        surface: "embed",
+        capture: Some("region"),
+    },
+    Item {
+        name: "screenshot --reuse",
+        aliases: &[],
+        description: "不重新截图，复用当前页面最近一次图片。",
+        takes_args: true,
+        surface: "embed",
+        capture: Some("reuse"),
+    },
+    Item {
+        name: "screenshot --screen",
+        aliases: &[],
+        description: "打开浏览器共享选择器并捕获一帧。",
+        takes_args: true,
+        surface: "embed",
+        capture: Some("screen"),
+    },
+    Item {
+        name: "screenshot --full-page",
+        aliases: &[],
+        description: "分段截取当前页面的完整纵向内容。",
+        takes_args: true,
+        surface: "embed",
+        capture: Some("full-page"),
+    },
+];
+
+pub fn list(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
+    let mut commands = Vec::new();
+    for item in BUILTINS.iter().chain(GOAL_HINTS).chain(CAPTURE) {
+        commands.push(item_json(item));
+    }
+    if let Some(slash) = gateway.ctx().get::<Slash>(SLASH) {
+        for entry in slash.list() {
+            commands.push(extra_json(&entry));
+        }
+    }
+    Ok(json!({ "commands": commands }))
+}
+
+pub async fn execute(gateway: GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let text = params
+        .get("text")
+        .or_else(|| params.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if text.trim().is_empty() {
+        return Err(RpcError::invalid_params("text is required"));
+    }
+    match parse_slash_line(&text) {
+        None => Ok(passthrough()),
+        Some((name, args)) => dispatch_named(&gateway, &name, &args).await,
+    }
+}
+
+async fn dispatch_named(
+    gateway: &GatewayHandle,
+    name: &str,
+    args: &str,
+) -> Result<Value, RpcError> {
+    if name == "screenshot" {
+        return Ok(json!({ "ok": true, "kind": "capture" }));
+    }
+    if let Some(item) = lookup_builtin(name) {
+        return execute_builtin(gateway, item.name, args).await;
+    }
+    if let Some(slash) = gateway.ctx().get::<Slash>(SLASH) {
+        if let Some(entry) = slash.list().into_iter().find(|e| e.command == name) {
+            return execute_extra(gateway, &entry, args).await;
+        }
+    }
+    Ok(passthrough())
+}
+
+async fn execute_builtin(
+    gateway: &GatewayHandle,
+    name: &str,
+    args: &str,
+) -> Result<Value, RpcError> {
+    let args = args.trim();
+    match name {
+        "new" => cmd_new(gateway),
+        "resume" => cmd_resume(gateway),
+        "model" => cmd_model(gateway, args),
+        "loop" => cmd_loop(gateway, args),
+        "plan" => cmd_plan(gateway, args),
+        "view-plan" => cmd_view_plan(gateway),
+        "goal" => cmd_goal(gateway, args),
+        "compact" => cmd_compact(gateway, args),
+        "effort" => cmd_effort(gateway, args),
+        "think" => cmd_think(gateway),
+        "help" => Ok(notice("斜杠命令", help_body(gateway))),
+        "usage" => cmd_usage(gateway),
+        "context" => Ok(menu("context")),
+        "workflow" => cmd_workflow(gateway, args),
+        "timestamps" => cmd_timestamps(gateway),
+        "cd" => cmd_cd(args),
+        "settings" => cmd_settings(gateway, args),
+        other => Ok(terminal_only(other)),
+    }
+}
+
+async fn execute_extra(
+    gateway: &GatewayHandle,
+    entry: &SlashEntry,
+    args: &str,
+) -> Result<Value, RpcError> {
+    match entry.kind {
+        ExtraSlashKind::Prompt => {
+            let text = entry.expand(args);
+            if entry.send {
+                submit_text(gateway, text)
+            } else {
+                Ok(filled(text))
+            }
+        }
+        ExtraSlashKind::Overlay => Ok(notice(entry.overlay_title(), entry.expand(args))),
+        ExtraSlashKind::Slot => Ok(notice(
+            "终端插槽",
+            format!("{} 请在 Dock 终端打开。", entry.display()),
+        )),
+        ExtraSlashKind::Tool => {
+            let Some(tools) = gateway.ctx().get::<Tools>(TOOLS) else {
+                return Ok(notice(entry.tool_title(), "tools 未挂载".to_string()));
+            };
+            let result = tools
+                .execute(ToolCall {
+                    id: format!("slash-tool-{}", entry.command),
+                    name: entry.text.trim().to_string(),
+                    arguments: tool_slash_arguments(args),
+                })
+                .await;
+            Ok(notice(entry.tool_title(), result.content))
+        }
+    }
+}
+
+fn cmd_new(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let sessions = sessions(gateway)?;
+    sessions.archive_current();
+    sessions.clear();
+    if let Some(plan) = gateway.ctx().get::<PlanMode>(PLAN_MODE) {
+        plan.set(false);
+    }
+    if let Some(goal) = gateway.ctx().get::<Goal>(GOAL) {
+        goal.clear();
+    }
+    gateway.reset_transcript();
+    Ok(applied("已开始新会话"))
+}
+
+fn cmd_resume(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let sessions = sessions(gateway)?;
+    let Some(item) = sessions.archived().into_iter().next() else {
+        return Ok(notice("恢复会话", "没有可恢复的会话。"));
+    };
+    sessions.archive_current();
+    if !sessions.restore(&item.id) {
+        return Ok(notice("恢复会话", "没有可恢复的会话。"));
+    }
+    gateway.reset_transcript();
+    Ok(applied("已恢复上次会话"))
+}
+
+fn cmd_model(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    if args.is_empty() {
+        return Ok(menu("model"));
+    }
+    let settings = settings(gateway)?;
+    settings.set_model(args);
+    Ok(applied(format!("已切换 {args}")))
+}
+
+fn cmd_loop(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    if args.is_empty() {
+        return Ok(filled(loop_composer_fill()));
+    }
+    let visible = format!("/loop {args}");
+    if let Some(sessions) = gateway.ctx().get::<Sessions>(SESSIONS) {
+        sessions.arm_user_addon(
+            visible.clone(),
+            loop_schedule_instruction(args, LoopFireMode::InSession),
+        );
+    }
+    submit_text(gateway, visible)
+}
+
+fn cmd_plan(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    let Some(plan) = gateway.ctx().get::<PlanMode>(PLAN_MODE) else {
+        return Ok(notice("计划模式", "计划模式未挂载。"));
+    };
+    if args.is_empty() {
+        plan.enter_pending();
+        return Ok(applied("计划模式"));
+    }
+    plan.enter_active();
+    submit_text(gateway, args.to_string())
+}
+
+fn cmd_view_plan(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let Some(plan) = gateway.ctx().get::<PlanMode>(PLAN_MODE) else {
+        return Ok(notice("计划", "计划模式未挂载。"));
+    };
+    if let Some(prompt) = plan.front().or_else(|| plan.disk_preview()) {
+        let body = if prompt.empty {
+            "计划文件是空的。".to_string()
+        } else {
+            prompt.body
+        };
+        return Ok(notice("当前计划", body));
+    }
+    Ok(notice("计划", "没有可查看的计划。"))
+}
+
+fn cmd_goal(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    if args.is_empty() {
+        if let Some(goal) = gateway.ctx().get::<Goal>(GOAL) {
+            goal.arm_composer();
+        }
+        return Ok(filled(goal_composer_fill()));
+    }
+    if args == "<目标>" {
+        return Ok(filled(goal_composer_fill()));
+    }
+    let first = args.split_whitespace().next().unwrap_or("");
+    match first {
+        "status" => Ok(menu("goal")),
+        "edit" => Ok(menu("goal")),
+        "pause" => {
+            let Some(goal) = gateway.ctx().get::<Goal>(GOAL) else {
+                return Ok(notice("目标", "目标服务未挂载。"));
+            };
+            goal.disarm_composer();
+            if goal.pause() {
+                Ok(applied("目标已暂停"))
+            } else {
+                Ok(notice("目标", "没有进行中的目标。"))
+            }
+        }
+        "resume" => {
+            let Some(goal) = gateway.ctx().get::<Goal>(GOAL) else {
+                return Ok(notice("目标", "目标服务未挂载。"));
+            };
+            goal.disarm_composer();
+            if goal.resume() {
+                Ok(applied("目标已继续"))
+            } else {
+                Ok(notice("目标", "没有已暂停的目标。"))
+            }
+        }
+        "clear" => {
+            let Some(goal) = gateway.ctx().get::<Goal>(GOAL) else {
+                return Ok(notice("目标", "目标服务未挂载。"));
+            };
+            if goal.present() {
+                goal.clear();
+                Ok(applied("已清除目标"))
+            } else {
+                goal.disarm_composer();
+                Ok(notice("目标", "没有活动目标。"))
+            }
+        }
+        _ => {
+            if GOAL_RESERVED_SUBCOMMANDS.contains(&first) {
+                return Ok(menu("goal"));
+            }
+            let Some(goal) = gateway.ctx().get::<Goal>(GOAL) else {
+                return Ok(notice("目标", "目标服务未挂载。"));
+            };
+            goal.disarm_composer();
+            goal.start(args);
+            submit_text(gateway, args.to_string())
+        }
+    }
+}
+
+fn cmd_compact(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    let port = session_port(gateway)?;
+    port.compact(args.to_string());
+    Ok(applied("正在压缩上下文…"))
+}
+
+fn cmd_effort(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    if args.is_empty() {
+        return Ok(menu("reasoning"));
+    }
+    let settings = settings(gateway)?;
+    settings.set_effort(args);
+    Ok(applied(format!("推理强度 {args}")))
+}
+
+fn cmd_think(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let settings = settings(gateway)?;
+    let on = settings.toggle_thinking();
+    Ok(applied(if on {
+        "思考模式已开"
+    } else {
+        "思考模式已关"
+    }))
+}
+
+fn cmd_usage(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let sessions = sessions(gateway)?;
+    Ok(notice(
+        "本会话用量",
+        session_usage_block_text(&sessions.prompt_usage()),
+    ))
+}
+
+fn cmd_workflow(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    if args.is_empty() || args.eq_ignore_ascii_case("runs") {
+        return Ok(terminal_only("workflow"));
+    }
+    submit_text(
+        gateway,
+        format!(
+            "# /workflow — 启动工作流\n\n\
+             用户请求：{args}\n\n\
+             用 workflow 工具启动。已有同名注册工作流就用 source.type=name；否则按 create-workflow 技能写脚本。\
+             进度看 /workflow runs。完成后会自动汇报，不要轮询 wait_tasks。"
+        ),
+    )
+}
+
+fn cmd_timestamps(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let settings = settings(gateway)?;
+    let on = !settings.timestamps();
+    settings.set_timestamps(on);
+    Ok(applied(if on {
+        "时间戳已开"
+    } else {
+        "时间戳已关"
+    }))
+}
+
+fn cmd_cd(args: &str) -> Result<Value, RpcError> {
+    let path = if args.is_empty() { "." } else { args };
+    match std::env::set_current_dir(path) {
+        Ok(()) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(path));
+            Ok(applied(format!("cwd {}", cwd.display())))
+        }
+        Err(e) => Ok(notice("工作目录", e.to_string())),
+    }
+}
+
+fn cmd_settings(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    if args.is_empty() {
+        return Ok(terminal_only("settings"));
+    }
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let key = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    match key {
+        "timestamps" => cmd_timestamps(gateway),
+        "think" | "thinking" => cmd_think(gateway),
+        "theme" => Ok(terminal_only("theme")),
+        "model" => cmd_model(gateway, rest),
+        "effort" => cmd_effort(gateway, rest),
+        _ => Ok(terminal_only("settings")),
+    }
+}
+
+fn submit_text(gateway: &GatewayHandle, text: String) -> Result<Value, RpcError> {
+    let port = session_port(gateway)?;
+    let working = port.working();
+    port.submit(text, false);
+    Ok(json!({
+        "ok": true,
+        "kind": "submitted",
+        "turn": {
+            "threadId": LIVE_THREAD_ID,
+            "turnId": format!("t{}", gateway.latest_seq().saturating_add(1)),
+            "status": if working { "queued" } else { "running" }
+        }
+    }))
+}
+
+fn parse_slash_line(text: &str) -> Option<(String, String)> {
+    let goal_usage = cordis_spine::goal_usage_message();
+    let loop_usage = cordis_spine::loop_usage_message();
+    let mut body = text.trim();
+    if let Some(rest) = body.strip_prefix(goal_usage) {
+        body = rest.trim();
+    } else if let Some(rest) = body.strip_prefix(loop_usage) {
+        body = rest.trim();
+    }
+    if body.is_empty() {
+        return None;
+    }
+    let line = body.lines().last().unwrap_or(body).trim();
+    let rest = line.strip_prefix('/')?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("").trim();
+    if name.is_empty() {
+        return None;
+    }
+    let args = parts.next().unwrap_or("").trim().to_string();
+    Some((name.to_string(), args))
+}
+
+fn lookup_builtin(name: &str) -> Option<&'static Item> {
+    let n = name.trim_start_matches('/');
+    BUILTINS
+        .iter()
+        .find(|d| d.name == n || d.aliases.iter().any(|a| *a == n))
+}
+
+fn item_json(item: &Item) -> Value {
+    json!({
+        "name": item.name,
+        "display": format!("/{}", item.name),
+        "aliases": item.aliases,
+        "description": item.description,
+        "takesArgs": item.takes_args,
+        "surface": item.surface,
+        "kind": item.capture.map(|_| "capture").unwrap_or("command"),
+        "capture": item.capture,
+    })
+}
+
+fn extra_json(entry: &SlashEntry) -> Value {
+    json!({
+        "name": entry.command,
+        "display": entry.display(),
+        "aliases": [],
+        "description": entry.description,
+        "takesArgs": true,
+        "surface": "gateway",
+        "kind": entry.kind.as_str(),
+        "capture": Value::Null,
+    })
+}
+
+fn help_body(gateway: &GatewayHandle) -> String {
+    let mut lines = Vec::new();
+    for item in BUILTINS.iter().chain(CAPTURE) {
+        lines.push(format!("/{}  {}", item.name, item.description));
+    }
+    if let Some(slash) = gateway.ctx().get::<Slash>(SLASH) {
+        for entry in slash.list() {
+            lines.push(format!("{}  {}", entry.display(), entry.description));
+        }
+    }
+    lines.join("\n")
+}
+
+fn filled(text: impl Into<String>) -> Value {
+    json!({ "ok": true, "kind": "filled", "fill": text.into() })
+}
+
+fn notice(title: impl Into<String>, body: impl Into<String>) -> Value {
+    json!({
+        "ok": true,
+        "kind": "notice",
+        "notice": { "title": title.into(), "body": body.into() }
+    })
+}
+
+fn menu(id: &str) -> Value {
+    json!({ "ok": true, "kind": "menu", "menu": id })
+}
+
+fn applied(message: impl Into<String>) -> Value {
+    json!({ "ok": true, "kind": "applied", "notice": { "title": "", "body": message.into() } })
+}
+
+fn passthrough() -> Value {
+    json!({ "ok": true, "kind": "passthrough" })
+}
+
+fn terminal_only(name: &str) -> Value {
+    notice("终端命令", format!("/{name} 请在 Dock 终端使用。"))
+}
+
+fn sessions(gateway: &GatewayHandle) -> Result<std::sync::Arc<Sessions>, RpcError> {
+    gateway
+        .ctx()
+        .get::<Sessions>(SESSIONS)
+        .ok_or_else(|| RpcError::app("unavailable", "sessions service is not mounted"))
+}
+
+fn settings(gateway: &GatewayHandle) -> Result<std::sync::Arc<AppSettings>, RpcError> {
+    gateway
+        .ctx()
+        .get::<AppSettings>(SETTINGS)
+        .ok_or_else(|| RpcError::app("unavailable", "settings service is not mounted"))
+}
+
+fn session_port(gateway: &GatewayHandle) -> Result<std::sync::Arc<SessionRef>, RpcError> {
+    gateway
+        .ctx()
+        .get::<SessionRef>(SESSION_PORT)
+        .ok_or_else(|| RpcError::app("unavailable", "session.port is not mounted"))
+}

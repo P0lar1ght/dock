@@ -9,7 +9,9 @@ import type {
   ApprovalMode,
   ReasoningEffort,
   TurnQueueResult,
-  TurnSubmission
+  TurnSubmission,
+  SlashExecuteResult,
+  SlashListResult
 } from '../protocol/responses.js';
 import type { SessionListener } from './SessionEvents.js';
 import { reduceSession, restoreSession } from './SessionReducer.js';
@@ -90,6 +92,8 @@ export interface AgentSessionOperations {
     workspaceId: string,
     selection: { read?: boolean; write?: boolean }
   ): Promise<ThreadEnvironmentResult>;
+  listSlashCommands(): Promise<SlashListResult>;
+  executeSlash(text: string, threadId: string): Promise<SlashExecuteResult>;
   resolvePermission(
     threadId: string,
     workspaceId: string,
@@ -398,6 +402,14 @@ export class AgentSession {
     const environment = await this.operations.setMemory(this.id, this.workspaceId, selection);
     this.setEnvironment(environment);
     return environment;
+  }
+
+  listSlashCommands() {
+    return this.operations.listSlashCommands();
+  }
+
+  executeSlash(text: string) {
+    return this.operations.executeSlash(text, this.id);
   }
 
   resolvePermission(requestIdValue: string, decision: PermissionDecision) {

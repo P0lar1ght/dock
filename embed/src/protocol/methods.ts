@@ -37,3 +37,5 @@ export const HOST_TOOLS_CANCEL = 'hostTools/cancel' as const;
 export const IMAGE_INPUTS_SYNC = 'imageInputs/sync' as const;
 export const IMAGE_INPUTS_PUT = 'imageInputs/put' as const;
 export const MCP_RELOAD = 'mcp/reload' as const;
+export const SLASH_LIST = 'slash/list' as const;
+export const SLASH_EXECUTE = 'slash/execute' as const;

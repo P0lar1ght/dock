@@ -32,3 +32,5 @@ npm run build
 | `data-auto-connect` | `false` 时由宿主调用 `connect()` |
 
 公开事件：`dock:ready`、`dock:state`、`dock:toggle`、`dock:error`。首次连接会创建配对请求，**请在 Dock 终端确认**（`/pair` 或弹出 overlay），浏览器轮询直到 `approved`，再 `POST /v1/pairing/exchanges` 拿 ticket。没有 `dock pair` CLI。
+
+斜杠补全来自 Gateway `slash/list`，发送走 `slash/execute`（接到同一套 spine / agent harness）。嵌入脚本只做前缀过滤和结果渲染；`/screenshot` 仍在浏览器里截图，再作为 Turn 交给 Gateway。

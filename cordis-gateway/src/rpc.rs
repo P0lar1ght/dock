@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::handle::GatewayHandle;
-use crate::handlers::{connection, environment, interaction, permission, thread, turn};
+use crate::handlers::{connection, environment, interaction, permission, slash, thread, turn};
 use crate::protocol::{self, RpcError};
 
 pub async fn dispatch(
@@ -50,6 +50,8 @@ pub async fn dispatch(
         protocol::INTERACTION_RESPOND => interaction::respond(&gateway, params),
         protocol::PLAN_RESOLVE => interaction::plan_resolve(&gateway, params),
         protocol::ELICIT_RESOLVE => interaction::elicit_resolve(&gateway, params),
+        protocol::SLASH_LIST => slash::list(&gateway, params),
+        protocol::SLASH_EXECUTE => slash::execute(gateway, params).await,
         _ => Err(RpcError::method_not_found(method)),
     }
 }

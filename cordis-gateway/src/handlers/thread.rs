@@ -143,10 +143,7 @@ pub fn subscribe(
     subscribed: &mut std::collections::HashSet<String>,
 ) -> Result<Value, RpcError> {
     let id = text(&params, "threadId").unwrap_or_else(|_| LIVE_THREAD_ID.into());
-    let since = params
-        .get("sinceSeq")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let since = params.get("sinceSeq").and_then(Value::as_u64).unwrap_or(0);
     subscribed.insert(id.clone());
     let replayed = if id == LIVE_THREAD_ID {
         gateway.history_since(since).len()

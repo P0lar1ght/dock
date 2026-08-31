@@ -102,11 +102,7 @@ impl PairingStore {
         Ok((id, expires_unix_ms))
     }
 
-    pub fn poll(
-        &mut self,
-        id: &str,
-        origin: &str,
-    ) -> Result<(PairingStatus, u64), PairingError> {
+    pub fn poll(&mut self, id: &str, origin: &str) -> Result<(PairingStatus, u64), PairingError> {
         let origin = require_origin(origin)?;
         self.gc();
         let req = self
@@ -123,11 +119,7 @@ impl PairingStore {
         Ok((req.status, req.expires_unix_ms))
     }
 
-    pub fn exchange(
-        &mut self,
-        id: &str,
-        origin: &str,
-    ) -> Result<IssuedTicket, PairingError> {
+    pub fn exchange(&mut self, id: &str, origin: &str) -> Result<IssuedTicket, PairingError> {
         let origin = require_origin(origin)?;
         self.gc();
         let req = self
@@ -150,9 +142,7 @@ impl PairingStore {
                 "pairing request is still waiting for TUI confirmation",
             )),
             PairingStatus::Denied => Err(PairingError::new("denied", "pairing request was denied")),
-            PairingStatus::Expired => {
-                Err(PairingError::new("expired", "pairing request expired"))
-            }
+            PairingStatus::Expired => Err(PairingError::new("expired", "pairing request expired")),
         }
     }
 
@@ -294,10 +284,7 @@ impl PairingStore {
         self.bindings.retain(|b| b.origin != origin);
         self.tickets.retain(|_, t| t.origin != origin);
         if self.bindings.len() == before {
-            return Err(PairingError::new(
-                "not_found",
-                "no binding for that origin",
-            ));
+            return Err(PairingError::new("not_found", "no binding for that origin"));
         }
         self.emit();
         Ok(())
@@ -366,9 +353,9 @@ pub fn normalize_application(value: &str) -> Result<String, PairingError> {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        || !application
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-')
+        || !application.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-'
+        })
     {
         return Err(PairingError::new(
             "invalid_application",
@@ -390,7 +377,5 @@ pub fn require_origin(origin: &str) -> Result<String, PairingError> {
 }
 
 fn unix_ms(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }

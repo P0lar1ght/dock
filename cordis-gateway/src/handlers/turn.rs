@@ -79,7 +79,11 @@ fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Valu
     let port = session_port(gateway)?;
     let working = port.working();
     port.submit(message, send_now);
-    let status = if working && !send_now { "queued" } else { "running" };
+    let status = if working && !send_now {
+        "queued"
+    } else {
+        "running"
+    };
     Ok(json!({
         "threadId": LIVE_THREAD_ID,
         "turnId": format!("t{}", gateway.latest_seq().saturating_add(1)),
@@ -94,7 +98,10 @@ fn apply_turn_intent(
 ) -> Result<(), RpcError> {
     let intent = params.get("intent");
     if intent.and_then(|v| v.get("mode")).and_then(Value::as_str) == Some("plan") {
-        if let Some(plan) = gateway.ctx().get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE) {
+        if let Some(plan) = gateway
+            .ctx()
+            .get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE)
+        {
             plan.set(true);
         }
     }

@@ -261,3 +261,36 @@ export interface TurnQueueResult {
   } | null;
   items: TurnQueueItem[];
 }
+
+export interface SlashCatalogCommand {
+  name: string;
+  display: string;
+  aliases?: string[];
+  description: string;
+  takesArgs?: boolean;
+  surface?: 'gateway' | 'terminal' | 'embed' | string;
+  kind?: string;
+  capture?: 'viewport' | 'region' | 'reuse' | 'screen' | 'full-page' | string | null;
+}
+
+export interface SlashListResult {
+  commands: SlashCatalogCommand[];
+}
+
+export type SlashExecuteKind =
+  | 'submitted'
+  | 'filled'
+  | 'notice'
+  | 'menu'
+  | 'capture'
+  | 'passthrough'
+  | 'applied';
+
+export interface SlashExecuteResult {
+  ok: true;
+  kind: SlashExecuteKind;
+  fill?: string;
+  menu?: string;
+  notice?: { title: string; body: string };
+  turn?: TurnSubmission;
+}
