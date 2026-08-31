@@ -8,8 +8,9 @@ use std::time::Duration;
 use cordis::Context;
 use cordis_gateway::{gateway_bind, GATEWAY, PROTOCOL_VERSION};
 use cordis_spine::{
-    agent_loop, install_fakes, mcp_client, permissions, plan_mode, settings, tool_ask_user, turn,
-    LoopHandle, PermissionOptionKind, Permissions, TurnControl, AGENT_LOOP, PERMISSIONS, TURN,
+    agent_loop, install_fakes, mcp_client, permissions, plan_mode, settings, tool_ask_user,
+    tool_goal, turn, AppSettings, Goal, LogEvent, LoopHandle, PermissionOptionKind, Permissions,
+    Sessions, TurnControl, AGENT_LOOP, GOAL, PERMISSIONS, SESSIONS, SETTINGS, TURN,
 };
 use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use futures_util::{SinkExt, StreamExt};
@@ -82,6 +83,7 @@ impl Harness {
         root.plugin(permissions(), ()).unwrap().wait().await.unwrap();
         root.plugin(plan_mode(), ()).unwrap().wait().await.unwrap();
         root.plugin(tool_ask_user(), ()).unwrap().wait().await.unwrap();
+        root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
         root.plugin(mcp_client(), ()).unwrap().wait().await.unwrap();
         root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
         let port = TestSession {
@@ -422,4 +424,112 @@ async fn permission_dual_resolve_first_wins() {
         .await;
     assert_eq!(empty["error"]["details"]["code"], "empty_queue");
     assert!(!perms.resolve(PermissionOptionKind::AllowOnce));
+}
+
+#[tokio::test]
+async fn thread_archive_rename_delete_use_sessions() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("hello archive".into()));
+    let archived = rpc
+        .call("thread/archive", json!({ "threadId": "live" }))
+        .await;
+    assert!(archived.get("error").is_none(), "{archived}");
+    let id = archived["result"]["thread"]["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with('s'));
+    assert_eq!(archived["result"]["thread"]["title"], "hello archive");
+    let renamed = rpc
+        .call(
+            "thread/rename",
+            json!({ "threadId": id, "title": "renamed" }),
+        )
+        .await;
+    assert_eq!(renamed["result"]["thread"]["title"], "renamed");
+    let live_rename = rpc
+        .call(
+            "thread/rename",
+            json!({ "threadId": "live", "title": "new chat" }),
+        )
+        .await;
+    assert_eq!(live_rename["result"]["thread"]["title"], "new chat");
+    let deleted = rpc
+        .call(
+            "thread/delete",
+            json!({ "threadId": id, "confirmation": id }),
+        )
+        .await;
+    assert_eq!(deleted["result"]["ok"], true);
+    assert!(sessions.archived().is_empty());
+}
+
+#[tokio::test]
+async fn reasoning_and_goal_project_dock_services() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let reasoning = rpc
+        .call(
+            "thread/reasoning/set",
+            json!({ "threadId": "live", "effort": "high" }),
+        )
+        .await;
+    assert_eq!(reasoning["result"]["reasoning"]["effort"], "high");
+    let settings = h.ctx.require::<AppSettings>(SETTINGS).unwrap();
+    assert_eq!(settings.effort(), "high");
+    assert!(settings.thinking());
+    let started = rpc
+        .call(
+            "thread/goal/set",
+            json!({ "threadId": "live", "content": "ship the gateway" }),
+        )
+        .await;
+    assert_eq!(started["result"]["goal"]["status"], "active");
+    assert_eq!(started["result"]["goal"]["summary"], "ship the gateway");
+    let paused = rpc
+        .call("thread/goal/pause", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(paused["result"]["goal"]["status"], "paused");
+    assert!(h.ctx.require::<Goal>(GOAL).unwrap().paused());
+    let cleared = rpc
+        .call("thread/goal/clear", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(cleared["result"]["goal"]["status"], "none");
+}
+
+#[tokio::test]
+async fn turn_intent_starts_goal_and_plan() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc.call("thread/subscribe", json!({ "threadId": "live" })).await;
+    let started = rpc
+        .call(
+            "turn/start",
+            json!({
+                "message": "finish pairing",
+                "intent": { "mode": "plan", "goal": { "operation": "start", "objective": "finish pairing" } }
+            }),
+        )
+        .await;
+    assert!(started.get("error").is_none(), "{started}");
+    assert!(h.ctx.require::<Goal>(GOAL).unwrap().active());
+}
+
+#[tokio::test]
+async fn mcp_reload_and_model_refresh_are_implemented() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let reload = rpc.call("mcp/reload", json!({})).await;
+    assert_eq!(reload["result"]["ok"], true);
+    let refresh = rpc
+        .call("thread/model/refresh", json!({ "threadId": "live" }))
+        .await;
+    assert!(refresh["result"]["model"]["id"].is_string());
 }

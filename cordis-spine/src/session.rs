@@ -61,6 +61,9 @@ pub struct Sessions {
     /// ignores this.
     auto_compact_suppressed: Arc<AtomicBool>,
     compacting: Arc<AtomicBool>,
+    /// Optional live-thread title (gateway `thread/rename` / `thread/start`).
+    /// Empty means derive from the first user message, same as `/resume`.
+    display_title: Arc<Mutex<Option<String>>>,
     /// User follow-up prompts waiting in the session actor (not GoalSummary).
     queued_followups: Arc<AtomicUsize>,
     /// One-shot wire addons paired with a specific next user bubble
@@ -113,6 +116,7 @@ impl Sessions {
             identity: Arc::from(identity.into()),
             auto_compact_suppressed: Arc::new(AtomicBool::new(false)),
             compacting: Arc::new(AtomicBool::new(false)),
+            display_title: Arc::new(Mutex::new(None)),
             queued_followups: Arc::new(AtomicUsize::new(0)),
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
         }
@@ -473,6 +477,7 @@ impl Sessions {
         self.rewound.store(false, Ordering::Relaxed);
         self.auto_compact_suppressed.store(false, Ordering::Relaxed);
         self.compacting.store(false, Ordering::Relaxed);
+        *self.display_title.lock().unwrap() = None;
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
         {
@@ -669,14 +674,16 @@ impl Sessions {
         let mut next = self.next_id.lock().unwrap();
         let id = format!("s{next}");
         *next += 1;
-        let title = events
-            .iter()
-            .find_map(|e| match e {
-                LogEvent::User(text) => {
-                    let t = text.trim();
-                    (!t.is_empty()).then(|| t.chars().take(40).collect())
-                }
-                _ => None,
+        let title = self
+            .live_title()
+            .or_else(|| {
+                events.iter().find_map(|e| match e {
+                    LogEvent::User(text) => {
+                        let t = text.trim();
+                        (!t.is_empty()).then(|| t.chars().take(40).collect())
+                    }
+                    _ => None,
+                })
             })
             .unwrap_or_else(|| id.clone());
         let times = self.times();
@@ -712,6 +719,7 @@ impl Sessions {
             .iter()
             .filter(|e| matches!(e, LogEvent::User(_)))
             .count();
+        let title = item.title.clone();
         *self.times.lock().unwrap() = item.times;
         *self.events.lock().unwrap() = item.events;
         *self.user_images.lock().unwrap() = vec![Vec::new(); user_n];
@@ -723,7 +731,47 @@ impl Sessions {
         if let Some(event) = last {
             self.emit_session(event);
         }
+        *self.display_title.lock().unwrap() = Some(title);
         true
+    }
+
+    /// Title shown for the live thread. Gateway and `/resume` share this.
+    pub fn live_title(&self) -> Option<String> {
+        self.display_title
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+    }
+
+    pub fn set_live_title(&self, title: impl Into<String>) {
+        let title = title.into();
+        let trimmed = title.trim();
+        *self.display_title.lock().unwrap() = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.chars().take(160).collect())
+        };
+    }
+
+    pub fn rename_archived(&self, id: &str, title: &str) -> Option<ArchivedSession> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let title: String = trimmed.chars().take(160).collect();
+        let mut archive = self.archive.lock().unwrap();
+        let item = archive.iter_mut().find(|s| s.id == id)?;
+        item.title = title;
+        Some(item.clone())
+    }
+
+    pub fn remove_archived(&self, id: &str) -> Option<ArchivedSession> {
+        let mut archive = self.archive.lock().unwrap();
+        let idx = archive.iter().position(|s| s.id == id)?;
+        Some(archive.remove(idx))
     }
 }
 
@@ -760,6 +808,21 @@ mod tests {
         assert!(sessions.restore(&item.id));
         assert_eq!(sessions.events().len(), 1);
         assert_eq!(sessions.times().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rename_and_remove_archived() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("keep me".into()));
+        let item = sessions.archive_current().unwrap();
+        let renamed = sessions
+            .rename_archived(&item.id, "  new title  ")
+            .expect("archived rename");
+        assert_eq!(renamed.title, "new title");
+        assert_eq!(sessions.remove_archived(&item.id).unwrap().title, "new title");
+        assert!(sessions.archived().is_empty());
+        assert!(sessions.rename_archived(&item.id, "gone").is_none());
     }
 
     #[tokio::test]

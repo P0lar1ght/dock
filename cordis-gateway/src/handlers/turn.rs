@@ -75,6 +75,7 @@ fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Valu
     if message.trim().is_empty() {
         return Err(RpcError::invalid_params("message is required"));
     }
+    apply_turn_intent(gateway, &params, &message)?;
     let port = session_port(gateway)?;
     let working = port.working();
     port.submit(message, send_now);
@@ -84,6 +85,46 @@ fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Valu
         "turnId": format!("t{}", gateway.latest_seq().saturating_add(1)),
         "status": status
     }))
+}
+
+fn apply_turn_intent(
+    gateway: &GatewayHandle,
+    params: &Value,
+    message: &str,
+) -> Result<(), RpcError> {
+    let intent = params.get("intent");
+    if intent.and_then(|v| v.get("mode")).and_then(Value::as_str) == Some("plan") {
+        if let Some(plan) = gateway.ctx().get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE) {
+            plan.set(true);
+        }
+    }
+    let goal_intent = intent.and_then(|v| v.get("goal"));
+    let op = goal_intent
+        .and_then(|g| g.get("operation"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if op.is_empty() {
+        return Ok(());
+    }
+    let Some(goal) = gateway.ctx().get::<cordis_spine::Goal>(cordis_spine::GOAL) else {
+        return Ok(());
+    };
+    match op {
+        "start" => {
+            let objective = goal_intent
+                .and_then(|g| g.get("objective"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(message.trim());
+            goal.start(objective);
+        }
+        "resume" => {
+            let _ = goal.resume();
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn session_port(gateway: &GatewayHandle) -> Result<std::sync::Arc<SessionRef>, RpcError> {

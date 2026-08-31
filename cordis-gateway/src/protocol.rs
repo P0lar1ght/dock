@@ -35,14 +35,25 @@ pub const INITIALIZE: &str = "initialize";
 pub const WORKSPACE_LIST: &str = "workspace/list";
 pub const THREAD_LIST: &str = "thread/list";
 pub const THREAD_START: &str = "thread/start";
+pub const THREAD_RENAME: &str = "thread/rename";
+pub const THREAD_ARCHIVE: &str = "thread/archive";
 pub const THREAD_RESTORE: &str = "thread/restore";
+pub const THREAD_DELETE: &str = "thread/delete";
 pub const THREAD_HISTORY: &str = "thread/history";
 pub const THREAD_SUBSCRIBE: &str = "thread/subscribe";
 pub const THREAD_UNSUBSCRIBE: &str = "thread/unsubscribe";
 pub const THREAD_ENVIRONMENT_GET: &str = "thread/environment/get";
 pub const THREAD_MODEL_SET: &str = "thread/model/set";
+pub const THREAD_MODEL_REFRESH: &str = "thread/model/refresh";
+pub const THREAD_REASONING_SET: &str = "thread/reasoning/set";
 pub const THREAD_APPROVAL_SET: &str = "thread/approval/set";
 pub const THREAD_PLAN_SET: &str = "thread/plan/set";
+pub const THREAD_MEMORY_SET: &str = "thread/memory/set";
+pub const THREAD_GOAL_SET: &str = "thread/goal/set";
+pub const THREAD_GOAL_EDIT: &str = "thread/goal/edit";
+pub const THREAD_GOAL_PAUSE: &str = "thread/goal/pause";
+pub const THREAD_GOAL_COMPLETE: &str = "thread/goal/complete";
+pub const THREAD_GOAL_CLEAR: &str = "thread/goal/clear";
 pub const THREAD_CONTEXT_COMPACT: &str = "thread/context/compact";
 pub const TURN_START: &str = "turn/start";
 pub const TURN_ENQUEUE: &str = "turn/enqueue";
@@ -54,6 +65,7 @@ pub const PERMISSION_RESOLVE: &str = "permission/resolve";
 pub const INTERACTION_RESPOND: &str = "interaction/respond";
 pub const PLAN_RESOLVE: &str = "plan/resolve";
 pub const ELICIT_RESOLVE: &str = "elicit/resolve";
+pub const MCP_RELOAD: &str = "mcp/reload";
 
 #[derive(Clone, Debug)]
 pub struct RpcError {

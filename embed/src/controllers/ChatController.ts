@@ -98,7 +98,7 @@ export class ChatController {
       ) === true,
       screenCaptureSupported: browserDisplayCaptureSupported(),
       planSupported: this.stateValue?.environment?.plan.canChange === true,
-      goalSupported: false,
+      goalSupported: true,
       goalStatus: this.stateValue?.environment?.goal.status
     });
     const slashCommandIndex = Math.min(

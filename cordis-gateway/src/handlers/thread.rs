@@ -15,13 +15,79 @@ pub fn list(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> 
     Ok(json!({ "threads": threads }))
 }
 
-pub fn start(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
+pub fn start(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let sessions = live_sessions(gateway)?;
     sessions.archive_current();
     sessions.clear();
+    if let Some(title) = params.get("title").and_then(Value::as_str) {
+        sessions.set_live_title(title);
+    }
     gateway.reset_transcript();
     Ok(json!({
         "thread": live_summary(&sessions, protocol::DEFAULT_WORKSPACE_ID)
+    }))
+}
+
+pub fn rename(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let id = text(&params, "threadId")?;
+    let title = text(&params, "title")?;
+    let sessions = live_sessions(gateway)?;
+    if id == LIVE_THREAD_ID {
+        sessions.set_live_title(&title);
+        return Ok(json!({
+            "ok": true,
+            "thread": live_summary(&sessions, protocol::DEFAULT_WORKSPACE_ID)
+        }));
+    }
+    let item = sessions
+        .rename_archived(&id, &title)
+        .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
+    Ok(json!({
+        "ok": true,
+        "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID)
+    }))
+}
+
+pub fn archive(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let id = text(&params, "threadId").unwrap_or_else(|_| LIVE_THREAD_ID.into());
+    let sessions = live_sessions(gateway)?;
+    if id != LIVE_THREAD_ID {
+        let item = sessions
+            .archived()
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
+        return Ok(json!({ "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID) }));
+    }
+    match sessions.archive_current() {
+        Some(item) => {
+            sessions.clear();
+            gateway.reset_transcript();
+            Ok(json!({
+                "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID)
+            }))
+        }
+        None => Ok(json!({
+            "thread": live_summary(&sessions, protocol::DEFAULT_WORKSPACE_ID)
+        })),
+    }
+}
+
+pub fn delete(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let id = text(&params, "threadId")?;
+    if id == LIVE_THREAD_ID {
+        return Err(RpcError::app(
+            "invalid_params",
+            "cannot delete the live thread; archive it first",
+        ));
+    }
+    let sessions = live_sessions(gateway)?;
+    let item = sessions
+        .remove_archived(&id)
+        .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
+    Ok(json!({
+        "ok": true,
+        "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID)
     }))
 }
 
@@ -112,16 +178,18 @@ fn live_sessions(gateway: &GatewayHandle) -> Result<std::sync::Arc<Sessions>, Rp
 }
 
 fn live_summary(sessions: &Sessions, workspace_id: &str) -> Value {
-    let title = sessions
-        .events()
-        .iter()
-        .find_map(|e| match e {
-            cordis_spine::LogEvent::User(t) if !t.trim().is_empty() => {
-                Some(t.chars().take(40).collect::<String>())
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| "当前会话".into());
+    let title = sessions.live_title().unwrap_or_else(|| {
+        sessions
+            .events()
+            .iter()
+            .find_map(|e| match e {
+                cordis_spine::LogEvent::User(t) if !t.trim().is_empty() => {
+                    Some(t.chars().take(40).collect::<String>())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "当前会话".into())
+    });
     json!({
         "id": LIVE_THREAD_ID,
         "title": title,

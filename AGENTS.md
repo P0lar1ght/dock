@@ -8,7 +8,7 @@ Dock 是 Grok 外形的 TUI，跑在 Cordis 插件树上。和 DeepSeek Harness 
 
 ```bash
 cargo run -p cordis-app
-cargo test -p cordis-spine -p cordis-tui -p cordis-app
+cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
 ```
 
 ## 一切皆插件

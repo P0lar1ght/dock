@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    snapshot_context, AppSettings, Mcp, PermissionMode, PlanMode, MCP, PLAN_MODE, SETTINGS,
+    snapshot_context, AppSettings, Goal, Mcp, PermissionMode, PlanMode, GOAL, MCP, PLAN_MODE,
+    SETTINGS,
 };
 use cordis_tui::{SessionRef, SESSION_PORT};
 
@@ -12,6 +13,81 @@ pub fn get(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
     let mut map = environment_fields(gateway)?;
     map.insert("threadId".into(), json!(LIVE_THREAD_ID));
     Ok(Value::Object(map))
+}
+
+pub fn refresh_models(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    get(gateway, params)
+}
+
+pub fn set_reasoning(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let effort = params
+        .get("effort")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::invalid_params("effort is required"))?;
+    let settings = settings(gateway)?;
+    match effort {
+        "none" => {
+            settings.set_thinking(false);
+            settings.set_effort("none");
+        }
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => {
+            settings.set_thinking(true);
+            settings.set_effort(effort);
+        }
+        _ => {
+            return Err(RpcError::invalid_params(
+                "effort must be none, low, medium, high, or similar",
+            ))
+        }
+    }
+    get(gateway, params)
+}
+
+pub fn set_memory(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    // Dock memory is a pair of tools, not PolarVigil read/write gates.
+    let _ = params.get("read");
+    let _ = params.get("write");
+    get(gateway, params)
+}
+
+pub fn set_goal(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let content = params
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::invalid_params("content is required"))?;
+    goal_service(gateway)?.start(content);
+    get(gateway, params)
+}
+
+pub fn edit_goal(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let content = params
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::invalid_params("content is required"))?;
+    let goal = goal_service(gateway)?;
+    if !goal.present() {
+        return Err(RpcError::app("not_found", "no active goal"));
+    }
+    goal.set_title(content);
+    Ok(json!({ "goal": goal_object(gateway) }))
+}
+
+pub fn pause_goal(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
+    let goal = goal_service(gateway)?;
+    if !goal.pause() {
+        return Err(RpcError::app("not_found", "no active goal to pause"));
+    }
+    Ok(json!({ "goal": goal_object(gateway) }))
+}
+
+pub fn clear_goal(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let _ = params;
+    goal_service(gateway)?.clear();
+    Ok(json!({ "goal": goal_object(gateway) }))
 }
 
 pub fn set_model(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
@@ -78,6 +154,33 @@ fn settings(gateway: &GatewayHandle) -> Result<std::sync::Arc<AppSettings>, RpcE
         .ctx()
         .get::<AppSettings>(SETTINGS)
         .ok_or_else(|| RpcError::app("unavailable", "settings service is not mounted"))
+}
+
+fn goal_service(gateway: &GatewayHandle) -> Result<std::sync::Arc<Goal>, RpcError> {
+    gateway
+        .ctx()
+        .get::<Goal>(GOAL)
+        .ok_or_else(|| RpcError::app("unavailable", "goal service is not mounted"))
+}
+
+fn goal_object(gateway: &GatewayHandle) -> Value {
+    match gateway.ctx().get::<Goal>(GOAL) {
+        Some(goal) if goal.present() => {
+            let status = if goal.paused() { "paused" } else { "active" };
+            json!({
+                "status": status,
+                "summary": goal.title(),
+                "truncated": false,
+                "progressSummary": goal.status(),
+                "revision": 1
+            })
+        }
+        _ => json!({
+            "status": "none",
+            "summary": "",
+            "truncated": false
+        }),
+    }
 }
 
 fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String, Value>, RpcError> {
@@ -168,20 +271,17 @@ fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String,
     map.insert(
         "reasoning".into(),
         json!({
-            "supported": settings.thinking(),
-            "effort": settings.effort(),
+            "supported": true,
+            "effort": if settings.thinking() {
+                settings.effort()
+            } else {
+                "none".into()
+            },
             "canChange": true,
             "options": ["none", "low", "medium", "high"]
         }),
     );
-    map.insert(
-        "goal".into(),
-        json!({
-            "status": "none",
-            "summary": "",
-            "truncated": false
-        }),
-    );
+    map.insert("goal".into(), goal_object(gateway));
     map.insert(
         "plan".into(),
         json!({

@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use cordis_spine::{Mcp, MCP};
+
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError};
 
@@ -17,5 +19,18 @@ pub fn workspace_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
             "path": cwd
         }],
         "defaultWorkspaceId": protocol::DEFAULT_WORKSPACE_ID
+    }))
+}
+
+/// Dock MCP is fail-open and already live; this is a snapshot, not PolarVigil reconnect.
+pub fn mcp_reload(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let count = gateway
+        .ctx()
+        .get::<Mcp>(MCP)
+        .map(|m| m.list().len())
+        .unwrap_or(0);
+    Ok(json!({
+        "ok": true,
+        "serverCount": count
     }))
 }

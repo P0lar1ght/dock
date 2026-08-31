@@ -88,7 +88,7 @@ pub use mcp::{
     is_mcp_public_name, mcp_client, public_tool_name, ElicitPrompt, Elicitation, Mcp, McpStatus,
     McpToolStatus,
 };
-pub use memory::tool_memory;
+pub use memory::{tool_memory, Memory};
 pub use monitor::tool_monitor;
 pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, COMPACT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL,

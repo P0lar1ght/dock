@@ -77,7 +77,7 @@ export function goalPopover(
           ${goal.totalSteps ? ` · ${goal.completedSteps || 0}/${goal.totalSteps}` : ''}
         </p>
       ` : nothing}
-      <p class="goal-note">完整 Goal 由 Runtime 保存；界面只恢复有界安全摘要和进度。</p>
+      <p class="goal-note">目标来自当前 Dock 会话；暂停和清除与终端 `/goal` 共用同一状态。</p>
     </aside>
   `;
 }
