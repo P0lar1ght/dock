@@ -28,6 +28,7 @@ export class PairingController {
   private readonly now: () => number;
   private state: PairingView = hidden();
   private pending?: Promise<boolean>;
+  private boundWait?: Promise<void>;
   private waitGeneration = 0;
 
   constructor(
@@ -55,8 +56,15 @@ export class PairingController {
     return pending;
   }
 
+  /** Resolves after TUI approval + `onTicket` (WebSocket connected). */
+  waitUntilBound() {
+    if (this.boundWait) return this.boundWait;
+    return Promise.reject(new Error('配对尚未开始'));
+  }
+
   clear() {
     this.waitGeneration += 1;
+    this.boundWait = undefined;
     if (this.state.phase === 'hidden') return;
     this.state = hidden();
     this.onChange();
@@ -84,7 +92,7 @@ export class PairingController {
         expiresAt: result.expiresAt
       };
       this.onChange();
-      void this.waitForApproval(pairingRequestId, generation);
+      this.boundWait = this.waitForApproval(pairingRequestId, generation);
       return true;
     } catch {
       this.state = {
@@ -98,16 +106,18 @@ export class PairingController {
   }
 
   private async waitForApproval(pairingRequestId: string, generation: number) {
-    if (!this.options.waitForTicket) return;
+    if (!this.options.waitForTicket) {
+      throw new Error('配对等待未配置');
+    }
     try {
       const ticket = await this.options.waitForTicket(pairingRequestId);
       if (generation !== this.waitGeneration || this.state.pairingRequestId !== pairingRequestId) {
-        return;
+        throw new Error('配对已取消');
       }
       await this.options.onTicket?.(ticket.ticket);
-    } catch {
+    } catch (error) {
       if (generation !== this.waitGeneration || this.state.pairingRequestId !== pairingRequestId) {
-        return;
+        throw error;
       }
       this.state = {
         phase: 'error',
@@ -115,6 +125,7 @@ export class PairingController {
         error: '配对被拒绝或已过期，请重新生成后在 Dock 终端确认。'
       };
       this.onChange();
+      throw error;
     }
   }
 }

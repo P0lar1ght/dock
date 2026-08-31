@@ -157,6 +157,8 @@ export class ThreadController {
       this.onActiveSession(active);
       return active;
     }
+    const live = this.summaries.find((thread) => !thread.archivedAt);
+    if (live) return this.switchTo(live.id);
     return this.create();
   }
 
@@ -311,6 +313,7 @@ export class ThreadController {
     this.renameThreadId = '';
     this.renameDraft = '';
     this.confirmDeleteThreadId = '';
+    this.tail = Promise.resolve();
   }
 
   private watch(session: AgentSession) {
@@ -425,20 +428,25 @@ export class ThreadController {
     }
   }
 
-  private async run<T>(operation: string, action: () => Promise<T>) {
-    if (this.operation) throw new Error('Thread operation is already in progress');
-    this.operation = operation;
-    this.error = '';
-    this.onChange();
-    try {
-      return await action();
-    } catch (error) {
-      this.error = 'Thread 操作未完成，请检查连接后重试';
-      throw error;
-    } finally {
-      this.operation = '';
+  private tail: Promise<void> = Promise.resolve();
+
+  private run<T>(operation: string, action: () => Promise<T>): Promise<T> {
+    const started = this.tail.then(async () => {
+      this.operation = operation;
+      this.error = '';
       this.onChange();
-    }
+      try {
+        return await action();
+      } catch (error) {
+        this.error = 'Thread 操作未完成，请检查连接后重试';
+        throw error;
+      } finally {
+        this.operation = '';
+        this.onChange();
+      }
+    });
+    this.tail = started.then(() => undefined, () => undefined);
+    return started;
   }
 
   private requireClient() {

@@ -70,6 +70,7 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
   private openValue = false;
   private initialized = false;
   private initializing?: Promise<void>;
+  private connecting?: Promise<void>;
   private removeConnectionListener?: () => void;
 
   get client() {
@@ -137,31 +138,17 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
     this.skinStore = undefined;
     this.initialized = false;
     this.initializing = undefined;
+    this.connecting = undefined;
     this.connection = { state: 'idle' };
   }
 
   async connect() {
     await this.updateComplete;
     await this.initialize();
-    const client = this.requireClient();
-    if (client.connectionState.state === 'connected') {
-      await this.threadController.load();
-      this.chatController.bind(client.activeSession);
-      if (this.openValue) await this.ensureSession();
-      return;
-    }
-    try {
-      await client.connect();
-      await this.threadController.load();
-      this.chatController.bind(client.activeSession);
-      if (this.openValue) await this.ensureSession();
-      this.dispatchEvent(new CustomEvent(DOCK_AGENT_READY, {
-        detail: { application: this.application, gatewayUrl: client.gatewayUrl }
-      }));
-    } catch (error) {
-      this.dispatchError(error);
-      throw error;
-    }
+    this.connecting ||= this.connectOnce().finally(() => {
+      this.connecting = undefined;
+    });
+    await this.connecting;
   }
 
   async openChat() {
@@ -170,6 +157,11 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
     await this.updateComplete;
     this.positionPanel();
     this.dispatchToggle();
+    try {
+      await this.connect();
+    } catch {
+      // connectOnce already dispatched dock:error
+    }
     if (this.connection.state === 'connected') await this.ensureSession();
     await this.updateComplete;
     this.renderRoot.querySelector<HTMLTextAreaElement>('[data-testid="chat-input"]')?.focus();
@@ -404,6 +396,36 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
     this.requestUpdate();
   }
 
+  private async connectOnce() {
+    const client = this.requireClient();
+    try {
+      if (client.connectionState.state !== 'connected') {
+        try {
+          await client.connect();
+        } catch (error) {
+          if (!needsPairing(errorCode(error)) || !this.pairingController) throw error;
+          const started = await this.pairingController.begin();
+          if (!started) {
+            throw new Error(this.pairingController.view.error || '无法创建本机配对请求');
+          }
+          await this.pairingController.waitUntilBound();
+        }
+      }
+      await this.afterConnected();
+      this.dispatchEvent(new CustomEvent(DOCK_AGENT_READY, {
+        detail: { application: this.application, gatewayUrl: client.gatewayUrl }
+      }));
+    } catch (error) {
+      this.dispatchError(error);
+      throw error;
+    }
+  }
+
+  private async afterConnected() {
+    await this.threadController.load();
+    await this.ensureSession();
+  }
+
   private async ensureSession() {
     const session = await this.threadController.ensureActive();
     this.chatController.bind(session);
@@ -476,4 +498,10 @@ function shortStatus(state: string) {
 
 function needsPairing(code: string | undefined) {
   return code === 'pairing_required' || code === 'binding_revoked' || code === 'origin_not_allowed';
+}
+
+function errorCode(error: unknown) {
+  return error && typeof error === 'object' && 'code' in error
+    ? String((error as { code: unknown }).code)
+    : undefined;
 }

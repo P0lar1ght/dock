@@ -31,6 +31,6 @@ npm run build
 | `data-theme` | `auto` / `light` / `dark` |
 | `data-auto-connect` | `false` 时由宿主调用 `connect()` |
 
-公开事件：`dock:ready`、`dock:state`、`dock:toggle`、`dock:error`。首次连接会创建配对请求，**请在 Dock 终端确认**（`/pair` 或弹出 overlay），浏览器轮询直到 `approved`，再 `POST /v1/pairing/exchanges` 拿 ticket。没有 `dock pair` CLI。
+公开事件：`dock:ready`、`dock:state`、`dock:toggle`、`dock:error`。`connect()` 在 Origin 未绑定时**不会当终态失败**：它创建配对请求并等到 Dock 终端批准（`/pair` 或弹出 overlay），再 `POST /v1/pairing/exchanges` 拿 ticket、挂上 live thread，然后才 `dock:ready`。没有 `dock pair` CLI。`openChat()` 会等同一条连接路径，所以 composer 在 ready 之后可以发消息。
 
 斜杠补全来自 Gateway `slash/list`，发送走 `slash/execute`（接到同一套 spine / agent harness）。嵌入脚本只做前缀过滤和结果渲染；`/screenshot` 仍在浏览器里截图，再作为 Turn 交给 Gateway。
