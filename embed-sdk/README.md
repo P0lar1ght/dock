@@ -1,6 +1,6 @@
 # dock-embed
 
-宿主页用一份脚本注入 Dock 宠物和 Chat。目录：`embed/`。构建产物是 `dist/dock-embed.js`。
+宿主页用一份脚本注入 Dock 宠物和 Chat。目录：`embed-sdk/`。构建产物是 `dist/dock-embed.js`。
 
 这份 SDK 参考 PolarVigil 的浏览器注入面（Origin 配对、JSON-RPC、Thread/Turn），协议改成 Dock 实际投影的 `dock.1`：同一进程里的当前会话，而不是 PolarVigil Runtime 的十二项硬能力。
 
@@ -15,7 +15,7 @@
 ```
 
 ```bash
-cd embed
+cd embed-sdk
 npm install
 npm run build
 ```

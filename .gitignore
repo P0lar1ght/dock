@@ -2,5 +2,5 @@
 **/*.rs.bk
 .DS_Store
 .dock/
-embed/node_modules/
-embed/dist/
+embed-sdk/node_modules/
+embed-sdk/dist/

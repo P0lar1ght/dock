@@ -1,27 +1,242 @@
-# dock
+<p align="center">
+  <img src="assets/logo/mark-black-v9-belly.png" width="112" alt="Dock mark">
+</p>
+<h1 align="center">Dock</h1>
+<p align="center">
+  <b>Grok 外形的本地 Agent TUI · 一切皆插件</b>
+</p>
+<p align="center">
+  <img src="assets/logo/lockup-black-v9-belly.png" width="360" alt="Dock">
+</p>
+<p align="center">
+  <img src="https://img.shields.io/badge/rust-1.88+-dea584?logo=rust&logoColor=white" alt="Rust 1.88+">
+  <img src="https://img.shields.io/badge/cordis-plugin_tree-132238" alt="Cordis plugin tree">
+  <img src="https://img.shields.io/badge/gateway-loopback-73dbff" alt="Loopback gateway">
+  <img src="https://img.shields.io/badge/license-MIT-yellow" alt="MIT">
+</p>
+<p align="center">
+  <a href="#快速开始">快速开始</a> •
+  <a href="#特性">特性</a> •
+  <a href="#架构概览">架构</a> •
+  <a href="#浏览器-companion">浏览器</a> •
+  <a href="#仓库">仓库</a> •
+  <a href="#文档">文档</a>
+</p>
 
-Grok 外形的本地 Agent。**不 path-dep `grok-build/`。** 外面的参考树（`cordis/`、`deepseek-harness/`、`grok-build/`）不属于本仓库。
+---
 
-第一方库统一 `cordis-*`。其余是入口、注入、冻结副本。
+## 简介
 
-| 目录 | 干什么 |
-|---|---|
-| [`cordis-rust/`](cordis-rust/) | 插件内核：`Context`、inject、named services（crate `cordis`） |
-| [`cordis-spine/`](cordis-spine/) | Agent 循环、工具、MCP、会话 |
-| [`cordis-tui/`](cordis-tui/) | 全屏终端 UI |
-| [`cordis-app/`](cordis-app/) | 二进制入口 |
-| [`cordis-render/`](cordis-render/) | 输出渲染：Markdown、Mermaid（后续同类往这里加） |
-| [`embed/`](embed/) | 宿主页 JS 注入（`dock-embed.js`） |
-| [`vendor/`](vendor/) | 冻结副本：[`mermaid/`](vendor/mermaid/) 布局栈、[`xai/`](vendor/xai/) Grok 拷贝 |
-| [`skills/`](skills/) | Agent skills |
-| [`assets/`](assets/) | 品牌图 |
+**Dock** 是跑在 [Cordis](https://github.com/cordiverse/cordis) 插件树上的本地 Agent。Chrome 对齐 Grok pager，数据面走 spine 的会话日志与工具表。和 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 一样：**没有可私自打补丁的内核**。新行为是再挂一个插件，或接到已有 named service / waterfall 上。
 
-插件规则：[AGENTS.md](AGENTS.md)。模型工具：[TOOLS.md](TOOLS.md)。斜杠 / TUI：[CLI.md](CLI.md)。
+Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。本仓库是 Rust 实现（crate `cordis`），不是上游 JS `cordis/` 的 fork。
+
+当前主线已覆盖：
+
+- 全屏 TUI：思考折叠、工具卡片、计划 / 目标 / 子代理、斜杠与 overlay
+- Spine 五件套 + `agent-loop`：会话、采样、工具、系统提示、Agent 预设
+- 工作区读写跑、联网、MCP、计划模式、调度、动态 Cordis 插件
+- 回环 Gateway：Origin 配对、`dock.1` 投影、斜杠 list/execute
+- 宿主页 SDK：一份 `dock-embed.js` 注入宠物和 Chat
+
+工作只在这棵树里。不要改、不要 path-dep 外面的 `grok-build/`、`deepseek-harness/`、上游 `cordis/`。
+
+## 特性
+
+### 🔌 一切皆插件
+
+- 循环本身也是插件。换采样换 UI 换工具，不要焊进 `event_loop`
+- 一张 `"tools"` 表：`inject: ["tools"]` 后 `register`，MCP 也进同一张表
+- 扩展走 waterfall（`agent/pre-step`、`llm/stream`、`tools/execute`、`system-prompt/assemble`）
+- Named service **live-lookup**：调用点再 `ctx.get`，不要把 `Arc` 关进长生命周期闭包
+
+### 🖥️ Grok 外形 TUI
+
+- 快捷键条 `Key:label`、思考折叠、工具卡先输入后输出
+- 用户可见文案中文；底栏短 hint 保持 `Enter:send` 无空格
+- `/preset` YAML 目录就是 Agent；项目 `.dock/presets/` 默认落点
+- Shift+Tab 在 **询问 / 始终允许** 之间切换；计划是独立模式，不是第三种权限
+
+### 🛠️ 工具与 MCP
+
+- 工作区：`bash` `read_file` `grep` `glob` `write_file` `search_replace`
+- 计划、提问、后台任务、调度、子代理、记忆、LSP、workflow
+- MCP fail-open；公名 `mcp_{server}__{tool}`，不能盖掉 `bash`
+- 动态包：`cordis_define` / `cordis_run` / `cordis_promote` 写成 `.dock/plugins`
+
+### 🌐 浏览器 companion
+
+- Gateway 只绑 loopback（默认 `127.0.0.1:18991`，同端口再试 `[::1]`）
+- 鉴权靠 TUI `/pair` + 一次性 ticket，不是 Origin 白名单
+- 斜杠走 Gateway；SDK 只解析、截图、把 `{ kind }` 画出来
+- `/view-plan` `/help` 等 notice 用命令输出卡片，不当错误粉字
+
+---
+
+## 架构概览
+
+Dock 的 harness 就是一棵 Cordis 插件树。内核是 crate `cordis`（`Context`、`inject`、named service、waterfall、fiber 生命周期）——**没有可私自打补丁的内核**，新行为只能再挂插件。`cordis-app` 起**一个** `Context`，分两步长出整棵树：`install_app` 先挂 Spine 五件套 + Harness 服务 + 工具粒（尾部是 `llm`，再 `compact`），`main` 再补上 `agent-loop`、`session_actor`、`gateway`、1s cron tick、`tui`，并用 `system-prompt/assemble` waterfall 注入工作区基座提示。TUI 和 Gateway 都是树上的插件，不是旁路进程；宿主页 `embed-sdk` 只连回环 Gateway（`dock.1`），不另起一套 harness，也不直连 TUI。
+
+```mermaid
+flowchart TB
+  person["人"]
+  term["终端"]
+  host["宿主页<br/>dock-embed.js"]
+  person --> term
+  person --> host
+
+  subgraph app["cordis-app · 同一 Context"]
+    direction TB
+
+    subgraph surfaces["表面"]
+      direction LR
+      tui["tui<br/>theme · tui.scrollback · tui.prompt<br/>tui.statusBar · tui.welcome<br/>tui.shortcuts · tui.pairing<br/>event loop"]
+      gw["gateway<br/>127.0.0.1:18991 兼 IPv6 loopback<br/>Origin 配对<br/>dock.1 JSON-RPC<br/>turn / thread / permissions<br/>slash/list · slash/execute<br/>image inputs · live-lookup"]
+    end
+
+    actor["session_actor<br/>session + session.port<br/>cron tick 1s live-lookup<br/>due → sessions.append / session.submit"]
+
+    spine["Spine<br/>sessions · llm · tools<br/>systemPrompt · agents<br/>agentLoop"]
+
+    svc["Harness 服务<br/>settings · turn · permissions · cron · jobs · todos<br/>planMode · ask · mcp · goal · lsp · subagents<br/>memory · workflows · slash · agentPresets · compact<br/>tui.slots · dynamicCordisRunner"]
+
+    grains["tools.register · 一张表<br/>workspace: list_dir · read_file · grep · glob<br/>write_file · search_replace · bash<br/>grains: web · todo · plan-mode · ask-user · jobs<br/>scheduler · task · subagent · memory<br/>monitor · goal · lsp · workflow<br/>mcp-client · cordis"]
+
+    tui --> actor
+    gw --> actor
+    actor --> spine --> svc --> grains
+  end
+
+  term --> tui
+  host -->|"loopback HTTP / WS"| gw
+
+  api["模型 API"]
+  mcpOut["MCP stdio / HTTP"]
+  disk["~/.dock 与项目 .dock"]
+  md["cordis-render"]
+
+  spine --> api
+  grains --> mcpOut
+  svc --> disk
+  tui --> md
+```
+
+挂载有序：工具粒都在 `workspace_tools` 之后、`llm` 之前 `register`；`compact` 在 `llm` 之后（要 `inject "llm"`）；`tool-subagent` 在 `tool-task` 之后（live-look `"subagents"`）。完整顺序与每颗粒的工具名见 [TOOLS.md](TOOLS.md)。
+
+Gateway 默认 `127.0.0.1:18991`，同端口再试 `[::1]`（`DOCK_GATEWAY_BIND` 可覆盖）。配对走 HTTP；会话投影、权限、斜杠、图片输入走 JSON-RPC `dock.1`。鉴权是 Origin 配对 + 回环，不是 Origin 白名单。工具能力插件 `inject: ["tools"]` 后 `register`，MCP 也进同一张 `"tools"` 表。模式 / 模型 / 权限开关住在 `settings`；计划是独立模式，不是第三种权限。Named service 在调用点 live-lookup，不要把 `Arc` 关进长生命周期闭包。
+
+磁盘：`~/.dock`（`DOCK_HOME`）放用户 config、presets、plugins、memory、`mcp_credentials.json`；项目 `.dock` 放覆盖 config、presets、plugins、`plan.md`。HTTP MCP 的 OAuth token 不写进 `config.toml`。
+
+约定、工具名单、斜杠分别见 [AGENTS.md](AGENTS.md)、[TOOLS.md](TOOLS.md)、[CLI.md](CLI.md)。
+
+### 一轮怎么跑
+
+TUI 从不持有循环：按键映射成 `SessionCommand` 交给 `session_actor`，由它管队列——提交 / 立即发送（取消在飞行的一轮）/ 提前 / 目标 GoalSummary 续跑 / 子代理 mailbox 续跑。actor 每次取一条，调 `agent-loop` 提供的 `LoopHandle`。`LoopHandle` 包着默认 driver `GrokStep`：一轮 Grok 形状的采样——`agent/pre-step` 一次，然后 `system-prompt/assemble` → `llm/stream` → `tools/execute` → 回采样，直到出文本。安全上限 256 步；`/goal` 在外层多轮直到 `update_goal(completed)`。换 driver 只换这颗 `agent-loop` 插件，不动 actor。
+
+每一环都是 waterfall。拦截接 `on_waterfall`；默认实现放在 `waterfall(..., || default)` 的闭包里。监听必须把控制权交给下一环，不要悄悄吞掉链。
+
+```mermaid
+flowchart LR
+  pre["agent/pre-step"] --> assemble["system-prompt/assemble"]
+  assemble --> stream["llm/stream"]
+  stream --> exec["tools/execute"]
+  exec -->|"tool call"| stream
+  stream -->|"text"| done["turn end"]
+```
+
+---
+
+## 快速开始
+
+需要 **Rust 1.88+**（`cordis-gateway` 在 1.85 编不过）和本机 API key，或在配置里写好端点。
 
 ```bash
 cargo run -p cordis-app
 ```
 
-Model picker（`/model`，F2 Settings）读 `~/.dock/config.toml` 再读 `.dock/config.toml`。见 `config.toml.example`。`DOCK_MODEL` 覆盖 `[models].default`。
+首次启动会全屏接管终端。模型目录读 `~/.dock/config.toml`，再读项目 `.dock/config.toml`（后者覆盖）。样例：[`config.toml.example`](config.toml.example)。
 
-Stub LLM 会 echo。产品只在这棵树里改。
+| 变量 | 作用 |
+|---|---|
+| `DOCK_HOME` | 用户配置目录，默认 `~/.dock` |
+| `DOCK_MODEL` | 覆盖 `[models].default` |
+| `DOCK_API_KEY` / `DOCK_API_BASE` | 覆盖当前模型的 key / base URL |
+| `DOCK_GATEWAY_BIND` | 回环网关，默认 `127.0.0.1:18991` |
+
+没有可用模型时 spine 会 echo。不要把 `.dock/config.toml`、API key、`.env` 提交进仓库。
+
+测试：
+
+```bash
+cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
+cargo test -p cordis-spine --test round -- install_app_registers
+```
+
+核对工具表是否还对，跑上面这条 `install_app_registers`。
+
+---
+
+## 浏览器 companion
+
+同一进程里的 `gateway` 插件只绑 loopback。宿主页用一份脚本注入宠物和 Chat：
+
+```bash
+cd embed-sdk
+npm install
+npm run build
+```
+
+打开 [`embed-sdk/examples/inject/index.html`](embed-sdk/examples/inject/index.html)，在 TUI 里 `/pair`（或首次连接弹出的 overlay）批准该 Origin。
+
+```html
+<script
+  src="/vendor/dock/dock-embed.js"
+  data-dock-auto
+  data-application="example-app"
+  data-gateway-url="http://127.0.0.1:18991"
+  data-skin="dudu">
+</script>
+```
+
+协议与属性见 [`embed-sdk/README.md`](embed-sdk/README.md)。TUI overlay 类命令（`/cd` `/settings` `/pair` …）会回「请在 Dock 终端使用」。
+
+---
+
+## 仓库
+
+第一方库统一 `cordis-*`。其余是入口、注入、冻结副本。
+
+```
+dock/
+├── cordis-rust/          # 插件内核 crate `cordis`：Context、inject、named services
+├── cordis-spine/         # Agent 循环、工具、MCP、会话、预设
+├── cordis-tui/           # 全屏终端 UI
+├── cordis-gateway/       # 回环 HTTP/WS：配对与 dock.1 投影
+├── cordis-app/           # 二进制入口
+├── cordis-render/        # Markdown / Mermaid
+├── embed-sdk/            # 宿主页 JS 注入（dock-embed.js）
+├── vendor/               # 冻结副本：mermaid 布局栈、xai Grok 拷贝
+├── skills/               # Agent skills
+├── assets/               # 品牌图
+└── config.toml.example   # 用户 / 项目模型目录样例
+```
+
+---
+
+## 文档
+
+| 文档 | 说明 |
+|---|---|
+| [AGENTS.md](AGENTS.md) | 插件规则、布局、live-lookup、给写代码的 agent / 人 |
+| [TOOLS.md](TOOLS.md) | 模型工具、插件粒、缺口、明确不做 |
+| [CLI.md](CLI.md) | 斜杠、快捷键、overlay、底栏 |
+| [embed-sdk/README.md](embed-sdk/README.md) | 浏览器 SDK 属性、事件、配对 |
+| [skills/cordis-plugin-development/SKILL.md](skills/cordis-plugin-development/SKILL.md) | 动态 Cordis 插件工作流 |
+
+Crate README 管该包的 API。根目录这三份清单是产品面的权威：TOOLS、CLI、AGENTS。
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=P0lar1ght/dock&type=Date)](https://star-history.com/#P0lar1ght/dock&Date)
