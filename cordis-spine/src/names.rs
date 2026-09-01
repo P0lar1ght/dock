@@ -34,6 +34,8 @@ pub const DYNAMIC_CORDIS_RUNNER: &str = "dynamicCordisRunner";
 pub const TUI_SLOTS: &str = "tui.slots";
 /// In-memory maps `provide`d by Rhai host halves.
 pub const RHAI_BAGS: &str = "rhaiBags";
+/// Prompt-section inventory + occupancy snapshot (`ContextBook`).
+pub const CONTEXT: &str = "context";
 pub const SYSTEM_PROMPT: &str = "systemPrompt";
 pub const AGENTS: &str = "agents";
 pub const AGENT_LOOP: &str = "agentLoop";

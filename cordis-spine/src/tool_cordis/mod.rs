@@ -11,12 +11,10 @@ use std::sync::Arc;
 use cordis::{plugin, Context, Inject, Plugin};
 use serde_json::Value;
 
-use crate::agent_presets::AgentPresets;
+use crate::context_book::{own_sections, ContextBook};
 use crate::dynamic_runner::{DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode};
-use crate::names::{
-    AGENT_PRESETS, DYNAMIC_CORDIS_RUNNER, PRE_STEP, PROMPT_ASSEMBLE, SESSIONS, TOOLS,
-};
-use crate::prompt::{PromptAssembly, ORDER_CORDIS};
+use crate::names::{CONTEXT, DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, TOOLS};
+use crate::prompt::ORDER_CORDIS;
 use crate::session::Sessions;
 use crate::slash::{contrib_fields_present, slash_entry_from_define};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
@@ -56,23 +54,15 @@ const PROMOTE_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"proper
 pub fn tool_cordis() -> Plugin {
     plugin(
         "tool-cordis",
-        Inject::from([TOOLS, DYNAMIC_CORDIS_RUNNER]),
+        Inject::from([TOOLS, DYNAMIC_CORDIS_RUNNER, CONTEXT]),
         |ctx, _: &()| {
-            let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
-                let ctx = ctx.clone();
-                move |assembly: PromptAssembly, args| {
-                    let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
-                    // A `replace_prompt` preset owns the whole prompt; the
-                    // dynamic-plugin blurb only belongs on the layered base.
-                    let replace = ctx
-                        .get::<AgentPresets>(AGENT_PRESETS)
-                        .is_some_and(|p| p.replaces_prompt());
-                    if !replace {
-                        a.section(ORDER_CORDIS, "cordis", CORDIS_SYSTEM_PROMPT);
-                    }
-                    a
-                }
-            });
+            let book = ctx.require::<ContextBook>(CONTEXT)?;
+            own_sections(
+                ctx,
+                vec![book.section(ORDER_CORDIS, "cordis", |_| {
+                    Some(CORDIS_SYSTEM_PROMPT.to_string())
+                })?],
+            )?;
             let ctx_pre = ctx.clone();
             let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
                 let next = args.next::<PreStep>().unwrap_or(step);

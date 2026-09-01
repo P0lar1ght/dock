@@ -9,12 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
-use crate::agent_presets::AgentPresets;
-use crate::names::{
-    AGENT_PRESETS, PRE_STEP, PROMPT_ASSEMBLE, SESSIONS, SETTINGS, SKILLS, SLASH, TOOLS,
-    TOOLS_EXECUTE,
-};
-use crate::prompt::{PromptAssembly, ORDER_SKILLS};
+use crate::context_book::{own_sections, ContextBook};
+use crate::names::{CONTEXT, PRE_STEP, SESSIONS, SETTINGS, SKILLS, SLASH, TOOLS, TOOLS_EXECUTE};
+use crate::prompt::ORDER_SKILLS;
 use crate::session::Sessions;
 use crate::settings::AppSettings;
 use crate::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
@@ -351,26 +348,22 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
 }
 
 pub fn skills() -> Plugin {
-    plugin("skills", Inject::from([SLASH]), |ctx, _: &()| {
+    plugin("skills", Inject::from([SLASH, CONTEXT]), |ctx, _: &()| {
         let handle = Skills::discover(ctx.clone());
-        let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
-            let ctx = ctx.clone();
-            move |assembly: PromptAssembly, args| {
-                let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
-                let replace = ctx
-                    .get::<AgentPresets>(AGENT_PRESETS)
-                    .is_some_and(|p| p.replaces_prompt());
-                if !replace {
-                    if let Some(skills) = ctx.get::<Skills>(SKILLS) {
-                        let listing = skills.listing_text();
-                        if !listing.trim().is_empty() {
-                            a.section(ORDER_SKILLS, "skills", listing);
-                        }
+        let book = ctx.require::<ContextBook>(CONTEXT)?;
+        own_sections(
+            ctx,
+            vec![book.section(ORDER_SKILLS, "skills", |exec| {
+                exec.get::<Skills>(SKILLS).and_then(|skills| {
+                    let listing = skills.listing_text();
+                    if listing.trim().is_empty() {
+                        None
+                    } else {
+                        Some(listing)
                     }
-                }
-                a
-            }
-        });
+                })
+            })?],
+        )?;
         let ctx_pre = ctx.clone();
         let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
             let next = args.next::<PreStep>().unwrap_or(step);

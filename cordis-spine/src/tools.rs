@@ -88,11 +88,7 @@ impl Tools {
     /// Infrequent local tools: registered for `search_tool` / `use_tool`,
     /// omitted from the sampler tools array and occupancy. Execute still
     /// applies Agent preset allowlists (unlike MCP extras).
-    pub fn register_deferred(
-        &self,
-        spec: ToolSpec,
-        body: ToolBody,
-    ) -> cordis::Result<Disposable> {
+    pub fn register_deferred(&self, spec: ToolSpec, body: ToolBody) -> cordis::Result<Disposable> {
         self.register_inner(spec, body, ExtraKind::Deferred)
     }
 

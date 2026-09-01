@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use cordis::Context;
 use cordis_spine::{
-    occupancy_detail, session_usage_block_text, snapshot_context, ContextSnapshot, OccupancyDetail,
-    OccupancyKind, Sessions, TokenUsage, SESSIONS,
+    occupancy_detail, session_usage_block_text, snapshot_context, ContextBook, ContextSnapshot,
+    OccupancyDetail, OccupancyKind, Sessions, TokenUsage, CONTEXT, SESSIONS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -252,7 +252,11 @@ fn rebuild_body(
             }
         }
         (UsageTab::Context, None) => {
-            let snap = prev_snap.unwrap_or_else(|| snapshot_context(ctx));
+            let snap = prev_snap.unwrap_or_else(|| {
+                ctx.get::<ContextBook>(CONTEXT)
+                    .map(|b| b.window())
+                    .unwrap_or_else(|| snapshot_context(ctx))
+            });
             let view = context_view(&snap, width, hovered);
             BodyMemo {
                 tab,
@@ -374,7 +378,10 @@ fn paint_tab(
 
 fn occupancy_detail_lines(ctx: &Context, kind: OccupancyKind, width: u16) -> Vec<Line<'static>> {
     let theme = Theme::current();
-    let detail = occupancy_detail(ctx, kind);
+    let detail = ctx
+        .get::<ContextBook>(CONTEXT)
+        .map(|b| b.detail(kind))
+        .unwrap_or_else(|| occupancy_detail(ctx, kind));
     paint_occupancy_detail(&detail, &theme, width)
 }
 

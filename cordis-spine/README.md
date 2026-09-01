@@ -7,7 +7,8 @@ Five named Cordis services (DSH plugin seams) plus one Grok-shaped turn driver.
 | `sessions` | in-memory log | Grok conversation persist / DSH session log |
 | `llm` | echo / text stub, or `cordis-grok-llm` | Grok sampler (`chat` / `resp` / `anthropic`) |
 | `tools` | echo, or Grok workspace tools (`--features grok`) | Grok ToolBridge execute |
-| `systemPrompt` | fixed string | Grok `Agent.system_prompt` |
+| `systemPrompt` | fixed string | Assemble facade: live-look `"context"` then `system-prompt/assemble` |
+| `context` | empty `ContextBook` | Prompt fragments (`set_base` / `section`) + occupancy `window()` |
 | `agents` | in-memory registry | Grok `Agent` handle + DSH registry |
 | `agentLoop` | **the** loop plugin | Grok `handle_prompt` one inner-loop step |
 

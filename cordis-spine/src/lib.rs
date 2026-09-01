@@ -12,6 +12,7 @@ mod bundle;
 mod chat_chunk;
 mod compact;
 mod config;
+mod context_book;
 mod context_usage;
 mod cron;
 mod dynamic_runner;
@@ -64,6 +65,7 @@ pub use config::{
     load_catalog, load_disabled_mcp_tools, load_mcp_servers, persist_disabled_mcp_tools,
     persist_mcp_server_enabled, McpOAuthConfig, McpServer, McpTransport, ModelChoice,
 };
+pub use context_book::{context, own_sections, ContextBook};
 pub use context_usage::{
     occupancy_detail, snapshot_context, ContextCategory, ContextSnapshot, OccupancyDetail,
     OccupancyKind,
@@ -95,18 +97,18 @@ pub use mcp::{
 pub use memory::{tool_memory, Memory};
 pub use monitor::tool_monitor;
 pub use names::{
-    AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, COMPACT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL,
-    JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT,
-    PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS, SESSIONS, SESSION_EVENT, SETTINGS,
-    SKILLS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TUI_SLOTS, TURN,
-    WORKFLOWS,
+    AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, COMPACT, CONTEXT, CRON,
+    DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
+    PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
+    SESSIONS, SESSION_EVENT, SETTINGS, SKILLS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS,
+    TOOLS_EXECUTE, TUI_SLOTS, TURN, WORKFLOWS,
 };
 pub use permissions::{permissions, PermissionPrompt, Permissions};
 pub use plan_mode::{
     is_plan_file_edit, plan_instruction, plan_mode, plan_system_addon, PlanApprovalPrompt,
     PlanDecision, PlanMode, PlanPhase, PLAN_REL,
 };
-pub use prompt::{system_prompt, PromptAssembly, SystemPrompt};
+pub use prompt::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
 pub use sched::{
     expired_task_notice, format_scheduled_task_prompt, format_scheduled_task_reminder,

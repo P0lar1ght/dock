@@ -12,11 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
-use crate::agent_presets::AgentPresets;
-use crate::names::{
-    AGENT_PRESETS, PROMPT_ASSEMBLE, SESSIONS, SETTINGS, SLASH, TOOLS, TOOLS_EXECUTE, WORKFLOWS,
-};
-use crate::prompt::{PromptAssembly, ORDER_WORKFLOWS};
+use crate::context_book::{own_sections, ContextBook};
+use crate::names::{CONTEXT, SESSIONS, SETTINGS, SLASH, TOOLS, TOOLS_EXECUTE, WORKFLOWS};
+use crate::prompt::ORDER_WORKFLOWS;
 use crate::session::Sessions;
 use crate::settings::AppSettings;
 use crate::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
@@ -246,75 +244,76 @@ validate_only: true 只做冒烟检查（元数据、编译、一条 canned-host
 const PARAMS: &str = r#"{"type":"object","properties":{"source":{"description":"Exactly one workflow source.","oneOf":[{"type":"object","required":["type","name"],"properties":{"type":{"const":"name"},"name":{"type":"string"}}},{"type":"object","required":["type","script"],"properties":{"type":{"const":"script"},"script":{"type":"string"}}},{"type":"object","required":["type","script_path"],"properties":{"type":{"const":"script_path"},"script_path":{"type":"string"}}},{"type":"object","required":["type","resume_from_run_id"],"properties":{"type":{"const":"resume"},"resume_from_run_id":{"type":"string"}}}]},"agent_budget":{"type":"integer","minimum":1,"maximum":1024},"args":{},"validate_only":{"type":"boolean"},"name":{"type":"string"},"script":{"type":"string"},"script_path":{"type":"string"},"resume_from_run_id":{"type":"string"}},"required":[]}"#;
 
 pub fn tool_workflow() -> Plugin {
-    plugin("tool-workflow", Inject::from([TOOLS]), |ctx, _: &()| {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = Arc::new(drain::WorkflowState::new());
-        {
-            let state = state.clone();
-            let ctx = ctx.clone();
-            tokio::spawn(drain::drain_loop_with_ctx(state, ctx, rx));
-        }
-        let catalog_names: HashSet<String> = scan_catalog().into_iter().map(|w| w.name).collect();
-        let handle = Workflows {
-            ctx: ctx.clone(),
-            state,
-            handle: WorkflowLaunchHandle(tx),
-            extras: Mutex::new(Vec::new()),
-            announced: Mutex::new(catalog_names),
-        };
-        handle.sync_slash();
-        let provided = ctx.provide(WORKFLOWS, handle)?;
-        let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
-            let ctx = ctx.clone();
-            move |assembly: PromptAssembly, args| {
-                let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
-                let replace = ctx
-                    .get::<AgentPresets>(AGENT_PRESETS)
-                    .is_some_and(|p| p.replaces_prompt());
-                if !replace {
-                    if let Some(wf) = ctx.get::<Workflows>(WORKFLOWS) {
+    plugin(
+        "tool-workflow",
+        Inject::from([TOOLS, CONTEXT]),
+        |ctx, _: &()| {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let state = Arc::new(drain::WorkflowState::new());
+            {
+                let state = state.clone();
+                let ctx = ctx.clone();
+                tokio::spawn(drain::drain_loop_with_ctx(state, ctx, rx));
+            }
+            let catalog_names: HashSet<String> =
+                scan_catalog().into_iter().map(|w| w.name).collect();
+            let handle = Workflows {
+                ctx: ctx.clone(),
+                state,
+                handle: WorkflowLaunchHandle(tx),
+                extras: Mutex::new(Vec::new()),
+                announced: Mutex::new(catalog_names),
+            };
+            handle.sync_slash();
+            let provided = ctx.provide(WORKFLOWS, handle)?;
+            let book = ctx.require::<ContextBook>(CONTEXT)?;
+            own_sections(
+                ctx,
+                vec![book.section(ORDER_WORKFLOWS, "workflows", |exec| {
+                    exec.get::<Workflows>(WORKFLOWS).and_then(|wf| {
                         let listing = wf.listing_text();
-                        if !listing.trim().is_empty() {
-                            a.section(ORDER_WORKFLOWS, "workflows", listing);
+                        if listing.trim().is_empty() {
+                            None
+                        } else {
+                            Some(listing)
                         }
+                    })
+                })?],
+            )?;
+            let ctx_exec = ctx.clone();
+            let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
+                let result = args.next::<ToolResult>().unwrap_or(result);
+                if let Some(wf) = ctx_exec.get::<Workflows>(WORKFLOWS) {
+                    let call_args = arguments_for(&ctx_exec, &result);
+                    let paths = extract_paths_from_tool(&result.name, &call_args, &result.content);
+                    if !paths.is_empty() {
+                        wf.notice_paths(&paths);
                     }
                 }
-                a
-            }
-        });
-        let ctx_exec = ctx.clone();
-        let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
-            let result = args.next::<ToolResult>().unwrap_or(result);
-            if let Some(wf) = ctx_exec.get::<Workflows>(WORKFLOWS) {
-                let call_args = arguments_for(&ctx_exec, &result);
-                let paths = extract_paths_from_tool(&result.name, &call_args, &result.content);
-                if !paths.is_empty() {
-                    wf.notice_paths(&paths);
-                }
-            }
-            result
-        });
-        let tools = ctx.require::<Tools>(TOOLS)?;
-        let body: ToolBody = {
-            let ctx = ctx.clone();
-            std::sync::Arc::new(move |call| {
+                result
+            });
+            let tools = ctx.require::<Tools>(TOOLS)?;
+            let body: ToolBody = {
                 let ctx = ctx.clone();
-                Box::pin(async move { run_workflow_tool(&ctx, call).await })
-            })
-        };
-        own_registered(
-            ctx,
-            vec![tools.register_deferred(
-                ToolSpec {
-                    name: WORKFLOW_TOOL_NAME.into(),
-                    description: DESC.into(),
-                    parameters_json: PARAMS.into(),
-                },
-                body,
-            )?],
-        )?;
-        Ok(Some(provided))
-    })
+                std::sync::Arc::new(move |call| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move { run_workflow_tool(&ctx, call).await })
+                })
+            };
+            own_registered(
+                ctx,
+                vec![tools.register_deferred(
+                    ToolSpec {
+                        name: WORKFLOW_TOOL_NAME.into(),
+                        description: DESC.into(),
+                        parameters_json: PARAMS.into(),
+                    },
+                    body,
+                )?],
+            )?;
+            Ok(Some(provided))
+        },
+    )
 }
 
 /// Copied from Grok `WorkflowTool::run` (handle → oneshot ack → render).

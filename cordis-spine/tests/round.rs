@@ -391,6 +391,19 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     assert!(root
         .get::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
         .is_some());
+    assert!(root
+        .get::<cordis_spine::ContextBook>(cordis_spine::CONTEXT)
+        .is_some());
+    let assembled = root
+        .require::<cordis_spine::SystemPrompt>(SYSTEM_PROMPT)
+        .unwrap()
+        .assemble();
+    assert!(
+        !assembled.contains("# Dynamic Cordis Plugins"),
+        "{assembled}"
+    );
+    assert!(assembled.contains("search_tool 查 cordis"), "{assembled}");
+    assert!(!assembled.contains("update_goal(objective"), "{assembled}");
     assert!(root.get::<cordis_spine::Ask>(cordis_spine::ASK).is_some());
     assert!(root
         .get::<cordis_spine::Compact>(cordis_spine::COMPACT)

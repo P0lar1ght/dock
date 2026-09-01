@@ -6,6 +6,7 @@ use cordis::Context;
 use crate::agent_presets::AgentPresets;
 use crate::agents::Agents;
 use crate::ask_user::Ask;
+use crate::context_book::ContextBook;
 use crate::cron::Cron;
 use crate::dynamic_runner::{builtins_lines, DynamicRunner, PluginOrigin, SnapshotRow};
 use crate::goal::Goal;
@@ -15,9 +16,9 @@ use crate::lsp::LspBackendAdapter;
 use crate::mcp::Mcp;
 use crate::memory::Memory;
 use crate::names::{
-    AGENTS, AGENT_PRESETS, ASK, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LSP, MCP, MEMORY,
-    PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS,
-    TUI_SLOTS, TURN, WORKFLOWS,
+    AGENTS, AGENT_PRESETS, ASK, CONTEXT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LSP, MCP,
+    MEMORY, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS,
+    TOOLS, TUI_SLOTS, TURN, WORKFLOWS,
 };
 use crate::permissions::Permissions;
 use crate::plan_mode::PlanMode;
@@ -187,6 +188,7 @@ fn probe_spine(ctx: &Context) -> Vec<String> {
     push_live::<Llm>(&mut lines, ctx, LLM);
     push_live::<Tools>(&mut lines, ctx, TOOLS);
     push_live::<SystemPrompt>(&mut lines, ctx, SYSTEM_PROMPT);
+    push_live::<ContextBook>(&mut lines, ctx, CONTEXT);
     push_live::<Agents>(&mut lines, ctx, AGENTS);
     push_live::<AppSettings>(&mut lines, ctx, SETTINGS);
     push_live::<TurnControl>(&mut lines, ctx, TURN);
@@ -230,6 +232,13 @@ fn annotate_injectable_services(lines: &mut Vec<String>) {
             &[
                 "register(#{ command, kind, text, title?, send?, description? }) — additive only; cannot replace /agents, /help, /quit, …",
                 "list() — extra commands (not the TUI builtin catalog)",
+            ],
+        ),
+        (
+            CONTEXT,
+            &[
+                "set_base / section / replace_base — prompt fragments; dispose unregisters",
+                "window() / detail(kind) — occupancy snapshot for /context",
             ],
         ),
         (

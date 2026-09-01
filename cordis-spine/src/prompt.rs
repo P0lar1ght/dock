@@ -1,6 +1,7 @@
 use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::names::{PROMPT_ASSEMBLE, SYSTEM_PROMPT};
+use crate::context_book::ContextBook;
+use crate::names::{CONTEXT, PROMPT_ASSEMBLE, SYSTEM_PROMPT};
 
 /// Section slots on the `system-prompt/assemble` waterfall. Each contributor is
 /// its own plugin handler that adds a section at a fixed order, so the assembled
@@ -28,7 +29,16 @@ pub const ORDER_GOAL: i32 = 50;
 pub struct PromptAssembly {
     base: String,
     replace: Option<String>,
+    replace_id: Option<String>,
     sections: Vec<PromptSection>,
+}
+
+/// One rendered slice of an assembled system prompt (`base` or a named section).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptPart {
+    pub id: String,
+    pub order: i32,
+    pub body: String,
 }
 
 #[derive(Clone)]
@@ -43,6 +53,7 @@ impl PromptAssembly {
         Self {
             base: base.into(),
             replace: None,
+            replace_id: None,
             sections: Vec::new(),
         }
     }
@@ -57,6 +68,47 @@ impl PromptAssembly {
     /// *is* the whole prompt. Sections still apply on top of the replacement.
     pub fn replace_base(&mut self, body: impl Into<String>) {
         self.replace = Some(body.into());
+        if self.replace_id.is_none() {
+            self.replace_id = Some("base".into());
+        }
+    }
+
+    /// Like [`replace_base`](Self::replace_base), tagging the head for occupancy.
+    pub fn replace_base_named(&mut self, id: &str, body: impl Into<String>) {
+        self.replace_id = Some(id.to_string());
+        self.replace = Some(body.into());
+    }
+
+    pub fn head_empty(&self) -> bool {
+        self.replace.is_none() && self.base.trim().is_empty()
+    }
+
+    /// Head (base or replacement) plus each section, in render order.
+    pub fn inspect(&self) -> Vec<PromptPart> {
+        let mut parts = Vec::new();
+        if let Some(body) = self.replace.as_ref() {
+            parts.push(PromptPart {
+                id: self.replace_id.clone().unwrap_or_else(|| "base".into()),
+                order: i32::MIN,
+                body: body.clone(),
+            });
+        } else if !self.base.is_empty() {
+            parts.push(PromptPart {
+                id: "base".into(),
+                order: i32::MIN,
+                body: self.base.clone(),
+            });
+        }
+        let mut secs: Vec<&PromptSection> = self.sections.iter().collect();
+        secs.sort_by_key(|s| s.order);
+        for s in secs {
+            parts.push(PromptPart {
+                id: s.id.clone(),
+                order: s.order,
+                body: s.body.clone(),
+            });
+        }
+        parts
     }
 
     /// Whether the base has been replaced. Addon plugins skip their section when
@@ -112,13 +164,25 @@ impl SystemPrompt {
         self.assemble_on(&self.ctx)
     }
 
-    /// Run the `system-prompt/assemble` waterfall and render. This assembler
-    /// owns no prompt content — every fragment (base, persona, roster, plan,
-    /// goal, cordis) is contributed by a plugin's waterfall handler.
+    /// Run the `system-prompt/assemble` waterfall and render. Content comes from
+    /// `"context"` (`ContextBook`); this assembler owns no product copy. Missing
+    /// `"context"` falls back to the fake seed used in tests.
     pub fn assemble_on(&self, exec: &Context) -> String {
-        let seed = PromptAssembly::new(self.text.clone());
-        exec.waterfall(PROMPT_ASSEMBLE, seed.clone(), move || seed)
-            .render()
+        self.assemble_parts_on(exec).render()
+    }
+
+    pub fn assemble_parts_on(&self, exec: &Context) -> PromptAssembly {
+        let mut seed = exec
+            .get::<ContextBook>(CONTEXT)
+            .map(|b| b.assemble_on(exec))
+            .unwrap_or_else(|| PromptAssembly::new(self.text.clone()));
+        if seed.head_empty() && !self.text.is_empty() {
+            seed.set_base(self.text.clone());
+        }
+        exec.waterfall(PROMPT_ASSEMBLE, seed.clone(), {
+            let seed = seed.clone();
+            move || seed
+        })
     }
 }
 
@@ -156,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assemble_offers_goal_when_idle() {
+    async fn assemble_omits_goal_offer_when_idle() {
         let ctx = cordis::Context::new();
         crate::install_without_llm(&ctx).await.unwrap();
         ctx.plugin(crate::tool_goal(), ())
@@ -166,7 +230,7 @@ mod tests {
             .unwrap();
         let system = SystemPrompt::fake(ctx.clone());
         let assembled = system.assemble();
-        assert!(assembled.contains("update_goal(objective"), "{assembled}");
+        assert!(!assembled.contains("update_goal(objective"), "{assembled}");
         assert!(!assembled.contains("已设定目标"), "{assembled}");
     }
 

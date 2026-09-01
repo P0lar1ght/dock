@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    snapshot_context, AppSettings, Goal, Mcp, PermissionMode, PlanMode, GOAL, MCP, PLAN_MODE,
-    SETTINGS,
+    snapshot_context, AppSettings, ContextBook, Goal, Mcp, PermissionMode, PlanMode, CONTEXT, GOAL,
+    MCP, PLAN_MODE, SETTINGS,
 };
 use cordis_tui::{SessionRef, SESSION_PORT};
 
@@ -242,7 +242,11 @@ fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String,
                 .sum()
         })
         .unwrap_or(0);
-    let snap = snapshot_context(gateway.ctx());
+    let snap = gateway
+        .ctx()
+        .get::<ContextBook>(CONTEXT)
+        .map(|b| b.window())
+        .unwrap_or_else(|| snapshot_context(gateway.ctx()));
     let (used, total, pct, trigger) = (
         snap.used,
         snap.total,

@@ -565,7 +565,10 @@ mod tests {
         let ctx = cordis::Context::new();
         let tools = Tools::echo(ctx);
         let _s = tools
-            .register_deferred(spec("scheduler_create", "create a scheduled task"), stub_body())
+            .register_deferred(
+                spec("scheduler_create", "create a scheduled task"),
+                stub_body(),
+            )
             .unwrap();
         let _m = tools
             .register_mcp(spec("mcp_linear__save_issue", "save an issue"), stub_body())

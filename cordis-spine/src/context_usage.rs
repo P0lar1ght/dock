@@ -11,7 +11,7 @@ use crate::compact::{
 };
 use crate::mcp::{is_mcp_public_name, split_mcp_public_name};
 use crate::names::{SESSIONS, SETTINGS, SKILLS, SYSTEM_PROMPT, TOOLS};
-use crate::prompt::SystemPrompt;
+use crate::prompt::{PromptAssembly, SystemPrompt};
 use crate::session::{Sessions, TokenUsage};
 use crate::settings::AppSettings;
 use crate::tools::Tools;
@@ -115,10 +115,11 @@ pub fn snapshot_context(ctx: &Context) -> ContextSnapshot {
 
 /// Itemized breakdown for one occupancy slice (TUI detail pane).
 pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
-    let system = assembled_system(ctx);
+    let parts = assembled_parts(ctx);
+    let system = parts.render();
     let snap = snapshot_with_system(ctx, &system);
     match kind {
-        OccupancyKind::System => system_detail(&system, &snap),
+        OccupancyKind::System => system_detail(&parts, &snap),
         OccupancyKind::Messages => messages_detail(ctx, &snap),
         OccupancyKind::Overhead => overhead_detail(ctx, &snap),
         OccupancyKind::Free => free_detail(&snap),
@@ -130,10 +131,14 @@ pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
     }
 }
 
-fn assembled_system(ctx: &Context) -> String {
+fn assembled_parts(ctx: &Context) -> PromptAssembly {
     ctx.get::<SystemPrompt>(SYSTEM_PROMPT)
-        .map(|p| p.assemble_on(ctx))
+        .map(|p| p.assemble_parts_on(ctx))
         .unwrap_or_default()
+}
+
+fn assembled_system(ctx: &Context) -> String {
+    assembled_parts(ctx).render()
 }
 
 fn snapshot_with_system(ctx: &Context, system: &str) -> ContextSnapshot {
@@ -202,13 +207,23 @@ fn snapshot_with_system(ctx: &Context, system: &str) -> ContextSnapshot {
     }
 }
 
-fn system_detail(text: &str, snap: &ContextSnapshot) -> OccupancyDetail {
+fn system_detail(assembly: &PromptAssembly, snap: &ContextSnapshot) -> OccupancyDetail {
+    let text = assembly.render();
     let chars = text.chars().count() as u64;
     let lines = if text.is_empty() {
         0
     } else {
         text.lines().count() as u64
     };
+    let rows: Vec<DetailRow> = assembly
+        .inspect()
+        .into_iter()
+        .map(|p| DetailRow {
+            label: section_label(&p.id),
+            tokens: Some(estimate_text(&p.body)),
+            note: None,
+        })
+        .collect();
     OccupancyDetail {
         kind: OccupancyKind::System,
         tokens: snap.system_prompt_tokens,
@@ -217,13 +232,27 @@ fn system_detail(text: &str, snap: &ContextSnapshot) -> OccupancyDetail {
                 "{} token · {chars} 字 · {lines} 行",
                 snap.system_prompt_tokens
             ),
-            rows: Vec::new(),
+            rows,
         }],
         text: Some(if text.is_empty() {
             "（空）".into()
         } else {
-            text.to_string()
+            text
         }),
+    }
+}
+
+fn section_label(id: &str) -> String {
+    match id {
+        "base" => "基座".into(),
+        "cordis" => "Cordis".into(),
+        "skills" => "技能".into(),
+        "workflows" => "工作流".into(),
+        "persona" | "persona-replace" => "人设".into(),
+        "roster" => "子代理".into(),
+        "plan" => "计划".into(),
+        "goal" => "目标".into(),
+        other => other.into(),
     }
 }
 
@@ -695,10 +724,7 @@ fn extra_categories(ctx: &Context) -> Vec<ContextCategory> {
         rows.push(ContextCategory {
             label: "本地按需".into(),
             tokens: 0,
-            detail: Some(format!(
-                "{} 个工具 · 未计入窗口",
-                deferred_specs.len()
-            )),
+            detail: Some(format!("{} 个工具 · 未计入窗口", deferred_specs.len())),
         });
     }
     let workflows = crate::workflow::catalog_listing();
@@ -919,12 +945,19 @@ mod tests {
         crate::bundle::install_fakes(&ctx).await.unwrap();
         let d = occupancy_detail(&ctx, OccupancyKind::System);
         assert_eq!(d.kind, OccupancyKind::System);
-        let text = d.text.unwrap_or_default();
+        let text = d.text.clone().unwrap_or_default();
         assert!(
             text.contains("test agent") || text.contains("You are"),
             "text={text}"
         );
         assert!(d.tokens > 0);
+        assert!(
+            d.groups
+                .iter()
+                .flat_map(|g| &g.rows)
+                .any(|r| r.label == "基座"),
+            "{d:?}"
+        );
     }
 
     #[tokio::test]

@@ -14,8 +14,9 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::names::{AGENT_PRESETS, PROMPT_ASSEMBLE};
-use crate::prompt::{PromptAssembly, ORDER_PERSONA, ORDER_ROSTER};
+use crate::context_book::{own_sections, ContextBook};
+use crate::names::{AGENT_PRESETS, CONTEXT};
+use crate::prompt::{ORDER_PERSONA, ORDER_ROSTER};
 use crate::types::ToolSpec;
 
 pub const DEFAULT_PRESET_ID: &str = "code";
@@ -791,36 +792,49 @@ pub fn is_shipped(id: &str) -> bool {
 }
 
 pub fn agent_presets() -> Plugin {
-    plugin("agent-presets", Inject::new(), |ctx, _: &()| {
+    plugin("agent-presets", Inject::from([CONTEXT]), |ctx, _: &()| {
         let user = crate::config::dock_home().join("presets");
         let project = std::env::current_dir()
             .ok()
             .map(|cwd| cwd.join(".dock").join("presets"));
         let provided = ctx.provide(AGENT_PRESETS, AgentPresets::load_layers(user, project))?;
-        // The current preset contributes its persona (or, for a replace_prompt
-        // mode, the whole base) plus the subagent roster to the prompt assembly.
-        let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
-            let ctx = ctx.clone();
-            move |assembly: PromptAssembly, args| {
-                let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
-                if let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) {
+        let book = ctx.require::<ContextBook>(CONTEXT)?;
+        own_sections(
+            ctx,
+            vec![
+                book.replace_base("persona-replace", |exec| {
+                    let presets = exec.get::<AgentPresets>(AGENT_PRESETS)?;
+                    if !presets.replaces_prompt() {
+                        return None;
+                    }
                     let mut persona = String::new();
                     presets.merge_persona(&mut persona);
-                    if !persona.is_empty() {
-                        if presets.replaces_prompt() {
-                            a.replace_base(persona);
-                        } else {
-                            let body = persona.strip_prefix("\n\n").unwrap_or(&persona);
-                            a.section(ORDER_PERSONA, "persona", body);
-                        }
+                    if persona.trim().is_empty() {
+                        None
+                    } else {
+                        Some(persona)
                     }
-                    if let Some(roster) = presets.subagent_roster_addon() {
-                        a.section(ORDER_ROSTER, "roster", roster);
+                })?,
+                book.section(ORDER_PERSONA, "persona", |exec| {
+                    let presets = exec.get::<AgentPresets>(AGENT_PRESETS)?;
+                    let mut persona = String::new();
+                    presets.merge_persona(&mut persona);
+                    if presets.replaces_prompt() {
+                        return None;
                     }
-                }
-                a
-            }
-        });
+                    let body = persona.strip_prefix("\n\n").unwrap_or(&persona);
+                    if body.trim().is_empty() {
+                        None
+                    } else {
+                        Some(body.to_string())
+                    }
+                })?,
+                book.section_always(ORDER_ROSTER, "roster", |exec| {
+                    exec.get::<AgentPresets>(AGENT_PRESETS)
+                        .and_then(|p| p.subagent_roster_addon())
+                })?,
+            ],
+        )?;
         Ok(Some(provided))
     })
 }

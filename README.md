@@ -99,7 +99,7 @@ flowchart TB
 
     grains["工具粒 → register 进 tools<br/>web · todo · plan-mode · ask-user · jobs · scheduler<br/>task · subagent · memory · monitor · goal<br/>lsp · workflow · mcp-client · cordis"]
 
-    svc["Harness 服务（named service · live-lookup）<br/>settings · turn · permissions · cron · jobs · todos<br/>planMode · ask · mcp · goal · lsp · subagents · memory<br/>workflows · slash · agentPresets · compact<br/>tui.slots · dynamicCordisRunner"]
+    svc["Harness 服务（named service · live-lookup）<br/>context · settings · turn · permissions · cron · jobs · todos<br/>planMode · ask · mcp · goal · lsp · subagents · memory<br/>workflows · slash · agentPresets · compact<br/>tui.slots · dynamicCordisRunner"]
   end
 
   person --> term --> tui
@@ -163,7 +163,7 @@ flowchart LR
 
 `llm/stream` 是这一轮的枢纽：出工具调用就过 `tools/execute`（权限 / 计划门在这里挡）再回来，出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
 
-`system-prompt/assemble` 的载荷是 `PromptAssembly`（`cordis-spine`）：一段 base + 若干带 order 的命名分段。assembler 服务自己不含任何提示词——每段都是**贡献它的插件**的 `on_waterfall` handler：`system-prompt.base` 设 base，`agent-presets` 加 persona + 子代理名册（`replace_prompt` 模式则整份替换 base），`plan-mode` 加计划提醒，`tool-goal` 加目标指令/邀约，`tool-cordis` 加动态插件说明。handler 调 `args.next()` 拿到累积体再 `section(order, id, body)`；`render()` 按 order 排序拼接，所以最终提示词与插件挂载顺序无关。加/改一段提示词就是加/换一颗插件，不动 assembler。
+`system-prompt/assemble` 的载荷是 `PromptAssembly`。贡献插件 `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（对标 `"tools".register`，fiber dispose 注销）。`systemPrompt` 只做 facade：live-lookup `"context"` 求值，再跑 waterfall 供拦截。基座（`system-prompt.base`）只写身份与按需发现，不列工具名；persona/roster 来自 `agent-presets`，listing 来自 `skills` / `tool-workflow`，计划态来自 `plan-mode`，活跃目标来自 `tool-goal`，Cordis 只留短指针。`/context` 与顶栏 live-lookup `ContextBook.window()`，系统提示按段看 token。加/改一段提示词就是在贡献插件里登记，不动 assembler。
 
 ---
 

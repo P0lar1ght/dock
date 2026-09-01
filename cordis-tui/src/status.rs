@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    snapshot_context, ContextSnapshot, LlmOutput, LogEvent, Sessions, TokenUsage, SESSIONS,
+    snapshot_context, ContextBook, ContextSnapshot, LlmOutput, LogEvent, Sessions, TokenUsage,
+    CONTEXT, SESSIONS,
 };
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
@@ -103,7 +104,11 @@ impl StatusLine {
                 return cached.snap.clone();
             }
         }
-        let snap = snapshot_context(&self.ctx);
+        let snap = self
+            .ctx
+            .get::<ContextBook>(CONTEXT)
+            .map(|b| b.window())
+            .unwrap_or_else(|| snapshot_context(&self.ctx));
         *memo = Some(SnapMemo {
             rev,
             usage,

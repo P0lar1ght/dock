@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::agent_presets::AgentPresets;
-use crate::names::{AGENT_PRESETS, GOAL, PROMPT_ASSEMBLE, TOOLS};
-use crate::prompt::{PromptAssembly, ORDER_GOAL};
+use crate::context_book::{own_sections, ContextBook};
+use crate::names::{CONTEXT, GOAL, TOOLS};
+use crate::prompt::ORDER_GOAL;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
@@ -84,50 +84,44 @@ impl Goal {
 }
 
 pub fn tool_goal() -> Plugin {
-    plugin("tool-goal", Inject::from([TOOLS]), |ctx, _: &()| {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = Arc::new(GoalState::new());
-        {
-            let state = state.clone();
-            tokio::spawn(drain::drain_loop(state, rx));
-        }
-        ctx.provide(
-            GOAL,
-            Goal {
-                state,
-                handle: GoalUpdateHandle(tx),
-            },
-        )?;
-        // Goal contributes its instruction (active) or offer (idle) to the
-        // prompt assembly.
-        let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
-            let ctx = ctx.clone();
-            move |assembly: PromptAssembly, args| {
-                let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
-                let replace = ctx
-                    .get::<AgentPresets>(AGENT_PRESETS)
-                    .is_some_and(|p| p.replaces_prompt());
-                if !replace {
-                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
-                        if goal.active() {
-                            a.section(ORDER_GOAL, "goal", goal_instruction(&goal.title()));
-                        } else if !goal.present() {
-                            a.section(ORDER_GOAL, "goal", goal_offer_addon());
-                        }
-                    }
-                }
-                a
+    plugin(
+        "tool-goal",
+        Inject::from([TOOLS, CONTEXT]),
+        |ctx, _: &()| {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let state = Arc::new(GoalState::new());
+            {
+                let state = state.clone();
+                tokio::spawn(drain::drain_loop(state, rx));
             }
-        });
-        let tools = ctx.require::<Tools>(TOOLS)?;
-        let body: ToolBody = {
-            let ctx = ctx.clone();
-            std::sync::Arc::new(move |call| {
+            ctx.provide(
+                GOAL,
+                Goal {
+                    state,
+                    handle: GoalUpdateHandle(tx),
+                },
+            )?;
+            let book = ctx.require::<ContextBook>(CONTEXT)?;
+            own_sections(
+                ctx,
+                vec![book.section(ORDER_GOAL, "goal", |exec| {
+                    let goal = exec.get::<Goal>(GOAL)?;
+                    if goal.active() {
+                        Some(goal_instruction(&goal.title()))
+                    } else {
+                        None
+                    }
+                })?],
+            )?;
+            let tools = ctx.require::<Tools>(TOOLS)?;
+            let body: ToolBody = {
                 let ctx = ctx.clone();
-                Box::pin(async move { run_update_goal(&ctx, call).await })
-            })
-        };
-        own_registered(
+                std::sync::Arc::new(move |call| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move { run_update_goal(&ctx, call).await })
+                })
+            };
+            own_registered(
             ctx,
             vec![tools.register_deferred(
                 ToolSpec {
@@ -138,8 +132,9 @@ pub fn tool_goal() -> Plugin {
                 body,
             )?],
         )?;
-        Ok(None)
-    })
+            Ok(None)
+        },
+    )
 }
 
 /// Copied from Grok `UpdateGoalTool::run` (handle → oneshot ack → render).

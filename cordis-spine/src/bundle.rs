@@ -4,6 +4,7 @@ use crate::agent_presets::agent_presets;
 use crate::agents::agents;
 use crate::ask_user::tool_ask_user;
 use crate::compact::compact;
+use crate::context_book::context;
 use crate::cron::cron;
 use crate::dynamic_runner::{dynamic_runner, DynamicRunner};
 use crate::goal::tool_goal;
@@ -32,10 +33,11 @@ use crate::turn::turn;
 use crate::web_fetch::tool_web;
 use crate::workflow::tool_workflow;
 
-/// Sessions / systemPrompt / agents. No `llm` or `tools` — the harness mounts those.
+/// Sessions / context / systemPrompt / agents. No `llm` or `tools` — the harness mounts those.
 pub async fn install_core(ctx: &Context) -> Result<()> {
     let fibers = [
         ctx.plugin(sessions(), ())?,
+        ctx.plugin(context(), ())?,
         ctx.plugin(system_prompt(), ())?,
         ctx.plugin(agents(), ())?,
     ];

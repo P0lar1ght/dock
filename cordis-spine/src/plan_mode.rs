@@ -13,9 +13,9 @@ use std::sync::Mutex;
 use cordis::{plugin, Context, Inject, Plugin};
 use tokio::sync::oneshot;
 
-use crate::agent_presets::AgentPresets;
-use crate::names::{AGENT_PRESETS, PLAN_EVENT, PLAN_MODE, PROMPT_ASSEMBLE, TOOLS};
-use crate::prompt::{PromptAssembly, ORDER_PLAN};
+use crate::context_book::{own_sections, ContextBook};
+use crate::names::{CONTEXT, PLAN_EVENT, PLAN_MODE, TOOLS};
+use crate::prompt::ORDER_PLAN;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
@@ -245,43 +245,40 @@ fn path_targets_plan_file(path: &str) -> bool {
 }
 
 pub fn plan_mode() -> Plugin {
-    plugin("plan-mode", Inject::from([TOOLS]), |ctx, _: &()| {
-        ctx.provide(PLAN_MODE, PlanMode::new(ctx.clone()))?;
-        // Plan mode contributes the read-only reminder to the prompt assembly.
-        let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
-            let ctx = ctx.clone();
-            move |assembly: PromptAssembly, args| {
-                let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
-                let replace = ctx
-                    .get::<AgentPresets>(AGENT_PRESETS)
-                    .is_some_and(|p| p.replaces_prompt());
-                if !replace {
-                    if let Some(plan) = ctx.get::<PlanMode>(PLAN_MODE) {
-                        plan.promote_pending();
-                        if plan.gated() {
-                            a.section(ORDER_PLAN, "plan", plan_system_addon());
-                        }
+    plugin(
+        "plan-mode",
+        Inject::from([TOOLS, CONTEXT]),
+        |ctx, _: &()| {
+            ctx.provide(PLAN_MODE, PlanMode::new(ctx.clone()))?;
+            let book = ctx.require::<ContextBook>(CONTEXT)?;
+            own_sections(
+                ctx,
+                vec![book.section(ORDER_PLAN, "plan", |exec| {
+                    let plan = exec.get::<PlanMode>(PLAN_MODE)?;
+                    plan.promote_pending();
+                    if plan.gated() {
+                        Some(plan_system_addon().to_string())
+                    } else {
+                        None
                     }
-                }
-                a
-            }
-        });
-        let tools = ctx.require::<Tools>(TOOLS)?;
-        let enter: ToolBody = {
-            let ctx = ctx.clone();
-            std::sync::Arc::new(move |call| {
+                })?],
+            )?;
+            let tools = ctx.require::<Tools>(TOOLS)?;
+            let enter: ToolBody = {
                 let ctx = ctx.clone();
-                Box::pin(async move { enter_plan(&ctx, call) })
-            })
-        };
-        let exit: ToolBody = {
-            let ctx = ctx.clone();
-            std::sync::Arc::new(move |call| {
+                std::sync::Arc::new(move |call| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move { enter_plan(&ctx, call) })
+                })
+            };
+            let exit: ToolBody = {
                 let ctx = ctx.clone();
-                Box::pin(async move { exit_plan(&ctx, call).await })
-            })
-        };
-        own_registered(
+                std::sync::Arc::new(move |call| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move { exit_plan(&ctx, call).await })
+                })
+            };
+            own_registered(
                 ctx,
                 vec![
                     tools.register(
@@ -302,8 +299,9 @@ pub fn plan_mode() -> Plugin {
                     )?,
                 ],
             )?;
-        Ok(None)
-    })
+            Ok(None)
+        },
+    )
 }
 
 fn plan_path() -> PathBuf {
