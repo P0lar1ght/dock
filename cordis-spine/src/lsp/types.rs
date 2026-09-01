@@ -107,16 +107,31 @@ impl std::fmt::Display for LspOperation {
 pub struct LspToolInput {
     #[schemars(description = "The LSP operation to perform.")]
     pub operation: LspOperation,
-    #[schemars(description = "Absolute path to the file.")]
+    #[schemars(description = "Path to the file. Absolute, or relative to cwd.")]
     #[serde(default)]
     pub file_path: Option<String>,
     #[schemars(description = "0-indexed line number.")]
     #[serde(default)]
     pub line: Option<u32>,
-    #[schemars(description = "0-indexed column number.")]
-    #[serde(default)]
+    #[schemars(description = "0-indexed UTF-16 column.")]
+    #[serde(default, alias = "column")]
     pub character: Option<u32>,
     #[schemars(description = "Symbol name or partial name (workspaceSymbol only).")]
     #[serde(default)]
     pub query: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LspOperation, LspToolInput};
+
+    #[test]
+    fn column_alias_and_camel_case_operation() {
+        let v: LspToolInput =
+            serde_json::from_str(r#"{"operation":"hover","file_path":"a.rs","line":1,"column":2}"#)
+                .unwrap();
+        assert!(matches!(v.operation, LspOperation::Hover));
+        assert_eq!(v.character, Some(2));
+        assert_eq!(v.line, Some(1));
+    }
 }

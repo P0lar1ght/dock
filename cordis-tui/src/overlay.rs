@@ -494,7 +494,7 @@ const HELP: &[HelpEntry] = &[
     }),
     HelpEntry::Row(HelpRow {
         key: "/pair",
-        label: "浏览器配对与已绑来源",
+        label: "浏览器配对（开启回环网关）",
         kind: HelpKind::Slash(SlashCmd::Pair),
     }),
     HelpEntry::Row(HelpRow {
@@ -581,6 +581,11 @@ const HELP: &[HelpEntry] = &[
         key: "/mcps",
         label: "MCP 服务器（Space 开关 · i 登录 · Enter 展开）",
         kind: HelpKind::Slash(SlashCmd::Mcps),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/lsp",
+        label: "探测并写入语言服务器（Tab 补全 status / setup / user）",
+        kind: HelpKind::Slash(SlashCmd::Lsp),
     }),
     HelpEntry::Row(HelpRow {
         key: "/cordis",
@@ -786,6 +791,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.key == "/tasks"));
         assert!(rows.iter().any(|r| r.key == "/workflow"));
         assert!(rows.iter().any(|r| r.key == "/mcps"));
+        assert!(rows.iter().any(|r| r.key == "/lsp"));
         assert!(rows.iter().any(|r| r.key == "/preset"));
         assert!(rows.iter().any(|r| r.key == "/usage"));
         assert!(rows.iter().any(|r| r.key == "/context"));

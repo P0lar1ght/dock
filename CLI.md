@@ -12,7 +12,7 @@
 
 浏览器 `embed-sdk` **不要**为每个斜杠单独适配。Gateway 暴露 `slash/list`（补全目录：TUI `slash_catalog()` + `"slash"` 追加 + 浏览器 `/screenshot*`）和 `slash/execute`（接到 spine / session.port）。JS 只做前缀过滤、截图采集、以及把 `{ kind: filled|notice|menu|capture|submitted|applied }` 画出来。TUI overlay 类命令（`/pair` `/theme` `/preset` `/settings` …）和 **`/cd`** execute 会回 Notice「请在 Dock 终端使用」——list 标 `terminal` 的名字不会改进程状态（`/settings timestamps` 也不会）。`/timestamps` `/think` `/model` `/effort` 仍可从浏览器直接改。未知 `/foo` 为 `passthrough`，当作普通 prompt 发给模型。`slash/execute` 的 `threadId` 只能是 `live` 或省略。
 
-下拉打开时 Enter / Tab 只把 `/命令 ` 放进输入框，不执行。名字后面有空格后下拉关闭，再 Enter 才解析（有参数就带上）。
+下拉打开时 Tab 把当前高亮项填进输入框（命令名阶段填 `/命令 `，参数阶段填 `/命令 参数 `）。Enter 只在**命令名**阶段填入；空格之后（参数下拉仍开着）Enter 发送并解析。无参数命令在名字后空格关闭下拉。有参数目录的命令（`/lsp` `/theme` `/model` `/effort` `/loop` `/settings`）空格后继续列出参数：`/lsp s` 可 Tab 到 `status` / `setup`，再 Enter 执行。
 
 | 命令 | 行为 |
 |---|---|
@@ -20,7 +20,7 @@
 | `/new` | 归档当前会话并清空。账本用量一并清零 |
 | `/model` `/m` | 切换当前模型 |
 | `/resume` | 恢复上次会话。用量账本不随归档恢复（Grok：新进程 resume 清零） |
-| `/pair`（`pairing`） | 浏览器 Origin 配对管理：待批请求可批准，已绑来源可撤销。首次连接时也会弹出「允许浏览器连接？」overlay（和权限 overlay 同款打断）。Gateway 默认 `127.0.0.1:18991`，并尝试同端口 `[::1]`。`[::1]` 绑失败会打 stderr，并写在 `/pair` 标题栏与 `initialize.connection.companion`（不能静默）。浏览器轮询配对状态，**批准后** `POST /v1/pairing/exchanges` 才拿 ticket（校验 TTL，一次性；poll **不**回明文）。CORS 反射任意 Origin：恶意页能打到本机 API，但没有该 Origin 的 TUI 批准就拿不到 ticket |
+| `/pair`（`pairing`） | 浏览器 Origin 配对：第一行开启/关闭回环网关（默认不监听；首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。开启后待批请求可批准，已绑来源可撤销。overlay 显示实际监听地址。首次连接弹出「允许浏览器连接？」；Enter 批准 / `x` 拒绝或撤销（在网关行上 `x` 关闭监听）。浏览器 companion 的 list/execute 限制见上文。CORS 反射任意 Origin：鉴权靠配对 + 回环。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费 |
 | `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
 | `/plan [说明]` | 开计划模式；无说明只切模式（Pending，发第一条 prompt 后变 Active）。有说明则 Active 并提交 |
 | `/view-plan`（`show-plan` `plan-view`） | 查看 `.dock/plan.md`（打开时读一次，pretty markdown）；若 `exit_plan_mode` 正在等待批准则打开审批 chrome（`a` 批准 / `s` 修改 / `q` 放弃） |
@@ -30,6 +30,7 @@
 | `/tasks` | Grok 分组 pane：Workflows → Subagents → Tasks → Watchers。子代理行显示当前模式名册的角色名（如守望下的「岑」而不是 `Cen`）。Enter / 点击子代理或后台任务打开 **Grok 同款全屏边框**（子代理：工具卡折叠循环 + 框底输入 `send_message`）。Esc 从全屏回到本列表。子代理第一轮结束后显示 **idle**（不是 done）；idle 不算 running。Watchers 里的 loop：`x` 或点 `[✗]` 关闭（`scheduler_delete` / `cron.cancel`） |
 | `/workflow` / `/workflow runs` | Grok `Workflow Runs` overlay |
 | `/mcps` | Grok 分组 pane：标题「MCP 服务器」、分组「本地 (N)」、徽章 `[就绪]` / `[需认证]` / `[不可用]` / `[已禁用]`、右侧 `(本地)`。Space 开关当前服务器或工具（写入 `config.toml`：`[mcp_servers.<name>].enabled` 与 `[disabled_mcp_tools.<server>]`）；`i` 对 HTTP 服务器打开浏览器 OAuth（PKCE，token 写 `~/.dock/mcp_credentials.json`，不是 grok.com 登录）；Enter 展开/收起工具（`N 个工具` / `N 个工具（M 个已启用）`）；Esc 关闭。stdio 或 Streamable HTTP。工具表跟 `tools/list` 翻页和 `tools/list_changed`；HTTP 跟 GET SSE，session 404 会重新握手 |
+| `/lsp` | 探测 PATH 上的 `rust-analyzer` / `typescript-language-server` / `gopls` / `pyright-langserver`，按工作区标记（含子目录，跳过 `node_modules` / `target`）把缺的服务器写入 `.dock/lsp.json`，不覆盖已有条目。Notice 显示保留 / 添加 / 跳过。当前会话会尝试启动新服务器。空命令或 `/lsp setup` 写项目配置；`/lsp status` 只看不写；`/lsp user` 把 PATH 上有的默认服务器写入 `~/.dock/lsp.json`（不要求工作区标记）。输入 `/lsp ` 后 Tab / Enter 补全 `status` / `setup` / `user`（`/lsp s` 可滤到 status）。浏览器 companion 拒绝（请在 Dock 终端用） |
 | `/cordis`（`plugins`） | Notice「Cordis 插件」：磁盘永久层（项目 `.dock/plugins/<id>/` 覆盖用户 `~/.dock/plugins/<id>/`）和本会话内存插件。Esc 关闭。写成永久用模型工具 `cordis_promote` |
 | `/preset`（`presets` `agent` `agents`） | 打开 Agent 预设名册。定义全是 YAML 目录：内置 < `~/.dock/presets/<id>/agent.yml` < 项目 `.dock/presets/<id>/agent.yml`（后写覆盖；仍可读旧 `<id>.yml`）。**加一个目录就是一个 Agent**，不必改代码。子代理写在 `agents/<type>.yml`（人设 + 工具允许名单）。**`n` 新建 / `d` 复制默认写当前工作区** `.dock/presets/<id>/`（有项目层时 origin 为项目）；改内置模式仍写 `~/.dock/presets/` 覆盖。新建人设默认写 `.dock/presets/<当前模式>/agents/`。系统提示注入这两处的绝对路径（空名册也会注入）；只有用户明确要求保存到全局才写 `~/.dock/presets/`。省略 `tools` = 当前已注册全部工具；`[]` = 空；列表 = 允许名单（Dock 工具名）。`replace_prompt: true` 时 `persona` 整份替换系统提示。手写 `agents/<type>.yml` 后，`subagent` 校验、`/preset` 和下一采样步系统提示都会重读；本轮要立刻出现在 enum 里时用 `subagent`（`reload_roster: true`），不必新开会话。新建模式写完后用 `/preset` 应用该 id（`reload_roster` 不切模式）。名册列出子代理 id；`n` 新建、`d` 复制、`a` 应用、`x` 删除（内置不能删；删覆盖则恢复内置） |
 | `/history` | 搜索提示词历史 |
@@ -80,7 +81,7 @@ order: 10
 |---|---|
 | `g`（输入框空、有目标、且当前没在生成） | 打开/关闭目标 overlay，可改标题、暂停、清除 |
 | 提问 overlay | 听 `ask/pending`，和权限 overlay 同款 |
-| 浏览器配对 overlay | 听 `gateway/pairing`。首次 Origin 请求弹出「允许浏览器连接？」；`/pair` 列出待批与已绑来源（Enter 批准 / `x` 拒绝或撤销） |
+| 浏览器配对 overlay | 听 `gateway/pairing`。`/pair` 第一行开启或关闭监听；首次 Origin 请求弹出「允许浏览器连接？」；下列待批与已绑来源（Enter 批准 / `x` 拒绝或撤销） |
 | MCP elicitation | 听 `mcp/elicit`。权限 / 提问 overlay 会抢前台（队列仍在）。表单逐步填：选项带「其他」、自由输入空内容闪「请输入具体内容」。URL 模式 Enter 开浏览器，等 `notifications/elicitation/complete` 或 Esc 取消 |
 | 动态插槽 `Overlay::Slot` | `"tui.slots"` 登记的纯文本 pane（复用 Notice 布局）。Esc 关闭；↑/↓ 滚动并把规范化键名转给 `on_key`（`esc` / `enter` / `up` / `down` / `char:x`）。脚本 `open_slot` 或 slash `kind: slot` 打开 |
 | `/cordis` | Notice：永久（磁盘）与会话（内存）插件一览 |

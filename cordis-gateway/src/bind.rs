@@ -1,10 +1,13 @@
 //! Bind only loopback: `127.0.0.0/8` and `::1`. Never `0.0.0.0` / `::`.
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 
 use cordis_tui::CompanionStatus;
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:18991";
+/// How many consecutive ports to try after `EADDRINUSE` (requested port included).
+pub const PORT_SEARCH: u16 = 32;
 
 pub fn parse_bind(raw: &str) -> Result<SocketAddr, String> {
     let addr: SocketAddr = raw
@@ -17,19 +20,41 @@ pub fn parse_bind(raw: &str) -> Result<SocketAddr, String> {
     }
 }
 
-pub fn listen(raw: &str) -> Result<(TcpListener, SocketAddr), String> {
-    let addr = parse_bind(raw)?;
-    let listener = TcpListener::bind(addr).map_err(|e| format!("bind {addr}: {e}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("set nonblocking: {e}"))?;
-    let local = listener
-        .local_addr()
-        .map_err(|e| format!("local_addr: {e}"))?;
+fn bind_loopback(addr: SocketAddr) -> io::Result<(TcpListener, SocketAddr)> {
+    let listener = TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    let local = listener.local_addr()?;
     if !local.ip().is_loopback() {
-        return Err("gateway refused a non-loopback bind".into());
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "gateway refused a non-loopback bind",
+        ));
     }
     Ok((listener, local))
+}
+
+/// Bind `raw`. Port `0` is OS-assigned. Any other port walks up on `EADDRINUSE`.
+pub fn listen(raw: &str) -> Result<(TcpListener, SocketAddr), String> {
+    let addr = parse_bind(raw)?;
+    if addr.port() == 0 {
+        return bind_loopback(addr).map_err(|e| format!("bind {addr}: {e}"));
+    }
+    let mut last_in_use = None;
+    for offset in 0..PORT_SEARCH {
+        let Some(port) = addr.port().checked_add(offset) else {
+            break;
+        };
+        let candidate = SocketAddr::new(addr.ip(), port);
+        match bind_loopback(candidate) {
+            Ok(ok) => return Ok(ok),
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => last_in_use = Some((candidate, e)),
+            Err(e) => return Err(format!("bind {candidate}: {e}")),
+        }
+    }
+    match last_in_use {
+        Some((tried, e)) => Err(format!("bind {tried}: {e}")),
+        None => Err(format!("bind {addr}: no free loopback port")),
+    }
 }
 
 pub struct CompanionListener {
@@ -111,6 +136,7 @@ mod tests {
             CompanionStatus::Failed { addr, error } => {
                 panic!("companion {addr} failed (IPv6/localhost must bind in tests): {error}");
             }
+            CompanionStatus::Stopped => panic!("companion should be bound in this test"),
         }
     }
 
@@ -132,6 +158,16 @@ mod tests {
             CompanionStatus::Listening(v6) => {
                 panic!("companion silently bound {v6} while [::1]:{port} is held");
             }
+            CompanionStatus::Stopped => panic!("companion should report failure, not stopped"),
         }
+    }
+
+    #[test]
+    fn listen_walks_to_the_next_free_port() {
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = held.local_addr().unwrap();
+        let (_got, actual) = listen(&busy.to_string()).unwrap();
+        assert_eq!(actual.ip(), busy.ip());
+        assert_ne!(actual.port(), busy.port(), "should skip the held port");
     }
 }

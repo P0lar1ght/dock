@@ -189,6 +189,10 @@ fn rpc_error_frame(id: Option<Value>, err: RpcError) -> String {
 
 fn companion_json(status: &cordis_tui::CompanionStatus) -> Value {
     match status {
+        cordis_tui::CompanionStatus::Stopped => json!({
+            "status": "stopped",
+            "listening": false
+        }),
         cordis_tui::CompanionStatus::Listening(addr) => json!({
             "status": "listening",
             "address": addr.to_string()

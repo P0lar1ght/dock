@@ -1,19 +1,29 @@
 use cordis::{plugin, Disposable, Inject, Plugin};
 use cordis_spine::{ASK, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TURN};
-use cordis_tui::{CompanionStatus, GATEWAY, SESSION_PORT};
+use cordis_tui::{GATEWAY, SESSION_PORT};
 
 use crate::bind;
 use crate::handle::GatewayHandle;
-use crate::http;
 
 pub const DEFAULT_BIND: &str = bind::DEFAULT_BIND;
 
+/// Mount `"gateway"` without binding a port. TUI `/pair` calls `start_listen`.
 pub fn gateway() -> Plugin {
     let bind = std::env::var("DOCK_GATEWAY_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
-    gateway_bind(bind)
+    gateway_idle(bind)
 }
 
+/// Mount without listening. `DOCK_GATEWAY_BIND` is only the preferred address.
+pub fn gateway_idle(bind_addr: impl Into<String>) -> Plugin {
+    mount(bind_addr, false)
+}
+
+/// Bind immediately (integration tests).
 pub fn gateway_bind(bind_addr: impl Into<String>) -> Plugin {
+    mount(bind_addr, true)
+}
+
+fn mount(bind_addr: impl Into<String>, auto_listen: bool) -> Plugin {
     let bind_addr = bind_addr.into();
     plugin(
         "gateway",
@@ -28,47 +38,22 @@ pub fn gateway_bind(bind_addr: impl Into<String>) -> Plugin {
             SETTINGS,
         ]),
         move |ctx, _: &()| {
-            let (listener, local_addr) =
-                bind::listen(&bind_addr).map_err(|e| cordis::Error::message(e))?;
-            let companion = bind::companion_listener(local_addr);
-            if let CompanionStatus::Failed { addr, error } = &companion.status {
-                eprintln!(
-                    "dock gateway: 未能监听 {addr}（{error}）。本机 IPv6 / localhost 可能连不上。"
-                );
-            }
-            let handle = GatewayHandle::new(ctx.clone(), local_addr, companion.status.clone());
+            let preferred = bind::parse_bind(&bind_addr).map_err(cordis::Error::message)?;
+            let handle = GatewayHandle::idle(ctx.clone(), preferred);
             handle.reset_transcript();
-            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-            let app = http::router(handle.clone());
-            spawn_http(listener, app.clone(), shutdown_rx.clone());
-            if let Some(v6) = companion.listener {
-                spawn_http(v6, app, shutdown_rx);
+            if auto_listen {
+                handle
+                    .start_listen()
+                    .map_err(|e| cordis::Error::message(e.to_string()))?;
             }
+            let h = handle.clone();
             ctx.effect("gateway-http", move |scope| {
                 scope.own(Disposable::from_fn(move || {
-                    let _ = shutdown_tx.send(true);
+                    let _ = h.stop_listen();
                 }));
                 Ok(())
             })?;
             Ok(Some(ctx.provide(GATEWAY, handle.as_ref_service())?))
         },
     )
-}
-
-fn spawn_http(
-    listener: std::net::TcpListener,
-    app: axum::Router,
-    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
-) {
-    tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::from_std(listener) {
-            Ok(l) => l,
-            Err(_) => return,
-        };
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.wait_for(|stop| *stop).await;
-            })
-            .await;
-    });
 }

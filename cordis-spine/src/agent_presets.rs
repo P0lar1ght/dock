@@ -14,7 +14,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::names::AGENT_PRESETS;
+use crate::names::{AGENT_PRESETS, PROMPT_ASSEMBLE};
+use crate::prompt::{PromptAssembly, ORDER_PERSONA, ORDER_ROSTER};
 use crate::types::ToolSpec;
 
 pub const DEFAULT_PRESET_ID: &str = "code";
@@ -569,6 +570,18 @@ impl AgentPresets {
         }
     }
 
+    /// Roster block body (no leading blank line) for the prompt assembly, or
+    /// `None` when this isolate injects none (child overlay / broken / empty
+    /// result). Wraps [`Self::merge_subagent_roster`] so the two never drift.
+    pub fn subagent_roster_addon(&self) -> Option<String> {
+        let mut s = String::new();
+        self.merge_subagent_roster(&mut s);
+        match s.strip_prefix("\n\n") {
+            Some(body) if !body.is_empty() => Some(body.to_string()),
+            _ => None,
+        }
+    }
+
     pub fn current_roster(&self) -> IndexMap<String, SubagentDef> {
         self.resync();
         self.current().agents
@@ -675,9 +688,7 @@ impl AgentPresets {
     fn new_role_write_hint(&self) -> String {
         let dir = self.workspace_agents_dir();
         let id = self.current_id();
-        format!(
-            "新建人设必须写到当前工作区这个绝对路径（当前模式 {id}），不要猜测目录：{dir}/<type>.yml。目录不存在就创建。不要写 ~/.dock/presets/，除非用户明确要求保存到全局。"
-        )
+        format!("新建人设写到当前工作区绝对路径（当前模式 {id}，不要猜测）：{dir}/<type>.yml。")
     }
 
     /// Re-read `agents/` and list callable `subagent_type` ids.
@@ -786,6 +797,30 @@ pub fn agent_presets() -> Plugin {
             .ok()
             .map(|cwd| cwd.join(".dock").join("presets"));
         let provided = ctx.provide(AGENT_PRESETS, AgentPresets::load_layers(user, project))?;
+        // The current preset contributes its persona (or, for a replace_prompt
+        // mode, the whole base) plus the subagent roster to the prompt assembly.
+        let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
+            let ctx = ctx.clone();
+            move |assembly: PromptAssembly, args| {
+                let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
+                if let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) {
+                    let mut persona = String::new();
+                    presets.merge_persona(&mut persona);
+                    if !persona.is_empty() {
+                        if presets.replaces_prompt() {
+                            a.replace_base(persona);
+                        } else {
+                            let body = persona.strip_prefix("\n\n").unwrap_or(&persona);
+                            a.section(ORDER_PERSONA, "persona", body);
+                        }
+                    }
+                    if let Some(roster) = presets.subagent_roster_addon() {
+                        a.section(ORDER_ROSTER, "roster", roster);
+                    }
+                }
+                a
+            }
+        });
         Ok(Some(provided))
     })
 }

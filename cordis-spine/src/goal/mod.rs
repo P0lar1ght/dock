@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::names::{GOAL, TOOLS};
+use crate::agent_presets::AgentPresets;
+use crate::names::{AGENT_PRESETS, GOAL, PROMPT_ASSEMBLE, TOOLS};
+use crate::prompt::{PromptAssembly, ORDER_GOAL};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
@@ -96,6 +98,27 @@ pub fn tool_goal() -> Plugin {
                 handle: GoalUpdateHandle(tx),
             },
         )?;
+        // Goal contributes its instruction (active) or offer (idle) to the
+        // prompt assembly.
+        let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
+            let ctx = ctx.clone();
+            move |assembly: PromptAssembly, args| {
+                let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
+                let replace = ctx
+                    .get::<AgentPresets>(AGENT_PRESETS)
+                    .is_some_and(|p| p.replaces_prompt());
+                if !replace {
+                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
+                        if goal.active() {
+                            a.section(ORDER_GOAL, "goal", goal_instruction(&goal.title()));
+                        } else if !goal.present() {
+                            a.section(ORDER_GOAL, "goal", goal_offer_addon());
+                        }
+                    }
+                }
+                a
+            }
+        });
         let tools = ctx.require::<Tools>(TOOLS)?;
         let body: ToolBody = {
             let ctx = ctx.clone();

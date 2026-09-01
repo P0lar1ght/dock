@@ -31,6 +31,7 @@ pub const RESERVED_SLASH: &[&str] = &[
     "tasks",
     "workflow",
     "mcps",
+    "lsp",
     "cordis",
     "plugins",
     "preset",

@@ -66,7 +66,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 ### 🌐 浏览器 companion
 
-- Gateway 只绑 loopback（默认 `127.0.0.1:18991`，同端口再试 `[::1]`）
+- Gateway **默认挂插件但不监听**。TUI `/pair` 开启/关闭回环端口；首选 `127.0.0.1:18991`，占用则换下一个，同端口再试 `[::1]`
 - 鉴权靠 TUI `/pair` + 一次性 ticket，不是 Origin 白名单
 - 斜杠走 Gateway；SDK 只解析、截图、把 `{ kind }` 画出来
 - `/view-plan` `/help` 等 notice 用命令输出卡片，不当错误粉字
@@ -75,7 +75,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 ## 架构概览
 
-Dock 的 harness 就是一棵 Cordis 插件树。内核是 crate `cordis`（`Context`、`inject`、named service、waterfall、fiber 生命周期）——**没有可私自打补丁的内核**，新行为只能再挂插件。`cordis-app` 起**一个** `Context`，分两步长出整棵树：`install_app` 先挂 Spine 五件套 + Harness 服务 + 工具粒（尾部是 `llm`，再 `compact`），`main` 再补上 `agent-loop`、`session_actor`、`gateway`、1s cron tick、`tui`，并用 `system-prompt/assemble` waterfall 注入工作区基座提示。TUI 和 Gateway 都是树上的插件，不是旁路进程；宿主页 `embed-sdk` 只连回环 Gateway（`dock.1`），不另起一套 harness，也不直连 TUI。
+Dock 的 harness 就是一棵 Cordis 插件树。内核是 crate `cordis`（`Context`、`inject`、named service、waterfall、fiber 生命周期）——**没有可私自打补丁的内核**，新行为只能再挂插件。`cordis-app` 起**一个** `Context`，分两步长出整棵树：`install_app` 先挂 Spine 五件套 + Harness 服务 + 工具粒（尾部是 `llm`，再 `compact`），`main` 再挂 `system-prompt.base`、`agent-loop`、`session_actor`、`gateway`（默认不监听）、`cron-driver`、`tui`。这些同样是插件——`main` 只做组装，不焊任何行为逻辑（连基座系统提示和 1s 调度都各是一颗插件）。TUI 和 Gateway 都是树上的插件，不是旁路进程；宿主页 `embed-sdk` 只连回环 Gateway（`dock.1`），不另起一套 harness，也不直连 TUI。
 
 ```mermaid
 flowchart TB
@@ -89,7 +89,7 @@ flowchart TB
     subgraph surf["表面插件"]
       direction LR
       tui["tui<br/>event loop · 滚动区 · prompt<br/>overlay · 快捷键 · 主题 · 配对"]
-      gw["gateway<br/>回环 127.0.0.1:18991 · 兼 IPv6<br/>Origin 配对 · dock.1 JSON-RPC"]
+      gw["gateway（默认不监听）<br/>/pair 开启 · 回环 127.0.0.1:18991 · 占用换端口<br/>Origin 配对 · dock.1 JSON-RPC"]
     end
 
     actor["session_actor（SESSION_PORT）<br/>队列：提交 · 立即发送 · 提前<br/>GoalSummary · mailbox 续跑"]
@@ -107,7 +107,7 @@ flowchart TB
 
   tui -->|"SESSION_PORT"| actor
   gw -->|"SESSION_PORT"| actor
-  tick["cron tick · 1s（main 任务）"] -->|"到点 → submit"| actor
+  tick["cron-driver 插件<br/>1s tick · live-look cron/sessions"] -->|"到点 → submit"| actor
   actor -->|"LoopHandle.run"| aloop
   aloop -->|"跑一轮"| spine
   aloop -.->|"live-lookup"| svc
@@ -131,11 +131,11 @@ flowchart TB
   class api,mcp,disk,render ext;
 ```
 
-实线是控制 / 数据流，虚线是「`register` 进 `tools`」与「named service live-lookup」。两个表面（`tui`、`gateway`）都经 `SESSION_PORT` 把 prompt 投给 `session_actor`，也各自 live-look `sessions` 等做会话投影；`cron tick` 是 `main` 里独立的 tokio 任务，到点用同一个 port 提交。磁盘（`~/.dock` / 项目 `.dock`）由 `svc` 与部分工具粒（memory / plan-mode / dynamic / mcp）读写。
+实线是控制 / 数据流，虚线是「`register` 进 `tools`」与「named service live-lookup」。两个表面（`tui`、`gateway`）都经 `SESSION_PORT` 把 prompt 投给 `session_actor`，也各自 live-look `sessions` 等做会话投影；`cron-driver` 插件 `inject` `cron`/`sessions`/`session.port`，1s 一 tick，到点用同一个 port 提交。磁盘（`~/.dock` / 项目 `.dock`）由 `svc` 与部分工具粒（memory / plan-mode / dynamic / mcp）读写。
 
 挂载有序：工具粒都在 `workspace_tools` 之后、`llm` 之前 `register`；`compact` 在 `llm` 之后（要 `inject "llm"`）；`tool-subagent` 在 `tool-task` 之后（live-look `"subagents"`）。完整顺序与每颗粒的工具名见 [TOOLS.md](TOOLS.md)。
 
-Gateway 默认 `127.0.0.1:18991`，同端口再试 `[::1]`（`DOCK_GATEWAY_BIND` 可覆盖）。配对走 HTTP；会话投影、权限、斜杠、图片输入走 JSON-RPC `dock.1`。鉴权是 Origin 配对 + 回环，不是 Origin 白名单。工具能力插件 `inject: ["tools"]` 后 `register`，MCP 也进同一张 `"tools"` 表。模式 / 模型 / 权限开关住在 `settings`；计划是独立模式，不是第三种权限。Named service 在调用点 live-lookup，不要把 `Arc` 关进长生命周期闭包。
+Gateway 默认挂载但不监听。TUI `/pair` 开启回环 HTTP（首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。`DOCK_GATEWAY_BIND` 只改首选地址。配对走 HTTP；会话投影、权限、斜杠、图片输入走 JSON-RPC `dock.1`。鉴权是 Origin 配对 + 回环，不是 Origin 白名单。工具能力插件 `inject: ["tools"]` 后 `register`，MCP 也进同一张 `"tools"` 表。模式 / 模型 / 权限开关住在 `settings`；计划是独立模式，不是第三种权限。Named service 在调用点 live-lookup，不要把 `Arc` 关进长生命周期闭包。
 
 磁盘：`~/.dock`（`DOCK_HOME`）放用户 config、presets、plugins、memory、`mcp_credentials.json`；项目 `.dock` 放覆盖 config、presets、plugins、`plan.md`。HTTP MCP 的 OAuth token 不写进 `config.toml`。
 
@@ -163,6 +163,8 @@ flowchart LR
 
 `llm/stream` 是这一轮的枢纽：出工具调用就过 `tools/execute`（权限 / 计划门在这里挡）再回来，出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
 
+`system-prompt/assemble` 的载荷是 `PromptAssembly`（`cordis-spine`）：一段 base + 若干带 order 的命名分段。assembler 服务自己不含任何提示词——每段都是**贡献它的插件**的 `on_waterfall` handler：`system-prompt.base` 设 base，`agent-presets` 加 persona + 子代理名册（`replace_prompt` 模式则整份替换 base），`plan-mode` 加计划提醒，`tool-goal` 加目标指令/邀约，`tool-cordis` 加动态插件说明。handler 调 `args.next()` 拿到累积体再 `section(order, id, body)`；`render()` 按 order 排序拼接，所以最终提示词与插件挂载顺序无关。加/改一段提示词就是加/换一颗插件，不动 assembler。
+
 ---
 
 ## 快速开始
@@ -173,14 +175,14 @@ flowchart LR
 cargo run -p cordis-app
 ```
 
-首次启动会全屏接管终端。模型目录读 `~/.dock/config.toml`，再读项目 `.dock/config.toml`（后者覆盖）。样例：[`config.toml.example`](config.toml.example)。
+首次启动会全屏接管终端。浏览器 companion 在 TUI 里 `/pair` → Enter 开启回环网关后再打开宿主页。模型目录读 `~/.dock/config.toml`，再读项目 `.dock/config.toml`（后者覆盖）。样例：[`config.toml.example`](config.toml.example)。
 
 | 变量 | 作用 |
 |---|---|
 | `DOCK_HOME` | 用户配置目录，默认 `~/.dock` |
 | `DOCK_MODEL` | 覆盖 `[models].default` |
 | `DOCK_API_KEY` / `DOCK_API_BASE` | 覆盖当前模型的 key / base URL |
-| `DOCK_GATEWAY_BIND` | 回环网关，默认 `127.0.0.1:18991` |
+| `DOCK_GATEWAY_BIND` | 回环网关首选地址，默认 `127.0.0.1:18991`；`/pair` 开启时占用则换下一个端口 |
 
 没有可用模型时 spine 会 echo。不要把 `.dock/config.toml`、API key、`.env` 提交进仓库。
 
@@ -197,7 +199,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 
 ## 浏览器 companion
 
-同一进程里的 `gateway` 插件只绑 loopback。宿主页用一份脚本注入宠物和 Chat：
+同一进程里的 `gateway` 插件只绑 loopback，**默认不监听**。在 TUI `/pair` 里开启后再打开宿主页。首选端口占用时自动换下一个（overlay 显示实际地址）。
 
 ```bash
 cd embed-sdk

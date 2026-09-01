@@ -71,6 +71,36 @@ fn slash_plan_tasks_mcps_map() {
         dispatch(Action::SendPrompt("/mcps".into()), &prompt).as_slice(),
         [Effect::ShowMcps]
     ));
+    prompt.insert_str("/lsp st");
+    let filled = dispatch(Action::SlashAccept, &prompt);
+    assert!(filled.is_empty(), "{filled:?}");
+    assert_eq!(prompt.text(), "/lsp status ");
+    prompt.clear();
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/lsp".into()), &prompt).as_slice(),
+        [Effect::ShowLsp {
+            write: true,
+            user: false
+        }]
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/lsp status".into()), &prompt).as_slice(),
+        [Effect::ShowLsp {
+            write: false,
+            user: false
+        }]
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/lsp user".into()), &prompt).as_slice(),
+        [Effect::ShowLsp {
+            write: true,
+            user: true
+        }]
+    ));
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/lsp nope".into()), &prompt).as_slice(),
+        [Effect::FillPrompt { text }] if text.contains("/lsp")
+    ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/cordis".into()), &prompt).as_slice(),
         [Effect::ShowCordis]

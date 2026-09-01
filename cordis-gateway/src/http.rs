@@ -1,5 +1,7 @@
 //! Bootstrap HTTP: pairing request / poll / exchange / tickets. Loopback only.
 
+use std::net::TcpListener;
+
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -15,6 +17,24 @@ use crate::ws;
 #[derive(Clone)]
 pub struct AppState {
     pub gateway: GatewayHandle,
+}
+
+pub(crate) fn spawn_listener(
+    listener: TcpListener,
+    app: Router,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::from_std(listener) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.wait_for(|stop| *stop).await;
+            })
+            .await;
+    });
 }
 
 pub fn router(gateway: GatewayHandle) -> Router {

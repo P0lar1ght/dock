@@ -17,13 +17,20 @@ use crate::image_store::ImageInputStore;
 use crate::pairing::{IssuedTicket, PairingStatus, PairingStore};
 use crate::transcript::{ProjectedEvent, Transcript};
 
+struct ListenSlot {
+    listening: bool,
+    local_addr: SocketAddr,
+    companion: CompanionStatus,
+    shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
+}
+
 pub struct GatewayInner {
     pub ctx: Context,
     pub pairing: Mutex<PairingStore>,
     pub transcript: Mutex<Transcript>,
     pub images: Mutex<ImageInputStore>,
-    pub local_addr: SocketAddr,
-    pub companion: CompanionStatus,
+    preferred: SocketAddr,
+    listen: Mutex<ListenSlot>,
 }
 
 #[derive(Clone)]
@@ -32,25 +39,94 @@ pub struct GatewayHandle {
 }
 
 impl GatewayHandle {
-    pub fn new(ctx: Context, local_addr: SocketAddr, companion: CompanionStatus) -> Self {
+    pub fn idle(ctx: Context, preferred: SocketAddr) -> Self {
         let inner = Arc::new(GatewayInner {
             pairing: Mutex::new(PairingStore::new(ctx.clone())),
             transcript: Mutex::new(Transcript::new()),
             images: Mutex::new(ImageInputStore::new()),
-            local_addr,
-            companion,
+            preferred,
+            listen: Mutex::new(ListenSlot {
+                listening: false,
+                local_addr: preferred,
+                companion: CompanionStatus::Stopped,
+                shutdown_tx: None,
+            }),
             ctx: ctx.clone(),
         });
         listen_events(&inner);
         Self { inner }
     }
 
+    fn slot(&self) -> std::sync::MutexGuard<'_, ListenSlot> {
+        self.inner
+            .listen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn companion_status(&self) -> CompanionStatus {
-        self.inner.companion.clone()
+        self.slot().companion.clone()
     }
 
     pub fn listen_addr(&self) -> SocketAddr {
-        self.inner.local_addr
+        self.slot().local_addr
+    }
+
+    pub fn is_listening(&self) -> bool {
+        self.slot().listening
+    }
+
+    pub fn start_listen(&self) -> Result<SocketAddr, PairingError> {
+        let mut g = self.slot();
+        if g.listening {
+            return Ok(g.local_addr);
+        }
+        let preferred = self.inner.preferred;
+        let (listener, actual) = match crate::bind::listen(&preferred.to_string()) {
+            Ok(ok) => ok,
+            Err(msg) => {
+                g.companion = CompanionStatus::Failed {
+                    addr: preferred,
+                    error: msg.clone(),
+                };
+                return Err(PairingError::new("bind_failed", msg));
+            }
+        };
+        if preferred.port() != 0 && actual.port() != preferred.port() {
+            eprintln!("dock gateway: {} 已被占用，改绑 {}", preferred, actual);
+        }
+        let companion = crate::bind::companion_listener(actual);
+        if let CompanionStatus::Failed { addr, error } = &companion.status {
+            eprintln!(
+                "dock gateway: 未能监听 {addr}（{error}）。本机 IPv6 / localhost 可能连不上。"
+            );
+        }
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        g.listening = true;
+        g.local_addr = actual;
+        g.companion = companion.status.clone();
+        g.shutdown_tx = Some(shutdown_tx);
+        drop(g);
+
+        let app = crate::http::router(self.clone());
+        crate::http::spawn_listener(listener, app.clone(), shutdown_rx.clone());
+        if let Some(v6) = companion.listener {
+            crate::http::spawn_listener(v6, app, shutdown_rx);
+        }
+        Ok(actual)
+    }
+
+    pub fn stop_listen(&self) -> Result<(), PairingError> {
+        let mut g = self.slot();
+        let tx = g.shutdown_tx.take();
+        g.listening = false;
+        g.companion = CompanionStatus::Stopped;
+        g.local_addr = self.inner.preferred;
+        drop(g);
+        if let Some(tx) = tx {
+            let _ = tx.send(true);
+        }
+        Ok(())
     }
 
     pub fn ctx(&self) -> &Context {
@@ -188,11 +264,23 @@ impl GatewayPort for GatewayHandle {
     }
 
     fn local_addr(&self) -> SocketAddr {
-        self.inner.local_addr
+        GatewayHandle::listen_addr(self)
     }
 
     fn companion_status(&self) -> CompanionStatus {
-        self.inner.companion.clone()
+        GatewayHandle::companion_status(self)
+    }
+
+    fn is_listening(&self) -> bool {
+        GatewayHandle::is_listening(self)
+    }
+
+    fn start_listen(&self) -> Result<SocketAddr, PairingError> {
+        GatewayHandle::start_listen(self)
+    }
+
+    fn stop_listen(&self) -> Result<(), PairingError> {
+        GatewayHandle::stop_listen(self)
     }
 }
 

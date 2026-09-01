@@ -15,7 +15,7 @@ cordis-rust/     插件内核 crate `cordis`：Context、inject、named services
 cordis-spine/    Agent 循环、工具、MCP、会话、预设；install_app 挂整棵产品树
 cordis-tui/      全屏终端 UI 插件（theme / scrollback / prompt / …）
 cordis-gateway/  回环 HTTP/WS 插件：Origin 配对、dock.1 投影、slash/list|execute
-cordis-app/      二进制入口：install_app + agent-loop + gateway + tui
+cordis-app/      二进制入口：install_app + agent-loop + gateway（默认不监听）+ tui
 cordis-render/   Markdown / Mermaid 渲染
 embed-sdk/       宿主页 SDK（dock-embed.js）；协议 dock.1，不要为每个斜杠单独适配
 vendor/          冻结副本：mermaid 布局栈、xai Grok 拷贝（见 vendor/README.md）
@@ -53,7 +53,7 @@ cd embed-sdk && npm install && npm run build
 | 其它 spine | `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `subagents` `memory` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名。`agentPresets` 是 YAML 目录（内置 `code` / `minimal` / `cordis` / `warden` < `~/.dock/presets/<id>/` 或显示名目录如 `创造/` < 项目 `.dock/presets/<id>/`；旧 `<id>.yml` 仍可读）。新建模式默认落到项目层，细节见 [CLI.md](CLI.md) |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-subagent` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register`。清单与缺口：[TOOLS.md](TOOLS.md) |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` | 同名 |
-| 回环网关 | `gateway` | `"gateway"`（`GatewayRef`）。事件 `gateway/pairing`。只绑 loopback（默认 `127.0.0.1:18991`，同时尝试 `[::1]` 同端口；`DOCK_GATEWAY_BIND` 可覆盖）。配对、CORS、斜杠 list/execute 的终端限制见 [CLI.md](CLI.md) `/pair` |
+| 回环网关 | `gateway` | `"gateway"`（`GatewayRef`）。事件 `gateway/pairing`。**默认挂载但不监听**；TUI `/pair` 开启/关闭。只绑 loopback（首选 `127.0.0.1:18991`，占用则往上找端口，同端口再试 `[::1]`）。`DOCK_GATEWAY_BIND` 只改首选地址。配对、CORS、斜杠 list/execute 的终端限制见 [CLI.md](CLI.md) `/pair` |
 | 事件循环 | `tui` inject `session` + `session.port` | — |
 
 - **换插件，不改 loop。** 新 UI 面做成 `tui.*` 插件；新采样做成 `llm` 插件。工具能力插件 `inject: ["tools"]` 后 `ctx.tools.register()`（DSH 一个 `"tools"` 表，不是 `tools.mcp` ExtraTools）。不要把功能焊进 `event_loop` 或 `agent-loop`。
@@ -92,7 +92,7 @@ Chrome（快捷键条 `Key:label`、思考折叠、工具卡片输入/输出、p
 - `install_fakes` 保持 **echo**。`cordis-spine/tests/round.rs` 期望 `TurnOutcome::Text("echoed: hello")`。
 - 打开 MCP 的测试必须 fail-open；harness 默认 `mcp: false`。
 - 不要提交 `.dock/config.toml`、API key、`.env`。`DOCK_HOME` 覆盖用户配置目录。
-- `[::1]` 绑失败会打 stderr，并出现在 `/pair` overlay 与 `initialize.connection.companion`，不能静默。CORS 反射 Origin 是有意的：鉴权靠配对 + 回环，不是 Origin 白名单。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费。
+- `[::1]` 绑失败会打 stderr，并出现在 `/pair` overlay 与 `initialize.connection.companion`，不能静默。默认不监听，多开 TUI 不会抢端口；`/pair` 开启时首选端口占用则换下一个。CORS 反射 Origin 是有意的：鉴权靠配对 + 回环，不是 Origin 白名单。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费。
 
 ## 改代码时
 

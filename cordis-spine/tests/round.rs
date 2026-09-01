@@ -341,6 +341,22 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     assert!(root
         .get::<cordis_spine::DynamicRunner>(cordis_spine::DYNAMIC_CORDIS_RUNNER)
         .is_some());
+    assert!(root
+        .get::<cordis_spine::LspBackendAdapter>(cordis_spine::LSP)
+        .is_some());
+
+    let lsp_parse = tools
+        .execute(cordis_spine::ToolCall {
+            id: "lsp-bad".into(),
+            name: "lsp".into(),
+            arguments: "{}".into(),
+        })
+        .await;
+    assert!(
+        lsp_parse.content.contains("Error"),
+        "lsp missing operation: {}",
+        lsp_parse.content
+    );
 
     let todo = tools
         .execute(cordis_spine::ToolCall {

@@ -83,7 +83,10 @@ pub use goal::{
 pub use jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
 pub use llm::{llm, Llm, LlmConfig, LlmMode, Sampler};
 pub use loop_plugin::agent_loop;
-pub use lsp::tool_lsp;
+pub use lsp::{
+    lsp_auto_setup, lsp_composer_fill, lsp_status_report, tool_lsp, LspBackendAdapter,
+    LspSetupReport, LspSetupScope,
+};
 pub use mcp::{
     is_mcp_public_name, mcp_client, public_tool_name, ElicitPrompt, Elicitation, Mcp, McpStatus,
     McpToolStatus,
@@ -101,7 +104,7 @@ pub use plan_mode::{
     is_plan_file_edit, plan_instruction, plan_mode, plan_system_addon, PlanApprovalPrompt,
     PlanDecision, PlanMode, PlanPhase, PLAN_REL,
 };
-pub use prompt::{system_prompt, SystemPrompt};
+pub use prompt::{system_prompt, PromptAssembly, SystemPrompt};
 pub use runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
 pub use sched::{
     expired_task_notice, format_scheduled_task_prompt, format_scheduled_task_reminder,

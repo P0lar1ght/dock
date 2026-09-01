@@ -41,6 +41,7 @@ pub enum SlashCmd {
     Tasks,
     Workflow,
     Mcps,
+    Lsp,
     Cordis,
     Preset,
     Usage,
@@ -62,6 +63,7 @@ pub enum ArgKind {
     Settings,
     Effort,
     LoopInterval,
+    Lsp,
 }
 
 pub struct SlashDef {
@@ -158,7 +160,7 @@ pub const CATALOG: &[SlashDef] = &[
         name: "pair",
         aliases: &["pairing"],
         display: "/pair",
-        description: "浏览器配对与已绑来源",
+        description: "浏览器配对（开启回环网关）",
         takes_args: false,
         args_required: false,
         arg_kind: None,
@@ -232,6 +234,16 @@ pub const CATALOG: &[SlashDef] = &[
         takes_args: false,
         args_required: false,
         arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Lsp,
+        name: "lsp",
+        aliases: &[],
+        display: "/lsp",
+        description: "探测并写入语言服务器（Tab 补全 status / setup / user）",
+        takes_args: true,
+        args_required: false,
+        arg_kind: Some(ArgKind::Lsp),
     },
     SlashDef {
         cmd: SlashCmd::Cordis,
@@ -412,6 +424,8 @@ pub struct SlashSnapshot {
     pub open: bool,
     pub selected: usize,
     pub matches: Vec<SuggestionRow>,
+    /// True while completing `/cmd args` — Enter should send, Tab still fills.
+    pub completing_args: bool,
 }
 
 impl SlashSnapshot {
@@ -426,18 +440,45 @@ pub fn snapshot(text: &str, selected: usize) -> SlashSnapshot {
     snapshot_ex(text, selected, &[])
 }
 
+#[cfg(test)]
 pub fn snapshot_ex(text: &str, selected: usize, extras: &[SlashEntry]) -> SlashSnapshot {
-    let Some(query) = slash_query(text) else {
-        return SlashSnapshot {
-            open: false,
-            selected: 0,
-            matches: Vec::new(),
-        };
+    snapshot_with_settings(text, selected, extras, None)
+}
+
+pub fn snapshot_with_settings(
+    text: &str,
+    selected: usize,
+    extras: &[SlashEntry],
+    settings: Option<&AppSettings>,
+) -> SlashSnapshot {
+    let closed = SlashSnapshot {
+        open: false,
+        selected: 0,
+        matches: Vec::new(),
+        completing_args: false,
     };
+    let (matches, completing_args) = match slash_phase(text) {
+        None => return closed,
+        Some(SlashPhase::Command(query)) => (command_matches(query, extras), false),
+        Some(SlashPhase::Args { name, query }) => (arg_matches(name, query, settings), true),
+    };
+    if matches.is_empty() {
+        return closed;
+    }
+    let selected = selected.min(matches.len() - 1);
+    SlashSnapshot {
+        open: true,
+        selected,
+        matches,
+        completing_args,
+    }
+}
+
+fn command_matches(query: &str, extras: &[SlashEntry]) -> Vec<SuggestionRow> {
     let sources = rank_sources(extras);
     let mut matcher = FuzzyMatcher::new();
     let ranked = matcher.rank(&sources, query, sources.len(), |d| d.name.as_str());
-    let matches: Vec<SuggestionRow> = ranked
+    ranked
         .into_iter()
         .map(|(idx, _)| {
             let d = &sources[idx];
@@ -447,17 +488,24 @@ pub fn snapshot_ex(text: &str, selected: usize, extras: &[SlashEntry]) -> SlashS
                 pick: d.pick.clone(),
             }
         })
-        .collect();
-    let selected = if matches.is_empty() {
-        0
-    } else {
-        selected.min(matches.len() - 1)
+        .collect()
+}
+
+fn arg_matches(name: &str, query: &str, settings: Option<&AppSettings>) -> Vec<SuggestionRow> {
+    let Some(def) = lookup(name) else {
+        return Vec::new();
     };
-    SlashSnapshot {
-        open: !matches.is_empty(),
-        selected,
-        matches,
-    }
+    let Some(kind) = def.arg_kind else {
+        return Vec::new();
+    };
+    filter_args(kind, query, settings)
+        .into_iter()
+        .map(|item| SuggestionRow {
+            display: format!("{} {}", def.display, item.insert_text),
+            description: item.description,
+            pick: SlashPick::Builtin(def.cmd),
+        })
+        .collect()
 }
 
 struct RankSource {
@@ -491,16 +539,24 @@ fn rank_sources(extras: &[SlashEntry]) -> Vec<RankSource> {
     out
 }
 
-fn slash_query(text: &str) -> Option<&str> {
+enum SlashPhase<'a> {
+    /// `/ls` — still choosing a command name.
+    Command(&'a str),
+    /// `/lsp s` — command chosen; completing arguments when `arg_kind` is set.
+    Args { name: &'a str, query: &'a str },
+}
+
+fn slash_phase(text: &str) -> Option<SlashPhase<'_>> {
     if text.contains('\n') {
         return None;
     }
     let rest = text.strip_prefix('/')?;
-    // `/cmd ` means the name is chosen; close the picker so Enter sends/parses.
-    if rest.chars().any(char::is_whitespace) {
-        return None;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("");
+    match parts.next() {
+        None => Some(SlashPhase::Command(name)),
+        Some(query) => Some(SlashPhase::Args { name, query }),
     }
-    Some(rest)
 }
 
 #[cfg(test)]
@@ -598,6 +654,14 @@ pub fn loop_interval_args() -> Vec<ArgItem> {
         .collect()
 }
 
+pub fn lsp_args() -> Vec<ArgItem> {
+    vec![
+        ArgItem::new("status", "只看配置，不写文件"),
+        ArgItem::new("setup", "写入项目 .dock/lsp.json"),
+        ArgItem::new("user", "写入 ~/.dock/lsp.json"),
+    ]
+}
+
 pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
     match kind {
         ArgKind::Theme => theme_args(),
@@ -605,6 +669,7 @@ pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
         ArgKind::Settings => settings_args(settings),
         ArgKind::Effort => effort_args(),
         ArgKind::LoopInterval => loop_interval_args(),
+        ArgKind::Lsp => lsp_args(),
     }
 }
 
@@ -641,6 +706,7 @@ mod tests {
         assert_eq!(lookup("tasks").map(|d| d.cmd), Some(SlashCmd::Tasks));
         assert_eq!(lookup("workflow").map(|d| d.cmd), Some(SlashCmd::Workflow));
         assert_eq!(lookup("mcps").map(|d| d.cmd), Some(SlashCmd::Mcps));
+        assert_eq!(lookup("lsp").map(|d| d.cmd), Some(SlashCmd::Lsp));
         assert_eq!(lookup("cordis").map(|d| d.cmd), Some(SlashCmd::Cordis));
         assert_eq!(lookup("plugins").map(|d| d.cmd), Some(SlashCmd::Cordis));
         assert_eq!(lookup("preset").map(|d| d.cmd), Some(SlashCmd::Preset));
@@ -665,6 +731,33 @@ mod tests {
         let extras = [extra("standup")];
         assert!(snapshot_ex("/standup", 0, &extras).open);
         assert!(!snapshot_ex("/standup ", 0, &extras).open);
+    }
+
+    #[test]
+    fn lsp_args_stay_open_and_filter() {
+        let cmd = snapshot("/lsp", 0);
+        assert!(cmd.open && !cmd.completing_args, "{cmd:?}");
+
+        let all = snapshot("/lsp ", 0);
+        assert!(all.open && all.completing_args, "{all:?}");
+        let displays: Vec<_> = all.matches.iter().map(|r| r.display.as_str()).collect();
+        assert!(displays.contains(&"/lsp status"), "{displays:?}");
+        assert!(displays.contains(&"/lsp setup"), "{displays:?}");
+        assert!(displays.contains(&"/lsp user"), "{displays:?}");
+
+        let filtered = snapshot("/lsp s", 0);
+        assert!(filtered.open);
+        let displays: Vec<_> = filtered
+            .matches
+            .iter()
+            .map(|r| r.display.as_str())
+            .collect();
+        assert!(displays.contains(&"/lsp status"), "{displays:?}");
+        assert!(displays.contains(&"/lsp setup"), "{displays:?}");
+
+        let status = snapshot("/lsp sta", 0);
+        assert_eq!(status.matches[0].display, "/lsp status");
+        assert!(status.completing_args);
     }
 
     #[test]

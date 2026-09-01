@@ -158,6 +158,10 @@ impl LspManager {
         tools_enabled: bool,
         notification_handle: crate::lsp::notify::ToolNotificationHandle,
     ) -> Self {
+        let workspace_root = match workspace_root.canonicalize() {
+            Ok(p) => p,
+            Err(_) => workspace_root,
+        };
         Self {
             servers,
             workspace_root,
@@ -208,13 +212,33 @@ impl LspManager {
             return;
         }
         self.initialized = true;
-
         let configs: Vec<_> = self
             .servers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        self.start_configs(configs).await;
+    }
+
+    /// Start any configured server that is not running yet (`/lsp` after bootstrap).
+    pub async fn start_missing(&mut self) {
+        if !self.initialized || self.shutting_down {
+            return;
+        }
+        let configs: Vec<_> = self
+            .servers
+            .iter()
+            .filter(|(name, _)| !self.clients.contains_key(*name))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.start_configs(configs).await;
+    }
+
+    async fn start_configs(&mut self, configs: Vec<(String, LspServerConfig)>) {
         for (name, server_config) in configs {
+            if self.shutting_down {
+                return;
+            }
             self.notification_handle
                 .send_lsp_starting(crate::lsp::notify::LspServerStarting {
                     server_name: name.clone(),

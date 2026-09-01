@@ -63,6 +63,35 @@ impl PairingUi {
             .and_then(|g| g.pairing_revoke(origin).ok())
             .is_some()
     }
+
+    pub fn is_listening(&self) -> bool {
+        self.ctx
+            .get::<GatewayRef>(GATEWAY)
+            .map(|g| g.is_listening())
+            .unwrap_or(false)
+    }
+
+    pub fn start_listen(&self) -> bool {
+        self.ctx
+            .get::<GatewayRef>(GATEWAY)
+            .and_then(|g| g.start_listen().ok())
+            .is_some()
+    }
+
+    pub fn stop_listen(&self) -> bool {
+        self.ctx
+            .get::<GatewayRef>(GATEWAY)
+            .and_then(|g| g.stop_listen().ok())
+            .is_some()
+    }
+
+    pub fn toggle_listen(&self) -> bool {
+        if self.is_listening() {
+            self.stop_listen()
+        } else {
+            self.start_listen()
+        }
+    }
 }
 
 pub fn chrome_height(prompt: &PairingPrompt, width: u16) -> u16 {
@@ -202,12 +231,13 @@ pub fn render_pending(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManageRow {
+    Listen,
     Pending(usize),
     Binding(usize),
 }
 
 pub fn manage_rows(pending: &[PairingPrompt], bindings: &[PairingBinding]) -> Vec<ManageRow> {
-    let mut rows = Vec::new();
+    let mut rows = vec![ManageRow::Listen];
     for i in 0..pending.len() {
         rows.push(ManageRow::Pending(i));
     }
@@ -221,6 +251,30 @@ pub fn overlay_len(pending: &[PairingPrompt], bindings: &[PairingBinding]) -> us
     manage_rows(pending, bindings).len()
 }
 
+pub fn overlay_copy(gw: Option<&GatewayRef>) -> (String, &'static str) {
+    let empty = "没有待批请求，也没有已绑定的来源。";
+    match gw {
+        None => ("未挂载回环网关。".into(), "网关插件不在树上。"),
+        Some(g) if !g.is_listening() => {
+            let mut status = format!("未监听 {}", g.local_addr());
+            status.push_str(" · Enter 开启（占用则换端口）");
+            if let Some(w) = g.companion_status().warning() {
+                status.push_str(" · ");
+                status.push_str(&w);
+            }
+            (status, empty)
+        }
+        Some(g) => {
+            let mut status = format!("监听 {}", g.local_addr());
+            if let Some(w) = g.companion_status().warning() {
+                status.push_str(" · ");
+                status.push_str(&w);
+            }
+            (status, empty)
+        }
+    }
+}
+
 pub fn render_manage(
     buf: &mut Buffer,
     area: Rect,
@@ -228,19 +282,25 @@ pub fn render_manage(
     bindings: &[PairingBinding],
     selected: usize,
     warning: Option<&str>,
+    empty: &str,
+    listening: bool,
+    listen_addr: &str,
 ) -> PickerHits {
     let rows = manage_rows(pending, bindings);
     let owned: Vec<(String, String, bool)> = if rows.is_empty() {
-        vec![(
-            "没有待批请求，也没有已绑定的来源。".into(),
-            String::new(),
-            true,
-        )]
+        vec![(empty.into(), String::new(), true)]
     } else {
         rows.iter()
             .enumerate()
             .map(|(i, row)| {
                 let (label, right) = match row {
+                    ManageRow::Listen => {
+                        if listening {
+                            ("关闭回环网关".into(), listen_addr.to_string())
+                        } else {
+                            ("开启回环网关".into(), "Enter 开启".into())
+                        }
+                    }
                     ManageRow::Pending(j) => {
                         let p = &pending[*j];
                         (
@@ -286,19 +346,23 @@ pub fn accept_manage(ui: &PairingUi, overlay: &mut Overlay) {
     let bindings = ui.bindings();
     let rows = manage_rows(&pending, &bindings);
     match rows.get(*selected) {
+        Some(ManageRow::Listen) => {
+            ui.toggle_listen();
+        }
         Some(ManageRow::Pending(i)) => {
             if let Some(p) = pending.get(*i) {
                 ui.confirm(&p.id);
             }
+            *selected = 0;
         }
         Some(ManageRow::Binding(i)) => {
             if let Some(b) = bindings.get(*i) {
                 ui.revoke(&b.origin);
             }
+            *selected = 0;
         }
         None => {}
     }
-    *selected = 0;
 }
 
 pub fn reject_manage(ui: &PairingUi, overlay: &mut Overlay) {
@@ -309,19 +373,25 @@ pub fn reject_manage(ui: &PairingUi, overlay: &mut Overlay) {
     let bindings = ui.bindings();
     let rows = manage_rows(&pending, &bindings);
     match rows.get(*selected) {
+        Some(ManageRow::Listen) => {
+            if ui.is_listening() {
+                ui.stop_listen();
+            }
+        }
         Some(ManageRow::Pending(i)) => {
             if let Some(p) = pending.get(*i) {
                 ui.deny(&p.id);
             }
+            *selected = 0;
         }
         Some(ManageRow::Binding(i)) => {
             if let Some(b) = bindings.get(*i) {
                 ui.revoke(&b.origin);
             }
+            *selected = 0;
         }
         None => {}
     }
-    *selected = 0;
 }
 
 fn format_time(t: SystemTime) -> String {
@@ -366,5 +436,27 @@ fn fill_rect(buf: &mut Buffer, area: Rect, style: Style) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listen_row_is_always_first() {
+        assert_eq!(manage_rows(&[], &[]), vec![ManageRow::Listen]);
+        assert_eq!(overlay_len(&[], &[]), 1);
+        let pending = [PairingPrompt {
+            id: "1".into(),
+            application: "app".into(),
+            origin: "http://localhost".into(),
+            created_at: SystemTime::UNIX_EPOCH,
+            expires_at: SystemTime::UNIX_EPOCH,
+        }];
+        assert_eq!(
+            manage_rows(&pending, &[]),
+            vec![ManageRow::Listen, ManageRow::Pending(0)]
+        );
     }
 }

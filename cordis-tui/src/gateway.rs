@@ -49,14 +49,19 @@ impl std::error::Error for PairingError {}
 /// Dual-stack companion bind (`127.0.0.1` ↔ `::1`). Failure must be visible.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompanionStatus {
+    /// Plugin is mounted but HTTP is not bound yet (`/pair` 开启).
+    Stopped,
     Listening(SocketAddr),
-    Failed { addr: SocketAddr, error: String },
+    Failed {
+        addr: SocketAddr,
+        error: String,
+    },
 }
 
 impl CompanionStatus {
     pub fn warning(&self) -> Option<String> {
         match self {
-            Self::Listening(_) => None,
+            Self::Stopped | Self::Listening(_) => None,
             Self::Failed { addr, error } => Some(format!(
                 "未能监听 {addr}（{error}）。本机 IPv6 / localhost 可能连不上。"
             )),
@@ -74,6 +79,9 @@ pub trait GatewayPort: Send + Sync {
     fn pairing_revoke(&self, origin: &str) -> Result<(), PairingError>;
     fn local_addr(&self) -> SocketAddr;
     fn companion_status(&self) -> CompanionStatus;
+    fn is_listening(&self) -> bool;
+    fn start_listen(&self) -> Result<SocketAddr, PairingError>;
+    fn stop_listen(&self) -> Result<(), PairingError>;
 }
 
 /// Named `"gateway"` service. Clone is cheap; each call looks through to the plugin.
@@ -115,5 +123,17 @@ impl GatewayRef {
 
     pub fn companion_status(&self) -> CompanionStatus {
         self.0.companion_status()
+    }
+
+    pub fn is_listening(&self) -> bool {
+        self.0.is_listening()
+    }
+
+    pub fn start_listen(&self) -> Result<SocketAddr, PairingError> {
+        self.0.start_listen()
+    }
+
+    pub fn stop_listen(&self) -> Result<(), PairingError> {
+        self.0.stop_listen()
     }
 }

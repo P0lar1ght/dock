@@ -515,6 +515,7 @@ pub(super) fn draw(
                                 open: true,
                                 selected: snap.selected,
                                 matches: snap.suggestion_rows(),
+                                completing_args: false,
                             };
                             render_dropdown(frame.buffer_mut(), drop_area, &fake, &theme);
                         } else if !overlay.is_open() {
@@ -616,14 +617,19 @@ pub(super) fn paint_overlay(
                 .as_ref()
                 .map(|g| g.pairing_bindings())
                 .unwrap_or_default();
-            let warning = gw.as_ref().and_then(|g| g.companion_status().warning());
+            let (status, empty) = pairing::overlay_copy(gw.as_deref());
             pairing::render_manage(
                 buf,
                 area,
                 &pending,
                 &bindings,
                 *selected,
-                warning.as_deref(),
+                Some(status.as_str()).filter(|s| !s.is_empty()),
+                empty,
+                gw.as_ref().map(|g| g.is_listening()).unwrap_or(false),
+                &gw.as_ref()
+                    .map(|g| g.local_addr().to_string())
+                    .unwrap_or_default(),
             )
         }
         Overlay::Help { selected, query } => {
@@ -843,6 +849,7 @@ pub(super) fn arg_picker_title(kind: crate::slash::ArgKind) -> &'static str {
         crate::slash::ArgKind::Settings => "设置",
         crate::slash::ArgKind::Effort => "推理强度",
         crate::slash::ArgKind::LoopInterval => "循环间隔",
+        crate::slash::ArgKind::Lsp => "LSP",
     }
 }
 

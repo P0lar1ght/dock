@@ -1314,9 +1314,9 @@ pub(super) fn to_action(
                     }
                 }
                 KeyCode::Enter => {
-                    if slash_open(ctx) {
-                        // Picker is still choosing a command name: put `/cmd ` in
-                        // the composer. Parse runs on the next send, after args.
+                    if slash_captures_enter(ctx) {
+                        // Command-name picker: put `/cmd ` in the composer.
+                        // Argument picker stays open for Tab; Enter sends.
                         return Some(Action::SlashAccept);
                     }
                     if file_search_open(ctx) {

@@ -11,8 +11,12 @@ use std::sync::Arc;
 use cordis::{plugin, Context, Inject, Plugin};
 use serde_json::Value;
 
+use crate::agent_presets::AgentPresets;
 use crate::dynamic_runner::{DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode};
-use crate::names::{DYNAMIC_CORDIS_RUNNER, PRE_STEP, PROMPT_ASSEMBLE, SESSIONS, TOOLS};
+use crate::names::{
+    AGENT_PRESETS, DYNAMIC_CORDIS_RUNNER, PRE_STEP, PROMPT_ASSEMBLE, SESSIONS, TOOLS,
+};
+use crate::prompt::{PromptAssembly, ORDER_CORDIS};
 use crate::session::Sessions;
 use crate::slash::{contrib_fields_present, slash_entry_from_define};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
@@ -54,13 +58,20 @@ pub fn tool_cordis() -> Plugin {
         "tool-cordis",
         Inject::from([TOOLS, DYNAMIC_CORDIS_RUNNER]),
         |ctx, _: &()| {
-            let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, |text: String, args| {
-                let mut next = args.next::<String>().unwrap_or(text);
-                if !next.contains("Dynamic Cordis Plugins") {
-                    next.push_str("\n\n");
-                    next.push_str(CORDIS_SYSTEM_PROMPT);
+            let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
+                let ctx = ctx.clone();
+                move |assembly: PromptAssembly, args| {
+                    let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
+                    // A `replace_prompt` preset owns the whole prompt; the
+                    // dynamic-plugin blurb only belongs on the layered base.
+                    let replace = ctx
+                        .get::<AgentPresets>(AGENT_PRESETS)
+                        .is_some_and(|p| p.replaces_prompt());
+                    if !replace {
+                        a.section(ORDER_CORDIS, "cordis", CORDIS_SYSTEM_PROMPT);
+                    }
+                    a
                 }
-                next
             });
             let ctx_pre = ctx.clone();
             let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {

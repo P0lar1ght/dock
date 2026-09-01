@@ -15,7 +15,7 @@ use ratatui::widgets::Widget;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use cordis::Context;
-use cordis_spine::{Slash, SlashEntry, SLASH};
+use cordis_spine::{AppSettings, Slash, SlashEntry, SETTINGS, SLASH};
 
 use super::theme::Theme;
 use crate::clipboard::ClipboardImage;
@@ -375,16 +375,34 @@ impl PromptWidget {
         state.unfocused = false;
     }
 
+    fn slash_settings(&self) -> Option<std::sync::Arc<AppSettings>> {
+        self.ctx
+            .as_ref()
+            .and_then(|c| c.get::<AppSettings>(SETTINGS))
+    }
+
     pub fn slash_snapshot(&self) -> crate::slash::SlashSnapshot {
         let extras = self.slash_extras();
+        let settings = self.slash_settings();
         let state = self.state.lock().unwrap();
-        crate::slash::snapshot_ex(&state.input, state.slash_selected, &extras)
+        crate::slash::snapshot_with_settings(
+            &state.input,
+            state.slash_selected,
+            &extras,
+            settings.as_deref(),
+        )
     }
 
     pub fn slash_move(&self, delta: i16) {
         let extras = self.slash_extras();
+        let settings = self.slash_settings();
         let mut state = self.state.lock().unwrap();
-        let snap = crate::slash::snapshot_ex(&state.input, state.slash_selected, &extras);
+        let snap = crate::slash::snapshot_with_settings(
+            &state.input,
+            state.slash_selected,
+            &extras,
+            settings.as_deref(),
+        );
         if !snap.open || snap.matches.is_empty() {
             return;
         }

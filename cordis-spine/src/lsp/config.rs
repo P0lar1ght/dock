@@ -1,4 +1,4 @@
-//! LSP server configuration from `.grok/lsp.json`.
+//! LSP server configuration from `~/.dock/lsp.json` and `<cwd>/.dock/lsp.json`.
 
 #![allow(dead_code)] // Grok-copied API kept for later wiring.
 
@@ -133,7 +133,7 @@ pub fn filter_project_lsp_when_untrusted(
         .collect()
 }
 
-/// Load LSP server configs from `~/.grok/lsp.json` and `<cwd>/.grok/lsp.json`.
+/// Load LSP server configs from `~/.dock/lsp.json` and `<cwd>/.dock/lsp.json`.
 /// Project config overrides user config for the same server name.
 pub fn load_servers(cwd: &Path) -> BTreeMap<String, LspServerConfig> {
     let user_path = crate::config::dock_home().join("lsp.json");
@@ -188,7 +188,47 @@ pub fn load_servers(cwd: &Path) -> BTreeMap<String, LspServerConfig> {
     merged
 }
 
+/// User/project `lsp.json`, then fill gaps with language servers found on PATH
+/// for the current workspace (Cargo.toml → rust-analyzer, etc.).
+///
+/// Called at first LSP start, not plugin mount, so `/cd` before the first
+/// `lsp` call still sees the right root.
+pub fn load_servers_or_defaults(cwd: &Path) -> BTreeMap<String, LspServerConfig> {
+    let mut merged = load_servers(cwd);
+    for (name, cfg) in detect_defaults(cwd) {
+        merged.entry(name).or_insert(cfg);
+    }
+    merged
+}
+
+/// File-relative or absolute path → absolute `file://` URI.
+/// Canonicalized so macOS `/var` vs `/private/var` matches `workspace_root`.
+pub fn resolve_tool_path(path: &str) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        p.canonicalize().unwrap_or(p)
+    } else {
+        let joined = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p);
+        joined.canonicalize().unwrap_or(joined)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LspJsonFile {
+    Map(BTreeMap<String, LspServerConfig>),
+    Wrapped {
+        #[serde(rename = "lspServers")]
+        lsp_servers: BTreeMap<String, LspServerConfig>,
+    },
+}
+
 /// Load LSP server configs from a JSON file. Returns empty map on missing/invalid file.
+///
+/// Accepts a flat `{ "rust-analyzer": { "command": ... } }` map or the plugin
+/// wrapper `{ "lspServers": { ... } }`.
 pub fn load_file(path: &Path) -> BTreeMap<String, LspServerConfig> {
     let s = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -199,9 +239,158 @@ pub fn load_file(path: &Path) -> BTreeMap<String, LspServerConfig> {
         }
     };
 
-    serde_json::from_str(&s).unwrap_or_else(|e| {
-        tracing::warn!(?e, "failed to parse lsp.json");
-        BTreeMap::new()
+    match serde_json::from_str::<LspJsonFile>(&s) {
+        Ok(LspJsonFile::Map(m)) => m,
+        Ok(LspJsonFile::Wrapped { lsp_servers }) => lsp_servers,
+        Err(e) => {
+            tracing::warn!(?e, "failed to parse lsp.json");
+            BTreeMap::new()
+        }
+    }
+}
+
+pub(crate) struct DefaultServer {
+    pub name: &'static str,
+    pub command: &'static str,
+    pub args: &'static [&'static str],
+    /// Workspace files that mean this language is in play.
+    pub markers: &'static [&'static str],
+    pub extensions: &'static [(&'static str, &'static str)],
+}
+
+pub(crate) const DEFAULT_SERVERS: &[DefaultServer] = &[
+    DefaultServer {
+        name: "rust-analyzer",
+        command: "rust-analyzer",
+        args: &[],
+        markers: &["Cargo.toml"],
+        extensions: &[(".rs", "rust")],
+    },
+    DefaultServer {
+        name: "typescript-language-server",
+        command: "typescript-language-server",
+        args: &["--stdio"],
+        markers: &["package.json", "tsconfig.json", "jsconfig.json"],
+        extensions: &[
+            (".ts", "typescript"),
+            (".tsx", "typescriptreact"),
+            (".js", "javascript"),
+            (".jsx", "javascriptreact"),
+            (".mjs", "javascript"),
+            (".cjs", "javascript"),
+        ],
+    },
+    DefaultServer {
+        name: "gopls",
+        command: "gopls",
+        args: &[],
+        markers: &["go.mod"],
+        extensions: &[(".go", "go")],
+    },
+    DefaultServer {
+        name: "pyright",
+        command: "pyright-langserver",
+        args: &["--stdio"],
+        markers: &["pyproject.toml", "setup.py", "requirements.txt"],
+        extensions: &[(".py", "python"), (".pyi", "python")],
+    },
+];
+
+pub(crate) const SKIP_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    "target",
+    ".git",
+    "dist",
+    ".dock",
+    ".hg",
+    ".svn",
+    "build",
+    "out",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+
+const MARKER_MAX_DEPTH: u32 = 4;
+
+pub(crate) fn config_from_spec(spec: &DefaultServer) -> LspServerConfig {
+    let mut extensions = HashMap::new();
+    for (ext, lang) in spec.extensions {
+        extensions.insert((*ext).to_string(), (*lang).to_string());
+    }
+    LspServerConfig {
+        command: spec.command.to_string(),
+        args: spec.args.iter().map(|s| (*s).to_string()).collect(),
+        extensions,
+        ..LspServerConfig::default()
+    }
+}
+
+/// `cwd` or a nearby subdirectory has a language marker (skips `node_modules` / `target`).
+pub(crate) fn workspace_has_marker(cwd: &Path, markers: &[&str]) -> bool {
+    if markers.iter().any(|m| cwd.join(m).is_file()) {
+        return true;
+    }
+    walk_for_markers(cwd, markers, 0)
+}
+
+fn walk_for_markers(dir: &Path, markers: &[&str], depth: u32) -> bool {
+    if depth >= MARKER_MAX_DEPTH {
+        return false;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for ent in rd.flatten() {
+        let path = ent.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || SKIP_DIR_NAMES.contains(&name.as_ref()) {
+            continue;
+        }
+        if markers.iter().any(|m| path.join(m).is_file()) {
+            return true;
+        }
+        if walk_for_markers(&path, markers, depth + 1) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Language servers on PATH whose workspace markers exist under `cwd`.
+pub fn detect_defaults(cwd: &Path) -> BTreeMap<String, LspServerConfig> {
+    let mut out = BTreeMap::new();
+    for spec in DEFAULT_SERVERS {
+        if !command_on_path(spec.command) {
+            continue;
+        }
+        if !workspace_has_marker(cwd, spec.markers) {
+            continue;
+        }
+        out.insert(spec.name.to_string(), config_from_spec(spec));
+    }
+    out
+}
+
+pub fn command_on_path(name: &str) -> bool {
+    let p = Path::new(name);
+    if p.components().count() > 1 {
+        return p.is_file();
+    }
+    let Ok(path) = std::env::var("PATH") else {
+        return false;
+    };
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    path.split(sep).any(|dir| {
+        let candidate = Path::new(dir).join(name);
+        if candidate.is_file() {
+            return true;
+        }
+        cfg!(windows) && Path::new(dir).join(format!("{name}.exe")).is_file()
     })
 }
 
@@ -372,5 +561,99 @@ mod tests {
         assert!(kept.contains_key("proj"));
         assert!(kept.contains_key("usr"));
         assert!(kept.contains_key("plug"));
+    }
+
+    #[test]
+    fn load_file_accepts_flat_map_and_lsp_servers_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let flat = dir.path().join("flat.json");
+        std::fs::write(
+            &flat,
+            r#"{"rust-analyzer":{"command":"rust-analyzer","extensionToLanguage":{".rs":"rust"}}}"#,
+        )
+        .unwrap();
+        let loaded = super::load_file(&flat);
+        assert_eq!(loaded["rust-analyzer"].command, "rust-analyzer");
+        assert_eq!(
+            loaded["rust-analyzer"].extensions.get(".rs").unwrap(),
+            "rust"
+        );
+
+        let wrapped = dir.path().join("wrapped.json");
+        std::fs::write(
+            &wrapped,
+            r#"{"lspServers":{"gopls":{"command":"gopls","extensions":{".go":"go"}}}}"#,
+        )
+        .unwrap();
+        let loaded = super::load_file(&wrapped);
+        assert_eq!(loaded["gopls"].command, "gopls");
+    }
+
+    #[test]
+    fn detect_defaults_requires_workspace_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = super::detect_defaults(dir.path());
+        assert!(
+            !none.contains_key("rust-analyzer"),
+            "no Cargo.toml → no rust-analyzer default"
+        );
+        if super::command_on_path("rust-analyzer") {
+            std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+            let found = super::detect_defaults(dir.path());
+            assert!(
+                found.contains_key("rust-analyzer"),
+                "Cargo.toml + rust-analyzer on PATH"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_tool_path_keeps_absolute() {
+        let abs = if cfg!(windows) {
+            r"C:\tmp\lib.rs"
+        } else {
+            "/tmp/lib.rs"
+        };
+        let resolved = super::resolve_tool_path(abs);
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with("lib.rs"));
+    }
+
+    #[test]
+    fn nested_package_json_counts_as_typescript_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("embed-sdk");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("package.json"), "{}\n").unwrap();
+        assert!(super::workspace_has_marker(
+            dir.path(),
+            &["package.json", "tsconfig.json", "jsconfig.json"]
+        ));
+        assert!(!super::workspace_has_marker(dir.path(), &["go.mod"]));
+        let skipped = dir.path().join("node_modules").join("pkg");
+        std::fs::create_dir_all(&skipped).unwrap();
+        std::fs::write(skipped.join("go.mod"), "module x\n").unwrap();
+        assert!(
+            !super::workspace_has_marker(dir.path(), &["go.mod"]),
+            "node_modules must not count as a workspace marker"
+        );
+    }
+
+    #[test]
+    fn user_config_wins_over_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+        let mut merged = BTreeMap::new();
+        merged.insert(
+            "rust-analyzer".into(),
+            LspServerConfig {
+                command: "/custom/ra".into(),
+                ..LspServerConfig::default()
+            },
+        );
+        for (name, cfg) in super::detect_defaults(dir.path()) {
+            merged.entry(name).or_insert(cfg);
+        }
+        assert_eq!(merged["rust-analyzer"].command, "/custom/ra");
     }
 }

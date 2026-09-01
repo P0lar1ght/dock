@@ -3,7 +3,7 @@
 //! `dispatch_on_sockets` is a thin router; each LSP operation has its own helper.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
@@ -57,6 +57,33 @@ impl LspBackendAdapter {
         }
     }
 
+    /// After `/lsp` writes lsp.json: merge disk config and start any new servers.
+    pub fn apply_disk_config_background(&self) {
+        let lsp_manager = self.lsp_manager.clone();
+        let startup = self.startup.clone();
+        tokio::spawn(async move {
+            {
+                let mut state = startup.state.lock().await;
+                if matches!(&*state, StartupState::Failed(_)) {
+                    *state = StartupState::NotStarted;
+                }
+            }
+            {
+                let mut mgr = lsp_manager.lock().await;
+                let cwd = std::env::current_dir().unwrap_or_else(|_| mgr.workspace_root.clone());
+                mgr.workspace_root = cwd.canonicalize().unwrap_or(cwd.clone());
+                for (name, cfg) in super::setup::merged_after_setup(&cwd) {
+                    mgr.servers.entry(name).or_insert(cfg);
+                }
+                if mgr.initialized {
+                    mgr.start_missing().await;
+                    return;
+                }
+            }
+            LspBackendAdapter::ensure_started_with_state(lsp_manager, startup).await;
+        });
+    }
+
     fn spawn_bootstrap_task(
         lsp_manager: Arc<tokio::sync::Mutex<LspManager>>,
         startup: Arc<StartupCoordinator>,
@@ -101,8 +128,24 @@ async fn bootstrap_lsp(
 
     let restartable = {
         let mut mgr = lsp_manager.lock().await;
+        if !mgr.initialized && mgr.servers.is_empty() {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| mgr.workspace_root.clone());
+            mgr.workspace_root = cwd.canonicalize().unwrap_or(cwd);
+            mgr.servers = super::config::load_servers_or_defaults(&mgr.workspace_root);
+        }
         mgr.ensure_initialized().await;
         if mgr.clients.is_empty() {
+            if mgr.servers.is_empty() {
+                let user = crate::config::dock_home().join("lsp.json");
+                let project = mgr.workspace_root.join(".dock").join("lsp.json");
+                return Err(format!(
+                    "No LSP servers configured. Add {user} or {project} \
+                     (see TOOLS.md), or install rust-analyzer / typescript-language-server / gopls \
+                     on PATH in a matching workspace.",
+                    user = user.display(),
+                    project = project.display(),
+                ));
+            }
             return Err("No LSP servers started successfully.".to_string());
         }
         for (path, content) in &pending_changes {
@@ -184,7 +227,7 @@ impl super::LspBackend for LspBackendAdapter {
                 }
                 _ => {
                     let path = match input.file_path.as_deref() {
-                        Some(fp) => PathBuf::from(fp),
+                        Some(fp) => super::config::resolve_tool_path(fp),
                         None => return err_result("Required: file_path.".into()),
                     };
                     match mgr.socket_for_file(&path).await {
@@ -326,7 +369,7 @@ fn require_position(input: &LspToolInput) -> Result<(PathBuf, TextDocumentPositi
     else {
         return Err("Required: file_path, line, character.".into());
     };
-    let path = PathBuf::from(fp);
+    let path = super::config::resolve_tool_path(fp);
     let params = text_document_position(&path, line, character).map_err(|e| format!("{e}"))?;
     Ok((path, params))
 }
@@ -470,7 +513,7 @@ async fn dispatch_document_symbols(
     let Some(ref fp) = input.file_path else {
         return Err(DispatchError::Validation("Required: file_path.".into()));
     };
-    let uri = file_uri(Path::new(fp))?;
+    let uri = file_uri(&super::config::resolve_tool_path(fp))?;
     let params = DocumentSymbolParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         work_done_progress_params: Default::default(),
@@ -558,5 +601,75 @@ fn workspace_symbol_to_info(ws: lsp_types::WorkspaceSymbol) -> SymbolInformation
         deprecated: None,
         location: loc,
         container_name: ws.container_name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lsp::config::{command_on_path, LspServerConfig};
+    use crate::lsp::notify::ToolNotificationHandle;
+    use crate::lsp::{LspBackend, LspOperation, LspToolInput};
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    #[ignore = "needs rust-analyzer on PATH; starts a real language server"]
+    async fn rust_analyzer_hover_when_on_path() {
+        assert!(
+            command_on_path("rust-analyzer"),
+            "rust-analyzer must be on PATH"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"lsp_smoke\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let src = dir.path().join("src/lib.rs");
+        std::fs::write(&src, "pub fn hello() -> i32 { 1 }\n").unwrap();
+
+        let mut extensions = HashMap::new();
+        extensions.insert(".rs".into(), "rust".into());
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "rust-analyzer".into(),
+            LspServerConfig {
+                command: "rust-analyzer".into(),
+                extensions,
+                startup_timeout: Some(20_000),
+                ..Default::default()
+            },
+        );
+        let mgr = Arc::new(tokio::sync::Mutex::new(crate::lsp::LspManager::new(
+            servers,
+            dir.path().canonicalize().unwrap(),
+            true,
+            ToolNotificationHandle::noop(),
+        )));
+        let adapter = LspBackendAdapter::new(mgr);
+        adapter
+            .ensure_ready()
+            .await
+            .expect("rust-analyzer should start");
+
+        let input = LspToolInput {
+            operation: LspOperation::Hover,
+            file_path: Some(src.display().to_string()),
+            line: Some(0),
+            character: Some(7),
+            query: None,
+        };
+        let mut last = String::new();
+        for _ in 0..40 {
+            let result = adapter.dispatch(&input).await;
+            last = result.text.clone();
+            if !result.is_error && !last.contains("No hover") {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        panic!("no hover from rust-analyzer: {last}");
     }
 }

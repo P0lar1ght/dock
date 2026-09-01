@@ -184,6 +184,12 @@ impl Runtime {
         value: T,
         inner: Box<dyn FnOnce() -> T + Send>,
     ) -> T {
+        // No listeners: run the default directly, skipping the per-level `Arc`
+        // and `Mutex` the recursive chain would otherwise allocate. Same result
+        // as `go(0, ..)` immediately taking `inner` when `handlers` is empty.
+        if handlers.is_empty() {
+            return inner();
+        }
         let logger = self.logger.clone();
         fn go<T: Clone + Send + Sync + 'static>(
             i: usize,

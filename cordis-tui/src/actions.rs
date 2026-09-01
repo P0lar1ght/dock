@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
 use cordis_spine::{
-    goal_composer_fill, loop_composer_fill, loop_usage_message, tool_slash_arguments,
-    ExtraSlashKind, SlashEntry, GOAL_RESERVED_SUBCOMMANDS,
+    goal_composer_fill, loop_composer_fill, loop_usage_message, lsp_composer_fill,
+    tool_slash_arguments, ExtraSlashKind, SlashEntry, GOAL_RESERVED_SUBCOMMANDS,
 };
 
 /// Synchronous, side-effect-free user intent.
@@ -160,6 +160,11 @@ pub enum Effect {
     ShowTasks,
     ToggleWorkflows,
     ShowMcps,
+    /// `/lsp`：空/`setup` 写项目配置，`user` 写用户配置，`status` 只看不写。
+    ShowLsp {
+        write: bool,
+        user: bool,
+    },
     ShowCordis,
     ShowPresets {
         focus: Option<String>,
@@ -298,6 +303,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
             }
         }
         SlashCmd::Mcps => Effect::ShowMcps,
+        SlashCmd::Lsp => lsp_effect(args),
         SlashCmd::Cordis => Effect::ShowCordis,
         SlashCmd::Preset => {
             let focus = if args.is_empty() {
@@ -386,6 +392,26 @@ fn workflow_instruction(args: &str) -> String {
          用 workflow 工具启动。已有同名注册工作流就用 source.type=name；否则按 create-workflow 技能写脚本。\
          进度看 /workflow runs。完成后会自动汇报，不要轮询 wait_tasks。"
     )
+}
+
+fn lsp_effect(args: &str) -> Effect {
+    match args.trim() {
+        "" | "setup" | "auto" => Effect::ShowLsp {
+            write: true,
+            user: false,
+        },
+        "user" => Effect::ShowLsp {
+            write: true,
+            user: true,
+        },
+        "status" => Effect::ShowLsp {
+            write: false,
+            user: false,
+        },
+        _ => Effect::FillPrompt {
+            text: lsp_composer_fill(),
+        },
+    }
 }
 
 fn goal_effect(args: &str) -> Effect {

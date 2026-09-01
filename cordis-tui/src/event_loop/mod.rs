@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    goal_composer_fill, AgentPresets, AppSettings, DynamicRunner, Goal, LogEvent, PlanMode,
-    Sessions, Slash, ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL,
-    MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS,
-    SLASH, TOOLS,
+    goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets, AppSettings,
+    DynamicRunner, Goal, LogEvent, LspBackendAdapter, LspSetupScope, PlanMode, Sessions, Slash,
+    ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT,
+    PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS, SLASH, TOOLS,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -528,6 +528,35 @@ pub async fn run(ctx: Context) -> Result<()> {
                                         query: String::new(),
                                         tools_expanded: HashSet::new(),
                                         section_collapsed: false,
+                                    };
+                                }
+                                Effect::ShowLsp { write, user } => {
+                                    let cwd = std::env::current_dir()
+                                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                    let body = if write {
+                                        let scope = if user {
+                                            LspSetupScope::User
+                                        } else {
+                                            LspSetupScope::Project
+                                        };
+                                        match lsp_auto_setup(&cwd, scope) {
+                                            Ok(report) => {
+                                                if let Some(handle) =
+                                                    ctx.get::<LspBackendAdapter>(LSP)
+                                                {
+                                                    handle.apply_disk_config_background();
+                                                }
+                                                report.display()
+                                            }
+                                            Err(e) => format!("无法写入 LSP 配置：{e}"),
+                                        }
+                                    } else {
+                                        lsp_status_report(&cwd)
+                                    };
+                                    overlay = Overlay::Notice {
+                                        title: "LSP".into(),
+                                        body,
+                                        scroll: 0,
                                     };
                                 }
                                 Effect::ShowCordis => {

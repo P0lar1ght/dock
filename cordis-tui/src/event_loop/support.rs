@@ -1022,6 +1022,15 @@ pub(super) fn slash_open(ctx: &Context) -> bool {
         .is_some_and(|p| p.slash_snapshot().open)
 }
 
+/// Enter fills `/cmd ` only while choosing a command name. After a space,
+/// the arg dropdown stays visible for Tab, but Enter sends.
+pub(super) fn slash_captures_enter(ctx: &Context) -> bool {
+    ctx.get::<PromptWidget>(TUI_PROMPT).is_some_and(|p| {
+        let snap = p.slash_snapshot();
+        snap.open && !snap.completing_args
+    })
+}
+
 pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
     match overlay {
         Overlay::None => 0,

@@ -13,7 +13,9 @@ use std::sync::Mutex;
 use cordis::{plugin, Context, Inject, Plugin};
 use tokio::sync::oneshot;
 
-use crate::names::{PLAN_EVENT, PLAN_MODE, TOOLS};
+use crate::agent_presets::AgentPresets;
+use crate::names::{AGENT_PRESETS, PLAN_EVENT, PLAN_MODE, PROMPT_ASSEMBLE, TOOLS};
+use crate::prompt::{PromptAssembly, ORDER_PLAN};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
@@ -245,6 +247,25 @@ fn path_targets_plan_file(path: &str) -> bool {
 pub fn plan_mode() -> Plugin {
     plugin("plan-mode", Inject::from([TOOLS]), |ctx, _: &()| {
         ctx.provide(PLAN_MODE, PlanMode::new(ctx.clone()))?;
+        // Plan mode contributes the read-only reminder to the prompt assembly.
+        let _ = ctx.on_waterfall(PROMPT_ASSEMBLE, {
+            let ctx = ctx.clone();
+            move |assembly: PromptAssembly, args| {
+                let mut a = args.next::<PromptAssembly>().unwrap_or(assembly);
+                let replace = ctx
+                    .get::<AgentPresets>(AGENT_PRESETS)
+                    .is_some_and(|p| p.replaces_prompt());
+                if !replace {
+                    if let Some(plan) = ctx.get::<PlanMode>(PLAN_MODE) {
+                        plan.promote_pending();
+                        if plan.gated() {
+                            a.section(ORDER_PLAN, "plan", plan_system_addon());
+                        }
+                    }
+                }
+                a
+            }
+        });
         let tools = ctx.require::<Tools>(TOOLS)?;
         let enter: ToolBody = {
             let ctx = ctx.clone();

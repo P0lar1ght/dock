@@ -137,10 +137,7 @@ impl Ask {
     /// Dual-resolve from the web gateway. Matches questions by id, text, or
     /// projector `question_{n}` ids. Empty queue is an error so the second
     /// resolver cannot silently succeed.
-    pub fn respond(
-        &self,
-        answers: &[(String, Vec<String>, Option<String>)],
-    ) -> Result<(), String> {
+    pub fn respond(&self, answers: &[(String, Vec<String>, Option<String>)]) -> Result<(), String> {
         let mut queue = self.queue.lock().unwrap();
         let Some(pending) = queue.front_mut() else {
             return Err("no pending question".into());

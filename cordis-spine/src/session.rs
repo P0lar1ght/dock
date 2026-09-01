@@ -820,7 +820,10 @@ mod tests {
             .rename_archived(&item.id, "  new title  ")
             .expect("archived rename");
         assert_eq!(renamed.title, "new title");
-        assert_eq!(sessions.remove_archived(&item.id).unwrap().title, "new title");
+        assert_eq!(
+            sessions.remove_archived(&item.id).unwrap().title,
+            "new title"
+        );
         assert!(sessions.archived().is_empty());
         assert!(sessions.rename_archived(&item.id, "gone").is_none());
     }

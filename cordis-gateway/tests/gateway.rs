@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cordis::Context;
-use cordis_gateway::{gateway_bind, GATEWAY, PROTOCOL_VERSION};
+use cordis_gateway::{gateway_bind, gateway_idle, GATEWAY, PROTOCOL_VERSION};
 use cordis_spine::{
     agent_loop, install_fakes, mcp_client, permissions, plan_mode, settings, slash, tool_ask_user,
     tool_goal, turn, AppSettings, ExtraSlashKind, Goal, LogEvent, LoopHandle, PermissionOptionKind,
@@ -75,36 +75,41 @@ struct Harness {
     http: reqwest::Client,
 }
 
+async fn harness_root() -> Context {
+    let root = Context::new();
+    install_fakes(&root).await.unwrap();
+    root.plugin(settings(), ()).unwrap().wait().await.unwrap();
+    root.plugin(turn(), ()).unwrap().wait().await.unwrap();
+    root.plugin(permissions(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(plan_mode(), ()).unwrap().wait().await.unwrap();
+    root.plugin(tool_ask_user(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+    root.plugin(slash(), ()).unwrap().wait().await.unwrap();
+    root.plugin(mcp_client(), ()).unwrap().wait().await.unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    let port = TestSession {
+        ctx: root.clone(),
+        working: Arc::new(AtomicBool::new(false)),
+    };
+    root.provide(
+        SESSION_PORT,
+        SessionRef::new(Arc::new(port) as Arc<dyn SessionPort>),
+    )
+    .unwrap();
+    root
+}
+
 impl Harness {
     async fn boot() -> Self {
-        let root = Context::new();
-        install_fakes(&root).await.unwrap();
-        root.plugin(settings(), ()).unwrap().wait().await.unwrap();
-        root.plugin(turn(), ()).unwrap().wait().await.unwrap();
-        root.plugin(permissions(), ())
-            .unwrap()
-            .wait()
-            .await
-            .unwrap();
-        root.plugin(plan_mode(), ()).unwrap().wait().await.unwrap();
-        root.plugin(tool_ask_user(), ())
-            .unwrap()
-            .wait()
-            .await
-            .unwrap();
-        root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
-        root.plugin(slash(), ()).unwrap().wait().await.unwrap();
-        root.plugin(mcp_client(), ()).unwrap().wait().await.unwrap();
-        root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
-        let port = TestSession {
-            ctx: root.clone(),
-            working: Arc::new(AtomicBool::new(false)),
-        };
-        root.provide(
-            SESSION_PORT,
-            SessionRef::new(Arc::new(port) as Arc<dyn SessionPort>),
-        )
-        .unwrap();
+        let root = harness_root().await;
         root.plugin(gateway_bind("127.0.0.1:0"), ())
             .unwrap()
             .wait()
@@ -114,6 +119,11 @@ impl Harness {
             .require::<cordis_tui::GatewayRef>(GATEWAY)
             .unwrap()
             .local_addr();
+        assert!(
+            root.require::<cordis_tui::GatewayRef>(GATEWAY)
+                .unwrap()
+                .is_listening()
+        );
         let http = reqwest::Client::new();
         let harness = Self {
             ctx: root,
@@ -780,6 +790,9 @@ async fn companion_ipv6_serves_http() {
         cordis_tui::CompanionStatus::Failed { addr, error } => {
             panic!("companion {addr} failed: {error}");
         }
+        cordis_tui::CompanionStatus::Stopped => {
+            panic!("companion not listening");
+        }
     };
     assert!(addr.is_ipv6(), "{addr}");
     let res = h
@@ -901,4 +914,58 @@ async fn image_inputs_put_then_turn_projects_attachments() {
     assert_eq!(user["params"]["attachments"][0]["mimeType"], "image/png");
     assert_eq!(user["params"]["attachments"][0]["width"], 1);
     assert!(user["params"]["attachments"][0].get("data").is_none());
+}
+
+#[tokio::test]
+async fn gateway_idle_until_start_listen() {
+    let root = harness_root().await;
+    root.plugin(gateway_idle("127.0.0.1:0"), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let gw = root.require::<cordis_tui::GatewayRef>(GATEWAY).unwrap();
+    assert!(!gw.is_listening(), "plugin should not bind until /pair");
+    let preferred = gw.local_addr();
+    assert_eq!(preferred.port(), 0);
+
+    let addr = gw.start_listen().expect("start_listen");
+    assert!(gw.is_listening());
+    assert_ne!(addr.port(), 0);
+
+    let http = reqwest::Client::new();
+    let mut ready = false;
+    for _ in 0..80 {
+        if http
+            .get(format!("http://{addr}/nope"))
+            .header("Origin", PAGE_ORIGIN)
+            .send()
+            .await
+            .is_ok()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(ready, "HTTP did not start on {addr}");
+
+    gw.stop_listen().expect("stop_listen");
+    assert!(!gw.is_listening());
+    let mut down = false;
+    for _ in 0..80 {
+        match http
+            .get(format!("http://{addr}/nope"))
+            .header("Origin", PAGE_ORIGIN)
+            .send()
+            .await
+        {
+            Err(_) => {
+                down = true;
+                break;
+            }
+            Ok(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+        }
+    }
+    assert!(down, "HTTP still serving {addr} after stop_listen");
 }
