@@ -695,4 +695,25 @@ mod tests {
             Err(ResolveError::FilenameMismatch { .. })
         ));
     }
+
+    #[test]
+    fn dock_deep_research_is_the_compiled_in_builtin() {
+        let builtin = BUILTIN_WORKFLOWS
+            .iter()
+            .find(|row| row.name == "deep-research")
+            .expect("deep-research builtin");
+        let meta = extract_meta(builtin.script).expect("meta");
+        assert_eq!(meta.name, "deep-research");
+        assert!(
+            meta.when_to_use
+                .as_deref()
+                .is_some_and(|text| text.contains("/deep-research")),
+            "{:?}",
+            meta.when_to_use
+        );
+        assert!(builtin.path.ends_with("src/workflow/workflows/deep_research.rhai"));
+        assert!(builtin.script.contains("没有提供调研问题"));
+        assert!(builtin.script.contains("label: \"report-synthesizer\""));
+        assert!(is_compiled_in_builtin("deep-research"));
+    }
 }

@@ -19,6 +19,7 @@ use super::grok_tool::{
 };
 use super::registry::{resolve_by_name, resolve_by_path, resolve_inline, ResolveError};
 use crate::names::SUBAGENTS;
+use crate::task::types::{SubagentCapabilityMode, SubagentRuntimeOverrides};
 use crate::task::Subagents;
 
 #[derive(Clone, Debug)]
@@ -367,9 +368,12 @@ async fn spawn_agent(
     let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
         return Err(HostError::Failed("subagents is not mounted".into()));
     };
-    let prompt = opts.prompt;
+    let mut prompt = opts.prompt;
     if prompt.trim().is_empty() {
         return Err(HostError::Failed("agent prompt is empty".into()));
+    }
+    if let Some(schema) = &opts.output_schema {
+        prompt = append_output_schema(&prompt, schema);
     }
     let description = opts
         .label
@@ -381,16 +385,73 @@ async fn spawn_agent(
         .as_deref()
         .unwrap_or("general-purpose")
         .to_string();
+    let overrides = SubagentRuntimeOverrides {
+        model: opts.model.clone(),
+        reasoning_effort: opts.effort.clone(),
+        capability_mode: parse_capability(opts.capability_mode.as_deref()),
+        output_schema: opts.output_schema.clone(),
+        output_token_budget: opts.max_output_tokens,
+        ..Default::default()
+    };
     let started = Instant::now();
-    let snap = sub.spawn_and_wait(prompt, description, subagent_type).await;
+    let snap = sub
+        .spawn_and_wait_with(prompt, description, subagent_type, overrides)
+        .await;
     Ok(AgentResult {
         agent_id: snap.id,
         success: !snap.cancelled && snap.done,
-        output: serde_json::json!(snap.output),
+        output: agent_output_value(&snap.output),
         cancelled: snap.cancelled,
         tokens_used: 0,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+fn parse_capability(raw: Option<&str>) -> Option<SubagentCapabilityMode> {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("read-only") | Some("readonly") => Some(SubagentCapabilityMode::ReadOnly),
+        Some("read-write") | Some("readwrite") => Some(SubagentCapabilityMode::ReadWrite),
+        Some("execute") => Some(SubagentCapabilityMode::Execute),
+        Some("all") => Some(SubagentCapabilityMode::All),
+        _ => None,
+    }
+}
+
+fn append_output_schema(prompt: &str, schema: &serde_json::Value) -> String {
+    format!(
+        "{prompt}\n\n<output-schema>\n{schema}\n</output-schema>\nReply with JSON only that matches the schema. Do not wrap it in markdown fences."
+    )
+}
+
+fn agent_output_value(raw: &str) -> serde_json::Value {
+    let trimmed = raw.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return value;
+    }
+    if let Some(fenced) = extract_fenced_json(trimmed) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&fenced) {
+            return value;
+        }
+    }
+    serde_json::json!(raw)
+}
+
+fn extract_fenced_json(raw: &str) -> Option<String> {
+    let after_open = raw.split_once("```")?.1;
+    let body = after_open
+        .strip_prefix("json")
+        .or_else(|| after_open.strip_prefix("JSON"))
+        .unwrap_or(after_open);
+    let body = body
+        .strip_prefix('\n')
+        .or_else(|| body.strip_prefix("\r\n"))
+        .unwrap_or(body);
+    let inner = body.split_once("```")?.0.trim();
+    if inner.starts_with('{') || inner.starts_with('[') {
+        Some(inner.to_string())
+    } else {
+        None
+    }
 }
 
 fn sanitize_scratch(name: &str) -> String {
@@ -425,5 +486,29 @@ fn reply_cancelled(req: WorkflowHostRequest) {
             let _ = reply.send(Err(HostError::Cancelled));
         }
         R::Phase { .. } | R::Log { .. } | R::Telemetry { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_output_parses_json_object_or_fence() {
+        let obj = agent_output_value(r#"{"questions":["a"]}"#);
+        assert_eq!(obj["questions"][0], "a");
+        let fenced = agent_output_value("here\n```json\n{\"claim\":\"x\"}\n```\n");
+        assert_eq!(fenced["claim"], "x");
+        let plain = agent_output_value("not json");
+        assert_eq!(plain, serde_json::json!("not json"));
+    }
+
+    #[test]
+    fn read_only_capability_maps() {
+        assert_eq!(
+            parse_capability(Some("read-only")),
+            Some(SubagentCapabilityMode::ReadOnly)
+        );
+        assert_eq!(parse_capability(Some("nope")), None);
     }
 }

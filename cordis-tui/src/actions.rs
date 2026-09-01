@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
 use cordis_spine::{
-    goal_composer_fill, loop_composer_fill, loop_usage_message, lsp_composer_fill,
-    tool_slash_arguments, ExtraSlashKind, SlashEntry, GOAL_RESERVED_SUBCOMMANDS,
+    extra_tool_slash_arguments, goal_composer_fill, loop_composer_fill, loop_usage_message,
+    lsp_composer_fill, workflow_command_arguments, ExtraSlashKind, SlashEntry,
+    GOAL_RESERVED_SUBCOMMANDS, WORKFLOW_TOOL_NAME,
 };
 
 /// Synchronous, side-effect-free user intent.
@@ -296,9 +297,21 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
             if args.is_empty() || args.eq_ignore_ascii_case("runs") {
                 Effect::ToggleWorkflows
             } else {
-                Effect::SendPrompt {
-                    text: workflow_instruction(args),
-                    send_now: true,
+                let first = args.split_whitespace().next().unwrap_or("");
+                if matches!(first, "pause" | "resume" | "stop" | "save") {
+                    Effect::ToggleWorkflows
+                } else {
+                    match workflow_command_arguments(args) {
+                        Ok((name, arguments)) => Effect::RunTool {
+                            name: WORKFLOW_TOOL_NAME.into(),
+                            arguments,
+                            title: format!("/{name}"),
+                        },
+                        Err(body) => Effect::ShowNotice {
+                            title: "工作流".into(),
+                            body,
+                        },
+                    }
                 }
             }
         }
@@ -359,10 +372,16 @@ pub fn effect_for_extra(entry: &SlashEntry, args: &str) -> Effect {
             body: text,
         },
         ExtraSlashKind::Slot => Effect::OpenSlot { id: text },
-        ExtraSlashKind::Tool => Effect::RunTool {
-            name: entry.text.trim().to_string(),
-            arguments: tool_slash_arguments(args),
-            title: entry.tool_title(),
+        ExtraSlashKind::Tool => match extra_tool_slash_arguments(entry, args) {
+            Ok(arguments) => Effect::RunTool {
+                name: entry.text.trim().to_string(),
+                arguments,
+                title: entry.tool_title(),
+            },
+            Err(body) => Effect::ShowNotice {
+                title: entry.tool_title(),
+                body,
+            },
         },
     }
 }
@@ -382,16 +401,6 @@ fn apply_settings_arg(args: &str) -> Effect {
             cmd: SlashCmd::Settings,
         },
     }
-}
-
-/// `/workflow <name …>` 注入给模型的说明（工具名保持英文）。
-fn workflow_instruction(args: &str) -> String {
-    format!(
-        "# /workflow — 启动工作流\n\n\
-         用户请求：{args}\n\n\
-         用 workflow 工具启动。已有同名注册工作流就用 source.type=name；否则按 create-workflow 技能写脚本。\
-         进度看 /workflow runs。完成后会自动汇报，不要轮询 wait_tasks。"
-    )
 }
 
 fn lsp_effect(args: &str) -> Effect {
@@ -623,6 +632,33 @@ mod tests {
         }
         match effect_for_extra(&entry, r#"{"x":1}"#) {
             Effect::RunTool { arguments, .. } => assert_eq!(arguments, r#"{"x":1}"#),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn extra_slash_workflow_builds_named_source() {
+        let entry = SlashEntry {
+            command: "deep-research".into(),
+            description: "调研".into(),
+            kind: ExtraSlashKind::Tool,
+            text: WORKFLOW_TOOL_NAME.into(),
+            title: "deep-research".into(),
+            send: false,
+        };
+        match effect_for_extra(&entry, "why rust") {
+            Effect::RunTool {
+                name,
+                arguments,
+                title,
+            } => {
+                assert_eq!(name, WORKFLOW_TOOL_NAME);
+                assert_eq!(title, "deep-research");
+                let v: serde_json::Value = serde_json::from_str(&arguments).unwrap();
+                assert_eq!(v["source"]["type"], "name");
+                assert_eq!(v["source"]["name"], "deep-research");
+                assert_eq!(v["args"]["query"], "why rust");
+            }
             other => panic!("{other:?}"),
         }
     }

@@ -29,6 +29,9 @@
 | `/goal status\|edit\|pause\|resume\|clear` | 打开目标 overlay / 暂停 / 继续 / 清除 |
 | `/tasks` | Grok 分组 pane：Workflows → Subagents → Tasks → Watchers。子代理行显示当前模式名册的角色名（如守望下的「岑」而不是 `Cen`）。Enter / 点击子代理或后台任务打开 **Grok 同款全屏边框**（子代理：工具卡折叠循环 + 框底输入 `send_message`）。Esc 从全屏回到本列表。子代理第一轮结束后显示 **idle**（不是 done）；idle 不算 running。Watchers 里的 loop：`x` 或点 `[✗]` 关闭（`scheduler_delete` / `cron.cancel`） |
 | `/workflow` / `/workflow runs` | Grok `Workflow Runs` overlay |
+| `/workflow <name> [参数]` | 立刻用 `workflow` 工具按注册名启动（不经模型）。参数：纯文本 → `args.query`/`args.objective`；以 `{` 开头 → 原始 JSON。可选 `--agent-budget N`。`pause`/`resume`/`stop`/`save` 仍打开 overlay |
+| `/deep-research <查询>` | 内置 Rhai 工作流 extra（`kind: tool` → `workflow`，`source.type=name`）。其它已发现工作流同样登记成 `/<name>`。不可盖 `RESERVED_SLASH`；与技能撞名时技能 extra 优先 |
+| `/<工作流名> [参数]` | 项目 `.dock/workflows/<name>.rhai`、用户 `~/.dock/workflows/<name>.rhai`（以及 `~/.dock/bundled/workflows/`）里 `meta.name` 与文件名一致的脚本。不能覆盖内置 `deep-research` |
 | `/mcps` | Grok 分组 pane：标题「MCP 服务器」、分组「本地 (N)」、徽章 `[就绪]` / `[需认证]` / `[不可用]` / `[已禁用]`、右侧 `(本地)`。Space 开关当前服务器或工具（写入 `config.toml`：`[mcp_servers.<name>].enabled` 与 `[disabled_mcp_tools.<server>]`）；`i` 对 HTTP 服务器打开浏览器 OAuth（PKCE，token 写 `~/.dock/mcp_credentials.json`，不是 grok.com 登录）；Enter 展开/收起工具（`N 个工具` / `N 个工具（M 个已启用）`）；Esc 关闭。stdio 或 Streamable HTTP。工具表跟 `tools/list` 翻页和 `tools/list_changed`；HTTP 跟 GET SSE，session 404 会重新握手 |
 | `/lsp` | 探测 PATH 上的 `rust-analyzer` / `typescript-language-server` / `gopls` / `pyright-langserver`，按工作区标记（含子目录，跳过 `node_modules` / `target`）把缺的服务器写入 `.dock/lsp.json`，不覆盖已有条目。Notice 显示保留 / 添加 / 跳过。当前会话会尝试启动新服务器。空命令或 `/lsp setup` 写项目配置；`/lsp status` 只看不写；`/lsp user` 把 PATH 上有的默认服务器写入 `~/.dock/lsp.json`（不要求工作区标记）。输入 `/lsp ` 后 Tab / Enter 补全 `status` / `setup` / `user`（`/lsp s` 可滤到 status）。浏览器 companion 拒绝（请在 Dock 终端用） |
 | `/cordis`（`plugins`） | Notice「Cordis 插件」：磁盘永久层（项目 `.dock/plugins/<id>/` 覆盖用户 `~/.dock/plugins/<id>/`）和本会话内存插件。Esc 关闭。写成永久用模型工具 `cordis_promote` |
@@ -37,7 +40,7 @@
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
 | `/find` | 搜索对话 |
 | `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入 / 输出 / 缓存命中与占比 / 思考 / 调用次数 / API 耗时。接口若带 `cost_in_usd_ticks` 才显示费用，缺省为「未上报」（不是免费）。**Tab** 切到占用。**没有** grok.com 账号额度、`/usage manage` |
-| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、MCP、工作流、技能。**工具定义不含 MCP**（对齐 Grok `tool_definitions_builtins_only`）；MCP 工具 schema 占用记在「MCP 服务器」行，点开按 server 列出每个工具。技能 listing 已在系统提示里，图例行不把同一段再加进 `used`。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量 |
+| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、MCP、工作流、技能。**工具定义不含 MCP**（对齐 Grok `tool_definitions_builtins_only`）；MCP 工具 schema 占用记在「MCP 服务器」行，点开按 server 列出每个工具。技能与工作流 listing 已在系统提示里，图例行不把同一段再加进 `used`。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量 |
 | `/compact [说明]` | 压缩旧对话为摘要（Grok 同款 structured `<summary>` 九段）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩（Grok `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`）；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制 |
 | `/theme` `/t` | 切换配色 |
 | `/timestamps` | 开关滚动区时间戳 |

@@ -133,4 +133,7 @@ pub use types::{
 };
 pub use usage::{session_usage_block_text, PromptUsage, UsageLedger};
 pub use web_fetch::tool_web;
-pub use workflow::{tool_workflow, WorkflowRunSnap, Workflows};
+pub use workflow::{
+    extra_tool_slash_arguments, tool_workflow, workflow_command_arguments,
+    workflow_slash_arguments, WorkflowInfo, WorkflowRunSnap, Workflows, WORKFLOW_TOOL_NAME,
+};

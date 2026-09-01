@@ -158,7 +158,7 @@ pub fn render_workflows_overlay(
             buf,
             content.x + 1,
             list_y,
-            "No workflow runs in this session yet.",
+            "本会话还没有工作流运行。",
             Style::default().fg(theme.gray_bright),
             content.right(),
         );
@@ -167,7 +167,7 @@ pub fn render_workflows_overlay(
                 buf,
                 content.x + 1,
                 list_y + 2,
-                "Start one with /deep-research <query> or ask for a workflow.",
+                "用 /deep-research <查询> 启动，或把脚本放到 .dock/workflows/<name>.rhai。",
                 Style::default().fg(theme.gray),
                 content.right(),
             );

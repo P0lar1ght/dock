@@ -152,6 +152,24 @@ impl Subagents {
         description: String,
         subagent_type: String,
     ) -> SubagentSnap {
+        self.spawn_and_wait_with(
+            prompt,
+            description,
+            subagent_type,
+            SubagentRuntimeOverrides::default(),
+        )
+        .await
+    }
+
+    /// Same as [`Self::spawn_and_wait`], with capability / schema overrides
+    /// from a Rhai `agent()` call.
+    pub async fn spawn_and_wait_with(
+        &self,
+        prompt: String,
+        description: String,
+        subagent_type: String,
+        runtime_overrides: SubagentRuntimeOverrides,
+    ) -> SubagentSnap {
         let id = uuid::Uuid::now_v7().to_string();
         self.remember(
             &id,
@@ -168,7 +186,7 @@ impl Subagents {
             parent_prompt_id: None,
             resume_from: None,
             cwd: None,
-            runtime_overrides: SubagentRuntimeOverrides::default(),
+            runtime_overrides,
             run_in_background: false,
             surface_completion: false,
             await_to_completion: true,

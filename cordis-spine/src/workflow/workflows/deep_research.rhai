@@ -1,7 +1,7 @@
 let meta = #{
     name: "deep-research",
-    description: "Research a query with bounded parallelism, cross-check the evidence, and write a cited report",
-    when_to_use: "Compare, investigate, or research a question that needs sourced claims. /deep-research, research this, write a cited report.",
+    description: "用有界并行调研一个问题，交叉核验证据，并写出带引用的报告",
+    when_to_use: "需要有出处的比较、调查或调研。/deep-research <查询>，或 workflow 工具 source.name=deep-research。",
     phases: [
         #{ title: "Plan", detail: "Choose a small set of independent research questions" },
         #{ title: "Research", detail: "Collect structured claims, evidence, and sources in parallel" },
@@ -20,11 +20,11 @@ fn trimmed(s) {
 }
 
 if args == () {
-    pause("verification", "No research query was provided. Run /deep-research <query>, or pass args.query.");
+    pause("verification", "没有提供调研问题。运行 /deep-research <查询>，或传入 args.query。");
 }
 let query = if args.query != () { args.query } else { args.objective };
 if query == () || query == "" {
-    pause("verification", "No research query was provided. Run /deep-research <query>, or pass args.query.");
+    pause("verification", "没有提供调研问题。运行 /deep-research <查询>，或传入 args.query。");
 }
 let breadth = 4;
 if args.breadth != () && args.breadth >= 2 && args.breadth <= 6 {

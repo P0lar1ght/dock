@@ -10,10 +10,10 @@
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    goal_composer_fill, loop_composer_fill, loop_schedule_instruction, session_usage_block_text,
-    tool_slash_arguments, AppSettings, ExtraSlashKind, Goal, LoopFireMode, PlanMode, Sessions,
-    Slash, SlashEntry, ToolCall, Tools, GOAL, GOAL_RESERVED_SUBCOMMANDS, PLAN_MODE, SESSIONS,
-    SETTINGS, SLASH, TOOLS,
+    extra_tool_slash_arguments, goal_composer_fill, loop_composer_fill, loop_schedule_instruction,
+    session_usage_block_text, workflow_command_arguments, AppSettings, ExtraSlashKind, Goal,
+    LoopFireMode, PlanMode, Sessions, Slash, SlashEntry, ToolCall, Tools, GOAL,
+    GOAL_RESERVED_SUBCOMMANDS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, TOOLS, WORKFLOW_TOOL_NAME,
 };
 use cordis_tui::{resolve_slash, slash_catalog, SessionRef, SlashCatalogEntry, SESSION_PORT};
 
@@ -249,7 +249,7 @@ async fn execute_builtin(
         GatewayCmd::Help => Ok(notice("斜杠命令", help_body(gateway))),
         GatewayCmd::Usage => cmd_usage(gateway),
         GatewayCmd::Context => Ok(menu("context")),
-        GatewayCmd::Workflow => cmd_workflow(gateway, args),
+        GatewayCmd::Workflow => cmd_workflow(gateway, args).await,
         GatewayCmd::Timestamps => cmd_timestamps(gateway),
     }
 }
@@ -277,11 +277,15 @@ async fn execute_extra(
             let Some(tools) = gateway.ctx().get::<Tools>(TOOLS) else {
                 return Ok(notice(entry.tool_title(), "tools 未挂载".to_string()));
             };
+            let arguments = match extra_tool_slash_arguments(entry, args) {
+                Ok(arguments) => arguments,
+                Err(body) => return Ok(notice(entry.tool_title(), body)),
+            };
             let result = tools
                 .execute(ToolCall {
                     id: format!("slash-tool-{}", entry.command),
                     name: entry.text.trim().to_string(),
-                    arguments: tool_slash_arguments(args),
+                    arguments,
                 })
                 .await;
             Ok(notice(entry.tool_title(), result.content))
@@ -461,20 +465,30 @@ fn cmd_usage(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     ))
 }
 
-fn cmd_workflow(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
-    // Overlay (`/workflow` / `/workflow runs`) is TUI. A name submits a start prompt.
+async fn cmd_workflow(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    let args = args.trim();
     if args.is_empty() || args.eq_ignore_ascii_case("runs") {
         return Ok(terminal_only("workflow"));
     }
-    submit_text(
-        gateway,
-        format!(
-            "# /workflow — 启动工作流\n\n\
-             用户请求：{args}\n\n\
-             用 workflow 工具启动。已有同名注册工作流就用 source.type=name；否则按 create-workflow 技能写脚本。\
-             进度看 /workflow runs。完成后会自动汇报，不要轮询 wait_tasks。"
-        ),
-    )
+    let first = args.split_whitespace().next().unwrap_or("");
+    if matches!(first, "pause" | "resume" | "stop" | "save") {
+        return Ok(terminal_only("workflow"));
+    }
+    let (name, arguments) = match workflow_command_arguments(args) {
+        Ok(v) => v,
+        Err(body) => return Ok(notice("工作流", body)),
+    };
+    let Some(tools) = gateway.ctx().get::<Tools>(TOOLS) else {
+        return Ok(notice(format!("/{name}"), "tools 未挂载".to_string()));
+    };
+    let result = tools
+        .execute(ToolCall {
+            id: format!("slash-tool-{name}"),
+            name: WORKFLOW_TOOL_NAME.into(),
+            arguments,
+        })
+        .await;
+    Ok(notice(format!("/{name}"), result.content))
 }
 
 fn cmd_timestamps(gateway: &GatewayHandle) -> Result<Value, RpcError> {

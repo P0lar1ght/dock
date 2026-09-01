@@ -67,6 +67,24 @@ fn slash_plan_tasks_mcps_map() {
         dispatch(Action::SendPrompt("/workflow runs".into()), &prompt).as_slice(),
         [Effect::ToggleWorkflows]
     ));
+    match dispatch(
+        Action::SendPrompt("/workflow deep-research why rust".into()),
+        &prompt,
+    )
+    .as_slice()
+    {
+        [Effect::RunTool {
+            name,
+            arguments,
+            title,
+        }] => {
+            assert_eq!(name, "workflow");
+            assert_eq!(title, "/deep-research");
+            assert!(arguments.contains("deep-research"), "{arguments}");
+            assert!(arguments.contains("why rust"), "{arguments}");
+        }
+        other => panic!("{other:?}"),
+    }
     assert!(matches!(
         dispatch(Action::SendPrompt("/mcps".into()), &prompt).as_slice(),
         [Effect::ShowMcps]
