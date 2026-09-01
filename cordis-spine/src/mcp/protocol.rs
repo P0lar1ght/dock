@@ -41,6 +41,13 @@ pub fn is_mcp_public_name(name: &str) -> bool {
     name.starts_with(MCP_NAME_PREFIX) && name.contains(MCP_TOOL_NAME_DELIMITER)
 }
 
+/// Split `mcp_{server}__{tool}` into `(server, tool)`.
+pub fn split_mcp_public_name(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix(MCP_NAME_PREFIX)?;
+    rest.split_once(MCP_TOOL_NAME_DELIMITER)
+        .filter(|(server, tool)| !server.is_empty() && !tool.is_empty())
+}
+
 pub fn client_info() -> Value {
     json!({
         "name": "dock",
@@ -344,5 +351,10 @@ mod tests {
         assert_eq!(raw_tool_name("mcp_local__echo"), "echo");
         assert!(is_mcp_public_name("mcp_local__sungods_search"));
         assert!(!is_mcp_public_name("bash"));
+        assert_eq!(
+            split_mcp_public_name("mcp_sungods__search"),
+            Some(("sungods", "search"))
+        );
+        assert_eq!(split_mcp_public_name("bash"), None);
     }
 }

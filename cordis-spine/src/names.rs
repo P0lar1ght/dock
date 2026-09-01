@@ -21,6 +21,8 @@ pub const MEMORY: &str = "memory";
 pub const GOAL: &str = "goal";
 /// Language-server client (`ctx.lsp`). Fail-open.
 pub const LSP: &str = "lsp";
+/// Agent skills catalog (`ctx.skills`). Fail-open.
+pub const SKILLS: &str = "skills";
 /// Rhai workflow coordinator (`ctx.workflows`). `workflow` + `/workflow`.
 pub const WORKFLOWS: &str = "workflows";
 /// Extra prompt-bar slash commands. TUI live-looks it; builtins stay in CATALOG.

@@ -298,6 +298,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "interrupt_agent",
         "report",
         "lsp",
+        "skill",
         "update_goal",
         "memory_search",
         "memory_get",
@@ -343,6 +344,9 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         .is_some());
     assert!(root
         .get::<cordis_spine::LspBackendAdapter>(cordis_spine::LSP)
+        .is_some());
+    assert!(root
+        .get::<cordis_spine::Skills>(cordis_spine::SKILLS)
         .is_some());
 
     let lsp_parse = tools

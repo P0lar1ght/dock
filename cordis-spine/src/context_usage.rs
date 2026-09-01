@@ -9,8 +9,8 @@ use cordis::Context;
 use crate::compact::{
     estimate_context_tokens, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, VISIBLE_NOTICE,
 };
-use crate::mcp::Mcp;
-use crate::names::{MCP, SESSIONS, SETTINGS, SYSTEM_PROMPT, TOOLS};
+use crate::mcp::{is_mcp_public_name, split_mcp_public_name};
+use crate::names::{SESSIONS, SETTINGS, SKILLS, SYSTEM_PROMPT, TOOLS};
 use crate::prompt::SystemPrompt;
 use crate::session::{Sessions, TokenUsage};
 use crate::settings::AppSettings;
@@ -29,6 +29,7 @@ pub enum OccupancyKind {
     Tools,
     Mcp,
     Workflows,
+    Skills,
 }
 
 impl OccupancyKind {
@@ -41,6 +42,7 @@ impl OccupancyKind {
             Self::Tools => "工具定义",
             Self::Mcp => "MCP 服务器",
             Self::Workflows => "工作流",
+            Self::Skills => "技能",
         }
     }
 }
@@ -119,8 +121,9 @@ pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
         OccupancyKind::Overhead => overhead_detail(ctx, &snap),
         OccupancyKind::Free => free_detail(&snap),
         OccupancyKind::Tools => tools_detail(ctx, &snap),
-        OccupancyKind::Mcp => mcp_detail(ctx),
+        OccupancyKind::Mcp => mcp_detail(ctx, &snap),
         OccupancyKind::Workflows => workflows_detail(&snap),
+        OccupancyKind::Skills => skills_detail(ctx, &snap),
     }
 }
 
@@ -163,15 +166,14 @@ fn snapshot_with_system(ctx: &Context, system: &str) -> ContextSnapshot {
         .map(|s| s.user_image_count().saturating_mul(IMAGE_TOKEN_ESTIMATE))
         .unwrap_or(0);
 
-    let specs = ctx
-        .get::<Tools>(TOOLS)
-        .map(|t| t.specs_for_model_on(ctx))
-        .unwrap_or_default();
-    let tool_definitions_count = specs.len() as u64;
-    let tool_definitions_tokens = estimate_tool_definitions(&specs);
+    let (builtin_specs, mcp_specs) = partition_model_specs(ctx);
+    let tool_definitions_count = builtin_specs.len() as u64;
+    let tool_definitions_tokens = estimate_tool_definitions(&builtin_specs);
+    let mcp_definitions_tokens = estimate_tool_definitions(&mcp_specs);
 
     let estimate = base
         .saturating_add(tool_definitions_tokens)
+        .saturating_add(mcp_definitions_tokens)
         .saturating_add(image_tokens)
         .saturating_add(reasoning);
     let usage = sessions.as_ref().map(|s| s.usage()).unwrap_or_default();
@@ -361,28 +363,37 @@ fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         snap.system_prompt_tokens
             .saturating_add(snap.message_tokens),
     );
+    let mcp_cat = snap.categories.iter().find(|c| c.label == "MCP 服务器");
+    let mut rows = vec![
+        DetailRow {
+            label: "推理".into(),
+            tokens: Some(reasoning),
+            note: Some(format!("{reasoning_n} 段")),
+        },
+        DetailRow {
+            label: "图片".into(),
+            tokens: Some(image_tok),
+            note: Some(format!("{image_n} 张 × {IMAGE_TOKEN_ESTIMATE}")),
+        },
+        DetailRow {
+            label: "工具定义".into(),
+            tokens: Some(snap.tool_definitions_tokens),
+            note: Some(format!("{} 个", snap.tool_definitions_count)),
+        },
+    ];
+    if let Some(c) = mcp_cat {
+        rows.push(DetailRow {
+            label: "MCP 工具".into(),
+            tokens: Some(c.tokens),
+            note: c.detail.clone(),
+        });
+    }
     OccupancyDetail {
         kind: OccupancyKind::Overhead,
         tokens: overhead,
         groups: vec![DetailGroup {
             heading: "菱形条开销格包含这些，工具定义不单独占色块".into(),
-            rows: vec![
-                DetailRow {
-                    label: "推理".into(),
-                    tokens: Some(reasoning),
-                    note: Some(format!("{reasoning_n} 段")),
-                },
-                DetailRow {
-                    label: "图片".into(),
-                    tokens: Some(image_tok),
-                    note: Some(format!("{image_n} 张 × {IMAGE_TOKEN_ESTIMATE}")),
-                },
-                DetailRow {
-                    label: "工具定义".into(),
-                    tokens: Some(snap.tool_definitions_tokens),
-                    note: Some(format!("{} 个", snap.tool_definitions_count)),
-                },
-            ],
+            rows,
         }],
         text: None,
     }
@@ -415,10 +426,8 @@ fn free_detail(snap: &ContextSnapshot) -> OccupancyDetail {
 }
 
 fn tools_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
-    let mut rows: Vec<DetailRow> = ctx
-        .get::<Tools>(TOOLS)
-        .map(|t| t.specs_for_model_on(ctx))
-        .unwrap_or_default()
+    let (builtin_specs, _) = partition_model_specs(ctx);
+    let mut rows: Vec<DetailRow> = builtin_specs
         .into_iter()
         .map(|s| {
             let tok = estimate_text(&s.name)
@@ -443,46 +452,76 @@ fn tools_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         kind: OccupancyKind::Tools,
         tokens: snap.tool_definitions_tokens,
         groups: vec![DetailGroup {
-            heading: format!("{} 个工具（模型可见）", snap.tool_definitions_count),
+            heading: format!(
+                "{} 个工具（模型可见，不含 MCP）",
+                snap.tool_definitions_count
+            ),
             rows,
         }],
         text: None,
     }
 }
 
-fn mcp_detail(ctx: &Context) -> OccupancyDetail {
-    let rows = extra_categories(ctx)
-        .into_iter()
-        .find(|c| c.label == "MCP 服务器");
-    let tokens = rows.as_ref().map(|c| c.tokens).unwrap_or(0);
-    let mut detail_rows = Vec::new();
-    if let Some(mcp) = ctx.get::<Mcp>(MCP) {
-        for s in mcp.list().into_iter().filter(|s| s.enabled) {
-            let enabled: Vec<_> = s.tools.iter().filter(|t| t.enabled).collect();
-            let mut text = s.name.clone();
-            text.push('\n');
-            for t in &enabled {
-                text.push_str(&t.name);
-                text.push('\n');
-            }
-            detail_rows.push(DetailRow {
-                label: s.name,
-                tokens: Some(estimate_text(&text)),
-                note: Some(format!("{} 个工具", enabled.len())),
-            });
-        }
+fn mcp_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
+    let tokens = snap
+        .categories
+        .iter()
+        .find(|c| c.label == "MCP 服务器")
+        .map(|c| c.tokens)
+        .unwrap_or(0);
+    let (_, mcp_specs) = partition_model_specs(ctx);
+    let mut by_server: std::collections::BTreeMap<String, Vec<ToolSpec>> =
+        std::collections::BTreeMap::new();
+    for spec in mcp_specs {
+        let server = split_mcp_public_name(&spec.name)
+            .map(|(s, _)| s.to_string())
+            .unwrap_or_else(|| spec.name.clone());
+        by_server.entry(server).or_default().push(spec);
     }
+    let groups: Vec<DetailGroup> = by_server
+        .into_iter()
+        .map(|(server, specs)| {
+            let mut rows: Vec<DetailRow> = specs
+                .into_iter()
+                .map(|s| {
+                    let local = split_mcp_public_name(&s.name)
+                        .map(|(_, t)| t.to_string())
+                        .unwrap_or_else(|| s.name.clone());
+                    let tok = estimate_text(&s.name)
+                        .saturating_add(estimate_text(&s.description))
+                        .saturating_add(estimate_text(&s.parameters_json));
+                    DetailRow {
+                        label: local,
+                        tokens: Some(tok),
+                        note: {
+                            let d = s.description.trim();
+                            if d.is_empty() {
+                                None
+                            } else {
+                                Some(preview(d, 48))
+                            }
+                        },
+                    }
+                })
+                .collect();
+            rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.label.cmp(&b.label)));
+            DetailGroup {
+                heading: format!("{server} · {} 个工具", rows.len()),
+                rows,
+            }
+        })
+        .collect();
     OccupancyDetail {
         kind: OccupancyKind::Mcp,
         tokens,
-        groups: vec![DetailGroup {
-            heading: if detail_rows.is_empty() {
-                "没有已启用的 MCP 服务器".into()
-            } else {
-                format!("{} 台已启用", detail_rows.len())
-            },
-            rows: detail_rows,
-        }],
+        groups: if groups.is_empty() {
+            vec![DetailGroup {
+                heading: "没有已发给模型的 MCP 工具".into(),
+                rows: Vec::new(),
+            }]
+        } else {
+            groups
+        },
         text: None,
     }
 }
@@ -520,6 +559,44 @@ fn workflows_detail(snap: &ContextSnapshot) -> OccupancyDetail {
         tokens,
         groups: vec![DetailGroup {
             heading: format!("{} 个工作流", rows.len()),
+            rows,
+        }],
+        text: None,
+    }
+}
+
+fn skills_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
+    let tokens = snap
+        .categories
+        .iter()
+        .find(|c| c.label == "技能")
+        .map(|c| c.tokens)
+        .unwrap_or(0);
+    let rows: Vec<DetailRow> = ctx
+        .get::<crate::skills::Skills>(SKILLS)
+        .map(|s| {
+            s.occupancy_rows()
+                .into_iter()
+                .map(|(label, tokens, desc)| DetailRow {
+                    label,
+                    tokens: Some(tokens),
+                    note: {
+                        let d = desc.trim();
+                        if d.is_empty() {
+                            None
+                        } else {
+                            Some(preview(d, 48))
+                        }
+                    },
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    OccupancyDetail {
+        kind: OccupancyKind::Skills,
+        tokens,
+        groups: vec![DetailGroup {
+            heading: format!("{} 个技能（listing，已计入系统提示）", rows.len()),
             rows,
         }],
         text: None,
@@ -564,26 +641,23 @@ fn window_size(session_window: u64, ctx: &Context) -> u64 {
 
 fn extra_categories(ctx: &Context) -> Vec<ContextCategory> {
     let mut rows = Vec::new();
-    if let Some(mcp) = ctx.get::<Mcp>(MCP) {
-        let servers: Vec<_> = mcp.list().into_iter().filter(|s| s.enabled).collect();
-        if !servers.is_empty() {
-            let mut text = String::new();
-            for s in &servers {
-                text.push_str(&s.name);
-                text.push('\n');
-                for t in &s.tools {
-                    if t.enabled {
-                        text.push_str(&t.name);
-                        text.push('\n');
-                    }
-                }
+    let (_, mcp_specs) = partition_model_specs(ctx);
+    if !mcp_specs.is_empty() {
+        let mut servers = std::collections::BTreeSet::new();
+        for spec in &mcp_specs {
+            if let Some((server, _)) = split_mcp_public_name(&spec.name) {
+                servers.insert(server.to_string());
             }
-            rows.push(ContextCategory {
-                label: "MCP 服务器".into(),
-                tokens: estimate_text(&text),
-                detail: Some(count_detail(servers.len() as u64, "个")),
-            });
         }
+        rows.push(ContextCategory {
+            label: "MCP 服务器".into(),
+            tokens: estimate_tool_definitions(&mcp_specs),
+            detail: Some(format!(
+                "{} 台 · {} 个工具",
+                servers.len().max(1),
+                mcp_specs.len()
+            )),
+        });
     }
     let workflows = crate::workflow::catalog_listing();
     if !workflows.is_empty() {
@@ -599,6 +673,17 @@ fn extra_categories(ctx: &Context) -> Vec<ContextCategory> {
             tokens: estimate_text(&text),
             detail: Some(count_detail(workflows.len() as u64, "个")),
         });
+    }
+    if let Some(skills) = ctx.get::<crate::skills::Skills>(SKILLS) {
+        let skill_rows = skills.occupancy_rows();
+        if !skill_rows.is_empty() {
+            let tokens: u64 = skill_rows.iter().map(|(_, t, _)| *t).sum();
+            rows.push(ContextCategory {
+                label: "技能".into(),
+                tokens,
+                detail: Some(count_detail(skill_rows.len() as u64, "个")),
+            });
+        }
     }
     rows
 }
@@ -622,6 +707,22 @@ fn estimate_tool_definitions(specs: &[ToolSpec]) -> u64 {
                 .saturating_add(estimate_text(&s.parameters_json))
         })
         .sum()
+}
+
+fn partition_model_specs(ctx: &Context) -> (Vec<ToolSpec>, Vec<ToolSpec>) {
+    let Some(tools) = ctx.get::<Tools>(TOOLS) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut builtin = Vec::new();
+    let mut mcp = Vec::new();
+    for spec in tools.specs_for_model_on(ctx) {
+        if tools.is_mcp(&spec.name) || is_mcp_public_name(&spec.name) {
+            mcp.push(spec);
+        } else {
+            builtin.push(spec);
+        }
+    }
+    (builtin, mcp)
 }
 
 fn estimate_text(text: &str) -> u64 {
@@ -824,5 +925,66 @@ mod tests {
             "{d:?}"
         );
         assert!(d.tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_schema_occupancy_is_under_mcp_not_tools() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let tools = ctx.get::<Tools>(TOOLS).unwrap();
+        let body: crate::tools::ToolBody = std::sync::Arc::new(|call| {
+            Box::pin(async move { crate::tools::tool_result(call, "") })
+        });
+        let _keep = tools
+            .register_mcp(
+                ToolSpec {
+                    name: "mcp_probe__ping".into(),
+                    description: "mcp occupancy probe with a longer description".into(),
+                    parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#
+                        .into(),
+                },
+                body,
+            )
+            .unwrap();
+        let snap = snapshot_context(&ctx);
+        assert!(
+            snap.categories
+                .iter()
+                .any(|c| c.label == "MCP 服务器" && c.tokens > 0),
+            "{:?}",
+            snap.categories
+        );
+        let tools_detail = occupancy_detail(&ctx, OccupancyKind::Tools);
+        assert!(
+            !tools_detail
+                .groups
+                .iter()
+                .flat_map(|g| &g.rows)
+                .any(|r| r.label.contains("mcp_probe") || r.label == "ping"),
+            "{tools_detail:?}"
+        );
+        let mcp = occupancy_detail(&ctx, OccupancyKind::Mcp);
+        assert!(
+            mcp.groups.iter().any(|g| g.heading.contains("probe")
+                && g.rows
+                    .iter()
+                    .any(|r| r.label == "ping" && r.tokens.unwrap_or(0) > 0)),
+            "{mcp:?}"
+        );
+        assert_eq!(
+            mcp.tokens,
+            estimate_tool_definitions(&[ToolSpec {
+                name: "mcp_probe__ping".into(),
+                description: "mcp occupancy probe with a longer description".into(),
+                parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#.into(),
+            }])
+        );
+        assert_eq!(
+            snap.used,
+            snap.system_prompt_tokens
+                .saturating_add(snap.message_tokens)
+                .saturating_add(snap.tool_definitions_tokens)
+                .saturating_add(mcp.tokens)
+        );
     }
 }

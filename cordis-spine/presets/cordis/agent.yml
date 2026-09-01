@@ -33,6 +33,7 @@ tools:
   - web_fetch
   - web_search
   - lsp
+  - skill
   - memory_search
   - memory_get
   - update_goal

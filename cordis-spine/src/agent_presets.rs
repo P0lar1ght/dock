@@ -1504,6 +1504,7 @@ mod tests {
         assert!(presets.allows("bash"));
         assert!(presets.allows("run_terminal_cmd"));
         assert!(presets.allows("lsp"));
+        assert!(presets.allows("skill"));
         assert!(presets.allows("task"));
         assert!(presets.allows("subagent"));
         assert!(presets.allows("send_message"));
@@ -1518,6 +1519,7 @@ mod tests {
 
         presets.apply(CORDIS_PRESET_ID).unwrap();
         assert!(presets.allows("cordis_inspect"));
+        assert!(presets.allows("skill"));
         assert!(presets.allows("cordis_run"));
         assert!(presets.allows("cordis_promote"));
         assert!(!presets.allows("scheduler_create"));

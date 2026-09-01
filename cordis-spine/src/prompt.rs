@@ -6,6 +6,7 @@ use crate::names::{PROMPT_ASSEMBLE, SYSTEM_PROMPT};
 /// its own plugin handler that adds a section at a fixed order, so the assembled
 /// prompt is byte-stable no matter what order the plugins mount in.
 pub const ORDER_CORDIS: i32 = 10;
+pub const ORDER_SKILLS: i32 = 15;
 pub const ORDER_PERSONA: i32 = 20;
 pub const ORDER_ROSTER: i32 = 30;
 pub const ORDER_PLAN: i32 = 40;

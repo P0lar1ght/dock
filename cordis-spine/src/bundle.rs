@@ -21,6 +21,7 @@ use crate::prompt::system_prompt;
 use crate::sched::tool_scheduler;
 use crate::session::sessions;
 use crate::settings::settings;
+use crate::skills::{skills, tool_skills};
 use crate::slash::slash;
 use crate::task::{tool_subagent, tool_task};
 use crate::todo_write::tool_todo;
@@ -97,6 +98,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(cron(), ())?.wait().await?;
     ctx.plugin(jobs(), ())?.wait().await?;
     ctx.plugin(slash(), ())?.wait().await?;
+    ctx.plugin(skills(), ())?.wait().await?;
     ctx.plugin(tui_slots(), ())?.wait().await?;
     ctx.plugin(agent_presets(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;
@@ -112,6 +114,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_monitor(), ())?.wait().await?;
     ctx.plugin(tool_goal(), ())?.wait().await?;
     ctx.plugin(tool_lsp(), ())?.wait().await?;
+    ctx.plugin(tool_skills(), ())?.wait().await?;
     ctx.plugin(tool_workflow(), ())?.wait().await?;
     ctx.plugin(mcp_client(), ())?.wait().await?;
     ctx.plugin(dynamic_runner(), ())?.wait().await?;

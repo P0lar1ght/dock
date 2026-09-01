@@ -37,7 +37,7 @@ pub(super) type RelistFn = std::sync::Arc<
 >;
 
 pub use elicitation::{ElicitPrompt, Elicitation};
-pub use protocol::{is_mcp_public_name, public_tool_name, raw_tool_name};
+pub use protocol::{is_mcp_public_name, public_tool_name, raw_tool_name, split_mcp_public_name};
 
 #[derive(Clone, Debug)]
 pub struct McpToolStatus {

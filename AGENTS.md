@@ -50,8 +50,8 @@ cd embed-sdk && npm install && npm run build
 |---|---|---|
 | Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
-| 其它 spine | `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `subagents` `memory` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名。`agentPresets` 是 YAML 目录（内置 `code` / `minimal` / `cordis` / `warden` < `~/.dock/presets/<id>/` 或显示名目录如 `创造/` < 项目 `.dock/presets/<id>/`；旧 `<id>.yml` 仍可读）。新建模式默认落到项目层，细节见 [CLI.md](CLI.md) |
-| 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-subagent` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register`。清单与缺口：[TOOLS.md](TOOLS.md) |
+| 其它 spine | `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名。`agentPresets` 是 YAML 目录（内置 `code` / `minimal` / `cordis` / `warden` < `~/.dock/presets/<id>/` 或显示名目录如 `创造/` < 项目 `.dock/presets/<id>/`；旧 `<id>.yml` 仍可读）。新建模式默认落到项目层，细节见 [CLI.md](CLI.md) |
+| 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-subagent` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register`。清单与缺口：[TOOLS.md](TOOLS.md) |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` | 同名 |
 | 回环网关 | `gateway` | `"gateway"`（`GatewayRef`）。事件 `gateway/pairing`。**默认挂载但不监听**；TUI `/pair` 开启/关闭。只绑 loopback（首选 `127.0.0.1:18991`，占用则往上找端口，同端口再试 `[::1]`）。`DOCK_GATEWAY_BIND` 只改首选地址。配对、CORS、斜杠 list/execute 的终端限制见 [CLI.md](CLI.md) `/pair` |
 | 事件循环 | `tui` inject `session` + `session.port` | — |

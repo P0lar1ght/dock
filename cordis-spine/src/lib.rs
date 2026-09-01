@@ -33,6 +33,7 @@ mod runtime;
 mod sched;
 mod session;
 mod settings;
+mod skills;
 mod slash;
 mod stream_acc;
 mod task;
@@ -88,8 +89,8 @@ pub use lsp::{
     LspSetupReport, LspSetupScope,
 };
 pub use mcp::{
-    is_mcp_public_name, mcp_client, public_tool_name, ElicitPrompt, Elicitation, Mcp, McpStatus,
-    McpToolStatus,
+    is_mcp_public_name, mcp_client, public_tool_name, split_mcp_public_name, ElicitPrompt,
+    Elicitation, Mcp, McpStatus, McpToolStatus,
 };
 pub use memory::{tool_memory, Memory};
 pub use monitor::tool_monitor;
@@ -97,7 +98,8 @@ pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, COMPACT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL,
     JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT,
     PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS, SESSIONS, SESSION_EVENT, SETTINGS,
-    SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TUI_SLOTS, TURN, WORKFLOWS,
+    SKILLS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TUI_SLOTS, TURN,
+    WORKFLOWS,
 };
 pub use permissions::{permissions, PermissionPrompt, Permissions};
 pub use plan_mode::{
@@ -113,6 +115,7 @@ pub use sched::{
 };
 pub use session::{sessions, ArchivedSession, Sessions, TokenUsage};
 pub use settings::{settings, AppSettings, MermaidEngineKind, PermissionMode};
+pub use skills::{skills, tool_skills, SkillInfo, SkillScope, Skills};
 pub use slash::{
     slash, slash_name_reserved, tool_slash_arguments, ExtraSlashKind, Slash, SlashEntry,
     RESERVED_SLASH,

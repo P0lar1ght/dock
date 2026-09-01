@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use cordis::Context;
 use cordis_spine::{
-    occupancy_detail, session_usage_block_text, snapshot_context, ContextSnapshot, OccupancyDetail,
-    OccupancyKind, Sessions, TokenUsage, SESSIONS,
+    occupancy_detail, session_usage_block_text, snapshot_context, ContextCategory, ContextSnapshot,
+    OccupancyDetail, OccupancyKind, Sessions, TokenUsage, SESSIONS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -694,6 +694,7 @@ fn category_kind(label: &str) -> OccupancyKind {
     match label {
         "MCP 服务器" => OccupancyKind::Mcp,
         "工作流" => OccupancyKind::Workflows,
+        "技能" => OccupancyKind::Skills,
         _ => OccupancyKind::Tools,
     }
 }
@@ -1103,6 +1104,20 @@ mod tests {
         assert!(!all.contains("MCP 服务器"));
         assert!(!all.contains("工作流"));
         assert!(!all.contains("技能"));
+    }
+
+    #[test]
+    fn skills_category_maps_to_skills_kind() {
+        let mut snap = snapshot();
+        snap.categories.push(ContextCategory {
+            label: "技能".into(),
+            tokens: 40,
+            detail: Some("1 个".into()),
+        });
+        let view = context_view(&snap, 80, None);
+        let kinds: Vec<_> = view.legend.iter().map(|h| h.2).collect();
+        assert!(kinds.contains(&OccupancyKind::Skills), "{kinds:?}");
+        assert!(all_text(&view.lines).contains("技能"));
     }
 
     #[test]
