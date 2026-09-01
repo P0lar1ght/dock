@@ -1,4 +1,5 @@
 import { html, nothing } from 'lit';
+import { repeat } from 'lit/directives/repeat.js';
 import type { SessionMessage } from '../../session/MessageModel.js';
 import type { SessionActivityState } from '../../session/SessionState.js';
 import type { SessionToolActivity } from '../../session/ToolActivityModel.js';
@@ -7,7 +8,7 @@ import type { SessionPlanActivity } from '../../session/PlanActivityModel.js';
 import { isActiveSubagent, type SessionSubagentActivity } from '../../session/SubagentActivityModel.js';
 import type { PermissionInteractionState } from '../../controllers/PermissionController.js';
 import type { PermissionDecision } from '../../protocol/permissions.js';
-import { buildChatTimeline } from './ChatTimeline.js';
+import { buildChatTimeline, type ChatTimelineItem } from './ChatTimeline.js';
 import { toolActivityRow } from './ToolActivityRow.js';
 import { permissionPrompt } from '../PermissionPrompt.js';
 import { assistantMessageParts } from '../../rendering/messageParts.js';
@@ -71,7 +72,7 @@ export function chatMessageList(
           <h3>和嘟嘟聊聊吧</h3>
           <p>${model.sessionReady ? '输入一条消息，本地 Agent 会在这里实时回复。' : '正在等待本地 Agent 连接。'}</p>
         </div>
-      ` : timeline.map((item) => item.kind === 'message'
+      ` : repeat(timeline, timelineKey, (item) => item.kind === 'message'
         ? messageBubble(item.message)
         : item.kind === 'tool'
           ? toolActivityRow(
@@ -107,6 +108,27 @@ export function chatMessageList(
   `;
 }
 
+function timelineKey(item: ChatTimelineItem) {
+  switch (item.kind) {
+    case 'message':
+      return item.message.id;
+    case 'tool':
+      return `tool:${item.tool.id}`;
+    case 'plan':
+      return `plan:${item.plan.id}`;
+    case 'goal':
+      return `goal:${item.goal.id}`;
+    case 'user_input':
+      return `input:${item.request.id}`;
+    case 'subagent':
+      return `subagent:${item.subagent.id}`;
+    case 'issue':
+      return `issue:${item.issue.id}`;
+    case 'permission':
+      return `permission:${item.permission.id}`;
+  }
+}
+
 function messageBubble(message: SessionMessage) {
   const assistant = message.role === 'assistant';
   const label = assistant ? 'Agent' : 'You';
@@ -122,7 +144,7 @@ function messageBubble(message: SessionMessage) {
       <div class="message-bubble">
         ${assistant
           ? assistantMessageParts(message.content || (message.status === 'streaming' ? '…' : ''))
-          : html`<span class="message-copy">${message.content}</span>`}
+          : html`<span class="message-copy">${visibleUserText(message.content, message.attachments)}</span>`}
         ${message.attachments?.length
           ? message.attachments.map((attachment, index) => imageAttachment(attachment, index))
           : nothing}
@@ -132,6 +154,15 @@ function messageBubble(message: SessionMessage) {
       </div>
     </article>
   `;
+}
+
+function visibleUserText(
+  content: string,
+  attachments: SessionMessage['attachments']
+) {
+  const stripped = String(content || '').replace(/\[Image #\d+\]\s*/gu, '').trim();
+  if (stripped) return stripped;
+  return attachments?.length ? '' : content;
 }
 
 function imageAttachment(

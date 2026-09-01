@@ -174,9 +174,9 @@ export class AgentSession {
       ? parseScreenshotCommand(messageValue, this.latestImageTurnId())
       : messageValue;
     const message = text(typeof parsed === 'string' ? parsed : parsed.message);
-    if (!message) throw new Error('message is required');
     const imageInputs = typeof parsed === 'string' ? undefined : parsed.imageInputs;
     const intent = typeof parsed === 'string' ? undefined : parsed.intent;
+    if (!message && !imageInputs?.length) throw new Error('message is required');
     return intent
       ? this.operations.startTurn(this.id, this.workspaceId, message, imageInputs, intent)
       : this.operations.startTurn(this.id, this.workspaceId, message, imageInputs);
@@ -221,8 +221,9 @@ export class AgentSession {
     const parsed = typeof messageValue === 'string'
       ? parseScreenshotCommand(messageValue, this.latestImageTurnId())
       : messageValue;
-    const message = requiredText(typeof parsed === 'string' ? parsed : parsed.message, 'message');
+    const message = text(typeof parsed === 'string' ? parsed : parsed.message);
     const imageInputs = typeof parsed === 'string' ? undefined : parsed.imageInputs;
+    if (!message && !imageInputs?.length) throw new Error('message is required');
     const submission = await this.operations.enqueueTurn(
       this.id,
       this.workspaceId,
@@ -237,8 +238,9 @@ export class AgentSession {
     const parsed = typeof messageValue === 'string'
       ? parseScreenshotCommand(messageValue, this.latestImageTurnId())
       : messageValue;
-    const message = requiredText(typeof parsed === 'string' ? parsed : parsed.message, 'message');
+    const message = text(typeof parsed === 'string' ? parsed : parsed.message);
     const imageInputs = typeof parsed === 'string' ? undefined : parsed.imageInputs;
+    if (!message && !imageInputs?.length) throw new Error('message is required');
     const submission = await this.operations.steerTurn(
       this.id,
       this.workspaceId,

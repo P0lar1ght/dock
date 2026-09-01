@@ -35,6 +35,7 @@ struct Conn {
     origin: String,
     auth: Option<IssuedTicket>,
     initialized: bool,
+    connection_lease_id: Option<String>,
     subscribed: HashSet<String>,
 }
 
@@ -46,6 +47,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
         origin,
         auth: None,
         initialized: false,
+        connection_lease_id: None,
         subscribed: HashSet::new(),
     }));
 
@@ -136,6 +138,8 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
     if method == protocol::INITIALIZE {
         let auth = conn.auth.as_ref().unwrap();
         conn.initialized = true;
+        let lease = uuid::Uuid::new_v4().to_string();
+        conn.connection_lease_id = Some(lease.clone());
         return Ok(json!({
             "ok": true,
             "serverInfo": {
@@ -148,10 +152,22 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
                 "application": auth.application,
                 "origin": auth.origin,
                 "defaultWorkspaceId": protocol::DEFAULT_WORKSPACE_ID,
-                "connectionLeaseId": uuid::Uuid::new_v4().to_string(),
+                "connectionLeaseId": lease,
                 "listen": conn.gateway.listen_addr().to_string(),
                 "companion": companion_json(&conn.gateway.companion_status())
             }
+        }));
+    }
+    if method == protocol::IMAGE_INPUTS_SYNC {
+        let lease = conn.connection_lease_id.clone().ok_or_else(|| {
+            RpcError::app(
+                "not_initialized",
+                "initialize is required after authenticate",
+            )
+        })?;
+        return Ok(json!({
+            "connectionLeaseId": lease,
+            "limitsVersion": protocol::IMAGE_INPUTS_LIMITS_VERSION
         }));
     }
     if !conn.initialized {

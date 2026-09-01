@@ -164,7 +164,12 @@ export const composerStyles = css`
   }
 
   .composer-hint { color: var(--pv-muted); }
-  .composer-error { color: var(--pv-danger); }
+  .composer-error {
+    max-height: 4.8em;
+    overflow: auto;
+    color: var(--pv-danger);
+    white-space: pre-wrap;
+  }
 
   .composer-popover-scrim {
     position: fixed;
@@ -399,7 +404,6 @@ export const composerStyles = css`
     text-overflow: clip;
     white-space: normal;
   }
-  .approval-option[data-mode="full_access"] strong { color: var(--pv-warning); }
   .approval-option:disabled { cursor: not-allowed; }
 
   .goal-popover { padding: 12px; }

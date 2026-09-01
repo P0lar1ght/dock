@@ -19,7 +19,7 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("threadSubscriptions", true),
     ("threads", true),
     ("hostTools", false),
-    ("imageInputs", false),
+    ("imageInputs", true),
     ("slash", true),
 ];
 
@@ -69,6 +69,9 @@ pub const ELICIT_RESOLVE: &str = "elicit/resolve";
 pub const MCP_RELOAD: &str = "mcp/reload";
 pub const SLASH_LIST: &str = "slash/list";
 pub const SLASH_EXECUTE: &str = "slash/execute";
+pub const IMAGE_INPUTS_SYNC: &str = "imageInputs/sync";
+pub const IMAGE_INPUTS_PUT: &str = "imageInputs/put";
+pub const IMAGE_INPUTS_LIMITS_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]
 pub struct RpcError {

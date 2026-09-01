@@ -471,6 +471,7 @@ name = "cordis-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "cordis",
  "cordis-spine",
  "cordis-tui",

@@ -1,42 +1,32 @@
 import { html, nothing } from 'lit';
 
 import type { SessionGoalActivity } from '../../session/GoalActivityModel.js';
+import { TOOL_DIAMOND } from './toolCard.js';
 
 export function goalProgressRow(goal: SessionGoalActivity) {
-  const percent = goal.totalSteps > 0
-    ? Math.min(100, Math.round((goal.completedSteps / goal.totalSteps) * 100))
-    : 0;
+  const steps = goal.totalSteps > 0 ? `${goal.completedSteps}/${goal.totalSteps}` : '';
   return html`
-    <article
-      class="goal-progress-row"
+    <details
+      class="tool-card goal-progress-row"
       data-testid="goal-progress-row"
       data-status=${goal.status}
       data-revision=${goal.revision}
     >
-      <header>
-        <strong>Goal · revision ${goal.revision}</strong>
-        <span>${statusLabel(goal.status)}</span>
-      </header>
-      <p class="goal-progress-objective">${goal.summary}</p>
-      ${goal.progressSummary
-        ? html`<p class="goal-progress-copy">${goal.progressSummary}</p>`
-        : nothing}
-      ${goal.totalSteps > 0 ? html`
-        <div
-          class="goal-progress-meter"
-          role="progressbar"
-          aria-valuemin="0"
-          aria-valuemax=${goal.totalSteps}
-          aria-valuenow=${goal.completedSteps}
-        ><span style=${`width:${percent}%`}></span></div>
-        <small>${goal.completedSteps}/${goal.totalSteps} · continuation ${goal.continuationCount}/${goal.maxContinuations}</small>
-      ` : html`
-        <small>continuation ${goal.continuationCount}/${goal.maxContinuations}</small>
-      `}
-      ${goal.blockedReason
-        ? html`<p class="goal-progress-blocked">${goal.blockedReason}</p>`
-        : nothing}
-    </article>
+      <summary aria-label=${`Goal，${statusLabel(goal.status)}，${goal.summary}`}>
+        <span class="tool-card-diamond" aria-hidden="true">${TOOL_DIAMOND}</span>
+        <span class="tool-card-name">Goal</span>
+        <span class="tool-card-summary">${goal.summary}${steps ? `  ${steps}` : ''}</span>
+      </summary>
+      <div class="tool-card-body">
+        ${goal.progressSummary
+          ? html`<p>${goal.progressSummary}</p>`
+          : nothing}
+        <div class="tool-card-k">${statusLabel(goal.status)} · continuation ${goal.continuationCount}/${goal.maxContinuations}</div>
+        ${goal.blockedReason
+          ? html`<p class="goal-progress-blocked">${goal.blockedReason}</p>`
+          : nothing}
+      </div>
+    </details>
   `;
 }
 

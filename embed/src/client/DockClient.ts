@@ -354,13 +354,12 @@ export class DockClient {
         imageInputs?: readonly ImageTurnInput[],
         intent?: StartTurnInput['intent']
       ) => {
-        const [environment, uploadedImages] = await Promise.all([
-          this.hostTools.prepareTurnEnvironment(
-            () => this.contextController.prepareTurn(id, message)),
-          imageInputs?.length
-            ? this.imageInputs.prepareTurn(id, selectedWorkspace, imageInputs)
-            : Promise.resolve(undefined)
-        ]);
+        const uploadedImages = imageInputs?.length
+          ? await this.imageInputs.prepareTurn(id, selectedWorkspace, imageInputs)
+          : undefined;
+        const environment = await this.hostTools.prepareTurnEnvironment(
+          () => this.contextController.prepareTurn(id, message)
+        );
         const submission = await this.turnApi.start(
           id,
           selectedWorkspace,
@@ -379,21 +378,17 @@ export class DockClient {
         return submission;
       },
       enqueueTurn: async (id, workspace, message, imageInputs) => {
-        const [hostTools, preparedImages] = await Promise.all([
-          this.hostTools.prepareQueuedTurnEnvironment(),
-          imageInputs?.length
-            ? this.imageInputs.prepareTurn(id, workspace, imageInputs)
-            : Promise.resolve(undefined)
-        ]);
+        const preparedImages = imageInputs?.length
+          ? await this.imageInputs.prepareTurn(id, workspace, imageInputs)
+          : undefined;
+        const hostTools = await this.hostTools.prepareQueuedTurnEnvironment();
         return this.turnApi.enqueue(id, workspace, message, hostTools, preparedImages);
       },
       steerTurn: async (id, workspace, message, imageInputs) => {
-        const [hostTools, preparedImages] = await Promise.all([
-          this.hostTools.prepareQueuedTurnEnvironment(),
-          imageInputs?.length
-            ? this.imageInputs.prepareTurn(id, workspace, imageInputs)
-            : Promise.resolve(undefined)
-        ]);
+        const preparedImages = imageInputs?.length
+          ? await this.imageInputs.prepareTurn(id, workspace, imageInputs)
+          : undefined;
+        const hostTools = await this.hostTools.prepareQueuedTurnEnvironment();
         return this.turnApi.steer(id, workspace, message, hostTools, preparedImages);
       },
       listTurnQueue: (id, selectedWorkspace) => this.turnApi.listQueue(id, selectedWorkspace),

@@ -194,7 +194,7 @@ fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String,
                 "id": m.id,
                 "label": if m.name.is_empty() { m.id.clone() } else { m.name.clone() },
                 "available": true,
-                "inputModalities": ["text"]
+                "inputModalities": ["text", "image"]
             })
         })
         .collect();
@@ -255,7 +255,7 @@ fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String,
         json!({
             "id": model,
             "label": model,
-            "inputModalities": ["text"],
+            "inputModalities": ["text", "image"],
             "canChange": true,
             "options": options
         }),

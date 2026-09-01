@@ -1,47 +1,31 @@
 import { html, nothing } from 'lit';
 import type { SessionSubagentActivity } from '../../session/SubagentActivityModel.js';
+import { TOOL_DIAMOND } from './toolCard.js';
 
 export function subagentActivityRow(subagent: SessionSubagentActivity) {
   const status = statusLabel(subagent.status);
+  const preview = subagent.resultSummary || subagent.errorSummary || '';
   return html`
     <details
-      class="subagent-activity"
+      class="tool-card subagent-activity"
       data-testid="subagent-activity"
       data-subagent-id=${subagent.id}
       data-turn-id=${subagent.turnId}
       data-status=${subagent.status}
     >
-      <summary aria-label=${`${subagent.description}，${status}，点击展开详情`}>
-        <span class="subagent-status-icon" aria-hidden="true">${statusIcon(subagent.status)}</span>
-        <span class="subagent-row-copy">
-          <span class="subagent-row-title">${subagent.description}</span>
-          <span class="subagent-row-type">${subagent.subagentType}</span>
-        </span>
-        <span class="subagent-row-status">${status}</span>
-        <span class="subagent-chevron" aria-hidden="true">›</span>
+      <summary aria-label=${`${status} ${subagent.subagentType} ${subagent.description}`}>
+        <span class="tool-card-diamond" aria-hidden="true">${TOOL_DIAMOND}</span>
+        <span class="tool-card-name">${status}</span>
+        ${subagent.subagentType
+          ? html`<span class="tool-card-summary">${subagent.subagentType}</span>`
+          : nothing}
+        <span class="tool-card-summary">${`\u201C${subagent.description}\u201D`}</span>
       </summary>
-      <div class="subagent-details">
-        <div class="subagent-detail-meta">
-          <span>${status}</span>
-          <span>${subagent.turns} 轮</span>
-          <span>${subagent.toolCalls} 次工具</span>
-          ${subagent.durationMs === undefined ? nothing : html`
-            <span>${formatDuration(subagent.durationMs)}</span>
-          `}
-          ${subagent.resultTruncated ? html`<span>结果已截断</span>` : nothing}
-        </div>
-        ${subagent.resultSummary ? html`
-          <section>
-            <h4>结果摘要</h4>
-            <p>${subagent.resultSummary}</p>
-          </section>
-        ` : nothing}
-        ${subagent.errorSummary ? html`
-          <section>
-            <h4>失败摘要</h4>
-            <p>${subagent.errorSummary}</p>
-          </section>
-        ` : nothing}
+      <div class="tool-card-body">
+        ${preview ? html`<pre class="tool-card-pre">${preview}</pre>` : nothing}
+        <div class="tool-card-k">${subagent.turns} 轮 · ${subagent.toolCalls} 次工具${
+          subagent.durationMs === undefined ? '' : ` · ${formatDuration(subagent.durationMs)}`
+        }</div>
       </div>
     </details>
   `;
@@ -54,14 +38,6 @@ function statusLabel(status: SessionSubagentActivity['status']) {
   if (status === 'failed') return '执行失败';
   if (status === 'cancelled') return '已停止';
   return '已完成';
-}
-
-function statusIcon(status: SessionSubagentActivity['status']) {
-  if (status === 'running' || status === 'background') return '•';
-  if (status === 'waiting_permission') return '!';
-  if (status === 'failed') return '×';
-  if (status === 'cancelled') return '−';
-  return '✓';
 }
 
 function formatDuration(durationMs: number) {

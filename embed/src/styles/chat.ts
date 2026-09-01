@@ -3,6 +3,7 @@ import { css } from 'lit';
 export const chatStyles = css`
   .chat-panel {
     position: fixed;
+    isolation: isolate;
     width: clamp(
       var(--pv-chat-min-width),
       var(--pv-chat-fluid-width),
@@ -50,6 +51,7 @@ export const chatStyles = css`
     grid-template-rows: auto minmax(0, 1fr) auto;
     height: 100%;
     overflow: hidden;
+    isolation: isolate;
     border-radius: inherit;
     background: var(--pv-panel);
   }
@@ -204,9 +206,10 @@ export const chatStyles = css`
     display: flex;
     min-height: 0;
     flex-direction: column;
-    gap: 13px;
+    gap: 6px;
     overflow-x: hidden;
     overflow-y: auto;
+    overflow-anchor: none;
     padding: 18px 16px 16px;
     overscroll-behavior: contain;
     scrollbar-width: thin;

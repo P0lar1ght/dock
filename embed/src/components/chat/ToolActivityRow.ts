@@ -3,6 +3,13 @@ import type { SessionToolActivity } from '../../session/ToolActivityModel.js';
 import type { SessionRuntimeIssue } from '../../session/RuntimeIssueModel.js';
 import type { RuntimeIssueInteraction } from '../../controllers/RuntimeIssueController.js';
 import { runtimeIssueDetails, type RuntimeIssueActions } from './RuntimeIssueRow.js';
+import {
+  TOOL_DIAMOND,
+  argumentSummary,
+  isShellTool,
+  prettyArgs,
+  truncatedOutput
+} from './toolCard.js';
 
 export function toolActivityRow(
   tool: SessionToolActivity,
@@ -10,56 +17,50 @@ export function toolActivityRow(
   interactions: Readonly<Record<string, RuntimeIssueInteraction>> = {},
   issueActions?: RuntimeIssueActions
 ) {
-  const label = toolLabel(tool);
+  const name = tool.toolName || tool.title || 'tool';
+  const summary = argumentSummary(name, tool.inputSummary);
+  const shell = isShellTool(name);
+  const input = prettyArgs(tool.inputSummary);
+  const outputSource = tool.outputDetails || tool.outputPreview || '';
+  const output = outputSource ? truncatedOutput(outputSource) : undefined;
+  const label = shell ? `$ ${summary || '\u{2026}'}` : `${name}${summary ? `  ${summary}` : ''}`;
   return html`
     <details
-      class="tool-activity"
+      class="tool-card tool-activity"
       data-testid="tool-activity"
       data-tool-id=${tool.id}
       data-turn-id=${tool.turnId}
       data-status=${tool.status}
     >
-      <summary aria-label=${`${label}，${statusLabel(tool.status)}，点击展开详情`}>
-        <span class="tool-status-icon" aria-hidden="true">${statusIcon(tool.status)}</span>
-        <span class="tool-row-title">${label}</span>
-        ${tool.durationMs === undefined ? nothing : html`
-          <span class="tool-duration">${formatDuration(tool.durationMs)}</span>
-        `}
-        <span class="tool-chevron" aria-hidden="true">›</span>
+      <summary aria-label=${`${label}，${statusLabel(tool.status)}`}>
+        ${shell
+          ? html`<span class="tool-card-prompt" aria-hidden="true">$</span>`
+          : html`<span class="tool-card-diamond" aria-hidden="true">${TOOL_DIAMOND}</span>`}
+        ${shell
+          ? html`<span class="tool-card-summary">${summary || '\u{2026}'}</span>`
+          : html`
+              <span class="tool-card-name">${name}</span>
+              ${summary ? html`<span class="tool-card-summary">${summary}</span>` : nothing}
+            `}
+        ${tool.status === 'running' ? html`<span class="tool-card-live">运行中</span>` : nothing}
       </summary>
-      <div class="tool-details">
-        <div class="tool-detail-meta">
-          <span>${statusLabel(tool.status)}</span>
-          ${tool.resultType ? html`<span>${tool.resultType}</span>` : nothing}
-          ${tool.truncated ? html`<span>服务端内容已截断</span>` : nothing}
-          ${tool.outputPreviewTruncated ? html`<span>响应预览已限长</span>` : nothing}
-        </div>
-        ${tool.inputSummary ? html`
-          <section>
-            <h4>输入摘要</h4>
-            <pre>${tool.inputSummary}</pre>
-          </section>
+      <div class="tool-card-body">
+        ${!shell && input ? html`
+          <div class="tool-card-k">输入</div>
+          <pre class="tool-card-pre">${input}</pre>
         ` : nothing}
-        ${tool.outputSummary ? html`
-          <section>
-            <h4>结果摘要</h4>
-            <p>${tool.outputSummary}</p>
-          </section>
+        ${tool.status === 'running' && !outputSource ? html`
+          <div class="tool-card-live-body">运行中</div>
         ` : nothing}
-        ${tool.outputPreview ? html`
-          <section class="tool-output-section">
-            <h4>响应预览</h4>
-            <pre data-testid="tool-output-preview">${tool.outputPreview}</pre>
-            ${tool.outputDetails ? html`
-              <details class="tool-output-more">
-                <summary aria-label="查看更多工具响应">
-                  <span>查看更多响应</span>
-                  <span aria-hidden="true">›</span>
-                </summary>
-                <pre data-testid="tool-output-details">${tool.outputDetails}</pre>
-              </details>
-            ` : nothing}
-          </section>
+        ${outputSource ? html`
+          <div class="tool-card-k">输出</div>
+          <pre class="tool-card-pre" data-testid="tool-output-preview">${output?.text}</pre>
+          ${tool.outputDetails && output?.hidden ? html`
+            <details class="tool-output-more">
+              <summary>查看完整输出</summary>
+              <pre data-testid="tool-output-details">${tool.outputDetails}</pre>
+            </details>
+          ` : nothing}
         ` : nothing}
         ${issue && issueActions ? runtimeIssueDetails(issue, interactions[issue.id], issueActions) : nothing}
       </div>
@@ -67,29 +68,9 @@ export function toolActivityRow(
   `;
 }
 
-function toolLabel(tool: SessionToolActivity) {
-  const name = tool.title || tool.toolName || 'tool';
-  if (/shell|exec|command/i.test(tool.toolName)) return `运行 ${name}`;
-  if (/read|file|context/i.test(tool.toolName)) return `读取 ${name}`;
-  if (/search|find/i.test(tool.toolName)) return `搜索 ${name}`;
-  return `调用 ${name}`;
-}
-
 function statusLabel(status: SessionToolActivity['status']) {
   if (status === 'running') return '执行中';
   if (status === 'failed') return '执行失败';
   if (status === 'cancelled') return '已停止';
   return '已完成';
-}
-
-function statusIcon(status: SessionToolActivity['status']) {
-  if (status === 'running') return '•';
-  if (status === 'failed') return '×';
-  if (status === 'cancelled') return '−';
-  return '✓';
-}
-
-function formatDuration(durationMs: number) {
-  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
-  return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
 }

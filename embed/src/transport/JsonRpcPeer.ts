@@ -32,10 +32,13 @@ export class JsonRpcPeer {
     const id = `sdk-${Date.now()}-${++this.sequence}`;
     const request: JsonRpcRequest = { id, method, params };
     return new Promise<T>((resolve, reject) => {
+      const timeoutMs = method.startsWith('imageInputs/')
+        ? Math.max(this.timeoutMs, 60_000)
+        : this.timeoutMs;
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new DockClientError('request_timeout', `${method} timed out`));
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
       try {
         this.transport.send(JSON.stringify(request));

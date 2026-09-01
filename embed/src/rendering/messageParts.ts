@@ -34,9 +34,14 @@ function renderBlock(block: MarkdownBlock): unknown {
         : html`<ul>${block.items.map(renderListItem)}</ul>`;
     case 'code_block':
       return html`
-        <pre class="markdown-code-block" data-testid="markdown-code-block"><code
-          data-language=${block.language || nothing}
-        >${block.code}</code></pre>
+        <figure class="markdown-code-figure" data-language=${block.language || nothing}>
+          ${block.language
+            ? html`<figcaption class="markdown-code-caption">${codeCaption(block.language)}</figcaption>`
+            : nothing}
+          <pre class="markdown-code-block" data-testid="markdown-code-block"><code
+            data-language=${block.language || nothing}
+          >${block.code}</code></pre>
+        </figure>
       `;
     case 'table':
       return renderTable(block);
@@ -95,6 +100,11 @@ function renderTable(block: Extract<MarkdownBlock, { kind: 'table' }>) {
 
 function alignment(value: MarkdownTableAlignment | undefined) {
   return value || nothing;
+}
+
+function codeCaption(language: string) {
+  if (language === 'mermaid') return 'Mermaid 流程图';
+  return language;
 }
 
 function renderHeading(level: 1 | 2 | 3 | 4 | 5 | 6, children: MarkdownInline[]) {

@@ -1,4 +1,5 @@
 import { DockClientError } from '../protocol/errors.js';
+import { encodeCanvasBlob } from './ImageEncode.js';
 import { hideEmbeddedAgentUi } from './CaptureUiVisibility.js';
 import type { ScreenshotProvider } from './types.js';
 
@@ -19,6 +20,21 @@ export function browserDisplayCaptureSupported() {
     && typeof globalThis.navigator?.mediaDevices?.getDisplayMedia === 'function';
 }
 
+/** Call from a click/key handler so `getDisplayMedia` still has user activation. */
+export function captureBrowserDisplayFrame(signal?: AbortSignal) {
+  return createDisplayScreenshotProvider()({
+    reason: 'user_command',
+    signal: signal || new AbortController().signal,
+    limits: {
+      maxBytes: 2 * 1024 * 1024,
+      maxEdge: 4096,
+      maxPixels: 4_194_304,
+      timeoutMs: 120_000
+    },
+    target: { kind: 'screen' }
+  });
+}
+
 /** Captures exactly one frame from a display surface explicitly chosen by the user agent. */
 export function createDisplayScreenshotProvider(
   options: DisplayCaptureProviderOptions = {}
@@ -37,45 +53,50 @@ export function createDisplayScreenshotProvider(
     let restoreAgentUi: () => void = () => undefined;
     try {
       stream = await acquireDisplayStream(getDisplayMedia, signal);
-      const tracks = stream.getVideoTracks();
-      if (tracks.length !== 1) {
+      const track = stream.getVideoTracks()[0];
+      if (!track) {
         throw new DockClientError(
           'image_input_capture_failed',
-          'Screen sharing did not provide exactly one video track'
+          'Screen sharing did not provide a video track'
         );
       }
-      const track = tracks[0];
       restoreAgentUi = (options.hideAgentUi || defaultHideAgentUi)();
       video = (options.createVideo || defaultCreateVideo)();
-      video.muted = true;
-      video.playsInline = true;
-      video.srcObject = stream;
-      await (options.waitForFrame || waitForFirstFrame)(video, track, signal);
-      const dimensions = fitDimensions(
-        video.videoWidth || numberSetting(track, 'width'),
-        video.videoHeight || numberSetting(track, 'height'),
-        limits.maxEdge,
-        limits.maxPixels
-      );
-      const canvas = (options.createCanvas || defaultCreateCanvas)();
-      canvas.width = dimensions.width;
-      canvas.height = dimensions.height;
-      const context = canvas.getContext('2d', { alpha: false });
-      if (!context) {
-        throw new DockClientError(
-          'image_input_capture_failed',
-          'Screen capture canvas is unavailable'
+      const detachVideo = attachOffscreenVideo(video);
+      try {
+        video.muted = true;
+        video.playsInline = true;
+        video.autoplay = true;
+        video.srcObject = stream;
+        await (options.waitForFrame || waitForFirstFrame)(video, track, signal);
+        const dimensions = fitDimensions(
+          video.videoWidth || numberSetting(track, 'width'),
+          video.videoHeight || numberSetting(track, 'height'),
+          limits.maxEdge,
+          limits.maxPixels
         );
+        const canvas = (options.createCanvas || defaultCreateCanvas)();
+        canvas.width = dimensions.width;
+        canvas.height = dimensions.height;
+        const context = canvas.getContext('2d', { alpha: false });
+        if (!context) {
+          throw new DockClientError(
+            'image_input_capture_failed',
+            'Screen capture canvas is unavailable'
+          );
+        }
+        context.drawImage(video, 0, 0, dimensions.width, dimensions.height);
+        const blob = await encodeCanvasBlob(canvas, 0.85, signal);
+        return {
+          blob,
+          width: dimensions.width,
+          height: dimensions.height,
+          capturedAt: Date.now(),
+          label: 'shared display'
+        };
+      } finally {
+        detachVideo();
       }
-      context.drawImage(video, 0, 0, dimensions.width, dimensions.height);
-      const blob = await canvasBlob(canvas, signal);
-      return {
-        blob,
-        width: dimensions.width,
-        height: dimensions.height,
-        capturedAt: Date.now(),
-        label: 'shared display'
-      };
     } catch (error) {
       throw displayCaptureError(error);
     } finally {
@@ -105,6 +126,26 @@ function browserGetDisplayMedia() {
 
 function defaultHideAgentUi() {
   return typeof document === 'undefined' ? () => undefined : hideEmbeddedAgentUi(document);
+}
+
+function attachOffscreenVideo(video: HTMLVideoElement) {
+  if (typeof document === 'undefined' || !document.body) return () => undefined;
+  video.setAttribute('playsinline', 'true');
+  video.setAttribute('muted', 'true');
+  Object.assign(video.style, {
+    position: 'fixed',
+    left: '-10000px',
+    top: '0',
+    width: '8px',
+    height: '8px',
+    opacity: '0',
+    pointerEvents: 'none'
+  });
+  document.body.appendChild(video);
+  return () => {
+    video.srcObject = null;
+    video.remove();
+  };
 }
 
 function defaultCreateVideo() {
@@ -243,29 +284,6 @@ function numberSetting(track: MediaStreamTrack, key: 'width' | 'height') {
   return typeof value === 'number' ? value : 0;
 }
 
-function canvasBlob(canvas: HTMLCanvasElement, signal: AbortSignal) {
-  return new Promise<Blob>((resolve, reject) => {
-    let settled = false;
-    const abort = () => {
-      if (settled) return;
-      settled = true;
-      reject(cancelled());
-    };
-    signal.addEventListener('abort', abort, { once: true });
-    canvas.toBlob((blob) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener('abort', abort);
-      blob
-        ? resolve(blob)
-        : reject(new DockClientError(
-          'image_input_capture_failed',
-          'Screen capture encoding failed'
-        ));
-    }, 'image/webp', 0.9);
-  });
-}
-
 function stopStream(stream: MediaStream) {
   for (const track of new Set(stream.getTracks())) track.stop();
 }
@@ -287,7 +305,9 @@ function displayCaptureError(error: unknown) {
       'Screen sharing requires a new explicit user action'
     );
   }
-  if (name === 'NotFoundError') return unsupported();
+  if (name === 'NotFoundError' || name === 'NotSupportedError' || name === 'SecurityError') {
+    return unsupported();
+  }
   if (name === 'AbortError') return cancelled();
   return new DockClientError(
     'image_input_capture_failed',

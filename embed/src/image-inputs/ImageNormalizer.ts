@@ -1,4 +1,5 @@
 import { DockClientError } from '../protocol/errors.js';
+import { encodeCanvasBlob } from './ImageEncode.js';
 
 const ALLOWED_MIME = new Set(['image/webp', 'image/png', 'image/jpeg']);
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -34,7 +35,15 @@ export async function normalizeBrowserImage(
       'This WebView cannot decode screenshots safely'
     );
   }
-  const bitmap = await globalThis.createImageBitmap(blob);
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await globalThis.createImageBitmap(blob);
+  } catch {
+    throw new DockClientError(
+      'image_input_capture_failed',
+      'The captured image could not be decoded'
+    );
+  }
   try {
     if (signal.aborted) throw cancelled();
     if (
@@ -46,34 +55,42 @@ export async function normalizeBrowserImage(
         'Screenshot Provider dimensions do not match the decoded image'
       );
     }
-    const dimensions = targetDimensions(bitmap.width, bitmap.height, options.maxLongestEdge);
-    const canvas = document.createElement('canvas');
-    canvas.width = dimensions.width;
-    canvas.height = dimensions.height;
-    const context = canvas.getContext('2d', { alpha: false });
-    if (!context) {
-      throw new DockClientError('image_input_capture_failed', 'Screenshot canvas is unavailable');
+    let quality = Math.max(0.4, Math.min(1, options.quality));
+    let edge = options.maxLongestEdge ?? 2048;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (signal.aborted) throw cancelled();
+      const dimensions = targetDimensions(bitmap.width, bitmap.height, edge);
+      const canvas = document.createElement('canvas');
+      canvas.width = dimensions.width;
+      canvas.height = dimensions.height;
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) {
+        throw new DockClientError('image_input_capture_failed', 'Screenshot canvas is unavailable');
+      }
+      context.drawImage(bitmap, 0, 0, dimensions.width, dimensions.height);
+      const encoded = await encodeCanvasBlob(canvas, quality, signal);
+      if (signal.aborted) throw cancelled();
+      const mimeType = encoded.type || 'image/png';
+      if (ALLOWED_MIME.has(mimeType) && encoded.size > 0 && encoded.size <= MAX_BYTES) {
+        const bytes = new Uint8Array(await encoded.arrayBuffer());
+        const digestBytes = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+        return {
+          blob: encoded.type ? encoded : new Blob([bytes], { type: mimeType }),
+          mimeType: mimeType as NormalizedBrowserImage['mimeType'],
+          width: dimensions.width,
+          height: dimensions.height,
+          byteLength: bytes.byteLength,
+          digest: hex(new Uint8Array(digestBytes)),
+          dataBase64: base64(bytes)
+        };
+      }
+      quality = Math.max(0.4, quality - 0.2);
+      edge = Math.max(640, Math.floor(edge * 0.75));
     }
-    context.drawImage(bitmap, 0, 0, dimensions.width, dimensions.height);
-    const encoded = await canvasBlob(canvas, options.quality);
-    if (signal.aborted) throw cancelled();
-    if (!ALLOWED_MIME.has(encoded.type) || encoded.size > MAX_BYTES || encoded.size === 0) {
-      throw new DockClientError(
-        'image_input_too_large',
-        'Normalized screenshot exceeds the image input limit'
-      );
-    }
-    const bytes = new Uint8Array(await encoded.arrayBuffer());
-    const digestBytes = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-    return {
-      blob: encoded,
-      mimeType: encoded.type as NormalizedBrowserImage['mimeType'],
-      width: dimensions.width,
-      height: dimensions.height,
-      byteLength: bytes.byteLength,
-      digest: hex(new Uint8Array(digestBytes)),
-      dataBase64: base64(bytes)
-    };
+    throw new DockClientError(
+      'image_input_too_large',
+      'Normalized screenshot exceeds the image input limit'
+    );
   } finally {
     bitmap.close();
   }
@@ -95,18 +112,6 @@ function targetDimensions(width: number, height: number, configuredEdge: number)
     throw new DockClientError('image_input_dimensions_exceeded', 'Screenshot dimensions exceed the limit');
   }
   return result;
-}
-
-function canvasBlob(canvas: HTMLCanvasElement, quality: number) {
-  return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => blob
-        ? resolve(blob)
-        : reject(new DockClientError('image_input_capture_failed', 'Screenshot encoding failed')),
-      'image/webp',
-      Math.max(0.1, Math.min(1, quality))
-    );
-  });
 }
 
 function base64(bytes: Uint8Array) {

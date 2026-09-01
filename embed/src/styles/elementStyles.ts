@@ -1,6 +1,7 @@
 import { animationStyles } from './animations.js';
 import { approvalStyles } from './approval.js';
 import { chatStyles } from './chat.js';
+import { commandOutputStyles } from './commandOutput.js';
 import { composerStyles } from './composer.js';
 import { layoutStyles } from './layout.js';
 import { imageInputStyles } from './imageInputs.js';
@@ -27,6 +28,7 @@ export const elementStyles = [
   themeStyles,
   layoutStyles,
   chatStyles,
+  commandOutputStyles,
   composerStyles,
   imageInputStyles,
   slashCommandStyles,

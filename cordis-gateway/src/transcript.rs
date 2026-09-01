@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 
 use cordis_spine::{
     Ask, ElicitPrompt, LogEvent, PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt,
-    PlanDecision, Sessions,
+    PlanDecision, Sessions, UserImage,
 };
 
 use crate::protocol::LIVE_THREAD_ID;
@@ -132,12 +132,25 @@ impl Transcript {
     pub fn reset_from_sessions(&mut self, sessions: &Sessions) {
         self.events.clear();
         self.projector = Projector::default();
+        let images = sessions.user_images();
+        let mut user_i = 0usize;
         for event in sessions.events() {
-            self.ingest_log(event);
+            let attachments = if matches!(event, LogEvent::User(_)) {
+                let row = images.get(user_i).cloned().unwrap_or_default();
+                user_i += 1;
+                attachment_values(&row)
+            } else {
+                Vec::new()
+            };
+            self.ingest_log_with(event, &attachments);
         }
     }
 
     pub fn ingest_log(&mut self, event: LogEvent) {
+        self.ingest_log_with(event, &[]);
+    }
+
+    pub fn ingest_log_with(&mut self, event: LogEvent, user_attachments: &[Value]) {
         match event {
             LogEvent::User(text) => {
                 self.complete_turn_if_open();
@@ -149,22 +162,20 @@ impl Transcript {
                 self.projector.turn_open = true;
                 let turn_id = self.projector.turn_id.clone();
                 self.push("turn/started", json!({ "status": "running" }));
-                self.push(
-                    "item/user_message",
-                    json!({ "content": text, "turnId": turn_id }),
-                );
+                let mut payload = json!({ "content": text, "turnId": turn_id });
+                if !user_attachments.is_empty() {
+                    payload["attachments"] = Value::Array(user_attachments.to_vec());
+                }
+                self.push("item/user_message", payload);
             }
             LogEvent::LlmStream(out) => {
                 if !self.projector.turn_open {
                     self.ensure_turn();
                 }
-                if out.text.len() > self.projector.last_text.len() {
-                    let delta = out.text[self.projector.last_text.len()..].to_string();
-                    self.projector.last_text = out.text.clone();
-                    if !delta.is_empty() {
-                        self.push("item/message_delta", json!({ "delta": delta }));
-                    }
+                if let Some(delta) = stream_text_delta(&self.projector.last_text, &out.text) {
+                    self.push("item/message_delta", json!({ "delta": delta }));
                 }
+                self.projector.last_text.clone_from(&out.text);
                 for call in &out.tool_calls {
                     if self.projector.seen_tools.insert(call.id.clone()) {
                         self.projector.pending_tools.insert(call.id.clone());
@@ -423,4 +434,156 @@ fn iso_now() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("{ms}")
+}
+
+pub(crate) fn attachment_values(images: &[UserImage]) -> Vec<Value> {
+    images
+        .iter()
+        .filter(|img| matches!(img.mime.as_str(), "image/png" | "image/jpeg" | "image/webp"))
+        .filter(|img| img.width > 0 && img.height > 0 && !img.data.is_empty())
+        .map(|img| {
+            json!({
+                "type": "image",
+                "mimeType": img.mime,
+                "width": img.width,
+                "height": img.height,
+                "byteLength": img.data.len()
+            })
+        })
+        .collect()
+}
+
+/// Incremental assistant text for `item/message_delta`.
+///
+/// Spine re-emits the full accumulated `LlmOutput.text` on every token. A new
+/// sample (empty `begin_llm`, or a rewritten buffer) is **not** a byte prefix of
+/// the previous string — slicing at `previous.len()` panics inside a multibyte
+/// char such as `）`.
+fn stream_text_delta(previous: &str, current: &str) -> Option<String> {
+    if current == previous {
+        return None;
+    }
+    if let Some(delta) = current.strip_prefix(previous) {
+        return if delta.is_empty() {
+            None
+        } else {
+            Some(delta.to_string())
+        };
+    }
+    if current.is_empty() {
+        None
+    } else {
+        Some(current.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cordis_spine::LlmOutput;
+
+    fn deltas(t: &Transcript) -> Vec<String> {
+        t.history_since(0)
+            .into_iter()
+            .filter(|e| e.method == "item/message_delta")
+            .map(|e| {
+                e.payload
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stream_text_delta_suffix_on_utf8_growth() {
+        assert_eq!(stream_text_delta("你", "你好").as_deref(), Some("好"));
+        assert_eq!(stream_text_delta("你好", "你好").as_deref(), None);
+    }
+
+    #[test]
+    fn stream_text_delta_does_not_slice_inside_multibyte_char() {
+        let previous = "a".repeat(45);
+        let current = "bash 工具被权限拒 1m29 需要审批）。我用";
+        assert!(!current.is_char_boundary(previous.len()));
+        assert_eq!(
+            stream_text_delta(&previous, current).as_deref(),
+            Some(current)
+        );
+        assert_eq!(stream_text_delta(&previous, "").as_deref(), None);
+    }
+
+    #[test]
+    fn llm_stream_rewrite_after_long_prefix_does_not_panic() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "a".repeat(45),
+            ..Default::default()
+        }));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "bash 工具被权限拒 1m29 需要审批）。我用".into(),
+            ..Default::default()
+        }));
+        assert!(deltas(&t).iter().any(|d| d.contains("需要审批）")));
+    }
+
+    #[test]
+    fn llm_stream_empty_resets_prefix_before_next_sample() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "a".repeat(45),
+            ..Default::default()
+        }));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput::default()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "bash 工具被权限拒 1m29 需要审批）。我用".into(),
+            ..Default::default()
+        }));
+        let got = deltas(&t);
+        assert_eq!(
+            got.last().map(String::as_str),
+            Some("bash 工具被权限拒 1m29 需要审批）。我用")
+        );
+    }
+
+    #[test]
+    fn llm_stream_emits_char_suffix_when_text_grows() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "你".into(),
+            ..Default::default()
+        }));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "你好".into(),
+            ..Default::default()
+        }));
+        assert_eq!(deltas(&t), vec!["你".to_string(), "好".to_string()]);
+    }
+
+    #[test]
+    fn user_message_includes_attachment_metadata() {
+        let mut t = Transcript::new();
+        t.ingest_log_with(
+            LogEvent::User("[Image #1] 这是什么".into()),
+            &[json!({
+                "type": "image",
+                "mimeType": "image/png",
+                "width": 8,
+                "height": 8,
+                "byteLength": 32
+            })],
+        );
+        let user = t
+            .history_since(0)
+            .into_iter()
+            .find(|e| e.method == "item/user_message")
+            .expect("user message");
+        assert_eq!(user.payload["content"], "[Image #1] 这是什么");
+        assert_eq!(user.payload["attachments"][0]["mimeType"], "image/png");
+        assert!(user.payload["attachments"][0].get("data").is_none());
+    }
 }

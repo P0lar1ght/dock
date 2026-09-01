@@ -7,13 +7,13 @@ export const animationStyles = css`
   }
 
   @keyframes pv-panel-in-left {
-    from { opacity: 0; transform: translateX(16px) scale(0.98); }
-    to { opacity: 1; transform: translateX(0) scale(1); }
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 
   @keyframes pv-panel-in-right {
-    from { opacity: 0; transform: translateX(-16px) scale(0.98); }
-    to { opacity: 1; transform: translateX(0) scale(1); }
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 
   @keyframes pv-caret-blink {
@@ -41,12 +41,10 @@ export const animationStyles = css`
 
   .chat-panel[data-side="left"] {
     animation: pv-panel-in-left 180ms ease-out;
-    transform-origin: right center;
   }
 
   .chat-panel[data-side="right"] {
     animation: pv-panel-in-right 180ms ease-out;
-    transform-origin: left center;
   }
 
   @media (prefers-reduced-motion: reduce) {

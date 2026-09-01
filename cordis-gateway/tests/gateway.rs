@@ -280,6 +280,7 @@ async fn handshake_initialize_is_dock1() {
     assert_eq!(init["result"]["capabilities"]["threadSubscriptions"], true);
     assert_eq!(init["result"]["capabilities"]["threads"], true);
     assert_eq!(init["result"]["capabilities"]["hostTools"], false);
+    assert_eq!(init["result"]["capabilities"]["imageInputs"], true);
     assert_eq!(init["result"]["capabilities"]["slash"], true);
     assert_eq!(
         init["result"]["connection"]["companion"]["status"],
@@ -812,4 +813,92 @@ async fn pairing_exchange_is_one_shot() {
     assert_eq!(second.status(), 409);
     let err: Value = second.json().await.unwrap();
     assert_eq!(err["error"]["code"], "consumed");
+}
+
+fn tiny_png() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ]
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[tokio::test]
+async fn image_inputs_put_then_turn_projects_attachments() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    let lease = init["result"]["connection"]["connectionLeaseId"]
+        .as_str()
+        .unwrap();
+    let env = rpc
+        .call("thread/environment/get", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(
+        env["result"]["model"]["inputModalities"],
+        json!(["text", "image"])
+    );
+    let sync = rpc
+        .call("imageInputs/sync", json!({ "instanceId": "test" }))
+        .await;
+    assert_eq!(sync["result"]["connectionLeaseId"], lease);
+    assert_eq!(sync["result"]["limitsVersion"], 3);
+
+    let data = tiny_png();
+    let digest = sha256_hex(&data);
+    let put = rpc
+        .call(
+            "imageInputs/put",
+            json!({
+                "threadId": "live",
+                "workspaceId": "default",
+                "captureId": "cap-1",
+                "source": "upload",
+                "mimeType": "image/png",
+                "width": 1,
+                "height": 1,
+                "byteLength": data.len(),
+                "digest": digest,
+                "dataBase64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &data
+                )
+            }),
+        )
+        .await;
+    assert!(put.get("error").is_none(), "{put}");
+    let id = put["result"]["imageInputId"].as_str().unwrap();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    let started = rpc
+        .call(
+            "turn/start",
+            json!({
+                "message": "这是什么",
+                "imageInputs": [{ "id": id, "digest": digest, "detail": "auto" }]
+            }),
+        )
+        .await;
+    assert!(started.get("error").is_none(), "{started}");
+    let user = rpc
+        .wait_notification("item/user_message", Duration::from_secs(5))
+        .await;
+    let content = user["params"]["content"].as_str().unwrap();
+    assert!(content.contains("[Image #1]"), "{content}");
+    assert!(content.contains("这是什么"), "{content}");
+    assert_eq!(user["params"]["attachments"][0]["mimeType"], "image/png");
+    assert_eq!(user["params"]["attachments"][0]["width"], 1);
+    assert!(user["params"]["attachments"][0].get("data").is_none());
 }

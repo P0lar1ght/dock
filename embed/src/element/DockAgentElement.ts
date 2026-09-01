@@ -274,6 +274,7 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
         moveSlashCommand: (delta) => this.chatController.moveSlashCommand(delta),
         completeSlashCommand: (index) => this.chatController.completeSlashCommand(index),
         addImages: (files) => this.chatController.addImageFiles(files),
+        captureScreen: () => void this.chatController.captureScreen(),
         removeImage: (id) => this.chatController.removeImage(id),
         moveImage: (id, delta) => this.chatController.moveImage(id, delta),
         removeQueuedTurn: (queueId) => void this.chatController.removeQueuedTurn(queueId),
@@ -303,7 +304,8 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
         dismissIssue: (issueId) => this.chatController.dismissIssue(issueId),
         retryMessage: () => void this.chatController.submit(),
         clearMessageError: () => this.chatController.clearError(),
-        clearThreadError: () => this.threadController.clearError()
+        clearThreadError: () => this.threadController.clearError(),
+        dismissCommandOutput: () => this.chatController.dismissCommandOutput()
       })}
     `;
   }
@@ -449,9 +451,19 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
       height: panel.offsetHeight || bounds.height || 640
     });
     panel.dataset.side = placement.side;
-    panel.style.setProperty('--pv-panel-tail-y', `${placement.anchorY}px`);
-    panel.style.left = `${placement.x}px`;
-    panel.style.top = `${placement.y}px`;
+    const left = `${placement.x}px`;
+    const top = `${placement.y}px`;
+    const tail = `${placement.anchorY}px`;
+    if (
+      panel.style.left === left
+      && panel.style.top === top
+      && panel.style.getPropertyValue('--pv-panel-tail-y') === tail
+    ) {
+      return;
+    }
+    panel.style.setProperty('--pv-panel-tail-y', tail);
+    panel.style.left = left;
+    panel.style.top = top;
   }
 
   private dispatchToggle() {

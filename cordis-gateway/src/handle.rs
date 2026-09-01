@@ -6,13 +6,14 @@ use std::sync::{Arc, Mutex};
 
 use cordis::Context;
 use cordis_spine::{
-    Ask, LogEvent, Mcp, Permissions, PlanMode, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS,
-    PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT,
+    Ask, LogEvent, Mcp, Permissions, PlanMode, Sessions, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT,
+    PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT,
 };
 use cordis_tui::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
 };
 
+use crate::image_store::ImageInputStore;
 use crate::pairing::{IssuedTicket, PairingStatus, PairingStore};
 use crate::transcript::{ProjectedEvent, Transcript};
 
@@ -20,6 +21,7 @@ pub struct GatewayInner {
     pub ctx: Context,
     pub pairing: Mutex<PairingStore>,
     pub transcript: Mutex<Transcript>,
+    pub images: Mutex<ImageInputStore>,
     pub local_addr: SocketAddr,
     pub companion: CompanionStatus,
 }
@@ -34,6 +36,7 @@ impl GatewayHandle {
         let inner = Arc::new(GatewayInner {
             pairing: Mutex::new(PairingStore::new(ctx.clone())),
             transcript: Mutex::new(Transcript::new()),
+            images: Mutex::new(ImageInputStore::new()),
             local_addr,
             companion,
             ctx: ctx.clone(),
@@ -133,6 +136,30 @@ impl GatewayHandle {
             *self.inner.transcript.lock().unwrap() = Transcript::new();
         }
     }
+
+    pub fn put_image(
+        &self,
+        id: String,
+        mime: String,
+        width: u32,
+        height: u32,
+        digest: String,
+        data: Vec<u8>,
+    ) -> Result<crate::image_store::StoredImage, crate::protocol::RpcError> {
+        self.inner
+            .images
+            .lock()
+            .unwrap()
+            .put(id, mime, width, height, digest, data)
+    }
+
+    pub fn take_image(
+        &self,
+        id: &str,
+        digest: &str,
+    ) -> Result<crate::image_store::StoredImage, crate::protocol::RpcError> {
+        self.inner.images.lock().unwrap().take(id, digest)
+    }
 }
 
 impl GatewayPort for GatewayHandle {
@@ -172,11 +199,16 @@ impl GatewayPort for GatewayHandle {
 fn listen_events(inner: &Arc<GatewayInner>) {
     let for_session = inner.clone();
     let _ = inner.ctx.on(SESSION_EVENT, move |event: &LogEvent| {
+        let attachments = if matches!(event, LogEvent::User(_)) {
+            last_user_attachments(&for_session.ctx)
+        } else {
+            Vec::new()
+        };
         for_session
             .transcript
             .lock()
             .unwrap()
-            .ingest_log(event.clone());
+            .ingest_log_with(event.clone(), &attachments);
     });
     let for_perm = inner.clone();
     let ctx_perm = inner.ctx.clone();
@@ -230,4 +262,12 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             t.elicit_resolved();
         }
     });
+}
+
+fn last_user_attachments(ctx: &Context) -> Vec<serde_json::Value> {
+    let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
+        return Vec::new();
+    };
+    let rows = sessions.user_images();
+    crate::transcript::attachment_values(rows.last().map(Vec::as_slice).unwrap_or(&[]))
 }

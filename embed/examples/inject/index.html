@@ -3,16 +3,31 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Dock embed host</title>
+    <title>Dock embed 浏览器测试</title>
     <style>
       body { margin: 0; min-height: 100vh; font: 16px/1.5 system-ui, sans-serif; background: #f4f6f8; color: #18202a; }
-      main { width: min(720px, calc(100% - 32px)); margin: 40px auto; padding: 24px; background: white; border-radius: 12px; }
+      main { width: min(760px, calc(100% - 32px)); margin: 40px auto; padding: 24px; background: white; border-radius: 12px; }
+      code { overflow-wrap: anywhere; }
+      .row { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 16px; }
+      button { min-height: 36px; padding: 8px 12px; border: 0; border-radius: 6px; background: #155eef; color: white; font: inherit; cursor: pointer; }
+      button.secondary { background: #475467; }
+      pre { min-height: 160px; max-height: 320px; margin: 0; padding: 16px; overflow: auto; background: #101828; color: #d1fadf; border-radius: 8px; }
+      .ok { color: #12b76a; }
+      .warn { color: #f79009; }
     </style>
   </head>
   <body>
     <main>
-      <h1>Dock 宿主注入</h1>
-      <p>页面只挂一份 <code>dock-embed.js</code>。宠物和 Chat 在 Shadow DOM 里，不改宿主样式。</p>
+      <h1>Dock 宿主注入测试</h1>
+      <p>本页用 <code>&lt;script src="…/dock-embed.js"&gt;</code> 自动挂载宠物和 Chat。Gateway 默认 <code>http://127.0.0.1:18991</code>；未配对时会停在等待终端 <code>/pair</code>。</p>
+      <p id="mount-status" class="warn">正在加载 dock-embed.js…</p>
+      <div class="row">
+        <button id="open-chat" type="button">打开 Chat</button>
+        <button id="close-chat" class="secondary" type="button">关闭 Chat</button>
+        <button id="connect" class="secondary" type="button">手动 connect()</button>
+      </div>
+      <h2>事件日志</h2>
+      <pre id="log" aria-live="polite">尚未收到 dock:* 事件</pre>
     </main>
     <script
       src="../../dist/dock-embed.js"
@@ -21,5 +36,6 @@
       data-gateway-url="http://127.0.0.1:18991"
       data-skin="dudu">
     </script>
+    <script src="./host-test.js"></script>
   </body>
 </html>

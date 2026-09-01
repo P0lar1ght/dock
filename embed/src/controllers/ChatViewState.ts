@@ -15,6 +15,7 @@ import type { PendingImageInput } from '../image-inputs/PendingImageInputStore.j
 import type { SessionUserInputRequest } from '../session/UserInputModel.js';
 import type { SessionGoalActivity } from '../session/GoalActivityModel.js';
 import type { UserInputInteractionState } from './UserInputController.js';
+import type { CommandOutputView } from './CommandOutput.js';
 
 export type ComposerMenu =
   'context' | 'model' | 'reasoning' | 'approval' | 'goal' | 'plan' | 'memory';
@@ -57,5 +58,6 @@ export interface ChatViewState {
   slashCommands: readonly SlashCommandSuggestion[];
   slashCommandIndex: number;
   turnControl: TurnControlView;
+  commandOutput?: CommandOutputView;
   error?: string;
 }

@@ -6,6 +6,7 @@ description = "Loopback HTTP/WS Cordis plugin: Origin pairing and dock.1 session
 license = "MIT"
 
 [dependencies]
+base64 = "0.22"
 axum = { version = "0.8", features = ["ws", "json"] }
 cordis = { path = "../cordis-rust" }
 cordis-spine = { path = "../cordis-spine" }

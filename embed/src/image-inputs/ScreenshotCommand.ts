@@ -1,16 +1,17 @@
 import type { StartTurnInput } from './types.js';
 
-const COMMAND = '/screenshot';
+const COMMAND = 'screenshot';
 const DEFAULT_QUERY = '请分析当前界面。';
+
+export function isScreenshotCommand(value: string) {
+  return new RegExp(`^/${COMMAND}(?:\\s|$)`, 'u').test(String(value || '').trim());
+}
 
 export function parseScreenshotCommand(
   value: string,
   latestScreenshotTurnId?: string
 ): StartTurnInput | string {
   const trimmed = String(value || '').trim();
-  if (new RegExp(`^/${COMMAND}(?:\\s|$)`, 'u').test(trimmed)) {
-    return trimmed.slice(1);
-  }
   const match = trimmed.match(/^\/screenshot(?:\s+([\s\S]*))?$/u);
   if (!match) return trimmed;
   const argument = String(match[1] || '').trim();

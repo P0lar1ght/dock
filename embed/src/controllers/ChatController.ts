@@ -15,14 +15,18 @@ import {
   slashCommandSuggestions,
   type SlashCatalogEntry
 } from './SlashCommandModel.js';
-import { browserDisplayCaptureSupported } from '../image-inputs/DisplayScreenshotProvider.js';
+import { isScreenshotCommand, parseScreenshotCommand } from '../image-inputs/ScreenshotCommand.js';
+import {
+  browserDisplayCaptureSupported,
+  captureBrowserDisplayFrame
+} from '../image-inputs/DisplayScreenshotProvider.js';
 import type {
   ActiveTurnSendMode,
   ChatViewState,
   ComposerMenu,
   TurnIntentMode
 } from './ChatViewState.js';
-import { delay, resizeComposer } from './ChatDom.js';
+import { delay, isNearBottom, resizeComposer } from './ChatDom.js';
 import {
   ChatImageInputController,
   imageSubmissionError
@@ -30,6 +34,7 @@ import {
 import { UserInputController } from './UserInputController.js';
 import type { SessionUserInputRequest } from '../session/UserInputModel.js';
 import { ChatGoalController } from './ChatGoalController.js';
+import { commandOutputFromSlash, type CommandOutputView } from './CommandOutput.js';
 
 export type { ActiveTurnSendMode, ChatViewState } from './ChatViewState.js';
 
@@ -53,6 +58,7 @@ export class ChatController {
   private approvalChanging = false;
   private approvalConfirmationPending = false;
   private localError = '';
+  private commandOutput?: CommandOutputView;
   private submitting = false;
   private capturingScreenshot = false;
   private slashCommandIndex = 0;
@@ -60,6 +66,10 @@ export class ChatController {
   private readonly removingQueueIds = new Set<string>();
   private removeSessionListener?: () => void;
   private lastScrolledRevision = '';
+  private lastComposerValue = '\0';
+  private stickToBottom = true;
+  private scrollRoot?: HTMLElement;
+  private unbindScroll?: () => void;
   private readonly permissionController: PermissionController;
   private readonly turnController: TurnController;
   private readonly runtimeIssueController: RuntimeIssueController;
@@ -143,10 +153,13 @@ export class ChatController {
       busy,
       submitting: this.submitting,
       capturingScreenshot: this.capturingScreenshot,
-      canSend: sessionReady && !this.submitting && Boolean(this.draftValue.trim()),
+      canSend: sessionReady && !this.submitting && (
+        Boolean(this.draftValue.trim()) || this.imageInputs.pending.length > 0
+      ),
       slashCommands,
       slashCommandIndex,
       turnControl: this.turnController.view,
+      commandOutput: this.commandOutput,
       error: this.localError || this.goalControl.error || this.executionControl.error || undefined
     };
   }
@@ -165,6 +178,7 @@ export class ChatController {
     this.userInputController.bind(session);
     this.stateValue = session?.state;
     this.slashCatalogLoaded = false;
+    this.commandOutput = undefined;
     this.removeSessionListener = session?.onChange((state) => {
       this.stateValue = state;
       this.turnController.update(state);
@@ -238,6 +252,12 @@ export class ChatController {
     if (!this.localError && !this.executionControl.error) return;
     this.localError = '';
     this.executionControl.clearError();
+    this.onChange();
+  }
+
+  dismissCommandOutput() {
+    if (!this.commandOutput) return;
+    this.commandOutput = undefined;
     this.onChange();
   }
 
@@ -377,9 +397,7 @@ export class ChatController {
       this.composerMenu = undefined;
       return true;
     } catch {
-      this.localError = mode === 'full_access'
-        ? '完全访问尚未确认，请重新发起本机确认'
-        : '审批模式未能切换，请刷新 Thread 状态后重试';
+      this.localError = '审批模式未能切换，请刷新 Thread 状态后重试';
       return false;
     } finally {
       this.approvalChanging = false;
@@ -420,11 +438,46 @@ export class ChatController {
     return this.goalControl.clear(this.sessionValue);
   }
 
+  captureScreen() {
+    if (this.submitting || this.capturingScreenshot) return Promise.resolve(false);
+    return this.submitScreenCapture();
+  }
+
+  private async submitScreenCapture() {
+    const session = this.sessionValue;
+    if (!session || session.state.connection !== 'live') {
+      this.localError = 'Agent Session 尚未就绪';
+      this.onChange();
+      return false;
+    }
+    const originalDraft = this.draftValue;
+    this.localError = '';
+    try {
+      const capture = await captureBrowserDisplayFrame();
+      this.imageInputs.add([asImageFile(capture.blob)], true);
+      this.draftValue = '';
+      this.submitting = true;
+      this.capturingScreenshot = true;
+      this.onChange();
+      await this.submitTurn(session, screenCaption(originalDraft));
+      return true;
+    } catch (error) {
+      this.draftValue = originalDraft;
+      this.localError = imageSubmissionError(error);
+      return false;
+    } finally {
+      this.submitting = false;
+      this.capturingScreenshot = false;
+      this.onChange();
+    }
+  }
+
   async submit() {
     const session = this.sessionValue;
     const originalDraft = this.draftValue;
     const message = originalDraft.trim();
-    if (!message || this.submitting) return false;
+    const hasImages = this.imageInputs.pending.length > 0;
+    if ((!message && !hasImages) || this.submitting) return false;
     if (!session || session.state.connection !== 'live') {
       this.localError = 'Agent Session 尚未就绪';
       this.onChange();
@@ -436,6 +489,12 @@ export class ChatController {
     this.submitting = true;
     this.onChange();
     try {
+      if (isScreenshotCommand(message)) {
+        this.capturingScreenshot = true;
+        this.onChange();
+        await this.submitTurn(session, message || '/screenshot');
+        return true;
+      }
       if (looksLikeSlash(message)) {
         const result = await session.executeSlash(message).catch((error) => {
           if (slashUnavailable(error)) return { ok: true as const, kind: 'passthrough' as const };
@@ -489,18 +548,15 @@ export class ChatController {
       this.draftValue = result.fill;
       return;
     }
-    if (result.kind === 'notice' && result.notice) {
-      this.localError = [result.notice.title, result.notice.body]
-        .filter((part) => part.trim())
-        .join('\n');
-      return;
+    const output = commandOutputFromSlash(result);
+    if (output) {
+      this.commandOutput = output;
+      this.localError = '';
+      if (result.kind === 'notice') return;
     }
     if (result.kind === 'menu' && result.menu) {
       this.openSlashMenu(result.menu);
       return;
-    }
-    if (result.kind === 'applied' && result.notice?.body) {
-      this.localError = result.notice.body;
     }
     await session.refreshEnvironment().catch(() => undefined);
   }
@@ -589,16 +645,25 @@ export class ChatController {
   }
 
   afterRender(root: ParentNode) {
-    resizeComposer(root.querySelector<HTMLTextAreaElement>('[data-testid="chat-input"]'));
+    const input = root.querySelector<HTMLTextAreaElement>('[data-testid="chat-input"]');
+    const composerValue = input?.value ?? '';
+    if (composerValue !== this.lastComposerValue) {
+      this.lastComposerValue = composerValue;
+      resizeComposer(input);
+    }
     const list = root.querySelector<HTMLElement>('[data-testid="message-list"]');
     if (!list) {
       this.lastScrolledRevision = '';
+      this.stickToBottom = true;
+      this.detachScroll();
       return;
     }
+    this.attachScroll(list);
     const last = this.stateValue?.messages.at(-1);
     const revision = `${this.stateValue?.lastSeq || 0}:${last?.id || ''}:${last?.content.length || 0}`;
     if (revision === this.lastScrolledRevision) return;
     this.lastScrolledRevision = revision;
+    if (!this.stickToBottom) return;
     list.scrollTop = list.scrollHeight;
   }
 
@@ -612,12 +677,34 @@ export class ChatController {
     this.sessionValue = undefined;
     this.stateValue = undefined;
     this.lastScrolledRevision = '';
+    this.lastComposerValue = '\0';
+    this.stickToBottom = true;
+    this.detachScroll();
     this.removingQueueIds.clear();
     this.composerMenu = undefined;
     this.goalControl.reset();
     this.imageInputs.clear();
+    this.commandOutput = undefined;
     this.slashCatalog = mergeSlashCatalog(undefined);
     this.slashCatalogLoaded = false;
+  }
+
+  private attachScroll(list: HTMLElement) {
+    if (this.scrollRoot === list) return;
+    this.detachScroll();
+    const onScroll = () => {
+      this.stickToBottom = isNearBottom(list);
+    };
+    list.addEventListener('scroll', onScroll, { passive: true });
+    this.scrollRoot = list;
+    this.unbindScroll = () => list.removeEventListener('scroll', onScroll);
+    this.stickToBottom = isNearBottom(list);
+  }
+
+  private detachScroll() {
+    this.unbindScroll?.();
+    this.unbindScroll = undefined;
+    this.scrollRoot = undefined;
   }
 
   private async finishThreadControl(operation: Promise<boolean>) {
@@ -628,8 +715,25 @@ export class ChatController {
   }
 }
 
+function asImageFile(blob: Blob) {
+  const type = blob.type === 'image/jpeg' || blob.type === 'image/webp' || blob.type === 'image/png'
+    ? blob.type
+    : 'image/png';
+  const named = blob.type ? blob : new Blob([blob], { type });
+  const ext = type === 'image/jpeg' ? 'jpg' : type === 'image/webp' ? 'webp' : 'png';
+  return typeof File === 'function' ? new File([named], `screen.${ext}`, { type }) : named;
+}
+
 function looksLikeSlash(message: string) {
   return message.startsWith('/') && !message.startsWith('//');
+}
+
+function screenCaption(value: string) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return '';
+  if (!isScreenshotCommand(trimmed)) return trimmed;
+  const parsed = parseScreenshotCommand(trimmed);
+  return typeof parsed === 'string' ? parsed : parsed.message;
 }
 
 function slashUnavailable(error: unknown) {

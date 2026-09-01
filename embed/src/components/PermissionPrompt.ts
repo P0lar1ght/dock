@@ -5,6 +5,7 @@ import type { PermissionInteractionState } from '../controllers/PermissionContro
 import type { SessionRuntimeIssue } from '../session/RuntimeIssueModel.js';
 import type { RuntimeIssueInteraction } from '../controllers/RuntimeIssueController.js';
 import { runtimeIssueDetails, type RuntimeIssueActions } from './chat/RuntimeIssueRow.js';
+import { TOOL_DIAMOND, prettyArgs } from './chat/toolCard.js';
 
 export function permissionPrompt(
   permission: SessionPermissionRequest,
@@ -16,9 +17,10 @@ export function permissionPrompt(
 ) {
   const pending = permission.status === 'pending';
   const resolving = Boolean(interaction?.resolving);
+  const args = prettyArgs(permission.argumentsSummary);
   return html`
     <details
-      class="permission-prompt"
+      class="tool-card permission-prompt"
       data-testid="permission-prompt"
       data-permission-id=${permission.id}
       data-turn-id=${permission.turnId}
@@ -28,26 +30,16 @@ export function permissionPrompt(
       ?open=${pending}
     >
       <summary aria-label=${`${permission.title}，${permissionStatus(permission)}`}>
-        <span class="permission-icon" aria-hidden="true">${permissionIcon(permission.status)}</span>
-        <span class="permission-title">${permission.title}</span>
-        <span class="permission-risk">${riskLabel(permission.risk)}</span>
-        <span class="permission-state">${permissionStatus(permission)}</span>
-        <span class="permission-chevron" aria-hidden="true">›</span>
+        <span class="tool-card-diamond" aria-hidden="true">${TOOL_DIAMOND}</span>
+        <span class="tool-card-name">${permission.title}</span>
+        <span class="tool-card-summary">${permissionStatus(permission)}${permission.risk === 'high' ? ' · 高风险' : ''}</span>
       </summary>
-      <div class="permission-details">
-        ${permission.scope ? html`<p class="permission-scope">作用域 · ${permission.scope}</p>` : nothing}
-        ${permission.reason ? html`<p class="permission-reason">说明 · ${permission.reason}</p>` : nothing}
-        ${permission.bindingSummary ? html`
-          <p class="permission-scope">授权绑定 · ${permission.bindingSummary}</p>
-        ` : nothing}
-        ${permission.expiresAt ? html`
-          <p class="permission-scope">授权到期 · ${new Date(permission.expiresAt).toISOString()}</p>
-        ` : nothing}
-        ${permission.argumentsSummary ? html`
-          <section>
-            <h4>参数摘要</h4>
-            <pre>${permission.argumentsSummary}</pre>
-          </section>
+      <div class="tool-card-body permission-details">
+        ${permission.reason ? html`<p class="permission-reason">${permission.reason}</p>` : nothing}
+        ${permission.scope ? html`<div class="tool-card-k">${permission.scope}</div>` : nothing}
+        ${args ? html`
+          <div class="tool-card-k">输入</div>
+          <pre class="tool-card-pre">${args}</pre>
         ` : nothing}
         ${interaction?.error ? html`<p class="permission-error" role="alert">${interaction.error}</p>` : nothing}
         ${issue && issueActions ? runtimeIssueDetails(issue, issueInteractions[issue.id], issueActions) : nothing}
@@ -85,16 +77,3 @@ function permissionStatus(permission: SessionPermissionRequest) {
   return '需要确认';
 }
 
-function permissionIcon(status: SessionPermissionRequest['status']) {
-  if (status === 'approved') return '✓';
-  if (status === 'denied') return '−';
-  if (status === 'failed') return '×';
-  return '!';
-}
-
-function riskLabel(risk: SessionPermissionRequest['risk']) {
-  if (risk === 'high') return '高风险';
-  if (risk === 'medium') return '中风险';
-  if (risk === 'low') return '低风险';
-  return '风险未知';
-}

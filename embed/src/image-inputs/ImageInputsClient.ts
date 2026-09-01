@@ -112,13 +112,17 @@ export class ImageInputsClient {
       }];
     }
     const controller = new AbortController();
+    const screen = inputs.some((input) =>
+      input.type === 'screenshot' && !reuseInput(input) && captureModeOf(input.capture) === 'screen'
+    );
     const fullPage = inputs.some((input) =>
       input.type === 'screenshot' && captureModeOf(input.capture) === 'full-page'
     );
-    const configuredTimeout = fullPage
-      ? this.configuration.fullPageTimeoutMs ?? 30_000
-      : this.configuration.timeoutMs ?? 10_000;
-    const timeoutMs = Math.max(1, Math.min(30_000, configuredTimeout));
+    const timeoutMs = screen
+      ? 120_000
+      : fullPage
+        ? this.configuration.fullPageTimeoutMs ?? 30_000
+        : 30_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const prepared: PreparedImageInputReference[] = [];

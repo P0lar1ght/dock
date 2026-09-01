@@ -146,10 +146,25 @@ export const markdownStyles = css`
   .markdown-message [data-align="center"] { text-align: center; }
   .markdown-message [data-align="right"] { text-align: right; }
 
+  .markdown-code-figure {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+    margin: 0;
+  }
+
+  .markdown-code-caption {
+    color: var(--pv-muted);
+    font-size: 10px;
+    font-weight: 760;
+    letter-spacing: 0.04em;
+  }
+
   .markdown-inline-code,
   .markdown-code-block {
     border: 1px solid var(--pv-border);
     background: rgba(4, 13, 22, 0.48);
+    color: var(--pv-text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 0.9em;
   }
@@ -167,8 +182,13 @@ export const markdownStyles = css`
     padding: 10px;
     border-radius: 9px;
     line-height: 1.45;
+    tab-size: 2;
     overscroll-behavior: contain;
     white-space: pre;
+  }
+
+  .markdown-code-figure[data-language="mermaid"] .markdown-code-block {
+    max-height: 280px;
   }
 
   .markdown-code-block code {

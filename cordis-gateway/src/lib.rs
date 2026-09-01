@@ -7,6 +7,7 @@
 mod bind;
 mod handle;
 mod http;
+mod image_store;
 mod pairing;
 mod plugin;
 mod protocol;

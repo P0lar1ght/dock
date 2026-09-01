@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use cordis_spine::{Sessions, UserImage, SESSIONS};
 use cordis_tui::{SessionRef, SESSION_PORT};
 
 use crate::handle::GatewayHandle;
@@ -67,11 +68,18 @@ pub fn queue_remove(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
 }
 
 fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Value, RpcError> {
-    let message = params
+    let mut message = params
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let images = resolve_turn_images(gateway, &params)?;
+    if !images.is_empty() {
+        message = with_image_chips(&message, images.len());
+        if let Some(sessions) = gateway.ctx().get::<Sessions>(SESSIONS) {
+            sessions.queue_user_images(images);
+        }
+    }
     if message.trim().is_empty() {
         return Err(RpcError::invalid_params("message is required"));
     }
@@ -89,6 +97,83 @@ fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Valu
         "turnId": format!("t{}", gateway.latest_seq().saturating_add(1)),
         "status": status
     }))
+}
+
+fn resolve_turn_images(
+    gateway: &GatewayHandle,
+    params: &Value,
+) -> Result<Vec<UserImage>, RpcError> {
+    let Some(list) = params.get("imageInputs").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    if list.len() > 4 {
+        return Err(RpcError::app(
+            "image_input_invalid",
+            "A Turn accepts 1-4 images",
+        ));
+    }
+    let mut out = Vec::with_capacity(list.len());
+    for item in list {
+        if let Some(reuse) = item.get("reuseTurnId").and_then(Value::as_str) {
+            out.extend(reuse_turn_images(gateway, reuse)?);
+            continue;
+        }
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_params("imageInputs.id is required"))?;
+        let digest = item
+            .get("digest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_params("imageInputs.digest is required"))?;
+        out.push(gateway.take_image(id, digest)?.into());
+    }
+    Ok(out)
+}
+
+fn reuse_turn_images(gateway: &GatewayHandle, turn_id: &str) -> Result<Vec<UserImage>, RpcError> {
+    let Some(sessions) = gateway.ctx().get::<Sessions>(SESSIONS) else {
+        return Err(RpcError::app("unavailable", "sessions is not mounted"));
+    };
+    let index = turn_id
+        .strip_prefix('t')
+        .and_then(|n| n.parse::<usize>().ok())
+        .and_then(|n| n.checked_sub(1));
+    let Some(index) = index else {
+        return Err(RpcError::invalid_params("reuseTurnId is invalid"));
+    };
+    let rows = sessions.user_images();
+    rows.get(index)
+        .cloned()
+        .filter(|row| !row.is_empty())
+        .ok_or_else(|| {
+            RpcError::app(
+                "image_input_invalid",
+                "No reusable screenshot Turn is available",
+            )
+        })
+}
+
+fn with_image_chips(message: &str, count: usize) -> String {
+    let mut chips = String::new();
+    for i in 1..=count {
+        let chip = format!("[Image #{i}]");
+        if message.contains(&chip) {
+            continue;
+        }
+        if !chips.is_empty() {
+            chips.push(' ');
+        }
+        chips.push_str(&chip);
+    }
+    if chips.is_empty() {
+        return message.to_string();
+    }
+    if message.trim().is_empty() {
+        chips
+    } else {
+        format!("{chips} {message}")
+    }
 }
 
 fn apply_turn_intent(

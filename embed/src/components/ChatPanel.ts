@@ -13,6 +13,7 @@ import type { ThreadWorkspaceView } from '../controllers/ThreadController.js';
 import { threadMenu } from './chat/ThreadMenu.js';
 import type { SessionRuntimeIssue } from '../session/RuntimeIssueModel.js';
 import { safeRuntimeIssueText } from '../session/RuntimeIssueModel.js';
+import { commandOutputCard } from './chat/CommandOutputCard.js';
 import { operationIssueNotice, type OperationIssueView } from './chat/OperationIssueNotice.js';
 import type { ApprovalMode, ReasoningEffort } from '../protocol/responses.js';
 import type { ThreadMemorySelection } from '../controllers/ThreadExecutionControlController.js';
@@ -68,6 +69,7 @@ export interface ChatPanelActions {
   moveSlashCommand: (delta: number) => void;
   completeSlashCommand: (index?: number) => void;
   addImages: (files: readonly File[]) => void;
+  captureScreen: () => void;
   removeImage: (id: string) => void;
   moveImage: (id: string, delta: number) => void;
   removeQueuedTurn: (queueId: string) => void;
@@ -96,6 +98,7 @@ export interface ChatPanelActions {
   retryMessage: () => void;
   clearMessageError: () => void;
   clearThreadError: () => void;
+  dismissCommandOutput: () => void;
 }
 
 export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
@@ -148,6 +151,7 @@ export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
         })}
 
         <div class="chat-footer">
+          ${commandOutputCard(model.commandOutput, actions.dismissCommandOutput)}
           ${connectionStatus(model.recovery, model.pairing, model.gateway, {
             retry: actions.retry,
             refreshPairing: actions.refreshPairing,
@@ -182,7 +186,7 @@ export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
             goalDraft: model.goalDraft,
             goalChanging: model.goalChanging,
             environment: model.environment,
-            error: model.recovery.visible ? undefined : model.warning
+            error: model.recovery.visible ? undefined : (model.error || model.warning)
           }, {
             draft: actions.draft,
             mode: actions.sendMode,
@@ -211,6 +215,7 @@ export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
             moveSlashCommand: actions.moveSlashCommand,
             completeSlashCommand: actions.completeSlashCommand,
             addImages: actions.addImages,
+            captureScreen: actions.captureScreen,
             removeImage: actions.removeImage,
             moveImage: actions.moveImage
           })}
@@ -221,14 +226,6 @@ export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
 }
 
 function operationIssue(model: ChatPanelModel): OperationIssueView | undefined {
-  if (model.error) {
-    return {
-      source: 'message',
-      title: '消息提交失败',
-      detail: safeRuntimeIssueText(model.error, 220),
-      retryable: Boolean(model.draft.trim()) && model.sessionReady
-    };
-  }
   if (model.threadWorkspace.error) {
     return {
       source: 'thread',

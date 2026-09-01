@@ -2,6 +2,7 @@ import { html, nothing } from 'lit';
 import { faArrowUp } from '@fortawesome/free-solid-svg-icons/faArrowUp';
 import { faChevronDown } from '@fortawesome/free-solid-svg-icons/faChevronDown';
 import { faHand } from '@fortawesome/free-solid-svg-icons/faHand';
+import { faCamera } from '@fortawesome/free-solid-svg-icons/faCamera';
 import { faPlus } from '@fortawesome/free-solid-svg-icons/faPlus';
 import { faPaperclip } from '@fortawesome/free-solid-svg-icons/faPaperclip';
 import { faArrowLeft } from '@fortawesome/free-solid-svg-icons/faArrowLeft';
@@ -22,6 +23,7 @@ import type { ApprovalMode, ReasoningEffort } from '../../protocol/responses.js'
 import type { SlashCommandSuggestion } from '../../controllers/SlashCommandModel.js';
 import type { PendingImageInput } from '../../image-inputs/PendingImageInputStore.js';
 import type { TurnIntentMode } from '../../controllers/ChatViewState.js';
+import { browserDisplayCaptureSupported } from '../../image-inputs/DisplayScreenshotProvider.js';
 
 export interface ChatComposerModel {
   draft: string;
@@ -73,6 +75,7 @@ export interface ChatComposerActions {
   moveSlashCommand: (delta: number) => void;
   completeSlashCommand: (index?: number) => void;
   addImages: (files: readonly File[]) => void;
+  captureScreen: () => void;
   removeImage: (id: string) => void;
   moveImage: (id: string, delta: number) => void;
 }
@@ -91,6 +94,7 @@ export function chatComposer(model: ChatComposerModel, actions: ChatComposerActi
   const approval = approvalLabel(model.environment?.approval.mode);
   const modelLabel = model.environment?.model.label || '模型';
   const imageSupported = model.environment?.model.inputModalities?.includes('image') === true;
+  const screenCaptureSupported = browserDisplayCaptureSupported();
   return html`
     <footer class="composer-shell">
       ${model.error ? html`<p class="composer-error" role="alert">${model.error}</p>` : ''}
@@ -208,6 +212,14 @@ export function chatComposer(model: ChatComposerModel, actions: ChatComposerActi
                 form?.querySelector<HTMLInputElement>('[data-testid="image-file-input"]')?.click();
               }}
             >${iconTemplate(faPaperclip)}</button>
+            <button
+              class="composer-control attachment-control"
+              data-testid="screenshot-screen-trigger"
+              type="button"
+              aria-label="截取屏幕"
+              ?disabled=${!model.sessionReady || !imageSupported || !screenCaptureSupported || model.submitting || model.capturingScreenshot}
+              @click=${actions.captureScreen}
+            >${iconTemplate(faCamera)}</button>
             <button
               class="composer-control approval-control"
               type="button"
@@ -349,9 +361,7 @@ function slashCommandMenu(model: ChatComposerModel, actions: ChatComposerActions
 }
 
 function approvalLabel(value: SessionEnvironment['approval']['mode'] | undefined) {
-  if (value === 'full_access') return '完全访问';
-  if (value === 'auto') return '按风险审批';
-  return '请求审批';
+  return value === 'auto' ? '始终允许' : '询问';
 }
 
 function activeSendModes(mode: ActiveTurnSendMode, actions: ChatComposerActions) {

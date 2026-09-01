@@ -1,6 +1,7 @@
 import { html, nothing } from 'lit';
 import type { RuntimeIssueInteraction } from '../../controllers/RuntimeIssueController.js';
 import type { SessionRuntimeIssue } from '../../session/RuntimeIssueModel.js';
+import { TOOL_DIAMOND } from './toolCard.js';
 
 export interface RuntimeIssueActions {
   retryIssue: (issue: SessionRuntimeIssue) => void;
@@ -15,17 +16,16 @@ export function runtimeIssueRow(
 ) {
   return html`
     <details
-      class="runtime-issue"
+      class="tool-card runtime-issue"
       data-testid="runtime-issue"
       data-issue-id=${issue.id}
       data-turn-id=${issue.turnId}
       data-kind=${issue.kind}
     >
       <summary aria-label=${`${issue.title}，点击展开恢复操作`}>
-        <span class="runtime-issue-icon" aria-hidden="true">!</span>
-        <span class="runtime-issue-title">${issue.title}</span>
-        <span class="runtime-issue-action-label">${actionLabel(issue)}</span>
-        <span class="runtime-issue-chevron" aria-hidden="true">›</span>
+        <span class="tool-card-diamond" aria-hidden="true">${TOOL_DIAMOND}</span>
+        <span class="tool-card-name">${issue.title}</span>
+        <span class="tool-card-summary">${actionLabel(issue)}</span>
       </summary>
       ${runtimeIssueDetails(issue, interaction, actions)}
     </details>

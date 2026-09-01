@@ -83,7 +83,7 @@ export function reduceSession(state: SessionState, notification: RuntimeNotifica
       if (turnId) next = withActivity(projectUserMessage(state, turnId, text(params.content), seq, params.attachments), 'thinking');
       break;
     case 'item/message_delta':
-      if (turnId) next = withActivity(appendAssistantDelta(state, turnId, stringValue(params.delta), seq), 'streaming');
+      if (turnId) next = withActivity(appendAssistantDelta(state, turnId, messageDelta(params), seq), 'streaming');
       break;
     case 'turn/started':
       if (turnId) next = withActivity(withTurn(state, turnId, 'running'), 'thinking');
@@ -574,6 +574,17 @@ function object(value: unknown): Record<string, unknown> {
 
 function text(value: unknown) {
   return String(value || '').trim();
+}
+
+function messageDelta(params: Record<string, unknown>) {
+  const nested = object(params.delta);
+  if (typeof params.delta === 'string') return params.delta;
+  if (typeof nested.text === 'string') return nested.text;
+  if (typeof nested.content === 'string') return nested.content;
+  if (typeof nested.delta === 'string') return nested.delta;
+  if (typeof params.text === 'string') return params.text;
+  if (typeof params.content === 'string') return params.content;
+  return stringValue(params.delta);
 }
 
 function stringValue(value: unknown) {
