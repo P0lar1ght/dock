@@ -40,6 +40,9 @@ enum ExtraKind {
     Dynamic,
     /// Live MCP tool — bypasses Agent preset allowlist while the server/tool is on.
     Mcp,
+    /// Infrequent local tool — hidden from the sampler, discovered via
+    /// `search_tool` and called with `use_tool`. Allowlist still applies.
+    Deferred,
 }
 
 /// Named `tools` service. Echo backend for tests; workspace backend for the app.
@@ -82,9 +85,20 @@ impl Tools {
         self.register_inner(spec, body, ExtraKind::Dynamic)
     }
 
-    /// MCP extras: registered for `use_tool` dispatch and occupancy, omitted
-    /// from the sampler tools array. Execute still bypasses the Agent preset
-    /// allowlist so `mcp_{server}__{tool}` can run after discovery.
+    /// Infrequent local tools: registered for `search_tool` / `use_tool`,
+    /// omitted from the sampler tools array and occupancy. Execute still
+    /// applies Agent preset allowlists (unlike MCP extras).
+    pub fn register_deferred(
+        &self,
+        spec: ToolSpec,
+        body: ToolBody,
+    ) -> cordis::Result<Disposable> {
+        self.register_inner(spec, body, ExtraKind::Deferred)
+    }
+
+    /// MCP extras: registered for `use_tool` dispatch, omitted from the
+    /// sampler tools array and occupancy. Execute still bypasses the Agent
+    /// preset allowlist so `mcp_{server}__{tool}` can run after discovery.
     pub fn register_mcp(&self, spec: ToolSpec, body: ToolBody) -> cordis::Result<Disposable> {
         self.register_inner(spec, body, ExtraKind::Mcp)
     }
@@ -152,6 +166,19 @@ impl Tools {
             .is_some_and(|e| e.kind == ExtraKind::Mcp)
     }
 
+    pub fn is_deferred(&self, name: &str) -> bool {
+        self.extra
+            .lock()
+            .unwrap()
+            .get(name)
+            .is_some_and(|e| e.kind == ExtraKind::Deferred)
+    }
+
+    /// Hidden from the sampler: MCP extras and infrequent local tools.
+    pub fn is_hidden(&self, name: &str) -> bool {
+        self.is_mcp(name) || self.is_deferred(name)
+    }
+
     fn bypasses_allowlist(&self, name: &str) -> bool {
         self.is_dynamic(name) || self.is_mcp(name)
     }
@@ -177,25 +204,27 @@ impl Tools {
         let extra = self.extra.lock().unwrap();
         let mut regular: Vec<ToolSpec> = extra
             .values()
-            .filter(|e| e.kind != ExtraKind::Mcp)
+            .filter(|e| !matches!(e.kind, ExtraKind::Mcp | ExtraKind::Deferred))
             .map(|e| e.spec.clone())
             .collect();
         regular.sort_by(|a, b| a.name.cmp(&b.name));
         specs.extend(regular);
-        // Hidden from the sampler (`specs_for_model`); occupancy / inspect
-        // still list them. Discovery is `search_tool` → `use_tool`.
+        // Hidden from the sampler (`specs_for_model`); still registered for
+        // `use_tool` dispatch. Occupancy does not count these schemas.
         for entry in extra.values() {
-            if entry.kind == ExtraKind::Mcp {
+            if matches!(entry.kind, ExtraKind::Mcp | ExtraKind::Deferred) {
                 specs.push(entry.spec.clone());
             }
         }
         specs
     }
 
-    /// Specs the sampler should see: live `"tools"` minus MCP extras (Grok
-    /// `tool_definitions_builtins_only`), then the current agent preset
-    /// allowlist. MCP tools stay registered for `use_tool` dispatch.
-    /// Inspect / occupancy / the TUI catalog still use [`Tools::specs`].
+    /// Specs the sampler should see: live `"tools"` minus hidden extras
+    /// (MCP + infrequent local; Grok `tool_definitions_builtins_only` plus
+    /// Dock's deferred locals), then the current agent preset allowlist.
+    /// Hidden tools stay registered for `use_tool` dispatch.
+    /// Inspect / the TUI catalog still use [`Tools::specs`]. Occupancy
+    /// counts [`Self::specs_for_model`] only.
     pub fn specs_for_model(&self) -> Vec<ToolSpec> {
         self.specs_for_model_on(&self.ctx)
     }
@@ -204,7 +233,7 @@ impl Tools {
         let specs: Vec<ToolSpec> = self
             .specs()
             .into_iter()
-            .filter(|s| !self.is_mcp(&s.name))
+            .filter(|s| !self.is_hidden(&s.name))
             .collect();
         match exec.get::<AgentPresets>(AGENT_PRESETS) {
             Some(presets) => specs
@@ -438,11 +467,14 @@ mod tests {
     }
 
     #[test]
-    fn specs_for_model_omits_mcp_extras() {
+    fn specs_for_model_omits_hidden_extras() {
         let ctx = Context::new();
         let tools = Tools::echo(ctx);
         tools.register(spec("alpha"), stub_body()).unwrap();
         let _mcp = tools.register_mcp(spec("mcp_s__t"), stub_body()).unwrap();
+        let _def = tools
+            .register_deferred(spec("scheduler_create"), stub_body())
+            .unwrap();
         let model: Vec<String> = tools
             .specs_for_model()
             .into_iter()
@@ -450,6 +482,9 @@ mod tests {
             .collect();
         assert_eq!(model, ["alpha"]);
         assert!(tools.specs().iter().any(|s| s.name == "mcp_s__t"));
+        assert!(tools.specs().iter().any(|s| s.name == "scheduler_create"));
+        assert!(tools.is_hidden("scheduler_create"));
+        assert!(tools.is_deferred("scheduler_create"));
     }
 
     #[tokio::test]

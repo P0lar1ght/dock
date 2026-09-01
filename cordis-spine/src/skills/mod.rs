@@ -425,7 +425,7 @@ pub fn tool_skills() -> Plugin {
         };
         own_registered(
             ctx,
-            vec![tools.register(
+            vec![tools.register_deferred(
                 ToolSpec {
                     name: "skill".into(),
                     description: SKILL_TOOL_DESC.into(),

@@ -3,8 +3,8 @@
 //! Protocol: offer `2026-07-28` first; fall back to initialize-era `2025-11-25`.
 //! Transports: stdio (Content-Length) and Streamable HTTP (`url`).
 //! Public names: `mcp_{server}__{tool}`. Sampler sees `search_tool` / `use_tool`
-//! (Grok progressive disclosure); MCP extras stay registered for dispatch and
-//! occupancy, omitted from `specs_for_model`. Enabled MCP tools bypass Agent
+//! (Grok progressive disclosure); MCP extras stay registered for dispatch,
+//! omitted from `specs_for_model` and occupancy. Enabled MCP tools bypass Agent
 //! preset allowlists on execute.
 
 mod credentials;

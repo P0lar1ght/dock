@@ -304,7 +304,7 @@ pub fn tool_workflow() -> Plugin {
         };
         own_registered(
             ctx,
-            vec![tools.register(
+            vec![tools.register_deferred(
                 ToolSpec {
                     name: WORKFLOW_TOOL_NAME.into(),
                     description: DESC.into(),

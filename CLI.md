@@ -40,7 +40,7 @@
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
 | `/find` | 搜索对话 |
 | `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入 / 输出 / 缓存命中与占比 / 思考 / 调用次数 / API 耗时。接口若带 `cost_in_usd_ticks` 才显示费用，缺省为「未上报」（不是免费）。**Tab** 切到占用。**没有** grok.com 账号额度、`/usage manage` |
-| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、MCP、工作流、技能。**工具定义不含 MCP**（对齐 Grok `tool_definitions_builtins_only`）；MCP 工具 schema 占用记在「MCP 服务器」行，点开按 server 列出每个工具。技能与工作流 listing 已在系统提示里，图例行不把同一段再加进 `used`。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量 |
+| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、MCP、本地按需、工作流、技能。**工具定义只含模型可见项**（`search_tool` / `use_tool` 等）。MCP extras 与 `register_deferred` 的本地工具 **不计入** `used`；点开只看目录。`search_tool` 返回的 schema 记在消息历史里直到压缩。技能与工作流 listing 已在系统提示里，图例行不把同一段再加进 `used`。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量 |
 | `/compact [说明]` | 压缩旧对话为摘要（Grok 同款 structured `<summary>` 九段）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩（Grok `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`）；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制 |
 | `/theme` `/t` | 切换配色 |
 | `/timestamps` | 开关滚动区时间戳 |
@@ -97,7 +97,7 @@ order: 10
 | 目标状态条 | 有目标时钉在子代理头像和排队条之间（紧挨输入框上方）：标题 + `[暂停]`/`[继续]` `[修改]` `[关闭]`；第二行是进度备注和彩色扫光波。运行中随 80ms 刷新换色；暂停后冻结变灰。点标题打开 overlay，点 `[修改]` 直接改标题 |
 | 子代理头像条 | 未结束的子代理钉在输入框上方横排**正方形**头像（框里是显示名首字，无名字行）。运行中边框扫光并呼吸。点头像打开 **Grok 同款全屏边框**：标题栏 + 子代理自己的滚动区（工具卡折叠循环与主界面相同：收起 → 截断 → 展开）。框底可输入，Enter 经 `send_message`（urgent）发给该子代理以调整。Esc / q（输入为空时）/ [✗] 返回 |
 | 滚动区 | live-lookup `"todos"`；用户气泡灰带铺满行宽（Grok `with_background`）；图标抄 Grok `todo_pane`（`□` `▶` `✓` `✗`）。**`subagent` 是独立卡片**：当前模式名册角色名 + type id，始终折叠，点击打开全屏对话。Grok `task` 仍画成原来的子代理块。后台 bash / `monitor` 画成任务卡片。`update_goal` 画成 **Goal 卡**（设定 / 进展 / 完成 / 受阻）。`scheduler_create` / `scheduler_list` / `scheduler_delete` 画成 **Loop 卡**（设定 / 列表 / 关闭）。`search_tool` 画成 **Search Tools** 卡（关键词 + 条数；展开为「动作  服务器」列表，不把 JSON schema 铺开）。MCP 调用（`use_tool` 或遗留 `mcp_{server}__{tool}`）画成 **Server Action** 卡（参数 kv + 输出；`use_tool` 标题用内层 `tool_name`）。运行中 ◆ 会脉冲，活动与耗时随 80ms 刷新 |
-| 顶栏 | 右上角 `上下文 {used}/{window}`：当前窗口占用（系统提示 + 消息 + 内建工具定义 + MCP 工具定义 + 图片 + 推理；有官方 prompt 则取较大值）。点击打开占用 overlay，再点分类看明细。不是 `/usage` 的会话累计账本 |
+| 顶栏 | 右上角 `上下文 {used}/{window}`：当前窗口占用（系统提示 + 消息 + 模型可见工具定义 + 图片 + 推理；有官方 prompt 则取较大值）。MCP extras 与按需本地工具不进采样工具表，也不计入占用。点击打开占用 overlay，再点分类看明细。不是 `/usage` 的会话累计账本 |
 | `enter_plan_mode` / `exit_plan_mode` 卡 | scrollback：`◆ Plan: Enter\|Exit`；Exit 展开 markdown。`exit` 会 park 审批，写闸保持到用户决定 |
 
 ---

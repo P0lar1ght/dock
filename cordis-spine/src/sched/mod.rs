@@ -60,7 +60,7 @@ pub fn tool_scheduler() -> Plugin {
             own_registered(
                 ctx,
                 vec![
-                    tools.register(
+                    tools.register_deferred(
                         ToolSpec {
                             name: "scheduler_create".into(),
                             description: format!(
@@ -77,7 +77,7 @@ Usage notes:\n\
                         },
                         create,
                     )?,
-                    tools.register(
+                    tools.register_deferred(
                         ToolSpec {
                             name: "scheduler_list".into(),
                             description: "List all active scheduled tasks with their IDs, prompts, intervals, and next fire times.".into(),
@@ -85,7 +85,7 @@ Usage notes:\n\
                         },
                         list,
                     )?,
-                    tools.register(
+                    tools.register_deferred(
                         ToolSpec {
                             name: "scheduler_delete".into(),
                             description: "Cancel a scheduled task by ID.".into(),

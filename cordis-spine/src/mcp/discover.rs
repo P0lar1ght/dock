@@ -1,8 +1,9 @@
 //! Grok progressive disclosure: `search_tool` + `use_tool`.
 //!
-//! MCP extras stay registered for dispatch but are omitted from the sampler
-//! tools array (`Tools::specs_for_model`). Catalog changes are announced as
-//! server-level `<system-reminder>` deltas, not per-tool schema dumps.
+//! Hidden extras (MCP + infrequent local tools) stay registered for dispatch
+//! but are omitted from the sampler tools array (`Tools::specs_for_model`).
+//! Catalog changes for MCP are announced as server-level `<system-reminder>`
+//! deltas, not per-tool schema dumps.
 
 use serde_json::{json, Value};
 
@@ -16,18 +17,29 @@ use super::{Mcp, McpStatus};
 pub const SEARCH_TOOL_NAME: &str = "search_tool";
 pub const USE_TOOL_NAME: &str = "use_tool";
 
-const SEARCH_TOOL_DESC: &str = "Search for MCP tools by keyword and retrieve their input schemas. \
-If status is \"partial\", some servers may still be connecting. \
-Call matched tools with use_tool (tool_name is the qualified mcp_server__tool name).";
+const SEARCH_TOOL_DESC: &str = "Search on-demand tools by keyword and retrieve their input schemas. \
+Matches MCP integrations and infrequent local tools (scheduler, memory, lsp, skill, workflow, cordis_*, …). \
+Returns only hits, each with a full input_schema, capped by limit (default 5, max 255). \
+Unmatched tools stay hidden; total_hidden_tools is the catalog size. \
+If status is \"partial\", some MCP servers may still be connecting. \
+Call matched tools with use_tool. Do not guess parameter names.";
 
-const SEARCH_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Keywords to match against tool names, server names, and descriptions (e.g. \"linear create issue\")."},"limit":{"type":"integer","description":"Maximum number of results (default 5)."}},"required":["query"]}"#;
+const SEARCH_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Keywords to match against tool names, server/group names, and descriptions (e.g. \"linear create issue\", \"scheduler\", \"cordis define\")."},"limit":{"type":"integer","minimum":1,"maximum":255,"description":"Maximum number of results (default 5, max 255)."}},"required":["query"]}"#;
 
-const USE_TOOL_DESC: &str = "Call an MCP integration tool. \
-tool_name must be the qualified mcp_server__tool name returned by search_tool \
-(e.g. mcp_linear__save_issue). tool_input must match that tool's input_schema. \
-Do not route native tools (bash, read_file, …) through use_tool — call them directly.";
+const USE_TOOL_DESC: &str = "Call an on-demand tool discovered via search_tool. \
+tool_name is the name search_tool returned (mcp_server__tool, or a local name like scheduler_create). \
+tool_input must match that tool's input_schema. \
+If the schema is already in this conversation you may call use_tool again without searching; \
+after a new session, subagent, or compaction, search again. Never guess parameter names. \
+Do not route first-class tools (bash, read_file, …) through use_tool — call them directly. \
+Output is capped at 20KB; search_tool is not.";
 
-const USE_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"tool_name":{"type":"string","description":"Qualified MCP name from search_tool (mcp_server__tool)."},"tool_input":{"type":"object","description":"Arguments conforming to the tool's input_schema.","additionalProperties":true}},"required":["tool_name"]}"#;
+const USE_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"tool_name":{"type":"string","description":"Name from search_tool (mcp_server__tool or a deferred local tool)."},"tool_input":{"type":"object","description":"Arguments conforming to the tool's input_schema.","additionalProperties":true}},"required":["tool_name"]}"#;
+
+/// Grok `MCP_MAX_OUTPUT_BYTES`. `search_tool` has no output cap.
+pub const USE_TOOL_MAX_OUTPUT_BYTES: usize = 20_000;
+const DEFAULT_SEARCH_LIMIT: usize = 5;
+const MAX_SEARCH_LIMIT: usize = 255;
 
 pub fn search_spec() -> ToolSpec {
     ToolSpec {
@@ -52,13 +64,13 @@ pub fn run_search(tools: &Tools, mcp: Option<&Mcp>, arguments: &str) -> String {
     if query.is_empty() {
         return pretty(json!({
             "results": [],
-            "total_hidden_tools": mcp_count(tools),
+            "total_hidden_tools": hidden_count(tools),
             "status": if ready { "ready" } else { "partial" },
             "note": "query is required.",
         }));
     }
     let hits = search_hits(tools, &query, limit);
-    let total_hidden = mcp_count(tools);
+    let total_hidden = hidden_count(tools);
     let mut groups: Vec<(String, f32, Vec<Value>)> = Vec::new();
     for hit in &hits {
         let row = json!({
@@ -84,7 +96,7 @@ pub fn run_search(tools: &Tools, mcp: Option<&Mcp>, arguments: &str) -> String {
     let note = if !ready {
         Some("Some MCP servers are still connecting. Results may be incomplete.")
     } else if total_hidden == 0 && result_groups.is_empty() {
-        Some("No MCP tools are available in this session. Enable servers in /mcps.")
+        Some("No on-demand tools are available in this session. Enable MCP servers in /mcps.")
     } else {
         None
     };
@@ -101,46 +113,39 @@ pub async fn run_use_tool(tools: &Tools, exec: &cordis::Context, call: ToolCall)
     if tool_name.is_empty() {
         return tool_result(
             call,
-            "tool_name is required. Use search_tool to discover MCP tools.",
+            "tool_name is required. Use search_tool to discover on-demand tools.",
         );
     }
-    if !tool_name.contains("__") {
-        if is_native_tool(tools, &tool_name) {
-            return tool_result(
-                call,
-                format!(
-                    "`{tool_name}` is a native tool, not an MCP integration tool. \
-                     Call `{tool_name}` directly as its own tool call instead of \
-                     routing it through `use_tool`."
-                ),
-            );
-        }
+    let resolved = resolve_hidden_name(tools, &tool_name);
+    if tools.is_hidden(&resolved) {
+        let inner = ToolCall {
+            id: call.id.clone(),
+            name: resolved,
+            arguments: tool_input,
+        };
+        let mut result = tools.execute_on(exec, inner).await;
+        result.name = USE_TOOL_NAME.into();
+        result.content = cap_use_tool_output(result.content);
+        return result;
+    }
+    if is_first_class_tool(tools, &tool_name) {
         return tool_result(
             call,
             format!(
-                "'{tool_name}' is not a valid MCP tool name. \
-                 Tool names must be qualified as `mcp_server__tool` \
-                 (e.g. `mcp_linear__save_issue`). Use `{SEARCH_TOOL_NAME}` to discover available tools."
+                "`{tool_name}` is a first-class tool, not an on-demand tool. \
+                 Call `{tool_name}` directly as its own tool call instead of \
+                 routing it through `use_tool`."
             ),
         );
     }
-    let resolved = resolve_mcp_name(tools, &tool_name);
-    if !tools.is_mcp(&resolved) {
-        return tool_result(
-            call,
-            format!(
-                "MCP tool '{tool_name}' is not enabled. Use `{SEARCH_TOOL_NAME}` to discover available tools."
-            ),
-        );
-    }
-    let inner = ToolCall {
-        id: call.id.clone(),
-        name: resolved,
-        arguments: tool_input,
-    };
-    let mut result = tools.execute_on(exec, inner).await;
-    result.name = USE_TOOL_NAME.into();
-    result
+    tool_result(
+        call,
+        format!(
+            "'{tool_name}' is not an enabled on-demand tool. \
+             Use `{SEARCH_TOOL_NAME}` to discover available tools and copy \
+             tool_name from the result. Never guess parameter names."
+        ),
+    )
 }
 
 pub(super) struct ServerSummary {
@@ -261,15 +266,18 @@ fn search_hits(tools: &Tools, query: &str, limit: usize) -> Vec<Hit> {
     let mut exact: Option<Hit> = None;
     let mut scored = Vec::new();
     for spec in tools.specs() {
-        if !tools.is_mcp(&spec.name) {
+        if !tools.is_hidden(&spec.name) {
             continue;
         }
-        let (server, raw) = split_mcp_public_name(&spec.name).unwrap_or(("", spec.name.as_str()));
+        let group = catalog_group(&spec.name);
+        let raw = split_mcp_public_name(&spec.name)
+            .map(|(_, t)| t)
+            .unwrap_or(spec.name.as_str());
         let schema: Value = serde_json::from_str(&spec.parameters_json)
             .unwrap_or_else(|_| json!({"type": "object"}));
         let hit = |score: f32| Hit {
             name: spec.name.clone(),
-            server: server.to_string(),
+            server: group.clone(),
             description: spec.description.clone(),
             score,
             schema: schema.clone(),
@@ -278,7 +286,7 @@ fn search_hits(tools: &Tools, query: &str, limit: usize) -> Vec<Hit> {
             exact = Some(hit(1.0));
             break;
         }
-        let score = token_score(&q, &spec.name, server, raw, &spec.description);
+        let score = token_score(&q, &spec.name, &group, raw, &spec.description);
         if score > 0.0 {
             scored.push(hit(score));
         }
@@ -308,12 +316,29 @@ fn token_score(query: &str, public: &str, server: &str, raw: &str, desc: &str) -
     score
 }
 
-fn mcp_count(tools: &Tools) -> usize {
+fn hidden_count(tools: &Tools) -> usize {
     tools
         .specs()
         .into_iter()
-        .filter(|s| tools.is_mcp(&s.name))
+        .filter(|s| tools.is_hidden(&s.name))
         .count()
+}
+
+fn catalog_group(name: &str) -> String {
+    if let Some((server, _)) = split_mcp_public_name(name) {
+        return server.to_string();
+    }
+    match name {
+        n if n.starts_with("cordis_") => "cordis".into(),
+        n if n.starts_with("scheduler_") => "scheduler".into(),
+        n if n.starts_with("memory_") => "memory".into(),
+        "monitor" => "monitor".into(),
+        "update_goal" => "goal".into(),
+        "lsp" => "lsp".into(),
+        "skill" => "skills".into(),
+        "workflow" => "workflow".into(),
+        _ => "dock".into(),
+    }
 }
 
 fn parse_query(arguments: &str) -> String {
@@ -331,8 +356,8 @@ fn parse_limit(arguments: &str) -> usize {
         .and_then(|n| n.as_u64())
         .map(|n| n as usize)
         .filter(|n| *n > 0)
-        .unwrap_or(5)
-        .min(32)
+        .unwrap_or(DEFAULT_SEARCH_LIMIT)
+        .min(MAX_SEARCH_LIMIT)
 }
 
 fn parse_use_args(arguments: &str) -> (String, String) {
@@ -351,22 +376,47 @@ fn parse_use_args(arguments: &str) -> (String, String) {
     (name, input)
 }
 
-fn resolve_mcp_name(tools: &Tools, name: &str) -> String {
-    if tools.is_mcp(name) || is_mcp_public_name(name) {
+fn resolve_hidden_name(tools: &Tools, name: &str) -> String {
+    if tools.is_hidden(name) || is_mcp_public_name(name) {
         return name.to_string();
     }
     if let Some((server, tool)) = name.split_once("__") {
-        return public_tool_name(server, tool);
+        let public = public_tool_name(server, tool);
+        if tools.is_hidden(&public) {
+            return public;
+        }
     }
     name.to_string()
 }
 
-fn is_native_tool(tools: &Tools, name: &str) -> bool {
+fn is_first_class_tool(tools: &Tools, name: &str) -> bool {
+    if is_meta(name) {
+        return false;
+    }
     workspace::handles(name)
         || tools
             .specs()
             .iter()
-            .any(|s| s.name == name && !tools.is_mcp(name))
+            .any(|s| s.name == name && !tools.is_hidden(name))
+}
+
+fn is_meta(name: &str) -> bool {
+    name == SEARCH_TOOL_NAME || name == USE_TOOL_NAME
+}
+
+fn cap_use_tool_output(content: String) -> String {
+    if content.len() <= USE_TOOL_MAX_OUTPUT_BYTES {
+        return content;
+    }
+    let mut end = USE_TOOL_MAX_OUTPUT_BYTES;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n[output truncated: showing first {end} of {} bytes]",
+        &content[..end],
+        content.len()
+    )
 }
 
 fn pretty(v: Value) -> String {
@@ -506,7 +556,92 @@ mod tests {
             },
         )
         .await;
-        assert!(native.content.contains("native tool"), "{native:?}");
+        assert!(native.content.contains("first-class tool"), "{native:?}");
         assert!(native.content.contains("bash"), "{native:?}");
+    }
+
+    #[test]
+    fn search_includes_deferred_local_and_caps_limit() {
+        let ctx = cordis::Context::new();
+        let tools = Tools::echo(ctx);
+        let _s = tools
+            .register_deferred(spec("scheduler_create", "create a scheduled task"), stub_body())
+            .unwrap();
+        let _m = tools
+            .register_mcp(spec("mcp_linear__save_issue", "save an issue"), stub_body())
+            .unwrap();
+        let found = run_search(&tools, None, r#"{"query":"scheduler"}"#);
+        assert!(found.contains("scheduler_create"), "{found}");
+        assert!(found.contains("\"server\": \"scheduler\""), "{found}");
+        assert!(found.contains("\"total_hidden_tools\": 2"), "{found}");
+        assert_eq!(parse_limit(r#"{"query":"x","limit":999}"#), 255);
+        assert_eq!(parse_limit(r#"{"query":"x"}"#), 5);
+        assert_eq!(parse_limit(r#"{"query":"x","limit":0}"#), 5);
+    }
+
+    #[test]
+    fn search_limit_truncates_hits() {
+        let ctx = cordis::Context::new();
+        let tools = Tools::echo(ctx);
+        let _keeps: Vec<_> = (0..8)
+            .map(|i| {
+                tools
+                    .register_deferred(
+                        spec(&format!("probe_tool_{i}"), "probe catalog item"),
+                        stub_body(),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let limited = run_search(&tools, None, r#"{"query":"probe","limit":3}"#);
+        let n = limited.matches("probe_tool_").count();
+        assert_eq!(n, 3, "{limited}");
+        assert!(limited.contains("\"total_hidden_tools\": 8"), "{limited}");
+    }
+
+    #[tokio::test]
+    async fn use_tool_dispatches_deferred_and_caps_output() {
+        let ctx = cordis::Context::new();
+        let tools = Tools::echo(ctx.clone());
+        let _d = tools
+            .register_deferred(spec("scheduler_create", "sched"), stub_body())
+            .unwrap();
+        let ok = run_use_tool(
+            &tools,
+            &ctx,
+            ToolCall {
+                id: "1".into(),
+                name: USE_TOOL_NAME.into(),
+                arguments: r#"{"tool_name":"scheduler_create","tool_input":{}}"#.into(),
+            },
+        )
+        .await;
+        assert_eq!(ok.content, "pong");
+
+        let fat: crate::tools::ToolBody = Arc::new(|call| {
+            Box::pin(async move { tool_result(call, "x".repeat(USE_TOOL_MAX_OUTPUT_BYTES + 50)) })
+        });
+        let _mcp = tools
+            .register_mcp(
+                ToolSpec {
+                    name: "mcp_probe__blob".into(),
+                    description: "blob".into(),
+                    parameters_json: r#"{"type":"object"}"#.into(),
+                },
+                fat,
+            )
+            .unwrap();
+        let capped = run_use_tool(
+            &tools,
+            &ctx,
+            ToolCall {
+                id: "2".into(),
+                name: USE_TOOL_NAME.into(),
+                arguments: r#"{"tool_name":"mcp_probe__blob","tool_input":{}}"#.into(),
+            },
+        )
+        .await;
+        assert!(capped.content.contains("output truncated"), "{capped:?}");
+        assert!(capped.content.len() < USE_TOOL_MAX_OUTPUT_BYTES + 80);
     }
 }

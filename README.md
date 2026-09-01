@@ -61,7 +61,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 - 工作区：`bash` `read_file` `grep` `glob` `write_file` `search_replace`
 - 计划、提问、后台任务、调度、子代理、记忆、LSP、workflow
-- MCP fail-open；模型侧 `search_tool` / `use_tool`，内部公名 `mcp_{server}__{tool}`，不能盖掉 `bash`
+- MCP 与不常用本地工具走 `search_tool` / `use_tool` 渐进披露；内部公名 `mcp_{server}__{tool}`，不能盖掉 `bash`
 - 动态包：`cordis_define` / `cordis_run` / `cordis_promote` 写成 `.dock/plugins`
 
 ### 🌐 浏览器 companion

@@ -26,7 +26,7 @@ pub fn tool_monitor() -> Plugin {
             };
             own_registered(
                 ctx,
-                vec![tools.register(
+                vec![tools.register_deferred(
                     ToolSpec {
                         name: "monitor".into(),
                         description: DESC.into(),

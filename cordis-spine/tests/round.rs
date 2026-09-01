@@ -339,6 +339,33 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         !model.iter().any(|n| n.starts_with("mcp_")),
         "sampler must hide MCP extras: {model:?}"
     );
+    for hidden in [
+        "scheduler_create",
+        "memory_search",
+        "monitor",
+        "update_goal",
+        "lsp",
+        "skill",
+        "workflow",
+        "cordis_inspect",
+    ] {
+        assert!(
+            !model.iter().any(|n| n == hidden),
+            "sampler must hide deferred {hidden}: {model:?}"
+        );
+    }
+    let sched_search = tools
+        .execute(cordis_spine::ToolCall {
+            id: "st-sched".into(),
+            name: "search_tool".into(),
+            arguments: r#"{"query":"scheduler","limit":5}"#.into(),
+        })
+        .await;
+    assert!(
+        sched_search.content.contains("scheduler_create"),
+        "search_tool should surface deferred locals: {}",
+        sched_search.content
+    );
     let search = tools
         .execute(cordis_spine::ToolCall {
             id: "st".into(),

@@ -36,7 +36,7 @@ pub fn tool_memory() -> Plugin {
         own_registered(
             ctx,
             vec![
-                tools.register(
+                tools.register_deferred(
                     ToolSpec {
                         name: "memory_search".into(),
                         description: "Search cross-session local memory for relevant knowledge chunks. Returns ranked results from ~/.dock/memory and .dock/memory.\n\nUse this proactively when a question references prior work, decisions, or conventions you do not have in the current transcript.\n\nMemory is historical context, not automatically the current plan. Verify recalled facts against live sources before relying on them.".into(),
@@ -44,7 +44,7 @@ pub fn tool_memory() -> Plugin {
                     },
                     search,
                 )?,
-                tools.register(
+                tools.register_deferred(
                     ToolSpec {
                         name: "memory_get".into(),
                         description: "Read a memory file by path. Returns the file content with line numbers, optionally limited to a range of lines.\n\nUse after memory_search returns a relevant result. Line numbers are 1-based and match the from parameter.".into(),

@@ -693,6 +693,7 @@ fn visible_cell(
 fn category_kind(label: &str) -> OccupancyKind {
     match label {
         "MCP 服务器" => OccupancyKind::Mcp,
+        "本地按需" => OccupancyKind::Deferred,
         "工作流" => OccupancyKind::Workflows,
         "技能" => OccupancyKind::Skills,
         _ => OccupancyKind::Tools,
@@ -1105,6 +1106,25 @@ mod tests {
         assert!(!all.contains("MCP 服务器"));
         assert!(!all.contains("工作流"));
         assert!(!all.contains("技能"));
+    }
+
+    #[test]
+    fn mcp_category_zero_tokens_still_listed() {
+        let mut snap = snapshot();
+        snap.categories.push(ContextCategory {
+            label: "MCP 服务器".into(),
+            tokens: 0,
+            detail: Some("1 台 · 21 个工具 · 未计入窗口".into()),
+        });
+        let all = all_text(&context_lines(&snap, 80));
+        assert!(all.contains("MCP 服务器"), "{all}");
+        assert!(all.contains("未计入窗口"), "{all}");
+        let view = context_view(&snap, 80, None);
+        assert!(
+            view.legend.iter().any(|h| h.2 == OccupancyKind::Mcp),
+            "{:?}",
+            view.legend
+        );
     }
 
     #[test]

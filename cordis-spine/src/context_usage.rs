@@ -28,6 +28,7 @@ pub enum OccupancyKind {
     Free,
     Tools,
     Mcp,
+    Deferred,
     Workflows,
     Skills,
 }
@@ -41,6 +42,7 @@ impl OccupancyKind {
             Self::Free => "空闲",
             Self::Tools => "工具定义",
             Self::Mcp => "MCP 服务器",
+            Self::Deferred => "本地按需",
             Self::Workflows => "工作流",
             Self::Skills => "技能",
         }
@@ -122,6 +124,7 @@ pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
         OccupancyKind::Free => free_detail(&snap),
         OccupancyKind::Tools => tools_detail(ctx, &snap),
         OccupancyKind::Mcp => mcp_detail(ctx, &snap),
+        OccupancyKind::Deferred => deferred_detail(ctx, &snap),
         OccupancyKind::Workflows => workflows_detail(&snap),
         OccupancyKind::Skills => skills_detail(ctx, &snap),
     }
@@ -166,14 +169,14 @@ fn snapshot_with_system(ctx: &Context, system: &str) -> ContextSnapshot {
         .map(|s| s.user_image_count().saturating_mul(IMAGE_TOKEN_ESTIMATE))
         .unwrap_or(0);
 
-    let (builtin_specs, mcp_specs) = partition_model_specs(ctx);
+    let (builtin_specs, _, _) = partition_model_specs(ctx);
     let tool_definitions_count = builtin_specs.len() as u64;
     let tool_definitions_tokens = estimate_tool_definitions(&builtin_specs);
-    let mcp_definitions_tokens = estimate_tool_definitions(&mcp_specs);
 
+    // Hidden extras (MCP + deferred local) stay registered for `use_tool`
+    // but are omitted from the sampler tools array. Occupancy matches that send.
     let estimate = base
         .saturating_add(tool_definitions_tokens)
-        .saturating_add(mcp_definitions_tokens)
         .saturating_add(image_tokens)
         .saturating_add(reasoning);
     let usage = sessions.as_ref().map(|s| s.usage()).unwrap_or_default();
@@ -363,8 +366,7 @@ fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         snap.system_prompt_tokens
             .saturating_add(snap.message_tokens),
     );
-    let mcp_cat = snap.categories.iter().find(|c| c.label == "MCP 服务器");
-    let mut rows = vec![
+    let rows = vec![
         DetailRow {
             label: "推理".into(),
             tokens: Some(reasoning),
@@ -381,13 +383,6 @@ fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
             note: Some(format!("{} 个", snap.tool_definitions_count)),
         },
     ];
-    if let Some(c) = mcp_cat {
-        rows.push(DetailRow {
-            label: "MCP 工具".into(),
-            tokens: Some(c.tokens),
-            note: c.detail.clone(),
-        });
-    }
     OccupancyDetail {
         kind: OccupancyKind::Overhead,
         tokens: overhead,
@@ -426,7 +421,7 @@ fn free_detail(snap: &ContextSnapshot) -> OccupancyDetail {
 }
 
 fn tools_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
-    let (builtin_specs, _) = partition_model_specs(ctx);
+    let (builtin_specs, _, _) = partition_model_specs(ctx);
     let mut rows: Vec<DetailRow> = builtin_specs
         .into_iter()
         .map(|s| {
@@ -453,7 +448,7 @@ fn tools_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         tokens: snap.tool_definitions_tokens,
         groups: vec![DetailGroup {
             heading: format!(
-                "{} 个工具（模型可见，不含 MCP）",
+                "{} 个工具（模型可见，不含按需工具）",
                 snap.tool_definitions_count
             ),
             rows,
@@ -469,7 +464,7 @@ fn mcp_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         .find(|c| c.label == "MCP 服务器")
         .map(|c| c.tokens)
         .unwrap_or(0);
-    let (_, mcp_specs) = partition_model_specs(ctx);
+    let (_, mcp_specs, _) = partition_model_specs(ctx);
     let mut by_server: std::collections::BTreeMap<String, Vec<ToolSpec>> =
         std::collections::BTreeMap::new();
     for spec in mcp_specs {
@@ -478,50 +473,87 @@ fn mcp_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
             .unwrap_or_else(|| spec.name.clone());
         by_server.entry(server).or_default().push(spec);
     }
-    let groups: Vec<DetailGroup> = by_server
-        .into_iter()
-        .map(|(server, specs)| {
-            let mut rows: Vec<DetailRow> = specs
-                .into_iter()
-                .map(|s| {
-                    let local = split_mcp_public_name(&s.name)
-                        .map(|(_, t)| t.to_string())
-                        .unwrap_or_else(|| s.name.clone());
-                    let tok = estimate_text(&s.name)
-                        .saturating_add(estimate_text(&s.description))
-                        .saturating_add(estimate_text(&s.parameters_json));
-                    DetailRow {
-                        label: local,
-                        tokens: Some(tok),
-                        note: {
-                            let d = s.description.trim();
-                            if d.is_empty() {
-                                None
-                            } else {
-                                Some(preview(d, 48))
-                            }
-                        },
-                    }
-                })
-                .collect();
-            rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.label.cmp(&b.label)));
-            DetailGroup {
-                heading: format!("{server} · {} 个工具", rows.len()),
-                rows,
-            }
-        })
-        .collect();
+    let mut groups: Vec<DetailGroup> = vec![DetailGroup {
+        heading: "未发给模型 · 经 search_tool / use_tool 发现".into(),
+        rows: Vec::new(),
+    }];
+    for (server, specs) in by_server {
+        let mut rows: Vec<DetailRow> = specs
+            .into_iter()
+            .map(|s| {
+                let local = split_mcp_public_name(&s.name)
+                    .map(|(_, t)| t.to_string())
+                    .unwrap_or_else(|| s.name.clone());
+                DetailRow {
+                    label: local,
+                    tokens: None,
+                    note: {
+                        let d = s.description.trim();
+                        if d.is_empty() {
+                            None
+                        } else {
+                            Some(preview(d, 48))
+                        }
+                    },
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| a.label.cmp(&b.label));
+        groups.push(DetailGroup {
+            heading: format!("{server} · {} 个工具", rows.len()),
+            rows,
+        });
+    }
     OccupancyDetail {
         kind: OccupancyKind::Mcp,
         tokens,
-        groups: if groups.is_empty() {
+        groups: if groups.len() == 1 {
             vec![DetailGroup {
-                heading: "没有已发给模型的 MCP 工具".into(),
+                heading: "没有已连接的 MCP 工具".into(),
                 rows: Vec::new(),
             }]
         } else {
             groups
         },
+        text: None,
+    }
+}
+
+fn deferred_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
+    let tokens = snap
+        .categories
+        .iter()
+        .find(|c| c.label == "本地按需")
+        .map(|c| c.tokens)
+        .unwrap_or(0);
+    let (_, _, deferred) = partition_model_specs(ctx);
+    let mut rows: Vec<DetailRow> = deferred
+        .into_iter()
+        .map(|s| DetailRow {
+            label: s.name,
+            tokens: None,
+            note: {
+                let d = s.description.trim();
+                if d.is_empty() {
+                    None
+                } else {
+                    Some(preview(d, 48))
+                }
+            },
+        })
+        .collect();
+    rows.sort_by(|a, b| a.label.cmp(&b.label));
+    OccupancyDetail {
+        kind: OccupancyKind::Deferred,
+        tokens,
+        groups: vec![DetailGroup {
+            heading: if rows.is_empty() {
+                "没有按需本地工具".into()
+            } else {
+                format!("未发给模型 · {} 个 · 经 search_tool 发现", rows.len())
+            },
+            rows,
+        }],
         text: None,
     }
 }
@@ -641,7 +673,7 @@ fn window_size(session_window: u64, ctx: &Context) -> u64 {
 
 fn extra_categories(ctx: &Context) -> Vec<ContextCategory> {
     let mut rows = Vec::new();
-    let (_, mcp_specs) = partition_model_specs(ctx);
+    let (_, mcp_specs, deferred_specs) = partition_model_specs(ctx);
     if !mcp_specs.is_empty() {
         let mut servers = std::collections::BTreeSet::new();
         for spec in &mcp_specs {
@@ -651,11 +683,21 @@ fn extra_categories(ctx: &Context) -> Vec<ContextCategory> {
         }
         rows.push(ContextCategory {
             label: "MCP 服务器".into(),
-            tokens: estimate_tool_definitions(&mcp_specs),
+            tokens: 0,
             detail: Some(format!(
-                "{} 台 · {} 个工具",
+                "{} 台 · {} 个工具 · 未计入窗口",
                 servers.len().max(1),
                 mcp_specs.len()
+            )),
+        });
+    }
+    if !deferred_specs.is_empty() {
+        rows.push(ContextCategory {
+            label: "本地按需".into(),
+            tokens: 0,
+            detail: Some(format!(
+                "{} 个工具 · 未计入窗口",
+                deferred_specs.len()
             )),
         });
     }
@@ -709,21 +751,24 @@ fn estimate_tool_definitions(specs: &[ToolSpec]) -> u64 {
         .sum()
 }
 
-fn partition_model_specs(ctx: &Context) -> (Vec<ToolSpec>, Vec<ToolSpec>) {
+fn partition_model_specs(ctx: &Context) -> (Vec<ToolSpec>, Vec<ToolSpec>, Vec<ToolSpec>) {
     let Some(tools) = ctx.get::<Tools>(TOOLS) else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     };
     let mut builtin = Vec::new();
     let mut mcp = Vec::new();
+    let mut deferred = Vec::new();
     for spec in tools.specs_for_model_on(ctx) {
         builtin.push(spec);
     }
     for spec in tools.specs() {
         if tools.is_mcp(&spec.name) || is_mcp_public_name(&spec.name) {
             mcp.push(spec);
+        } else if tools.is_deferred(&spec.name) {
+            deferred.push(spec);
         }
     }
-    (builtin, mcp)
+    (builtin, mcp, deferred)
 }
 
 fn estimate_text(text: &str) -> u64 {
@@ -929,31 +974,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_tool_schema_occupancy_is_under_mcp_not_tools() {
+    async fn mcp_schemas_are_listed_but_not_counted_in_used() {
         let ctx = Context::new();
         crate::bundle::install_fakes(&ctx).await.unwrap();
         let tools = ctx.get::<Tools>(TOOLS).unwrap();
         let body: crate::tools::ToolBody = std::sync::Arc::new(|call| {
             Box::pin(async move { crate::tools::tool_result(call, "") })
         });
-        let _keep = tools
-            .register_mcp(
-                ToolSpec {
-                    name: "mcp_probe__ping".into(),
-                    description: "mcp occupancy probe with a longer description".into(),
-                    parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#
-                        .into(),
-                },
-                body,
-            )
-            .unwrap();
+        let mcp_spec = ToolSpec {
+            name: "mcp_probe__ping".into(),
+            description: "mcp occupancy probe with a longer description".into(),
+            parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#.into(),
+        };
+        let hidden = estimate_tool_definitions(&[mcp_spec.clone()]);
+        let _keep = tools.register_mcp(mcp_spec, body).unwrap();
         let snap = snapshot_context(&ctx);
+        let mcp_cat = snap
+            .categories
+            .iter()
+            .find(|c| c.label == "MCP 服务器")
+            .expect("MCP legend");
+        assert_eq!(mcp_cat.tokens, 0, "{mcp_cat:?}");
         assert!(
-            snap.categories
-                .iter()
-                .any(|c| c.label == "MCP 服务器" && c.tokens > 0),
-            "{:?}",
-            snap.categories
+            mcp_cat
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("未计入窗口") && d.contains("1 个工具")),
+            "{mcp_cat:?}"
         );
         let tools_detail = occupancy_detail(&ctx, OccupancyKind::Tools);
         assert!(
@@ -965,27 +1012,20 @@ mod tests {
             "{tools_detail:?}"
         );
         let mcp = occupancy_detail(&ctx, OccupancyKind::Mcp);
+        assert_eq!(mcp.tokens, 0);
         assert!(
             mcp.groups.iter().any(|g| g.heading.contains("probe")
                 && g.rows
                     .iter()
-                    .any(|r| r.label == "ping" && r.tokens.unwrap_or(0) > 0)),
+                    .any(|r| r.label == "ping" && r.tokens.is_none())),
             "{mcp:?}"
-        );
-        assert_eq!(
-            mcp.tokens,
-            estimate_tool_definitions(&[ToolSpec {
-                name: "mcp_probe__ping".into(),
-                description: "mcp occupancy probe with a longer description".into(),
-                parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#.into(),
-            }])
         );
         assert_eq!(
             snap.used,
             snap.system_prompt_tokens
                 .saturating_add(snap.message_tokens)
                 .saturating_add(snap.tool_definitions_tokens)
-                .saturating_add(mcp.tokens)
         );
+        assert!(hidden > 0);
     }
 }

@@ -23,10 +23,9 @@ const SYSTEM_PROMPT: &str = "思考过程必须使用中文（含 reasoning / �
 查网上的近况用 web_search、web_fetch。\
 多步进度用 todo_write。\
 需要用户做选择时用 ask_user_question。\
-做法不明确时用 enter_plan_mode / exit_plan_mode；定时任务用 scheduler_create / scheduler_list / scheduler_delete。\
-子代理用 task；代码智能用 lsp；本地记忆用 memory_search / memory_get；盯长命令用 monitor；目标进度用 update_goal；多步编排用 workflow。\
-MCP 集成用 search_tool 按关键词发现，再用 use_tool 调用（tool_name 为 mcp_server__tool，例如 mcp_linear__save_issue）；不要把 mcp_* 当一等工具直接调用。\
-会话内动态插件用 cordis_inspect / cordis_define / cordis_run / cordis_call / cordis_promote / cordis_stop / cordis_undefine（先读 skills/cordis-plugin-development/SKILL.md）。跨重启写成 .dock/plugins。自定义斜杠或只读 overlay 用 factory slash，不能替换内建命令。\
+做法不明确时用 enter_plan_mode / exit_plan_mode。\
+子代理用 task / subagent。\
+MCP 集成和不常用的本地能力（scheduler_*、memory_*、monitor、update_goal、lsp、skill、workflow、cordis_*）不在常驻工具表里：用 search_tool 按关键词发现（默认最多 5 条、上限 255，每项带完整 input_schema），再用 use_tool 调用。没命中的继续藏着，total_hidden_tools 是目录总数。schema 已在当前上下文里就可以反复 use_tool；换没见过的工具、新会话、子代理、压缩后再用，要再 search。禁止猜参数名。内置工具不要走 use_tool。\
 优先用工具，不要猜文件内容。回复尽量短。";
 
 pub fn system_prompt() -> Plugin {
