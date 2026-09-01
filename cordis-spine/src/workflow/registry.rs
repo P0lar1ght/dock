@@ -711,7 +711,9 @@ mod tests {
             "{:?}",
             meta.when_to_use
         );
-        assert!(builtin.path.ends_with("src/workflow/workflows/deep_research.rhai"));
+        assert!(builtin
+            .path
+            .ends_with("src/workflow/workflows/deep_research.rhai"));
         assert!(builtin.script.contains("没有提供调研问题"));
         assert!(builtin.script.contains("label: \"report-synthesizer\""));
         assert!(is_compiled_in_builtin("deep-research"));

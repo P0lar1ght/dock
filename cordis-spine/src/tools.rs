@@ -1,12 +1,12 @@
 //! DSH `ctx.tools`: one registry. Capability plugins call [`Tools::register`].
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
+use indexmap::IndexMap;
 
 use crate::acp;
-use crate::agent_presets::{blocked_tool_message, AgentPresets};
+use crate::agent_presets::{blocked_tool_message, AgentPresets, MINIMAL_PRESET_ID};
 use crate::names::{AGENT_PRESETS, JOBS, PERMISSIONS, PLAN_MODE, TOOLS, TOOLS_EXECUTE, TURN};
 use crate::permissions::Permissions;
 use crate::plan_mode::PlanMode;
@@ -49,7 +49,7 @@ enum ExtraKind {
 pub struct Tools {
     ctx: Context,
     workspace: bool,
-    extra: Arc<Mutex<HashMap<String, Entry>>>,
+    extra: Arc<Mutex<IndexMap<String, Entry>>>,
 }
 
 impl Tools {
@@ -57,7 +57,7 @@ impl Tools {
         Self {
             ctx,
             workspace: false,
-            extra: Arc::new(Mutex::new(HashMap::new())),
+            extra: Arc::new(Mutex::new(IndexMap::new())),
         }
     }
 
@@ -65,7 +65,7 @@ impl Tools {
         Self {
             ctx,
             workspace: true,
-            extra: Arc::new(Mutex::new(HashMap::new())),
+            extra: Arc::new(Mutex::new(IndexMap::new())),
         }
     }
 
@@ -82,8 +82,9 @@ impl Tools {
         self.register_inner(spec, body, ExtraKind::Dynamic)
     }
 
-    /// MCP tools: visible to the model even when the current Agent preset
-    /// allowlist omits the `mcp_{server}__{tool}` name.
+    /// MCP extras: registered for `use_tool` dispatch and occupancy, omitted
+    /// from the sampler tools array. Execute still bypasses the Agent preset
+    /// allowlist so `mcp_{server}__{tool}` can run after discovery.
     pub fn register_mcp(&self, spec: ToolSpec, body: ToolBody) -> cordis::Result<Disposable> {
         self.register_inner(spec, body, ExtraKind::Mcp)
     }
@@ -107,10 +108,32 @@ impl Tools {
             }
             extra.insert(name.clone(), Entry { spec, body, kind });
         }
+        Ok(self.disposable_for(&name))
+    }
+
+    /// Replace an existing MCP tool in place so `specs()` order (and the
+    /// sampler tools prefix) does not move. Returns a new unregister handle;
+    /// drop the previous handle without disposing.
+    pub fn patch_mcp(&self, spec: ToolSpec, body: ToolBody) -> Option<Disposable> {
+        let name = spec.name.clone();
+        {
+            let mut extra = self.extra.lock().unwrap();
+            let entry = extra.get_mut(&name)?;
+            if entry.kind != ExtraKind::Mcp {
+                return None;
+            }
+            entry.spec = spec;
+            entry.body = body;
+        }
+        Some(self.disposable_for(&name))
+    }
+
+    fn disposable_for(&self, name: &str) -> Disposable {
         let extra = self.extra.clone();
-        Ok(Disposable::from_fn(move || {
-            extra.lock().unwrap().remove(&name);
-        }))
+        let name = name.to_string();
+        Disposable::from_fn(move || {
+            extra.lock().unwrap().shift_remove(&name);
+        })
     }
 
     pub fn is_dynamic(&self, name: &str) -> bool {
@@ -133,35 +156,64 @@ impl Tools {
         self.is_dynamic(name) || self.is_mcp(name)
     }
 
+    /// `search_tool` / `use_tool` stay on the sampler like Grok builtins.
+    /// Overlay YAML that predates them must not hide the discovery surface.
+    /// `minimal` stays workspace-only.
+    fn mcp_meta_visible(&self, exec: &Context, name: &str) -> bool {
+        if !is_mcp_meta_tool(name) {
+            return false;
+        }
+        match exec.get::<AgentPresets>(AGENT_PRESETS) {
+            Some(presets) => presets.current_id() != MINIMAL_PRESET_ID,
+            None => true,
+        }
+    }
+
     pub fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = Vec::new();
         if self.workspace {
             specs.extend(workspace::specs());
         }
         let extra = self.extra.lock().unwrap();
-        let mut names: Vec<_> = extra.keys().cloned().collect();
-        names.sort();
-        for name in names {
-            if let Some(entry) = extra.get(&name) {
+        let mut regular: Vec<ToolSpec> = extra
+            .values()
+            .filter(|e| e.kind != ExtraKind::Mcp)
+            .map(|e| e.spec.clone())
+            .collect();
+        regular.sort_by(|a, b| a.name.cmp(&b.name));
+        specs.extend(regular);
+        // Hidden from the sampler (`specs_for_model`); occupancy / inspect
+        // still list them. Discovery is `search_tool` → `use_tool`.
+        for entry in extra.values() {
+            if entry.kind == ExtraKind::Mcp {
                 specs.push(entry.spec.clone());
             }
         }
         specs
     }
 
-    /// Specs the sampler should see: live `"tools"` intersected with the
-    /// current agent preset allowlist. Inspect / the TUI catalog still use
-    /// [`Tools::specs`].
+    /// Specs the sampler should see: live `"tools"` minus MCP extras (Grok
+    /// `tool_definitions_builtins_only`), then the current agent preset
+    /// allowlist. MCP tools stay registered for `use_tool` dispatch.
+    /// Inspect / occupancy / the TUI catalog still use [`Tools::specs`].
     pub fn specs_for_model(&self) -> Vec<ToolSpec> {
         self.specs_for_model_on(&self.ctx)
     }
 
     pub fn specs_for_model_on(&self, exec: &Context) -> Vec<ToolSpec> {
-        let specs = self.specs();
+        let specs: Vec<ToolSpec> = self
+            .specs()
+            .into_iter()
+            .filter(|s| !self.is_mcp(&s.name))
+            .collect();
         match exec.get::<AgentPresets>(AGENT_PRESETS) {
             Some(presets) => specs
                 .into_iter()
-                .filter(|s| self.bypasses_allowlist(&s.name) || presets.allows(&s.name))
+                .filter(|s| {
+                    self.is_dynamic(&s.name)
+                        || self.mcp_meta_visible(exec, &s.name)
+                        || presets.allows(&s.name)
+                })
                 .map(|mut spec| {
                     presets.bind_spawn_schema(&mut spec);
                     spec
@@ -177,7 +229,10 @@ impl Tools {
 
     pub async fn execute_on(&self, exec: &Context, call: ToolCall) -> ToolResult {
         if let Some(presets) = exec.get::<AgentPresets>(AGENT_PRESETS) {
-            if !self.bypasses_allowlist(&call.name) && !presets.allows(&call.name) {
+            if !self.bypasses_allowlist(&call.name)
+                && !self.mcp_meta_visible(exec, &call.name)
+                && !presets.allows(&call.name)
+            {
                 return finish(
                     exec,
                     ToolResult {
@@ -238,6 +293,12 @@ impl Tools {
         let result = if let Some(body) = body {
             let exec = exec.clone();
             EXEC_CTX.scope(exec, body(call)).await
+        } else if looks_like_mcp_name(&call.name) {
+            ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content: "MCP 工具未启用或已关闭".into(),
+            }
         } else {
             self.dispatch_local(exec, call).await
         };
@@ -266,6 +327,14 @@ impl Tools {
 
 fn finish(ctx: &Context, result: ToolResult) -> ToolResult {
     ctx.waterfall(TOOLS_EXECUTE, result.clone(), move || result)
+}
+
+fn looks_like_mcp_name(name: &str) -> bool {
+    name.starts_with("mcp_") && name.contains("__")
+}
+
+fn is_mcp_meta_tool(name: &str) -> bool {
+    name == "search_tool" || name == "use_tool"
 }
 
 /// Own registrations on the calling fiber (DSH register-dispose).
@@ -297,4 +366,106 @@ pub fn workspace_tools() -> Plugin {
     plugin("tools", Inject::new(), |ctx, _: &()| {
         Ok(Some(ctx.provide(TOOLS, Tools::workspace(ctx.clone()))?))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stub_body() -> ToolBody {
+        Arc::new(|call| Box::pin(async move { tool_result(call, "ok") }))
+    }
+
+    fn spec(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: name.into(),
+            parameters_json: r#"{"type":"object"}"#.into(),
+        }
+    }
+
+    fn names(tools: &Tools) -> Vec<String> {
+        tools.specs().into_iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn mcp_tools_append_without_reordering_regular() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx);
+        tools.register(spec("zeta"), stub_body()).unwrap();
+        tools.register(spec("alpha"), stub_body()).unwrap();
+        let before = names(&tools);
+        assert_eq!(before, ["alpha", "zeta"]);
+
+        let first = tools.register_mcp(spec("mcp_s__t"), stub_body()).unwrap();
+        let with_one = names(&tools);
+        assert_eq!(&with_one[..before.len()], before.as_slice());
+        assert_eq!(with_one.last().map(String::as_str), Some("mcp_s__t"));
+
+        let second = tools.register_mcp(spec("mcp_s__u"), stub_body()).unwrap();
+        let with_two = names(&tools);
+        assert_eq!(&with_two[..with_one.len()], with_one.as_slice());
+        assert_eq!(with_two.last().map(String::as_str), Some("mcp_s__u"));
+
+        let patched = tools
+            .patch_mcp(
+                ToolSpec {
+                    name: "mcp_s__t".into(),
+                    description: "patched".into(),
+                    parameters_json: r#"{"type":"object"}"#.into(),
+                },
+                stub_body(),
+            )
+            .unwrap();
+        drop(first);
+        let after_patch = names(&tools);
+        assert_eq!(after_patch, with_two);
+        assert_eq!(
+            tools
+                .specs()
+                .into_iter()
+                .find(|s| s.name == "mcp_s__t")
+                .unwrap()
+                .description,
+            "patched"
+        );
+
+        patched.dispose_sync();
+        let after_remove = names(&tools);
+        assert_eq!(after_remove, ["alpha", "zeta", "mcp_s__u"]);
+        second.dispose_sync();
+        assert_eq!(names(&tools), before);
+    }
+
+    #[test]
+    fn specs_for_model_omits_mcp_extras() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx);
+        tools.register(spec("alpha"), stub_body()).unwrap();
+        let _mcp = tools.register_mcp(spec("mcp_s__t"), stub_body()).unwrap();
+        let model: Vec<String> = tools
+            .specs_for_model()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(model, ["alpha"]);
+        assert!(tools.specs().iter().any(|s| s.name == "mcp_s__t"));
+    }
+
+    #[tokio::test]
+    async fn disabled_mcp_name_does_not_echo() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        let out = tools
+            .execute_on(
+                &ctx,
+                ToolCall {
+                    id: "1".into(),
+                    name: "mcp_s__gone".into(),
+                    arguments: "{}".into(),
+                },
+            )
+            .await;
+        assert_eq!(out.content, "MCP 工具未启用或已关闭");
+    }
 }

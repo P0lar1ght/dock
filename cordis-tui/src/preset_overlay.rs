@@ -69,7 +69,12 @@ impl PresetView {
 
 pub fn live_specs(ctx: &Context) -> Vec<ToolSpec> {
     ctx.get::<Tools>(TOOLS)
-        .map(|t| t.specs())
+        .map(|t| {
+            t.specs()
+                .into_iter()
+                .filter(|s| !t.is_mcp(&s.name))
+                .collect()
+        })
         .unwrap_or_default()
 }
 

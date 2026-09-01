@@ -70,12 +70,24 @@ pub fn render_floating_frame(
     theme: &Theme,
     close_hovered: bool,
 ) -> Option<PickerFrame> {
+    render_floating_frame_height(buf, area, theme, close_hovered, 4 + 20)
+}
+
+/// Same chrome as [`render_floating_frame`], with a caller-chosen total height.
+/// Height is still clamped to the default picker size and the terminal.
+pub fn render_floating_frame_height(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    close_hovered: bool,
+    popup_h: u16,
+) -> Option<PickerFrame> {
     if area.height < 8 || area.width < 30 {
         return None;
     }
     dim_area(buf, area, theme.bg_base, 0.5);
     let popup_w = ((area.width as f32 * 0.65) as u16).max(44).min(area.width);
-    let popup_h = (4 + 20).min(area.height.saturating_sub(2));
+    let popup_h = popup_h.min(4 + 20).min(area.height.saturating_sub(2));
     let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 3;
     let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);

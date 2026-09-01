@@ -37,4 +37,6 @@ tools:
   - bash
   - write_file
   - todo_write
+  - search_tool
+  - use_tool
   - report

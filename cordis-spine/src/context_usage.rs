@@ -716,10 +716,11 @@ fn partition_model_specs(ctx: &Context) -> (Vec<ToolSpec>, Vec<ToolSpec>) {
     let mut builtin = Vec::new();
     let mut mcp = Vec::new();
     for spec in tools.specs_for_model_on(ctx) {
+        builtin.push(spec);
+    }
+    for spec in tools.specs() {
         if tools.is_mcp(&spec.name) || is_mcp_public_name(&spec.name) {
             mcp.push(spec);
-        } else {
-            builtin.push(spec);
         }
     }
     (builtin, mcp)

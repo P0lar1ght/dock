@@ -109,6 +109,29 @@ impl Disposable {
         }
     }
 
+    /// Run remaining **sync** cleanup now. Async steps are skipped (same as
+    /// fiber error unwind). Further [`dispose`](Self::dispose) is a no-op.
+    ///
+    /// Dropping a [`Disposable`] does **not** run cleanup; callers that
+    /// unregister live tools must call this (or [`dispose`](Self::dispose)).
+    pub fn dispose_sync(&self) {
+        let steps = {
+            let mut g = self.inner.state.lock().unwrap();
+            match &mut *g {
+                DisposeState::Live { .. } => {
+                    let DisposeState::Live { steps } =
+                        std::mem::replace(&mut *g, DisposeState::Done)
+                    else {
+                        unreachable!()
+                    };
+                    steps
+                }
+                DisposeState::Done | DisposeState::Running { .. } => return,
+            }
+        };
+        run_steps_sync(steps);
+    }
+
     /// Run cleanup. Concurrent callers wait for the in-flight run.
     pub async fn dispose(&self) -> Result<()> {
         let taken = {

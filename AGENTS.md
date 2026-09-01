@@ -59,7 +59,7 @@ cd embed-sdk && npm install && npm run build
 - **换插件，不改 loop。** 新 UI 面做成 `tui.*` 插件；新采样做成 `llm` 插件。工具能力插件 `inject: ["tools"]` 后 `ctx.tools.register()`（DSH 一个 `"tools"` 表，不是 `tools.mcp` ExtraTools）。不要把功能焊进 `event_loop` 或 `agent-loop`。
 - **循环本身也是插件。** 不要调用 `xai_grok_pager::app::run`，不要 spawn Grok `MvpAgent`。ACP 只是 pager 的权限表面（`PermissionOptionKind`），不是完整 ACP agent。
 - **扩展走 waterfall**（`agent/pre-step`、`llm/stream`、`tools/execute`、`system-prompt/assemble`）。拦截时接 `on_waterfall`；默认实现放在 `waterfall(..., || default)` 的闭包里。Waterfall 监听必须把控制权交给下一环，不要悄悄吞掉链。
-- **MCP 是 fail-open 插件。** `mcp-client` 连不上或没配置时仍 `Active`，往 `"mcp"` 写空/失败状态；工具名 `mcp_{server}__{tool}` 注册进 `"tools"`（开启的 MCP 工具穿过 Agent 预设允许名单），不能盖掉 `bash`。HTTP MCP 的 OAuth token 在 `~/.dock/mcp_credentials.json`（`DOCK_HOME`），不要写进 `config.toml`。不是 grok.com 账号登录。
+- **MCP 是 fail-open 插件。** `mcp-client` 连不上或没配置时仍 `Active`，往 `"mcp"` 写空/失败状态。MCP 工具名 `mcp_{server}__{tool}` 注册进 `"tools"` 供 `use_tool` 调度（开启的 MCP 工具穿过 Agent 预设允许名单），**不进** sampler 的 `specs_for_model`（对齐 Grok `tool_definitions_builtins_only`）。模型侧固定 `search_tool`（关键词发现 + schema）和 `use_tool`（`tool_name` + `tool_input`），描述静态以保住 tools JSON 前缀缓存。`/mcps` Space 立刻 `dispose` 注销或追加注册（MCP 挂在 `"tools"` 表末尾，重连原地补 body，不改系统提示）。目录变化用服务器级 `<system-reminder>` 增量（已连接/已更新/已断开 + 工具数量，不含 schema）；启动只打 dirty，下一次 `agent/pre-step` 再注入。HTTP MCP 的 OAuth token 在 `~/.dock/mcp_credentials.json`（`DOCK_HOME`），不要写进 `config.toml`。不是 grok.com 账号登录。
 - **浏览器 companion 不是第二套 harness。** `embed-sdk/` 只解析、采集（截图）、把 Gateway 的 `{ kind }` 画出来。斜杠目录迭代 `cordis_tui::slash_catalog()`（不是手抄表）+ `"slash"` extras + `/screenshot*`。list 标 `terminal` 的命令（`/cd` `/settings` 含带参）execute 拒绝。斜杠 `notice` / `applied` 走命令输出卡片，不要当 composer 错误。
 
 ## Live-lookup，不捕获

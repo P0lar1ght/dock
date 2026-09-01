@@ -90,7 +90,7 @@ pub use lsp::{
 };
 pub use mcp::{
     is_mcp_public_name, mcp_client, public_tool_name, split_mcp_public_name, ElicitPrompt,
-    Elicitation, Mcp, McpStatus, McpToolStatus,
+    Elicitation, Mcp, McpStatus, McpToolStatus, SEARCH_TOOL_NAME, USE_TOOL_NAME,
 };
 pub use memory::{tool_memory, Memory};
 pub use monitor::tool_monitor;

@@ -43,6 +43,8 @@ tools:
   - list_agents
   - interrupt_agent
   - workflow
+  - search_tool
+  - use_tool
   - cordis_inspect
   - cordis_inspect_self
   - cordis_define

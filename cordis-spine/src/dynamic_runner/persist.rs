@@ -467,9 +467,9 @@ impl DynamicRunner {
             "永久（磁盘）：".into(),
         ];
         if disk.is_empty() {
-            lines.push(
-                "  （还没有。目录：项目 .dock/plugins/<id>/ ，用户 ~/.dock/plugins/<id>/）".into(),
-            );
+            lines.push("  （还没有）".into());
+            lines.push("  .dock/plugins/<id>/".into());
+            lines.push("  ~/.dock/plugins/<id>/".into());
         } else {
             for spec in &disk {
                 let row = live.iter().find(|r| r.plugin_id == spec.id);

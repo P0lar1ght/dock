@@ -205,6 +205,25 @@ async fn effects_run_cleanup_in_reverse() {
     assert_eq!(*seq.lock().unwrap(), [3, 2, 1]);
 }
 
+#[test]
+fn dispose_sync_runs_cleanup_drop_does_not() {
+    let seq = Arc::new(Mutex::new(Vec::new()));
+    let live = Disposable::from_fn({
+        let seq = seq.clone();
+        move || seq.lock().unwrap().push(1)
+    });
+    drop(live);
+    assert!(seq.lock().unwrap().is_empty());
+
+    let d = Disposable::from_fn({
+        let seq = seq.clone();
+        move || seq.lock().unwrap().push(1)
+    });
+    d.dispose_sync();
+    d.dispose_sync();
+    assert_eq!(*seq.lock().unwrap(), [1]);
+}
+
 #[tokio::test]
 async fn yield_error_rolls_back_collected() {
     let root = Context::new();

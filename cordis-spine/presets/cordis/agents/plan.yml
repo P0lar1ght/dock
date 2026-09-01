@@ -14,4 +14,6 @@ tools:
   - memory_search
   - memory_get
   - ask_user_question
+  - search_tool
+  - use_tool
   - report

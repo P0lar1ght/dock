@@ -258,6 +258,8 @@ async fn install_fakes_echo_has_no_capability_tools() {
         "scheduler_create",
         "cordis_define",
         "cordis_run",
+        "search_tool",
+        "use_tool",
     ] {
         assert!(
             !names.iter().any(|n| n == banned),
@@ -304,6 +306,8 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "memory_get",
         "monitor",
         "workflow",
+        "search_tool",
+        "use_tool",
         "cordis_inspect",
         "cordis_inspect_self",
         "cordis_define",
@@ -322,6 +326,31 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         .get::<cordis_spine::Mcp>(cordis_spine::MCP)
         .expect("mcp-client must provide even with no servers");
     let _ = mcp.list();
+    let model: Vec<String> = tools
+        .specs_for_model()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(
+        model.iter().any(|n| n == "search_tool") && model.iter().any(|n| n == "use_tool"),
+        "sampler must see search_tool/use_tool: {model:?}"
+    );
+    assert!(
+        !model.iter().any(|n| n.starts_with("mcp_")),
+        "sampler must hide MCP extras: {model:?}"
+    );
+    let search = tools
+        .execute(cordis_spine::ToolCall {
+            id: "st".into(),
+            name: "search_tool".into(),
+            arguments: r#"{"query":"linear"}"#.into(),
+        })
+        .await;
+    assert!(
+        search.content.contains("total_hidden_tools"),
+        "search_tool: {}",
+        search.content
+    );
     assert!(root
         .get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE)
         .is_some());

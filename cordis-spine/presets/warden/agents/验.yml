@@ -18,4 +18,6 @@ tools:
   - kill_task
   - monitor
   - todo_write
+  - search_tool
+  - use_tool
   - report

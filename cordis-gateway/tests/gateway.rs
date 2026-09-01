@@ -119,11 +119,10 @@ impl Harness {
             .require::<cordis_tui::GatewayRef>(GATEWAY)
             .unwrap()
             .local_addr();
-        assert!(
-            root.require::<cordis_tui::GatewayRef>(GATEWAY)
-                .unwrap()
-                .is_listening()
-        );
+        assert!(root
+            .require::<cordis_tui::GatewayRef>(GATEWAY)
+            .unwrap()
+            .is_listening());
         let http = reqwest::Client::new();
         let harness = Self {
             ctx: root,

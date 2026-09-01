@@ -58,10 +58,7 @@ impl GatewayHandle {
     }
 
     fn slot(&self) -> std::sync::MutexGuard<'_, ListenSlot> {
-        self.inner
-            .listen
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.inner.listen.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn companion_status(&self) -> CompanionStatus {

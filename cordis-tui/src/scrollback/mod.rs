@@ -43,6 +43,7 @@ mod plan;
 mod read;
 mod sched;
 mod search;
+mod search_tool;
 mod subagent;
 mod text_selection;
 mod thinking;
@@ -939,6 +940,8 @@ fn tool_card_lines(
         read::lines(arguments, content, theme, width, mode, running)
     } else if edit::is_edit_tool(name) {
         edit::lines(name, arguments, content, theme, width, mode, running)
+    } else if search_tool::is_search_tool(name) {
+        search_tool::lines(arguments, content, theme, width, mode, running)
     } else if search::is_search_tool(name) {
         search::lines(name, arguments, content, theme, width, mode, running)
     } else if list_dir::is_list_dir_tool(name) {

@@ -22,4 +22,6 @@ tools:
   - lsp
   - memory_search
   - memory_get
+  - search_tool
+  - use_tool
   - report

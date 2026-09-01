@@ -2,9 +2,13 @@
 //!
 //! Protocol: offer `2026-07-28` first; fall back to initialize-era `2025-11-25`.
 //! Transports: stdio (Content-Length) and Streamable HTTP (`url`).
-//! Public names: `mcp_{server}__{tool}`. Enabled tools bypass Agent preset allowlists.
+//! Public names: `mcp_{server}__{tool}`. Sampler sees `search_tool` / `use_tool`
+//! (Grok progressive disclosure); MCP extras stay registered for dispatch and
+//! occupancy, omitted from `specs_for_model`. Enabled MCP tools bypass Agent
+//! preset allowlists on execute.
 
 mod credentials;
+mod discover;
 mod elicitation;
 mod http;
 mod incoming;
@@ -15,14 +19,16 @@ mod stdio;
 mod tools_list;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, plugin_async, Disposable, Inject, Plugin};
+use cordis::{plugin, plugin_async, Context, Disposable, Inject, Plugin};
 
 use crate::config::{self, McpServer, McpTransport};
-use crate::names::{MCP, TOOLS};
-use crate::tools::{ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use crate::names::{MCP, PRE_STEP, SESSIONS, TOOLS};
+use crate::session::Sessions;
+use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 use incoming::LiveHooks;
 
@@ -36,6 +42,7 @@ pub(super) type RelistFn = std::sync::Arc<
         + Sync,
 >;
 
+pub use discover::{SEARCH_TOOL_NAME, USE_TOOL_NAME};
 pub use elicitation::{ElicitPrompt, Elicitation};
 pub use protocol::{is_mcp_public_name, public_tool_name, raw_tool_name, split_mcp_public_name};
 
@@ -76,21 +83,27 @@ struct Inner {
 
 #[derive(Clone)]
 pub struct Mcp {
+    ctx: Context,
     inner: Arc<Mutex<Inner>>,
     elicit: Elicitation,
     changed_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    dirty: Arc<AtomicBool>,
+    announced: Arc<Mutex<HashMap<String, discover::ServerFingerprint>>>,
 }
 
 impl Mcp {
-    fn new(tools: Option<Tools>, elicit: Elicitation) -> Self {
+    fn new(ctx: Context, tools: Option<Tools>, elicit: Elicitation) -> Self {
         let (changed_tx, changed_rx) = tokio::sync::mpsc::unbounded_channel();
         let mcp = Self {
+            ctx,
             inner: Arc::new(Mutex::new(Inner {
                 slots: Vec::new(),
                 tools,
             })),
             elicit,
             changed_tx,
+            dirty: Arc::new(AtomicBool::new(false)),
+            announced: Arc::new(Mutex::new(HashMap::new())),
         };
         spawn_changed_refresh(mcp.clone(), changed_rx);
         mcp
@@ -110,6 +123,38 @@ impl Mcp {
             .collect()
     }
 
+    pub fn catalog_ready(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .slots
+            .iter()
+            .all(|s| !s.config.enabled || s.call.is_some() || s.last_error.is_some())
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    fn maybe_inject_reminder(&self) {
+        if !self.dirty.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let summaries = discover::summaries_from_status(&self.list());
+        let mut announced = self.announced.lock().unwrap();
+        let Some(text) = discover::build_delta_reminder(&announced, &summaries) else {
+            return;
+        };
+        *announced = discover::fingerprint_servers(&summaries);
+        drop(announced);
+        let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) else {
+            return;
+        };
+        sessions.append(LogEvent::SystemReminder(format!(
+            "<system-reminder>\n{text}\n</system-reminder>"
+        )));
+    }
+
     fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
         for slot in &mut inner.slots {
@@ -122,28 +167,14 @@ impl Mcp {
 
     pub async fn set_server_enabled(&self, name: &str, enabled: bool) -> Result<(), String> {
         config::persist_mcp_server_enabled(name, enabled)?;
-        if !enabled {
-            let mut inner = self.inner.lock().unwrap();
-            let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == name) else {
-                return Err(format!("unknown MCP server {name}"));
-            };
-            drop_registered(slot);
-            stop_slot(slot);
-            slot.call = None;
-            slot.relist = None;
-            slot.config.enabled = false;
-            slot.last_error = None;
-            return Ok(());
-        }
-        let config = {
-            let mut inner = self.inner.lock().unwrap();
-            let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == name) else {
-                return Err(format!("unknown MCP server {name}"));
-            };
-            slot.config.enabled = true;
-            slot.config.clone()
+        let result = if enabled {
+            self.plug_server(name).await
+        } else {
+            self.unplug_server(name)
         };
-        self.connect_slot(&config).await
+        self.mark_dirty();
+        self.maybe_inject_reminder();
+        result
     }
 
     pub async fn set_tool_enabled(
@@ -152,7 +183,7 @@ impl Mcp {
         tool: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        let (disabled, server_on) = {
+        let disabled = {
             let inner = self.inner.lock().unwrap();
             let Some(slot) = inner.slots.iter().find(|s| s.config.name == server) else {
                 return Err(format!("unknown MCP server {server}"));
@@ -165,23 +196,12 @@ impl Mcp {
             }
             let mut list: Vec<String> = names.into_iter().collect();
             list.sort();
-            (list, slot.config.enabled)
+            list
         };
         config::persist_disabled_mcp_tools(server, &disabled)?;
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == server) else {
-                return Err(format!("unknown MCP server {server}"));
-            };
-            if enabled {
-                slot.disabled_tools.remove(tool);
-            } else {
-                slot.disabled_tools.insert(tool.to_string());
-            }
-        }
-        if server_on {
-            self.sync_registrations(server);
-        }
+        self.apply_tool_enabled(server, tool, enabled)?;
+        self.mark_dirty();
+        self.maybe_inject_reminder();
         Ok(())
     }
 
@@ -202,7 +222,10 @@ impl Mcp {
         match oauth::browser_login(&config).await {
             Ok(()) => {
                 if config.enabled {
-                    self.connect_slot(&config).await
+                    let result = self.connect_slot(&config).await;
+                    self.mark_dirty();
+                    self.maybe_inject_reminder();
+                    result
                 } else {
                     Ok(())
                 }
@@ -215,6 +238,64 @@ impl Mcp {
                 Err(e)
             }
         }
+    }
+
+    async fn plug_server(&self, name: &str) -> Result<(), String> {
+        let config = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == name) else {
+                return Err(format!("unknown MCP server {name}"));
+            };
+            slot.config.enabled = true;
+            slot.config.clone()
+        };
+        self.connect_slot(&config).await
+    }
+
+    fn unplug_server(&self, name: &str) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == name) else {
+            return Err(format!("unknown MCP server {name}"));
+        };
+        drop_registered(slot);
+        stop_slot(slot);
+        slot.call = None;
+        slot.relist = None;
+        slot.config.enabled = false;
+        slot.last_error = None;
+        drop(inner);
+        self.mark_dirty();
+        Ok(())
+    }
+
+    fn apply_tool_enabled(&self, server: &str, tool: &str, enabled: bool) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let tools = inner.tools.clone();
+        let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == server) else {
+            return Err(format!("unknown MCP server {server}"));
+        };
+        if enabled {
+            slot.disabled_tools.remove(tool);
+        } else {
+            slot.disabled_tools.insert(tool.to_string());
+        }
+        let public = public_tool_name(server, tool);
+        if !enabled {
+            if let Some(d) = slot.registered.remove(&public) {
+                d.dispose_sync();
+            }
+            drop(inner);
+            self.mark_dirty();
+            return Ok(());
+        }
+        if slot.config.enabled {
+            if let Some(tools) = tools.as_ref() {
+                upsert_one(slot, tools, &public);
+            }
+        }
+        drop(inner);
+        self.mark_dirty();
+        Ok(())
     }
 
     async fn connect_slot(&self, config: &McpServer) -> Result<(), String> {
@@ -247,15 +328,16 @@ impl Mcp {
         };
         match result {
             Ok((listed, call, relist)) => {
-                drop_registered(slot);
                 slot.listed = listed;
                 slot.call = Some(call);
                 slot.relist = Some(relist);
                 slot.stop = Some(stop_tx);
                 slot.last_error = None;
                 if let Some(tools) = tools {
-                    register_enabled(slot, &tools);
+                    sync_listed(slot, &tools);
                 }
+                drop(inner);
+                self.mark_dirty();
                 Ok(())
             }
             Err(e) => {
@@ -265,6 +347,8 @@ impl Mcp {
                 slot.relist = None;
                 slot.last_error = Some(e.clone());
                 let _ = stop_tx.send(true);
+                drop(inner);
+                self.mark_dirty();
                 Err(e)
             }
         }
@@ -289,37 +373,30 @@ impl Mcp {
                 return;
             }
         };
-        let mut inner = self.inner.lock().unwrap();
-        let tools = inner.tools.clone();
-        let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == name) else {
-            return;
-        };
-        drop_registered(slot);
-        slot.listed = listed;
-        if let (Some(tools), Some(_)) = (tools, slot.call.as_ref()) {
-            if slot.config.enabled {
-                register_enabled(slot, &tools);
-            }
-        }
-    }
-
-    fn sync_registrations(&self, server: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        let tools = inner.tools.clone();
-        let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == server) else {
-            return;
-        };
-        drop_registered(slot);
-        if slot.config.enabled {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let tools = inner.tools.clone();
+            let Some(slot) = inner.slots.iter_mut().find(|s| s.config.name == name) else {
+                return;
+            };
+            slot.listed = listed;
             if let (Some(tools), Some(_)) = (tools, slot.call.as_ref()) {
-                register_enabled(slot, &tools);
+                if slot.config.enabled {
+                    sync_listed(slot, &tools);
+                } else {
+                    drop_registered(slot);
+                }
             }
         }
+        self.mark_dirty();
+        self.maybe_inject_reminder();
     }
 }
 
 fn drop_registered(slot: &mut Slot) {
-    slot.registered.clear();
+    for (_, d) in slot.registered.drain() {
+        d.dispose_sync();
+    }
 }
 
 fn stop_slot(slot: &mut Slot) {
@@ -346,34 +423,68 @@ fn spawn_changed_refresh(mcp: Mcp, mut rx: tokio::sync::mpsc::UnboundedReceiver<
     });
 }
 
-fn register_enabled(slot: &mut Slot, tools: &Tools) {
+fn sync_listed(slot: &mut Slot, tools: &Tools) {
+    if slot.call.is_none() {
+        drop_registered(slot);
+        return;
+    }
+    let want: HashSet<String> = slot
+        .listed
+        .iter()
+        .filter(|(public, ..)| !slot.disabled_tools.contains(&raw_tool_name(public)))
+        .map(|(public, ..)| public.clone())
+        .collect();
+    let stale: Vec<String> = slot
+        .registered
+        .keys()
+        .filter(|name| !want.contains(*name))
+        .cloned()
+        .collect();
+    for name in stale {
+        if let Some(d) = slot.registered.remove(&name) {
+            d.dispose_sync();
+        }
+    }
+    for (public, _, _) in slot.listed.clone() {
+        if want.contains(&public) {
+            upsert_one(slot, tools, &public);
+        }
+    }
+}
+
+fn upsert_one(slot: &mut Slot, tools: &Tools, public: &str) {
     let Some(call) = slot.call.clone() else {
         return;
     };
-    for (public, description, parameters_json) in &slot.listed {
-        let raw = raw_tool_name(public);
-        if slot.disabled_tools.contains(&raw) {
-            continue;
-        }
+    let Some((_, description, parameters_json)) =
+        slot.listed.iter().find(|(name, ..)| name == public)
+    else {
+        return;
+    };
+    if slot.disabled_tools.contains(&raw_tool_name(public)) {
+        return;
+    }
+    let pname = public.to_string();
+    let body: ToolBody = std::sync::Arc::new(move |c| {
         let call = call.clone();
-        let pname = public.clone();
-        let body: ToolBody = std::sync::Arc::new(move |c| {
-            let call = call.clone();
-            let pname = pname.clone();
-            Box::pin(async move { call(pname, c).await })
-        });
-        match tools.register_mcp(
-            ToolSpec {
-                name: public.clone(),
-                description: description.clone(),
-                parameters_json: parameters_json.clone(),
-            },
-            body,
-        ) {
-            Ok(d) => {
-                slot.registered.insert(public.clone(), d);
-            }
-            Err(_) => {}
+        let pname = pname.clone();
+        Box::pin(async move { call(pname, c).await })
+    });
+    let spec = ToolSpec {
+        name: public.to_string(),
+        description: description.clone(),
+        parameters_json: parameters_json.clone(),
+    };
+    if let Some(d) = tools.patch_mcp(spec.clone(), body.clone()) {
+        let _ = slot.registered.insert(public.to_string(), d);
+        return;
+    }
+    match tools.register_mcp(spec, body) {
+        Ok(d) => {
+            slot.registered.insert(public.to_string(), d);
+        }
+        Err(e) => {
+            tracing::warn!(tool = public, "MCP register failed: {e}");
         }
     }
 }
@@ -432,7 +543,43 @@ pub fn mcp_client() -> Plugin {
             let configured = config::load_mcp_servers();
             let disabled_map = config::load_disabled_mcp_tools();
             let tools = ctx.require::<Tools>(TOOLS)?;
-            let mcp = Mcp::new(Some((*tools).clone()), Elicitation::new(ctx.clone()));
+            let mcp = Mcp::new(
+                ctx.clone(),
+                Some((*tools).clone()),
+                Elicitation::new(ctx.clone()),
+            );
+            let search_body: ToolBody = std::sync::Arc::new(|call| {
+                Box::pin(async move {
+                    let Some(exec) = crate::tools::exec_ctx() else {
+                        return tool_result(call, "search_tool: missing exec context");
+                    };
+                    let Some(tools) = exec.get::<Tools>(TOOLS) else {
+                        return tool_result(call, "search_tool: tools unavailable");
+                    };
+                    let mcp = exec.get::<Mcp>(MCP);
+                    let body =
+                        discover::run_search(tools.as_ref(), mcp.as_deref(), &call.arguments);
+                    tool_result(call, body)
+                })
+            });
+            let use_body: ToolBody = std::sync::Arc::new(|call| {
+                Box::pin(async move {
+                    let Some(exec) = crate::tools::exec_ctx() else {
+                        return tool_result(call, "use_tool: missing exec context");
+                    };
+                    let Some(tools) = exec.get::<Tools>(TOOLS) else {
+                        return tool_result(call, "use_tool: tools unavailable");
+                    };
+                    discover::run_use_tool(tools.as_ref(), &exec, call).await
+                })
+            });
+            own_registered(
+                &ctx,
+                vec![
+                    tools.register(discover::search_spec(), search_body)?,
+                    tools.register(discover::use_spec(), use_body)?,
+                ],
+            )?;
             {
                 let mut inner = mcp.inner.lock().unwrap();
                 for server in configured {
@@ -467,6 +614,14 @@ pub fn mcp_client() -> Plugin {
                 let _ = mcp.connect_slot(&server).await;
             }
             ctx.provide(MCP, mcp.clone())?;
+            let mcp_pre = mcp.clone();
+            let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+                let next = args.next::<PreStep>().unwrap_or(step);
+                if next.enter {
+                    mcp_pre.maybe_inject_reminder();
+                }
+                next
+            });
             let mcp_drop = mcp;
             ctx.effect("mcp.servers", move |scope| {
                 scope.own(Disposable::from_fn(move || mcp_drop.shutdown()));
@@ -494,7 +649,198 @@ pub fn mcp_empty() -> Plugin {
     plugin("mcp-client", Inject::new(), |ctx, _: &()| {
         Ok(Some(ctx.provide(
             MCP,
-            Mcp::new(None, Elicitation::new(ctx.clone())),
+            Mcp::new(ctx.clone(), None, Elicitation::new(ctx.clone())),
         )?))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::names::{SESSIONS, TOOLS};
+    use crate::session::Sessions;
+    use crate::tools::tool_result;
+    use crate::types::ToolCall;
+    use std::sync::Arc;
+
+    fn stub_call() -> CallFn {
+        Arc::new(|_, c| Box::pin(async move { tool_result(c, "ok") }))
+    }
+
+    fn fake_config(name: &str) -> McpServer {
+        McpServer {
+            name: name.into(),
+            transport: McpTransport::Stdio {
+                command: "true".into(),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+            startup_timeout_sec: 1,
+            enabled: true,
+            oauth: crate::config::McpOAuthConfig {
+                client_id: None,
+                client_secret: None,
+                scopes: Vec::new(),
+                callback_port: None,
+            },
+        }
+    }
+
+    fn attach_fake(mcp: &Mcp, name: &str, raw_tools: &[(&str, &str)]) {
+        let listed: Vec<protocol::ListedTool> = raw_tools
+            .iter()
+            .map(|(raw, desc)| {
+                (
+                    public_tool_name(name, raw),
+                    (*desc).to_string(),
+                    r#"{"type":"object"}"#.into(),
+                )
+            })
+            .collect();
+        let mut inner = mcp.inner.lock().unwrap();
+        if !inner.slots.iter().any(|s| s.config.name == name) {
+            inner.slots.push(Slot {
+                config: fake_config(name),
+                call: None,
+                relist: None,
+                stop: None,
+                listed: Vec::new(),
+                disabled_tools: HashSet::new(),
+                registered: HashMap::new(),
+                last_error: None,
+            });
+        }
+        let tools = inner.tools.clone();
+        let slot = inner
+            .slots
+            .iter_mut()
+            .find(|s| s.config.name == name)
+            .unwrap();
+        slot.listed = listed;
+        slot.call = Some(stub_call());
+        slot.config.enabled = true;
+        if let Some(tools) = tools {
+            sync_listed(slot, &tools);
+        }
+        drop(inner);
+        mcp.mark_dirty();
+    }
+
+    fn spec_names(tools: &Tools) -> Vec<String> {
+        tools.specs().into_iter().map(|s| s.name).collect()
+    }
+
+    async fn boot() -> (cordis::Context, Mcp, Tools) {
+        let ctx = cordis::Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        let tools = (*ctx.require::<Tools>(TOOLS).unwrap()).clone();
+        let mcp = Mcp::new(
+            ctx.clone(),
+            Some(tools.clone()),
+            Elicitation::new(ctx.clone()),
+        );
+        (ctx, mcp, tools)
+    }
+
+    #[tokio::test]
+    async fn toggle_unregisters_and_reregisters_without_reshuffling_prefix() {
+        let (_ctx, mcp, tools) = boot().await;
+        tools
+            .register(
+                ToolSpec {
+                    name: "zeta".into(),
+                    description: "z".into(),
+                    parameters_json: r#"{"type":"object"}"#.into(),
+                },
+                Arc::new(|c| Box::pin(async move { tool_result(c, "z") })),
+            )
+            .unwrap();
+        let prefix = spec_names(&tools);
+        attach_fake(&mcp, "probe", &[("ping", "ping"), ("pong", "pong")]);
+        let with_mcp = spec_names(&tools);
+        assert_eq!(&with_mcp[..prefix.len()], prefix.as_slice());
+        assert_eq!(
+            &with_mcp[prefix.len()..],
+            ["mcp_probe__ping", "mcp_probe__pong"]
+        );
+
+        mcp.unplug_server("probe").unwrap();
+        assert_eq!(spec_names(&tools), prefix);
+        let blocked = tools
+            .execute(ToolCall {
+                id: "1".into(),
+                name: "mcp_probe__ping".into(),
+                arguments: "{}".into(),
+            })
+            .await;
+        assert_eq!(blocked.content, "MCP 工具未启用或已关闭");
+
+        attach_fake(&mcp, "probe", &[("ping", "ping"), ("pong", "pong")]);
+        let again = spec_names(&tools);
+        assert_eq!(&again[..prefix.len()], prefix.as_slice());
+        assert_eq!(
+            &again[prefix.len()..],
+            ["mcp_probe__ping", "mcp_probe__pong"]
+        );
+        let ok = tools
+            .execute(ToolCall {
+                id: "2".into(),
+                name: "mcp_probe__ping".into(),
+                arguments: "{}".into(),
+            })
+            .await;
+        assert_eq!(ok.content, "ok");
+
+        mcp.apply_tool_enabled("probe", "ping", false).unwrap();
+        let after_one = spec_names(&tools);
+        assert_eq!(&after_one[..prefix.len()], prefix.as_slice());
+        assert_eq!(&after_one[prefix.len()..], ["mcp_probe__pong"]);
+        let model: Vec<String> = tools
+            .specs_for_model()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            !model.iter().any(|n| n.starts_with("mcp_")),
+            "sampler tools must hide MCP extras: {model:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_appends_server_delta_reminder_not_tool_names() {
+        let (ctx, mcp, tools) = boot().await;
+        attach_fake(&mcp, "probe", &[("ping", "ping")]);
+        mcp.maybe_inject_reminder();
+        mcp.unplug_server("probe").unwrap();
+        mcp.maybe_inject_reminder();
+        let events = ctx.require::<Sessions>(SESSIONS).unwrap().events();
+        let reminders: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::SystemReminder(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            reminders
+                .iter()
+                .any(|t| t.contains("MCP 服务器已连接") && t.contains("probe")),
+            "{reminders:?}"
+        );
+        assert!(
+            reminders
+                .iter()
+                .any(|t| t.contains("MCP 服务器已断开：probe")),
+            "{reminders:?}"
+        );
+        assert!(
+            reminders.iter().all(|t| !t.contains("mcp_probe__ping")),
+            "{reminders:?}"
+        );
+        assert!(
+            reminders.iter().all(|t| t.contains("<system-reminder>")),
+            "{reminders:?}"
+        );
+        assert!(!tools.is_mcp("mcp_probe__ping"));
+    }
 }

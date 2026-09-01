@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use cordis::Context;
 use cordis_spine::{
-    occupancy_detail, session_usage_block_text, snapshot_context, ContextCategory, ContextSnapshot,
-    OccupancyDetail, OccupancyKind, Sessions, TokenUsage, SESSIONS,
+    occupancy_detail, session_usage_block_text, snapshot_context, ContextSnapshot, OccupancyDetail,
+    OccupancyKind, Sessions, TokenUsage, SESSIONS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -996,6 +996,7 @@ fn percent_of_window(part: u64, total: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cordis_spine::ContextCategory;
 
     fn line_text(lines: &[Line<'static>], idx: usize) -> String {
         lines[idx]

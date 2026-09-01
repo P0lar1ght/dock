@@ -1056,6 +1056,7 @@ fn absorb_mode_overlay(
             sanitize_stale_warden_overlay(&mut overlay, &base);
         }
     }
+    ensure_mcp_discovery_tools(id, &mut overlay);
     overlay.origin = origin;
     overlay.id = id.to_string();
     presets.insert(id.to_string(), overlay);
@@ -1311,6 +1312,36 @@ fn tool_allowed(allow: &[String], name: &str) -> bool {
     name == "run_terminal_cmd" && allow.iter().any(|n| n == "bash")
 }
 
+/// Overlay YAML snapshots an allowlist. When crate adds `search_tool` /
+/// `use_tool`, stale user/project copies would otherwise hide them from
+/// `/preset` and `allows()`. Skip `minimal` and explicit empty lists.
+fn ensure_mcp_discovery_tools(id: &str, preset: &mut AgentPreset) {
+    if id == MINIMAL_PRESET_ID {
+        return;
+    }
+    if !SHIPPED.iter().any(|m| m.id == id) {
+        return;
+    }
+    append_mcp_discovery(&mut preset.tools);
+    for def in preset.agents.values_mut() {
+        append_mcp_discovery(&mut def.tools);
+    }
+}
+
+fn append_mcp_discovery(tools: &mut Option<Vec<String>>) {
+    let Some(list) = tools else {
+        return;
+    };
+    if list.is_empty() {
+        return;
+    }
+    for name in [crate::mcp::SEARCH_TOOL_NAME, crate::mcp::USE_TOOL_NAME] {
+        if !list.iter().any(|t| t == name) {
+            list.push(name.to_string());
+        }
+    }
+}
+
 fn mint_id(presets: &IndexMap<String, AgentPreset>) -> String {
     if !presets.contains_key("custom") {
         return "custom".into();
@@ -1414,10 +1445,11 @@ fn sanitize_stale_warden_overlay(overlay: &mut AgentPreset, base: &AgentPreset) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::names::TOOLS;
-    use crate::tools::Tools;
+    use crate::names::{AGENT_PRESETS, TOOLS};
+    use crate::tools::{tool_result, Tools};
     use crate::types::ToolCall;
     use cordis::Context;
+    use std::sync::Arc;
 
     fn spec(name: &str) -> ToolSpec {
         ToolSpec {
@@ -1456,6 +1488,15 @@ mod tests {
                     "{}",
                     mode.id
                 );
+                assert!(
+                    p.tools
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|n| n == crate::mcp::SEARCH_TOOL_NAME),
+                    "{}",
+                    mode.id
+                );
                 for id in ["岑", "锁", "甲", "乙", "丙", "衡", "验", "观", "突击"] {
                     let def = p.agents.get(id).unwrap_or_else(|| panic!("{id}"));
                     let tools = def.tools.as_ref().unwrap();
@@ -1482,6 +1523,15 @@ mod tests {
                     .unwrap()
                     .iter()
                     .any(|n| n == "report"));
+                assert!(
+                    p.tools
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|n| n == crate::mcp::SEARCH_TOOL_NAME),
+                    "{}",
+                    mode.id
+                );
             }
         }
     }
@@ -1508,6 +1558,8 @@ mod tests {
         assert!(presets.allows("task"));
         assert!(presets.allows("subagent"));
         assert!(presets.allows("send_message"));
+        assert!(presets.allows("search_tool"));
+        assert!(presets.allows("use_tool"));
         assert!(!presets.allows("report"));
         assert!(!presets.allows("cordis_define"));
         assert!(!presets.allows("scheduler_create"));
@@ -1515,11 +1567,15 @@ mod tests {
         presets.apply(MINIMAL_PRESET_ID).unwrap();
         assert!(presets.allows("read_file"));
         assert!(!presets.allows("web_search"));
+        assert!(!presets.allows("search_tool"));
+        assert!(!presets.allows("use_tool"));
         assert!(!presets.allows("cordis_run"));
 
         presets.apply(CORDIS_PRESET_ID).unwrap();
         assert!(presets.allows("cordis_inspect"));
         assert!(presets.allows("skill"));
+        assert!(presets.allows("search_tool"));
+        assert!(presets.allows("use_tool"));
         assert!(presets.allows("cordis_run"));
         assert!(presets.allows("cordis_promote"));
         assert!(!presets.allows("scheduler_create"));
@@ -1528,6 +1584,8 @@ mod tests {
         assert!(presets.allows("bash"));
         assert!(presets.allows("run_terminal_cmd"));
         assert!(presets.allows("subagent"));
+        assert!(presets.allows("search_tool"));
+        assert!(presets.allows("use_tool"));
         assert!(!presets.allows("task"));
         assert!(!presets.allows("get_task_output"));
         assert!(!presets.allows("wait_tasks"));
@@ -1538,6 +1596,49 @@ mod tests {
         assert!(presets.subagent("jia").is_none());
         assert!(!presets.allows("write_file"));
         assert!(!presets.allows("cordis_run"));
+    }
+
+    #[test]
+    fn stale_overlay_allowlist_gains_search_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let code = dir.path().join("code");
+        std::fs::create_dir_all(code.join("agents")).unwrap();
+        std::fs::write(
+            code.join("agent.yml"),
+            "name: 编码\ntools:\n  - bash\n  - read_file\n",
+        )
+        .unwrap();
+        std::fs::write(
+            code.join("agents").join("explore.yml"),
+            "name: 探索\ntools:\n  - read_file\n  - report\n",
+        )
+        .unwrap();
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        assert!(presets.allows("bash"));
+        assert!(presets.allows("search_tool"));
+        assert!(presets.allows("use_tool"));
+        let explore = presets.subagent("explore").unwrap();
+        let tools = explore.tools.unwrap();
+        assert!(tools.iter().any(|n| n == "search_tool"), "{tools:?}");
+        assert!(tools.iter().any(|n| n == "use_tool"), "{tools:?}");
+
+        let ctx = Context::new();
+        ctx.provide(AGENT_PRESETS, presets).unwrap();
+        let tools_svc = Tools::echo(ctx.clone());
+        let body: crate::tools::ToolBody =
+            Arc::new(|c| Box::pin(async move { tool_result(c, "ok") }));
+        tools_svc
+            .register(spec("search_tool"), body.clone())
+            .unwrap();
+        tools_svc.register(spec("use_tool"), body.clone()).unwrap();
+        tools_svc.register(spec("bash"), body).unwrap();
+        let model: Vec<String> = tools_svc
+            .specs_for_model_on(&ctx)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(model.iter().any(|n| n == "search_tool"), "{model:?}");
+        assert!(model.iter().any(|n| n == "use_tool"), "{model:?}");
     }
 
     #[test]

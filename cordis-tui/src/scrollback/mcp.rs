@@ -1,6 +1,6 @@
 //! MCP tool card — Grok `UseToolCallBlock`: **Server** `Action`, kv args, output.
 
-use cordis_spine::is_mcp_public_name;
+use cordis_spine::{is_mcp_public_name, USE_TOOL_NAME};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -14,7 +14,7 @@ use crate::theme::Theme;
 const TRUNCATED_INLINE: usize = 3;
 
 pub fn is_mcp_tool(name: &str) -> bool {
-    is_mcp_public_name(name)
+    name == USE_TOOL_NAME || is_mcp_public_name(name)
 }
 
 pub fn lines(
@@ -29,7 +29,12 @@ pub fn lines(
     let failed = looks_failed(content);
     let open = mode != ToolMode::Collapsed;
     let muted = (!open && !running) || failed;
-    let mut header = header_line(name, theme, muted, Some(width.saturating_sub(2)));
+    let mut header = header_line(
+        &card_name(name, arguments),
+        theme,
+        muted,
+        Some(width.saturating_sub(2)),
+    );
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
@@ -40,7 +45,7 @@ pub fn lines(
     }
 
     let mut out = vec![header];
-    let args = input_args(arguments);
+    let args = display_args(name, arguments);
     if !args.is_empty() {
         out.push(Line::from(""));
         for (key, val) in &args {
@@ -144,6 +149,56 @@ fn header_line(name: &str, theme: &Theme, muted: bool, max_width: Option<usize>)
     }
 }
 
+fn card_name(name: &str, arguments: &str) -> String {
+    if name == USE_TOOL_NAME {
+        if let Some(inner) = inner_tool_name(arguments) {
+            return inner;
+        }
+    }
+    name.to_string()
+}
+
+fn inner_tool_name(arguments: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    v.get("tool_name")
+        .and_then(|n| n.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn display_args(name: &str, arguments: &str) -> Vec<(String, String)> {
+    if name != USE_TOOL_NAME {
+        return input_args(arguments);
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return input_args(arguments);
+    };
+    match v.get("tool_input") {
+        Some(input) => flatten_value(input),
+        None => input_args(arguments)
+            .into_iter()
+            .filter(|(k, _)| k != "tool_name")
+            .collect(),
+    }
+}
+
+fn flatten_value(v: &serde_json::Value) -> Vec<(String, String)> {
+    match v {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, val)| {
+                let s = match val {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                (k.clone(), s)
+            })
+            .collect(),
+        serde_json::Value::Null => Vec::new(),
+        other => vec![("args".into(), other.to_string())],
+    }
+}
+
 fn input_args(arguments: &str) -> Vec<(String, String)> {
     let trimmed = arguments.trim();
     if trimmed.is_empty() {
@@ -201,6 +256,24 @@ mod tests {
     }
 
     #[test]
+    fn use_tool_header_uses_inner_name() {
+        let theme = Theme::current();
+        let text = plain(&lines(
+            "use_tool",
+            r#"{"tool_name":"mcp_local__echo","tool_input":{"text":"hi"}}"#,
+            "pong",
+            &theme,
+            80,
+            ToolMode::Collapsed,
+            false,
+        ));
+        assert!(text.contains("Local"), "{text}");
+        assert!(text.contains("Echo"), "{text}");
+        assert!(!text.contains("use_tool"), "{text}");
+        assert!(!text.contains("mcp_local__echo"), "{text}");
+    }
+
+    #[test]
     fn header_strips_prefix_and_titleizes() {
         assert_eq!(titleize("list_issues"), "List Issues");
         assert_eq!(titleize("local"), "Local");
@@ -222,6 +295,25 @@ mod tests {
         assert!(text.contains("Echo"), "{text}");
         assert!(!text.contains("mcp_local__echo"), "{text}");
         assert!(!text.contains("Mcp "), "{text}");
+    }
+
+    #[test]
+    fn use_tool_expanded_shows_inner_args() {
+        let theme = Theme::current();
+        let text = plain(&lines(
+            "use_tool",
+            r#"{"tool_name":"mcp_local__echo","tool_input":{"text":"hi","n":2}}"#,
+            "pong",
+            &theme,
+            80,
+            ToolMode::Expanded,
+            false,
+        ));
+        assert!(text.contains("Local"), "{text}");
+        assert!(text.contains("text: "), "{text}");
+        assert!(text.contains("hi"), "{text}");
+        assert!(!text.contains("tool_name"), "{text}");
+        assert!(!text.contains("tool_input"), "{text}");
     }
 
     #[test]
