@@ -4,6 +4,11 @@
 //! [`history`]. The loop live-looks this service at the start of each sample
 //! (after tools flush). Summarization samples on an isolated `"sessions"`
 //! realm so `begin_llm` does not append onto the live log.
+//!
+//! Grok pager keeps scrollback and only replaces `chat_state` conversation
+//! (`replace_conversation_for_compaction`). Dock matches that: [`Sessions::events`]
+//! stays the pager transcript; [`Sessions::model_history`] is what the sampler
+//! sees.
 
 mod config;
 mod history;
@@ -85,7 +90,7 @@ pub fn compact() -> Plugin {
 }
 
 fn context_tokens_used(sessions: &Sessions, system: &str) -> u64 {
-    let estimate = estimate_context_tokens(system, &sessions.events());
+    let estimate = estimate_context_tokens(system, &sessions.model_history());
     let u = sessions.usage();
     if u.official {
         u.prompt.max(estimate)
@@ -113,7 +118,7 @@ async fn compact_session_locked(
     extra: Option<&str>,
     cfg: &FullReplaceConfig,
 ) -> Result<()> {
-    let history = sessions.events();
+    let history = sessions.model_history();
     if !history
         .iter()
         .any(|e| matches!(e, LogEvent::User(t) if !t.trim().is_empty()))
@@ -240,7 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_replaces_live_log_without_polluting_with_sample() {
+    async fn compact_keeps_display_log_and_hides_sample() {
         let root = Context::new();
         let sessions = Sessions::new(root.clone());
         for e in sample_history() {
@@ -258,12 +263,24 @@ mod tests {
             .unwrap();
         let events = sessions.events();
         assert!(
-            events
+            events.iter().any(|e| matches!(
+                e,
+                LogEvent::ToolExecute { content, .. } if content.contains("buggy")
+            )),
+            "pager must keep the original transcript: {events:?}"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            LogEvent::LlmStream(o) if o.text == VISIBLE_NOTICE
+        )));
+        let model = sessions.model_history();
+        assert!(
+            model
                 .iter()
                 .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains("auth.rs"))),
-            "{events:?}"
+            "{model:?}"
         );
-        assert!(!events.iter().any(|e| matches!(
+        assert!(!model.iter().any(|e| matches!(
             e,
             LogEvent::ToolExecute { content, .. } if content.contains("buggy")
         )));
@@ -317,7 +334,11 @@ mod tests {
         )
         .unwrap();
         assert!(Compact.maybe_auto(&root).await.unwrap());
-        assert!(!sessions.events().iter().any(|e| matches!(
+        assert!(sessions.events().iter().any(|e| matches!(
+            e,
+            LogEvent::ToolExecute { content, .. } if content.contains('y')
+        )));
+        assert!(!sessions.model_history().iter().any(|e| matches!(
             e,
             LogEvent::ToolExecute { content, .. } if content.contains('y')
         )));

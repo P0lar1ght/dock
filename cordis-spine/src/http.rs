@@ -79,7 +79,7 @@ async fn sample_http(
     let user_images = sampler
         .ctx
         .get::<Sessions>(SESSIONS)
-        .map(|s| s.user_images())
+        .map(|s| s.model_user_images())
         .unwrap_or_default();
     let mut body = json!({
         "model": model,

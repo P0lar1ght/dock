@@ -4,6 +4,8 @@
 
 用户可见文案中文；Grok 底栏那种短 hint（`Enter:send`）保持英文无空格。
 
+进程入口（`cargo run -p cordis-app -- …`）：`--resume` 恢复本 cwd 最近一次落盘会话，`--resume <id>` 指定 id，`--help` 看用法。对话在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。
+
 ---
 
 ## 斜杠
@@ -17,15 +19,15 @@
 | 命令 | 行为 |
 |---|---|
 | `/settings`（`config` `prefs`） | 设置 overlay；有参数则直接改（`timestamps` / `theme` / `model`）。浏览器 companion 一律拒绝（含带参），请用 `/timestamps` `/think` `/model` `/effort` |
-| `/new` | 归档当前会话并清空。账本用量一并清零 |
+| `/new` | 归档当前会话并清空。账本用量一并清零。归档写入 `$DOCK_HOME/sessions/<cwd>/` |
 | `/model` `/m` | 切换当前模型 |
-| `/resume` | 恢复上次会话。用量账本不随归档恢复（Grok：新进程 resume 清零） |
+| `/resume` | 打开会话 picker，恢复本工作区已落盘的会话（进程重启后仍在）。用量账本不随归档恢复（Grok：新进程 resume 清零）。进程入口 `--resume` / `--resume <id>` 启动时直接恢复 |
 | `/pair`（`pairing`） | 浏览器 Origin 配对：第一行开启/关闭回环网关（默认不监听；首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。开启后待批请求可批准，已绑来源可撤销。overlay 显示实际监听地址。首次连接弹出「允许浏览器连接？」；Enter 批准 / `x` 拒绝或撤销（在网关行上 `x` 关闭监听）。浏览器 companion 的 list/execute 限制见上文。CORS 反射任意 Origin：鉴权靠配对 + 回环。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费 |
 | `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
 | `/plan [说明]` | 开计划模式；无说明只切模式（Pending，发第一条 prompt 后变 Active）。有说明则 Active 并提交 |
 | `/view-plan`（`show-plan` `plan-view`） | 查看 `.dock/plan.md`（打开时读一次，pretty markdown）；若 `exit_plan_mode` 正在等待批准则打开审批 chrome（`a` 批准 / `s` 修改 / `q` 放弃） |
 | `/goal` | 输入框留下用法（`用法: /goal <目标>` + `/goal `），不会清空。再发送即为目标 |
-| `/goal <目标>` | 开目标；用户气泡是目标文本；`goal_instruction` 走 system-prompt。模型只回一句文本时不会结束目标：注入隐藏 continuation（Grok `Goal NOT complete`），继续采样直到 `update_goal(completed)` / 暂停 / 取消。整轮结束后若目标仍在进行，再塞一条隐藏 GoalSummary 开下一轮。模型也可用 `update_goal(objective)` 自己开目标 |
+| `/goal <目标>` | 开目标；用户气泡是目标文本；`goal_instruction` 走历史尾部 `<system-reminder>`（不改系统提示）。模型只回一句文本时不会结束目标：注入隐藏 continuation（Grok `Goal NOT complete`），继续采样直到 `update_goal(completed)` / 暂停 / 取消。整轮结束后若目标仍在进行，再塞一条隐藏 GoalSummary 开下一轮。模型也可用 `update_goal(objective)` 自己开目标 |
 | `/goal status\|edit\|pause\|resume\|clear` | 打开目标 overlay / 暂停 / 继续 / 清除 |
 | `/tasks` | Grok 分组 pane：Workflows → Subagents → Tasks → Watchers。子代理行显示当前模式名册的角色名（如守望下的「岑」而不是 `Cen`）。Enter / 点击子代理或后台任务打开 **Grok 同款全屏边框**（子代理：工具卡折叠循环 + 框底输入 `send_message`）。Esc 从全屏回到本列表。子代理第一轮结束后显示 **idle**（不是 done）；idle 不算 running。Watchers 里的 loop：`x` 或点 `[✗]` 关闭（`scheduler_delete` / `cron.cancel`） |
 | `/workflow` / `/workflow runs` | Grok `Workflow Runs` overlay |
@@ -35,13 +37,13 @@
 | `/mcps` | Grok 分组 pane：标题「MCP 服务器」、分组「本地 (N)」、徽章 `[就绪]` / `[需认证]` / `[不可用]` / `[已禁用]`、右侧 `(本地)`。Space 开关当前服务器或工具（写入 `config.toml`：`[mcp_servers.<name>].enabled` 与 `[disabled_mcp_tools.<server>]`），并立刻从 `"tools"` 注销/追加注册（MCP 不进 sampler 工具表，走 `search_tool` / `use_tool`；不重写系统提示；目录变化用服务器级 `<system-reminder>`）。`i` 对 HTTP 服务器打开浏览器 OAuth（PKCE，token 写 `~/.dock/mcp_credentials.json`，不是 grok.com 登录）；Enter 展开/收起工具（`N 个工具` / `N 个工具（M 个已启用）`）；Esc 关闭。stdio 或 Streamable HTTP。工具表跟 `tools/list` 翻页和 `tools/list_changed`；HTTP 跟 GET SSE，session 404 会重新握手 |
 | `/lsp` | 探测 PATH 上的 `rust-analyzer` / `typescript-language-server` / `gopls` / `pyright-langserver`，按工作区标记（含子目录，跳过 `node_modules` / `target`）把缺的服务器写入 `.dock/lsp.json`，不覆盖已有条目。Notice 显示保留 / 添加 / 跳过。当前会话会尝试启动新服务器。空命令或 `/lsp setup` 写项目配置；`/lsp status` 只看不写；`/lsp user` 把 PATH 上有的默认服务器写入 `~/.dock/lsp.json`（不要求工作区标记）。输入 `/lsp ` 后 Tab / Enter 补全 `status` / `setup` / `user`（`/lsp s` 可滤到 status）。浏览器 companion 拒绝（请在 Dock 终端用） |
 | `/cordis`（`plugins`） | Notice「Cordis 插件」：磁盘永久层（项目 `.dock/plugins/<id>/` 覆盖用户 `~/.dock/plugins/<id>/`）和本会话内存插件。Esc 关闭。写成永久用模型工具 `cordis_promote` |
-| `/preset`（`presets` `agent` `agents`） | 打开 Agent 预设名册。定义全是 YAML 目录：内置 < `~/.dock/presets/<id>/agent.yml` < 项目 `.dock/presets/<id>/agent.yml`（后写覆盖；仍可读旧 `<id>.yml`）。**加一个目录就是一个 Agent**，不必改代码。子代理写在 `agents/<type>.yml`（人设 + 工具允许名单）。**`n` 新建 / `d` 复制默认写当前工作区** `.dock/presets/<id>/`（有项目层时 origin 为项目）；改内置模式仍写 `~/.dock/presets/` 覆盖。新建人设默认写 `.dock/presets/<当前模式>/agents/`。系统提示注入这两处的绝对路径（空名册也会注入）；只有用户明确要求保存到全局才写 `~/.dock/presets/`。省略 `tools` = 当前已注册全部工具；`[]` = 空；列表 = 允许名单（Dock 工具名）。`replace_prompt: true` 时 `persona` 整份替换系统提示。手写 `agents/<type>.yml` 后，`subagent` 校验、`/preset` 和下一采样步系统提示都会重读；本轮要立刻出现在 enum 里时用 `subagent`（`reload_roster: true`），不必新开会话。新建模式写完后用 `/preset` 应用该 id（`reload_roster` 不切模式）。名册列出子代理 id；`n` 新建、`d` 复制、`a` 应用、`x` 删除（内置不能删；删覆盖则恢复内置） |
+| `/preset`（`presets` `agent` `agents`） | 打开 Agent 预设名册。定义全是 YAML 目录：内置 < `~/.dock/presets/<id>/agent.yml` < 项目 `.dock/presets/<id>/agent.yml`（后写覆盖；仍可读旧 `<id>.yml`）。**加一个目录就是一个 Agent**，不必改代码。子代理写在 `agents/<type>.yml`（人设 + 工具允许名单）。**`n` 新建 / `d` 复制默认写当前工作区** `.dock/presets/<id>/`（有项目层时 origin 为项目）；改内置模式仍写 `~/.dock/presets/` 覆盖。新建人设默认写 `.dock/presets/<当前模式>/agents/`。系统提示注入工作区相对路径 `.dock/presets` 与 `.dock/presets/<模式>/agents`（空名册也会注入，不用绝对 `{cwd}`）；只有用户明确要求保存到全局才写 `~/.dock/presets/`。省略 `tools` = 当前已注册全部工具；`[]` = 空；列表 = 允许名单（Dock 工具名）。`replace_prompt: true` 时 `persona` 整份替换系统提示。手写 `agents/<type>.yml` 后，`subagent` 校验、`/preset` 和下一采样步系统提示都会重读；本轮要立刻出现在 enum 里时用 `subagent`（`reload_roster: true`），不必新开会话。新建模式写完后用 `/preset` 应用该 id（`reload_roster` 不切模式）。名册列出子代理 id；`n` 新建、`d` 复制、`a` 应用、`x` 删除（内置不能删；删覆盖则恢复内置） |
 | `/history` | 搜索提示词历史 |
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
 | `/find` | 搜索对话 |
 | `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入 / 输出 / 缓存命中与占比 / 思考 / 调用次数 / API 耗时。接口若带 `cost_in_usd_ticks` 才显示费用，缺省为「未上报」（不是免费）。**Tab** 切到占用。**没有** grok.com 账号额度、`/usage manage` |
-| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、MCP、本地按需、工作流、技能。点「系统提示」按段展开（基座 / Cordis / 技能 / 工作流 / 人设 / 子代理 / 计划 / 目标）。**工具定义只含模型可见项**（`search_tool` / `use_tool` 等）。MCP extras 与 `register_deferred` 的本地工具 **不计入** `used`；点开只看目录。`search_tool` 返回的 schema 记在消息历史里直到压缩。技能与工作流 listing 已在系统提示里，图例行不把同一段再加进 `used`。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量。占用 live-lookup `"context"` |
-| `/compact [说明]` | 压缩旧对话为摘要（Grok 同款 structured `<summary>` 九段）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩（Grok `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`）；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制 |
+| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、**技能**、工作流、MCP、本地按需。点「系统提示」按段展开（基座 / Cordis / 技能 / 工作流 / 人设 / 子代理）。**工具定义只含模型可见项**（`search_tool` / `use_tool` 等）。MCP extras 与 `register_deferred` 的本地工具 **不计入** `used`；点开只看目录。`search_tool` 返回的 schema 记在消息历史里直到压缩。技能 listing 给模型看所以仍在系统提示正文里；图例单独占一行（标「已计入系统提示」），不把同一段再加进 `used`。工作流同理。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量。占用 live-lookup `"context"` |
+| `/compact [说明]` | 压缩旧对话为摘要发给模型（Grok 同款 structured `<summary>` 九段）。滚动区保留原对话，末尾加「已压缩上下文。」（Grok pager 是 SessionEvent，不擦 scrollback）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制 |
 | `/theme` `/t` | 切换配色 |
 | `/timestamps` | 开关滚动区时间戳 |
 | `/effort` | 设置推理强度 |
@@ -56,7 +58,7 @@
 
 ## Agent 预设 YAML
 
-层（后者覆盖前者）：crate 内置 `code` / `minimal` / `cordis` / `warden`（`presets/<id>/agent.yml` + 可选 `agents/*.yml`）→ `~/.dock/presets/<id>/` → 项目 `.dock/presets/<id>/`。仍可读旧 `<id>.yml`；同名目录优先。**预设目录名**即模式 id（`[a-z0-9][a-z0-9-]*`）。也可以用内置模式的**显示名**做目录：项目 `.dock/presets/创造/agents/review.yml` 叠到 `cordis`，`编码/` 叠到 `code`，`守望/` 叠到 `warden`。子代理文件名是 `subagent_type`（ascii 或汉字，如守望的 `甲`）。**新建模式默认写当前工作区** `.dock/presets/<id>/agent.yml`（`/preset` `n`/`d` 有项目层时落到这里；系统提示注入 `{cwd}/.dock/presets` 的绝对路径）。**新建人设默认写** `.dock/presets/<当前模式 id>/agents/`。`/cd` 或 `/preset` 切换后下一轮系统提示更新路径；同模式同 cwd 下前缀保持不变以免打掉 prompt cache。空名册（新建模式、`minimal`）仍注入写路径。只有用户明确要求保存到全局才写 `~/.dock/presets/`。写完人设后当前会话生效（`subagent` 校验立刻重读；本轮 enum 用 `subagent` 的 `reload_roster: true` 刷新）；新建模式写完后用 `/preset` 应用该 id。改 crate 内置 `presets/` 要重新编译。`/preset` 打开时也会重读。`warden`（守望）主代理只调度，子代理见 `agents/`。
+层（后者覆盖前者）：crate 内置 `code` / `minimal` / `cordis` / `warden`（`presets/<id>/agent.yml` + 可选 `agents/*.yml`）→ `~/.dock/presets/<id>/` → 项目 `.dock/presets/<id>/`。仍可读旧 `<id>.yml`；同名目录优先。**预设目录名**即模式 id（`[a-z0-9][a-z0-9-]*`）。也可以用内置模式的**显示名**做目录：项目 `.dock/presets/创造/agents/review.yml` 叠到 `cordis`，`编码/` 叠到 `code`，`守望/` 叠到 `warden`。子代理文件名是 `subagent_type`（ascii 或汉字，如守望的 `甲`）。**新建模式默认写当前工作区** `.dock/presets/<id>/agent.yml`（`/preset` `n`/`d` 有项目层时落到这里；系统提示注入 `.dock/presets` 与 `.dock/presets/<模式>/agents`，不用绝对 `{cwd}`）。**新建人设默认写** `.dock/presets/<当前模式 id>/agents/`。`/preset` 切换后下一轮系统提示更新模式目录后缀；`/cd` 不再改写这些路径以免打掉 prompt cache。空名册（新建模式、`minimal`）仍注入写路径。只有用户明确要求保存到全局才写 `~/.dock/presets/`。写完人设后当前会话生效（`subagent` 校验立刻重读；本轮 enum 用 `subagent` 的 `reload_roster: true` 刷新）；新建模式写完后用 `/preset` 应用该 id。改 crate 内置 `presets/` 要重新编译。`/preset` 打开时也会重读。`warden`（守望）主代理只调度，子代理见 `agents/`。
 
 ```yaml
 # <repo>/.dock/presets/review/agent.yml
@@ -107,7 +109,7 @@ order: 10
 抄 Grok `UsageLedger` + `session_usage_block_text`，不接 `x.ai/billing`。
 
 - 只把 SSE **官方** `usage` 折进账本（`prompt_tokens_details.cached_tokens`，缺省再认 `prompt_cache_hit_tokens` / `cache_read_input_tokens`；思考认 `completion_tokens_details.reasoning_tokens`）。开转前的本地估算只更新顶栏占用，不入账（Grok fail-closed：缺费用 ≠ 免费）。
-- **缓存占比** = 缓存命中 / 完整输入（Grok：`cached_prompt_tokens` 是 `prompt_tokens` 的子集，不要相减）。会话累计用总量相除，不是各轮百分比再平均。超过 100% 钳到 100%；输入为 0 显示 `-`。格式抄 Grok `/context` 的 `percent_of_window`（不足 10% 一位小数，否则整数）。
+- **缓存占比** = 缓存命中 / 完整输入（Grok：`cached_prompt_tokens` 是 `prompt_tokens` 的子集，不要相减）。会话累计用总量相除，不是各轮百分比再平均。另显示 **上一轮命中**（最近一次主循环调用）。超过 100% 钳到 100%；输入为 0 显示 `-`。格式抄 Grok `/context` 的 `percent_of_window`（不足 10% 一位小数，否则整数）。
 - 主循环每次 `finish_llm` 记一笔；子代理 isolate 结束时 `record_subagent` 折进父会话，不增加 `numTurns`。
 - `/new` / `clear` / `/resume` 清零账本。
 
@@ -119,4 +121,4 @@ order: 10
 - 一轮采样安全上限 256 步（Grok 默认不限 `max_turns`）；撞上限时滚动区留下说明，而不是静默停
 - 提问 overlay：有 Other，自由输入比 Grok pager 简单
 - `/usage`：占用 + 用量两 tab；无 grok.com 账号额度条、无 Session info
-- `/compact`：Grok full-replace 一轮（structured 九段摘要 + 85% 自动）；无 two-pass / segments / transcript 落盘
+- `/compact`：Grok full-replace 一轮（structured 九段摘要 + 85% 自动；只换发给模型的历史，滚动区不擦）。无 two-pass / segments / `updates.jsonl` 旁路；模型前缀落 `compact.json`

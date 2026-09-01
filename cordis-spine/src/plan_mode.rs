@@ -13,11 +13,10 @@ use std::sync::Mutex;
 use cordis::{plugin, Context, Inject, Plugin};
 use tokio::sync::oneshot;
 
-use crate::context_book::{own_sections, ContextBook};
-use crate::names::{CONTEXT, PLAN_EVENT, PLAN_MODE, TOOLS};
-use crate::prompt::ORDER_PLAN;
+use crate::names::{PLAN_EVENT, PLAN_MODE, PRE_STEP, SESSIONS, TOOLS};
+use crate::session::Sessions;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 pub const PLAN_REL: &str = ".dock/plan.md";
 
@@ -53,10 +52,17 @@ struct PendingApproval {
     tx: oneshot::Sender<PlanDecision>,
 }
 
+struct ModeState {
+    phase: PlanPhase,
+    reminder_count: u32,
+    pending_exit_reminder: bool,
+    was_previously_active: bool,
+}
+
 /// Named `"planMode"` service. Live-lookup; do not capture the Arc.
 pub struct PlanMode {
     ctx: Context,
-    phase: Mutex<PlanPhase>,
+    mode: Mutex<ModeState>,
     approval: Mutex<Option<PendingApproval>>,
     last_decision: Mutex<Option<PlanDecision>>,
 }
@@ -65,14 +71,19 @@ impl PlanMode {
     pub fn new(ctx: Context) -> Self {
         Self {
             ctx,
-            phase: Mutex::new(PlanPhase::Inactive),
+            mode: Mutex::new(ModeState {
+                phase: PlanPhase::Inactive,
+                reminder_count: 0,
+                pending_exit_reminder: false,
+                was_previously_active: false,
+            }),
             approval: Mutex::new(None),
             last_decision: Mutex::new(None),
         }
     }
 
     pub fn phase(&self) -> PlanPhase {
-        *self.phase.lock().unwrap()
+        self.mode.lock().unwrap().phase
     }
 
     /// Chrome chip / Shift+Tab: any non-inactive phase, or parked approval.
@@ -99,22 +110,31 @@ impl PlanMode {
 
     /// User toggle / `/plan` without description.
     pub fn enter_pending(&self) {
-        let mut phase = self.phase.lock().unwrap();
-        if *phase == PlanPhase::Inactive {
-            *phase = PlanPhase::Pending;
+        let mut mode = self.mode.lock().unwrap();
+        if mode.phase == PlanPhase::Inactive {
+            mode.phase = PlanPhase::Pending;
+            mode.pending_exit_reminder = false;
         }
     }
 
     /// `enter_plan_mode` tool or `/plan <desc>`.
     pub fn enter_active(&self) {
-        *self.phase.lock().unwrap() = PlanPhase::Active;
+        let mut mode = self.mode.lock().unwrap();
+        if mode.phase != PlanPhase::Active {
+            mode.reminder_count = 0;
+        }
+        mode.phase = PlanPhase::Active;
+        mode.was_previously_active = true;
+        mode.pending_exit_reminder = false;
     }
 
-    /// Promote Pending → Active on first prompt assemble.
+    /// Promote Pending → Active on first turn `agent/pre-step`.
     pub fn promote_pending(&self) {
-        let mut phase = self.phase.lock().unwrap();
-        if *phase == PlanPhase::Pending {
-            *phase = PlanPhase::Active;
+        let mut mode = self.mode.lock().unwrap();
+        if mode.phase == PlanPhase::Pending {
+            mode.phase = PlanPhase::Active;
+            mode.was_previously_active = true;
+            mode.reminder_count = 0;
         }
     }
 
@@ -142,7 +162,15 @@ impl PlanMode {
         if let Some(pending) = self.approval.lock().unwrap().take() {
             let _ = pending.tx.send(PlanDecision::Quit);
         }
-        *self.phase.lock().unwrap() = PlanPhase::Inactive;
+        {
+            let mut mode = self.mode.lock().unwrap();
+            let leaving = mode.phase != PlanPhase::Inactive;
+            mode.phase = PlanPhase::Inactive;
+            if leaving {
+                mode.pending_exit_reminder = true;
+                mode.was_previously_active = true;
+            }
+        }
         self.ctx.emit(PLAN_EVENT, ());
     }
 
@@ -159,10 +187,15 @@ impl PlanMode {
         };
         match decision {
             PlanDecision::Approve | PlanDecision::Quit => {
-                *self.phase.lock().unwrap() = PlanPhase::Inactive;
+                let mut mode = self.mode.lock().unwrap();
+                mode.phase = PlanPhase::Inactive;
+                mode.pending_exit_reminder = true;
+                mode.was_previously_active = true;
             }
             PlanDecision::Revise => {
-                *self.phase.lock().unwrap() = PlanPhase::Active;
+                let mut mode = self.mode.lock().unwrap();
+                mode.phase = PlanPhase::Active;
+                mode.was_previously_active = true;
             }
         }
         *self.last_decision.lock().unwrap() = Some(decision);
@@ -189,9 +222,63 @@ impl PlanMode {
             });
         }
         // Stay Active while parked so the gate remains.
-        *self.phase.lock().unwrap() = PlanPhase::Active;
+        {
+            let mut mode = self.mode.lock().unwrap();
+            mode.phase = PlanPhase::Active;
+            mode.was_previously_active = true;
+        }
         self.ctx.emit(PLAN_EVENT, ());
         rx.await.unwrap_or(PlanDecision::Quit)
+    }
+
+    /// Grok `inject_plan_mode_reminders`: append at the history tail so the
+    /// system-prompt prefix stays byte-stable for provider cache.
+    fn inject_turn_reminder(&self) {
+        let Some(body) = self.take_reminder_body() else {
+            return;
+        };
+        let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) else {
+            return;
+        };
+        sessions.append(LogEvent::SystemReminder(wrap_plan_reminder(&body)));
+    }
+
+    fn take_reminder_body(&self) -> Option<String> {
+        let awaiting = self.approval.lock().unwrap().is_some();
+        let mut mode = self.mode.lock().unwrap();
+        if mode.phase == PlanPhase::Pending {
+            let reentry = mode.was_previously_active;
+            mode.phase = PlanPhase::Active;
+            mode.was_previously_active = true;
+            mode.reminder_count = 1;
+            return Some(
+                if reentry {
+                    plan_reentry_addon()
+                } else {
+                    plan_system_addon()
+                }
+                .to_string(),
+            );
+        }
+        if mode.phase == PlanPhase::Active || awaiting {
+            if mode.phase == PlanPhase::Active {
+                let full = mode.reminder_count.is_multiple_of(2);
+                mode.reminder_count = mode.reminder_count.saturating_add(1);
+                return Some(
+                    if full {
+                        plan_system_addon()
+                    } else {
+                        plan_sparse_addon()
+                    }
+                    .to_string(),
+                );
+            }
+        }
+        if mode.pending_exit_reminder {
+            mode.pending_exit_reminder = false;
+            return Some(plan_exit_addon().to_string());
+        }
+        None
     }
 
     /// Disk snapshot for `/view-plan` when nothing is parked.
@@ -245,40 +332,34 @@ fn path_targets_plan_file(path: &str) -> bool {
 }
 
 pub fn plan_mode() -> Plugin {
-    plugin(
-        "plan-mode",
-        Inject::from([TOOLS, CONTEXT]),
-        |ctx, _: &()| {
-            ctx.provide(PLAN_MODE, PlanMode::new(ctx.clone()))?;
-            let book = ctx.require::<ContextBook>(CONTEXT)?;
-            own_sections(
-                ctx,
-                vec![book.section(ORDER_PLAN, "plan", |exec| {
-                    let plan = exec.get::<PlanMode>(PLAN_MODE)?;
-                    plan.promote_pending();
-                    if plan.gated() {
-                        Some(plan_system_addon().to_string())
-                    } else {
-                        None
-                    }
-                })?],
-            )?;
-            let tools = ctx.require::<Tools>(TOOLS)?;
-            let enter: ToolBody = {
+    plugin("plan-mode", Inject::from([TOOLS]), |ctx, _: &()| {
+        ctx.provide(PLAN_MODE, PlanMode::new(ctx.clone()))?;
+        let ctx_pre = ctx.clone();
+        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+            let next = args.next::<PreStep>().unwrap_or(step);
+            if next.enter {
+                if let Some(plan) = ctx_pre.get::<PlanMode>(PLAN_MODE) {
+                    plan.inject_turn_reminder();
+                }
+            }
+            next
+        });
+        let tools = ctx.require::<Tools>(TOOLS)?;
+        let enter: ToolBody = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move |call| {
                 let ctx = ctx.clone();
-                std::sync::Arc::new(move |call| {
-                    let ctx = ctx.clone();
-                    Box::pin(async move { enter_plan(&ctx, call) })
-                })
-            };
-            let exit: ToolBody = {
+                Box::pin(async move { enter_plan(&ctx, call) })
+            })
+        };
+        let exit: ToolBody = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move |call| {
                 let ctx = ctx.clone();
-                std::sync::Arc::new(move |call| {
-                    let ctx = ctx.clone();
-                    Box::pin(async move { exit_plan(&ctx, call).await })
-                })
-            };
-            own_registered(
+                Box::pin(async move { exit_plan(&ctx, call).await })
+            })
+        };
+        own_registered(
                 ctx,
                 vec![
                     tools.register(
@@ -299,9 +380,8 @@ pub fn plan_mode() -> Plugin {
                     )?,
                 ],
             )?;
-            Ok(None)
-        },
-    )
+        Ok(None)
+    })
 }
 
 fn plan_path() -> PathBuf {
@@ -335,13 +415,30 @@ fn probe_or_create(path: &Path) -> Seed {
     }
 }
 
-/// 计划模式打开时追加到 system prompt（Grok `plan_mode_reminder_full_template` 中文）。
+/// 计划模式打开时追加到 history 尾部（Grok `plan_mode_reminder_full_template` 中文）。
 pub fn plan_system_addon() -> &'static str {
     "计划模式已开启。除计划文件外，不要改文件或跑会改环境的命令。\n\n\
      计划写到 `.dock/plan.md`。这是唯一允许编辑的文件。\n\
      若文件还不存在，先调用 enter_plan_mode 创建。\n\n\
      只读探索代码并写出实现计划。需要澄清时用 ask_user_question。\
      准备好后用 exit_plan_mode 把计划交给用户。"
+}
+
+fn plan_sparse_addon() -> &'static str {
+    "计划模式仍开启。除计划文件外，不要改文件或跑会改环境的命令。"
+}
+
+fn plan_exit_addon() -> &'static str {
+    "已退出计划模式。现在可以改文件、跑工具。"
+}
+
+fn plan_reentry_addon() -> &'static str {
+    "再次进入计划模式。先前的计划在 `.dock/plan.md`。除该文件外不要改文件。\
+     准备好后用 exit_plan_mode 把计划交给用户。"
+}
+
+fn wrap_plan_reminder(body: &str) -> String {
+    format!("<system-reminder>\n{body}\n</system-reminder>")
 }
 
 /// 斜杠 `/plan` 注入给模型的说明（工具名保持英文）。
@@ -469,6 +566,21 @@ mod tests {
         assert!(!plan.gated());
         plan.promote_pending();
         assert!(plan.gated());
+    }
+
+    #[test]
+    fn reminder_alternates_full_then_sparse() {
+        let ctx = Context::new();
+        let plan = PlanMode::new(ctx);
+        plan.enter_pending();
+        let first = plan.take_reminder_body().expect("activation");
+        assert!(first.contains("计划模式已开启"), "{first}");
+        assert!(first.contains("exit_plan_mode"), "{first}");
+        let second = plan.take_reminder_body().expect("per-turn");
+        assert!(second.contains("计划模式仍开启"), "{second}");
+        plan.exit_now();
+        let exit = plan.take_reminder_body().expect("exit");
+        assert!(exit.contains("已退出计划模式"), "{exit}");
     }
 
     #[test]

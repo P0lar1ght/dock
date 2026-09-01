@@ -1,0 +1,617 @@
+//! Grok-shaped session folders under `$DOCK_HOME/sessions/<cwd-key>/<id>/`.
+//!
+//! Each session is `meta.json` + `chat_history.jsonl` (+ optional `compact.json`
+//! so resume keeps the sampler prefix while the pager transcript stays full).
+//! Fail-open: IO errors leave the in-memory log alone. Usage ledgers stay out
+//! of these files (Grok: a new process resume starts a fresh `/usage` book).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::dock_home;
+use crate::session::ArchivedSession;
+use crate::types::{LlmOutput, LogEvent, ToolCall};
+
+const HISTORY: &str = "chat_history.jsonl";
+const META: &str = "meta.json";
+const COMPACT: &str = "compact.json";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MetaFile {
+    id: String,
+    title: String,
+    cwd: String,
+    #[serde(default)]
+    updated_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CompactFile {
+    from: usize,
+    prefix: Vec<WireEvent>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HistoryLine {
+    ts: u64,
+    #[serde(flatten)]
+    event: WireEvent,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum WireEvent {
+    User {
+        text: String,
+    },
+    PreStep,
+    Prompt {
+        text: String,
+    },
+    #[serde(rename = "system-reminder")]
+    SystemReminder {
+        text: String,
+    },
+    Llm {
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        reasoning: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<WireToolCall>,
+    },
+    Tool {
+        id: String,
+        name: String,
+        #[serde(default)]
+        arguments: String,
+        #[serde(default)]
+        content: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireToolCall {
+    id: String,
+    name: String,
+    #[serde(default)]
+    arguments: String,
+}
+
+pub fn new_id() -> String {
+    uuid::Uuid::now_v7().simple().to_string()
+}
+
+/// Grok `encode_cwd_dirname`: one path segment, reversible enough via `meta.cwd`.
+pub fn encode_cwd_dirname(cwd: &Path) -> String {
+    let raw = cwd.to_string_lossy();
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '/' | '\\' | ':' => out.push('-'),
+            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' => out.push(c),
+            _ => out.push('-'),
+        }
+    }
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "workspace".into()
+    } else {
+        out
+    }
+}
+
+pub fn sessions_cwd_dir(cwd: &Path) -> PathBuf {
+    dock_home().join("sessions").join(encode_cwd_dirname(cwd))
+}
+
+pub fn save(item: &ArchivedSession, cwd: &Path) -> std::io::Result<()> {
+    if item.id.trim().is_empty() || item.events.is_empty() {
+        return Ok(());
+    }
+    let dir = sessions_cwd_dir(cwd).join(&item.id);
+    fs::create_dir_all(&dir)?;
+    let updated = item.times.last().copied().unwrap_or_else(SystemTime::now);
+    let meta = MetaFile {
+        id: item.id.clone(),
+        title: item.title.clone(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        updated_unix: unix(updated),
+    };
+    atomic_write(
+        &dir.join(META),
+        serde_json::to_vec_pretty(&meta).unwrap_or_default(),
+    )?;
+    let mut body = String::new();
+    let now = SystemTime::now();
+    for (i, event) in item.events.iter().enumerate() {
+        let ts = unix(item.times.get(i).copied().unwrap_or(now));
+        if let Some(wire) = to_wire(event) {
+            let line = HistoryLine { ts, event: wire };
+            if let Ok(json) = serde_json::to_string(&line) {
+                body.push_str(&json);
+                body.push('\n');
+            }
+        }
+    }
+    atomic_write(&dir.join(HISTORY), body.into_bytes())?;
+    save_compact(&dir, item);
+    Ok(())
+}
+
+pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
+    let path = sessions_cwd_dir(cwd).join(id).join(META);
+    let mut meta = match fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str::<MetaFile>(&raw).unwrap_or(MetaFile {
+            id: id.into(),
+            title: String::new(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            updated_unix: unix(SystemTime::now()),
+        }),
+        Err(_) => MetaFile {
+            id: id.into(),
+            title: String::new(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            updated_unix: unix(SystemTime::now()),
+        },
+    };
+    meta.title = title.into();
+    meta.updated_unix = unix(SystemTime::now());
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    atomic_write(&path, serde_json::to_vec_pretty(&meta).unwrap_or_default())
+}
+
+pub fn remove(id: &str, cwd: &Path) -> std::io::Result<()> {
+    let dir = sessions_cwd_dir(cwd).join(id);
+    if dir.is_dir() {
+        fs::remove_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+pub fn load_cwd(cwd: &Path) -> Vec<ArchivedSession> {
+    let root = sessions_cwd_dir(cwd);
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(u64, ArchivedSession)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_dir() {
+                return None;
+            }
+            load_one(&path)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.id.cmp(&a.1.id)));
+    rows.into_iter().map(|(_, s)| s).collect()
+}
+
+fn load_one(dir: &Path) -> Option<(u64, ArchivedSession)> {
+    let id = dir.file_name()?.to_string_lossy().into_owned();
+    if id.starts_with('.') {
+        return None;
+    }
+    let meta_raw = fs::read_to_string(dir.join(META)).ok();
+    let meta: Option<MetaFile> = meta_raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let history = fs::read_to_string(dir.join(HISTORY)).unwrap_or_default();
+    let mut events = Vec::new();
+    let mut times = Vec::new();
+    for line in history.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<HistoryLine>(line) else {
+            continue;
+        };
+        events.push(from_wire(row.event));
+        times.push(from_unix(row.ts));
+    }
+    if events.is_empty() {
+        return None;
+    }
+    let (compact_prefix, compact_from) = load_compact(dir, events.len());
+    let title = meta
+        .as_ref()
+        .map(|m| m.title.clone())
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| first_user_title(&events))
+        .unwrap_or_else(|| id.clone());
+    let updated = meta
+        .as_ref()
+        .map(|m| m.updated_unix)
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| times.last().map(|t| unix(*t)).unwrap_or(0));
+    Some((
+        updated,
+        ArchivedSession {
+            id: meta
+                .as_ref()
+                .map(|m| m.id.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(id),
+            title,
+            events,
+            times,
+            compact_prefix,
+            compact_from,
+        },
+    ))
+}
+
+fn save_compact(dir: &Path, item: &ArchivedSession) {
+    let path = dir.join(COMPACT);
+    match &item.compact_prefix {
+        Some(prefix) if !prefix.is_empty() => {
+            let file = CompactFile {
+                from: item.compact_from,
+                prefix: prefix.iter().filter_map(to_wire).collect(),
+            };
+            if let Ok(bytes) = serde_json::to_vec_pretty(&file) {
+                let _ = atomic_write(&path, bytes);
+            }
+        }
+        _ => {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn load_compact(dir: &Path, event_len: usize) -> (Option<Vec<LogEvent>>, usize) {
+    let Ok(raw) = fs::read_to_string(dir.join(COMPACT)) else {
+        return (None, 0);
+    };
+    let Ok(file) = serde_json::from_str::<CompactFile>(&raw) else {
+        return (None, 0);
+    };
+    if file.prefix.is_empty() {
+        return (None, 0);
+    }
+    let prefix: Vec<LogEvent> = file.prefix.into_iter().map(from_wire).collect();
+    (Some(prefix), file.from.min(event_len))
+}
+
+fn first_user_title(events: &[LogEvent]) -> Option<String> {
+    events.iter().find_map(|e| match e {
+        LogEvent::User(text) => {
+            let t = text.trim();
+            (!t.is_empty()).then(|| t.chars().take(40).collect())
+        }
+        _ => None,
+    })
+}
+
+fn to_wire(event: &LogEvent) -> Option<WireEvent> {
+    Some(match event {
+        LogEvent::User(text) => WireEvent::User { text: text.clone() },
+        LogEvent::PreStep => WireEvent::PreStep,
+        LogEvent::Prompt(text) => WireEvent::Prompt { text: text.clone() },
+        LogEvent::SystemReminder(text) => WireEvent::SystemReminder { text: text.clone() },
+        LogEvent::LlmStream(out) => WireEvent::Llm {
+            text: out.text.clone(),
+            reasoning: out.reasoning.clone(),
+            reasoning_ms: out.reasoning_ms,
+            tool_calls: out
+                .tool_calls
+                .iter()
+                .map(|c| WireToolCall {
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                    arguments: c.arguments.clone(),
+                })
+                .collect(),
+        },
+        LogEvent::ToolExecute {
+            id,
+            name,
+            arguments,
+            content,
+        } => WireEvent::Tool {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
+            content: content.clone(),
+        },
+    })
+}
+
+fn from_wire(event: WireEvent) -> LogEvent {
+    match event {
+        WireEvent::User { text } => LogEvent::User(text),
+        WireEvent::PreStep => LogEvent::PreStep,
+        WireEvent::Prompt { text } => LogEvent::Prompt(text),
+        WireEvent::SystemReminder { text } => LogEvent::SystemReminder(text),
+        WireEvent::Llm {
+            text,
+            reasoning,
+            reasoning_ms,
+            tool_calls,
+        } => LogEvent::LlmStream(LlmOutput {
+            text,
+            reasoning,
+            reasoning_ms,
+            tool_calls: tool_calls
+                .into_iter()
+                .map(|c| ToolCall {
+                    id: c.id,
+                    name: c.name,
+                    arguments: c.arguments,
+                })
+                .collect(),
+        }),
+        WireEvent::Tool {
+            id,
+            name,
+            arguments,
+            content,
+        } => LogEvent::ToolExecute {
+            id,
+            name,
+            arguments,
+            content,
+        },
+    }
+}
+
+fn unix(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn from_unix(secs: u64) -> SystemTime {
+    UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
+fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(tmp, path)
+}
+
+pub fn empty_llm_placeholder(events: &[LogEvent]) -> bool {
+    matches!(
+        events.last(),
+        Some(LogEvent::LlmStream(out))
+            if out.text.is_empty() && out.reasoning.is_empty() && out.tool_calls.is_empty()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::ArchivedSession;
+    use crate::types::LogEvent;
+    use std::sync::{Mutex, MutexGuard};
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("DOCK_HOME", v),
+                None => std::env::remove_var("DOCK_HOME"),
+            }
+        }
+    }
+
+    fn lock_home() -> HomeGuard {
+        let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("DOCK_HOME");
+        std::env::set_var("DOCK_HOME", dir.path());
+        HomeGuard {
+            prev,
+            _lock: lock,
+            _dir: dir,
+        }
+    }
+
+    #[test]
+    fn encode_collapses_path_separators() {
+        let p = Path::new("/Users/polar/Desktop/AILab/dock");
+        let enc = encode_cwd_dirname(p);
+        assert!(enc.starts_with("Users-polar"), "{enc}");
+        assert!(!enc.contains('/'), "{enc}");
+    }
+
+    #[test]
+    fn roundtrip_user_and_tool() {
+        let _home = lock_home();
+        let cwd = Path::new("/tmp/dock-persist-test");
+        let item = ArchivedSession {
+            id: "abc123".into(),
+            title: "hello persist".into(),
+            events: vec![
+                LogEvent::User("hello persist".into()),
+                LogEvent::ToolExecute {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{\"cmd\":\"pwd\"}".into(),
+                    content: "/tmp".into(),
+                },
+            ],
+            times: vec![SystemTime::now(), SystemTime::now()],
+            compact_prefix: None,
+            compact_from: 0,
+        };
+        save(&item, cwd).unwrap();
+        let loaded = load_cwd(cwd);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "abc123");
+        assert_eq!(loaded[0].title, "hello persist");
+        assert_eq!(loaded[0].events, item.events);
+        remove("abc123", cwd).unwrap();
+        assert!(load_cwd(cwd).is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_disk_reloads_archived_session() {
+        let _home = lock_home();
+        let sessions = crate::session::Sessions::new(cordis::Context::new());
+        sessions.attach_disk();
+        sessions.append(LogEvent::User("disk hello".into()));
+        let id = sessions
+            .archive_current()
+            .expect("archive writes a folder")
+            .id;
+        let again = crate::session::Sessions::new(cordis::Context::new());
+        again.attach_disk();
+        assert!(
+            again.archived().iter().any(|s| s.id == id),
+            "{:?}",
+            again
+                .archived()
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(again.restore(&id));
+        assert!(matches!(
+            again.events().first(),
+            Some(LogEvent::User(t)) if t == "disk hello"
+        ));
+    }
+
+    fn reload() -> crate::session::Sessions {
+        let sessions = crate::session::Sessions::new(cordis::Context::new());
+        sessions.attach_disk();
+        sessions
+    }
+
+    #[tokio::test]
+    async fn clear_drops_live_folder_so_attach_disk_does_not_resurrect() {
+        let _home = lock_home();
+        let sessions = reload();
+        sessions.append(LogEvent::User("gone after clear".into()));
+        sessions.clear();
+        let again = reload();
+        assert!(
+            again.archived().is_empty(),
+            "clear must delete the live folder, got {:?}",
+            again
+                .archived()
+                .iter()
+                .map(|s| s.title.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn rewind_persists_truncated_log() {
+        let _home = lock_home();
+        let sessions = reload();
+        sessions.append(LogEvent::User("keep".into()));
+        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+            text: "reply".into(),
+            ..crate::types::LlmOutput::default()
+        }));
+        sessions.append(LogEvent::User("undo me".into()));
+        sessions.begin_llm();
+        sessions
+            .rewind_inflight_user()
+            .expect("no-output user rewinds");
+        let again = reload();
+        let item = again.archived().into_iter().next().expect("rewound live");
+        assert!(again.restore(&item.id));
+        let events = again.events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LogEvent::User(t) if t == "undo me")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn seal_persists_interrupted_tool_stub() {
+        let _home = lock_home();
+        let sessions = reload();
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+            tool_calls: vec![crate::types::ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }],
+            ..crate::types::LlmOutput::default()
+        }));
+        sessions.seal_incomplete_tool_calls();
+        let again = reload();
+        let item = again.archived().into_iter().next().expect("sealed live");
+        assert!(again.restore(&item.id));
+        assert!(
+            again.events().iter().any(|e| matches!(
+                e,
+                LogEvent::ToolExecute { content, .. }
+                    if content == crate::types::INTERRUPTED_TOOL_RESULT
+            )),
+            "{:?}",
+            again.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_keeps_transcript_and_restores_model_prefix() {
+        let _home = lock_home();
+        let sessions = reload();
+        sessions.append(LogEvent::User("keep visible".into()));
+        sessions.append(LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            content: "full tool body".into(),
+        });
+        sessions.replace_compacted(vec![
+            LogEvent::User("keep visible".into()),
+            LogEvent::SystemReminder("compacted earlier turns".into()),
+            LogEvent::LlmStream(crate::types::LlmOutput {
+                text: crate::types::COMPACT_NOTICE.into(),
+                ..crate::types::LlmOutput::default()
+            }),
+        ]);
+        let id = sessions
+            .archive_current()
+            .expect("archive writes a folder")
+            .id;
+        let again = reload();
+        assert!(again.restore(&id));
+        assert!(
+            again.events().iter().any(|e| matches!(
+                e,
+                LogEvent::ToolExecute { content, .. } if content.contains("full tool body")
+            )),
+            "resume must keep the pager transcript: {:?}",
+            again.events()
+        );
+        assert!(!again.model_history().iter().any(|e| matches!(
+            e,
+            LogEvent::ToolExecute { content, .. } if content.contains("full tool body")
+        )));
+        assert!(again.model_history().iter().any(|e| matches!(
+            e,
+            LogEvent::SystemReminder(t) if t.contains("compacted earlier")
+        )));
+    }
+}

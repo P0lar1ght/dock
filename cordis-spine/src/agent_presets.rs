@@ -214,14 +214,14 @@ struct Inner {
     persist: bool,
 }
 
-/// Byte-stable write paths while cwd + mode stay the same (prompt-cache prefix).
+/// Write-path hints for the system prompt. Workspace-relative so a `/cd`
+/// or different machine does not rewrite the prefix (provider prompt cache).
 #[derive(Clone)]
 struct WriteHintSnap {
-    cwd: PathBuf,
     mode: String,
-    /// `{cwd}/.dock/presets` — stable across mode switches in the same workspace.
+    /// `.dock/presets`
     presets_dir: String,
-    /// `{cwd}/.dock/presets/{mode}/agents`
+    /// `.dock/presets/{mode}/agents`
     agents_dir: String,
 }
 
@@ -264,7 +264,7 @@ impl AgentPresets {
     }
 
     /// `/cd`: point the project overlay at the new workspace and drop the
-    /// write-path cache so the next assemble injects the new absolute dir.
+    /// write-path cache so the next assemble picks up the new mode dir.
     pub fn set_workspace_root(&self, cwd: &Path) {
         {
             let mut inner = self.inner.lock().unwrap();
@@ -634,44 +634,31 @@ impl AgentPresets {
         )
     }
 
-    /// Absolute `{cwd}/.dock/presets` for the live workspace.
-    /// Same cache key as [`Self::workspace_agents_dir`] (cwd + mode).
+    /// Workspace-relative `.dock/presets` (not an absolute `{cwd}/…` path).
+    /// Same cache key as [`Self::workspace_agents_dir`] (current mode).
     pub fn workspace_presets_dir(&self) -> String {
         self.write_hint_snap().presets_dir
     }
 
-    /// Absolute `{cwd}/.dock/presets/{mode}/agents` for the live workspace.
-    /// Cached while cwd + mode are unchanged so the system prefix stays
-    /// byte-identical across samples (provider prompt cache).
+    /// Workspace-relative `.dock/presets/{mode}/agents`.
     pub fn workspace_agents_dir(&self) -> String {
         self.write_hint_snap().agents_dir
     }
 
     fn write_hint_snap(&self) -> WriteHintSnap {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let mode = self.current_id();
         {
             let snap = self.write_hint.lock().unwrap();
             if let Some(s) = snap.as_ref() {
-                if s.cwd == cwd && s.mode == mode {
+                if s.mode == mode {
                     return s.clone();
                 }
             }
         }
-        let root = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
-        let presets_dir = root.join(".dock").join("presets").display().to_string();
-        let agents_dir = root
-            .join(".dock")
-            .join("presets")
-            .join(&mode)
-            .join(AGENTS_DIR)
-            .display()
-            .to_string();
         let snap = WriteHintSnap {
-            cwd,
-            mode,
-            presets_dir,
-            agents_dir,
+            mode: mode.clone(),
+            presets_dir: ".dock/presets".into(),
+            agents_dir: format!(".dock/presets/{mode}/agents"),
         };
         *self.write_hint.lock().unwrap() = Some(snap.clone());
         snap
@@ -689,7 +676,7 @@ impl AgentPresets {
     fn new_role_write_hint(&self) -> String {
         let dir = self.workspace_agents_dir();
         let id = self.current_id();
-        format!("新建人设写到当前工作区绝对路径（当前模式 {id}，不要猜测）：{dir}/<type>.yml。")
+        format!("新建人设写到当前工作区（当前模式 {id}，不要猜测）：{dir}/<type>.yml。")
     }
 
     /// Re-read `agents/` and list callable `subagent_type` ids.
@@ -1929,16 +1916,14 @@ mod tests {
         assert!(assembled.contains("send_message"));
         assert!(assembled.contains("urgent"));
         assert!(assembled.contains("reload_roster"));
-        let cwd = std::env::current_dir().unwrap();
-        let root = cwd.canonicalize().unwrap_or(cwd);
-        let expect = root
-            .join(".dock")
-            .join("presets")
-            .join("code")
-            .join("agents");
         assert!(
-            assembled.contains(&expect.display().to_string()),
+            assembled.contains(".dock/presets/code/agents"),
             "{assembled}"
+        );
+        assert!(assembled.contains(".dock/presets"), "{assembled}");
+        assert!(
+            !assembled.contains(&std::env::current_dir().unwrap().display().to_string()),
+            "system prompt must not embed an absolute cwd: {assembled}"
         );
         assert!(assembled.contains("不要猜测"), "{assembled}");
         assert!(assembled.contains("全局"), "{assembled}");
@@ -1949,32 +1934,25 @@ mod tests {
         assert!(presets.subagent_role_hint().contains("reload_roster"));
         assert!(presets
             .subagent_role_hint()
-            .contains(&expect.display().to_string()));
+            .contains(".dock/presets/code/agents"));
     }
 
     #[test]
-    fn roster_hint_uses_live_workspace_path() {
+    fn roster_hint_uses_workspace_relative_path() {
         let dir = tempfile::tempdir().unwrap();
         let presets = AgentPresets::load(dir.path().to_path_buf());
         let mut assembled = String::new();
         presets.merge_subagent_roster(&mut assembled);
-        let cwd = std::env::current_dir().unwrap();
-        let root = cwd.canonicalize().unwrap_or(cwd);
-        let expect = root
-            .join(".dock")
-            .join("presets")
-            .join("code")
-            .join("agents");
         assert!(
-            assembled.contains(&expect.display().to_string()),
+            assembled.contains(".dock/presets/code/agents"),
             "{assembled}"
         );
         assert!(assembled.contains("当前模式 code"), "{assembled}");
         assert!(assembled.contains("新建 Agent 模式"), "{assembled}");
         assert!(assembled.contains("全局"), "{assembled}");
-        let presets_dir = root.join(".dock").join("presets");
+        assert!(assembled.contains(".dock/presets"), "{assembled}");
         assert!(
-            assembled.contains(&presets_dir.display().to_string()),
+            !assembled.contains(&std::env::current_dir().unwrap().display().to_string()),
             "{assembled}"
         );
     }
@@ -1986,20 +1964,13 @@ mod tests {
         let a = presets.workspace_agents_dir();
         let b = presets.workspace_agents_dir();
         assert_eq!(a, b);
-        assert!(
-            a.ends_with("/.dock/presets/code/agents")
-                || a.ends_with("\\.dock\\presets\\code\\agents"),
-            "{a}"
-        );
+        assert_eq!(a, ".dock/presets/code/agents");
         let presets_dir = presets.workspace_presets_dir();
+        assert_eq!(presets_dir, ".dock/presets");
         presets.apply(WARDEN_PRESET_ID).unwrap();
         let c = presets.workspace_agents_dir();
         assert_ne!(a, c);
-        assert!(
-            c.contains("/.dock/presets/warden/agents")
-                || c.contains("\\.dock\\presets\\warden\\agents"),
-            "{c}"
-        );
+        assert_eq!(c, ".dock/presets/warden/agents");
         assert_eq!(presets_dir, presets.workspace_presets_dir());
     }
 
@@ -2014,26 +1985,16 @@ mod tests {
         assert!(assembled.contains("当前模式尚无子代理"), "{assembled}");
         assert!(assembled.contains("新建 Agent 模式"), "{assembled}");
         assert!(assembled.contains("[a-z0-9]"), "{assembled}");
-        let cwd = std::env::current_dir().unwrap();
-        let root = cwd.canonicalize().unwrap_or(cwd);
-        let presets_dir = root.join(".dock").join("presets");
-        let agents_dir = presets_dir.join("minimal").join("agents");
+        assert!(assembled.contains(".dock/presets"), "{assembled}");
         assert!(
-            assembled.contains(&presets_dir.display().to_string()),
-            "{assembled}"
-        );
-        assert!(
-            assembled.contains(&agents_dir.display().to_string()),
+            assembled.contains(".dock/presets/minimal/agents"),
             "{assembled}"
         );
         assert!(assembled.contains("当前模式 minimal"), "{assembled}");
         assert!(presets.subagent_role_hint().contains("new Agent mode"));
         let report = presets.reload_roster_report();
         assert!(report.contains("empty roster"), "{report}");
-        assert!(
-            report.contains(&presets_dir.display().to_string()),
-            "{report}"
-        );
+        assert!(report.contains(".dock/presets"), "{report}");
     }
 
     #[test]

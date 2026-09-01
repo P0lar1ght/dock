@@ -30,6 +30,9 @@ struct SkillsInner {
     activated: HashSet<String>,
     extras: Vec<Disposable>,
     overlay: Option<Disposable>,
+    /// First rendered listing, frozen so window/activation changes do not
+    /// rewrite the system-prompt prefix (Grok never mutates system for skills).
+    frozen_listing: Option<String>,
 }
 
 /// Named `"skills"` service. Live-look at the call site.
@@ -51,6 +54,7 @@ impl Skills {
                 activated: HashSet::new(),
                 extras: Vec::new(),
                 overlay: None,
+                frozen_listing: None,
             })),
         };
         skills.sync_slash();
@@ -62,6 +66,12 @@ impl Skills {
     }
 
     pub fn listing_text(&self) -> String {
+        {
+            let inner = self.inner.lock().unwrap();
+            if let Some(frozen) = inner.frozen_listing.clone() {
+                return frozen;
+            }
+        }
         let window = self
             .ctx
             .get::<Sessions>(SESSIONS)
@@ -76,9 +86,14 @@ impl Skills {
                 })
             })
             .unwrap_or(128_000);
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(frozen) = inner.frozen_listing.clone() {
+            return frozen;
+        }
         let list = listable(&inner.catalog, &inner.activated);
-        render_listing(&list, listing_budget_chars(window))
+        let text = render_listing(&list, listing_budget_chars(window));
+        inner.frozen_listing = Some(text.clone());
+        text
     }
 
     pub fn occupancy_rows(&self) -> Vec<(String, u64, String)> {
@@ -195,20 +210,34 @@ impl Skills {
     }
 
     fn activate_for_paths(&self, paths: &[PathBuf]) {
-        let mut inner = self.inner.lock().unwrap();
-        let names: Vec<String> = inner
-            .catalog
-            .iter()
-            .filter(|skill| {
-                skill
-                    .paths
-                    .as_ref()
-                    .is_some_and(|patterns| discover::paths_gate_match(patterns, paths))
-            })
-            .map(|skill| skill.name.clone())
-            .collect();
-        for name in names {
-            inner.activated.insert(name);
+        let mut newly = Vec::new();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let names: Vec<String> = inner
+                .catalog
+                .iter()
+                .filter(|skill| {
+                    skill
+                        .paths
+                        .as_ref()
+                        .is_some_and(|patterns| discover::paths_gate_match(patterns, paths))
+                })
+                .map(|skill| skill.name.clone())
+                .collect();
+            for name in names {
+                if inner.activated.insert(name.clone()) {
+                    newly.push(name);
+                }
+            }
+        }
+        if newly.is_empty() {
+            return;
+        }
+        if let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) {
+            sessions.append(LogEvent::SystemReminder(format!(
+                "技能现已可用：{}。用 `/name` 或 skill 工具加载全文。",
+                newly.join("、")
+            )));
         }
     }
 
@@ -277,14 +306,14 @@ fn format_skill_block(skill: &SkillInfo, args: &str, body: &str) -> String {
         format!(
             "<skill name=\"{}\" path=\"{}\">\n{body}\n</skill>",
             skill.name,
-            skill.path.display()
+            skill.listing_path()
         )
     } else {
         format!(
             "<skill name=\"{}\" args=\"{}\" path=\"{}\">\n{body}\n</skill>",
             skill.name,
             args,
-            skill.path.display()
+            skill.listing_path()
         )
     }
 }
@@ -454,7 +483,7 @@ fn run_skill_tool(ctx: &Context, call: ToolCall) -> ToolResult {
         let hint = skills
             .catalog()
             .into_iter()
-            .map(|s| format!("{} ({})", s.name, s.path.display()))
+            .map(|s| format!("{} ({})", s.name, s.listing_path()))
             .take(8)
             .collect::<Vec<_>>()
             .join("\n");
@@ -532,9 +561,9 @@ mod tests {
     }
 
     #[test]
-    fn order_skills_sits_between_cordis_and_persona() {
-        assert!(ORDER_SKILLS > crate::prompt::ORDER_CORDIS);
-        assert!(ORDER_SKILLS < crate::prompt::ORDER_PERSONA);
+    fn order_skills_follows_roster() {
+        assert!(ORDER_SKILLS > crate::prompt::ORDER_ROSTER);
+        assert!(ORDER_SKILLS > crate::prompt::ORDER_WORKFLOWS);
     }
 
     #[tokio::test]
@@ -616,6 +645,13 @@ mod tests {
             .find(|c| c.label == "技能")
             .expect("技能 legend");
         assert!(extra.tokens > 0);
+        assert!(
+            extra
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("已计入系统提示")),
+            "{extra:?}"
+        );
         assert_eq!(
             snap.used,
             snap.system_prompt_tokens
@@ -632,6 +668,21 @@ mod tests {
                 .any(|r| r.label == "demo-skill"),
             "{detail:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn occupancy_lists_skills_category_when_catalog_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let _cwd = lock_cwd(dir.path());
+        let ctx = cordis::Context::new();
+        mount_skills(&ctx).await;
+        let snap = snapshot_context(&ctx);
+        let extra = snap
+            .categories
+            .iter()
+            .find(|c| c.label == "技能")
+            .expect("技能 legend even with empty catalog");
+        assert_eq!(extra.tokens, 0);
     }
 
     #[tokio::test]

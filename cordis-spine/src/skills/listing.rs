@@ -75,7 +75,7 @@ fn format_entry(skill: &SkillInfo, with_desc: bool) -> String {
             "- `{}` ({})\n  {}\n",
             skill.name,
             skill.scope.label(),
-            skill.path.display()
+            skill.listing_path()
         );
     }
     let mut desc = skill.description.clone();
@@ -92,7 +92,7 @@ fn format_entry(skill: &SkillInfo, with_desc: bool) -> String {
     if desc.chars().count() < MIN_DESC {
         desc = skill.name.clone();
     }
-    format!("- `{}` — {desc}\n  {}\n", skill.name, skill.path.display())
+    format!("- `{}` — {desc}\n  {}\n", skill.name, skill.listing_path())
 }
 
 pub fn overlay_body(skills: &[SkillInfo]) -> String {
@@ -112,7 +112,7 @@ pub fn overlay_body(skills: &[SkillInfo]) -> String {
             skill.scope.label(),
             skill.description
         ));
-        lines.push(format!("  {}", skill.path.display()));
+        lines.push(format!("  {}", skill.listing_path()));
     }
     lines.join("\n")
 }
@@ -165,5 +165,13 @@ mod tests {
         let list = listable(&skills, &activated);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "shown");
+    }
+
+    #[test]
+    fn listing_uses_generic_paths() {
+        let skill = sample("demo", "a reasonably long description for listing");
+        let text = render_listing(&[&skill], 800);
+        assert!(text.contains(".dock/skills/demo/SKILL.md"), "{text}");
+        assert!(!text.contains("/tmp/"), "{text}");
     }
 }

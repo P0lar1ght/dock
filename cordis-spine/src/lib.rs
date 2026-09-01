@@ -33,6 +33,7 @@ mod prompt;
 mod runtime;
 mod sched;
 mod session;
+mod session_persist;
 mod settings;
 mod skills;
 mod slash;
@@ -131,7 +132,7 @@ pub use tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
 pub use turn::{turn, TurnControl};
 pub use types::{
     LlmOutput, LogEvent, PreStep, PromptRequest, ToolCall, ToolResult, ToolSpec, TurnOutcome,
-    UserImage, INTERRUPTED_TOOL_RESULT,
+    UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
 };
 pub use usage::{session_usage_block_text, PromptUsage, UsageLedger};
 pub use web_fetch::tool_web;

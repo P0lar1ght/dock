@@ -163,7 +163,7 @@ flowchart LR
 
 `llm/stream` 是这一轮的枢纽：出工具调用就过 `tools/execute`（权限 / 计划门在这里挡）再回来，出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
 
-`system-prompt/assemble` 的载荷是 `PromptAssembly`。贡献插件 `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（对标 `"tools".register`，fiber dispose 注销）。`systemPrompt` 只做 facade：live-lookup `"context"` 求值，再跑 waterfall 供拦截。基座（`system-prompt.base`）只写身份与按需发现，不列工具名；persona/roster 来自 `agent-presets`，listing 来自 `skills` / `tool-workflow`，计划态来自 `plan-mode`，活跃目标来自 `tool-goal`，Cordis 只留短指针。`/context` 与顶栏 live-lookup `ContextBook.window()`，系统提示按段看 token。加/改一段提示词就是在贡献插件里登记，不动 assembler。
+`system-prompt/assemble` 的载荷是 `PromptAssembly`。贡献插件 `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（对标 `"tools".register`，fiber dispose 注销）。`systemPrompt` 只做 facade：live-lookup `"context"` 求值，再跑 waterfall 供拦截。基座（`system-prompt.base`）只写身份与按需发现，不列工具名；persona/roster 来自 `agent-presets`（写路径用 `.dock/presets`，不用绝对 `{cwd}`），listing 来自 `skills` / `tool-workflow`（同样用 `skills/`、`.dock/skills/`、`~/.dock/skills/` 这类通用路径）。计划 / 目标走历史尾部 `<system-reminder>`，不进系统提示。Cordis 只留短指针。`/context` 与顶栏 live-lookup `ContextBook.window()`，系统提示按段看 token。加/改一段提示词就是在贡献插件里登记，不动 assembler。
 
 ---
 
@@ -173,13 +173,15 @@ flowchart LR
 
 ```bash
 cargo run -p cordis-app
+cargo run -p cordis-app -- --resume          # 恢复本 cwd 最近一次会话
+cargo run -p cordis-app -- --resume <id>     # 恢复指定会话
 ```
 
 首次启动会全屏接管终端。浏览器 companion 在 TUI 里 `/pair` → Enter 开启回环网关后再打开宿主页。模型目录读 `~/.dock/config.toml`，再读项目 `.dock/config.toml`（后者覆盖）。样例：[`config.toml.example`](config.toml.example)。
 
 | 变量 | 作用 |
 |---|---|
-| `DOCK_HOME` | 用户配置目录，默认 `~/.dock` |
+| `DOCK_HOME` | 用户配置目录，默认 `~/.dock`（含 `sessions/<cwd>/` 对话 jsonl） |
 | `DOCK_MODEL` | 覆盖 `[models].default` |
 | `DOCK_API_KEY` / `DOCK_API_BASE` | 覆盖当前模型的 key / base URL |
 | `DOCK_GATEWAY_BIND` | 回环网关首选地址，默认 `127.0.0.1:18991`；`/pair` 开启时占用则换下一个端口 |

@@ -5,8 +5,9 @@
 //! this plugin. Display name `system-prompt.base`.
 //!
 //! The spine `"systemPrompt"` service is the assembler only. Persona / roster
-//! come from `agent-presets`, plan from `plan-mode`, goal from `tool-goal`,
-//! listings from `skills` / `tool-workflow`, the Cordis pointer from
+//! come from `agent-presets` (workspace-relative `.dock/presets` paths),
+//! listings from `skills` / `tool-workflow`. Plan / goal are history-tail
+//! reminders, not system sections. The Cordis pointer comes from
 //! `tool-cordis`. Tool how-to lives on `ToolSpec.description`, not here.
 
 use cordis::{plugin, Inject, Plugin};

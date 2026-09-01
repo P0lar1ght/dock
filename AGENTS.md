@@ -48,7 +48,7 @@ cd embed-sdk && npm install && npm run build
 
 | 层 | 例子 | ctx key |
 |---|---|---|
-| Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
+| Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名。`sessions` 在 `attach_disk` 后读写 `$DOCK_HOME/sessions/<cwd>/` |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
 | 其它 spine | `context` `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名。`context` 是 `ContextBook`：提示词分段 `section` / `set_base` / `replace_base`（fiber dispose 注销），占用 `window()` / `detail`。`systemPrompt.assemble` 与 `/context` 都 live-lookup 这张表。`agentPresets` 是 YAML 目录（内置 `code` / `minimal` / `cordis` / `warden` < `~/.dock/presets/<id>/` 或显示名目录如 `创造/` < 项目 `.dock/presets/<id>/`；旧 `<id>.yml` 仍可读）。新建模式默认落到项目层，细节见 [CLI.md](CLI.md)。`workflows` 是 Rhai：内置 `deep-research` + `{cwd}/.dock/workflows/<name>.rhai` / `~/.dock/workflows/`，斜杠 `/name` 启动 |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-subagent` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register`。清单与缺口：[TOOLS.md](TOOLS.md) |

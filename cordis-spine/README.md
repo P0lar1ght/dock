@@ -4,7 +4,7 @@ Five named Cordis services (DSH plugin seams) plus one Grok-shaped turn driver.
 
 | ctx key | Fake | Role |
 |---|---|---|
-| `sessions` | in-memory log | Grok conversation persist / DSH session log |
+| `sessions` | disk + memory log | Grok conversation persist (`$DOCK_HOME/sessions/<cwd>/<id>/chat_history.jsonl`) |
 | `llm` | echo / text stub, or `cordis-grok-llm` | Grok sampler (`chat` / `resp` / `anthropic`) |
 | `tools` | echo, or Grok workspace tools (`--features grok`) | Grok ToolBridge execute |
 | `systemPrompt` | fixed string | Assemble facade: live-look `"context"` then `system-prompt/assemble` |

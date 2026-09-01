@@ -44,6 +44,18 @@ pub struct SkillInfo {
     pub scope: SkillScope,
 }
 
+impl SkillInfo {
+    /// Workspace- or home-relative path for model-facing listings.
+    pub fn listing_path(&self) -> String {
+        match self.scope {
+            SkillScope::Bundled => format!("skills/{}/SKILL.md", self.name),
+            SkillScope::User => format!("~/.dock/skills/{}/SKILL.md", self.name),
+            SkillScope::Agents => format!(".agents/skills/{}/SKILL.md", self.name),
+            SkillScope::Project => format!(".dock/skills/{}/SKILL.md", self.name),
+        }
+    }
+}
+
 pub fn scan_all() -> Vec<SkillInfo> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut map = IndexMap::new();

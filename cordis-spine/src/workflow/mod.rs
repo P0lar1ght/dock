@@ -57,6 +57,7 @@ pub struct Workflows {
     pub handle: WorkflowLaunchHandle,
     extras: Mutex<Vec<Disposable>>,
     announced: Mutex<HashSet<String>>,
+    frozen_listing: Mutex<Option<String>>,
 }
 
 impl Workflows {
@@ -69,6 +70,9 @@ impl Workflows {
     }
 
     fn listing_text(&self) -> String {
+        if let Some(frozen) = self.frozen_listing.lock().unwrap().clone() {
+            return frozen;
+        }
         let window = self
             .ctx
             .get::<Sessions>(SESSIONS)
@@ -83,7 +87,9 @@ impl Workflows {
                 })
             })
             .unwrap_or(128_000);
-        listing::render_listing(&scan_catalog(), listing::listing_budget_chars(window))
+        let text = listing::render_listing(&scan_catalog(), listing::listing_budget_chars(window));
+        *self.frozen_listing.lock().unwrap() = Some(text.clone());
+        text
     }
 
     fn sync_slash(&self) {
@@ -263,6 +269,7 @@ pub fn tool_workflow() -> Plugin {
                 handle: WorkflowLaunchHandle(tx),
                 extras: Mutex::new(Vec::new()),
                 announced: Mutex::new(catalog_names),
+                frozen_listing: Mutex::new(None),
             };
             handle.sync_slash();
             let provided = ctx.provide(WORKFLOWS, handle)?;
@@ -410,9 +417,9 @@ mod tests {
     }
 
     #[test]
-    fn order_workflows_sits_between_skills_and_persona() {
-        assert!(ORDER_WORKFLOWS > ORDER_SKILLS);
-        assert!(ORDER_WORKFLOWS < crate::prompt::ORDER_PERSONA);
+    fn order_workflows_follow_roster() {
+        assert!(ORDER_WORKFLOWS > crate::prompt::ORDER_ROSTER);
+        assert!(ORDER_SKILLS > ORDER_WORKFLOWS);
     }
 
     #[tokio::test]

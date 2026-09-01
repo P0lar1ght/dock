@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
@@ -6,7 +7,7 @@ use std::time::{Instant, SystemTime};
 use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::names::{SESSIONS, SESSION_EVENT};
-use crate::types::LogEvent;
+use crate::types::{LogEvent, COMPACT_NOTICE};
 use crate::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,9 +31,14 @@ pub struct ArchivedSession {
     pub title: String,
     pub events: Vec<LogEvent>,
     pub times: Vec<SystemTime>,
+    /// Model-history head after compact. Display `events` stay the full transcript.
+    pub compact_prefix: Option<Vec<LogEvent>>,
+    /// Display index from which new events are appended onto [`Self::compact_prefix`].
+    pub compact_from: usize,
 }
 
-/// In-memory session log. DSH `ctx.sessions`; Grok conversation persistence.
+/// Session log. DSH `ctx.sessions`; Grok conversation folders on disk after
+/// [`Sessions::attach_disk`].
 #[derive(Clone)]
 pub struct Sessions {
     ctx: Context,
@@ -70,6 +76,14 @@ pub struct Sessions {
     /// (display `/loop …` vs `loop_schedule_instruction`, or a scheduled-fire
     /// reminder). Hidden from the pager as [`LogEvent::SystemReminder`].
     pending_user_addons: Arc<Mutex<VecDeque<(String, String)>>>,
+    /// When set, archive / live snapshots write Grok-style folders under
+    /// `$DOCK_HOME/sessions/<cwd-key>/`. Isolated child logs stay memory-only.
+    disk_cwd: Arc<Mutex<Option<PathBuf>>>,
+    live_id: Arc<Mutex<String>>,
+    /// Compacted prefix sent to the sampler. `None` = display log is the model history.
+    compact_prefix: Arc<Mutex<Option<Vec<LogEvent>>>>,
+    compact_from: Arc<Mutex<usize>>,
+    compact_images: Arc<Mutex<Vec<Vec<crate::types::UserImage>>>>,
 }
 
 /// Official SSE usage held until [`Sessions::finish_llm`] so one sample is
@@ -119,7 +133,39 @@ impl Sessions {
             display_title: Arc::new(Mutex::new(None)),
             queued_followups: Arc::new(AtomicUsize::new(0)),
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
+            disk_cwd: Arc::new(Mutex::new(None)),
+            live_id: Arc::new(Mutex::new(String::new())),
+            compact_prefix: Arc::new(Mutex::new(None)),
+            compact_from: Arc::new(Mutex::new(0)),
+            compact_images: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Load `$DOCK_HOME/sessions/<cwd>/` into the resume list. No-op for
+    /// isolated child logs. Safe to call more than once (replaces the list).
+    pub fn attach_disk(&self) {
+        if !self.emit {
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let loaded = crate::session_persist::load_cwd(&cwd);
+        *self.archive.lock().unwrap() = loaded;
+        *self.live_id.lock().unwrap() = crate::session_persist::new_id();
+        *self.disk_cwd.lock().unwrap() = Some(cwd);
+    }
+
+    /// Restore the newest on-disk session for this cwd (Grok `--resume`).
+    /// Archives a non-empty live log first. Usage ledger still resets.
+    pub fn resume_latest(&self) -> bool {
+        let id = self.archived().into_iter().next().map(|s| s.id);
+        self.archive_current();
+        id.is_some_and(|id| self.restore(&id))
+    }
+
+    /// Restore a specific on-disk / archived id. Same ledger rule as [`Self::restore`].
+    pub fn resume_id(&self, id: &str) -> bool {
+        self.archive_current();
+        self.restore(id)
     }
 
     /// Queue a hidden model-only reminder for the next user bubble whose
@@ -169,7 +215,9 @@ impl Sessions {
         let n = events.len();
         *self.events.lock().unwrap() = events;
         *self.times.lock().unwrap() = vec![SystemTime::now(); n];
+        self.reset_compact();
         self.bump_events_rev();
+        self.persist_live();
     }
 
     pub fn usage(&self) -> TokenUsage {
@@ -239,6 +287,7 @@ impl Sessions {
                 self.emit_session(reminder);
             }
         }
+        self.persist_live();
     }
 
     fn emit_session(&self, event: LogEvent) {
@@ -266,6 +315,80 @@ impl Sessions {
 
     pub fn events(&self) -> Vec<LogEvent> {
         self.events.lock().unwrap().clone()
+    }
+
+    /// History sent to the sampler. After compact this is the summary prefix
+    /// plus turns that landed after the visible notice — not the pager log.
+    pub fn model_history(&self) -> Vec<LogEvent> {
+        let prefix = self.compact_prefix.lock().unwrap();
+        let Some(prefix) = prefix.as_ref() else {
+            return self.events();
+        };
+        let from = *self.compact_from.lock().unwrap();
+        let events = self.events.lock().unwrap();
+        let start = from.min(events.len());
+        let mut out = prefix.clone();
+        out.extend(events[start..].iter().cloned());
+        out
+    }
+
+    /// Images aligned with [`Self::model_history`] user rows (not the pager log).
+    pub fn model_user_images(&self) -> Vec<Vec<crate::types::UserImage>> {
+        let prefix = self.compact_prefix.lock().unwrap();
+        let Some(prefix) = prefix.as_ref() else {
+            return self.user_images();
+        };
+        let prefix_users = prefix
+            .iter()
+            .filter(|e| matches!(e, LogEvent::User(_)))
+            .count();
+        let mut out = self.compact_images.lock().unwrap().clone();
+        out.resize(prefix_users, Vec::new());
+        let from = *self.compact_from.lock().unwrap();
+        let events = self.events.lock().unwrap();
+        let images = self.user_images.lock().unwrap();
+        let mut user_i = 0usize;
+        for (i, event) in events.iter().enumerate() {
+            if matches!(event, LogEvent::User(_)) {
+                if i >= from {
+                    out.push(images.get(user_i).cloned().unwrap_or_default());
+                }
+                user_i += 1;
+            }
+        }
+        out
+    }
+
+    pub fn model_user_image_count(&self) -> u64 {
+        self.model_user_images()
+            .iter()
+            .map(|row| row.len() as u64)
+            .sum()
+    }
+
+    fn reset_compact(&self) {
+        *self.compact_prefix.lock().unwrap() = None;
+        *self.compact_from.lock().unwrap() = 0;
+        self.compact_images.lock().unwrap().clear();
+    }
+
+    fn compact_snapshot(&self) -> (Option<Vec<LogEvent>>, usize) {
+        (
+            self.compact_prefix.lock().unwrap().clone(),
+            *self.compact_from.lock().unwrap(),
+        )
+    }
+
+    fn apply_compact_snapshot(&self, prefix: Option<Vec<LogEvent>>, from: usize) {
+        let n = self.events.lock().unwrap().len();
+        let from = from.min(n);
+        let image_n = prefix
+            .as_ref()
+            .map(|p| p.iter().filter(|e| matches!(e, LogEvent::User(_))).count())
+            .unwrap_or(0);
+        *self.compact_from.lock().unwrap() = from;
+        *self.compact_images.lock().unwrap() = vec![Vec::new(); image_n];
+        *self.compact_prefix.lock().unwrap() = prefix;
     }
 
     pub fn times(&self) -> Vec<SystemTime> {
@@ -385,6 +508,7 @@ impl Sessions {
         self.bump_events_rev();
         self.commit_pending_call();
         self.emit_session(event);
+        self.persist_live();
     }
 
     fn commit_pending_call(&self) {
@@ -454,12 +578,20 @@ impl Sessions {
         *self.pending_call.lock().unwrap() = None;
         *self.turn_started.lock().unwrap() = None;
         self.rewound.store(true, Ordering::Relaxed);
+        {
+            let n = self.events.lock().unwrap().len();
+            let mut from = self.compact_from.lock().unwrap();
+            if *from > n {
+                *from = n;
+            }
+        }
         self.bump_events_rev();
         if let Some(event) = leftover {
             self.emit_session(event);
         } else {
             self.emit_session(LogEvent::PreStep);
         }
+        self.persist_live();
         Some((text, images))
     }
 
@@ -478,6 +610,7 @@ impl Sessions {
         self.auto_compact_suppressed.store(false, Ordering::Relaxed);
         self.compacting.store(false, Ordering::Relaxed);
         *self.display_title.lock().unwrap() = None;
+        self.reset_compact();
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
         {
@@ -488,6 +621,7 @@ impl Sessions {
                 ..TokenUsage::default()
             };
         }
+        self.persist_live();
     }
 
     pub fn auto_compact_suppressed(&self) -> bool {
@@ -536,6 +670,7 @@ impl Sessions {
                 if let Some(event) = leftover {
                     self.emit_session(event);
                 }
+                self.persist_live();
             }
             return;
         };
@@ -567,6 +702,7 @@ impl Sessions {
                 if let Some(event) = leftover {
                     self.emit_session(event);
                 }
+                self.persist_live();
             }
             return;
         }
@@ -590,6 +726,7 @@ impl Sessions {
         if let Some(event) = event {
             self.emit_session(event);
         }
+        self.persist_live();
     }
 
     /// Exclusive compact lock so auto and `/compact` cannot overlap.
@@ -603,9 +740,9 @@ impl Sessions {
         self.compacting.store(false, Ordering::Relaxed);
     }
 
-    /// Swap the live log for a compacted prefix. Keeps images for User rows
-    /// whose text still appears, in order.
-    pub fn replace_compacted(&self, events: Vec<LogEvent>) {
+    /// Keep the pager transcript. Store `prefix` as the sampler history head
+    /// and append [`COMPACT_NOTICE`] so the TUI shows that a compact ran.
+    pub fn replace_compacted(&self, prefix: Vec<LogEvent>) {
         let (old_users, old_images) = {
             let log = self.events.lock().unwrap();
             let images = self.user_images.lock().unwrap();
@@ -620,7 +757,7 @@ impl Sessions {
         };
         let mut used = vec![false; old_users.len()];
         let mut mapped = Vec::new();
-        for event in &events {
+        for event in &prefix {
             if let LogEvent::User(text) = event {
                 let img = old_users
                     .iter()
@@ -638,18 +775,24 @@ impl Sessions {
                 mapped.push(img);
             }
         }
-        let n = events.len();
-        let last = events.last().cloned();
-        *self.times.lock().unwrap() = vec![SystemTime::now(); n];
-        *self.events.lock().unwrap() = events;
-        *self.user_images.lock().unwrap() = mapped;
-        self.pending_images.lock().unwrap().clear();
+        *self.compact_images.lock().unwrap() = mapped;
+        let already = matches!(
+            self.events.lock().unwrap().last(),
+            Some(LogEvent::LlmStream(out)) if out.text == COMPACT_NOTICE
+        );
+        if !already {
+            self.append(LogEvent::LlmStream(crate::types::LlmOutput {
+                text: COMPACT_NOTICE.into(),
+                ..crate::types::LlmOutput::default()
+            }));
+        }
+        let from = self.events.lock().unwrap().len();
+        *self.compact_from.lock().unwrap() = from;
+        *self.compact_prefix.lock().unwrap() = Some(prefix);
         *self.pending_call.lock().unwrap() = None;
         self.rewound.store(false, Ordering::Relaxed);
         self.bump_events_rev();
-        if let Some(event) = last {
-            self.emit_session(event);
-        }
+        self.persist_live();
     }
 
     fn estimate_tokens(text: &str) -> u64 {
@@ -671,9 +814,8 @@ impl Sessions {
         if events.is_empty() {
             return None;
         }
-        let mut next = self.next_id.lock().unwrap();
-        let id = format!("s{next}");
-        *next += 1;
+        self.persist_live();
+        let id = self.take_archive_id();
         let title = self
             .live_title()
             .or_else(|| {
@@ -687,12 +829,16 @@ impl Sessions {
             })
             .unwrap_or_else(|| id.clone());
         let times = self.times();
+        let (compact_prefix, compact_from) = self.compact_snapshot();
         let item = ArchivedSession {
             id,
             title,
             events,
             times,
+            compact_prefix,
+            compact_from,
         };
+        self.write_archived(&item);
         self.archive.lock().unwrap().insert(0, item.clone());
         Some(item)
     }
@@ -726,12 +872,16 @@ impl Sessions {
         self.pending_images.lock().unwrap().clear();
         *self.pending_call.lock().unwrap() = None;
         self.rewound.store(false, Ordering::Relaxed);
+        self.apply_compact_snapshot(item.compact_prefix, item.compact_from);
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
         if let Some(event) = last {
             self.emit_session(event);
         }
         *self.display_title.lock().unwrap() = Some(title);
+        if self.disk_cwd.lock().unwrap().is_some() {
+            *self.live_id.lock().unwrap() = item.id;
+        }
         true
     }
 
@@ -754,6 +904,7 @@ impl Sessions {
         } else {
             Some(trimmed.chars().take(160).collect())
         };
+        self.persist_live();
     }
 
     pub fn rename_archived(&self, id: &str, title: &str) -> Option<ArchivedSession> {
@@ -765,13 +916,89 @@ impl Sessions {
         let mut archive = self.archive.lock().unwrap();
         let item = archive.iter_mut().find(|s| s.id == id)?;
         item.title = title;
-        Some(item.clone())
+        let saved = item.clone();
+        drop(archive);
+        if let Some(cwd) = self.disk_cwd.lock().unwrap().clone() {
+            let _ = crate::session_persist::save_title(&saved.id, &saved.title, &cwd);
+        }
+        Some(saved)
     }
 
     pub fn remove_archived(&self, id: &str) -> Option<ArchivedSession> {
         let mut archive = self.archive.lock().unwrap();
         let idx = archive.iter().position(|s| s.id == id)?;
-        Some(archive.remove(idx))
+        let item = archive.remove(idx);
+        drop(archive);
+        if let Some(cwd) = self.disk_cwd.lock().unwrap().clone() {
+            let _ = crate::session_persist::remove(&item.id, &cwd);
+        }
+        Some(item)
+    }
+
+    fn take_archive_id(&self) -> String {
+        if self.disk_cwd.lock().unwrap().is_some() {
+            let mut live = self.live_id.lock().unwrap();
+            if live.is_empty() {
+                *live = crate::session_persist::new_id();
+            }
+            let id = live.clone();
+            *live = crate::session_persist::new_id();
+            id
+        } else {
+            let mut next = self.next_id.lock().unwrap();
+            let id = format!("s{next}");
+            *next += 1;
+            id
+        }
+    }
+
+    fn write_archived(&self, item: &ArchivedSession) {
+        let Some(cwd) = self.disk_cwd.lock().unwrap().clone() else {
+            return;
+        };
+        let _ = crate::session_persist::save(item, &cwd);
+    }
+
+    fn persist_live(&self) {
+        let Some(cwd) = self.disk_cwd.lock().unwrap().clone() else {
+            return;
+        };
+        let events = self.events();
+        let mut live = self.live_id.lock().unwrap();
+        if live.is_empty() {
+            *live = crate::session_persist::new_id();
+        }
+        let id = live.clone();
+        drop(live);
+        if events.is_empty() {
+            let _ = crate::session_persist::remove(&id, &cwd);
+            return;
+        }
+        if crate::session_persist::empty_llm_placeholder(&events) {
+            return;
+        }
+        let title = self
+            .live_title()
+            .or_else(|| {
+                events.iter().find_map(|e| match e {
+                    LogEvent::User(text) => {
+                        let t = text.trim();
+                        (!t.is_empty()).then(|| t.chars().take(40).collect())
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_else(|| id.clone());
+        let (compact_prefix, compact_from) = self.compact_snapshot();
+        let item = ArchivedSession {
+            id,
+            title,
+            events,
+            times: self.times(),
+            compact_prefix,
+            compact_from,
+        };
+        let _ = crate::session_persist::save(&item, &cwd);
     }
 }
 
@@ -1087,5 +1314,58 @@ mod tests {
         sessions.begin_llm();
         sessions.seal_incomplete_tool_calls();
         assert_eq!(sessions.events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compact_keeps_pager_log_and_shortens_model_history() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("first".into()));
+        sessions.append(LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            content: "secret body".into(),
+        });
+        sessions.append(LogEvent::User("second".into()));
+        let prefix = vec![
+            LogEvent::User("first".into()),
+            LogEvent::SystemReminder("summary of earlier turns".into()),
+            LogEvent::LlmStream(crate::types::LlmOutput {
+                text: crate::types::COMPACT_NOTICE.into(),
+                ..crate::types::LlmOutput::default()
+            }),
+        ];
+        sessions.replace_compacted(prefix);
+        let display = sessions.events();
+        assert!(
+            display.iter().any(|e| matches!(
+                e,
+                LogEvent::ToolExecute { content, .. } if content.contains("secret body")
+            )),
+            "{display:?}"
+        );
+        assert!(display.iter().any(|e| matches!(
+            e,
+            LogEvent::LlmStream(o) if o.text == crate::types::COMPACT_NOTICE
+        )));
+        let model = sessions.model_history();
+        assert!(!model.iter().any(|e| matches!(
+            e,
+            LogEvent::ToolExecute { content, .. } if content.contains("secret body")
+        )));
+        assert!(model.iter().any(|e| matches!(
+            e,
+            LogEvent::SystemReminder(t) if t.contains("summary of earlier")
+        )));
+        sessions.append(LogEvent::User("after compact".into()));
+        assert!(sessions.events().iter().any(|e| matches!(
+            e,
+            LogEvent::User(t) if t == "after compact"
+        )));
+        assert!(sessions.model_history().iter().any(|e| matches!(
+            e,
+            LogEvent::User(t) if t == "after compact"
+        )));
     }
 }

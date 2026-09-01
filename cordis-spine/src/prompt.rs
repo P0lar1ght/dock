@@ -6,13 +6,14 @@ use crate::names::{CONTEXT, PROMPT_ASSEMBLE, SYSTEM_PROMPT};
 /// Section slots on the `system-prompt/assemble` waterfall. Each contributor is
 /// its own plugin handler that adds a section at a fixed order, so the assembled
 /// prompt is byte-stable no matter what order the plugins mount in.
+///
+/// Stable identity first (prefix cache), then listings. Plan / goal stay out of
+/// this table — they are `<system-reminder>` tails (Grok / DSH).
 pub const ORDER_CORDIS: i32 = 10;
-pub const ORDER_SKILLS: i32 = 15;
-pub const ORDER_WORKFLOWS: i32 = 16;
 pub const ORDER_PERSONA: i32 = 20;
 pub const ORDER_ROSTER: i32 = 30;
-pub const ORDER_PLAN: i32 = 40;
-pub const ORDER_GOAL: i32 = 50;
+pub const ORDER_WORKFLOWS: i32 = 40;
+pub const ORDER_SKILLS: i32 = 41;
 
 /// Structured payload carried by the `system-prompt/assemble` waterfall.
 ///
@@ -197,12 +198,14 @@ pub fn system_prompt() -> Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::names::{GOAL, PLAN_MODE};
+    use crate::names::{GOAL, PLAN_MODE, PRE_STEP, SESSIONS};
     use crate::plan_mode::PlanMode;
+    use crate::session::Sessions;
+    use crate::types::{LogEvent, PreStep};
     use crate::Goal;
 
     #[tokio::test]
-    async fn assemble_appends_plan_addon_when_active() {
+    async fn assemble_omits_plan_when_active() {
         let ctx = cordis::Context::new();
         crate::install_without_llm(&ctx).await.unwrap();
         ctx.plugin(crate::plan_mode(), ())
@@ -214,9 +217,39 @@ mod tests {
         assert!(!system.assemble().contains("计划模式已开启"));
         ctx.get::<PlanMode>(PLAN_MODE).unwrap().set(true);
         let assembled = system.assemble();
-        assert!(assembled.contains("计划模式已开启"), "{assembled}");
-        assert!(assembled.contains("exit_plan_mode"), "{assembled}");
-        assert!(assembled.contains("ask_user_question"), "{assembled}");
+        assert!(!assembled.contains("计划模式已开启"), "{assembled}");
+        assert!(!assembled.contains("exit_plan_mode"), "{assembled}");
+    }
+
+    #[tokio::test]
+    async fn pre_step_injects_plan_reminder() {
+        let ctx = cordis::Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::plan_mode(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        ctx.get::<PlanMode>(PLAN_MODE).unwrap().enter_pending();
+        ctx.waterfall(
+            PRE_STEP,
+            PreStep {
+                user: "探索仓库".into(),
+                enter: true,
+            },
+            || PreStep {
+                user: "探索仓库".into(),
+                enter: true,
+            },
+        );
+        let events = ctx.get::<Sessions>(SESSIONS).unwrap().events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains("计划模式已开启"))),
+            "{events:?}"
+        );
+        assert!(ctx.get::<PlanMode>(PLAN_MODE).unwrap().gated());
     }
 
     #[tokio::test]
@@ -235,7 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assemble_instructs_when_goal_active() {
+    async fn assemble_omits_goal_when_active() {
         let ctx = cordis::Context::new();
         crate::install_without_llm(&ctx).await.unwrap();
         ctx.plugin(crate::tool_goal(), ())
@@ -246,7 +279,37 @@ mod tests {
         ctx.get::<Goal>(GOAL).unwrap().start("理解 TUI");
         let system = SystemPrompt::fake(ctx.clone());
         let assembled = system.assemble();
-        assert!(assembled.contains("已设定目标：理解 TUI"), "{assembled}");
+        assert!(!assembled.contains("已设定目标：理解 TUI"), "{assembled}");
         assert!(!assembled.contains("update_goal(objective"), "{assembled}");
+    }
+
+    #[tokio::test]
+    async fn pre_step_injects_goal_instruction() {
+        let ctx = cordis::Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::tool_goal(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        ctx.get::<Goal>(GOAL).unwrap().start("理解 TUI");
+        ctx.waterfall(
+            PRE_STEP,
+            PreStep {
+                user: "理解 TUI".into(),
+                enter: true,
+            },
+            || PreStep {
+                user: "理解 TUI".into(),
+                enter: true,
+            },
+        );
+        let events = ctx.get::<Sessions>(SESSIONS).unwrap().events();
+        assert!(
+            events.iter().any(
+                |e| matches!(e, LogEvent::SystemReminder(t) if t.contains("已设定目标：理解 TUI"))
+            ),
+            "{events:?}"
+        );
     }
 }

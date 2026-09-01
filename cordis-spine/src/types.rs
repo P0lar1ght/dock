@@ -5,6 +5,11 @@ use std::fmt;
 /// tool call" if a user message follows unmatched `tool_calls`.
 pub const INTERRUPTED_TOOL_RESULT: &str = "已中断。";
 
+/// Visible compact marker. The pager keeps older bubbles; this assistant
+/// line is appended so the user sees that a compact ran. The model history
+/// carries the same bubble plus a hidden continuation summary.
+pub const COMPACT_NOTICE: &str = "已压缩上下文。";
+
 /// Durable session log events. Grok persists conversation items; DSH persists
 /// a typed event log. This is the thin shared shape.
 

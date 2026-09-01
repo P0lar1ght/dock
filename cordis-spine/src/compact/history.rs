@@ -7,8 +7,9 @@ use super::summary::{format_compact_summary_content, wrap_user_query};
 use crate::types::{LlmOutput, LogEvent};
 
 /// TUI hides [`LogEvent::SystemReminder`]; this assistant bubble is the
-/// visible compact notice. Dock-only (Grok paints via ACP notifications).
-pub const VISIBLE_NOTICE: &str = "已压缩上下文。";
+/// visible compact notice (also appended to the display log). Dock-only
+/// (Grok paints via ACP notifications).
+pub const VISIBLE_NOTICE: &str = crate::types::COMPACT_NOTICE;
 
 /// Grok `strip_tool_messages_for_conversation_item` + drop images/reasoning:
 /// drop tool results, flatten assistant `tool_calls` into `[Called tools: …]`.
@@ -82,8 +83,9 @@ fn last_real_user(history: &[LogEvent]) -> Option<String> {
     })
 }
 
-/// First real user + last user wrapped in `<user_query>` (Grok) + recent
-/// stubbed tools + continuation reminder. Visible notice is Dock-only.
+/// Model-history prefix after compact: first real user + last user wrapped
+/// in `<user_query>` (Grok) + recent stubbed tools + continuation reminder.
+/// The display log is not replaced; [`VISIBLE_NOTICE`] is appended there too.
 pub fn build_compacted_events(history: &[LogEvent], summary: &str) -> Vec<LogEvent> {
     let first = first_real_user(history);
     let last = last_real_user(history);

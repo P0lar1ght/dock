@@ -8,11 +8,10 @@ use std::sync::Arc;
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::context_book::{own_sections, ContextBook};
-use crate::names::{CONTEXT, GOAL, TOOLS};
-use crate::prompt::ORDER_GOAL;
+use crate::names::{GOAL, PRE_STEP, SESSIONS, TOOLS, TOOLS_EXECUTE};
+use crate::session::Sessions;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 pub use drain::GoalState;
 pub use grok_tool::{
@@ -54,6 +53,12 @@ impl Goal {
         self.state.start(title);
     }
 
+    /// One-shot standing contract for the current objective (slash or
+    /// `update_goal`). Injected as a history-tail reminder, not system prompt.
+    pub fn take_instruction(&self) -> Option<String> {
+        self.state.take_instruction()
+    }
+
     pub fn pause(&self) -> bool {
         self.state.pause()
     }
@@ -84,44 +89,45 @@ impl Goal {
 }
 
 pub fn tool_goal() -> Plugin {
-    plugin(
-        "tool-goal",
-        Inject::from([TOOLS, CONTEXT]),
-        |ctx, _: &()| {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let state = Arc::new(GoalState::new());
-            {
-                let state = state.clone();
-                tokio::spawn(drain::drain_loop(state, rx));
+    plugin("tool-goal", Inject::from([TOOLS]), |ctx, _: &()| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(GoalState::new());
+        {
+            let state = state.clone();
+            tokio::spawn(drain::drain_loop(state, rx));
+        }
+        ctx.provide(
+            GOAL,
+            Goal {
+                state,
+                handle: GoalUpdateHandle(tx),
+            },
+        )?;
+        let ctx_pre = ctx.clone();
+        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+            let next = args.next::<PreStep>().unwrap_or(step);
+            if next.enter {
+                inject_goal_instruction(&ctx_pre);
             }
-            ctx.provide(
-                GOAL,
-                Goal {
-                    state,
-                    handle: GoalUpdateHandle(tx),
-                },
-            )?;
-            let book = ctx.require::<ContextBook>(CONTEXT)?;
-            own_sections(
-                ctx,
-                vec![book.section(ORDER_GOAL, "goal", |exec| {
-                    let goal = exec.get::<Goal>(GOAL)?;
-                    if goal.active() {
-                        Some(goal_instruction(&goal.title()))
-                    } else {
-                        None
-                    }
-                })?],
-            )?;
-            let tools = ctx.require::<Tools>(TOOLS)?;
-            let body: ToolBody = {
+            next
+        });
+        let ctx_exec = ctx.clone();
+        let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
+            let result = args.next::<ToolResult>().unwrap_or(result);
+            if result.name == UPDATE_GOAL_TOOL_NAME {
+                inject_goal_instruction(&ctx_exec);
+            }
+            result
+        });
+        let tools = ctx.require::<Tools>(TOOLS)?;
+        let body: ToolBody = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move |call| {
                 let ctx = ctx.clone();
-                std::sync::Arc::new(move |call| {
-                    let ctx = ctx.clone();
-                    Box::pin(async move { run_update_goal(&ctx, call).await })
-                })
-            };
-            own_registered(
+                Box::pin(async move { run_update_goal(&ctx, call).await })
+            })
+        };
+        own_registered(
             ctx,
             vec![tools.register_deferred(
                 ToolSpec {
@@ -132,9 +138,23 @@ pub fn tool_goal() -> Plugin {
                 body,
             )?],
         )?;
-            Ok(None)
-        },
-    )
+        Ok(None)
+    })
+}
+
+fn inject_goal_instruction(ctx: &cordis::Context) {
+    let Some(goal) = ctx.get::<Goal>(GOAL) else {
+        return;
+    };
+    let Some(body) = goal.take_instruction() else {
+        return;
+    };
+    let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
+        return;
+    };
+    sessions.append(LogEvent::SystemReminder(format!(
+        "<system-reminder>\n{body}\n</system-reminder>"
+    )));
 }
 
 /// Copied from Grok `UpdateGoalTool::run` (handle → oneshot ack → render).

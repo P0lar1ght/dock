@@ -119,6 +119,8 @@ pub struct UsageLedger {
     pub by_model: IndexMap<String, UsageTotals>,
     /// Main-agent loop rounds for `num_turns` (subagents excluded).
     pub main_loop_model_calls: u64,
+    /// Last main-loop call (for `/usage` 上一轮命中). Subagents do not overwrite.
+    pub last_call: Option<UsageTotals>,
     /// Bill may under-count (drain timeout, nested subagent incomplete, apply failure).
     pub incomplete: bool,
 }
@@ -136,6 +138,7 @@ impl UsageLedger {
     ) {
         let call = UsageTotals::from_call(usage, api_duration_ms, cost_usd_ticks);
         self.main_loop_model_calls = self.main_loop_model_calls.saturating_add(1);
+        self.last_call = Some(call.clone());
         self.fold_entry(model_id, &call);
     }
 
@@ -184,6 +187,9 @@ pub struct PromptUsage {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub usage_is_incomplete: bool,
+    /// Last main-agent-loop call. Session totals stay cumulative.
+    #[serde(default, rename = "lastCall", skip_serializing_if = "Option::is_none")]
+    pub last_call: Option<PromptUsageModel>,
 }
 
 impl PromptUsage {
@@ -278,6 +284,7 @@ impl From<&UsageLedger> for PromptUsage {
                 .collect(),
             num_turns: ledger.main_loop_model_calls,
             usage_is_incomplete: ledger.incomplete,
+            last_call: ledger.last_call.as_ref().map(PromptUsageModel::from),
         };
         usage.scrub_untrustworthy_costs();
         usage
@@ -305,6 +312,14 @@ pub fn session_usage_block_text(usage: &PromptUsage) -> String {
         group_thousands(t.cached_read_tokens),
         share_percent(t.cached_read_tokens, t.input_tokens),
     ));
+    if let Some(last) = &usage.last_call {
+        rows.push(format!(
+            "  上一轮命中:    {} / {} · {}",
+            group_thousands(last.cached_read_tokens),
+            group_thousands(last.input_tokens),
+            share_percent(last.cached_read_tokens, last.input_tokens),
+        ));
+    }
     rows.push(format!(
         "  输出 token:    {}（思考 {}）",
         group_thousands(t.output_tokens),
@@ -520,6 +535,24 @@ mod tests {
     }
 
     #[test]
+    fn session_usage_block_shows_last_call_cache() {
+        let mut last = model_row(13_000, 200, None);
+        last.cached_read_tokens = 12_000;
+        let mut totals = model_row(26_000, 400, None);
+        totals.cached_read_tokens = 12_000;
+        let usage = PromptUsage {
+            totals,
+            last_call: Some(last),
+            ..Default::default()
+        };
+        let text = session_usage_block_text(&usage);
+        assert!(
+            text.contains("上一轮命中:    12,000 / 13,000 · 92%"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn session_usage_block_formats_tokens_and_cost() {
         let mut totals = model_row(1_234_567, 45_678, Some(12_345_000_000));
         totals.cached_read_tokens = 1_000_000;
@@ -533,6 +566,7 @@ mod tests {
         let text = session_usage_block_text(&usage);
         assert!(text.contains("1,234,567"), "{text}");
         assert!(text.contains("缓存 1,000,000 · 81%"), "{text}");
+        assert!(!text.contains("上一轮命中"), "{text}");
         assert!(text.contains("思考 12,000"), "{text}");
         assert!(text.contains("$1.2345"), "{text}");
         assert!(text.contains("3m12s"), "{text}");

@@ -110,14 +110,13 @@ impl ContextSnapshot {
 
 /// Assemble occupancy from live `"sessions"` / `"systemPrompt"` / `"tools"`.
 pub fn snapshot_context(ctx: &Context) -> ContextSnapshot {
-    snapshot_with_system(ctx, &assembled_system(ctx))
+    snapshot_with_parts(ctx, &assembled_parts(ctx))
 }
 
 /// Itemized breakdown for one occupancy slice (TUI detail pane).
 pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
     let parts = assembled_parts(ctx);
-    let system = parts.render();
-    let snap = snapshot_with_system(ctx, &system);
+    let snap = snapshot_with_parts(ctx, &parts);
     match kind {
         OccupancyKind::System => system_detail(&parts, &snap),
         OccupancyKind::Messages => messages_detail(ctx, &snap),
@@ -137,41 +136,38 @@ fn assembled_parts(ctx: &Context) -> PromptAssembly {
         .unwrap_or_default()
 }
 
-fn assembled_system(ctx: &Context) -> String {
-    assembled_parts(ctx).render()
-}
-
-fn snapshot_with_system(ctx: &Context, system: &str) -> ContextSnapshot {
-    let system_prompt_tokens = estimate_text(system);
+fn snapshot_with_parts(ctx: &Context, parts: &PromptAssembly) -> ContextSnapshot {
+    let system = parts.render();
+    let system_prompt_tokens = estimate_text(&system);
     let sessions = ctx.get::<Sessions>(SESSIONS);
     let (base, reasoning, turn_count, tool_call_count, compaction_count) = if let Some(sessions) =
         sessions.as_ref()
     {
-        sessions.with_log(|history, _| {
-            (
-                estimate_context_tokens(system, history),
-                reasoning_tokens(history),
-                history
-                    .iter()
-                    .filter(|e| matches!(e, LogEvent::User(t) if !t.trim().is_empty()))
-                    .count() as u64,
-                history
-                    .iter()
-                    .filter(|e| matches!(e, LogEvent::ToolExecute { .. }))
-                    .count() as u64,
-                history
-                    .iter()
-                    .filter(|e| matches!(e, LogEvent::LlmStream(out) if out.text == VISIBLE_NOTICE))
-                    .count() as u64,
-            )
-        })
+        let history = sessions.model_history();
+        let display = sessions.events();
+        (
+            estimate_context_tokens(&system, &history),
+            reasoning_tokens(&history),
+            display
+                .iter()
+                .filter(|e| matches!(e, LogEvent::User(t) if !t.trim().is_empty()))
+                .count() as u64,
+            display
+                .iter()
+                .filter(|e| matches!(e, LogEvent::ToolExecute { .. }))
+                .count() as u64,
+            display
+                .iter()
+                .filter(|e| matches!(e, LogEvent::LlmStream(out) if out.text == VISIBLE_NOTICE))
+                .count() as u64,
+        )
     } else {
         (system_prompt_tokens, 0, 0, 0, 0)
     };
     let message_tokens = base.saturating_sub(system_prompt_tokens);
     let image_tokens = sessions
         .as_ref()
-        .map(|s| s.user_image_count().saturating_mul(IMAGE_TOKEN_ESTIMATE))
+        .map(|s| s.model_user_image_count().saturating_mul(IMAGE_TOKEN_ESTIMATE))
         .unwrap_or(0);
 
     let (builtin_specs, _, _) = partition_model_specs(ctx);
@@ -203,7 +199,7 @@ fn snapshot_with_system(ctx: &Context, system: &str) -> ContextSnapshot {
         turn_count,
         tool_call_count,
         compaction_count,
-        categories: extra_categories(ctx),
+        categories: extra_categories(ctx, parts),
     }
 }
 
@@ -259,7 +255,7 @@ fn section_label(id: &str) -> String {
 fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
     let history = ctx
         .get::<Sessions>(SESSIONS)
-        .map(|s| s.events())
+        .map(|s| s.model_history())
         .unwrap_or_default();
     let mut user_n = 0u64;
     let mut user_tok = 0u64;
@@ -379,7 +375,7 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
 fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
     let history = ctx
         .get::<Sessions>(SESSIONS)
-        .map(|s| s.events())
+        .map(|s| s.model_history())
         .unwrap_or_default();
     let reasoning = reasoning_tokens(&history);
     let reasoning_n = history
@@ -388,7 +384,7 @@ fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         .count() as u64;
     let image_n = ctx
         .get::<Sessions>(SESSIONS)
-        .map(|s| s.user_image_count())
+        .map(|s| s.model_user_image_count())
         .unwrap_or(0);
     let image_tok = image_n.saturating_mul(IMAGE_TOKEN_ESTIMATE);
     let overhead = snap.used.saturating_sub(
@@ -700,8 +696,72 @@ fn window_size(session_window: u64, ctx: &Context) -> u64 {
         .unwrap_or(128_000)
 }
 
-fn extra_categories(ctx: &Context) -> Vec<ContextCategory> {
+fn section_tokens(assembly: &PromptAssembly, id: &str) -> u64 {
+    assembly
+        .inspect()
+        .into_iter()
+        .find(|p| p.id == id)
+        .map(|p| estimate_text(&p.body))
+        .unwrap_or(0)
+}
+
+fn extra_categories(ctx: &Context, assembly: &PromptAssembly) -> Vec<ContextCategory> {
     let mut rows = Vec::new();
+    // Listings that already live in the system prompt come first so /context
+    // does not clip 技能 under MCP / 本地按需 / 工作流.
+    let skills = ctx.get::<crate::skills::Skills>(SKILLS);
+    let skill_rows = skills
+        .as_ref()
+        .map(|s| s.occupancy_rows())
+        .unwrap_or_default();
+    let catalog_n = skills.as_ref().map(|s| s.catalog().len()).unwrap_or(0);
+    let skills_section = section_tokens(assembly, "skills");
+    if skills.is_some() || skills_section > 0 {
+        let tokens = if skills_section > 0 {
+            skills_section
+        } else {
+            skill_rows.iter().map(|(_, t, _)| *t).sum()
+        };
+        let n = skill_rows.len().max(catalog_n);
+        rows.push(ContextCategory {
+            label: "技能".into(),
+            tokens,
+            detail: Some(if tokens > 0 {
+                if n > 0 {
+                    format!("{n} 个 · 已计入系统提示")
+                } else {
+                    "已计入系统提示".into()
+                }
+            } else {
+                count_detail(n as u64, "个")
+            }),
+        });
+    }
+    let workflows = crate::workflow::catalog_listing();
+    let workflows_section = section_tokens(assembly, "workflows");
+    if !workflows.is_empty() || workflows_section > 0 {
+        let tokens = if workflows_section > 0 {
+            workflows_section
+        } else {
+            let mut text = String::new();
+            for (name, desc) in &workflows {
+                text.push_str(name);
+                text.push('\n');
+                text.push_str(desc);
+                text.push('\n');
+            }
+            estimate_text(&text)
+        };
+        rows.push(ContextCategory {
+            label: "工作流".into(),
+            tokens,
+            detail: Some(if tokens > 0 {
+                format!("{} 个 · 已计入系统提示", workflows.len().max(1))
+            } else {
+                count_detail(workflows.len() as u64, "个")
+            }),
+        });
+    }
     let (_, mcp_specs, deferred_specs) = partition_model_specs(ctx);
     if !mcp_specs.is_empty() {
         let mut servers = std::collections::BTreeSet::new();
@@ -726,32 +786,6 @@ fn extra_categories(ctx: &Context) -> Vec<ContextCategory> {
             tokens: 0,
             detail: Some(format!("{} 个工具 · 未计入窗口", deferred_specs.len())),
         });
-    }
-    let workflows = crate::workflow::catalog_listing();
-    if !workflows.is_empty() {
-        let mut text = String::new();
-        for (name, desc) in &workflows {
-            text.push_str(name);
-            text.push('\n');
-            text.push_str(desc);
-            text.push('\n');
-        }
-        rows.push(ContextCategory {
-            label: "工作流".into(),
-            tokens: estimate_text(&text),
-            detail: Some(count_detail(workflows.len() as u64, "个")),
-        });
-    }
-    if let Some(skills) = ctx.get::<crate::skills::Skills>(SKILLS) {
-        let skill_rows = skills.occupancy_rows();
-        if !skill_rows.is_empty() {
-            let tokens: u64 = skill_rows.iter().map(|(_, t, _)| *t).sum();
-            rows.push(ContextCategory {
-                label: "技能".into(),
-                tokens,
-                detail: Some(count_detail(skill_rows.len() as u64, "个")),
-            });
-        }
     }
     rows
 }

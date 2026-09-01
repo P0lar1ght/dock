@@ -12,6 +12,7 @@ pub struct GoalState {
     pub active: AtomicBool,
     pub paused: AtomicBool,
     pub awaiting_composer: AtomicBool,
+    pub instruction_pending: AtomicBool,
     pub title: Mutex<String>,
     /// Last `update_goal` message / blocked note for TUI chrome.
     pub status: Mutex<String>,
@@ -24,6 +25,7 @@ impl GoalState {
             active: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             awaiting_composer: AtomicBool::new(false),
+            instruction_pending: AtomicBool::new(false),
             title: Mutex::new(String::new()),
             status: Mutex::new(String::new()),
             blocked_streak: AtomicU32::new(0),
@@ -41,7 +43,20 @@ impl GoalState {
         self.active.store(true, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
         self.awaiting_composer.store(false, Ordering::SeqCst);
+        self.instruction_pending.store(true, Ordering::SeqCst);
         self.blocked_streak.store(0, Ordering::SeqCst);
+    }
+
+    pub fn take_instruction(&self) -> Option<String> {
+        if !self.instruction_pending.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        if !self.active() {
+            return None;
+        }
+        Some(super::grok_tool::goal_instruction(
+            &self.title.lock().unwrap(),
+        ))
     }
 
     pub fn active(&self) -> bool {
@@ -63,6 +78,7 @@ impl GoalState {
         }
         self.active.store(false, Ordering::SeqCst);
         self.paused.store(true, Ordering::SeqCst);
+        self.instruction_pending.store(false, Ordering::SeqCst);
         true
     }
 
@@ -72,6 +88,7 @@ impl GoalState {
         }
         self.paused.store(false, Ordering::SeqCst);
         self.active.store(true, Ordering::SeqCst);
+        self.instruction_pending.store(true, Ordering::SeqCst);
         true
     }
 
@@ -79,6 +96,7 @@ impl GoalState {
         self.active.store(false, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
         self.awaiting_composer.store(false, Ordering::SeqCst);
+        self.instruction_pending.store(false, Ordering::SeqCst);
         self.blocked_streak.store(0, Ordering::SeqCst);
         self.title.lock().unwrap().clear();
         self.status.lock().unwrap().clear();
@@ -99,6 +117,9 @@ impl GoalState {
         } else {
             title
         };
+        if self.present() {
+            self.instruction_pending.store(true, Ordering::SeqCst);
+        }
     }
 
     pub fn arm_composer(&self) {

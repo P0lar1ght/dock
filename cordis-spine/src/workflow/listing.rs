@@ -69,12 +69,21 @@ fn format_entry(workflow: &WorkflowListing, with_desc: bool) -> String {
         desc = workflow.name.clone();
     }
     let mut out = format!("- `{}` — {desc}\n", workflow.name);
-    if let Some(path) = workflow.path.as_deref().filter(|p| !p.is_empty()) {
+    if let Some(path) = listing_path(workflow) {
         out.push_str("  ");
-        out.push_str(path);
+        out.push_str(&path);
         out.push('\n');
     }
     out
+}
+
+fn listing_path(workflow: &WorkflowListing) -> Option<String> {
+    match workflow.source {
+        "project" => Some(format!(".dock/workflows/{}.rhai", workflow.name)),
+        "user" => Some(format!("~/.dock/workflows/{}.rhai", workflow.name)),
+        "bundled" => Some(format!("~/.dock/bundled/workflows/{}.rhai", workflow.name)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +120,16 @@ mod tests {
     #[test]
     fn empty_catalog_is_blank() {
         assert!(render_listing(&[], 800).is_empty());
+    }
+
+    #[test]
+    fn listing_uses_generic_paths() {
+        let workflows = vec![sample(
+            "demo-flow",
+            "a reasonably long description for listing",
+        )];
+        let text = render_listing(&workflows, 800);
+        assert!(text.contains(".dock/workflows/demo-flow.rhai"), "{text}");
+        assert!(!text.contains("/tmp/"), "{text}");
     }
 }

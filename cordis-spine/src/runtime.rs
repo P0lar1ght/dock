@@ -12,10 +12,9 @@ use crate::error::{Error, Result};
 use crate::goal::{goal_continuation_directive, Goal};
 use crate::llm::Llm;
 use crate::names::{
-    AGENTS, AGENT_PRESETS, COMPACT, GOAL, LLM, PLAN_MODE, PRE_STEP, SESSIONS, SUBAGENTS,
-    SYSTEM_PROMPT, TOOLS, TURN,
+    AGENTS, AGENT_PRESETS, COMPACT, GOAL, LLM, PRE_STEP, SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS,
+    TURN,
 };
-use crate::plan_mode::PlanMode;
 use crate::prompt::SystemPrompt;
 use crate::session::Sessions;
 use crate::task::Subagents;
@@ -168,7 +167,7 @@ async fn grok_sample_loop(
                     ctx,
                     PromptRequest {
                         system: system.clone(),
-                        history: sessions.events(),
+                        history: sessions.model_history(),
                         tools: tools.specs_for_model_on(ctx),
                     },
                 )
@@ -246,17 +245,13 @@ fn inject_goal_continuation(ctx: &Context, sessions: &Sessions) {
     )));
 }
 
-fn system_cache_key(ctx: &Context) -> (String, PathBuf, bool, Option<String>) {
+fn system_cache_key(ctx: &Context) -> (String, PathBuf) {
     let mode = ctx
         .get::<AgentPresets>(AGENT_PRESETS)
         .map(|p| p.current_id())
         .unwrap_or_default();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let plan = ctx.get::<PlanMode>(PLAN_MODE).is_some_and(|p| p.gated());
-    let goal = ctx
-        .get::<Goal>(GOAL)
-        .and_then(|g| if g.active() { Some(g.title()) } else { None });
-    (mode, cwd, plan, goal)
+    (mode, cwd)
 }
 
 fn cancelled(ctx: &Context) -> bool {
