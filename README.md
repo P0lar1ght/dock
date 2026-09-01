@@ -79,47 +79,59 @@ Dock 的 harness 就是一棵 Cordis 插件树。内核是 crate `cordis`（`Con
 
 ```mermaid
 flowchart TB
-  person["人"]
+  person(["人"])
   term["终端"]
-  host["宿主页<br/>dock-embed.js"]
-  person --> term
-  person --> host
+  host["宿主页 · dock-embed.js"]
 
-  subgraph app["cordis-app · 同一 Context"]
+  subgraph app["cordis-app · 一个 Context（内核 crate cordis）"]
     direction TB
 
-    subgraph surfaces["表面"]
+    subgraph surf["表面插件"]
       direction LR
-      tui["tui<br/>theme · tui.scrollback · tui.prompt<br/>tui.statusBar · tui.welcome<br/>tui.shortcuts · tui.pairing<br/>event loop"]
-      gw["gateway<br/>127.0.0.1:18991 兼 IPv6 loopback<br/>Origin 配对<br/>dock.1 JSON-RPC<br/>turn / thread / permissions<br/>slash/list · slash/execute<br/>image inputs · live-lookup"]
+      tui["tui<br/>event loop · 滚动区 · prompt<br/>overlay · 快捷键 · 主题 · 配对"]
+      gw["gateway<br/>回环 127.0.0.1:18991 · 兼 IPv6<br/>Origin 配对 · dock.1 JSON-RPC"]
     end
 
-    actor["session_actor<br/>session + session.port<br/>cron tick 1s live-lookup<br/>due → sessions.append / session.submit"]
+    actor["session_actor（SESSION_PORT）<br/>队列：提交 · 立即发送 · 提前<br/>GoalSummary · mailbox 续跑"]
+    aloop["agent-loop · LoopHandle<br/>GrokStep 驱动一轮"]
 
-    spine["Spine<br/>sessions · llm · tools<br/>systemPrompt · agents<br/>agentLoop"]
+    spine["Spine 五件套<br/>sessions · llm · tools（一张表）<br/>systemPrompt · agents"]
 
-    svc["Harness 服务<br/>settings · turn · permissions · cron · jobs · todos<br/>planMode · ask · mcp · goal · lsp · subagents<br/>memory · workflows · slash · agentPresets · compact<br/>tui.slots · dynamicCordisRunner"]
+    grains["工具粒 → register 进 tools<br/>web · todo · plan-mode · ask-user · jobs · scheduler<br/>task · subagent · memory · monitor · goal<br/>lsp · workflow · mcp-client · cordis"]
 
-    grains["tools.register · 一张表<br/>workspace: list_dir · read_file · grep · glob<br/>write_file · search_replace · bash<br/>grains: web · todo · plan-mode · ask-user · jobs<br/>scheduler · task · subagent · memory<br/>monitor · goal · lsp · workflow<br/>mcp-client · cordis"]
-
-    tui --> actor
-    gw --> actor
-    actor --> spine --> svc --> grains
+    svc["Harness 服务（named service · live-lookup）<br/>settings · turn · permissions · cron · jobs · todos<br/>planMode · ask · mcp · goal · lsp · subagents · memory<br/>workflows · slash · agentPresets · compact<br/>tui.slots · dynamicCordisRunner"]
   end
 
-  term --> tui
-  host -->|"loopback HTTP / WS"| gw
+  person --> term --> tui
+  person --> host -->|"loopback HTTP / WS"| gw
+
+  tui -->|"SESSION_PORT"| actor
+  gw -->|"SESSION_PORT"| actor
+  tick["cron tick · 1s（main 任务）"] -->|"到点 → submit"| actor
+  actor -->|"LoopHandle.run"| aloop
+  aloop -->|"跑一轮"| spine
+  aloop -.->|"live-lookup"| svc
+  grains -.->|"register"| spine
 
   api["模型 API"]
-  mcpOut["MCP stdio / HTTP"]
-  disk["~/.dock 与项目 .dock"]
-  md["cordis-render"]
+  mcp["MCP stdio / HTTP"]
+  disk["~/.dock · 项目 .dock"]
+  render["cordis-render · Markdown / Mermaid"]
 
-  spine --> api
-  grains --> mcpOut
+  spine -->|"采样"| api
+  grains -->|"mcp-client"| mcp
   svc --> disk
-  tui --> md
+  tui --> render
+
+  classDef surface fill:#e8f2ff,stroke:#3b82c4,color:#0b1f33;
+  classDef core fill:#fff3e0,stroke:#d98a2b,color:#3a2a10;
+  classDef ext fill:#eef0f2,stroke:#8a9199,color:#2a2f36;
+  class tui,gw surface;
+  class tick,actor,aloop core;
+  class api,mcp,disk,render ext;
 ```
+
+实线是控制 / 数据流，虚线是「`register` 进 `tools`」与「named service live-lookup」。两个表面（`tui`、`gateway`）都经 `SESSION_PORT` 把 prompt 投给 `session_actor`，也各自 live-look `sessions` 等做会话投影；`cron tick` 是 `main` 里独立的 tokio 任务，到点用同一个 port 提交。磁盘（`~/.dock` / 项目 `.dock`）由 `svc` 与部分工具粒（memory / plan-mode / dynamic / mcp）读写。
 
 挂载有序：工具粒都在 `workspace_tools` 之后、`llm` 之前 `register`；`compact` 在 `llm` 之后（要 `inject "llm"`）；`tool-subagent` 在 `tool-task` 之后（live-look `"subagents"`）。完整顺序与每颗粒的工具名见 [TOOLS.md](TOOLS.md)。
 
@@ -137,12 +149,19 @@ TUI 从不持有循环：按键映射成 `SessionCommand` 交给 `session_actor`
 
 ```mermaid
 flowchart LR
-  pre["agent/pre-step"] --> assemble["system-prompt/assemble"]
-  assemble --> stream["llm/stream"]
-  stream --> exec["tools/execute"]
-  exec -->|"tool call"| stream
-  stream -->|"text"| done["turn end"]
+  start(["用户 prompt<br/>GoalSummary / mailbox 续跑"])
+  start --> pre["agent/pre-step<br/>每轮一次"]
+  pre --> asm["system-prompt/assemble<br/>每轮一次"]
+  asm --> stream["llm/stream"]
+  stream -->|"工具调用"| exec["tools/execute<br/>权限 / 计划门"]
+  exec -->|"结果回灌"| stream
+  stream -->|"文本"| done(["turn 结束"])
+
+  classDef hub fill:#fff3e0,stroke:#d98a2b,color:#3a2a10;
+  class stream,exec hub;
 ```
+
+`llm/stream` 是这一轮的枢纽：出工具调用就过 `tools/execute`（权限 / 计划门在这里挡）再回来，出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
 
 ---
 
