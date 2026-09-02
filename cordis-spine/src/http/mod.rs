@@ -23,6 +23,10 @@ use crate::types::{
 
 use cordis::Context;
 
+/// HTTP `User-Agent` for LLM calls. Gateways that key the App column off UA
+/// see `dock/<version>` instead of `reqwest/0.12`.
+const LLM_USER_AGENT: &str = concat!("dock/", env!("CARGO_PKG_VERSION"));
+
 pub struct HttpSampler {
     pub ctx: Context,
     pub api_key: String,
@@ -100,7 +104,10 @@ async fn sample_http(
         ApiBackend::Responses => responses::body(&wire, &request, &user_images, thinking, &effort),
         ApiBackend::Messages => messages::body(&wire, &request, &user_images, thinking, &effort),
     };
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(LLM_USER_AGENT)
+        .build()
+        .expect("dock user-agent is a valid header value");
     let cancel = sampler.ctx.get::<TurnControl>(TURN).map(|t| t.token());
     let mut response = None;
     for attempt in 0..3u32 {
@@ -571,6 +578,12 @@ fn reasoning_details_text(details: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_user_agent_is_dock_version() {
+        assert_eq!(LLM_USER_AGENT, concat!("dock/", env!("CARGO_PKG_VERSION")));
+        assert!(LLM_USER_AGENT.starts_with("dock/"));
+    }
 
     #[test]
     fn parses_tool_call() {
