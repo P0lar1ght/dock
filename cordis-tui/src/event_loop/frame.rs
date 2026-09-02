@@ -867,6 +867,9 @@ mod tests {
             api_key: None,
             env_key: None,
             context_window: None,
+            api_backend: cordis_spine::ApiBackend::ChatCompletions,
+            auth_scheme: None,
+            api_model: None,
         }
     }
 

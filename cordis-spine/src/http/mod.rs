@@ -1,12 +1,15 @@
-//! OpenAI-compatible `chat/completions`. Live-lookup `"settings"` for model
-//! and `"turn"` for cancel. Streaming copied from Grok sampler
-//! `chat_completion_stream` (SSE `data:` → `ChatCompletionChunk` deltas).
+//! `"llm"` HTTP sampler. Live-lookup `"settings"` for model and `"turn"` for
+//! cancel. `api_backend` picks the wire (Grok `ApiBackend`): chat/completions,
+//! Responses, or Anthropic Messages. All three emit [`StreamDelta`].
+
+mod messages;
+mod responses;
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::chat_chunk::ChatCompletionChunk;
-use crate::config;
+use crate::config::{self, ApiBackend, AuthScheme};
 use crate::llm::Sampler;
 use crate::names::{SESSIONS, SETTINGS, TURN};
 use crate::runtime::BoxFuture;
@@ -58,9 +61,20 @@ async fn sample_http(
         .get::<AppSettings>(SETTINGS)
         .map(|s| s.thinking())
         .unwrap_or(true);
+    let choice = config::lookup_model(&model);
+    let backend = choice.as_ref().map(|m| m.api_backend).unwrap_or_default();
+    let auth = choice
+        .as_ref()
+        .map(|m| m.resolved_auth())
+        .unwrap_or(AuthScheme::Bearer);
+    let wire = choice
+        .as_ref()
+        .map(|m| m.wire_model().to_string())
+        .unwrap_or_else(|| model.clone());
     let (api_base, api_key) = resolve_endpoint(sampler, &model);
     if let Some(sessions) = sampler.ctx.get::<Sessions>(SESSIONS) {
-        let window = config::lookup_model(&model)
+        let window = choice
+            .as_ref()
             .and_then(|m| m.context_window)
             .unwrap_or(128_000);
         sessions.set_window(window);
@@ -72,63 +86,33 @@ async fn sample_http(
             ..crate::usage::TokenUsage::default()
         },
         official: false,
-        model: model.clone(),
+        model: wire.clone(),
         cost_usd_ticks: None,
     });
-    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
+    let url = format!("{}/{}", api_base.trim_end_matches('/'), backend.path());
     let user_images = sampler
         .ctx
         .get::<Sessions>(SESSIONS)
         .map(|s| s.model_user_images())
         .unwrap_or_default();
-    let mut body = json!({
-        "model": model,
-        "messages": messages(&request, &user_images),
-        "stream": true,
-        "stream_options": { "include_usage": true },
-    });
-    if !request.tools.is_empty() {
-        body["tools"] = Value::Array(
-            request
-                .tools
-                .iter()
-                .map(|t| {
-                    let parameters: Value = serde_json::from_str(&t.parameters_json)
-                        .unwrap_or(json!({"type":"object"}));
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": parameters,
-                        }
-                    })
-                })
-                .collect(),
-        );
-    }
-    if !thinking || effort == "none" {
-        body["reasoning"] = json!({ "effort": "none", "exclude": true });
-        body["reasoning_effort"] = json!("none");
-    } else if !effort.is_empty() {
-        // OpenRouter MiniMax / Claude / etc. need the unified `reasoning`
-        // object; legacy `reasoning_effort` alone is not enough for M3.
-        body["reasoning"] = json!({
-            "effort": effort,
-            "exclude": false,
-        });
-        body["reasoning_effort"] = json!(effort);
-    }
+    let body = match backend {
+        ApiBackend::ChatCompletions => chat_body(&wire, &request, &user_images, thinking, &effort),
+        ApiBackend::Responses => responses::body(&wire, &request, &user_images, thinking, &effort),
+        ApiBackend::Messages => messages::body(&wire, &request, &user_images, thinking, &effort),
+    };
     let client = reqwest::Client::new();
     let cancel = sampler.ctx.get::<TurnControl>(TURN).map(|t| t.token());
     let mut response = None;
     for attempt in 0..3u32 {
-        let send = client
+        let mut send = client
             .post(&url)
-            .bearer_auth(&api_key)
             .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&body)
-            .send();
+            .json(&body);
+        send = apply_auth(send, auth, &api_key);
+        if backend == ApiBackend::Messages {
+            send = send.header("anthropic-version", "2023-06-01");
+        }
+        let send = send.send();
         let got = if let Some(ref cancel) = cancel {
             tokio::select! {
                 biased;
@@ -203,7 +187,7 @@ async fn sample_http(
                 };
             }
         };
-        let output = parse_chat_completion(&text);
+        let output = parse_json_body(backend, &text);
         if !output.reasoning.is_empty() {
             on_delta(StreamDelta::Reasoning(output.reasoning.clone()));
         }
@@ -214,7 +198,7 @@ async fn sample_http(
     }
 
     let cancel = sampler.ctx.get::<TurnControl>(TURN).map(|t| t.token());
-    let mut acc = ChatStreamAcc::default();
+    let mut acc = WireAcc::new(backend, &wire);
     let mut buf = Vec::new();
     let mut first = true;
     let mut stream = response.bytes_stream();
@@ -252,10 +236,7 @@ async fn sample_http(
         }
         buf.extend_from_slice(&bytes);
         for data in take_sse_data(&mut buf) {
-            let Ok(frame) = serde_json::from_str::<ChatCompletionChunk>(&data) else {
-                continue;
-            };
-            for delta in acc.ingest(frame) {
+            for delta in acc.ingest(&data) {
                 on_delta(delta);
             }
         }
@@ -264,6 +245,110 @@ async fn sample_http(
         }
     }
     acc.finish()
+}
+
+fn apply_auth(
+    req: reqwest::RequestBuilder,
+    auth: AuthScheme,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    match auth {
+        AuthScheme::Bearer => req.bearer_auth(api_key),
+        AuthScheme::XApiKey => req.header("x-api-key", api_key),
+    }
+}
+
+enum WireAcc {
+    Chat(ChatStreamAcc),
+    Responses(responses::Acc),
+    Messages(messages::Acc),
+}
+
+impl WireAcc {
+    fn new(backend: ApiBackend, model: &str) -> Self {
+        match backend {
+            ApiBackend::ChatCompletions => Self::Chat(ChatStreamAcc::default()),
+            ApiBackend::Responses => Self::Responses(responses::Acc::new(model)),
+            ApiBackend::Messages => Self::Messages(messages::Acc::new(model)),
+        }
+    }
+
+    fn ingest(&mut self, data: &str) -> Vec<StreamDelta> {
+        match self {
+            Self::Chat(acc) => {
+                let Ok(frame) = serde_json::from_str::<ChatCompletionChunk>(data) else {
+                    return Vec::new();
+                };
+                acc.ingest(frame)
+            }
+            Self::Responses(acc) => acc.ingest_json(data),
+            Self::Messages(acc) => acc.ingest_json(data),
+        }
+    }
+
+    fn finish(self) -> LlmOutput {
+        match self {
+            Self::Chat(acc) => acc.finish(),
+            Self::Responses(acc) => acc.finish(),
+            Self::Messages(acc) => acc.finish(),
+        }
+    }
+}
+
+fn parse_json_body(backend: ApiBackend, text: &str) -> LlmOutput {
+    match backend {
+        ApiBackend::ChatCompletions => parse_chat_completion(text),
+        ApiBackend::Responses => responses::parse_json(text),
+        ApiBackend::Messages => messages::parse_json(text),
+    }
+}
+
+fn chat_body(
+    model: &str,
+    request: &PromptRequest,
+    user_images: &[Vec<UserImage>],
+    thinking: bool,
+    effort: &str,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages(request, user_images),
+        "stream": true,
+        "stream_options": { "include_usage": true },
+    });
+    if !request.tools.is_empty() {
+        body["tools"] = Value::Array(
+            request
+                .tools
+                .iter()
+                .map(|t| {
+                    let parameters: Value = serde_json::from_str(&t.parameters_json)
+                        .unwrap_or(json!({"type":"object"}));
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": parameters,
+                        }
+                    })
+                })
+                .collect(),
+        );
+    }
+    if !thinking || effort == "none" {
+        body["reasoning"] = json!({ "effort": "none", "exclude": true });
+        body["reasoning_effort"] = json!("none");
+    } else if !effort.is_empty() {
+        // OpenRouter MiniMax / Claude / etc. need the unified `reasoning`
+        // object; legacy `reasoning_effort` alone is not enough for M3.
+        body["reasoning"] = json!({
+            "effort": effort,
+            "exclude": false,
+        });
+        body["reasoning_effort"] = json!(effort);
+    }
+    body
 }
 
 fn resolve_endpoint(sampler: &HttpSampler, model: &str) -> (String, String) {

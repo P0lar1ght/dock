@@ -9,7 +9,8 @@ use crate::session::Sessions;
 use crate::stream_acc::StreamDelta;
 use crate::types::{LlmOutput, LogEvent, PromptRequest, ToolCall};
 
-/// Echo: always `echo`. Workspace: `list_dir` / `read_file`. Text: no tools. Http: OpenAI-compatible.
+/// Echo: always `echo`. Workspace: `list_dir` / `read_file`. Text: no tools.
+/// Http: `api_backend` chat/completions / responses / messages.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LlmMode {
     #[default]
@@ -59,7 +60,7 @@ impl LlmConfig {
     }
 }
 
-/// Swap this to change the protocol (stub, Grok chat / resp / anthropic, …).
+/// Swap this to change the protocol (stub, or HttpSampler `api_backend`).
 pub trait Sampler: Send + Sync {
     fn sample<'a>(
         &'a self,

@@ -10,6 +10,51 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 use serde::Deserialize;
 
+/// Grok `ApiBackend`: which inference wire the `llm` plugin speaks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ApiBackend {
+    #[default]
+    ChatCompletions,
+    Responses,
+    Messages,
+}
+
+impl ApiBackend {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("responses") | Some("resp") => Self::Responses,
+            Some("messages") | Some("anthropic") => Self::Messages,
+            _ => Self::ChatCompletions,
+        }
+    }
+
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat/completions",
+            Self::Responses => "responses",
+            Self::Messages => "messages",
+        }
+    }
+}
+
+/// Grok `AuthScheme`. Independent of [`ApiBackend`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AuthScheme {
+    #[default]
+    Bearer,
+    XApiKey,
+}
+
+impl AuthScheme {
+    pub fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("x_api_key") | Some("x-api-key") => Some(Self::XApiKey),
+            Some("bearer") => Some(Self::Bearer),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChoice {
     pub id: String,
@@ -22,6 +67,12 @@ pub struct ModelChoice {
     /// Env var name for the bearer token when `api_key` is empty.
     pub env_key: Option<String>,
     pub context_window: Option<u64>,
+    /// Grok `[model.<id>].api_backend` (`chat_completions` / `responses` / `messages`).
+    pub api_backend: ApiBackend,
+    /// `None` = Bearer, except Messages defaults to `x-api-key`.
+    pub auth_scheme: Option<AuthScheme>,
+    /// Wire slug in the JSON body. None = use [`Self::id`] (picker key).
+    pub api_model: Option<String>,
 }
 
 impl ModelChoice {
@@ -47,6 +98,21 @@ impl ModelChoice {
                 .and_then(|name| std::env::var(name).ok())
                 .and_then(|s| nonempty(Some(s)))
         })
+    }
+
+    pub fn resolved_auth(&self) -> AuthScheme {
+        self.auth_scheme.unwrap_or(match self.api_backend {
+            ApiBackend::Messages => AuthScheme::XApiKey,
+            ApiBackend::ChatCompletions | ApiBackend::Responses => AuthScheme::Bearer,
+        })
+    }
+
+    pub fn wire_model(&self) -> &str {
+        self.api_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.id.as_str())
     }
 }
 
@@ -437,6 +503,12 @@ struct CatalogRow {
     env_key: Option<String>,
     #[serde(default)]
     context_window: Option<u64>,
+    #[serde(default)]
+    api_backend: Option<String>,
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    #[serde(default)]
+    api_model: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -455,6 +527,12 @@ struct ModelOverride {
     env_key: Option<String>,
     #[serde(default)]
     context_window: Option<u64>,
+    #[serde(default)]
+    api_backend: Option<String>,
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    #[serde(default)]
+    api_model: Option<String>,
 }
 
 /// Built-in catalog (Grok `default_model_entries` role). Picker reads this only
@@ -476,6 +554,9 @@ pub fn default_model_entries() -> Vec<ModelChoice> {
         api_key: None,
         env_key: None,
         context_window: None,
+        api_backend: ApiBackend::ChatCompletions,
+        auth_scheme: None,
+        api_model: None,
     })
     .collect()
 }
@@ -574,6 +655,9 @@ fn choice_from_row(row: &CatalogRow) -> ModelChoice {
         api_key: nonempty(row.api_key.clone()),
         env_key: nonempty(row.env_key.clone()),
         context_window: row.context_window.filter(|n| *n > 0),
+        api_backend: ApiBackend::parse(row.api_backend.as_deref()),
+        auth_scheme: AuthScheme::parse(row.auth_scheme.as_deref()),
+        api_model: nonempty(row.api_model.clone()),
     }
 }
 
@@ -599,6 +683,15 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
             if ov.context_window.is_some() {
                 existing.context_window = ov.context_window.filter(|n| *n > 0);
             }
+            if ov.api_backend.is_some() {
+                existing.api_backend = ApiBackend::parse(ov.api_backend.as_deref());
+            }
+            if ov.auth_scheme.is_some() {
+                existing.auth_scheme = AuthScheme::parse(ov.auth_scheme.as_deref());
+            }
+            if ov.api_model.is_some() {
+                existing.api_model = nonempty(ov.api_model.clone());
+            }
             existing.id = id;
         } else {
             list.push(ModelChoice {
@@ -608,6 +701,9 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
                 api_key: nonempty(ov.api_key.clone()),
                 env_key: nonempty(ov.env_key.clone()),
                 context_window: ov.context_window.filter(|n| *n > 0),
+                api_backend: ApiBackend::parse(ov.api_backend.as_deref()),
+                auth_scheme: AuthScheme::parse(ov.auth_scheme.as_deref()),
+                api_model: nonempty(ov.api_model.clone()),
                 id,
             });
         }
@@ -738,6 +834,63 @@ api_key = "free"
             Some("https://free.empero.org/v1")
         );
         assert!(glm.has_http());
+    }
+
+    #[test]
+    fn api_backend_and_auth_scheme_from_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.claude]
+api_base_url = "https://api.anthropic.com/v1"
+api_backend = "messages"
+env_key = "ANTHROPIC_API_KEY"
+
+[model.gpt]
+api_base_url = "https://api.openai.com/v1"
+api_backend = "responses"
+auth_scheme = "bearer"
+"#,
+        )
+        .unwrap();
+        let list = load_catalog_from(&[path]);
+        let claude = list.iter().find(|m| m.id == "claude").unwrap();
+        assert_eq!(claude.api_backend, ApiBackend::Messages);
+        assert_eq!(claude.resolved_auth(), AuthScheme::XApiKey);
+        let gpt = list.iter().find(|m| m.id == "gpt").unwrap();
+        assert_eq!(gpt.api_backend, ApiBackend::Responses);
+        assert_eq!(gpt.resolved_auth(), AuthScheme::Bearer);
+        assert_eq!(ApiBackend::Messages.path(), "messages");
+        assert_eq!(ApiBackend::Responses.path(), "responses");
+        assert_eq!(ApiBackend::ChatCompletions.path(), "chat/completions");
+    }
+
+    #[test]
+    fn api_model_is_wire_slug_picker_keeps_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model."minimax-m3-responses"]
+name = "MiniMax M3 responses"
+api_base_url = "https://openrouter.ai/api/v1"
+api_backend = "responses"
+api_model = "minimax/minimax-m3:free"
+auth_scheme = "bearer"
+"#,
+        )
+        .unwrap();
+        let list = load_catalog_from(&[path]);
+        let m = list
+            .iter()
+            .find(|m| m.id == "minimax-m3-responses")
+            .unwrap();
+        assert_eq!(m.wire_model(), "minimax/minimax-m3:free");
+        assert_eq!(m.api_backend, ApiBackend::Responses);
+        assert_eq!(m.resolved_auth(), AuthScheme::Bearer);
     }
 
     #[test]

@@ -140,34 +140,36 @@ fn snapshot_with_parts(ctx: &Context, parts: &PromptAssembly) -> ContextSnapshot
     let system = parts.render();
     let system_prompt_tokens = estimate_text(&system);
     let sessions = ctx.get::<Sessions>(SESSIONS);
-    let (base, reasoning, turn_count, tool_call_count, compaction_count) = if let Some(sessions) =
-        sessions.as_ref()
-    {
-        let history = sessions.model_history();
-        let display = sessions.events();
-        (
-            estimate_context_tokens(&system, &history),
-            reasoning_tokens(&history),
-            display
-                .iter()
-                .filter(|e| matches!(e, LogEvent::User(t) if !t.trim().is_empty()))
-                .count() as u64,
-            display
-                .iter()
-                .filter(|e| matches!(e, LogEvent::ToolExecute { .. }))
-                .count() as u64,
-            display
-                .iter()
-                .filter(|e| matches!(e, LogEvent::LlmStream(out) if out.text == VISIBLE_NOTICE))
-                .count() as u64,
-        )
-    } else {
-        (system_prompt_tokens, 0, 0, 0, 0)
-    };
+    let (base, reasoning, turn_count, tool_call_count, compaction_count) =
+        if let Some(sessions) = sessions.as_ref() {
+            let history = sessions.model_history();
+            let display = sessions.events();
+            (
+                estimate_context_tokens(&system, &history),
+                reasoning_tokens(&history),
+                display
+                    .iter()
+                    .filter(|e| matches!(e, LogEvent::User(t) if !t.trim().is_empty()))
+                    .count() as u64,
+                display
+                    .iter()
+                    .filter(|e| matches!(e, LogEvent::ToolExecute { .. }))
+                    .count() as u64,
+                display
+                    .iter()
+                    .filter(|e| matches!(e, LogEvent::LlmStream(out) if out.text == VISIBLE_NOTICE))
+                    .count() as u64,
+            )
+        } else {
+            (system_prompt_tokens, 0, 0, 0, 0)
+        };
     let message_tokens = base.saturating_sub(system_prompt_tokens);
     let image_tokens = sessions
         .as_ref()
-        .map(|s| s.model_user_image_count().saturating_mul(IMAGE_TOKEN_ESTIMATE))
+        .map(|s| {
+            s.model_user_image_count()
+                .saturating_mul(IMAGE_TOKEN_ESTIMATE)
+        })
         .unwrap_or(0);
 
     let (builtin_specs, _, _) = partition_model_specs(ctx);

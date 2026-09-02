@@ -20,7 +20,7 @@
 |---|---|
 | `/settings`（`config` `prefs`） | 设置 overlay；有参数则直接改（`timestamps` / `theme` / `model`）。浏览器 companion 一律拒绝（含带参），请用 `/timestamps` `/think` `/model` `/effort` |
 | `/new` | 归档当前会话并清空。账本用量一并清零。归档写入 `$DOCK_HOME/sessions/<cwd>/` |
-| `/model` `/m` | 切换当前模型 |
+| `/model` `/m` | 切换当前模型。目录 `[model.<id>].api_backend`（`chat_completions` / `responses` / `messages`）决定 `"llm"` 走哪条 HTTP 线；`api_model` 是发给上游的 slug（省略=目录 id）；`auth_scheme` 默认 Bearer，messages 默认 `x-api-key`（OpenRouter 的 /messages 要写 `bearer`） |
 | `/resume` | 打开会话 picker，恢复本工作区已落盘的会话（进程重启后仍在）。用量账本不随归档恢复（Grok：新进程 resume 清零）。进程入口 `--resume` / `--resume <id>` 启动时直接恢复 |
 | `/pair`（`pairing`） | 浏览器 Origin 配对：第一行开启/关闭回环网关（默认不监听；首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。开启后待批请求可批准，已绑来源可撤销。overlay 显示实际监听地址。首次连接弹出「允许浏览器连接？」；Enter 批准 / `x` 拒绝或撤销（在网关行上 `x` 关闭监听）。浏览器 companion 的 list/execute 限制见上文。CORS 反射任意 Origin：鉴权靠配对 + 回环。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费 |
 | `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
