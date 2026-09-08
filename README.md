@@ -61,7 +61,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 - 工作区：`bash` `read_file` `grep` `glob` `write_file` `search_replace`
 - 计划、提问、后台任务、调度、子代理、记忆、LSP、workflow
-- 浏览器驾驶舱（`browser_*`，`register_deferred`，chromiumoxide CDP + lean a11y refs）
+- 浏览器驾驶舱（`browser_*`，`register_deferred`，chromiumoxide CDP + `/browser` 完整 TUI 驾驶舱 overlay（PR C））
 - MCP 与不常用本地工具走 `search_tool` / `use_tool` 渐进披露；内部公名 `mcp_{server}__{tool}`，不能盖掉 `bash`
 - 动态包：`cordis_define` / `cordis_run` / `cordis_promote` 写成 `.dock/plugins`
 

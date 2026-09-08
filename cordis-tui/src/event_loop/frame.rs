@@ -2,8 +2,9 @@
 
 use cordis::Context;
 use cordis_spine::{
-    AgentPresets, AppSettings, Ask, Goal, PermissionMode, Permissions, PlanMode, Sessions,
-    TuiSlots, AGENT_PRESETS, ASK, GOAL, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TUI_SLOTS,
+    AgentPresets, AppSettings, Ask, Browser, Goal, PermissionMode, Permissions, PlanMode, Sessions,
+    TuiSlots, AGENT_PRESETS, ASK, BROWSER, GOAL, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
+    TUI_SLOTS,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::CrosstermBackend;
@@ -830,6 +831,26 @@ pub(super) fn paint_overlay(
                 .and_then(|s| s.render(id))
                 .unwrap_or_else(|| format!("slot \"{id}\" is not registered"));
             text_overlay::render(buf, area, &title, &body, *scroll)
+        }
+        Overlay::Browser { scroll } => {
+            let approval = ctx
+                .get::<Permissions>(PERMISSIONS)
+                .and_then(|p| p.front())
+                .filter(|pr| pr.tool.starts_with("browser_"))
+                .map(|pr| {
+                    if pr.summary.is_empty() {
+                        pr.tool
+                    } else {
+                        format!("{} — {}", pr.tool, pr.summary)
+                    }
+                });
+            let body = ctx
+                .get::<Browser>(BROWSER)
+                .map(|b| b.format_cockpit(approval.as_deref()))
+                .unwrap_or_else(|| {
+                    "browser 未挂载（tool-browser 插件不在树上）。".into()
+                });
+            text_overlay::render(buf, area, "浏览器", &body, *scroll)
         }
         Overlay::Inspect {
             target,

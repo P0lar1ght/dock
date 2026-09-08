@@ -154,6 +154,11 @@ pub(super) fn run_action(
                 scroll_text(scroll, delta, body);
                 return Vec::new();
             }
+            if let Overlay::Browser { scroll } = overlay {
+                let body = browser_cockpit_body(ctx);
+                scroll_text(scroll, delta, &body);
+                return Vec::new();
+            }
             if let Overlay::Inspect { target, scroll, .. } = overlay {
                 // Stick-to-bottom: OverlayMove(-1) is ↑ and should reveal older lines.
                 scroll_inspect(ctx, target, scroll, -delta);
@@ -741,6 +746,11 @@ pub(super) fn run_action(
                 scroll_text(scroll, delta, body);
                 return Vec::new();
             }
+            if let Overlay::Browser { scroll } = overlay {
+                let body = browser_cockpit_body(ctx);
+                scroll_text(scroll, delta, &body);
+                return Vec::new();
+            }
             if let Overlay::Inspect { target, scroll, .. } = overlay {
                 scroll_inspect(ctx, target, scroll, delta);
                 return Vec::new();
@@ -1189,6 +1199,7 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         | Overlay::Usage { .. }
         | Overlay::Notice { .. }
         | Overlay::Slot { .. }
+        | Overlay::Browser { .. }
         | Overlay::Inspect { .. }
         | Overlay::Presets(_) => None,
         Overlay::Tasks { .. } | Overlay::Mcps { .. } | Overlay::Workflows { .. } => None,

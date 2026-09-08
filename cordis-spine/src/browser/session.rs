@@ -294,6 +294,20 @@ impl ConnectedSession {
         Ok(path)
     }
 
+    /// Sync-friendly tab rows for the `/browser` cockpit cache.
+    pub async fn tab_infos(&self) -> Vec<super::BrowserTabInfo> {
+        let mut out = Vec::with_capacity(self.pages.len());
+        for (i, p) in self.pages.iter().enumerate() {
+            let u = p.url().await.ok().flatten().unwrap_or_default();
+            out.push(super::BrowserTabInfo {
+                index: i,
+                url: u,
+                active: i == self.active,
+            });
+        }
+        out
+    }
+
     pub async fn tabs(
         &mut self,
         action: &str,

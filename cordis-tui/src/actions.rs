@@ -167,6 +167,8 @@ pub enum Effect {
         user: bool,
     },
     ShowCordis,
+    /// Live `/browser` cockpit overlay (status / tabs / screenshot / 审批).
+    ShowBrowser,
     ShowPresets {
         focus: Option<String>,
     },
@@ -367,6 +369,7 @@ pub fn effect_for_extra(entry: &SlashEntry, args: &str) -> Effect {
                 Effect::SetPrompt { text }
             }
         }
+        ExtraSlashKind::Overlay if entry.command == "browser" => Effect::ShowBrowser,
         ExtraSlashKind::Overlay => Effect::ShowNotice {
             title: entry.overlay_title(),
             body: text,
@@ -590,6 +593,34 @@ mod tests {
             interpret_loop_composer("just a normal prompt"),
             LoopComposer::Other
         ));
+    }
+
+    #[test]
+    fn browser_extra_overlay_live_looks_cockpit() {
+        let entry = SlashEntry {
+            command: "browser".into(),
+            description: "浏览器驾驶舱（未连接）".into(),
+            kind: ExtraSlashKind::Overlay,
+            text: "未连接".into(),
+            title: "浏览器".into(),
+            send: false,
+        };
+        assert!(matches!(effect_for_extra(&entry, ""), Effect::ShowBrowser));
+        let other = SlashEntry {
+            command: "skills".into(),
+            description: "技能".into(),
+            kind: ExtraSlashKind::Overlay,
+            text: "body".into(),
+            title: "技能".into(),
+            send: false,
+        };
+        match effect_for_extra(&other, "") {
+            Effect::ShowNotice { title, body } => {
+                assert_eq!(title, "技能");
+                assert_eq!(body, "body");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

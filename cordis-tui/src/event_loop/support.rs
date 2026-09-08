@@ -5,10 +5,10 @@ use std::collections::HashSet;
 use cordis::Context;
 use cordis_spine::{
     goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
-    Ask, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind, Permissions, PlanMode,
-    Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage, Workflows, AGENT_PRESETS, ASK,
-    CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS,
-    WORKFLOWS,
+    Ask, Browser, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind, Permissions,
+    PlanMode, Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage, Workflows,
+    AGENT_PRESETS, ASK, BROWSER, CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
+    SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
 
 use crate::ask_view;
@@ -132,6 +132,24 @@ pub(super) fn dispatch_slot_key(ctx: &Context, overlay: &mut Overlay, key: &str)
         overlay.close();
     }
     true
+}
+
+
+pub(super) fn browser_cockpit_body(ctx: &Context) -> String {
+    let approval = ctx
+        .get::<Permissions>(PERMISSIONS)
+        .and_then(|p| p.front())
+        .filter(|pr| pr.tool.starts_with("browser_"))
+        .map(|pr| {
+            if pr.summary.is_empty() {
+                pr.tool
+            } else {
+                format!("{} — {}", pr.tool, pr.summary)
+            }
+        });
+    ctx.get::<Browser>(BROWSER)
+        .map(|b| b.format_cockpit(approval.as_deref()))
+        .unwrap_or_else(|| "browser 未挂载（tool-browser 插件不在树上）。".into())
 }
 
 pub(super) fn open_ask_if_needed(ctx: &Context, overlay: &mut Overlay) {
@@ -1098,6 +1116,7 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
         Overlay::Usage { .. }
         | Overlay::Notice { .. }
         | Overlay::Slot { .. }
+        | Overlay::Browser { .. }
         | Overlay::Inspect { .. } => 0,
         Overlay::Presets(view) => preset_overlay::overlay_len(ctx, view),
     }
