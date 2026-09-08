@@ -45,6 +45,40 @@ where
     }
 }
 
+/// Poll `check` until it returns `Ok(true)` or `timeout` elapses.
+pub async fn poll_until<F, Fut>(
+    timeout: Duration,
+    interval: Duration,
+    mut check: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, String>>,
+{
+    let start = tokio::time::Instant::now();
+    let deadline = start + timeout;
+    loop {
+        if check().await? {
+            return Ok(());
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "wait timed out after {}ms",
+                start.elapsed().as_millis()
+            ));
+        }
+        let sleep_for = interval.min(deadline.saturating_duration_since(now));
+        if sleep_for.is_zero() {
+            return Err(format!(
+                "wait timed out after {}ms",
+                start.elapsed().as_millis()
+            ));
+        }
+        tokio::time::sleep(sleep_for).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +116,23 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, "timed out");
+    }
+
+    #[tokio::test]
+    async fn poll_until_succeeds_and_times_out() {
+        let n = AtomicU32::new(0);
+        poll_until(Duration::from_millis(200), Duration::from_millis(5), || {
+            let c = n.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(c >= 2) }
+        })
+        .await
+        .unwrap();
+
+        let err = poll_until(Duration::from_millis(30), Duration::from_millis(5), || async {
+            Ok(false)
+        })
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
     }
 }

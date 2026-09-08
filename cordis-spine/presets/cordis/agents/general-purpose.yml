@@ -25,9 +25,16 @@ tools:
   - search_tool
   - use_tool
   - browser_open
+  - browser_navigate
+  - browser_navigate_back
   - browser_snapshot
   - browser_click
+  - browser_hover
   - browser_type
+  - browser_press_key
+  - browser_select_option
+  - browser_fill_form
+  - browser_wait_for
   - browser_screenshot
   - browser_tabs
   - browser_close
