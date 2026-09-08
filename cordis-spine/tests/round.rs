@@ -335,6 +335,9 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "browser_resize",
         "browser_screenshot",
         "browser_tabs",
+        "browser_evaluate",
+        "browser_console_messages",
+        "browser_network_requests",
         "browser_close",
     ] {
         assert!(
@@ -385,6 +388,9 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "browser_resize",
         "browser_screenshot",
         "browser_tabs",
+        "browser_evaluate",
+        "browser_console_messages",
+        "browser_network_requests",
         "browser_close",
     ] {
         assert!(
@@ -429,6 +435,9 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "browser_resize",
         "browser_screenshot",
         "browser_tabs",
+        "browser_evaluate",
+        "browser_console_messages",
+        "browser_network_requests",
         "browser_close",
     ] {
         assert!(

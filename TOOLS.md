@@ -39,7 +39,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 | `tui.slots` | `"tui.slots"` | — | 动态包登记的 TUI 插槽（数据+回调，不是 ratatui widget）。`install_app` 始终挂上。TUI 用一次通用 `Overlay::Slot` 臂 |
 | `agent-presets` | `"agentPresets"` | — | 组装 Agent：YAML 定义人设 + 工具允许名单，运行时只过滤 live `"tools"`。**正在运行的动态包**用 `Tools::register_dynamic` 登记的 extra 工具、以及 **已开启的 MCP 工具**（`register_mcp`，公名 `mcp_{server}__{tool}`，经 `use_tool` 调度）会穿过允许名单。层：crate `presets/<id>/agent.yml` + `agents/*.yml` < `~/.dock/presets` < 项目 `.dock/presets`。仍可读旧 `<id>.yml`（目录优先）。加一个目录就是一个 Agent。内置 `code` / `minimal` / `cordis` / `warden`（守望）。`code`/`cordis` 的 `agents/` 名册是 `general-purpose` / `explore` / `plan`（项目层可加，如 `.dock/presets/创造/agents/review.yml` 叠到 `cordis`）；`warden` 是 `岑` `锁` `甲` `乙` `丙` `衡` `验` `观` `突击`（不要用拼音 id）。发给模型的 `subagent`/`task` 把 `subagent_type` 收成当前名册 enum。省略 `tools` = 全部已注册工具。新建模式默认写**当前工作区** `.dock/presets/<id>/agent.yml`（`/preset` n/d 有项目层时落到这里；系统提示注入 `.dock/presets` 与 `.dock/presets/<模式>/agents`，不用绝对 `{cwd}`；id 必须 `[a-z0-9][a-z0-9-]*`，汉字目录只叠内置）。新建子代理默认写 `.dock/presets/<当前模式 id>/agents/<type>.yml`。空名册仍注入这两处路径。只有用户明确要求保存到全局才写 `~/.dock/presets/`。写完人设后 `subagent` 校验立刻重读；本轮刚写完时用 `subagent`（`reload_roster: true`）刷新 enum。新建模式写完后用 `/preset` 应用该 id。改 crate `presets/` 要重新编译 |
 | `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 |
-| `tool-browser` | `"browser"` + `"tools"` | `browser_open` `browser_navigate` `browser_navigate_back` `browser_snapshot` `browser_click` `browser_hover` `browser_type` `browser_press_key` `browser_select_option` `browser_fill_form` `browser_wait_for` `browser_drag` `browser_handle_dialog` `browser_file_upload` `browser_resize` `browser_screenshot` `browser_tabs` `browser_close`（按需） | **BUA D2 / P1**：in-process **chromiumoxide** CDP。D1/P0 之外增加 drag / handle_dialog / file_upload / resize。`browser_open` = 确保会话 + 首个 URL（可懒启动独立 `$DOCK_HOME/browser/user-data` Chromium）；`browser_navigate` / `browser_navigate_back` = 已有会话内跳转。`browser_snapshot` 出 lean a11y 树 + `@eN` refs（agent-browser 仅作形状参考，非运行时依赖）。无 Node/Playwright。`register_deferred`：不进 sampler / `specs_for_model`。Fiber dispose 关掉 Chromium。`/browser` 驾驶舱列 P0+P1。`code` / `cordis`（+ general-purpose）允许名单含这些 `browser_*`；`minimal` / `warden` 主代理不含 |
+| `tool-browser` | `"browser"` + `"tools"` | `browser_open` `browser_navigate` `browser_navigate_back` `browser_snapshot` `browser_click` `browser_hover` `browser_type` `browser_press_key` `browser_select_option` `browser_fill_form` `browser_wait_for` `browser_drag` `browser_handle_dialog` `browser_file_upload` `browser_resize` `browser_evaluate` `browser_console_messages` `browser_network_requests` `browser_screenshot` `browser_tabs` `browser_close`（按需） | **BUA P2**：in-process **chromiumoxide** CDP。P1 之外增加 `browser_evaluate`（**权限门同 bash**：`needs_permission` + `blocked_in_plan`，经 `tools/execute` / `use_tool` 命中）、只读截断的 `browser_console_messages` / `browser_network_requests`（会话连接时挂 Network/Runtime 监听，保留最近 N 条）、以及 **同域 iframe**：`browser_snapshot` / `browser_evaluate` / `browser_click` 可选 `frame`/`frame_selector`（CSS 选 iframe）；跨域或找不到则明确报错。无 Node/Playwright；CUA 像素点击仍不做。`register_deferred`：不进 sampler / `specs_for_model`。Fiber dispose 关掉 Chromium。`/browser` 驾驶舱列 P0–P2 + 最近 evaluate/network。`code` / `cordis`（+ general-purpose）允许名单含这些 `browser_*`；`minimal` / `warden` 主代理不含 |
 | `tool-todo` | `"todos"` + `"tools"` | `todo_write` | Grok merge/replace |
 | `plan-mode` | `"planMode"` + `"tools"` | `enter_plan_mode` `exit_plan_mode` | 计划文件 `.dock/plan.md`。计划态挡住 bash / 写文件等 |
 | `tool-ask-user` | `"ask"` + `"tools"` | `ask_user_question` | 事件 `ask/pending` |
@@ -69,11 +69,19 @@ cargo test -p cordis-spine --test round -- install_app_registers
 }
 ```
 
-权限门（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote`。
+权限门（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `browser_evaluate`。
 
 计划门：同上（`enter_plan_mode` 之后这些返回 blocked，直到 `exit_plan_mode`）。例外：对 `.dock/plan.md` 的 `search_replace` / `write_file` 自动放行（对齐 grok）。
 
 ---
+
+
+### Browser iframe 策略（BUA P2）
+
+- **默认**：`browser_snapshot` / `browser_evaluate` / click·type 等操作在**主文档**（current main frame）。
+- **进入同域 iframe**：在 `browser_snapshot` / `browser_evaluate`（及 click 的文档对称参数）上传可选 `frame` 或 `frame_selector`（CSS，指向 `<iframe>`/`<frame>`）。实现用主文档 `querySelector` 探测 + `Page.getFrameTree` 匹配 CDP `FrameId`，再对 evaluate 设 `Runtime.evaluate` 的 `contextId`，对 snapshot 传 `Accessibility.getFullAXTree.frameId`。
+- **跨域 / 找不到**：探测读 `contentDocument` 失败或树里匹配不到时，**直接失败并返回明确错误**（例如 `cross-origin iframe (CDP cannot enter)` / `no element matching frame_selector`）。不做 OOPIF 像素点击，也不静默落到主文档。
+- **refs**：framed snapshot 产生的 `@eN` 只对该 frame 有效；click 前应使用同一 `frame_selector` 拍到的 snapshot。
 
 ## 待做（已挂名、仍比 Grok 薄）
 
