@@ -9,6 +9,7 @@ mod agent_presets;
 mod agents;
 mod ask_user;
 mod browser;
+mod computer;
 mod bundle;
 mod chat_chunk;
 mod compact;
@@ -59,6 +60,7 @@ pub use agent_presets::{
 pub use agents::{agents, Agent, Agents};
 pub use ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
 pub use browser::{tool_browser, Browser, BrowserSession, BrowserTabInfo, BROWSER_TOOL_NAMES};
+pub use computer::{tool_computer, Computer, CUA_DRIVER_SERVER};
 pub use bundle::{
     install_app, install_core, install_fakes, install_foundation, install_spine,
     install_without_llm,
@@ -101,7 +103,7 @@ pub use mcp::{
 pub use memory::{tool_memory, Memory};
 pub use monitor::tool_monitor;
 pub use names::{
-    AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, CONTEXT, CRON,
+    AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
     DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
     PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
     SESSIONS, SESSION_EVENT, SETTINGS, SKILLS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS,
