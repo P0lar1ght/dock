@@ -1,6 +1,7 @@
 //! Chromiumoxide CDP session: launch, navigate, tabs, dispose.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -8,13 +9,18 @@ use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::accessibility::{EnableParams, GetFullAxTreeParams};
 use chromiumoxide::cdp::browser_protocol::dom::{
     FocusParams, GetBoxModelParams, ResolveNodeParams, ScrollIntoViewIfNeededParams,
+    SetFileInputFilesParams,
 };
+use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::input::{
-    DispatchKeyEventParams, DispatchKeyEventType, InsertTextParams,
+    DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
+    InsertTextParams, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    GetNavigationHistoryParams, NavigateToHistoryEntryParams,
+    EventJavascriptDialogOpening, GetNavigationHistoryParams, HandleJavaScriptDialogParams,
+    NavigateToHistoryEntryParams,
 };
+use chromiumoxide::layout::Point;
 use chromiumoxide::cdp::browser_protocol::target::{ActivateTargetParams, CloseTargetParams};
 use chromiumoxide::cdp::js_protocol::runtime::{CallArgument, CallFunctionOnParams};
 use chromiumoxide::keys;
@@ -31,12 +37,21 @@ const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const NAV_TIMEOUT: Duration = Duration::from_secs(45);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Clone, Debug)]
+pub struct PendingDialog {
+    pub message: String,
+    pub dialog_type: String,
+    pub default_prompt: Option<String>,
+}
+
 #[allow(dead_code)] // retained for status / debugging profile path
 pub struct ConnectedSession {
     browser: Browser,
     pages: Vec<Page>,
     active: usize,
     handler: JoinHandle<()>,
+    dialog_tasks: Vec<JoinHandle<()>>,
+    pending_dialog: Arc<std::sync::Mutex<Option<PendingDialog>>>,
     pub(crate) user_data_dir: PathBuf,
     pub refs: HashMap<String, RefEntry>,
 }
@@ -99,14 +114,46 @@ impl ConnectedSession {
         .await
         .map_err(|e| format!("new_page({start}): {e}"))?;
 
+        let pending_dialog = Arc::new(std::sync::Mutex::new(None));
+        let mut dialog_tasks = Vec::new();
+        dialog_tasks.push(Self::spawn_dialog_listener(&page, pending_dialog.clone()).await?);
+
         Ok(Self {
             browser,
             pages: vec![page],
             active: 0,
             handler,
+            dialog_tasks,
+            pending_dialog,
             user_data_dir,
             refs: HashMap::new(),
         })
+    }
+
+    async fn spawn_dialog_listener(
+        page: &Page,
+        pending: Arc<std::sync::Mutex<Option<PendingDialog>>>,
+    ) -> Result<JoinHandle<()>, String> {
+        let mut events = page
+            .event_listener::<EventJavascriptDialogOpening>()
+            .await
+            .map_err(|e| format!("dialog listener: {e}"))?;
+        Ok(tokio::spawn(async move {
+            while let Some(ev) = events.next().await {
+                let info = PendingDialog {
+                    message: ev.message.clone(),
+                    dialog_type: ev.r#type.as_ref().to_string(),
+                    default_prompt: ev.default_prompt.clone(),
+                };
+                if let Ok(mut g) = pending.lock() {
+                    *g = Some(info);
+                }
+            }
+        }))
+    }
+
+    pub fn pending_dialog(&self) -> Option<PendingDialog> {
+        self.pending_dialog.lock().ok().and_then(|g| g.clone())
     }
 
     pub fn active_page(&self) -> Result<&Page, String> {
@@ -340,6 +387,8 @@ impl ConnectedSession {
                     .new_page(u)
                     .await
                     .map_err(|e| format!("new tab: {e}"))?;
+                self.dialog_tasks
+                    .push(Self::spawn_dialog_listener(&page, self.pending_dialog.clone()).await?);
                 self.pages.push(page);
                 self.active = self.pages.len() - 1;
                 self.refs.clear();
@@ -778,9 +827,220 @@ impl ConnectedSession {
 
     pub async fn shutdown(mut self) {
         self.refs.clear();
+        for t in self.dialog_tasks.drain(..) {
+            t.abort();
+        }
         let _ = self.browser.close().await;
         let _ = self.browser.wait().await;
         self.handler.abort();
+    }
+
+    async fn point_for_backend(
+        page: &Page,
+        backend: chromiumoxide::cdp::browser_protocol::dom::BackendNodeId,
+    ) -> Result<Point, String> {
+        page.execute(
+            ScrollIntoViewIfNeededParams::builder()
+                .backend_node_id(backend.clone())
+                .build(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let model = page
+            .execute(
+                GetBoxModelParams::builder()
+                    .backend_node_id(backend)
+                    .build(),
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .result
+            .model;
+        Ok(chromiumoxide::layout::ElementQuad::from_quad(&model.content).quad_center())
+    }
+
+    async fn resolve_point(
+        &self,
+        page: &Page,
+        ref_id: Option<&str>,
+        x: Option<f64>,
+        y: Option<f64>,
+        which: &str,
+    ) -> Result<(Point, String), String> {
+        if let (Some(x), Some(y)) = (x, y) {
+            return Ok((Point { x, y }, format!("coords ({x},{y})")));
+        }
+        let raw = ref_id.ok_or_else(|| {
+            format!("{which} requires ref or x/y coordinates")
+        })?;
+        let (key, entry) = self.lookup_ref(raw)?;
+        let backend = snapshot::backend_id(&entry)
+            .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
+        let point = Self::point_for_backend(page, backend).await?;
+        Ok((point, format!("@{key}")))
+    }
+
+    /// Drag from source ref/coords to target ref/coords via CDP mouse events.
+    pub async fn drag(
+        &mut self,
+        source_ref: Option<&str>,
+        target_ref: Option<&str>,
+        start_x: Option<f64>,
+        start_y: Option<f64>,
+        end_x: Option<f64>,
+        end_y: Option<f64>,
+        steps: Option<u32>,
+    ) -> Result<String, String> {
+        let page = self.active_page()?.clone();
+        let (start, start_label) = self
+            .resolve_point(&page, source_ref, start_x, start_y, "drag source")
+            .await?;
+        let (end, end_label) = self
+            .resolve_point(&page, target_ref, end_x, end_y, "drag target")
+            .await?;
+        let steps = steps.unwrap_or(10).max(1) as i64;
+
+        // Move to start, press, move with button held, release.
+        page.move_mouse(start)
+            .await
+            .map_err(|e| format!("drag move start: {e}"))?;
+        let press = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(start.x)
+            .y(start.y)
+            .button(MouseButton::Left)
+            .buttons(1)
+            .click_count(1)
+            .build()
+            .map_err(|e| e.to_string())?;
+        page.execute(press)
+            .await
+            .map_err(|e| format!("drag press: {e}"))?;
+
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let x = start.x + (end.x - start.x) * t;
+            let y = start.y + (end.y - start.y) * t;
+            let mv = DispatchMouseEventParams::builder()
+                .r#type(DispatchMouseEventType::MouseMoved)
+                .x(x)
+                .y(y)
+                .button(MouseButton::Left)
+                .buttons(1)
+                .build()
+                .map_err(|e| e.to_string())?;
+            page.execute(mv)
+                .await
+                .map_err(|e| format!("drag move: {e}"))?;
+        }
+
+        let release = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(end.x)
+            .y(end.y)
+            .button(MouseButton::Left)
+            .buttons(0)
+            .click_count(1)
+            .build()
+            .map_err(|e| e.to_string())?;
+        page.execute(release)
+            .await
+            .map_err(|e| format!("drag release: {e}"))?;
+
+        self.refs.clear();
+        Ok(format!("dragged from {start_label} to {end_label}"))
+    }
+
+    /// Accept or dismiss a pending JS dialog (alert/confirm/prompt/beforeunload).
+    pub async fn handle_dialog(
+        &mut self,
+        accept: bool,
+        prompt_text: Option<&str>,
+    ) -> Result<String, String> {
+        let page = self.active_page()?.clone();
+        let pending = self.pending_dialog();
+        let mut params = HandleJavaScriptDialogParams::new(accept);
+        if let Some(t) = prompt_text {
+            params.prompt_text = Some(t.to_string());
+        }
+        page.execute(params)
+            .await
+            .map_err(|e| format!("handleJavaScriptDialog: {e}"))?;
+        if let Ok(mut g) = self.pending_dialog.lock() {
+            *g = None;
+        }
+        let action = if accept { "accepted" } else { "dismissed" };
+        match pending {
+            Some(d) => {
+                let mut out = format!(
+                    "{action} {dtype} dialog: {msg}",
+                    dtype = d.dialog_type,
+                    msg = d.message
+                );
+                if let Some(p) = d.default_prompt.as_ref().filter(|s| !s.is_empty()) {
+                    out.push_str(&format!(" (default_prompt={p:?})"));
+                }
+                Ok(out)
+            }
+            None => Ok(format!("{action} dialog (no tracked pending event)")),
+        }
+    }
+
+    /// Set files on an `<input type=file>` identified by snapshot ref.
+    pub async fn file_upload(
+        &mut self,
+        ref_id: &str,
+        paths: &[String],
+    ) -> Result<String, String> {
+        if paths.is_empty() {
+            return Err("paths must be a non-empty array of file paths".into());
+        }
+        let mut abs = Vec::with_capacity(paths.len());
+        for p in paths {
+            let pb = PathBuf::from(p);
+            if !pb.is_file() {
+                return Err(format!("file not found: {p}"));
+            }
+            abs.push(
+                pb.canonicalize()
+                    .map_err(|e| format!("canonicalize {p}: {e}"))?
+                    .display()
+                    .to_string(),
+            );
+        }
+        let (key, entry) = self.lookup_ref(ref_id)?;
+        let backend = snapshot::backend_id(&entry)
+            .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
+        let page = self.active_page()?.clone();
+        let params = SetFileInputFilesParams::builder()
+            .files(abs.clone())
+            .backend_node_id(backend)
+            .build()
+            .map_err(|e| e.to_string())?;
+        page.execute(params)
+            .await
+            .map_err(|e| format!("setFileInputFiles: {e}"))?;
+        self.refs.clear();
+        Ok(format!(
+            "uploaded {} file(s) to @{key}: {}",
+            abs.len(),
+            abs.join(", ")
+        ))
+    }
+
+    /// Override viewport size via Emulation.setDeviceMetricsOverride.
+    pub async fn resize(&mut self, width: i64, height: i64) -> Result<String, String> {
+        if width <= 0 || height <= 0 {
+            return Err("width and height must be positive integers".into());
+        }
+        if width > 10_000_000 || height > 10_000_000 {
+            return Err("width/height out of CDP range".into());
+        }
+        let page = self.active_page()?.clone();
+        page.execute(SetDeviceMetricsOverrideParams::new(width, height, 1.0, false))
+            .await
+            .map_err(|e| format!("setDeviceMetricsOverride: {e}"))?;
+        Ok(format!("resized viewport to {width}x{height}"))
     }
 }
 
