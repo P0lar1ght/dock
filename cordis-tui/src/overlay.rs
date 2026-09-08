@@ -117,6 +117,10 @@ pub enum Overlay {
         id: String,
         scroll: usize,
     },
+    /// Live `/browser` cockpit (status / tabs / screenshot / 审批). Body from `"browser"`.
+    Browser {
+        scroll: usize,
+    },
     /// `/preset` roster + assembly canvas.
     Presets(PresetView),
     /// Child conversation or background job (Grok fullscreen framed view).
@@ -226,6 +230,7 @@ impl Overlay {
             | Self::Usage { .. }
             | Self::Notice { .. }
             | Self::Slot { .. }
+            | Self::Browser { .. }
             | Self::Inspect { .. }
             | Self::Goal { editing: false, .. } => "",
             Self::Goal {
@@ -324,7 +329,7 @@ impl Overlay {
             | Self::Mcps { selected, .. }
             | Self::Workflows { selected, .. }
             | Self::Goal { selected, .. } => *selected,
-            Self::Usage { .. } | Self::Notice { .. } | Self::Slot { .. } | Self::Inspect { .. } => {
+            Self::Usage { .. } | Self::Notice { .. } | Self::Slot { .. } | Self::Browser { .. } | Self::Inspect { .. } => {
                 0
             }
             Self::Presets(PresetView::Roster { selected }) => *selected,
@@ -355,7 +360,7 @@ impl Overlay {
             | Self::Mcps { selected: s, .. }
             | Self::Workflows { selected: s, .. }
             | Self::Goal { selected: s, .. } => *s = selected,
-            Self::Usage { .. } | Self::Notice { .. } | Self::Slot { .. } | Self::Inspect { .. } => {
+            Self::Usage { .. } | Self::Notice { .. } | Self::Slot { .. } | Self::Browser { .. } | Self::Inspect { .. } => {
             }
             Self::Presets(PresetView::Roster { selected: s }) => *s = selected,
             Self::Presets(PresetView::Canvas(c)) => match c.pane {
@@ -403,6 +408,7 @@ impl Overlay {
             | Self::Usage { .. }
             | Self::Notice { .. }
             | Self::Slot { .. }
+            | Self::Browser { .. }
             | Self::Inspect { .. }
             | Self::Goal { editing: false, .. }
             | Self::Presets(_) => None,
@@ -804,6 +810,14 @@ mod tests {
             id: "memo".into(),
             scroll: 0,
         };
+        assert!(overlay.is_open());
+        overlay.close();
+        assert!(!overlay.is_open());
+    }
+
+    #[test]
+    fn browser_overlay_opens_and_closes() {
+        let mut overlay = Overlay::Browser { scroll: 0 };
         assert!(overlay.is_open());
         overlay.close();
         assert!(!overlay.is_open());

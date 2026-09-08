@@ -167,7 +167,7 @@ pub enum Effect {
         user: bool,
     },
     ShowCordis,
-    /// Live-look `"browser"` cockpit Notice (status / tabs / screenshot).
+    /// Live `/browser` cockpit overlay (status / tabs / screenshot / 审批).
     ShowBrowser,
     ShowPresets {
         focus: Option<String>,
@@ -599,9 +599,9 @@ mod tests {
     fn browser_extra_overlay_live_looks_cockpit() {
         let entry = SlashEntry {
             command: "browser".into(),
-            description: "浏览器驾驶舱（Closed）".into(),
+            description: "浏览器驾驶舱（未连接）".into(),
             kind: ExtraSlashKind::Overlay,
-            text: "Closed".into(),
+            text: "未连接".into(),
             title: "浏览器".into(),
             send: false,
         };

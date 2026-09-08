@@ -233,7 +233,10 @@ impl Shortcuts {
         }
         if matches!(
             overlay,
-            Overlay::Notice { .. } | Overlay::Slot { .. } | Overlay::Inspect { .. }
+            Overlay::Notice { .. }
+                | Overlay::Slot { .. }
+                | Overlay::Browser { .. }
+                | Overlay::Inspect { .. }
         ) {
             return vec![
                 HintItem::new("↑/↓", "scroll"),
