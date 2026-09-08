@@ -56,6 +56,10 @@ tools:
   - browser_select_option
   - browser_fill_form
   - browser_wait_for
+  - browser_drag
+  - browser_handle_dialog
+  - browser_file_upload
+  - browser_resize
   - browser_screenshot
   - browser_tabs
   - browser_close

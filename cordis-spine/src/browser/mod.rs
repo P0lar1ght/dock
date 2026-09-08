@@ -38,6 +38,10 @@ pub const BROWSER_TOOL_NAMES: &[&str] = &[
     "browser_select_option",
     "browser_fill_form",
     "browser_wait_for",
+    "browser_drag",
+    "browser_handle_dialog",
+    "browser_file_upload",
+    "browser_resize",
     "browser_screenshot",
     "browser_tabs",
     "browser_close",
@@ -189,7 +193,9 @@ impl Browser {
         out.push_str(
             "  P0 导航/后退 · 悬停 · 按键 · 下拉 · 填表 · 等待（text/selector）\n",
         );
-        out.push_str("  对话框/拖拽/上传/视口 → D2。不渲染网页。\n");
+        out.push_str(
+            "  P1 拖拽 · 对话框 · 文件上传 · 视口 resize。不渲染网页。\n",
+        );
         out.push('\n');
         out.push_str("审批：\n");
         match approval_line {
@@ -210,7 +216,7 @@ impl Browser {
         out.push('\n');
         out.push_str("工具：\n");
         out.push_str(
-            "  search_tool / use_tool → browser_open · browser_navigate · browser_navigate_back · browser_snapshot · browser_click · browser_hover · browser_type · browser_press_key · browser_select_option · browser_fill_form · browser_wait_for · browser_screenshot · browser_tabs · browser_close\n",
+            "  search_tool / use_tool → browser_open · browser_navigate · browser_navigate_back · browser_snapshot · browser_click · browser_hover · browser_type · browser_press_key · browser_select_option · browser_fill_form · browser_wait_for · browser_drag · browser_handle_dialog · browser_file_upload · browser_resize · browser_screenshot · browser_tabs · browser_close\n",
         );
         out.push_str("  不进默认 sampler 工具表；无需先 /browser。\n");
         out.push('\n');
@@ -432,6 +438,10 @@ async fn run_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         | "browser_select_option"
         | "browser_fill_form"
         | "browser_wait_for"
+        | "browser_drag"
+        | "browser_handle_dialog"
+        | "browser_file_upload"
+        | "browser_resize"
         | "browser_screenshot"
         | "browser_tabs" => {
             if browser.session() == BrowserSession::Closed {
@@ -538,6 +548,45 @@ async fn dispatch_connected(
             }
             out
         }
+        "browser_drag" => {
+            let source_ref = arg_str(args, "source_ref");
+            let target_ref = arg_str(args, "target_ref");
+            let start_x = arg_f64(args, "start_x");
+            let start_y = arg_f64(args, "start_y");
+            let end_x = arg_f64(args, "end_x");
+            let end_y = arg_f64(args, "end_y");
+            let steps = arg_u64(args, "steps").map(|n| n as u32);
+            session
+                .drag(
+                    source_ref.as_deref(),
+                    target_ref.as_deref(),
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    steps,
+                )
+                .await
+        }
+        "browser_handle_dialog" => {
+            let accept = arg_bool(args, "accept").ok_or_else(|| {
+                "accept boolean is required (true=accept, false=dismiss)".to_string()
+            })?;
+            let prompt_text = arg_str(args, "prompt_text");
+            session
+                .handle_dialog(accept, prompt_text.as_deref())
+                .await
+        }
+        "browser_file_upload" => {
+            let r = arg_str(args, "ref").ok_or_else(|| "ref is required".to_string())?;
+            let paths = parse_paths(args)?;
+            session.file_upload(&r, &paths).await
+        }
+        "browser_resize" => {
+            let width = arg_i64(args, "width").ok_or_else(|| "width is required".to_string())?;
+            let height = arg_i64(args, "height").ok_or_else(|| "height is required".to_string())?;
+            session.resize(width, height).await
+        }
         other => Err(format!("unknown browser tool `{other}`")),
     }
 }
@@ -569,6 +618,44 @@ fn arg_u64(raw: &str, key: &str) -> Option<u64> {
         x.as_u64()
             .or_else(|| x.as_i64().and_then(|n| u64::try_from(n).ok()))
     })
+}
+
+fn arg_i64(raw: &str, key: &str) -> Option<i64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    v.get(key).and_then(|x| {
+        x.as_i64()
+            .or_else(|| x.as_u64().and_then(|n| i64::try_from(n).ok()))
+            .or_else(|| x.as_f64().map(|n| n as i64))
+    })
+}
+
+fn arg_f64(raw: &str, key: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    v.get(key).and_then(|x| {
+        x.as_f64()
+            .or_else(|| x.as_i64().map(|n| n as f64))
+            .or_else(|| x.as_u64().map(|n| n as f64))
+    })
+}
+
+fn parse_paths(raw: &str) -> Result<Vec<String>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid JSON arguments: {e}"))?;
+    if let Some(arr) = v.get("paths").and_then(|x| x.as_array()) {
+        let mut out = Vec::with_capacity(arr.len());
+        for (i, item) in arr.iter().enumerate() {
+            let s = item
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("paths[{i}] must be a non-empty string"))?;
+            out.push(s.to_string());
+        }
+        return Ok(out);
+    }
+    if let Some(p) = v.get("path").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+        return Ok(vec![p.to_string()]);
+    }
+    Err("paths array (or path string) is required".into())
 }
 
 fn parse_fill_fields(raw: &str) -> Result<Vec<(String, String)>, String> {
@@ -652,6 +739,26 @@ fn browser_specs() -> Vec<ToolSpec> {
             parameters_json: r#"{"type":"object","properties":{"text":{"type":"string","description":"Substring to wait for in document body text."},"selector":{"type":"string","description":"CSS selector to wait for."},"timeout_ms":{"type":"integer","description":"Max wait in milliseconds (default 30000)."}}}"#.into(),
         },
         ToolSpec {
+            name: "browser_drag".into(),
+            description: "Drag from a source snapshot ref (or start_x/start_y) to a target ref (or end_x/end_y) via CDP mouse events. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"source_ref":{"type":"string","description":"Snapshot ref to drag from."},"target_ref":{"type":"string","description":"Snapshot ref to drop on."},"start_x":{"type":"number"},"start_y":{"type":"number"},"end_x":{"type":"number"},"end_y":{"type":"number"},"steps":{"type":"integer","description":"Intermediate mouseMoved steps (default 10)."}}}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_handle_dialog".into(),
+            description: "Accept or dismiss a JavaScript dialog (alert/confirm/prompt/beforeunload). Optional prompt_text for prompt dialogs. Wire Page.javascriptDialogOpening so agents are not stuck on native dialogs. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"accept":{"type":"boolean","description":"true to accept/OK, false to dismiss/Cancel."},"prompt_text":{"type":"string","description":"Text for prompt dialogs before accepting."}},"required":["accept"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_file_upload".into(),
+            description: "Set files on a file input from browser_snapshot ref via DOM.setFileInputFiles. Pass paths: [\"/abs/path\", ...] or path for one file. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"File input ref from browser_snapshot."},"paths":{"type":"array","items":{"type":"string"},"description":"Absolute or relative file paths."},"path":{"type":"string","description":"Single file path (alternative to paths)."}},"required":["ref"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_resize".into(),
+            description: "Set the page viewport width/height via Emulation.setDeviceMetricsOverride. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"width":{"type":"integer","description":"Viewport width in CSS pixels."},"height":{"type":"integer","description":"Viewport height in CSS pixels."}},"required":["width","height"]}"#.into(),
+        },
+        ToolSpec {
             name: "browser_screenshot".into(),
             description: "Capture a screenshot into $DOCK_HOME/browser/screenshots/. Discover via search_tool; call with use_tool.".into(),
             parameters_json: r#"{"type":"object","properties":{"full_page":{"type":"boolean","description":"Capture the full scrollable page."}}}"#.into(),
@@ -708,6 +815,11 @@ mod tests {
         assert!(body.contains("browser_hover"), "{body}");
         assert!(body.contains("browser_navigate"), "{body}");
         assert!(body.contains("browser_press_key"), "{body}");
+        assert!(body.contains("browser_drag"), "{body}");
+        assert!(body.contains("browser_handle_dialog"), "{body}");
+        assert!(body.contains("browser_file_upload"), "{body}");
+        assert!(body.contains("browser_resize"), "{body}");
+        assert!(body.contains("P1"), "{body}");
         let with_approval = browser.format_cockpit(Some("browser_open — https://example.com/"));
         assert!(with_approval.contains("browser_open — https://example.com/"), "{with_approval}");
         assert!(!with_approval.contains("审批：\n  （无）"), "{with_approval}");
@@ -815,6 +927,10 @@ mod tests {
             "browser_select_option",
             "browser_fill_form",
             "browser_wait_for",
+            "browser_drag",
+            "browser_handle_dialog",
+            "browser_file_upload",
+            "browser_resize",
         ] {
             let args = if need_open == "browser_navigate" {
                 r#"{"url":"about:blank"}"#
@@ -828,6 +944,14 @@ mod tests {
                 r#"{"text":"hi","timeout_ms":10}"#
             } else if need_open == "browser_hover" {
                 r#"{"ref":"@e1"}"#
+            } else if need_open == "browser_drag" {
+                r#"{"source_ref":"@e1","target_ref":"@e2"}"#
+            } else if need_open == "browser_handle_dialog" {
+                r#"{"accept":true}"#
+            } else if need_open == "browser_file_upload" {
+                r#"{"ref":"@e1","paths":["/tmp/x"]}"#
+            } else if need_open == "browser_resize" {
+                r#"{"width":800,"height":600}"#
             } else {
                 "{}"
             };
@@ -940,6 +1064,119 @@ mod tests {
             "{}",
             closed_nav.content
         );
+
+        fiber.dispose().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn p1_resize_dialog_upload_drag_when_chrome_available() {
+        let dock_home = tempfile::tempdir().unwrap();
+        std::env::set_var("DOCK_HOME", dock_home.path());
+
+        if session::discover_chrome().is_err() {
+            eprintln!("skip p1 smoke: chrome not installed");
+            return;
+        }
+
+        let (root, fiber) = boot_browser().await;
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+
+        let open = tools
+            .execute(ToolCall {
+                id: "o".into(),
+                name: "browser_open".into(),
+                arguments: r#"{"url":"data:text/html,<html><body><div id=a style='width:40px;height:40px'>A</div><div id=b style='width:40px;height:40px;margin-top:80px'>B</div><input id=f type=file /><script>setTimeout(function(){alert('BUA-D2');},50);</script></body></html>"}"#.into(),
+            })
+            .await;
+        assert!(!open.content.starts_with("Error:"), "open: {}", open.content);
+
+        let resize = tools
+            .execute(ToolCall {
+                id: "rz".into(),
+                name: "browser_resize".into(),
+                arguments: r#"{"width":1024,"height":768}"#.into(),
+            })
+            .await;
+        assert!(!resize.content.starts_with("Error:"), "resize: {}", resize.content);
+        assert!(resize.content.contains("1024x768"), "{}", resize.content);
+
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let dlg = tools
+            .execute(ToolCall {
+                id: "d".into(),
+                name: "browser_handle_dialog".into(),
+                arguments: r#"{"accept":true}"#.into(),
+            })
+            .await;
+        assert!(!dlg.content.starts_with("Error:"), "handle_dialog: {}", dlg.content);
+
+        let drag = tools
+            .execute(ToolCall {
+                id: "dg".into(),
+                name: "browser_drag".into(),
+                arguments: r#"{"start_x":20,"start_y":20,"end_x":20,"end_y":120,"steps":5}"#.into(),
+            })
+            .await;
+        assert!(!drag.content.starts_with("Error:"), "drag: {}", drag.content);
+
+        let upload_path = dock_home.path().join("upload.txt");
+        std::fs::write(&upload_path, b"hello").unwrap();
+        let snap = tools
+            .execute(ToolCall {
+                id: "s".into(),
+                name: "browser_snapshot".into(),
+                arguments: r#"{"interactive":true}"#.into(),
+            })
+            .await;
+        assert!(!snap.content.starts_with("Error:"), "snapshot: {}", snap.content);
+        let file_ref = snap.content.lines().find_map(|l| {
+            let lower = l.to_ascii_lowercase();
+            if !(lower.contains("choose file")
+                || lower.contains("file")
+                || lower.contains("upload"))
+            {
+                return None;
+            }
+            // Prefer "[ref=eN]" then bare "@eN".
+            if let Some(idx) = lower.find("ref=e") {
+                let rest = &l[idx + 4..];
+                let id: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                if id.starts_with('e') {
+                    return Some(format!("@{id}"));
+                }
+            }
+            l.split_whitespace()
+                .find(|t| t.starts_with("@e") || t.contains("ref=e"))
+                .map(|s| {
+                    let s = s.trim_matches(|c| c == ',' || c == ')' || c == '(' || c == ']');
+                    if let Some(r) = s.strip_prefix("ref=") {
+                        format!("@{r}")
+                    } else if s.starts_with('@') {
+                        s.to_string()
+                    } else {
+                        format!("@{s}")
+                    }
+                })
+        });
+        let file_ref = file_ref.expect(&format!(
+            "expected file input ref in snapshot:\n{}",
+            snap.content
+        ));
+        let up = tools
+            .execute(ToolCall {
+                id: "up".into(),
+                name: "browser_file_upload".into(),
+                arguments: format!(
+                    r#"{{"ref":"{}","paths":["{}"]}}"#,
+                    file_ref,
+                    upload_path.display()
+                ),
+            })
+            .await;
+        assert!(!up.content.starts_with("Error:"), "file_upload: {}", up.content);
 
         fiber.dispose().await.unwrap();
     }
