@@ -79,6 +79,8 @@ struct BrowserInner {
     last_screenshot: Mutex<Option<PathBuf>>,
     /// Last `browser_wait_for` outcome line for the `/browser` cockpit.
     last_wait: Mutex<Option<String>>,
+    /// Pending JS dialog line (type + message), or last handle_dialog outcome.
+    last_dialog: Mutex<Option<String>>,
     /// Optional slash table to refresh `/browser` overlay body on connect/close.
     slash: Mutex<Option<Arc<Slash>>>,
 }
@@ -93,6 +95,7 @@ impl Browser {
                 last_tabs: Mutex::new(Vec::new()),
                 last_screenshot: Mutex::new(None),
                 last_wait: Mutex::new(None),
+                last_dialog: Mutex::new(None),
                 slash: Mutex::new(None),
             }),
         }
@@ -124,6 +127,11 @@ impl Browser {
     /// Last `browser_wait_for` summary line, if any this session.
     pub fn last_wait(&self) -> Option<String> {
         self.inner.last_wait.lock().unwrap().clone()
+    }
+
+    /// Pending / last JS dialog line for the `/browser` cockpit.
+    pub fn last_dialog(&self) -> Option<String> {
+        self.inner.last_dialog.lock().unwrap().clone()
     }
 
     pub fn status_line(&self) -> String {
@@ -189,6 +197,13 @@ impl Browser {
             None => out.push_str("  （无）\n"),
         }
         out.push('\n');
+        out.push_str("对话框：\n");
+        match self.inner.last_dialog.lock().unwrap().clone() {
+            Some(line) => out.push_str(&format!("  {line}\n")),
+            None => out.push_str("  （无）\n"),
+        }
+        out.push_str("  用 browser_handle_dialog 接受/拒绝；不渲染网页。\n");
+        out.push('\n');
         out.push_str("能力：\n");
         out.push_str(
             "  P0 导航/后退 · 悬停 · 按键 · 下拉 · 填表 · 等待（text/selector）\n",
@@ -253,6 +268,24 @@ impl Browser {
     fn remember_wait(&self, line: String) {
         *self.inner.last_wait.lock().unwrap() = Some(line);
         self.refresh_slash();
+    }
+
+    fn remember_dialog(&self, line: String) {
+        *self.inner.last_dialog.lock().unwrap() = Some(line);
+        self.refresh_slash();
+    }
+
+    fn sync_pending_dialog(&self, session: &ConnectedSession) {
+        if let Some(d) = session.pending_dialog() {
+            let msg = d.message.replace("\n", " ");
+            let short = if msg.chars().count() > 80 {
+                format!("{}…", msg.chars().take(80).collect::<String>())
+            } else {
+                msg
+            };
+            let line = format!("待处理 {} — {}", d.dialog_type, short);
+            *self.inner.last_dialog.lock().unwrap() = Some(line);
+        }
     }
 
     fn mark_connected(&self, url: &str) {
@@ -472,6 +505,7 @@ async fn dispatch_connected(
 ) -> Result<String, String> {
     let mut g = browser.inner.live.lock().await;
     let session = g.as_mut().ok_or_else(|| NEED_OPEN.to_string())?;
+    browser.sync_pending_dialog(session);
     match name {
         "browser_snapshot" => {
             let interactive = arg_bool(args, "interactive").unwrap_or(true);
@@ -573,9 +607,14 @@ async fn dispatch_connected(
                 "accept boolean is required (true=accept, false=dismiss)".to_string()
             })?;
             let prompt_text = arg_str(args, "prompt_text");
-            session
+            let out = session
                 .handle_dialog(accept, prompt_text.as_deref())
-                .await
+                .await;
+            match &out {
+                Ok(line) => browser.remember_dialog(line.clone()),
+                Err(e) => browser.remember_dialog(format!("失败：{e}")),
+            }
+            out
         }
         "browser_file_upload" => {
             let r = arg_str(args, "ref").ok_or_else(|| "ref is required".to_string())?;
@@ -876,6 +915,8 @@ mod tests {
         assert!(browser.cockpit_body().contains("等待："));
         assert!(browser.cockpit_body().contains("能力："));
         assert!(browser.last_wait().is_none());
+        assert!(browser.cockpit_body().contains("对话框："));
+        assert!(browser.last_dialog().is_none());
         assert!(browser.cockpit_body().contains("断开："));
         assert!(browser.tabs().is_empty());
         assert!(browser.last_screenshot().is_none());
