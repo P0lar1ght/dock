@@ -61,6 +61,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 - 工作区：`bash` `read_file` `grep` `glob` `write_file` `search_replace`
 - 计划、提问、后台任务、调度、子代理、记忆、LSP、workflow
+- 浏览器驾驶舱骨架（`browser_*`，`register_deferred`，尚未驱动 Chromium）
 - MCP 与不常用本地工具走 `search_tool` / `use_tool` 渐进披露；内部公名 `mcp_{server}__{tool}`，不能盖掉 `bash`
 - 动态包：`cordis_define` / `cordis_run` / `cordis_promote` 写成 `.dock/plugins`
 
@@ -97,9 +98,9 @@ flowchart TB
 
     spine["Spine 五件套<br/>sessions · llm · tools（一张表）<br/>systemPrompt · agents"]
 
-    grains["工具粒 → register 进 tools<br/>web · todo · plan-mode · ask-user · jobs · scheduler<br/>task · subagent · memory · monitor · goal<br/>lsp · workflow · mcp-client · cordis"]
+    grains["工具粒 → register 进 tools<br/>web · browser · todo · plan-mode · ask-user · jobs · scheduler<br/>task · subagent · memory · monitor · goal<br/>lsp · workflow · mcp-client · cordis"]
 
-    svc["Harness 服务（named service · live-lookup）<br/>context · settings · turn · permissions · cron · jobs · todos<br/>planMode · ask · mcp · goal · lsp · subagents · memory<br/>workflows · slash · agentPresets · compact<br/>tui.slots · dynamicCordisRunner"]
+    svc["Harness 服务（named service · live-lookup）<br/>context · settings · turn · permissions · cron · jobs · todos<br/>planMode · ask · mcp · goal · lsp · subagents · memory · browser<br/>workflows · slash · agentPresets · compact<br/>tui.slots · dynamicCordisRunner"]
   end
 
   person --> term --> tui

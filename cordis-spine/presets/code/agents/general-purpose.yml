@@ -24,4 +24,11 @@ tools:
   - memory_get
   - search_tool
   - use_tool
+  - browser_open
+  - browser_snapshot
+  - browser_click
+  - browser_type
+  - browser_screenshot
+  - browser_tabs
+  - browser_close
   - report

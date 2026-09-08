@@ -260,6 +260,8 @@ async fn install_fakes_echo_has_no_capability_tools() {
         "cordis_run",
         "search_tool",
         "use_tool",
+        "browser_open",
+        "browser_snapshot",
     ] {
         assert!(
             !names.iter().any(|n| n == banned),
@@ -316,6 +318,13 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "cordis_stop",
         "cordis_undefine",
         "cordis_promote",
+        "browser_open",
+        "browser_snapshot",
+        "browser_click",
+        "browser_type",
+        "browser_screenshot",
+        "browser_tabs",
+        "browser_close",
     ] {
         assert!(
             names.iter().any(|n| n == need),
@@ -348,6 +357,13 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "skill",
         "workflow",
         "cordis_inspect",
+        "browser_open",
+        "browser_snapshot",
+        "browser_click",
+        "browser_type",
+        "browser_screenshot",
+        "browser_tabs",
+        "browser_close",
     ] {
         assert!(
             !model.iter().any(|n| n == hidden),
@@ -365,6 +381,40 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         sched_search.content.contains("scheduler_create"),
         "search_tool should surface deferred locals: {}",
         sched_search.content
+    );
+    let browser_search = tools
+        .execute(cordis_spine::ToolCall {
+            id: "st-browser".into(),
+            name: "search_tool".into(),
+            arguments: r#"{"query":"browser","limit":20}"#.into(),
+        })
+        .await;
+    for need in [
+        "browser_open",
+        "browser_snapshot",
+        "browser_click",
+        "browser_type",
+        "browser_screenshot",
+        "browser_tabs",
+        "browser_close",
+    ] {
+        assert!(
+            browser_search.content.contains(need),
+            "search_tool should surface deferred {need}: {}",
+            browser_search.content
+        );
+    }
+    let browser_stub = tools
+        .execute(cordis_spine::ToolCall {
+            id: "br-open".into(),
+            name: "browser_open".into(),
+            arguments: r#"{"url":"https://example.com"}"#.into(),
+        })
+        .await;
+    assert!(
+        browser_stub.content.contains("not connected"),
+        "browser stub: {}",
+        browser_stub.content
     );
     let search = tools
         .execute(cordis_spine::ToolCall {
@@ -414,6 +464,15 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     assert!(root
         .get::<cordis_spine::LspBackendAdapter>(cordis_spine::LSP)
         .is_some());
+    assert!(root
+        .get::<cordis_spine::Browser>(cordis_spine::BROWSER)
+        .is_some_and(|b| b.session() == cordis_spine::BrowserSession::Closed));
+    assert!(root
+        .require::<cordis_spine::Slash>(cordis_spine::SLASH)
+        .unwrap()
+        .list()
+        .iter()
+        .any(|e| e.command == "browser"));
     assert!(root
         .get::<cordis_spine::Skills>(cordis_spine::SKILLS)
         .is_some());

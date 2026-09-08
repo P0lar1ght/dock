@@ -6,6 +6,7 @@ use cordis::Context;
 use crate::agent_presets::AgentPresets;
 use crate::agents::Agents;
 use crate::ask_user::Ask;
+use crate::browser::Browser;
 use crate::context_book::ContextBook;
 use crate::cron::Cron;
 use crate::dynamic_runner::{builtins_lines, DynamicRunner, PluginOrigin, SnapshotRow};
@@ -16,9 +17,9 @@ use crate::lsp::LspBackendAdapter;
 use crate::mcp::Mcp;
 use crate::memory::Memory;
 use crate::names::{
-    AGENTS, AGENT_PRESETS, ASK, CONTEXT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LSP, MCP,
-    MEMORY, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS,
-    TOOLS, TUI_SLOTS, TURN, WORKFLOWS,
+    AGENTS, AGENT_PRESETS, ASK, BROWSER, CONTEXT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM,
+    LSP, MCP, MEMORY, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, SYSTEM_PROMPT,
+    TODOS, TOOLS, TUI_SLOTS, TURN, WORKFLOWS,
 };
 use crate::permissions::Permissions;
 use crate::plan_mode::PlanMode;
@@ -207,6 +208,7 @@ fn probe_spine(ctx: &Context) -> Vec<String> {
     push_live::<Workflows>(&mut lines, ctx, WORKFLOWS);
     push_live::<DynamicRunner>(&mut lines, ctx, DYNAMIC_CORDIS_RUNNER);
     push_live::<Memory>(&mut lines, ctx, MEMORY);
+    push_live::<Browser>(&mut lines, ctx, BROWSER);
     push_live::<LspBackendAdapter>(&mut lines, ctx, LSP);
     lines
 }

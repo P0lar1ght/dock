@@ -3,6 +3,7 @@ use cordis::{Context, Fiber, Result};
 use crate::agent_presets::agent_presets;
 use crate::agents::agents;
 use crate::ask_user::tool_ask_user;
+use crate::browser::tool_browser;
 use crate::compact::compact;
 use crate::context_book::context;
 use crate::cron::cron;
@@ -105,6 +106,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(agent_presets(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;
     ctx.plugin(tool_web(), ())?.wait().await?;
+    ctx.plugin(tool_browser(), ())?.wait().await?;
     ctx.plugin(tool_todo(), ())?.wait().await?;
     ctx.plugin(plan_mode(), ())?.wait().await?;
     ctx.plugin(tool_ask_user(), ())?.wait().await?;
