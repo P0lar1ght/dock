@@ -205,21 +205,24 @@ pub struct McpOAuthConfig {
 /// Grok default `initialize` / `tools/list` budget (`DEFAULT_STARTUP_TIMEOUT_SECS`).
 pub const DEFAULT_MCP_STARTUP_TIMEOUT_SECS: u64 = 30;
 
-/// How Dock frames JSON-RPC on MCP stdio (LSP Content-Length vs NDJSON).
+/// How Dock frames JSON-RPC on MCP stdio (NDJSON vs LSP Content-Length).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum McpStdioFraming {
-    /// Probe Content-Length on a fresh spawn; on JSON-RPC parse error (-32700), kill and respawn as NDJSON.
+    /// Default: one JSON-RPC object per line (cua-driver and most modern stdio MCP).
     #[default]
-    Auto,
-    ContentLength,
     Ndjson,
+    /// LSP-style `Content-Length` framing — only when explicitly set.
+    ContentLength,
+    /// Probe Content-Length on a fresh spawn; on JSON-RPC parse error (-32700), kill and respawn as NDJSON.
+    Auto,
 }
 
 impl McpStdioFraming {
-    /// Parse config aliases (`auto`, `content-length` / `cl`, `ndjson` / `jsonl`, …).
+    /// Parse config aliases (`ndjson` / `jsonl`, `content-length` / `cl`, `auto`, …).
+    /// Missing / empty → [`Self::Ndjson`].
     pub fn from_config(raw: Option<&str>) -> Self {
         let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Self::Auto;
+            return Self::Ndjson;
         };
         match raw.to_ascii_lowercase().as_str() {
             "auto" => Self::Auto,
@@ -228,8 +231,8 @@ impl McpStdioFraming {
             }
             "ndjson" | "newline" | "nl" | "jsonl" | "line" => Self::Ndjson,
             other => {
-                tracing::warn!(framing = other, "unknown mcp stdio framing; using auto");
-                Self::Auto
+                tracing::warn!(framing = other, "unknown mcp stdio framing; using ndjson");
+                Self::Ndjson
             }
         }
     }
@@ -1042,7 +1045,7 @@ framing = "ndjson"
         }
         assert_eq!(McpStdioFraming::from_config(Some("cl")), McpStdioFraming::ContentLength);
         assert_eq!(McpStdioFraming::from_config(Some("auto")), McpStdioFraming::Auto);
-        assert_eq!(McpStdioFraming::from_config(None), McpStdioFraming::Auto);
+        assert_eq!(McpStdioFraming::from_config(None), McpStdioFraming::Ndjson);
     }
 
     #[test]

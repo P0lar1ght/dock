@@ -4,10 +4,11 @@
 //! (`elicitation/create`, `ping`) and `tools/list_changed` while `tools/call`
 //! waits.
 //!
-//! Framing: `auto` (default) spawns with Content-Length; on JSON-RPC parse error
-//! (-32700 / "parse") kills the child and respawns with NDJSON. Explicit
-//! `content-length` / `ndjson` skip probing. Never flips wire framing on the
-//! same stdin. Reads accept either shape (first line starting with `{` → NDJSON).
+//! Framing: default **NDJSON** (one JSON-RPC object per line). Explicit
+//! `content-length` keeps LSP framing for legacy servers. Optional `auto`
+//! probes Content-Length then kills+respawns as NDJSON on -32700/parse — never
+//! flips wire framing on the same stdin. Reads accept either shape (first line
+//! starting with `{` → NDJSON).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

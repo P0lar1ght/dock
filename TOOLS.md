@@ -90,7 +90,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 控本机桌面走 **trycua [`cua-driver`](https://github.com/trycua/cua)** MCP，**不**自研键鼠、**不** Docker / cua 云沙箱、**不** path-dep 进 spine。
 
 - **接入**：用户本机安装 `cua-driver`；Dock 用现有 `mcp-client` stdio。`config.toml` 样例见 [config.toml.example](config.toml.example) 与下文。公名 `mcp_cua-driver__{tool}`（服务器键名必须是 `cua-driver`），与其它 MCP 一样 **不进** sampler / `specs_for_model`，经 `search_tool` / `use_tool`。
-- **stdio 帧**：cua-driver 0.24.x MCP 讲 **NDJSON**（每行一条 JSON-RPC），不是 LSP Content-Length。Dock 默认 `framing = "auto"`：先 Content-Length 探测，若握手 `-32700` / parse error 则 **杀掉子进程并 respawn** 再以 NDJSON 握手（不在同一 stdin 硬切）。cua-driver 建议显式 `framing = "ndjson"` 跳过探测。无需 Python 桥。
+- **stdio 帧**：Dock MCP stdio **默认 NDJSON**（每行一条 JSON-RPC，对齐 cua-driver 0.24+）。LSP `Content-Length` 仅显式 `framing = "content-length"`。可选 `framing = "auto"`：先 CL 探测，`-32700`/parse 则 **kill+respawn** NDJSON（不在同一 stdin 硬切）。无需 Python 桥。
 - **权限 / 计划门**：所有 `mcp_cua-driver__*` 与 `bash` 同级（`needs_permission` + `blocked_in_plan`）。`use_tool` 内层 `execute` 会命中该门。
 - **Allowlist**：MCP extras 仍按现规则 **穿过** Agent preset allowlist；但 `code` / `cordis`（含 general-purpose）须保留 `search_tool` / `use_tool`。`minimal` / `warden` 主代理不含这两项则调不到 cua-driver。
 - **勿混 BUA**：`cua-driver` 自带的 `browser_*` MCP 工具 ≠ Dock chromiumoxide `browser_*`。网页自动化优先 Dock BUA；桌面键鼠 / 开应用走 cua-driver。
@@ -126,8 +126,8 @@ cua-driver mcp-config      # 打印推荐 command/args（可抄进 config.toml�
 command = "cua-driver"
 args = ["mcp"]
 enabled = true
-# cua-driver 讲 NDJSON；默认 framing=auto 会探测，也可显式：
-# framing = "ndjson"
+# 默认已是 ndjson；旧 CL 服务器才写：
+# framing = "content-length"
 # 若 PATH 没有，可改成 mcp-config 给出的绝对路径，例如：
 # command = "/home/YOU/.cua-driver/packages/releases/…/cua-driver"
 ```
