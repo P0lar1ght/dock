@@ -174,6 +174,9 @@ pub struct McpServerRow {
     pub enabled: bool,
     #[serde(default)]
     pub startup_timeout_sec: Option<u64>,
+    /// Stdio JSON-RPC framing: `auto` (default), `content-length`, or `ndjson`.
+    #[serde(default, alias = "stdio_framing", alias = "stdioFraming")]
+    pub framing: Option<String>,
 }
 
 /// Grok `[mcp_servers.<name>.oauth]` / JSON `oauth` block (camelCase aliases).
@@ -202,12 +205,43 @@ pub struct McpOAuthConfig {
 /// Grok default `initialize` / `tools/list` budget (`DEFAULT_STARTUP_TIMEOUT_SECS`).
 pub const DEFAULT_MCP_STARTUP_TIMEOUT_SECS: u64 = 30;
 
+/// How Dock frames JSON-RPC on MCP stdio (LSP Content-Length vs NDJSON).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum McpStdioFraming {
+    /// Prefer Content-Length; on JSON-RPC parse error (-32700), switch to NDJSON once.
+    #[default]
+    Auto,
+    ContentLength,
+    Ndjson,
+}
+
+impl McpStdioFraming {
+    /// Parse config aliases (`auto`, `content-length` / `cl`, `ndjson` / `jsonl`, …).
+    pub fn from_config(raw: Option<&str>) -> Self {
+        let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Self::Auto;
+        };
+        match raw.to_ascii_lowercase().as_str() {
+            "auto" => Self::Auto,
+            "content-length" | "content_length" | "contentlength" | "cl" | "lsp" => {
+                Self::ContentLength
+            }
+            "ndjson" | "newline" | "nl" | "jsonl" | "line" => Self::Ndjson,
+            other => {
+                tracing::warn!(framing = other, "unknown mcp stdio framing; using auto");
+                Self::Auto
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpTransport {
     Stdio {
         command: String,
         args: Vec<String>,
         env: BTreeMap<String, String>,
+        framing: McpStdioFraming,
     },
     Http {
         url: String,
@@ -295,6 +329,7 @@ fn row_to_server(name: String, row: McpServerRow) -> Option<McpServer> {
                 command: command.to_string(),
                 args: row.args,
                 env: row.env,
+                framing: McpStdioFraming::from_config(row.framing.as_deref()),
             },
             startup_timeout_sec,
             enabled: row.enabled,
@@ -982,6 +1017,32 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
             }
             other => panic!("expected stdio, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mcp_stdio_framing_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.cua]
+command = "cua-driver"
+args = ["mcp"]
+framing = "ndjson"
+"#,
+        )
+        .unwrap();
+        let list = load_mcp_servers_from(&[path]);
+        match &list[0].transport {
+            McpTransport::Stdio { framing, .. } => {
+                assert_eq!(*framing, McpStdioFraming::Ndjson);
+            }
+            other => panic!("expected stdio, got {other:?}"),
+        }
+        assert_eq!(McpStdioFraming::from_config(Some("cl")), McpStdioFraming::ContentLength);
+        assert_eq!(McpStdioFraming::from_config(Some("auto")), McpStdioFraming::Auto);
+        assert_eq!(McpStdioFraming::from_config(None), McpStdioFraming::Auto);
     }
 
     #[test]
