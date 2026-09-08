@@ -195,6 +195,27 @@ impl Slash {
         self.extra.lock().unwrap().values().cloned().collect()
     }
 
+    /// Update an existing overlay/prompt extra's description + body (e.g. /browser status).
+    pub fn update_overlay(
+        &self,
+        command: &str,
+        description: impl Into<String>,
+        text: impl Into<String>,
+        title: impl Into<String>,
+    ) -> bool {
+        let Ok(command) = normalize_command(command) else {
+            return false;
+        };
+        let mut extra = self.extra.lock().unwrap();
+        let Some(entry) = extra.get_mut(&command) else {
+            return false;
+        };
+        entry.description = description.into();
+        entry.text = text.into();
+        entry.title = title.into();
+        true
+    }
+
     /// Queue a Notice for the TUI (e.g. after an async `kind: tool` run).
     pub fn queue_notice(&self, title: impl Into<String>, body: impl Into<String>) {
         *self.pending_notice.lock().unwrap() = Some((title.into(), body.into()));

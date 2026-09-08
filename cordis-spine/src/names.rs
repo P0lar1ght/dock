@@ -17,7 +17,7 @@ pub const MCP: &str = "mcp";
 pub const SUBAGENTS: &str = "subagents";
 /// Local memory files (`ctx.memory`).
 pub const MEMORY: &str = "memory";
-/// External Chromium cockpit (`ctx.browser`). Stub session until PR B.
+/// External Chromium cockpit (`ctx.browser`). chromiumoxide CDP session (lean a11y refs).
 pub const BROWSER: &str = "browser";
 /// Local goal progress (`ctx.goal`). `/goal` + `update_goal`.
 pub const GOAL: &str = "goal";
