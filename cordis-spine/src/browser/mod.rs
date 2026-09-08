@@ -73,6 +73,8 @@ struct BrowserInner {
     last_url: Mutex<String>,
     last_tabs: Mutex<Vec<BrowserTabInfo>>,
     last_screenshot: Mutex<Option<PathBuf>>,
+    /// Last `browser_wait_for` outcome line for the `/browser` cockpit.
+    last_wait: Mutex<Option<String>>,
     /// Optional slash table to refresh `/browser` overlay body on connect/close.
     slash: Mutex<Option<Arc<Slash>>>,
 }
@@ -86,6 +88,7 @@ impl Browser {
                 last_url: Mutex::new(String::new()),
                 last_tabs: Mutex::new(Vec::new()),
                 last_screenshot: Mutex::new(None),
+                last_wait: Mutex::new(None),
                 slash: Mutex::new(None),
             }),
         }
@@ -112,6 +115,11 @@ impl Browser {
     /// Path of the most recent `browser_screenshot`, if any this session.
     pub fn last_screenshot(&self) -> Option<PathBuf> {
         self.inner.last_screenshot.lock().unwrap().clone()
+    }
+
+    /// Last `browser_wait_for` summary line, if any this session.
+    pub fn last_wait(&self) -> Option<String> {
+        self.inner.last_wait.lock().unwrap().clone()
     }
 
     pub fn status_line(&self) -> String {
@@ -171,6 +179,18 @@ impl Browser {
             None => out.push_str("  （无）\n"),
         }
         out.push('\n');
+        out.push_str("等待：\n");
+        match self.inner.last_wait.lock().unwrap().clone() {
+            Some(line) => out.push_str(&format!("  {line}\n")),
+            None => out.push_str("  （无）\n"),
+        }
+        out.push('\n');
+        out.push_str("能力：\n");
+        out.push_str(
+            "  P0 导航/后退 · 悬停 · 按键 · 下拉 · 填表 · 等待（text/selector）\n",
+        );
+        out.push_str("  对话框/拖拽/上传/视口 → D2。不渲染网页。\n");
+        out.push('\n');
         out.push_str("审批：\n");
         match approval_line {
             Some(line) if !line.is_empty() => {
@@ -222,6 +242,11 @@ impl Browser {
 
     fn remember_screenshot(&self, path: PathBuf) {
         *self.inner.last_screenshot.lock().unwrap() = Some(path);
+    }
+
+    fn remember_wait(&self, line: String) {
+        *self.inner.last_wait.lock().unwrap() = Some(line);
+        self.refresh_slash();
     }
 
     fn mark_connected(&self, url: &str) {
@@ -504,9 +529,14 @@ async fn dispatch_connected(
             let text = arg_str(args, "text");
             let selector = arg_str(args, "selector");
             let timeout_ms = arg_u64(args, "timeout_ms");
-            session
+            let out = session
                 .wait_for(text.as_deref(), selector.as_deref(), timeout_ms)
-                .await
+                .await;
+            match &out {
+                Ok(line) => browser.remember_wait(line.clone()),
+                Err(e) => browser.remember_wait(format!("失败：{e}")),
+            }
+            out
         }
         other => Err(format!("unknown browser tool `{other}`")),
     }
@@ -731,6 +761,9 @@ mod tests {
         assert!(browser.cockpit_body().contains("标签页："));
         assert!(browser.cockpit_body().contains("最近截图："));
         assert!(browser.cockpit_body().contains("审批："));
+        assert!(browser.cockpit_body().contains("等待："));
+        assert!(browser.cockpit_body().contains("能力："));
+        assert!(browser.last_wait().is_none());
         assert!(browser.cockpit_body().contains("断开："));
         assert!(browser.tabs().is_empty());
         assert!(browser.last_screenshot().is_none());
