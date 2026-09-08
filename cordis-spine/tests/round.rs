@@ -404,17 +404,18 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
             browser_search.content
         );
     }
-    let browser_stub = tools
+    // Session stays Closed until browser_open; snapshot without open needs no Chromium.
+    let browser_closed = tools
         .execute(cordis_spine::ToolCall {
-            id: "br-open".into(),
-            name: "browser_open".into(),
-            arguments: r#"{"url":"https://example.com"}"#.into(),
+            id: "br-snap".into(),
+            name: "browser_snapshot".into(),
+            arguments: r#"{"interactive":true}"#.into(),
         })
         .await;
     assert!(
-        browser_stub.content.contains("not connected"),
-        "browser stub: {}",
-        browser_stub.content
+        browser_closed.content.contains("not connected"),
+        "browser closed snapshot: {}",
+        browser_closed.content
     );
     let search = tools
         .execute(cordis_spine::ToolCall {
