@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::accessibility::{EnableParams, GetFullAxTreeParams};
+use chromiumoxide::cdp::browser_protocol::accessibility::{
+    EnableParams as AxEnableParams, GetFullAxTreeParams,
+};
 use chromiumoxide::cdp::browser_protocol::dom::{
     FocusParams, GetBoxModelParams, ResolveNodeParams, ScrollIntoViewIfNeededParams,
     SetFileInputFilesParams,
@@ -16,16 +18,22 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
     InsertTextParams, MouseButton,
 };
+use chromiumoxide::cdp::browser_protocol::network::{
+    EventRequestWillBeSent, EventResponseReceived,
+};
 use chromiumoxide::cdp::browser_protocol::page::{
-    EventJavascriptDialogOpening, GetNavigationHistoryParams, HandleJavaScriptDialogParams,
-    NavigateToHistoryEntryParams,
+    EventJavascriptDialogOpening, FrameId, FrameTree, GetFrameTreeParams,
+    GetNavigationHistoryParams, HandleJavaScriptDialogParams, NavigateToHistoryEntryParams,
 };
 use chromiumoxide::layout::Point;
 use chromiumoxide::cdp::browser_protocol::target::{ActivateTargetParams, CloseTargetParams};
-use chromiumoxide::cdp::js_protocol::runtime::{CallArgument, CallFunctionOnParams};
+use chromiumoxide::cdp::js_protocol::runtime::{
+    CallArgument, CallFunctionOnParams, EvaluateParams, EventConsoleApiCalled, RemoteObject,
+};
 use chromiumoxide::keys;
 use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_util::StreamExt;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
 use crate::config::dock_home;
@@ -44,6 +52,105 @@ pub struct PendingDialog {
     pub default_prompt: Option<String>,
 }
 
+const CAPTURE_CAP: usize = 100;
+const EVAL_RESULT_MAX: usize = 8_192;
+const LINE_MAX: usize = 512;
+
+#[derive(Clone, Debug)]
+pub struct NetworkEntry {
+    pub method: String,
+    pub url: String,
+    pub status: Option<i64>,
+    pub resource_type: String,
+    request_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConsoleEntry {
+    pub level: String,
+    pub text: String,
+}
+
+struct CaptureBuffers {
+    network: Vec<NetworkEntry>,
+    console: Vec<ConsoleEntry>,
+}
+
+impl CaptureBuffers {
+    fn new() -> Self {
+        Self {
+            network: Vec::new(),
+            console: Vec::new(),
+        }
+    }
+
+    fn push_network(&mut self, entry: NetworkEntry) {
+        if let Some(existing) = self
+            .network
+            .iter_mut()
+            .rev()
+            .find(|e| e.request_id == entry.request_id)
+        {
+            if entry.status.is_some() {
+                existing.status = entry.status;
+            }
+            if !entry.resource_type.is_empty() {
+                existing.resource_type = entry.resource_type;
+            }
+            return;
+        }
+        self.network.push(entry);
+        if self.network.len() > CAPTURE_CAP {
+            let drop_n = self.network.len() - CAPTURE_CAP;
+            self.network.drain(0..drop_n);
+        }
+    }
+
+    fn update_network_status(&mut self, request_id: &str, status: i64, resource_type: &str) {
+        if let Some(existing) = self
+            .network
+            .iter_mut()
+            .rev()
+            .find(|e| e.request_id == request_id)
+        {
+            existing.status = Some(status);
+            if !resource_type.is_empty() {
+                existing.resource_type = resource_type.to_string();
+            }
+        }
+    }
+
+    fn push_console(&mut self, entry: ConsoleEntry) {
+        self.console.push(entry);
+        if self.console.len() > CAPTURE_CAP {
+            let drop_n = self.console.len() - CAPTURE_CAP;
+            self.console.drain(0..drop_n);
+        }
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
+}
+
+fn remote_object_text(obj: &RemoteObject) -> String {
+    if let Some(v) = obj.value.as_ref() {
+        match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    } else if let Some(d) = obj.description.as_ref() {
+        d.clone()
+    } else {
+        format!("{:?}", obj.r#type)
+    }
+}
+
 #[allow(dead_code)] // retained for status / debugging profile path
 pub struct ConnectedSession {
     browser: Browser,
@@ -51,7 +158,9 @@ pub struct ConnectedSession {
     active: usize,
     handler: JoinHandle<()>,
     dialog_tasks: Vec<JoinHandle<()>>,
+    capture_tasks: Vec<JoinHandle<()>>,
     pending_dialog: Arc<std::sync::Mutex<Option<PendingDialog>>>,
+    capture: Arc<AsyncMutex<CaptureBuffers>>,
     pub(crate) user_data_dir: PathBuf,
     pub refs: HashMap<String, RefEntry>,
 }
@@ -115,8 +224,11 @@ impl ConnectedSession {
         .map_err(|e| format!("new_page({start}): {e}"))?;
 
         let pending_dialog = Arc::new(std::sync::Mutex::new(None));
+        let capture = Arc::new(AsyncMutex::new(CaptureBuffers::new()));
         let mut dialog_tasks = Vec::new();
+        let mut capture_tasks = Vec::new();
         dialog_tasks.push(Self::spawn_dialog_listener(&page, pending_dialog.clone()).await?);
+        capture_tasks.extend(Self::attach_page_capture(&page, capture.clone()).await?);
 
         Ok(Self {
             browser,
@@ -124,7 +236,9 @@ impl ConnectedSession {
             active: 0,
             handler,
             dialog_tasks,
+            capture_tasks,
             pending_dialog,
+            capture,
             user_data_dir,
             refs: HashMap::new(),
         })
@@ -150,6 +264,70 @@ impl ConnectedSession {
                 }
             }
         }))
+    }
+
+    async fn attach_page_capture(
+        page: &Page,
+        capture: Arc<AsyncMutex<CaptureBuffers>>,
+    ) -> Result<Vec<JoinHandle<()>>, String> {
+        // Network/Runtime are enabled by chromiumoxide's frame/network managers
+        // on target attach. Do not re-send Enable — it can time out the command
+        // queue. Event listeners alone surface request/console traffic.
+        let mut tasks = Vec::with_capacity(3);
+        if let Ok(mut events) = page.event_listener::<EventRequestWillBeSent>().await {
+            let capture = capture.clone();
+            tasks.push(tokio::spawn(async move {
+                while let Some(ev) = events.next().await {
+                    let method = ev.request.method.clone();
+                    let url = truncate_str(&ev.request.url, LINE_MAX);
+                    let resource_type = ev
+                        .r#type
+                        .as_ref()
+                        .map(|t| t.as_ref().to_string())
+                        .unwrap_or_default();
+                    let request_id = ev.request_id.inner().to_string();
+                    let mut g = capture.lock().await;
+                    g.push_network(NetworkEntry {
+                        method,
+                        url,
+                        status: None,
+                        resource_type,
+                        request_id,
+                    });
+                }
+            }));
+        }
+        if let Ok(mut events) = page.event_listener::<EventResponseReceived>().await {
+            let capture = capture.clone();
+            tasks.push(tokio::spawn(async move {
+                while let Some(ev) = events.next().await {
+                    let request_id = ev.request_id.inner().to_string();
+                    let status = ev.response.status;
+                    let resource_type = ev.r#type.as_ref().to_string();
+                    let mut g = capture.lock().await;
+                    g.update_network_status(&request_id, status, &resource_type);
+                }
+            }));
+        }
+        if let Ok(mut events) = page.event_listener::<EventConsoleApiCalled>().await {
+            let capture = capture.clone();
+            tasks.push(tokio::spawn(async move {
+                while let Some(ev) = events.next().await {
+                    let level = ev.r#type.as_ref().to_string();
+                    let text = truncate_str(
+                        &ev.args
+                            .iter()
+                            .map(remote_object_text)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        LINE_MAX,
+                    );
+                    let mut g = capture.lock().await;
+                    g.push_console(ConsoleEntry { level, text });
+                }
+            }));
+        }
+        Ok(tasks)
     }
 
     pub fn pending_dialog(&self) -> Option<PendingDialog> {
@@ -185,16 +363,25 @@ impl ConnectedSession {
         Ok(cur)
     }
 
-    pub async fn snapshot(&mut self, interactive: bool) -> Result<LeanSnapshot, String> {
+    pub async fn snapshot(
+        &mut self,
+        interactive: bool,
+        frame_selector: Option<&str>,
+    ) -> Result<LeanSnapshot, String> {
         let page = self.active_page()?.clone();
+        let frame_id = self.resolve_frame_id(&page, frame_selector).await?;
         let snap = with_timeout(
             ACTION_TIMEOUT,
             async {
-                page.execute(EnableParams::default())
+                page.execute(AxEnableParams::default())
                     .await
                     .map_err(|e| format!("ax enable: {e}"))?;
+                let mut builder = GetFullAxTreeParams::builder();
+                if let Some(fid) = frame_id.clone() {
+                    builder = builder.frame_id(fid);
+                }
                 let resp = page
-                    .execute(GetFullAxTreeParams::builder().build())
+                    .execute(builder.build())
                     .await
                     .map_err(|e| format!("getFullAXTree: {e}"))?;
                 Ok::<_, String>(snapshot::build_lean_snapshot(
@@ -389,6 +576,8 @@ impl ConnectedSession {
                     .map_err(|e| format!("new tab: {e}"))?;
                 self.dialog_tasks
                     .push(Self::spawn_dialog_listener(&page, self.pending_dialog.clone()).await?);
+                self.capture_tasks
+                    .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
                 self.pages.push(page);
                 self.active = self.pages.len() - 1;
                 self.refs.clear();
@@ -830,6 +1019,9 @@ impl ConnectedSession {
         for t in self.dialog_tasks.drain(..) {
             t.abort();
         }
+        for t in self.capture_tasks.drain(..) {
+            t.abort();
+        }
         let _ = self.browser.close().await;
         let _ = self.browser.wait().await;
         self.handler.abort();
@@ -1041,6 +1233,197 @@ impl ConnectedSession {
             .await
             .map_err(|e| format!("setDeviceMetricsOverride: {e}"))?;
         Ok(format!("resized viewport to {width}x{height}"))
+    }
+
+    /// Run JS in the page (or optional same-origin iframe) and return a truncated string/JSON.
+    pub async fn evaluate(
+        &mut self,
+        expression: &str,
+        frame_selector: Option<&str>,
+    ) -> Result<String, String> {
+        if expression.trim().is_empty() {
+            return Err("expression is required".into());
+        }
+        let page = self.active_page()?.clone();
+        let frame_id = self.resolve_frame_id(&page, frame_selector).await?;
+        let mut builder = EvaluateParams::builder()
+            .expression(expression)
+            .return_by_value(true)
+            .await_promise(true)
+            .user_gesture(true);
+        if let Some(fid) = frame_id {
+            let ctx = page
+                .frame_execution_context(fid.clone())
+                .await
+                .map_err(|e| format!("frame execution context: {e}"))?
+                .ok_or_else(|| {
+                    "no execution context for frame (cross-origin or not ready)".to_string()
+                })?;
+            builder = builder.context_id(ctx);
+        }
+        let params = builder.build().map_err(|e| e.to_string())?;
+        let result = with_timeout(
+            ACTION_TIMEOUT,
+            async {
+                page.evaluate(params)
+                    .await
+                    .map_err(|e| format!("evaluate: {e}"))
+            },
+            || "evaluate timeout".into(),
+        )
+        .await
+        .map_err(|e| format!("browser_evaluate: {e}"))?;
+
+        let obj = result.object();
+        let rendered = if let Some(v) = obj.value.as_ref() {
+            match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => {
+                    serde_json::to_string(other).unwrap_or_else(|_| other.to_string())
+                }
+            }
+        } else if let Some(d) = obj.description.as_ref() {
+            d.clone()
+        } else {
+            "undefined".into()
+        };
+        Ok(truncate_str(&rendered, EVAL_RESULT_MAX))
+    }
+
+    pub async fn console_messages(&self) -> Result<String, String> {
+        let g = self.capture.lock().await;
+        if g.console.is_empty() {
+            return Ok("(no console messages captured yet)".into());
+        }
+        let lines: Vec<String> = g
+            .console
+            .iter()
+            .map(|e| format!("{}: {}", e.level, e.text))
+            .collect();
+        Ok(lines.join("\n"))
+    }
+
+    pub async fn network_requests(&self) -> Result<String, String> {
+        let g = self.capture.lock().await;
+        if g.network.is_empty() {
+            return Ok("(no network requests captured yet)".into());
+        }
+        let lines: Vec<String> = g
+            .network
+            .iter()
+            .map(|e| {
+                let status = e
+                    .status
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "-".into());
+                let ty = if e.resource_type.is_empty() {
+                    "-"
+                } else {
+                    e.resource_type.as_str()
+                };
+                format!("{} {} {} {}", e.method, e.url, status, ty)
+            })
+            .collect();
+        Ok(lines.join("\n"))
+    }
+
+    /// Resolve optional CSS `frame_selector` to a CDP FrameId. Main frame when None.
+    /// Cross-origin / unlocatable iframes fail with a clear error.
+    async fn resolve_frame_id(
+        &self,
+        page: &Page,
+        frame_selector: Option<&str>,
+    ) -> Result<Option<FrameId>, String> {
+        let Some(sel) = frame_selector.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+        let sel_json = serde_json::to_string(sel).unwrap_or_else(|_| "\"\"".into());
+        let probe = format!(
+            r#"(function() {{
+  const el = document.querySelector({sel_json});
+  if (!el) return {{ error: 'no element matching frame_selector' }};
+  const tag = String(el.tagName || '').toUpperCase();
+  if (tag !== 'IFRAME' && tag !== 'FRAME') {{
+    return {{ error: 'frame_selector did not match an iframe/frame' }};
+  }}
+  try {{
+    void el.contentDocument;
+  }} catch (e) {{
+    return {{
+      error: 'cross-origin iframe (CDP cannot enter)',
+      crossOrigin: true,
+      src: String(el.src || ''),
+      name: String(el.name || '')
+    }};
+  }}
+  return {{
+    ok: true,
+    src: String(el.src || ''),
+    name: String(el.name || '')
+  }};
+}})()"#
+        );
+        let probed = page
+            .evaluate(probe.as_str())
+            .await
+            .map_err(|e| format!("frame probe: {e}"))?;
+        let val = probed
+            .value()
+            .cloned()
+            .ok_or_else(|| "frame probe returned no value".to_string())?;
+        if let Some(err) = val.get("error").and_then(|x| x.as_str()) {
+            return Err(err.into());
+        }
+        let name = val
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let src = val
+            .get("src")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let tree = page
+            .execute(GetFrameTreeParams {})
+            .await
+            .map_err(|e| format!("getFrameTree: {e}"))?
+            .result
+            .frame_tree;
+        let mut frames = Vec::new();
+        flatten_frame_tree(&tree, &mut frames);
+        // Prefer named child frames; skip the root (no parent).
+        let children: Vec<&_> = frames.iter().filter(|f| f.parent_id.is_some()).collect();
+        if let Some(found) = children.iter().find(|f| {
+            (!name.is_empty() && f.name.as_deref() == Some(name.as_str()))
+                || (!src.is_empty()
+                    && (f.url == src
+                        || f.url.ends_with(src.trim_start_matches('/'))
+                        || src.ends_with(f.url.trim_start_matches('/'))))
+        }) {
+            return Ok(Some(found.id.clone()));
+        }
+        if children.len() == 1 && name.is_empty() && src.is_empty() {
+            return Ok(Some(children[0].id.clone()));
+        }
+        // Same-origin but unmatched: if exactly one child, use it when selector matched.
+        if children.len() == 1 {
+            return Ok(Some(children[0].id.clone()));
+        }
+        Err(format!(
+            "iframe matched selector but could not locate CDP frame (name={name:?} src={src:?}; {} child frame(s))",
+            children.len()
+        ))
+    }
+}
+
+fn flatten_frame_tree(tree: &FrameTree, out: &mut Vec<chromiumoxide::cdp::browser_protocol::page::Frame>) {
+    out.push(tree.frame.clone());
+    if let Some(children) = tree.child_frames.as_ref() {
+        for child in children {
+            flatten_frame_tree(child, out);
+        }
     }
 }
 

@@ -24,6 +24,7 @@ pub fn needs_permission(tool: &str) -> bool {
             | "monitor"
             | "cordis_run"
             | "cordis_promote"
+            | "browser_evaluate"
     )
 }
 
@@ -40,6 +41,7 @@ pub fn blocked_in_plan(tool: &str) -> bool {
             | "monitor"
             | "cordis_run"
             | "cordis_promote"
+            | "browser_evaluate"
     )
 }
 
@@ -62,9 +64,14 @@ mod tests {
         assert!(needs_permission("cordis_run"));
         assert!(needs_permission("cordis_promote"));
         assert!(!needs_permission("cordis_inspect"));
+        assert!(needs_permission("browser_evaluate"));
+        assert!(!needs_permission("browser_snapshot"));
+        assert!(!needs_permission("browser_network_requests"));
         assert!(blocked_in_plan("cordis_run"));
         assert!(blocked_in_plan("cordis_promote"));
         assert!(!blocked_in_plan("cordis_inspect"));
+        assert!(blocked_in_plan("browser_evaluate"));
+        assert!(!blocked_in_plan("browser_console_messages"));
     }
 
     #[test]

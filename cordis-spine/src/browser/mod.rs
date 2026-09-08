@@ -42,6 +42,9 @@ pub const BROWSER_TOOL_NAMES: &[&str] = &[
     "browser_handle_dialog",
     "browser_file_upload",
     "browser_resize",
+    "browser_evaluate",
+    "browser_console_messages",
+    "browser_network_requests",
     "browser_screenshot",
     "browser_tabs",
     "browser_close",
@@ -81,6 +84,10 @@ struct BrowserInner {
     last_wait: Mutex<Option<String>>,
     /// Pending JS dialog line (type + message), or last handle_dialog outcome.
     last_dialog: Mutex<Option<String>>,
+    /// Last `browser_evaluate` result preview for the `/browser` cockpit.
+    last_evaluate: Mutex<Option<String>>,
+    /// Last `browser_network_requests` summary line for the `/browser` cockpit.
+    last_network: Mutex<Option<String>>,
     /// Optional slash table to refresh `/browser` overlay body on connect/close.
     slash: Mutex<Option<Arc<Slash>>>,
 }
@@ -96,6 +103,8 @@ impl Browser {
                 last_screenshot: Mutex::new(None),
                 last_wait: Mutex::new(None),
                 last_dialog: Mutex::new(None),
+                last_evaluate: Mutex::new(None),
+                last_network: Mutex::new(None),
                 slash: Mutex::new(None),
             }),
         }
@@ -132,6 +141,16 @@ impl Browser {
     /// Pending / last JS dialog line for the `/browser` cockpit.
     pub fn last_dialog(&self) -> Option<String> {
         self.inner.last_dialog.lock().unwrap().clone()
+    }
+
+    /// Last evaluate preview line, if any this session.
+    pub fn last_evaluate(&self) -> Option<String> {
+        self.inner.last_evaluate.lock().unwrap().clone()
+    }
+
+    /// Last network summary line, if any this session.
+    pub fn last_network(&self) -> Option<String> {
+        self.inner.last_network.lock().unwrap().clone()
     }
 
     pub fn status_line(&self) -> String {
@@ -211,6 +230,24 @@ impl Browser {
         out.push_str(
             "  P1 拖拽 · 对话框 · 文件上传 · 视口 resize。不渲染网页。\n",
         );
+        out.push_str(
+            "  P2 evaluate（权限门）· console · network · 同域 iframe（frame_selector）。\n",
+        );
+        out.push('\n');
+        out.push_str("最近 evaluate：\n");
+        match self.inner.last_evaluate.lock().unwrap().clone() {
+            Some(line) => out.push_str(&format!("  {line}\n")),
+            None => out.push_str("  （无）\n"),
+        }
+        out.push_str(
+            "  browser_evaluate 须过权限浮层（与 bash 同级）；计划模式会挡。\n",
+        );
+        out.push('\n');
+        out.push_str("最近 network：\n");
+        match self.inner.last_network.lock().unwrap().clone() {
+            Some(line) => out.push_str(&format!("  {line}\n")),
+            None => out.push_str("  （无）\n"),
+        }
         out.push('\n');
         out.push_str("审批：\n");
         match approval_line {
@@ -231,7 +268,7 @@ impl Browser {
         out.push('\n');
         out.push_str("工具：\n");
         out.push_str(
-            "  search_tool / use_tool → browser_open · browser_navigate · browser_navigate_back · browser_snapshot · browser_click · browser_hover · browser_type · browser_press_key · browser_select_option · browser_fill_form · browser_wait_for · browser_drag · browser_handle_dialog · browser_file_upload · browser_resize · browser_screenshot · browser_tabs · browser_close\n",
+            "  search_tool / use_tool → browser_open · browser_navigate · browser_navigate_back · browser_snapshot · browser_click · browser_hover · browser_type · browser_press_key · browser_select_option · browser_fill_form · browser_wait_for · browser_drag · browser_handle_dialog · browser_file_upload · browser_resize · browser_evaluate · browser_console_messages · browser_network_requests · browser_screenshot · browser_tabs · browser_close\n",
         );
         out.push_str("  不进默认 sampler 工具表；无需先 /browser。\n");
         out.push('\n');
@@ -272,6 +309,16 @@ impl Browser {
 
     fn remember_dialog(&self, line: String) {
         *self.inner.last_dialog.lock().unwrap() = Some(line);
+        self.refresh_slash();
+    }
+
+    fn remember_evaluate(&self, line: String) {
+        *self.inner.last_evaluate.lock().unwrap() = Some(line);
+        self.refresh_slash();
+    }
+
+    fn remember_network(&self, line: String) {
+        *self.inner.last_network.lock().unwrap() = Some(line);
         self.refresh_slash();
     }
 
@@ -475,6 +522,9 @@ async fn run_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         | "browser_handle_dialog"
         | "browser_file_upload"
         | "browser_resize"
+        | "browser_evaluate"
+        | "browser_console_messages"
+        | "browser_network_requests"
         | "browser_screenshot"
         | "browser_tabs" => {
             if browser.session() == BrowserSession::Closed {
@@ -509,7 +559,8 @@ async fn dispatch_connected(
     match name {
         "browser_snapshot" => {
             let interactive = arg_bool(args, "interactive").unwrap_or(true);
-            let snap = session.snapshot(interactive).await?;
+            let frame = arg_str(args, "frame").or_else(|| arg_str(args, "frame_selector"));
+            let snap = session.snapshot(interactive, frame.as_deref()).await?;
             let tabs = session.tab_infos().await;
             browser.remember_tabs(tabs);
             browser.refresh_slash();
@@ -517,6 +568,9 @@ async fn dispatch_connected(
         }
         "browser_click" => {
             let r = arg_str(args, "ref").ok_or_else(|| "ref is required".to_string())?;
+            // Optional frame/frame_selector documented for API symmetry; refs
+            // must come from a snapshot taken in that frame.
+            let _frame = arg_str(args, "frame").or_else(|| arg_str(args, "frame_selector"));
             session.click_ref(&r).await
         }
         "browser_type" => {
@@ -625,6 +679,35 @@ async fn dispatch_connected(
             let width = arg_i64(args, "width").ok_or_else(|| "width is required".to_string())?;
             let height = arg_i64(args, "height").ok_or_else(|| "height is required".to_string())?;
             session.resize(width, height).await
+        }
+        "browser_evaluate" => {
+            let expression = arg_str(args, "expression")
+                .or_else(|| arg_str(args, "code"))
+                .ok_or_else(|| "expression is required".to_string())?;
+            let frame = arg_str(args, "frame").or_else(|| arg_str(args, "frame_selector"));
+            let out = session.evaluate(&expression, frame.as_deref()).await;
+            match &out {
+                Ok(line) => {
+                    let preview = if line.chars().count() > 120 {
+                        format!("{}…", line.chars().take(120).collect::<String>())
+                    } else {
+                        line.clone()
+                    };
+                    browser.remember_evaluate(preview);
+                }
+                Err(e) => browser.remember_evaluate(format!("失败：{e}")),
+            }
+            out
+        }
+        "browser_console_messages" => session.console_messages().await,
+        "browser_network_requests" => {
+            let out = session.network_requests().await;
+            if let Ok(body) = &out {
+                let summary = body.lines().next().unwrap_or("(empty)").to_string();
+                let n = body.lines().count();
+                browser.remember_network(format!("{n} entr(y/ies); last: {summary}"));
+            }
+            out
         }
         other => Err(format!("unknown browser tool `{other}`")),
     }
@@ -739,13 +822,13 @@ fn browser_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "browser_snapshot".into(),
-            description: "Lean accessibility snapshot of the current page with refs (@eN) for click/type/hover/select/fill. Prefer interactive=true. Discover via search_tool; call with use_tool.".into(),
-            parameters_json: r#"{"type":"object","properties":{"interactive":{"type":"boolean","description":"If true (default), only interactive element refs."}}}"#.into(),
+            description: "Lean accessibility snapshot of the current page (or same-origin iframe via frame/frame_selector) with refs (@eN) for click/type/hover/select/fill. Prefer interactive=true. Cross-origin iframes fail clearly. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"interactive":{"type":"boolean","description":"If true (default), only interactive element refs."},"frame":{"type":"string","description":"Optional CSS selector for a same-origin iframe/frame."},"frame_selector":{"type":"string","description":"Alias of frame."}}}"#.into(),
         },
         ToolSpec {
             name: "browser_click".into(),
-            description: "Click an element from browser_snapshot by ref (@eN). Discover via search_tool; call with use_tool.".into(),
-            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"Element ref from browser_snapshot."}},"required":["ref"]}"#.into(),
+            description: "Click an element from browser_snapshot by ref (@eN). If the ref came from a framed snapshot, pass the same frame/frame_selector for clarity (refs already target that frame). Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"Element ref from browser_snapshot."},"frame":{"type":"string","description":"Optional CSS selector matching the iframe used for snapshot."},"frame_selector":{"type":"string","description":"Alias of frame."}},"required":["ref"]}"#.into(),
         },
         ToolSpec {
             name: "browser_hover".into(),
@@ -796,6 +879,21 @@ fn browser_specs() -> Vec<ToolSpec> {
             name: "browser_resize".into(),
             description: "Set the page viewport width/height via Emulation.setDeviceMetricsOverride. Discover via search_tool; call with use_tool.".into(),
             parameters_json: r#"{"type":"object","properties":{"width":{"type":"integer","description":"Viewport width in CSS pixels."},"height":{"type":"integer","description":"Viewport height in CSS pixels."}},"required":["width","height"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_evaluate".into(),
+            description: "Run JavaScript in the page (or same-origin iframe via frame/frame_selector) via chromiumoxide CDP Runtime.evaluate. Returns a truncated string/JSON result. Permissions-gated like bash (needs_permission + plan block). Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"expression":{"type":"string","description":"JS expression or function to evaluate."},"code":{"type":"string","description":"Alias of expression."},"frame":{"type":"string","description":"Optional CSS selector for a same-origin iframe/frame."},"frame_selector":{"type":"string","description":"Alias of frame."}},"required":["expression"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_console_messages".into(),
+            description: "Read-only recent console API messages captured since the session connected (truncated). Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_network_requests".into(),
+            description: "Read-only list of recent network requests (method/url/status/type). Truncated; never dumps response bodies. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.into(),
         },
         ToolSpec {
             name: "browser_screenshot".into(),
@@ -858,7 +956,13 @@ mod tests {
         assert!(body.contains("browser_handle_dialog"), "{body}");
         assert!(body.contains("browser_file_upload"), "{body}");
         assert!(body.contains("browser_resize"), "{body}");
+        assert!(body.contains("browser_evaluate"), "{body}");
+        assert!(body.contains("browser_network_requests"), "{body}");
         assert!(body.contains("P1"), "{body}");
+        assert!(body.contains("P2"), "{body}");
+        assert!(body.contains("最近 evaluate："), "{body}");
+        assert!(body.contains("权限浮层"), "{body}");
+        assert!(body.contains("最近 network："), "{body}");
         let with_approval = browser.format_cockpit(Some("browser_open — https://example.com/"));
         assert!(with_approval.contains("browser_open — https://example.com/"), "{with_approval}");
         assert!(!with_approval.contains("审批：\n  （无）"), "{with_approval}");
@@ -972,6 +1076,9 @@ mod tests {
             "browser_handle_dialog",
             "browser_file_upload",
             "browser_resize",
+            "browser_evaluate",
+            "browser_console_messages",
+            "browser_network_requests",
         ] {
             let args = if need_open == "browser_navigate" {
                 r#"{"url":"about:blank"}"#
@@ -993,6 +1100,8 @@ mod tests {
                 r#"{"ref":"@e1","paths":["/tmp/x"]}"#
             } else if need_open == "browser_resize" {
                 r#"{"width":800,"height":600}"#
+            } else if need_open == "browser_evaluate" {
+                r#"{"expression":"1+1"}"#
             } else {
                 "{}"
             };
@@ -1293,5 +1402,123 @@ mod tests {
         // Dispose after close must still be clean.
         fiber.dispose().await.unwrap();
         assert!(root.get::<Browser>(BROWSER).is_none());
+    }
+
+    #[tokio::test]
+    async fn p2_evaluate_network_iframe_when_chrome_available() {
+        let dock_home = tempfile::tempdir().unwrap();
+        std::env::set_var("DOCK_HOME", dock_home.path());
+
+        if session::discover_chrome().is_err() {
+            eprintln!("skip p2 smoke: chrome not installed");
+            return;
+        }
+
+        let (root, fiber) = boot_browser().await;
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+        let browser = root.get::<Browser>(BROWSER).unwrap();
+
+        let open = tools
+            .execute(ToolCall {
+                id: "o2".into(),
+                name: "browser_open".into(),
+                arguments: r#"{"url":"about:blank"}"#.into(),
+            })
+            .await;
+        assert!(!open.content.starts_with("Error:"), "open: {}", open.content);
+
+        let setup = tools
+            .execute(ToolCall {
+                id: "ev0".into(),
+                name: "browser_evaluate".into(),
+                arguments: r#"{"expression":"(() => { document.body.innerHTML = '<h1 id=t>P2Main</h1><iframe id=f name=child src=\"data:text/html,<html><body><p id=p>InsideFrame</p></body></html>\"></iframe>'; console.log('BUA-P2-LOG'); return document.title = 'p2'; })()"}"#.into(),
+            })
+            .await;
+        assert!(!setup.content.starts_with("Error:"), "setup evaluate: {}", setup.content);
+
+        let ev = tools
+            .execute(ToolCall {
+                id: "ev".into(),
+                name: "browser_evaluate".into(),
+                arguments: r#"{"expression":"1+2"}"#.into(),
+            })
+            .await;
+        assert!(!ev.content.starts_with("Error:"), "evaluate: {}", ev.content);
+        assert!(ev.content.contains('3'), "evaluate result: {}", ev.content);
+        assert!(browser.last_evaluate().is_some());
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = tools
+            .execute(ToolCall {
+                id: "fetch".into(),
+                name: "browser_evaluate".into(),
+                arguments: r#"{"expression":"fetch('data:text/plain,hi').then(r => r.text()).catch(e => String(e))"}"#.into(),
+            })
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        let console = tools
+            .execute(ToolCall {
+                id: "c".into(),
+                name: "browser_console_messages".into(),
+                arguments: "{}".into(),
+            })
+            .await;
+        assert!(
+            !console.content.starts_with("Error:"),
+            "console: {}",
+            console.content
+        );
+        assert!(
+            console.content.contains("BUA-P2-LOG") || console.content.contains("log:"),
+            "console: {}",
+            console.content
+        );
+
+        let net = tools
+            .execute(ToolCall {
+                id: "n".into(),
+                name: "browser_network_requests".into(),
+                arguments: "{}".into(),
+            })
+            .await;
+        assert!(!net.content.starts_with("Error:"), "network: {}", net.content);
+        assert!(browser.last_network().is_some());
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let frame_ev = tools
+            .execute(ToolCall {
+                id: "fe".into(),
+                name: "browser_evaluate".into(),
+                arguments: r##"{"expression":"document.getElementById('p') && document.getElementById('p').textContent","frame_selector":"#f"}"##.into(),
+            })
+            .await;
+        assert!(
+            !frame_ev.content.starts_with("Error:"),
+            "frame evaluate: {}",
+            frame_ev.content
+        );
+        assert!(
+            frame_ev.content.contains("InsideFrame"),
+            "frame evaluate: {}",
+            frame_ev.content
+        );
+
+        let cross = tools
+            .execute(ToolCall {
+                id: "xo".into(),
+                name: "browser_evaluate".into(),
+                arguments: r##"{"expression":"1","frame_selector":"#missing"}"##.into(),
+            })
+            .await;
+        assert!(
+            cross.content.contains("Error:")
+                || cross.content.contains("no element")
+                || cross.content.contains("matching"),
+            "missing frame: {}",
+            cross.content
+        );
+
+        fiber.dispose().await.unwrap();
     }
 }

@@ -62,6 +62,9 @@ tools:
   - browser_resize
   - browser_screenshot
   - browser_tabs
+  - browser_evaluate
+  - browser_console_messages
+  - browser_network_requests
   - browser_close
   - cordis_inspect
   - cordis_inspect_self
