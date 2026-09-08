@@ -4,6 +4,7 @@ use crate::agent_presets::agent_presets;
 use crate::agents::agents;
 use crate::ask_user::tool_ask_user;
 use crate::browser::tool_browser;
+use crate::computer::tool_computer;
 use crate::compact::compact;
 use crate::context_book::context;
 use crate::cron::cron;
@@ -121,6 +122,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_skills(), ())?.wait().await?;
     ctx.plugin(tool_workflow(), ())?.wait().await?;
     ctx.plugin(mcp_client(), ())?.wait().await?;
+    ctx.plugin(tool_computer(), ())?.wait().await?;
     ctx.plugin(dynamic_runner(), ())?.wait().await?;
     if let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) {
         tokio::spawn(async move {

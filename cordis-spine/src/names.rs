@@ -19,6 +19,8 @@ pub const SUBAGENTS: &str = "subagents";
 pub const MEMORY: &str = "memory";
 /// External Chromium cockpit (`ctx.browser`). chromiumoxide CDP + live `/browser` TUI cockpit (lean a11y refs).
 pub const BROWSER: &str = "browser";
+/// Host desktop CUA cockpit (`ctx.computer`). Thin status over cua-driver MCP; no key/mouse kernel.
+pub const COMPUTER: &str = "computer";
 /// Local goal progress (`ctx.goal`). `/goal` + `update_goal`.
 pub const GOAL: &str = "goal";
 /// Language-server client (`ctx.lsp`). Fail-open.

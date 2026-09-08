@@ -40,6 +40,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 | `agent-presets` | `"agentPresets"` | — | 组装 Agent：YAML 定义人设 + 工具允许名单，运行时只过滤 live `"tools"`。**正在运行的动态包**用 `Tools::register_dynamic` 登记的 extra 工具、以及 **已开启的 MCP 工具**（`register_mcp`，公名 `mcp_{server}__{tool}`，经 `use_tool` 调度）会穿过允许名单。层：crate `presets/<id>/agent.yml` + `agents/*.yml` < `~/.dock/presets` < 项目 `.dock/presets`。仍可读旧 `<id>.yml`（目录优先）。加一个目录就是一个 Agent。内置 `code` / `minimal` / `cordis` / `warden`（守望）。`code`/`cordis` 的 `agents/` 名册是 `general-purpose` / `explore` / `plan`（项目层可加，如 `.dock/presets/创造/agents/review.yml` 叠到 `cordis`）；`warden` 是 `岑` `锁` `甲` `乙` `丙` `衡` `验` `观` `突击`（不要用拼音 id）。发给模型的 `subagent`/`task` 把 `subagent_type` 收成当前名册 enum。省略 `tools` = 全部已注册工具。新建模式默认写**当前工作区** `.dock/presets/<id>/agent.yml`（`/preset` n/d 有项目层时落到这里；系统提示注入 `.dock/presets` 与 `.dock/presets/<模式>/agents`，不用绝对 `{cwd}`；id 必须 `[a-z0-9][a-z0-9-]*`，汉字目录只叠内置）。新建子代理默认写 `.dock/presets/<当前模式 id>/agents/<type>.yml`。空名册仍注入这两处路径。只有用户明确要求保存到全局才写 `~/.dock/presets/`。写完人设后 `subagent` 校验立刻重读；本轮刚写完时用 `subagent`（`reload_roster: true`）刷新 enum。新建模式写完后用 `/preset` 应用该 id。改 crate `presets/` 要重新编译 |
 | `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 |
 | `tool-browser` | `"browser"` + `"tools"` | `browser_open` `browser_navigate` `browser_navigate_back` `browser_snapshot` `browser_click` `browser_hover` `browser_type` `browser_press_key` `browser_select_option` `browser_fill_form` `browser_wait_for` `browser_drag` `browser_handle_dialog` `browser_file_upload` `browser_resize` `browser_evaluate` `browser_console_messages` `browser_network_requests` `browser_screenshot` `browser_tabs` `browser_close`（按需） | **BUA P2**：in-process **chromiumoxide** CDP。P1 之外增加 `browser_evaluate`（**权限门同 bash**：`needs_permission` + `blocked_in_plan`，经 `tools/execute` / `use_tool` 命中）、只读截断的 `browser_console_messages` / `browser_network_requests`（会话连接时挂 Network/Runtime 监听，保留最近 N 条）、以及 **同域 iframe**：`browser_snapshot` / `browser_evaluate` / `browser_click` 可选 `frame`/`frame_selector`（CSS 选 iframe）；跨域或找不到则明确报错。无 Node/Playwright；CUA 像素点击仍不做。`register_deferred`：不进 sampler / `specs_for_model`。Fiber dispose 关掉 Chromium。`/browser` 驾驶舱列 P0–P2 + 最近 evaluate/network。`code` / `cordis`（+ general-purpose）允许名单含这些 `browser_*`；`minimal` / `warden` 主代理不含 |
+| `tool-computer` | `"computer"` | — | **CUA C0**：薄驾驶舱 named `"computer"`。桌面键鼠经 trycua `cua-driver` MCP（公名 `mcp_cua-driver__*`，现有 `mcp-client`），**不**自研键鼠 / Docker。live-lookup `"mcp"` 看 cua-driver 是否就绪；`/computer` 为 TUI CATALOG builtin（`Overlay::Computer`）。全部 `mcp_cua-driver__*` 与 bash 同级 permissions / 计划门。挂在 `mcp-client` 之后；fiber dispose 注销。见下文「Computer / CUA」 |
 | `tool-todo` | `"todos"` + `"tools"` | `todo_write` | Grok merge/replace |
 | `plan-mode` | `"planMode"` + `"tools"` | `enter_plan_mode` `exit_plan_mode` | 计划文件 `.dock/plan.md`。计划态挡住 bash / 写文件等 |
 | `tool-ask-user` | `"ask"` + `"tools"` | `ask_user_question` | 事件 `ask/pending` |
@@ -69,7 +70,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 }
 ```
 
-权限门（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `browser_evaluate`。
+权限门（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `browser_evaluate`，以及全部 **`mcp_cua-driver__*`**（trycua `cua-driver` MCP，与 bash 同级）。
 
 计划门：同上（`enter_plan_mode` 之后这些返回 blocked，直到 `exit_plan_mode`）。例外：对 `.dock/plan.md` 的 `search_replace` / `write_file` 自动放行（对齐 grok）。
 
@@ -82,6 +83,52 @@ cargo test -p cordis-spine --test round -- install_app_registers
 - **进入同域 iframe**：在 `browser_snapshot` / `browser_evaluate`（及 click 的文档对称参数）上传可选 `frame` 或 `frame_selector`（CSS，指向 `<iframe>`/`<frame>`）。实现用主文档 `querySelector` 探测 + `Page.getFrameTree` 匹配 CDP `FrameId`，再对 evaluate 设 `Runtime.evaluate` 的 `contextId`，对 snapshot 传 `Accessibility.getFullAXTree.frameId`。
 - **跨域 / 找不到**：探测读 `contentDocument` 失败或树里匹配不到时，**直接失败并返回明确错误**（例如 `cross-origin iframe (CDP cannot enter)` / `no element matching frame_selector`）。不做 OOPIF 像素点击，也不静默落到主文档。
 - **refs**：framed snapshot 产生的 `@eN` 只对该 frame 有效；click 前应使用同一 `frame_selector` 拍到的 snapshot。
+
+
+### Computer / CUA（`cua-driver` MCP，C0）
+
+控本机桌面走 **trycua [`cua-driver`](https://github.com/trycua/cua)** MCP，**不**自研键鼠、**不** Docker / cua 云沙箱、**不** path-dep 进 spine。
+
+- **接入**：用户本机安装 `cua-driver`；Dock 用现有 `mcp-client` stdio。`config.toml` 样例见 [config.toml.example](config.toml.example) 与下文。公名 `mcp_cua-driver__{tool}`（服务器键名必须是 `cua-driver`），与其它 MCP 一样 **不进** sampler / `specs_for_model`，经 `search_tool` / `use_tool`。
+- **权限 / 计划门**：所有 `mcp_cua-driver__*` 与 `bash` 同级（`needs_permission` + `blocked_in_plan`）。`use_tool` 内层 `execute` 会命中该门。
+- **Allowlist**：MCP extras 仍按现规则 **穿过** Agent preset allowlist；但 `code` / `cordis`（含 general-purpose）须保留 `search_tool` / `use_tool`。`minimal` / `warden` 主代理不含这两项则调不到 cua-driver。
+- **勿混 BUA**：`cua-driver` 自带的 `browser_*` MCP 工具 ≠ Dock chromiumoxide `browser_*`。网页自动化优先 Dock BUA；桌面键鼠 / 开应用走 cua-driver。
+- **Linux 坑**（写进安装说明）：需要 **X11 或 XWayland**（原生 Wayland 仍预览）；`DISPLAY` / `XAUTHORITY`；`at-spi2-core`（+ 必要时 toolkit-accessibility）否则 AT-SPI / `get_window_state` 弱；把 `~/.local/bin` 放进 `PATH`，或用 `cua-driver mcp-config` 给出的绝对 command；telemetry 默开，可 `cua-driver telemetry disable`。
+- **TUI**：`/computer` 薄驾驶舱（连上 / 未装 driver、审批提示）；named `"computer"` 已挂；完整 live overlay 由 TUI 同 PR 跟。不嵌真桌面。
+- **冒烟**：装好后 `/mcps` 见 `cua-driver` → `search_tool` 查桌面工具 → `use_tool`（先过权限门）完成截图或点按一类动作。
+
+**本机边界（BUA 在 Linux + X11 冒烟，`cua-driver` 0.24.x）**
+
+- `doctor` 应见 `display server: X11` + `X11 connection: connected`。若 `[warn] AT-SPI: accessibility bus not reachable`：装 `at-spi2-core`，确保用户会话有 D-Bus；GNOME 可再开 `gsettings set org.gnome.desktop.interface toolkit-accessibility true`。AT-SPI 弱时 `get_window_state` / a11y 树不可靠，点按仍可能走几何。
+- 验收常用 MCP 名（公名前缀 `mcp_cua-driver__`）：`list_apps` / `list_windows` / `launch_app`、`click` / `double_click` / `right_click` / `drag` / `scroll`、`type_text` / `press_key` / `hotkey`、`get_accessibility_tree` / `get_desktop_state` / `get_screen_size`、`bring_to_front` / `invoke_menu`。driver 另暴露 `browser_*`——**不要**当 Dock BUA 用。
+- 无图形会话 / 纯 SSH 无 `DISPLAY`：`doctor` 会挂；CI 不要默认跑 cua-driver 实机。本机可用既有 X11/Xvfb，但 AT-SPI 仍要会话总线。
+- 安装脚本：`https://cua.ai/driver/install.sh` → 常落到 `~/.local/bin/cua-driver`；`mcp-config` 的 JSON `command` 可直接抄进 Dock。
+
+安装（Linux 示例）：
+
+```bash
+# 官方安装（二进制进 ~/.cua-driver，并 symlink 到 ~/.local/bin）
+/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
+# Debian/Ubuntu 建议再装 AT-SPI：
+#   sudo apt-get install -y at-spi2-core
+export PATH="$HOME/.local/bin:$PATH"
+cua-driver --version
+cua-driver doctor          # 查 DISPLAY / X11 / AT-SPI
+cua-driver mcp-config      # 打印推荐 command/args（可抄进 config.toml）
+# 可选：cua-driver telemetry disable
+```
+
+`~/.dock/config.toml`（或项目 `.dock/config.toml`）样例——优先 PATH 上的 `cua-driver`：
+
+```toml
+[mcp_servers.cua-driver]
+command = "cua-driver"
+args = ["mcp"]
+enabled = true
+# 若 PATH 没有，可改成 mcp-config 给出的绝对路径，例如：
+# command = "/home/YOU/.cua-driver/packages/releases/…/cua-driver"
+```
+
 
 ## 待做（已挂名、仍比 Grok 薄）
 

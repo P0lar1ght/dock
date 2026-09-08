@@ -5,9 +5,9 @@ use std::collections::HashSet;
 use cordis::Context;
 use cordis_spine::{
     goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
-    Ask, Browser, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind, Permissions,
+    Ask, Browser, Computer, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind, Permissions,
     PlanMode, Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage, Workflows,
-    AGENT_PRESETS, ASK, BROWSER, CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
+    AGENT_PRESETS, ASK, BROWSER, COMPUTER, CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
     SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
 
@@ -151,6 +151,25 @@ pub(super) fn browser_cockpit_body(ctx: &Context) -> String {
         .map(|b| b.format_cockpit(approval.as_deref()))
         .unwrap_or_else(|| "browser 未挂载（tool-browser 插件不在树上）。".into())
 }
+
+pub(super) fn computer_cockpit_body(ctx: &Context) -> String {
+    let approval = ctx
+        .get::<Permissions>(PERMISSIONS)
+        .and_then(|p| p.front())
+        .filter(|pr| pr.tool.starts_with("mcp_cua-driver__"))
+        .map(|pr| {
+            if pr.summary.is_empty() {
+                pr.tool.clone()
+            } else {
+                format!("{} — {}", pr.tool, pr.summary)
+            }
+        });
+    ctx.get::<Computer>(COMPUTER)
+        .map(|c| c.format_cockpit(approval.as_deref()))
+        .unwrap_or_else(|| "computer 未挂载（tool-computer 插件不在树上）。".into())
+}
+
+
 
 pub(super) fn open_ask_if_needed(ctx: &Context, overlay: &mut Overlay) {
     if matches!(
@@ -1117,6 +1136,7 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
         | Overlay::Notice { .. }
         | Overlay::Slot { .. }
         | Overlay::Browser { .. }
+        | Overlay::Computer { .. }
         | Overlay::Inspect { .. } => 0,
         Overlay::Presets(view) => preset_overlay::overlay_len(ctx, view),
     }

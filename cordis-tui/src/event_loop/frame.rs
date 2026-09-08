@@ -852,6 +852,10 @@ pub(super) fn paint_overlay(
                 });
             text_overlay::render(buf, area, "浏览器", &body, *scroll)
         }
+        Overlay::Computer { scroll } => {
+            let body = super::support::computer_cockpit_body(ctx);
+            text_overlay::render(buf, area, "电脑", &body, *scroll)
+        }
         Overlay::Inspect {
             target,
             scroll,
