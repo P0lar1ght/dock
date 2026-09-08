@@ -239,6 +239,9 @@ impl Browser {
             Some(line) => out.push_str(&format!("  {line}\n")),
             None => out.push_str("  （无）\n"),
         }
+        out.push_str(
+            "  browser_evaluate 须过权限浮层（与 bash 同级）；计划模式会挡。\n",
+        );
         out.push('\n');
         out.push_str("最近 network：\n");
         match self.inner.last_network.lock().unwrap().clone() {
@@ -958,6 +961,7 @@ mod tests {
         assert!(body.contains("P1"), "{body}");
         assert!(body.contains("P2"), "{body}");
         assert!(body.contains("最近 evaluate："), "{body}");
+        assert!(body.contains("权限浮层"), "{body}");
         assert!(body.contains("最近 network："), "{body}");
         let with_approval = browser.format_cockpit(Some("browser_open — https://example.com/"));
         assert!(with_approval.contains("browser_open — https://example.com/"), "{with_approval}");
