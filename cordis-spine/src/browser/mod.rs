@@ -28,9 +28,16 @@ use session::ConnectedSession;
 /// Planned whitelist. Registered deferred; not in `specs_for_model`.
 pub const BROWSER_TOOL_NAMES: &[&str] = &[
     "browser_open",
+    "browser_navigate",
+    "browser_navigate_back",
     "browser_snapshot",
     "browser_click",
+    "browser_hover",
     "browser_type",
+    "browser_press_key",
+    "browser_select_option",
+    "browser_fill_form",
+    "browser_wait_for",
     "browser_screenshot",
     "browser_tabs",
     "browser_close",
@@ -183,7 +190,7 @@ impl Browser {
         out.push('\n');
         out.push_str("工具：\n");
         out.push_str(
-            "  search_tool / use_tool → browser_open · browser_snapshot · browser_click · browser_type · browser_screenshot · browser_tabs · browser_close\n",
+            "  search_tool / use_tool → browser_open · browser_navigate · browser_navigate_back · browser_snapshot · browser_click · browser_hover · browser_type · browser_press_key · browser_select_option · browser_fill_form · browser_wait_for · browser_screenshot · browser_tabs · browser_close\n",
         );
         out.push_str("  不进默认 sampler 工具表；无需先 /browser。\n");
         out.push('\n');
@@ -284,6 +291,33 @@ impl Browser {
         self.mark_connected(&url_now);
         Ok(format!("opened {url_now}"))
     }
+
+    /// Jump within an existing session. Errors if Closed (unlike [`Self::ensure_open`]).
+    async fn navigate_existing(&self, url: &str) -> Result<String, String> {
+        let mut g = self.inner.live.lock().await;
+        let session = g.as_mut().ok_or_else(|| NEED_OPEN.to_string())?;
+        let cur = session.navigate(url).await?;
+        let tabs = session.tab_infos().await;
+        drop(g);
+        self.remember_tabs(tabs);
+        self.mark_connected(&cur);
+        Ok(format!("navigated to {cur}"))
+    }
+
+    async fn navigate_back_existing(&self) -> Result<String, String> {
+        let mut g = self.inner.live.lock().await;
+        let session = g.as_mut().ok_or_else(|| NEED_OPEN.to_string())?;
+        let cur = session.navigate_back().await?;
+        let tabs = session.tab_infos().await;
+        drop(g);
+        self.remember_tabs(tabs);
+        if let Some(active) = self.inner.last_tabs.lock().unwrap().iter().find(|t| t.active) {
+            self.mark_connected(&active.url);
+        } else {
+            self.refresh_slash();
+        }
+        Ok(cur)
+    }
 }
 
 impl Default for Browser {
@@ -344,13 +378,35 @@ async fn run_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
             Some(url) if !url.is_empty() => browser.ensure_open(Some(&url)).await,
             _ => Err("Error: url is required".into()),
         },
+        "browser_navigate" => {
+            if browser.session() == BrowserSession::Closed {
+                Err(NEED_OPEN.into())
+            } else {
+                match arg_str(&call.arguments, "url") {
+                    Some(url) if !url.is_empty() => browser.navigate_existing(&url).await,
+                    _ => Err("url is required".into()),
+                }
+            }
+        }
+        "browser_navigate_back" => {
+            if browser.session() == BrowserSession::Closed {
+                Err(NEED_OPEN.into())
+            } else {
+                browser.navigate_back_existing().await
+            }
+        }
         "browser_close" => {
             browser.shutdown().await;
             Ok("browser closed".into())
         }
         "browser_snapshot"
         | "browser_click"
+        | "browser_hover"
         | "browser_type"
+        | "browser_press_key"
+        | "browser_select_option"
+        | "browser_fill_form"
+        | "browser_wait_for"
         | "browser_screenshot"
         | "browser_tabs" => {
             if browser.session() == BrowserSession::Closed {
@@ -423,6 +479,35 @@ async fn dispatch_connected(
             browser.refresh_slash();
             Ok(out)
         }
+        "browser_hover" => {
+            let r = arg_str(args, "ref").ok_or_else(|| "ref is required".to_string())?;
+            session.hover_ref(&r).await
+        }
+        "browser_press_key" => {
+            let key = arg_str(args, "key").ok_or_else(|| "key is required".to_string())?;
+            let ref_id = arg_str(args, "ref");
+            session.press_key(&key, ref_id.as_deref()).await
+        }
+        "browser_select_option" => {
+            let r = arg_str(args, "ref").ok_or_else(|| "ref is required".to_string())?;
+            let value = arg_str(args, "value");
+            let label = arg_str(args, "label");
+            session
+                .select_option(&r, value.as_deref(), label.as_deref())
+                .await
+        }
+        "browser_fill_form" => {
+            let fields = parse_fill_fields(args)?;
+            session.fill_form(&fields).await
+        }
+        "browser_wait_for" => {
+            let text = arg_str(args, "text");
+            let selector = arg_str(args, "selector");
+            let timeout_ms = arg_u64(args, "timeout_ms");
+            session
+                .wait_for(text.as_deref(), selector.as_deref(), timeout_ms)
+                .await
+        }
         other => Err(format!("unknown browser tool `{other}`")),
     }
 }
@@ -448,16 +533,57 @@ fn arg_usize(raw: &str, key: &str) -> Option<usize> {
     })
 }
 
+fn arg_u64(raw: &str, key: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    v.get(key).and_then(|x| {
+        x.as_u64()
+            .or_else(|| x.as_i64().and_then(|n| u64::try_from(n).ok()))
+    })
+}
+
+fn parse_fill_fields(raw: &str) -> Result<Vec<(String, String)>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid JSON arguments: {e}"))?;
+    let arr = v
+        .get("fields")
+        .and_then(|x| x.as_array())
+        .ok_or_else(|| "fields array is required".to_string())?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let r = item
+            .get("ref")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("fields[{i}].ref is required"))?;
+        let value = item.get("value").map(|x| match x {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }).unwrap_or_default();
+        out.push((r.to_string(), value));
+    }
+    Ok(out)
+}
+
 fn browser_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "browser_open".into(),
-            description: "Open a URL in Dock's isolated Chromium session (BUA cockpit via chromiumoxide CDP). Lazily launches Chromium under $DOCK_HOME/browser/user-data — no /browser required. Discover via search_tool; call with use_tool.".into(),
+            description: "Open a URL in Dock's isolated Chromium session (BUA cockpit via chromiumoxide CDP). Lazily launches Chromium under $DOCK_HOME/browser/user-data — no /browser required. Use browser_open for first connect; use browser_navigate to jump in an already-open session. Discover via search_tool; call with use_tool.".into(),
             parameters_json: r#"{"type":"object","properties":{"url":{"type":"string","description":"URL to open."}},"required":["url"]}"#.into(),
         },
         ToolSpec {
+            name: "browser_navigate".into(),
+            description: "Navigate the current tab to a URL in an existing Chromium session. Errors if Closed — call browser_open first. Unlike browser_open, does not launch Chromium. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"url":{"type":"string","description":"URL to navigate to."}},"required":["url"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_navigate_back".into(),
+            description: "Go back in history for the active tab (existing session only; errors if Closed). Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.into(),
+        },
+        ToolSpec {
             name: "browser_snapshot".into(),
-            description: "Lean accessibility snapshot of the current page with refs (@eN) for click/type. Prefer interactive=true. Discover via search_tool; call with use_tool.".into(),
+            description: "Lean accessibility snapshot of the current page with refs (@eN) for click/type/hover/select/fill. Prefer interactive=true. Discover via search_tool; call with use_tool.".into(),
             parameters_json: r#"{"type":"object","properties":{"interactive":{"type":"boolean","description":"If true (default), only interactive element refs."}}}"#.into(),
         },
         ToolSpec {
@@ -466,9 +592,34 @@ fn browser_specs() -> Vec<ToolSpec> {
             parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"Element ref from browser_snapshot."}},"required":["ref"]}"#.into(),
         },
         ToolSpec {
+            name: "browser_hover".into(),
+            description: "Hover an element from browser_snapshot by ref (@eN). Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"Element ref from browser_snapshot."}},"required":["ref"]}"#.into(),
+        },
+        ToolSpec {
             name: "browser_type".into(),
             description: "Type text into an element from browser_snapshot (optional ref focuses first). Discover via search_tool; call with use_tool.".into(),
             parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"Element ref from browser_snapshot."},"text":{"type":"string","description":"Text to type."},"submit":{"type":"boolean","description":"Press Enter after typing."}},"required":["text"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_press_key".into(),
+            description: "Press a key or shortcut (Enter/Tab/Escape/ArrowDown or Control+a, Meta+Shift+t). Optional ref focuses that element first. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"key":{"type":"string","description":"Key or chord (e.g. Enter, Tab, Control+a)."},"ref":{"type":"string","description":"Optional snapshot ref to focus before pressing."}},"required":["key"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_select_option".into(),
+            description: "Select an option on a <select> (or similar) by snapshot ref plus value and/or label. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"Element ref from browser_snapshot."},"value":{"type":"string","description":"Option value attribute."},"label":{"type":"string","description":"Option visible label/text."}},"required":["ref"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_fill_form".into(),
+            description: "Fill multiple form fields in one call. Pass fields: [{ref, value}, ...]. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"fields":{"type":"array","description":"Array of {ref, value} objects.","items":{"type":"object","properties":{"ref":{"type":"string"},"value":{}},"required":["ref"]}}},"required":["fields"]}"#.into(),
+        },
+        ToolSpec {
+            name: "browser_wait_for".into(),
+            description: "Wait for visible text and/or a CSS selector, or just sleep for timeout_ms when neither is set. Discover via search_tool; call with use_tool.".into(),
+            parameters_json: r#"{"type":"object","properties":{"text":{"type":"string","description":"Substring to wait for in document body text."},"selector":{"type":"string","description":"CSS selector to wait for."},"timeout_ms":{"type":"integer","description":"Max wait in milliseconds (default 30000)."}}}"#.into(),
         },
         ToolSpec {
             name: "browser_screenshot".into(),
@@ -524,6 +675,9 @@ mod tests {
             assert!(body.contains(needle), "missing {needle} in {body}");
         }
         assert_eq!(browser.status_line(), "未连接");
+        assert!(body.contains("browser_hover"), "{body}");
+        assert!(body.contains("browser_navigate"), "{body}");
+        assert!(body.contains("browser_press_key"), "{body}");
         let with_approval = browser.format_cockpit(Some("browser_open — https://example.com/"));
         assert!(with_approval.contains("browser_open — https://example.com/"), "{with_approval}");
         assert!(!with_approval.contains("审批：\n  （无）"), "{with_approval}");
@@ -620,6 +774,51 @@ mod tests {
             result.content
         );
 
+        for need_open in [
+            "browser_navigate",
+            "browser_navigate_back",
+            "browser_hover",
+            "browser_press_key",
+            "browser_select_option",
+            "browser_fill_form",
+            "browser_wait_for",
+        ] {
+            let args = if need_open == "browser_navigate" {
+                r#"{"url":"about:blank"}"#
+            } else if need_open == "browser_press_key" {
+                r#"{"key":"Enter"}"#
+            } else if need_open == "browser_select_option" {
+                r#"{"ref":"@e1","value":"x"}"#
+            } else if need_open == "browser_fill_form" {
+                r#"{"fields":[{"ref":"@e1","value":"x"}]}"#
+            } else if need_open == "browser_wait_for" {
+                r#"{"text":"hi","timeout_ms":10}"#
+            } else if need_open == "browser_hover" {
+                r#"{"ref":"@e1"}"#
+            } else {
+                "{}"
+            };
+            let r = tools
+                .execute(ToolCall {
+                    id: need_open.into(),
+                    name: need_open.into(),
+                    arguments: args.into(),
+                })
+                .await;
+            assert!(
+                r.content.contains("not connected") || r.content.contains("browser_open"),
+                "{need_open}: {}",
+                r.content
+            );
+        }
+
+        // Specs cover open vs navigate wording.
+        let specs = tools.specs();
+        let open = specs.iter().find(|s| s.name == "browser_open").unwrap();
+        let nav = specs.iter().find(|s| s.name == "browser_navigate").unwrap();
+        assert!(open.description.contains("browser_navigate") || open.description.contains("first"), "{}", open.description);
+        assert!(nav.description.contains("existing") || nav.description.contains("Closed"), "{}", nav.description);
+
         fiber.dispose().await.unwrap();
         assert!(root.get::<Browser>(BROWSER).is_none());
         for name in BROWSER_TOOL_NAMES {
@@ -634,6 +833,82 @@ mod tests {
             .list()
             .iter()
             .all(|e| e.command != "browser"));
+    }
+
+    #[tokio::test]
+    async fn p0_navigate_press_wait_when_chrome_available() {
+        let dock_home = tempfile::tempdir().unwrap();
+        std::env::set_var("DOCK_HOME", dock_home.path());
+
+        if session::discover_chrome().is_err() {
+            eprintln!("skip p0 smoke: chrome not installed");
+            return;
+        }
+
+        let (root, fiber) = boot_browser().await;
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+
+        let open = tools
+            .execute(ToolCall {
+                id: "o".into(),
+                name: "browser_open".into(),
+                arguments: r#"{"url":"data:text/html,<html><body><h1>HelloBUA</h1><select id=s><option value=a>A</option><option value=b>B</option></select><input id=i /></body></html>"}"#.into(),
+            })
+            .await;
+        assert!(!open.content.starts_with("Error:"), "open: {}", open.content);
+
+        let nav = tools
+            .execute(ToolCall {
+                id: "n".into(),
+                name: "browser_navigate".into(),
+                arguments: r#"{"url":"data:text/html,<html><body><p>NavOK</p><input id=x /></body></html>"}"#.into(),
+            })
+            .await;
+        assert!(!nav.content.starts_with("Error:"), "navigate: {}", nav.content);
+        assert!(nav.content.contains("navigated"), "{}", nav.content);
+
+        let wait = tools
+            .execute(ToolCall {
+                id: "w".into(),
+                name: "browser_wait_for".into(),
+                arguments: r#"{"text":"NavOK","timeout_ms":5000}"#.into(),
+            })
+            .await;
+        assert!(!wait.content.starts_with("Error:"), "wait_for: {}", wait.content);
+
+        let key = tools
+            .execute(ToolCall {
+                id: "k".into(),
+                name: "browser_press_key".into(),
+                arguments: r#"{"key":"Tab"}"#.into(),
+            })
+            .await;
+        assert!(!key.content.starts_with("Error:"), "press_key: {}", key.content);
+
+        let closed_nav = {
+            let _ = tools
+                .execute(ToolCall {
+                    id: "c".into(),
+                    name: "browser_close".into(),
+                    arguments: "{}".into(),
+                })
+                .await;
+            tools
+                .execute(ToolCall {
+                    id: "bad".into(),
+                    name: "browser_navigate".into(),
+                    arguments: r#"{"url":"about:blank"}"#.into(),
+                })
+                .await
+        };
+        assert!(
+            closed_nav.content.contains("not connected")
+                || closed_nav.content.contains("browser_open"),
+            "{}",
+            closed_nav.content
+        );
+
+        fiber.dispose().await.unwrap();
     }
 
     #[tokio::test]

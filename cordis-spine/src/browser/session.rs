@@ -7,12 +7,17 @@ use std::time::Duration;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::accessibility::{EnableParams, GetFullAxTreeParams};
 use chromiumoxide::cdp::browser_protocol::dom::{
-    FocusParams, GetBoxModelParams, ScrollIntoViewIfNeededParams,
+    FocusParams, GetBoxModelParams, ResolveNodeParams, ScrollIntoViewIfNeededParams,
 };
 use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, InsertTextParams,
 };
+use chromiumoxide::cdp::browser_protocol::page::{
+    GetNavigationHistoryParams, NavigateToHistoryEntryParams,
+};
 use chromiumoxide::cdp::browser_protocol::target::{ActivateTargetParams, CloseTargetParams};
+use chromiumoxide::cdp::js_protocol::runtime::{CallArgument, CallFunctionOnParams};
+use chromiumoxide::keys;
 use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_util::StreamExt;
 use tokio::task::JoinHandle;
@@ -20,7 +25,7 @@ use tokio::task::JoinHandle;
 use crate::config::dock_home;
 
 use super::snapshot::{self, LeanSnapshot, RefEntry};
-use super::wait::{retry_async, with_timeout};
+use super::wait::{poll_until, retry_async, with_timeout};
 
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const NAV_TIMEOUT: Duration = Duration::from_secs(45);
@@ -379,6 +384,398 @@ impl ConnectedSession {
         }
     }
 
+    fn lookup_ref(&self, ref_id: &str) -> Result<(String, RefEntry), String> {
+        let key = snapshot::parse_ref(ref_id).ok_or_else(|| "missing ref".to_string())?;
+        let entry = self
+            .refs
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "unknown ref `{key}` — call browser_snapshot first (have {} refs)",
+                    self.refs.len()
+                )
+            })?;
+        Ok((key, entry))
+    }
+
+    async fn focus_backend(
+        page: &Page,
+        backend: chromiumoxide::cdp::browser_protocol::dom::BackendNodeId,
+    ) -> Result<(), String> {
+        page.execute(
+            ScrollIntoViewIfNeededParams::builder()
+                .backend_node_id(backend.clone())
+                .build(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        page.execute(FocusParams::builder().backend_node_id(backend).build())
+            .await
+            .map_err(|e| format!("focus: {e}"))?;
+        Ok(())
+    }
+
+    async fn call_js_on_backend(
+        page: &Page,
+        backend: chromiumoxide::cdp::browser_protocol::dom::BackendNodeId,
+        function_declaration: &str,
+        args: Vec<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let resolved = page
+            .execute(
+                ResolveNodeParams::builder()
+                    .backend_node_id(backend)
+                    .build(),
+            )
+            .await
+            .map_err(|e| format!("resolveNode: {e}"))?;
+        let object_id = resolved
+            .result
+            .object
+            .object_id
+            .ok_or_else(|| "resolveNode returned no objectId".to_string())?;
+        let mut builder = CallFunctionOnParams::builder()
+            .function_declaration(function_declaration)
+            .object_id(object_id)
+            .return_by_value(true)
+            .await_promise(true)
+            .user_gesture(true);
+        for a in args {
+            builder = builder.argument(CallArgument::builder().value(a).build());
+        }
+        let call = builder.build().map_err(|e| e.to_string())?;
+        let resp = page
+            .execute(call)
+            .await
+            .map_err(|e| format!("callFunctionOn: {e}"))?;
+        if let Some(exc) = resp.result.exception_details {
+            return Err(format!("js exception: {exc:?}"));
+        }
+        Ok(resp.result.result.value)
+    }
+
+    pub async fn hover_ref(&mut self, ref_id: &str) -> Result<String, String> {
+        let (key, entry) = self.lookup_ref(ref_id)?;
+        let backend = snapshot::backend_id(&entry)
+            .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
+        let page = self.active_page()?.clone();
+        retry_async(3, Duration::from_millis(150), || {
+            let page = page.clone();
+            let backend = backend.clone();
+            async move {
+                page.execute(
+                    ScrollIntoViewIfNeededParams::builder()
+                        .backend_node_id(backend.clone())
+                        .build(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                let model = page
+                    .execute(
+                        GetBoxModelParams::builder()
+                            .backend_node_id(backend)
+                            .build(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .result
+                    .model;
+                let point = chromiumoxide::layout::ElementQuad::from_quad(&model.content)
+                    .quad_center();
+                page.move_mouse(point)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(())
+            }
+        })
+        .await?;
+        Ok(format!("hovered @{key} ({})", entry.role))
+    }
+
+    /// Press a key or chord (`Enter`, `Tab`, `Control+a`, `Meta+Shift+t`).
+    pub async fn press_key(
+        &mut self,
+        key: &str,
+        ref_id: Option<&str>,
+    ) -> Result<String, String> {
+        let page = self.active_page()?.clone();
+        if let Some(raw) = ref_id {
+            let (k, entry) = self.lookup_ref(raw)?;
+            let backend = snapshot::backend_id(&entry)
+                .ok_or_else(|| format!("ref `{k}` has no backend DOM node"))?;
+            Self::focus_backend(&page, backend).await?;
+        }
+        let (modifiers, key_name) = parse_key_chord(key)?;
+        let def = keys::get_key_definition(&key_name).ok_or_else(|| {
+            format!(
+                "unknown key `{key_name}` (from `{key}`). Use names like Enter, Tab, Escape, ArrowDown, a, Control+a"
+            )
+        })?;
+        let key_down_type = if def.text.is_some() || def.key.len() == 1 {
+            DispatchKeyEventType::KeyDown
+        } else {
+            DispatchKeyEventType::RawKeyDown
+        };
+        let mut down = DispatchKeyEventParams::builder()
+            .r#type(key_down_type)
+            .key(def.key)
+            .code(def.code)
+            .windows_virtual_key_code(def.key_code)
+            .native_virtual_key_code(def.key_code)
+            .modifiers(modifiers);
+        if let Some(txt) = def.text {
+            down = down.text(txt);
+        } else if def.key.len() == 1 && modifiers == 0 {
+            down = down.text(def.key);
+        }
+        let down = down.build().map_err(|e| e.to_string())?;
+        page.execute(down).await.map_err(|e| e.to_string())?;
+        let up = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyUp)
+            .key(def.key)
+            .code(def.code)
+            .windows_virtual_key_code(def.key_code)
+            .native_virtual_key_code(def.key_code)
+            .modifiers(modifiers)
+            .build()
+            .map_err(|e| e.to_string())?;
+        page.execute(up).await.map_err(|e| e.to_string())?;
+        Ok(format!("pressed {key}"))
+    }
+
+    pub async fn select_option(
+        &mut self,
+        ref_id: &str,
+        value: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<String, String> {
+        if value.is_none() && label.is_none() {
+            return Err("select_option requires value and/or label".into());
+        }
+        let (key, entry) = self.lookup_ref(ref_id)?;
+        let backend = snapshot::backend_id(&entry)
+            .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
+        let page = self.active_page()?.clone();
+        Self::focus_backend(&page, backend.clone()).await?;
+        let js = r#"function(value, label) {
+  const el = this;
+  const opts = el.options ? Array.from(el.options) : [];
+  let opt = null;
+  if (value != null && value !== '') {
+    opt = opts.find(o => String(o.value) === String(value));
+  }
+  if (!opt && label != null && label !== '') {
+    const want = String(label);
+    opt = opts.find(o => String(o.label) === want || String(o.textContent).trim() === want);
+  }
+  if (!opt) {
+    return { ok: false, error: 'option not found' };
+  }
+  el.value = opt.value;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return { ok: true, value: String(opt.value), label: String(opt.label || opt.textContent || '').trim() };
+}"#;
+        let args = vec![
+            value
+                .map(|s| serde_json::Value::String(s.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            label
+                .map(|s| serde_json::Value::String(s.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        ];
+        let out = Self::call_js_on_backend(&page, backend, js, args).await?;
+        let ok = out
+            .as_ref()
+            .and_then(|v| v.get("ok"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        if !ok {
+            let err = out
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("select failed");
+            return Err(format!("{err} for @{key}"));
+        }
+        let selected = out
+            .as_ref()
+            .and_then(|v| v.get("value"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        self.refs.clear();
+        Ok(format!("selected `{selected}` on @{key}"))
+    }
+
+    pub async fn fill_form(
+        &mut self,
+        fields: &[(String, String)],
+    ) -> Result<String, String> {
+        if fields.is_empty() {
+            return Err("fields must be a non-empty array of {ref, value}".into());
+        }
+        let page = self.active_page()?.clone();
+        let mut filled = Vec::new();
+        let js = r#"function(value) {
+  const el = this;
+  const v = value == null ? '' : String(value);
+  if (el.isContentEditable) {
+    el.textContent = v;
+  } else if ('value' in el) {
+    el.value = v;
+  } else {
+    return { ok: false, error: 'element is not fillable' };
+  }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return { ok: true };
+}"#;
+        for (ref_id, value) in fields {
+            let (key, entry) = self.lookup_ref(ref_id)?;
+            let backend = snapshot::backend_id(&entry)
+                .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
+            Self::focus_backend(&page, backend.clone()).await?;
+            let out = Self::call_js_on_backend(
+                &page,
+                backend,
+                js,
+                vec![serde_json::Value::String(value.clone())],
+            )
+            .await?;
+            let ok = out
+                .as_ref()
+                .and_then(|v| v.get("ok"))
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            if !ok {
+                let err = out
+                    .as_ref()
+                    .and_then(|v| v.get("error"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("fill failed");
+                return Err(format!("{err} for @{key}"));
+            }
+            filled.push(format!("@{key}"));
+        }
+        self.refs.clear();
+        Ok(format!("filled {} field(s): {}", filled.len(), filled.join(", ")))
+    }
+
+    pub async fn wait_for(
+        &mut self,
+        text: Option<&str>,
+        selector: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> Result<String, String> {
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000).max(1));
+        let page = self.active_page()?.clone();
+        let text = text.map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let selector = selector.map(|s| s.to_string()).filter(|s| !s.is_empty());
+
+        if text.is_none() && selector.is_none() {
+            tokio::time::sleep(timeout).await;
+            return Ok(format!("waited {}ms", timeout.as_millis()));
+        }
+
+        let text_c = text.clone();
+        let sel_c = selector.clone();
+        poll_until(timeout, Duration::from_millis(100), || {
+            let page = page.clone();
+            let text_c = text_c.clone();
+            let sel_c = sel_c.clone();
+            async move {
+                if let Some(sel) = sel_c.as_ref() {
+                    let expr = format!(
+                        "!!document.querySelector({})",
+                        serde_json::to_string(sel).unwrap_or_else(|_| "null".into())
+                    );
+                    let found: bool = page
+                        .evaluate(expr.as_str())
+                        .await
+                        .map_err(|e| format!("selector eval: {e}"))?
+                        .into_value()
+                        .map_err(|e| format!("selector value: {e}"))?;
+                    if !found {
+                        return Ok(false);
+                    }
+                }
+                if let Some(t) = text_c.as_ref() {
+                    let body: String = page
+                        .evaluate(
+                            "(() => (document.body && (document.body.innerText || document.body.textContent)) || '')()",
+                        )
+                        .await
+                        .map_err(|e| format!("text eval: {e}"))?
+                        .into_value()
+                        .map_err(|e| format!("text value: {e}"))?;
+                    if !body.contains(t) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        })
+        .await
+        .map_err(|e| {
+            let mut parts = Vec::new();
+            if let Some(t) = &text {
+                parts.push(format!("text={t:?}"));
+            }
+            if let Some(s) = &selector {
+                parts.push(format!("selector={s:?}"));
+            }
+            format!("{e} ({})", parts.join(", "))
+        })?;
+
+        let mut msg = String::from("wait satisfied");
+        if let Some(t) = text {
+            msg.push_str(&format!(" text={t:?}"));
+        }
+        if let Some(s) = selector {
+            msg.push_str(&format!(" selector={s:?}"));
+        }
+        Ok(msg)
+    }
+
+    pub async fn navigate_back(&mut self) -> Result<String, String> {
+        let page = self.active_page()?.clone();
+        let hist = page
+            .execute(GetNavigationHistoryParams {})
+            .await
+            .map_err(|e| format!("getNavigationHistory: {e}"))?
+            .result;
+        let idx = hist.current_index;
+        if idx <= 0 {
+            return Err("no previous history entry".into());
+        }
+        let entry = hist
+            .entries
+            .get(idx as usize - 1)
+            .ok_or_else(|| "no previous history entry".to_string())?;
+        with_timeout(
+            NAV_TIMEOUT,
+            async {
+                page.execute(NavigateToHistoryEntryParams::new(entry.id))
+                    .await
+                    .map_err(|e| format!("navigateToHistoryEntry: {e}"))?;
+                Ok::<_, String>(())
+            },
+            || "navigate_back timeout".into(),
+        )
+        .await?;
+        self.refs.clear();
+        // Give the page a moment; URL may still be settling.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let cur = page
+            .url()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| entry.url.clone());
+        Ok(format!("navigated back to {cur}"))
+    }
+
     pub async fn shutdown(mut self) {
         self.refs.clear();
         let _ = self.browser.close().await;
@@ -433,6 +830,46 @@ pub fn discover_chrome() -> Result<String, String> {
     }
 }
 
+
+/// Bit field: Alt=1, Ctrl=2, Meta=4, Shift=8. Returns (modifiers, main_key).
+pub fn parse_key_chord(raw: &str) -> Result<(i64, String), String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("key is required".into());
+    }
+    let parts: Vec<&str> = s.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Err("key is required".into());
+    }
+    let mut modifiers = 0i64;
+    for p in &parts[..parts.len() - 1] {
+        match normalize_modifier(p) {
+            Some(bit) => modifiers |= bit,
+            None => {
+                return Err(format!(
+                    "unknown modifier `{p}` in `{raw}` (use Control/Ctrl, Alt, Meta/Command/Cmd, Shift)"
+                ));
+            }
+        }
+    }
+    let main = parts[parts.len() - 1].to_string();
+    // Allow bare modifier names only as the key itself (rare); otherwise require a main key.
+    if parts.len() > 1 && normalize_modifier(&main).is_some() && keys::get_key_definition(&main).is_none() {
+        return Err(format!("chord `{raw}` is missing a main key"));
+    }
+    Ok((modifiers, main))
+}
+
+fn normalize_modifier(p: &str) -> Option<i64> {
+    match p.to_ascii_lowercase().as_str() {
+        "alt" | "option" => Some(1),
+        "control" | "ctrl" => Some(2),
+        "meta" | "command" | "cmd" | "super" | "win" | "windows" => Some(4),
+        "shift" => Some(8),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +897,15 @@ mod tests {
             Some(v) => std::env::set_var("CHROME_PATH", v),
             None => std::env::remove_var("CHROME_PATH"),
         }
+    }
+
+    #[test]
+    fn parse_key_chord_modifiers() {
+        assert_eq!(parse_key_chord("Enter").unwrap(), (0, "Enter".into()));
+        assert_eq!(parse_key_chord("Control+a").unwrap(), (2, "a".into()));
+        assert_eq!(parse_key_chord("Ctrl+Shift+Tab").unwrap(), (2 | 8, "Tab".into()));
+        assert_eq!(parse_key_chord("Meta+Shift+t").unwrap(), (4 | 8, "t".into()));
+        assert!(parse_key_chord("Foo+a").is_err());
+        assert!(parse_key_chord("").is_err());
     }
 }
