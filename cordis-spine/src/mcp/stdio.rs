@@ -4,10 +4,10 @@
 //! (`elicitation/create`, `ping`) and `tools/list_changed` while `tools/call`
 //! waits.
 //!
-//! Framing: `auto` (default) starts Content-Length; on JSON-RPC parse error
-//! (-32700 / "parse") switches to NDJSON and retries handshake once. Explicit
-//! `content-length` / `ndjson` skip auto-detect. Reads accept either shape
-//! (first line starting with `{` → NDJSON).
+//! Framing: `auto` (default) spawns with Content-Length; on JSON-RPC parse error
+//! (-32700 / "parse") kills the child and respawns with NDJSON. Explicit
+//! `content-length` / `ndjson` skip probing. Never flips wire framing on the
+//! same stdin. Reads accept either shape (first line starting with `{` → NDJSON).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,20 +31,11 @@ use super::incoming::{self, LiveHooks};
 use super::tools_list;
 use super::{CallFn, RelistFn};
 
-/// Resolved on-the-wire framing (after `auto` settles).
+/// Fixed on-the-wire framing for one child process (never flipped mid-connection).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WireFraming {
     ContentLength,
     Ndjson,
-}
-
-impl WireFraming {
-    fn from_config(framing: McpStdioFraming) -> Self {
-        match framing {
-            McpStdioFraming::Ndjson => Self::Ndjson,
-            McpStdioFraming::Auto | McpStdioFraming::ContentLength => Self::ContentLength,
-        }
-    }
 }
 
 pub(super) async fn connect(
@@ -52,11 +43,52 @@ pub(super) async fn connect(
     hooks: LiveHooks,
     stop: watch::Receiver<bool>,
 ) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
+    let McpTransport::Stdio { framing, .. } = &server.transport else {
+        return Err("not a stdio MCP server".into());
+    };
+    let timeout = Duration::from_secs(server.startup_timeout_sec.max(1));
+    match *framing {
+        McpStdioFraming::ContentLength => {
+            connect_once(server, hooks, stop, WireFraming::ContentLength, timeout).await
+        }
+        McpStdioFraming::Ndjson => {
+            connect_once(server, hooks, stop, WireFraming::Ndjson, timeout).await
+        }
+        McpStdioFraming::Auto => {
+            match connect_once(
+                server,
+                hooks.clone(),
+                stop.clone(),
+                WireFraming::ContentLength,
+                timeout,
+            )
+            .await
+            {
+                Ok(ok) => Ok(ok),
+                Err(e) if looks_like_framing_parse_error(&e) => {
+                    tracing::info!(
+                        "MCP stdio parse error on Content-Length; killing child and respawning as NDJSON"
+                    );
+                    connect_once(server, hooks, stop, WireFraming::Ndjson, timeout).await
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+async fn connect_once(
+    server: &McpServer,
+    hooks: LiveHooks,
+    stop: watch::Receiver<bool>,
+    wire: WireFraming,
+    timeout: Duration,
+) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
     let McpTransport::Stdio {
         command,
         args,
         env,
-        framing,
+        ..
     } = &server.transport
     else {
         return Err("not a stdio MCP server".into());
@@ -80,8 +112,7 @@ pub(super) async fn connect(
         next_id: AtomicU64::new(1),
         protocol: Mutex::new(PROTOCOL_LATEST.to_string()),
         modern: AtomicBool::new(true),
-        wire: Mutex::new(WireFraming::from_config(*framing)),
-        auto_switch: AtomicBool::new(matches!(framing, McpStdioFraming::Auto)),
+        wire,
         hooks,
         _child: Mutex::new(Some(child)),
     });
@@ -90,11 +121,21 @@ pub(super) async fn connect(
     tokio::spawn(async move {
         reader_loop(BufReader::new(stdout), reader_shared, &mut stop_reader).await;
     });
-    let timeout = Duration::from_secs(server.startup_timeout_sec.max(1));
-    handshake_maybe_switch(&shared, timeout).await?;
-    let listed = tokio::time::timeout(timeout, list_all(&shared, &server.name))
-        .await
-        .map_err(|_| "tools/list timeout".to_string())??;
+    if let Err(e) = handshake(&shared, timeout).await {
+        shared.kill_child();
+        return Err(e);
+    }
+    let listed = match tokio::time::timeout(timeout, list_all(&shared, &server.name)).await {
+        Ok(Ok(listed)) => listed,
+        Ok(Err(e)) => {
+            shared.kill_child();
+            return Err(e);
+        }
+        Err(_) => {
+            shared.kill_child();
+            return Err("tools/list timeout".to_string());
+        }
+    };
     let session_call = shared.clone();
     let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
         let session = session_call.clone();
@@ -129,40 +170,16 @@ struct Shared {
     next_id: AtomicU64,
     protocol: Mutex<String>,
     modern: AtomicBool,
-    wire: Mutex<WireFraming>,
-    /// `true` while `auto` may still flip Content-Length → NDJSON once.
-    auto_switch: AtomicBool,
+    wire: WireFraming,
     hooks: LiveHooks,
     _child: Mutex<Option<tokio::process::Child>>,
 }
 
 impl Shared {
-    fn wire(&self) -> WireFraming {
-        *self.wire.lock().unwrap()
-    }
-
-    /// Switch write framing to NDJSON if still in `auto`. Returns whether we switched.
-    fn try_switch_to_ndjson(&self) -> bool {
-        if !self.auto_switch.swap(false, Ordering::SeqCst) {
-            return false;
+    fn kill_child(&self) {
+        if let Some(mut child) = self._child.lock().unwrap().take() {
+            let _ = child.start_kill();
         }
-        *self.wire.lock().unwrap() = WireFraming::Ndjson;
-        true
-    }
-}
-
-async fn handshake_maybe_switch(s: &Shared, timeout: Duration) -> Result<(), String> {
-    match handshake(s, timeout).await {
-        Ok(()) => Ok(()),
-        Err(e) if looks_like_framing_parse_error(&e) && s.try_switch_to_ndjson() => {
-            tracing::info!("MCP stdio parse error on Content-Length; retrying handshake as NDJSON");
-            s.pending.lock().unwrap().clear();
-            // Reset protocol state for a clean second handshake.
-            *s.protocol.lock().unwrap() = PROTOCOL_LATEST.to_string();
-            s.modern.store(true, Ordering::Relaxed);
-            handshake(s, timeout).await
-        }
-        Err(e) => Err(e),
     }
 }
 
@@ -300,9 +317,8 @@ async fn notify(s: &Shared, method: &str, params: Value) -> Result<(), String> {
 }
 
 async fn write_msg(s: &Shared, v: &Value) -> Result<(), String> {
-    let framing = s.wire();
     let mut stdin = s.stdin.lock().await;
-    write_frame(&mut *stdin, v, framing).await
+    write_frame(&mut *stdin, v, s.wire).await
 }
 
 async fn write_frame<W: AsyncWriteExt + Unpin>(
@@ -379,7 +395,7 @@ fn deliver_response(shared: &Shared, v: Value) {
         return;
     }
     // JSON-RPC parse errors often use `id: null` — hand to oldest pending so
-    // auto framing can see -32700 and retry as NDJSON.
+    // `auto` can see -32700 and respawn with NDJSON.
     if value_is_framing_parse_error(&v) {
         let mut pending = shared.pending.lock().unwrap();
         if let Some(id) = pending.keys().copied().min() {
@@ -527,14 +543,17 @@ mod tests {
     }
 
     #[test]
-    fn auto_switch_once() {
-        let wire = Mutex::new(WireFraming::ContentLength);
-        let auto = AtomicBool::new(true);
-        // Mimic Shared::try_switch_to_ndjson
-        assert!(auto.swap(false, Ordering::SeqCst));
-        *wire.lock().unwrap() = WireFraming::Ndjson;
-        assert_eq!(*wire.lock().unwrap(), WireFraming::Ndjson);
-        assert!(!auto.swap(false, Ordering::SeqCst));
+    fn auto_respawn_uses_fixed_wire_per_child() {
+        // `auto` never flips WireFraming mid-connection; first child is CL, second Ndjson.
+        assert_ne!(WireFraming::ContentLength, WireFraming::Ndjson);
+        assert!(looks_like_framing_parse_error(
+            r#"{"code":-32700,"message":"Parse error"}"#
+        ));
+        // Framing stays fixed for the life of one Shared / child.
+        let shared_wire = WireFraming::ContentLength;
+        assert_eq!(shared_wire, WireFraming::ContentLength);
+        let respawn_wire = WireFraming::Ndjson;
+        assert_eq!(respawn_wire, WireFraming::Ndjson);
     }
 
     #[tokio::test]

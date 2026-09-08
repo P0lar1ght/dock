@@ -208,7 +208,7 @@ pub const DEFAULT_MCP_STARTUP_TIMEOUT_SECS: u64 = 30;
 /// How Dock frames JSON-RPC on MCP stdio (LSP Content-Length vs NDJSON).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum McpStdioFraming {
-    /// Prefer Content-Length; on JSON-RPC parse error (-32700), switch to NDJSON once.
+    /// Probe Content-Length on a fresh spawn; on JSON-RPC parse error (-32700), kill and respawn as NDJSON.
     #[default]
     Auto,
     ContentLength,

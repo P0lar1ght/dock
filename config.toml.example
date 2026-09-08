@@ -80,11 +80,11 @@ api_key = "free"
 # Prefer PATH (`cua-driver`); or paste the absolute command from `cua-driver mcp-config`.
 # Linux needs X11/XWayland (+ AT-SPI for get_window_state). No Docker.
 # cua-driver 0.24+ speaks NDJSON (one JSON-RPC object per line), not Content-Length.
-# Default framing = "auto" detects that; set framing = "ndjson" to skip probing.
+# Prefer framing = "ndjson". Default auto probes Content-Length then respawns as NDJSON.
 #
 # [mcp_servers.cua-driver]
 # command = "cua-driver"
 # args = ["mcp"]
 # enabled = true
-# framing = "ndjson"   # optional; auto works
+# framing = "ndjson"
 
