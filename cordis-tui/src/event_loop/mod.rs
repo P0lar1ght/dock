@@ -579,6 +579,9 @@ pub async fn run(ctx: Context) -> Result<()> {
                                 Effect::ShowBrowser => {
                                     overlay = Overlay::Browser { scroll: 0 };
                                 }
+                                Effect::ShowComputer => {
+                                    overlay = Overlay::Computer { scroll: 0 };
+                                }
                                 Effect::ShowPresets { focus } => {
                                     overlay = open_presets_overlay(&ctx, focus);
                                 }

@@ -52,7 +52,14 @@ impl Computer {
                 self.inner.ctx
                     .get::<Permissions>(PERMISSIONS)
                     .and_then(|p| p.front())
-                    .map(|prompt| format!("{} — {}", prompt.tool, prompt.summary))
+                    .filter(|prompt| prompt.tool.starts_with("mcp_cua-driver__"))
+                    .map(|prompt| {
+                        if prompt.summary.is_empty() {
+                            prompt.tool.clone()
+                        } else {
+                            format!("{} — {}", prompt.tool, prompt.summary)
+                        }
+                    })
             });
         self.format_cockpit_inner(approval.as_deref())
     }

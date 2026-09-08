@@ -236,6 +236,7 @@ impl Shortcuts {
             Overlay::Notice { .. }
                 | Overlay::Slot { .. }
                 | Overlay::Browser { .. }
+                | Overlay::Computer { .. }
                 | Overlay::Inspect { .. }
         ) {
             return vec![

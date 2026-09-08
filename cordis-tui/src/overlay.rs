@@ -121,6 +121,10 @@ pub enum Overlay {
     Browser {
         scroll: usize,
     },
+    /// Live `/computer` thin cockpit (cua-driver MCP status / 审批). No embedded desktop.
+    Computer {
+        scroll: usize,
+    },
     /// `/preset` roster + assembly canvas.
     Presets(PresetView),
     /// Child conversation or background job (Grok fullscreen framed view).
@@ -231,6 +235,7 @@ impl Overlay {
             | Self::Notice { .. }
             | Self::Slot { .. }
             | Self::Browser { .. }
+            | Self::Computer { .. }
             | Self::Inspect { .. }
             | Self::Goal { editing: false, .. } => "",
             Self::Goal {
@@ -329,7 +334,12 @@ impl Overlay {
             | Self::Mcps { selected, .. }
             | Self::Workflows { selected, .. }
             | Self::Goal { selected, .. } => *selected,
-            Self::Usage { .. } | Self::Notice { .. } | Self::Slot { .. } | Self::Browser { .. } | Self::Inspect { .. } => {
+            Self::Usage { .. }
+            | Self::Notice { .. }
+            | Self::Slot { .. }
+            | Self::Browser { .. }
+            | Self::Computer { .. }
+            | Self::Inspect { .. } => {
                 0
             }
             Self::Presets(PresetView::Roster { selected }) => *selected,
@@ -360,8 +370,12 @@ impl Overlay {
             | Self::Mcps { selected: s, .. }
             | Self::Workflows { selected: s, .. }
             | Self::Goal { selected: s, .. } => *s = selected,
-            Self::Usage { .. } | Self::Notice { .. } | Self::Slot { .. } | Self::Browser { .. } | Self::Inspect { .. } => {
-            }
+            Self::Usage { .. }
+            | Self::Notice { .. }
+            | Self::Slot { .. }
+            | Self::Browser { .. }
+            | Self::Computer { .. }
+            | Self::Inspect { .. } => {}
             Self::Presets(PresetView::Roster { selected: s }) => *s = selected,
             Self::Presets(PresetView::Canvas(c)) => match c.pane {
                 PresetPane::Catalog => c.catalog_sel = selected,
@@ -409,6 +423,7 @@ impl Overlay {
             | Self::Notice { .. }
             | Self::Slot { .. }
             | Self::Browser { .. }
+            | Self::Computer { .. }
             | Self::Inspect { .. }
             | Self::Goal { editing: false, .. }
             | Self::Presets(_) => None,
@@ -587,6 +602,11 @@ const HELP: &[HelpEntry] = &[
         key: "/mcps",
         label: "MCP 服务器（Space 开关 · i 登录 · Enter 展开）",
         kind: HelpKind::Slash(SlashCmd::Mcps),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/computer",
+        label: "本机桌面 cua-driver 驾驶舱（不嵌桌面）",
+        kind: HelpKind::Hint,
     }),
     HelpEntry::Row(HelpRow {
         key: "/lsp",
@@ -797,6 +817,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.key == "/tasks"));
         assert!(rows.iter().any(|r| r.key == "/workflow"));
         assert!(rows.iter().any(|r| r.key == "/mcps"));
+        assert!(rows.iter().any(|r| r.key == "/computer"));
         assert!(rows.iter().any(|r| r.key == "/lsp"));
         assert!(rows.iter().any(|r| r.key == "/preset"));
         assert!(rows.iter().any(|r| r.key == "/usage"));
@@ -818,6 +839,14 @@ mod tests {
     #[test]
     fn browser_overlay_opens_and_closes() {
         let mut overlay = Overlay::Browser { scroll: 0 };
+        assert!(overlay.is_open());
+        overlay.close();
+        assert!(!overlay.is_open());
+    }
+
+    #[test]
+    fn computer_overlay_opens_and_closes() {
+        let mut overlay = Overlay::Computer { scroll: 0 };
         assert!(overlay.is_open());
         overlay.close();
         assert!(!overlay.is_open());

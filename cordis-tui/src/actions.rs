@@ -169,6 +169,8 @@ pub enum Effect {
     ShowCordis,
     /// Live `/browser` cockpit overlay (status / tabs / screenshot / 审批).
     ShowBrowser,
+    /// Live `/computer` thin cockpit (cua-driver MCP status / 审批). No embedded desktop.
+    ShowComputer,
     ShowPresets {
         focus: Option<String>,
     },
@@ -370,6 +372,7 @@ pub fn effect_for_extra(entry: &SlashEntry, args: &str) -> Effect {
             }
         }
         ExtraSlashKind::Overlay if entry.command == "browser" => Effect::ShowBrowser,
+        ExtraSlashKind::Overlay if entry.command == "computer" => Effect::ShowComputer,
         ExtraSlashKind::Overlay => Effect::ShowNotice {
             title: entry.overlay_title(),
             body: text,
@@ -621,6 +624,19 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn computer_extra_overlay_opens_show_computer() {
+        let entry = SlashEntry {
+            command: "computer".into(),
+            description: "电脑".into(),
+            kind: ExtraSlashKind::Overlay,
+            text: String::new(),
+            title: "电脑".into(),
+            send: false,
+        };
+        assert!(matches!(effect_for_extra(&entry, ""), Effect::ShowComputer));
     }
 
     #[test]
