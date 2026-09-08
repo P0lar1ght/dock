@@ -17,10 +17,11 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets, AppSettings,
+    goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets, AppSettings, Browser,
     DynamicRunner, Goal, LogEvent, LspBackendAdapter, LspSetupScope, PlanMode, Sessions, Slash,
-    ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT,
-    PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS, SLASH, TOOLS,
+    ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, BROWSER, DYNAMIC_CORDIS_RUNNER, GOAL, LSP,
+    MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS,
+    SLASH, TOOLS,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -572,6 +573,19 @@ pub async fn run(ctx: Context) -> Result<()> {
                                         });
                                     overlay = Overlay::Notice {
                                         title: "Cordis 插件".into(),
+                                        body,
+                                        scroll: 0,
+                                    };
+                                }
+                                Effect::ShowBrowser => {
+                                    let body = ctx
+                                        .get::<Browser>(BROWSER)
+                                        .map(|b| b.cockpit_body())
+                                        .unwrap_or_else(|| {
+                                            "browser 未挂载（tool-browser 插件不在树上）。".into()
+                                        });
+                                    overlay = Overlay::Notice {
+                                        title: "浏览器".into(),
                                         body,
                                         scroll: 0,
                                     };

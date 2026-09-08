@@ -1,15 +1,18 @@
 //! BUA browser cockpit: named `"browser"` + deferred `browser_*` via chromiumoxide CDP.
 //!
-//! TUI is cockpit-only (full overlay is PR C). Tools land on the `"tools"` table via
-//! [`Tools::register_deferred`] so the sampler never sees them; the model discovers
-//! them with `search_tool` and calls them with `use_tool`. Profile lives under
-//! `$DOCK_HOME/browser/…`, not the user's daily Chrome profile. Lean a11y refs are
-//! agent-browser-shaped (reference only — no agent-browser binary / Node runtime).
+//! `/browser` is a live TUI cockpit overlay (status / tabs / last screenshot /
+//! approval hint) — live-looked by the TUI like Slot, not a terminal web
+//! renderer. Tools land on the `"tools"` table via [`Tools::register_deferred`]
+//! so the sampler never sees them; the model discovers them with `search_tool`
+//! and calls them with `use_tool`. Profile lives under `$DOCK_HOME/browser/…`,
+//! not the user's daily Chrome profile. Lean a11y refs are agent-browser-shaped
+//! (reference only — no agent-browser binary / Node runtime).
 
 mod session;
 mod snapshot;
 mod wait;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +45,14 @@ pub enum BrowserSession {
     Connected,
 }
 
+/// One cached tab row for the `/browser` cockpit (sync-readable; refreshed after CDP ops).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserTabInfo {
+    pub index: usize,
+    pub url: String,
+    pub active: bool,
+}
+
 /// Named `"browser"` handle. Call sites live-lookup; do not capture the `Arc`.
 /// Clone shares the same session (inner `Arc`).
 #[derive(Clone)]
@@ -53,6 +64,8 @@ struct BrowserInner {
     live: tokio::sync::Mutex<Option<ConnectedSession>>,
     connected: AtomicBool,
     last_url: Mutex<String>,
+    last_tabs: Mutex<Vec<BrowserTabInfo>>,
+    last_screenshot: Mutex<Option<PathBuf>>,
     /// Optional slash table to refresh `/browser` overlay body on connect/close.
     slash: Mutex<Option<Arc<Slash>>>,
 }
@@ -64,6 +77,8 @@ impl Browser {
                 live: tokio::sync::Mutex::new(None),
                 connected: AtomicBool::new(false),
                 last_url: Mutex::new(String::new()),
+                last_tabs: Mutex::new(Vec::new()),
+                last_screenshot: Mutex::new(None),
                 slash: Mutex::new(None),
             }),
         }
@@ -82,29 +97,100 @@ impl Browser {
         }
     }
 
+    /// Sync snapshot of tabs last seen after a CDP op (empty when Closed).
+    pub fn tabs(&self) -> Vec<BrowserTabInfo> {
+        self.inner.last_tabs.lock().unwrap().clone()
+    }
+
+    /// Path of the most recent `browser_screenshot`, if any this session.
+    pub fn last_screenshot(&self) -> Option<PathBuf> {
+        self.inner.last_screenshot.lock().unwrap().clone()
+    }
+
     pub fn status_line(&self) -> String {
         match self.session() {
             BrowserSession::Closed => "未连接".into(),
             BrowserSession::Connected => {
                 let url = self.inner.last_url.lock().unwrap().clone();
                 if url.is_empty() {
-                    "Connected".into()
+                    "已连接".into()
                 } else {
-                    format!("Connected — {url}")
+                    format!("已连接 — {url}")
                 }
             }
         }
     }
 
-    fn slash_body(&self) -> String {
+    /// Full `/browser` cockpit body (text_overlay-friendly sections).
+    /// Pass `None` for slash refresh; the live TUI overlay passes a pending
+    /// `browser_*` permission line when `Permissions::front` matches.
+    pub fn cockpit_body(&self) -> String {
+        self.format_cockpit(None)
+    }
+
+    /// Build cockpit text with an optional live approval hint line.
+    pub fn format_cockpit(&self, approval_line: Option<&str>) -> String {
+        let kicker = match self.session() {
+            BrowserSession::Closed => "未连接",
+            BrowserSession::Connected => "已连接",
+        };
         let status = self.status_line();
-        format!(
-            "{status}\n\
-chromiumoxide CDP（独立 profile：$DOCK_HOME/browser/user-data）。\n\
-模型可直接 browser_open，无需先 /browser。工具经 search_tool / use_tool：\
-browser_open、browser_snapshot、browser_click、browser_type、browser_screenshot、browser_tabs、browser_close；不进默认 sampler 工具表。\n\
-截图：$DOCK_HOME/browser/screenshots/。"
-        )
+        let tabs = self.inner.last_tabs.lock().unwrap().clone();
+        let shot = self.inner.last_screenshot.lock().unwrap().clone();
+
+        let mut out = String::new();
+        out.push_str(kicker);
+        out.push('\n');
+        out.push('\n');
+        out.push_str("状态：\n");
+        out.push_str(&format!("  {status}\n"));
+        out.push('\n');
+        out.push_str("标签页：\n");
+        if tabs.is_empty() {
+            out.push_str("  （无）\n");
+        } else {
+            for t in &tabs {
+                let mark = if t.active { "*" } else { " " };
+                let url = if t.url.is_empty() { "about:blank" } else { t.url.as_str() };
+                out.push_str(&format!("  {mark} [{}] {url}\n", t.index));
+            }
+        }
+        out.push('\n');
+        out.push_str("最近截图：\n");
+        match shot {
+            Some(p) => {
+                out.push_str(&format!("  {}\n", p.display()));
+            }
+            None => out.push_str("  （无）\n"),
+        }
+        out.push('\n');
+        out.push_str("审批：\n");
+        match approval_line {
+            Some(line) if !line.is_empty() => {
+                out.push_str(&format!("  {line}\n"));
+            }
+            _ => out.push_str("  （无）\n"),
+        }
+        out.push_str(
+            "  真正批准/拒绝请用权限浮层（允许使用 …？）。\n",
+        );
+        out.push('\n');
+        out.push_str("断开：\n");
+        out.push_str(
+            "  模型调用 browser_close 关闭 Chromium；卸载 tool-browser 会 dispose 会话。\n",
+        );
+        out.push_str("  Esc 关闭本面板。终端只显示驾驶舱状态，不渲染网页。\n");
+        out.push('\n');
+        out.push_str("工具：\n");
+        out.push_str(
+            "  search_tool / use_tool → browser_open · browser_snapshot · browser_click · browser_type · browser_screenshot · browser_tabs · browser_close\n",
+        );
+        out.push_str("  不进默认 sampler 工具表；无需先 /browser。\n");
+        out.push('\n');
+        out.push_str("配置：\n");
+        out.push_str("  $DOCK_HOME/browser/user-data\n");
+        out.push_str("  $DOCK_HOME/browser/screenshots\n");
+        out
     }
 
     fn refresh_slash(&self) {
@@ -113,22 +199,47 @@ browser_open、browser_snapshot、browser_click、browser_type、browser_screens
         };
         let connected = self.session() == BrowserSession::Connected;
         let desc = if connected {
-            "浏览器驾驶舱（Connected）"
+            "浏览器驾驶舱（已连接）"
         } else {
             "浏览器驾驶舱（未连接）"
         };
-        let _ = slash.update_overlay("browser", desc, self.slash_body(), "浏览器");
+        let _ = slash.update_overlay("browser", desc, self.format_cockpit(None), "浏览器");
+    }
+
+    fn remember_tabs(&self, tabs: Vec<BrowserTabInfo>) {
+        if let Some(active) = tabs.iter().find(|t| t.active) {
+            *self.inner.last_url.lock().unwrap() = active.url.clone();
+        }
+        *self.inner.last_tabs.lock().unwrap() = tabs;
+    }
+
+    fn remember_screenshot(&self, path: PathBuf) {
+        *self.inner.last_screenshot.lock().unwrap() = Some(path);
     }
 
     fn mark_connected(&self, url: &str) {
         self.inner.connected.store(true, Ordering::SeqCst);
         *self.inner.last_url.lock().unwrap() = url.to_string();
+        {
+            let mut tabs = self.inner.last_tabs.lock().unwrap();
+            if tabs.is_empty() {
+                tabs.push(BrowserTabInfo {
+                    index: 0,
+                    url: url.to_string(),
+                    active: true,
+                });
+            } else if let Some(t) = tabs.iter_mut().find(|t| t.active) {
+                t.url = url.to_string();
+            }
+        }
         self.refresh_slash();
     }
 
     fn mark_closed(&self) {
         self.inner.connected.store(false, Ordering::SeqCst);
         self.inner.last_url.lock().unwrap().clear();
+        self.inner.last_tabs.lock().unwrap().clear();
+        // Keep last_screenshot so the cockpit can still show the path after close.
         self.refresh_slash();
     }
 
@@ -145,16 +256,19 @@ browser_open、browser_snapshot、browser_click、browser_type、browser_screens
         if let Some(session) = g.as_mut() {
             if let Some(u) = url {
                 let cur = session.navigate(u).await?;
+                let tabs = session.tab_infos().await;
+                self.remember_tabs(tabs);
                 self.mark_connected(&cur);
                 return Ok(format!("navigated to {cur}"));
             }
-            let cur = session
-                .active_page()?
-                .url()
-                .await
-                .ok()
-                .flatten()
+            let tabs = session.tab_infos().await;
+            let cur = tabs
+                .iter()
+                .find(|t| t.active)
+                .map(|t| t.url.clone())
+                .filter(|u| !u.is_empty())
                 .unwrap_or_else(|| self.inner.last_url.lock().unwrap().clone());
+            self.remember_tabs(tabs);
             self.mark_connected(&cur);
             return Ok(format!("already connected — {cur}"));
         }
@@ -164,7 +278,9 @@ browser_open、browser_snapshot、browser_click、browser_type、browser_screens
             Ok(p) => p.url().await.ok().flatten().unwrap_or(fallback),
             Err(_) => fallback,
         };
+        let tabs = session.tab_infos().await;
         *g = Some(session);
+        self.remember_tabs(tabs);
         self.mark_connected(&url_now);
         Ok(format!("opened {url_now}"))
     }
@@ -200,7 +316,7 @@ pub fn tool_browser() -> Plugin {
                 command: "browser".into(),
                 description: "浏览器驾驶舱（未连接）".into(),
                 kind: ExtraSlashKind::Overlay,
-                text: browser.slash_body(),
+                text: browser.format_cockpit(None),
                 title: "浏览器".into(),
                 send: false,
             })?);
@@ -269,12 +385,9 @@ async fn dispatch_connected(
         "browser_snapshot" => {
             let interactive = arg_bool(args, "interactive").unwrap_or(true);
             let snap = session.snapshot(interactive).await?;
-            if let Ok(p) = session.active_page() {
-                if let Ok(Some(u)) = p.url().await {
-                    *browser.inner.last_url.lock().unwrap() = u;
-                    browser.refresh_slash();
-                }
-            }
+            let tabs = session.tab_infos().await;
+            browser.remember_tabs(tabs);
+            browser.refresh_slash();
             Ok(snap.text)
         }
         "browser_click" => {
@@ -292,6 +405,10 @@ async fn dispatch_connected(
         "browser_screenshot" => {
             let full = arg_bool(args, "full_page").unwrap_or(false);
             let path = session.screenshot(full).await?;
+            browser.remember_screenshot(path.clone());
+            let tabs = session.tab_infos().await;
+            browser.remember_tabs(tabs);
+            browser.refresh_slash();
             Ok(format!("saved {}", path.display()))
         }
         "browser_tabs" => {
@@ -301,12 +418,9 @@ async fn dispatch_connected(
             let out = session
                 .tabs(&action, index, url.as_deref())
                 .await?;
-            if let Ok(p) = session.active_page() {
-                if let Ok(Some(u)) = p.url().await {
-                    *browser.inner.last_url.lock().unwrap() = u;
-                    browser.refresh_slash();
-                }
-            }
+            let tabs = session.tab_infos().await;
+            browser.remember_tabs(tabs);
+            browser.refresh_slash();
             Ok(out)
         }
         other => Err(format!("unknown browser tool `{other}`")),
@@ -377,6 +491,7 @@ fn browser_specs() -> Vec<ToolSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use crate::slash::slash;
     use crate::tools::{tools, Tools};
     use cordis::Context;
@@ -390,6 +505,64 @@ mod tests {
         (root, fiber)
     }
 
+    #[test]
+    fn cockpit_body_lists_sections_when_closed() {
+        let browser = Browser::new();
+        let body = browser.cockpit_body();
+        assert!(body.starts_with("未连接"), "{body}");
+        for needle in [
+            "状态：",
+            "标签页：",
+            "最近截图：",
+            "审批：",
+            "断开：",
+            "工具：",
+            "配置：",
+            "（无）",
+            "允许使用 …？",
+        ] {
+            assert!(body.contains(needle), "missing {needle} in {body}");
+        }
+        assert_eq!(browser.status_line(), "未连接");
+        let with_approval = browser.format_cockpit(Some("browser_open — https://example.com/"));
+        assert!(with_approval.contains("browser_open — https://example.com/"), "{with_approval}");
+        assert!(!with_approval.contains("审批：\n  （无）"), "{with_approval}");
+    }
+
+    #[test]
+    fn cockpit_body_shows_tabs_and_screenshot_path() {
+        let browser = Browser::new();
+        browser.inner.connected.store(true, Ordering::SeqCst);
+        browser.remember_tabs(vec![
+            BrowserTabInfo {
+                index: 0,
+                url: "https://example.com/".into(),
+                active: true,
+            },
+            BrowserTabInfo {
+                index: 1,
+                url: "about:blank".into(),
+                active: false,
+            },
+        ]);
+        browser.remember_screenshot(PathBuf::from("/tmp/shot.png"));
+        let body = browser.cockpit_body();
+        assert!(body.starts_with("已连接"), "{body}");
+        assert!(body.contains("已连接 — https://example.com/"), "{body}");
+        assert!(body.contains("* [0] https://example.com/"), "{body}");
+        assert!(body.contains("  [1] about:blank"), "{body}");
+        assert!(body.contains("/tmp/shot.png"), "{body}");
+        assert!(body.contains("审批："), "{body}");
+        assert_eq!(
+            browser.last_screenshot().as_deref(),
+            Some(Path::new("/tmp/shot.png"))
+        );
+        assert_eq!(
+            browser.status_line(),
+            "已连接 — https://example.com/"
+        );
+    }
+
     #[tokio::test]
     async fn registers_deferred_named_service_slash_and_disposes() {
         let dock_home = tempfile::tempdir().unwrap();
@@ -400,6 +573,13 @@ mod tests {
         let browser = root.get::<Browser>(BROWSER).expect("named browser service");
         assert_eq!(browser.session(), BrowserSession::Closed);
         assert_eq!(browser.status_line(), "未连接");
+        assert!(browser.cockpit_body().contains("未连接"));
+        assert!(browser.cockpit_body().contains("标签页："));
+        assert!(browser.cockpit_body().contains("最近截图："));
+        assert!(browser.cockpit_body().contains("审批："));
+        assert!(browser.cockpit_body().contains("断开："));
+        assert!(browser.tabs().is_empty());
+        assert!(browser.last_screenshot().is_none());
 
         for name in BROWSER_TOOL_NAMES {
             assert!(
@@ -484,10 +664,18 @@ mod tests {
         );
         assert_eq!(browser.session(), BrowserSession::Connected);
         assert!(
-            browser.status_line().starts_with("Connected"),
+            browser.status_line().starts_with("已连接"),
             "{}",
             browser.status_line()
         );
+        assert!(
+            !browser.tabs().is_empty(),
+            "cockpit should cache at least one tab"
+        );
+        let body = browser.cockpit_body();
+        assert!(body.starts_with("已连接"), "{body}");
+        assert!(body.contains("标签页："), "{body}");
+        assert!(body.contains("审批："), "{body}");
 
         let snap = tools
             .execute(ToolCall {

@@ -58,7 +58,7 @@ pub use agent_presets::{
 };
 pub use agents::{agents, Agent, Agents};
 pub use ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
-pub use browser::{tool_browser, Browser, BrowserSession, BROWSER_TOOL_NAMES};
+pub use browser::{tool_browser, Browser, BrowserSession, BrowserTabInfo, BROWSER_TOOL_NAMES};
 pub use bundle::{
     install_app, install_core, install_fakes, install_foundation, install_spine,
     install_without_llm,
