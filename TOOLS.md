@@ -94,14 +94,25 @@ cargo test -p cordis-spine --test round -- install_app_registers
 - **勿混 BUA**：`cua-driver` 自带的 `browser_*` MCP 工具 ≠ Dock chromiumoxide `browser_*`。网页自动化优先 Dock BUA；桌面键鼠 / 开应用走 cua-driver。
 - **Linux 坑**（写进安装说明）：需要 **X11 或 XWayland**（原生 Wayland 仍预览）；`DISPLAY` / `XAUTHORITY`；`at-spi2-core`（+ 必要时 toolkit-accessibility）否则 AT-SPI / `get_window_state` 弱；把 `~/.local/bin` 放进 `PATH`，或用 `cua-driver mcp-config` 给出的绝对 command；telemetry 默开，可 `cua-driver telemetry disable`。
 - **TUI**：`/computer` 薄驾驶舱（连上 / 未装 driver、审批提示）由同 PR 的 TUI/Cordis 跟；不嵌真桌面。
-- **冒烟**：装好后 `/mcps` 见 `cua-driver` → `search_tool` 查 `click`/`type`/`screenshot` 类 → `use_tool`（先过权限门）完成截图或点按一类动作。
+- **冒烟**：装好后 `/mcps` 见 `cua-driver` → `search_tool` 查桌面工具 → `use_tool`（先过权限门）完成截图或点按一类动作。
+
+**本机边界（BUA 在 Linux + X11 冒烟，`cua-driver` 0.24.x）**
+
+- `doctor` 应见 `display server: X11` + `X11 connection: connected`。若 `[warn] AT-SPI: accessibility bus not reachable`：装 `at-spi2-core`，确保用户会话有 D-Bus；GNOME 可再开 `gsettings set org.gnome.desktop.interface toolkit-accessibility true`。AT-SPI 弱时 `get_window_state` / a11y 树不可靠，点按仍可能走几何。
+- 验收常用 MCP 名（公名前缀 `mcp_cua-driver__`）：`list_apps` / `list_windows` / `launch_app`、`click` / `double_click` / `right_click` / `drag` / `scroll`、`type_text` / `press_key` / `hotkey`、`get_accessibility_tree` / `get_desktop_state` / `get_screen_size`、`bring_to_front` / `invoke_menu`。driver 另暴露 `browser_*`——**不要**当 Dock BUA 用。
+- 无图形会话 / 纯 SSH 无 `DISPLAY`：`doctor` 会挂；CI 不要默认跑 cua-driver 实机。本机可用既有 X11/Xvfb，但 AT-SPI 仍要会话总线。
+- 安装脚本：`https://cua.ai/driver/install.sh` → 常落到 `~/.local/bin/cua-driver`；`mcp-config` 的 JSON `command` 可直接抄进 Dock。
 
 安装（Linux 示例）：
 
 ```bash
-# 按 trycua 官方安装到 ~/.cua-driver，并确保 cua-driver 在 PATH（常为 ~/.local/bin）
+# 官方安装（二进制进 ~/.cua-driver，并 symlink 到 ~/.local/bin）
+/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
+# Debian/Ubuntu 建议再装 AT-SPI：
+#   sudo apt-get install -y at-spi2-core
+export PATH="$HOME/.local/bin:$PATH"
 cua-driver --version
-cua-driver doctor          # 查 DISPLAY / AT-SPI
+cua-driver doctor          # 查 DISPLAY / X11 / AT-SPI
 cua-driver mcp-config      # 打印推荐 command/args（可抄进 config.toml）
 # 可选：cua-driver telemetry disable
 ```
