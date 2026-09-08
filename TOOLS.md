@@ -69,7 +69,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 }
 ```
 
-权限门（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `browser_evaluate`。
+权限门（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `browser_evaluate`，以及全部 **`mcp_cua-driver__*`**（trycua `cua-driver` MCP，与 bash 同级）。
 
 计划门：同上（`enter_plan_mode` 之后这些返回 blocked，直到 `exit_plan_mode`）。例外：对 `.dock/plan.md` 的 `search_replace` / `write_file` 自动放行（对齐 grok）。
 
@@ -82,6 +82,41 @@ cargo test -p cordis-spine --test round -- install_app_registers
 - **进入同域 iframe**：在 `browser_snapshot` / `browser_evaluate`（及 click 的文档对称参数）上传可选 `frame` 或 `frame_selector`（CSS，指向 `<iframe>`/`<frame>`）。实现用主文档 `querySelector` 探测 + `Page.getFrameTree` 匹配 CDP `FrameId`，再对 evaluate 设 `Runtime.evaluate` 的 `contextId`，对 snapshot 传 `Accessibility.getFullAXTree.frameId`。
 - **跨域 / 找不到**：探测读 `contentDocument` 失败或树里匹配不到时，**直接失败并返回明确错误**（例如 `cross-origin iframe (CDP cannot enter)` / `no element matching frame_selector`）。不做 OOPIF 像素点击，也不静默落到主文档。
 - **refs**：framed snapshot 产生的 `@eN` 只对该 frame 有效；click 前应使用同一 `frame_selector` 拍到的 snapshot。
+
+
+### Computer / CUA（`cua-driver` MCP，C0）
+
+控本机桌面走 **trycua [`cua-driver`](https://github.com/trycua/cua)** MCP，**不**自研键鼠、**不** Docker / cua 云沙箱、**不** path-dep 进 spine。
+
+- **接入**：用户本机安装 `cua-driver`；Dock 用现有 `mcp-client` stdio。`config.toml` 样例见 [config.toml.example](config.toml.example) 与下文。公名 `mcp_cua-driver__{tool}`（服务器键名必须是 `cua-driver`），与其它 MCP 一样 **不进** sampler / `specs_for_model`，经 `search_tool` / `use_tool`。
+- **权限 / 计划门**：所有 `mcp_cua-driver__*` 与 `bash` 同级（`needs_permission` + `blocked_in_plan`）。`use_tool` 内层 `execute` 会命中该门。
+- **Allowlist**：MCP extras 仍按现规则 **穿过** Agent preset allowlist；但 `code` / `cordis`（含 general-purpose）须保留 `search_tool` / `use_tool`。`minimal` / `warden` 主代理不含这两项则调不到 cua-driver。
+- **勿混 BUA**：`cua-driver` 自带的 `browser_*` MCP 工具 ≠ Dock chromiumoxide `browser_*`。网页自动化优先 Dock BUA；桌面键鼠 / 开应用走 cua-driver。
+- **Linux 坑**（写进安装说明）：需要 **X11 或 XWayland**（原生 Wayland 仍预览）；`DISPLAY` / `XAUTHORITY`；`at-spi2-core`（+ 必要时 toolkit-accessibility）否则 AT-SPI / `get_window_state` 弱；把 `~/.local/bin` 放进 `PATH`，或用 `cua-driver mcp-config` 给出的绝对 command；telemetry 默开，可 `cua-driver telemetry disable`。
+- **TUI**：`/computer` 薄驾驶舱（连上 / 未装 driver、审批提示）由同 PR 的 TUI/Cordis 跟；不嵌真桌面。
+- **冒烟**：装好后 `/mcps` 见 `cua-driver` → `search_tool` 查 `click`/`type`/`screenshot` 类 → `use_tool`（先过权限门）完成截图或点按一类动作。
+
+安装（Linux 示例）：
+
+```bash
+# 按 trycua 官方安装到 ~/.cua-driver，并确保 cua-driver 在 PATH（常为 ~/.local/bin）
+cua-driver --version
+cua-driver doctor          # 查 DISPLAY / AT-SPI
+cua-driver mcp-config      # 打印推荐 command/args（可抄进 config.toml）
+# 可选：cua-driver telemetry disable
+```
+
+`~/.dock/config.toml`（或项目 `.dock/config.toml`）样例——优先 PATH 上的 `cua-driver`：
+
+```toml
+[mcp_servers.cua-driver]
+command = "cua-driver"
+args = ["mcp"]
+enabled = true
+# 若 PATH 没有，可改成 mcp-config 给出的绝对路径，例如：
+# command = "/home/YOU/.cua-driver/packages/releases/…/cua-driver"
+```
+
 
 ## 待做（已挂名、仍比 Grok 薄）
 
