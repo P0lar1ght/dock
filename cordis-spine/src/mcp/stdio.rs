@@ -1,7 +1,14 @@
-//! stdio MCP: Content-Length JSON-RPC. Probe `server/discover` (2026-07-28),
-//! then fall back to `initialize` if the server is still initialize-era.
-//! A standing reader demuxes server requests (`elicitation/create`, `ping`)
-//! and `tools/list_changed` while `tools/call` waits.
+//! stdio MCP: Content-Length and/or NDJSON JSON-RPC.
+//! Probe `server/discover` (2026-07-28), then fall back to `initialize` if the
+//! server is still initialize-era. A standing reader demuxes server requests
+//! (`elicitation/create`, `ping`) and `tools/list_changed` while `tools/call`
+//! waits.
+//!
+//! Framing: default **NDJSON** (one JSON-RPC object per line). Explicit
+//! `content-length` keeps LSP framing for legacy servers. Optional `auto`
+//! probes Content-Length then kills+respawns as NDJSON on -32700/parse — never
+//! flips wire framing on the same stdin. Reads accept either shape (first line
+//! starting with `{` → NDJSON).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -9,11 +16,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
 use tokio::sync::{oneshot, watch};
 
-use crate::config::{McpServer, McpTransport};
+use crate::config::{McpServer, McpStdioFraming, McpTransport};
 use crate::mcp::protocol::{
     self, client_capabilities, client_info, discover_versions, pick_version, raw_tool_name,
     with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
@@ -25,12 +32,66 @@ use super::incoming::{self, LiveHooks};
 use super::tools_list;
 use super::{CallFn, RelistFn};
 
+/// Fixed on-the-wire framing for one child process (never flipped mid-connection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireFraming {
+    ContentLength,
+    Ndjson,
+}
+
 pub(super) async fn connect(
     server: &McpServer,
     hooks: LiveHooks,
     stop: watch::Receiver<bool>,
 ) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
-    let McpTransport::Stdio { command, args, env } = &server.transport else {
+    let McpTransport::Stdio { framing, .. } = &server.transport else {
+        return Err("not a stdio MCP server".into());
+    };
+    let timeout = Duration::from_secs(server.startup_timeout_sec.max(1));
+    match *framing {
+        McpStdioFraming::ContentLength => {
+            connect_once(server, hooks, stop, WireFraming::ContentLength, timeout).await
+        }
+        McpStdioFraming::Ndjson => {
+            connect_once(server, hooks, stop, WireFraming::Ndjson, timeout).await
+        }
+        McpStdioFraming::Auto => {
+            match connect_once(
+                server,
+                hooks.clone(),
+                stop.clone(),
+                WireFraming::ContentLength,
+                timeout,
+            )
+            .await
+            {
+                Ok(ok) => Ok(ok),
+                Err(e) if looks_like_framing_parse_error(&e) => {
+                    tracing::info!(
+                        "MCP stdio parse error on Content-Length; killing child and respawning as NDJSON"
+                    );
+                    connect_once(server, hooks, stop, WireFraming::Ndjson, timeout).await
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+async fn connect_once(
+    server: &McpServer,
+    hooks: LiveHooks,
+    stop: watch::Receiver<bool>,
+    wire: WireFraming,
+    timeout: Duration,
+) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
+    let McpTransport::Stdio {
+        command,
+        args,
+        env,
+        ..
+    } = &server.transport
+    else {
         return Err("not a stdio MCP server".into());
     };
     let mut child = tokio::process::Command::new(command);
@@ -52,6 +113,7 @@ pub(super) async fn connect(
         next_id: AtomicU64::new(1),
         protocol: Mutex::new(PROTOCOL_LATEST.to_string()),
         modern: AtomicBool::new(true),
+        wire,
         hooks,
         _child: Mutex::new(Some(child)),
     });
@@ -60,11 +122,21 @@ pub(super) async fn connect(
     tokio::spawn(async move {
         reader_loop(BufReader::new(stdout), reader_shared, &mut stop_reader).await;
     });
-    let timeout = Duration::from_secs(server.startup_timeout_sec.max(1));
-    handshake(&shared, timeout).await?;
-    let listed = tokio::time::timeout(timeout, list_all(&shared, &server.name))
-        .await
-        .map_err(|_| "tools/list timeout".to_string())??;
+    if let Err(e) = handshake(&shared, timeout).await {
+        shared.kill_child();
+        return Err(e);
+    }
+    let listed = match tokio::time::timeout(timeout, list_all(&shared, &server.name)).await {
+        Ok(Ok(listed)) => listed,
+        Ok(Err(e)) => {
+            shared.kill_child();
+            return Err(e);
+        }
+        Err(_) => {
+            shared.kill_child();
+            return Err("tools/list timeout".to_string());
+        }
+    };
     let session_call = shared.clone();
     let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
         let session = session_call.clone();
@@ -99,8 +171,36 @@ struct Shared {
     next_id: AtomicU64,
     protocol: Mutex<String>,
     modern: AtomicBool,
+    wire: WireFraming,
     hooks: LiveHooks,
     _child: Mutex<Option<tokio::process::Child>>,
+}
+
+impl Shared {
+    fn kill_child(&self) {
+        if let Some(mut child) = self._child.lock().unwrap().take() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+fn looks_like_framing_parse_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("-32700")
+        || lower.contains("parse error")
+        || (lower.contains("parse") && lower.contains("error"))
+}
+
+fn value_is_framing_parse_error(v: &Value) -> bool {
+    if protocol::jsonrpc_error_code(v) == Some(-32700) {
+        return true;
+    }
+    v.pointer("/error/message")
+        .and_then(|m| m.as_str())
+        .is_some_and(|m| {
+            let lower = m.to_ascii_lowercase();
+            lower.contains("parse")
+        })
 }
 
 async fn handshake(s: &Shared, timeout: Duration) -> Result<(), String> {
@@ -123,6 +223,9 @@ async fn handshake(s: &Shared, timeout: Duration) -> Result<(), String> {
             Ok(())
         }
         Ok(Ok(v)) => {
+            if value_is_framing_parse_error(&v) {
+                return Err(v["error"].to_string());
+            }
             if let Some(supported) = protocol::unsupported_versions(&v) {
                 let picked = pick_version(&supported).ok_or_else(|| {
                     format!("server does not speak a protocol Dock supports: {supported:?}")
@@ -137,6 +240,7 @@ async fn handshake(s: &Shared, timeout: Duration) -> Result<(), String> {
             }
             initialize_legacy(s, timeout).await
         }
+        Ok(Err(e)) if looks_like_framing_parse_error(&e) => Err(e),
         Ok(Err(_)) | Err(_) => initialize_legacy(s, timeout).await,
     }
 }
@@ -214,15 +318,30 @@ async fn notify(s: &Shared, method: &str, params: Value) -> Result<(), String> {
 }
 
 async fn write_msg(s: &Shared, v: &Value) -> Result<(), String> {
-    let body = serde_json::to_vec(v).map_err(|e| e.to_string())?;
-    let head = format!("Content-Length: {}\r\n\r\n", body.len());
     let mut stdin = s.stdin.lock().await;
-    stdin
-        .write_all(head.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    stdin.write_all(&body).await.map_err(|e| e.to_string())?;
-    stdin.flush().await.map_err(|e| e.to_string())
+    write_frame(&mut *stdin, v, s.wire).await
+}
+
+async fn write_frame<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    v: &Value,
+    framing: WireFraming,
+) -> Result<(), String> {
+    let body = serde_json::to_vec(v).map_err(|e| e.to_string())?;
+    match framing {
+        WireFraming::ContentLength => {
+            let head = format!("Content-Length: {}\r\n\r\n", body.len());
+            w.write_all(head.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            w.write_all(&body).await.map_err(|e| e.to_string())?;
+        }
+        WireFraming::Ndjson => {
+            w.write_all(&body).await.map_err(|e| e.to_string())?;
+            w.write_all(b"\n").await.map_err(|e| e.to_string())?;
+        }
+    }
+    w.flush().await.map_err(|e| e.to_string())
 }
 
 async fn reader_loop(
@@ -249,11 +368,7 @@ async fn reader_loop(
                 };
                 match protocol::classify(v) {
                     Incoming::Response(v) => {
-                        if let Some(id) = incoming::pending_id(&v) {
-                            if let Some(tx) = shared.pending.lock().unwrap().remove(&id) {
-                                let _ = tx.send(v);
-                            }
-                        }
+                        deliver_response(&shared, v);
                     }
                     Incoming::Notification { method, params } => {
                         incoming::note(&shared.hooks, &method, &params);
@@ -273,8 +388,43 @@ async fn reader_loop(
     }
 }
 
-async fn read_frame(stdout: &mut BufReader<tokio::process::ChildStdout>) -> Result<String, String> {
-    let mut headers = String::new();
+fn deliver_response(shared: &Shared, v: Value) {
+    if let Some(id) = incoming::pending_id(&v) {
+        if let Some(tx) = shared.pending.lock().unwrap().remove(&id) {
+            let _ = tx.send(v);
+        }
+        return;
+    }
+    // JSON-RPC parse errors often use `id: null` — hand to oldest pending so
+    // `auto` can see -32700 and respawn with NDJSON.
+    if value_is_framing_parse_error(&v) {
+        let mut pending = shared.pending.lock().unwrap();
+        if let Some(id) = pending.keys().copied().min() {
+            if let Some(tx) = pending.remove(&id) {
+                let _ = tx.send(v);
+            }
+        }
+    }
+}
+
+/// Dual-read: if the first line starts with `{`, treat as one NDJSON message;
+/// otherwise parse Content-Length headers + body as today.
+async fn read_frame<R: AsyncBufReadExt + Unpin>(stdout: &mut R) -> Result<String, String> {
+    let mut first = String::new();
+    stdout
+        .read_line(&mut first)
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.is_empty() {
+        return Err("MCP stdio eof".into());
+    }
+    if first.trim_start().starts_with('{') {
+        while first.ends_with('\n') || first.ends_with('\r') {
+            first.pop();
+        }
+        return Ok(first);
+    }
+    let mut headers = first;
     loop {
         let mut line = String::new();
         stdout
@@ -300,8 +450,126 @@ async fn read_frame(stdout: &mut BufReader<tokio::process::ChildStdout>) -> Resu
         .flatten()
         .ok_or("missing Content-Length")?;
     let mut buf = vec![0u8; len];
-    tokio::io::AsyncReadExt::read_exact(stdout, &mut buf)
+    stdout
+        .read_exact(&mut buf)
         .await
         .map_err(|e| e.to_string())?;
     String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::BufReader;
+
+    #[tokio::test]
+    async fn read_ndjson_line() {
+        let (client, mut server) = tokio::io::duplex(1024);
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+        server.write_all(body.as_bytes()).await.unwrap();
+        server.write_all(b"\n").await.unwrap();
+        drop(server);
+        let mut reader = BufReader::new(client);
+        let got = read_frame(&mut reader).await.unwrap();
+        assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn read_content_length_frame() {
+        let (client, mut server) = tokio::io::duplex(1024);
+        let body = r#"{"jsonrpc":"2.0","id":2,"result":{}}"#;
+        let frame = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+        server.write_all(frame.as_bytes()).await.unwrap();
+        drop(server);
+        let mut reader = BufReader::new(client);
+        let got = read_frame(&mut reader).await.unwrap();
+        assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn write_content_length_format() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        let msg = json!({"jsonrpc":"2.0","id":1,"method":"ping","params":{}});
+        write_frame(&mut client, &msg, WireFraming::ContentLength)
+            .await
+            .unwrap();
+        drop(client);
+        let mut reader = BufReader::new(server);
+        let got = read_frame(&mut reader).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&got).unwrap(), msg);
+        // Raw bytes must include Content-Length header when written that way —
+        // re-read via a fresh duplex to assert header shape.
+        let (mut w, mut r) = tokio::io::duplex(1024);
+        write_frame(&mut w, &msg, WireFraming::ContentLength)
+            .await
+            .unwrap();
+        drop(w);
+        let mut buf = Vec::new();
+        AsyncReadExt::read_to_end(&mut r, &mut buf).await.unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.starts_with("Content-Length: "), "{s}");
+        assert!(s.contains("\r\n\r\n"));
+        assert!(!s.ends_with('\n') || s.contains("\r\n\r\n{"));
+    }
+
+    #[tokio::test]
+    async fn write_ndjson_format() {
+        let (mut w, mut r) = tokio::io::duplex(1024);
+        let msg = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+        write_frame(&mut w, &msg, WireFraming::Ndjson).await.unwrap();
+        drop(w);
+        let mut buf = Vec::new();
+        AsyncReadExt::read_to_end(&mut r, &mut buf).await.unwrap();
+        assert_eq!(buf.last().copied(), Some(b'\n'));
+        let line = std::str::from_utf8(&buf[..buf.len() - 1]).unwrap();
+        assert!(!line.contains("Content-Length"));
+        assert_eq!(serde_json::from_str::<Value>(line).unwrap(), msg);
+    }
+
+    #[test]
+    fn parse_error_detection() {
+        assert!(value_is_framing_parse_error(&json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {"code": -32700, "message": "Parse error"}
+        })));
+        assert!(looks_like_framing_parse_error(
+            r#"{"code":-32700,"message":"Parse error"}"#
+        ));
+        assert!(!value_is_framing_parse_error(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32601, "message": "Method not found"}
+        })));
+    }
+
+    #[test]
+    fn auto_respawn_uses_fixed_wire_per_child() {
+        // `auto` never flips WireFraming mid-connection; first child is CL, second Ndjson.
+        assert_ne!(WireFraming::ContentLength, WireFraming::Ndjson);
+        assert!(looks_like_framing_parse_error(
+            r#"{"code":-32700,"message":"Parse error"}"#
+        ));
+        // Framing stays fixed for the life of one Shared / child.
+        let shared_wire = WireFraming::ContentLength;
+        assert_eq!(shared_wire, WireFraming::ContentLength);
+        let respawn_wire = WireFraming::Ndjson;
+        assert_eq!(respawn_wire, WireFraming::Ndjson);
+    }
+
+    #[tokio::test]
+    async fn dual_read_prefers_ndjson_when_brace() {
+        // Content-Length servers never start a frame with `{`; NDJSON always does.
+        let (client, mut server) = tokio::io::duplex(256);
+        server
+            .write_all(br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}"#)
+            .await
+            .unwrap();
+        server.write_all(b"\n").await.unwrap();
+        drop(server);
+        let mut reader = BufReader::new(client);
+        let got = read_frame(&mut reader).await.unwrap();
+        let v: Value = serde_json::from_str(&got).unwrap();
+        assert!(value_is_framing_parse_error(&v));
+    }
 }

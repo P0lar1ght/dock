@@ -68,7 +68,7 @@ pub use bundle::{
 pub use compact::{compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
 pub use config::{
     load_catalog, load_disabled_mcp_tools, load_mcp_servers, persist_disabled_mcp_tools,
-    persist_mcp_server_enabled, ApiBackend, AuthScheme, McpOAuthConfig, McpServer, McpTransport,
+    persist_mcp_server_enabled, ApiBackend, AuthScheme, McpOAuthConfig, McpServer, McpStdioFraming, McpTransport,
     ModelChoice,
 };
 pub use context_book::{context, own_sections, ContextBook};

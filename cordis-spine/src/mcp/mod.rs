@@ -1,7 +1,7 @@
 //! MCP client: one plugin, tools register into `"tools"`. Connect/list fail-open.
 //!
 //! Protocol: offer `2026-07-28` first; fall back to initialize-era `2025-11-25`.
-//! Transports: stdio (Content-Length) and Streamable HTTP (`url`).
+//! Transports: stdio (Content-Length or NDJSON) and Streamable HTTP (`url`).
 //! Public names: `mcp_{server}__{tool}`. Sampler sees `search_tool` / `use_tool`
 //! (Grok progressive disclosure); MCP extras stay registered for dispatch,
 //! omitted from `specs_for_model` and occupancy. Enabled MCP tools bypass Agent
@@ -674,6 +674,7 @@ mod tests {
                 command: "true".into(),
                 args: Vec::new(),
                 env: Default::default(),
+                framing: crate::config::McpStdioFraming::Auto,
             },
             startup_timeout_sec: 1,
             enabled: true,
