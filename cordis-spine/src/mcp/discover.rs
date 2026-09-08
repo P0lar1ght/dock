@@ -18,13 +18,13 @@ pub const SEARCH_TOOL_NAME: &str = "search_tool";
 pub const USE_TOOL_NAME: &str = "use_tool";
 
 const SEARCH_TOOL_DESC: &str = "Search on-demand tools by keyword and retrieve their input schemas. \
-Matches MCP integrations and infrequent local tools (scheduler, memory, lsp, skill, workflow, cordis_*, …). \
+Matches MCP integrations and infrequent local tools (scheduler, memory, lsp, skill, workflow, cordis_*, browser_*, …). \
 Returns only hits, each with a full input_schema, capped by limit (default 5, max 255). \
 Unmatched tools stay hidden; total_hidden_tools is the catalog size. \
 If status is \"partial\", some MCP servers may still be connecting. \
 Call matched tools with use_tool. Do not guess parameter names.";
 
-const SEARCH_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Keywords to match against tool names, server/group names, and descriptions (e.g. \"linear create issue\", \"scheduler\", \"cordis define\")."},"limit":{"type":"integer","minimum":1,"maximum":255,"description":"Maximum number of results (default 5, max 255)."}},"required":["query"]}"#;
+const SEARCH_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Keywords to match against tool names, server/group names, and descriptions (e.g. \"linear create issue\", \"scheduler\", \"browser\", \"cordis define\")."},"limit":{"type":"integer","minimum":1,"maximum":255,"description":"Maximum number of results (default 5, max 255)."}},"required":["query"]}"#;
 
 const USE_TOOL_DESC: &str = "Call an on-demand tool discovered via search_tool. \
 tool_name is the name search_tool returned (mcp_server__tool, or a local name like scheduler_create). \
@@ -332,6 +332,7 @@ fn catalog_group(name: &str) -> String {
         n if n.starts_with("cordis_") => "cordis".into(),
         n if n.starts_with("scheduler_") => "scheduler".into(),
         n if n.starts_with("memory_") => "memory".into(),
+        n if n.starts_with("browser_") => "browser".into(),
         "monitor" => "monitor".into(),
         "update_goal" => "goal".into(),
         "lsp" => "lsp".into(),

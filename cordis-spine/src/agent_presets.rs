@@ -1561,6 +1561,8 @@ mod tests {
         assert!(presets.allows("send_message"));
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
+        assert!(presets.allows("browser_open"));
+        assert!(presets.allows("browser_snapshot"));
         assert!(!presets.allows("report"));
         assert!(!presets.allows("cordis_define"));
         assert!(!presets.allows("scheduler_create"));
@@ -1570,6 +1572,7 @@ mod tests {
         assert!(!presets.allows("web_search"));
         assert!(!presets.allows("search_tool"));
         assert!(!presets.allows("use_tool"));
+        assert!(!presets.allows("browser_open"));
         assert!(!presets.allows("cordis_run"));
 
         presets.apply(CORDIS_PRESET_ID).unwrap();
@@ -1577,6 +1580,7 @@ mod tests {
         assert!(presets.allows("skill"));
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
+        assert!(presets.allows("browser_open"));
         assert!(presets.allows("cordis_run"));
         assert!(presets.allows("cordis_promote"));
         assert!(!presets.allows("scheduler_create"));
@@ -1587,6 +1591,7 @@ mod tests {
         assert!(presets.allows("subagent"));
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
+        assert!(!presets.allows("browser_open"));
         assert!(!presets.allows("task"));
         assert!(!presets.allows("get_task_output"));
         assert!(!presets.allows("wait_tasks"));
