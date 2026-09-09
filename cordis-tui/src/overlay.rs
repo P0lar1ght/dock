@@ -346,6 +346,7 @@ impl Overlay {
             Self::Presets(PresetView::Canvas(c)) => match c.pane {
                 PresetPane::Catalog => c.catalog_sel,
                 PresetPane::Assigned => c.assigned_sel,
+                PresetPane::Roles => c.roles_sel,
                 PresetPane::Persona => 0,
             },
         }
@@ -380,6 +381,7 @@ impl Overlay {
             Self::Presets(PresetView::Canvas(c)) => match c.pane {
                 PresetPane::Catalog => c.catalog_sel = selected,
                 PresetPane::Assigned => c.assigned_sel = selected,
+                PresetPane::Roles => c.roles_sel = selected,
                 PresetPane::Persona => {}
             },
         }

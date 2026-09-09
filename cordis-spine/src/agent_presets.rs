@@ -458,6 +458,144 @@ impl AgentPresets {
         }
     }
 
+    /// Create a new `agents/<id>.yml` role under this mode. Returns `(role_id, def)`.
+    pub fn create_subagent(&self, mode_id: &str) -> Result<(String, SubagentDef), String> {
+        let mut minted = None;
+        self.mutate(mode_id, |preset| {
+            let id = mint_role_id(&preset.agents);
+            let def = SubagentDef {
+                name: id.clone(),
+                ..SubagentDef::default()
+            };
+            preset.agents.insert(id.clone(), def.clone());
+            minted = Some((id, def));
+            Ok(())
+        })?;
+        minted.ok_or_else(|| "创建子代理失败".into())
+    }
+
+    pub fn delete_subagent(&self, mode_id: &str, role_id: &str) -> Result<(), String> {
+        self.mutate(mode_id, |preset| {
+            if preset.agents.shift_remove(role_id).is_none() {
+                return Err(format!("没有子代理 {role_id}"));
+            }
+            Ok(())
+        })?;
+        // Remove only this role's YAML (do not scan-delete other disk files).
+        let inner = self.inner.lock().unwrap();
+        if let Some(preset) = inner.presets.get(mode_id) {
+            if preset.origin != PresetOrigin::Shipped && preset.broken.is_none() {
+                let path = file_path(&inner, preset)
+                    .parent()
+                    .map(|p| p.join(AGENTS_DIR).join(format!("{role_id}.yml")));
+                if let Some(path) = path {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_subagent_persona(
+        &self,
+        mode_id: &str,
+        role_id: &str,
+        persona: String,
+    ) -> Result<(), String> {
+        self.mutate(mode_id, |preset| {
+            let Some(def) = preset.agents.get_mut(role_id) else {
+                return Err(format!("没有子代理 {role_id}"));
+            };
+            def.persona = persona;
+            Ok(())
+        })
+    }
+
+    pub fn add_subagent_tool(&self, mode_id: &str, role_id: &str, name: &str) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("工具名不能为空".into());
+        }
+        self.mutate(mode_id, |preset| {
+            let Some(def) = preset.agents.get_mut(role_id) else {
+                return Err(format!("没有子代理 {role_id}"));
+            };
+            match &mut def.tools {
+                None => Ok(()),
+                Some(list) if list.iter().any(|n| n == name) => Ok(()),
+                Some(list) => {
+                    list.push(name.to_string());
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    pub fn remove_subagent_tool(
+        &self,
+        mode_id: &str,
+        role_id: &str,
+        name: &str,
+        live: &[String],
+    ) -> Result<(), String> {
+        self.mutate(mode_id, |preset| {
+            let Some(def) = preset.agents.get_mut(role_id) else {
+                return Err(format!("没有子代理 {role_id}"));
+            };
+            match &def.tools {
+                None => {
+                    def.tools = Some(
+                        live.iter()
+                            .filter(|n| n.as_str() != name)
+                            .cloned()
+                            .collect(),
+                    );
+                }
+                Some(_) => {
+                    if let Some(list) = def.tools.as_mut() {
+                        list.retain(|n| n != name);
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn assigned_subagent_tools(
+        &self,
+        mode_id: &str,
+        role_id: &str,
+        live: &[String],
+    ) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        let Some(preset) = inner.presets.get(mode_id) else {
+            return live.to_vec();
+        };
+        let Some(def) = preset.agents.get(role_id) else {
+            return live.to_vec();
+        };
+        match &def.tools {
+            None => live.to_vec(),
+            Some(list) => list.clone(),
+        }
+    }
+
+    pub fn upsert_subagent(
+        &self,
+        mode_id: &str,
+        role_id: &str,
+        def: SubagentDef,
+    ) -> Result<(), String> {
+        if !valid_agent_type_id(role_id) {
+            return Err(format!(
+                "子代理 id 无效（ascii slug 或 1–16 汉字）: {role_id}"
+            ));
+        }
+        self.mutate(mode_id, |preset| {
+            preset.agents.insert(role_id.to_string(), def);
+            Ok(())
+        })
+    }
+
     pub fn allows(&self, name: &str) -> bool {
         let inner = self.inner.lock().unwrap();
         let Some(preset) = inner.presets.get(&inner.current) else {
@@ -1238,6 +1376,9 @@ fn persist_preset(inner: &Inner, id: &str) -> Result<(), String> {
             std::fs::write(agents_dir.join(format!("{tid}.yml")), body)
                 .map_err(|e| e.to_string())?;
         }
+        // Do NOT wipe agents/*.yml missing from memory: handwritten roles that
+        // were never reload_roster'd must survive /preset edits of the same mode.
+        // Explicit delete_subagent removes that role's file instead.
         if id == WARDEN_PRESET_ID {
             for (from, _) in WARDEN_PINYIN_ALIASES {
                 let _ = std::fs::remove_file(agents_dir.join(format!("{from}.yml")));
@@ -1354,6 +1495,19 @@ fn mint_id(presets: &IndexMap<String, AgentPreset>) -> String {
         }
     }
     format!("custom-{}", uuid::Uuid::now_v7().as_simple())
+}
+
+fn mint_role_id(agents: &IndexMap<String, SubagentDef>) -> String {
+    if !agents.contains_key("role") {
+        return "role".into();
+    }
+    for n in 2..10_000 {
+        let id = format!("role-{n}");
+        if !agents.contains_key(&id) {
+            return id;
+        }
+    }
+    format!("role-{}", uuid::Uuid::now_v7().as_simple())
 }
 
 fn inject_subagent_type_enum(parameters_json: &str, ids: &[String]) -> Option<String> {
@@ -1645,6 +1799,60 @@ mod tests {
             .collect();
         assert!(model.iter().any(|n| n == "search_tool"), "{model:?}");
         assert!(model.iter().any(|n| n == "use_tool"), "{model:?}");
+    }
+
+    #[test]
+    fn subagent_crud_roundtrip_via_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        let mode = presets.create().unwrap();
+        let (rid, def) = presets.create_subagent(&mode.id).unwrap();
+        assert_eq!(rid, "role");
+        assert_eq!(def.name, "role");
+        presets
+            .set_subagent_persona(&mode.id, &rid, "你是侦察".into())
+            .unwrap();
+        presets.add_subagent_tool(&mode.id, &rid, "bash").unwrap();
+        // open allowlist starts as None → add is no-op; remove snapshots.
+        let live = vec!["bash".into(), "read_file".into()];
+        presets
+            .remove_subagent_tool(&mode.id, &rid, "read_file", &live)
+            .unwrap();
+        let tools = presets.assigned_subagent_tools(&mode.id, &rid, &live);
+        assert_eq!(tools, vec!["bash".to_string()]);
+        presets
+            .set_subagent_persona(&mode.id, &rid, "更新".into())
+            .unwrap();
+        let got = presets.get(&mode.id).unwrap();
+        assert_eq!(got.agents.get(&rid).unwrap().persona, "更新");
+        presets.delete_subagent(&mode.id, &rid).unwrap();
+        assert!(presets.get(&mode.id).unwrap().agents.is_empty());
+        let agents_dir = dir.path().join(&mode.id).join("agents");
+        assert!(
+            !agents_dir.join("role.yml").exists(),
+            "deleted role.yml should be removed"
+        );
+    }
+
+    #[test]
+    fn persist_keeps_handwritten_agents_yml_not_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        let mode = presets.create().unwrap();
+        let agents_dir = dir.path().join(&mode.id).join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("scout.yml"),
+            "name: scout\npersona: 手写未 reload\n",
+        )
+        .unwrap();
+        // Touch mode via /preset-like mutate without loading scout into memory.
+        presets.set_persona(&mode.id, "改名 persona".into()).unwrap();
+        assert!(
+            agents_dir.join("scout.yml").exists(),
+            "handwritten agents/scout.yml must survive persist without reload"
+        );
+        assert!(!presets.get(&mode.id).unwrap().agents.contains_key("scout"));
     }
 
     #[test]
