@@ -87,3 +87,9 @@ api_key = "free"
 # args = ["mcp"]
 # enabled = true
 
+# --- Browser / BUA Chromium display ---
+# Default headless (CI-safe). Toggle from /browser with `h`, or set here.
+# DOCK_BROWSER_HEADED (any non-empty) overrides to headed at launch.
+#
+# [browser]
+# headed = false
