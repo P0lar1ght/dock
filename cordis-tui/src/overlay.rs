@@ -840,6 +840,8 @@ mod tests {
     fn browser_overlay_opens_and_closes() {
         let mut overlay = Overlay::Browser { scroll: 0 };
         assert!(overlay.is_open());
+        // h toggles headed in event_loop keys (live-lookup "browser"); overlay itself is scroll-only.
+        assert!(matches!(overlay, Overlay::Browser { scroll: 0 }));
         overlay.close();
         assert!(!overlay.is_open());
     }

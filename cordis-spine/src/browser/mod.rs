@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Disposable, Inject, Plugin};
 
+use crate::config;
 use crate::names::{BROWSER, SLASH, TOOLS};
 use crate::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::tools::{own_registered, tool_result, tool_result_with_images, ToolBody, Tools};
@@ -153,6 +154,31 @@ impl Browser {
         self.inner.last_network.lock().unwrap().clone()
     }
 
+    /// Persisted `[browser].headed` preference (ignores env override).
+    pub fn headed_pref(&self) -> bool {
+        config::load_browser_headed()
+    }
+
+    /// Effective headed at next launch: env `DOCK_BROWSER_HEADED` (any non-empty) OR pref.
+    pub fn headed_effective(&self) -> bool {
+        config::effective_browser_headed()
+    }
+
+    /// Persist headed preference and refresh `/browser` slash overlay. Does **not** restart Chromium.
+    pub fn set_headed(&self, headed: bool) -> Result<(), String> {
+        config::persist_browser_headed(headed)?;
+        self.refresh_slash();
+        Ok(())
+    }
+
+    /// Toggle persisted headed preference. Returns the new pref value.
+    /// Live sessions keep their current headless/headed mode until browser_close + browser_open.
+    pub fn toggle_headed(&self) -> Result<bool, String> {
+        let next = !self.headed_pref();
+        self.set_headed(next)?;
+        Ok(next)
+    }
+
     pub fn status_line(&self) -> String {
         match self.session() {
             BrowserSession::Closed => "未连接".into(),
@@ -190,6 +216,27 @@ impl Browser {
         out.push('\n');
         out.push_str("状态：\n");
         out.push_str(&format!("  {status}\n"));
+        out.push('\n');
+        out.push_str("显示：\n");
+        {
+            let pref = self.headed_pref();
+            let effective = self.headed_effective();
+            let pref_label = if pref { "有头" } else { "无头" };
+            let eff_label = if effective { "有头" } else { "无头" };
+            out.push_str(&format!("  偏好：{pref_label}（默认无头）\n"));
+            if config::dock_browser_headed_env_override() {
+                out.push_str(&format!(
+                    "  生效：{eff_label}（DOCK_BROWSER_HEADED 覆盖 → 有头）\n"
+                ));
+            } else {
+                out.push_str(&format!("  生效：{eff_label}\n"));
+            }
+            out.push_str("  按 h 切换有头/无头（写入 config.toml [browser].headed）。\n");
+            out.push_str(
+                "  切换不会重启已开的 Chromium；需 browser_close 后再 browser_open 才生效。\n",
+            );
+            out.push_str("  终端驾驶舱不嵌入网页；有头时窗口在系统桌面。\n");
+        }
         out.push('\n');
         out.push_str("标签页：\n");
         if tabs.is_empty() {
@@ -390,7 +437,7 @@ impl Browser {
             self.mark_connected(&cur);
             return Ok(format!("already connected — {cur}"));
         }
-        let session = ConnectedSession::launch(url).await?;
+        let session = ConnectedSession::launch(url, self.headed_effective()).await?;
         let fallback = url.unwrap_or("about:blank").to_string();
         let url_now = match session.active_page() {
             Ok(p) => p.url().await.ok().flatten().unwrap_or(fallback),
@@ -962,6 +1009,7 @@ mod tests {
         assert!(body.starts_with("未连接"), "{body}");
         for needle in [
             "状态：",
+            "显示：",
             "标签页：",
             "最近截图：",
             "审批：",
@@ -970,6 +1018,9 @@ mod tests {
             "配置：",
             "（无）",
             "允许使用 …？",
+            "无头",
+            "按 h 切换",
+            "browser_close",
         ] {
             assert!(body.contains(needle), "missing {needle} in {body}");
         }
@@ -991,6 +1042,48 @@ mod tests {
         let with_approval = browser.format_cockpit(Some("browser_open — https://example.com/"));
         assert!(with_approval.contains("browser_open — https://example.com/"), "{with_approval}");
         assert!(!with_approval.contains("审批：\n  （无）"), "{with_approval}");
+    }
+
+    #[test]
+    fn cockpit_body_shows_headed_display_section() {
+        let dock_home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("DOCK_HOME");
+        let prev_env = std::env::var_os("DOCK_BROWSER_HEADED");
+        std::env::set_var("DOCK_HOME", dock_home.path());
+        std::env::remove_var("DOCK_BROWSER_HEADED");
+
+        let browser = Browser::new();
+        assert!(!browser.headed_pref());
+        assert!(!browser.headed_effective());
+        let body = browser.cockpit_body();
+        assert!(body.contains("显示："), "{body}");
+        assert!(body.contains("偏好：无头"), "{body}");
+        assert!(body.contains("生效：无头"), "{body}");
+
+        assert!(browser.toggle_headed().unwrap());
+        assert!(browser.headed_pref());
+        assert!(browser.headed_effective());
+        let body = browser.cockpit_body();
+        assert!(body.contains("偏好：有头"), "{body}");
+        assert!(body.contains("生效：有头"), "{body}");
+
+        std::env::set_var("DOCK_BROWSER_HEADED", "1");
+        // Pref can be flipped off; env still forces effective headed.
+        browser.set_headed(false).unwrap();
+        assert!(!browser.headed_pref());
+        assert!(browser.headed_effective());
+        let body = browser.cockpit_body();
+        assert!(body.contains("DOCK_BROWSER_HEADED"), "{body}");
+        assert!(body.contains("生效：有头"), "{body}");
+
+        match prev_env {
+            Some(v) => std::env::set_var("DOCK_BROWSER_HEADED", v),
+            None => std::env::remove_var("DOCK_BROWSER_HEADED"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("DOCK_HOME", v),
+            None => std::env::remove_var("DOCK_HOME"),
+        }
     }
 
     #[test]

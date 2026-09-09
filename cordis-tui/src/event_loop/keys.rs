@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use cordis::Context;
 use cordis_spine::{
-    AppSettings, Ask, Goal, Mcp, PermissionMode, PermissionOptionKind, Permissions, PlanDecision,
-    PlanMode, Sessions, TuiSlots, UserImage, ASK, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSIONS,
-    SETTINGS, TUI_SLOTS,
+    AppSettings, Ask, Browser, Goal, Mcp, PermissionMode, PermissionOptionKind, Permissions,
+    PlanDecision, PlanMode, Sessions, TuiSlots, UserImage, ASK, BROWSER, GOAL, MCP, PERMISSIONS,
+    PLAN_MODE, SESSIONS, SETTINGS, TUI_SLOTS,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -450,6 +450,27 @@ pub(super) fn run_action(
                     }
                     return Vec::new();
                 }
+            }
+            if matches!(overlay, Overlay::Browser { .. }) {
+                if c == 'h' || c == 'H' {
+                    if let Some(browser) = ctx.get::<Browser>(BROWSER) {
+                        match browser.toggle_headed() {
+                            Ok(true) => flash(
+                                ctx,
+                                "已切换为有头（需 browser_close 后再 browser_open 才生效）",
+                            ),
+                            Ok(false) => flash(
+                                ctx,
+                                "已切换为无头（需 browser_close 后再 browser_open 才生效）",
+                            ),
+                            Err(e) => flash(ctx, format!("切换显示失败：{e}")),
+                        }
+                    } else {
+                        flash(ctx, "browser 未挂载（tool-browser 插件不在树上）。");
+                    }
+                    return Vec::new();
+                }
+                return Vec::new();
             }
             overlay.push_char(c);
             return Vec::new();

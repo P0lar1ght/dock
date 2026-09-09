@@ -129,6 +129,17 @@ struct FileConfig {
     /// Grok `[disabled_mcp_tools.<server>] = ["tool", …]` — raw MCP tool names.
     #[serde(default)]
     disabled_mcp_tools: BTreeMap<String, Vec<String>>,
+    /// `[browser]` — BUA Chromium display prefs (headed vs headless).
+    #[serde(default)]
+    browser: BrowserSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BrowserSection {
+    /// Show a real Chromium window. Default false (headless / CI-safe).
+    /// `None` = key absent (do not override earlier catalog paths).
+    #[serde(default)]
+    headed: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -471,6 +482,83 @@ pub fn persist_disabled_mcp_tools_in(
         doc["disabled_mcp_tools"][server] = toml_edit::value(arr);
         Ok(())
     })
+}
+
+/// Persisted `[browser].headed` preference (default false / headless).
+/// Only files that actually set `browser.headed` contribute; later catalog paths win.
+pub fn load_browser_headed() -> bool {
+    load_browser_headed_from(&catalog_paths())
+}
+
+pub fn load_browser_headed_from(paths: &[PathBuf]) -> bool {
+    let mut headed = false;
+    for path in paths {
+        let Some(file) = read_file(path) else {
+            continue;
+        };
+        if let Some(val) = file.browser.headed {
+            headed = val;
+        }
+    }
+    headed
+}
+
+/// Write `[browser].headed` into user dock config (or an existing file that already has `[browser]`).
+pub fn persist_browser_headed(headed: bool) -> Result<(), String> {
+    persist_browser_headed_in(&catalog_paths(), headed)
+}
+
+pub fn persist_browser_headed_in(paths: &[PathBuf], headed: bool) -> Result<(), String> {
+    let path = browser_persist_target(paths)?;
+    patch_toml(&path, |doc| {
+        if doc.get("browser").is_none() {
+            doc["browser"] = toml_edit::table();
+        }
+        doc["browser"]["headed"] = toml_edit::value(headed);
+        Ok(())
+    })
+}
+
+/// True when `DOCK_BROWSER_HEADED` is set to a **non-empty** value (after trim).
+/// Empty string / whitespace-only is treated as unset (use `[browser].headed` pref).
+pub fn dock_browser_headed_env_override() -> bool {
+    match std::env::var("DOCK_BROWSER_HEADED") {
+        Ok(v) => !v.trim().is_empty(),
+        Err(_) => false,
+    }
+}
+
+/// Effective headed mode at Chromium launch: any non-empty `DOCK_BROWSER_HEADED` overrides to headed.
+pub fn effective_browser_headed() -> bool {
+    effective_browser_headed_with(dock_browser_headed_env_override(), load_browser_headed())
+}
+
+pub fn effective_browser_headed_with(env_override: bool, pref: bool) -> bool {
+    env_override || pref
+}
+
+fn browser_persist_target(paths: &[PathBuf]) -> Result<PathBuf, String> {
+    for path in paths.iter().rev() {
+        if file_has_browser_section(path) {
+            return Ok(path.clone());
+        }
+    }
+    for path in paths.iter().rev() {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+    Ok(dock_home().join("config.toml"))
+}
+
+fn file_has_browser_section(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    doc.get("browser").is_some()
 }
 
 fn mcp_persist_target(paths: &[PathBuf], name: &str) -> Result<PathBuf, String> {
@@ -1190,5 +1278,67 @@ callbackPort = 3118
         let linear = list.iter().find(|s| s.name == "linear").unwrap();
         assert_eq!(linear.oauth.client_id.as_deref(), Some("slack-byo-client"));
         assert_eq!(linear.oauth.callback_port, Some(3118));
+    }
+
+    #[test]
+    fn browser_headed_persist_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+# keep this comment
+[models]
+default = "grok-4"
+"#,
+        )
+        .unwrap();
+        assert!(!load_browser_headed_from(&[path.clone()]));
+        persist_browser_headed_in(&[path.clone()], true).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("keep this comment"), "{body}");
+        assert!(body.contains("[browser]"), "{body}");
+        assert!(body.contains("headed = true"), "{body}");
+        assert!(load_browser_headed_from(&[path.clone()]));
+        persist_browser_headed_in(&[path.clone()], false).unwrap();
+        assert!(!load_browser_headed_from(&[path]));
+    }
+
+    #[test]
+    fn browser_headed_defaults_false_and_later_path_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(&user, "[browser]\nheaded = true\n").unwrap();
+        std::fs::write(&project, "[models]\ndefault = \"x\"\n").unwrap();
+        // Project has no browser.headed → user pref remains.
+        assert!(load_browser_headed_from(&[user.clone(), project.clone()]));
+        std::fs::write(&project, "[browser]\nheaded = false\n").unwrap();
+        assert!(!load_browser_headed_from(&[user, project]));
+    }
+
+    #[test]
+    fn effective_browser_headed_env_overrides_pref() {
+        assert!(effective_browser_headed_with(true, false));
+        assert!(effective_browser_headed_with(false, true));
+        assert!(effective_browser_headed_with(true, true));
+        assert!(!effective_browser_headed_with(false, false));
+    }
+
+    #[test]
+    fn dock_browser_headed_env_empty_is_unset() {
+        let prev = std::env::var_os("DOCK_BROWSER_HEADED");
+        std::env::remove_var("DOCK_BROWSER_HEADED");
+        assert!(!dock_browser_headed_env_override());
+        std::env::set_var("DOCK_BROWSER_HEADED", "");
+        assert!(!dock_browser_headed_env_override());
+        std::env::set_var("DOCK_BROWSER_HEADED", "   ");
+        assert!(!dock_browser_headed_env_override());
+        std::env::set_var("DOCK_BROWSER_HEADED", "1");
+        assert!(dock_browser_headed_env_override());
+        match prev {
+            Some(v) => std::env::set_var("DOCK_BROWSER_HEADED", v),
+            None => std::env::remove_var("DOCK_BROWSER_HEADED"),
+        }
     }
 }

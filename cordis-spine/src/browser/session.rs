@@ -166,7 +166,9 @@ pub struct ConnectedSession {
 }
 
 impl ConnectedSession {
-    pub async fn launch(url: Option<&str>) -> Result<Self, String> {
+    /// Launch Chromium. `headed` comes from cockpit pref + `DOCK_BROWSER_HEADED` override
+    /// (see [`crate::config::effective_browser_headed`]); default remains headless.
+    pub async fn launch(url: Option<&str>, headed: bool) -> Result<Self, String> {
         let user_data_dir = browser_user_data_dir();
         std::fs::create_dir_all(&user_data_dir)
             .map_err(|e| format!("create user-data-dir {}: {e}", user_data_dir.display()))?;
@@ -180,8 +182,8 @@ impl ConnectedSession {
             .arg("--disable-dev-shm-usage")
             .arg("--force-renderer-accessibility");
 
-        // Headless by default (CI / servers). Set DOCK_BROWSER_HEADED=1 for UI.
-        if std::env::var_os("DOCK_BROWSER_HEADED").is_some() {
+        // Headless by default (CI / servers). Prefer with_head when cockpit/env says so.
+        if headed {
             builder = builder.with_head();
         }
 
