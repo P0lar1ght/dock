@@ -102,17 +102,12 @@ pub fn live_names(ctx: &Context) -> Vec<String> {
     live_specs(ctx).into_iter().map(|s| s.name).collect()
 }
 
-fn is_deferred_tool(ctx: &Context, name: &str) -> bool {
-    ctx.get::<Tools>(TOOLS)
-        .map(|t| t.is_deferred(name))
-        .unwrap_or(false)
-}
 
 fn tool_kind_label(ctx: &Context, name: &str) -> &'static str {
-    if is_deferred_tool(ctx, name) {
-        "延迟"
-    } else {
-        "常驻"
+    match ctx.get::<Tools>(TOOLS) {
+        Some(t) if t.is_mcp(name) => "MCP",
+        Some(t) if t.is_deferred(name) => "延迟",
+        _ => "常驻",
     }
 }
 
@@ -728,11 +723,11 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     );
     let asg_header = if all_tools {
         format!(
-            "已加入 · 全部 · {} · Enter/双击移除",
+            "已加入 · 全部 · {} · 单击选中 · Enter/双击移除",
             assigned.len()
         )
     } else {
-        format!("已加入 · {} · Enter/双击移除", assigned.len())
+        format!("已加入 · {} · 单击选中 · Enter/双击移除", assigned.len())
     };
 
     let cat_rights: Vec<String> = catalog
@@ -1185,6 +1180,19 @@ mod tests {
         assert_eq!(tool_kind_label(&ctx, "bash"), "常驻");
         assert_eq!(tool_kind_label(&ctx, "scheduler_create"), "延迟");
     }
+
+    #[test]
+    fn mcp_tools_labeled_mcp_not_resident() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools
+            .register_mcp(spec("mcp_demo__shot"), stub_body())
+            .unwrap();
+        ctx.provide(TOOLS, tools).unwrap();
+        assert_eq!(tool_kind_label(&ctx, "mcp_demo__shot"), "MCP");
+        assert_ne!(tool_kind_label(&ctx, "mcp_demo__shot"), "常驻");
+    }
+
 
     #[test]
     fn single_click_selects_double_click_adds() {

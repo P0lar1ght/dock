@@ -480,7 +480,20 @@ impl AgentPresets {
                 return Err(format!("没有子代理 {role_id}"));
             }
             Ok(())
-        })
+        })?;
+        // Remove only this role's YAML (do not scan-delete other disk files).
+        let inner = self.inner.lock().unwrap();
+        if let Some(preset) = inner.presets.get(mode_id) {
+            if preset.origin != PresetOrigin::Shipped && preset.broken.is_none() {
+                let path = file_path(&inner, preset)
+                    .parent()
+                    .map(|p| p.join(AGENTS_DIR).join(format!("{role_id}.yml")));
+                if let Some(path) = path {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn set_subagent_persona(
@@ -1363,21 +1376,9 @@ fn persist_preset(inner: &Inner, id: &str) -> Result<(), String> {
             std::fs::write(agents_dir.join(format!("{tid}.yml")), body)
                 .map_err(|e| e.to_string())?;
         }
-        // Drop YAML for roles removed via /preset (keep directory tidy).
-        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("yml") {
-                    continue;
-                }
-                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                if !preset.agents.contains_key(stem) {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-        }
+        // Do NOT wipe agents/*.yml missing from memory: handwritten roles that
+        // were never reload_roster'd must survive /preset edits of the same mode.
+        // Explicit delete_subagent removes that role's file instead.
         if id == WARDEN_PRESET_ID {
             for (from, _) in WARDEN_PINYIN_ALIASES {
                 let _ = std::fs::remove_file(agents_dir.join(format!("{from}.yml")));
@@ -1829,8 +1830,29 @@ mod tests {
         let agents_dir = dir.path().join(&mode.id).join("agents");
         assert!(
             !agents_dir.join("role.yml").exists(),
-            "orphan role.yml should be removed"
+            "deleted role.yml should be removed"
         );
+    }
+
+    #[test]
+    fn persist_keeps_handwritten_agents_yml_not_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        let mode = presets.create().unwrap();
+        let agents_dir = dir.path().join(&mode.id).join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("scout.yml"),
+            "name: scout\npersona: 手写未 reload\n",
+        )
+        .unwrap();
+        // Touch mode via /preset-like mutate without loading scout into memory.
+        presets.set_persona(&mode.id, "改名 persona".into()).unwrap();
+        assert!(
+            agents_dir.join("scout.yml").exists(),
+            "handwritten agents/scout.yml must survive persist without reload"
+        );
+        assert!(!presets.get(&mode.id).unwrap().agents.contains_key("scout"));
     }
 
     #[test]
