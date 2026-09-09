@@ -260,6 +260,20 @@ pub(super) fn run_action(
                     _ => false,
                 };
                 if typing {
+                    // CUA/crossterm often drops KeyCode::Enter; allow `;` / newline to
+                    // advance/confirm Roles naming drafts (printable, automation-friendly).
+                    let naming = matches!(
+                        overlay,
+                        Overlay::Presets(PresetView::Canvas(s)) if s.naming_role.is_some()
+                    );
+                    if naming && (c == ';' || c == '\n') {
+                        let action = match overlay {
+                            Overlay::Presets(view) => preset_overlay::accept(ctx, view),
+                            _ => PresetAction::None,
+                        };
+                        apply_preset_action(ctx, overlay, action);
+                        return Vec::new();
+                    }
                     overlay.push_char(c);
                     return Vec::new();
                 }
@@ -672,6 +686,12 @@ pub(super) fn run_action(
             return Vec::new();
         }
         Action::OverlayTab => {
+            if matches!(
+                overlay,
+                Overlay::Presets(PresetView::Canvas(s)) if s.naming_role.is_some()
+            ) {
+                return accept_overlay(ctx, overlay);
+            }
             if let Overlay::Presets(view) = overlay {
                 view.cycle_pane();
             }

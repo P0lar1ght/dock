@@ -230,7 +230,7 @@ fn start_create_naming(canvas: &mut CanvasState) -> PresetAction {
         id: String::new(),
         name: String::new(),
     });
-    PresetAction::Flash("输入角色 id · Enter 下一步".into())
+    PresetAction::Flash("输入角色 id · Enter/;/Tab 下一步".into())
 }
 
 fn start_rename_naming(ctx: &Context, canvas: &mut CanvasState) -> PresetAction {
@@ -256,7 +256,7 @@ fn start_rename_naming(ctx: &Context, canvas: &mut CanvasState) -> PresetAction 
         id: role,
         name,
     });
-    PresetAction::Flash("改名 · 编辑 id 后 Enter，再编辑显示名".into())
+    PresetAction::Flash("改名 · 编辑 id 后 Enter/;/Tab，再编辑显示名".into())
 }
 
 fn confirm_role_naming(ctx: &Context, canvas: &mut CanvasState) -> PresetAction {
@@ -276,7 +276,7 @@ fn confirm_role_naming(ctx: &Context, canvas: &mut CanvasState) -> PresetAction 
                 }
                 d.step = RoleNamingStep::Name;
             }
-            PresetAction::Flash("输入显示名 · Enter 确认".into())
+            PresetAction::Flash("输入显示名 · Enter/;/Tab 确认".into())
         }
         RoleNamingStep::Name => {
             let id = draft.id.trim().to_string();
@@ -1006,7 +1006,7 @@ fn paint_naming_draft(buf: &mut Buffer, area: Rect, theme: &Theme, canvas: &Canv
         RoleNamingStep::Id => draft.id.as_str(),
         RoleNamingStep::Name => draft.name.as_str(),
     };
-    let hint = "Enter 确认 · Esc 取消";
+    let hint = "Enter/;/Tab 确认 · Esc 取消（CUA 可用 ; 或 Tab）";
     buf.set_style(area, Style::default().bg(theme.bg_visual));
     buf.set_line(
         area.x,
@@ -1439,6 +1439,57 @@ mod tests {
             presets.get(&mode.id).unwrap().agents.contains_key("scout"),
             "resync must load handwritten scout.yml"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
+    fn naming_semicolon_advances_and_confirms() {
+        let dir = std::env::temp_dir().join(format!(
+            "dock-preset-semi-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let presets = AgentPresets::load(dir.clone());
+        let mode = presets.create().unwrap();
+        let ctx = Context::new();
+        ctx.provide(AGENT_PRESETS, presets).unwrap();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("bash"), stub_body()).unwrap();
+        ctx.provide(TOOLS, tools).unwrap();
+        let mut view = open_canvas(&ctx, &mode.id).unwrap();
+        // jump to Roles and start naming
+        if let PresetView::Canvas(c) = &mut view {
+            c.pane = PresetPane::Roles;
+        }
+        assert!(matches!(
+            on_canvas_char(&ctx, &mut view, 'n'),
+            PresetAction::Flash(_)
+        ));
+        // type id via overlay push path simulation
+        if let PresetView::Canvas(c) = &mut view {
+            if let Some(d) = c.naming_role.as_mut() {
+                d.id = "scout".into();
+            }
+        }
+        // semicolon advances Id → Name
+        let a1 = accept(&ctx, &mut view);
+        assert!(matches!(&a1, PresetAction::Flash(msg) if msg.contains("显示名")), "{a1:?}");
+        if let PresetView::Canvas(c) = &mut view {
+            if let Some(d) = c.naming_role.as_mut() {
+                d.name = "侦察".into();
+            }
+        }
+        let a2 = accept(&ctx, &mut view);
+        assert!(
+            matches!(&a2, PresetAction::Flash(msg) if msg.contains("编辑子代理") || msg.contains("scout")),
+            "{a2:?}"
+        );
+        let presets = ctx.get::<AgentPresets>(AGENT_PRESETS).unwrap();
+        let got = presets.get(&mode.id).unwrap();
+        assert!(got.agents.contains_key("scout"));
+        assert_eq!(got.agents.get("scout").unwrap().name, "侦察");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

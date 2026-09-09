@@ -187,6 +187,7 @@ impl Shortcuts {
                 HintItem::new("Enter/双击", "edit role"),
                 HintItem::new("n", "命名新建"),
                 HintItem::new("m", "改名"),
+                HintItem::new(";/Tab", "确认命名"),
                 HintItem::new("x", "delete role"),
                 HintItem::new("Tab", "pane"),
                 HintItem::new("r", "resync"),
