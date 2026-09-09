@@ -6,23 +6,25 @@ use serde_json::{json, Value};
 use crate::tool_images::model_accepts_images;
 use crate::types::UserImage;
 
-pub(crate) fn chat_tool_messages(id: &str, content: &str, images: &[UserImage], model: &str) -> Vec<Value> {
-    let vision = model_accepts_images(model);
-    let mut out = Vec::new();
-    out.push(json!({
+/// Text-only Chat Completions `role:tool` message (images go on a batched user msg).
+pub(crate) fn chat_tool_message(id: &str, content: &str) -> Value {
+    json!({
         "role": "tool",
         "tool_call_id": id,
         "content": content,
-    }));
-    if vision && !images.is_empty() {
-        // Chat Completions tool role is text-only on DeepSeek / default OpenAI
-        // shape — park pixels on an adjacent user message in the same turn.
-        out.push(user_with_images(
-            "Tool result image content included inline.",
-            images,
-        ));
+    })
+}
+
+/// Adjacent user message carrying accumulated tool-result images for vision models.
+/// Returns `None` when the model rejects images or `images` is empty.
+pub(crate) fn chat_tool_images_user(images: &[UserImage], model: &str) -> Option<Value> {
+    if !model_accepts_images(model) || images.is_empty() {
+        return None;
     }
-    out
+    Some(user_with_images(
+        "Tool result image content included inline.",
+        images,
+    ))
 }
 
 pub(crate) fn messages_tool_result_block(id: &str, content: &str, images: &[UserImage], model: &str) -> Value {
