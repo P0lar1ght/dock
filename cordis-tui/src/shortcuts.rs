@@ -154,7 +154,8 @@ impl Shortcuts {
                 if s.pane == crate::preset_overlay::PresetPane::Catalog
         ) {
             return vec![
-                HintItem::new("Enter", "add"),
+                HintItem::new("Enter/双击", "add"),
+                HintItem::new("单击", "select"),
                 HintItem::new("Tab", "pane"),
                 HintItem::new("type", "filter"),
                 HintItem::new("Esc", "back"),
@@ -166,9 +167,24 @@ impl Shortcuts {
                 if s.pane == crate::preset_overlay::PresetPane::Assigned
         ) {
             return vec![
-                HintItem::new("Enter", "remove"),
+                HintItem::new("Enter/双击", "remove"),
+                HintItem::new("单击", "select"),
                 HintItem::new("Tab", "pane"),
-                HintItem::new("d", "remove"),
+                HintItem::new("x", "remove"),
+                HintItem::new("Esc", "back"),
+            ];
+        }
+        if matches!(
+            overlay,
+            Overlay::Presets(crate::preset_overlay::PresetView::Canvas(s))
+                if s.pane == crate::preset_overlay::PresetPane::Roles
+                    && s.editing_role.is_none()
+        ) {
+            return vec![
+                HintItem::new("Enter/双击", "edit role"),
+                HintItem::new("n", "new role"),
+                HintItem::new("x", "delete role"),
+                HintItem::new("Tab", "pane"),
                 HintItem::new("Esc", "back"),
             ];
         }
@@ -186,6 +202,8 @@ impl Shortcuts {
             return vec![
                 HintItem::new("Enter", "open"),
                 HintItem::new("n", "new"),
+                HintItem::new("d", "duplicate"),
+                HintItem::new("x", "delete mode"),
                 HintItem::new("a", "apply"),
                 HintItem::new("Esc", "close"),
             ];

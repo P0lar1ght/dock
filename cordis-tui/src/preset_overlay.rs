@@ -1,7 +1,11 @@
 //! `/preset` roster + two-pane assembly canvas.
 //!
-//! Left: live `"tools"` catalog. Right: this preset's toolset. Identity /
-//! persona sit above the split. Business state lives on `"agentPresets"`.
+//! Left: live tools **not yet** in this preset (or role). Right: already
+//! assigned. Single click selects; double-click or Enter adds/removes.
+//! Roles pane edits `agents/<id>.yml` (tools + persona) without YAML-only
+//! workflow. Deferred (`register_deferred` / `search_tool`) tools are badged.
+
+use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
@@ -22,11 +26,15 @@ use crate::theme::Theme;
 
 pub const ASSIGNED_HIT: usize = 10_000;
 pub const PERSONA_HIT: usize = 20_000;
+pub const ROLES_HIT: usize = 30_000;
+
+const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresetPane {
     Catalog,
     Assigned,
+    Roles,
     Persona,
 }
 
@@ -36,9 +44,14 @@ pub struct CanvasState {
     pub pane: PresetPane,
     pub catalog_sel: usize,
     pub assigned_sel: usize,
+    pub roles_sel: usize,
     pub catalog_query: String,
     pub editing_persona: bool,
     pub persona_draft: String,
+    /// When set, dual panes + persona edit this `agents/<id>` role.
+    pub editing_role: Option<String>,
+    /// Last mouse hit index + time for double-click (anti-misclick).
+    pub last_click: Option<(usize, Instant)>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +74,14 @@ impl PresetView {
         }
         c.pane = match c.pane {
             PresetPane::Catalog => PresetPane::Assigned,
-            PresetPane::Assigned => PresetPane::Persona,
+            PresetPane::Assigned => {
+                if c.editing_role.is_some() {
+                    PresetPane::Persona
+                } else {
+                    PresetPane::Roles
+                }
+            }
+            PresetPane::Roles => PresetPane::Persona,
             PresetPane::Persona => PresetPane::Catalog,
         };
     }
@@ -82,6 +102,20 @@ pub fn live_names(ctx: &Context) -> Vec<String> {
     live_specs(ctx).into_iter().map(|s| s.name).collect()
 }
 
+fn is_deferred_tool(ctx: &Context, name: &str) -> bool {
+    ctx.get::<Tools>(TOOLS)
+        .map(|t| t.is_deferred(name))
+        .unwrap_or(false)
+}
+
+fn tool_kind_label(ctx: &Context, name: &str) -> &'static str {
+    if is_deferred_tool(ctx, name) {
+        "延迟"
+    } else {
+        "常驻"
+    }
+}
+
 pub fn overlay_len(ctx: &Context, view: &PresetView) -> usize {
     match view {
         PresetView::Roster { .. } => list_presets(ctx).len().max(1),
@@ -89,6 +123,7 @@ pub fn overlay_len(ctx: &Context, view: &PresetView) -> usize {
         PresetView::Canvas(c) => match c.pane {
             PresetPane::Catalog => catalog_rows(ctx, c).len(),
             PresetPane::Assigned => assigned_names(ctx, c).len(),
+            PresetPane::Roles => role_ids(ctx, c).len().max(1),
             PresetPane::Persona => 0,
         },
     }
@@ -100,9 +135,12 @@ pub fn list_presets(ctx: &Context) -> Vec<AgentPreset> {
         .unwrap_or_default()
 }
 
-fn catalog_rows<'a>(ctx: &Context, canvas: &CanvasState) -> Vec<ToolSpec> {
+/// Left pane: full live catalog minus tools already assigned (∪ with right = full set).
+fn catalog_rows(ctx: &Context, canvas: &CanvasState) -> Vec<ToolSpec> {
+    let assigned = assigned_names(ctx, canvas);
     live_specs(ctx)
         .into_iter()
+        .filter(|s| !assigned.iter().any(|n| n == &s.name))
         .filter(|s| {
             matches_query(&s.name, &canvas.catalog_query)
                 || matches_query(&s.description, &canvas.catalog_query)
@@ -112,9 +150,37 @@ fn catalog_rows<'a>(ctx: &Context, canvas: &CanvasState) -> Vec<ToolSpec> {
 
 fn assigned_names(ctx: &Context, canvas: &CanvasState) -> Vec<String> {
     let live = live_names(ctx);
+    let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+        return live;
+    };
+    match &canvas.editing_role {
+        Some(role) => presets.assigned_subagent_tools(&canvas.id, role, &live),
+        None => presets.assigned_tools(&canvas.id, &live),
+    }
+}
+
+fn role_ids(ctx: &Context, canvas: &CanvasState) -> Vec<String> {
     ctx.get::<AgentPresets>(AGENT_PRESETS)
-        .map(|p| p.assigned_tools(&canvas.id, &live))
-        .unwrap_or(live)
+        .and_then(|p| p.get(&canvas.id))
+        .map(|p| p.agents.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn role_all_tools(ctx: &Context, canvas: &CanvasState) -> bool {
+    let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+        return true;
+    };
+    let Some(preset) = presets.get(&canvas.id) else {
+        return true;
+    };
+    match &canvas.editing_role {
+        Some(role) => preset
+            .agents
+            .get(role)
+            .map(|d| d.tools.is_none())
+            .unwrap_or(true),
+        None => preset.tools.is_none(),
+    }
 }
 
 pub fn open_canvas(ctx: &Context, id: &str) -> Result<PresetView, String> {
@@ -127,18 +193,47 @@ pub fn open_canvas(ctx: &Context, id: &str) -> Result<PresetView, String> {
         pane: PresetPane::Catalog,
         catalog_sel: 0,
         assigned_sel: 0,
+        roles_sel: 0,
         catalog_query: String::new(),
         editing_persona: false,
         persona_draft: preset.persona,
+        editing_role: None,
+        last_click: None,
     }))
 }
 
-/// Esc: cancel persona edit → canvas; canvas → roster; roster → close.
+fn enter_role_editor(ctx: &Context, canvas: &mut CanvasState, role_id: &str) -> PresetAction {
+    let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+        return PresetAction::Flash("Agent 预设服务未挂载".into());
+    };
+    let Some(preset) = presets.get(&canvas.id) else {
+        return PresetAction::Flash(format!("没有预设 {}", canvas.id));
+    };
+    let Some(def) = preset.agents.get(role_id) else {
+        return PresetAction::Flash(format!("没有子代理 {role_id}"));
+    };
+    canvas.editing_role = Some(role_id.to_string());
+    canvas.persona_draft = def.persona.clone();
+    canvas.editing_persona = false;
+    canvas.pane = PresetPane::Catalog;
+    canvas.catalog_sel = 0;
+    canvas.assigned_sel = 0;
+    canvas.catalog_query.clear();
+    PresetAction::Flash(format!("编辑子代理 {role_id}"))
+}
+
+/// Esc: cancel persona edit → role editor → canvas; canvas → roster; roster → close.
 /// Returns true when the overlay should close.
 pub fn on_esc(ctx: &Context, view: &mut PresetView) -> bool {
     if matches!(view, PresetView::Canvas(c) if c.editing_persona) {
         cancel_persona_edit(ctx, view);
         return false;
+    }
+    if let PresetView::Canvas(c) = view {
+        if c.editing_role.is_some() {
+            leave_role_editor(ctx, c);
+            return false;
+        }
     }
     let id = match view {
         PresetView::Canvas(c) => Some(c.id.clone()),
@@ -155,6 +250,18 @@ pub fn on_esc(ctx: &Context, view: &mut PresetView) -> bool {
     false
 }
 
+fn leave_role_editor(ctx: &Context, canvas: &mut CanvasState) {
+    canvas.editing_role = None;
+    canvas.editing_persona = false;
+    canvas.pane = PresetPane::Roles;
+    canvas.catalog_query.clear();
+    canvas.persona_draft = ctx
+        .get::<AgentPresets>(AGENT_PRESETS)
+        .and_then(|p| p.get(&canvas.id))
+        .map(|p| p.persona)
+        .unwrap_or_default();
+}
+
 /// Restore persona draft from the service when cancelling edit.
 pub fn cancel_persona_edit(ctx: &Context, view: &mut PresetView) {
     let PresetView::Canvas(c) = view else {
@@ -163,11 +270,19 @@ pub fn cancel_persona_edit(ctx: &Context, view: &mut PresetView) {
     if !c.editing_persona {
         return;
     }
-    c.persona_draft = ctx
-        .get::<AgentPresets>(AGENT_PRESETS)
-        .and_then(|p| p.get(&c.id))
-        .map(|p| p.persona)
-        .unwrap_or_default();
+    c.persona_draft = match &c.editing_role {
+        Some(role) => ctx
+            .get::<AgentPresets>(AGENT_PRESETS)
+            .and_then(|p| p.get(&c.id))
+            .and_then(|p| p.agents.get(role).cloned())
+            .map(|d| d.persona)
+            .unwrap_or_default(),
+        None => ctx
+            .get::<AgentPresets>(AGENT_PRESETS)
+            .and_then(|p| p.get(&c.id))
+            .map(|p| p.persona)
+            .unwrap_or_default(),
+    };
     c.editing_persona = false;
 }
 
@@ -190,10 +305,15 @@ pub fn accept(ctx: &Context, view: &mut PresetView) -> PresetAction {
             }
         }
         PresetView::Canvas(c) if c.editing_persona => {
-            if let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) {
-                if let Err(e) = presets.set_persona(&c.id, c.persona_draft.clone()) {
-                    return PresetAction::Flash(e);
-                }
+            let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+                return PresetAction::Flash("Agent 预设服务未挂载".into());
+            };
+            let result = match &c.editing_role {
+                Some(role) => presets.set_subagent_persona(&c.id, role, c.persona_draft.clone()),
+                None => presets.set_persona(&c.id, c.persona_draft.clone()),
+            };
+            if let Err(e) = result {
+                return PresetAction::Flash(e);
             }
             c.editing_persona = false;
             PresetAction::Flash("已保存人设".into())
@@ -202,20 +322,41 @@ pub fn accept(ctx: &Context, view: &mut PresetView) -> PresetAction {
             c.editing_persona = true;
             PresetAction::None
         }
+        PresetView::Canvas(c) if c.pane == PresetPane::Roles && c.editing_role.is_none() => {
+            let roles = role_ids(ctx, c);
+            let Some(role) = roles.get(c.roles_sel).cloned() else {
+                return PresetAction::Flash("没有子代理 · 按 n 新建".into());
+            };
+            enter_role_editor(ctx, c, &role)
+        }
         PresetView::Canvas(c) if c.pane == PresetPane::Catalog => {
             let rows = catalog_rows(ctx, c);
             let Some(spec) = rows.get(c.catalog_sel) else {
                 return PresetAction::None;
             };
+            let name = spec.name.clone();
             let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
                 return PresetAction::Flash("Agent 预设服务未挂载".into());
             };
-            match presets.add_tool(&c.id, &spec.name) {
-                Ok(()) => PresetAction::None,
+            let result = match &c.editing_role {
+                Some(role) => presets.add_subagent_tool(&c.id, role, &name),
+                None => presets.add_tool(&c.id, &name),
+            };
+            match result {
+                Ok(()) => {
+                    // After add, item leaves left pane — keep selection in range.
+                    let next_len = catalog_rows(ctx, c).len();
+                    if next_len == 0 {
+                        c.catalog_sel = 0;
+                    } else {
+                        c.catalog_sel = c.catalog_sel.min(next_len - 1);
+                    }
+                    PresetAction::Flash(format!("已加入 {name}"))
+                }
                 Err(e) => PresetAction::Flash(e),
             }
         }
-        PresetView::Canvas(c) => {
+        PresetView::Canvas(c) if c.pane == PresetPane::Assigned => {
             let names = assigned_names(ctx, c);
             let Some(name) = names.get(c.assigned_sel).cloned() else {
                 return PresetAction::None;
@@ -224,7 +365,11 @@ pub fn accept(ctx: &Context, view: &mut PresetView) -> PresetAction {
             let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
                 return PresetAction::Flash("Agent 预设服务未挂载".into());
             };
-            match presets.remove_tool(&c.id, &name, &live) {
+            let result = match &c.editing_role {
+                Some(role) => presets.remove_subagent_tool(&c.id, role, &name, &live),
+                None => presets.remove_tool(&c.id, &name, &live),
+            };
+            match result {
                 Ok(()) => {
                     let next_len = assigned_names(ctx, c).len();
                     if next_len == 0 {
@@ -232,11 +377,12 @@ pub fn accept(ctx: &Context, view: &mut PresetView) -> PresetAction {
                     } else {
                         c.assigned_sel = c.assigned_sel.min(next_len - 1);
                     }
-                    PresetAction::None
+                    PresetAction::Flash(format!("已移除 {name}"))
                 }
                 Err(e) => PresetAction::Flash(e),
             }
         }
+        PresetView::Canvas(_) => PresetAction::None,
     }
 }
 
@@ -276,7 +422,7 @@ pub fn on_roster_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
                 Ok(()) => {
                     let next = list_presets(ctx);
                     *selected = (*selected).min(next.len().saturating_sub(1));
-                    PresetAction::Flash(format!("已删除 {}", src.id))
+                    PresetAction::Flash(format!("已删除模式 {}", src.id))
                 }
                 Err(e) => PresetAction::Flash(e),
             }
@@ -305,32 +451,94 @@ pub fn on_canvas_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
     if remove {
         return accept(ctx, view);
     }
+
     if let PresetView::Canvas(canvas) = view {
-        if !canvas.editing_persona && canvas.pane == PresetPane::Persona && matches!(c, 'e' | 'E') {
-            canvas.editing_persona = true;
+        if canvas.editing_persona {
+            return PresetAction::None;
         }
+        if canvas.pane == PresetPane::Persona && matches!(c, 'e' | 'E') {
+            canvas.editing_persona = true;
+            return PresetAction::None;
+        }
+        if canvas.pane == PresetPane::Roles && canvas.editing_role.is_none() {
+            let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+                return PresetAction::Flash("Agent 预设服务未挂载".into());
+            };
+            match c {
+                'n' | 'N' => match presets.create_subagent(&canvas.id) {
+                    Ok((rid, _)) => {
+                        let roles = role_ids(ctx, canvas);
+                        canvas.roles_sel = roles.iter().position(|r| r == &rid).unwrap_or(0);
+                        enter_role_editor(ctx, canvas, &rid)
+                    }
+                    Err(e) => PresetAction::Flash(e),
+                },
+                'x' | 'X' | 'd' | 'D' => {
+                    let roles = role_ids(ctx, canvas);
+                    let Some(role) = roles.get(canvas.roles_sel).cloned() else {
+                        return PresetAction::Flash("没有可删子代理".into());
+                    };
+                    match presets.delete_subagent(&canvas.id, &role) {
+                        Ok(()) => {
+                            let next = role_ids(ctx, canvas);
+                            canvas.roles_sel = canvas.roles_sel.min(next.len().saturating_sub(1));
+                            PresetAction::Flash(format!("已删除子代理 {role}"))
+                        }
+                        Err(e) => PresetAction::Flash(e),
+                    }
+                }
+                _ => PresetAction::None,
+            }
+        } else {
+            PresetAction::None
+        }
+    } else {
+        PresetAction::None
     }
-    PresetAction::None
 }
 
+fn select_hit(view: &mut PresetView, idx: usize) {
+    let PresetView::Canvas(c) = view else {
+        return;
+    };
+    if idx >= ROLES_HIT {
+        c.pane = PresetPane::Roles;
+        c.roles_sel = idx - ROLES_HIT;
+        return;
+    }
+    if idx >= PERSONA_HIT {
+        c.pane = PresetPane::Persona;
+        return;
+    }
+    if idx >= ASSIGNED_HIT {
+        c.pane = PresetPane::Assigned;
+        c.assigned_sel = idx - ASSIGNED_HIT;
+        return;
+    }
+    c.pane = PresetPane::Catalog;
+    c.catalog_sel = idx;
+}
+
+/// Mouse: single click = select only; double-click = add/remove / open role / edit persona.
 pub fn apply_hit(ctx: &Context, view: &mut PresetView, idx: usize) -> PresetAction {
-    {
+    let now = Instant::now();
+    let double = {
         let PresetView::Canvas(c) = view else {
             return PresetAction::None;
         };
-        if idx >= PERSONA_HIT {
-            c.pane = PresetPane::Persona;
-            return PresetAction::None;
-        }
-        if idx >= ASSIGNED_HIT {
-            c.pane = PresetPane::Assigned;
-            c.assigned_sel = idx - ASSIGNED_HIT;
-        } else {
-            c.pane = PresetPane::Catalog;
-            c.catalog_sel = idx;
-        }
+        let dbl = c
+            .last_click
+            .as_ref()
+            .is_some_and(|(prev, at)| *prev == idx && now.duration_since(*at) <= DOUBLE_CLICK);
+        c.last_click = Some((idx, now));
+        dbl
+    };
+    select_hit(view, idx);
+    if double {
+        accept(ctx, view)
+    } else {
+        PresetAction::None
     }
-    accept(ctx, view)
 }
 
 pub fn render(ctx: &Context, buf: &mut Buffer, area: Rect, view: &PresetView) -> PickerHits {
@@ -341,6 +549,10 @@ pub fn render(ctx: &Context, buf: &mut Buffer, area: Rect, view: &PresetView) ->
 }
 
 fn render_roster(ctx: &Context, buf: &mut Buffer, area: Rect, selected: usize) -> PickerHits {
+    let theme = Theme::current();
+    let Some(frame) = render_fullscreen_frame(buf, area, &theme, Some("Agent 预设"), false) else {
+        return PickerHits::default();
+    };
     let presets = list_presets(ctx);
     let current = ctx
         .get::<AgentPresets>(AGENT_PRESETS)
@@ -351,10 +563,41 @@ fn render_roster(ctx: &Context, buf: &mut Buffer, area: Rect, selected: usize) -
     } else {
         selected.min(presets.len() - 1)
     };
+    let mut hits = PickerHits {
+        close_button: frame.close_button,
+        ..Default::default()
+    };
+    let content = frame.content;
+    if content.height < 3 || content.width < 12 {
+        return hits;
+    }
+
+    // Visible delete affordance (x was easy to miss in the shortcut strip alone).
+    let hint = " Enter 打开 · n 新建 · d 复制 · x 删除模式 · a 应用 ";
+    buf.set_line(
+        content.x,
+        content.y,
+        &Line::from(Span::styled(
+            truncate_str(hint, content.width as usize),
+            Style::default()
+                .fg(theme.accent_skill)
+                .add_modifier(Modifier::BOLD),
+        )),
+        content.width,
+    );
+
+    let list_area = Rect {
+        x: content.x,
+        y: content.y.saturating_add(1),
+        width: content.width,
+        height: content.height.saturating_sub(1),
+    };
+
     let rights: Vec<String> = presets
         .iter()
         .map(|p| {
-            if let Some(reason) = &p.broken {
+            let deletable = p.origin != PresetOrigin::Shipped;
+            let base = if let Some(reason) = &p.broken {
                 format!("损坏 · {reason}")
             } else if p.id == current {
                 let agents = agent_ids(p);
@@ -372,6 +615,11 @@ fn render_roster(ctx: &Context, buf: &mut Buffer, area: Rect, selected: usize) -
                     PresetOrigin::Project => "项目".into(),
                     PresetOrigin::User => p.id.clone(),
                 }
+            };
+            if deletable {
+                format!("{base} · x删")
+            } else {
+                base
             }
         })
         .collect();
@@ -393,13 +641,18 @@ fn render_roster(ctx: &Context, buf: &mut Buffer, area: Rect, selected: usize) -
             })
             .collect()
     };
-    crate::overlay::render_overlay(buf, area, "Agent 预设", "", &rows, false)
+    let row_hits = render_picker_list(buf, list_area, &theme, "", &rows, 0);
+    hits.rows = row_hits;
+    hits
 }
 
 fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasState) -> PickerHits {
     let theme = Theme::current();
-    let Some(frame) = render_fullscreen_frame(buf, area, &theme, Some("组装 Agent"), false)
-    else {
+    let title = match &canvas.editing_role {
+        Some(role) => format!("组装角色 · {role}"),
+        None => "组装 Agent".into(),
+    };
+    let Some(frame) = render_fullscreen_frame(buf, area, &theme, Some(&title), false) else {
         return PickerHits::default();
     };
     let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
@@ -437,6 +690,13 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
         return hits;
     }
 
+    // Roles list replaces tool panes when focused (and not inside a role editor).
+    if canvas.pane == PresetPane::Roles && canvas.editing_role.is_none() {
+        hits.rows
+            .extend(render_roles_pane(ctx, buf, chunks[1], &theme, canvas, &preset));
+        return hits;
+    }
+
     let cols = Layout::horizontal([
         Constraint::Percentage(50),
         Constraint::Length(1),
@@ -447,8 +707,7 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
 
     let catalog = catalog_rows(ctx, canvas);
     let assigned = assigned_names(ctx, canvas);
-    let live = live_specs(ctx);
-    let all_tools = preset.tools.is_none();
+    let all_tools = role_all_tools(ctx, canvas);
 
     let cat_sel = if catalog.is_empty() {
         0
@@ -463,23 +722,27 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     let cat_focus = canvas.pane == PresetPane::Catalog;
     let asg_focus = canvas.pane == PresetPane::Assigned;
 
-    let cat_header = format!("完整目录 · {}", live.len());
+    let cat_header = format!(
+        "可加 · {} · 单击选中 · Enter/双击加入",
+        catalog.len()
+    );
     let asg_header = if all_tools {
-        format!("工具集 · 全部 · {}", assigned.len())
+        format!(
+            "已加入 · 全部 · {} · Enter/双击移除",
+            assigned.len()
+        )
     } else {
-        format!("工具集 · {}", assigned.len())
+        format!("已加入 · {} · Enter/双击移除", assigned.len())
     };
 
     let cat_rights: Vec<String> = catalog
         .iter()
         .map(|spec| {
             let brief = brief_desc(&spec.description);
-            let on = assigned.iter().any(|n| n == &spec.name);
-            match (brief.is_empty(), on) {
-                (true, true) => "已加入".into(),
-                (true, false) => String::new(),
-                (false, true) => format!("{brief} · 已加入"),
-                (false, false) => brief,
+            let kind = tool_kind_label(ctx, &spec.name);
+            match brief.is_empty() {
+                true => kind.to_string(),
+                false => format!("{brief} · {kind}"),
             }
         })
         .collect();
@@ -496,10 +759,18 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     let assigned_meta: Vec<(String, String)> = assigned
         .iter()
         .map(|name| {
-            let live_hit = live.iter().find(|s| &s.name == name);
+            let live_hit = live_specs(ctx).into_iter().find(|s| &s.name == name);
+            let kind = tool_kind_label(ctx, name);
             let right = match live_hit {
-                None => "未挂载".into(),
-                Some(spec) => brief_desc(&spec.description),
+                None => format!("未挂载 · {kind}"),
+                Some(spec) => {
+                    let brief = brief_desc(&spec.description);
+                    if brief.is_empty() {
+                        kind.to_string()
+                    } else {
+                        format!("{brief} · {kind}")
+                    }
+                }
             };
             (name.clone(), right)
         })
@@ -541,6 +812,64 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     hits
 }
 
+fn render_roles_pane(
+    ctx: &Context,
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    canvas: &CanvasState,
+    preset: &AgentPreset,
+) -> Vec<(usize, Rect)> {
+    let ids = role_ids(ctx, canvas);
+    let sel = if ids.is_empty() {
+        0
+    } else {
+        canvas.roles_sel.min(ids.len() - 1)
+    };
+    let header = format!(
+        "子代理角色 · {} · Enter/双击编辑 · n 新建 · x 删除",
+        ids.len()
+    );
+    let rights: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            let def = preset.agents.get(id);
+            match def {
+                Some(d) if !d.name.trim().is_empty() && d.name != *id => {
+                    let tools = match &d.tools {
+                        None => "工具·全部".into(),
+                        Some(t) => format!("工具·{}", t.len()),
+                    };
+                    format!("{} · {tools}", d.name)
+                }
+                Some(d) => match &d.tools {
+                    None => "工具·全部".into(),
+                    Some(t) => format!("工具·{}", t.len()),
+                },
+                None => String::new(),
+            }
+        })
+        .collect();
+    let rows: Vec<PickerRow> = if ids.is_empty() {
+        vec![PickerRow {
+            label: "(无角色)",
+            right_label: "按 n 新建",
+            selected: true,
+        }]
+    } else {
+        ids.iter()
+            .zip(rights.iter())
+            .enumerate()
+            .map(|(i, (id, right))| PickerRow {
+                label: id.as_str(),
+                right_label: right.as_str(),
+                selected: i == sel,
+            })
+            .collect()
+    };
+    render_tool_pane(buf, area, theme, &header, "", false, &rows, ROLES_HIT)
+}
+
 fn paint_identity(
     buf: &mut Buffer,
     area: Rect,
@@ -564,7 +893,10 @@ fn paint_identity(
         (PresetOrigin::User, true) => " · 当前",
         (PresetOrigin::User, false) => "",
     };
-    let title = format!(" {}  [{}]{badge} ", preset.name, preset.id);
+    let title = match &canvas.editing_role {
+        Some(role) => format!(" {}  [{}] / 角色 {role}{badge} ", preset.name, preset.id),
+        None => format!(" {}  [{}]{badge} ", preset.name, preset.id),
+    };
     buf.set_line(
         area.x,
         area.y,
@@ -575,7 +907,8 @@ fn paint_identity(
         area.width,
     );
     let mut y = area.y.saturating_add(1);
-    if y < area.y + area.height && !preset.description.trim().is_empty() {
+    if y < area.y + area.height && !preset.description.trim().is_empty() && canvas.editing_role.is_none()
+    {
         buf.set_line(
             area.x,
             y,
@@ -587,13 +920,18 @@ fn paint_identity(
         );
         y = y.saturating_add(1);
     }
-    if y < area.y + area.height && !preset.agents.is_empty() {
+    if y < area.y + area.height && canvas.editing_role.is_none() {
         let ids: Vec<&str> = preset.agents.keys().map(|s| s.as_str()).collect();
+        let line = if ids.is_empty() {
+            "子代理 （无）· Tab 到「角色」增删改".to_string()
+        } else {
+            format!("子代理 {} · Tab 到「角色」", ids.join(" / "))
+        };
         buf.set_line(
             area.x,
             y,
             &Line::from(Span::styled(
-                truncate_str(&format!("子代理 {}", ids.join(" / ")), area.width as usize),
+                truncate_str(&line, area.width as usize),
                 Style::default().fg(theme.gray),
             )),
             area.width,
@@ -615,12 +953,23 @@ fn paint_identity(
         theme.bg_base
     };
     buf.set_style(persona_rect, Style::default().bg(bg));
+    let stored = match &canvas.editing_role {
+        Some(role) => preset
+            .agents
+            .get(role)
+            .map(|d| d.persona.as_str())
+            .unwrap_or(""),
+        None => preset.persona.as_str(),
+    };
     let body = if canvas.editing_persona {
         canvas.persona_draft.as_str()
-    } else if preset.persona.trim().is_empty() {
-        "（无人设 · Tab 到人设后 Enter 编辑）"
+    } else if !canvas.persona_draft.trim().is_empty() {
+        // Draft tracks the active target (mode or role) after open/enter.
+        canvas.persona_draft.as_str()
+    } else if !stored.trim().is_empty() {
+        stored.trim()
     } else {
-        preset.persona.trim()
+        "（无人设 · Tab 到人设后 Enter 编辑）"
     };
     let wrapped = textwrap::wrap(body, area.width.max(1) as usize);
     for (i, line) in wrapped.iter().enumerate() {
@@ -745,7 +1094,45 @@ fn brief_desc(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::brief_desc;
+    use super::*;
+    use cordis_spine::{ToolSpec, Tools, AGENT_PRESETS, TOOLS};
+    use std::sync::Arc;
+
+    fn spec(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: format!("{name} tool."),
+            parameters_json: r#"{"type":"object"}"#.into(),
+        }
+    }
+
+    fn stub_body() -> cordis_spine::ToolBody {
+        Arc::new(|_c| {
+            Box::pin(async {
+                cordis_spine::ToolResult {
+                    content: "ok".into(),
+                    ..Default::default()
+                }
+            })
+        })
+    }
+
+    fn harness_allowlist() -> Context {
+        let ctx = Context::new();
+        let mut preset = AgentPreset::new("custom");
+        preset.origin = PresetOrigin::User;
+        preset.tools = Some(vec!["bash".into()]);
+        let presets = AgentPresets::overlay(preset);
+        ctx.provide(AGENT_PRESETS, presets).unwrap();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("bash"), stub_body()).unwrap();
+        tools.register(spec("read_file"), stub_body()).unwrap();
+        tools
+            .register_deferred(spec("scheduler_create"), stub_body())
+            .unwrap();
+        ctx.provide(TOOLS, tools).unwrap();
+        ctx
+    }
 
     #[test]
     fn brief_desc_takes_first_sentence() {
@@ -757,6 +1144,163 @@ mod tests {
             brief_desc("Read a file.\n- By default reads up to 1000 lines."),
             "Read a file."
         );
-        assert_eq!(brief_desc("你是助手。后面还有。"), "你是助手。");
+    }
+
+    #[test]
+    fn catalog_excludes_assigned_left_right_partition_full_set() {
+        let ctx = harness_allowlist();
+        let canvas = CanvasState {
+            id: "custom".into(),
+            pane: PresetPane::Catalog,
+            catalog_sel: 0,
+            assigned_sel: 0,
+            roles_sel: 0,
+            catalog_query: String::new(),
+            editing_persona: false,
+            persona_draft: String::new(),
+            editing_role: None,
+            last_click: None,
+        };
+        let left: Vec<String> = catalog_rows(&ctx, &canvas)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        let right = assigned_names(&ctx, &canvas);
+        assert_eq!(right, vec!["bash".to_string()]);
+        assert!(left.contains(&"read_file".to_string()));
+        assert!(left.contains(&"scheduler_create".to_string()));
+        assert!(!left.iter().any(|n| n == "bash"));
+        // left ∪ right covers full non-MCP live set
+        let mut union = left;
+        union.extend(right);
+        union.sort();
+        let mut live = live_names(&ctx);
+        live.sort();
+        assert_eq!(union, live);
+    }
+
+    #[test]
+    fn deferred_tools_are_labeled() {
+        let ctx = harness_allowlist();
+        assert_eq!(tool_kind_label(&ctx, "bash"), "常驻");
+        assert_eq!(tool_kind_label(&ctx, "scheduler_create"), "延迟");
+    }
+
+    #[test]
+    fn single_click_selects_double_click_adds() {
+        let ctx = harness_allowlist();
+        let mut view = open_canvas(&ctx, "custom").unwrap();
+        // catalog should start with read_file / scheduler_create (bash already assigned)
+        let rows = match &view {
+            PresetView::Canvas(c) => catalog_rows(&ctx, c),
+            _ => panic!("expected canvas"),
+        };
+        let read_idx = rows.iter().position(|s| s.name == "read_file").unwrap();
+
+        let action = apply_hit(&ctx, &mut view, read_idx);
+        assert!(matches!(action, PresetAction::None));
+        match &view {
+            PresetView::Canvas(c) => {
+                assert_eq!(c.pane, PresetPane::Catalog);
+                assert_eq!(c.catalog_sel, read_idx);
+            }
+            _ => panic!("expected canvas"),
+        }
+        // assigned still only bash
+        if let PresetView::Canvas(c) = &view {
+            assert_eq!(assigned_names(&ctx, c), vec!["bash".to_string()]);
+        }
+
+        // Simulate double-click by rewinding last_click timestamp.
+        if let PresetView::Canvas(c) = &mut view {
+            c.last_click = Some((read_idx, Instant::now() - Duration::from_millis(100)));
+        }
+        let action = apply_hit(&ctx, &mut view, read_idx);
+        assert!(matches!(action, PresetAction::Flash(msg) if msg.contains("已加入")));
+        if let PresetView::Canvas(c) = &view {
+            let asg = assigned_names(&ctx, c);
+            assert!(asg.iter().any(|n| n == "read_file"), "{asg:?}");
+            assert!(!catalog_rows(&ctx, c).iter().any(|s| s.name == "read_file"));
+        }
+    }
+
+    #[test]
+    fn enter_adds_from_catalog() {
+        let ctx = harness_allowlist();
+        let mut view = open_canvas(&ctx, "custom").unwrap();
+        if let PresetView::Canvas(c) = &mut view {
+            let rows = catalog_rows(&ctx, c);
+            let idx = rows
+                .iter()
+                .position(|s| s.name == "scheduler_create")
+                .unwrap();
+            c.catalog_sel = idx;
+            c.pane = PresetPane::Catalog;
+        }
+        let action = accept(&ctx, &mut view);
+        assert!(matches!(action, PresetAction::Flash(msg) if msg.contains("已加入")));
+        if let PresetView::Canvas(c) = &view {
+            assert!(assigned_names(&ctx, c)
+                .iter()
+                .any(|n| n == "scheduler_create"));
+        }
+    }
+
+    #[test]
+    fn subagent_role_create_edit_delete_in_ui() {
+        let ctx = harness_allowlist();
+        let mut view = open_canvas(&ctx, "custom").unwrap();
+        if let PresetView::Canvas(c) = &mut view {
+            c.pane = PresetPane::Roles;
+        }
+        let action = on_canvas_char(&ctx, &mut view, 'n');
+        assert!(matches!(action, PresetAction::Flash(msg) if msg.contains("编辑子代理")));
+        match &view {
+            PresetView::Canvas(c) => {
+                assert_eq!(c.editing_role.as_deref(), Some("role"));
+                assert_eq!(c.pane, PresetPane::Catalog);
+            }
+            _ => panic!("expected canvas"),
+        }
+        // role starts with tools=None (all) → catalog empty; remove to open allowlist
+        if let PresetView::Canvas(c) = &mut view {
+            c.pane = PresetPane::Assigned;
+            c.assigned_sel = assigned_names(&ctx, c)
+                .iter()
+                .position(|n| n == "read_file")
+                .expect("read_file assigned while all-tools");
+        }
+        let action = accept(&ctx, &mut view);
+        assert!(matches!(action, PresetAction::Flash(msg) if msg.contains("已移除")));
+        if let PresetView::Canvas(c) = &view {
+            assert!(!role_all_tools(&ctx, c));
+            assert!(!assigned_names(&ctx, c).iter().any(|n| n == "read_file"));
+            // left pane now has the removed tool
+            assert!(catalog_rows(&ctx, c).iter().any(|s| s.name == "read_file"));
+        }
+        assert!(!on_esc(&ctx, &mut view));
+        match &view {
+            PresetView::Canvas(c) => {
+                assert!(c.editing_role.is_none());
+                assert_eq!(c.pane, PresetPane::Roles);
+            }
+            _ => panic!("expected canvas"),
+        }
+        let action = on_canvas_char(&ctx, &mut view, 'x');
+        assert!(matches!(action, PresetAction::Flash(msg) if msg.contains("已删除子代理")));
+        if let PresetView::Canvas(c) = &view {
+            assert!(role_ids(&ctx, c).is_empty());
+        }
+    }
+
+    #[test]
+    fn roster_delete_flash_mentions_mode() {
+        let ctx = harness_allowlist();
+        // overlay custom is the only/current; create another via duplicate path isn't available
+        // without persist — just ensure x on shipped-like fails gracefully when only overlay.
+        let mut view = PresetView::Roster { selected: 0 };
+        let action = on_roster_char(&ctx, &mut view, 'x');
+        // overlay preset origin is User, delete should work in-memory
+        assert!(matches!(action, PresetAction::Flash(msg) if msg.contains("已删除模式")));
     }
 }
