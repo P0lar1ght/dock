@@ -101,10 +101,20 @@ pub fn transcript(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> (S
                 }
                 pending = llm.tool_calls.iter().map(|c| c.id.clone()).collect();
             }
-            LogEvent::ToolExecute { id, content, .. } => {
+            LogEvent::ToolExecute {
+                id,
+                content,
+                images,
+                ..
+            } => {
                 if let Some(i) = pending.iter().position(|p| p == id) {
                     pending.remove(i);
-                    pending_results.push(tool_result_block(id, content));
+                    pending_results.push(super::tool_images::messages_tool_result_block(
+                        &sanitize_tool_id(id),
+                        content,
+                        images,
+                        "",
+                    ));
                 }
             }
             LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::LlmStream(_) => {}
@@ -534,6 +544,8 @@ mod tests {
                 name: "bash".into(),
                 arguments: "{}".into(),
                 content: "ok".into(),
+            
+                images: Vec::new(),
             },
             LogEvent::User("follow-up".into()),
         ]);

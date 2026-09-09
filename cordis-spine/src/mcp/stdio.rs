@@ -25,7 +25,7 @@ use crate::mcp::protocol::{
     self, client_capabilities, client_info, discover_versions, pick_version, raw_tool_name,
     with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
-use crate::tools::tool_result;
+use crate::tools::{tool_result, tool_result_with_images};
 use crate::types::ToolCall;
 
 use super::incoming::{self, LiveHooks};
@@ -150,7 +150,14 @@ async fn connect_once(
                 body
             };
             match rpc(&session, "tools/call", params).await {
-                Ok(v) => tool_result(c, protocol::format_call_result(&v)),
+                Ok(v) => {
+                    let (text, images) = protocol::format_call_result_parts(&v);
+                    if images.is_empty() {
+                        tool_result(c, text)
+                    } else {
+                        tool_result_with_images(c, text, images)
+                    }
+                },
                 Err(e) => tool_result(c, e),
             }
         })

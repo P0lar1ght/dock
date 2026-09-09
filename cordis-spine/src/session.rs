@@ -715,6 +715,8 @@ impl Sessions {
                     name: call.name,
                     arguments: call.arguments,
                     content: crate::types::INTERRUPTED_TOOL_RESULT.into(),
+                
+                    images: Vec::new(),
                 },
             );
             times.insert(insert_at, now);
@@ -1282,6 +1284,8 @@ mod tests {
             name: "bash".into(),
             arguments: "{}".into(),
             content: "ok".into(),
+        
+            images: Vec::new(),
         });
         sessions.append(LogEvent::User("follow-up".into()));
         sessions.seal_incomplete_tool_calls();
@@ -1326,6 +1330,8 @@ mod tests {
             name: "read_file".into(),
             arguments: "{}".into(),
             content: "secret body".into(),
+        
+            images: Vec::new(),
         });
         sessions.append(LogEvent::User("second".into()));
         let prefix = vec![

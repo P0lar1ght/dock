@@ -72,6 +72,9 @@ enum WireEvent {
         arguments: String,
         #[serde(default)]
         content: String,
+        /// Filesystem paths for tool images (never base64 in JSONL).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_paths: Vec<String>,
     },
 }
 
@@ -295,6 +298,52 @@ fn first_user_title(events: &[LogEvent]) -> Option<String> {
     })
 }
 
+fn tool_image_blob_dir() -> PathBuf {
+    dock_home().join("tool-images")
+}
+
+/// Write in-memory tool images to `$DOCK_HOME/tool-images/<call>-N.ext` and
+/// return those paths for the JSONL wire. Skips when empty.
+fn persist_tool_images(call_id: &str, images: &[crate::types::UserImage]) -> Vec<String> {
+    if images.is_empty() {
+        return Vec::new();
+    }
+    let dir = tool_image_blob_dir();
+    let _ = fs::create_dir_all(&dir);
+    let safe: String = call_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut paths = Vec::with_capacity(images.len());
+    for (i, img) in images.iter().enumerate() {
+        let ext = match img.mime.as_str() {
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => "png",
+        };
+        let path = dir.join(format!("{safe}-{i}.{ext}"));
+        if fs::write(&path, img.data.as_ref()).is_ok() {
+            paths.push(path.display().to_string());
+        }
+    }
+    paths
+}
+
+fn load_tool_images(paths: &[String]) -> Vec<crate::types::UserImage> {
+    paths
+        .iter()
+        .filter_map(|p| crate::tool_images::user_image_from_path(Path::new(p)))
+        .collect()
+}
+
+
 fn to_wire(event: &LogEvent) -> Option<WireEvent> {
     Some(match event {
         LogEvent::User(text) => WireEvent::User { text: text.clone() },
@@ -320,11 +369,13 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
             name,
             arguments,
             content,
+            images,
         } => WireEvent::Tool {
             id: id.clone(),
             name: name.clone(),
             arguments: arguments.clone(),
             content: content.clone(),
+            image_paths: persist_tool_images(id, images),
         },
     })
 }
@@ -358,11 +409,13 @@ fn from_wire(event: WireEvent) -> LogEvent {
             name,
             arguments,
             content,
+            image_paths,
         } => LogEvent::ToolExecute {
             id,
             name,
             arguments,
             content,
+            images: load_tool_images(&image_paths),
         },
     }
 }
@@ -449,6 +502,8 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{\"cmd\":\"pwd\"}".into(),
                     content: "/tmp".into(),
+                
+                    images: Vec::new(),
                 },
             ],
             times: vec![SystemTime::now(), SystemTime::now()],
@@ -582,6 +637,8 @@ mod tests {
             name: "read_file".into(),
             arguments: "{}".into(),
             content: "full tool body".into(),
+        
+            images: Vec::new(),
         });
         sessions.replace_compacted(vec![
             LogEvent::User("keep visible".into()),

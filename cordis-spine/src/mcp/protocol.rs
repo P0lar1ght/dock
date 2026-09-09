@@ -6,6 +6,9 @@
 use base64::Engine;
 use serde_json::{json, Value};
 
+use crate::tool_images::{self, IMAGE_SEPARATE_PLACEHOLDER};
+use crate::types::UserImage;
+
 /// Latest published MCP spec. Offered first on both stdio and Streamable HTTP.
 pub const PROTOCOL_LATEST: &str = "2026-07-28";
 /// Last initialize-era revision (Grok's pin). Used when the server has no 2026 support.
@@ -209,20 +212,58 @@ pub fn tools_from_list(server_name: &str, listed: &Value) -> Vec<ListedTool> {
 }
 
 pub fn format_call_result(v: &Value) -> String {
+    format_call_result_parts(v).0
+}
+
+/// Text + extracted images for a tools/call JSON-RPC result.
+/// Keeps `type:image` (and CUA `png_base64` / path) instead of dropping them.
+pub fn format_call_result_parts(v: &Value) -> (String, Vec<UserImage>) {
     if let Some(err) = v.get("error") {
-        return err.to_string();
+        return (err.to_string(), Vec::new());
     }
     let Some(content) = v.pointer("/result/content").and_then(|c| c.as_array()) else {
-        return v
+        let text = v
             .pointer("/result")
             .map(|r| r.to_string())
             .unwrap_or_else(|| v.to_string());
+        let (text, images) = extract_from_text_and_structured(&text, v.pointer("/result"));
+        return (text, images);
     };
-    let texts: Vec<&str> = content
-        .iter()
-        .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-        .collect();
-    if texts.is_empty() {
+
+    let mut texts: Vec<String> = Vec::new();
+    let mut images: Vec<UserImage> = Vec::new();
+
+    for item in content {
+        let kind = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match kind {
+            "image" => {
+                if let Some(img) = image_from_mcp_item(item) {
+                    images.push(img);
+                    texts.push(IMAGE_SEPARATE_PLACEHOLDER.to_string());
+                }
+            }
+            "text" => {
+                if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                    let (cleaned, extracted) = extract_data_uri_images(t);
+                    texts.push(cleaned);
+                    images.extend(extracted);
+                }
+            }
+            _ => {
+                if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                    let (cleaned, extracted) = extract_data_uri_images(t);
+                    texts.push(cleaned);
+                    images.extend(extracted);
+                }
+            }
+        }
+    }
+
+    if let Some(result) = v.pointer("/result") {
+        promote_cua_fields(result, &mut texts, &mut images);
+    }
+
+    let text = if texts.is_empty() {
         serde_json::to_string(content).unwrap_or_else(|_| {
             content
                 .iter()
@@ -232,6 +273,123 @@ pub fn format_call_result(v: &Value) -> String {
         })
     } else {
         texts.join("\n")
+    };
+    (text, tool_images::cap_images(images))
+}
+
+fn image_from_mcp_item(item: &Value) -> Option<UserImage> {
+    let mime = item
+        .get("mimeType")
+        .or_else(|| item.get("mime_type"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("image/png");
+    if let Some(data) = item.get("data").and_then(|d| d.as_str()) {
+        if data.starts_with("data:") {
+            let (_cleaned, imgs) = extract_data_uri_images(data);
+            return imgs.into_iter().next();
+        }
+        return tool_images::user_image_from_base64(data, mime);
+    }
+    None
+}
+
+fn extract_from_text_and_structured(
+    text: &str,
+    result: Option<&Value>,
+) -> (String, Vec<UserImage>) {
+    let (cleaned, mut images) = extract_data_uri_images(text);
+    let mut texts = vec![cleaned.clone()];
+    if let Some(result) = result {
+        promote_cua_fields(result, &mut texts, &mut images);
+    }
+    (texts.into_iter().next().unwrap_or(cleaned), tool_images::cap_images(images))
+}
+
+fn promote_cua_fields(result: &Value, texts: &mut Vec<String>, images: &mut Vec<UserImage>) {
+    let structured = result
+        .get("structuredContent")
+        .or_else(|| result.get("structured_content"))
+        .unwrap_or(result);
+
+    if let Some(b64) = structured
+        .get("png_base64")
+        .or_else(|| structured.get("pngBase64"))
+        .and_then(|v| v.as_str())
+    {
+        if let Some(img) = tool_images::user_image_from_base64(b64, "image/png") {
+            images.push(img);
+            if texts.is_empty() {
+                texts.push(IMAGE_SEPARATE_PLACEHOLDER.to_string());
+            }
+        }
+    }
+
+    if let Some(path) = structured
+        .get("path")
+        .or_else(|| structured.get("screenshot_path"))
+        .or_else(|| structured.get("file"))
+        .and_then(|v| v.as_str())
+    {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            if let Some(img) = tool_images::user_image_from_path(p) {
+                images.push(img);
+                if !texts.iter().any(|t| t.contains(path)) {
+                    texts.push(format!("saved {path}"));
+                }
+            }
+        }
+    }
+}
+
+/// Pull `data:image/...;base64,...` out of free text (Grok extract_base64_images).
+fn extract_data_uri_images(text: &str) -> (String, Vec<UserImage>) {
+    let mut images = Vec::new();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < text.len() {
+        let rest = &text[i..];
+        let lower = rest.to_ascii_lowercase();
+        let Some(rel) = lower.find("data:image/") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&text[i..i + rel]);
+        let start = i + rel;
+        let after = &text[start..];
+        let Some(semi) = after.to_ascii_lowercase().find(";base64,") else {
+            out.push(text.as_bytes()[start] as char);
+            i = start + 1;
+            continue;
+        };
+        let mime_end = semi;
+        let mime = after
+            .get("data:".len()..mime_end)
+            .unwrap_or("image/png");
+        let payload_start = start + semi + ";base64,".len();
+        let mut j = payload_start;
+        let b = text.as_bytes();
+        while j < b.len() {
+            let c = b[j];
+            if c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'\n' | b'\r') {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        let payload = text[payload_start..j].replace(['\n', '\r'], "");
+        if let Some(img) = tool_images::user_image_from_base64(&payload, mime) {
+            images.push(img);
+            out.push_str(IMAGE_SEPARATE_PLACEHOLDER);
+        } else {
+            out.push_str(&text[start..j]);
+        }
+        i = j;
+    }
+    if images.is_empty() {
+        (text.to_string(), images)
+    } else {
+        (out, images)
     }
 }
 
@@ -336,6 +494,28 @@ mod tests {
             ]}
         });
         assert_eq!(format_call_result(&v), "a\nb");
+    }
+
+    #[test]
+    fn format_keeps_image_type() {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0]);
+        png.extend(std::iter::repeat(0u8).take(40));
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let v = json!({
+            "result": { "content": [
+                {"type":"text","text":"shot"},
+                {"type":"image","mimeType":"image/png","data": b64}
+            ]}
+        });
+        let (text, images) = format_call_result_parts(&v);
+        assert!(text.contains("shot"), "{text}");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime, "image/png");
     }
 
     #[test]

@@ -90,6 +90,16 @@ pub fn execute_with(
     is_cancelled: impl Fn() -> bool,
     jobs: Option<&Jobs>,
 ) -> ToolResult {
+    if call.name == "read_file" {
+        if let Some((content, images)) = read_file_maybe_image(&call.arguments) {
+            return ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content,
+                images: crate::tool_images::cap_images(images),
+            };
+        }
+    }
     let content = match call.name.as_str() {
         "list_dir" => list_dir(&call.arguments),
         "read_file" => read_file(&call.arguments),
@@ -104,6 +114,7 @@ pub fn execute_with(
         call_id: call.id,
         name: call.name,
         content,
+        ..Default::default()
     }
 }
 
@@ -178,6 +189,31 @@ fn list_dir(args: &str) -> String {
         format!("{}\n{}", path.display(), lines.join("\n"))
     }
 }
+
+/// When the target is png/jpeg/webp/gif, return inline image + placeholder
+/// instead of `read_to_string` (which fails / garbles binaries).
+fn read_file_maybe_image(args: &str) -> Option<(String, Vec<crate::types::UserImage>)> {
+    let v = parse_args(args);
+    let target = str_field(&v, &["target_file", "path"])?;
+    let path = resolve(&target);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif") {
+        return None;
+    }
+    let img = crate::tool_images::user_image_from_path(&path)?;
+    let content = format!(
+        "{}
+{}",
+        path.display(),
+        crate::tool_images::IMAGE_INLINE_PLACEHOLDER
+    );
+    Some((content, vec![img]))
+}
+
 
 fn read_file(args: &str) -> String {
     let v = parse_args(args);
@@ -648,5 +684,33 @@ mod tests {
         let out = execute(call);
         assert!(out.content.contains("1→only"), "{}", out.content);
         assert!(!out.content.contains("truncated"), "{}", out.content);
+    }
+
+    #[test]
+    fn read_file_returns_image_for_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0]);
+        png.extend(std::iter::repeat(0u8).take(40));
+        std::fs::write(&path, &png).unwrap();
+        let args = serde_json::json!({"target_file": path}).to_string();
+        let call = ToolCall {
+            id: "1".into(),
+            name: "read_file".into(),
+            arguments: args,
+        };
+        let result = execute(call);
+        assert!(
+            result.content.contains("Image content included inline"),
+            "{}",
+            result.content
+        );
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].mime, "image/png");
     }
 }

@@ -239,6 +239,8 @@ mod tests {
                 name: "read_file".into(),
                 arguments: r#"{"target_file":"src/auth.rs"}"#.into(),
                 content: "fn login() { buggy }".into(),
+            
+                images: Vec::new(),
             },
             LogEvent::User("also add a test".into()),
         ]
@@ -321,6 +323,8 @@ mod tests {
             name: "read_file".into(),
             arguments: "{}".into(),
             content: "y".repeat(400),
+        
+            images: Vec::new(),
         });
         let used = estimate_context_tokens("", &sessions.events());
         assert!(
