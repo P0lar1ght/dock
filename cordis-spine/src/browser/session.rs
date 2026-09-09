@@ -179,12 +179,21 @@ impl ConnectedSession {
             .user_data_dir(&user_data_dir)
             .no_sandbox()
             .launch_timeout(LAUNCH_TIMEOUT)
-            .arg("--disable-dev-shm-usage")
-            .arg("--force-renderer-accessibility");
+            // chromiumoxide Arg::from does not auto-prepend "--" for bare keys in 0.9,
+            // but Builder::arg historically treated "--foo" as key "--foo" and some
+            // formatters double the dashes — pass bare flag names without leading "--".
+            // (Lynn: "--force-…" became "----force-…" and accessibility never applied.)
+            .arg("disable-dev-shm-usage")
+            .arg("force-renderer-accessibility");
 
         // Headless by default (CI / servers). Prefer with_head when cockpit/env says so.
+        // Default Viewport 800×600 Emulation-overrides layout; headed windows then paint
+        // only a corner on grey chrome. Clear viewport so the OS window drives layout.
         if headed {
-            builder = builder.with_head();
+            builder = builder
+                .with_head()
+                .viewport(None)
+                .window_size(1280, 900);
         }
 
         let config = builder
