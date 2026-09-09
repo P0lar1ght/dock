@@ -336,10 +336,21 @@ fn persist_tool_images(call_id: &str, images: &[crate::types::UserImage]) -> Vec
     paths
 }
 
+/// Only reload images whose paths resolve under `$DOCK_HOME/tool-images/`.
+/// Out-of-bounds / missing paths are skipped (fail-open).
 fn load_tool_images(paths: &[String]) -> Vec<crate::types::UserImage> {
+    let root = tool_image_blob_dir();
+    let root_canon = root.canonicalize().unwrap_or(root);
     paths
         .iter()
-        .filter_map(|p| crate::tool_images::user_image_from_path(Path::new(p)))
+        .filter_map(|p| {
+            let path = Path::new(p);
+            let canon = path.canonicalize().ok()?;
+            if !canon.starts_with(&root_canon) {
+                return None;
+            }
+            crate::tool_images::user_image_from_path(&canon)
+        })
         .collect()
 }
 
@@ -518,6 +529,63 @@ mod tests {
         assert_eq!(loaded[0].events, item.events);
         remove("abc123", cwd).unwrap();
         assert!(load_cwd(cwd).is_empty());
+    }
+
+    #[test]
+    fn roundtrip_tool_images_bytes() {
+        use crate::tool_images::user_image_from_bytes;
+        let _home = lock_home();
+        let cwd = Path::new("/tmp/dock-persist-image-test");
+        let png = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, 0x05, 0xfe, 0x02, 0xfe, 0xa7, 0x35, 0x81,
+            0x84, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let img = user_image_from_bytes(png.clone(), Some("image/png")).expect("png");
+        let item = ArchivedSession {
+            id: "img123".into(),
+            title: "image persist".into(),
+            events: vec![
+                LogEvent::User("see shot".into()),
+                LogEvent::ToolExecute {
+                    id: "shot1".into(),
+                    name: "browser_screenshot".into(),
+                    arguments: "{}".into(),
+                    content: "Image content included inline".into(),
+                    images: vec![img.clone()],
+                },
+            ],
+            times: vec![SystemTime::now(), SystemTime::now()],
+            compact_prefix: None,
+            compact_from: 0,
+        };
+        save(&item, cwd).unwrap();
+        // image_paths should land under DOCK_HOME/tool-images/
+        let blob_dir = crate::config::dock_home().join("tool-images");
+        assert!(blob_dir.is_dir(), "{blob_dir:?}");
+        let loaded = load_cwd(cwd);
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0].events[1] {
+            LogEvent::ToolExecute { images, .. } => {
+                assert_eq!(images.len(), 1, "{images:?}");
+                assert_eq!(images[0].mime, "image/png");
+                assert_eq!(images[0].data.as_ref(), img.data.as_ref());
+                assert_eq!(images[0].data.as_ref(), png.as_slice());
+            }
+            other => panic!("expected ToolExecute, got {other:?}"),
+        }
+        remove("img123", cwd).unwrap();
+    }
+
+    #[test]
+    fn load_tool_images_skips_out_of_bounds_paths() {
+        let _home = lock_home();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"not an image under tool-images").unwrap();
+        let loaded = load_tool_images(&[outside.path().display().to_string()]);
+        assert!(loaded.is_empty(), "must skip paths outside tool-images: {loaded:?}");
     }
 
     #[tokio::test]

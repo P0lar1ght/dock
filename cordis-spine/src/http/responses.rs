@@ -21,7 +21,7 @@ pub fn body(
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "input": input_items(request, user_images),
+        "input": input_items(request, user_images, model),
         "stream": true,
     });
     if !request.tools.is_empty() {
@@ -55,7 +55,7 @@ pub fn body(
     body
 }
 
-pub fn input_items(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Value> {
+pub fn input_items(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str) -> Vec<Value> {
     let mut out = Vec::new();
     if !request.system.is_empty() {
         out.push(easy_message("system", &request.system, &[]));
@@ -102,7 +102,7 @@ pub fn input_items(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> V
                 if let Some(i) = pending.iter().position(|p| p == id) {
                     pending.remove(i);
                     out.extend(super::tool_images::responses_tool_output(
-                        id, content, images, "",
+                        id, content, images, model,
                     ));
                 }
             }
@@ -488,7 +488,7 @@ mod tests {
             },
             LogEvent::User("follow-up".into()),
         ]);
-        let items = input_items(&request, &[]);
+        let items = input_items(&request, &[], "gpt");
         assert_eq!(items[0]["role"], "system");
         assert_eq!(items[1]["role"], "user");
         assert_eq!(items[2]["type"], "function_call");

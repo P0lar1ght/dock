@@ -330,9 +330,8 @@ fn promote_cua_fields(result: &Value, texts: &mut Vec<String>, images: &mut Vec<
         .or_else(|| structured.get("file"))
         .and_then(|v| v.as_str())
     {
-        let p = std::path::Path::new(path);
-        if p.exists() {
-            if let Some(img) = tool_images::user_image_from_path(p) {
+        if let Some(safe) = path_under_dock_home(std::path::Path::new(path)) {
+            if let Some(img) = tool_images::user_image_from_path(&safe) {
                 images.push(img);
                 if !texts.iter().any(|t| t.contains(path)) {
                     texts.push(format!("saved {path}"));
@@ -340,6 +339,16 @@ fn promote_cua_fields(result: &Value, texts: &mut Vec<String>, images: &mut Vec<
             }
         }
     }
+}
+
+/// MCP structuredContent paths must resolve under `$DOCK_HOME` (screenshots /
+/// tool-images live there). Outside → skip so a malicious server cannot exfiltrate
+/// arbitrary files via path/screenshot_path/file.
+fn path_under_dock_home(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let canon = path.canonicalize().ok()?;
+    let home = crate::config::dock_home();
+    let home = home.canonicalize().unwrap_or(home);
+    canon.starts_with(&home).then_some(canon)
 }
 
 /// Pull `data:image/...;base64,...` out of free text (Grok extract_base64_images).
@@ -536,5 +545,48 @@ mod tests {
             Some(("sungods", "search"))
         );
         assert_eq!(split_mcp_public_name("bash"), None);
+    }
+
+    #[test]
+    fn promote_cua_path_under_dock_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("DOCK_HOME");
+        std::env::set_var("DOCK_HOME", dir.path());
+        let shots = dir.path().join("browser").join("screenshots");
+        std::fs::create_dir_all(&shots).unwrap();
+        let png = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, 0x05, 0xfe, 0x02, 0xfe, 0xa7, 0x35, 0x81,
+            0x84, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let shot = shots.join("ok.png");
+        std::fs::write(&shot, &png).unwrap();
+        let v = json!({
+            "result": {
+                "content": [{"type":"text","text":"ok"}],
+                "structuredContent": {"screenshot_path": shot.to_string_lossy()}
+            }
+        });
+        let (_text, images) = format_call_result_parts(&v);
+        assert_eq!(images.len(), 1, "{images:?}");
+
+        // Outside DOCK_HOME must be skipped even if the file exists.
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), &png).unwrap();
+        let v2 = json!({
+            "result": {
+                "content": [{"type":"text","text":"bad"}],
+                "structuredContent": {"path": outside.path().to_string_lossy()}
+            }
+        });
+        let (_text, images2) = format_call_result_parts(&v2);
+        assert!(images2.is_empty(), "must not read outside DOCK_HOME: {images2:?}");
+
+        match &prev {
+            Some(v) => std::env::set_var("DOCK_HOME", v),
+            None => std::env::remove_var("DOCK_HOME"),
+        }
     }
 }

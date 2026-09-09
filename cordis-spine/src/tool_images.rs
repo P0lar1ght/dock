@@ -249,4 +249,13 @@ mod tests {
         assert_eq!(result.images[0].data, img.data);
         assert_eq!(result.content, IMAGE_INLINE_PLACEHOLDER);
     }
+
+    #[test]
+    fn model_accepts_images_rejects_deepseek() {
+        assert!(!model_accepts_images("deepseek-chat"));
+        assert!(!model_accepts_images("DeepSeek-Coder"));
+        assert!(!model_accepts_images("foo-text"));
+        assert!(model_accepts_images("grok-4"));
+        assert!(model_accepts_images(""));
+    }
 }

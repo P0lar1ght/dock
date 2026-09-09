@@ -23,7 +23,7 @@ pub fn body(
     thinking: bool,
     effort: &str,
 ) -> Value {
-    let (system, messages) = transcript(request, user_images);
+    let (system, messages) = transcript(request, user_images, model);
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -59,7 +59,7 @@ pub fn body(
     body
 }
 
-pub fn transcript(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> (String, Vec<Value>) {
+pub fn transcript(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str) -> (String, Vec<Value>) {
     let mut messages = Vec::new();
     let mut user_i = 0usize;
     let mut pending: Vec<String> = Vec::new();
@@ -113,7 +113,7 @@ pub fn transcript(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> (S
                         &sanitize_tool_id(id),
                         content,
                         images,
-                        "",
+                        model,
                     ));
                 }
             }
@@ -549,7 +549,7 @@ mod tests {
             },
             LogEvent::User("follow-up".into()),
         ]);
-        let (system, msgs) = transcript(&request, &[]);
+        let (system, msgs) = transcript(&request, &[], "claude");
         assert_eq!(system, "s");
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[1]["role"], "assistant");

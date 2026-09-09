@@ -320,7 +320,7 @@ fn chat_body(
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "messages": messages(request, user_images),
+        "messages": messages(request, user_images, model),
         "stream": true,
         "stream_options": { "include_usage": true },
     });
@@ -409,7 +409,7 @@ fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
     other + ascii.saturating_add(3) / 4
 }
 
-fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Value> {
+fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str) -> Vec<Value> {
     let mut out = vec![json!({"role":"system","content": request.system})];
     let mut user_i = 0usize;
     let mut pending: Vec<String> = Vec::new();
@@ -472,9 +472,7 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Valu
             } => {
                 if let Some(i) = pending.iter().position(|p| p == id) {
                     pending.remove(i);
-                    // Model id not threaded into transcript builder; empty =
-                    // accept images (see tool_images::model_accepts_images).
-                    out.extend(tool_images::chat_tool_messages(id, content, images, ""));
+                    out.extend(tool_images::chat_tool_messages(id, content, images, model));
                 }
             }
             LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::LlmStream(_) => {}
@@ -658,7 +656,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let msgs = messages(&req, &[]);
+        let msgs = messages(&req, &[], "grok-4");
         assert_eq!(msgs[1]["role"], "user");
         assert_eq!(msgs[2]["role"], "assistant");
         assert_eq!(msgs[3]["role"], "tool");
@@ -712,7 +710,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let msgs = messages(&req, &[]);
+        let msgs = messages(&req, &[], "grok-4");
         let tool = msgs.iter().find(|m| m["role"] == "tool").expect("tool msg");
         assert_eq!(tool["content"], "saved /tmp/shot.png\nImage content included inline");
         let user_img = msgs
@@ -724,5 +722,72 @@ mod tests {
             parts.iter().any(|p| p["type"] == "image_url"),
             "{parts:?}"
         );
+    }
+
+    #[test]
+    fn tool_result_images_degraded_for_non_vision_model() {
+        use std::sync::Arc;
+        let png = {
+            let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            v.extend_from_slice(&[0, 0, 0, 13]);
+            v.extend_from_slice(b"IHDR");
+            v.extend_from_slice(&1u32.to_be_bytes());
+            v.extend_from_slice(&1u32.to_be_bytes());
+            v.extend_from_slice(&[8, 2, 0, 0, 0]);
+            v.extend(std::iter::repeat(0u8).take(40));
+            v
+        };
+        let img = UserImage {
+            mime: "image/png".into(),
+            data: Arc::from(png.into_boxed_slice()),
+            width: 1,
+            height: 1,
+        };
+        let req = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "browser_screenshot".into(),
+                        arguments: "{}".into(),
+                    }],
+                    ..LlmOutput::default()
+                }),
+                LogEvent::ToolExecute {
+                    id: "c1".into(),
+                    name: "browser_screenshot".into(),
+                    arguments: "{}".into(),
+                    content: "saved shot\nImage content included inline".into(),
+                    images: vec![img],
+                },
+            ],
+            tools: vec![],
+        };
+        let vision = messages(&req, &[], "grok-4");
+        assert!(
+            vision.iter().any(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"))
+            }),
+            "vision model should attach image parts: {vision:?}"
+        );
+        let text_only = messages(&req, &[], "deepseek-chat");
+        assert!(
+            !text_only.iter().any(|m| {
+                m["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"))
+            }),
+            "non-vision model must not attach image parts: {text_only:?}"
+        );
+        let tool = text_only
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool msg");
+        assert_eq!(tool["content"], "saved shot\nImage content included inline");
     }
 }
