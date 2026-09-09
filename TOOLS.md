@@ -104,6 +104,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 - 验收常用 MCP 名（公名前缀 `mcp_cua-driver__`）：`list_apps` / `list_windows` / `launch_app`、`click` / `double_click` / `right_click` / `drag` / `scroll`、`type_text` / `press_key` / `hotkey`、`get_accessibility_tree` / `get_desktop_state` / `get_screen_size`、`bring_to_front` / `invoke_menu`。driver 另暴露 `browser_*`——**不要**当 Dock BUA 用。
 - 无图形会话 / 纯 SSH 无 `DISPLAY`：`doctor` 会挂；CI 不要默认跑 cua-driver 实机。本机可用既有 X11/Xvfb，但 AT-SPI 仍要会话总线。
 - **办公链 S3（完整 CUA 重测）**：开 `mousepad` → `bring_to_front` → `type_text` → **`hotkey` `ctrl+s`（`delivery_mode=foreground`）** 落盘 `/tmp/...`；`invoke_menu` 仅 AT-SPI 绿时可选；再用 `verify_state` + 读文件确认。固定步骤见验收台 `dock-cua-accept/S3_REPRO.md`。包已装仍 warn 时勿只靠菜单。
+- **开应用 / S8**：`list_apps` 可能漏 `mousepad` 等 —— `launch_app` **优先** `launch_path=/usr/bin/mousepad`（或绝对路径）。S8 Thunar 选中/树验证依赖 AT-SPI；弱则只证目录打开（几何/截图），勿强求 a11y 选中态。
 - 安装脚本：`https://cua.ai/driver/install.sh` → 常落到 `~/.local/bin/cua-driver`；`mcp-config` 的 JSON `command` 可直接抄进 Dock。
 
 安装（Linux 示例）：
