@@ -302,8 +302,21 @@ fn extract_from_text_and_structured(
     if let Some(result) = result {
         promote_cua_fields(result, &mut texts, &mut images);
     }
-    (texts.into_iter().next().unwrap_or(cleaned), tool_images::cap_images(images))
+    let joined = if texts.is_empty() {
+        cleaned
+    } else {
+        texts.join("\n")
+    };
+    (joined, tool_images::cap_images(images))
 }
+
+/// Cap serialized non-image `structuredContent` appended into tool text.
+const STRUCTURED_CONTENT_TEXT_MAX: usize = 8 * 1024;
+
+const STRUCTURED_IMAGE_KEYS: &[&str] = &[
+    "png_base64",
+    "pngBase64",
+];
 
 fn promote_cua_fields(result: &Value, texts: &mut Vec<String>, images: &mut Vec<UserImage>) {
     let structured = result
@@ -339,6 +352,67 @@ fn promote_cua_fields(result: &Value, texts: &mut Vec<String>, images: &mut Vec<
             }
         }
     }
+
+    // Only when MCP returned an explicit structuredContent object: surface
+    // non-image fields (e.g. list_windows bounds/window_id) into tool text.
+    // Do not dump the whole `result` when the key is absent.
+    if let Some(sc) = result
+        .get("structuredContent")
+        .or_else(|| result.get("structured_content"))
+    {
+        append_structured_content_text(sc, texts);
+    }
+}
+
+fn append_structured_content_text(structured: &Value, texts: &mut Vec<String>) {
+    let scrubbed = scrub_structured_for_text(structured);
+    if scrubbed.is_null()
+        || scrubbed.as_object().map(|o| o.is_empty()).unwrap_or(false)
+        || scrubbed.as_array().map(|a| a.is_empty()).unwrap_or(false)
+    {
+        return;
+    }
+    let Ok(raw) = serde_json::to_string(&scrubbed) else {
+        return;
+    };
+    if raw == "{}" || raw == "[]" || raw == "null" {
+        return;
+    }
+    // Skip if the same payload is already fully present in joined text.
+    if texts.iter().any(|t| t.contains(&raw)) {
+        return;
+    }
+    texts.push(truncate_structured_text(&raw));
+}
+
+fn scrub_structured_for_text(structured: &Value) -> Value {
+    match structured {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if STRUCTURED_IMAGE_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
+                out.insert(k.clone(), scrub_structured_for_text(v));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(scrub_structured_for_text).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+fn truncate_structured_text(s: &str) -> String {
+    if s.len() <= STRUCTURED_CONTENT_TEXT_MAX {
+        return s.to_string();
+    }
+    let mut end = STRUCTURED_CONTENT_TEXT_MAX;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…(truncated)", &s[..end])
 }
 
 /// MCP structuredContent paths must resolve under `$DOCK_HOME` (screenshots /
@@ -588,5 +662,66 @@ mod tests {
             Some(v) => std::env::set_var("DOCK_HOME", v),
             None => std::env::remove_var("DOCK_HOME"),
         }
+    }
+
+    #[test]
+    fn structured_content_non_image_fields_append_to_text() {
+        let v = json!({
+            "result": {
+                "content": [{"type":"text","text":"windows"}],
+                "structuredContent": {
+                    "windows": [
+                        {"window_id": "0x1a2b", "title": "mousepad", "bounds": {"x":10,"y":20,"w":800,"h":600}}
+                    ]
+                }
+            }
+        });
+        let (text, images) = format_call_result_parts(&v);
+        assert!(images.is_empty(), "{images:?}");
+        assert!(text.contains("windows"), "{text}");
+        assert!(text.contains("window_id"), "{text}");
+        assert!(text.contains("0x1a2b"), "{text}");
+        assert!(text.contains("bounds"), "{text}");
+    }
+
+    #[test]
+    fn structured_content_skips_png_base64_in_text() {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0]);
+        png.extend(std::iter::repeat(0u8).take(40));
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let v = json!({
+            "result": {
+                "content": [{"type":"text","text":"shot"}],
+                "structuredContent": {
+                    "png_base64": b64,
+                    "window_id": "w1"
+                }
+            }
+        });
+        let (text, images) = format_call_result_parts(&v);
+        assert_eq!(images.len(), 1, "{images:?}");
+        assert!(text.contains("window_id"), "{text}");
+        assert!(text.contains("w1"), "{text}");
+        assert!(!text.contains("png_base64"), "{text}");
+        assert!(!text.contains(&b64[..32.min(b64.len())]), "must not dump base64 into text: {text}");
+    }
+
+    #[test]
+    fn structured_content_text_truncates() {
+        let big = "x".repeat(STRUCTURED_CONTENT_TEXT_MAX + 50);
+        let v = json!({
+            "result": {
+                "content": [{"type":"text","text":"ok"}],
+                "structuredContent": {"blob": big}
+            }
+        });
+        let (text, _) = format_call_result_parts(&v);
+        assert!(text.contains("…(truncated)"), "{text}");
+        assert!(text.len() < STRUCTURED_CONTENT_TEXT_MAX + 80, "len={}", text.len());
     }
 }
