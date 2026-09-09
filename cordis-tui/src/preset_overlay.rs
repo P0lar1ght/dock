@@ -281,6 +281,7 @@ pub fn cancel_persona_edit(ctx: &Context, view: &mut PresetView) {
     c.editing_persona = false;
 }
 
+#[derive(Debug)]
 pub enum PresetAction {
     None,
     Flash(String),
@@ -381,6 +382,36 @@ pub fn accept(ctx: &Context, view: &mut PresetView) -> PresetAction {
     }
 }
 
+
+fn resync_action(ctx: &Context, view: &mut PresetView) -> PresetAction {
+    let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+        return PresetAction::Flash("Agent 预设服务未挂载".into());
+    };
+    presets.resync();
+    if let PresetView::Canvas(c) = view {
+        let mode_id = c.id.clone();
+        if presets.get(&mode_id).is_none() {
+            *view = PresetView::roster();
+            return PresetAction::Flash(format!(
+                "已刷新；模式 {mode_id} 已不在磁盘，回到列表"
+            ));
+        }
+        if let Some(role) = c.editing_role.clone() {
+            if !role_ids(ctx, c).iter().any(|r| r == &role) {
+                c.editing_role = None;
+                c.pane = PresetPane::Roles;
+            }
+        }
+        let roles = role_ids(ctx, c);
+        c.roles_sel = c.roles_sel.min(roles.len().saturating_sub(1));
+        let assigned = assigned_names(ctx, c);
+        c.assigned_sel = c.assigned_sel.min(assigned.len().saturating_sub(1));
+        let catalog = catalog_rows(ctx, c);
+        c.catalog_sel = c.catalog_sel.min(catalog.len().saturating_sub(1));
+    }
+    PresetAction::Flash("已刷新预设（磁盘 YAML → 内存）".into())
+}
+
 pub fn on_roster_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAction {
     let PresetView::Roster { selected } = view else {
         return PresetAction::None;
@@ -431,6 +462,7 @@ pub fn on_roster_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
                 Err(e) => PresetAction::Flash(e),
             }
         }
+        'r' | 'R' => resync_action(ctx, view),
         _ => PresetAction::None,
     }
 }
@@ -445,6 +477,17 @@ pub fn on_canvas_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
     );
     if remove {
         return accept(ctx, view);
+    }
+
+    let can_resync = matches!(
+        view,
+        PresetView::Canvas(s)
+            if !s.editing_persona
+                && (s.pane != PresetPane::Catalog || s.catalog_query.is_empty())
+                && matches!(c, 'r' | 'R')
+    );
+    if can_resync {
+        return resync_action(ctx, view);
     }
 
     if let PresetView::Canvas(canvas) = view {
@@ -1172,6 +1215,35 @@ mod tests {
         let mut live = live_names(&ctx);
         live.sort();
         assert_eq!(union, live);
+    }
+
+    #[test]
+    fn r_resyncs_handwritten_role_into_memory() {
+        let dir = std::env::temp_dir().join(format!(
+            "dock-preset-r-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let presets = AgentPresets::load(dir.clone());
+        let mode = presets.create().unwrap();
+        let agents_dir = dir.join(&mode.id).join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("scout.yml"), "name: scout\npersona: disk\n").unwrap();
+        let ctx = Context::new();
+        ctx.provide(AGENT_PRESETS, presets).unwrap();
+        let mut view = open_canvas(&ctx, &mode.id).unwrap();
+        let action = on_canvas_char(&ctx, &mut view, 'r');
+        assert!(
+            matches!(&action, PresetAction::Flash(msg) if msg.contains("刷新")),
+            "{action:?}"
+        );
+        let presets = ctx.get::<AgentPresets>(AGENT_PRESETS).unwrap();
+        assert!(
+            presets.get(&mode.id).unwrap().agents.contains_key("scout"),
+            "resync must load handwritten scout.yml"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

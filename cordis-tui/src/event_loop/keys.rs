@@ -245,11 +245,16 @@ pub(super) fn run_action(
                 return Vec::new();
             }
             if matches!(overlay, Overlay::Presets(_)) {
-                let typing = matches!(
-                    overlay,
+                // Catalog filter typing; bare `r` with empty filter is resync (#20).
+                let typing = match overlay {
+                    Overlay::Presets(PresetView::Canvas(s)) if s.editing_persona => true,
                     Overlay::Presets(PresetView::Canvas(s))
-                        if s.editing_persona || s.pane == preset_overlay::PresetPane::Catalog
-                );
+                        if s.pane == preset_overlay::PresetPane::Catalog =>
+                    {
+                        !(matches!(c, 'r' | 'R') && s.catalog_query.is_empty())
+                    }
+                    _ => false,
+                };
                 if typing {
                     overlay.push_char(c);
                     return Vec::new();
