@@ -247,7 +247,11 @@ pub(super) fn run_action(
             if matches!(overlay, Overlay::Presets(_)) {
                 // Catalog filter typing; bare `r` with empty filter is resync (#20).
                 let typing = match overlay {
-                    Overlay::Presets(PresetView::Canvas(s)) if s.editing_persona => true,
+                    Overlay::Presets(PresetView::Canvas(s))
+                        if s.editing_persona || s.naming_role.is_some() =>
+                    {
+                        true
+                    }
                     Overlay::Presets(PresetView::Canvas(s))
                         if s.pane == preset_overlay::PresetPane::Catalog =>
                     {
@@ -552,8 +556,17 @@ pub(super) fn run_action(
             }
             if matches!(
                 overlay,
+                Overlay::Presets(PresetView::Canvas(s)) if s.naming_role.is_some()
+            ) {
+                overlay.push_char(' ');
+                return Vec::new();
+            }
+            if matches!(
+                overlay,
                 Overlay::Presets(PresetView::Canvas(s))
-                    if !s.editing_persona && s.pane == preset_overlay::PresetPane::Catalog
+                    if !s.editing_persona
+                        && s.naming_role.is_none()
+                        && s.pane == preset_overlay::PresetPane::Catalog
             ) {
                 overlay.push_char(' ');
                 return Vec::new();

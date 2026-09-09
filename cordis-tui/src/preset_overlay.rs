@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    is_shipped, AgentPreset, AgentPresets, PresetOrigin, ToolSpec, Tools, AGENT_PRESETS, TOOLS,
+    is_shipped, AgentPreset, AgentPresets, PresetOrigin, SubagentDef, ToolSpec, Tools, AGENT_PRESETS,
+    TOOLS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -38,6 +39,21 @@ pub enum PresetPane {
     Persona,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleNamingStep {
+    Id,
+    Name,
+}
+
+/// Draft for creating (`from: None`) or renaming (`from: Some(old_id)`) a role.
+#[derive(Debug, Clone)]
+pub struct RoleNamingDraft {
+    pub from: Option<String>,
+    pub step: RoleNamingStep,
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct CanvasState {
     pub id: String,
@@ -50,8 +66,16 @@ pub struct CanvasState {
     pub persona_draft: String,
     /// When set, dual panes + persona edit this `agents/<id>` role.
     pub editing_role: Option<String>,
+    /// Roles naming draft (id → name), similar to persona typing.
+    pub naming_role: Option<RoleNamingDraft>,
     /// Last mouse hit index + time for double-click (anti-misclick).
     pub last_click: Option<(usize, Instant)>,
+}
+
+impl CanvasState {
+    pub fn naming_active(&self) -> bool {
+        self.naming_role.is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +93,7 @@ impl PresetView {
         let Self::Canvas(c) = self else {
             return;
         };
-        if c.editing_persona {
+        if c.editing_persona || c.naming_role.is_some() {
             return;
         }
         c.pane = match c.pane {
@@ -114,7 +138,7 @@ fn tool_kind_label(ctx: &Context, name: &str) -> &'static str {
 pub fn overlay_len(ctx: &Context, view: &PresetView) -> usize {
     match view {
         PresetView::Roster { .. } => list_presets(ctx).len().max(1),
-        PresetView::Canvas(c) if c.editing_persona => 0,
+        PresetView::Canvas(c) if c.editing_persona || c.naming_role.is_some() => 0,
         PresetView::Canvas(c) => match c.pane {
             PresetPane::Catalog => catalog_rows(ctx, c).len(),
             PresetPane::Assigned => assigned_names(ctx, c).len(),
@@ -193,8 +217,112 @@ pub fn open_canvas(ctx: &Context, id: &str) -> Result<PresetView, String> {
         editing_persona: false,
         persona_draft: preset.persona,
         editing_role: None,
+        naming_role: None,
         last_click: None,
     }))
+}
+
+
+fn start_create_naming(canvas: &mut CanvasState) -> PresetAction {
+    canvas.naming_role = Some(RoleNamingDraft {
+        from: None,
+        step: RoleNamingStep::Id,
+        id: String::new(),
+        name: String::new(),
+    });
+    PresetAction::Flash("输入角色 id · Enter 下一步".into())
+}
+
+fn start_rename_naming(ctx: &Context, canvas: &mut CanvasState) -> PresetAction {
+    let roles = role_ids(ctx, canvas);
+    let Some(role) = roles.get(canvas.roles_sel).cloned() else {
+        return PresetAction::Flash("没有可改名子代理".into());
+    };
+    let name = ctx
+        .get::<AgentPresets>(AGENT_PRESETS)
+        .and_then(|p| p.get(&canvas.id))
+        .and_then(|p| p.agents.get(&role).cloned())
+        .map(|d| {
+            if d.name.trim().is_empty() {
+                role.clone()
+            } else {
+                d.name
+            }
+        })
+        .unwrap_or_else(|| role.clone());
+    canvas.naming_role = Some(RoleNamingDraft {
+        from: Some(role.clone()),
+        step: RoleNamingStep::Id,
+        id: role,
+        name,
+    });
+    PresetAction::Flash("改名 · 编辑 id 后 Enter，再编辑显示名".into())
+}
+
+fn confirm_role_naming(ctx: &Context, canvas: &mut CanvasState) -> PresetAction {
+    let Some(draft) = canvas.naming_role.clone() else {
+        return PresetAction::None;
+    };
+    match draft.step {
+        RoleNamingStep::Id => {
+            let id = draft.id.trim().to_string();
+            if id.is_empty() {
+                return PresetAction::Flash("角色 id 不能为空".into());
+            }
+            if let Some(d) = canvas.naming_role.as_mut() {
+                d.id = id.clone();
+                if d.name.trim().is_empty() {
+                    d.name = id;
+                }
+                d.step = RoleNamingStep::Name;
+            }
+            PresetAction::Flash("输入显示名 · Enter 确认".into())
+        }
+        RoleNamingStep::Name => {
+            let id = draft.id.trim().to_string();
+            let name = {
+                let n = draft.name.trim();
+                if n.is_empty() {
+                    id.clone()
+                } else {
+                    n.to_string()
+                }
+            };
+            let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+                return PresetAction::Flash("Agent 预设服务未挂载".into());
+            };
+            let result = match &draft.from {
+                None => {
+                    if presets
+                        .get(&canvas.id)
+                        .map(|p| p.agents.contains_key(&id))
+                        .unwrap_or(false)
+                    {
+                        return PresetAction::Flash(format!("子代理 id 已存在: {id}"));
+                    }
+                    let def = SubagentDef {
+                        name: name.clone(),
+                        ..SubagentDef::default()
+                    };
+                    presets.upsert_subagent(&canvas.id, &id, def)
+                }
+                Some(from) if from == &id => {
+                    presets.rename_subagent(&canvas.id, from, &id, name.clone())
+                }
+                Some(from) => presets.rename_subagent(&canvas.id, from, &id, name.clone()),
+            };
+            if let Err(e) = result {
+                return PresetAction::Flash(e);
+            }
+            canvas.naming_role = None;
+            let roles = role_ids(ctx, canvas);
+            canvas.roles_sel = roles.iter().position(|r| r == &id).unwrap_or(0);
+            match &draft.from {
+                None => enter_role_editor(ctx, canvas, &id),
+                Some(_) => PresetAction::Flash(format!("已改名 {id}（{name}）")),
+            }
+        }
+    }
 }
 
 fn enter_role_editor(ctx: &Context, canvas: &mut CanvasState, role_id: &str) -> PresetAction {
@@ -210,6 +338,7 @@ fn enter_role_editor(ctx: &Context, canvas: &mut CanvasState, role_id: &str) -> 
     canvas.editing_role = Some(role_id.to_string());
     canvas.persona_draft = def.persona.clone();
     canvas.editing_persona = false;
+    canvas.naming_role = None;
     canvas.pane = PresetPane::Catalog;
     canvas.catalog_sel = 0;
     canvas.assigned_sel = 0;
@@ -217,9 +346,15 @@ fn enter_role_editor(ctx: &Context, canvas: &mut CanvasState, role_id: &str) -> 
     PresetAction::Flash(format!("编辑子代理 {role_id}"))
 }
 
-/// Esc: cancel persona edit → role editor → canvas; canvas → roster; roster → close.
+/// Esc: cancel naming draft → persona edit → role editor → canvas; canvas → roster; roster → close.
 /// Returns true when the overlay should close.
 pub fn on_esc(ctx: &Context, view: &mut PresetView) -> bool {
+    if let PresetView::Canvas(c) = view {
+        if c.naming_role.is_some() {
+            c.naming_role = None;
+            return false;
+        }
+    }
     if matches!(view, PresetView::Canvas(c) if c.editing_persona) {
         cancel_persona_edit(ctx, view);
         return false;
@@ -248,6 +383,7 @@ pub fn on_esc(ctx: &Context, view: &mut PresetView) -> bool {
 fn leave_role_editor(ctx: &Context, canvas: &mut CanvasState) {
     canvas.editing_role = None;
     canvas.editing_persona = false;
+    canvas.naming_role = None;
     canvas.pane = PresetPane::Roles;
     canvas.catalog_query.clear();
     canvas.persona_draft = ctx
@@ -300,6 +436,7 @@ pub fn accept(ctx: &Context, view: &mut PresetView) -> PresetAction {
                 Err(e) => PresetAction::Flash(e),
             }
         }
+        PresetView::Canvas(c) if c.naming_role.is_some() => confirm_role_naming(ctx, c),
         PresetView::Canvas(c) if c.editing_persona => {
             let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
                 return PresetAction::Flash("Agent 预设服务未挂载".into());
@@ -321,7 +458,7 @@ pub fn accept(ctx: &Context, view: &mut PresetView) -> PresetAction {
         PresetView::Canvas(c) if c.pane == PresetPane::Roles && c.editing_role.is_none() => {
             let roles = role_ids(ctx, c);
             let Some(role) = roles.get(c.roles_sel).cloned() else {
-                return PresetAction::Flash("没有子代理 · 按 n 新建".into());
+                return PresetAction::Flash("没有子代理 · 按 n 命名新建".into());
             };
             enter_role_editor(ctx, c, &role)
         }
@@ -472,6 +609,7 @@ pub fn on_canvas_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
         view,
         PresetView::Canvas(s)
             if !s.editing_persona
+                && !s.naming_active()
                 && s.pane == PresetPane::Assigned
                 && matches!(c, 'd' | 'D' | 'x' | 'X')
     );
@@ -483,6 +621,7 @@ pub fn on_canvas_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
         view,
         PresetView::Canvas(s)
             if !s.editing_persona
+                && !s.naming_active()
                 && (s.pane != PresetPane::Catalog || s.catalog_query.is_empty())
                 && matches!(c, 'r' | 'R')
     );
@@ -491,7 +630,7 @@ pub fn on_canvas_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
     }
 
     if let PresetView::Canvas(canvas) = view {
-        if canvas.editing_persona {
+        if canvas.editing_persona || canvas.naming_role.is_some() {
             return PresetAction::None;
         }
         if canvas.pane == PresetPane::Persona && matches!(c, 'e' | 'E') {
@@ -503,14 +642,8 @@ pub fn on_canvas_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
                 return PresetAction::Flash("Agent 预设服务未挂载".into());
             };
             match c {
-                'n' | 'N' => match presets.create_subagent(&canvas.id) {
-                    Ok((rid, _)) => {
-                        let roles = role_ids(ctx, canvas);
-                        canvas.roles_sel = roles.iter().position(|r| r == &rid).unwrap_or(0);
-                        enter_role_editor(ctx, canvas, &rid)
-                    }
-                    Err(e) => PresetAction::Flash(e),
-                },
+                'n' | 'N' => start_create_naming(canvas),
+                'm' | 'M' => start_rename_naming(ctx, canvas),
                 'x' | 'X' | 'd' | 'D' => {
                     let roles = role_ids(ctx, canvas);
                     let Some(role) = roles.get(canvas.roles_sel).cloned() else {
@@ -713,7 +846,7 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
         return hits;
     }
 
-    let identity_h = if canvas.editing_persona {
+    let identity_h = if canvas.editing_persona || canvas.naming_role.is_some() {
         content.height.saturating_sub(2).min(8).max(3)
     } else {
         6u16.min(content.height.saturating_sub(3)).max(3)
@@ -725,6 +858,11 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     hits.rows.push((PERSONA_HIT, persona_rect));
 
     if canvas.editing_persona {
+        return hits;
+    }
+
+    if canvas.naming_role.is_some() {
+        paint_naming_draft(buf, chunks[1], &theme, canvas);
         return hits;
     }
 
@@ -850,6 +988,63 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     hits
 }
 
+
+fn paint_naming_draft(buf: &mut Buffer, area: Rect, theme: &Theme, canvas: &CanvasState) {
+    let Some(draft) = canvas.naming_role.as_ref() else {
+        return;
+    };
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let title = match (&draft.from, draft.step) {
+        (None, RoleNamingStep::Id) => "命名新建 · 角色 id（ascii slug 或 1–16 汉字）",
+        (None, RoleNamingStep::Name) => "命名新建 · 显示名",
+        (Some(_), RoleNamingStep::Id) => "改名 · 角色 id（改 id 会迁移 agents/<id>.yml）",
+        (Some(_), RoleNamingStep::Name) => "改名 · 显示名",
+    };
+    let value = match draft.step {
+        RoleNamingStep::Id => draft.id.as_str(),
+        RoleNamingStep::Name => draft.name.as_str(),
+    };
+    let hint = "Enter 确认 · Esc 取消";
+    buf.set_style(area, Style::default().bg(theme.bg_visual));
+    buf.set_line(
+        area.x,
+        area.y,
+        &Line::from(Span::styled(
+            truncate_str(title, area.width as usize),
+            Style::default()
+                .fg(theme.accent_skill)
+                .bg(theme.bg_visual)
+                .add_modifier(Modifier::BOLD),
+        )),
+        area.width,
+    );
+    if area.height > 1 {
+        let shown = if value.is_empty() { "▌" } else { value };
+        buf.set_line(
+            area.x,
+            area.y + 1,
+            &Line::from(Span::styled(
+                truncate_str(shown, area.width as usize),
+                Style::default().fg(theme.text_primary).bg(theme.bg_visual),
+            )),
+            area.width,
+        );
+    }
+    if area.height > 2 {
+        buf.set_line(
+            area.x,
+            area.y + 2,
+            &Line::from(Span::styled(
+                truncate_str(hint, area.width as usize),
+                Style::default().fg(theme.gray).bg(theme.bg_visual),
+            )),
+            area.width,
+        );
+    }
+}
+
 fn render_roles_pane(
     ctx: &Context,
     buf: &mut Buffer,
@@ -865,7 +1060,7 @@ fn render_roles_pane(
         canvas.roles_sel.min(ids.len() - 1)
     };
     let header = format!(
-        "子代理角色 · {} · Enter/双击编辑 · n 新建 · x 删除",
+        "子代理角色 · {} · Enter/双击编辑 · n 命名新建 · m 改名 · x 删除",
         ids.len()
     );
     let rights: Vec<String> = ids
@@ -891,7 +1086,7 @@ fn render_roles_pane(
     let rows: Vec<PickerRow> = if ids.is_empty() {
         vec![PickerRow {
             label: "(无角色)",
-            right_label: "按 n 新建",
+            right_label: "按 n 命名新建",
             selected: true,
         }]
     } else {
@@ -1197,6 +1392,7 @@ mod tests {
             editing_persona: false,
             persona_draft: String::new(),
             editing_role: None,
+            naming_role: None,
             last_click: None,
         };
         let left: Vec<String> = catalog_rows(&ctx, &canvas)
@@ -1334,14 +1530,50 @@ mod tests {
             c.pane = PresetPane::Roles;
         }
         let action = on_canvas_char(&ctx, &mut view, 'n');
-        assert!(matches!(action, PresetAction::Flash(msg) if msg.contains("编辑子代理")));
+        assert!(
+            matches!(&action, PresetAction::Flash(msg) if msg.contains("角色 id")),
+            "{action:?}"
+        );
+        match &mut view {
+            PresetView::Canvas(c) => {
+                let draft = c.naming_role.as_mut().expect("naming draft");
+                assert!(draft.from.is_none());
+                assert_eq!(draft.step, RoleNamingStep::Id);
+                draft.id = "scout".into();
+            }
+            _ => panic!("expected canvas"),
+        }
+        let action = accept(&ctx, &mut view);
+        assert!(
+            matches!(&action, PresetAction::Flash(msg) if msg.contains("显示名")),
+            "{action:?}"
+        );
+        match &mut view {
+            PresetView::Canvas(c) => {
+                let draft = c.naming_role.as_mut().expect("naming draft");
+                assert_eq!(draft.step, RoleNamingStep::Name);
+                draft.name = "侦察".into();
+            }
+            _ => panic!("expected canvas"),
+        }
+        let action = accept(&ctx, &mut view);
+        assert!(
+            matches!(&action, PresetAction::Flash(msg) if msg.contains("编辑子代理")),
+            "{action:?}"
+        );
         match &view {
             PresetView::Canvas(c) => {
-                assert_eq!(c.editing_role.as_deref(), Some("role"));
+                assert!(c.naming_role.is_none());
+                assert_eq!(c.editing_role.as_deref(), Some("scout"));
                 assert_eq!(c.pane, PresetPane::Catalog);
             }
             _ => panic!("expected canvas"),
         }
+        let presets = ctx.get::<AgentPresets>(AGENT_PRESETS).unwrap();
+        assert_eq!(
+            presets.get("custom").unwrap().agents.get("scout").unwrap().name,
+            "侦察"
+        );
         // role starts with tools=None (all) → catalog empty; remove to open allowlist
         if let PresetView::Canvas(c) = &mut view {
             c.pane = PresetPane::Assigned;
