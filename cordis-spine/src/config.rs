@@ -519,13 +519,22 @@ pub fn persist_browser_headed_in(paths: &[PathBuf], headed: bool) -> Result<(), 
     })
 }
 
-/// Effective headed mode at Chromium launch: any non-empty `DOCK_BROWSER_HEADED` overrides to headed.
-pub fn effective_browser_headed() -> bool {
-    effective_browser_headed_with(std::env::var_os("DOCK_BROWSER_HEADED").is_some(), load_browser_headed())
+/// True when `DOCK_BROWSER_HEADED` is set to a **non-empty** value (after trim).
+/// Empty string / whitespace-only is treated as unset (use `[browser].headed` pref).
+pub fn dock_browser_headed_env_override() -> bool {
+    match std::env::var("DOCK_BROWSER_HEADED") {
+        Ok(v) => !v.trim().is_empty(),
+        Err(_) => false,
+    }
 }
 
-pub fn effective_browser_headed_with(env_set: bool, pref: bool) -> bool {
-    env_set || pref
+/// Effective headed mode at Chromium launch: any non-empty `DOCK_BROWSER_HEADED` overrides to headed.
+pub fn effective_browser_headed() -> bool {
+    effective_browser_headed_with(dock_browser_headed_env_override(), load_browser_headed())
+}
+
+pub fn effective_browser_headed_with(env_override: bool, pref: bool) -> bool {
+    env_override || pref
 }
 
 fn browser_persist_target(paths: &[PathBuf]) -> Result<PathBuf, String> {
@@ -1314,5 +1323,22 @@ default = "grok-4"
         assert!(effective_browser_headed_with(false, true));
         assert!(effective_browser_headed_with(true, true));
         assert!(!effective_browser_headed_with(false, false));
+    }
+
+    #[test]
+    fn dock_browser_headed_env_empty_is_unset() {
+        let prev = std::env::var_os("DOCK_BROWSER_HEADED");
+        std::env::remove_var("DOCK_BROWSER_HEADED");
+        assert!(!dock_browser_headed_env_override());
+        std::env::set_var("DOCK_BROWSER_HEADED", "");
+        assert!(!dock_browser_headed_env_override());
+        std::env::set_var("DOCK_BROWSER_HEADED", "   ");
+        assert!(!dock_browser_headed_env_override());
+        std::env::set_var("DOCK_BROWSER_HEADED", "1");
+        assert!(dock_browser_headed_env_override());
+        match prev {
+            Some(v) => std::env::set_var("DOCK_BROWSER_HEADED", v),
+            None => std::env::remove_var("DOCK_BROWSER_HEADED"),
+        }
     }
 }

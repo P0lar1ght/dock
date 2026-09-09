@@ -224,7 +224,7 @@ impl Browser {
             let pref_label = if pref { "有头" } else { "无头" };
             let eff_label = if effective { "有头" } else { "无头" };
             out.push_str(&format!("  偏好：{pref_label}（默认无头）\n"));
-            if std::env::var_os("DOCK_BROWSER_HEADED").is_some() {
+            if config::dock_browser_headed_env_override() {
                 out.push_str(&format!(
                     "  生效：{eff_label}（DOCK_BROWSER_HEADED 覆盖 → 有头）\n"
                 ));

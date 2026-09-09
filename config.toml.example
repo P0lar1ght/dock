@@ -89,7 +89,7 @@ api_key = "free"
 
 # --- Browser / BUA Chromium display ---
 # Default headless (CI-safe). Toggle from /browser with `h`, or set here.
-# DOCK_BROWSER_HEADED (any non-empty) overrides to headed at launch.
+# DOCK_BROWSER_HEADED (any non-empty) overrides to headed at launch; empty/unset → use [browser].headed.
 #
 # [browser]
 # headed = false
