@@ -247,7 +247,11 @@ pub(super) fn run_action(
             if matches!(overlay, Overlay::Presets(_)) {
                 // Catalog filter typing; bare `r` with empty filter is resync (#20).
                 let typing = match overlay {
-                    Overlay::Presets(PresetView::Canvas(s)) if s.editing_persona => true,
+                    Overlay::Presets(PresetView::Canvas(s))
+                        if s.editing_persona || s.naming_role.is_some() =>
+                    {
+                        true
+                    }
                     Overlay::Presets(PresetView::Canvas(s))
                         if s.pane == preset_overlay::PresetPane::Catalog =>
                     {
@@ -256,6 +260,20 @@ pub(super) fn run_action(
                     _ => false,
                 };
                 if typing {
+                    // CUA/crossterm often drops KeyCode::Enter; allow `;` / newline to
+                    // advance/confirm Roles naming drafts (printable, automation-friendly).
+                    let naming = matches!(
+                        overlay,
+                        Overlay::Presets(PresetView::Canvas(s)) if s.naming_role.is_some()
+                    );
+                    if naming && (c == ';' || c == '\n') {
+                        let action = match overlay {
+                            Overlay::Presets(view) => preset_overlay::accept(ctx, view),
+                            _ => PresetAction::None,
+                        };
+                        apply_preset_action(ctx, overlay, action);
+                        return Vec::new();
+                    }
                     overlay.push_char(c);
                     return Vec::new();
                 }
@@ -552,8 +570,17 @@ pub(super) fn run_action(
             }
             if matches!(
                 overlay,
+                Overlay::Presets(PresetView::Canvas(s)) if s.naming_role.is_some()
+            ) {
+                overlay.push_char(' ');
+                return Vec::new();
+            }
+            if matches!(
+                overlay,
                 Overlay::Presets(PresetView::Canvas(s))
-                    if !s.editing_persona && s.pane == preset_overlay::PresetPane::Catalog
+                    if !s.editing_persona
+                        && s.naming_role.is_none()
+                        && s.pane == preset_overlay::PresetPane::Catalog
             ) {
                 overlay.push_char(' ');
                 return Vec::new();
@@ -659,6 +686,12 @@ pub(super) fn run_action(
             return Vec::new();
         }
         Action::OverlayTab => {
+            if matches!(
+                overlay,
+                Overlay::Presets(PresetView::Canvas(s)) if s.naming_role.is_some()
+            ) {
+                return accept_overlay(ctx, overlay);
+            }
             if let Overlay::Presets(view) = overlay {
                 view.cycle_pane();
             }

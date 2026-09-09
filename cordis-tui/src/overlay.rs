@@ -12,7 +12,7 @@ use crate::grok::picker::{
 };
 use crate::grok::tasks_pane::GroupKind;
 use crate::plan_approval_view::PlanWrapCache;
-use crate::preset_overlay::{CanvasState, PresetPane, PresetView};
+use crate::preset_overlay::{CanvasState, PresetPane, PresetView, RoleNamingDraft, RoleNamingStep};
 use crate::settings_modal::SettingsField;
 use crate::slash::{ArgKind, SlashCmd};
 use crate::theme::Theme;
@@ -247,6 +247,24 @@ impl Overlay {
             | Self::Mcps { query, .. }
             | Self::Workflows { query, .. } => query,
             Self::Presets(PresetView::Canvas(CanvasState {
+                naming_role:
+                    Some(RoleNamingDraft {
+                        step: RoleNamingStep::Id,
+                        id,
+                        ..
+                    }),
+                ..
+            })) => id,
+            Self::Presets(PresetView::Canvas(CanvasState {
+                naming_role:
+                    Some(RoleNamingDraft {
+                        step: RoleNamingStep::Name,
+                        name,
+                        ..
+                    }),
+                ..
+            })) => name,
+            Self::Presets(PresetView::Canvas(CanvasState {
                 editing_persona: true,
                 persona_draft,
                 ..
@@ -403,6 +421,24 @@ impl Overlay {
                 draft,
                 ..
             } => Some(draft),
+            Self::Presets(PresetView::Canvas(CanvasState {
+                naming_role:
+                    Some(RoleNamingDraft {
+                        step: RoleNamingStep::Id,
+                        id,
+                        ..
+                    }),
+                ..
+            })) => Some(id),
+            Self::Presets(PresetView::Canvas(CanvasState {
+                naming_role:
+                    Some(RoleNamingDraft {
+                        step: RoleNamingStep::Name,
+                        name,
+                        ..
+                    }),
+                ..
+            })) => Some(name),
             Self::Presets(PresetView::Canvas(CanvasState {
                 editing_persona: true,
                 persona_draft,

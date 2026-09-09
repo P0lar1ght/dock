@@ -596,6 +596,55 @@ impl AgentPresets {
         })
     }
 
+    /// Rename a role id and/or display name. When `to_id` differs from `from`,
+    /// migrates memory + deletes `agents/<from>.yml` (persist writes the new file).
+    pub fn rename_subagent(
+        &self,
+        mode_id: &str,
+        from: &str,
+        to_id: &str,
+        name: String,
+    ) -> Result<(), String> {
+        if !valid_agent_type_id(to_id) {
+            return Err(format!(
+                "子代理 id 无效（ascii slug 或 1–16 汉字）: {to_id}"
+            ));
+        }
+        let id_changed = from != to_id;
+        self.mutate(mode_id, |preset| {
+            if id_changed {
+                if preset.agents.contains_key(to_id) {
+                    return Err(format!("子代理 id 已存在: {to_id}"));
+                }
+                let Some(mut def) = preset.agents.shift_remove(from) else {
+                    return Err(format!("没有子代理 {from}"));
+                };
+                def.name = name;
+                preset.agents.insert(to_id.to_string(), def);
+            } else {
+                let Some(def) = preset.agents.get_mut(from) else {
+                    return Err(format!("没有子代理 {from}"));
+                };
+                def.name = name;
+            }
+            Ok(())
+        })?;
+        if id_changed {
+            let inner = self.inner.lock().unwrap();
+            if let Some(preset) = inner.presets.get(mode_id) {
+                if preset.origin != PresetOrigin::Shipped && preset.broken.is_none() {
+                    let path = file_path(&inner, preset)
+                        .parent()
+                        .map(|p| p.join(AGENTS_DIR).join(format!("{from}.yml")));
+                    if let Some(path) = path {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn allows(&self, name: &str) -> bool {
         let inner = self.inner.lock().unwrap();
         let Some(preset) = inner.presets.get(&inner.current) else {
@@ -1832,6 +1881,77 @@ mod tests {
             !agents_dir.join("role.yml").exists(),
             "deleted role.yml should be removed"
         );
+    }
+
+    #[test]
+    fn upsert_subagent_custom_id_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        let mode = presets.create().unwrap();
+        let def = SubagentDef {
+            name: "侦察".into(),
+            ..SubagentDef::default()
+        };
+        presets.upsert_subagent(&mode.id, "scout", def).unwrap();
+        let got = presets.get(&mode.id).unwrap();
+        assert!(got.agents.contains_key("scout"));
+        assert_eq!(got.agents.get("scout").unwrap().name, "侦察");
+        let yml = dir.path().join(&mode.id).join("agents").join("scout.yml");
+        assert!(yml.is_file(), "custom id must land as agents/scout.yml");
+    }
+
+    #[test]
+    fn rename_subagent_migrates_agents_yml() {
+        let dir = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        let mode = presets.create().unwrap();
+        presets
+            .upsert_subagent(
+                &mode.id,
+                "old-role",
+                SubagentDef {
+                    name: "旧名".into(),
+                    persona: "keep".into(),
+                    ..SubagentDef::default()
+                },
+            )
+            .unwrap();
+        let agents_dir = dir.path().join(&mode.id).join("agents");
+        assert!(agents_dir.join("old-role.yml").is_file());
+        presets
+            .rename_subagent(&mode.id, "old-role", "new-role", "新名".into())
+            .unwrap();
+        let got = presets.get(&mode.id).unwrap();
+        assert!(!got.agents.contains_key("old-role"));
+        assert_eq!(got.agents.get("new-role").unwrap().name, "新名");
+        assert_eq!(got.agents.get("new-role").unwrap().persona, "keep");
+        assert!(
+            !agents_dir.join("old-role.yml").exists(),
+            "old agents yml must be removed on id rename"
+        );
+        assert!(agents_dir.join("new-role.yml").is_file());
+    }
+
+    #[test]
+    fn upsert_subagent_rejects_invalid_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        let mode = presets.create().unwrap();
+        let err = presets
+            .upsert_subagent(
+                &mode.id,
+                "Bad_ID",
+                SubagentDef {
+                    name: "x".into(),
+                    ..SubagentDef::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("无效"), "{err}");
+        let err = presets
+            .rename_subagent(&mode.id, "missing", "also Bad", "n".into())
+            .unwrap_err();
+        assert!(err.contains("无效"), "{err}");
     }
 
     #[test]

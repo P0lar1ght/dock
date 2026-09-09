@@ -141,10 +141,11 @@ impl Shortcuts {
         }
         if matches!(
             overlay,
-            Overlay::Presets(crate::preset_overlay::PresetView::Canvas(s)) if s.editing_persona
+            Overlay::Presets(crate::preset_overlay::PresetView::Canvas(s))
+                if s.editing_persona || s.naming_role.is_some()
         ) {
             return vec![
-                HintItem::new("Enter", "save"),
+                HintItem::new("Enter", "确认"),
                 HintItem::new("Esc", "cancel"),
             ];
         }
@@ -184,7 +185,9 @@ impl Shortcuts {
         ) {
             return vec![
                 HintItem::new("Enter/双击", "edit role"),
-                HintItem::new("n", "new role"),
+                HintItem::new("n", "命名新建"),
+                HintItem::new("m", "改名"),
+                HintItem::new(";/Tab", "确认命名"),
                 HintItem::new("x", "delete role"),
                 HintItem::new("Tab", "pane"),
                 HintItem::new("r", "resync"),
