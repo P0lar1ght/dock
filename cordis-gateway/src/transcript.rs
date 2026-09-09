@@ -205,6 +205,7 @@ impl Transcript {
                 name,
                 arguments,
                 content,
+                images: _,
             } => {
                 if !self.projector.turn_open {
                     self.ensure_turn();

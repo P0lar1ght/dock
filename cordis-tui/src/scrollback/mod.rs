@@ -760,6 +760,7 @@ fn build_frame(
                 name,
                 arguments,
                 content,
+                images: _,
             } => {
                 push_tool_card(
                     &mut lines,
@@ -1165,6 +1166,7 @@ mod tests {
             name: "read_file".into(),
             arguments: r#"{"target_file":"src/lib.rs","offset":1,"limit":20}"#.into(),
             content: "1→pub fn x() {}\n".into(),
+            images: vec![],
         }]);
         let text = plain(&lines);
         assert!(text.contains("Read "), "{text}");
@@ -1180,6 +1182,7 @@ mod tests {
             name: "update_goal".into(),
             arguments: r#"{"objective":"理解并分析 TUI"}"#.into(),
             content: r#"{"success":true,"summary":"Goal set: 理解并分析 TUI."}"#.into(),
+            images: vec![],
         }]);
         let text = plain(&lines);
         assert!(text.contains("Goal: 设定"), "{text}");
@@ -1197,6 +1200,7 @@ mod tests {
             name: "scheduler_create".into(),
             arguments: r#"{"interval":"5m","prompt":"检查部署","fire_immediately":true}"#.into(),
             content: "已设定 cron-1（every 5 minutes）".into(),
+            images: vec![],
         }]);
         let text = plain(&lines);
         assert!(text.contains("Loop: 设定"), "{text}");
@@ -1214,6 +1218,7 @@ mod tests {
             name: "task".into(),
             arguments: r#"{"prompt":"x","description":"观 观察","subagent_type":"观"}"#.into(),
             content: "Subagent started in background.\n         subagent_id: kid-1\n         type: 观\n         description: 观 观察\n".into(),
+            images: vec![],
         }]);
         let text = plain(&lines);
         assert!(text.contains("子代理"), "{text}");
@@ -1230,6 +1235,7 @@ mod tests {
             name: "subagent".into(),
             arguments: r#"{"prompt":"x","description":"观 观察","subagent_type":"观"}"#.into(),
             content: "Subagent started in background.\n         subagent_id: kid-2\n         type: 观\n         description: 观 观察\n".into(),
+            images: vec![],
         }]);
         let text = plain(&lines);
         assert!(text.contains("子代理"), "{text}");
@@ -1312,6 +1318,7 @@ mod tests {
             name: "bash".into(),
             arguments: r#"{"command":"sleep 9"}"#.into(),
             content: notice.into(),
+            images: vec![],
         }]);
         let text = plain(&lines);
         assert!(text.contains("任务"), "{text}");
@@ -1332,6 +1339,7 @@ mod tests {
             name: "list_dir".into(),
             arguments: r#"{"target_directory":"."}"#.into(),
             content: "MARKER.txt\nother".into(),
+            images: vec![],
         }]);
         let text = plain(&lines);
         assert!(text.contains('\u{25C6}'), "{text}");

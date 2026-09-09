@@ -35,6 +35,9 @@ pub enum LogEvent {
         name: String,
         arguments: String,
         content: String,
+        /// In-memory only for the live turn / HTTP builders. Persist stores
+        /// filesystem path refs, never raw bytes in JSONL.
+        images: Vec<UserImage>,
     },
 }
 
@@ -89,6 +92,21 @@ pub struct ToolResult {
     pub call_id: String,
     pub name: String,
     pub content: String,
+    /// Multimodal pixels for the next sample (screenshots / MCP images /
+    /// `read_file` on PNG). Empty for text-only tools. Not serialized as
+    /// base64 into the session transcript — see `session_persist` path refs.
+    pub images: Vec<UserImage>,
+}
+
+impl Default for ToolResult {
+    fn default() -> Self {
+        Self {
+            call_id: String::new(),
+            name: String::new(),
+            content: String::new(),
+            images: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

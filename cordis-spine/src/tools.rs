@@ -264,6 +264,7 @@ impl Tools {
                         call_id: call.id,
                         name: call.name,
                         content: blocked_tool_message().into(),
+                        ..Default::default()
                     },
                 );
             }
@@ -280,6 +281,7 @@ impl Tools {
                                 call_id: call.id,
                                 name: call.name,
                                 content: "计划模式已阻止：用户批准计划后使用 exit_plan_mode".into(),
+                                ..Default::default()
                             },
                         );
                     }
@@ -302,6 +304,7 @@ impl Tools {
                                 call_id: call.id,
                                 name: call.name,
                                 content: "权限被拒绝".into(),
+                                ..Default::default()
                             },
                         );
                     }
@@ -323,6 +326,7 @@ impl Tools {
                 call_id: call.id,
                 name: call.name,
                 content: "MCP 工具未启用或已关闭".into(),
+                ..Default::default()
             }
         } else {
             self.dispatch_local(exec, call).await
@@ -346,6 +350,7 @@ impl Tools {
             call_id: call.id,
             name: call.name,
             content: call.arguments,
+            ..Default::default()
         }
     }
 }
@@ -378,6 +383,20 @@ pub fn tool_result(call: ToolCall, content: impl Into<String>) -> ToolResult {
         call_id: call.id,
         name: call.name,
         content: content.into(),
+        ..Default::default()
+    }
+}
+
+pub fn tool_result_with_images(
+    call: ToolCall,
+    content: impl Into<String>,
+    images: Vec<crate::types::UserImage>,
+) -> ToolResult {
+    ToolResult {
+        call_id: call.id,
+        name: call.name,
+        content: content.into(),
+        images: crate::tool_images::cap_images(images),
     }
 }
 

@@ -189,10 +189,11 @@ fn extra_ping() -> cordis::Plugin {
             .unwrap();
         let body: cordis_spine::ToolBody = std::sync::Arc::new(|call| {
             Box::pin(async move {
-                cordis_spine::ToolResult {
+                                cordis_spine::ToolResult {
                     call_id: call.id,
                     name: call.name,
                     content: "pong".into(),
+                    ..Default::default()
                 }
             })
         });

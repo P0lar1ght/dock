@@ -4,6 +4,7 @@
 
 mod messages;
 mod responses;
+mod tool_images;
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -319,7 +320,7 @@ fn chat_body(
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "messages": messages(request, user_images),
+        "messages": messages(request, user_images, model),
         "stream": true,
         "stream_options": { "include_usage": true },
     });
@@ -408,24 +409,30 @@ fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
     other + ascii.saturating_add(3) / 4
 }
 
-fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Value> {
+fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str) -> Vec<Value> {
     let mut out = vec![json!({"role":"system","content": request.system})];
     let mut user_i = 0usize;
     let mut pending: Vec<String> = Vec::new();
+    // Images from this assistant turn's tool results — flushed once after all
+    // role:tool messages for the turn (API rejects tool/user/tool interleaving).
+    let mut pending_images: Vec<UserImage> = Vec::new();
     for event in &request.history {
         match event {
             LogEvent::User(text) => {
                 flush_unmatched_tools(&mut out, &mut pending);
+                flush_pending_tool_images(&mut out, &mut pending_images, model);
                 let images = user_images.get(user_i).cloned().unwrap_or_default();
                 user_i += 1;
                 out.push(user_message(text, &images));
             }
             LogEvent::SystemReminder(text) => {
                 flush_unmatched_tools(&mut out, &mut pending);
+                flush_pending_tool_images(&mut out, &mut pending_images, model);
                 out.push(user_message(text, &[]));
             }
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() => {
                 flush_unmatched_tools(&mut out, &mut pending);
+                flush_pending_tool_images(&mut out, &mut pending_images, model);
                 let tool_calls: Vec<Value> = llm
                     .tool_calls
                     .iter()
@@ -456,6 +463,7 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Valu
             }
             LogEvent::LlmStream(llm) if !llm.text.is_empty() || !llm.reasoning.is_empty() => {
                 flush_unmatched_tools(&mut out, &mut pending);
+                flush_pending_tool_images(&mut out, &mut pending_images, model);
                 let mut msg = json!({"role":"assistant","content": llm.text});
                 if !llm.reasoning.is_empty() {
                     msg["reasoning"] = json!(llm.reasoning);
@@ -463,20 +471,26 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>]) -> Vec<Valu
                 }
                 out.push(msg);
             }
-            LogEvent::ToolExecute { id, content, .. } => {
+            LogEvent::ToolExecute {
+                id,
+                content,
+                images,
+                ..
+            } => {
                 if let Some(i) = pending.iter().position(|p| p == id) {
                     pending.remove(i);
-                    out.push(json!({
-                        "role": "tool",
-                        "tool_call_id": id,
-                        "content": content,
-                    }));
+                    out.push(tool_images::chat_tool_message(id, content));
+                    pending_images.extend(images.iter().cloned());
+                    if pending.is_empty() {
+                        flush_pending_tool_images(&mut out, &mut pending_images, model);
+                    }
                 }
             }
             LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::LlmStream(_) => {}
         }
     }
     flush_unmatched_tools(&mut out, &mut pending);
+    flush_pending_tool_images(&mut out, &mut pending_images, model);
     out
 }
 
@@ -487,6 +501,16 @@ fn flush_unmatched_tools(out: &mut Vec<Value>, pending: &mut Vec<String>) {
             "tool_call_id": id,
             "content": INTERRUPTED_TOOL_RESULT,
         }));
+    }
+}
+
+fn flush_pending_tool_images(out: &mut Vec<Value>, pending_images: &mut Vec<UserImage>, model: &str) {
+    if pending_images.is_empty() {
+        return;
+    }
+    let images = std::mem::take(pending_images);
+    if let Some(msg) = tool_images::chat_tool_images_user(&images, model) {
+        out.push(msg);
     }
 }
 
@@ -647,12 +671,14 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                     content: "ok".into(),
+                
+                    images: Vec::new(),
                 },
                 LogEvent::User("follow-up".into()),
             ],
             tools: vec![],
         };
-        let msgs = messages(&req, &[]);
+        let msgs = messages(&req, &[], "grok-4");
         assert_eq!(msgs[1]["role"], "user");
         assert_eq!(msgs[2]["role"], "assistant");
         assert_eq!(msgs[3]["role"], "tool");
@@ -663,5 +689,266 @@ mod tests {
         assert_eq!(msgs[4]["content"], INTERRUPTED_TOOL_RESULT);
         assert_eq!(msgs[5]["role"], "user");
         assert_eq!(msgs[5]["content"], "follow-up");
+    }
+
+    #[test]
+    fn tool_result_emits_image_part() {
+        use std::sync::Arc;
+        let png = {
+            let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            v.extend_from_slice(&[0, 0, 0, 13]);
+            v.extend_from_slice(b"IHDR");
+            v.extend_from_slice(&1u32.to_be_bytes());
+            v.extend_from_slice(&1u32.to_be_bytes());
+            v.extend_from_slice(&[8, 2, 0, 0, 0]);
+            v.extend(std::iter::repeat(0u8).take(40));
+            v
+        };
+        let img = UserImage {
+            mime: "image/png".into(),
+            data: Arc::from(png.into_boxed_slice()),
+            width: 1,
+            height: 1,
+        };
+        let req = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "browser_screenshot".into(),
+                        arguments: "{}".into(),
+                    }],
+                    ..LlmOutput::default()
+                }),
+                LogEvent::ToolExecute {
+                    id: "c1".into(),
+                    name: "browser_screenshot".into(),
+                    arguments: "{}".into(),
+                    content: "saved /tmp/shot.png\nImage content included inline".into(),
+                    images: vec![img],
+                },
+            ],
+            tools: vec![],
+        };
+        let msgs = messages(&req, &[], "grok-4");
+        let tool = msgs.iter().find(|m| m["role"] == "tool").expect("tool msg");
+        assert_eq!(tool["content"], "saved /tmp/shot.png\nImage content included inline");
+        let user_img = msgs
+            .iter()
+            .find(|m| m["role"] == "user" && m["content"].is_array())
+            .expect("adjacent user with image");
+        let parts = user_img["content"].as_array().unwrap();
+        assert!(
+            parts.iter().any(|p| p["type"] == "image_url"),
+            "{parts:?}"
+        );
+    }
+
+    #[test]
+    fn tool_result_images_degraded_for_non_vision_model() {
+        use std::sync::Arc;
+        let png = {
+            let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            v.extend_from_slice(&[0, 0, 0, 13]);
+            v.extend_from_slice(b"IHDR");
+            v.extend_from_slice(&1u32.to_be_bytes());
+            v.extend_from_slice(&1u32.to_be_bytes());
+            v.extend_from_slice(&[8, 2, 0, 0, 0]);
+            v.extend(std::iter::repeat(0u8).take(40));
+            v
+        };
+        let img = UserImage {
+            mime: "image/png".into(),
+            data: Arc::from(png.into_boxed_slice()),
+            width: 1,
+            height: 1,
+        };
+        let req = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "browser_screenshot".into(),
+                        arguments: "{}".into(),
+                    }],
+                    ..LlmOutput::default()
+                }),
+                LogEvent::ToolExecute {
+                    id: "c1".into(),
+                    name: "browser_screenshot".into(),
+                    arguments: "{}".into(),
+                    content: "saved shot\nImage content included inline".into(),
+                    images: vec![img],
+                },
+            ],
+            tools: vec![],
+        };
+        let vision = messages(&req, &[], "grok-4");
+        assert!(
+            vision.iter().any(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"))
+            }),
+            "vision model should attach image parts: {vision:?}"
+        );
+        let text_only = messages(&req, &[], "deepseek-chat");
+        assert!(
+            !text_only.iter().any(|m| {
+                m["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"))
+            }),
+            "non-vision model must not attach image parts: {text_only:?}"
+        );
+        let tool = text_only
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool msg");
+        assert_eq!(tool["content"], "saved shot\nImage content included inline");
+    }
+
+    fn tiny_png() -> UserImage {
+        use std::sync::Arc;
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        v.extend_from_slice(&[0, 0, 0, 13]);
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&1u32.to_be_bytes());
+        v.extend_from_slice(&1u32.to_be_bytes());
+        v.extend_from_slice(&[8, 2, 0, 0, 0]);
+        v.extend(std::iter::repeat(0u8).take(40));
+        UserImage {
+            mime: "image/png".into(),
+            data: Arc::from(v.into_boxed_slice()),
+            width: 1,
+            height: 1,
+        }
+    }
+
+    /// Parallel dual tools in one turn; only one carries images.
+    /// Must be tool, tool, THEN one user — never tool/user/tool.
+    #[test]
+    fn parallel_tools_batch_images_after_all_tool_results() {
+        let img = tiny_png();
+        let req = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "c1".into(),
+                            name: "bash".into(),
+                            arguments: "{}".into(),
+                        },
+                        ToolCall {
+                            id: "c2".into(),
+                            name: "browser_screenshot".into(),
+                            arguments: "{}".into(),
+                        },
+                    ],
+                    ..LlmOutput::default()
+                }),
+                LogEvent::ToolExecute {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    content: "ok".into(),
+                    images: Vec::new(),
+                },
+                LogEvent::ToolExecute {
+                    id: "c2".into(),
+                    name: "browser_screenshot".into(),
+                    arguments: "{}".into(),
+                    content: "shot\nImage content included inline".into(),
+                    images: vec![img],
+                },
+            ],
+            tools: vec![],
+        };
+        let msgs = messages(&req, &[], "grok-4");
+        let roles: Vec<&str> = msgs
+            .iter()
+            .skip(1) // system
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "tool", "tool", "user"],
+            "expected tool,tool,user batching; got {roles:?} full={msgs:?}"
+        );
+        assert_eq!(msgs[3]["tool_call_id"], "c1");
+        assert_eq!(msgs[4]["tool_call_id"], "c2");
+        let parts = msgs[5]["content"].as_array().expect("batched user parts");
+        let n_images = parts.iter().filter(|p| p["type"] == "image_url").count();
+        assert_eq!(n_images, 1, "single tool's image only: {parts:?}");
+        // No interleaved user between the two tools.
+        assert!(
+            !(msgs[3]["role"] == "tool"
+                && msgs[4]["role"] == "user"
+                && msgs[5]["role"] == "tool"),
+            "must not interleave tool/user/tool"
+        );
+    }
+
+    #[test]
+    fn parallel_tools_both_with_images_batch_into_one_user() {
+        let img1 = tiny_png();
+        let img2 = tiny_png();
+        let req = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "c1".into(),
+                            name: "browser_screenshot".into(),
+                            arguments: "{}".into(),
+                        },
+                        ToolCall {
+                            id: "c2".into(),
+                            name: "computer_screenshot".into(),
+                            arguments: "{}".into(),
+                        },
+                    ],
+                    ..LlmOutput::default()
+                }),
+                LogEvent::ToolExecute {
+                    id: "c1".into(),
+                    name: "browser_screenshot".into(),
+                    arguments: "{}".into(),
+                    content: "shot1".into(),
+                    images: vec![img1],
+                },
+                LogEvent::ToolExecute {
+                    id: "c2".into(),
+                    name: "computer_screenshot".into(),
+                    arguments: "{}".into(),
+                    content: "shot2".into(),
+                    images: vec![img2],
+                },
+            ],
+            tools: vec![],
+        };
+        let msgs = messages(&req, &[], "grok-4");
+        let roles: Vec<&str> = msgs
+            .iter()
+            .skip(1)
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "tool", "tool", "user"],
+            "expected tool,tool,user; got {roles:?}"
+        );
+        let parts = msgs[5]["content"].as_array().expect("batched user parts");
+        let n_images = parts.iter().filter(|p| p["type"] == "image_url").count();
+        assert_eq!(n_images, 2, "both images in one user: {parts:?}");
     }
 }

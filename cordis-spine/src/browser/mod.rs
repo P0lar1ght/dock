@@ -20,7 +20,7 @@ use cordis::{plugin, Disposable, Inject, Plugin};
 
 use crate::names::{BROWSER, SLASH, TOOLS};
 use crate::slash::{ExtraSlashKind, Slash, SlashEntry};
-use crate::tools::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::{own_registered, tool_result, tool_result_with_images, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
 
 use session::ConnectedSession;
@@ -536,7 +536,32 @@ async fn run_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         other => Err(format!("unknown browser tool `{other}`")),
     };
     match result {
-        Ok(content) => tool_result(call, content),
+        Ok(content) => {
+            if call.name == "browser_screenshot" {
+                // Path stays in content for /browser cockpit; also load bytes.
+                let path = content
+                    .strip_prefix("saved ")
+                    .unwrap_or(content.as_str())
+                    .trim();
+                let mut images = Vec::new();
+                if let Some(img) = crate::tool_images::user_image_from_path(std::path::Path::new(path))
+                {
+                    images.push(img);
+                }
+                let body = if images.is_empty() {
+                    content
+                } else {
+                    format!(
+                        "{content}
+{}",
+                        crate::tool_images::IMAGE_INLINE_PLACEHOLDER
+                    )
+                };
+                tool_result_with_images(call, body, images)
+            } else {
+                tool_result(call, content)
+            }
+        }
         Err(e) => {
             let msg = if e.starts_with("Error:") {
                 e
