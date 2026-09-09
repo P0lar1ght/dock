@@ -103,6 +103,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 - `doctor` 应见 `display server: X11` + `X11 connection: connected`。若 `[warn] AT-SPI: accessibility bus not reachable`：装 `at-spi2-core`，确保用户会话有 D-Bus；GNOME 可再开 `gsettings set org.gnome.desktop.interface toolkit-accessibility true`。AT-SPI 弱时 `get_window_state` / a11y 树不可靠，点按仍可能走几何。
 - 验收常用 MCP 名（公名前缀 `mcp_cua-driver__`）：`list_apps` / `list_windows` / `launch_app`、`click` / `double_click` / `right_click` / `drag` / `scroll`、`type_text` / `press_key` / `hotkey`、`get_accessibility_tree` / `get_desktop_state` / `get_screen_size`、`bring_to_front` / `invoke_menu`。driver 另暴露 `browser_*`——**不要**当 Dock BUA 用。
 - 无图形会话 / 纯 SSH 无 `DISPLAY`：`doctor` 会挂；CI 不要默认跑 cua-driver 实机。本机可用既有 X11/Xvfb，但 AT-SPI 仍要会话总线。
+- **办公链 S3（完整 CUA 重测）**：开 `mousepad` → `bring_to_front` → `type_text` → **`hotkey` `ctrl+s`（`delivery_mode=foreground`）** 落盘 `/tmp/...`；`invoke_menu` 仅 AT-SPI 绿时可选；再用 `verify_state` + 读文件确认。固定步骤见验收台 `dock-cua-accept/S3_REPRO.md`。包已装仍 warn 时勿只靠菜单。
 - 安装脚本：`https://cua.ai/driver/install.sh` → 常落到 `~/.local/bin/cua-driver`；`mcp-config` 的 JSON `command` 可直接抄进 Dock。
 
 安装（Linux 示例）：
