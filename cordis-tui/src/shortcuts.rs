@@ -158,6 +158,7 @@ impl Shortcuts {
                 HintItem::new("单击", "select"),
                 HintItem::new("Tab", "pane"),
                 HintItem::new("type", "filter"),
+                HintItem::new("r", "resync"),
                 HintItem::new("Esc", "back"),
             ];
         }
@@ -171,6 +172,7 @@ impl Shortcuts {
                 HintItem::new("单击", "select"),
                 HintItem::new("Tab", "pane"),
                 HintItem::new("x", "remove"),
+                HintItem::new("r", "resync"),
                 HintItem::new("Esc", "back"),
             ];
         }
@@ -185,6 +187,7 @@ impl Shortcuts {
                 HintItem::new("n", "new role"),
                 HintItem::new("x", "delete role"),
                 HintItem::new("Tab", "pane"),
+                HintItem::new("r", "resync"),
                 HintItem::new("Esc", "back"),
             ];
         }
@@ -195,6 +198,7 @@ impl Shortcuts {
             return vec![
                 HintItem::new("Enter", "edit"),
                 HintItem::new("Tab", "pane"),
+                HintItem::new("r", "resync"),
                 HintItem::new("Esc", "back"),
             ];
         }
@@ -205,6 +209,7 @@ impl Shortcuts {
                 HintItem::new("d", "duplicate"),
                 HintItem::new("x", "delete mode"),
                 HintItem::new("a", "apply"),
+                HintItem::new("r", "resync"),
                 HintItem::new("Esc", "close"),
             ];
         }
