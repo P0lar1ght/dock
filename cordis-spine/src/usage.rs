@@ -104,6 +104,33 @@ impl UsageTotals {
         self.cost_missing_calls = self.cost_missing_calls.saturating_add(*cost_missing_calls);
         self.cost_usd_ticks = merge_cost_ticks(self.cost_usd_ticks, *cost_usd_ticks);
     }
+
+    /// This total minus `earlier` (saturating per counter).
+    fn saturating_sub(&self, earlier: &UsageTotals) -> UsageTotals {
+        UsageTotals {
+            input_tokens: self.input_tokens.saturating_sub(earlier.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(earlier.output_tokens),
+            cached_read_tokens: self
+                .cached_read_tokens
+                .saturating_sub(earlier.cached_read_tokens),
+            cache_creation_tokens: self
+                .cache_creation_tokens
+                .saturating_sub(earlier.cache_creation_tokens),
+            reasoning_tokens: self
+                .reasoning_tokens
+                .saturating_sub(earlier.reasoning_tokens),
+            model_calls: self.model_calls.saturating_sub(earlier.model_calls),
+            api_duration_ms: self.api_duration_ms.saturating_sub(earlier.api_duration_ms),
+            cost_usd_ticks: match (self.cost_usd_ticks, earlier.cost_usd_ticks) {
+                (None, _) => None,
+                (Some(now), None) => Some(now),
+                (Some(now), Some(before)) => Some(now.saturating_sub(before)),
+            },
+            cost_missing_calls: self
+                .cost_missing_calls
+                .saturating_sub(earlier.cost_missing_calls),
+        }
+    }
 }
 
 fn merge_cost_ticks(a: Option<i64>, b: Option<i64>) -> Option<i64> {
@@ -149,6 +176,27 @@ impl UsageLedger {
         }
         if incomplete {
             self.incomplete = true;
+        }
+    }
+
+    /// Usage accumulated since `earlier`, per model. A continuable child keeps
+    /// one cumulative ledger across turns, so re-folding the whole thing every
+    /// turn would bill the parent multiplicatively; the runner folds this delta
+    /// instead.
+    pub fn delta_since(&self, earlier: &UsageLedger) -> UsageLedger {
+        let by_model = self
+            .by_model
+            .iter()
+            .map(|(model_id, totals)| {
+                let before = earlier.by_model.get(model_id).cloned().unwrap_or_default();
+                (model_id.clone(), totals.saturating_sub(&before))
+            })
+            .filter(|(_, totals)| *totals != UsageTotals::default())
+            .collect();
+        UsageLedger {
+            by_model,
+            incomplete: self.incomplete && !earlier.incomplete,
+            ..Default::default()
         }
     }
 
