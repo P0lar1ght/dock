@@ -12,7 +12,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # gateway 测试打 loopback HTTP；代理环境必须放行回环地址，否则会成片 502。
-  no_proxy: "127.0.0.1,localhost,[::1]"
+  # 注意 env 的 key 大小写不敏感，不能同时写 no_proxy 和 NO_PROXY。
   NO_PROXY: "127.0.0.1,localhost,[::1]"
 
 jobs:

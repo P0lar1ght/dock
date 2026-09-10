@@ -76,6 +76,14 @@ cargo test --locked -p cordis-spine -- --skip browser:: --test-threads=1
 
 工具链用 rustup 的 stable，仓库下限由 `[workspace.package].rust-version` 兜底。代理环境要放行回环地址（见上文 `no_proxy`）。
 
+改 workflow 后先本地校验：
+
+```bash
+actionlint .github/workflows/ci.yml
+```
+
+`env` 的 key 大小写不敏感，`no_proxy` 与 `NO_PROXY` 同时写会被判重复 key，workflow 整体解析失败。
+
 CI 不跑的三类：
 
 - `cordis-spine` 的 `browser::tests`：要真实 Chrome 与 UI 快照，跑在无图形会话里不稳定。
