@@ -915,15 +915,14 @@ impl AgentPresets {
         lines.join("\n")
     }
 
-    /// Close `subagent` / `task` `subagent_type` to the live roster so the
-    /// sampler cannot fall back to a trained three-type enum.
+    /// Close the `task` `subagent_type` to the live roster so the sampler
+    /// cannot fall back to a trained three-type enum, and append the roster
+    /// hint to its description.
     pub fn bind_spawn_schema(&self, spec: &mut ToolSpec) {
-        if spec.name != "subagent" && spec.name != "task" {
+        if spec.name != "task" {
             return;
         }
-        if spec.name == "subagent" {
-            spec.description.push_str(&self.subagent_role_hint());
-        }
+        spec.description.push_str(&self.subagent_role_hint());
         let roster = self.current_roster();
         if roster.is_empty() {
             return;
@@ -1765,7 +1764,6 @@ mod tests {
         assert!(presets.allows("lsp"));
         assert!(presets.allows("skill"));
         assert!(presets.allows("task"));
-        assert!(presets.allows("subagent"));
         assert!(presets.allows("send_message"));
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
@@ -1796,11 +1794,10 @@ mod tests {
         presets.apply(WARDEN_PRESET_ID).unwrap();
         assert!(presets.allows("bash"));
         assert!(presets.allows("run_terminal_cmd"));
-        assert!(presets.allows("subagent"));
+        assert!(presets.allows("task"));
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
         assert!(!presets.allows("browser_open"));
-        assert!(!presets.allows("task"));
         assert!(!presets.allows("get_task_output"));
         assert!(!presets.allows("wait_tasks"));
         assert!(!presets.allows("kill_task"));
@@ -2454,7 +2451,7 @@ mod tests {
         assert!(presets.subagent("review").is_some());
 
         let mut spec = ToolSpec {
-            name: "subagent".into(),
+            name: "task".into(),
             description: "Delegate".into(),
             parameters_json: r#"{"type":"object","properties":{"subagent_type":{"type":"string"}},"required":["subagent_type"]}"#.into(),
         };

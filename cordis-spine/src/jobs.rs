@@ -257,7 +257,7 @@ pub fn tool_jobs() -> Plugin {
                     tools.register(
                         ToolSpec {
                             name: "get_task_output".into(),
-                            description: "Get output and status from a background terminal command.\n- Pass task_ids with one or more ids from is_background=true commands; omit timeout_ms or pass 0 for a non-blocking snapshot.".into(),
+                            description: "Get output and status from a background terminal command or a subagent.\n- Pass task_ids with one or more ids from is_background=true commands or a task spawn subagent_id; omit timeout_ms or pass 0 for a non-blocking snapshot.\n- A subagent pushes its turn end to you, so poll only when you need the result now.".into(),
                             parameters_json: OUTPUT_PARAMS.into(),
                         },
                         output,
@@ -265,7 +265,7 @@ pub fn tool_jobs() -> Plugin {
                     tools.register(
                         ToolSpec {
                             name: "wait_tasks".into(),
-                            description: "Wait until background tasks complete. Prefer get_task_output with a positive timeout_ms.".into(),
+                            description: "Wait until background commands or subagents complete. Prefer get_task_output with a positive timeout_ms.".into(),
                             parameters_json: WAIT_PARAMS.into(),
                         },
                         wait,
@@ -273,7 +273,7 @@ pub fn tool_jobs() -> Plugin {
                     tools.register(
                         ToolSpec {
                             name: "kill_task".into(),
-                            description: "Terminate a running background terminal command. Sends SIGTERM/SIGKILL to a background command.".into(),
+                            description: "Terminate a running background terminal command, or dispose a live subagent. For a subagent, use interrupt_agent instead when you only want to stop its current turn.".into(),
                             parameters_json: KILL_PARAMS.into(),
                         },
                         kill,
@@ -312,14 +312,6 @@ fn render_snap(s: &JobSnapshot) -> String {
     format!("[{status}] {} {}\n{}", s.id, s.command, s.output)
 }
 
-fn mailbox_poll_error(id: &str) -> String {
-    format!(
-        "Error: {id} is a continuable subagent started with the subagent tool. \
-         Do not use get_task_output / wait_tasks. The child reports with report; \
-         you receive a system-reminder. Follow up with send_message / list_agents."
-    )
-}
-
 async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     let (ids, timeout) = parse_ids(&call.arguments);
     let jobs = ctx.get::<Jobs>(JOBS);
@@ -330,12 +322,7 @@ async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
             parts.extend(jobs.list().iter().map(render_snap));
         }
         if let Some(sub) = &sub {
-            parts.extend(
-                sub.list()
-                    .iter()
-                    .filter(|s| !s.mailbox)
-                    .map(render_subagent),
-            );
+            parts.extend(sub.list().iter().map(render_subagent));
         }
         if parts.is_empty() {
             return tool_result(call, "No background tasks exist in this session.");
@@ -364,14 +351,6 @@ async fn kill_task(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         return tool_result(call, "Error: task_id is required");
     };
     if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
-        if sub.mailbox_child(id) {
-            return tool_result(
-                call,
-                format!(
-                    "Error: {id} is a continuable subagent. Stop its turn with interrupt_agent, not kill_task."
-                ),
-            );
-        }
         if let Some(msg) = sub.kill(id) {
             return tool_result(call, msg);
         }
@@ -395,10 +374,6 @@ async fn collect_output(
         let mut parts = Vec::new();
         let mut all_done = true;
         for id in ids {
-            if sub.is_some_and(|s| s.mailbox_child(id)) {
-                parts.push(mailbox_poll_error(id));
-                continue;
-            }
             if let Some(s) = sub.and_then(|s| s.snapshot(id)) {
                 if s.running() {
                     all_done = false;
@@ -416,11 +391,10 @@ async fn collect_output(
             }
         }
         if timeout_ms == 0 || all_done || tokio::time::Instant::now() >= deadline {
+            // The parent has the result now, so drop the redundant turn-end
+            // notice for whatever it just collected.
             if let Some(sub) = sub {
                 for id in ids {
-                    if sub.mailbox_child(id) {
-                        continue;
-                    }
                     if sub.snapshot(id).is_some_and(|s| !s.running()) {
                         sub.consume_completion(id);
                     }

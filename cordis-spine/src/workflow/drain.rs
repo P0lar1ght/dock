@@ -19,7 +19,6 @@ use super::grok_tool::{
 };
 use super::registry::{resolve_by_name, resolve_by_path, resolve_inline, ResolveError};
 use crate::names::SUBAGENTS;
-use crate::task::types::{SubagentCapabilityMode, SubagentRuntimeOverrides};
 use crate::task::Subagents;
 
 #[derive(Clone, Debug)]
@@ -385,18 +384,18 @@ async fn spawn_agent(
         .as_deref()
         .unwrap_or("general-purpose")
         .to_string();
-    let overrides = SubagentRuntimeOverrides {
-        model: opts.model.clone(),
-        reasoning_effort: opts.effort.clone(),
-        capability_mode: parse_capability(opts.capability_mode.as_deref()),
-        output_schema: opts.output_schema.clone(),
-        output_token_budget: opts.max_output_tokens,
-        ..Default::default()
-    };
+    if opts.model.is_some()
+        || opts.effort.is_some()
+        || opts.capability_mode.is_some()
+        || opts.max_output_tokens.is_some()
+    {
+        tracing::debug!(
+            "workflow agent() model/effort/capability/max_output_tokens are ignored; \
+             dock children share the parent model and full toolset"
+        );
+    }
     let started = Instant::now();
-    let snap = sub
-        .spawn_and_wait_with(prompt, description, subagent_type, overrides)
-        .await;
+    let snap = sub.spawn_and_wait(prompt, description, subagent_type).await;
     Ok(AgentResult {
         agent_id: snap.id,
         success: !snap.cancelled && snap.done,
@@ -405,16 +404,6 @@ async fn spawn_agent(
         tokens_used: 0,
         duration_ms: started.elapsed().as_millis() as u64,
     })
-}
-
-fn parse_capability(raw: Option<&str>) -> Option<SubagentCapabilityMode> {
-    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("read-only") | Some("readonly") => Some(SubagentCapabilityMode::ReadOnly),
-        Some("read-write") | Some("readwrite") => Some(SubagentCapabilityMode::ReadWrite),
-        Some("execute") => Some(SubagentCapabilityMode::Execute),
-        Some("all") => Some(SubagentCapabilityMode::All),
-        _ => None,
-    }
 }
 
 fn append_output_schema(prompt: &str, schema: &serde_json::Value) -> String {
@@ -501,14 +490,5 @@ mod tests {
         assert_eq!(fenced["claim"], "x");
         let plain = agent_output_value("not json");
         assert_eq!(plain, serde_json::json!("not json"));
-    }
-
-    #[test]
-    fn read_only_capability_maps() {
-        assert_eq!(
-            parse_capability(Some("read-only")),
-            Some(SubagentCapabilityMode::ReadOnly)
-        );
-        assert_eq!(parse_capability(Some("nope")), None);
     }
 }

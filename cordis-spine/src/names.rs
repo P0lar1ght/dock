@@ -13,7 +13,8 @@ pub const ASK: &str = "ask";
 pub const PLAN_MODE: &str = "planMode";
 /// MCP connection status for `/mcps`. Tools register into `"tools"`.
 pub const MCP: &str = "mcp";
-/// Subagent coordinator (`ctx.subagents`). `tool-task` provides it; `task` and `tool-subagent` live-look it.
+/// Subagent coordinator (`ctx.subagents`). `tool-task` provides it; the
+/// spawn + mailbox tools live-look it.
 pub const SUBAGENTS: &str = "subagents";
 /// Local memory files (`ctx.memory`).
 pub const MEMORY: &str = "memory";

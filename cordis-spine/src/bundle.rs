@@ -26,7 +26,7 @@ use crate::session::sessions;
 use crate::settings::settings;
 use crate::skills::{skills, tool_skills};
 use crate::slash::slash;
-use crate::task::{tool_subagent, tool_task};
+use crate::task::{tool_task, TaskConfig};
 use crate::todo_write::tool_todo;
 use crate::tool_cordis::tool_cordis;
 use crate::tools::{tools, workspace_tools};
@@ -113,8 +113,9 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_ask_user(), ())?.wait().await?;
     ctx.plugin(tool_jobs(), ())?.wait().await?;
     ctx.plugin(tool_scheduler(), ())?.wait().await?;
-    ctx.plugin(tool_task(), ())?.wait().await?;
-    ctx.plugin(tool_subagent(), ())?.wait().await?;
+    ctx.plugin(tool_task(), TaskConfig::default())?
+        .wait()
+        .await?;
     ctx.plugin(tool_memory(), ())?.wait().await?;
     ctx.plugin(tool_monitor(), ())?.wait().await?;
     ctx.plugin(tool_goal(), ())?.wait().await?;

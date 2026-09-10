@@ -134,7 +134,8 @@ pub use slash::{
     RESERVED_SLASH,
 };
 pub use stream_acc::StreamDelta;
-pub use task::{tool_subagent, tool_task, SubagentSnap, Subagents};
+pub use task::admission::SubagentLimits;
+pub use task::{tool_task, SubagentSnap, Subagents, TaskConfig};
 pub use todo_write::{tool_todo, TodoItem, TodoStatus, Todos};
 pub use tool_cordis::tool_cordis;
 pub use tool_images::{

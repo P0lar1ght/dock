@@ -31,7 +31,6 @@ tools:
   - memory_get
   - update_goal
   - task
-  - subagent
   - send_message
   - list_agents
   - interrupt_agent

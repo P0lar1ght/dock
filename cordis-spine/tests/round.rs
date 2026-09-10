@@ -321,7 +321,6 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "bash",
         "list_dir",
         "task",
-        "subagent",
         "send_message",
         "list_agents",
         "interrupt_agent",

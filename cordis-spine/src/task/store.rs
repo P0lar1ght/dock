@@ -2,10 +2,10 @@
 
 #![allow(dead_code)] // Grok-copied API kept for later wiring.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cordis::Disposable;
 use tokio::sync::Notify;
@@ -35,6 +35,9 @@ pub(super) struct ChildSlot {
     pub urgent: Mutex<Option<String>>,
     pub(crate) wake: Notify,
     pub started_at: Instant,
+    /// When the child last parked idle; `None` while it is running. Drives the
+    /// idle sweep.
+    pub parked_at: Mutex<Option<Instant>>,
     pub owner: SubagentOwner,
     /// True if `report` ran during the current child turn.
     pub reported_this_turn: AtomicBool,
@@ -45,7 +48,14 @@ impl ChildSlot {
         *self.life.lock().unwrap()
     }
 
+    pub(crate) fn disposed(&self) -> bool {
+        self.dispose.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn set_life(&self, life: SubagentLife) {
+        if life == SubagentLife::Running {
+            *self.parked_at.lock().unwrap() = None;
+        }
         *self.life.lock().unwrap() = life;
     }
 }
@@ -59,22 +69,24 @@ pub(super) struct ChildStore {
 
 struct ParentInbox {
     notices: VecDeque<ParentNotice>,
-    /// First-turn idle already queued or consumed via `get_task_output`.
-    first_idle: HashSet<String>,
 }
 
+/// Parent-facing notice, drained by the session actor into a hidden mailbox
+/// turn (`LogEvent::SystemReminder`).
 #[derive(Clone, Debug)]
 pub(super) enum ParentNotice {
-    Report {
-        from: String,
-        output: String,
-    },
-    FirstIdle {
+    /// Child called `report` during its turn.
+    Report { from: String, output: String },
+    /// One per finished child turn: the child is idle and can be continued.
+    TurnEnd {
         id: String,
         subagent_type: String,
         description: String,
         duration_ms: u64,
         cancelled: bool,
+        /// The child's turn text, carried when it did not `report` this turn so
+        /// the parent is not left waiting on an empty notice.
+        output: Option<String>,
     },
 }
 
@@ -84,7 +96,6 @@ impl ChildStore {
             inner: Arc::new(Mutex::new(HashMap::new())),
             inbox: Arc::new(Mutex::new(ParentInbox {
                 notices: VecDeque::new(),
-                first_idle: HashSet::new(),
             })),
             parent_wake: Arc::new(Notify::new()),
         }
@@ -130,6 +141,7 @@ impl ChildStore {
             urgent: Mutex::new(None),
             wake: Notify::new(),
             started_at: Instant::now(),
+            parked_at: Mutex::new(None),
             owner,
             reported_this_turn: AtomicBool::new(false),
         });
@@ -207,6 +219,7 @@ impl ChildStore {
             slot.cancelled.store(true, Ordering::Relaxed);
         }
         *slot.output.lock().unwrap() = output;
+        *slot.parked_at.lock().unwrap() = Some(Instant::now());
         slot.set_life(SubagentLife::Idle);
         slot.wake.notify_waiters();
     }
@@ -342,7 +355,7 @@ impl ChildStore {
                 from: from.to_string(),
                 output: output.to_string(),
             });
-        self.parent_wake.notify_waiters();
+        self.notify_parent();
     }
 
     pub fn reset_reported(&self, id: &str) {
@@ -352,50 +365,74 @@ impl ChildStore {
     }
 
     /// Mailbox children that end a turn without `report` still reach the parent.
-    pub fn forward_unreported_turn(&self, id: &str, output: &str) {
+    ///
+    /// One notice per finished turn: the child is idle and continuable, plus
+    /// its turn text when it did not `report` (the parent cannot see assistant
+    /// text otherwise). Callers that already delivered the result inline
+    /// ([`Self::consume_completion`]) drop it again.
+    pub fn push_turn_end(&self, id: &str, output: Option<String>, cancelled: bool) {
         let Some(slot) = self.get(id) else {
             return;
         };
-        if slot.owner != SubagentOwner::Subagent {
-            return;
-        }
-        if slot.reported_this_turn.load(Ordering::Relaxed) {
-            return;
-        }
-        self.push_report(id, &super::format::format_unreported_turn(output));
-    }
-
-    /// Grok completion reminder: first park after spawn, once.
-    pub fn queue_first_idle(&self, id: &str) {
-        let Some(slot) = self.get(id) else {
-            return;
-        };
-        let mut inbox = self.inbox.lock().unwrap();
-        if !inbox.first_idle.insert(id.to_string()) {
-            return;
-        }
-        inbox.notices.push_back(ParentNotice::FirstIdle {
+        let notice = ParentNotice::TurnEnd {
             id: id.to_string(),
             subagent_type: slot.subagent_type.clone(),
             description: slot.description.clone(),
             duration_ms: slot.started_at.elapsed().as_millis() as u64,
-            cancelled: slot.cancelled.load(Ordering::Relaxed),
-        });
-        drop(inbox);
-        self.parent_wake.notify_waiters();
+            cancelled,
+            output,
+        };
+        self.inbox.lock().unwrap().notices.push_back(notice);
+        self.notify_parent();
     }
 
+    /// Drop the queued turn-end notice for `id`: the caller already has the
+    /// result (inline foreground spawn, or a `get_task_output` poll).
     pub fn consume_completion(&self, id: &str) {
-        let mut inbox = self.inbox.lock().unwrap();
-        inbox.first_idle.insert(id.to_string());
-        inbox.notices.retain(|n| match n {
-            ParentNotice::FirstIdle { id: queued, .. } => queued != id,
-            ParentNotice::Report { .. } => true,
-        });
+        self.inbox
+            .lock()
+            .unwrap()
+            .notices
+            .retain(|n| !matches!(n, ParentNotice::TurnEnd { id: queued, .. } if queued == id));
     }
 
     pub fn drain_notices(&self) -> Vec<ParentNotice> {
         self.inbox.lock().unwrap().notices.drain(..).collect()
+    }
+
+    /// Dispose children that have been idle and unaddressed for longer than
+    /// `ttl`. Their slot and transcript survive, so `get_task_output` and
+    /// `resume_from` keep working.
+    pub fn sweep_idle(&self, ttl: Duration) -> Vec<String> {
+        let mut swept = Vec::new();
+        for (id, slot) in self.inner.lock().unwrap().iter() {
+            if slot.life() != SubagentLife::Idle || slot.disposed() {
+                continue;
+            }
+            let parked = *slot.parked_at.lock().unwrap();
+            if !parked.is_some_and(|at| at.elapsed() >= ttl) {
+                continue;
+            }
+            if slot.queued.lock().unwrap().is_empty() && slot.urgent.lock().unwrap().is_none() {
+                swept.push(id.clone());
+            }
+        }
+        for id in &swept {
+            let output = self
+                .get(id)
+                .map(|s| s.output.lock().unwrap().clone())
+                .unwrap_or_default();
+            self.dispose(id, output, false);
+        }
+        swept
+    }
+
+    /// Wake the parent actor. `notify_one` stores a permit so a notice pushed
+    /// in the window between the actor's `has_parent_notices` check and its
+    /// `notified()` registration is not lost.
+    fn notify_parent(&self) {
+        self.parent_wake.notify_waiters();
+        self.parent_wake.notify_one();
     }
 }
 
@@ -424,6 +461,5 @@ pub(super) fn snap(id: &str, s: &ChildSlot) -> SubagentSnap {
         cancelled: s.cancelled.load(Ordering::Relaxed),
         output: s.output.lock().unwrap().clone(),
         started_at: s.started_at,
-        mailbox: matches!(s.owner, SubagentOwner::Subagent),
     }
 }

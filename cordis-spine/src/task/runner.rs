@@ -18,17 +18,15 @@ use crate::types::{LogEvent, TurnOutcome};
 
 use super::coordinator::{
     ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, SendBoxFuture,
-    StartedChild, SubagentProgress,
+    StartedChild,
 };
 use super::interjection::format_interjection;
 use super::store::ChildStore;
-use super::types::{
-    SubagentDescribeOutcome, SubagentOwner, SubagentResult, SubagentTypeSummary,
-    SubagentValidateTypeOutcome,
-};
+use super::types::{SubagentResult, SubagentValidateTypeOutcome};
 use super::{current_depth, SubagentLife, DEPTH};
 
-pub(super) const PARENT_SESSION_ID: &str = "dock";
+/// Session id carried by every child spawn (see [`crate::session::ROOT_IDENTITY`]).
+pub(super) const PARENT_SESSION_ID: &str = crate::session::ROOT_IDENTITY;
 
 pub(super) struct DockChildControl {
     turn: Arc<TurnControl>,
@@ -37,12 +35,6 @@ pub(super) struct DockChildControl {
 }
 
 impl ChildControl for DockChildControl {
-    type ProgressFuture = std::future::Ready<SubagentProgress>;
-
-    fn progress(&self) -> Self::ProgressFuture {
-        std::future::ready(SubagentProgress::default())
-    }
-
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
         self.turn.cancel();
@@ -57,10 +49,8 @@ pub(super) struct DockChildRunner {
 
 impl ChildRunner for DockChildRunner {
     type Control = DockChildControl;
-    type CompletionData = ();
-    type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
+    type RunFuture = SendBoxFuture<ChildRunOutput>;
     type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
-    type DescribeFuture = SendBoxFuture<SubagentDescribeOutcome>;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
         let parent = self.ctx.clone();
@@ -77,29 +67,7 @@ impl ChildRunner for DockChildRunner {
         Box::pin(async move { validate_roster(&ctx, &subagent_type) })
     }
 
-    fn describe_type(
-        &self,
-        subagent_type: String,
-        _harness_agent_type: Option<String>,
-        _parent_session_id: String,
-    ) -> Self::DescribeFuture {
-        let ctx = self.ctx.clone();
-        Box::pin(async move {
-            match validate_roster(&ctx, &subagent_type) {
-                SubagentValidateTypeOutcome::Ok => {
-                    SubagentDescribeOutcome::Ok(SubagentTypeSummary::default())
-                }
-                SubagentValidateTypeOutcome::Unknown { available } => {
-                    SubagentDescribeOutcome::Unknown { available }
-                }
-                _ => SubagentDescribeOutcome::Unknown {
-                    available: Vec::new(),
-                },
-            }
-        })
-    }
-
-    fn on_completed(&self, completion: ChildCompletion<Self::CompletionData>) {
+    fn on_completed(&self, completion: ChildCompletion) {
         if let Some(s) = self.store.snapshot(&completion.request.id) {
             if !s.done {
                 // `run()` returns after the first turn; drive_child still owns
@@ -136,7 +104,7 @@ async fn run_dock_child(
     parent: Context,
     store: ChildStore,
     run: ChildRunRequest<DockChildControl>,
-) -> ChildRunOutput<()> {
+) -> ChildRunOutput {
     let wall = Instant::now();
     let id = run.request.id.clone();
     let typ = run.request.subagent_type.clone();
@@ -186,9 +154,7 @@ async fn run_dock_child(
         }
     }
     let mut preset = def.to_preset(&typ);
-    if matches!(run.request.owner, SubagentOwner::Subagent) {
-        super::format::append_mailbox_report_duty(&mut preset.persona);
-    }
+    super::format::append_report_duty(&mut preset.persona);
     match child.provide(AGENT_PRESETS, AgentPresets::overlay(preset)) {
         Ok(d) => hold.push(d),
         Err(e) => {
@@ -207,12 +173,6 @@ async fn run_dock_child(
         .reporter
         .started(StartedChild {
             child_session_id: id.clone(),
-            persona: None,
-            resumed_from: run.request.resume_from.clone(),
-            child_cwd: String::new(),
-            worktree_path: None,
-            effective_model_id: String::new(),
-            definition_background: false,
             control: DockChildControl {
                 turn: turn.clone(),
                 cancelled: cancelled.clone(),
@@ -231,7 +191,6 @@ async fn run_dock_child(
     let id_w = id.clone();
     let parent_w = parent.clone();
     let coord_cancel = run.cancellation.clone();
-    let notify_idle = matches!(run.request.owner, SubagentOwner::Subagent);
     tokio::spawn(async move {
         drive_child(
             parent_w,
@@ -242,7 +201,6 @@ async fn run_dock_child(
             cancelled,
             coord_cancel,
             first_tx,
-            notify_idle,
         )
         .await;
     });
@@ -262,12 +220,13 @@ async fn drive_child(
     mut prompt: String,
     cancelled: Arc<AtomicBool>,
     coord_cancel: CancellationToken,
-    first_tx: oneshot::Sender<ChildRunOutput<()>>,
-    notify_idle: bool,
+    first_tx: oneshot::Sender<ChildRunOutput>,
 ) {
     let wall = Instant::now();
     let handle = LoopHandle::new(child.clone(), Arc::new(GrokStep));
     let mut first_tx = Some(first_tx);
+    // Child usage already billed to the parent.
+    let mut folded = crate::usage::UsageLedger::default();
 
     loop {
         if store
@@ -290,12 +249,10 @@ async fn drive_child(
         store
             .get(&id)
             .inspect(|s| s.set_life(SubagentLife::Running));
-        if notify_idle {
-            if let Some(s) = child.get::<Sessions>(SESSIONS) {
-                s.append(LogEvent::SystemReminder(super::format::wrap_reminder(
-                    super::format::MAILBOX_REPORT_TURN_REMINDER,
-                )));
-            }
+        if let Some(s) = child.get::<Sessions>(SESSIONS) {
+            s.append(LogEvent::SystemReminder(super::format::wrap_reminder(
+                super::format::REPORT_TURN_REMINDER,
+            )));
         }
 
         let outcome = if first_tx.is_some() {
@@ -322,11 +279,16 @@ async fn drive_child(
             child.get::<Sessions>(SESSIONS),
             parent.get::<Sessions>(SESSIONS),
         ) {
-            let mut child_ledger = child_s.ledger();
-            if cancelled.load(Ordering::Relaxed) && child_ledger.totals.model_calls > 0 {
-                child_ledger.mark_incomplete();
+            // The child keeps one cumulative ledger across turns, so fold only
+            // what this turn added — re-folding the total would bill the parent
+            // once per turn.
+            let child_ledger = child_s.ledger();
+            let mut delta = child_ledger.delta_since(&folded);
+            if cancelled.load(Ordering::Relaxed) && delta.totals.model_calls > 0 {
+                delta.mark_incomplete();
             }
-            parent_s.fold_subagent_ledger(&child_ledger);
+            parent_s.fold_subagent_ledger(&delta);
+            folded = child_ledger;
         }
 
         let slot = store.get(&id);
@@ -369,17 +331,22 @@ async fn drive_child(
             Ok(text) => (true, text.clone()),
             Err(e) => (false, format!("failed: {e}")),
         };
-        if notify_idle {
-            store.forward_unreported_turn(&id, &output);
-        }
+        // One parent notice per finished turn. The child's text rides it when
+        // it did not call `report`; a caller that already has the result
+        // (foreground spawn, `get_task_output` poll) drops the notice again.
+        let reported = store
+            .get(&id)
+            .is_some_and(|s| s.reported_this_turn.load(Ordering::Relaxed));
+        store.push_turn_end(
+            &id,
+            (!reported).then(|| super::format::cap_turn_text(&output)),
+            was_cancelled && interrupt,
+        );
         let next_ready = take_inbox(&store, &id);
         if next_ready.is_none() {
             store.park_idle(&id, output.clone(), was_cancelled && interrupt);
         } else {
             store.set_output(&id, output.clone());
-        }
-        if first_tx.is_some() && notify_idle {
-            store.queue_first_idle(&id);
         }
         let first_out = ChildRunOutput {
             result: SubagentResult {
@@ -392,8 +359,6 @@ async fn drive_child(
                 duration_ms,
                 ..Default::default()
             },
-            completion_data: (),
-            snapshot_ref: None,
         };
         if let Some(tx) = first_tx.take() {
             let _ = tx.send(first_out);
@@ -461,7 +426,7 @@ fn failed(
     wall: Instant,
     msg: String,
     cancelled: bool,
-) -> ChildRunOutput<()> {
+) -> ChildRunOutput {
     store.dispose(id, msg.clone(), cancelled);
     ChildRunOutput {
         result: SubagentResult {
@@ -474,8 +439,6 @@ fn failed(
             duration_ms: wall.elapsed().as_millis() as u64,
             ..Default::default()
         },
-        completion_data: (),
-        snapshot_ref: None,
     }
 }
 
@@ -540,46 +503,58 @@ mod inbox_tests {
     }
 
     #[test]
-    fn mailbox_idle_without_report_forwards() {
-        let store = ChildStore::new();
-        store.ensure_owned(
-            "x",
-            "d".into(),
-            "t".into(),
-            super::super::types::SubagentOwner::Subagent,
-        );
-        store.forward_unreported_turn("x", "FINDINGS");
-        let text = format!("{:?}", store.drain_notices());
-        assert!(text.contains("FINDINGS"), "{text}");
-        assert!(
-            text.contains("未调用 report") || text.contains("report"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn mailbox_can_report_many_times_then_skip_auto_forward() {
-        let store = ChildStore::new();
-        store.ensure_owned(
-            "x",
-            "d".into(),
-            "t".into(),
-            super::super::types::SubagentOwner::Subagent,
-        );
-        store.push_report("x", "progress-1");
-        store.push_report("x", "progress-2");
-        store.forward_unreported_turn("x", "should-not-forward");
-        let text = format!("{:?}", store.drain_notices());
-        assert!(text.contains("progress-1"), "{text}");
-        assert!(text.contains("progress-2"), "{text}");
-        assert!(!text.contains("should-not-forward"), "{text}");
-    }
-
-    #[test]
-    fn task_child_does_not_auto_forward() {
+    fn turn_end_without_report_carries_the_text() {
         let store = ChildStore::new();
         store.ensure("x", "d".into(), "t".into());
-        store.forward_unreported_turn("x", "FINDINGS");
-        assert!(store.drain_notices().is_empty());
+        store.push_turn_end("x", Some("FINDINGS".into()), false);
+        let rendered: Vec<String> = store
+            .drain_notices()
+            .iter()
+            .map(super::super::format::format_parent_notice)
+            .collect();
+        let text = rendered.join("\n");
+        assert!(text.contains("FINDINGS"), "{text}");
+        assert!(text.contains("finished its turn and is idle"), "{text}");
+    }
+
+    #[test]
+    fn reported_turn_pushes_one_notice_without_forwarded_text() {
+        let store = ChildStore::new();
+        store.ensure("x", "d".into(), "t".into());
+        store.push_report("x", "progress-1");
+        store.push_report("x", "progress-2");
+        // The runner passes `None` when the child already reported.
+        store.push_turn_end("x", None, false);
+        let notices = store.drain_notices();
+        let text = notices
+            .iter()
+            .map(super::super::format::format_parent_notice)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("progress-1"), "{text}");
+        assert!(text.contains("progress-2"), "{text}");
+        assert_eq!(notices.len(), 3, "{text}");
+        assert!(matches!(
+            notices.last(),
+            Some(super::super::store::ParentNotice::TurnEnd { output: None, .. })
+        ));
+    }
+
+    #[test]
+    fn consume_completion_drops_only_that_childs_turn_end() {
+        let store = ChildStore::new();
+        store.ensure("a", "d".into(), "t".into());
+        store.ensure("b", "d".into(), "t".into());
+        store.push_turn_end("a", Some("A".into()), false);
+        store.push_turn_end("b", Some("B".into()), false);
+        store.consume_completion("a");
+        let text = store
+            .drain_notices()
+            .iter()
+            .map(super::super::format::format_parent_notice)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("\"a\""), "{text}");
+        assert!(text.contains("\"b\""), "{text}");
     }
 }
