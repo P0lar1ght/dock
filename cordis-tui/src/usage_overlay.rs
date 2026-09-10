@@ -544,6 +544,8 @@ impl RowLayout {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    // TUI 绘制/布局函数：参数都是 buf/坐标/主题等绘制碎片，抽结构体只会把噪音搬到所有调用点，故意保留。
     fn render(
         &self,
         row: &LegendRow,

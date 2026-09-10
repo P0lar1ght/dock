@@ -482,9 +482,8 @@ impl PromptWidget {
             return false;
         };
         let path = file_search::normalize_display_path(&hit.path).to_string();
-        let insert = if hit.is_dir && ctx.is_dir_mode() {
-            format!("{path}/")
-        } else if hit.is_dir {
+        // 两个分支都是目录补尾斜杠，仅 is_dir 决定，合并为一条（行为不变）。
+        let insert = if hit.is_dir {
             format!("{path}/")
         } else {
             format!("{path} ")
@@ -748,6 +747,8 @@ fn paint_info_line(
     let _ = div_style;
 }
 
+#[allow(clippy::too_many_arguments)]
+// TUI 绘制/布局函数：参数都是 buf/坐标/主题等绘制碎片，抽结构体只会把噪音搬到所有调用点，故意保留。
 fn paint_prompt_row(
     buf: &mut Buffer,
     x: u16,

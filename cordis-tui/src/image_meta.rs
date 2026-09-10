@@ -90,7 +90,7 @@ fn jpeg_size(data: &[u8]) -> Option<(u32, u32)> {
             break;
         }
         let len = u16::from_be_bytes([data[i], data[i + 1]]) as usize;
-        if matches!(marker, 0xc0 | 0xc1 | 0xc2) && i + 7 <= data.len() {
+        if (0xc0..=0xc2).contains(&marker) && i + 7 <= data.len() {
             let h = u16::from_be_bytes([data[i + 3], data[i + 4]]) as u32;
             let w = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
             return Some((w, h));

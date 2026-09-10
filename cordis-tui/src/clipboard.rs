@@ -106,11 +106,11 @@ pub fn paste_from_event(text: &str) -> PastePayload {
 pub fn paste_image() -> Option<ClipboardImage> {
     #[cfg(target_os = "macos")]
     {
-        return macos_clipboard_image();
+        macos_clipboard_image()
     }
     #[cfg(target_os = "linux")]
     {
-        return linux_clipboard_image();
+        linux_clipboard_image()
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {

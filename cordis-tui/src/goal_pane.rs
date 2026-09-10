@@ -301,7 +301,7 @@ fn paint_wave_row(
     let wave_w = if status_w == 0 {
         wave_budget
     } else {
-        wave_budget.saturating_sub(status_w).min(18).max(8)
+        wave_budget.saturating_sub(status_w).clamp(8, 18)
     };
     for i in 0..wave_w {
         let x = area.x + i;

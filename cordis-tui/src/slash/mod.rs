@@ -416,7 +416,7 @@ pub fn lookup(name: &str) -> Option<&'static SlashDef> {
     let n = name.trim_start_matches('/');
     CATALOG
         .iter()
-        .find(|d| d.name == n || d.aliases.iter().any(|a| *a == n))
+        .find(|d| d.name == n || d.aliases.contains(&n))
 }
 
 #[derive(Debug, Clone)]

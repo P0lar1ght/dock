@@ -735,9 +735,9 @@ fn capitalize_tag(tag: &str) -> String {
 
 fn format_interval(every: std::time::Duration) -> String {
     let secs = every.as_secs().max(1);
-    if secs % 3600 == 0 {
+    if secs.is_multiple_of(3600) {
         format!("{}h", secs / 3600)
-    } else if secs % 60 == 0 {
+    } else if secs.is_multiple_of(60) {
         format!("{}m", secs / 60)
     } else {
         format!("{secs}s")

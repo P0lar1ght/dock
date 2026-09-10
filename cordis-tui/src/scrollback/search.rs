@@ -82,8 +82,7 @@ pub fn lines(
     } else {
         usize::MAX
     };
-    let mut shown_files = 0usize;
-    for file in &parsed.files {
+    for (shown_files, file) in parsed.files.iter().enumerate() {
         if shown_files >= file_cap {
             let rest = parsed.files.len() - shown_files;
             out.push(Line::from(Span::styled(
@@ -117,7 +116,6 @@ pub fn lines(
                 )));
             }
         }
-        shown_files += 1;
     }
     if width > 0 {
         out = word_wrap_lines(out, width);

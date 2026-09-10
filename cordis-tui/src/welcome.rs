@@ -133,7 +133,7 @@ fn render_hero_box(
     secs: f32,
     hover: Option<usize>,
 ) -> Vec<(Rect, WelcomeHit)> {
-    let box_w = area.width.saturating_sub(4).min(108).max(40);
+    let box_w = area.width.saturating_sub(4).clamp(40, 108);
     let inner_w = box_w.saturating_sub(2);
     let logo = pick_hero_logo(inner_w);
     let logo_h = logo.map(count_lines).unwrap_or(0);
@@ -337,7 +337,7 @@ fn count_lines(logo: &str) -> u16 {
 }
 
 fn visual_width(logo: &str) -> u16 {
-    non_empty_lines(logo).map(|l| cols(l)).max().unwrap_or(0)
+    non_empty_lines(logo).map(cols).max().unwrap_or(0)
 }
 
 fn shine_opacity(diag: f32, secs: f32) -> f32 {

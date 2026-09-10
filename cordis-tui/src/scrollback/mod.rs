@@ -297,9 +297,7 @@ impl Scrollback {
             return None;
         }
         sel.dragging = false;
-        let Some(drag) = sel.drag.take() else {
-            return None;
-        };
+        let drag = sel.drag.take()?;
         if !drag.is_non_empty() {
             return None;
         }
@@ -577,6 +575,8 @@ pub(crate) struct ChildTranscript {
 
 /// Same cards as the main scrollback (`build_frame`), with caller-owned folds.
 /// `skip_first_user` drops only the spawn prompt so later steering User rows stay.
+#[allow(clippy::too_many_arguments)]
+// TUI 绘制/布局函数：参数都是 buf/坐标/主题等绘制碎片，抽结构体只会把噪音搬到所有调用点，故意保留。
 pub(crate) fn child_transcript(
     events: &[LogEvent],
     width: usize,
@@ -616,11 +616,9 @@ fn skip_first_user_event(events: &[LogEvent]) -> Vec<LogEvent> {
     events
         .iter()
         .filter(|e| {
-            if matches!(e, LogEvent::User(_)) {
-                if !seen_user {
-                    seen_user = true;
-                    return false;
-                }
+            if matches!(e, LogEvent::User(_)) && !seen_user {
+                seen_user = true;
+                return false;
             }
             true
         })
@@ -666,6 +664,8 @@ fn message_wrap(width: usize, show_ts: bool) -> usize {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+// TUI 绘制/布局函数：参数都是 buf/坐标/主题等绘制碎片，抽结构体只会把噪音搬到所有调用点，故意保留。
 fn build_frame(
     events: &[LogEvent],
     times: &[SystemTime],
@@ -795,6 +795,8 @@ fn build_frame(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+// TUI 绘制/布局函数：参数都是 buf/坐标/主题等绘制碎片，抽结构体只会把噪音搬到所有调用点，故意保留。
 fn push_tool_card(
     lines: &mut Vec<Line<'static>>,
     tool_headers: &mut Vec<(usize, String)>,
@@ -1441,11 +1443,7 @@ mod tests {
         for i in 0..40 {
             sessions.append(LogEvent::User(format!("msg-{i}")));
             sessions.append(LogEvent::LlmStream(LlmOutput {
-                text: format!(
-                    "{}{}",
-                    format!("reply-{i} "),
-                    "more text for wrapping ".repeat(8)
-                ),
+                text: format!("reply-{i} {}", "more text for wrapping ".repeat(8)),
                 ..LlmOutput::default()
             }));
         }
