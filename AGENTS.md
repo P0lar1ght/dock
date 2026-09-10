@@ -2,7 +2,7 @@
 
 Dock 是 Grok 外形的本地 Agent TUI，跑在 Cordis 插件树（crate `cordis`）上。**一切皆插件**：没有可私自打补丁的内核，新行为必须再挂一颗插件，或接到已有 named service / waterfall 上。
 
-本文件是根政策，给所有编码 agent（Codex / Cursor / Copilot / Claude Code / Gemini CLI / OpenClaw）和人类共用。`CLAUDE.md` 软链到本文件。规则只写跨任务硬约束；流程细节在 skills，架构细节在 docs。子包若有嵌套 `AGENTS.md`，以离目标文件最近的那份为准。
+本文件是根政策，给所有编码 agent（Codex / Cursor / Copilot / Claude Code / Gemini CLI / OpenClaw）和人类共用。`CLAUDE.md` 只有一行 `@AGENTS.md`，指向本文件。规则只写跨任务硬约束；流程细节在 skills，架构细节在 docs。子包若有嵌套 `AGENTS.md`，以离目标文件最近的那份为准。
 
 ## Start
 
