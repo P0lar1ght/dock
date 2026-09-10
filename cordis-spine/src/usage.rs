@@ -179,25 +179,32 @@ impl UsageLedger {
         }
     }
 
-    /// Usage accumulated since `earlier`, per model. A continuable child keeps
-    /// one cumulative ledger across turns, so re-folding the whole thing every
-    /// turn would bill the parent multiplicatively; the runner folds this delta
-    /// instead.
+    /// Usage accumulated since `earlier`. A continuable child keeps one
+    /// cumulative ledger across turns, so re-folding the whole thing every turn
+    /// would bill the parent multiplicatively; the runner folds this delta
+    /// instead. The per-model deltas are also accumulated into `totals`, so
+    /// `fold_subagent_ledger`'s `totals.model_calls` guard sees real work.
     pub fn delta_since(&self, earlier: &UsageLedger) -> UsageLedger {
-        let by_model = self
-            .by_model
-            .iter()
-            .map(|(model_id, totals)| {
-                let before = earlier.by_model.get(model_id).cloned().unwrap_or_default();
-                (model_id.clone(), totals.saturating_sub(&before))
-            })
-            .filter(|(_, totals)| *totals != UsageTotals::default())
-            .collect();
-        UsageLedger {
-            by_model,
+        let mut delta = UsageLedger {
             incomplete: self.incomplete && !earlier.incomplete,
             ..Default::default()
+        };
+        for (model_id, totals) in &self.by_model {
+            let before = earlier.by_model.get(model_id).cloned().unwrap_or_default();
+            let mut row = totals.saturating_sub(&before);
+            // Equal reported ticks mean "no new cost", not "free": a real call
+            // never reports Some(0) (zero cost is dropped at capture), so
+            // normalize it away or an idle turn would keep a non-empty row.
+            if row.cost_usd_ticks == Some(0) {
+                row.cost_usd_ticks = None;
+            }
+            if row == UsageTotals::default() {
+                continue;
+            }
+            delta.totals.fold_totals(&row);
+            delta.by_model.insert(model_id.clone(), row);
         }
+        delta
     }
 
     pub fn mark_incomplete(&mut self) {
@@ -505,6 +512,139 @@ mod tests {
             cost_is_partial: false,
             cost_missing_calls: 0,
         }
+    }
+
+    #[test]
+    fn delta_since_totals_and_by_model_match_a_single_fold() {
+        let mut cumulative = UsageLedger::default();
+        cumulative.record_main_loop_call("a", &tu(100, 10), Some(50), Some(70));
+        cumulative.record_main_loop_call("b", &tu(30, 5), Some(20), None);
+
+        let delta = cumulative.delta_since(&UsageLedger::default());
+
+        // The delta carries only usage, not main-loop bookkeeping.
+        assert_eq!(delta.main_loop_model_calls, 0);
+        assert_eq!(delta.last_call, None);
+        assert_eq!(delta.totals, cumulative.totals);
+        assert_eq!(delta.by_model, cumulative.by_model);
+        assert_eq!(delta.totals.model_calls, 2);
+        assert_eq!(delta.totals.cost_usd_ticks, Some(70));
+        assert!(delta.totals.cost_is_partial());
+        assert_eq!(delta.by_model["a"].input_tokens, 100);
+        assert_eq!(delta.by_model["b"].input_tokens, 30);
+        assert!(!delta.incomplete);
+    }
+
+    #[test]
+    fn delta_since_second_delta_only_carries_new_calls() {
+        let mut cumulative = UsageLedger::default();
+        cumulative.record_main_loop_call("a", &tu(100, 10), Some(50), Some(70));
+        let first = cumulative.delta_since(&UsageLedger::default());
+
+        cumulative.record_main_loop_call("a", &tu(40, 4), Some(10), Some(30));
+        let second = cumulative.delta_since(&first);
+
+        assert_eq!(second.totals.model_calls, 1);
+        assert_eq!(second.totals.input_tokens, 40);
+        assert_eq!(second.totals.output_tokens, 4);
+        assert_eq!(second.totals.cost_usd_ticks, Some(30));
+        assert_eq!(second.by_model.len(), 1);
+        assert_eq!(second.by_model["a"].input_tokens, 40);
+    }
+
+    #[test]
+    fn delta_since_flags_newly_incomplete_only() {
+        let mut cumulative = UsageLedger::default();
+        cumulative.record_main_loop_call("a", &tu(10, 1), None, None);
+        cumulative.mark_incomplete();
+        assert!(cumulative.delta_since(&UsageLedger::default()).incomplete);
+
+        let earlier = cumulative.clone();
+        assert!(!cumulative.delta_since(&earlier).incomplete);
+    }
+
+    /// Mirrors the runner loop: fold cumulative-ledger deltas turn-by-turn into
+    /// a parent ledger; the parent must end exactly at the child's final total
+    /// (no double counting, no under counting), and the `mark_incomplete`
+    /// cancel path must survive the fold.
+    #[test]
+    fn turn_by_turn_delta_folding_matches_child_final_total() {
+        let mut child = UsageLedger::default();
+        let mut folded = UsageLedger::default();
+        let mut parent = UsageLedger::default();
+
+        // Turn 1: one call on model a.
+        child.record_main_loop_call("a", &tu(100, 10), Some(50), Some(70));
+        let delta = child.delta_since(&folded);
+        assert!(delta.totals.model_calls > 0);
+        parent.record_subagent(
+            &delta
+                .by_model
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+            delta.incomplete,
+        );
+        folded = child.clone();
+
+        // Turn 2: another call on the same model plus a new model.
+        child.record_main_loop_call("a", &tu(40, 4), Some(10), Some(30));
+        child.record_main_loop_call("b", &tu(20, 2), Some(5), None);
+        let delta = child.delta_since(&folded);
+        assert!(delta.totals.model_calls > 0);
+        parent.record_subagent(
+            &delta
+                .by_model
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+            delta.incomplete,
+        );
+        folded = child.clone();
+
+        // Turn 3: no usage at all — an empty delta must be a no-op, or idle
+        // parking would bill the parent again.
+        let delta = child.delta_since(&folded);
+        assert_eq!(delta.totals, UsageTotals::default());
+        assert!(delta.by_model.is_empty());
+        parent.record_subagent(
+            &delta
+                .by_model
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+            delta.incomplete,
+        );
+        folded = child.clone();
+
+        // Turn 4: one call, then cancelled mid-turn — runner marks the delta
+        // incomplete and the parent must inherit the flag.
+        child.record_main_loop_call("a", &tu(30, 3), Some(5), None);
+        let mut delta = child.delta_since(&folded);
+        assert!(delta.totals.model_calls > 0);
+        delta.mark_incomplete();
+        parent.record_subagent(
+            &delta
+                .by_model
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+            delta.incomplete,
+        );
+
+        assert_eq!(
+            parent.totals, child.totals,
+            "parent must equal child exactly"
+        );
+        assert_eq!(parent.by_model, child.by_model);
+        assert_eq!(parent.totals.model_calls, 4);
+        assert_eq!(parent.totals.input_tokens, 100 + 40 + 20 + 30);
+        assert_eq!(parent.totals.cost_usd_ticks, Some(70 + 30));
+        assert!(parent.incomplete);
+        assert_eq!(
+            parent.main_loop_model_calls, 0,
+            "subagent calls are not turns"
+        );
     }
 
     #[test]
