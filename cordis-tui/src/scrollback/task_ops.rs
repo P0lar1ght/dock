@@ -154,6 +154,8 @@ fn verb_error(name: &str) -> &'static str {
         "send_message" => "发送失败",
         "kill_task" => "终止出错",
         "interrupt_agent" => "打断出错",
+        "report" => "上报失败",
+        "list_agents" => "名册出错",
         _ => "查询出错",
     }
 }
@@ -169,11 +171,20 @@ fn verb_ok(name: &str, content: &str, pending: bool) -> (&'static str, Option<&'
                 ("未找到", None)
             } else if content.contains("No background tasks") {
                 ("任务总览", Some("当前没有后台任务"))
+            } else if content.contains("[running]") {
+                ("任务输出", Some("部分任务仍在运行"))
             } else {
                 ("任务输出", None)
             }
         }
-        "wait_tasks" => ("任务就绪", None),
+        // wait_tasks 超时返回时正文里仍是 `[running]` 块——此时不能说「就绪」。
+        "wait_tasks" => {
+            if content.contains("[running]") {
+                ("等待中", Some("超时返回，仍有任务在运行"))
+            } else {
+                ("任务就绪", None)
+            }
+        }
         "kill_task" => {
             if content.contains("already finished") {
                 ("早已结束", None)
@@ -523,5 +534,163 @@ mod tests {
         let text = flat(&card);
         assert!(text.contains("查询任务"), "{text}");
         assert!(text.contains("sleep 并汇报"), "{text}");
+    }
+
+    #[test]
+    fn wait_tasks_distinguishes_ready_from_timeout() {
+        let theme = Theme::current();
+        let done = lines(
+            "wait_tasks",
+            r#"{"task_ids":["kid-1"]}"#,
+            "[idle] kid-1 [general-purpose] sleep 并汇报\n耗时=5s 退出码=0",
+            &[snap("kid-1", "sleep 并汇报")],
+            &[],
+            &theme,
+            120,
+        );
+        assert!(flat(&done).contains("任务就绪"));
+
+        let timeout = lines(
+            "wait_tasks",
+            r#"{"task_ids":["kid-1"],"timeout_ms":8000}"#,
+            "[running] kid-1 [general-purpose] sleep 并汇报\n(still running)",
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&timeout);
+        assert!(text.contains("等待中"), "{text}");
+        assert!(text.contains("仍有任务在运行"), "{text}");
+    }
+
+    #[test]
+    fn get_task_output_snapshot_with_running_target_says_so() {
+        let theme = Theme::current();
+        let card = lines(
+            "get_task_output",
+            r#"{"task_ids":["kid-1"],"timeout_ms":0}"#,
+            "[running] kid-1 [general-purpose] sleep 并汇报\n(still running)",
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&card);
+        assert!(text.contains("任务输出"), "{text}");
+        assert!(text.contains("部分任务仍在运行"), "{text}");
+    }
+
+    #[test]
+    fn error_verbs_are_per_tool() {
+        let theme = Theme::current();
+        let cases = [
+            ("report", "Error: output is required", "上报失败"),
+            ("list_agents", "Error: boom", "名册出错"),
+            ("get_task_output", "Error: task_ids is required", "查询出错"),
+            ("wait_tasks", "Error: task_ids is required", "查询出错"),
+            ("send_message", "Error: message is required", "发送失败"),
+            ("kill_task", "Error: task_id is required", "终止出错"),
+            ("interrupt_agent", "Error: invalid arguments", "打断出错"),
+        ];
+        for (name, content, verb) in cases {
+            let card = lines(name, "{}", content, &[], &[], &theme, 120);
+            assert!(flat(&card).contains(verb), "{name}: {}", flat(&card));
+        }
+    }
+
+    #[test]
+    fn send_message_urgent_and_idle_delivery_verbs() {
+        let theme = Theme::current();
+        let steer = lines(
+            "send_message",
+            r#"{"subagent_id":"kid-1","message":"改方向"}"#,
+            "urgent message delivered to running subagent kid-1; it will steer on the current turn",
+            &[snap("kid-1", "观察")],
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&steer);
+        assert!(text.contains("已插话"), "{text}");
+        assert!(text.contains("运行中，本轮生效"), "{text}");
+
+        let start = lines(
+            "send_message",
+            r#"{"subagent_id":"kid-1","message":"继续"}"#,
+            "queued message delivered to idle subagent kid-1; the next turn is starting now",
+            &[snap("kid-1", "观察")],
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&start);
+        assert!(text.contains("已送达"), "{text}");
+        assert!(text.contains("下一轮已开始"), "{text}");
+    }
+
+    #[test]
+    fn interrupt_requested_and_kill_terminal_states() {
+        let theme = Theme::current();
+        let requested = lines(
+            "interrupt_agent",
+            r#"{"agent_id":"kid-1"}"#,
+            "interrupt requested for agent kid-1",
+            &[snap("kid-1", "观察")],
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&requested);
+        assert!(text.contains("已请求打断"), "{text}");
+        assert!(text.contains("本轮停下后转 idle"), "{text}");
+
+        let finished = lines(
+            "kill_task",
+            r#"{"task_id":"kid-1"}"#,
+            "kid-1 already finished",
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        assert!(flat(&finished).contains("早已结束"));
+
+        let missing = lines(
+            "kill_task",
+            r#"{"task_id":"kid-9"}"#,
+            "Task or subagent kid-9 not found. No background tasks or subagents exist in this session.",
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        assert!(flat(&missing).contains("未找到"));
+    }
+
+    #[test]
+    fn multi_task_ids_bind_first_target_only() {
+        let agents = vec![snap("kid-1", "第一个"), snap("kid-2", "第二个")];
+        assert_eq!(
+            header_id(
+                "get_task_output",
+                r#"{"task_ids":["kid-1","kid-2"]}"#,
+                &agents,
+                &[]
+            ),
+            Some("sub:kid-1".into())
+        );
+        let theme = Theme::current();
+        let card = lines(
+            "get_task_output",
+            r#"{"task_ids":["kid-1","kid-2"]}"#,
+            "[idle] kid-1 [general-purpose] 第一个\n输出一\n\n[idle] kid-2 [general-purpose] 第二个\n输出二",
+            &agents,
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&card);
+        assert!(text.contains("第一个"), "{text}");
     }
 }
