@@ -71,7 +71,7 @@ impl WorkflowState {
                 snap
             })
             .collect();
-        rows.sort_by(|a, b| b.received_at.cmp(&a.received_at));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.received_at));
         rows
     }
 

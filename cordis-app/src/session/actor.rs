@@ -333,6 +333,7 @@ fn apply_cmd(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
 async fn drive_job<F>(
     ctx: &Context,
     current_prompt_id: &Mutex<Option<String>>,

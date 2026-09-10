@@ -139,6 +139,7 @@ impl DynamicRunner {
         list_factories()
     }
 
+    #[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
     pub fn define(
         &self,
         session_id: &str,
@@ -156,6 +157,7 @@ impl DynamicRunner {
         self.define_at(session_id, target, name, purpose, factory, contrib, source)
     }
 
+    #[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
     pub(crate) fn define_at(
         &self,
         session_id: &str,
@@ -290,6 +292,7 @@ impl DynamicRunner {
         package_id: &str,
         mode: RunMode,
     ) -> Result<RunReceipt, String> {
+        #[allow(clippy::large_enum_variant)] // 局部枚举，box 会牵动匹配点，先保留
         enum Prepared {
             Wait(tokio::sync::watch::Receiver<Option<registry::StartOutcome>>),
             Lead {
@@ -597,6 +600,7 @@ impl DynamicRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
     async fn start_fresh(
         &self,
         plugin_id: &str,

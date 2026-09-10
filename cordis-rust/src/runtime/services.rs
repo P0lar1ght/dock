@@ -94,7 +94,7 @@ impl Runtime {
                     .unwrap_or(false);
                 drop(w);
                 if active {
-                    rt.notify(&ctx, &[name.clone()]);
+                    rt.notify(&ctx, std::slice::from_ref(&name));
                 }
             }
             let rt2 = rt.clone();
@@ -107,7 +107,7 @@ impl Runtime {
                         w.store.remove(&key);
                     }
                 }
-                rt2.notify(&ctx2, &[name2.clone()]);
+                rt2.notify(&ctx2, std::slice::from_ref(&name2));
                 let mut w = rt2.lock();
                 if let Some(f) = w.fibers.get_mut(&ctx2.fiber) {
                     if let Some(store) = &mut f.store {

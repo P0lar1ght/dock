@@ -204,6 +204,7 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
 async fn spawn_grok_child(
     sub: &Subagents,
     call: ToolCall,

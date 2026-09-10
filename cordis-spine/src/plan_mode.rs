@@ -244,7 +244,6 @@ impl PlanMode {
     }
 
     fn take_reminder_body(&self) -> Option<String> {
-        let awaiting = self.approval.lock().unwrap().is_some();
         let mut mode = self.mode.lock().unwrap();
         if mode.phase == PlanPhase::Pending {
             let reentry = mode.was_previously_active;
@@ -260,19 +259,17 @@ impl PlanMode {
                 .to_string(),
             );
         }
-        if mode.phase == PlanPhase::Active || awaiting {
-            if mode.phase == PlanPhase::Active {
-                let full = mode.reminder_count.is_multiple_of(2);
-                mode.reminder_count = mode.reminder_count.saturating_add(1);
-                return Some(
-                    if full {
-                        plan_system_addon()
-                    } else {
-                        plan_sparse_addon()
-                    }
-                    .to_string(),
-                );
-            }
+        if mode.phase == PlanPhase::Active {
+            let full = mode.reminder_count.is_multiple_of(2);
+            mode.reminder_count = mode.reminder_count.saturating_add(1);
+            return Some(
+                if full {
+                    plan_system_addon()
+                } else {
+                    plan_sparse_addon()
+                }
+                .to_string(),
+            );
         }
         if mode.pending_exit_reminder {
             mode.pending_exit_reminder = false;

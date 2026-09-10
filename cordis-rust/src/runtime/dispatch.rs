@@ -191,11 +191,12 @@ impl Runtime {
             return inner();
         }
         let logger = self.logger.clone();
+        type OnceBox<T> = Arc<Mutex<Option<Box<dyn FnOnce() -> T + Send>>>>;
         fn go<T: Clone + Send + Sync + 'static>(
             i: usize,
             handlers: Arc<Vec<SyncHandler>>,
             value: T,
-            inner: Arc<Mutex<Option<Box<dyn FnOnce() -> T + Send>>>>,
+            inner: OnceBox<T>,
             logger: Logger,
         ) -> T {
             if i >= handlers.len() {

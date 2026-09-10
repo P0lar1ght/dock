@@ -109,11 +109,11 @@ pub fn parse_oauth_callback_params(
     })
 }
 
-fn in_flight(
-) -> &'static tokio::sync::Mutex<HashMap<String, watch::Receiver<Option<Result<(), String>>>>> {
-    static CELL: OnceLock<
-        tokio::sync::Mutex<HashMap<String, watch::Receiver<Option<Result<(), String>>>>>,
-    > = OnceLock::new();
+/// 每个 issuer 上一次登录尝试的结果广播。
+type InFlightMap = HashMap<String, watch::Receiver<Option<Result<(), String>>>>;
+
+fn in_flight() -> &'static tokio::sync::Mutex<InFlightMap> {
+    static CELL: OnceLock<tokio::sync::Mutex<InFlightMap>> = OnceLock::new();
     CELL.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
 }
 
@@ -309,7 +309,8 @@ pub async fn discover_metadata(mcp_url: &str) -> Result<AuthMetadata, String> {
     let client = probe_client()?;
     let prm_urls = {
         let mut urls = Vec::new();
-        if let Ok(resp) = tokio::time::timeout(
+        // timeout 的 Err 与请求的 Err 一起拍平成一层，避免三层 if let 嵌套。
+        if let Ok(Ok(resp)) = tokio::time::timeout(
             DISCOVERY_TIMEOUT,
             client
                 .post(mcp_url)
@@ -319,12 +320,10 @@ pub async fn discover_metadata(mcp_url: &str) -> Result<AuthMetadata, String> {
         )
         .await
         {
-            if let Ok(resp) = resp {
-                if let Some(h) = header_join(resp.headers(), &WWW_AUTHENTICATE) {
-                    if let Some(u) = parse_resource_metadata_url(&h) {
-                        urls.push(u);
-                    }
-                }
+            if let Some(u) = header_join(resp.headers(), &WWW_AUTHENTICATE)
+                .and_then(|h| parse_resource_metadata_url(&h))
+            {
+                urls.push(u);
             }
         }
         urls.extend(well_known_protected_resource(mcp_url));

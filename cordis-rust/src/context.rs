@@ -206,7 +206,7 @@ impl Context {
         let handler: SyncHandler = Arc::new(move |args: EventArgs| {
             Ok(args
                 .get::<T>()
-                .and_then(|t| handler(t))
+                .and_then(&handler)
                 .map(|v| Arc::new(v) as Payload))
         });
         self.rt.listen(self, name, handler, EventOptions::default())

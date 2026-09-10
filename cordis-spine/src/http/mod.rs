@@ -705,7 +705,7 @@ mod tests {
             v.extend_from_slice(&1u32.to_be_bytes());
             v.extend_from_slice(&1u32.to_be_bytes());
             v.extend_from_slice(&[8, 2, 0, 0, 0]);
-            v.extend(std::iter::repeat(0u8).take(40));
+            v.extend(std::iter::repeat_n(0u8, 40));
             v
         };
         let img = UserImage {
@@ -760,7 +760,7 @@ mod tests {
             v.extend_from_slice(&1u32.to_be_bytes());
             v.extend_from_slice(&1u32.to_be_bytes());
             v.extend_from_slice(&[8, 2, 0, 0, 0]);
-            v.extend(std::iter::repeat(0u8).take(40));
+            v.extend(std::iter::repeat_n(0u8, 40));
             v
         };
         let img = UserImage {
@@ -825,7 +825,7 @@ mod tests {
         v.extend_from_slice(&1u32.to_be_bytes());
         v.extend_from_slice(&1u32.to_be_bytes());
         v.extend_from_slice(&[8, 2, 0, 0, 0]);
-        v.extend(std::iter::repeat(0u8).take(40));
+        v.extend(std::iter::repeat_n(0u8, 40));
         UserImage {
             mime: "image/png".into(),
             data: Arc::from(v.into_boxed_slice()),

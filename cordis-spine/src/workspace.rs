@@ -246,7 +246,7 @@ fn read_file(args: &str) -> String {
         .enumerate()
         .map(|(i, line)| {
             let n = start + i + 1;
-            if n == 1 || n % 10 == 0 {
+            if n == 1 || n.is_multiple_of(10) {
                 format!("{n}→{line}")
             } else {
                 (*line).to_string()
@@ -695,7 +695,7 @@ mod tests {
         png.extend_from_slice(&1u32.to_be_bytes());
         png.extend_from_slice(&1u32.to_be_bytes());
         png.extend_from_slice(&[8, 2, 0, 0, 0]);
-        png.extend(std::iter::repeat(0u8).take(40));
+        png.extend(std::iter::repeat_n(0u8, 40));
         std::fs::write(&path, &png).unwrap();
         let args = serde_json::json!({"target_file": path}).to_string();
         let call = ToolCall {

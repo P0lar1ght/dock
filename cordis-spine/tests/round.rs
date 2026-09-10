@@ -771,7 +771,7 @@ async fn active_goal_keeps_sampling_after_first_text() {
     );
     let kinds = root.require::<Sessions>(SESSIONS).unwrap().kinds();
     assert!(
-        kinds.iter().any(|k| *k == "system-reminder"),
+        kinds.contains(&"system-reminder"),
         "Grok goal continuation is a hidden reminder, got {kinds:?}"
     );
     let users = kinds.iter().filter(|k| **k == "user").count();

@@ -857,7 +857,7 @@ description = "ollama"
 "#,
         )
         .unwrap();
-        let list = load_catalog_from(&[path.clone()]);
+        let list = load_catalog_from(std::slice::from_ref(&path));
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "local-llm");
         assert_eq!(
@@ -1036,7 +1036,7 @@ env_key = "OPENROUTER_API_KEY"
 "#,
         )
         .unwrap();
-        let list = load_catalog_from(&[path.clone()]);
+        let list = load_catalog_from(std::slice::from_ref(&path));
         let m = list
             .iter()
             .find(|m| m.id == "minimax/minimax-m3:free")
@@ -1216,17 +1216,18 @@ url = "http://127.0.0.1:18989/mcp"
 "#,
         )
         .unwrap();
-        persist_mcp_server_enabled_in(&[path.clone()], "local", false).unwrap();
+        persist_mcp_server_enabled_in(std::slice::from_ref(&path), "local", false).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("keep this comment"), "{body}");
         assert!(body.contains("enabled = false"), "{body}");
-        persist_disabled_mcp_tools_in(&[path.clone()], "local", &["echo".into()]).unwrap();
-        let tools = load_disabled_mcp_tools_from(&[path.clone()]);
+        persist_disabled_mcp_tools_in(std::slice::from_ref(&path), "local", &["echo".into()])
+            .unwrap();
+        let tools = load_disabled_mcp_tools_from(std::slice::from_ref(&path));
         assert_eq!(
             tools.get("local").cloned().unwrap_or_default(),
             vec!["echo".to_string()]
         );
-        persist_disabled_mcp_tools_in(&[path.clone()], "local", &[]).unwrap();
+        persist_disabled_mcp_tools_in(std::slice::from_ref(&path), "local", &[]).unwrap();
         assert!(!load_disabled_mcp_tools_from(&[path]).contains_key("local"));
     }
 
@@ -1299,14 +1300,14 @@ default = "grok-4"
 "#,
         )
         .unwrap();
-        assert!(!load_browser_headed_from(&[path.clone()]));
-        persist_browser_headed_in(&[path.clone()], true).unwrap();
+        assert!(!load_browser_headed_from(std::slice::from_ref(&path)));
+        persist_browser_headed_in(std::slice::from_ref(&path), true).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("keep this comment"), "{body}");
         assert!(body.contains("[browser]"), "{body}");
         assert!(body.contains("headed = true"), "{body}");
-        assert!(load_browser_headed_from(&[path.clone()]));
-        persist_browser_headed_in(&[path.clone()], false).unwrap();
+        assert!(load_browser_headed_from(std::slice::from_ref(&path)));
+        persist_browser_headed_in(std::slice::from_ref(&path), false).unwrap();
         assert!(!load_browser_headed_from(&[path]));
     }
 

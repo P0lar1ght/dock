@@ -331,12 +331,12 @@ fn parse_slash_invoke(user: &str) -> Option<(&str, &str)> {
     Some((name, args))
 }
 
-fn skill_md_near(path: &PathBuf) -> Option<PathBuf> {
+fn skill_md_near(path: &std::path::Path) -> Option<PathBuf> {
     if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") && path.is_file() {
-        return Some(path.clone());
+        return Some(path.to_path_buf());
     }
     let mut dir = if path.is_dir() {
-        path.clone()
+        path.to_path_buf()
     } else {
         path.parent()?.to_path_buf()
     };
@@ -541,8 +541,8 @@ mod tests {
 
     #[test]
     fn order_skills_follows_roster() {
-        assert!(ORDER_SKILLS > crate::prompt::ORDER_ROSTER);
-        assert!(ORDER_SKILLS > crate::prompt::ORDER_WORKFLOWS);
+        const { assert!(ORDER_SKILLS > crate::prompt::ORDER_ROSTER) };
+        const { assert!(ORDER_SKILLS > crate::prompt::ORDER_WORKFLOWS) };
     }
 
     #[tokio::test]

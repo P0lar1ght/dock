@@ -420,7 +420,7 @@ pub fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -499,7 +499,7 @@ mod tests {
         call.cached_prompt_tokens = 40;
         call.reasoning_tokens = 3;
         ledger.record_main_loop_call("grok-build", &call, Some(50), Some(20_000_000));
-        let v = serde_json::to_value(&PromptUsage::from(&ledger)).unwrap();
+        let v = serde_json::to_value(PromptUsage::from(&ledger)).unwrap();
         assert_eq!(v["inputTokens"], 100);
         assert_eq!(v["outputTokens"], 10);
         assert_eq!(v["cachedReadTokens"], 40);
@@ -514,7 +514,7 @@ mod tests {
         let mut ledger = UsageLedger::default();
         ledger.record_main_loop_call("a", &tu(100, 10), None, Some(70));
         ledger.record_main_loop_call("a", &tu(50, 5), None, None);
-        let v = serde_json::to_value(&PromptUsage::from(&ledger)).unwrap();
+        let v = serde_json::to_value(PromptUsage::from(&ledger)).unwrap();
         assert_eq!(v["costUsdTicks"], serde_json::Value::Null);
         assert_eq!(v["costIsPartial"], true);
     }

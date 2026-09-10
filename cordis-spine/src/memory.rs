@@ -80,7 +80,7 @@ fn memory_search(call: ToolCall) -> ToolResult {
     }
     let mut hits: Vec<(f64, PathBuf, usize, usize, String)> = Vec::new();
     for root in memory_roots() {
-        walk_md(&root, &root, &terms, &mut hits);
+        walk_md(&root, &terms, &mut hits);
     }
     hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     hits.retain(|h| h.0 >= min_score);
@@ -103,19 +103,14 @@ fn memory_search(call: ToolCall) -> ToolResult {
     tool_result(call, out)
 }
 
-fn walk_md(
-    root: &Path,
-    dir: &Path,
-    terms: &[String],
-    hits: &mut Vec<(f64, PathBuf, usize, usize, String)>,
-) {
+fn walk_md(dir: &Path, terms: &[String], hits: &mut Vec<(f64, PathBuf, usize, usize, String)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            walk_md(root, &path, terms, hits);
+            walk_md(&path, terms, hits);
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");

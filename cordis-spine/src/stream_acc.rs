@@ -101,10 +101,7 @@ impl ChatStreamAcc {
 /// Split SSE `data:` payloads. `[DONE]` is omitted (Grok client terminates there).
 pub fn take_sse_data(buf: &mut Vec<u8>) -> Vec<String> {
     let mut events = Vec::new();
-    loop {
-        let Some(end) = find_event_end(buf) else {
-            break;
-        };
+    while let Some(end) = find_event_end(buf) {
         let raw: Vec<u8> = buf.drain(..end).collect();
         if let Some(data) = sse_data_field(&raw) {
             if data == "[DONE]" {

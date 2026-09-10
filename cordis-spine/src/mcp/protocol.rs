@@ -580,7 +580,7 @@ mod tests {
         png.extend_from_slice(&1u32.to_be_bytes());
         png.extend_from_slice(&1u32.to_be_bytes());
         png.extend_from_slice(&[8, 2, 0, 0, 0]);
-        png.extend(std::iter::repeat(0u8).take(40));
+        png.extend(std::iter::repeat_n(0u8, 40));
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         let v = json!({
             "result": { "content": [
@@ -682,7 +682,7 @@ mod tests {
         png.extend_from_slice(&1u32.to_be_bytes());
         png.extend_from_slice(&1u32.to_be_bytes());
         png.extend_from_slice(&[8, 2, 0, 0, 0]);
-        png.extend(std::iter::repeat(0u8).take(40));
+        png.extend(std::iter::repeat_n(0u8, 40));
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         let v = json!({
             "result": {
