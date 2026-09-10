@@ -12,8 +12,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # gateway 测试打 loopback HTTP；代理环境必须放行回环地址，否则会成片 502。
-  no_proxy: 127.0.0.1,localhost,[::1]
-  NO_PROXY: 127.0.0.1,localhost,[::1]
+  no_proxy: "127.0.0.1,localhost,[::1]"
+  NO_PROXY: "127.0.0.1,localhost,[::1]"
 
 jobs:
   test:
@@ -28,7 +28,7 @@ jobs:
       - name: Test (gateway / tui / app)
         run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
 
-      # browser:: 测试要真实 Chrome 与 UI 快照；其余部分用 set_var("DOCK_HOME") 做隔离，
+      # browser 测试要真实 Chrome 与 UI 快照；其余模块用进程级 DOCK_HOME 做隔离，
       # 并行会互相踩，必须串行。见 docs/DEVELOPMENT.md「CI」。
       - name: Test (spine)
-        run: cargo test --locked -p cordis-spine -- --skip browser:: --test-threads=1
+        run: "cargo test --locked -p cordis-spine -- --skip browser:: --test-threads=1"
