@@ -244,7 +244,11 @@ impl Browser {
         } else {
             for t in &tabs {
                 let mark = if t.active { "*" } else { " " };
-                let url = if t.url.is_empty() { "about:blank" } else { t.url.as_str() };
+                let url = if t.url.is_empty() {
+                    "about:blank"
+                } else {
+                    t.url.as_str()
+                };
                 out.push_str(&format!("  {mark} [{}] {url}\n", t.index));
             }
         }
@@ -271,12 +275,8 @@ impl Browser {
         out.push_str("  用 browser_handle_dialog 接受/拒绝；不渲染网页。\n");
         out.push('\n');
         out.push_str("能力：\n");
-        out.push_str(
-            "  P0 导航/后退 · 悬停 · 按键 · 下拉 · 填表 · 等待（text/selector）\n",
-        );
-        out.push_str(
-            "  P1 拖拽 · 对话框 · 文件上传 · 视口 resize。不渲染网页。\n",
-        );
+        out.push_str("  P0 导航/后退 · 悬停 · 按键 · 下拉 · 填表 · 等待（text/selector）\n");
+        out.push_str("  P1 拖拽 · 对话框 · 文件上传 · 视口 resize。不渲染网页。\n");
         out.push_str(
             "  P2 evaluate（权限门）· console · network · 同域 iframe（frame_selector）。\n",
         );
@@ -286,9 +286,7 @@ impl Browser {
             Some(line) => out.push_str(&format!("  {line}\n")),
             None => out.push_str("  （无）\n"),
         }
-        out.push_str(
-            "  browser_evaluate 须过权限浮层（与 bash 同级）；计划模式会挡。\n",
-        );
+        out.push_str("  browser_evaluate 须过权限浮层（与 bash 同级）；计划模式会挡。\n");
         out.push('\n');
         out.push_str("最近 network：\n");
         match self.inner.last_network.lock().unwrap().clone() {
@@ -303,9 +301,7 @@ impl Browser {
             }
             _ => out.push_str("  （无）\n"),
         }
-        out.push_str(
-            "  真正批准/拒绝请用权限浮层（允许使用 …？）。\n",
-        );
+        out.push_str("  真正批准/拒绝请用权限浮层（允许使用 …？）。\n");
         out.push('\n');
         out.push_str("断开：\n");
         out.push_str(
@@ -469,7 +465,14 @@ impl Browser {
         let tabs = session.tab_infos().await;
         drop(g);
         self.remember_tabs(tabs);
-        if let Some(active) = self.inner.last_tabs.lock().unwrap().iter().find(|t| t.active) {
+        if let Some(active) = self
+            .inner
+            .last_tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.active)
+        {
             self.mark_connected(&active.url);
         } else {
             self.refresh_slash();
@@ -591,7 +594,8 @@ async fn run_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
                     .unwrap_or(content.as_str())
                     .trim();
                 let mut images = Vec::new();
-                if let Some(img) = crate::tool_images::user_image_from_path(std::path::Path::new(path))
+                if let Some(img) =
+                    crate::tool_images::user_image_from_path(std::path::Path::new(path))
                 {
                     images.push(img);
                 }
@@ -620,11 +624,7 @@ async fn run_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     }
 }
 
-async fn dispatch_connected(
-    browser: &Browser,
-    name: &str,
-    args: &str,
-) -> Result<String, String> {
+async fn dispatch_connected(browser: &Browser, name: &str, args: &str) -> Result<String, String> {
     let mut g = browser.inner.live.lock().await;
     let session = g.as_mut().ok_or_else(|| NEED_OPEN.to_string())?;
     browser.sync_pending_dialog(session);
@@ -649,9 +649,7 @@ async fn dispatch_connected(
             let text = arg_str(args, "text").ok_or_else(|| "text is required".to_string())?;
             let ref_id = arg_str(args, "ref");
             let submit = arg_bool(args, "submit").unwrap_or(false);
-            session
-                .type_ref(ref_id.as_deref(), &text, submit)
-                .await
+            session.type_ref(ref_id.as_deref(), &text, submit).await
         }
         "browser_screenshot" => {
             let full = arg_bool(args, "full_page").unwrap_or(false);
@@ -666,9 +664,7 @@ async fn dispatch_connected(
             let action = arg_str(args, "action").unwrap_or_else(|| "list".into());
             let index = arg_usize(args, "index");
             let url = arg_str(args, "url");
-            let out = session
-                .tabs(&action, index, url.as_deref())
-                .await?;
+            let out = session.tabs(&action, index, url.as_deref()).await?;
             let tabs = session.tab_infos().await;
             browser.remember_tabs(tabs);
             browser.refresh_slash();
@@ -733,9 +729,7 @@ async fn dispatch_connected(
                 "accept boolean is required (true=accept, false=dismiss)".to_string()
             })?;
             let prompt_text = arg_str(args, "prompt_text");
-            let out = session
-                .handle_dialog(accept, prompt_text.as_deref())
-                .await;
+            let out = session.handle_dialog(accept, prompt_text.as_deref()).await;
             match &out {
                 Ok(line) => browser.remember_dialog(line.clone()),
                 Err(e) => browser.remember_dialog(format!("失败：{e}")),
@@ -787,9 +781,7 @@ async fn dispatch_connected(
 
 fn arg_str(raw: &str, key: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    v.get(key)
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
+    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
 fn arg_bool(raw: &str, key: &str) -> Option<bool> {
@@ -846,7 +838,11 @@ fn parse_paths(raw: &str) -> Result<Vec<String>, String> {
         }
         return Ok(out);
     }
-    if let Some(p) = v.get("path").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(p) = v
+        .get("path")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
         return Ok(vec![p.to_string()]);
     }
     Err("paths array (or path string) is required".into())
@@ -866,10 +862,13 @@ fn parse_fill_fields(raw: &str) -> Result<Vec<(String, String)>, String> {
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("fields[{i}].ref is required"))?;
-        let value = item.get("value").map(|x| match x {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        }).unwrap_or_default();
+        let value = item
+            .get("value")
+            .map(|x| match x {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_default();
         out.push((r.to_string(), value));
     }
     Ok(out)
@@ -988,10 +987,10 @@ fn browser_specs() -> Vec<ToolSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::slash::slash;
     use crate::tools::{tools, Tools};
     use cordis::Context;
+    use std::path::Path;
 
     async fn boot_browser() -> (Context, cordis::Fiber) {
         let root = Context::new();
@@ -1040,8 +1039,14 @@ mod tests {
         assert!(body.contains("权限浮层"), "{body}");
         assert!(body.contains("最近 network："), "{body}");
         let with_approval = browser.format_cockpit(Some("browser_open — https://example.com/"));
-        assert!(with_approval.contains("browser_open — https://example.com/"), "{with_approval}");
-        assert!(!with_approval.contains("审批：\n  （无）"), "{with_approval}");
+        assert!(
+            with_approval.contains("browser_open — https://example.com/"),
+            "{with_approval}"
+        );
+        assert!(
+            !with_approval.contains("审批：\n  （无）"),
+            "{with_approval}"
+        );
     }
 
     #[test]
@@ -1114,10 +1119,7 @@ mod tests {
             browser.last_screenshot().as_deref(),
             Some(Path::new("/tmp/shot.png"))
         );
-        assert_eq!(
-            browser.status_line(),
-            "已连接 — https://example.com/"
-        );
+        assert_eq!(browser.status_line(), "已连接 — https://example.com/");
     }
 
     #[tokio::test]
@@ -1241,8 +1243,16 @@ mod tests {
         let specs = tools.specs();
         let open = specs.iter().find(|s| s.name == "browser_open").unwrap();
         let nav = specs.iter().find(|s| s.name == "browser_navigate").unwrap();
-        assert!(open.description.contains("browser_navigate") || open.description.contains("first"), "{}", open.description);
-        assert!(nav.description.contains("existing") || nav.description.contains("Closed"), "{}", nav.description);
+        assert!(
+            open.description.contains("browser_navigate") || open.description.contains("first"),
+            "{}",
+            open.description
+        );
+        assert!(
+            nav.description.contains("existing") || nav.description.contains("Closed"),
+            "{}",
+            nav.description
+        );
 
         fiber.dispose().await.unwrap();
         assert!(root.get::<Browser>(BROWSER).is_none());
@@ -1280,7 +1290,11 @@ mod tests {
                 arguments: r#"{"url":"data:text/html,<html><body><h1>HelloBUA</h1><select id=s><option value=a>A</option><option value=b>B</option></select><input id=i /></body></html>"}"#.into(),
             })
             .await;
-        assert!(!open.content.starts_with("Error:"), "open: {}", open.content);
+        assert!(
+            !open.content.starts_with("Error:"),
+            "open: {}",
+            open.content
+        );
 
         let nav = tools
             .execute(ToolCall {
@@ -1289,7 +1303,11 @@ mod tests {
                 arguments: r#"{"url":"data:text/html,<html><body><p>NavOK</p><input id=x /></body></html>"}"#.into(),
             })
             .await;
-        assert!(!nav.content.starts_with("Error:"), "navigate: {}", nav.content);
+        assert!(
+            !nav.content.starts_with("Error:"),
+            "navigate: {}",
+            nav.content
+        );
         assert!(nav.content.contains("navigated"), "{}", nav.content);
 
         let wait = tools
@@ -1299,7 +1317,11 @@ mod tests {
                 arguments: r#"{"text":"NavOK","timeout_ms":5000}"#.into(),
             })
             .await;
-        assert!(!wait.content.starts_with("Error:"), "wait_for: {}", wait.content);
+        assert!(
+            !wait.content.starts_with("Error:"),
+            "wait_for: {}",
+            wait.content
+        );
 
         let key = tools
             .execute(ToolCall {
@@ -1308,7 +1330,11 @@ mod tests {
                 arguments: r#"{"key":"Tab"}"#.into(),
             })
             .await;
-        assert!(!key.content.starts_with("Error:"), "press_key: {}", key.content);
+        assert!(
+            !key.content.starts_with("Error:"),
+            "press_key: {}",
+            key.content
+        );
 
         let closed_nav = {
             let _ = tools
@@ -1356,7 +1382,11 @@ mod tests {
                 arguments: r#"{"url":"data:text/html,<html><body><div id=a style='width:40px;height:40px'>A</div><div id=b style='width:40px;height:40px;margin-top:80px'>B</div><input id=f type=file /><script>setTimeout(function(){alert('BUA-D2');},50);</script></body></html>"}"#.into(),
             })
             .await;
-        assert!(!open.content.starts_with("Error:"), "open: {}", open.content);
+        assert!(
+            !open.content.starts_with("Error:"),
+            "open: {}",
+            open.content
+        );
 
         let resize = tools
             .execute(ToolCall {
@@ -1365,7 +1395,11 @@ mod tests {
                 arguments: r#"{"width":1024,"height":768}"#.into(),
             })
             .await;
-        assert!(!resize.content.starts_with("Error:"), "resize: {}", resize.content);
+        assert!(
+            !resize.content.starts_with("Error:"),
+            "resize: {}",
+            resize.content
+        );
         assert!(resize.content.contains("1024x768"), "{}", resize.content);
 
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -1376,7 +1410,11 @@ mod tests {
                 arguments: r#"{"accept":true}"#.into(),
             })
             .await;
-        assert!(!dlg.content.starts_with("Error:"), "handle_dialog: {}", dlg.content);
+        assert!(
+            !dlg.content.starts_with("Error:"),
+            "handle_dialog: {}",
+            dlg.content
+        );
 
         let drag = tools
             .execute(ToolCall {
@@ -1385,7 +1423,11 @@ mod tests {
                 arguments: r#"{"start_x":20,"start_y":20,"end_x":20,"end_y":120,"steps":5}"#.into(),
             })
             .await;
-        assert!(!drag.content.starts_with("Error:"), "drag: {}", drag.content);
+        assert!(
+            !drag.content.starts_with("Error:"),
+            "drag: {}",
+            drag.content
+        );
 
         let upload_path = dock_home.path().join("upload.txt");
         std::fs::write(&upload_path, b"hello").unwrap();
@@ -1396,7 +1438,11 @@ mod tests {
                 arguments: r#"{"interactive":true}"#.into(),
             })
             .await;
-        assert!(!snap.content.starts_with("Error:"), "snapshot: {}", snap.content);
+        assert!(
+            !snap.content.starts_with("Error:"),
+            "snapshot: {}",
+            snap.content
+        );
         let file_ref = snap.content.lines().find_map(|l| {
             let lower = l.to_ascii_lowercase();
             if !(lower.contains("choose file")
@@ -1444,7 +1490,11 @@ mod tests {
                 ),
             })
             .await;
-        assert!(!up.content.starts_with("Error:"), "file_upload: {}", up.content);
+        assert!(
+            !up.content.starts_with("Error:"),
+            "file_upload: {}",
+            up.content
+        );
 
         fiber.dispose().await.unwrap();
     }
@@ -1510,11 +1560,7 @@ mod tests {
                 arguments: "{}".into(),
             })
             .await;
-        assert!(
-            close.content.contains("closed"),
-            "{}",
-            close.content
-        );
+        assert!(close.content.contains("closed"), "{}", close.content);
         assert_eq!(browser.session(), BrowserSession::Closed);
 
         // Dispose after close must still be clean.
@@ -1543,7 +1589,11 @@ mod tests {
                 arguments: r#"{"url":"about:blank"}"#.into(),
             })
             .await;
-        assert!(!open.content.starts_with("Error:"), "open: {}", open.content);
+        assert!(
+            !open.content.starts_with("Error:"),
+            "open: {}",
+            open.content
+        );
 
         let setup = tools
             .execute(ToolCall {
@@ -1552,7 +1602,11 @@ mod tests {
                 arguments: r#"{"expression":"(() => { document.body.innerHTML = '<h1 id=t>P2Main</h1><iframe id=f name=child src=\"data:text/html,<html><body><p id=p>InsideFrame</p></body></html>\"></iframe>'; console.log('BUA-P2-LOG'); return document.title = 'p2'; })()"}"#.into(),
             })
             .await;
-        assert!(!setup.content.starts_with("Error:"), "setup evaluate: {}", setup.content);
+        assert!(
+            !setup.content.starts_with("Error:"),
+            "setup evaluate: {}",
+            setup.content
+        );
 
         let ev = tools
             .execute(ToolCall {
@@ -1561,7 +1615,11 @@ mod tests {
                 arguments: r#"{"expression":"1+2"}"#.into(),
             })
             .await;
-        assert!(!ev.content.starts_with("Error:"), "evaluate: {}", ev.content);
+        assert!(
+            !ev.content.starts_with("Error:"),
+            "evaluate: {}",
+            ev.content
+        );
         assert!(ev.content.contains('3'), "evaluate result: {}", ev.content);
         assert!(browser.last_evaluate().is_some());
 
@@ -1600,7 +1658,11 @@ mod tests {
                 arguments: "{}".into(),
             })
             .await;
-        assert!(!net.content.starts_with("Error:"), "network: {}", net.content);
+        assert!(
+            !net.content.starts_with("Error:"),
+            "network: {}",
+            net.content
+        );
         assert!(browser.last_network().is_some());
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

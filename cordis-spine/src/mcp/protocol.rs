@@ -313,10 +313,7 @@ fn extract_from_text_and_structured(
 /// Cap serialized non-image `structuredContent` appended into tool text.
 const STRUCTURED_CONTENT_TEXT_MAX: usize = 8 * 1024;
 
-const STRUCTURED_IMAGE_KEYS: &[&str] = &[
-    "png_base64",
-    "pngBase64",
-];
+const STRUCTURED_IMAGE_KEYS: &[&str] = &["png_base64", "pngBase64"];
 
 fn promote_cua_fields(result: &Value, texts: &mut Vec<String>, images: &mut Vec<UserImage>) {
     let structured = result
@@ -397,9 +394,7 @@ fn scrub_structured_for_text(structured: &Value) -> Value {
             }
             Value::Object(out)
         }
-        Value::Array(items) => {
-            Value::Array(items.iter().map(scrub_structured_for_text).collect())
-        }
+        Value::Array(items) => Value::Array(items.iter().map(scrub_structured_for_text).collect()),
         other => other.clone(),
     }
 }
@@ -446,9 +441,7 @@ fn extract_data_uri_images(text: &str) -> (String, Vec<UserImage>) {
             continue;
         };
         let mime_end = semi;
-        let mime = after
-            .get("data:".len()..mime_end)
-            .unwrap_or("image/png");
+        let mime = after.get("data:".len()..mime_end).unwrap_or("image/png");
         let payload_start = start + semi + ";base64,".len();
         let mut j = payload_start;
         let b = text.as_bytes();
@@ -656,7 +649,10 @@ mod tests {
             }
         });
         let (_text, images2) = format_call_result_parts(&v2);
-        assert!(images2.is_empty(), "must not read outside DOCK_HOME: {images2:?}");
+        assert!(
+            images2.is_empty(),
+            "must not read outside DOCK_HOME: {images2:?}"
+        );
 
         match &prev {
             Some(v) => std::env::set_var("DOCK_HOME", v),
@@ -708,7 +704,10 @@ mod tests {
         assert!(text.contains("window_id"), "{text}");
         assert!(text.contains("w1"), "{text}");
         assert!(!text.contains("png_base64"), "{text}");
-        assert!(!text.contains(&b64[..32.min(b64.len())]), "must not dump base64 into text: {text}");
+        assert!(
+            !text.contains(&b64[..32.min(b64.len())]),
+            "must not dump base64 into text: {text}"
+        );
     }
 
     #[test]
@@ -722,6 +721,10 @@ mod tests {
         });
         let (text, _) = format_call_result_parts(&v);
         assert!(text.contains("…(truncated)"), "{text}");
-        assert!(text.len() < STRUCTURED_CONTENT_TEXT_MAX + 80, "len={}", text.len());
+        assert!(
+            text.len() < STRUCTURED_CONTENT_TEXT_MAX + 80,
+            "len={}",
+            text.len()
+        );
     }
 }

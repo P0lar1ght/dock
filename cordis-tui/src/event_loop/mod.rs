@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets, AppSettings, DynamicRunner,
-    Goal, LogEvent, LspBackendAdapter, LspSetupScope, PlanMode, Sessions, Slash, ToolCall, Tools,
-    AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT, PERMISSION_EVENT,
-    PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS, SLASH, TOOLS,
+    goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets, AppSettings,
+    DynamicRunner, Goal, LogEvent, LspBackendAdapter, LspSetupScope, PlanMode, Sessions, Slash,
+    ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT,
+    PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS, SLASH, TOOLS,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{

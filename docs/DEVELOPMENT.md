@@ -53,13 +53,14 @@ cargo test -p cordis-spine --test subagents
 cargo test -p cordis-gateway --test gateway
 
 # lint / 格式
+cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid
 cargo clippy -p cordis-spine --all-targets
-rustfmt --edition 2021 <改过的文件>
 ```
 
 注意事项，都是当前仓库的真实状态：
 
-- 仓库存量 clippy warning 与 `cargo fmt --all --check` diff 都存在（复现：`cargo clippy -p cordis-spine --all-targets`、`cargo fmt --all --check`）。**只对改过的文件跑 rustfmt**，不要 `cargo fmt --all` / `cargo clippy --fix` 全仓，那会制造无关 diff。
+- 第一方 crate 已 rustfmt-clean，CI 会跑上面的格式门禁。**不要对 `vendor/` 跑 rustfmt**（冻结副本，见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
+- 仓库存量 clippy warning（百余条，含 `too_many_arguments` / `large_enum_variant` 这类需要判断的）尚未清理，所以不要全仓 `cargo clippy --fix`；按改动的 crate 看有没有新增 warning。
 - 改行为只跑对应 crate，不要动辄全量。不要为了跑测试切 `--release`。
 - `install_fakes` 保持 echo（`cordis-spine/tests/round.rs` 期望 `echoed: hello`）；测试默认不配 `mcp_servers`，`mcp_client` 仍挂载并 fail-open，不要改成默认连接。
 - `vendor/` 里的 crate 是冻结副本，测试不过就当已知边界上报，不要就地改（见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
@@ -84,10 +85,10 @@ actionlint .github/workflows/ci.yml
 
 `env` 的 key 大小写不敏感，`no_proxy` 与 `NO_PROXY` 同时写会被判重复 key，workflow 整体解析失败。
 
-CI 不跑的三类：
+CI 不跑的：
 
 - `cordis-spine` 的 `browser::tests`：要真实 Chrome 与 UI 快照，跑在无图形会话里不稳定。
-- `cargo fmt --check` 与 `clippy`：仓库有存量 fmt diff 与 clippy warning，先清存量再纳入门禁。
+- `clippy`：仓库存量 warning 未清（见上文「命令」的注意事项）。
 - `embed-sdk` 的 js 检查：目前没有 lint / test 脚本，类型检查就是 `npm run build:types`。
 
 spine 测试串行跑的原因：多个模块用 `std::env::set_var("DOCK_HOME", …)` / 切 cwd 做隔离，进程级环境变量在并行下会互相覆盖，表现为 `session_persist::tests` 与 `skills::tests` 随机红。本地复现：

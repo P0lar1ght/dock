@@ -180,15 +180,7 @@ pub fn build_lean_snapshot(nodes: &[AxNode], interactive_only: bool) -> LeanSnap
             if let Some(children) = &node.child_ids {
                 for cid in children {
                     if let Some(child) = by_id.get(cid.inner().as_str()) {
-                        walk(
-                            child,
-                            by_id,
-                            depth,
-                            interactive_only,
-                            next_ref,
-                            refs,
-                            lines,
-                        );
+                        walk(child, by_id, depth, interactive_only, next_ref, refs, lines);
                     }
                 }
             }
@@ -291,15 +283,15 @@ pub fn build_lean_snapshot(nodes: &[AxNode], interactive_only: bool) -> LeanSnap
 
 /// Resolve backend id helper for session actions.
 pub fn backend_id(entry: &RefEntry) -> Option<BackendNodeId> {
-    entry
-        .backend_dom_node_id
-        .map(BackendNodeId::new)
+    entry.backend_dom_node_id.map(BackendNodeId::new)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chromiumoxide::cdp::browser_protocol::accessibility::{AxNode, AxNodeId, AxValue, AxValueType};
+    use chromiumoxide::cdp::browser_protocol::accessibility::{
+        AxNode, AxNodeId, AxValue, AxValueType,
+    };
 
     fn ax_val(s: &str) -> AxValue {
         AxValue {
@@ -350,8 +342,16 @@ mod tests {
         // 4 is not linked as child of root — still shouldn't get a ref in interactive mode
         // when walked only via roots; unlinked StaticText becomes a root but is noise.
         let snap = build_lean_snapshot(&nodes, true);
-        assert!(snap.text.contains("button \"Submit\" [ref=e1]"), "{}", snap.text);
-        assert!(snap.text.contains("textbox \"Email\" [ref=e2]"), "{}", snap.text);
+        assert!(
+            snap.text.contains("button \"Submit\" [ref=e1]"),
+            "{}",
+            snap.text
+        );
+        assert!(
+            snap.text.contains("textbox \"Email\" [ref=e2]"),
+            "{}",
+            snap.text
+        );
         assert!(!snap.text.contains("StaticText"), "{}", snap.text);
         assert_eq!(snap.refs["e1"].backend_dom_node_id, Some(10));
         assert_eq!(snap.refs["e2"].name, "Email");

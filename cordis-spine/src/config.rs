@@ -1131,8 +1131,14 @@ framing = "ndjson"
             }
             other => panic!("expected stdio, got {other:?}"),
         }
-        assert_eq!(McpStdioFraming::from_config(Some("cl")), McpStdioFraming::ContentLength);
-        assert_eq!(McpStdioFraming::from_config(Some("auto")), McpStdioFraming::Auto);
+        assert_eq!(
+            McpStdioFraming::from_config(Some("cl")),
+            McpStdioFraming::ContentLength
+        );
+        assert_eq!(
+            McpStdioFraming::from_config(Some("auto")),
+            McpStdioFraming::Auto
+        );
         assert_eq!(McpStdioFraming::from_config(None), McpStdioFraming::Ndjson);
     }
 

@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    is_shipped, AgentPreset, AgentPresets, PresetOrigin, SubagentDef, ToolSpec, Tools, AGENT_PRESETS,
-    TOOLS,
+    is_shipped, AgentPreset, AgentPresets, PresetOrigin, SubagentDef, ToolSpec, Tools,
+    AGENT_PRESETS, TOOLS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -126,7 +126,6 @@ pub fn live_names(ctx: &Context) -> Vec<String> {
     live_specs(ctx).into_iter().map(|s| s.name).collect()
 }
 
-
 fn tool_kind_label(ctx: &Context, name: &str) -> &'static str {
     match ctx.get::<Tools>(TOOLS) {
         Some(t) if t.is_mcp(name) => "MCP",
@@ -221,7 +220,6 @@ pub fn open_canvas(ctx: &Context, id: &str) -> Result<PresetView, String> {
         last_click: None,
     }))
 }
-
 
 fn start_create_naming(canvas: &mut CanvasState) -> PresetAction {
     canvas.naming_role = Some(RoleNamingDraft {
@@ -519,7 +517,6 @@ pub fn accept(ctx: &Context, view: &mut PresetView) -> PresetAction {
     }
 }
 
-
 fn resync_action(ctx: &Context, view: &mut PresetView) -> PresetAction {
     let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
         return PresetAction::Flash("Agent 预设服务未挂载".into());
@@ -529,9 +526,7 @@ fn resync_action(ctx: &Context, view: &mut PresetView) -> PresetAction {
         let mode_id = c.id.clone();
         if presets.get(&mode_id).is_none() {
             *view = PresetView::roster();
-            return PresetAction::Flash(format!(
-                "已刷新；模式 {mode_id} 已不在磁盘，回到列表"
-            ));
+            return PresetAction::Flash(format!("已刷新；模式 {mode_id} 已不在磁盘，回到列表"));
         }
         if let Some(role) = c.editing_role.clone() {
             if !role_ids(ctx, c).iter().any(|r| r == &role) {
@@ -721,7 +716,8 @@ pub fn render(ctx: &Context, buf: &mut Buffer, area: Rect, view: &PresetView) ->
 
 fn render_roster(ctx: &Context, buf: &mut Buffer, area: Rect, selected: usize) -> PickerHits {
     let theme = Theme::current();
-    let Some(frame) = render_fullscreen_frame(buf, area, &theme, Some("Agent 预设"), false) else {
+    let Some(frame) = render_fullscreen_frame(buf, area, &theme, Some("Agent 预设"), false)
+    else {
         return PickerHits::default();
     };
     let presets = list_presets(ctx);
@@ -868,8 +864,9 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
 
     // Roles list replaces tool panes when focused (and not inside a role editor).
     if canvas.pane == PresetPane::Roles && canvas.editing_role.is_none() {
-        hits.rows
-            .extend(render_roles_pane(ctx, buf, chunks[1], &theme, canvas, &preset));
+        hits.rows.extend(render_roles_pane(
+            ctx, buf, chunks[1], &theme, canvas, &preset,
+        ));
         return hits;
     }
 
@@ -898,10 +895,7 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     let cat_focus = canvas.pane == PresetPane::Catalog;
     let asg_focus = canvas.pane == PresetPane::Assigned;
 
-    let cat_header = format!(
-        "可加 · {} · 单击选中 · Enter/双击加入",
-        catalog.len()
-    );
+    let cat_header = format!("可加 · {} · 单击选中 · Enter/双击加入", catalog.len());
     let asg_header = if all_tools {
         format!(
             "已加入 · 全部 · {} · 单击选中 · Enter/双击移除",
@@ -987,7 +981,6 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     ));
     hits
 }
-
 
 fn paint_naming_draft(buf: &mut Buffer, area: Rect, theme: &Theme, canvas: &CanvasState) {
     let Some(draft) = canvas.naming_role.as_ref() else {
@@ -1140,7 +1133,9 @@ fn paint_identity(
         area.width,
     );
     let mut y = area.y.saturating_add(1);
-    if y < area.y + area.height && !preset.description.trim().is_empty() && canvas.editing_role.is_none()
+    if y < area.y + area.height
+        && !preset.description.trim().is_empty()
+        && canvas.editing_role.is_none()
     {
         buf.set_line(
             area.x,
@@ -1415,10 +1410,7 @@ mod tests {
 
     #[test]
     fn r_resyncs_handwritten_role_into_memory() {
-        let dir = std::env::temp_dir().join(format!(
-            "dock-preset-r-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("dock-preset-r-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let presets = AgentPresets::load(dir.clone());
@@ -1442,13 +1434,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
     #[test]
     fn naming_semicolon_advances_and_confirms() {
-        let dir = std::env::temp_dir().join(format!(
-            "dock-preset-semi-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("dock-preset-semi-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let presets = AgentPresets::load(dir.clone());
@@ -1475,7 +1463,10 @@ mod tests {
         }
         // semicolon advances Id → Name
         let a1 = accept(&ctx, &mut view);
-        assert!(matches!(&a1, PresetAction::Flash(msg) if msg.contains("显示名")), "{a1:?}");
+        assert!(
+            matches!(&a1, PresetAction::Flash(msg) if msg.contains("显示名")),
+            "{a1:?}"
+        );
         if let PresetView::Canvas(c) = &mut view {
             if let Some(d) = c.naming_role.as_mut() {
                 d.name = "侦察".into();
@@ -1511,7 +1502,6 @@ mod tests {
         assert_eq!(tool_kind_label(&ctx, "mcp_demo__shot"), "MCP");
         assert_ne!(tool_kind_label(&ctx, "mcp_demo__shot"), "常驻");
     }
-
 
     #[test]
     fn single_click_selects_double_click_adds() {
@@ -1622,7 +1612,13 @@ mod tests {
         }
         let presets = ctx.get::<AgentPresets>(AGENT_PRESETS).unwrap();
         assert_eq!(
-            presets.get("custom").unwrap().agents.get("scout").unwrap().name,
+            presets
+                .get("custom")
+                .unwrap()
+                .agents
+                .get("scout")
+                .unwrap()
+                .name,
             "侦察"
         );
         // role starts with tools=None (all) → catalog empty; remove to open allowlist

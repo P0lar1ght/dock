@@ -511,7 +511,12 @@ impl AgentPresets {
         })
     }
 
-    pub fn add_subagent_tool(&self, mode_id: &str, role_id: &str, name: &str) -> Result<(), String> {
+    pub fn add_subagent_tool(
+        &self,
+        mode_id: &str,
+        role_id: &str,
+        name: &str,
+    ) -> Result<(), String> {
         if name.trim().is_empty() {
             return Err("工具名不能为空".into());
         }
@@ -1967,7 +1972,9 @@ mod tests {
         )
         .unwrap();
         // Touch mode via /preset-like mutate without loading scout into memory.
-        presets.set_persona(&mode.id, "改名 persona".into()).unwrap();
+        presets
+            .set_persona(&mode.id, "改名 persona".into())
+            .unwrap();
         assert!(
             agents_dir.join("scout.yml").exists(),
             "handwritten agents/scout.yml must survive persist without reload"

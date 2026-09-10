@@ -1,8 +1,8 @@
 //! Chromiumoxide CDP session: launch, navigate, tabs, dispose.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
@@ -25,12 +25,12 @@ use chromiumoxide::cdp::browser_protocol::page::{
     EventJavascriptDialogOpening, FrameId, FrameTree, GetFrameTreeParams,
     GetNavigationHistoryParams, HandleJavaScriptDialogParams, NavigateToHistoryEntryParams,
 };
-use chromiumoxide::layout::Point;
 use chromiumoxide::cdp::browser_protocol::target::{ActivateTargetParams, CloseTargetParams};
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EvaluateParams, EventConsoleApiCalled, RemoteObject,
 };
 use chromiumoxide::keys;
+use chromiumoxide::layout::Point;
 use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_util::StreamExt;
 use tokio::sync::Mutex as AsyncMutex;
@@ -134,7 +134,10 @@ fn truncate_str(s: &str, max: usize) -> String {
     if count <= max {
         s.to_string()
     } else {
-        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}…",
+            s.chars().take(max.saturating_sub(1)).collect::<String>()
+        )
     }
 }
 
@@ -190,15 +193,10 @@ impl ConnectedSession {
         // Default Viewport 800×600 Emulation-overrides layout; headed windows then paint
         // only a corner on grey chrome. Clear viewport so the OS window drives layout.
         if headed {
-            builder = builder
-                .with_head()
-                .viewport(None)
-                .window_size(1280, 900);
+            builder = builder.with_head().viewport(None).window_size(1280, 900);
         }
 
-        let config = builder
-            .build()
-            .map_err(|e| format!("BrowserConfig: {e}"))?;
+        let config = builder.build().map_err(|e| format!("BrowserConfig: {e}"))?;
 
         let (browser, mut handler) = with_timeout(
             LAUNCH_TIMEOUT,
@@ -360,9 +358,7 @@ impl ConnectedSession {
         with_timeout(
             NAV_TIMEOUT,
             async {
-                page.goto(url)
-                    .await
-                    .map_err(|e| format!("goto: {e}"))?;
+                page.goto(url).await.map_err(|e| format!("goto: {e}"))?;
                 Ok::<_, String>(())
             },
             || "navigate timeout".into(),
@@ -370,7 +366,12 @@ impl ConnectedSession {
         .await
         .map_err(|e| format!("navigate({url}): {e}"))?;
         self.refs.clear();
-        let cur = page.url().await.ok().flatten().unwrap_or_else(|| url.into());
+        let cur = page
+            .url()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| url.into());
         Ok(cur)
     }
 
@@ -410,16 +411,12 @@ impl ConnectedSession {
 
     pub async fn click_ref(&mut self, ref_id: &str) -> Result<String, String> {
         let key = snapshot::parse_ref(ref_id).ok_or_else(|| "missing ref".to_string())?;
-        let entry = self
-            .refs
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "unknown ref `{key}` — call browser_snapshot first (have {} refs)",
-                    self.refs.len()
-                )
-            })?;
+        let entry = self.refs.get(&key).cloned().ok_or_else(|| {
+            format!(
+                "unknown ref `{key}` — call browser_snapshot first (have {} refs)",
+                self.refs.len()
+            )
+        })?;
         let backend = snapshot::backend_id(&entry)
             .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
         let page = self.active_page()?.clone();
@@ -445,11 +442,9 @@ impl ConnectedSession {
                     .map_err(|e| e.to_string())?
                     .result
                     .model;
-                let point = chromiumoxide::layout::ElementQuad::from_quad(&model.content)
-                    .quad_center();
-                page.click(point)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let point =
+                    chromiumoxide::layout::ElementQuad::from_quad(&model.content).quad_center();
+                page.click(point).await.map_err(|e| e.to_string())?;
                 Ok::<_, String>(())
             }
         })
@@ -482,13 +477,9 @@ impl ConnectedSession {
             )
             .await
             .map_err(|e| e.to_string())?;
-            page.execute(
-                FocusParams::builder()
-                    .backend_node_id(backend)
-                    .build(),
-            )
-            .await
-            .map_err(|e| format!("focus: {e}"))?;
+            page.execute(FocusParams::builder().backend_node_id(backend).build())
+                .await
+                .map_err(|e| format!("focus: {e}"))?;
         }
 
         page.execute(InsertTextParams::new(text))
@@ -597,7 +588,10 @@ impl ConnectedSession {
             "switch" => {
                 let i = index.ok_or_else(|| "switch requires index".to_string())?;
                 if i >= self.pages.len() {
-                    return Err(format!("tab index {i} out of range (0..{})", self.pages.len()));
+                    return Err(format!(
+                        "tab index {i} out of range (0..{})",
+                        self.pages.len()
+                    ));
                 }
                 let page = &self.pages[i];
                 let tid = page.target_id().clone();
@@ -629,22 +623,20 @@ impl ConnectedSession {
                 self.refs.clear();
                 Ok(format!("closed tab {i}; active={}", self.active))
             }
-            other => Err(format!("unknown tabs action `{other}` (list|new|switch|close)")),
+            other => Err(format!(
+                "unknown tabs action `{other}` (list|new|switch|close)"
+            )),
         }
     }
 
     fn lookup_ref(&self, ref_id: &str) -> Result<(String, RefEntry), String> {
         let key = snapshot::parse_ref(ref_id).ok_or_else(|| "missing ref".to_string())?;
-        let entry = self
-            .refs
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "unknown ref `{key}` — call browser_snapshot first (have {} refs)",
-                    self.refs.len()
-                )
-            })?;
+        let entry = self.refs.get(&key).cloned().ok_or_else(|| {
+            format!(
+                "unknown ref `{key}` — call browser_snapshot first (have {} refs)",
+                self.refs.len()
+            )
+        })?;
         Ok((key, entry))
     }
 
@@ -730,11 +722,9 @@ impl ConnectedSession {
                     .map_err(|e| e.to_string())?
                     .result
                     .model;
-                let point = chromiumoxide::layout::ElementQuad::from_quad(&model.content)
-                    .quad_center();
-                page.move_mouse(point)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let point =
+                    chromiumoxide::layout::ElementQuad::from_quad(&model.content).quad_center();
+                page.move_mouse(point).await.map_err(|e| e.to_string())?;
                 Ok::<_, String>(())
             }
         })
@@ -743,11 +733,7 @@ impl ConnectedSession {
     }
 
     /// Press a key or chord (`Enter`, `Tab`, `Control+a`, `Meta+Shift+t`).
-    pub async fn press_key(
-        &mut self,
-        key: &str,
-        ref_id: Option<&str>,
-    ) -> Result<String, String> {
+    pub async fn press_key(&mut self, key: &str, ref_id: Option<&str>) -> Result<String, String> {
         let page = self.active_page()?.clone();
         if let Some(raw) = ref_id {
             let (k, entry) = self.lookup_ref(raw)?;
@@ -857,10 +843,7 @@ impl ConnectedSession {
         Ok(format!("selected `{selected}` on @{key}"))
     }
 
-    pub async fn fill_form(
-        &mut self,
-        fields: &[(String, String)],
-    ) -> Result<String, String> {
+    pub async fn fill_form(&mut self, fields: &[(String, String)]) -> Result<String, String> {
         if fields.is_empty() {
             return Err("fields must be a non-empty array of {ref, value}".into());
         }
@@ -908,7 +891,11 @@ impl ConnectedSession {
             filled.push(format!("@{key}"));
         }
         self.refs.clear();
-        Ok(format!("filled {} field(s): {}", filled.len(), filled.join(", ")))
+        Ok(format!(
+            "filled {} field(s): {}",
+            filled.len(),
+            filled.join(", ")
+        ))
     }
 
     pub async fn wait_for(
@@ -1073,9 +1060,7 @@ impl ConnectedSession {
         if let (Some(x), Some(y)) = (x, y) {
             return Ok((Point { x, y }, format!("coords ({x},{y})")));
         }
-        let raw = ref_id.ok_or_else(|| {
-            format!("{which} requires ref or x/y coordinates")
-        })?;
+        let raw = ref_id.ok_or_else(|| format!("{which} requires ref or x/y coordinates"))?;
         let (key, entry) = self.lookup_ref(raw)?;
         let backend = snapshot::backend_id(&entry)
             .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
@@ -1190,11 +1175,7 @@ impl ConnectedSession {
     }
 
     /// Set files on an `<input type=file>` identified by snapshot ref.
-    pub async fn file_upload(
-        &mut self,
-        ref_id: &str,
-        paths: &[String],
-    ) -> Result<String, String> {
+    pub async fn file_upload(&mut self, ref_id: &str, paths: &[String]) -> Result<String, String> {
         if paths.is_empty() {
             return Err("paths must be a non-empty array of file paths".into());
         }
@@ -1240,9 +1221,11 @@ impl ConnectedSession {
             return Err("width/height out of CDP range".into());
         }
         let page = self.active_page()?.clone();
-        page.execute(SetDeviceMetricsOverrideParams::new(width, height, 1.0, false))
-            .await
-            .map_err(|e| format!("setDeviceMetricsOverride: {e}"))?;
+        page.execute(SetDeviceMetricsOverrideParams::new(
+            width, height, 1.0, false,
+        ))
+        .await
+        .map_err(|e| format!("setDeviceMetricsOverride: {e}"))?;
         Ok(format!("resized viewport to {width}x{height}"))
     }
 
@@ -1289,9 +1272,7 @@ impl ConnectedSession {
         let rendered = if let Some(v) = obj.value.as_ref() {
             match v {
                 serde_json::Value::String(s) => s.clone(),
-                other => {
-                    serde_json::to_string(other).unwrap_or_else(|_| other.to_string())
-                }
+                other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
             }
         } else if let Some(d) = obj.description.as_ref() {
             d.clone()
@@ -1429,7 +1410,10 @@ impl ConnectedSession {
     }
 }
 
-fn flatten_frame_tree(tree: &FrameTree, out: &mut Vec<chromiumoxide::cdp::browser_protocol::page::Frame>) {
+fn flatten_frame_tree(
+    tree: &FrameTree,
+    out: &mut Vec<chromiumoxide::cdp::browser_protocol::page::Frame>,
+) {
     out.push(tree.frame.clone());
     if let Some(children) = tree.child_frames.as_ref() {
         for child in children {
@@ -1484,14 +1468,17 @@ pub fn discover_chrome() -> Result<String, String> {
     }
 }
 
-
 /// Bit field: Alt=1, Ctrl=2, Meta=4, Shift=8. Returns (modifiers, main_key).
 pub fn parse_key_chord(raw: &str) -> Result<(i64, String), String> {
     let s = raw.trim();
     if s.is_empty() {
         return Err("key is required".into());
     }
-    let parts: Vec<&str> = s.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = s
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
     if parts.is_empty() {
         return Err("key is required".into());
     }
@@ -1508,7 +1495,10 @@ pub fn parse_key_chord(raw: &str) -> Result<(i64, String), String> {
     }
     let main = parts[parts.len() - 1].to_string();
     // Allow bare modifier names only as the key itself (rare); otherwise require a main key.
-    if parts.len() > 1 && normalize_modifier(&main).is_some() && keys::get_key_definition(&main).is_none() {
+    if parts.len() > 1
+        && normalize_modifier(&main).is_some()
+        && keys::get_key_definition(&main).is_none()
+    {
         return Err(format!("chord `{raw}` is missing a main key"));
     }
     Ok((modifiers, main))
@@ -1557,8 +1547,14 @@ mod tests {
     fn parse_key_chord_modifiers() {
         assert_eq!(parse_key_chord("Enter").unwrap(), (0, "Enter".into()));
         assert_eq!(parse_key_chord("Control+a").unwrap(), (2, "a".into()));
-        assert_eq!(parse_key_chord("Ctrl+Shift+Tab").unwrap(), (2 | 8, "Tab".into()));
-        assert_eq!(parse_key_chord("Meta+Shift+t").unwrap(), (4 | 8, "t".into()));
+        assert_eq!(
+            parse_key_chord("Ctrl+Shift+Tab").unwrap(),
+            (2 | 8, "Tab".into())
+        );
+        assert_eq!(
+            parse_key_chord("Meta+Shift+t").unwrap(),
+            (4 | 8, "t".into())
+        );
         assert!(parse_key_chord("Foo+a").is_err());
         assert!(parse_key_chord("").is_err());
     }

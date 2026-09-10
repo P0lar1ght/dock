@@ -758,7 +758,7 @@ mod tests {
             "---\nname: late-skill\ndescription: Discovered mid session.\n---\n\nLate body.\n",
         )
         .unwrap();
-                let result = ToolResult {
+        let result = ToolResult {
             call_id: "w1".into(),
             name: "write_file".into(),
             content: format!("created {}", skill_md.display()),

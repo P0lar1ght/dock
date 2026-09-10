@@ -357,9 +357,7 @@ impl Overlay {
             | Self::Slot { .. }
             | Self::Browser { .. }
             | Self::Computer { .. }
-            | Self::Inspect { .. } => {
-                0
-            }
+            | Self::Inspect { .. } => 0,
             Self::Presets(PresetView::Roster { selected }) => *selected,
             Self::Presets(PresetView::Canvas(c)) => match c.pane {
                 PresetPane::Catalog => c.catalog_sel,

@@ -62,7 +62,7 @@ pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
                 name: name.clone(),
                 arguments: arguments.clone(),
                 content: "Tool call omitted...".into(),
-            
+
                 images: Vec::new(),
             }),
             LogEvent::SystemReminder(text) => Some(LogEvent::SystemReminder(text.clone())),
@@ -176,7 +176,7 @@ mod tests {
                 name: "read_file".into(),
                 arguments: r#"{"target_file":"src/auth.rs"}"#.into(),
                 content: "fn login() { buggy }".into(),
-            
+
                 images: Vec::new(),
             },
             LogEvent::User("also add a test".into()),
@@ -212,7 +212,7 @@ mod tests {
             name: "write_file".into(),
             arguments: "{}".into(),
             content: "test body".into(),
-        
+
             images: Vec::new(),
         });
         let events = build_compacted_events(

@@ -28,5 +28,5 @@ cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
 
 - [ ] 没有密钥、`.env`、`.dock/` 私人配置、真实会话数据
 - [ ] 没有删测试、弱化断言、加长超时来换绿灯
-- [ ] 没有夹带无关格式化或顺手重构（仓库存量 fmt / clippy 差异不属于本 PR）
+- [ ] 没有夹带无关格式化或顺手重构（格式由 CI 的 `cargo fmt --check` 把关；clippy 存量 warning 不属于本 PR）
 - [ ] 回归测试能打到原缺陷

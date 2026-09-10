@@ -9,10 +9,10 @@ mod agent_presets;
 mod agents;
 mod ask_user;
 mod browser;
-mod computer;
 mod bundle;
 mod chat_chunk;
 mod compact;
+mod computer;
 mod config;
 mod context_book;
 mod context_usage;
@@ -61,12 +61,12 @@ pub use agent_presets::{
 pub use agents::{agents, Agent, Agents};
 pub use ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
 pub use browser::{tool_browser, Browser, BrowserSession, BrowserTabInfo, BROWSER_TOOL_NAMES};
-pub use computer::{tool_computer, Computer, CUA_DRIVER_SERVER};
 pub use bundle::{
     install_app, install_core, install_fakes, install_foundation, install_spine,
     install_without_llm,
 };
 pub use compact::{compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
+pub use computer::{tool_computer, Computer, CUA_DRIVER_SERVER};
 pub use config::{
     effective_browser_headed, load_browser_headed, load_catalog, load_disabled_mcp_tools,
     load_mcp_servers, persist_browser_headed, persist_disabled_mcp_tools,
@@ -134,7 +134,10 @@ pub use stream_acc::StreamDelta;
 pub use task::{tool_subagent, tool_task, SubagentSnap, Subagents};
 pub use todo_write::{tool_todo, TodoItem, TodoStatus, Todos};
 pub use tool_cordis::tool_cordis;
-pub use tool_images::{cap_images, user_image_from_bytes, user_image_from_path, IMAGE_INLINE_PLACEHOLDER, MAX_TOOL_IMAGES};
+pub use tool_images::{
+    cap_images, user_image_from_bytes, user_image_from_path, IMAGE_INLINE_PLACEHOLDER,
+    MAX_TOOL_IMAGES,
+};
 pub use tools::{own_registered, tools, workspace_tools, ToolBody, Tools};
 pub use tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
 pub use turn::{turn, TurnControl};

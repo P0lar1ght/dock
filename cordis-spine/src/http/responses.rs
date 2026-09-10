@@ -55,7 +55,11 @@ pub fn body(
     body
 }
 
-pub fn input_items(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str) -> Vec<Value> {
+pub fn input_items(
+    request: &PromptRequest,
+    user_images: &[Vec<UserImage>],
+    model: &str,
+) -> Vec<Value> {
     let mut out = Vec::new();
     if !request.system.is_empty() {
         out.push(easy_message("system", &request.system, &[]));
@@ -483,7 +487,7 @@ mod tests {
                 name: "bash".into(),
                 arguments: "{}".into(),
                 content: "ok".into(),
-            
+
                 images: Vec::new(),
             },
             LogEvent::User("follow-up".into()),

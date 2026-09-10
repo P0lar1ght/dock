@@ -86,10 +86,7 @@ async fn connect_once(
     timeout: Duration,
 ) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
     let McpTransport::Stdio {
-        command,
-        args,
-        env,
-        ..
+        command, args, env, ..
     } = &server.transport
     else {
         return Err("not a stdio MCP server".into());
@@ -157,7 +154,7 @@ async fn connect_once(
                     } else {
                         tool_result_with_images(c, text, images)
                     }
-                },
+                }
                 Err(e) => tool_result(c, e),
             }
         })
@@ -523,7 +520,9 @@ mod tests {
     async fn write_ndjson_format() {
         let (mut w, mut r) = tokio::io::duplex(1024);
         let msg = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
-        write_frame(&mut w, &msg, WireFraming::Ndjson).await.unwrap();
+        write_frame(&mut w, &msg, WireFraming::Ndjson)
+            .await
+            .unwrap();
         drop(w);
         let mut buf = Vec::new();
         AsyncReadExt::read_to_end(&mut r, &mut buf).await.unwrap();
@@ -569,7 +568,9 @@ mod tests {
         // Content-Length servers never start a frame with `{`; NDJSON always does.
         let (client, mut server) = tokio::io::duplex(256);
         server
-            .write_all(br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}"#)
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}"#,
+            )
             .await
             .unwrap();
         server.write_all(b"\n").await.unwrap();
