@@ -1261,6 +1261,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
     async fn p0_navigate_press_wait_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
         let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
@@ -1353,6 +1354,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
     async fn p1_resize_dialog_upload_drag_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
         let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
@@ -1490,6 +1492,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
     async fn open_close_launches_chromium_when_available() {
         let dock_home = tempfile::tempdir().unwrap();
         let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
@@ -1559,6 +1562,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
     async fn p2_evaluate_network_iframe_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
         let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());

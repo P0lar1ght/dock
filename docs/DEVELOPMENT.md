@@ -72,7 +72,7 @@ cargo clippy -p cordis-spine --all-targets
 
 ```bash
 cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
-cargo test --locked -p cordis-spine -- --skip browser::
+cargo test --locked -p cordis-spine
 ```
 
 工具链用 rustup 的 stable，仓库下限由 `[workspace.package].rust-version` 兜底。代理环境要放行回环地址（见上文 `no_proxy`）。
@@ -87,7 +87,13 @@ actionlint .github/workflows/ci.yml
 
 CI 不跑的：
 
-- `cordis-spine` 的 `browser::tests`：要真实 Chrome 与 UI 快照，跑在无图形会话里不稳定。
+- 标了 `#[ignore]` 的用例：`browser` 里 4 个要真实 Chrome 的冒烟（`p0_` / `p1_` / `p2_` / `open_close_`）。页面文本与快照随 Chrome 版本、界面语言变化 —— 例如中文本地化下 `<input type=file>` 的标签是「选择文件」，而 `p1_` 的过滤器只匹配 ASCII `file`。要跑就本地跑：
+
+  ```bash
+  cargo test -p cordis-spine --lib -- --ignored           # 全跑，需要装 Chrome
+  cargo test -p cordis-spine --lib -- p1_ --ignored       # 单个
+  ```
+
 - `clippy`：仓库存量 warning 未清（见上文「命令」的注意事项）。
 - `embed-sdk` 的 js 检查：目前没有 lint / test 脚本，类型检查就是 `npm run build:types`。
 
