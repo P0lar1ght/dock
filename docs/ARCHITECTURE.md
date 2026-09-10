@@ -38,7 +38,7 @@ config.toml.example      用户 / 项目模型目录样例
 
 `main` 只做组装，不焊行为逻辑——基座系统提示、1s 调度都是各自一颗插件。TUI 与 Gateway 都是树上的插件，不是旁路进程。`embed-sdk` 只连回环 Gateway（`dock.1`），不另起 harness，也不直连 TUI。
 
-挂载有序：工具粒都在 `workspace_tools` 之后、`llm` 之前 `register`；`compact` 在 `llm` 之后（`inject "llm"`）；`tool-subagent` 在 `tool-task` 之后（live-lookup `"subagents"`）。完整顺序与每颗粒的工具名见 TOOLS.md。
+挂载有序：工具粒都在 `workspace_tools` 之后、`llm` 之前 `register`；`compact` 在 `llm` 之后（`inject "llm"`）；`tool-task` 同时登记 spawn 工具与 mailbox 工具。完整顺序与每颗粒的工具名见 TOOLS.md。
 
 ## named service 与插件粒
 
@@ -47,7 +47,7 @@ config.toml.example      用户 / 项目模型目录样例
 | Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
 | 其它 spine | `context` `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名 |
-| 工具插件 | `tool-web` `tool-browser` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-subagent` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
+| 工具插件 | `tool-web` `tool-browser` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` | 同名 |
 | 回环网关 | `gateway` | `"gateway"`（`GatewayRef`），事件 `gateway/pairing` |
 
