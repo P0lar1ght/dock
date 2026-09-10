@@ -45,6 +45,7 @@ mod sched;
 mod search;
 mod search_tool;
 mod subagent;
+mod task_ops;
 mod text_selection;
 mod thinking;
 pub(crate) mod tool;
@@ -861,6 +862,16 @@ fn push_tool_card(
         ));
         for i in header_at..lines.len() {
             tool_headers.push((i, hid.clone()));
+        }
+    } else if task_ops::is_task_op(name) {
+        let op_hid = task_ops::header_id(name, arguments, agents, job_snaps);
+        lines.extend(task_ops::lines(
+            name, arguments, content, agents, job_snaps, theme, width,
+        ));
+        if let Some(h) = op_hid {
+            for i in header_at..lines.len() {
+                tool_headers.push((i, h.clone()));
+            }
         }
     } else {
         let mode = tool_fold
