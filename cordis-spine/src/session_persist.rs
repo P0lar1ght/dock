@@ -459,36 +459,6 @@ mod tests {
     use super::*;
     use crate::session::ArchivedSession;
     use crate::types::LogEvent;
-    use std::sync::{Mutex, MutexGuard};
-
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
-
-    struct HomeGuard {
-        prev: Option<std::ffi::OsString>,
-        _lock: MutexGuard<'static, ()>,
-        _dir: tempfile::TempDir,
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var("DOCK_HOME", v),
-                None => std::env::remove_var("DOCK_HOME"),
-            }
-        }
-    }
-
-    fn lock_home() -> HomeGuard {
-        let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("DOCK_HOME");
-        std::env::set_var("DOCK_HOME", dir.path());
-        HomeGuard {
-            prev,
-            _lock: lock,
-            _dir: dir,
-        }
-    }
 
     #[test]
     fn encode_collapses_path_separators() {
@@ -500,7 +470,7 @@ mod tests {
 
     #[test]
     fn roundtrip_user_and_tool() {
-        let _home = lock_home();
+        let _home = crate::test_env::scoped().home();
         let cwd = Path::new("/tmp/dock-persist-test");
         let item = ArchivedSession {
             id: "abc123".into(),
@@ -533,7 +503,7 @@ mod tests {
     #[test]
     fn roundtrip_tool_images_bytes() {
         use crate::tool_images::user_image_from_bytes;
-        let _home = lock_home();
+        let _home = crate::test_env::scoped().home();
         let cwd = Path::new("/tmp/dock-persist-image-test");
         let png = vec![
             0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
@@ -580,7 +550,7 @@ mod tests {
 
     #[test]
     fn load_tool_images_skips_out_of_bounds_paths() {
-        let _home = lock_home();
+        let _home = crate::test_env::scoped().home();
         let outside = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(outside.path(), b"not an image under tool-images").unwrap();
         let loaded = load_tool_images(&[outside.path().display().to_string()]);
@@ -592,7 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_disk_reloads_archived_session() {
-        let _home = lock_home();
+        let _home = crate::test_env::scoped().home();
         let sessions = crate::session::Sessions::new(cordis::Context::new());
         sessions.attach_disk();
         sessions.append(LogEvent::User("disk hello".into()));
@@ -626,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_drops_live_folder_so_attach_disk_does_not_resurrect() {
-        let _home = lock_home();
+        let _home = crate::test_env::scoped().home();
         let sessions = reload();
         sessions.append(LogEvent::User("gone after clear".into()));
         sessions.clear();
@@ -644,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn rewind_persists_truncated_log() {
-        let _home = lock_home();
+        let _home = crate::test_env::scoped().home();
         let sessions = reload();
         sessions.append(LogEvent::User("keep".into()));
         sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
@@ -671,7 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn seal_persists_interrupted_tool_stub() {
-        let _home = lock_home();
+        let _home = crate::test_env::scoped().home();
         let sessions = reload();
         sessions.append(LogEvent::User("hi".into()));
         sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
@@ -699,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_keeps_transcript_and_restores_model_prefix() {
-        let _home = lock_home();
+        let _home = crate::test_env::scoped().home();
         let sessions = reload();
         sessions.append(LogEvent::User("keep visible".into()));
         sessions.append(LogEvent::ToolExecute {

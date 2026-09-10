@@ -64,7 +64,7 @@ cargo clippy -p cordis-spine --all-targets
 - 改行为只跑对应 crate，不要动辄全量。不要为了跑测试切 `--release`。
 - `install_fakes` 保持 echo（`cordis-spine/tests/round.rs` 期望 `echoed: hello`）；测试默认不配 `mcp_servers`，`mcp_client` 仍挂载并 fail-open，不要改成默认连接。
 - `vendor/` 里的 crate 是冻结副本，测试不过就当已知边界上报，不要就地改（见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
-- `cordis-spine` 的测试含进程级 `DOCK_HOME` 竞态，并行会随机红；本地与 CI 都加 `--test-threads=1`，原因见下文「CI」。
+- `cordis-spine` 的测试改进程级 env / cwd 必须走 `crate::test_env::scoped()`（单一进程锁 + drop 还原）。不要各模块自建 `static Mutex`，私锁之间不互斥，正是并行随机红的成因。
 
 ## CI
 
@@ -72,7 +72,7 @@ cargo clippy -p cordis-spine --all-targets
 
 ```bash
 cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
-cargo test --locked -p cordis-spine -- --skip browser:: --test-threads=1
+cargo test --locked -p cordis-spine -- --skip browser::
 ```
 
 工具链用 rustup 的 stable，仓库下限由 `[workspace.package].rust-version` 兜底。代理环境要放行回环地址（见上文 `no_proxy`）。
@@ -91,12 +91,15 @@ CI 不跑的：
 - `clippy`：仓库存量 warning 未清（见上文「命令」的注意事项）。
 - `embed-sdk` 的 js 检查：目前没有 lint / test 脚本，类型检查就是 `npm run build:types`。
 
-spine 测试串行跑的原因：多个模块用 `std::env::set_var("DOCK_HOME", …)` / 切 cwd 做隔离，进程级环境变量在并行下会互相覆盖，表现为 `session_persist::tests` 与 `skills::tests` 随机红。本地复现：
+spine 测试怎么隔离进程级 env：多个模块会临时改 `DOCK_HOME` 与当前目录做隔离，而这两个都是进程级全局。模块各持一把私有锁时锁与锁之间不互斥，表现为 `session_persist::tests` 与 `skills::tests` 随机红。仓库统一用 `cordis-spine/src/test_env.rs` 的 `scoped()`：
 
-```bash
-cargo test -p cordis-spine --lib            # 并行：随机失败
-cargo test -p cordis-spine --lib -- --test-threads=1   # 串行：稳定
+```rust
+let _home = crate::test_env::scoped().home();                  // 临时 DOCK_HOME
+let _cwd = crate::test_env::scoped().cwd(dir.path());          // 切 cwd
+let _env = crate::test_env::scoped().set("CHROME_PATH", "/x"); // 设 / 删单个变量
 ```
+
+一次 `scoped()` 只拿一把锁，所以不要嵌套调用（会自锁）。集成测试用不到 crate 私有模块，`tests/round.rs` 里自带同一把文件级锁。
 
 ## 浏览器 SDK
 

@@ -617,8 +617,7 @@ mod tests {
     #[test]
     fn promote_cua_path_under_dock_home() {
         let dir = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("DOCK_HOME");
-        std::env::set_var("DOCK_HOME", dir.path());
+        let _env = crate::test_env::scoped().set("DOCK_HOME", dir.path());
         let shots = dir.path().join("browser").join("screenshots");
         std::fs::create_dir_all(&shots).unwrap();
         let png = vec![
@@ -653,11 +652,6 @@ mod tests {
             images2.is_empty(),
             "must not read outside DOCK_HOME: {images2:?}"
         );
-
-        match &prev {
-            Some(v) => std::env::set_var("DOCK_HOME", v),
-            None => std::env::remove_var("DOCK_HOME"),
-        }
     }
 
     #[test]

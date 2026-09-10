@@ -9,6 +9,43 @@ use cordis_spine::{
     SESSIONS, SYSTEM_PROMPT, TOOLS, TURN,
 };
 
+/// 进程级 env（`DOCK_HOME`）的共享锁：本文件里有一个测试会临时改它，
+/// 其它测试必须读到稳定的值，所以大家都先拿这把锁。
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 独占 env 并把 `DOCK_HOME` 指向临时目录。
+struct HomeGuard {
+    prev: Option<std::ffi::OsString>,
+    _dir: tempfile::TempDir,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var("DOCK_HOME", v),
+            None => std::env::remove_var("DOCK_HOME"),
+        }
+        // 字段按声明顺序释放：临时目录先删，锁最后放。
+    }
+}
+
+fn lock_home() -> HomeGuard {
+    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let prev = std::env::var_os("DOCK_HOME");
+    std::env::set_var("DOCK_HOME", dir.path());
+    HomeGuard {
+        prev,
+        _dir: dir,
+        _lock: lock,
+    }
+}
+
 async fn boot() -> Context {
     let root = Context::new();
     install_fakes(&root).await.unwrap();
@@ -18,6 +55,7 @@ async fn boot() -> Context {
 
 #[tokio::test]
 async fn loop_waits_for_all_five() {
+    let _env = env_lock();
     let root = Context::new();
     let fiber = root.plugin(agent_loop(), ()).unwrap();
     assert_eq!(fiber.state(), FiberState::Pending);
@@ -28,6 +66,7 @@ async fn loop_waits_for_all_five() {
 
 #[tokio::test]
 async fn one_round_writes_log_in_order() {
+    let _env = env_lock();
     let root = boot().await;
     let out = root
         .require::<LoopHandle>(AGENT_LOOP)
@@ -65,6 +104,7 @@ async fn one_round_writes_log_in_order() {
 
 #[tokio::test]
 async fn pre_step_can_reject() {
+    let _env = env_lock();
     let root = Context::new();
     install_fakes(&root).await.unwrap();
     root.on_waterfall(PRE_STEP, |_: PreStep, _| PreStep {
@@ -85,6 +125,7 @@ async fn pre_step_can_reject() {
 
 #[tokio::test]
 async fn cancelled_turn_stops_before_sample() {
+    let _env = env_lock();
     let root = boot().await;
     root.plugin(turn(), ()).unwrap().wait().await.unwrap();
     root.require::<TurnControl>(TURN).unwrap().cancel();
@@ -139,6 +180,7 @@ fn prompt_only_loop() -> cordis::Plugin {
 
 #[tokio::test]
 async fn swap_loop_plugin_keeps_the_five_services() {
+    let _env = env_lock();
     let root = Context::new();
     install_fakes(&root).await.unwrap();
     let grok = root.plugin(agent_loop(), ()).unwrap();
@@ -170,6 +212,7 @@ async fn swap_loop_plugin_keeps_the_five_services() {
 
 #[tokio::test]
 async fn second_turn_does_not_reuse_previous_tool_result() {
+    let _env = env_lock();
     let root = boot().await;
     let agent = root.require::<LoopHandle>(AGENT_LOOP).unwrap();
     assert_eq!(
@@ -214,6 +257,7 @@ fn extra_ping() -> cordis::Plugin {
 
 #[tokio::test]
 async fn tools_register_is_live_and_disposed_with_fiber() {
+    let _env = env_lock();
     use cordis_spine::{install_without_llm, ToolCall, Tools, TOOLS};
 
     let root = Context::new();
@@ -247,6 +291,7 @@ async fn tools_register_is_live_and_disposed_with_fiber() {
 
 #[tokio::test]
 async fn install_fakes_echo_has_no_capability_tools() {
+    let _env = env_lock();
     let root = boot().await;
     let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
     let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
@@ -273,10 +318,9 @@ async fn install_fakes_echo_has_no_capability_tools() {
 
 #[tokio::test]
 async fn install_app_registers_capability_tools_and_mcp_fail_open() {
-    // Isolated home so a live `roster.yml` (e.g. current: warden) cannot
+    // Isolated home so a live `roster.yml` in the real `DOCK_HOME` cannot
     // filter out enter_plan_mode / task on the default code preset.
-    let dock_home = tempfile::tempdir().unwrap();
-    std::env::set_var("DOCK_HOME", dock_home.path());
+    let _home = lock_home();
     let root = Context::new();
     cordis_spine::install_app(&root).await.unwrap();
     let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
@@ -715,6 +759,7 @@ impl Sampler for CountThenComplete {
 
 #[tokio::test]
 async fn active_goal_keeps_sampling_after_first_text() {
+    let _env = env_lock();
     let root = Context::new();
     install_without_llm(&root).await.unwrap();
     root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
@@ -758,6 +803,7 @@ async fn active_goal_keeps_sampling_after_first_text() {
 
 #[tokio::test]
 async fn text_without_goal_samples_once() {
+    let _env = env_lock();
     let root = Context::new();
     install_without_llm(&root).await.unwrap();
     let samples = Arc::new(AtomicUsize::new(0));
@@ -819,6 +865,7 @@ impl Sampler for ToolsThenText {
 
 #[tokio::test]
 async fn coding_turn_survives_more_than_eight_tool_rounds() {
+    let _env = env_lock();
     let root = Context::new();
     install_without_llm(&root).await.unwrap();
     let samples = Arc::new(AtomicUsize::new(0));

@@ -1052,10 +1052,9 @@ mod tests {
     #[test]
     fn cockpit_body_shows_headed_display_section() {
         let dock_home = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("DOCK_HOME");
-        let prev_env = std::env::var_os("DOCK_BROWSER_HEADED");
-        std::env::set_var("DOCK_HOME", dock_home.path());
-        std::env::remove_var("DOCK_BROWSER_HEADED");
+        let _env = crate::test_env::scoped()
+            .set("DOCK_HOME", dock_home.path())
+            .remove("DOCK_BROWSER_HEADED");
 
         let browser = Browser::new();
         assert!(!browser.headed_pref());
@@ -1080,15 +1079,6 @@ mod tests {
         let body = browser.cockpit_body();
         assert!(body.contains("DOCK_BROWSER_HEADED"), "{body}");
         assert!(body.contains("生效：有头"), "{body}");
-
-        match prev_env {
-            Some(v) => std::env::set_var("DOCK_BROWSER_HEADED", v),
-            None => std::env::remove_var("DOCK_BROWSER_HEADED"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("DOCK_HOME", v),
-            None => std::env::remove_var("DOCK_HOME"),
-        }
     }
 
     #[test]
@@ -1125,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn registers_deferred_named_service_slash_and_disposes() {
         let dock_home = tempfile::tempdir().unwrap();
-        std::env::set_var("DOCK_HOME", dock_home.path());
+        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         let (root, fiber) = boot_browser().await;
         let tools = root.require::<Tools>(TOOLS).unwrap();
@@ -1273,7 +1263,7 @@ mod tests {
     #[tokio::test]
     async fn p0_navigate_press_wait_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
-        std::env::set_var("DOCK_HOME", dock_home.path());
+        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         if session::discover_chrome().is_err() {
             eprintln!("skip p0 smoke: chrome not installed");
@@ -1365,7 +1355,7 @@ mod tests {
     #[tokio::test]
     async fn p1_resize_dialog_upload_drag_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
-        std::env::set_var("DOCK_HOME", dock_home.path());
+        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         if session::discover_chrome().is_err() {
             eprintln!("skip p1 smoke: chrome not installed");
@@ -1502,7 +1492,7 @@ mod tests {
     #[tokio::test]
     async fn open_close_launches_chromium_when_available() {
         let dock_home = tempfile::tempdir().unwrap();
-        std::env::set_var("DOCK_HOME", dock_home.path());
+        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         if session::discover_chrome().is_err() {
             eprintln!("skip open_close: chrome not installed");
@@ -1571,7 +1561,7 @@ mod tests {
     #[tokio::test]
     async fn p2_evaluate_network_iframe_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
-        std::env::set_var("DOCK_HOME", dock_home.path());
+        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         if session::discover_chrome().is_err() {
             eprintln!("skip p2 smoke: chrome not installed");
