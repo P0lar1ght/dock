@@ -23,23 +23,12 @@ impl SpawnQueue {
         self.entries.is_empty()
     }
 
-    pub(super) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
     pub(super) fn push_back(&mut self, entry: QueuedSpawn) {
         self.entries.push_back(entry);
     }
 
     pub(super) fn contains_id(&self, id: &str) -> bool {
         self.entries.iter().any(|queued| queued.request.id == id)
-    }
-
-    pub(super) fn count_for_session(&self, parent_session_id: &str) -> usize {
-        self.entries
-            .iter()
-            .filter(|queued| queued.request.parent_session_id == parent_session_id)
-            .count()
     }
 
     pub(super) fn iter(&self) -> std::collections::vec_deque::Iter<'_, QueuedSpawn> {
@@ -55,7 +44,6 @@ impl SpawnQueue {
 pub(super) struct QueuedSpawn {
     pub(super) request: Box<SubagentRequest>,
     /// Tokio clock so paused-clock tests can assert the wait.
-    pub(super) queued_at: tokio::time::Instant,
     pub(super) caller: QueuedCaller,
 }
 
@@ -78,10 +66,6 @@ impl QueuedCaller {
         }
     }
 
-    pub(super) fn is_backgrounded(&self) -> bool {
-        matches!(self, Self::Backgrounded)
-    }
-
     pub(super) fn into_spawn_reply(self) -> Option<oneshot::Sender<SubagentResult>> {
         match self {
             Self::Awaiting { result_tx, .. } => Some(result_tx),
@@ -93,16 +77,11 @@ impl QueuedCaller {
 pub(super) enum StartOrigin {
     Direct,
     Dequeued {
-        queued_for: std::time::Duration,
         deadline: Option<tokio::time::Instant>,
     },
 }
 
 impl<R: ChildRunner> SubagentCoordinator<R> {
-    pub(super) fn session_queued_count(&self, parent_session_id: &str) -> usize {
-        self.queued.count_for_session(parent_session_id)
-    }
-
     pub(super) fn start_queued_within_capacity(&mut self) {
         // Finishing a cancelled entry below re-enters through `finish_child`;
         // the latch makes that inner sweep a no-op instead of a recursion
@@ -122,9 +101,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             let running = self.session_running_count(&queued.request.parent_session_id);
             if self.admission.has_capacity(running) {
                 let QueuedSpawn {
-                    request,
-                    queued_at,
-                    caller,
+                    request, caller, ..
                 } = queued;
                 let (spawn_reply, deadline) = match caller {
                     QueuedCaller::Awaiting {
@@ -133,14 +110,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     } => (Some(result_tx), deadline),
                     QueuedCaller::Backgrounded => (None, None),
                 };
-                self.start_child(
-                    *request,
-                    spawn_reply,
-                    StartOrigin::Dequeued {
-                        queued_for: queued_at.elapsed(),
-                        deadline,
-                    },
-                );
+                self.start_child(*request, spawn_reply, StartOrigin::Dequeued { deadline });
             } else {
                 kept.push_back(queued);
             }
@@ -171,19 +141,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     /// of timing out and the id stays queryable as a cancelled record.
     fn finish_cancelled_queued(&mut self, queued: QueuedSpawn) {
         let QueuedSpawn {
-            request,
-            caller,
-            queued_at,
+            request, caller, ..
         } = queued;
         // Token observers must see command-path cancels too.
         request.cancel_token.cancel();
         let result = cancelled_while_queued_result(&request);
-        self.finish_never_started(
-            *request,
-            caller.into_spawn_reply(),
-            result,
-            queued_at.into_std(),
-        );
+        self.finish_never_started(*request, caller.into_spawn_reply(), result);
     }
 
     /// The destructor's queue drain: resolve awaiting callers and cancel

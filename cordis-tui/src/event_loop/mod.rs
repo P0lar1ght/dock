@@ -19,8 +19,9 @@ use cordis::Context;
 use cordis_spine::{
     goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets, AppSettings,
     DynamicRunner, Goal, LogEvent, LspBackendAdapter, LspSetupScope, PlanMode, Sessions, Slash,
-    ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT,
-    PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS, SLASH, TOOLS,
+    Subagents, ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL, LSP,
+    MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS,
+    SLASH, SUBAGENTS, TOOLS,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -205,6 +206,10 @@ pub async fn run(ctx: Context) -> Result<()> {
                             match effect {
                                 Effect::Quit => quit = true,
                                 Effect::NewSession => {
+                                    if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
+                                        sub.cancel_all();
+                                        sub.open_admission();
+                                    }
                                     if let Ok(sessions) = ctx.require::<Sessions>(SESSIONS) {
                                         sessions.archive_current();
                                         sessions.clear();

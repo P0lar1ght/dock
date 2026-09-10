@@ -1,4 +1,6 @@
-//! Mode-directory roster + continuable mailbox (queued / urgent / interrupt / report).
+//! Mode-directory roster + one continuable spawn tool: a child runs a turn,
+//! parks idle, accepts `send_message`, and pushes a turn-end notice to the
+//! parent.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -6,10 +8,9 @@ use std::time::Duration;
 
 use cordis::Context;
 use cordis_spine::{
-    agent_loop, blocked_tool_message, install_without_llm, tool_subagent, tool_task, turn,
-    AgentPresets, BoxFuture, Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions,
-    StreamDelta, Subagents, ToolCall, Tools, AGENT_LOOP, AGENT_PRESETS, LLM, SESSIONS, SUBAGENTS,
-    TOOLS,
+    agent_loop, blocked_tool_message, install_without_llm, tool_task, turn, AgentPresets,
+    BoxFuture, Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions, StreamDelta, Subagents,
+    TaskConfig, ToolCall, Tools, AGENT_LOOP, AGENT_PRESETS, LLM, SESSIONS, SUBAGENTS, TOOLS,
 };
 use tokio::sync::Notify;
 
@@ -87,18 +88,17 @@ fn last_user(history: &[LogEvent]) -> String {
 }
 
 async fn boot(sampler: Arc<dyn Sampler>) -> Harness {
+    boot_with(sampler, TaskConfig::default()).await
+}
+
+async fn boot_with(sampler: Arc<dyn Sampler>, cfg: TaskConfig) -> Harness {
     let root = Context::new();
     install_without_llm(&root).await.unwrap();
     root.plugin(turn(), ()).unwrap().wait().await.unwrap();
     let home = tempfile::tempdir().unwrap();
     root.provide(AGENT_PRESETS, AgentPresets::load(home.path().to_path_buf()))
         .unwrap();
-    root.plugin(tool_task(), ()).unwrap().wait().await.unwrap();
-    root.plugin(tool_subagent(), ())
-        .unwrap()
-        .wait()
-        .await
-        .unwrap();
+    root.plugin(tool_task(), cfg).unwrap().wait().await.unwrap();
     root.provide(LLM, Llm::from_sampler(root.clone(), sampler))
         .unwrap();
     root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
@@ -119,10 +119,10 @@ async fn spawn_bg(tools: &Tools, prompt: &str, subagent_type: &str) -> String {
     let started = tools
         .execute(ToolCall {
             id: "t0".into(),
-            name: "subagent".into(),
+            name: "task".into(),
             arguments: serde_json::json!({
                 "prompt": prompt,
-                "description": "mailbox test",
+                "description": "spawn test",
                 "subagent_type": subagent_type,
                 "run_in_background": true,
             })
@@ -132,7 +132,7 @@ async fn spawn_bg(tools: &Tools, prompt: &str, subagent_type: &str) -> String {
     assert!(
         started.content.contains("Subagent started in background")
             && started.content.contains("send_message")
-            && !started.content.contains("get_task_output"),
+            && started.content.contains("get_task_output"),
         "{}",
         started.content
     );
@@ -200,20 +200,6 @@ async fn unknown_type_lists_roster() {
         "{}",
         out.content
     );
-    let via_subagent = tools
-        .execute(ToolCall {
-            id: "bad2".into(),
-            name: "subagent".into(),
-            arguments: r#"{"prompt":"x","description":"bad type","subagent_type":"not-a-type"}"#
-                .into(),
-        })
-        .await;
-    assert!(
-        via_subagent.content.contains("Unknown subagent type")
-            && via_subagent.content.contains("explore"),
-        "{}",
-        via_subagent.content
-    );
 }
 
 #[tokio::test]
@@ -237,6 +223,42 @@ async fn empty_roster_with_task_allowed_errors() {
         })
         .await;
     assert!(out.content.contains("no subagents"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn task_schema_drops_the_unimplemented_params() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let spec = tools
+        .specs_for_model()
+        .into_iter()
+        .find(|s| s.name == "task")
+        .expect("task spec");
+    let v: serde_json::Value = serde_json::from_str(&spec.parameters_json).unwrap();
+    let props = v["properties"].as_object().unwrap();
+    for gone in ["cwd", "isolation", "model"] {
+        assert!(!props.contains_key(gone), "{gone} should not be advertised");
+    }
+    for kept in [
+        "prompt",
+        "description",
+        "subagent_type",
+        "run_in_background",
+        "resume_from",
+        "reload_roster",
+    ] {
+        assert!(props.contains_key(kept), "{kept} missing from the schema");
+    }
+    assert_eq!(
+        v["required"],
+        serde_json::json!(["prompt", "description"]),
+        "schema required-set must match what the tool enforces"
+    );
+    // The roster is closed to this mode's agents/ ids.
+    assert!(
+        v["properties"]["subagent_type"]["enum"].is_array(),
+        "subagent_type must carry the live roster enum"
+    );
 }
 
 #[tokio::test]
@@ -409,8 +431,10 @@ async fn interrupt_idle_is_noop_not_a_wake() {
     assert!(sub.snapshot(&id).unwrap().idle);
 }
 
+/// The point of the merge: a background child's turn end reaches the parent
+/// without any polling.
 #[tokio::test]
-async fn idle_without_report_forwards_turn_text() {
+async fn background_turn_end_pushes_notice_with_output() {
     let h = boot(Arc::new(LastUser)).await;
     let tools = h.root.require::<Tools>(TOOLS).unwrap();
     let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
@@ -418,13 +442,177 @@ async fn idle_without_report_forwards_turn_text() {
     wait_idle(&sub, &id).await;
     let notices = sub.drain_parent_notices();
     assert!(
-        notices
-            .iter()
-            .any(|t| t.contains(&id) && t.contains("FIRST_TURN") && t.contains("未调用 report")),
+        notices.iter().any(|t| t.contains(&id)
+            && t.contains("FIRST_TURN")
+            && t.contains("finished its turn and is idle")),
         "{notices:?}"
     );
 }
 
+/// A foreground spawn hands the result back inline, so the same completion
+/// must not also queue a notice.
+#[tokio::test]
+async fn foreground_spawn_consumes_its_own_notice() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let out = tools
+        .execute(ToolCall {
+            id: "fg".into(),
+            name: "task".into(),
+            arguments: serde_json::json!({
+                "prompt": "INLINE_RESULT",
+                "description": "foreground",
+                "subagent_type": "general-purpose",
+                "run_in_background": false,
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(out.content.contains("INLINE_RESULT"), "{}", out.content);
+    assert!(out.content.contains("<subagent_meta>"), "{}", out.content);
+    let notices = sub.drain_parent_notices();
+    assert!(
+        !notices
+            .iter()
+            .any(|t| t.contains("finished its turn and is idle")),
+        "the inline result already carried this completion: {notices:?}"
+    );
+}
+
+/// Stop cancels the session's children; the next prompt re-opens spawns.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_all_stops_children() {
+    let gate = Arc::new(Gate {
+        started: AtomicBool::new(false),
+        release: Notify::new(),
+    });
+    let h = boot(Arc::new(GatedLastUser {
+        gate: gate.clone(),
+        first: AtomicBool::new(true),
+    }))
+    .await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "FIRST_TURN", "general-purpose").await;
+    wait_flag(&gate.started).await;
+    wait_running(&sub, &id).await;
+    sub.cancel_all();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !sub.snapshot(&id).is_some_and(|s| s.cancelled || s.done) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "cancel_all did not stop {id}"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    gate.release.notify_waiters();
+}
+
+/// An idle child frees its concurrent slot: with a limit of 1, the second
+/// spawn must start once the first parks.
+#[tokio::test]
+async fn idle_child_does_not_hold_the_concurrency_slot() {
+    let h = boot_with(
+        Arc::new(LastUser),
+        TaskConfig {
+            limits: cordis_spine::SubagentLimits {
+                max_concurrent: 1,
+                ..Default::default()
+            },
+            ..TaskConfig::default()
+        },
+    )
+    .await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let first = spawn_bg(&tools, "FIRST", "general-purpose").await;
+    wait_idle(&sub, &first).await;
+    let second = spawn_bg(&tools, "SECOND", "general-purpose").await;
+    wait_output_contains(&sub, &second, "SECOND").await;
+}
+
+async fn wait_flag(flag: &AtomicBool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if flag.load(Ordering::SeqCst) {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("sampler never started");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn subagent_type_enum(tools: &Tools) -> Vec<String> {
+    let spec = tools
+        .specs_for_model()
+        .into_iter()
+        .find(|s| s.name == "task")
+        .expect("task spec");
+    let v: serde_json::Value = serde_json::from_str(&spec.parameters_json).unwrap();
+    v["properties"]["subagent_type"]["enum"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|x| x.as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+async fn reload_roster_picks_up_new_yml() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let before = tools
+        .execute(ToolCall {
+            id: "r0".into(),
+            name: "task".into(),
+            arguments: r#"{"reload_roster":true}"#.into(),
+        })
+        .await;
+    assert!(
+        before.content.contains("explore") && !before.content.contains("- review"),
+        "{}",
+        before.content
+    );
+    assert!(
+        !subagent_type_enum(&tools).iter().any(|id| id == "review"),
+        "{:?}",
+        subagent_type_enum(&tools)
+    );
+
+    std::fs::create_dir_all(h._home.path().join("code").join("agents")).unwrap();
+    std::fs::write(
+        h._home
+            .path()
+            .join("code")
+            .join("agents")
+            .join("review.yml"),
+        "name: 评审\ndescription: 审 diff\ntools:\n  - read_file\n",
+    )
+    .unwrap();
+
+    let after = tools
+        .execute(ToolCall {
+            id: "r1".into(),
+            name: "task".into(),
+            arguments: r#"{"reload_roster":true}"#.into(),
+        })
+        .await;
+    assert!(
+        after.content.contains("review") && after.content.contains("评审"),
+        "{}",
+        after.content
+    );
+    let ids = subagent_type_enum(&tools);
+    assert!(ids.iter().any(|id| id == "review"), "{ids:?}");
+    assert!(ids.iter().any(|id| id == "explore"), "{ids:?}");
+}
+
+/// `report` stays the child→parent channel, and it queues until the parent
+/// samples rather than mutating the parent's live history.
 #[tokio::test]
 async fn report_appends_parent_system_reminder() {
     let h = boot(Arc::new(LastUser)).await;
@@ -477,83 +665,4 @@ async fn report_appends_parent_system_reminder() {
             .any(|t| t.contains(&id) && t.contains("仓库只有 README")),
         "{notices:?}"
     );
-}
-
-async fn wait_flag(flag: &AtomicBool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if flag.load(Ordering::SeqCst) {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("sampler never started");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-fn subagent_type_enum(tools: &Tools) -> Vec<String> {
-    let spec = tools
-        .specs_for_model()
-        .into_iter()
-        .find(|s| s.name == "subagent")
-        .expect("subagent spec");
-    let v: serde_json::Value = serde_json::from_str(&spec.parameters_json).unwrap();
-    v["properties"]["subagent_type"]["enum"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|x| x.as_str().map(str::to_string))
-        .collect()
-}
-
-#[tokio::test]
-async fn subagent_reload_roster_picks_up_new_yml() {
-    let h = boot(Arc::new(LastUser)).await;
-    let tools = h.root.require::<Tools>(TOOLS).unwrap();
-    let before = tools
-        .execute(ToolCall {
-            id: "r0".into(),
-            name: "subagent".into(),
-            arguments: r#"{"reload_roster":true}"#.into(),
-        })
-        .await;
-    assert!(
-        before.content.contains("explore") && !before.content.contains("- review"),
-        "{}",
-        before.content
-    );
-    assert!(
-        !subagent_type_enum(&tools).iter().any(|id| id == "review"),
-        "{:?}",
-        subagent_type_enum(&tools)
-    );
-
-    std::fs::create_dir_all(h._home.path().join("code").join("agents")).unwrap();
-    std::fs::write(
-        h._home
-            .path()
-            .join("code")
-            .join("agents")
-            .join("review.yml"),
-        "name: 评审\ndescription: 审 diff\ntools:\n  - read_file\n",
-    )
-    .unwrap();
-
-    let after = tools
-        .execute(ToolCall {
-            id: "r1".into(),
-            name: "subagent".into(),
-            arguments: r#"{"reload_roster":true}"#.into(),
-        })
-        .await;
-    assert!(
-        after.content.contains("review") && after.content.contains("评审"),
-        "{}",
-        after.content
-    );
-    let ids = subagent_type_enum(&tools);
-    assert!(ids.iter().any(|id| id == "review"), "{ids:?}");
-    assert!(ids.iter().any(|id| id == "explore"), "{ids:?}");
 }

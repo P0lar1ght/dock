@@ -94,9 +94,14 @@ struct PendingCall {
     cost_usd_ticks: Option<i64>,
 }
 
+/// Root session identity. The subagent coordinator binds its spawns to this
+/// value, so a Stop or session switch can cancel exactly this session's
+/// children.
+pub const ROOT_IDENTITY: &str = "main";
+
 impl Sessions {
     pub fn new(ctx: Context) -> Self {
-        Self::with_identity(ctx, "main", true)
+        Self::with_identity(ctx, ROOT_IDENTITY, true)
     }
 
     /// Nested subagent log: same API, no TUI events.

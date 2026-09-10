@@ -1,9 +1,14 @@
-//! Grok `task` coordinator + dock isolate `ChildRunner`.
+//! Subagent coordinator + dock isolate `ChildRunner`.
 //!
-//! Named service `"subagents"` is provided by `tool-task`. Continuable spawn
-//! is a separate plugin: [`tool_subagent`].
+//! One plugin provides the named service `"subagents"` and registers the whole
+//! model-facing surface: `task` (spawn) plus the mailbox tools
+//! (`send_message` / `list_agents` / `interrupt_agent` / `report`).
+//!
+//! Every child is continuable: it runs a turn, parks idle, accepts
+//! `send_message`, and pushes a turn-end notice to the parent. The parent is
+//! never required to poll.
 
-mod admission;
+pub mod admission;
 pub mod backend;
 mod control;
 pub mod coordinator;
@@ -13,33 +18,39 @@ mod format;
 mod interjection;
 mod runner;
 mod store;
-mod subagent_tool;
 mod tool_error;
 pub mod types;
 
-pub use subagent_tool::tool_subagent;
-
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cordis::{plugin, Inject, Plugin};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::names::{SUBAGENTS, TOOLS};
+use crate::session::ROOT_IDENTITY;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::ToolCall;
 
+use admission::SubagentLimits;
 use backend::{ChannelBackend, SubagentBackend};
 use coordinator::{CoordinatorConfig, SubagentCoordinator};
-use runner::{DockChildRunner, PARENT_SESSION_ID};
+use runner::DockChildRunner;
 use store::ChildStore;
 use types::{
-    SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
-    SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
+    SubagentCancelRequest, SubagentCancelTarget, SubagentEvent, SubagentOwner, SubagentRequest,
+    SubagentRuntimeOverrides,
 };
 
 /// Copied from Grok `MAX_SUBAGENT_DEPTH`.
 pub const MAX_SUBAGENT_DEPTH: u32 = 1;
+
+/// Idle children older than this are disposed (their slot and transcript stay
+/// readable, so `get_task_output` and `resume_from` keep working).
+const IDLE_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// How often the idle sweep runs.
+const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 tokio::task_local! {
     pub(super) static DEPTH: u32;
@@ -66,13 +77,32 @@ pub struct SubagentSnap {
     pub cancelled: bool,
     pub output: String,
     pub started_at: Instant,
-    /// Spawned with the `subagent` tool (mailbox). Not `get_task_output`.
-    pub mailbox: bool,
 }
 
 impl SubagentSnap {
     pub fn running(&self) -> bool {
         !self.done && !self.idle
+    }
+}
+
+/// Host-supplied coordinator policy. Read at the composition root (env +
+/// config.toml) and injected, so the plugin never re-reads ambient state.
+#[derive(Clone, Debug)]
+pub struct TaskConfig {
+    /// How long a foreground spawn blocks before it is handed off to the
+    /// background. Grok's shell uses 600s; a dock turn is interactive, so the
+    /// default is shorter.
+    pub foreground_budget: Duration,
+    /// Session-scoped concurrent spawn limits.
+    pub limits: SubagentLimits,
+}
+
+impl Default for TaskConfig {
+    fn default() -> Self {
+        Self {
+            foreground_budget: Duration::from_secs(120),
+            limits: SubagentLimits::from_env(),
+        }
     }
 }
 
@@ -115,7 +145,6 @@ impl Subagents {
                                 "Task or subagent {id} not found. No background tasks or subagents exist in this session."
                             ),
                             started_at: Instant::now(),
-                            mailbox: false,
                         })
                         .collect()
                 } else {
@@ -137,12 +166,49 @@ impl Subagents {
             .backend
             .sender()
             .send(SubagentEvent::Cancel(SubagentCancelRequest {
-                parent_session_id: Some(PARENT_SESSION_ID.into()),
+                parent_session_id: Some(ROOT_IDENTITY.into()),
                 target: SubagentCancelTarget::SubagentId(id.to_owned()),
                 respond_to,
             }));
-        let _ = SubagentCancelOutcome::Cancelled;
         Some(format!("killed {id}"))
+    }
+
+    /// Cancel every live child of this session (user Stop, session switch).
+    /// Spawn admission stays closed until [`Self::open_admission`].
+    pub fn cancel_all(&self) {
+        let (respond_to, _rx) = oneshot::channel();
+        let _ = self.backend.request_cancel_parent_session(respond_to);
+    }
+
+    /// Re-open spawns after a Stop: called at the start of each user turn.
+    pub fn open_admission(&self) {
+        let _ = self.backend.open_spawn_admission();
+    }
+
+    /// Session delete / switch: cancel this session's children and wait up to
+    /// `budget` for them to drain.
+    pub async fn teardown_and_drain(&self, budget: Duration) {
+        self.backend
+            .teardown_session_and_drain(ROOT_IDENTITY, budget)
+            .await;
+    }
+
+    /// Dispose idle children past the sweep TTL.
+    pub fn sweep_idle(&self, ttl: Duration) -> Vec<String> {
+        self.store.sweep_idle(ttl)
+    }
+
+    pub fn has_parent_notices(&self) -> bool {
+        self.store.has_parent_notices()
+    }
+
+    /// Enqueue a parent-facing notice and wake the session actor.
+    pub fn enqueue_parent_report(&self, from: &str, output: &str) {
+        self.store.push_report(from, output);
+    }
+
+    pub fn parent_wake(&self) -> Arc<tokio::sync::Notify> {
+        self.store.parent_wake()
     }
 
     /// Spawn a child and wait. Workflow host `SpawnAgent` live-looks `"subagents"`.
@@ -161,8 +227,8 @@ impl Subagents {
         .await
     }
 
-    /// Same as [`Self::spawn_and_wait`], with capability / schema overrides
-    /// from a Rhai `agent()` call.
+    /// Same as [`Self::spawn_and_wait`], with the runtime overrides a
+    /// workflow-host `agent()` call can express.
     pub async fn spawn_and_wait_with(
         &self,
         prompt: String,
@@ -182,15 +248,12 @@ impl Subagents {
             prompt,
             description,
             subagent_type,
-            parent_session_id: PARENT_SESSION_ID.into(),
-            parent_prompt_id: None,
+            parent_session_id: ROOT_IDENTITY.into(),
             resume_from: None,
-            cwd: None,
             runtime_overrides,
             run_in_background: false,
             surface_completion: false,
             await_to_completion: true,
-            fork_context: false,
             owner: SubagentOwner::workflow("host"),
             cancel_token: tokio_util::sync::CancellationToken::new(),
         };
@@ -217,23 +280,6 @@ impl Subagents {
         self.store
             .ensure_owned(id, description, subagent_type, owner);
     }
-
-    pub fn mailbox_child(&self, id: &str) -> bool {
-        self.snapshot(id).is_some_and(|s| s.mailbox)
-    }
-
-    pub fn has_parent_notices(&self) -> bool {
-        self.store.has_parent_notices()
-    }
-
-    /// Enqueue a parent mailbox notice and wake the session actor.
-    pub fn enqueue_parent_report(&self, from: &str, output: &str) {
-        self.store.push_report(from, output);
-    }
-
-    pub fn parent_wake(&self) -> std::sync::Arc<tokio::sync::Notify> {
-        self.store.parent_wake()
-    }
 }
 
 fn missing_snap(id: &str) -> SubagentSnap {
@@ -246,40 +292,125 @@ fn missing_snap(id: &str) -> SubagentSnap {
         cancelled: false,
         output: String::new(),
         started_at: Instant::now(),
-        mailbox: false,
     }
 }
 
 pub fn tool_task() -> Plugin {
-    plugin("tool-task", Inject::from([TOOLS]), |ctx, _: &()| {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let store = ChildStore::new();
-        let backend = ChannelBackend::new(tx);
-        let runner = DockChildRunner {
-            ctx: ctx.clone(),
-            store: store.clone(),
-        };
-        let coord = SubagentCoordinator::new(rx, runner, CoordinatorConfig::default());
-        tokio::spawn(async move {
-            coord.run().await;
-        });
-        ctx.provide(SUBAGENTS, Subagents { backend, store })?;
-        let tools = ctx.require::<Tools>(TOOLS)?;
-        let task_body: ToolBody = {
-            let ctx = ctx.clone();
-            Arc::new(move |call: ToolCall| {
+    plugin(
+        "tool-task",
+        Inject::from([TOOLS]),
+        |ctx, cfg: &TaskConfig| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let store = ChildStore::new();
+            let backend = ChannelBackend::for_session(tx, ROOT_IDENTITY);
+            let runner = DockChildRunner {
+                ctx: ctx.clone(),
+                store: store.clone(),
+            };
+            let coord = SubagentCoordinator::new(
+                rx,
+                runner,
+                CoordinatorConfig {
+                    foreground_budget: cfg.foreground_budget,
+                    limits: cfg.limits,
+                },
+            );
+            tokio::spawn(async move {
+                coord.run().await;
+            });
+
+            let sweep_store = store.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(IDLE_SWEEP_INTERVAL).await;
+                    for id in sweep_store.sweep_idle(IDLE_TTL) {
+                        tracing::debug!(subagent_id = %id, "disposed idle subagent");
+                    }
+                }
+            });
+
+            ctx.provide(SUBAGENTS, Subagents { backend, store })?;
+            let tools = ctx.require::<Tools>(TOOLS)?;
+
+            let task_body: ToolBody = {
                 let ctx = ctx.clone();
-                Box::pin(async move {
-                    let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
-                        return tool_result(call, "Error: subagents is not mounted");
-                    };
-                    execute::run_task(&ctx, &sub, call).await
+                Arc::new(move |call: ToolCall| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move {
+                        let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
+                            return tool_result(call, "Error: subagents is not mounted");
+                        };
+                        execute::run_task(&ctx, &sub, call).await
+                    })
                 })
-            })
-        };
-        own_registered(ctx, vec![tools.register(execute::spec(), task_body)?])?;
-        Ok(None)
-    })
+            };
+            let send_body: ToolBody = {
+                let ctx = ctx.clone();
+                Arc::new(move |call: ToolCall| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move {
+                        let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
+                            return tool_result(call, "Error: subagents is not mounted");
+                        };
+                        control::run_send(&sub, call).await
+                    })
+                })
+            };
+            let list_body: ToolBody = {
+                let ctx = ctx.clone();
+                Arc::new(move |call: ToolCall| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move {
+                        let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
+                            return tool_result(call, "Error: subagents is not mounted");
+                        };
+                        control::run_list(&sub, call).await
+                    })
+                })
+            };
+            let interrupt_body: ToolBody = {
+                let ctx = ctx.clone();
+                Arc::new(move |call: ToolCall| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move {
+                        let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
+                            return tool_result(call, "Error: subagents is not mounted");
+                        };
+                        control::run_interrupt(&sub, call).await
+                    })
+                })
+            };
+            let report_body: ToolBody = {
+                let ctx = ctx.clone();
+                Arc::new(move |call: ToolCall| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move {
+                        let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
+                            return tool_result(call, "Error: subagents is not mounted");
+                        };
+                        let sessions = crate::tools::exec_ctx()
+                            .and_then(|c| c.get::<crate::session::Sessions>(crate::names::SESSIONS))
+                            .or_else(|| {
+                                ctx.get::<crate::session::Sessions>(crate::names::SESSIONS)
+                            });
+                        control::run_report(&sub, sessions, call).await
+                    })
+                })
+            };
+
+            own_registered(
+                ctx,
+                vec![
+                    tools.register(execute::spec(), task_body)?,
+                    tools.register(control::send_spec(), send_body)?,
+                    tools.register(control::list_spec(), list_body)?,
+                    tools.register(control::interrupt_spec(), interrupt_body)?,
+                    tools.register(control::report_spec(), report_body)?,
+                ],
+            )?;
+            Ok(None)
+        },
+    )
 }
 
 pub fn render_subagent(s: &SubagentSnap) -> String {
@@ -303,21 +434,12 @@ mod coordinator_spawn_tests {
     use super::*;
     use crate::task::coordinator::{
         ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, SendBoxFuture, StartedChild,
-        SubagentProgress,
     };
-    use crate::task::types::{
-        SubagentDescribeOutcome, SubagentResult, SubagentTypeSummary, SubagentValidateTypeOutcome,
-    };
+    use crate::task::types::{SubagentResult, SubagentValidateTypeOutcome};
 
     struct NopControl;
 
     impl ChildControl for NopControl {
-        type ProgressFuture = std::future::Ready<SubagentProgress>;
-
-        fn progress(&self) -> Self::ProgressFuture {
-            std::future::ready(SubagentProgress::default())
-        }
-
         fn cancel(&self) {}
     }
 
@@ -325,10 +447,8 @@ mod coordinator_spawn_tests {
 
     impl ChildRunner for ImmediateRunner {
         type Control = NopControl;
-        type CompletionData = ();
-        type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
+        type RunFuture = SendBoxFuture<ChildRunOutput>;
         type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
-        type DescribeFuture = SendBoxFuture<SubagentDescribeOutcome>;
 
         fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
             Box::pin(async move {
@@ -336,12 +456,6 @@ mod coordinator_spawn_tests {
                     .reporter
                     .started(StartedChild {
                         child_session_id: run.request.id.clone(),
-                        persona: None,
-                        resumed_from: None,
-                        child_cwd: String::new(),
-                        worktree_path: None,
-                        effective_model_id: String::new(),
-                        definition_background: false,
                         control: NopControl,
                     })
                     .await;
@@ -353,8 +467,6 @@ mod coordinator_spawn_tests {
                         child_session_id: run.request.id,
                         ..Default::default()
                     },
-                    completion_data: (),
-                    snapshot_ref: None,
                 }
             })
         }
@@ -367,16 +479,7 @@ mod coordinator_spawn_tests {
             Box::pin(async { SubagentValidateTypeOutcome::Ok })
         }
 
-        fn describe_type(
-            &self,
-            _subagent_type: String,
-            _harness_agent_type: Option<String>,
-            _parent_session_id: String,
-        ) -> Self::DescribeFuture {
-            Box::pin(async { SubagentDescribeOutcome::Ok(SubagentTypeSummary::default()) })
-        }
-
-        fn on_completed(&self, _completion: crate::task::coordinator::ChildCompletion<()>) {}
+        fn on_completed(&self, _completion: crate::task::coordinator::ChildCompletion) {}
     }
 
     #[tokio::test]
@@ -386,7 +489,7 @@ mod coordinator_spawn_tests {
         tokio::spawn(async move {
             coord.run().await;
         });
-        let backend = ChannelBackend::new(tx);
+        let backend = ChannelBackend::for_session(tx, ROOT_IDENTITY);
         let result = backend
             .spawn(SubagentRequest {
                 id: "sa-coord".into(),
@@ -394,14 +497,11 @@ mod coordinator_spawn_tests {
                 description: "coord test".into(),
                 subagent_type: "general-purpose".into(),
                 parent_session_id: "dock".into(),
-                parent_prompt_id: None,
                 resume_from: None,
-                cwd: None,
                 runtime_overrides: SubagentRuntimeOverrides::default(),
                 run_in_background: false,
                 surface_completion: true,
                 await_to_completion: true,
-                fork_context: false,
                 owner: SubagentOwner::Task,
                 cancel_token: tokio_util::sync::CancellationToken::new(),
             })

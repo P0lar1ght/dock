@@ -1,4 +1,9 @@
 //! Grok `TaskTool::run`, adapted to dock `ToolCall` / `ChannelBackend`.
+//!
+//! One spawn tool: the child runs a turn, parks idle, and can be continued
+//! with the mailbox tools (`send_message` / `report` / `list_agents` /
+//! `interrupt_agent`). A finished turn pushes a notice to the parent, so a
+//! background spawn never has to be polled.
 
 use serde::Deserialize;
 
@@ -10,23 +15,34 @@ use crate::types::{ToolCall, ToolResult};
 use super::backend::SubagentBackend;
 use super::format::{
     format_subagent_auto_backgrounded, format_subagent_completed,
-    format_subagent_started_background, sanitize_optional_arg, BackgroundNoticeNaming,
+    format_subagent_started_background, BackgroundNoticeNaming,
 };
 use super::runner::PARENT_SESSION_ID;
 use super::types::{
-    is_valid_resume_id, sanitize_cwd_value, ModelOverrideProvenance, SubagentIsolationMode,
-    SubagentOwner, SubagentRequest, SubagentRuntimeOverrides, SubagentValidateTypeOutcome,
+    is_valid_resume_id, SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
+    SubagentValidateTypeOutcome,
 };
 use super::{current_depth, Subagents, MAX_SUBAGENT_DEPTH};
 
-const TASK_PARAMS: &str = r#"{"type":"object","properties":{"prompt":{"type":"string","description":"The full task prompt for the subagent to execute."},"description":{"type":"string","description":"Short description of the task (3-5 words)."},"subagent_type":{"type":"string","description":"Id from the current Agent mode agents/ roster."},"run_in_background":{"type":"boolean","description":"Returns immediately with a subagent_id. Use get_task_output to retrieve results. Default true."},"resume_from":{"type":"string","description":"Resume a completed subagent_id with a new prompt."},"cwd":{"type":"string","description":"Explicit working directory. Mutually exclusive with isolation=worktree."},"isolation":{"type":"string","description":"none (default) or worktree."},"model":{"type":"string","description":"Optional model slug. Ignored when resume_from is set."}},"required":["prompt","description"]}"#;
+const TASK_PARAMS: &str = r#"{"type":"object","properties":{"prompt":{"type":"string","description":"Complete standalone task for this role. The child does not see this conversation."},"description":{"type":"string","description":"Short (3-5 word) label for the delegated work."},"subagent_type":{"type":"string","description":"Role id from the live agents/ roster. The enum on this field is the callable set — extra YAML roles are included."},"run_in_background":{"type":"boolean","description":"Default true. Returns a durable subagent_id immediately; you are notified when a turn ends. Set false only when the next action needs the result now."},"resume_from":{"type":"string","description":"A disposed subagent_id: starts from that child's transcript with this prompt appended."},"reload_roster":{"type":"boolean","description":"If true, re-read this mode's agents/*.yml and return the live subagent_type ids. Does not spawn. Use after writing a new agents/<id>.yml so the next model step's enum includes it. Omit the spawn fields."}},"required":["prompt","description"]}"#;
 
-const TASK_DESC: &str = "Launch a subagent from the current Agent mode roster.\n\
-- prompt: the full task for the child.\n\
-- description: 3–5 words.\n\
-- subagent_type: id from this mode's agents/ YAML. The tool parameter enum is the callable set (same as the live roster, including user overlay roles).\n\
-- run_in_background: default true. Returns subagent_id; collect with get_task_output.\n\
-- resume_from: completed/disposed subagent_id only.\n\
+const TASK_DESC: &str = "Delegate work to a role from the current Agent mode agents/ roster \
+(a YAML file under this preset's agents/). The child runs in its own context, keeps a durable \
+subagent_id, and stays idle between turns, so a delegation is a conversation rather than a \
+one-shot handoff.\n\
+- prompt: the full task for the child. It does not see this conversation.\n\
+- description: 3-5 words.\n\
+- subagent_type: id from this mode's agents/ YAML. The tool parameter enum is the callable set \
+(same as the live roster, including user overlay roles).\n\
+- run_in_background: default true. Returns subagent_id immediately; its turn end reaches you as \
+a notification. Set false only when the next action needs the result now.\n\
+- resume_from: a disposed subagent_id only.\n\
+- reload_roster: refresh the subagent_type enum after writing a new agents/<id>.yml (does not spawn).\n\
+Talking to a child: send_message (idle — queued and urgent both start its next turn now; urgent \
+is send-now only while it is running), list_agents for state, interrupt_agent to stop the current \
+turn. The child reaches you with report (many times, across turns), and a turn that ends without \
+report has its text forwarded. After writing a new Agent mode directory, apply that id with \
+/preset before spawning its roles; reload_roster does not switch modes.\n\
 Max nesting depth is 1.";
 
 pub(super) fn spec() -> crate::types::ToolSpec {
@@ -41,9 +57,9 @@ fn default_true() -> bool {
     true
 }
 
-/// Copied field set from Grok `TaskToolInput`.
 #[derive(Debug, Deserialize)]
 struct TaskToolInput {
+    #[serde(default)]
     prompt: String,
     #[serde(default)]
     description: String,
@@ -54,11 +70,8 @@ struct TaskToolInput {
     #[serde(default)]
     resume_from: Option<String>,
     #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    isolation: Option<SubagentIsolationMode>,
-    #[serde(default)]
-    model: Option<String>,
+    reload_roster: bool,
+    /// Accepted but not advertised: a server-side id override.
     #[serde(default)]
     task_id: Option<String>,
 }
@@ -68,16 +81,21 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
         Ok(v) => v,
         Err(e) => return tool_result(call, format!("Error: invalid task arguments: {e}")),
     };
+    if input.reload_roster {
+        let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+            return tool_result(call, "Error: agentPresets is not mounted");
+        };
+        return tool_result(call, presets.reload_roster_report());
+    }
     if input.prompt.trim().is_empty() {
         return tool_result(call, "Error: prompt is required");
     }
     let description = {
         let t = input.description.trim();
         if t.is_empty() {
-            "subagent".to_string()
-        } else {
-            t.to_string()
+            return tool_result(call, "Error: description is required");
         }
+        t.to_string()
     };
 
     let subagent_type = {
@@ -123,72 +141,15 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
                 return tool_result(
                     call,
                     format!(
-                        "subagent {src} has not completed; resume_from is for a finished subagent_id. \
-                         Collect with get_task_output."
+                        "subagent {src} has not been disposed; resume_from is for a disposed subagent_id. \
+                         Continue it with send_message, or collect with get_task_output."
                     ),
                 );
             }
         }
     }
 
-    let model = sanitize_optional_arg(input.model);
-    let model = if resume_from.is_some() {
-        if let Some(ref ignored) = model {
-            tracing::debug!(
-                model = %ignored,
-                "ignoring model override because resume_from is set"
-            );
-        }
-        None
-    } else {
-        model
-    };
-
-    let cwd = input.cwd.as_deref().and_then(sanitize_cwd_value);
-    let cwd = if cwd.is_some() && input.isolation == Some(SubagentIsolationMode::Worktree) {
-        if cwd
-            .as_deref()
-            .is_some_and(|p| std::path::Path::new(p).is_dir())
-        {
-            return tool_result(
-                call,
-                "cwd and isolation=\"worktree\" are mutually exclusive. \
-                 Use cwd to point the subagent at an existing directory, \
-                 or isolation=\"worktree\" to create a new isolated worktree, \
-                 but not both.",
-            );
-        }
-        tracing::debug!(
-            cwd = %cwd.as_deref().unwrap_or(""),
-            "clearing non-existent cwd path because isolation=worktree is set"
-        );
-        None
-    } else {
-        cwd
-    };
-
-    if let Some(ref cwd_path) = cwd {
-        if resume_from.is_none() {
-            let p = std::path::Path::new(cwd_path);
-            if !p.is_dir() {
-                let detail = if p.exists() {
-                    format!("cwd \"{cwd_path}\" exists but is not a directory")
-                } else {
-                    format!("cwd \"{cwd_path}\" does not exist")
-                };
-                return tool_result(call, detail);
-            }
-        }
-    }
-
-    if input.isolation == Some(SubagentIsolationMode::Worktree) {
-        return tool_result(
-            call,
-            "isolation=\"worktree\" is not available in this host.",
-        );
-    }
-
-    spawn_grok_child(
+    spawn_child(
         sub,
         call,
         input.prompt,
@@ -196,16 +157,13 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
         subagent_type,
         input.run_in_background,
         resume_from,
-        cwd,
-        input.isolation,
-        model,
         input.task_id,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
-async fn spawn_grok_child(
+async fn spawn_child(
     sub: &Subagents,
     call: ToolCall,
     prompt: String,
@@ -213,13 +171,8 @@ async fn spawn_grok_child(
     subagent_type: String,
     run_in_background: bool,
     resume_from: Option<String>,
-    cwd: Option<String>,
-    isolation: Option<SubagentIsolationMode>,
-    model: Option<String>,
     task_id: Option<String>,
 ) -> ToolResult {
-    let depth = current_depth();
-
     match sub
         .backend()
         .validate_type(&subagent_type, PARENT_SESSION_ID)
@@ -237,25 +190,6 @@ async fn spawn_grok_child(
                 format!("Unknown subagent type: {}{suffix}", subagent_type),
             );
         }
-        SubagentValidateTypeOutcome::Disabled => {
-            return tool_result(
-                call,
-                format!(
-                    "Subagent '{}' is disabled via [subagents.toggle] in config.toml",
-                    subagent_type
-                ),
-            );
-        }
-        SubagentValidateTypeOutcome::NotAllowed { allowed } => {
-            return tool_result(
-                call,
-                format!(
-                    "agent can only spawn: {}; '{}' not allowed",
-                    allowed.join(", "),
-                    subagent_type
-                ),
-            );
-        }
         SubagentValidateTypeOutcome::ValidationUnavailable => {
             return tool_result(
                 call,
@@ -268,10 +202,6 @@ async fn spawn_grok_child(
         }
     }
 
-    if model.is_some() {
-        tracing::debug!("Task.model is ignored; dock children share the parent model");
-    }
-
     let id = task_id
         .filter(|s| super::types::is_not_sentinel(s))
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
@@ -282,36 +212,19 @@ async fn spawn_grok_child(
         SubagentOwner::Task,
     );
 
-    let child_cancellation = tokio_util::sync::CancellationToken::new();
     let request = SubagentRequest {
         id: id.clone(),
         prompt,
         description: description.clone(),
         subagent_type: subagent_type.clone(),
         parent_session_id: PARENT_SESSION_ID.into(),
-        parent_prompt_id: None,
         resume_from,
-        cwd,
-        runtime_overrides: SubagentRuntimeOverrides {
-            model,
-            model_override_provenance: ModelOverrideProvenance::Tool,
-            reasoning_effort: None,
-            persona: None,
-            capability_mode: None,
-            isolation,
-            harness_agent_type: None,
-            completion_output_cap: None,
-            spawn_depth: Some(depth + 1),
-            output_token_budget: None,
-            output_schema: None,
-            loop_task_id: None,
-        },
+        runtime_overrides: SubagentRuntimeOverrides::default(),
         run_in_background,
         surface_completion: true,
         await_to_completion: false,
-        fork_context: false,
         owner: SubagentOwner::Task,
-        cancel_token: child_cancellation,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
     let naming = BackgroundNoticeNaming::CANONICAL;
@@ -341,7 +254,7 @@ async fn spawn_grok_child(
         });
         return tool_result(
             call,
-            format_subagent_started_background(&id, &subagent_type, &description, &naming, false),
+            format_subagent_started_background(&id, &subagent_type, &description, &naming),
         );
     }
 
@@ -353,16 +266,13 @@ async fn spawn_grok_child(
     if result.backgrounded {
         return tool_result(
             call,
-            format_subagent_auto_backgrounded(
-                &id,
-                &subagent_type,
-                &description,
-                &naming,
-                false,
-                false,
-            ),
+            format_subagent_auto_backgrounded(&id, &subagent_type, &description, &naming),
         );
     }
+
+    // The parent has the result in hand, so drop the queued turn-end notice
+    // the child pushed when this turn finished.
+    sub.consume_completion(&id);
 
     if result.success {
         let body = format_subagent_completed(
@@ -372,7 +282,6 @@ async fn spawn_grok_child(
             result.tool_calls,
             result.turns,
             result.duration_ms,
-            None,
         );
         tool_result(call, body)
     } else {

@@ -825,7 +825,6 @@ mod tests {
             cancelled: false,
             output: String::new(),
             started_at: Instant::now(),
-            mailbox: false,
         };
         let entry = TaskEntry::from_subagent(&snap, Some("岑"));
         match entry {

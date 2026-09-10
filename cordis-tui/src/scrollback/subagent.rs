@@ -11,17 +11,9 @@ use cordis_spine::{LogEvent, SubagentSnap};
 
 pub const HEADER_PREFIX: &str = "sub:";
 
-pub fn is_task_tool(name: &str) -> bool {
-    name == "task"
-}
-
-/// Independent continuable spawn — not a `task` alias (Grok rejects that).
-pub fn is_subagent_tool(name: &str) -> bool {
-    name == "subagent"
-}
-
+/// The one spawn tool: its card opens the child conversation overlay.
 pub fn opens_child_overlay(name: &str) -> bool {
-    is_task_tool(name) || is_subagent_tool(name)
+    name == "task"
 }
 
 pub fn parse_id(content: &str) -> Option<String> {
@@ -307,12 +299,8 @@ mod tests {
         assert_eq!(id, "sub:kid");
         assert_eq!(open_id(&id), Some("kid"));
         assert!(open_id("call-9").is_none());
-        let id = header_id("call-8", "subagent", "subagent_id: kid-2\n", "{}", &[]);
-        assert_eq!(id, "sub:kid-2");
-        assert!(is_task_tool("task"));
-        assert!(!is_task_tool("subagent"));
-        assert!(is_subagent_tool("subagent"));
-        assert!(!is_subagent_tool("task"));
+        assert!(opens_child_overlay("task"));
+        assert!(!opens_child_overlay("bash"));
     }
 
     #[test]
@@ -327,7 +315,6 @@ mod tests {
             cancelled: false,
             output: "## 结论\n\n第一行预览".into(),
             started_at: std::time::Instant::now(),
-            mailbox: false,
         };
         let live = CardLive {
             snap: Some(&snap),

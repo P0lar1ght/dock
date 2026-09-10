@@ -2,14 +2,11 @@
 
 use tokio::sync::oneshot;
 
-use super::super::admission::{AdmissionDecision, AdmissionError};
+use super::super::admission::AdmissionDecision;
 use super::super::coordinator_state::PendingChild;
 use super::super::types::{SubagentOwner, SubagentRequest, SubagentResult, SubagentSpawnRequest};
 use super::queue::{QueuedCaller, QueuedSpawn, StartOrigin};
-use super::{
-    ChildRunOutput, ChildRunner, LimitedSpawnOrigin, SubagentCoordinator, SubagentLimitDecision,
-    SubagentLimitNotice,
-};
+use super::{ChildRunOutput, ChildRunner, SubagentCoordinator};
 
 impl<R: ChildRunner> SubagentCoordinator<R> {
     pub(super) fn handle_spawn(&mut self, command: SubagentSpawnRequest) {
@@ -63,18 +60,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     running,
                     "subagent queued at the concurrent limit"
                 );
-                self.notify_limit(
-                    &request,
-                    SubagentLimitDecision::QueuedAtConcurrentLimit {
-                        limit: self.admission.max_concurrent(),
-                    },
-                );
                 let deadline = request
                     .awaits_in_foreground()
                     .then(|| tokio::time::Instant::now() + self.config.foreground_budget);
                 self.queued.push_back(QueuedSpawn {
                     request,
-                    queued_at: tokio::time::Instant::now(),
                     caller: QueuedCaller::Awaiting {
                         result_tx,
                         deadline,
@@ -82,14 +72,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 });
             }
             AdmissionDecision::Reject(error) => {
-                self.notify_limit(
-                    &request,
-                    match &error {
-                        AdmissionError::ConcurrentLimitReached { limit } => {
-                            SubagentLimitDecision::RejectedAtConcurrentLimit { limit: *limit }
-                        }
-                    },
-                );
                 let result = SubagentResult {
                     success: false,
                     error: Some(error.message()),
@@ -97,12 +79,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     child_session_id: id,
                     ..Default::default()
                 };
-                self.finish_never_started(
-                    *request,
-                    Some(result_tx),
-                    result,
-                    std::time::Instant::now(),
-                );
+                self.finish_never_started(*request, Some(result_tx), result);
             }
         }
     }
@@ -151,30 +128,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         Ok(())
     }
 
-    /// Counts are computed here, not at call sites: a queued spawn counts
-    /// itself in `queue_depth` (the notice fires before the push), a rejected
-    /// spawn does not.
-    fn notify_limit(&self, request: &SubagentRequest, decision: SubagentLimitDecision) {
-        let Some(sink) = &self.config.limit_sink else {
-            return;
-        };
-        let queued = self.session_queued_count(&request.parent_session_id);
-        sink(SubagentLimitNotice {
-            parent_session_id: request.parent_session_id.clone(),
-            decision,
-            running: self.session_running_count(&request.parent_session_id),
-            queue_depth: match decision {
-                SubagentLimitDecision::QueuedAtConcurrentLimit { .. } => queued + 1,
-                SubagentLimitDecision::RejectedAtConcurrentLimit { .. } => queued,
-            },
-            origin: if request.is_scheduler_loop() {
-                LimitedSpawnOrigin::SchedulerLoop
-            } else {
-                LimitedSpawnOrigin::Task
-            },
-        });
-    }
-
     /// Route a spawn that never reached the runner through `finish_child`,
     /// so waiters resolve and the id stays queryable; `since` anchors the
     /// record's duration.
@@ -183,13 +136,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         request: SubagentRequest,
         spawn_reply: Option<oneshot::Sender<SubagentResult>>,
         result: SubagentResult,
-        since: std::time::Instant,
     ) {
         let id = request.id.clone();
         self.pending.insert(
             id.clone(),
             PendingChild {
-                started_at: since,
                 cancellation: request.cancel_token.clone(),
                 spawn_reply,
                 foreground_deadline: None,
@@ -198,14 +149,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 request,
             },
         );
-        self.finish_child(
-            &id,
-            ChildRunOutput {
-                result,
-                completion_data: R::CompletionData::default(),
-                snapshot_ref: None,
-            },
-        );
+        self.finish_child(&id, ChildRunOutput { result });
     }
 }
 
