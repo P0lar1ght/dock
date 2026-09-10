@@ -102,6 +102,7 @@ async fn discard_crashed_client_if_current(
 }
 
 /// Installs a restarted client unless shutdown has begun.
+#[allow(clippy::result_large_err)] // Err 回传的是刚建好的 LspClient（要还给重试循环复用），box 只会多一次分配
 async fn install_restarted_client(
     lsp_manager: &Arc<tokio::sync::Mutex<LspManager>>,
     server_name: &str,

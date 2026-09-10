@@ -335,7 +335,7 @@ impl TaskEntry {
         let tag_display = "Loop";
         let label = format!(
             "{} {} \u{b7} {}{}",
-            tag_display, human_schedule, &prompt_preview, &suffix
+            tag_display, human_schedule, prompt_preview, suffix
         );
         let schedule_style = format!("{} \u{b7} ", human_schedule);
         let neutral = Style::default().fg(theme.text_secondary);
