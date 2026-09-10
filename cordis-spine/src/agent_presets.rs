@@ -730,7 +730,7 @@ impl AgentPresets {
         }
         assembled.push_str("\n\n");
         assembled.push_str(ROSTER_MARK);
-        assembled.push_str("\n用 subagent 委派并持续交流（send_message / list_agents / interrupt_agent）。idle 时 queued 与 urgent 都会立刻开下一轮；urgent 只在 running 时才是 send-now。interrupt_agent 不能叫醒 idle。子代理用 report 与你交流（可多轮多次），你看不到它们的助手正文。若收到「未调用 report」代转发，当作该轮消息，send_message 追问或改派，不要空等。");
+        assembled.push_str("\n用 task 委派并持续交流（send_message / list_agents / interrupt_agent）。idle 时 queued 与 urgent 都会立刻开下一轮；urgent 只在 running 时才是 send-now。interrupt_agent 不能叫醒 idle。子代理用 report 与你交流（可多轮多次），你看不到它们的助手正文。若收到「未调用 report」代转发，当作该轮消息，send_message 追问或改派，不要空等。");
         let has_task = match &preset.tools {
             None => true,
             Some(t) => t.iter().any(|n| n == "task"),
@@ -738,7 +738,7 @@ impl AgentPresets {
         if has_task {
             assembled.push_str("一次性收集结果用 task + get_task_output。");
         }
-        assembled.push_str(" 本轮给当前模式加了 agents/<id>.yml 后，先 subagent（reload_roster: true）再 spawn，enum 才会带上新 id。新建模式写完后用 /preset 应用该 id，不要指望 reload_roster 切模式。");
+        assembled.push_str(" 本轮给当前模式加了 agents/<id>.yml 后，先 task（reload_roster: true）再 spawn，enum 才会带上新 id。新建模式写完后用 /preset 应用该 id，不要指望 reload_roster 切模式。");
         assembled.push_str(&self.new_mode_write_hint());
         assembled.push_str(&self.new_role_write_hint());
         if preset.agents.is_empty() {
@@ -797,7 +797,7 @@ impl AgentPresets {
         })
     }
 
-    /// Appended to the model-facing `subagent` tool so it names this mode's roles.
+    /// Appended to the model-facing `task` tool so it names this mode's roles.
     pub fn subagent_role_hint(&self) -> String {
         let roster = self.current_roster();
         if roster.is_empty() {
@@ -872,12 +872,12 @@ impl AgentPresets {
     }
 
     /// Re-read `agents/` and list callable `subagent_type` ids.
-    /// Used by `subagent` when `reload_roster` is true.
+    /// Used by `task` when `reload_roster` is true.
     pub fn reload_roster_report(&self) -> String {
         self.resync();
         let preset = self.current();
         let mut lines = vec![format!(
-            "Reloaded agents/ for mode {} ({}). Next model step's subagent / task subagent_type enum:",
+            "Reloaded agents/ for mode {} ({}). Next model step's task subagent_type enum:",
             preset.id, preset.name
         )];
         if preset.agents.is_empty() {
@@ -904,9 +904,7 @@ impl AgentPresets {
                 lines.push(line);
             }
         }
-        lines.push(
-            "Call subagent with one of these ids. Do not use a type that is not listed.".into(),
-        );
+        lines.push("Call task with one of these ids. Do not use a type that is not listed.".into());
         lines.push(format!(
             "New roles go in {}/<type>.yml. New Agent modes go in {}/<id>/agent.yml (id [a-z0-9][a-z0-9-]*), then /preset apply. Do not write ~/.dock/presets/ unless the user asks to save globally.",
             self.workspace_agents_dir(),
@@ -1643,10 +1641,14 @@ fn sanitize_stale_warden_overlay(overlay: &mut AgentPreset, base: &AgentPreset) 
     let Some(tools) = overlay.tools.as_mut() else {
         return;
     };
-    tools
-        .retain(|t| t != "task" && t != "get_task_output" && t != "wait_tasks" && t != "kill_task");
-    if !tools.iter().any(|t| t == "subagent") {
-        tools.push("subagent".into());
+    // 拼音 overlay 早于 spawn 工具面统一到单一 task：剥掉旧名（subagent 与
+    // 一次性 task 套件的附属工具），并保证 task 在列 —— 迁移是换名，不是剥掉
+    // spawn 面让用户两手空空。
+    tools.retain(|t| {
+        t != "subagent" && t != "get_task_output" && t != "wait_tasks" && t != "kill_task"
+    });
+    if !tools.iter().any(|t| t == "task") {
+        tools.push("task".into());
     }
 }
 
@@ -2162,6 +2164,9 @@ mod tests {
         assert!(presets.subagent("jia").is_none());
         assert_eq!(presets.subagent("甲").unwrap().name, "甲旧");
         assert!(presets.subagent("观").is_some());
+        // 迁移是换名不是剥面：旧 overlay 只写了 subagent，迁移后必须还有 task。
+        assert!(presets.allows("task"), "{:?}", presets.current().tools);
+        assert!(!presets.allows("subagent"), "{:?}", presets.current().tools);
         let mut assembled = String::new();
         presets.merge_subagent_roster(&mut assembled);
         assert!(!assembled.contains("jia"), "{assembled}");
@@ -2215,9 +2220,11 @@ mod tests {
             current.persona
         );
         assert!(current.persona.contains("甲/乙/丙"), "{}", current.persona);
-        assert!(presets.allows("subagent"));
-        assert!(!presets.allows("task"));
+        assert!(presets.allows("task"));
+        assert!(!presets.allows("subagent"));
         assert!(!presets.allows("get_task_output"));
+        assert!(!presets.allows("wait_tasks"));
+        assert!(!presets.allows("kill_task"));
         assert!(presets.allows("write_file"));
         assert!(presets.subagent("jia").is_none());
         let jia = presets.subagent("甲").unwrap();
@@ -2226,7 +2233,10 @@ mod tests {
         let mut roster = String::new();
         presets.merge_subagent_roster(&mut roster);
         assert!(!roster.contains("jia"), "{roster}");
-        assert!(!roster.contains("get_task_output"), "{roster}");
+        // spawn 面统一后的文案只教 task；旧一次性套件不再出现在提示里。
+        assert!(roster.contains("用 task 委派"), "{roster}");
+        assert!(!roster.contains("wait_tasks"), "{roster}");
+        assert!(!roster.contains("kill_task"), "{roster}");
         assert!(roster.contains("- 甲"), "{roster}");
     }
 
@@ -2249,7 +2259,8 @@ mod tests {
         presets.merge_subagent_roster(&mut assembled);
         assert_eq!(assembled.matches(ROSTER_MARK).count(), 1);
         assert!(assembled.contains("explore"));
-        assert!(assembled.contains("subagent"));
+        assert!(assembled.contains("用 task 委派"), "{assembled}");
+        assert!(!assembled.contains("用 subagent"), "{assembled}");
         assert!(assembled.contains("send_message"));
         assert!(assembled.contains("urgent"));
         assert!(assembled.contains("reload_roster"));
