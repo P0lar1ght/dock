@@ -1520,27 +1520,17 @@ mod tests {
 
     #[test]
     fn user_data_under_dock_home() {
-        let prev = std::env::var_os("DOCK_HOME");
-        std::env::set_var("DOCK_HOME", "/tmp/dock-test-home-browser");
+        let _env = crate::test_env::scoped().set("DOCK_HOME", "/tmp/dock-test-home-browser");
         let p = browser_user_data_dir();
         assert!(p.ends_with("browser/user-data"), "{p:?}");
         assert!(!p.to_string_lossy().contains(".config/google-chrome"));
-        match prev {
-            Some(v) => std::env::set_var("DOCK_HOME", v),
-            None => std::env::remove_var("DOCK_HOME"),
-        }
     }
 
     #[test]
     fn discover_mentions_chrome_path_on_bad_env() {
-        let prev = std::env::var_os("CHROME_PATH");
-        std::env::set_var("CHROME_PATH", "/no/such/chrome-binary-xyz");
+        let _env = crate::test_env::scoped().set("CHROME_PATH", "/no/such/chrome-binary-xyz");
         let err = discover_chrome().unwrap_err();
         assert!(err.contains("CHROME_PATH"), "{err}");
-        match prev {
-            Some(v) => std::env::set_var("CHROME_PATH", v),
-            None => std::env::remove_var("CHROME_PATH"),
-        }
     }
 
     #[test]

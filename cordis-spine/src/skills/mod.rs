@@ -522,27 +522,6 @@ mod tests {
     use crate::context_usage::{occupancy_detail, snapshot_context, OccupancyKind};
     use crate::prompt::{SystemPrompt, ORDER_SKILLS};
     use crate::types::PreStep;
-    use std::sync::{Mutex, MutexGuard};
-
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
-
-    struct CwdGuard {
-        prev: std::path::PathBuf,
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.prev);
-        }
-    }
-
-    fn lock_cwd(dir: &std::path::Path) -> CwdGuard {
-        let lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        CwdGuard { prev, _lock: lock }
-    }
 
     fn write_skill(root: &std::path::Path, name: &str, body: &str) {
         let skill_dir = root.join("skills").join(name);
@@ -574,7 +553,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Demo skill for inject tests.\n---\n\nDo the demo with $ARGUMENTS.\n",
         );
-        let _cwd = lock_cwd(dir.path());
+        let _cwd = crate::test_env::scoped().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let skills = ctx.get::<Skills>(SKILLS).unwrap();
@@ -610,7 +589,7 @@ mod tests {
             "help",
             "---\nname: help\ndescription: Must not shadow /help.\n---\n\nNope.\n",
         );
-        let _cwd = lock_cwd(dir.path());
+        let _cwd = crate::test_env::scoped().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let extras = ctx.get::<Slash>(SLASH).unwrap().list();
@@ -629,7 +608,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Demo skill for listing occupancy.\n---\n\nBody.\n",
         );
-        let _cwd = lock_cwd(dir.path());
+        let _cwd = crate::test_env::scoped().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let assembled = ctx
@@ -673,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn occupancy_lists_skills_category_when_catalog_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let _cwd = lock_cwd(dir.path());
+        let _cwd = crate::test_env::scoped().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let snap = snapshot_context(&ctx);
@@ -706,7 +685,7 @@ mod tests {
             "hidden-one",
             "---\nname: hidden-one\ndescription: User slash only.\ndisable-model-invocation: true\n---\n\nSecret.\n",
         );
-        let _cwd = lock_cwd(dir.path());
+        let _cwd = crate::test_env::scoped().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
@@ -747,7 +726,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Already known.\n---\n\nOld.\n",
         );
-        let _cwd = lock_cwd(dir.path());
+        let _cwd = crate::test_env::scoped().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let late = dir.path().join(".dock").join("skills").join("late-skill");

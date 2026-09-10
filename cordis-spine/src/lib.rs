@@ -53,6 +53,9 @@ mod web_fetch;
 mod workflow;
 mod workspace;
 
+#[cfg(test)]
+mod test_env;
+
 pub use acp::PermissionOptionKind;
 pub use agent_presets::{
     agent_presets, blocked_tool_message, is_shipped, AgentPreset, AgentPresets, PresetOrigin,

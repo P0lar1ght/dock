@@ -1232,7 +1232,7 @@ url = "http://127.0.0.1:18989/mcp"
 
     #[test]
     fn mcp_bearer_token_from_env() {
-        std::env::set_var("DOCK_TEST_MCP_BEARER", "tok-secret");
+        let _env = crate::test_env::scoped().set("DOCK_TEST_MCP_BEARER", "tok-secret");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -1333,8 +1333,7 @@ default = "grok-4"
 
     #[test]
     fn dock_browser_headed_env_empty_is_unset() {
-        let prev = std::env::var_os("DOCK_BROWSER_HEADED");
-        std::env::remove_var("DOCK_BROWSER_HEADED");
+        let _env = crate::test_env::scoped().remove("DOCK_BROWSER_HEADED");
         assert!(!dock_browser_headed_env_override());
         std::env::set_var("DOCK_BROWSER_HEADED", "");
         assert!(!dock_browser_headed_env_override());
@@ -1342,9 +1341,5 @@ default = "grok-4"
         assert!(!dock_browser_headed_env_override());
         std::env::set_var("DOCK_BROWSER_HEADED", "1");
         assert!(dock_browser_headed_env_override());
-        match prev {
-            Some(v) => std::env::set_var("DOCK_BROWSER_HEADED", v),
-            None => std::env::remove_var("DOCK_BROWSER_HEADED"),
-        }
     }
 }

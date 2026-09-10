@@ -368,38 +368,12 @@ mod tests {
     use crate::context_usage::{occupancy_detail, snapshot_context, OccupancyKind};
     use crate::prompt::{SystemPrompt, ORDER_SKILLS, ORDER_WORKFLOWS};
     use crate::slash::slash;
-    use std::sync::{Mutex as StdMutex, MutexGuard};
-
-    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
-
-    struct EnvGuard {
-        prev_cwd: std::path::PathBuf,
-        prev_home: Option<String>,
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.prev_cwd);
-            match &self.prev_home {
-                Some(v) => std::env::set_var("DOCK_HOME", v),
-                None => std::env::remove_var("DOCK_HOME"),
-            }
-        }
-    }
-
-    fn lock_env(dir: &std::path::Path) -> EnvGuard {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev_cwd = std::env::current_dir().unwrap();
-        let prev_home = std::env::var("DOCK_HOME").ok();
-        std::env::set_current_dir(dir).unwrap();
-        std::env::set_var("DOCK_HOME", dir.join("dock-home"));
+    /// `DOCK_HOME` 指向临时目录 + 切 cwd，退出时还原（进程级状态由 test_env 串行化）。
+    fn env_in(dir: &std::path::Path) -> crate::test_env::EnvScope {
         std::fs::create_dir_all(dir.join("dock-home")).unwrap();
-        EnvGuard {
-            prev_cwd,
-            prev_home,
-            _lock: lock,
-        }
+        crate::test_env::scoped()
+            .cwd(dir)
+            .set("DOCK_HOME", dir.join("dock-home"))
     }
 
     fn script(name: &str, desc: &str) -> String {
@@ -425,7 +399,7 @@ mod tests {
     #[tokio::test]
     async fn builtin_deep_research_is_a_slash_extra() {
         let dir = tempfile::tempdir().unwrap();
-        let _env = lock_env(dir.path());
+        let _env = env_in(dir.path());
         let ctx = cordis::Context::new();
         mount_workflows(&ctx).await;
         let extras = ctx.get::<Slash>(SLASH).unwrap().list();
@@ -450,7 +424,7 @@ mod tests {
             script("review-pr", "Review a PR."),
         )
         .unwrap();
-        let _env = lock_env(dir.path());
+        let _env = env_in(dir.path());
         let ctx = cordis::Context::new();
         mount_workflows(&ctx).await;
         let extras = ctx.get::<Slash>(SLASH).unwrap().list();
@@ -472,7 +446,7 @@ mod tests {
             script("help", "Must not shadow /help."),
         )
         .unwrap();
-        let _env = lock_env(dir.path());
+        let _env = env_in(dir.path());
         let ctx = cordis::Context::new();
         mount_workflows(&ctx).await;
         let extras = ctx.get::<Slash>(SLASH).unwrap().list();
@@ -483,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn assemble_lists_workflows_and_occupancy_does_not_double_count() {
         let dir = tempfile::tempdir().unwrap();
-        let _env = lock_env(dir.path());
+        let _env = env_in(dir.path());
         let ctx = cordis::Context::new();
         mount_workflows(&ctx).await;
         let assembled = ctx
@@ -520,7 +494,7 @@ mod tests {
     #[tokio::test]
     async fn tools_execute_discovers_new_workflow() {
         let dir = tempfile::tempdir().unwrap();
-        let _env = lock_env(dir.path());
+        let _env = env_in(dir.path());
         let ctx = cordis::Context::new();
         mount_workflows(&ctx).await;
         let wf_dir = dir.path().join(".dock").join("workflows");
