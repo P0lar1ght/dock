@@ -4,3 +4,13 @@
 .dock/
 embed-sdk/node_modules/
 embed-sdk/dist/
+
+# 密钥 / 本地环境（不进源码、commit、PR）
+.env
+.env.*
+!.env.example
+*.local.toml
+
+# 编辑器 / 临时文件
+*.swp
+*.swo

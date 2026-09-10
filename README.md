@@ -134,7 +134,7 @@ flowchart TB
 
 实线是控制 / 数据流，虚线是「`register` 进 `tools`」与「named service live-lookup」。两个表面（`tui`、`gateway`）都经 `SESSION_PORT` 把 prompt 投给 `session_actor`，也各自 live-look `sessions` 等做会话投影；`cron-driver` 插件 `inject` `cron`/`sessions`/`session.port`，1s 一 tick，到点用同一个 port 提交。磁盘（`~/.dock` / 项目 `.dock`）由 `svc` 与部分工具粒（memory / plan-mode / dynamic / mcp）读写。
 
-挂载有序：工具粒都在 `workspace_tools` 之后、`llm` 之前 `register`；`compact` 在 `llm` 之后（要 `inject "llm"`）；`tool-subagent` 在 `tool-task` 之后（live-look `"subagents"`）。完整顺序与每颗粒的工具名见 [TOOLS.md](TOOLS.md)。
+挂载顺序见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 Gateway 默认挂载但不监听。TUI `/pair` 开启回环 HTTP（首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。`DOCK_GATEWAY_BIND` 只改首选地址。配对走 HTTP；会话投影、权限、斜杠、图片输入走 JSON-RPC `dock.1`。鉴权是 Origin 配对 + 回环，不是 Origin 白名单。工具能力插件 `inject: ["tools"]` 后 `register`，MCP 也进同一张 `"tools"` 表。模式 / 模型 / 权限开关住在 `settings`；计划是独立模式，不是第三种权限。Named service 在调用点 live-lookup，不要把 `Arc` 关进长生命周期闭包。
 
@@ -170,7 +170,7 @@ flowchart LR
 
 ## 快速开始
 
-需要 **Rust 1.88+**（`cordis-gateway` 在 1.85 编不过）和本机 API key，或在配置里写好端点。
+需要 **Rust 1.88+**（README badge 与本节一致；本仓无 `rust-toolchain` / `rust-version` / CI 兜底，说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）和本机 API key，或在配置里写好端点。
 
 ```bash
 cargo run -p cordis-app
@@ -204,9 +204,11 @@ cargo test -p cordis-spine --test round -- install_app_registers
 
 同一进程里的 `gateway` 插件只绑 loopback，**默认不监听**。在 TUI `/pair` 里开启后再打开宿主页。首选端口占用时自动换下一个（overlay 显示实际地址）。
 
+构建 `embed-sdk/` 需要 Node >= 18（`embed-sdk/package.json` 的 `engines.node`）。
+
 ```bash
 cd embed-sdk
-npm install
+npm ci
 npm run build
 ```
 
@@ -240,7 +242,9 @@ dock/
 ├── cordis-render/        # Markdown / Mermaid
 ├── embed-sdk/            # 宿主页 JS 注入（dock-embed.js）
 ├── vendor/               # 冻结副本：mermaid 布局栈、xai Grok 拷贝
-├── skills/               # Agent skills
+├── skills/               # Agent skills（内置，Bundled scope）
+├── .agents/skills/       # 仓库流程 skills（Agents scope）
+├── docs/                 # 架构与开发细节
 ├── assets/               # 品牌图
 └── config.toml.example   # 用户 / 项目模型目录样例
 ```
@@ -251,13 +255,19 @@ dock/
 
 | 文档 | 说明 |
 |---|---|
-| [AGENTS.md](AGENTS.md) | 插件规则、布局、live-lookup、给写代码的 agent / 人 |
+| [AGENTS.md](AGENTS.md) | 根政策：命令、边界、提交约定；给写代码的 agent / 人（`CLAUDE.md` 指向它） |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 插件树目录地图、不变式、磁盘布局 |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 环境、命令、测试、调试、落点 |
 | [TOOLS.md](TOOLS.md) | 模型工具、插件粒、缺口、明确不做 |
 | [CLI.md](CLI.md) | 斜杠、快捷键、overlay、底栏 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 人类贡献流程 |
+| [SECURITY.md](SECURITY.md) | 漏洞上报与安全边界 |
 | [embed-sdk/README.md](embed-sdk/README.md) | 浏览器 SDK 属性、事件、配对 |
 | [skills/cordis-plugin-development/SKILL.md](skills/cordis-plugin-development/SKILL.md) | 动态 Cordis 插件工作流 |
+| [.agents/skills/](.agents/skills/) | 仓库流程 skills：git-commit、create-pr |
+| `LICENSE` | 尚未添加（TODO）：根 `Cargo.toml` 声明 `license = "MIT"`，仓库当前没有 `LICENSE` 文件 |
 
-Crate README 管该包的 API。根目录这三份清单是产品面的权威：TOOLS、CLI、AGENTS。
+Crate README 管该包的 API。产品面的权威清单：`TOOLS.md`（模型工具）、`CLI.md`（斜杠 / 快捷键 / overlay）；插件树与不变式见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ---
 

@@ -1,6 +1,6 @@
 # CLI / TUI
 
-对照当前 `cordis-tui` 斜杠目录与 overlay，不是愿望列表。架构仍以 [AGENTS.md](AGENTS.md) 为准。**模型工具**记在 [TOOLS.md](TOOLS.md)；本文件只记人操作的命令、快捷键、overlay、底栏。
+对照当前 `cordis-tui` 斜杠目录与 overlay，不是愿望列表。硬规则见 [AGENTS.md](AGENTS.md)，架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。**模型工具**记在 [TOOLS.md](TOOLS.md)；本文件只记人操作的命令、快捷键、overlay、底栏。
 
 用户可见文案中文；Grok 底栏那种短 hint（`Enter:send`）保持英文无空格。
 

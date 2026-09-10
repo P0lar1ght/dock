@@ -1,6 +1,6 @@
 # 工具清单
 
-对照当前 `install_app` 与 `cordis-spine` 源码，不是愿望列表。架构规则仍以 [AGENTS.md](AGENTS.md) 为准；本文件只记 **模型工具、插件粒、缺口、不要做的事**。斜杠命令、快捷键、overlay、底栏见 [CLI.md](CLI.md)。
+对照当前 `install_app` 与 `cordis-spine` 源码，不是愿望列表。硬规则见 [AGENTS.md](AGENTS.md)，插件树与不变式见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；本文件只记 **模型工具、插件粒、缺口、不要做的事**。斜杠命令、快捷键、overlay、底栏见 [CLI.md](CLI.md)。
 
 核对：
 
