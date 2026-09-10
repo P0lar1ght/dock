@@ -28,6 +28,10 @@ jobs:
       - name: Format
         run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid"
 
+      # lint 门禁：第一方 crate 已清零，这里挡住新增。vendor/ 冻结副本不参与。
+      - name: Clippy
+        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets -- -D warnings
+
       # 默认回归集合里除 spine 之外的部分。
       - name: Test (gateway / tui / app)
         run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
