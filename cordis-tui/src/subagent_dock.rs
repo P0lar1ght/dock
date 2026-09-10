@@ -469,7 +469,6 @@ mod tests {
             cancelled: false,
             output: String::new(),
             started_at: Instant::now(),
-            mailbox: true,
         }
     }
 

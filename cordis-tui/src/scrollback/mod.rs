@@ -826,7 +826,7 @@ fn push_tool_card(
         let live = Some(subagent::CardLive {
             snap: snap.as_ref(),
             events: &events,
-            role: if subagent::is_subagent_tool(name) {
+            role: {
                 let typ = snap
                     .as_ref()
                     .map(|s| s.subagent_type.as_str())
@@ -843,8 +843,6 @@ fn push_tool_card(
                             })
                     });
                 typ.and_then(|t| presets.and_then(|p| p.role_label(&t)))
-            } else {
-                None
             },
         });
         lines.extend(subagent::lines(arguments, content, live, theme, width));
@@ -1234,7 +1232,7 @@ mod tests {
     fn subagent_tool_card_is_clickable() {
         let lines = lines_from_events(&[LogEvent::ToolExecute {
             id: "s1".into(),
-            name: "subagent".into(),
+            name: "task".into(),
             arguments: r#"{"prompt":"x","description":"观 观察","subagent_type":"观"}"#.into(),
             content: "Subagent started in background.\n         subagent_id: kid-2\n         type: 观\n         description: 观 观察\n".into(),
             images: vec![],
@@ -1243,7 +1241,7 @@ mod tests {
         assert!(text.contains("子代理"), "{text}");
         assert!(text.contains("观"), "{text}");
         assert!(text.contains("点击查看"), "{text}");
-        let hid = super::subagent::header_id("s1", "subagent", "subagent_id: kid-2\n", "{}", &[]);
+        let hid = super::subagent::header_id("s1", "task", "subagent_id: kid-2\n", "{}", &[]);
         assert_eq!(hid, "sub:kid-2");
         assert_eq!(super::subagent::open_id(&hid), Some("kid-2"));
     }
