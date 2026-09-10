@@ -303,7 +303,6 @@ fn apply_cmd(
             send_now,
             respond_to,
         }) => {
-            open_subagent_admission(ctx);
             let next = Pending {
                 prompt_id,
                 job: Job::Prompt(text),
@@ -311,13 +310,15 @@ fn apply_cmd(
             };
             if send_now {
                 queue.push_front(next);
+                // 先 cancel（cancel_all 会关掉 spawn admission），再重开，
+                // 这一轮才有 spawn 面 —— 顺序反了会让本轮一直 spawn_blocked。
+                request_cancel(ctx);
+                open_subagent_admission(ctx);
             } else {
+                open_subagent_admission(ctx);
                 queue.push_back(next);
             }
             sync_snaps(ctx, queue, queued, snaps);
-            if send_now {
-                request_cancel(ctx);
-            }
             false
         }
         Some(SessionCommand::Compact {
@@ -336,6 +337,8 @@ fn apply_cmd(
             promote_in_queue(queue, id.as_deref());
             sync_snaps(ctx, queue, queued, snaps);
             request_cancel(ctx);
+            // 同 send_now：cancel_all 关掉 admission，给被提升的那一轮重开。
+            open_subagent_admission(ctx);
             false
         }
         Some(SessionCommand::Take { id }) => {
@@ -778,6 +781,133 @@ mod tests {
         })
         .await
         .expect("send-now should cancel the first turn and run interrupt");
+        handle.cancel();
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// send_now 先 cancel（request_cancel → cancel_all 会关掉 spawn
+    /// admission）再重开：随后这一轮再 spawn 的子代理必须真的跑起来（快照离开
+    /// Running、产出非空），而不是被 "parent session is stopped" 拒掉、空等下一个
+    /// prompt。注意不能等 turn-end 通知进父会话事件：父会话采样被 hold，唤醒
+    /// 排不进事件流，子代理本身跑完才是准据。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_now_reopens_spawn_admission_for_the_turn_it_starts() {
+        let root = Context::new();
+        install_without_llm(&root).await.unwrap();
+        root.plugin(turn(), ()).unwrap().wait().await.unwrap();
+        let home = tempfile::tempdir().unwrap();
+        root.provide(AGENT_PRESETS, AgentPresets::load(home.path().to_path_buf()))
+            .unwrap();
+        root.plugin(tool_task(), cordis_spine::TaskConfig::default())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        root.provide(
+            LLM,
+            Llm::from_sampler(
+                root.clone(),
+                Arc::new(HoldThenText {
+                    started: started.clone(),
+                    release: release.clone(),
+                    holding: Arc::new(AtomicBool::new(true)),
+                }),
+            ),
+        )
+        .unwrap();
+        root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let current_prompt_id = Arc::new(Mutex::new(None));
+        let queued = Arc::new(AtomicUsize::new(0));
+        let queued_prompts = Arc::new(Mutex::new(Vec::new()));
+        let handle = SessionHandle {
+            cmd_tx,
+            current_prompt_id: current_prompt_id.clone(),
+            queued: queued.clone(),
+            queued_prompts: queued_prompts.clone(),
+        };
+        tokio::spawn(run_session(
+            root.clone(),
+            cmd_rx,
+            current_prompt_id,
+            queued,
+            queued_prompts,
+        ));
+
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        handle.submit("interrupt", true);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if handle
+                    .queued_prompts()
+                    .iter()
+                    .any(|q| q.text == "interrupt")
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("send-now prompt should reach apply_cmd");
+
+        // The send-now turn itself spawns: admission must be open again after
+        // apply_cmd's cancel → reopen sequence.
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+        let out = tools
+            .execute(ToolCall {
+                id: "after-send-now".into(),
+                name: "task".into(),
+                arguments: serde_json::json!({
+                    "prompt": "SEND_NOW_ADMISSION_CHILD",
+                    "description": "admission smoke",
+                    "subagent_type": "general-purpose",
+                    "run_in_background": true,
+                })
+                .to_string(),
+            })
+            .await;
+        assert!(
+            out.content.contains("Subagent started in background"),
+            "{}",
+            out.content
+        );
+
+        // `remember` writes the snapshot before the coordinator admits the
+        // spawn, so a bare snapshot proves nothing: a rejected spawn stays in
+        // the initial Running life with empty output. Wait until the child has
+        // actually executed a turn (left Running and produced output).
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        let subs = root.require::<Subagents>(SUBAGENTS).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ran = subs.list().iter().any(|snap| {
+                    snap.description == "admission smoke"
+                        && !snap.running()
+                        && !snap.output.is_empty()
+                });
+                if ran {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            for snap in subs.list() {
+                eprintln!("SNAP: {snap:?}");
+            }
+            for e in sessions.events() {
+                eprintln!("EVT: {e:?}");
+            }
+            panic!("child spawned after send-now must actually start");
+        });
         handle.cancel();
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
     }
