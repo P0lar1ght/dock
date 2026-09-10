@@ -50,7 +50,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 cargo test -p cordis-spine --test dynamic -- <test_name>   # 动态插件相关
 
 cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app   # 格式门禁（CI 同款）
-cargo clippy -p cordis-spine --all-targets -- -D warnings   # lint（按改动的 crate 跑，CI 同款）
+cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings   # lint（按改动的 crate 跑，CI 同款）
 ```
 
 ```bash

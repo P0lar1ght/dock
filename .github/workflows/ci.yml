@@ -30,7 +30,10 @@ jobs:
 
       # lint 门禁：第一方 crate 已清零，这里挡住新增。vendor/ 冻结副本不参与。
       - name: Clippy
-        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets -- -D warnings
+        # `--no-deps` 必须有：--locked 下的 workspace 成员含 vendor/ 冻结副本，
+        # 不排除的话它们会一起被 lint，`-D warnings` 会被上游的既有 warning 打红
+        # （2026-09 那次就是在 vendor/xai/workflow 上挂的）。
+        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets --no-deps -- -D warnings
 
       # 默认回归集合里除 spine 之外的部分。
       - name: Test (gateway / tui / app)

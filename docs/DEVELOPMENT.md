@@ -60,7 +60,7 @@ cargo clippy -p cordis-spine --all-targets -- -D warnings
 注意事项，都是当前仓库的真实状态：
 
 - 第一方 crate 已 rustfmt-clean，CI 会跑上面的格式门禁。**不要对 `vendor/` 跑 rustfmt**（冻结副本，见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
-- 第一方 crate 的 clippy 已清零，`-D warnings` 是 CI 门禁。新增代码要么真消掉 warning，要么在那一处 `#[allow(clippy::…)]` 并写清理由 —— 不要往 workspace 级 lint 配置里塞 allow。
+- 第一方 crate 的 clippy 已清零，`-D warnings` 是 CI 门禁。命令要带 **`--no-deps`**：workspace 成员里有 `vendor/` 冻结副本，不带就会被一起 lint，然后被上游既有 warning 打红。新增代码要么真消掉 warning，要么在那一处 `#[allow(clippy::…)]` 并写清理由 —— 不要往 workspace 级 lint 配置里塞 allow。
 - `too_many_arguments` / `large_enum_variant` / `result_large_err` 这类是设计取舍，仓库当前一律**逐处 allow + 理由注释**，不动签名；要抽结构体或 boxing 就单独提 PR。
 - 改行为只跑对应 crate，不要动辄全量。不要为了跑测试切 `--release`。
 - `install_fakes` 保持 echo（`cordis-spine/tests/round.rs` 期望 `echoed: hello`）；测试默认不配 `mcp_servers`，`mcp_client` 仍挂载并 fail-open，不要改成默认连接。
@@ -73,7 +73,7 @@ cargo clippy -p cordis-spine --all-targets -- -D warnings
 
 ```bash
 cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid
-cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets -- -D warnings
+cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets --no-deps -- -D warnings
 cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
 cargo test --locked -p cordis-spine
 ```
