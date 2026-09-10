@@ -527,7 +527,7 @@ mod tests {
         std::fs::create_dir_all(&wf_dir).unwrap();
         let path = wf_dir.join("late-flow.rhai");
         std::fs::write(&path, script("late-flow", "Discovered mid session.")).unwrap();
-                let result = ToolResult {
+        let result = ToolResult {
             call_id: "w1".into(),
             name: "write_file".into(),
             content: format!("created {}", path.display()),

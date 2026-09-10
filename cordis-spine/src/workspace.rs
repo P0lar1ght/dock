@@ -214,7 +214,6 @@ fn read_file_maybe_image(args: &str) -> Option<(String, Vec<crate::types::UserIm
     Some((content, vec![img]))
 }
 
-
 fn read_file(args: &str) -> String {
     let v = parse_args(args);
     let Some(target) = str_field(&v, &["target_file", "path"]) else {

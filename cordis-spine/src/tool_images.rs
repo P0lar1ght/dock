@@ -40,10 +40,7 @@ pub fn user_image_from_bytes(data: Vec<u8>, mime_hint: Option<&str>) -> Option<U
 
 pub fn user_image_from_path(path: &Path) -> Option<UserImage> {
     let data = std::fs::read(path).ok()?;
-    let hint = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(ext_mime);
+    let hint = path.extension().and_then(|e| e.to_str()).map(ext_mime);
     user_image_from_bytes(data, hint)
 }
 
@@ -172,7 +169,17 @@ fn jpeg_size(data: &[u8]) -> Option<(u32, u32)> {
         // SOF0–SOF3 / SOF5–SOF7 / SOF9–SOF11 / SOF13–SOF15
         if matches!(
             marker,
-            0xc0 | 0xc1 | 0xc2 | 0xc3 | 0xc5 | 0xc6 | 0xc7 | 0xc9 | 0xca | 0xcb | 0xcd | 0xce
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
                 | 0xcf
         ) && len >= 7
         {

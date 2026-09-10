@@ -504,7 +504,11 @@ fn flush_unmatched_tools(out: &mut Vec<Value>, pending: &mut Vec<String>) {
     }
 }
 
-fn flush_pending_tool_images(out: &mut Vec<Value>, pending_images: &mut Vec<UserImage>, model: &str) {
+fn flush_pending_tool_images(
+    out: &mut Vec<Value>,
+    pending_images: &mut Vec<UserImage>,
+    model: &str,
+) {
     if pending_images.is_empty() {
         return;
     }
@@ -671,7 +675,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                     content: "ok".into(),
-                
+
                     images: Vec::new(),
                 },
                 LogEvent::User("follow-up".into()),
@@ -734,16 +738,16 @@ mod tests {
         };
         let msgs = messages(&req, &[], "grok-4");
         let tool = msgs.iter().find(|m| m["role"] == "tool").expect("tool msg");
-        assert_eq!(tool["content"], "saved /tmp/shot.png\nImage content included inline");
+        assert_eq!(
+            tool["content"],
+            "saved /tmp/shot.png\nImage content included inline"
+        );
         let user_img = msgs
             .iter()
             .find(|m| m["role"] == "user" && m["content"].is_array())
             .expect("adjacent user with image");
         let parts = user_img["content"].as_array().unwrap();
-        assert!(
-            parts.iter().any(|p| p["type"] == "image_url"),
-            "{parts:?}"
-        );
+        assert!(parts.iter().any(|p| p["type"] == "image_url"), "{parts:?}");
     }
 
     #[test]
@@ -889,9 +893,7 @@ mod tests {
         assert_eq!(n_images, 1, "single tool's image only: {parts:?}");
         // No interleaved user between the two tools.
         assert!(
-            !(msgs[3]["role"] == "tool"
-                && msgs[4]["role"] == "user"
-                && msgs[5]["role"] == "tool"),
+            !(msgs[3]["role"] == "tool" && msgs[4]["role"] == "user" && msgs[5]["role"] == "tool"),
             "must not interleave tool/user/tool"
         );
     }

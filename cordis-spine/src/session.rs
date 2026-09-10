@@ -715,7 +715,7 @@ impl Sessions {
                     name: call.name,
                     arguments: call.arguments,
                     content: crate::types::INTERRUPTED_TOOL_RESULT.into(),
-                
+
                     images: Vec::new(),
                 },
             );
@@ -1284,7 +1284,7 @@ mod tests {
             name: "bash".into(),
             arguments: "{}".into(),
             content: "ok".into(),
-        
+
             images: Vec::new(),
         });
         sessions.append(LogEvent::User("follow-up".into()));
@@ -1330,7 +1330,7 @@ mod tests {
             name: "read_file".into(),
             arguments: "{}".into(),
             content: "secret body".into(),
-        
+
             images: Vec::new(),
         });
         sessions.append(LogEvent::User("second".into()));

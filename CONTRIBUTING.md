@@ -15,8 +15,8 @@ Dock 是 Rust workspace + 一个 JS SDK。这份文件讲人类怎么提改动�
 cargo run -p cordis-app
 cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
 cargo test -p cordis-spine --test round -- install_app_registers
+cargo fmt -p <改过的 crate>              # CI 会跑 cargo fmt --check，别对 vendor/ 跑
 cargo clippy -p <你改的 crate> --all-targets
-rustfmt --edition 2021 <你改过的文件>
 ```
 
 `embed-sdk/` 的改动：

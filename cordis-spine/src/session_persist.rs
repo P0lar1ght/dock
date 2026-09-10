@@ -354,7 +354,6 @@ fn load_tool_images(paths: &[String]) -> Vec<crate::types::UserImage> {
         .collect()
 }
 
-
 fn to_wire(event: &LogEvent) -> Option<WireEvent> {
     Some(match event {
         LogEvent::User(text) => WireEvent::User { text: text.clone() },
@@ -513,7 +512,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{\"cmd\":\"pwd\"}".into(),
                     content: "/tmp".into(),
-                
+
                     images: Vec::new(),
                 },
             ],
@@ -585,7 +584,10 @@ mod tests {
         let outside = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(outside.path(), b"not an image under tool-images").unwrap();
         let loaded = load_tool_images(&[outside.path().display().to_string()]);
-        assert!(loaded.is_empty(), "must skip paths outside tool-images: {loaded:?}");
+        assert!(
+            loaded.is_empty(),
+            "must skip paths outside tool-images: {loaded:?}"
+        );
     }
 
     #[tokio::test]
@@ -705,7 +707,7 @@ mod tests {
             name: "read_file".into(),
             arguments: "{}".into(),
             content: "full tool body".into(),
-        
+
             images: Vec::new(),
         });
         sessions.replace_compacted(vec![

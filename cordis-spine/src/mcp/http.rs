@@ -106,7 +106,7 @@ pub(super) async fn connect(
                     } else {
                         tool_result_with_images(c, text, images)
                     }
-                },
+                }
                 Err(e) => tool_result(c, e),
             }
         })

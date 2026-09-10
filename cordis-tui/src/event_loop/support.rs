@@ -5,10 +5,10 @@ use std::collections::HashSet;
 use cordis::Context;
 use cordis_spine::{
     goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
-    Ask, Browser, Computer, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind, Permissions,
-    PlanMode, Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage, Workflows,
-    AGENT_PRESETS, ASK, BROWSER, COMPUTER, CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
-    SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
+    Ask, Browser, Computer, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind,
+    Permissions, PlanMode, Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage,
+    Workflows, AGENT_PRESETS, ASK, BROWSER, COMPUTER, CRON, GOAL, JOBS, MCP, PERMISSIONS,
+    PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
 
 use crate::ask_view;
@@ -134,7 +134,6 @@ pub(super) fn dispatch_slot_key(ctx: &Context, overlay: &mut Overlay, key: &str)
     true
 }
 
-
 pub(super) fn browser_cockpit_body(ctx: &Context) -> String {
     let approval = ctx
         .get::<Permissions>(PERMISSIONS)
@@ -168,8 +167,6 @@ pub(super) fn computer_cockpit_body(ctx: &Context) -> String {
         .map(|c| c.format_cockpit(approval.as_deref()))
         .unwrap_or_else(|| "computer 未挂载（tool-computer 插件不在树上）。".into())
 }
-
-
 
 pub(super) fn open_ask_if_needed(ctx: &Context, overlay: &mut Overlay) {
     if matches!(

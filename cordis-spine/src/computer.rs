@@ -46,21 +46,20 @@ impl Computer {
 
     /// Live-look MCP + optional permissions front for the cockpit body.
     pub fn format_cockpit(&self, approval_line: Option<&str>) -> String {
-        let approval = approval_line
-            .map(str::to_string)
-            .or_else(|| {
-                self.inner.ctx
-                    .get::<Permissions>(PERMISSIONS)
-                    .and_then(|p| p.front())
-                    .filter(|prompt| prompt.tool.starts_with("mcp_cua-driver__"))
-                    .map(|prompt| {
-                        if prompt.summary.is_empty() {
-                            prompt.tool.clone()
-                        } else {
-                            format!("{} — {}", prompt.tool, prompt.summary)
-                        }
-                    })
-            });
+        let approval = approval_line.map(str::to_string).or_else(|| {
+            self.inner
+                .ctx
+                .get::<Permissions>(PERMISSIONS)
+                .and_then(|p| p.front())
+                .filter(|prompt| prompt.tool.starts_with("mcp_cua-driver__"))
+                .map(|prompt| {
+                    if prompt.summary.is_empty() {
+                        prompt.tool.clone()
+                    } else {
+                        format!("{} — {}", prompt.tool, prompt.summary)
+                    }
+                })
+        });
         self.format_cockpit_inner(approval.as_deref())
     }
 
@@ -143,11 +142,12 @@ impl Computer {
             return;
         };
         let body = self.format_cockpit(None);
-        let desc = match self.inner.ctx.get::<Mcp>(MCP).and_then(|m| {
-            m.list()
-                .into_iter()
-                .find(|s| s.name == CUA_DRIVER_SERVER)
-        }) {
+        let desc = match self
+            .inner
+            .ctx
+            .get::<Mcp>(MCP)
+            .and_then(|m| m.list().into_iter().find(|s| s.name == CUA_DRIVER_SERVER))
+        {
             Some(s) if s.enabled && s.ok => "电脑驾驶舱（已连接）",
             Some(s) if !s.enabled => "电脑驾驶舱（已禁用）",
             Some(_) => "电脑驾驶舱（未连上）",
@@ -194,7 +194,7 @@ mod tests {
     async fn registers_slash_named_service_and_disposes() {
         let root = Context::new();
         root.plugin(slash(), ()).unwrap().wait().await.unwrap();
-        // MCP missing → plugin stays Pending until MCP exists; provide a stub via empty mcp? 
+        // MCP missing → plugin stays Pending until MCP exists; provide a stub via empty mcp?
         // Inject requires MCP — mount without MCP should leave fiber pending.
         let pending = root.plugin(tool_computer(), ()).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -224,10 +224,7 @@ mod tests {
 
         let slash = root.get::<Slash>(SLASH).unwrap();
         assert!(
-            slash
-                .list()
-                .iter()
-                .any(|e| e.command == "computer"),
+            slash.list().iter().any(|e| e.command == "computer"),
             "slash missing computer"
         );
 

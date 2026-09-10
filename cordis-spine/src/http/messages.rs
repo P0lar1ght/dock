@@ -59,7 +59,11 @@ pub fn body(
     body
 }
 
-pub fn transcript(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str) -> (String, Vec<Value>) {
+pub fn transcript(
+    request: &PromptRequest,
+    user_images: &[Vec<UserImage>],
+    model: &str,
+) -> (String, Vec<Value>) {
     let mut messages = Vec::new();
     let mut user_i = 0usize;
     let mut pending: Vec<String> = Vec::new();
@@ -544,7 +548,7 @@ mod tests {
                 name: "bash".into(),
                 arguments: "{}".into(),
                 content: "ok".into(),
-            
+
                 images: Vec::new(),
             },
             LogEvent::User("follow-up".into()),

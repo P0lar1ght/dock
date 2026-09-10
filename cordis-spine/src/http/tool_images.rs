@@ -27,7 +27,12 @@ pub(crate) fn chat_tool_images_user(images: &[UserImage], model: &str) -> Option
     ))
 }
 
-pub(crate) fn messages_tool_result_block(id: &str, content: &str, images: &[UserImage], model: &str) -> Value {
+pub(crate) fn messages_tool_result_block(
+    id: &str,
+    content: &str,
+    images: &[UserImage],
+    model: &str,
+) -> Value {
     let vision = model_accepts_images(model);
     if !vision || images.is_empty() {
         return json!({
@@ -58,7 +63,12 @@ pub(crate) fn messages_tool_result_block(id: &str, content: &str, images: &[User
     })
 }
 
-pub(crate) fn responses_tool_output(id: &str, content: &str, images: &[UserImage], model: &str) -> Vec<Value> {
+pub(crate) fn responses_tool_output(
+    id: &str,
+    content: &str,
+    images: &[UserImage],
+    model: &str,
+) -> Vec<Value> {
     let vision = model_accepts_images(model);
     if !vision || images.is_empty() {
         return vec![json!({

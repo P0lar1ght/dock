@@ -4,11 +4,7 @@ use std::future::Future;
 use std::time::Duration;
 
 /// Retry an async op until it succeeds or attempts/time are exhausted.
-pub async fn retry_async<T, E, F, Fut>(
-    attempts: u32,
-    delay: Duration,
-    mut op: F,
-) -> Result<T, E>
+pub async fn retry_async<T, E, F, Fut>(attempts: u32, delay: Duration, mut op: F) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -30,11 +26,7 @@ where
 }
 
 /// Cap a future with a timeout; map timeout to `on_timeout`.
-pub async fn with_timeout<T, E, Fut, F>(
-    timeout: Duration,
-    fut: Fut,
-    on_timeout: F,
-) -> Result<T, E>
+pub async fn with_timeout<T, E, Fut, F>(timeout: Duration, fut: Fut, on_timeout: F) -> Result<T, E>
 where
     Fut: Future<Output = Result<T, E>>,
     F: FnOnce() -> E,
@@ -128,9 +120,11 @@ mod tests {
         .await
         .unwrap();
 
-        let err = poll_until(Duration::from_millis(30), Duration::from_millis(5), || async {
-            Ok(false)
-        })
+        let err = poll_until(
+            Duration::from_millis(30),
+            Duration::from_millis(5),
+            || async { Ok(false) },
+        )
         .await
         .unwrap_err();
         assert!(err.contains("timed out"), "{err}");

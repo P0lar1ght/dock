@@ -847,9 +847,7 @@ pub(super) fn paint_overlay(
             let body = ctx
                 .get::<Browser>(BROWSER)
                 .map(|b| b.format_cockpit(approval.as_deref()))
-                .unwrap_or_else(|| {
-                    "browser 未挂载（tool-browser 插件不在树上）。".into()
-                });
+                .unwrap_or_else(|| "browser 未挂载（tool-browser 插件不在树上）。".into());
             text_overlay::render(buf, area, "浏览器", &body, *scroll)
         }
         Overlay::Computer { scroll } => {
