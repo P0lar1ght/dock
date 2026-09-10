@@ -32,7 +32,7 @@ jobs:
       - name: Test (gateway / tui / app)
         run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
 
-      # browser 测试要真实 Chrome 与 UI 快照，CI 里跳过；其余模块的进程级
+      # 需要真实 Chrome 的 browser 冒烟已标 #[ignore]；其余用例的进程级
       # DOCK_HOME / cwd 由 test_env::scoped() 串行化，可以并行跑。见 docs/DEVELOPMENT.md「CI」。
       - name: Test (spine)
-        run: "cargo test --locked -p cordis-spine -- --skip browser::"
+        run: cargo test --locked -p cordis-spine
