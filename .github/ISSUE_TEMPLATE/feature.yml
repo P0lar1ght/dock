@@ -1,0 +1,60 @@
+name: 功能请求
+description: 新能力、新插件面、或行为调整
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先确认这不该是「再挂一颗插件」。涉及新依赖、public API、数据模型、权限模型、跨包重命名的，请在正文写明影响面。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么
+      description: 具体场景与当前卡点，不要只写结论
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议做法
+      description: 新插件 / 换现有插件 / 接已有 waterfall 或 named service，选一个并说明落点目录
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案
+      description: 你已经排除的做法与原因
+    validations:
+      required: false
+  - type: dropdown
+    id: surface
+    attributes:
+      label: 影响面（可多选，用文字补充）
+      multiple: true
+      options:
+        - cordis-rust（内核）
+        - cordis-spine（循环 / 工具 / MCP）
+        - cordis-tui（终端 UI）
+        - cordis-gateway（回环网关）
+        - cordis-render（Markdown / Mermaid）
+        - embed-sdk（宿主页）
+        - 文档 / 流程
+    validations:
+      required: true
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: 影响确认
+      options:
+        - label: 会改模型工具面（需同步 TOOLS.md）
+          required: false
+        - label: 会改斜杠 / overlay（需同步 CLI.md）
+          required: false
+        - label: 会引入新依赖
+          required: false
+        - label: 会改 public API / 协议 / 落盘格式
+          required: false
+        - label: 会改权限模型
+          required: false

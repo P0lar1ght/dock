@@ -16,7 +16,7 @@
 
 ```bash
 cd embed-sdk
-npm install
+npm ci
 npm run build
 ```
 

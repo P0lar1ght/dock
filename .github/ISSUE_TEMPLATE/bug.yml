@@ -1,0 +1,64 @@
+name: Bug 报告
+description: 行为与预期不符
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        不要贴密钥、API key、`.dock/config.toml` 内容、`~/.dock/mcp_credentials.json` 或真实会话记录。
+        只贴必要输出，先自己确认能对上当前 `main`。
+  - type: textarea
+    id: actual
+    attributes:
+      label: 现象
+      description: 实际发生了什么
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望
+      description: 你期望发生什么，依据是什么（文档 / 旧行为）
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. cargo run -p cordis-app
+        2. 在 prompt 里输入 …
+        3. 观察到 …
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: commit
+      description: "`git rev-parse --short HEAD`"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: "`rustc --version`、`uname -a`、Node 版本（涉及 embed-sdk 时）"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 输出
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 不含密钥、私人配置、真实会话数据
+          required: true
+        - label: 已对照当前源码确认不是配置问题
+          required: false
