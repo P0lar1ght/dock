@@ -17,6 +17,10 @@
 | `mermaid/` | Warp Mermaid 布局栈：`dagre_rust`、`graphlib_rust`、`mermaid-to-svg`、`ordered_hashmap`，给 `cordis-render/mermaid`（crate `xai-grok-mermaid`）用 |
 | `xai/` | Grok 拷贝：`xai-workflow`、`xai-fuzzy-file-search`（workspace 成员）、`grok-tools`（仅对照源） |
 
+## 许可证
+
+沿用上游许可证，不要改成第一方的 `cordis-*` 那套：`xai/` 与 `mermaid/` 多数目录是 Apache-2.0（`mermaid-to-svg` 是 MIT）。声明在各 crate 的 `Cargo.toml`，Apache-2.0 副本放在对应目录的 `LICENSE`。替换或升级目录时保持这些文件与上游一致。
+
 ## 验证
 
 ```bash

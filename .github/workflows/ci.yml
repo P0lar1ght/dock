@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # gateway 测试打 loopback HTTP；代理环境必须放行回环地址，否则会成片 502。
+  # 注意 env 的 key 大小写不敏感，不能同时写 no_proxy 和 NO_PROXY。
+  NO_PROXY: "127.0.0.1,localhost,[::1]"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # 默认回归集合里除 spine 之外的部分。
+      - name: Test (gateway / tui / app)
+        run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
+
+      # browser 测试要真实 Chrome 与 UI 快照；其余模块用进程级 DOCK_HOME 做隔离，
+      # 并行会互相踩，必须串行。见 docs/DEVELOPMENT.md「CI」。
+      - name: Test (spine)
+        run: "cargo test --locked -p cordis-spine -- --skip browser:: --test-threads=1"

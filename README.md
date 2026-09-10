@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/cordis-plugin_tree-132238" alt="Cordis plugin tree">
   <img src="https://img.shields.io/badge/gateway-loopback-73dbff" alt="Loopback gateway">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="MIT">
+  <img src="https://github.com/P0lar1ght/dock/actions/workflows/ci.yml/badge.svg" alt="CI">
 </p>
 <p align="center">
   <a href="#快速开始">快速开始</a> •
@@ -170,7 +171,7 @@ flowchart LR
 
 ## 快速开始
 
-需要 **Rust 1.88+**（README badge 与本节一致；本仓无 `rust-toolchain` / `rust-version` / CI 兜底，说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）和本机 API key，或在配置里写好端点。
+需要 **Rust 1.88+**（版本下限说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）和本机 API key，或在配置里写好端点。
 
 ```bash
 cargo run -p cordis-app
@@ -246,6 +247,7 @@ dock/
 ├── .agents/skills/       # 仓库流程 skills（Agents scope）
 ├── docs/                 # 架构与开发细节
 ├── assets/               # 品牌图
+├── LICENSE               # MIT（第一方 crate）
 └── config.toml.example   # 用户 / 项目模型目录样例
 ```
 
@@ -265,7 +267,6 @@ dock/
 | [embed-sdk/README.md](embed-sdk/README.md) | 浏览器 SDK 属性、事件、配对 |
 | [skills/cordis-plugin-development/SKILL.md](skills/cordis-plugin-development/SKILL.md) | 动态 Cordis 插件工作流 |
 | [.agents/skills/](.agents/skills/) | 仓库流程 skills：git-commit、create-pr |
-| `LICENSE` | 尚未添加（TODO）：根 `Cargo.toml` 声明 `license = "MIT"`，仓库当前没有 `LICENSE` 文件 |
 
 Crate README 管该包的 API。产品面的权威清单：`TOOLS.md`（模型工具）、`CLI.md`（斜杠 / 快捷键 / overlay）；插件树与不变式见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 

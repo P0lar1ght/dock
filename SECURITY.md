@@ -2,9 +2,7 @@
 
 ## 上报漏洞
 
-不要在公开 issue 里贴漏洞细节。用 GitHub 的私有渠道：仓库 **Security → Report a vulnerability**（<https://github.com/P0lar1ght/dock/security/advisories/new>）。
-
-TODO: 指定安全联系人 / 邮箱，并确认仓库已开启 Private vulnerability reporting。
+不要在公开 issue 里贴漏洞细节。用 GitHub 的私有渠道：仓库 **Security → Report a vulnerability**（<https://github.com/P0lar1ght/dock/security/advisories/new>）。该渠道只对仓库维护者可见，不需要额外邮箱。
 
 请在报告里给：影响版本或 commit、复现步骤、影响范围、是否需要本机交互。
 

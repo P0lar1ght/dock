@@ -5,8 +5,8 @@ Dock 是 Rust workspace + 一个 JS SDK。这份文件讲人类怎么提改动�
 ## 开始之前
 
 1. 有 issue 的话先读 issue；没有就先把要改的行为写清楚（触发方式、期望、现状）。
-2. `git status -sb` 确认工作区状态，别把无关改动混进分支。
-3. 检查你的工具链：rustc **1.88+**（README 声明，未实测；版本说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）、Node **>= 18**（`embed-sdk/package.json` 的 `engines.node`）。
+2. 一个 PR 只做一件事。
+3. 工具链与版本约束见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 4. 大改动（新依赖、public API、数据模型、权限模型、跨包重命名）先开 issue 对齐，再写代码。
 
 ## 开发
@@ -25,7 +25,7 @@ rustfmt --edition 2021 <你改过的文件>
 cd embed-sdk && npm ci && npm run build
 ```
 
-注意：仓库存量 clippy warning 与 fmt diff 都存在，只格式化你改过的文件；不要全仓 `cargo fmt --all` 或 `clippy --fix`，那会淹没 review。
+命令的完整清单与注意事项（存量 fmt / clippy 差异、测试范围选择）见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 
 ## 提交
 
@@ -40,16 +40,11 @@ cd embed-sdk && npm ci && npm run build
 - 描述里写清：改了什么、为什么、怎么验证（贴命令与结果）。
 - 关联 issue（`Closes #12`）。
 - 改动如果影响模型工具面或人操作的面，同步 `TOOLS.md` / `CLI.md`。
+- CI 会在 PR 上跑默认回归集合，见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 - 步骤见 [.agents/skills/create-pr/SKILL.md](.agents/skills/create-pr/SKILL.md)。
 
-## 不要做的事
-
-- 改仓外的 `grok-build/`、`deepseek-harness/`、上游 JS `cordis/`；也不要 path-dep 它们。
-- 就地改 `vendor/` 里的冻结副本（要改先走 upstream 同步，见 [vendor/README.md](vendor/README.md)）。
-- 删测试、弱化断言、加长超时来换绿灯。
-- 扩大 scope 顺手重构。
-- 在 PR 里夹带格式化的无关文件。
+行为边界见 [AGENTS.md](AGENTS.md) 的 Boundaries；`vendor/` 另有冻结副本约束，见 [vendor/AGENTS.md](vendor/AGENTS.md)。
 
 ## 许可证
 
-仓库根 `Cargo.toml` 声明 `license = "MIT"`。仓库当前**没有** `LICENSE` 文件（TODO）。提交贡献即表示你同意以该许可证发布你的改动。
+仓库根 `Cargo.toml` 与第一方 crate 声明 `license = "MIT"`，全文见 [LICENSE](LICENSE)。`cordis-render/` 的两个 crate 与 `vendor/` 下的上游拷贝沿用各自上游许可证（多为 Apache-2.0，副本见同目录 `LICENSE`，以各 crate 的 `Cargo.toml` 为准）。提交贡献即表示你同意以对应许可证发布你的改动。

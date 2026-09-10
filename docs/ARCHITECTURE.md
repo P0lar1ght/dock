@@ -87,7 +87,7 @@ llm/stream                   枢纽：出工具调用 → tools/execute（权限
 
 ## 已知边界
 
-- `cordis-gateway` 的 rustc **1.88+** 要求：README 声明，本仓无 toolchain 文件兜底，说明见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+- `cordis-gateway` 的 rustc **1.88+** 下限由根 `Cargo.toml` 的 `[workspace.package].rust-version` 固化，见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 - `cordis-render` 的 mermaid 面依赖 `vendor/mermaid/` 冻结副本。
 - `embed-sdk` 只解析、采集（截图）、把 Gateway 的 `{ kind }` 画出来；斜杠目录迭代 `cordis_tui::slash_catalog()` + `"slash"` extras + `/screenshot*`，不手抄表。标 `terminal` 的命令（`/cd`、`/settings` 含带参）execute 拒绝。
 - 本机桌面 CUA 走外部 cua-driver MCP，不自研键鼠；全部与 `bash` 同级权限 / 计划门。cua-driver 自带的 `browser_*` ≠ Dock BUA 的 `browser_*`。

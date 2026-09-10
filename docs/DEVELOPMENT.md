@@ -6,7 +6,7 @@
 
 | 需要 | 版本 | 说明 |
 |---|---|---|
-| rustc / cargo | **1.88+**（README 声明，未实测） | 依据是 `README.md` 的 badge 与「快速开始」（原文：`cordis-gateway` 在 1.85 编不过）。本仓没有 `rust-toolchain`、`Cargo.toml` 没有 `rust-version`、也没有 CI 兜底；本机只有 1.95，无法实测 1.85。用旧工具链编不过就升到 1.88+，不要改写法去迁就旧编译器。`Context::new()` 需要 tokio runtime |
+| rustc / cargo | **1.88+** | 由根 `Cargo.toml` 的 `[workspace.package].rust-version = "1.88"` 声明，第一方 crate 用 `rust-version.workspace = true` 继承（`vendor/` 冻结副本不继承）。`README.md` 的 badge 与「快速开始」同步声明（原文：`cordis-gateway` 在 1.85 编不过）。用旧工具链编不过就升到 1.88+，不要改写法去迁就旧编译器。`Context::new()` 需要 tokio runtime |
 | Node / npm | **>= 18** | 只给 `embed-sdk/`（`package.json` 的 `engines.node`） |
 | 模型端点 | — | `~/.dock/config.toml` 或项目 `.dock/config.toml`，样例 `config.toml.example` |
 
@@ -15,7 +15,7 @@
 ## 第一次跑起来
 
 ```bash
-git status -sb                 # 先确认工作区干净，别把别人的改动带进来
+git status -sb                 # 当前分支与未提交改动
 cargo run -p cordis-app        # 全屏接管终端
 cargo run -p cordis-app -- --resume        # 恢复本 cwd 最近一次会话
 cargo run -p cordis-app -- --resume <id>   # 指定会话
@@ -63,6 +63,39 @@ rustfmt --edition 2021 <改过的文件>
 - 改行为只跑对应 crate，不要动辄全量。不要为了跑测试切 `--release`。
 - `install_fakes` 保持 echo（`cordis-spine/tests/round.rs` 期望 `echoed: hello`）；测试默认不配 `mcp_servers`，`mcp_client` 仍挂载并 fail-open，不要改成默认连接。
 - `vendor/` 里的 crate 是冻结副本，测试不过就当已知边界上报，不要就地改（见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
+- `cordis-spine` 的测试含进程级 `DOCK_HOME` 竞态，并行会随机红；本地与 CI 都加 `--test-threads=1`，原因见下文「CI」。
+
+## CI
+
+`.github/workflows/ci.yml` 在 `main` 的 push 与所有 PR 上跑，分两步：
+
+```bash
+cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
+cargo test --locked -p cordis-spine -- --skip browser:: --test-threads=1
+```
+
+工具链用 rustup 的 stable，仓库下限由 `[workspace.package].rust-version` 兜底。代理环境要放行回环地址（见上文 `no_proxy`）。
+
+改 workflow 后先本地校验：
+
+```bash
+actionlint .github/workflows/ci.yml
+```
+
+`env` 的 key 大小写不敏感，`no_proxy` 与 `NO_PROXY` 同时写会被判重复 key，workflow 整体解析失败。
+
+CI 不跑的三类：
+
+- `cordis-spine` 的 `browser::tests`：要真实 Chrome 与 UI 快照，跑在无图形会话里不稳定。
+- `cargo fmt --check` 与 `clippy`：仓库有存量 fmt diff 与 clippy warning，先清存量再纳入门禁。
+- `embed-sdk` 的 js 检查：目前没有 lint / test 脚本，类型检查就是 `npm run build:types`。
+
+spine 测试串行跑的原因：多个模块用 `std::env::set_var("DOCK_HOME", …)` / 切 cwd 做隔离，进程级环境变量在并行下会互相覆盖，表现为 `session_persist::tests` 与 `skills::tests` 随机红。本地复现：
+
+```bash
+cargo test -p cordis-spine --lib            # 并行：随机失败
+cargo test -p cordis-spine --lib -- --test-threads=1   # 串行：稳定
+```
 
 ## 浏览器 SDK
 
@@ -100,6 +133,7 @@ npm run pack:skin      # 打包 pet skin
 - `/pair` 看回环网关状态与实际端口；`[::1]` 绑失败会打 stderr 并出现在 `/pair` 与 `initialize.connection.companion`，不是静默失败。
 - 会话问题先看 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` / `chat_history.jsonl`）。
 - 改工具表后用 `cargo test -p cordis-spine --test round -- install_app_registers` 核对。
+- `cordis-gateway` 的测试全程打 loopback HTTP（`127.0.0.1` 与 `[::1]`）。环境里设了 HTTP 代理时，必须把回环地址放进 `no_proxy` / `NO_PROXY`，否则请求会被代理接管，症状是成片 502 与无响应体。
 
 ## 仓库流程 skills
 
