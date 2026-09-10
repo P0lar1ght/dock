@@ -1,18 +1,6 @@
 # CODEOWNERS
 #
 # 语法：<path-pattern> <@owner...>；后匹配的规则覆盖前面的。
-# TODO: 填真实 maintainer 的 GitHub handle。下面的规则全部是注释示例，
-# 未填之前 GitHub 只认默认的 write 权限，本文件不生效。
-#
-# *                 @P0lar1ght
-# /cordis-rust/     @TODO
-# /cordis-spine/    @TODO
-# /cordis-tui/      @TODO
-# /cordis-gateway/  @TODO
-# /cordis-app/      @TODO
-# /cordis-render/   @TODO
-# /embed-sdk/       @TODO
-# /vendor/          @TODO
-# /.github/         @TODO
-# /AGENTS.md        @TODO
-# /docs/            @TODO
+# 范围与边界见 AGENTS.md；贡献流程见 CONTRIBUTING.md。
+
+* @P0lar1ght

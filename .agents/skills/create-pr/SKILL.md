@@ -14,12 +14,12 @@ user-invocable: true
 ## 1. 前提检查
 
 ```bash
-git status -sb              # 工作区干净，且不在 main 上直接提交
+git status -sb              # 有无未提交改动；不在 main 上直接提交
 git log --oneline origin/main..HEAD
 git diff --stat origin/main...HEAD
 ```
 
-- 改动只包含本次任务的 commit，没有夹带别人正在用的分支或无关文件。
+- 分支只包含本次任务的 commit，无夹带的无关改动。
 - 验证跑过，并留下可复制的证据：命令 + 结果摘要。
 - 影响模型工具面 / 斜杠 / overlay / 协议 / 配置键 → `TOOLS.md`、`CLI.md`、`docs/ARCHITECTURE.md` 已同步。
 
@@ -47,7 +47,7 @@ cd embed-sdk && npm ci && npm run build
 git push -u origin <branch>
 ```
 
-不要 force push 到别人在用的分支；不要在没被要求时动 `main`、发 tag 或发版。
+不要 force push 到已推送并被 review 的分支；不要在没被要求时动 `main`、发 tag 或发版。
 
 ## 4. 写 PR
 
@@ -64,5 +64,5 @@ git push -u origin <branch>
 ## 5. 之后
 
 - 不擅自 merge、不擅自关 issue。
-- Review 提出改动时：新 commit 追加，不要 force push 覆盖别人已 review 的历史，除非确定只有你在用该分支。
+- Review 提出改动时：新 commit 追加，不要 force push 覆盖已被 review 的历史。
 - 大改动（新依赖、public API、数据模型、权限模型）先在对齐阶段讨论过再开 PR。
