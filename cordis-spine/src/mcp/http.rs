@@ -1,7 +1,7 @@
 //! Streamable HTTP MCP client (rmcp `post_message` shape, reqwest 0.12).
 //!
-//! Prefer protocol `2026-07-28` (no session, `_meta` + `MCP-Protocol-Version`
-//! + `Mcp-Method` / `Mcp-Name`). On a 400 that is not a modern JSON-RPC error,
+//! Prefer protocol `2026-07-28` (no session; `_meta`, `MCP-Protocol-Version`,
+//! `Mcp-Method` / `Mcp-Name`). On a 400 that is not a modern JSON-RPC error,
 //! fall back to initialize-era `2025-11-25` with `Mcp-Session-Id`.
 //! Standing GET SSE + session 404 recover; POST SSE is processed in order
 //! (elicitation must complete before later events on that stream).
@@ -638,7 +638,7 @@ mod tests {
         let id = v.get("id").cloned().unwrap_or(Value::Null);
         match mode {
             Mode::Unauthorized => {
-                return b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Length: 0\r\n\r\n".to_vec();
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Length: 0\r\n\r\n".to_vec()
             }
             Mode::Paged => match method {
                 "tools/list" => {

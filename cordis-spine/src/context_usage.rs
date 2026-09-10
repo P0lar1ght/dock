@@ -1055,7 +1055,7 @@ mod tests {
             description: "mcp occupancy probe with a longer description".into(),
             parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#.into(),
         };
-        let hidden = estimate_tool_definitions(&[mcp_spec.clone()]);
+        let hidden = estimate_tool_definitions(std::slice::from_ref(&mcp_spec));
         let _keep = tools.register_mcp(mcp_spec, body).unwrap();
         let snap = snapshot_context(&ctx);
         let mcp_cat = snap

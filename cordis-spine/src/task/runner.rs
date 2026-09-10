@@ -253,6 +253,7 @@ async fn run_dock_child(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
 async fn drive_child(
     parent: Context,
     child: Context,
@@ -423,9 +424,7 @@ enum NextMsg {
 
 async fn wait_next(store: &ChildStore, id: &str) -> Option<NextMsg> {
     loop {
-        let Some(slot) = store.get(id) else {
-            return None;
-        };
+        let slot = store.get(id)?;
         if slot.dispose.load(Ordering::Relaxed) {
             return None;
         }

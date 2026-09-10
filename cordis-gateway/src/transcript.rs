@@ -65,6 +65,7 @@ fn flatten_payload(payload: &Value) -> serde_json::Map<String, Value> {
     }
 }
 
+#[derive(Default)]
 struct Projector {
     seq: u64,
     turn_n: u64,
@@ -77,24 +78,6 @@ struct Projector {
     ask_id: Option<String>,
     plan_id: Option<String>,
     elicit_id: Option<String>,
-}
-
-impl Default for Projector {
-    fn default() -> Self {
-        Self {
-            seq: 0,
-            turn_n: 0,
-            turn_id: String::new(),
-            last_text: String::new(),
-            seen_tools: HashSet::new(),
-            pending_tools: HashSet::new(),
-            turn_open: false,
-            perm_id: None,
-            ask_id: None,
-            plan_id: None,
-            elicit_id: None,
-        }
-    }
 }
 
 pub struct Transcript {

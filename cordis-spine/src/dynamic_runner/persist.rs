@@ -252,6 +252,7 @@ impl DynamicRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
     pub fn define_persistent(
         &self,
         plugin_id: &str,

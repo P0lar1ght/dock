@@ -275,6 +275,8 @@ pub fn overlay_copy(gw: Option<&GatewayRef>) -> (String, &'static str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+// TUI 绘制/布局函数：参数都是 buf/坐标/主题等绘制碎片，抽结构体只会把噪音搬到所有调用点，故意保留。
 pub fn render_manage(
     buf: &mut Buffer,
     area: Rect,
@@ -373,11 +375,11 @@ pub fn reject_manage(ui: &PairingUi, overlay: &mut Overlay) {
     let bindings = ui.bindings();
     let rows = manage_rows(&pending, &bindings);
     match rows.get(*selected) {
-        Some(ManageRow::Listen) => {
-            if ui.is_listening() {
-                ui.stop_listen();
-            }
+        // 仅在正在监听时才停：guard 不成立时落到下面的空分支（行为与原先的内层 if 一致）。
+        Some(ManageRow::Listen) if ui.is_listening() => {
+            ui.stop_listen();
         }
+        Some(ManageRow::Listen) => {}
         Some(ManageRow::Pending(i)) => {
             if let Some(p) = pending.get(*i) {
                 ui.deny(&p.id);

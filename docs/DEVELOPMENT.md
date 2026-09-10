@@ -54,13 +54,14 @@ cargo test -p cordis-gateway --test gateway
 
 # lint / 格式
 cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid
-cargo clippy -p cordis-spine --all-targets
+cargo clippy -p cordis-spine --all-targets -- -D warnings
 ```
 
 注意事项，都是当前仓库的真实状态：
 
 - 第一方 crate 已 rustfmt-clean，CI 会跑上面的格式门禁。**不要对 `vendor/` 跑 rustfmt**（冻结副本，见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
-- 仓库存量 clippy warning（百余条，含 `too_many_arguments` / `large_enum_variant` 这类需要判断的）尚未清理，所以不要全仓 `cargo clippy --fix`；按改动的 crate 看有没有新增 warning。
+- 第一方 crate 的 clippy 已清零，`-D warnings` 是 CI 门禁。命令要带 **`--no-deps`**：workspace 成员里有 `vendor/` 冻结副本，不带就会被一起 lint，然后被上游既有 warning 打红。新增代码要么真消掉 warning，要么在那一处 `#[allow(clippy::…)]` 并写清理由 —— 不要往 workspace 级 lint 配置里塞 allow。
+- `too_many_arguments` / `large_enum_variant` / `result_large_err` 这类是设计取舍，仓库当前一律**逐处 allow + 理由注释**，不动签名；要抽结构体或 boxing 就单独提 PR。
 - 改行为只跑对应 crate，不要动辄全量。不要为了跑测试切 `--release`。
 - `install_fakes` 保持 echo（`cordis-spine/tests/round.rs` 期望 `echoed: hello`）；测试默认不配 `mcp_servers`，`mcp_client` 仍挂载并 fail-open，不要改成默认连接。
 - `vendor/` 里的 crate 是冻结副本，测试不过就当已知边界上报，不要就地改（见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
@@ -68,9 +69,11 @@ cargo clippy -p cordis-spine --all-targets
 
 ## CI
 
-`.github/workflows/ci.yml` 在 `main` 的 push 与所有 PR 上跑，分两步：
+`.github/workflows/ci.yml` 在 `main` 的 push 与所有 PR 上跑四步：
 
 ```bash
+cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid
+cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets --no-deps -- -D warnings
 cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
 cargo test --locked -p cordis-spine
 ```
@@ -94,7 +97,6 @@ CI 不跑的：
   cargo test -p cordis-spine --lib -- p1_ --ignored       # 单个
   ```
 
-- `clippy`：仓库存量 warning 未清（见上文「命令」的注意事项）。
 - `embed-sdk` 的 js 检查：目前没有 lint / test 脚本，类型检查就是 `npm run build:types`。
 
 spine 测试怎么隔离进程级 env：多个模块会临时改 `DOCK_HOME` 与当前目录做隔离，而这两个都是进程级全局。模块各持一把私有锁时锁与锁之间不互斥，表现为 `session_persist::tests` 与 `skills::tests` 随机红。仓库统一用 `cordis-spine/src/test_env.rs` 的 `scoped()`：

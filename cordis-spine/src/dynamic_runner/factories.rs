@@ -51,7 +51,7 @@ pub struct FactoryInfo {
 }
 
 pub fn list_factories() -> &'static [FactoryInfo] {
-    &FACTORIES
+    FACTORIES
 }
 
 pub fn lookup_factory(id: &str) -> Option<&'static FactoryInfo> {

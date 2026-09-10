@@ -47,21 +47,21 @@ pub fn parse_interval(s: &str) -> Result<u64, SchedulerError> {
 /// Convert seconds to a human-readable interval string.
 /// e.g. 300 -> "every 5 minutes", 3600 -> "every 1 hour"
 pub fn interval_to_human(secs: u64) -> String {
-    if secs % 86400 == 0 {
+    if secs.is_multiple_of(86400) {
         let n = secs / 86400;
         if n == 1 {
             "every 1 day".into()
         } else {
             format!("every {n} days")
         }
-    } else if secs % 3600 == 0 {
+    } else if secs.is_multiple_of(3600) {
         let n = secs / 3600;
         if n == 1 {
             "every 1 hour".into()
         } else {
             format!("every {n} hours")
         }
-    } else if secs % 60 == 0 {
+    } else if secs.is_multiple_of(60) {
         let n = secs / 60;
         if n == 1 {
             "every 1 minute".into()

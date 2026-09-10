@@ -78,6 +78,8 @@ impl CanvasState {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
+// 变体大小差异仅来自内联的 Canvas 状态；boxing 会改动枚举形态和所有匹配点，留待单独决策。
 #[derive(Debug, Clone)]
 pub enum PresetView {
     Roster { selected: usize },
@@ -415,6 +417,8 @@ pub fn cancel_persona_edit(ctx: &Context, view: &mut PresetView) {
     c.editing_persona = false;
 }
 
+#[allow(clippy::large_enum_variant)]
+// 变体大小差异仅来自内联的 Canvas 状态；boxing 会改动枚举形态和所有匹配点，留待单独决策。
 #[derive(Debug)]
 pub enum PresetAction {
     None,
@@ -843,7 +847,7 @@ fn render_canvas(ctx: &Context, buf: &mut Buffer, area: Rect, canvas: &CanvasSta
     }
 
     let identity_h = if canvas.editing_persona || canvas.naming_role.is_some() {
-        content.height.saturating_sub(2).min(8).max(3)
+        content.height.saturating_sub(2).clamp(3, 8)
     } else {
         6u16.min(content.height.saturating_sub(3)).max(3)
     };
@@ -1227,6 +1231,8 @@ fn paint_vsplit(buf: &mut Buffer, area: Rect, theme: &Theme) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+// TUI 绘制/布局函数：参数都是 buf/坐标/主题等绘制碎片，抽结构体只会把噪音搬到所有调用点，故意保留。
 fn render_tool_pane(
     buf: &mut Buffer,
     area: Rect,

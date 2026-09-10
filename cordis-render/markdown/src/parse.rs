@@ -1677,7 +1677,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                                 .unwrap_or(0)
                                 .saturating_sub(new_widths.get(i).copied().unwrap_or(0))
                         };
-                        indices.sort_by(|&a, &b| unmet(b).cmp(&unmet(a)));
+                        indices.sort_by_key(|&i| std::cmp::Reverse(unmet(i)));
                         for &idx in &indices {
                             if remaining == 0 {
                                 break;

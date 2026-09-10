@@ -191,10 +191,7 @@ async fn run_update_goal(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         }
     };
     match render_ack_into_output(ack) {
-        Ok(out) => tool_result(
-            call,
-            serde_json::to_string(&out).unwrap_or_else(|_| out.summary),
-        ),
+        Ok(out) => tool_result(call, serde_json::to_string(&out).unwrap_or(out.summary)),
         Err(e) => tool_result(call, format!("{}: {}", e.kind, e.detail)),
     }
 }

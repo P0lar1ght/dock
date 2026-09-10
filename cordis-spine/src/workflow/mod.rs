@@ -351,7 +351,7 @@ async fn run_workflow_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult 
         Ok(ack) => match render_ack(ack) {
             Ok(out) => tool_result(
                 call,
-                serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.message),
+                serde_json::to_string_pretty(&out).unwrap_or(out.message),
             ),
             Err((code, detail)) => tool_result(call, format!("Error: {code}: {detail}")),
         },
@@ -392,8 +392,8 @@ mod tests {
 
     #[test]
     fn order_workflows_follow_roster() {
-        assert!(ORDER_WORKFLOWS > crate::prompt::ORDER_ROSTER);
-        assert!(ORDER_SKILLS > ORDER_WORKFLOWS);
+        const { assert!(ORDER_WORKFLOWS > crate::prompt::ORDER_ROSTER) };
+        const { assert!(ORDER_SKILLS > ORDER_WORKFLOWS) };
     }
 
     #[tokio::test]

@@ -50,7 +50,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 cargo test -p cordis-spine --test dynamic -- <test_name>   # 动态插件相关
 
 cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app   # 格式门禁（CI 同款）
-cargo clippy -p cordis-spine --all-targets   # lint（按改动的 crate 跑；存量 warning 未清）
+cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings   # lint（按改动的 crate 跑，CI 同款）
 ```
 
 ```bash
@@ -61,7 +61,7 @@ cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080
 - 不要为了证明一次小改去跑全量套件（workspace 含 `vendor/` 冻结 crate）。改哪个 crate 跑哪个。
 - 不要为跑测试改 `--release` / production build；开发会话用默认 debug profile。
 - `install_app` 工具表是否还对：跑 `install_app_registers`。
-- 仓库已 rustfmt-clean，CI 会挡格式；不要对 `vendor/` 跑 rustfmt（冻结副本）。仓库存量 clippy warning 未清，不要全仓 `clippy --fix` 制造无关 diff。
+- 第一方 crate 已 rustfmt-clean 且 clippy 清零，CI 两道门禁（`cargo fmt --check` + `clippy -- -D warnings`）都会挡。不要对 `vendor/` 跑 rustfmt / clippy（冻结副本）。
 
 ## Repair
 

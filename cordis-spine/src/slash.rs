@@ -234,7 +234,7 @@ impl Default for Slash {
 
 pub fn slash_name_reserved(name: &str) -> bool {
     let n = name.trim().trim_start_matches('/');
-    RESERVED_SLASH.iter().any(|r| *r == n)
+    RESERVED_SLASH.contains(&n)
 }
 
 pub fn normalize_command(raw: &str) -> Result<String, String> {

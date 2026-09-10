@@ -423,11 +423,10 @@ impl ConnectedSession {
 
         retry_async(3, Duration::from_millis(150), || {
             let page = page.clone();
-            let backend = backend.clone();
             async move {
                 page.execute(
                     ScrollIntoViewIfNeededParams::builder()
-                        .backend_node_id(backend.clone())
+                        .backend_node_id(backend)
                         .build(),
                 )
                 .await
@@ -472,7 +471,7 @@ impl ConnectedSession {
                 .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
             page.execute(
                 ScrollIntoViewIfNeededParams::builder()
-                    .backend_node_id(backend.clone())
+                    .backend_node_id(backend)
                     .build(),
             )
             .await
@@ -646,7 +645,7 @@ impl ConnectedSession {
     ) -> Result<(), String> {
         page.execute(
             ScrollIntoViewIfNeededParams::builder()
-                .backend_node_id(backend.clone())
+                .backend_node_id(backend)
                 .build(),
         )
         .await
@@ -703,11 +702,10 @@ impl ConnectedSession {
         let page = self.active_page()?.clone();
         retry_async(3, Duration::from_millis(150), || {
             let page = page.clone();
-            let backend = backend.clone();
             async move {
                 page.execute(
                     ScrollIntoViewIfNeededParams::builder()
-                        .backend_node_id(backend.clone())
+                        .backend_node_id(backend)
                         .build(),
                 )
                 .await
@@ -792,7 +790,7 @@ impl ConnectedSession {
         let backend = snapshot::backend_id(&entry)
             .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
         let page = self.active_page()?.clone();
-        Self::focus_backend(&page, backend.clone()).await?;
+        Self::focus_backend(&page, backend).await?;
         let js = r#"function(value, label) {
   const el = this;
   const opts = el.options ? Array.from(el.options) : [];
@@ -867,7 +865,7 @@ impl ConnectedSession {
             let (key, entry) = self.lookup_ref(ref_id)?;
             let backend = snapshot::backend_id(&entry)
                 .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
-            Self::focus_backend(&page, backend.clone()).await?;
+            Self::focus_backend(&page, backend).await?;
             let out = Self::call_js_on_backend(
                 &page,
                 backend,
@@ -1031,7 +1029,7 @@ impl ConnectedSession {
     ) -> Result<Point, String> {
         page.execute(
             ScrollIntoViewIfNeededParams::builder()
-                .backend_node_id(backend.clone())
+                .backend_node_id(backend)
                 .build(),
         )
         .await
@@ -1069,6 +1067,7 @@ impl ConnectedSession {
     }
 
     /// Drag from source ref/coords to target ref/coords via CDP mouse events.
+    #[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
     pub async fn drag(
         &mut self,
         source_ref: Option<&str>,

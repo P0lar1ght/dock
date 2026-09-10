@@ -110,6 +110,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     /// Re-key a nested spawn (its parent is itself a subagent) to the root
     /// session, inheriting workflow lineage and loop identity; rejects the
     /// spawn when its parent subagent is already being torn down.
+    #[allow(clippy::result_large_err)] // Err 是领域对象，调用点按值消费；box 会改签名与所有匹配点，单独决策
     fn reparent_nested_spawn(&self, request: &mut SubagentRequest) -> Result<(), SubagentResult> {
         let Some((root_parent, loop_task_id, spawner_cancelled, spawner_owner)) = self
             .active
@@ -166,7 +167,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 SubagentLimitDecision::QueuedAtConcurrentLimit { .. } => queued + 1,
                 SubagentLimitDecision::RejectedAtConcurrentLimit { .. } => queued,
             },
-            origin: if request.from_scheduler_loop() {
+            origin: if request.is_scheduler_loop() {
                 LimitedSpawnOrigin::SchedulerLoop
             } else {
                 LimitedSpawnOrigin::Task

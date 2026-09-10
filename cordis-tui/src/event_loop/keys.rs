@@ -138,7 +138,7 @@ pub(super) fn run_action(
             }
             let _ = dispatch_slot_key(ctx, overlay, "esc");
             overlay.close();
-            return Vec::new();
+            Vec::new()
         }
         Action::OverlayMove(delta) => {
             if let Overlay::Usage {
@@ -183,7 +183,7 @@ pub(super) fn run_action(
             }
             let len = overlay_len(ctx, overlay);
             overlay.move_sel(delta, len);
-            return Vec::new();
+            Vec::new()
         }
         Action::OverlayAccept => {
             if matches!(
@@ -208,7 +208,7 @@ pub(super) fn run_action(
             if dispatch_slot_key(ctx, overlay, "enter") {
                 return Vec::new();
             }
-            return accept_overlay(ctx, overlay);
+            accept_overlay(ctx, overlay)
         }
         Action::OverlayChar(c) => {
             if matches!(
@@ -496,7 +496,7 @@ pub(super) fn run_action(
                 return Vec::new();
             }
             overlay.push_char(c);
-            return Vec::new();
+            Vec::new()
         }
         Action::OverlayBackspace => {
             if let Overlay::Ask {
@@ -523,7 +523,7 @@ pub(super) fn run_action(
                 }
             }
             overlay.backspace();
-            return Vec::new();
+            Vec::new()
         }
         Action::OverlayPaste(text) => {
             if let Overlay::Ask {
@@ -551,11 +551,11 @@ pub(super) fn run_action(
                 }
             }
             overlay.push_str(&text);
-            return Vec::new();
+            Vec::new()
         }
         Action::OverlaySelect(idx) => {
             overlay.set_selected(idx);
-            return Vec::new();
+            Vec::new()
         }
         Action::OverlaySpace => {
             if matches!(
@@ -665,7 +665,7 @@ pub(super) fn run_action(
                     }
                 }
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::OverlayNavH(delta) => {
             if let Overlay::Ask {
@@ -683,7 +683,7 @@ pub(super) fn run_action(
             if matches!(overlay, Overlay::Ask { .. }) {
                 navigate_ask(ctx, overlay, delta);
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::OverlayTab => {
             if matches!(
@@ -705,7 +705,7 @@ pub(super) fn run_action(
                 *detail = None;
                 *scroll = 0;
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::MouseMove { column, row } => {
             if matches!(overlay, Overlay::Usage { .. }) {
@@ -724,7 +724,7 @@ pub(super) fn run_action(
                 }
                 scrollback.set_mouse(column, row);
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::MouseDown { column, row } => {
             if queue_pane::hit(queue_hits, column, row).is_some() {
@@ -739,13 +739,13 @@ pub(super) fn run_action(
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
                 scrollback.mouse_down(column, row);
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::MouseDrag { column, row } => {
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
                 scrollback.mouse_drag(column, row);
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::MouseUp { column, row } => {
             if let Some(hit) = queue_pane::hit(queue_hits, column, row) {
@@ -780,11 +780,11 @@ pub(super) fn run_action(
                     | MouseUpResult::None => {}
                 }
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::PasteClipboard => {
             apply_paste(ctx, overlay, crate::clipboard::paste_from_clipboard());
-            return Vec::new();
+            Vec::new()
         }
         Action::Scroll(delta) => {
             if let Overlay::PlanApproval {
@@ -831,7 +831,7 @@ pub(super) fn run_action(
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
                 scrollback.scroll(delta);
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::ScrollPage(pages) => {
             if let Overlay::Inspect { target, scroll, .. } = overlay {
@@ -854,7 +854,7 @@ pub(super) fn run_action(
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
                 scrollback.scroll_page(pages);
             }
-            return Vec::new();
+            Vec::new()
         }
         Action::Click { column, row } => {
             if let Overlay::Inspect { .. } = overlay {
@@ -993,11 +993,11 @@ pub(super) fn run_action(
                 return Vec::new();
             }
             // Scrollback clicks go through MouseDown/Up (drag-select).
-            return Vec::new();
+            Vec::new()
         }
         Action::InsertText(text) => {
             apply_paste(ctx, overlay, crate::clipboard::paste_from_event(&text));
-            return Vec::new();
+            Vec::new()
         }
         Action::CycleMode => {
             let plan = ctx.get::<PlanMode>(PLAN_MODE);
@@ -1023,7 +1023,7 @@ pub(super) fn run_action(
                 settings.set_permission_mode(next_perm);
             }
             flash(ctx, msg);
-            return Vec::new();
+            Vec::new()
         }
         Action::ToggleGoalDetail => {
             if matches!(overlay, Overlay::Goal { .. }) {
@@ -1031,7 +1031,7 @@ pub(super) fn run_action(
             } else {
                 open_goal_overlay(ctx, overlay, false);
             }
-            return Vec::new();
+            Vec::new()
         }
         other => {
             let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) else {

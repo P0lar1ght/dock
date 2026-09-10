@@ -184,19 +184,18 @@ fn parse_frontmatter(raw: &str) -> Frontmatter {
     let Some(map) = value.as_mapping() else {
         return out;
     };
-    out.name = scalar(map.get(&yaml_key("name")));
-    out.description = scalar(map.get(&yaml_key("description")));
-    out.when_to_use = scalar(map.get(&yaml_key("when-to-use")))
-        .or_else(|| scalar(map.get(&yaml_key("when_to_use"))));
-    out.paths = string_list(map.get(&yaml_key("paths")));
-    if map.contains_key(&yaml_key("user-invocable"))
-        || map.contains_key(&yaml_key("user_invocable"))
+    out.name = scalar(map.get(yaml_key("name")));
+    out.description = scalar(map.get(yaml_key("description")));
+    out.when_to_use = scalar(map.get(yaml_key("when-to-use")))
+        .or_else(|| scalar(map.get(yaml_key("when_to_use"))));
+    out.paths = string_list(map.get(yaml_key("paths")));
+    if map.contains_key(yaml_key("user-invocable")) || map.contains_key(yaml_key("user_invocable"))
     {
-        out.user_invocable = yaml_true(map.get(&yaml_key("user-invocable")))
-            || yaml_true(map.get(&yaml_key("user_invocable")));
+        out.user_invocable = yaml_true(map.get(yaml_key("user-invocable")))
+            || yaml_true(map.get(yaml_key("user_invocable")));
     }
-    out.disable_model_invocation = yaml_true(map.get(&yaml_key("disable-model-invocation")))
-        || yaml_true(map.get(&yaml_key("disable_model_invocation")));
+    out.disable_model_invocation = yaml_true(map.get(yaml_key("disable-model-invocation")))
+        || yaml_true(map.get(yaml_key("disable_model_invocation")));
     out
 }
 

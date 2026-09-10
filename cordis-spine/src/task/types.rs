@@ -161,7 +161,7 @@ pub struct SubagentRequest {
 }
 
 impl SubagentRequest {
-    pub fn from_scheduler_loop(&self) -> bool {
+    pub fn is_scheduler_loop(&self) -> bool {
         self.runtime_overrides.loop_task_id.is_some()
     }
 
@@ -191,6 +191,7 @@ impl SubagentSpawnRequest {
     ///
     /// Primarily useful for channel adapters and deterministic test harnesses;
     /// production lifecycle replies are owned by `SubagentCoordinator`.
+    #[allow(clippy::result_large_err)] // Err 是领域对象，调用点按值消费；box 会改签名与所有匹配点，单独决策
     pub fn respond_with(
         self,
         build: impl FnOnce(&SubagentRequest) -> SubagentResult,
@@ -244,7 +245,7 @@ pub struct SubagentRuntimeOverrides {
     pub loop_task_id: Option<String>,
 }
 
-/// Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.
+// Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.
 
 /// Sanitize a model-emitted `cwd` argument for the `task` tool.
 ///

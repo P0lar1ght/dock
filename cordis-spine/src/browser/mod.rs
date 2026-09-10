@@ -1467,10 +1467,8 @@ mod tests {
                     }
                 })
         });
-        let file_ref = file_ref.expect(&format!(
-            "expected file input ref in snapshot:\n{}",
-            snap.content
-        ));
+        let file_ref = file_ref
+            .unwrap_or_else(|| panic!("expected file input ref in snapshot:\n{}", snap.content));
         let up = tools
             .execute(ToolCall {
                 id: "up".into(),

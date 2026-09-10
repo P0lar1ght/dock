@@ -103,10 +103,10 @@ pub fn detach_std_command(cmd: &mut std::process::Command) {
                 if libc::setsid() >= 0 {
                     return Ok(());
                 }
-                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
-                    if libc::setpgid(0, 0) == 0 {
-                        return Ok(());
-                    }
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+                    && libc::setpgid(0, 0) == 0
+                {
+                    return Ok(());
                 }
                 Err(std::io::Error::last_os_error())
             });

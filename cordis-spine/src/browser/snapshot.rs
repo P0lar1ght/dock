@@ -1,8 +1,10 @@
 //! Lean accessibility snapshot + stable refs (agent-browser shape, not a dep).
 //!
 //! Output lines look like:
+//!
 //!   - button "Submit" [ref=e1]
 //!   - textbox "Email" [ref=e2] value="a@b.com"
+//!
 //! Refs are `@eN` / `eN` / `ref=eN` for click/type.
 
 use std::collections::{HashMap, HashSet};
@@ -119,7 +121,7 @@ fn is_noise(role: &str, name: &str, interactive_only: bool) -> bool {
         return !is_interactive(role);
     }
     // Keep interactive + a few structural / named nodes; skip empty generics.
-    if is_interactive(role) || STRUCTURAL_KEEP.iter().any(|r| *r == k.as_str()) {
+    if is_interactive(role) || STRUCTURAL_KEEP.contains(&k.as_str()) {
         return false;
     }
     name.trim().is_empty()

@@ -88,6 +88,7 @@ impl SseParser {
 }
 
 /// Standing GET until `stop` is true. 405 / 404 without a session ends the loop.
+#[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
 pub async fn listen_get(
     client: reqwest::Client,
     url: String,
@@ -154,6 +155,7 @@ enum GetEnd {
     Retry,
 }
 
+#[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
 async fn get_once(
     client: &reqwest::Client,
     url: &str,

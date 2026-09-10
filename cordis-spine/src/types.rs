@@ -87,7 +87,7 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct ToolResult {
     pub call_id: String,
     pub name: String,
@@ -96,17 +96,6 @@ pub struct ToolResult {
     /// `read_file` on PNG). Empty for text-only tools. Not serialized as
     /// base64 into the session transcript — see `session_persist` path refs.
     pub images: Vec<UserImage>,
-}
-
-impl Default for ToolResult {
-    fn default() -> Self {
-        Self {
-            call_id: String::new(),
-            name: String::new(),
-            content: String::new(),
-            images: Vec::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
