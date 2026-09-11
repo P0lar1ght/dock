@@ -244,7 +244,7 @@ fn turn_end_decision(
     );
     let seed = end.clone();
     ctx.waterfall(TURN_END, end, move || seed)
-        .decision()
+        .settle()
         .map(str::to_string)
 }
 

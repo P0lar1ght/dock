@@ -257,7 +257,26 @@ pub struct TurnEnd {
     /// not — so a handler that must not act on a child's turn reads this
     /// instead of looking up `"sessions"` itself.
     pub identity: String,
-    continuations: Vec<(i32, String)>,
+    continuations: Vec<Continuation>,
+}
+
+/// One handler's vote, plus the bookkeeping it wants to run only if that vote
+/// is the one the loop acts on.
+#[derive(Clone)]
+struct Continuation {
+    order: i32,
+    reminder: String,
+    on_win: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl fmt::Debug for Continuation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Continuation")
+            .field("order", &self.order)
+            .field("reminder", &self.reminder)
+            .field("on_win", &self.on_win.is_some())
+            .finish()
+    }
 }
 
 impl TurnEnd {
@@ -281,15 +300,53 @@ impl TurnEnd {
     /// Vote for another round. `reminder` is the `<system-reminder>` body the
     /// loop appends if this vote wins.
     pub fn keep_working(&mut self, order: i32, reminder: impl Into<String>) {
-        self.continuations.push((order, reminder.into()));
+        self.continuations.push(Continuation {
+            order,
+            reminder: reminder.into(),
+            on_win: None,
+        });
+    }
+
+    /// Vote, and run `on_win` only if this vote is the one the loop acts on.
+    ///
+    /// A handler cannot tell whether it won: handlers registered outside it
+    /// vote after it returns, and the winner is picked once the whole chain is
+    /// back. So anything that must be charged per *actual* continuation — a
+    /// self-limiting quota, a counter the user sees — belongs here rather than
+    /// next to the `keep_working` call, where it would be spent on rounds this
+    /// handler never got.
+    pub fn keep_working_with(
+        &mut self,
+        order: i32,
+        reminder: impl Into<String>,
+        on_win: impl Fn() + Send + Sync + 'static,
+    ) {
+        self.continuations.push(Continuation {
+            order,
+            reminder: reminder.into(),
+            on_win: Some(std::sync::Arc::new(on_win)),
+        });
     }
 
     /// The winning reminder (smallest order), or `None` to end the turn.
+    /// Read-only — the loop calls [`TurnEnd::settle`] instead.
     pub fn decision(&self) -> Option<&str> {
-        self.continuations
-            .iter()
-            .min_by_key(|(order, _)| *order)
-            .map(|(_, body)| body.as_str())
+        self.winner().map(|c| c.reminder.as_str())
+    }
+
+    /// [`TurnEnd::decision`], plus the winner's `on_win`. The loop calls this
+    /// exactly once per turn end, right before it appends the reminder.
+    pub fn settle(&self) -> Option<&str> {
+        let win = self.winner()?;
+        if let Some(on_win) = &win.on_win {
+            on_win();
+        }
+        Some(win.reminder.as_str())
+    }
+
+    /// Smallest order wins; ties go to whoever voted first.
+    fn winner(&self) -> Option<&Continuation> {
+        self.continuations.iter().min_by_key(|c| c.order)
     }
 
     /// True for the user-facing session. Subagent turns are `child-*`.
