@@ -54,7 +54,7 @@ cargo test -p cordis-gateway --test gateway
 
 # lint / 格式
 cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid
-cargo clippy -p cordis-spine --all-targets -- -D warnings
+cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings
 ```
 
 注意事项，都是当前仓库的真实状态：

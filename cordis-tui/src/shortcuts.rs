@@ -315,6 +315,16 @@ impl Shortcuts {
         {
             hints.insert(hints.len().saturating_sub(1), HintItem::new("g", "goal"));
         }
+        if self
+            .ctx
+            .get::<cordis_spine::Todos>(cordis_spine::TODOS)
+            .is_some_and(|t| t.stats().total() > 0)
+        {
+            hints.insert(
+                hints.len().saturating_sub(1),
+                HintItem::new("Ctrl+t", "todo"),
+            );
+        }
         hints
     }
 }

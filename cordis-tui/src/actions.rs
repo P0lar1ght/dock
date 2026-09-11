@@ -95,6 +95,8 @@ pub enum Action {
     },
     CycleMode,
     ToggleGoalDetail,
+    /// Cycle the scrollback todo card fold (Ctrl+t).
+    ToggleTodoFold,
 }
 
 /// Produced by dispatch, consumed by the event loop.

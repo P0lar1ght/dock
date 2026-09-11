@@ -514,6 +514,11 @@ const HELP: &[HelpEntry] = &[
         kind: HelpKind::Hint,
     }),
     HelpEntry::Row(HelpRow {
+        key: "ctrl+t",
+        label: "待办卡片折叠（未完成 / 全部 / 一行）",
+        kind: HelpKind::Hint,
+    }),
+    HelpEntry::Row(HelpRow {
         key: "ctrl+q",
         label: "退出",
         kind: HelpKind::Slash(SlashCmd::Quit),

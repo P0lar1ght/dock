@@ -24,7 +24,7 @@ use crate::session::SessionRef;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::Widget;
 
 use crate::grok::mermaid::{self, AffordanceKind};
@@ -49,6 +49,7 @@ mod subagent;
 mod task_ops;
 mod text_selection;
 mod thinking;
+pub(crate) mod todo;
 pub(crate) mod tool;
 mod user;
 mod web;
@@ -111,6 +112,9 @@ pub struct Scrollback {
     expanded: Mutex<HashSet<String>>,
     /// Tool cards: Collapsed (absent) → Truncated → Expanded (grok fold cycle).
     tool_fold: Mutex<HashMap<String, tool::ToolMode>>,
+    /// Todo card fold. Its own cell (not `tool_fold`) because the default is
+    /// Active, not Collapsed, and the cycle is card-specific.
+    todo_fold: Mutex<todo::TodoFold>,
     last_frame: Mutex<Frame>,
     /// When [`Self::layout_key`] matches, [`Self::last_frame`] is reused.
     layout_cache_key: Mutex<Option<u64>>,
@@ -126,6 +130,7 @@ impl Scrollback {
             offset: Mutex::new(0),
             expanded: Mutex::new(HashSet::new()),
             tool_fold: Mutex::new(HashMap::new()),
+            todo_fold: Mutex::new(todo::TodoFold::default()),
             last_frame: Mutex::new(Frame {
                 lines: Vec::new(),
                 tool_headers: Vec::new(),
@@ -364,7 +369,9 @@ impl Scrollback {
         if let Some(id) = bg_task::open_id(&id) {
             return ClickHit::OpenJob { id: id.to_string() };
         }
-        if id.starts_with("think:") {
+        if id == todo::HEADER_ID {
+            self.cycle_todo_fold();
+        } else if id.starts_with("think:") {
             let mut expanded = self.expanded.lock().unwrap();
             if !expanded.remove(&id) {
                 expanded.insert(id);
@@ -382,6 +389,24 @@ impl Scrollback {
             }
         }
         ClickHit::ToolToggle
+    }
+
+    /// Advance the todo card fold (header click or Ctrl+t). No-op visually
+    /// when there is no list — [`todo::lines`] renders nothing.
+    pub fn cycle_todo_fold(&self) {
+        let mut fold = self.todo_fold.lock().unwrap();
+        *fold = fold.next();
+    }
+
+    pub fn todo_fold(&self) -> todo::TodoFold {
+        *self.todo_fold.lock().unwrap()
+    }
+
+    /// Whether a todo list is mounted and non-empty (drives the Ctrl+t hint).
+    pub fn has_todos(&self) -> bool {
+        self.ctx
+            .get::<Todos>(TODOS)
+            .is_some_and(|t| t.stats().total() > 0)
     }
 
     pub fn last_assistant(&self, n: usize) -> Option<String> {
@@ -453,6 +478,7 @@ impl Scrollback {
             .get::<Todos>(TODOS)
             .map(|t| t.snapshot())
             .unwrap_or_default();
+        let todo_fold = self.todo_fold();
         let subagents = self.ctx.get::<Subagents>(SUBAGENTS);
         let jobs = self.ctx.get::<Jobs>(JOBS);
         let presets = self.ctx.get::<AgentPresets>(AGENT_PRESETS);
@@ -466,6 +492,7 @@ impl Scrollback {
                 working,
                 show_ts,
                 &todos,
+                todo_fold,
                 subagents.as_deref(),
                 jobs.as_deref(),
                 presets.as_deref(),
@@ -507,9 +534,13 @@ impl Scrollback {
         if let Some(todos) = self.ctx.get::<Todos>(TODOS) {
             for (id, item) in todos.snapshot() {
                 id.hash(&mut h);
+                // Content too: `todo_write` can re-word an item without
+                // touching its id or status, and the card shows the wording.
+                item.content.hash(&mut h);
                 std::mem::discriminant(&item.status).hash(&mut h);
             }
         }
+        std::mem::discriminant(&self.todo_fold()).hash(&mut h);
         if let Some(subagents) = self.ctx.get::<Subagents>(SUBAGENTS) {
             for a in subagents.list() {
                 a.id.hash(&mut h);
@@ -603,6 +634,7 @@ pub(crate) fn child_transcript(
         running,
         false,
         &[],
+        todo::TodoFold::default(),
         subagents,
         None,
         presets,
@@ -648,6 +680,7 @@ pub(crate) fn lines_from_events(events: &[LogEvent]) -> Vec<Line<'static>> {
         false,
         false,
         &[],
+        todo::TodoFold::default(),
         None,
         None,
         None,
@@ -677,6 +710,7 @@ fn build_frame(
     working: bool,
     show_ts: bool,
     todos: &[(String, cordis_spine::TodoItem)],
+    todo_fold: todo::TodoFold,
     subagents: Option<&Subagents>,
     jobs: Option<&Jobs>,
     presets: Option<&AgentPresets>,
@@ -785,8 +819,10 @@ fn build_frame(
             LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::SystemReminder(_) => {}
         }
     }
-    if !todos.is_empty() {
-        lines.extend(todo_lines(todos, &theme, width));
+    let todo_card = todo::lines(todos, todo_fold, &theme, width);
+    if !todo_card.is_empty() {
+        tool_headers.push((lines.len(), todo::HEADER_ID.to_string()));
+        lines.extend(todo_card);
         lines.push(Line::from(""));
     }
     Frame {
@@ -992,6 +1028,8 @@ fn tool_card_lines(
         execute::lines(arguments, content, theme, width, mode, running)
     } else if web::is_web_tool(name) {
         web::lines(name, arguments, content, theme, width, mode, running)
+    } else if todo::is_todo_tool(name) {
+        todo::card_lines(arguments, theme, width, mode, running)
     } else if plan::is_plan_tool(name) {
         plan::lines(name, arguments, content, theme, width, mode, running)
     } else if goal::is_goal_tool(name) {
@@ -1005,32 +1043,6 @@ fn tool_card_lines(
     } else {
         tool::lines(name, arguments, content, theme, width, mode, running)
     }
-}
-
-fn todo_lines(
-    todos: &[(String, cordis_spine::TodoItem)],
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let style = crate::grok::todo_pane::TodoPaneStyle::default();
-    let mut lines = vec![Line::from(Span::styled(
-        "待办",
-        Style::default().fg(theme.accent_user),
-    ))];
-    for (id, item) in todos {
-        let st = style.for_status(item.status);
-        let mark = crate::grok::todo_pane::todo_icon(item.status);
-        let content = format!(" {id} {}", item.content);
-        let clipped: String = content
-            .chars()
-            .take(width.saturating_sub(2).max(6))
-            .collect();
-        lines.push(Line::from(vec![
-            Span::styled(mark.to_string(), Style::default().fg(st.icon_fg)),
-            Span::styled(clipped, st.text_style),
-        ]));
-    }
-    lines
 }
 
 fn format_timestamp(at: SystemTime, expanded: bool) -> String {
@@ -1155,6 +1167,7 @@ mod tests {
             false,
             true,
             &[],
+            todo::TodoFold::default(),
             None,
             None,
             None,
@@ -1529,5 +1542,86 @@ mod tests {
         Widget::render(&scrollback, area, &mut buf);
         let key3 = *scrollback.layout_cache_key.lock().unwrap();
         assert_ne!(key1, key3, "new event must rebuild layout");
+    }
+
+    fn todo(content: &str, status: cordis_spine::TodoStatus) -> (String, cordis_spine::TodoItem) {
+        (
+            content.to_string(),
+            cordis_spine::TodoItem {
+                content: content.into(),
+                priority: Default::default(),
+                status,
+                meta: None,
+            },
+        )
+    }
+
+    fn frame_with_todos(todos: &[(String, cordis_spine::TodoItem)], fold: todo::TodoFold) -> Frame {
+        build_frame(
+            &[LogEvent::User("干活".into())],
+            &[],
+            80,
+            &HashSet::new(),
+            &HashMap::new(),
+            false,
+            false,
+            todos,
+            fold,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn todo_card_header_is_click_mapped() {
+        use cordis_spine::TodoStatus;
+        let todos = vec![
+            todo("读代码", TodoStatus::Completed),
+            todo("改 UI", TodoStatus::InProgress),
+            todo("补测试", TodoStatus::Pending),
+        ];
+        let frame = frame_with_todos(&todos, todo::TodoFold::Active);
+        let (idx, id) = frame
+            .tool_headers
+            .iter()
+            .find(|(_, id)| id == todo::HEADER_ID)
+            .cloned()
+            .expect("todo header must be hit-mapped");
+        assert_eq!(id, todo::HEADER_ID);
+        let header = plain(std::slice::from_ref(&frame.lines[idx]));
+        assert!(header.contains("待办"), "{header}");
+        assert!(header.contains("1/3"), "{header}");
+    }
+
+    #[test]
+    fn folding_the_todo_card_shrinks_the_transcript() {
+        use cordis_spine::TodoStatus;
+        let todos: Vec<_> = (0..5)
+            .map(|i| todo(&format!("步骤 {i}"), TodoStatus::Pending))
+            .collect();
+        let active = frame_with_todos(&todos, todo::TodoFold::Active).lines.len();
+        let summary = frame_with_todos(&todos, todo::TodoFold::Summary)
+            .lines
+            .len();
+        assert_eq!(active - summary, 5, "summary drops every item row");
+    }
+
+    #[test]
+    fn scrollback_cycles_the_todo_fold() {
+        use cordis::Context;
+        use cordis_spine::{Sessions, SESSIONS};
+
+        let root = Context::new();
+        root.provide(SESSIONS, Sessions::new(root.clone())).unwrap();
+        let scrollback = Scrollback::new(root.clone());
+        assert_eq!(scrollback.todo_fold(), todo::TodoFold::Active);
+        scrollback.cycle_todo_fold();
+        assert_eq!(scrollback.todo_fold(), todo::TodoFold::Full);
+        scrollback.cycle_todo_fold();
+        assert_eq!(scrollback.todo_fold(), todo::TodoFold::Summary);
+        scrollback.cycle_todo_fold();
+        assert_eq!(scrollback.todo_fold(), todo::TodoFold::Active);
+        assert!(!scrollback.has_todos(), "no todos service mounted");
     }
 }

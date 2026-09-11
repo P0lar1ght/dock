@@ -52,6 +52,9 @@ pub const PERMISSIONS: &str = "permissions";
 pub const TURN: &str = "turn";
 
 pub const PRE_STEP: &str = "agent/pre-step";
+/// Model stopped calling tools (or ran out of steps) — last chance to say the
+/// turn is not done. Payload [`crate::TurnEnd`].
+pub const TURN_END: &str = "agent/turn-end";
 pub const PROMPT_ASSEMBLE: &str = "system-prompt/assemble";
 pub const LLM_STREAM: &str = "llm/stream";
 pub const TOOLS_EXECUTE: &str = "tools/execute";

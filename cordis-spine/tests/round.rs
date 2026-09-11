@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use cordis::{plugin, Context, FiberState, Inject};
 use cordis_spine::{
-    agent_loop, install_fakes, install_without_llm, tool_goal, turn, Agent, Agents, BoxFuture,
-    Driver, Error, Goal, Llm, LlmOutput, LoopHandle, PreStep, PromptRequest, Sampler, Sessions,
-    StreamDelta, ToolCall, TurnControl, TurnOutcome, AGENTS, AGENT_LOOP, GOAL, LLM, PRE_STEP,
-    SESSIONS, SYSTEM_PROMPT, TOOLS, TURN,
+    agent_loop, install_fakes, install_without_llm, tool_goal, tool_todo, turn, Agent, Agents,
+    BoxFuture, Driver, Error, Goal, Llm, LlmOutput, LoopHandle, PreStep, PromptRequest, Sampler,
+    Sessions, StreamDelta, ToolCall, TurnControl, TurnOutcome, AGENTS, AGENT_LOOP, GOAL, LLM,
+    PRE_STEP, SESSIONS, SYSTEM_PROMPT, TOOLS, TURN,
 };
 
 /// 整个测试二进制共用一个隔离的 `DOCK_HOME`：第一次调用时建临时目录并设好，
@@ -868,4 +868,343 @@ async fn coding_turn_survives_more_than_eight_tool_rounds() {
         .unwrap();
     assert_eq!(out, TurnOutcome::Text("done".into()));
     assert_eq!(samples.load(Ordering::SeqCst), 13);
+}
+
+/// Scripted `todo_write` turn: open the list, answer with text, then (after the
+/// gate pushes back) close the list and answer again.
+struct TodoScript {
+    n: Arc<AtomicUsize>,
+    /// Sample indexes at which a `todo_write` call is emitted, with its args.
+    writes: Vec<(usize, &'static str)>,
+}
+
+impl Sampler for TodoScript {
+    fn sample<'a>(
+        &'a self,
+        _request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let n = self.n.clone();
+        let writes = self.writes.clone();
+        Box::pin(async move {
+            let i = n.fetch_add(1, Ordering::SeqCst);
+            match writes.iter().find(|(at, _)| *at == i) {
+                Some((_, args)) => LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: format!("t{i}"),
+                        name: "todo_write".into(),
+                        arguments: (*args).to_string(),
+                    }],
+                    ..LlmOutput::default()
+                },
+                None => LlmOutput {
+                    text: format!("round-{i}"),
+                    ..LlmOutput::default()
+                },
+            }
+        })
+    }
+}
+
+async fn boot_todo_loop(samples: Arc<AtomicUsize>, writes: Vec<(usize, &'static str)>) -> Context {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    root.provide(
+        LLM,
+        Llm::from_sampler(root.clone(), Arc::new(TodoScript { n: samples, writes })),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root
+}
+
+const OPEN_LIST: &str = r#"{"merge":false,"todos":[
+    {"id":"a","content":"读代码","status":"in_progress"},
+    {"id":"b","content":"改实现","status":"pending"}]}"#;
+const CLOSE_LIST: &str = r#"{"todos":[
+    {"id":"a","status":"completed"},
+    {"id":"b","status":"completed"}]}"#;
+
+#[tokio::test]
+async fn open_todos_gate_the_turn_until_they_are_closed() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    // s0 opens the list, s1 answers with text (gate fires), s2 closes the
+    // list, s3 answers again and is allowed through.
+    let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST), (2, CLOSE_LIST)]).await;
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("round-3".into()));
+    assert_eq!(
+        samples.load(Ordering::SeqCst),
+        4,
+        "text with open todos must not end the turn"
+    );
+    let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+    let reminders: Vec<String> = sessions
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            cordis_spine::LogEvent::SystemReminder(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reminders.len(), 1, "one nudge, not one per remaining item");
+    assert!(reminders[0].contains(cordis_spine::TODO_GATE_SENTINEL));
+    assert!(reminders[0].contains("读代码"), "{}", reminders[0]);
+    let users = sessions.kinds().iter().filter(|k| **k == "user").count();
+    assert_eq!(users, 1, "the gate is a hidden reminder, not a user bubble");
+}
+
+#[tokio::test]
+async fn a_closed_list_lets_the_turn_end() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    let root = boot_todo_loop(samples.clone(), vec![(0, CLOSE_LIST)]).await;
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("round-1".into()));
+    assert_eq!(samples.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn the_gate_gives_up_after_two_nudges() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    // The model never closes the list; the turn must still end.
+    let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST)]).await;
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("round-3".into()));
+    assert_eq!(
+        samples.load(Ordering::SeqCst),
+        4,
+        "one tool round + text + two gated rounds"
+    );
+}
+
+/// The status-only write that forgot `merge: true` must keep its content
+/// (Grok's `effective_merge` auto-upgrade), or the live card and the gate
+/// would both start showing raw ids.
+#[tokio::test]
+async fn status_only_write_without_merge_keeps_content() {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
+    tools
+        .execute(ToolCall {
+            id: "1".into(),
+            name: "todo_write".into(),
+            arguments: OPEN_LIST.into(),
+        })
+        .await;
+    let out = tools
+        .execute(ToolCall {
+            id: "2".into(),
+            name: "todo_write".into(),
+            arguments: r#"{"merge":false,"todos":[{"id":"a","status":"completed"}]}"#.into(),
+        })
+        .await;
+    assert!(out.content.contains("读代码"), "{}", out.content);
+    let todos = root
+        .get::<cordis_spine::Todos>(cordis_spine::TODOS)
+        .unwrap();
+    assert_eq!(todos.snapshot().len(), 2, "auto-merge must not drop item b");
+    assert_eq!(todos.stats().completed, 1);
+}
+
+/// `"todos"` is shared with subagent isolates (only sessions / turn /
+/// agentPresets are isolated), so a child must not be gated — or nudged — by
+/// the parent's list.
+#[tokio::test]
+async fn a_subagent_turn_is_not_gated_by_the_parent_list() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST)]).await;
+    // Fill the shared list from the parent side.
+    root.require::<cordis_spine::Tools>(TOOLS)
+        .unwrap()
+        .execute(ToolCall {
+            id: "seed".into(),
+            name: "todo_write".into(),
+            arguments: OPEN_LIST.into(),
+        })
+        .await;
+    samples.store(1, Ordering::SeqCst); // past the scripted write
+
+    let child = root.isolate("sessions");
+    child
+        .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+        .unwrap();
+    let out = LoopHandle::new(child.clone(), Arc::new(cordis_spine::GrokStep))
+        .run("子任务")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("round-1".into()));
+    assert_eq!(
+        samples.load(Ordering::SeqCst),
+        2,
+        "child must end on its first text sample"
+    );
+    let kinds = child.require::<Sessions>(SESSIONS).unwrap().kinds();
+    assert!(
+        !kinds.contains(&"system-reminder"),
+        "no parent-todo nudge in a child session: {kinds:?}"
+    );
+}
+
+/// Long tool run without touching the list: the watchdog reminds the model to
+/// check items off mid-turn, and does it once, not once per step.
+#[tokio::test]
+async fn a_stale_list_gets_a_mid_turn_nudge() {
+    struct WriteThenGrind {
+        n: Arc<AtomicUsize>,
+        tool_rounds: usize,
+    }
+    impl Sampler for WriteThenGrind {
+        fn sample<'a>(
+            &'a self,
+            _request: PromptRequest,
+            _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        ) -> BoxFuture<'a, LlmOutput> {
+            let n = self.n.clone();
+            let rounds = self.tool_rounds;
+            Box::pin(async move {
+                let i = n.fetch_add(1, Ordering::SeqCst);
+                let call = |name: &str, args: &str| LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: format!("c{i}"),
+                        name: name.into(),
+                        arguments: args.into(),
+                    }],
+                    ..LlmOutput::default()
+                };
+                match i {
+                    0 => call("todo_write", OPEN_LIST),
+                    i if i <= rounds => call("echo", "x"),
+                    _ => LlmOutput {
+                        text: "done".into(),
+                        ..LlmOutput::default()
+                    },
+                }
+            })
+        }
+    }
+
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    let samples = Arc::new(AtomicUsize::new(0));
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(WriteThenGrind {
+                n: samples.clone(),
+                tool_rounds: 8,
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    let _ = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    let nudges = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter(
+            |e| matches!(e, cordis_spine::LogEvent::SystemReminder(t) if t.contains("没有更新")),
+        )
+        .count();
+    assert_eq!(nudges, 1, "one stale-list nudge across 8 quiet tool rounds");
+}
+
+/// Both `agent/turn-end` handlers want another round. The order slot decides,
+/// not the mount order: "advance the next todo" is more actionable than
+/// "keep pushing the goal", so todo (10) beats goal (20) either way.
+async fn boot_goal_and_todo(samples: Arc<AtomicUsize>, todo_first: bool) -> Context {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    if todo_first {
+        root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+        root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+    } else {
+        root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+        root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    }
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(TodoScript {
+                n: samples,
+                writes: vec![(0, OPEN_LIST)],
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root.require::<Goal>(GOAL).unwrap().start("交付这次改动");
+    root
+}
+
+#[tokio::test]
+async fn the_lowest_order_slot_wins_regardless_of_mount_order() {
+    for todo_first in [true, false] {
+        let samples = Arc::new(AtomicUsize::new(0));
+        let root = boot_goal_and_todo(samples, todo_first).await;
+        let _ = root
+            .require::<LoopHandle>(AGENT_LOOP)
+            .unwrap()
+            .run("干活")
+            .await
+            .unwrap();
+        // Skip the goal's own pre-step instruction; look at turn-end continuations.
+        let continuations: Vec<String> = root
+            .require::<Sessions>(SESSIONS)
+            .unwrap()
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                cordis_spine::LogEvent::SystemReminder(t)
+                    if t.contains(cordis_spine::TODO_GATE_SENTINEL)
+                        || t.contains("<goal-state>") =>
+                {
+                    Some(t.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let first = continuations
+            .first()
+            .expect("an open list plus an active goal must continue the turn");
+        assert!(
+            first.contains(cordis_spine::TODO_GATE_SENTINEL),
+            "todo (order 10) must outrank goal (order 20), todo_first={todo_first}: {first}"
+        );
+        assert!(
+            !first.contains("<goal-state>"),
+            "only the winning reminder is appended: {first}"
+        );
+    }
 }
