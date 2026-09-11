@@ -172,6 +172,9 @@ impl PreStep {
 /// slot order, so two handlers injecting on the same step land in a fixed
 /// sequence instead of one decided by plugin mount order.
 pub const ORDER_STEP_START_TODO: i32 = 10;
+/// Disk / dynamic Cordis plugins (`host.on("agent/step-start", ...)`). Behind
+/// the built-ins: a script may add to the turn's discipline, not outrank it.
+pub const ORDER_STEP_START_DYNAMIC: i32 = 50;
 
 /// `agent/step-start` payload. Runs before every sampling step, including the
 /// first one of the turn and the ones after an `agent/turn-end` continuation.
@@ -229,6 +232,8 @@ impl StepStart {
 /// than "keep pushing the goal".
 pub const ORDER_TURN_END_TODO: i32 = 10;
 pub const ORDER_TURN_END_GOAL: i32 = 20;
+/// Disk / dynamic Cordis plugins — see [`ORDER_STEP_START_DYNAMIC`].
+pub const ORDER_TURN_END_DYNAMIC: i32 = 50;
 
 /// `agent/turn-end` payload. Runs once per turn-ending decision: the model
 /// stopped emitting tool calls (or the step budget ran out) and the loop is
