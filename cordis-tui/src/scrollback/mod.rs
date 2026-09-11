@@ -45,6 +45,7 @@ mod sched;
 mod search;
 mod search_tool;
 mod subagent;
+mod task_ops;
 mod text_selection;
 mod thinking;
 pub(crate) mod tool;
@@ -814,6 +815,13 @@ fn push_tool_card(
     job_snaps: &[JobSnapshot],
     presets: Option<&AgentPresets>,
 ) {
+    // `use_tool` 是 deferred 工具的包装：内层是 task 族/skill 操作时按内层
+    // 操作渲染卡片（参数取 `tool_input`）。
+    let unwrapped = task_ops::unwrap_use_tool(name, arguments);
+    let (name, arguments) = match &unwrapped {
+        Some((inner_name, inner_args)) => (inner_name.as_str(), inner_args.as_str()),
+        None => (name, arguments),
+    };
     let header_at = lines.len();
     let hid = bg_task::header_id(name, content, arguments, job_snaps)
         .unwrap_or_else(|| subagent::header_id(id, name, content, arguments, agents));
@@ -861,6 +869,16 @@ fn push_tool_card(
         ));
         for i in header_at..lines.len() {
             tool_headers.push((i, hid.clone()));
+        }
+    } else if task_ops::is_task_op(name) {
+        let op_hid = task_ops::header_id(name, arguments, agents, job_snaps);
+        lines.extend(task_ops::lines(
+            name, arguments, content, agents, job_snaps, theme, width,
+        ));
+        if let Some(h) = op_hid {
+            for i in header_at..lines.len() {
+                tool_headers.push((i, h.clone()));
+            }
         }
     } else {
         let mode = tool_fold
