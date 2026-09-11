@@ -815,6 +815,13 @@ fn push_tool_card(
     job_snaps: &[JobSnapshot],
     presets: Option<&AgentPresets>,
 ) {
+    // `use_tool` 是 deferred 工具的包装：内层是 task 族/skill 操作时按内层
+    // 操作渲染卡片（参数取 `tool_input`）。
+    let unwrapped = task_ops::unwrap_use_tool(name, arguments);
+    let (name, arguments) = match &unwrapped {
+        Some((inner_name, inner_args)) => (inner_name.as_str(), inner_args.as_str()),
+        None => (name, arguments),
+    };
     let header_at = lines.len();
     let hid = bg_task::header_id(name, content, arguments, job_snaps)
         .unwrap_or_else(|| subagent::header_id(id, name, content, arguments, agents));

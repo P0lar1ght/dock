@@ -1,5 +1,6 @@
 //! Task-family control-op cards — `get_task_output` / `wait_tasks` /
-//! `kill_task` / `interrupt_agent` / `send_message` / `list_agents` / `report`.
+//! `kill_task` / `interrupt_agent` / `send_message` / `list_agents` /
+//! `report` / `skill`.
 //! The spawn call (`task`) has its own card in [`super::subagent`]; these
 //! render the follow-up ops: status verb + target label + result preview.
 //! A click on a target card opens the child conversation (`sub:<id>`) or job
@@ -23,6 +24,7 @@ pub fn is_task_op(name: &str) -> bool {
             | "send_message"
             | "list_agents"
             | "report"
+            | "skill"
     )
 }
 
@@ -63,6 +65,9 @@ pub fn header_id(
     agents: &[SubagentSnap],
     jobs: &[JobSnapshot],
 ) -> Option<String> {
+    if let Some((inner, inner_args)) = unwrap_use_tool(name, arguments) {
+        return header_id(&inner, &inner_args, agents, jobs);
+    }
     let id = target_ids(name, arguments).into_iter().next()?;
     if agents.iter().any(|a| a.id == id) {
         return Some(format!("sub:{id}"));
@@ -71,6 +76,28 @@ pub fn header_id(
         return Some(format!("job:{id}"));
     }
     None
+}
+
+/// `use_tool` 包装（deferred 工具都走它）：内层 `tool_name` 是本族操作时，
+/// 返回 (内层工具名, `tool_input` 序列化)，让操作卡片直接按内层渲染；
+/// 其余情况返回 None 走通用渲染。
+pub fn unwrap_use_tool(name: &str, arguments: &str) -> Option<(String, String)> {
+    if name != "use_tool" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let inner = v.get("tool_name")?.as_str()?;
+    if !is_task_op(inner) {
+        return None;
+    }
+    let input = v
+        .get("tool_input")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    Some((
+        inner.to_string(),
+        serde_json::to_string(&input).unwrap_or_else(|_| "{}".into()),
+    ))
 }
 
 pub fn lines(
@@ -82,6 +109,17 @@ pub fn lines(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line<'static>> {
+    if let Some((inner, inner_args)) = unwrap_use_tool(name, arguments) {
+        return lines(
+            &inner,
+            &inner_args,
+            content,
+            agents,
+            job_snaps,
+            theme,
+            width,
+        );
+    }
     let ids = target_ids(name, arguments);
     let snap = ids
         .first()
@@ -96,6 +134,10 @@ pub fn lines(
     } else {
         verb_ok(name, content, pending)
     };
+    // 技能卡：来源层取自信封里的 path，附带用户传入的 args。
+    let skill_meta = (name == "skill" && !err && !pending)
+        .then(|| skill_meta(content, arguments))
+        .flatten();
     let running = pending && !err;
     let desc = label_for(&ids, snap, job, content, arguments, name);
     let preview = preview_for(name, arguments, content);
@@ -116,6 +158,9 @@ pub fn lines(
     }
     if let Some(detail) = detail {
         spans.push(Span::styled(format!(" \u{00b7} {detail}"), theme.muted()));
+    }
+    if let Some(meta) = &skill_meta {
+        spans.push(Span::styled(format!(" \u{00b7} {meta}"), theme.muted()));
     }
     if running {
         if let Some(started) = snap.map(|s| s.started_at) {
@@ -156,6 +201,7 @@ fn verb_error(name: &str) -> &'static str {
         "interrupt_agent" => "打断出错",
         "report" => "上报失败",
         "list_agents" => "名册出错",
+        "skill" => "加载失败",
         _ => "查询出错",
     }
 }
@@ -222,6 +268,7 @@ fn verb_ok(name: &str, content: &str, pending: bool) -> (&'static str, Option<&'
             }
         }
         "report" => ("已上报父代理", None),
+        "skill" => ("已加载技能", None),
         _ => ("任务", None),
     }
 }
@@ -234,6 +281,7 @@ fn verb_pending(name: &str) -> &'static str {
         "send_message" => "发送消息",
         "list_agents" => "子代理名册",
         "report" => "上报父代理",
+        "skill" => "加载技能",
         _ => "任务",
     }
 }
@@ -253,6 +301,9 @@ fn label_for(
     }
     if name == "report" {
         return None;
+    }
+    if name == "skill" {
+        return json_str(arguments, "name");
     }
     if let Some(s) = snap {
         let d = s.description.trim();
@@ -328,6 +379,12 @@ fn preview_for(name: &str, arguments: &str, content: &str) -> Option<String> {
     match name {
         "send_message" => json_str(arguments, "message").map(|m| first_line(&m)),
         "report" => json_str(arguments, "output").map(|o| first_line(&o)),
+        // `<skill …>` 信封的开合标签不算正文。
+        "skill" => content
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('<'))
+            .map(first_line),
         "get_task_output" | "wait_tasks" | "kill_task" | "interrupt_agent" => content
             .lines()
             .map(str::trim)
@@ -336,6 +393,40 @@ fn preview_for(name: &str, arguments: &str, content: &str) -> Option<String> {
             .map(first_line),
         _ => None,
     }
+}
+
+/// 技能结果信封里的来源层 + 用户传入的 args：
+/// `bundled/skills/…` → 内置，`skills/…` → 仓库，`~/.dock/skills/…` → 用户，
+/// `.agents/skills/…` → agents，`.dock/skills/…` → 项目。
+fn skill_meta(content: &str, arguments: &str) -> Option<String> {
+    let header = content.lines().next()?;
+    let path = attr(header, "path=\"")?;
+    let scope = if path.starts_with("bundled/") {
+        "内置"
+    } else if path.starts_with("skills/") {
+        "仓库"
+    } else if path.starts_with("~/.dock/") {
+        "用户"
+    } else if path.starts_with(".agents/") {
+        "agents"
+    } else if path.starts_with(".dock/") {
+        "项目"
+    } else {
+        "未知来源"
+    };
+    let args = json_str(arguments, "args").unwrap_or_default();
+    Some(if args.trim().is_empty() {
+        scope.to_string()
+    } else {
+        format!("{scope} · args={args}")
+    })
+}
+
+/// 从 `… path="…"` 形式的属性里取值。
+fn attr(header: &str, key: &str) -> Option<String> {
+    let rest = header.split_once(key)?.1;
+    let value = rest.split('"').next()?;
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn json_str(arguments: &str, key: &str) -> Option<String> {
@@ -517,6 +608,131 @@ mod tests {
         let text = flat(&card);
         assert!(text.contains("已上报父代理"), "{text}");
         assert!(text.contains("测试全过：ALL PASS"), "{text}");
+    }
+
+    #[test]
+    fn use_tool_wrapper_renders_inner_op() {
+        let theme = Theme::current();
+        let args = r#"{"tool_name":"skill","tool_input":{"name":"dock-config"}}"#;
+        let card = lines(
+            "use_tool",
+            args,
+            "<skill name=\"dock-config\" path=\"bundled/skills/dock-config/SKILL.md\">\n# Dock 配置手册\n</skill>",
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&card);
+        assert!(text.contains("已加载技能"), "{text}");
+        assert!(text.contains("dock-config"), "{text}");
+
+        // 内层非本族操作不解包。
+        assert!(unwrap_use_tool(
+            "use_tool",
+            r#"{"tool_name":"browser_open","tool_input":{}}"#
+        )
+        .is_none());
+        assert!(unwrap_use_tool("skill", "{}").is_none());
+
+        // 内层 task 族的 target 解析穿透 tool_input。
+        let agents = vec![snap("kid-1", "观察")];
+        assert_eq!(
+            header_id(
+                "use_tool",
+                r#"{"tool_name":"get_task_output","tool_input":{"task_ids":["kid-1"]}}"#,
+                &agents,
+                &[]
+            ),
+            Some("sub:kid-1".into())
+        );
+    }
+
+    #[test]
+    fn skill_card_shows_name_and_body_preview() {
+        let theme = Theme::current();
+        let content = "<skill name=\"dock-config\" path=\"bundled/skills/dock-config/SKILL.md\">\n\
+                       # Dock 配置手册\n\n配置按顺序合并……\n</skill>\n\nFiles in skill dir:\n";
+        let card = lines(
+            "skill",
+            r#"{"name":"dock-config"}"#,
+            content,
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&card);
+        assert!(text.contains("已加载技能"), "{text}");
+        assert!(text.contains("dock-config"), "{text}");
+        assert!(text.contains("Dock 配置手册"), "{text}");
+        assert!(
+            !text.contains("点击查看"),
+            "skill 卡片无 overlay 可跳：{text}"
+        );
+
+        let pending = lines(
+            "skill",
+            r#"{"name":"dock-config"}"#,
+            "",
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        assert!(flat(&pending).contains("加载技能"));
+
+        let failed = lines(
+            "skill",
+            r#"{"name":"nope"}"#,
+            "Error: unknown skill \"nope\"",
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        assert!(flat(&failed).contains("加载失败"));
+    }
+
+    #[test]
+    fn skill_card_shows_source_layer_and_args() {
+        let theme = Theme::current();
+        let env =
+            |path: &str| format!("<skill name=\"dock-config\" path=\"{path}\">\n# 正文\n</skill>");
+        let cases = [
+            ("bundled/skills/dock-config/SKILL.md", "内置"),
+            ("skills/mcp-builder/SKILL.md", "仓库"),
+            ("~/.dock/skills/my-skill/SKILL.md", "用户"),
+            (".agents/skills/x/SKILL.md", "agents"),
+            (".dock/skills/y/SKILL.md", "项目"),
+        ];
+        for (path, label) in cases {
+            let card = lines(
+                "skill",
+                r#"{"name":"dock-config"}"#,
+                &env(path),
+                &[],
+                &[],
+                &theme,
+                120,
+            );
+            let text = flat(&card);
+            assert!(text.contains("已加载技能"), "{text}");
+            assert!(text.contains(label), "{path} 应显示 {label}: {text}");
+        }
+
+        let with_args = lines(
+            "skill",
+            r#"{"name":"dock-config","args":"mcp 怎么接"}"#,
+            &env("bundled/skills/dock-config/SKILL.md"),
+            &[],
+            &[],
+            &theme,
+            120,
+        );
+        let text = flat(&with_args);
+        assert!(text.contains("内置"), "{text}");
+        assert!(text.contains("args=mcp 怎么接"), "{text}");
     }
 
     #[test]
