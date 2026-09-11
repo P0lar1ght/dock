@@ -511,6 +511,19 @@ impl Host {
             .ctx
             .on_waterfall(TURN_END, move |end: TurnEnd, args| {
                 let mut next = args.next::<TurnEnd>().unwrap_or(end);
+                // `TurnEnd` says handlers must respect this, and the host — not
+                // the script's good intentions — is the handler here. When the
+                // user has queued the next message they steer: the script is
+                // not even asked.
+                //
+                // Child turns are *not* filtered (unlike `tool-todo` /
+                // `tool-goal`, whose state belongs to the main session): the
+                // loop appends to whichever session is running, so a script's
+                // reminder lands in the child's own transcript. Scripts that
+                // care read `main` off the payload.
+                if next.queued_followups {
+                    return next;
+                }
                 let mut payload = Map::new();
                 payload.insert("text".into(), next.text.clone().into());
                 payload.insert("rounds".into(), (next.rounds as i64).into());
@@ -540,9 +553,25 @@ impl Host {
         let engine = self.inner.engine.clone();
         let ast = self.inner.ast.clone();
         let plugin_id = self.inner.plugin_id.clone();
-        move |payload: Map| match call_fnptr(&engine, &ast, &handler, Dynamic::from_map(payload)) {
-            Ok(text) if !text.trim().is_empty() => Some(text),
-            Ok(_) => None,
+        move |payload: Map| match call_fnptr_raw(
+            &engine,
+            &ast,
+            &handler,
+            Dynamic::from_map(payload),
+        ) {
+            Ok(v) if v.is_unit() => None,
+            // A string or nothing. Anything else would otherwise be stringified
+            // into the model's history by accident.
+            Ok(v) => match v.into_string() {
+                Ok(text) if !text.trim().is_empty() => Some(text),
+                Ok(_) => None,
+                Err(kind) => {
+                    eprintln!(
+                        "[cordis:{plugin_id}] host.on: handler must return a string or (), got {kind}"
+                    );
+                    None
+                }
+            },
             Err(e) => {
                 eprintln!("[cordis:{plugin_id}] host.on: {e}");
                 None
@@ -699,12 +728,22 @@ fn preview(text: &str, max: usize) -> String {
 }
 
 fn call_fnptr(engine: &Engine, ast: &AST, fnptr: &FnPtr, arg: Dynamic) -> Result<String, String> {
-    let result: Dynamic = if arg.is_unit() {
-        fnptr.call(engine, ast, ()).map_err(|e| e.to_string())?
+    Ok(dynamic_to_display(call_fnptr_raw(engine, ast, fnptr, arg)?))
+}
+
+/// [`call_fnptr`] without the display coercion — for callers that must tell a
+/// string apart from "returned something else".
+fn call_fnptr_raw(
+    engine: &Engine,
+    ast: &AST,
+    fnptr: &FnPtr,
+    arg: Dynamic,
+) -> Result<Dynamic, String> {
+    if arg.is_unit() {
+        fnptr.call(engine, ast, ()).map_err(|e| e.to_string())
     } else {
-        fnptr.call(engine, ast, (arg,)).map_err(|e| e.to_string())?
-    };
-    Ok(dynamic_to_display(result))
+        fnptr.call(engine, ast, (arg,)).map_err(|e| e.to_string())
+    }
 }
 
 fn block_on_tool(tools: &Tools, call: ToolCall) -> Result<String, Box<rhai::EvalAltResult>> {

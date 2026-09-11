@@ -1303,3 +1303,53 @@ async fn a_rhai_hook_cannot_outrank_or_swallow_the_todo_gate() {
         "the built-in gate outranks the script: {first}"
     );
 }
+
+/// Returns a non-string, which must not be stringified into the transcript.
+const RHAI_NON_STRING: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("agent/step-start", |s| { 42 });
+        host.on("agent/turn-end", |e| { #{ oops: true } });
+    }
+}"#;
+
+/// `TurnEnd` says handlers must respect `queued_followups`, and here the host
+/// *is* the handler — the rule cannot live in the script's documentation.
+#[tokio::test]
+async fn a_rhai_turn_end_hook_never_outvotes_a_queued_followup() {
+    let root = boot_with_loop().await;
+    run_rhai(&root, "hook", RHAI_HOOKS).await;
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .set_queued_followups(1);
+
+    let _ = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert_eq!(samples(&root), 1, "the user is steering, not the script");
+    assert!(
+        !reminders(&root).iter().any(|t| t.contains("脚本续跑")),
+        "{:?}",
+        reminders(&root)
+    );
+}
+
+/// A script hook returns a reminder or nothing. Anything else is a mistake, not
+/// a reminder to be coerced into the model's history.
+#[tokio::test]
+async fn a_rhai_hook_returning_a_non_string_injects_nothing() {
+    let root = boot_with_loop().await;
+    run_rhai(&root, "junk", RHAI_NON_STRING).await;
+
+    let _ = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert_eq!(samples(&root), 1);
+    assert!(reminders(&root).is_empty(), "{:?}", reminders(&root));
+}
