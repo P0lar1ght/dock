@@ -135,10 +135,37 @@ pub struct PromptRequest {
     pub tools: Vec<ToolSpec>,
 }
 
+/// `agent/pre-step` payload. Runs once per user prompt, before the first
+/// sample. Handlers may veto the turn by returning `enter: false`.
+///
+/// Unlike [`StepStart`] / [`TurnEnd`], pre-step handlers append their reminders
+/// themselves — and the `Sessions` they can reach is the one on the context
+/// they registered on, i.e. the **main** session. A subagent turn fires this
+/// waterfall too, so anything that appends to the session, consumes one-shot
+/// state, or advances the user's own state must check [`PreStep::identity`]
+/// first or it will do it to the parent.
 #[derive(Clone, Debug)]
 pub struct PreStep {
     pub user: String,
     pub enter: bool,
+    /// `Sessions::identity()` of the turn starting — see [`TurnEnd::identity`]
+    /// for why it rides the payload.
+    pub identity: String,
+}
+
+impl PreStep {
+    pub fn new(user: impl Into<String>, enter: bool, identity: impl Into<String>) -> Self {
+        Self {
+            user: user.into(),
+            enter,
+            identity: identity.into(),
+        }
+    }
+
+    /// True for the user-facing session. Subagent turns are `child-*`.
+    pub fn is_main_session(&self) -> bool {
+        self.identity == crate::session::ROOT_IDENTITY
+    }
 }
 
 /// Order slots on the `agent/step-start` waterfall. Reminders are appended in

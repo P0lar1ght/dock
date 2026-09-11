@@ -581,17 +581,9 @@ async fn at_plugin_id_pre_step_injects_identity_reminder() {
     )
     .await;
     let user = "@echo-1 please inspect";
-    root.waterfall(
-        PRE_STEP,
-        PreStep {
-            user: user.into(),
-            enter: true,
-        },
-        || PreStep {
-            user: user.into(),
-            enter: true,
-        },
-    );
+    root.waterfall(PRE_STEP, PreStep::new(user, true, MAIN), move || {
+        PreStep::new(user, true, MAIN)
+    });
     let events = root.require::<Sessions>(SESSIONS).unwrap().events();
     let reminder = events.iter().find_map(|e| match e {
         LogEvent::SystemReminder(text) => Some(text.as_str()),

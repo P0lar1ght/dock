@@ -72,15 +72,9 @@ async fn grok_turn(ctx: &Context, prompt: String) -> Result<TurnOutcome> {
     sessions.append(LogEvent::User(prompt.clone()));
 
     let decision = {
-        let user = prompt.clone();
-        ctx.waterfall(
-            PRE_STEP,
-            PreStep {
-                user: user.clone(),
-                enter: true,
-            },
-            move || PreStep { user, enter: true },
-        )
+        let step = PreStep::new(prompt.clone(), true, sessions.identity());
+        let seed = step.clone();
+        ctx.waterfall(PRE_STEP, step, move || seed)
     };
     if !decision.enter {
         return Err(Error::PreStepRejected);

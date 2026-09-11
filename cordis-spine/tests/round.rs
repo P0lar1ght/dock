@@ -87,9 +87,9 @@ async fn pre_step_can_reject() {
     isolated_home();
     let root = Context::new();
     install_fakes(&root).await.unwrap();
-    root.on_waterfall(PRE_STEP, |_: PreStep, _| PreStep {
-        user: String::new(),
+    root.on_waterfall(PRE_STEP, |step: PreStep, _| PreStep {
         enter: false,
+        ..step
     })
     .unwrap();
     root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
@@ -1221,6 +1221,54 @@ async fn a_subagent_grind_gets_no_stale_nudge() {
     assert!(
         !kinds.contains(&"system-reminder"),
         "no parent-list nudge in a child session: {kinds:?}"
+    );
+}
+
+/// `agent/pre-step` fires on a subagent turn too, and its handlers can only
+/// reach the session they registered on — the main one. Without the identity
+/// guard a child turn eats the goal's one-shot instruction and drops it into
+/// the parent's transcript, where the user's own next turn never sees it.
+#[tokio::test]
+async fn a_subagent_turn_does_not_eat_the_parent_goal_instruction() {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+    let samples = Arc::new(AtomicUsize::new(0));
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(TodoScript {
+                n: samples,
+                writes: vec![],
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root.require::<Goal>(GOAL).unwrap().start("交付这次改动");
+
+    let child = root.isolate("sessions");
+    child
+        .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+        .unwrap();
+    let _ = LoopHandle::new(child.clone(), Arc::new(cordis_spine::GrokStep))
+        .run("子任务")
+        .await
+        .unwrap();
+
+    let parent = root.require::<Sessions>(SESSIONS).unwrap().kinds();
+    assert!(
+        !parent.contains(&"system-reminder"),
+        "a child turn must not append to the parent transcript: {parent:?}"
+    );
+    assert!(
+        root.require::<Goal>(GOAL)
+            .unwrap()
+            .take_instruction()
+            .is_some(),
+        "the one-shot goal instruction must still be waiting for the user's own turn"
     );
 }
 

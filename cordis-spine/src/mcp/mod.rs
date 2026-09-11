@@ -617,7 +617,10 @@ pub fn mcp_client() -> Plugin {
             let mcp_pre = mcp.clone();
             let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
                 let next = args.next::<PreStep>().unwrap_or(step);
-                if next.enter {
+                // Main session only: the catalog notice is drained once. A
+                // child turn would spend it on the parent's transcript, and the
+                // user would never see why `/mcps` changed.
+                if next.enter && next.is_main_session() {
                     mcp_pre.maybe_inject_reminder();
                 }
                 next

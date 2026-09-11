@@ -66,7 +66,9 @@ pub fn tool_cordis() -> Plugin {
             let ctx_pre = ctx.clone();
             let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
                 let next = args.next::<PreStep>().unwrap_or(step);
-                if next.enter {
+                // Main session only: a `@pluginId` reminder has to land in the
+                // session that mentioned it, and that is the only one reachable.
+                if next.enter && next.is_main_session() {
                     inject_plugin_mentions(&ctx_pre, &next.user);
                 }
                 next

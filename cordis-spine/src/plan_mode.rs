@@ -334,7 +334,9 @@ pub fn plan_mode() -> Plugin {
         let ctx_pre = ctx.clone();
         let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
             let next = args.next::<PreStep>().unwrap_or(step);
-            if next.enter {
+            // Main session only: the plan is the user's, so Pending → Active is
+            // the user's own turn to make, not a subagent's.
+            if next.enter && next.is_main_session() {
                 if let Some(plan) = ctx_pre.get::<PlanMode>(PLAN_MODE) {
                     plan.inject_turn_reminder();
                 }
