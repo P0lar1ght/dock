@@ -67,6 +67,23 @@ struct Frame {
     mermaid: Vec<(usize, String)>,
     /// First content line of user/assistant blocks, for `/timestamps`.
     stamps: Vec<(usize, SystemTime)>,
+    /// Header rows of cards that are still running.
+    live: Vec<LiveRow>,
+}
+
+/// A card header that is still running. The frame it belongs to is cached and
+/// may be painted for minutes, so nothing about it is baked in: the painter
+/// sweeps [`live::shine_at`] across the row and right-aligns a fresh clock on
+/// every frame. See [`live`] for why this is not a rebuild.
+struct LiveRow {
+    line: usize,
+    /// Display width of the built row, so the clock lands past the card's own
+    /// text instead of eating its tail.
+    used: u16,
+    /// Wall-clock start, when the card has one to show.
+    started: Option<SystemTime>,
+    /// Colour the sweep tints toward — the card's own accent, read off its `◆`.
+    accent: Option<ratatui::style::Color>,
 }
 
 pub enum ClickHit {
@@ -136,6 +153,7 @@ impl Scrollback {
                 tool_headers: Vec::new(),
                 mermaid: Vec::new(),
                 stamps: Vec::new(),
+                live: Vec::new(),
             }),
             layout_cache_key: Mutex::new(None),
             last_area: Mutex::new(Rect::default()),
@@ -461,6 +479,7 @@ impl Scrollback {
                 tool_headers: Vec::new(),
                 mermaid: Vec::new(),
                 stamps: Vec::new(),
+                live: Vec::new(),
             };
         };
         let expanded = self.expanded.lock().unwrap().clone();
@@ -504,6 +523,10 @@ impl Scrollback {
     fn layout_key(&self, width: usize) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         width.hash(&mut h);
+        // Every span carries baked colours — accents, the user band, syntect
+        // fallbacks. Without this a palette switch keeps the old frame and
+        // paints GrokNight's #e1e1e1 text onto GrokDay's #eeeeee background.
+        Theme::current_kind().hash(&mut h);
         if let Ok(sessions) = self.ctx.require::<Sessions>(SESSIONS) {
             sessions.events_rev().hash(&mut h);
         } else {
@@ -722,6 +745,7 @@ fn build_frame(
     let mut tool_headers = Vec::new();
     let mut mermaid = Vec::new();
     let mut stamps = Vec::new();
+    let mut live = Vec::new();
     for (i, event) in events.iter().enumerate() {
         let stamp = times.get(i).copied();
         match event {
@@ -750,6 +774,16 @@ fn build_frame(
                     think_open,
                 );
                 if !think.is_empty() {
+                    if streaming_think {
+                        // Header only. The clock stays off: the block already
+                        // prints `思考了 1.2s` once the model stops.
+                        live.push(LiveRow {
+                            line: lines.len(),
+                            used: line_width(&think[0]),
+                            started: None,
+                            accent: think[0].spans.first().and_then(|s| s.style.fg),
+                        });
+                    }
                     tool_headers.push((lines.len(), think_id));
                     lines.extend(think);
                     lines.push(Line::from(""));
@@ -775,6 +809,8 @@ fn build_frame(
                     push_tool_card(
                         &mut lines,
                         &mut tool_headers,
+                        &mut live,
+                        stamp,
                         &call.id,
                         &call.name,
                         &call.arguments,
@@ -801,6 +837,8 @@ fn build_frame(
                 push_tool_card(
                     &mut lines,
                     &mut tool_headers,
+                    &mut live,
+                    stamp,
                     id,
                     name,
                     arguments,
@@ -830,6 +868,7 @@ fn build_frame(
         tool_headers,
         mermaid,
         stamps,
+        live,
     }
 }
 
@@ -857,6 +896,10 @@ pub(crate) fn unwrap_use_tool(name: &str, arguments: &str) -> Option<(String, St
 fn push_tool_card(
     lines: &mut Vec<Line<'static>>,
     tool_headers: &mut Vec<(usize, String)>,
+    live_rows: &mut Vec<LiveRow>,
+    // `started`: when this card is a still-running tool call, when the model
+    // asked for it — the painter turns it into a clock.
+    started: Option<SystemTime>,
     id: &str,
     name: &str,
     arguments: &str,
@@ -910,12 +953,22 @@ fn push_tool_card(
                 typ.and_then(|t| presets.and_then(|p| p.role_label(&t)))
             },
         });
+        let still_running = subagent::is_running(content, snap.as_ref());
         lines.extend(subagent::lines(arguments, content, live, theme, width));
+        if still_running {
+            mark_live(
+                live_rows,
+                lines,
+                header_at,
+                snap.as_ref().and_then(|s| live::wall_start(s.started_at)),
+            );
+        }
         for i in header_at..lines.len() {
             tool_headers.push((i, hid.clone()));
         }
     } else if let Some(jid) = bg_task::open_id(&hid) {
         let snap = jobs.and_then(|j| j.snapshot(jid));
+        let still_running = bg_task::is_running(content, snap.as_ref());
         lines.extend(bg_task::lines(
             name,
             arguments,
@@ -924,6 +977,14 @@ fn push_tool_card(
             theme,
             width,
         ));
+        if still_running {
+            mark_live(
+                live_rows,
+                lines,
+                header_at,
+                snap.as_ref().map(|s| s.start_time),
+            );
+        }
         for i in header_at..lines.len() {
             tool_headers.push((i, hid.clone()));
         }
@@ -934,6 +995,11 @@ fn push_tool_card(
         lines.extend(task_ops::lines(
             name, arguments, content, agents, job_snaps, theme, width,
         ));
+        // `wait_tasks` / `get_task_output` can hang for minutes. The clock is
+        // painted (`started` = when the model asked), never baked.
+        if running {
+            mark_live(live_rows, lines, header_at, started);
+        }
         if let Some(h) = op_hid {
             for i in header_at..lines.len() {
                 tool_headers.push((i, h.clone()));
@@ -947,9 +1013,40 @@ fn push_tool_card(
         lines.extend(tool_card_lines(
             name, arguments, content, theme, width, mode, running,
         ));
+        if running {
+            mark_live(live_rows, lines, header_at, started);
+        }
         tool_headers.push((header_at, hid));
     }
     lines.push(Line::from(""));
+}
+
+/// Register the card header at `header_at` as still running. No-op when the
+/// card rendered nothing (a card that produced no header has nothing to sweep).
+fn mark_live(
+    live_rows: &mut Vec<LiveRow>,
+    lines: &[Line<'static>],
+    header_at: usize,
+    started: Option<SystemTime>,
+) {
+    let Some(header) = lines.get(header_at) else {
+        return;
+    };
+    live_rows.push(LiveRow {
+        line: header_at,
+        used: line_width(header),
+        started,
+        // The bullet already carries the card's state colour; no second source
+        // of truth to drift.
+        accent: header.spans.first().and_then(|s| s.style.fg),
+    });
+}
+
+fn line_width(line: &Line<'_>) -> u16 {
+    line.spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()) as u16)
+        .sum()
 }
 
 impl Widget for &Scrollback {
@@ -966,6 +1063,15 @@ impl Widget for &Scrollback {
             .ctx
             .get::<AppSettings>(SETTINGS)
             .is_some_and(|s| s.timestamps());
+        paint_live_chrome(
+            buf,
+            area,
+            &frame,
+            scroll,
+            show_ts,
+            &theme,
+            crate::grok::color::shimmer_tick(),
+        );
         if show_ts {
             let mouse = *self.mouse.lock().unwrap();
             paint_timestamps(buf, area, &frame, scroll, mouse, &theme);
@@ -1042,6 +1148,72 @@ fn tool_card_lines(
         ask::lines(name, arguments, content, theme, width, mode, running)
     } else {
         tool::lines(name, arguments, content, theme, width, mode, running)
+    }
+}
+
+/// The one moving part of the transcript. Runs after [`paint_visible_lines`]
+/// over the rows [`Frame::live`] recorded, and only those: a shine head with a
+/// trailing glow travels across each running card, and a fresh clock is
+/// right-aligned past the card's own text.
+///
+/// This is a paint-time pass on purpose. The frame it decorates is cached by
+/// [`Scrollback::layout_key`] and can be minutes old — see [`live`] for why
+/// rebuilding on the shimmer tick is not an option.
+fn paint_live_chrome(
+    buf: &mut Buffer,
+    area: Rect,
+    frame: &Frame,
+    scroll: u16,
+    show_ts: bool,
+    theme: &Theme,
+    tick: u64,
+) {
+    if area.width == 0 || area.height == 0 || frame.live.is_empty() {
+        return;
+    }
+    // `/timestamps` owns the right edge; the clock tucks in beside it.
+    let right_edge = area.width.saturating_sub(if show_ts {
+        TIMESTAMP_RESERVED as u16
+    } else {
+        0
+    });
+    for row in &frame.live {
+        if row.line < scroll as usize {
+            continue;
+        }
+        let y = area.y + (row.line as u16).saturating_sub(scroll);
+        if y >= area.y.saturating_add(area.height) {
+            continue;
+        }
+        // The sweep belongs to the card, not the pane: running it over the full
+        // width would spend most of the cycle crossing blank columns to the
+        // right of a short header, which reads as a stutter.
+        let sweep = row.used.min(area.width);
+        for col in 0..sweep {
+            let heat = live::shine_at(col as usize, sweep as usize, tick);
+            if heat <= 0.0 {
+                continue;
+            }
+            let Some(cell) = buf.cell_mut((area.x + col, y)) else {
+                continue;
+            };
+            if cell.symbol() == " " {
+                continue;
+            }
+            let Some(accent) = row.accent else { continue };
+            if let Some(hot) = crate::grok::color::blend_color(cell.fg, accent, heat) {
+                cell.set_fg(hot);
+            }
+        }
+        let Some(label) = row.started.and_then(live::elapsed_label) else {
+            continue;
+        };
+        let w = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
+        // Only when it fits past the header, with a gap. Never eat the card.
+        if right_edge < w + 2 || row.used + 2 > right_edge - w {
+            continue;
+        }
+        buf.set_string(area.x + right_edge - w, y, &label, theme.dim());
     }
 }
 
@@ -1508,6 +1680,9 @@ mod tests {
         use cordis_spine::{Sessions, SESSIONS};
         use ratatui::widgets::Widget;
 
+        // The palette is in the layout key now, so a test that flips it must not
+        // land between these two renders.
+        let _guard = crate::theme::test_guard();
         let root = Context::new();
         let sessions = Sessions::new(root.clone());
         root.provide(SESSIONS, sessions.clone()).unwrap();
@@ -1623,5 +1798,397 @@ mod tests {
         scrollback.cycle_todo_fold();
         assert_eq!(scrollback.todo_fold(), todo::TodoFold::Active);
         assert!(!scrollback.has_todos(), "no todos service mounted");
+    }
+}
+
+#[cfg(test)]
+mod live_chrome_tests {
+    use super::*;
+    use cordis::Context;
+    use cordis_spine::{LlmOutput, Sessions, ToolCall, SESSIONS};
+    use ratatui::widgets::Widget;
+
+    fn plain(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn row_colors(buf: &Buffer, y: u16, width: u16) -> Vec<ratatui::style::Color> {
+        (0..width).map(|x| buf[(x, y)].fg).collect()
+    }
+
+    /// A session parked on a tool call the model made but that has not come back.
+    fn running_session() -> (Context, Sessions) {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        root.provide(SESSIONS, sessions.clone()).unwrap();
+        sessions.append(LogEvent::User("跑一下构建".into()));
+        sessions.append(LogEvent::LlmStream(LlmOutput {
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                arguments: r#"{"command":"cargo build --release"}"#.into(),
+            }],
+            ..LlmOutput::default()
+        }));
+        (root, sessions)
+    }
+
+    /// The bug: `running_dots()` / the old `pulse_fg` were evaluated during
+    /// `build`, so a cached frame froze them. Nothing time-varying may be baked.
+    #[test]
+    fn a_running_card_bakes_nothing_that_moves() {
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        let before = sb.build(80);
+        let t0 = crate::grok::color::shimmer_tick();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while crate::grok::color::shimmer_tick() == t0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shimmer clock stopped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let after = sb.build(80);
+        assert_eq!(
+            plain(&before.lines),
+            plain(&after.lines),
+            "a card built one tick later must be identical — anything that \
+             differs here is a moving part baked into a cached frame"
+        );
+    }
+
+    #[test]
+    fn a_pending_tool_call_registers_its_header_as_live() {
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        let frame = sb.build(80);
+        assert_eq!(frame.live.len(), 1, "{}", plain(&frame.lines));
+        let header = plain(std::slice::from_ref(&frame.lines[frame.live[0].line]));
+        assert!(header.contains("cargo build"), "{header}");
+        assert!(header.contains("运行中"), "{header}");
+        assert!(frame.live[0].started.is_some(), "clock needs a start");
+    }
+
+    /// `12.3s` — the clock the painter owns. A built line must never carry one:
+    /// the frame around it is cached and can be painted for minutes.
+    fn has_baked_clock(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        chars
+            .windows(4)
+            .any(|w| w[0].is_ascii_digit() && w[1] == '.' && w[2].is_ascii_digit() && w[3] == 's')
+    }
+
+    /// `wait_tasks` parks on this card for minutes, and the clock it used to
+    /// bake was the *target's* birth time, not this call's start. It has to ride
+    /// the same paint-time pass as every other running card.
+    #[test]
+    fn a_running_task_op_registers_its_header_as_live() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        root.provide(SESSIONS, sessions.clone()).unwrap();
+        sessions.append(LogEvent::User("等一下子代理".into()));
+        sessions.append(LogEvent::LlmStream(LlmOutput {
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "wait_tasks".into(),
+                arguments: r#"{"ids":["kid-1"]}"#.into(),
+            }],
+            ..LlmOutput::default()
+        }));
+        let sb = Scrollback::new(root);
+        let frame = sb.build(80);
+        assert_eq!(frame.live.len(), 1, "{}", plain(&frame.lines));
+        let row = &frame.live[0];
+        let header = plain(std::slice::from_ref(&frame.lines[row.line]));
+        assert!(header.contains("查询任务"), "{header}");
+        assert!(
+            !has_baked_clock(&header),
+            "the elapsed clock must be painted, not baked: {header}"
+        );
+        assert!(row.started.is_some(), "clock needs a start");
+
+        // …and the painter has to actually put it on the row.
+        let area = Rect::new(0, 0, 80, 12);
+        let theme = Theme::current();
+        let mut buf = Buffer::empty(area);
+        paint_visible_lines(&mut buf, area, &frame.lines, 0);
+        paint_live_chrome(&mut buf, area, &frame, 0, false, &theme, 0);
+        let painted: String = (0..area.width)
+            .map(|x| buf[(area.x + x, row.line as u16)].symbol())
+            .collect();
+        assert!(
+            has_baked_clock(&painted),
+            "no painted clock on the running task-op row: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_settled_tool_call_is_not_live() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        root.provide(SESSIONS, sessions.clone()).unwrap();
+        sessions.append(LogEvent::ToolExecute {
+            id: "call-1".into(),
+            name: "bash".into(),
+            arguments: r#"{"command":"echo hi"}"#.into(),
+            content: "hi\n".into(),
+            images: vec![],
+        });
+        let sb = Scrollback::new(root);
+        assert!(sb.build(80).live.is_empty());
+    }
+
+    /// The headline regression: the shine has to advance between paints of the
+    /// *same* cached frame. Before this change the card was repainted
+    /// byte-identically for as long as the layout key held.
+    #[test]
+    fn the_shine_advances_across_paints_of_one_cached_frame() {
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        let area = Rect::new(0, 0, 80, 10);
+        let frame = sb.build(80);
+        let theme = Theme::current();
+        let y = frame.live[0].line as u16;
+
+        let ticks = 40u64;
+        let mut lit = Vec::new();
+        for tick in 0..ticks {
+            let mut buf = Buffer::empty(area);
+            paint_visible_lines(&mut buf, area, &frame.lines, 0);
+            paint_live_chrome(&mut buf, area, &frame, 0, false, &theme, tick);
+            lit.push(row_colors(&buf, y, area.width));
+        }
+        let moved = lit.windows(2).filter(|w| w[0] != w[1]).count();
+        // Before this change the card was repainted byte-identically forever,
+        // so `moved` was 0. It is not 39 either: the head spends a few ticks
+        // off the left edge between passes, which is the pause by design.
+        assert!(
+            moved * 5 >= (ticks as usize - 1) * 3,
+            "the sweep is stalling: changed on only {moved}/{}",
+            ticks - 1
+        );
+        let accent = frame.live[0].accent.expect("card accent");
+        let bare = {
+            let mut b = Buffer::empty(area);
+            paint_visible_lines(&mut b, area, &frame.lines, 0);
+            row_colors(&b, y, area.width)
+        };
+        let peak = lit
+            .iter()
+            .map(|r| r.iter().zip(bare.iter()).filter(|(a, b)| a != b).count())
+            .max()
+            .unwrap_or(0);
+        assert!(peak >= 8, "the lit window is only {peak} cells wide");
+        assert!(
+            lit.iter().any(|r| r.contains(&accent)),
+            "the head must reach the card's accent at full strength"
+        );
+    }
+
+    /// The sweep is decoration: it may recolour the row but never rewrite it.
+    #[test]
+    fn the_shine_never_changes_a_glyph() {
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        let area = Rect::new(0, 0, 80, 10);
+        let mut frame = sb.build(80);
+        // Clock off: this test is about the sweep, which may recolour but must
+        // never rewrite.
+        frame.live[0].started = None;
+        let theme = Theme::current();
+        let y = frame.live[0].line as u16;
+
+        let mut bare = Buffer::empty(area);
+        paint_visible_lines(&mut bare, area, &frame.lines, 0);
+        let expected = row_text(&bare, y, area.width);
+        for tick in 0..40u64 {
+            let mut buf = Buffer::empty(area);
+            paint_visible_lines(&mut buf, area, &frame.lines, 0);
+            paint_live_chrome(&mut buf, area, &frame, 0, false, &theme, tick);
+            assert_eq!(row_text(&buf, y, area.width), expected, "tick {tick}");
+        }
+    }
+
+    #[test]
+    fn the_clock_lands_on_the_right_and_spares_the_card_text() {
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        let area = Rect::new(0, 0, 80, 10);
+        let mut frame = sb.build(80);
+        frame.live[0].started =
+            Some(std::time::SystemTime::now() - std::time::Duration::from_secs(12));
+        let theme = Theme::current();
+        let y = frame.live[0].line as u16;
+        let used = frame.live[0].used;
+
+        let mut buf = Buffer::empty(area);
+        paint_visible_lines(&mut buf, area, &frame.lines, 0);
+        paint_live_chrome(&mut buf, area, &frame, 0, false, &theme, 0);
+        let row = row_text(&buf, y, area.width);
+        assert!(row.trim_end().ends_with("12s"), "{row:?}");
+        assert!(row.contains("cargo build"), "card text survives: {row:?}");
+        assert!(
+            row.replace(' ', "").contains("运行中"),
+            "card label survives: {row:?}"
+        );
+        // Measured in display columns, not symbols: the clock starts past the
+        // header, so nothing of the card is overwritten.
+        let clock_x = (0..area.width)
+            .rev()
+            .take_while(|x| buf[(*x, y)].symbol() != " ")
+            .last()
+            .expect("clock painted");
+        assert!(
+            clock_x >= used + 2,
+            "clock at col {clock_x} overlaps a {used}-column header"
+        );
+    }
+
+    /// Narrow pane: there is no room for a clock, so there must be no clock —
+    /// not a clock painted over the command.
+    #[test]
+    fn a_narrow_row_drops_the_clock_instead_of_eating_the_card() {
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        let area = Rect::new(0, 0, 30, 10);
+        let mut frame = sb.build(30);
+        frame.live[0].started =
+            Some(std::time::SystemTime::now() - std::time::Duration::from_secs(12));
+        let theme = Theme::current();
+        let y = frame.live[0].line as u16;
+
+        let mut bare = Buffer::empty(area);
+        paint_visible_lines(&mut bare, area, &frame.lines, 0);
+        let expected = row_text(&bare, y, area.width);
+
+        let mut buf = Buffer::empty(area);
+        paint_visible_lines(&mut buf, area, &frame.lines, 0);
+        paint_live_chrome(&mut buf, area, &frame, 0, false, &theme, 0);
+        assert_eq!(row_text(&buf, y, area.width), expected);
+    }
+
+    /// The painter has to actually be wired into `render`, not just exist. The
+    /// clock is the tick-independent half, so it proves the call site.
+    #[test]
+    fn render_runs_the_live_painter() {
+        let _guard = crate::theme::test_guard();
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        Widget::render(&sb, area, &mut buf);
+        let y = sb.last_frame.lock().unwrap().live[0].line as u16;
+        let row = row_text(&buf, y, area.width);
+        assert!(
+            row.trim_end().ends_with('s'),
+            "no elapsed clock — is `paint_live_chrome` still called? {row:?}"
+        );
+    }
+
+    /// Switching palettes must invalidate the transcript. Without the theme in
+    /// the key the cached GrokNight spans (#e1e1e1) survive onto GrokDay's
+    /// #eeeeee background — a contrast ratio of about 1.06:1.
+    #[test]
+    fn switching_the_palette_rebuilds_the_transcript() {
+        let _guard = crate::theme::test_guard();
+        let restore = Theme::current_kind();
+
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        root.provide(SESSIONS, sessions.clone()).unwrap();
+        sessions.append(LogEvent::LlmStream(LlmOutput {
+            text: "## 标题\n\n正文一段".into(),
+            ..LlmOutput::default()
+        }));
+        let sb = Scrollback::new(root);
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+
+        Theme::apply_kind(crate::theme::ThemeKind::GrokNight);
+        Widget::render(&sb, area, &mut buf);
+        let night_key = *sb.layout_cache_key.lock().unwrap();
+        let night = sb.last_frame.lock().unwrap().lines.clone();
+
+        Theme::apply_kind(crate::theme::ThemeKind::GrokDay);
+        Widget::render(&sb, area, &mut buf);
+        let day_key = *sb.layout_cache_key.lock().unwrap();
+        let day = sb.last_frame.lock().unwrap().lines.clone();
+
+        Theme::apply_kind(restore);
+
+        assert_ne!(night_key, day_key, "palette must be in the layout key");
+        assert_eq!(plain(&night), plain(&day), "only the colours may differ");
+        let fg = |ls: &[Line<'static>]| -> Vec<Option<ratatui::style::Color>> {
+            ls.iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.style.fg))
+                .collect()
+        };
+        assert_ne!(
+            fg(&night),
+            fg(&day),
+            "markdown must be re-rendered under the new palette, not served \
+             from the assistant cache"
+        );
+    }
+
+    /// The `read` card keeps its own body cache; it has the same hazard.
+    #[test]
+    fn switching_the_palette_repaints_a_read_card_body() {
+        let _guard = crate::theme::test_guard();
+        let restore = Theme::current_kind();
+        let args = r#"{"target_file":"note.txt"}"#;
+        let body = "1→hello\n2→world\n";
+
+        Theme::apply_kind(crate::theme::ThemeKind::GrokNight);
+        let night = read::lines(
+            args,
+            body,
+            &Theme::current(),
+            80,
+            tool::ToolMode::Expanded,
+            false,
+        );
+        Theme::apply_kind(crate::theme::ThemeKind::GrokDay);
+        let day = read::lines(
+            args,
+            body,
+            &Theme::current(),
+            80,
+            tool::ToolMode::Expanded,
+            false,
+        );
+        Theme::apply_kind(restore);
+
+        assert_eq!(plain(&night), plain(&day));
+        // Only the body: the header is rebuilt every call, so including it
+        // would pass even with a palette-blind body cache.
+        let gutter = |ls: &[Line<'static>]| -> Vec<Option<ratatui::style::Color>> {
+            ls[2..]
+                .iter()
+                .filter_map(|l| l.spans.first().map(|s| s.style.fg))
+                .collect()
+        };
+        assert!(!gutter(&night).is_empty(), "expected numbered body rows");
+        assert_ne!(
+            gutter(&night),
+            gutter(&day),
+            "body cache ignored the palette"
+        );
     }
 }

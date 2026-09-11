@@ -58,6 +58,10 @@ struct BodyMemo {
     detail: Option<OccupancyKind>,
     width: u16,
     hovered: Option<OccupancyKind>,
+    /// The body is coloured in `rebuild_body`, so it is theme-dependent:
+    /// `Theme::apply_kind` notifies nobody, and without this in the reuse key
+    /// a palette switch leaves the overlay painted in the old colours.
+    theme_kind: crate::theme::ThemeKind,
     rev: u64,
     usage: TokenUsage,
     snap: Option<ContextSnapshot>,
@@ -144,6 +148,7 @@ pub fn render(
     };
     let hovered = *HOVER.lock().unwrap();
     let (rev, usage) = occupancy_stamp(ctx);
+    let theme_kind = Theme::current_kind();
     let visible = {
         let mut memo = BODY.lock().unwrap();
         let reuse = memo.as_ref().is_some_and(|m| {
@@ -151,6 +156,7 @@ pub fn render(
                 && m.detail == detail
                 && m.width == body_area.width
                 && m.hovered == hovered
+                && m.theme_kind == theme_kind
                 && m.rev == rev
                 && m.usage == usage
         });
@@ -233,6 +239,7 @@ fn rebuild_body(
     usage: TokenUsage,
     prev_snap: Option<ContextSnapshot>,
 ) -> BodyMemo {
+    let theme_kind = Theme::current_kind();
     match (tab, detail) {
         (UsageTab::Context, Some(kind)) => {
             let lines = occupancy_detail_lines(ctx, kind, width);
@@ -241,6 +248,7 @@ fn rebuild_body(
                 detail,
                 width,
                 hovered: None,
+                theme_kind,
                 rev,
                 usage,
                 snap: None,
@@ -263,6 +271,7 @@ fn rebuild_body(
                 detail,
                 width,
                 hovered,
+                theme_kind,
                 rev,
                 usage,
                 snap: Some(snap),
@@ -278,6 +287,7 @@ fn rebuild_body(
             detail: None,
             width,
             hovered: None,
+            theme_kind,
             rev,
             usage,
             snap: None,
@@ -1021,6 +1031,56 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()).chain(["\n"]))
             .collect()
+    }
+
+    /// Only the memoised body region — the frame chrome is painted fresh from
+    /// the live theme and would mask a stale body.
+    fn painted_body_fgs(ctx: &Context, area: Rect) -> Vec<Color> {
+        let theme = Theme::current();
+        let inner = render_floating_frame(&mut Buffer::empty(area), area, &theme, false)
+            .expect("floating frame")
+            .content;
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, ctx, UsageTab::Session, 0, None);
+        let body = Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(1),
+        );
+        let mut fgs = Vec::new();
+        for y in body.y..body.y + body.height {
+            for x in body.x..body.x + body.width {
+                let cell = &buf[(x, y)];
+                if cell.symbol() != " " {
+                    fgs.push(cell.fg);
+                }
+            }
+        }
+        fgs
+    }
+
+    /// The body is coloured when it is built, so the memo has to die with the
+    /// palette: `Theme::apply_kind` writes a static and notifies nobody.
+    #[test]
+    fn switching_the_palette_repaints_the_usage_body() {
+        let _guard = crate::theme::test_guard();
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        root.provide(SESSIONS, sessions.clone()).unwrap();
+        let area = Rect::new(0, 0, 97, 24);
+
+        crate::theme::Theme::apply_kind(crate::theme::ThemeKind::GrokNight);
+        let night = painted_body_fgs(&root, area);
+        crate::theme::Theme::apply_kind(crate::theme::ThemeKind::GrokDay);
+        let day = painted_body_fgs(&root, area);
+        crate::theme::Theme::apply_kind(crate::theme::ThemeKind::GrokNight);
+
+        assert!(!night.is_empty(), "nothing was painted: {night:?}");
+        assert_ne!(
+            night, day,
+            "the overlay body kept the old palette after a theme switch"
+        );
     }
 
     fn snapshot() -> ContextSnapshot {

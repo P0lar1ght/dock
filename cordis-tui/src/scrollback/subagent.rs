@@ -134,24 +134,18 @@ pub fn lines(
     if let Some(act) = activity {
         spans.push(Span::styled(format!(" \u{00b7} {act}"), theme.muted()));
     }
-    if running {
-        if let Some(started) = live.as_ref().and_then(|l| l.snap).map(|s| s.started_at) {
-            spans.push(Span::styled(live::elapsed_instant(started), theme.muted()));
-        }
-    }
+    // No elapsed clock here: this line is layout-cached, so a baked duration
+    // would freeze at whatever it read when the frame was built.
+    // `Scrollback::paint_live_chrome` right-aligns a fresh one every paint.
     spans.push(Span::styled("  （点击查看）".to_string(), theme.dim()));
     let mut header = Line::from(spans);
     header.spans.insert(
         0,
-        live::diamond(
-            theme,
-            if running {
-                theme.accent_running
-            } else {
-                theme.accent_thinking
-            },
-            running,
-        ),
+        live::diamond(if running {
+            theme.accent_running
+        } else {
+            theme.accent_thinking
+        }),
     );
     if width > 0 {
         header = truncate_line(header, width);
@@ -192,6 +186,12 @@ pub fn last_assistant_text(events: &[LogEvent]) -> Option<&str> {
     })
 }
 
+/// Whether this card is still running. `build_frame` needs it to register the
+/// row as live without re-deriving the header.
+pub(crate) fn is_running(content: &str, snap: Option<&SubagentSnap>) -> bool {
+    status_verb(content, snap).1
+}
+
 fn status_verb(content: &str, snap: Option<&SubagentSnap>) -> (&'static str, bool) {
     if let Some(s) = snap {
         if s.cancelled {
@@ -222,12 +222,7 @@ fn status_verb(content: &str, snap: Option<&SubagentSnap>) -> (&'static str, boo
 }
 
 pub(crate) fn live_activity(events: &[LogEvent]) -> Option<String> {
-    let label = activity_label(events)?;
-    if label == "运行中" {
-        Some(format!("运行中{}", live::running_dots()))
-    } else {
-        Some(label)
-    }
+    activity_label(events)
 }
 
 fn activity_label(events: &[LogEvent]) -> Option<String> {
@@ -238,10 +233,10 @@ fn activity_label(events: &[LogEvent]) -> Option<String> {
                 return llm.tool_calls.last().map(|c| c.name.clone());
             }
             LogEvent::LlmStream(llm) if !llm.reasoning.trim().is_empty() => {
-                return Some(format!("思考中{}", live::running_dots()));
+                return Some("思考中".to_string());
             }
             LogEvent::LlmStream(llm) if !llm.text.trim().is_empty() => {
-                return Some(format!("回复中{}", live::running_dots()));
+                return Some("回复中".to_string());
             }
             _ => {}
         }

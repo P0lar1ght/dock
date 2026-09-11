@@ -5,7 +5,7 @@ Grok pager 界面，拆成 Cordis 插件。Harness 只 `plugin(tui())`。全屏�
 | 插件 | ctx key | 做什么 |
 |---|---|---|
 | `theme` | `theme` | GrokNight 调色板 |
-| `tui.scrollback` | `tui.scrollback` | Grok block：`❯`/`$`/`↻` 用户、markdown 助手、折叠 `◆` 工具（点击展开）；按宽度 `word_wrap_lines` |
+| `tui.scrollback` | `tui.scrollback` | Grok block：`❯`/`$`/`↻` 用户、markdown 助手、折叠 `◆` 工具（点击展开）；按宽度 `word_wrap_lines`。整份 transcript 按 `layout_key`（宽度 / `events_rev` / 折叠态 / **配色**）缓存，运行中卡片的扫光与耗时走 `paint_live_chrome`，不进缓存 |
 | `tui.prompt` | `tui.prompt` | 随内容长高的 `┃` + `╭─╮` composer；粘贴 / 历史上翻；`/` 弹出 slash 下拉 |
 | `tui.statusBar` | `tui.statusBar` | 顶栏 cwd / turn / idle |
 | `tui.welcome` | `tui.welcome` | braille logo + 菜单（空 session）；F3 resume 时切到 fullscreen picker |

@@ -140,11 +140,11 @@ pub fn lines(
     if let Some(detail) = detail {
         spans.push(Span::styled(format!(" \u{00b7} {detail}"), theme.muted()));
     }
-    if running {
-        if let Some(started) = snap.map(|s| s.started_at) {
-            spans.push(Span::styled(live::elapsed_instant(started), theme.muted()));
-        }
-    }
+    // No clock here: the header is part of a cached frame, so a value evaluated
+    // now would sit frozen for as long as the layout key holds — and `snap`
+    // would have handed us the *target's* birth time, not this call's start.
+    // `wait_tasks` hangs for minutes; its clock comes from the paint-time pass
+    // via `mark_live` (see [`super::live`]).
     let clickable = header_id(name, arguments, agents, job_snaps).is_some();
     if clickable {
         spans.push(Span::styled("  （点击查看）".to_string(), theme.dim()));
@@ -157,7 +157,7 @@ pub fn lines(
     } else {
         theme.accent_thinking
     };
-    line.spans.insert(0, live::diamond(theme, accent, running));
+    line.spans.insert(0, live::diamond(accent));
     if width > 0 {
         line = truncate_line(line, width);
     }

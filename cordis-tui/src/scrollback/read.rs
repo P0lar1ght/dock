@@ -32,6 +32,9 @@ fn body_cache_key(path: &str, content: &str, mode: ToolMode, width: usize) -> u6
     content.hash(&mut h);
     std::mem::discriminant(&mode).hash(&mut h);
     width.hash(&mut h);
+    // Gutter and un-highlightable lines take their colour from the live
+    // palette, so a cached body belongs to the theme that built it.
+    crate::theme::Theme::current_kind().hash(&mut h);
     h.finish()
 }
 
