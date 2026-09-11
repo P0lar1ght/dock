@@ -69,6 +69,8 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 
 安全上限 256 步。换 driver 只换 `agent-loop` 插件，不动 actor。
 
+**开轮前的 handler 自己 append。** `agent/pre-step` 和后两条不一样：handler 直接往 `Sessions` 写（目标指令、技能正文、MCP 目录变更通告、计划提醒），而它能拿到的 `Sessions` 只有注册时捕获的那一份 —— 主会话。子代理开轮同样会跑这条链，所以凡是要写会话、消费一次性状态、或推进用户自己状态的 handler，都得先看载荷里的 `identity`（`PreStep::is_main_session()`）。六个内建 handler 都这么做。
+
 **中途盯梢也是插件说了算。** `agent/step-start` 每个采样步之前跑一次 —— `agent/pre-step` 是每轮一次、`agent/turn-end` 是收尾一次，都盯不住跑起来的一轮。载荷 `StepStart` 带 `step`（本轮已采样步数，续跑不清零）和 `identity`，handler 用 `remind(order, 正文)` 排队，循环按 order 顺序落成 `SystemReminder`。带 per-turn 状态的 handler 在 `step == 0` 自己重置，循环不替谁存状态。现有一个：
 
 - `tool-todo`（`ORDER_STEP_START_TODO = 10`）：待办列表连续 6 步没动且仍有未完成项时提醒勾选 / 调整，每轮最多 3 次（`Todos::revision()` 计数）。只在主会话生效 —— `"todos"` 不随子代理 isolate，靠载荷里的 `identity` 判断。

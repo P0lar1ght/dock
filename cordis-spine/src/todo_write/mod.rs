@@ -115,7 +115,9 @@ pub fn tool_todo() -> Plugin {
         let fires_pre = fires.clone();
         let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
             let next = args.next::<PreStep>().unwrap_or(step);
-            if next.enter {
+            // Main session only: the quota belongs to the main session's
+            // prompt, and a child starting a turn must not hand it a refill.
+            if next.enter && next.is_main_session() {
                 fires_pre.store(0, Ordering::Relaxed);
             }
             next

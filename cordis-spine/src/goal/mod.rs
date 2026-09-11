@@ -112,7 +112,10 @@ pub fn tool_goal() -> Plugin {
         let ctx_pre = ctx.clone();
         let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
             let next = args.next::<PreStep>().unwrap_or(step);
-            if next.enter {
+            // Main session only: `take_instruction` is one-shot, so a child
+            // turn would eat the objective the user's own next turn should see
+            // — and drop it into the parent's history at that.
+            if next.enter && next.is_main_session() {
                 inject_goal_instruction(&ctx_pre);
             }
             next

@@ -233,14 +233,8 @@ mod tests {
         ctx.get::<PlanMode>(PLAN_MODE).unwrap().enter_pending();
         ctx.waterfall(
             PRE_STEP,
-            PreStep {
-                user: "探索仓库".into(),
-                enter: true,
-            },
-            || PreStep {
-                user: "探索仓库".into(),
-                enter: true,
-            },
+            PreStep::new("探索仓库", true, crate::session::ROOT_IDENTITY),
+            || PreStep::new("探索仓库", true, crate::session::ROOT_IDENTITY),
         );
         let events = ctx.get::<Sessions>(SESSIONS).unwrap().events();
         assert!(
@@ -295,14 +289,8 @@ mod tests {
         ctx.get::<Goal>(GOAL).unwrap().start("理解 TUI");
         ctx.waterfall(
             PRE_STEP,
-            PreStep {
-                user: "理解 TUI".into(),
-                enter: true,
-            },
-            || PreStep {
-                user: "理解 TUI".into(),
-                enter: true,
-            },
+            PreStep::new("理解 TUI", true, crate::session::ROOT_IDENTITY),
+            || PreStep::new("理解 TUI", true, crate::session::ROOT_IDENTITY),
         );
         let events = ctx.get::<Sessions>(SESSIONS).unwrap().events();
         assert!(

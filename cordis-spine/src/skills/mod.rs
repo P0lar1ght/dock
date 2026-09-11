@@ -403,7 +403,9 @@ pub fn skills() -> Plugin {
         let ctx_pre = ctx.clone();
         let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
             let next = args.next::<PreStep>().unwrap_or(step);
-            if next.enter {
+            // Main session only: `/name args` comes from the prompt bar, and
+            // the SKILL.md body can only be appended to the main session.
+            if next.enter && next.is_main_session() {
                 if let Some(skills) = ctx_pre.get::<Skills>(SKILLS) {
                     skills.inject_slash(&next.user);
                 }
@@ -578,14 +580,8 @@ mod tests {
         assert!(skills.get("demo-skill").is_some());
         ctx.waterfall(
             PRE_STEP,
-            PreStep {
-                user: "/demo-skill abc".into(),
-                enter: true,
-            },
-            || PreStep {
-                user: "/demo-skill abc".into(),
-                enter: true,
-            },
+            PreStep::new("/demo-skill abc", true, crate::session::ROOT_IDENTITY),
+            || PreStep::new("/demo-skill abc", true, crate::session::ROOT_IDENTITY),
         );
         let events = ctx.get::<Sessions>(SESSIONS).unwrap().events();
         let text = events
