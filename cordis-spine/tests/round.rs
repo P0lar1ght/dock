@@ -5,8 +5,9 @@ use cordis::{plugin, Context, FiberState, Inject};
 use cordis_spine::{
     agent_loop, install_fakes, install_without_llm, tool_goal, tool_todo, turn, Agent, Agents,
     BoxFuture, Driver, Error, Goal, Llm, LlmOutput, LoopHandle, PreStep, PromptRequest, Sampler,
-    Sessions, StepStart, StreamDelta, ToolCall, TurnControl, TurnOutcome, AGENTS, AGENT_LOOP, GOAL,
-    LLM, PRE_STEP, SESSIONS, STEP_START, SYSTEM_PROMPT, TOOLS, TURN,
+    Sessions, StepStart, StreamDelta, ToolCall, TurnControl, TurnEnd, TurnOutcome, AGENTS,
+    AGENT_LOOP, GOAL, LLM, ORDER_TURN_END_TODO, PRE_STEP, SESSIONS, STEP_START, SYSTEM_PROMPT,
+    TOOLS, TURN, TURN_END,
 };
 
 /// 整个测试二进制共用一个隔离的 `DOCK_HOME`：第一次调用时建临时目录并设好，
@@ -1269,6 +1270,53 @@ async fn a_subagent_turn_does_not_eat_the_parent_goal_instruction() {
             .take_instruction()
             .is_some(),
         "the one-shot goal instruction must still be waiting for the user's own turn"
+    );
+}
+
+/// A handler cannot see the votes cast outside it, so its own self-limit has to
+/// be charged when it wins, not when it votes. A lower slot taking the round
+/// must not quietly spend the todo gate's two nudges.
+#[tokio::test]
+async fn a_lower_slot_winner_does_not_spend_the_todo_quota() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    // s0 opens the list; every later sample is text the gate would object to.
+    let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST)]).await;
+    // Outranks the gate for the first two endings, then falls silent.
+    let _hog = root
+        .on_waterfall(TURN_END, |end: TurnEnd, args| {
+            let mut next = args.next::<TurnEnd>().unwrap_or(end);
+            if next.rounds < 2 {
+                next.keep_working(
+                    ORDER_TURN_END_TODO - 1,
+                    "<system-reminder>先做别的</system-reminder>",
+                );
+            }
+            next
+        })
+        .unwrap();
+
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    // Two rounds taken by the hog, then the gate's own two, then the turn ends.
+    assert_eq!(out, TurnOutcome::Text("round-5".into()));
+    assert_eq!(samples.load(Ordering::SeqCst), 6);
+    let gate_nudges = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(e, cordis_spine::LogEvent::SystemReminder(t)
+                if t.contains(cordis_spine::TODO_GATE_SENTINEL))
+        })
+        .count();
+    assert_eq!(
+        gate_nudges, 2,
+        "the gate still gets its full quota after losing two rounds"
     );
 }
 

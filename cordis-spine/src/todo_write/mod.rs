@@ -156,11 +156,12 @@ pub fn tool_todo() -> Plugin {
                 return next;
             };
             if let Some(body) = todos.gate_reminder(backing_tasks(&ctx_end)) {
-                // Quota burns on the vote, not on the win. `ORDER_TURN_END_TODO`
-                // is the lowest slot, so today a vote is a win; a future handler
-                // that outranks it would silently eat this quota.
-                fires.fetch_add(1, Ordering::Relaxed);
-                next.keep_working(ORDER_TURN_END_TODO, body);
+                // Charged on the win, not on the vote: a handler in a lower
+                // slot can take the round, and the user never saw this nudge.
+                let spent = fires.clone();
+                next.keep_working_with(ORDER_TURN_END_TODO, body, move || {
+                    spent.fetch_add(1, Ordering::Relaxed);
+                });
             }
             next
         });
