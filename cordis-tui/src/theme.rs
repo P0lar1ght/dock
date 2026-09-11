@@ -203,3 +203,12 @@ impl Theme {
         Style::new().fg(self.text_primary)
     }
 }
+
+/// Serialises tests that flip the process-wide palette against tests that read
+/// it. [`Theme::apply_kind`] writes a global, so a switch landing in the middle
+/// of another test's two renders would be a genuine race, not a flake to retry.
+#[cfg(test)]
+pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}

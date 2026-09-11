@@ -57,6 +57,12 @@ pub fn open_id(header_id: &str) -> Option<&str> {
     header_id.strip_prefix(HEADER_PREFIX)
 }
 
+/// Whether this card is still running. `build_frame` needs it to register the
+/// row as live without re-deriving the header.
+pub(crate) fn is_running(content: &str, snap: Option<&JobSnapshot>) -> bool {
+    snap.is_some_and(|s| !s.done) || (snap.is_none() && is_bg_notice(content))
+}
+
 fn match_job(arguments: &str, jobs: &[JobSnapshot]) -> Option<String> {
     let cmd = json_field(arguments, "command")?;
     let hits: Vec<_> = jobs.iter().filter(|j| j.command == cmd).collect();
@@ -89,7 +95,7 @@ pub fn lines(
         .unwrap_or_else(|| "任务".into());
     let failed =
         snap.is_some_and(|s| s.done && looks_failed(&s.output)) || content.starts_with("Error");
-    let running = snap.is_some_and(|s| !s.done) || (snap.is_none() && is_bg_notice(content));
+    let running = is_running(content, snap);
     let (verb, color) = if failed {
         ("任务失败", theme.accent_error)
     } else if running {
@@ -129,13 +135,11 @@ pub fn lines(
         if let Some(act) = snap.and_then(|s| last_output_line(&s.output)) {
             spans.push(Span::styled(format!(" \u{00b7} {act}"), theme.muted()));
         }
-        if let Some(t) = snap.map(|s| s.start_time) {
-            spans.push(Span::styled(live::elapsed_system(t), theme.muted()));
-        }
+        // Elapsed is painted, not built — see `subagent::lines`.
     }
     spans.push(Span::styled("  （点击查看）".to_string(), theme.dim()));
     let mut line = Line::from(spans);
-    line.spans.insert(0, live::diamond(theme, color, running));
+    line.spans.insert(0, live::diamond(color));
     if width > 0 {
         line = truncate_line(line, width);
     }

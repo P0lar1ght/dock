@@ -27,6 +27,10 @@ pub fn render(text: &str, theme: &Theme, width: usize) -> Rendered {
     let hash = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut h);
+        // `md_style::style()` reads the live palette, so rendered lines are
+        // palette-specific. Keying on the text alone hands GrokNight spans back
+        // after a switch to GrokDay.
+        crate::theme::Theme::current_kind().hash(&mut h);
         h.finish()
     };
     if let Ok(guard) = CACHE.lock() {

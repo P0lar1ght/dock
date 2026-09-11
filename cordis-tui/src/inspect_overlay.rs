@@ -521,11 +521,7 @@ fn job_lines(ctx: &Context, id: &str) -> (String, Vec<Line<'static>>) {
     let status = if job.done {
         "完成".to_string()
     } else {
-        format!(
-            "运行中{}{}",
-            live::running_dots(),
-            live::elapsed_system(job.start_time)
-        )
+        format!("运行中{}", live::elapsed_system(job.start_time))
     };
     let title = job
         .description

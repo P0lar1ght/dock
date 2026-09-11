@@ -157,7 +157,7 @@ pub fn lines(
     } else {
         theme.accent_thinking
     };
-    line.spans.insert(0, live::diamond(theme, accent, running));
+    line.spans.insert(0, live::diamond(accent));
     if width > 0 {
         line = truncate_line(line, width);
     }
