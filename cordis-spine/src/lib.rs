@@ -112,7 +112,7 @@ pub use names::{
     DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
     PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
     SESSIONS, SESSION_EVENT, SETTINGS, SKILLS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS,
-    TOOLS_EXECUTE, TUI_SLOTS, TURN, WORKFLOWS,
+    TOOLS_EXECUTE, TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
 };
 pub use permissions::{permissions, PermissionPrompt, Permissions};
 pub use plan_mode::{
@@ -136,7 +136,7 @@ pub use slash::{
 pub use stream_acc::StreamDelta;
 pub use task::admission::SubagentLimits;
 pub use task::{tool_task, SubagentSnap, Subagents, TaskConfig};
-pub use todo_write::{tool_todo, TodoItem, TodoStatus, Todos};
+pub use todo_write::{tool_todo, TodoItem, TodoStats, TodoStatus, Todos, TODO_GATE_SENTINEL};
 pub use tool_cordis::tool_cordis;
 pub use tool_images::{
     cap_images, user_image_from_bytes, user_image_from_path, IMAGE_INLINE_PLACEHOLDER,
@@ -146,8 +146,9 @@ pub use tools::{own_registered, tools, workspace_tools, ToolBody, Tools};
 pub use tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
 pub use turn::{turn, TurnControl};
 pub use types::{
-    LlmOutput, LogEvent, PreStep, PromptRequest, ToolCall, ToolResult, ToolSpec, TurnOutcome,
-    UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
+    LlmOutput, LogEvent, PreStep, PromptRequest, ToolCall, ToolResult, ToolSpec, TurnEnd,
+    TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT, ORDER_TURN_END_GOAL,
+    ORDER_TURN_END_TODO,
 };
 pub use usage::{session_usage_block_text, PromptUsage, UsageLedger};
 pub use web_fetch::tool_web;

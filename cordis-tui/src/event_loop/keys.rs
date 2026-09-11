@@ -1033,6 +1033,16 @@ pub(super) fn run_action(
             }
             Vec::new()
         }
+        Action::ToggleTodoFold => {
+            if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
+                if scrollback.has_todos() {
+                    scrollback.cycle_todo_fold();
+                } else {
+                    flash(ctx, "当前没有待办列表");
+                }
+            }
+            Vec::new()
+        }
         other => {
             let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) else {
                 return Vec::new();
@@ -1350,6 +1360,7 @@ pub(super) fn to_action(
                 KeyCode::Char('x') if ctrl => Some(Action::Help),
                 KeyCode::Char('a') if ctrl => Some(Action::MoveBufferStart),
                 KeyCode::Char('e') if ctrl => Some(Action::MoveBufferEnd),
+                KeyCode::Char('t') if ctrl => Some(Action::ToggleTodoFold),
                 KeyCode::F(2) => Some(Action::SettingsModal),
                 KeyCode::F(3) => Some(Action::ResumePicker),
                 KeyCode::Esc => {

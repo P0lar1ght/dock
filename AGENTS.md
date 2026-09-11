@@ -49,7 +49,7 @@ cargo test -p cordis-tui --test dispatch
 cargo test -p cordis-spine --test round -- install_app_registers
 cargo test -p cordis-spine --test dynamic -- <test_name>   # 动态插件相关
 
-cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app   # 格式门禁（CI 同款）
+cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid   # 格式门禁（CI 同款，七个第一方 crate）
 cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings   # lint（按改动的 crate 跑，CI 同款）
 ```
 
@@ -78,7 +78,7 @@ cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080
 - 返回给用户的错误信息用中文（如 `"工具名不能为空"`）。
 - 新 crate 命名 `cordis-*`；新增行为优先新插件，不改 `event_loop` / `agent-loop` 私有状态。
 - named service 在调用点 `ctx.get` / `ctx.require` live-lookup，不把 `Arc<T>` 关进长生命周期闭包。
-- 扩展走 waterfall（`agent/pre-step`、`llm/stream`、`tools/execute`、`system-prompt/assemble`），监听必须把控制权交给下一环。
+- 扩展走 waterfall（`agent/pre-step`、`agent/turn-end`、`llm/stream`、`tools/execute`、`system-prompt/assemble`），监听必须把控制权交给下一环。
 - 改了工具面就同步 `TOOLS.md`；改了斜杠 / overlay / 快捷键就同步 `CLI.md`。
 
 ## Boundaries

@@ -9,18 +9,19 @@ use crate::agent_presets::AgentPresets;
 use crate::agents::Agents;
 use crate::compact::Compact;
 use crate::error::{Error, Result};
-use crate::goal::{goal_continuation_directive, Goal};
+use crate::goal::continuation_reminder as goal_continuation_reminder;
 use crate::llm::Llm;
 use crate::names::{
-    AGENTS, AGENT_PRESETS, COMPACT, GOAL, LLM, PRE_STEP, SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS,
-    TURN,
+    AGENTS, AGENT_PRESETS, COMPACT, LLM, PRE_STEP, SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TODOS,
+    TOOLS, TURN, TURN_END,
 };
 use crate::prompt::SystemPrompt;
-use crate::session::Sessions;
+use crate::session::{Sessions, ROOT_IDENTITY};
 use crate::task::Subagents;
+use crate::todo_write::{stale_reminder, Todos};
 use crate::tools::Tools;
 use crate::turn::TurnControl;
-use crate::types::{LogEvent, PreStep, PromptRequest, TurnOutcome};
+use crate::types::{LogEvent, PreStep, PromptRequest, TurnEnd, TurnOutcome};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -28,9 +29,16 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// cap so a runaway tool loop can still be Esc-cancelled and leaves a visible
 /// note instead of hanging. The old cap of 8 cut ordinary coding turns short.
 const MAX_STEPS: usize = 256;
-/// Grok keeps `/goal` on an outer turn loop until `update_goal(completed)`
-/// (or cancel). Inner `MAX_STEPS` is per round, not the whole goal.
-const MAX_GOAL_ROUNDS: usize = 64;
+/// Hard stop on `agent/turn-end` continuations. Handlers self-limit, but
+/// continuation is plugin-territory now (a dynamic Cordis plugin on disk can
+/// register one), so the loop keeps its own backstop. Esc — the per-step
+/// `abort_if_cancelled` — is the second line, not the only one.
+const MAX_TURN_END_ROUNDS: usize = 64;
+/// Sampling steps without a `todo_write` before the mid-turn nudge fires
+/// (Grok `TodoNudgeConfig::turns_since_todo_write`, which ships unimplemented).
+const TODO_NUDGE_AFTER_STEPS: usize = 6;
+/// Nudges per prompt. Two reminders are a hint; five are noise.
+const MAX_TODO_NUDGES: usize = 3;
 
 /// One Grok-shaped turn: pre-step once, then sample → tools → sample until text.
 ///
@@ -110,14 +118,16 @@ async fn grok_continue_mailbox(ctx: &Context) -> Result<TurnOutcome> {
     grok_sample_loop(ctx, &sessions, &llm, &tools, system).await
 }
 
-/// Grok `PromptOrigin::GoalSummary`: continue an active goal without a user bubble.
+/// Grok `PromptOrigin::GoalSummary`: continue an active goal without a user
+/// bubble. Not a turn *end*, so it injects the same reminder directly instead
+/// of running the `agent/turn-end` chain.
 async fn grok_continue_goal(ctx: &Context) -> Result<TurnOutcome> {
-    if !goal_keeps_working(ctx) {
+    let Some(reminder) = goal_continuation_reminder(ctx) else {
         return Ok(TurnOutcome::Text(String::new()));
-    }
+    };
     let sessions = ctx.require::<Sessions>(SESSIONS)?;
     sessions.seal_incomplete_tool_calls();
-    inject_goal_continuation(ctx, &sessions);
+    sessions.append(LogEvent::SystemReminder(reminder));
     let llm = ctx.require::<Llm>(LLM)?;
     let tools = ctx.require::<Tools>(TOOLS)?;
     let system_prompt = ctx.require::<SystemPrompt>(SYSTEM_PROMPT)?;
@@ -134,7 +144,11 @@ async fn grok_sample_loop(
 ) -> Result<TurnOutcome> {
     let system_prompt = ctx.require::<SystemPrompt>(SYSTEM_PROMPT)?;
     let mut cache_key = system_cache_key(ctx);
-    let mut goal_rounds = 0usize;
+    let mut rounds = 0usize;
+    // `"todos"` is not isolated per child (only sessions / turn / agentPresets
+    // are), so a subagent sees the parent's list. Nagging it about work it was
+    // never given would be wrong — todo discipline is the main session's.
+    let mut todo = TodoWatch::new(ctx, sessions.identity() == ROOT_IDENTITY);
     let mut last_text = String::new();
     loop {
         tokio::task::yield_now().await;
@@ -142,6 +156,9 @@ async fn grok_sample_loop(
         for _ in 0..MAX_STEPS {
             abort_if_cancelled(ctx, sessions)?;
             drain_parent_mailbox(ctx, sessions);
+            if let Some(text) = todo.stale_nudge(ctx) {
+                sessions.append(LogEvent::SystemReminder(text));
+            }
             if let Some(compact) = ctx.get::<Compact>(COMPACT) {
                 match compact.maybe_auto(ctx).await {
                     Ok(_) => {}
@@ -191,21 +208,24 @@ async fn grok_sample_loop(
                 });
             }
         }
-        if ended_with_text {
-            if goal_keeps_working(ctx) && sessions.has_queued_followups() {
-                return Ok(TurnOutcome::Text(last_text));
-            }
-            if goal_keeps_working(ctx) && goal_rounds < MAX_GOAL_ROUNDS {
-                goal_rounds += 1;
-                inject_goal_continuation(ctx, sessions);
+        // `agent/turn-end`: goal / todo / anything else gets a say before the
+        // turn hands control back. The loop only counts rounds and appends the
+        // winning reminder — the policy lives in the handlers.
+        if rounds < MAX_TURN_END_ROUNDS {
+            if let Some(reminder) = turn_end_decision(
+                ctx,
+                sessions,
+                if ended_with_text { &last_text } else { "" },
+                rounds,
+                ended_with_text,
+            ) {
+                rounds += 1;
+                sessions.append(LogEvent::SystemReminder(reminder));
                 continue;
             }
-            return Ok(TurnOutcome::Text(last_text));
         }
-        if goal_keeps_working(ctx) && goal_rounds < MAX_GOAL_ROUNDS {
-            goal_rounds += 1;
-            inject_goal_continuation(ctx, sessions);
-            continue;
+        if ended_with_text {
+            return Ok(TurnOutcome::Text(last_text));
         }
         sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
             text: format!(
@@ -217,8 +237,74 @@ async fn grok_sample_loop(
     }
 }
 
-fn goal_keeps_working(ctx: &Context) -> bool {
-    ctx.get::<Goal>(GOAL).is_some_and(|g| g.active())
+/// Run `agent/turn-end` and return the winning reminder, if any. No handlers
+/// (or no votes) means the turn may end — fail-open.
+fn turn_end_decision(
+    ctx: &Context,
+    sessions: &Sessions,
+    text: &str,
+    rounds: usize,
+    ended_with_text: bool,
+) -> Option<String> {
+    let end = TurnEnd::new(
+        text,
+        rounds,
+        ended_with_text,
+        sessions.has_queued_followups(),
+        sessions.identity(),
+    );
+    let seed = end.clone();
+    ctx.waterfall(TURN_END, end, move || seed)
+        .decision()
+        .map(str::to_string)
+}
+
+/// Mid-turn `todo_write` watchdog. Counts sampling steps since the list last
+/// moved; nudges when the model is clearly working but not checking items off.
+struct TodoWatch {
+    /// `Todos::revision` at the last step, or `None` when no list is mounted.
+    seen_revision: Option<u64>,
+    steps_since_write: usize,
+    nudges: usize,
+    /// False in subagent turns: `"todos"` is shared with children, so only the
+    /// main session gets nagged about the list.
+    armed: bool,
+}
+
+impl TodoWatch {
+    fn new(ctx: &Context, armed: bool) -> Self {
+        Self {
+            seen_revision: ctx.get::<Todos>(TODOS).map(|t| t.revision()),
+            steps_since_write: 0,
+            nudges: 0,
+            armed,
+        }
+    }
+
+    /// Call once per sampling step. `Some(reminder)` when the list has gone
+    /// stale for [`TODO_NUDGE_AFTER_STEPS`] steps with work still open.
+    fn stale_nudge(&mut self, ctx: &Context) -> Option<String> {
+        if !self.armed {
+            return None;
+        }
+        let todos = ctx.get::<Todos>(TODOS)?;
+        let revision = todos.revision();
+        if self.seen_revision != Some(revision) {
+            self.seen_revision = Some(revision);
+            self.steps_since_write = 0;
+            return None;
+        }
+        self.steps_since_write += 1;
+        if self.nudges >= MAX_TODO_NUDGES || self.steps_since_write < TODO_NUDGE_AFTER_STEPS {
+            return None;
+        }
+        if todos.stats().open() == 0 {
+            return None;
+        }
+        self.nudges += 1;
+        let steps = std::mem::take(&mut self.steps_since_write);
+        Some(stale_reminder(steps))
+    }
 }
 
 /// Continuable `subagent` mailbox: inject after a complete tool round (or at
@@ -233,17 +319,6 @@ fn drain_parent_mailbox(ctx: &Context, sessions: &Sessions) {
     for text in sub.drain_parent_notices() {
         sessions.append(LogEvent::SystemReminder(text));
     }
-}
-
-fn inject_goal_continuation(ctx: &Context, sessions: &Sessions) {
-    let objective = ctx
-        .get::<Goal>(GOAL)
-        .map(|g| g.title())
-        .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| "目标".into());
-    sessions.append(LogEvent::SystemReminder(goal_continuation_directive(
-        &objective,
-    )));
 }
 
 fn system_cache_key(ctx: &Context) -> (String, PathBuf) {

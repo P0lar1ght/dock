@@ -41,7 +41,8 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
         | Action::MouseUp { .. }
         | Action::PasteClipboard
         | Action::CycleMode
-        | Action::ToggleGoalDetail => Vec::new(),
+        | Action::ToggleGoalDetail
+        | Action::ToggleTodoFold => Vec::new(),
         Action::CancelTurn => vec![Effect::CancelTurn],
         Action::PromoteQueued { id } => vec![Effect::PromoteQueued { id }],
         Action::EditQueued { id } => vec![Effect::EditQueued { id }],

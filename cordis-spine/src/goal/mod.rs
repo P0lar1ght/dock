@@ -8,10 +8,16 @@ use std::sync::Arc;
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::names::{GOAL, PRE_STEP, SESSIONS, TOOLS, TOOLS_EXECUTE};
+use crate::names::{GOAL, PRE_STEP, SESSIONS, TOOLS, TOOLS_EXECUTE, TURN_END};
 use crate::session::Sessions;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
+use crate::types::{
+    LogEvent, PreStep, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_TURN_END_GOAL,
+};
+
+/// Grok keeps `/goal` on an outer turn loop until `update_goal(completed)` (or
+/// cancel). The agent loop's `MAX_STEPS` is per round, not per goal.
+const MAX_GOAL_ROUNDS: usize = 64;
 
 pub use drain::GoalState;
 pub use grok_tool::{
@@ -111,6 +117,28 @@ pub fn tool_goal() -> Plugin {
             }
             next
         });
+        let ctx_end = ctx.clone();
+        let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
+            let mut next = args.next::<TurnEnd>().unwrap_or(end);
+            // Main session only. `"goal"` is not isolated per subagent (the
+            // child runner isolates `sessions` / `turn` / `agentPresets`), so
+            // without this a child turn is continued by its parent's goal all
+            // the way to the hard stop. The identity rides on the payload
+            // because a waterfall handler cannot see the executing context.
+            if !next.is_main_session() {
+                return next;
+            }
+            // The user queued the next message: they steer, not the goal loop.
+            if next.queued_followups || next.rounds >= MAX_GOAL_ROUNDS {
+                return next;
+            }
+            // Both endings continue a goal: text without `update_goal(completed)`
+            // is stopping short, and a blown step budget still leaves the goal open.
+            if let Some(body) = continuation_reminder(&ctx_end) {
+                next.keep_working(ORDER_TURN_END_GOAL, body);
+            }
+            next
+        });
         let ctx_exec = ctx.clone();
         let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
             let result = args.next::<ToolResult>().unwrap_or(result);
@@ -140,6 +168,23 @@ pub fn tool_goal() -> Plugin {
         )?;
         Ok(None)
     })
+}
+
+/// `<system-reminder>` body that keeps an active goal going, or `None` when no
+/// goal is running. Shared by the `agent/turn-end` handler and the GoalSummary
+/// entry (`LoopHandle::continue_goal`), which injects it without a turn end.
+pub fn continuation_reminder(ctx: &cordis::Context) -> Option<String> {
+    let goal = ctx.get::<Goal>(GOAL)?;
+    if !goal.active() {
+        return None;
+    }
+    let title = goal.title();
+    let objective = title.trim();
+    Some(goal_continuation_directive(if objective.is_empty() {
+        "目标"
+    } else {
+        objective
+    }))
 }
 
 fn inject_goal_instruction(ctx: &cordis::Context) {

@@ -2,25 +2,39 @@
 
 mod logic;
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::names::{TODOS, TOOLS};
+use crate::jobs::Jobs;
+use crate::names::{JOBS, PRE_STEP, SUBAGENTS, TODOS, TOOLS, TURN_END};
+use crate::task::Subagents;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use crate::types::{PreStep, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_TURN_END_TODO};
 
-pub use logic::{TodoItem, TodoState, TodoStatus, TodoWriteInput};
+/// Grok `TodoGateConfig::max_fires_per_prompt`. Bounds the extra inference one
+/// user prompt can be forced into when the model stops with open todos.
+const MAX_TODO_GATE_FIRES: usize = 2;
+
+pub use logic::{
+    stale_reminder, TodoItem, TodoState, TodoStats, TodoStatus, TodoWriteInput, TODO_GATE_SENTINEL,
+};
 
 /// Named `"todos"` service. TUI live-looks the list; do not capture the Arc.
 pub struct Todos {
     state: Mutex<TodoState>,
+    /// Bumped on every applied write. The agent loop compares it against the
+    /// value it saw last step to tell "the model is keeping the list current"
+    /// from "the model forgot the list exists".
+    revision: AtomicU64,
 }
 
 impl Todos {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(TodoState::default()),
+            revision: AtomicU64::new(0),
         }
     }
 
@@ -33,14 +47,30 @@ impl Todos {
             .collect()
     }
 
+    pub fn stats(&self) -> TodoStats {
+        logic::stats(&self.state.lock().unwrap())
+    }
+
+    /// Write counter — see [`Todos::revision`].
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+
+    /// Turn-end gate body, or `None` when nothing is left to nag about.
+    /// `backing_tasks` = live background jobs + running subagents.
+    pub fn gate_reminder(&self, backing_tasks: usize) -> Option<String> {
+        logic::gate_reminder(&self.state.lock().unwrap(), backing_tasks)
+    }
+
     pub fn apply(&self, input: TodoWriteInput) -> Result<String, logic::TodoError> {
         let mut state = self.state.lock().unwrap();
         logic::validate_no_duplicate_ids(&input.todos)?;
-        if input.merge {
+        if logic::effective_merge(&state, &input) {
             logic::apply_merge(&mut state, &input.todos)?;
         } else {
             logic::apply_replace(&mut state, &input.todos)?;
         }
+        self.revision.fetch_add(1, Ordering::Relaxed);
         Ok(logic::summarize_todo_state(&state))
     }
 }
@@ -51,11 +81,55 @@ impl Default for Todos {
     }
 }
 
-const PARAMS: &str = r#"{"type":"object","properties":{"merge":{"type":"boolean","description":"When true (default), merge by id. When false, replace the list."},"todos":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"]}},"required":["id"]}}},"required":["todos"]}"#;
+/// Grok keeps the `todo_write` blurb to two lines and puts the discipline in a
+/// `<task_completion_discipline>` prompt block. Dock has no such block (the
+/// base prompt stays identity-only for prefix cache), so the rules live here —
+/// the description is the one place the model re-reads every step.
+const TODO_WRITE_DESC: &str = "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\n\
+Use for any task with 3+ steps, or as soon as exploration shows the work is bigger than it looked. Skip it for trivial single-step work.\n\n\
+Rules:\n\
+- Write the list BEFORE starting the work, not after finishing it.\n\
+- Exactly one item is `in_progress` at a time. Mark it before you touch anything for that item.\n\
+- Mark an item `completed` in the same turn you finish it — never batch completions at the end, and never mark something completed while its verification (tests, build, review) is still pending.\n\
+- When exploration changes the plan, update the list in the same turn you learn it: add the steps you discovered, drop the ones that turned out unnecessary (`cancelled`), re-word items that were wrong. A stale list is worse than no list.\n\
+- Do not end a turn with pending items and no tool call. Either advance the next item, or state the external blocker and mark the affected items `cancelled`.\n\n\
+Send only the items you are changing (`merge` defaults to true); id + status is enough to flip an existing item.";
+
+const PARAMS: &str = r#"{"type":"object","properties":{"merge":{"type":"boolean","description":"When true (default), merge the given items into the list by id — send only what changed. When false, the given items replace the whole list."},"todos":{"type":"array","description":"Items to write. In merge mode, id + status is enough to flip an existing item.","items":{"type":"object","properties":{"id":{"type":"string","description":"Stable identifier, reused across calls to update the same item."},"content":{"type":"string","description":"Imperative one-liner describing the step. Optional when updating an existing item."},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"],"description":"pending | in_progress (keep exactly one) | completed (finished and verified) | cancelled (dropped or blocked)."}},"required":["id"]}}},"required":["todos"]}"#;
 
 pub fn tool_todo() -> Plugin {
     plugin("tool-todo", Inject::from([TOOLS]), |ctx, _: &()| {
         ctx.provide(TODOS, Todos::new())?;
+        // Gate quota. Plugin-local (not on `Todos`) — it is policy state of
+        // this handler pair, not part of the named service. `Todos` outlives
+        // the turn, so the counter needs an explicit per-prompt reset.
+        let fires = Arc::new(AtomicUsize::new(0));
+        let fires_pre = fires.clone();
+        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+            let next = args.next::<PreStep>().unwrap_or(step);
+            if next.enter {
+                fires_pre.store(0, Ordering::Relaxed);
+            }
+            next
+        });
+        let ctx_end = ctx.clone();
+        let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
+            let mut next = args.next::<TurnEnd>().unwrap_or(end);
+            if !gate_applies(&next) || fires.load(Ordering::Relaxed) >= MAX_TODO_GATE_FIRES {
+                return next;
+            }
+            let Some(todos) = ctx_end.get::<Todos>(TODOS) else {
+                return next;
+            };
+            if let Some(body) = todos.gate_reminder(backing_tasks(&ctx_end)) {
+                // Quota burns on the vote, not on the win. `ORDER_TURN_END_TODO`
+                // is the lowest slot, so today a vote is a win; a future handler
+                // that outranks it would silently eat this quota.
+                fires.fetch_add(1, Ordering::Relaxed);
+                next.keep_working(ORDER_TURN_END_TODO, body);
+            }
+            next
+        });
         let tools = ctx.require::<Tools>(TOOLS)?;
         let body: ToolBody = {
             let ctx = ctx.clone();
@@ -69,7 +143,7 @@ pub fn tool_todo() -> Plugin {
             vec![tools.register(
                 ToolSpec {
                     name: "todo_write".into(),
-                    description: "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.".into(),
+                    description: TODO_WRITE_DESC.into(),
                     parameters_json: PARAMS.into(),
                 },
                 body,
@@ -77,6 +151,33 @@ pub fn tool_todo() -> Plugin {
         )?;
         Ok(None)
     })
+}
+
+/// Whether this turn end is one the todo gate has any business in.
+///
+/// - Only a text ending: a blown step budget means the model is stuck in a tool
+///   loop, and one more round of "advance your todos" will not unstick it.
+/// - Not while the user has queued the next message — they steer.
+/// - Main session only. `"todos"` is **not** isolated per subagent (the child
+///   runner isolates `sessions` / `turn` / `agentPresets`), so a child would
+///   otherwise be gated by its parent's list. The identity rides on the payload
+///   because a waterfall handler cannot see the executing context.
+fn gate_applies(end: &TurnEnd) -> bool {
+    end.ended_with_text && !end.queued_followups && end.is_main_session()
+}
+
+/// Live background work that can legitimately back an `in_progress` item —
+/// "kick off a job, report back" stays a valid way to end a turn.
+fn backing_tasks(ctx: &Context) -> usize {
+    let jobs = ctx
+        .get::<Jobs>(JOBS)
+        .map(|j| j.list().iter().filter(|j| !j.done).count())
+        .unwrap_or(0);
+    let agents = ctx
+        .get::<Subagents>(SUBAGENTS)
+        .map(|s| s.list().iter().filter(|a| a.running()).count())
+        .unwrap_or(0);
+    jobs + agents
 }
 
 fn write_todos(ctx: &cordis::Context, call: ToolCall) -> ToolResult {

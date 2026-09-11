@@ -140,3 +140,80 @@ pub struct PreStep {
     pub user: String,
     pub enter: bool,
 }
+
+/// Order slots on the `agent/turn-end` waterfall. Two handlers can both want
+/// another round; the smaller order wins, so the outcome does not depend on
+/// plugin mount order (same reason [`crate::PromptAssembly`] uses slots).
+///
+/// More specific beats more general — "do the next todo" is more actionable
+/// than "keep pushing the goal".
+pub const ORDER_TURN_END_TODO: i32 = 10;
+pub const ORDER_TURN_END_GOAL: i32 = 20;
+
+/// `agent/turn-end` payload. Runs once per turn-ending decision: the model
+/// stopped emitting tool calls (or the step budget ran out) and the loop is
+/// about to hand control back. Handlers call [`TurnEnd::keep_working`] to say
+/// "not yet".
+///
+/// Handlers **return text only** — the loop owns the `SystemReminder` append,
+/// so a reminder can never land between a `tool_calls` row and its
+/// `ToolExecute` rows, and "voted but forgot to append" cannot happen.
+#[derive(Clone, Debug, Default)]
+pub struct TurnEnd {
+    /// The model's closing text. Empty when `ended_with_text` is false.
+    pub text: String,
+    /// How many times this turn has already been continued. Handlers use it to
+    /// self-limit; the loop's own cap is a backstop, not a budget to lean on.
+    pub rounds: usize,
+    /// False = the step budget ran out (the model is stuck in a tool loop),
+    /// not a normal text ending.
+    pub ended_with_text: bool,
+    /// The user already queued the next message. Handlers **must** respect
+    /// this: when the user is steering, do not grab the wheel.
+    pub queued_followups: bool,
+    /// `Sessions::identity()` of the turn being ended. A waterfall handler only
+    /// ever sees the context it registered on (`EventArgs` carries no execution
+    /// ctx), and `"sessions"` is isolated per subagent while most services are
+    /// not — so a handler that must not act on a child's turn reads this
+    /// instead of looking up `"sessions"` itself.
+    pub identity: String,
+    continuations: Vec<(i32, String)>,
+}
+
+impl TurnEnd {
+    pub fn new(
+        text: impl Into<String>,
+        rounds: usize,
+        ended_with_text: bool,
+        queued_followups: bool,
+        identity: impl Into<String>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            rounds,
+            ended_with_text,
+            queued_followups,
+            identity: identity.into(),
+            continuations: Vec::new(),
+        }
+    }
+
+    /// Vote for another round. `reminder` is the `<system-reminder>` body the
+    /// loop appends if this vote wins.
+    pub fn keep_working(&mut self, order: i32, reminder: impl Into<String>) {
+        self.continuations.push((order, reminder.into()));
+    }
+
+    /// The winning reminder (smallest order), or `None` to end the turn.
+    pub fn decision(&self) -> Option<&str> {
+        self.continuations
+            .iter()
+            .min_by_key(|(order, _)| *order)
+            .map(|(_, body)| body.as_str())
+    }
+
+    /// True for the user-facing session. Subagent turns are `child-*`.
+    pub fn is_main_session(&self) -> bool {
+        self.identity == crate::session::ROOT_IDENTITY
+    }
+}
