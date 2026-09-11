@@ -148,7 +148,8 @@ pub use turn::{turn, TurnControl};
 pub use types::{
     LlmOutput, LogEvent, PreStep, PromptRequest, StepStart, ToolCall, ToolResult, ToolSpec,
     TurnEnd, TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
-    ORDER_STEP_START_TODO, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
+    ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_TODO, ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL,
+    ORDER_TURN_END_TODO,
 };
 pub use usage::{session_usage_block_text, PromptUsage, UsageLedger};
 pub use web_fetch::tool_web;

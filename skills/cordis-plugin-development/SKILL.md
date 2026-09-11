@@ -62,7 +62,7 @@ Prefer the capability closest to the data owner. Do not create a dynamic Plugin 
 
 `cordis_define` fields: `plugin` (`kind: "new"` + `idPrefix` of 3–6 lowercase English letters, or `kind: "existing"` + `pluginId`), `name`, `purpose`, `factory: "rhai"`, `source` (Rhai string). Then `cordis_run`.
 
-`source` must evaluate to a map. `apply` is a function; define does not call it. `inject` is an array of named services that must already be live, or the fiber stays pending (same as `hold`). Omit `inject` → `["tools"]`. Typical extras: `"slash"`, `"tui.slots"`. Scripts cannot `on_waterfall`, cannot `ctx.plugin`, cannot load disk modules, cannot nest `eval`. `host.on` may only listen to `"session/event"`.
+`source` must evaluate to a map. `apply` is a function; define does not call it. `inject` is an array of named services that must already be live, or the fiber stays pending (same as `hold`). Omit `inject` → `["tools"]`. Typical extras: `"slash"`, `"tui.slots"`. Scripts cannot `ctx.plugin`, cannot load disk modules, cannot nest `eval`. `host.on` reaches three events only: `"session/event"` (observe), `"agent/step-start"` and `"agent/turn-end"` (intercept) — the other waterfalls are not scriptable.
 
 ```rhai
 #{
@@ -140,9 +140,13 @@ Confirm signatures with `cordis_inspect` `what: "builtins"`.
 | `host.open_slot(id)` | `"tui.slots"` | Ask the TUI to open that overlay |
 | `host.call_tool(name, args)` | `"tools"` | Runs a live model tool; bash-class tools still hit the permission overlay. `args` is a map or a JSON string |
 | `host.on("session/event", \|line\| { ... })` | — | Observe the session log after append. `line` is `user\t…` / `assistant\t…` / `tool\tname` / `reminder\t…`. Runs asynchronously; do not treat it as a waterfall. Stop unregisters. Do not re-enter `Sessions` from the handler |
+| `host.on("agent/step-start", \|step\| { ... })` | — | Runs **before every sample** of a turn. `step` is `#{ step, identity, main }` — `step` counts from 0 and keeps counting across turn-end continuations, so per-turn state rearms at 0. Return a `<system-reminder>` string to inject it before this sample, or `()` for no opinion |
+| `host.on("agent/turn-end", \|end\| { ... })` | — | Runs when the turn wants to end. `end` is `#{ text, rounds, ended_with_text, queued_followups, identity, main }`. Return a `<system-reminder>` string to keep the turn going, or `()` to let it end. Respect `queued_followups`: the user already typed the next message |
 | `host.log(message)` / `print` | — | Tagged `[cordis:{pluginId}]` |
 
 The evaluator is not a security boundary (same trust as bash). Sync steps are bounded by operation limits.
+
+The two intercept hooks run **inline on the turn**, so the script blocks the sample until it returns (bounded by the same operation limit); keep them short and avoid `host.call_tool` there. A throw is treated as no opinion — it is logged and the turn carries on. The host always passes control to the next handler for you, so a script cannot swallow the chain, and cannot append to `Sessions` itself: it returns text, the loop appends it. Built-in slots win: `tool-todo` (10) and `tool-goal` (20) outrank a script (50) when both want the same round.
 
 ## Preset factories (teaching / regression)
 

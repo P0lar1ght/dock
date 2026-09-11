@@ -8,11 +8,14 @@ use cordis::{plugin, Context, Inject, Plugin};
 use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
 use serde_json::Value;
 
-use crate::names::{RHAI_BAGS, SESSION_EVENT, SLASH, TOOLS, TUI_SLOTS};
+use crate::names::{RHAI_BAGS, SESSION_EVENT, SLASH, STEP_START, TOOLS, TUI_SLOTS, TURN_END};
 use crate::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::tui_slots::{SlotHandler, SlotKeyResult, TuiSlots};
-use crate::types::{LogEvent, ToolCall, ToolSpec};
+use crate::types::{
+    LogEvent, StepStart, ToolCall, ToolSpec, TurnEnd, ORDER_STEP_START_DYNAMIC,
+    ORDER_TURN_END_DYNAMIC,
+};
 
 const MAX_SOURCE: usize = 128 * 1024;
 const DEFINE_MAX_OPS: u64 = 100_000;
@@ -63,8 +66,12 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.on",
-        "Observe a Host event. Only \"session/event\" is allowed (not a waterfall). Payload is a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…. Handlers run after emit returns; do not assume they can block the turn. Stop unregisters the listener.",
-        &["host.on(\"session/event\", |line| { ... })"],
+        "Observe \"session/event\", or intercept the two scriptable waterfalls. session/event payload is a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…, handled after emit returns. \"agent/step-start\" (#{ step, identity, main }) runs before every sample and \"agent/turn-end\" (#{ text, rounds, ended_with_text, queued_followups, identity, main }) runs when the turn wants to end; return a <system-reminder> string to inject / keep working, or () for no opinion. Those two run inline and block the turn, bounded by max_operations; a throw is treated as no opinion. Built-in slots outrank a script. The other waterfalls are not scriptable. Stop unregisters the listener.",
+        &[
+            "host.on(\"session/event\", |line| { ... })",
+            "host.on(\"agent/step-start\", |step| { ... })",
+            "host.on(\"agent/turn-end\", |end| { ... })",
+        ],
     ),
     (
         "host.log",
@@ -460,11 +467,90 @@ impl Host {
         handler: FnPtr,
     ) -> Result<(), Box<rhai::EvalAltResult>> {
         let name = event.to_string();
-        if name != SESSION_EVENT {
-            return err(format!(
-                "host.on only supports \"{SESSION_EVENT}\" (got {name:?}); waterfall intercept is not allowed"
-            ));
+        match name.as_str() {
+            SESSION_EVENT => self.on_session_event(handler),
+            STEP_START => self.on_step_start(handler),
+            TURN_END => self.on_turn_end(handler),
+            _ => err(format!(
+                "host.on supports {SESSION_EVENT:?}, {STEP_START:?} and {TURN_END:?} (got {name:?}); \
+                 the other waterfalls are not scriptable"
+            )),
         }
+    }
+
+    /// `agent/step-start`: return a `<system-reminder>` body to inject before
+    /// this sample, or `()` for no opinion. The chain always runs on — a script
+    /// gets to add, never to swallow — and the loop does the append.
+    fn on_step_start(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        let script = self.script_hook(handler);
+        let d = self
+            .inner
+            .ctx
+            .on_waterfall(STEP_START, move |start: StepStart, args| {
+                let mut next = args.next::<StepStart>().unwrap_or(start);
+                let mut payload = Map::new();
+                payload.insert("step".into(), (next.step as i64).into());
+                payload.insert("identity".into(), next.identity.clone().into());
+                payload.insert("main".into(), next.is_main_session().into());
+                if let Some(body) = script(payload) {
+                    next.remind(ORDER_STEP_START_DYNAMIC, body);
+                }
+                next
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)?;
+        Ok(())
+    }
+
+    /// `agent/turn-end`: return a `<system-reminder>` body to keep the turn
+    /// going, or `()` to let it end. Built-in slots win ties against a script.
+    fn on_turn_end(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        let script = self.script_hook(handler);
+        let d = self
+            .inner
+            .ctx
+            .on_waterfall(TURN_END, move |end: TurnEnd, args| {
+                let mut next = args.next::<TurnEnd>().unwrap_or(end);
+                let mut payload = Map::new();
+                payload.insert("text".into(), next.text.clone().into());
+                payload.insert("rounds".into(), (next.rounds as i64).into());
+                payload.insert("ended_with_text".into(), next.ended_with_text.into());
+                payload.insert("queued_followups".into(), next.queued_followups.into());
+                payload.insert("identity".into(), next.identity.clone().into());
+                payload.insert("main".into(), next.is_main_session().into());
+                if let Some(body) = script(payload) {
+                    next.keep_working(ORDER_TURN_END_DYNAMIC, body);
+                }
+                next
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)?;
+        Ok(())
+    }
+
+    /// Wrap a script callback as a synchronous `Map -> Option<String>`.
+    ///
+    /// Waterfalls run inline, so this blocks the turn while the script runs —
+    /// bounded by the engine's `max_operations`. A throw (or a blown budget) is
+    /// "no opinion": it is logged and the chain carries on (fail-open).
+    fn script_hook(
+        &self,
+        handler: FnPtr,
+    ) -> impl Fn(Map) -> Option<String> + Send + Sync + 'static {
+        let engine = self.inner.engine.clone();
+        let ast = self.inner.ast.clone();
+        let plugin_id = self.inner.plugin_id.clone();
+        move |payload: Map| match call_fnptr(&engine, &ast, &handler, Dynamic::from_map(payload)) {
+            Ok(text) if !text.trim().is_empty() => Some(text),
+            Ok(_) => None,
+            Err(e) => {
+                eprintln!("[cordis:{plugin_id}] host.on: {e}");
+                None
+            }
+        }
+    }
+
+    fn on_session_event(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
         let engine = self.inner.engine.clone();
         let ast = self.inner.ast.clone();
         let plugin_id = self.inner.plugin_id.clone();

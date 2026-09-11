@@ -1,8 +1,9 @@
 use cordis::Context;
 use cordis_spine::{
-    agent_presets, dynamic_runner, permissions, settings, slash, tool_cordis, tools, tui_slots,
-    AgentPresets, DynEcho, DynamicRunner, LogEvent, PermissionMode, PersistScope, PluginOrigin,
-    PreStep, RhaiBag, RunMode, Sessions, Slash, ToolCall, Tools, AGENT_PRESETS, CORDIS_PRESET_ID,
+    agent_loop, agent_presets, dynamic_runner, llm, permissions, settings, slash, tool_cordis,
+    tool_todo, tools, tui_slots, AgentPresets, DynEcho, DynamicRunner, LlmConfig, LlmMode,
+    LogEvent, LoopHandle, PermissionMode, PersistScope, PluginOrigin, PreStep, RhaiBag, RunMode,
+    Sessions, Slash, ToolCall, Tools, TurnOutcome, AGENT_LOOP, AGENT_PRESETS, CORDIS_PRESET_ID,
     DYNAMIC_CORDIS_RUNNER, DYN_ECHO, DYN_ECHO_TOOL, PRE_STEP, SESSIONS, SETTINGS, SLASH, TOOLS,
     TUI_SLOTS,
 };
@@ -1138,4 +1139,167 @@ async fn promote_writes_disk_and_stops_session_copy() {
     assert!(runner.inspect_plugin(MAIN, "echo").is_ok());
     let session = runner.inspect_plugin(MAIN, "echo-1").unwrap();
     assert!(session.active_run.is_none());
+}
+
+// —— scriptable waterfalls ————————————————————————————————————————————————
+
+/// Registers on both scriptable waterfalls. `()` = no opinion.
+const RHAI_HOOKS: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("agent/step-start", |s| {
+            if s.step == 1 { "<system-reminder>脚本盯梢</system-reminder>" } else { () }
+        });
+        host.on("agent/turn-end", |e| {
+            if e.rounds < 1 { "<system-reminder>脚本续跑</system-reminder>" } else { () }
+        });
+    }
+}"#;
+
+/// A handler that always throws. Fail-open: the turn must not notice.
+const RHAI_THROWS: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("agent/step-start", |s| { throw "boom" });
+        host.on("agent/turn-end", |e| { throw "boom" });
+    }
+}"#;
+
+/// `boot()` plus a text-only sampler and the loop, so a turn can actually run.
+async fn boot_with_loop() -> Context {
+    let root = boot().await;
+    root.plugin(
+        llm(),
+        LlmConfig {
+            mode: LlmMode::Text,
+            ..LlmConfig::default()
+        },
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root
+}
+
+async fn run_rhai(root: &Context, prefix: &str, source: &str) {
+    let defined = exec_json(
+        root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": prefix},
+            "name": "Hooks",
+            "purpose": "waterfall",
+            "factory": "rhai",
+            "source": source,
+        }),
+    )
+    .await;
+    assert!(defined.contains("pkg-1"), "{defined}");
+    let ran = exec_json(
+        root,
+        "cordis_run",
+        json!({"pluginId": format!("{prefix}-1"), "packageId": "pkg-1", "mode": "run"}),
+    )
+    .await;
+    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+}
+
+fn reminders(root: &Context) -> Vec<String> {
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::SystemReminder(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn samples(root: &Context) -> usize {
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .kinds()
+        .iter()
+        .filter(|k| **k == "llm/stream")
+        .count()
+}
+
+/// A disk-shaped Rhai package can now do what only compiled-in code could:
+/// keep a turn going, and drop a reminder in before a sample.
+#[tokio::test]
+async fn rhai_can_intercept_step_start_and_turn_end() {
+    let root = boot_with_loop().await;
+    run_rhai(&root, "hook", RHAI_HOOKS).await;
+
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert!(matches!(out, TurnOutcome::Text(ref t) if !t.is_empty()));
+    assert_eq!(
+        samples(&root),
+        2,
+        "the script's vote must buy a second sample"
+    );
+    let seen = reminders(&root);
+    assert_eq!(
+        seen,
+        [
+            "<system-reminder>脚本续跑</system-reminder>",
+            "<system-reminder>脚本盯梢</system-reminder>"
+        ],
+        "turn-end reminder lands first, then step 1's"
+    );
+}
+
+/// A throwing script is "no opinion", not a broken turn.
+#[tokio::test]
+async fn a_throwing_rhai_hook_does_not_break_the_turn() {
+    let root = boot_with_loop().await;
+    run_rhai(&root, "bang", RHAI_THROWS).await;
+
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert!(matches!(out, TurnOutcome::Text(ref t) if !t.is_empty()));
+    assert_eq!(samples(&root), 1, "a throw must not add a round");
+    assert!(reminders(&root).is_empty(), "{:?}", reminders(&root));
+}
+
+/// The host always calls `args.next()` for the script, so a script cannot drop
+/// the chain — and its slot (50) loses to the built-in gate (10).
+#[tokio::test]
+async fn a_rhai_hook_cannot_outrank_or_swallow_the_todo_gate() {
+    let root = boot_with_loop().await;
+    // Script first, so the built-in gate is *inside* it on the chain: if the
+    // host ever stopped calling `args.next()`, the gate's vote would vanish.
+    run_rhai(&root, "hook", RHAI_HOOKS).await;
+    root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    exec(
+        &root,
+        "todo_write",
+        r#"{"merge":false,"todos":[{"id":"a","content":"读代码","status":"in_progress"}]}"#,
+    )
+    .await;
+
+    let _ = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    let seen = reminders(&root);
+    let first = seen.first().expect("the gate must continue the turn");
+    assert!(
+        first.contains(cordis_spine::TODO_GATE_SENTINEL),
+        "the built-in gate outranks the script: {first}"
+    );
 }
