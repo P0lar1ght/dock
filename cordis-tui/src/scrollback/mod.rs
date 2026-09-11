@@ -995,6 +995,11 @@ fn push_tool_card(
         lines.extend(task_ops::lines(
             name, arguments, content, agents, job_snaps, theme, width,
         ));
+        // `wait_tasks` / `get_task_output` can hang for minutes. The clock is
+        // painted (`started` = when the model asked), never baked.
+        if running {
+            mark_live(live_rows, lines, header_at, started);
+        }
         if let Some(h) = op_hid {
             for i in header_at..lines.len() {
                 tool_headers.push((i, h.clone()));
@@ -1878,6 +1883,59 @@ mod live_chrome_tests {
         assert!(header.contains("cargo build"), "{header}");
         assert!(header.contains("运行中"), "{header}");
         assert!(frame.live[0].started.is_some(), "clock needs a start");
+    }
+
+    /// `12.3s` — the clock the painter owns. A built line must never carry one:
+    /// the frame around it is cached and can be painted for minutes.
+    fn has_baked_clock(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        chars
+            .windows(4)
+            .any(|w| w[0].is_ascii_digit() && w[1] == '.' && w[2].is_ascii_digit() && w[3] == 's')
+    }
+
+    /// `wait_tasks` parks on this card for minutes, and the clock it used to
+    /// bake was the *target's* birth time, not this call's start. It has to ride
+    /// the same paint-time pass as every other running card.
+    #[test]
+    fn a_running_task_op_registers_its_header_as_live() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        root.provide(SESSIONS, sessions.clone()).unwrap();
+        sessions.append(LogEvent::User("等一下子代理".into()));
+        sessions.append(LogEvent::LlmStream(LlmOutput {
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "wait_tasks".into(),
+                arguments: r#"{"ids":["kid-1"]}"#.into(),
+            }],
+            ..LlmOutput::default()
+        }));
+        let sb = Scrollback::new(root);
+        let frame = sb.build(80);
+        assert_eq!(frame.live.len(), 1, "{}", plain(&frame.lines));
+        let row = &frame.live[0];
+        let header = plain(std::slice::from_ref(&frame.lines[row.line]));
+        assert!(header.contains("查询任务"), "{header}");
+        assert!(
+            !has_baked_clock(&header),
+            "the elapsed clock must be painted, not baked: {header}"
+        );
+        assert!(row.started.is_some(), "clock needs a start");
+
+        // …and the painter has to actually put it on the row.
+        let area = Rect::new(0, 0, 80, 12);
+        let theme = Theme::current();
+        let mut buf = Buffer::empty(area);
+        paint_visible_lines(&mut buf, area, &frame.lines, 0);
+        paint_live_chrome(&mut buf, area, &frame, 0, false, &theme, 0);
+        let painted: String = (0..area.width)
+            .map(|x| buf[(area.x + x, row.line as u16)].symbol())
+            .collect();
+        assert!(
+            has_baked_clock(&painted),
+            "no painted clock on the running task-op row: {painted:?}"
+        );
     }
 
     #[test]
