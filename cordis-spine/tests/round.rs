@@ -1208,3 +1208,47 @@ async fn the_lowest_order_slot_wins_regardless_of_mount_order() {
         );
     }
 }
+
+/// `"goal"` is not isolated per subagent either (`ChildRunner` isolates
+/// `sessions` / `turn` / `agentPresets`), so an active parent goal must not
+/// push a child turn to the hard stop.
+#[tokio::test]
+async fn a_subagent_turn_is_not_gated_by_the_parent_goal() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(TodoScript {
+                n: samples.clone(),
+                writes: Vec::new(),
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root.require::<Goal>(GOAL).unwrap().start("交付这次改动");
+
+    let child = root.isolate("sessions");
+    child
+        .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+        .unwrap();
+    let out = LoopHandle::new(child.clone(), Arc::new(cordis_spine::GrokStep))
+        .run("子任务")
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        TurnOutcome::Text("round-0".into()),
+        "a child turn must not be continued by the parent's goal"
+    );
+    assert_eq!(
+        samples.load(Ordering::SeqCst),
+        1,
+        "child must end on its first text sample"
+    );
+}

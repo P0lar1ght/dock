@@ -120,6 +120,14 @@ pub fn tool_goal() -> Plugin {
         let ctx_end = ctx.clone();
         let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
             let mut next = args.next::<TurnEnd>().unwrap_or(end);
+            // Main session only. `"goal"` is not isolated per subagent (the
+            // child runner isolates `sessions` / `turn` / `agentPresets`), so
+            // without this a child turn is continued by its parent's goal all
+            // the way to the hard stop. The identity rides on the payload
+            // because a waterfall handler cannot see the executing context.
+            if !next.is_main_session() {
+                return next;
+            }
             // The user queued the next message: they steer, not the goal loop.
             if next.queued_followups || next.rounds >= MAX_GOAL_ROUNDS {
                 return next;
