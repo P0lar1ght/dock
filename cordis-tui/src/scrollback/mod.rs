@@ -44,6 +44,7 @@ mod read;
 mod sched;
 mod search;
 mod search_tool;
+mod skill;
 mod subagent;
 mod task_ops;
 mod text_selection;
@@ -796,6 +797,25 @@ fn build_frame(
     }
 }
 
+/// `use_tool` 包装（deferred 工具都走它）：返回内层 `(tool_name, tool_input)`。
+/// 纯解包，不认识任何工具名——调用方（task 族 / `skill`）各自判定是不是自己
+/// 的卡片。
+pub(crate) fn unwrap_use_tool(name: &str, arguments: &str) -> Option<(String, String)> {
+    if name != "use_tool" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let inner = v.get("tool_name")?.as_str()?;
+    let input = v
+        .get("tool_input")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    Some((
+        inner.to_string(),
+        serde_json::to_string(&input).unwrap_or_else(|_| "{}".into()),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 // TUI 绘制/布局函数：参数都是 buf/坐标/主题等绘制碎片，抽结构体只会把噪音搬到所有调用点，故意保留。
 fn push_tool_card(
@@ -817,7 +837,8 @@ fn push_tool_card(
 ) {
     // `use_tool` 是 deferred 工具的包装：内层是 task 族/skill 操作时按内层
     // 操作渲染卡片（参数取 `tool_input`）。
-    let unwrapped = task_ops::unwrap_use_tool(name, arguments);
+    let unwrapped = unwrap_use_tool(name, arguments)
+        .filter(|(inner, _)| task_ops::is_task_op(inner) || skill::is_skill(inner));
     let (name, arguments) = match &unwrapped {
         Some((inner_name, inner_args)) => (inner_name.as_str(), inner_args.as_str()),
         None => (name, arguments),
@@ -870,6 +891,8 @@ fn push_tool_card(
         for i in header_at..lines.len() {
             tool_headers.push((i, hid.clone()));
         }
+    } else if skill::is_skill(name) {
+        lines.extend(skill::lines(arguments, content, theme, width));
     } else if task_ops::is_task_op(name) {
         let op_hid = task_ops::header_id(name, arguments, agents, job_snaps);
         lines.extend(task_ops::lines(
@@ -1191,6 +1214,25 @@ mod tests {
         assert!(text.contains("src/lib.rs"), "{text}");
         assert!(text.contains("(1-20)"), "{text}");
         assert!(!text.contains("pub fn"), "collapsed hides body: {text}");
+    }
+
+    /// deferred 包装的 `skill` 走 `skill::lines`，不落回通用工具卡。
+    #[test]
+    fn use_tool_wrapped_skill_uses_skill_card() {
+        let lines = lines_from_events(&[LogEvent::ToolExecute {
+            id: "sk1".into(),
+            name: "use_tool".into(),
+            arguments: r#"{"tool_name":"skill","tool_input":{"name":"dock-config"}}"#.into(),
+            content: r#"<skill name="dock-config" path="bundled/skills/dock-config/SKILL.md">
+# Dock 配置手册
+</skill>"#
+                .into(),
+            images: vec![],
+        }]);
+        let text = plain(&lines);
+        assert!(text.contains("已加载技能"), "{text}");
+        assert!(text.contains("dock-config"), "{text}");
+        assert!(text.contains("内置"), "{text}");
     }
 
     #[test]
