@@ -10,6 +10,8 @@ pub const MAX_WALK_DEPTH: usize = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum SkillScope {
+    /// 编译期嵌入、启动时物化到 `$DOCK_HOME/bundled/skills/`（最低优先级）
+    Builtin,
     /// `{cwd}/skills/`
     Bundled,
     /// `~/.dock/skills/`
@@ -23,6 +25,7 @@ pub enum SkillScope {
 impl SkillScope {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Builtin => "内置",
             Self::Bundled => "仓库",
             Self::User => "用户",
             Self::Agents => "agents",
@@ -36,6 +39,8 @@ pub struct SkillInfo {
     pub name: String,
     pub description: String,
     pub when_to_use: Option<String>,
+    /// Agent Skills 规范的可选 `license`：许可名，或指向同目录的许可文件。
+    pub license: Option<String>,
     pub paths: Option<Vec<String>>,
     pub user_invocable: bool,
     pub disable_model_invocation: bool,
@@ -48,6 +53,7 @@ impl SkillInfo {
     /// Workspace- or home-relative path for model-facing listings.
     pub fn listing_path(&self) -> String {
         match self.scope {
+            SkillScope::Builtin => format!("bundled/skills/{}/SKILL.md", self.name),
             SkillScope::Bundled => format!("skills/{}/SKILL.md", self.name),
             SkillScope::User => format!("~/.dock/skills/{}/SKILL.md", self.name),
             SkillScope::Agents => format!(".agents/skills/{}/SKILL.md", self.name),
@@ -59,6 +65,11 @@ impl SkillInfo {
 pub fn scan_all() -> Vec<SkillInfo> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut map = IndexMap::new();
+    // 内置最先合并：同名技能被任何更高层覆盖（对齐 Grok bundled 语义）。
+    merge_scope(
+        &mut map,
+        scan_dir(&materialize_bundled(), SkillScope::Builtin),
+    );
     merge_scope(&mut map, scan_dir(&cwd.join("skills"), SkillScope::Bundled));
     merge_scope(
         &mut map,
@@ -73,6 +84,23 @@ pub fn scan_all() -> Vec<SkillInfo> {
         scan_dir(&cwd.join(".dock").join("skills"), SkillScope::Project),
     );
     map.into_values().collect()
+}
+
+/// 把编译期嵌入的内置技能物化到 `$DOCK_HOME/bundled/skills/`，返回缓存目录。
+/// 已存在的文件不覆盖（用户可以直接改缓存；同名技能本就被更高层覆盖）。
+fn materialize_bundled() -> PathBuf {
+    let root = crate::config::dock_home().join("bundled").join("skills");
+    for (rel, content) in crate::skills::builtin::BUILTIN_FILES {
+        let path = root.join(rel);
+        if path.is_file() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, content);
+    }
+    root
 }
 
 fn merge_scope(map: &mut IndexMap<String, SkillInfo>, skills: Vec<SkillInfo>) {
@@ -148,6 +176,7 @@ pub fn parse_skill_file(path: &Path, scope: SkillScope) -> Option<SkillInfo> {
         name,
         description,
         when_to_use: fm.when_to_use,
+        license: fm.license,
         paths: fm.paths,
         user_invocable: fm.user_invocable,
         disable_model_invocation: fm.disable_model_invocation,
@@ -161,6 +190,7 @@ struct Frontmatter {
     name: Option<String>,
     description: Option<String>,
     when_to_use: Option<String>,
+    license: Option<String>,
     paths: Option<Vec<String>>,
     user_invocable: bool,
     disable_model_invocation: bool,
@@ -171,6 +201,7 @@ fn parse_frontmatter(raw: &str) -> Frontmatter {
         name: None,
         description: None,
         when_to_use: None,
+        license: None,
         paths: None,
         user_invocable: true,
         disable_model_invocation: false,
@@ -188,6 +219,7 @@ fn parse_frontmatter(raw: &str) -> Frontmatter {
     out.description = scalar(map.get(yaml_key("description")));
     out.when_to_use = scalar(map.get(yaml_key("when-to-use")))
         .or_else(|| scalar(map.get(yaml_key("when_to_use"))));
+    out.license = scalar(map.get(yaml_key("license")));
     out.paths = string_list(map.get(yaml_key("paths")));
     if map.contains_key(yaml_key("user-invocable")) || map.contains_key(yaml_key("user_invocable"))
     {
@@ -281,6 +313,8 @@ fn peek_description(body: &str) -> Option<String> {
     None
 }
 
+/// Agent Skills 规范：1-64 字符，仅小写字母/数字/连字符，不得以连字符开头
+/// 或结尾，不得有连续连字符。
 pub fn valid_skill_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if !(1..=MAX_NAME_LEN).contains(&bytes.len()) {
@@ -290,6 +324,9 @@ pub fn valid_skill_name(name: &str) -> bool {
         && bytes
             .iter()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        && !bytes.starts_with(b"-")
+        && !bytes.ends_with(b"-")
+        && !name.contains("--")
 }
 
 pub fn apply_substitutions(body: &str, args: &str, skill_dir: &Path) -> String {
@@ -370,16 +407,54 @@ pub fn paths_gate_match(patterns: &[String], touched: &[PathBuf]) -> bool {
     })
 }
 
+/// gitignore 风格的受限 glob，支持 `*`（单段内任意）、`**`（跨任意段，可为零段）、
+/// `?`（单个非 `/` 字符）。
+/// - 不含 `/` 的模式：按路径段名匹配（文件名或目录名，目录即其下任意文件）。
+/// - 含 `/` 的模式：锚定匹配；触碰路径常是绝对路径，所以从每个段边界都试一次，
+///   让 `docs/**` 也能命中 `/abs/cwd/docs/a.md`。
 fn globish_match(pattern: &str, path: &str) -> bool {
-    let pat = pattern.trim();
+    let pat = pattern.trim().trim_start_matches("./");
     if pat.is_empty() {
         return false;
     }
-    if !pat.contains('*') {
-        return path.contains(pat);
+    let pat = pat.trim_end_matches('/');
+    let path = path.trim_start_matches("./");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() {
+        return false;
     }
-    let needle = pat.replace("**/", "").replace("**", "").replace('*', "");
-    !needle.is_empty() && path.contains(&needle)
+    if !pat.contains('/') {
+        // 文件/目录名（可含通配）：匹配任意层级的单段。
+        return segs.iter().any(|s| match_segment(pat, s));
+    }
+    let pat_segs: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
+    (0..segs.len()).any(|i| match_segments(&pat_segs, &segs[i..]))
+}
+
+fn match_segments(pat: &[&str], segs: &[&str]) -> bool {
+    match pat.split_first() {
+        None => segs.is_empty(),
+        Some((p, rest)) if *p == "**" => (0..=segs.len()).any(|i| match_segments(rest, &segs[i..])),
+        Some((p, rest)) => match segs.split_first() {
+            Some((s, srest)) => match_segment(p, s) && match_segments(rest, srest),
+            None => false,
+        },
+    }
+}
+
+/// 单段内通配：`*` 任意（可空）、`?` 单字符。
+fn match_segment(pat: &str, seg: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let s: Vec<char> = seg.chars().collect();
+    fn go(p: &[char], s: &[char]) -> bool {
+        match p.split_first() {
+            None => s.is_empty(),
+            Some(('?', rest)) => !s.is_empty() && go(rest, &s[1..]),
+            Some(('*', rest)) => (0..=s.len()).any(|i| go(rest, &s[i..])),
+            Some((c, rest)) => s.first() == Some(c) && go(rest, &s[1..]),
+        }
+    }
+    go(&p, &s)
 }
 
 #[cfg(test)]
@@ -426,5 +501,155 @@ mod tests {
             "created /tmp/.dock/skills/late-skill/SKILL.md",
         );
         assert!(paths.iter().any(|p| p.ends_with("SKILL.md")), "{paths:?}");
+    }
+
+    #[test]
+    fn frontmatter_license_is_parsed() {
+        let raw = "---\nname: mcp-builder\ndescription: d\nlicense: Complete terms in LICENSE.txt\n---\nBody.\n";
+        assert_eq!(
+            parse_frontmatter(raw).license.as_deref(),
+            Some("Complete terms in LICENSE.txt")
+        );
+        let raw = "---\nname: x\ndescription: d\n---\n";
+        assert_eq!(parse_frontmatter(raw).license, None);
+    }
+
+    /// 内置与仓库技能必须满足 Agent Skills 规范的最小要求：name 合法且与目录
+    /// 同名、description 非空且不超 1024 字符。
+    #[test]
+    fn shipped_skills_conform_to_spec() {
+        let _env = crate::test_env::scoped().home();
+        for (rel, content) in crate::skills::builtin::BUILTIN_FILES {
+            if !rel.ends_with("SKILL.md") {
+                continue;
+            }
+            assert_conforms(
+                rel,
+                rel.trim_end_matches("/SKILL.md")
+                    .rsplit('/')
+                    .next()
+                    .unwrap(),
+                content,
+            );
+        }
+
+        let repo_skills = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("skills");
+        let mut repo_checked = 0usize;
+        for entry in std::fs::read_dir(&repo_skills)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let dir = entry.path();
+            let skill_md = dir.join("SKILL.md");
+            if !skill_md.is_file() {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&skill_md).unwrap();
+            let dir_name = dir.file_name().unwrap().to_str().unwrap().to_string();
+            assert_conforms(&dir_name, &dir_name, &raw);
+            repo_checked += 1;
+        }
+        assert!(
+            repo_checked >= 4,
+            "expected the four repo skills, got {repo_checked}"
+        );
+    }
+
+    /// name 必须合法且与目录同名；description 必填且不超 1024 字符。
+    /// 规范里 name 可选（缺省取目录名），所以只校验「写了就必须对」。
+    fn assert_conforms(dir_name: &str, expected_name: &str, raw: &str) {
+        let fm = parse_frontmatter(raw);
+        if let Some(name) = fm.name {
+            assert!(valid_skill_name(&name), "{dir_name}: invalid name {name}");
+            assert_eq!(name, expected_name, "{dir_name}: name must match dir");
+        }
+        let desc = fm.description.unwrap_or_default();
+        assert!(!desc.trim().is_empty(), "{dir_name}: missing description");
+        assert!(
+            desc.chars().count() <= MAX_DESCRIPTION_LEN,
+            "{dir_name}: description over {MAX_DESCRIPTION_LEN} chars"
+        );
+    }
+
+    #[test]
+    fn skill_name_rules_follow_agent_skills_spec() {
+        assert!(valid_skill_name("pdf-processing"));
+        assert!(valid_skill_name("a"));
+        assert!(!valid_skill_name("PDF"));
+        assert!(!valid_skill_name("-pdf"));
+        assert!(!valid_skill_name("pdf-"));
+        assert!(!valid_skill_name("pdf--processing"));
+        assert!(!valid_skill_name(""));
+        assert!(!valid_skill_name(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn glob_star_does_not_cross_segments_or_suffixes() {
+        // `*.rs` 无斜杠：按单段匹配、任意层级（gitignore 语义）。
+        assert!(globish_match("*.rs", "main.rs"));
+        assert!(globish_match("*.rs", "src/main.rs"));
+        assert!(!globish_match("*.rs", "main.rsx"));
+        // 单段内的 `*` 不跨 `/`：`src/*.rs` 不进孙子目录。
+        assert!(globish_match("src/*.rs", "src/main.rs"));
+        assert!(!globish_match("src/*.rs", "src/deep/main.rs"));
+        assert!(globish_match("**/*.rs", "src/deep/main.rs"));
+        assert!(globish_match("**/*.rs", "main.rs"), "** 可匹配零段");
+    }
+
+    #[test]
+    fn glob_double_star_and_question() {
+        assert!(globish_match("src/**/*.rs", "src/a/b.rs"));
+        assert!(globish_match("src/**/*.rs", "src/b.rs"), "src/**/ 可为零段");
+        assert!(!globish_match("src/**/*.rs", "lib/b.rs"));
+        assert!(globish_match("test_?.py", "test_1.py"));
+        assert!(!globish_match("test_?.py", "test_10.py"));
+        assert!(
+            globish_match("docs", "docs/guide.md"),
+            "目录模式命中其下文件"
+        );
+        assert!(globish_match("docs", "docs"));
+    }
+
+    #[test]
+    fn glob_literal_with_slash_anchors_from_segment_boundary() {
+        assert!(globish_match("docs/guide.md", "/abs/cwd/docs/guide.md"));
+        assert!(globish_match(
+            ".dock/skills/x/SKILL.md",
+            "repo/.dock/skills/x/SKILL.md"
+        ));
+        assert!(!globish_match("docs/guide.md", "/abs/cwd/other/guide.md"));
+    }
+
+    #[test]
+    fn builtin_materializes_and_yields_lowest_priority() {
+        let _env = crate::test_env::scoped().home();
+        let root = materialize_bundled();
+        for name in crate::skills::builtin::builtin_skill_dirs() {
+            assert!(root.join(name).join("SKILL.md").is_file(), "{name}");
+        }
+        // 幂等：再次物化不覆盖、不报错。
+        let _ = materialize_bundled();
+        let skills = scan_all();
+        let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"dock-guide"), "{names:?}");
+        assert!(names.contains(&"dock-config"), "{names:?}");
+        let sc = skills.iter().find(|s| s.name == "dock-guide").unwrap();
+        assert_eq!(sc.scope, SkillScope::Builtin);
+        // 同名用户技能覆盖内置。
+        let user_dir = crate::config::dock_home().join("skills").join("dock-guide");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::write(
+            user_dir.join("SKILL.md"),
+            "---\nname: dock-guide\ndescription: user override\n---\nUser body.\n",
+        )
+        .unwrap();
+        let skills = scan_all();
+        let sc = skills.iter().find(|s| s.name == "dock-guide").unwrap();
+        assert_eq!(sc.scope, SkillScope::User);
+        assert_eq!(sc.description, "user override");
     }
 }
