@@ -670,7 +670,7 @@ mod tests {
     #[tokio::test]
     async fn occupancy_lists_skills_category_even_without_project_skills() {
         let dir = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().cwd(dir.path());
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let snap = snapshot_context(&ctx);
