@@ -243,9 +243,7 @@ fn turn_end_decision(
         sessions.identity(),
     );
     let seed = end.clone();
-    ctx.waterfall(TURN_END, end, move || seed)
-        .settle()
-        .map(str::to_string)
+    ctx.waterfall(TURN_END, end, move || seed).settle()
 }
 
 /// Run `agent/step-start` and collect what to inject before this sample, in

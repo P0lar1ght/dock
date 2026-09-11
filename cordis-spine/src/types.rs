@@ -334,14 +334,15 @@ impl TurnEnd {
         self.winner().map(|c| c.reminder.as_str())
     }
 
-    /// [`TurnEnd::decision`], plus the winner's `on_win`. The loop calls this
-    /// exactly once per turn end, right before it appends the reminder.
-    pub fn settle(&self) -> Option<&str> {
+    /// [`TurnEnd::decision`], plus the winner's `on_win`. Consuming on purpose:
+    /// `on_win` is a side effect, and the loop is the last reader anyway, so
+    /// "settled twice, charged twice" is not a mistake anyone can make.
+    pub fn settle(self) -> Option<String> {
         let win = self.winner()?;
         if let Some(on_win) = &win.on_win {
             on_win();
         }
-        Some(win.reminder.as_str())
+        Some(win.reminder.clone())
     }
 
     /// Smallest order wins; ties go to whoever voted first.
