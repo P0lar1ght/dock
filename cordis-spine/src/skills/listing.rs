@@ -112,7 +112,12 @@ pub fn overlay_body(skills: &[SkillInfo]) -> String {
             skill.scope.label(),
             skill.description
         ));
-        lines.push(format!("  {}", skill.listing_path()));
+        let mut meta = skill.listing_path();
+        if let Some(license) = skill.license.as_deref().filter(|l| !l.is_empty()) {
+            meta.push_str("  ·  ");
+            meta.push_str(license);
+        }
+        lines.push(format!("  {meta}"));
     }
     lines.join("\n")
 }
@@ -128,6 +133,7 @@ mod tests {
             name: name.into(),
             description: desc.into(),
             when_to_use: None,
+            license: None,
             paths: None,
             user_invocable: true,
             disable_model_invocation: false,
@@ -165,6 +171,21 @@ mod tests {
         let list = listable(&skills, &activated);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "shown");
+    }
+
+    #[test]
+    fn overlay_shows_license_when_present() {
+        let mut licensed = sample("mcp-builder", "MCP 服务器开发指南");
+        licensed.license = Some("Complete terms in LICENSE.txt".into());
+        let plain = sample("demo", "没有 license 的技能");
+        let text = overlay_body(&[licensed, plain]);
+        assert!(text.contains("Complete terms in LICENSE.txt"), "{text}");
+        // 没写 license 的技能，路径行不带额外的 ` · `。
+        let demo_path = text
+            .lines()
+            .find(|l| l.trim().ends_with(".dock/skills/demo/SKILL.md"))
+            .expect("demo path line");
+        assert_eq!(demo_path.trim(), ".dock/skills/demo/SKILL.md");
     }
 
     #[test]

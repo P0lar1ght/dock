@@ -1,5 +1,6 @@
 //! Named `"skills"` catalog + `skill` model tool. Fail-open.
 
+mod builtin;
 mod discover;
 mod listing;
 
@@ -121,6 +122,12 @@ impl Skills {
             .iter()
             .find(|s| s.name == name)
             .cloned()
+    }
+
+    /// paths 渐进披露：匹配文件被触碰过才激活（对齐 Grok，激活前不进 listing
+    /// 也不可被 `skill` 工具加载；`/name` 用户斜杠不受限）。
+    pub fn is_activated(&self, name: &str) -> bool {
+        self.inner.lock().unwrap().activated.contains(name)
     }
 
     pub fn load(&self, name: &str, args: &str) -> Result<(SkillInfo, String), String> {
@@ -498,6 +505,17 @@ fn run_skill_tool(ctx: &Context, call: ToolCall) -> ToolResult {
             format!("Error: skill {name:?} is user-invocable only (`/{name}`)"),
         );
     }
+    if let Some(patterns) = meta.paths.as_ref().filter(|p| !p.is_empty()) {
+        if !skills.is_activated(&name) {
+            return tool_result(
+                call,
+                format!(
+                    "Error: skill {name:?} is gated on paths [{}] and not active yet; it unlocks when a matching file is touched in this session.",
+                    patterns.join(", ")
+                ),
+            );
+        }
+    }
     match skills.load(&name, &args) {
         Ok((skill, body)) => {
             let siblings = sibling_files(&skill.dir);
@@ -553,7 +571,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Demo skill for inject tests.\n---\n\nDo the demo with $ARGUMENTS.\n",
         );
-        let _cwd = crate::test_env::scoped().cwd(dir.path());
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let skills = ctx.get::<Skills>(SKILLS).unwrap();
@@ -589,7 +607,7 @@ mod tests {
             "help",
             "---\nname: help\ndescription: Must not shadow /help.\n---\n\nNope.\n",
         );
-        let _cwd = crate::test_env::scoped().cwd(dir.path());
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let extras = ctx.get::<Slash>(SLASH).unwrap().list();
@@ -608,7 +626,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Demo skill for listing occupancy.\n---\n\nBody.\n",
         );
-        let _cwd = crate::test_env::scoped().cwd(dir.path());
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let assembled = ctx
@@ -650,9 +668,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn occupancy_lists_skills_category_when_catalog_empty() {
+    async fn occupancy_lists_skills_category_even_without_project_skills() {
         let dir = tempfile::tempdir().unwrap();
-        let _cwd = crate::test_env::scoped().cwd(dir.path());
+        let _env = crate::test_env::scoped().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let snap = snapshot_context(&ctx);
@@ -660,8 +678,9 @@ mod tests {
             .categories
             .iter()
             .find(|c| c.label == "技能")
-            .expect("技能 legend even with empty catalog");
-        assert_eq!(extra.tokens, 0);
+            .expect("技能 legend even without project skills");
+        // 项目层没有技能也要有图例；内置技能（dock-guide/dock-config）始终存在。
+        assert!(extra.tokens > 0, "{extra:?}");
     }
 
     #[tokio::test]
@@ -685,7 +704,7 @@ mod tests {
             "hidden-one",
             "---\nname: hidden-one\ndescription: User slash only.\ndisable-model-invocation: true\n---\n\nSecret.\n",
         );
-        let _cwd = crate::test_env::scoped().cwd(dir.path());
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
@@ -726,7 +745,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Already known.\n---\n\nOld.\n",
         );
-        let _cwd = crate::test_env::scoped().cwd(dir.path());
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let late = dir.path().join(".dock").join("skills").join("late-skill");
@@ -757,6 +776,87 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains("late-skill"))),
             "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gated_skill_requires_activation_before_tool_load() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(
+            dir.path(),
+            "gated-one",
+            "---\nname: gated-one\ndescription: Only for Cargo manifests.\npaths:\n  - \"**/Cargo.toml\"\n---\n\nCargo rules $ARGUMENTS.\n",
+        );
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let ctx = cordis::Context::new();
+        mount_skills(&ctx).await;
+        ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
+        // 激活前：不进 listing，skill 工具拒绝加载。
+        let listing = ctx.get::<Skills>(SKILLS).unwrap().listing_text();
+        assert!(!listing.contains("gated-one"), "{listing}");
+        let tools = ctx.require::<Tools>(TOOLS).unwrap();
+        let blocked = tools
+            .execute(crate::types::ToolCall {
+                id: "g1".into(),
+                name: "skill".into(),
+                arguments: r#"{"name":"gated-one"}"#.into(),
+            })
+            .await;
+        assert!(
+            blocked.content.contains("gated on paths"),
+            "{}",
+            blocked.content
+        );
+        // 触碰匹配路径 → 激活提示，之后工具可加载。
+        let result = ToolResult {
+            call_id: "g2".into(),
+            name: "edit_file".into(),
+            content: "updated Cargo.toml".into(),
+            ..Default::default()
+        };
+        ctx.waterfall(TOOLS_EXECUTE, result.clone(), move || result);
+        let events = ctx.get::<Sessions>(SESSIONS).unwrap().events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains("gated-one"))),
+            "{events:?}"
+        );
+        let ok = tools
+            .execute(crate::types::ToolCall {
+                id: "g3".into(),
+                name: "skill".into(),
+                arguments: r#"{"name":"gated-one","args":"now"}"#.into(),
+            })
+            .await;
+        assert!(ok.content.contains("Cargo rules now"), "{}", ok.content);
+    }
+
+    #[tokio::test]
+    async fn builtin_skill_is_listed_and_loadable() {
+        let dir = tempfile::tempdir().unwrap();
+        // 一次 scoped() 只持一把进程锁：home + cwd 必须链在同一 guard 上。
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let ctx = cordis::Context::new();
+        mount_skills(&ctx).await;
+        let skills = ctx.get::<Skills>(SKILLS).unwrap();
+        let sc = skills.get("dock-guide").expect("builtin dock-guide");
+        assert_eq!(sc.scope, discover::SkillScope::Builtin);
+        let listing = skills.listing_text();
+        assert!(listing.contains("dock-guide"), "{listing}");
+        ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
+        let tools = ctx.require::<Tools>(TOOLS).unwrap();
+        let out = tools
+            .execute(crate::types::ToolCall {
+                id: "b1".into(),
+                name: "skill".into(),
+                arguments: r#"{"name":"dock-guide"}"#.into(),
+            })
+            .await;
+        assert!(
+            out.content.contains("<skill name=\"dock-guide\""),
+            "{}",
+            out.content
         );
     }
 }
