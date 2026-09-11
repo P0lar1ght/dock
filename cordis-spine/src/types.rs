@@ -141,6 +141,59 @@ pub struct PreStep {
     pub enter: bool,
 }
 
+/// Order slots on the `agent/step-start` waterfall. Reminders are appended in
+/// slot order, so two handlers injecting on the same step land in a fixed
+/// sequence instead of one decided by plugin mount order.
+pub const ORDER_STEP_START_TODO: i32 = 10;
+
+/// `agent/step-start` payload. Runs before every sampling step, including the
+/// first one of the turn and the ones after an `agent/turn-end` continuation.
+/// Handlers call [`StepStart::remind`] to inject a `<system-reminder>` ahead of
+/// the sample.
+///
+/// This is the "every step" grain. `agent/pre-step` fires once per user prompt
+/// and `agent/turn-end` once per ending — neither can watch a turn as it runs.
+///
+/// Handlers **return text only**: the loop owns the append, so a reminder can
+/// never land between a `tool_calls` row and its `ToolExecute` rows.
+#[derive(Clone, Debug, Default)]
+pub struct StepStart {
+    /// Sampling steps already taken in this turn — 0 on the first step, and it
+    /// keeps counting across turn-end continuations. A handler with per-turn
+    /// state rearms on 0; the loop holds no state on anyone's behalf.
+    pub step: usize,
+    /// `Sessions::identity()` of the running turn — see [`TurnEnd::identity`]
+    /// for why it rides the payload.
+    pub identity: String,
+    reminders: Vec<(i32, String)>,
+}
+
+impl StepStart {
+    pub fn new(step: usize, identity: impl Into<String>) -> Self {
+        Self {
+            step,
+            identity: identity.into(),
+            reminders: Vec::new(),
+        }
+    }
+
+    /// Queue a `<system-reminder>` body for this step.
+    pub fn remind(&mut self, order: i32, reminder: impl Into<String>) {
+        self.reminders.push((order, reminder.into()));
+    }
+
+    /// Queued reminders in slot order (ties keep registration order).
+    pub fn into_reminders(mut self) -> Vec<String> {
+        self.reminders.sort_by_key(|(order, _)| *order);
+        self.reminders.into_iter().map(|(_, body)| body).collect()
+    }
+
+    /// True for the user-facing session. Subagent turns are `child-*`.
+    pub fn is_main_session(&self) -> bool {
+        self.identity == crate::session::ROOT_IDENTITY
+    }
+}
+
 /// Order slots on the `agent/turn-end` waterfall. Two handlers can both want
 /// another round; the smaller order wins, so the outcome does not depend on
 /// plugin mount order (same reason [`crate::PromptAssembly`] uses slots).

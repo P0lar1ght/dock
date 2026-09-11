@@ -14,7 +14,7 @@ Five named Cordis services (DSH plugin seams) plus one Grok-shaped turn driver.
 
 The loop injects the five services and live-looks them up. Replace the driver by swapping **only** the `agent-loop` plugin.
 
-One round: `agent/pre-step` → assemble prompt → sample (`llm/stream`) → `tools/execute` → sample again until text.
+One round: `agent/pre-step` → assemble prompt → `agent/step-start` → sample (`llm/stream`) → `tools/execute` → `agent/step-start` → sample again until text, then `agent/turn-end` decides whether the turn is really over.
 
 ```rust
 let root = cordis::Context::new();

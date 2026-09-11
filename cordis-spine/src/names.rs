@@ -52,6 +52,9 @@ pub const PERMISSIONS: &str = "permissions";
 pub const TURN: &str = "turn";
 
 pub const PRE_STEP: &str = "agent/pre-step";
+/// Before every sampling step of a turn — the "watch the turn as it runs"
+/// grain. Payload [`crate::StepStart`].
+pub const STEP_START: &str = "agent/step-start";
 /// Model stopped calling tools (or ran out of steps) — last chance to say the
 /// turn is not done. Payload [`crate::TurnEnd`].
 pub const TURN_END: &str = "agent/turn-end";
