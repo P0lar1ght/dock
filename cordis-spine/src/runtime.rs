@@ -12,16 +12,15 @@ use crate::error::{Error, Result};
 use crate::goal::continuation_reminder as goal_continuation_reminder;
 use crate::llm::Llm;
 use crate::names::{
-    AGENTS, AGENT_PRESETS, COMPACT, LLM, PRE_STEP, SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TODOS,
+    AGENTS, AGENT_PRESETS, COMPACT, LLM, PRE_STEP, SESSIONS, STEP_START, SUBAGENTS, SYSTEM_PROMPT,
     TOOLS, TURN, TURN_END,
 };
 use crate::prompt::SystemPrompt;
-use crate::session::{Sessions, ROOT_IDENTITY};
+use crate::session::Sessions;
 use crate::task::Subagents;
-use crate::todo_write::{stale_reminder, Todos};
 use crate::tools::Tools;
 use crate::turn::TurnControl;
-use crate::types::{LogEvent, PreStep, PromptRequest, TurnEnd, TurnOutcome};
+use crate::types::{LogEvent, PreStep, PromptRequest, StepStart, TurnEnd, TurnOutcome};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -34,11 +33,6 @@ const MAX_STEPS: usize = 256;
 /// register one), so the loop keeps its own backstop. Esc — the per-step
 /// `abort_if_cancelled` — is the second line, not the only one.
 const MAX_TURN_END_ROUNDS: usize = 64;
-/// Sampling steps without a `todo_write` before the mid-turn nudge fires
-/// (Grok `TodoNudgeConfig::turns_since_todo_write`, which ships unimplemented).
-const TODO_NUDGE_AFTER_STEPS: usize = 6;
-/// Nudges per prompt. Two reminders are a hint; five are noise.
-const MAX_TODO_NUDGES: usize = 3;
 
 /// One Grok-shaped turn: pre-step once, then sample → tools → sample until text.
 ///
@@ -145,10 +139,7 @@ async fn grok_sample_loop(
     let system_prompt = ctx.require::<SystemPrompt>(SYSTEM_PROMPT)?;
     let mut cache_key = system_cache_key(ctx);
     let mut rounds = 0usize;
-    // `"todos"` is not isolated per child (only sessions / turn / agentPresets
-    // are), so a subagent sees the parent's list. Nagging it about work it was
-    // never given would be wrong — todo discipline is the main session's.
-    let mut todo = TodoWatch::new(ctx, sessions.identity() == ROOT_IDENTITY);
+    let mut steps = 0usize;
     let mut last_text = String::new();
     loop {
         tokio::task::yield_now().await;
@@ -156,9 +147,13 @@ async fn grok_sample_loop(
         for _ in 0..MAX_STEPS {
             abort_if_cancelled(ctx, sessions)?;
             drain_parent_mailbox(ctx, sessions);
-            if let Some(text) = todo.stale_nudge(ctx) {
-                sessions.append(LogEvent::SystemReminder(text));
+            // `agent/step-start`: whoever wants to watch the turn as it runs
+            // (todo staleness today) gets a look before each sample. The loop
+            // counts steps and appends — the policy lives in the handlers.
+            for reminder in step_start_reminders(ctx, sessions, steps) {
+                sessions.append(LogEvent::SystemReminder(reminder));
             }
+            steps += 1;
             if let Some(compact) = ctx.get::<Compact>(COMPACT) {
                 match compact.maybe_auto(ctx).await {
                     Ok(_) => {}
@@ -259,52 +254,13 @@ fn turn_end_decision(
         .map(str::to_string)
 }
 
-/// Mid-turn `todo_write` watchdog. Counts sampling steps since the list last
-/// moved; nudges when the model is clearly working but not checking items off.
-struct TodoWatch {
-    /// `Todos::revision` at the last step, or `None` when no list is mounted.
-    seen_revision: Option<u64>,
-    steps_since_write: usize,
-    nudges: usize,
-    /// False in subagent turns: `"todos"` is shared with children, so only the
-    /// main session gets nagged about the list.
-    armed: bool,
-}
-
-impl TodoWatch {
-    fn new(ctx: &Context, armed: bool) -> Self {
-        Self {
-            seen_revision: ctx.get::<Todos>(TODOS).map(|t| t.revision()),
-            steps_since_write: 0,
-            nudges: 0,
-            armed,
-        }
-    }
-
-    /// Call once per sampling step. `Some(reminder)` when the list has gone
-    /// stale for [`TODO_NUDGE_AFTER_STEPS`] steps with work still open.
-    fn stale_nudge(&mut self, ctx: &Context) -> Option<String> {
-        if !self.armed {
-            return None;
-        }
-        let todos = ctx.get::<Todos>(TODOS)?;
-        let revision = todos.revision();
-        if self.seen_revision != Some(revision) {
-            self.seen_revision = Some(revision);
-            self.steps_since_write = 0;
-            return None;
-        }
-        self.steps_since_write += 1;
-        if self.nudges >= MAX_TODO_NUDGES || self.steps_since_write < TODO_NUDGE_AFTER_STEPS {
-            return None;
-        }
-        if todos.stats().open() == 0 {
-            return None;
-        }
-        self.nudges += 1;
-        let steps = std::mem::take(&mut self.steps_since_write);
-        Some(stale_reminder(steps))
-    }
+/// Run `agent/step-start` and collect what to inject before this sample, in
+/// slot order. No handlers means no reminders — fail-open.
+fn step_start_reminders(ctx: &Context, sessions: &Sessions, step: usize) -> Vec<String> {
+    let start = StepStart::new(step, sessions.identity());
+    let seed = start.clone();
+    ctx.waterfall(STEP_START, start, move || seed)
+        .into_reminders()
 }
 
 /// Continuable `subagent` mailbox: inject after a complete tool round (or at

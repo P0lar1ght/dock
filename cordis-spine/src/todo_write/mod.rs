@@ -8,14 +8,22 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::jobs::Jobs;
-use crate::names::{JOBS, PRE_STEP, SUBAGENTS, TODOS, TOOLS, TURN_END};
+use crate::names::{JOBS, PRE_STEP, STEP_START, SUBAGENTS, TODOS, TOOLS, TURN_END};
 use crate::task::Subagents;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{PreStep, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_TURN_END_TODO};
+use crate::types::{
+    PreStep, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_STEP_START_TODO,
+    ORDER_TURN_END_TODO,
+};
 
 /// Grok `TodoGateConfig::max_fires_per_prompt`. Bounds the extra inference one
 /// user prompt can be forced into when the model stops with open todos.
 const MAX_TODO_GATE_FIRES: usize = 2;
+/// Sampling steps without a `todo_write` before the mid-turn nudge fires
+/// (Grok `TodoNudgeConfig::turns_since_todo_write`, which ships unimplemented).
+const TODO_NUDGE_AFTER_STEPS: usize = 6;
+/// Nudges per turn. Two reminders are a hint; five are noise.
+const MAX_TODO_NUDGES: usize = 3;
 
 pub use logic::{
     stale_reminder, TodoItem, TodoState, TodoStats, TodoStatus, TodoWriteInput, TODO_GATE_SENTINEL,
@@ -24,7 +32,7 @@ pub use logic::{
 /// Named `"todos"` service. TUI live-looks the list; do not capture the Arc.
 pub struct Todos {
     state: Mutex<TodoState>,
-    /// Bumped on every applied write. The agent loop compares it against the
+    /// Bumped on every applied write. [`TodoWatch`] compares it against the
     /// value it saw last step to tell "the model is keeping the list current"
     /// from "the model forgot the list exists".
     revision: AtomicU64,
@@ -112,6 +120,30 @@ pub fn tool_todo() -> Plugin {
             }
             next
         });
+        // Mid-turn watchdog. Same shape as the gate quota: plugin-local policy
+        // state, rearmed from the payload (step 0) instead of by the loop.
+        let watch = Arc::new(Mutex::new(TodoWatch::default()));
+        let ctx_step = ctx.clone();
+        let _ = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
+            let mut next = args.next::<StepStart>().unwrap_or(start);
+            // Main session only — see [`gate_applies`]. A child sharing the
+            // parent's list must not be nagged about it, and must not disturb
+            // the parent's counters while it runs alongside.
+            if !next.is_main_session() {
+                return next;
+            }
+            let Some(todos) = ctx_step.get::<Todos>(TODOS) else {
+                return next;
+            };
+            let mut watch = watch.lock().unwrap();
+            if next.step == 0 {
+                *watch = TodoWatch::armed_at(todos.revision());
+            }
+            if let Some(body) = watch.stale_nudge(&todos) {
+                next.remind(ORDER_STEP_START_TODO, body);
+            }
+            next
+        });
         let ctx_end = ctx.clone();
         let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
             let mut next = args.next::<TurnEnd>().unwrap_or(end);
@@ -151,6 +183,47 @@ pub fn tool_todo() -> Plugin {
         )?;
         Ok(None)
     })
+}
+
+/// Mid-turn `todo_write` watchdog. Counts sampling steps since the list last
+/// moved; nudges when the model is clearly working but not checking items off.
+/// One turn's worth of state — `agent/step-start` step 0 rearms it.
+#[derive(Default)]
+struct TodoWatch {
+    /// [`Todos::revision`] as of the last step we looked.
+    seen_revision: Option<u64>,
+    steps_since_write: usize,
+    nudges: usize,
+}
+
+impl TodoWatch {
+    fn armed_at(revision: u64) -> Self {
+        Self {
+            seen_revision: Some(revision),
+            ..Self::default()
+        }
+    }
+
+    /// Call once per sampling step. `Some(reminder)` when the list has gone
+    /// stale for [`TODO_NUDGE_AFTER_STEPS`] steps with work still open.
+    fn stale_nudge(&mut self, todos: &Todos) -> Option<String> {
+        let revision = todos.revision();
+        if self.seen_revision != Some(revision) {
+            self.seen_revision = Some(revision);
+            self.steps_since_write = 0;
+            return None;
+        }
+        self.steps_since_write += 1;
+        if self.nudges >= MAX_TODO_NUDGES || self.steps_since_write < TODO_NUDGE_AFTER_STEPS {
+            return None;
+        }
+        if todos.stats().open() == 0 {
+            return None;
+        }
+        self.nudges += 1;
+        let steps = std::mem::take(&mut self.steps_since_write);
+        Some(stale_reminder(steps))
+    }
 }
 
 /// Whether this turn end is one the todo gate has any business in.

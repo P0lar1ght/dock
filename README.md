@@ -48,7 +48,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 - 循环本身也是插件。换采样换 UI 换工具，不要焊进 `event_loop`
 - 一张 `"tools"` 表：`inject: ["tools"]` 后 `register`，MCP 也进同一张表
-- 扩展走 waterfall（`agent/pre-step`、`llm/stream`、`tools/execute`、`system-prompt/assemble`）
+- 扩展走 waterfall（`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/execute`、`system-prompt/assemble`）
 - Named service **live-lookup**：调用点再 `ctx.get`，不要把 `Arc` 关进长生命周期闭包
 
 ### 🖥️ Grok 外形 TUI

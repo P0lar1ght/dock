@@ -111,8 +111,8 @@ pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
     DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
     PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
-    SESSIONS, SESSION_EVENT, SETTINGS, SKILLS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS,
-    TOOLS_EXECUTE, TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
+    SESSIONS, SESSION_EVENT, SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SYSTEM_PROMPT, TODOS,
+    TOOLS, TOOLS_EXECUTE, TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
 };
 pub use permissions::{permissions, PermissionPrompt, Permissions};
 pub use plan_mode::{
@@ -146,9 +146,9 @@ pub use tools::{own_registered, tools, workspace_tools, ToolBody, Tools};
 pub use tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
 pub use turn::{turn, TurnControl};
 pub use types::{
-    LlmOutput, LogEvent, PreStep, PromptRequest, ToolCall, ToolResult, ToolSpec, TurnEnd,
-    TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT, ORDER_TURN_END_GOAL,
-    ORDER_TURN_END_TODO,
+    LlmOutput, LogEvent, PreStep, PromptRequest, StepStart, ToolCall, ToolResult, ToolSpec,
+    TurnEnd, TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
+    ORDER_STEP_START_TODO, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
 };
 pub use usage::{session_usage_block_text, PromptUsage, UsageLedger};
 pub use web_fetch::tool_web;

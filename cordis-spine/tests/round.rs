@@ -5,8 +5,8 @@ use cordis::{plugin, Context, FiberState, Inject};
 use cordis_spine::{
     agent_loop, install_fakes, install_without_llm, tool_goal, tool_todo, turn, Agent, Agents,
     BoxFuture, Driver, Error, Goal, Llm, LlmOutput, LoopHandle, PreStep, PromptRequest, Sampler,
-    Sessions, StreamDelta, ToolCall, TurnControl, TurnOutcome, AGENTS, AGENT_LOOP, GOAL, LLM,
-    PRE_STEP, SESSIONS, SYSTEM_PROMPT, TOOLS, TURN,
+    Sessions, StepStart, StreamDelta, ToolCall, TurnControl, TurnOutcome, AGENTS, AGENT_LOOP, GOAL,
+    LLM, PRE_STEP, SESSIONS, STEP_START, SYSTEM_PROMPT, TOOLS, TURN,
 };
 
 /// 整个测试二进制共用一个隔离的 `DOCK_HOME`：第一次调用时建临时目录并设好，
@@ -1136,6 +1136,152 @@ async fn a_stale_list_gets_a_mid_turn_nudge() {
         )
         .count();
     assert_eq!(nudges, 1, "one stale-list nudge across 8 quiet tool rounds");
+}
+
+/// Grinds tool calls for `rounds` samples, then answers with text.
+struct Grind {
+    n: Arc<AtomicUsize>,
+    rounds: usize,
+}
+
+impl Sampler for Grind {
+    fn sample<'a>(
+        &'a self,
+        _request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let n = self.n.clone();
+        let rounds = self.rounds;
+        Box::pin(async move {
+            let i = n.fetch_add(1, Ordering::SeqCst);
+            if i < rounds {
+                return LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: format!("c{i}"),
+                        name: "echo".into(),
+                        arguments: "x".into(),
+                    }],
+                    ..LlmOutput::default()
+                };
+            }
+            LlmOutput {
+                text: format!("round-{i}"),
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+/// The mid-turn nudge is main-session discipline as much as the gate is:
+/// `"todos"` is shared with children, so a grinding subagent must not be nagged
+/// about a list it was never given — and its steps must not move the parent's
+/// counters, since both sessions now hit one plugin-side watchdog.
+#[tokio::test]
+async fn a_subagent_grind_gets_no_stale_nudge() {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    let samples = Arc::new(AtomicUsize::new(0));
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(Grind {
+                n: samples.clone(),
+                rounds: 9,
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    // Fill the shared list from the parent side, then hand the turn to a child.
+    root.require::<cordis_spine::Tools>(TOOLS)
+        .unwrap()
+        .execute(ToolCall {
+            id: "seed".into(),
+            name: "todo_write".into(),
+            arguments: OPEN_LIST.into(),
+        })
+        .await;
+
+    let child = root.isolate("sessions");
+    child
+        .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+        .unwrap();
+    let _ = LoopHandle::new(child.clone(), Arc::new(cordis_spine::GrokStep))
+        .run("子任务")
+        .await
+        .unwrap();
+    assert!(
+        samples.load(Ordering::SeqCst) > 6,
+        "the child must grind past the nudge threshold for this to prove anything"
+    );
+    let kinds = child.require::<Sessions>(SESSIONS).unwrap().kinds();
+    assert!(
+        !kinds.contains(&"system-reminder"),
+        "no parent-list nudge in a child session: {kinds:?}"
+    );
+}
+
+/// `agent/step-start` is an extension point, not a loop private: a handler
+/// mounted from outside sees every step numbered from 0 — across turn-end
+/// continuations too — and the loop appends what it queues, in slot order.
+#[tokio::test]
+async fn a_plugin_can_inject_a_reminder_before_every_step() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    // s0 opens the list, s1..s3 answer with text; the gate continues the turn
+    // twice, so steps 2 and 3 are on the far side of an `agent/turn-end`.
+    let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST)]).await;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Registered low slot first, so the raw vote order is the reverse of the
+    // expected append order — the slot sort is what puts it right.
+    let steps = seen.clone();
+    let _early = root
+        .on_waterfall(STEP_START, move |start: StepStart, args| {
+            let mut next = args.next::<StepStart>().unwrap_or(start);
+            steps.lock().unwrap().push(next.step);
+            next.remind(-5, "<system-reminder>早</system-reminder>");
+            next
+        })
+        .unwrap();
+    let _late = root
+        .on_waterfall(STEP_START, move |start: StepStart, args| {
+            let mut next = args.next::<StepStart>().unwrap_or(start);
+            next.remind(90, "<system-reminder>晚</system-reminder>");
+            next
+        })
+        .unwrap();
+
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("round-3".into()));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![0, 1, 2, 3],
+        "one call per sample, counting on across turn-end continuations"
+    );
+    let injected: Vec<String> = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            cordis_spine::LogEvent::SystemReminder(t) if t.contains('早') || t.contains('晚') => {
+                Some(t.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injected.len(), 8, "both handlers land on all four steps");
+    for (i, body) in injected.iter().enumerate() {
+        let want = if i % 2 == 0 { '早' } else { '晚' };
+        assert!(body.contains(want), "step {}: {body}", i / 2);
+    }
 }
 
 /// Both `agent/turn-end` handlers want another round. The order slot decides,

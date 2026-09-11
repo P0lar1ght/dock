@@ -60,6 +60,7 @@ TUI 从不持有循环：按键映射成 `SessionCommand` 交给 `session_actor`
 ```
 agent/pre-step               每轮开始，一次
 system-prompt/assemble       每轮一次
+agent/step-start             每个采样步之前，一次
 llm/stream                   枢纽：出工具调用 → tools/execute（权限 / 计划门）→ 回采样
                              出文本（或采样步数耗尽）→ agent/turn-end
 agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采样
@@ -68,19 +69,23 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 
 安全上限 256 步。换 driver 只换 `agent-loop` 插件，不动 actor。
 
+**中途盯梢也是插件说了算。** `agent/step-start` 每个采样步之前跑一次 —— `agent/pre-step` 是每轮一次、`agent/turn-end` 是收尾一次，都盯不住跑起来的一轮。载荷 `StepStart` 带 `step`（本轮已采样步数，续跑不清零）和 `identity`，handler 用 `remind(order, 正文)` 排队，循环按 order 顺序落成 `SystemReminder`。带 per-turn 状态的 handler 在 `step == 0` 自己重置，循环不替谁存状态。现有一个：
+
+- `tool-todo`（`ORDER_STEP_START_TODO = 10`）：待办列表连续 6 步没动且仍有未完成项时提醒勾选 / 调整，每轮最多 3 次（`Todos::revision()` 计数）。只在主会话生效 —— `"todos"` 不随子代理 isolate，靠载荷里的 `identity` 判断。
+
 **收不收尾是插件说了算。** 循环只跑 `agent/turn-end` 链、数轮数（硬止损 64 轮）、把胜出的正文落成 `SystemReminder`；`append` 不交给 handler，免得 reminder 插进 `tool_calls` 和它的 `ToolExecute` 之间。载荷 `TurnEnd` 带 `text` / `rounds` / `ended_with_text` / `queued_followups` / `identity`，handler 用 `keep_working(order, 正文)` 表态，order 小的赢。没有 handler 就正常收尾（fail-open）。现有两个：
 
 - `tool-todo`（`ORDER_TURN_END_TODO = 10`）：出文本收尾但还有 pending / 无后台任务托底的 in_progress 时续跑，每条用户消息最多 2 次（计数在 `agent/pre-step` 清零）。只在主会话生效 —— `"todos"` 不随子代理 isolate，靠载荷里的 `identity` 判断。
 - `tool-goal`（`ORDER_TURN_END_GOAL = 20`）：`/goal` 没 `update_goal(completed)` 就一直续，最多 64 轮；两种收尾都续。
 
-两个都尊重 `queued_followups`：用户已经排了下一条时不抢方向盘。另有一条**不**走 waterfall 的每步提醒：待办列表连续 6 步没动且仍有未完成项时提醒勾选 / 调整，每轮最多 3 次（`Todos::revision()` 计数）。
+两个都尊重 `queued_followups`：用户已经排了下一条时不抢方向盘。
 
 ## 不变式
 
 1. **换插件，不改 loop。** 新 UI 面是 `tui.*` 插件；新采样是 `llm` 插件。不要把功能焊进 `event_loop` 或 `agent-loop`。不要调用 `xai_grok_pager::app::run`，不要 spawn Grok `MvpAgent`。
 2. **一张 `"tools"` 表。** 工具能力插件 `inject: ["tools"]` 后 `ctx.tools.register()`；MCP 也进同一张表，不是 `tools.mcp` 之类的副表。
 3. **live-lookup，不捕获。** 调用点 `ctx.get` / `ctx.require`。不要把 `Arc<T>` 关进长生命周期闭包（TUI frame、HTTP 重试、cron tick、sampler `on_delta` 这类闭包里也要重新 `get`）。
-4. **扩展走 waterfall。** 五条：`agent/pre-step`、`agent/turn-end`、`llm/stream`、`tools/execute`、`system-prompt/assemble`。拦截接 `on_waterfall`，默认实现放在 `waterfall(..., || default)` 的闭包里。监听必须把控制权交给下一环，不许吞链。handler **拿不到执行 ctx**（`EventArgs` 只有 payload 和 `next`），只有注册时捕获的那个 ctx；跟着会话走的东西（如 `identity`）要放进载荷。多个 handler 会抢同一个结果时用显式 order 槽（`system-prompt/assemble` 的段序、`agent/turn-end` 的 `ORDER_TURN_END_*`），不靠挂载顺序定胜负。
+4. **扩展走 waterfall。** 六条：`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/execute`、`system-prompt/assemble`。循环里不留第七条私有扩展点。拦截接 `on_waterfall`，默认实现放在 `waterfall(..., || default)` 的闭包里。监听必须把控制权交给下一环，不许吞链。handler **拿不到执行 ctx**（`EventArgs` 只有 payload 和 `next`），只有注册时捕获的那个 ctx；跟着会话走的东西（如 `identity`）要放进载荷，per-turn 状态由 handler 自己存、按载荷里的信号（如 `StepStart::step == 0`）重置。多个 handler 会抢同一个结果、或要定彼此先后时用显式 order 槽（`system-prompt/assemble` 的段序、`agent/turn-end` 的 `ORDER_TURN_END_*`、`agent/step-start` 的 `ORDER_STEP_START_*`），不靠挂载顺序定胜负。
 5. **提示词分段归贡献插件。** `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（fiber dispose 注销）。`systemPrompt` 只是 facade；基座只写身份与按需发现，**不列工具名**。计划 / 目标走历史尾部 `<system-reminder>`，不进系统提示。
 6. **MCP / 按需工具 fail-open。** 连不上仍是 `Active`，往 `"mcp"` 写空 / 失败状态。不常用本地工具（`register_deferred`：scheduler / memory / monitor / goal / lsp / skill / workflow / cordis_* / browser_*）注册进 `"tools"` 但**不进** sampler 的 `specs_for_model`；模型侧固定 `search_tool` + `use_tool`。工具描述保持静态，以保住 tools JSON 前缀缓存。
 7. **工具名不撞车。** MCP 公名 `mcp_{server}__{tool}`，不能盖掉 `bash` 之类的内置名。
