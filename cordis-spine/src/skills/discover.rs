@@ -410,8 +410,10 @@ pub fn paths_gate_match(patterns: &[String], touched: &[PathBuf]) -> bool {
 /// gitignore 风格的受限 glob，支持 `*`（单段内任意）、`**`（跨任意段，可为零段）、
 /// `?`（单个非 `/` 字符）。
 /// - 不含 `/` 的模式：按路径段名匹配（文件名或目录名，目录即其下任意文件）。
-/// - 含 `/` 的模式：锚定匹配；触碰路径常是绝对路径，所以从每个段边界都试一次，
-///   让 `docs/**` 也能命中 `/abs/cwd/docs/a.md`。
+/// - 含 `/` 的模式：按段比对，但从**每个段边界**都试一次 —— 触碰路径常是
+///   绝对路径，从段边界起试才能让 `docs/**` 命中 `/abs/cwd/docs/a.md`。
+///   这是有意放宽，不是 gitignore 的严格 anchored 语义（`src/*.rs` 也会命中
+///   `/other/src/main.rs`）。
 fn globish_match(pattern: &str, path: &str) -> bool {
     let pat = pattern.trim().trim_start_matches("./");
     if pat.is_empty() {

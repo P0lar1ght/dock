@@ -136,7 +136,7 @@ npm run pack:skin      # 打包 pet skin
 | 动态插件（会话内起一颗 Cordis 包） | skill `skills/cordis-plugin-development/SKILL.md` |
 | Agent 预设 YAML | 内置在 `cordis-spine/presets/`；用户 / 项目覆盖在 `~/.dock/presets/`、`.dock/presets/` |
 
-`.agents/skills/` 与 `skills/` 都会被运行时扫描（前者 Agents scope，后者 Bundled）。同名时项目 `.dock/skills` > `.agents/skills` > `~/.dock/skills` > `skills/`。
+`.agents/skills/` 与 `skills/` 都会被运行时扫描（前者 Agents scope，后者 Bundled）。同名时项目 `.dock/skills` > `.agents/skills` > `~/.dock/skills` > `skills/` > 内置 `$DOCK_HOME/bundled/skills/`（编译期嵌入，启动物化到缓存）。
 
 ## 调试
 

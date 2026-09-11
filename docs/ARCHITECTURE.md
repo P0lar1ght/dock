@@ -77,7 +77,7 @@ llm/stream                   枢纽：出工具调用 → tools/execute（权限
 7. **工具名不撞车。** MCP 公名 `mcp_{server}__{tool}`，不能盖掉 `bash` 之类的内置名。
 8. **Gateway 默认不监听。** 只绑 loopback（首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`；`DOCK_GATEWAY_BIND` 只改首选）。`/pair` 开启；鉴权靠配对 + 一次性 ticket + 回环，CORS 反射 Origin 是有意的。
 9. **reasoning 不混进助手 markdown。** 推理走 `StreamDelta::Reasoning` / `LlmOutput.reasoning`；工具卡折叠显示 name + 参数摘要，展开先「输入」再「输出」，参数在 `LogEvent::ToolExecute.arguments`。
-10. **skills 覆盖顺序。** `scan_all` 按 Bundled（`{cwd}/skills`）→ User（`~/.dock/skills`）→ Agents（`{cwd}/.agents/skills`）→ Project（`{cwd}/.dock/skills`）合并，同名后者覆盖前者。
+10. **skills 覆盖顺序。** `scan_all` 按 Builtin（`$DOCK_HOME/bundled/skills`，编译期嵌入、启动物化）→ Bundled（`{cwd}/skills`）→ User（`~/.dock/skills`）→ Agents（`{cwd}/.agents/skills`）→ Project（`{cwd}/.dock/skills`）合并，同名后者覆盖前者。
 
 ## 磁盘
 
