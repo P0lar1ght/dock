@@ -500,6 +500,13 @@ impl Sessions {
         if out.reasoning.is_empty() {
             out.reasoning = output.reasoning.clone();
         }
+        // Responses 的 reasoning item 原件只在 `response.completed` 里拿得到，
+        // 没有对应的增量，所以只能在收尾时落进这一行。漏掉这句的后果是整条
+        // 推理链存不进会话：下一轮回放不出来，而要求「带 tools 就必须回传
+        // reasoning」的上游（DeepSeek thinking 模式）会直接 400。
+        if out.reasoning_items.is_empty() {
+            out.reasoning_items = output.reasoning_items.clone();
+        }
         if out.reasoning_ms.is_none() && !out.reasoning.is_empty() {
             out.reasoning_ms = self
                 .turn_started
@@ -1029,6 +1036,39 @@ pub fn sessions() -> Plugin {
 mod tests {
     use super::*;
     use crate::types::LogEvent;
+
+    /// Responses 的 reasoning item 只在流收尾时才有，必须由 `finish_llm` 落进
+    /// 会话行；漏了就等于整条推理链没存过，下一轮回放不出来。
+    #[tokio::test]
+    async fn finish_llm_stores_reasoning_items_for_replay() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("go".into()));
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Reasoning("plan".into()));
+        sessions.finish_llm(&crate::types::LlmOutput {
+            text: "answer".into(),
+            reasoning: "plan".into(),
+            tool_calls: vec![crate::types::ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }],
+            reasoning_items: vec![serde_json::json!({"type":"reasoning","id":"rs_1"})],
+            ..crate::types::LlmOutput::default()
+        });
+        let out = sessions
+            .model_history()
+            .into_iter()
+            .find_map(|e| match e {
+                LogEvent::LlmStream(o) if !o.tool_calls.is_empty() => Some(o),
+                _ => None,
+            })
+            .expect("assistant turn");
+        assert_eq!(out.reasoning, "plan");
+        assert_eq!(out.reasoning_items.len(), 1, "原件要落进会话：{out:?}");
+        assert_eq!(out.reasoning_items[0]["id"], "rs_1");
+    }
 
     #[tokio::test]
     async fn archive_then_restore() {
