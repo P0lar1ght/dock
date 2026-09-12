@@ -40,6 +40,12 @@ pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEv
 
 /// Grok `extract_messages_since_last_user`: assistant + tool rows after the
 /// last `User`, with tool bodies replaced by `"Tool call omitted..."`.
+///
+/// **带 `tool_calls` 的轮次保留推理内容**：有的上游（DeepSeek 的 thinking 模式）
+/// 规定请求里只要带 `tools`，之前每一轮的 `reasoning_content` 就必须一并回传，
+/// 缺了直接 400。压缩前缀恰好把 tool_calls 留着、推理清空，于是压缩之后的第一
+/// 条消息就炸。纯文本轮次照旧清空——约束只针对带工具的轮次，而推理链往往比
+/// 正文还长，能省则省。
 pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
     let start = history
         .iter()
@@ -49,8 +55,12 @@ pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
     history[start..]
         .iter()
         .filter_map(|event| match event {
+            LogEvent::LlmStream(out) if !out.tool_calls.is_empty() => {
+                Some(LogEvent::LlmStream(out.clone()))
+            }
             LogEvent::LlmStream(out) => Some(LogEvent::LlmStream(LlmOutput {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 ..out.clone()
             })),
             LogEvent::ToolExecute {
@@ -194,6 +204,63 @@ mod tests {
             e,
             LogEvent::LlmStream(o) if o.tool_calls.is_empty() && o.text.contains("[Called tools: read_file]")
         )));
+    }
+
+    /// 回归：压缩前缀里带 tool_calls 的那几轮必须留着 reasoning。
+    /// DeepSeek thinking 模式规定请求带 `tools` 时，之前每轮的 `reasoning_content`
+    /// 都要回传，缺了 400——压缩成功之后的第一条消息就会炸。
+    #[test]
+    fn compacted_tail_keeps_reasoning_on_tool_turns() {
+        let mut history = sample_history();
+        history.push(LogEvent::LlmStream(LlmOutput {
+            text: "writing test".into(),
+            reasoning: "先看现有测试怎么组织".into(),
+            tool_calls: vec![ToolCall {
+                id: "c2".into(),
+                name: "write_file".into(),
+                arguments: "{}".into(),
+            }],
+            reasoning_items: vec![serde_json::json!({"type":"reasoning","id":"rs_2"})],
+            ..LlmOutput::default()
+        }));
+        history.push(LogEvent::ToolExecute {
+            id: "c2".into(),
+            name: "write_file".into(),
+            arguments: "{}".into(),
+            content: "test body".into(),
+            images: Vec::new(),
+        });
+        // 纯文本收尾的一轮：没有 tool_calls，约束不适用，照旧清空省上下文。
+        history.push(LogEvent::LlmStream(LlmOutput {
+            text: "写完了".into(),
+            reasoning: "这段推理没人需要".into(),
+            ..LlmOutput::default()
+        }));
+
+        let tail = extract_messages_since_last_user(&history);
+        let with_tools = tail
+            .iter()
+            .find_map(|e| match e {
+                LogEvent::LlmStream(o) if !o.tool_calls.is_empty() => Some(o),
+                _ => None,
+            })
+            .expect("带工具的那一轮还在");
+        assert_eq!(with_tools.reasoning, "先看现有测试怎么组织");
+        assert_eq!(
+            with_tools.reasoning_items.len(),
+            1,
+            "Responses 的原件也要留"
+        );
+
+        let text_only = tail
+            .iter()
+            .find_map(|e| match e {
+                LogEvent::LlmStream(o) if o.tool_calls.is_empty() => Some(o),
+                _ => None,
+            })
+            .expect("纯文本那一轮还在");
+        assert!(text_only.reasoning.is_empty(), "{text_only:?}");
+        assert!(text_only.reasoning_items.is_empty(), "{text_only:?}");
     }
 
     #[test]
