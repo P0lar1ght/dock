@@ -30,6 +30,7 @@ pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEv
                     reasoning: String::new(),
                     reasoning_ms: None,
                     tool_calls: Vec::new(),
+                    reasoning_items: Vec::new(),
                 }))
             }
             other => Some(other.clone()),

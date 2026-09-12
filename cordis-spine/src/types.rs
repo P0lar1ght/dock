@@ -105,6 +105,11 @@ pub struct LlmOutput {
     /// Elapsed thinking time in ms, set when the stream finishes.
     pub reasoning_ms: Option<u64>,
     pub tool_calls: Vec<ToolCall>,
+    /// Responses API 的原始 `reasoning` item（含 id / summary / content），按模型
+    /// 输出顺序保存。[`Self::reasoning`] 是给人看的拍平文本，回放给模型要用这里
+    /// 的原件（Grok `ConversationItem::Reasoning` 同款：推理项是顶层兄弟节点，
+    /// 不折进 assistant，这样 input 能复现模型当时的顺序）。其它两条 wire 不用。
+    pub reasoning_items: Vec<serde_json::Value>,
 }
 
 impl LlmOutput {
