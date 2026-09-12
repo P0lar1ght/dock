@@ -267,6 +267,9 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
     let mut tool_tok = 0u64;
     let mut remind_n = 0u64;
     let mut remind_tok = 0u64;
+    // 按需发现的代价：search_tool 结果里的 schema 每轮都随历史重发。
+    let mut search_n = 0u64;
+    let mut search_tok = 0u64;
     let mut rows = Vec::new();
     for event in &history {
         match event {
@@ -316,6 +319,10 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
                     .saturating_add(estimate_text(content));
                 tool_n += 1;
                 tool_tok += tok;
+                if name == crate::mcp::SEARCH_TOOL_NAME {
+                    search_n += 1;
+                    search_tok += tok;
+                }
                 rows.push(DetailRow {
                     label: "工具".into(),
                     tokens: Some(tok),
@@ -335,30 +342,38 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
             _ => {}
         }
     }
+    let mut summary = vec![
+        DetailRow {
+            label: "用户".into(),
+            tokens: Some(user_tok),
+            note: Some(format!("{user_n} 条")),
+        },
+        DetailRow {
+            label: "助手".into(),
+            tokens: Some(asst_tok),
+            note: Some(format!("{asst_n} 条")),
+        },
+        DetailRow {
+            label: "工具结果".into(),
+            tokens: Some(tool_tok),
+            note: Some(format!("{tool_n} 条")),
+        },
+        DetailRow {
+            label: "提醒".into(),
+            tokens: Some(remind_tok),
+            note: Some(format!("{remind_n} 条")),
+        },
+    ];
+    if search_n > 0 {
+        summary.push(DetailRow {
+            label: "按需发现".into(),
+            tokens: Some(search_tok),
+            note: Some(format!("{search_n} 次 search_tool · 已计入工具结果")),
+        });
+    }
     let mut groups = vec![DetailGroup {
         heading: format!("用户 {user_n} · 助手 {asst_n} · 工具结果 {tool_n} · 提醒 {remind_n}"),
-        rows: vec![
-            DetailRow {
-                label: "用户".into(),
-                tokens: Some(user_tok),
-                note: Some(format!("{user_n} 条")),
-            },
-            DetailRow {
-                label: "助手".into(),
-                tokens: Some(asst_tok),
-                note: Some(format!("{asst_n} 条")),
-            },
-            DetailRow {
-                label: "工具结果".into(),
-                tokens: Some(tool_tok),
-                note: Some(format!("{tool_n} 条")),
-            },
-            DetailRow {
-                label: "提醒".into(),
-                tokens: Some(remind_tok),
-                note: Some(format!("{remind_n} 条")),
-            },
-        ],
+        rows: summary,
     }];
     if !rows.is_empty() {
         groups.push(DetailGroup {
@@ -973,6 +988,43 @@ mod tests {
         assert!(snap.total > 0);
         assert!(snap.system_prompt_tokens > 0);
         assert!(snap.used >= snap.system_prompt_tokens + snap.message_tokens);
+    }
+
+    /// 「按需发现」在**消息明细**里（总览只有系统提示 / 消息 / 推理开销 / 空闲
+    /// + 工具类目），点「消息」那一行才看得到。
+    #[tokio::test]
+    async fn messages_detail_breaks_out_search_tool_cost() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::ToolExecute {
+            id: "call-1".into(),
+            name: crate::mcp::SEARCH_TOOL_NAME.into(),
+            arguments: r#"{"query":"screenshot"}"#.into(),
+            content: r#"{"results":[],"total_hidden_tools":95}"#.into(),
+            images: Vec::new(),
+        });
+        let rows = |kind| {
+            occupancy_detail(&ctx, kind)
+                .groups
+                .iter()
+                .flat_map(|g| g.rows.clone())
+                .collect::<Vec<_>>()
+        };
+        let row = rows(OccupancyKind::Messages)
+            .into_iter()
+            .find(|r| r.label == "按需发现")
+            .expect("消息明细应列出按需发现");
+        assert!(row.tokens.unwrap_or(0) > 0);
+        assert!(row.note.unwrap_or_default().contains("1 次 search_tool"));
+        // 没搜过就不占一行。
+        let clean = Context::new();
+        crate::bundle::install_fakes(&clean).await.unwrap();
+        assert!(!occupancy_detail(&clean, OccupancyKind::Messages)
+            .groups
+            .iter()
+            .flat_map(|g| &g.rows)
+            .any(|r| r.label == "按需发现"));
     }
 
     #[tokio::test]
