@@ -612,7 +612,20 @@ fn catalog_items(settings: Option<&AppSettings>) -> Vec<ModelChoice> {
 }
 
 pub fn model_args(settings: Option<&AppSettings>) -> Vec<ArgItem> {
-    catalog_items(settings)
+    let items = catalog_items(settings);
+    // 目录来自 config.toml，没配就是空的（内置假条目已删）。给一条能照着做的
+    // 提示，别让 /model 变成一个不解释为什么的空下拉。
+    if items.is_empty() {
+        // 这是一条说明，不是一个可选项：`insert_text` 留空，回车不会把提示文案
+        // 当成模型 id 提交出去（`ArgItem::new` 默认 insert_text = display）。
+        let mut hint = ArgItem::new(
+            "（无模型）",
+            "在 ~/.dock/config.toml 或 .dock/config.toml 里写 [model.<id>]，见 config.toml.example",
+        );
+        hint.insert_text = String::new();
+        return vec![hint];
+    }
+    items
         .into_iter()
         .map(|m| {
             let desc = if m.description.is_empty() {
@@ -625,10 +638,35 @@ pub fn model_args(settings: Option<&AppSettings>) -> Vec<ArgItem> {
         .collect()
 }
 
-pub fn effort_args() -> Vec<ArgItem> {
-    ["low", "medium", "high", "xhigh"]
+/// 档位来自当前模型的 `[model.<id>].reasoning_efforts`，没配才退回通用四档——
+/// 各家认识的档位不一样，列死一份只会让人选到上游不认的值。
+pub fn effort_args(settings: Option<&AppSettings>) -> Vec<ArgItem> {
+    let Some(settings) = settings else {
+        return cordis_spine::DEFAULT_EFFORT_CHOICES
+            .iter()
+            .map(|e| ArgItem::new(*e, "推理强度"))
+            .collect();
+    };
+    let choices = settings.effort_choices();
+    if choices.is_empty() {
+        let mut hint = ArgItem::new(
+            "（该模型无推理档）",
+            "config 里这个模型写了 reasoning = false",
+        );
+        hint.insert_text = String::new();
+        return vec![hint];
+    }
+    let current = settings.effort();
+    choices
         .into_iter()
-        .map(|e| ArgItem::new(e, "推理强度"))
+        .map(|e| {
+            let desc = if e == current {
+                "推理强度 · 当前"
+            } else {
+                "推理强度"
+            };
+            ArgItem::new(e, desc)
+        })
         .collect()
 }
 
@@ -667,7 +705,7 @@ pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
         ArgKind::Theme => theme_args(),
         ArgKind::Model => model_args(settings),
         ArgKind::Settings => settings_args(settings),
-        ArgKind::Effort => effort_args(),
+        ArgKind::Effort => effort_args(settings),
         ArgKind::LoopInterval => loop_interval_args(),
         ArgKind::Lsp => lsp_args(),
     }
@@ -858,8 +896,43 @@ mod tests {
         assert_eq!(parse_copy_args("2").unwrap().0, 2);
     }
 
+    /// 空目录时给的是说明而不是选项：`insert_text` 必须为空，否则回车会把
+    /// 「（无模型）」当成模型 id 提交出去。
     #[test]
-    fn model_args_come_from_catalog() {
-        assert!(!model_args(None).is_empty());
+    fn empty_catalog_hint_is_not_selectable() {
+        for item in model_args(None).iter().chain(effort_args(None).iter()) {
+            if item.display.starts_with('（') {
+                assert!(
+                    item.insert_text.is_empty(),
+                    "提示项不能被填进输入框：{item:?}"
+                );
+            }
+        }
+    }
+
+    /// 没有 settings 时退回通用四档（`/effort` 从浏览器 companion 过来就是这条路）。
+    #[test]
+    fn effort_args_fall_back_to_the_generic_ladder() {
+        let args = effort_args(None);
+        let values: Vec<&str> = args.iter().map(|a| a.display.as_str()).collect();
+        assert_eq!(values, cordis_spine::DEFAULT_EFFORT_CHOICES);
+        assert!(args.iter().all(|a| !a.insert_text.is_empty()));
+    }
+
+    /// 目录只来自 config（内置假条目已删），所以这里断言的是「与 live 目录
+    /// 逐条对应」，而不是「非空」——没有 config.toml 时给的是写配置的指引。
+    #[test]
+    fn model_args_mirror_the_live_catalog() {
+        let catalog = load_catalog();
+        let args = model_args(None);
+        if catalog.is_empty() {
+            assert_eq!(args.len(), 1);
+            assert!(args[0].description.contains("config.toml"), "{args:?}");
+            return;
+        }
+        assert_eq!(args.len(), catalog.len());
+        let ids: Vec<&str> = args.iter().map(|a| a.display.as_str()).collect();
+        let want: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, want);
     }
 }

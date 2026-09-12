@@ -72,13 +72,30 @@ pub fn value_text(field: SettingsField, settings: &AppSettings) -> String {
     match field {
         SettingsField::Theme => Theme::current_kind().display_name().into(),
         SettingsField::Timestamps => bool_label(settings.timestamps()),
-        SettingsField::Thinking => bool_label(settings.thinking()),
-        SettingsField::Model => settings.model(),
-        SettingsField::Effort => {
-            if settings.thinking() {
-                settings.effort()
+        SettingsField::Thinking => {
+            if settings.reasoning_available() {
+                bool_label(settings.thinking())
             } else {
+                "（该模型无推理档）".into()
+            }
+        }
+        SettingsField::Model => {
+            let model = settings.model();
+            if model.is_empty() {
+                "（未配置，见 config.toml）".into()
+            } else {
+                model
+            }
+        }
+        SettingsField::Effort => {
+            if !settings.reasoning_available() {
+                "（该模型无推理档）".into()
+            } else if !settings.thinking() {
                 "（思考已关）".into()
+            } else if settings.effort().is_empty() {
+                "（默认）".into()
+            } else {
+                settings.effort()
             }
         }
         SettingsField::PermissionMode => match settings.permission_mode() {
@@ -118,9 +135,11 @@ pub fn enum_choices(field: SettingsField, settings: &AppSettings) -> Vec<(String
                 (m.id, desc)
             })
             .collect(),
-        SettingsField::Effort => ["low", "medium", "high", "xhigh"]
+        // 档位来自当前模型的 reasoning_efforts，没配才是通用四档。
+        SettingsField::Effort => settings
+            .effort_choices()
             .into_iter()
-            .map(|e| (e.to_string(), "推理".into()))
+            .map(|e| (e, "推理".into()))
             .collect(),
         SettingsField::PermissionMode => vec![
             ("询问".into(), "每次需确认".into()),

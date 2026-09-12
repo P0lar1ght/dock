@@ -16,14 +16,16 @@ pub fn body(
     model: &str,
     request: &PromptRequest,
     user_images: &[Vec<UserImage>],
-    thinking: bool,
-    effort: &str,
+    params: &super::WireParams,
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "input": input_items(request, user_images, model),
+        "input": input_items(request, user_images, params.images),
         "stream": true,
     });
+    if let Some(max) = params.max_output_tokens {
+        body["max_output_tokens"] = json!(max);
+    }
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(
             request
@@ -42,15 +44,20 @@ pub fn body(
                 .collect(),
         );
     }
-    if !thinking || effort == "none" {
-        body["reasoning"] = json!({ "effort": "none" });
-    } else if !effort.is_empty() {
-        body["reasoning"] = json!({
-            "effort": effort,
-            "summary": "concise",
-        });
-    } else {
-        body["reasoning"] = json!({ "summary": "concise" });
+    match params.reasoning {
+        // 没有推理档的模型：`reasoning` 整个字段都不发。
+        super::Reasoning::Unsupported => {}
+        super::Reasoning::Off => body["reasoning"] = json!({ "effort": "none" }),
+        super::Reasoning::On if params.effort == "none" => {
+            body["reasoning"] = json!({ "effort": "none" })
+        }
+        super::Reasoning::On if !params.effort.is_empty() => {
+            body["reasoning"] = json!({
+                "effort": params.effort,
+                "summary": "concise",
+            })
+        }
+        super::Reasoning::On => body["reasoning"] = json!({ "summary": "concise" }),
     }
     body
 }
@@ -58,7 +65,7 @@ pub fn body(
 pub fn input_items(
     request: &PromptRequest,
     user_images: &[Vec<UserImage>],
-    model: &str,
+    vision: bool,
 ) -> Vec<Value> {
     let mut out = Vec::new();
     if !request.system.is_empty() {
@@ -106,7 +113,7 @@ pub fn input_items(
                 if let Some(i) = pending.iter().position(|p| p == id) {
                     pending.remove(i);
                     out.extend(super::tool_images::responses_tool_output(
-                        id, content, images, model,
+                        id, content, images, vision,
                     ));
                 }
             }
@@ -455,6 +462,16 @@ fn stream_snapshot(
 mod tests {
     use super::*;
 
+    /// 思考开着、给定强度、支持读图的一组参数（测试默认）。
+    fn params_on(effort: &str) -> crate::http::WireParams {
+        crate::http::WireParams {
+            reasoning: crate::http::Reasoning::On,
+            effort: effort.into(),
+            max_output_tokens: None,
+            images: true,
+        }
+    }
+
     fn req(history: Vec<LogEvent>) -> PromptRequest {
         PromptRequest {
             system: "s".into(),
@@ -492,7 +509,7 @@ mod tests {
             },
             LogEvent::User("follow-up".into()),
         ]);
-        let items = input_items(&request, &[], "gpt");
+        let items = input_items(&request, &[], true);
         assert_eq!(items[0]["role"], "system");
         assert_eq!(items[1]["role"], "user");
         assert_eq!(items[2]["type"], "function_call");
@@ -518,7 +535,7 @@ mod tests {
                 parameters_json: r#"{"type":"object"}"#.into(),
             }],
         };
-        let body = body("gpt", &request, &[], true, "high");
+        let body = body("gpt", &request, &[], &params_on("high"));
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "grep");
         assert!(body["tools"][0].get("function").is_none());
@@ -570,6 +587,40 @@ mod tests {
         );
         let out = acc.finish();
         assert!(out.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn responses_body_reasoning_is_three_state() {
+        let request = req(vec![LogEvent::User("hi".into())]);
+        let params = crate::http::WireParams {
+            reasoning: crate::http::Reasoning::Unsupported,
+            ..params_on("")
+        };
+        let out = body("gpt", &request, &[], &params);
+        assert!(out.get("reasoning").is_none(), "{out}");
+        assert!(out.get("max_output_tokens").is_none(), "{out}");
+
+        let params = crate::http::WireParams {
+            reasoning: crate::http::Reasoning::Off,
+            ..params_on("")
+        };
+        assert_eq!(
+            body("gpt", &request, &[], &params)["reasoning"]["effort"],
+            "none"
+        );
+
+        let out = body("gpt", &request, &[], &params_on("high"));
+        assert_eq!(out["reasoning"]["effort"], "high");
+        assert_eq!(out["reasoning"]["summary"], "concise");
+
+        let params = crate::http::WireParams {
+            max_output_tokens: Some(1024),
+            ..params_on("")
+        };
+        assert_eq!(
+            body("gpt", &request, &[], &params)["max_output_tokens"],
+            1024
+        );
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! Dock config.toml — Grok's `$GROK_HOME/config.toml` shape, trimmed.
 //!
 //! Catalog merge (same order as Grok `resolve_model_list`):
-//! built-in defaults < user `~/.dock/config.toml` < project `.dock/config.toml`.
-//! `[models].catalog` replaces the built-in list; `[model.<id>]` adds/overrides.
+//! user `~/.dock/config.toml` < project `.dock/config.toml`.
+//! `[models].catalog` sets the list; `[model.<id>]` adds/overrides. 没有配置文件
+//! 就没有模型——内置目录已经删掉，不再假装有可用端点。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,9 @@ impl AuthScheme {
     }
 }
 
+/// `[model.<id>].reasoning_efforts` 没写时 `/effort` 列的通用档位。
+pub const DEFAULT_EFFORT_CHOICES: &[&str] = &["low", "medium", "high", "xhigh"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChoice {
     pub id: String,
@@ -73,6 +77,25 @@ pub struct ModelChoice {
     pub auth_scheme: Option<AuthScheme>,
     /// Wire slug in the JSON body. None = use [`Self::id`] (picker key).
     pub api_model: Option<String>,
+    /// `[model.<id>].prompt_cache`. Messages 后端的 `cache_control` 断点开关，
+    /// 缺省开。指向不认这个字段的自建 /v1/messages 代理时置 false。
+    pub prompt_cache: Option<bool>,
+    /// `[model.<id>].max_output_tokens`. 缺省不发（Messages 除外，那边是必填项）。
+    pub max_output_tokens: Option<u32>,
+    /// `[model.<id>].reasoning`. false = 这个模型没有推理档，任何推理参数都不发。
+    /// 缺省（None）跟着运行时的 `/think` 开关走。
+    pub reasoning: Option<bool>,
+    /// `[model.<id>].reasoning_effort`. 该模型的默认强度，缺省不发、由上游决定。
+    pub reasoning_effort: Option<String>,
+    /// `[model.<id>].reasoning_efforts`. 这个模型**认识**哪几档，`/effort` 的菜单
+    /// 照着列。各家不一样（有的只有 low/high，有的多一档 minimal），写死一份通用
+    /// 列表就会让人选到上游不认的值。
+    ///
+    /// 三态：`None` = 没写，菜单给通用四档；`Some([...])` = 就这几档；
+    /// **`Some([])` = 这个模型会推理但不接受档位参数**（菜单空着，永不发 effort）。
+    pub reasoning_efforts: Option<Vec<String>>,
+    /// `[model.<id>].supports_images`. false = 纯文本模型，图片不往请求里塞。
+    pub supports_images: Option<bool>,
 }
 
 impl ModelChoice {
@@ -105,6 +128,53 @@ impl ModelChoice {
             ApiBackend::Messages => AuthScheme::XApiKey,
             ApiBackend::ChatCompletions | ApiBackend::Responses => AuthScheme::Bearer,
         })
+    }
+
+    /// 只有 Messages 后端会用：其余两条靠上游自动前缀缓存，不需要断点。
+    pub fn prompt_cache_enabled(&self) -> bool {
+        self.prompt_cache.unwrap_or(true)
+    }
+
+    /// 没写就当支持——多模态是现在的常态，写死一份"哪些模型是纯文本"的名单
+    /// 只会越追越旧。纯文本模型在 config 里显式标 `supports_images = false`。
+    pub fn accepts_images(&self) -> bool {
+        self.supports_images.unwrap_or(true)
+    }
+
+    /// `reasoning = false` 的模型连 `/think` 都不该影响它：一个推理字段都不发。
+    pub fn supports_reasoning(&self) -> bool {
+        self.reasoning.unwrap_or(true)
+    }
+
+    /// `/effort` 菜单该列哪几档。没配就给通用四档——这是给人选的菜单，不是
+    /// 悄悄塞进请求体的值，列错了用户自己看得见；但模型真支持哪几档只有 config
+    /// 知道，配了就以 config 为准。
+    pub fn effort_choices(&self) -> Vec<String> {
+        if !self.supports_reasoning() {
+            return Vec::new();
+        }
+        let Some(configured) = self.reasoning_efforts.as_ref() else {
+            return DEFAULT_EFFORT_CHOICES
+                .iter()
+                .map(|e| (*e).to_string())
+                .collect();
+        };
+        // 显式写空列表 = 会推理但没有档位可选，菜单就该是空的。
+        configured
+            .iter()
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty())
+            .collect()
+    }
+
+    /// 空 = 不发 effort，让上游用自己的默认。
+    pub fn default_effort(&self) -> String {
+        self.reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default()
+            .to_string()
     }
 
     pub fn wire_model(&self) -> &str {
@@ -635,6 +705,18 @@ struct CatalogRow {
     auth_scheme: Option<String>,
     #[serde(default)]
     api_model: Option<String>,
+    #[serde(default)]
+    prompt_cache: Option<bool>,
+    #[serde(default)]
+    max_output_tokens: Option<u32>,
+    #[serde(default)]
+    reasoning: Option<bool>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    reasoning_efforts: Option<Vec<String>>,
+    #[serde(default)]
+    supports_images: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -659,32 +741,18 @@ struct ModelOverride {
     auth_scheme: Option<String>,
     #[serde(default)]
     api_model: Option<String>,
-}
-
-/// Built-in catalog (Grok `default_model_entries` role). Picker reads this only
-/// when no config file supplies `[[models.catalog]]`.
-pub fn default_model_entries() -> Vec<ModelChoice> {
-    [
-        ("grok-4", "Grok 4", "xAI"),
-        ("grok-3", "Grok 3", "xAI"),
-        ("grok-2-latest", "Grok 2", "xAI"),
-        ("gpt-4.1", "GPT-4.1", "OpenAI-compatible"),
-        ("claude-sonnet-4", "Claude Sonnet 4", "Anthropic-compatible"),
-    ]
-    .into_iter()
-    .map(|(id, name, description)| ModelChoice {
-        id: id.into(),
-        name: name.into(),
-        description: description.into(),
-        api_base_url: None,
-        api_key: None,
-        env_key: None,
-        context_window: None,
-        api_backend: ApiBackend::ChatCompletions,
-        auth_scheme: None,
-        api_model: None,
-    })
-    .collect()
+    #[serde(default)]
+    prompt_cache: Option<bool>,
+    #[serde(default)]
+    max_output_tokens: Option<u32>,
+    #[serde(default)]
+    reasoning: Option<bool>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    reasoning_efforts: Option<Vec<String>>,
+    #[serde(default)]
+    supports_images: Option<bool>,
 }
 
 pub fn dock_home() -> PathBuf {
@@ -724,8 +792,11 @@ pub fn catalog_has_http() -> bool {
     load_catalog().iter().any(ModelChoice::has_http)
 }
 
+/// 目录只来自 config：没有 `[[models.catalog]]` / `[model.<id>]` 就是空的。
+/// 以前这里塞过五条没有 api_base 也没有 key 的内置条目（grok-4 / gpt-4.1 / …），
+/// 选中它们只会得到一个连不上的模型——宁可空着，让 `/model` 直说去写 config。
 pub fn load_catalog_from(paths: &[PathBuf]) -> Vec<ModelChoice> {
-    let mut list = default_model_entries();
+    let mut list: Vec<ModelChoice> = Vec::new();
     for path in paths {
         let Some(file) = read_file(path) else {
             continue;
@@ -735,11 +806,7 @@ pub fn load_catalog_from(paths: &[PathBuf]) -> Vec<ModelChoice> {
         }
         merge_overrides(&mut list, &file.model);
     }
-    if list.is_empty() {
-        default_model_entries()
-    } else {
-        list
-    }
+    list
 }
 
 pub fn load_default_model_from(paths: &[PathBuf]) -> Option<String> {
@@ -784,6 +851,12 @@ fn choice_from_row(row: &CatalogRow) -> ModelChoice {
         api_backend: ApiBackend::parse(row.api_backend.as_deref()),
         auth_scheme: AuthScheme::parse(row.auth_scheme.as_deref()),
         api_model: nonempty(row.api_model.clone()),
+        prompt_cache: row.prompt_cache,
+        max_output_tokens: row.max_output_tokens.filter(|n| *n > 0),
+        reasoning: row.reasoning,
+        reasoning_effort: nonempty(row.reasoning_effort.clone()),
+        reasoning_efforts: row.reasoning_efforts.clone(),
+        supports_images: row.supports_images,
     }
 }
 
@@ -830,6 +903,12 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
                 api_backend: ApiBackend::parse(ov.api_backend.as_deref()),
                 auth_scheme: AuthScheme::parse(ov.auth_scheme.as_deref()),
                 api_model: nonempty(ov.api_model.clone()),
+                prompt_cache: ov.prompt_cache,
+                max_output_tokens: ov.max_output_tokens.filter(|n| *n > 0),
+                reasoning: ov.reasoning,
+                reasoning_effort: nonempty(ov.reasoning_effort.clone()),
+                reasoning_efforts: ov.reasoning_efforts.clone(),
+                supports_images: ov.supports_images,
                 id,
             });
         }

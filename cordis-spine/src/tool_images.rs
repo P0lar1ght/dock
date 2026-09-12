@@ -192,21 +192,6 @@ fn jpeg_size(data: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-/// Heuristic: text-only / non-vision model ids skip attaching image parts.
-/// Unknown models keep images (most current chat defaults are multimodal).
-pub fn model_accepts_images(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    if m.contains("deepseek-chat")
-        || m.contains("deepseek-coder")
-        || m.contains("deepseek-reasoner")
-        || m.ends_with("-text")
-        || m.contains("coder-only")
-    {
-        return false;
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,14 +240,5 @@ mod tests {
         assert_eq!(result.images.len(), 1);
         assert_eq!(result.images[0].data, img.data);
         assert_eq!(result.content, IMAGE_INLINE_PLACEHOLDER);
-    }
-
-    #[test]
-    fn model_accepts_images_rejects_deepseek() {
-        assert!(!model_accepts_images("deepseek-chat"));
-        assert!(!model_accepts_images("DeepSeek-Coder"));
-        assert!(!model_accepts_images("foo-text"));
-        assert!(model_accepts_images("grok-4"));
-        assert!(model_accepts_images(""));
     }
 }

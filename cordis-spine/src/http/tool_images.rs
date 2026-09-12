@@ -3,7 +3,6 @@
 use base64::Engine;
 use serde_json::{json, Value};
 
-use crate::tool_images::model_accepts_images;
 use crate::types::UserImage;
 
 /// Text-only Chat Completions `role:tool` message (images go on a batched user msg).
@@ -17,8 +16,8 @@ pub(crate) fn chat_tool_message(id: &str, content: &str) -> Value {
 
 /// Adjacent user message carrying accumulated tool-result images for vision models.
 /// Returns `None` when the model rejects images or `images` is empty.
-pub(crate) fn chat_tool_images_user(images: &[UserImage], model: &str) -> Option<Value> {
-    if !model_accepts_images(model) || images.is_empty() {
+pub(crate) fn chat_tool_images_user(images: &[UserImage], vision: bool) -> Option<Value> {
+    if !vision || images.is_empty() {
         return None;
     }
     Some(user_with_images(
@@ -31,9 +30,8 @@ pub(crate) fn messages_tool_result_block(
     id: &str,
     content: &str,
     images: &[UserImage],
-    model: &str,
+    vision: bool,
 ) -> Value {
-    let vision = model_accepts_images(model);
     if !vision || images.is_empty() {
         return json!({
             "type": "tool_result",
@@ -67,9 +65,8 @@ pub(crate) fn responses_tool_output(
     id: &str,
     content: &str,
     images: &[UserImage],
-    model: &str,
+    vision: bool,
 ) -> Vec<Value> {
-    let vision = model_accepts_images(model);
     if !vision || images.is_empty() {
         return vec![json!({
             "type": "function_call_output",

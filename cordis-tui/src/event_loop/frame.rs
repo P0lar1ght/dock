@@ -104,8 +104,10 @@ pub(super) fn prompt_chrome_info(ctx: &Context) -> String {
     }
     if let Some(settings) = settings.as_ref() {
         if settings.thinking() {
+            // 空 = 没指定强度（不发这个参数），底栏就只写「思考」。"medium"
+            // 以前是 harness 硬塞的默认值，现在它和别的档一样要显示出来。
             let effort = settings.effort();
-            if effort.is_empty() || effort == "medium" {
+            if effort.is_empty() {
                 parts.push("思考".into());
             } else {
                 parts.push(format!("思考·{effort}"));
@@ -895,6 +897,12 @@ mod tests {
             api_backend: cordis_spine::ApiBackend::ChatCompletions,
             auth_scheme: None,
             api_model: None,
+            prompt_cache: None,
+            max_output_tokens: None,
+            reasoning: None,
+            reasoning_effort: None,
+            reasoning_efforts: None,
+            supports_images: None,
         }
     }
 

@@ -35,6 +35,62 @@ pub struct HttpSampler {
     pub fallback_model: String,
 }
 
+/// 一次请求的模型侧参数。能力与默认值来自 `[model.<id>]`，运行时开关（思考
+/// 开 / 关、当前强度）来自 `"settings"`。
+///
+/// 缺省一律是**不发这个字段**，让上游用自己的默认：harness 替所有模型猜一个
+/// 值（"medium"、16384、按名字判断能不能读图）正是不同模型报错的来源。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum Reasoning {
+    /// `reasoning = false`：这个模型没有推理档，一个相关字段都不发。发
+    /// `effort: "none"` 对它同样是未知字段，照样 400。
+    Unsupported,
+    /// 支持推理，但用户关了思考：显式告诉上游别想。
+    Off,
+    /// 开着。`effort` 为空 = 不指定强度，用上游默认。
+    #[default]
+    On,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WireParams {
+    pub reasoning: Reasoning,
+    /// 只在 [`Reasoning::On`] 时有意义；空 = 不发。
+    pub effort: String,
+    /// None = 不发（Messages 后端另有必填兜底）。
+    pub max_output_tokens: Option<u32>,
+    /// false = 图片不进请求体。
+    pub images: bool,
+}
+
+impl WireParams {
+    fn resolve(choice: Option<&config::ModelChoice>, settings: Option<&AppSettings>) -> Self {
+        let thinking = settings.is_none_or(AppSettings::thinking);
+        let reasoning = if !choice.is_none_or(config::ModelChoice::supports_reasoning) {
+            Reasoning::Unsupported
+        } else if thinking {
+            Reasoning::On
+        } else {
+            Reasoning::Off
+        };
+        // 运行时强度优先（用户在 /model 或设置里选过），否则用该模型的默认。
+        let effort = match reasoning {
+            Reasoning::On => settings
+                .map(AppSettings::effort)
+                .filter(|e| !e.is_empty())
+                .or_else(|| choice.map(config::ModelChoice::default_effort))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        Self {
+            reasoning,
+            effort,
+            max_output_tokens: choice.and_then(|c| c.max_output_tokens),
+            images: choice.is_none_or(config::ModelChoice::accepts_images),
+        }
+    }
+}
+
 impl Sampler for HttpSampler {
     fn sample<'a>(
         &'a self,
@@ -56,17 +112,9 @@ async fn sample_http(
         .map(|s| s.model())
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| sampler.fallback_model.clone());
-    let effort = sampler
-        .ctx
-        .get::<AppSettings>(SETTINGS)
-        .map(|s| s.effort())
-        .unwrap_or_default();
-    let thinking = sampler
-        .ctx
-        .get::<AppSettings>(SETTINGS)
-        .map(|s| s.thinking())
-        .unwrap_or(true);
     let choice = config::lookup_model(&model);
+    let settings = sampler.ctx.get::<AppSettings>(SETTINGS);
+    let params = WireParams::resolve(choice.as_ref(), settings.as_deref());
     let backend = choice.as_ref().map(|m| m.api_backend).unwrap_or_default();
     let auth = choice
         .as_ref()
@@ -101,9 +149,17 @@ async fn sample_http(
         .map(|s| s.model_user_images())
         .unwrap_or_default();
     let body = match backend {
-        ApiBackend::ChatCompletions => chat_body(&wire, &request, &user_images, thinking, &effort),
-        ApiBackend::Responses => responses::body(&wire, &request, &user_images, thinking, &effort),
-        ApiBackend::Messages => messages::body(&wire, &request, &user_images, thinking, &effort),
+        ApiBackend::ChatCompletions => chat_body(&wire, &request, &user_images, &params),
+        ApiBackend::Responses => responses::body(&wire, &request, &user_images, &params),
+        ApiBackend::Messages => {
+            // Anthropic 的前缀缓存只在显式断点处写，缺省开；自建代理不认
+            // `cache_control` 时 `[model.<id>].prompt_cache = false` 关掉。
+            let prompt_cache = choice
+                .as_ref()
+                .map(config::ModelChoice::prompt_cache_enabled)
+                .unwrap_or(true);
+            messages::body(&wire, &request, &user_images, &params, prompt_cache)
+        }
     };
     let client = reqwest::Client::builder()
         .user_agent(LLM_USER_AGENT)
@@ -315,15 +371,17 @@ fn chat_body(
     model: &str,
     request: &PromptRequest,
     user_images: &[Vec<UserImage>],
-    thinking: bool,
-    effort: &str,
+    params: &WireParams,
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "messages": messages(request, user_images, model),
+        "messages": messages(request, user_images, params.images),
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+    if let Some(max) = params.max_output_tokens {
+        body["max_tokens"] = json!(max);
+    }
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(
             request
@@ -344,17 +402,28 @@ fn chat_body(
                 .collect(),
         );
     }
-    if !thinking || effort == "none" {
-        body["reasoning"] = json!({ "effort": "none", "exclude": true });
-        body["reasoning_effort"] = json!("none");
-    } else if !effort.is_empty() {
-        // OpenRouter MiniMax / Claude / etc. need the unified `reasoning`
-        // object; legacy `reasoning_effort` alone is not enough for M3.
-        body["reasoning"] = json!({
-            "effort": effort,
-            "exclude": false,
-        });
-        body["reasoning_effort"] = json!(effort);
+    match params.reasoning {
+        // 没有推理档的模型：连"别想"都不要说。
+        Reasoning::Unsupported => {}
+        Reasoning::Off => {
+            body["reasoning"] = json!({ "effort": "none", "exclude": true });
+            body["reasoning_effort"] = json!("none");
+        }
+        Reasoning::On if params.effort == "none" => {
+            body["reasoning"] = json!({ "effort": "none", "exclude": true });
+            body["reasoning_effort"] = json!("none");
+        }
+        Reasoning::On if !params.effort.is_empty() => {
+            // OpenRouter MiniMax / Claude / etc. need the unified `reasoning`
+            // object; legacy `reasoning_effort` alone is not enough for M3.
+            body["reasoning"] = json!({
+                "effort": params.effort,
+                "exclude": false,
+            });
+            body["reasoning_effort"] = json!(params.effort);
+        }
+        // 开着但没指定强度：不发，用上游默认。
+        Reasoning::On => {}
     }
     body
 }
@@ -409,7 +478,7 @@ fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
     other + ascii.saturating_add(3) / 4
 }
 
-fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str) -> Vec<Value> {
+fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], vision: bool) -> Vec<Value> {
     let mut out = vec![json!({"role":"system","content": request.system})];
     let mut user_i = 0usize;
     let mut pending: Vec<String> = Vec::new();
@@ -420,19 +489,19 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str
         match event {
             LogEvent::User(text) => {
                 flush_unmatched_tools(&mut out, &mut pending);
-                flush_pending_tool_images(&mut out, &mut pending_images, model);
+                flush_pending_tool_images(&mut out, &mut pending_images, vision);
                 let images = user_images.get(user_i).cloned().unwrap_or_default();
                 user_i += 1;
                 out.push(user_message(text, &images));
             }
             LogEvent::SystemReminder(text) => {
                 flush_unmatched_tools(&mut out, &mut pending);
-                flush_pending_tool_images(&mut out, &mut pending_images, model);
+                flush_pending_tool_images(&mut out, &mut pending_images, vision);
                 out.push(user_message(text, &[]));
             }
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() => {
                 flush_unmatched_tools(&mut out, &mut pending);
-                flush_pending_tool_images(&mut out, &mut pending_images, model);
+                flush_pending_tool_images(&mut out, &mut pending_images, vision);
                 let tool_calls: Vec<Value> = llm
                     .tool_calls
                     .iter()
@@ -463,7 +532,7 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str
             }
             LogEvent::LlmStream(llm) if !llm.text.is_empty() || !llm.reasoning.is_empty() => {
                 flush_unmatched_tools(&mut out, &mut pending);
-                flush_pending_tool_images(&mut out, &mut pending_images, model);
+                flush_pending_tool_images(&mut out, &mut pending_images, vision);
                 let mut msg = json!({"role":"assistant","content": llm.text});
                 if !llm.reasoning.is_empty() {
                     msg["reasoning"] = json!(llm.reasoning);
@@ -482,7 +551,7 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str
                     out.push(tool_images::chat_tool_message(id, content));
                     pending_images.extend(images.iter().cloned());
                     if pending.is_empty() {
-                        flush_pending_tool_images(&mut out, &mut pending_images, model);
+                        flush_pending_tool_images(&mut out, &mut pending_images, vision);
                     }
                 }
             }
@@ -490,7 +559,7 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], model: &str
         }
     }
     flush_unmatched_tools(&mut out, &mut pending);
-    flush_pending_tool_images(&mut out, &mut pending_images, model);
+    flush_pending_tool_images(&mut out, &mut pending_images, vision);
     out
 }
 
@@ -507,13 +576,13 @@ fn flush_unmatched_tools(out: &mut Vec<Value>, pending: &mut Vec<String>) {
 fn flush_pending_tool_images(
     out: &mut Vec<Value>,
     pending_images: &mut Vec<UserImage>,
-    model: &str,
+    vision: bool,
 ) {
     if pending_images.is_empty() {
         return;
     }
     let images = std::mem::take(pending_images);
-    if let Some(msg) = tool_images::chat_tool_images_user(&images, model) {
+    if let Some(msg) = tool_images::chat_tool_images_user(&images, vision) {
         out.push(msg);
     }
 }
@@ -607,6 +676,103 @@ fn reasoning_details_text(details: &Value) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn model(id: &str) -> config::ModelChoice {
+        config::ModelChoice {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            api_base_url: None,
+            api_key: None,
+            env_key: None,
+            context_window: None,
+            api_backend: ApiBackend::ChatCompletions,
+            auth_scheme: None,
+            api_model: None,
+            prompt_cache: None,
+            max_output_tokens: None,
+            reasoning: None,
+            reasoning_effort: None,
+            reasoning_efforts: None,
+            supports_images: None,
+        }
+    }
+
+    fn empty_request() -> PromptRequest {
+        PromptRequest {
+            system: "s".into(),
+            history: vec![LogEvent::User("hi".into())],
+            tools: vec![],
+        }
+    }
+
+    /// 目录里没这个模型（或压根没 config）时不替上游做任何假设。
+    #[test]
+    fn wire_params_default_to_sending_nothing() {
+        let params = WireParams::resolve(None, None);
+        assert_eq!(params.reasoning, Reasoning::On);
+        assert!(params.effort.is_empty(), "强度缺省不发");
+        assert_eq!(params.max_output_tokens, None);
+        assert!(params.images, "未知模型按多模态处理");
+    }
+
+    #[test]
+    fn wire_params_come_from_model_config() {
+        let mut choice = model("m");
+        choice.reasoning_effort = Some("high".into());
+        choice.max_output_tokens = Some(8192);
+        choice.supports_images = Some(false);
+        let params = WireParams::resolve(Some(&choice), None);
+        assert_eq!(params.effort, "high");
+        assert_eq!(params.max_output_tokens, Some(8192));
+        assert!(!params.images);
+
+        choice.reasoning = Some(false);
+        let params = WireParams::resolve(Some(&choice), None);
+        assert_eq!(params.reasoning, Reasoning::Unsupported);
+        assert!(params.effort.is_empty(), "不支持推理就不带强度");
+    }
+
+    /// 三态各自发什么：不支持 = 什么都不发，关掉 = 显式 none，开着 = 按强度。
+    #[test]
+    fn chat_body_reasoning_is_three_state() {
+        let req = empty_request();
+        let mut params = WireParams {
+            reasoning: Reasoning::Unsupported,
+            ..WireParams::default()
+        };
+        let body = chat_body("m", &req, &[], &params);
+        assert!(body.get("reasoning").is_none(), "{body}");
+        assert!(body.get("reasoning_effort").is_none(), "{body}");
+
+        params.reasoning = Reasoning::Off;
+        let body = chat_body("m", &req, &[], &params);
+        assert_eq!(body["reasoning"]["effort"], "none");
+        assert_eq!(body["reasoning_effort"], "none");
+
+        params.reasoning = Reasoning::On;
+        let body = chat_body("m", &req, &[], &params);
+        assert!(body.get("reasoning").is_none(), "没指定强度就不发：{body}");
+
+        params.effort = "high".into();
+        let body = chat_body("m", &req, &[], &params);
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn chat_body_sends_max_tokens_only_when_configured() {
+        let req = empty_request();
+        let params = WireParams::default();
+        assert!(chat_body("m", &req, &[], &params)
+            .get("max_tokens")
+            .is_none());
+        let params = WireParams {
+            max_output_tokens: Some(4096),
+            ..WireParams::default()
+        };
+        assert_eq!(chat_body("m", &req, &[], &params)["max_tokens"], 4096);
+    }
+
     #[test]
     fn llm_user_agent_is_dock_version() {
         assert_eq!(LLM_USER_AGENT, concat!("dock/", env!("CARGO_PKG_VERSION")));
@@ -682,7 +848,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let msgs = messages(&req, &[], "grok-4");
+        let msgs = messages(&req, &[], true);
         assert_eq!(msgs[1]["role"], "user");
         assert_eq!(msgs[2]["role"], "assistant");
         assert_eq!(msgs[3]["role"], "tool");
@@ -736,7 +902,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let msgs = messages(&req, &[], "grok-4");
+        let msgs = messages(&req, &[], true);
         let tool = msgs.iter().find(|m| m["role"] == "tool").expect("tool msg");
         assert_eq!(
             tool["content"],
@@ -791,7 +957,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let vision = messages(&req, &[], "grok-4");
+        let vision = messages(&req, &[], true);
         assert!(
             vision.iter().any(|m| {
                 m["role"] == "user"
@@ -801,7 +967,7 @@ mod tests {
             }),
             "vision model should attach image parts: {vision:?}"
         );
-        let text_only = messages(&req, &[], "deepseek-chat");
+        let text_only = messages(&req, &[], false);
         assert!(
             !text_only.iter().any(|m| {
                 m["content"]
@@ -875,7 +1041,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let msgs = messages(&req, &[], "grok-4");
+        let msgs = messages(&req, &[], true);
         let roles: Vec<&str> = msgs
             .iter()
             .skip(1) // system
@@ -938,7 +1104,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let msgs = messages(&req, &[], "grok-4");
+        let msgs = messages(&req, &[], true);
         let roles: Vec<&str> = msgs
             .iter()
             .skip(1)

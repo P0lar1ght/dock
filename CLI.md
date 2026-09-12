@@ -20,7 +20,7 @@
 |---|---|
 | `/settings`（`config` `prefs`） | 设置 overlay；有参数则直接改（`timestamps` / `theme` / `model`）。浏览器 companion 一律拒绝（含带参），请用 `/timestamps` `/think` `/model` `/effort` |
 | `/new` | 归档当前会话并清空。账本用量一并清零。归档写入 `$DOCK_HOME/sessions/<cwd>/` |
-| `/model` `/m` | 切换当前模型。目录 `[model.<id>].api_backend`（`chat_completions` / `responses` / `messages`）决定 `"llm"` 走哪条 HTTP 线；`api_model` 是发给上游的 slug（省略=目录 id）；`auth_scheme` 默认 Bearer，messages 默认 `x-api-key`（OpenRouter 的 /messages 要写 `bearer`） |
+| `/model` `/m` | 切换当前模型。**目录只来自 config.toml**，没写就是空的（会提示去 `config.toml.example` 抄）——内置那几条没端点的假条目已删。目录 `[model.<id>].api_backend`（`chat_completions` / `responses` / `messages`）决定 `"llm"` 走哪条 HTTP 线；`api_model` 是发给上游的 slug（省略=目录 id）；`auth_scheme` 默认 Bearer，messages 默认 `x-api-key`（第三方网关的 /messages 多半仍要 `bearer`）。能力与默认值也在这里：`context_window` / `max_output_tokens` / `reasoning` / `reasoning_effort` / `reasoning_efforts` / `supports_images` / `prompt_cache`，**不写就不发那个参数**。切模型会按新模型重新播种推理默认值 |
 | `/resume` | 打开会话 picker，恢复本工作区已落盘的会话（进程重启后仍在）。用量账本不随归档恢复（Grok：新进程 resume 清零）。进程入口 `--resume` / `--resume <id>` 启动时直接恢复 |
 | `/pair`（`pairing`） | 浏览器 Origin 配对：第一行开启/关闭回环网关（默认不监听；首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。开启后待批请求可批准，已绑来源可撤销。overlay 显示实际监听地址。首次连接弹出「允许浏览器连接？」；Enter 批准 / `x` 拒绝或撤销（在网关行上 `x` 关闭监听）。浏览器 companion 的 list/execute 限制见上文。CORS 反射任意 Origin：鉴权靠配对 + 回环。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费 |
 | `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
@@ -48,7 +48,7 @@
 | `/compact [说明]` | 压缩旧对话为摘要发给模型（Grok 同款 structured `<summary>` 九段）。滚动区保留原对话，末尾加「已压缩上下文。」（Grok pager 是 SessionEvent，不擦 scrollback）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制 |
 | `/theme` `/t` | 切换配色 |
 | `/timestamps` | 开关滚动区时间戳 |
-| `/effort` | 设置推理强度 |
+| `/effort` | 设置推理强度。**菜单来自当前模型的 `[model.<id>].reasoning_efforts`**，不写才列通用四档（low / medium / high / xhigh），写 `[]` 表示会推理但不接受档位参数（菜单空着、永不发 effort）——各家认识的档位不一样，列死一份会让人选到上游不认的值。不选就用 `reasoning_effort`，那个也没写就不发这个参数（上游默认）。`reasoning = false` 的模型这一项与 `/think` 都置灰，菜单只给一条说明、回车不会填进输入框 |
 | `/export [path]` | 把对话导出到文件 |
 | `/cd` | 切换工作目录（进程级 cwd）。只在 Dock 终端生效；浏览器 companion 会拒绝 |
 | `/help` | 显示斜杠命令 |
@@ -113,6 +113,7 @@ order: 10
 抄 Grok `UsageLedger` + `session_usage_block_text`，不接 `x.ai/billing`。
 
 - 只把 SSE **官方** `usage` 折进账本（`prompt_tokens_details.cached_tokens`，缺省再认 `prompt_cache_hit_tokens` / `cache_read_input_tokens`；思考认 `completion_tokens_details.reasoning_tokens`）。开转前的本地估算只更新顶栏占用，不入账（Grok fail-closed：缺费用 ≠ 免费）。
+- **缓存写在哪**：`chat_completions` / `responses` 靠上游自动前缀缓存；`messages` 必须显式打断点，由 `http/messages.rs` 的 `apply_cache_breakpoints`（抄 Grok）在 system 尾 + 对话 tip + 上一轮收尾处各打一个，第四个槽留给网关。`[model.<id>].prompt_cache = false` 可关（自建代理不认 `cache_control` 时）。
 - **缓存占比** = 缓存命中 / 完整输入（Grok：`cached_prompt_tokens` 是 `prompt_tokens` 的子集，不要相减）。会话累计用总量相除，不是各轮百分比再平均。另显示 **上一轮命中**（最近一次主循环调用）。超过 100% 钳到 100%；输入为 0 显示 `-`。格式抄 Grok `/context` 的 `percent_of_window`（不足 10% 一位小数，否则整数）。
 - 主循环每次 `finish_llm` 记一笔；子代理 isolate 结束时 `record_subagent` 折进父会话，不增加 `numTurns`。
 - `/new` / `clear` / `/resume` 清零账本。
