@@ -41,11 +41,13 @@ pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEv
 /// Grok `extract_messages_since_last_user`: assistant + tool rows after the
 /// last `User`, with tool bodies replaced by `"Tool call omitted..."`.
 ///
-/// **带 `tool_calls` 的轮次保留推理内容**：有的上游（DeepSeek 的 thinking 模式）
-/// 规定请求里只要带 `tools`，之前每一轮的 `reasoning_content` 就必须一并回传，
-/// 缺了直接 400。压缩前缀恰好把 tool_calls 留着、推理清空，于是压缩之后的第一
-/// 条消息就炸。纯文本轮次照旧清空——约束只针对带工具的轮次，而推理链往往比
-/// 正文还长，能省则省。
+/// **assistant 轮次原样保留，推理内容不剥**：有的上游（DeepSeek 的 thinking
+/// 模式）规定请求里带 `tools` 时，**之前每一轮**的推理内容都必须一并回传，缺了
+/// 直接 400（`The reasoning_text in the thinking mode must be passed back`）。
+///
+/// 最早这里把推理一律清空，压缩之后的第一条消息就炸；改成"只给带 tool_calls
+/// 的轮次保留"仍然不够——纯文本收尾的那一轮同样在尾巴里，同样被要求回传。
+/// 省下来的那点上下文换不来这个代价，索性整条留着。
 pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
     let start = history
         .iter()
@@ -55,14 +57,7 @@ pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
     history[start..]
         .iter()
         .filter_map(|event| match event {
-            LogEvent::LlmStream(out) if !out.tool_calls.is_empty() => {
-                Some(LogEvent::LlmStream(out.clone()))
-            }
-            LogEvent::LlmStream(out) => Some(LogEvent::LlmStream(LlmOutput {
-                reasoning: String::new(),
-                reasoning_items: Vec::new(),
-                ..out.clone()
-            })),
+            LogEvent::LlmStream(out) => Some(LogEvent::LlmStream(out.clone())),
             LogEvent::ToolExecute {
                 id,
                 name,
@@ -115,10 +110,11 @@ pub fn build_compacted_events(history: &[LogEvent], summary: &str) -> Vec<LogEve
     out.push(LogEvent::SystemReminder(format_compact_summary_content(
         summary,
     )));
-    out.push(LogEvent::LlmStream(LlmOutput {
-        text: VISIBLE_NOTICE.into(),
-        ..LlmOutput::default()
-    }));
+    // [`VISIBLE_NOTICE`] 只进显示日志（`Sessions::replace_compacted` 自己追加），
+    // 不进模型历史：它是一条合成的 assistant 消息，没有推理内容。压缩若发生在
+    // 新一轮开头（尾巴为空），它会成为请求里唯一的 assistant 消息，于是
+    // 「thinking 模式必须回传 reasoning_text」的上游直接 400。模型也不需要被
+    // 告知"刚压缩过"——摘要本身就在上一条 reminder 里。
     out
 }
 
@@ -210,7 +206,7 @@ mod tests {
     /// DeepSeek thinking 模式规定请求带 `tools` 时，之前每轮的 `reasoning_content`
     /// 都要回传，缺了 400——压缩成功之后的第一条消息就会炸。
     #[test]
-    fn compacted_tail_keeps_reasoning_on_tool_turns() {
+    fn compacted_tail_keeps_reasoning_on_every_assistant_turn() {
         let mut history = sample_history();
         history.push(LogEvent::LlmStream(LlmOutput {
             text: "writing test".into(),
@@ -230,10 +226,11 @@ mod tests {
             content: "test body".into(),
             images: Vec::new(),
         });
-        // 纯文本收尾的一轮：没有 tool_calls，约束不适用，照旧清空省上下文。
+        // 纯文本收尾的一轮同样在尾巴里，同样被要求回传推理。
         history.push(LogEvent::LlmStream(LlmOutput {
             text: "写完了".into(),
-            reasoning: "这段推理没人需要".into(),
+            reasoning: "收尾这轮的推理照样要回传".into(),
+            reasoning_items: vec![serde_json::json!({"type":"reasoning","id":"rs_3"})],
             ..LlmOutput::default()
         }));
 
@@ -259,8 +256,36 @@ mod tests {
                 _ => None,
             })
             .expect("纯文本那一轮还在");
-        assert!(text_only.reasoning.is_empty(), "{text_only:?}");
-        assert!(text_only.reasoning_items.is_empty(), "{text_only:?}");
+        assert_eq!(text_only.reasoning, "收尾这轮的推理照样要回传");
+        assert_eq!(text_only.reasoning_items.len(), 1, "{text_only:?}");
+    }
+
+    /// 压缩通知是给 TUI 看的（`Sessions::replace_compacted` 自己往显示日志追加），
+    /// **不能**进模型历史：它是一条没有推理内容的合成 assistant 消息，压缩若发生
+    /// 在新一轮开头，它会是请求里唯一的 assistant 消息，thinking 模式的上游直接
+    /// 400。
+    #[test]
+    fn compacted_prefix_has_no_synthetic_assistant_turn() {
+        let events = build_compacted_events(&sample_history(), "summary body");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LogEvent::LlmStream(o) if o.text == VISIBLE_NOTICE)),
+            "{events:?}"
+        );
+        // 摘要本身还在，模型不会丢掉上下文。
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains("summary body"))));
+        // 前缀里每一条 assistant 消息都带着自己的推理。
+        for event in &events {
+            if let LogEvent::LlmStream(out) = event {
+                assert!(
+                    !out.reasoning.is_empty() || !out.tool_calls.is_empty(),
+                    "凭空多出一条没有推理的 assistant：{out:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -304,7 +329,9 @@ mod tests {
             e,
             LogEvent::SystemReminder(t) if t.contains("This session is being continued")
         )));
-        assert!(events
+        // 压缩通知只进显示日志，不进模型前缀（见
+        // `compacted_prefix_has_no_synthetic_assistant_turn`）。
+        assert!(!events
             .iter()
             .any(|e| matches!(e, LogEvent::LlmStream(o) if o.text == VISIBLE_NOTICE)));
         assert!(!events.iter().any(|e| matches!(e, LogEvent::PreStep)));
