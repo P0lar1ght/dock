@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
-use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -37,13 +37,13 @@ pub fn lines(
         failed || entries.is_empty() && content.contains("(empty)"),
         muted,
         theme,
-        width.saturating_sub(2).max(8),
+        card::header_width(width),
     );
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -59,10 +59,10 @@ pub fn lines(
         return out;
     }
     if entries.is_empty() {
-        out.push(Line::from(Span::styled(
-            "  (empty)".to_string(),
+        out.push(card::indent(Line::from(Span::styled(
+            "（空目录）".to_string(),
             theme.muted(),
-        )));
+        ))));
         return out;
     }
     let body: Vec<Line<'static>> = entries
@@ -73,15 +73,15 @@ pub fn lines(
             } else {
                 theme.primary()
             };
-            Line::from(Span::styled(format!("  {e}"), style))
+            Line::from(Span::styled(e, style))
         })
         .collect();
-    let body = if width == 0 {
-        body
+    let rows = card::body(body, width);
+    if mode == ToolMode::Truncated {
+        out.extend(card::head_tail(rows, FIRST_LINES, LAST_LINES, "项", theme));
     } else {
-        word_wrap_lines(body, width)
-    };
-    out.extend(apply_truncation(body, mode, theme));
+        out.extend(rows);
+    }
     out
 }
 
@@ -142,29 +142,6 @@ fn header_line(
     } else {
         truncate_line(line, width)
     }
-}
-
-fn apply_truncation(
-    wrapped: Vec<Line<'static>>,
-    mode: ToolMode,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    if mode != ToolMode::Truncated {
-        return wrapped;
-    }
-    let total = wrapped.len();
-    let threshold = FIRST_LINES + LAST_LINES;
-    if total <= threshold {
-        return wrapped;
-    }
-    let hidden = total - threshold;
-    let mut out: Vec<_> = wrapped.iter().take(FIRST_LINES).cloned().collect();
-    out.push(Line::from(Span::styled(
-        format!("  \u{2026} +{hidden} more"),
-        theme.muted(),
-    )));
-    out.extend(wrapped.into_iter().skip(total - LAST_LINES));
-    out
 }
 
 fn path_from_args(arguments: &str) -> Option<String> {

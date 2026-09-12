@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
-use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -45,71 +45,69 @@ pub fn lines(
     prepend_diamond(&mut header, theme, failed || declined);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
 
     let mut out = vec![header, Line::from("")];
     if failed || declined {
-        for line in content.lines() {
-            out.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(if failed {
-                    theme.accent_error
-                } else {
-                    theme.gray
-                }),
-            )));
-        }
-        return if width == 0 {
-            out
-        } else {
-            word_wrap_lines(out, width)
-        };
+        let rows: Vec<Line<'static>> = content
+            .lines()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(if failed {
+                        theme.accent_error
+                    } else {
+                        theme.gray
+                    }),
+                ))
+            })
+            .collect();
+        out.extend(card::body(rows, width));
+        return out;
     }
 
     if !qa.is_empty() {
         for (i, (question, answer)) in qa.iter().enumerate() {
-            out.push(Line::from(vec![
-                Span::styled(format!("  {}. ", i + 1), theme.muted()),
+            out.push(card::indent(Line::from(vec![
+                Span::styled(format!("{}. ", i + 1), theme.muted()),
                 Span::styled(question.clone(), theme.primary()),
-            ]));
+            ])));
             let a_line = if answer.is_empty() {
-                Line::from(Span::styled("     (no answer)".to_string(), theme.dim()))
+                Line::from(Span::styled("   （未回答）".to_string(), theme.dim()))
             } else {
                 Line::from(vec![
-                    Span::styled("     \u{2192} ".to_string(), theme.fg(theme.accent_user)),
+                    Span::styled("   \u{2192} ".to_string(), theme.fg(theme.accent_user)),
                     Span::styled(answer.clone(), theme.fg(theme.accent_user)),
                 ])
             };
-            out.push(a_line);
+            out.push(card::indent(a_line));
         }
     } else if !pending.is_empty() {
         for (i, question) in pending.iter().enumerate() {
-            out.push(Line::from(vec![
-                Span::styled(format!("  {}. ", i + 1), theme.muted()),
+            out.push(card::indent(Line::from(vec![
+                Span::styled(format!("{}. ", i + 1), theme.muted()),
                 Span::styled(question.clone(), theme.primary()),
-            ]));
+            ])));
             if running {
-                out.push(Line::from(Span::styled(
-                    "     等待回答\u{2026}".to_string(),
+                out.push(card::indent(Line::from(Span::styled(
+                    "   等待回答\u{2026}".to_string(),
                     theme.dim(),
-                )));
+                ))));
             }
         }
     } else if !content.is_empty() {
-        for line in content.lines() {
-            out.push(Line::from(Span::styled(line.to_string(), theme.muted())));
-        }
+        let rows: Vec<Line<'static>> = content
+            .lines()
+            .map(|line| Line::from(Span::styled(line.to_string(), theme.muted())))
+            .collect();
+        out.extend(card::body(rows, width));
     }
 
-    if width == 0 {
-        out
-    } else {
-        word_wrap_lines(out, width)
-    }
+    out
 }
 
 fn header_title(
@@ -177,7 +175,7 @@ fn header_line(
     if width == 0 {
         line
     } else {
-        truncate_line(line, width.saturating_sub(2).max(8))
+        truncate_line(line, card::header_width(width))
     }
 }
 

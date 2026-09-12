@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
 use crate::scrollback::assistant;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -74,8 +75,8 @@ fn enter_lines(
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -136,8 +137,8 @@ fn exit_lines(
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -158,9 +159,13 @@ fn exit_lines(
     } else {
         plan_md.as_deref().unwrap_or(EMPTY_PLAN_PLACEHOLDER)
     };
-    let rendered = assistant::render(body_src, theme, width.saturating_sub(2).max(20));
-    let body = apply_truncation(rendered.lines, mode, theme);
-    out.extend(body);
+    let rendered = assistant::render(body_src, theme, card::body_width(width));
+    let body: Vec<Line<'static>> = rendered.lines.into_iter().map(card::indent).collect();
+    if mode == ToolMode::Truncated {
+        out.extend(card::head_tail(body, FIRST_LINES, LAST_LINES, "行", theme));
+    } else {
+        out.extend(body);
+    }
     out
 }
 
@@ -197,7 +202,7 @@ fn header_line(
     if width == 0 {
         line
     } else {
-        truncate_line(line, width.saturating_sub(2).max(8))
+        truncate_line(line, card::header_width(width))
     }
 }
 
@@ -214,29 +219,6 @@ fn prepend_diamond(line: &mut Line<'static>, theme: &Theme, failed: bool) {
             Style::default().fg(fg),
         ),
     );
-}
-
-fn apply_truncation(
-    wrapped: Vec<Line<'static>>,
-    mode: ToolMode,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    if mode != ToolMode::Truncated {
-        return wrapped;
-    }
-    let total = wrapped.len();
-    let threshold = FIRST_LINES + LAST_LINES;
-    if total <= threshold {
-        return wrapped;
-    }
-    let hidden = total - threshold;
-    let mut out: Vec<_> = wrapped.iter().take(FIRST_LINES).cloned().collect();
-    out.push(Line::from(Span::styled(
-        format!("\u{2026} +{hidden} lines"),
-        theme.muted(),
-    )));
-    out.extend(wrapped.into_iter().skip(total - LAST_LINES));
-    out
 }
 
 /// Prefer relative `.dock/plan.md`; fall back to any path mentioned after 保存在 / saved at.

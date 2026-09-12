@@ -5,8 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::grok::glyphs;
-use crate::grok::line_utils::truncate_line;
-use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -32,12 +31,12 @@ pub fn lines(
     let open = mode != ToolMode::Collapsed;
     let muted = (!open && !running) || failed;
 
-    let mut header = shell_header(&command, theme, muted, width);
+    let mut header = shell_header(&command, theme, muted);
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -50,10 +49,10 @@ pub fn lines(
     }
     if content.is_empty() || content == "(no output)" {
         out.push(Line::from(""));
-        out.push(Line::from(Span::styled(
-            "  (no output)".to_string(),
+        out.push(card::indent(Line::from(Span::styled(
+            "（无输出）".to_string(),
             theme.muted(),
-        )));
+        ))));
         return out;
     }
 
@@ -65,57 +64,28 @@ pub fn lines(
     };
     let styled: Vec<Line<'static>> = content
         .lines()
-        .map(|line| Line::from(Span::styled(format!("  {line}"), body_style)))
+        .map(|line| Line::from(Span::styled(line.to_string(), body_style)))
         .collect();
-    let wrap_w = width.saturating_sub(2).max(20);
-    let wrapped = if width == 0 {
-        styled
+    let rows = card::body(styled, width);
+    if mode == ToolMode::Truncated {
+        out.extend(card::head_tail(rows, FIRST_LINES, LAST_LINES, "行", theme));
     } else {
-        word_wrap_lines(styled, wrap_w)
-    };
-    out.extend(apply_truncation(wrapped, mode, theme));
+        out.extend(rows);
+    }
     out
 }
 
-fn shell_header(command: &str, theme: &Theme, muted: bool, width: usize) -> Line<'static> {
+fn shell_header(command: &str, theme: &Theme, muted: bool) -> Line<'static> {
     let cmd_style = if muted {
         theme.muted()
     } else {
         theme.primary().add_modifier(Modifier::BOLD)
     };
     let cmd = command.replace('\n', " ");
-    let line = Line::from(vec![
+    Line::from(vec![
         Span::styled("$ ".to_string(), theme.dim()),
         Span::styled(cmd, cmd_style),
-    ]);
-    if width == 0 {
-        line
-    } else {
-        truncate_line(line, width.saturating_sub(2).max(8))
-    }
-}
-
-fn apply_truncation(
-    wrapped: Vec<Line<'static>>,
-    mode: ToolMode,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    if mode != ToolMode::Truncated {
-        return wrapped;
-    }
-    let total = wrapped.len();
-    let threshold = FIRST_LINES + LAST_LINES;
-    if total <= threshold {
-        return wrapped;
-    }
-    let hidden = total - threshold;
-    let mut out: Vec<_> = wrapped.iter().take(FIRST_LINES).cloned().collect();
-    out.push(Line::from(Span::styled(
-        format!("  \u{2026} +{hidden} lines"),
-        theme.muted(),
-    )));
-    out.extend(wrapped.into_iter().skip(total - LAST_LINES));
-    out
+    ])
 }
 
 fn command_from_args(arguments: &str) -> Option<String> {
@@ -171,7 +141,14 @@ mod tests {
         );
         let text = plain(&lines);
         assert!(text.contains("$ "), "{text}");
-        assert!(text.contains("+7 lines"), "{text}");
+        assert!(text.contains("\u{2026} 还有 7 行"), "{text}");
         assert!(!text.contains("L05"), "{text}");
+        // 正文按公共外壳缩进，和标题文字对齐。
+        assert!(text.contains("\n  L01"), "{text}");
+        // 截断态的折叠符说明「还有更多」。
+        assert!(
+            lines[0].spans.last().unwrap().content.contains('\u{2304}'),
+            "{text}"
+        );
     }
 }

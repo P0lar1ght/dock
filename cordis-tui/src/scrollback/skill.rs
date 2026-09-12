@@ -9,6 +9,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::grok::line_utils::truncate_line;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::theme::Theme;
 
@@ -72,7 +73,7 @@ pub fn lines(arguments: &str, content: &str, theme: &Theme, width: usize) -> Vec
     // 技能卡没有可跳的 overlay，也没有 elapsed；正文预览只在结果落地后出现。
     if !running {
         if let Some(preview) = preview(content) {
-            let mut prev = Line::from(Span::styled(format!("  {preview}"), theme.dim()));
+            let mut prev = card::indent(Line::from(Span::styled(preview, theme.dim())));
             if width > 0 {
                 prev = truncate_line(prev, width);
             }

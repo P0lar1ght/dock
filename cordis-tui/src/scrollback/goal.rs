@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -49,8 +50,8 @@ pub fn lines(
     prepend_diamond(&mut header, accent, failed, theme);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -87,7 +88,7 @@ pub fn lines(
         if parsed.message.as_deref() != Some(sum.as_str())
             && parsed.objective.as_deref() != Some(sum.as_str())
         {
-            out.push(Line::from(Span::styled(format!("  {sum}"), theme.muted())));
+            out.push(card::indent(Line::from(Span::styled(sum, theme.muted()))));
         }
     }
     if out.len() == 2 {
@@ -219,7 +220,7 @@ fn header_line(
     if width == 0 {
         line
     } else {
-        truncate_line(line, width.saturating_sub(2).max(8))
+        truncate_line(line, card::header_width(width))
     }
 }
 

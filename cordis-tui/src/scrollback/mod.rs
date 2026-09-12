@@ -33,6 +33,7 @@ use crate::theme::Theme;
 mod ask;
 mod assistant;
 mod bg_task;
+pub(crate) mod card;
 mod edit;
 mod execute;
 mod goal;
@@ -1051,9 +1052,17 @@ fn push_tool_card(
         if running {
             mark_live(live_rows, lines, header_at, started);
         }
-        tool_headers.push((header_at, hid));
+        // 整张卡都可点，不只是折叠头那一行：展开后点正文没反应是原先最让人
+        // 困惑的一处 —— 子代理 / 后台任务卡本来就整卡可点，两套手感。
+        for i in header_at..lines.len() {
+            tool_headers.push((i, hid.clone()));
+        }
     }
-    lines.push(Line::from(""));
+    // 卡片之间的空行由外壳统一负责，各卡片不自己推 —— 原先两边都推就成了
+    // 两行空白。
+    if lines.last().is_some_and(|l| !l.spans.is_empty()) {
+        lines.push(Line::from(""));
+    }
 }
 
 /// Register the card header at `header_at` as still running. No-op when the
@@ -1672,7 +1681,7 @@ mod tests {
             false,
         );
         let text = plain(&lines);
-        assert!(text.contains("… +7 lines"), "{text}");
+        assert!(text.contains("\u{2026} 还有 7 行"), "{text}");
         assert!(!text.contains("L05"), "{text}");
     }
 
@@ -2220,19 +2229,16 @@ mod live_chrome_tests {
 
         assert_eq!(plain(&night), plain(&day));
         // Only the body: the header is rebuilt every call, so including it
-        // would pass even with a palette-blind body cache.
-        let gutter = |ls: &[Line<'static>]| -> Vec<Option<ratatui::style::Color>> {
+        // would pass even with a palette-blind body cache. 整行所有 span 都看
+        // —— 只盯第一个的话，公共外壳插在最前面的缩进空白（无色）会把差异吃掉。
+        let body = |ls: &[Line<'static>]| -> Vec<Option<ratatui::style::Color>> {
             ls[2..]
                 .iter()
-                .filter_map(|l| l.spans.first().map(|s| s.style.fg))
+                .flat_map(|l| l.spans.iter().map(|s| s.style.fg))
                 .collect()
         };
-        assert!(!gutter(&night).is_empty(), "expected numbered body rows");
-        assert_ne!(
-            gutter(&night),
-            gutter(&day),
-            "body cache ignored the palette"
-        );
+        assert!(!body(&night).is_empty(), "expected numbered body rows");
+        assert_ne!(body(&night), body(&day), "body cache ignored the palette");
     }
 
     /// 旧实现 `pages.saturating_mul(half).max(pages)` 把所有负向翻页夹成
@@ -2336,5 +2342,293 @@ mod live_chrome_tests {
             visible.contains("reply-7"),
             "jump must land on the match; visible window:\n{visible}"
         );
+    }
+}
+
+/// #52：外壳的一致性由测试守着，不靠人记。每加一张卡片都要过这一组 —— 只要
+/// 有人手搓缩进、自创截断文案、或者忘了折叠符，这里立刻红。
+#[cfg(test)]
+mod card_shell_tests {
+    use super::*;
+
+    fn text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// 覆盖 `tool_card_lines` 的每一条分支。新增卡片时补一行。
+    fn samples() -> Vec<(&'static str, &'static str, &'static str, String)> {
+        let body: String = (1..=20).map(|i| format!("正文第 {i} 行\n")).collect();
+        vec![
+            ("bash", "bash", r#"{"command":"cargo test"}"#, body.clone()),
+            ("通用工具", "echo", r#"{"text":"hi"}"#, body.clone()),
+            (
+                "read",
+                "read_file",
+                r#"{"target_file":"a.rs"}"#,
+                (1..=20)
+                    .map(|i| format!("{i}\u{2192}let v{i} = {i};\n"))
+                    .collect(),
+            ),
+            (
+                "edit",
+                "search_replace",
+                r#"{"file_path":"a.rs","old_string":"let x = 1;","new_string":"let x = 2;"}"#,
+                String::new(),
+            ),
+            (
+                "list_dir",
+                "list_dir",
+                r#"{"target_directory":"src"}"#,
+                std::iter::once("src\n".to_string())
+                    .chain((1..=20).map(|i| format!("f{i}.rs\n")))
+                    .collect(),
+            ),
+            (
+                "grep",
+                "grep",
+                r#"{"pattern":"fn"}"#,
+                (1..=20)
+                    .map(|i| format!("src/f{i}.rs:{i}:fn x() {{}}\n"))
+                    .collect(),
+            ),
+            ("web", "web_search", r#"{"query":"q"}"#, body.clone()),
+            (
+                "fetch",
+                "web_fetch",
+                r#"{"url":"https://x.dev"}"#,
+                body.clone(),
+            ),
+            ("mcp", "mcp_srv__act", r#"{"a":1}"#, body.clone()),
+            (
+                "search_tool",
+                "search_tool",
+                r#"{"query":"q"}"#,
+                body.clone(),
+            ),
+            (
+                "goal",
+                "update_goal",
+                r#"{"objective":"统一外壳"}"#,
+                r#"{"success":true,"summary":"Goal set"}"#.into(),
+            ),
+            (
+                "plan",
+                "exit_plan_mode",
+                r##"{"plan":"# 计划\n\n- 一\n- 二"}"##,
+                "ok".into(),
+            ),
+            (
+                "sched",
+                "scheduler_create",
+                r#"{"interval":"5m","prompt":"检查"}"#,
+                "已设定 cron-1".into(),
+            ),
+            (
+                "ask",
+                "ask_question",
+                r#"{"questions":[{"question":"选哪个?"}]}"#,
+                "".into(),
+            ),
+            (
+                "todo",
+                "todo_write",
+                r#"{"merge":false,"todos":[{"id":"1","content":"干活","status":"pending"}]}"#,
+                "ok".into(),
+            ),
+        ]
+    }
+
+    fn render(name: &str, args: &str, content: &str, mode: tool::ToolMode) -> Vec<Line<'static>> {
+        tool_card_lines(name, args, content, &Theme::current(), 60, mode, false)
+    }
+
+    /// 正文一律缩进 [`card::BODY_INDENT`] 列，和标题文字对齐。原先 0 / 2 /
+    /// gutter 三套并存，同屏看过去左边缘是锯齿状的。
+    #[test]
+    fn every_card_body_shares_one_indent() {
+        let pad = " ".repeat(card::BODY_INDENT);
+        for (label, name, args, content) in samples() {
+            for mode in [tool::ToolMode::Truncated, tool::ToolMode::Expanded] {
+                let lines = render(name, args, &content, mode);
+                for line in lines.iter().skip(1) {
+                    let t = text(line);
+                    if t.trim().is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        t.starts_with(&pad),
+                        "{label} 的正文没走公共缩进 ({mode:?}): {t:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 截断脚注一种写法。原先四种：`… +4 lines` / `… +2 more files` /
+    /// `… (6 more lines)` / `… 还有 6 行`。
+    #[test]
+    fn every_elision_reads_the_same_way() {
+        let banned = ["lines", "more", "entries", "+"];
+        let mut seen = 0usize;
+        for (label, name, args, content) in samples() {
+            for line in render(name, args, &content, tool::ToolMode::Truncated) {
+                let t = text(&line);
+                let Some(rest) = t.trim_start().strip_prefix('\u{2026}') else {
+                    continue;
+                };
+                seen += 1;
+                assert!(
+                    rest.trim_start().starts_with("还有"),
+                    "{label} 的截断脚注没走公共文案: {t:?}"
+                );
+                for bad in banned {
+                    assert!(!rest.contains(bad), "{label} 仍是旧文案: {t:?}");
+                }
+            }
+        }
+        assert!(seen >= 5, "样本里应该有好几张卡触发截断，实际 {seen}");
+    }
+
+    /// 每张可折叠的卡片都带折叠符，三种状态各不相同。原先只有一半卡片有
+    /// 「（点击展开）」，最常见的 Read / Edit / Bash / List / Search 反倒没有。
+    #[test]
+    fn every_foldable_card_marks_its_fold_state() {
+        for (label, name, args, content) in samples() {
+            let marks: Vec<String> = [
+                tool::ToolMode::Collapsed,
+                tool::ToolMode::Truncated,
+                tool::ToolMode::Expanded,
+            ]
+            .into_iter()
+            .map(|m| {
+                let head = render(name, args, &content, m).remove(0);
+                head.spans
+                    .last()
+                    .map(|s| s.content.to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+            for m in &marks {
+                assert_eq!(
+                    unicode_width::UnicodeWidthStr::width(m.as_str()),
+                    card::FOLD_MARK,
+                    "{label} 的标题尾巴不是折叠符: {marks:?}"
+                );
+            }
+            let unique: std::collections::HashSet<&String> = marks.iter().collect();
+            assert_eq!(unique.len(), 3, "{label} 的三种折叠态看不出区别: {marks:?}");
+        }
+    }
+
+    /// 标题行永远画得下，且不顶出面板 —— 折叠符是「这张卡能点」的唯一提示。
+    #[test]
+    fn a_card_header_fits_its_pane_at_every_width() {
+        for (label, name, args, content) in samples() {
+            for pane in [24usize, 40, 60, 100] {
+                let head = tool_card_lines(
+                    name,
+                    args,
+                    &content,
+                    &Theme::current(),
+                    pane,
+                    tool::ToolMode::Collapsed,
+                    false,
+                )
+                .remove(0);
+                let w = unicode_width::UnicodeWidthStr::width(text(&head).as_str());
+                assert!(
+                    w <= pane,
+                    "{label} 在 {pane} 列画出 {w} 列: {:?}",
+                    text(&head)
+                );
+            }
+        }
+    }
+
+    /// 整张卡都能点，不只是折叠头那一行。
+    #[test]
+    fn a_whole_card_is_clickable_not_just_its_header() {
+        let frame = build_frame(
+            &[LogEvent::ToolExecute {
+                id: "t1".into(),
+                name: "bash".into(),
+                arguments: r#"{"command":"cargo test"}"#.into(),
+                content: "一\n二\n三\n".into(),
+                images: vec![],
+            }],
+            &[],
+            60,
+            &HashSet::new(),
+            &HashMap::from([("t1".to_string(), tool::ToolMode::Expanded)]),
+            false,
+            false,
+            &[],
+            todo::TodoFold::default(),
+            None,
+            None,
+            None,
+        );
+        let body_rows: Vec<usize> = frame
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| text(l).contains('\u{4e00}'))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!body_rows.is_empty(), "样本里应该有正文行");
+        for row in body_rows {
+            assert!(
+                frame
+                    .tool_headers
+                    .iter()
+                    .any(|(i, id)| *i == row && id == "t1"),
+                "展开后第 {row} 行点不动"
+            );
+        }
+    }
+
+    /// 卡片之间只留一行空白 —— 外壳负责，各卡片不自己推。
+    #[test]
+    fn cards_are_separated_by_exactly_one_blank_line() {
+        let frame = build_frame(
+            &[
+                LogEvent::ToolExecute {
+                    id: "a".into(),
+                    name: "echo".into(),
+                    arguments: r#"{"text":"hi"}"#.into(),
+                    content: String::new(),
+                    images: vec![],
+                },
+                LogEvent::ToolExecute {
+                    id: "b".into(),
+                    name: "echo".into(),
+                    arguments: r#"{"text":"ho"}"#.into(),
+                    content: String::new(),
+                    images: vec![],
+                },
+            ],
+            &[],
+            60,
+            &HashSet::new(),
+            &HashMap::from([
+                ("a".to_string(), tool::ToolMode::Expanded),
+                ("b".to_string(), tool::ToolMode::Expanded),
+            ]),
+            false,
+            false,
+            &[],
+            todo::TodoFold::default(),
+            None,
+            None,
+            None,
+        );
+        let blanks: Vec<String> = frame.lines.iter().map(|l| text(l)).collect();
+        for w in blanks.windows(2) {
+            assert!(
+                !(w[0].trim().is_empty() && w[1].trim().is_empty()),
+                "出现连续两行空白:\n{}",
+                blanks.join("\n")
+            );
+        }
     }
 }

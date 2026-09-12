@@ -4,8 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::grok::glyphs;
-use crate::grok::line_utils::truncate_line;
-use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -75,18 +74,13 @@ fn search_lines(
             };
             spans.push(Span::styled(label, theme.dim()));
         }
-        let line = Line::from(spans);
-        if width == 0 {
-            line
-        } else {
-            truncate_line(line, width.saturating_sub(2).max(8))
-        }
+        Line::from(spans)
     };
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -102,23 +96,18 @@ fn search_lines(
         EXPANDED_INLINE
     };
     let body_lines: Vec<&str> = content.lines().collect();
-    let show = body_lines.iter().take(cap);
-    for line in show {
-        out.push(Line::from(Span::styled(format!("  {line}"), theme.muted())));
-    }
+    let rows: Vec<Line<'static>> = body_lines
+        .iter()
+        .take(cap)
+        .map(|line| Line::from(Span::styled(line.to_string(), theme.muted())))
+        .collect();
+    out.extend(card::body(rows, width));
     if body_lines.len() > cap {
-        let rest = body_lines.len() - cap;
-        out.push(Line::from(Span::styled(
-            format!("  \u{2026} ({rest} more lines)"),
-            theme.dim(),
-        )));
+        out.push(card::elision(body_lines.len() - cap, "行", theme));
     }
     if !urls.is_empty() {
         out.push(Line::from(""));
-        out.push(sources_line(&urls, theme));
-    }
-    if width > 0 {
-        out = word_wrap_lines(out, width);
+        out.push(card::indent(sources_line(&urls, theme)));
     }
     out
 }
@@ -151,7 +140,7 @@ fn fetch_lines(
             theme.primary()
         };
         let bold = text.add_modifier(Modifier::BOLD);
-        let line = Line::from(vec![
+        Line::from(vec![
             Span::styled("Fetch ".to_string(), bold),
             Span::styled(
                 url,
@@ -161,18 +150,13 @@ fn fetch_lines(
                     theme.fg(theme.path)
                 },
             ),
-        ]);
-        if width == 0 {
-            line
-        } else {
-            truncate_line(line, width.saturating_sub(2).max(8))
-        }
+        ])
     };
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -186,7 +170,10 @@ fn fetch_lines(
     let mut body = content.lines().peekable();
     if let Some(first) = body.peek() {
         if first.starts_with("HTTP ") {
-            out.push(Line::from(Span::styled(format!("  {first}"), theme.dim())));
+            out.push(card::indent(Line::from(Span::styled(
+                first.to_string(),
+                theme.dim(),
+            ))));
             body.next();
             if body.peek().is_some_and(|l| l.is_empty()) {
                 body.next();
@@ -200,23 +187,19 @@ fn fetch_lines(
     } else {
         EXPANDED_INLINE
     };
-    for line in rest.iter().take(cap) {
-        out.push(Line::from(Span::styled(format!("  {line}"), theme.muted())));
-    }
+    let rows: Vec<Line<'static>> = rest
+        .iter()
+        .take(cap)
+        .map(|line| Line::from(Span::styled(line.to_string(), theme.muted())))
+        .collect();
+    out.extend(card::body(rows, width));
     if rest.len() > cap {
-        let n = rest.len() - cap;
-        out.push(Line::from(Span::styled(
-            format!("  \u{2026} ({n} more lines)"),
-            theme.dim(),
-        )));
+        out.push(card::elision(rest.len() - cap, "行", theme));
     } else if rest.is_empty() {
-        out.push(Line::from(Span::styled(
-            "  (no content)".to_string(),
+        out.push(card::indent(Line::from(Span::styled(
+            "（无正文）".to_string(),
             theme.muted(),
-        )));
-    }
-    if width > 0 {
-        out = word_wrap_lines(out, width);
+        ))));
     }
     out
 }
@@ -252,7 +235,7 @@ fn sources_line(urls: &[String], theme: &Theme) -> Line<'static> {
         .map(|s| s.as_str())
         .collect();
     let extra = domains.len().saturating_sub(MAX_SOURCES);
-    let mut text = format!("  Sources: {}", shown.join(", "));
+    let mut text = format!("Sources: {}", shown.join(", "));
     if extra > 0 {
         text.push_str(&format!(" (+{extra} more)"));
     }

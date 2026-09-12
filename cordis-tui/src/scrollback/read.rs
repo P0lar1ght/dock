@@ -15,6 +15,7 @@ use syntect::highlighting::FontStyle;
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
 use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -54,12 +55,12 @@ pub fn lines(
     let open = mode != ToolMode::Collapsed;
     let muted = !open && !running;
 
-    let mut header = header_line(&meta, theme, muted, width.saturating_sub(2).max(8));
+    let mut header = header_line(&meta, theme, muted, card::header_width(width));
     prepend_diamond(&mut header, theme);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -67,7 +68,7 @@ pub fn lines(
     let mut out = vec![header];
     if running && content.is_empty() {
         out.push(Line::from(""));
-        out.push(Line::from(live::running_body(theme)));
+        out.push(card::indent(Line::from(live::running_body(theme))));
         return out;
     }
     if content.trim().is_empty() || content.starts_with("Error") {
@@ -78,9 +79,11 @@ pub fn lines(
             } else {
                 theme.muted()
             };
-            for line in content.lines() {
-                out.push(Line::from(Span::styled(line.to_string(), style)));
-            }
+            let rows: Vec<Line<'static>> = content
+                .lines()
+                .map(|line| Line::from(Span::styled(line.to_string(), style)))
+                .collect();
+            out.extend(card::body(rows, width));
         }
         return out;
     }
@@ -231,7 +234,8 @@ fn render_body(
 
     let last_num = slice.last().map(|(n, _)| *n).unwrap_or(meta.offset);
     let gutter_w = digit_count(last_num);
-    let content_w = width.saturating_sub(gutter_w + 2).max(20);
+    // gutter 占 `gutter_w + 2` 列，正文再让出公共外壳的右边距。
+    let row_w = card::body_width(width).saturating_sub(gutter_w + 2).max(20);
 
     let gutter_style = theme.dim();
     let text_style = theme.primary();
@@ -241,18 +245,18 @@ fn render_body(
 
     let mut styled: Vec<Line<'static>> = Vec::with_capacity(slice.len() + 1);
     for (i, (num, text)) in slice.iter().enumerate() {
-        if elided.is_some() && i == FIRST_LINES {
-            styled.push(Line::from(Span::styled(
-                "\u{2026}".to_string(),
-                theme.muted(),
-            )));
+        if let (Some(hidden), true) = (elided, i == FIRST_LINES) {
+            // 原先只画一个光秃秃的 `…`，连省了多少行都不说 —— 全仓唯一一个
+            // 不报条数的截断点。
+            styled.push(card::elision(hidden, "行", theme));
             // Reset highlighter across the gap so state doesn't bleed.
             highlighter = syntect.highlight_lines_by_file_path(Path::new(&meta.path));
         }
         let gutter = format!("{:>w$}  ", num, w = gutter_w);
         let mut spans = vec![Span::styled(gutter, gutter_style)];
         spans.extend(highlight_spans(text, &mut highlighter, syntect, text_style));
-        styled.push(Line::from(spans));
+        // 行号 gutter 是这张卡自己的正文语言，但左边缘仍要和别的卡齐。
+        styled.push(card::indent(Line::from(spans)));
     }
 
     let out = if width == 0 {
@@ -260,7 +264,7 @@ fn render_body(
     } else {
         // Wrap only the text portion: word_wrap_lines wraps whole lines including
         // gutter. Acceptable for cordis; matching grok joiner hang is heavier.
-        word_wrap_lines(styled, content_w.saturating_add(gutter_w + 2))
+        word_wrap_lines(styled, row_w.saturating_add(gutter_w + 2))
     };
 
     if let Ok(mut guard) = BODY_CACHE.lock() {
