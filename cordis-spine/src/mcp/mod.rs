@@ -16,6 +16,7 @@ mod oauth;
 mod protocol;
 mod sse;
 mod stdio;
+mod tool_index;
 mod tools_list;
 
 use std::collections::{HashMap, HashSet};
@@ -557,8 +558,18 @@ pub fn mcp_client() -> Plugin {
                         return tool_result(call, "search_tool: tools unavailable");
                     };
                     let mcp = exec.get::<Mcp>(MCP);
-                    let body =
-                        discover::run_search(tools.as_ref(), mcp.as_deref(), &call.arguments);
+                    // schema 是否已在上下文里，以本 agent 自己的模型历史为准：
+                    // 子代理 isolate 看到的是它那份 `"sessions"`。
+                    let seen = exec
+                        .get::<Sessions>(SESSIONS)
+                        .map(|s| discover::schemas_in_context(&s.model_history()))
+                        .unwrap_or_default();
+                    let body = discover::run_search(
+                        tools.as_ref(),
+                        mcp.as_deref(),
+                        &seen,
+                        &call.arguments,
+                    );
                     tool_result(call, body)
                 })
             });

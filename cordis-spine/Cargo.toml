@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 base64 = "0.22"
+bm25 = "2.3"
 getrandom = "0.2"
 sha2 = "0.10"
 webbrowser = "1"
