@@ -44,7 +44,7 @@
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
 | `/find` | 搜索对话 |
 | `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入 / 输出 / 缓存命中与占比 / 思考 / 调用次数 / API 耗时。接口若带 `cost_in_usd_ticks` 才显示费用，缺省为「未上报」（不是免费）。**Tab** 切到占用。**没有** grok.com 账号额度、`/usage manage` |
-| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、**技能**、工作流、MCP、本地按需。点「系统提示」按段展开（基座 / Cordis / 技能 / 工作流 / 人设 / 子代理）。**工具定义只含模型可见项**（`search_tool` / `use_tool` 等）。MCP extras 与 `register_deferred` 的本地工具 **不计入** `used`；点开只看目录。`search_tool` 返回的 schema 记在消息历史里直到压缩。技能 listing 给模型看所以仍在系统提示正文里；图例单独占一行（标「已计入系统提示」），不把同一段再加进 `used`。工作流同理。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量。占用 live-lookup `"context"` |
+| `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、**技能**、工作流、MCP、本地按需。点「系统提示」按段展开（基座 / Cordis / 技能 / 工作流 / 人设 / 子代理）。**工具定义只含模型可见项**（`search_tool` / `use_tool` 等）。MCP extras 与 `register_deferred` 的本地工具 **不计入** `used`；点开只看目录。`search_tool` 返回的 schema 记在消息历史里直到压缩；消息明细在有搜索时多一行 **「按需发现」**（`N 次 search_tool`，已含在「工具结果」里，单列出来是为了让重复搜索的代价可见）。技能 listing 给模型看所以仍在系统提示正文里；图例单独占一行（标「已计入系统提示」），不把同一段再加进 `used`。工作流同理。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量。占用 live-lookup `"context"` |
 | `/compact [说明]` | 压缩旧对话为摘要发给模型（Grok 同款 structured `<summary>` 九段）。滚动区保留原对话，末尾加「已压缩上下文。」（Grok pager 是 SessionEvent，不擦 scrollback）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制 |
 | `/theme` `/t` | 切换配色 |
 | `/timestamps` | 开关滚动区时间戳 |
