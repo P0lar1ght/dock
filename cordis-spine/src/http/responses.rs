@@ -87,6 +87,7 @@ pub fn input_items(
             }
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() => {
                 flush_unmatched(&mut out, &mut pending);
+                out.extend(replayable_reasoning(llm));
                 if !llm.text.is_empty() {
                     out.push(easy_message("assistant", &llm.text, &[]));
                 }
@@ -102,6 +103,7 @@ pub fn input_items(
             }
             LogEvent::LlmStream(llm) if !llm.text.is_empty() => {
                 flush_unmatched(&mut out, &mut pending);
+                out.extend(replayable_reasoning(llm));
                 out.push(easy_message("assistant", &llm.text, &[]));
             }
             LogEvent::ToolExecute {
@@ -122,6 +124,40 @@ pub fn input_items(
     }
     flush_unmatched(&mut out, &mut pending);
     out
+}
+
+/// 把上一轮的 reasoning item 原样放回 input，排在同一轮的 message /
+/// function_call 之前——推理项是顶层兄弟节点，复现模型当时的顺序
+/// （Grok `conversation_item_to_input_items` 的 `ConversationItem::Reasoning` 臂）。
+///
+/// 两处清洗照抄 Grok：`status` 是 output-only 字段，回传会被拒；`content[]` 的
+/// 元素要带 `type: "reasoning_text"` 判别符，缺了同样 400。
+fn replayable_reasoning(llm: &crate::types::LlmOutput) -> Vec<Value> {
+    llm.reasoning_items
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .map(|item| {
+            let mut item = item.clone();
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("status");
+            }
+            patch_reasoning_text_types(&mut item);
+            item
+        })
+        .collect()
+}
+
+/// Grok `patch_reasoning_text_types`。
+fn patch_reasoning_text_types(item: &mut Value) {
+    let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for part in content.iter_mut() {
+        if let Some(obj) = part.as_object_mut() {
+            obj.entry("type")
+                .or_insert_with(|| Value::String("reasoning_text".into()));
+        }
+    }
 }
 
 fn flush_unmatched(out: &mut Vec<Value>, pending: &mut Vec<String>) {
@@ -275,6 +311,8 @@ impl Acc {
     }
 
     fn completed_event(&mut self, response: &Value) -> Vec<StreamDelta> {
+        // `response.completed` 带完整的 output 数组，reasoning item 的原件（id /
+        // summary / content）只在这里拿得到；纯增量流拼不出合法的 item。
         let mut out = output_from_response(response);
         if out.reasoning.is_empty() {
             out.reasoning = self.reasoning.clone();
@@ -317,6 +355,7 @@ pub fn parse_json(body: &str) -> LlmOutput {
 fn output_from_response(response: &Value) -> LlmOutput {
     let mut text = String::new();
     let mut reasoning = String::new();
+    let mut reasoning_items = Vec::new();
     let mut tool_calls = Vec::new();
     let Some(items) = response["output"].as_array() else {
         return LlmOutput::default();
@@ -345,7 +384,10 @@ fn output_from_response(response: &Value) -> LlmOutput {
                     arguments,
                 });
             }
-            Some("reasoning") => append_reasoning(&mut reasoning, item),
+            Some("reasoning") => {
+                append_reasoning(&mut reasoning, item);
+                reasoning_items.push(item.clone());
+            }
             _ => {}
         }
     }
@@ -353,6 +395,7 @@ fn output_from_response(response: &Value) -> LlmOutput {
         text,
         reasoning,
         tool_calls,
+        reasoning_items,
         ..LlmOutput::default()
     }
 }
@@ -371,18 +414,20 @@ fn append_message_text(text: &mut String, item: &Value) {
     }
 }
 
+/// 拍平成给人看的文本。分段之间要换行——`push_str` 会把 summary 和 content
+/// 粘成一坨（"planstep one"），思考卡里读着像乱码。
 fn append_reasoning(reasoning: &mut String, item: &Value) {
     if let Some(parts) = item["summary"].as_array() {
         for part in parts {
             if let Some(s) = part["text"].as_str() {
-                reasoning.push_str(s);
+                push_piece(reasoning, s);
             }
         }
     }
     if let Some(parts) = item["content"].as_array() {
         for part in parts {
             if let Some(s) = part["text"].as_str() {
-                reasoning.push_str(s);
+                push_piece(reasoning, s);
             }
         }
     }
@@ -635,5 +680,98 @@ mod tests {
         );
         assert_eq!(out.text, "answer");
         assert_eq!(out.reasoning, "plan");
+    }
+
+    /// 抓到的是原件（含 id），不是拍平文本。
+    #[test]
+    fn completed_response_keeps_raw_reasoning_items() {
+        let out = parse_json(
+            r#"{
+                "output":[
+                    {"type":"reasoning","id":"rs_1","status":"completed",
+                     "summary":[{"type":"summary_text","text":"plan"}],
+                     "content":[{"text":"step one"}]},
+                    {"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"}
+                ]
+            }"#,
+        );
+        assert_eq!(out.reasoning_items.len(), 1);
+        assert_eq!(out.reasoning_items[0]["id"], "rs_1");
+        assert_eq!(out.reasoning, "plan\nstep one");
+    }
+
+    /// 回放：推理项排在同轮 message / function_call 之前，`status` 去掉，
+    /// `content[]` 补上 `reasoning_text` 判别符。
+    #[test]
+    fn reasoning_items_replay_before_the_turn_they_belong_to() {
+        let llm = LlmOutput {
+            text: "answer".into(),
+            reasoning: "plan".into(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }],
+            reasoning_items: vec![json!({
+                "type": "reasoning",
+                "id": "rs_1",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": "plan"}],
+                "content": [{"text": "step one"}],
+            })],
+            ..LlmOutput::default()
+        };
+        let request = req(vec![
+            LogEvent::User("go".into()),
+            LogEvent::LlmStream(llm),
+            LogEvent::ToolExecute {
+                id: "c1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+                content: "ok".into(),
+                images: Vec::new(),
+            },
+        ]);
+        let items = input_items(&request, &[], true);
+        let kinds: Vec<&str> = items
+            .iter()
+            .map(|i| {
+                i["type"]
+                    .as_str()
+                    .unwrap_or_else(|| i["role"].as_str().unwrap_or("?"))
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "message",   // system
+                "message",   // user
+                "reasoning", // 推理项在前
+                "message",   // assistant 文本
+                "function_call",
+                "function_call_output",
+            ],
+            "{items:#?}"
+        );
+        let reasoning = items.iter().find(|i| i["type"] == "reasoning").unwrap();
+        assert_eq!(reasoning["id"], "rs_1");
+        assert!(reasoning.get("status").is_none(), "status 是 output-only");
+        assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
+        assert_eq!(reasoning["summary"][0]["type"], "summary_text");
+    }
+
+    /// 没抓到原件（中断流、压缩过的历史、旧会话文件）就什么都不放回去。
+    #[test]
+    fn no_items_means_no_replay() {
+        let request = req(vec![
+            LogEvent::User("go".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "answer".into(),
+                reasoning: "plan".into(),
+                ..LlmOutput::default()
+            }),
+        ]);
+        let items = input_items(&request, &[], true);
+        assert!(items.iter().all(|i| i["type"] != "reasoning"), "{items:#?}");
     }
 }

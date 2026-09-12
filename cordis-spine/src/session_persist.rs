@@ -64,6 +64,10 @@ enum WireEvent {
         reasoning_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<WireToolCall>,
+        /// Responses API 的原始 reasoning item，回放推理链要用。旧文件没有这个
+        /// 字段，`default` 让它们照常读出来（只是不再有推理链可回放）。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reasoning_items: Vec<serde_json::Value>,
     },
     Tool {
         id: String,
@@ -364,6 +368,7 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
             text: out.text.clone(),
             reasoning: out.reasoning.clone(),
             reasoning_ms: out.reasoning_ms,
+            reasoning_items: out.reasoning_items.clone(),
             tool_calls: out
                 .tool_calls
                 .iter()
@@ -401,10 +406,12 @@ fn from_wire(event: WireEvent) -> LogEvent {
             reasoning,
             reasoning_ms,
             tool_calls,
+            reasoning_items,
         } => LogEvent::LlmStream(LlmOutput {
             text,
             reasoning,
             reasoning_ms,
+            reasoning_items,
             tool_calls: tool_calls
                 .into_iter()
                 .map(|c| ToolCall {
@@ -498,6 +505,43 @@ mod tests {
         assert_eq!(loaded[0].events, item.events);
         remove("abc123", cwd).unwrap();
         assert!(load_cwd(cwd).is_empty());
+    }
+
+    /// Responses 的推理链要跨会话活下来；旧文件没有这个字段也得读得出来。
+    #[test]
+    fn roundtrip_reasoning_items_and_reads_old_rows() {
+        let _home = crate::test_env::scoped().home();
+        let cwd = Path::new("/tmp/dock-persist-reasoning-test");
+        let item = ArchivedSession {
+            id: "rs1".into(),
+            title: "reasoning".into(),
+            events: vec![LogEvent::LlmStream(LlmOutput {
+                text: "answer".into(),
+                reasoning: "plan".into(),
+                reasoning_items: vec![serde_json::json!({
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{"type": "summary_text", "text": "plan"}],
+                })],
+                ..LlmOutput::default()
+            })],
+            times: vec![SystemTime::now()],
+            compact_prefix: None,
+            compact_from: 0,
+        };
+        save(&item, cwd).unwrap();
+        let loaded = load_cwd(cwd);
+        assert_eq!(loaded[0].events, item.events);
+        remove("rs1", cwd).unwrap();
+
+        // 旧格式（没有 reasoning_items）照常读，只是没推理链可回放。
+        let old: WireEvent =
+            serde_json::from_str(r#"{"kind":"llm","text":"hi","reasoning":"plan"}"#).unwrap();
+        let LogEvent::LlmStream(out) = from_wire(old) else {
+            panic!("expected llm row");
+        };
+        assert_eq!(out.text, "hi");
+        assert!(out.reasoning_items.is_empty());
     }
 
     #[test]

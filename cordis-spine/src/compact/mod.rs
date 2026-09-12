@@ -19,10 +19,9 @@ use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::error::{Error, Result};
 use crate::llm::Llm;
-use crate::names::{COMPACT, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS, TURN};
+use crate::names::{COMPACT, LLM, SESSIONS, SYSTEM_PROMPT, TURN};
 use crate::prompt::SystemPrompt;
 use crate::session::Sessions;
-use crate::tools::Tools;
 use crate::turn::TurnControl;
 use crate::types::{LogEvent, PromptRequest};
 
@@ -126,10 +125,6 @@ async fn compact_session_locked(
         return Err(Error::Compact("没有可压缩的对话。".into()));
     }
     let llm = ctx.require::<Llm>(LLM)?;
-    let tools = ctx
-        .get::<Tools>(TOOLS)
-        .map(|t| t.specs_for_model_on(ctx))
-        .unwrap_or_default();
     let mut request_history = prepare_conversation_for_summarization(&history);
     request_history.push(LogEvent::User(build_summary_prompt_kind(
         SummaryPromptKind::Structured,
@@ -154,7 +149,11 @@ async fn compact_session_locked(
                 PromptRequest {
                     system: system.clone(),
                     history: request_history.clone(),
-                    tools: tools.clone(),
+                    // 摘要不该调工具（调了下面就判失败），带着整张工具表只是白
+                    // 付几千 token，还会让「带 tools 就必须回传 reasoning_content」
+                    // 这类上游约束平白多一处触发点。Grok 这里是带的，这条是有意
+                    // 偏离。
+                    tools: Vec::new(),
                 },
             )
             .await;
@@ -296,6 +295,54 @@ mod tests {
             0,
             "summarizer sample must not land on the live log"
         );
+    }
+
+    /// 记下摘要请求长什么样。
+    #[derive(Default)]
+    struct CapturedRequest(std::sync::Mutex<Option<PromptRequest>>);
+
+    struct Capturing(Arc<CapturedRequest>, String);
+
+    impl Sampler for Capturing {
+        fn sample<'a>(
+            &'a self,
+            request: PromptRequest,
+            mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        ) -> BoxFuture<'a, LlmOutput> {
+            *self.0 .0.lock().unwrap() = Some(request);
+            let text = self.1.clone();
+            Box::pin(async move {
+                on_delta(StreamDelta::Text(text.clone()));
+                LlmOutput {
+                    text,
+                    ..LlmOutput::default()
+                }
+            })
+        }
+    }
+
+    /// 摘要调用不带工具表：摘要调工具本来就判失败，带着只是白付 token，
+    /// 并且给「带 tools 就必须回传 reasoning_content」这类上游约束多一处触发点。
+    #[tokio::test]
+    async fn summary_request_carries_no_tools() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        for e in sample_history() {
+            sessions.append(e);
+        }
+        let _s = root.provide(SESSIONS, sessions).unwrap();
+        let seen = Arc::new(CapturedRequest::default());
+        root.provide(
+            LLM,
+            Llm::from_sampler(
+                root.clone(),
+                Arc::new(Capturing(seen.clone(), healthy_summary())),
+            ),
+        )
+        .unwrap();
+        Compact.run_on(&root, None).await.unwrap();
+        let request = seen.0.lock().unwrap().take().expect("sampled once");
+        assert!(request.tools.is_empty(), "{:?}", request.tools);
     }
 
     #[tokio::test]
