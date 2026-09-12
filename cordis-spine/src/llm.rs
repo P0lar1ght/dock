@@ -139,14 +139,13 @@ pub fn llm() -> Plugin {
     plugin("llm", Inject::new(), |ctx, cfg: &LlmConfig| {
         let provided = match cfg.mode {
             LlmMode::Http => {
+                // 端点和模型都来自 config / env，这里不再替用户猜一个 xAI 地址
+                // 和 "grok-4"：猜错了只会得到一条看不懂的 404。
                 let sampler = HttpSampler {
                     ctx: ctx.clone(),
                     api_key: cfg.api_key.clone().unwrap_or_default(),
-                    api_base: cfg
-                        .api_base
-                        .clone()
-                        .unwrap_or_else(|| "https://api.x.ai/v1".into()),
-                    fallback_model: cfg.model.clone().unwrap_or_else(|| "grok-4".into()),
+                    api_base: cfg.api_base.clone().unwrap_or_default(),
+                    fallback_model: cfg.model.clone().unwrap_or_default(),
                 };
                 Llm::from_sampler(ctx.clone(), Arc::new(sampler))
             }

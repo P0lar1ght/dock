@@ -74,7 +74,7 @@ pub use config::{
     effective_browser_headed, load_browser_headed, load_catalog, load_disabled_mcp_tools,
     load_mcp_servers, persist_browser_headed, persist_disabled_mcp_tools,
     persist_mcp_server_enabled, ApiBackend, AuthScheme, McpOAuthConfig, McpServer, McpStdioFraming,
-    McpTransport, ModelChoice,
+    McpTransport, ModelChoice, DEFAULT_EFFORT_CHOICES,
 };
 pub use context_book::{context, own_sections, ContextBook};
 pub use context_usage::{

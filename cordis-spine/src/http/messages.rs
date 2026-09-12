@@ -1,6 +1,9 @@
 //! Anthropic Messages API (`POST /v1/messages`). Wire mapping copied from
 //! Grok `conversation/messages.rs` + L2 `stream/messages.rs`. Thinking from
 //! prior turns is omitted: Dock has no encrypted `signature` to replay.
+//!
+//! 前缀缓存要显式 `cache_control` 断点（不像 chat/completions 与 Responses 由
+//! 上游自动做），断点布局照抄 Grok `apply_cache_breakpoints`。
 
 use std::collections::BTreeMap;
 
@@ -20,18 +23,32 @@ pub fn body(
     model: &str,
     request: &PromptRequest,
     user_images: &[Vec<UserImage>],
-    thinking: bool,
-    effort: &str,
+    params: &super::WireParams,
+    prompt_cache: bool,
 ) -> Value {
-    let (system, messages) = transcript(request, user_images, model);
+    let (system, mut messages) = transcript(request, user_images, params.images);
+    let mut system_blocks: Vec<Value> = if system.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({"type": "text", "text": system})]
+    };
+    if prompt_cache {
+        apply_cache_breakpoints(&mut system_blocks, &mut messages);
+    }
     let mut body = json!({
         "model": model,
         "messages": messages,
-        "max_tokens": DEFAULT_MAX_TOKENS,
+        // Anthropic 这项必填，所以这里是唯一一个"没配就兜底"的参数。
+        "max_tokens": params.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         "stream": true,
     });
     if !system.is_empty() {
-        body["system"] = json!(system);
+        // 关掉缓存时保持老形状（纯字符串），给不认块数组的代理留条活路。
+        body["system"] = if prompt_cache {
+            Value::Array(system_blocks)
+        } else {
+            json!(system)
+        };
     }
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -50,7 +67,9 @@ pub fn body(
                 .collect(),
         );
     }
-    if thinking && effort != "none" {
+    // Off / Unsupported 都是不发 `thinking`：Anthropic 没有"显式关闭"的形状，
+    // 不发就是不想。
+    if params.reasoning == super::Reasoning::On && params.effort != "none" {
         body["thinking"] = json!({
             "type": "adaptive",
             "display": "summarized",
@@ -59,10 +78,67 @@ pub fn body(
     body
 }
 
+fn ephemeral() -> Value {
+    json!({"type": "ephemeral"})
+}
+
+/// Grok `mark_message_cache_breakpoint`：标最后一个带得动断点的块，跳过 API
+/// 不接受断点的 thinking。纯字符串 content 挂不住断点，先升成块数组。
+fn mark_message_cache_breakpoint(msg: &mut Value) -> bool {
+    match msg.get_mut("content") {
+        Some(Value::Array(blocks)) => {
+            for block in blocks.iter_mut().rev() {
+                let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+                if matches!(kind, "thinking" | "redacted_thinking") {
+                    continue;
+                }
+                let Some(obj) = block.as_object_mut() else {
+                    continue;
+                };
+                obj.insert("cache_control".into(), ephemeral());
+                return true;
+            }
+            false
+        }
+        Some(content @ Value::String(_)) => {
+            let text = std::mem::take(content);
+            *content = json!([{ "type": "text", "text": text, "cache_control": ephemeral() }]);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Grok `apply_cache_breakpoints`。缓存条目只在断点处写，所以只标 system 会让
+/// 整段对话都不进缓存。第三个断点覆盖「一轮追加的块数超过 API 20 块回看」的
+/// 情况。第四个槽留空：网关自己开自动缓存时会占用它，五个会被直接拒。
+fn apply_cache_breakpoints(system_blocks: &mut [Value], messages: &mut [Value]) {
+    if let Some(obj) = system_blocks.last_mut().and_then(Value::as_object_mut) {
+        obj.insert("cache_control".into(), ephemeral());
+    }
+    let tip = (0..messages.len())
+        .rev()
+        .find(|&i| mark_message_cache_breakpoint(&mut messages[i]));
+    // 上一次请求收尾的位置。一轮可能连着追加好几条 user 消息，所以整段跳过尾
+    // 部的 user 串，而不是只退一格。
+    let Some(tip) = tip else { return };
+    let prev = messages[..tip]
+        .iter()
+        .rposition(|m| m["role"] == "assistant")
+        .and_then(|assistant| {
+            messages[..assistant]
+                .iter()
+                .rposition(|m| m["role"] == "user")
+        });
+    if let Some(prev) = prev {
+        mark_message_cache_breakpoint(&mut messages[prev]);
+    }
+}
+
 pub fn transcript(
     request: &PromptRequest,
     user_images: &[Vec<UserImage>],
-    model: &str,
+    vision: bool,
 ) -> (String, Vec<Value>) {
     let mut messages = Vec::new();
     let mut user_i = 0usize;
@@ -117,7 +193,7 @@ pub fn transcript(
                         &sanitize_tool_id(id),
                         content,
                         images,
-                        model,
+                        vision,
                     ));
                 }
             }
@@ -553,7 +629,7 @@ mod tests {
             },
             LogEvent::User("follow-up".into()),
         ]);
-        let (system, msgs) = transcript(&request, &[], "claude");
+        let (system, msgs) = transcript(&request, &[], true);
         assert_eq!(system, "s");
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[1]["role"], "assistant");
@@ -584,12 +660,182 @@ mod tests {
                 parameters_json: r#"{"type":"object"}"#.into(),
             }],
         };
-        let body = body("claude", &request, &[], true, "high");
+        let body = body("claude", &request, &[], &params_on("high"), true);
         assert_eq!(body["tools"][0]["name"], "grep");
         assert!(body["tools"][0].get("function").is_none());
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(body["thinking"]["type"], "adaptive");
+    }
+
+    /// 思考开着、给定强度、支持读图的一组参数（测试默认）。
+    fn params_on(effort: &str) -> crate::http::WireParams {
+        crate::http::WireParams {
+            reasoning: crate::http::Reasoning::On,
+            effort: effort.into(),
+            max_output_tokens: None,
+            images: true,
+        }
+    }
+
+    fn marker_on_last_block(msg: &Value) -> Option<&str> {
+        msg["content"]
+            .as_array()?
+            .last()?
+            .get("cache_control")?
+            .get("type")?
+            .as_str()
+    }
+
+    fn count_markers(body: &Value) -> usize {
+        fn walk(v: &Value, n: &mut usize) {
+            match v {
+                Value::Object(map) => {
+                    if map.contains_key("cache_control") {
+                        *n += 1;
+                    }
+                    map.values().for_each(|v| walk(v, n));
+                }
+                Value::Array(items) => items.iter().for_each(|v| walk(v, n)),
+                _ => {}
+            }
+        }
+        let mut n = 0;
+        walk(body, &mut n);
+        n
+    }
+
+    /// 两轮对话：system + 末尾 tip + 上一轮收尾处，共三个断点，第四槽留空。
+    #[test]
+    fn cache_breakpoints_mark_system_tip_and_previous_turn() {
+        let request = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("first".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    text: "answer one".into(),
+                    ..LlmOutput::default()
+                }),
+                LogEvent::User("second".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                    }],
+                    ..LlmOutput::default()
+                }),
+                LogEvent::ToolExecute {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    content: "ok".into(),
+                    images: Vec::new(),
+                },
+            ],
+            tools: vec![],
+        };
+        let body = body("claude", &request, &[], &params_on("high"), true);
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 5, "{body:#}");
+        // tip = 最后一条（工具结果那条 user）。
+        assert_eq!(
+            marker_on_last_block(&msgs[4]),
+            Some("ephemeral"),
+            "{body:#}"
+        );
+        // 上一轮收尾：从 tip 往回找最后一个 assistant（3），再往回找 user（2）。
+        // 这个位置在整轮工具循环里不动，所以每一步都能命中它。
+        assert_eq!(
+            marker_on_last_block(&msgs[2]),
+            Some("ephemeral"),
+            "{body:#}"
+        );
+        assert_eq!(msgs[0]["content"], "first", "更早的轮次不打断点");
+        assert!(msgs[1]["content"][0].get("cache_control").is_none());
+        assert_eq!(count_markers(&body), 3, "第四个槽留给网关：{body:#}");
+    }
+
+    /// 纯字符串 content 挂不住断点，要先升成块数组（Grok 同款）。
+    #[test]
+    fn cache_breakpoint_promotes_plain_text_content() {
+        let request = PromptRequest {
+            system: String::new(),
+            history: vec![LogEvent::User("only".into())],
+            tools: vec![],
+        };
+        let body = body("claude", &request, &[], &params_on("high"), true);
+        let msg = &body["messages"][0];
+        assert_eq!(msg["content"][0]["type"], "text");
+        assert_eq!(msg["content"][0]["text"], "only");
+        assert_eq!(marker_on_last_block(msg), Some("ephemeral"), "{body:#}");
+    }
+
+    /// API 不接受 thinking 上的断点：往前找下一个能带的块。
+    #[test]
+    fn cache_breakpoint_skips_thinking_blocks() {
+        let mut msg = json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "answer"},
+                {"type": "thinking", "thinking": "plan"},
+            ],
+        });
+        assert!(mark_message_cache_breakpoint(&mut msg));
+        assert!(msg["content"][1].get("cache_control").is_none());
+        assert_eq!(msg["content"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// 关掉开关就回到老形状：system 还是纯字符串，全身没有 cache_control。
+    #[test]
+    fn prompt_cache_off_keeps_the_plain_shape() {
+        let request = PromptRequest {
+            system: "s".into(),
+            history: vec![LogEvent::User("hi".into())],
+            tools: vec![],
+        };
+        let body = body("claude", &request, &[], &params_on("high"), false);
+        assert_eq!(body["system"], "s");
+        assert_eq!(body["messages"][0]["content"], "hi");
+        assert_eq!(count_markers(&body), 0, "{body:#}");
+    }
+
+    /// max_tokens 是 Anthropic 必填项：没配才兜底，配了就用配的。
+    /// thinking 只在"支持且开着"时发——Anthropic 没有"显式关闭"的形状。
+    #[test]
+    fn messages_body_honours_model_config() {
+        let request = PromptRequest {
+            system: String::new(),
+            history: vec![LogEvent::User("hi".into())],
+            tools: vec![],
+        };
+        let out = body("claude", &request, &[], &params_on(""), true);
+        assert_eq!(out["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(out["thinking"]["type"], "adaptive");
+
+        let params = crate::http::WireParams {
+            max_output_tokens: Some(2048),
+            ..params_on("")
+        };
+        assert_eq!(
+            body("claude", &request, &[], &params, true)["max_tokens"],
+            2048
+        );
+
+        for state in [
+            crate::http::Reasoning::Off,
+            crate::http::Reasoning::Unsupported,
+        ] {
+            let params = crate::http::WireParams {
+                reasoning: state,
+                ..params_on("")
+            };
+            let out = body("claude", &request, &[], &params, true);
+            assert!(out.get("thinking").is_none(), "{out}");
+        }
     }
 
     #[test]
