@@ -58,41 +58,55 @@ fn render_uncached(text: &str, theme: &Theme, width: usize) -> Rendered {
     let mut renderer = cordis_markdown::StreamingMarkdownRenderer::new(md_style::style(), true);
     renderer.push(text);
     let output = renderer.finish_into_output(Some(syntect));
-    let mermaid_bodies: Vec<String> = output
+    let mut lines = output.lines;
+    // 插入位置按原 `output.lines` 坐标算。倒序插入互不影响低位的坐标，
+    // 但每个先插的高位元素会被后续所有更低的插入推后一位：最终下标 =
+    // 原下标 + 升序排名。wrap 之后靠这份下标显式映射，不再回认文本
+    // （窄窗下折行会把一个块认成两个，第二块的源码被第一块吃掉）。
+    //
+    // 源码跟着 `inserts` 走，不另开一个按 `code_blocks` 顺序的平行数组：
+    // 这里按位置排过序，平行数组只有在「块顺序恰好等于位置顺序」时才对得上。
+    let mut inserts: Vec<(usize, &str)> = output
         .code_blocks
         .iter()
         .filter(|cb| cb.info.split_whitespace().next() == Some("mermaid"))
-        .map(|cb| cb.body.clone())
+        .map(|cb| (cb.output_line_range.end.min(lines.len()), cb.body.as_str()))
         .collect();
-    let mut lines = output.lines;
-    for cb in output.code_blocks.iter().rev() {
-        if cb.info.split_whitespace().next() != Some("mermaid") {
-            continue;
-        }
-        let at = cb.output_line_range.end.min(lines.len());
-        lines.insert(at, mermaid_affordance(theme));
+    inserts.sort_by_key(|(at, _)| *at);
+    // `(最终行号, 源码)`，按行号升序。
+    let mut affordances: Vec<(usize, &str)> = Vec::with_capacity(inserts.len());
+    for (rank, (at, body)) in inserts.iter().enumerate().rev() {
+        lines.insert(*at, mermaid_affordance(theme, width));
+        affordances.push((at + rank, *body));
     }
-    let lines = if width == 0 {
+    affordances.reverse();
+    let mut mermaid = Vec::new();
+    let lines: Vec<Line<'static>> = if width == 0 {
+        mermaid.extend(affordances.iter().map(|(at, body)| (*at, body.to_string())));
         lines
     } else {
-        word_wrap_lines(lines, width)
-    };
-    let mut mermaid = Vec::new();
-    let mut i = 0usize;
-    for (idx, line) in lines.iter().enumerate() {
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        if mermaid::is_affordance_text(&text) {
-            if let Some(body) = mermaid_bodies.get(i) {
-                mermaid.push((idx, body.clone()));
-                i += 1;
+        // affordance 行不参与 word wrap：宽度不够时少画按钮
+        // （`mermaid::line_for_width`），折行会让 `[Copy Source]` 掉到
+        // 下一行，映射和点击都错位。
+        let mut out = Vec::new();
+        let mut next = affordances.iter().peekable();
+        for (i, line) in lines.into_iter().enumerate() {
+            match next.peek() {
+                Some((at, body)) if *at == i => {
+                    mermaid.push((out.len(), body.to_string()));
+                    next.next();
+                    out.push(line);
+                }
+                _ => out.extend(word_wrap_lines(vec![line], width)),
             }
         }
-    }
+        out
+    };
     Rendered { lines, mermaid }
 }
 
-fn mermaid_affordance(theme: &Theme) -> Line<'static> {
-    mermaid::line(theme)
+fn mermaid_affordance(theme: &Theme, width: usize) -> Line<'static> {
+    mermaid::line_for_width(theme, width as u16)
 }
 
 #[cfg(test)]
@@ -121,5 +135,77 @@ mod tests {
         );
         assert_eq!(rendered.mermaid.len(), 1);
         assert!(rendered.mermaid[0].1.contains("flowchart"));
+    }
+
+    /// 窄窗下 affordance 行不折行：折成两截会把一个块认成两个，
+    /// 两个块时第二块的源码被第一块的第二截吃掉。
+    #[test]
+    fn two_mermaid_blocks_in_narrow_window_keep_their_own_bodies() {
+        let theme = Theme::groknight();
+        let md = concat!(
+            "```mermaid\nflowchart TD\nA-->B\n```\n\n",
+            "过渡段。\n\n",
+            "```mermaid\nflowchart LR\nC-->D\n```\n",
+        );
+        let rendered = render(md, &theme, 40);
+        assert_eq!(rendered.mermaid.len(), 2, "one row per block");
+        assert!(
+            rendered.mermaid[0].1.contains("A-->B"),
+            "{:?}",
+            rendered.mermaid
+        );
+        assert!(
+            rendered.mermaid[1].1.contains("C-->D"),
+            "{:?}",
+            rendered.mermaid
+        );
+        // 每个 affordance 行都只占一行（没被折开）。
+        let rows = rendered
+            .lines
+            .iter()
+            .filter(|l| {
+                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                t.contains("[Open Image]")
+            })
+            .count();
+        assert_eq!(rows, 2);
+        // 映射行号直接指向 affordance 行本身。
+        for (idx, _) in &rendered.mermaid {
+            let t: String = rendered.lines[*idx]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert!(
+                t.contains("[Open Image]"),
+                "line {idx} is not an affordance row: {t}"
+            );
+        }
+    }
+
+    /// 窄窗省按钮的口径：40 列保 [Open Image] + [Copy Source]（丢
+    /// [Copy Image Path]），24 列只保 [Open Image]；画出来的列位和
+    /// hit_kind 共享同一套按钮表，不会漂移。
+    #[test]
+    fn affordance_buttons_shrink_with_width_and_stay_hittable() {
+        assert_eq!(
+            mermaid::hit_kind(12, 40),
+            Some(mermaid::AffordanceKind::Open)
+        );
+        assert_eq!(
+            mermaid::hit_kind(27, 40),
+            Some(mermaid::AffordanceKind::CopySource)
+        );
+        assert_eq!(mermaid::hit_kind(27, 24), None);
+        assert_eq!(
+            mermaid::hit_kind(12, 24),
+            Some(mermaid::AffordanceKind::Open)
+        );
+        let theme = Theme::groknight();
+        let line = mermaid::line_for_width(&theme, 24);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[Open Image]"), "{text}");
+        assert!(!text.contains("[Copy Image Path]"), "{text}");
+        assert!(!text.contains("[Copy Source]"), "{text}");
     }
 }

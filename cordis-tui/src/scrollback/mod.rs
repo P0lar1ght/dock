@@ -138,6 +138,10 @@ pub struct Scrollback {
     last_area: Mutex<Rect>,
     mouse: Mutex<Option<(u16, u16)>>,
     selection: Mutex<SelectionState>,
+    /// `/find` 结果按 query 记一层 memo：paint_overlay 每帧都查一遍，
+    /// 不 memo 的话每帧都要扫整份 transcript 的行文本。带上 layout key，
+    /// transcript 一变 memo 即失效。
+    find_memo: Mutex<FindMemo>,
 }
 
 impl Scrollback {
@@ -158,6 +162,7 @@ impl Scrollback {
             layout_cache_key: Mutex::new(None),
             last_area: Mutex::new(Rect::default()),
             mouse: Mutex::new(None),
+            find_memo: Mutex::new(None),
             selection: Mutex::new(SelectionState {
                 pending: None,
                 drag: None,
@@ -193,7 +198,15 @@ impl Scrollback {
 
     pub fn scroll_page(&self, pages: i16) {
         let height = self.last_area.lock().unwrap().height.max(1);
-        self.scroll(pages.saturating_mul(height as i16 / 2).max(pages));
+        let half = height as i16 / 2;
+        // 窗口太矮时退化为整页 → 一行；正常时按半屏翻。保号，不许把
+        // PageDown 的 -half 夹成 -1（旧实现的 `.max(pages)` 正是这么干的）。
+        let delta = if half == 0 {
+            pages
+        } else {
+            pages.saturating_mul(half)
+        };
+        self.scroll(delta);
     }
 
     pub fn set_mouse(&self, column: u16, row: u16) {
@@ -364,7 +377,7 @@ impl Scrollback {
         let scroll = extra.saturating_sub(offset);
         let line_idx = (row.saturating_sub(area.y) as usize).saturating_add(scroll as usize);
         if let Some((_, src)) = frame.mermaid.iter().find(|(i, _)| *i == line_idx) {
-            return match mermaid::hit_kind(column.saturating_sub(area.x)) {
+            return match mermaid::hit_kind(column.saturating_sub(area.x), area.width) {
                 Some(kind) => ClickHit::Mermaid {
                     kind,
                     source: src.clone(),
@@ -448,10 +461,25 @@ impl Scrollback {
         if q.is_empty() {
             return Vec::new();
         }
+        // 走 ensure_frame + last_frame：paint_overlay 每帧都调 find，绕过
+        // 缓存等于在后台任务跑着时 12.5Hz 重跑整份 markdown + syntect。
+        // 宽度用真实宽度 —— 旧实现 .max(40) 建出的帧行数和 last_frame
+        // 对不上，jump_to_line 是按 last_frame 算 offset 的，窄窗下跳过去
+        // 是错的行。
+        let width = self.last_area.lock().unwrap().width as usize;
+        if width == 0 {
+            return Vec::new();
+        }
+        self.ensure_frame(width);
+        let layout_key = *self.layout_cache_key.lock().unwrap();
+        if let Some((key, cached_q, hits)) = self.find_memo.lock().unwrap().as_ref() {
+            if Some(*key) == layout_key && cached_q == q {
+                return hits.clone();
+            }
+        }
         let needle = q.to_ascii_lowercase();
-        let width = self.last_area.lock().unwrap().width.max(40) as usize;
-        let frame = self.build(width);
-        frame
+        let frame = self.last_frame.lock().unwrap();
+        let hits: Vec<(usize, String)> = frame
             .lines
             .iter()
             .enumerate()
@@ -461,9 +489,13 @@ impl Scrollback {
                     .contains(&needle)
                     .then_some((i, text.trim().to_string()))
             })
-            .collect()
+            .collect();
+        drop(frame);
+        if let Some(key) = layout_key {
+            *self.find_memo.lock().unwrap() = Some((key, q.to_string(), hits.clone()));
+        }
+        hits
     }
-
     pub fn jump_to_line(&self, line_idx: usize) {
         let area = *self.last_area.lock().unwrap();
         let frame = self.last_frame.lock().unwrap();
@@ -713,6 +745,9 @@ pub(crate) fn lines_from_events(events: &[LogEvent]) -> Vec<Line<'static>> {
 
 /// Grok `timestamp_reserved`: `"  12:30 PM"` is 10 columns.
 const TIMESTAMP_RESERVED: usize = 10;
+
+/// `(layout_key, query, hits)` — `/find` 的 memo 载荷。
+type FindMemo = Option<(u64, String, Vec<(usize, String)>)>;
 
 fn message_wrap(width: usize, show_ts: bool) -> usize {
     if show_ts {
@@ -1219,8 +1254,10 @@ fn paint_live_chrome(
 
 fn format_timestamp(at: SystemTime, expanded: bool) -> String {
     let dt: DateTime<Local> = at.into();
+    // hover 态也必须 ≤ TIMESTAMP_RESERVED（10 列）：正文是按 10 列让位的，
+    // 超宽会把行尾 9 列字盖掉。展开只换内容，不换宽度。
     if expanded {
-        dt.format("  %H:%M:%S | %b %d").to_string()
+        dt.format("  %H:%M:%S").to_string()
     } else if cfg!(unix) {
         dt.format("  %-I:%M %p").to_string()
     } else {
@@ -1323,8 +1360,14 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let compact = format_timestamp(at, false);
         assert!(compact.contains(':'), "{compact}");
+        // hover 展开到秒，但宽度必须仍 ≤ TIMESTAMP_RESERVED（正文按 10 列
+        // 让位）；旧格式 `"  %H:%M:%S | %b %d"` 是 19 列，会盖掉行尾 9 列字。
         let hover = format_timestamp(at, true);
-        assert!(hover.contains('|'), "{hover}");
+        assert!(hover.contains(':'), "{hover}");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(hover.as_str()) <= TIMESTAMP_RESERVED,
+            "{hover}"
+        );
     }
 
     #[test]
@@ -2189,6 +2232,109 @@ mod live_chrome_tests {
             gutter(&night),
             gutter(&day),
             "body cache ignored the palette"
+        );
+    }
+
+    /// 旧实现 `pages.saturating_mul(half).max(pages)` 把所有负向翻页夹成
+    /// -1：PageDown / Ctrl+D 只滚一行。24 行高、下翻两页应动 24 行。
+    #[test]
+    fn page_down_scrolls_half_a_screen_not_one_line() {
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        *sb.last_area.lock().unwrap() = Rect::new(0, 0, 80, 24);
+        *sb.offset.lock().unwrap() = 100;
+        sb.scroll_page(-1);
+        assert_eq!(
+            *sb.offset.lock().unwrap(),
+            88,
+            "one page down = half screen"
+        );
+        sb.scroll_page(-1);
+        assert_eq!(
+            *sb.offset.lock().unwrap(),
+            76,
+            "second page down = full screen"
+        );
+        sb.scroll_page(1);
+        assert_eq!(*sb.offset.lock().unwrap(), 88, "page up still works");
+    }
+
+    /// 窗口矮到半屏算不出（height < 2）时退化为一次一行，且两个方向都要动。
+    #[test]
+    fn page_scroll_in_a_one_line_window_moves_one_line() {
+        let (root, _sessions) = running_session();
+        let sb = Scrollback::new(root);
+        *sb.last_area.lock().unwrap() = Rect::new(0, 0, 80, 1);
+        *sb.offset.lock().unwrap() = 10;
+        sb.scroll_page(1);
+        assert_eq!(*sb.offset.lock().unwrap(), 11);
+        sb.scroll_page(-1);
+        assert_eq!(*sb.offset.lock().unwrap(), 10);
+    }
+
+    /// hover 态时间戳换格式但不能换宽度：正文按 TIMESTAMP_RESERVED=10 让
+    /// 位，旧的 `"  %H:%M:%S | %b %d"` 是 19 列，鼠标一靠右就盖掉 9 列字。
+    #[test]
+    fn hover_timestamp_stays_within_reserved_columns() {
+        let at = std::time::SystemTime::UNIX_EPOCH;
+        let hover = format_timestamp(at, true);
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(hover.as_str()),
+            TIMESTAMP_RESERVED,
+            "{hover}"
+        );
+        let normal = format_timestamp(at, false);
+        assert!(
+            unicode_width::UnicodeWidthStr::width(normal.as_str()) <= TIMESTAMP_RESERVED,
+            "{normal}"
+        );
+    }
+
+    /// find 用真实宽度（不再是 `.max(40)`）并直接读 last_frame，窄窗下
+    /// jump_to_line 落点才是命中行。
+    #[test]
+    fn find_at_narrow_width_jumps_to_the_matching_line() {
+        use cordis::Context;
+        use cordis_spine::{LlmOutput, Sessions, SESSIONS};
+        use ratatui::widgets::Widget;
+
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        root.provide(SESSIONS, sessions.clone()).unwrap();
+        for i in 0..40 {
+            sessions.append(LogEvent::User(format!("msg-{i}")));
+            sessions.append(LogEvent::LlmStream(LlmOutput {
+                text: format!("reply-{i} {}", "more text for wrapping ".repeat(8)),
+                ..LlmOutput::default()
+            }));
+        }
+        let sb = Scrollback::new(root);
+        let area = Rect::new(0, 0, 30, 10);
+        let mut buf = Buffer::empty(area);
+        Widget::render(&sb, area, &mut buf);
+
+        let hits = sb.find("reply-7");
+        assert!(!hits.is_empty());
+        let (idx, text) = &hits[0];
+        assert!(text.contains("reply-7"), "{text}");
+        sb.jump_to_line(*idx);
+
+        let frame = sb.last_frame.lock().unwrap();
+        let extra = frame.lines.len().saturating_sub(area.height as usize) as u16;
+        let offset = *sb.offset.lock().unwrap();
+        let top = extra.saturating_sub(offset) as usize;
+        let visible: String = (top..(top + area.height as usize).min(frame.lines.len()))
+            .map(|i| {
+                frame.lines[i]
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            visible.contains("reply-7"),
+            "jump must land on the match; visible window:\n{visible}"
         );
     }
 }

@@ -13,7 +13,7 @@ Grok pager 界面，拆成 Cordis 插件。Harness 只 `plugin(tui())`。全屏�
 
 发消息时 live lookup `session.port`，不把 `Arc` 关进闭包。
 
-Slash / 快捷键：`/new` `Ctrl+W` 归档后清空；`/resume` / F3 会话 picker（可搜索）；`/history` 提示词历史；`/find` 搜索 scrollback；`/copy` 复制上一条助手回复；`/help` 或 `Ctrl+.` 快捷键速查；`/quit` 退出。Composer 支持左右光标、`Shift+Enter` 换行、`@` 文件补全。Mermaid 块可点 `[Copy Source]`。
+Slash / 快捷键：`/new` `Ctrl+W` 归档后清空；`/resume` / F3 会话 picker（可搜索）；`/history` 提示词历史；`/find` 搜索 scrollback；`/copy` 复制上一条助手回复；`/help` 或 `Ctrl+.` 快捷键速查；`/quit` 退出。Composer 支持左右光标、`Shift+Enter` 换行、`@` 文件补全。Mermaid 块可点 `[Copy Source]`（affordance 行不换行：面板放不下时按 `[Copy Image Path]` → `[Copy Source]` 的顺序省按钮，画出的列位与点击判定共用同一张表）。
 
 ```bash
 cargo run -p cordis-app
