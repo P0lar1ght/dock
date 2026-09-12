@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 use crate::grok::glyphs;
 use crate::grok::line_utils::{truncate_line, truncate_str};
 use crate::grok::todo_pane::{todo_icon, TodoPaneStyle};
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -245,8 +246,8 @@ pub fn card_lines(
     let mut header = call_header(&items, theme, width);
     if running && mode == ToolMode::Collapsed {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if mode == ToolMode::Collapsed || items.is_empty() {
         return vec![header];
     }
@@ -261,7 +262,7 @@ pub fn card_lines(
         out.push(item_row(item, &style, width));
     }
     if let Some(rest) = items.len().checked_sub(cap).filter(|n| *n > 0) {
-        out.push(note_row(format!("… 还有 {rest} 项"), theme));
+        out.push(card::elision(rest, "项", theme));
     }
     out
 }

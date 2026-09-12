@@ -11,6 +11,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::grok::line_utils::truncate_line;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::theme::Theme;
 use cordis_spine::{JobSnapshot, SubagentSnap};
@@ -163,7 +164,7 @@ pub fn lines(
     }
     let mut out = vec![line];
     if let (Some(preview), false) = (preview, running) {
-        let mut prev = Line::from(Span::styled(format!("  {preview}"), theme.dim()));
+        let mut prev = card::indent(Line::from(Span::styled(preview, theme.dim())));
         if width > 0 {
             prev = truncate_line(prev, width);
         }

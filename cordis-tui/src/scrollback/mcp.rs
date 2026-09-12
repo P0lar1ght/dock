@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
-use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -33,13 +33,13 @@ pub fn lines(
         &card_name(name, arguments),
         theme,
         muted,
-        Some(width.saturating_sub(2)),
+        Some(card::header_width(width)),
     );
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -49,16 +49,16 @@ pub fn lines(
     if !args.is_empty() {
         out.push(Line::from(""));
         for (key, val) in &args {
-            out.push(Line::from(vec![
-                Span::styled(format!("  {key}: "), theme.muted()),
+            out.push(card::indent(Line::from(vec![
+                Span::styled(format!("{key}: "), theme.muted()),
                 Span::styled(val.clone(), theme.primary()),
-            ]));
+            ])));
         }
     }
     if running && content.is_empty() {
         out.push(Line::from(""));
-        out.push(Line::from(live::running_body(theme)));
-        return finish(out, width);
+        out.push(card::indent(Line::from(live::running_body(theme))));
+        return out;
     }
     if !content.is_empty() {
         out.push(Line::from(""));
@@ -73,25 +73,16 @@ pub fn lines(
         } else {
             (raw.as_slice(), None)
         };
-        for line in shown {
-            out.push(Line::from(Span::styled(format!("  {line}"), failed_style)));
-        }
+        let rows: Vec<Line<'static>> = shown
+            .iter()
+            .map(|line| Line::from(Span::styled(line.to_string(), failed_style)))
+            .collect();
+        out.extend(card::body(rows, width));
         if let Some(remaining) = extra {
-            out.push(Line::from(Span::styled(
-                format!("  … 还有 {remaining} 行"),
-                theme.dim(),
-            )));
+            out.push(card::elision(remaining, "行", theme));
         }
     }
-    finish(out, width)
-}
-
-fn finish(out: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    if width == 0 {
-        out
-    } else {
-        word_wrap_lines(out, width)
-    }
+    out
 }
 
 fn looks_failed(content: &str) -> bool {

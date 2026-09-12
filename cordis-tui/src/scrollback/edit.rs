@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
 use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -64,33 +65,41 @@ pub fn lines(
         diff.deletes,
         muted,
         theme,
-        width.saturating_sub(2).max(8),
+        card::header_width(width),
     );
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
 
     let mut out = vec![header, Line::from("")];
     if failed {
-        for line in content.lines() {
-            out.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(theme.accent_error),
-            )));
-        }
+        let rows: Vec<Line<'static>> = content
+            .lines()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.accent_error),
+                ))
+            })
+            .collect();
+        out.extend(card::body(rows, width));
         return out;
     }
     if running && diff.rows.is_empty() {
-        out.push(Line::from(live::running_body(theme)));
+        out.push(card::indent(Line::from(live::running_body(theme))));
         return out;
     }
     let body = render_diff_rows(&diff.rows, theme, width);
-    out.extend(apply_truncation(body, mode, theme));
+    if mode == ToolMode::Truncated {
+        out.extend(card::head_tail(body, FIRST_LINES, LAST_LINES, "行", theme));
+    } else {
+        out.extend(body);
+    }
     out
 }
 
@@ -235,34 +244,15 @@ fn render_diff_rows(rows: &[DiffRow], theme: &Theme, width: usize) -> Vec<Line<'
         ]);
         out.push(line);
     }
+    // `- ` / `+ ` 是这张卡自己的正文语言，缩进仍走公共外壳。
     if width == 0 {
-        out
+        out.into_iter().map(card::indent).collect()
     } else {
-        word_wrap_lines(out, width.saturating_sub(2).max(20))
+        word_wrap_lines(out, card::body_width(width))
+            .into_iter()
+            .map(card::indent)
+            .collect()
     }
-}
-
-fn apply_truncation(
-    wrapped: Vec<Line<'static>>,
-    mode: ToolMode,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    if mode != ToolMode::Truncated {
-        return wrapped;
-    }
-    let total = wrapped.len();
-    let threshold = FIRST_LINES + LAST_LINES;
-    if total <= threshold {
-        return wrapped;
-    }
-    let hidden = total - threshold;
-    let mut out: Vec<_> = wrapped.iter().take(FIRST_LINES).cloned().collect();
-    out.push(Line::from(Span::styled(
-        format!("\u{2026} +{hidden} lines"),
-        theme.muted(),
-    )));
-    out.extend(wrapped.into_iter().skip(total - LAST_LINES));
-    out
 }
 
 fn path_from_args(arguments: &str) -> Option<String> {

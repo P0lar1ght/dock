@@ -5,6 +5,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::grok::line_utils::truncate_line;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::theme::Theme;
 use cordis_spine::{LogEvent, SubagentSnap};
@@ -168,7 +169,8 @@ pub fn lines(
                 .unwrap_or(preview)
                 .trim();
             if !one.is_empty() {
-                let mut preview_line = Line::from(Span::styled(format!("  {one}"), theme.dim()));
+                let mut preview_line =
+                    card::indent(Line::from(Span::styled(one.to_string(), theme.dim())));
                 if width > 0 {
                     preview_line = truncate_line(preview_line, width);
                 }

@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
-use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -46,13 +46,13 @@ pub fn lines(
         &parsed,
         muted,
         theme,
-        width.saturating_sub(2).max(8),
+        card::header_width(width),
     );
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -85,40 +85,32 @@ pub fn lines(
     for (shown_files, file) in parsed.files.iter().enumerate() {
         if shown_files >= file_cap {
             let rest = parsed.files.len() - shown_files;
-            out.push(Line::from(Span::styled(
-                format!("  \u{2026} +{rest} more files"),
-                theme.muted(),
-            )));
+            out.push(card::elision(rest, "个文件", theme));
             break;
         }
-        out.push(Line::from(Span::styled(
-            format!("  {}", file.path),
+        out.push(card::indent(Line::from(Span::styled(
+            file.path.clone(),
             theme.fg(theme.path),
-        )));
+        ))));
         for (i, hit) in file.hits.iter().enumerate() {
             if i >= hit_cap {
                 let rest = file.hits.len() - hit_cap;
-                out.push(Line::from(Span::styled(
-                    format!("    \u{2026} +{rest} more"),
-                    theme.muted(),
-                )));
+                // 命中行比文件名再深一层：层级是信息，统一的是文案形状。
+                out.push(card::indent(card::elision(rest, "处", theme)));
                 break;
             }
             if let Some(n) = hit.line {
-                out.push(Line::from(vec![
-                    Span::styled(format!("    {n:>4}  "), theme.dim()),
+                out.push(card::indent(card::indent(Line::from(vec![
+                    Span::styled(format!("{n:>4}  "), theme.dim()),
                     Span::styled(hit.text.clone(), theme.primary()),
-                ]));
+                ]))));
             } else if !hit.text.is_empty() {
-                out.push(Line::from(Span::styled(
-                    format!("    {}", hit.text),
+                out.push(card::indent(card::indent(Line::from(Span::styled(
+                    hit.text.clone(),
                     theme.muted(),
-                )));
+                )))));
             }
         }
-    }
-    if width > 0 {
-        out = word_wrap_lines(out, width);
     }
     out
 }

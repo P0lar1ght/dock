@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_line;
-use crate::grok::wrapping::word_wrap_lines;
+use crate::scrollback::card;
 use crate::scrollback::live;
 use crate::scrollback::tool::ToolMode;
 use crate::theme::Theme;
@@ -35,13 +35,13 @@ pub fn lines(
         results.len(),
         muted,
         theme,
-        Some(width.saturating_sub(2)),
+        Some(card::header_width(width)),
     );
     prepend_diamond(&mut header, theme, failed);
     if running && !open {
         live::mark_running(&mut header, theme);
-        return vec![header];
     }
+    let header = card::finish_header(header, width, mode, theme);
     if !open {
         return vec![header];
     }
@@ -49,26 +49,30 @@ pub fn lines(
     let mut out = vec![header];
     if running && content.is_empty() {
         out.push(Line::from(""));
-        out.push(Line::from(live::running_body(theme)));
-        return finish(out, width);
+        out.push(card::indent(Line::from(live::running_body(theme))));
+        return out;
     }
     if failed {
         out.push(Line::from(""));
-        for line in content.lines() {
-            out.push(Line::from(Span::styled(
-                format!("  {line}"),
-                Style::default().fg(theme.accent_error),
-            )));
-        }
-        return finish(out, width);
+        let rows: Vec<Line<'static>> = content
+            .lines()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.accent_error),
+                ))
+            })
+            .collect();
+        out.extend(card::body(rows, width));
+        return out;
     }
     if results.is_empty() {
         out.push(Line::from(""));
-        out.push(Line::from(Span::styled(
-            "  (no results found)".to_string(),
+        out.push(card::indent(Line::from(Span::styled(
+            "（无结果）".to_string(),
             theme.muted(),
-        )));
-        return finish(out, width);
+        ))));
+        return out;
     }
 
     out.push(Line::from(""));
@@ -76,15 +80,15 @@ pub fn lines(
         let action = titleize(discovered_tool_action(&tool.name, &tool.server));
         let server = titleize(&tool.server);
         let mut spans = vec![
-            Span::styled(format!("  {}. ", i + 1), theme.muted()),
+            Span::styled(format!("{}. ", i + 1), theme.muted()),
             Span::styled(action, theme.primary().add_modifier(Modifier::BOLD)),
         ];
         if !server.is_empty() {
             spans.push(Span::styled(format!("  {server}"), theme.dim()));
         }
-        out.push(Line::from(spans));
+        out.push(card::indent(Line::from(spans)));
     }
-    finish(out, width)
+    out
 }
 
 struct DiscoveredTool {
@@ -187,14 +191,6 @@ fn header_line(
     match max_width {
         Some(w) => truncate_line(line, w),
         None => line,
-    }
-}
-
-fn finish(out: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    if width == 0 {
-        out
-    } else {
-        word_wrap_lines(out, width)
     }
 }
 
@@ -322,7 +318,7 @@ mod tests {
             ToolMode::Expanded,
             false,
         ));
-        assert!(text.contains("(no results found)"), "{text}");
+        assert!(text.contains("（无结果）"), "{text}");
     }
 
     #[test]
