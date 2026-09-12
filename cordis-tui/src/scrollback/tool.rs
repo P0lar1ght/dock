@@ -212,7 +212,8 @@ fn collapsed_line(
                 .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
                 .sum();
             let summary = format!("  {summary}");
-            if used + summary.len() <= w {
+            // 显示宽度，不是字节数：中文摘要 3 字节/字符只占 2 列。
+            if used + unicode_width::UnicodeWidthStr::width(summary.as_str()) <= w {
                 spans.push(Span::styled(summary, theme.muted()));
             }
         } else {
@@ -298,5 +299,22 @@ mod tests {
         assert_eq!(ToolMode::Collapsed.next(), Some(ToolMode::Truncated));
         assert_eq!(ToolMode::Truncated.next(), Some(ToolMode::Expanded));
         assert_eq!(ToolMode::Expanded.next(), None);
+    }
+
+    /// 中文摘要 3 字节/字符只占 2 列：按字节数比宽度会把放得下的摘要整条
+    /// 丢掉（旧实现 `used + summary.len()` 的笔误）。
+    #[test]
+    fn chinese_summary_fits_by_display_width_not_bytes() {
+        let theme = Theme::current();
+        // "Edit" 4 列 + "  中文参数" 10 列 = 14 列，正好放得下；
+        // 按字节算是 4 + 14 = 18 > 14，旧实现会丢。
+        let line = collapsed_line("Edit", "中文参数", &theme, false, Some(14));
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("中文参数"), "{text}");
+
+        // 真放不下（宽 12）时仍应被省掉，由 truncate_line 兜底头行。
+        let line = collapsed_line("Edit", "中文参数", &theme, false, Some(12));
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("中文参数"), "{text}");
     }
 }

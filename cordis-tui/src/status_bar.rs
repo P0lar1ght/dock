@@ -10,6 +10,10 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use super::theme::Theme;
+use crate::grok::line_utils::truncate_str;
+
+/// 顶栏相邻两段之间至少留这么多列。低于它三段会贴死成一串看不断的字。
+const SEG_GAP: u16 = 2;
 
 /// Status bar showing context information.
 ///
@@ -81,25 +85,54 @@ impl Widget for StatusBar<'_> {
         // Fill background (the whole row)
         buf.set_style(area, Style::default().bg(theme.bg_base));
 
-        // Left content
-        let left_w = UnicodeWidthStr::width(self.left) as u16;
-        let left_span = Span::styled(self.left, style);
-        buf.set_span(content_x, area.y, &left_span, content_width);
+        // 三段预算：right 优先、center 次之、left 吃剩下的，每相邻两段之间
+        // 留 SEG_GAP 列，各自截断后再画。旧实现 last-write-wins：长 cwd 铺满
+        // 整行，right 最后画直接盖掉 center 的尾巴，窄窗下中间那段被啃成乱码。
+        let right_text = self.right.map(|t| truncate_str(t, content_width as usize));
+        let right_w = right_text
+            .as_deref()
+            .map(|t| UnicodeWidthStr::width(t) as u16)
+            .unwrap_or(0);
 
-        if let Some(center) = self.center {
-            let center_width = UnicodeWidthStr::width(center) as u16;
-            let center_x = content_x + (content_width.saturating_sub(center_width)) / 2;
-            if center_x > content_x + left_w + 2 {
-                let center_span = Span::styled(center, style);
-                buf.set_span(center_x, area.y, &center_span, center_width);
-            }
+        let gap_for = |w: u16| if w > 0 { SEG_GAP } else { 0 };
+        // center 要么整段显示，要么不显示：`第 5 轮` 截成 `第` 比不画更难读，
+        // 而且它是可省的装饰位，left 的 cwd 尾巴才是要保的信息。
+        let for_center = content_width.saturating_sub(right_w + gap_for(right_w));
+        let center_text = self
+            .center
+            .filter(|c| UnicodeWidthStr::width(*c) as u16 <= for_center);
+        let center_w = center_text
+            .map(|c| UnicodeWidthStr::width(c) as u16)
+            .unwrap_or(0);
+
+        let for_left = for_center.saturating_sub(center_w + gap_for(center_w));
+        // 预算为 0 时干脆不画：`truncate_str(_, 0)` 返回的是 `…`，仍占 1 列，
+        // 极窄下会被 right 覆盖 —— 又变回"两段抢同一格"。
+        let left_text = if for_left == 0 {
+            String::new()
+        } else {
+            truncate_str(self.left, for_left as usize)
+        };
+        let left_w = UnicodeWidthStr::width(left_text.as_str()) as u16;
+
+        if left_w > 0 {
+            let left_span = Span::styled(left_text.as_str(), style);
+            buf.set_span(content_x, area.y, &left_span, left_w);
         }
 
-        if let Some(right) = self.right {
-            let right_width = UnicodeWidthStr::width(right) as u16;
-            let right_x = content_x + content_width.saturating_sub(right_width);
+        // Center 在 left 与 right 之间的窗口里居中。窗口是 budget 出来的且
+        // 含两侧留白，所以既压不到任何一段，也不会和它们贴死。
+        if let Some(center) = center_text {
+            let window_w = content_width.saturating_sub(left_w + right_w);
+            let center_x = content_x + left_w + window_w.saturating_sub(center_w) / 2;
+            let center_span = Span::styled(center, style);
+            buf.set_span(center_x, area.y, &center_span, center_w);
+        }
+
+        if let Some(right) = right_text.as_deref() {
+            let right_x = content_x + content_width.saturating_sub(right_w);
             let right_span = Span::styled(right, self.right_style.unwrap_or(style));
-            buf.set_span(right_x, area.y, &right_span, right_width);
+            buf.set_span(right_x, area.y, &right_span, right_w);
         }
     }
 }
@@ -140,5 +173,92 @@ mod tests {
         assert_eq!(hit.x, 40 - w);
         assert!(hit.contains(Position { x: hit.x, y: 0 }));
         assert!(!hit.contains(Position { x: 0, y: 0 }));
+    }
+
+    fn row(buf: &Buffer, width: u16) -> String {
+        // 宽字符占两个格子，第二格是默认空白；按显示宽度步进收集，
+        // 才能拼回视觉上的一行。
+        let mut out = String::new();
+        let mut x = 0u16;
+        while x < width {
+            let sym = buf[(x, 0)].symbol().to_string();
+            let w = UnicodeWidthStr::width(sym.as_str()) as u16;
+            out.push_str(&sym);
+            x += w.max(1);
+        }
+        out
+    }
+
+    /// 窄窗三段预算：left 截断、center 完整、right 完整，互不覆盖。
+    /// 旧实现 left 铺满整行、center 因压线被丢、right 直接盖上去。
+    #[test]
+    fn narrow_bar_budgets_right_center_left_without_overlap() {
+        let area = Rect::new(0, 0, 40, 1);
+        let left = "/Users/polar/very-long-repo-name/dock";
+        let center = "第 5 轮";
+        let right = "上下文 20.0k/204k";
+        let mut buf = Buffer::empty(area);
+        StatusBar::new(left)
+            .center(center)
+            .right(right)
+            .render(area, &mut buf);
+        let text = row(&buf, 40);
+        assert!(text.contains('…'), "left cwd should be truncated: {text}");
+        assert!(text.contains("第 5 轮"), "center must survive: {text}");
+        // 不重叠还不够 —— 三段贴死成一串同样读不出来。留白写死成字面量，
+        // 不用 SEG_GAP 拼：那样常数一改断言跟着改，等于自证。
+        assert!(
+            text.contains("…  第 5 轮"),
+            "left 与 center 之间要留白: {text}"
+        );
+        assert!(
+            text.contains("第 5 轮  上下文"),
+            "center 与 right 之间要留白: {text}"
+        );
+        let tail = {
+            let w = UnicodeWidthStr::width(right) as u16;
+            let mut out = String::new();
+            let mut x = 40 - w;
+            while x < 40 {
+                let sym = buf[(x, 0)].symbol().to_string();
+                out.push_str(&sym);
+                x += UnicodeWidthStr::width(sym.as_str()).max(1) as u16;
+            }
+            out
+        };
+        assert_eq!(tail, right, "right segment must be intact: {text}");
+    }
+
+    /// 三段都放得下时行为不变：left 靠左、right 靠右、center 居中。
+    #[test]
+    fn wide_bar_keeps_all_three_segments() {
+        let area = Rect::new(0, 0, 80, 1);
+        let left = "cwd";
+        let center = "第 5 轮";
+        let right = "20.0k/204k";
+        let mut buf = Buffer::empty(area);
+        StatusBar::new(left)
+            .center(center)
+            .right(right)
+            .render(area, &mut buf);
+        let text = row(&buf, 80);
+        assert!(text.starts_with(left), "{text}");
+        assert!(text.ends_with(right), "{text}");
+        assert!(text.contains(center), "{text}");
+    }
+
+    /// center 是装饰位：放不下就整段丢掉。截成 `第` 既没信息又占着
+    /// left 的 cwd 尾巴 —— 那才是这一行真正要保的东西。
+    #[test]
+    fn a_center_that_cannot_fit_whole_is_dropped_not_chopped() {
+        let area = Rect::new(0, 0, 22, 1);
+        let mut buf = Buffer::empty(area);
+        StatusBar::new("/Users/polar/dock")
+            .center("第 5 轮")
+            .right("上下文 20.0k/204k")
+            .render(area, &mut buf);
+        let text = row(&buf, 22);
+        assert!(text.contains("上下文 20.0k/204k"), "{text}");
+        assert!(!text.contains('第'), "半个 center 比不画更糟: {text}");
     }
 }
