@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::context_book::{own_sections, ContextBook};
 use crate::names::{AGENT_PRESETS, CONTEXT};
-use crate::prompt::{ORDER_PERSONA, ORDER_ROSTER};
+use crate::prompt::ORDER_PERSONA;
 use crate::types::ToolSpec;
 
 pub const DEFAULT_PRESET_ID: &str = "code";
@@ -25,7 +25,6 @@ pub const CORDIS_PRESET_ID: &str = "cordis";
 pub const WARDEN_PRESET_ID: &str = "warden";
 
 const PERSONA_MARK: &str = "# Agent 预设：";
-const ROSTER_MARK: &str = "# 本模式子代理";
 const BLOCKED: &str = "当前 Agent 预设未包含此工具。用 /preset 调整工具集。";
 const ROSTER_FILE: &str = "roster.yml";
 const AGENT_FILE: &str = "agent.yml";
@@ -129,6 +128,11 @@ pub struct SubagentDef {
     pub tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace_prompt: bool,
+    /// Carry the skills / workflows listings into this child's system prompt.
+    /// Off by default: a narrow child rarely loads a skill, and every
+    /// concurrent child pays for the catalog again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub listings: bool,
 }
 
 impl SubagentDef {
@@ -144,6 +148,7 @@ impl SubagentDef {
             persona: self.persona.clone(),
             tools: self.tools.clone(),
             replace_prompt: self.replace_prompt,
+            listings: self.listings,
             order: None,
             agents: IndexMap::new(),
             broken: None,
@@ -168,6 +173,10 @@ pub struct AgentPreset {
     /// Persona replaces the assembled system prompt instead of appending.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace_prompt: bool,
+    /// Child-only: carry the skills / workflows listings. The main session
+    /// always gets them; see [`SubagentDef::listings`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub listings: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i64>,
     /// Child roster. Stored in `agents/*.yml`, not in `agent.yml`.
@@ -189,6 +198,7 @@ impl AgentPreset {
             persona: String::new(),
             tools: None,
             replace_prompt: false,
+            listings: false,
             order: None,
             agents: IndexMap::new(),
             broken: None,
@@ -714,67 +724,6 @@ impl AgentPresets {
         assembled.push_str(&format!("{PERSONA_MARK}{}\n\n{text}", preset.name));
     }
 
-    /// Parent-only: list YAML subagent types so the model knows `subagent_type` ids.
-    /// Empty roster still injects write paths (new mode / first role).
-    pub fn merge_subagent_roster(&self, assembled: &mut String) {
-        self.resync();
-        if !self.inner.lock().unwrap().persist {
-            return;
-        }
-        let preset = self.current();
-        if preset.broken.is_some() {
-            return;
-        }
-        if assembled.contains(ROSTER_MARK) {
-            return;
-        }
-        assembled.push_str("\n\n");
-        assembled.push_str(ROSTER_MARK);
-        assembled.push_str("\n用 task 委派并持续交流（send_message / list_agents / interrupt_agent）。idle 时 queued 与 urgent 都会立刻开下一轮；urgent 只在 running 时才是 send-now。interrupt_agent 不能叫醒 idle。子代理用 report 与你交流（可多轮多次），你看不到它们的助手正文。若收到「未调用 report」代转发，当作该轮消息，send_message 追问或改派，不要空等。");
-        let has_task = match &preset.tools {
-            None => true,
-            Some(t) => t.iter().any(|n| n == "task"),
-        };
-        if has_task {
-            assembled.push_str("一次性收集结果用 task + get_task_output。");
-        }
-        assembled.push_str(" 本轮给当前模式加了 agents/<id>.yml 后，先 task（reload_roster: true）再 spawn，enum 才会带上新 id。新建模式写完后用 /preset 应用该 id，不要指望 reload_roster 切模式。");
-        assembled.push_str(&self.new_mode_write_hint());
-        assembled.push_str(&self.new_role_write_hint());
-        if preset.agents.is_empty() {
-            assembled.push_str(" 当前模式尚无子代理。\n");
-            return;
-        }
-        assembled.push_str(" subagent_type 为下列 id。\n");
-        for (id, def) in &preset.agents {
-            let name = def.name.trim();
-            let desc = def.description.trim();
-            if name.is_empty() || name == id {
-                if desc.is_empty() {
-                    assembled.push_str(&format!("- {id}\n"));
-                } else {
-                    assembled.push_str(&format!("- {id}：{desc}\n"));
-                }
-            } else if desc.is_empty() {
-                assembled.push_str(&format!("- {id}：{name}\n"));
-            } else {
-                assembled.push_str(&format!("- {id}（{name}）：{desc}\n"));
-            }
-        }
-    }
-
-    /// Roster block body (no leading blank line) for the prompt assembly, or
-    /// `None` when this isolate injects none (child overlay / broken / empty
-    /// result). Wraps [`Self::merge_subagent_roster`] so the two never drift.
-    pub fn subagent_roster_addon(&self) -> Option<String> {
-        let mut s = String::new();
-        self.merge_subagent_roster(&mut s);
-        match s.strip_prefix("\n\n") {
-            Some(body) if !body.is_empty() => Some(body.to_string()),
-            _ => None,
-        }
-    }
-
     pub fn current_roster(&self) -> IndexMap<String, SubagentDef> {
         self.resync();
         self.current().agents
@@ -811,16 +760,22 @@ impl AgentPresets {
             .iter()
             .map(|(id, def)| {
                 let name = def.name.trim();
-                if name.is_empty() || name == id {
+                let desc = def.description.trim();
+                let head = if name.is_empty() || name == id {
                     id.clone()
                 } else {
                     format!("{id} ({name})")
+                };
+                if desc.is_empty() {
+                    head
+                } else {
+                    format!("{head}: {desc}")
                 }
             })
             .collect();
         format!(
             " subagent_type is a role id from this mode's agents/: {}. After writing a new agents/<id>.yml, call with reload_roster true (no spawn) to refresh this enum. Write new roles under {}/. New Agent modes go in {}/<id>/agent.yml (id [a-z0-9][a-z0-9-]*), then /preset apply; Han display-name dirs overlay a shipped mode and do not create one. Only ~/.dock/presets/ if the user asks to save globally.",
-            parts.join(", "),
+            parts.join("; "),
             self.workspace_agents_dir(),
             self.workspace_presets_dir()
         )
@@ -854,21 +809,6 @@ impl AgentPresets {
         };
         *self.write_hint.lock().unwrap() = Some(snap.clone());
         snap
-    }
-
-    /// Cwd-stable: how to add a new Agent mode. Placed before the current-mode
-    /// agents path so a mode switch only changes the suffix (prompt cache).
-    fn new_mode_write_hint(&self) -> String {
-        let dir = self.workspace_presets_dir();
-        format!(
-            "新建 Agent 模式写到 {dir}/<id>/agent.yml，子代理写同目录 agents/<type>.yml。模式 id 必须是 [a-z0-9][a-z0-9-]*（如 review），不要用汉字做模式目录名（汉字目录只会叠到已有同名内置模式）。目录不存在就创建。写完后用 /preset 应用该 id。不要写 ~/.dock/presets/，除非用户明确要求保存到全局。"
-        )
-    }
-
-    fn new_role_write_hint(&self) -> String {
-        let dir = self.workspace_agents_dir();
-        let id = self.current_id();
-        format!("新建人设写到当前工作区（当前模式 {id}，不要猜测）：{dir}/<type>.yml。")
     }
 
     /// Re-read `agents/` and list callable `subagent_type` ids.
@@ -934,6 +874,13 @@ impl AgentPresets {
     pub fn replaces_prompt(&self) -> bool {
         let preset = self.current();
         preset.broken.is_none() && preset.replace_prompt
+    }
+
+    /// Whether this preset asked for the skills / workflows listings. Only
+    /// consulted for child isolates — the main session always gets them.
+    pub fn wants_listings(&self) -> bool {
+        let preset = self.current();
+        preset.broken.is_none() && preset.listings
     }
 
     fn mutate(
@@ -1004,10 +951,6 @@ pub fn agent_presets() -> Plugin {
                     } else {
                         Some(body.to_string())
                     }
-                })?,
-                book.section_always(ORDER_ROSTER, "roster", |exec| {
-                    exec.get::<AgentPresets>(AGENT_PRESETS)
-                        .and_then(|p| p.subagent_roster_addon())
                 })?,
             ],
         )?;
@@ -2167,10 +2110,10 @@ mod tests {
         // 迁移是换名不是剥面：旧 overlay 只写了 subagent，迁移后必须还有 task。
         assert!(presets.allows("task"), "{:?}", presets.current().tools);
         assert!(!presets.allows("subagent"), "{:?}", presets.current().tools);
-        let mut assembled = String::new();
-        presets.merge_subagent_roster(&mut assembled);
-        assert!(!assembled.contains("jia"), "{assembled}");
-        assert!(assembled.contains("甲"), "{assembled}");
+        // 角色 id 现在只从 `task` 工具的 role hint 出去。
+        let hint = presets.subagent_role_hint();
+        assert!(!hint.contains("jia"), "{hint}");
+        assert!(hint.contains("甲"), "{hint}");
     }
 
     #[test]
@@ -2230,14 +2173,12 @@ mod tests {
         let jia = presets.subagent("甲").unwrap();
         assert!(!jia.persona.contains("调度标签"), "{}", jia.persona);
         assert!(jia.persona.contains("只守住甲"), "{}", jia.persona);
-        let mut roster = String::new();
-        presets.merge_subagent_roster(&mut roster);
-        assert!(!roster.contains("jia"), "{roster}");
-        // spawn 面统一后的文案只教 task；旧一次性套件不再出现在提示里。
-        assert!(roster.contains("用 task 委派"), "{roster}");
-        assert!(!roster.contains("wait_tasks"), "{roster}");
-        assert!(!roster.contains("kill_task"), "{roster}");
-        assert!(roster.contains("- 甲"), "{roster}");
+        let hint = presets.subagent_role_hint();
+        assert!(!hint.contains("jia"), "{hint}");
+        // spawn 面统一后只教 task；旧一次性套件不出现在委派说明里。
+        assert!(!hint.contains("wait_tasks"), "{hint}");
+        assert!(!hint.contains("kill_task"), "{hint}");
+        assert!(hint.contains("甲"), "{hint}");
     }
 
     fn presets_warden(dir: &tempfile::TempDir) -> AgentPreset {
@@ -2255,53 +2196,38 @@ mod tests {
         presets.merge_persona(&mut assembled);
         assert_eq!(assembled.matches(PERSONA_MARK).count(), 1);
         assert!(assembled.contains("编码助手"));
-        presets.merge_subagent_roster(&mut assembled);
-        presets.merge_subagent_roster(&mut assembled);
-        assert_eq!(assembled.matches(ROSTER_MARK).count(), 1);
-        assert!(assembled.contains("explore"));
-        assert!(assembled.contains("用 task 委派"), "{assembled}");
-        assert!(!assembled.contains("用 subagent"), "{assembled}");
-        assert!(assembled.contains("send_message"));
-        assert!(assembled.contains("urgent"));
-        assert!(assembled.contains("reload_roster"));
-        assert!(
-            assembled.contains(".dock/presets/code/agents"),
-            "{assembled}"
-        );
-        assert!(assembled.contains(".dock/presets"), "{assembled}");
-        assert!(
-            !assembled.contains(&std::env::current_dir().unwrap().display().to_string()),
-            "system prompt must not embed an absolute cwd: {assembled}"
-        );
-        assert!(assembled.contains("不要猜测"), "{assembled}");
-        assert!(assembled.contains("全局"), "{assembled}");
-        assert!(assembled.contains("~/.dock/presets"), "{assembled}");
+        // 名册与写路径归 `task` 工具的 role hint，不再在系统提示里重写一遍。
+        assert!(!assembled.contains("send_message"), "{assembled}");
+        assert!(!assembled.contains("reload_roster"), "{assembled}");
         assert_eq!(presets.role_label("explore").as_deref(), Some("探索"));
-        assert!(presets.subagent_role_hint().contains("explore"));
-        assert!(presets.subagent_role_hint().contains("general-purpose"));
-        assert!(presets.subagent_role_hint().contains("reload_roster"));
-        assert!(presets
-            .subagent_role_hint()
-            .contains(".dock/presets/code/agents"));
+        let hint = presets.subagent_role_hint();
+        assert!(hint.contains("explore"), "{hint}");
+        assert!(hint.contains("general-purpose"), "{hint}");
+        assert!(hint.contains("reload_roster"), "{hint}");
+        assert!(hint.contains(".dock/presets/code/agents"), "{hint}");
+        assert!(hint.contains(".dock/presets"), "{hint}");
+        assert!(hint.contains("~/.dock/presets"), "{hint}");
+        assert!(hint.contains("globally"), "{hint}");
+        assert!(
+            !hint.contains(&std::env::current_dir().unwrap().display().to_string()),
+            "role hint must not embed an absolute cwd: {hint}"
+        );
+        // 角色说明现在也进 hint（原先只有 roster 段有）。
+        assert!(hint.contains("只读探索代码库"), "{hint}");
     }
 
     #[test]
     fn roster_hint_uses_workspace_relative_path() {
         let dir = tempfile::tempdir().unwrap();
         let presets = AgentPresets::load(dir.path().to_path_buf());
-        let mut assembled = String::new();
-        presets.merge_subagent_roster(&mut assembled);
+        let hint = presets.subagent_role_hint();
+        assert!(hint.contains(".dock/presets/code/agents"), "{hint}");
+        assert!(hint.contains("New Agent modes"), "{hint}");
+        assert!(hint.contains("globally"), "{hint}");
+        assert!(hint.contains(".dock/presets"), "{hint}");
         assert!(
-            assembled.contains(".dock/presets/code/agents"),
-            "{assembled}"
-        );
-        assert!(assembled.contains("当前模式 code"), "{assembled}");
-        assert!(assembled.contains("新建 Agent 模式"), "{assembled}");
-        assert!(assembled.contains("全局"), "{assembled}");
-        assert!(assembled.contains(".dock/presets"), "{assembled}");
-        assert!(
-            !assembled.contains(&std::env::current_dir().unwrap().display().to_string()),
-            "{assembled}"
+            !hint.contains(&std::env::current_dir().unwrap().display().to_string()),
+            "{hint}"
         );
     }
 
@@ -2327,34 +2253,104 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let presets = AgentPresets::load(dir.path().to_path_buf());
         presets.apply(MINIMAL_PRESET_ID).unwrap();
-        let mut assembled = String::new();
-        presets.merge_subagent_roster(&mut assembled);
-        assert!(assembled.contains(ROSTER_MARK), "{assembled}");
-        assert!(assembled.contains("当前模式尚无子代理"), "{assembled}");
-        assert!(assembled.contains("新建 Agent 模式"), "{assembled}");
-        assert!(assembled.contains("[a-z0-9]"), "{assembled}");
-        assert!(assembled.contains(".dock/presets"), "{assembled}");
-        assert!(
-            assembled.contains(".dock/presets/minimal/agents"),
-            "{assembled}"
-        );
-        assert!(assembled.contains("当前模式 minimal"), "{assembled}");
-        assert!(presets.subagent_role_hint().contains("new Agent mode"));
+        let hint = presets.subagent_role_hint();
+        assert!(hint.contains("no agents/ roles"), "{hint}");
+        assert!(hint.contains("new Agent mode"), "{hint}");
+        assert!(hint.contains("[a-z0-9]"), "{hint}");
+        assert!(hint.contains(".dock/presets"), "{hint}");
+        assert!(hint.contains(".dock/presets/minimal/agents"), "{hint}");
+        assert!(hint.contains("globally"), "{hint}");
         let report = presets.reload_roster_report();
         assert!(report.contains("empty roster"), "{report}");
         assert!(report.contains(".dock/presets"), "{report}");
     }
 
+    /// `listings` is additive: absent from old YAML, and never written back
+    /// when a preset is persisted, so `/preset` edits do not rewrite user files.
     #[test]
-    fn overlay_skips_parent_roster_write_hints() {
-        let def = SubagentDef {
-            name: "探".into(),
-            ..SubagentDef::default()
-        };
-        let overlay = AgentPresets::overlay(def.to_preset("explore"));
-        let mut assembled = String::new();
-        overlay.merge_subagent_roster(&mut assembled);
-        assert!(assembled.is_empty(), "{assembled}");
+    fn listings_defaults_off_and_is_not_serialized() {
+        let legacy: SubagentDef = serde_yaml::from_str("name: 探索\npersona: hi\n").unwrap();
+        assert!(!legacy.listings, "absent listings must default to false");
+
+        let opted: SubagentDef = serde_yaml::from_str("name: 通用\nlistings: true\n").unwrap();
+        assert!(opted.listings);
+        assert!(opted.to_preset("general-purpose").listings);
+
+        let dumped = serde_yaml::to_string(&legacy).unwrap();
+        assert!(!dumped.contains("listings"), "{dumped}");
+        let dumped_on = serde_yaml::to_string(&opted).unwrap();
+        assert!(dumped_on.contains("listings: true"), "{dumped_on}");
+    }
+
+    /// `listings: true` puts the skills / workflows catalogs into a child's
+    /// system prompt, and both headers name their loader (`skill` /
+    /// `workflow`). A role that advertises them without holding the tool burns
+    /// a round: the sampler hides it, `search_tool` no longer lists it (those
+    /// tools stopped being deferred), and `use_tool` hits the same allowlist.
+    #[test]
+    fn a_listing_role_holds_the_tools_its_listing_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        let mut checked = 0usize;
+        for preset in presets.list() {
+            if !preset.builtin() || preset.broken.is_some() {
+                continue;
+            }
+            for (id, def) in &preset.agents {
+                if !def.listings {
+                    continue;
+                }
+                checked += 1;
+                let overlay = AgentPresets::overlay(def.to_preset(id));
+                assert!(overlay.wants_listings(), "{id} advertises listings");
+                for tool in ["skill", "workflow"] {
+                    assert!(
+                        overlay.allows(tool),
+                        "{}/{} advertises the {tool} listing without holding the tool: {:?}",
+                        preset.id,
+                        id,
+                        def.tools
+                    );
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no builtin role opts into listings — the assertion above is vacuous"
+        );
+    }
+
+    /// The roster used to be a system-prompt section that repeated, in Chinese,
+    /// what the `task` tool description already said in English. It is gone:
+    /// role ids, write paths and the mailbox semantics now live on the tools.
+    /// A child overlay therefore cannot inherit parent-only write hints.
+    #[tokio::test]
+    async fn roster_section_is_gone_from_the_assembly() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let ctx = cordis::Context::new();
+        ctx.plugin(crate::context_book::context(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        ctx.plugin(agent_presets(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let book = ctx.get::<ContextBook>(CONTEXT).unwrap();
+        let ids: Vec<String> = book
+            .assemble()
+            .inspect()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(!ids.iter().any(|id| id == "roster"), "{ids:?}");
+        let rendered = book.assemble().render();
+        assert!(!rendered.contains("本模式子代理"), "{rendered}");
+        assert!(!rendered.contains("send_message"), "{rendered}");
+        assert!(!rendered.contains("reload_roster"), "{rendered}");
     }
 
     #[test]
@@ -2416,11 +2412,13 @@ mod tests {
             .expect("new yml must be spawnable now");
         assert_eq!(def.name, "侦察");
         assert!(presets.current_roster().contains_key("scout"));
-        let mut assembled = String::new();
-        presets.merge_subagent_roster(&mut assembled);
-        assert!(assembled.contains("scout"), "{assembled}");
-        assert!(assembled.contains("侦察"), "{assembled}");
-        assert!(presets.subagent_role_hint().contains("scout"));
+        let hint = presets.subagent_role_hint();
+        assert!(hint.contains("scout"), "{hint}");
+        assert!(hint.contains("侦察"), "{hint}");
+        assert!(
+            hint.contains("新角色"),
+            "role descriptions ride along: {hint}"
+        );
         let report = presets.reload_roster_report();
         assert!(report.contains("scout"), "{report}");
         assert!(report.contains("侦察"), "{report}");
