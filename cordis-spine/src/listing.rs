@@ -5,14 +5,15 @@
 //! truncation, degraded second pass, overflow footer) are identical, so they
 //! live here once and each caller supplies only its header and path shape.
 //!
-//! [`wants_listing`] is the shared gate: both listings are main-session-only
-//! unless a child's preset opts in.
+//! [`wants_listing`] is the shared gate: a listing goes out only to a session
+//! that wants it *and* can actually call the loader its header names.
 
 use cordis::Context;
 
 use crate::agent_presets::AgentPresets;
-use crate::names::{AGENT_PRESETS, SESSIONS};
+use crate::names::{AGENT_PRESETS, SESSIONS, TOOLS};
 use crate::session::{Sessions, ROOT_IDENTITY};
+use crate::tools::Tools;
 
 /// Fraction of the context window (chars ≈ tokens×4) one listing may occupy.
 ///
@@ -38,19 +39,44 @@ pub(crate) fn budget_chars(window_tokens: u64) -> usize {
 
 /// Whether this session should carry a catalog listing in its system prompt.
 ///
-/// The main session always does. A child isolate does only when its
-/// `agents/<type>.yml` sets `listings: true` — a narrow child rarely loads a
-/// skill, and every concurrent child would otherwise re-pay for the catalog.
-/// Fails open: no `"sessions"` (unit tests, bare harnesses) counts as main.
-pub(crate) fn wants_listing(exec: &Context) -> bool {
-    let main = exec
+/// `loader` is the tool the listing header tells the model to call (`skill`,
+/// `workflow`). Two independent gates:
+///
+/// 1. **Who is asking.** The main session wants a listing; a child isolate does
+///    only when its `agents/<type>.yml` sets `listings: true` — a narrow child
+///    rarely loads a skill, and every concurrent child would otherwise re-pay
+///    for the catalog.
+/// 2. **Can they act on it.** The loader has to be visible to this session's
+///    sampler. A preset whose allowlist omits `skill` (`warden`) would
+///    otherwise be handed a catalog it cannot use: the sampler filters the tool
+///    out, `search_tool` does not index it (it is not deferred), and `use_tool`
+///    hits the same allowlist — so the listing only buys a failed call.
+///
+/// Fails open on both: no `"sessions"` counts as main, and no `"tools"` (unit
+/// tests, bare harnesses) counts as visible.
+pub(crate) fn wants_listing(exec: &Context, loader: &str) -> bool {
+    let wanted = exec
         .get::<Sessions>(SESSIONS)
-        .is_none_or(|s| s.identity() == ROOT_IDENTITY);
-    if main {
+        .is_none_or(|s| s.identity() == ROOT_IDENTITY)
+        || exec
+            .get::<AgentPresets>(AGENT_PRESETS)
+            .is_some_and(|p| p.wants_listings());
+    wanted && loader_visible(exec, loader)
+}
+
+/// Whether the sampler for this session will be handed `loader`.
+///
+/// Asks the live `"tools"` table rather than re-deriving the rule, so this
+/// cannot drift from what `Tools::specs_for_model_on` actually sends or from
+/// what `Tools::execute_on` will accept.
+fn loader_visible(exec: &Context, loader: &str) -> bool {
+    let Some(tools) = exec.get::<Tools>(TOOLS) else {
         return true;
-    }
-    exec.get::<AgentPresets>(AGENT_PRESETS)
-        .is_some_and(|p| p.wants_listings())
+    };
+    tools
+        .specs_for_model_on(exec)
+        .iter()
+        .any(|s| s.name == loader)
 }
 
 /// One catalog row. `listing_path` is workspace- or home-relative — never an
@@ -146,6 +172,24 @@ fn entry_desc<E: ListEntry>(entry: &E) -> String {
 mod tests {
     use super::*;
 
+    /// Put a loader on the live `"tools"` table so `wants_listing` sees it.
+    fn register_loader(ctx: &Context, name: &str) -> cordis::Disposable {
+        let tools = ctx.get::<Tools>(TOOLS).expect("tools mounted");
+        let body: crate::tools::ToolBody = std::sync::Arc::new(|call| {
+            Box::pin(async move { crate::tools::tool_result(call, "") })
+        });
+        tools
+            .register(
+                crate::types::ToolSpec {
+                    name: name.into(),
+                    description: format!("{name} loader"),
+                    parameters_json: r#"{"type":"object"}"#.into(),
+                },
+                body,
+            )
+            .unwrap()
+    }
+
     struct Row {
         name: String,
         desc: String,
@@ -239,15 +283,49 @@ mod tests {
     #[tokio::test]
     async fn main_session_and_bare_harness_get_listings() {
         let ctx = Context::new();
-        assert!(wants_listing(&ctx), "no sessions at all must fail open");
+        assert!(
+            wants_listing(&ctx, "skill"),
+            "no sessions and no tools at all must fail open"
+        );
         crate::bundle::install_fakes(&ctx).await.unwrap();
-        assert!(wants_listing(&ctx), "main session always gets listings");
+        let _skill = register_loader(&ctx, "skill");
+        assert!(
+            wants_listing(&ctx, "skill"),
+            "main session holding the loader gets listings"
+        );
+    }
+
+    /// The header names a loader; a session that cannot call it must not be
+    /// handed the catalog. Covers `warden` (allowlist omits `skill`) and any
+    /// harness where the loader plugin is simply not mounted.
+    #[tokio::test]
+    async fn an_uncallable_loader_withholds_the_listing() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let _skill = register_loader(&ctx, "skill");
+        assert!(wants_listing(&ctx, "skill"));
+        assert!(
+            !wants_listing(&ctx, "workflow"),
+            "an unregistered loader withholds its listing"
+        );
+
+        let mut narrow = crate::agent_presets::AgentPreset::new("narrow");
+        narrow.tools = Some(vec!["read_file".into()]);
+        let scoped = ctx.isolate("agentPresets");
+        scoped
+            .provide(AGENT_PRESETS, AgentPresets::overlay(narrow))
+            .unwrap();
+        assert!(
+            !wants_listing(&scoped, "skill"),
+            "an allowlist without the loader withholds its listing"
+        );
     }
 
     #[tokio::test]
     async fn child_session_is_opt_in() {
         let ctx = Context::new();
         crate::bundle::install_fakes(&ctx).await.unwrap();
+        let _skill = register_loader(&ctx, "skill");
         let child = ctx.isolate("sessions").isolate("agentPresets");
         child
             .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
@@ -265,7 +343,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            !wants_listing(&child),
+            !wants_listing(&child, "skill"),
             "narrow child must not carry listings"
         );
 
@@ -284,7 +362,10 @@ mod tests {
                 AgentPresets::overlay(wide.to_preset("general-purpose")),
             )
             .unwrap();
-        assert!(wants_listing(&wide_ctx), "opted-in child carries listings");
+        assert!(
+            wants_listing(&wide_ctx, "skill"),
+            "opted-in child holding the loader carries listings"
+        );
     }
 
     #[test]

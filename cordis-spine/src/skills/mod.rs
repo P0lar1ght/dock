@@ -411,7 +411,7 @@ pub fn skills() -> Plugin {
         own_sections(
             ctx,
             vec![book.section(ORDER_SKILLS, "skills", |exec| {
-                if !wants_listing(exec) {
+                if !wants_listing(exec, "skill") {
                     return None;
                 }
                 exec.get::<Skills>(SKILLS).and_then(|skills| {
@@ -576,6 +576,9 @@ mod tests {
         std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     }
 
+    /// Mount both halves, like `install_app` does: `skills` owns the catalog
+    /// and the listing, `tool-skills` registers the `skill` loader the listing
+    /// header names. Without the loader the listing is (correctly) withheld.
     async fn mount_skills(ctx: &Context) {
         crate::install_without_llm(ctx).await.unwrap();
         ctx.plugin(crate::slash(), ())
@@ -584,6 +587,7 @@ mod tests {
             .await
             .unwrap();
         ctx.plugin(skills(), ()).unwrap().wait().await.unwrap();
+        ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
     }
 
     #[test]
@@ -730,7 +734,6 @@ mod tests {
         let _env = crate::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
-        ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
         let tools = ctx.require::<Tools>(TOOLS).unwrap();
         let out = tools
             .execute(crate::types::ToolCall {
@@ -813,7 +816,6 @@ mod tests {
         let _env = crate::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
-        ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
         // 激活前：不进 listing，skill 工具拒绝加载。
         let listing = ctx.get::<Skills>(SKILLS).unwrap().listing_text();
         assert!(!listing.contains("gated-one"), "{listing}");
@@ -867,7 +869,6 @@ mod tests {
         assert_eq!(sc.scope, discover::SkillScope::Builtin);
         let listing = skills.listing_text();
         assert!(listing.contains("dock-guide"), "{listing}");
-        ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
         let tools = ctx.require::<Tools>(TOOLS).unwrap();
         let out = tools
             .execute(crate::types::ToolCall {

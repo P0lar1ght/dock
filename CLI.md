@@ -54,7 +54,7 @@
 | `/cd` | 切换工作目录（进程级 cwd）。只在 Dock 终端生效；浏览器 companion 会拒绝 |
 | `/help` | 显示斜杠命令 |
 | `/skills` | 额外命令（`"slash"` extras，不是 CATALOG）：Notice 列出已发现技能的斜杠名、来源层、路径。撞名技能 `skills` 时本 overlay 优先，该技能只能用 `skill` 工具 |
-| `/<技能名> [参数]` | 每个 `user-invocable` 技能登记成 extra（`kind: prompt`，发送）。用户气泡保持 `/name args`（skill 色）；`agent/pre-step` 把 SKILL.md 全文注入 `SystemReminder`（`$ARGUMENTS` / `$SKILL_DIR`），不先调 `skill` 工具。不可盖内建 `RESERVED_SLASH`（如 `/help`）。`disable-model-invocation` 的技能仍可斜杠，但不进 listing / `skill` 工具。listing 段**只发给主会话**，子代理要在 `agents/<type>.yml` 写 `listings: true` 才带（内置只有 `general-purpose` 打开；工作流 listing 同一开关） |
+| `/<技能名> [参数]` | 每个 `user-invocable` 技能登记成 extra（`kind: prompt`，发送）。用户气泡保持 `/name args`（skill 色）；`agent/pre-step` 把 SKILL.md 全文注入 `SystemReminder`（`$ARGUMENTS` / `$SKILL_DIR`），不先调 `skill` 工具。不可盖内建 `RESERVED_SLASH`（如 `/help`）。`disable-model-invocation` 的技能仍可斜杠，但不进 listing / `skill` 工具。listing 段**只发给主会话**，子代理要在 `agents/<type>.yml` 写 `listings: true` 才带（内置只有 `general-purpose` 打开；工作流 listing 同一开关）；另外 header 点名的 `skill` / `workflow` 不在当前预设 allowlist 里时整段不发（`warden` 即如此） |
 | `/quit` `/exit` | 退出 |
 
 ---
@@ -79,7 +79,7 @@ replace_prompt: false
 order: 10
 ```
 
-子代理另放 `agents/<type>.yml`（人设 + 工具集），默认路径是项目 `.dock/presets/<当前模式 id>/agents/<type>.yml`。主代理用**唯一**的 spawn 工具 `task` 委派当前模式名册角色，`subagent_type` 为该文件名（不含 `.yml`）。发给模型的 `task` 参数带名册 `enum`（名册多出来的角色必须出现在这个 enum 里才能调）。本轮新写 `agents/<id>.yml` 后，用 `task` 的 `reload_roster: true` 刷新（不 spawn），下一采样步的 enum 才带新 id。新建模式写 `{cwd}/.dock/presets/<id>/agent.yml`（id 不能是汉字），然后 `/preset` 应用；`reload_roster` 只刷新当前模式名册。子代理默认不带技能 / 工作流 listing（`agents/<type>.yml` 的 `listings: true` 打开）。`task` 只接受 prompt / description / subagent_type / run_in_background / resume_from / reload_roster——`cwd` / `isolation` / `model` 已从参数里删掉（dock 不实现）。每个子代理都是可续跑的：一轮跑完 park idle，父代理收到回合结束通知（未 `report` 时带上该轮正文），所以后台 spawn 不需要轮询 `get_task_output`。持续交流：父→子 `send_message`（idle 时 queued / urgent 都会立刻开下一轮；urgent 只在 running 时才是 send-now）；子→父 `report`（可多轮多次）。`list_agents` 是状态源。`interrupt_agent` 停本轮；要整个撤掉用 `kill_task`。用户 Stop / 新会话会取消本会话子代理。
+子代理另放 `agents/<type>.yml`（人设 + 工具集），默认路径是项目 `.dock/presets/<当前模式 id>/agents/<type>.yml`。主代理用**唯一**的 spawn 工具 `task` 委派当前模式名册角色，`subagent_type` 为该文件名（不含 `.yml`）。发给模型的 `task` 参数带名册 `enum`（名册多出来的角色必须出现在这个 enum 里才能调）。本轮新写 `agents/<id>.yml` 后，用 `task` 的 `reload_roster: true` 刷新（不 spawn），下一采样步的 enum 才带新 id。新建模式写 `{cwd}/.dock/presets/<id>/agent.yml`（id 不能是汉字），然后 `/preset` 应用；`reload_roster` 只刷新当前模式名册。子代理默认不带技能 / 工作流 listing（`agents/<type>.yml` 的 `listings: true` 打开；打开还要求该角色的工具集里有 `skill` / `workflow`，否则那段仍不发）。`task` 只接受 prompt / description / subagent_type / run_in_background / resume_from / reload_roster——`cwd` / `isolation` / `model` 已从参数里删掉（dock 不实现）。每个子代理都是可续跑的：一轮跑完 park idle，父代理收到回合结束通知（未 `report` 时带上该轮正文），所以后台 spawn 不需要轮询 `get_task_output`。持续交流：父→子 `send_message`（idle 时 queued / urgent 都会立刻开下一轮；urgent 只在 running 时才是 send-now）；子→父 `report`（可多轮多次）。`list_agents` 是状态源。`interrupt_agent` 停本轮；要整个撤掉用 `kill_task`。用户 Stop / 新会话会取消本会话子代理。
 
 `tools` 里写 Dock 已挂上的名字（`bash` `read_file` `cordis_define` …），不是 DSH 包名。未挂上的名字在画布右侧显示「未挂载」。
 
