@@ -247,7 +247,7 @@ fn section_label(id: &str) -> String {
         "skills" => "技能".into(),
         "workflows" => "工作流".into(),
         "persona" | "persona-replace" => "人设".into(),
-        "roster" => "子代理".into(),
+        "project" => "项目规约".into(),
         "plan" => "计划".into(),
         "goal" => "目标".into(),
         other => other.into(),

@@ -1,5 +1,9 @@
 name: 通用
 description: 完成一项委派任务并返回简洁结果
+# 宽口径子代理：保留技能 / 工作流 listing（窄口径角色默认不带）。
+# 两段 listing 的标题分别点名 `skill` / `workflow`，所以这两个必须在下面的 tools 里，
+# 否则子代理会被告知一个它调不动的工具（sampler、search_tool、use_tool 三处都会被挡）。
+listings: true
 persona: |
   你是通用子代理。完成任务并返回简洁结果。
   结束前用 report 向启动你的主代理上报自足结论；中途发现会改变主代理下一步时也可以提前 report。
@@ -20,8 +24,10 @@ tools:
   - web_fetch
   - web_search
   - lsp
+  - skill
   - memory_search
   - memory_get
+  - workflow
   - search_tool
   - use_tool
   - browser_open

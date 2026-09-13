@@ -387,14 +387,21 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         !model.iter().any(|n| n.starts_with("mcp_")),
         "sampler must hide MCP extras: {model:?}"
     );
+    // `skill` / `workflow` are named by the system-prompt listings, so they
+    // have to be callable without a `search_tool` round-trip first. Everything
+    // else that is only reachable through discovery stays off the sampler.
+    for listed in ["skill", "workflow"] {
+        assert!(
+            model.iter().any(|n| n == listed),
+            "sampler must expose the listed tool {listed}: {model:?}"
+        );
+    }
     for hidden in [
         "scheduler_create",
         "memory_search",
         "monitor",
         "update_goal",
         "lsp",
-        "skill",
-        "workflow",
         "cordis_inspect",
         "browser_open",
         "browser_navigate",

@@ -20,6 +20,7 @@ use crate::monitor::tool_monitor;
 use crate::names::DYNAMIC_CORDIS_RUNNER;
 use crate::permissions::permissions;
 use crate::plan_mode::plan_mode;
+use crate::project_instructions::project_instructions;
 use crate::prompt::system_prompt;
 use crate::sched::tool_scheduler;
 use crate::session::sessions;
@@ -103,6 +104,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(jobs(), ())?.wait().await?;
     ctx.plugin(slash(), ())?.wait().await?;
     ctx.plugin(skills(), ())?.wait().await?;
+    ctx.plugin(project_instructions(), ())?.wait().await?;
     ctx.plugin(tui_slots(), ())?.wait().await?;
     ctx.plugin(agent_presets(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;

@@ -12,7 +12,7 @@ use super::Subagents;
 pub(super) fn send_spec() -> ToolSpec {
     ToolSpec {
         name: "send_message".into(),
-        description: "Send a follow-up to a continuable subagent started with the subagent tool. Does not return the child's reply; use list_agents to confirm status.\n\
+        description: "Send a follow-up to a continuable subagent started with the task tool. Does not return the child's reply; use list_agents to confirm status.\n\
 - subagent_id: id from subagent / list_agents.\n\
 - message: text for the child.\n\
 - priority: queued (default) waits if the child is running; urgent is send-now and steers a running child (not interrupt-then-send). If the child is idle, both queued and urgent start the next turn immediately. The tool result says idle→starting now vs running→queued vs running→steer."

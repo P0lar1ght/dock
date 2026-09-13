@@ -35,7 +35,8 @@ one-shot handoff.\n\
 - subagent_type: id from this mode's agents/ YAML. The tool parameter enum is the callable set \
 (same as the live roster, including user overlay roles).\n\
 - run_in_background: default true. Returns subagent_id immediately; its turn end reaches you as \
-a notification. Set false only when the next action needs the result now.\n\
+a notification. Set false only when the next action needs the result now. To collect a one-shot \
+result instead of conversing, pair it with get_task_output.\n\
 - resume_from: a disposed subagent_id only.\n\
 - reload_roster: refresh the subagent_type enum after writing a new agents/<id>.yml (does not spawn).\n\
 Talking to a child: send_message (idle — queued and urgent both start its next turn now; urgent \

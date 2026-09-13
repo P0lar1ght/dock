@@ -51,7 +51,13 @@ pub struct SkillInfo {
 
 impl SkillInfo {
     /// Workspace- or home-relative path for model-facing listings.
-    pub fn listing_path(&self) -> String {
+    ///
+    /// Deliberately not named `listing_path`: that is the
+    /// [`ListEntry`](crate::listing::ListEntry) trait method in
+    /// `skills/listing.rs`, and its impl delegates here. Same-named inherent +
+    /// trait methods resolve to the inherent one, so a future rename here
+    /// would silently turn that delegation into infinite recursion.
+    pub fn display_path(&self) -> String {
         match self.scope {
             SkillScope::Builtin => format!("bundled/skills/{}/SKILL.md", self.name),
             SkillScope::Bundled => format!("skills/{}/SKILL.md", self.name),
