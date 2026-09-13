@@ -23,19 +23,46 @@ default = "<model-id>"
 [model."<model-id>"]
 name = "显示名"
 api_base_url = "https://…/v1"
-api_backend = "chat_completions"   # 或 responses / messages
+api_backends = ["responses", "chat_completions"]   # 端点支持哪几条协议
 api_model = "上游真实模型名"        # 省略时用 <model-id>
 api_key = "…"                       # 或用 env_key 从环境变量取
 env_key = "MY_API_KEY"
 context_window = 128000
+
+# 协议块：只在某条 wire 上覆盖连接（入口不同时用）
+[model."<model-id>".messages]
+api_base_url = "https://…/anthropic"
+
+# 单价：USD / 百万 token，写了 /usage 才算得出金额
+[model."<model-id>".pricing]
+input = 0.28        # 未命中输入
+cache_read = 0.028
+cache_write = 0.28  # 省略则按 input
+output = 0.42
 ```
 
-- `api_backend` 三选一：`chat_completions`（OpenAI 风格）、`responses`、
-  `messages`（Anthropic 风格）。同一上游想换协议就再配一行，`/model` 切换。
+- `api_backends` 是**一个端点支持的协议列表**，第一条 = 切到该模型时的默认。
+  可选值 `responses`、`chat_completions`（OpenAI 风格）、`messages`（Anthropic
+  风格）。声明多条后用 `/protocol` 现场切，不用为了换协议再配一行重复的模型。
+- 单数 `api_backend = "…"` = 只支持这一条。**两个都不写默认 `responses`**，
+  所以只开 /chat/completions 的端点（自建代理、本地 ollama、多数长尾模型）必须
+  显式写 `api_backend = "chat_completions"`，否则会打到不存在的路径。
+  两个键都写时，单数当默认提到队首。
+- `[model."<id>".<协议>]` 协议块：同一端点各协议入口不同时用（DeepSeek 的
+  OpenAI 侧是 `https://api.deepseek.com`，Anthropic 侧是 `…/anthropic`）。只能
+  覆盖三个**连接**键：`api_base_url` / `auth_scheme` / `api_model`。优先级
+  协议块 > 模型级 > 协议默认。协议名接受别名 `resp` / `chat` / `anthropic`。
+  能力键（`context_window`、`reasoning*`、`supports_images`、
+  `max_output_tokens`、`prompt_cache`）是模型的属性，不随协议变，只写模型级。
+- `[model."<id>".pricing]` 单价，USD / 百万 token，四个价位和 `/usage` 的分段
+  一一对应。**不内置厂商价格表**——价格变动频繁，猜出来的单价一旦过期就是静默
+  给出错误金额。本地算出的金额一律标「约 …（按 config 单价估算）」，不是账单：
+  不含分时折扣（DeepSeek off-peak 半价）。上游带了费用则以上游为准。
 - `env_key` 指向环境变量名，与 `api_key` 二选一。
 - `context_window` 按上游真实值填，驱动上下文占用显示与自动压缩阈值。
-- `auth_scheme` 缺省 Bearer；`messages` 后端缺省 `x-api-key`（OpenRouter
-  的 /messages 要显式写 `bearer`）。
+- `auth_scheme` 不写就跟着**当前协议**走：`messages` 用 `x-api-key`，另两条用
+  Bearer。写了就对该模型的所有协议一律生效（OpenRouter 的 /messages 要显式
+  写 `bearer`）。
 
 ## MCP server
 

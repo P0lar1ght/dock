@@ -873,6 +873,7 @@ pub(super) fn arg_picker_title(kind: crate::slash::ArgKind) -> &'static str {
     match kind {
         crate::slash::ArgKind::Theme => "主题",
         crate::slash::ArgKind::Model => "模型",
+        crate::slash::ArgKind::Protocol => "推理协议",
         crate::slash::ArgKind::Settings => "设置",
         crate::slash::ArgKind::Effort => "推理强度",
         crate::slash::ArgKind::LoopInterval => "循环间隔",
@@ -894,7 +895,9 @@ mod tests {
             api_key: None,
             env_key: None,
             context_window: None,
-            api_backend: cordis_spine::ApiBackend::ChatCompletions,
+            api_backends: vec![cordis_spine::ApiBackend::ChatCompletions],
+            backend_overrides: Default::default(),
+            pricing: None,
             auth_scheme: None,
             api_model: None,
             prompt_cache: None,

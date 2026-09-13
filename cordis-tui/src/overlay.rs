@@ -605,6 +605,11 @@ const HELP: &[HelpEntry] = &[
         kind: HelpKind::Slash(SlashCmd::Model),
     }),
     HelpEntry::Row(HelpRow {
+        key: "/protocol",
+        label: "切换推理协议",
+        kind: HelpKind::Slash(SlashCmd::Protocol),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "/settings",
         label: "设置",
         kind: HelpKind::Slash(SlashCmd::Settings),

@@ -4,11 +4,14 @@
 //! existing ledger ([`session_usage_block_text`]). No grok.com billing.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use cordis::Context;
 use cordis_spine::{
-    occupancy_detail, session_usage_block_text, snapshot_context, ContextBook, ContextSnapshot,
-    OccupancyDetail, OccupancyKind, Sessions, TokenUsage, CONTEXT, SESSIONS,
+    calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_trend,
+    occupancy_detail, per_model_amounts, session_usage_block_text, share_percent, snapshot_context,
+    CacheSegmentKind, ContextBook, ContextSnapshot, OccupancyDetail, OccupancyKind, Sessions,
+    TokenUsage, CONTEXT, SESSIONS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -291,7 +294,7 @@ fn rebuild_body(
             rev,
             usage,
             snap: None,
-            lines: session_lines(ctx),
+            lines: session_lines(ctx, width),
             legend: Vec::new(),
             bar: Vec::new(),
             bar_row_len: 0,
@@ -300,28 +303,306 @@ fn rebuild_body(
     }
 }
 
-fn session_lines(ctx: &Context) -> Vec<Line<'static>> {
+fn session_lines(ctx: &Context, width: u16) -> Vec<Line<'static>> {
     let usage = ctx
         .get::<Sessions>(SESSIONS)
         .map(|s| s.prompt_usage())
         .unwrap_or_default();
+    session_view(&usage, width)
+}
+
+/// 缓存三段的画法。三段互不相交、加起来是全量输入，所以共用一条 bar。
+///
+/// 每段的字形不同而不只是颜色不同：Context 页也是这么分的（实心 / 点 / 空心
+/// 菱形），而且单色终端与截图里只靠颜色分段等于没分。
+struct CacheColors {
+    hit: (char, Color),
+    write: (char, Color),
+    miss: (char, Color),
+}
+
+impl CacheColors {
+    fn from_theme(theme: &Theme) -> Self {
+        Self {
+            hit: ('█', theme.accent_success),
+            write: ('▓', theme.accent_verify),
+            miss: ('░', theme.gray_dim),
+        }
+    }
+
+    /// spine 定义分段，这里只负责给它挑字形与颜色。
+    fn of(&self, kind: CacheSegmentKind) -> (char, Color) {
+        match kind {
+            CacheSegmentKind::Hit => self.hit,
+            CacheSegmentKind::Write => self.write,
+            CacheSegmentKind::Miss => self.miss,
+        }
+    }
+}
+
+/// Session 页。Context 页早就是"条 + 图例"的画法，这里沿用同一套，
+/// 免得同一个 overlay 里两页读起来像两个程序。
+fn session_view(usage: &cordis_spine::PromptUsage, width: u16) -> Vec<Line<'static>> {
     let theme = Theme::current();
-    session_usage_block_text(&usage)
-        .lines()
-        .enumerate()
-        .map(|(i, row)| {
-            if i == 0 {
-                Line::styled(
-                    row.to_string(),
-                    Style::default()
-                        .fg(theme.text_primary)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Line::styled(row.to_string(), Style::default().fg(theme.text_primary))
-            }
+    let t = &usage.totals;
+    let muted = theme.muted();
+    let primary = Style::default()
+        .fg(theme.text_primary)
+        .add_modifier(Modifier::BOLD);
+    let secondary = Style::default().fg(theme.text_secondary);
+
+    if t.model_calls == 0 && usage.model_usage.is_empty() {
+        // 空账本没什么可画的，一句话比一条空条子诚实。
+        return session_usage_block_text(usage)
+            .lines()
+            .map(|row| Line::styled(row.to_string(), secondary))
+            .collect();
+    }
+
+    let colors = CacheColors::from_theme(&theme);
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(
+            "本会话用量（自开始或上次恢复）".to_string(),
+            primary,
+        )),
+        Line::from(""),
+    ];
+
+    // 明细在前、图在后：要对账的是这几个数，bar 只是让比例一眼看出来。
+    lines.extend(amount_rows(t, &colors, secondary, muted));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        match t.cache_hit_rate() {
+            Some(rate) => format!("缓存命中 {:.0}% of 完整输入", rate * 100.0),
+            None => "缓存命中 -".to_string(),
+        },
+        secondary,
+    )));
+    lines.push(cache_bar(t, &colors, width));
+    lines.push(Line::from(cache_bar_legend(t, &colors, muted)));
+
+    if let Some(last) = &usage.last_call {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "上一轮  输入(未命中) {} \u{00b7} 缓存命中 {} \u{00b7} 完整输入 {}",
+                group_thousands(last.uncached_input_tokens()),
+                group_thousands(last.cached_read_tokens),
+                group_thousands(last.input_tokens),
+            ),
+            secondary,
+        )));
+    }
+    // 标签占 12 列，右边的计数后缀留 24 列；剩下的才是格子。放不下时
+    // `hit_rate_trend` 丢最旧的，不能让渲染层在右边裁掉最新的那几次。
+    const TREND_LABEL: &str = "每轮命中率  ";
+    let trend_cells = (width as usize).saturating_sub(TREND_LABEL.width() + 24);
+    if let Some(trend) = hit_rate_trend(&usage.recent_calls, trend_cells) {
+        let drawn = trend.chars().count();
+        lines.push(Line::from(vec![
+            Span::styled(TREND_LABEL.to_string(), muted),
+            Span::styled(trend, Style::default().fg(colors.hit.1)),
+            // 报**实际画出来的格数**：这个轴是「有输入的主循环调用」，和下面
+            // 那行的「模型调用」不是一个口径，不写清楚就会被读成少画了一格。
+            Span::styled(format!("  最近 {drawn} 次主循环调用"), muted),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "  旧 → 新 \u{00b7} 掉一格通常是前缀被改写（压缩 / 系统提示或工具表变了）".to_string(),
+            Style::default().fg(theme.gray),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "模型调用 {} \u{00b7} API 耗时 {} \u{00b7} 费用 {}",
+            calls_breakdown(usage),
+            format_duration(Duration::from_millis(t.api_duration_ms)),
+            format_cost(t),
+        ),
+        muted,
+    )));
+
+    if usage.model_usage.len() > 1 {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("按模型".to_string(), secondary)));
+        for (model, m) in &usage.model_usage {
+            lines.push(Line::from(Span::styled(
+                format!("  {model}  {}", per_model_amounts(m)),
+                muted,
+            )));
+        }
+    }
+
+    if usage.usage_is_incomplete {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "用量统计不完整，可能少计。".to_string(),
+            Style::default().fg(theme.warning),
+        )));
+    }
+    lines
+}
+
+/// 一条按 token 比例分段的条：命中 / 写入 / 未命中。
+///
+/// 非零的段至少占一格——四舍五入到 0 会让"有 300 token 白付了全价"这件事
+/// 从图上消失，而那正是要看的东西。
+fn cache_bar(
+    t: &cordis_spine::PromptUsageModel,
+    colors: &CacheColors,
+    width: u16,
+) -> Line<'static> {
+    let cells = (width as usize).clamp(8, 40);
+    let parts = [
+        (t.cached_read_tokens, colors.hit),
+        (t.cache_creation_tokens, colors.write),
+        (t.uncached_input_tokens(), colors.miss),
+    ];
+    let total = t.input_tokens.max(1);
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    for (i, (tokens, (glyph, color))) in parts.iter().enumerate() {
+        if *tokens == 0 {
+            continue;
+        }
+        let raw = ((*tokens as f64 / total as f64) * cells as f64).round() as usize;
+        let left = cells.saturating_sub(used);
+        // 后面还有几个非零段，就给它们各留一格：不留的话 99.95% 的命中会四舍
+        // 五入吃掉整条，剩下那点全价未命中直接从图上消失。
+        let reserved = parts[i + 1..].iter().filter(|(n, _)| *n > 0).count();
+        let n = if reserved == 0 {
+            // 最后一个非零段吃掉舍入残余，条长才稳定。
+            left
+        } else {
+            raw.clamp(1, left.saturating_sub(reserved).max(1))
+        };
+        if n == 0 {
+            continue;
+        }
+        used += n;
+        spans.push(Span::styled(
+            glyph.to_string().repeat(n),
+            Style::default().fg(*color),
+        ));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(
+            "─".repeat(cells),
+            Style::default().fg(colors.miss.1),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// 逐项精确数值，Claude Code `/cost` 的口径：**「输入」指未命中的那部分**，
+/// 缓存读 / 写各自单列。三者互不相交，加起来就是下面那行「完整输入」。
+///
+/// 这里不缩写成 `131k`：这几个数是用来对账的，四舍五入过的数对不上账。
+fn amount_rows(
+    t: &cordis_spine::PromptUsageModel,
+    colors: &CacheColors,
+    secondary: Style,
+    muted: Style,
+) -> Vec<Line<'static>> {
+    /// 一行明细。`mark` = 该行在 bar 上对应的字形与颜色；`None` 的行（输出）
+    /// 不在那条 bar 里，留空白对齐。
+    struct AmountRow {
+        mark: Option<(char, Color)>,
+        label: &'static str,
+        tokens: u64,
+        note: String,
+    }
+
+    // 分段、文案、「写入为 0 不占行」的规则都来自 spine：这套口径以前在文本块
+    // 和这里各写一遍，改一处必漏另一处。
+    let mut rows: Vec<AmountRow> = t
+        .cache_segments()
+        .into_iter()
+        .map(|seg| AmountRow {
+            mark: Some(colors.of(seg.kind)),
+            label: seg.kind.label(),
+            tokens: seg.tokens,
+            note: seg.kind.note().to_string(),
         })
-        .collect()
+        .collect();
+    rows.push(AmountRow {
+        mark: None,
+        label: "输出",
+        tokens: t.output_tokens,
+        note: format!("思考 {}", group_thousands(t.reasoning_tokens)),
+    });
+
+    // 「完整输入」也参与对齐，否则最宽的那个数会把这一列顶出去。
+    let num_w = rows
+        .iter()
+        .map(|r| group_thousands(r.tokens).chars().count())
+        .chain(std::iter::once(
+            group_thousands(t.input_tokens).chars().count(),
+        ))
+        .max()
+        .unwrap_or(0);
+    let label_w = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.label))
+        .chain(std::iter::once(UnicodeWidthStr::width("完整输入")))
+        .max()
+        .unwrap_or(0);
+
+    let mut lines: Vec<Line<'static>> = rows
+        .iter()
+        .map(|r| {
+            let (glyph, color) = r.mark.unwrap_or((' ', muted.fg.unwrap_or(Color::Reset)));
+            Line::from(vec![
+                Span::styled(format!("{glyph} "), Style::default().fg(color)),
+                Span::styled(pad_display(r.label, label_w + 2), secondary),
+                Span::styled(format!("{:>num_w$}", group_thousands(r.tokens)), secondary),
+                Span::styled(format!("   {}", r.note), muted),
+            ])
+        })
+        .collect();
+
+    // 完整输入 = 上面三项之和。单列一行是因为它和「输入(未命中)」差一个量级，
+    // 两个都叫"输入"最容易看串。
+    lines.push(Line::from(vec![
+        Span::styled("  ".to_string(), muted),
+        Span::styled(pad_display("完整输入", label_w + 2), muted),
+        Span::styled(
+            format!("{:>num_w$}", group_thousands(t.input_tokens)),
+            muted,
+        ),
+        Span::styled(
+            format!("   合计 {}", group_thousands(t.total_tokens)),
+            muted,
+        ),
+    ]));
+    lines
+}
+
+/// bar 底下的一行紧凑图例。精确数值已经在上面的表里，这里只解释字形。
+fn cache_bar_legend(
+    t: &cordis_spine::PromptUsageModel,
+    colors: &CacheColors,
+    muted: Style,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    // 顺序跟 bar 一致（未命中 → 命中 → 写入），图例和色块对得上。
+    for seg in t.cache_segments() {
+        if !spans.is_empty() {
+            spans.push(Span::styled("   ".to_string(), muted));
+        }
+        let (glyph, color) = colors.of(seg.kind);
+        spans.push(Span::styled(
+            format!("{glyph} "),
+            Style::default().fg(color),
+        ));
+        spans.push(Span::styled(
+            format!("{} {}", seg.kind.short_label(), t.segment_share(&seg)),
+            muted,
+        ));
+    }
+    spans
 }
 
 fn paint_tabs(buf: &mut Buffer, inner: Rect, theme: &Theme, tab: UsageTab, close: Rect) {
@@ -531,7 +812,7 @@ impl RowLayout {
     }
 
     fn percent(tokens: u64, total: u64) -> String {
-        format!("({})", percent_of_window(tokens, total))
+        format!("({})", share_percent(tokens, total))
     }
 
     fn cells(&self, tokens: u64, total: u64) -> String {
@@ -1001,18 +1282,6 @@ fn fmt_tok_big(n: u64) -> String {
     }
 }
 
-fn percent_of_window(part: u64, total: u64) -> String {
-    if total == 0 {
-        return "-".to_string();
-    }
-    let p = ((part as f64 / total as f64) * 100.0).max(if part > 0 { 0.1 } else { 0.0 });
-    if p < 10.0 {
-        format!("{p:.1}%")
-    } else {
-        format!("{p:.0}%")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1234,6 +1503,158 @@ mod tests {
             hits.iter().any(|(_, k)| *k == OccupancyKind::System),
             "{hits:?}"
         );
+    }
+
+    fn usage_row(input: u64, cached: u64, created: u64) -> cordis_spine::PromptUsageModel {
+        cordis_spine::PromptUsageModel {
+            input_tokens: input,
+            output_tokens: 100,
+            total_tokens: input + 100,
+            cached_read_tokens: cached,
+            cache_creation_tokens: created,
+            reasoning_tokens: 0,
+            model_calls: 1,
+            api_duration_ms: 1_000,
+            cost_usd_ticks: None,
+            cost_is_partial: false,
+            cost_missing_calls: 0,
+            cost_estimated_calls: 0,
+        }
+    }
+
+    /// 条的长度必须稳定：舍入残余归到最后一个非零段，否则宽度会随比例抖动。
+    #[test]
+    fn cache_bar_always_fills_the_same_width() {
+        let colors = CacheColors::from_theme(&Theme::current());
+        for (input, cached, created) in [
+            (1_000u64, 333u64, 333u64),
+            (1_000, 999, 0),
+            (1_000, 0, 0),
+            (7, 3, 1),
+        ] {
+            let line = cache_bar(&usage_row(input, cached, created), &colors, 30);
+            let painted: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(
+                painted.chars().count(),
+                30,
+                "input={input} cached={cached} created={created} → {painted:?}"
+            );
+        }
+    }
+
+    /// 非零但很小的段也要占一格：四舍五入到 0 会让"有一小段白付了全价"
+    /// 从图上消失，而那正是这条 bar 要显示的东西。
+    #[test]
+    fn a_tiny_miss_still_gets_a_cell() {
+        let colors = CacheColors::from_theme(&Theme::current());
+        let line = cache_bar(&usage_row(100_000, 99_950, 0), &colors, 20);
+        let miss: usize = line
+            .spans
+            .iter()
+            .filter(|s| s.style.fg == Some(colors.miss.1))
+            .map(|s| s.content.chars().count())
+            .sum();
+        assert!(miss >= 1, "0.05% 的未命中被抹掉了：{line:?}");
+    }
+
+    /// 空账本不画条子，直说没有调用。
+    #[test]
+    fn empty_ledger_says_so_instead_of_drawing_an_empty_bar() {
+        let lines = session_view(&cordis_spine::PromptUsage::default(), 60);
+        let all = all_text(&lines);
+        assert!(all.contains("尚未有模型调用"), "{all}");
+        assert!(!all.contains('█'), "{all}");
+    }
+
+    /// Session 页要把输入拆成三段，并在有多轮时画出走势。
+    #[test]
+    fn session_view_breaks_out_cache_and_draws_the_trend() {
+        let mut totals = usage_row(131_113, 110_976, 0);
+        totals.model_calls = 11;
+        let usage = cordis_spine::PromptUsage {
+            totals,
+            last_call: Some(usage_row(26_742, 18_560, 0)),
+            recent_calls: vec![
+                usage_row(10_000, 9_500, 0),
+                usage_row(20_000, 4_000, 0),
+                usage_row(26_742, 18_560, 0),
+            ],
+            ..Default::default()
+        };
+        let all = all_text(&session_view(&usage, 60));
+        // Claude Code 口径：三个精确数各自成行，「输入」指未命中那部分。
+        // 131,113 − 110,976 = 20,137，要能自己算出来，且不缩写成 20.1k。
+        assert!(all.contains("输入(未命中)"), "{all}");
+        assert!(all.contains("20,137"), "{all}");
+        assert!(all.contains("缓存命中"), "{all}");
+        assert!(all.contains("110,976"), "{all}");
+        assert!(all.contains("100"), "输出缺了：{all}");
+        assert!(all.contains("完整输入"), "{all}");
+        assert!(all.contains("131,113"), "{all}");
+        assert!(!all.contains("131k"), "对账用的数不该缩写：{all}");
+        assert!(all.contains("缓存命中 85% of 完整输入"), "{all}");
+        // 分段靠字形，不只靠颜色——单色终端和截图里颜色是丢的。
+        assert!(all.contains('█') && all.contains('░'), "{all}");
+        assert!(all.contains("上一轮"), "{all}");
+        assert!(all.contains("8,182"), "上一轮未命中算错：{all}");
+        // 中间那轮命中率掉到 20%，走势图必须看得出来。
+        assert!(all.contains("每轮命中率"), "{all}");
+        // 95% → █，20% → ▂，69% → ▆
+        assert!(all.contains("█▂▆"), "走势没按每轮命中率画出来：{all}");
+        assert!(
+            !all.contains("写入"),
+            "这条 wire 不报写入，不该凭空多一行：{all}"
+        );
+    }
+
+    /// 走势格数和「模型调用」是两个口径（后者折了子代理），并排摆着不写明就
+    /// 会被读成走势少画了一格。overlay 必须两边都把数字说出来。
+    #[test]
+    fn trend_cell_count_is_reconcilable_with_model_calls() {
+        let mut totals = usage_row(100_000, 90_000, 0);
+        totals.model_calls = 20;
+        let usage = cordis_spine::PromptUsage {
+            totals,
+            num_turns: 19,
+            recent_calls: (0..19).map(|_| usage_row(1_000, 900, 0)).collect(),
+            ..Default::default()
+        };
+        let all = all_text(&session_view(&usage, 100));
+        assert!(all.contains("最近 19 次主循环调用"), "{all}");
+        assert!(all.contains("模型调用 20（主循环 19 · 子代理 1）"), "{all}");
+    }
+
+    /// 窄窗口下走势要裁最旧的：渲染层只会在右边截断，那样丢的恰好是最新几次。
+    #[test]
+    fn narrow_overlay_keeps_the_newest_trend_cells() {
+        let calls: Vec<_> = (0..40).map(|i| usage_row(1_000, i * 25, 0)).collect();
+        let wide = all_text(&session_view(
+            &cordis_spine::PromptUsage {
+                totals: usage_row(40_000, 20_000, 0),
+                recent_calls: calls.clone(),
+                ..Default::default()
+            },
+            120,
+        ));
+        let narrow = all_text(&session_view(
+            &cordis_spine::PromptUsage {
+                totals: usage_row(40_000, 20_000, 0),
+                recent_calls: calls,
+                ..Default::default()
+            },
+            60,
+        ));
+        let spark_of = |text: &str| -> String {
+            text.lines()
+                .find(|l| l.starts_with("每轮命中率"))
+                .unwrap()
+                .chars()
+                .filter(|c| "▁▂▃▄▅▆▇█".contains(*c))
+                .collect()
+        };
+        let (w, n) = (spark_of(&wide), spark_of(&narrow));
+        assert!(n.chars().count() < w.chars().count(), "窄窗口没裁：{n}");
+        assert!(w.ends_with(&n), "裁掉的该是最旧的：wide={w} narrow={n}");
     }
 
     #[test]

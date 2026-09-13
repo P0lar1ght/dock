@@ -99,6 +99,30 @@ struct PendingCall {
 /// children.
 pub const ROOT_IDENTITY: &str = "main";
 
+/// 按 `[model.<id>.pricing]` 估一次调用的费用。`None` = 没配单价。
+///
+/// 这里认的是**发给上游的 slug**（`pending.model`），不是目录 id：两个目录条目
+/// 可以指向同一个上游模型，价是上游模型的属性。找不到 slug 时退回按目录 id 匹配，
+/// 那是 `api_model` 省略时的常态。
+fn estimated_cost_ticks(wire_model: &str, usage: &crate::usage::TokenUsage) -> Option<i64> {
+    let catalog = crate::config::load_catalog();
+    let pricing = catalog
+        .iter()
+        .find(|m| m.wire_model() == wire_model)
+        .or_else(|| catalog.iter().find(|m| m.id == wire_model))
+        .and_then(|m| m.pricing)?;
+    let uncached = usage
+        .prompt_tokens
+        .saturating_sub(usage.cached_prompt_tokens)
+        .saturating_sub(usage.cache_creation_prompt_tokens);
+    Some(pricing.cost_ticks(
+        uncached,
+        usage.cached_prompt_tokens,
+        usage.cache_creation_prompt_tokens,
+        usage.completion_tokens,
+    ))
+}
+
 impl Sessions {
     pub fn new(ctx: Context) -> Self {
         Self::with_identity(ctx, ROOT_IDENTITY, true)
@@ -537,12 +561,14 @@ impl Sessions {
             .lock()
             .unwrap()
             .map(|t| t.elapsed().as_millis() as u64);
-        self.ledger.lock().unwrap().record_main_loop_call(
-            model,
-            &pending.usage,
-            duration_ms,
+        let cost = crate::usage::CallCost::pick(
             pending.cost_usd_ticks,
+            estimated_cost_ticks(model, &pending.usage),
         );
+        self.ledger
+            .lock()
+            .unwrap()
+            .record_main_loop_call(model, &pending.usage, duration_ms, cost);
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {

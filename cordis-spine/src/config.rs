@@ -12,21 +12,46 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 
 /// Grok `ApiBackend`: which inference wire the `llm` plugin speaks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// 默认是 Responses：coding agent 依赖推理链跨轮回放、块级工具结果、item 可寻址，
+/// 这三件事只有 item/block 序列模型表达得了。chat/completions 仍是覆盖面最广的
+/// 那条，端点只支持它就显式声明。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ApiBackend {
     #[default]
-    ChatCompletions,
     Responses,
+    ChatCompletions,
     Messages,
 }
 
 impl ApiBackend {
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-            Some("responses") | Some("resp") => Self::Responses,
-            Some("messages") | Some("anthropic") => Self::Messages,
-            _ => Self::ChatCompletions,
+    /// `/protocol` 菜单在目录里没有当前模型时列的通用三条，顺序 = 默认优先。
+    pub const ALL: &'static [ApiBackend] =
+        &[Self::Responses, Self::ChatCompletions, Self::Messages];
+
+    /// 认得出来才返回。解析**声明列表**用这个：不认识的项要能丢掉，而不是
+    /// 悄悄变成默认值，否则 `api_backends = ["responses", "typo"]` 会得到两条
+    /// Responses。
+    pub fn from_name(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "responses" | "resp" => Some(Self::Responses),
+            "messages" | "anthropic" => Some(Self::Messages),
+            "chat_completions" | "chat-completions" | "chat" | "completions" => {
+                Some(Self::ChatCompletions)
+            }
+            _ => None,
         }
+    }
+
+    /// 单数 `api_backend` 的解析：缺省 / 不认识都退回默认。
+    pub fn parse(raw: Option<&str>) -> Self {
+        let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Self::default();
+        };
+        Self::from_name(raw).unwrap_or_else(|| {
+            tracing::warn!(api_backend = raw, "unknown api_backend; using responses");
+            Self::default()
+        })
     }
 
     pub fn path(self) -> &'static str {
@@ -34,6 +59,24 @@ impl ApiBackend {
             Self::ChatCompletions => "chat/completions",
             Self::Responses => "responses",
             Self::Messages => "messages",
+        }
+    }
+
+    /// config.toml 里写的名字，也是 `/protocol <name>` 接受的名字。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+            Self::Messages => "messages",
+        }
+    }
+
+    /// `/protocol` 菜单里的一句话说明。
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "OpenAI /chat/completions · 覆盖面最广",
+            Self::Responses => "OpenAI /responses · 推理链可跨轮回放",
+            Self::Messages => "Anthropic /messages · 显式缓存断点",
         }
     }
 }
@@ -54,10 +97,93 @@ impl AuthScheme {
             _ => None,
         }
     }
+
+    /// 没显式写 `auth_scheme` 时按**当前这条 wire** 猜——同一个端点切到
+    /// /messages 就该换头，所以这跟着运行时协议走，不是模型的固定属性。
+    pub fn default_for(backend: ApiBackend) -> Self {
+        match backend {
+            ApiBackend::Messages => Self::XApiKey,
+            ApiBackend::ChatCompletions | ApiBackend::Responses => Self::Bearer,
+        }
+    }
 }
 
 /// `[model.<id>].reasoning_efforts` 没写时 `/effort` 列的通用档位。
 pub const DEFAULT_EFFORT_CHOICES: &[&str] = &["low", "medium", "high", "xhigh"];
+
+/// `[model.<id>.pricing]` —— 单价，**USD / 百万 token**（全行业通用的报价单位）。
+///
+/// 存 tick（1 USD = 1e10）而不是 f64：`ModelChoice` 要 `Eq`，浮点没有；而且
+/// tick 本来就是整数单位，省掉一路浮点误差。
+///
+/// 不内置任何厂商价格表。价格变动频繁，按模型名猜出来的单价一旦过期就是**静默
+/// 给出错误金额**，比不显示更糟——这也是 `[[models.catalog]]` 内置条目当初被
+/// 删掉的同一个理由。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelPricing {
+    /// 未命中输入（Claude Code `/cost` 里的 "input"）。
+    pub input_ticks_per_mtok: i64,
+    pub cache_read_ticks_per_mtok: i64,
+    /// 缓存写入。config 里省略则回落到 `input`——多数厂商写入就是原价，
+    /// Anthropic 那种 1.25x 的要显式写。
+    pub cache_write_ticks_per_mtok: i64,
+    /// 输出。多数厂商把推理 token 计在这里，所以不单列。
+    pub output_ticks_per_mtok: i64,
+}
+
+impl ModelPricing {
+    /// 一次调用的估算费用（tick）。分段口径和 `/usage` 完全一致：
+    /// 未命中 / 缓存读 / 缓存写互不相交，各按各的单价。
+    ///
+    /// 用 `i128` 中转：1e6 token × 1e12 tick/Mtok 已经贴近 `i64` 上限。
+    pub fn cost_ticks(
+        &self,
+        uncached_input: u64,
+        cache_read: u64,
+        cache_write: u64,
+        output: u64,
+    ) -> i64 {
+        let part = |tokens: u64, per_mtok: i64| -> i128 {
+            i128::from(tokens) * i128::from(per_mtok) / 1_000_000
+        };
+        let total = part(uncached_input, self.input_ticks_per_mtok)
+            + part(cache_read, self.cache_read_ticks_per_mtok)
+            + part(cache_write, self.cache_write_ticks_per_mtok)
+            + part(output, self.output_ticks_per_mtok);
+        total.clamp(0, i128::from(i64::MAX)) as i64
+    }
+
+    /// 四个价位全是 0 = 没写价，不该拿 $0 冒充"免费"。
+    pub fn is_zero(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `$X / 1M tokens` → tick。负数与非有限值当没写。
+fn usd_per_mtok_to_ticks(raw: Option<f64>) -> i64 {
+    raw.filter(|v| v.is_finite() && *v > 0.0)
+        .map(|v| (v * crate::usage::USD_TICKS_PER_USD).round() as i64)
+        .unwrap_or(0)
+}
+
+/// `[model.<id>.<protocol>]` —— 同一个模型在**某一条 wire 上**的连接差异。
+///
+/// 起因：一个端点支持所有协议，但各协议的入口不同。DeepSeek 的 OpenAI 侧是
+/// `https://api.deepseek.com`，Anthropic 侧是 `https://api.deepseek.com/anthropic`。
+/// 没有这一层就只能退回「一个协议一条模型条目」，等于把刚合并掉的重复又配回来。
+///
+/// 这里只放**连接**相关的键。能力（`context_window` / `reasoning` /
+/// `supports_images` / …）是模型的属性，不随 wire 变，不给覆盖——那正是
+/// 「一个模型一条 entry」要守住的东西。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackendOverride {
+    /// 这条 wire 自己的基址。None = 用模型的 `api_base_url`。
+    pub api_base_url: Option<String>,
+    /// 这条 wire 自己的鉴权头。None = 用模型的 `auth_scheme`，再没有就按协议默认。
+    pub auth_scheme: Option<AuthScheme>,
+    /// 这条 wire 上的模型 slug。None = 用模型的 `api_model` / 目录 id。
+    pub api_model: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChoice {
@@ -71,9 +197,19 @@ pub struct ModelChoice {
     /// Env var name for the bearer token when `api_key` is empty.
     pub env_key: Option<String>,
     pub context_window: Option<u64>,
-    /// Grok `[model.<id>].api_backend` (`chat_completions` / `responses` / `messages`).
-    pub api_backend: ApiBackend,
-    /// `None` = Bearer, except Messages defaults to `x-api-key`.
+    /// `[model.<id>].api_backends` —— 这个端点**声明支持**哪几条 wire，按声明
+    /// 顺序，第一条是切到该模型时的默认。单数 `api_backend` = 只写一条。
+    ///
+    /// 一个端点常常同时开着 /responses 和 /chat/completions；以前要为此配两个
+    /// 模型条目（靠 `api_model` 指向同一个上游 slug），`/model` 里就多出一行只
+    /// 有协议不同的重复项。声明成一行、运行时用 `/protocol` 切。
+    ///
+    /// 解析后**永不为空**：空列表退回 `[ApiBackend::default()]`。
+    pub api_backends: Vec<ApiBackend>,
+    /// `[model.<id>.<protocol>]` 的按协议连接覆盖（基址 / 鉴权 / slug）。
+    /// 同一个端点各协议入口不同时用它，见 [`BackendOverride`]。
+    pub backend_overrides: BTreeMap<ApiBackend, BackendOverride>,
+    /// `None` = 跟着当前协议走（[`AuthScheme::default_for`]）。
     pub auth_scheme: Option<AuthScheme>,
     /// Wire slug in the JSON body. None = use [`Self::id`] (picker key).
     pub api_model: Option<String>,
@@ -96,6 +232,8 @@ pub struct ModelChoice {
     pub reasoning_efforts: Option<Vec<String>>,
     /// `[model.<id>].supports_images`. false = 纯文本模型，图片不往请求里塞。
     pub supports_images: Option<bool>,
+    /// `[model.<id>.pricing]`。`None` = 没配单价，`/usage` 显示"未上报"而不是 $0。
+    pub pricing: Option<ModelPricing>,
 }
 
 impl ModelChoice {
@@ -103,6 +241,12 @@ impl ModelChoice {
         self.api_base_url
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())
+            // 只在协议块里写基址的模型同样是「配了端点」的。
+            || self.backend_overrides.values().any(|o| {
+                o.api_base_url
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+            })
             || self
                 .api_key
                 .as_deref()
@@ -123,11 +267,55 @@ impl ModelChoice {
         })
     }
 
-    pub fn resolved_auth(&self) -> AuthScheme {
-        self.auth_scheme.unwrap_or(match self.api_backend {
-            ApiBackend::Messages => AuthScheme::XApiKey,
-            ApiBackend::ChatCompletions | ApiBackend::Responses => AuthScheme::Bearer,
-        })
+    /// 切到该模型时用哪条 wire：声明列表的第一条。
+    pub fn default_backend(&self) -> ApiBackend {
+        self.api_backends.first().copied().unwrap_or_default()
+    }
+
+    /// `/protocol` 只允许切到声明过的协议——端点没开的那条切过去就是 404。
+    pub fn supports_backend(&self, backend: ApiBackend) -> bool {
+        self.api_backends.contains(&backend)
+    }
+
+    /// 声明了不止一条才值得在 UI 上给切换入口。
+    pub fn has_backend_choice(&self) -> bool {
+        self.api_backends.len() > 1
+    }
+
+    fn override_for(&self, backend: ApiBackend) -> Option<&BackendOverride> {
+        self.backend_overrides.get(&backend)
+    }
+
+    /// 这条 wire 的基址：协议级覆盖 > 模型级 `api_base_url` > None（交给 sampler
+    /// 的兜底）。DeepSeek 的 /anthropic 入口就走这条路。
+    pub fn base_url_for(&self, backend: ApiBackend) -> Option<&str> {
+        self.override_for(backend)
+            .and_then(|o| o.api_base_url.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.api_base_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
+    /// 协议级覆盖 > 模型级 `auth_scheme` > 按协议默认。
+    pub fn resolved_auth(&self, backend: ApiBackend) -> AuthScheme {
+        self.override_for(backend)
+            .and_then(|o| o.auth_scheme)
+            .or(self.auth_scheme)
+            .unwrap_or_else(|| AuthScheme::default_for(backend))
+    }
+
+    /// 这条 wire 上发给上游的 slug：协议级覆盖 > 模型级 `api_model` > 目录 id。
+    pub fn wire_model_for(&self, backend: ApiBackend) -> &str {
+        self.override_for(backend)
+            .and_then(|o| o.api_model.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.wire_model())
     }
 
     /// 只有 Messages 后端会用：其余两条靠上游自动前缀缓存，不需要断点。
@@ -702,9 +890,13 @@ struct CatalogRow {
     #[serde(default)]
     api_backend: Option<String>,
     #[serde(default)]
+    api_backends: Option<Vec<String>>,
+    #[serde(default)]
     auth_scheme: Option<String>,
     #[serde(default)]
     api_model: Option<String>,
+    #[serde(flatten)]
+    backends: BackendTables,
     #[serde(default)]
     prompt_cache: Option<bool>,
     #[serde(default)]
@@ -717,6 +909,32 @@ struct CatalogRow {
     reasoning_efforts: Option<Vec<String>>,
     #[serde(default)]
     supports_images: Option<bool>,
+    #[serde(default)]
+    pricing: Option<PricingRow>,
+}
+
+/// `[model.<id>.responses]` / `.chat_completions` / `.messages` 三个可选子表。
+///
+/// 用固定字段而不是 `BTreeMap<String, _>`：协议名写错时 serde 会当未知键丢掉，
+/// 而 map 会悄悄收下一个永远匹配不上的条目。别名跟 `ApiBackend::from_name` 对齐。
+#[derive(Debug, Default, Deserialize)]
+struct BackendTables {
+    #[serde(default, alias = "resp")]
+    responses: Option<BackendRow>,
+    #[serde(default, alias = "chat-completions", alias = "chat")]
+    chat_completions: Option<BackendRow>,
+    #[serde(default, alias = "anthropic")]
+    messages: Option<BackendRow>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackendRow {
+    #[serde(default, alias = "api_base")]
+    api_base_url: Option<String>,
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    #[serde(default)]
+    api_model: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -738,9 +956,13 @@ struct ModelOverride {
     #[serde(default)]
     api_backend: Option<String>,
     #[serde(default)]
+    api_backends: Option<Vec<String>>,
+    #[serde(default)]
     auth_scheme: Option<String>,
     #[serde(default)]
     api_model: Option<String>,
+    #[serde(flatten)]
+    backends: BackendTables,
     #[serde(default)]
     prompt_cache: Option<bool>,
     #[serde(default)]
@@ -753,6 +975,39 @@ struct ModelOverride {
     reasoning_efforts: Option<Vec<String>>,
     #[serde(default)]
     supports_images: Option<bool>,
+    #[serde(default)]
+    pricing: Option<PricingRow>,
+}
+
+/// `[model.<id>.pricing]`，单位 USD / 百万 token。
+#[derive(Debug, Default, Deserialize)]
+struct PricingRow {
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+    #[serde(default)]
+    cache_write: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+}
+
+impl PricingRow {
+    /// 全 0（没写任何一个价）返回 `None`：`Some(0)` 会被下游当成"这个模型免费"。
+    fn parse(&self) -> Option<ModelPricing> {
+        let input = usd_per_mtok_to_ticks(self.input);
+        let pricing = ModelPricing {
+            input_ticks_per_mtok: input,
+            cache_read_ticks_per_mtok: usd_per_mtok_to_ticks(self.cache_read),
+            // 省略 = 按原价。多数厂商写入不额外加价；Anthropic 那种 1.25x 要显式写。
+            cache_write_ticks_per_mtok: match usd_per_mtok_to_ticks(self.cache_write) {
+                0 => input,
+                v => v,
+            },
+            output_ticks_per_mtok: usd_per_mtok_to_ticks(self.output),
+        };
+        (!pricing.is_zero()).then_some(pricing)
+    }
 }
 
 pub fn dock_home() -> PathBuf {
@@ -839,6 +1094,62 @@ fn nonempty(value: Option<String>) -> Option<String> {
     })
 }
 
+/// `api_backends`（列表，第一条 = 默认）+ 单数 `api_backend`（当默认讲）。
+///
+/// 两个都写时单数提到队首：这样在老配置上加一行 `api_backends` 不会把原来的
+/// 默认协议换掉。都没写就是 `[ApiBackend::default()]`——返回值永不为空。
+fn parse_backends(list: Option<&Vec<String>>, single: Option<&str>) -> Vec<ApiBackend> {
+    let mut out: Vec<ApiBackend> = Vec::new();
+    let mut push = |backend: ApiBackend| {
+        if !out.contains(&backend) {
+            out.push(backend);
+        }
+    };
+    if let Some(single) = single.map(str::trim).filter(|s| !s.is_empty()) {
+        push(ApiBackend::parse(Some(single)));
+    }
+    for raw in list.into_iter().flatten() {
+        match ApiBackend::from_name(raw) {
+            Some(backend) => push(backend),
+            None => tracing::warn!(
+                api_backend = raw.as_str(),
+                "unknown api_backends entry; skipped"
+            ),
+        }
+    }
+    if out.is_empty() {
+        out.push(ApiBackend::default());
+    }
+    out
+}
+
+impl BackendTables {
+    fn is_empty(&self) -> bool {
+        self.responses.is_none() && self.chat_completions.is_none() && self.messages.is_none()
+    }
+
+    /// 三个子表 → `ApiBackend` 索引的覆盖表。整块空着的子表不收，免得
+    /// `backend_overrides` 里躺着一堆什么都不覆盖的条目。
+    fn parse(&self) -> BTreeMap<ApiBackend, BackendOverride> {
+        let rows = [
+            (ApiBackend::Responses, self.responses.as_ref()),
+            (ApiBackend::ChatCompletions, self.chat_completions.as_ref()),
+            (ApiBackend::Messages, self.messages.as_ref()),
+        ];
+        rows.into_iter()
+            .filter_map(|(backend, row)| {
+                let row = row?;
+                let over = BackendOverride {
+                    api_base_url: nonempty(row.api_base_url.clone()),
+                    auth_scheme: AuthScheme::parse(row.auth_scheme.as_deref()),
+                    api_model: nonempty(row.api_model.clone()),
+                };
+                (over != BackendOverride::default()).then_some((backend, over))
+            })
+            .collect()
+    }
+}
+
 fn choice_from_row(row: &CatalogRow) -> ModelChoice {
     ModelChoice {
         id: row.id.clone(),
@@ -848,7 +1159,8 @@ fn choice_from_row(row: &CatalogRow) -> ModelChoice {
         api_key: nonempty(row.api_key.clone()),
         env_key: nonempty(row.env_key.clone()),
         context_window: row.context_window.filter(|n| *n > 0),
-        api_backend: ApiBackend::parse(row.api_backend.as_deref()),
+        api_backends: parse_backends(row.api_backends.as_ref(), row.api_backend.as_deref()),
+        backend_overrides: row.backends.parse(),
         auth_scheme: AuthScheme::parse(row.auth_scheme.as_deref()),
         api_model: nonempty(row.api_model.clone()),
         prompt_cache: row.prompt_cache,
@@ -857,6 +1169,7 @@ fn choice_from_row(row: &CatalogRow) -> ModelChoice {
         reasoning_effort: nonempty(row.reasoning_effort.clone()),
         reasoning_efforts: row.reasoning_efforts.clone(),
         supports_images: row.supports_images,
+        pricing: row.pricing.as_ref().and_then(PricingRow::parse),
     }
 }
 
@@ -882,14 +1195,23 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
             if ov.context_window.is_some() {
                 existing.context_window = ov.context_window.filter(|n| *n > 0);
             }
-            if ov.api_backend.is_some() {
-                existing.api_backend = ApiBackend::parse(ov.api_backend.as_deref());
+            if ov.api_backend.is_some() || ov.api_backends.is_some() {
+                existing.api_backends =
+                    parse_backends(ov.api_backends.as_ref(), ov.api_backend.as_deref());
+            }
+            // 整块替换而不是逐协议合并：写了协议块就是在重新声明这个模型的连接
+            // 方式，半新半旧地叠上去只会得到谁也说不清的基址。
+            if !ov.backends.is_empty() {
+                existing.backend_overrides = ov.backends.parse();
             }
             if ov.auth_scheme.is_some() {
                 existing.auth_scheme = AuthScheme::parse(ov.auth_scheme.as_deref());
             }
             if ov.api_model.is_some() {
                 existing.api_model = nonempty(ov.api_model.clone());
+            }
+            if ov.pricing.is_some() {
+                existing.pricing = ov.pricing.as_ref().and_then(PricingRow::parse);
             }
             existing.id = id;
         } else {
@@ -900,7 +1222,8 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
                 api_key: nonempty(ov.api_key.clone()),
                 env_key: nonempty(ov.env_key.clone()),
                 context_window: ov.context_window.filter(|n| *n > 0),
-                api_backend: ApiBackend::parse(ov.api_backend.as_deref()),
+                api_backends: parse_backends(ov.api_backends.as_ref(), ov.api_backend.as_deref()),
+                backend_overrides: ov.backends.parse(),
                 auth_scheme: AuthScheme::parse(ov.auth_scheme.as_deref()),
                 api_model: nonempty(ov.api_model.clone()),
                 prompt_cache: ov.prompt_cache,
@@ -909,6 +1232,7 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
                 reasoning_effort: nonempty(ov.reasoning_effort.clone()),
                 reasoning_efforts: ov.reasoning_efforts.clone(),
                 supports_images: ov.supports_images,
+                pricing: ov.pricing.as_ref().and_then(PricingRow::parse),
                 id,
             });
         }
@@ -1062,14 +1386,327 @@ auth_scheme = "bearer"
         .unwrap();
         let list = load_catalog_from(&[path]);
         let claude = list.iter().find(|m| m.id == "claude").unwrap();
-        assert_eq!(claude.api_backend, ApiBackend::Messages);
-        assert_eq!(claude.resolved_auth(), AuthScheme::XApiKey);
+        assert_eq!(claude.api_backends, vec![ApiBackend::Messages]);
+        assert_eq!(
+            claude.resolved_auth(claude.default_backend()),
+            AuthScheme::XApiKey
+        );
         let gpt = list.iter().find(|m| m.id == "gpt").unwrap();
-        assert_eq!(gpt.api_backend, ApiBackend::Responses);
-        assert_eq!(gpt.resolved_auth(), AuthScheme::Bearer);
+        assert_eq!(gpt.api_backends, vec![ApiBackend::Responses]);
+        assert_eq!(gpt.resolved_auth(gpt.default_backend()), AuthScheme::Bearer);
         assert_eq!(ApiBackend::Messages.path(), "messages");
         assert_eq!(ApiBackend::Responses.path(), "responses");
         assert_eq!(ApiBackend::ChatCompletions.path(), "chat/completions");
+    }
+
+    /// 一个端点同时开了 /responses 和 /chat/completions：写**一条** `[model.<id>]`
+    /// 就够，不用为了换协议再配一个只有 api_backend 不同的重复条目。
+    #[test]
+    fn one_endpoint_declares_several_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.dual]
+api_base_url = "https://example.test/v1"
+api_backends = ["responses", "chat_completions"]
+env_key = "K"
+"#,
+        )
+        .unwrap();
+        let m = &load_catalog_from(&[path])[0];
+        assert_eq!(
+            m.api_backends,
+            vec![ApiBackend::Responses, ApiBackend::ChatCompletions]
+        );
+        assert_eq!(m.default_backend(), ApiBackend::Responses, "第一条 = 默认");
+        assert!(m.supports_backend(ApiBackend::ChatCompletions));
+        assert!(!m.supports_backend(ApiBackend::Messages), "没声明就不能切");
+        assert!(m.has_backend_choice());
+        // auth 跟着**当前这条 wire** 走，不是模型的固定属性。
+        assert_eq!(m.resolved_auth(ApiBackend::Responses), AuthScheme::Bearer);
+        assert_eq!(m.resolved_auth(ApiBackend::Messages), AuthScheme::XApiKey);
+    }
+
+    /// 一个端点支持所有协议，但各协议的入口不同——DeepSeek 的 OpenAI 侧是
+    /// `https://api.deepseek.com`，Anthropic 侧是 `…/anthropic`。协议块只覆盖
+    /// 连接，能力（context_window / reasoning / …）仍然是整条模型共用的。
+    ///
+    /// 同时守着 `#[serde(flatten)]` + toml 的坑：flatten 会把整张表先 buffer 成
+    /// `Content` 再分发，数字 / 布尔 / 数组这些非字符串键最容易在这一步丢掉，
+    /// 所以这里每种都放了一个。
+    #[test]
+    fn per_protocol_base_url_and_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model."deepseek-flash"]
+api_base_url = "https://api.deepseek.com"
+api_backends = ["responses", "chat_completions", "messages"]
+env_key = "DEEPSEEK_API_KEY"
+context_window = 264800
+max_output_tokens = 8192
+reasoning = true
+reasoning_efforts = ["low", "high", "max"]
+supports_images = true
+
+[model."deepseek-flash".messages]
+api_base_url = "https://api.deepseek.com/anthropic"
+auth_scheme = "bearer"
+api_model = "deepseek-chat"
+"#,
+        )
+        .unwrap();
+        let m = &load_catalog_from(&[path])[0];
+
+        // 非字符串键必须活过 flatten。
+        assert_eq!(m.context_window, Some(264_800));
+        assert_eq!(m.max_output_tokens, Some(8192));
+        assert_eq!(m.reasoning, Some(true));
+        assert_eq!(m.supports_images, Some(true));
+        assert_eq!(m.effort_choices(), vec!["low", "high", "max"]);
+        assert_eq!(
+            m.api_backends,
+            vec![
+                ApiBackend::Responses,
+                ApiBackend::ChatCompletions,
+                ApiBackend::Messages
+            ]
+        );
+
+        // 没写协议块的两条走模型级基址与 slug。
+        for backend in [ApiBackend::Responses, ApiBackend::ChatCompletions] {
+            assert_eq!(m.base_url_for(backend), Some("https://api.deepseek.com"));
+            assert_eq!(m.wire_model_for(backend), "deepseek-flash");
+            assert_eq!(m.resolved_auth(backend), AuthScheme::Bearer);
+        }
+        // messages 三项全被协议块接管（auth 显式 bearer，压过协议默认的 x-api-key）。
+        assert_eq!(
+            m.base_url_for(ApiBackend::Messages),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(m.wire_model_for(ApiBackend::Messages), "deepseek-chat");
+        assert_eq!(m.resolved_auth(ApiBackend::Messages), AuthScheme::Bearer);
+    }
+
+    /// 只在协议块里写基址也算「配了端点」，否则 `/model` 会把它当成没端点的行。
+    #[test]
+    fn a_protocol_only_base_url_still_counts_as_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.only-anthropic]
+api_backend = "messages"
+
+[model.only-anthropic.messages]
+api_base_url = "https://example.test/anthropic"
+"#,
+        )
+        .unwrap();
+        let m = &load_catalog_from(&[path])[0];
+        assert!(m.has_http());
+        assert_eq!(
+            m.base_url_for(ApiBackend::Messages),
+            Some("https://example.test/anthropic")
+        );
+        // 没写模型级 api_base_url，别的协议就没有基址可用（会退到 sampler 兜底）。
+        assert_eq!(m.base_url_for(ApiBackend::Responses), None);
+    }
+
+    /// 协议名写对了别名也认；空协议块不进 `backend_overrides`。
+    #[test]
+    fn protocol_table_aliases_and_empty_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.m]
+api_base_url = "https://example.test/v1"
+
+[model.m.anthropic]
+api_base_url = "https://example.test/anthropic"
+
+[model.m.chat]
+"#,
+        )
+        .unwrap();
+        let m = &load_catalog_from(&[path])[0];
+        assert_eq!(
+            m.base_url_for(ApiBackend::Messages),
+            Some("https://example.test/anthropic"),
+            "anthropic 是 messages 的别名"
+        );
+        assert_eq!(
+            m.backend_overrides.len(),
+            1,
+            "什么都不覆盖的空块不该占一条：{:?}",
+            m.backend_overrides
+        );
+    }
+
+    /// 单价按段计，口径和 `/usage` 的三段完全一致。省略 `cache_write` 回落到
+    /// `input`——多数厂商写入就是原价。
+    #[test]
+    fn pricing_is_per_segment_and_cache_write_falls_back_to_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.priced]
+api_base_url = "https://example.test/v1"
+
+[model.priced.pricing]
+input = 0.28
+cache_read = 0.028
+output = 0.42
+"#,
+        )
+        .unwrap();
+        let p = load_catalog_from(&[path])[0].pricing.unwrap();
+        assert_eq!(p.input_ticks_per_mtok, 2_800_000_000);
+        assert_eq!(p.cache_read_ticks_per_mtok, 280_000_000);
+        assert_eq!(
+            p.cache_write_ticks_per_mtok, p.input_ticks_per_mtok,
+            "没写 cache_write 就按原价，不是 0"
+        );
+
+        // 1M 未命中 + 1M 命中 + 1M 输出 = 0.28 + 0.028 + 0.42 = $0.728
+        let ticks = p.cost_ticks(1_000_000, 1_000_000, 0, 1_000_000);
+        assert_eq!(ticks, 7_280_000_000);
+        assert!((crate::usage::ticks_to_usd(ticks) - 0.728).abs() < 1e-9);
+    }
+
+    /// 没写 `[pricing]`、或写了但全是 0 / 负数：`None`，不能拿 $0 冒充免费。
+    #[test]
+    fn missing_or_zero_pricing_is_none_not_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.bare]
+api_base_url = "https://example.test/v1"
+
+[model.zeroed]
+api_base_url = "https://example.test/v1"
+
+[model.zeroed.pricing]
+input = 0
+output = -1
+"#,
+        )
+        .unwrap();
+        let list = load_catalog_from(&[path]);
+        for m in &list {
+            assert_eq!(m.pricing, None, "{} 不该有单价", m.id);
+        }
+    }
+
+    /// 大用量不能溢出：中间用 i128 转，1M token × 高单价仍要算对。
+    #[test]
+    fn pricing_survives_large_token_counts() {
+        let p = ModelPricing {
+            input_ticks_per_mtok: 1_500_000_000_000, // $150 / Mtok
+            cache_read_ticks_per_mtok: 0,
+            cache_write_ticks_per_mtok: 0,
+            output_ticks_per_mtok: 0,
+        };
+        let ticks = p.cost_ticks(10_000_000, 0, 0, 0);
+        assert_eq!(ticks, 15_000_000_000_000);
+        assert!((crate::usage::ticks_to_usd(ticks) - 1_500.0).abs() < 1e-6);
+    }
+
+    /// 老配置只写单数 `api_backend`：等价于只声明这一条，没有可切的余地。
+    #[test]
+    fn singular_api_backend_is_a_one_element_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.legacy]
+api_base_url = "https://example.test/v1"
+api_backend = "chat_completions"
+"#,
+        )
+        .unwrap();
+        let m = &load_catalog_from(&[path])[0];
+        assert_eq!(m.api_backends, vec![ApiBackend::ChatCompletions]);
+        assert!(!m.has_backend_choice());
+    }
+
+    /// 两个键都写：单数当默认提到队首，这样在老配置上补一行 `api_backends`
+    /// 不会把原来的默认协议换掉。不认识的项跳过，不会变成一条重复的默认值。
+    #[test]
+    fn singular_leads_and_unknown_entries_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.mixed]
+api_base_url = "https://example.test/v1"
+api_backend = "chat_completions"
+api_backends = ["responses", "chat_completions", "grpc"]
+"#,
+        )
+        .unwrap();
+        let m = &load_catalog_from(&[path])[0];
+        assert_eq!(
+            m.api_backends,
+            vec![ApiBackend::ChatCompletions, ApiBackend::Responses],
+            "单数在前、去重、'grpc' 丢掉而不是退化成一条默认值"
+        );
+    }
+
+    /// 什么都不写就是 Responses：coding agent 的默认该是能回放推理链的那条。
+    #[test]
+    fn omitting_the_key_defaults_to_responses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.bare]
+api_base_url = "https://example.test/v1"
+"#,
+        )
+        .unwrap();
+        let m = &load_catalog_from(&[path])[0];
+        assert_eq!(m.api_backends, vec![ApiBackend::Responses]);
+        assert_eq!(ApiBackend::default(), ApiBackend::Responses);
+        assert_eq!(ApiBackend::parse(None), ApiBackend::Responses);
+    }
+
+    /// `[[models.catalog]]` 的行也能被 `[model.<id>]` 改协议声明。
+    #[test]
+    fn override_replaces_the_whole_backend_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[models.catalog]]
+id = "m"
+api_backend = "messages"
+
+[model.m]
+api_backends = ["responses", "messages"]
+"#,
+        )
+        .unwrap();
+        let m = &load_catalog_from(&[path])[0];
+        assert_eq!(
+            m.api_backends,
+            vec![ApiBackend::Responses, ApiBackend::Messages]
+        );
     }
 
     #[test]
@@ -1094,8 +1731,8 @@ auth_scheme = "bearer"
             .find(|m| m.id == "minimax-m3-responses")
             .unwrap();
         assert_eq!(m.wire_model(), "minimax/minimax-m3:free");
-        assert_eq!(m.api_backend, ApiBackend::Responses);
-        assert_eq!(m.resolved_auth(), AuthScheme::Bearer);
+        assert_eq!(m.api_backends, vec![ApiBackend::Responses]);
+        assert_eq!(m.resolved_auth(m.default_backend()), AuthScheme::Bearer);
     }
 
     #[test]

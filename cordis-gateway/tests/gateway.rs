@@ -677,6 +677,35 @@ async fn slash_execute_dispatches_to_spine() {
         .await;
     assert_eq!(passthrough["result"]["kind"], "passthrough");
 
+    // `/protocol` 空参数列可选协议；没在 api_backends 里声明的协议不能被切进去
+    // （harness 的模型不在任何目录里 = 三条通用协议都可选，所以拿一个假名字试）。
+    let protocols = rpc
+        .call("slash/execute", json!({ "text": "/protocol" }))
+        .await;
+    assert_eq!(protocols["result"]["kind"], "notice");
+    assert!(
+        protocols["result"]["notice"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("responses"),
+        "{protocols}"
+    );
+    let switched = rpc
+        .call("slash/execute", json!({ "text": "/protocol messages" }))
+        .await;
+    assert_eq!(switched["result"]["kind"], "applied");
+    assert_eq!(
+        h.ctx.require::<AppSettings>(SETTINGS).unwrap().backend(),
+        cordis_spine::ApiBackend::Messages
+    );
+    let rejected = rpc
+        .call("slash/execute", json!({ "text": "/protocol grpc" }))
+        .await;
+    assert!(rejected["result"]["notice"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("未知协议"));
+
     let terminal = rpc.call("slash/execute", json!({ "text": "/pair" })).await;
     assert_eq!(terminal["result"]["kind"], "notice");
     assert!(terminal["result"]["notice"]["body"]

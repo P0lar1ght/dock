@@ -11,6 +11,7 @@
 
 #![allow(dead_code)] // Grok-copied API kept for later wiring.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -28,6 +29,36 @@ pub struct TokenUsage {
     pub reasoning_tokens: u64,
     pub cached_prompt_tokens: u64,
     pub cache_creation_prompt_tokens: u64,
+}
+
+/// 一次调用的费用来源。三态，缺费用与零费用永远分得开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallCost {
+    /// 上游在响应里带了费用（目前只有 xAI 的 `cost_in_usd_ticks`）。这是账单。
+    Reported(i64),
+    /// 按 `[model.<id>.pricing]` 本地算的。**不是账单**：单价可能过期，也不含
+    /// 分时折扣（DeepSeek off-peak 半价），显示层要加"约"。
+    Estimated(i64),
+    /// 既没上报、也没配单价。**不是免费**。
+    Unknown,
+}
+
+impl CallCost {
+    /// 上游优先：报了就用报的，没报才拿 config 单价估。
+    pub fn pick(reported: Option<i64>, estimated: Option<i64>) -> Self {
+        match (reported_cost_ticks(reported), estimated.filter(|t| *t > 0)) {
+            (Some(t), _) => Self::Reported(t),
+            (None, Some(t)) => Self::Estimated(t),
+            (None, None) => Self::Unknown,
+        }
+    }
+
+    fn ticks(self) -> Option<i64> {
+        match self {
+            Self::Reported(t) | Self::Estimated(t) => Some(t),
+            Self::Unknown => None,
+        }
+    }
 }
 
 /// Normalize a wire cost-ticks value at capture.
@@ -49,16 +80,41 @@ pub struct UsageTotals {
     pub api_duration_ms: u64,
     /// USD ticks (1e10 per USD). Absent when no call reported cost.
     pub cost_usd_ticks: Option<i64>,
+    /// 既没上报、也没 config 单价可算的调用数。
     pub cost_missing_calls: u64,
+    /// 用 `[model.<id>.pricing]` **本地估算**出来的调用数。
+    ///
+    /// 和上报的费用分开记：估算不是账单，单价过期、有分时折扣（DeepSeek
+    /// off-peak 半价）时都会偏。显示层据此加"约"字，不能混成一个数就完事。
+    pub cost_estimated_calls: u64,
 }
 
+/// `/usage` 保留多少次调用的明细。只够看出「命中率在哪一轮掉下去」这一件事，
+/// 不是审计日志——留太多既占内存，画成 sparkline 也糊成一团。
+pub const RECENT_CALLS_KEPT: usize = 40;
+
 impl UsageTotals {
-    fn from_call(
-        usage: &TokenUsage,
-        api_duration_ms: Option<u64>,
-        cost_usd_ticks: Option<i64>,
-    ) -> Self {
-        let cost_usd_ticks = reported_cost_ticks(cost_usd_ticks);
+    /// 没命中缓存、按全价计费的输入。
+    ///
+    /// 三条 wire 归一到同一个约定：`input_tokens` 是**全量**输入，
+    /// `cached_read` 与 `cache_creation` 是它互不相交的两个子集（Anthropic 的
+    /// `input_tokens` 原本不含这两项，`messages.rs` 在解析时已经加了回去）。
+    /// 所以这里是减法，不是别的口径。
+    pub fn uncached_input_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_sub(self.cached_read_tokens)
+            .saturating_sub(self.cache_creation_tokens)
+    }
+
+    /// 命中率。`None` = 这一格没有输入，不能拿 0% 冒充。
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        (self.input_tokens > 0).then(|| {
+            self.cached_read_tokens.min(self.input_tokens) as f64 / self.input_tokens as f64
+        })
+    }
+
+    fn from_call(usage: &TokenUsage, api_duration_ms: Option<u64>, cost: CallCost) -> Self {
+        let cost_usd_ticks = cost.ticks();
         Self {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
@@ -68,7 +124,8 @@ impl UsageTotals {
             model_calls: 1,
             api_duration_ms: api_duration_ms.unwrap_or(0),
             cost_usd_ticks,
-            cost_missing_calls: u64::from(cost_usd_ticks.is_none()),
+            cost_missing_calls: u64::from(cost == CallCost::Unknown),
+            cost_estimated_calls: u64::from(matches!(cost, CallCost::Estimated(_))),
         }
     }
 
@@ -91,6 +148,7 @@ impl UsageTotals {
             api_duration_ms,
             cost_usd_ticks,
             cost_missing_calls,
+            cost_estimated_calls,
         } = other;
         self.input_tokens = self.input_tokens.saturating_add(*input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(*output_tokens);
@@ -102,6 +160,9 @@ impl UsageTotals {
         self.model_calls = self.model_calls.saturating_add(*model_calls);
         self.api_duration_ms = self.api_duration_ms.saturating_add(*api_duration_ms);
         self.cost_missing_calls = self.cost_missing_calls.saturating_add(*cost_missing_calls);
+        self.cost_estimated_calls = self
+            .cost_estimated_calls
+            .saturating_add(*cost_estimated_calls);
         self.cost_usd_ticks = merge_cost_ticks(self.cost_usd_ticks, *cost_usd_ticks);
     }
 
@@ -129,6 +190,9 @@ impl UsageTotals {
             cost_missing_calls: self
                 .cost_missing_calls
                 .saturating_sub(earlier.cost_missing_calls),
+            cost_estimated_calls: self
+                .cost_estimated_calls
+                .saturating_sub(earlier.cost_estimated_calls),
         }
     }
 }
@@ -148,6 +212,14 @@ pub struct UsageLedger {
     pub main_loop_model_calls: u64,
     /// Last main-loop call (for `/usage` 上一轮命中). Subagents do not overwrite.
     pub last_call: Option<UsageTotals>,
+    /// 最近 [`RECENT_CALLS_KEPT`] 次主循环调用，新的在后。
+    ///
+    /// 只有一个 `last_call` 时看不出「这一轮新内容本来就多」和「前缀被打断了、
+    /// 整段重算」的区别——两者都表现为命中率低。要区分只能看走势。
+    ///
+    /// `VecDeque` 而不是 `Vec`：语义就是「推新弹旧」的定长队列，`Vec::remove(0)`
+    /// 每次调用都要 memmove 一遍。40 项时无所谓，但调大上限就成了隐患。
+    pub recent_calls: VecDeque<UsageTotals>,
     /// Bill may under-count (drain timeout, nested subagent incomplete, apply failure).
     pub incomplete: bool,
 }
@@ -161,11 +233,15 @@ impl UsageLedger {
         model_id: &str,
         usage: &TokenUsage,
         api_duration_ms: Option<u64>,
-        cost_usd_ticks: Option<i64>,
+        cost: CallCost,
     ) {
-        let call = UsageTotals::from_call(usage, api_duration_ms, cost_usd_ticks);
+        let call = UsageTotals::from_call(usage, api_duration_ms, cost);
         self.main_loop_model_calls = self.main_loop_model_calls.saturating_add(1);
         self.last_call = Some(call.clone());
+        if self.recent_calls.len() == RECENT_CALLS_KEPT {
+            self.recent_calls.pop_front();
+        }
+        self.recent_calls.push_back(call.clone());
         self.fold_entry(model_id, &call);
     }
 
@@ -245,6 +321,9 @@ pub struct PromptUsage {
     /// Last main-agent-loop call. Session totals stay cumulative.
     #[serde(default, rename = "lastCall", skip_serializing_if = "Option::is_none")]
     pub last_call: Option<PromptUsageModel>,
+    /// 最近若干次主循环调用（旧 → 新），`/usage` 的命中率走势用。
+    #[serde(default, rename = "recentCalls", skip_serializing_if = "Vec::is_empty")]
+    pub recent_calls: Vec<PromptUsageModel>,
 }
 
 impl PromptUsage {
@@ -290,6 +369,102 @@ pub struct PromptUsageModel {
     pub cost_is_partial: bool,
     #[serde(default, skip_serializing)]
     pub cost_missing_calls: u64,
+    /// 其中有几次是本地估算的（见 [`CallCost::Estimated`]）。
+    #[serde(default, skip_serializing)]
+    pub cost_estimated_calls: u64,
+}
+
+/// 完整输入的一段。三段互不相交、加起来等于 `input_tokens`。
+///
+/// 口径、文案、「写入为 0 不占行」的规则只在这里定义一次：之前 spine 的文本块、
+/// TUI 的数字表 / bar / 图例 / 按模型行各写了一遍，改一处就漏三处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheSegmentKind {
+    /// 没命中缓存，按全价计费。Claude Code `/cost` 里的「input」就是这段。
+    Miss,
+    Hit,
+    Write,
+}
+
+impl CacheSegmentKind {
+    /// 数字表里的长标签。`Miss` 带括号是因为光写「输入」会和「完整输入」混。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Miss => "输入(未命中)",
+            Self::Hit => "缓存命中",
+            Self::Write => "缓存写入",
+        }
+    }
+
+    /// bar 图例里的短标签，旁边就是色块，不需要再说一遍「输入」。
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Miss => "未命中",
+            Self::Hit => "命中",
+            Self::Write => "写入",
+        }
+    }
+
+    /// 计价口径。三段单价不同，这正是要拆开显示的理由。
+    pub fn note(self) -> &'static str {
+        match self {
+            Self::Miss => "全价计费",
+            Self::Hit => "按缓存价计费",
+            Self::Write => "首次落盘，比原价贵",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheSegment {
+    pub kind: CacheSegmentKind,
+    pub tokens: u64,
+}
+
+impl PromptUsageModel {
+    /// 见 [`UsageTotals::uncached_input_tokens`]——没命中、按全价计费的输入。
+    pub fn uncached_input_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_sub(self.cached_read_tokens)
+            .saturating_sub(self.cache_creation_tokens)
+    }
+
+    /// 命中率。`None` = 没有输入，不拿 0% 冒充。
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        (self.input_tokens > 0).then(|| {
+            self.cached_read_tokens.min(self.input_tokens) as f64 / self.input_tokens as f64
+        })
+    }
+
+    /// 完整输入拆成的三段，顺序固定（未命中 → 命中 → 写入），所有画法共用。
+    ///
+    /// **写入为 0 时整段不出现**：那多半是这条 wire 根本不报它
+    /// （chat/completions、Responses），不是"真的没写"——列一行 0 会被读成缓存
+    /// 没生效。未命中与命中即使为 0 也保留，它们每条 wire 都报。
+    pub fn cache_segments(&self) -> Vec<CacheSegment> {
+        let mut out = vec![
+            CacheSegment {
+                kind: CacheSegmentKind::Miss,
+                tokens: self.uncached_input_tokens(),
+            },
+            CacheSegment {
+                kind: CacheSegmentKind::Hit,
+                tokens: self.cached_read_tokens,
+            },
+        ];
+        if self.cache_creation_tokens > 0 {
+            out.push(CacheSegment {
+                kind: CacheSegmentKind::Write,
+                tokens: self.cache_creation_tokens,
+            });
+        }
+        out
+    }
+
+    /// 该段占完整输入的比例，格式同 `/context`。
+    pub fn segment_share(&self, segment: &CacheSegment) -> String {
+        share_percent(segment.tokens, self.input_tokens)
+    }
 }
 
 /// Server cost scale: 1 USD = 10^10 ticks.
@@ -311,6 +486,7 @@ impl From<&UsageTotals> for PromptUsageModel {
             api_duration_ms,
             cost_usd_ticks,
             cost_missing_calls,
+            cost_estimated_calls,
         } = *t;
         Self {
             input_tokens,
@@ -324,6 +500,7 @@ impl From<&UsageTotals> for PromptUsageModel {
             cost_usd_ticks,
             cost_is_partial: t.cost_is_partial(),
             cost_missing_calls,
+            cost_estimated_calls,
         }
     }
 }
@@ -340,6 +517,11 @@ impl From<&UsageLedger> for PromptUsage {
             num_turns: ledger.main_loop_model_calls,
             usage_is_incomplete: ledger.incomplete,
             last_call: ledger.last_call.as_ref().map(PromptUsageModel::from),
+            recent_calls: ledger
+                .recent_calls
+                .iter()
+                .map(PromptUsageModel::from)
+                .collect(),
         };
         usage.scrub_untrustworthy_costs();
         usage
@@ -360,33 +542,50 @@ pub fn session_usage_block_text(usage: &PromptUsage) -> String {
         };
     }
 
-    let mut rows = Vec::new();
+    // Claude Code `/cost` 的口径：**「输入」= 未命中的那部分**，缓存读 / 写各自
+    // 单列。分段与文案见 [`PromptUsageModel::cache_segments`]。
+    let mut rows: Vec<String> = t
+        .cache_segments()
+        .iter()
+        .map(|seg| {
+            format!(
+                "  {}{} · {}",
+                pad_label(&format!("{}:", seg.kind.label()), 15),
+                group_thousands(seg.tokens),
+                t.segment_share(seg),
+            )
+        })
+        .collect();
     rows.push(format!(
-        "  输入 token:    {}（缓存 {} · {}）",
+        "  {}{}（思考 {}）",
+        pad_label("输出:", 15),
+        group_thousands(t.output_tokens),
+        group_thousands(t.reasoning_tokens),
+    ));
+    rows.push(format!(
+        "  {}{} · 合计 {}",
+        pad_label("完整输入:", 15),
         group_thousands(t.input_tokens),
-        group_thousands(t.cached_read_tokens),
-        share_percent(t.cached_read_tokens, t.input_tokens),
+        group_thousands(t.total_tokens),
     ));
     if let Some(last) = &usage.last_call {
         rows.push(format!(
-            "  上一轮命中:    {} / {} · {}",
+            "  上一轮:        输入(未命中) {} · 缓存命中 {} · 完整输入 {} · {}",
+            group_thousands(last.uncached_input_tokens()),
             group_thousands(last.cached_read_tokens),
             group_thousands(last.input_tokens),
             share_percent(last.cached_read_tokens, last.input_tokens),
         ));
     }
-    rows.push(format!(
-        "  输出 token:    {}（思考 {}）",
-        group_thousands(t.output_tokens),
-        group_thousands(t.reasoning_tokens),
-    ));
-    rows.push(format!(
-        "  合计 token:    {}",
-        group_thousands(t.total_tokens)
-    ));
+    if let Some(trend) = hit_rate_trend(&usage.recent_calls, RECENT_CALLS_KEPT) {
+        rows.push(format!(
+            "  每轮命中率:    {trend}（旧 → 新 · 最近 {} 次主循环调用）",
+            trend.chars().count(),
+        ));
+    }
     rows.push(format!(
         "  模型调用:      {} · API 耗时: {}",
-        group_thousands(t.model_calls),
+        calls_breakdown(usage),
         format_duration(Duration::from_millis(t.api_duration_ms)),
     ));
     rows.push(format!("  费用:          {}", format_cost(t)));
@@ -395,11 +594,9 @@ pub fn session_usage_block_text(usage: &PromptUsage) -> String {
         rows.push("  按模型:".to_string());
         for (model, m) in &usage.model_usage {
             rows.push(format!(
-                "    {model}: {} 入 / {} 出 · 缓存 {} · {}",
-                group_thousands(m.input_tokens),
-                group_thousands(m.output_tokens),
-                share_percent(m.cached_read_tokens, m.input_tokens),
-                format_cost(m),
+                "    {model}: {} · {}",
+                per_model_amounts(m),
+                format_cost(m)
             ));
         }
     }
@@ -409,6 +606,60 @@ pub fn session_usage_block_text(usage: &PromptUsage) -> String {
     }
 
     join_header_rows("本会话用量（自开始或上次恢复）：".to_string(), rows)
+}
+
+/// 调用次数怎么念。
+///
+/// `totals.model_calls` 折进了子代理（`record_subagent` 也走 `fold_entry`），
+/// 而走势图只有主循环（`recent_calls` 只由 `record_main_loop_call` 写）。两个数
+/// 并排摆着又不说明来历，就会读成「走势少画了一格」——所以差额必须写出来。
+pub fn calls_breakdown(usage: &PromptUsage) -> String {
+    let total = usage.totals.model_calls;
+    let sub = total.saturating_sub(usage.num_turns);
+    if sub == 0 {
+        return group_thousands(total);
+    }
+    format!(
+        "{}（主循环 {} · 子代理 {}）",
+        group_thousands(total),
+        group_thousands(usage.num_turns),
+        group_thousands(sub),
+    )
+}
+
+/// Sparkline 的八级方块，低 → 高。
+const SPARK_LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// 一次调用的命中率 → 一个方块。刻度固定成 0..100%，不按样本自适应：自适应
+/// 的话一段全是 90% 上下的调用会被拉成大起大落，看起来像出了问题。
+///
+/// 有输入但一点没命中时给最低的一格而不是空白——空白读起来像「没有这次调用」。
+pub fn hit_rate_spark(call: &PromptUsageModel) -> char {
+    let Some(rate) = call.cache_hit_rate() else {
+        return ' ';
+    };
+    let idx = (rate * SPARK_LEVELS.len() as f64).floor() as usize;
+    SPARK_LEVELS[idx.min(SPARK_LEVELS.len() - 1)]
+}
+
+/// 整段走势，最多 `max_cells` 格。`None` = 不足两次调用，一个格子看不出走势。
+///
+/// 放不下时**丢最旧的、留最新的**：数据是旧 → 新排的，交给渲染层在右边裁等于
+/// 把刚发生的那几次裁掉，正好是最该看的。
+///
+/// 没有输入的调用不占格子（[`hit_rate_spark`] 对它返回空格，两处守卫必须同时
+/// 在：这里滤掉，spark 那边兜底）。所以格数是「有输入的主循环调用数」，可能
+/// 少于 `num_turns`——调用方要把**实际格数**报给用户，别拿别的计数去凑。
+pub fn hit_rate_trend(calls: &[PromptUsageModel], max_cells: usize) -> Option<String> {
+    let mut rendered: Vec<char> = calls
+        .iter()
+        .filter(|c| c.input_tokens > 0)
+        .map(hit_rate_spark)
+        .collect();
+    if rendered.len() > max_cells {
+        rendered.drain(..rendered.len() - max_cells);
+    }
+    (rendered.len() >= 2).then(|| rendered.into_iter().collect())
 }
 
 /// Copied from grok `xai-token-estimation::usage_percentage`.
@@ -421,9 +672,37 @@ pub fn usage_percentage(used: u64, total: u64) -> f64 {
     }
 }
 
+/// 按模型一行：同样是 Claude Code 的口径（输入 = 未命中）。文本块与 overlay
+/// 共用，两边各写一遍正是这次要收掉的东西。
+pub fn per_model_amounts(m: &PromptUsageModel) -> String {
+    m.cache_segments()
+        .iter()
+        .map(|seg| format!("{} {}", group_thousands(seg.tokens), seg.kind.label()))
+        .chain(std::iter::once(format!(
+            "{} 输出",
+            group_thousands(m.output_tokens)
+        )))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// 左对齐到指定显示宽度。中文字符宽 2，不能按 `char` 数补。
+///
+/// 这里的标签是一组固定常量，只有 ASCII 与 CJK 两种宽度，所以自己数就够；
+/// 为它们给 spine 拉一个 `unicode-width` 依赖不划算（TUI 那边本来就有）。
+fn pad_label(label: &str, width: usize) -> String {
+    let w: usize = label
+        .chars()
+        .map(|c| if c.is_ascii() { 1 } else { 2 })
+        .sum();
+    format!("{label}{}", " ".repeat(width.saturating_sub(w)))
+}
+
 /// Copied from grok pager `percent_of_window`. Tiny nonzero shares floor at
 /// `0.1%`; `part` is clamped to `total` so a cache subset cannot read over 100%.
-fn share_percent(part: u64, total: u64) -> String {
+///
+/// `/context` 的占比和 `/usage` 的缓存占比是同一条规则，只此一份。
+pub fn share_percent(part: u64, total: u64) -> String {
     if total == 0 {
         return "-".to_string();
     }
@@ -436,11 +715,33 @@ fn share_percent(part: u64, total: u64) -> String {
     }
 }
 
-fn format_cost(m: &PromptUsageModel) -> String {
-    match m.cost_usd_ticks {
-        Some(ticks) => format!("${:.4}", ticks_to_usd(ticks)),
-        None if m.cost_is_partial => "未上报（部分调用无费用）".to_string(),
-        None => "未上报".to_string(),
+/// 费用文案。
+///
+/// 三种来源永不混成一个说法：
+/// - 全部来自上游 → `$X`，这是账单。
+/// - 掺了本地估算 → 加"约"并说明来源。单价可能过期，也不含分时折扣
+///   （DeepSeek off-peak 半价），把它当账单读会亏。
+/// - 有调用连价都算不出 → 沿用既有的 partial 措辞。`None` 一律是"未上报"，
+///   **不是免费**（Grok fail-closed）。
+pub fn format_cost(m: &PromptUsageModel) -> String {
+    let Some(ticks) = m.cost_usd_ticks else {
+        return if m.cost_is_partial {
+            "未上报（部分调用无费用）".to_string()
+        } else {
+            "未上报".to_string()
+        };
+    };
+    let amount = format!("${:.4}", ticks_to_usd(ticks));
+    let reported = m
+        .model_calls
+        .saturating_sub(m.cost_estimated_calls)
+        .saturating_sub(m.cost_missing_calls);
+    match (m.cost_estimated_calls, m.cost_missing_calls, reported) {
+        (0, 0, _) => amount,
+        (0, _, _) => format!("约 {amount}（部分调用无费用）"),
+        (_, 0, 0) => format!("约 {amount}（按 config 单价估算）"),
+        (_, 0, _) => format!("约 {amount}（部分上报 · 部分估算）"),
+        _ => format!("约 {amount}（部分估算 · 部分调用无费用）"),
     }
 }
 
@@ -511,14 +812,15 @@ mod tests {
             cost_usd_ticks: ticks,
             cost_is_partial: false,
             cost_missing_calls: 0,
+            cost_estimated_calls: 0,
         }
     }
 
     #[test]
     fn delta_since_totals_and_by_model_match_a_single_fold() {
         let mut cumulative = UsageLedger::default();
-        cumulative.record_main_loop_call("a", &tu(100, 10), Some(50), Some(70));
-        cumulative.record_main_loop_call("b", &tu(30, 5), Some(20), None);
+        cumulative.record_main_loop_call("a", &tu(100, 10), Some(50), CallCost::Reported(70));
+        cumulative.record_main_loop_call("b", &tu(30, 5), Some(20), CallCost::Unknown);
 
         let delta = cumulative.delta_since(&UsageLedger::default());
 
@@ -538,10 +840,10 @@ mod tests {
     #[test]
     fn delta_since_second_delta_only_carries_new_calls() {
         let mut cumulative = UsageLedger::default();
-        cumulative.record_main_loop_call("a", &tu(100, 10), Some(50), Some(70));
+        cumulative.record_main_loop_call("a", &tu(100, 10), Some(50), CallCost::Reported(70));
         let first = cumulative.delta_since(&UsageLedger::default());
 
-        cumulative.record_main_loop_call("a", &tu(40, 4), Some(10), Some(30));
+        cumulative.record_main_loop_call("a", &tu(40, 4), Some(10), CallCost::Reported(30));
         let second = cumulative.delta_since(&first);
 
         assert_eq!(second.totals.model_calls, 1);
@@ -555,7 +857,7 @@ mod tests {
     #[test]
     fn delta_since_flags_newly_incomplete_only() {
         let mut cumulative = UsageLedger::default();
-        cumulative.record_main_loop_call("a", &tu(10, 1), None, None);
+        cumulative.record_main_loop_call("a", &tu(10, 1), None, CallCost::Unknown);
         cumulative.mark_incomplete();
         assert!(cumulative.delta_since(&UsageLedger::default()).incomplete);
 
@@ -574,7 +876,7 @@ mod tests {
         let mut parent = UsageLedger::default();
 
         // Turn 1: one call on model a.
-        child.record_main_loop_call("a", &tu(100, 10), Some(50), Some(70));
+        child.record_main_loop_call("a", &tu(100, 10), Some(50), CallCost::Reported(70));
         let delta = child.delta_since(&folded);
         assert!(delta.totals.model_calls > 0);
         parent.record_subagent(
@@ -588,8 +890,8 @@ mod tests {
         folded = child.clone();
 
         // Turn 2: another call on the same model plus a new model.
-        child.record_main_loop_call("a", &tu(40, 4), Some(10), Some(30));
-        child.record_main_loop_call("b", &tu(20, 2), Some(5), None);
+        child.record_main_loop_call("a", &tu(40, 4), Some(10), CallCost::Reported(30));
+        child.record_main_loop_call("b", &tu(20, 2), Some(5), CallCost::Unknown);
         let delta = child.delta_since(&folded);
         assert!(delta.totals.model_calls > 0);
         parent.record_subagent(
@@ -619,7 +921,7 @@ mod tests {
 
         // Turn 4: one call, then cancelled mid-turn — runner marks the delta
         // incomplete and the parent must inherit the flag.
-        child.record_main_loop_call("a", &tu(30, 3), Some(5), None);
+        child.record_main_loop_call("a", &tu(30, 3), Some(5), CallCost::Unknown);
         let mut delta = child.delta_since(&folded);
         assert!(delta.totals.model_calls > 0);
         delta.mark_incomplete();
@@ -650,12 +952,12 @@ mod tests {
     #[test]
     fn ledger_sums_partial_subagent_and_zero_cost() {
         let mut ledger = UsageLedger::default();
-        ledger.record_main_loop_call("m", &tu(1, 1), None, Some(0));
+        ledger.record_main_loop_call("m", &tu(1, 1), None, CallCost::Unknown);
         assert_eq!(ledger.totals.cost_usd_ticks, None);
         assert_eq!(ledger.totals.cost_missing_calls, 1);
 
-        ledger.record_main_loop_call("a", &tu(100, 10), Some(100), None);
-        ledger.record_main_loop_call("a", &tu(50, 5), Some(50), Some(70));
+        ledger.record_main_loop_call("a", &tu(100, 10), Some(100), CallCost::Unknown);
+        ledger.record_main_loop_call("a", &tu(50, 5), Some(50), CallCost::Reported(70));
         assert_eq!(ledger.totals.cost_usd_ticks, Some(70));
         assert!(ledger.totals.cost_is_partial());
         assert_eq!(ledger.main_loop_model_calls, 3);
@@ -686,7 +988,12 @@ mod tests {
         let mut call = tu(100, 10);
         call.cached_prompt_tokens = 40;
         call.reasoning_tokens = 3;
-        ledger.record_main_loop_call("grok-build", &call, Some(50), Some(20_000_000));
+        ledger.record_main_loop_call(
+            "grok-build",
+            &call,
+            Some(50),
+            CallCost::Reported(20_000_000),
+        );
         let v = serde_json::to_value(PromptUsage::from(&ledger)).unwrap();
         assert_eq!(v["inputTokens"], 100);
         assert_eq!(v["outputTokens"], 10);
@@ -700,8 +1007,8 @@ mod tests {
     #[test]
     fn response_scrubs_partial_costs() {
         let mut ledger = UsageLedger::default();
-        ledger.record_main_loop_call("a", &tu(100, 10), None, Some(70));
-        ledger.record_main_loop_call("a", &tu(50, 5), None, None);
+        ledger.record_main_loop_call("a", &tu(100, 10), None, CallCost::Reported(70));
+        ledger.record_main_loop_call("a", &tu(50, 5), None, CallCost::Unknown);
         let v = serde_json::to_value(PromptUsage::from(&ledger)).unwrap();
         assert_eq!(v["costUsdTicks"], serde_json::Value::Null);
         assert_eq!(v["costIsPartial"], true);
@@ -735,7 +1042,9 @@ mod tests {
         };
         let text = session_usage_block_text(&usage);
         assert!(
-            text.contains("上一轮命中:    12,000 / 13,000 · 92%"),
+            text.contains(
+                "上一轮:        输入(未命中) 1,000 · 缓存命中 12,000 · 完整输入 13,000 · 92%"
+            ),
             "{text}"
         );
     }
@@ -752,8 +1061,14 @@ mod tests {
             ..Default::default()
         };
         let text = session_usage_block_text(&usage);
-        assert!(text.contains("1,234,567"), "{text}");
-        assert!(text.contains("缓存 1,000,000 · 81%"), "{text}");
+        assert!(
+            text.contains("完整输入:      1,234,567 · 合计 1,280,245"),
+            "{text}"
+        );
+        assert!(text.contains("缓存命中:      1,000,000 · 81%"), "{text}");
+        // Claude Code 口径：「输入」就是未命中那部分，要能自己算出来。
+        assert!(text.contains("输入(未命中):  234,567 · 19%"), "{text}");
+        assert!(!text.contains("缓存写入"), "没有写入就不占一行：{text}");
         assert!(!text.contains("上一轮命中"), "{text}");
         assert!(text.contains("思考 12,000"), "{text}");
         assert!(text.contains("$1.2345"), "{text}");
@@ -761,10 +1076,284 @@ mod tests {
         assert!(!text.contains("按模型"), "{text}");
     }
 
+    /// 三条 wire 归一后，输入 = 命中 + 写入 + 未命中，减法才成立。
+    /// Anthropic 的 `input_tokens` 本来不含另外两项，`messages.rs` 解析时补过。
+    #[test]
+    fn uncached_input_is_the_rest_of_the_prompt() {
+        let mut row = model_row(1_000, 10, None);
+        row.cached_read_tokens = 600;
+        row.cache_creation_tokens = 150;
+        assert_eq!(row.uncached_input_tokens(), 250);
+        assert_eq!(row.cache_hit_rate(), Some(0.6));
+
+        // 上游只报了读、没报写：剩下的全算未命中，不能变成负数。
+        let mut read_only = model_row(1_000, 10, None);
+        read_only.cached_read_tokens = 1_200;
+        assert_eq!(read_only.uncached_input_tokens(), 0);
+        assert_eq!(read_only.cache_hit_rate(), Some(1.0), "命中率封顶 100%");
+
+        // 没有输入不能拿 0% 冒充「一点没命中」。
+        assert_eq!(model_row(0, 0, None).cache_hit_rate(), None);
+    }
+
+    /// 上游优先：报了就用报的；没报才拿 config 单价估；都没有是 `Unknown`
+    /// （**不是免费**）。上报的 0 / 负数在 `reported_cost_ticks` 就被判成没上报。
+    #[test]
+    fn call_cost_prefers_the_upstream_bill_over_the_local_estimate() {
+        assert_eq!(
+            CallCost::pick(Some(700), Some(999)),
+            CallCost::Reported(700)
+        );
+        assert_eq!(CallCost::pick(None, Some(999)), CallCost::Estimated(999));
+        assert_eq!(CallCost::pick(None, None), CallCost::Unknown);
+        assert_eq!(
+            CallCost::pick(Some(0), Some(999)),
+            CallCost::Estimated(999),
+            "上游报 0 = 没上报，不是免费"
+        );
+        assert_eq!(
+            CallCost::pick(None, Some(0)),
+            CallCost::Unknown,
+            "算出来 0 说明没配单价"
+        );
+    }
+
+    /// 估算永远带"约"，且不同来源的措辞分得开——把估算读成账单会亏。
+    #[test]
+    fn cost_label_distinguishes_bill_from_estimate() {
+        let row = |calls: u64, estimated: u64, missing: u64| PromptUsageModel {
+            model_calls: calls,
+            cost_usd_ticks: Some(12_345_000_000),
+            cost_estimated_calls: estimated,
+            cost_missing_calls: missing,
+            ..Default::default()
+        };
+        assert_eq!(format_cost(&row(3, 0, 0)), "$1.2345");
+        assert_eq!(
+            format_cost(&row(3, 3, 0)),
+            "约 $1.2345（按 config 单价估算）"
+        );
+        assert_eq!(
+            format_cost(&row(3, 1, 0)),
+            "约 $1.2345（部分上报 · 部分估算）"
+        );
+        assert_eq!(
+            format_cost(&row(3, 1, 1)),
+            "约 $1.2345（部分估算 · 部分调用无费用）"
+        );
+
+        // 一分钱都算不出时不能显示 $0。
+        let none = PromptUsageModel {
+            model_calls: 2,
+            cost_usd_ticks: None,
+            cost_missing_calls: 2,
+            ..Default::default()
+        };
+        assert_eq!(format_cost(&none), "未上报");
+    }
+
+    /// 估算的调用数要能一路折到会话总计，否则长会话里"约"字会掉。
+    #[test]
+    fn estimated_calls_fold_into_the_session_total() {
+        let mut ledger = UsageLedger::default();
+        ledger.record_main_loop_call("m", &tu(100, 10), None, CallCost::Estimated(500));
+        ledger.record_main_loop_call("m", &tu(100, 10), None, CallCost::Reported(700));
+        let usage = PromptUsage::from(&ledger);
+        assert_eq!(usage.totals.cost_usd_ticks, Some(1_200));
+        assert_eq!(usage.totals.cost_estimated_calls, 1);
+        assert_eq!(usage.totals.cost_missing_calls, 0);
+        assert!(
+            format_cost(&usage.totals).contains("部分上报 · 部分估算"),
+            "{}",
+            format_cost(&usage.totals)
+        );
+    }
+
+    /// 三段是完整输入的一个划分：互不相交、加起来正好等于 `input_tokens`。
+    /// 所有画法都由它派生，这条不成立的话 bar、数字表、按模型行会一起错。
+    #[test]
+    fn cache_segments_partition_the_full_input() {
+        let mut row = model_row(1_000, 10, None);
+        row.cached_read_tokens = 600;
+        row.cache_creation_tokens = 150;
+        let segs = row.cache_segments();
+        assert_eq!(
+            segs.iter().map(|s| s.tokens).sum::<u64>(),
+            row.input_tokens,
+            "三段之和必须等于完整输入"
+        );
+        assert_eq!(
+            segs.iter().map(|s| s.kind).collect::<Vec<_>>(),
+            vec![
+                CacheSegmentKind::Miss,
+                CacheSegmentKind::Hit,
+                CacheSegmentKind::Write
+            ],
+            "顺序固定，bar 与图例才对得上"
+        );
+        assert_eq!(row.segment_share(&segs[0]), "25%");
+
+        // 不报写入的 wire：只有两段，且仍然是一个划分。
+        row.cache_creation_tokens = 0;
+        let segs = row.cache_segments();
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs.iter().map(|s| s.tokens).sum::<u64>(), row.input_tokens);
+    }
+
+    /// 写入有量才占一行——没有写入的 wire（chat/completions、Responses）不该
+    /// 平白多出一行 0。
+    #[test]
+    fn cache_write_row_only_when_the_wire_reports_writes() {
+        let mut totals = model_row(1_000, 10, None);
+        totals.cached_read_tokens = 400;
+        totals.cache_creation_tokens = 100;
+        let text = session_usage_block_text(&PromptUsage {
+            totals,
+            ..Default::default()
+        });
+        assert!(text.contains("缓存写入:      100 · 10%"), "{text}");
+        assert!(text.contains("输入(未命中):  500 · 50%"), "{text}");
+        assert!(text.contains("缓存命中:      400 · 40%"), "{text}");
+    }
+
+    /// Sparkline 的刻度是固定的 0..100%，不按样本自适应：自适应会把一串都在
+    /// 90% 上下的调用画成大起大落，看起来像出了问题。
+    #[test]
+    fn hit_rate_spark_uses_an_absolute_scale() {
+        let spark = |input: u64, cached: u64| {
+            let mut row = model_row(input, 0, None);
+            row.cached_read_tokens = cached;
+            hit_rate_spark(&row)
+        };
+        assert_eq!(spark(100, 0), '▁', "有输入但零命中要占最低一格，不是空白");
+        assert_eq!(spark(100, 100), '█');
+        assert_eq!(spark(100, 50), '▅');
+        // 都在高位的样本必须画得一样高，不能被拉伸。
+        assert_eq!(spark(100, 90), spark(100, 95));
+        assert_eq!(spark(0, 0), ' ', "没有输入 = 没有这一格");
+    }
+
+    /// 一次调用画不出走势，不如不画。
+    #[test]
+    fn hit_rate_trend_needs_at_least_two_calls() {
+        let one = [model_row(100, 1, None)];
+        assert_eq!(hit_rate_trend(&one, 40), None);
+
+        let mut hot = model_row(100, 1, None);
+        hot.cached_read_tokens = 100;
+        let calls = [model_row(100, 1, None), hot, model_row(0, 0, None)];
+        assert_eq!(
+            hit_rate_trend(&calls, 40).as_deref(),
+            Some("▁█"),
+            "没有输入的调用不占格子"
+        );
+    }
+
+    /// 放不下时丢**最旧**的。数据是旧 → 新排的，交给渲染层在右边裁等于把刚
+    /// 发生的那几次裁掉，正好是最该看的。
+    #[test]
+    fn hit_rate_trend_drops_the_oldest_not_the_newest() {
+        let calls: Vec<PromptUsageModel> = (0..8)
+            .map(|i| {
+                let mut row = model_row(100, 1, None);
+                // 命中率 0%,12%,25%…，每一格都不同，方向错了就看得出来。
+                row.cached_read_tokens = i * 12;
+                row
+            })
+            .collect();
+        let full = hit_rate_trend(&calls, 40).unwrap();
+        assert_eq!(full.chars().count(), 8);
+
+        let clipped = hit_rate_trend(&calls, 3).unwrap();
+        assert_eq!(clipped.chars().count(), 3);
+        assert!(
+            full.ends_with(&clipped),
+            "留下的必须是最新的三格：full={full} clipped={clipped}"
+        );
+    }
+
+    /// 走势只画主循环，`model_calls` 还折了子代理进去。两个数并排摆着又不说明
+    /// 来历，就会被读成「走势少画了一格」——差额必须写出来。
+    #[test]
+    fn call_counts_reconcile_with_the_trend() {
+        let mut ledger = UsageLedger::default();
+        for _ in 0..19 {
+            let mut call = tu(1_000, 10);
+            call.cached_prompt_tokens = 900;
+            ledger.record_main_loop_call("m", &call, None, CallCost::Unknown);
+        }
+        let only_main = PromptUsage::from(&ledger);
+        assert_eq!(
+            calls_breakdown(&only_main),
+            "19",
+            "没有子代理时不该多一对括号"
+        );
+
+        ledger.record_subagent(
+            &[(
+                "sub".into(),
+                UsageTotals {
+                    input_tokens: 500,
+                    model_calls: 1,
+                    ..Default::default()
+                },
+            )],
+            false,
+        );
+        let usage = PromptUsage::from(&ledger);
+        let cells = hit_rate_trend(&usage.recent_calls, RECENT_CALLS_KEPT)
+            .map(|t| t.chars().count())
+            .unwrap_or(0);
+        assert_eq!(usage.totals.model_calls, 20);
+        assert_eq!(cells, 19, "子代理不进走势");
+        assert_eq!(
+            calls_breakdown(&usage),
+            "20（主循环 19 · 子代理 1）",
+            "差额要写出来，否则 20 与 19 格对不上"
+        );
+        assert!(session_usage_block_text(&usage).contains("最近 19 次主循环调用"));
+    }
+
+    /// 每次主循环调用都进历史，且有上限——长会话不能无限增长。
+    #[test]
+    fn recent_calls_are_bounded_and_ordered_oldest_first() {
+        let mut ledger = UsageLedger::default();
+        for i in 1..=(RECENT_CALLS_KEPT + 5) {
+            ledger.record_main_loop_call("a", &tu(i as u64, 1), None, CallCost::Unknown);
+        }
+        assert_eq!(ledger.recent_calls.len(), RECENT_CALLS_KEPT);
+        assert_eq!(
+            ledger.recent_calls.front().unwrap().input_tokens,
+            6,
+            "最旧的几次被挤掉"
+        );
+        assert_eq!(
+            ledger.recent_calls.back().unwrap().input_tokens,
+            (RECENT_CALLS_KEPT + 5) as u64,
+            "最新的在末尾"
+        );
+
+        // 子代理不是主循环的一轮，不进走势图。
+        ledger.record_subagent(
+            &[(
+                "b".into(),
+                UsageTotals {
+                    input_tokens: 9_999,
+                    model_calls: 1,
+                    ..Default::default()
+                },
+            )],
+            false,
+        );
+        assert_eq!(ledger.recent_calls.len(), RECENT_CALLS_KEPT);
+        assert!(ledger.recent_calls.iter().all(|c| c.input_tokens != 9_999));
+    }
+
     #[test]
     fn session_usage_block_lists_models_when_multiple() {
         let mut usage = PromptUsage {
             totals: model_row(150, 15, None),
+            num_turns: 1,
             ..Default::default()
         };
         usage
@@ -775,8 +1364,14 @@ mod tests {
             .insert("grok-4".into(), model_row(50, 5, None));
         let text = session_usage_block_text(&usage);
         assert!(text.contains("按模型:"), "{text}");
-        assert!(text.contains("grok-build: 100 入 / 10 出 · 缓存"), "{text}");
-        assert!(text.contains("grok-4: 50 入 / 5 出 · 缓存"), "{text}");
+        assert!(
+            text.contains("grok-build: 100 输入(未命中) · 0 缓存命中 · 10 输出"),
+            "{text}"
+        );
+        assert!(
+            text.contains("grok-4: 50 输入(未命中) · 0 缓存命中 · 5 输出"),
+            "{text}"
+        );
     }
 
     #[test]

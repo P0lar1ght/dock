@@ -18,9 +18,10 @@
 
 | 命令 | 行为 |
 |---|---|
-| `/settings`（`config` `prefs`） | 设置 overlay；有参数则直接改（`timestamps` / `theme` / `model`）。浏览器 companion 一律拒绝（含带参），请用 `/timestamps` `/think` `/model` `/effort` |
+| `/settings`（`config` `prefs`） | 设置 overlay；有参数则直接改（`timestamps` / `theme` / `model` / `protocol`）。浏览器 companion 一律拒绝（含带参），请用 `/timestamps` `/think` `/model` `/protocol` `/effort` |
 | `/new` | 归档当前会话并清空。账本用量一并清零。归档写入 `$DOCK_HOME/sessions/<cwd>/` |
-| `/model` `/m` | 切换当前模型。**目录只来自 config.toml**，没写就是空的（会提示去 `config.toml.example` 抄）——内置那几条没端点的假条目已删。目录 `[model.<id>].api_backend`（`chat_completions` / `responses` / `messages`）决定 `"llm"` 走哪条 HTTP 线；`api_model` 是发给上游的 slug（省略=目录 id）；`auth_scheme` 默认 Bearer，messages 默认 `x-api-key`（第三方网关的 /messages 多半仍要 `bearer`）。能力与默认值也在这里：`context_window` / `max_output_tokens` / `reasoning` / `reasoning_effort` / `reasoning_efforts` / `supports_images` / `prompt_cache`，**不写就不发那个参数**。切模型会按新模型重新播种推理默认值 |
+| `/model` `/m` | 切换当前模型。**目录只来自 config.toml**，没写就是空的（会提示去 `config.toml.example` 抄）——内置那几条没端点的假条目已删。目录 `[model.<id>].api_backends`（列表，第一条=默认；单数 `api_backend`=只支持这一条；**都不写默认 `responses`**）声明这个端点支持哪几条 HTTP 线，声明多条时 picker 里会带出来；`api_model` 是发给上游的 slug（省略=目录 id）；`auth_scheme` 不写就跟着当前协议走（messages→`x-api-key`，另两条→Bearer；第三方网关的 /messages 多半仍要 `bearer`）。同一端点各协议入口不同时写协议块 `[model."<id>".<协议>]`，只覆盖连接三件套 `api_base_url` / `auth_scheme` / `api_model`（DeepSeek 的 Anthropic 侧是 `…/anthropic`）。能力与默认值不随协议变，只写模型级：`context_window` / `max_output_tokens` / `reasoning` / `reasoning_effort` / `reasoning_efforts` / `supports_images` / `prompt_cache`，**不写就不发那个参数**。切模型会按新模型重新播种推理默认值与协议 |
+| `/protocol`（`proto` `wire`） | 在**当前模型声明过的**协议之间切（`responses` / `chat_completions` / `messages`）。空参数或名字打错开 picker，不猜一条发出去；切到没声明的那条会被挡下并提示去 config 里补 `api_backends`。一个端点同时开着 /responses 和 /chat/completions 时用这个，不用再配一个只有协议不同的重复模型条目。运行时状态，不落盘；`/model` 换模型即按新模型的默认重新播种。浏览器 companion 也支持：空参数回一条 notice 列出可选协议 |
 | `/resume` | 打开会话 picker，恢复本工作区已落盘的会话（进程重启后仍在）。用量账本不随归档恢复（Grok：新进程 resume 清零）。进程入口 `--resume` / `--resume <id>` 启动时直接恢复 |
 | `/pair`（`pairing`） | 浏览器 Origin 配对：第一行开启/关闭回环网关（默认不监听；首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。开启后待批请求可批准，已绑来源可撤销。overlay 显示实际监听地址。首次连接弹出「允许浏览器连接？」；Enter 批准 / `x` 拒绝或撤销（在网关行上 `x` 关闭监听）。浏览器 companion 的 list/execute 限制见上文。CORS 反射任意 Origin：鉴权靠配对 + 回环。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费 |
 | `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
@@ -43,7 +44,7 @@
 | `/history` | 搜索提示词历史 |
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
 | `/find` | 搜索对话 |
-| `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入 / 输出 / 缓存命中与占比 / 思考 / 调用次数 / API 耗时。接口若带 `cost_in_usd_ticks` 才显示费用，缺省为「未上报」（不是免费）。**Tab** 切到占用。**没有** grok.com 账号额度、`/usage manage` |
+| `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入拆成命中 / 写入 / 未命中三段并画成 bar，加每轮命中率 sparkline、上一轮明细、输出 / 思考 / 调用次数 / API 耗时。费用来源三态：上游带 `cost_in_usd_ticks`（目前只有 xAI）显示 `$X`；否则按 `[model.<id>.pricing]` 本地估算，显示 `约 $X（按 config 单价估算）`；都没有则「未上报」（**不是免费**）。**Tab** 切到占用。浏览器 companion 拿到的是同一份数据的文本版。**没有** grok.com 账号额度、`/usage manage` |
 | `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、**技能**、工作流、MCP、本地按需。点「系统提示」按段展开（基座 / Cordis / 技能 / 工作流 / 人设 / 子代理）。**工具定义只含模型可见项**（`search_tool` / `use_tool` 等）。MCP extras 与 `register_deferred` 的本地工具 **不计入** `used`；点开只看目录。`search_tool` 返回的 schema 记在消息历史里直到压缩；消息明细在有搜索时多一行 **「按需发现」**（`N 次 search_tool`，已含在「工具结果」里，单列出来是为了让重复搜索的代价可见）。技能 listing 给模型看所以仍在系统提示正文里；图例单独占一行（标「已计入系统提示」），不把同一段再加进 `used`。工作流同理。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量。占用 live-lookup `"context"` |
 | `/compact [说明]` | 压缩旧对话为摘要发给模型（Grok 同款 structured `<summary>` 九段）。滚动区保留原对话，末尾加「已压缩上下文。」（Grok pager 是 SessionEvent，不擦 scrollback）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制。摘要调用**不带工具表**（摘要本来就不许调工具，带着白付几千 token）。压缩后的模型前缀里，**assistant 轮次原样保留推理内容**，且**不含**「已压缩上下文。」那条合成消息（它只进滚动区）：有的上游（DeepSeek thinking 模式）规定请求带 `tools` 时之前每一轮的推理都必须回传，缺了报 `The reasoning_text in the thinking mode must be passed back` |
 | `/theme` `/t` | 切换配色 |
@@ -114,8 +115,13 @@ order: 10
 
 - 只把 SSE **官方** `usage` 折进账本（`prompt_tokens_details.cached_tokens`，缺省再认 `prompt_cache_hit_tokens` / `cache_read_input_tokens`；思考认 `completion_tokens_details.reasoning_tokens`）。开转前的本地估算只更新顶栏占用，不入账（Grok fail-closed：缺费用 ≠ 免费）。
 - **缓存写在哪**：`chat_completions` / `responses` 靠上游自动前缀缓存；`messages` 必须显式打断点，由 `http/messages.rs` 的 `apply_cache_breakpoints`（抄 Grok）在 system 尾 + 对话 tip + 上一轮收尾处各打一个，第四个槽留给网关。`[model.<id>].prompt_cache = false` 可关（自建代理不认 `cache_control` 时）。
-- **缓存占比** = 缓存命中 / 完整输入（Grok：`cached_prompt_tokens` 是 `prompt_tokens` 的子集，不要相减）。会话累计用总量相除，不是各轮百分比再平均。另显示 **上一轮命中**（最近一次主循环调用）。超过 100% 钳到 100%；输入为 0 显示 `-`。格式抄 Grok `/context` 的 `percent_of_window`（不足 10% 一位小数，否则整数）。
+- **缓存占比** = 缓存命中 / 完整输入（Grok：`cached_prompt_tokens` 是 `prompt_tokens` 的子集，不要相减）。会话累计用总量相除，不是各轮百分比再平均。超过 100% 钳到 100%；输入为 0 显示 `-`。格式抄 Grok `/context` 的 `percent_of_window`（不足 10% 一位小数，否则整数）。
+- **输入拆三段**：命中 / 写入 / 未命中，互不相交且加起来等于完整输入（`messages` 的 `input_tokens` 本不含前两项，解析时已加回）。overlay 里画成一条按 token 比例分段的 bar，分段靠字形（`█` 命中 / `▓` 写入 / `░` 未命中）而不只靠颜色，单色终端与截图里照样读得出。非零段至少占一格——四舍五入到 0 会让「有一小段白付了全价」从图上消失。写入为 0 不占图例行（`chat_completions` / `responses` 根本不报它，画一行 0 会被误读成缓存没生效）。
+- **每轮走势**：账本留最近 40 次主循环调用，overlay 画成 sparkline（`▁`–`█`，旧 → 新）。刻度固定 0–100%，**不**按样本自适应——自适应会把一串都在 90% 上下的调用画成大起大落。只有一次调用不画。用途：命中率低时区分「这一轮新内容本来就多」和「前缀被改写了整段重算」（压缩、系统提示或工具表变化），只看 **上一轮** 一个数分不出来。
+- **走势的横轴是「有输入的主循环调用」**，不是「模型调用」。两处口径不同：子代理走 `record_subagent`，折进 `model_calls` 但不进 `recent_calls`；`input_tokens == 0` 的调用也不占格子（没有命中率可言）。所以 sparkline 旁边报的是**实际画出来的格数**，`模型调用` 一行在有子代理时拆成 `总数（主循环 N · 子代理 M）`——不写明就会被读成走势少画了一格。
+- **窄窗口裁最旧的**：数据旧 → 新排列，交给渲染层在右边截断等于丢掉刚发生的那几次，正好是最该看的。宽度不够时 `hit_rate_trend` 自己丢队首。
 - 主循环每次 `finish_llm` 记一笔；子代理 isolate 结束时 `record_subagent` 折进父会话，不增加 `numTurns`。
+- **费用**：`CallCost` 三态 `Reported | Estimated | Unknown`，上游优先。`[model.<id>.pricing]` 是 USD / 百万 token 的四价位（input 指**未命中**、cache_read、cache_write 省略回落 input、output），按 `/usage` 的同一套分段计价，存 tick（1 USD = 1e10）避免浮点累积。**不内置厂商价格表**：价格变动频繁，过期单价会静默给出错误金额，和内置模型目录当初被删是同一个理由。估算值一律带「约」并注明来源，混合会话显示「部分上报 · 部分估算」——估算不含分时折扣（DeepSeek off-peak 半价），不能当账单读。四个价位全 0 / 负数 = 没配价，不拿 $0 冒充免费。
 - `/new` / `clear` / `/resume` 清零账本。
 
 ---

@@ -7,7 +7,7 @@ use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
 use cordis_spine::{
     extra_tool_slash_arguments, goal_composer_fill, loop_composer_fill, loop_usage_message,
-    lsp_composer_fill, workflow_command_arguments, ExtraSlashKind, SlashEntry,
+    lsp_composer_fill, workflow_command_arguments, ApiBackend, ExtraSlashKind, SlashEntry,
     GOAL_RESERVED_SUBCOMMANDS, WORKFLOW_TOOL_NAME,
 };
 
@@ -124,6 +124,7 @@ pub enum Effect {
     },
     SetTheme(ThemeKind),
     SetModel(String),
+    SetProtocol(ApiBackend),
     SetEffort(String),
     ToggleTimestamps,
     ToggleThinking,
@@ -253,6 +254,14 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
                 Effect::SetModel(args.to_string())
             }
         }
+        // 名字打错就开菜单，不要猜一条协议发出去——猜错就是一次 404。
+        SlashCmd::Protocol => match ApiBackend::from_name(args) {
+            Some(backend) => Effect::SetProtocol(backend),
+            None => Effect::ArgPicker {
+                kind: ArgKind::Protocol,
+                cmd,
+            },
+        },
         SlashCmd::Settings => {
             if args.is_empty() {
                 Effect::SettingsModal
@@ -403,6 +412,7 @@ fn apply_settings_arg(args: &str) -> Effect {
         "think" | "thinking" => Effect::ToggleThinking,
         "theme" => effect_for_slash(SlashCmd::Theme, rest),
         "model" => effect_for_slash(SlashCmd::Model, rest),
+        "protocol" | "proto" | "wire" => effect_for_slash(SlashCmd::Protocol, rest),
         "effort" => effect_for_slash(SlashCmd::Effort, rest),
         _ => Effect::ArgPicker {
             kind: ArgKind::Settings,
@@ -547,6 +557,37 @@ pub fn interpret_loop_composer(text: &str) -> LoopComposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/protocol` 认 config 里的写法与常见简写；空参数和打错的名字都开菜单，
+    /// 不猜一条协议发出去。
+    #[test]
+    fn protocol_slash_parses_names_and_falls_back_to_the_picker() {
+        for (args, want) in [
+            ("responses", ApiBackend::Responses),
+            ("resp", ApiBackend::Responses),
+            ("chat_completions", ApiBackend::ChatCompletions),
+            ("chat-completions", ApiBackend::ChatCompletions),
+            ("Messages", ApiBackend::Messages),
+            ("anthropic", ApiBackend::Messages),
+        ] {
+            match effect_for_slash(SlashCmd::Protocol, args) {
+                Effect::SetProtocol(got) => assert_eq!(got, want, "{args}"),
+                other => panic!("{args}: {other:?}"),
+            }
+        }
+        for args in ["", "grpc"] {
+            assert!(
+                matches!(
+                    effect_for_slash(SlashCmd::Protocol, args),
+                    Effect::ArgPicker {
+                        kind: ArgKind::Protocol,
+                        ..
+                    }
+                ),
+                "{args} 该开菜单"
+            );
+        }
+    }
 
     #[test]
     fn interpret_stub_and_objective() {
