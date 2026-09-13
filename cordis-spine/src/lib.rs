@@ -22,6 +22,7 @@ mod error;
 mod goal;
 mod http;
 mod jobs;
+mod listing;
 mod llm;
 mod loop_plugin;
 mod lsp;
@@ -31,6 +32,7 @@ mod monitor;
 mod names;
 mod permissions;
 mod plan_mode;
+mod project_instructions;
 mod prompt;
 mod runtime;
 mod sched;
@@ -119,6 +121,7 @@ pub use plan_mode::{
     is_plan_file_edit, plan_instruction, plan_mode, plan_system_addon, PlanApprovalPrompt,
     PlanDecision, PlanMode, PlanPhase, PLAN_REL,
 };
+pub use project_instructions::{project_instructions, INSTRUCTIONS_FILE};
 pub use prompt::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
 pub use sched::{

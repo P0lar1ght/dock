@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
 use crate::context_book::{own_sections, ContextBook};
+use crate::listing::wants_listing;
 use crate::names::{CONTEXT, SESSIONS, SETTINGS, SLASH, TOOLS, TOOLS_EXECUTE, WORKFLOWS};
 use crate::prompt::ORDER_WORKFLOWS;
 use crate::session::Sessions;
@@ -277,6 +278,9 @@ pub fn tool_workflow() -> Plugin {
             own_sections(
                 ctx,
                 vec![book.section(ORDER_WORKFLOWS, "workflows", |exec| {
+                    if !wants_listing(exec) {
+                        return None;
+                    }
                     exec.get::<Workflows>(WORKFLOWS).and_then(|wf| {
                         let listing = wf.listing_text();
                         if listing.trim().is_empty() {
@@ -309,7 +313,10 @@ pub fn tool_workflow() -> Plugin {
             };
             own_registered(
                 ctx,
-                vec![tools.register_deferred(
+                // On the sampler table, not deferred: the system-prompt
+                // listing names this tool, so it has to be callable without a
+                // `search_tool` round-trip first.
+                vec![tools.register(
                     ToolSpec {
                         name: WORKFLOW_TOOL_NAME.into(),
                         description: DESC.into(),
@@ -392,7 +399,7 @@ mod tests {
 
     #[test]
     fn order_workflows_follow_roster() {
-        const { assert!(ORDER_WORKFLOWS > crate::prompt::ORDER_ROSTER) };
+        const { assert!(ORDER_WORKFLOWS > crate::prompt::ORDER_PERSONA) };
         const { assert!(ORDER_SKILLS > ORDER_WORKFLOWS) };
     }
 

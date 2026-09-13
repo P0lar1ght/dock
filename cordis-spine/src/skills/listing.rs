@@ -1,19 +1,37 @@
-//! Budget-capped skill listing for system-prompt / `/context`.
+//! Skill listing for system-prompt / `/context`. Budget + rendering rules are
+//! shared with workflows in [`crate::listing`]; this file only supplies the
+//! header and the skill-shaped row.
+
+use crate::listing::{self, ListEntry};
 
 use super::discover::SkillInfo;
 
-/// Fraction of the context window (in characters ≈ tokens×4) for the listing.
-pub const SKILL_BUDGET_PERCENT: f64 = 0.08;
-const MAX_ENTRY_DESC: usize = 400;
-const MIN_DESC: usize = 20;
+const HEADER: &str = "可用技能（用 `/name` 或 `skill` 工具加载全文；listing 只有名称与说明）：\n\n";
 
 pub fn listing_budget_chars(window_tokens: u64) -> usize {
-    let window = if window_tokens == 0 {
-        128_000
-    } else {
-        window_tokens
-    };
-    ((window as f64) * 4.0 * SKILL_BUDGET_PERCENT) as usize
+    listing::budget_chars(window_tokens)
+}
+
+impl ListEntry for SkillInfo {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn when_to_use(&self) -> Option<&str> {
+        self.when_to_use.as_deref()
+    }
+
+    fn listing_path(&self) -> Option<String> {
+        Some(self.display_path())
+    }
+
+    fn short_tag(&self) -> Option<&str> {
+        Some(self.scope.label())
+    }
 }
 
 pub fn listable<'a>(
@@ -37,62 +55,7 @@ pub fn listable<'a>(
 }
 
 pub fn render_listing(skills: &[&SkillInfo], budget_chars: usize) -> String {
-    if skills.is_empty() {
-        return String::new();
-    }
-    let header = "可用技能（用 `/name` 或 `skill` 工具加载全文；listing 只有名称与说明）：\n\n";
-    let mut body = String::from(header);
-    let mut included = 0usize;
-    for skill in skills {
-        let entry = format_entry(skill, true);
-        if body.len() + entry.len() > budget_chars && included > 0 {
-            break;
-        }
-        body.push_str(&entry);
-        included += 1;
-    }
-    if included == 0 {
-        body = String::from(header);
-        for skill in skills {
-            let entry = format_entry(skill, false);
-            if body.len() + entry.len() > budget_chars && included > 0 {
-                break;
-            }
-            body.push_str(&entry);
-            included += 1;
-        }
-    }
-    let rest = skills.len().saturating_sub(included);
-    if rest > 0 {
-        body.push_str(&format!("… 还有 {rest} 个技能未列入（超出占用预算）。\n"));
-    }
-    body
-}
-
-fn format_entry(skill: &SkillInfo, with_desc: bool) -> String {
-    if !with_desc {
-        return format!(
-            "- `{}` ({})\n  {}\n",
-            skill.name,
-            skill.scope.label(),
-            skill.listing_path()
-        );
-    }
-    let mut desc = skill.description.clone();
-    if let Some(when) = &skill.when_to_use {
-        if !when.is_empty() {
-            desc.push_str(" Use when: ");
-            desc.push_str(when);
-        }
-    }
-    if desc.chars().count() > MAX_ENTRY_DESC {
-        desc = desc.chars().take(MAX_ENTRY_DESC).collect();
-        desc.push('…');
-    }
-    if desc.chars().count() < MIN_DESC {
-        desc = skill.name.clone();
-    }
-    format!("- `{}` — {desc}\n  {}\n", skill.name, skill.listing_path())
+    listing::render(HEADER, skills, budget_chars)
 }
 
 pub fn overlay_body(skills: &[SkillInfo]) -> String {
@@ -112,7 +75,7 @@ pub fn overlay_body(skills: &[SkillInfo]) -> String {
             skill.scope.label(),
             skill.description
         ));
-        let mut meta = skill.listing_path();
+        let mut meta = skill.display_path();
         if let Some(license) = skill.license.as_deref().filter(|l| !l.is_empty()) {
             meta.push_str("  ·  ");
             meta.push_str(license);
@@ -144,9 +107,9 @@ mod tests {
     }
 
     #[test]
-    fn budget_is_eight_percent_of_window_chars() {
-        assert_eq!(listing_budget_chars(128_000), 40_960);
-        assert_eq!(listing_budget_chars(0), 40_960);
+    fn budget_is_three_percent_of_window_chars() {
+        assert_eq!(listing_budget_chars(128_000), 15_360);
+        assert_eq!(listing_budget_chars(0), 15_360);
     }
 
     #[test]
@@ -194,5 +157,13 @@ mod tests {
         let text = render_listing(&[&skill], 800);
         assert!(text.contains(".dock/skills/demo/SKILL.md"), "{text}");
         assert!(!text.contains("/tmp/"), "{text}");
+    }
+
+    /// The header names `skill`, so that tool has to be on the sampler table.
+    #[test]
+    fn header_points_at_a_sampler_tool() {
+        let skill = sample("demo", "a reasonably long description for listing");
+        let text = render_listing(&[&skill], 800);
+        assert!(text.contains("`skill` 工具"), "{text}");
     }
 }

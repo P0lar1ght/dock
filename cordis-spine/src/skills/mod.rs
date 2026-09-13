@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
 use crate::context_book::{own_sections, ContextBook};
+use crate::listing::wants_listing;
 use crate::names::{CONTEXT, PRE_STEP, SESSIONS, SETTINGS, SKILLS, SLASH, TOOLS, TOOLS_EXECUTE};
 use crate::prompt::ORDER_SKILLS;
 use crate::session::Sessions;
@@ -97,10 +98,20 @@ impl Skills {
         text
     }
 
+    /// Rows behind the `/context` 技能 slice.
+    ///
+    /// Derived from the *frozen* listing when one exists: the system prompt
+    /// never rewrites its skills section, so re-running `listable` against the
+    /// live activation set would report skills the model was never told about.
     pub fn occupancy_rows(&self) -> Vec<(String, u64, String)> {
         let inner = self.inner.lock().unwrap();
+        let listed = inner
+            .frozen_listing
+            .as_ref()
+            .map(|frozen| listed_names(frozen));
         let list = listable(&inner.catalog, &inner.activated);
         list.into_iter()
+            .filter(|s| listed.as_ref().is_none_or(|names| names.contains(&s.name)))
             .map(|s| {
                 let mut text = s.name.clone();
                 text.push('\n');
@@ -295,6 +306,16 @@ impl Skills {
     }
 }
 
+/// Entry names actually present in a rendered listing (`- \`name\` …`).
+fn listed_names(listing: &str) -> HashSet<String> {
+    listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("- `"))
+        .filter_map(|rest| rest.split('`').next())
+        .map(str::to_string)
+        .collect()
+}
+
 fn occupancy_estimate(text: &str) -> u64 {
     let mut ascii = 0u64;
     let mut other = 0u64;
@@ -313,14 +334,14 @@ fn format_skill_block(skill: &SkillInfo, args: &str, body: &str) -> String {
         format!(
             "<skill name=\"{}\" path=\"{}\">\n{body}\n</skill>",
             skill.name,
-            skill.listing_path()
+            skill.display_path()
         )
     } else {
         format!(
             "<skill name=\"{}\" args=\"{}\" path=\"{}\">\n{body}\n</skill>",
             skill.name,
             args,
-            skill.listing_path()
+            skill.display_path()
         )
     }
 }
@@ -390,6 +411,9 @@ pub fn skills() -> Plugin {
         own_sections(
             ctx,
             vec![book.section(ORDER_SKILLS, "skills", |exec| {
+                if !wants_listing(exec) {
+                    return None;
+                }
                 exec.get::<Skills>(SKILLS).and_then(|skills| {
                     let listing = skills.listing_text();
                     if listing.trim().is_empty() {
@@ -456,7 +480,10 @@ pub fn tool_skills() -> Plugin {
         };
         own_registered(
             ctx,
-            vec![tools.register_deferred(
+            // On the sampler table, not deferred: the system-prompt listing
+            // names this tool, so it has to be callable without a
+            // `search_tool` round-trip first.
+            vec![tools.register(
                 ToolSpec {
                     name: "skill".into(),
                     description: SKILL_TOOL_DESC.into(),
@@ -492,7 +519,7 @@ fn run_skill_tool(ctx: &Context, call: ToolCall) -> ToolResult {
         let hint = skills
             .catalog()
             .into_iter()
-            .map(|s| format!("{} ({})", s.name, s.listing_path()))
+            .map(|s| format!("{} ({})", s.name, s.display_path()))
             .take(8)
             .collect::<Vec<_>>()
             .join("\n");
@@ -561,7 +588,7 @@ mod tests {
 
     #[test]
     fn order_skills_follows_roster() {
-        const { assert!(ORDER_SKILLS > crate::prompt::ORDER_ROSTER) };
+        const { assert!(ORDER_SKILLS > crate::prompt::ORDER_PERSONA) };
         const { assert!(ORDER_SKILLS > crate::prompt::ORDER_WORKFLOWS) };
     }
 
@@ -854,5 +881,18 @@ mod tests {
             "{}",
             out.content
         );
+    }
+
+    /// The system prompt freezes its skills section on first render, so the
+    /// `/context` breakdown must report that frozen set — not whatever the
+    /// live activation set has grown to since.
+    #[test]
+    fn listed_names_parses_rendered_entries() {
+        let listing =
+            "可用技能：\n\n- `alpha` — first\n  .dock/skills/alpha/SKILL.md\n- `beta` (项目)\n";
+        let names = listed_names(listing);
+        assert!(names.contains("alpha"), "{names:?}");
+        assert!(names.contains("beta"), "{names:?}");
+        assert_eq!(names.len(), 2, "{names:?}");
     }
 }

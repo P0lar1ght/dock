@@ -7,13 +7,16 @@ use crate::names::{CONTEXT, PROMPT_ASSEMBLE, SYSTEM_PROMPT};
 /// its own plugin handler that adds a section at a fixed order, so the assembled
 /// prompt is byte-stable no matter what order the plugins mount in.
 ///
-/// Stable identity first (prefix cache), then listings. Plan / goal stay out of
-/// this table — they are `<system-reminder>` tails (Grok / DSH).
+/// Stable identity first (prefix cache), then listings, then whatever varies
+/// with the workspace. Plan / goal stay out of this table — they are
+/// `<system-reminder>` tails (Grok / DSH).
 pub const ORDER_CORDIS: i32 = 10;
 pub const ORDER_PERSONA: i32 = 20;
-pub const ORDER_ROSTER: i32 = 30;
 pub const ORDER_WORKFLOWS: i32 = 40;
 pub const ORDER_SKILLS: i32 = 41;
+/// Workspace `AGENTS.md`. Last on purpose: it is the only section whose body
+/// tracks the cwd, so everything above it stays byte-identical across `/cd`.
+pub const ORDER_PROJECT: i32 = 50;
 
 /// Structured payload carried by the `system-prompt/assemble` waterfall.
 ///
