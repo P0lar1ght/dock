@@ -344,6 +344,27 @@ pub async fn run(ctx: Context) -> Result<()> {
                                         flash(&ctx, format!("已切换 {model}"));
                                     }
                                 }
+                                Effect::SetProtocol(backend) => {
+                                    let msg = match ctx.get::<AppSettings>(SETTINGS) {
+                                        // 端点没声明的协议切过去就是 404，这里挡
+                                        // 住并说清楚该去 config 里加哪一行。
+                                        Some(settings)
+                                            if !settings.backend_choices().contains(&backend) =>
+                                        {
+                                            format!(
+                                                "{} 未在该模型的 api_backends 里声明",
+                                                backend.name()
+                                            )
+                                        }
+                                        Some(settings) => {
+                                            settings.set_backend(backend);
+                                            format!("协议 {}", backend.name())
+                                        }
+                                        None => format!("协议 {}", backend.name()),
+                                    };
+                                    overlay.close();
+                                    flash(&ctx, msg);
+                                }
                                 Effect::SetEffort(effort) => {
                                     if let Some(settings) = ctx.get::<AppSettings>(SETTINGS) {
                                         settings.set_effort(effort.clone());

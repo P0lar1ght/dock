@@ -5,17 +5,32 @@
 # 下面三段分别是三条 wire 的最小可用配置，把 <...> 换成你自己的端点与模型名。
 #
 # 连接
-#   api_base_url  OpenAI 兼容的基址。请求路径 = api_base_url + /chat/completions
-#                 | /responses | /messages，按 api_backend 决定。
-#   api_backend   chat_completions（默认）| responses | messages
+#   api_base_url  OpenAI 兼容的基址。请求路径 = api_base_url + /responses |
+#                 /chat/completions | /messages，按当前协议决定。
+#   api_backends  这个端点**支持哪几条协议**，列表，第一条 = 切到该模型时的默认。
+#                 一个端点常常同时开着 /responses 和 /chat/completions：声明成
+#                 一行，运行时用 /protocol 在这几条之间切，不用为了换协议再配
+#                 一个只有协议不同的重复模型条目。
+#                 可选值 responses | chat_completions | messages。
+#   api_backend   单数写法 = 只支持这一条。不写默认 responses。
+#                 两个键都写时，单数当默认提到队首（老配置补一行 api_backends
+#                 不会换掉原来的默认协议）。
 #   api_model     发给上游的 slug；省略则用目录 id（`[model."<id>"]` 里的 id）。
-#                 同一模型想在 /model 里出现多行（比如测三条协议）就靠它。
 #   env_key       读哪个环境变量取密钥。**首选这个**，别把密钥写进文件。
 #   api_key       行内密钥；写了就优先于 env_key。仅用于本地临时测试。
-#   auth_scheme   bearer（默认）| x_api_key。messages 默认 x-api-key；走第三方
-#                 网关的 /messages 通常仍是 bearer，那就显式写 bearer。
+#   auth_scheme   bearer | x_api_key。不写就跟着**当前协议**走：messages 用
+#                 x-api-key，另两条用 bearer。走第三方网关的 /messages 通常仍是
+#                 bearer，那就显式写 bearer。
 #   Dotted / slashed id 必须加引号：[model."vendor/model-name"]
 #   DOCK_MODEL 环境变量在启动时覆盖 [models].default。
+#
+# 协议块 [model."<id>".<协议>]——同一个端点各协议入口不同时用它。可覆盖三个
+# **连接**键：api_base_url / auth_scheme / api_model。优先级：协议块 > 模型级 >
+# 协议默认。协议名用 responses / chat_completions / messages（别名 resp / chat /
+# anthropic）。能力键（context_window、reasoning、supports_images…）是模型的属性，
+# 不随协议变，只能写在模型级，这样才守得住「一个模型一条 entry」。
+#   典型：DeepSeek 的 OpenAI 侧是 https://api.deepseek.com，
+#         Anthropic 侧是 https://api.deepseek.com/anthropic。
 #
 # 能力 / 默认值——**不写就不发这个参数**，交给上游自己的默认。不同模型的差异
 # 写在这里，不写死在 dock 里：
@@ -36,9 +51,31 @@
 #                      前缀缓存由上游自动做，这个键对它们无效。
 
 [models]
-default = "chat-model"
+default = "dual-model"
 
-# --- 1. Chat Completions（最通用，绝大多数端点都支持这条） ---
+# --- 1. 一个端点、多条协议（最常见的情况） ---
+# 三条都开着：声明一次，`/protocol` 现场切。默认走 responses——推理链能跨轮
+# 回放，长工具循环不丢思路。Anthropic 侧入口不同，写个协议块单独指过去；
+# 其余的键（窗口、推理档、能不能读图）三条协议共用。
+[model."dual-model"]
+name = "多协议模型"
+description = "<厂商> /responses + /chat/completions + /messages"
+api_base_url = "https://<your-endpoint>/v1"
+api_backends = ["responses", "chat_completions", "messages"]
+api_model = "<上游真实模型名>"
+env_key = "YOUR_API_KEY_ENV"
+context_window = 200000
+reasoning = true
+reasoning_effort = "medium"
+reasoning_efforts = ["low", "medium", "high"]
+
+# 只覆盖连接：这条 wire 的基址不一样，鉴权也按网关要求改成 bearer。
+[model."dual-model".messages]
+api_base_url = "https://<your-endpoint>/anthropic"
+auth_scheme = "bearer"
+
+# --- 2. 只支持 Chat Completions 的端点（自建代理、本地 ollama、多数长尾模型） ---
+# 默认是 responses，这类端点**必须**显式声明，否则会打到一个不存在的路径。
 [model."chat-model"]
 name = "Chat 模型"
 description = "<厂商> /chat/completions"
@@ -47,19 +84,6 @@ api_backend = "chat_completions"
 env_key = "YOUR_API_KEY_ENV"
 context_window = 128000
 
-# --- 2. Responses（OpenAI 风格；推理链能跨轮回放，推理模型优先走这条） ---
-[model."responses-model"]
-name = "Responses 模型"
-description = "<厂商> /responses"
-api_base_url = "https://<your-endpoint>/v1"
-api_backend = "responses"
-api_model = "<上游真实模型名>"
-env_key = "YOUR_API_KEY_ENV"
-context_window = 200000
-reasoning = true
-reasoning_effort = "medium"
-reasoning_efforts = ["low", "medium", "high"]
-
 # --- 3. Messages（Anthropic 风格；max_tokens 必填，缓存要显式断点） ---
 [model."messages-model"]
 name = "Messages 模型"
@@ -67,7 +91,8 @@ description = "<厂商> /messages"
 api_base_url = "https://<your-endpoint>/v1"
 api_backend = "messages"
 api_model = "<上游真实模型名>"
-# 直连 Anthropic 风格端点可省略（默认 x-api-key）；第三方网关多半要 bearer。
+# 直连 Anthropic 风格端点可省略（默认跟着协议走 = x-api-key）；第三方网关多半
+# 要 bearer。注意写了就对该模型的所有协议一律生效。
 auth_scheme = "x_api_key"
 env_key = "YOUR_API_KEY_ENV"
 context_window = 200000

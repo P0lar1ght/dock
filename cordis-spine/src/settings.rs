@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::config::{self, ModelChoice};
+use crate::config::{self, ApiBackend, ModelChoice};
 use crate::names::SETTINGS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,9 @@ pub enum MermaidEngineKind {
 pub struct AppSettings {
     model: Mutex<String>,
     effort: Mutex<String>,
+    /// 当前这一轮走哪条 wire。种子来自 `[model.<id>].api_backends` 的第一条，
+    /// `/protocol` 在**该模型声明过的**协议之间切。
+    backend: Mutex<ApiBackend>,
     /// When false, requests send `reasoning.exclude` / effort none (no think card).
     thinking: Mutex<bool>,
     timestamps: Mutex<bool>,
@@ -35,6 +38,7 @@ impl AppSettings {
         let settings = Self {
             model: Mutex::new(model.clone()),
             effort: Mutex::new(String::new()),
+            backend: Mutex::new(ApiBackend::default()),
             thinking: Mutex::new(true),
             timestamps: Mutex::new(true),
             permission_mode: Mutex::new(PermissionMode::Ask),
@@ -69,6 +73,35 @@ impl AppSettings {
         *self.thinking.lock().unwrap() = choice
             .as_ref()
             .is_none_or(config::ModelChoice::supports_reasoning);
+        // 协议同理：上一个模型选的 wire 带到下一个端点上就是 404。目录里没有
+        // 这个模型时退回全局默认，不留着前一个的。
+        *self.backend.lock().unwrap() = choice
+            .as_ref()
+            .map(config::ModelChoice::default_backend)
+            .unwrap_or_default();
+    }
+
+    /// 当前模型声明支持哪几条 wire。目录里没有这个模型就给通用三条——够用，
+    /// 又不假装知道那个端点开了什么。
+    pub fn backend_choices(&self) -> Vec<ApiBackend> {
+        match config::lookup_model(&self.model()) {
+            Some(choice) => choice.api_backends.clone(),
+            None => ApiBackend::ALL.to_vec(),
+        }
+    }
+
+    /// 这一轮实际走哪条。config.toml 是热读的，存着的值可能已经不在声明列表里
+    /// （用户刚把那条协议删了），所以每次都对着当前目录校一遍。
+    pub fn backend(&self) -> ApiBackend {
+        let current = *self.backend.lock().unwrap();
+        match config::lookup_model(&self.model()) {
+            Some(choice) if !choice.supports_backend(current) => choice.default_backend(),
+            _ => current,
+        }
+    }
+
+    pub fn set_backend(&self, backend: ApiBackend) {
+        *self.backend.lock().unwrap() = backend;
     }
 
     /// 模型自己说了没有推理档时，思考开关是死的（UI 据此置灰）。
@@ -228,7 +261,8 @@ mod tests {
             api_key: None,
             env_key: None,
             context_window: None,
-            api_backend: config::ApiBackend::ChatCompletions,
+            api_backends: vec![config::ApiBackend::ChatCompletions],
+            backend_overrides: Default::default(),
             auth_scheme: None,
             api_model: None,
             prompt_cache: None,
@@ -254,6 +288,63 @@ mod tests {
         assert!(
             choice.effort_choices().is_empty(),
             "不支持推理时档位列表无意义"
+        );
+    }
+
+    /// 目录里没有这个模型：协议给通用三条，默认落在 Responses。
+    #[test]
+    fn unknown_model_offers_every_wire() {
+        let settings = AppSettings::new("not-in-any-catalog");
+        assert_eq!(settings.backend(), ApiBackend::Responses);
+        assert_eq!(settings.backend_choices(), ApiBackend::ALL.to_vec());
+    }
+
+    /// 切模型必须把上一个模型选的协议清掉——把 messages 带到一个只开
+    /// /chat/completions 的端点上就是 404。
+    #[test]
+    fn switching_models_reseeds_the_protocol() {
+        let settings = AppSettings::new("x");
+        settings.set_backend(ApiBackend::Messages);
+        assert_eq!(settings.backend(), ApiBackend::Messages);
+        settings.set_model("still-not-in-any-catalog");
+        assert_eq!(settings.backend(), ApiBackend::Responses, "协议要重新播种");
+    }
+
+    /// 声明了两条 wire 的端点：`/protocol` 列这两条，切过去生效；config 里没
+    /// 声明的那条被存进来（用户切完又改了 config）时，`backend()` 要挡回默认，
+    /// 而不是照发一个 404 的路径出去。
+    #[test]
+    fn protocol_switches_within_the_declared_list_only() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            r#"
+[model.dual]
+api_base_url = "https://example.test/v1"
+api_backends = ["responses", "chat_completions"]
+"#,
+        )
+        .unwrap();
+        let _env = crate::test_env::scoped()
+            .set("DOCK_HOME", home.path())
+            .cwd(cwd.path());
+
+        let settings = AppSettings::new("dual");
+        assert_eq!(settings.backend(), ApiBackend::Responses);
+        assert_eq!(
+            settings.backend_choices(),
+            vec![ApiBackend::Responses, ApiBackend::ChatCompletions]
+        );
+
+        settings.set_backend(ApiBackend::ChatCompletions);
+        assert_eq!(settings.backend(), ApiBackend::ChatCompletions);
+
+        settings.set_backend(ApiBackend::Messages);
+        assert_eq!(
+            settings.backend(),
+            ApiBackend::Responses,
+            "没声明的协议不能生效，要退回该模型的默认"
         );
     }
 

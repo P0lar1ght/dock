@@ -5,14 +5,15 @@
 //! Capture commands (`/screenshot`) are listed here so embed does not keep a
 //! parallel harness catalog; the actual pixels stay in JS. `/cd` and `/settings`
 //! (including `/settings timestamps`) are listed but refused: list `terminal`
-//! never mutates process state. Use `/timestamps` `/think` `/model` `/effort`.
+//! never mutates process state. Use `/timestamps` `/think` `/model` `/protocol`
+//! `/effort`.
 
 use serde_json::{json, Value};
 
 use cordis_spine::{
     extra_tool_slash_arguments, goal_composer_fill, loop_composer_fill, loop_schedule_instruction,
-    session_usage_block_text, workflow_command_arguments, AppSettings, ExtraSlashKind, Goal,
-    LoopFireMode, PlanMode, Sessions, Slash, SlashEntry, ToolCall, Tools, GOAL,
+    session_usage_block_text, workflow_command_arguments, ApiBackend, AppSettings, ExtraSlashKind,
+    Goal, LoopFireMode, PlanMode, Sessions, Slash, SlashEntry, ToolCall, Tools, GOAL,
     GOAL_RESERVED_SUBCOMMANDS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, TOOLS, WORKFLOW_TOOL_NAME,
 };
 use cordis_tui::{resolve_slash, slash_catalog, SessionRef, SlashCatalogEntry, SESSION_PORT};
@@ -40,6 +41,7 @@ enum GatewayCmd {
     New,
     Resume,
     Model,
+    Protocol,
     Loop,
     Plan,
     ViewPlan,
@@ -59,6 +61,7 @@ fn gateway_cmd(name: &str) -> Option<GatewayCmd> {
         "new" => GatewayCmd::New,
         "resume" => GatewayCmd::Resume,
         "model" => GatewayCmd::Model,
+        "protocol" => GatewayCmd::Protocol,
         "loop" => GatewayCmd::Loop,
         "plan" => GatewayCmd::Plan,
         "view-plan" => GatewayCmd::ViewPlan,
@@ -239,6 +242,7 @@ async fn execute_builtin(
         GatewayCmd::New => cmd_new(gateway),
         GatewayCmd::Resume => cmd_resume(gateway),
         GatewayCmd::Model => cmd_model(gateway, args),
+        GatewayCmd::Protocol => cmd_protocol(gateway, args),
         GatewayCmd::Loop => cmd_loop(gateway, args),
         GatewayCmd::Plan => cmd_plan(gateway, args),
         GatewayCmd::ViewPlan => cmd_view_plan(gateway),
@@ -327,6 +331,38 @@ fn cmd_model(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
     let settings = settings(gateway)?;
     settings.set_model(args);
     Ok(applied(format!("已切换 {args}")))
+}
+
+/// `/protocol` —— 在当前模型 `api_backends` 声明过的协议之间切。
+///
+/// 空参数回一条 notice 列可选项，不新开一个 menu id：`menu` 的取值是 dock.1
+/// 的一部分，为这个功能扩协议不值得，宿主页也不需要为它加渲染。
+fn cmd_protocol(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {
+    let settings = settings(gateway)?;
+    let choices = settings.backend_choices();
+    if args.is_empty() {
+        let current = settings.backend();
+        let body = choices
+            .iter()
+            .map(|b| {
+                let mark = if *b == current { " ·当前" } else { "" };
+                format!("/protocol {}{mark} — {}", b.name(), b.description())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(notice("推理协议", body));
+    }
+    let Some(backend) = ApiBackend::from_name(args) else {
+        return Ok(applied(format!("未知协议 {args}")));
+    };
+    if !choices.contains(&backend) {
+        return Ok(applied(format!(
+            "{} 未在该模型的 api_backends 里声明",
+            backend.name()
+        )));
+    }
+    settings.set_backend(backend);
+    Ok(applied(format!("协议 {}", backend.name())))
 }
 
 fn cmd_loop(gateway: &GatewayHandle, args: &str) -> Result<Value, RpcError> {

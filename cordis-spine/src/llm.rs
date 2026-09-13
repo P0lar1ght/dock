@@ -10,7 +10,8 @@ use crate::stream_acc::StreamDelta;
 use crate::types::{LlmOutput, LogEvent, PromptRequest, ToolCall};
 
 /// Echo: always `echo`. Workspace: `list_dir` / `read_file`. Text: no tools.
-/// Http: `api_backend` chat/completions / responses / messages.
+/// Http: 走 `api_backends` 声明的某条 wire（responses / chat/completions /
+/// messages），具体哪条由运行时 `/protocol` 决定。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LlmMode {
     #[default]
@@ -60,7 +61,7 @@ impl LlmConfig {
     }
 }
 
-/// Swap this to change the protocol (stub, or HttpSampler `api_backend`).
+/// Swap this to change the protocol (stub, or HttpSampler's declared wires).
 pub trait Sampler: Send + Sync {
     fn sample<'a>(
         &'a self,

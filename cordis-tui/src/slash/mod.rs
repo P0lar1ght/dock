@@ -6,7 +6,7 @@ mod dropdown;
 mod interval;
 mod matcher;
 
-use cordis_spine::{load_catalog, AppSettings, ModelChoice, SlashEntry};
+use cordis_spine::{load_catalog, ApiBackend, AppSettings, ModelChoice, SlashEntry};
 
 pub use args::ArgItem;
 pub use dropdown::{desired_item_rows, render_dropdown, SuggestionRow};
@@ -28,6 +28,7 @@ pub enum SlashCmd {
     Quit,
     Theme,
     Model,
+    Protocol,
     Settings,
     Loop,
     Export,
@@ -60,6 +61,7 @@ pub enum SlashPick {
 pub enum ArgKind {
     Theme,
     Model,
+    Protocol,
     Settings,
     Effort,
     LoopInterval,
@@ -144,6 +146,16 @@ pub const CATALOG: &[SlashDef] = &[
         takes_args: true,
         args_required: true,
         arg_kind: Some(ArgKind::Model),
+    },
+    SlashDef {
+        cmd: SlashCmd::Protocol,
+        name: "protocol",
+        aliases: &["proto", "wire"],
+        display: "/protocol",
+        description: "切换当前模型的推理协议",
+        takes_args: true,
+        args_required: false,
+        arg_kind: Some(ArgKind::Protocol),
     },
     SlashDef {
         cmd: SlashCmd::Resume,
@@ -629,11 +641,48 @@ pub fn model_args(settings: Option<&AppSettings>) -> Vec<ArgItem> {
         .into_iter()
         .map(|m| {
             let desc = if m.description.is_empty() {
-                m.name
+                m.name.clone()
             } else {
-                m.description
+                m.description.clone()
+            };
+            // 声明了多条 wire 的端点在这里就说清楚，省得用户为了看协议再开一次
+            // /protocol。只有一条时不占位置。
+            let desc = if m.has_backend_choice() {
+                let wires: Vec<&str> = m.api_backends.iter().map(|b| b.name()).collect();
+                format!("{desc} · {}", wires.join(" / "))
+            } else {
+                desc
             };
             ArgItem::new(m.id, desc)
+        })
+        .collect()
+}
+
+/// 协议菜单来自当前模型的 `[model.<id>].api_backends`——端点没声明的那条切过去
+/// 就是 404，所以这里只列声明过的。目录里没有当前模型才退回通用三条。
+pub fn protocol_args(settings: Option<&AppSettings>) -> Vec<ArgItem> {
+    let (choices, current) = match settings {
+        Some(settings) => (settings.backend_choices(), Some(settings.backend())),
+        None => (ApiBackend::ALL.to_vec(), None),
+    };
+    if choices.len() <= 1 {
+        let only = choices.first().copied().unwrap_or_default();
+        let mut hint = ArgItem::new(
+            format!("（只声明了 {}）", only.name()),
+            "在 config 里给这个模型写 api_backends = [\"responses\", \"chat_completions\"]",
+        );
+        hint.insert_text = String::new();
+        return vec![hint];
+    }
+    choices
+        .into_iter()
+        .map(|backend| {
+            let desc = if Some(backend) == current {
+                format!("{} · 当前", backend.description())
+            } else {
+                backend.description().to_string()
+            };
+            ArgItem::new(backend.name(), desc)
         })
         .collect()
 }
@@ -682,6 +731,7 @@ pub fn settings_args(settings: Option<&AppSettings>) -> Vec<ArgItem> {
         ArgItem::new("theme grokday", "GrokDay 配色"),
         ArgItem::new("theme tokyonight", "TokyoNight 配色"),
         ArgItem::new(format!("model {model_id}"), "默认模型"),
+        ArgItem::new("protocol", "推理协议"),
     ]
 }
 
@@ -704,6 +754,7 @@ pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
     match kind {
         ArgKind::Theme => theme_args(),
         ArgKind::Model => model_args(settings),
+        ArgKind::Protocol => protocol_args(settings),
         ArgKind::Settings => settings_args(settings),
         ArgKind::Effort => effort_args(settings),
         ArgKind::LoopInterval => loop_interval_args(),
@@ -934,5 +985,20 @@ mod tests {
         let ids: Vec<&str> = args.iter().map(|a| a.display.as_str()).collect();
         let want: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, want);
+    }
+
+    /// 没有 settings 时（浏览器 companion 走这条）列通用三条，插入的是 config
+    /// 里写的那个名字——`/protocol responses` 得能原样再解析回来。
+    #[test]
+    fn protocol_args_list_every_wire_without_settings() {
+        let args = protocol_args(None);
+        let names: Vec<&str> = args.iter().map(|a| a.display.as_str()).collect();
+        assert_eq!(names, vec!["responses", "chat_completions", "messages"]);
+        for item in &args {
+            assert_eq!(
+                ApiBackend::from_name(&item.insert_text),
+                Some(ApiBackend::from_name(&item.display).unwrap())
+            );
+        }
     }
 }

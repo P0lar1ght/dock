@@ -1,6 +1,7 @@
 //! `"llm"` HTTP sampler. Live-lookup `"settings"` for model and `"turn"` for
-//! cancel. `api_backend` picks the wire (Grok `ApiBackend`): chat/completions,
-//! Responses, or Anthropic Messages. All three emit [`StreamDelta`].
+//! cancel. `[model.<id>].api_backends` declares which wires the endpoint speaks;
+//! `"settings"` holds the one in use (`/protocol`): Responses (default),
+//! chat/completions, or Anthropic Messages. All three emit [`StreamDelta`].
 
 mod messages;
 mod responses;
@@ -115,16 +116,26 @@ async fn sample_http(
     let choice = config::lookup_model(&model);
     let settings = sampler.ctx.get::<AppSettings>(SETTINGS);
     let params = WireParams::resolve(choice.as_ref(), settings.as_deref());
-    let backend = choice.as_ref().map(|m| m.api_backend).unwrap_or_default();
+    // 协议是运行时状态（`/protocol`），不是模型的固定属性：一个端点可以同时开
+    // /responses 与 /chat/completions。settings 会对着目录校一遍再给出来。
+    let backend = settings
+        .as_deref()
+        .map(AppSettings::backend)
+        .unwrap_or_else(|| {
+            choice
+                .as_ref()
+                .map(config::ModelChoice::default_backend)
+                .unwrap_or_default()
+        });
     let auth = choice
         .as_ref()
-        .map(|m| m.resolved_auth())
-        .unwrap_or(AuthScheme::Bearer);
+        .map(|m| m.resolved_auth(backend))
+        .unwrap_or_else(|| AuthScheme::default_for(backend));
     let wire = choice
         .as_ref()
-        .map(|m| m.wire_model().to_string())
+        .map(|m| m.wire_model_for(backend).to_string())
         .unwrap_or_else(|| model.clone());
-    let (api_base, api_key) = resolve_endpoint(sampler, &model);
+    let (api_base, api_key) = resolve_endpoint(sampler, &model, backend);
     if let Some(sessions) = sampler.ctx.get::<Sessions>(SESSIONS) {
         let window = choice
             .as_ref()
@@ -428,17 +439,17 @@ fn chat_body(
     body
 }
 
-fn resolve_endpoint(sampler: &HttpSampler, model: &str) -> (String, String) {
+/// 基址按**当前协议**解析：同一个端点各协议的入口可能不同（DeepSeek 的
+/// OpenAI 侧是 `…/`，Anthropic 侧是 `…/anthropic`），见
+/// `[model.<id>.<protocol>].api_base_url`。
+fn resolve_endpoint(sampler: &HttpSampler, model: &str, backend: ApiBackend) -> (String, String) {
     let choice = config::lookup_model(model);
-    let api_base = choice
-        .as_ref()
-        .and_then(|m| m.api_base_url.clone())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| sampler.api_base.clone());
     let own_base = choice
         .as_ref()
-        .and_then(|m| m.api_base_url.as_deref())
-        .is_some_and(|s| !s.trim().is_empty());
+        .and_then(|m| m.base_url_for(backend))
+        .map(str::to_string);
+    let api_base = own_base.clone().unwrap_or_else(|| sampler.api_base.clone());
+    let own_base = own_base.is_some();
     let api_key = choice
         .as_ref()
         .and_then(|m| m.resolved_api_key())
@@ -685,7 +696,8 @@ mod tests {
             api_key: None,
             env_key: None,
             context_window: None,
-            api_backend: ApiBackend::ChatCompletions,
+            api_backends: vec![ApiBackend::ChatCompletions],
+            backend_overrides: Default::default(),
             auth_scheme: None,
             api_model: None,
             prompt_cache: None,

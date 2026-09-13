@@ -5,7 +5,7 @@ Five named Cordis services (DSH plugin seams) plus one Grok-shaped turn driver.
 | ctx key | Fake | Role |
 |---|---|---|
 | `sessions` | disk + memory log | Grok conversation persist (`$DOCK_HOME/sessions/<cwd>/<id>/chat_history.jsonl`) |
-| `llm` | echo / text stub, or `HttpSampler` | Grok-shaped sampler: `api_backend` = `chat_completions` / `responses` / `messages` |
+| `llm` | echo / text stub, or `HttpSampler` | Grok-shaped sampler; `[model.<id>].api_backends` declares which wires the endpoint speaks (`responses` default / `chat_completions` / `messages`), `/protocol` picks among them at runtime |
 | `tools` | echo, or Grok workspace tools (`--features grok`) | Grok ToolBridge execute |
 | `systemPrompt` | fixed string | Assemble facade: live-look `"context"` then `system-prompt/assemble` |
 | `context` | empty `ContextBook` | Prompt fragments (`set_base` / `section`) + occupancy `window()` |
