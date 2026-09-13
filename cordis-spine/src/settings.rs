@@ -263,6 +263,7 @@ mod tests {
             context_window: None,
             api_backends: vec![config::ApiBackend::ChatCompletions],
             backend_overrides: Default::default(),
+            pricing: None,
             auth_scheme: None,
             api_model: None,
             prompt_cache: None,

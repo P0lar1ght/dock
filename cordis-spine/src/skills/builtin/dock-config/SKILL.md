@@ -32,6 +32,13 @@ context_window = 128000
 # 协议块：只在某条 wire 上覆盖连接（入口不同时用）
 [model."<model-id>".messages]
 api_base_url = "https://…/anthropic"
+
+# 单价：USD / 百万 token，写了 /usage 才算得出金额
+[model."<model-id>".pricing]
+input = 0.28        # 未命中输入
+cache_read = 0.028
+cache_write = 0.28  # 省略则按 input
+output = 0.42
 ```
 
 - `api_backends` 是**一个端点支持的协议列表**，第一条 = 切到该模型时的默认。
@@ -47,6 +54,10 @@ api_base_url = "https://…/anthropic"
   协议块 > 模型级 > 协议默认。协议名接受别名 `resp` / `chat` / `anthropic`。
   能力键（`context_window`、`reasoning*`、`supports_images`、
   `max_output_tokens`、`prompt_cache`）是模型的属性，不随协议变，只写模型级。
+- `[model."<id>".pricing]` 单价，USD / 百万 token，四个价位和 `/usage` 的分段
+  一一对应。**不内置厂商价格表**——价格变动频繁，猜出来的单价一旦过期就是静默
+  给出错误金额。本地算出的金额一律标「约 …（按 config 单价估算）」，不是账单：
+  不含分时折扣（DeepSeek off-peak 半价）。上游带了费用则以上游为准。
 - `env_key` 指向环境变量名，与 `api_key` 二选一。
 - `context_window` 按上游真实值填，驱动上下文占用显示与自动压缩阈值。
 - `auth_scheme` 不写就跟着**当前协议**走：`messages` 用 `x-api-key`，另两条用

@@ -111,6 +111,61 @@ impl AuthScheme {
 /// `[model.<id>].reasoning_efforts` 没写时 `/effort` 列的通用档位。
 pub const DEFAULT_EFFORT_CHOICES: &[&str] = &["low", "medium", "high", "xhigh"];
 
+/// `[model.<id>.pricing]` —— 单价，**USD / 百万 token**（全行业通用的报价单位）。
+///
+/// 存 tick（1 USD = 1e10）而不是 f64：`ModelChoice` 要 `Eq`，浮点没有；而且
+/// tick 本来就是整数单位，省掉一路浮点误差。
+///
+/// 不内置任何厂商价格表。价格变动频繁，按模型名猜出来的单价一旦过期就是**静默
+/// 给出错误金额**，比不显示更糟——这也是 `[[models.catalog]]` 内置条目当初被
+/// 删掉的同一个理由。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelPricing {
+    /// 未命中输入（Claude Code `/cost` 里的 "input"）。
+    pub input_ticks_per_mtok: i64,
+    pub cache_read_ticks_per_mtok: i64,
+    /// 缓存写入。config 里省略则回落到 `input`——多数厂商写入就是原价，
+    /// Anthropic 那种 1.25x 的要显式写。
+    pub cache_write_ticks_per_mtok: i64,
+    /// 输出。多数厂商把推理 token 计在这里，所以不单列。
+    pub output_ticks_per_mtok: i64,
+}
+
+impl ModelPricing {
+    /// 一次调用的估算费用（tick）。分段口径和 `/usage` 完全一致：
+    /// 未命中 / 缓存读 / 缓存写互不相交，各按各的单价。
+    ///
+    /// 用 `i128` 中转：1e6 token × 1e12 tick/Mtok 已经贴近 `i64` 上限。
+    pub fn cost_ticks(
+        &self,
+        uncached_input: u64,
+        cache_read: u64,
+        cache_write: u64,
+        output: u64,
+    ) -> i64 {
+        let part = |tokens: u64, per_mtok: i64| -> i128 {
+            i128::from(tokens) * i128::from(per_mtok) / 1_000_000
+        };
+        let total = part(uncached_input, self.input_ticks_per_mtok)
+            + part(cache_read, self.cache_read_ticks_per_mtok)
+            + part(cache_write, self.cache_write_ticks_per_mtok)
+            + part(output, self.output_ticks_per_mtok);
+        total.clamp(0, i128::from(i64::MAX)) as i64
+    }
+
+    /// 四个价位全是 0 = 没写价，不该拿 $0 冒充"免费"。
+    pub fn is_zero(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `$X / 1M tokens` → tick。负数与非有限值当没写。
+fn usd_per_mtok_to_ticks(raw: Option<f64>) -> i64 {
+    raw.filter(|v| v.is_finite() && *v > 0.0)
+        .map(|v| (v * crate::usage::USD_TICKS_PER_USD).round() as i64)
+        .unwrap_or(0)
+}
+
 /// `[model.<id>.<protocol>]` —— 同一个模型在**某一条 wire 上**的连接差异。
 ///
 /// 起因：一个端点支持所有协议，但各协议的入口不同。DeepSeek 的 OpenAI 侧是
@@ -177,6 +232,8 @@ pub struct ModelChoice {
     pub reasoning_efforts: Option<Vec<String>>,
     /// `[model.<id>].supports_images`. false = 纯文本模型，图片不往请求里塞。
     pub supports_images: Option<bool>,
+    /// `[model.<id>.pricing]`。`None` = 没配单价，`/usage` 显示"未上报"而不是 $0。
+    pub pricing: Option<ModelPricing>,
 }
 
 impl ModelChoice {
@@ -852,6 +909,8 @@ struct CatalogRow {
     reasoning_efforts: Option<Vec<String>>,
     #[serde(default)]
     supports_images: Option<bool>,
+    #[serde(default)]
+    pricing: Option<PricingRow>,
 }
 
 /// `[model.<id>.responses]` / `.chat_completions` / `.messages` 三个可选子表。
@@ -916,6 +975,39 @@ struct ModelOverride {
     reasoning_efforts: Option<Vec<String>>,
     #[serde(default)]
     supports_images: Option<bool>,
+    #[serde(default)]
+    pricing: Option<PricingRow>,
+}
+
+/// `[model.<id>.pricing]`，单位 USD / 百万 token。
+#[derive(Debug, Default, Deserialize)]
+struct PricingRow {
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+    #[serde(default)]
+    cache_write: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+}
+
+impl PricingRow {
+    /// 全 0（没写任何一个价）返回 `None`：`Some(0)` 会被下游当成"这个模型免费"。
+    fn parse(&self) -> Option<ModelPricing> {
+        let input = usd_per_mtok_to_ticks(self.input);
+        let pricing = ModelPricing {
+            input_ticks_per_mtok: input,
+            cache_read_ticks_per_mtok: usd_per_mtok_to_ticks(self.cache_read),
+            // 省略 = 按原价。多数厂商写入不额外加价；Anthropic 那种 1.25x 要显式写。
+            cache_write_ticks_per_mtok: match usd_per_mtok_to_ticks(self.cache_write) {
+                0 => input,
+                v => v,
+            },
+            output_ticks_per_mtok: usd_per_mtok_to_ticks(self.output),
+        };
+        (!pricing.is_zero()).then_some(pricing)
+    }
 }
 
 pub fn dock_home() -> PathBuf {
@@ -1077,6 +1169,7 @@ fn choice_from_row(row: &CatalogRow) -> ModelChoice {
         reasoning_effort: nonempty(row.reasoning_effort.clone()),
         reasoning_efforts: row.reasoning_efforts.clone(),
         supports_images: row.supports_images,
+        pricing: row.pricing.as_ref().and_then(PricingRow::parse),
     }
 }
 
@@ -1117,6 +1210,9 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
             if ov.api_model.is_some() {
                 existing.api_model = nonempty(ov.api_model.clone());
             }
+            if ov.pricing.is_some() {
+                existing.pricing = ov.pricing.as_ref().and_then(PricingRow::parse);
+            }
             existing.id = id;
         } else {
             list.push(ModelChoice {
@@ -1136,6 +1232,7 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
                 reasoning_effort: nonempty(ov.reasoning_effort.clone()),
                 reasoning_efforts: ov.reasoning_efforts.clone(),
                 supports_images: ov.supports_images,
+                pricing: ov.pricing.as_ref().and_then(PricingRow::parse),
                 id,
             });
         }
@@ -1451,6 +1548,79 @@ api_base_url = "https://example.test/anthropic"
             "什么都不覆盖的空块不该占一条：{:?}",
             m.backend_overrides
         );
+    }
+
+    /// 单价按段计，口径和 `/usage` 的三段完全一致。省略 `cache_write` 回落到
+    /// `input`——多数厂商写入就是原价。
+    #[test]
+    fn pricing_is_per_segment_and_cache_write_falls_back_to_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.priced]
+api_base_url = "https://example.test/v1"
+
+[model.priced.pricing]
+input = 0.28
+cache_read = 0.028
+output = 0.42
+"#,
+        )
+        .unwrap();
+        let p = load_catalog_from(&[path])[0].pricing.unwrap();
+        assert_eq!(p.input_ticks_per_mtok, 2_800_000_000);
+        assert_eq!(p.cache_read_ticks_per_mtok, 280_000_000);
+        assert_eq!(
+            p.cache_write_ticks_per_mtok, p.input_ticks_per_mtok,
+            "没写 cache_write 就按原价，不是 0"
+        );
+
+        // 1M 未命中 + 1M 命中 + 1M 输出 = 0.28 + 0.028 + 0.42 = $0.728
+        let ticks = p.cost_ticks(1_000_000, 1_000_000, 0, 1_000_000);
+        assert_eq!(ticks, 7_280_000_000);
+        assert!((crate::usage::ticks_to_usd(ticks) - 0.728).abs() < 1e-9);
+    }
+
+    /// 没写 `[pricing]`、或写了但全是 0 / 负数：`None`，不能拿 $0 冒充免费。
+    #[test]
+    fn missing_or_zero_pricing_is_none_not_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model.bare]
+api_base_url = "https://example.test/v1"
+
+[model.zeroed]
+api_base_url = "https://example.test/v1"
+
+[model.zeroed.pricing]
+input = 0
+output = -1
+"#,
+        )
+        .unwrap();
+        let list = load_catalog_from(&[path]);
+        for m in &list {
+            assert_eq!(m.pricing, None, "{} 不该有单价", m.id);
+        }
+    }
+
+    /// 大用量不能溢出：中间用 i128 转，1M token × 高单价仍要算对。
+    #[test]
+    fn pricing_survives_large_token_counts() {
+        let p = ModelPricing {
+            input_ticks_per_mtok: 1_500_000_000_000, // $150 / Mtok
+            cache_read_ticks_per_mtok: 0,
+            cache_write_ticks_per_mtok: 0,
+            output_ticks_per_mtok: 0,
+        };
+        let ticks = p.cost_ticks(10_000_000, 0, 0, 0);
+        assert_eq!(ticks, 15_000_000_000_000);
+        assert!((crate::usage::ticks_to_usd(ticks) - 1_500.0).abs() < 1e-6);
     }
 
     /// 老配置只写单数 `api_backend`：等价于只声明这一条，没有可切的余地。

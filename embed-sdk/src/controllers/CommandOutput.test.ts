@@ -52,5 +52,9 @@ test('plan markdown is rendered as markdown', () => {
 
 test('help and usage stay preformatted', () => {
   assert.equal(commandOutputLooksLikeMarkdown('/help  斜杠命令\n/view-plan  查看当前计划'), false);
-  assert.equal(commandOutputLooksLikeMarkdown('  输入 token:    1,024\n  输出 token:    256'), false);
+  // 抄 `session_usage_block_text` 的真实输出：对齐靠空格，markdown 会毁掉它。
+  assert.equal(
+    commandOutputLooksLikeMarkdown('  输入(未命中):  1,024 · 19%\n  缓存命中:      4,096 · 81%'),
+    false,
+  );
 });

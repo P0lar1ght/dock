@@ -45,6 +45,14 @@
 #                      菜单空着、永不发 effort。
 #   supports_images    false = 纯文本模型，图片（含工具结果里的截图）不进请求体。
 #                      不写 = 当作支持。
+#   [model."<id>".pricing]  单价，USD / 百万 token。写了 /usage 才算得出金额。
+#                      input（未命中）/ cache_read / cache_write / output 四个价位，
+#                      口径和 /usage 的分段一一对应。cache_write 省略按 input 算。
+#                      **不内置任何厂商价格表**：价格变动频繁，猜出来的单价一旦
+#                      过期就是静默给出错误金额，比不显示更糟。
+#                      本地算出来的金额永远标「约 …（按 config 单价估算）」，不是
+#                      账单：不含分时折扣（如 DeepSeek off-peak 半价）。上游若在
+#                      响应里带了费用（目前只有 xAI），以上游为准且不加「约」。
 #   prompt_cache       仅 messages 后端：true（默认）往 system / 对话尾部打
 #                      cache_control 断点，长会话每轮省掉重复前缀的计费。自建
 #                      /v1/messages 代理不认这个字段时置 false。另两条 wire 的
@@ -73,6 +81,13 @@ reasoning_efforts = ["low", "medium", "high"]
 [model."dual-model".messages]
 api_base_url = "https://<your-endpoint>/anthropic"
 auth_scheme = "bearer"
+
+# 单价：抄你的厂商定价页，USD / 百万 token。省略整段 = /usage 显示「未上报」。
+[model."dual-model".pricing]
+input = 0.28
+cache_read = 0.028
+cache_write = 0.28
+output = 0.42
 
 # --- 2. 只支持 Chat Completions 的端点（自建代理、本地 ollama、多数长尾模型） ---
 # 默认是 responses，这类端点**必须**显式声明，否则会打到一个不存在的路径。

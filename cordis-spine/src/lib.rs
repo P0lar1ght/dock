@@ -74,7 +74,7 @@ pub use config::{
     effective_browser_headed, load_browser_headed, load_catalog, load_disabled_mcp_tools,
     load_mcp_servers, persist_browser_headed, persist_disabled_mcp_tools,
     persist_mcp_server_enabled, ApiBackend, AuthScheme, McpOAuthConfig, McpServer, McpStdioFraming,
-    McpTransport, ModelChoice, DEFAULT_EFFORT_CHOICES,
+    McpTransport, ModelChoice, ModelPricing, DEFAULT_EFFORT_CHOICES,
 };
 pub use context_book::{context, own_sections, ContextBook};
 pub use context_usage::{
@@ -151,7 +151,11 @@ pub use types::{
     ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_TODO, ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL,
     ORDER_TURN_END_TODO,
 };
-pub use usage::{session_usage_block_text, PromptUsage, UsageLedger};
+pub use usage::{
+    calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,
+    per_model_amounts, session_usage_block_text, share_percent, ticks_to_usd, CacheSegment,
+    CacheSegmentKind, CallCost, PromptUsage, PromptUsageModel, UsageLedger, RECENT_CALLS_KEPT,
+};
 pub use web_fetch::tool_web;
 pub use workflow::{
     extra_tool_slash_arguments, tool_workflow, workflow_command_arguments,
