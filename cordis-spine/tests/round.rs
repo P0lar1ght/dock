@@ -1501,3 +1501,47 @@ async fn a_subagent_turn_is_not_gated_by_the_parent_goal() {
         "child must end on its first text sample"
     );
 }
+
+/// A listing header names its loader (`skill` / `workflow`). Advertising it to
+/// a preset that cannot call it burns tokens and invites a guaranteed-failed
+/// call: the sampler filters it out, `search_tool` no longer indexes it (those
+/// tools stopped being deferred), and `use_tool` hits the same allowlist.
+///
+/// Parent side of the invariant that `a_listing_role_holds_the_tools_its_
+/// listing_names` guards for child roles.
+#[tokio::test]
+async fn main_session_listings_follow_the_preset_allowlist() {
+    isolated_home();
+    let root = Context::new();
+    cordis_spine::install_app(&root).await.unwrap();
+    let presets = root
+        .require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
+        .unwrap();
+    let book = root
+        .require::<cordis_spine::ContextBook>(cordis_spine::CONTEXT)
+        .unwrap();
+
+    for (mode, want) in [
+        ("code", true),
+        ("cordis", true),
+        ("minimal", false),
+        ("warden", false),
+    ] {
+        presets.apply(mode).unwrap();
+        let ids: Vec<String> = book
+            .assemble()
+            .inspect()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        for (section, tool) in [("skills", "skill"), ("workflows", "workflow")] {
+            let present = ids.iter().any(|id| id == section);
+            assert_eq!(
+                present,
+                want && presets.allows(tool),
+                "mode {mode}: {section} section present={present} but allows({tool})={}: {ids:?}",
+                presets.allows(tool)
+            );
+        }
+    }
+}

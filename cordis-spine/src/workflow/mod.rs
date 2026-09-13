@@ -278,7 +278,7 @@ pub fn tool_workflow() -> Plugin {
             own_sections(
                 ctx,
                 vec![book.section(ORDER_WORKFLOWS, "workflows", |exec| {
-                    if !wants_listing(exec) {
+                    if !wants_listing(exec, WORKFLOW_TOOL_NAME) {
                         return None;
                     }
                     exec.get::<Workflows>(WORKFLOWS).and_then(|wf| {
