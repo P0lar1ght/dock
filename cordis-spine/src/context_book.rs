@@ -10,11 +10,10 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use indexmap::IndexMap;
 
-use crate::agent_presets::AgentPresets;
 use crate::context_usage::{
     occupancy_detail, snapshot_context, ContextSnapshot, OccupancyDetail, OccupancyKind,
 };
-use crate::names::{AGENT_PRESETS, CONTEXT};
+use crate::names::CONTEXT;
 use crate::prompt::PromptAssembly;
 
 type BaseFn = Arc<dyn Fn(&Context) -> String + Send + Sync>;
@@ -89,7 +88,9 @@ impl ContextBook {
         self.insert(id, Slot::Replace(Arc::new(body)))
     }
 
-    /// Named section. Skipped while the current preset `replaces_prompt()`.
+    /// Named section. Skipped once a [`replace_base`](Self::replace_base) slot
+    /// has actually produced a replacement — a `replace_prompt` preset whose
+    /// persona is blank produces none, and then this section still applies.
     pub fn section(
         &self,
         order: i32,
@@ -106,7 +107,11 @@ impl ContextBook {
         )
     }
 
-    /// Named section that still applies on a `replace_prompt` preset (roster).
+    /// Named section that survives a landed `replace_prompt` replacement.
+    ///
+    /// No production caller today: the subagent roster that needed it now
+    /// lives on the `task` tool description. Kept as the escape hatch for a
+    /// section that has to outlive `replace_prompt` (a hard safety rule, say).
     pub fn section_always(
         &self,
         order: i32,
@@ -145,9 +150,10 @@ impl ContextBook {
                 }
             }
         }
-        let replaced = exec
-            .get::<AgentPresets>(AGENT_PRESETS)
-            .is_some_and(|p| p.replaces_prompt());
+        // Judge on what actually landed, not on what the preset intended: a
+        // `replace_prompt` preset with a blank persona yields no replacement,
+        // and skipping the sections then would leave only the bare base.
+        let replaced = a.replaced();
         for (id, slot) in &slots {
             if let Slot::Section {
                 order,
@@ -204,6 +210,55 @@ mod tests {
         let book = ctx.get::<ContextBook>(CONTEXT).unwrap();
         let _keep = book.set_base("base", |_| "a".into()).unwrap();
         assert!(book.set_base("base", |_| "b".into()).is_err());
+    }
+
+    /// `replace_prompt: true` with a blank persona produces no replacement, so
+    /// the sections must survive. Judging on `AgentPresets::replaces_prompt()`
+    /// dropped persona / skills / workflows / cordis and shipped a bare base.
+    #[tokio::test]
+    async fn blank_replacement_keeps_sections() {
+        let ctx = Context::new();
+        ctx.plugin(context(), ()).unwrap().wait().await.unwrap();
+        let mut preset = crate::agent_presets::AgentPreset::new("blank");
+        preset.replace_prompt = true;
+        preset.persona = "   \n".into();
+        ctx.provide(
+            crate::names::AGENT_PRESETS,
+            crate::agent_presets::AgentPresets::overlay(preset),
+        )
+        .unwrap();
+        let book = ctx.get::<ContextBook>(CONTEXT).unwrap();
+        let _base = book.set_base("base", |_| "BASE".into()).unwrap();
+        let _replace = book.replace_base("persona-replace", |_| None).unwrap();
+        let _skills = book
+            .section(41, "skills", |_| Some("SKILLS".into()))
+            .unwrap();
+        let out = book.assemble().render();
+        assert!(out.contains("BASE"), "{out}");
+        assert!(out.contains("SKILLS"), "{out}");
+    }
+
+    /// The other half: a replacement that *does* land still hides the sections.
+    #[tokio::test]
+    async fn landed_replacement_skips_sections() {
+        let ctx = Context::new();
+        ctx.plugin(context(), ()).unwrap().wait().await.unwrap();
+        let book = ctx.get::<ContextBook>(CONTEXT).unwrap();
+        let _base = book.set_base("base", |_| "BASE".into()).unwrap();
+        let _replace = book
+            .replace_base("persona-replace", |_| Some("PERSONA".into()))
+            .unwrap();
+        let _skills = book
+            .section(41, "skills", |_| Some("SKILLS".into()))
+            .unwrap();
+        let _roster = book
+            .section_always(30, "roster", |_| Some("ROSTER".into()))
+            .unwrap();
+        let out = book.assemble().render();
+        assert!(out.contains("PERSONA"), "{out}");
+        assert!(!out.contains("BASE"), "{out}");
+        assert!(!out.contains("SKILLS"), "{out}");
+        assert!(out.contains("ROSTER"), "{out}");
     }
 
     #[tokio::test]
