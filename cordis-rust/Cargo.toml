@@ -1,6 +1,6 @@
 [package]
 name = "cordis"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Rust port of the Cordis plugin kernel"

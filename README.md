@@ -16,6 +16,7 @@
   <img src="https://github.com/P0lar1ght/dock/actions/workflows/ci.yml/badge.svg" alt="CI">
 </p>
 <p align="center">
+  <a href="#安装">安装</a> •
   <a href="#快速开始">快速开始</a> •
   <a href="#特性">特性</a> •
   <a href="#架构概览">架构</a> •
@@ -167,6 +168,37 @@ flowchart LR
 `llm/stream` 是这一轮的枢纽：出工具调用就过 `tools/execute`（权限 / 计划门在这里挡）再回来，出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
 
 `system-prompt/assemble` 的载荷是 `PromptAssembly`。贡献插件 `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（对标 `"tools".register`，fiber dispose 注销）。`systemPrompt` 只做 facade：live-lookup `"context"` 求值，再跑 waterfall 供拦截。基座（`system-prompt.base`）只写身份与按需发现，不列工具名；persona/roster 来自 `agent-presets`（写路径用 `.dock/presets`，不用绝对 `{cwd}`），listing 来自 `skills` / `tool-workflow`（同样用 `skills/`、`.dock/skills/`、`~/.dock/skills/` 这类通用路径）。计划 / 目标走历史尾部 `<system-reminder>`，不进系统提示。Cordis 只留短指针。`/context` 与顶栏 live-lookup `ContextBook.window()`，系统提示按段看 token。加/改一段提示词就是在贡献插件里登记，不动 assembler。
+
+---
+
+## 安装
+
+macOS（Apple Silicon / Intel）与 Linux（x86_64 / aarch64）有预编译二进制，不需要 Rust 工具链：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/P0lar1ght/dock/main/install.sh | sh
+```
+
+脚本从 [GitHub Release](https://github.com/P0lar1ght/dock/releases) 取对应平台的
+`dock-<target>.tar.gz`，校验 sha256 后装进 `~/.local/bin`（不写系统目录、不需要 sudo）。
+
+| 变量 | 作用 |
+|---|---|
+| `DOCK_VERSION` | 指定版本，如 `v0.1.0`；默认 latest |
+| `DOCK_INSTALL_DIR` | 安装目录，默认 `~/.local/bin` |
+
+变量要写在 `sh` 前面，写在 `curl` 前面只会传给 `curl`、脚本收不到：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/P0lar1ght/dock/main/install.sh | DOCK_VERSION=v0.1.0 sh
+```
+
+装完脚本会跑一次 `dock --version` 自检，跑不起来直接报错退出。macOS 产物未做代码签名 / 公证，
+首次运行若被 Gatekeeper 拦下，按脚本提示执行一次
+`xattr -d com.apple.quarantine "$(command -v dock)"` 即可。
+
+Linux 产物动态链系统库，要求 **glibc ≥ 2.39** 与 **OpenSSL 3**（约等于 Ubuntu 24.04+ /
+Debian 13+ / Fedora 40+）；更老的发行版与 Windows 暂无可用产物，请见下方「快速开始」从源码构建。
 
 ---
 

@@ -109,6 +109,51 @@ let _env = crate::test_env::scoped().set("CHROME_PATH", "/x"); // 设 / 删单�
 
 一次 `scoped()` 只拿一把锁，所以不要嵌套调用（会自锁）。集成测试用不到 crate 私有模块，`tests/round.rs` 里自带同一把文件级锁。
 
+## 发布
+
+`.github/workflows/release.yml` 在 `v*` tag 上跑：先复述 CI 的四道门禁并校验 tag 与
+`[workspace.package].version` 一致，再矩阵构建四个平台，最后把 `dock-<target>.tar.gz` 与
+`<...>.sha256` 挂到同名 Release（`gh release create --generate-notes`）。`install.sh` 只认这套
+产物名与 `tar` 里的 `dock` 二进制，改任意一边都要同步另一边。
+
+| target | 构建机 |
+|---|---|
+| `aarch64-apple-darwin` | `macos-14` |
+| `x86_64-apple-darwin` | `macos-14`（交叉编译，macOS 构建机只有 arm64） |
+| `x86_64-unknown-linux-gnu` | `ubuntu-24.04` |
+| `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` |
+
+Windows 未做适配验证，不发。
+
+两个 Linux 目标必须钉在同一档 Ubuntu：产物动态链 glibc，构建机的 glibc 就是运行下限
+（24.04 是 2.39），一高一低会出现「同一台发行版 x86_64 能跑、arm64 报 `GLIBC_2.38 not
+found`」。同理，`cordis-spine` 的 reqwest 走 `default-tls`（Linux 上即 OpenSSL），产物动态链
+`libssl.so.3` / `libcrypto.so.3`，OpenSSL 1.1 的发行版跑不起来。要放宽这两条下限得换静态方案
+（musl 目标，或 spine 改 `rustls-tls`），0.1.0 先按已知限制记在 `CHANGELOG.md`。
+
+发版步骤：
+
+1. 改根 `Cargo.toml` 的 `[workspace.package].version` —— 第一方 crate 全是
+   `version.workspace = true`，一处生效；同步 `CHANGELOG.md`。
+2. 本地跑默认回归集合与格式门禁。
+3. `git tag v0.x.y && git push origin v0.x.y`，剩下的交给 workflow。
+
+本地校验与干跑：
+
+```bash
+actionlint .github/workflows/release.yml
+shellcheck install.sh
+
+# 安装脚本干跑：把产物与 .sha256 放进一个目录，让它当 Release 用
+mkdir -p /tmp/rel
+tar -czf /tmp/rel/dock-aarch64-apple-darwin.tar.gz -C target/release dock
+(cd /tmp/rel && shasum -a 256 dock-aarch64-apple-darwin.tar.gz > dock-aarch64-apple-darwin.tar.gz.sha256)
+DOCK_BASE_URL=file:///tmp/rel DOCK_INSTALL_DIR=/tmp/dockbin sh install.sh
+```
+
+macOS 产物未签名 / 未公证，Gatekeeper 会拦首次运行；`install.sh` 检测到 quarantine 标记时打印
+一次 `xattr -d com.apple.quarantine`，不替用户改（要彻底解决得上 Apple 开发者账号做签名 + 公证）。
+
 ## 浏览器 SDK
 
 ```bash

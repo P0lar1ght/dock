@@ -1,6 +1,6 @@
 [package]
 name = "cordis-tui"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Grok pager TUI as Cordis plugins (theme, scrollback, prompt, status, welcome, event loop)"

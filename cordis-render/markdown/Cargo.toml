@@ -1,6 +1,6 @@
 [package]
 name = "cordis-markdown"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 description = "Grok markdown renderer, baked from xai-grok-markdown (no grok-build dep)"
