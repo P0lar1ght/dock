@@ -1,0 +1,118 @@
+name: Release
+
+# tag 即发布点：v0.1.0 → Release v0.1.0。
+# 先跑与 CI 同款的门禁 + tag/版本一致性，再矩阵构建四个平台的产物，
+# 最后把 tar.gz + sha256 传上去（install.sh 从这里取）。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # gateway 测试打 loopback HTTP；代理环境必须放行回环地址，否则会成片 502。
+  NO_PROXY: "127.0.0.1,localhost,[::1]"
+
+jobs:
+  verify:
+    name: 门禁 + 版本一致性
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # tag 与 Cargo.toml 的 workspace 版本必须同源，否则会发出版本号对不上的产物。
+      - name: Tag 与 workspace 版本一致
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          got=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "$want" != "$got" ]; then
+            echo "tag ${GITHUB_REF_NAME} 与 Cargo.toml 的版本 ${got} 不一致" >&2
+            exit 1
+          fi
+
+      - name: Format
+        run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid"
+
+      - name: Clippy
+        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets --no-deps -- -D warnings
+
+      - name: Test (gateway / tui / app)
+        run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
+
+      - name: Test (spine)
+        run: cargo test --locked -p cordis-spine
+
+  build:
+    name: ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 构建机都是 arm64，x86_64 产物走交叉编译。
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p cordis-app --target ${{ matrix.target }}
+
+      # 产物名与 install.sh 的约定一致：dock-<target-triple>.tar.gz（+ .sha256）。
+      - name: Package
+        run: |
+          set -eu
+          file="dock-${{ matrix.target }}.tar.gz"
+          tar -czf "$file" -C "target/${{ matrix.target }}/release" dock
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$file" > "$file.sha256"
+          else
+            shasum -a 256 "$file" > "$file.sha256"
+          fi
+          ls -lh "$file" "$file.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dock-${{ matrix.target }}
+          path: |
+            dock-${{ matrix.target }}.tar.gz
+            dock-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: 发布
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 上传产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -lh dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
