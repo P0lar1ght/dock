@@ -178,19 +178,6 @@ impl Jobs {
         self.spawn_job(command, None, false, true)
     }
 
-    /// Promote a foreground command to a real background task (auto-background).
-    /// Returns false when the id is unknown or already finished.
-    pub fn detach(&self, id: &str) -> bool {
-        let job = self.inner.lock().unwrap().get(id).cloned();
-        match job {
-            Some(job) => {
-                job.foreground.store(false, Ordering::Relaxed);
-                true
-            }
-            None => false,
-        }
-    }
-
     /// Drop a finished foreground command from the table so it stops holding
     /// its output buffer for the rest of the session.
     pub fn forget(&self, id: &str) {
@@ -252,6 +239,19 @@ impl Jobs {
             .iter()
             .map(|(id, job)| Self::snap(id, job))
             .collect()
+    }
+
+    /// 只读完成位，不碰输出缓冲。
+    ///
+    /// 前台 bash 每 20ms 轮询一次；走 `snapshot()` 的话每次都要 `render()` 把
+    /// 头尾拼成一个最大 20KB 的 String，一条 30s 的命令要白拼 1500 次，只为读
+    /// 一个 bool。
+    pub(crate) fn is_done(&self, id: &str) -> Option<bool> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|job| job.done.load(Ordering::Relaxed))
     }
 
     pub fn snapshot(&self, id: &str) -> Option<JobSnapshot> {

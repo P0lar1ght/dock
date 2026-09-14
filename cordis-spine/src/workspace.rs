@@ -443,11 +443,17 @@ async fn bash(
     let budget = foreground_budget();
     let start = std::time::Instant::now();
     loop {
-        let snap = jobs.snapshot(&id);
-        if snap.as_ref().is_some_and(|s| s.done) {
-            let out = snap.map(|s| s.output).unwrap_or_default();
-            jobs.forget(&id);
-            return out;
+        // 轮询只读完成位；输出只在真正要返回时取一次，避免每 20ms 白拼一个
+        // 最大 20KB 的 String。
+        match jobs.is_done(&id) {
+            Some(true) => {
+                let out = jobs.snapshot(&id).map(|s| s.output).unwrap_or_default();
+                jobs.forget(&id);
+                return out;
+            }
+            // 任务凭空消失：只有我们自己会 forget，正常不会走到。
+            None => return "(no output)".into(),
+            Some(false) => {}
         }
         if is_cancelled() {
             return finish_early(jobs, &id, "cancelled".into()).await;
@@ -476,7 +482,7 @@ async fn finish_early(jobs: &Jobs, id: &str, reason: String) -> String {
     let _ = jobs.kill(id).await;
     // kill 是发信号，run 任务还要收尾；给它一小段时间把尾巴写完。
     for _ in 0..25 {
-        if jobs.snapshot(id).is_some_and(|s| s.done) {
+        if jobs.is_done(id) != Some(false) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

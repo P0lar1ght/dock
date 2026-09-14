@@ -103,16 +103,35 @@ async fn output_is_capped_and_says_so() {
     .await;
     assert!(done, "任务应能结束");
 
+    // 上限是 20KB（头 4KB + 尾 16KB），加上截断提示那一行的开销。断言要卡在
+    // 上限本身，松到 64KB 就打不到「是否真的按 20KB 截」这件事。
+    const CAP: usize = 20 * 1024;
+    const NOTICE_SLACK: usize = 512;
     let out = jobs.snapshot(&id).unwrap().output;
     assert!(
-        out.len() < 64 * 1024,
-        "输出应被截断到上限附近，实际 {} 字节",
+        out.len() <= CAP + NOTICE_SLACK,
+        "输出应截断到 {CAP} 字节上限（含提示开销），实际 {} 字节",
+        out.len()
+    );
+    assert!(
+        out.len() > CAP - 1024,
+        "1MB 的输出应当把上限填满，实际只有 {} 字节 —— 说明截断切多了",
         out.len()
     );
     assert!(
         out.contains("截断"),
         "截断必须在正文里说明，否则模型会把残缺输出当完整结果：{}",
         &out[..out.len().min(200)]
+    );
+    // 头尾都要留住，不能只剩一头。
+    assert!(
+        out.starts_with("PADDING"),
+        "头部应保留命令开头：{}",
+        &out[..out.len().min(80)]
+    );
+    assert!(
+        out.trim_end().ends_with("PADDINGPADDINGPADDING"),
+        "尾部应保留收尾（失败原因通常在结尾）"
     );
 }
 
