@@ -344,7 +344,8 @@ impl Tools {
                         .is_some_and(|t| t.is_cancelled())
                 },
                 jobs.as_deref(),
-            );
+            )
+            .await;
         }
         ToolResult {
             call_id: call.id,

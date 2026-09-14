@@ -1,20 +1,113 @@
 //! Background jobs (`ctx.jobs`). Bash `is_background` and `tool-jobs` use this.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use cordis::{plugin, Inject, Plugin};
-use tokio::io::AsyncReadExt;
-use tokio::process::Child;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::names::{JOBS, SUBAGENTS, TOOLS};
 use crate::task::{render_subagent, Subagents};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::types::{ToolCall, ToolResult, ToolSpec};
+
+/// 单个任务保留的输出上限。对齐 Grok 的 `output_byte_limit`（默认 20k chars）。
+///
+/// 没有上限时，一条 `cargo test` 就能把上百万字节灌进上下文；在管道死锁被修掉
+/// 之前这个问题被死锁挡着，修完就会真的发生。
+pub(crate) const MAX_OUTPUT_BYTES: usize = 20 * 1024;
+/// 头部保留量：留住命令开头的上下文（编译目标、参数回显）。
+const HEAD_BYTES: usize = 4 * 1024;
+/// 尾部保留量：失败原因和汇总几乎总在结尾。
+const TAIL_BYTES: usize = MAX_OUTPUT_BYTES - HEAD_BYTES;
+/// 子进程退出后留给读端收尾的窗口。
+///
+/// 孙进程会继承管道（`sleep 60 &`），子进程退出后读端不一定立刻 EOF。给一个
+/// 有界窗口，到点放弃剩余输出，绝不无限期挂着。
+const DRAIN_GRACE: Duration = Duration::from_millis(200);
+
+/// 流式累积的输出，带头尾双端上限。
+///
+/// 中间超出的部分直接丢弃，但 `total` 保持单调，所以截断提示里报的是真实字节数。
+#[derive(Default)]
+pub(crate) struct OutputBuf {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    total: usize,
+}
+
+impl OutputBuf {
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
+        self.total += bytes.len();
+        let mut rest = bytes;
+        if self.head.len() < HEAD_BYTES {
+            let take = (HEAD_BYTES - self.head.len()).min(rest.len());
+            self.head.extend_from_slice(&rest[..take]);
+            rest = &rest[take..];
+        }
+        if rest.is_empty() {
+            return;
+        }
+        if rest.len() >= TAIL_BYTES {
+            self.tail.clear();
+            self.tail.extend(&rest[rest.len() - TAIL_BYTES..]);
+            return;
+        }
+        let overflow = (self.tail.len() + rest.len()).saturating_sub(TAIL_BYTES);
+        if overflow > 0 {
+            self.tail.drain(..overflow);
+        }
+        self.tail.extend(rest);
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let mut s = String::from_utf8_lossy(trim_trailing_partial(&self.head)).into_owned();
+        if self.tail.is_empty() {
+            return s;
+        }
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        let dropped = self.total - self.head.len() - self.tail.len();
+        if dropped > 0 {
+            s.push_str(&format!(
+                "\n\n[… 已截断：中间省略 {dropped} 字节，总输出 {} 字节。\
+                 需要完整内容就把命令改成写进文件再分段读 …]\n\n",
+                self.total
+            ));
+        }
+        s.push_str(&String::from_utf8_lossy(trim_leading_continuation(&tail)));
+        s
+    }
+}
+
+/// 裁掉结尾被切断的 UTF-8 序列，避免 `from_utf8_lossy` 在拼接处吐替换字符。
+fn trim_trailing_partial(bytes: &[u8]) -> &[u8] {
+    // 一个 UTF-8 序列最长 4 字节，往回找不超过 3 个续接字节。
+    let mut cut = bytes.len();
+    for _ in 0..3 {
+        if cut == 0 {
+            break;
+        }
+        match std::str::from_utf8(&bytes[..cut]) {
+            Ok(_) => return &bytes[..cut],
+            Err(e) => cut = e.valid_up_to(),
+        }
+    }
+    &bytes[..cut]
+}
+
+/// 裁掉开头的续接字节（`0b10xx_xxxx`）—— 尾部缓冲是按字节滚动的，起点可能落在
+/// 一个多字节字符中间。
+fn trim_leading_continuation(bytes: &[u8]) -> &[u8] {
+    let skip = bytes
+        .iter()
+        .take(3)
+        .take_while(|b| (*b & 0b1100_0000) == 0b1000_0000)
+        .count();
+    &bytes[skip..]
+}
 
 #[derive(Clone, Debug)]
 pub struct JobSnapshot {
@@ -26,16 +119,29 @@ pub struct JobSnapshot {
     pub description: Option<String>,
     /// True for `monitor` tool tasks. Watchers group in the tasks pane.
     pub is_monitor: bool,
+    /// True while a **foreground** bash is still blocking the turn.
+    ///
+    /// Foreground commands live in the same table purely so the TUI can render
+    /// their output while they run; they are not background tasks and are kept
+    /// out of the tasks pane and out of `get_task_output`'s no-id listing.
+    pub foreground: bool,
     pub start_time: SystemTime,
 }
 
 struct Job {
     command: String,
-    output: Mutex<String>,
+    output: Mutex<OutputBuf>,
+    /// `exit 1` 之类的前缀。输出是流式追加的，前缀只能单独存、渲染时拼。
+    exit_note: Mutex<Option<String>>,
     done: AtomicBool,
-    child: AsyncMutex<Option<Child>>,
+    /// kill 信号。run 任务自己 select 在它上面并调用 `child.kill()`。
+    ///
+    /// 旧实现把 `Child` 关在 `AsyncMutex` 里，`wait()` 持锁期间 `kill()` 会被
+    /// 一直挡住；改成信号后两边不再共用锁。
+    cancel: tokio::sync::watch::Sender<bool>,
     description: Option<String>,
     is_monitor: bool,
+    foreground: AtomicBool,
     start_time: SystemTime,
 }
 
@@ -63,34 +169,78 @@ impl Jobs {
         description: Option<String>,
         is_monitor: bool,
     ) -> String {
+        self.spawn_job(command, description, is_monitor, false)
+    }
+
+    /// Register a **foreground** bash so the TUI can show its output while it
+    /// runs. The caller owns the lifetime: wait on the snapshot, then `forget`.
+    pub fn start_foreground(&self, command: impl Into<String>) -> String {
+        self.spawn_job(command, None, false, true)
+    }
+
+    /// Promote a foreground command to a real background task (auto-background).
+    /// Returns false when the id is unknown or already finished.
+    pub fn detach(&self, id: &str) -> bool {
+        let job = self.inner.lock().unwrap().get(id).cloned();
+        match job {
+            Some(job) => {
+                job.foreground.store(false, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop a finished foreground command from the table so it stops holding
+    /// its output buffer for the rest of the session.
+    pub fn forget(&self, id: &str) {
+        self.inner.lock().unwrap().remove(id);
+    }
+
+    fn spawn_job(
+        &self,
+        command: impl Into<String>,
+        description: Option<String>,
+        is_monitor: bool,
+        foreground: bool,
+    ) -> String {
         let command = command.into();
         let id = format!("job-{}", self.seq.fetch_add(1, Ordering::Relaxed));
+        // 接收端必须在 spawn 之前就建好：`subscribe()` 只看得到订阅之后的变更，
+        // 放到 run_job 里订阅的话，早于它执行的 kill 信号会被整个丢掉。
+        let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
         let job = Arc::new(Job {
             command: command.clone(),
-            output: Mutex::new(String::new()),
+            output: Mutex::new(OutputBuf::default()),
+            exit_note: Mutex::new(None),
             done: AtomicBool::new(false),
-            child: AsyncMutex::new(None),
+            cancel,
             description,
             is_monitor,
+            foreground: AtomicBool::new(foreground),
             start_time: SystemTime::now(),
         });
         self.inner.lock().unwrap().insert(id.clone(), job.clone());
-        let spawned_id = id.clone();
-        tokio::spawn(async move {
-            run_job(job, command).await;
-            let _ = spawned_id;
-        });
+        tokio::spawn(run_job(job, command, cancel_rx));
         id
     }
 
     fn snap(id: &str, job: &Job) -> JobSnapshot {
+        let body = job.output.lock().unwrap().render();
+        let note = job.exit_note.lock().unwrap().clone();
+        let output = match note {
+            Some(note) if body.trim().is_empty() => note,
+            Some(note) => format!("{note}\n{body}"),
+            None => body,
+        };
         JobSnapshot {
             id: id.into(),
             command: job.command.clone(),
             done: job.done.load(Ordering::Relaxed),
-            output: job.output.lock().unwrap().clone(),
+            output,
             description: job.description.clone(),
             is_monitor: job.is_monitor,
+            foreground: job.foreground.load(Ordering::Relaxed),
             start_time: job.start_time,
         }
     }
@@ -129,6 +279,7 @@ impl Jobs {
                             ),
                             description: None,
                             is_monitor: false,
+                            foreground: false,
                             start_time: SystemTime::UNIX_EPOCH,
                         })
                         .collect()
@@ -150,17 +301,25 @@ impl Jobs {
         if job.done.load(Ordering::Relaxed) {
             return format!("{id} already finished");
         }
-        let mut child = job.child.lock().await;
-        if let Some(child) = child.as_mut() {
-            let _ = child.kill().await;
-        }
-        drop(child);
-        job.done.store(true, Ordering::Relaxed);
+        // 只发信号：run 任务自己 kill 并收尾。这样 kill 不会被运行中的 wait 挡住。
+        let _ = job.cancel.send(true);
         format!("killed {id}")
     }
 }
 
-async fn run_job(job: Arc<Job>, command: String) {
+/// 把一个读端持续抽干到共享缓冲。stdout / stderr 各跑一份，必须并发。
+async fn pump<R: AsyncRead + Unpin>(reader: Option<R>, job: Arc<Job>) {
+    let Some(mut reader) = reader else { return };
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => job.output.lock().unwrap().push(&chunk[..n]),
+        }
+    }
+}
+
+async fn run_job(job: Arc<Job>, command: String, mut cancel: tokio::sync::watch::Receiver<bool>) {
     let spawned = tokio::process::Command::new("bash")
         .arg("-lc")
         .arg(&command)
@@ -168,46 +327,54 @@ async fn run_job(job: Arc<Job>, command: String) {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn();
-    match spawned {
+    let mut child = match spawned {
         Err(e) => {
-            *job.output.lock().unwrap() = format!("Error spawning bash: {e}");
+            job.output
+                .lock()
+                .unwrap()
+                .push(format!("Error spawning bash: {e}").as_bytes());
             job.done.store(true, Ordering::Relaxed);
+            return;
         }
-        Ok(mut child) => {
-            let mut stdout = child.stdout.take();
-            let mut stderr = child.stderr.take();
-            *job.child.lock().await = Some(child);
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            if let Some(mut s) = stdout.take() {
-                let _ = s.read_to_end(&mut out).await;
-            }
-            if let Some(mut s) = stderr.take() {
-                let _ = s.read_to_end(&mut err).await;
-            }
-            let mut body = String::from_utf8_lossy(&out).into_owned();
-            let err_s = String::from_utf8_lossy(&err);
-            if !err_s.is_empty() {
-                if !body.is_empty() {
-                    body.push('\n');
-                }
-                body.push_str(&err_s);
-            }
-            if let Some(child) = job.child.lock().await.as_mut() {
-                let status = child.wait().await.ok();
-                if let Some(st) = status {
-                    if !st.success() {
-                        body = format!("exit {st}\n{body}");
-                    }
-                }
-            }
-            if body.trim().is_empty() {
-                body = "(no output)".into();
-            }
-            *job.output.lock().unwrap() = body;
-            job.done.store(true, Ordering::Relaxed);
+        Ok(child) => child,
+    };
+
+    // stdout 与 stderr 必须并发抽干。任一侧写满管道缓冲（64KB）子进程就会阻塞，
+    // 而子进程不退出另一侧永远读不到 EOF —— 旧实现顺序 `read_to_end` 正是这样
+    // 把 `cargo build` 这类往 stderr 猛写的命令永久挂死的。
+    let out = tokio::spawn(pump(child.stdout.take(), job.clone()));
+    let err = tokio::spawn(pump(child.stderr.take(), job.clone()));
+    let (abort_out, abort_err) = (out.abort_handle(), err.abort_handle());
+
+    let mut killed = false;
+    let status = tokio::select! {
+        st = child.wait() => st.ok(),
+        _ = cancel.changed() => {
+            killed = true;
+            let _ = child.kill().await;
+            child.wait().await.ok()
+        }
+    };
+
+    // 子进程退出不代表管道关闭：孙进程（`sleep 60 &`）继承了写端就还开着。
+    let drain = async {
+        let _ = tokio::join!(out, err);
+    };
+    if tokio::time::timeout(DRAIN_GRACE, drain).await.is_err() {
+        abort_out.abort();
+        abort_err.abort();
+    }
+
+    // 我们自己发的 SIGKILL 不是命令的失败原因，报 `exit signal: 9` 只会误导。
+    if let Some(st) = status {
+        if !st.success() && !killed {
+            *job.exit_note.lock().unwrap() = Some(format!("exit {st}"));
         }
     }
+    if job.output.lock().unwrap().total == 0 && job.exit_note.lock().unwrap().is_none() {
+        job.output.lock().unwrap().push(b"(no output)");
+    }
+    job.done.store(true, Ordering::Relaxed);
 }
 
 impl Default for Jobs {
@@ -319,7 +486,13 @@ async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     if ids.is_empty() {
         let mut parts = Vec::new();
         if let Some(jobs) = &jobs {
-            parts.extend(jobs.list().iter().map(render_snap));
+            // 前台命令只是为了让 TUI 看见进度才挂在同一张表上，不是后台任务。
+            parts.extend(
+                jobs.list()
+                    .iter()
+                    .filter(|j| !j.foreground)
+                    .map(render_snap),
+            );
         }
         if let Some(sub) = &sub {
             parts.extend(sub.list().iter().map(render_subagent));

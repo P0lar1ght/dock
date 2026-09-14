@@ -541,7 +541,15 @@ pub(super) fn task_entries(
     query: &str,
     collapsed: &HashSet<GroupKind>,
 ) -> Vec<TaskEntry> {
-    let jobs = ctx.get::<Jobs>(JOBS).map(|j| j.list()).unwrap_or_default();
+    // 前台 bash 也挂在 jobs 表上（为了让 TUI 读到实时输出），但它不是后台任务，
+    // 不进 tasks pane。
+    let jobs: Vec<_> = ctx
+        .get::<Jobs>(JOBS)
+        .map(|j| j.list())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|j| !j.foreground)
+        .collect();
     let subagents = ctx
         .get::<Subagents>(SUBAGENTS)
         .map(|s| s.list())

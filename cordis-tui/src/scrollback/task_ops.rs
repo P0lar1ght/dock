@@ -468,6 +468,7 @@ mod tests {
             output: "3".into(),
             description: None,
             is_monitor: false,
+            foreground: false,
             start_time: std::time::SystemTime::now(),
         };
         assert_eq!(
