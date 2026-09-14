@@ -181,7 +181,9 @@ fn paint_row(buf: &mut Buffer, rect: Rect, row: &Row, theme: &Theme) {
     let desc = truncate_line(row.styled.clone(), desc_w as usize);
     buf.set_line(body_x, rect.y, &desc, desc_w);
 
-    if tail_w >= TAIL_MIN_W && !row.tail.is_empty() {
+    // 画不画由 `split_body` 一处决定（0 宽就是不画），这里别再拿 `TAIL_MIN_W`
+    // 判一次 —— 那会让短摘要即使放得下也被挡在门外。
+    if tail_w > 0 {
         let tail = truncate_str(&row.tail, tail_w as usize);
         let x = body_x.saturating_add(desc_w).saturating_add(1);
         buf.set_line(
@@ -214,7 +216,10 @@ fn split_body(rest: u16, tail: &str) -> (u16, u16) {
     let want = (tail.width() as u16).saturating_add(1);
     let cap = rest / 2;
     let tail_w = want.min(cap);
-    if tail_w < TAIL_MIN_W {
+    // 比的是**可用的那一半够不够**，不是摘要本身够不够长：拿 `want` 去比
+    // `TAIL_MIN_W` 会把 `idle` / `74%` 这种 11 列以下的短摘要永久吞掉 —— 192 列的
+    // 终端上放得下也不画。短尾只在真的挤不下（`cap` 太窄）时才让位给描述。
+    if tail_w < want.min(TAIL_MIN_W) {
         (rest, 0)
     } else {
         (rest.saturating_sub(tail_w).saturating_sub(1), tail_w)
@@ -371,6 +376,24 @@ mod tests {
             "窄屏也要保住耗时：{line:?}"
         );
         assert!(!line.contains("test round"), "宽度不够就别画尾行：{line}");
+    }
+
+    /// 短摘要（`idle`、`74%`）不是「宽度不够才砍」的对象：宽屏上放得下就得画。
+    #[test]
+    fn short_tail_is_kept_on_a_wide_row() {
+        let rows = vec![row(
+            TaskDockHit::Subagent("sa-1".into()),
+            "岑 调查网关超时",
+            false,
+            63,
+            "idle",
+        )];
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        paint(&mut buf, area, &rows);
+        let line = text_at(&buf, 0, 80);
+        assert!(line.contains("idle"), "短尾行宽屏上要画：{line}");
+        assert!(line.trim_end().ends_with("1:03"), "耗时仍右对齐：{line:?}");
     }
 
     #[test]
