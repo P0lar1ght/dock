@@ -1,6 +1,7 @@
 //! Overlay openers, MCP/goal helpers, and small loop utilities.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::{Instant, SystemTime};
 
 use cordis::Context;
 use cordis_spine::{
@@ -29,6 +30,7 @@ use crate::scrollback::Scrollback;
 use crate::session::SessionRef;
 use crate::settings_modal;
 use crate::slash::{self, filter_args};
+use crate::task_dock;
 use crate::text_overlay;
 use crate::usage_overlay;
 
@@ -536,16 +538,18 @@ pub(super) fn accept_elicit(
     }
 }
 
-pub(super) fn task_entries(
-    ctx: &Context,
-    query: &str,
-    collapsed: &HashSet<GroupKind>,
-) -> Vec<TaskEntry> {
+/// 五类耗时任务归一后的清单，主界面任务条与 `/tasks` 共用同一份。
+///
+/// 走 `list_brief()` 而不是 `list()`：`TaskEntry` 根本不读 `JobSnapshot.output`
+/// （`from_bg_task` 只用 description / command / is_monitor / done），而任务条
+/// 常驻、每 80ms 重绘，整份拼 20KB 输出纯属白工。摘要要用的最新一行就搭在
+/// `output` 上带回来。
+pub(crate) fn live_task_entries(ctx: &Context) -> Vec<TaskEntry> {
     // 前台 bash 也挂在 jobs 表上（为了让 TUI 读到实时输出），但它不是后台任务，
-    // 不进 tasks pane。
+    // 不进 tasks pane、也不进任务条。
     let jobs: Vec<_> = ctx
         .get::<Jobs>(JOBS)
-        .map(|j| j.list())
+        .map(|j| j.list_brief())
         .unwrap_or_default()
         .into_iter()
         .filter(|j| !j.foreground)
@@ -560,9 +564,138 @@ pub(super) fn task_entries(
         .map(|w| w.list().into_iter().map(to_tui_workflow).collect())
         .unwrap_or_default();
     let presets = ctx.get::<AgentPresets>(AGENT_PRESETS);
-    let items = tasks_pane::collect_items(&jobs, &subagents, &cron, &workflows, presets.as_deref());
+    tasks_pane::collect_items(&jobs, &subagents, &cron, &workflows, presets.as_deref())
+}
+
+pub(super) fn task_entries(
+    ctx: &Context,
+    query: &str,
+    collapsed: &HashSet<GroupKind>,
+) -> Vec<TaskEntry> {
+    let items = live_task_entries(ctx);
     let rows = tasks_pane::rebuild_entries(&items, collapsed);
     tasks_pane::filter_entries(rows, query)
+}
+
+/// 任务条的行。未完成的才画；完成的结果本来就会落到 scrollback。
+///
+/// 尾行摘要先一次性收成一张表再查。按行去 `list_brief()` / `snapshot()` 取的话
+/// 每帧是 O(n²) 次克隆，而这条是 80ms 的热路径。
+pub(crate) fn task_dock_rows(ctx: &Context) -> Vec<task_dock::Row> {
+    let mut tails: HashMap<String, String> = ctx
+        .get::<Jobs>(JOBS)
+        .map(|j| {
+            j.list_brief()
+                .into_iter()
+                .map(|j| (j.id, j.output))
+                .collect()
+        })
+        .unwrap_or_default();
+    // `collect_items` 不过滤 done 子代理（`/tasks` 要列出来），任务条得自己挡。
+    // idle 的留着 —— 它还能接 send_message。
+    let mut live_agents: HashSet<String> = HashSet::new();
+    for snap in ctx
+        .get::<Subagents>(SUBAGENTS)
+        .map(|s| s.list())
+        .unwrap_or_default()
+    {
+        if snap.done {
+            continue;
+        }
+        tails.insert(snap.id.clone(), task_dock::last_line(&snap.output));
+        live_agents.insert(snap.id);
+    }
+    let now = Instant::now();
+    live_task_entries(ctx)
+        .into_iter()
+        .filter_map(|entry| task_dock_row(entry, &tails, &live_agents, now))
+        .collect()
+}
+
+fn task_dock_row(
+    entry: TaskEntry,
+    tails: &HashMap<String, String>,
+    live_agents: &HashSet<String>,
+    now: Instant,
+) -> Option<task_dock::Row> {
+    match entry {
+        TaskEntry::BgTask {
+            task_id,
+            styled,
+            running,
+            start_time,
+            ..
+        } => {
+            if !running {
+                return None;
+            }
+            // `list_brief` 把最新一行搭在 output 上带回来。
+            let tail = tails.get(&task_id).cloned().unwrap_or_default();
+            Some(task_dock::Row {
+                hit: task_dock::TaskDockHit::Job(task_id),
+                styled,
+                running,
+                elapsed: SystemTime::now()
+                    .duration_since(start_time)
+                    .unwrap_or_default(),
+                tail,
+            })
+        }
+        TaskEntry::Agent {
+            subagent_id,
+            styled,
+            running,
+            started_at,
+            ..
+        } => {
+            if !live_agents.contains(&subagent_id) {
+                return None;
+            }
+            let tail = tails.get(&subagent_id).cloned().unwrap_or_default();
+            Some(task_dock::Row {
+                hit: task_dock::TaskDockHit::Subagent(subagent_id),
+                styled,
+                running,
+                elapsed: now.duration_since(started_at),
+                tail,
+            })
+        }
+        TaskEntry::Workflow {
+            styled,
+            running,
+            started_at,
+            ..
+        } => running.then(|| task_dock::Row {
+            hit: task_dock::TaskDockHit::OpenTasks,
+            styled,
+            running,
+            elapsed: now.duration_since(started_at),
+            tail: String::new(),
+        }),
+        TaskEntry::Scheduled {
+            styled, started_at, ..
+        } => Some(task_dock::Row {
+            hit: task_dock::TaskDockHit::OpenTasks,
+            styled,
+            running: false,
+            elapsed: now.duration_since(started_at),
+            tail: String::new(),
+        }),
+        TaskEntry::Header { .. } => None,
+    }
+}
+
+/// 有没有活着的耗时任务。只数数量，不建 label、不走 `collect_items` ——
+/// 这是 80ms 心跳里的判断，不能顺手把整张表算一遍。
+pub(super) fn any_live_task(ctx: &Context) -> bool {
+    ctx.get::<Jobs>(JOBS).is_some_and(|j| j.live_count() > 0)
+        || ctx
+            .get::<Subagents>(SUBAGENTS)
+            .is_some_and(|s| s.list().iter().any(|a| !a.done))
+        || ctx.get::<Cron>(CRON).is_some_and(|c| !c.list().is_empty())
+        || ctx
+            .get::<Workflows>(WORKFLOWS)
+            .is_some_and(|w| w.list().into_iter().any(|r| to_tui_workflow(r).is_active()))
 }
 
 pub(super) fn to_tui_workflow(snap: cordis_spine::WorkflowRunSnap) -> WorkflowRunSnapshot {
@@ -764,13 +897,11 @@ pub(super) fn live_redraw(ctx: &Context, overlay: &Overlay) -> bool {
     welcome_open(ctx)
         || turn_running(ctx)
         || matches!(overlay, Overlay::Inspect { .. } | Overlay::Tasks { .. })
-        || ctx
-            .get::<Subagents>(SUBAGENTS)
-            .is_some_and(|s| s.list().iter().any(|a| a.running()))
         || ctx.get::<Goal>(GOAL).is_some_and(|g| g.active())
-        || ctx
-            .get::<Jobs>(JOBS)
-            .is_some_and(|j| j.list().iter().any(|j| !j.done))
+        // 任务条常驻主界面且带耗时计时器，只要还有活着的任务就得继续重绘。
+        // 原来分开写的「子代理 running」「job !done」两条都被它覆盖，而且补上了
+        // idle 子代理、workflow、定时任务 —— 那三类以前会让计时器冻住。
+        || any_live_task(ctx)
 }
 
 /// Grok cancel-rewind: restore the full sent prompt when the turn has no
@@ -1195,5 +1326,144 @@ mod tests {
         assert!(matches!(&overlay, Overlay::Slot { id, .. } if id == "memo"));
         assert!(dispatch_slot_key(&root, &mut overlay, "esc"));
         assert!(!overlay.is_open());
+    }
+
+    /// 任务条带耗时计时器，只要还有活着的后台任务就必须继续 80ms 重绘。
+    #[tokio::test]
+    async fn live_redraw_follows_background_jobs() {
+        let root = Context::new();
+        let jobs = Jobs::new();
+        let _hold = root.provide(JOBS, jobs).unwrap();
+        assert!(
+            !live_redraw(&root, &Overlay::None),
+            "没有任务时不该空转重绘"
+        );
+
+        let jobs = root.get::<Jobs>(JOBS).unwrap();
+        let id = jobs.start("sleep 30");
+        for _ in 0..100 {
+            if any_live_task(&root) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            live_redraw(&root, &Overlay::None),
+            "有后台任务在跑就得继续重绘，否则任务条的耗时会冻住"
+        );
+
+        let _ = jobs.kill(&id).await;
+        for _ in 0..100 {
+            if !any_live_task(&root) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !live_redraw(&root, &Overlay::None),
+            "任务结束后要停下来，别一直空转"
+        );
+    }
+
+    /// 这条打的是改动前真正的缺口：旧 `live_redraw` 只看「子代理 `running()`」和
+    /// 「job 未完成」，**定时任务完全不在里面**。任务条现在会画 `/loop` 行并带
+    /// 耗时，不补这条子句计时器就冻住。同理适用于 idle 子代理与 workflow ——
+    /// 它们构造成本高，这里用 Cron 代表整类。
+    #[tokio::test]
+    async fn live_redraw_covers_scheduled_tasks() {
+        let root = Context::new();
+        let _hold = root.provide(CRON, Cron::new()).unwrap();
+        assert!(!live_redraw(&root, &Overlay::None), "空表不该空转重绘");
+
+        let cron = root.get::<Cron>(CRON).unwrap();
+        let id = cron
+            .add(std::time::Duration::from_secs(600), "每十分钟看一眼 CI")
+            .unwrap();
+        assert!(any_live_task(&root), "已排程的定时任务算活着的任务");
+        assert!(
+            live_redraw(&root, &Overlay::None),
+            "定时任务在表上时要继续重绘（旧实现这里是 false，任务条耗时会冻住）"
+        );
+        assert!(
+            !task_dock_rows(&root).is_empty(),
+            "定时任务要出现在任务条上"
+        );
+
+        assert!(cron.cancel(&id));
+        assert!(!live_redraw(&root, &Overlay::None), "取消后要停下来");
+    }
+
+    /// 前台 bash 不进任务条，也就不该单独把重绘拉起来 —— turn status 那一行
+    /// 已经在显示「Waiting…」，每条快命令都闪一下任务条只是噪音。
+    #[tokio::test]
+    async fn foreground_commands_do_not_drive_the_task_dock() {
+        let root = Context::new();
+        let _hold = root.provide(JOBS, Jobs::new()).unwrap();
+        let jobs = root.get::<Jobs>(JOBS).unwrap();
+        let id = jobs.start_foreground("sleep 30");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(!any_live_task(&root), "前台命令不算任务条上的任务");
+        assert!(
+            task_dock_rows(&root).is_empty(),
+            "前台命令不该出现在任务条上"
+        );
+        let _ = jobs.kill(&id).await;
+    }
+
+    /// `collect_items` 不过滤 done 子代理（`/tasks` 要把它们列出来），任务条必须
+    /// 自己挡掉；idle 的要留着，它还能接 `send_message`。
+    #[test]
+    fn done_subagents_are_kept_out_of_the_dock() {
+        use crate::grok::tasks_pane::TaskEntry;
+        use ratatui::text::Line;
+
+        let agent = |id: &str, running: bool| TaskEntry::Agent {
+            id: 1,
+            subagent_id: id.into(),
+            child_session_id: String::new(),
+            label: id.into(),
+            styled: Line::from(id.to_string()),
+            running,
+            started_at: Instant::now(),
+            type_label: "观".into(),
+        };
+        let tails = HashMap::new();
+        let now = Instant::now();
+
+        // idle（running=false）但还活着 → 要画。
+        let live: HashSet<String> = ["idle-one".to_string()].into_iter().collect();
+        assert!(
+            task_dock_row(agent("idle-one", false), &tails, &live, now).is_some(),
+            "idle 子代理要留在任务条上"
+        );
+        // 同样 running=false，但已经 done → 不画。两者在 TaskEntry 上无法区分，
+        // 所以必须靠活跃集合，不能只看 running。
+        assert!(
+            task_dock_row(agent("finished", false), &tails, &HashSet::new(), now).is_none(),
+            "done 子代理不该出现在任务条上"
+        );
+    }
+
+    /// 任务条的行要能读到最新一行输出 —— 这是它比旧头像方块有用的唯一理由。
+    #[tokio::test]
+    async fn task_dock_row_carries_the_latest_output_line() {
+        let root = Context::new();
+        let _hold = root.provide(JOBS, Jobs::new()).unwrap();
+        let jobs = root.get::<Jobs>(JOBS).unwrap();
+        let id = jobs.start("echo 早先一行; echo 最新一行; sleep 30");
+
+        let mut tail = String::new();
+        for _ in 0..150 {
+            if let Some(row) = task_dock_rows(&root).into_iter().next() {
+                if !row.tail.is_empty() {
+                    tail = row.tail;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(tail, "最新一行", "任务条摘要取最后一行");
+        let _ = jobs.kill(&id).await;
     }
 }

@@ -159,3 +159,80 @@ async fn kill_returns_promptly_for_a_running_job() {
     .await;
     assert!(done, "被杀掉的任务应当标记为 done");
 }
+
+/// 主界面任务条要的是「最新一行进度」，不是整份输出。
+#[tokio::test]
+async fn list_brief_carries_only_the_last_line() {
+    let jobs = Jobs::new();
+    let id = jobs.start("echo 第一行; echo 第二行; echo 最后一行; sleep 5");
+
+    let ready = until(Duration::from_secs(5), || {
+        jobs.list_brief()
+            .iter()
+            .any(|j| j.id == id && j.output.contains("最后一行"))
+    })
+    .await;
+    assert!(
+        ready,
+        "任务条摘要应能读到最新一行，实际：{:?}",
+        jobs.list_brief()
+            .iter()
+            .map(|j| j.output.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let brief = jobs.list_brief().into_iter().find(|j| j.id == id).unwrap();
+    assert_eq!(brief.output, "最后一行", "只要最后一行，不要整份");
+    assert!(
+        jobs.snapshot(&id).unwrap().output.contains("第一行"),
+        "完整快照仍然带全部输出，两者不能混淆"
+    );
+    let _ = jobs.kill(&id).await;
+}
+
+/// 任务条每 80ms 重绘一次，摘要绝不能把整份缓冲拼出来。
+#[tokio::test]
+async fn list_brief_does_not_render_the_whole_buffer() {
+    let jobs = Jobs::new();
+    let id = jobs.start("yes PADDINGPADDINGPADDING | head -50000; echo 收尾行");
+
+    let done = until(Duration::from_secs(20), || {
+        jobs.snapshot(&id).is_some_and(|s| s.done)
+    })
+    .await;
+    assert!(done, "任务应能结束");
+
+    let full = jobs.snapshot(&id).unwrap().output;
+    let brief = jobs.list_brief().into_iter().find(|j| j.id == id).unwrap();
+    assert!(
+        brief.output.len() <= 200,
+        "摘要应限制在单行上限内，实际 {} 字节",
+        brief.output.len()
+    );
+    assert!(
+        full.len() > 10 * 1024,
+        "对照组：完整快照确实是大块输出（{} 字节）",
+        full.len()
+    );
+    assert_eq!(brief.output, "收尾行", "摘要取的是最后一行");
+}
+
+/// `live_count` 只数活着的后台任务：前台命令和已完成的都不算。
+#[tokio::test]
+async fn live_count_skips_foreground_and_finished() {
+    let jobs = Jobs::new();
+    let bg = jobs.start("sleep 5");
+    let fg = jobs.start_foreground("sleep 5");
+
+    let up = until(Duration::from_secs(2), || jobs.live_count() == 1).await;
+    assert!(
+        up,
+        "只该数到那条后台任务，实际 {}（前台命令不进任务条）",
+        jobs.live_count()
+    );
+
+    let _ = jobs.kill(&bg).await;
+    let _ = jobs.kill(&fg).await;
+    let drained = until(Duration::from_secs(5), || jobs.live_count() == 0).await;
+    assert!(drained, "都结束后应当归零");
+}
