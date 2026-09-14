@@ -215,6 +215,7 @@ mod tests {
             output: "1\n2\n3\n".into(),
             description: Some("count".into()),
             is_monitor: false,
+            foreground: false,
             start_time: std::time::SystemTime::now(),
         };
         let theme = Theme::current();

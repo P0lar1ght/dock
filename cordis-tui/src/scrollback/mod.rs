@@ -609,6 +609,9 @@ impl Scrollback {
             for j in jobs.list() {
                 j.id.hash(&mut h);
                 j.done.hash(&mut h);
+                // 输出是流式增长的：不把长度算进指纹，布局缓存就永远命中，
+                // 跑着的命令在 transcript 上看起来是一动不动的。
+                j.output.len().hash(&mut h);
             }
         }
         h.finish()

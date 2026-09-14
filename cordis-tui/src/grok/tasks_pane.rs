@@ -769,6 +769,7 @@ mod tests {
             output: String::new(),
             description: Some("say hi".into()),
             is_monitor: false,
+            foreground: false,
             start_time: SystemTime::now(),
         };
         let items = collect_items(&[job], &[], &[], &[], None);
@@ -794,6 +795,7 @@ mod tests {
             output: String::new(),
             description: Some("watch log".into()),
             is_monitor: true,
+            foreground: false,
             start_time: SystemTime::now(),
         };
         let loop_job = CronJob {

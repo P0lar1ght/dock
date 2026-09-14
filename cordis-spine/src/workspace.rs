@@ -21,6 +21,22 @@ const WRITE_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":
 /// Default max lines when the model omits `limit` (grok `MAX_LINES_READ`).
 const MAX_LINES_READ: usize = 1_000;
 
+/// 前台 bash 的阻塞预算。到点把命令收掉并把已产出的输出带回来。
+///
+/// 30s 这个数字来自 Grok `block_until_ms` 的省略默认值；P0 先保持不变，只把
+/// “到点丢输出”改掉。覆盖用的 env 对齐 Grok 的 `GROK_MAX_FOREGROUND_BLOCK_MS`。
+const FOREGROUND_MS_ENV: &str = "DOCK_BASH_FOREGROUND_MS";
+const DEFAULT_FOREGROUND_MS: u64 = 30_000;
+
+fn foreground_budget() -> Duration {
+    std::env::var(FOREGROUND_MS_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_millis(DEFAULT_FOREGROUND_MS))
+}
+
 const READ_FILE_DESC: &str = "Read a file.\n\
 - By default reads up to 1000 lines from offset (default line 1).\n\
 - For large files, pass offset + limit to page through; the result notes how many lines remain.\n\
@@ -81,13 +97,13 @@ pub fn handles(name: &str) -> bool {
 }
 
 #[allow(dead_code)]
-pub fn execute(call: ToolCall) -> ToolResult {
-    execute_with(call, || false, None)
+pub async fn execute(call: ToolCall) -> ToolResult {
+    execute_with(call, || false, None).await
 }
 
-pub fn execute_with(
+pub async fn execute_with(
     call: ToolCall,
-    is_cancelled: impl Fn() -> bool,
+    is_cancelled: impl Fn() -> bool + Send + Sync,
     jobs: Option<&Jobs>,
 ) -> ToolResult {
     if call.name == "read_file" {
@@ -105,7 +121,7 @@ pub fn execute_with(
         "read_file" => read_file(&call.arguments),
         "grep" => grep(&call.arguments),
         "search_replace" => search_replace(&call.arguments),
-        "bash" | "run_terminal_cmd" => bash(&call.arguments, &is_cancelled, jobs),
+        "bash" | "run_terminal_cmd" => bash(&call.arguments, &is_cancelled, jobs).await,
         "glob" => glob_files(&call.arguments),
         "write_file" => write_file(&call.arguments),
         other => format!("unknown tool: {other}"),
@@ -387,7 +403,11 @@ fn search_replace(args: &str) -> String {
     }
 }
 
-fn bash(args: &str, is_cancelled: &dyn Fn() -> bool, jobs: Option<&Jobs>) -> String {
+async fn bash(
+    args: &str,
+    is_cancelled: &(dyn Fn() -> bool + Send + Sync),
+    jobs: Option<&Jobs>,
+) -> String {
     let v = parse_args(args);
     let Some(command) = str_field(&v, &["command"]) else {
         return "Error: command is required".into();
@@ -407,57 +427,72 @@ fn bash(args: &str, is_cancelled: &dyn Fn() -> bool, jobs: Option<&Jobs>) -> Str
             );
         }
     }
-    let mut child = match Command::new("bash")
-        .arg("-lc")
-        .arg(&command)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return format!("Error spawning bash: {e}"),
+    // 前台也走 `Jobs`：同一套并发抽干 + 增量累积 + 输出上限，且 TUI 能在命令
+    // 还在跑的时候就读到它的输出（tasks pane / scrollback 都读 JobSnapshot）。
+    // 没挂 `"jobs"` 服务时（单测、精简装配）临时起一张本地表，行为完全一致，
+    // 只是没人能查它 —— 所以后台请求仍然退回前台执行，不发无处可查的 task_id。
+    let local;
+    let jobs = match jobs {
+        Some(jobs) => jobs,
+        None => {
+            local = Jobs::new();
+            &local
+        }
     };
-    let timeout = Duration::from_secs(30);
+    let id = jobs.start_foreground(&command);
+    let budget = foreground_budget();
     let start = std::time::Instant::now();
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = std::io::Read::read_to_string(&mut out, &mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
-                }
-                let mut body = stdout;
-                if !stderr.is_empty() {
-                    if !body.is_empty() {
-                        body.push('\n');
-                    }
-                    body.push_str(&stderr);
-                }
-                if !status.success() {
-                    body = format!("exit {status}\n{body}");
-                }
-                if body.trim().is_empty() {
-                    body = "(no output)".into();
-                }
-                return body;
+        // 轮询只读完成位；输出只在真正要返回时取一次，避免每 20ms 白拼一个
+        // 最大 20KB 的 String。
+        match jobs.is_done(&id) {
+            Some(true) => {
+                let out = jobs.snapshot(&id).map(|s| s.output).unwrap_or_default();
+                jobs.forget(&id);
+                return out;
             }
-            Ok(None) if is_cancelled() => {
-                let _ = child.kill();
-                return "cancelled".into();
-            }
-            Ok(None) if start.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                return "Error: command timed out after 30s".into();
-            }
-            Err(e) => return format!("Error waiting on bash: {e}"),
+            // 任务凭空消失：只有我们自己会 forget，正常不会走到。
+            None => return "(no output)".into(),
+            Some(false) => {}
         }
+        if is_cancelled() {
+            return finish_early(jobs, &id, "cancelled".into()).await;
+        }
+        if start.elapsed() >= budget {
+            let secs = budget.as_secs_f64();
+            return finish_early(
+                jobs,
+                &id,
+                format!(
+                    "Error: 命令超时（前台预算 {secs:.0}s）已被终止。\
+                     下面是终止前已产出的输出；需要跑完就用 is_background: true 重跑。"
+                ),
+            )
+            .await;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// 取消 / 超时的收尾：杀掉命令，把已经产出的输出带回来，再把任务摘掉。
+///
+/// 旧实现在这里直接 `kill` 后返回一句错误字符串，从不读管道，模型拿不到任何
+/// 已完成的工作。
+async fn finish_early(jobs: &Jobs, id: &str, reason: String) -> String {
+    let _ = jobs.kill(id).await;
+    // kill 是发信号，run 任务还要收尾；给它一小段时间把尾巴写完。
+    for _ in 0..25 {
+        if jobs.is_done(id) != Some(false) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let out = jobs.snapshot(id).map(|s| s.output).unwrap_or_default();
+    jobs.forget(id);
+    if out.trim().is_empty() || out.trim() == "(no output)" {
+        reason
+    } else {
+        format!("{reason}\n{out}")
     }
 }
 
@@ -546,8 +581,8 @@ fn write_file(args: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn list_dir_json_name() {
+    #[tokio::test]
+    async fn list_dir_json_name() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
         let call = ToolCall {
@@ -558,12 +593,12 @@ mod tests {
                 serde_json::to_string(&dir.path().to_string_lossy()).unwrap()
             ),
         };
-        let out = execute(call);
+        let out = execute(call).await;
         assert!(out.content.contains("a.txt"), "{}", out.content);
     }
 
-    #[test]
-    fn search_replace_once() {
+    #[tokio::test]
+    async fn search_replace_once() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "alpha beta alpha").unwrap();
@@ -577,12 +612,12 @@ mod tests {
             })
             .to_string(),
         };
-        execute(call);
+        execute(call).await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "AAA beta alpha");
     }
 
-    #[test]
-    fn glob_finds_txt() {
+    #[tokio::test]
+    async fn glob_finds_txt() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("keep.txt"), "x").unwrap();
         std::fs::write(dir.path().join("skip.md"), "y").unwrap();
@@ -595,13 +630,13 @@ mod tests {
             })
             .to_string(),
         };
-        let out = execute(call);
+        let out = execute(call).await;
         assert!(out.content.contains("keep.txt"), "{}", out.content);
         assert!(!out.content.contains("skip.md"), "{}", out.content);
     }
 
-    #[test]
-    fn write_file_creates() {
+    #[tokio::test]
+    async fn write_file_creates() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.txt");
         let call = ToolCall {
@@ -613,13 +648,13 @@ mod tests {
             })
             .to_string(),
         };
-        let out = execute(call);
+        let out = execute(call).await;
         assert!(out.content.contains("wrote"), "{}", out.content);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
 
-    #[test]
-    fn read_file_omitted_limit_caps_at_default() {
+    #[tokio::test]
+    async fn read_file_omitted_limit_caps_at_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.txt");
         let body: String = (1..=1_050).map(|i| format!("L{i}\n")).collect();
@@ -629,7 +664,7 @@ mod tests {
             name: "read_file".into(),
             arguments: serde_json::json!({ "target_file": path }).to_string(),
         };
-        let out = execute(call);
+        let out = execute(call).await;
         assert!(
             out.content.contains("1→L1\n"),
             "{}",
@@ -648,8 +683,8 @@ mod tests {
         assert!(!out.content.contains("L1050\n"), "must not dump past cap");
     }
 
-    #[test]
-    fn read_file_explicit_limit_respected() {
+    #[tokio::test]
+    async fn read_file_explicit_limit_respected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
@@ -663,15 +698,15 @@ mod tests {
             })
             .to_string(),
         };
-        let out = execute(call);
+        let out = execute(call).await;
         assert!(out.content.contains("b\n"), "{}", out.content);
         assert!(out.content.contains("c\n"), "{}", out.content);
         assert!(!out.content.contains("d\n"), "{}", out.content);
         assert!(out.content.contains("offset=4"), "{}", out.content);
     }
 
-    #[test]
-    fn read_file_small_file_no_truncation_note() {
+    #[tokio::test]
+    async fn read_file_small_file_no_truncation_note() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tiny.txt");
         std::fs::write(&path, "only\n").unwrap();
@@ -680,13 +715,13 @@ mod tests {
             name: "read_file".into(),
             arguments: serde_json::json!({ "target_file": path }).to_string(),
         };
-        let out = execute(call);
+        let out = execute(call).await;
         assert!(out.content.contains("1→only"), "{}", out.content);
         assert!(!out.content.contains("truncated"), "{}", out.content);
     }
 
-    #[test]
-    fn read_file_returns_image_for_png() {
+    #[tokio::test]
+    async fn read_file_returns_image_for_png() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shot.png");
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -703,7 +738,7 @@ mod tests {
             name: "read_file".into(),
             arguments: args,
         };
-        let result = execute(call);
+        let result = execute(call).await;
         assert!(
             result.content.contains("Image content included inline"),
             "{}",
@@ -711,5 +746,79 @@ mod tests {
         );
         assert_eq!(result.images.len(), 1);
         assert_eq!(result.images[0].mime, "image/png");
+    }
+
+    /// 前台 bash 的管道死锁：输出超过管道缓冲（64KB）就会把子进程堵死，
+    /// 一条 0.1s 的命令要等满整个前台预算再被杀，输出还全丢。
+    #[tokio::test]
+    async fn bash_large_output_does_not_deadlock() {
+        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "3000");
+        let start = std::time::Instant::now();
+        let out = bash(
+            r#"{"command":"yes OUTLINE0123456789 | head -20000; echo finished"}"#,
+            &|| false,
+            None,
+        )
+        .await;
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "0.1s 的命令不该耗满前台预算，实际 {:?}",
+            start.elapsed()
+        );
+        assert!(
+            out.contains("finished"),
+            "收尾行应保留：{}",
+            &out[..out.len().min(200)]
+        );
+    }
+
+    /// 到了前台预算要把已经产出的输出带回来。旧实现直接 `child.kill()` 后返回
+    /// 一句错误字符串，从不读管道，模型什么都拿不到。
+    #[tokio::test]
+    async fn bash_timeout_keeps_partial_output() {
+        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "700");
+        let out = bash(
+            r#"{"command":"echo early-line; sleep 30"}"#,
+            &|| false,
+            None,
+        )
+        .await;
+        assert!(
+            out.contains("early-line"),
+            "超时也要带回已产出的输出：{out}"
+        );
+        assert!(out.contains("超时"), "要说明是超时：{out}");
+    }
+
+    /// 前台命令必须在 `jobs` 里现身，否则 TUI 无处读它的实时输出；
+    /// 结束后要摘掉，不能常驻。
+    #[tokio::test]
+    async fn bash_foreground_shows_live_progress_in_jobs() {
+        // 同一进程里别的用例会改 DOCK_BASH_FOREGROUND_MS；不拿这把锁就会被它们的
+        // 短预算污染，表现为本用例随机超时。
+        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
+        let jobs = Jobs::new();
+        let run = bash(
+            r#"{"command":"for i in 1 2 3 4 5 6; do echo tick-$i; sleep 0.2; done"}"#,
+            &|| false,
+            Some(&jobs),
+        );
+        let watch = async {
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if jobs
+                    .list()
+                    .iter()
+                    .any(|j| j.foreground && j.output.contains("tick-1"))
+                {
+                    return true;
+                }
+            }
+            false
+        };
+        let (out, seen) = tokio::join!(run, watch);
+        assert!(seen, "前台命令运行期间应能在 jobs 里看到它的实时输出");
+        assert!(out.contains("tick-6"), "最终结果要完整：{out}");
+        assert!(jobs.list().is_empty(), "前台任务结束后应从表里摘掉");
     }
 }
