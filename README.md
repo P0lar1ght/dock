@@ -187,9 +187,18 @@ curl -fsSL https://raw.githubusercontent.com/P0lar1ght/dock/main/install.sh | sh
 | `DOCK_VERSION` | 指定版本，如 `v0.1.0`；默认 latest |
 | `DOCK_INSTALL_DIR` | 安装目录，默认 `~/.local/bin` |
 
-装完 `dock --version` 应打印版本号。macOS 产物未做代码签名 / 公证，首次运行若被 Gatekeeper
-拦下，按脚本提示执行一次 `xattr -d com.apple.quarantine "$(command -v dock)"` 即可。Windows
-暂无预编译产物，请见下方「快速开始」从源码构建。
+变量要写在 `sh` 前面，写在 `curl` 前面只会传给 `curl`、脚本收不到：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/P0lar1ght/dock/main/install.sh | DOCK_VERSION=v0.1.0 sh
+```
+
+装完脚本会跑一次 `dock --version` 自检，跑不起来直接报错退出。macOS 产物未做代码签名 / 公证，
+首次运行若被 Gatekeeper 拦下，按脚本提示执行一次
+`xattr -d com.apple.quarantine "$(command -v dock)"` 即可。
+
+Linux 产物动态链系统库，要求 **glibc ≥ 2.39** 与 **OpenSSL 3**（约等于 Ubuntu 24.04+ /
+Debian 13+ / Fedora 40+）；更老的发行版与 Windows 暂无可用产物，请见下方「快速开始」从源码构建。
 
 ---
 

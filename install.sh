@@ -110,11 +110,22 @@ main() {
     [ -f "$tmp/$ASSET" ] || die "产物里没有 $ASSET 二进制"
 
     mkdir -p "$install_dir" || die "无法创建 $install_dir"
-    install -m 0755 "$tmp/$ASSET" "$install_dir/$ASSET" 2>/dev/null ||
-        { cp "$tmp/$ASSET" "$install_dir/$ASSET" && chmod 0755 "$install_dir/$ASSET"; } ||
-        die "无法写入 $install_dir/$ASSET"
+    # 先写同目录的临时名再 mv 覆盖：升级时旧 dock 可能正在跑，直接写会被 Linux
+    # 拒成 ETXTBSY（Text file busy）；rename(2) 只换目录项，对已映射的旧进程无影响。
+    staged="$install_dir/.$ASSET.new.$$"
+    cp "$tmp/$ASSET" "$staged" || die "无法写入 $install_dir（目录不可写？）"
+    chmod 0755 "$staged" || die "无法给 $staged 加执行位"
+    mv -f "$staged" "$install_dir/$ASSET" || {
+        rm -f "$staged"
+        die "无法替换 $install_dir/$ASSET"
+    }
 
-    installed=$("$install_dir/$ASSET" --version 2>/dev/null || echo "$ASSET")
+    # 装完必须真的能跑起来：架构选错、缺 libssl.so.3 / glibc 太旧都只在这一步暴露。
+    # 失败要连 stderr 一起吐出来，不能静默当成功。
+    if ! installed=$("$install_dir/$ASSET" --version 2>&1); then
+        printf '%s\n' "$installed" >&2
+        die "$install_dir/$ASSET 装上了但跑不起来（见上方输出）"
+    fi
     printf '已安装 %s → %s\n' "$installed" "$install_dir/$ASSET"
 
     # 产物没有代码签名/公证：只提示，不替用户改 Gatekeeper 的标记。

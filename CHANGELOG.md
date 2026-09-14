@@ -44,6 +44,12 @@
 ### 已知限制
 
 - 只发 macOS 与 Linux；Windows 未做适配验证。
+- Linux 预编译产物动态链系统库，有两条运行下限：**glibc ≥ 2.39**（构建机是
+  `ubuntu-24.04` / `ubuntu-24.04-arm`，两个架构同档）与 **OpenSSL 3**
+  （`libssl.so.3` / `libcrypto.so.3`，来自 `cordis-spine` 的 reqwest `default-tls`）。
+  实际可用范围约等于 Ubuntu 24.04+ / Debian 13+ / Fedora 40+；更老的发行版
+  （Ubuntu 22.04、Debian 12、RHEL 9、Amazon Linux 2）请从源码构建。`install.sh` 装完会跑一次
+  `dock --version`，跑不起来会直接报错退出，不会假装装好了。
 - macOS 产物未做代码签名 / 公证，Gatekeeper 首次运行可能拦截（`install.sh` 会给出
   `xattr -d com.apple.quarantine` 提示）。
 - 需要浏览器 companion 时，宿主页 SDK 要自己 build `embed-sdk/`（`npm ci && npm run build`），

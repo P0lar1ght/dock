@@ -19,7 +19,7 @@ fn parse_args() -> ResumeArg {
                 std::process::exit(0);
             }
             "-V" | "--version" => {
-                println!("dock {}", env!("CARGO_PKG_VERSION"));
+                print_version();
                 std::process::exit(0);
             }
             "-r" | "--resume" => {
@@ -29,6 +29,10 @@ fn parse_args() -> ResumeArg {
                         print_help();
                         std::process::exit(0);
                     }
+                    Some(flag) if matches!(flag.as_str(), "-V" | "--version") => {
+                        print_version();
+                        std::process::exit(0);
+                    }
                     Some(_) | None => ResumeArg::Latest,
                 };
             }
@@ -36,6 +40,10 @@ fn parse_args() -> ResumeArg {
         }
     }
     resume
+}
+
+fn print_version() {
+    println!("dock {}", env!("CARGO_PKG_VERSION"));
 }
 
 fn print_help() {

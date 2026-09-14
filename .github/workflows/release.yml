@@ -7,8 +7,10 @@ on:
   push:
     tags: ["v*"]
 
+# 默认只读：verify / build 要编译并运行第三方 crate 的 build script 和整套测试，
+# 不该拿着能建 Release、能写仓库内容的 token。写权限只给 release 这一个 job。
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,10 +28,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # tag 与 Cargo.toml 的 workspace 版本必须同源，否则会发出版本号对不上的产物。
+      # 必须把 version 限定在 [workspace.package] 段里取：根 Cargo.toml 以后加
+      # [workspace.dependencies] 就会出现别的 version = "…"，取“第一条”会比错对象。
       - name: Tag 与 workspace 版本一致
         run: |
+          set -eu
           want="${GITHUB_REF_NAME#v}"
-          got=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          got=$(awk -F'"' '
+            /^\[workspace\.package\]/ { in_sec = 1; next }
+            /^\[/                     { in_sec = 0 }
+            in_sec && /^version[[:space:]]*=/ { print $2; exit }
+          ' Cargo.toml)
+          if [ -z "$got" ]; then
+            echo "没能从 Cargo.toml 的 [workspace.package] 里读到 version" >&2
+            exit 1
+          fi
           if [ "$want" != "$got" ]; then
             echo "tag ${GITHUB_REF_NAME} 与 Cargo.toml 的版本 ${got} 不一致" >&2
             exit 1
@@ -47,6 +60,11 @@ jobs:
       - name: Test (spine)
         run: cargo test --locked -p cordis-spine
 
+      # 内核单列（AGENTS.md 的「Commands」把它写成独立一条）。clippy --all-targets
+      # 只编译不运行它的用例，不补这步就等于发版从没跑过 Context / inject / fiber 的测试。
+      - name: Test (kernel)
+        run: cargo test --locked -p cordis
+
   build:
     name: ${{ matrix.target }}
     needs: verify
@@ -61,7 +79,11 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-14
             target: x86_64-apple-darwin
-          - os: ubuntu-22.04
+          # 两个 Linux 架构必须同一档 Ubuntu，否则 glibc 底线会一高一低（24.04 是
+          # 2.39、22.04 是 2.35），同一台发行版上 x86_64 能跑、arm64 报 GLIBC_2.38
+          # not found。22.04 系列 2026-09-17 起 deprecation（brownout 会直接让 job
+          # 失败），所以往上对齐到 24.04。
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -102,17 +124,25 @@ jobs:
     name: 发布
     needs: [verify, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # 分成「建 Release」和「传产物」两步且都可重入：上传中途挂掉后重跑，
+      # 一把梭的 gh release create 会因为 Release 已存在直接失败，产物一个都补不上。
       - name: 上传产物
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -eu
           ls -lh dist
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

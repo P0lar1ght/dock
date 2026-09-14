@@ -120,10 +120,16 @@ let _env = crate::test_env::scoped().set("CHROME_PATH", "/x"); // 设 / 删单�
 |---|---|
 | `aarch64-apple-darwin` | `macos-14` |
 | `x86_64-apple-darwin` | `macos-14`（交叉编译，macOS 构建机只有 arm64） |
-| `x86_64-unknown-linux-gnu` | `ubuntu-22.04` |
+| `x86_64-unknown-linux-gnu` | `ubuntu-24.04` |
 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` |
 
 Windows 未做适配验证，不发。
+
+两个 Linux 目标必须钉在同一档 Ubuntu：产物动态链 glibc，构建机的 glibc 就是运行下限
+（24.04 是 2.39），一高一低会出现「同一台发行版 x86_64 能跑、arm64 报 `GLIBC_2.38 not
+found`」。同理，`cordis-spine` 的 reqwest 走 `default-tls`（Linux 上即 OpenSSL），产物动态链
+`libssl.so.3` / `libcrypto.so.3`，OpenSSL 1.1 的发行版跑不起来。要放宽这两条下限得换静态方案
+（musl 目标，或 spine 改 `rustls-tls`），0.1.0 先按已知限制记在 `CHANGELOG.md`。
 
 发版步骤：
 
@@ -139,6 +145,7 @@ actionlint .github/workflows/release.yml
 shellcheck install.sh
 
 # 安装脚本干跑：把产物与 .sha256 放进一个目录，让它当 Release 用
+mkdir -p /tmp/rel
 tar -czf /tmp/rel/dock-aarch64-apple-darwin.tar.gz -C target/release dock
 (cd /tmp/rel && shasum -a 256 dock-aarch64-apple-darwin.tar.gz > dock-aarch64-apple-darwin.tar.gz.sha256)
 DOCK_BASE_URL=file:///tmp/rel DOCK_INSTALL_DIR=/tmp/dockbin sh install.sh
