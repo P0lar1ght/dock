@@ -26,7 +26,9 @@ use crate::queue_pane::{self, QueueHit};
 use crate::scrollback::{ClickHit, MouseUpResult, Scrollback};
 use crate::settings_modal;
 use crate::slash::filter_args;
-use crate::subagent_dock;
+use std::collections::HashSet;
+
+use crate::task_dock::{self, TaskDockHit};
 
 use super::support::*;
 use crate::actions::{Action, Effect};
@@ -45,7 +47,7 @@ pub(super) fn run_action(
     action: Action,
     overlay: &mut Overlay,
     hits: &PickerHits,
-    dock_hits: &[(Rect, String)],
+    dock_hits: &[(Rect, TaskDockHit)],
     goal_hits: &[(Rect, GoalHit)],
     queue_hits: &[(Rect, QueueHit)],
 ) -> Vec<Effect> {
@@ -757,8 +759,17 @@ pub(super) fn run_action(
             if let Some(hit) = goal_pane::hit(goal_hits, column, row) {
                 return apply_goal_hit(ctx, overlay, hit);
             }
-            if let Some(id) = subagent_dock::hit(dock_hits, column, row) {
-                *overlay = Overlay::inspect_subagent(id, false);
+            if let Some(target) = task_dock::hit(dock_hits, column, row) {
+                *overlay = match target {
+                    TaskDockHit::Subagent(id) => Overlay::inspect_subagent(id, false),
+                    TaskDockHit::Job(id) => Overlay::inspect_job(id, false),
+                    // workflow / 定时任务没有单独的全屏视图，退回整张表。
+                    TaskDockHit::OpenTasks => Overlay::Tasks {
+                        selected: 0,
+                        query: String::new(),
+                        collapsed: HashSet::new(),
+                    },
+                };
                 return Vec::new();
             }
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
@@ -866,8 +877,17 @@ pub(super) fn run_action(
             if let Some(hit) = goal_pane::hit(goal_hits, column, row) {
                 return apply_goal_hit(ctx, overlay, hit);
             }
-            if let Some(id) = subagent_dock::hit(dock_hits, column, row) {
-                *overlay = Overlay::inspect_subagent(id, false);
+            if let Some(target) = task_dock::hit(dock_hits, column, row) {
+                *overlay = match target {
+                    TaskDockHit::Subagent(id) => Overlay::inspect_subagent(id, false),
+                    TaskDockHit::Job(id) => Overlay::inspect_job(id, false),
+                    // workflow / 定时任务没有单独的全屏视图，退回整张表。
+                    TaskDockHit::OpenTasks => Overlay::Tasks {
+                        selected: 0,
+                        query: String::new(),
+                        collapsed: HashSet::new(),
+                    },
+                };
                 return Vec::new();
             }
             if overlay.is_open() {

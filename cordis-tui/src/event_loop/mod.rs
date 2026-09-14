@@ -150,7 +150,7 @@ pub async fn run(ctx: Context) -> Result<()> {
     let mut shimmer = tokio::time::interval(Duration::from_millis(80));
     let mut overlay = Overlay::None;
     let mut hits = PickerHits::default();
-    let mut dock_hits: Vec<(Rect, String)> = Vec::new();
+    let mut dock_hits: Vec<(Rect, crate::task_dock::TaskDockHit)> = Vec::new();
     let mut goal_hits: Vec<(Rect, GoalHit)> = Vec::new();
     let mut queue_hits: Vec<(Rect, QueueHit)> = Vec::new();
     let mut pointer = (0u16, 0u16);

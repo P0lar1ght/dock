@@ -80,7 +80,44 @@ impl OutputBuf {
         s.push_str(&String::from_utf8_lossy(trim_leading_continuation(&tail)));
         s
     }
+
+    /// 最后一行非空输出，用于主界面任务条的进度摘要。
+    ///
+    /// 不能用 `render()` 再取最后一行：任务条常驻、每 80ms 重绘一次，整份
+    /// 拼接是每个任务最多 20KB 的白工。这里只从尾部往回扫到上一个换行。
+    pub(crate) fn last_line(&self, max_bytes: usize) -> String {
+        // 尾部缓冲为空说明总量还没超过头部上限，此时尾行在 head 里。
+        let scan: Vec<u8> = if self.tail.is_empty() {
+            self.head.clone()
+        } else {
+            self.tail.iter().copied().collect()
+        };
+        let end = scan
+            .iter()
+            .rposition(|b| !matches!(b, b'\n' | b'\r' | b' ' | b'\t'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if end == 0 {
+            return String::new();
+        }
+        let start = scan[..end]
+            .iter()
+            .rposition(|b| *b == b'\n' || *b == b'\r')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let mut slice = &scan[start..end];
+        if slice.len() > max_bytes {
+            slice = trim_trailing_partial(&slice[..max_bytes]);
+        }
+        // 尾部缓冲是按字节滚动的，起点可能落在多字节字符中间。
+        String::from_utf8_lossy(trim_leading_continuation(slice))
+            .trim()
+            .to_string()
+    }
 }
+
+/// 任务条摘要里单行输出的字节上限。再长也没地方画。
+pub(crate) const TAIL_LINE_BYTES: usize = 200;
 
 /// 裁掉结尾被切断的 UTF-8 序列，避免 `from_utf8_lossy` 在拼接处吐替换字符。
 fn trim_trailing_partial(bytes: &[u8]) -> &[u8] {
@@ -239,6 +276,43 @@ impl Jobs {
             .iter()
             .map(|(id, job)| Self::snap(id, job))
             .collect()
+    }
+
+    /// 与 [`Jobs::list`] 同形，但 `output` 只放最后一行。
+    ///
+    /// 给主界面任务条用：它常驻、每 80ms 重绘，走 `list()` 的话每帧都要把每个
+    /// 任务最多 20KB 的输出整份拼出来再克隆，只为显示一行进度摘要。
+    pub fn list_brief(&self) -> Vec<JobSnapshot> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, job)| {
+                let tail = job.output.lock().unwrap().last_line(TAIL_LINE_BYTES);
+                JobSnapshot {
+                    id: id.clone(),
+                    command: job.command.clone(),
+                    done: job.done.load(Ordering::Relaxed),
+                    output: tail,
+                    description: job.description.clone(),
+                    is_monitor: job.is_monitor,
+                    foreground: job.foreground.load(Ordering::Relaxed),
+                    start_time: job.start_time,
+                }
+            })
+            .collect()
+    }
+
+    /// 任务条只需要知道「有没有活着的后台任务」，不必建快照。
+    pub fn live_count(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|job| {
+                !job.done.load(Ordering::Relaxed) && !job.foreground.load(Ordering::Relaxed)
+            })
+            .count()
     }
 
     /// 只读完成位，不碰输出缓冲。

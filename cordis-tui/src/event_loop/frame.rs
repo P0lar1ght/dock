@@ -37,7 +37,7 @@ use crate::scrollback::Scrollback;
 use crate::session::SessionRef;
 use crate::settings_modal;
 use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
-use crate::subagent_dock;
+use crate::task_dock::{self, TaskDockHit};
 use crate::text_overlay;
 use crate::theme::Theme;
 use crate::usage_overlay;
@@ -158,7 +158,7 @@ pub(super) fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stderr>>,
     overlay: &Overlay,
     hits: &mut PickerHits,
-    dock_hits: &mut Vec<(Rect, String)>,
+    dock_hits: &mut Vec<(Rect, TaskDockHit)>,
     goal_hits: &mut Vec<(Rect, GoalHit)>,
     queue_hits: &mut Vec<(Rect, QueueHit)>,
     pointer: (u16, u16),
@@ -244,11 +244,13 @@ pub(super) fn draw(
             } else {
                 status::turn_status_height(ctx, modal_open)
             };
-            let dock_h = if inspect_open {
-                0
+            // 一帧只收一次：高度和绘制共用这一份。
+            let dock_rows = if inspect_open {
+                Vec::new()
             } else {
-                subagent_dock::desired_height(ctx, inner.width)
+                task_dock_rows(ctx)
             };
+            let dock_h = task_dock::desired_height(dock_rows.len());
             let goal_h = if inspect_open || modal_open {
                 0
             } else {
@@ -349,14 +351,7 @@ pub(super) fn draw(
             let mut files_open = false;
             if !inspect_open {
                 *hits = paint_overlay(ctx, frame.buffer_mut(), scroll_area, overlay, on_welcome);
-                let selected_sub = match overlay {
-                    Overlay::Inspect {
-                        target: InspectTarget::Subagent(id),
-                        ..
-                    } => Some(id.as_str()),
-                    _ => None,
-                };
-                *dock_hits = subagent_dock::paint(ctx, frame.buffer_mut(), dock_area, selected_sub);
+                *dock_hits = task_dock::paint(frame.buffer_mut(), dock_area, &dock_rows);
                 if goal_h > 0 {
                     if let Some(goal) = ctx.get::<Goal>(GOAL) {
                         *goal_hits = goal_pane::paint(

@@ -12,8 +12,8 @@
 //! ## Why a shine and not a spinner
 //!
 //! Dock already has a motion vocabulary — the welcome logo sweeps a diagonal
-//! highlight (`welcome::shine_opacity`) and the subagent dock runs a bead
-//! around each tile rim (`subagent_dock::hot_index`). A running card is the
+//! highlight (`welcome::shine_opacity`) and running rows breathe through
+//! `grok::color::pulse_fg`. A running card is the
 //! same idea reduced to one row: a head travels left to right with a short
 //! trailing glow, tinting the text toward the card's own accent as it passes.
 //! That keeps the card's mark instead of parking a foreign spinner glyph in

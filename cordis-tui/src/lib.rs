@@ -36,7 +36,7 @@ mod shortcuts;
 mod slash;
 mod status;
 mod status_bar;
-mod subagent_dock;
+mod task_dock;
 mod text_overlay;
 mod theme;
 mod usage_overlay;
