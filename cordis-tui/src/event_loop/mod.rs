@@ -555,6 +555,9 @@ pub async fn run(ctx: Context) -> Result<()> {
                                         tools_expanded: HashSet::new(),
                                         section_collapsed: false,
                                     };
+                                    // 打开即对账：模型在会话里刚写进 config.toml 的
+                                    // 服务器不用重启 dock 就能看见。没变化时静默。
+                                    spawn_mcp_reload(ctx.clone(), redraw_tx.clone(), true);
                                 }
                                 Effect::ShowLsp { write, user } => {
                                     let cwd = std::env::current_dir()
@@ -690,6 +693,9 @@ pub async fn run(ctx: Context) -> Result<()> {
                                 }
                                 Effect::McpAuth { name } => {
                                     spawn_mcp_auth(ctx.clone(), redraw_tx.clone(), name);
+                                }
+                                Effect::ReloadMcps { quiet } => {
+                                    spawn_mcp_reload(ctx.clone(), redraw_tx.clone(), quiet);
                                 }
                             }
                         }

@@ -858,6 +858,44 @@ pub(super) fn spawn_mcp_toggle(
     });
 }
 
+/// 重读 `config.toml` 并与已连服务器对账。`quiet`（开 `/mcps` 时的自动重载）
+/// 只在确实变了或有失败时 flash；手动 Ctrl+R 一律给反馈，否则按键像没反应。
+pub(super) fn spawn_mcp_reload(
+    ctx: Context,
+    redraw: tokio::sync::mpsc::UnboundedSender<()>,
+    quiet: bool,
+) {
+    if ctx.get::<Mcp>(MCP).is_none() {
+        if !quiet {
+            flash(&ctx, "MCP 未挂载");
+        }
+        return;
+    }
+    if !quiet {
+        flash(&ctx, "正在重载 MCP 配置…");
+    }
+    tokio::spawn(async move {
+        let Some(mcp) = ctx.get::<Mcp>(MCP) else {
+            if !quiet {
+                flash(&ctx, "MCP 未挂载");
+            }
+            let _ = redraw.send(());
+            return;
+        };
+        match mcp.reload().await {
+            Ok(report) => {
+                if !quiet || !report.is_noop() {
+                    flash(&ctx, report.summary());
+                }
+            }
+            // 并发重载撞闸时静默：自动那次已经在做同样的事了。
+            Err(e) if !quiet => flash(&ctx, e),
+            Err(_) => {}
+        }
+        let _ = redraw.send(());
+    });
+}
+
 pub(super) fn spawn_mcp_auth(
     ctx: Context,
     redraw: tokio::sync::mpsc::UnboundedSender<()>,
