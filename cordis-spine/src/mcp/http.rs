@@ -3,8 +3,14 @@
 //! Prefer protocol `2026-07-28` (no session; `_meta`, `MCP-Protocol-Version`,
 //! `Mcp-Method` / `Mcp-Name`). On a 400 that is not a modern JSON-RPC error,
 //! fall back to initialize-era `2025-11-25` with `Mcp-Session-Id`.
-//! Standing GET SSE + session 404 recover; POST SSE is processed in order
-//! (elicitation must complete before later events on that stream).
+//! Standing GET SSE + session 404 recover.
+//!
+//! POST SSE **不再**串行等 elicitation 完成。原来的「按序处理，elicitation 先
+//! 完成再处理该流上的后续事件」在真实场景下是死锁源：`elicitation/create` 要等
+//! 用户填完整张表单，这期间流的消费停摆，服务器发来的任何东西（包括本次
+//! `tools/call` 的结果）都读不到，表单填得越久越像卡死。改成把服务器请求交给
+//! 单独的任务处理、回复走 `HttpShared::reply_tx`。JSON-RPC 按 id 配对，顺序不是
+//! 正确性的前提；服务器也不会在拿到 elicitation 答复前发依赖它的事件。
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,7 +20,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde_json::{json, Value};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::config::{McpServer, McpTransport};
 use crate::mcp::protocol::{
@@ -50,6 +56,7 @@ pub(super) async fn connect(
     let client = build_client(&server.name, url, headers)?;
     let (protocol_watch, proto_rx) = watch::channel(PROTOCOL_LATEST.to_string());
     let (session_watch, sid_rx) = watch::channel(None);
+    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<Value>();
     let shared = Arc::new(HttpShared {
         client: client.clone(),
         url: url.clone(),
@@ -62,6 +69,14 @@ pub(super) async fn connect(
         pending: Mutex::new(HashMap::new()),
         hooks,
         handshake: tokio::sync::Mutex::new(()),
+        reply_tx,
+    });
+    // 回复写侧：所有 sender 随 Arc<HttpShared> 一起 drop 时自然收尾。
+    let reply_shared = shared.clone();
+    tokio::spawn(async move {
+        while let Some(reply) = reply_rx.recv().await {
+            let _ = post_raw(&reply_shared, &reply).await;
+        }
     });
     let timeout = Duration::from_secs(server.startup_timeout_sec.max(1));
     let listed = tokio::time::timeout(timeout, handshake(&shared))
@@ -133,6 +148,12 @@ struct HttpShared {
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     hooks: LiveHooks,
     handshake: tokio::sync::Mutex<()>,
+    /// 服务器发来的请求（`elicitation/create`）的回复出口。
+    ///
+    /// 不能在 `ingest` 里直接 `post_raw` 回复：那会让读侧一直等到用户填完整张
+    /// 表单。走通道还顺带打断了 `ingest → post_raw → post → ingest` 这个递归
+    /// async 环 —— 有环的时候编译器推不出 `Send`，什么都 spawn 不出去。
+    reply_tx: mpsc::UnboundedSender<Value>,
 }
 
 impl HttpShared {
@@ -330,7 +351,30 @@ async fn rpc_inner(
             s.pending.lock().unwrap().remove(&id);
             Ok(v)
         }
-        Ok(None) => rx.await.map_err(|_| "MCP HTTP closed".into()),
+        // 结果走 SSE 回来：和 stdio 一样要有兜底 deadline，否则服务器不回就是
+        // 永久挂起，无人值守时没有任何恢复手段。
+        Ok(None) => {
+            let Some(budget) = protocol::call_timeout() else {
+                return rx.await.map_err(|_| "MCP HTTP closed".into());
+            };
+            match tokio::time::timeout(budget, rx).await {
+                Ok(Ok(v)) => Ok(v),
+                Ok(Err(_)) => Err("MCP HTTP closed".into()),
+                Err(_) => {
+                    s.pending.lock().unwrap().remove(&id);
+                    let _ = Box::pin(post_raw(
+                        s,
+                        &protocol::cancelled_notification(id, "client timeout"),
+                    ))
+                    .await;
+                    Err(format!(
+                        "MCP {method} 超时（{}s 未响应）。调长或取消上限：{}=<秒数>（0 = 不限）",
+                        budget.as_secs(),
+                        protocol::CALL_TIMEOUT_ENV
+                    ))
+                }
+            }
+        }
         Err(e) => {
             s.pending.lock().unwrap().remove(&id);
             Err(e)
@@ -373,8 +417,15 @@ async fn ingest(s: &HttpShared, v: Value, want_id: Option<u64>) -> Option<Value>
             None
         }
         Incoming::Request { id, method, params } => {
-            let reply = incoming::request(&s.hooks, id, method, params).await;
-            let _ = Box::pin(post_raw(s, &reply)).await;
+            // 同 stdio：`elicitation/create` 会一直等到用户填完整张表，在这里
+            // await 会把 SSE 的消费停摆，服务器发来的任何东西（包括这次
+            // tools/call 的结果）都读不到。JSON-RPC 按 id 配对，回复不需要保序。
+            let hooks = s.hooks.clone();
+            let tx = s.reply_tx.clone();
+            tokio::spawn(async move {
+                let reply = incoming::request(&hooks, id, method, params).await;
+                let _ = tx.send(reply);
+            });
             None
         }
     }
@@ -548,6 +599,10 @@ mod tests {
         Unauthorized,
         Paged,
         SessionDrop,
+        /// `tools/call` 的回复是一条 SSE 流，里面先是一个**没人会回答**的
+        /// `elicitation/create`，然后才是调用结果。用来钉住「读侧不被
+        /// elicitation 挡住」。
+        ElicitThenResult,
     }
 
     async fn connect_test(
@@ -621,6 +676,16 @@ mod tests {
         buf.windows(4).position(|w| w == b"\r\n\r\n")
     }
 
+    /// 一条 SSE 响应，按顺序携带若干 JSON-RPC 消息。
+    fn sse_response(events: &[Value]) -> Vec<u8> {
+        let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
     fn json_response(status: u16, extra_headers: &str, body: &str) -> Vec<u8> {
         format!(
             "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}\r\n{body}",
@@ -682,6 +747,43 @@ mod tests {
                     })
                     .to_string(),
                 ),
+            },
+            Mode::ElicitThenResult => match method {
+                "tools/list" => json_response(
+                    200,
+                    "",
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "tools": [{
+                            "name": "echo",
+                            "description": "echo text",
+                            "inputSchema": { "type": "object" }
+                        }] }
+                    })
+                    .to_string(),
+                ),
+                "tools/call" => sse_response(&[
+                    // 没有 TUI 来回答它 —— `Elicitation::create` 会一直挂着。
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 9001,
+                        "method": "elicitation/create",
+                        "params": {
+                            "message": "确认？",
+                            "requestedSchema": {
+                                "type": "object",
+                                "properties": { "ok": { "type": "boolean" } }
+                            }
+                        }
+                    }),
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "content": [{ "type": "text", "text": "结果送达" }] }
+                    }),
+                ]),
+                _ => json_response(200, "", &json!({ "jsonrpc": "2.0", "id": id, "result": {} }).to_string()),
             },
             Mode::Modern => match method {
                 "tools/list" => {
@@ -876,6 +978,33 @@ mod tests {
         )
         .await;
         assert_eq!(result.content, "hi");
+        handle.abort();
+    }
+
+    /// 服务器在同一条 SSE 流上先发 `elicitation/create` 再发调用结果。
+    ///
+    /// 改之前 `ingest` 会在读侧内联 await `incoming::request`，而
+    /// `elicitation/create` 要等用户填完整张表单 —— 没有 TUI 就是永远。结果事件
+    /// 排在它后面，于是 `tools/call` 永久挂起：工具调用卡住、整轮对话结束不了，
+    /// 正是线上报的那个现象。
+    #[tokio::test]
+    async fn elicitation_does_not_block_the_call_result() {
+        let (url, handle) = spawn_server(Mode::ElicitThenResult).await;
+        let (_, call) = connect_test(&http_server(url)).await.expect("connect");
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            call(
+                "mcp_local__echo".into(),
+                ToolCall {
+                    id: "1".into(),
+                    name: "mcp_local__echo".into(),
+                    arguments: "{}".into(),
+                },
+            ),
+        )
+        .await
+        .expect("结果不该被没人回答的 elicitation 挡住");
+        assert_eq!(result.content, "结果送达");
         handle.abort();
     }
 

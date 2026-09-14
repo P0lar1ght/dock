@@ -68,6 +68,35 @@ pub fn client_capabilities() -> Value {
     })
 }
 
+/// 单次 JSON-RPC 请求的兜底超时。
+///
+/// `startup_timeout_sec` 只覆盖握手与 `tools/list`；`tools/call` 此前完全没有
+/// deadline —— 服务器接了调用不回就是永久挂起，无人值守时（`/loop`、后台子代理）
+/// 没有任何恢复手段。
+///
+/// 取值刻意宽松：取消赛跑已经让用户随时能 `[stop]`，这里只当最后一道兜底，不去
+/// 猜哪个工具"应该"跑多久。`DOCK_MCP_CALL_TIMEOUT_SECS` 可覆盖（0 = 不限）。
+pub const DEFAULT_CALL_TIMEOUT_SECS: u64 = 600;
+pub const CALL_TIMEOUT_ENV: &str = "DOCK_MCP_CALL_TIMEOUT_SECS";
+
+pub fn call_timeout() -> Option<std::time::Duration> {
+    let secs = std::env::var(CALL_TIMEOUT_ENV)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CALL_TIMEOUT_SECS);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
+/// MCP 规范的取消通知。放弃等待时发给服务器，让它能停掉自己那边的活
+/// （已经拉起的浏览器、建立中的连接……），而不是留着测废进程。
+pub fn cancelled_notification(request_id: u64, reason: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": { "requestId": request_id, "reason": reason }
+    })
+}
+
 pub fn request_meta(protocol: &str) -> Value {
     json!({
         META_PROTOCOL: protocol,
@@ -525,6 +554,40 @@ pub fn parse_sse_json_values(body: &str) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    /// 兜底超时可以被 env 调整，`0` 表示不限。没有这条出口的话，一个合法的长
+    /// 工具调用会被硬编码上限误杀，而用户没有任何办法放宽。
+    #[test]
+    fn call_timeout_reads_the_env_override() {
+        let _env = crate::test_env::scoped();
+        assert_eq!(
+            call_timeout(),
+            Some(std::time::Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS))
+        );
+
+        let _env = _env.set(CALL_TIMEOUT_ENV, "5");
+        assert_eq!(call_timeout(), Some(std::time::Duration::from_secs(5)));
+
+        let _env = _env.set(CALL_TIMEOUT_ENV, "0");
+        assert_eq!(call_timeout(), None, "0 = 不限");
+
+        let _env = _env.set(CALL_TIMEOUT_ENV, "不是数字");
+        assert_eq!(
+            call_timeout(),
+            Some(std::time::Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS)),
+            "解析不了就退回默认，不要变成不限"
+        );
+    }
+
+    /// 放弃等待时要按规范通知服务器，否则它那边的活会一直挂着。
+    #[test]
+    fn cancelled_notification_shape() {
+        let v = cancelled_notification(7, "client timeout");
+        assert_eq!(v["method"], "notifications/cancelled");
+        assert_eq!(v["params"]["requestId"], 7);
+        assert_eq!(v["params"]["reason"], "client timeout");
+        assert!(v.get("id").is_none(), "通知不带 id");
+    }
+
     use super::*;
 
     #[test]

@@ -981,6 +981,44 @@ mod tests {
         assert_eq!(result["content"]["env"], "staging");
     }
 
+    /// 可选文本字段留空必须能提交 —— 否则表单走不完，MCP 请求永远不 resolve，
+    /// 工具调用和整轮对话一起卡死。必填的仍要挡住。
+    ///
+    /// TUI 侧不再自己预判空输入，就靠这里的两条分支；改这里要同步想清楚
+    /// `accept_elicit` 会把哪条错误闪给用户。
+    #[tokio::test]
+    async fn optional_text_accepts_empty_but_required_does_not() {
+        let root = Context::new();
+        let elicit = Elicitation::new(root);
+        let params = json!({
+            "message": "备注",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "must": { "type": "string", "title": "必填" },
+                    "note": { "type": "string", "title": "可选备注" }
+                },
+                "required": ["must"]
+            }
+        });
+        let handle = tokio::spawn({
+            let elicit = elicit.clone();
+            async move { elicit.create("local", params).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // 字段顺序跟 schema 的 properties 走：先 must，后 note。
+        assert_eq!(elicit.accept_text("").unwrap_err(), "此项必填");
+        elicit.accept_text("有值").unwrap();
+        // 可选字段留空直接过。
+        elicit.accept_text("").unwrap();
+
+        let result = handle.await.unwrap();
+        assert_eq!(result["action"], "accept");
+        assert_eq!(result["content"]["must"], "有值");
+        assert_eq!(result["content"]["note"], "");
+    }
+
     #[tokio::test]
     async fn other_multi_replaces_sentinel_with_draft() {
         let root = Context::new();

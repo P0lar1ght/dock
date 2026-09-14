@@ -310,7 +310,23 @@ async fn rpc(s: &Shared, method: &str, params: Value) -> Result<Value, String> {
         s.pending.lock().unwrap().remove(&id);
         return Err(e);
     }
-    rx.await.map_err(|_| "MCP stdio closed".to_string())
+    let Some(budget) = protocol::call_timeout() else {
+        return rx.await.map_err(|_| "MCP stdio closed".to_string());
+    };
+    match tokio::time::timeout(budget, rx).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(_)) => Err("MCP stdio closed".to_string()),
+        Err(_) => {
+            s.pending.lock().unwrap().remove(&id);
+            // 告诉服务器别再算了，否则它那边的活会一直挂着。
+            let _ = write_msg(s, &protocol::cancelled_notification(id, "client timeout")).await;
+            Err(format!(
+                "MCP {method} 超时（{}s 未响应）。调长或取消上限：{}=<秒数>（0 = 不限）",
+                budget.as_secs(),
+                protocol::CALL_TIMEOUT_ENV
+            ))
+        }
+    }
 }
 
 async fn notify(s: &Shared, method: &str, params: Value) -> Result<(), String> {
@@ -378,8 +394,16 @@ async fn reader_loop(
                         incoming::note(&shared.hooks, &method, &params);
                     }
                     Incoming::Request { id, method, params } => {
-                        let reply = incoming::request(&shared.hooks, id, method, params).await;
-                        let _ = write_msg(&shared, &reply).await;
+                        // 绝不能在读循环里 await：`elicitation/create` 会一直等到
+                        // 用户填完整张表，期间读循环停摆，服务器发来的任何东西
+                        // （包括这次 tools/call 的结果）都读不到 —— 表单填得越久
+                        // 越像死锁。JSON-RPC 按 id 配对，回复不需要保序。
+                        let shared = shared.clone();
+                        tokio::spawn(async move {
+                            let reply =
+                                incoming::request(&shared.hooks, id, method, params).await;
+                            let _ = write_msg(&shared, &reply).await;
+                        });
                     }
                 }
             }
