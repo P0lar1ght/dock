@@ -77,18 +77,23 @@ pub(super) fn open_permission_if_needed(ctx: &Context, overlay: &mut Overlay) {
     ) {
         return;
     }
-    if matches!(overlay, Overlay::Elicit { .. }) {
-        overlay.close();
-    } else if overlay.is_open() {
-        return;
-    }
+    // 先确认真有待授权项，再决定要不要抢前台。
+    //
+    // 反过来写（看见 elicit 就先 close 再看有没有东西要显示）会在没有待授权项时
+    // 把正在填的 elicit 表单每轮拆掉重建 —— 它的 selected / picked / draft 活在
+    // overlay 上，重建就等于全部打回默认。
     if ctx
         .get::<Permissions>(PERMISSIONS)
         .and_then(|p| p.front())
-        .is_some()
+        .is_none()
     {
-        *overlay = Overlay::Permission { selected: 0 };
+        return;
     }
+    // 授权门优先级高于 elicit，可以抢；其余已开的 overlay 让位给它们。
+    if overlay.is_open() && !matches!(overlay, Overlay::Elicit { .. }) {
+        return;
+    }
+    *overlay = Overlay::Permission { selected: 0 };
 }
 
 pub(super) fn open_slot_if_needed(ctx: &Context, overlay: &mut Overlay) {
@@ -185,14 +190,14 @@ pub(super) fn open_ask_if_needed(ctx: &Context, overlay: &mut Overlay) {
         }
         return;
     }
-    if matches!(overlay, Overlay::Elicit { .. }) {
-        overlay.close();
-    } else if overlay.is_open() {
-        return;
-    }
+    // 同 `open_permission_if_needed`：先确认真有待回答的提问再抢前台，否则会把
+    // 正在填的 elicit 表单每轮拆掉重建。
     let Some(front) = ctx.get::<Ask>(ASK).and_then(|a| a.front()) else {
         return;
     };
+    if overlay.is_open() && !matches!(overlay, Overlay::Elicit { .. }) {
+        return;
+    }
     *overlay = ask_overlay_from_prompt(&front);
 }
 
@@ -523,10 +528,14 @@ pub(super) fn accept_elicit(
         overlay.close();
         return;
     };
-    if mcp_elicit_view::needs_draft(&front, selected, &picked) && draft.trim().is_empty() {
-        flash(ctx, "请输入具体内容");
-        return;
-    }
+    // 空输入该不该挡由服务侧一处判：`text_value` 对必填空值回「此项必填」，
+    // `other_content` 对空的「其他」回「请输入具体内容」，两条都会被下面 flash 出去。
+    //
+    // 这里原本还自己预检一遍 `needs_draft && draft.is_empty()`，但 `needs_draft`
+    // 只看 `typing` / 光标是否停在「其他」上，看不到字段是不是必填 —— 于是
+    // **可选**文本字段留空永远提交不了：回车只闪一下，表单走不完，MCP 请求
+    // 永远不 resolve，工具调用和整轮对话一起卡死。多选里光标恰好停在「其他」
+    // 但没勾它时同理。
     let result = if front.typing {
         elicit.accept_text(draft)
     } else {
@@ -1409,6 +1418,108 @@ mod tests {
             "前台命令不该出现在任务条上"
         );
         let _ = jobs.kill(&id).await;
+    }
+
+    /// MCP elicitation 的选择态活在 overlay 上，而 `ElicitPrompt.selected` 每次
+    /// `front()` 都由 `default_selected(field)` 重算。每轮事件循环都会依次跑
+    /// `open_permission_if_needed` → `open_ask_if_needed` → `open_elicit_if_needed`，
+    /// 前两个只要看见 Elicit 就无条件 `close()`，**没确认自己真有待处理项**。
+    /// 于是 elicit overlay 每轮被拆掉重建，selected / picked / draft 全部打回默认：
+    /// 上下键选完立刻被重置（看起来"不能上下选"），回车提交的是默认项而不是
+    /// 高亮项，选到「其他」时 draft 也被清空 → 闪 `请输入具体内容` 后什么都没发生，
+    /// MCP 请求永远不 resolve，工具调用和整轮对话一起卡死。
+    ///
+    /// 点击之所以"能用"，是因为鼠标那一路在同一个事件里选中并立刻 accept，
+    /// 中间没有插进一轮循环。
+    #[test]
+    fn probes_keep_a_live_elicit_overlay_when_they_have_nothing_to_show() {
+        let live = || Overlay::Elicit {
+            selected: 2,
+            picked: vec![false, false, true],
+            draft: "staging".into(),
+        };
+        let assert_intact = |overlay: &Overlay, who: &str| match overlay {
+            Overlay::Elicit {
+                selected,
+                picked,
+                draft,
+            } => {
+                assert_eq!(*selected, 2, "{who} 不该重置 selected");
+                assert_eq!(
+                    picked.as_slice(),
+                    [false, false, true],
+                    "{who} 不该重置 picked"
+                );
+                assert_eq!(draft, "staging", "{who} 不该清空 draft");
+            }
+            other => panic!("{who} 不该关掉 elicit overlay，实际：{other:?}"),
+        };
+
+        // 没有 ASK / PERMISSIONS 服务 —— 等价于「没有待处理的提问 / 授权」。
+        let root = Context::new();
+
+        let mut overlay = live();
+        open_ask_if_needed(&root, &mut overlay);
+        assert_intact(&overlay, "open_ask_if_needed");
+
+        let mut overlay = live();
+        open_permission_if_needed(&root, &mut overlay);
+        assert_intact(&overlay, "open_permission_if_needed");
+
+        // 事件循环里排在 elicit 之前的三个探针连着跑完也要原样还在。
+        // （`open_elicit_if_needed` 是 owner，队列空时由它关掉是正确行为，
+        // 这个测试里没挂 MCP 服务，所以不把它算进来。）
+        let mut overlay = live();
+        open_pairing_if_needed(&root, &mut overlay);
+        open_permission_if_needed(&root, &mut overlay);
+        open_ask_if_needed(&root, &mut overlay);
+        assert_intact(&overlay, "elicit 之前的三个探针");
+    }
+
+    /// 反方向：修好「没东西就别动 elicit」之后，**真有**待回答提问时的抢占不能丢。
+    #[tokio::test]
+    async fn a_pending_ask_still_preempts_the_elicit_overlay() {
+        use cordis_spine::{Ask, Question, QuestionOption, ASK};
+
+        let root = Context::new();
+        let _hold = root.provide(ASK, Ask::new(root.clone())).unwrap();
+        let ask = root.get::<Ask>(ASK).unwrap();
+        let pending = tokio::spawn({
+            let ask = ask.clone();
+            async move {
+                ask.ask(vec![Question {
+                    question: "继续吗？".into(),
+                    options: vec![QuestionOption {
+                        label: "继续".into(),
+                        description: String::new(),
+                        preview: None,
+                        id: None,
+                    }],
+                    multi_select: Some(false),
+                    id: None,
+                }])
+                .await
+            }
+        });
+        for _ in 0..100 {
+            if ask.front().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut overlay = Overlay::Elicit {
+            selected: 1,
+            picked: Vec::new(),
+            draft: String::new(),
+        };
+        open_ask_if_needed(&root, &mut overlay);
+        assert!(
+            matches!(overlay, Overlay::Ask { .. }),
+            "有待回答的提问时仍要抢前台，实际：{overlay:?}"
+        );
+        ask.cancel();
+        let _ = pending.await;
     }
 
     /// `collect_items` 不过滤 done 子代理（`/tasks` 要把它们列出来），任务条必须
