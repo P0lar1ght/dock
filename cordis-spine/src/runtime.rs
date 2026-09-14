@@ -187,7 +187,12 @@ async fn grok_sample_loop(
             for call in output.tool_calls {
                 abort_if_cancelled(ctx, sessions)?;
                 let arguments = call.arguments.clone();
-                let result = tools.execute_on(ctx, call).await;
+                let Some(result) = execute_cancellable(ctx, tools, call).await else {
+                    // 工具跑到一半被 Stop：给未完成的 tool call 补上中断结果，
+                    // 否则下一次采样会因为缺 tool result 400。
+                    sessions.seal_incomplete_tool_calls();
+                    return Err(Error::Cancelled);
+                };
                 sessions.append(LogEvent::ToolExecute {
                     id: result.call_id,
                     name: result.name,
@@ -292,6 +297,31 @@ fn abort_if_cancelled(ctx: &Context, sessions: &Sessions) -> Result<()> {
     }
 }
 
+/// 工具执行与取消赛跑。`None` = 工具还在跑的时候用户按了 Stop。
+///
+/// 裸 `await` 的话 `[stop]` 只是把 `TurnControl` 的 token 置位，没人监听，工具
+/// 一旦开始就只能等它自己返回。`bash` 显得能取消纯粹是因为它**自己**在循环里
+/// 轮询 `is_cancelled()`；MCP 的 `tools/call` 是 `rx.await`，没有这层，于是
+/// 服务器不回 = 整轮对话永远结束不了，Stop 按了也没反应。
+///
+/// 放在这里而不是让每个工具各自轮询：取消是循环的事，不该要求每个工具体都记得
+/// 自己实现一遍。
+async fn execute_cancellable(
+    ctx: &Context,
+    tools: &Tools,
+    call: crate::types::ToolCall,
+) -> Option<crate::types::ToolResult> {
+    let Some(token) = ctx.get::<TurnControl>(TURN).map(|t| t.token()) else {
+        return Some(tools.execute_on(ctx, call).await);
+    };
+    tokio::select! {
+        // 两边同时就绪时优先收工具的结果，别把已经跑完的活丢掉。
+        biased;
+        result = tools.execute_on(ctx, call) => Some(result),
+        _ = token.cancelled() => None,
+    }
+}
+
 pub struct LoopHandle {
     ctx: Context,
     driver: Arc<dyn Driver>,
@@ -314,5 +344,79 @@ impl LoopHandle {
     /// Hidden GoalSummary turn: reminder then sample, no user bubble.
     pub async fn continue_goal(&self) -> Result<TurnOutcome> {
         grok_continue_goal(&self.ctx).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tools;
+    use crate::types::ToolSpec;
+    use std::time::Duration;
+
+    /// Stop 必须能打断已经在跑的工具。
+    ///
+    /// 改之前这里是裸 `await`：`[stop]` 只把 token 置位，没人监听，工具一旦开始
+    /// 就只能等它自己返回。`bash` 显得能取消是因为它自己在循环里轮询
+    /// `is_cancelled()`；MCP 的 `tools/call` 是 `rx.await`，没有这层 —— 服务器
+    /// 不回就是整轮对话永远结束不了，Stop 按了也没反应。
+    #[tokio::test]
+    async fn stop_interrupts_a_tool_that_never_returns() {
+        let root = Context::new();
+        let tools = Tools::echo(root.clone());
+        let _hold_tools = root.provide(TOOLS, tools).unwrap();
+        let _hold_turn = root.provide(TURN, TurnControl::new()).unwrap();
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+
+        let _reg = tools
+            .register(
+                ToolSpec {
+                    name: "never_returns".into(),
+                    description: "挂住不返回".into(),
+                    parameters_json: r#"{"type":"object"}"#.into(),
+                },
+                std::sync::Arc::new(|_call| {
+                    Box::pin(async move {
+                        std::future::pending::<()>().await;
+                        unreachable!()
+                    })
+                }),
+            )
+            .unwrap();
+
+        let turn = root.require::<TurnControl>(TURN).unwrap();
+        let stopper = turn.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stopper.cancel();
+        });
+
+        let call = crate::types::ToolCall {
+            id: "1".into(),
+            name: "never_returns".into(),
+            arguments: "{}".into(),
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            execute_cancellable(&root, &tools, call),
+        )
+        .await
+        .expect("Stop 之后必须让出控制权，不能一直挂着");
+        assert!(outcome.is_none(), "被 Stop 打断时不该返回工具结果");
+    }
+
+    /// 没挂 `TurnControl` 时退回原来的行为：直接等工具跑完。
+    #[tokio::test]
+    async fn without_turn_control_the_tool_still_runs() {
+        let root = Context::new();
+        let tools = Tools::echo(root.clone());
+        let _hold = root.provide(TOOLS, tools).unwrap();
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+        let call = crate::types::ToolCall {
+            id: "1".into(),
+            name: "echo".into(),
+            arguments: "hi".into(),
+        };
+        assert!(execute_cancellable(&root, &tools, call).await.is_some());
     }
 }
