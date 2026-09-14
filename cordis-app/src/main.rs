@@ -18,6 +18,10 @@ fn parse_args() -> ResumeArg {
                 print_help();
                 std::process::exit(0);
             }
+            "-V" | "--version" => {
+                println!("dock {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "-r" | "--resume" => {
                 resume = match args.next() {
                     Some(id) if !id.starts_with('-') => ResumeArg::Id(id),
@@ -40,10 +44,11 @@ fn print_help() {
 Dock — Grok-shaped TUI on a Cordis plugin tree.
 
 Usage:
-  cargo run -p cordis-app -- [options]
+  dock [options]
 
 Options:
   -r, --resume [id]  Restore the latest session for this cwd, or a specific id
+  -V, --version      Print version and exit
   -h, --help         Show this help
 
 Sessions are stored in $DOCK_HOME/sessions/<cwd>/ (default ~/.dock/sessions/).
