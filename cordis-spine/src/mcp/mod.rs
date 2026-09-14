@@ -66,6 +66,113 @@ pub struct McpStatus {
     pub tools: Vec<McpToolStatus>,
 }
 
+/// 一次 [`Mcp::reload`] 做了什么。`added` 记的是「配置里新出现」，与 `failed`
+/// 不互斥：新服务器连不上时两边都有它。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct McpReloadReport {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    /// 配置改过、或上次没连上这次重试成功的。
+    pub reconnected: Vec<String>,
+    /// 配置里被改成 `enabled = false` 的。
+    pub disabled: Vec<String>,
+    /// 配置一致且连接健康，一个字节都没碰。
+    pub unchanged: usize,
+    pub failed: Vec<(String, String)>,
+}
+
+impl McpReloadReport {
+    pub fn is_noop(&self) -> bool {
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.reconnected.is_empty()
+            && self.disabled.is_empty()
+            && self.failed.is_empty()
+    }
+
+    /// 给 TUI flash 用的一行中文摘要。
+    pub fn summary(&self) -> String {
+        if self.is_noop() {
+            return "MCP 配置无变化".into();
+        }
+        let mut parts = Vec::new();
+        let mut push = |label: &str, names: &[String]| {
+            if !names.is_empty() {
+                parts.push(format!("{label} {}", names.join("、")));
+            }
+        };
+        push("新增", &self.added);
+        push("移除", &self.removed);
+        push("重连", &self.reconnected);
+        push("禁用", &self.disabled);
+        if !self.failed.is_empty() {
+            let detail: Vec<String> = self
+                .failed
+                .iter()
+                .map(|(name, err)| format!("{name}（{}）", clip(err, 40)))
+                .collect();
+            parts.push(format!("失败 {}", detail.join("、")));
+        }
+        format!("MCP 配置已重载：{}", parts.join("；"))
+    }
+}
+
+fn clip(text: &str, max_chars: usize) -> String {
+    let mut out: String = text.chars().take(max_chars).collect();
+    if out.chars().count() < text.chars().count() {
+        out.push('…');
+    }
+    out
+}
+
+/// 一个 slot 在重载时该怎么处理。判定见 [`plan_for`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SlotPlan {
+    /// 配置里新出现。
+    Add,
+    /// 配置里整条没了。
+    Remove,
+    /// 配置里转成 `enabled = false`。
+    Unplug,
+    /// 配置内容变了（命令 / args / env / url / headers / timeout / oauth / 转成启用）。
+    Reconnect,
+    /// 配置一致但没连上（从没连过，或上次报错）—— 改完命令行重载就能自愈。
+    Retry,
+    /// 配置一致且连接健康 —— 不碰。重连 stdio 会杀掉子进程，
+    /// 连带丢掉它自己的会话状态（cua-driver 的浏览器就是这样）。
+    Keep,
+}
+
+/// `current` 是 `(当前配置, 是否已连上)`，两侧的 `None` 表示这个名字在
+/// slots / 配置文件里不存在。`McpServer` 的 `Eq` 含 `enabled`，所以
+/// 「禁用转启用」自然落进 `Reconnect`。
+pub(super) fn plan_for(
+    current: Option<(&McpServer, bool)>,
+    desired: Option<&McpServer>,
+) -> SlotPlan {
+    match (current, desired) {
+        (None, Some(_)) => SlotPlan::Add,
+        (Some(_), None) => SlotPlan::Remove,
+        (None, None) => SlotPlan::Keep,
+        (Some((current, connected)), Some(desired)) => {
+            if !desired.enabled {
+                return if current.enabled {
+                    SlotPlan::Unplug
+                } else {
+                    SlotPlan::Keep
+                };
+            }
+            if current != desired {
+                SlotPlan::Reconnect
+            } else if connected {
+                SlotPlan::Keep
+            } else {
+                SlotPlan::Retry
+            }
+        }
+    }
+}
+
 struct Slot {
     config: McpServer,
     call: Option<CallFn>,
@@ -90,6 +197,16 @@ pub struct Mcp {
     changed_tx: tokio::sync::mpsc::UnboundedSender<String>,
     dirty: Arc<AtomicBool>,
     announced: Arc<Mutex<HashMap<String, discover::ServerFingerprint>>>,
+    reloading: Arc<AtomicBool>,
+}
+
+/// drop 时放开重载闸，panic 也不会把标志位卡死。
+struct ReloadGuard(Arc<AtomicBool>);
+
+impl Drop for ReloadGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Mcp {
@@ -105,6 +222,7 @@ impl Mcp {
             changed_tx,
             dirty: Arc::new(AtomicBool::new(false)),
             announced: Arc::new(Mutex::new(HashMap::new())),
+            reloading: Arc::new(AtomicBool::new(false)),
         };
         spawn_changed_refresh(mcp.clone(), changed_rx);
         mcp
@@ -204,6 +322,147 @@ impl Mcp {
         self.mark_dirty();
         self.maybe_inject_reminder();
         Ok(())
+    }
+
+    /// 重读配置文件并与当前 slots 对账：新增 / 移除 / 改动 / 禁用都就地生效，
+    /// 配置一致且连着的服务器一个字节都不碰。目录变化走和 `/mcps` 开关同一条
+    /// `<system-reminder>` 通道，模型下一轮就知道它刚配的服务器上线了。
+    ///
+    /// 同时只允许一个重载在跑；第二个调用立刻拿到 `Err`。
+    pub async fn reload(&self) -> Result<McpReloadReport, String> {
+        if self.reloading.swap(true, Ordering::SeqCst) {
+            return Err("MCP 配置正在重载中".into());
+        }
+        let _guard = ReloadGuard(self.reloading.clone());
+        Ok(self.reload_inner().await)
+    }
+
+    async fn reload_inner(&self) -> McpReloadReport {
+        let desired = config::load_mcp_servers();
+        let disabled_map = config::load_disabled_mcp_tools();
+        let mut report = McpReloadReport::default();
+        let mut to_connect: Vec<(McpServer, SlotPlan)> = Vec::new();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let tools = inner.tools.clone();
+            let by_name: HashMap<&str, &McpServer> =
+                desired.iter().map(|s| (s.name.as_str(), s)).collect();
+
+            inner.slots.retain_mut(|slot| {
+                let want = by_name.get(slot.config.name.as_str()).copied();
+                let plan = plan_for(Some((&slot.config, slot.call.is_some())), want);
+                let Some(want) = want else {
+                    // Remove：配置里整条没了。
+                    drop_registered(slot);
+                    stop_slot(slot);
+                    report.removed.push(slot.config.name.clone());
+                    return false;
+                };
+                let name = slot.config.name.clone();
+                // 先落新配置，`connect_slot` 只写连接结果、不碰 `slot.config`。
+                slot.config = want.clone();
+                let want_disabled: HashSet<String> = disabled_map
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                let disabled_changed = slot.disabled_tools != want_disabled;
+                slot.disabled_tools = want_disabled;
+                match plan {
+                    SlotPlan::Unplug => {
+                        drop_registered(slot);
+                        stop_slot(slot);
+                        slot.call = None;
+                        slot.relist = None;
+                        slot.last_error = None;
+                        report.disabled.push(name);
+                    }
+                    SlotPlan::Keep => {
+                        report.unchanged += 1;
+                        // `[disabled_mcp_tools.*]` 的编辑也要跟着生效；
+                        // Reconnect / Retry 走 connect_slot，那边自会 sync。
+                        if disabled_changed && slot.config.enabled {
+                            if let Some(tools) = tools.as_ref() {
+                                sync_listed(slot, tools);
+                            }
+                        }
+                    }
+                    SlotPlan::Reconnect | SlotPlan::Retry => {
+                        to_connect.push((want.clone(), plan));
+                    }
+                    // 走不到：`plan_for(Some(..), Some(..))` 不返回这两个。
+                    // 但这里正持着 `inner` 的锁，panic 会把整个 MCP 子系统毒死，
+                    // 所以留原样并记一条，不 `unreachable!`。
+                    SlotPlan::Add | SlotPlan::Remove => {
+                        tracing::warn!(server = name.as_str(), ?plan, "MCP 重载遇到意外的 plan");
+                    }
+                }
+                true
+            });
+
+            for server in &desired {
+                if inner.slots.iter().any(|s| s.config.name == server.name) {
+                    continue;
+                }
+                let disabled_tools = disabled_map
+                    .get(&server.name)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                inner.slots.push(Slot {
+                    config: server.clone(),
+                    call: None,
+                    relist: None,
+                    stop: None,
+                    listed: Vec::new(),
+                    disabled_tools,
+                    registered: HashMap::new(),
+                    last_error: None,
+                });
+                report.added.push(server.name.clone());
+                if server.enabled {
+                    to_connect.push((server.clone(), SlotPlan::Add));
+                }
+            }
+
+            // 让 `/mcps` 的行序跟着配置文件走，重载后不无故洗牌。
+            let order: HashMap<&str, usize> = desired
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.name.as_str(), i))
+                .collect();
+            inner.slots.sort_by_key(|s| {
+                order
+                    .get(s.config.name.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
+
+        // 串行连接的话，3 个坏服务器 × 默认 30s startup_timeout 就是 90s 卡死。
+        // `connect_slot` 全程不跨 await 持锁，可以并发。
+        let results = futures_util::future::join_all(to_connect.into_iter().map(
+            |(server, plan)| async move {
+                let result = self.connect_slot(&server).await;
+                (server.name, plan, result)
+            },
+        ))
+        .await;
+        for (name, plan, result) in results {
+            match result {
+                Ok(()) if plan == SlotPlan::Add => {}
+                Ok(()) => report.reconnected.push(name),
+                Err(e) => report.failed.push((name, e)),
+            }
+        }
+
+        if !report.is_noop() {
+            self.mark_dirty();
+            self.maybe_inject_reminder();
+        }
+        report
     }
 
     /// Browser PKCE for an HTTP MCP server. Reconnects when the server is enabled.
@@ -745,6 +1004,33 @@ mod tests {
         tools.specs().into_iter().map(|s| s.name).collect()
     }
 
+    /// `DOCK_HOME` + cwd 都指向空临时目录，再把 `body` 写成用户级 catalog。
+    /// 返回的 guard 与 cwd 目录要一直持到用例结束。
+    fn isolated_config(body: &str) -> (crate::test_env::EnvScope, tempfile::TempDir) {
+        let cwd = tempfile::tempdir().unwrap();
+        let env = crate::test_env::scoped().home().cwd(cwd.path());
+        std::fs::write(config::dock_home().join("config.toml"), body).unwrap();
+        (env, cwd)
+    }
+
+    /// 与 `fake_config("probe")` 完全等价的一行配置 —— `plan_for` 必须判成 `Keep`。
+    const PROBE_TOML: &str = r#"
+[mcp_servers.probe]
+command = "true"
+framing = "auto"
+startup_timeout_sec = 1
+"#;
+
+    fn slot_call(mcp: &Mcp, name: &str) -> Option<CallFn> {
+        mcp.inner
+            .lock()
+            .unwrap()
+            .slots
+            .iter()
+            .find(|s| s.config.name == name)
+            .and_then(|s| s.call.clone())
+    }
+
     async fn boot() -> (cordis::Context, Mcp, Tools) {
         let ctx = cordis::Context::new();
         crate::install_without_llm(&ctx).await.unwrap();
@@ -857,5 +1143,178 @@ mod tests {
             "{reminders:?}"
         );
         assert!(!tools.is_mcp("mcp_probe__ping"));
+    }
+
+    #[test]
+    fn plan_for_covers_the_reconcile_table() {
+        let base = fake_config("probe");
+        let mut disabled = base.clone();
+        disabled.enabled = false;
+        let mut changed = base.clone();
+        changed.startup_timeout_sec = 9;
+
+        assert_eq!(plan_for(None, Some(&base)), SlotPlan::Add);
+        assert_eq!(plan_for(Some((&base, true)), None), SlotPlan::Remove);
+        assert_eq!(
+            plan_for(Some((&base, true)), Some(&disabled)),
+            SlotPlan::Unplug
+        );
+        assert_eq!(
+            plan_for(Some((&disabled, false)), Some(&disabled)),
+            SlotPlan::Keep,
+            "本来就禁用、配置也还是禁用，没事可做"
+        );
+        assert_eq!(
+            plan_for(Some((&base, true)), Some(&changed)),
+            SlotPlan::Reconnect
+        );
+        assert_eq!(
+            plan_for(Some((&disabled, false)), Some(&base)),
+            SlotPlan::Reconnect,
+            "禁用转启用要连上来"
+        );
+        assert_eq!(
+            plan_for(Some((&base, true)), Some(&base)),
+            SlotPlan::Keep,
+            "配置没变且连着就别动它 —— 重连 stdio 会杀掉子进程状态"
+        );
+        assert_eq!(
+            plan_for(Some((&base, false)), Some(&base)),
+            SlotPlan::Retry,
+            "配置没变但没连上要重试，这样改完命令行重载就能自愈"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_a_server_added_to_config() {
+        let (_env, _cwd) = isolated_config(
+            r#"
+[mcp_servers.later]
+command = "true"
+enabled = false
+"#,
+        );
+        let (_ctx, mcp, _tools) = boot().await;
+        assert!(mcp.list().is_empty(), "Mcp::new 不读配置，起点必须是空的");
+
+        let report = mcp.reload().await.unwrap();
+        assert_eq!(report.added, ["later"]);
+        assert!(report.failed.is_empty(), "{report:?}");
+        let names: Vec<String> = mcp.list().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["later"], "重载后配置里的新服务器要出现在 /mcps 里");
+    }
+
+    #[tokio::test]
+    async fn reload_drops_a_server_removed_from_config() {
+        let (_env, _cwd) = isolated_config("");
+        let (_ctx, mcp, tools) = boot().await;
+        attach_fake(&mcp, "probe", &[("ping", "ping")]);
+        assert!(tools.is_mcp("mcp_probe__ping"));
+
+        let report = mcp.reload().await.unwrap();
+        assert_eq!(report.removed, ["probe"]);
+        assert!(mcp.list().is_empty(), "配置里没了就不该还列在 /mcps 上");
+        assert!(
+            !tools.is_mcp("mcp_probe__ping"),
+            "它的工具也要从 \"tools\" 注销"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_a_healthy_unchanged_server_connected() {
+        let (_env, _cwd) = isolated_config(PROBE_TOML);
+        let (_ctx, mcp, _tools) = boot().await;
+        attach_fake(&mcp, "probe", &[("ping", "ping")]);
+        let before = slot_call(&mcp, "probe").expect("attach_fake 应当装上 call");
+
+        let report = mcp.reload().await.unwrap();
+        assert_eq!(report.unchanged, 1, "{report:?}");
+        assert!(report.is_noop(), "配置一致时重载应当什么都不做：{report:?}");
+        let after = slot_call(&mcp, "probe").expect("连接不该被拆掉");
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "健康且配置没变的服务器不能重连 —— 重连 stdio 会杀掉它的子进程状态"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_reports_connect_failure_without_poisoning_the_slot() {
+        // `true` 立刻退出，握不上手；1s 预算让失败来得快。
+        let (_env, _cwd) = isolated_config(
+            r#"
+[mcp_servers.broken]
+command = "true"
+startup_timeout_sec = 1
+"#,
+        );
+        let (_ctx, mcp, _tools) = boot().await;
+
+        let report = mcp.reload().await.unwrap();
+        assert_eq!(report.added, ["broken"]);
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert_eq!(report.failed[0].0, "broken");
+        let status = mcp.list();
+        assert_eq!(status.len(), 1, "fail-open：连不上也要留在列表里");
+        assert!(!status[0].ok);
+        assert!(!status[0].detail.is_empty(), "错误详情要显示出来");
+        assert!(
+            report.summary().contains("失败 broken"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_announces_the_delta_to_the_model() {
+        let (_env, _cwd) = isolated_config("");
+        let (ctx, mcp, _tools) = boot().await;
+        attach_fake(&mcp, "probe", &[("ping", "ping")]);
+        mcp.maybe_inject_reminder();
+
+        mcp.reload().await.unwrap();
+        let events = ctx.require::<Sessions>(SESSIONS).unwrap().events();
+        let reminders: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::SystemReminder(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            reminders
+                .iter()
+                .any(|t| t.contains("MCP 服务器已断开：probe")),
+            "重载要复用目录 delta 通道告诉模型：{reminders:?}"
+        );
+        assert!(
+            reminders.iter().all(|t| !t.contains("mcp_probe__ping")),
+            "delta 只报服务器，不铺工具名：{reminders:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_reloads_do_not_overlap() {
+        let (_env, _cwd) = isolated_config(
+            r#"
+[mcp_servers.slow]
+command = "sleep"
+args = ["5"]
+startup_timeout_sec = 2
+"#,
+        );
+        let (_ctx, mcp, _tools) = boot().await;
+
+        let first = tokio::spawn({
+            let mcp = mcp.clone();
+            async move { mcp.reload().await }
+        });
+        // 等第一个把闸推上去（连接要 2s，窗口很宽）。
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let second = mcp.reload().await;
+        assert_eq!(second.unwrap_err(), "MCP 配置正在重载中");
+        assert!(first.await.unwrap().is_ok());
+
+        // 闸要放开，下一次还能重载。
+        assert!(mcp.reload().await.is_ok());
     }
 }

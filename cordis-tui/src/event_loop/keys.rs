@@ -669,6 +669,12 @@ pub(super) fn run_action(
             }
             Vec::new()
         }
+        Action::OverlayRefresh => {
+            if matches!(overlay, Overlay::Mcps { .. }) {
+                return vec![Effect::ReloadMcps { quiet: false }];
+            }
+            Vec::new()
+        }
         Action::OverlayNavH(delta) => {
             if let Overlay::Ask {
                 selected,
@@ -1655,8 +1661,70 @@ pub(super) fn overlay_keys(code: KeyCode, ctrl: bool) -> Option<Action> {
         KeyCode::Char('.') if ctrl => Some(Action::Help),
         KeyCode::Char('x') if ctrl => Some(Action::Help),
         KeyCode::Char(' ') if !ctrl => Some(Action::OverlaySpace),
+        // Ctrl 组合，不走 `Char(c) if !ctrl`，所以搜索框里照样能打 r。
+        KeyCode::Char('r') | KeyCode::Char('R') if ctrl => Some(Action::OverlayRefresh),
         KeyCode::Tab | KeyCode::BackTab => Some(Action::OverlayTab),
         KeyCode::Char(c) if !ctrl => Some(Action::OverlayChar(c)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mcps_overlay() -> Overlay {
+        Overlay::Mcps {
+            selected: 0,
+            query: String::new(),
+            tools_expanded: HashSet::new(),
+            section_collapsed: false,
+        }
+    }
+
+    fn refresh(overlay: &mut Overlay) -> Vec<Effect> {
+        run_action(
+            &Context::new(),
+            Action::OverlayRefresh,
+            overlay,
+            &PickerHits::default(),
+            &[],
+            &[],
+            &[],
+        )
+    }
+
+    /// Ctrl+R 走 Ctrl 分支，不能把普通 `r` 从搜索框里抢走 —— `i` 今天就是那样
+    /// 被抢的，`cua-driver` 里的 `i` 永远打不出来。
+    #[test]
+    fn ctrl_r_refreshes_without_stealing_the_search_letter() {
+        assert!(matches!(
+            overlay_keys(KeyCode::Char('r'), true),
+            Some(Action::OverlayRefresh)
+        ));
+        assert!(matches!(
+            overlay_keys(KeyCode::Char('R'), true),
+            Some(Action::OverlayRefresh)
+        ));
+        assert!(matches!(
+            overlay_keys(KeyCode::Char('r'), false),
+            Some(Action::OverlayChar('r'))
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_only_reloads_mcps() {
+        let mut overlay = mcps_overlay();
+        assert!(matches!(
+            refresh(&mut overlay).as_slice(),
+            [Effect::ReloadMcps { quiet: false }]
+        ));
+
+        let mut other = Overlay::Tasks {
+            selected: 0,
+            query: String::new(),
+            collapsed: HashSet::new(),
+        };
+        assert!(refresh(&mut other).is_empty(), "别的 overlay 不该被牵连");
     }
 }

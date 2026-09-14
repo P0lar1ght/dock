@@ -1,5 +1,6 @@
 //! MCP servers overlay — Grok Extensions MCP-tab layout, Chinese copy.
 //! Space toggles a server or a tool. `i` starts HTTP MCP browser OAuth.
+//! Ctrl+R re-reads `config.toml` and reconciles (opening the pane does it too).
 //! No grok.com connectors or marketplace.
 
 use std::collections::HashSet;
@@ -26,7 +27,7 @@ const BADGE_NEEDS_AUTH: &str = "[需认证]";
 const NO_TOOLS: &str = "没有工具（服务器可能未连接）";
 const EMPTY: &str = "未配置 MCP 服务器";
 const NO_MATCH: &str = "无匹配";
-const FOOTER: &str = "Space 开关 · i 登录 · Enter 展开 · Esc 关闭";
+const FOOTER: &str = "Space 开关 · i 登录 · Ctrl+R 重载 · Enter 展开 · Esc 关闭";
 const DESC_INDENT: u16 = 4;
 const FOLD_WIDTH: u16 = 2;
 
@@ -667,7 +668,10 @@ mod tests {
         assert_eq!(badge_for(false, true, false), "[已禁用]");
         assert_eq!(TITLE, "MCP 服务器");
         assert_eq!(RIGHT_LOCAL, "(本地)");
-        assert_eq!(FOOTER, "Space 开关 · i 登录 · Enter 展开 · Esc 关闭");
+        assert_eq!(
+            FOOTER,
+            "Space 开关 · i 登录 · Ctrl+R 重载 · Enter 展开 · Esc 关闭"
+        );
     }
 
     #[test]

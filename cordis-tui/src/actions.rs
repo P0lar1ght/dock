@@ -31,6 +31,8 @@ pub enum Action {
     OverlaySelect(usize),
     OverlaySpace,
     OverlayTab,
+    /// 重新读取当前 overlay 背后的外部状态（Ctrl+R；目前只有 `/mcps` 接）。
+    OverlayRefresh,
     /// Horizontal nav inside an overlay (Ask multi-question ←/→).
     OverlayNavH(i16),
     SettingsModal,
@@ -209,6 +211,11 @@ pub enum Effect {
     /// Async: browser PKCE for an HTTP MCP server (`i` on `/mcps`).
     McpAuth {
         name: String,
+    },
+    /// Async: 重读 `config.toml` 并与已连服务器对账（开 `/mcps` 时自动，Ctrl+R 手动）。
+    /// `quiet` 时只有确实变了才 flash，免得每次开 pane 都刷一条。
+    ReloadMcps {
+        quiet: bool,
     },
     SetPrompt {
         text: String,
