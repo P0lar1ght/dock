@@ -80,7 +80,9 @@ struct State {
     /// `None` = live buffer; `Some(i)` = recalling `history[i]`.
     history_idx: Option<usize>,
     stash: String,
-    slash_selected: usize,
+    /// 斜杠下拉的高亮行。`None` = 用户还没上下选过（打字会把它打回 None），
+    /// 此时补参数阶段的 Enter 照旧直接发。
+    slash_selected: Option<usize>,
     file_selected: usize,
     file_dismissed: bool,
     last_at_query: String,
@@ -237,7 +239,7 @@ impl PromptWidget {
         let from = prev_boundary(&state.input, cursor);
         state.input.replace_range(from..cursor, "");
         state.cursor = from;
-        state.slash_selected = 0;
+        state.slash_selected = None;
         state.file_dismissed = false;
         sync_chips(&mut state);
     }
@@ -254,7 +256,7 @@ impl PromptWidget {
         let cursor = state.cursor;
         let to = next_boundary(&state.input, cursor);
         state.input.replace_range(cursor..to, "");
-        state.slash_selected = 0;
+        state.slash_selected = None;
         state.file_dismissed = false;
         sync_chips(&mut state);
     }
@@ -300,7 +302,7 @@ impl PromptWidget {
         let end = range.end.min(state.input.len());
         state.input.replace_range(start..end, text);
         state.cursor = start + text.len();
-        state.slash_selected = 0;
+        state.slash_selected = None;
         state.file_dismissed = false;
     }
 
@@ -308,7 +310,7 @@ impl PromptWidget {
         let mut state = self.state.lock().unwrap();
         state.input.clear();
         state.cursor = 0;
-        state.slash_selected = 0;
+        state.slash_selected = None;
         state.file_selected = 0;
         state.file_dismissed = false;
         state.last_at_query.clear();
@@ -335,7 +337,7 @@ impl PromptWidget {
         state.history_idx = None;
         state.stash.clear();
         state.cursor = 0;
-        state.slash_selected = 0;
+        state.slash_selected = None;
         state.file_selected = 0;
         state.file_dismissed = false;
         state.last_at_query.clear();
@@ -364,7 +366,7 @@ impl PromptWidget {
         }
         state.input = text.to_string();
         state.cursor = state.input.len();
-        state.slash_selected = 0;
+        state.slash_selected = None;
         state.file_selected = 0;
         state.file_dismissed = false;
         state.last_at_query.clear();
@@ -387,10 +389,15 @@ impl PromptWidget {
         let state = self.state.lock().unwrap();
         crate::slash::snapshot_with_settings(
             &state.input,
-            state.slash_selected,
+            state.slash_selected.unwrap_or(0),
             &extras,
             settings.as_deref(),
         )
+    }
+
+    /// 用户是否亲手上下选过下拉里的某一行（而不是停在默认高亮上）。
+    pub fn slash_picked(&self) -> bool {
+        self.state.lock().unwrap().slash_selected.is_some()
     }
 
     pub fn slash_move(&self, delta: i16) {
@@ -399,7 +406,7 @@ impl PromptWidget {
         let mut state = self.state.lock().unwrap();
         let snap = crate::slash::snapshot_with_settings(
             &state.input,
-            state.slash_selected,
+            state.slash_selected.unwrap_or(0),
             &extras,
             settings.as_deref(),
         );
@@ -407,8 +414,8 @@ impl PromptWidget {
             return;
         }
         let n = snap.matches.len() as i32;
-        let next = (state.slash_selected as i32 + delta as i32).rem_euclid(n) as usize;
-        state.slash_selected = next;
+        let cur = state.slash_selected.unwrap_or(0) as i32;
+        state.slash_selected = Some((cur + delta as i32).rem_euclid(n) as usize);
     }
 
     pub fn apply_slash_insert(&self, display: &str) {
@@ -420,7 +427,7 @@ impl PromptWidget {
         let mut state = self.state.lock().unwrap();
         state.input = text.to_string();
         state.cursor = state.input.len();
-        state.slash_selected = 0;
+        state.slash_selected = None;
         state.file_selected = 0;
         state.file_dismissed = false;
         if text.is_empty() {
@@ -876,7 +883,7 @@ fn insert_at_cursor(state: &mut State, s: &str) {
     let i = state.cursor.min(state.input.len());
     state.input.insert_str(i, s);
     state.cursor = i + s.len();
-    state.slash_selected = 0;
+    state.slash_selected = None;
     state.file_dismissed = false;
 }
 
@@ -917,7 +924,7 @@ fn drop_chip_at(state: &mut State, range: Range<usize>) {
     let chip = state.input.get(range.clone()).unwrap_or("").to_string();
     state.input.replace_range(range.clone(), "");
     state.cursor = range.start;
-    state.slash_selected = 0;
+    state.slash_selected = None;
     state.file_dismissed = false;
     state.images.retain(|img| img.chip() != chip);
     state.paste_bodies.retain(|(c, _)| c != &chip);

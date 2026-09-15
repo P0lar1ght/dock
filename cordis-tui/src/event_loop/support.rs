@@ -1298,11 +1298,12 @@ pub(super) fn slash_open(ctx: &Context) -> bool {
 }
 
 /// Enter fills `/cmd ` only while choosing a command name. After a space,
-/// the arg dropdown stays visible for Tab, but Enter sends.
+/// the arg dropdown stays visible for Tab and Enter sends —— 除非用户上下选过
+/// 其中一行：那就是他要那一行，Enter 先把它填进输入框（再按一下才发）。
 pub(super) fn slash_captures_enter(ctx: &Context) -> bool {
     ctx.get::<PromptWidget>(TUI_PROMPT).is_some_and(|p| {
         let snap = p.slash_snapshot();
-        snap.open && !snap.completing_args
+        snap.open && (!snap.completing_args || p.slash_picked())
     })
 }
 

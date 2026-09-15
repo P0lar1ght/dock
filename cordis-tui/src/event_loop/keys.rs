@@ -1507,7 +1507,7 @@ pub(super) fn to_action(
                 KeyCode::Enter => {
                     if slash_captures_enter(ctx) {
                         // Command-name picker: put `/cmd ` in the composer.
-                        // Argument picker stays open for Tab; Enter sends.
+                        // Argument picker: 选过行就填那一行，没选过照旧发。
                         return Some(Action::SlashAccept);
                     }
                     if file_search_open(ctx) {
@@ -1818,6 +1818,53 @@ mod tests {
             &Overlay::None,
             None,
         )
+    }
+
+    /// 在下拉里上下选到某一行再回车：要把**那一行**填进输入框。
+    /// 以前补参数阶段的 Enter 一律直接发，于是选中 `/tab close` 回车发出去的是
+    /// 光秃秃的 `/tab` —— 开了一张新页。
+    #[tokio::test]
+    async fn enter_takes_the_arg_row_the_user_highlighted() {
+        let ctx = Context::new();
+        for p in [crate::plugin::theme(), crate::plugin::prompt()] {
+            ctx.plugin(p, ()).unwrap().wait().await.unwrap();
+        }
+        let prompt = ctx.get::<PromptWidget>(TUI_PROMPT).unwrap();
+        let enter = |ctx: &Context| {
+            to_action(
+                ctx,
+                Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                )),
+                &Overlay::None,
+                None,
+            )
+        };
+
+        // 没动过下拉：Enter 照旧直接发，`/model` 这种「不带参数也有意义」的命令
+        // 不用多按一下。
+        prompt.insert_str("/tab ");
+        assert!(matches!(enter(&ctx), Some(Action::SendPrompt(t)) if t.trim() == "/tab"));
+
+        // 选到 `/tab close` 再回车。
+        prompt.insert_str("/tab ");
+        for _ in 0..16 {
+            if prompt
+                .slash_snapshot()
+                .current()
+                .is_some_and(|row| row.display == "/tab close")
+            {
+                break;
+            }
+            prompt.slash_move(1);
+        }
+        assert!(matches!(enter(&ctx), Some(Action::SlashAccept)));
+        assert!(crate::dispatch::dispatch(Action::SlashAccept, &prompt).is_empty());
+        assert_eq!(prompt.text(), "/tab close ");
+
+        // 填完就当没选过：下一下 Enter 才是发送。
+        assert!(matches!(enter(&ctx), Some(Action::SendPrompt(t)) if t.trim() == "/tab close"));
     }
 
     /// 分页键不能踩现有键位：`Ctrl+W` 还是新会话，`Ctrl+D` 还是半页下滚。

@@ -14,7 +14,7 @@
 
 浏览器 `embed-sdk` **不要**为每个斜杠单独适配。Gateway 暴露 `slash/list`（补全目录：TUI `slash_catalog()` + `"slash"` 追加 + 浏览器 `/screenshot*`）和 `slash/execute`（接到 spine / session.port）。JS 只做前缀过滤、截图采集、以及把 `{ kind: filled|notice|menu|capture|submitted|applied }` 画出来。TUI overlay 类命令（`/pair` `/theme` `/preset` `/settings` …）和 **`/cd`** execute 会回 Notice「请在 Dock 终端使用」——list 标 `terminal` 的名字不会改进程状态（`/settings timestamps` 也不会）。`/timestamps` `/think` `/model` `/effort` 仍可从浏览器直接改。未知 `/foo` 为 `passthrough`，当作普通 prompt 发给模型。`slash/execute` 的 `threadId` 只能是 `live` 或省略。
 
-下拉打开时 Tab 把当前高亮项填进输入框（命令名阶段填 `/命令 `，参数阶段填 `/命令 参数 `）。Enter 只在**命令名**阶段填入；空格之后（参数下拉仍开着）Enter 发送并解析。无参数命令在名字后空格关闭下拉。有参数目录的命令（`/lsp` `/theme` `/model` `/effort` `/loop` `/settings`）空格后继续列出参数：`/lsp s` 可 Tab 到 `status` / `setup`，再 Enter 执行。
+下拉打开时 Tab 把当前高亮项填进输入框（命令名阶段填 `/命令 `，参数阶段填 `/命令 参数 `）。Enter 在**命令名**阶段填入；空格之后（参数下拉仍开着）Enter 发送并解析 —— 但只要你用 ↑↓ 选过其中一行，Enter 就先把**那一行**填进输入框（再按一下才发），不会把光秃秃的 `/命令` 发出去。无参数命令在名字后空格关闭下拉。有参数目录的命令（`/lsp` `/theme` `/model` `/effort` `/loop` `/settings` `/tab`）空格后继续列出参数：`/lsp s` 可 Tab 到 `status` / `setup`，再 Enter 执行。
 
 | 命令 | 行为 |
 |---|---|
