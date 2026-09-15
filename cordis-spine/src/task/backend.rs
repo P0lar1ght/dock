@@ -89,6 +89,24 @@ impl ChannelBackend {
             .is_ok()
     }
 
+    /// 同 [`Self::request_cancel_parent_session`]，但取消**指定**会话的孩子。
+    ///
+    /// 分页各是一条并列主线（`main#2`…），Stop / 新会话只该动自己那一页的；
+    /// 绑定在 backend 上的那个 id 只是缺省值。
+    pub fn request_cancel_session(
+        &self,
+        parent_session_id: &str,
+        respond_to: oneshot::Sender<SubagentCancelOutcome>,
+    ) -> bool {
+        self.tx
+            .send(SubagentEvent::Cancel(SubagentCancelRequest {
+                parent_session_id: Some(parent_session_id.to_owned()),
+                target: SubagentCancelTarget::ParentSession,
+                respond_to,
+            }))
+            .is_ok()
+    }
+
     /// Re-open Task spawns after a prior ParentSession stop (start of next turn).
     pub fn open_spawn_admission(&self) -> bool {
         let Some(parent_session_id) = self.parent_session_id() else {
@@ -96,6 +114,15 @@ impl ChannelBackend {
         };
         self.tx
             .send(SubagentEvent::OpenSpawnAdmission { parent_session_id })
+            .is_ok()
+    }
+
+    /// 同 [`Self::open_spawn_admission`]，但针对**指定**会话。
+    pub fn open_spawn_admission_for(&self, parent_session_id: &str) -> bool {
+        self.tx
+            .send(SubagentEvent::OpenSpawnAdmission {
+                parent_session_id: parent_session_id.to_owned(),
+            })
             .is_ok()
     }
 
@@ -253,4 +280,49 @@ pub(crate) fn parse_timeout_ms(value: Option<&str>) -> Option<u64> {
         let n = raw.parse::<u64>().ok()?;
         (n > 0).then_some(n)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::ROOT_IDENTITY;
+
+    /// 分页各是一条并列主线：取消 / 放行都要打到**指定**会话，不能回落到
+    /// backend 上绑的那个缺省 id —— 那样第 2 页按 Stop 会收掉第 1 页的孩子。
+    #[tokio::test]
+    async fn per_session_cancel_and_admission_target_the_given_id() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let backend = ChannelBackend::for_session(tx, ROOT_IDENTITY);
+
+        let (respond_to, _rx) = oneshot::channel();
+        assert!(backend.request_cancel_session("main#2", respond_to));
+        match rx.recv().await.expect("cancel event") {
+            SubagentEvent::Cancel(request) => {
+                assert_eq!(request.parent_session_id.as_deref(), Some("main#2"));
+                assert!(matches!(
+                    request.target,
+                    SubagentCancelTarget::ParentSession
+                ));
+            }
+            _ => panic!("expected Cancel"),
+        }
+
+        assert!(backend.open_spawn_admission_for("main#2"));
+        match rx.recv().await.expect("admission event") {
+            SubagentEvent::OpenSpawnAdmission { parent_session_id } => {
+                assert_eq!(parent_session_id, "main#2");
+            }
+            _ => panic!("expected OpenSpawnAdmission"),
+        }
+
+        // 不带 id 的那两个仍然走绑定值，老行为不变。
+        let (respond_to, _rx) = oneshot::channel();
+        assert!(backend.request_cancel_parent_session(respond_to));
+        match rx.recv().await.expect("bound cancel") {
+            SubagentEvent::Cancel(request) => {
+                assert_eq!(request.parent_session_id.as_deref(), Some(ROOT_IDENTITY));
+            }
+            _ => panic!("expected Cancel"),
+        }
+    }
 }

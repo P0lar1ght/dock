@@ -274,15 +274,24 @@ fn request_cancel(ctx: &Context) {
     }
     // Stop also cancels this session's subagents; admission re-opens on the
     // next prompt (see `open_subagent_admission`).
+    //
+    // `"subagents"` 是全局一份、按 parent session 分账：带上自己这一页的身份，
+    // 否则第 2 页按 Stop 会把第 1 页的子代理一起收了。没有会话时退回旧行为。
     if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
-        sub.cancel_all();
+        match ctx.get::<Sessions>(SESSIONS) {
+            Some(sessions) => sub.cancel_session(sessions.identity()),
+            None => sub.cancel_all(),
+        }
     }
 }
 
 /// A new user turn re-opens spawns after a prior Stop.
 fn open_subagent_admission(ctx: &Context) {
     if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
-        sub.open_admission();
+        match ctx.get::<Sessions>(SESSIONS) {
+            Some(sessions) => sub.open_admission_for(sessions.identity()),
+            None => sub.open_admission(),
+        }
     }
 }
 

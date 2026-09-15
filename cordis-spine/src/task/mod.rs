@@ -173,6 +173,23 @@ impl Subagents {
         Some(format!("killed {id}"))
     }
 
+    /// Cancel every live child of **one** session（Stop / 新会话）。
+    /// Spawn admission stays closed until [`Self::open_admission_for`].
+    ///
+    /// 分页是并列主线：第 2 页按 Stop 不该把第 1 页的子代理一起收了，所以取消
+    /// 按会话身份走，而不是 backend 上绑的那个缺省 id。
+    pub fn cancel_session(&self, parent_session_id: &str) {
+        let (respond_to, _rx) = oneshot::channel();
+        let _ = self
+            .backend
+            .request_cancel_session(parent_session_id, respond_to);
+    }
+
+    /// 同 [`Self::open_admission`]，但针对指定会话。
+    pub fn open_admission_for(&self, parent_session_id: &str) {
+        let _ = self.backend.open_spawn_admission_for(parent_session_id);
+    }
+
     /// Cancel every live child of this session (user Stop, session switch).
     /// Spawn admission stays closed until [`Self::open_admission`].
     pub fn cancel_all(&self) {

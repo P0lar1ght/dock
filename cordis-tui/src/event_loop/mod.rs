@@ -216,9 +216,19 @@ pub async fn run(root: Context) -> Result<()> {
                             match effect {
                                 Effect::Quit => quit = true,
                                 Effect::NewSession => {
+                                    // 只收自己这一页的子代理：`"subagents"` 是全局一份、
+                                    // 按 parent session 分账，`cancel_all` 会波及别的分页。
                                     if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
-                                        sub.cancel_all();
-                                        sub.open_admission();
+                                        match ctx.get::<Sessions>(SESSIONS) {
+                                            Some(sessions) => {
+                                                sub.cancel_session(sessions.identity());
+                                                sub.open_admission_for(sessions.identity());
+                                            }
+                                            None => {
+                                                sub.cancel_all();
+                                                sub.open_admission();
+                                            }
+                                        }
                                     }
                                     if let Ok(sessions) = ctx.require::<Sessions>(SESSIONS) {
                                         sessions.archive_current();
