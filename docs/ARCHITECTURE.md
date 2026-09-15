@@ -81,10 +81,12 @@ config.toml.example      用户 / 项目模型目录样例
 替用户说话不是分页该做的事。
 
 **旁问**（`/btw`）是第三种语义：同样是分叉，但那一页 `TabKind::Aside` —— 多 isolate
-一个 `agentPresets` 并 provide 一份**只读**预设（`cordis-app` 的 `aside_preset()`），
-而且**不进 `tabs` 那个 Vec**：它单独挂在 `Tabs::aside` 上，不占页号、不进标签栏、
-不参与 `active_index` 的下标。答案画在输入框上方的面板里，`Esc` 销毁，`Ctrl+↑`
-提升 —— 提升等于用它的历史开一张全权的常驻页，再把旁问本身 dispose 掉。
+一个 `agentPresets` 并 provide 一份**只读**预设（`cordis-app` 的 `aside_preset()`）。
+它就是一张**普通分页**，进标签栏（标 `?`）、有自己的滚动区，所以答案走的是和主线
+一样的渲染路径（markdown、工具卡、流式）。「不打断」指的是主线那一轮照跑，不是把
+答案塞进一个额外的面板里 —— 早先那版把它画成输入框上方的 pane，既不渲染 markdown
+也放不下长回答，已经删掉。`/tab promote` 转正：用它的历史开一张全权常驻页，再把
+旁问那一页 dispose 掉。
 
 分页会话的身份是 `main#<N>`，`is_main_identity` 认它是**并列的主线**而不是子代理
 （判错会让第 2 页拿不到工具目录）。

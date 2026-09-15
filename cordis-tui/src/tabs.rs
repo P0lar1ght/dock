@@ -56,17 +56,6 @@ pub enum TabKind {
 /// 与种类（旁问页要挂只读预设）。
 pub type TabMount = Arc<dyn Fn(usize, TabKind) -> Plugin + Send + Sync>;
 
-/// 面板要画的旁问状态。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AsideView {
-    /// 问的是哪一页。
-    pub origin: usize,
-    pub question: String,
-    /// 还没答出正文时是 `None`。
-    pub answer: Option<String>,
-    pub working: bool,
-}
-
 /// 标签栏要画的一行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabInfo {
@@ -76,8 +65,10 @@ pub struct TabInfo {
     /// 这一页正在生成。
     pub working: bool,
     pub active: bool,
-    /// 从哪一页分叉出来的（`/tab fork`）。空白新页是 `None`。
+    /// 从哪一页分叉出来的（`/tab fork` / `/btw`）。空白新页是 `None`。
     pub origin: Option<usize>,
+    /// 常驻页还是只读旁问页。
+    pub kind: TabKind,
 }
 
 struct Tab {
@@ -86,6 +77,7 @@ struct Tab {
     /// 第 1 页就是根，没有可以 dispose 的 fiber。
     fiber: Option<Fiber>,
     origin: Option<usize>,
+    kind: TabKind,
 }
 
 /// Named `"tui.tabs"`。调用点 live-lookup，别把 `Arc` 关进长生命周期闭包。
@@ -100,16 +92,6 @@ struct Inner {
     tabs: Mutex<Vec<Tab>>,
     active: AtomicUsize,
     next_id: AtomicUsize,
-    /// 同时只有一个旁问页。它**不在** `tabs` 里：不进标签栏、不占页号、
-    /// 不参与 `active_index` 那套下标，关掉即销毁。
-    aside: Mutex<Option<Aside>>,
-}
-
-struct Aside {
-    ctx: Context,
-    fiber: Fiber,
-    origin: usize,
-    question: String,
 }
 
 impl Tabs {
@@ -119,6 +101,7 @@ impl Tabs {
             ctx: root.clone(),
             fiber: None,
             origin: None,
+            kind: TabKind::Normal,
         };
         Self {
             inner: Arc::new(Inner {
@@ -127,7 +110,6 @@ impl Tabs {
                 tabs: Mutex::new(vec![first]),
                 active: AtomicUsize::new(0),
                 next_id: AtomicUsize::new(2),
-                aside: Mutex::new(None),
             }),
         }
     }
@@ -169,6 +151,7 @@ impl Tabs {
                 working: tab_working(&tab.ctx),
                 active: i == active,
                 origin: tab.origin,
+                kind: tab.kind,
             })
             .collect()
     }
@@ -274,12 +257,21 @@ impl Tabs {
     }
 
     async fn open_with(&self, seed: Option<(usize, Vec<LogEvent>)>) -> Result<usize, String> {
+        self.open_page(TabKind::Normal, seed).await
+    }
+
+    /// 建页 + 入册 + 切过去。返回新页的 0 基位置。
+    async fn open_page(
+        &self,
+        kind: TabKind,
+        seed: Option<(usize, Vec<LogEvent>)>,
+    ) -> Result<usize, String> {
         if self.len() >= MAX_TABS {
             return Err(format!("最多 {MAX_TABS} 页"));
         }
         let origin = seed.as_ref().map(|(origin, _)| *origin);
         let (id, child, fiber) = self
-            .mount_page(TabKind::Normal, seed.map(|(_, events)| events))
+            .mount_page(kind, seed.map(|(_, events)| events))
             .await?;
         let index = {
             let mut tabs = self.inner.tabs.lock().unwrap();
@@ -288,6 +280,7 @@ impl Tabs {
                 ctx: child,
                 fiber: Some(fiber),
                 origin,
+                kind,
             });
             tabs.len() - 1
         };
@@ -295,89 +288,63 @@ impl Tabs {
         Ok(index)
     }
 
-    /// `/btw`：从当前页分叉一个**只读**旁问页，把问题发进去，不切页。
+    /// `/btw`：从当前页分叉一个**只读**分页，把问题发进去并切过去。
     ///
-    /// 同时只留一个旁问：再问一句就把上一个关掉 —— 面板只有一块，留着看不见
-    /// 的第二个旁问只是在偷偷烧 token。
-    pub async fn ask_aside(&self, question: String) -> Result<(), String> {
+    /// 「不打断」指的是**主线那一轮照跑**（各页各自的会话与循环），不是不换视线：
+    /// 答案要走这一页自己的滚动区，markdown、工具卡、流式才都在。看完 `Alt+1`
+    /// 回主线，或者 `/tab close` 关掉。
+    pub async fn ask_aside(&self, question: String) -> Result<usize, String> {
         let question = question.trim().to_string();
         if question.is_empty() {
             return Err("要问点什么：/btw <问题>".into());
         }
-        self.close_aside().await?;
         let origin = self.active_id();
         let snapshot = self
             .active_ctx()
             .get::<Sessions>(SESSIONS)
             .map(|s| s.model_history())
             .unwrap_or_default();
-        let (_id, ctx, fiber) = self.mount_page(TabKind::Aside, Some(snapshot)).await?;
+        let index = self
+            .open_page(TabKind::Aside, Some((origin, snapshot)))
+            .await?;
+        let ctx = self.active_ctx();
         let Some(port) = ctx.get::<SessionRef>(SESSION_PORT) else {
-            let _ = fiber.dispose().await;
+            let _ = self.close(index).await;
             return Err("旁问页没有会话入口".into());
         };
         // 旁问不排队：它就是为了「别打断」而存在的。
-        port.submit(question.clone(), true);
-        *self.inner.aside.lock().unwrap() = Some(Aside {
-            ctx,
-            fiber,
-            origin,
-            question,
-        });
-        Ok(())
+        port.submit(question, true);
+        let tabs = self.inner.tabs.lock().unwrap();
+        Ok(tabs[index].id)
     }
 
-    /// 有没有旁问开着。只问存在性时用这个 —— [`Self::aside`] 会把答案也拷一份。
-    pub fn has_aside(&self) -> bool {
-        self.inner.aside.lock().unwrap().is_some()
-    }
-
-    /// 面板要画的东西。没有旁问就是 `None`（面板不占行）。
-    pub fn aside(&self) -> Option<AsideView> {
-        let aside = self.inner.aside.lock().unwrap();
-        let aside = aside.as_ref()?;
-        let answer = aside
-            .ctx
-            .get::<Sessions>(SESSIONS)
-            .and_then(|s| last_reply(&s));
-        Some(AsideView {
-            origin: aside.origin,
-            question: aside.question.clone(),
-            answer,
-            working: tab_working(&aside.ctx),
-        })
-    }
-
-    /// 关掉旁问页并 dispose 它。没有旁问时是 no-op。
-    pub async fn close_aside(&self) -> Result<(), String> {
-        let aside = self.inner.aside.lock().unwrap().take();
-        if let Some(aside) = aside {
-            aside
-                .fiber
-                .dispose()
-                .await
-                .map_err(|e| format!("关闭旁问失败：{e}"))?;
-        }
-        Ok(())
-    }
-
-    /// 把旁问提升成常驻分页：带着它已经聊出来的历史开一页**全权**的，再销毁
-    /// 旁问本身。只读那档是「插一嘴」的约束，认真聊下去就不该再受它管。
-    pub async fn promote_aside(&self) -> Result<usize, String> {
-        let (origin, history) = {
-            let aside = self.inner.aside.lock().unwrap();
-            let aside = aside.as_ref().ok_or_else(|| "没有旁问可提升".to_string())?;
-            let history = aside
+    /// 把当前的只读旁问页转正：用它已经聊出来的历史开一张**全权**常驻页，
+    /// 再把旁问那一页关掉。只读是「插一嘴」的约束，认真聊下去不该再受它管。
+    pub async fn promote_active(&self) -> Result<usize, String> {
+        let index = self.active_index();
+        let (kind, origin, history) = {
+            let tabs = self.inner.tabs.lock().unwrap();
+            let tab = tabs.get(index).ok_or_else(|| "没有当前页".to_string())?;
+            let history = tab
                 .ctx
                 .get::<Sessions>(SESSIONS)
                 .map(|s| s.model_history())
                 .unwrap_or_default();
-            (aside.origin, history)
+            (tab.kind, tab.origin, history)
         };
-        let index = self.open_with(Some((origin, history))).await?;
-        self.close_aside().await?;
-        let tabs = self.inner.tabs.lock().unwrap();
-        Ok(tabs[index].id)
+        if kind != TabKind::Aside {
+            return Err("这一页本来就是全权的，不用转正".into());
+        }
+        let new_index = self
+            .open_page(TabKind::Normal, Some((origin.unwrap_or(1), history)))
+            .await?;
+        let new_id = {
+            let tabs = self.inner.tabs.lock().unwrap();
+            tabs[new_index].id
+        };
+        // 新页在旁问页后面，关掉旁问会把它左移；`close` 自己会修焦点。
+        self.close(index).await?;
+        Ok(new_id)
     }
 
     /// 把当前页最近一条模型回复带回它的来源页：填进那一页的输入框并切过去。

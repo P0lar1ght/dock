@@ -7,7 +7,8 @@ use cordis_spine::{
     agent_loop, install_fakes, LlmOutput, LogEvent, Sessions, Tools, SESSIONS, TOOLS,
 };
 use cordis_tui::{
-    prompt, tabs, theme, PromptWidget, SessionRef, Tabs, SESSION_PORT, TUI_PROMPT, TUI_TABS,
+    prompt, tabs, theme, PromptWidget, SessionRef, TabKind, Tabs, SESSION_PORT, TUI_PROMPT,
+    TUI_TABS,
 };
 
 /// 整个测试二进制共用一个隔离的 `DOCK_HOME`，免得读到本机 `~/.dock`。
@@ -162,42 +163,30 @@ async fn carry_back_needs_a_fork() {
     );
 }
 
-/// `/btw`：旁问页带着当前页的快照、**只读**、不进标签栏，答案只在它自己那儿。
+/// `/btw`：旁问是**一张真分页**——有自己的滚动区（markdown / 工具卡照常渲染），
+/// 带着当前页的快照、只读，且不进主线上下文。
 #[tokio::test]
-async fn aside_is_read_only_and_out_of_the_tab_bar() {
+async fn aside_opens_a_read_only_tab() {
     let root = boot().await;
     let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
     let main = root.get::<Sessions>(SESSIONS).unwrap();
     main.append(LogEvent::User("主线在干活".into()));
 
-    tabs.ask_aside("它现在卡在哪".into()).await.unwrap();
+    let id = tabs.ask_aside("它现在卡在哪".into()).await.unwrap();
 
-    // 不进标签栏、不占页号、不抢焦点。
-    assert_eq!(tabs.len(), 1, "旁问不该出现在标签栏里");
-    assert_eq!(tabs.active_index(), 0, "旁问不抢焦点");
-    let view = tabs.aside().expect("面板要有东西可画");
-    assert_eq!(view.origin, 1);
-    assert_eq!(view.question, "它现在卡在哪");
+    // 进标签栏、切过去、标成只读。
+    assert_eq!(tabs.len(), 2, "旁问就是一张分页");
+    let info = tabs.list().into_iter().find(|t| t.id == id).unwrap();
+    assert!(info.active, "问完就该切过去看答案");
+    assert_eq!(info.kind, TabKind::Aside);
+    assert_eq!(info.origin, Some(1));
 
-    // 主线的历史一个字没动。
+    // 整套每页视图都挂上了（滚动区 / 输入框都在 `tab_mount` 那一串里），
+    // 所以答案走的是正常渲染路径——markdown、工具卡、流式都在。
+    let aside_ctx = tabs.active_ctx();
+    assert!(aside_ctx.get::<PromptWidget>(TUI_PROMPT).is_some());
+    assert!(aside_ctx.get::<Sessions>(SESSIONS).is_some());
     assert_eq!(main.events().len(), 1, "旁问不进主线上下文");
-
-    tabs.close_aside().await.unwrap();
-    assert!(tabs.aside().is_none());
-}
-
-#[tokio::test]
-async fn asking_again_replaces_the_previous_aside() {
-    let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
-    root.get::<Sessions>(SESSIONS)
-        .unwrap()
-        .append(LogEvent::User("主线".into()));
-
-    tabs.ask_aside("第一问".into()).await.unwrap();
-    tabs.ask_aside("第二问".into()).await.unwrap();
-    assert_eq!(tabs.aside().unwrap().question, "第二问", "同时只留一个旁问");
-    assert_eq!(tabs.len(), 1);
 }
 
 #[tokio::test]
@@ -205,24 +194,29 @@ async fn empty_question_is_refused() {
     let root = boot().await;
     let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
     assert!(tabs.ask_aside("   ".into()).await.is_err());
-    assert!(tabs.aside().is_none());
+    assert_eq!(tabs.len(), 1, "被拒的旁问不该留下半页");
 }
 
-/// 提升：旁问的历史进一张**常驻**页，旁问本身销毁。
+/// 转正：拿旁问已经聊出来的历史开一张**全权**页，旁问那一页关掉。
 #[tokio::test]
-async fn promoting_an_aside_makes_a_normal_tab() {
+async fn promoting_an_aside_makes_a_full_tab() {
     let root = boot().await;
     let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
     root.get::<Sessions>(SESSIONS)
         .unwrap()
         .append(LogEvent::User("主线".into()));
-    tabs.ask_aside("问一句".into()).await.unwrap();
+    let aside_id = tabs.ask_aside("问一句".into()).await.unwrap();
 
-    let id = tabs.promote_aside().await.unwrap();
-    assert!(tabs.aside().is_none(), "提升之后旁问本身该没了");
-    assert_eq!(tabs.len(), 2, "提升出来的是常驻页");
-    let promoted = tabs.list().iter().find(|t| t.id == id).cloned().unwrap();
-    assert_eq!(promoted.origin, Some(1), "提升页记得来源");
+    let id = tabs.promote_active().await.unwrap();
+    assert_ne!(id, aside_id);
+    assert_eq!(tabs.len(), 2, "旁问那一页要被关掉，换成转正的这张");
+    let promoted = tabs.list().into_iter().find(|t| t.id == id).unwrap();
+    assert_eq!(promoted.kind, TabKind::Normal, "转正之后是全权页");
+    assert_eq!(promoted.origin, Some(1));
+    assert!(
+        !tabs.list().iter().any(|t| t.id == aside_id),
+        "旁问页该没了"
+    );
     assert!(
         !tabs
             .active_ctx()
@@ -230,15 +224,15 @@ async fn promoting_an_aside_makes_a_normal_tab() {
             .unwrap()
             .events()
             .is_empty(),
-        "提升页要带着旁问聊过的历史"
+        "转正页要带着旁问聊过的历史"
     );
 }
 
 #[tokio::test]
-async fn promote_without_an_aside_is_refused() {
+async fn promoting_a_normal_tab_is_refused() {
     let root = boot().await;
     let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
-    assert!(tabs.promote_aside().await.is_err());
+    assert!(tabs.promote_active().await.is_err(), "常驻页不用转正");
 }
 
 #[tokio::test]

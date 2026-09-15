@@ -12,7 +12,6 @@ use ratatui::style::Style;
 use ratatui::widgets::Block;
 use ratatui::Terminal;
 
-use crate::aside_pane;
 use crate::ask_view;
 use crate::error::{Error, Result};
 use crate::file_search;
@@ -179,7 +178,6 @@ pub(super) fn draw(
         .get::<Tabs>(TUI_TABS)
         .map(|t| t.list())
         .unwrap_or_default();
-    let aside = ctx.get::<Tabs>(TUI_TABS).and_then(|t| t.aside());
     terminal
         .draw(|frame| {
             let area = frame.area();
@@ -277,12 +275,6 @@ pub(super) fn draw(
             } else {
                 queue_pane::desired_height(queued_items.len())
             };
-            // 旁问面板钉在排队条和输入框之间；模态开着时让位。
-            let aside_h = if inspect_open || modal_open {
-                0
-            } else {
-                aside_pane::desired_height(aside.as_ref(), inner.width)
-            };
             // 只有一页时不占这一行；全屏 inspect 时也让位。
             let tab_h = if inspect_open || tab_rows.len() < 2 {
                 0
@@ -296,7 +288,6 @@ pub(super) fn draw(
                 Constraint::Length(dock_h),
                 Constraint::Length(goal_h),
                 Constraint::Length(queue_h),
-                Constraint::Length(aside_h),
                 // Grok: turn status sits between scrollback chrome and the composer.
                 Constraint::Length(turn_h),
                 Constraint::Length(prompt_h),
@@ -309,15 +300,9 @@ pub(super) fn draw(
             let dock_area = chunks[3];
             let goal_area = chunks[4];
             let queue_area = chunks[5];
-            let aside_area = chunks[6];
-            let turn_area = chunks[7];
-            let prompt_area = chunks[8];
-            let shortcuts_area = chunks[9];
-            if aside_h > 0 {
-                if let Some(aside) = aside.as_ref() {
-                    aside_pane::paint(frame.buffer_mut(), aside_area, aside);
-                }
-            }
+            let turn_area = chunks[6];
+            let prompt_area = chunks[7];
+            let shortcuts_area = chunks[8];
             if tab_h > 0 {
                 *tab_hits = tab_bar::paint(frame.buffer_mut(), tab_area, &tab_rows);
             }

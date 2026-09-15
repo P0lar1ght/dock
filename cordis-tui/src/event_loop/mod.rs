@@ -793,25 +793,22 @@ pub async fn run(root: Context) -> Result<()> {
                                 Effect::AsideAsk { question } => {
                                     match tabs_service(&root) {
                                         Some(tabs) => match tabs.ask_aside(question).await {
-                                            Ok(()) => flash(&root, "旁问已发出（答案见输入框上方面板）"),
+                                            Ok(id) => flash(
+                                                &root,
+                                                format!("旁问开在第 {id} 页（只读）；Alt+1 回主线"),
+                                            ),
                                             Err(e) => flash(&root, e),
                                         },
                                         None => flash(&root, "分页服务未挂载"),
                                     }
+                                    ctx = active_ctx(&root);
                                     overlay.close();
                                 }
-                                Effect::AsideClose => {
-                                    if let Some(tabs) = tabs_service(&root) {
-                                        if let Err(e) = tabs.close_aside().await {
-                                            flash(&root, e);
-                                        }
-                                    }
-                                }
-                                Effect::AsidePromote => {
+                                Effect::TabPromote => {
                                     match tabs_service(&root) {
-                                        Some(tabs) => match tabs.promote_aside().await {
+                                        Some(tabs) => match tabs.promote_active().await {
                                             Ok(id) => {
-                                                flash(&root, format!("旁问已提升为第 {id} 页（全权）"))
+                                                flash(&root, format!("已转正成第 {id} 页（全权）"))
                                             }
                                             Err(e) => flash(&root, e),
                                         },

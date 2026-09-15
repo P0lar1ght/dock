@@ -4,7 +4,6 @@
 //! `tui.welcome` / `tui.shortcuts` / `tui` without touching the session actor.
 
 mod actions;
-mod aside_pane;
 mod ask_view;
 mod clipboard;
 mod dispatch;
@@ -58,4 +57,4 @@ pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui,
 pub use prompt::PromptWidget;
 pub use session::{QueuedItem, SessionPort, SessionRef};
 pub use slash::{resolve_slash, slash_catalog, SlashCatalogEntry};
-pub use tabs::{tabs, AsideView, TabInfo, TabKind, TabMount, Tabs, MAX_TABS, PER_TAB_SERVICES};
+pub use tabs::{tabs, TabInfo, TabKind, TabMount, Tabs, MAX_TABS, PER_TAB_SERVICES};

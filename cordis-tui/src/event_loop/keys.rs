@@ -1493,11 +1493,6 @@ pub(super) fn to_action(
                             return None;
                         }
                     }
-                    // 旁问面板：只在「当前页空闲 + 输入框已空」这一步接管 Esc。
-                    // 放在取消轮次和清输入之后，就绝不会把那两件事抢走。
-                    if aside_open(ctx) {
-                        return Some(Action::AsideClose);
-                    }
                     // Grok swallows idle-empty Esc (welcome / no turns). Quit is ctrl+q.
                     None
                 }
@@ -1534,7 +1529,6 @@ pub(super) fn to_action(
                         None
                     }
                 }
-                KeyCode::Up if ctrl && aside_open(ctx) => Some(Action::AsidePromote),
                 KeyCode::Up => {
                     if slash_open(ctx) {
                         Some(Action::SlashMove(-1))

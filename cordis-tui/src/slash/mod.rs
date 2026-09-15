@@ -145,7 +145,7 @@ pub const CATALOG: &[SlashDef] = &[
         name: "tab",
         aliases: &["tabs"],
         display: "/tab",
-        description: "分页：new / fork / back / close / 页号",
+        description: "分页：new / fork / back / promote / close / 页号",
         takes_args: true,
         args_required: false,
         arg_kind: Some(ArgKind::Tab),
@@ -772,6 +772,7 @@ pub fn tab_args() -> Vec<ArgItem> {
         ArgItem::new("new", "开一张空白新页（Ctrl+N）"),
         ArgItem::new("fork", "带当前页上下文快照分叉一页（Ctrl+F）"),
         ArgItem::new("back", "把本页结论带回来源页的输入框（Ctrl+B）"),
+        ArgItem::new("promote", "把当前的只读旁问页转正成全权页"),
         ArgItem::new("close", "关掉当前页；`close <页号>` 关那一页"),
     ]
 }
@@ -827,7 +828,13 @@ mod tests {
         let snap = snapshot("/tab ", 0);
         assert!(snap.open && snap.completing_args, "{snap:?}");
         let rows: Vec<&str> = snap.matches.iter().map(|m| m.display.as_str()).collect();
-        for want in ["/tab new", "/tab fork", "/tab back", "/tab close"] {
+        for want in [
+            "/tab new",
+            "/tab fork",
+            "/tab back",
+            "/tab promote",
+            "/tab close",
+        ] {
             assert!(rows.contains(&want), "缺 {want}：{rows:?}");
         }
 

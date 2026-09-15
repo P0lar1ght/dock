@@ -24,10 +24,6 @@ pub enum Action {
     TabFork,
     /// `Ctrl+B`：把这一页最近一条回复带回来源页的输入框。
     TabCarryBack,
-    /// `Esc`（当前页空闲且输入框为空时）：关掉旁问面板。
-    AsideClose,
-    /// `Ctrl+↑`：把旁问提升成常驻分页。
-    AsidePromote,
     ResumePicker,
     Help,
     RestoreSession(String),
@@ -132,14 +128,12 @@ pub enum Effect {
     TabFork,
     /// 把当前页最近一条回复填进来源页的输入框并切过去。
     TabCarryBack,
-    /// Async: `/btw`：只读旁问一句，答案进面板，不进主线上下文。
+    /// Async: `/btw`：开一张只读分页问一句，不进主线上下文。
     AsideAsk {
         question: String,
     },
-    /// Async: 关掉旁问面板并销毁那一页。
-    AsideClose,
-    /// Async: 把旁问提升成常驻分页（全权）。
-    AsidePromote,
+    /// Async: 把当前的只读旁问页转正成全权常驻页。
+    TabPromote,
     ResumePicker,
     PairingManage,
     Help,
@@ -270,6 +264,7 @@ fn tab_effect(args: &str) -> Effect {
         None | Some("new") | Some("n") => Effect::TabNew,
         Some("fork") | Some("f") => Effect::TabFork,
         Some("back") | Some("b") => Effect::TabCarryBack,
+        Some("promote") | Some("p") => Effect::TabPromote,
         Some("close") | Some("c") | Some("x") => Effect::TabClose {
             id: parts.next().and_then(|n| n.parse::<usize>().ok()),
         },
@@ -278,7 +273,8 @@ fn tab_effect(args: &str) -> Effect {
             _ => Effect::ShowNotice {
                 title: "分页".into(),
                 body: "用法：/tab（新开）、/tab fork（带上下文分叉）、\
-                       /tab back（把本页结论带回来源页）、/tab close [页号]、/tab <页号>\n\
+                       /tab back（把本页结论带回来源页）、/tab promote（旁问页转正）、\
+                       /tab close [页号]、/tab <页号>\n\
                        快捷键：Ctrl+N 新开、Ctrl+F 分叉、Ctrl+B 带回、Alt+1..9 切换。\n"
                     .into(),
             },
@@ -296,8 +292,9 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
                 Effect::ShowNotice {
                     title: "旁问".into(),
                     body: "用法：/btw <问题>\n\
-                           从当前页分叉一个**只读**的旁问，答案显示在输入框上方的面板里，\n\
-                           不打断当前任务、也不进主线上下文。Esc 关闭，Ctrl+↑ 提升为分页。\n"
+                           从当前页分叉一张**只读**分页问一句：主线那一轮照跑，答案也不进\n\
+                           主线上下文。看完 Alt+1 回主线，/tab close 关掉，\n\
+                           /tab promote 可以把它转正成全权页。\n"
                         .into(),
                 }
             } else {

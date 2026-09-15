@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::grok::line_utils::truncate_str;
-use crate::tabs::TabInfo;
+use crate::tabs::{TabInfo, TabKind};
 use crate::theme::Theme;
 
 /// 点到了哪一页 —— 带的是标签上的**稳定编号**，不是位置。
@@ -61,10 +61,20 @@ pub fn paint(buf: &mut Buffer, area: Rect, tabs: &[TabInfo]) -> Vec<(Rect, TabHi
         let head = format!(" {}{} ", tab.id, mark(tab));
         let head_w = head.width() as u16;
         let budget = cell.saturating_sub(head_w).max(2) as usize;
-        // 分叉页的标题来自来源页的快照，不标一下就和来源页长得一模一样。
-        let title = match tab.origin {
-            Some(_) => format!("⑂{}", truncate_str(&tab.title, budget.saturating_sub(1))),
-            None => truncate_str(&tab.title, budget),
+        // 分叉 / 旁问页的标题来自来源页的快照，不标一下就和来源页长得一模一样。
+        // `?` 是只读旁问，`⑂` 是普通分叉。
+        let badge = match (tab.kind, tab.origin) {
+            (TabKind::Aside, _) => "?",
+            (TabKind::Normal, Some(_)) => "⑂",
+            (TabKind::Normal, None) => "",
+        };
+        let title = if badge.is_empty() {
+            truncate_str(&tab.title, budget)
+        } else {
+            format!(
+                "{badge}{}",
+                truncate_str(&tab.title, budget.saturating_sub(1))
+            )
         };
         let text = format!("{head}{title} ");
         let width = (text.width() as u16).min(area.x + area.width - x);
@@ -102,12 +112,21 @@ mod tests {
             working,
             active,
             origin: None,
+            kind: TabKind::Normal,
         }
     }
 
     fn forked(id: usize, title: &str, origin: usize) -> TabInfo {
         TabInfo {
             origin: Some(origin),
+            ..tab(id, title, false, false)
+        }
+    }
+
+    fn aside(id: usize, title: &str, origin: usize) -> TabInfo {
+        TabInfo {
+            origin: Some(origin),
+            kind: TabKind::Aside,
             ..tab(id, title, false, false)
         }
     }
@@ -167,6 +186,14 @@ mod tests {
     fn forked_tabs_are_marked() {
         let (text, _) = render(&[tab(1, "主线", false, true), forked(2, "主线", 1)], 60);
         assert!(text.contains('⑂'), "{text:?}");
+    }
+
+    /// 只读旁问页要和普通分叉页分得开。
+    #[test]
+    fn aside_tabs_get_their_own_badge() {
+        let (text, _) = render(&[tab(1, "主线", false, true), aside(2, "主线", 1)], 60);
+        assert!(text.contains('?'), "{text:?}");
+        assert!(!text.contains('⑂'), "{text:?}");
     }
 
     #[test]

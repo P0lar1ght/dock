@@ -554,7 +554,7 @@ const HELP: &[HelpEntry] = &[
     }),
     HelpEntry::Row(HelpRow {
         key: "/btw",
-        label: "插一嘴：只读问一句，不打断当前任务",
+        label: "插一嘴：开一张只读分页问一句，主线照跑",
         kind: HelpKind::Slash(SlashCmd::Btw),
     }),
     HelpEntry::Row(HelpRow {

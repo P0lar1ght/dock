@@ -13,8 +13,6 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
         Action::TabGo(id) => vec![Effect::TabGo { id }],
         Action::TabFork => vec![Effect::TabFork],
         Action::TabCarryBack => vec![Effect::TabCarryBack],
-        Action::AsideClose => vec![Effect::AsideClose],
-        Action::AsidePromote => vec![Effect::AsidePromote],
         Action::ResumePicker => vec![Effect::ResumePicker],
         Action::Help => vec![Effect::Help],
         Action::RestoreSession(id) => vec![Effect::RestoreSession(id)],
