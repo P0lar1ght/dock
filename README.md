@@ -57,7 +57,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 - 快捷键条 `Key:label`、思考折叠、工具卡先输入后输出
 - 用户可见文案中文；底栏短 hint 保持 `Enter:send` 无空格
 - `/preset` YAML 目录就是 Agent；项目 `.dock/presets/` 默认落点
-- 工作区根目录的 `AGENTS.md` 自动进系统提示（`~/.dock/AGENTS.md` 是跨工作区的用户层，两层追加不覆盖）
+- 工作区根目录的 `AGENTS.md` 作为历史尾部提醒注入（`~/.dock/AGENTS.md` 是跨工作区的用户层，两层追加不覆盖；内容变了才重注，会话中途改文件不会作废提示前缀）
 - Shift+Tab 在 **询问 / 始终允许** 之间切换；计划是独立模式，不是第三种权限
 
 ### 🛠️ 工具与 MCP

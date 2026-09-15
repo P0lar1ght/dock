@@ -176,6 +176,9 @@ impl PreStep {
 /// Order slots on the `agent/step-start` waterfall. Reminders are appended in
 /// slot order, so two handlers injecting on the same step land in a fixed
 /// sequence instead of one decided by plugin mount order.
+/// 工作区规约（`AGENTS.md`）。排在所有提醒最前：它是这一步的**规则**，其余提醒
+/// 都是在这些规则之下的具体催办。
+pub const ORDER_STEP_START_INSTRUCTIONS: i32 = 5;
 pub const ORDER_STEP_START_TODO: i32 = 10;
 /// Disk / dynamic Cordis plugins (`host.on("agent/step-start", ...)`). Behind
 /// the built-ins: a script may add to the turn's discipline, not outrank it.

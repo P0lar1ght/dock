@@ -1001,14 +1001,22 @@ fn visible_cell(
     ))
 }
 
+/// 分类行 → 可点开的占用类别。
+///
+/// 从 [`OccupancyKind::title`] 反查，不再各写一份字面量：spine 那边加一类、
+/// 这边忘了跟，新行就会静默落进 `Tools` 的兜底——点「工程规约」打开「工具定义」
+/// 就是这么来的。标签与映射现在同一个来源。
 fn category_kind(label: &str) -> OccupancyKind {
-    match label {
-        "MCP 服务器" => OccupancyKind::Mcp,
-        "本地按需" => OccupancyKind::Deferred,
-        "工作流" => OccupancyKind::Workflows,
-        "技能" => OccupancyKind::Skills,
-        _ => OccupancyKind::Tools,
-    }
+    [
+        OccupancyKind::Mcp,
+        OccupancyKind::Deferred,
+        OccupancyKind::Workflows,
+        OccupancyKind::Skills,
+        OccupancyKind::Instructions,
+    ]
+    .into_iter()
+    .find(|kind| kind.title() == label)
+    .unwrap_or(OccupancyKind::Tools)
 }
 
 #[cfg(test)]
@@ -1701,6 +1709,43 @@ mod tests {
         let (w, n) = (spark_of(&wide), spark_of(&narrow));
         assert!(n.chars().count() < w.chars().count(), "窄窗口没裁：{n}");
         assert!(w.ends_with(&n), "裁掉的该是最旧的：wide={w} narrow={n}");
+    }
+
+    /// 分类行点开的必须是它自己那一类。
+    ///
+    /// spine 加了「工程规约」而这边的映射没跟上时，它会静默落进 `Tools` 的兜底
+    /// ——点「工程规约」打开的是「工具定义」。
+    #[test]
+    fn every_category_row_opens_its_own_detail() {
+        for kind in [
+            OccupancyKind::Mcp,
+            OccupancyKind::Deferred,
+            OccupancyKind::Workflows,
+            OccupancyKind::Skills,
+            OccupancyKind::Instructions,
+        ] {
+            assert_eq!(category_kind(kind.title()), kind, "{}", kind.title());
+        }
+        // 兜底仍然是工具定义：工具那一行的标签不在上面的名单里。
+        assert_eq!(
+            category_kind(OccupancyKind::Tools.title()),
+            OccupancyKind::Tools
+        );
+    }
+
+    /// 「工程规约」要能画进分类区并且可点击。
+    #[test]
+    fn instructions_row_is_clickable() {
+        let mut snap = snapshot();
+        snap.categories.push(ContextCategory {
+            label: OccupancyKind::Instructions.title().into(),
+            tokens: 2_800,
+            detail: Some("AGENTS.md · 已计入消息".into()),
+        });
+        let view = context_view(&snap, 80, None);
+        let kinds: Vec<_> = view.legend.iter().map(|h| h.2).collect();
+        assert!(kinds.contains(&OccupancyKind::Instructions), "{kinds:?}");
+        assert!(all_text(&view.lines).contains("工程规约"));
     }
 
     #[test]
