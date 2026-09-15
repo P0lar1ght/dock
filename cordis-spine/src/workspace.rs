@@ -23,10 +23,13 @@ const MAX_LINES_READ: usize = 1_000;
 
 /// 前台 bash 的阻塞预算。到点把命令收掉并把已产出的输出带回来。
 ///
-/// 30s 这个数字来自 Grok `block_until_ms` 的省略默认值；P0 先保持不变，只把
-/// “到点丢输出”改掉。覆盖用的 env 对齐 Grok 的 `GROK_MAX_FOREGROUND_BLOCK_MS`。
+/// Grok 这里是 30s（`block_until_ms` 的省略默认值），用意是催模型把长命令交后台。
+/// 在本仓库太短：一条 `cargo clippy -p cordis-spine` 就 1 分多钟，`cargo test` 全量
+/// 更久，30s 到点必然被收掉——模型只能反复「起后台 + `get_task_output` 轮询」，多花
+/// 的回合比省下的等待贵。放宽到 5 分钟：仍有上限（挂不死），到点照旧把已产出的输出
+/// 带回来。覆盖用的 env 对齐 Grok 的 `GROK_MAX_FOREGROUND_BLOCK_MS`。
 const FOREGROUND_MS_ENV: &str = "DOCK_BASH_FOREGROUND_MS";
-const DEFAULT_FOREGROUND_MS: u64 = 30_000;
+const DEFAULT_FOREGROUND_MS: u64 = 300_000;
 
 fn foreground_budget() -> Duration {
     std::env::var(FOREGROUND_MS_ENV)
