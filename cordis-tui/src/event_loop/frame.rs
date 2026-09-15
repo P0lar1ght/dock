@@ -23,7 +23,8 @@ use crate::grok::tasks_pane;
 use crate::grok::workflows;
 use crate::mcp_elicit_view;
 use crate::names::{
-    GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
+    GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_TABS,
+    TUI_WELCOME,
 };
 use crate::overlay::{
     self, filter_help_items, filter_sessions, filter_strings, HelpItem, InspectTarget, Overlay,
@@ -37,6 +38,8 @@ use crate::scrollback::Scrollback;
 use crate::session::SessionRef;
 use crate::settings_modal;
 use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
+use crate::tab_bar;
+use crate::tabs::Tabs;
 use crate::task_dock::{self, TaskDockHit};
 use crate::text_overlay;
 use crate::theme::Theme;
@@ -161,6 +164,7 @@ pub(super) fn draw(
     dock_hits: &mut Vec<(Rect, TaskDockHit)>,
     goal_hits: &mut Vec<(Rect, GoalHit)>,
     queue_hits: &mut Vec<(Rect, QueueHit)>,
+    tab_hits: &mut Vec<(Rect, tab_bar::TabHit)>,
     pointer: (u16, u16),
 ) -> Result<()> {
     let theme = Theme::current();
@@ -168,6 +172,12 @@ pub(super) fn draw(
     dock_hits.clear();
     goal_hits.clear();
     queue_hits.clear();
+    tab_hits.clear();
+    // 标签栏与旁问面板都活在根上（`Tabs` 不分 realm），当前页的 ctx 一样查得到。
+    let tab_rows = ctx
+        .get::<Tabs>(TUI_TABS)
+        .map(|t| t.list())
+        .unwrap_or_default();
     terminal
         .draw(|frame| {
             let area = frame.area();
@@ -265,7 +275,14 @@ pub(super) fn draw(
             } else {
                 queue_pane::desired_height(queued_items.len())
             };
+            // 只有一页时不占这一行；全屏 inspect 时也让位。
+            let tab_h = if inspect_open || tab_rows.len() < 2 {
+                0
+            } else {
+                1
+            };
             let chunks = Layout::vertical([
+                Constraint::Length(tab_h),
                 Constraint::Length(1),
                 Constraint::Min(1),
                 Constraint::Length(dock_h),
@@ -277,13 +294,18 @@ pub(super) fn draw(
                 Constraint::Length(1),
             ])
             .split(inner);
-            let scroll_area = chunks[1];
-            let dock_area = chunks[2];
-            let goal_area = chunks[3];
-            let queue_area = chunks[4];
-            let turn_area = chunks[5];
-            let prompt_area = chunks[6];
-            let shortcuts_area = chunks[7];
+            let tab_area = chunks[0];
+            let status_area = chunks[1];
+            let scroll_area = chunks[2];
+            let dock_area = chunks[3];
+            let goal_area = chunks[4];
+            let queue_area = chunks[5];
+            let turn_area = chunks[6];
+            let prompt_area = chunks[7];
+            let shortcuts_area = chunks[8];
+            if tab_h > 0 {
+                *tab_hits = tab_bar::paint(frame.buffer_mut(), tab_area, &tab_rows);
+            }
             if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
                 let left = status.left();
                 let center = status.center();
@@ -298,9 +320,9 @@ pub(super) fn draw(
                     } else {
                         bar = bar.right_styled(r, status.occupancy_style());
                     }
-                    status.remember_right_hit(chunks[0], r);
+                    status.remember_right_hit(status_area, r);
                 }
-                frame.render_widget(bar, chunks[0]);
+                frame.render_widget(bar, status_area);
             }
             status::render_turn_status(
                 frame.buffer_mut(),
@@ -866,6 +888,7 @@ pub(super) fn paint_overlay(
 
 pub(super) fn arg_picker_title(kind: crate::slash::ArgKind) -> &'static str {
     match kind {
+        crate::slash::ArgKind::Tab => "分页",
         crate::slash::ArgKind::Theme => "主题",
         crate::slash::ArgKind::Model => "模型",
         crate::slash::ArgKind::Protocol => "推理协议",

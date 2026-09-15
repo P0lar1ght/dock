@@ -20,7 +20,9 @@ use crate::grok::mcps;
 use crate::grok::tasks_pane::{self, GroupKind, TaskEntry};
 use crate::grok::workflows::WorkflowRunSnapshot;
 use crate::mcp_elicit_view;
-use crate::names::{GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
+use crate::names::{
+    GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS, TUI_WELCOME,
+};
 use crate::overlay::{filter_help_items, filter_sessions, filter_strings, InspectTarget, Overlay};
 use crate::pairing;
 use crate::permission_view;
@@ -30,6 +32,7 @@ use crate::scrollback::Scrollback;
 use crate::session::SessionRef;
 use crate::settings_modal;
 use crate::slash::{self, filter_args};
+use crate::tabs::Tabs;
 use crate::task_dock;
 use crate::text_overlay;
 use crate::usage_overlay;
@@ -1104,6 +1107,18 @@ pub(super) fn copy_out(ctx: &Context, text: &str, file: Option<&std::path::Path>
     }
 }
 
+/// 分页服务。没挂（裁剪过的树、单元测试）就是单页模式。
+pub(super) fn tabs_service(root: &Context) -> Option<std::sync::Arc<Tabs>> {
+    root.get::<Tabs>(TUI_TABS)
+}
+
+/// 当前分页的上下文；没挂分页服务时就是根本身。
+pub(super) fn active_ctx(root: &Context) -> Context {
+    tabs_service(root)
+        .map(|t| t.active_ctx())
+        .unwrap_or_else(|| root.clone())
+}
+
 pub(super) fn flash(ctx: &Context, msg: impl Into<String>) {
     if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
         status.flash(msg);
@@ -1283,11 +1298,12 @@ pub(super) fn slash_open(ctx: &Context) -> bool {
 }
 
 /// Enter fills `/cmd ` only while choosing a command name. After a space,
-/// the arg dropdown stays visible for Tab, but Enter sends.
+/// the arg dropdown stays visible for Tab and Enter sends —— 除非用户上下选过
+/// 其中一行：那就是他要那一行，Enter 先把它填进输入框（再按一下才发）。
 pub(super) fn slash_captures_enter(ctx: &Context) -> bool {
     ctx.get::<PromptWidget>(TUI_PROMPT).is_some_and(|p| {
         let snap = p.slash_snapshot();
-        snap.open && !snap.completing_args
+        snap.open && (!snap.completing_args || p.slash_picked())
     })
 }
 

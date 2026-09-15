@@ -82,7 +82,10 @@ fn restore_terminal() {
     let _ = disable_raw_mode();
 }
 
-pub async fn run(ctx: Context) -> Result<()> {
+pub async fn run(root: Context) -> Result<()> {
+    // 事件循环里的 `ctx` 始终是**当前分页**的上下文（见下面的 shadow）。监听器
+    // 和终端接管用根上下文，它们不随切页变。
+    let ctx = root.clone();
     let _guard = TerminalGuard;
     let prev_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -153,6 +156,7 @@ pub async fn run(ctx: Context) -> Result<()> {
     let mut dock_hits: Vec<(Rect, crate::task_dock::TaskDockHit)> = Vec::new();
     let mut goal_hits: Vec<(Rect, GoalHit)> = Vec::new();
     let mut queue_hits: Vec<(Rect, QueueHit)> = Vec::new();
+    let mut tab_hits: Vec<(Rect, crate::tab_bar::TabHit)> = Vec::new();
     let mut pointer = (0u16, 0u16);
     let mut quit = false;
     let mut esc_suppress_until: Option<Instant> = None;
@@ -164,10 +168,15 @@ pub async fn run(ctx: Context) -> Result<()> {
         &mut dock_hits,
         &mut goal_hits,
         &mut queue_hits,
+        &mut tab_hits,
         pointer,
     )?;
 
     while !quit {
+        // 当前分页的上下文。没被 isolate 的名字（tools / llm / permissions /
+        // mcp / gateway…）照样解析到根，所以这一行只把会话、循环和视图换掉。
+        // 切页的三个 effect 会就地重绑它 —— 否则切完这一帧还画的是上一页。
+        let mut ctx = active_ctx(&root);
         tokio::select! {
             biased;
             event = input_rx.recv() => {
@@ -200,15 +209,26 @@ pub async fn run(ctx: Context) -> Result<()> {
                             &dock_hits,
                             &goal_hits,
                             &queue_hits,
+                            &tab_hits,
                         )
                         .into();
                         while let Some(effect) = effects.pop_front() {
                             match effect {
                                 Effect::Quit => quit = true,
                                 Effect::NewSession => {
+                                    // 只收自己这一页的子代理：`"subagents"` 是全局一份、
+                                    // 按 parent session 分账，`cancel_all` 会波及别的分页。
                                     if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
-                                        sub.cancel_all();
-                                        sub.open_admission();
+                                        match ctx.get::<Sessions>(SESSIONS) {
+                                            Some(sessions) => {
+                                                sub.cancel_session(sessions.identity());
+                                                sub.open_admission_for(sessions.identity());
+                                            }
+                                            None => {
+                                                sub.cancel_all();
+                                                sub.open_admission();
+                                            }
+                                        }
                                     }
                                     if let Ok(sessions) = ctx.require::<Sessions>(SESSIONS) {
                                         sessions.archive_current();
@@ -703,6 +723,100 @@ pub async fn run(ctx: Context) -> Result<()> {
                                 Effect::ReloadMcps { quiet } => {
                                     spawn_mcp_reload(ctx.clone(), redraw_tx.clone(), quiet);
                                 }
+                                Effect::TabNew => {
+                                    // 起一整棵子树要 await 插件挂载：这里直接等，
+                                    // 开页是用户按下去就该看见结果的动作。
+                                    match tabs_service(&root) {
+                                        Some(tabs) => match tabs.open().await {
+                                            Ok(_) => flash(&root, format!("已开第 {} 页", tabs.active_id())),
+                                            Err(e) => flash(&root, e),
+                                        },
+                                        None => flash(&root, "分页服务未挂载"),
+                                    }
+                                    // 立刻换到新页的上下文：这一帧的 draw 就该画新页。
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
+                                Effect::TabGo { id } => {
+                                    match tabs_service(&root) {
+                                        Some(tabs) if tabs.activate_id(id) => {}
+                                        Some(_) => flash(&root, format!("没有第 {id} 页")),
+                                        None => flash(&root, "分页服务未挂载"),
+                                    }
+                                    // 立刻换到新页的上下文：这一帧的 draw 就该画新页。
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
+                                Effect::TabClose { id } => {
+                                    match tabs_service(&root) {
+                                        Some(tabs) => match tabs.close_id(id).await {
+                                            Ok(closed) => flash(&root, format!("已关第 {closed} 页")),
+                                            Err(e) => flash(&root, e),
+                                        },
+                                        None => flash(&root, "分页服务未挂载"),
+                                    }
+                                    // 立刻换到新页的上下文：这一帧的 draw 就该画新页。
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
+                                Effect::TabFork => {
+                                    match tabs_service(&root) {
+                                        Some(tabs) => match tabs.fork().await {
+                                            Ok(_) => flash(
+                                                &root,
+                                                format!(
+                                                    "已分叉到第 {} 页（带着上下文快照）",
+                                                    tabs.active_id()
+                                                ),
+                                            ),
+                                            Err(e) => flash(&root, e),
+                                        },
+                                        None => flash(&root, "分页服务未挂载"),
+                                    }
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
+                                Effect::TabCarryBack => {
+                                    match tabs_service(&root) {
+                                        Some(tabs) => match tabs.carry_back() {
+                                            Ok(origin) => flash(
+                                                &root,
+                                                format!("已带回第 {origin} 页的输入框，改完再发"),
+                                            ),
+                                            Err(e) => flash(&root, e),
+                                        },
+                                        None => flash(&root, "分页服务未挂载"),
+                                    }
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
+                                Effect::AsideAsk { question } => {
+                                    match tabs_service(&root) {
+                                        Some(tabs) => match tabs.ask_aside(question).await {
+                                            Ok(id) => flash(
+                                                &root,
+                                                format!("旁问开在第 {id} 页（只读）；Alt+1 回主线"),
+                                            ),
+                                            Err(e) => flash(&root, e),
+                                        },
+                                        None => flash(&root, "分页服务未挂载"),
+                                    }
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
+                                Effect::TabPromote => {
+                                    match tabs_service(&root) {
+                                        Some(tabs) => match tabs.promote_active().await {
+                                            Ok(id) => {
+                                                flash(&root, format!("已转正成第 {id} 页（全权）"))
+                                            }
+                                            Err(e) => flash(&root, e),
+                                        },
+                                        None => flash(&root, "分页服务未挂载"),
+                                    }
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
                                 Effect::CuaRefresh => {
                                     spawn_cua_refresh(ctx.clone(), redraw_tx.clone(), false);
                                 }
@@ -730,6 +844,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                         &mut dock_hits,
                         &mut goal_hits,
                         &mut queue_hits,
+                        &mut tab_hits,
                         pointer,
                     )?;
                 }
@@ -751,6 +866,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                     &mut dock_hits,
                     &mut goal_hits,
                     &mut queue_hits,
+                    &mut tab_hits,
                     pointer,
                 )?;
             }
@@ -764,6 +880,7 @@ pub async fn run(ctx: Context) -> Result<()> {
                         &mut dock_hits,
                         &mut goal_hits,
                         &mut queue_hits,
+                        &mut tab_hits,
                         pointer,
                     )?;
                 }

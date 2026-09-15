@@ -1,7 +1,7 @@
-use cordis_app::{cron_driver, session_actor, system_prompt};
+use cordis_app::{cron_driver, session_actor, system_prompt, tab_mount};
 use cordis_gateway::gateway;
 use cordis_spine::{agent_loop, install_app, Sessions, SESSIONS};
-use cordis_tui::tui;
+use cordis_tui::{tabs, tui};
 
 enum ResumeArg {
     Off,
@@ -86,6 +86,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     root.plugin(session_actor(), ())?.wait().await?;
     root.plugin(gateway(), ())?.wait().await?;
     root.plugin(cron_driver(), ())?.wait().await?;
+    // 分页服务要在 TUI 之前挂上：事件循环第一帧就会问它当前是哪一页。
+    root.plugin(tabs(), tab_mount())?.wait().await?;
     root.plugin(tui(), ())?.wait().await?;
     Ok(())
 }

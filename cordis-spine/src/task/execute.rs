@@ -163,7 +163,22 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
     .await
 }
 
-#[allow(clippy::too_many_arguments)] // 绘制 / 布局 / 注册参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
+/// 发起这次 `task` 调用的会话身份。
+///
+/// 工具体是全局注册一次、捕获根 ctx 的，所以要问**执行期** ctx
+/// （`tools::exec_ctx`，`Tools::execute_on` 用 task-local 递下来的那个）。
+/// 只认主线身份：分页是并列主线（`main#2`…），各自记账；子代理再 spawn 的
+/// 孙代理照旧挂在 `main` 上，不动既有的取消语义。
+fn caller_session_id() -> String {
+    crate::tools::exec_ctx()
+        .and_then(|c| c.get::<crate::session::Sessions>(crate::names::SESSIONS))
+        .map(|s| s.identity().to_string())
+        .filter(|id| crate::session::is_main_identity(id))
+        .unwrap_or_else(|| PARENT_SESSION_ID.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+// 参数天然多，抽结构体只是把参数搬个家，留给需要时再拆
 async fn spawn_child(
     sub: &Subagents,
     call: ToolCall,
@@ -174,9 +189,10 @@ async fn spawn_child(
     resume_from: Option<String>,
     task_id: Option<String>,
 ) -> ToolResult {
+    let parent_session_id = caller_session_id();
     match sub
         .backend()
-        .validate_type(&subagent_type, PARENT_SESSION_ID)
+        .validate_type(&subagent_type, &parent_session_id)
         .await
     {
         SubagentValidateTypeOutcome::Ok => {}
@@ -218,7 +234,7 @@ async fn spawn_child(
         prompt,
         description: description.clone(),
         subagent_type: subagent_type.clone(),
-        parent_session_id: PARENT_SESSION_ID.into(),
+        parent_session_id,
         resume_from,
         runtime_overrides: SubagentRuntimeOverrides::default(),
         run_in_background,
@@ -304,4 +320,70 @@ fn default_type(ctx: &cordis::Context) -> String {
         return "general-purpose".into();
     }
     roster.keys().next().cloned().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::names::SESSIONS;
+    use crate::session::Sessions;
+    use crate::tools::{ToolBody, Tools};
+    use crate::types::ToolSpec;
+    use std::sync::{Arc, Mutex};
+
+    fn spec() -> ToolSpec {
+        ToolSpec {
+            name: "probe-caller".into(),
+            description: "test".into(),
+            parameters_json: "{}".into(),
+        }
+    }
+
+    /// 子代理的 spawn 要绑到**发起调用的那一页**上，而不是写死 `main`。
+    /// 工具体捕获的是根 ctx，身份只能从执行期 ctx 拿（`Tools::execute_on` 的
+    /// task-local）—— 这条测的就是那条通路。
+    #[tokio::test]
+    async fn spawns_bind_to_the_calling_page() {
+        let root = cordis::Context::new();
+        let tools = Tools::echo(root.clone());
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let body: ToolBody = {
+            let seen = seen.clone();
+            Arc::new(move |call| {
+                let seen = seen.clone();
+                Box::pin(async move {
+                    seen.lock().unwrap().push(caller_session_id());
+                    crate::tools::tool_result(call, "ok")
+                })
+            })
+        };
+        let _hold = tools.register(spec(), body).unwrap();
+        let call = || ToolCall {
+            id: "1".into(),
+            name: "probe-caller".into(),
+            arguments: "{}".into(),
+        };
+
+        // 第 2 页：身份 main#2，spawn 该记在它自己名下。
+        let tab = root.isolate("sessions");
+        let _tab_sessions = tab
+            .provide(SESSIONS, Sessions::tab(tab.clone(), 2))
+            .unwrap();
+        tools.execute_on(&tab, call()).await;
+
+        // 子代理（child-…）不是主线：孙代理照旧挂在 main 上，语义不动。
+        let child = root.isolate("sessions");
+        let _child_sessions = child
+            .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-7"))
+            .unwrap();
+        tools.execute_on(&child, call()).await;
+
+        // 没有会话时退回 main。
+        tools.execute_on(&root, call()).await;
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["main#2", PARENT_SESSION_ID, PARENT_SESSION_ID]
+        );
+    }
 }

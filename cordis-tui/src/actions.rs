@@ -16,6 +16,14 @@ use cordis_spine::{
 pub enum Action {
     Quit,
     NewSession,
+    /// `Ctrl+N`：开一页新会话（分页，不是换掉当前会话）。
+    TabNew,
+    /// `Alt+1..9` 或点标签：切到标签上那个号的页。
+    TabGo(usize),
+    /// `Ctrl+F`：从当前页分叉一页（带上下文快照）。
+    TabFork,
+    /// `Ctrl+B`：把这一页最近一条回复带回来源页的输入框。
+    TabCarryBack,
     ResumePicker,
     Help,
     RestoreSession(String),
@@ -106,6 +114,26 @@ pub enum Action {
 pub enum Effect {
     Quit,
     NewSession,
+    /// Async: 起一棵新的分页子树（会话 / 循环 / 视图各一份）。
+    TabNew,
+    /// 切到标签编号 `id` 的页。
+    TabGo {
+        id: usize,
+    },
+    /// Async: 关掉一页并 dispose 它整棵子树；`None` 关当前页。
+    TabClose {
+        id: Option<usize>,
+    },
+    /// Async: 从当前页分叉一页（带上下文快照，记来源）。
+    TabFork,
+    /// 把当前页最近一条回复填进来源页的输入框并切过去。
+    TabCarryBack,
+    /// Async: `/btw`：开一张只读分页问一句，不进主线上下文。
+    AsideAsk {
+        question: String,
+    },
+    /// Async: 把当前的只读旁问页转正成全权常驻页。
+    TabPromote,
     ResumePicker,
     PairingManage,
     Help,
@@ -228,10 +256,53 @@ pub enum Effect {
     },
 }
 
+/// `/tab` 的子命令。空参就是开新页——最常用的那个不该还要多打一个词。
+/// `close` 不带参数关的是**当前页**；带数字关那一页（1 基，和标签上的号一致）。
+fn tab_effect(args: &str) -> Effect {
+    let mut parts = args.split_whitespace();
+    match parts.next() {
+        None | Some("new") | Some("n") => Effect::TabNew,
+        Some("fork") | Some("f") => Effect::TabFork,
+        Some("back") | Some("b") => Effect::TabCarryBack,
+        Some("promote") | Some("p") => Effect::TabPromote,
+        Some("close") | Some("c") | Some("x") => Effect::TabClose {
+            id: parts.next().and_then(|n| n.parse::<usize>().ok()),
+        },
+        Some(other) => match other.parse::<usize>() {
+            Ok(id) if id > 0 => Effect::TabGo { id },
+            _ => Effect::ShowNotice {
+                title: "分页".into(),
+                body: "用法：/tab（新开）、/tab fork（带上下文分叉）、\
+                       /tab back（把本页结论带回来源页）、/tab promote（旁问页转正）、\
+                       /tab close [页号]、/tab <页号>\n\
+                       快捷键：Ctrl+N 新开、Ctrl+F 分叉、Ctrl+B 带回、Alt+1..9 切换。\n"
+                    .into(),
+            },
+        },
+    }
+}
+
 pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
     let args = args.trim();
     match cmd {
         SlashCmd::New => Effect::NewSession,
+        SlashCmd::Tab => tab_effect(args),
+        SlashCmd::Btw => {
+            if args.is_empty() {
+                Effect::ShowNotice {
+                    title: "旁问".into(),
+                    body: "用法：/btw <问题>\n\
+                           从当前页分叉一张**只读**分页问一句：主线那一轮照跑，答案也不进\n\
+                           主线上下文。看完 Alt+1 回主线，/tab close 关掉，\n\
+                           /tab promote 可以把它转正成全权页。\n"
+                        .into(),
+                }
+            } else {
+                Effect::AsideAsk {
+                    question: args.to_string(),
+                }
+            }
+        }
         SlashCmd::Resume => Effect::ResumePicker,
         SlashCmd::Pair => Effect::PairingManage,
         SlashCmd::Help => Effect::Help,
@@ -570,6 +641,37 @@ pub fn interpret_loop_composer(text: &str) -> LoopComposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/btw` 要带问题；空参给用法而不是起一个空旁问。
+    #[test]
+    fn btw_slash_needs_a_question() {
+        assert!(matches!(
+            effect_for_slash(SlashCmd::Btw, "它卡在哪"),
+            Effect::AsideAsk { question } if question == "它卡在哪"
+        ));
+        assert!(matches!(
+            effect_for_slash(SlashCmd::Btw, "  "),
+            Effect::ShowNotice { .. }
+        ));
+    }
+
+    /// `/tab` 空参就是开新页：最常用的动作不该还要多打一个词。
+    #[test]
+    fn tab_slash_parses_subcommands() {
+        assert!(matches!(tab_effect(""), Effect::TabNew));
+        assert!(matches!(tab_effect("new"), Effect::TabNew));
+        assert!(matches!(tab_effect("close"), Effect::TabClose { id: None }));
+        assert!(matches!(
+            tab_effect("close 3"),
+            Effect::TabClose { id: Some(3) }
+        ));
+        assert!(matches!(tab_effect("2"), Effect::TabGo { id: 2 }));
+        assert!(matches!(tab_effect("fork"), Effect::TabFork));
+        assert!(matches!(tab_effect("back"), Effect::TabCarryBack));
+        // 打错了给用法，不猜一个页号切过去。
+        assert!(matches!(tab_effect("nope"), Effect::ShowNotice { .. }));
+        assert!(matches!(tab_effect("0"), Effect::ShowNotice { .. }));
+    }
 
     /// `/protocol` 认 config 里的写法与常见简写；空参数和打错的名字都开菜单，
     /// 不猜一条协议发出去。

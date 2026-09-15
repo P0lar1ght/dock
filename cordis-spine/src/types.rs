@@ -167,9 +167,9 @@ impl PreStep {
         }
     }
 
-    /// True for the user-facing session. Subagent turns are `child-*`.
+    /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
     pub fn is_main_session(&self) -> bool {
-        self.identity == crate::session::ROOT_IDENTITY
+        crate::session::is_main_identity(&self.identity)
     }
 }
 
@@ -223,9 +223,9 @@ impl StepStart {
         self.reminders.into_iter().map(|(_, body)| body).collect()
     }
 
-    /// True for the user-facing session. Subagent turns are `child-*`.
+    /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
     pub fn is_main_session(&self) -> bool {
-        self.identity == crate::session::ROOT_IDENTITY
+        crate::session::is_main_identity(&self.identity)
     }
 }
 
@@ -360,8 +360,8 @@ impl TurnEnd {
         self.continuations.iter().min_by_key(|c| c.order)
     }
 
-    /// True for the user-facing session. Subagent turns are `child-*`.
+    /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
     pub fn is_main_session(&self) -> bool {
-        self.identity == crate::session::ROOT_IDENTITY
+        crate::session::is_main_identity(&self.identity)
     }
 }

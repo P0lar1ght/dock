@@ -529,8 +529,33 @@ const HELP: &[HelpEntry] = &[
     }),
     HelpEntry::Row(HelpRow {
         key: "ctrl+w",
-        label: "新会话",
+        label: "新会话（换掉当前这一页的会话）",
         kind: HelpKind::Slash(SlashCmd::New),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "ctrl+n",
+        label: "新分页（另起一个会话，并排跑）",
+        kind: HelpKind::Slash(SlashCmd::Tab),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "ctrl+f",
+        label: "分叉当前会话到新分页（带上下文快照）",
+        kind: HelpKind::Slash(SlashCmd::Tab),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "ctrl+b",
+        label: "把分叉页的结论带回来源页的输入框",
+        kind: HelpKind::Slash(SlashCmd::Tab),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "alt+1..9",
+        label: "切到标签上那个号的分页",
+        kind: HelpKind::Hint,
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/btw",
+        label: "插一嘴：开一张只读分页问一句，主线照跑",
+        kind: HelpKind::Slash(SlashCmd::Btw),
     }),
     HelpEntry::Row(HelpRow {
         key: "f2",

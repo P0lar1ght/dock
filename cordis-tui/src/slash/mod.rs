@@ -19,6 +19,8 @@ pub const MAX_VISIBLE_SUGGESTIONS: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashCmd {
     New,
+    Tab,
+    Btw,
     Resume,
     Pair,
     Help,
@@ -59,6 +61,7 @@ pub enum SlashPick {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgKind {
+    Tab,
     Theme,
     Model,
     Protocol,
@@ -135,6 +138,26 @@ pub const CATALOG: &[SlashDef] = &[
         description: "开始新会话",
         takes_args: false,
         args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Tab,
+        name: "tab",
+        aliases: &["tabs"],
+        display: "/tab",
+        description: "分页：new / fork / back / promote / close / 页号",
+        takes_args: true,
+        args_required: false,
+        arg_kind: Some(ArgKind::Tab),
+    },
+    SlashDef {
+        cmd: SlashCmd::Btw,
+        name: "btw",
+        aliases: &["aside", "旁问"],
+        display: "/btw",
+        description: "插一嘴：只读地问一句，不打断当前任务、不进主线上下文",
+        takes_args: true,
+        args_required: true,
         arg_kind: None,
     },
     SlashDef {
@@ -742,6 +765,18 @@ pub fn loop_interval_args() -> Vec<ArgItem> {
         .collect()
 }
 
+/// `/tab` 的子命令补全。页号不在这里 —— `args_for` 看不到 `"tui.tabs"`，
+/// 而且数字查询本来就该让下拉关掉、直接把 `/tab 3` 提交出去。
+pub fn tab_args() -> Vec<ArgItem> {
+    vec![
+        ArgItem::new("new", "开一张空白新页（Ctrl+N）"),
+        ArgItem::new("fork", "带当前页上下文快照分叉一页（Ctrl+F）"),
+        ArgItem::new("back", "把本页结论带回来源页的输入框（Ctrl+B）"),
+        ArgItem::new("promote", "把当前的只读旁问页转正成全权页"),
+        ArgItem::new("close", "关掉当前页；`close <页号>` 关那一页"),
+    ]
+}
+
 pub fn lsp_args() -> Vec<ArgItem> {
     vec![
         ArgItem::new("status", "只看配置，不写文件"),
@@ -752,6 +787,7 @@ pub fn lsp_args() -> Vec<ArgItem> {
 
 pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
     match kind {
+        ArgKind::Tab => tab_args(),
         ArgKind::Theme => theme_args(),
         ArgKind::Model => model_args(settings),
         ArgKind::Protocol => protocol_args(settings),
@@ -784,6 +820,37 @@ mod tests {
     fn nucleo_ranks_resume() {
         let snap = snapshot("/re", 0);
         assert_eq!(snap.matches[0].display, "/resume");
+    }
+
+    /// `/tab ` 之后补子命令；页号是自由输入，下拉该让开。
+    #[test]
+    fn tab_completes_subcommands_but_not_page_numbers() {
+        let snap = snapshot("/tab ", 0);
+        assert!(snap.open && snap.completing_args, "{snap:?}");
+        let rows: Vec<&str> = snap.matches.iter().map(|m| m.display.as_str()).collect();
+        for want in [
+            "/tab new",
+            "/tab fork",
+            "/tab back",
+            "/tab promote",
+            "/tab close",
+        ] {
+            assert!(rows.contains(&want), "缺 {want}：{rows:?}");
+        }
+
+        let snap = snapshot("/tab fo", 0);
+        assert_eq!(snap.matches[0].display, "/tab fork");
+
+        // 数字不该被模糊匹配硬塞成某个子命令：下拉关掉，`/tab 3` 直接提交。
+        let snap = snapshot("/tab 3", 0);
+        assert!(!snap.open, "{snap:?}");
+    }
+
+    /// `/btw` 是自由文本，不该弹一堆补全把问题挡住。
+    #[test]
+    fn btw_does_not_complete_its_question() {
+        let snap = snapshot("/btw 它卡在哪", 0);
+        assert!(!snap.open, "{snap:?}");
     }
 
     #[test]

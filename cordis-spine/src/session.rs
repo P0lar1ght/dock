@@ -99,6 +99,17 @@ struct PendingCall {
 /// children.
 pub const ROOT_IDENTITY: &str = "main";
 
+/// 分页会话身份前缀：`main#2`、`main#3`……第一页就是 [`ROOT_IDENTITY`]。
+pub const TAB_IDENTITY_PREFIX: &str = "main#";
+
+/// 用户面的会话（根会话或任一分页）。子代理是 `child-…`，不算。
+///
+/// 三处 `is_main_session()` 与系统提示的目录开关都问这个：分页是**并列的主线**，
+/// 不是子代理，判错会让第 2 页拿不到工具目录、也收不到主线才有的提醒。
+pub fn is_main_identity(identity: &str) -> bool {
+    identity == ROOT_IDENTITY || identity.starts_with(TAB_IDENTITY_PREFIX)
+}
+
 /// 按 `[model.<id>.pricing]` 估一次调用的费用。`None` = 没配单价。
 ///
 /// 这里认的是**发给上游的 slug**（`pending.model`），不是目录 id：两个目录条目
@@ -126,6 +137,17 @@ fn estimated_cost_ticks(wire_model: &str, usage: &crate::usage::TokenUsage) -> O
 impl Sessions {
     pub fn new(ctx: Context) -> Self {
         Self::with_identity(ctx, ROOT_IDENTITY, true)
+    }
+
+    /// 第 `index` 个分页的会话（`index >= 2`；第一页就是 [`Self::new`]）。
+    /// 与主会话同级：照发 TUI 事件、系统提示照给目录，只是换一个身份。
+    pub fn tab(ctx: Context, index: usize) -> Self {
+        Self::with_identity(ctx, format!("{TAB_IDENTITY_PREFIX}{index}"), true)
+    }
+
+    /// 用户面的会话（根会话或分页），不是子代理。
+    pub fn is_main(&self) -> bool {
+        is_main_identity(&self.identity)
     }
 
     /// Nested subagent log: same API, no TUI events.
