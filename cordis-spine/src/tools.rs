@@ -232,18 +232,28 @@ impl Tools {
             .filter(|s| !self.is_hidden(&s.name))
             .collect();
         match exec.get::<AgentPresets>(AGENT_PRESETS) {
-            Some(presets) => specs
-                .into_iter()
-                .filter(|s| {
-                    self.is_dynamic(&s.name)
-                        || self.mcp_meta_visible(exec, &s.name)
-                        || presets.allows(&s.name)
-                })
-                .map(|mut spec| {
-                    presets.bind_spawn_schema(&mut spec);
-                    spec
-                })
-                .collect(),
+            Some(presets) => {
+                let mut out: Vec<ToolSpec> = specs
+                    .into_iter()
+                    .filter(|s| {
+                        self.is_dynamic(&s.name)
+                            || self.mcp_meta_visible(exec, &s.name)
+                            || presets.allows(&s.name)
+                    })
+                    .map(|mut spec| {
+                        presets.bind_spawn_schema(&mut spec);
+                        spec
+                    })
+                    .collect();
+                // 到处都允许的排前面，会被某个角色过滤掉的排后面。排序键只看整份
+                // 名册、与当前预设无关，所以**子代理那张表是主会话那张表的真前缀**：
+                // 工具表排在整份 prompt 的最前面，以前从第一个被过滤掉的工具起就
+                // 分叉，子代理每次冷启动都要把公共头重付一遍。稳定排序，组内顺序
+                // 不变（内置工具仍在最前，其余仍按名字）。
+                let universal = presets.universal_tools();
+                out.sort_by_key(|s| !universal.allows_everywhere(&s.name));
+                out
+            }
             None => specs,
         }
     }
@@ -431,6 +441,80 @@ mod tests {
 
     fn names(tools: &Tools) -> Vec<String> {
         tools.specs().into_iter().map(|s| s.name).collect()
+    }
+
+    /// 子代理那张工具表必须是主会话那张的**真前缀**。
+    ///
+    /// tools 排在整份 prompt 的最前面。角色白名单过滤掉的项要是散落在数组中间，
+    /// 序列化出来的 tools 就从第一个缺口处分叉，后面整段（system + 全部消息）都得
+    /// 重算——这正是每个子代理第一次调用都要整份满价的原因。排序键只看整份名册，
+    /// 与当前预设无关，父子两边才算得出同一个分组。
+    #[test]
+    fn a_subagent_tool_table_is_a_prefix_of_the_main_one() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        // 名字刻意交错：按名字排序时，共用的与专属的会插花。
+        for name in ["alpha", "bravo", "mike", "november", "zulu"] {
+            tools.register(spec(name), stub_body()).unwrap();
+        }
+        let shared = ["alpha", "mike", "zulu"];
+
+        let mut mode = crate::agent_presets::AgentPreset::new("code");
+        mode.tools = Some(
+            ["alpha", "bravo", "mike", "november", "zulu"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        mode.agents.insert(
+            "explore".into(),
+            crate::agent_presets::SubagentDef {
+                tools: Some(shared.iter().map(|s| s.to_string()).collect()),
+                ..Default::default()
+            },
+        );
+        let parent_presets = AgentPresets::overlay(mode.clone());
+        let _p = ctx.provide(AGENT_PRESETS, parent_presets.clone()).unwrap();
+
+        let child_ctx = ctx.isolate("agentPresets");
+        let _c = child_ctx
+            .provide(
+                AGENT_PRESETS,
+                AgentPresets::overlay_with_order(
+                    mode.agents["explore"].to_preset("explore"),
+                    parent_presets.universal_tools(),
+                ),
+            )
+            .unwrap();
+
+        let names = |exec: &Context| -> Vec<String> {
+            tools
+                .specs_for_model_on(exec)
+                .into_iter()
+                .map(|s| s.name)
+                .collect()
+        };
+        let main = names(&ctx);
+        let child = names(&child_ctx);
+        let common = main.iter().zip(&child).take_while(|(a, b)| a == b).count();
+
+        assert_eq!(child, shared, "子代理看得见的还是那三个，没有多也没有少");
+        assert_eq!(
+            common,
+            child.len(),
+            "子代理的表必须整个是主会话的前缀：main={main:?} child={child:?}"
+        );
+        assert_eq!(&main[..3], &shared[..], "共用的排在最前：{main:?}");
+
+        // 没有这条排序时是什么样：按名字排，第二项就分叉了。
+        let mut by_name = main.clone();
+        by_name.sort();
+        let old_common = by_name
+            .iter()
+            .zip(&child)
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert_eq!(old_common, 1, "旧顺序下公共前缀只有一项：{by_name:?}");
     }
 
     #[test]

@@ -119,9 +119,8 @@ async fn run_dock_child(
         .unwrap_or_default();
     let prompt = child_prompt(&typ, &desc, &run.request.prompt);
 
-    let def = parent
-        .get::<AgentPresets>(AGENT_PRESETS)
-        .and_then(|p| p.subagent(&typ));
+    let parent_presets = parent.get::<AgentPresets>(AGENT_PRESETS);
+    let def = parent_presets.as_ref().and_then(|p| p.subagent(&typ));
     let Some(def) = def else {
         return failed(
             &id,
@@ -155,7 +154,16 @@ async fn run_dock_child(
     }
     let mut preset = def.to_preset(&typ);
     super::format::append_report_duty(&mut preset.persona);
-    match child.provide(AGENT_PRESETS, AgentPresets::overlay(preset)) {
+    // 工具表的排序依据从父会话继承：子代理那张表要和主会话那张共用同一个分组，
+    // 才会是它的真前缀，公共头（system + tools）才有得命中。
+    let order = parent_presets
+        .as_ref()
+        .map(|p| p.universal_tools())
+        .unwrap_or_default();
+    match child.provide(
+        AGENT_PRESETS,
+        AgentPresets::overlay_with_order(preset, order),
+    ) {
         Ok(d) => hold.push(d),
         Err(e) => {
             return failed(&id, &store, wall, format!("child agentPresets: {e}"), false);

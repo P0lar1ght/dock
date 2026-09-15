@@ -22,7 +22,8 @@ cargo test -p cordis-spine --test round -- install_app_registers
 6. **MCP / 可选能力 fail-open。** 没配置或连不上时插件仍 Active，不要让 `install_app` 失败。
 7. **不接 Grok 账号产品。** 登录、账单、分享、marketplace、Imagine / 视频生成、voice、dashboard 账号面：不做。核心 agent 能力（读改跑、搜网、todo、提问、计划、后台任务、调度、MCP）要补。本会话 token 账本（输入/输出/缓存/思考）不是账号产品，见 [CLI.md](CLI.md) `/usage`。
 8. **产品面要跟上。** 新工具要有：register 进 specs（或 `register_deferred` 走 `search_tool`）、execute 路径、权限/计划门（该挡的挡）、人要看见的 slash / TUI（记 [CLI.md](CLI.md)）。用户可见文案中文；Grok 底栏 `Enter:send` 那种短 hint 保持英文无空格。
-9. **测的是树，不是 stub。** 清单以 `install_app` 挂上的插件和 `Tools::specs()` 为准。不要留一个同名但走另一套 end state 的假实现。
+9. **工具表的顺序是缓存面，不是审美。** `specs_for_model_on` 把「整份名册里每个预设与角色都允许的工具」排在前面，其余（会被某个角色过滤掉的、`task` 这种 schema 随名册改写的、MCP / 按需的）排在后面；组内顺序不变（内置在前、其余按名字）。排序键只看名册、与当前预设无关，所以**子代理那张表是主会话那张的真前缀**。tools 排在整份 prompt 最前面，中间少一项就会让后面整段前缀作废，子代理每次冷启动都得把公共头重付一遍。子代理 spawn 时经 `AgentPresets::overlay_with_order` 继承父会话的排序依据——`overlay` 只带一个角色预设，自己算出来的分组和父会话对不上。
+10. **测的是树，不是 stub。** 清单以 `install_app` 挂上的插件和 `Tools::specs()` 为准。不要留一个同名但走另一套 end state 的假实现。
 
 ---
 
