@@ -68,6 +68,29 @@ cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings
 - `vendor/` 里的 crate 是冻结副本，测试不过就当已知边界上报，不要就地改（见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
 - `cordis-spine` 的测试改进程级 env / cwd 必须走 `crate::test_env::scoped()`（单一进程锁 + drop 还原）。不要各模块自建 `static Mutex`，私锁之间不互斥，正是并行随机红的成因。
 
+## 构建速度
+
+等的从来不是测试本身（`cordis-spine` 693 个 lib 用例跑完 10 秒），是**重编与重链**。三条实测有效的：
+
+**1. 给 clippy 单独的 target 目录。** clippy 走 `RUSTC_WORKSPACE_WRAPPER`，指纹里的 `rustc` 哈希和 `cargo test` 不是一个值——**在同一个 target 里 `clippy` 与 `test` 来回切，每切一次都把 200MB 的 rlib 重编一遍**。分开就是两份常热缓存：
+
+```bash
+CARGO_TARGET_DIR=target/clippy cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings
+```
+
+**2. 迭代时别跑全量。** 改哪块跑哪块，全量留到提交前一次：
+
+```bash
+cargo test -p cordis-spine --lib project_instructions   # 只跑这一个模块的单测
+cargo test -p cordis-spine --test instructions          # 只链这一个集成二进制
+```
+
+`cordis-spine` 有 5 个集成测试文件 = 5 个上百 MB 的可执行文件，全量测要挨个链一遍。
+
+**3. `[profile.dev] debug = "line-tables-only"`**（已在根 `Cargo.toml`）。调试信息原本占产物的绝大头。backtrace 的「文件:行」还在，测试和 panic 定位不受影响；要用 lldb 看局部变量就跑 `--profile dev-debug`。
+
+**定期清。** `target/debug/incremental` 与 `deps` 会堆到几十上百 GB（本仓库见过 254 GiB），磁盘压力本身在拖慢构建。改 `[profile.*]` 会让**所有** crate 的指纹失效（依赖也算），那时正是 `cargo clean` 的时机；平时用 `cargo clean -p <crate>` 或 `cargo-sweep`。
+
 ## CI
 
 `.github/workflows/ci.yml` 在 `main` 的 push 与所有 PR 上跑四步：
