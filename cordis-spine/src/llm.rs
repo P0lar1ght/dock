@@ -61,6 +61,22 @@ impl LlmConfig {
     }
 }
 
+tokio::task_local! {
+    /// 正在采样的是**谁的** ctx。子代理跑在自己的隔离 ctx 上，而 `HttpSampler`
+    /// 捏着的是 `llm()` 挂载时的根 ctx——采样器要是照那个去找 `"sessions"` /
+    /// `"turn"`，子代理就会带上主会话的图片，它自己的 `TurnControl` 也没人听
+    /// （`interrupt_agent` 打不断正在跑的那个 HTTP 流）。
+    ///
+    /// 走 task-local 而不是改 [`Sampler`] 的签名：那是 pub trait，动它得让所有
+    /// 实现跟着改，而这里要传的是「当前调用方是谁」这种天然属于调用栈的东西。
+    static SAMPLE_CTX: Context;
+}
+
+/// 当前采样调用方的 ctx。`None` = 没走 `Llm::stream_*`（直接调的 [`Sampler`]）。
+pub(crate) fn sampling_ctx() -> Option<Context> {
+    SAMPLE_CTX.try_with(|c| c.clone()).ok()
+}
+
 /// Swap this to change the protocol (stub, or HttpSampler's declared wires).
 pub trait Sampler: Send + Sync {
     fn sample<'a>(
@@ -122,7 +138,7 @@ impl Llm {
                 observe(&delta);
             }),
         );
-        let output = sample.await;
+        let output = SAMPLE_CTX.scope(ctx.clone(), sample).await;
         if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
             sessions.finish_llm(&output);
         }

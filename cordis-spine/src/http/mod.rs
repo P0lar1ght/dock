@@ -3,6 +3,7 @@
 //! `"settings"` holds the one in use (`/protocol`): Responses (default),
 //! chat/completions, or Anthropic Messages. All three emit [`StreamDelta`].
 
+mod cache_debug;
 mod messages;
 mod responses;
 mod tool_images;
@@ -107,14 +108,19 @@ async fn sample_http(
     request: PromptRequest,
     mut on_delta: Box<dyn FnMut(StreamDelta) + Send + '_>,
 ) -> LlmOutput {
-    let model = sampler
-        .ctx
+    // 采样的是**谁的**会话：子代理跑在自己的隔离 ctx 上，而 `sampler.ctx` 是
+    // `llm()` 挂载时捕获的根 ctx。拿错的后果不只是日志标签——子代理会带上主会话
+    // 的图片（`model_user_images` 按下标取），它自己的 `TurnControl` 也没人听，
+    // `interrupt_agent` 打不断正在跑的这个流。`"settings"` 这类没被隔离的服务，
+    // 从哪个 ctx 查都解析到同一个对象。
+    let exec = crate::llm::sampling_ctx().unwrap_or_else(|| sampler.ctx.clone());
+    let model = exec
         .get::<AppSettings>(SETTINGS)
         .map(|s| s.model())
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| sampler.fallback_model.clone());
     let choice = config::lookup_model(&model);
-    let settings = sampler.ctx.get::<AppSettings>(SETTINGS);
+    let settings = exec.get::<AppSettings>(SETTINGS);
     let params = WireParams::resolve(choice.as_ref(), settings.as_deref());
     // 协议是运行时状态（`/protocol`），不是模型的固定属性：一个端点可以同时开
     // /responses 与 /chat/completions。settings 会对着目录校一遍再给出来。
@@ -136,7 +142,7 @@ async fn sample_http(
         .map(|m| m.wire_model_for(backend).to_string())
         .unwrap_or_else(|| model.clone());
     let (api_base, api_key) = resolve_endpoint(sampler, &model, backend);
-    if let Some(sessions) = sampler.ctx.get::<Sessions>(SESSIONS) {
+    if let Some(sessions) = exec.get::<Sessions>(SESSIONS) {
         let window = choice
             .as_ref()
             .and_then(|m| m.context_window)
@@ -154,8 +160,7 @@ async fn sample_http(
         cost_usd_ticks: None,
     });
     let url = format!("{}/{}", api_base.trim_end_matches('/'), backend.path());
-    let user_images = sampler
-        .ctx
+    let user_images = exec
         .get::<Sessions>(SESSIONS)
         .map(|s| s.model_user_images())
         .unwrap_or_default();
@@ -172,11 +177,22 @@ async fn sample_http(
             messages::body(&wire, &request, &user_images, &params, prompt_cache)
         }
     };
+    // `DOCK_CACHE_DEBUG` 没设时是空转；设了就把这次请求的前缀与同一会话上一次
+    // 的逐条比一遍，写进日志。子代理与主会话交替发请求，所以按身份分开比。
+    cache_debug::record_request(
+        &exec
+            .get::<Sessions>(SESSIONS)
+            .map(|s| s.identity().to_string())
+            .unwrap_or_else(|| "?".into()),
+        backend.path(),
+        &wire,
+        &body,
+    );
     let client = reqwest::Client::builder()
         .user_agent(LLM_USER_AGENT)
         .build()
         .expect("dock user-agent is a valid header value");
-    let cancel = sampler.ctx.get::<TurnControl>(TURN).map(|t| t.token());
+    let cancel = exec.get::<TurnControl>(TURN).map(|t| t.token());
     let mut response = None;
     for attempt in 0..3u32 {
         let mut send = client
@@ -191,12 +207,11 @@ async fn sample_http(
         let got = if let Some(ref cancel) = cancel {
             tokio::select! {
                 biased;
-                _ = cancel.cancelled() => {
-                    return LlmOutput {
-                        text: "cancelled".into(),
-                        ..LlmOutput::default()
-                    };
-                }
+                // 空输出，不是 `"cancelled"` 这类占位文本：`finish_llm` 会把
+                // 非空文本填进本轮那条助手记录，于是历史里留下一句模型从没说过
+                // 的话，`seal_incomplete_tool_calls` 也不再把空槽位弹掉，
+                // 连带 cancel-rewind（Stop 后把提示词还回输入框）一起失效。
+                _ = cancel.cancelled() => return LlmOutput::default(),
                 response = send => response,
             }
         } else {
@@ -214,12 +229,7 @@ async fn sample_http(
                 if let Some(ref cancel) = cancel {
                     tokio::select! {
                         biased;
-                        _ = cancel.cancelled() => {
-                            return LlmOutput {
-                                text: "cancelled".into(),
-                                ..LlmOutput::default()
-                            };
-                        }
+                        _ = cancel.cancelled() => return LlmOutput::default(),
                         _ = tokio::time::sleep(wait) => {}
                     }
                 } else {
@@ -272,7 +282,7 @@ async fn sample_http(
         return output;
     }
 
-    let cancel = sampler.ctx.get::<TurnControl>(TURN).map(|t| t.token());
+    let cancel = exec.get::<TurnControl>(TURN).map(|t| t.token());
     let mut acc = WireAcc::new(backend, &wire);
     let mut buf = Vec::new();
     let mut first = true;
@@ -312,6 +322,7 @@ async fn sample_http(
         buf.extend_from_slice(&bytes);
         for data in take_sse_data(&mut buf) {
             for delta in acc.ingest(&data) {
+                cache_debug::note_usage(&delta);
                 on_delta(delta);
             }
         }
@@ -716,6 +727,102 @@ mod tests {
             history: vec![LogEvent::User("hi".into())],
             tools: vec![],
         }
+    }
+
+    /// Stop 落在「请求已发出、响应头还没回」这个窗口时（插队发送也走这条：
+    /// `send_now` 先 `request_cancel` 再跑新一轮），采样器不能伪造文本。
+    ///
+    /// 非空文本会被 `finish_llm` 填进本轮那条助手记录：历史里从此留着一句模型
+    /// 没说过的话，`seal_incomplete_tool_calls` 也不再把空槽位弹掉，于是
+    /// cancel-rewind 失效——提示词回不到输入框，用户那条消息和这句假话一起留在
+    /// 上下文里。
+    #[tokio::test]
+    async fn cancelling_before_the_response_leaves_nothing_in_the_log() {
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::turn::turn(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::User("hi".into()));
+        ctx.require::<TurnControl>(TURN).unwrap().cancel();
+
+        let llm = crate::llm::Llm::from_sampler(
+            ctx.clone(),
+            std::sync::Arc::new(HttpSampler {
+                ctx: ctx.clone(),
+                api_key: "test-key".into(),
+                // 不会真连出去：取消分支是 `biased` 的第一臂，先于 send 命中。
+                api_base: "http://127.0.0.1:9/v1".into(),
+                fallback_model: "test-model".into(),
+            }),
+        );
+        let out = llm.stream_on(&ctx, empty_request()).await;
+
+        assert!(out.text.is_empty(), "取消不该伪造文本：{out:?}");
+        sessions.seal_incomplete_tool_calls();
+        assert_eq!(
+            sessions.kinds(),
+            vec!["user"],
+            "取消后只该剩用户那条：{:?}",
+            sessions.events()
+        );
+        assert!(!sessions.last_turn_has_output());
+        assert_eq!(
+            sessions
+                .rewind_inflight_user()
+                .map(|(text, _)| text)
+                .as_deref(),
+            Some("hi"),
+            "提示词该能还回输入框"
+        );
+    }
+
+    /// 子代理的请求必须跑在**它自己**的 ctx 上。
+    ///
+    /// 采样器以前一律从 `sampler.ctx`（`llm()` 挂载时的根 ctx）找 `"sessions"` /
+    /// `"turn"`，于是：`interrupt_agent` 取消的是子代理那把 `TurnControl`，可正在
+    /// 跑的 HTTP 流听的是主会话那把，打不断；`model_user_images` 也会把主会话粘的
+    /// 图按下标贴到子代理自己的消息上。
+    ///
+    /// 这里让子代理那把取消、主会话那把不取消：修好之前采样器会真的去连端点。
+    #[tokio::test]
+    async fn a_child_isolate_samples_with_its_own_turn() {
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::turn::turn(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+
+        let child = ctx.isolate("sessions").isolate("turn");
+        let _s = child
+            .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+            .unwrap();
+        let child_turn = TurnControl::new();
+        child_turn.cancel();
+        let _t = child.provide(TURN, child_turn).unwrap();
+        assert!(
+            !ctx.require::<TurnControl>(TURN).unwrap().is_cancelled(),
+            "主会话这把不能是取消的，否则测不出听的是哪一把"
+        );
+
+        let llm = crate::llm::Llm::from_sampler(
+            ctx.clone(),
+            std::sync::Arc::new(HttpSampler {
+                ctx: ctx.clone(),
+                api_key: "test-key".into(),
+                // 听对了就根本不会连出去。
+                api_base: "http://127.0.0.1:9/v1".into(),
+                fallback_model: "test-model".into(),
+            }),
+        );
+        let out = llm.stream_on(&child, empty_request()).await;
+
+        assert!(out.text.is_empty(), "采样器听的还是主会话那把取消：{out:?}");
     }
 
     /// 目录里没这个模型（或压根没 config）时不替上游做任何假设。
