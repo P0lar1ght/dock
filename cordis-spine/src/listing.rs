@@ -12,7 +12,7 @@ use cordis::Context;
 
 use crate::agent_presets::AgentPresets;
 use crate::names::{AGENT_PRESETS, SESSIONS, TOOLS};
-use crate::session::{Sessions, ROOT_IDENTITY};
+use crate::session::Sessions;
 use crate::tools::Tools;
 
 /// Fraction of the context window (chars ≈ tokens×4) one listing may occupy.
@@ -55,9 +55,7 @@ pub(crate) fn budget_chars(window_tokens: u64) -> usize {
 /// Fails open on both: no `"sessions"` counts as main, and no `"tools"` (unit
 /// tests, bare harnesses) counts as visible.
 pub(crate) fn wants_listing(exec: &Context, loader: &str) -> bool {
-    let wanted = exec
-        .get::<Sessions>(SESSIONS)
-        .is_none_or(|s| s.identity() == ROOT_IDENTITY)
+    let wanted = exec.get::<Sessions>(SESSIONS).is_none_or(|s| s.is_main())
         || exec
             .get::<AgentPresets>(AGENT_PRESETS)
             .is_some_and(|p| p.wants_listings());

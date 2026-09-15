@@ -9,6 +9,12 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
     match action {
         Action::Quit => vec![Effect::Quit],
         Action::NewSession => vec![Effect::NewSession],
+        Action::TabNew => vec![Effect::TabNew],
+        Action::TabGo(id) => vec![Effect::TabGo { id }],
+        Action::TabFork => vec![Effect::TabFork],
+        Action::TabCarryBack => vec![Effect::TabCarryBack],
+        Action::AsideClose => vec![Effect::AsideClose],
+        Action::AsidePromote => vec![Effect::AsidePromote],
         Action::ResumePicker => vec![Effect::ResumePicker],
         Action::Help => vec![Effect::Help],
         Action::RestoreSession(id) => vec![Effect::RestoreSession(id)],

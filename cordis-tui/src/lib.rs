@@ -4,6 +4,7 @@
 //! `tui.welcome` / `tui.shortcuts` / `tui` without touching the session actor.
 
 mod actions;
+mod aside_pane;
 mod ask_view;
 mod clipboard;
 mod dispatch;
@@ -36,6 +37,8 @@ mod shortcuts;
 mod slash;
 mod status;
 mod status_bar;
+mod tab_bar;
+mod tabs;
 mod task_dock;
 mod text_overlay;
 mod theme;
@@ -49,9 +52,10 @@ pub use gateway::{
 };
 pub use names::{
     GATEWAY, GATEWAY_PAIRING, SESSION, SESSION_PORT, THEME, TUI, TUI_PAIRING, TUI_PROMPT,
-    TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
+    TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_TABS, TUI_WELCOME,
 };
 pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui, welcome};
 pub use prompt::PromptWidget;
 pub use session::{QueuedItem, SessionPort, SessionRef};
 pub use slash::{resolve_slash, slash_catalog, SlashCatalogEntry};
+pub use tabs::{tabs, AsideView, TabInfo, TabKind, TabMount, Tabs, MAX_TABS, PER_TAB_SERVICES};

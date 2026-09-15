@@ -48,10 +48,52 @@ config.toml.example      用户 / 项目模型目录样例
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
 | 其它 spine | `context` `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名 |
 | 工具插件 | `tool-web` `tool-browser` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
-| TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` | 同名 |
+| TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` `tui.tabs` | 同名 |
 | 回环网关 | `gateway` | `"gateway"`（`GatewayRef`），事件 `gateway/pairing` |
 
 `settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。
+
+## 分页：一个终端里的多个会话
+
+`Ctrl+N` 开的每一页 = **一棵 isolate 子树**。第 1 页就是根上下文本身；第 2 页起由
+`root.isolate("sessions").isolate("turn")…` 派生，只有 `PER_TAB_SERVICES` 里的名字
+各有一份：
+
+| 每页一份 | 全局一份（落回根） |
+|---|---|
+| `sessions` `turn` `agentLoop` `session` `session.port` | `tools` `llm` `systemPrompt` `agents` `permissions` `ask` `mcp` `settings` `skills` `memory` |
+| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp` `workflows` `slash` `agentPresets` `theme` `gateway` `todos` `planMode` `goal` |
+
+服务按 `(isolate realm, name)` 解析，没被 isolate 的名字自然落回根 —— 所以**一张
+`"tools"` 表**的不变式没有被破坏，两页共用同一张表、同一个 `llm`、同一套权限浮层。
+系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的是各页自己的 ctx。
+
+事件**不分 realm**（`ctx.emit` 不看 isolate），后台页的 `session/event` 照样能把
+前台叫醒重绘，标签栏上的 `●` 就是靠这个活的。
+
+装一页要挂哪些插件由**组合根**决定（`cordis-app` 的 `tab_mount()`），TUI 只管开 /
+关 / 切：`"tui.tabs"` 拿到的是一个建页插件工厂。关页 `dispose` 那一颗页 fiber，
+它下面的会话、循环、actor、视图一起走。
+
+**分叉**（`Ctrl+F`）= 建页时把来源页的 `model_history()` 快照 `seed` 进新页的会话，
+并记下 `origin`。快照是值传递，分叉后两页互不影响。**带回**（`Ctrl+B`）把分叉页最近
+一条有正文的回复填进来源页的 `PromptWidget` 并切过去 —— **不**往来源页的历史里写，
+替用户说话不是分页该做的事。
+
+**旁问**（`/btw`）是第三种语义：同样是分叉，但那一页 `TabKind::Aside` —— 多 isolate
+一个 `agentPresets` 并 provide 一份**只读**预设（`cordis-app` 的 `aside_preset()`），
+而且**不进 `tabs` 那个 Vec**：它单独挂在 `Tabs::aside` 上，不占页号、不进标签栏、
+不参与 `active_index` 的下标。答案画在输入框上方的面板里，`Esc` 销毁，`Ctrl+↑`
+提升 —— 提升等于用它的历史开一张全权的常驻页，再把旁问本身 dispose 掉。
+
+分页会话的身份是 `main#<N>`，`is_main_identity` 认它是**并列的主线**而不是子代理
+（判错会让第 2 页拿不到工具目录）。
+
+**已知边界**：分页不落盘（`--resume`、gateway `dock.1` 投影、会话归档都只跟第 1
+页）；权限浮层 / `ask` / MCP elicit 是全局队列且**还没有来源标记**，后台页触发的
+弹窗会在你正看的那一页弹出；子代理的 `parent_session_id` 仍硬绑 `main`（后台页
+spawn 的子代理会被第 1 页的 Stop 一起取消）；全局单例（浏览器、cua、后台任务表）
+两页会抢。`todos` / `planMode` / `goal` 目前也是全局一份，两页共用。
 
 ## 一轮怎么跑
 

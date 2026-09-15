@@ -26,6 +26,7 @@ use crate::queue_pane::{self, QueueHit};
 use crate::scrollback::{ClickHit, MouseUpResult, Scrollback};
 use crate::settings_modal;
 use crate::slash::filter_args;
+use crate::tab_bar;
 use std::collections::HashSet;
 
 use crate::task_dock::{self, TaskDockHit};
@@ -42,6 +43,9 @@ use crate::status::StatusLine;
 use crate::usage_overlay;
 use crate::welcome::{Welcome, WelcomeHit};
 
+#[allow(clippy::too_many_arguments)]
+// 后四个参数都是上一帧的点击命中表（picker / 任务条 / 目标条 / 排队条 / 标签栏）：
+// 打包成结构体只会把噪音搬到每个调用点和每处测试，故意保留成平铺。
 pub(super) fn run_action(
     ctx: &Context,
     action: Action,
@@ -50,6 +54,7 @@ pub(super) fn run_action(
     dock_hits: &[(Rect, TaskDockHit)],
     goal_hits: &[(Rect, GoalHit)],
     queue_hits: &[(Rect, QueueHit)],
+    tab_hits: &[(Rect, tab_bar::TabHit)],
 ) -> Vec<Effect> {
     match action {
         Action::OverlayClose => {
@@ -782,6 +787,10 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::MouseDown { column, row } => {
+            // 按在标签栏上不要起选区：切页在 MouseUp 那边做。
+            if tab_bar::hit(tab_hits, column, row).is_some() {
+                return Vec::new();
+            }
             if queue_pane::hit(queue_hits, column, row).is_some() {
                 return Vec::new();
             }
@@ -803,6 +812,9 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::MouseUp { column, row } => {
+            if let Some(tab_bar::TabHit(id)) = tab_bar::hit(tab_hits, column, row) {
+                return vec![Effect::TabGo { id }];
+            }
             if let Some(hit) = queue_pane::hit(queue_hits, column, row) {
                 return match hit {
                     QueueHit::Send(id) => vec![Effect::PromoteQueued { id: Some(id) }],
@@ -921,6 +933,11 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::Click { column, row } => {
+            // 标签栏先判：欢迎屏 / overlay 开着时鼠标走的是这条路（不是 MouseUp），
+            // 而新开的分页一定停在欢迎屏上——不先判这里，点标签就是死的。
+            if let Some(tab_bar::TabHit(id)) = tab_bar::hit(tab_hits, column, row) {
+                return vec![Effect::TabGo { id }];
+            }
             if let Overlay::Inspect { .. } = overlay {
                 match inspect_overlay::click(column, row) {
                     InspectClick::Close => return close_inspect(overlay),
@@ -1423,8 +1440,17 @@ pub(super) fn to_action(
             if overlay.is_open() {
                 return overlay_keys(key.code, ctrl);
             }
+            // Alt+1..9 直达标签上那个号的页。号是稳定的，关掉中间一页也不会串。
+            if alt {
+                if let KeyCode::Char(c @ '1'..='9') = key.code {
+                    return Some(Action::TabGo(c as usize - '0' as usize));
+                }
+            }
             match key.code {
                 KeyCode::Char('w') if ctrl => Some(Action::NewSession),
+                KeyCode::Char('n') if ctrl => Some(Action::TabNew),
+                KeyCode::Char('f') if ctrl => Some(Action::TabFork),
+                KeyCode::Char('b') if ctrl => Some(Action::TabCarryBack),
                 KeyCode::Char('k') if ctrl => Some(Action::Scroll(1)),
                 KeyCode::Char('j') if ctrl => Some(Action::Scroll(-1)),
                 KeyCode::Char('u') if ctrl => Some(Action::ScrollPage(1)),
@@ -1467,6 +1493,11 @@ pub(super) fn to_action(
                             return None;
                         }
                     }
+                    // 旁问面板：只在「当前页空闲 + 输入框已空」这一步接管 Esc。
+                    // 放在取消轮次和清输入之后，就绝不会把那两件事抢走。
+                    if aside_open(ctx) {
+                        return Some(Action::AsideClose);
+                    }
                     // Grok swallows idle-empty Esc (welcome / no turns). Quit is ctrl+q.
                     None
                 }
@@ -1503,6 +1534,7 @@ pub(super) fn to_action(
                         None
                     }
                 }
+                KeyCode::Up if ctrl && aside_open(ctx) => Some(Action::AsidePromote),
                 KeyCode::Up => {
                     if slash_open(ctx) {
                         Some(Action::SlashMove(-1))
@@ -1738,7 +1770,105 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
+    }
+
+    /// 点标签切页在**三条**鼠标路径上都要成立：欢迎屏 / overlay 开着时是
+    /// `Click`，其余是 `MouseDown` + `MouseUp`。新开的分页一定停在欢迎屏上，
+    /// 只接 `MouseUp` 的话点标签就是死的。
+    #[tokio::test]
+    async fn clicking_a_tab_switches_on_every_mouse_path() {
+        let ctx = Context::new();
+        let bar = [(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 1,
+            },
+            tab_bar::TabHit(3),
+        )];
+        let go = |action: Action, overlay: &mut Overlay| {
+            run_action(
+                &ctx,
+                action,
+                overlay,
+                &PickerHits::default(),
+                &[],
+                &[],
+                &[],
+                &bar,
+            )
+        };
+
+        let mut overlay = Overlay::None;
+        assert!(matches!(
+            go(Action::Click { column: 2, row: 0 }, &mut overlay).as_slice(),
+            [Effect::TabGo { id: 3 }]
+        ));
+        assert!(matches!(
+            go(Action::MouseUp { column: 2, row: 0 }, &mut overlay).as_slice(),
+            [Effect::TabGo { id: 3 }]
+        ));
+        // 按下去只是别起选区，不产生副作用。
+        assert!(go(Action::MouseDown { column: 2, row: 0 }, &mut overlay).is_empty());
+        // 不在标签栏那一行的点击照旧。
+        assert!(go(Action::Click { column: 2, row: 7 }, &mut overlay).is_empty());
+    }
+
+    fn key_action(code: KeyCode, mods: KeyModifiers) -> Option<Action> {
+        to_action(
+            &Context::new(),
+            Event::Key(crossterm::event::KeyEvent::new(code, mods)),
+            &Overlay::None,
+            None,
+        )
+    }
+
+    /// 分页键不能踩现有键位：`Ctrl+W` 还是新会话，`Ctrl+D` 还是半页下滚。
+    #[test]
+    fn tab_keys_do_not_steal_existing_bindings() {
+        assert!(matches!(
+            key_action(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            Some(Action::TabNew)
+        ));
+        assert!(matches!(
+            key_action(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            Some(Action::NewSession)
+        ));
+        assert!(matches!(
+            key_action(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            Some(Action::ScrollPage(-1))
+        ));
+        assert!(matches!(
+            key_action(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            Some(Action::TabFork)
+        ));
+        assert!(matches!(
+            key_action(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            Some(Action::TabCarryBack)
+        ));
+    }
+
+    /// `Alt+1..9` 直达标签上那个号；不带 Alt 的数字照样进输入框。
+    #[test]
+    fn alt_digits_jump_to_tabs() {
+        assert!(matches!(
+            key_action(KeyCode::Char('3'), KeyModifiers::ALT),
+            Some(Action::TabGo(3))
+        ));
+        assert!(matches!(
+            key_action(KeyCode::Char('9'), KeyModifiers::ALT),
+            Some(Action::TabGo(9))
+        ));
+        assert!(
+            matches!(
+                key_action(KeyCode::Char('3'), KeyModifiers::NONE),
+                Some(Action::InsertChar('3'))
+            ),
+            "光按数字得能打出数字"
+        );
     }
 
     /// Ctrl+R 走 Ctrl 分支，不能把普通 `r` 从搜索框里抢走 —— `i` 今天就是那样
@@ -1817,7 +1947,16 @@ mod tests {
     }
 
     fn run(ctx: &Context, action: Action, overlay: &mut Overlay) -> Vec<Effect> {
-        run_action(ctx, action, overlay, &PickerHits::default(), &[], &[], &[])
+        run_action(
+            ctx,
+            action,
+            overlay,
+            &PickerHits::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
     }
 
     /// 按 `i` 只进确认态。下载并执行外部脚本这种事，不能一个键就开跑。

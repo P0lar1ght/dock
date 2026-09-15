@@ -19,6 +19,8 @@ pub const MAX_VISIBLE_SUGGESTIONS: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashCmd {
     New,
+    Tab,
+    Btw,
     Resume,
     Pair,
     Help,
@@ -135,6 +137,26 @@ pub const CATALOG: &[SlashDef] = &[
         description: "开始新会话",
         takes_args: false,
         args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Tab,
+        name: "tab",
+        aliases: &["tabs"],
+        display: "/tab",
+        description: "分页：new / close / 1-9（Ctrl+N 新开，Alt+数字 切换）",
+        takes_args: true,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Btw,
+        name: "btw",
+        aliases: &["aside", "旁问"],
+        display: "/btw",
+        description: "插一嘴：只读地问一句，不打断当前任务、不进主线上下文",
+        takes_args: true,
+        args_required: true,
         arg_kind: None,
     },
     SlashDef {
