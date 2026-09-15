@@ -9,7 +9,7 @@ use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SHORTCUTS};
 use crate::overlay::Overlay;
 use crate::prompt::PromptWidget;
 use crate::session::SessionRef;
-use cordis_spine::{Ask, ASK};
+use cordis_spine::{Ask, Computer, ASK, COMPUTER};
 
 pub struct Shortcuts {
     ctx: Context,
@@ -257,12 +257,34 @@ impl Shortcuts {
                 HintItem::new("Esc", "close"),
             ];
         }
+        // 驾驶舱的键随状态变：没装只有 install，装好了才谈 grant，确认态只剩
+        // Enter / Esc。全部按 `"computer"` 报的状态来，这里不自己判断本机。
+        if let Overlay::Computer { pending, .. } = overlay {
+            if pending.is_some() {
+                return vec![
+                    HintItem::new("Enter", "confirm"),
+                    HintItem::new("Esc", "cancel"),
+                ];
+            }
+            let computer = self.ctx.get::<Computer>(COMPUTER);
+            let mut hints = vec![HintItem::new("↑/↓", "scroll")];
+            if let Some(computer) = &computer {
+                if !computer.busy() {
+                    hints.push(HintItem::new("i", computer.install_label()));
+                    if computer.grant_available() {
+                        hints.push(HintItem::new("p", "grant"));
+                    }
+                }
+            }
+            hints.push(HintItem::new("Ctrl+R", "recheck"));
+            hints.push(HintItem::new("Esc", "close"));
+            return hints;
+        }
         if matches!(
             overlay,
             Overlay::Notice { .. }
                 | Overlay::Slot { .. }
                 | Overlay::Browser { .. }
-                | Overlay::Computer { .. }
                 | Overlay::Inspect { .. }
         ) {
             return vec![

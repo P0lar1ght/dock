@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use cordis::Context;
 use cordis_spine::{
-    AppSettings, Ask, Browser, Goal, Mcp, PermissionMode, PermissionOptionKind, Permissions,
-    PlanDecision, PlanMode, Sessions, TuiSlots, UserImage, ASK, BROWSER, GOAL, MCP, PERMISSIONS,
-    PLAN_MODE, SESSIONS, SETTINGS, TUI_SLOTS,
+    AppSettings, Ask, Browser, Computer, CuaAction, Goal, Mcp, PermissionMode,
+    PermissionOptionKind, Permissions, PlanDecision, PlanMode, Sessions, TuiSlots, UserImage, ASK,
+    BROWSER, COMPUTER, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TUI_SLOTS,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -138,6 +138,15 @@ pub(super) fn run_action(
                     return Vec::new();
                 }
             }
+            // 确认态先退回驾驶舱：Esc 是「不装了」，不是「关窗」。
+            if let Overlay::Computer { pending, .. } = overlay {
+                if pending.take().is_some() {
+                    return Vec::new();
+                }
+                if let Some(computer) = ctx.get::<Computer>(COMPUTER) {
+                    computer.clear_finished();
+                }
+            }
             let _ = dispatch_slot_key(ctx, overlay, "esc");
             overlay.close();
             Vec::new()
@@ -161,8 +170,8 @@ pub(super) fn run_action(
                 scroll_text(scroll, delta, &body);
                 return Vec::new();
             }
-            if let Overlay::Computer { scroll } = overlay {
-                let body = computer_cockpit_body(ctx);
+            if let Overlay::Computer { scroll, pending } = overlay {
+                let body = computer_cockpit_body(ctx, *pending);
                 scroll_text(scroll, delta, &body);
                 return Vec::new();
             }
@@ -206,6 +215,15 @@ pub(super) fn run_action(
             ) {
                 send_inspect_composer(ctx, overlay);
                 return Vec::new();
+            }
+            if let Overlay::Computer { pending, .. } = overlay {
+                if let Some(action) = pending.take() {
+                    return vec![Effect::CuaRun { action }];
+                }
+                // 没有待确认的动作时，Enter 照旧关窗（同 /browser 那类只读驾驶舱）。
+                if let Some(computer) = ctx.get::<Computer>(COMPUTER) {
+                    computer.clear_finished();
+                }
             }
             if dispatch_slot_key(ctx, overlay, "enter") {
                 return Vec::new();
@@ -476,6 +494,30 @@ pub(super) fn run_action(
                     return Vec::new();
                 }
             }
+            if let Overlay::Computer { pending, .. } = overlay {
+                // 两步走：`i` / `p` 只进确认态，Enter 才真的去下载 / 起子进程。
+                let picked = match c {
+                    'i' | 'I' => Some(CuaAction::Install),
+                    'p' | 'P' => Some(CuaAction::Grant),
+                    _ => None,
+                };
+                if let Some(action) = picked {
+                    if let Some(computer) = ctx.get::<Computer>(COMPUTER) {
+                        if computer.busy() {
+                            flash(ctx, "上一个动作还在跑");
+                            return Vec::new();
+                        }
+                        if action == CuaAction::Grant && !computer.grant_available() {
+                            flash(ctx, "这台机器上不需要（或还不能）授权：先装好 cua-driver，且只有 macOS 要这一步");
+                            return Vec::new();
+                        }
+                        *pending = Some(action);
+                    } else {
+                        flash(ctx, "computer 未挂载（tool-computer 插件不在树上）。");
+                    }
+                }
+                return Vec::new();
+            }
             if matches!(overlay, Overlay::Browser { .. }) {
                 if c == 'h' || c == 'H' {
                     if let Some(browser) = ctx.get::<Browser>(BROWSER) {
@@ -673,6 +715,11 @@ pub(super) fn run_action(
             if matches!(overlay, Overlay::Mcps { .. }) {
                 return vec![Effect::ReloadMcps { quiet: false }];
             }
+            // 驾驶舱的 Ctrl+R 是「重新看一眼本机」：装没装 / 授权给没给，
+            // 再把 MCP 配置对一次账（在 dock 外面装好的 driver 就是这样接上的）。
+            if matches!(overlay, Overlay::Computer { .. }) {
+                return vec![Effect::CuaRefresh, Effect::ReloadMcps { quiet: false }];
+            }
             Vec::new()
         }
         Action::OverlayNavH(delta) => {
@@ -832,8 +879,8 @@ pub(super) fn run_action(
                 scroll_text(scroll, delta, &body);
                 return Vec::new();
             }
-            if let Overlay::Computer { scroll } = overlay {
-                let body = computer_cockpit_body(ctx);
+            if let Overlay::Computer { scroll, pending } = overlay {
+                let body = computer_cockpit_body(ctx, *pending);
                 scroll_text(scroll, delta, &body);
                 return Vec::new();
             }
@@ -1713,11 +1760,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_only_reloads_mcps() {
+    async fn refresh_reloads_mcps_and_rechecks_the_driver() {
         let mut overlay = mcps_overlay();
         assert!(matches!(
             refresh(&mut overlay).as_slice(),
             [Effect::ReloadMcps { quiet: false }]
+        ));
+
+        // 驾驶舱的 Ctrl+R 还要重新探一次本机 driver。
+        let mut computer = computer_overlay(None);
+        assert!(matches!(
+            refresh(&mut computer).as_slice(),
+            [Effect::CuaRefresh, Effect::ReloadMcps { quiet: false }]
         ));
 
         let mut other = Overlay::Tasks {
@@ -1726,5 +1780,107 @@ mod tests {
             collapsed: HashSet::new(),
         };
         assert!(refresh(&mut other).is_empty(), "别的 overlay 不该被牵连");
+    }
+
+    fn computer_overlay(pending: Option<CuaAction>) -> Overlay {
+        Overlay::Computer { scroll: 0, pending }
+    }
+
+    /// 本测试二进制共用一个隔离的 `DOCK_HOME`，并显式关掉内置 cua-driver：
+    /// 否则挂上 `mcp-client` 会去连本机真实配置里的 MCP 服务器。
+    fn isolated_env() {
+        static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("dock-tui-keys-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("DOCK_HOME", &dir);
+            std::env::set_var("DOCK_CUA_DRIVER", "off");
+        });
+    }
+
+    async fn boot_computer() -> Context {
+        isolated_env();
+        let root = Context::new();
+        for fiber in [
+            root.plugin(cordis_spine::slash(), ()).unwrap(),
+            root.plugin(cordis_spine::tools(), ()).unwrap(),
+            root.plugin(cordis_spine::mcp_client(), ()).unwrap(),
+        ] {
+            fiber.wait().await.unwrap();
+        }
+        root.plugin(cordis_spine::tool_computer(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        root
+    }
+
+    fn run(ctx: &Context, action: Action, overlay: &mut Overlay) -> Vec<Effect> {
+        run_action(ctx, action, overlay, &PickerHits::default(), &[], &[], &[])
+    }
+
+    /// 按 `i` 只进确认态。下载并执行外部脚本这种事，不能一个键就开跑。
+    #[tokio::test]
+    async fn install_takes_two_keys() {
+        let ctx = boot_computer().await;
+        let mut overlay = computer_overlay(None);
+
+        let effects = run(&ctx, Action::OverlayChar('i'), &mut overlay);
+        assert!(effects.is_empty(), "按 i 不该直接产生副作用：{effects:?}");
+        assert!(matches!(
+            overlay,
+            Overlay::Computer {
+                pending: Some(CuaAction::Install),
+                ..
+            }
+        ));
+
+        let effects = run(&ctx, Action::OverlayAccept, &mut overlay);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::CuaRun {
+                action: CuaAction::Install
+            }]
+        ));
+        assert!(
+            matches!(overlay, Overlay::Computer { pending: None, .. }),
+            "确认过就该退出确认态"
+        );
+        assert!(overlay.is_open(), "确认后窗口要留着看进度");
+    }
+
+    /// 没有待确认动作时，Enter 还是和别的只读驾驶舱一样关窗。
+    #[tokio::test]
+    async fn enter_without_confirmation_still_closes() {
+        let ctx = boot_computer().await;
+        let mut overlay = computer_overlay(None);
+        let effects = run(&ctx, Action::OverlayAccept, &mut overlay);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(!overlay.is_open());
+    }
+
+    /// 确认态里的 Esc 是「不装了」，不是「关窗」。
+    #[tokio::test]
+    async fn esc_cancels_confirmation_before_closing() {
+        let ctx = boot_computer().await;
+        let mut overlay = computer_overlay(Some(CuaAction::Install));
+
+        run(&ctx, Action::OverlayClose, &mut overlay);
+        assert!(matches!(overlay, Overlay::Computer { pending: None, .. }));
+        assert!(overlay.is_open(), "第一下 Esc 只该退出确认态");
+
+        run(&ctx, Action::OverlayClose, &mut overlay);
+        assert!(!overlay.is_open());
+    }
+
+    /// 没装 driver（也就没授权可谈）时按 `p` 不进确认态。
+    #[tokio::test]
+    async fn grant_key_is_inert_without_a_driver() {
+        let ctx = boot_computer().await;
+        let mut overlay = computer_overlay(None);
+        let effects = run(&ctx, Action::OverlayChar('p'), &mut overlay);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(matches!(overlay, Overlay::Computer { pending: None, .. }));
     }
 }

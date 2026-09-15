@@ -8,6 +8,26 @@
 
 ## [未发布]
 
+### 新增
+
+- **`/computer` 自己会装 cua-driver**：驾驶舱变成状态机（未挂载 / 未安装 / 缺授权 / 已禁用 /
+  未连上 / 已连接），`i` 走 trycua 官方脚本装或重装，`p`（macOS）让 driver 自己拉起
+  Accessibility / 屏幕录制授权对话框。两个动作都是**两步**：先列出要执行的每一步，`Enter` 才真的跑，
+  `Esc` 只取消确认；进度一行行显示在驾驶舱里，装完自动重新探测 + 重载 MCP，不用重启 dock。
+- **cua-driver 零配置接入**：Dock 启动时自己发现本机 driver（`DOCK_CUA_DRIVER` → `PATH` →
+  `~/.local/bin` → macOS `/Applications/CuaDriver.app`），找得到就注入内置
+  `[mcp_servers.cua-driver]`，不必再手写 `config.toml`；`DOCK_CUA_DRIVER=off` 彻底关掉。
+  Dock 的 release **不带** driver 二进制。
+- 桌面类关键词（click / screenshot / 桌面 …）搜不到工具且 driver 没连上时，`search_tool` 的 note
+  会直接指向 `/computer` 的安装键。
+
+### 变更
+
+- `/computer` 的 `Ctrl+R` 重新探测本机 driver 并重载 MCP 配置；打开驾驶舱也会静默重探一次
+  （在 dock 外面装好、授权好的 driver 这样接上）。
+- `/mcps` 里禁用内置的 cua-driver 行时，Dock 把完整一行（`command` / `args` / `enabled = false`）
+  落进用户 `config.toml`，此后该行归配置文件管。
+
 ## [0.1.0] - 2026-09-14
 
 首个公开版本。macOS（Apple Silicon / Intel）与 Linux（x86_64 / aarch64）有预编译二进制，

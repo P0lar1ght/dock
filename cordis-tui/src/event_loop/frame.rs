@@ -849,8 +849,8 @@ pub(super) fn paint_overlay(
                 .unwrap_or_else(|| "browser 未挂载（tool-browser 插件不在树上）。".into());
             text_overlay::render(buf, area, "浏览器", &body, *scroll)
         }
-        Overlay::Computer { scroll } => {
-            let body = super::support::computer_cockpit_body(ctx);
+        Overlay::Computer { scroll, pending } => {
+            let body = super::support::computer_cockpit_body(ctx, *pending);
             text_overlay::render(buf, area, "电脑", &body, *scroll)
         }
         Overlay::Inspect {
