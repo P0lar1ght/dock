@@ -539,10 +539,53 @@ impl McpServer {
     }
 }
 
-/// Live-read MCP servers from config. Fail-open: missing files → empty.
-/// Later files overlay the same name (Grok project `< user`).
+/// Live-read MCP servers from config. Fail-open: missing files → 只剩内置行。
+/// Later files overlay the same name (Grok project `< user`)，配置文件里的同名行
+/// 整条盖掉内置行。
 pub fn load_mcp_servers() -> Vec<McpServer> {
-    load_mcp_servers_from(&catalog_paths())
+    merge_builtin_mcp_servers(
+        builtin_mcp_servers(),
+        load_mcp_servers_from(&catalog_paths()),
+    )
+}
+
+/// 代码里自带的 MCP 行：零配置就能用，优先级低于任何配置文件。
+///
+/// 目前只有 cua-driver，而且**发现得到二进制才注入** —— 没装就当没有这条，
+/// `/mcps` 不会多出一条永远连不上的死行（computer 驾驶舱自己会说「未安装」）。
+pub fn builtin_mcp_servers() -> Vec<McpServer> {
+    crate::cua::discover()
+        .map(|path| {
+            vec![McpServer {
+                name: crate::cua::CUA_DRIVER_SERVER.to_string(),
+                transport: McpTransport::Stdio {
+                    // 绝对路径：从 GUI 起的终端常常没有 `~/.local/bin`。
+                    command: path.to_string_lossy().into_owned(),
+                    args: vec!["mcp".to_string()],
+                    env: BTreeMap::new(),
+                    framing: McpStdioFraming::Ndjson,
+                },
+                startup_timeout_sec: DEFAULT_MCP_STARTUP_TIMEOUT_SECS,
+                enabled: true,
+                oauth: McpOAuthConfig::default(),
+            }]
+        })
+        .unwrap_or_default()
+}
+
+/// 内置行在前，配置文件的同名行整条替换它（位置保持内置那条的次序）。
+pub fn merge_builtin_mcp_servers(
+    builtin: Vec<McpServer>,
+    from_files: Vec<McpServer>,
+) -> Vec<McpServer> {
+    let mut rows: IndexMap<String, McpServer> = builtin
+        .into_iter()
+        .map(|server| (server.name.clone(), server))
+        .collect();
+    for server in from_files {
+        rows.insert(server.name.clone(), server);
+    }
+    rows.into_values().collect()
 }
 
 pub fn load_mcp_servers_from(paths: &[PathBuf]) -> Vec<McpServer> {
@@ -696,7 +739,19 @@ pub fn persist_mcp_server_enabled_in(
     name: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let path = mcp_persist_target(paths, name)?;
+    let path = match mcp_persist_target(paths, name) {
+        Ok(path) => path,
+        // 内置行在配置文件里没有实体：落一条完整的行到用户 config，否则
+        // `/mcps` 上按 Space 只会得到「no [mcp_servers.cua-driver]」。
+        Err(err) => {
+            let Some(builtin) = builtin_mcp_servers().into_iter().find(|s| s.name == name) else {
+                return Err(err);
+            };
+            return patch_toml(&mcp_persist_fallback(paths)?, |doc| {
+                write_builtin_mcp_row(doc, &builtin, enabled)
+            });
+        }
+    };
     patch_toml(&path, |doc| {
         let Some(item) = doc.get_mut("mcp_servers").and_then(|t| t.get_mut(name)) else {
             return Err(format!("config has no [mcp_servers.{name}]"));
@@ -704,6 +759,34 @@ pub fn persist_mcp_server_enabled_in(
         item["enabled"] = toml_edit::value(enabled);
         Ok(())
     })
+}
+
+/// 把内置行按当前发现到的 command / args 写成实体行。写完它就归配置文件管，
+/// 内置行不再参与（`merge_builtin_mcp_servers` 让文件整条覆盖）。
+fn write_builtin_mcp_row(
+    doc: &mut toml_edit::DocumentMut,
+    server: &McpServer,
+    enabled: bool,
+) -> Result<(), String> {
+    let McpTransport::Stdio { command, args, .. } = &server.transport else {
+        return Err(format!("内置行 {} 不是 stdio", server.name));
+    };
+    if doc.get("mcp_servers").is_none() {
+        let mut parent = toml_edit::Table::new();
+        // 只作为 `[mcp_servers.<name>]` 的前缀出现，不单独打一行 `[mcp_servers]`。
+        parent.set_implicit(true);
+        doc["mcp_servers"] = toml_edit::Item::Table(parent);
+    }
+    let mut arr = toml_edit::Array::new();
+    for arg in args {
+        arr.push(arg.as_str());
+    }
+    let mut row = toml_edit::Table::new();
+    row["command"] = toml_edit::value(command.as_str());
+    row["args"] = toml_edit::value(arr);
+    row["enabled"] = toml_edit::value(enabled);
+    doc["mcp_servers"][&server.name] = toml_edit::Item::Table(row);
+    Ok(())
 }
 
 /// Persist `[disabled_mcp_tools.<server>]` as an array of raw tool names.
@@ -1856,6 +1939,83 @@ framing = "ndjson"
             McpStdioFraming::Auto
         );
         assert_eq!(McpStdioFraming::from_config(None), McpStdioFraming::Ndjson);
+    }
+
+    /// 内置行只是「零配置默认」：配置文件里写了同名行就整条归它，连 command
+    /// 都不能留着内置那份，否则用户改成自己的绝对路径会被悄悄忽略。
+    #[test]
+    fn config_file_row_replaces_builtin_row() {
+        let builtin = vec![McpServer {
+            name: "cua-driver".into(),
+            transport: McpTransport::Stdio {
+                command: "/builtin/cua-driver".into(),
+                args: vec!["mcp".into()],
+                env: BTreeMap::new(),
+                framing: McpStdioFraming::Ndjson,
+            },
+            startup_timeout_sec: DEFAULT_MCP_STARTUP_TIMEOUT_SECS,
+            enabled: true,
+            oauth: McpOAuthConfig::default(),
+        }];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.cua-driver]
+command = "/opt/mine/cua-driver"
+args = ["mcp"]
+enabled = false
+
+[mcp_servers.other]
+command = "npx"
+"#,
+        )
+        .unwrap();
+        let merged = merge_builtin_mcp_servers(builtin, load_mcp_servers_from(&[path]));
+        assert_eq!(merged.len(), 2);
+        let cua = merged.iter().find(|s| s.name == "cua-driver").unwrap();
+        assert!(!cua.enabled);
+        assert_eq!(cua.endpoint(), "/opt/mine/cua-driver");
+    }
+
+    /// `/mcps` 里给内置行按 Space：文件里没有实体行，要落一条完整的，
+    /// 不能只报「config has no [mcp_servers.…]」。
+    #[test]
+    fn toggling_builtin_row_writes_a_full_row() {
+        let _env = crate::test_env::scoped().remove(crate::cua::DRIVER_ENV);
+        let Some(driver) = crate::cua::discover() else {
+            // 本机没装 driver 就没有内置行可落，跳过（CI 常态）。
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        persist_mcp_server_enabled_in(std::slice::from_ref(&path), "cua-driver", false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[mcp_servers.cua-driver]"), "{text}");
+        assert!(text.contains("enabled = false"), "{text}");
+        assert!(
+            text.contains(&driver.to_string_lossy().into_owned()),
+            "{text}"
+        );
+
+        // 落地之后就走普通路径，再切回来只改 enabled。
+        persist_mcp_server_enabled_in(std::slice::from_ref(&path), "cua-driver", true).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("enabled = true"), "{text}");
+        assert_eq!(
+            text.matches("[mcp_servers.cua-driver]").count(),
+            1,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn unknown_server_without_a_row_still_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        assert!(persist_mcp_server_enabled_in(&[path], "nope", false).is_err());
     }
 
     #[test]

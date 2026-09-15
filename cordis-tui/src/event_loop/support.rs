@@ -6,10 +6,10 @@ use std::time::{Instant, SystemTime};
 use cordis::Context;
 use cordis_spine::{
     goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
-    Ask, Browser, Computer, Cron, Goal, Jobs, LoopFireMode, Mcp, McpStatus, MermaidEngineKind,
-    Permissions, PlanMode, Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage,
-    Workflows, AGENT_PRESETS, ASK, BROWSER, COMPUTER, CRON, GOAL, JOBS, MCP, PERMISSIONS,
-    PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
+    Ask, Browser, Computer, Cron, CuaAction, Goal, Jobs, LoopFireMode, Mcp, McpStatus,
+    MermaidEngineKind, Permissions, PlanMode, Sessions, Slash, SlotKeyResult, Subagents, TuiSlots,
+    UserImage, Workflows, AGENT_PRESETS, ASK, BROWSER, COMPUTER, CRON, GOAL, JOBS, MCP,
+    PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
 
 use crate::ask_view;
@@ -158,7 +158,7 @@ pub(super) fn browser_cockpit_body(ctx: &Context) -> String {
         .unwrap_or_else(|| "browser 未挂载（tool-browser 插件不在树上）。".into())
 }
 
-pub(super) fn computer_cockpit_body(ctx: &Context) -> String {
+pub(super) fn computer_cockpit_body(ctx: &Context, pending: Option<CuaAction>) -> String {
     let approval = ctx
         .get::<Permissions>(PERMISSIONS)
         .and_then(|p| p.front())
@@ -171,8 +171,45 @@ pub(super) fn computer_cockpit_body(ctx: &Context) -> String {
             }
         });
     ctx.get::<Computer>(COMPUTER)
-        .map(|c| c.format_cockpit(approval.as_deref()))
+        .map(|c| c.format_cockpit_with(approval.as_deref(), pending))
         .unwrap_or_else(|| "computer 未挂载（tool-computer 插件不在树上）。".into())
+}
+
+/// 重新探测本机 cua-driver。`quiet` 是开 overlay 时那次，不 flash。
+pub(super) fn spawn_cua_refresh(
+    ctx: Context,
+    redraw: tokio::sync::mpsc::UnboundedSender<()>,
+    quiet: bool,
+) {
+    let Some(computer) = ctx.get::<Computer>(COMPUTER) else {
+        if !quiet {
+            flash(&ctx, "computer 未挂载（tool-computer 插件不在树上）。");
+        }
+        return;
+    };
+    computer.refresh();
+    if !quiet {
+        flash(&ctx, "正在重新检测 cua-driver…");
+    }
+    let _ = redraw.send(());
+}
+
+/// 执行确认过的安装 / 授权。真正的下载、子进程、MCP 重载都在 `"computer"` 里，
+/// 这里只负责起头、给一条 flash，并让 UI 继续重绘。
+pub(super) fn spawn_cua_run(
+    ctx: Context,
+    redraw: tokio::sync::mpsc::UnboundedSender<()>,
+    action: CuaAction,
+) {
+    let Some(computer) = ctx.get::<Computer>(COMPUTER) else {
+        flash(&ctx, "computer 未挂载（tool-computer 插件不在树上）。");
+        return;
+    };
+    match computer.start(action) {
+        Ok(()) => flash(&ctx, format!("{}…（进度见 /computer）", action.title())),
+        Err(e) => flash(&ctx, e),
+    }
+    let _ = redraw.send(());
 }
 
 pub(super) fn open_ask_if_needed(ctx: &Context, overlay: &mut Overlay) {
@@ -949,6 +986,9 @@ pub(super) fn live_redraw(ctx: &Context, overlay: &Overlay) -> bool {
         // 原来分开写的「子代理 running」「job !done」两条都被它覆盖，而且补上了
         // idle 子代理、workflow、定时任务 —— 那三类以前会让计时器冻住。
         || any_live_task(ctx)
+        // 装 driver 要下几十 MB，进度是子进程一行行吐出来的：不持续重绘的话
+        // 驾驶舱会停在按下 Enter 的那一帧。
+        || ctx.get::<Computer>(COMPUTER).is_some_and(|c| c.busy())
 }
 
 /// Grok cancel-rewind: restore the full sent prompt when the turn has no

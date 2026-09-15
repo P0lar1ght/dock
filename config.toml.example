@@ -122,13 +122,17 @@ prompt_cache = true
 # reasoning = false
 
 # --- Computer / CUA: trycua cua-driver MCP (stdio) ---
-# Install cua-driver on the host, then enable this block.
+# 装好 driver 就够了，这一段**不用写**：Dock 自己找 DOCK_CUA_DRIVER → PATH →
+# ~/.local/bin → macOS /Applications/CuaDriver.app，找到就注入内置的
+# [mcp_servers.cua-driver]（args = ["mcp"], enabled = true）。
+# 还没装：开 /computer 按 i，走官方 https://cua.ai/driver/install.sh。
+# DOCK_CUA_DRIVER=<绝对路径> 指定某一份；DOCK_CUA_DRIVER=off 关掉内置行。
 # Tools appear as mcp_cua-driver__* (search_tool / use_tool); all gated like bash.
-# Prefer PATH (`cua-driver`); or paste the absolute command from `cua-driver mcp-config`.
 # Linux needs X11/XWayland (+ AT-SPI for get_window_state). No Docker.
 # cua-driver 0.24+ speaks NDJSON. Dock stdio defaults to ndjson (no framing key needed).
 # Legacy Content-Length servers only: framing = "content-length"
 #
+# 写下面这段只为覆盖内置行（换命令 / 固定绝对路径 / 关掉）——同名行整条生效：
 # [mcp_servers.cua-driver]
 # command = "cua-driver"
 # args = ["mcp"]

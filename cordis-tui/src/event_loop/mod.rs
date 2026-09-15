@@ -609,7 +609,13 @@ pub async fn run(ctx: Context) -> Result<()> {
                                     overlay = Overlay::Browser { scroll: 0 };
                                 }
                                 Effect::ShowComputer => {
-                                    overlay = Overlay::Computer { scroll: 0 };
+                                    overlay = Overlay::Computer {
+                                        scroll: 0,
+                                        pending: None,
+                                    };
+                                    // 开窗就重新看一眼本机：在 dock 外面装好 / 授权好的
+                                    // driver，不该还显示上一次的缓存。
+                                    spawn_cua_refresh(ctx.clone(), redraw_tx.clone(), true);
                                 }
                                 Effect::ShowPresets { focus } => {
                                     overlay = open_presets_overlay(&ctx, focus);
@@ -696,6 +702,12 @@ pub async fn run(ctx: Context) -> Result<()> {
                                 }
                                 Effect::ReloadMcps { quiet } => {
                                     spawn_mcp_reload(ctx.clone(), redraw_tx.clone(), quiet);
+                                }
+                                Effect::CuaRefresh => {
+                                    spawn_cua_refresh(ctx.clone(), redraw_tx.clone(), false);
+                                }
+                                Effect::CuaRun { action } => {
+                                    spawn_cua_run(ctx.clone(), redraw_tx.clone(), action);
                                 }
                             }
                         }

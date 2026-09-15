@@ -23,6 +23,9 @@ fn isolated_home() -> &'static std::path::Path {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.keep();
         std::env::set_var("DOCK_HOME", &path);
+        // 内置 cua-driver 行是「发现得到就注入」：开发机上装了 driver 的话，
+        // 挂 `mcp-client` 会真的把守护进程拉起来。测试不碰本机 driver。
+        std::env::set_var("DOCK_CUA_DRIVER", "off");
         path
     })
 }

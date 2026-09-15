@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use cordis_spine::{ArchivedSession, OccupancyKind, PlanApprovalPrompt, SlashEntry};
+use cordis_spine::{ArchivedSession, CuaAction, OccupancyKind, PlanApprovalPrompt, SlashEntry};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 
@@ -122,8 +122,12 @@ pub enum Overlay {
         scroll: usize,
     },
     /// Live `/computer` thin cockpit (cua-driver MCP status / 审批). No embedded desktop.
+    ///
+    /// `pending` 是按下 `i` / `p` 后的确认态：确认块的文案仍由 `"computer"` 生成，
+    /// 这里只记「在等哪一个动作被确认」。
     Computer {
         scroll: usize,
+        pending: Option<CuaAction>,
     },
     /// `/preset` roster + assembly canvas.
     Presets(PresetView),
@@ -894,7 +898,10 @@ mod tests {
 
     #[test]
     fn computer_overlay_opens_and_closes() {
-        let mut overlay = Overlay::Computer { scroll: 0 };
+        let mut overlay = Overlay::Computer {
+            scroll: 0,
+            pending: None,
+        };
         assert!(overlay.is_open());
         overlay.close();
         assert!(!overlay.is_open());

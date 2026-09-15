@@ -7,8 +7,8 @@ use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
 use cordis_spine::{
     extra_tool_slash_arguments, goal_composer_fill, loop_composer_fill, loop_usage_message,
-    lsp_composer_fill, workflow_command_arguments, ApiBackend, ExtraSlashKind, SlashEntry,
-    GOAL_RESERVED_SUBCOMMANDS, WORKFLOW_TOOL_NAME,
+    lsp_composer_fill, workflow_command_arguments, ApiBackend, CuaAction, ExtraSlashKind,
+    SlashEntry, GOAL_RESERVED_SUBCOMMANDS, WORKFLOW_TOOL_NAME,
 };
 
 /// Synchronous, side-effect-free user intent.
@@ -216,6 +216,12 @@ pub enum Effect {
     /// `quiet` 时只有确实变了才 flash，免得每次开 pane 都刷一条。
     ReloadMcps {
         quiet: bool,
+    },
+    /// Async: 重新探测本机 cua-driver（开 `/computer` 时自动，Ctrl+R 手动）。
+    CuaRefresh,
+    /// Async: `/computer` 确认后执行安装（`i`）或授权（`p`）。
+    CuaRun {
+        action: CuaAction,
     },
     SetPrompt {
         text: String,

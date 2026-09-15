@@ -17,6 +17,7 @@ mod config;
 mod context_book;
 mod context_usage;
 mod cron;
+mod cua;
 mod dynamic_runner;
 mod error;
 mod goal;
@@ -71,7 +72,7 @@ pub use bundle::{
     install_without_llm,
 };
 pub use compact::{compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
-pub use computer::{tool_computer, Computer, CUA_DRIVER_SERVER};
+pub use computer::{tool_computer, Computer, ComputerState, CuaAction, CUA_DRIVER_SERVER};
 pub use config::{
     effective_browser_headed, load_browser_headed, load_catalog, load_disabled_mcp_tools,
     load_mcp_servers, persist_browser_headed, persist_disabled_mcp_tools,

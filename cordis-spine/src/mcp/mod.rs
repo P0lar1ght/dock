@@ -1006,9 +1006,15 @@ mod tests {
 
     /// `DOCK_HOME` + cwd 都指向空临时目录，再把 `body` 写成用户级 catalog。
     /// 返回的 guard 与 cwd 目录要一直持到用例结束。
+    ///
+    /// 同时关掉内置 cua-driver 行：它是「发现得到就注入」，开发机上装了 driver
+    /// 的话每个 reload 用例都会真的去拉守护进程。
     fn isolated_config(body: &str) -> (crate::test_env::EnvScope, tempfile::TempDir) {
         let cwd = tempfile::tempdir().unwrap();
-        let env = crate::test_env::scoped().home().cwd(cwd.path());
+        let env = crate::test_env::scoped()
+            .home()
+            .cwd(cwd.path())
+            .set(crate::cua::DRIVER_ENV, "off");
         std::fs::write(config::dock_home().join("config.toml"), body).unwrap();
         (env, cwd)
     }

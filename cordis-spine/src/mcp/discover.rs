@@ -156,6 +156,7 @@ pub fn run_search(
         ready,
         total_hidden,
         result_groups.is_empty(),
+        desktop_driver_missing(&query, mcp),
         in_context,
         over_budget,
         dropped,
@@ -168,10 +169,44 @@ pub fn run_search(
     }))
 }
 
+/// 桌面类查询的关键词。搜不到东西**又**是这类词时，模型该被告知本机还没装
+/// driver —— 这是它唯一会撞上「桌面控制不可用」的地方。
+const DESKTOP_QUERY_HINTS: &[&str] = &[
+    "desktop",
+    "screen",
+    "screenshot",
+    "click",
+    "keyboard",
+    "mouse",
+    "window",
+    "gui",
+    "computer",
+    "cua",
+    "桌面",
+    "截图",
+    "点击",
+    "鼠标",
+    "键盘",
+    "窗口",
+];
+
+/// 查询像在找桌面控制，而 cua-driver 没连上。
+fn desktop_driver_missing(query: &str, mcp: Option<&Mcp>) -> bool {
+    let query = query.to_lowercase();
+    if !DESKTOP_QUERY_HINTS.iter().any(|k| query.contains(k)) {
+        return false;
+    }
+    !mcp.map(Mcp::list).unwrap_or_default().iter().any(|s| {
+        s.name == crate::cua::CUA_DRIVER_SERVER && s.enabled && s.ok && !s.tools.is_empty()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn search_note(
     ready: bool,
     total_hidden: usize,
     empty: bool,
+    desktop_driver_missing: bool,
     in_context: usize,
     over_budget: usize,
     dropped: usize,
@@ -193,6 +228,14 @@ fn search_note(
                  on-demand tools are registered."
             ));
         }
+    }
+    if empty && desktop_driver_missing {
+        parts.push(
+            "Controlling this machine's desktop (click / type / screenshot) needs the cua-driver \
+             MCP server, which is not connected. Tell the user to open /computer and press i to \
+             install it — Dock does not ship the driver."
+                .into(),
+        );
     }
     if in_context > 0 {
         parts.push(format!(
@@ -618,6 +661,25 @@ mod tests {
             content: content.into(),
             images: Vec::new(),
         }
+    }
+
+    /// 没装 driver 时，模型搜桌面工具只会得到空结果；note 得把下一步说出来，
+    /// 否则它只能回一句「我没有这个能力」。
+    #[test]
+    fn empty_desktop_search_points_at_the_computer_cockpit() {
+        let ctx = cordis::Context::new();
+        let tools = Tools::echo(ctx);
+        let _a = tools
+            .register_mcp(spec("mcp_linear__save_issue", "save an issue"), stub_body())
+            .unwrap();
+
+        let out = run_search(&tools, None, &seen(), r#"{"query":"click desktop window"}"#);
+        assert!(out.contains("/computer"), "{out}");
+        assert!(out.contains("cua-driver"), "{out}");
+
+        // 非桌面类查询不该被这句噪音污染。
+        let other = run_search(&tools, None, &seen(), r#"{"query":"zzzz nothing"}"#);
+        assert!(!other.contains("/computer"), "{other}");
     }
 
     #[test]
