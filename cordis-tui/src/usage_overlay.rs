@@ -9,9 +9,9 @@ use std::time::Duration;
 use cordis::Context;
 use cordis_spine::{
     calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_trend,
-    occupancy_detail, per_model_amounts, session_usage_block_text, share_percent, snapshot_context,
-    CacheSegmentKind, ContextBook, ContextSnapshot, OccupancyDetail, OccupancyKind, Sessions,
-    TokenUsage, CONTEXT, SESSIONS,
+    miss_breakdown_text, occupancy_detail, per_model_amounts, session_usage_block_text,
+    share_percent, snapshot_context, CacheSegmentKind, ContextBook, ContextSnapshot,
+    OccupancyDetail, OccupancyKind, Sessions, TokenUsage, CONTEXT, SESSIONS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -394,6 +394,15 @@ fn session_view(usage: &cordis_spine::PromptUsage, width: u16) -> Vec<Line<'stat
             secondary,
         )));
     }
+    // 总计折了子代理与压缩，而「上一轮」和走势只有主循环。不把未命中按来源拆
+    // 开，这两个口径并排摆着就会被读成「每一轮都在漏 token」——实际大头往往是
+    // 子代理冷启动（各自一套系统提示，第一次调用必然整份满价）。
+    if let Some(breakdown) = miss_breakdown_text(usage) {
+        lines.push(Line::from(Span::styled(
+            format!("未命中来源  {breakdown}"),
+            secondary,
+        )));
+    }
     // 标签占 12 列，右边的计数后缀留 24 列；剩下的才是格子。放不下时
     // `hit_rate_trend` 丢最旧的，不能让渲染层在右边裁掉最新的那几次。
     const TREND_LABEL: &str = "每轮命中率  ";
@@ -524,7 +533,9 @@ fn amount_rows(
             mark: Some(colors.of(seg.kind)),
             label: seg.kind.label(),
             tokens: seg.tokens,
-            note: seg.kind.note().to_string(),
+            // 计价口径由 spine 出，它还知道这条 wire 报不报「写入」——不报的
+            // wire 上，这一轮新写进缓存的 token 就混在「未命中」里。
+            note: t.segment_note(&seg),
         })
         .collect();
     rows.push(AmountRow {
@@ -1601,10 +1612,13 @@ mod tests {
         assert!(all.contains("每轮命中率"), "{all}");
         // 95% → █，20% → ▂，69% → ▆
         assert!(all.contains("█▂▆"), "走势没按每轮命中率画出来：{all}");
+        // 不报写入的 wire 不该凭空多一行；「未命中」那行的注脚里提到写入是另
+        // 一回事——它说的正是「写入混在这一段里」。
         assert!(
-            !all.contains("写入"),
+            !all.contains(CacheSegmentKind::Write.label()),
             "这条 wire 不报写入，不该凭空多一行：{all}"
         );
+        assert!(all.contains("含首次写入"), "{all}");
     }
 
     /// 走势格数和「模型调用」是两个口径（后者折了子代理），并排摆着不写明就
@@ -1622,6 +1636,38 @@ mod tests {
         let all = all_text(&session_view(&usage, 100));
         assert!(all.contains("最近 19 次主循环调用"), "{all}");
         assert!(all.contains("模型调用 20（主循环 19 · 子代理 1）"), "{all}");
+    }
+
+    /// 总计折了子代理与压缩，上一轮 / 走势只有主循环。不把未命中按来源拆开，
+    /// 这两个口径并排摆着就会被读成「主循环每轮都在漏 token」。
+    #[test]
+    fn session_view_attributes_the_miss_to_its_source() {
+        let mut totals = usage_row(1_110_000, 998_000, 0);
+        totals.model_calls = 12;
+        let mut subagent = usage_row(20_000, 0, 0);
+        subagent.model_calls = 1;
+        let mut side = usage_row(90_000, 0, 0);
+        side.model_calls = 1;
+        let usage = cordis_spine::PromptUsage {
+            totals,
+            num_turns: 10,
+            subagent: Some(subagent),
+            side: Some(side),
+            last_call: Some(usage_row(100_000, 99_800, 0)),
+            ..Default::default()
+        };
+        let all = all_text(&session_view(&usage, 100));
+        assert!(
+            all.contains("未命中来源  主循环 2,000 · 子代理 20,000 · 压缩 90,000"),
+            "{all}"
+        );
+        assert!(
+            all.contains("模型调用 12（主循环 10 · 子代理 1 · 压缩 1）"),
+            "{all}"
+        );
+        // 这条 wire 不报写入，未命中里混着「首次写入」，不注明就会被当成
+        // Claude Code `/cost` 的 input 口径。
+        assert!(all.contains("含首次写入"), "{all}");
     }
 
     /// 窄窗口下走势要裁最旧的：渲染层只会在右边截断，那样丢的恰好是最新几次。

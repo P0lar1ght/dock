@@ -44,7 +44,7 @@
 | `/history` | 搜索提示词历史 |
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
 | `/find` | 搜索对话 |
-| `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入拆成命中 / 写入 / 未命中三段并画成 bar，加每轮命中率 sparkline、上一轮明细、输出 / 思考 / 调用次数 / API 耗时。费用来源三态：上游带 `cost_in_usd_ticks`（目前只有 xAI）显示 `$X`；否则按 `[model.<id>.pricing]` 本地估算，显示 `约 $X（按 config 单价估算）`；都没有则「未上报」（**不是免费**）。**Tab** 切到占用。浏览器 companion 拿到的是同一份数据的文本版。**没有** grok.com 账号额度、`/usage manage` |
+| `/usage`（`cost`） | 本会话用量 overlay（用量 tab）：输入拆成命中 / 写入 / 未命中三段并画成 bar，加每轮命中率 sparkline、上一轮明细、未命中来源（主循环 / 子代理 / 压缩，只有真有子代理 / 压缩时才出现）、输出 / 思考 / 调用次数 / API 耗时。费用来源三态：上游带 `cost_in_usd_ticks`（目前只有 xAI）显示 `$X`；否则按 `[model.<id>.pricing]` 本地估算，显示 `约 $X（按 config 单价估算）`；都没有则「未上报」（**不是免费**）。**Tab** 切到占用。浏览器 companion 拿到的是同一份数据的文本版。**没有** grok.com 账号额度、`/usage manage` |
 | `/context` | 打开占用 overlay：菱形条按系统提示 / 消息 / 推理开销 / 空闲拆分，下面列出工具定义、**技能**、工作流、MCP、本地按需。点「系统提示」按段展开（基座 / Cordis / 人设 / 工作流 / 技能 / **项目规约**；子代理名册段已撤，改挂在 `task` 工具 description 上）。**工具定义只含模型可见项**（`search_tool` / `use_tool` 等）。MCP extras 与 `register_deferred` 的本地工具 **不计入** `used`；点开只看目录。`search_tool` 返回的 schema 记在消息历史里直到压缩；消息明细在有搜索时多一行 **「按需发现」**（`N 次 search_tool`，已含在「工具结果」里，单列出来是为了让重复搜索的代价可见）。技能 listing 给模型看所以仍在系统提示正文里；图例单独占一行（标「已计入系统提示」），不把同一段再加进 `used`。工作流同理。点顶栏右上角「上下文」同样打开。点分类行或色块看该类明细；Esc 返回总览。**Tab** 切到用量。占用 live-lookup `"context"` |
 | `/compact [说明]` | 压缩旧对话为摘要发给模型（Grok 同款 structured `<summary>` 九段）。滚动区保留原对话，末尾加「已压缩上下文。」（Grok pager 是 SessionEvent，不擦 scrollback）。可选说明并进摘要。上下文达到窗口 **85%** 时自动压缩；失败或压完仍超阈值则等到下一条用户消息再自动。手动 `/compact` 不受此限制。摘要调用**不带工具表**（摘要本来就不许调工具，带着白付几千 token）。压缩后的模型前缀里，**assistant 轮次原样保留推理内容**，且**不含**「已压缩上下文。」那条合成消息（它只进滚动区）：有的上游（DeepSeek thinking 模式）规定请求带 `tools` 时之前每一轮的推理都必须回传，缺了报 `The reasoning_text in the thinking mode must be passed back` |
 | `/theme` `/t` | 切换配色 |
@@ -120,9 +120,9 @@ order: 10
 - **缓存占比** = 缓存命中 / 完整输入（Grok：`cached_prompt_tokens` 是 `prompt_tokens` 的子集，不要相减）。会话累计用总量相除，不是各轮百分比再平均。超过 100% 钳到 100%；输入为 0 显示 `-`。格式抄 Grok `/context` 的 `percent_of_window`（不足 10% 一位小数，否则整数）。
 - **输入拆三段**：命中 / 写入 / 未命中，互不相交且加起来等于完整输入（`messages` 的 `input_tokens` 本不含前两项，解析时已加回）。overlay 里画成一条按 token 比例分段的 bar，分段靠字形（`█` 命中 / `▓` 写入 / `░` 未命中）而不只靠颜色，单色终端与截图里照样读得出。非零段至少占一格——四舍五入到 0 会让「有一小段白付了全价」从图上消失。写入为 0 不占图例行（`chat_completions` / `responses` 根本不报它，画一行 0 会被误读成缓存没生效）。
 - **每轮走势**：账本留最近 40 次主循环调用，overlay 画成 sparkline（`▁`–`█`，旧 → 新）。刻度固定 0–100%，**不**按样本自适应——自适应会把一串都在 90% 上下的调用画成大起大落。只有一次调用不画。用途：命中率低时区分「这一轮新内容本来就多」和「前缀被改写了整段重算」（压缩、系统提示或工具表变化），只看 **上一轮** 一个数分不出来。
-- **走势的横轴是「有输入的主循环调用」**，不是「模型调用」。两处口径不同：子代理走 `record_subagent`，折进 `model_calls` 但不进 `recent_calls`；`input_tokens == 0` 的调用也不占格子（没有命中率可言）。所以 sparkline 旁边报的是**实际画出来的格数**，`模型调用` 一行在有子代理时拆成 `总数（主循环 N · 子代理 M）`——不写明就会被读成走势少画了一格。
+- **走势的横轴是「有输入的主循环调用」**，不是「模型调用」。三处口径不同：子代理走 `record_subagent`、压缩走旁路 `record_side_call`，两者都折进 `model_calls` 但不进 `recent_calls`；`input_tokens == 0` 的调用也不占格子（没有命中率可言）。所以 sparkline 旁边报的是**实际画出来的格数**，`模型调用` 一行在有子代理 / 压缩时拆成 `总数（主循环 N · 子代理 M · 压缩 K）`——不写明就会被读成走势少画了一格。压缩是单次命中率掉格最大的事件，且它之后那一轮必然全量重算；以前它既不记账也不占格，`/usage` 里一个 token 都看不见。
 - **窄窗口裁最旧的**：数据旧 → 新排列，交给渲染层在右边截断等于丢掉刚发生的那几次，正好是最该看的。宽度不够时 `hit_rate_trend` 自己丢队首。
-- 主循环每次 `finish_llm` 记一笔；子代理 isolate 结束时 `record_subagent` 折进父会话，不增加 `numTurns`。
+- 主循环每次 `finish_llm` 记一笔；子代理 isolate 结束时 `record_subagent` 折进父会话，不增加 `numTurns`；压缩走旁路 `record_side_call`，花钱但既不增加 `numTurns` 也不占走势格子（它不是用户的一轮）。
 - **费用**：`CallCost` 三态 `Reported | Estimated | Unknown`，上游优先。`[model.<id>.pricing]` 是 USD / 百万 token 的四价位（input 指**未命中**、cache_read、cache_write 省略回落 input、output），按 `/usage` 的同一套分段计价，存 tick（1 USD = 1e10）避免浮点累积。**不内置厂商价格表**：价格变动频繁，过期单价会静默给出错误金额，和内置模型目录当初被删是同一个理由。估算值一律带「约」并注明来源，混合会话显示「部分上报 · 部分估算」——估算不含分时折扣（DeepSeek off-peak 半价），不能当账单读。四个价位全 0 / 负数 = 没配价，不拿 $0 冒充免费。
 - `/new` / `clear` / `/resume` 清零账本。
 

@@ -300,6 +300,34 @@ impl Sessions {
             .record_subagent(&rows, child.incomplete);
     }
 
+    /// 记一次**旁路**调用的用量：压缩这类隔离掉 `"sessions"`、因而不经
+    /// `begin_llm` / `finish_llm` 的采样。
+    ///
+    /// 不记的话，一次压缩（整段历史、几乎零命中的满价请求）在 `/usage` 里一个
+    /// token 都看不见，而它之后那次全量重算的成本又只能摊在主循环头上。
+    pub fn record_side_call(
+        &self,
+        model: &str,
+        usage: &crate::usage::TokenUsage,
+        api_duration_ms: Option<u64>,
+        reported_cost_ticks: Option<i64>,
+    ) {
+        if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
+            return;
+        }
+        let model = if model.trim().is_empty() {
+            "unknown"
+        } else {
+            model
+        };
+        let cost =
+            crate::usage::CallCost::pick(reported_cost_ticks, estimated_cost_ticks(model, usage));
+        self.ledger
+            .lock()
+            .unwrap()
+            .record_side_call(model, usage, api_duration_ms, cost);
+    }
+
     pub fn turn_elapsed(&self) -> Option<std::time::Duration> {
         self.turn_started.lock().unwrap().map(|t| t.elapsed())
     }

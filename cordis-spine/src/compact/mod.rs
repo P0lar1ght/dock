@@ -22,8 +22,10 @@ use crate::llm::Llm;
 use crate::names::{COMPACT, LLM, SESSIONS, SYSTEM_PROMPT, TURN};
 use crate::prompt::SystemPrompt;
 use crate::session::Sessions;
+use crate::stream_acc::StreamDelta;
 use crate::turn::TurnControl;
 use crate::types::{LogEvent, PromptRequest};
+use crate::usage::TokenUsage;
 
 use history::{build_compacted_events, prepare_conversation_for_summarization};
 
@@ -32,6 +34,13 @@ use prompt::{build_summary_prompt_kind, SummaryPromptKind};
 use summary::is_degenerate_summary;
 
 pub use config::{exceeds_threshold, FullReplaceConfig, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
+
+/// 一次摘要采样的账单，从 SSE 的 `usage` delta 里捞出来的。
+struct SideCall {
+    usage: TokenUsage,
+    model: String,
+    cost_usd_ticks: Option<i64>,
+}
 
 /// Named `"compact"`. Stateless; per-session flags live on [`Sessions`].
 #[derive(Clone, Default)]
@@ -143,8 +152,12 @@ async fn compact_session_locked(
         if attempt > 0 && cfg.retry_delay_secs > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(cfg.retry_delay_secs)).await;
         }
+        // 压缩的 usage 只在 delta 里出现一次，而这条采样隔离掉了 `"sessions"`，
+        // 没人会替它记账——自己捞出来，跑完折进账本的旁路那一格。
+        let billed: std::sync::Arc<std::sync::Mutex<Option<SideCall>>> = Default::default();
+        let started = std::time::Instant::now();
         let output = llm
-            .stream_on(
+            .stream_observed(
                 &iso,
                 PromptRequest {
                     system: system.clone(),
@@ -155,8 +168,35 @@ async fn compact_session_locked(
                     // 偏离。
                     tools: Vec::new(),
                 },
+                {
+                    let billed = billed.clone();
+                    move |delta| {
+                        if let StreamDelta::Usage {
+                            tokens,
+                            official: true,
+                            model,
+                            cost_usd_ticks,
+                        } = delta
+                        {
+                            *billed.lock().unwrap() = Some(SideCall {
+                                usage: tokens.clone(),
+                                model: model.clone(),
+                                cost_usd_ticks: *cost_usd_ticks,
+                            });
+                        }
+                    }
+                },
             )
             .await;
+        // 失败的那几次尝试同样花了钱，所以记账在判定之前。
+        if let Some(call) = billed.lock().unwrap().take() {
+            sessions.record_side_call(
+                &call.model,
+                &call.usage,
+                Some(started.elapsed().as_millis() as u64),
+                call.cost_usd_ticks,
+            );
+        }
         if cancelled(ctx) {
             return Err(Error::Cancelled);
         }
@@ -294,6 +334,73 @@ mod tests {
                 .count(),
             0,
             "summarizer sample must not land on the live log"
+        );
+    }
+
+    /// 带 usage 的摘要采样：真实 wire 在流里报一次 `usage`，压缩这条采样隔离掉
+    /// 了 `"sessions"`，没人替它记账。
+    struct BilledSummary(String);
+
+    impl Sampler for BilledSummary {
+        fn sample<'a>(
+            &'a self,
+            _request: PromptRequest,
+            mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        ) -> BoxFuture<'a, LlmOutput> {
+            let text = self.0.clone();
+            Box::pin(async move {
+                on_delta(StreamDelta::Usage {
+                    tokens: TokenUsage {
+                        prompt_tokens: 90_000,
+                        completion_tokens: 900,
+                        total_tokens: 90_900,
+                        cached_prompt_tokens: 0,
+                        ..TokenUsage::default()
+                    },
+                    official: true,
+                    model: "summarizer".into(),
+                    cost_usd_ticks: None,
+                });
+                on_delta(StreamDelta::Text(text.clone()));
+                LlmOutput {
+                    text,
+                    ..LlmOutput::default()
+                }
+            })
+        }
+    }
+
+    /// 压缩是**一次满价、几乎零命中的整段历史请求**，而且它之后那一轮必然全量
+    /// 重算。它隔离掉 `"sessions"`，所以既不 `begin_llm` 也不 `finish_llm`，
+    /// 用量以前整笔掉进黑洞：`/usage` 里看不到开销，命中率掉格也无从归因。
+    #[tokio::test]
+    async fn compaction_is_billed_without_counting_as_a_turn() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        for e in sample_history() {
+            sessions.append(e);
+        }
+        let _s = root.provide(SESSIONS, sessions.clone()).unwrap();
+        root.provide(
+            LLM,
+            Llm::from_sampler(root.clone(), Arc::new(BilledSummary(healthy_summary()))),
+        )
+        .unwrap();
+
+        Compact.run_on(&root, None).await.unwrap();
+
+        let usage = sessions.prompt_usage();
+        let side = usage.side.clone().expect("压缩没进账本");
+        assert_eq!(side.input_tokens, 90_000, "{usage:?}");
+        assert_eq!(side.output_tokens, 900);
+        assert_eq!(side.model_calls, 1);
+        assert_eq!(usage.totals.input_tokens, 90_000, "会话总计要含压缩");
+        assert_eq!(usage.num_turns, 0, "压缩不是用户的一轮");
+        assert!(usage.recent_calls.is_empty(), "压缩不进每轮命中率走势");
+        assert!(
+            crate::usage::calls_breakdown(&usage).contains("压缩 1"),
+            "{}",
+            crate::usage::calls_breakdown(&usage)
         );
     }
 

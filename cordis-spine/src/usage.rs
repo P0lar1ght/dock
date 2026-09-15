@@ -208,6 +208,14 @@ fn merge_cost_ticks(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 pub struct UsageLedger {
     pub totals: UsageTotals,
     pub by_model: IndexMap<String, UsageTotals>,
+    /// 子代理折进来的那部分（`totals` 里也算了一份，这里是它的子集）。
+    ///
+    /// 不单记的话，会话总计里「未命中」的大头到底是主循环每轮的新内容、还是
+    /// 每个子代理各自的冷启动，就没有任何一处看得出来——而这两件事的处理方式
+    /// 完全不同。
+    pub subagent_totals: UsageTotals,
+    /// 旁路调用：压缩这类既不进会话、也不是子代理的采样（`totals` 的子集）。
+    pub side_totals: UsageTotals,
     /// Main-agent loop rounds for `num_turns` (subagents excluded).
     pub main_loop_model_calls: u64,
     /// Last main-loop call (for `/usage` 上一轮命中). Subagents do not overwrite.
@@ -249,10 +257,29 @@ impl UsageLedger {
     pub fn record_subagent(&mut self, by_model: &[(String, UsageTotals)], incomplete: bool) {
         for (model_id, totals) in by_model {
             self.fold_entry(model_id, totals);
+            self.subagent_totals.fold_totals(totals);
         }
         if incomplete {
             self.incomplete = true;
         }
+    }
+
+    /// 记一次**旁路**调用：压缩这类不进会话、也不算子代理的采样。
+    ///
+    /// 进 `totals` / `by_model`（它确实花了钱），但不碰 `main_loop_model_calls`
+    /// 与 `recent_calls`——它不是用户的一轮，塞进走势图会把「每轮命中率」这条
+    /// 轴的含义搅浑。压缩恰恰是命中率掉格最大的单次事件，不记的话 `/usage` 里
+    /// 既看不到它的开销、也无从解释它之后那次全量重算。
+    pub fn record_side_call(
+        &mut self,
+        model_id: &str,
+        usage: &TokenUsage,
+        api_duration_ms: Option<u64>,
+        cost: CallCost,
+    ) {
+        let call = UsageTotals::from_call(usage, api_duration_ms, cost);
+        self.side_totals.fold_totals(&call);
+        self.fold_entry(model_id, &call);
     }
 
     /// Usage accumulated since `earlier`. A continuable child keeps one
@@ -324,9 +351,50 @@ pub struct PromptUsage {
     /// 最近若干次主循环调用（旧 → 新），`/usage` 的命中率走势用。
     #[serde(default, rename = "recentCalls", skip_serializing_if = "Vec::is_empty")]
     pub recent_calls: Vec<PromptUsageModel>,
+    /// 总计里属于子代理的那部分。`None` = 这次会话没有子代理。
+    #[serde(
+        default,
+        rename = "subagentUsage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub subagent: Option<PromptUsageModel>,
+    /// 总计里属于旁路调用（压缩）的那部分。`None` = 一次都没跑过。
+    #[serde(default, rename = "sideUsage", skip_serializing_if = "Option::is_none")]
+    pub side: Option<PromptUsageModel>,
 }
 
 impl PromptUsage {
+    /// 「未命中」按来源拆开：主循环 / 子代理 / 压缩，非零的才出现。
+    ///
+    /// `None` = 只有主循环，拆了等于把同一个数写两遍。有子代理时这一行才是
+    /// 会话总计与「上一轮」对得上的唯一途径：总计折了子代理和压缩，而上一轮 /
+    /// 走势只有主循环，两个口径并排摆着最容易被读成「每轮都在漏 token」。
+    pub fn miss_breakdown(&self) -> Option<Vec<(&'static str, u64)>> {
+        let sub = self
+            .subagent
+            .as_ref()
+            .map(PromptUsageModel::uncached_input_tokens);
+        let side = self
+            .side
+            .as_ref()
+            .map(PromptUsageModel::uncached_input_tokens);
+        if sub.unwrap_or(0) == 0 && side.unwrap_or(0) == 0 {
+            return None;
+        }
+        let total = self.totals.uncached_input_tokens();
+        let main = total
+            .saturating_sub(sub.unwrap_or(0))
+            .saturating_sub(side.unwrap_or(0));
+        let mut out = vec![("主循环", main)];
+        if let Some(n) = sub.filter(|n| *n > 0) {
+            out.push(("子代理", n));
+        }
+        if let Some(n) = side.filter(|n| *n > 0) {
+            out.push(("压缩", n));
+        }
+        Some(out)
+    }
+
     /// Drop cost ticks when partial or incomplete so all surfaces fail closed.
     pub fn scrub_untrustworthy_costs(&mut self) {
         if !(self.usage_is_incomplete || self.totals.cost_is_partial) {
@@ -465,6 +533,24 @@ impl PromptUsageModel {
     pub fn segment_share(&self, segment: &CacheSegment) -> String {
         share_percent(segment.tokens, self.input_tokens)
     }
+
+    /// 该段的计价口径。比 [`CacheSegmentKind::note`] 多知道一件事：这条 wire
+    /// 报不报「写入」。
+    ///
+    /// chat/completions 与 Responses 不单独上报 `cache_creation`，于是**这一轮
+    /// 新写进缓存的 token 全落在「未命中」里**。不写明的话，这个数和 Claude
+    /// Code `/cost` 的 `input` 看着是同一个口径，其实差着一整个桶——那边把它
+    /// 单列成 cache write 了。
+    pub fn segment_note(&self, segment: &CacheSegment) -> String {
+        let base = segment.kind.note();
+        if segment.kind == CacheSegmentKind::Miss
+            && self.cache_creation_tokens == 0
+            && self.cached_read_tokens > 0
+        {
+            return format!("{base} · 含首次写入（这条 wire 不单列）");
+        }
+        base.to_string()
+    }
 }
 
 /// Server cost scale: 1 USD = 10^10 ticks.
@@ -522,6 +608,10 @@ impl From<&UsageLedger> for PromptUsage {
                 .iter()
                 .map(PromptUsageModel::from)
                 .collect(),
+            subagent: (ledger.subagent_totals != UsageTotals::default())
+                .then(|| PromptUsageModel::from(&ledger.subagent_totals)),
+            side: (ledger.side_totals != UsageTotals::default())
+                .then(|| PromptUsageModel::from(&ledger.side_totals)),
         };
         usage.scrub_untrustworthy_costs();
         usage
@@ -577,6 +667,9 @@ pub fn session_usage_block_text(usage: &PromptUsage) -> String {
             share_percent(last.cached_read_tokens, last.input_tokens),
         ));
     }
+    if let Some(breakdown) = miss_breakdown_text(usage) {
+        rows.push(format!("  {}{breakdown}", pad_label("未命中来源:", 15)));
+    }
     if let Some(trend) = hit_rate_trend(&usage.recent_calls, RECENT_CALLS_KEPT) {
         rows.push(format!(
             "  每轮命中率:    {trend}（旧 → 新 · 最近 {} 次主循环调用）",
@@ -615,15 +708,36 @@ pub fn session_usage_block_text(usage: &PromptUsage) -> String {
 /// 并排摆着又不说明来历，就会读成「走势少画了一格」——所以差额必须写出来。
 pub fn calls_breakdown(usage: &PromptUsage) -> String {
     let total = usage.totals.model_calls;
-    let sub = total.saturating_sub(usage.num_turns);
-    if sub == 0 {
+    let side = usage.side.as_ref().map(|s| s.model_calls).unwrap_or(0);
+    // 有分账就用分账。没有（旧账本 / 手搓的 payload）才退回减法，那时差额一律
+    // 算子代理——以前压缩根本不记账，减法从来没见过它。
+    let sub = usage
+        .subagent
+        .as_ref()
+        .map(|s| s.model_calls)
+        .unwrap_or_else(|| total.saturating_sub(usage.num_turns).saturating_sub(side));
+    if sub == 0 && side == 0 {
         return group_thousands(total);
     }
-    format!(
-        "{}（主循环 {} · 子代理 {}）",
-        group_thousands(total),
-        group_thousands(usage.num_turns),
-        group_thousands(sub),
+    let mut parts = vec![format!("主循环 {}", group_thousands(usage.num_turns))];
+    if sub > 0 {
+        parts.push(format!("子代理 {}", group_thousands(sub)));
+    }
+    if side > 0 {
+        parts.push(format!("压缩 {}", group_thousands(side)));
+    }
+    format!("{}（{}）", group_thousands(total), parts.join(" · "))
+}
+
+/// 「未命中」按来源拆成一行，见 [`PromptUsage::miss_breakdown`]。
+pub fn miss_breakdown_text(usage: &PromptUsage) -> Option<String> {
+    Some(
+        usage
+            .miss_breakdown()?
+            .into_iter()
+            .map(|(label, tokens)| format!("{label} {}", group_thousands(tokens)))
+            .collect::<Vec<_>>()
+            .join(" \u{00b7} "),
     )
 }
 
@@ -1270,6 +1384,111 @@ mod tests {
             full.ends_with(&clipped),
             "留下的必须是最新的三格：full={full} clipped={clipped}"
         );
+    }
+
+    /// 会话总计折了子代理与压缩，「上一轮」和走势却只有主循环。不把未命中按
+    /// 来源拆开，这两个口径并排摆着就会被读成「主循环每轮都在漏 token」——而
+    /// 大头往往是子代理冷启动：各自一套系统提示，第一次调用必然整份满价。
+    #[test]
+    fn miss_breakdown_separates_subagent_cold_starts_from_the_main_loop() {
+        let mut ledger = UsageLedger::default();
+        // 主循环：每轮只差一条新消息没命中。
+        for _ in 0..10 {
+            let mut call = tu(100_000, 500);
+            call.cached_prompt_tokens = 99_800;
+            ledger.record_main_loop_call("m", &call, None, CallCost::Unknown);
+        }
+        // 子代理：一次冷启动，整份 prompt 全价。
+        ledger.record_subagent(
+            &[(
+                "m".into(),
+                UsageTotals {
+                    input_tokens: 20_000,
+                    output_tokens: 300,
+                    cached_read_tokens: 0,
+                    model_calls: 1,
+                    ..Default::default()
+                },
+            )],
+            false,
+        );
+        // 压缩：整段历史、几乎零命中。
+        ledger.record_side_call("m", &tu(90_000, 900), None, CallCost::Unknown);
+
+        let usage = PromptUsage::from(&ledger);
+        assert_eq!(
+            usage.totals.uncached_input_tokens(),
+            2_000 + 20_000 + 90_000
+        );
+        assert_eq!(
+            usage.miss_breakdown(),
+            Some(vec![
+                ("主循环", 2_000),
+                ("子代理", 20_000),
+                ("压缩", 90_000)
+            ]),
+            "未命中的来源分不开，总计就只能被读成主循环在漏"
+        );
+        let text = session_usage_block_text(&usage);
+        assert!(
+            text.contains("未命中来源:    主循环 2,000 · 子代理 20,000 · 压缩 90,000"),
+            "{text}"
+        );
+        assert!(
+            text.contains("模型调用:      12（主循环 10 · 子代理 1 · 压缩 1）"),
+            "{text}"
+        );
+
+        // 只有主循环时拆开等于把同一个数写两遍。
+        let mut plain = UsageLedger::default();
+        plain.record_main_loop_call("m", &tu(100, 10), None, CallCost::Unknown);
+        assert_eq!(PromptUsage::from(&plain).miss_breakdown(), None);
+        assert!(!session_usage_block_text(&PromptUsage::from(&plain)).contains("未命中来源"));
+    }
+
+    /// 旁路调用（压缩）花的钱要进总计，但它不是用户的一轮：不进 `num_turns`，
+    /// 也不占「每轮命中率」的格子。
+    #[test]
+    fn side_calls_are_billed_but_are_not_turns() {
+        let mut ledger = UsageLedger::default();
+        ledger.record_main_loop_call("m", &tu(1_000, 10), Some(100), CallCost::Reported(50));
+        ledger.record_side_call("m", &tu(90_000, 900), Some(2_000), CallCost::Reported(700));
+
+        assert_eq!(ledger.main_loop_model_calls, 1, "压缩不是一轮");
+        assert_eq!(ledger.recent_calls.len(), 1, "压缩不进走势");
+        assert_eq!(ledger.totals.input_tokens, 91_000);
+        assert_eq!(ledger.totals.model_calls, 2);
+        assert_eq!(ledger.side_totals.input_tokens, 90_000);
+        assert_eq!(ledger.totals.cost_usd_ticks, Some(750), "压缩的钱也是钱");
+        assert_eq!(ledger.by_model["m"].input_tokens, 91_000);
+    }
+
+    /// 不报写入的 wire（chat/completions、Responses）上，这一轮**新写进缓存**的
+    /// token 全落在「未命中」里。不写明就会被当成和 Claude Code `/cost` 的
+    /// `input` 同一个口径，而那边把它单列成了 cache write。
+    #[test]
+    fn miss_note_says_when_the_wire_folds_writes_into_it() {
+        let mut no_write_bucket = model_row(1_000, 10, None);
+        no_write_bucket.cached_read_tokens = 900;
+        let segs = no_write_bucket.cache_segments();
+        assert!(
+            no_write_bucket
+                .segment_note(&segs[0])
+                .contains("含首次写入"),
+            "{}",
+            no_write_bucket.segment_note(&segs[0])
+        );
+
+        // 报写入的 wire（Messages）：写入自己占一段，未命中就是纯未命中。
+        let mut with_bucket = model_row(1_000, 10, None);
+        with_bucket.cached_read_tokens = 600;
+        with_bucket.cache_creation_tokens = 300;
+        let segs = with_bucket.cache_segments();
+        assert_eq!(with_bucket.segment_note(&segs[0]), "全价计费");
+
+        // 一次都没命中过（首轮）不算「这条 wire 不报写入」的证据。
+        let cold = model_row(1_000, 10, None);
+        assert_eq!(cold.segment_note(&cold.cache_segments()[0]), "全价计费");
     }
 
     /// 走势只画主循环，`model_calls` 还折了子代理进去。两个数并排摆着又不说明
