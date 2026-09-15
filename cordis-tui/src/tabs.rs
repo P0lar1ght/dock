@@ -327,6 +327,11 @@ impl Tabs {
         Ok(())
     }
 
+    /// 有没有旁问开着。只问存在性时用这个 —— [`Self::aside`] 会把答案也拷一份。
+    pub fn has_aside(&self) -> bool {
+        self.inner.aside.lock().unwrap().is_some()
+    }
+
     /// 面板要画的东西。没有旁问就是 `None`（面板不占行）。
     pub fn aside(&self) -> Option<AsideView> {
         let aside = self.inner.aside.lock().unwrap();
@@ -447,15 +452,16 @@ impl Tabs {
 
 /// 这一页最近一条**有正文**的模型回复。只有工具调用的那几步跳过：带回去的
 /// 该是结论，不是「我调用了 read_file」。
+///
+/// 走 `with_log` 借用而不是 `events()`：这条在每帧的 `aside()` 里被调用，
+/// `events()` 会把整份日志（含工具输出的大字符串）深拷贝一遍。
 fn last_reply(sessions: &Sessions) -> Option<String> {
-    sessions
-        .events()
-        .into_iter()
-        .rev()
-        .find_map(|event| match event {
-            LogEvent::LlmStream(out) if !out.text.trim().is_empty() => Some(out.text),
+    sessions.with_log(|events, _| {
+        events.iter().rev().find_map(|event| match event {
+            LogEvent::LlmStream(out) if !out.text.trim().is_empty() => Some(out.text.clone()),
             _ => None,
         })
+    })
 }
 
 /// 带回来源页的块：注明出处并整段引用，用户接着往下写自己的问题。
@@ -470,6 +476,8 @@ fn tab_working(ctx: &Context) -> bool {
 }
 
 /// 标签标题：会话自己的标题 > 第一条用户消息 > 「新会话」。
+///
+/// 同 [`last_reply`]，走 `with_log` 借用：`list()` 每帧、每个分页各调一次。
 fn tab_title(ctx: &Context) -> String {
     let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
         return "新会话".into();
@@ -478,11 +486,11 @@ fn tab_title(ctx: &Context) -> String {
         return clip(&title);
     }
     sessions
-        .events()
-        .into_iter()
-        .find_map(|event| match event {
-            LogEvent::User(text) => Some(clip(&text)),
-            _ => None,
+        .with_log(|events, _| {
+            events.iter().find_map(|event| match event {
+                LogEvent::User(text) => Some(clip(text)),
+                _ => None,
+            })
         })
         .unwrap_or_else(|| "新会话".into())
 }

@@ -92,8 +92,15 @@ config.toml.example      用户 / 项目模型目录样例
 **已知边界**：分页不落盘（`--resume`、gateway `dock.1` 投影、会话归档都只跟第 1
 页）；权限浮层 / `ask` / MCP elicit 是全局队列且**还没有来源标记**，后台页触发的
 弹窗会在你正看的那一页弹出；子代理的 `parent_session_id` 仍硬绑 `main`（后台页
-spawn 的子代理会被第 1 页的 Stop 一起取消）；全局单例（浏览器、cua、后台任务表）
-两页会抢。`todos` / `planMode` / `goal` 目前也是全局一份，两页共用。
+spawn 的子代理会被第 1 页的 Stop 一起取消，反过来在任一分页按 `Ctrl+W` 也会
+`cancel_all()` 掉所有页的子代理）；全局单例（浏览器、cua、后台任务表）两页会抢；
+`todos` / `planMode` / `goal` 目前也是全局一份，两页共用。
+
+要按页取消子代理，得让**执行期的会话身份跟着工具调用的载荷走** —— 同
+`StepStart::identity` / `TurnEnd::identity` 那个套路。工具体是全局注册一次、
+捕获根 ctx 的，现在在 `task/execute.rs` 的 spawn 点根本拿不到是哪一页在调；
+协调器那边按 `parent_session_id` 取消的能力本来就有（`ChannelBackend::for_session`），
+缺的只是这个身份。
 
 ## 一轮怎么跑
 

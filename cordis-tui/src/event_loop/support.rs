@@ -1114,8 +1114,7 @@ pub(super) fn tabs_service(root: &Context) -> Option<std::sync::Arc<Tabs>> {
 
 /// 有没有旁问面板开着（`/btw` 起的那一个）。
 pub(super) fn aside_open(ctx: &Context) -> bool {
-    ctx.get::<Tabs>(TUI_TABS)
-        .is_some_and(|t| t.aside().is_some())
+    ctx.get::<Tabs>(TUI_TABS).is_some_and(|t| t.has_aside())
 }
 
 /// 当前分页的上下文；没挂分页服务时就是根本身。

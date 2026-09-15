@@ -25,7 +25,11 @@ pub fn desired_height(aside: Option<&AsideView>, width: u16) -> u16 {
     (2 + body.len() as u16).min(MAX_HEIGHT)
 }
 
-/// 正文按宽度折行；还没答出来时只有一行状态。
+/// 正文折行；还没答出来时只有一行状态。
+///
+/// 按**显示列**折（`textwrap` 走 unicode-width），不是按字符数：`set_line` 是
+/// 按列裁剪的，中文一个字占两列，按字符折的话每行后半截会被直接丢掉——既不
+/// 显示也不换行。
 fn body_lines(aside: &AsideView, width: usize) -> Vec<String> {
     let width = width.max(8);
     match &aside.answer {
@@ -37,16 +41,8 @@ fn body_lines(aside: &AsideView, width: usize) -> Vec<String> {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let mut rest = line;
-                while !rest.is_empty() {
-                    let taken: String = rest.chars().take(width).collect();
-                    let used = taken.chars().count();
-                    out.push(taken);
-                    rest = &rest[rest
-                        .char_indices()
-                        .nth(used)
-                        .map(|(i, _)| i)
-                        .unwrap_or(rest.len())..];
+                for wrapped in textwrap::wrap(line, width) {
+                    out.push(wrapped.into_owned());
                     if out.len() >= MAX_HEIGHT as usize {
                         return out;
                     }
@@ -196,5 +192,16 @@ mod tests {
         let aside = view(Some("中文中文中文中文中文中文"), false);
         let text = render(&aside, 20);
         assert!(text.contains('中'), "{text}");
+    }
+
+    /// 中文一个字占两列：按字符数折行、按列裁剪的话，每行后半截会被直接丢掉
+    /// （既不显示也不换行）。这里逐字断言，一个都不能少。
+    #[test]
+    fn cjk_answers_do_not_lose_characters() {
+        let answer = "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉";
+        let text = render(&view(Some(answer), false), 40);
+        for ch in answer.chars() {
+            assert!(text.contains(ch), "掉了「{ch}」：{text}");
+        }
     }
 }
