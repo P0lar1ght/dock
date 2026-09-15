@@ -7,16 +7,16 @@ use crate::names::{CONTEXT, PROMPT_ASSEMBLE, SYSTEM_PROMPT};
 /// its own plugin handler that adds a section at a fixed order, so the assembled
 /// prompt is byte-stable no matter what order the plugins mount in.
 ///
-/// Stable identity first (prefix cache), then listings, then whatever varies
-/// with the workspace. Plan / goal stay out of this table — they are
+/// Stable identity first (prefix cache), then listings. Plan / goal and the
+/// workspace conventions (`AGENTS.md`) stay out of this table — they are
 /// `<system-reminder>` tails (Grok / DSH).
+///
+/// 这张表里**没有任何一段跟着 cwd 变**：`AGENTS.md` 搬去消息流之后，整份系统提示
+/// 只由预设决定，`/cd` 不再让前缀作废，主会话与子代理共享的头也更长。
 pub const ORDER_CORDIS: i32 = 10;
 pub const ORDER_PERSONA: i32 = 20;
 pub const ORDER_WORKFLOWS: i32 = 40;
 pub const ORDER_SKILLS: i32 = 41;
-/// Workspace `AGENTS.md`. Last on purpose: it is the only section whose body
-/// tracks the cwd, so everything above it stays byte-identical across `/cd`.
-pub const ORDER_PROJECT: i32 = 50;
 
 /// Structured payload carried by the `system-prompt/assemble` waterfall.
 ///

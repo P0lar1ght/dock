@@ -31,6 +31,8 @@ pub enum OccupancyKind {
     Deferred,
     Workflows,
     Skills,
+    /// 工作区规约（`AGENTS.md`）。在消息流里，不在系统提示里。
+    Instructions,
 }
 
 impl OccupancyKind {
@@ -41,6 +43,7 @@ impl OccupancyKind {
             Self::Overhead => "推理/开销",
             Self::Free => "空闲",
             Self::Tools => "工具定义",
+            Self::Instructions => "工程规约",
             Self::Mcp => "MCP 服务器",
             Self::Deferred => "本地按需",
             Self::Workflows => "工作流",
@@ -127,6 +130,7 @@ pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
         OccupancyKind::Deferred => deferred_detail(ctx, &snap),
         OccupancyKind::Workflows => workflows_detail(&snap),
         OccupancyKind::Skills => skills_detail(ctx, &snap),
+        OccupancyKind::Instructions => instructions_detail(ctx, &snap),
     }
 }
 
@@ -247,7 +251,6 @@ fn section_label(id: &str) -> String {
         "skills" => "技能".into(),
         "workflows" => "工作流".into(),
         "persona" | "persona-replace" => "人设".into(),
-        "project" => "项目规约".into(),
         "plan" => "计划".into(),
         "goal" => "目标".into(),
         other => other.into(),
@@ -639,6 +642,39 @@ fn workflows_detail(snap: &ContextSnapshot) -> OccupancyDetail {
     }
 }
 
+/// 工作区规约的明细：哪几层出了力，以及**模型实际看到的那份原文**。
+///
+/// 正文取的是历史里注入的副本，不是磁盘当前内容——文件刚改过、还没注入新版本时
+/// 两者并不相等，而这里要回答的是「模型现在读到的是什么」。
+fn instructions_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
+    let tokens = snap
+        .categories
+        .iter()
+        .find(|c| c.label == OccupancyKind::Instructions.title())
+        .map(|c| c.tokens)
+        .unwrap_or(0);
+    let rows: Vec<DetailRow> = crate::project_instructions::instruction_paths()
+        .into_iter()
+        .filter_map(|(label, path)| {
+            let raw = std::fs::read_to_string(&path).ok()?;
+            (!raw.trim().is_empty()).then(|| DetailRow {
+                label: label.to_string(),
+                tokens: Some(estimate_text(&raw)),
+                note: Some(path.display().to_string()),
+            })
+        })
+        .collect();
+    OccupancyDetail {
+        kind: OccupancyKind::Instructions,
+        tokens,
+        groups: vec![DetailGroup {
+            heading: format!("{} 层 · 作为 <system-reminder> 注入消息流", rows.len()),
+            rows,
+        }],
+        text: crate::project_instructions::injected_copy(ctx),
+    }
+}
+
 fn skills_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
     let tokens = snap
         .categories
@@ -752,6 +788,18 @@ fn extra_categories(ctx: &Context, assembly: &PromptAssembly) -> Vec<ContextCate
             } else {
                 count_detail(n as u64, "个")
             }),
+        });
+    }
+    // 规约不在系统提示里（它是消息流尾部的 reminder），但用户问的是「我的
+    // AGENTS.md 占了多少」——单列一行，并写明它算在消息里。
+    if let Some(copy) = crate::project_instructions::injected_copy(ctx) {
+        rows.push(ContextCategory {
+            label: OccupancyKind::Instructions.title().into(),
+            tokens: estimate_text(&copy),
+            detail: Some(format!(
+                "{} · 已计入消息",
+                crate::project_instructions::INSTRUCTIONS_FILE
+            )),
         });
     }
     let workflows = crate::workflow::catalog_listing();
@@ -1025,6 +1073,35 @@ mod tests {
             .iter()
             .flat_map(|g| &g.rows)
             .any(|r| r.label == "按需发现"));
+    }
+
+    /// 规约那一类点开来要是**它自己**的明细：层清单 + 模型实际读到的原文。
+    #[tokio::test]
+    async fn detail_instructions_lists_the_layers_and_the_injected_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        std::fs::write(dir.path().join("AGENTS.md"), "RULE-ONE").unwrap();
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        let body = crate::project_instructions::render(&ctx).expect("rules");
+        sessions.append(crate::types::LogEvent::SystemReminder(body.clone()));
+
+        let d = occupancy_detail(&ctx, OccupancyKind::Instructions);
+        assert_eq!(d.kind, OccupancyKind::Instructions);
+        assert_eq!(d.text.as_deref(), Some(body.as_str()), "要给注入的那份原文");
+        let rows: Vec<&str> = d.groups[0].rows.iter().map(|r| r.label.as_str()).collect();
+        assert!(rows.contains(&"AGENTS.md"), "{rows:?}");
+
+        // 分类行的标签与可点开的类别同源，否则点开的是别人。
+        let snap = snapshot_context(&ctx);
+        assert!(
+            snap.categories
+                .iter()
+                .any(|c| c.label == OccupancyKind::Instructions.title() && c.tokens > 0),
+            "{:?}",
+            snap.categories
+        );
     }
 
     #[tokio::test]

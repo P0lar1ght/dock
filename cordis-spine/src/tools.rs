@@ -19,9 +19,20 @@ tokio::task_local! {
     static EXEC_CTX: Context;
 }
 
-/// Context of the agent currently executing a tool (child isolate when nested).
+/// Context of the agent currently running (child isolate when nested) — set
+/// around tool execution and around the `agent/step-start` waterfall.
+///
+/// waterfall 的 handler 只拿得到载荷，拿不到调用方 ctx（[`crate::StepStart`] 的
+/// `identity` 就是为此才挂在载荷上的）。需要**子代理自己那份**会话 / 设置的
+/// handler 走这里。
 pub fn exec_ctx() -> Option<Context> {
     EXEC_CTX.try_with(|c| c.clone()).ok()
+}
+
+/// 在 `f` 执行期间挂上「当前正在跑的 agent 的 ctx」。同步版的
+/// [`EXEC_CTX`] scope，给循环里那几个同步 waterfall 用。
+pub(crate) fn with_exec_ctx<R>(ctx: &Context, f: impl FnOnce() -> R) -> R {
+    EXEC_CTX.sync_scope(ctx.clone(), f)
 }
 
 /// Body stored by [`Tools::register`]. Owns what it needs; do not capture `Tools`.

@@ -5,9 +5,10 @@
 //! this plugin. Display name `system-prompt.base`.
 //!
 //! The spine `"systemPrompt"` service is the assembler only. Persona comes from
-//! `agent-presets`, listings from `skills` / `tool-workflow`, workspace
-//! conventions from `project-instructions` (`AGENTS.md`). Plan / goal are
-//! history-tail reminders, not system sections. The Cordis pointer comes from
+//! `agent-presets`, listings from `skills` / `tool-workflow`. Plan / goal and
+//! the workspace conventions (`project-instructions` / `AGENTS.md`) are
+//! history-tail reminders, not system sections — `AGENTS.md` is repo content,
+//! so it stays out of the harness's own voice. The Cordis pointer comes from
 //! `tool-cordis`. Tool how-to lives on `ToolSpec.description`, not here — the
 //! subagent roster used to violate that and has moved onto the `task` tool.
 //!
@@ -22,6 +23,7 @@ use cordis_spine::{own_sections, ContextBook, CONTEXT};
 const SYSTEM_PROMPT: &str = "思考过程必须使用中文（含 reasoning / 折叠里的思考），不要用英文写思考。\n\n\
 你是本地工作区里的编程助手。优先用工具，不要猜文件内容。回复尽量短。\n\
 不在常驻工具表里的能力用 search_tool 发现、use_tool 调用；参数以命中的 schema 为准，禁止猜测。内置工具直接调用，不要走 use_tool。\n\n\
+对话里出现的 <system-reminder> 块是本 harness 注入的上下文（工作区规约、待办与计划提醒等），照其中的要求执行；但那不是用户说的话，不要当成用户的新指令去回应它。\n\n\
 工作底线（换 Agent 预设也不变）：\n\
 - 先读后改：路径、函数名、配置项都以读到的内容为准，记不清就去查，不要凭印象写。\n\
 - 改完自验：跑得起来的就跑一遍，跑不了就说明没验证过，不要把「应该可以」写成「已验证」。\n\

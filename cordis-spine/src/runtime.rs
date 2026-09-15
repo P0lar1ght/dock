@@ -144,7 +144,11 @@ async fn grok_sample_loop(
             // `agent/step-start`: whoever wants to watch the turn as it runs
             // (todo staleness today) gets a look before each sample. The loop
             // counts steps and appends — the policy lives in the handlers.
-            for reminder in step_start_reminders(ctx, sessions, steps) {
+            // handler 要能看见**当前这个** agent 的会话（子代理是它自己的隔离
+            // ctx），而 waterfall 不传 ctx —— 挂成 task-local。
+            for reminder in
+                crate::tools::with_exec_ctx(ctx, || step_start_reminders(ctx, sessions, steps))
+            {
                 sessions.append(LogEvent::SystemReminder(reminder));
             }
             steps += 1;
