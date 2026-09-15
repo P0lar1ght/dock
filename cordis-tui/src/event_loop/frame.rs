@@ -903,6 +903,7 @@ pub(super) fn paint_overlay(
 
 pub(super) fn arg_picker_title(kind: crate::slash::ArgKind) -> &'static str {
     match kind {
+        crate::slash::ArgKind::Tab => "分页",
         crate::slash::ArgKind::Theme => "主题",
         crate::slash::ArgKind::Model => "模型",
         crate::slash::ArgKind::Protocol => "推理协议",
