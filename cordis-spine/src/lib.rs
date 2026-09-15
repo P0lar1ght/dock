@@ -157,8 +157,9 @@ pub use types::{
 };
 pub use usage::{
     calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,
-    per_model_amounts, session_usage_block_text, share_percent, ticks_to_usd, CacheSegment,
-    CacheSegmentKind, CallCost, PromptUsage, PromptUsageModel, UsageLedger, RECENT_CALLS_KEPT,
+    miss_breakdown_text, per_model_amounts, session_usage_block_text, share_percent, ticks_to_usd,
+    CacheSegment, CacheSegmentKind, CallCost, PromptUsage, PromptUsageModel, UsageLedger,
+    RECENT_CALLS_KEPT,
 };
 pub use web_fetch::tool_web;
 pub use workflow::{

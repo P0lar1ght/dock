@@ -577,7 +577,7 @@ async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         return tool_result(call, parts.join("\n\n"));
     }
     let body = collect_output(jobs.as_deref(), sub.as_deref(), &ids, timeout).await;
-    tool_result(call, body)
+    tool_result(call, with_wait_note(body))
 }
 
 async fn wait_tasks(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
@@ -589,7 +589,7 @@ async fn wait_tasks(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     let jobs = ctx.get::<Jobs>(JOBS);
     let sub = ctx.get::<Subagents>(SUBAGENTS);
     let body = collect_output(jobs.as_deref(), sub.as_deref(), &ids, timeout).await;
-    tool_result(call, body)
+    tool_result(call, with_wait_note(body))
 }
 
 async fn kill_task(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
@@ -609,21 +609,58 @@ async fn kill_task(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     tool_result(call, msg)
 }
 
+/// 一次 `collect_output` 的收尾状态，决定正文后面补不补说明、补哪句。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WaitOutcome {
+    /// 等到点了仍有任务在跑（不是「等到任务完成」）。
+    timed_out: bool,
+    /// 仍在跑的里面有子代理 —— 它会自己推回合结束，不必轮询。
+    subagent_pending: bool,
+}
+
+/// 等到点了任务还没跑完时补一句：上面是**快照**不是结论，任务仍在跑。
+///
+/// 不加这句时，一个 `[running]` 快照很容易被当成最终结果读掉。turn-end 那半句
+/// 只在真的有子代理在跑时给：后台 bash 和 monitor 不推通知，让它们去等一个永远
+/// 不来的通知，等于换个方向再骗一次。
+fn with_wait_note((body, outcome): (String, WaitOutcome)) -> String {
+    if !outcome.timed_out {
+        return body;
+    }
+    let mut note = String::from(
+        "Still running when the wait timed out. The snapshot above is the output so far, not a \
+         result — call again later.",
+    );
+    if outcome.subagent_pending {
+        note.push_str(
+            " A subagent pushes its turn end to you, so waiting for that notice works too.",
+        );
+    }
+    format!("{body}\n\n{note}")
+}
+
+/// 收集 `ids` 的输出，返回正文与本次等待的收尾状态。
+///
+/// `timeout_ms` 是**本次调用愿意等多久**，不是任务的生命周期：到点返回的是当前
+/// 快照（已产出输出 + `[running]`），任务照跑，下次调用接着查 —— 长任务不会因为
+/// 某次等待到期而丢结果。`timeout_ms == 0` 是不等待的即时快照。
 async fn collect_output(
     jobs: Option<&Jobs>,
     sub: Option<&Subagents>,
     ids: &[String],
     timeout_ms: u64,
-) -> String {
+) -> (String, WaitOutcome) {
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(if timeout_ms == 0 { 1 } else { timeout_ms });
     loop {
         let mut parts = Vec::new();
         let mut all_done = true;
+        let mut subagent_pending = false;
         for id in ids {
             if let Some(s) = sub.and_then(|s| s.snapshot(id)) {
                 if s.running() {
                     all_done = false;
+                    subagent_pending = true;
                 }
                 parts.push(render_subagent(&s));
             } else if let Some(j) = jobs.and_then(|j| j.snapshot(id)) {
@@ -647,8 +684,82 @@ async fn collect_output(
                     }
                 }
             }
-            return parts.join("\n\n");
+            let timed_out = timeout_ms > 0 && !all_done;
+            return (
+                parts.join("\n\n"),
+                WaitOutcome {
+                    timed_out,
+                    subagent_pending: timed_out && subagent_pending,
+                },
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 到点仍有任务在跑：正文给 running 快照（任务没被中止），并补一句说明它不是结论。
+    ///
+    /// 后台 bash / monitor 不推回合结束通知，所以这句里不能出现 turn-end。
+    #[tokio::test]
+    async fn collect_output_reports_when_the_wait_runs_out() {
+        let jobs = Jobs::new();
+        let id = jobs.start("sleep 5");
+        let started = std::time::Instant::now();
+        let (body, outcome) =
+            collect_output(Some(&jobs), None, std::slice::from_ref(&id), 300).await;
+        // 先收进程再断言，免得中途失败漏一个 sleep 出去。
+        assert!(jobs.kill(&id).await.contains("killed"), "收不掉测试进程");
+
+        assert!(outcome.timed_out, "300ms 到点时 sleep 5 还在跑：{body}");
+        assert!(!outcome.subagent_pending, "跑的是 bash job，不是子代理");
+        assert!(body.contains("[running]"), "{body}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "等待该按 timeout 返回，而不是挂到任务结束"
+        );
+        let note = with_wait_note((body, outcome));
+        assert!(note.contains("not a result"), "{note}");
+        assert!(
+            !note.contains("turn end"),
+            "bash job 没有 turn-end 通知：{note}"
+        );
+    }
+
+    /// 等到点的是子代理时才提「它会自己推回合结束」。
+    #[test]
+    fn subagent_wait_note_points_at_the_turn_end_notice() {
+        let outcome = WaitOutcome {
+            timed_out: true,
+            subagent_pending: true,
+        };
+        let note = with_wait_note(("[running] sub-1".into(), outcome));
+        assert!(note.contains("not a result"), "{note}");
+        assert!(note.contains("turn end"), "{note}");
+    }
+
+    /// 跑完的任务不报「等到点了」，也不加提示。
+    #[tokio::test]
+    async fn completed_task_is_not_a_timed_out_wait() {
+        let jobs = Jobs::new();
+        let id = jobs.start("echo done");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !jobs.snapshot(&id).is_some_and(|s| s.done) {
+            assert!(std::time::Instant::now() < deadline, "echo 没在 10s 内跑完");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let (body, outcome) =
+            collect_output(Some(&jobs), None, std::slice::from_ref(&id), 300).await;
+        assert_eq!(outcome, WaitOutcome::default(), "{body}");
+        assert!(body.contains("[done]"), "{body}");
+        assert_eq!(
+            with_wait_note((body.clone(), outcome)),
+            body,
+            "跑完了不该加提示"
+        );
     }
 }

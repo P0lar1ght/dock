@@ -61,6 +61,22 @@ impl LlmConfig {
     }
 }
 
+tokio::task_local! {
+    /// 正在采样的是**谁的** ctx。子代理跑在自己的隔离 ctx 上，而 `HttpSampler`
+    /// 捏着的是 `llm()` 挂载时的根 ctx——采样器要是照那个去找 `"sessions"` /
+    /// `"turn"`，子代理就会带上主会话的图片，它自己的 `TurnControl` 也没人听
+    /// （`interrupt_agent` 打不断正在跑的那个 HTTP 流）。
+    ///
+    /// 走 task-local 而不是改 [`Sampler`] 的签名：那是 pub trait，动它得让所有
+    /// 实现跟着改，而这里要传的是「当前调用方是谁」这种天然属于调用栈的东西。
+    static SAMPLE_CTX: Context;
+}
+
+/// 当前采样调用方的 ctx。`None` = 没走 `Llm::stream_*`（直接调的 [`Sampler`]）。
+pub(crate) fn sampling_ctx() -> Option<Context> {
+    SAMPLE_CTX.try_with(|c| c.clone()).ok()
+}
+
 /// Swap this to change the protocol (stub, or HttpSampler's declared wires).
 pub trait Sampler: Send + Sync {
     fn sample<'a>(
@@ -92,21 +108,37 @@ impl Llm {
 
     /// Sample against the caller's ctx so a nested isolate can own `"sessions"`.
     pub async fn stream_on(&self, ctx: &Context, request: PromptRequest) -> LlmOutput {
+        self.stream_observed(ctx, request, |_| {}).await
+    }
+
+    /// 同 [`stream_on`](Self::stream_on)，另给调用方一份 delta 的只读回调。
+    ///
+    /// 压缩那种隔离掉 `"sessions"` 的旁路采样，用量本来会随 delta 一起掉进
+    /// 黑洞——没有会话就没人 `apply_llm_delta`，账本里一笔都不落。观察者让它
+    /// 把 usage 捞出来自己记账，而不必为此假造一个会话。
+    pub async fn stream_observed<F>(
+        &self,
+        ctx: &Context,
+        request: PromptRequest,
+        mut observe: F,
+    ) -> LlmOutput
+    where
+        F: FnMut(&StreamDelta) + Send,
+    {
         if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
             sessions.begin_llm();
         }
         let stream_ctx = ctx.clone();
-        let output = self
-            .sampler
-            .sample(
-                request,
-                Box::new(move |delta| {
-                    if let Some(sessions) = stream_ctx.get::<Sessions>(SESSIONS) {
-                        sessions.apply_llm_delta(&delta);
-                    }
-                }),
-            )
-            .await;
+        let sample = self.sampler.sample(
+            request,
+            Box::new(move |delta| {
+                if let Some(sessions) = stream_ctx.get::<Sessions>(SESSIONS) {
+                    sessions.apply_llm_delta(&delta);
+                }
+                observe(&delta);
+            }),
+        );
+        let output = SAMPLE_CTX.scope(ctx.clone(), sample).await;
         if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
             sessions.finish_llm(&output);
         }

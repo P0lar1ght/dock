@@ -21,6 +21,10 @@ use crate::types::ToolSpec;
 
 pub const DEFAULT_PRESET_ID: &str = "code";
 pub const MINIMAL_PRESET_ID: &str = "minimal";
+
+/// 唯一的 spawn 工具（`TOOLS.md`：只有 `task`）。它的 schema 随当前名册改写，
+/// 所以在排序里不算「到处都允许」。
+const SPAWN_TOOL_NAME: &str = "task";
 pub const CORDIS_PRESET_ID: &str = "cordis";
 pub const WARDEN_PRESET_ID: &str = "warden";
 
@@ -241,6 +245,10 @@ struct WriteHintSnap {
 pub struct AgentPresets {
     inner: Arc<Mutex<Inner>>,
     write_hint: Arc<Mutex<Option<WriteHintSnap>>>,
+    /// 从父会话继承下来的工具排序依据。子代理 overlay 只带**一个**角色预设，
+    /// 自己算出来的「到处都允许」会变成「这个角色允许的全部」——和父会话的分组
+    /// 不同，工具表就对不齐，前缀白排。见 [`Self::universal_tools`]。
+    order: Option<Arc<UniversalTools>>,
 }
 
 impl AgentPresets {
@@ -253,11 +261,25 @@ impl AgentPresets {
         Self {
             inner: Arc::new(Mutex::new(inner)),
             write_hint: Arc::new(Mutex::new(None)),
+            order: None,
         }
     }
 
     /// In-memory overlay for a child isolate. Never writes disk.
     pub fn overlay(preset: AgentPreset) -> Self {
+        Self::overlay_inner(preset, None)
+    }
+
+    /// 同 [`Self::overlay`]，另外继承父会话的工具排序依据。
+    ///
+    /// 真正 spawn 子代理走这条：不继承的话，父子两边的工具表分组不同，子代理那张
+    /// 表就不再是主会话那张的真前缀，公共头每次冷启动都要重付。预览类的调用
+    /// （`/context` 占用估算）用 [`Self::overlay`] 就行，它们不发请求。
+    pub fn overlay_with_order(preset: AgentPreset, order: Arc<UniversalTools>) -> Self {
+        Self::overlay_inner(preset, Some(order))
+    }
+
+    fn overlay_inner(preset: AgentPreset, order: Option<Arc<UniversalTools>>) -> Self {
         let id = preset.id.clone();
         let mut presets = IndexMap::new();
         presets.insert(id.clone(), preset);
@@ -270,6 +292,7 @@ impl AgentPresets {
                 persist: false,
             })),
             write_hint: Arc::new(Mutex::new(None)),
+            order,
         }
     }
 
@@ -660,6 +683,36 @@ impl AgentPresets {
         Ok(())
     }
 
+    /// 名册里所有白名单的快照，用来判断一个工具是不是**到处都允许**。
+    ///
+    /// 取的是**整份名册**（每个预设 + 它旗下每个角色），不是「当前预设」：子代理
+    /// 的 `"agentPresets"` 是隔离的，它的 current 是角色而不是模式，按 current 算
+    /// 出来的顺序父子两边对不上，那就白排了。整份名册是从同一批文件读出来的，父子
+    /// 算出来一模一样。
+    ///
+    /// 坏掉的预设放行一切（见 [`Self::allows`]），不构成约束。
+    pub fn universal_tools(&self) -> Arc<UniversalTools> {
+        if let Some(order) = &self.order {
+            return order.clone();
+        }
+        let inner = self.inner.lock().unwrap();
+        let mut lists = Vec::new();
+        for preset in inner.presets.values() {
+            if preset.broken.is_some() {
+                continue;
+            }
+            if let Some(allow) = &preset.tools {
+                lists.push(allow.clone());
+            }
+            for def in preset.agents.values() {
+                if let Some(allow) = &def.tools {
+                    lists.push(allow.clone());
+                }
+            }
+        }
+        Arc::new(UniversalTools { lists })
+    }
+
     pub fn allows(&self, name: &str) -> bool {
         let inner = self.inner.lock().unwrap();
         let Some(preset) = inner.presets.get(&inner.current) else {
@@ -857,7 +910,7 @@ impl AgentPresets {
     /// cannot fall back to a trained three-type enum, and append the roster
     /// hint to its description.
     pub fn bind_spawn_schema(&self, spec: &mut ToolSpec) {
-        if spec.name != "task" {
+        if spec.name != SPAWN_TOOL_NAME {
             return;
         }
         spec.description.push_str(&self.subagent_role_hint());
@@ -1439,6 +1492,31 @@ fn sort_presets(presets: &mut IndexMap<String, AgentPreset>) {
 
 fn shipped_index(id: &str) -> Option<usize> {
     SHIPPED.iter().position(|m| m.id == id)
+}
+
+/// 名册里所有工具白名单的快照。见 [`AgentPresets::universal_tools`]。
+///
+/// 存在的理由是前缀缓存：子代理那张工具表是主会话那张按角色白名单过滤出来的，
+/// 被过滤掉的项若散落在数组中间，序列化出来的 `tools` 就会从第一个缺口处和主会话
+/// 分叉。而 tools 排在整份 prompt 的最前面，一分叉，后面**整段**都得重算——这正是
+/// 每个子代理第一次调用要整份满价的原因。把「到处都允许」的排前面，子代理的数组
+/// 就成了主会话数组的真前缀，公共头能整段命中。
+#[derive(Clone, Default)]
+pub struct UniversalTools {
+    lists: Vec<Vec<String>>,
+}
+
+impl UniversalTools {
+    /// 名册里每一份白名单都放行这个工具？没有任何白名单时全都算（那时本来就没人
+    /// 过滤，顺序维持原样）。
+    pub fn allows_everywhere(&self, name: &str) -> bool {
+        // `task` 例外：它的 schema 由 `bind_spawn_schema` 按当前名册改写，内容
+        // 本身就随预设变，排在前面反而把分叉点提前了。
+        if name == SPAWN_TOOL_NAME {
+            return false;
+        }
+        self.lists.iter().all(|allow| tool_allowed(allow, name))
+    }
 }
 
 fn tool_allowed(allow: &[String], name: &str) -> bool {

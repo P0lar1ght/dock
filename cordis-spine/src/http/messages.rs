@@ -112,6 +112,16 @@ fn mark_message_cache_breakpoint(msg: &mut Value) -> bool {
 /// Grok `apply_cache_breakpoints`。缓存条目只在断点处写，所以只标 system 会让
 /// 整段对话都不进缓存。第三个断点覆盖「一轮追加的块数超过 API 20 块回看」的
 /// 情况。第四个槽留空：网关自己开自动缓存时会占用它，五个会被直接拒。
+///
+/// **断点会移动，因而每次请求都会改写已发出前缀里的 37 个字节**
+/// （`,"cache_control":{"type":"ephemeral"}` 从上一次带标记的那条消息上消失）。
+/// 按 Anthropic 的语义这无害：`cache_control` 是元数据，前缀匹配只看内容，滚动
+/// 断点正是官方推荐的用法。
+///
+/// 但**按整份请求体前缀做匹配的兼容层会因此整段失配**。这类端点自己就做自动前缀
+/// 缓存，正确做法是给它配 `[model.<id>].prompt_cache = false`：dock 一个标记都不
+/// 发，请求体变成纯追加，命中交给上游自己做。4 个断点的上限决定了「标记只增不减」
+/// 做不到，所以这里不为那类端点改布局——开关比猜上游可靠。
 fn apply_cache_breakpoints(system_blocks: &mut [Value], messages: &mut [Value]) {
     if let Some(obj) = system_blocks.last_mut().and_then(Value::as_object_mut) {
         obj.insert("cache_control".into(), ephemeral());
@@ -703,6 +713,69 @@ mod tests {
         let mut n = 0;
         walk(body, &mut n);
         n
+    }
+
+    /// `prompt_cache = false` 时请求体必须是**纯追加**：一条已经发出去过的消息
+    /// 都不许再变。
+    ///
+    /// 这正是这个开关存在的意义。开着断点时布局会滚动，每次请求都从上一次带标记
+    /// 的那条消息上抹掉 37 字节的 `,"cache_control":{"type":"ephemeral"}`——真
+    /// Anthropic 不在乎（元数据不参与前缀匹配），但按请求体前缀匹配的兼容层会整段
+    /// 失配。实测日志里每次请求都是 `同前 N-3/N ⚠ · 旧 2940B 新 2903B`，读回来的
+    /// 量从两万多掉到 8,512（= system+tools 那一段）。关掉之后这条路必须干净。
+    #[test]
+    fn prompt_cache_off_keeps_the_body_append_only() {
+        let mut history = vec![LogEvent::User("first".into())];
+        let serialize = |history: &[LogEvent], prompt_cache: bool| -> Vec<String> {
+            let request = PromptRequest {
+                system: "s".into(),
+                history: history.to_vec(),
+                tools: vec![],
+            };
+            let body = body("claude", &request, &[], &params_on("high"), prompt_cache);
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m.to_string())
+                .collect()
+        };
+        let common =
+            |a: &[String], b: &[String]| a.iter().zip(b).take_while(|(x, y)| x == y).count();
+
+        let mut off = serialize(&history, false);
+        let mut on = serialize(&history, true);
+        let mut rewrites_with_breakpoints = 0usize;
+        for round in 0..12 {
+            history.push(LogEvent::LlmStream(LlmOutput {
+                text: format!("answer {round}"),
+                ..LlmOutput::default()
+            }));
+            history.push(LogEvent::User(format!("ask {round}")));
+
+            let now_off = serialize(&history, false);
+            let same = common(&off, &now_off);
+            assert_eq!(
+                same,
+                off.len(),
+                "第 {round} 轮改写了已发出的消息：旧 {:?} 新 {:?}",
+                off.get(same),
+                now_off.get(same),
+            );
+            off = now_off;
+
+            // 开着断点时会改写——这不是缺陷，是 Anthropic 语义下的正常滚动。
+            // 钉住它，免得有人把上面那条断言当成「两种配置都成立」。
+            let now_on = serialize(&history, true);
+            if common(&on, &now_on) < on.len() {
+                rewrites_with_breakpoints += 1;
+            }
+            on = now_on;
+        }
+        assert!(
+            rewrites_with_breakpoints > 0,
+            "断点开着却从不移动？那这个开关就没必要存在了"
+        );
     }
 
     /// 两轮对话：system + 末尾 tip + 上一轮收尾处，共三个断点，第四槽留空。
