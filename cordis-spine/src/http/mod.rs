@@ -470,13 +470,19 @@ impl WireAcc {
     fn ingest(&mut self, data: &str) -> Vec<StreamDelta> {
         match self {
             Self::Chat(acc) => {
+                // 错误信封必须在 chunk 解析**之前**判。`ChatCompletionChunk`
+                // 的字段全是 `serde(default)` 且不拒未知字段，所以
+                // `{"error":{…}}` 会**成功**解析成一个 `choices` 为空的 chunk，
+                // 落进 `Ok` 分支后被当成「没有增量」丢掉——放在解析失败的
+                // `else` 里判等于永远不会触发。
+                //
+                // 后果是这一轮完全空白地收场：没有文本、没有报错，界面上就像
+                // 应用坏了。
+                if let Some(err) = crate::stream_acc::chat_stream_error(data) {
+                    acc.set_error(err);
+                    return Vec::new();
+                }
                 let Ok(frame) = serde_json::from_str::<ChatCompletionChunk>(data) else {
-                    // 解不成 chunk 的帧多半是 provider 中途发来的错误信封。
-                    // 旧实现无条件丢弃，于是这一轮**完全空白地收场**：没有文本、
-                    // 没有报错，界面上就像应用坏了。认出来就记下，认不出才丢。
-                    if let Some(err) = crate::stream_acc::chat_stream_error(data) {
-                        acc.set_error(err);
-                    }
                     return Vec::new();
                 };
                 acc.ingest(frame)
@@ -811,6 +817,49 @@ fn reasoning_details_text(details: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 走**真正的集成点** `WireAcc::ingest`，不是只测 `chat_stream_error` 本身。
+    ///
+    /// 这是上一版漏掉的那一步：`ChatCompletionChunk` 的字段全是 `serde(default)`
+    /// 且不拒未知字段，`{"error":{…}}` 会**成功**解析成 `choices` 为空的 chunk，
+    /// 所以把错误判定放在解析失败的 `else` 里等于永远不触发。单测 helper 测不
+    /// 出这件事，必须从 `ingest` 进。
+    #[test]
+    fn chat_error_envelope_is_caught_by_ingest_not_parsed_as_empty_chunk() {
+        for raw in [
+            r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+            r#"{"error":"rate limit exceeded"}"#,
+        ] {
+            // 前提复述：它确实能解析成一个空 chunk —— 正是缺陷成因。
+            let as_chunk = serde_json::from_str::<ChatCompletionChunk>(raw);
+            assert!(as_chunk.is_ok_and(|c| c.choices.is_empty()), "{raw}");
+
+            let mut acc = WireAcc::new(ApiBackend::ChatCompletions, "m");
+            let deltas = acc.ingest(raw);
+            assert!(deltas.is_empty(), "错误帧不该产生增量：{raw}");
+            let out = acc.finish();
+            assert!(out.text.is_empty(), "错误漏进 text：{}", out.text);
+            assert!(
+                out.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("rate limit")),
+                "错误被吞掉了：{:?}（{raw}）",
+                out.error
+            );
+        }
+    }
+
+    /// 正常增量帧不能被错误判定劫走——误判一条有内容的 chunk 会把整轮正文吞掉。
+    #[test]
+    fn chat_ordinary_frames_still_accumulate() {
+        let mut acc = WireAcc::new(ApiBackend::ChatCompletions, "m");
+        acc.ingest(r#"{"choices":[{"delta":{"content":"he"}}]}"#);
+        // 有些代理会在正常帧上带 `"error": null`。
+        acc.ingest(r#"{"choices":[{"delta":{"content":"llo"}}],"error":null}"#);
+        let out = acc.finish();
+        assert_eq!(out.text, "hello");
+        assert_eq!(out.error, None);
+    }
 
     /// 采样失败详情不进 chat/completions 的 `messages`（与另两条 wire 同一条
     /// 承诺）。三条都验，是因为「不进上下文」靠的是各自 builder 的门槛条件，

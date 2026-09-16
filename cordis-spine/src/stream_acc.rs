@@ -124,6 +124,18 @@ impl ChatStreamAcc {
 pub fn chat_stream_error(data: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
     let err = v.get("error")?;
+    // `"error": null` 是「这一帧没出错」的常见写法，不是错误。
+    if err.is_null() {
+        return None;
+    }
+    // 带增量的帧优先当 chunk 处理：真正的错误信封不会同时捎着 choices，
+    // 而把一条有内容的 chunk 误判成错误会把这一轮的正文整个吞掉。
+    if v.get("choices")
+        .and_then(|c| c.as_array())
+        .is_some_and(|c| !c.is_empty())
+    {
+        return None;
+    }
     let text = match err {
         serde_json::Value::String(s) => s.clone(),
         _ => {
