@@ -68,6 +68,9 @@ enum WireEvent {
         /// 字段，`default` 让它们照常读出来（只是不再有推理链可回放）。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         reasoning_items: Vec<serde_json::Value>,
+        /// 本轮采样的失败详情。旧文件没有这个字段，`default` 让它们照常读出来。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     Tool {
         id: String,
@@ -369,6 +372,7 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
             reasoning: out.reasoning.clone(),
             reasoning_ms: out.reasoning_ms,
             reasoning_items: out.reasoning_items.clone(),
+            error: out.error.clone(),
             tool_calls: out
                 .tool_calls
                 .iter()
@@ -407,11 +411,13 @@ fn from_wire(event: WireEvent) -> LogEvent {
             reasoning_ms,
             tool_calls,
             reasoning_items,
+            error,
         } => LogEvent::LlmStream(LlmOutput {
             text,
             reasoning,
             reasoning_ms,
             reasoning_items,
+            error,
             tool_calls: tool_calls
                 .into_iter()
                 .map(|c| ToolCall {
@@ -505,6 +511,36 @@ mod tests {
         assert_eq!(loaded[0].events, item.events);
         remove("abc123", cwd).unwrap();
         assert!(load_cwd(cwd).is_empty());
+    }
+
+    /// 采样失败详情要跟着会话落盘，`/resume` 之后还看得见「上次为什么断的」；
+    /// 旧文件没有这个字段也得照常读。
+    #[test]
+    fn roundtrip_llm_error_and_reads_old_rows() {
+        let _home = crate::test_env::scoped().home();
+        let cwd = Path::new("/tmp/dock-persist-llm-error-test");
+        let detail = "[连接失败] error sending request ← connection reset by peer";
+        let item = ArchivedSession {
+            id: "e1".into(),
+            title: "err".into(),
+            events: vec![LogEvent::LlmStream(LlmOutput {
+                error: Some(detail.into()),
+                ..LlmOutput::default()
+            })],
+            times: vec![SystemTime::now()],
+            compact_prefix: None,
+            compact_from: 0,
+        };
+        save(&item, cwd).unwrap();
+        let loaded = load_cwd(cwd);
+        assert_eq!(loaded[0].events, item.events);
+        remove("e1", cwd).unwrap();
+
+        let old: WireEvent = serde_json::from_str(r#"{"kind":"llm","text":"hi"}"#).unwrap();
+        let LogEvent::LlmStream(out) = from_wire(old) else {
+            panic!("expected llm row");
+        };
+        assert_eq!(out.error, None);
     }
 
     /// Responses 的推理链要跨会话活下来；旧文件没有这个字段也得读得出来。

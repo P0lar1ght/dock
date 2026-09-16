@@ -574,6 +574,11 @@ impl Sessions {
         if out.reasoning.is_empty() {
             out.reasoning = output.reasoning.clone();
         }
+        // 失败详情只落事件、不进 `text`：三条 wire builder 都以 `text` 非空或
+        // 有 tool_call 为门槛，所以它天然不会被回放给模型。
+        if out.error.is_none() {
+            out.error = output.error.clone();
+        }
         // Responses 的 reasoning item 原件只在 `response.completed` 里拿得到，
         // 没有对应的增量，所以只能在收尾时落进这一行。漏掉这句的后果是整条
         // 推理链存不进会话：下一轮回放不出来，而要求「带 tools 就必须回传

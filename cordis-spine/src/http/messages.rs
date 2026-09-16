@@ -608,6 +608,31 @@ mod tests {
         }
     }
 
+    /// 采样失败详情**绝不能**进 wire：它只是 harness 说给人听的一句话，
+    /// 回放给模型就变成「模型自己说过 LLM 请求失败」，而且每轮都要再付一次
+    /// token。门槛是 `text` 非空或有 tool_call——只写 `error` 的那条记录整条
+    /// 不出现在请求里。
+    #[test]
+    fn llm_error_never_reaches_the_wire() {
+        let detail = "[连接失败] error sending request ← connection reset by peer";
+        let request = req(vec![
+            LogEvent::User("hi".into()),
+            LogEvent::LlmStream(LlmOutput {
+                error: Some(detail.into()),
+                ..LlmOutput::default()
+            }),
+            LogEvent::User("再试一次".into()),
+        ]);
+        let body = body("m", &request, &[], &Default::default(), true);
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            !json.contains("connection reset"),
+            "失败详情漏进请求体了：{json}"
+        );
+        assert!(!json.contains("请求失败"), "{json}");
+        assert!(json.contains("再试一次"), "正常消息仍要在：{json}");
+    }
+
     #[test]
     fn omits_prior_reasoning_and_groups_tool_results() {
         let request = req(vec![

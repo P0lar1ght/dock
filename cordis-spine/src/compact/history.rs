@@ -31,6 +31,9 @@ pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEv
                     reasoning_ms: None,
                     tool_calls: Vec::new(),
                     reasoning_items: Vec::new(),
+                    // 压缩摘要是发给模型的，失败详情本来就不进模型历史，
+                    // 更不该被摘进去。
+                    error: None,
                 }))
             }
             other => Some(other.clone()),

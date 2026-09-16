@@ -507,6 +507,24 @@ fn stream_snapshot(
 mod tests {
     use super::*;
 
+    /// 采样失败详情不进 Responses 的 `input`（与 messages / chat 同一条承诺）。
+    #[test]
+    fn llm_error_never_reaches_the_wire() {
+        let request = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    error: Some("[连接失败] connection reset by peer".into()),
+                    ..LlmOutput::default()
+                }),
+            ],
+            tools: vec![],
+        };
+        let json = serde_json::to_string(&body("m", &request, &[], &params_on("low"))).unwrap();
+        assert!(!json.contains("connection reset"), "{json}");
+    }
+
     /// 思考开着、给定强度、支持读图的一组参数（测试默认）。
     fn params_on(effort: &str) -> crate::http::WireParams {
         crate::http::WireParams {

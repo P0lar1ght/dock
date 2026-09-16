@@ -103,6 +103,85 @@ impl Sampler for HttpSampler {
     }
 }
 
+/// 进程级共用的 LLM HTTP client。
+///
+/// `reqwest::Client` 持有连接池，**每次请求新建一个等于每次都重做 DNS + TCP +
+/// TLS 握手**（reqwest 文档明确反对这么用）。对着本来就不稳的 provider，这会
+/// 实打实抬高传输失败率——旧实现正是在 `sample_http` 里 per-request 建的。
+///
+/// 只设 `connect_timeout`，**不设整体 `timeout`**：响应是 SSE 长流，一个全局
+/// 超时会把正常的长回答拦腰砍断。
+fn llm_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(LLM_USER_AGENT)
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("dock user-agent is a valid header value")
+    })
+}
+
+/// 传输层错误值不值得重试。
+///
+/// builder 错误是我们自己把请求拼错了，重试多少次都一样；其余（连接、TLS、
+/// 超时、连接被重置）都是请求没到服务器或没被受理，重试安全。
+fn is_retryable_transport(e: &reqwest::Error) -> bool {
+    !e.is_builder()
+}
+
+/// 把 reqwest 错误摊成一句有信息量的话。
+///
+/// `reqwest::Error` 的 `Display` 只印 `error sending request for url (…)`，
+/// **真正的原因在 `source()` 链里**（`connection reset by peer`、`dns error`、
+/// `certificate verify failed`…）。不走这条链，报错就永远只有那句没信息量的
+/// 壳——这正是「provider 报错看不出原因」的由来，不是上游没给。
+fn transport_detail(e: &reqwest::Error) -> String {
+    let kind = if e.is_timeout() {
+        "超时"
+    } else if e.is_connect() {
+        "连接失败"
+    } else if e.is_body() {
+        "请求体"
+    } else if e.is_decode() {
+        "解码"
+    } else {
+        "传输"
+    };
+    format!("[{kind}] {}", error_chain(e))
+}
+
+/// 把一个错误的 `source()` 链摊成 `外层 ← 内层 ← 根因`。
+///
+/// 独立出来是为了可测：用真的 `reqwest::Error` 造一条带 source 的链很难。
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut chain = vec![e.to_string()];
+    let mut src = e.source();
+    while let Some(s) = src {
+        let text = s.to_string();
+        // 链上常有重复措辞，重复的不再堆。
+        if !chain.iter().any(|p| p == &text) {
+            chain.push(text);
+        }
+        src = s.source();
+    }
+    chain.join(" ← ")
+}
+
+/// 各家用的 request-id 头名不一样，挨个试。
+fn response_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    ["request-id", "x-request-id", "cf-ray", "x-amzn-requestid"]
+        .iter()
+        .find_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|v| v.to_str().ok())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+}
+
 async fn sample_http(
     sampler: &HttpSampler,
     request: PromptRequest,
@@ -188,12 +267,10 @@ async fn sample_http(
         &wire,
         &body,
     );
-    let client = reqwest::Client::builder()
-        .user_agent(LLM_USER_AGENT)
-        .build()
-        .expect("dock user-agent is a valid header value");
+    let client = llm_client();
     let cancel = exec.get::<TurnControl>(TURN).map(|t| t.token());
     let mut response = None;
+    let mut last_transport_error: Option<String> = None;
     for attempt in 0..3u32 {
         let mut send = client
             .post(&url)
@@ -218,9 +295,29 @@ async fn sample_http(
             send.await
         };
         match got {
+            // 传输层失败：请求根本没到服务器、或没被受理，重试是安全的。
+            // 旧实现在这里直接 return，而这恰好是最该重试的一类
+            // （连接重置 / DNS / TLS 握手 / 连接超时）。
+            Err(e) if is_retryable_transport(&e) && attempt < 2 => {
+                last_transport_error = Some(transport_detail(&e));
+                let wait = std::time::Duration::from_millis(800 * (attempt as u64 + 1));
+                if let Some(ref cancel) = cancel {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return LlmOutput::default(),
+                        _ = tokio::time::sleep(wait) => {}
+                    }
+                } else {
+                    tokio::time::sleep(wait).await;
+                }
+            }
             Err(e) => {
+                let attempts = attempt + 1;
                 return LlmOutput {
-                    text: format!("llm request failed: {e}"),
+                    error: Some(format!(
+                        "LLM 请求失败（已尝试 {attempts} 次）：{}",
+                        transport_detail(&e)
+                    )),
                     ..LlmOutput::default()
                 };
             }
@@ -244,15 +341,26 @@ async fn sample_http(
     }
     let Some(response) = response else {
         return LlmOutput {
-            text: "llm HTTP 503: endpoint busy, retry later".into(),
+            error: Some(match last_transport_error {
+                // 重试用光了，最后一次仍是传输失败：把真实原因带上，
+                // 不要报成 503（那是另一回事）。
+                Some(detail) => format!("LLM 请求失败（已尝试 3 次）：{detail}"),
+                None => "LLM HTTP 503：服务端繁忙，已重试 3 次仍失败".into(),
+            }),
             ..LlmOutput::default()
         };
     };
     let status = response.status();
     if !status.is_success() {
+        // request-id 只有在服务端真的回了响应时才存在——传输层失败那条路径上
+        // 是没有的，别在那边找。
+        let request_id = response_request_id(response.headers());
         let text = response.text().await.unwrap_or_default();
+        let id = request_id
+            .map(|id| format!("，request-id: {id}"))
+            .unwrap_or_default();
         return LlmOutput {
-            text: format!("llm HTTP {status}: {text}"),
+            error: Some(format!("LLM HTTP {status}{id}\n{}", text.trim())),
             ..LlmOutput::default()
         };
     }
@@ -267,7 +375,7 @@ async fn sample_http(
             Ok(t) => t,
             Err(e) => {
                 return LlmOutput {
-                    text: format!("llm body failed: {e}"),
+                    error: Some(format!("LLM 响应体读取失败：{}", transport_detail(&e))),
                     ..LlmOutput::default()
                 };
             }
@@ -697,6 +805,56 @@ fn reasoning_details_text(details: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 采样失败详情不进 chat/completions 的 `messages`（与另两条 wire 同一条
+    /// 承诺）。三条都验，是因为「不进上下文」靠的是各自 builder 的门槛条件，
+    /// 谁改宽了都会悄悄破功。
+    #[test]
+    fn llm_error_never_reaches_the_wire() {
+        let request = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    error: Some("[连接失败] connection reset by peer".into()),
+                    ..LlmOutput::default()
+                }),
+            ],
+            tools: vec![],
+        };
+        let json =
+            serde_json::to_string(&chat_body("m", &request, &[], &WireParams::default())).unwrap();
+        assert!(!json.contains("connection reset"), "{json}");
+    }
+
+    /// reqwest 的 `Display` 只印外壳，真正的原因在 `source()` 链里——摊平函数
+    /// 必须把链上每一环都带出来，否则报错永远只有那句没信息量的话。
+    #[test]
+    fn transport_detail_walks_the_source_chain() {
+        #[derive(Debug)]
+        struct Inner;
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "connection reset by peer")
+            }
+        }
+        impl std::error::Error for Inner {}
+        #[derive(Debug)]
+        struct Outer(Inner);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "error sending request")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let chain = error_chain(&Outer(Inner));
+        assert!(chain.contains("error sending request"), "{chain}");
+        assert!(chain.contains("connection reset by peer"), "{chain}");
+    }
 
     fn model(id: &str) -> config::ModelChoice {
         config::ModelChoice {

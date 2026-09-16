@@ -23,10 +23,11 @@ use crate::names::SESSION_PORT;
 use crate::session::SessionRef;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::Line;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::grok::glyphs;
 use crate::grok::mermaid::{self, AffordanceKind};
 use crate::theme::Theme;
 
@@ -837,6 +838,15 @@ fn build_frame(
                     lines.extend(rendered.lines);
                     lines.push(Line::from(""));
                 }
+                // 采样失败详情。只画给人看——它不在 `llm.text` 里，所以不会被
+                // 当成助手消息回放给模型。
+                if let Some(err) = llm.error.as_deref() {
+                    if let Some(at) = stamp {
+                        stamps.push((lines.len(), at));
+                    }
+                    lines.extend(llm_error_lines(err, &theme, message_wrap(width, show_ts)));
+                    lines.push(Line::from(""));
+                }
                 for call in &llm.tool_calls {
                     let done = events[i + 1..].iter().any(|e| match e {
                         LogEvent::ToolExecute { id, .. } => id == &call.id,
@@ -909,6 +919,48 @@ fn build_frame(
         stamps,
         live,
     }
+}
+
+/// 采样失败的行：错误色 `⚠` 头行 + 逐行详情。
+///
+/// 这段**只进滚动区**。错误存在 `LlmOutput::error` 而不是 `text` 里，三条 wire
+/// builder 都以 `text` 非空或有 tool_call 为门槛，所以它不会被回放给模型——
+/// 否则「LLM 请求失败…」会变成模型自己说过的一句话，还要为它反复付 token。
+fn llm_error_lines(err: &str, theme: &Theme, wrap: usize) -> Vec<Line<'static>> {
+    let style = Style::default().fg(theme.accent_error);
+    let mut out = vec![Line::from(Span::styled(
+        format!("{} 请求失败", glyphs::diamond_filled()),
+        style.add_modifier(Modifier::BOLD),
+    ))];
+    for raw in err.lines() {
+        for chunk in wrap_plain(raw, wrap.max(20)) {
+            out.push(card::indent(Line::from(Span::styled(chunk, style))));
+        }
+    }
+    out
+}
+
+/// 按显示宽度硬折行——错误详情里是 URL 和 TLS 串，没有可断的空格。
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > width && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        cur.push(ch);
+        used += w;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// `use_tool` 包装（deferred 工具都走它）：返回内层 `(tool_name, tool_input)`。
@@ -1630,6 +1682,19 @@ mod tests {
         let hid =
             super::bg_task::header_id("bash", notice, r#"{"command":"sleep 9"}"#, &[]).unwrap();
         assert_eq!(super::bg_task::open_id(&hid), Some("job-3"));
+    }
+
+    /// 失败详情要画给人看（`llm.text` 里没有它，所以模型看不到）。
+    #[test]
+    fn llm_error_is_rendered_in_scrollback() {
+        let detail = "[连接失败] error sending request ← connection reset by peer";
+        let lines = lines_from_events(&[LogEvent::LlmStream(cordis_spine::LlmOutput {
+            error: Some(detail.into()),
+            ..Default::default()
+        })]);
+        let text = plain(&lines);
+        assert!(text.contains("请求失败"), "{text}");
+        assert!(text.contains("connection reset by peer"), "{text}");
     }
 
     #[test]
