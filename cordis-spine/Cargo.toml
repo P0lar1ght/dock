@@ -37,6 +37,11 @@ schemars = "0.8"
 libc = "0.2"
 xai-workflow = { path = "../vendor/xai/workflow" }
 chromiumoxide = { version = "0.9", default-features = true }
+ignore = "0.4"
+globset = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -534,54 +534,11 @@ fn is_meta(name: &str) -> bool {
 
 /// 超帽的输出先落盘再截断，模型能按路径把剩下的捞回来（Grok `mcp_truncate`
 /// 同款）。写盘失败退回纯截断，不要因为磁盘问题让工具调用失败。
+/// 字节兜底帽 + 溢出落盘。实现搬去了 `crate::tool_output`，内置工具与
+/// `use_tool` 共用同一套语义和同一个落盘目录（`$DOCK_HOME/tool-output/`）。
 async fn cap_use_tool_output(call_id: &str, content: String) -> String {
-    if content.len() <= USE_TOOL_MAX_OUTPUT_BYTES {
-        return content;
-    }
-    let total = content.len();
-    let mut end = USE_TOOL_MAX_OUTPUT_BYTES;
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
-    }
-    let hint = match offload_full_output(call_id, &content).await {
-        Some(path) => format!(
-            " Full output written to: {path}. Read that path with read_file or grep to retrieve \
-             the rest."
-        ),
-        None => String::new(),
-    };
-    format!(
-        "{}\n\n[output truncated: showing first {end} of {total} bytes.{hint}]",
-        &content[..end]
-    )
-}
-
-async fn offload_full_output(call_id: &str, content: &str) -> Option<String> {
-    let dir = crate::config::dock_home().join("tool-output");
-    tokio::fs::create_dir_all(&dir).await.ok()?;
-    let path = dir.join(format!("{}.txt", offload_stem(call_id)));
-    tokio::fs::write(&path, content).await.ok()?;
-    Some(path.to_string_lossy().into_owned())
-}
-
-/// 把 call_id 映射成安全文件名，`/` 或 `..` 逃不出 `tool-output/`
-/// （同 `session_persist::persist_tool_images`）。
-fn offload_stem(call_id: &str) -> String {
-    let safe: String = call_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if safe.is_empty() {
-        "use_tool".into()
-    } else {
-        safe
-    }
+    let budget = crate::tool_output::Budget::opaque(USE_TOOL_MAX_OUTPUT_BYTES);
+    crate::tool_output::cap_bytes(call_id, content, &budget).await
 }
 
 /// 预算按**实际发出去的**缩进 JSON 计（紧凑长度会低估近一倍）。算的是命中行

@@ -1,6 +1,7 @@
 //! Background jobs (`ctx.jobs`). Bash `is_background` and `tool-jobs` use this.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -206,13 +207,36 @@ impl Jobs {
         description: Option<String>,
         is_monitor: bool,
     ) -> String {
-        self.spawn_job(command, description, is_monitor, false)
+        self.spawn_job(command, description, is_monitor, false, None)
+    }
+
+    /// `start_ex` 加一个工作目录。`bash` 的 `workdir` 参数走这里——让模型传
+    /// 目录比让它写 `cd x && ...` 可靠：每次调用都是全新的 shell，`cd` 不留存，
+    /// 拼在命令里还会跟 `&&` / 引号纠缠。
+    pub fn start_ex_in(
+        &self,
+        command: impl Into<String>,
+        description: Option<String>,
+        is_monitor: bool,
+        cwd: Option<PathBuf>,
+    ) -> String {
+        self.spawn_job(command, description, is_monitor, false, cwd)
     }
 
     /// Register a **foreground** bash so the TUI can show its output while it
     /// runs. The caller owns the lifetime: wait on the snapshot, then `forget`.
     pub fn start_foreground(&self, command: impl Into<String>) -> String {
-        self.spawn_job(command, None, false, true)
+        self.spawn_job(command, None, false, true, None)
+    }
+
+    /// `start_foreground` 加描述与工作目录。
+    pub fn start_foreground_ex(
+        &self,
+        command: impl Into<String>,
+        description: Option<String>,
+        cwd: Option<PathBuf>,
+    ) -> String {
+        self.spawn_job(command, description, false, true, cwd)
     }
 
     /// Drop a finished foreground command from the table so it stops holding
@@ -227,6 +251,7 @@ impl Jobs {
         description: Option<String>,
         is_monitor: bool,
         foreground: bool,
+        cwd: Option<PathBuf>,
     ) -> String {
         let command = command.into();
         let id = format!("job-{}", self.seq.fetch_add(1, Ordering::Relaxed));
@@ -245,7 +270,7 @@ impl Jobs {
             start_time: SystemTime::now(),
         });
         self.inner.lock().unwrap().insert(id.clone(), job.clone());
-        tokio::spawn(run_job(job, command, cancel_rx));
+        tokio::spawn(run_job(job, command, cancel_rx, cwd));
         id
     }
 
@@ -393,14 +418,23 @@ async fn pump<R: AsyncRead + Unpin>(reader: Option<R>, job: Arc<Job>) {
     }
 }
 
-async fn run_job(job: Arc<Job>, command: String, mut cancel: tokio::sync::watch::Receiver<bool>) {
-    let spawned = tokio::process::Command::new("bash")
+async fn run_job(
+    job: Arc<Job>,
+    command: String,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+    cwd: Option<PathBuf>,
+) {
+    let mut builder = tokio::process::Command::new("bash");
+    builder
         .arg("-lc")
         .arg(&command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
+        .kill_on_drop(true);
+    if let Some(cwd) = cwd.as_deref() {
+        builder.current_dir(cwd);
+    }
+    let spawned = builder.spawn();
     let mut child = match spawned {
         Err(e) => {
             job.output

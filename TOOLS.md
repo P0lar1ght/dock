@@ -33,7 +33,7 @@ cargo test -p cordis-spine --test round -- install_app_registers
 
 | 插件 | ctx | 模型工具 | 备注 |
 |---|---|---|---|
-| `tools`（`workspace_tools`） | `"tools"` | `list_dir` `read_file` `grep` `search_replace` `bash`（别名 `run_terminal_cmd`）`glob` `write_file` | 工作区内建，不能被 register 盖掉。`bash` 前台预算 **5 分钟**（`DOCK_BASH_FOREGROUND_MS` 覆盖，对齐 Grok `GROK_MAX_FOREGROUND_BLOCK_MS`——Grok 默认 30s，这里放宽是因为一条 `cargo clippy` 就 1 分钟起，30s 到点只会逼模型反复起后台再轮询）；**到点与取消都把已产出的输出一并返回**，不再只回一句错误 |
+| `tools`（`workspace_tools`） | `"tools"` | `list_dir` `read_file` `grep` `search_replace` `bash`（别名 `run_terminal_cmd`）`glob` `write_file` | 工作区内建，不能被 register 盖掉。七颗的描述都是 Grok 那种 usage notes（不是一行字），且**逐条点名对应的 shell 命令**（`read_file` 之于 `cat`、`grep` 之于 `grep`/`rg`、`glob` 之于 `find`、`list_dir` 之于 `ls`、`search_replace` 之于 `sed -i`）并说明为什么用工具更划算：不过权限门、计划模式下仍可用、会回报自己截断了多少。`bash` 描述里有同一份反向清单。详见下文「工作区七颗工具」 |
 | `jobs` | `"jobs"` | — | 进程表。bash `is_background` / `block_until_ms: 0` 用它，**前台 bash 也在这张表上**（`foreground: true`，只为让 TUI 边跑边读输出；不进 tasks pane、不进 `get_task_output` 的无参列表，结束即摘掉）。stdout / stderr **并发抽干**——顺序读会在任一侧写满 64KB 管道缓冲时把子进程永久堵死。输出流式累积，上限 20KB（头 4KB + 尾 16KB，中间截断并在正文标明省略字节数），对齐 Grok `output_byte_limit` |
 | `slash` | `"slash"` | — | 额外斜杠命令表；TUI live-lookup。内建 `CATALOG` 不能被盖掉。`kind`：`prompt` / `overlay` / `slot`（打开已登记的 `tui.slots` id）/ **`tool`**（`text`=工具名，直接 `Tools::execute`，结果 Notice；权限门仍生效） |
 | `skills` | `"skills"` | — | 发现 `SKILL.md`（`$DOCK_HOME/bundled/skills/` 内置 < `{cwd}/skills/` < `~/.dock/skills/` < `{cwd}/.agents/skills/` < `{cwd}/.dock/skills/`，后者同名覆盖；内置是编译期嵌入、启动物化到 bundled 缓存的 dock 自述技能，通用技能不进二进制）。frontmatter：`name`（出厂技能须合法且与目录同名；运行时非法或缺省即回退目录名，仍非法则丢弃该技能）`description`（出厂技能必填 ≤1024；运行时缺省取正文首行、再用 name）`license` `when-to-use` `paths` `user-invocable`（缺省 true）`disable-model-invocation`（缺省 false）。`license` 只在 `/skills` overlay 的路径行展示。向 `"context"` 登记 listing 段（窗口 token ×4 ×**3%**，不要把全文塞进系统提示；预算与渲染规则与工作流共用 `src/listing.rs`）。两道门（`listing::wants_listing`）：**只有主会话拿这一段**，子代理要在 `agents/<type>.yml` 写 `listings: true` 才带（内置只有 `general-purpose` 打开）；且 **header 点名的 `skill` 必须对本会话可见**（在当前预设 allowlist 里且已注册），否则整段不发——`warden` 主代理没有 `skill`，给了也只是诱导一次必然被 allowlist 挡回的调用。`agent/pre-step` 把用户气泡 `/name args` 注入 `SystemReminder`。带 `paths:` 的技能渐进披露：匹配文件被触碰前不进 listing，`tools/execute` 触碰后激活并 `SystemReminder` 通告（listing 首帧冻结不回写，与 Grok 同款）。`tools/execute` 路径靠近 skills 目录时中途发现。`user-invocable` 技能登记成 slash extras（不可盖 `RESERVED_SLASH`）；另登记 `/skills` overlay。fail-open |
@@ -77,6 +77,26 @@ cargo test -p cordis-spine --test round -- install_app_registers
 
 ---
 
+### 工作区七颗工具
+
+设计前提：**模型总是绕回 `bash`，很大程度上是因为内置工具真的更弱**。所以先把工具修到值得用，再谈引导；引导只加厚了工具描述，没有往系统提示里加段（`system-prompt/assemble` 仍是 `ORDER_CORDIS/PERSONA/WORKFLOWS/SKILLS` 四个槽）。
+
+**为什么不学 codex 把 `grep` 删掉、让模型走 `bash` 里的 `rg`。** codex 的模型侧文件面只有 `exec_command` + `apply_patch` + `view_image`，没有内容检索工具。它敢这么做有两个前提，dock 都不具备：一是它的 shell 强一档（PTY、session id + `write_stdin` 可续、`workdir`、`yield_time_ms` 10s 让出、按 token 计的 `max_output_tokens`）；二是它没有 tool-level 的只读预设。dock 的权限门 / 计划门 / preset allowlist 全是 tool-level 的——`acp.rs` 的 `gated_builtin` 里有 `bash`、没有 `grep`；`presets/code/agents/explore.yml` 与 `plan.yml` 明确列 `grep`、明确不含 `bash`。搜索一旦归进 `bash`，这两颗只读子代理和整个计划模式就都搜不了了。
+
+| 工具 | 现在的行为 |
+|---|---|
+| `grep` | **进程内 ripgrep**（`src/grep.rs`）：`ignore` 走目录、`grep-regex` 编译、`grep-searcher` 扫文件，**不 spawn `rg`**，旧的 `Command::new("rg")` + 手搓 `grep_walk` 兜底已删（那条兜底不读 `.gitignore`、regex 方言也不同，等于「装没装 rg 结果不一样」）。参数面补齐：`glob` `type` `-i` `-A` `-B` `-C` `output_mode`（`content`/`files_with_matches`/`count`）`head_limit` `multiline`。`type` 用 `ignore` 自带的 ripgrep 默认类型表（219 条，含 `rust`/`py`/`ts`/`go`…），未知类型名降级成不过滤并在结果里说明。NUL 字节即判二进制并停搜。单行超 1000 字符按**字符**边界截断。整趟 20s 墙钟预算，到点带回已扫到的部分并说明。空结果回报搜索范围与已施加的过滤——模型才分得清「真没有」和「搜错地方」 |
+| `glob` | 换 `globset`（ripgrep 自己的 glob）。修掉两个反向的错：旧的手搓 matcher 把 `*` 翻成 `.*`，导致 `**/*.rs` **漏掉根目录下所有文件**（正则强制要有一个 `/`），而 `src/*.rs` 又会**跨过 `/`** 匹配进 `src/deep/b.rs`。现在 `literal_separator(true)`：`*` 不跨 `/`、`**` 才跨，无 `/` 的模式匹配任意深度 basename。**files-only**（旧实现在判 `is_dir` 前就把条目推进结果，目录会混进来）、按 mtime 新→旧排序、走 `ignore` 读 `.gitignore`、上限 200 条且截断出声 |
+| `list_dir` | 走 `ignore::WalkBuilder`（`max_depth(1)`）读 `.gitignore`，`target/` / `node_modules/` 不再刷屏。超过 100 条转摘要：子目录仍逐条列，文件收成计数 + 扩展名分布 + 前 100 个文件名 + 「另有 N 个未列出」 |
+| `search_replace` | `replace_all: false` 且多处命中时**报错并回报命中数**，文件一个字节不写。旧实现 `replacen(..., 1)` 静默改第一处——模型以为改的是自己瞄准的那处，实际可能是另一处同名代码。对齐 Grok / DSH |
+| `bash` | 新增 `timeout_ms`（**只能收紧不能放宽**，上限仍是 `DOCK_BASH_FOREGROUND_MS` 的 5 分钟）、`workdir`（不存在直接报错，不让命令在意外目录里跑掉）、`description`（5–10 词，进 `JobSnapshot`）。前台预算与「到点/取消都带回已产出输出」不变 |
+| `read_file` / `write_file` | 行为未变，只加厚描述 |
+
+**输出预算**统一走 `src/tool_output.rs`（从 `mcp/discover.rs` 提出来的共享层，`use_tool` 改用它、**文案与行为逐字不变**）。三层：①语义分页（grep 数匹配行、`list_dir` 数条目），不按字节切；②回报总数（`showing N of M` / 额度填满就停时说 `at least`，绝不谎报精确总数）；③溢出落盘 `$DOCK_HOME/tool-output/<call_id>.txt` 并在提示里回路径。有第三层，「截断」就不是丢信息，而是把信息从上下文降级成**可寻址**——模型能用 `read_file` / `grep` 把剩下的捞回来。齐质列表**保头丢尾**（不做头尾各留一半的挖洞式截断，中间挖掉模型无从知道挖了什么）；`bash` 那种「结论在尾巴上」的输出仍由 `jobs` 自己保头 4KB + 尾 16KB。
+
+**已知仍薄**：`read_file` 没有单行长度帽（minified 单行大文件仍能吃掉窗口），本轮未改。
+
+新依赖：`ignore` / `globset`（原本就随 `vendor/xai/fuzzy-file-search` 进了二进制，这里提成 `cordis-spine` 的直接依赖，无新包）+ `grep-searcher` / `grep-regex` / `grep-matcher` / `encoding_rs_io`（4 个新包，全是 ripgrep 家族）。
 
 ### Browser iframe 策略（BUA P2）
 
@@ -172,8 +192,8 @@ enabled = true
 
 相对 Grok 完整实现，这些 **已经在表里** 但行为更窄。补的时候还是改对应插件，不要新焊一层。
 
-- `read_file`：纯文本，无 PDF / 图 / PPTX
-- `grep` / `list_dir`：参数比 Grok 少
+- `read_file`：纯文本（图片走多模态），无 PDF / PPTX / ipynb；**无单行长度帽**，minified 单行大文件仍能吃掉窗口
+- `list_dir` 大目录摘要的头部采样：扩展名计数是对的，但「前 100 个文件名」对**同前缀爆炸**的目录信息量很低——`target/debug/deps` 下前 100 个几乎全是同一个 crate 的 CGU 分片（`aho_corasick-<hash>.…-cgu.N.rcgu.o` 一次 16 个）。可以考虑按公共前缀去重后再采样，让头部覆盖更多不同的东西。实测踩到过
 - `web_search`：不是 xAI Responses API
 - `task`：`tool-task` 保持 Grok coordinator；无 worktree / ACP / MCP pool。子代理共用父模型、父工具集与父工作目录（没有 per-child cwd/model/persona）
 - `update_goal`：尚未自动 spawn Grok 的 `goal plan writer` / classifier / strategist
