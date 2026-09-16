@@ -1314,6 +1314,9 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
             .get::<Sessions>(SESSIONS)
             .map(|s| filter_sessions(&s.archived(), query).len())
             .unwrap_or(0),
+        Overlay::Dashboard {
+            query, collapsed, ..
+        } => crate::dashboard::build_rows(ctx, query, collapsed).len(),
         Overlay::Help { query, .. } => filter_help_items(query, &slash_extras(ctx)).len(),
         Overlay::History { query, .. } => ctx
             .get::<PromptWidget>(TUI_PROMPT)

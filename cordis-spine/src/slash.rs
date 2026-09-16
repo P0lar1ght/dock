@@ -37,6 +37,8 @@ pub const RESERVED_SLASH: &[&str] = &[
     "plan-view",
     "goal",
     "tasks",
+    "dashboard",
+    "overview",
     "workflow",
     "mcps",
     "lsp",

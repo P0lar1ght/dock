@@ -140,6 +140,18 @@ impl Tabs {
             .unwrap_or_else(|| self.inner.root.clone())
     }
 
+    /// 每一页的 ctx。dashboard 要挨页问 `"sessions"`（每页一份），
+    /// [`active_ctx`](Self::active_ctx) 只给当前那一页。
+    pub fn contexts(&self) -> Vec<Context> {
+        self.inner
+            .tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.ctx.clone())
+            .collect()
+    }
+
     pub fn list(&self) -> Vec<TabInfo> {
         let tabs = self.inner.tabs.lock().unwrap();
         let active = self.active_index();

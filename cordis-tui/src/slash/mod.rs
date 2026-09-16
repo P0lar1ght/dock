@@ -42,6 +42,7 @@ pub enum SlashCmd {
     ViewPlan,
     Goal,
     Tasks,
+    Agents,
     Workflow,
     Mcps,
     Lsp,
@@ -246,6 +247,18 @@ pub const CATALOG: &[SlashDef] = &[
         aliases: &[],
         display: "/tasks",
         description: "列出后台任务与定时任务",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Agents,
+        // 主名用 `dashboard`：`agents` 已经是 `/preset` 的别名（预设画布），
+        // 抢过来会把那条打掉。
+        name: "dashboard",
+        aliases: &["overview"],
+        display: "/dashboard",
+        description: "会话总览：分页、子代理、历史会话",
         takes_args: false,
         args_required: false,
         arg_kind: None,

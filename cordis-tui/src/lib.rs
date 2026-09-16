@@ -6,6 +6,7 @@
 mod actions;
 mod ask_view;
 mod clipboard;
+mod dashboard;
 mod dispatch;
 mod error;
 mod event_loop;

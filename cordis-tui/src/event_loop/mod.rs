@@ -558,6 +558,9 @@ pub async fn run(root: Context) -> Result<()> {
                                         collapsed: HashSet::new(),
                                     };
                                 }
+                                Effect::ShowAgents => {
+                                    overlay = crate::dashboard::open(&ctx);
+                                }
                                 Effect::ToggleWorkflows => {
                                     if matches!(overlay, Overlay::Workflows { .. }) {
                                         overlay.close();

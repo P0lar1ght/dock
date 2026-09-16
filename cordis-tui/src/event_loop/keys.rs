@@ -236,6 +236,16 @@ pub(super) fn run_action(
             accept_overlay(ctx, overlay)
         }
         Action::OverlayChar(c) => {
+            if let Overlay::Dashboard {
+                focus: crate::dashboard::Focus::Composer,
+                composer,
+                composer_cursor,
+                ..
+            } = overlay
+            {
+                crate::inspect_overlay::insert_composer(composer, composer_cursor, c);
+                return Vec::new();
+            }
             if matches!(
                 overlay,
                 Overlay::Inspect {
@@ -466,6 +476,32 @@ pub(super) fn run_action(
                 }
                 return Vec::new();
             }
+            if let Overlay::Dashboard {
+                selected,
+                query,
+                collapsed,
+                ..
+            } = overlay
+            {
+                if c == 'x' || c == 'X' {
+                    let rows = crate::dashboard::build_rows(ctx, query, collapsed);
+                    if let Some(crate::dashboard::DashRow::Archived { id, cwd, .. }) =
+                        rows.get(*selected)
+                    {
+                        if let Some(roster) = ctx.get::<cordis_spine::Roster>(cordis_spine::ROSTER)
+                        {
+                            match roster.remove(id, cwd) {
+                                Ok(()) => flash(ctx, "已删除该会话"),
+                                Err(e) => flash(ctx, format!("删除失败：{e}")),
+                            }
+                        }
+                        // 删完行数变了，选中项可能落到界外。
+                        let len = crate::dashboard::build_rows(ctx, query, collapsed).len();
+                        *selected = (*selected).min(len.saturating_sub(1));
+                    }
+                    return Vec::new();
+                }
+            }
             if let Overlay::Tasks {
                 selected,
                 query,
@@ -548,6 +584,16 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::OverlayBackspace => {
+            if let Overlay::Dashboard {
+                focus: crate::dashboard::Focus::Composer,
+                composer,
+                composer_cursor,
+                ..
+            } = overlay
+            {
+                crate::inspect_overlay::composer_backspace(composer, composer_cursor);
+                return Vec::new();
+            }
             if let Overlay::Ask {
                 selected,
                 picked,
@@ -746,6 +792,13 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::OverlayTab => {
+            if let Overlay::Dashboard { focus, .. } = overlay {
+                *focus = match focus {
+                    crate::dashboard::Focus::List => crate::dashboard::Focus::Composer,
+                    crate::dashboard::Focus::Composer => crate::dashboard::Focus::List,
+                };
+                return Vec::new();
+            }
             if matches!(
                 overlay,
                 Overlay::Presets(PresetView::Canvas(s)) if s.naming_role.is_some()
@@ -770,6 +823,11 @@ pub(super) fn run_action(
         Action::MouseMove { column, row } => {
             if matches!(overlay, Overlay::Usage { .. }) {
                 usage_overlay::hover(column, row);
+            }
+            // 顶栏右段的悬停态：停上去把占用率换成进度条。覆盖层开着时也更新，
+            // 这样关掉覆盖层不会留下一个卡住的悬停态。
+            if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
+                status.set_mouse(column, row);
             }
             if welcome_open(ctx) && !overlay.is_open() {
                 if let Ok(welcome) = ctx.require::<Welcome>(TUI_WELCOME) {
@@ -1310,6 +1368,74 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         }
         _ => {}
     }
+    // 焦点在 peek 输入框时，Enter 是**把消息发给选中的那个会话**——面板存在的
+    // 理由就是这个：不切页、不离开面板，轮流给几个会话派活。
+    if let Overlay::Dashboard {
+        selected,
+        query,
+        collapsed,
+        focus: crate::dashboard::Focus::Composer,
+        composer,
+        composer_cursor,
+    } = overlay
+    {
+        let rows = crate::dashboard::build_rows(ctx, query, collapsed);
+        let Some(row) = rows.get(*selected) else {
+            return Vec::new();
+        };
+        match crate::dashboard::submit_to(ctx, row, composer) {
+            Ok(()) => {
+                composer.clear();
+                *composer_cursor = 0;
+            }
+            Err(msg) => flash(ctx, msg),
+        }
+        return Vec::new();
+    }
+    // 焦点在列表时按行类型分：抬头是折叠开关，要就地改 overlay 而不是发 Effect，
+    // 所以单独在这里处理完直接返回。
+    if let Overlay::Dashboard {
+        selected,
+        query,
+        collapsed,
+        ..
+    } = overlay
+    {
+        let rows = crate::dashboard::build_rows(ctx, query, collapsed);
+        let Some(row) = rows.get(*selected).cloned() else {
+            return Vec::new();
+        };
+        let resumable = row.resumable();
+        match row {
+            crate::dashboard::DashRow::Header { state, .. } => {
+                if !collapsed.remove(&state) {
+                    collapsed.insert(state);
+                }
+                // 折叠后行数变了，选中项可能落到界外。
+                let len = crate::dashboard::build_rows(ctx, query, collapsed).len();
+                *selected = (*selected).min(len.saturating_sub(1));
+                return Vec::new();
+            }
+            crate::dashboard::DashRow::Tab { id, .. } => {
+                overlay.close();
+                return vec![Effect::TabGo { id }];
+            }
+            crate::dashboard::DashRow::Archived { id, cwd, .. } => {
+                if !resumable {
+                    // 不在当前工作目录下的会话恢复不了：`Sessions::restore` 只认
+                    // `archived()`，那份列表是 `load_cwd(当前 cwd)` 填的。与其
+                    // 按下去毫无反应，不如说清楚。
+                    flash(
+                        ctx,
+                        format!("该会话属于 {}，先 /cd 过去再恢复", cwd.display()),
+                    );
+                    return Vec::new();
+                }
+                overlay.close();
+                return vec![Effect::RestoreSession(id)];
+            }
+        }
+    }
     let effect = match overlay {
         Overlay::Resume { selected, query } => ctx.get::<Sessions>(SESSIONS).and_then(|s| {
             filter_sessions(&s.archived(), query)
@@ -1373,6 +1499,8 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         | Overlay::Inspect { .. }
         | Overlay::Presets(_) => None,
         Overlay::Tasks { .. } | Overlay::Mcps { .. } | Overlay::Workflows { .. } => None,
+        // 上面已经按行类型处理完并返回了，走不到这里。
+        Overlay::Dashboard { .. } => None,
     };
     overlay.close();
     effect.into_iter().collect()
@@ -1713,6 +1841,11 @@ fn open_context_from_status(ctx: &Context, overlay: &mut Overlay, column: u16, r
     let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) else {
         return false;
     };
+    // chip 压在右段最右边，先判它——否则点 `[Agents]` 会连带把占用 overlay 开出来。
+    if status.hit_dashboard(column, row) {
+        *overlay = crate::dashboard::open(ctx);
+        return true;
+    }
     if !status.hit_right(column, row) {
         return false;
     }
@@ -1736,6 +1869,9 @@ pub(super) fn overlay_keys(code: KeyCode, ctrl: bool) -> Option<Action> {
         KeyCode::Char(' ') if !ctrl => Some(Action::OverlaySpace),
         // Ctrl 组合，不走 `Char(c) if !ctrl`，所以搜索框里照样能打 r。
         KeyCode::Char('r') | KeyCode::Char('R') if ctrl => Some(Action::OverlayRefresh),
+        // 会话面板上的「+ 新会话」。别的 overlay 开着时按到只会白跑一次 TabNew，
+        // 那本来就是它在主界面的语义。
+        KeyCode::Char('n') | KeyCode::Char('N') if ctrl => Some(Action::TabNew),
         KeyCode::Tab | KeyCode::BackTab => Some(Action::OverlayTab),
         KeyCode::Char(c) if !ctrl => Some(Action::OverlayChar(c)),
         _ => None,

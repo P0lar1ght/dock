@@ -5,7 +5,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
@@ -24,10 +24,12 @@ pub struct StatusBar<'a> {
     pub left: &'a str,
     /// Center content (e.g., "Turn 2/3")
     pub center: Option<&'a str>,
-    /// Right-aligned content (e.g. context occupancy).
+    /// Right-aligned content (e.g. context occupancy). flash 文案走这条。
     pub right: Option<&'a str>,
-    /// Optional style for the right span (usage-percent coloring).
-    pub right_style: Option<Style>,
+    /// 多 span 的右段。占用率是一条渐变色的数字 + dim 分隔符 + 协议名，悬停时
+    /// 整段换成进度条，一个 `Style` 盖不住，所以走这条。设了它就压过
+    /// [`Self::right`]。
+    pub right_line: Option<Line<'a>>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -37,7 +39,7 @@ impl<'a> StatusBar<'a> {
             left,
             center: None,
             right: None,
-            right_style: None,
+            right_line: None,
         }
     }
 
@@ -53,12 +55,40 @@ impl<'a> StatusBar<'a> {
         self
     }
 
-    /// Right content with an explicit style (occupancy percent coloring).
-    pub fn right_styled(mut self, text: &'a str, style: Style) -> Self {
-        self.right = Some(text);
-        self.right_style = Some(style);
+    /// 多 span 的右段（占用率渐变 + 分隔符 + 协议，或悬停时的进度条）。
+    pub fn right_line(mut self, line: Line<'a>) -> Self {
+        self.right_line = Some(line);
         self
     }
+}
+
+/// 把一条 `Line` 按显示宽度截到 `budget` 列，逐 span 走、保住各自的样式。
+///
+/// 右段是渐变色数字 + dim 分隔符 + 协议名，整条拍平成 `&str` 再 `truncate_str`
+/// 会把颜色全丢掉；窄窗下颜色恰恰是唯一还在报警的东西。
+fn truncate_line(line: &Line<'_>, budget: usize) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in &line.spans {
+        let w = UnicodeWidthStr::width(span.content.as_ref());
+        if used + w <= budget {
+            out.push(Span::styled(span.content.to_string(), span.style));
+            used += w;
+            continue;
+        }
+        // 这一段放不下：截到剩余预算，末尾留一列给省略号。
+        let room = budget.saturating_sub(used);
+        if room > 1 {
+            let head = truncate_str(span.content.as_ref(), room);
+            if !head.is_empty() {
+                out.push(Span::styled(head, span.style));
+            }
+        } else if room == 1 {
+            out.push(Span::styled("…".to_string(), span.style));
+        }
+        break;
+    }
+    Line::from(out)
 }
 
 impl Widget for StatusBar<'_> {
@@ -88,11 +118,23 @@ impl Widget for StatusBar<'_> {
         // 三段预算：right 优先、center 次之、left 吃剩下的，每相邻两段之间
         // 留 SEG_GAP 列，各自截断后再画。旧实现 last-write-wins：长 cwd 铺满
         // 整行，right 最后画直接盖掉 center 的尾巴，窄窗下中间那段被啃成乱码。
-        let right_text = self.right.map(|t| truncate_str(t, content_width as usize));
-        let right_w = right_text
-            .as_deref()
-            .map(|t| UnicodeWidthStr::width(t) as u16)
-            .unwrap_or(0);
+        let right_spans = self
+            .right_line
+            .as_ref()
+            .map(|l| truncate_line(l, content_width as usize));
+        let right_text = match right_spans {
+            Some(_) => None,
+            None => self.right.map(|t| truncate_str(t, content_width as usize)),
+        };
+        let right_w = match (&right_spans, right_text.as_deref()) {
+            (Some(l), _) => l
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum::<usize>() as u16,
+            (None, Some(t)) => UnicodeWidthStr::width(t) as u16,
+            (None, None) => 0,
+        };
 
         let gap_for = |w: u16| if w > 0 { SEG_GAP } else { 0 };
         // center 要么整段显示，要么不显示：`第 5 轮` 截成 `第` 比不画更难读，
@@ -129,9 +171,19 @@ impl Widget for StatusBar<'_> {
             buf.set_span(center_x, area.y, &center_span, center_w);
         }
 
-        if let Some(right) = right_text.as_deref() {
-            let right_x = content_x + content_width.saturating_sub(right_w);
-            let right_span = Span::styled(right, self.right_style.unwrap_or(style));
+        let right_x = content_x + content_width.saturating_sub(right_w);
+        if let Some(line) = right_spans.as_ref() {
+            let mut x = right_x;
+            for span in &line.spans {
+                let w = UnicodeWidthStr::width(span.content.as_ref()) as u16;
+                if w == 0 {
+                    continue;
+                }
+                buf.set_span(x, area.y, span, w);
+                x += w;
+            }
+        } else if let Some(right) = right_text.as_deref() {
+            let right_span = Span::styled(right, style);
             buf.set_span(right_x, area.y, &right_span, right_w);
         }
     }
