@@ -2,8 +2,8 @@
 //! "The prompt is always pushed to the queue first."
 
 use super::actions::{effect_for_pick, Action, Effect};
-use super::prompt::PromptWidget;
-use super::slash;
+use crate::slash;
+use crate::views::prompt::PromptWidget;
 
 pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
     match action {

@@ -20,7 +20,7 @@ use cordis_spine::{
 };
 
 use crate::names::SESSION_PORT;
-use crate::session::SessionRef;
+use crate::seam::session::SessionRef;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

@@ -13,9 +13,9 @@ use ratatui::style::Style;
 use unicode_width::UnicodeWidthStr;
 
 use crate::names::SESSION_PORT;
-use crate::session::SessionRef;
-use crate::status_bar;
+use crate::seam::session::SessionRef;
 use crate::theme::Theme;
+use crate::views::status_bar;
 use ratatui::buffer::Buffer;
 use ratatui::text::{Line, Span};
 
@@ -475,7 +475,7 @@ pub fn render_turn_status(buf: &mut Buffer, area: Rect, ctx: &Context, waiting_p
         .map(|s| s.queued_prompts().len())
         .unwrap_or(0);
     let can_send = ctx
-        .get::<crate::prompt::PromptWidget>(crate::names::TUI_PROMPT)
+        .get::<crate::views::prompt::PromptWidget>(crate::names::TUI_PROMPT)
         .is_some_and(|p| p.can_send());
     let queue_hint = if queued == 0 {
         String::new()

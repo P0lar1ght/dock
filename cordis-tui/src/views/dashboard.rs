@@ -42,8 +42,8 @@ use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_str;
 use crate::grok::picker::{render_bordered_frame, render_header, PickerHits};
 use crate::names::{SESSION_PORT, TUI_TABS};
-use crate::session::SessionRef;
-use crate::tabs::{TabKind, Tabs};
+use crate::seam::session::SessionRef;
+use crate::seam::tabs::{TabKind, Tabs};
 use crate::theme::Theme;
 
 /// 键盘焦点：列表还是 peek 的输入框。Tab 切换。
@@ -468,7 +468,7 @@ pub fn render_panel(buf: &mut Buffer, area: Rect, view: &PanelView<'_>) -> Picke
 /// `main ~/Desktop/AILab/dock                    ◇ 2 空闲`
 fn paint_header(buf: &mut Buffer, area: Rect, theme: &Theme, summary: &str) {
     let base = Style::default().bg(theme.bg_base);
-    let cwd = crate::status::cwd_display();
+    let cwd = crate::views::status::cwd_display();
     let left = truncate_str(&cwd, area.width.saturating_sub(16) as usize);
     buf.set_span(
         area.x,
@@ -815,14 +815,14 @@ fn row_title(row: &DashRow) -> &str {
 }
 
 /// 开面板：重扫名册、选中第一条可选行。
-pub fn open(ctx: &Context) -> crate::overlay::Overlay {
+pub fn open(ctx: &Context) -> crate::views::overlay::Overlay {
     // 上一次看之后可能又存过会话，名册 2s TTL 会让第一眼看到旧列表。
     if let Some(roster) = ctx.get::<Roster>(ROSTER) {
         roster.invalidate();
     }
     let collapsed = HashSet::new();
     let rows = build_rows(ctx, "", &collapsed);
-    crate::overlay::Overlay::Dashboard {
+    crate::views::overlay::Overlay::Dashboard {
         selected: first_selectable(&rows),
         query: String::new(),
         collapsed,

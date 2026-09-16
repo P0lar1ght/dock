@@ -3,12 +3,12 @@
 
 use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::ask_view;
 use crate::grok::shortcuts::HintItem;
 use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SHORTCUTS};
-use crate::overlay::Overlay;
-use crate::prompt::PromptWidget;
-use crate::session::SessionRef;
+use crate::seam::session::SessionRef;
+use crate::views::ask_view;
+use crate::views::overlay::Overlay;
+use crate::views::prompt::PromptWidget;
 use cordis_spine::{Ask, Computer, ASK, COMPUTER};
 
 pub struct Shortcuts {
@@ -69,7 +69,7 @@ impl Shortcuts {
                 .ctx
                 .get::<cordis_spine::Mcp>(cordis_spine::MCP)
                 .and_then(|m| m.elicitation().front())
-                .is_some_and(|p| crate::mcp_elicit_view::needs_draft(&p, *selected, picked));
+                .is_some_and(|p| crate::views::mcp_elicit_view::needs_draft(&p, *selected, picked));
             if typing {
                 return vec![
                     HintItem::new("type", "other"),
@@ -141,7 +141,7 @@ impl Shortcuts {
         }
         if matches!(
             overlay,
-            Overlay::Presets(crate::preset_overlay::PresetView::Canvas(s))
+            Overlay::Presets(crate::views::preset_overlay::PresetView::Canvas(s))
                 if s.editing_persona || s.naming_role.is_some()
         ) {
             return vec![
@@ -151,8 +151,8 @@ impl Shortcuts {
         }
         if matches!(
             overlay,
-            Overlay::Presets(crate::preset_overlay::PresetView::Canvas(s))
-                if s.pane == crate::preset_overlay::PresetPane::Catalog
+            Overlay::Presets(crate::views::preset_overlay::PresetView::Canvas(s))
+                if s.pane == crate::views::preset_overlay::PresetPane::Catalog
         ) {
             return vec![
                 HintItem::new("Enter/双击", "add"),
@@ -165,8 +165,8 @@ impl Shortcuts {
         }
         if matches!(
             overlay,
-            Overlay::Presets(crate::preset_overlay::PresetView::Canvas(s))
-                if s.pane == crate::preset_overlay::PresetPane::Assigned
+            Overlay::Presets(crate::views::preset_overlay::PresetView::Canvas(s))
+                if s.pane == crate::views::preset_overlay::PresetPane::Assigned
         ) {
             return vec![
                 HintItem::new("Enter/双击", "remove"),
@@ -179,8 +179,8 @@ impl Shortcuts {
         }
         if matches!(
             overlay,
-            Overlay::Presets(crate::preset_overlay::PresetView::Canvas(s))
-                if s.pane == crate::preset_overlay::PresetPane::Roles
+            Overlay::Presets(crate::views::preset_overlay::PresetView::Canvas(s))
+                if s.pane == crate::views::preset_overlay::PresetPane::Roles
                     && s.editing_role.is_none()
         ) {
             return vec![
@@ -196,7 +196,7 @@ impl Shortcuts {
         }
         if matches!(
             overlay,
-            Overlay::Presets(crate::preset_overlay::PresetView::Canvas(_))
+            Overlay::Presets(crate::views::preset_overlay::PresetView::Canvas(_))
         ) {
             return vec![
                 HintItem::new("Enter", "edit"),
@@ -219,7 +219,7 @@ impl Shortcuts {
         if matches!(
             overlay,
             Overlay::Inspect {
-                target: crate::overlay::InspectTarget::Job(_),
+                target: crate::views::overlay::InspectTarget::Job(_),
                 ..
             }
         ) {
@@ -232,7 +232,7 @@ impl Shortcuts {
         if matches!(
             overlay,
             Overlay::Inspect {
-                target: crate::overlay::InspectTarget::Subagent(_),
+                target: crate::views::overlay::InspectTarget::Subagent(_),
                 ..
             }
         ) {

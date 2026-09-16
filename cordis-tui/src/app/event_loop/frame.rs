@@ -12,49 +12,49 @@ use ratatui::style::Style;
 use ratatui::widgets::{Block, Widget};
 use ratatui::Terminal;
 
-use crate::ask_view;
-use crate::dashboard;
 use crate::error::{Error, Result};
 use crate::file_search;
-use crate::gateway::GatewayRef;
 use crate::grok::mcps;
 use crate::grok::picker::{PickerHits, PickerRow};
 use crate::grok::shortcuts::ShortcutsBar;
 use crate::grok::tasks_pane;
 use crate::grok::workflows;
-use crate::mcp_elicit_view;
 use crate::names::{
     GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_TABS,
     TUI_WELCOME,
 };
-use crate::overlay::{
+use crate::scrollback::Scrollback;
+use crate::seam::gateway::GatewayRef;
+use crate::seam::session::SessionRef;
+use crate::seam::tabs::Tabs;
+use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
+use crate::theme::Theme;
+use crate::views::ask_view;
+use crate::views::dashboard;
+use crate::views::mcp_elicit_view;
+use crate::views::overlay::{
     self, filter_help_items, filter_sessions, filter_strings, HelpItem, InspectTarget, Overlay,
 };
-use crate::pairing;
-use crate::permission_view;
-use crate::plan_approval_view;
-use crate::preset_overlay;
-use crate::queue_pane::{self, QueueHit};
-use crate::scrollback::Scrollback;
-use crate::session::SessionRef;
-use crate::settings_modal;
-use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
-use crate::tab_bar;
-use crate::tabs::Tabs;
-use crate::task_dock::{self, TaskDockHit};
-use crate::text_overlay;
-use crate::theme::Theme;
-use crate::usage_overlay;
+use crate::views::pairing;
+use crate::views::permission_view;
+use crate::views::plan_approval_view;
+use crate::views::preset_overlay;
+use crate::views::queue_pane::{self, QueueHit};
+use crate::views::settings_modal;
+use crate::views::tab_bar;
+use crate::views::task_dock::{self, TaskDockHit};
+use crate::views::text_overlay;
+use crate::views::usage_overlay;
 
 use super::support::*;
-use crate::goal_overlay;
-use crate::goal_pane::{self, GoalHit};
-use crate::inspect_overlay;
-use crate::prompt::PromptWidget;
-use crate::shortcuts::Shortcuts;
-use crate::status::{self, StatusLine};
-use crate::status_bar::StatusBar;
-use crate::welcome::Welcome;
+use crate::seam::shortcuts::Shortcuts;
+use crate::views::goal_overlay;
+use crate::views::goal_pane::{self, GoalHit};
+use crate::views::inspect_overlay;
+use crate::views::prompt::PromptWidget;
+use crate::views::status::{self, StatusLine};
+use crate::views::status_bar::StatusBar;
+use crate::views::welcome::Welcome;
 use std::io::Stderr;
 
 /// Grok `LayoutConfig::default()` outer padding.
@@ -595,7 +595,7 @@ pub(super) fn draw(
                                         width: scroll_area.width.saturating_sub(2).max(1),
                                         height: h,
                                     };
-                                    crate::prompt::paint_image_card(
+                                    crate::views::prompt::paint_image_card(
                                         frame.buffer_mut(),
                                         card,
                                         &img,
@@ -616,7 +616,7 @@ pub(super) fn draw(
                 .get::<Shortcuts>(TUI_SHORTCUTS)
                 .map(|s| s.hints(overlay, slash_is_open, files_open))
                 .unwrap_or_else(|| {
-                    crate::shortcuts::idle_hints(
+                    crate::seam::shortcuts::idle_hints(
                         ctx.get::<PromptWidget>(TUI_PROMPT)
                             .is_some_and(|p| p.can_send()),
                         ctx.get::<SessionRef>(SESSION_PORT)

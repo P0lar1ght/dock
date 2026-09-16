@@ -20,8 +20,8 @@ use cordis_spine::{LogEvent, Sessions, AGENT_LOOP, AGENT_PRESETS, SESSIONS, TURN
 use crate::names::{
     SESSION, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS, TUI_WELCOME,
 };
-use crate::prompt::PromptWidget;
-use crate::session::SessionRef;
+use crate::seam::session::SessionRef;
+use crate::views::prompt::PromptWidget;
 
 /// 每页各有一份的服务。没列进来的一律落回根（全局单例：工具表、LLM、权限、
 /// MCP、浏览器、cua、后台任务……），两页会真的抢同一个。

@@ -7,16 +7,18 @@ use cordis_spine::{ArchivedSession, CuaAction, OccupancyKind, PlanApprovalPrompt
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 
-use crate::dashboard;
 use crate::grok::picker::{
     render_floating_frame, render_fullscreen_frame, render_picker_list, PickerHits, PickerRow,
 };
 use crate::grok::tasks_pane::GroupKind;
-use crate::plan_approval_view::PlanWrapCache;
-use crate::preset_overlay::{CanvasState, PresetPane, PresetView, RoleNamingDraft, RoleNamingStep};
-use crate::settings_modal::SettingsField;
 use crate::slash::{ArgKind, SlashCmd};
 use crate::theme::Theme;
+use crate::views::dashboard;
+use crate::views::plan_approval_view::PlanWrapCache;
+use crate::views::preset_overlay::{
+    CanvasState, PresetPane, PresetView, RoleNamingDraft, RoleNamingStep,
+};
+use crate::views::settings_modal::SettingsField;
 
 #[derive(Debug, Clone, Default)]
 pub enum Overlay {
@@ -299,7 +301,7 @@ impl Overlay {
             ..
         } = self
         {
-            crate::inspect_overlay::insert_composer(composer, composer_cursor, c);
+            crate::views::inspect_overlay::insert_composer(composer, composer_cursor, c);
             return;
         }
         if let Some(q) = self.query_mut() {
@@ -316,7 +318,7 @@ impl Overlay {
             ..
         } = self
         {
-            crate::inspect_overlay::composer_insert_str(composer, composer_cursor, s);
+            crate::views::inspect_overlay::composer_insert_str(composer, composer_cursor, s);
             return;
         }
         if let Some(q) = self.query_mut() {
@@ -333,7 +335,7 @@ impl Overlay {
             ..
         } = self
         {
-            crate::inspect_overlay::composer_backspace(composer, composer_cursor);
+            crate::views::inspect_overlay::composer_backspace(composer, composer_cursor);
             return;
         }
         if let Some(q) = self.query_mut() {

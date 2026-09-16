@@ -14,8 +14,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
-use super::grok::color::blend_color;
-use super::theme::Theme;
+use crate::grok::color::blend_color;
+use crate::theme::Theme;
 
 /// Welcome menu row — same order as Grok's post-auth stacked menu (new / resume / quit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,9 +31,9 @@ const MENU: [(&str, &str, WelcomeHit); 3] = [
     ("ctrl+q", "退出", WelcomeHit::Quit),
 ];
 
-const LOGO: &str = include_str!("../assets/logo/logo16.txt");
-const LOGO_MID: &str = include_str!("../assets/logo/logo12.txt");
-const LOGO_SMALL: &str = include_str!("../assets/logo/logo07.txt");
+const LOGO: &str = include_str!("../../assets/logo/logo16.txt");
+const LOGO_MID: &str = include_str!("../../assets/logo/logo12.txt");
+const LOGO_SMALL: &str = include_str!("../../assets/logo/logo07.txt");
 const TITLE: &str = "Dock";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SUBTITLE: &str = "Cordis 插件树 · 反馈用 /help";

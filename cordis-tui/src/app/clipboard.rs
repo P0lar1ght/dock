@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use crate::image_meta;
+use crate::media::image_meta;
 
 #[derive(Clone, Debug)]
 pub struct ClipboardImage {

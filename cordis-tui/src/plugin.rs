@@ -3,13 +3,13 @@ use cordis::{plugin, plugin_async, Inject, Plugin};
 use crate::names::{
     SESSION, SESSION_PORT, THEME, TUI_PAIRING, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME,
 };
-use crate::prompt::PromptWidget;
 use crate::scrollback::Scrollback;
-use crate::status::StatusLine;
 use crate::theme::Theme;
-use crate::welcome::Welcome;
+use crate::views::prompt::PromptWidget;
+use crate::views::status::StatusLine;
+use crate::views::welcome::Welcome;
 
-use crate::event_loop;
+use crate::app::event_loop;
 
 pub fn theme() -> Plugin {
     plugin("theme", Inject::new(), |ctx, _: &()| {
@@ -55,14 +55,14 @@ pub fn welcome() -> Plugin {
 }
 
 pub fn shortcuts() -> Plugin {
-    crate::shortcuts::shortcuts()
+    crate::seam::shortcuts::shortcuts()
 }
 
 pub fn pairing() -> Plugin {
     plugin("tui.pairing", Inject::from([THEME]), |ctx, _: &()| {
         Ok(Some(ctx.provide(
             TUI_PAIRING,
-            crate::pairing::PairingUi::new(ctx.clone()),
+            crate::views::pairing::PairingUi::new(ctx.clone()),
         )?))
     })
 }

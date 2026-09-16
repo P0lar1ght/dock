@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::grok::line_utils::truncate_str;
-use crate::tabs::{TabInfo, TabKind};
+use crate::seam::tabs::{TabInfo, TabKind};
 use crate::theme::Theme;
 
 /// 点到了哪一页 —— 带的是标签上的**稳定编号**，不是位置。

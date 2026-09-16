@@ -39,19 +39,19 @@ use ratatui::Terminal;
 use crate::error::{Error, Result};
 use crate::grok::picker::PickerHits;
 use crate::names::{GATEWAY_PAIRING, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS};
-use crate::overlay::{Overlay, UsageTab};
-use crate::queue_pane::QueueHit;
 use crate::scrollback::Scrollback;
-use crate::session::SessionRef;
+use crate::seam::session::SessionRef;
 use crate::theme::Theme;
+use crate::views::overlay::{Overlay, UsageTab};
+use crate::views::queue_pane::QueueHit;
 
-use crate::actions::Effect;
-use crate::goal_pane::GoalHit;
-use crate::input::{drain_events, drain_notifies, spawn_reader};
-use crate::mermaid_png;
-use crate::prompt::PromptWidget;
-use crate::status::StatusLine;
-use crate::usage_overlay;
+use crate::app::actions::Effect;
+use crate::app::input::{drain_events, drain_notifies, spawn_reader};
+use crate::media::mermaid_png;
+use crate::views::goal_pane::GoalHit;
+use crate::views::prompt::PromptWidget;
+use crate::views::status::StatusLine;
+use crate::views::usage_overlay;
 
 use frame::{chrome_model_label, draw};
 use keys::{run_action, to_action};
@@ -153,10 +153,10 @@ pub async fn run(root: Context) -> Result<()> {
     let mut shimmer = tokio::time::interval(Duration::from_millis(80));
     let mut overlay = Overlay::None;
     let mut hits = PickerHits::default();
-    let mut dock_hits: Vec<(Rect, crate::task_dock::TaskDockHit)> = Vec::new();
+    let mut dock_hits: Vec<(Rect, crate::views::task_dock::TaskDockHit)> = Vec::new();
     let mut goal_hits: Vec<(Rect, GoalHit)> = Vec::new();
     let mut queue_hits: Vec<(Rect, QueueHit)> = Vec::new();
-    let mut tab_hits: Vec<(Rect, crate::tab_bar::TabHit)> = Vec::new();
+    let mut tab_hits: Vec<(Rect, crate::views::tab_bar::TabHit)> = Vec::new();
     let mut pointer = (0u16, 0u16);
     let mut quit = false;
     let mut esc_suppress_until: Option<Instant> = None;
@@ -559,7 +559,7 @@ pub async fn run(root: Context) -> Result<()> {
                                     };
                                 }
                                 Effect::ShowAgents => {
-                                    overlay = crate::dashboard::open(&ctx);
+                                    overlay = crate::views::dashboard::open(&ctx);
                                 }
                                 Effect::ToggleWorkflows => {
                                     if matches!(overlay, Overlay::Workflows { .. }) {

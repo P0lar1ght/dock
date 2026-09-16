@@ -9,8 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
-use super::theme::Theme;
 use crate::grok::line_utils::truncate_str;
+use crate::theme::Theme;
 
 /// 顶栏相邻两段之间至少留这么多列。低于它三段会贴死成一串看不断的字。
 const SEG_GAP: u16 = 2;
