@@ -48,6 +48,8 @@ pub const SETTINGS: &str = "settings";
 /// Conversation history compaction (`/compact` + auto at 85% of the window).
 pub const COMPACT: &str = "compact";
 pub const CRON: &str = "cron";
+/// 跨 cwd 的会话名册（`Roster`）。`sessions` 是**本页**的会话日志，两者不同。
+pub const ROSTER: &str = "roster";
 pub const PERMISSIONS: &str = "permissions";
 pub const TURN: &str = "turn";
 

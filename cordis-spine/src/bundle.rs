@@ -22,6 +22,7 @@ use crate::permissions::permissions;
 use crate::plan_mode::plan_mode;
 use crate::project_instructions::project_instructions;
 use crate::prompt::system_prompt;
+use crate::roster::roster;
 use crate::sched::tool_scheduler;
 use crate::session::sessions;
 use crate::settings::settings;
@@ -105,6 +106,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(turn(), ())?.wait().await?;
     ctx.plugin(permissions(), ())?.wait().await?;
     ctx.plugin(cron(), ())?.wait().await?;
+    ctx.plugin(roster(), ())?.wait().await?;
     ctx.plugin(jobs(), ())?.wait().await?;
     ctx.plugin(slash(), ())?.wait().await?;
     ctx.plugin(skills(), ())?.wait().await?;

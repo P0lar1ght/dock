@@ -208,6 +208,160 @@ pub fn load_cwd(cwd: &Path) -> Vec<ArchivedSession> {
     rows.into_iter().map(|(_, s)| s).collect()
 }
 
+/// 一条会话名册项：**不解析整份 transcript**。
+///
+/// [`load_cwd`] 走 [`load_one`]，那条路把 `chat_history.jsonl` 整份读出来再逐行
+/// 反序列化——用来恢复一个会话没问题，用来列全机器上的几十上百个会话就不行了。
+/// 名册只要抬头，所以只读 `meta.json` 加 jsonl 的**尾部一小段**。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RosterEntry {
+    pub id: String,
+    pub title: String,
+    /// 会话的工作目录。**只能从 `meta.json` 读**，不能从目录名反解——
+    /// [`encode_cwd_dirname`] 把 `/` `\` `:` 和所有非字母数字都压成 `-`，再折叠
+    /// 连续的 `-`，是有损的。
+    pub cwd: PathBuf,
+    pub updated: SystemTime,
+    /// 末条事件的一行摘要，读不出来就是空串。
+    pub summary: String,
+}
+
+/// 只在 jsonl 尾部读这么多字节找最后一行。一条 `chat_history.jsonl` 可以有几
+/// MB（长会话 + 工具输出），名册为了一行摘要没必要整份读进来。
+const TAIL_SCAN_BYTES: u64 = 64 * 1024;
+
+/// 扫 `$DOCK_HOME/sessions/*/*/`，按更新时间新到旧。
+///
+/// 跨 cwd：`load_cwd` 只看当前工作目录那一个子目录，名册要看全部。失败的条目
+/// 直接跳过（fail-open，和这个模块其余部分一致）。
+pub fn load_roster() -> Vec<RosterEntry> {
+    let root = dock_home().join("sessions");
+    let Ok(cwd_dirs) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<RosterEntry> = Vec::new();
+    for cwd_dir in cwd_dirs.flatten() {
+        let path = cwd_dir.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(sessions) = fs::read_dir(&path) else {
+            continue;
+        };
+        rows.extend(
+            sessions
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .filter_map(|p| roster_entry(&p)),
+        );
+    }
+    rows.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| b.id.cmp(&a.id)));
+    rows
+}
+
+fn roster_entry(dir: &Path) -> Option<RosterEntry> {
+    let dir_id = dir.file_name()?.to_string_lossy().into_owned();
+    if dir_id.starts_with('.') {
+        return None;
+    }
+    let history = dir.join(HISTORY);
+    // 没有 transcript 的目录不算一个会话——`save` 对空 `events` 直接返回，所以
+    // 这种目录只会是写了一半或被手动动过的残留。
+    if !history.is_file() {
+        return None;
+    }
+    let meta: Option<MetaFile> = fs::read_to_string(dir.join(META))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let last = last_history_line(&history);
+    let updated = meta
+        .as_ref()
+        .map(|m| m.updated_unix)
+        .filter(|n| *n > 0)
+        .or_else(|| last.as_ref().map(|l| l.ts))
+        .map(from_unix)
+        .unwrap_or(UNIX_EPOCH);
+    let title = meta
+        .as_ref()
+        .map(|m| m.title.clone())
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| dir_id.clone());
+    let cwd = meta
+        .as_ref()
+        .map(|m| PathBuf::from(&m.cwd))
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_default();
+    Some(RosterEntry {
+        id: meta
+            .as_ref()
+            .map(|m| m.id.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(dir_id),
+        title,
+        cwd,
+        updated,
+        summary: last.map(|l| wire_summary(&l.event)).unwrap_or_default(),
+    })
+}
+
+/// 最后一条能解出来的 `HistoryLine`。只读文件尾部 [`TAIL_SCAN_BYTES`]。
+fn last_history_line(path: &Path) -> Option<HistoryLine> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let from = len.saturating_sub(TAIL_SCAN_BYTES);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    // 从尾部截进来时第一行多半是被切断的半行，所以从后往前找第一条解得开的。
+    text.lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .find_map(|l| serde_json::from_str::<HistoryLine>(l).ok())
+}
+
+/// 末条事件压成一行给名册用。
+fn wire_summary(event: &WireEvent) -> String {
+    let raw = match event {
+        WireEvent::User { text } | WireEvent::Prompt { text } => text.as_str(),
+        WireEvent::SystemReminder { .. } | WireEvent::PreStep => "",
+        WireEvent::Llm {
+            text, tool_calls, ..
+        } => {
+            if !text.trim().is_empty() {
+                text.as_str()
+            } else {
+                return tool_calls
+                    .first()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+            }
+        }
+        WireEvent::Tool { name, .. } => name.as_str(),
+    };
+    let one_line: String = raw
+        .trim()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    one_line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 按 id 读**一个**会话的完整 transcript。
+///
+/// [`load_cwd`] 会把同一个 cwd 下的每个会话都整份解出来——面板 peek 只要选中的
+/// 那一个，用它等于为了一条读几十条。
+pub fn load_session(id: &str, cwd: &Path) -> Option<ArchivedSession> {
+    let dir = sessions_cwd_dir(cwd).join(id);
+    if !dir.is_dir() {
+        return None;
+    }
+    load_one(&dir).map(|(_, session)| session)
+}
+
 fn load_one(dir: &Path) -> Option<(u64, ArchivedSession)> {
     let id = dir.file_name()?.to_string_lossy().into_owned();
     if id.starts_with('.') {

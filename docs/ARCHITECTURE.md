@@ -46,12 +46,14 @@ config.toml.example      用户 / 项目模型目录样例
 |---|---|---|
 | Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
-| 其它 spine | `context` `settings` `turn` `permissions` `cron` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名 |
+| 其它 spine | `context` `settings` `turn` `permissions` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名 |
 | 工具插件 | `tool-web` `tool-browser` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` `tui.tabs` | 同名 |
 | 回环网关 | `gateway` | `"gateway"`（`GatewayRef`），事件 `gateway/pairing` |
 
 `settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。
+
+`roster` 与 `sessions` 不是一回事，别混：`sessions` 是**本页**的会话日志（每页一份，`archived()` 走 `load_cwd`，只看当前 cwd 且会把整份 transcript 解出来）；`roster` 是**跨 cwd** 的会话抬头名册（全局一份，扫 `$DOCK_HOME/sessions/*/*/`，每条只读 `meta.json` 加 jsonl 尾部 64KB 取一行摘要，压 2s TTL 备忘挡住每帧重扫）。名册项的 `cwd` **只能从 `meta.json` 读**——`encode_cwd_dirname` 把 `/` 和非字母数字都压成 `-` 再折叠连续 `-`，目录名是有损的、反解不回来。对应 Grok pager 的 `app/roster.rs`，是 agent dashboard 的行来源之一。
 
 ## 分页：一个终端里的多个会话
 

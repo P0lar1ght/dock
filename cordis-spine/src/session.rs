@@ -1039,6 +1039,13 @@ impl Sessions {
         Some(item)
     }
 
+    /// 当前这一份会话在磁盘上的 id（`persist_live` 写的那个），还没落过盘就是
+    /// 空串。dashboard 用它把名册里的同一条去重——已经开着的会话不该在「历史」
+    /// 里再出现一次。
+    pub fn live_session_id(&self) -> String {
+        self.live_id.lock().unwrap().clone()
+    }
+
     fn take_archive_id(&self) -> String {
         if self.disk_cwd.lock().unwrap().is_some() {
             let mut live = self.live_id.lock().unwrap();
