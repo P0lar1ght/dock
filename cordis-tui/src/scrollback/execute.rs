@@ -104,8 +104,24 @@ fn command_from_args(arguments: &str) -> Option<String> {
 
 /// 一次已完成的 bash 调用，供 [`group_lines`] 合并渲染。
 pub struct Call<'a> {
+    /// 该次调用的 tool call id——同时是它**自己那一段**的折叠键。
+    pub id: &'a str,
     pub arguments: &'a str,
     pub content: &'a str,
+    /// 这一段的折叠态。缺省继承组的折叠态，用户单独点过才有自己的值。
+    pub mode: ToolMode,
+}
+
+/// 合并卡的渲染结果：行，加上「第几行归哪个折叠键管」。
+///
+/// 组头归组键（折叠整张卡），每条命令的 `$ cmd` 与正文归它自己的 id——
+/// grok 的做法是每条 execute 调用各是一个 `ExecuteToolCallBlock`、各带
+/// `DisplayMode`，这里在「一张卡」的外观下保住同一件事：**三条长输出可以
+/// 只收掉其中一条**。
+pub struct GroupCard {
+    pub lines: Vec<Line<'static>>,
+    /// `(相对 lines 的行号, 折叠键)`
+    pub row_ids: Vec<(usize, String)>,
 }
 
 /// 连续多次 bash 调用合成一张卡。
@@ -118,10 +134,11 @@ pub struct Call<'a> {
 /// 任务 id 与实时输出），正在跑的调用要单独挂时钟，都不参与合并。
 pub fn group_lines(
     calls: &[Call<'_>],
+    group_key: &str,
     theme: &Theme,
     width: usize,
     mode: ToolMode,
-) -> Vec<Line<'static>> {
+) -> GroupCard {
     let failed = calls.iter().any(|c| is_failure(c.content));
     let open = mode != ToolMode::Collapsed;
     let muted = !open || failed;
@@ -137,21 +154,37 @@ pub fn group_lines(
     ]);
     prepend_diamond(&mut header, theme, failed);
     let header = card::finish_header(header, width, mode, theme);
+    let mut row_ids = vec![(0usize, group_key.to_string())];
     if !open {
-        return vec![header];
+        return GroupCard {
+            lines: vec![header],
+            row_ids,
+        };
     }
 
     let mut out = vec![header];
     for call in calls {
+        // 空行归组：点它切整组，不至于误伤某一条命令。
+        row_ids.push((out.len(), group_key.to_string()));
         out.push(Line::from(""));
+        let start = out.len();
         let command = command_from_args(call.arguments).unwrap_or_else(|| "\u{2026}".into());
         out.push(card::indent(Line::from(vec![
             Span::styled("$ ".to_string(), theme.dim()),
             Span::styled(command.replace('\n', " "), theme.primary()),
         ])));
-        out.extend(call_body(call.content, theme, width, mode));
+        if call.mode != ToolMode::Collapsed {
+            out.extend(call_body(call.content, theme, width, call.mode));
+        }
+        // 这条命令的 `$ cmd` 与正文都归它自己的 id——点它只折它。
+        for row in start..out.len() {
+            row_ids.push((row, call.id.to_string()));
+        }
     }
-    out
+    GroupCard {
+        lines: out,
+        row_ids,
+    }
 }
 
 /// 一条命令的输出块（合并卡里用）。空输出也要留一行，否则读不出这条跑过没有。
