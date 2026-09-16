@@ -14,3 +14,6 @@ embed-sdk/dist/
 # 编辑器 / 临时文件
 *.swp
 *.swo
+
+# logo 设计历史稿
+cordis-tui/assets/logo/candidates/

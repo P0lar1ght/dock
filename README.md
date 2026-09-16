@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="assets/logo/mark-black-v9-belly.png" width="112" alt="Dock mark">
+  <img src="assets/logo/mark.png" width="112" alt="Dock mark">
 </p>
 <h1 align="center">Dock</h1>
 <p align="center">
   <b>Grok 外形的本地 Agent TUI · 一切皆插件</b>
 </p>
 <p align="center">
-  <img src="assets/logo/lockup-black-v9-belly.png" width="360" alt="Dock">
+  <img src="assets/logo/lockup.png" width="360" alt="Dock">
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/rust-1.88+-dea584?logo=rust&logoColor=white" alt="Rust 1.88+">
