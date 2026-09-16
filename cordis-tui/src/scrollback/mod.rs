@@ -785,8 +785,13 @@ fn build_frame(
     let mut mermaid = Vec::new();
     let mut stamps = Vec::new();
     let mut live = Vec::new();
+    // 已经被前面某个合并卡吃掉的事件下标（连续 bash 合成一张卡）。
+    let mut merged_into_group: HashSet<usize> = HashSet::new();
     for (i, event) in events.iter().enumerate() {
         let stamp = times.get(i).copied();
+        if merged_into_group.contains(&i) {
+            continue;
+        }
         match event {
             LogEvent::User(text) => {
                 if let Some(at) = stamp {
@@ -873,6 +878,38 @@ fn build_frame(
                 content,
                 images: _,
             } => {
+                // 相邻的、都已完成的前台 bash 合成一张卡。后台 bash 归 bg_task
+                // 卡（自带任务 id 与实时输出），不参与合并。
+                let group = mergeable_shell_run(events, i, &job_snaps);
+                if group.len() > 1 {
+                    let mode = tool_fold
+                        .get(id)
+                        .copied()
+                        .unwrap_or(tool::ToolMode::Collapsed);
+                    let calls: Vec<execute::Call<'_>> = group
+                        .iter()
+                        .filter_map(|&idx| match &events[idx] {
+                            LogEvent::ToolExecute {
+                                arguments, content, ..
+                            } => Some(execute::Call { arguments, content }),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(at) = stamp {
+                        stamps.push((lines.len(), at));
+                    }
+                    let header_at = lines.len();
+                    lines.extend(execute::group_lines(&calls, &theme, width, mode));
+                    // 整张卡都可点，折叠键用组内第一条调用的 id。
+                    for row in header_at..lines.len() {
+                        tool_headers.push((row, id.clone()));
+                    }
+                    if lines.last().is_some_and(|l| !l.spans.is_empty()) {
+                        lines.push(Line::from(""));
+                    }
+                    merged_into_group.extend(group.iter().skip(1).copied());
+                    continue;
+                }
                 push_tool_card(
                     &mut lines,
                     &mut tool_headers,
@@ -909,6 +946,41 @@ fn build_frame(
         stamps,
         live,
     }
+}
+
+/// 从 `start` 起，连续的、可合并的前台 bash 事件下标。
+///
+/// 返回至少包含 `start` 自己；长度为 1 时调用方按老路走单卡，渲染逐字不变。
+///
+/// 「可合并」要同时满足：是 execute 族工具、事件是已完成的 `ToolExecute`、且
+/// **不是** `bg_task` 卡（后台 bash 有自己的任务 id、实时输出与时钟，合进来会
+/// 丢掉这些）。中间夹任何别的事件（包括模型的思考与文本）都断开——合并的前提
+/// 是它们在视觉上本来就连成一片。
+fn mergeable_shell_run(events: &[LogEvent], start: usize, job_snaps: &[JobSnapshot]) -> Vec<usize> {
+    let mergeable = |idx: usize| -> bool {
+        match &events[idx] {
+            LogEvent::ToolExecute {
+                name,
+                arguments,
+                content,
+                ..
+            } => {
+                execute::is_execute_tool(name)
+                    && bg_task::header_id(name, content, arguments, job_snaps).is_none()
+            }
+            _ => false,
+        }
+    };
+    if !mergeable(start) {
+        return vec![start];
+    }
+    let mut run = vec![start];
+    let mut next = start + 1;
+    while next < events.len() && mergeable(next) {
+        run.push(next);
+        next += 1;
+    }
+    run
 }
 
 /// `use_tool` 包装（deferred 工具都走它）：返回内层 `(tool_name, tool_input)`。
@@ -1630,6 +1702,97 @@ mod tests {
         let hid =
             super::bg_task::header_id("bash", notice, r#"{"command":"sleep 9"}"#, &[]).unwrap();
         assert_eq!(super::bg_task::open_id(&hid), Some("job-3"));
+    }
+
+    fn shell_exec(id: &str, command: &str, content: &str) -> LogEvent {
+        LogEvent::ToolExecute {
+            id: id.into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": command }).to_string(),
+            content: content.into(),
+            images: vec![],
+        }
+    }
+
+    /// 相邻的多次前台 bash 折叠成一张卡，折叠态只占一行。
+    #[test]
+    fn consecutive_shell_calls_collapse_into_one_card() {
+        let lines = lines_from_events(&[
+            shell_exec("1", "cargo fmt --check", ""),
+            shell_exec("2", "cargo clippy", "Finished"),
+            shell_exec("3", "cargo test", "test result: ok"),
+        ]);
+        let text = plain(&lines);
+        assert!(text.contains("Bash 3 条命令"), "{text}");
+        assert_eq!(
+            text.matches('\u{25C6}').count(),
+            1,
+            "三次调用应只剩一个卡片菱形：{text}"
+        );
+        assert!(!text.contains("cargo clippy"), "折叠态不该露出正文：{text}");
+    }
+
+    /// 展开后逐条命令与各自输出都在。
+    #[test]
+    fn merged_shell_card_expands_to_each_command() {
+        let theme = Theme::current();
+        let calls = [
+            execute::Call {
+                arguments: r#"{"command":"cargo fmt --check"}"#,
+                content: "",
+            },
+            execute::Call {
+                arguments: r#"{"command":"cargo test"}"#,
+                content: "test result: ok",
+            },
+        ];
+        let lines = execute::group_lines(&calls, &theme, 80, tool::ToolMode::Expanded);
+        let text = plain(&lines);
+        assert!(text.contains("$ cargo fmt --check"), "{text}");
+        assert!(text.contains("（无输出）"), "空输出也要留痕：{text}");
+        assert!(text.contains("$ cargo test"), "{text}");
+        assert!(text.contains("test result: ok"), "{text}");
+    }
+
+    /// 单独一次 bash 仍走原来的单卡，渲染逐字不变。
+    #[test]
+    fn lone_shell_call_keeps_the_single_card() {
+        let lines = lines_from_events(&[shell_exec("1", "cargo test", "ok")]);
+        let text = plain(&lines);
+        assert!(text.contains("Bash $ cargo test"), "{text}");
+        assert!(!text.contains("条命令"), "{text}");
+    }
+
+    /// 中间夹了别的工具就断开——合并的前提是它们视觉上本来连成一片。
+    #[test]
+    fn shell_calls_split_by_another_tool_do_not_merge() {
+        let lines = lines_from_events(&[
+            shell_exec("1", "pwd", "/tmp"),
+            LogEvent::ToolExecute {
+                id: "2".into(),
+                name: "list_dir".into(),
+                arguments: r#"{"target_directory":"."}"#.into(),
+                content: "a.txt".into(),
+                images: vec![],
+            },
+            shell_exec("3", "whoami", "polar"),
+        ]);
+        let text = plain(&lines);
+        assert!(!text.contains("条命令"), "不相邻不该合并：{text}");
+        assert!(text.contains("Bash $ pwd"), "{text}");
+        assert!(text.contains("Bash $ whoami"), "{text}");
+    }
+
+    /// 后台 bash 归 bg_task 卡（自带任务 id / 实时输出 / 时钟），不能被合并吃掉。
+    #[test]
+    fn background_shell_calls_are_not_merged() {
+        let notice = "[Command moved to background]\n\ntask_id: job-3\n";
+        let lines = lines_from_events(&[
+            shell_exec("1", "sleep 9", notice),
+            shell_exec("2", "sleep 10", notice),
+        ]);
+        let text = plain(&lines);
+        assert!(!text.contains("条命令"), "后台卡不该被合并：{text}");
     }
 
     #[test]
