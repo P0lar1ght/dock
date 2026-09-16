@@ -14,6 +14,12 @@ cordis-spine/            Agent 循环、工具粒、MCP、会话、预设、权�
   presets/               内置 Agent 预设 YAML（code / minimal / cordis / warden）
   tests/                 round.rs（install_app_registers）、dynamic.rs、subagents.rs
 cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、statusBar、shortcuts…
+  src/app/               状态与派发：actions、dispatch、event_loop、input、clipboard
+  src/views/             画出来的东西：overlay、dashboard、各 *_view / *_modal / pane
+  src/seam/              TUI live-look 的 named service 座：session、gateway、shortcuts、tabs
+  src/theme/             调色板（grokday / groknight / tokyonight）
+  src/scrollback/        transcript 渲染与卡片
+  src/grok/              从 grok pager 冻结复制的 chrome（glyphs、picker、wrapping…）
 cordis-gateway/          回环 HTTP/WS 插件：配对、dock.1 JSON-RPC 投影、slash list|execute
 cordis-app/              二进制入口：一个 Context，install_app + agent-loop + gateway + tui
 cordis-render/markdown/  crate `cordis-markdown`
