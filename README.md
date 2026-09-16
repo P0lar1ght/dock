@@ -79,7 +79,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 ## 架构概览
 
-Dock 的 harness 就是一棵 Cordis 插件树。内核是 crate `cordis`（`Context`、`inject`、named service、waterfall、fiber 生命周期）——**没有可私自打补丁的内核**，新行为只能再挂插件。`cordis-app` 起**一个** `Context`，分两步长出整棵树：`install_app` 先挂 Spine 五件套 + Harness 服务 + 工具粒（尾部是 `llm`，再 `compact`），`main` 再挂 `system-prompt.base`、`agent-loop`、`session_actor`、`gateway`（默认不监听）、`cron-driver`、`tui`。这些同样是插件——`main` 只做组装，不焊任何行为逻辑（连基座系统提示和 1s 调度都各是一颗插件）。TUI 和 Gateway 都是树上的插件，不是旁路进程；宿主页 `embed-sdk` 只连回环 Gateway（`dock.1`），不另起一套 harness，也不直连 TUI。
+Dock 的 harness 就是一棵 Cordis 插件树，内核是 crate `cordis`（`Context`、`inject`、named service、waterfall、fiber 生命周期）。`cordis-app` 起**一个** `Context`，分两步长出整棵树：`install_app` 挂 Spine 五件套 + Harness 服务 + 工具粒，`main` 再挂 `system-prompt.base`、`agent-loop`、`session_actor`、`gateway`、`cron-driver`、`tui`。这些同样是插件——`main` 只做组装，不焊行为逻辑。TUI 和 Gateway 都是树上的插件而非旁路进程；宿主页 `embed-sdk` 只连回环 Gateway（`dock.1`），不另起 harness、不直连 TUI。
 
 ```mermaid
 flowchart TB
@@ -135,21 +135,15 @@ flowchart TB
   class api,mcp,disk,render ext;
 ```
 
-实线是控制 / 数据流，虚线是「`register` 进 `tools`」与「named service live-lookup」。两个表面（`tui`、`gateway`）都经 `SESSION_PORT` 把 prompt 投给 `session_actor`，也各自 live-look `sessions` 等做会话投影；`cron-driver` 插件 `inject` `cron`/`sessions`/`session.port`，1s 一 tick，到点用同一个 port 提交。磁盘（`~/.dock` / 项目 `.dock`）由 `svc` 与部分工具粒（memory / plan-mode / dynamic / mcp）读写。
+实线是控制 / 数据流，虚线是「`register` 进 `tools`」与「named service live-lookup」。两个表面都经 `SESSION_PORT` 把 prompt 投给 `session_actor`；`cron-driver` 1s 一 tick，到点用同一个 port 提交。
 
-挂载顺序见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
-
-Gateway 默认挂载但不监听。TUI `/pair` 开启回环 HTTP（首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。`DOCK_GATEWAY_BIND` 只改首选地址。配对走 HTTP；会话投影、权限、斜杠、图片输入走 JSON-RPC `dock.1`。鉴权是 Origin 配对 + 回环，不是 Origin 白名单。工具能力插件 `inject: ["tools"]` 后 `register`，MCP 也进同一张 `"tools"` 表。模式 / 模型 / 权限开关住在 `settings`；计划是独立模式，不是第三种权限。Named service 在调用点 live-lookup，不要把 `Arc` 关进长生命周期闭包。
-
-磁盘：`~/.dock`（`DOCK_HOME`）放用户 config、presets、plugins、memory、`mcp_credentials.json`；项目 `.dock` 放覆盖 config、presets、plugins、`plan.md`。HTTP MCP 的 OAuth token 不写进 `config.toml`。
+挂载顺序、完整不变式、磁盘布局见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。几条最常踩的：工具能力插件 `inject: ["tools"]` 后 `register`，MCP 也进同一张表；named service 在调用点 live-lookup，不要把 `Arc` 关进长生命周期闭包；计划是独立模式，不是第三种权限。
 
 约定、工具名单、斜杠分别见 [AGENTS.md](AGENTS.md)、[TOOLS.md](TOOLS.md)、[CLI.md](CLI.md)。
 
 ### 一轮怎么跑
 
-TUI 从不持有循环：按键映射成 `SessionCommand` 交给 `session_actor`，由它管队列——提交 / 立即发送（取消在飞行的一轮）/ 提前 / 目标 GoalSummary 续跑 / 子代理 mailbox 续跑。actor 每次取一条，调 `agent-loop` 提供的 `LoopHandle`。`LoopHandle` 包着默认 driver `GrokStep`：一轮 Grok 形状的采样——`agent/pre-step` 一次，然后 `system-prompt/assemble` → `llm/stream` → `tools/execute` → 回采样，直到出文本。安全上限 256 步；`/goal` 在外层多轮直到 `update_goal(completed)`。换 driver 只换这颗 `agent-loop` 插件，不动 actor。
-
-每一环都是 waterfall。拦截接 `on_waterfall`；默认实现放在 `waterfall(..., || default)` 的闭包里。监听必须把控制权交给下一环，不要悄悄吞掉链。
+TUI 从不持有循环：按键变成 `SessionCommand` 交给 `session_actor` 管队列，actor 每次取一条调 `agent-loop` 的 `LoopHandle`。默认 driver `GrokStep` 跑一轮 Grok 形状的采样，安全上限 256 步；换 driver 只换 `agent-loop` 这颗插件，不动 actor。每一环都是 waterfall——监听必须把控制权交给下一环，不要悄悄吞掉链。
 
 ```mermaid
 flowchart LR
@@ -165,7 +159,7 @@ flowchart LR
   class stream,exec hub;
 ```
 
-`llm/stream` 是这一轮的枢纽：出工具调用就过 `tools/execute`（权限 / 计划门在这里挡）再回来，出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
+`llm/stream` 是枢纽：出工具调用就过 `tools/execute`（权限 / 计划门在这里挡）再回来，出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
 
 `system-prompt/assemble` 的载荷是 `PromptAssembly`。贡献插件 `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（对标 `"tools".register`，fiber dispose 注销）。`systemPrompt` 只做 facade：live-lookup `"context"` 求值，再跑 waterfall 供拦截。基座（`system-prompt.base`）只写身份与按需发现，不列工具名；persona/roster 来自 `agent-presets`（写路径用 `.dock/presets`，不用绝对 `{cwd}`），listing 来自 `skills` / `tool-workflow`（同样用 `skills/`、`.dock/skills/`、`~/.dock/skills/` 这类通用路径）。计划 / 目标走历史尾部 `<system-reminder>`，不进系统提示。Cordis 只留短指针。`/context` 与顶栏 live-lookup `ContextBook.window()`，系统提示按段看 token。加/改一段提示词就是在贡献插件里登记，不动 assembler。
 
@@ -294,7 +288,7 @@ dock/
 | [AGENTS.md](AGENTS.md) | 根政策：命令、边界、提交约定；给写代码的 agent / 人（`CLAUDE.md` 指向它） |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 插件树目录地图、不变式、磁盘布局 |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 环境、命令、测试、调试、落点 |
-| [TOOLS.md](TOOLS.md) | 模型工具、插件粒、缺口、明确不做 |
+| [TOOLS.md](TOOLS.md) | 模型工具索引、插件粒、缺口、明确不做（单颗细节在 [docs/tools/](docs/tools/)）|
 | [CLI.md](CLI.md) | 斜杠、快捷键、overlay、底栏 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 人类贡献流程 |
 | [SECURITY.md](SECURITY.md) | 漏洞上报与安全边界 |

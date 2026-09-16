@@ -33,7 +33,7 @@ config.toml.example  用户 / 项目模型目录样例
 
 工具链：rustc **1.88+**、Node **>= 18**（`embed-sdk/package.json` 的 `engines.node`）。Rust 下限由根 `Cargo.toml` 的 `[workspace.package].rust-version` 固化，细节见 `docs/DEVELOPMENT.md`。`Context::new()` 需要 tokio runtime。
 
-产品面的权威清单是三份：`TOOLS.md`（模型工具）、`CLI.md`（斜杠 / 快捷键 / overlay）、`docs/ARCHITECTURE.md`（插件树与不变式）。Crate README 管该包的 API。
+产品面的权威清单是三份：`TOOLS.md`（模型工具**索引**；单颗工具的细节在 `docs/tools/<name>.md`，改一块只读那一份）、`CLI.md`（斜杠 / 快捷键 / overlay）、`docs/ARCHITECTURE.md`（插件树与不变式）。Crate README 管该包的 API。
 
 ## Commands
 
@@ -79,7 +79,7 @@ cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080
 - 新 crate 命名 `cordis-*`；新增行为优先新插件，不改 `event_loop` / `agent-loop` 私有状态。
 - named service 在调用点 `ctx.get` / `ctx.require` live-lookup，不把 `Arc<T>` 关进长生命周期闭包。
 - 扩展走 waterfall（`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/execute`、`system-prompt/assemble`），监听必须把控制权交给下一环。
-- 改了工具面就同步 `TOOLS.md`；改了斜杠 / overlay / 快捷键就同步 `CLI.md`。
+- 改了工具面就同步 `docs/tools/<name>.md`（细节）与 `TOOLS.md`（只有一句话 + 链接要改才动）；改了斜杠 / overlay / 快捷键就同步 `CLI.md`。
 
 ## Boundaries
 
@@ -132,7 +132,7 @@ cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080
 | 开发环境、命令、测试、调试 | `docs/DEVELOPMENT.md` |
 | 人类贡献流程 | `CONTRIBUTING.md` |
 | 安全与漏洞上报 | `SECURITY.md` |
-| 模型工具 / 插件粒 / 缺口 | `TOOLS.md` |
+| 模型工具 / 插件粒 / 缺口 | `TOOLS.md`（索引）+ `docs/tools/` |
 | 斜杠 / 快捷键 / overlay | `CLI.md` |
 | 产品介绍 | `README.md` |
 | 提交与 PR 流程 skill | `.agents/skills/git-commit/SKILL.md`、`.agents/skills/create-pr/SKILL.md` |

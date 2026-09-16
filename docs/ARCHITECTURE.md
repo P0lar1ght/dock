@@ -2,7 +2,7 @@
 
 Dock 的 harness 是一棵 Cordis 插件树。内核是 crate `cordis`（`Context`、`inject`、named service、waterfall、fiber 生命周期）。**没有可私自打补丁的内核**：新行为只能是再挂一颗插件，或接到已有 named service / waterfall 上。
 
-硬规则在根 [AGENTS.md](../AGENTS.md)；本文件是可重复查的目录地图与不变式。工具名单见 [TOOLS.md](../TOOLS.md)，人操作的面见 [CLI.md](../CLI.md)。
+硬规则在根 [AGENTS.md](../AGENTS.md)；本文件是可重复查的目录地图与不变式。工具名单见 [TOOLS.md](../TOOLS.md)（细节在 [tools/](tools/)），人操作的面见 [CLI.md](../CLI.md)。
 
 ## 目录地图
 
@@ -38,7 +38,7 @@ config.toml.example      用户 / 项目模型目录样例
 
 `main` 只做组装，不焊行为逻辑——基座系统提示、1s 调度都是各自一颗插件。TUI 与 Gateway 都是树上的插件，不是旁路进程。`embed-sdk` 只连回环 Gateway（`dock.1`），不另起 harness，也不直连 TUI。
 
-挂载有序：工具粒都在 `workspace_tools` 之后、`llm` 之前 `register`；`compact` 在 `llm` 之后（`inject "llm"`）；`tool-task` 同时登记 spawn 工具与 mailbox 工具。完整顺序与每颗粒的工具名见 TOOLS.md。
+挂载有序：工具粒都在 `workspace_tools` 之后、`llm` 之前 `register`；`compact` 在 `llm` 之后（`inject "llm"`）；`tool-task` 同时登记 spawn 工具与 mailbox 工具。完整顺序与每颗粒的工具名见 TOOLS.md，单颗细节见 `docs/tools/`。
 
 ## named service 与插件粒
 
