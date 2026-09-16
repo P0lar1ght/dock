@@ -1024,7 +1024,8 @@ mod tests {
         assert!(capped.content.len() < USE_TOOL_MAX_OUTPUT_BYTES + 400);
 
         // 截断掉的部分落盘，模型能按路径捞回全文。
-        let path = crate::config::dock_home().join("tool-output").join("2.txt");
+        let path = crate::tool_output::spill_dir()
+            .join(format!("{}.txt", crate::tool_output::offload_stem("2")));
         assert!(
             capped.content.contains(&path.to_string_lossy().to_string()),
             "{capped:?}"
@@ -1058,6 +1059,13 @@ mod tests {
         .await;
         let dir = crate::config::dock_home().join("tool-output");
         assert!(out.content.contains("output truncated"), "{out:?}");
-        assert!(dir.join("______escape.txt").exists(), "{out:?}");
+        assert!(
+            dir.join(format!(
+                "{}.txt",
+                crate::tool_output::offload_stem("../../escape")
+            ))
+            .exists(),
+            "{out:?}"
+        );
     }
 }

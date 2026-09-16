@@ -892,16 +892,28 @@ fn build_frame(
                 // 卡（自带任务 id 与实时输出），不参与合并。
                 let group = mergeable_shell_run(events, i, &job_snaps);
                 if group.len() > 1 {
-                    let mode = tool_fold
-                        .get(id)
+                    // 组键与组内第一条调用的 id **必须分开**：共用一个键时点
+                    // 第一条命令就会把整组折掉，组内单独折叠永远轮不到它。
+                    let group_key = format!("{BASH_GROUP_PREFIX}{id}");
+                    let group_mode = tool_fold
+                        .get(&group_key)
                         .copied()
                         .unwrap_or(tool::ToolMode::Collapsed);
                     let calls: Vec<execute::Call<'_>> = group
                         .iter()
                         .filter_map(|&idx| match &events[idx] {
                             LogEvent::ToolExecute {
-                                arguments, content, ..
-                            } => Some(execute::Call { arguments, content }),
+                                id,
+                                arguments,
+                                content,
+                                ..
+                            } => Some(execute::Call {
+                                id,
+                                arguments,
+                                content,
+                                // 缺省继承组的折叠态，用户单独点过那条才有自己的值。
+                                mode: tool_fold.get(id).copied().unwrap_or(group_mode),
+                            }),
                             _ => None,
                         })
                         .collect();
@@ -909,11 +921,11 @@ fn build_frame(
                         stamps.push((lines.len(), at));
                     }
                     let header_at = lines.len();
-                    lines.extend(execute::group_lines(&calls, &theme, width, mode));
-                    // 整张卡都可点，折叠键用组内第一条调用的 id。
-                    for row in header_at..lines.len() {
-                        tool_headers.push((row, id.clone()));
+                    let card = execute::group_lines(&calls, &group_key, &theme, width, group_mode);
+                    for (row, key) in card.row_ids {
+                        tool_headers.push((header_at + row, key));
                     }
+                    lines.extend(card.lines);
                     if lines.last().is_some_and(|l| !l.spans.is_empty()) {
                         lines.push(Line::from(""));
                     }
@@ -999,6 +1011,10 @@ fn wrap_plain(text: &str, width: usize) -> Vec<String> {
     }
     out
 }
+
+/// 合并卡的组折叠键前缀。带前缀是为了和组内任何一条调用的 id 都不撞——
+/// 撞了就等于组和第一条命令共用一个折叠态。
+const BASH_GROUP_PREFIX: &str = "bash-group:";
 
 /// 从 `start` 起，连续的、可合并的前台 bash 事件下标。
 ///
@@ -1803,20 +1819,87 @@ mod tests {
         let theme = Theme::current();
         let calls = [
             execute::Call {
+                id: "1",
                 arguments: r#"{"command":"cargo fmt --check"}"#,
                 content: "",
+                mode: tool::ToolMode::Expanded,
             },
             execute::Call {
+                id: "2",
                 arguments: r#"{"command":"cargo test"}"#,
                 content: "test result: ok",
+                mode: tool::ToolMode::Expanded,
             },
         ];
-        let lines = execute::group_lines(&calls, &theme, 80, tool::ToolMode::Expanded);
-        let text = plain(&lines);
+        let card = execute::group_lines(&calls, "g", &theme, 80, tool::ToolMode::Expanded);
+        let text = plain(&card.lines);
         assert!(text.contains("$ cargo fmt --check"), "{text}");
         assert!(text.contains("（无输出）"), "空输出也要留痕：{text}");
         assert!(text.contains("$ cargo test"), "{text}");
         assert!(text.contains("test result: ok"), "{text}");
+    }
+
+    /// S1：组内第 2、3 条要能**单独**折叠。grok 的做法是每条 execute 调用各是
+    /// 一个带 `DisplayMode` 的块；这里在「一张卡」的外观下保住同一件事。
+    /// 原实现把整卡所有行都绑组内第一条的 id，于是点哪都是切整组。
+    #[test]
+    fn each_command_in_a_merged_card_folds_on_its_own_key() {
+        let theme = Theme::current();
+        let calls = [
+            execute::Call {
+                id: "c1",
+                arguments: r#"{"command":"one"}"#,
+                content: "OUT-ONE",
+                mode: tool::ToolMode::Expanded,
+            },
+            execute::Call {
+                id: "c2",
+                arguments: r#"{"command":"two"}"#,
+                content: "OUT-TWO",
+                mode: tool::ToolMode::Collapsed,
+            },
+        ];
+        let card = execute::group_lines(
+            &calls,
+            "bash-group:c1",
+            &theme,
+            80,
+            tool::ToolMode::Expanded,
+        );
+        let text = plain(&card.lines);
+        // 第二条被单独折起来了：命令还在，正文没了。
+        assert!(text.contains("$ two"), "{text}");
+        assert!(!text.contains("OUT-TWO"), "第二条应已单独折叠：{text}");
+        assert!(text.contains("OUT-ONE"), "第一条不该受影响：{text}");
+
+        // 组头归组键，各命令的行归各自的 id——否则点谁都是切整组。
+        let key_at = |row: usize| {
+            card.row_ids
+                .iter()
+                .find(|(r, _)| *r == row)
+                .map(|(_, k)| k.as_str())
+        };
+        assert_eq!(key_at(0), Some("bash-group:c1"), "组头归组键");
+        let one_row = card
+            .lines
+            .iter()
+            .position(|l| plain(std::slice::from_ref(l)).contains("$ one"))
+            .expect("找不到第一条命令行");
+        assert_eq!(key_at(one_row), Some("c1"));
+        let two_row = card
+            .lines
+            .iter()
+            .position(|l| plain(std::slice::from_ref(l)).contains("$ two"))
+            .expect("找不到第二条命令行");
+        assert_eq!(key_at(two_row), Some("c2"));
+    }
+
+    /// 组键不能等于组内任何一条调用的 id，否则点第一条命令就折掉整组。
+    #[test]
+    fn group_key_never_collides_with_a_member_id() {
+        let lines = lines_from_events(&[shell_exec("1", "a", "A"), shell_exec("2", "b", "B")]);
+        let _ = plain(&lines);
+        assert_ne!(format!("{BASH_GROUP_PREFIX}1"), "1");
     }
 
     /// 单独一次 bash 仍走原来的单卡，渲染逐字不变。
