@@ -522,7 +522,7 @@ impl Acc {
         }
         if let Some(err) = self.error {
             return LlmOutput {
-                text: err,
+                error: Some(err),
                 ..LlmOutput::default()
             };
         }
@@ -631,6 +631,23 @@ mod tests {
         );
         assert!(!json.contains("请求失败"), "{json}");
         assert!(json.contains("再试一次"), "正常消息仍要在：{json}");
+    }
+
+    /// SSE 流中途的 provider 错误事件也**不能**写进 `text`——它与传输层失败
+    /// 同类，是 harness 说给人听的，进了 `text` 就会被下轮回放成「模型自己
+    /// 说过 llm messages …」。
+    #[test]
+    fn sse_midstream_error_goes_to_error_not_text() {
+        let mut acc = Acc::new("m");
+        acc.ingest_json(
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"server overloaded"}}"#,
+        );
+        let out = acc.finish();
+        assert!(out.text.is_empty(), "流内错误漏进 text：{}", out.text);
+        assert_eq!(
+            out.error.as_deref(),
+            Some("llm messages overloaded_error: server overloaded")
+        );
     }
 
     #[test]
