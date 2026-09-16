@@ -9,51 +9,52 @@ use cordis_spine::{
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::Style;
-use ratatui::widgets::Block;
+use ratatui::widgets::{Block, Widget};
 use ratatui::Terminal;
 
-use crate::ask_view;
 use crate::error::{Error, Result};
 use crate::file_search;
-use crate::gateway::GatewayRef;
 use crate::grok::mcps;
 use crate::grok::picker::{PickerHits, PickerRow};
 use crate::grok::shortcuts::ShortcutsBar;
 use crate::grok::tasks_pane;
 use crate::grok::workflows;
-use crate::mcp_elicit_view;
 use crate::names::{
     GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_TABS,
     TUI_WELCOME,
 };
-use crate::overlay::{
+use crate::scrollback::Scrollback;
+use crate::seam::gateway::GatewayRef;
+use crate::seam::session::SessionRef;
+use crate::seam::tabs::Tabs;
+use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
+use crate::theme::Theme;
+use crate::views::ask_view;
+use crate::views::dashboard;
+use crate::views::mcp_elicit_view;
+use crate::views::overlay::{
     self, filter_help_items, filter_sessions, filter_strings, HelpItem, InspectTarget, Overlay,
 };
-use crate::pairing;
-use crate::permission_view;
-use crate::plan_approval_view;
-use crate::preset_overlay;
-use crate::queue_pane::{self, QueueHit};
-use crate::scrollback::Scrollback;
-use crate::session::SessionRef;
-use crate::settings_modal;
-use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
-use crate::tab_bar;
-use crate::tabs::Tabs;
-use crate::task_dock::{self, TaskDockHit};
-use crate::text_overlay;
-use crate::theme::Theme;
-use crate::usage_overlay;
+use crate::views::pairing;
+use crate::views::permission_view;
+use crate::views::plan_approval_view;
+use crate::views::preset_overlay;
+use crate::views::queue_pane::{self, QueueHit};
+use crate::views::settings_modal;
+use crate::views::tab_bar;
+use crate::views::task_dock::{self, TaskDockHit};
+use crate::views::text_overlay;
+use crate::views::usage_overlay;
 
 use super::support::*;
-use crate::goal_overlay;
-use crate::goal_pane::{self, GoalHit};
-use crate::inspect_overlay;
-use crate::prompt::PromptWidget;
-use crate::shortcuts::Shortcuts;
-use crate::status::{self, StatusLine};
-use crate::status_bar::StatusBar;
-use crate::welcome::Welcome;
+use crate::seam::shortcuts::Shortcuts;
+use crate::views::goal_overlay;
+use crate::views::goal_pane::{self, GoalHit};
+use crate::views::inspect_overlay;
+use crate::views::prompt::PromptWidget;
+use crate::views::status::{self, StatusLine};
+use crate::views::status_bar::StatusBar;
+use crate::views::welcome::Welcome;
 use std::io::Stderr;
 
 /// Grok `LayoutConfig::default()` outer padding.
@@ -102,6 +103,14 @@ pub(super) fn prompt_chrome_info(ctx: &Context) -> String {
         parts.push(timer);
     }
     parts.push(model);
+    // 当前走哪条 wire 紧跟在模型后面：切模型会**重新播种**协议，这两条永远
+    // 一起变，贴在一起才读得成一条信息。模型没选（空 id）时不留一个孤零零的
+    // 协议名——那时候它不代表任何端点。
+    if let Some(settings) = settings.as_ref() {
+        if !settings.model().trim().is_empty() {
+            parts.push(settings.backend().name().to_string());
+        }
+    }
     if let Some(preset) = preset {
         parts.push(preset);
     }
@@ -185,6 +194,40 @@ pub(super) fn draw(
                 .buffer_mut()
                 .set_style(area, Style::default().bg(theme.bg_base));
             let inner = inner_area(area);
+            // 会话面板是**独立视图**，吃满整个内区：它自己有抬头（cwd + 汇总）、
+            // 动作行、列表、peek 和快捷键条，再叠一层应用状态栏就成了两行 cwd。
+            // 别的 overlay 只铺在滚动区上，所以走不到这条。
+            if let Overlay::Dashboard {
+                selected,
+                query,
+                collapsed,
+                focus,
+                composer,
+                ..
+            } = overlay
+            {
+                // 擦**整个 area**，不是 `inner`：面板画在内缩 2 列 / 1 行的区域里，
+                // 外面那圈 padding 上一帧的字还在（上面只 `set_style` 过，那不擦
+                // 字符）。只擦 inner 会在四边留一圈上一屏的残字。
+                ratatui::widgets::Clear.render(area, frame.buffer_mut());
+                frame
+                    .buffer_mut()
+                    .set_style(area, Style::default().bg(theme.bg_base));
+                let rows = dashboard::build_rows(ctx, query, collapsed);
+                *hits = dashboard::render(
+                    frame.buffer_mut(),
+                    inner,
+                    ctx,
+                    &dashboard::PanelInput {
+                        rows: &rows,
+                        selected: *selected,
+                        query,
+                        focus: *focus,
+                        composer,
+                    },
+                );
+                return;
+            }
             let inspect_open = matches!(overlay, Overlay::Inspect { .. });
             let perm_open = matches!(overlay, Overlay::Permission { .. });
             let pairing_pending = matches!(overlay, Overlay::PairingPending { .. });
@@ -314,13 +357,15 @@ pub(super) fn draw(
                 if let Some(c) = center.as_deref() {
                     bar = bar.center(c);
                 }
+                let right_line = status.right_line();
                 if let Some(r) = right.as_deref() {
-                    if status.right_is_flash() {
-                        bar = bar.right(r);
-                    } else {
-                        bar = bar.right_styled(r, status.occupancy_style());
-                    }
+                    // 命中区按纯文本算宽度：悬停态（进度条 + 百分比）和默认态
+                    // （数字）等宽，所以这一份宽度对两种形态都成立。
                     status.remember_right_hit(status_area, r);
+                    match right_line {
+                        Some(line) => bar = bar.right_line(line),
+                        None => bar = bar.right(r),
+                    }
                 }
                 frame.render_widget(bar, status_area);
             }
@@ -550,7 +595,7 @@ pub(super) fn draw(
                                         width: scroll_area.width.saturating_sub(2).max(1),
                                         height: h,
                                     };
-                                    crate::prompt::paint_image_card(
+                                    crate::views::prompt::paint_image_card(
                                         frame.buffer_mut(),
                                         card,
                                         &img,
@@ -571,7 +616,7 @@ pub(super) fn draw(
                 .get::<Shortcuts>(TUI_SHORTCUTS)
                 .map(|s| s.hints(overlay, slash_is_open, files_open))
                 .unwrap_or_else(|| {
-                    crate::shortcuts::idle_hints(
+                    crate::seam::shortcuts::idle_hints(
                         ctx.get::<PromptWidget>(TUI_PROMPT)
                             .is_some_and(|p| p.can_send()),
                         ctx.get::<SessionRef>(SESSION_PORT)
@@ -798,6 +843,8 @@ pub(super) fn paint_overlay(
             let runs = workflow_rows(ctx, query);
             workflows::render_workflows_overlay(buf, area, &runs, *selected, query)
         }
+        // 面板在 `draw` 里就吃满整个内区并提前返回了，走不到这里。
+        Overlay::Dashboard { .. } => PickerHits::default(),
         Overlay::Mcps {
             selected,
             query,
@@ -944,5 +991,30 @@ mod tests {
         );
         assert_eq!(format_model_display("Grok 4", "", "grok-4"), "Grok 4");
         assert_eq!(chrome_model_label("unknown/id", &catalog), "unknown/id");
+    }
+
+    /// 底栏在模型旁边写当前协议：切模型会重新播种协议，两条一起变，分开放
+    /// 就会让人以为协议是独立设置的。
+    #[test]
+    fn prompt_chrome_pairs_the_model_with_its_protocol() {
+        let ctx = Context::new();
+        let _svc = ctx
+            .provide(SETTINGS, AppSettings::new("not-in-any-catalog"))
+            .unwrap();
+        let line = prompt_chrome_info(&ctx);
+        assert!(
+            line.starts_with("not-in-any-catalog · responses"),
+            "line={line}"
+        );
+    }
+
+    /// 没选模型（空 id）时不写协议：底栏兜底的 `dock` 不是一个端点，给它配一条
+    /// wire 是假信息。
+    #[test]
+    fn prompt_chrome_skips_the_protocol_without_a_model() {
+        let ctx = Context::new();
+        let _svc = ctx.provide(SETTINGS, AppSettings::new("")).unwrap();
+        let line = prompt_chrome_info(&ctx);
+        assert!(line.starts_with("dock · 思考"), "line={line}");
     }
 }

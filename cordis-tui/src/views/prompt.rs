@@ -17,9 +17,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use cordis::Context;
 use cordis_spine::{AppSettings, Slash, SlashEntry, SETTINGS, SLASH};
 
-use super::theme::Theme;
-use crate::clipboard::ClipboardImage;
+use crate::app::clipboard::ClipboardImage;
 use crate::file_search::{self, FileSearchSnapshot};
+use crate::theme::Theme;
 
 const IMAGE_CAP: usize = 10;
 const PASTE_CHIP_LINES: usize = 4;
@@ -171,7 +171,7 @@ impl PromptWidget {
     }
 
     pub fn handle_paste(&self, text: &str) {
-        let text = crate::clipboard::normalize_cr(text);
+        let text = crate::app::clipboard::normalize_cr(text);
         if text.is_empty() {
             return;
         }

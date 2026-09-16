@@ -75,6 +75,20 @@ fn with_band(
     line
 }
 
+/// 一行纯 band 底色的内边距行。
+///
+/// Grok 的用户块哪怕只有一句话也有三行的体量：上下各一行空的底色行把文本托起来。
+/// dock 之前的块高度等于文本行数，一句话的提问就是一条一行高的浅色带，在 `bg_base`
+/// `#141414` 上只差 16/255——高度撑不起来，颜色又弱，滚动时和模型输出糊在一起。
+fn band_pad(band: ratatui::style::Color, fill_width: usize) -> Line<'static> {
+    let mut line = Line::from(Span::styled(
+        " ".repeat(fill_width),
+        Style::default().bg(band),
+    ));
+    line.style = line.style.bg(band);
+    line
+}
+
 /// Skill token = first `/…` on the first line (Grok `UserPromptBlock::skill`).
 fn skill_token_end(text: &str) -> Option<usize> {
     let first = text.lines().next().unwrap_or("");
@@ -166,7 +180,30 @@ pub fn lines(
             fill_width,
         ));
     }
-    out
+    // 上下内边距只在真的有底色时才加：`band` 为 None 的主题里它们会退化成两条
+    // 看不见的空行，白占两行高度。
+    match band {
+        Some(c) => {
+            let mut padded = Vec::with_capacity(out.len() + 2);
+            padded.push(band_pad(c, fill_width));
+            padded.extend(out);
+            padded.push(band_pad(c, fill_width));
+            padded
+        }
+        None => out,
+    }
+}
+
+/// 块内第一条正文行的下标——`/timestamps` 的时钟要对齐文本，不是对齐内边距。
+pub fn text_row_offset(block: &[Line<'static>]) -> usize {
+    block
+        .iter()
+        .position(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.content.chars().any(|c| !c.is_whitespace()))
+        })
+        .unwrap_or(0)
 }
 
 fn token_styled_line(

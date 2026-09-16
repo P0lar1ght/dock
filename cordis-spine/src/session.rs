@@ -166,10 +166,19 @@ impl Sessions {
             times: Arc::new(Mutex::new(Vec::new())),
             archive: Arc::new(Mutex::new(Vec::new())),
             next_id: Arc::new(Mutex::new(1)),
-            usage: Arc::new(Mutex::new(TokenUsage {
-                window: 128_000,
-                ..TokenUsage::default()
-            })),
+            // 窗口从 **0（未知）** 起步，不预先塞一个 128_000。
+            //
+            // `context_usage::window_size` 把任何非零的会话窗口当权威值，直接
+            // 返回、不再查目录；而真正的窗口要到第一次组请求时才由
+            // `http::…` 的 `set_window` 写进来。于是冷启动那一段顶栏显示的是
+            // 种子值 128K，聊一句之后才跳成 config 里配的 1M——看起来像是窗口
+            // 自己变了。`project_instructions` / `workflow` / `skills` 早就写成
+            // `filter(|w| *w > 0).or_else(查目录)`，本来就把 0 当"还不知道"；
+            // 是这颗种子把那套兜底全废掉了。
+            //
+            // 0 对下游是安全的：`set_window` 只接受 `> 0`，
+            // `compact::exceeds_threshold` 对 window == 0 直接返回 false。
+            usage: Arc::new(Mutex::new(TokenUsage::default())),
             ledger: Arc::new(Mutex::new(UsageLedger::default())),
             pending_call: Arc::new(Mutex::new(None)),
             turn_started: Arc::new(Mutex::new(None)),
@@ -1028,6 +1037,13 @@ impl Sessions {
             let _ = crate::session_persist::remove(&item.id, &cwd);
         }
         Some(item)
+    }
+
+    /// 当前这一份会话在磁盘上的 id（`persist_live` 写的那个），还没落过盘就是
+    /// 空串。dashboard 用它把名册里的同一条去重——已经开着的会话不该在「历史」
+    /// 里再出现一次。
+    pub fn live_session_id(&self) -> String {
+        self.live_id.lock().unwrap().clone()
     }
 
     fn take_archive_id(&self) -> String {

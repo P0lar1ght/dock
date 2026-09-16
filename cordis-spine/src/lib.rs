@@ -36,6 +36,7 @@ mod permissions;
 mod plan_mode;
 mod project_instructions;
 mod prompt;
+mod roster;
 mod runtime;
 mod sched;
 mod session;
@@ -116,8 +117,8 @@ pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
     DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
     PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
-    SESSIONS, SESSION_EVENT, SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SYSTEM_PROMPT, TODOS,
-    TOOLS, TOOLS_EXECUTE, TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
+    ROSTER, SESSIONS, SESSION_EVENT, SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SYSTEM_PROMPT,
+    TODOS, TOOLS, TOOLS_EXECUTE, TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
 };
 pub use permissions::{permissions, PermissionPrompt, Permissions};
 pub use plan_mode::{
@@ -126,6 +127,7 @@ pub use plan_mode::{
 };
 pub use project_instructions::{project_instructions, INSTRUCTIONS_FILE};
 pub use prompt::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
+pub use roster::{roster, Roster};
 pub use runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
 pub use sched::{
     expired_task_notice, format_scheduled_task_prompt, format_scheduled_task_reminder,
@@ -133,6 +135,7 @@ pub use sched::{
     parse_interval, tool_scheduler, LoopFireMode, SCHEDULER_CREATE_TOOL_NAME,
 };
 pub use session::{sessions, ArchivedSession, Sessions, TokenUsage};
+pub use session_persist::RosterEntry;
 pub use settings::{settings, AppSettings, MermaidEngineKind, PermissionMode};
 pub use skills::{skills, tool_skills, SkillInfo, SkillScope, Skills};
 pub use slash::{

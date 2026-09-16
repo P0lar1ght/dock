@@ -22,8 +22,8 @@ use crate::grok::picker::{
     render_divider, render_fullscreen_frame, render_header, render_picker_list, render_picker_row,
     PickerHits, PickerRow,
 };
-use crate::overlay::matches_query;
 use crate::theme::Theme;
+use crate::views::overlay::matches_query;
 
 pub const ASSIGNED_HIT: usize = 10_000;
 pub const PERSONA_HIT: usize = 20_000;

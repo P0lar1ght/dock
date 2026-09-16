@@ -11,11 +11,14 @@ use crate::grok::picker::{
     render_floating_frame, render_fullscreen_frame, render_picker_list, PickerHits, PickerRow,
 };
 use crate::grok::tasks_pane::GroupKind;
-use crate::plan_approval_view::PlanWrapCache;
-use crate::preset_overlay::{CanvasState, PresetPane, PresetView, RoleNamingDraft, RoleNamingStep};
-use crate::settings_modal::SettingsField;
 use crate::slash::{ArgKind, SlashCmd};
 use crate::theme::Theme;
+use crate::views::dashboard;
+use crate::views::plan_approval_view::PlanWrapCache;
+use crate::views::preset_overlay::{
+    CanvasState, PresetPane, PresetView, RoleNamingDraft, RoleNamingStep,
+};
+use crate::views::settings_modal::SettingsField;
 
 #[derive(Debug, Clone, Default)]
 pub enum Overlay {
@@ -139,6 +142,17 @@ pub enum Overlay {
         composer: String,
         composer_cursor: usize,
     },
+    /// 会话面板：同屏观察并驱动多个会话。不是模态框，是占满整屏的独立视图。
+    Dashboard {
+        selected: usize,
+        query: String,
+        collapsed: HashSet<dashboard::RowState>,
+        /// 键盘焦点在列表还是下方 peek 的输入框。
+        focus: dashboard::Focus,
+        /// peek 输入框的内容与光标（字节下标）。
+        composer: String,
+        composer_cursor: usize,
+    },
 }
 
 /// Tabs inside [`Overlay::Usage`].
@@ -249,7 +263,8 @@ impl Overlay {
             } => draft,
             Self::Tasks { query, .. }
             | Self::Mcps { query, .. }
-            | Self::Workflows { query, .. } => query,
+            | Self::Workflows { query, .. }
+            | Self::Dashboard { query, .. } => query,
             Self::Presets(PresetView::Canvas(CanvasState {
                 naming_role:
                     Some(RoleNamingDraft {
@@ -286,7 +301,7 @@ impl Overlay {
             ..
         } = self
         {
-            crate::inspect_overlay::insert_composer(composer, composer_cursor, c);
+            crate::views::inspect_overlay::insert_composer(composer, composer_cursor, c);
             return;
         }
         if let Some(q) = self.query_mut() {
@@ -303,7 +318,7 @@ impl Overlay {
             ..
         } = self
         {
-            crate::inspect_overlay::composer_insert_str(composer, composer_cursor, s);
+            crate::views::inspect_overlay::composer_insert_str(composer, composer_cursor, s);
             return;
         }
         if let Some(q) = self.query_mut() {
@@ -320,7 +335,7 @@ impl Overlay {
             ..
         } = self
         {
-            crate::inspect_overlay::composer_backspace(composer, composer_cursor);
+            crate::views::inspect_overlay::composer_backspace(composer, composer_cursor);
             return;
         }
         if let Some(q) = self.query_mut() {
@@ -355,6 +370,7 @@ impl Overlay {
             | Self::Tasks { selected, .. }
             | Self::Mcps { selected, .. }
             | Self::Workflows { selected, .. }
+            | Self::Dashboard { selected, .. }
             | Self::Goal { selected, .. } => *selected,
             Self::Usage { .. }
             | Self::Notice { .. }
@@ -390,6 +406,7 @@ impl Overlay {
             | Self::Tasks { selected: s, .. }
             | Self::Mcps { selected: s, .. }
             | Self::Workflows { selected: s, .. }
+            | Self::Dashboard { selected: s, .. }
             | Self::Goal { selected: s, .. } => *s = selected,
             Self::Usage { .. }
             | Self::Notice { .. }
@@ -417,7 +434,8 @@ impl Overlay {
             | Self::Args { query, .. }
             | Self::Tasks { query, .. }
             | Self::Mcps { query, .. }
-            | Self::Workflows { query, .. } => Some(query),
+            | Self::Workflows { query, .. }
+            | Self::Dashboard { query, .. } => Some(query),
             Self::Goal {
                 editing: true,
                 draft,
@@ -667,6 +685,11 @@ const HELP: &[HelpEntry] = &[
         key: "/tasks",
         label: "后台任务与子代理（对话中点击卡片查看）",
         kind: HelpKind::Slash(SlashCmd::Tasks),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/dashboard",
+        label: "会话总览：分页 · 子代理 · 历史（Enter 打开 · x 删除）",
+        kind: HelpKind::Slash(SlashCmd::Agents),
     }),
     HelpEntry::Row(HelpRow {
         key: "/workflow",

@@ -7,8 +7,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::grok::picker::{render_floating_frame, PickerHits, PickerRow};
-use crate::overlay;
 use crate::theme::{Theme, ThemeKind};
+use crate::views::overlay;
 use cordis_spine::{AppSettings, MermaidEngineKind, PermissionMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

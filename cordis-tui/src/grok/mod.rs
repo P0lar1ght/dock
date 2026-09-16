@@ -9,6 +9,7 @@ pub mod mcps;
 pub mod md_style;
 pub mod mermaid;
 pub mod picker;
+pub mod progress_bar;
 pub mod shortcuts;
 pub mod tasks_pane;
 pub mod todo_pane;

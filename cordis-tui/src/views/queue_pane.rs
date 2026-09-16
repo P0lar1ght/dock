@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::grok::line_utils::truncate_str;
-use crate::session::QueuedItem;
+use crate::seam::session::QueuedItem;
 use crate::theme::Theme;
 
 /// Grok `MAX_QUEUE_HEIGHT`.

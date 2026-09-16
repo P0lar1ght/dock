@@ -20,8 +20,8 @@ use cordis_spine::{LogEvent, Sessions, AGENT_LOOP, AGENT_PRESETS, SESSIONS, TURN
 use crate::names::{
     SESSION, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS, TUI_WELCOME,
 };
-use crate::prompt::PromptWidget;
-use crate::session::SessionRef;
+use crate::seam::session::SessionRef;
+use crate::views::prompt::PromptWidget;
 
 /// 每页各有一份的服务。没列进来的一律落回根（全局单例：工具表、LLM、权限、
 /// MCP、浏览器、cua、后台任务……），两页会真的抢同一个。
@@ -138,6 +138,18 @@ impl Tabs {
         tabs.get(index)
             .map(|t| t.ctx.clone())
             .unwrap_or_else(|| self.inner.root.clone())
+    }
+
+    /// 每一页的 ctx。dashboard 要挨页问 `"sessions"`（每页一份），
+    /// [`active_ctx`](Self::active_ctx) 只给当前那一页。
+    pub fn contexts(&self) -> Vec<Context> {
+        self.inner
+            .tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.ctx.clone())
+            .collect()
     }
 
     pub fn list(&self) -> Vec<TabInfo> {

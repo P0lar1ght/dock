@@ -15,6 +15,9 @@ mod palette {
     pub const BG: Color = rgb(26, 27, 38);
     pub const BG_DARK: Color = rgb(22, 22, 30);
     pub const BG_HIGHLIGHT: Color = rgb(41, 46, 66);
+    /// `bg_light` 专用，比 [`BG_HIGHLIGHT`] 再亮一档。原值压在 `BG_STORM`
+    /// `rgb(36,40,59)` 上只差 5/255，三个主题里对比最弱的一个。
+    pub const BG_BAND: Color = rgb(54, 61, 86);
     pub const BG_STORM: Color = rgb(36, 40, 59);
     pub const BG_STORM_DARK: Color = rgb(31, 35, 53);
     pub const FG: Color = rgb(192, 202, 245);
@@ -44,7 +47,7 @@ impl Theme {
     pub const fn tokyonight() -> Self {
         Self {
             bg_base: BG_STORM,
-            bg_light: BG_HIGHLIGHT,
+            bg_light: BG_BAND,
             bg_dark: BG_HIGHLIGHT,
             bg_highlight: BG_HIGHLIGHT,
             bg_hover: rgb(40, 49, 76),

@@ -11,12 +11,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 use unicode_width::UnicodeWidthChar;
 
-use crate::gateway::{GatewayRef, PairingBinding, PairingPrompt};
 use crate::grok::glyphs;
 use crate::grok::picker::{PickerHits, PickerRow};
 use crate::names::GATEWAY;
-use crate::overlay::{self, Overlay};
+use crate::seam::gateway::{GatewayRef, PairingBinding, PairingPrompt};
 use crate::theme::Theme;
+use crate::views::overlay::{self, Overlay};
 
 pub const PENDING_OPTIONS: &[&str] = &["批准", "拒绝"];
 

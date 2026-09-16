@@ -22,8 +22,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::grok::glyphs;
 use crate::grok::picker::{render_floating_frame, PickerHits};
-use crate::overlay::UsageTab;
 use crate::theme::Theme;
+use crate::views::overlay::UsageTab;
 
 struct Hits {
     context: Rect,

@@ -17,10 +17,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_str;
 use crate::grok::picker::{render_bordered_frame, render_close_button, PickerHits};
-use crate::overlay::InspectTarget;
 use crate::scrollback::tool::ToolMode;
 use crate::scrollback::{self, live};
 use crate::theme::Theme;
+use crate::views::overlay::InspectTarget;
 use cordis::Context;
 use cordis_spine::{AgentPresets, Jobs, Subagents, AGENT_PRESETS, JOBS, SUBAGENTS};
 

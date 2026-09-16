@@ -33,6 +33,10 @@ mod palette {
     pub const BG_STORM_DARK: Color = rgb(17, 17, 17); //  #111111 — dark bg
     pub const BG_STORM: Color = rgb(20, 20, 20); //  #141414 — main bg
     pub const BG_HIGHLIGHT: Color = rgb(36, 36, 36); //  #242424 — highlight bg
+    /// `bg_light` 专用，比 [`BG_HIGHLIGHT`] 再亮一档：用户提问块、询问 / 配对 /
+    /// 计划审批等覆盖层都铺这一层。`#242424` 压在 `BG_STORM` `#141414` 上只差
+    /// 16/255，一行高的色带基本看不出来。
+    pub const BG_BAND: Color = rgb(46, 46, 46); //  #2e2e2e — 浮层 / 用户块底
 
     // ── Text / grays ────────────────────────────────────────────────────
     pub const FG: Color = rgb(225, 225, 225); // #e1e1e1 — primary text
@@ -70,7 +74,7 @@ impl Theme {
     pub const fn groknight() -> Self {
         Self {
             bg_base: BG_STORM,
-            bg_light: BG_HIGHLIGHT,
+            bg_light: BG_BAND,
             bg_dark: rgb(28, 28, 28), // lighter than bg_base for visible code blocks
             bg_highlight: BG_HIGHLIGHT,
             bg_hover: rgb(44, 44, 44),

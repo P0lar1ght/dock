@@ -192,6 +192,7 @@ pub enum Effect {
     GoalResume,
     GoalClear,
     ShowTasks,
+    ShowAgents,
     ToggleWorkflows,
     ShowMcps,
     /// `/lsp`：空/`setup` 写项目配置，`user` 写用户配置，`status` 只看不写。
@@ -392,6 +393,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         SlashCmd::ViewPlan => Effect::ViewPlan,
         SlashCmd::Goal => goal_effect(args),
         SlashCmd::Tasks => Effect::ShowTasks,
+        SlashCmd::Agents => Effect::ShowAgents,
         SlashCmd::Workflow => {
             if args.is_empty() || args.eq_ignore_ascii_case("runs") {
                 Effect::ToggleWorkflows

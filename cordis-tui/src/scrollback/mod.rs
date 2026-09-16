@@ -20,7 +20,7 @@ use cordis_spine::{
 };
 
 use crate::names::SESSION_PORT;
-use crate::session::SessionRef;
+use crate::seam::session::SessionRef;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -795,15 +795,12 @@ fn build_frame(
         }
         match event {
             LogEvent::User(text) => {
+                let block = user::lines(text, &theme, message_wrap(width, show_ts), width);
                 if let Some(at) = stamp {
-                    stamps.push((lines.len(), at));
+                    // 块首是一行 band 内边距，时钟要落在正文那一行上。
+                    stamps.push((lines.len() + user::text_row_offset(&block), at));
                 }
-                lines.extend(user::lines(
-                    text,
-                    &theme,
-                    message_wrap(width, show_ts),
-                    width,
-                ));
+                lines.extend(block);
                 lines.push(Line::from(""));
             }
             LogEvent::LlmStream(llm) => {
@@ -1477,20 +1474,88 @@ mod tests {
     fn user_band_fills_the_pane_width() {
         let theme = Theme::current();
         let lines = super::user::lines("hi", &theme, 40, 80);
-        let used: usize = lines[0]
+        let text_row = super::user::text_row_offset(&lines);
+        let used: usize = lines[text_row]
             .spans
             .iter()
             .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
         assert_eq!(used, 80, "Grok prompt band pads to the pane width");
-        let area = Rect::new(0, 0, 80, 1);
+        let height = lines.len() as u16;
+        let area = Rect::new(0, 0, 80, height);
         let mut buf = Buffer::empty(area);
         Paragraph::new(lines).render(area, &mut buf);
         assert_eq!(
-            buf[(79, 0)].bg,
+            buf[(79, text_row as u16)].bg,
             theme.bg_light,
             "right edge of the user row must carry the band background"
         );
+    }
+
+    /// 一句话的提问也要有三行体量：上下各一行 band 内边距。一行高的色带在
+    /// `bg_base` 上分不出来，滚起来和模型输出糊在一起。
+    #[test]
+    fn user_block_has_band_padding_above_and_below() {
+        let theme = Theme::current();
+        let lines = super::user::lines("hi", &theme, 40, 80);
+        assert_eq!(
+            lines.len(),
+            3,
+            "one-line prompt renders as a three-row block"
+        );
+        assert_eq!(super::user::text_row_offset(&lines), 1);
+
+        let area = Rect::new(0, 0, 80, 3);
+        let mut buf = Buffer::empty(area);
+        Paragraph::new(lines).render(area, &mut buf);
+        for row in 0..3u16 {
+            assert_eq!(
+                buf[(79, row)].bg,
+                theme.bg_light,
+                "row {row} must carry the band all the way to the right edge"
+            );
+            assert_eq!(
+                buf[(0, row)].bg,
+                theme.bg_light,
+                "row {row} must carry the band from the left edge"
+            );
+        }
+        assert!(
+            (0..80).all(|x| buf[(x, 0u16)].symbol().trim().is_empty()),
+            "the top row is padding, not text"
+        );
+        assert!(
+            (0..80).all(|x| buf[(x, 2u16)].symbol().trim().is_empty()),
+            "the bottom row is padding, not text"
+        );
+    }
+
+    /// band 要和页面底分得开。改之前三个主题的通道最大差是 16 / 16 / 7
+    /// （groknight / grokday / tokyonight），下限取 20 正好卡在它们之上：
+    /// 谁把 `bg_light` 调回那一档，这条就红。
+    #[test]
+    fn band_is_distinguishable_from_the_page_background() {
+        fn channels(c: ratatui::style::Color) -> (i32, i32, i32) {
+            match c {
+                ratatui::style::Color::Rgb(r, g, b) => (r as i32, g as i32, b as i32),
+                other => panic!("expected an rgb color, got {other:?}"),
+            }
+        }
+        for (name, theme) in [
+            ("groknight", Theme::groknight()),
+            ("grokday", Theme::grokday()),
+            ("tokyonight", Theme::tokyonight()),
+        ] {
+            let (br, bg, bb) = channels(theme.bg_base);
+            let (lr, lg, lb) = channels(theme.bg_light);
+            let delta = (lr - br).abs().max((lg - bg).abs()).max((lb - bb).abs());
+            assert!(
+                delta >= 20,
+                "{name}: band {:?} is only {delta}/255 from the page background {:?}",
+                theme.bg_light,
+                theme.bg_base
+            );
+        }
     }
 
     #[test]
@@ -1539,13 +1604,14 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(frame.stamps, vec![(0, at)]);
-        let area = Rect::new(0, 0, 80, 3);
+        // 块首是 band 内边距，正文在第 1 行——时钟跟着正文走，不落在空的底色行上。
+        assert_eq!(frame.stamps, vec![(1, at)]);
+        let area = Rect::new(0, 0, 80, 4);
         let mut buf = Buffer::empty(area);
         Paragraph::new(frame.lines.clone()).render(area, &mut buf);
         paint_timestamps(&mut buf, area, &frame, 0, None, &Theme::current());
-        let left: String = (0..16).map(|x| buf[(x, 0)].symbol().to_string()).collect();
-        let right: String = (60..80).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        let left: String = (0..16).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        let right: String = (60..80).map(|x| buf[(x, 1)].symbol().to_string()).collect();
         assert!(left.contains('你') && left.contains('好'), "{left:?}");
         assert!(
             right.contains("AM") || right.contains("PM"),

@@ -33,8 +33,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
 use crate::grok::glyphs;
-use crate::status::format_duration_short;
 use crate::theme::Theme;
+use crate::views::status::format_duration_short;
 
 /// Columns of trailing glow behind the shine head.
 const TAIL: u64 = 10;

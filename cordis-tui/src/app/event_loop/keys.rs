@@ -11,37 +11,37 @@ use cordis_spine::{
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::ask_view;
 use crate::grok::mcps;
 use crate::grok::picker::PickerHits;
 use crate::grok::tasks_pane::TaskEntry;
 use crate::names::{TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME};
-use crate::overlay::{
+use crate::scrollback::{ClickHit, MouseUpResult, Scrollback};
+use crate::slash::filter_args;
+use crate::views::ask_view;
+use crate::views::overlay::{
     self, filter_sessions, filter_strings, HelpItem, HelpKind, InspectTarget, Overlay, UsageTab,
 };
-use crate::permission_view;
-use crate::plan_approval_view;
-use crate::preset_overlay::{self, PresetAction, PresetView};
-use crate::queue_pane::{self, QueueHit};
-use crate::scrollback::{ClickHit, MouseUpResult, Scrollback};
-use crate::settings_modal;
-use crate::slash::filter_args;
-use crate::tab_bar;
+use crate::views::permission_view;
+use crate::views::plan_approval_view;
+use crate::views::preset_overlay::{self, PresetAction, PresetView};
+use crate::views::queue_pane::{self, QueueHit};
+use crate::views::settings_modal;
+use crate::views::tab_bar;
 use std::collections::HashSet;
 
-use crate::task_dock::{self, TaskDockHit};
+use crate::views::task_dock::{self, TaskDockHit};
 
 use super::support::*;
-use crate::actions::{Action, Effect};
-use crate::dispatch::dispatch;
-use crate::goal_overlay;
-use crate::goal_pane::{self, GoalHit};
-use crate::inspect_overlay::{self, InspectClick};
-use crate::mode_cycle;
-use crate::prompt::PromptWidget;
-use crate::status::StatusLine;
-use crate::usage_overlay;
-use crate::welcome::{Welcome, WelcomeHit};
+use crate::app::actions::{Action, Effect};
+use crate::app::dispatch::dispatch;
+use crate::app::mode_cycle;
+use crate::views::goal_overlay;
+use crate::views::goal_pane::{self, GoalHit};
+use crate::views::inspect_overlay::{self, InspectClick};
+use crate::views::prompt::PromptWidget;
+use crate::views::status::StatusLine;
+use crate::views::usage_overlay;
+use crate::views::welcome::{Welcome, WelcomeHit};
 
 #[allow(clippy::too_many_arguments)]
 // 后四个参数都是上一帧的点击命中表（picker / 任务条 / 目标条 / 排队条 / 标签栏）：
@@ -87,11 +87,11 @@ pub(super) fn run_action(
             }
             if matches!(overlay, Overlay::PairingPending { .. }) {
                 if let Some(id) = ctx
-                    .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                    .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
                     .and_then(|g| g.pairing_front().map(|p| p.id))
                 {
                     let _ = ctx
-                        .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                        .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
                         .and_then(|g| g.pairing_deny(&id).ok());
                 }
             }
@@ -236,6 +236,16 @@ pub(super) fn run_action(
             accept_overlay(ctx, overlay)
         }
         Action::OverlayChar(c) => {
+            if let Overlay::Dashboard {
+                focus: crate::views::dashboard::Focus::Composer,
+                composer,
+                composer_cursor,
+                ..
+            } = overlay
+            {
+                crate::views::inspect_overlay::insert_composer(composer, composer_cursor, c);
+                return Vec::new();
+            }
             if matches!(
                 overlay,
                 Overlay::Inspect {
@@ -354,7 +364,7 @@ pub(super) fn run_action(
             if let Overlay::PairingPending { selected } = overlay {
                 if let Some(i) = c.to_digit(10) {
                     let i = i as usize;
-                    if (1..=crate::pairing::PENDING_OPTIONS.len()).contains(&i) {
+                    if (1..=crate::views::pairing::PENDING_OPTIONS.len()).contains(&i) {
                         *selected = i - 1;
                         return accept_overlay(ctx, overlay);
                     }
@@ -364,9 +374,9 @@ pub(super) fn run_action(
             if let Overlay::PairingManage { .. } = overlay {
                 if c == 'x' || c == 'X' {
                     if let Some(ui) =
-                        ctx.get::<crate::pairing::PairingUi>(crate::names::TUI_PAIRING)
+                        ctx.get::<crate::views::pairing::PairingUi>(crate::names::TUI_PAIRING)
                     {
-                        crate::pairing::reject_manage(&ui, overlay);
+                        crate::views::pairing::reject_manage(&ui, overlay);
                     }
                     return Vec::new();
                 }
@@ -466,6 +476,32 @@ pub(super) fn run_action(
                 }
                 return Vec::new();
             }
+            if let Overlay::Dashboard {
+                selected,
+                query,
+                collapsed,
+                ..
+            } = overlay
+            {
+                if c == 'x' || c == 'X' {
+                    let rows = crate::views::dashboard::build_rows(ctx, query, collapsed);
+                    if let Some(crate::views::dashboard::DashRow::Archived { id, cwd, .. }) =
+                        rows.get(*selected)
+                    {
+                        if let Some(roster) = ctx.get::<cordis_spine::Roster>(cordis_spine::ROSTER)
+                        {
+                            match roster.remove(id, cwd) {
+                                Ok(()) => flash(ctx, "已删除该会话"),
+                                Err(e) => flash(ctx, format!("删除失败：{e}")),
+                            }
+                        }
+                        // 删完行数变了，选中项可能落到界外。
+                        let len = crate::views::dashboard::build_rows(ctx, query, collapsed).len();
+                        *selected = (*selected).min(len.saturating_sub(1));
+                    }
+                    return Vec::new();
+                }
+            }
             if let Overlay::Tasks {
                 selected,
                 query,
@@ -548,6 +584,16 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::OverlayBackspace => {
+            if let Overlay::Dashboard {
+                focus: crate::views::dashboard::Focus::Composer,
+                composer,
+                composer_cursor,
+                ..
+            } = overlay
+            {
+                crate::views::inspect_overlay::composer_backspace(composer, composer_cursor);
+                return Vec::new();
+            }
             if let Overlay::Ask {
                 selected,
                 picked,
@@ -746,6 +792,17 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::OverlayTab => {
+            if let Overlay::Dashboard { focus, .. } = overlay {
+                *focus = match focus {
+                    crate::views::dashboard::Focus::List => {
+                        crate::views::dashboard::Focus::Composer
+                    }
+                    crate::views::dashboard::Focus::Composer => {
+                        crate::views::dashboard::Focus::List
+                    }
+                };
+                return Vec::new();
+            }
             if matches!(
                 overlay,
                 Overlay::Presets(PresetView::Canvas(s)) if s.naming_role.is_some()
@@ -770,6 +827,11 @@ pub(super) fn run_action(
         Action::MouseMove { column, row } => {
             if matches!(overlay, Overlay::Usage { .. }) {
                 usage_overlay::hover(column, row);
+            }
+            // 顶栏右段的悬停态：停上去把占用率换成进度条。覆盖层开着时也更新，
+            // 这样关掉覆盖层不会留下一个卡住的悬停态。
+            if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
+                status.set_mouse(column, row);
             }
             if welcome_open(ctx) && !overlay.is_open() {
                 if let Ok(welcome) = ctx.require::<Welcome>(TUI_WELCOME) {
@@ -859,7 +921,7 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::PasteClipboard => {
-            apply_paste(ctx, overlay, crate::clipboard::paste_from_clipboard());
+            apply_paste(ctx, overlay, crate::app::clipboard::paste_from_clipboard());
             Vec::new()
         }
         Action::Scroll(delta) => {
@@ -969,11 +1031,11 @@ pub(super) fn run_action(
                     }
                     if matches!(overlay, Overlay::PairingPending { .. }) {
                         if let Some(id) = ctx
-                            .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                            .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
                             .and_then(|g| g.pairing_front().map(|p| p.id))
                         {
                             let _ = ctx
-                                .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                                .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
                                 .and_then(|g| g.pairing_deny(&id).ok());
                         }
                     }
@@ -1086,7 +1148,7 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::InsertText(text) => {
-            apply_paste(ctx, overlay, crate::clipboard::paste_from_event(&text));
+            apply_paste(ctx, overlay, crate::app::clipboard::paste_from_event(&text));
             Vec::new()
         }
         Action::CycleMode => {
@@ -1190,10 +1252,11 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         }
         Overlay::PairingPending { selected } => {
             if let Some(id) = ctx
-                .get::<crate::gateway::GatewayRef>(crate::names::GATEWAY)
+                .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
                 .and_then(|g| g.pairing_front().map(|p| p.id))
             {
-                if let Some(gw) = ctx.get::<crate::gateway::GatewayRef>(crate::names::GATEWAY) {
+                if let Some(gw) = ctx.get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
+                {
                     if *selected == 0 {
                         let _ = gw.pairing_confirm(&id);
                     } else {
@@ -1205,8 +1268,9 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
             return Vec::new();
         }
         Overlay::PairingManage { .. } => {
-            if let Some(ui) = ctx.get::<crate::pairing::PairingUi>(crate::names::TUI_PAIRING) {
-                crate::pairing::accept_manage(&ui, overlay);
+            if let Some(ui) = ctx.get::<crate::views::pairing::PairingUi>(crate::names::TUI_PAIRING)
+            {
+                crate::views::pairing::accept_manage(&ui, overlay);
             }
             return Vec::new();
         }
@@ -1310,6 +1374,74 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         }
         _ => {}
     }
+    // 焦点在 peek 输入框时，Enter 是**把消息发给选中的那个会话**——面板存在的
+    // 理由就是这个：不切页、不离开面板，轮流给几个会话派活。
+    if let Overlay::Dashboard {
+        selected,
+        query,
+        collapsed,
+        focus: crate::views::dashboard::Focus::Composer,
+        composer,
+        composer_cursor,
+    } = overlay
+    {
+        let rows = crate::views::dashboard::build_rows(ctx, query, collapsed);
+        let Some(row) = rows.get(*selected) else {
+            return Vec::new();
+        };
+        match crate::views::dashboard::submit_to(ctx, row, composer) {
+            Ok(()) => {
+                composer.clear();
+                *composer_cursor = 0;
+            }
+            Err(msg) => flash(ctx, msg),
+        }
+        return Vec::new();
+    }
+    // 焦点在列表时按行类型分：抬头是折叠开关，要就地改 overlay 而不是发 Effect，
+    // 所以单独在这里处理完直接返回。
+    if let Overlay::Dashboard {
+        selected,
+        query,
+        collapsed,
+        ..
+    } = overlay
+    {
+        let rows = crate::views::dashboard::build_rows(ctx, query, collapsed);
+        let Some(row) = rows.get(*selected).cloned() else {
+            return Vec::new();
+        };
+        let resumable = row.resumable();
+        match row {
+            crate::views::dashboard::DashRow::Header { state, .. } => {
+                if !collapsed.remove(&state) {
+                    collapsed.insert(state);
+                }
+                // 折叠后行数变了，选中项可能落到界外。
+                let len = crate::views::dashboard::build_rows(ctx, query, collapsed).len();
+                *selected = (*selected).min(len.saturating_sub(1));
+                return Vec::new();
+            }
+            crate::views::dashboard::DashRow::Tab { id, .. } => {
+                overlay.close();
+                return vec![Effect::TabGo { id }];
+            }
+            crate::views::dashboard::DashRow::Archived { id, cwd, .. } => {
+                if !resumable {
+                    // 不在当前工作目录下的会话恢复不了：`Sessions::restore` 只认
+                    // `archived()`，那份列表是 `load_cwd(当前 cwd)` 填的。与其
+                    // 按下去毫无反应，不如说清楚。
+                    flash(
+                        ctx,
+                        format!("该会话属于 {}，先 /cd 过去再恢复", cwd.display()),
+                    );
+                    return Vec::new();
+                }
+                overlay.close();
+                return vec![Effect::RestoreSession(id)];
+            }
+        }
+    }
     let effect = match overlay {
         Overlay::Resume { selected, query } => ctx.get::<Sessions>(SESSIONS).and_then(|s| {
             filter_sessions(&s.archived(), query)
@@ -1323,13 +1455,15 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
                 .cloned()
                 .and_then(|item| match item {
                     HelpItem::Builtin(row) => match row.kind {
-                        HelpKind::Slash(cmd) => Some(crate::actions::effect_for_slash(cmd, "")),
+                        HelpKind::Slash(cmd) => {
+                            Some(crate::app::actions::effect_for_slash(cmd, ""))
+                        }
                         HelpKind::Hint => None,
                     },
                     HelpItem::Extra { command, .. } => extras
                         .iter()
                         .find(|e| e.command == command)
-                        .map(|e| crate::actions::effect_for_extra(e, "")),
+                        .map(|e| crate::app::actions::effect_for_extra(e, "")),
                 })
         }
         Overlay::History { selected, query } => ctx.get::<PromptWidget>(TUI_PROMPT).and_then(|p| {
@@ -1353,7 +1487,7 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
                 crate::slash::ArgKind::LoopInterval => {
                     Effect::InsertHistory(format!("/loop {} ", item.insert_text))
                 }
-                _ => crate::actions::effect_for_slash(*cmd, &item.insert_text),
+                _ => crate::app::actions::effect_for_slash(*cmd, &item.insert_text),
             })
         }
         Overlay::None
@@ -1373,6 +1507,8 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         | Overlay::Inspect { .. }
         | Overlay::Presets(_) => None,
         Overlay::Tasks { .. } | Overlay::Mcps { .. } | Overlay::Workflows { .. } => None,
+        // 上面已经按行类型处理完并返回了，走不到这里。
+        Overlay::Dashboard { .. } => None,
     };
     overlay.close();
     effect.into_iter().collect()
@@ -1664,10 +1800,10 @@ pub(super) fn take_send(ctx: &Context, send_now: bool) -> Action {
 pub(super) fn apply_paste(
     ctx: &Context,
     overlay: &mut Overlay,
-    payload: crate::clipboard::PastePayload,
+    payload: crate::app::clipboard::PastePayload,
 ) {
     if overlay.is_open() {
-        if let crate::clipboard::PastePayload::Text(text) = payload {
+        if let crate::app::clipboard::PastePayload::Text(text) = payload {
             if let Overlay::Ask {
                 selected,
                 picked,
@@ -1700,9 +1836,9 @@ pub(super) fn apply_paste(
         return;
     };
     match payload {
-        crate::clipboard::PastePayload::Empty => flash(ctx, "剪贴板为空"),
-        crate::clipboard::PastePayload::Text(text) => prompt.handle_paste(&text),
-        crate::clipboard::PastePayload::Image(img) => match prompt.insert_image(img) {
+        crate::app::clipboard::PastePayload::Empty => flash(ctx, "剪贴板为空"),
+        crate::app::clipboard::PastePayload::Text(text) => prompt.handle_paste(&text),
+        crate::app::clipboard::PastePayload::Image(img) => match prompt.insert_image(img) {
             Ok(_) => {}
             Err(e) => flash(ctx, e),
         },
@@ -1713,6 +1849,11 @@ fn open_context_from_status(ctx: &Context, overlay: &mut Overlay, column: u16, r
     let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) else {
         return false;
     };
+    // chip 压在右段最右边，先判它——否则点 `[Agents]` 会连带把占用 overlay 开出来。
+    if status.hit_dashboard(column, row) {
+        *overlay = crate::views::dashboard::open(ctx);
+        return true;
+    }
     if !status.hit_right(column, row) {
         return false;
     }
@@ -1736,6 +1877,9 @@ pub(super) fn overlay_keys(code: KeyCode, ctrl: bool) -> Option<Action> {
         KeyCode::Char(' ') if !ctrl => Some(Action::OverlaySpace),
         // Ctrl 组合，不走 `Char(c) if !ctrl`，所以搜索框里照样能打 r。
         KeyCode::Char('r') | KeyCode::Char('R') if ctrl => Some(Action::OverlayRefresh),
+        // 会话面板上的「+ 新会话」。别的 overlay 开着时按到只会白跑一次 TabNew，
+        // 那本来就是它在主界面的语义。
+        KeyCode::Char('n') | KeyCode::Char('N') if ctrl => Some(Action::TabNew),
         KeyCode::Tab | KeyCode::BackTab => Some(Action::OverlayTab),
         KeyCode::Char(c) if !ctrl => Some(Action::OverlayChar(c)),
         _ => None,
@@ -1860,7 +2004,7 @@ mod tests {
             prompt.slash_move(1);
         }
         assert!(matches!(enter(&ctx), Some(Action::SlashAccept)));
-        assert!(crate::dispatch::dispatch(Action::SlashAccept, &prompt).is_empty());
+        assert!(crate::app::dispatch::dispatch(Action::SlashAccept, &prompt).is_empty());
         assert_eq!(prompt.text(), "/tab close ");
 
         // 填完就当没选过：下一下 Enter 才是发送。

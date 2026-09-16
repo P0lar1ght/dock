@@ -22,6 +22,9 @@ mod palette {
     pub const BG_STORM_DARK: Color = rgb(234, 234, 234); // #eaeaea
     pub const BG_STORM: Color = rgb(238, 238, 238); // #eeeeee — main bg
     pub const BG_HIGHLIGHT: Color = rgb(222, 222, 222); // #dedede — highlight bg
+    /// `bg_light` 专用，比 [`BG_HIGHLIGHT`] 再深一档（浅色主题里「更重」＝更深）。
+    /// 见 groknight 的同名常量。
+    pub const BG_BAND: Color = rgb(212, 212, 212); // #d4d4d4 — 浮层 / 用户块底
 
     // ── Text / grays (neutral dark) ──────────────────────────────────────
     pub const FG: Color = rgb(38, 38, 38); // #262626 — primary text
@@ -55,7 +58,7 @@ impl Theme {
     pub const fn grokday() -> Self {
         Self {
             bg_base: BG_STORM,
-            bg_light: BG_HIGHLIGHT,
+            bg_light: BG_BAND,
             bg_dark: rgb(228, 228, 228),
             bg_highlight: BG_HIGHLIGHT,
             bg_hover: rgb(208, 208, 208),

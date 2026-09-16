@@ -12,42 +12,44 @@ use cordis_spine::{
     PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
 
-use crate::ask_view;
-use crate::clipboard;
+use crate::app::clipboard;
 use crate::error::Result;
-use crate::gateway::GatewayRef;
 use crate::grok::mcps;
 use crate::grok::tasks_pane::{self, GroupKind, TaskEntry};
 use crate::grok::workflows::WorkflowRunSnapshot;
-use crate::mcp_elicit_view;
 use crate::names::{
     GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS, TUI_WELCOME,
 };
-use crate::overlay::{filter_help_items, filter_sessions, filter_strings, InspectTarget, Overlay};
-use crate::pairing;
-use crate::permission_view;
-use crate::plan_approval_view;
-use crate::preset_overlay::{self, PresetAction, PresetView};
 use crate::scrollback::Scrollback;
-use crate::session::SessionRef;
-use crate::settings_modal;
+use crate::seam::gateway::GatewayRef;
+use crate::seam::session::SessionRef;
+use crate::seam::tabs::Tabs;
 use crate::slash::{self, filter_args};
-use crate::tabs::Tabs;
-use crate::task_dock;
-use crate::text_overlay;
-use crate::usage_overlay;
+use crate::views::ask_view;
+use crate::views::mcp_elicit_view;
+use crate::views::overlay::{
+    filter_help_items, filter_sessions, filter_strings, InspectTarget, Overlay,
+};
+use crate::views::pairing;
+use crate::views::permission_view;
+use crate::views::plan_approval_view;
+use crate::views::preset_overlay::{self, PresetAction, PresetView};
+use crate::views::settings_modal;
+use crate::views::task_dock;
+use crate::views::text_overlay;
+use crate::views::usage_overlay;
 
-use crate::actions::{
+use crate::app::actions::{
     interpret_goal_composer_ex, interpret_loop_composer, Effect, GoalComposer, LoopComposer,
 };
-use crate::goal_overlay;
-use crate::goal_pane::GoalHit;
 use crate::grok::mermaid::AffordanceKind;
-use crate::inspect_overlay;
-use crate::mermaid_png;
-use crate::prompt::{PastedImage, PromptWidget};
-use crate::status::StatusLine;
-use crate::welcome::Welcome;
+use crate::media::mermaid_png;
+use crate::views::goal_overlay;
+use crate::views::goal_pane::GoalHit;
+use crate::views::inspect_overlay;
+use crate::views::prompt::{PastedImage, PromptWidget};
+use crate::views::status::StatusLine;
+use crate::views::welcome::Welcome;
 
 pub(super) fn open_pairing_if_needed(ctx: &Context, overlay: &mut Overlay) {
     let front = ctx
@@ -404,7 +406,7 @@ pub(super) fn scroll_plan_body(
 }
 
 pub(super) fn scroll_usage(
-    tab: crate::overlay::UsageTab,
+    tab: crate::views::overlay::UsageTab,
     detail: Option<cordis_spine::OccupancyKind>,
     scroll: &mut usize,
     delta: i16,
@@ -422,7 +424,7 @@ pub(super) fn scroll_text(scroll: &mut usize, delta: i16, body: &str) {
 
 pub(super) fn scroll_inspect(
     ctx: &Context,
-    target: &crate::overlay::InspectTarget,
+    target: &crate::views::overlay::InspectTarget,
     scroll: &mut usize,
     delta: i16,
 ) {
@@ -1186,8 +1188,9 @@ pub(super) fn intercept_goal_send(ctx: &Context, text: &str) -> Option<Vec<Effec
         GoalComposer::Slash(line) => {
             goal.disarm_composer();
             let extras = slash_extras(ctx);
-            slash::command_for_submit_ex(&line, &extras)
-                .map(|(pick, args)| vec![crate::actions::effect_for_pick(pick, &args, &extras)])
+            slash::command_for_submit_ex(&line, &extras).map(|(pick, args)| {
+                vec![crate::app::actions::effect_for_pick(pick, &args, &extras)]
+            })
         }
     }
 }
@@ -1314,6 +1317,9 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
             .get::<Sessions>(SESSIONS)
             .map(|s| filter_sessions(&s.archived(), query).len())
             .unwrap_or(0),
+        Overlay::Dashboard {
+            query, collapsed, ..
+        } => crate::views::dashboard::build_rows(ctx, query, collapsed).len(),
         Overlay::Help { query, .. } => filter_help_items(query, &slash_extras(ctx)).len(),
         Overlay::History { query, .. } => ctx
             .get::<PromptWidget>(TUI_PROMPT)

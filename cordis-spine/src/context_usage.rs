@@ -1020,6 +1020,51 @@ mod tests {
         assert_eq!(window_size(204_800, &Context::new()), 204_800);
     }
 
+    /// 冷启动（还没发过一轮）时占用率的分母要来自**模型目录**，不是会话里的
+    /// 占位值。
+    ///
+    /// `Sessions` 以前把 `usage.window` 播成 128_000，而 `window_size` 把任何
+    /// 非零会话窗口当权威值直接返回——于是顶栏一开始显示 `x / 128K`，聊一句
+    /// 之后 `http::…` 把真窗口写进来才跳成 `x / 1.0M`，看着像窗口自己变了。
+    #[tokio::test]
+    async fn cold_start_window_comes_from_the_catalog_not_a_session_seed() {
+        let cwd = tempfile::tempdir().unwrap();
+        let _env = crate::test_env::scoped().home().cwd(cwd.path());
+        std::fs::write(
+            crate::config::dock_home().join("config.toml"),
+            r#"
+[models]
+default = "wide-window"
+
+[model."wide-window"]
+api_base = "https://example.invalid/v1"
+context_window = 1000000
+"#,
+        )
+        .unwrap();
+
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        // `install_fakes` 不含 settings，而目录兜底正是从它走的。
+        ctx.plugin(crate::settings(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        assert_eq!(
+            sessions.usage().window,
+            0,
+            "新会话的窗口必须是 0（未知），否则目录兜底根本走不到"
+        );
+        assert_eq!(
+            snapshot_context(&ctx).total,
+            1_000_000,
+            "一轮都没发过时，分母就该是目录里配的窗口"
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_counts_user_message() {
         let ctx = Context::new();
