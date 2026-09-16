@@ -326,7 +326,7 @@ impl Acc {
     pub fn finish(self) -> LlmOutput {
         if let Some(err) = self.error {
             return LlmOutput {
-                text: err,
+                error: Some(err),
                 ..LlmOutput::default()
             };
         }
@@ -507,7 +507,46 @@ fn stream_snapshot(
 mod tests {
     use super::*;
 
-    /// 思考开着、给定强度、支持读图的一组参数（测试默认）。
+    /// 采样失败详情不进 Responses 的 `input`（与 messages / chat 同一条承诺）。
+    #[test]
+    fn llm_error_never_reaches_the_wire() {
+        let request = PromptRequest {
+            system: "s".into(),
+            history: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    error: Some("[连接失败] connection reset by peer".into()),
+                    ..LlmOutput::default()
+                }),
+            ],
+            tools: vec![],
+        };
+        let json = serde_json::to_string(&body("m", &request, &[], &params_on("low"))).unwrap();
+        assert!(!json.contains("connection reset"), "{json}");
+    }
+
+    /// SSE 流中途的 `response.failed` 与 `error` 事件不能写进 `text`：进了
+    /// `text` 就会被下轮回放成「模型自己说过 llm responses: …」。
+    #[test]
+    fn sse_midstream_error_goes_to_error_not_text() {
+        let mut acc = Acc::new("m");
+        acc.ingest_json(
+            r#"{"type":"response.failed","response":{"error":{"message":"rate limit exceeded"}}}"#,
+        );
+        let out = acc.finish();
+        assert!(out.text.is_empty(), "流内错误漏进 text：{}", out.text);
+        assert_eq!(
+            out.error.as_deref(),
+            Some("llm responses: rate limit exceeded")
+        );
+
+        let mut acc = Acc::new("m");
+        acc.ingest_json(r#"{"type":"error","message":"upstream panic"}"#);
+        let out = acc.finish();
+        assert!(out.text.is_empty(), "流内错误漏进 text：{}", out.text);
+        assert_eq!(out.error.as_deref(), Some("llm responses: upstream panic"));
+    }
+
     fn params_on(effort: &str) -> crate::http::WireParams {
         crate::http::WireParams {
             reasoning: crate::http::Reasoning::On,

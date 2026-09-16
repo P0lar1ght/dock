@@ -110,6 +110,14 @@ pub struct LlmOutput {
     /// 的原件（Grok `ConversationItem::Reasoning` 同款：推理项是顶层兄弟节点，
     /// 不折进 assistant，这样 input 能复现模型当时的顺序）。其它两条 wire 不用。
     pub reasoning_items: Vec<serde_json::Value>,
+    /// 本轮采样的失败详情（传输错误 / HTTP 状态码 + `request-id`）。
+    ///
+    /// **刻意不放进 [`Self::text`]**：`text` 会被三条 wire builder 当成助手消息
+    /// 回放给模型，于是「llm request failed: …」会变成模型自己说过的一句话，
+    /// 下一轮还要为它付 token。三条 builder 都以 `text` 非空或有 tool_call 为
+    /// 门槛，所以错误只写这里就天然不进模型历史，同时仍留在会话事件里供 TUI
+    /// 渲染与 `/resume` 回放。
+    pub error: Option<String>,
 }
 
 impl LlmOutput {

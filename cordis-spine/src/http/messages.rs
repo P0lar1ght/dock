@@ -522,7 +522,7 @@ impl Acc {
         }
         if let Some(err) = self.error {
             return LlmOutput {
-                text: err,
+                error: Some(err),
                 ..LlmOutput::default()
             };
         }
@@ -606,6 +606,48 @@ mod tests {
             history,
             tools: vec![],
         }
+    }
+
+    /// 采样失败详情**绝不能**进 wire：它只是 harness 说给人听的一句话，
+    /// 回放给模型就变成「模型自己说过 LLM 请求失败」，而且每轮都要再付一次
+    /// token。门槛是 `text` 非空或有 tool_call——只写 `error` 的那条记录整条
+    /// 不出现在请求里。
+    #[test]
+    fn llm_error_never_reaches_the_wire() {
+        let detail = "[连接失败] error sending request ← connection reset by peer";
+        let request = req(vec![
+            LogEvent::User("hi".into()),
+            LogEvent::LlmStream(LlmOutput {
+                error: Some(detail.into()),
+                ..LlmOutput::default()
+            }),
+            LogEvent::User("再试一次".into()),
+        ]);
+        let body = body("m", &request, &[], &Default::default(), true);
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            !json.contains("connection reset"),
+            "失败详情漏进请求体了：{json}"
+        );
+        assert!(!json.contains("请求失败"), "{json}");
+        assert!(json.contains("再试一次"), "正常消息仍要在：{json}");
+    }
+
+    /// SSE 流中途的 provider 错误事件也**不能**写进 `text`——它与传输层失败
+    /// 同类，是 harness 说给人听的，进了 `text` 就会被下轮回放成「模型自己
+    /// 说过 llm messages …」。
+    #[test]
+    fn sse_midstream_error_goes_to_error_not_text() {
+        let mut acc = Acc::new("m");
+        acc.ingest_json(
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"server overloaded"}}"#,
+        );
+        let out = acc.finish();
+        assert!(out.text.is_empty(), "流内错误漏进 text：{}", out.text);
+        assert_eq!(
+            out.error.as_deref(),
+            Some("llm messages overloaded_error: server overloaded")
+        );
     }
 
     #[test]
