@@ -29,6 +29,9 @@ pub struct ChatStreamAcc {
     reasoning: String,
     /// index → (id, name, arguments)
     tool_calls: BTreeMap<u32, (String, String, String)>,
+    /// provider 在流中途发的错误。与 messages / responses 两条 wire 同构：
+    /// 只进 [`LlmOutput::error`]，不进 `text`（`text` 是下一轮回放历史的门槛）。
+    error: Option<String>,
 }
 
 impl ChatStreamAcc {
@@ -79,6 +82,13 @@ impl ChatStreamAcc {
     }
 
     pub fn finish(self) -> LlmOutput {
+        // 先看错误：这一轮失败了，攒到一半的 tool_call 是残缺的，不该回放。
+        if let Some(err) = self.error {
+            return LlmOutput {
+                error: Some(err),
+                ..LlmOutput::default()
+            };
+        }
         let tool_calls = self
             .tool_calls
             .into_values()
@@ -96,6 +106,47 @@ impl ChatStreamAcc {
             ..LlmOutput::default()
         }
     }
+
+    /// 记下一条流内错误（第一条为准：后续多半是同一次失败的回声）。
+    pub fn set_error(&mut self, err: String) {
+        if self.error.is_none() {
+            self.error = Some(err);
+        }
+    }
+}
+
+/// 从一个**不是** `ChatCompletionChunk` 的 SSE 帧里认出错误信封。
+///
+/// chat/completions 没有像 Anthropic `{"type":"error"}` 那样的统一事件类型，
+/// 各家形状不一：OpenAI 是 `{"error":{"message":…,"type":…}}`，不少代理直接给
+/// `{"error":"…"}`，还有的把 `message` 放在顶层。认不出就回 `None`，调用方照旧
+/// 丢弃该帧。
+pub fn chat_stream_error(data: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    let err = v.get("error")?;
+    let text = match err {
+        serde_json::Value::String(s) => s.clone(),
+        _ => {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .or_else(|| v.get("message").and_then(|m| m.as_str()))
+                .unwrap_or_default();
+            let kind = err
+                .get("type")
+                .and_then(|t| t.as_str())
+                .or_else(|| err.get("code").and_then(|c| c.as_str()))
+                .unwrap_or("error");
+            if msg.is_empty() {
+                // 认出是错误但取不出人话，至少把原始 JSON 带上，
+                // 别让这一轮空白收场。
+                format!("{kind}: {err}")
+            } else {
+                format!("{kind}: {msg}")
+            }
+        }
+    };
+    Some(format!("llm chat {text}"))
 }
 
 /// Split SSE `data:` payloads. `[DONE]` is omitted (Grok client terminates there).
@@ -268,5 +319,40 @@ mod tests {
         );
         assert_eq!(deltas, vec![StreamDelta::Reasoning("Let me think…".into())]);
         assert_eq!(acc.finish().reasoning, "Let me think…");
+    }
+
+    /// provider 在流中途报错时，旧实现把整帧静默丢弃，这一轮**完全空白地
+    /// 收场**——没有文本也没有报错，用户看到的就是应用坏了。现在要认出来。
+    #[test]
+    fn midstream_error_is_captured_not_swallowed() {
+        for raw in [
+            r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+            r#"{"error":"rate limit exceeded"}"#,
+            r#"{"error":{"code":"rate_limit_error","message":"rate limit exceeded"}}"#,
+        ] {
+            let err = chat_stream_error(raw).unwrap_or_else(|| panic!("认不出：{raw}"));
+            assert!(err.contains("rate limit exceeded"), "{err}");
+        }
+    }
+
+    /// 错误只进 `error`，不进 `text`——`text` 是下一轮回放历史的门槛，
+    /// 进了就等于让模型「说过」一句 harness 的报错。
+    #[test]
+    fn midstream_error_goes_to_error_not_text() {
+        let mut acc = ChatStreamAcc::default();
+        acc.set_error(
+            chat_stream_error(r#"{"error":{"message":"boom","type":"server_error"}}"#).unwrap(),
+        );
+        let out = acc.finish();
+        assert!(out.text.is_empty(), "流内错误漏进 text：{}", out.text);
+        assert_eq!(out.error.as_deref(), Some("llm chat server_error: boom"));
+    }
+
+    /// 普通 chunk 不能被误判成错误帧。
+    #[test]
+    fn ordinary_frames_are_not_mistaken_for_errors() {
+        assert!(chat_stream_error(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).is_none());
+        assert!(chat_stream_error("[DONE]").is_none());
+        assert!(chat_stream_error("not json").is_none());
     }
 }

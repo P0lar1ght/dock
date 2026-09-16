@@ -471,6 +471,12 @@ impl WireAcc {
         match self {
             Self::Chat(acc) => {
                 let Ok(frame) = serde_json::from_str::<ChatCompletionChunk>(data) else {
+                    // 解不成 chunk 的帧多半是 provider 中途发来的错误信封。
+                    // 旧实现无条件丢弃，于是这一轮**完全空白地收场**：没有文本、
+                    // 没有报错，界面上就像应用坏了。认出来就记下，认不出才丢。
+                    if let Some(err) = crate::stream_acc::chat_stream_error(data) {
+                        acc.set_error(err);
+                    }
                     return Vec::new();
                 };
                 acc.ingest(frame)
