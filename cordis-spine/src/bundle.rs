@@ -96,6 +96,10 @@ pub async fn install_foundation(ctx: &Context) -> Result<Fiber> {
 /// App bundle: workspace tools + capability plugins that `register` into `"tools"`.
 /// Settings + cron are live-looked-up; the loop is not included so the harness can swap it.
 pub async fn install_app(ctx: &Context) -> Result<()> {
+    // 工具落盘副本（`use_tool` / `grep` 的溢出、超预算 bash 的完整输出）没有
+    // 自然的删除时机：写它们的那一轮结束后没人再负责。只在启动扫一次——此刻
+    // 本进程一个文件都还没写，删不到正在用的；会话中途跑才有那个风险。
+    tokio::task::spawn_blocking(crate::tool_output::gc_spill_dir);
     install_core(ctx).await?;
     ctx.plugin(settings(), ())?.wait().await?;
     ctx.plugin(turn(), ())?.wait().await?;

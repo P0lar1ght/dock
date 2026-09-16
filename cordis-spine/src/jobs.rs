@@ -38,10 +38,78 @@ pub(crate) struct OutputBuf {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     total: usize,
+    /// 落盘句柄与路径。**必须边跑边写**：`push` 里 `tail.drain` 是即时丢弃，
+    /// 命令结束（或超时）时中间字节早已不在内存里，那时再 offload 只能落到
+    /// 已经截断过的那一份。
+    spill: Option<Spill>,
+    /// 用作落盘文件名的任务 id。空串表示这个 buf 不落盘（单测里的裸 buf）。
+    id: String,
+}
+
+/// 一个仍在写入的完整输出副本。
+struct Spill {
+    path: String,
+    file: std::fs::File,
+}
+
+impl std::fmt::Debug for Spill {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Spill").field("path", &self.path).finish()
+    }
 }
 
 impl OutputBuf {
+    /// 带落盘能力的 buf。`id` 决定落盘文件名。
+    pub(crate) fn with_id(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ..Self::default()
+        }
+    }
+
+    /// 超出内存预算时开始落盘：先把此刻的 head + tail 原样写下去（这一刻二者
+    /// 合起来**就是**全部输出，一个字节都还没丢），之后每一块都追加。
+    ///
+    /// best-effort：开不了文件就当没有落盘能力，行为回到只留头尾。
+    fn open_spill(&mut self) {
+        if self.id.is_empty() {
+            return;
+        }
+        let dir = crate::tool_output::spill_dir();
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = dir.join(format!(
+            "{}.txt",
+            crate::tool_output::offload_stem(&self.id)
+        ));
+        let Ok(mut file) = std::fs::File::create(&path) else {
+            return;
+        };
+        use std::io::Write;
+        if file.write_all(&self.head).is_err() {
+            return;
+        }
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        if file.write_all(&tail).is_err() {
+            return;
+        }
+        self.spill = Some(Spill {
+            path: path.to_string_lossy().into_owned(),
+            file,
+        });
+    }
+
     pub(crate) fn push(&mut self, bytes: &[u8]) {
+        // 顺序要紧：先判「这一块会不会让我们开始丢字节」，在真丢之前把已有内容
+        // 落盘，再把这一块追加进去。反过来就会漏掉刚好跨过阈值的那一段。
+        if self.spill.is_none() && self.total + bytes.len() > HEAD_BYTES + TAIL_BYTES {
+            self.open_spill();
+        }
+        if let Some(spill) = self.spill.as_mut() {
+            use std::io::Write;
+            let _ = spill.file.write_all(bytes);
+        }
         self.total += bytes.len();
         let mut rest = bytes;
         if self.head.len() < HEAD_BYTES {
@@ -72,9 +140,17 @@ impl OutputBuf {
         let tail: Vec<u8> = self.tail.iter().copied().collect();
         let dropped = self.total - self.head.len() - self.tail.len();
         if dropped > 0 {
+            // 有落盘副本时给路径，让模型能把省略的那段捞回来——而不是像原先
+            // 那样叫它把命令改成写文件再跑一遍。
+            let recover = match self.spill.as_ref() {
+                Some(spill) => format!(
+                    "完整输出已写入：{}，用 read_file 或 grep 读它取回省略的部分。",
+                    spill.path
+                ),
+                None => "需要完整内容就把命令改成写进文件再分段读。".into(),
+            };
             s.push_str(&format!(
-                "\n\n[… 已截断：中间省略 {dropped} 字节，总输出 {} 字节。\
-                 需要完整内容就把命令改成写进文件再分段读 …]\n\n",
+                "\n\n[… 已截断：中间省略 {dropped} 字节，总输出 {} 字节。{recover} …]\n\n",
                 self.total
             ));
         }
@@ -260,7 +336,7 @@ impl Jobs {
         let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
         let job = Arc::new(Job {
             command: command.clone(),
-            output: Mutex::new(OutputBuf::default()),
+            output: Mutex::new(OutputBuf::with_id(&id)),
             exit_note: Mutex::new(None),
             done: AtomicBool::new(false),
             cancel,
@@ -734,6 +810,57 @@ async fn collect_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S2：超出内存预算的输出要边跑边落盘，**一个字节都不能丢**。
+    ///
+    /// `push` 里的 `tail.drain` 是即时丢弃，所以落盘必须在跨过阈值之前发生；
+    /// 晚一步中间那段就永远回不来了。这条用例正是钉住这个时序。
+    #[test]
+    fn oversized_output_spills_every_byte_while_running() {
+        let _env = crate::test_env::scoped().home();
+        let mut buf = OutputBuf::with_id("spill-job");
+        // 每块 1KB，总量远超 HEAD+TAIL，逼它在中途开始落盘。
+        let mut expected = Vec::new();
+        for i in 0..40u32 {
+            let chunk = format!("{i:04}{}\n", "x".repeat(1_019));
+            buf.push(chunk.as_bytes());
+            expected.extend_from_slice(chunk.as_bytes());
+        }
+        let rendered = buf.render();
+        assert!(rendered.contains("已截断"), "{rendered}");
+        let path = crate::tool_output::spill_dir().join(format!(
+            "{}.txt",
+            crate::tool_output::offload_stem("spill-job")
+        ));
+        assert!(
+            rendered.contains(&path.to_string_lossy().to_string()),
+            "截断提示要给出落盘路径：{rendered}"
+        );
+        let on_disk = std::fs::read(&path).expect("完整输出应已落盘");
+        assert_eq!(
+            on_disk.len(),
+            expected.len(),
+            "落盘副本必须是完整输出，不能有丢失"
+        );
+        assert_eq!(on_disk, expected, "落盘内容要与原始字节逐字一致");
+    }
+
+    /// 没超预算就不该建落盘文件——绝大多数命令都在这条路径上，
+    /// 每条都写一个文件是纯粹的磁盘垃圾。
+    #[test]
+    fn small_output_does_not_spill() {
+        let _env = crate::test_env::scoped().home();
+        let mut buf = OutputBuf::with_id("small-job");
+        buf.push(b"hello\n");
+        let rendered = buf.render();
+        assert_eq!(rendered, "hello\n");
+        assert!(!crate::tool_output::spill_dir()
+            .join(format!(
+                "{}.txt",
+                crate::tool_output::offload_stem("small-job")
+            ))
+            .exists());
+    }
 
     /// 到点仍有任务在跑：正文给 running 快照（任务没被中止），并补一句说明它不是结论。
     ///

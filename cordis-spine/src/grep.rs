@@ -656,7 +656,8 @@ mod tests {
         .await;
         assert_eq!(out.matches("big.txt:").count(), 5, "只内联 5 行：{out}");
         assert!(out.contains("at least"), "要说是至少而不是精确总数：{out}");
-        let spill = tool_output::spill_dir().join("spill-1.txt");
+        let spill =
+            tool_output::spill_dir().join(format!("{}.txt", tool_output::offload_stem("spill-1")));
         assert!(spill.exists(), "完整结果应落盘：{}", spill.display());
         assert_eq!(std::fs::read_to_string(&spill).unwrap().lines().count(), 5);
     }
