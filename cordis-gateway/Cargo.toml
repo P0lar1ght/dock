@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Loopback HTTP/WS Cordis plugin: Origin pairing and dock.1 session projection"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 base64 = "0.22"

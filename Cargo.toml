@@ -19,7 +19,7 @@ members = [
 [workspace.package]
 edition = "2021"
 rust-version = "1.88"
-license = "MIT"
+license = "Apache-2.0"
 version = "0.1.0"
 
 # 调试信息占了构建产物的绝大头：`cordis-spine` 的 rlib 一份 200MB、`dock` 二进制

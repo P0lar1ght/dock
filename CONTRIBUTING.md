@@ -47,4 +47,4 @@ cd embed-sdk && npm ci && npm run build
 
 ## 许可证
 
-仓库根 `Cargo.toml` 与第一方 crate 声明 `license = "MIT"`，全文见 [LICENSE](LICENSE)。`cordis-render/` 的两个 crate 与 `vendor/` 下的上游拷贝沿用各自上游许可证（多为 Apache-2.0，副本见同目录 `LICENSE`，以各 crate 的 `Cargo.toml` 为准）。提交贡献即表示你同意以对应许可证发布你的改动。
+仓库根 `Cargo.toml` 与第一方 crate 声明 `license = "Apache-2.0"`，全文见 [LICENSE](LICENSE)，版权归属与第三方清单见 [NOTICE](NOTICE)。`cordis-render/` 的两个 crate 与 `vendor/` 下的上游拷贝沿用各自上游许可证（多为 Apache-2.0，`vendor/mermaid/mermaid-to-svg` 为 MIT；副本见同目录 `LICENSE`，以各 crate 的 `Cargo.toml` 为准）。提交贡献即表示你同意以对应许可证发布你的改动。

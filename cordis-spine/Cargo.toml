@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "DSH-shaped plugin spine with a Grok-shaped one-step agent turn"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 base64 = "0.22"

@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Standalone Grok-shaped TUI: fake spine + session actor + pager"
-license = "MIT"
+license = "Apache-2.0"
 
 # 对外二进制名。产品叫 dock；crate 名与库 crate `cordis-tui` 保持 cordis-* 前缀。
 [[bin]]

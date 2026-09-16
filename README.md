@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/rust-1.88+-dea584?logo=rust&logoColor=white" alt="Rust 1.88+">
   <img src="https://img.shields.io/badge/cordis-plugin_tree-132238" alt="Cordis plugin tree">
   <img src="https://img.shields.io/badge/gateway-loopback-73dbff" alt="Loopback gateway">
-  <img src="https://img.shields.io/badge/license-MIT-yellow" alt="MIT">
+  <img src="https://img.shields.io/badge/license-Apache_2.0-yellow" alt="Apache 2.0">
   <img src="https://github.com/P0lar1ght/dock/actions/workflows/ci.yml/badge.svg" alt="CI">
 </p>
 <p align="center">
@@ -280,7 +280,8 @@ dock/
 ├── .agents/skills/       # 仓库流程 skills（Agents scope）
 ├── docs/                 # 架构与开发细节
 ├── assets/               # 品牌图
-├── LICENSE               # MIT（第一方 crate）
+├── LICENSE               # Apache-2.0（第一方 crate）
+├── NOTICE                # 版权归属 + vendor/ 第三方授权清单
 └── config.toml.example   # 用户 / 项目模型目录样例
 ```
 

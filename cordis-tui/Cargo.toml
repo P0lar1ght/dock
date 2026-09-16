@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Grok pager TUI as Cordis plugins (theme, scrollback, prompt, status, welcome, event loop)"
-license = "MIT"
+license = "Apache-2.0"
 readme = "README.md"
 
 [dependencies]
