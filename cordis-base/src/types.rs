@@ -123,7 +123,9 @@ pub struct ToolCall {
 /// Redirects are re-gated: the registry reads the **post-waterfall** name for
 /// the plan and permission checks, so rewriting `bash` into `read_file` really
 /// does drop the permission prompt instead of having already paid for it.
-/// A redirect cannot escape the preset allowlist — that check runs first.
+/// A redirect cannot escape the preset allowlist: the registry checks it twice,
+/// once on the inbound name and again on the post-waterfall one, so a read-only
+/// preset stays read-only no matter what a handler rewrites the call into.
 ///
 /// **No order slots.** The kernel's `EventOptions` carries `prepend` / `global`
 /// / `once` and no ordering key. The `ORDER_STEP_START_*` slots work because
