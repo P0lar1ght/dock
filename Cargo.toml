@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "cordis-rust",
+    "cordis-base",
     "cordis-spine",
     "cordis-tui",
     "cordis-gateway",

@@ -608,6 +608,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cordis-base"
+version = "0.1.0"
+dependencies = [
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "indexmap",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cordis-gateway"
 version = "0.1.0"
 dependencies = [
@@ -660,6 +680,7 @@ dependencies = [
  "bm25",
  "chromiumoxide",
  "cordis",
+ "cordis-base",
  "futures-util",
  "getrandom 0.2.17",
  "globset",

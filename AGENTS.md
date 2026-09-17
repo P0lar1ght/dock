@@ -18,7 +18,9 @@ Rust workspace（`resolver = "2"`，edition 2021，`Cargo.toml` 定成员与版�
 
 ```
 cordis-rust/     内核 crate `cordis`：Context、inject、named services、fiber 生命周期
+cordis-base/     spine 的底座：wire 类型、config.toml、纯引擎。**不含插件**，也不依赖内核 `cordis`
 cordis-spine/    Agent 循环、工具、MCP、会话、预设；install_app 挂整棵产品树
+                 src 按 agent / session / llm / prompt / tools / host 分层
 cordis-tui/      全屏终端 UI 插件（theme / scrollback / prompt / overlay / 快捷键）
 cordis-gateway/  回环 HTTP/WS 插件：Origin 配对、dock.1 投影、slash list|execute
 cordis-app/      二进制入口：install_app + agent-loop + gateway + tui
