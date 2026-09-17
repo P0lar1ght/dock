@@ -184,6 +184,47 @@ mod tests {
     }
 
     #[test]
+    fn deep_research_claim_schema_compiles() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "claims": {
+                    "type": "array",
+                    "maxItems": 6,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "claim": { "type": "string" },
+                            "evidence": { "type": "string" },
+                            "source_title": { "type": "string" },
+                            "source_locator": { "type": "string" },
+                            "source_type": {
+                                "type": "string",
+                                "enum": ["primary", "secondary", "repository", "other"]
+                            },
+                            "confidence": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"]
+                            }
+                        },
+                        "required": [
+                            "claim", "evidence", "source_title", "source_locator",
+                            "source_type", "confidence"
+                        ]
+                    }
+                },
+                "uncertainties": {
+                    "type": "array",
+                    "maxItems": 6,
+                    "items": { "type": "string" }
+                }
+            },
+            "required": ["claims", "uncertainties"]
+        });
+        compile_contract_schema(&schema).expect("research schema should compile");
+    }
+
+    #[test]
     fn an_oversized_schema_is_rejected() {
         let huge: Vec<String> = (0..20_000).map(|i| format!("field-{i}")).collect();
         let err = compile_contract_schema(&serde_json::json!({

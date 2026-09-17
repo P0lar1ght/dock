@@ -442,12 +442,17 @@ pub fn render_workflow_detail(
         // 上报单起一行缩进：它是这个孩子在干什么的唯一线索。
         if let Some(report) = row.latest_report.as_deref() {
             if y < body_y + body_h {
+                let report_fg = if row.state == "failed" {
+                    theme.accent_error
+                } else {
+                    theme.gray
+                };
                 span_at(
                     buf,
                     agents_x + 2,
                     y,
                     report,
-                    Style::default().fg(theme.gray),
+                    Style::default().fg(report_fg),
                     content.right(),
                 );
                 y += 1;

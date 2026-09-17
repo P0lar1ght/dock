@@ -822,6 +822,32 @@ complete("done");
     );
 }
 
+/// 失败原因必须写在这一行上。详情页原先只画 `failed · 0s`，用户看不见
+/// 是类型不存在、契约没过，还是孩子根本没起来。
+#[tokio::test]
+async fn a_failed_agent_puts_the_error_on_its_row() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let script = r#"
+let meta = #{ name: "fail-row", description: "unknown type" };
+let r = agent("x", #{ label: "researcher-0", agent_type: "no-such-role" });
+complete("done");
+"#;
+    let run_id = launch(&h, script, 4).await;
+    let run = wait_terminal(&h, &run_id).await;
+    let row = run
+        .agents
+        .iter()
+        .find(|a| a.label == "researcher-0")
+        .unwrap_or_else(|| panic!("没有 researcher-0：{:?}", run.agents));
+    assert_eq!(row.state, "failed", "{row:?}");
+    let reason = row.latest_report.as_deref().unwrap_or("");
+    assert!(
+        reason.contains("unknown subagent type") && reason.contains("no-such-role"),
+        "失败原因要在行上：{reason:?}"
+    );
+}
+
 /// 还在跑时就要把阶段钉在行上。详情页按行上的 `phase` 分栏，等收尾再写
 /// 用户早就看见「Plan 这一阶段还没有子代理」。
 #[tokio::test]

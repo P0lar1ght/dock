@@ -515,9 +515,20 @@ impl WorkflowHost {
                     };
                     row.tokens_used = result.tokens_used;
                     row.duration_ms = result.duration_ms;
+                    if !result.success && row.latest_report.is_none() {
+                        // 失败时脚本拿到的是 output 里的错误文本；详情页原先只画
+                        // `failed · 0s`，原因被丢掉了。
+                        row.latest_report = Some(match &result.output {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        });
+                    }
                 }
                 Err(HostError::Cancelled) => row.state = "cancelled".into(),
-                Err(_) => row.state = "failed".into(),
+                Err(err) => {
+                    row.state = "failed".into();
+                    row.latest_report = Some(err.to_string());
+                }
             }
         });
     }
