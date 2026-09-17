@@ -206,6 +206,22 @@ impl Tools {
         }
     }
 
+    /// 这颗工具在当前预设的工具集之外吗？
+    ///
+    /// 预设的工具集是**边界**，不是「模型能叫什么」的过滤器，所以 `execute_on` 查
+    /// 两次：入站查一次，挡住模型自己越界；`tools/pre-execute` 改道之后再查一次，
+    /// 挡住插件替它越界。少了后一次，一颗只读子代理的 `read_file` 就能被任意
+    /// handler 改写成 `bash` 跑出去——权限门跟着改写后的名字走，补不上这个洞，
+    /// 何况子代理那边常常压根没人应答询问。
+    fn outside_allowlist(&self, exec: &Context, name: &str) -> bool {
+        let Some(presets) = exec.get::<AgentPresets>(AGENT_PRESETS) else {
+            return false;
+        };
+        !self.bypasses_allowlist(name)
+            && !self.mcp_meta_visible(exec, name)
+            && !presets.allows(name)
+    }
+
     pub fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = Vec::new();
         if self.workspace {
@@ -277,26 +293,22 @@ impl Tools {
     }
 
     pub async fn execute_on(&self, exec: &Context, call: ToolCall) -> ToolResult {
-        if let Some(presets) = exec.get::<AgentPresets>(AGENT_PRESETS) {
-            if !self.bypasses_allowlist(&call.name)
-                && !self.mcp_meta_visible(exec, &call.name)
-                && !presets.allows(&call.name)
-            {
-                return finish(
-                    exec,
-                    ToolResult {
-                        call_id: call.id,
-                        name: call.name,
-                        content: blocked_tool_message().into(),
-                        ..Default::default()
-                    },
-                );
-            }
+        if self.outside_allowlist(exec, &call.name) {
+            return finish(
+                exec,
+                ToolResult {
+                    call_id: call.id,
+                    name: call.name,
+                    content: blocked_tool_message().into(),
+                    ..Default::default()
+                },
+            );
         }
-        // 改写 / 改道 / 拒绝的位点。**在允许名单之后**：改道不该能绕过预设的工具集
-        // 边界，否则一颗只读子代理能被改写成调 `bash`。**在计划门与权限门之前**：
-        // 改道必须换一套门——`bash` 改成 `read_file` 之后就该走 read-only 路径、
-        // 不弹权限；在门之后改，它已经按 `bash` 弹过一次询问了，那毫无意义。
+        // 改写 / 改道 / 拒绝的位点。**夹在允许名单的两次检查中间**：入站那次挡模型
+        // 越界，改道之后那次挡插件替它越界（见 `outside_allowlist`）。**在计划门与
+        // 权限门之前**：改道必须换一套门——`bash` 改成 `read_file` 之后就该走
+        // read-only 路径、不弹权限；在门之后改，它已经按 `bash` 弹过一次询问了，
+        // 那毫无意义。
         let identity = exec
             .get::<crate::session::log::Sessions>(SESSIONS)
             .map(|s| s.identity().to_string())
@@ -306,13 +318,27 @@ impl Tools {
             let fallback = seed.clone();
             exec.waterfall(TOOLS_PRE_EXECUTE, seed, move || fallback)
         };
+        // `ToolResult.name` 一律报**实际（将要）跑的那颗**，改道后就是新名字。回喂
+        // 模型的 tool 消息只带 `tool_call_id`（见 `llm/http`），名字是给 UI 和日志
+        // 看的——那里要看见的正是「真跑的是什么」。
         if let Some(reason) = pre.denial() {
             return finish(
                 exec,
                 ToolResult {
                     call_id: call.id,
-                    name: call.name,
+                    name: pre.name().to_string(),
                     content: reason.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        if pre.redirected() && self.outside_allowlist(exec, pre.name()) {
+            return finish(
+                exec,
+                ToolResult {
+                    call_id: call.id,
+                    name: pre.name().to_string(),
+                    content: blocked_tool_message().into(),
                     ..Default::default()
                 },
             );
@@ -825,11 +851,12 @@ mod pre_execute_tests {
         assert_eq!(out.content, "起点+后+先");
     }
 
-    /// 改道**不能绕过预设的允许名单**。
+    /// 改道**不能绕过预设的允许名单**——两个方向都钉住。
     ///
-    /// 允许名单检查排在 pre-execute 之前，就是为了这个：一颗只读子代理的工具集里
-    /// 没有 `bash`，那么任何 handler 都不该能把 `read_file` 改写成 `bash` 跑出去。
-    /// 名单是工具集边界，不是"模型能叫什么"的过滤器。
+    /// 名单是工具集**边界**，不是「模型能叫什么」的过滤器。所以查两次：模型直接叫
+    /// 名单外的，入站那次就挡掉，pre-execute 根本够不着；handler 把名单内的改道到
+    /// 名单外，改写后那次挡掉。少了后一次，一颗只读子代理的 `read_file` 就能被任意
+    /// handler 改成 `bash` 跑出去。
     #[tokio::test]
     async fn a_redirect_cannot_escape_the_preset_allowlist() {
         let ctx = Context::new();
@@ -856,8 +883,7 @@ mod pre_execute_tests {
             })
             .unwrap();
 
-        // 名单内的工具被改道到名单外：跑得成，因为名单挡的是模型**叫**的那颗。
-        // 这条用例钉的是反向——模型叫名单外的，pre-execute 根本没机会救它。
+        // 方向一：模型直接叫名单外的那颗——入站就挡。
         let blocked = tools.execute(call("bash", "{}")).await;
         assert_eq!(
             blocked.content,
@@ -865,6 +891,74 @@ mod pre_execute_tests {
             "名单外的调用要在 pre-execute 之前就被挡掉"
         );
         assert_ne!(blocked.content, "bash 跑了");
+
+        // 方向二（回归）：名单内的 `read_file` 被 handler 改道到名单外的 `bash`——
+        // 改写之后那次检查要挡下来，工具体一次都不能跑。
+        let escaped = tools.execute(call("read_file", "{}")).await;
+        assert_eq!(
+            escaped.content,
+            blocked_tool_message(),
+            "改道到名单外要被改写后的那次检查挡掉，实际 {}",
+            escaped.content
+        );
+        assert_ne!(
+            escaped.content, "bash 跑了",
+            "只读子代理不该能被改写成跑 bash"
+        );
+        assert_eq!(escaped.name, "bash", "结果报的是实际要跑的那颗");
+        assert_eq!(escaped.call_id, "c1", "挡下来也不能动 call_id");
+    }
+
+    /// 改道到**名单内**的另一颗照样放行——上面那条不能顺手把正常降权改道也堵死。
+    #[tokio::test]
+    async fn a_redirect_inside_the_allowlist_still_runs() {
+        let ctx = Context::new();
+        let mut mode = crate::agent::presets::AgentPreset::new("code");
+        mode.tools = Some(vec!["read_file".to_string(), "list_dir".to_string()]);
+        let _p = ctx
+            .provide(AGENT_PRESETS, AgentPresets::overlay(mode))
+            .unwrap();
+
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("read_file"), echo_body()).unwrap();
+        tools
+            .register(
+                spec("list_dir"),
+                Arc::new(|call| Box::pin(async move { tool_result(call, "list_dir 跑了") })),
+            )
+            .unwrap();
+        let _h = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                next.rewrite("list_dir", "{}");
+                next
+            })
+            .unwrap();
+
+        let out = tools.execute(call("read_file", "{}")).await;
+        assert_eq!(out.content, "list_dir 跑了");
+        assert_eq!(out.name, "list_dir");
+    }
+
+    /// 拒绝时结果也报**改写后**的名字，跟放行路径一条规则。
+    #[tokio::test]
+    async fn a_denial_after_a_redirect_reports_the_effective_name() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("probe"), echo_body()).unwrap();
+        let _h = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                next.rewrite("other", "{}");
+                next.deny("这次不行");
+                next
+            })
+            .unwrap();
+
+        let out = tools.execute(call("probe", "{}")).await;
+        assert_eq!(out.content, "这次不行");
+        assert_eq!(out.name, "other", "报的是改写后、也就是本来要跑的那颗");
+        assert_eq!(out.call_id, "c1");
     }
 
     /// 门读的是**改写之后**的名字。
