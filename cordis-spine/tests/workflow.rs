@@ -1026,3 +1026,89 @@ async fn done_notice_names_agents_by_their_label() {
         "子代理 UUID 不该出现在给模型的通知里：{text}"
     );
 }
+
+const PARALLEL_READ_ONLY: &str = r#"
+let meta = #{ name: "readonly-fanout", description: "four read-only researchers" };
+let jobs = [
+    #{ prompt: "one", label: "researcher-0", capability_mode: "read-only" },
+    #{ prompt: "two", label: "researcher-1", capability_mode: "read-only" },
+    #{ prompt: "three", label: "researcher-2", capability_mode: "read-only" },
+    #{ prompt: "four", label: "researcher-3", capability_mode: "read-only" },
+];
+let results = parallel(jobs);
+complete("done");
+"#;
+
+/// 一次 `parallel` 起四个**同样收窄**的子代理，四个都得真的跑起来。
+///
+/// `"capability"` 没被隔离时，`provide` 进的是共用注册表：第一个孩子占住名字，
+/// 后面每一个都以 `service "capability" has been registered` 当场失败。
+/// `deep_research.rhai` 的 Research 阶段正是四个 read-only researcher 并发。
+#[tokio::test]
+async fn parallel_read_only_agents_do_not_collide_on_the_capability_service() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let run_id = launch(&h, PARALLEL_READ_ONLY, 8).await;
+    let run = wait_terminal(&h, &run_id).await;
+
+    assert_eq!(run.status, "complete", "{run:?}");
+    assert_eq!(run.agents.len(), 4, "{:?}", run.agents);
+    for row in run.agents.iter() {
+        assert_eq!(
+            row.state, "done",
+            "{} 没跑起来：{:?}",
+            row.label, row.latest_report
+        );
+    }
+}
+
+/// 一个只读子代理在跑，**主会话**的工具表不能跟着被收窄。
+///
+/// `"capability"` 没被隔离时，`provide` 落进共用注册表，而那张 `Disposable`
+/// 被 `ChildStore` 按子代理 id 一直攥着（idle 的孩子能活 15 分钟）。于是主会话
+/// 自己 `ctx.get("capability")` 也查得到 read-only，`/deep-research` 会以
+/// 「当前 Agent 预设未包含此工具」被自己的允许名单挡掉。
+#[tokio::test]
+async fn a_read_only_child_does_not_narrow_the_main_session() {
+    let (sampler, _peak, gate) = counting(true);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let script = r#"
+let meta = #{ name: "leak-probe", description: "one read-only agent" };
+let r = agent("看一眼", #{ capability_mode: "read-only" });
+complete("done");
+"#;
+    let run_id = launch(&h, script, 4).await;
+
+    // 等这个只读孩子真的起来——它活着的这段时间正是泄漏的窗口。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let live = wf_run(&h, &run_id)
+            .map(|r| r.agents.iter().any(|a| a.state == "running"))
+            .unwrap_or(false);
+        if live {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "子代理没起来");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let names: Vec<String> = tools
+        .specs_for_model()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(
+        names.iter().any(|n| n == WORKFLOW_TOOL_NAME),
+        "只读子代理把主会话一起收窄了：{names:?}"
+    );
+
+    let pump = tokio::spawn(async move {
+        loop {
+            gate.notify_one();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    wait_terminal(&h, &run_id).await;
+    pump.abort();
+}

@@ -131,10 +131,23 @@ async fn run_dock_child(
         );
     };
 
-    let child = parent
+    let mut child = parent
         .isolate("sessions")
         .isolate("turn")
         .isolate("agentPresets");
+    // 这两项要**先隔离再 provide**：没隔离的名字 provide 进的是共用注册表，
+    // 第二个同样收窄的孩子会撞上「service 已注册」直接起不来——一次
+    // `parallel(jobs)` 起四个 read-only researcher 就是四个全挂。
+    //
+    // 只在真要收窄时隔离：不隔离才继承得到父会话那一份（虽然 `MAX_SUBAGENT_DEPTH`
+    // 目前不允许孙子，但别让这条依赖埋在这里）。
+    if run.request.runtime_overrides.capability_mode.is_some() {
+        child = child.isolate(CAPABILITY);
+    }
+    if !run.request.runtime_overrides.llm.is_empty() {
+        child = child.isolate(MODEL_OVERRIDE);
+    }
+    let child = child;
     let sessions = Sessions::isolated_as(child.clone(), id.clone());
     if !resume.is_empty() {
         sessions.seed(resume);
