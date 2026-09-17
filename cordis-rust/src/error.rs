@@ -15,6 +15,9 @@ pub enum Error {
     #[error("invalid plugin")]
     InvalidPlugin,
 
+    #[error("listener for {name:?} was rejected by internal/listener")]
+    ListenerRejected { name: String },
+
     #[error("service `{name}` has been registered at <{at}>")]
     ServiceRegistered { name: String, at: String },
 

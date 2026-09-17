@@ -13,6 +13,20 @@ impl Runtime {
         if names.is_empty() {
             return Vec::new();
         }
+        // 与上游 `reflect.ts` 的 `internal/service` 同位：provide 和 provider 卸载
+        // 都汇到这里，所以这一个发射点覆盖了"出现"和"消失"两种。查值用当前 ctx
+        // 的 isolate realm——同名服务在不同 realm 下是不同实现。
+        for name in names {
+            let value = self.get(ctx, name, false);
+            self.emit(
+                "internal/service",
+                Arc::new(crate::events::ServiceEvent {
+                    name: name.clone(),
+                    value,
+                }),
+                None,
+            );
+        }
         let plugin_fibers = {
             let w = self.lock();
             w.plugins
