@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::dispose::Disposable;
 use crate::error::{AggregateError, Result};
-use crate::events::{EventArgs, EventOptions, Payload, SyncHandler};
+use crate::events::{DispatchEvent, DispatchMode, EventArgs, EventOptions, Payload, SyncHandler};
 use crate::fiber::StatusEvent;
 use crate::ids::{next_hook, FiberId, FiberState};
 use crate::logger::Logger;
@@ -31,6 +31,26 @@ impl Runtime {
         } else {
             handler
         };
+        // 注册前先问一声：`internal/listener` 是 bail，任一监听者给出值即否决。
+        // 上游用它让插件把某个事件名据为己有。跳过 `internal/*` 自身，否则
+        // 一个 internal/listener 的监听者会在注册自己时被自己问到。
+        if !name.starts_with("internal/") && self.has_listener("internal/listener") {
+            let vetoed = self.bail(
+                "internal/listener",
+                Arc::new(crate::events::ListenerEvent {
+                    name: name.to_string(),
+                    prepend: options.prepend,
+                    global: options.global,
+                    once: options.once,
+                }),
+                None,
+            );
+            if vetoed.is_some() {
+                return Err(crate::error::Error::ListenerRejected {
+                    name: name.to_string(),
+                });
+            }
+        }
         let label = format!("ctx.on({name:?})");
         let rt = self.clone();
         let ctx_c = ctx.clone();
@@ -111,12 +131,40 @@ impl Runtime {
         out
     }
 
+    /// 这个事件名下有没有监听者。只摸一次 map，不构造载荷、不克隆 handler。
+    fn has_listener(&self, name: &str) -> bool {
+        self.lock().hooks.get(name).is_some_and(|h| !h.is_empty())
+    }
+
+    /// `internal/dispatch` 的记账。
+    ///
+    /// **没人监听时不构造载荷**：`internal/*` 自身跳过（否则第一条追踪就会自激），
+    /// 有监听者才付一次 `String` + `Arc`。上游 `events.ts` 是同一道闸
+    /// （`!name.startsWith('internal/') && this._hooks['internal/dispatch']?.length`）。
+    fn trace_dispatch(&self, mode: DispatchMode, name: &str) {
+        if name.starts_with("internal/") {
+            return;
+        }
+        if !self.has_listener("internal/dispatch") {
+            return;
+        }
+        self.emit(
+            "internal/dispatch",
+            Arc::new(DispatchEvent {
+                mode,
+                name: name.to_string(),
+            }),
+            None,
+        );
+    }
+
     pub(crate) fn emit(
         &self,
         name: &str,
         payload: Payload,
         filter: Option<&dyn Fn(&ListenerView) -> bool>,
     ) {
+        self.trace_dispatch(DispatchMode::Emit, name);
         for h in self.handlers(name, filter) {
             if let Err(e) = h(EventArgs {
                 payload: payload.clone(),
@@ -133,6 +181,7 @@ impl Runtime {
         payload: Payload,
         filter: Option<&dyn Fn(&ListenerView) -> bool>,
     ) -> Option<Payload> {
+        self.trace_dispatch(DispatchMode::Bail, name);
         for h in self.handlers(name, filter) {
             match h(EventArgs {
                 payload: payload.clone(),
@@ -152,6 +201,7 @@ impl Runtime {
         payload: Payload,
         filter: Option<&dyn Fn(&ListenerView) -> bool>,
     ) -> Result<(), AggregateError> {
+        self.trace_dispatch(DispatchMode::Parallel, name);
         let mut errors = Vec::new();
         for h in self.handlers(name, filter) {
             if let Err(e) = h(EventArgs {
@@ -175,6 +225,7 @@ impl Runtime {
         inner: Box<dyn FnOnce() -> T + Send>,
         filter: Option<&dyn Fn(&ListenerView) -> bool>,
     ) -> T {
+        self.trace_dispatch(DispatchMode::Waterfall, name);
         self.waterfall_run(self.handlers(name, filter), value, inner)
     }
 

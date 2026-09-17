@@ -14,7 +14,7 @@
 2. **一张 `"tools"` 表。** 粒度是套件：`tool-web` 同时 register `web_search` + `web_fetch`。MCP 是一颗插件连一个 server，工具仍进同一张表，公名 `mcp_{server}__{tool}`，不能盖掉 `bash`。
 3. **先复制 Grok，再改成 Cordis。** 工作只在 `dock/`；不改、不 path-dep `grok-build/`。`cp` 过来再剥依赖（`register_resource!`、`tracing`、schemars、xAI 账号 client）。
 4. **Live-lookup。** 调用点 `ctx.get` / `ctx.require`，不要把 `Arc<T>` 关进长生命周期闭包。
-5. **扩展走 waterfall**（`tools/execute`、`system-prompt/assemble`、`agent/turn-end`、`agent/step-start` 等），不在 loop 里分支。「出了文本但还不该收尾」是 `agent/turn-end`，「跑到一半要提醒」是 `agent/step-start`，不是再加一个 `if`。这三条子代理开轮 / 收尾时同样会跑，而 handler 只拿得到主会话的 `Sessions`——会写会话或消费一次性状态的，先看载荷里的 `identity`。
+5. **扩展走 waterfall**（`tools/pre-execute`、`tools/execute`、`system-prompt/assemble`、`agent/turn-end`、`agent/step-start` 等），不在 loop 里分支。「这次调用不该这么跑」是 `tools/pre-execute`（夹在允许名单的两次检查之间——入站一次挡模型越界、改写后一次挡插件替它越界，所以改道逃不出预设的工具集——再往后才是计划门与权限门，可 `rewrite` / `deny`；门读的是改写**之后**的名字，所以 `bash` 改成 `read_file` 真的会少弹一次权限）。「出了文本但还不该收尾」是 `agent/turn-end`，「跑到一半要提醒」是 `agent/step-start`，不是再加一个 `if`。这三条子代理开轮 / 收尾时同样会跑，而 handler 只拿得到主会话的 `Sessions`——会写会话或消费一次性状态的，先看载荷里的 `identity`。
 6. **MCP / 可选能力 fail-open。** 没配置或连不上时插件仍 Active，不让 `install_app` 失败。
 7. **不接 Grok 账号产品。** 登录、账单、分享、marketplace、Imagine、voice、dashboard：不做。核心 agent 能力要补。本会话 token 账本不算账号产品，见 [CLI.md](CLI.md) `/usage`。
 8. **产品面要跟上。** 新工具要有：register 进 specs（或 `register_deferred` 走 `search_tool`）、execute 路径、该挡的权限 / 计划门、人看得见的 slash / TUI（记 [CLI.md](CLI.md)）。用户可见文案中文；底栏 `Enter:send` 那种短 hint 保持英文无空格。

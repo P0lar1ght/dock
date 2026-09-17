@@ -106,6 +106,117 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// `tools/pre-execute` payload. Runs **before** the plan gate, the permission
+/// gate and the tool body — the seam for rewriting, redirecting or denying a
+/// call while its arguments are still on the table.
+///
+/// Split of labour with `tools/execute`: that one is post-hoc and carries a
+/// [`ToolResult`], so it can only touch what already happened. This one carries
+/// the arguments, so it can change what happens.
+///
+/// **Synchronous.** `Context::waterfall` takes sync handlers, so a listener here
+/// cannot await — no asking the user, no network. Rewriting, routing and
+/// denying are all pure decisions, which is the whole intended surface; a
+/// custom permission prompt still belongs behind `acp::needs_permission` +
+/// `Permissions::request`, which the registry awaits after this waterfall.
+///
+/// Redirects are re-gated: the registry reads the **post-waterfall** name for
+/// the plan and permission checks, so rewriting `bash` into `read_file` really
+/// does drop the permission prompt instead of having already paid for it.
+/// A redirect cannot escape the preset allowlist: the registry checks it twice,
+/// once on the inbound name and again on the post-waterfall one, so a read-only
+/// preset stays read-only no matter what a handler rewrites the call into.
+///
+/// **No order slots.** The kernel's `EventOptions` carries `prepend` / `global`
+/// / `once` and no ordering key. The `ORDER_STEP_START_*` slots work because
+/// reminders *accumulate* and get sorted at the end; a rewrite mutates in place,
+/// so there is nothing to sort. With the house idiom (take `args.next()`, then
+/// mutate what it returned) edits land innermost-first — reverse mount order.
+/// The case where order would actually be dangerous — one handler allowing what
+/// another denied — is closed by making [`PreExecute::deny`] monotonic instead.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreExecute {
+    /// Tool name as the model called it. Rewrites do not change this — read
+    /// [`PreExecute::name`] for what will actually run.
+    pub called: String,
+    /// `Sessions::identity()` of the turn making the call — see
+    /// [`TurnEnd::identity`] for why identity rides the payload.
+    pub identity: String,
+    name: String,
+    arguments: String,
+    denied: Option<String>,
+}
+
+impl PreExecute {
+    pub fn new(
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+        identity: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            called: name.clone(),
+            identity: identity.into(),
+            name,
+            arguments: arguments.into(),
+            denied: None,
+        }
+    }
+
+    /// What will run after this waterfall settles.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn arguments(&self) -> &str {
+        &self.arguments
+    }
+
+    /// True once some handler redirected the call to a different tool.
+    pub fn redirected(&self) -> bool {
+        self.name != self.called
+    }
+
+    /// Redirect to another tool. A denied call is left alone — the first denial
+    /// stands, so a later handler cannot quietly turn a refusal into a call.
+    pub fn rewrite(&mut self, name: impl Into<String>, arguments: impl Into<String>) {
+        if self.denied.is_some() {
+            return;
+        }
+        self.name = name.into();
+        self.arguments = arguments.into();
+    }
+
+    /// Replace the arguments, same tool.
+    pub fn rewrite_args(&mut self, arguments: impl Into<String>) {
+        if self.denied.is_some() {
+            return;
+        }
+        self.arguments = arguments.into();
+    }
+
+    /// Refuse the call. `reason` becomes the model-facing `ToolResult` body.
+    ///
+    /// Monotonic, like DSH's tool guards: the first denial wins and later
+    /// handlers cannot lift it. Otherwise mount order would decide whether a
+    /// policy holds.
+    pub fn deny(&mut self, reason: impl Into<String>) {
+        if self.denied.is_none() {
+            self.denied = Some(reason.into());
+        }
+    }
+
+    /// The refusal reason, if any handler denied the call.
+    pub fn denial(&self) -> Option<&str> {
+        self.denied.as_deref()
+    }
+
+    /// True for the user-facing session (root or any tab). Subagents are `child-*`.
+    pub fn is_main_session(&self) -> bool {
+        is_main_identity(&self.identity)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct ToolResult {
     pub call_id: String,

@@ -31,7 +31,10 @@ mod scope;
 pub use context::{Context, EffectScope, ServiceRef};
 pub use dispose::{Disposable, EffectMeta};
 pub use error::{AggregateError, Error, Result};
-pub use events::{is_bailed, EventArgs, EventOptions, UpdateEvent};
+pub use events::{
+    is_bailed, DispatchEvent, DispatchMode, EventArgs, EventOptions, ListenerEvent, ServiceEvent,
+    UpdateEvent,
+};
 pub use fiber::{Fiber, StatusEvent};
 pub use ids::{FiberId, FiberState, IsolateKey, PluginId};
 pub use logger::{LogLevel, Logger, Message};
