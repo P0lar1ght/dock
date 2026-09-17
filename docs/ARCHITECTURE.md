@@ -8,9 +8,20 @@ Dock 的 harness 是一棵 Cordis 插件树。内核是 crate `cordis`（`Contex
 
 ```
 cordis-rust/             crate `cordis`：Context、inject、named service、fiber、waterfall
+cordis-base/             spine 的底座：wire 类型、config.toml、纯引擎。**不含插件**
+  src/types.rs           LogEvent / ToolCall / ToolResult 与会话身份原语
+  src/config.rs          config.toml 解析与模型目录     src/usage.rs   token / 费用账本
+  src/chat_chunk.rs      流式分片                       src/stream_acc.rs  流式累积
+  src/grep.rs            进程内 ripgrep 引擎            src/tool_output.rs 工具输出预算
+  src/cua.rs             cua-driver 发现与授权          src/acp.rs     ACP 权限选项种类
 cordis-spine/            Agent 循环、工具粒、MCP、会话、预设、权限；install_app
-  src/*.rs               各 named service 与插件粒（llm、tools、permissions、slash、mcp…）
-  src/skills/            skills 发现与 listing（扫描顺序见下）
+  src/*.rs               lib / names（ctx 键）/ error / bundle（组合根）
+  src/agent/             runtime、loop_plugin、turn、agents、presets
+  src/session/           log（内存事件流）、persist（落盘）、roster（跨 cwd 名册）
+  src/llm/               sampler、http/（三条 wire）、compact/
+  src/prompt/            assemble、context_book、listing、project_instructions、context_usage
+  src/tools/             registry（那张唯一的 "tools" 表）+ 全部工具插件
+  src/host/              宿主 live-look 的表：settings、permissions、slash、tui_slots
   presets/               内置 Agent 预设 YAML（code / minimal / cordis / warden）
   tests/                 round.rs（install_app_registers）、dynamic.rs、subagents.rs
 cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、statusBar、shortcuts…
@@ -58,6 +69,10 @@ config.toml.example      用户 / 项目模型目录样例
 | 回环网关 | `gateway` | `"gateway"`（`GatewayRef`），事件 `gateway/pairing` |
 
 `settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。
+
+新东西往 `cordis-base` 还是 `cordis-spine` 放，判据是**有没有插件**：base 不 `provide` 任何 named service、不认识 ctx 键（所以 `names` 不在那儿）、也不依赖内核 crate `cordis`；它只有 wire 类型、`config.toml` 解析和纯引擎（ripgrep、cua 发现）。反过来，`settings` / `permissions` / `slash` / `cron` 虽然也不成环，但它们 provide 服务，留在 spine。这条线由编译器守着——base 反向依赖 spine 会直接编译失败，以前只能靠约定。
+
+`cordis-spine/src/tools/` 把注册表与全部工具实现收在一起，对齐 Grok 的 `xai-grok-tools`（那边同样是 `registry/` + `implementations/` 一个 crate）。注册表要问预设的允许名单、工具又要往注册表 register，这圈依赖是工具表这件事的固有形态，不是 dock 特有的耦合，所以不拆成两个 crate。
 
 `roster` 与 `sessions` 不是一回事，别混：`sessions` 是**本页**的会话日志（每页一份，`archived()` 走 `load_cwd`，只看当前 cwd 且会把整份 transcript 解出来）；`roster` 是**跨 cwd** 的会话抬头名册（全局一份，扫 `$DOCK_HOME/sessions/*/*/`，每条只读 `meta.json` 加 jsonl 尾部 64KB 取一行摘要，压 2s TTL 备忘挡住每帧重扫）。名册项的 `cwd` **只能从 `meta.json` 读**——`encode_cwd_dirname` 把 `/` 和非字母数字都压成 `-` 再折叠连续 `-`，目录名是有损的、反解不回来。对应 Grok pager 的 `app/roster.rs`，是 agent dashboard 的行来源之一。
 
