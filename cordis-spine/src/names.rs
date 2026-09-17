@@ -62,6 +62,11 @@ pub const STEP_START: &str = "agent/step-start";
 pub const TURN_END: &str = "agent/turn-end";
 pub const PROMPT_ASSEMBLE: &str = "system-prompt/assemble";
 pub const LLM_STREAM: &str = "llm/stream";
+/// Before the plan gate, the permission gate and the tool body. Payload
+/// [`cordis_base::types::PreExecute`] — rewrite / redirect / deny.
+pub const TOOLS_PRE_EXECUTE: &str = "tools/pre-execute";
+/// After the tool body. Payload [`cordis_base::types::ToolResult`] — inspect or
+/// replace what already happened.
 pub const TOOLS_EXECUTE: &str = "tools/execute";
 pub const SESSION_EVENT: &str = "session/event";
 pub const PERMISSION_EVENT: &str = "permissions/pending";

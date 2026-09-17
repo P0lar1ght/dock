@@ -80,7 +80,7 @@ cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080
 - 返回给用户的错误信息用中文（如 `"工具名不能为空"`）。
 - 新 crate 命名 `cordis-*`；新增行为优先新插件，不改 `event_loop` / `agent-loop` 私有状态。
 - named service 在调用点 `ctx.get` / `ctx.require` live-lookup，不把 `Arc<T>` 关进长生命周期闭包。
-- 扩展走 waterfall（`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/execute`、`system-prompt/assemble`），监听必须把控制权交给下一环。
+- 扩展走 waterfall（`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/pre-execute`、`tools/execute`、`system-prompt/assemble`），监听必须把控制权交给下一环。要在工具**跑之前**改写 / 改道 / 拒绝一次调用走 `tools/pre-execute`（拿得到 `arguments`）；`tools/execute` 是 post-hoc 的，载荷是 `ToolResult`，只能改已经发生的事。
 - 改了工具面就同步 `docs/tools/<name>.md`（细节）与 `TOOLS.md`（只有一句话 + 链接要改才动）；改了斜杠 / overlay / 快捷键就同步 `CLI.md`。
 
 ## Boundaries

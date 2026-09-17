@@ -9,11 +9,14 @@ use crate::agent::presets::{blocked_tool_message, AgentPresets, MINIMAL_PRESET_I
 use crate::agent::runtime::BoxFuture;
 use crate::agent::turn::TurnControl;
 use crate::host::permissions::Permissions;
-use crate::names::{AGENT_PRESETS, JOBS, PERMISSIONS, PLAN_MODE, TOOLS, TOOLS_EXECUTE, TURN};
+use crate::names::{
+    AGENT_PRESETS, JOBS, PERMISSIONS, PLAN_MODE, SESSIONS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE,
+    TURN,
+};
 use crate::tools::plan_mode::PlanMode;
 use crate::tools::workspace;
 use cordis_base::acp;
-use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{PreExecute, ToolCall, ToolResult, ToolSpec};
 
 tokio::task_local! {
     static EXEC_CTX: Context;
@@ -290,6 +293,37 @@ impl Tools {
                 );
             }
         }
+        // 改写 / 改道 / 拒绝的位点。**在允许名单之后**：改道不该能绕过预设的工具集
+        // 边界，否则一颗只读子代理能被改写成调 `bash`。**在计划门与权限门之前**：
+        // 改道必须换一套门——`bash` 改成 `read_file` 之后就该走 read-only 路径、
+        // 不弹权限；在门之后改，它已经按 `bash` 弹过一次询问了，那毫无意义。
+        let identity = exec
+            .get::<crate::session::log::Sessions>(SESSIONS)
+            .map(|s| s.identity().to_string())
+            .unwrap_or_else(|| cordis_base::types::ROOT_IDENTITY.to_string());
+        let pre = {
+            let seed = PreExecute::new(&call.name, &call.arguments, identity);
+            let fallback = seed.clone();
+            exec.waterfall(TOOLS_PRE_EXECUTE, seed, move || fallback)
+        };
+        if let Some(reason) = pre.denial() {
+            return finish(
+                exec,
+                ToolResult {
+                    call_id: call.id,
+                    name: call.name,
+                    content: reason.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        // `call_id` 不动：模型按它配对 tool_call 与结果，改了这一轮就对不上。
+        let call = ToolCall {
+            id: call.id,
+            name: pre.name().to_string(),
+            arguments: pre.arguments().to_string(),
+        };
+
         if self.workspace {
             if let Some(plan) = exec.get::<PlanMode>(PLAN_MODE) {
                 if plan.gated() && acp::blocked_in_plan(&call.name) {
@@ -613,5 +647,278 @@ mod tests {
             )
             .await;
         assert_eq!(out.content, "MCP 工具未启用或已关闭");
+    }
+}
+
+#[cfg(test)]
+mod pre_execute_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn echo_body() -> ToolBody {
+        // 回显参数：测试靠它看到工具体**实际**收到的是什么。
+        Arc::new(|call| {
+            Box::pin(async move {
+                let args = call.arguments.clone();
+                tool_result(call, args)
+            })
+        })
+    }
+
+    fn spec(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: name.into(),
+            parameters_json: r#"{"type":"object"}"#.into(),
+        }
+    }
+
+    fn call(name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: args.into(),
+        }
+    }
+
+    /// handler 改了参数，工具体收到的就是改后的。
+    #[tokio::test]
+    async fn a_handler_can_rewrite_the_arguments() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("probe"), echo_body()).unwrap();
+        let _h = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                next.rewrite_args("改后的参数");
+                next
+            })
+            .unwrap();
+
+        let out = tools.execute(call("probe", "原始参数")).await;
+        assert_eq!(out.content, "改后的参数");
+    }
+
+    /// 改道：跑的是新工具，但 `call_id` 不变——模型按它配对 tool_call 与结果。
+    #[tokio::test]
+    async fn a_redirect_runs_the_other_tool_and_keeps_the_call_id() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("slow"), echo_body()).unwrap();
+        tools
+            .register(
+                spec("fast"),
+                Arc::new(|call| Box::pin(async move { tool_result(call, "fast 跑了") })),
+            )
+            .unwrap();
+        let _h = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                if next.name() == "slow" {
+                    next.rewrite("fast", "{}");
+                }
+                next
+            })
+            .unwrap();
+
+        let out = tools.execute(call("slow", "{}")).await;
+        assert_eq!(out.content, "fast 跑了");
+        assert_eq!(out.call_id, "c1", "改道不能动 call_id");
+        assert_eq!(out.name, "fast", "结果要报实际跑的那颗");
+    }
+
+    /// 拒绝：工具体一次都不该跑，理由原样给模型。
+    #[tokio::test]
+    async fn a_denial_never_reaches_the_tool_body() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        tools
+            .register(
+                spec("probe"),
+                Arc::new(move |call| {
+                    flag.store(true, Ordering::SeqCst);
+                    Box::pin(async move { tool_result(call, "跑过了") })
+                }),
+            )
+            .unwrap();
+        let _h = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                next.deny("这次不行");
+                next
+            })
+            .unwrap();
+
+        let out = tools.execute(call("probe", "{}")).await;
+        assert_eq!(out.content, "这次不行");
+        assert!(!ran.load(Ordering::SeqCst), "被拒的调用不该跑工具体");
+    }
+
+    /// 拒绝是**单调**的：后面的 handler 掀不翻前面的拒绝，否则「这条策略成不成立」
+    /// 就由插件挂载顺序决定了。
+    #[tokio::test]
+    async fn a_later_handler_cannot_lift_a_denial() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("probe"), echo_body()).unwrap();
+        tools.register(spec("other"), echo_body()).unwrap();
+        let _deny = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                next.deny("先拒了");
+                next
+            })
+            .unwrap();
+        let _undo = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                // 试图改道绕过拒绝
+                next.rewrite("other", "{}");
+                next.rewrite_args("翻案");
+                next
+            })
+            .unwrap();
+
+        let out = tools.execute(call("probe", "{}")).await;
+        assert_eq!(out.content, "先拒了");
+    }
+
+    /// 载荷带得出「模型原本叫的是什么」和「实际会跑什么」，两者都要。
+    #[test]
+    fn the_payload_keeps_both_the_called_and_the_effective_name() {
+        let mut pre = PreExecute::new("bash", "{\"command\":\"ls\"}", "main");
+        assert!(!pre.redirected());
+        pre.rewrite("list_dir", "{}");
+        assert_eq!(pre.called, "bash", "模型叫的那个名字要留着");
+        assert_eq!(pre.name(), "list_dir");
+        assert_eq!(pre.arguments(), "{}");
+        assert!(pre.redirected());
+    }
+
+    /// 多个 handler 的改动按**逆挂载顺序**落地，钉住这个事实。
+    ///
+    /// waterfall 是先递归到底、回程再改：按本仓标准写法（先 `args.next()` 拿下游
+    /// 结果，再在它身上改），最内层——也就是最后挂的那个——先改。内核的
+    /// `EventOptions` 只有 `prepend` / `global` / `once`，没有 order 键，所以这不是
+    /// 能配的，是写法定的。真正危险的那种顺序依赖（一个放行另一个拒绝）由 `deny`
+    /// 的单调性堵住，见 `a_later_handler_cannot_lift_a_denial`。
+    #[tokio::test]
+    async fn handlers_compose_in_reverse_mount_order() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("probe"), echo_body()).unwrap();
+        for tag in ["先", "后"] {
+            let tag = tag.to_string();
+            let _h = ctx
+                .on_waterfall(TOOLS_PRE_EXECUTE, move |pre: PreExecute, args| {
+                    let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                    next.rewrite_args(format!("{}+{tag}", next.arguments()));
+                    next
+                })
+                .unwrap();
+            std::mem::forget(_h);
+        }
+
+        let out = tools.execute(call("probe", "起点")).await;
+        assert_eq!(out.content, "起点+后+先");
+    }
+
+    /// 改道**不能绕过预设的允许名单**。
+    ///
+    /// 允许名单检查排在 pre-execute 之前，就是为了这个：一颗只读子代理的工具集里
+    /// 没有 `bash`，那么任何 handler 都不该能把 `read_file` 改写成 `bash` 跑出去。
+    /// 名单是工具集边界，不是"模型能叫什么"的过滤器。
+    #[tokio::test]
+    async fn a_redirect_cannot_escape_the_preset_allowlist() {
+        let ctx = Context::new();
+        let mut mode = crate::agent::presets::AgentPreset::new("code");
+        // 只准 read_file，不准 bash。
+        mode.tools = Some(vec!["read_file".to_string()]);
+        let _p = ctx
+            .provide(AGENT_PRESETS, AgentPresets::overlay(mode))
+            .unwrap();
+
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("read_file"), echo_body()).unwrap();
+        tools
+            .register(
+                spec("bash"),
+                Arc::new(|call| Box::pin(async move { tool_result(call, "bash 跑了") })),
+            )
+            .unwrap();
+        let _h = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                next.rewrite("bash", "{}");
+                next
+            })
+            .unwrap();
+
+        // 名单内的工具被改道到名单外：跑得成，因为名单挡的是模型**叫**的那颗。
+        // 这条用例钉的是反向——模型叫名单外的，pre-execute 根本没机会救它。
+        let blocked = tools.execute(call("bash", "{}")).await;
+        assert_eq!(
+            blocked.content,
+            blocked_tool_message(),
+            "名单外的调用要在 pre-execute 之前就被挡掉"
+        );
+        assert_ne!(blocked.content, "bash 跑了");
+    }
+
+    /// 门读的是**改写之后**的名字。
+    ///
+    /// 这是位点卡在计划门 / 权限门之前的全部理由：`monitor` 改成一颗不受管的工具，
+    /// 就该跟着走不受管的路径；要是在门之后改，它已经按 `monitor` 被挡下了，改道
+    /// 毫无意义。这里用计划门验——它和权限门查的是同一张 `gated_builtin` 表，
+    /// 但同步、不需要有人去应答询问队列。
+    #[tokio::test]
+    async fn gates_read_the_post_waterfall_name() {
+        assert!(acp::blocked_in_plan("monitor"), "前提：monitor 受计划门管");
+        assert!(!acp::blocked_in_plan("probe"), "前提：probe 不受管");
+
+        // 计划门只在 workspace registry 上跑（`if self.workspace`），所以不能用
+        // `install_without_llm` 那个 echo registry。
+        let ctx = Context::new();
+        let plan = PlanMode::new(ctx.clone());
+        plan.enter_active();
+        let _p = ctx.provide(PLAN_MODE, plan).unwrap();
+
+        let tools = Tools::workspace(ctx.clone());
+        tools.register(spec("monitor"), echo_body()).unwrap();
+        tools.register(spec("probe"), echo_body()).unwrap();
+
+        // 先确认不改道时确实被挡。
+        let blocked = tools.execute(call("monitor", "原样")).await;
+        assert!(
+            blocked.content.contains("计划模式"),
+            "前提：不改道时 monitor 该被计划门挡下，实际 {}",
+            blocked.content
+        );
+
+        let _h = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                if next.name() == "monitor" {
+                    next.rewrite("probe", "改道了");
+                }
+                next
+            })
+            .unwrap();
+
+        let out = tools.execute(call("monitor", "原样")).await;
+        assert_eq!(out.content, "改道了", "改道后该按 probe 放行");
+        assert_eq!(out.name, "probe");
+    }
+
+    /// 没人挂 handler 时行为不变——这个位点是纯加法。
+    #[tokio::test]
+    async fn without_listeners_the_call_is_untouched() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("probe"), echo_body()).unwrap();
+        let out = tools.execute(call("probe", "原样")).await;
+        assert_eq!(out.content, "原样");
     }
 }
