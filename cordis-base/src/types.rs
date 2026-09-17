@@ -40,6 +40,49 @@ pub struct UserImage {
     pub height: u32,
 }
 
+/// [`LogEvent::Notice`] 的类别。落盘用 kebab-case 字符串，认不得的旧值读成
+/// [`Self::Other`]（丢一个配色，不丢一整条会话）。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoticeKind {
+    /// workflow 的某个子代理 `report` 了。
+    WorkflowReport,
+    /// 一次 workflow run 收尾。
+    WorkflowDone,
+    Other,
+}
+
+impl NoticeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkflowReport => "workflow-report",
+            Self::WorkflowDone => "workflow-done",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn from_str_lenient(raw: &str) -> Self {
+        match raw {
+            "workflow-report" => Self::WorkflowReport,
+            "workflow-done" => Self::WorkflowDone,
+            _ => Self::Other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod notice_kind_tests {
+    use super::NoticeKind;
+
+    #[test]
+    fn unknown_kind_is_other_so_old_jsonl_still_loads() {
+        assert_eq!(NoticeKind::from_str_lenient("nope"), NoticeKind::Other);
+        assert_eq!(
+            NoticeKind::from_str_lenient("workflow-report"),
+            NoticeKind::WorkflowReport
+        );
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LogEvent {
     User(String),
@@ -48,6 +91,20 @@ pub enum LogEvent {
     /// Grok `PromptOrigin::GoalSummary`: hidden from the pager, sent as a
     /// user-role reminder so the model keeps an active `/goal` turn going.
     SystemReminder(String),
+    /// **只给用户看**的通知：滚动区渲染成卡片，`Sessions::model_history` 把它
+    /// 滤掉，所以它既不进模型上下文，也不会触发一轮采样。
+    ///
+    /// 和 [`Self::SystemReminder`] 正好相反（那个是模型看得到、pager 藏起来）。
+    /// workflow 的子代理上报走这条：run 还在跑时推给模型会让它在半份结果上开一
+    /// 轮，但用户该看得见发生了什么。
+    Notice {
+        /// 通知类别，渲染器据此选卡片配色。
+        kind: NoticeKind,
+        /// 卡片头那一行。
+        title: String,
+        /// 卡片体，默认折叠。
+        body: String,
+    },
     LlmStream(LlmOutput),
     ToolExecute {
         id: String,
@@ -68,6 +125,7 @@ impl LogEvent {
             Self::Prompt(_) => "prompt",
             Self::SystemReminder(_) => "system-reminder",
             Self::LlmStream(_) => "llm/stream",
+            Self::Notice { .. } => "notice",
             Self::ToolExecute { .. } => "tools/execute",
         }
     }
@@ -81,6 +139,7 @@ impl fmt::Display for LogEvent {
             Self::Prompt(text) => write!(f, "prompt: {text}"),
             Self::SystemReminder(text) => write!(f, "reminder: {text}"),
             Self::LlmStream(out) => write!(f, "llm: {}", out.summary()),
+            Self::Notice { kind, title, .. } => write!(f, "notice[{}]: {title}", kind.as_str()),
             Self::ToolExecute { name, content, .. } => write!(f, "tool {name}: {content}"),
         }
     }

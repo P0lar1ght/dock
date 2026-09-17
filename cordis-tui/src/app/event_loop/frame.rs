@@ -839,9 +839,21 @@ pub(super) fn paint_overlay(
             let entries = task_entries(ctx, query, collapsed);
             tasks_pane::render_tasks_overlay(buf, area, &entries, *selected, query)
         }
-        Overlay::Workflows { selected, query } => {
+        Overlay::Workflows {
+            selected,
+            query,
+            detail,
+            phase,
+        } => {
             let runs = workflow_rows(ctx, query);
-            workflows::render_workflows_overlay(buf, area, &runs, *selected, query)
+            // 详情页盯的是一个 run id：列表过滤或排序变了也不该跳到别的 run 上。
+            match detail
+                .as_deref()
+                .and_then(|id| runs.iter().find(|r| r.run_id == id))
+            {
+                Some(run) => workflows::render_workflow_detail(buf, area, run, *phase),
+                None => workflows::render_workflows_overlay(buf, area, &runs, *selected, query),
+            }
         }
         // 面板在 `draw` 里就吃满整个内区并提前返回了，走不到这里。
         Overlay::Dashboard { .. } => PickerHits::default(),

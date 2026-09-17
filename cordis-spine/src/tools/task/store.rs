@@ -64,11 +64,23 @@ impl ChildSlot {
 pub(super) struct ChildStore {
     inner: Arc<Mutex<HashMap<String, Arc<ChildSlot>>>>,
     inbox: Arc<Mutex<ParentInbox>>,
+    /// 按 run id 攒的 workflow 子代理上报。与 `inbox` 分开就是为了**不**叫醒
+    /// 主线程；由 workflow host 取走。
+    workflow_inbox: Arc<Mutex<HashMap<String, Vec<WorkflowReport>>>>,
     parent_wake: Arc<Notify>,
 }
 
 struct ParentInbox {
     notices: VecDeque<ParentNotice>,
+}
+
+/// 一条 workflow 子代理的上报。不进父信箱：它是**过程**，run 还没结束就把它
+/// 塞给主线程，等于让主线程在半份结果上开一轮。由 workflow host 取走，折进 run
+/// 快照和滚动区 `Notice`；模型只在收尾拿到 `complete()` 的结果。
+#[derive(Clone, Debug)]
+pub struct WorkflowReport {
+    pub agent_id: String,
+    pub output: String,
 }
 
 /// Parent-facing notice, drained by the session actor into a hidden mailbox
@@ -77,6 +89,16 @@ struct ParentInbox {
 pub(super) enum ParentNotice {
     /// Child called `report` during its turn.
     Report { from: String, output: String },
+    /// 一次 workflow run 收尾。整条 run 只有这一条通知——过程都在里面了。
+    WorkflowDone {
+        name: String,
+        status: String,
+        elapsed_ms: u64,
+        /// `complete()` 的结果，或失败 / 暂停的原因。
+        summary: String,
+        /// 过程中各子代理的上报，按发生顺序。
+        reports: Vec<WorkflowReport>,
+    },
     /// One per finished child turn: the child is idle and can be continued.
     TurnEnd {
         id: String,
@@ -97,6 +119,7 @@ impl ChildStore {
             inbox: Arc::new(Mutex::new(ParentInbox {
                 notices: VecDeque::new(),
             })),
+            workflow_inbox: Arc::new(Mutex::new(HashMap::new())),
             parent_wake: Arc::new(Notify::new()),
         }
     }
@@ -343,9 +366,27 @@ impl ChildStore {
             .and_then(|s| s.queued.lock().unwrap().pop_front())
     }
 
+    /// 子代理 `report` 的落点。
+    ///
+    /// workflow 的孩子**不进父信箱**：run 还在跑时把中间结论推给主线程，主线程
+    /// 就会在半份结果上开一轮。它们攒进 run 自己的队列，由 workflow host 取走
+    /// 折进快照和滚动区 `Notice`。
     pub fn push_report(&self, from: &str, output: &str) {
-        if let Some(slot) = self.get(from) {
+        let owner = self.get(from).map(|slot| {
             slot.reported_this_turn.store(true, Ordering::Relaxed);
+            slot.owner.clone()
+        });
+        if let Some(run_id) = owner.as_ref().and_then(|o| o.workflow_run_id()) {
+            self.workflow_inbox
+                .lock()
+                .unwrap()
+                .entry(run_id.to_string())
+                .or_default()
+                .push(WorkflowReport {
+                    agent_id: from.to_string(),
+                    output: output.to_string(),
+                });
+            return;
         }
         self.inbox
             .lock()
@@ -354,6 +395,38 @@ impl ChildStore {
             .push_back(ParentNotice::Report {
                 from: from.to_string(),
                 output: output.to_string(),
+            });
+        self.notify_parent();
+    }
+
+    /// 取走某次 run 攒下的子代理上报。
+    pub fn take_workflow_reports(&self, run_id: &str) -> Vec<WorkflowReport> {
+        self.workflow_inbox
+            .lock()
+            .unwrap()
+            .remove(run_id)
+            .unwrap_or_default()
+    }
+
+    /// 一次 run 收尾：**整条 run 唯一**一条进父信箱的通知。
+    pub fn push_workflow_done(
+        &self,
+        name: String,
+        status: String,
+        elapsed_ms: u64,
+        summary: String,
+        reports: Vec<WorkflowReport>,
+    ) {
+        self.inbox
+            .lock()
+            .unwrap()
+            .notices
+            .push_back(ParentNotice::WorkflowDone {
+                name,
+                status,
+                elapsed_ms,
+                summary,
+                reports,
             });
         self.notify_parent();
     }

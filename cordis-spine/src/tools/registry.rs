@@ -10,9 +10,10 @@ use crate::agent::runtime::BoxFuture;
 use crate::agent::turn::TurnControl;
 use crate::host::permissions::Permissions;
 use crate::names::{
-    AGENT_PRESETS, JOBS, PERMISSIONS, PLAN_MODE, SESSIONS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE,
-    TURN,
+    AGENT_PRESETS, CAPABILITY, JOBS, PERMISSIONS, PLAN_MODE, SESSIONS, TOOLS, TOOLS_EXECUTE,
+    TOOLS_PRE_EXECUTE, TURN,
 };
+use crate::tools::capability::CapabilityMode;
 use crate::tools::plan_mode::PlanMode;
 use crate::tools::workspace;
 use cordis_base::acp;
@@ -20,6 +21,17 @@ use cordis_base::types::{PreExecute, ToolCall, ToolResult, ToolSpec};
 
 tokio::task_local! {
     static EXEC_CTX: Context;
+}
+
+/// 这颗工具被本会话的能力档位挡住了吗？
+///
+/// 没挂 `"capability"` 的会话（主会话、以及没指定档位的子代理）一律放行——档位
+/// 是**收窄**，不是新的准入条件。
+fn capability_denies(exec: &Context, name: &str) -> bool {
+    match exec.get::<CapabilityMode>(CAPABILITY) {
+        Some(mode) => !mode.allows(name),
+        None => false,
+    }
 }
 
 /// Context of the agent currently running (child isolate when nested) — set
@@ -214,6 +226,12 @@ impl Tools {
     /// handler 改写成 `bash` 跑出去——权限门跟着改写后的名字走，补不上这个洞，
     /// 何况子代理那边常常压根没人应答询问。
     fn outside_allowlist(&self, exec: &Context, name: &str) -> bool {
+        // 能力档位排在最前，**不吃 `bypasses_allowlist` 的豁免**：MCP 与动态包
+        // 工具绕过预设允许名单是有意的（服务端上线就该能调），但绕不过"这次
+        // 委派只准读"——否则一颗只读子代理换颗 MCP 工具就能写盘。
+        if capability_denies(exec, name) {
+            return true;
+        }
         let Some(presets) = exec.get::<AgentPresets>(AGENT_PRESETS) else {
             return false;
         };
@@ -259,7 +277,7 @@ impl Tools {
         let specs: Vec<ToolSpec> = self
             .specs()
             .into_iter()
-            .filter(|s| !self.is_hidden(&s.name))
+            .filter(|s| !self.is_hidden(&s.name) && !capability_denies(exec, &s.name))
             .collect();
         match exec.get::<AgentPresets>(AGENT_PRESETS) {
             Some(presets) => {

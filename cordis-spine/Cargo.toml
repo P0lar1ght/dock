@@ -35,6 +35,9 @@ async-lsp = { version = "=0.2.3", features = ["tokio", "tracing"] }
 async-trait = "0.1"
 tracing = "0.1"
 schemars = "0.8"
+# workflow `agent(output_schema:)` 的产出契约校验。schemars 是生成 schema 的，
+# 校验要另一颗；版本与 grok 对齐。
+jsonschema = { version = "0.30", default-features = false }
 libc = "0.2"
 xai-workflow = { path = "../vendor/xai/workflow" }
 chromiumoxide = { version = "0.9", default-features = true }

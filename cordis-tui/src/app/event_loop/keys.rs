@@ -197,11 +197,41 @@ pub(super) fn run_action(
                 }
                 return Vec::new();
             }
+            // 详情页里 ↑↓ 换的是阶段，不是列表里的 run。
+            if let Overlay::Workflows {
+                detail: Some(run_id),
+                phase,
+                query,
+                ..
+            } = overlay
+            {
+                let len = workflow_phase_count(ctx, query, run_id);
+                *phase = phase
+                    .saturating_add_signed(delta as isize)
+                    .min(len.saturating_sub(1));
+                return Vec::new();
+            }
             let len = overlay_len(ctx, overlay);
             overlay.move_sel(delta, len);
             Vec::new()
         }
         Action::OverlayAccept => {
+            // Enter 在列表里是打开选中 run 的详情页。
+            if let Overlay::Workflows {
+                selected,
+                query,
+                detail,
+                phase,
+            } = overlay
+            {
+                if detail.is_none() {
+                    if let Some(run) = workflow_rows(ctx, query).get(*selected) {
+                        *detail = Some(run.run_id.clone());
+                        *phase = 0;
+                    }
+                }
+                return Vec::new();
+            }
             if matches!(
                 overlay,
                 Overlay::Inspect {
@@ -510,8 +540,28 @@ pub(super) fn run_action(
             {
                 if c == 'x' || c == 'X' {
                     let rows = task_entries(ctx, query, collapsed);
-                    if let Some(TaskEntry::Scheduled { task_id, .. }) = rows.get(*selected) {
-                        cancel_scheduled(ctx, task_id);
+                    if let Some(target) = rows.get(*selected).and_then(TaskEntry::kill_target) {
+                        kill_task_target(ctx, &target);
+                        return Vec::new();
+                    }
+                }
+            }
+            // `x` 在 Workflow Runs 里停选中的那条 run（列表和详情页都认）。
+            if let Overlay::Workflows {
+                selected,
+                query,
+                detail,
+                ..
+            } = overlay
+            {
+                if c == 'x' || c == 'X' {
+                    let target = detail.clone().or_else(|| {
+                        workflow_rows(ctx, query)
+                            .get(*selected)
+                            .map(|run| run.run_id.clone())
+                    });
+                    if let Some(run_id) = target {
+                        stop_workflow(ctx, &run_id);
                         return Vec::new();
                     }
                 }
@@ -1091,13 +1141,39 @@ pub(super) fn run_action(
                         }
                     }
                 }
-                if let Some(id) = overlay::hit_kill(hits, column, row) {
+                if let Some(target) = overlay::hit_kill(hits, column, row) {
                     if matches!(overlay, Overlay::Tasks { .. }) {
-                        cancel_scheduled(ctx, &id);
+                        kill_task_target(ctx, &target);
                         return Vec::new();
                     }
                 }
                 if let Some(idx) = overlay::hit_index(hits, column, row) {
+                    // 详情页里那些行是阶段，点它只换阶段，不是选中一个 run。
+                    if let Overlay::Workflows {
+                        detail: Some(_),
+                        phase,
+                        ..
+                    } = overlay
+                    {
+                        *phase = idx;
+                        return Vec::new();
+                    }
+                    // 列表里点一行就进详情：以前在 `/tasks` 点 workflow 行看进展，
+                    // 详情已经挪到 `/workflow`，点击语义跟着走。
+                    if let Overlay::Workflows {
+                        selected,
+                        query,
+                        detail,
+                        phase,
+                    } = overlay
+                    {
+                        *selected = idx;
+                        if let Some(run) = workflow_rows(ctx, query).get(idx) {
+                            *detail = Some(run.run_id.clone());
+                            *phase = 0;
+                        }
+                        return Vec::new();
+                    }
                     if matches!(overlay, Overlay::Presets(PresetView::Canvas(_))) {
                         let action = match overlay {
                             Overlay::Presets(view) => preset_overlay::apply_hit(ctx, view, idx),
@@ -1317,6 +1393,8 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
                 *overlay = Overlay::inspect_job(task_id.clone(), true);
                 return Vec::new();
             }
+            // workflow 行在这里不展开：`/tasks` 是五类任务的总表，详情归
+            // `/workflow`。这里点开会把两个面板的职责搅在一起。
             return Vec::new();
         }
         Overlay::Mcps {
@@ -1338,8 +1416,13 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
             }
             return Vec::new();
         }
-        Overlay::Workflows { .. } => {
-            overlay.close();
+        Overlay::Workflows { detail, phase, .. } => {
+            // Esc 在详情页是返回列表，不是关掉整个 overlay。
+            if detail.take().is_some() {
+                *phase = 0;
+            } else {
+                overlay.close();
+            }
             return Vec::new();
         }
         Overlay::Goal {

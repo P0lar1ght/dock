@@ -1,5 +1,5 @@
 //! SessionActor-shaped drain: oneshot ack then `xai_workflow::run_workflow`.
-//! Host `SpawnAgent` live-looks `"subagents"` (`ChannelBackend::spawn`, `await_to_completion`).
+//! 每次 run 的 host 服务在 [`super::host`]。
 
 #![allow(dead_code)] // Grok-copied API kept for later wiring.
 
@@ -9,17 +9,17 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use xai_workflow::{
-    run_workflow, validate_script, AgentResult, BudgetState, HostError, Journal,
-    WorkflowHostRequest, WorkflowOutcome, WorkflowRunParams,
-};
+use xai_workflow::{run_workflow, validate_script, Journal, WorkflowOutcome, WorkflowRunParams};
 
 use super::grok_tool::{
     WorkflowLaunchAck, WorkflowLaunchEnvelope, WorkflowSource, WorkflowToolInput,
 };
+use super::host::{self, WorkflowHostParams, DEFAULT_AGENT_BUDGET};
 use super::registry::{resolve_by_name, resolve_by_path, resolve_inline, ResolveError};
-use crate::names::SUBAGENTS;
-use crate::tools::task::Subagents;
+use crate::names::{SESSIONS, SUBAGENTS};
+use crate::session::log::Sessions;
+use crate::tools::task::{Subagents, WorkflowReport};
+use cordis_base::types::{LogEvent, NoticeKind};
 
 #[derive(Clone, Debug)]
 pub struct WorkflowRunSnap {
@@ -34,6 +34,47 @@ pub struct WorkflowRunSnap {
     pub pause_message: Option<String>,
     pub result_summary: Option<String>,
     pub agents_running: u32,
+    /// 本次 run 的子代理调用上限（`workflow` 工具的 `agent_budget`）。
+    pub agent_budget: u64,
+    /// 已预留 + 已用掉的子代理调用数。预留即扣减，引擎负责回退。
+    pub agents_used: u64,
+    /// 脚本 `log()` 的最近几条，新的在后。
+    ///
+    /// 用 `Arc` 是因为快照在 80ms 心跳里被整表克隆（`any_live_task`），这里
+    /// 只该是一次引用计数。
+    pub logs: Arc<Vec<String>>,
+    /// 脚本 `meta.phases` 声明的阶段（标题，说明）。整条 run 不变。
+    pub phases: Arc<Vec<(String, String)>>,
+    /// 这次 run 起过的子代理，按启动顺序。
+    pub agents: Arc<Vec<WorkflowAgentRow>>,
+}
+
+/// run 里一个子代理的状态行。overlay 详情页右栏按它渲染。
+#[derive(Clone, Debug)]
+pub struct WorkflowAgentRow {
+    pub agent_id: String,
+    /// `agent(label:)`，没给就是角色名。
+    pub label: String,
+    /// `agent(phase:)`——这个孩子属于哪个阶段。
+    pub phase: Option<String>,
+    /// `running` / `done` / `failed` / `cancelled`。
+    pub state: String,
+    pub tokens_used: u64,
+    pub duration_ms: u64,
+    /// 这个孩子 `report` 的最后一条。不进主线程上下文，只做可见进度。
+    pub latest_report: Option<String>,
+}
+
+impl WorkflowRunSnap {
+    /// 最新一条脚本进度，给任务条和 overlay 行用。
+    pub fn latest_log(&self) -> Option<&str> {
+        self.logs.last().map(String::as_str)
+    }
+
+    /// 还在跑的子代理数。
+    pub fn agents_active(&self) -> u32 {
+        self.agents.iter().filter(|a| a.state == "running").count() as u32
+    }
 }
 
 struct RunSlot {
@@ -105,10 +146,52 @@ impl WorkflowState {
         );
     }
 
-    fn patch(&self, run_id: &str, f: impl FnOnce(&mut WorkflowRunSnap)) {
+    pub(super) fn patch(&self, run_id: &str, f: impl FnOnce(&mut WorkflowRunSnap)) {
         if let Some(slot) = self.inner.lock().unwrap().get_mut(run_id) {
             f(&mut slot.snap);
         }
+    }
+
+    /// 取消一次 run。引擎自己会以 `Cancelled` 收尾并落状态，host 循环随后把它
+    /// 的子代理收干净，所以这里只负责触发。
+    ///
+    /// 返回 `false` 表示没有这个 run，或者它已经结束了。
+    pub(super) fn cancel(&self, run_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        let Some(slot) = inner.get(run_id) else {
+            return false;
+        };
+        if slot.cancel.is_cancelled() || slot.snap.status != "active" {
+            return false;
+        }
+        slot.cancel.cancel();
+        true
+    }
+
+    /// 按 run id 或显示名找一次 run，活跃的优先。
+    ///
+    /// 显示名是给用户和 `/workflow` 管理用的（`alloc_name` 会加 `-2` 后缀去
+    /// 重），run id 保持内部，两边都该能点名。
+    pub(super) fn resolve(&self, needle: &str) -> Option<String> {
+        let needle = needle.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        let inner = self.inner.lock().unwrap();
+        if inner.contains_key(needle) {
+            return Some(needle.to_owned());
+        }
+        let mut fallback = None;
+        for slot in inner.values() {
+            if slot.snap.name != needle {
+                continue;
+            }
+            if slot.snap.status == "active" {
+                return Some(slot.snap.run_id.clone());
+            }
+            fallback.get_or_insert_with(|| slot.snap.run_id.clone());
+        }
+        fallback
     }
 }
 
@@ -193,6 +276,7 @@ async fn handle_launch(
     let run_id = format!("wf_{n}");
     let display = state.alloc_name(&resolved.meta.name);
     let cancel = CancellationToken::new();
+    let agent_budget = input.agent_budget.unwrap_or(DEFAULT_AGENT_BUDGET);
     let snap = WorkflowRunSnap {
         run_id: run_id.clone(),
         name: display.clone(),
@@ -205,6 +289,18 @@ async fn handle_launch(
         pause_message: None,
         result_summary: None,
         agents_running: 0,
+        agent_budget,
+        agents_used: 0,
+        logs: Arc::new(Vec::new()),
+        phases: Arc::new(
+            resolved
+                .meta
+                .phases
+                .iter()
+                .map(|p| (p.title.clone(), p.detail.clone().unwrap_or_default()))
+                .collect(),
+        ),
+        agents: Arc::new(Vec::new()),
     };
     state.insert(snap, cancel.clone());
     let _ = ack.send(WorkflowLaunchAck::Started {
@@ -214,14 +310,27 @@ async fn handle_launch(
         script_path: None,
     });
 
+    // 并发上限 live-look `"subagents"`：workflow 子代理不走会话限流，只受这里
+    // 挂的池约束。服务没挂载时退到出厂值，spawn 自己会再报错。
+    let configured = ctx
+        .get::<Subagents>(SUBAGENTS)
+        .map(|sub| sub.workflow_max_concurrent_agents())
+        .unwrap_or(host::DEFAULT_MAX_CONCURRENT_AGENTS);
     let (host_tx, host_rx) = mpsc::unbounded_channel();
-    let host_state = state.clone();
-    let host_id = run_id.clone();
-    let host_ctx = ctx.clone();
-    let host_cancel = cancel.clone();
-    tokio::spawn(async move {
-        host_loop(host_ctx, host_state, host_id, host_rx, host_cancel).await;
-    });
+    tokio::spawn(host::run(
+        WorkflowHostParams {
+            run_id: run_id.clone(),
+            ctx: ctx.clone(),
+            state: state.clone(),
+            cancel: cancel.clone(),
+            agent_budget,
+            max_concurrent_agents: host::max_concurrent_agents(configured),
+            scratch: cordis_base::config::dock_home()
+                .join("scratch")
+                .join(&run_id),
+        },
+        host_rx,
+    ));
 
     let script = resolved.script;
     let args = input.args.unwrap_or(serde_json::json!({}));
@@ -262,235 +371,64 @@ async fn handle_launch(
             snap.pause_message = Some(error.clone());
         }
     });
+    notify_done(&ctx, &state, &run_id);
+}
+
+/// run 收尾：把结果与过程交给主线程，并叫醒它一次。
+///
+/// **整条 run 只有这一次唤醒。** 中间那些「某个子代理跑完了」既不完整也不可
+/// 行动（脚本还在往下算），推给主线程只会让它在半份结果上烧一轮。
+fn notify_done(ctx: &cordis::Context, state: &Arc<WorkflowState>, run_id: &str) {
+    let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
+        return;
+    };
+    let Some(snap) = state.list().into_iter().find(|r| r.run_id == run_id) else {
+        return;
+    };
+    // 兜底再取一次：最后一个孩子可能在 host 循环退出之后才上报。
+    let mut reports: Vec<_> = snap
+        .agents
+        .iter()
+        .filter_map(|row| {
+            row.latest_report.as_ref().map(|output| WorkflowReport {
+                agent_id: row.label.clone(),
+                output: output.clone(),
+            })
+        })
+        .collect();
+    reports.extend(sub.take_workflow_reports(run_id));
+    let summary = snap
+        .result_summary
+        .clone()
+        .or_else(|| snap.pause_message.clone())
+        .unwrap_or_else(|| "（没有结果）".into());
+    // 滚动区的收尾卡：用户该看见 run 结束了、结果是什么。它不进模型历史，
+    // 模型走的是下面那条 `WorkflowDone` 通知。
+    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+        sessions.append(LogEvent::Notice {
+            kind: NoticeKind::WorkflowDone,
+            title: format!("工作流 {} · {}", snap.name, status_text(&snap.status)),
+            body: summary.clone(),
+        });
+    }
+    sub.notify_workflow_done(
+        snap.name.clone(),
+        snap.status.clone(),
+        snap.elapsed_ms,
+        summary,
+        reports,
+    );
+}
+
+fn status_text(status: &str) -> &str {
+    match status {
+        "complete" => "完成",
+        "cancelled" => "已停止",
+        "failed" => "失败",
+        other => other,
+    }
 }
 
 fn resolve_detail(err: ResolveError) -> String {
     err.to_string()
-}
-
-async fn host_loop(
-    ctx: cordis::Context,
-    state: Arc<WorkflowState>,
-    run_id: String,
-    mut rx: mpsc::UnboundedReceiver<WorkflowHostRequest>,
-    cancel: CancellationToken,
-) {
-    let spent = 0u64;
-    let mut reserved = 0u64;
-    let scratch = cordis_base::config::dock_home()
-        .join("scratch")
-        .join(&run_id);
-    let _ = std::fs::create_dir_all(&scratch);
-    loop {
-        let req = tokio::select! {
-            req = rx.recv() => match req {
-                Some(req) => req,
-                None => break,
-            },
-            _ = cancel.cancelled() => {
-                while let Ok(req) = rx.try_recv() {
-                    reply_cancelled(req);
-                }
-                break;
-            }
-        };
-        match req {
-            WorkflowHostRequest::ReserveAgentCalls { count, reply } => {
-                reserved = reserved.saturating_add(count);
-                let _ = reply.send(Ok(()));
-            }
-            WorkflowHostRequest::ReleaseAgentCalls { count, reply } => {
-                reserved = reserved.saturating_sub(count);
-                let _ = reply.send(Ok(()));
-            }
-            WorkflowHostRequest::SpawnAgent { opts, reply } => {
-                let ctx = ctx.clone();
-                let state = state.clone();
-                let run_id = run_id.clone();
-                tokio::spawn(async move {
-                    state.patch(&run_id, |s| {
-                        s.agents_running = s.agents_running.saturating_add(1)
-                    });
-                    let result = spawn_agent(&ctx, opts).await;
-                    state.patch(&run_id, |s| {
-                        s.agents_running = s.agents_running.saturating_sub(1)
-                    });
-                    let _ = reply.send(result);
-                });
-            }
-            WorkflowHostRequest::Phase { title, .. } => {
-                state.patch(&run_id, |s| s.current_phase = Some(title));
-            }
-            WorkflowHostRequest::Log { .. } | WorkflowHostRequest::Telemetry { .. } => {}
-            WorkflowHostRequest::BudgetQuery { reply } => {
-                let _ = reply.send(Ok(BudgetState {
-                    total: None,
-                    spent,
-                    reserved,
-                    remaining: None,
-                }));
-            }
-            WorkflowHostRequest::RenderTemplate { reply, .. } => {
-                let _ = reply.send(Err(HostError::Unsupported(
-                    "render_template is not available".into(),
-                )));
-            }
-            WorkflowHostRequest::WriteScratchFile {
-                name,
-                content,
-                reply,
-            } => {
-                let path = scratch.join(sanitize_scratch(&name));
-                let out = std::fs::write(&path, content)
-                    .map(|_| path.display().to_string())
-                    .map_err(|e| HostError::Failed(e.to_string()));
-                let _ = reply.send(out);
-            }
-            WorkflowHostRequest::ReadScratchFile { name, reply } => {
-                let path = scratch.join(sanitize_scratch(&name));
-                let out =
-                    std::fs::read_to_string(&path).map_err(|e| HostError::Failed(e.to_string()));
-                let _ = reply.send(out);
-            }
-            WorkflowHostRequest::GitDiffSince { reply, .. } => {
-                let _ = reply.send(Err(HostError::Unsupported(
-                    "git_diff_since is not available".into(),
-                )));
-            }
-        }
-        let _ = spent;
-    }
-}
-
-async fn spawn_agent(
-    ctx: &cordis::Context,
-    opts: xai_workflow::AgentOpts,
-) -> Result<AgentResult, HostError> {
-    let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
-        return Err(HostError::Failed("subagents is not mounted".into()));
-    };
-    let mut prompt = opts.prompt;
-    if prompt.trim().is_empty() {
-        return Err(HostError::Failed("agent prompt is empty".into()));
-    }
-    if let Some(schema) = &opts.output_schema {
-        prompt = append_output_schema(&prompt, schema);
-    }
-    let description = opts
-        .label
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "workflow-agent".into());
-    let subagent_type = opts
-        .agent_type
-        .as_deref()
-        .unwrap_or("general-purpose")
-        .to_string();
-    if opts.model.is_some()
-        || opts.effort.is_some()
-        || opts.capability_mode.is_some()
-        || opts.max_output_tokens.is_some()
-    {
-        tracing::debug!(
-            "workflow agent() model/effort/capability/max_output_tokens are ignored; \
-             dock children share the parent model and full toolset"
-        );
-    }
-    let started = Instant::now();
-    let snap = sub.spawn_and_wait(prompt, description, subagent_type).await;
-    Ok(AgentResult {
-        agent_id: snap.id,
-        success: !snap.cancelled && snap.done,
-        output: agent_output_value(&snap.output),
-        cancelled: snap.cancelled,
-        tokens_used: 0,
-        duration_ms: started.elapsed().as_millis() as u64,
-    })
-}
-
-fn append_output_schema(prompt: &str, schema: &serde_json::Value) -> String {
-    format!(
-        "{prompt}\n\n<output-schema>\n{schema}\n</output-schema>\nReply with JSON only that matches the schema. Do not wrap it in markdown fences."
-    )
-}
-
-fn agent_output_value(raw: &str) -> serde_json::Value {
-    let trimmed = raw.trim();
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        return value;
-    }
-    if let Some(fenced) = extract_fenced_json(trimmed) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&fenced) {
-            return value;
-        }
-    }
-    serde_json::json!(raw)
-}
-
-fn extract_fenced_json(raw: &str) -> Option<String> {
-    let after_open = raw.split_once("```")?.1;
-    let body = after_open
-        .strip_prefix("json")
-        .or_else(|| after_open.strip_prefix("JSON"))
-        .unwrap_or(after_open);
-    let body = body
-        .strip_prefix('\n')
-        .or_else(|| body.strip_prefix("\r\n"))
-        .unwrap_or(body);
-    let inner = body.split_once("```")?.0.trim();
-    if inner.starts_with('{') || inner.starts_with('[') {
-        Some(inner.to_string())
-    } else {
-        None
-    }
-}
-
-fn sanitize_scratch(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(255)
-        .collect()
-}
-
-fn reply_cancelled(req: WorkflowHostRequest) {
-    use WorkflowHostRequest as R;
-    match req {
-        R::ReserveAgentCalls { reply, .. } | R::ReleaseAgentCalls { reply, .. } => {
-            let _ = reply.send(Err(HostError::Cancelled));
-        }
-        R::SpawnAgent { reply, .. } => {
-            let _ = reply.send(Err(HostError::Cancelled));
-        }
-        R::BudgetQuery { reply } => {
-            let _ = reply.send(Err(HostError::Cancelled));
-        }
-        R::RenderTemplate { reply, .. }
-        | R::WriteScratchFile { reply, .. }
-        | R::ReadScratchFile { reply, .. }
-        | R::GitDiffSince { reply, .. } => {
-            let _ = reply.send(Err(HostError::Cancelled));
-        }
-        R::Phase { .. } | R::Log { .. } | R::Telemetry { .. } => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn agent_output_parses_json_object_or_fence() {
-        let obj = agent_output_value(r#"{"questions":["a"]}"#);
-        assert_eq!(obj["questions"][0], "a");
-        let fenced = agent_output_value("here\n```json\n{\"claim\":\"x\"}\n```\n");
-        assert_eq!(fenced["claim"], "x");
-        let plain = agent_output_value("not json");
-        assert_eq!(plain, serde_json::json!("not json"));
-    }
 }

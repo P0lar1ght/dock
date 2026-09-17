@@ -214,11 +214,14 @@ pub fn drain_one(
             );
             return;
         }
-        state.active.store(false, Ordering::SeqCst);
+        // 受阻三次是**暂停**，不是清掉。直接写 `active = false` 会让 `paused`
+        // 仍是 false，于是 `present()` 变假：目标从 TUI 里整个消失，`resume()`
+        // 也拒绝（它要求 `paused()`），用户再没有办法把它捡回来。
+        state.pause();
         send_ack(
             ack_tx,
             UpdateGoalAck::Accepted {
-                summary: format!("Goal blocked: {reason}."),
+                summary: format!("Goal blocked: {reason}. 目标已暂停，用 /goal resume 继续。"),
             },
         );
         return;
@@ -274,6 +277,33 @@ mod tests {
         assert!(state.resume());
         assert!(state.active());
         assert!(!state.paused());
+    }
+
+    /// 受阻三次要**暂停**目标，不是让它凭空消失。
+    ///
+    /// 改动前这里直接写 `active = false`，`paused` 仍是 false：`present()` 变假
+    /// → TUI 里没有目标了，`resume()` 又要求 `paused()` → 用户捡不回来。
+    #[test]
+    fn three_blocked_attempts_pause_instead_of_vanishing() {
+        let state = GoalState::new();
+        state.start("ship");
+        for _ in 0..3 {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            drain_one(
+                &state,
+                UpdateGoalInput {
+                    blocked_reason: Some("上游挂了".into()),
+                    ..Default::default()
+                },
+                tx,
+            );
+            let _ = rx.blocking_recv().unwrap();
+        }
+        assert!(!state.active(), "受阻三次后不该还在跑");
+        assert!(state.paused(), "应当是暂停");
+        assert!(state.present(), "TUI 仍要看得到这个目标");
+        assert!(state.resume(), "用户要能把它捡回来");
+        assert!(state.active());
     }
 
     #[test]

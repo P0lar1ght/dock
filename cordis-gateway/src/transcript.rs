@@ -219,7 +219,11 @@ impl Transcript {
                     }),
                 );
             }
-            LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::SystemReminder(_) => {}
+            // Notice 只给 TUI 用户看，不进 dock.1 投影，也不该变成一条聊天消息。
+            LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::SystemReminder(_)
+            | LogEvent::Notice { .. } => {}
         }
     }
 
@@ -478,6 +482,27 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    #[test]
+    fn notice_is_not_projected() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        let after_user = t.history_since(0).len();
+        t.ingest_log(LogEvent::Notice {
+            kind: cordis_spine::NoticeKind::WorkflowReport,
+            title: "deep-research · planner 上报".into(),
+            body: "阶段性结论".into(),
+        });
+        assert_eq!(
+            t.history_since(0).len(),
+            after_user,
+            "Notice 不该变成 dock.1 事件：{:?}",
+            t.history_since(0)
+                .iter()
+                .map(|e| &e.method)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

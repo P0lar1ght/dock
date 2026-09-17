@@ -3,8 +3,10 @@
 mod args;
 mod drain;
 mod grok_tool;
+mod host;
 mod listing;
 mod registry;
+mod schema_contract;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,7 @@ use cordis_base::types::{LogEvent, ToolCall, ToolResult, ToolSpec};
 pub use args::{workflow_command_arguments, workflow_slash_arguments};
 pub use drain::WorkflowRunSnap;
 pub use grok_tool::{render_ack, WorkflowLaunchHandle, WorkflowToolInput, WORKFLOW_TOOL_NAME};
+pub use host::DEFAULT_MAX_CONCURRENT_AGENTS;
 
 use registry::WorkflowListing;
 
@@ -58,6 +61,9 @@ pub struct Workflows {
     pub handle: WorkflowLaunchHandle,
     extras: Mutex<Vec<Disposable>>,
     announced: Mutex<HashSet<String>>,
+    /// 本会话**中途**发现的工作流名。启动时就在目录里的不算——那些在冻结的
+    /// listing 段里，压缩不会让模型忘掉它们。
+    discovered: Mutex<Vec<String>>,
     frozen_listing: Mutex<Option<String>>,
 }
 
@@ -68,6 +74,14 @@ impl Workflows {
 
     pub fn catalog(&self) -> Vec<WorkflowInfo> {
         scan_catalog().into_iter().map(WorkflowInfo::from).collect()
+    }
+
+    /// 停掉一次运行中的 run。`needle` 可以是 run id，也可以是显示名。
+    ///
+    /// 返回被停掉的 run id；没有匹配的活跃 run 时返回 `None`。
+    pub fn stop(&self, needle: &str) -> Option<String> {
+        let run_id = self.state.resolve(needle)?;
+        self.state.cancel(&run_id).then_some(run_id)
     }
 
     fn listing_text(&self) -> String {
@@ -121,6 +135,21 @@ impl Workflows {
         *self.extras.lock().unwrap() = extras;
     }
 
+    /// 压缩后重发的「中途发现」提示，没有中途发现就返回 `None`。
+    ///
+    /// listing 段是冻结的（系统提示不重写），所以这些工作流只靠历史里那条
+    /// reminder 让模型知道；压缩抹掉它之后得再说一遍。
+    pub fn rediscovery_notice(&self) -> Option<String> {
+        let found = self.discovered.lock().unwrap().clone();
+        if found.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "本会话中途发现的工作流：{}。用 `/name` 启动，或 `workflow` 工具 source.type=name。",
+            found.join("、")
+        ))
+    }
+
     fn notice_paths(&self, paths: &[PathBuf]) {
         if !paths.iter().any(|p| path_near_workflows(p)) {
             return;
@@ -134,6 +163,10 @@ impl Workflows {
                     new_names.push(workflow.name.clone());
                 }
             }
+        }
+        {
+            let mut discovered = self.discovered.lock().unwrap();
+            discovered.extend(new_names.iter().cloned());
         }
         self.sync_slash();
         if new_names.is_empty() {
@@ -270,6 +303,7 @@ pub fn tool_workflow() -> Plugin {
                 handle: WorkflowLaunchHandle(tx),
                 extras: Mutex::new(Vec::new()),
                 announced: Mutex::new(catalog_names),
+                discovered: Mutex::new(Vec::new()),
                 frozen_listing: Mutex::new(None),
             };
             handle.sync_slash();
@@ -332,6 +366,19 @@ pub fn tool_workflow() -> Plugin {
 
 /// Copied from Grok `WorkflowTool::run` (handle → oneshot ack → render).
 async fn run_workflow_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
+    // 子代理不许再起工作流。宽口径角色（`general-purpose`）的工具集里就有
+    // `workflow`，而 workflow 的子代理默认就是这个角色——不挡的话每一层都能拿
+    // 到一份全新的 `agent_budget` 与一个全新的并发池，run 级预算正好管不住。
+    let depth = crate::tools::task::current_depth();
+    if depth > 0 {
+        return tool_result(
+            call,
+            format!(
+                "Error: workflow_depth_exceeded: 子代理不能再启动工作流（当前深度 {depth}）。\
+                 把需要的工作交给这一层完成，或让主代理另起一条工作流。"
+            ),
+        );
+    }
     let input: WorkflowToolInput = match serde_json::from_str(&call.arguments) {
         Ok(v) => v,
         Err(e) => return tool_result(call, format!("Error: workflow_invalid_input: {e}")),
@@ -373,6 +420,42 @@ async fn run_workflow_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult 
 mod tests {
     use super::*;
     use crate::host::slash::slash;
+
+    /// 子代理不许再起工作流。
+    ///
+    /// 宽口径角色（`general-purpose`）的工具集里就有 `workflow`，而 workflow 的
+    /// 子代理默认就是这个角色；不挡的话每一层拿一份全新的 `agent_budget` 和一个
+    /// 全新的并发池，run 级预算管不住。
+    #[tokio::test]
+    async fn a_subagent_cannot_launch_another_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = env_in(dir.path());
+        let ctx = Context::new();
+        mount_workflows(&ctx).await;
+        let call = || ToolCall {
+            id: "nested".into(),
+            name: WORKFLOW_TOOL_NAME.into(),
+            arguments: r#"{"source":{"type":"name","name":"deep-research"}}"#.into(),
+        };
+
+        let nested = crate::tools::task::DEPTH
+            .scope(1, run_workflow_tool(&ctx, call()))
+            .await;
+        assert!(
+            nested.content.contains("workflow_depth_exceeded"),
+            "{}",
+            nested.content
+        );
+
+        // 主会话（depth 0）不受影响。
+        let top = run_workflow_tool(&ctx, call()).await;
+        assert!(
+            !top.content.contains("workflow_depth_exceeded"),
+            "{}",
+            top.content
+        );
+    }
+
     use crate::prompt::assemble::{SystemPrompt, ORDER_SKILLS, ORDER_WORKFLOWS};
     use crate::prompt::context_usage::{occupancy_detail, snapshot_context, OccupancyKind};
     /// `DOCK_HOME` 指向临时目录 + 切 cwd，退出时还原（进程级状态由 test_env 串行化）。

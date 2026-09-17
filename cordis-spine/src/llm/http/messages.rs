@@ -207,7 +207,12 @@ pub fn transcript(
                     ));
                 }
             }
-            LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::LlmStream(_) => {}
+            // Notice 到不了这里（`model_history` 已滤掉），列出来只是让编译器
+            // 在以后新增变体时继续报错。
+            LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::Notice { .. }
+            | LogEvent::LlmStream(_) => {}
         }
     }
     flush_unmatched(&mut pending_results, &mut pending);

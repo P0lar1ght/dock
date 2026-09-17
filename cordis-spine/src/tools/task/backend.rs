@@ -107,6 +107,32 @@ impl ChannelBackend {
             .is_ok()
     }
 
+    /// 取消一次 workflow run 的全部子代理，并等 coordinator 把它们排空。
+    ///
+    /// 与 [`Self::teardown_session_and_drain`] 同一套 best-effort 约定：通道关了
+    /// 或超了预算就记一条日志返回，取消本身已经发出去了。
+    pub async fn cancel_workflow_and_drain(&self, run_id: &str, budget: std::time::Duration) {
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(SubagentEvent::Cancel(SubagentCancelRequest {
+                parent_session_id: self.parent_session_id(),
+                target: SubagentCancelTarget::WorkflowRunId(run_id.to_owned()),
+                respond_to,
+            }))
+            .is_err()
+        {
+            return;
+        }
+        if tokio::time::timeout(budget, response_rx).await.is_err() {
+            tracing::warn!(
+                run_id,
+                budget_ms = budget.as_millis() as u64,
+                "workflow children still running after the cancel drain budget"
+            );
+        }
+    }
+
     /// Re-open Task spawns after a prior ParentSession stop (start of next turn).
     pub fn open_spawn_admission(&self) -> bool {
         let Some(parent_session_id) = self.parent_session_id() else {

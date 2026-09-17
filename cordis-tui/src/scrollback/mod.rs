@@ -41,6 +41,7 @@ mod goal;
 mod list_dir;
 pub(crate) mod live;
 mod mcp;
+mod notice;
 mod plan;
 mod read;
 mod sched;
@@ -948,6 +949,21 @@ fn build_frame(
                     &job_snaps,
                     presets,
                 );
+            }
+            LogEvent::Notice { kind, title, body } => {
+                // 只给用户看的卡片：模型历史里没有它，所以它不属于任何一轮工具
+                // 往返，自己按事件下标折叠。
+                let id = notice::header_id(i);
+                let mode = tool_fold
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(tool::ToolMode::Collapsed);
+                let card = notice::lines(*kind, title, body, &theme, width, mode);
+                if !card.is_empty() {
+                    tool_headers.push((lines.len(), id));
+                    lines.extend(card);
+                    lines.push(Line::from(""));
+                }
             }
             LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::SystemReminder(_) => {}
         }

@@ -703,6 +703,7 @@ fn event_line(ev: &LogEvent) -> Option<String> {
         LogEvent::ToolExecute { name, .. } => format!("tool\t{name}"),
         LogEvent::SystemReminder(text) => format!("reminder\t{}", preview(text, 80)),
         LogEvent::PreStep | LogEvent::Prompt(_) => return None,
+        LogEvent::Notice { kind, title, .. } => format!("notice[{}]\t{title}", kind.as_str()),
     };
     Some(line)
 }

@@ -27,8 +27,8 @@ pub struct PickerHits {
     pub close_button: Rect,
     /// `(data_index, row_rect)` for visible rows.
     pub rows: Vec<(usize, Rect)>,
-    /// `(kill_rect, scheduled task_id)` for `/loop` rows in the tasks pane.
-    pub kill_buttons: Vec<(Rect, String)>,
+    /// `(kill_rect, target)`：任务面板里能停的那些行（`/loop` 与 workflow）。
+    pub kill_buttons: Vec<(Rect, crate::grok::tasks_pane::KillTarget)>,
 }
 
 /// A selectable leaf row (Grok non-expandable `PickerRow`).

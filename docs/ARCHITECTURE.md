@@ -169,7 +169,10 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 7. **工具名不撞车。** MCP 公名 `mcp_{server}__{tool}`，不能盖掉 `bash` 之类的内置名。
 8. **Gateway 默认不监听。** 只绑 loopback（首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`；`DOCK_GATEWAY_BIND` 只改首选）。`/pair` 开启；鉴权靠配对 + 一次性 ticket + 回环，CORS 反射 Origin 是有意的。
 9. **reasoning 不混进助手 markdown。** 推理走 `StreamDelta::Reasoning` / `LlmOutput.reasoning`；工具卡折叠显示 name + 参数摘要，展开先「输入」再「输出」，参数在 `LogEvent::ToolExecute.arguments`。
-10. **skills 覆盖顺序。** `scan_all` 按 Builtin（`$DOCK_HOME/bundled/skills`，编译期嵌入、启动物化）→ Bundled（`{cwd}/skills`）→ User（`~/.dock/skills`）→ Agents（`{cwd}/.agents/skills`）→ Project（`{cwd}/.dock/skills`）合并，同名后者覆盖前者。
+10. **一次 workflow run 一个预算 + 一个并发池。** host 在 `cordis-spine/src/tools/workflow/host.rs`，每 run 一个 `WorkflowHost`。引擎（`vendor/xai/workflow`）**自己不记账**——`agent()` 预留 1、`parallel()` 一次预留整批，全靠 host 的 `ReserveAgentCalls` 回执决定放不放行，所以 `agent_budget` 只能在这里兑现；超了回 `AgentCallQuotaExceeded`，引擎翻成 `WorkflowOutcome::BudgetExceeded`。并发同理：`admission.rs` 对 workflow owner 的子代理**直接放行**（注释里的 "follow the run's own pool"），会话限流管不到它们，那个 pool 就是 host 的 semaphore。子代理的 owner 必须带**真实 run id** 并共用 run 的 `CancellationToken`，否则按 run 取消（`cancel_workflow_children` + `workflow_cancel_waiters`）一个也匹配不到。`workflow` 工具在 `depth > 0` 拒绝：宽口径角色的工具集里有它，不挡则每层递归都拿一份全新预算。
+11. **workflow 只在收尾时叫醒主线程一次。** 子代理通往父信箱的两条路都按 owner 拦在 `ChildStore`：回合结束通知看 `SubagentRequest::surface_completion`（`runner.rs` 真的读它），`report` 看 `owner.workflow_run_id()` 分流进 run 自己的队列。run 还在跑时推「某个孩子跑完了」，主线程就会在一份残缺的中间结果上烧一整轮，而一次 deep-research 有十来个孩子。过程上报折进 run 快照供 overlay 显示，收尾时随 `ParentNotice::WorkflowDone` 一并交付。
+12. **能力档位压在允许名单之上。** `tools::capability::CapabilityMode` 挂在**受限子会话**的 `"capability"`（主会话没有这一项 = 不设限），`Tools::outside_allowlist` 与 `specs_for_model_on` 两处都查，且查在 `bypasses_allowlist` **之前**——MCP 与动态包工具绕过预设允许名单是有意的，但绕不过「这次委派只准读」。分类按工具名、**默认关闭**：新工具忘了归类是在受限子代理里不可用，而不是带着写盘能力溜进只读会话。
+13. **skills 覆盖顺序。** `scan_all` 按 Builtin（`$DOCK_HOME/bundled/skills`，编译期嵌入、启动物化）→ Bundled（`{cwd}/skills`）→ User（`~/.dock/skills`）→ Agents（`{cwd}/.agents/skills`）→ Project（`{cwd}/.dock/skills`）合并，同名后者覆盖前者。
 
 ## 磁盘
 

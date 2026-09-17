@@ -17,7 +17,10 @@ pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEv
     history
         .iter()
         .filter_map(|event| match event {
-            LogEvent::ToolExecute { .. } | LogEvent::PreStep | LogEvent::Prompt(_) => None,
+            LogEvent::ToolExecute { .. }
+            | LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::Notice { .. } => None,
             LogEvent::LlmStream(out) => {
                 let mut text = out.text.clone();
                 if !out.tool_calls.is_empty() {
@@ -75,7 +78,11 @@ pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
                 images: Vec::new(),
             }),
             LogEvent::SystemReminder(text) => Some(LogEvent::SystemReminder(text.clone())),
-            LogEvent::User(_) | LogEvent::PreStep | LogEvent::Prompt(_) => None,
+            LogEvent::User(_)
+            | LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            // 只给用户看的卡片，不进被摘要的那份历史。
+            | LogEvent::Notice { .. } => None,
         })
         .collect()
 }
@@ -143,7 +150,7 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
                 n += estimate_text(arguments);
                 n += estimate_text(content);
             }
-            LogEvent::PreStep | LogEvent::Prompt(_) => {}
+            LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::Notice { .. } => {}
         }
     }
     n
@@ -195,10 +202,22 @@ mod tests {
 
     #[test]
     fn summarizer_prep_drops_tools_and_flattens_calls() {
-        let prepared = prepare_conversation_for_summarization(&sample_history());
+        let mut history = sample_history();
+        history.push(LogEvent::Notice {
+            kind: cordis_base::types::NoticeKind::WorkflowReport,
+            title: "上报".into(),
+            body: "不该进摘要".into(),
+        });
+        let prepared = prepare_conversation_for_summarization(&history);
         assert!(!prepared
             .iter()
             .any(|e| matches!(e, LogEvent::ToolExecute { .. })));
+        assert!(
+            !prepared
+                .iter()
+                .any(|e| matches!(e, LogEvent::Notice { .. })),
+            "{prepared:?}"
+        );
         assert!(prepared.iter().any(|e| matches!(
             e,
             LogEvent::LlmStream(o) if o.tool_calls.is_empty() && o.text.contains("[Called tools: read_file]")

@@ -123,6 +123,11 @@ pub struct SubagentRuntimeOverrides {
     /// Scheduler-loop lineage: marks the spawn as belonging to a loop task so
     /// the coordinator can account for it and the workflow host can inherit it.
     pub loop_task_id: Option<String>,
+    /// 这次委派允许到哪一层。`None` = 跟角色预设走，不额外收窄。
+    ///
+    /// 挂进子会话 ctx 的 `"capability"`，与预设工具集取交集，**MCP / 动态包工具
+    /// 也受它管**。
+    pub capability_mode: Option<crate::tools::capability::CapabilityMode>,
 }
 
 // Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.

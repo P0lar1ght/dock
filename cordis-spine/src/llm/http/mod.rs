@@ -614,7 +614,7 @@ fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
             }
             LogEvent::LlmStream(out) => bump(&out.text, &mut ascii, &mut other),
             LogEvent::ToolExecute { content, .. } => bump(content, &mut ascii, &mut other),
-            LogEvent::PreStep => {}
+            LogEvent::PreStep | LogEvent::Notice { .. } => {}
         }
     }
     other + ascii.saturating_add(3) / 4
@@ -697,7 +697,11 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], vision: boo
                     }
                 }
             }
-            LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::LlmStream(_) => {}
+            // Notice 到不了这里（`model_history` 已滤掉）。
+            LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::Notice { .. }
+            | LogEvent::LlmStream(_) => {}
         }
     }
     flush_unmatched_tools(&mut out, &mut pending);
