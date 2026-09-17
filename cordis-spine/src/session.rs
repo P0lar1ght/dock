@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime};
 use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::names::{SESSIONS, SESSION_EVENT};
+pub use crate::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
 use crate::types::{LogEvent, COMPACT_NOTICE};
 use crate::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
 
@@ -92,22 +93,6 @@ struct PendingCall {
     usage: CallUsage,
     model: String,
     cost_usd_ticks: Option<i64>,
-}
-
-/// Root session identity. The subagent coordinator binds its spawns to this
-/// value, so a Stop or session switch can cancel exactly this session's
-/// children.
-pub const ROOT_IDENTITY: &str = "main";
-
-/// 分页会话身份前缀：`main#2`、`main#3`……第一页就是 [`ROOT_IDENTITY`]。
-pub const TAB_IDENTITY_PREFIX: &str = "main#";
-
-/// 用户面的会话（根会话或任一分页）。子代理是 `child-…`，不算。
-///
-/// 三处 `is_main_session()` 与系统提示的目录开关都问这个：分页是**并列的主线**，
-/// 不是子代理，判错会让第 2 页拿不到工具目录、也收不到主线才有的提醒。
-pub fn is_main_identity(identity: &str) -> bool {
-    identity == ROOT_IDENTITY || identity.starts_with(TAB_IDENTITY_PREFIX)
 }
 
 /// 按 `[model.<id>.pricing]` 估一次调用的费用。`None` = 没配单价。

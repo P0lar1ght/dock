@@ -10,6 +10,25 @@ pub const INTERRUPTED_TOOL_RESULT: &str = "已中断。";
 /// carries the same bubble plus a hidden continuation summary.
 pub const COMPACT_NOTICE: &str = "已压缩上下文。";
 
+/// Root session identity. The subagent coordinator binds its spawns to this
+/// value, so a Stop or session switch can cancel exactly this session's
+/// children.
+pub const ROOT_IDENTITY: &str = "main";
+
+/// 分页会话身份前缀：`main#2`、`main#3`……第一页就是 [`ROOT_IDENTITY`]。
+pub const TAB_IDENTITY_PREFIX: &str = "main#";
+
+/// 用户面的会话（根会话或任一分页）。子代理是 `child-…`，不算。
+///
+/// 三处 `is_main_session()` 与系统提示的目录开关都问这个：分页是**并列的主线**，
+/// 不是子代理，判错会让第 2 页拿不到工具目录、也收不到主线才有的提醒。
+///
+/// 住在 `types` 而不是 `session`：`LogEvent` 一族要判身份，而 `types` 是整棵树的
+/// 叶子；反过来依赖 `session` 会让基础层整个拆不出去（唯一的那条反向边）。
+pub fn is_main_identity(identity: &str) -> bool {
+    identity == ROOT_IDENTITY || identity.starts_with(TAB_IDENTITY_PREFIX)
+}
+
 /// Durable session log events. Grok persists conversation items; DSH persists
 /// a typed event log. This is the thin shared shape.
 
@@ -177,7 +196,7 @@ impl PreStep {
 
     /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
     pub fn is_main_session(&self) -> bool {
-        crate::session::is_main_identity(&self.identity)
+        is_main_identity(&self.identity)
     }
 }
 
@@ -236,7 +255,7 @@ impl StepStart {
 
     /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
     pub fn is_main_session(&self) -> bool {
-        crate::session::is_main_identity(&self.identity)
+        is_main_identity(&self.identity)
     }
 }
 
@@ -373,6 +392,6 @@ impl TurnEnd {
 
     /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
     pub fn is_main_session(&self) -> bool {
-        crate::session::is_main_identity(&self.identity)
+        is_main_identity(&self.identity)
     }
 }
