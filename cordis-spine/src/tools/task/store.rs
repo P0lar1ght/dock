@@ -96,8 +96,11 @@ pub(super) enum ParentNotice {
         elapsed_ms: u64,
         /// `complete()` 的结果，或失败 / 暂停的原因。
         summary: String,
-        /// 过程中各子代理的上报，按发生顺序。
+        /// 过程中各子代理的上报，按发生顺序。`agent_id` 已换成行上的 label。
         reports: Vec<WorkflowReport>,
+        /// 攒不下而被丢掉的更早的上报条数。通知里如实说一句，别让主线程以为
+        /// 这就是全部过程。
+        dropped_reports: usize,
     },
     /// One per finished child turn: the child is idle and can be continued.
     TurnEnd {
@@ -416,6 +419,7 @@ impl ChildStore {
         elapsed_ms: u64,
         summary: String,
         reports: Vec<WorkflowReport>,
+        dropped_reports: usize,
     ) {
         self.inbox
             .lock()
@@ -427,6 +431,7 @@ impl ChildStore {
                 elapsed_ms,
                 summary,
                 reports,
+                dropped_reports,
             });
         self.notify_parent();
     }

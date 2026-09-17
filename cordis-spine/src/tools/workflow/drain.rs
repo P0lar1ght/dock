@@ -81,7 +81,27 @@ struct RunSlot {
     snap: WorkflowRunSnap,
     started: Instant,
     cancel: CancellationToken,
+    /// 这次 run 里**每一条**子代理上报，按发生顺序，收尾时一起交给主线程。
+    ///
+    /// 不放进 `snap`：快照在 80ms 心跳里被整表克隆给 TUI，而这堆文本只有收尾
+    /// 那一次用得上。行上的 `latest_report` 是给详情页看的**最后一条**，从它
+    /// 反推收尾通知会把同一个孩子先前报过的都丢掉。
+    reports: Vec<WorkflowReport>,
+    /// 超出 [`WORKFLOW_MAX_DONE_REPORTS`] 被丢掉的条数。
+    dropped_reports: usize,
 }
+
+/// 收尾通知里最多带几条过程上报。
+///
+/// 一个孩子可以报很多次，`agent_budget` 管得住孩子数管不住上报数；这条通知是
+/// 要进模型上下文的，得有个上限。满了丢最旧的，并在通知里说清楚丢了几条。
+const WORKFLOW_MAX_DONE_REPORTS: usize = 64;
+
+/// 快照表里最多留几条**已结束**的 run。
+///
+/// `WorkflowState` 活得和进程一样久，不淘汰的话跑一整天的会话会把每次 run 的
+/// 上报与日志都攒着。活跃的 run 一条不动。
+const WORKFLOW_MAX_FINISHED_RUNS: usize = 32;
 
 pub struct WorkflowState {
     inner: Mutex<HashMap<String, RunSlot>>,
@@ -115,6 +135,11 @@ impl WorkflowState {
         rows
     }
 
+    #[cfg(test)]
+    pub(super) fn run_count(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+
     fn alloc_name(&self, base: &str) -> String {
         let taken: Vec<String> = self
             .inner
@@ -136,14 +161,49 @@ impl WorkflowState {
     }
 
     fn insert(&self, snap: WorkflowRunSnap, cancel: CancellationToken) {
-        self.inner.lock().unwrap().insert(
+        let mut inner = self.inner.lock().unwrap();
+        prune_finished(&mut inner);
+        inner.insert(
             snap.run_id.clone(),
             RunSlot {
                 started: Instant::now(),
                 snap,
                 cancel,
+                reports: Vec::new(),
+                dropped_reports: 0,
             },
         );
+    }
+
+    /// 攒下一批子代理上报，收尾时一起交给主线程。
+    pub(super) fn push_reports(
+        &self,
+        run_id: &str,
+        reports: impl IntoIterator<Item = WorkflowReport>,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(slot) = inner.get_mut(run_id) else {
+            return;
+        };
+        for report in reports {
+            slot.reports.push(report);
+            if slot.reports.len() > WORKFLOW_MAX_DONE_REPORTS {
+                slot.reports.remove(0);
+                slot.dropped_reports += 1;
+            }
+        }
+    }
+
+    /// 取走攒下的上报，返回 `(上报, 被丢掉的条数)`。
+    pub(super) fn take_reports(&self, run_id: &str) -> (Vec<WorkflowReport>, usize) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(slot) = inner.get_mut(run_id) else {
+            return (Vec::new(), 0);
+        };
+        (
+            std::mem::take(&mut slot.reports),
+            std::mem::take(&mut slot.dropped_reports),
+        )
     }
 
     pub(super) fn patch(&self, run_id: &str, f: impl FnOnce(&mut WorkflowRunSnap)) {
@@ -193,6 +253,47 @@ impl WorkflowState {
         }
         fallback
     }
+}
+
+/// 只淘汰**已结束**的 run，最旧的先走。活跃的一条不动——它们还在被 host 写。
+fn prune_finished(map: &mut HashMap<String, RunSlot>) {
+    let mut finished: Vec<(Instant, String)> = map
+        .iter()
+        .filter(|(_, slot)| slot.snap.status != "active")
+        .map(|(id, slot)| (slot.snap.received_at, id.clone()))
+        .collect();
+    if finished.len() <= WORKFLOW_MAX_FINISHED_RUNS {
+        return;
+    }
+    finished.sort_by_key(|(at, _)| *at);
+    let extra = finished.len() - WORKFLOW_MAX_FINISHED_RUNS;
+    for (_, id) in finished.into_iter().take(extra) {
+        map.remove(&id);
+    }
+}
+
+/// 本进程的 scratch 根目录。
+///
+/// `run_id` 是**会话内**序号（`wf_1`、`wf_2`…），两个 dock 同时开着就会各自从
+/// `wf_1` 起。直接按 run id 建目录，两次无关的 run 会共用一个 scratch：互相读
+/// 到对方的 `report.md`，配额也算在一起。加一段每进程固定的后缀就够——同一次
+/// dock 里的所有 run 仍然挨在一起，跨进程再不撞。
+///
+/// 不删旧目录：`write_scratch_file` 的路径是当着用户面给出去的（deep-research
+/// 的报告就在那儿），到期清理该由用户自己决定。
+fn scratch_dir(run_id: &str) -> std::path::PathBuf {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let token = TOKEN.get_or_init(|| {
+        uuid::Uuid::now_v7()
+            .simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect()
+    });
+    cordis_base::config::dock_home()
+        .join("scratch")
+        .join(format!("{run_id}-{token}"))
 }
 
 pub async fn drain_loop_with_ctx(
@@ -325,9 +426,7 @@ async fn handle_launch(
             cancel: cancel.clone(),
             agent_budget,
             max_concurrent_agents: host::max_concurrent_agents(configured),
-            scratch: cordis_base::config::dock_home()
-                .join("scratch")
-                .join(&run_id),
+            scratch: scratch_dir(&run_id),
         },
         host_rx,
     ));
@@ -385,18 +484,17 @@ fn notify_done(ctx: &cordis::Context, state: &Arc<WorkflowState>, run_id: &str) 
     let Some(snap) = state.list().into_iter().find(|r| r.run_id == run_id) else {
         return;
     };
-    // 兜底再取一次：最后一个孩子可能在 host 循环退出之后才上报。
-    let mut reports: Vec<_> = snap
-        .agents
-        .iter()
-        .filter_map(|row| {
-            row.latest_report.as_ref().map(|output| WorkflowReport {
-                agent_id: row.label.clone(),
-                output: output.clone(),
-            })
-        })
-        .collect();
+    // host 一路攒下来的全部上报；兜底再从信箱取一次，最后一个孩子可能在 host
+    // 循环退出之后才上报。
+    let (mut reports, dropped) = state.take_reports(run_id);
     reports.extend(sub.take_workflow_reports(run_id));
+    // 通知里认的是行上的 label（`researcher-0`），不是子代理 UUID：两条来源都
+    // 带的是 child id，在这儿统一换一次，别让同一份列表里两种写法混着。
+    for report in reports.iter_mut() {
+        if let Some(row) = snap.agents.iter().find(|r| r.agent_id == report.agent_id) {
+            report.agent_id = row.label.clone();
+        }
+    }
     let summary = snap
         .result_summary
         .clone()
@@ -417,6 +515,7 @@ fn notify_done(ctx: &cordis::Context, state: &Arc<WorkflowState>, run_id: &str) 
         snap.elapsed_ms,
         summary,
         reports,
+        dropped,
     );
 }
 
@@ -431,4 +530,99 @@ fn status_text(status: &str) -> &str {
 
 fn resolve_detail(err: ResolveError) -> String {
     err.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(run_id: &str, status: &str, at: Instant) -> WorkflowRunSnap {
+        WorkflowRunSnap {
+            run_id: run_id.into(),
+            name: run_id.into(),
+            objective: String::new(),
+            status: status.into(),
+            current_phase: None,
+            elapsed_ms: 0,
+            received_at: at,
+            builtin: false,
+            pause_message: None,
+            result_summary: None,
+            agents_running: 0,
+            agent_budget: 1,
+            agents_used: 0,
+            logs: Arc::new(Vec::new()),
+            phases: Arc::new(Vec::new()),
+            agents: Arc::new(Vec::new()),
+        }
+    }
+
+    fn report(output: &str) -> WorkflowReport {
+        WorkflowReport {
+            agent_id: "a".into(),
+            output: output.into(),
+        }
+    }
+
+    /// 跑一天的会话不该把每次 run 的上报都攒着，但**在跑的**一条都不能动。
+    #[test]
+    fn finished_runs_are_evicted_oldest_first_and_active_ones_are_kept() {
+        let state = WorkflowState::new();
+        let base = Instant::now();
+        let live = snap("live", "active", base);
+        state.insert(live, CancellationToken::new());
+        for i in 0..(WORKFLOW_MAX_FINISHED_RUNS + 5) {
+            let at = base + std::time::Duration::from_millis(i as u64 + 1);
+            state.insert(
+                snap(&format!("wf_{i}"), "complete", at),
+                CancellationToken::new(),
+            );
+        }
+        // 最后插进去的那条还没结束，不参与淘汰计数。
+        let rows = state.list();
+        assert!(
+            rows.iter().any(|r| r.run_id == "live"),
+            "活跃的 run 被淘汰了：{:?}",
+            rows.iter().map(|r| &r.run_id).collect::<Vec<_>>()
+        );
+        assert!(
+            state.run_count() <= WORKFLOW_MAX_FINISHED_RUNS + 2,
+            "已结束的 run 没有被淘汰：{}",
+            state.run_count()
+        );
+        assert!(!rows.iter().any(|r| r.run_id == "wf_0"), "最旧的那条该先走");
+    }
+
+    /// 攒下的上报有上限，丢掉几条要算清楚——通知里会如实说一句。
+    #[test]
+    fn the_done_report_buffer_drops_the_oldest_and_counts_them() {
+        let state = WorkflowState::new();
+        state.insert(
+            snap("wf_1", "active", Instant::now()),
+            CancellationToken::new(),
+        );
+        for i in 0..(WORKFLOW_MAX_DONE_REPORTS + 3) {
+            state.push_reports("wf_1", [report(&format!("第 {i} 条"))]);
+        }
+        let (reports, dropped) = state.take_reports("wf_1");
+        assert_eq!(reports.len(), WORKFLOW_MAX_DONE_REPORTS);
+        assert_eq!(dropped, 3);
+        assert_eq!(reports[0].output, "第 3 条", "丢的该是最旧的");
+        let (again, dropped) = state.take_reports("wf_1");
+        assert!(again.is_empty() && dropped == 0, "取过一次就清空");
+    }
+
+    /// 两个 dock 同时开着，各自的 `wf_1` 不能共用一个 scratch 目录。
+    #[test]
+    fn scratch_dirs_are_scoped_to_this_process() {
+        let a = scratch_dir("wf_1");
+        assert_eq!(a, scratch_dir("wf_1"), "同一次 run 每次都得是同一个目录");
+        assert_ne!(a, scratch_dir("wf_2"));
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("wf_1-"), "{name}");
+        assert!(
+            name.len() > "wf_1-".len(),
+            "光有 run id 会跨进程撞车：{name}"
+        );
+    }
 }

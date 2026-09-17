@@ -22,7 +22,9 @@ Grok Rhai 引擎（`vendor/xai/workflow`）+ 同款 oneshot ack。内置 `deep-r
 
 `capability_mode` 真正生效：解析成 `tools::capability::CapabilityMode`（`read-only` / `read-write` / `execute` / `all`，档位语义与 grok 一致，读写与执行互不包含），挂进子会话 ctx 的 `"capability"`，工具允许名单与 sampler 工具表都查它。它**压在 MCP / 动态包的允许名单豁免之上**——那两类绕过预设允许名单是有意的，但绕不过「这次委派只准读」。分类按工具名做且**默认关闭**：认不出来的名字只有 `all` 放行。档位名写错当场报错，不会按不设限跑。
 
-`model` / `effort` / `max_output_tokens` 仍被忽略（只记 debug 日志）——dock 的子代理共享父模型。
+`model` / `effort` / `max_output_tokens` 走 `ModelOverride`，挂进子会话 ctx 的 `"model-override"`，由 `llm` 采样器读（主会话永远没有这一项 = 跟 `"settings"` 走）。**不是**给子会话隔离一份 `AppSettings`：那里面还有权限档位这类会话级状态，隔离一份等于让子代理带着一张过期的权限快照跑。
+
+`model` 必须是**本机模型目录（`config.toml`）里真有的 id**。这几个键是照 grok 的脚本 API 写的，脚本里那个名字大概率是 grok 的模型；照单全收只会把这个孩子打到一个解析不出端点的 id 上，换来一个 404。认不出来的退回父会话的模型并记一条 warn。`effort` 在模型不支持推理时不发。
 
 `log()` 进快照的环形缓冲（最近 50 条、单条 4KB），任务条与 `/workflow runs` 显示最新一条；不进会话历史，不吃模型上下文。`phase()` 截断到 256 字节。`Telemetry` 丢弃（dock 没有埋点通道），只留 debug 日志。
 
@@ -30,9 +32,11 @@ Grok Rhai 引擎（`vendor/xai/workflow`）+ 同款 oneshot ack。内置 `deep-r
 
 workflow 子代理有两条会通到主线程的路，**都被按 owner 拦住了**：回合结束通知（`surface_completion: false`，`runner.rs` 真的会读它）与 `report`（`ChildStore::push_report` 按 owner 分流，进 run 自己的队列）。理由是同一条：run 还在跑时把「某个孩子跑完了」推给主线程，主线程就会在一份残缺的中间结果上烧一整轮——一次 deep-research 有十来个孩子。
 
-子代理的 `report` 立刻进两处给**用户**看的通道：run 快照（overlay 那一行的 `latest_report` + 进度流）和滚动区 `LogEvent::Notice` 卡片。`Notice` **不进** `model_history`，所以看得见不等于叫醒主模型。run 收尾时**一条** `WorkflowDone` 信箱带着最终结果与全部过程上报（每条截断到 600 字）叫醒主线程——这兑现工具描述里「完成后会自动汇报」；滚动区另有一张收尾卡。
+子代理的 `report` 立刻进两处给**用户**看的通道：run 快照（overlay 那一行的 `latest_report` + 进度流）和滚动区 `LogEvent::Notice` 卡片。`Notice` **不进** `model_history`，所以看得见不等于叫醒主模型。run 收尾时**一条** `WorkflowDone` 信箱带着最终结果与全部过程上报（按发生顺序、每条截断到 600 字、最多 64 条，丢掉的在通知里如实报数）叫醒主线程，兑现工具描述里「完成后会自动汇报」；滚动区另有一张收尾卡。带的是**每一条**上报而不是每行的 `latest_report`——后者是覆盖写的，同一个孩子报第二次就把第一次挤掉了。每条上报署的是行上的 label（`researcher-0`），不是子代理 UUID。
 
-scratch 在 `~/.dock/scratch/<run_id>/`：名字必须是单个相对路径组件、拒符号链接、64 文件 / 单文件 10MB / 总量 64MB 配额、先写临时文件再 rename，读写都在 `spawn_blocking` 里。`render_template` 与 `git_diff_since` 返回 `Unsupported`（dock 没有模板表；仓库读写走 bash 权限门）。
+scratch 在 `~/.dock/scratch/<run_id>-<进程标记>/`：run id 是**会话内**序号（`wf_1`、`wf_2`…），两个 dock 同时开着会各自从 `wf_1` 起，光按 run id 建目录会让两次无关的 run 共用一个 scratch（互相读到对方的 `report.md`，配额也算在一起）。旧目录不自动删——那个路径是当着用户面给出去的。文件名必须是单个相对路径组件、拒符号链接、64 文件 / 单文件 10MB / 总量 64MB 配额、先写临时文件再 rename，读写都在 `spawn_blocking` 里。`render_template` 与 `git_diff_since` 返回 `Unsupported`（dock 没有模板表；仓库读写走 bash 权限门）。
+
+快照表只留最近 32 条**已结束**的 run（活跃的一条不动）：`WorkflowState` 活得和进程一样久，不淘汰的话跑一整天的会话会把每次 run 的上报和日志都攒着。被淘汰的 run 停不了也查不到。
 
 ### 停止
 
@@ -44,4 +48,4 @@ scratch 在 `~/.dock/scratch/<run_id>/`：名字必须是单个相对路径组�
 
 子代理归到哪一阶段：先看 `agent(phase:)`，没写就回退到脚本当时 `phase()` 的那一段。两者都没有的才落到末尾的「其它」；脚本完全没声明阶段时左栏整个收掉。
 
-**没有 pause/resume** ——它们要 journal 持久化，dock 还没有，所以底栏不列这两个键。
+**没有 pause/resume**，底栏不列这两个键。两条都卡在引擎上：`Paused` 只能由脚本自己发起（`vendor/xai/workflow` 的 `engine.rs` 把 `pause()` / `needs_input()` 翻成 `ControlToken::Pause`），host 侧只有取消，没有「按一下停在这儿」；resume 要把 `Journal::new(Some(path))` 落盘再 `Journal::load` 回来，那是一份新的落盘格式。引擎是冻结副本，不为本仓需求改。

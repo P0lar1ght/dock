@@ -921,3 +921,108 @@ async fn a_finished_run_cannot_be_stopped_again() {
     let wf = h.root.require::<Workflows>(WORKFLOWS).unwrap();
     assert_eq!(wf.stop(&run_id), None, "结束了的 run 不该还能停");
 }
+
+/// 每一步都 `report` 的子代理：同一个孩子会报好几次。
+struct ReportingTwice {
+    /// 每个 prompt 报过几次。
+    seen: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+}
+
+impl Sampler for ReportingTwice {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let text = last_user(&request.history);
+        let nth = {
+            let mut seen = self.seen.lock().unwrap();
+            let n = seen.entry(text.clone()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        Box::pin(async move {
+            on_delta(StreamDelta::Text(text.clone()));
+            let tool_calls = match nth {
+                1 | 2 => vec![ToolCall {
+                    id: format!("r{nth}"),
+                    name: "report".into(),
+                    arguments: serde_json::json!({ "output": format!("第 {nth} 条结论") })
+                        .to_string(),
+                }],
+                _ => Vec::new(),
+            };
+            LlmOutput {
+                text,
+                tool_calls,
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+const ONE_LABELLED_AGENT: &str = r#"
+let meta = #{ name: "report-probe", description: "one labelled agent" };
+let a = agent("first", #{ label: "researcher-0" });
+complete("done");
+"#;
+
+/// 一个孩子报两次，两条都要随收尾通知交给主线程。
+///
+/// 行上的 `latest_report` 是覆盖写的（详情页只需要最后一条），从它反推收尾
+/// 通知会把先前那些悄悄吃掉——主线程拿到的"过程"就只剩每个孩子的最后一句。
+#[tokio::test]
+async fn every_report_reaches_the_main_thread_not_just_the_last() {
+    let h = boot(
+        Arc::new(ReportingTwice {
+            seen: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }),
+        TaskConfig::default(),
+    )
+    .await;
+    let sub = h
+        .root
+        .require::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
+        .unwrap();
+    let run_id = launch(&h, ONE_LABELLED_AGENT, 4).await;
+    let run = wait_terminal(&h, &run_id).await;
+    assert_eq!(run.status, "complete", "{run:?}");
+
+    let notices = sub.drain_parent_notices();
+    assert_eq!(notices.len(), 1, "整条 run 只该有一条通知：{notices:?}");
+    let text = &notices[0];
+    assert!(text.contains("第 1 条结论"), "第一条上报被吃掉了：{text}");
+    assert!(text.contains("第 2 条结论"), "{text}");
+    // 行上仍然只留最后一条：详情页要的是"这个孩子现在在说什么"。
+    assert_eq!(
+        run.agents[0].latest_report.as_deref(),
+        Some("第 2 条结论"),
+        "{:?}",
+        run.agents
+    );
+}
+
+/// 通知里认的是行上的 label，不是子代理 UUID。
+#[tokio::test]
+async fn done_notice_names_agents_by_their_label() {
+    let h = boot(reporting(), TaskConfig::default()).await;
+    let sub = h
+        .root
+        .require::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
+        .unwrap();
+    let run_id = launch(&h, ONE_LABELLED_AGENT, 4).await;
+    let run = wait_terminal(&h, &run_id).await;
+    assert_eq!(run.status, "complete", "{run:?}");
+
+    let notices = sub.drain_parent_notices();
+    let text = &notices[0];
+    assert!(
+        text.contains("- researcher-0: 阶段性结论"),
+        "上报要按行上的 label 署名：{text}"
+    );
+    let child_id = &run.agents[0].agent_id;
+    assert!(
+        !text.contains(child_id.as_str()),
+        "子代理 UUID 不该出现在给模型的通知里：{text}"
+    );
+}

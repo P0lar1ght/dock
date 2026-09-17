@@ -48,7 +48,7 @@ pub use cordis_base::usage::{
 };
 pub use error::{Error, Result};
 pub use host::permissions::{permissions, PermissionPrompt, Permissions};
-pub use host::settings::{settings, AppSettings, MermaidEngineKind, PermissionMode};
+pub use host::settings::{settings, AppSettings, MermaidEngineKind, ModelOverride, PermissionMode};
 pub use host::slash::{
     slash, slash_name_reserved, tool_slash_arguments, ExtraSlashKind, Slash, SlashEntry,
     RESERVED_SLASH,

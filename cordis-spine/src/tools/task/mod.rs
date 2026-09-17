@@ -272,9 +272,10 @@ impl Subagents {
         elapsed_ms: u64,
         summary: String,
         reports: Vec<WorkflowReport>,
+        dropped_reports: usize,
     ) {
         self.store
-            .push_workflow_done(name, status, elapsed_ms, summary, reports);
+            .push_workflow_done(name, status, elapsed_ms, summary, reports, dropped_reports);
     }
 
     pub fn parent_wake(&self) -> Arc<tokio::sync::Notify> {

@@ -17,8 +17,17 @@ use cordis_spine::NoticeKind;
 /// 折叠时正文最多显示几行。
 const COLLAPSED_BODY_LINES: usize = 2;
 
-pub fn header_id(index: usize) -> String {
-    format!("notice:{index}")
+/// 这张卡的折叠 key。
+///
+/// 下标单用不住：Esc 撤回一轮会把事件表从那一轮截断（`Sessions::rewind`），
+/// 之后新来的卡会捡到被撤掉那张留下的展开态。混进内容摘要就钉死了——同一个
+/// 下标换了内容就是另一张卡。
+pub fn header_id(index: usize, title: &str, body: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    title.hash(&mut hasher);
+    body.hash(&mut hasher);
+    format!("notice:{index}:{:x}", hasher.finish())
 }
 
 pub fn lines(
@@ -136,6 +145,24 @@ mod tests {
         );
         let text = text_of(&out);
         assert!(text.contains("第四行"), "{text}");
+    }
+
+    /// 同一个下标换了内容就得换 key，否则撤回一轮之后新卡会顶着旧卡的展开态。
+    #[test]
+    fn the_fold_key_follows_the_content() {
+        assert_ne!(
+            header_id(3, "a 上报", "第一份结论"),
+            header_id(3, "b 上报", "第一份结论")
+        );
+        assert_ne!(
+            header_id(3, "a 上报", "第一份结论"),
+            header_id(3, "a 上报", "第二份结论")
+        );
+        assert_eq!(
+            header_id(3, "a 上报", "第一份结论"),
+            header_id(3, "a 上报", "第一份结论"),
+            "同一张卡每帧都得算出同一个 key，不然折不起来"
+        );
     }
 
     /// 没有正文就只剩标题一行，不该多画一个空卡体。

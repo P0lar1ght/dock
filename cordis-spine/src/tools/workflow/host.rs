@@ -22,6 +22,7 @@ use super::schema_contract::{
     compile_contract_schema, contract_prompt, retry_prompt, validate_contract_output,
     SCHEMA_CONTRACT_RETRIES,
 };
+use crate::host::settings::ModelOverride;
 use crate::names::{SESSIONS, SUBAGENTS};
 use crate::session::log::Sessions;
 use crate::tools::capability::CapabilityMode;
@@ -50,6 +51,44 @@ const WORKFLOW_MAX_SCRATCH_NAME_BYTES: usize = 255;
 const WORKFLOW_MAX_PHASE_BYTES: usize = 256;
 const WORKFLOW_MAX_LOG_BYTES: usize = 4 * 1024;
 const WORKFLOW_MAX_LOG_LINES: usize = 50;
+
+/// 模型目录查询抽成参数，是为了可测：`lookup_model` 读的是用户自己的
+/// `config.toml`，单测里那张表是什么样没法假定。
+fn llm_override_from(
+    opts: &AgentOpts,
+    run_id: &str,
+    known_model: impl Fn(&str) -> bool,
+) -> ModelOverride {
+    let model = opts
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .and_then(|m| {
+            if known_model(m) {
+                return Some(m.to_string());
+            }
+            tracing::warn!(
+                run_id = %run_id,
+                model = %m,
+                "workflow agent(model:) 不在本机模型目录里，这个子代理仍用父会话的模型"
+            );
+            None
+        });
+    ModelOverride {
+        model,
+        effort: opts
+            .effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(str::to_string),
+        // 上游那几条 wire 的字段都是 u32；脚本写得再大也按 u32 上限收。
+        max_output_tokens: opts
+            .max_output_tokens
+            .map(|n| n.min(u32::MAX as u64) as u32),
+    }
+}
 
 /// 配置值按机器并行度收窄：小机器上少跑几个，而不是照配置硬上。
 pub(super) fn max_concurrent_agents(configured: usize) -> usize {
@@ -96,6 +135,8 @@ struct ContractRun {
     description: String,
     subagent_type: String,
     capability_mode: Option<CapabilityMode>,
+    /// `agent(model:/effort:/max_output_tokens:)`。空 = 跟父会话的模型走。
+    llm: ModelOverride,
 }
 
 pub(super) struct WorkflowHost {
@@ -409,12 +450,7 @@ impl WorkflowHost {
                 ))
             })?),
         };
-        if opts.model.is_some() || opts.effort.is_some() || opts.max_output_tokens.is_some() {
-            tracing::debug!(
-                "workflow agent() model/effort/max_output_tokens are ignored; \
-                 dock children share the parent model"
-            );
-        }
+        let llm = self.llm_override(&opts);
 
         // 先占位再记 running：排队中的子代理不该显示成在跑。整个契约循环共用
         // 一个位子，重试不额外占并发。
@@ -432,6 +468,7 @@ impl WorkflowHost {
                     description,
                     subagent_type,
                     capability_mode,
+                    llm,
                 },
                 validator.as_ref(),
             );
@@ -450,6 +487,18 @@ impl WorkflowHost {
         self.drain_reports(&sub);
         self.agent_finished(row, &outcome);
         outcome
+    }
+
+    /// `agent(model:/effort:/max_output_tokens:)` → 子会话的采样覆写。
+    ///
+    /// **模型必须在用户自己的目录（`config.toml`）里。** 这几个键是照 grok 的
+    /// 脚本 API 写的，脚本里那个名字大概率是 grok 的模型；照单全收只会把这个
+    /// 孩子打到一个解析不出端点的 id 上，收到 404 比忽略它糟得多。认不出来的
+    /// 就退回父会话的模型，并记一条 warn 说清楚是哪一个。
+    fn llm_override(&self, opts: &AgentOpts) -> ModelOverride {
+        llm_override_from(opts, &self.params.run_id, |m| {
+            cordis_base::config::lookup_model(m).is_some()
+        })
     }
 
     fn current_phase(&self) -> Option<String> {
@@ -542,6 +591,11 @@ impl WorkflowHost {
         if reports.is_empty() {
             return;
         }
+        // 收尾通知要带**每一条**上报：行上的 `latest_report` 是覆盖写的，同一个
+        // 孩子报第二次就把第一次挤掉了，从它反推等于对主线程少说了一半。
+        self.params
+            .state
+            .push_reports(&self.params.run_id, reports.iter().cloned());
         let mut cards: Vec<(String, String)> = Vec::new();
         self.patch(|snap| {
             let mut lines = Vec::new();
@@ -610,6 +664,7 @@ impl WorkflowHost {
             description,
             subagent_type,
             capability_mode,
+            llm,
         } = run;
         let started = Instant::now();
         let mut attempts: u32 = 0;
@@ -641,6 +696,7 @@ impl WorkflowHost {
                     cancel_token: self.params.cancel.clone(),
                     runtime_overrides: SubagentRuntimeOverrides {
                         capability_mode,
+                        llm: llm.clone(),
                         ..Default::default()
                     },
                 })
@@ -874,6 +930,50 @@ mod tests {
         assert_eq!(fenced["claim"], "x");
         let plain = agent_output_value("not json");
         assert_eq!(plain, serde_json::json!("not json"));
+    }
+
+    /// `agent(model:)` 点名的模型必须是**本机目录里真有的** id。
+    ///
+    /// 这几个键是照 grok 的脚本 API 写的，脚本里那个名字大概率是 grok 的模型。
+    /// 照单全收 = 这个孩子被打到一个解析不出端点的 id 上，换来一个 404；退回
+    /// 父会话的模型至少还跑得完。
+    #[test]
+    fn an_unknown_model_falls_back_to_the_parent_session() {
+        let known = |m: &str| m == "local-fast";
+        let opts = AgentOpts {
+            model: Some("grok-4-fast".into()),
+            effort: Some("low".into()),
+            max_output_tokens: Some(4096),
+            ..AgentOpts::default()
+        };
+        let over = llm_override_from(&opts, "wf_1", known);
+        assert_eq!(over.model, None, "目录里没有的模型不该点名");
+        assert_eq!(over.effort.as_deref(), Some("low"), "强度与模型无关，照带");
+        assert_eq!(over.max_output_tokens, Some(4096));
+
+        let opts = AgentOpts {
+            model: Some(" local-fast ".into()),
+            ..AgentOpts::default()
+        };
+        let over = llm_override_from(&opts, "wf_1", known);
+        assert_eq!(over.model.as_deref(), Some("local-fast"));
+        assert!(over.effort.is_none());
+    }
+
+    /// 一个都没点名就别挂这个服务：空覆写会让子代理走一条本可以不走的分支。
+    #[test]
+    fn an_empty_override_stays_empty() {
+        let over = llm_override_from(&AgentOpts::default(), "wf_1", |_| true);
+        assert!(over.is_empty());
+        let blank = AgentOpts {
+            model: Some("   ".into()),
+            effort: Some(String::new()),
+            ..AgentOpts::default()
+        };
+        assert!(
+            llm_override_from(&blank, "wf_1", |_| true).is_empty(),
+            "空白字符串不算点名"
+        );
     }
 
     #[test]

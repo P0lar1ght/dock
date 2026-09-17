@@ -953,7 +953,7 @@ fn build_frame(
             LogEvent::Notice { kind, title, body } => {
                 // 只给用户看的卡片：模型历史里没有它，所以它不属于任何一轮工具
                 // 往返，自己按事件下标折叠。
-                let id = notice::header_id(i);
+                let id = notice::header_id(i, title, body);
                 let mode = tool_fold
                     .get(&id)
                     .copied()

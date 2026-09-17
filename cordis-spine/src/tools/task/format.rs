@@ -103,6 +103,7 @@ pub(super) fn format_parent_notice(notice: &super::store::ParentNotice) -> Strin
             elapsed_ms,
             summary,
             reports,
+            dropped_reports,
         } => {
             let mut text = format!(
                 "工作流 \"{name}\" 已{}（耗时 {:.1}s）。\n结果:\n{summary}",
@@ -121,6 +122,11 @@ pub(super) fn format_parent_notice(notice: &super::store::ParentNotice) -> Strin
                         "\n- {}: {}",
                         report.agent_id,
                         cap_report_text(&report.output)
+                    ));
+                }
+                if *dropped_reports > 0 {
+                    text.push_str(&format!(
+                        "\n（另有 {dropped_reports} 条更早的上报没有列出）"
                     ));
                 }
             }

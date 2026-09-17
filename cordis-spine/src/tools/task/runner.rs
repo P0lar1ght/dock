@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::presets::AgentPresets;
 use crate::agent::runtime::{GrokStep, LoopHandle};
 use crate::agent::turn::TurnControl;
-use crate::names::{AGENT_PRESETS, CAPABILITY, SESSIONS, TURN};
+use crate::names::{AGENT_PRESETS, CAPABILITY, MODEL_OVERRIDE, SESSIONS, TURN};
 use crate::session::log::Sessions;
 use cordis_base::types::{LogEvent, TurnOutcome};
 
@@ -158,6 +158,22 @@ async fn run_dock_child(
             Ok(d) => hold.push(d),
             Err(e) => {
                 return failed(&id, &store, wall, format!("child capability: {e}"), false);
+            }
+        }
+    }
+    // 采样覆写同理：没点名就一项都不挂，采样照 `"settings"` 走。
+    if !run.request.runtime_overrides.llm.is_empty() {
+        let over = run.request.runtime_overrides.llm.clone();
+        match child.provide(MODEL_OVERRIDE, over) {
+            Ok(d) => hold.push(d),
+            Err(e) => {
+                return failed(
+                    &id,
+                    &store,
+                    wall,
+                    format!("child model override: {e}"),
+                    false,
+                );
             }
         }
     }
