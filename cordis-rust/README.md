@@ -63,6 +63,10 @@ ctx.on("tick", move |_: &()| {
   `events.ts` 是同一道闸。
 - `internal/service` 发在 `notify` 里，那是 provide 与 provider 卸载的唯一汇合
   点，所以一个发射点覆盖"出现"和"消失"两种。
+- `Context::set`（就地换掉已有服务的值）**不发** `internal/service`，也不触发依赖
+  方重载：它走的是 `Runtime::set`，只改 `impl_.value`，绕开 `notify`。这一条是
+  刻意留着的——`set` 的语义是"同一个服务，换个值"，重跑一遍 provide/dispose 会
+  把正在用它的 fiber 全部重启。要让依赖方看见变化，就别用 `set`，重新 `provide`。
 
 ### 上游有而这里没有的
 
