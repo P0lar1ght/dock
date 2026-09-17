@@ -25,11 +25,11 @@ use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, plugin_async, Context, Disposable, Inject, Plugin};
 
-use crate::config::{self, McpServer, McpTransport};
 use crate::names::{MCP, PRE_STEP, SESSIONS, TOOLS};
 use crate::session::Sessions;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
+use cordis_base::config::{self, McpServer, McpTransport};
+use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 use incoming::LiveHooks;
 
@@ -933,7 +933,7 @@ mod tests {
     use crate::names::{SESSIONS, TOOLS};
     use crate::session::Sessions;
     use crate::tools::tool_result;
-    use crate::types::ToolCall;
+    use cordis_base::types::ToolCall;
     use std::sync::Arc;
 
     fn stub_call() -> CallFn {
@@ -947,11 +947,11 @@ mod tests {
                 command: "true".into(),
                 args: Vec::new(),
                 env: Default::default(),
-                framing: crate::config::McpStdioFraming::Auto,
+                framing: cordis_base::config::McpStdioFraming::Auto,
             },
             startup_timeout_sec: 1,
             enabled: true,
-            oauth: crate::config::McpOAuthConfig {
+            oauth: cordis_base::config::McpOAuthConfig {
                 client_id: None,
                 client_secret: None,
                 scopes: Vec::new(),
@@ -1009,12 +1009,12 @@ mod tests {
     ///
     /// 同时关掉内置 cua-driver 行：它是「发现得到就注入」，开发机上装了 driver
     /// 的话每个 reload 用例都会真的去拉守护进程。
-    fn isolated_config(body: &str) -> (crate::test_env::EnvScope, tempfile::TempDir) {
+    fn isolated_config(body: &str) -> (cordis_base::test_env::EnvScope, tempfile::TempDir) {
         let cwd = tempfile::tempdir().unwrap();
-        let env = crate::test_env::scoped()
+        let env = cordis_base::test_env::scoped()
             .home()
             .cwd(cwd.path())
-            .set(crate::cua::DRIVER_ENV, "off");
+            .set(cordis_base::cua::DRIVER_ENV, "off");
         std::fs::write(config::dock_home().join("config.toml"), body).unwrap();
         (env, cwd)
     }

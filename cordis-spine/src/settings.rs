@@ -2,8 +2,8 @@ use std::sync::Mutex;
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::config::{self, ApiBackend, ModelChoice};
 use crate::names::SETTINGS;
+use cordis_base::config::{self, ApiBackend, ModelChoice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
@@ -327,7 +327,7 @@ api_backends = ["responses", "chat_completions"]
 "#,
         )
         .unwrap();
-        let _env = crate::test_env::scoped()
+        let _env = cordis_base::test_env::scoped()
             .set("DOCK_HOME", home.path())
             .cwd(cwd.path());
 

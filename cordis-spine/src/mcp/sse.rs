@@ -13,7 +13,7 @@ use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION};
 use serde_json::Value;
 use tokio::sync::watch;
 
-use crate::config::McpServer;
+use cordis_base::config::McpServer;
 
 use super::credentials;
 use super::protocol;

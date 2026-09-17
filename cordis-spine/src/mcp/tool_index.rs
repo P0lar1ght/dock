@@ -7,7 +7,7 @@
 use bm25::{Language, SearchEngineBuilder};
 use serde_json::{json, Value};
 
-use crate::types::ToolSpec;
+use cordis_base::types::ToolSpec;
 
 use super::protocol::split_mcp_public_name;
 

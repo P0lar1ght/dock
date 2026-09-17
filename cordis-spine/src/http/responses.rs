@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::stream_acc::StreamDelta;
-use crate::types::{
+use cordis_base::stream_acc::StreamDelta;
+use cordis_base::types::{
     LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
 };
-use crate::usage::TokenUsage;
+use cordis_base::usage::TokenUsage;
 
 pub fn body(
     model: &str,
@@ -132,7 +132,7 @@ pub fn input_items(
 ///
 /// 两处清洗照抄 Grok：`status` 是 output-only 字段，回传会被拒；`content[]` 的
 /// 元素要带 `type: "reasoning_text"` 判别符，缺了同样 400。
-fn replayable_reasoning(llm: &crate::types::LlmOutput) -> Vec<Value> {
+fn replayable_reasoning(llm: &cordis_base::types::LlmOutput) -> Vec<Value> {
     llm.reasoning_items
         .iter()
         .filter(|item| item["type"] == "reasoning")
@@ -613,7 +613,7 @@ mod tests {
         let request = PromptRequest {
             system: String::new(),
             history: vec![],
-            tools: vec![crate::types::ToolSpec {
+            tools: vec![cordis_base::types::ToolSpec {
                 name: "grep".into(),
                 description: "search".into(),
                 parameters_json: r#"{"type":"object"}"#.into(),

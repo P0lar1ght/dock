@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::context_book::{own_sections, ContextBook};
 use crate::names::{AGENT_PRESETS, CONTEXT};
 use crate::prompt::ORDER_PERSONA;
-use crate::types::ToolSpec;
+use cordis_base::types::ToolSpec;
 
 pub const DEFAULT_PRESET_ID: &str = "code";
 pub const MINIMAL_PRESET_ID: &str = "minimal";
@@ -969,7 +969,7 @@ pub fn is_shipped(id: &str) -> bool {
 
 pub fn agent_presets() -> Plugin {
     plugin("agent-presets", Inject::from([CONTEXT]), |ctx, _: &()| {
-        let user = crate::config::dock_home().join("presets");
+        let user = cordis_base::config::dock_home().join("presets");
         let project = std::env::current_dir()
             .ok()
             .map(|cwd| cwd.join(".dock").join("presets"));
@@ -1678,8 +1678,8 @@ mod tests {
     use super::*;
     use crate::names::{AGENT_PRESETS, TOOLS};
     use crate::tools::{tool_result, Tools};
-    use crate::types::ToolCall;
     use cordis::Context;
+    use cordis_base::types::ToolCall;
     use std::sync::Arc;
 
     fn spec(name: &str) -> ToolSpec {
@@ -2405,7 +2405,7 @@ mod tests {
     #[tokio::test]
     async fn roster_section_is_gone_from_the_assembly() {
         let dir = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         ctx.plugin(crate::context_book::context(), ())
             .unwrap()

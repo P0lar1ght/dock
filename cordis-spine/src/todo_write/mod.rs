@@ -11,7 +11,7 @@ use crate::jobs::Jobs;
 use crate::names::{JOBS, PRE_STEP, STEP_START, SUBAGENTS, TODOS, TOOLS, TURN_END};
 use crate::task::Subagents;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{
+use cordis_base::types::{
     PreStep, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_STEP_START_TODO,
     ORDER_TURN_END_TODO,
 };

@@ -7,7 +7,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::tool_images::{self, IMAGE_SEPARATE_PLACEHOLDER};
-use crate::types::UserImage;
+use cordis_base::types::UserImage;
 
 /// Latest published MCP spec. Offered first on both stdio and Streamable HTTP.
 pub const PROTOCOL_LATEST: &str = "2026-07-28";
@@ -444,7 +444,7 @@ fn truncate_structured_text(s: &str) -> String {
 /// arbitrary files via path/screenshot_path/file.
 fn path_under_dock_home(path: &std::path::Path) -> Option<std::path::PathBuf> {
     let canon = path.canonicalize().ok()?;
-    let home = crate::config::dock_home();
+    let home = cordis_base::config::dock_home();
     let home = home.canonicalize().unwrap_or(home);
     canon.starts_with(&home).then_some(canon)
 }
@@ -558,7 +558,7 @@ mod tests {
     /// 工具调用会被硬编码上限误杀，而用户没有任何办法放宽。
     #[test]
     fn call_timeout_reads_the_env_override() {
-        let _env = crate::test_env::scoped();
+        let _env = cordis_base::test_env::scoped();
         assert_eq!(
             call_timeout(),
             Some(std::time::Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS))
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn promote_cua_path_under_dock_home() {
         let dir = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().set("DOCK_HOME", dir.path());
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dir.path());
         let shots = dir.path().join("browser").join("screenshots");
         std::fs::create_dir_all(&shots).unwrap();
         let png = vec![

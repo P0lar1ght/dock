@@ -19,8 +19,8 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
-use crate::config::dock_home;
-use crate::stream_acc::StreamDelta;
+use cordis_base::config::dock_home;
+use cordis_base::stream_acc::StreamDelta;
 
 /// 每处片段最多记这么多字节，免得把整份工具表和文件内容抄进日志。
 const EXCERPT_BYTES: usize = 160;
@@ -321,15 +321,15 @@ mod tests {
     #[test]
     fn disabled_unless_asked_for() {
         {
-            let _env = crate::test_env::scoped().remove("DOCK_CACHE_DEBUG");
+            let _env = cordis_base::test_env::scoped().remove("DOCK_CACHE_DEBUG");
             assert!(log_path().is_none(), "没设就不该开");
         }
         {
-            let _env = crate::test_env::scoped().set("DOCK_CACHE_DEBUG", "0");
+            let _env = cordis_base::test_env::scoped().set("DOCK_CACHE_DEBUG", "0");
             assert!(log_path().is_none(), "0 = 关");
         }
         {
-            let _env = crate::test_env::scoped()
+            let _env = cordis_base::test_env::scoped()
                 .home()
                 .set("DOCK_CACHE_DEBUG", "1");
             assert!(log_path()
@@ -337,7 +337,8 @@ mod tests {
                 .ends_with("scratch/cache-debug.log"));
         }
         {
-            let _env = crate::test_env::scoped().set("DOCK_CACHE_DEBUG", "/tmp/dock-cache.log");
+            let _env =
+                cordis_base::test_env::scoped().set("DOCK_CACHE_DEBUG", "/tmp/dock-cache.log");
             assert_eq!(log_path(), Some(PathBuf::from("/tmp/dock-cache.log")));
         }
     }

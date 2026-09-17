@@ -20,7 +20,7 @@ use crate::session::Sessions;
 use crate::task::Subagents;
 use crate::tools::Tools;
 use crate::turn::TurnControl;
-use crate::types::{LogEvent, PreStep, PromptRequest, StepStart, TurnEnd, TurnOutcome};
+use cordis_base::types::{LogEvent, PreStep, PromptRequest, StepStart, TurnEnd, TurnOutcome};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -160,9 +160,9 @@ async fn grok_sample_loop(
                         return Err(Error::Cancelled);
                     }
                     Err(err) => {
-                        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+                        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
                             text: format!("自动压缩失败：{err}"),
-                            ..crate::types::LlmOutput::default()
+                            ..cordis_base::types::LlmOutput::default()
                         }));
                     }
                 }
@@ -225,11 +225,11 @@ async fn grok_sample_loop(
         if ended_with_text {
             return Ok(TurnOutcome::Text(last_text));
         }
-        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
             text: format!(
                 "本轮已连续采样 {MAX_STEPS} 步仍无文本回复，已停下。发一条新消息可继续。"
             ),
-            ..crate::types::LlmOutput::default()
+            ..cordis_base::types::LlmOutput::default()
         }));
         return Err(Error::MaxSteps { max: MAX_STEPS });
     }
@@ -313,8 +313,8 @@ fn abort_if_cancelled(ctx: &Context, sessions: &Sessions) -> Result<()> {
 async fn execute_cancellable(
     ctx: &Context,
     tools: &Tools,
-    call: crate::types::ToolCall,
-) -> Option<crate::types::ToolResult> {
+    call: cordis_base::types::ToolCall,
+) -> Option<cordis_base::types::ToolResult> {
     let Some(token) = ctx.get::<TurnControl>(TURN).map(|t| t.token()) else {
         return Some(tools.execute_on(ctx, call).await);
     };
@@ -355,7 +355,7 @@ impl LoopHandle {
 mod tests {
     use super::*;
     use crate::tools::Tools;
-    use crate::types::ToolSpec;
+    use cordis_base::types::ToolSpec;
     use std::time::Duration;
 
     /// Stop 必须能打断已经在跑的工具。
@@ -395,7 +395,7 @@ mod tests {
             stopper.cancel();
         });
 
-        let call = crate::types::ToolCall {
+        let call = cordis_base::types::ToolCall {
             id: "1".into(),
             name: "never_returns".into(),
             arguments: "{}".into(),
@@ -416,7 +416,7 @@ mod tests {
         let tools = Tools::echo(root.clone());
         let _hold = root.provide(TOOLS, tools).unwrap();
         let tools = root.require::<Tools>(TOOLS).unwrap();
-        let call = crate::types::ToolCall {
+        let call = cordis_base::types::ToolCall {
             id: "1".into(),
             name: "echo".into(),
             arguments: "hi".into(),

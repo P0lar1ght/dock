@@ -11,7 +11,7 @@ use cordis::{plugin, Inject, Plugin};
 use crate::names::{GOAL, PRE_STEP, SESSIONS, TOOLS, TOOLS_EXECUTE, TURN_END};
 use crate::session::Sessions;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{
+use cordis_base::types::{
     LogEvent, PreStep, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_TURN_END_GOAL,
 };
 

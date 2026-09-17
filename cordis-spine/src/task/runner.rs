@@ -14,7 +14,7 @@ use crate::names::{AGENT_PRESETS, SESSIONS, TURN};
 use crate::runtime::{GrokStep, LoopHandle};
 use crate::session::Sessions;
 use crate::turn::TurnControl;
-use crate::types::{LogEvent, TurnOutcome};
+use cordis_base::types::{LogEvent, TurnOutcome};
 
 use super::coordinator::{
     ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, SendBoxFuture,
@@ -234,7 +234,7 @@ async fn drive_child(
     let handle = LoopHandle::new(child.clone(), Arc::new(GrokStep));
     let mut first_tx = Some(first_tx);
     // Child usage already billed to the parent.
-    let mut folded = crate::usage::UsageLedger::default();
+    let mut folded = cordis_base::usage::UsageLedger::default();
 
     loop {
         if store

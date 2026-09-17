@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::stream_acc::StreamDelta;
-use crate::types::{
+use cordis_base::stream_acc::StreamDelta;
+use cordis_base::types::{
     LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
 };
-use crate::usage::TokenUsage;
+use cordis_base::usage::TokenUsage;
 
 /// Anthropic requires `max_tokens`. Grok fills sampler defaults; Dock uses
 /// this when config has no per-request cap.
@@ -598,7 +598,7 @@ pub fn parse_json(body: &str) -> LlmOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ToolSpec;
+    use cordis_base::types::ToolSpec;
 
     fn req(history: Vec<LogEvent>) -> PromptRequest {
         PromptRequest {

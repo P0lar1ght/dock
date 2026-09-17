@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::agent_presets::AgentPresets;
 use crate::names::AGENT_PRESETS;
 use crate::tools::tool_result;
-use crate::types::{ToolCall, ToolResult};
+use cordis_base::types::{ToolCall, ToolResult};
 
 use super::backend::SubagentBackend;
 use super::format::{
@@ -46,8 +46,8 @@ report has its text forwarded. After writing a new Agent mode directory, apply t
 /preset before spawning its roles; reload_roster does not switch modes.\n\
 Max nesting depth is 1.";
 
-pub(super) fn spec() -> crate::types::ToolSpec {
-    crate::types::ToolSpec {
+pub(super) fn spec() -> cordis_base::types::ToolSpec {
+    cordis_base::types::ToolSpec {
         name: "task".into(),
         description: TASK_DESC.into(),
         parameters_json: TASK_PARAMS.into(),
@@ -328,7 +328,7 @@ mod tests {
     use crate::names::SESSIONS;
     use crate::session::Sessions;
     use crate::tools::{ToolBody, Tools};
-    use crate::types::ToolSpec;
+    use cordis_base::types::ToolSpec;
     use std::sync::{Arc, Mutex};
 
     fn spec() -> ToolSpec {

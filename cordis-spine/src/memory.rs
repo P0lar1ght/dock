@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::config::dock_home;
 use crate::names::{MEMORY, TOOLS};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::config::dock_home;
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 const SEARCH_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query. Prefer specific technical terms."},"max_results":{"type":"integer"},"min_score":{"type":"number"}},"required":["query"]}"#;
 const GET_PARAMS: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Memory file path from memory_search."},"from":{"type":"integer","description":"1-based start line."},"lines":{"type":"integer","description":"Max lines to return."}},"required":["path"]}"#;

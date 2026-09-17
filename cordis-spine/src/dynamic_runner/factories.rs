@@ -8,7 +8,7 @@ use cordis::{plugin, Inject, Plugin};
 use crate::names::{SLASH, TOOLS};
 use crate::slash::{Slash, SlashEntry};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 pub const DYN_ECHO: &str = "dynEcho";
 pub const DYN_NOTE: &str = "dynNote";

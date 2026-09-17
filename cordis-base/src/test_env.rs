@@ -22,7 +22,7 @@ use std::sync::{Mutex, MutexGuard};
 static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// 占用进程级状态的互斥并记录要恢复的项，drop 时统一还原。
-pub(crate) struct EnvScope {
+pub struct EnvScope {
     _lock: MutexGuard<'static, ()>,
     restore: Vec<(&'static str, Option<OsString>)>,
     prev_cwd: Option<PathBuf>,
@@ -31,7 +31,7 @@ pub(crate) struct EnvScope {
 
 impl EnvScope {
     /// 把 `DOCK_HOME` 指向新的临时目录（临时目录随 guard 一起释放）。
-    pub(crate) fn home(mut self) -> Self {
+    pub fn home(mut self) -> Self {
         let dir = tempfile::tempdir().unwrap();
         self = self.set("DOCK_HOME", dir.path());
         self._dir = Some(dir);
@@ -46,21 +46,21 @@ impl EnvScope {
     }
 
     /// 设置一个环境变量。
-    pub(crate) fn set(mut self, key: &'static str, value: impl AsRef<OsStr>) -> Self {
+    pub fn set(mut self, key: &'static str, value: impl AsRef<OsStr>) -> Self {
         self.record(key);
         std::env::set_var(key, value);
         self
     }
 
     /// 删除一个环境变量。
-    pub(crate) fn remove(mut self, key: &'static str) -> Self {
+    pub fn remove(mut self, key: &'static str) -> Self {
         self.record(key);
         std::env::remove_var(key);
         self
     }
 
     /// 切换当前目录。
-    pub(crate) fn cwd(mut self, dir: &Path) -> Self {
+    pub fn cwd(mut self, dir: &Path) -> Self {
         if self.prev_cwd.is_none() {
             self.prev_cwd = std::env::current_dir().ok();
         }
@@ -84,7 +84,7 @@ impl Drop for EnvScope {
 }
 
 /// 开始一个作用域，drop 前独占进程级 env / cwd。
-pub(crate) fn scoped() -> EnvScope {
+pub fn scoped() -> EnvScope {
     EnvScope {
         _lock: PROCESS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
         restore: Vec::new(),

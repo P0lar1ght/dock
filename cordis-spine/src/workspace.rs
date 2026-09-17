@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::jobs::Jobs;
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 const LIST_DIR_PARAMS: &str = r#"{"type":"object","properties":{"target_directory":{"type":"string","description":"Path to directory to list, relative to cwd or absolute."}},"required":["target_directory"]}"#;
 const READ_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{"type":"string","description":"Path of the file to read (relative to cwd or absolute)."},"offset":{"type":"integer","description":"1-based start line. Omit to start at line 1. Use with limit for large files."},"limit":{"type":"integer","description":"Max lines to return. Omit to use the default cap (1000). Pass a smaller value for a tight window."}},"required":["target_file"]}"#;
@@ -119,8 +119,8 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "grep".into(),
-            description: crate::grep::DESCRIPTION.into(),
-            parameters_json: crate::grep::PARAMS.into(),
+            description: cordis_base::grep::DESCRIPTION.into(),
+            parameters_json: cordis_base::grep::PARAMS.into(),
         },
         ToolSpec {
             name: "search_replace".into(),
@@ -182,7 +182,7 @@ pub async fn execute_with(
     let content = match call.name.as_str() {
         "list_dir" => list_dir(&call.arguments),
         "read_file" => read_file(&call.arguments),
-        "grep" => crate::grep::run(&call.id, &call.arguments).await,
+        "grep" => cordis_base::grep::run(&call.id, &call.arguments).await,
         "search_replace" => search_replace(&call.arguments),
         "bash" | "run_terminal_cmd" => bash(&call.arguments, &is_cancelled, jobs).await,
         "glob" => glob_files(&call.arguments),
@@ -335,7 +335,7 @@ fn summarize_dir(dirs: &[String], files: &[String], sample: usize) -> String {
 
 /// When the target is png/jpeg/webp/gif, return inline image + placeholder
 /// instead of `read_to_string` (which fails / garbles binaries).
-fn read_file_maybe_image(args: &str) -> Option<(String, Vec<crate::types::UserImage>)> {
+fn read_file_maybe_image(args: &str) -> Option<(String, Vec<cordis_base::types::UserImage>)> {
     let v = parse_args(args);
     let target = str_field(&v, &["target_file", "path"])?;
     let path = resolve(&target);
@@ -891,7 +891,7 @@ mod tests {
     /// `workdir` 让模型不必写 `cd x && ...`。
     #[tokio::test]
     async fn bash_runs_in_workdir() {
-        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("marker.txt"), "x").unwrap();
         let out = bash(
@@ -919,7 +919,7 @@ mod tests {
     /// `timeout_ms` 只能收紧：传一个很短的值应该提前收掉并带回已有输出。
     #[tokio::test]
     async fn bash_timeout_ms_tightens_the_budget() {
-        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "60000");
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "60000");
         let start = std::time::Instant::now();
         let out = bash(
             r#"{"command":"echo early; sleep 30","timeout_ms":600}"#,
@@ -938,7 +938,7 @@ mod tests {
     /// `timeout_ms` 不能放宽超过前台预算上限，否则一条命令能把整轮挂住。
     #[tokio::test]
     async fn bash_timeout_ms_cannot_exceed_the_ceiling() {
-        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "500");
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "500");
         let start = std::time::Instant::now();
         let out = bash(
             r#"{"command":"sleep 30","timeout_ms":600000}"#,
@@ -1090,7 +1090,7 @@ mod tests {
     /// 一条 0.1s 的命令要等满整个前台预算再被杀，输出还全丢。
     #[tokio::test]
     async fn bash_large_output_does_not_deadlock() {
-        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "3000");
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "3000");
         let start = std::time::Instant::now();
         let out = bash(
             r#"{"command":"yes OUTLINE0123456789 | head -20000; echo finished"}"#,
@@ -1114,7 +1114,7 @@ mod tests {
     /// 一句错误字符串，从不读管道，模型什么都拿不到。
     #[tokio::test]
     async fn bash_timeout_keeps_partial_output() {
-        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "700");
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "700");
         let out = bash(
             r#"{"command":"echo early-line; sleep 30"}"#,
             &|| false,
@@ -1134,7 +1134,7 @@ mod tests {
     async fn bash_foreground_shows_live_progress_in_jobs() {
         // 同一进程里别的用例会改 DOCK_BASH_FOREGROUND_MS；不拿这把锁就会被它们的
         // 短预算污染，表现为本用例随机超时。
-        let _env = crate::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
         let jobs = Jobs::new();
         let run = bash(
             r#"{"command":"for i in 1 2 3 4 5 6; do echo tick-$i; sleep 0.2; done"}"#,

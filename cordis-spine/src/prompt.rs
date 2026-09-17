@@ -204,8 +204,8 @@ mod tests {
     use crate::names::{GOAL, PLAN_MODE, PRE_STEP, SESSIONS};
     use crate::plan_mode::PlanMode;
     use crate::session::Sessions;
-    use crate::types::{LogEvent, PreStep};
     use crate::Goal;
+    use cordis_base::types::{LogEvent, PreStep};
 
     #[tokio::test]
     async fn assemble_omits_plan_when_active() {

@@ -18,11 +18,11 @@ use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Disposable, Inject, Plugin};
 
-use crate::config;
 use crate::names::{BROWSER, SLASH, TOOLS};
 use crate::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::tools::{own_registered, tool_result, tool_result_with_images, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::config;
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 use session::ConnectedSession;
 
@@ -1052,7 +1052,7 @@ mod tests {
     #[test]
     fn cockpit_body_shows_headed_display_section() {
         let dock_home = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped()
+        let _env = cordis_base::test_env::scoped()
             .set("DOCK_HOME", dock_home.path())
             .remove("DOCK_BROWSER_HEADED");
 
@@ -1115,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn registers_deferred_named_service_slash_and_disposes() {
         let dock_home = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         let (root, fiber) = boot_browser().await;
         let tools = root.require::<Tools>(TOOLS).unwrap();
@@ -1264,7 +1264,7 @@ mod tests {
     #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
     async fn p0_navigate_press_wait_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         if session::discover_chrome().is_err() {
             eprintln!("skip p0 smoke: chrome not installed");
@@ -1357,7 +1357,7 @@ mod tests {
     #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
     async fn p1_resize_dialog_upload_drag_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         if session::discover_chrome().is_err() {
             eprintln!("skip p1 smoke: chrome not installed");
@@ -1493,7 +1493,7 @@ mod tests {
     #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
     async fn open_close_launches_chromium_when_available() {
         let dock_home = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         if session::discover_chrome().is_err() {
             eprintln!("skip open_close: chrome not installed");
@@ -1563,7 +1563,7 @@ mod tests {
     #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
     async fn p2_evaluate_network_iframe_when_chrome_available() {
         let dock_home = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().set("DOCK_HOME", dock_home.path());
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
 
         if session::discover_chrome().is_err() {
             eprintln!("skip p2 smoke: chrome not installed");

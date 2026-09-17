@@ -11,7 +11,7 @@ use cordis::{plugin, Inject, Plugin};
 
 use crate::names::TOOLS;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 use config::WebFetchParams;
 use fetch::{fetch_url, search_web};

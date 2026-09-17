@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use crate::names::{JOBS, SUBAGENTS, TOOLS};
 use crate::task::{render_subagent, Subagents};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 /// 单个任务保留的输出上限。对齐 Grok 的 `output_byte_limit`（默认 20k chars）。
 ///
@@ -75,13 +75,13 @@ impl OutputBuf {
         if self.id.is_empty() {
             return;
         }
-        let dir = crate::tool_output::spill_dir();
+        let dir = cordis_base::tool_output::spill_dir();
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
         let path = dir.join(format!(
             "{}.txt",
-            crate::tool_output::offload_stem(&self.id)
+            cordis_base::tool_output::offload_stem(&self.id)
         ));
         let Ok(mut file) = std::fs::File::create(&path) else {
             return;
@@ -817,7 +817,7 @@ mod tests {
     /// 晚一步中间那段就永远回不来了。这条用例正是钉住这个时序。
     #[test]
     fn oversized_output_spills_every_byte_while_running() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         let mut buf = OutputBuf::with_id("spill-job");
         // 每块 1KB，总量远超 HEAD+TAIL，逼它在中途开始落盘。
         let mut expected = Vec::new();
@@ -828,9 +828,9 @@ mod tests {
         }
         let rendered = buf.render();
         assert!(rendered.contains("已截断"), "{rendered}");
-        let path = crate::tool_output::spill_dir().join(format!(
+        let path = cordis_base::tool_output::spill_dir().join(format!(
             "{}.txt",
-            crate::tool_output::offload_stem("spill-job")
+            cordis_base::tool_output::offload_stem("spill-job")
         ));
         assert!(
             rendered.contains(&path.to_string_lossy().to_string()),
@@ -849,15 +849,15 @@ mod tests {
     /// 每条都写一个文件是纯粹的磁盘垃圾。
     #[test]
     fn small_output_does_not_spill() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         let mut buf = OutputBuf::with_id("small-job");
         buf.push(b"hello\n");
         let rendered = buf.render();
         assert_eq!(rendered, "hello\n");
-        assert!(!crate::tool_output::spill_dir()
+        assert!(!cordis_base::tool_output::spill_dir()
             .join(format!(
                 "{}.txt",
-                crate::tool_output::offload_stem("small-job")
+                cordis_base::tool_output::offload_stem("small-job")
             ))
             .exists());
     }

@@ -36,7 +36,7 @@ use futures_util::StreamExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
-use crate::config::dock_home;
+use cordis_base::config::dock_home;
 
 use super::snapshot::{self, LeanSnapshot, RefEntry};
 use super::wait::{poll_until, retry_async, with_timeout};
@@ -170,7 +170,7 @@ pub struct ConnectedSession {
 
 impl ConnectedSession {
     /// Launch Chromium. `headed` comes from cockpit pref + `DOCK_BROWSER_HEADED` override
-    /// (see [`crate::config::effective_browser_headed`]); default remains headless.
+    /// (see [`cordis_base::config::effective_browser_headed`]); default remains headless.
     pub async fn launch(url: Option<&str>, headed: bool) -> Result<Self, String> {
         let user_data_dir = browser_user_data_dir();
         std::fs::create_dir_all(&user_data_dir)
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn user_data_under_dock_home() {
-        let _env = crate::test_env::scoped().set("DOCK_HOME", "/tmp/dock-test-home-browser");
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", "/tmp/dock-test-home-browser");
         let p = browser_user_data_dir();
         assert!(p.ends_with("browser/user-data"), "{p:?}");
         assert!(!p.to_string_lossy().contains(".config/google-chrome"));
@@ -1527,7 +1527,7 @@ mod tests {
 
     #[test]
     fn discover_mentions_chrome_path_on_bad_env() {
-        let _env = crate::test_env::scoped().set("CHROME_PATH", "/no/such/chrome-binary-xyz");
+        let _env = cordis_base::test_env::scoped().set("CHROME_PATH", "/no/such/chrome-binary-xyz");
         let err = discover_chrome().unwrap_err();
         assert!(err.contains("CHROME_PATH"), "{err}");
     }

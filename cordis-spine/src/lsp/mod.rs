@@ -90,8 +90,8 @@ const LSP_UNAVAILABLE: &str = "LSP tool is unavailable. Configure ~/.dock/lsp.js
 pub fn tool_lsp() -> cordis::Plugin {
     use crate::names::{LSP, TOOLS, TOOLS_EXECUTE};
     use crate::tools::{own_registered, ToolBody, Tools};
-    use crate::types::{ToolResult, ToolSpec};
     use cordis::{plugin, Inject};
+    use cordis_base::types::{ToolResult, ToolSpec};
     use notify::ToolNotificationHandle;
     use tokio::sync::Mutex as TokioMutex;
 
@@ -141,7 +141,7 @@ Requires file_path + line + character for position-based operations. line/charac
     })
 }
 
-fn notify_edit_if_needed(ctx: &cordis::Context, result: &crate::types::ToolResult) {
+fn notify_edit_if_needed(ctx: &cordis::Context, result: &cordis_base::types::ToolResult) {
     if !matches!(result.name.as_str(), "search_replace" | "write_file") {
         return;
     }
@@ -172,7 +172,10 @@ fn edited_path_from_result(content: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-async fn lsp_run(ctx: &cordis::Context, call: crate::types::ToolCall) -> crate::types::ToolResult {
+async fn lsp_run(
+    ctx: &cordis::Context,
+    call: cordis_base::types::ToolCall,
+) -> cordis_base::types::ToolResult {
     use crate::names::LSP;
     use crate::tools::tool_result;
     // Copied from Grok `LspTool::run`.

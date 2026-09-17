@@ -20,7 +20,7 @@ use crate::session::Sessions;
 use crate::settings::AppSettings;
 use crate::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{LogEvent, ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{LogEvent, ToolCall, ToolResult, ToolSpec};
 
 pub use args::{workflow_command_arguments, workflow_slash_arguments};
 pub use drain::WorkflowRunSnap;
@@ -175,7 +175,7 @@ fn path_near_workflows(path: &Path) -> bool {
     if raw.contains(".dock/workflows") || raw.contains(".dock\\workflows") {
         return true;
     }
-    let home = crate::config::dock_home();
+    let home = cordis_base::config::dock_home();
     path.starts_with(home.join("workflows"))
         || path.starts_with(home.join("bundled").join("workflows"))
 }
@@ -376,9 +376,9 @@ mod tests {
     use crate::prompt::{SystemPrompt, ORDER_SKILLS, ORDER_WORKFLOWS};
     use crate::slash::slash;
     /// `DOCK_HOME` 指向临时目录 + 切 cwd，退出时还原（进程级状态由 test_env 串行化）。
-    fn env_in(dir: &std::path::Path) -> crate::test_env::EnvScope {
+    fn env_in(dir: &std::path::Path) -> cordis_base::test_env::EnvScope {
         std::fs::create_dir_all(dir.join("dock-home")).unwrap();
-        crate::test_env::scoped()
+        cordis_base::test_env::scoped()
             .cwd(dir)
             .set("DOCK_HOME", dir.join("dock-home"))
     }

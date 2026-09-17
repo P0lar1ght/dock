@@ -11,16 +11,16 @@ mod tool_images;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
-use crate::chat_chunk::ChatCompletionChunk;
-use crate::config::{self, ApiBackend, AuthScheme};
 use crate::llm::Sampler;
 use crate::names::{SESSIONS, SETTINGS, TURN};
 use crate::runtime::BoxFuture;
 use crate::session::Sessions;
 use crate::settings::AppSettings;
-use crate::stream_acc::{take_sse_data, ChatStreamAcc, StreamDelta};
 use crate::turn::TurnControl;
-use crate::types::{
+use cordis_base::chat_chunk::ChatCompletionChunk;
+use cordis_base::config::{self, ApiBackend, AuthScheme};
+use cordis_base::stream_acc::{take_sse_data, ChatStreamAcc, StreamDelta};
+use cordis_base::types::{
     LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
 };
 
@@ -230,9 +230,9 @@ async fn sample_http(
     }
     let prompt_est = estimate_prompt_tokens(&request);
     on_delta(StreamDelta::Usage {
-        tokens: crate::usage::TokenUsage {
+        tokens: cordis_base::usage::TokenUsage {
             prompt_tokens: prompt_est,
-            ..crate::usage::TokenUsage::default()
+            ..cordis_base::usage::TokenUsage::default()
         },
         official: false,
         model: wire.clone(),
@@ -478,7 +478,7 @@ impl WireAcc {
                 //
                 // 后果是这一轮完全空白地收场：没有文本、没有报错，界面上就像
                 // 应用坏了。
-                if let Some(err) = crate::stream_acc::chat_stream_error(data) {
+                if let Some(err) = cordis_base::stream_acc::chat_stream_error(data) {
                     acc.set_error(err);
                     return Vec::new();
                 }

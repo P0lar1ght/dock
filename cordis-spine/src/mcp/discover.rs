@@ -10,8 +10,8 @@ use std::collections::HashSet;
 use serde_json::{json, Value};
 
 use crate::tools::{tool_result, Tools};
-use crate::types::{LogEvent, ToolCall, ToolResult, ToolSpec};
 use crate::workspace;
+use cordis_base::types::{LogEvent, ToolCall, ToolResult, ToolSpec};
 
 use super::protocol::{is_mcp_public_name, public_tool_name, split_mcp_public_name};
 use super::tool_index::{self, IndexedTool, Ranking};
@@ -197,7 +197,7 @@ fn desktop_driver_missing(query: &str, mcp: Option<&Mcp>) -> bool {
         return false;
     }
     !mcp.map(Mcp::list).unwrap_or_default().iter().any(|s| {
-        s.name == crate::cua::CUA_DRIVER_SERVER && s.enabled && s.ok && !s.tools.is_empty()
+        s.name == cordis_base::cua::CUA_DRIVER_SERVER && s.enabled && s.ok && !s.tools.is_empty()
     })
 }
 
@@ -534,11 +534,11 @@ fn is_meta(name: &str) -> bool {
 
 /// 超帽的输出先落盘再截断，模型能按路径把剩下的捞回来（Grok `mcp_truncate`
 /// 同款）。写盘失败退回纯截断，不要因为磁盘问题让工具调用失败。
-/// 字节兜底帽 + 溢出落盘。实现搬去了 `crate::tool_output`，内置工具与
+/// 字节兜底帽 + 溢出落盘。实现搬去了 `cordis_base::tool_output`，内置工具与
 /// `use_tool` 共用同一套语义和同一个落盘目录（`$DOCK_HOME/tool-output/`）。
 async fn cap_use_tool_output(call_id: &str, content: String) -> String {
-    let budget = crate::tool_output::Budget::opaque(USE_TOOL_MAX_OUTPUT_BYTES);
-    crate::tool_output::cap_bytes(call_id, content, &budget).await
+    let budget = cordis_base::tool_output::Budget::opaque(USE_TOOL_MAX_OUTPUT_BYTES);
+    cordis_base::tool_output::cap_bytes(call_id, content, &budget).await
 }
 
 /// 预算按**实际发出去的**缩进 JSON 计（紧凑长度会低估近一倍）。算的是命中行
@@ -1009,7 +1009,7 @@ mod tests {
                 fat,
             )
             .unwrap();
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let capped = run_use_tool(
             &tools,
             &ctx,
@@ -1024,8 +1024,10 @@ mod tests {
         assert!(capped.content.len() < USE_TOOL_MAX_OUTPUT_BYTES + 400);
 
         // 截断掉的部分落盘，模型能按路径捞回全文。
-        let path = crate::tool_output::spill_dir()
-            .join(format!("{}.txt", crate::tool_output::offload_stem("2")));
+        let path = cordis_base::tool_output::spill_dir().join(format!(
+            "{}.txt",
+            cordis_base::tool_output::offload_stem("2")
+        ));
         assert!(
             capped.content.contains(&path.to_string_lossy().to_string()),
             "{capped:?}"
@@ -1038,7 +1040,7 @@ mod tests {
 
     #[tokio::test]
     async fn use_tool_offload_stem_cannot_escape_the_folder() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let ctx = cordis::Context::new();
         let tools = Tools::echo(ctx.clone());
         let fat: crate::tools::ToolBody = Arc::new(|call| {
@@ -1057,12 +1059,12 @@ mod tests {
             },
         )
         .await;
-        let dir = crate::config::dock_home().join("tool-output");
+        let dir = cordis_base::config::dock_home().join("tool-output");
         assert!(out.content.contains("output truncated"), "{out:?}");
         assert!(
             dir.join(format!(
                 "{}.txt",
-                crate::tool_output::offload_stem("../../escape")
+                cordis_base::tool_output::offload_stem("../../escape")
             ))
             .exists(),
             "{out:?}"

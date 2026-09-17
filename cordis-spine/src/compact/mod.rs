@@ -22,10 +22,10 @@ use crate::llm::Llm;
 use crate::names::{COMPACT, LLM, SESSIONS, SYSTEM_PROMPT, TURN};
 use crate::prompt::SystemPrompt;
 use crate::session::Sessions;
-use crate::stream_acc::StreamDelta;
 use crate::turn::TurnControl;
-use crate::types::{LogEvent, PromptRequest};
-use crate::usage::TokenUsage;
+use cordis_base::stream_acc::StreamDelta;
+use cordis_base::types::{LogEvent, PromptRequest};
+use cordis_base::usage::TokenUsage;
 
 use history::{build_compacted_events, prepare_conversation_for_summarization};
 
@@ -229,8 +229,8 @@ mod tests {
     use super::*;
     use crate::llm::{Llm, Sampler};
     use crate::runtime::BoxFuture;
-    use crate::stream_acc::StreamDelta;
-    use crate::types::{LlmOutput, ToolCall};
+    use cordis_base::stream_acc::StreamDelta;
+    use cordis_base::types::{LlmOutput, ToolCall};
     use std::sync::Arc;
 
     struct FixedSummary(String);
@@ -398,9 +398,9 @@ mod tests {
         assert_eq!(usage.num_turns, 0, "压缩不是用户的一轮");
         assert!(usage.recent_calls.is_empty(), "压缩不进每轮命中率走势");
         assert!(
-            crate::usage::calls_breakdown(&usage).contains("压缩 1"),
+            cordis_base::usage::calls_breakdown(&usage).contains("压缩 1"),
             "{}",
-            crate::usage::calls_breakdown(&usage)
+            cordis_base::usage::calls_breakdown(&usage)
         );
     }
 

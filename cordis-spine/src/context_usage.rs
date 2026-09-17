@@ -15,7 +15,7 @@ use crate::prompt::{PromptAssembly, SystemPrompt};
 use crate::session::{Sessions, TokenUsage};
 use crate::settings::AppSettings;
 use crate::tools::Tools;
-use crate::types::{LogEvent, ToolSpec};
+use cordis_base::types::{LogEvent, ToolSpec};
 
 /// Per-image patch cost (Grok `IMAGE_TOKEN_ESTIMATE`).
 pub const IMAGE_TOKEN_ESTIMATE: u64 = 765;
@@ -1029,9 +1029,9 @@ mod tests {
     #[tokio::test]
     async fn cold_start_window_comes_from_the_catalog_not_a_session_seed() {
         let cwd = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().home().cwd(cwd.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(cwd.path());
         std::fs::write(
-            crate::config::dock_home().join("config.toml"),
+            cordis_base::config::dock_home().join("config.toml"),
             r#"
 [models]
 default = "wide-window"
@@ -1124,13 +1124,13 @@ context_window = 1000000
     #[tokio::test]
     async fn detail_instructions_lists_the_layers_and_the_injected_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         std::fs::write(dir.path().join("AGENTS.md"), "RULE-ONE").unwrap();
         let ctx = Context::new();
         crate::install_without_llm(&ctx).await.unwrap();
         let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
         let body = crate::project_instructions::render(&ctx).expect("rules");
-        sessions.append(crate::types::LogEvent::SystemReminder(body.clone()));
+        sessions.append(cordis_base::types::LogEvent::SystemReminder(body.clone()));
 
         let d = occupancy_detail(&ctx, OccupancyKind::Instructions);
         assert_eq!(d.kind, OccupancyKind::Instructions);

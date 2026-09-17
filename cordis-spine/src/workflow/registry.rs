@@ -66,12 +66,14 @@ pub(crate) fn project_root(session_cwd: &Path) -> PathBuf {
 }
 
 pub(crate) fn user_workflow_dir() -> PathBuf {
-    crate::config::dock_home().join("workflows")
+    cordis_base::config::dock_home().join("workflows")
 }
 
 /// Runtime-updated builtins from the GCS subagent bundle (`~/.dock/bundled/workflows`).
 pub(crate) fn bundled_workflow_dir() -> PathBuf {
-    crate::config::dock_home().join("bundled").join("workflows")
+    cordis_base::config::dock_home()
+        .join("bundled")
+        .join("workflows")
 }
 
 pub(crate) struct WorkflowRegistry {

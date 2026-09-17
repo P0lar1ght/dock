@@ -11,14 +11,14 @@ use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::cua::{self, Perms};
 use crate::mcp::Mcp;
 use crate::names::{COMPUTER, MCP, PERMISSIONS, SLASH};
 use crate::permissions::Permissions;
 use crate::slash::{ExtraSlashKind, Slash, SlashEntry};
+use cordis_base::cua::{self, Perms};
 
 /// Config / MCP server key for trycua cua-driver (must match TOOLS.md).
-pub use crate::cua::CUA_DRIVER_SERVER;
+pub use cordis_base::cua::CUA_DRIVER_SERVER;
 
 /// 进度区最多留多少行——安装脚本话很多，驾驶舱只要看得见「现在到哪了」。
 const MAX_JOB_LINES: usize = 12;
@@ -532,10 +532,10 @@ mod tests {
 
     /// 单测不该真去连本机 driver：内置 MCP 行一旦注入，`mcp-client` 会 spawn
     /// 真的 cua-driver 守护进程。
-    fn no_driver() -> crate::test_env::EnvScope {
-        crate::test_env::scoped()
+    fn no_driver() -> cordis_base::test_env::EnvScope {
+        cordis_base::test_env::scoped()
             .home()
-            .set(crate::cua::DRIVER_ENV, "off")
+            .set(cordis_base::cua::DRIVER_ENV, "off")
     }
 
     #[tokio::test]
@@ -598,10 +598,10 @@ mod tests {
         // HOME / cwd 都指向空目录：内置行是唯一来源，项目 .dock/config.toml
         // 不能掺进来；同时放开 DOCK_CUA_DRIVER 走真实发现。
         let cwd = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped()
+        let _env = cordis_base::test_env::scoped()
             .home()
             .cwd(cwd.path())
-            .remove(crate::cua::DRIVER_ENV);
+            .remove(cordis_base::cua::DRIVER_ENV);
 
         let root = Context::new();
         root.plugin(slash(), ()).unwrap().wait().await.unwrap();
@@ -685,7 +685,10 @@ mod tests {
         let computer = root.get::<Computer>(COMPUTER).unwrap();
         let body = computer.format_cockpit_with(None, Some(CuaAction::Install));
         assert!(body.contains("确认：安装 cua-driver"), "{body}");
-        assert!(body.contains(crate::cua::INSTALL_SCRIPT_URL), "{body}");
+        assert!(
+            body.contains(cordis_base::cua::INSTALL_SCRIPT_URL),
+            "{body}"
+        );
         assert!(body.contains("Enter 确认执行"), "{body}");
     }
 

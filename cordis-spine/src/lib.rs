@@ -4,24 +4,19 @@
 //! The loop injects those five and provides `agentLoop`. Swap the loop by
 //! disposing that one plugin and mounting another that injects the same five.
 
-mod acp;
 mod agent_presets;
 mod agents;
 mod ask_user;
 mod browser;
 mod bundle;
-mod chat_chunk;
 mod compact;
 mod computer;
-mod config;
 mod context_book;
 mod context_usage;
 mod cron;
-mod cua;
 mod dynamic_runner;
 mod error;
 mod goal;
-mod grep;
 mod http;
 mod jobs;
 mod listing;
@@ -44,25 +39,17 @@ mod session_persist;
 mod settings;
 mod skills;
 mod slash;
-mod stream_acc;
 mod task;
 mod todo_write;
 mod tool_cordis;
 mod tool_images;
-mod tool_output;
 mod tools;
 mod tui_slots;
 mod turn;
-mod types;
-mod usage;
 mod web_fetch;
 mod workflow;
 mod workspace;
 
-#[cfg(test)]
-mod test_env;
-
-pub use acp::PermissionOptionKind;
 pub use agent_presets::{
     agent_presets, blocked_tool_message, is_shipped, AgentPreset, AgentPresets, PresetOrigin,
     SubagentDef, CORDIS_PRESET_ID, DEFAULT_PRESET_ID, MINIMAL_PRESET_ID, WARDEN_PRESET_ID,
@@ -76,16 +63,30 @@ pub use bundle::{
 };
 pub use compact::{compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
 pub use computer::{tool_computer, Computer, ComputerState, CuaAction, CUA_DRIVER_SERVER};
-pub use config::{
+pub use context_book::{context, own_sections, ContextBook};
+pub use context_usage::{
+    occupancy_detail, snapshot_context, ContextCategory, ContextSnapshot, OccupancyDetail,
+    OccupancyKind,
+};
+pub use cordis_base::acp::PermissionOptionKind;
+pub use cordis_base::config::{
     effective_browser_headed, load_browser_headed, load_catalog, load_disabled_mcp_tools,
     load_mcp_servers, persist_browser_headed, persist_disabled_mcp_tools,
     persist_mcp_server_enabled, ApiBackend, AuthScheme, McpOAuthConfig, McpServer, McpStdioFraming,
     McpTransport, ModelChoice, ModelPricing, DEFAULT_EFFORT_CHOICES,
 };
-pub use context_book::{context, own_sections, ContextBook};
-pub use context_usage::{
-    occupancy_detail, snapshot_context, ContextCategory, ContextSnapshot, OccupancyDetail,
-    OccupancyKind,
+pub use cordis_base::stream_acc::StreamDelta;
+pub use cordis_base::types::{
+    LlmOutput, LogEvent, PreStep, PromptRequest, StepStart, ToolCall, ToolResult, ToolSpec,
+    TurnEnd, TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
+    ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_TODO,
+    ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
+};
+pub use cordis_base::usage::{
+    calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,
+    miss_breakdown_text, per_model_amounts, session_usage_block_text, share_percent, ticks_to_usd,
+    CacheSegment, CacheSegmentKind, CallCost, PromptUsage, PromptUsageModel, UsageLedger,
+    RECENT_CALLS_KEPT,
 };
 pub use cron::{
     cron, Cron, CronError, CronJob, CronTick, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS,
@@ -142,7 +143,6 @@ pub use slash::{
     slash, slash_name_reserved, tool_slash_arguments, ExtraSlashKind, Slash, SlashEntry,
     RESERVED_SLASH,
 };
-pub use stream_acc::StreamDelta;
 pub use task::admission::SubagentLimits;
 pub use task::{tool_task, SubagentSnap, Subagents, TaskConfig};
 pub use todo_write::{tool_todo, TodoItem, TodoStats, TodoStatus, Todos, TODO_GATE_SENTINEL};
@@ -154,18 +154,6 @@ pub use tool_images::{
 pub use tools::{own_registered, tools, workspace_tools, ToolBody, Tools};
 pub use tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
 pub use turn::{turn, TurnControl};
-pub use types::{
-    LlmOutput, LogEvent, PreStep, PromptRequest, StepStart, ToolCall, ToolResult, ToolSpec,
-    TurnEnd, TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
-    ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_TODO,
-    ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
-};
-pub use usage::{
-    calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,
-    miss_breakdown_text, per_model_amounts, session_usage_block_text, share_percent, ticks_to_usd,
-    CacheSegment, CacheSegmentKind, CallCost, PromptUsage, PromptUsageModel, UsageLedger,
-    RECENT_CALLS_KEPT,
-};
 pub use web_fetch::tool_web;
 pub use workflow::{
     extra_tool_slash_arguments, tool_workflow, workflow_command_arguments,

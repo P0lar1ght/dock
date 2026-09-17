@@ -22,7 +22,7 @@ impl LspSetupScope {
     pub fn path(self, cwd: &Path) -> PathBuf {
         match self {
             Self::Project => cwd.join(".dock").join("lsp.json"),
-            Self::User => crate::config::dock_home().join("lsp.json"),
+            Self::User => cordis_base::config::dock_home().join("lsp.json"),
         }
     }
 
@@ -94,7 +94,7 @@ pub fn composer_fill() -> String {
 }
 
 pub fn status_report(cwd: &Path) -> String {
-    let user = crate::config::dock_home().join("lsp.json");
+    let user = cordis_base::config::dock_home().join("lsp.json");
     let project = cwd.join(".dock").join("lsp.json");
     let configured = load_servers(cwd);
     let mut lines = vec!["LSP 配置".into(), String::new()];

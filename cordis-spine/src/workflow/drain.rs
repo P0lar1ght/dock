@@ -277,7 +277,9 @@ async fn host_loop(
 ) {
     let spent = 0u64;
     let mut reserved = 0u64;
-    let scratch = crate::config::dock_home().join("scratch").join(&run_id);
+    let scratch = cordis_base::config::dock_home()
+        .join("scratch")
+        .join(&run_id);
     let _ = std::fs::create_dir_all(&scratch);
     loop {
         let req = tokio::select! {

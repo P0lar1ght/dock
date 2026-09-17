@@ -22,13 +22,13 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION,
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::config::{McpServer, McpTransport};
 use crate::mcp::protocol::{
     self, client_capabilities, client_info, encode_header_value, id_matches, pick_version,
     raw_tool_name, unsupported_versions, with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
 use crate::tools::{tool_result, tool_result_with_images};
-use crate::types::ToolCall;
+use cordis_base::config::{McpServer, McpTransport};
+use cordis_base::types::ToolCall;
 
 use super::incoming::{self, LiveHooks};
 use super::sse::{self, SseParser};
@@ -584,7 +584,7 @@ async fn post(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{McpOAuthConfig, McpServer};
+    use cordis_base::config::{McpOAuthConfig, McpServer};
     use serde_json::json;
     use std::io;
     use std::sync::atomic::AtomicU32;

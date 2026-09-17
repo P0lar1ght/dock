@@ -5,7 +5,7 @@ use cordis::{plugin, Inject, Plugin};
 use crate::jobs::Jobs;
 use crate::names::{JOBS, TOOLS};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 const PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command or script. Each stdout line is an event; exit ends the watch."},"description":{"type":"string","description":"Short human-readable description of what you are monitoring."},"timeout_ms":{"type":"integer","description":"Kill after this many ms. Ignored when persistent is true. Default 36000000 (10h)."},"persistent":{"type":"boolean","description":"Run until kill_task or session end."}},"required":["command","description"]}"#;
 

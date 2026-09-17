@@ -32,7 +32,7 @@ pub fn load_servers_with_plugins_sourced(
         "plugin_names must be empty or parallel to plugin_lsp_paths"
     );
 
-    let user_path = crate::config::dock_home().join("lsp.json");
+    let user_path = cordis_base::config::dock_home().join("lsp.json");
     let project_path = cwd.join(".dock").join("lsp.json");
 
     // User-level servers
@@ -136,7 +136,7 @@ pub fn filter_project_lsp_when_untrusted(
 /// Load LSP server configs from `~/.dock/lsp.json` and `<cwd>/.dock/lsp.json`.
 /// Project config overrides user config for the same server name.
 pub fn load_servers(cwd: &Path) -> BTreeMap<String, LspServerConfig> {
-    let user_path = crate::config::dock_home().join("lsp.json");
+    let user_path = cordis_base::config::dock_home().join("lsp.json");
     let project_path = cwd.join(".dock").join("lsp.json");
 
     let mut merged = load_file(&user_path);

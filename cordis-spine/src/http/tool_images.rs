@@ -3,7 +3,7 @@
 use base64::Engine;
 use serde_json::{json, Value};
 
-use crate::types::UserImage;
+use cordis_base::types::UserImage;
 
 /// Text-only Chat Completions `role:tool` message (images go on a batched user msg).
 pub(crate) fn chat_tool_message(id: &str, content: &str) -> Value {

@@ -5,15 +5,15 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use indexmap::IndexMap;
 
-use crate::acp;
 use crate::agent_presets::{blocked_tool_message, AgentPresets, MINIMAL_PRESET_ID};
 use crate::names::{AGENT_PRESETS, JOBS, PERMISSIONS, PLAN_MODE, TOOLS, TOOLS_EXECUTE, TURN};
 use crate::permissions::Permissions;
 use crate::plan_mode::PlanMode;
 use crate::runtime::BoxFuture;
 use crate::turn::TurnControl;
-use crate::types::{ToolCall, ToolResult, ToolSpec};
 use crate::workspace;
+use cordis_base::acp;
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 tokio::task_local! {
     static EXEC_CTX: Context;
@@ -412,7 +412,7 @@ pub fn tool_result(call: ToolCall, content: impl Into<String>) -> ToolResult {
 pub fn tool_result_with_images(
     call: ToolCall,
     content: impl Into<String>,
-    images: Vec<crate::types::UserImage>,
+    images: Vec<cordis_base::types::UserImage>,
 ) -> ToolResult {
     ToolResult {
         call_id: call.id,

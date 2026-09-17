@@ -7,9 +7,9 @@ use std::sync::Mutex;
 use cordis::{plugin, Context, Inject, Plugin};
 use tokio::sync::oneshot;
 
-use crate::acp::PermissionOptionKind;
 use crate::names::{PERMISSIONS, PERMISSION_EVENT, SETTINGS};
 use crate::settings::{AppSettings, PermissionMode};
+use cordis_base::acp::PermissionOptionKind;
 
 #[derive(Clone, Debug)]
 pub struct PermissionPrompt {

@@ -79,7 +79,10 @@ pub fn scan_all() -> Vec<SkillInfo> {
     merge_scope(&mut map, scan_dir(&cwd.join("skills"), SkillScope::Bundled));
     merge_scope(
         &mut map,
-        scan_dir(&crate::config::dock_home().join("skills"), SkillScope::User),
+        scan_dir(
+            &cordis_base::config::dock_home().join("skills"),
+            SkillScope::User,
+        ),
     );
     merge_scope(
         &mut map,
@@ -95,7 +98,9 @@ pub fn scan_all() -> Vec<SkillInfo> {
 /// 把编译期嵌入的内置技能物化到 `$DOCK_HOME/bundled/skills/`，返回缓存目录。
 /// 已存在的文件不覆盖（用户可以直接改缓存；同名技能本就被更高层覆盖）。
 fn materialize_bundled() -> PathBuf {
-    let root = crate::config::dock_home().join("bundled").join("skills");
+    let root = cordis_base::config::dock_home()
+        .join("bundled")
+        .join("skills");
     for (rel, content) in crate::skills::builtin::BUILTIN_FILES {
         let path = root.join(rel);
         if path.is_file() {
@@ -526,7 +531,7 @@ mod tests {
     /// 同名、description 非空且不超 1024 字符。
     #[test]
     fn shipped_skills_conform_to_spec() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         for (rel, content) in crate::skills::builtin::BUILTIN_FILES {
             if !rel.ends_with("SKILL.md") {
                 continue;
@@ -634,7 +639,7 @@ mod tests {
 
     #[test]
     fn builtin_materializes_and_yields_lowest_priority() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         let root = materialize_bundled();
         for name in crate::skills::builtin::builtin_skill_dirs() {
             assert!(root.join(name).join("SKILL.md").is_file(), "{name}");
@@ -648,7 +653,9 @@ mod tests {
         let sc = skills.iter().find(|s| s.name == "dock-guide").unwrap();
         assert_eq!(sc.scope, SkillScope::Builtin);
         // 同名用户技能覆盖内置。
-        let user_dir = crate::config::dock_home().join("skills").join("dock-guide");
+        let user_dir = cordis_base::config::dock_home()
+            .join("skills")
+            .join("dock-guide");
         std::fs::create_dir_all(&user_dir).unwrap();
         std::fs::write(
             user_dir.join("SKILL.md"),

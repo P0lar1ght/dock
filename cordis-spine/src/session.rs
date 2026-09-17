@@ -7,9 +7,9 @@ use std::time::{Instant, SystemTime};
 use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::names::{SESSIONS, SESSION_EVENT};
-pub use crate::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
-use crate::types::{LogEvent, COMPACT_NOTICE};
-use crate::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
+pub use cordis_base::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
+use cordis_base::types::{LogEvent, COMPACT_NOTICE};
+use cordis_base::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TokenUsage {
@@ -51,8 +51,8 @@ pub struct Sessions {
     ledger: Arc<Mutex<UsageLedger>>,
     pending_call: Arc<Mutex<Option<PendingCall>>>,
     turn_started: Arc<Mutex<Option<Instant>>>,
-    pending_images: Arc<Mutex<Vec<crate::types::UserImage>>>,
-    user_images: Arc<Mutex<Vec<Vec<crate::types::UserImage>>>>,
+    pending_images: Arc<Mutex<Vec<cordis_base::types::UserImage>>>,
+    user_images: Arc<Mutex<Vec<Vec<cordis_base::types::UserImage>>>>,
     /// Set by [`Self::rewind_inflight_user`] so a dying turn cannot append
     /// onto the previous assistant bubble (Grok cancel-rewind fence).
     rewound: Arc<AtomicBool>,
@@ -84,7 +84,7 @@ pub struct Sessions {
     /// Compacted prefix sent to the sampler. `None` = display log is the model history.
     compact_prefix: Arc<Mutex<Option<Vec<LogEvent>>>>,
     compact_from: Arc<Mutex<usize>>,
-    compact_images: Arc<Mutex<Vec<Vec<crate::types::UserImage>>>>,
+    compact_images: Arc<Mutex<Vec<Vec<cordis_base::types::UserImage>>>>,
 }
 
 /// Official SSE usage held until [`Sessions::finish_llm`] so one sample is
@@ -100,8 +100,8 @@ struct PendingCall {
 /// 这里认的是**发给上游的 slug**（`pending.model`），不是目录 id：两个目录条目
 /// 可以指向同一个上游模型，价是上游模型的属性。找不到 slug 时退回按目录 id 匹配，
 /// 那是 `api_model` 省略时的常态。
-fn estimated_cost_ticks(wire_model: &str, usage: &crate::usage::TokenUsage) -> Option<i64> {
-    let catalog = crate::config::load_catalog();
+fn estimated_cost_ticks(wire_model: &str, usage: &cordis_base::usage::TokenUsage) -> Option<i64> {
+    let catalog = cordis_base::config::load_catalog();
     let pricing = catalog
         .iter()
         .find(|m| m.wire_model() == wire_model)
@@ -302,7 +302,7 @@ impl Sessions {
     pub fn record_side_call(
         &self,
         model: &str,
-        usage: &crate::usage::TokenUsage,
+        usage: &cordis_base::usage::TokenUsage,
         api_duration_ms: Option<u64>,
         reported_cost_ticks: Option<i64>,
     ) {
@@ -314,8 +314,10 @@ impl Sessions {
         } else {
             model
         };
-        let cost =
-            crate::usage::CallCost::pick(reported_cost_ticks, estimated_cost_ticks(model, usage));
+        let cost = cordis_base::usage::CallCost::pick(
+            reported_cost_ticks,
+            estimated_cost_ticks(model, usage),
+        );
         self.ledger
             .lock()
             .unwrap()
@@ -369,11 +371,11 @@ impl Sessions {
         }
     }
 
-    pub fn queue_user_images(&self, images: Vec<crate::types::UserImage>) {
+    pub fn queue_user_images(&self, images: Vec<cordis_base::types::UserImage>) {
         *self.pending_images.lock().unwrap() = images;
     }
 
-    pub fn user_images(&self) -> Vec<Vec<crate::types::UserImage>> {
+    pub fn user_images(&self) -> Vec<Vec<cordis_base::types::UserImage>> {
         self.user_images.lock().unwrap().clone()
     }
 
@@ -406,7 +408,7 @@ impl Sessions {
     }
 
     /// Images aligned with [`Self::model_history`] user rows (not the pager log).
-    pub fn model_user_images(&self) -> Vec<Vec<crate::types::UserImage>> {
+    pub fn model_user_images(&self) -> Vec<Vec<cordis_base::types::UserImage>> {
         let prefix = self.compact_prefix.lock().unwrap();
         let Some(prefix) = prefix.as_ref() else {
             return self.user_images();
@@ -480,15 +482,15 @@ impl Sessions {
         }
         *self.pending_call.lock().unwrap() = None;
         *self.turn_started.lock().unwrap() = Some(Instant::now());
-        self.append(LogEvent::LlmStream(crate::types::LlmOutput::default()));
+        self.append(LogEvent::LlmStream(cordis_base::types::LlmOutput::default()));
     }
 
-    pub fn apply_llm_delta(&self, delta: &crate::stream_acc::StreamDelta) {
+    pub fn apply_llm_delta(&self, delta: &cordis_base::stream_acc::StreamDelta) {
         if self.rewound.load(Ordering::Relaxed) {
             return;
         }
         match delta {
-            crate::stream_acc::StreamDelta::Text(text) => {
+            cordis_base::stream_acc::StreamDelta::Text(text) => {
                 if text.is_empty() {
                     return;
                 }
@@ -508,7 +510,7 @@ impl Sessions {
                 self.bump_events_rev();
                 self.emit_session(event);
             }
-            crate::stream_acc::StreamDelta::Reasoning(text) => {
+            cordis_base::stream_acc::StreamDelta::Reasoning(text) => {
                 if text.is_empty() {
                     return;
                 }
@@ -522,7 +524,7 @@ impl Sessions {
                 self.bump_events_rev();
                 self.emit_session(event);
             }
-            crate::stream_acc::StreamDelta::Usage {
+            cordis_base::stream_acc::StreamDelta::Usage {
                 tokens,
                 official,
                 model,
@@ -547,12 +549,12 @@ impl Sessions {
                         cost_usd_ticks: *cost_usd_ticks,
                     });
                 }
-                self.emit_session(LogEvent::LlmStream(crate::types::LlmOutput::default()));
+                self.emit_session(LogEvent::LlmStream(cordis_base::types::LlmOutput::default()));
             }
         }
     }
 
-    pub fn finish_llm(&self, output: &crate::types::LlmOutput) {
+    pub fn finish_llm(&self, output: &cordis_base::types::LlmOutput) {
         if self.rewound.load(Ordering::Relaxed) {
             return;
         }
@@ -610,7 +612,7 @@ impl Sessions {
             .lock()
             .unwrap()
             .map(|t| t.elapsed().as_millis() as u64);
-        let cost = crate::usage::CallCost::pick(
+        let cost = cordis_base::usage::CallCost::pick(
             pending.cost_usd_ticks,
             estimated_cost_ticks(model, &pending.usage),
         );
@@ -636,7 +638,7 @@ impl Sessions {
 
     /// Drop the in-flight user turn when it has no model/tool output yet.
     /// Returns the restored prompt (Grok cancel-rewind).
-    pub fn rewind_inflight_user(&self) -> Option<(String, Vec<crate::types::UserImage>)> {
+    pub fn rewind_inflight_user(&self) -> Option<(String, Vec<cordis_base::types::UserImage>)> {
         if self.last_turn_has_output() {
             return None;
         }
@@ -682,7 +684,7 @@ impl Sessions {
         Some((text, images))
     }
 
-    pub fn take_pending_images(&self) -> Vec<crate::types::UserImage> {
+    pub fn take_pending_images(&self) -> Vec<cordis_base::types::UserImage> {
         std::mem::take(&mut *self.pending_images.lock().unwrap())
     }
 
@@ -720,7 +722,7 @@ impl Sessions {
     }
 
     /// Drop a trailing empty `begin_llm` slot and insert interrupted
-    /// [`crate::types::INTERRUPTED_TOOL_RESULT`] rows for any assistant
+    /// [`cordis_base::types::INTERRUPTED_TOOL_RESULT`] rows for any assistant
     /// `tool_calls` that never got a matching [`LogEvent::ToolExecute`].
     /// Stubs sit immediately after that assistant (and any results that did
     /// land), before a following user message.
@@ -801,7 +803,7 @@ impl Sessions {
                     id: call.id,
                     name: call.name,
                     arguments: call.arguments,
-                    content: crate::types::INTERRUPTED_TOOL_RESULT.into(),
+                    content: cordis_base::types::INTERRUPTED_TOOL_RESULT.into(),
 
                     images: Vec::new(),
                 },
@@ -870,9 +872,9 @@ impl Sessions {
             Some(LogEvent::LlmStream(out)) if out.text == COMPACT_NOTICE
         );
         if !already {
-            self.append(LogEvent::LlmStream(crate::types::LlmOutput {
+            self.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
                 text: COMPACT_NOTICE.into(),
-                ..crate::types::LlmOutput::default()
+                ..cordis_base::types::LlmOutput::default()
             }));
         }
         let from = self.events.lock().unwrap().len();
@@ -1117,7 +1119,7 @@ pub fn sessions() -> Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::LogEvent;
+    use cordis_base::types::LogEvent;
 
     /// Responses 的 reasoning item 只在流收尾时才有，必须由 `finish_llm` 落进
     /// 会话行；漏了就等于整条推理链没存过，下一轮回放不出来。
@@ -1127,17 +1129,19 @@ mod tests {
         let sessions = Sessions::new(ctx);
         sessions.append(LogEvent::User("go".into()));
         sessions.begin_llm();
-        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Reasoning("plan".into()));
-        sessions.finish_llm(&crate::types::LlmOutput {
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Reasoning(
+            "plan".into(),
+        ));
+        sessions.finish_llm(&cordis_base::types::LlmOutput {
             text: "answer".into(),
             reasoning: "plan".into(),
-            tool_calls: vec![crate::types::ToolCall {
+            tool_calls: vec![cordis_base::types::ToolCall {
                 id: "c1".into(),
                 name: "bash".into(),
                 arguments: "{}".into(),
             }],
             reasoning_items: vec![serde_json::json!({"type":"reasoning","id":"rs_1"})],
-            ..crate::types::LlmOutput::default()
+            ..cordis_base::types::LlmOutput::default()
         });
         let out = sessions
             .model_history()
@@ -1233,11 +1237,11 @@ mod tests {
         let ctx = Context::new();
         let sessions = Sessions::new(ctx);
         sessions.begin_llm();
-        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Text("Hel".into()));
-        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Text("lo".into()));
-        sessions.finish_llm(&crate::types::LlmOutput {
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Text("Hel".into()));
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Text("lo".into()));
+        sessions.finish_llm(&cordis_base::types::LlmOutput {
             text: "Hello".into(),
-            ..crate::types::LlmOutput::default()
+            ..cordis_base::types::LlmOutput::default()
         });
         assert_eq!(sessions.events().len(), 1);
         match &sessions.events()[0] {
@@ -1250,30 +1254,30 @@ mod tests {
     async fn official_usage_accumulates_on_the_ledger() {
         let ctx = Context::new();
         let sessions = Sessions::new(ctx);
-        let mut tokens = crate::usage::TokenUsage {
+        let mut tokens = cordis_base::usage::TokenUsage {
             prompt_tokens: 100,
             completion_tokens: 10,
             cached_prompt_tokens: 40,
             reasoning_tokens: 3,
-            ..crate::usage::TokenUsage::default()
+            ..cordis_base::usage::TokenUsage::default()
         };
         sessions.begin_llm();
-        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
-            tokens: crate::usage::TokenUsage {
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Usage {
+            tokens: cordis_base::usage::TokenUsage {
                 prompt_tokens: 80,
-                ..crate::usage::TokenUsage::default()
+                ..cordis_base::usage::TokenUsage::default()
             },
             official: false,
             model: String::new(),
             cost_usd_ticks: None,
         });
-        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Usage {
             tokens: tokens.clone(),
             official: true,
             model: "grok-4".into(),
             cost_usd_ticks: Some(70),
         });
-        sessions.finish_llm(&crate::types::LlmOutput::default());
+        sessions.finish_llm(&cordis_base::types::LlmOutput::default());
         assert_eq!(sessions.ledger().totals.model_calls, 1);
         assert_eq!(sessions.ledger().totals.input_tokens, 100);
         assert_eq!(sessions.ledger().totals.cached_read_tokens, 40);
@@ -1286,13 +1290,13 @@ mod tests {
         tokens.cached_prompt_tokens = 10;
         tokens.reasoning_tokens = 1;
         sessions.begin_llm();
-        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Usage {
             tokens,
             official: true,
             model: "grok-4".into(),
             cost_usd_ticks: None,
         });
-        sessions.finish_llm(&crate::types::LlmOutput::default());
+        sessions.finish_llm(&cordis_base::types::LlmOutput::default());
         let u = sessions.prompt_usage();
         assert_eq!(u.totals.input_tokens, 150);
         assert_eq!(u.totals.output_tokens, 15);
@@ -1311,16 +1315,16 @@ mod tests {
         let ctx = Context::new();
         let sessions = Sessions::new(ctx);
         sessions.begin_llm();
-        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
-            tokens: crate::usage::TokenUsage {
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Usage {
+            tokens: cordis_base::usage::TokenUsage {
                 prompt_tokens: 12,
-                ..crate::usage::TokenUsage::default()
+                ..cordis_base::usage::TokenUsage::default()
             },
             official: false,
             model: String::new(),
             cost_usd_ticks: None,
         });
-        sessions.finish_llm(&crate::types::LlmOutput::default());
+        sessions.finish_llm(&cordis_base::types::LlmOutput::default());
         assert_eq!(sessions.ledger().totals.model_calls, 0);
         assert_eq!(sessions.usage().prompt, 12);
         assert!(!sessions.usage().official);
@@ -1332,17 +1336,17 @@ mod tests {
         let parent = Sessions::new(ctx.clone());
         let child = Sessions::isolated(ctx);
         child.begin_llm();
-        child.apply_llm_delta(&crate::stream_acc::StreamDelta::Usage {
-            tokens: crate::usage::TokenUsage {
+        child.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Usage {
+            tokens: cordis_base::usage::TokenUsage {
                 prompt_tokens: 5,
                 completion_tokens: 1,
-                ..crate::usage::TokenUsage::default()
+                ..cordis_base::usage::TokenUsage::default()
             },
             official: true,
             model: "child-model".into(),
             cost_usd_ticks: None,
         });
-        child.finish_llm(&crate::types::LlmOutput::default());
+        child.finish_llm(&cordis_base::types::LlmOutput::default());
         parent.fold_subagent_ledger(&child.ledger());
         assert_eq!(parent.ledger().main_loop_model_calls, 0);
         assert_eq!(parent.ledger().totals.model_calls, 1);
@@ -1355,9 +1359,9 @@ mod tests {
         let ctx = Context::new();
         let sessions = Sessions::new(ctx);
         sessions.append(LogEvent::User("keep".into()));
-        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
             text: "reply".into(),
-            ..crate::types::LlmOutput::default()
+            ..cordis_base::types::LlmOutput::default()
         }));
         sessions.append(LogEvent::User("undo me".into()));
         sessions.append(LogEvent::PreStep);
@@ -1380,7 +1384,7 @@ mod tests {
         let sessions = Sessions::new(ctx);
         sessions.append(LogEvent::User("keep me".into()));
         sessions.begin_llm();
-        sessions.apply_llm_delta(&crate::stream_acc::StreamDelta::Text("Hi".into()));
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Text("Hi".into()));
         assert!(sessions.last_turn_has_output());
         assert!(sessions.rewind_inflight_user().is_none());
         assert_eq!(sessions.events().len(), 2);
@@ -1391,20 +1395,20 @@ mod tests {
         let ctx = Context::new();
         let sessions = Sessions::new(ctx);
         sessions.append(LogEvent::User("hi".into()));
-        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
             tool_calls: vec![
-                crate::types::ToolCall {
+                cordis_base::types::ToolCall {
                     id: "c1".into(),
                     name: "bash".into(),
                     arguments: "{}".into(),
                 },
-                crate::types::ToolCall {
+                cordis_base::types::ToolCall {
                     id: "c2".into(),
                     name: "read".into(),
                     arguments: "{}".into(),
                 },
             ],
-            ..crate::types::LlmOutput::default()
+            ..cordis_base::types::LlmOutput::default()
         }));
         sessions.append(LogEvent::ToolExecute {
             id: "c1".into(),
@@ -1427,7 +1431,7 @@ mod tests {
         match &events[3] {
             LogEvent::ToolExecute { id, content, .. } => {
                 assert_eq!(id, "c2");
-                assert_eq!(content, crate::types::INTERRUPTED_TOOL_RESULT);
+                assert_eq!(content, cordis_base::types::INTERRUPTED_TOOL_RESULT);
             }
             other => panic!("{other:?}"),
         }
@@ -1464,9 +1468,9 @@ mod tests {
         let prefix = vec![
             LogEvent::User("first".into()),
             LogEvent::SystemReminder("summary of earlier turns".into()),
-            LogEvent::LlmStream(crate::types::LlmOutput {
-                text: crate::types::COMPACT_NOTICE.into(),
-                ..crate::types::LlmOutput::default()
+            LogEvent::LlmStream(cordis_base::types::LlmOutput {
+                text: cordis_base::types::COMPACT_NOTICE.into(),
+                ..cordis_base::types::LlmOutput::default()
             }),
         ];
         sessions.replace_compacted(prefix);
@@ -1480,7 +1484,7 @@ mod tests {
         );
         assert!(display.iter().any(|e| matches!(
             e,
-            LogEvent::LlmStream(o) if o.text == crate::types::COMPACT_NOTICE
+            LogEvent::LlmStream(o) if o.text == cordis_base::types::COMPACT_NOTICE
         )));
         let model = sessions.model_history();
         assert!(!model.iter().any(|e| matches!(

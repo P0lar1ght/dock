@@ -12,9 +12,9 @@ use serde_json::json;
 
 use super::registry::{Package, PersistScope, PluginOrigin};
 use super::{DefineReceipt, DefineTarget, DynamicRunner, RunMode};
-use crate::config::dock_home;
 use crate::dynamic_runner::factories::RHAI_FACTORY;
 use crate::slash::{slash_entry_from_define, SlashEntry};
+use cordis_base::config::dock_home;
 
 /// Session id of autoloaded disk plugins. Visible to every chat session.
 pub const PERSIST_SESSION: &str = "*";

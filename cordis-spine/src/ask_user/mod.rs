@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 
 use crate::names::{ASK, ASK_EVENT, TOOLS};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use questions::{AskUserQuestionInput, Question, QuestionOption};
 pub use types::QuestionAnnotation;

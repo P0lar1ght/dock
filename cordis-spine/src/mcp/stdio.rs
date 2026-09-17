@@ -20,13 +20,13 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
 use tokio::sync::{oneshot, watch};
 
-use crate::config::{McpServer, McpStdioFraming, McpTransport};
 use crate::mcp::protocol::{
     self, client_capabilities, client_info, discover_versions, pick_version, raw_tool_name,
     with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
 use crate::tools::{tool_result, tool_result_with_images};
-use crate::types::ToolCall;
+use cordis_base::config::{McpServer, McpStdioFraming, McpTransport};
+use cordis_base::types::ToolCall;
 
 use super::incoming::{self, LiveHooks};
 use super::tools_list;

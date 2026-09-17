@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::dock_home;
 use crate::session::ArchivedSession;
-use crate::types::{LlmOutput, LogEvent, ToolCall};
+use cordis_base::config::dock_home;
+use cordis_base::types::{LlmOutput, LogEvent, ToolCall};
 
 const HISTORY: &str = "chat_history.jsonl";
 const META: &str = "meta.json";
@@ -465,7 +465,7 @@ fn tool_image_blob_dir() -> PathBuf {
 
 /// Write in-memory tool images to `$DOCK_HOME/tool-images/<call>-N.ext` and
 /// return those paths for the JSONL wire. Skips when empty.
-fn persist_tool_images(call_id: &str, images: &[crate::types::UserImage]) -> Vec<String> {
+fn persist_tool_images(call_id: &str, images: &[cordis_base::types::UserImage]) -> Vec<String> {
     if images.is_empty() {
         return Vec::new();
     }
@@ -499,7 +499,7 @@ fn persist_tool_images(call_id: &str, images: &[crate::types::UserImage]) -> Vec
 
 /// Only reload images whose paths resolve under `$DOCK_HOME/tool-images/`.
 /// Out-of-bounds / missing paths are skipped (fail-open).
-fn load_tool_images(paths: &[String]) -> Vec<crate::types::UserImage> {
+fn load_tool_images(paths: &[String]) -> Vec<cordis_base::types::UserImage> {
     let root = tool_image_blob_dir();
     let root_canon = root.canonicalize().unwrap_or(root);
     paths
@@ -625,7 +625,7 @@ pub fn empty_llm_placeholder(events: &[LogEvent]) -> bool {
 mod tests {
     use super::*;
     use crate::session::ArchivedSession;
-    use crate::types::LogEvent;
+    use cordis_base::types::LogEvent;
 
     #[test]
     fn encode_collapses_path_separators() {
@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn roundtrip_user_and_tool() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let cwd = Path::new("/tmp/dock-persist-test");
         let item = ArchivedSession {
             id: "abc123".into(),
@@ -671,7 +671,7 @@ mod tests {
     /// 旧文件没有这个字段也得照常读。
     #[test]
     fn roundtrip_llm_error_and_reads_old_rows() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let cwd = Path::new("/tmp/dock-persist-llm-error-test");
         let detail = "[连接失败] error sending request ← connection reset by peer";
         let item = ArchivedSession {
@@ -700,7 +700,7 @@ mod tests {
     /// Responses 的推理链要跨会话活下来；旧文件没有这个字段也得读得出来。
     #[test]
     fn roundtrip_reasoning_items_and_reads_old_rows() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let cwd = Path::new("/tmp/dock-persist-reasoning-test");
         let item = ArchivedSession {
             id: "rs1".into(),
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn roundtrip_tool_images_bytes() {
         use crate::tool_images::user_image_from_bytes;
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let cwd = Path::new("/tmp/dock-persist-image-test");
         let png = vec![
             0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
@@ -766,7 +766,7 @@ mod tests {
         };
         save(&item, cwd).unwrap();
         // image_paths should land under DOCK_HOME/tool-images/
-        let blob_dir = crate::config::dock_home().join("tool-images");
+        let blob_dir = cordis_base::config::dock_home().join("tool-images");
         assert!(blob_dir.is_dir(), "{blob_dir:?}");
         let loaded = load_cwd(cwd);
         assert_eq!(loaded.len(), 1);
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn load_tool_images_skips_out_of_bounds_paths() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let outside = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(outside.path(), b"not an image under tool-images").unwrap();
         let loaded = load_tool_images(&[outside.path().display().to_string()]);
@@ -796,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_disk_reloads_archived_session() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let sessions = crate::session::Sessions::new(cordis::Context::new());
         sessions.attach_disk();
         sessions.append(LogEvent::User("disk hello".into()));
@@ -830,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_drops_live_folder_so_attach_disk_does_not_resurrect() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let sessions = reload();
         sessions.append(LogEvent::User("gone after clear".into()));
         sessions.clear();
@@ -848,12 +848,12 @@ mod tests {
 
     #[tokio::test]
     async fn rewind_persists_truncated_log() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let sessions = reload();
         sessions.append(LogEvent::User("keep".into()));
-        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
             text: "reply".into(),
-            ..crate::types::LlmOutput::default()
+            ..cordis_base::types::LlmOutput::default()
         }));
         sessions.append(LogEvent::User("undo me".into()));
         sessions.begin_llm();
@@ -875,16 +875,16 @@ mod tests {
 
     #[tokio::test]
     async fn seal_persists_interrupted_tool_stub() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let sessions = reload();
         sessions.append(LogEvent::User("hi".into()));
-        sessions.append(LogEvent::LlmStream(crate::types::LlmOutput {
-            tool_calls: vec![crate::types::ToolCall {
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            tool_calls: vec![cordis_base::types::ToolCall {
                 id: "c1".into(),
                 name: "bash".into(),
                 arguments: "{}".into(),
             }],
-            ..crate::types::LlmOutput::default()
+            ..cordis_base::types::LlmOutput::default()
         }));
         sessions.seal_incomplete_tool_calls();
         let again = reload();
@@ -894,7 +894,7 @@ mod tests {
             again.events().iter().any(|e| matches!(
                 e,
                 LogEvent::ToolExecute { content, .. }
-                    if content == crate::types::INTERRUPTED_TOOL_RESULT
+                    if content == cordis_base::types::INTERRUPTED_TOOL_RESULT
             )),
             "{:?}",
             again.events()
@@ -903,7 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_keeps_transcript_and_restores_model_prefix() {
-        let _home = crate::test_env::scoped().home();
+        let _home = cordis_base::test_env::scoped().home();
         let sessions = reload();
         sessions.append(LogEvent::User("keep visible".into()));
         sessions.append(LogEvent::ToolExecute {
@@ -917,9 +917,9 @@ mod tests {
         sessions.replace_compacted(vec![
             LogEvent::User("keep visible".into()),
             LogEvent::SystemReminder("compacted earlier turns".into()),
-            LogEvent::LlmStream(crate::types::LlmOutput {
-                text: crate::types::COMPACT_NOTICE.into(),
-                ..crate::types::LlmOutput::default()
+            LogEvent::LlmStream(cordis_base::types::LlmOutput {
+                text: cordis_base::types::COMPACT_NOTICE.into(),
+                ..cordis_base::types::LlmOutput::default()
             }),
         ]);
         let id = sessions

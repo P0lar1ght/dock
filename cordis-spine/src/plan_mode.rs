@@ -16,7 +16,7 @@ use tokio::sync::oneshot;
 use crate::names::{PLAN_EVENT, PLAN_MODE, PRE_STEP, SESSIONS, TOOLS};
 use crate::session::Sessions;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 pub const PLAN_REL: &str = ".dock/plan.md";
 

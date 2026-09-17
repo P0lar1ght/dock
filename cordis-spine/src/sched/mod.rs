@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::cron::{Cron, CronError, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS};
 use crate::names::{CRON, TOOLS};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use interval::{interval_to_human, parse_interval};
 pub use loop_cmd::{
@@ -249,7 +249,7 @@ fn delete_job(ctx: &Context, call: ToolCall) -> ToolResult {
 mod tests {
     use super::*;
     use crate::names::CRON;
-    use crate::types::ToolCall;
+    use cordis_base::types::ToolCall;
 
     fn ctx_with_cron() -> Context {
         let root = Context::new();

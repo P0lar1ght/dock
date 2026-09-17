@@ -34,7 +34,7 @@ struct Memo {
 pub struct Roster {
     memo: Mutex<Option<Memo>>,
     /// 最近读过的那一份 transcript（id → events）。见 [`Roster::transcript`]。
-    transcript_memo: Mutex<Option<(String, Vec<crate::types::LogEvent>)>>,
+    transcript_memo: Mutex<Option<(String, Vec<cordis_base::types::LogEvent>)>>,
 }
 
 impl Default for Roster {
@@ -79,7 +79,7 @@ impl Roster {
     /// 都命中缓存；上下换选中项才重读一次，那是人手速度，一次文件读扛得住。
     /// 缓存不设 TTL——历史会话的 transcript 不会再变（还在写的那个是活的分页，
     /// 走的是内存里的 `Sessions`，不到这里来）。
-    pub fn transcript(&self, id: &str, cwd: &std::path::Path) -> Vec<crate::types::LogEvent> {
+    pub fn transcript(&self, id: &str, cwd: &std::path::Path) -> Vec<cordis_base::types::LogEvent> {
         {
             let cached = self.transcript_memo.lock().unwrap();
             if let Some((cached_id, events)) = cached.as_ref() {
@@ -117,7 +117,7 @@ pub fn roster() -> Plugin {
 mod tests {
     use super::*;
     use crate::session::ArchivedSession;
-    use crate::types::LogEvent;
+    use cordis_base::types::LogEvent;
     use std::path::Path;
     use std::time::SystemTime;
 
@@ -137,7 +137,7 @@ mod tests {
     /// `load_cwd` 只看当前目录那一个，这正是名册存在的理由。
     #[test]
     fn roster_spans_every_cwd() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         session_persist::save(
             &archive("aaa", "第一个", vec![LogEvent::User("你好".into())]),
             Path::new("/tmp/project-one"),
@@ -167,7 +167,7 @@ mod tests {
     /// `-` 再折叠，从目录名反解不回来。这条用一个会被压缩的路径钉住。
     #[test]
     fn cwd_survives_the_lossy_directory_key() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         let cwd = Path::new("/tmp/a--b/c d/é");
         session_persist::save(
             &archive("ccc", "标题", vec![LogEvent::User("x".into())]),
@@ -183,7 +183,7 @@ mod tests {
     /// 摘要取**末条**事件，且压成一行——名册每条只占一行，换行会撑破它。
     #[test]
     fn summary_is_the_last_event_on_one_line() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         session_persist::save(
             &archive(
                 "ddd",
@@ -208,7 +208,7 @@ mod tests {
     /// 时间戳会撞在一起，靠 sleep 排既慢又不稳。直接把 meta 重写成指定时间。
     #[test]
     fn newest_first() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         let cwd = Path::new("/tmp/order-probe");
         for (id, updated) in [("old", 1_000u64), ("new", 3_000), ("mid", 2_000)] {
             session_persist::save(&archive(id, id, vec![LogEvent::User(id.into())]), cwd).unwrap();
@@ -233,7 +233,7 @@ mod tests {
     /// 几条用的都是小文件，`seek` 到 0，根本走不到。
     #[test]
     fn summary_reads_the_tail_of_a_large_transcript() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         let filler = "x".repeat(4_000);
         let mut events: Vec<LogEvent> = (0..40)
             .map(|i| LogEvent::User(format!("{i}-{filler}")))
@@ -259,7 +259,7 @@ mod tests {
     /// 面板 peek 每帧都问，不缓存就是每帧一次文件读加一次整份反序列化。
     #[test]
     fn transcript_loads_one_session_and_caches_it() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         let cwd = Path::new("/tmp/peek-probe");
         session_persist::save(
             &archive(
@@ -301,7 +301,7 @@ mod tests {
     /// 读不到的 id 给空，不 panic（会话可能刚被别的进程删掉）。
     #[test]
     fn a_missing_transcript_is_empty_not_a_panic() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         assert!(Roster::new()
             .transcript("nope", Path::new("/tmp/nowhere"))
             .is_empty());
@@ -311,8 +311,8 @@ mod tests {
     /// 会是写了一半或被手动动过的残留，列出来只是噪音。
     #[test]
     fn a_directory_without_a_transcript_is_not_a_session() {
-        let _env = crate::test_env::scoped().home();
-        let stray = crate::config::dock_home()
+        let _env = cordis_base::test_env::scoped().home();
+        let stray = cordis_base::config::dock_home()
             .join("sessions")
             .join("hand-made")
             .join("no-history");
@@ -334,7 +334,7 @@ mod tests {
     /// TTL 内不重扫：列表视图每帧都会问，不挡住就是每秒几千次 read_dir。
     #[test]
     fn list_is_memoized_within_the_ttl() {
-        let _env = crate::test_env::scoped().home();
+        let _env = cordis_base::test_env::scoped().home();
         let roster = Roster::new();
         assert!(roster.list().is_empty());
 

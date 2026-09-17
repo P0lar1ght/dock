@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::config::dock_home;
+use cordis_base::config::dock_home;
 
 const CREDENTIALS_FILENAME: &str = "mcp_credentials.json";
 

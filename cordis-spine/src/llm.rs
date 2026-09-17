@@ -6,8 +6,8 @@ use crate::http::HttpSampler;
 use crate::names::{LLM, LLM_STREAM, SESSIONS};
 use crate::runtime::BoxFuture;
 use crate::session::Sessions;
-use crate::stream_acc::StreamDelta;
-use crate::types::{LlmOutput, LogEvent, PromptRequest, ToolCall};
+use cordis_base::stream_acc::StreamDelta;
+use cordis_base::types::{LlmOutput, LogEvent, PromptRequest, ToolCall};
 
 /// Echo: always `echo`. Workspace: `list_dir` / `read_file`. Text: no tools.
 /// Http: 走 `api_backends` 声明的某条 wire（responses / chat/completions /
@@ -42,8 +42,8 @@ impl LlmConfig {
         let model = std::env::var("DOCK_MODEL")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .or_else(crate::config::load_default_model);
-        if api_key.is_some() || crate::config::catalog_has_http() {
+            .or_else(cordis_base::config::load_default_model);
+        if api_key.is_some() || cordis_base::config::catalog_has_http() {
             Self {
                 mode: LlmMode::Http,
                 api_key,

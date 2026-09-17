@@ -4,12 +4,12 @@
 //! + `build_compacted_history`, mapped onto Dock `LogEvent` (no `ConversationItem`).
 
 use super::summary::{format_compact_summary_content, wrap_user_query};
-use crate::types::{LlmOutput, LogEvent};
+use cordis_base::types::{LlmOutput, LogEvent};
 
 /// TUI hides [`LogEvent::SystemReminder`]; this assistant bubble is the
 /// visible compact notice (also appended to the display log). Dock-only
 /// (Grok paints via ACP notifications).
-pub const VISIBLE_NOTICE: &str = crate::types::COMPACT_NOTICE;
+pub const VISIBLE_NOTICE: &str = cordis_base::types::COMPACT_NOTICE;
 
 /// Grok `strip_tool_messages_for_conversation_item` + drop images/reasoning:
 /// drop tool results, flatten assistant `tool_calls` into `[Called tools: …]`.
@@ -165,7 +165,7 @@ fn estimate_text(text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ToolCall;
+    use cordis_base::types::ToolCall;
 
     fn sample_history() -> Vec<LogEvent> {
         vec![

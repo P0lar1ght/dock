@@ -18,7 +18,7 @@ use crate::prompt::ORDER_CORDIS;
 use crate::session::Sessions;
 use crate::slash::{contrib_fields_present, slash_entry_from_define};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 use inspect::{render_inspect, render_inspect_self};
 use prompt::CORDIS_SYSTEM_PROMPT;

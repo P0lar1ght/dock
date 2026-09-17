@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::types::UserImage;
+use cordis_base::types::UserImage;
 
 /// Cap images attached to one tool result (Grok `MAX_IMAGES`).
 pub const MAX_TOOL_IMAGES: usize = 5;
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn tool_result_images_round_trip() {
         use crate::tools::tool_result_with_images;
-        use crate::types::ToolCall;
+        use cordis_base::types::ToolCall;
         let img = user_image_from_bytes(tiny_png(), Some("image/png")).unwrap();
         let call = ToolCall {
             id: "c1".into(),

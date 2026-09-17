@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 use url::Url;
 
-use crate::config::McpServer;
+use cordis_base::config::McpServer;
 
 use super::credentials::{self, McpCredentialStore, StoredCredentials, TokenResponse};
 
@@ -148,7 +148,7 @@ pub async fn browser_login(server: &McpServer) -> Result<(), String> {
 
 async fn browser_login_inner(server: &McpServer) -> Result<(), String> {
     let url = match &server.transport {
-        crate::config::McpTransport::Http { url, .. } => url.clone(),
+        cordis_base::config::McpTransport::Http { url, .. } => url.clone(),
         _ => return Err("OAuth 只适用于 HTTP MCP 服务器".into()),
     };
     let resource = url.clone();
@@ -238,7 +238,7 @@ async fn browser_login_inner(server: &McpServer) -> Result<(), String> {
 
 pub async fn refresh_stored(server: &McpServer) -> Result<String, String> {
     let url = match &server.transport {
-        crate::config::McpTransport::Http { url, .. } => url.clone(),
+        cordis_base::config::McpTransport::Http { url, .. } => url.clone(),
         _ => return Err("not HTTP".into()),
     };
     let parsed = Url::parse(&url).map_err(|e| e.to_string())?;

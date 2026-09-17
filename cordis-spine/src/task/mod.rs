@@ -30,7 +30,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::names::{SUBAGENTS, TOOLS};
 use crate::session::ROOT_IDENTITY;
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::ToolCall;
+use cordis_base::types::ToolCall;
 
 use admission::SubagentLimits;
 use backend::{ChannelBackend, SubagentBackend};
@@ -122,7 +122,7 @@ impl Subagents {
     }
 
     /// Child conversation log. Live while the isolate is up; snapshot after.
-    pub fn events(&self, id: &str) -> Vec<crate::types::LogEvent> {
+    pub fn events(&self, id: &str) -> Vec<cordis_base::types::LogEvent> {
         self.store.events(id)
     }
 

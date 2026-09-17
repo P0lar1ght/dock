@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 use crate::session::Sessions;
 use crate::turn::TurnControl;
-use crate::types::LogEvent;
+use cordis_base::types::LogEvent;
 
 use super::types::SubagentOwner;
 use super::{SubagentLife, SubagentSnap};

@@ -12,7 +12,7 @@ use crate::names::{RHAI_BAGS, SESSION_EVENT, SLASH, STEP_START, TOOLS, TUI_SLOTS
 use crate::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
 use crate::tui_slots::{SlotHandler, SlotKeyResult, TuiSlots};
-use crate::types::{
+use cordis_base::types::{
     LogEvent, StepStart, ToolCall, ToolSpec, TurnEnd, ORDER_STEP_START_DYNAMIC,
     ORDER_TURN_END_DYNAMIC,
 };

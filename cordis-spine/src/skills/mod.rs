@@ -18,7 +18,7 @@ use crate::session::Sessions;
 use crate::settings::AppSettings;
 use crate::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
 use crate::tools::{own_registered, tool_result, ToolBody, Tools};
-use crate::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 pub use discover::{apply_substitutions, extract_skill_body, SkillInfo, SkillScope};
 pub use listing::{listable, listing_budget_chars, overlay_body, render_listing};
@@ -568,7 +568,7 @@ mod tests {
     use super::*;
     use crate::context_usage::{occupancy_detail, snapshot_context, OccupancyKind};
     use crate::prompt::{SystemPrompt, ORDER_SKILLS};
-    use crate::types::PreStep;
+    use cordis_base::types::PreStep;
 
     fn write_skill(root: &std::path::Path, name: &str, body: &str) {
         let skill_dir = root.join("skills").join(name);
@@ -604,7 +604,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Demo skill for inject tests.\n---\n\nDo the demo with $ARGUMENTS.\n",
         );
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let skills = ctx.get::<Skills>(SKILLS).unwrap();
@@ -634,7 +634,7 @@ mod tests {
             "help",
             "---\nname: help\ndescription: Must not shadow /help.\n---\n\nNope.\n",
         );
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let extras = ctx.get::<Slash>(SLASH).unwrap().list();
@@ -653,7 +653,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Demo skill for listing occupancy.\n---\n\nBody.\n",
         );
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let assembled = ctx
@@ -697,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn occupancy_lists_skills_category_even_without_project_skills() {
         let dir = tempfile::tempdir().unwrap();
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let snap = snapshot_context(&ctx);
@@ -731,12 +731,12 @@ mod tests {
             "hidden-one",
             "---\nname: hidden-one\ndescription: User slash only.\ndisable-model-invocation: true\n---\n\nSecret.\n",
         );
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let tools = ctx.require::<Tools>(TOOLS).unwrap();
         let out = tools
-            .execute(crate::types::ToolCall {
+            .execute(cordis_base::types::ToolCall {
                 id: "s1".into(),
                 name: "skill".into(),
                 arguments: r#"{"name":"demo-skill","args":"zz"}"#.into(),
@@ -750,7 +750,7 @@ mod tests {
         assert!(out.content.contains("Loaded zz."), "{}", out.content);
         assert!(out.content.contains("notes.md"), "{}", out.content);
         let hidden = tools
-            .execute(crate::types::ToolCall {
+            .execute(cordis_base::types::ToolCall {
                 id: "s2".into(),
                 name: "skill".into(),
                 arguments: r#"{"name":"hidden-one"}"#.into(),
@@ -771,7 +771,7 @@ mod tests {
             "demo-skill",
             "---\nname: demo-skill\ndescription: Already known.\n---\n\nOld.\n",
         );
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let late = dir.path().join(".dock").join("skills").join("late-skill");
@@ -813,7 +813,7 @@ mod tests {
             "gated-one",
             "---\nname: gated-one\ndescription: Only for Cargo manifests.\npaths:\n  - \"**/Cargo.toml\"\n---\n\nCargo rules $ARGUMENTS.\n",
         );
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         // 激活前：不进 listing，skill 工具拒绝加载。
@@ -821,7 +821,7 @@ mod tests {
         assert!(!listing.contains("gated-one"), "{listing}");
         let tools = ctx.require::<Tools>(TOOLS).unwrap();
         let blocked = tools
-            .execute(crate::types::ToolCall {
+            .execute(cordis_base::types::ToolCall {
                 id: "g1".into(),
                 name: "skill".into(),
                 arguments: r#"{"name":"gated-one"}"#.into(),
@@ -848,7 +848,7 @@ mod tests {
             "{events:?}"
         );
         let ok = tools
-            .execute(crate::types::ToolCall {
+            .execute(cordis_base::types::ToolCall {
                 id: "g3".into(),
                 name: "skill".into(),
                 arguments: r#"{"name":"gated-one","args":"now"}"#.into(),
@@ -861,7 +861,7 @@ mod tests {
     async fn builtin_skill_is_listed_and_loadable() {
         let dir = tempfile::tempdir().unwrap();
         // 一次 scoped() 只持一把进程锁：home + cwd 必须链在同一 guard 上。
-        let _env = crate::test_env::scoped().home().cwd(dir.path());
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
         let ctx = cordis::Context::new();
         mount_skills(&ctx).await;
         let skills = ctx.get::<Skills>(SKILLS).unwrap();
@@ -871,7 +871,7 @@ mod tests {
         assert!(listing.contains("dock-guide"), "{listing}");
         let tools = ctx.require::<Tools>(TOOLS).unwrap();
         let out = tools
-            .execute(crate::types::ToolCall {
+            .execute(cordis_base::types::ToolCall {
                 id: "b1".into(),
                 name: "skill".into(),
                 arguments: r#"{"name":"dock-guide"}"#.into(),

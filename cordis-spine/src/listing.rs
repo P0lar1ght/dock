@@ -178,7 +178,7 @@ mod tests {
         });
         tools
             .register(
-                crate::types::ToolSpec {
+                cordis_base::types::ToolSpec {
                     name: name.into(),
                     description: format!("{name} loader"),
                     parameters_json: r#"{"type":"object"}"#.into(),

@@ -136,7 +136,7 @@ async fn bootstrap_lsp(
         mgr.ensure_initialized().await;
         if mgr.clients.is_empty() {
             if mgr.servers.is_empty() {
-                let user = crate::config::dock_home().join("lsp.json");
+                let user = cordis_base::config::dock_home().join("lsp.json");
                 let project = mgr.workspace_root.join(".dock").join("lsp.json");
                 return Err(format!(
                     "No LSP servers configured. Add {user} or {project} \
