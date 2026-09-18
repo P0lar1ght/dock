@@ -97,9 +97,8 @@ fn class_of(tool: &str) -> Class {
 
         "search_replace" | "write_file" | "memory_write" => Class::Edit,
 
-        "bash" | "monitor" | "task" | "send_message" | "interrupt_agent" | "get_task_output"
-        | "wait_tasks" | "kill_task" | "workflow" | "scheduler_create" | "scheduler_delete"
-        | "scheduler_list" => Class::Execute,
+        "bash" | "monitor" | "task" | "send_message" | "interrupt_agent" | "job" | "kill_task"
+        | "workflow" | "scheduler_create" | "scheduler_delete" | "scheduler_list" => Class::Execute,
 
         "use_tool" => Class::Dispatch,
 

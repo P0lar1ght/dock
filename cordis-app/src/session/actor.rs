@@ -606,7 +606,7 @@ mod tests {
     }
 
     /// A background subagent's finished turn reaches the model through the
-    /// actor's own mailbox wake — no `get_task_output` polling anywhere in
+    /// actor's own mailbox wake — no `job` polling anywhere in
     /// this test.
     #[tokio::test(flavor = "multi_thread")]
     async fn background_subagent_turn_end_wakes_the_actor() {

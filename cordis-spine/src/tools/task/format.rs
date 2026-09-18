@@ -8,8 +8,8 @@ pub struct BackgroundNoticeNaming<'a> {
 
 impl BackgroundNoticeNaming<'static> {
     pub const CANONICAL: Self = Self {
-        task_output_tool: "get_task_output",
-        task_ids_param: "task_ids",
+        task_output_tool: "job",
+        task_ids_param: "job_ids",
         timeout_ms_param: "timeout_ms",
     };
 }

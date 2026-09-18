@@ -13,8 +13,7 @@ tools:
   - glob
   - bash
   - write_file
-  - get_task_output
-  - wait_tasks
+  - job
   - kill_task
   - monitor
   - todo_write

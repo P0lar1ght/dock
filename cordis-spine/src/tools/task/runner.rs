@@ -383,7 +383,7 @@ async fn drive_child(
         };
         // One parent notice per finished turn. The child's text rides it when
         // it did not call `report`; a caller that already has the result
-        // (foreground spawn, `get_task_output` poll) drops the notice again.
+        // (foreground spawn, `job` poll) drops the notice again.
         let reported = store
             .get(&id)
             .is_some_and(|s| s.reported_this_turn.load(Ordering::Relaxed));

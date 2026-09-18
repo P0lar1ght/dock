@@ -465,7 +465,7 @@ impl ChildStore {
     }
 
     /// Drop the queued turn-end notice for `id`: the caller already has the
-    /// result (inline foreground spawn, or a `get_task_output` poll).
+    /// result (inline foreground spawn, or a `job` poll).
     pub fn consume_completion(&self, id: &str) {
         self.inbox
             .lock()
@@ -479,7 +479,7 @@ impl ChildStore {
     }
 
     /// Dispose children that have been idle and unaddressed for longer than
-    /// `ttl`. Their slot and transcript survive, so `get_task_output` and
+    /// `ttl`. Their slot and transcript survive, so `job` and
     /// `resume_from` keep working.
     pub fn sweep_idle(&self, ttl: Duration) -> Vec<String> {
         let mut swept = Vec::new();

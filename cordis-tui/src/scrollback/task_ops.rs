@@ -1,5 +1,4 @@
-//! Task-family control-op cards — `get_task_output` / `wait_tasks` /
-//! `kill_task` / `interrupt_agent` / `send_message` / `list_agents` /
+//! Task-family control-op cards — `job` / `kill_task` / `interrupt_agent` / `send_message` / `list_agents` /
 //! `report`.
 //! The spawn call (`task`) has its own card in [`super::subagent`]; the
 //! `skill` card lives in [`super::skill`]. These render the follow-up ops:
@@ -19,13 +18,7 @@ use cordis_spine::{JobSnapshot, SubagentSnap};
 pub fn is_task_op(name: &str) -> bool {
     matches!(
         name,
-        "get_task_output"
-            | "wait_tasks"
-            | "kill_task"
-            | "interrupt_agent"
-            | "send_message"
-            | "list_agents"
-            | "report"
+        "job" | "kill_task" | "interrupt_agent" | "send_message" | "list_agents" | "report"
     )
 }
 
@@ -36,7 +29,12 @@ fn target_ids(name: &str, arguments: &str) -> Vec<String> {
     }
     let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
     let mut ids = Vec::new();
-    if let Some(arr) = v.get("task_ids").and_then(|x| x.as_array()) {
+    // `job_ids` 是现在的名字，`task_ids` 是旧名——历史会话里的卡片还得画出来。
+    let arr = v
+        .get("job_ids")
+        .or_else(|| v.get("task_ids"))
+        .and_then(|x| x.as_array());
+    if let Some(arr) = arr {
         ids.extend(
             arr.iter()
                 .filter_map(|x| x.as_str())
@@ -44,7 +42,7 @@ fn target_ids(name: &str, arguments: &str) -> Vec<String> {
                 .map(str::to_string),
         );
     }
-    for key in ["task_id", "subagent_id", "agent_id"] {
+    for key in ["job_id", "task_id", "subagent_id", "agent_id"] {
         if let Some(s) = v
             .get(key)
             .and_then(|x| x.as_str())
@@ -144,7 +142,8 @@ pub fn lines(
     // No clock here: the header is part of a cached frame, so a value evaluated
     // now would sit frozen for as long as the layout key holds — and `snap`
     // would have handed us the *target's* birth time, not this call's start.
-    // `wait_tasks` hangs for minutes; its clock comes from the paint-time pass
+    // A `job` call with a positive timeout_ms hangs for minutes; its clock comes
+    // from the paint-time pass
     // via `mark_live` (see [`super::live`]).
     let clickable = header_id(name, arguments, agents, job_snaps).is_some();
     if clickable {
@@ -190,23 +189,16 @@ fn verb_ok(name: &str, content: &str, pending: bool) -> (&'static str, Option<&'
         return (verb_pending(name), None);
     }
     match name {
-        "get_task_output" => {
+        "job" => {
             if content.contains("not found") {
                 ("未找到", None)
             } else if content.contains("No background tasks") {
                 ("任务总览", Some("当前没有后台任务"))
-            } else if content.contains("[running]") {
+            // `[running` 而不是 `[running]`：spine 会在状态后面补已运行时长。
+            } else if content.contains("[running") {
                 ("任务输出", Some("部分任务仍在运行"))
             } else {
                 ("任务输出", None)
-            }
-        }
-        // wait_tasks 超时返回时正文里仍是 `[running]` 块——此时不能说「就绪」。
-        "wait_tasks" => {
-            if content.contains("[running]") {
-                ("等待中", Some("超时返回，仍有任务在运行"))
-            } else {
-                ("任务就绪", None)
             }
         }
         "kill_task" => {
@@ -252,7 +244,7 @@ fn verb_ok(name: &str, content: &str, pending: bool) -> (&'static str, Option<&'
 
 fn verb_pending(name: &str) -> &'static str {
     match name {
-        "get_task_output" | "wait_tasks" => "查询任务",
+        "job" => "查询任务",
         "kill_task" => "终止任务",
         "interrupt_agent" => "打断子代理",
         "send_message" => "发送消息",
@@ -297,7 +289,7 @@ fn label_for(
         .or_else(|| json_str(arguments, "description"))
         .or_else(|| {
             ids.first().cloned().or_else(|| {
-                if name == "get_task_output" || name == "wait_tasks" {
+                if name == "job" {
                     Some("全部任务".to_string())
                 } else {
                     None
@@ -311,7 +303,7 @@ fn roster_summary(content: &str) -> String {
     let (mut running, mut idle) = (0usize, 0usize);
     for line in content.lines() {
         let t = line.trim();
-        if t.contains("[running]") {
+        if t.contains("[running") {
             running += 1;
         } else if t.contains("[idle]") {
             idle += 1;
@@ -352,7 +344,7 @@ fn preview_for(name: &str, arguments: &str, content: &str) -> Option<String> {
     match name {
         "send_message" => json_str(arguments, "message").map(|m| first_line(&m)),
         "report" => json_str(arguments, "output").map(|o| first_line(&o)),
-        "get_task_output" | "wait_tasks" | "kill_task" | "interrupt_agent" => content
+        "job" | "kill_task" | "interrupt_agent" => content
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
@@ -441,12 +433,12 @@ mod tests {
     }
 
     #[test]
-    fn get_task_output_card_parses_result_block() {
+    fn job_card_parses_result_block() {
         let theme = Theme::current();
         let body = "[idle] kid-1 [general-purpose] 修复 calc.py 的 add\n完成：add 修复，ALL PASS";
         let card = lines(
-            "get_task_output",
-            r#"{"task_ids":["kid-1"],"timeout_ms":0}"#,
+            "job",
+            r#"{"job_ids":["kid-1"],"timeout_ms":0}"#,
             body,
             &[snap("kid-1", "修复 calc.py 的 add")],
             &[],
@@ -460,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn get_task_output_targets_job_overlay() {
+    fn job_card_targets_job_overlay() {
         let job = JobSnapshot {
             id: "job-3".into(),
             command: "seq 3".into(),
@@ -472,13 +464,10 @@ mod tests {
             start_time: std::time::SystemTime::now(),
         };
         assert_eq!(
-            header_id("get_task_output", r#"{"task_ids":["job-3"]}"#, &[], &[job]),
+            header_id("job", r#"{"job_ids":["job-3"]}"#, &[], &[job]),
             Some("job:job-3".into())
         );
-        assert_eq!(
-            header_id("get_task_output", r#"{"task_ids":["ghost"]}"#, &[], &[]),
-            None
-        );
+        assert_eq!(header_id("job", r#"{"job_ids":["ghost"]}"#, &[], &[]), None);
     }
 
     #[test]
@@ -551,7 +540,7 @@ mod tests {
         // 内层 task 族操作按内层卡片渲染，参数取 `tool_input`。
         let card = lines(
             "use_tool",
-            r#"{"tool_name":"get_task_output","tool_input":{"task_ids":["kid-1"]}}"#,
+            r#"{"tool_name":"job","tool_input":{"job_ids":["kid-1"]}}"#,
             "[idle] kid-1 [general-purpose] 观察\n耗时=1s 退出码=0",
             &agents,
             &[],
@@ -579,7 +568,7 @@ mod tests {
         assert_eq!(
             header_id(
                 "use_tool",
-                r#"{"tool_name":"get_task_output","tool_input":{"task_ids":["kid-1"]}}"#,
+                r#"{"tool_name":"job","tool_input":{"job_ids":["kid-1"]}}"#,
                 &agents,
                 &[]
             ),
@@ -591,8 +580,8 @@ mod tests {
     fn pending_call_renders_running_verb() {
         let theme = Theme::current();
         let card = lines(
-            "wait_tasks",
-            r#"{"task_ids":["kid-1"],"timeout_ms":8000}"#,
+            "job",
+            r#"{"job_ids":["kid-1"],"timeout_ms":8000}"#,
             "",
             &[snap("kid-1", "sleep 并汇报")],
             &[],
@@ -605,40 +594,41 @@ mod tests {
     }
 
     #[test]
-    fn wait_tasks_distinguishes_ready_from_timeout() {
+    fn job_card_distinguishes_finished_from_still_running() {
         let theme = Theme::current();
         let done = lines(
-            "wait_tasks",
-            r#"{"task_ids":["kid-1"]}"#,
+            "job",
+            r#"{"job_ids":["kid-1"]}"#,
             "[idle] kid-1 [general-purpose] sleep 并汇报\n耗时=5s 退出码=0",
             &[snap("kid-1", "sleep 并汇报")],
             &[],
             &theme,
             120,
         );
-        assert!(flat(&done).contains("任务就绪"));
+        assert!(flat(&done).contains("任务输出"));
+        assert!(!flat(&done).contains("仍在运行"), "跑完了不该说还在跑");
 
         let timeout = lines(
-            "wait_tasks",
-            r#"{"task_ids":["kid-1"],"timeout_ms":8000}"#,
-            "[running] kid-1 [general-purpose] sleep 并汇报\n(still running)",
+            "job",
+            r#"{"job_ids":["kid-1"],"timeout_ms":8000}"#,
+            "[running 8s] kid-1 [general-purpose] sleep 并汇报\n(still running)",
             &[],
             &[],
             &theme,
             120,
         );
         let text = flat(&timeout);
-        assert!(text.contains("等待中"), "{text}");
-        assert!(text.contains("仍有任务在运行"), "{text}");
+        assert!(text.contains("任务输出"), "{text}");
+        assert!(text.contains("部分任务仍在运行"), "{text}");
     }
 
     #[test]
-    fn get_task_output_snapshot_with_running_target_says_so() {
+    fn job_snapshot_with_running_target_says_so() {
         let theme = Theme::current();
         let card = lines(
-            "get_task_output",
-            r#"{"task_ids":["kid-1"],"timeout_ms":0}"#,
-            "[running] kid-1 [general-purpose] sleep 并汇报\n(still running)",
+            "job",
+            r#"{"job_ids":["kid-1"],"timeout_ms":0}"#,
+            "[running 3s] kid-1 [general-purpose] sleep 并汇报\n(still running)",
             &[],
             &[],
             &theme,
@@ -655,8 +645,7 @@ mod tests {
         let cases = [
             ("report", "Error: output is required", "上报失败"),
             ("list_agents", "Error: boom", "名册出错"),
-            ("get_task_output", "Error: task_ids is required", "查询出错"),
-            ("wait_tasks", "Error: task_ids is required", "查询出错"),
+            ("job", "Error: job_ids is required", "查询出错"),
             ("send_message", "Error: message is required", "发送失败"),
             ("kill_task", "Error: task_id is required", "终止出错"),
             ("interrupt_agent", "Error: invalid arguments", "打断出错"),
@@ -740,18 +729,13 @@ mod tests {
     fn multi_task_ids_bind_first_target_only() {
         let agents = vec![snap("kid-1", "第一个"), snap("kid-2", "第二个")];
         assert_eq!(
-            header_id(
-                "get_task_output",
-                r#"{"task_ids":["kid-1","kid-2"]}"#,
-                &agents,
-                &[]
-            ),
+            header_id("job", r#"{"job_ids":["kid-1","kid-2"]}"#, &agents, &[]),
             Some("sub:kid-1".into())
         );
         let theme = Theme::current();
         let card = lines(
-            "get_task_output",
-            r#"{"task_ids":["kid-1","kid-2"]}"#,
+            "job",
+            r#"{"job_ids":["kid-1","kid-2"]}"#,
             "[idle] kid-1 [general-purpose] 第一个\n输出一\n\n[idle] kid-2 [general-purpose] 第二个\n输出二",
             &agents,
             &[],

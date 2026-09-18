@@ -16,8 +16,7 @@ tools:
   - bash
   - glob
   - write_file
-  - get_task_output
-  - wait_tasks
+  - job
   - kill_task
   - monitor
   - todo_write

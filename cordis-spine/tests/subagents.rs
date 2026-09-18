@@ -132,7 +132,7 @@ async fn spawn_bg(tools: &Tools, prompt: &str, subagent_type: &str) -> String {
     assert!(
         started.content.contains("Subagent started in background")
             && started.content.contains("send_message")
-            && started.content.contains("get_task_output"),
+            && started.content.contains("use job with job_ids="),
         "{}",
         started.content
     );

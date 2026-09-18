@@ -284,7 +284,7 @@ async fn install_fakes_echo_has_no_capability_tools() {
         "todo_write",
         "ask_user_question",
         "enter_plan_mode",
-        "get_task_output",
+        "job",
         "scheduler_create",
         "cordis_define",
         "cordis_run",
@@ -316,8 +316,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "ask_user_question",
         "enter_plan_mode",
         "exit_plan_mode",
-        "get_task_output",
-        "wait_tasks",
+        "job",
         "kill_task",
         "scheduler_create",
         "scheduler_list",
@@ -713,7 +712,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     assert!(
         started.content.contains("Subagent started in background")
             && started.content.contains("subagent_id:")
-            && started.content.contains("get_task_output"),
+            && started.content.contains("use job with job_ids="),
         "{}",
         started.content
     );

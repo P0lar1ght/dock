@@ -1709,11 +1709,7 @@ mod tests {
                     mode.id
                 );
                 assert!(
-                    !p.tools
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .any(|n| n == "get_task_output"),
+                    !p.tools.as_ref().unwrap().iter().any(|n| n == "job"),
                     "{}",
                     mode.id
                 );
@@ -1824,8 +1820,7 @@ mod tests {
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
         assert!(!presets.allows("browser_open"));
-        assert!(!presets.allows("get_task_output"));
-        assert!(!presets.allows("wait_tasks"));
+        assert!(!presets.allows("job"));
         assert!(!presets.allows("kill_task"));
         assert!(!presets.allows("report"));
         assert_eq!(presets.role_label("岑").as_deref(), Some("岑"));
@@ -2246,8 +2241,7 @@ mod tests {
         assert!(current.persona.contains("甲/乙/丙"), "{}", current.persona);
         assert!(presets.allows("task"));
         assert!(!presets.allows("subagent"));
-        assert!(!presets.allows("get_task_output"));
-        assert!(!presets.allows("wait_tasks"));
+        assert!(!presets.allows("job"));
         assert!(!presets.allows("kill_task"));
         assert!(presets.allows("write_file"));
         assert!(presets.subagent("jia").is_none());
@@ -2257,7 +2251,6 @@ mod tests {
         let hint = presets.subagent_role_hint();
         assert!(!hint.contains("jia"), "{hint}");
         // spawn 面统一后只教 task；旧一次性套件不出现在委派说明里。
-        assert!(!hint.contains("wait_tasks"), "{hint}");
         assert!(!hint.contains("kill_task"), "{hint}");
         assert!(hint.contains("甲"), "{hint}");
     }
