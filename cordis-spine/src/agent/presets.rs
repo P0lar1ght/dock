@@ -1099,6 +1099,10 @@ fn load_inner(user_dir: PathBuf, project_dir: Option<PathBuf>) -> Inner {
             load_dir(project, PresetOrigin::Project, &mut presets);
         }
     }
+    // 所有层都并完之后再归一化工具名：内建、用户、项目三层都可能带着旧名。
+    for preset in presets.values_mut() {
+        migrate_renamed_tools(preset);
+    }
     sort_presets(&mut presets);
     if current == "default" || !presets.contains_key(&current) {
         current = DEFAULT_PRESET_ID.into();
@@ -1529,6 +1533,47 @@ fn tool_allowed(allow: &[String], name: &str) -> bool {
 /// Overlay YAML snapshots an allowlist. When crate adds `search_tool` /
 /// `use_tool`, stale user/project copies would otherwise hide them from
 /// `/preset` and `allows()`. Skip `minimal` and explicit empty lists.
+/// 工具改过的名字：`旧名 → 新名`。
+///
+/// 预设的工具表是 **allowlist**（[`AgentPresets::allows`]），列一个**不存在**的
+/// 名字不会报错——它只是静默地什么都不给。所以一颗工具改名之后，`~/.dock/presets`
+/// 里那份老表会让模型既拿不到旧名（没这颗工具了）也拿不到新名（不在表里），
+/// 而且整条链上没有一处会出声。随内建预设一起改 `cordis-spine/presets/**` 只修好
+/// 了全新安装，装过的那份得在这里迁。
+const RENAMED_TOOLS: &[(&str, &str)] = &[("get_task_output", "job"), ("wait_tasks", "job")];
+
+/// 把一份预设（含它的子代理定义）里的旧工具名换成新名。
+///
+/// **只改内存里的那份，不回写 yml**：`persist_preset` 是整份序列化，会把用户在
+/// 文件里写的注释和排版一起抹掉。老名字留在磁盘上不碍事——每次加载都会被这里
+/// 归一化。
+fn migrate_renamed_tools(preset: &mut AgentPreset) {
+    rename_tools(&mut preset.tools);
+    for def in preset.agents.values_mut() {
+        rename_tools(&mut def.tools);
+    }
+}
+
+fn rename_tools(tools: &mut Option<Vec<String>>) {
+    let Some(list) = tools else {
+        return;
+    };
+    let mut out: Vec<String> = Vec::with_capacity(list.len());
+    for name in list.iter() {
+        let renamed = RENAMED_TOOLS
+            .iter()
+            .find(|(old, _)| old == name)
+            .map(|(_, new)| (*new).to_string())
+            .unwrap_or_else(|| name.clone());
+        // 多个旧名可以映到同一个新名（`get_task_output` 与 `wait_tasks` 都成了
+        // `job`），直接换会在表里留下重复项。
+        if !out.contains(&renamed) {
+            out.push(renamed);
+        }
+    }
+    *list = out;
+}
+
 fn ensure_mcp_discovery_tools(id: &str, preset: &mut AgentPreset) {
     if id == MINIMAL_PRESET_ID {
         return;
@@ -1764,6 +1809,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 装过的预设里写着改名前的工具名时，模型不能因此**一颗都拿不到**。
+    ///
+    /// 工具表是 allowlist：列一个不存在的名字不报错，只是静默地不给。所以
+    /// `get_task_output` / `wait_tasks` → `job` 之后，`~/.dock/presets` 里那份
+    /// 老表既给不出旧名（工具没了）也给不出新名（不在表里），整条链上没有一处
+    /// 会出声——只能在加载时把名字迁过来。
+    #[test]
+    fn installed_presets_with_pre_rename_tool_names_still_get_the_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("code/agents")).unwrap();
+        std::fs::write(
+            dir.path().join("code/agent.yml"),
+            "name: code\ntools:\n  - bash\n  - get_task_output\n  - wait_tasks\n  - kill_task\n",
+        )
+        .unwrap();
+        // 子代理定义那一层也得迁，它有自己的工具表。
+        std::fs::write(
+            dir.path().join("code/agents/general-purpose.yml"),
+            "persona: p\ntools:\n  - grep\n  - get_task_output\n",
+        )
+        .unwrap();
+
+        let presets = AgentPresets::load(dir.path().to_path_buf());
+        assert!(presets.allows("job"), "旧名要迁成 job");
+        assert!(!presets.allows("get_task_output"), "旧名不该还在表里");
+        assert!(!presets.allows("wait_tasks"));
+        assert!(presets.allows("bash"), "同表里别的工具不能受影响");
+
+        // 两个旧名映到同一个新名，迁完不能留下重复项。
+        let code = presets
+            .list()
+            .into_iter()
+            .find(|p| p.id == DEFAULT_PRESET_ID)
+            .expect("code 预设在");
+        let tools = code.tools.expect("有工具表");
+        assert_eq!(
+            tools.iter().filter(|t| *t == "job").count(),
+            1,
+            "重复的 job：{tools:?}"
+        );
+        let child = code_child_tools(&presets, "general-purpose");
+        assert!(
+            child.iter().any(|t| t == "job"),
+            "子代理那层也要迁：{child:?}"
+        );
+        assert!(!child.iter().any(|t| t == "get_task_output"), "{child:?}");
+    }
+
+    fn code_child_tools(presets: &AgentPresets, agent: &str) -> Vec<String> {
+        presets
+            .list()
+            .into_iter()
+            .find(|p| p.id == DEFAULT_PRESET_ID)
+            .and_then(|p| p.agents.get(agent).and_then(|d| d.tools.clone()))
+            .unwrap_or_default()
     }
 
     #[test]
