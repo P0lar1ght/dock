@@ -50,7 +50,7 @@ mod search_tool;
 mod skill;
 mod subagent;
 mod task_ops;
-mod text_selection;
+pub(crate) mod text_selection;
 mod thinking;
 pub(crate) mod todo;
 pub(crate) mod tool;

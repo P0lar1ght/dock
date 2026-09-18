@@ -275,13 +275,16 @@ fn walk_json_strings(v: &serde_json::Value, out: &mut Vec<PathBuf>) {
 }
 
 const DESC: &str = "启动工作流：一段 Rhai 脚本，把子代理编排成一次后台运行。\
-source 只能有一个：已注册 name、内联 script、script_path，或同进程 resume。\
+source 只能有一个：已注册 name、内联 script、script_path。\
 可选 args（绑到脚本 args）和 agent_budget（子代理调用上限，默认 128，最大 1024）。\
 调用立即返回；进度看 /workflow runs，完成后会自动汇报，不要轮询 wait_tasks。\
+**动手写或改脚本之前先读 `create-workflow` 技能的 SKILL.md**：脚本形状、host API、\
+方言规则和 dock 的限制（没有 resume，git_diff_since / render_template 不可用）都在那儿。\
 validate_only: true 只做冒烟检查（元数据、编译、一条 canned-host 路径），不证明每个分支或真实工具可用。\
-可复用脚本放到 .dock/workflows/<name>.rhai 或 ~/.dock/workflows/<name>.rhai；斜杠 `/name` 直接启动。";
+可复用脚本放到 .dock/workflows/<name>.rhai 或 ~/.dock/workflows/<name>.rhai；斜杠 `/name` 直接启动。\
+停一次在跑的 run 让用户走 /workflow stop <name>。";
 
-const PARAMS: &str = r#"{"type":"object","properties":{"source":{"description":"Exactly one workflow source.","oneOf":[{"type":"object","required":["type","name"],"properties":{"type":{"const":"name"},"name":{"type":"string"}}},{"type":"object","required":["type","script"],"properties":{"type":{"const":"script"},"script":{"type":"string"}}},{"type":"object","required":["type","script_path"],"properties":{"type":{"const":"script_path"},"script_path":{"type":"string"}}},{"type":"object","required":["type","resume_from_run_id"],"properties":{"type":{"const":"resume"},"resume_from_run_id":{"type":"string"}}}]},"agent_budget":{"type":"integer","minimum":1,"maximum":1024},"args":{},"validate_only":{"type":"boolean"},"name":{"type":"string"},"script":{"type":"string"},"script_path":{"type":"string"},"resume_from_run_id":{"type":"string"}},"required":[]}"#;
+const PARAMS: &str = r#"{"type":"object","properties":{"source":{"description":"Exactly one workflow source.","oneOf":[{"type":"object","required":["type","name"],"properties":{"type":{"const":"name"},"name":{"type":"string"}}},{"type":"object","required":["type","script"],"properties":{"type":{"const":"script"},"script":{"type":"string"}}},{"type":"object","required":["type","script_path"],"properties":{"type":{"const":"script_path"},"script_path":{"type":"string"}}}]},"agent_budget":{"type":"integer","minimum":1,"maximum":1024},"args":{},"validate_only":{"type":"boolean"},"name":{"type":"string"},"script":{"type":"string"},"script_path":{"type":"string"}},"required":[]}"#;
 
 pub fn tool_workflow() -> Plugin {
     plugin(

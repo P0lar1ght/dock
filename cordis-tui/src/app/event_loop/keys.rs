@@ -912,18 +912,39 @@ pub(super) fn run_action(
             if open_context_from_status(ctx, overlay, column, row) {
                 return Vec::new();
             }
+            // 输入框先挑：按在框里就是在框里选字，不该再去起滚动区的选区。
+            if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
+                if prompt.mouse_down(column, row) {
+                    if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
+                        scrollback.clear_selection();
+                    }
+                    return Vec::new();
+                }
+            }
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
                 scrollback.mouse_down(column, row);
             }
             Vec::new()
         }
         Action::MouseDrag { column, row } => {
+            if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
+                if prompt.mouse_drag(column, row) {
+                    return Vec::new();
+                }
+            }
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
                 scrollback.mouse_drag(column, row);
             }
             Vec::new()
         }
         Action::MouseUp { column, row } => {
+            // 在输入框里拖完就复制，和滚动区同一个手势（抬手即复制，高亮留着）。
+            if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
+                if let Some(text) = prompt.mouse_up(column, row) {
+                    copy_out(ctx, &text, None);
+                    return Vec::new();
+                }
+            }
             if let Some(tab_bar::TabHit(id)) = tab_bar::hit(tab_hits, column, row) {
                 return vec![Effect::TabGo { id }];
             }
@@ -1275,6 +1296,8 @@ pub(super) fn run_action(
             let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) else {
                 return Vec::new();
             };
+            // 选区归输入框自己管：删除 / 打字要**消费**它（删整段、替换），
+            // 挪光标才是作废。在这里一刀切清掉的话，按删除只会退一个字符。
             dispatch(other, &prompt)
         }
     }
@@ -1799,7 +1822,14 @@ pub(super) fn to_action(
                 // Overlay / welcome still click on Down; scrollback needs
                 // Down→Drag→Up for in-app text selection (alt-screen steals
                 // the terminal's native drag-copy).
-                if overlay.is_open() || welcome_open(ctx) {
+                //
+                // **输入框自己那一块永远走拖选那条路**，不管上面盖着欢迎页还是
+                // overlay：它是同一颗 `PromptWidget`，换个界面就选不动字才是
+                // 怪事。判定按它这一帧真画出来的位置（`PromptWidget::hit`），
+                // 这一帧没画就不认领。
+                if (overlay.is_open() || welcome_open(ctx))
+                    && !prompt_hit(ctx, mouse.column, mouse.row)
+                {
                     Some(Action::Click {
                         column: mouse.column,
                         row: mouse.row,
@@ -1812,7 +1842,9 @@ pub(super) fn to_action(
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if overlay.is_open() || welcome_open(ctx) {
+                if (overlay.is_open() || welcome_open(ctx))
+                    && !prompt_hit(ctx, mouse.column, mouse.row)
+                {
                     None
                 } else {
                     Some(Action::MouseDrag {
@@ -1822,7 +1854,9 @@ pub(super) fn to_action(
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if overlay.is_open() || welcome_open(ctx) {
+                if (overlay.is_open() || welcome_open(ctx))
+                    && !prompt_hit(ctx, mouse.column, mouse.row)
+                {
                     None
                 } else {
                     Some(Action::MouseUp {
@@ -2092,6 +2126,51 @@ mod tests {
 
         // 填完就当没选过：下一下 Enter 才是发送。
         assert!(matches!(enter(&ctx), Some(Action::SendPrompt(t)) if t.trim() == "/tab close"));
+    }
+
+    /// 欢迎页上输入框里照样能拖选。
+    ///
+    /// 输入框是同一颗 `PromptWidget`，可鼠标事件在欢迎页 / overlay 下被整段改道
+    /// 成 `Click`（那是给欢迎页菜单和 overlay 行用的），拖选那条路根本走不到——
+    /// 于是「刚进来的那个界面选不动字，聊两句之后又能选了」。规则改成：**输入框
+    /// 这一帧画在哪儿，那块就归它**，其余原样。
+    #[tokio::test]
+    async fn the_prompt_owns_its_own_box_even_on_the_welcome_screen() {
+        use crate::views::welcome::Welcome;
+        let ctx = Context::new();
+        let prompt = PromptWidget::default();
+        prompt.insert_str("试试复制选择");
+        let area = ratatui::layout::Rect::new(0, 20, 60, 3);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(&prompt, area, &mut buf);
+        let _p = ctx.provide(TUI_PROMPT, prompt).unwrap();
+        // 没有 `"sessions"` 时 `empty_session()` 就是 true——正是刚进来那一帧。
+        let _w = ctx.provide(TUI_WELCOME, Welcome::new(ctx.clone())).unwrap();
+        assert!(welcome_open(&ctx), "这一步要真的处在欢迎页");
+
+        let down = |col, row| {
+            to_action(
+                &ctx,
+                Event::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: col,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &Overlay::None,
+                None,
+            )
+        };
+        // 框里：走拖选。
+        assert!(
+            matches!(down(6, 21), Some(Action::MouseDown { .. })),
+            "欢迎页上按在输入框里也要能起选区"
+        );
+        // 框外：还是欢迎页菜单那套点击。
+        assert!(
+            matches!(down(6, 2), Some(Action::Click { .. })),
+            "框外仍旧是点击，别把欢迎页菜单弄坏"
+        );
     }
 
     /// 分页键不能踩现有键位：`Ctrl+W` 还是新会话，`Ctrl+D` 还是半页下滚。

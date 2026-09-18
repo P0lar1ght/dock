@@ -95,6 +95,17 @@ struct State {
     paste_bodies: Vec<(String, String)>,
     /// Last submitted composer text (Grok `in_flight_prompt`), for Esc rewind.
     last_sent: Option<String>,
+    /// 鼠标框选：`(anchor, head)`，都是 `input` 的字节下标。`None` = 没选区。
+    ///
+    /// 输入框自己做选区，是因为**全屏应用把终端的原生拖选顶掉了**：开了
+    /// alt-screen + 鼠标上报之后，拖动事件进的是 dock，终端那层选不了。滚动区
+    /// 早就这么干了（`Scrollback::mouse_down/drag/up`），输入框一直漏着。
+    selection: Option<(usize, usize)>,
+    /// 按下了但还没拖过阈值：还不算选区，抬手就是普通点击（移光标）。
+    pending: Option<(u16, u16, usize)>,
+    dragging: bool,
+    /// 上一帧画在哪儿。鼠标坐标要按它换算成字节下标，所以渲染时记一份。
+    last_area: Rect,
 }
 
 impl State {
@@ -106,10 +117,62 @@ impl State {
         }
     }
 
-    fn set_cursor(&mut self, i: usize) {
+    /// 选区正规化成 `input` 的一段字节范围；空选区返回 `None`。
+    ///
+    /// 也顺手挡住**过期**的选区：整段文本被换掉（历史、`/` 补全、清空）之后旧
+    /// 下标可能已经越界，这里判一次比在每个改文本的地方各清一次可靠。
+    fn selection_range(&self) -> Option<Range<usize>> {
+        let (a, b) = self.selection?;
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        if lo >= hi || hi > self.input.len() {
+            return None;
+        }
+        (self.input.is_char_boundary(lo) && self.input.is_char_boundary(hi)).then_some(lo..hi)
+    }
+
+    /// 有选区就把它删掉并返回 `true`。
+    ///
+    /// 编辑动作都先过这一关：**选中之后按删除要删掉整段**，而不是再退一个字符；
+    /// 打字同理，是替换而不是插在中间。
+    fn take_selection(&mut self) -> bool {
+        let Some(range) = self.selection_range() else {
+            self.drop_selection();
+            return false;
+        };
+        let start = range.start;
+        self.input.replace_range(range, "");
+        self.drop_selection();
+        self.cursor = start;
+        self.clamp_cursor();
+        self.slash_selected = None;
+        self.file_dismissed = false;
+        true
+    }
+
+    fn drop_selection(&mut self) {
+        self.selection = None;
+        self.pending = None;
+        self.dragging = false;
+    }
+
+    /// 只挪光标、**不动选区**。鼠标拖选专用：拖的过程中光标跟着走，但选区正在
+    /// 被这次拖动建立，不能被 [`Self::set_cursor`] 顺手清掉。
+    fn set_cursor_keep_selection(&mut self, i: usize) {
         self.cursor = i.min(self.input.len());
         self.clamp_cursor();
         self.file_dismissed = false;
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let range = self.selection_range()?;
+        self.input.get(range).map(str::to_string)
+    }
+
+    /// 挪光标即作废选区——键盘一动，鼠标框出来的那块高亮就不该再留着。
+    /// 所有 `move_*` / 历史 / 补全都走这里，不必各记各的。
+    fn set_cursor(&mut self, i: usize) {
+        self.drop_selection();
+        self.set_cursor_keep_selection(i);
     }
 }
 
@@ -228,6 +291,11 @@ impl PromptWidget {
 
     pub fn backspace(&self) {
         let mut state = self.state.lock().unwrap();
+        // 有选区就是删这一段，别再往前退一个字符。
+        if state.take_selection() {
+            sync_chips(&mut state);
+            return;
+        }
         if state.cursor == 0 {
             return;
         }
@@ -246,6 +314,10 @@ impl PromptWidget {
 
     pub fn delete(&self) {
         let mut state = self.state.lock().unwrap();
+        if state.take_selection() {
+            sync_chips(&mut state);
+            return;
+        }
         if state.cursor >= state.input.len() {
             return;
         }
@@ -554,6 +626,97 @@ impl PromptWidget {
         (rows.saturating_add(2)).clamp(3, max.max(3))
     }
 
+    /// 左键按下：命中输入框就记一个待定锚点并把光标挪过去，返回 `true`
+    /// （调用点据此**不再**把这次按下交给滚动区）。
+    pub fn mouse_down(&self, column: u16, row: u16) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.selection = None;
+        state.pending = None;
+        state.dragging = false;
+        let area = state.last_area;
+        let Some(byte) = byte_at(&state, area, column, row) else {
+            return false;
+        };
+        state.pending = Some((column, row, byte));
+        state.set_cursor_keep_selection(byte);
+        true
+    }
+
+    /// 左键拖动：过了一格阈值才算选区——不然每次点击都会留下一个空选区闪一下。
+    pub fn mouse_drag(&self, column: u16, row: u16) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if let Some((col0, row0, anchor)) = state.pending {
+            if column.abs_diff(col0) == 0 && row.abs_diff(row0) == 0 {
+                return false;
+            }
+            state.pending = None;
+            state.selection = Some((anchor, anchor));
+            state.dragging = true;
+        }
+        if !state.dragging {
+            return false;
+        }
+        let area = state.last_area;
+        let Some(byte) = byte_at(&state, area, column, row) else {
+            return true;
+        };
+        if let Some((_, head)) = state.selection.as_mut() {
+            *head = byte;
+        }
+        state.set_cursor_keep_selection(byte);
+        true
+    }
+
+    /// 左键抬起：拖出过非空选区就把它交出去（调用点负责写剪贴板）。
+    /// 高亮留着，和滚动区一样等下一次按下再清。
+    pub fn mouse_up(&self, column: u16, row: u16) -> Option<String> {
+        let mut state = self.state.lock().unwrap();
+        state.pending = None;
+        if !state.dragging {
+            return None;
+        }
+        state.dragging = false;
+        let area = state.last_area;
+        if let Some(byte) = byte_at(&state, area, column, row) {
+            if let Some((_, head)) = state.selection.as_mut() {
+                *head = byte;
+            }
+        }
+        let text = state.selected_text();
+        if text.is_none() {
+            state.selection = None;
+        }
+        text
+    }
+
+    /// 打字、回车、换会话……任何改动都让选区作废。
+    /// 每帧开头清一次「我画在哪儿」。
+    ///
+    /// 输入框不是每帧都画（会话面板是独立全屏视图，权限/审批浮层也会顶掉它）。
+    /// 不清的话 `last_area` 会留着上一帧的位置，鼠标点在盖住它的面板上会被判成
+    /// 「点在输入框里」。清在**每帧入口**，而不是各个不画输入框的分支里各记
+    /// 一次——后者漏一个就是这个 bug。
+    pub fn begin_frame(&self) {
+        self.state.lock().unwrap().last_area = Rect::ZERO;
+    }
+
+    /// 这个坐标是不是落在**这一帧真画出来的**输入框里。
+    pub fn hit(&self, column: u16, row: u16) -> bool {
+        let area = self.state.lock().unwrap().last_area;
+        area.width > 0 && area.height > 0 && area.contains(Position { x: column, y: row })
+    }
+
+    pub fn clear_selection(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.selection = None;
+        state.pending = None;
+        state.dragging = false;
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        self.state.lock().unwrap().selected_text()
+    }
+
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
         if area.height < 3 || area.width < 4 {
             return None;
@@ -590,7 +753,14 @@ impl Widget for &PromptWidget {
         }
         let theme = Theme::current();
         let bg = theme.bg_base;
-        let border_color = theme.prompt_border_active;
+        // 边框跟着焦点走：没焦点时用暗的那支。主题里两支颜色一直都在（注释写着
+        // "dimmer prompt chrome" / "brighter when focused"），只是这里一直只取
+        // 亮的那支，于是「这会儿打字到底进不进得去」看不出来。
+        let border_color = if self.focused() {
+            theme.prompt_border_active
+        } else {
+            theme.prompt_border
+        };
         buf.set_style(area, Style::default().fg(theme.text_primary).bg(bg));
 
         let content = Rect {
@@ -646,7 +816,10 @@ impl Widget for &PromptWidget {
             }
         }
 
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        // 鼠标坐标要按这一帧的位置换算，所以画完就记下来。
+        state.last_area = area;
+        let selection = state.selection_range();
         paint_info_line(
             buf,
             chunks[2],
@@ -697,6 +870,20 @@ impl Widget for &PromptWidget {
                 style,
                 chip_style,
             );
+            // 选区**画在正文之上**：复用滚动区那支高亮，两处拖选看起来才是同
+            // 一件事（`apply_selection_highlight` 还兼顾了 `Color::Reset` 主题）。
+            if let Some(range) = selection.as_ref() {
+                paint_row_selection(
+                    buf,
+                    text_x,
+                    y,
+                    body.width.saturating_sub(2),
+                    row,
+                    &state.input,
+                    range,
+                    &theme,
+                );
+            }
             if state.input.is_empty() && vis == 0 && state.unfocused {
                 paint_placeholder(buf, text_x, y, body.width, bg, &theme);
             }
@@ -752,6 +939,119 @@ fn paint_info_line(
     let style = Style::default().fg(fg).bg(bg);
     buf.set_stringn(x, row.y, &trunc, w as usize, style);
     let _ = div_style;
+}
+
+/// 一帧里正文的布局：可见行、起始行号、正文左上角。渲染和命中判定**共用**它，
+/// 否则两边各算一遍，窄窗折行一变就会错位。
+struct BodyLayout {
+    rows: Vec<VisualRow>,
+    body: Rect,
+    start: usize,
+    text_x: u16,
+    width: u16,
+}
+
+fn body_layout(state: &State, area: Rect) -> Option<BodyLayout> {
+    if area.height < 3 || area.width < 4 {
+        return None;
+    }
+    let body = Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: area.height.saturating_sub(2),
+    };
+    if body.height == 0 {
+        return None;
+    }
+    let inner = area.width.saturating_sub(4).max(1) as usize;
+    let rows = visual_rows(&state.input, inner);
+    let cursor_row = row_for_cursor(&rows, state.cursor);
+    let start = (cursor_row + 1).saturating_sub((body.height as usize).max(1));
+    Some(BodyLayout {
+        rows,
+        body,
+        start,
+        text_x: area.x.saturating_add(2),
+        width: body.width.saturating_sub(2),
+    })
+}
+
+/// 屏幕坐标 → `input` 的字节下标。落在正文之外返回 `None`；落在某一行右边的
+/// 空白处就吸到那一行末尾（拖选到行尾时的自然结果）。
+fn byte_at(state: &State, area: Rect, column: u16, row: u16) -> Option<usize> {
+    let layout = body_layout(state, area)?;
+    if column < layout.text_x || column >= layout.text_x.saturating_add(layout.width) {
+        // 左边框 / 右边框那两列不算正文，但纵向仍在框内时吸到最近的边。
+        if !(area.x..area.x.saturating_add(area.width)).contains(&column) {
+            return None;
+        }
+    }
+    if row < layout.body.y || row >= layout.body.y.saturating_add(layout.body.height) {
+        return None;
+    }
+    let vis = (row - layout.body.y) as usize;
+    let idx = layout.start + vis;
+    let Some(vrow) = layout.rows.get(idx) else {
+        // 空行区：吸到全文末尾。
+        return Some(state.input.len());
+    };
+    let slice = &state.input[vrow.byte_start..vrow.byte_end];
+    let target = column.saturating_sub(layout.text_x);
+    let mut col = UnicodeWidthStr::width(vrow.prefix) as u16;
+    if target <= col {
+        return Some(vrow.byte_start);
+    }
+    let mut byte = vrow.byte_start;
+    for ch in slice.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        // 落在字符前半格算这个字符之前，后半格算之后——半格吸附，跟编辑器一致。
+        if target < col.saturating_add(w.max(1)).saturating_sub(w / 2) {
+            return Some(byte);
+        }
+        col = col.saturating_add(w);
+        byte += ch.len_utf8();
+    }
+    Some(vrow.byte_end)
+}
+
+/// 把这一行落在选区里的那几列涂成高亮。
+///
+/// 按**显示列**算而不是按字节：CJK 一个字占两列，按字节涂会和文本错位半格。
+#[allow(clippy::too_many_arguments)]
+fn paint_row_selection(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    row: &VisualRow,
+    input: &str,
+    range: &Range<usize>,
+    theme: &Theme,
+) {
+    if range.end <= row.byte_start || range.start >= row.byte_end {
+        return;
+    }
+    let lo = range.start.max(row.byte_start);
+    let hi = range.end.min(row.byte_end);
+    let mut col = x.saturating_add(UnicodeWidthStr::width(row.prefix) as u16);
+    let end_x = x.saturating_add(width);
+    let mut byte = row.byte_start;
+    for ch in input[row.byte_start..row.byte_end].chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        if byte >= lo && byte < hi {
+            for cx in col..col.saturating_add(w).min(end_x) {
+                if let Some(cell) = buf.cell_mut((cx, y)) {
+                    crate::scrollback::text_selection::apply_selection_highlight(theme, cell);
+                }
+            }
+        }
+        col = col.saturating_add(w);
+        byte += ch.len_utf8();
+        if col >= end_x {
+            break;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -880,6 +1180,8 @@ pub fn paint_image_card(buf: &mut Buffer, area: Rect, image: &PastedImage, theme
 }
 
 fn insert_at_cursor(state: &mut State, s: &str) {
+    // 选中之后打字是**替换**，不是插进选区中间。
+    state.take_selection();
     let i = state.cursor.min(state.input.len());
     state.input.insert_str(i, s);
     state.cursor = i + s.len();
@@ -1117,6 +1419,150 @@ mod tests {
         prompt.backspace();
         prompt.backspace();
         assert!(prompt.text().is_empty());
+    }
+
+    fn render_at(prompt: &PromptWidget, area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        prompt.render(area, &mut buf);
+        buf
+    }
+
+    /// 输入框里要能用鼠标框选、抬手即复制。
+    ///
+    /// 全屏应用把终端的原生拖选顶掉了（alt-screen + 鼠标上报），所以这一段必须
+    /// 自己做，否则用户**根本没法把自己刚打的字复制出去**。滚动区早就这么干了。
+    #[test]
+    fn dragging_across_the_box_selects_and_hands_back_the_text() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("hello world");
+        let area = Rect::new(0, 0, 40, 3);
+        let _ = render_at(&prompt, area); // 记下 last_area，命中判定要用
+
+        // 正文从 x=2 起，`> ` 前缀占两列，所以第一个字符在 x=4。
+        assert!(prompt.mouse_down(4, 1), "按在框里要被输入框接住");
+        assert!(prompt.mouse_drag(9, 1));
+        assert_eq!(prompt.mouse_up(9, 1).as_deref(), Some("hello"));
+        // 高亮留着，和滚动区一样等下一次按下再清。
+        assert_eq!(prompt.selection_text().as_deref(), Some("hello"));
+    }
+
+    /// 选中之后按删除，删的是**整段选中**，不是再往前退一个字符。
+    ///
+    /// 这是最容易漏的一环：选区做出来了、也画出来了，但编辑动作不认它，用户
+    /// 选中一句话按删除，只掉了一个字。
+    #[test]
+    fn deleting_with_a_selection_removes_the_whole_selection() {
+        let area = Rect::new(0, 0, 40, 3);
+        for (label, act) in [("backspace", 0usize), ("delete", 1)] {
+            let prompt = PromptWidget::default();
+            prompt.insert_str("hello world");
+            let _ = render_at(&prompt, area);
+            assert!(prompt.mouse_down(4, 1));
+            assert!(prompt.mouse_drag(9, 1));
+            assert_eq!(prompt.mouse_up(9, 1).as_deref(), Some("hello"), "{label}");
+
+            if act == 0 {
+                prompt.backspace();
+            } else {
+                prompt.delete();
+            }
+            assert_eq!(prompt.text(), " world", "{label}");
+            assert_eq!(prompt.cursor(), 0, "{label}");
+            assert!(prompt.selection_text().is_none(), "{label}");
+        }
+    }
+
+    /// 选中之后打字是**替换**，不是插进选区中间。
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("hello world");
+        let area = Rect::new(0, 0, 40, 3);
+        let _ = render_at(&prompt, area);
+        assert!(prompt.mouse_down(4, 1));
+        assert!(prompt.mouse_drag(9, 1));
+        assert_eq!(prompt.mouse_up(9, 1).as_deref(), Some("hello"));
+
+        prompt.push('h');
+        prompt.push('i');
+        assert_eq!(prompt.text(), "hi world");
+        assert!(prompt.selection_text().is_none());
+    }
+
+    /// 挪光标才是「作废」——选区不该跟着方向键一起走。
+    #[test]
+    fn moving_the_cursor_drops_the_selection() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("hello world");
+        let area = Rect::new(0, 0, 40, 3);
+        let _ = render_at(&prompt, area);
+        assert!(prompt.mouse_down(4, 1));
+        assert!(prompt.mouse_drag(9, 1));
+        assert!(prompt.mouse_up(9, 1).is_some());
+
+        // 抬手时光标停在选区末尾（"hello" 之后），右移一格跨过空格。
+        prompt.move_right();
+        assert!(prompt.selection_text().is_none());
+        prompt.backspace();
+        assert_eq!(
+            prompt.text(),
+            "helloworld",
+            "作废之后就是普通退格，只掉一个字符"
+        );
+    }
+
+    /// 框外的按下不归输入框管——否则点滚动区会把选区起在输入框里。
+    #[test]
+    fn a_press_outside_the_box_is_not_the_prompts() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("abc");
+        let area = Rect::new(0, 10, 40, 3);
+        let _ = render_at(&prompt, area);
+        assert!(!prompt.mouse_down(4, 2), "框上面那行不是输入框");
+        assert!(!prompt.mouse_down(4, 20), "框下面那行也不是");
+        assert!(prompt.mouse_down(4, 11));
+    }
+
+    /// 没拖动就只是点一下：移光标，不留选区。
+    #[test]
+    fn a_plain_click_moves_the_cursor_without_selecting() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("hello");
+        let area = Rect::new(0, 0, 40, 3);
+        let _ = render_at(&prompt, area);
+        assert!(prompt.mouse_down(6, 1));
+        assert!(prompt.mouse_up(6, 1).is_none());
+        assert!(prompt.selection_text().is_none());
+    }
+
+    /// CJK 一个字占两列：按显示列换算，不能按字节，否则选出来的和看到的差半格。
+    #[test]
+    fn selection_counts_display_columns_not_bytes() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("试测试");
+        let area = Rect::new(0, 0, 40, 3);
+        let _ = render_at(&prompt, area);
+        assert!(prompt.mouse_down(4, 1));
+        assert!(prompt.mouse_drag(8, 1));
+        assert_eq!(prompt.mouse_up(8, 1).as_deref(), Some("试测"));
+    }
+
+    /// 没焦点时边框用暗的那支：不然「这会儿打字进不进得去」看不出来。
+    #[test]
+    fn the_border_follows_focus() {
+        let theme = Theme::current();
+        let prompt = PromptWidget::default();
+        let area = Rect::new(0, 0, 20, 3);
+
+        prompt.set_focused(true);
+        let bright = render_at(&prompt, area);
+        prompt.set_focused(false);
+        let dim = render_at(&prompt, area);
+
+        let corner = |buf: &Buffer| buf[(0, 0)].style().fg;
+        assert_eq!(corner(&bright), Some(theme.prompt_border_active));
+        assert_eq!(corner(&dim), Some(theme.prompt_border));
+        assert_ne!(theme.prompt_border, theme.prompt_border_active);
     }
 
     #[test]
