@@ -58,26 +58,29 @@ pub fn lines(
     }
     let header = card::finish_header(header, width, mode, theme);
 
-    let body_lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
-    if body_lines.is_empty() {
+    let source: Vec<Line<'static>> = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| Line::from(Span::styled(l.to_string(), theme.muted())))
+        .collect();
+    if source.is_empty() {
         return vec![header];
     }
+    // 走 `card::body`（折行 + 统一缩进）而不是光 `card::indent`：一条上报是模型
+    // 写的整段话，不折行就直接冲出终端右边缘，窄窗下更是只看得见开头。
+    let rows = card::body(source, width);
     let mut out = vec![header];
-    // 折叠态也留两行正文：一条上报的价值全在正文里，只剩标题等于没显示。
+    // 折叠态按**画出来的行**算，不是按原文的行：一行原文在窄窗下能折成七八行，
+    // 按原文数的话「收起」反而比展开还高。
     let shown = if open {
-        body_lines.as_slice()
+        rows.len()
     } else {
-        &body_lines[..body_lines.len().min(COLLAPSED_BODY_LINES)]
+        rows.len().min(COLLAPSED_BODY_LINES)
     };
-    for line in shown {
-        out.push(card::indent(Line::from(Span::styled(
-            (*line).to_string(),
-            theme.muted(),
-        ))));
-    }
-    let hidden = body_lines.len() - shown.len();
+    out.extend(rows.iter().take(shown).cloned());
+    let hidden = rows.len() - shown;
     if hidden > 0 {
-        out.push(card::indent(card::elision(hidden, "行", theme)));
+        out.push(card::elision(hidden, "行", theme));
     }
     out
 }
@@ -113,6 +116,32 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// 折叠态按**画出来的行**收：一行原文在窄窗下能折成好几行，按原文数的话
+    /// 「收起」反而比展开还高。
+    #[test]
+    fn collapsing_counts_wrapped_rows_not_source_lines() {
+        let theme = Theme::current();
+        let long = "本环境联网被封，web_search 与 web_fetch 均报 SSRF blocked，只能读本地只读证据；四个子问题全部无法取证，任何结论都只能算推测";
+        let out = lines(
+            NoticeKind::WorkflowReport,
+            "t",
+            long,
+            &theme,
+            44,
+            ToolMode::Collapsed,
+        );
+        // 标题 + 两行正文 + 一条省略脚注。
+        assert_eq!(out.len(), 4, "{:?}", text_of(&out));
+        assert!(text_of(&out).contains("还有"), "{:?}", text_of(&out));
+        for line in &out {
+            let row: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                unicode_width::UnicodeWidthStr::width(row.as_str()) <= 44,
+                "{row:?}"
+            );
+        }
     }
 
     #[test]

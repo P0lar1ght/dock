@@ -58,28 +58,35 @@ pub fn lines(
 
     let mut out = vec![header, Line::from("")];
     if failed {
-        for line in content.lines() {
-            out.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(theme.accent_error),
-            )));
-        }
+        let rows = content
+            .lines()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.accent_error),
+                ))
+            })
+            .collect();
+        out.extend(card::wrap_prefixed(rows, width));
         return out;
     }
+    // 下面这些字段全是模型写的，长度不可控：攒进 `rows` 统一折行再落进 `out`，
+    // 别让任意一条冲出终端右边缘。
+    let mut rows: Vec<Line<'static>> = Vec::new();
     if let Some(obj) = parsed.objective.as_deref().filter(|s| !s.is_empty()) {
-        out.push(Line::from(vec![
+        rows.push(Line::from(vec![
             Span::styled("  目标  ", theme.muted()),
             Span::styled(obj.to_string(), Style::default().fg(theme.text_primary)),
         ]));
     }
     if let Some(msg) = parsed.message.as_deref().filter(|s| !s.is_empty()) {
-        out.push(Line::from(vec![
+        rows.push(Line::from(vec![
             Span::styled("  进度  ", theme.muted()),
             Span::styled(msg.to_string(), Style::default().fg(theme.text_secondary)),
         ]));
     }
     if let Some(reason) = parsed.blocked.as_deref().filter(|s| !s.is_empty()) {
-        out.push(Line::from(vec![
+        rows.push(Line::from(vec![
             Span::styled("  受阻  ", theme.muted()),
             Span::styled(reason.to_string(), Style::default().fg(theme.warning)),
         ]));
@@ -88,9 +95,10 @@ pub fn lines(
         if parsed.message.as_deref() != Some(sum.as_str())
             && parsed.objective.as_deref() != Some(sum.as_str())
         {
-            out.push(card::indent(Line::from(Span::styled(sum, theme.muted()))));
+            rows.push(card::indent(Line::from(Span::styled(sum, theme.muted()))));
         }
     }
+    out.extend(card::wrap_prefixed(rows, width));
     if out.len() == 2 {
         out.push(Line::from(Span::styled(
             "  目标已更新".to_string(),
