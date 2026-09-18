@@ -14,11 +14,20 @@
 //!
 //! 输出预算走 `crate::tool_output`：按**匹配行**分页（不是字节），回报
 //! 「显示 N / 共 M」，溢出落盘并回路径。
+//!
+//! 遍历仍是 `ignore` 的顺序 + 路径排序（结果要可复现），但**扫描按批并发**：
+//! 一批文件里每颗各由一个 worker 扫，扫完按原顺序合并。顺序不变，`head_limit`
+//! 的「取前 N 条」语义也不变。批大小自适应（见 [`INITIAL_BATCH`]）：一批是扫完
+//! 才合并的，批开太大会让「额度早早填满」的查询白扫一整批。
+//!
+//! 超过 [`MAX_FILE_BYTES`] 的文件整颗跳过并报数（对齐 Grok `grep` 的
+//! `--max-filesize 5M`）：一条几百 MB 的日志能把 20s 墙钟吃光，让结果变成
+//! 「看起来搜完了、其实只搜了前缀」。搜索目标本身就是单个文件时不设这道闸。
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use grep_regex::RegexMatcherBuilder;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::overrides::OverrideBuilder;
 use ignore::types::TypesBuilder;
@@ -42,6 +51,28 @@ const MAX_CHARS_PER_LINE: usize = 1_000;
 const WALL_CLOCK: Duration = Duration::from_secs(20);
 /// 字节兜底帽。语义分页兜不住的才由它拦。
 const MAX_OUTPUT_BYTES: usize = 40_000;
+/// 单颗文件的字节闸：目录遍历时超过它就整颗跳过，并在结果里报跳过几颗。
+/// 对齐 Grok `grep` 的 `--max-filesize 5M`。
+const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
+/// 一个 worker 一批最多领多少颗文件（批大小的上限，见 [`INITIAL_BATCH`]）。
+///
+/// 批太小摊不掉线程启动（macOS 上一次几十 µs），批太大又会让「额度填满就停」
+/// 的粒度过粗、把没用的命中堆在内存里。
+const FILES_PER_WORKER: usize = 32;
+/// 第一批只领这么多颗文件。
+///
+/// 一批是「扫完才合并」的，所以额度在批中间填满也得先把整批扫完。而 content
+/// 模式下提前填满是常态（默认 200 行，一颗热门文件就够），批要是一上来就开到
+/// 满额，`grep "fn "` 这种查询得先白扫几百颗文件——实测比纯顺序版慢 4.8x。
+/// 于是批从小开始、每批没填满就放大 [`BATCH_GROWTH`] 倍：早停最多浪费一小批，
+/// 全扫也只多几轮合并。
+const INITIAL_BATCH: usize = 16;
+/// 上一批没把额度填满，下一批就放大这么多倍（上限 `FILES_PER_WORKER * workers`）。
+const BATCH_GROWTH: usize = 4;
+/// 少于这么多颗文件就整批顺序扫。
+///
+/// 搜一个小目录是常见操作，那时线程启动比扫描本身还贵。
+const PARALLEL_MIN_BATCH: usize = 8;
 
 pub const PARAMS: &str = r#"{"type":"object","properties":{
 "pattern":{"type":"string","description":"Regular expression to search for (ripgrep syntax). Escape literal special characters: `functionCall\\(`, or `interface\\{\\}` to match Go's interface{}."},
@@ -180,7 +211,13 @@ struct FileHits {
 
 /// 收集一个文件里的命中与上下文行；额度用尽就让 searcher 停下。
 struct Collector<'a> {
-    display: &'a str,
+    /// 正在扫的文件。显示名**命中之后**才算（见 [`Collector::prefix`]）。
+    path: &'a Path,
+    /// 搜索根，用于把绝对路径折回相对形式。
+    root: &'a Path,
+    /// 启动时取一次的 cwd——不是每颗文件都去 `getcwd`。
+    cwd: &'a Path,
+    display: Option<String>,
     hits: FileHits,
     /// 本文件还能再收多少行。0 = 已满。
     remaining: usize,
@@ -196,17 +233,36 @@ struct Collector<'a> {
 }
 
 impl Collector<'_> {
+    /// 这颗文件的显示名，第一次要用时才算。
+    ///
+    /// 绝大多数文件不命中，而算显示名要一次 `getcwd` + 一次 String 分配——
+    /// 那是**每颗文件**都要付的串行开销，放在命中路径上就白省了。
+    fn display(&mut self) -> &str {
+        if self.display.is_none() {
+            self.display = Some(display_path(self.path, self.root, self.cwd));
+        }
+        self.display.as_deref().unwrap_or_default()
+    }
+
     fn push(&mut self, sep: char, line_number: u64, bytes: &[u8]) -> bool {
         if self.remaining == 0 {
             self.hit_limit = true;
             return false;
         }
-        let text = String::from_utf8_lossy(bytes);
-        let text = text.trim_end_matches(['\n', '\r']);
+        let bytes = String::from_utf8_lossy(bytes);
+        let text = bytes.trim_end_matches(['\n', '\r']);
         let text = truncate_chars(text, MAX_CHARS_PER_LINE);
-        self.hits
-            .lines
-            .push(format!("{}{sep}{line_number}{sep}{text}", self.display));
+        if self.display.is_some() {
+            let display = self.display.as_deref().unwrap_or_default();
+            self.hits
+                .lines
+                .push(format!("{display}{sep}{line_number}{sep}{text}"));
+        } else {
+            let display = display_path(self.path, self.root, self.cwd);
+            let line = format!("{display}{sep}{line_number}{sep}{text}");
+            self.display = Some(display);
+            self.hits.lines.push(line);
+        }
         self.remaining -= 1;
         true
     }
@@ -254,9 +310,8 @@ impl Sink for Collector<'_> {
 }
 
 /// 把绝对路径显示成相对 cwd 的形式（对齐 rg 的输出习惯）。
-fn display_path(path: &Path, root: &Path) -> String {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| root.to_path_buf());
-    path.strip_prefix(&cwd)
+fn display_path(path: &Path, root: &Path, cwd: &Path) -> String {
+    path.strip_prefix(cwd)
         .or_else(|_| path.strip_prefix(root))
         .unwrap_or(path)
         .to_string_lossy()
@@ -288,6 +343,302 @@ struct Outcome {
     next_hint: &'static str,
     /// 搜了什么——空结果时明确回报，免得模型把「工具坏了」和「真没有」搞混。
     scope: String,
+    /// 因为超过 [`MAX_FILE_BYTES`] 被整颗跳过的文件数。
+    skipped_large: usize,
+}
+
+/// 每 worker 一份 `Searcher`：它不是 `Sync`，也不该跨线程共享。
+fn build_searcher(input: &Input) -> Searcher {
+    SearcherBuilder::new()
+        .line_number(true)
+        .multi_line(input.multiline)
+        // NUL 字节即判定为二进制并停搜：不这么做会把 .o / .png 的字节当文本吐出来。
+        .binary_detection(BinaryDetection::quit(0))
+        .before_context(input.before)
+        .after_context(input.after)
+        .build()
+}
+
+/// 待搜的一颗文件。显示名不在这里——它跟着命中一起算（见 [`Collector::display`]）。
+struct FileEntry {
+    path: PathBuf,
+}
+
+/// 一颗文件的扫描结果。
+enum FileScan {
+    /// 没命中，或读不动（权限、坏软链）——一颗文件不该废掉整次搜索。
+    NoMatch,
+    /// 超过大小闸，整颗跳过（数量要回报给模型）。
+    SkippedLarge,
+    Hits {
+        display: String,
+        hits: FileHits,
+        /// 这颗文件的收集因为额度用尽提前停了。
+        hit_limit: bool,
+    },
+}
+
+/// 一次扫描需要的前后文（root / cwd / 大小闸），跨 worker 共享。
+struct ScanCtx<'a> {
+    input: &'a Input,
+    root: &'a Path,
+    cwd: &'a Path,
+    size_guard: bool,
+}
+
+/// 扫一颗文件。
+fn scan_file(
+    entry: &FileEntry,
+    ctx: &ScanCtx<'_>,
+    matcher: &RegexMatcher,
+    searcher: &mut Searcher,
+    per_file_cap: usize,
+) -> FileScan {
+    // 大小闸在这里（而不是遍历时）查：`stat` 于是跟着扫描一起摊到多核上，
+    // 而且没命中的文件本来就要打开读，它是同一份元数据的顺路开销。
+    if ctx.size_guard
+        && std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES
+    {
+        return FileScan::SkippedLarge;
+    }
+    let mut collector = Collector {
+        path: &entry.path,
+        root: ctx.root,
+        cwd: ctx.cwd,
+        display: None,
+        hits: FileHits::default(),
+        remaining: per_file_cap,
+        hit_limit: false,
+        collect_lines: ctx.input.mode == OutputMode::Content,
+        stop_at_first: ctx.input.mode == OutputMode::FilesWithMatches,
+    };
+    if searcher
+        .search_path(matcher, &entry.path, &mut collector)
+        .is_err()
+    {
+        return FileScan::NoMatch;
+    }
+    if collector.hits.matches == 0 {
+        return FileScan::NoMatch;
+    }
+    FileScan::Hits {
+        display: collector.display().to_string(),
+        hits: collector.hits,
+        hit_limit: collector.hit_limit,
+    }
+}
+
+/// 一批文件的扫描结果，按 batch 顺序对齐。
+struct BatchScan {
+    scans: Vec<FileScan>,
+    /// 这一批里有文件因为墙钟到点没扫。
+    timed_out: bool,
+    /// 有 worker 崩了（内部 bug）：那一小段文件没扫到，必须说出来而不是静悄悄
+    /// 给出不完整的结果。
+    panicked: bool,
+}
+
+/// 并发扫一批文件，**按 batch 顺序**交回结果。
+///
+/// 顺序必须确定：结果要可复现，`head_limit` 的「取前 N 条」也只有顺序固定时
+/// 才有意义。所以这里是「先并发算、再按序合并」，不是谁先算完谁先出。
+fn scan_batch(
+    batch: &[FileEntry],
+    ctx: &ScanCtx<'_>,
+    matcher: &RegexMatcher,
+    per_file_cap: usize,
+    deadline: Instant,
+    workers: usize,
+) -> BatchScan {
+    let workers = if batch.len() < PARALLEL_MIN_BATCH {
+        1
+    } else {
+        workers.min(batch.len()).max(1)
+    };
+
+    // 单 worker 走顺序路径：小批不该为几十 µs 的线程启动付账，结果完全一样。
+    if workers == 1 {
+        let mut searcher = build_searcher(ctx.input);
+        let mut scans = Vec::with_capacity(batch.len());
+        let mut timed_out = false;
+        for entry in batch {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
+            scans.push(scan_file(entry, ctx, matcher, &mut searcher, per_file_cap));
+        }
+        scans.resize_with(batch.len(), || FileScan::NoMatch);
+        return BatchScan {
+            scans,
+            timed_out,
+            panicked: false,
+        };
+    }
+
+    struct Slice {
+        start: usize,
+        scans: Vec<FileScan>,
+        timed_out: bool,
+    }
+    let per_slice = batch.len().div_ceil(workers);
+    let slices: Vec<std::thread::Result<Slice>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = batch
+            .chunks(per_slice)
+            .enumerate()
+            .map(|(i, slice)| {
+                let start = i * per_slice;
+                scope.spawn(move || {
+                    let mut searcher = build_searcher(ctx.input);
+                    let mut scans = Vec::with_capacity(slice.len());
+                    let mut timed_out = false;
+                    for entry in slice {
+                        if Instant::now() >= deadline {
+                            timed_out = true;
+                            break;
+                        }
+                        scans.push(scan_file(entry, ctx, matcher, &mut searcher, per_file_cap));
+                    }
+                    scans.resize_with(slice.len(), || FileScan::NoMatch);
+                    Slice {
+                        start,
+                        scans,
+                        timed_out,
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join()).collect()
+    });
+
+    let mut scans: Vec<FileScan> = Vec::with_capacity(batch.len());
+    scans.resize_with(batch.len(), || FileScan::NoMatch);
+    let mut timed_out = false;
+    let mut panicked = false;
+    for slice in slices {
+        // worker 崩了：它领的那一段没扫到。不能假装扫过——把那一段留空并上报。
+        let Ok(mut slice) = slice else {
+            panicked = true;
+            continue;
+        };
+        timed_out |= slice.timed_out;
+        for (offset, scan) in slice.scans.drain(..).enumerate() {
+            if let Some(slot) = scans.get_mut(slice.start + offset) {
+                *slot = scan;
+            }
+        }
+    }
+    BatchScan {
+        scans,
+        timed_out,
+        panicked,
+    }
+}
+
+/// 跨批累计的结果与额度状态。
+struct SearchAcc {
+    mode: OutputMode,
+    head_limit: usize,
+    all_lines: Vec<String>,
+    entries: Vec<String>,
+    remaining: usize,
+    truncated: bool,
+    timed_out: bool,
+    /// 命中的文件数（写进结果的那些）。
+    total_seen: usize,
+    /// 因为超过 [`MAX_FILE_BYTES`] 被整颗跳过的文件数。
+    skipped_large: usize,
+    /// 有扫描 worker 崩过：结果可能缺一段。
+    panicked: bool,
+}
+
+impl SearchAcc {
+    fn new(input: &Input) -> Self {
+        Self {
+            mode: input.mode,
+            head_limit: input.head_limit,
+            all_lines: Vec::new(),
+            entries: Vec::new(),
+            remaining: input.head_limit,
+            truncated: false,
+            timed_out: false,
+            total_seen: 0,
+            skipped_large: 0,
+            panicked: false,
+        }
+    }
+
+    /// 这颗文件**最多**还能收多少行；非 `content` 模式没有单文件上限
+    /// （`count` 要真实计数）。
+    ///
+    /// 这是批开头取的一个上界，批内每颗文件拿到的是同一个值——所以它只挡得住
+    /// 单颗文件超额，挡不住批内多颗叠加超额。整趟额度由 [`SearchAcc::absorb`]
+    /// 按顺序合并时守。
+    fn per_file_cap(&self) -> usize {
+        if self.mode == OutputMode::Content {
+            self.remaining
+        } else {
+            usize::MAX
+        }
+    }
+
+    /// 按顺序并入一批结果。返回 `true` = 额度已填满，后面不必再搜。
+    ///
+    /// 额度满与墙钟到点在顺序实现里是互斥的（额度一满就 break，轮不到超时），
+    /// 这里保持同一约定：凡是「填满」返回的那条路径都不记 `timed_out`。
+    fn absorb(&mut self, scanned: BatchScan) -> bool {
+        let timed_out = scanned.timed_out;
+        self.panicked |= scanned.panicked;
+        // 先数跳过的大文件：额度填满会提前 return，不能让剩下的跳过数漏报。
+        for scan in scanned.scans.iter() {
+            if matches!(scan, FileScan::SkippedLarge) {
+                self.skipped_large += 1;
+            }
+        }
+        for scan in scanned.scans {
+            let FileScan::Hits {
+                display,
+                hits,
+                hit_limit,
+            } = scan
+            else {
+                continue;
+            };
+            self.total_seen += 1;
+            match self.mode {
+                OutputMode::Content => {
+                    // 额度在这里夹住，不能只靠单文件的 `per_file_cap`：那个值是
+                    // 批开头取的，批内每颗文件都按它收，叠起来会超过 head_limit
+                    // （`head_limit_holds_across_multiple_files`）。
+                    let want = hits.lines.len();
+                    let take = want.min(self.remaining);
+                    let overflowed = take < want;
+                    self.all_lines.extend(hits.lines.into_iter().take(take));
+                    self.remaining -= take;
+                    if hit_limit || overflowed || self.remaining == 0 {
+                        self.truncated = true;
+                        return true;
+                    }
+                }
+                OutputMode::FilesWithMatches => {
+                    self.entries.push(display);
+                    if self.entries.len() >= self.head_limit {
+                        self.truncated = true;
+                        return true;
+                    }
+                }
+                OutputMode::Count => {
+                    self.entries.push(format!("{display}:{}", hits.matches));
+                    if self.entries.len() >= self.head_limit {
+                        self.truncated = true;
+                        return true;
+                    }
+                }
+            }
+        }
+        self.timed_out |= timed_out;
+        false
+    }
 }
 
 fn search(input: &Input) -> Result<Outcome, String> {
@@ -297,15 +648,6 @@ fn search(input: &Input) -> Result<Outcome, String> {
         .dot_matches_new_line(input.multiline)
         .build(&input.pattern)
         .map_err(|e| format!("Error: invalid regex `{}`: {e}", input.pattern))?;
-
-    let mut searcher = SearcherBuilder::new()
-        .line_number(true)
-        .multi_line(input.multiline)
-        // NUL 字节即判定为二进制并停搜：不这么做会把 .o / .png 的字节当文本吐出来。
-        .binary_detection(BinaryDetection::quit(0))
-        .before_context(input.before)
-        .after_context(input.after)
-        .build();
 
     let mut walk = WalkBuilder::new(&input.path);
     // 顺序遍历 + 路径排序：工具结果要可复现，rg 的并行遍历顺序是不稳的。
@@ -341,85 +683,85 @@ fn search(input: &Input) -> Result<Outcome, String> {
         }
     }
 
-    let collect_lines = input.mode == OutputMode::Content;
-    let stop_at_first = input.mode == OutputMode::FilesWithMatches;
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let max_batch = FILES_PER_WORKER.saturating_mul(workers).max(1);
+    let mut batch_size = INITIAL_BATCH.min(max_batch);
+    // 显式点名一颗文件时不设大小闸：那是模型明说要搜它，跳过等于答非所问。
+    let size_guard = !input.path.is_file();
+    // cwd 取一次就够：以前它是每颗文件的 `getcwd`。
+    let cwd = std::env::current_dir().unwrap_or_else(|_| input.path.clone());
+    let ctx = ScanCtx {
+        input,
+        root: &input.path,
+        cwd: &cwd,
+        size_guard,
+    };
     let deadline = Instant::now() + WALL_CLOCK;
-    let mut all_lines: Vec<String> = Vec::new();
-    let mut entries: Vec<String> = Vec::new();
-    let mut remaining = input.head_limit;
-    let mut truncated = false;
-    let mut timed_out = false;
-    let mut total_seen = 0usize;
+    let mut acc = SearchAcc::new(input);
+    let mut batch: Vec<FileEntry> = Vec::with_capacity(batch_size);
 
     for dirent in walk.build() {
         if Instant::now() >= deadline {
-            timed_out = true;
+            acc.timed_out = true;
             break;
         }
         let Ok(dirent) = dirent else { continue };
         if !dirent.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
-        let path = dirent.path();
-        let display = display_path(path, &input.path);
-        let mut collector = Collector {
-            display: &display,
-            hits: FileHits::default(),
-            remaining: if collect_lines { remaining } else { usize::MAX },
-            hit_limit: false,
-            collect_lines,
-            stop_at_first,
-        };
-        // 读不动的文件（权限、坏软链）跳过，不让一个文件废掉整次搜索。
-        if searcher
-            .search_path(&matcher, path, &mut collector)
-            .is_err()
-        {
+        batch.push(FileEntry {
+            path: dirent.path().to_path_buf(),
+        });
+        if batch.len() < batch_size {
             continue;
         }
-        if collector.hits.matches == 0 {
-            continue;
+        let scanned = scan_batch(
+            &batch,
+            &ctx,
+            &matcher,
+            acc.per_file_cap(),
+            deadline,
+            workers,
+        );
+        let full = acc.absorb(scanned);
+        batch.clear();
+        if full || acc.timed_out {
+            break;
         }
-        total_seen += 1;
-        match input.mode {
-            OutputMode::Content => {
-                let hit_limit = collector.hit_limit;
-                let taken = collector.hits.lines.len();
-                all_lines.extend(collector.hits.lines);
-                remaining = remaining.saturating_sub(taken);
-                if hit_limit || remaining == 0 {
-                    truncated = true;
-                    break;
-                }
-            }
-            OutputMode::FilesWithMatches => {
-                entries.push(display.clone());
-                if entries.len() >= input.head_limit {
-                    truncated = true;
-                    break;
-                }
-            }
-            OutputMode::Count => {
-                entries.push(format!("{display}:{}", collector.hits.matches));
-                if entries.len() >= input.head_limit {
-                    truncated = true;
-                    break;
-                }
-            }
-        }
+        // 这一批没把额度填满，说明这趟大概是全扫：放大下一批，摊掉合并与线程启动。
+        batch_size = batch_size.saturating_mul(BATCH_GROWTH).min(max_batch);
+    }
+    if !acc.truncated && !acc.timed_out && !batch.is_empty() {
+        let scanned = scan_batch(
+            &batch,
+            &ctx,
+            &matcher,
+            acc.per_file_cap(),
+            deadline,
+            workers,
+        );
+        acc.absorb(scanned);
     }
 
-    let scope = describe_scope(input, &type_note, timed_out);
+    let scope = describe_scope(
+        input,
+        &type_note,
+        acc.timed_out,
+        acc.skipped_large,
+        acc.panicked,
+    );
     let (rendered, shown, unit, next_hint) = match input.mode {
         OutputMode::Content => (
-            all_lines.join("\n"),
-            all_lines.len(),
+            acc.all_lines.join("\n"),
+            acc.all_lines.len(),
             "matching lines",
             " Narrow the pattern, add a glob/type filter, or raise head_limit.",
         ),
         _ => (
-            entries.join("\n"),
-            entries.len(),
+            acc.entries.join("\n"),
+            acc.entries.len(),
             "files",
             " Narrow the pattern or raise head_limit.",
         ),
@@ -432,12 +774,15 @@ fn search(input: &Input) -> Result<Outcome, String> {
             counts: Counts::exact(0, 0),
             unit,
             next_hint,
-            scope,
+            // scope 已经写进 body，别让 render 再追加一遍。
+            scope: String::new(),
+            skipped_large: acc.skipped_large,
         });
     }
 
     // 额度填满就停了走查，所以总量是「至少」而不是精确值——不能谎报精确数。
-    let counts = if truncated || timed_out {
+    // worker 崩过同理：缺一段就不是精确总数。
+    let counts = if acc.truncated || acc.timed_out || acc.panicked {
         Counts::at_least(shown)
     } else {
         Counts::exact(shown, shown)
@@ -448,12 +793,23 @@ fn search(input: &Input) -> Result<Outcome, String> {
         counts,
         unit,
         next_hint,
-        scope: if total_seen > 0 { scope } else { String::new() },
+        scope: if acc.total_seen > 0 {
+            scope
+        } else {
+            String::new()
+        },
+        skipped_large: acc.skipped_large,
     })
 }
 
 /// 「搜了什么范围」。空结果时这一句是模型判断「没有」还是「搜错地方」的唯一依据。
-fn describe_scope(input: &Input, type_note: &str, timed_out: bool) -> String {
+fn describe_scope(
+    input: &Input,
+    type_note: &str,
+    timed_out: bool,
+    skipped_large: usize,
+    panicked: bool,
+) -> String {
     let mut bits = vec![format!("searched {}", input.path.display())];
     if let Some(g) = input.glob.as_deref() {
         bits.push(format!("glob={g}"));
@@ -469,12 +825,24 @@ fn describe_scope(input: &Input, type_note: &str, timed_out: bool) -> String {
     if !type_note.is_empty() {
         s.push_str(type_note);
     }
+    if skipped_large > 0 {
+        s.push_str(&format!(
+            " NOTE: skipped {skipped_large} file(s) larger than {} MB.",
+            MAX_FILE_BYTES / (1024 * 1024)
+        ));
+    }
     if timed_out {
         s.push_str(&format!(
             " NOTE: the search hit its {}s wall-clock budget and stopped; the above is only what \
              it had scanned by then.",
             WALL_CLOCK.as_secs()
         ));
+    }
+    if panicked {
+        s.push_str(
+            " NOTE: a scan worker failed; one slice of files was not searched, so the above may \
+             be incomplete. Re-run the search.",
+        );
     }
     s
 }
@@ -487,18 +855,21 @@ async fn render(call_id: &str, outcome: Outcome) -> String {
         unit,
         next_hint,
         scope,
+        skipped_large,
     } = outcome;
     let spill = match full {
         Some(full) => tool_output::offload(call_id, &full).await,
         None => None,
     };
     let footer = tool_output::footer(&counts, unit, next_hint, spill.as_deref());
+    let footer_empty = footer.is_empty();
     let mut out = body;
-    if !footer.is_empty() {
+    if !footer_empty {
         out.push_str(&footer);
-        if !scope.is_empty() {
-            out.push_str(&format!("\n{scope}"));
-        }
+    }
+    // 跳过了超大文件这件事必须说出口：结果非空时模型尤其容易把它当成「搜全了」。
+    if !scope.is_empty() && (!footer_empty || skipped_large > 0) {
+        out.push_str(&format!("\n{scope}"));
     }
     tool_output::cap_bytes(call_id, out, &Budget::list(MAX_OUTPUT_BYTES)).await
 }
@@ -640,6 +1011,187 @@ mod tests {
         assert!(out.contains("no matches"), "{out}");
         assert!(out.contains("searched"), "{out}");
         assert!(out.contains(".gitignore"), "要说明做了哪些过滤：{out}");
+    }
+
+    /// 并发扫描必须与顺序扫描给出**逐字相同**的结果顺序：并发改的是速度，
+    /// 不是「前 N 条」是哪 N 条。
+    #[test]
+    fn parallel_scan_matches_sequential_scan() {
+        let dir = fixture();
+        // 多到跨好几个 slice，且文件名顺序与创建顺序不同，专门抓「谁先算完谁先出」。
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for i in (0..14).rev() {
+            let p = dir.path().join(format!("src/f{i:02}.rs"));
+            std::fs::write(&p, format!("fn alpha_{i}() {{}}\n")).unwrap();
+            paths.push(p);
+        }
+        paths.sort();
+        let input = parse(r#"{"pattern":"alpha","path":".","head_limit":100}"#).unwrap();
+        let matcher = RegexMatcherBuilder::new()
+            .build("alpha")
+            .expect("valid regex");
+        let batch: Vec<FileEntry> = paths
+            .iter()
+            .map(|p| FileEntry { path: p.clone() })
+            .collect();
+        let cwd = std::env::current_dir().unwrap();
+        let root = dir.path().to_path_buf();
+        let ctx = ScanCtx {
+            input: &input,
+            root: &root,
+            cwd: &cwd,
+            size_guard: true,
+        };
+
+        let deadline = Instant::now() + WALL_CLOCK;
+        let seq = scan_batch(&batch, &ctx, &matcher, 100, deadline, 1);
+        let par = scan_batch(&batch, &ctx, &matcher, 100, deadline, 8);
+
+        assert_eq!(seq.scans.len(), batch.len());
+        assert_eq!(par.scans.len(), batch.len());
+        for (i, (a, b)) in seq.scans.iter().zip(par.scans.iter()).enumerate() {
+            match (a, b) {
+                (FileScan::Hits { hits: ha, .. }, FileScan::Hits { hits: hb, .. }) => {
+                    assert_eq!(ha.lines, hb.lines, "第 {i} 颗结果不一致");
+                    assert_eq!(ha.matches, hb.matches, "第 {i} 颗命中数不一致");
+                }
+                (FileScan::NoMatch, FileScan::NoMatch) => {}
+                _ => panic!("第 {i} 颗：两边结论不一致"),
+            }
+        }
+        // 显示名只能算一次，且必须相对 cwd——它是并行路径上唯一带状态的字段。
+        let hit_display = seq
+            .scans
+            .iter()
+            .find_map(|s| match s {
+                FileScan::Hits { display, .. } => Some(display.clone()),
+                _ => None,
+            })
+            .expect("至少一颗命中");
+        assert!(hit_display.starts_with("src/"), "{hit_display}");
+    }
+
+    /// 只并行扫描、不搬走串行开销的话只有 1.03–1.20x（见 docs/tools/workspace.md）：
+    /// 这条守住的是「worker 崩了不能静悄悄给不完整结果」。
+    #[test]
+    fn a_failed_worker_marks_the_result_incomplete() {
+        let input = parse(r#"{"pattern":"x","path":"."}"#).unwrap();
+        let mut acc = SearchAcc::new(&input);
+        acc.absorb(BatchScan {
+            scans: vec![FileScan::NoMatch],
+            timed_out: false,
+            panicked: true,
+        });
+        assert!(acc.panicked, "worker 崩过要记住");
+        let scope = describe_scope(&input, "", acc.timed_out, acc.skipped_large, acc.panicked);
+        assert!(scope.contains("scan worker failed"), "{scope}");
+        assert!(scope.contains("Re-run"), "要说清怎么办：{scope}");
+    }
+
+    /// 超过 5MB 的文件在目录遍历里整颗跳过，但必须报数——不说，模型会把结果
+    /// 当成「搜全了」。
+    #[tokio::test]
+    async fn oversized_file_is_skipped_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("small.txt"), "needle here\n").unwrap();
+        let big = dir.path().join("big.log");
+        std::fs::write(
+            &big,
+            format!("needle {}\n", "x".repeat(MAX_FILE_BYTES as usize + 16)),
+        )
+        .unwrap();
+
+        let out = run(
+            "t",
+            &serde_json::json!({"pattern": "needle", "path": dir.path()}).to_string(),
+        )
+        .await;
+        assert!(out.contains("small.txt:1:needle here"), "{out}");
+        assert!(!out.contains("big.log"), "超大文件不该被展开：{out}");
+        assert!(
+            out.contains("skipped 1 file(s) larger than 5 MB"),
+            "跳过了几颗必须回报：{out}"
+        );
+
+        // 只有那颗大文件命中时，也要说清楚「没有」是因为跳过了它。
+        let only_big = run(
+            "t",
+            &serde_json::json!({"pattern": "xxxxxx", "path": dir.path()}).to_string(),
+        )
+        .await;
+        assert!(only_big.contains("no matches"), "{only_big}");
+        assert!(only_big.contains("skipped 1 file(s)"), "{only_big}");
+    }
+
+    /// 显式点名一颗文件时不吃大小闸：跳过等于答非所问。
+    #[tokio::test]
+    async fn explicit_single_file_target_is_never_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.log");
+        std::fs::write(
+            &big,
+            format!("needle {}\n", "x".repeat(MAX_FILE_BYTES as usize + 16)),
+        )
+        .unwrap();
+        let out = run(
+            "t",
+            &serde_json::json!({"pattern": "needle", "path": big}).to_string(),
+        )
+        .await;
+        assert!(out.contains("needle"), "{out}");
+        assert!(!out.contains("skipped"), "{out}");
+    }
+
+    /// `head_limit` 是**整趟**的额度，不是每颗文件的。
+    ///
+    /// 按批扫描把单文件额度冻结在批开头，批内每颗命中文件都按同一个 `remaining`
+    /// 收行，叠起来就冲破了额度：head_limit=200 曾经实收 300 行，页脚却还在说
+    /// 「showing 300 ... at least 300 more」。单文件的用例盖不到这条，因为那时
+    /// `Collector` 自己的计数还管用。
+    #[tokio::test]
+    async fn head_limit_holds_across_multiple_files() {
+        let _env = crate::test_env::scoped().home();
+        let dir = tempfile::tempdir().unwrap();
+        // 每颗都不足额度、两颗就超——专抓「跨文件叠加」而不是「单文件超额」。
+        for f in 0..10 {
+            let body: String = (1..=150).map(|i| format!("hit {f} line {i}\n")).collect();
+            std::fs::write(dir.path().join(format!("f{f:02}.txt")), body).unwrap();
+        }
+        let out = run(
+            "multi-file-limit",
+            &serde_json::json!({"pattern": "hit", "path": dir.path(), "head_limit": 200})
+                .to_string(),
+        )
+        .await;
+        let inline = out.lines().filter(|l| l.contains(":hit ")).count();
+        assert_eq!(inline, 200, "内联行数必须正好是 head_limit：\n{out}");
+        assert!(out.contains("at least"), "超额的部分要说清楚：{out}");
+    }
+
+    /// 批大小是自适应的（先小后大），所以结果必然跨批合并——合并顺序必须仍是
+    /// 路径顺序，否则 `head_limit` 的「前 N 条」是哪 N 条就不确定了。
+    #[tokio::test]
+    async fn results_stay_path_ordered_across_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        // 比 INITIAL_BATCH 多得多，保证至少跨两批。
+        for f in 0..(INITIAL_BATCH * 4) {
+            std::fs::write(dir.path().join(format!("f{f:03}.txt")), "needle\n").unwrap();
+        }
+        let out = run(
+            "ordered",
+            &serde_json::json!({
+                "pattern": "needle",
+                "path": dir.path(),
+                "output_mode": "files_with_matches",
+            })
+            .to_string(),
+        )
+        .await;
+        let files: Vec<&str> = out.lines().filter(|l| l.ends_with(".txt")).collect();
+        assert_eq!(files.len(), INITIAL_BATCH * 4, "一颗都不能丢：{out}");
+        let mut sorted = files.clone();
+        sorted.sort_unstable();
+        assert_eq!(files, sorted, "跨批合并必须保持路径顺序");
     }
 
     /// 截断必须回报「至少 N」并给落盘路径——否则模型会把前 N 条当成全部。
