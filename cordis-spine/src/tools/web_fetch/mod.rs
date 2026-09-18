@@ -13,20 +13,37 @@ use crate::names::TOOLS;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
-use config::WebFetchParams;
+pub use config::WebFetchParams;
 use fetch::{fetch_url, search_web};
 
 const FETCH_PARAMS: &str = r#"{"type":"object","properties":{"url":{"type":"string","description":"The URL to fetch content from."}},"required":["url"]}"#;
 const SEARCH_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"The search query to perform."},"allowed_domains":{"type":"array","items":{"type":"string"},"description":"Optional list of domains to restrict search to."}},"required":["query"]}"#;
 
+/// 组合根便利函数：`[toolset.web_fetch]` → 运行时参数。
+///
+/// 读磁盘的是这里，不是插件体——`tool-web` 拿到的是已经定好的 `WebFetchParams`，
+/// 自己不 live-read 环境（和 `tool-task` 收 `TaskConfig` 同一个形状）。
+pub fn web_fetch_params() -> WebFetchParams {
+    WebFetchParams::from_tool_config(&cordis_base::config::load_web_fetch_config())
+}
+
 pub fn tool_web() -> Plugin {
-    plugin("tool-web", Inject::from([TOOLS]), |ctx, _: &()| {
-        let tools = ctx.require::<Tools>(TOOLS)?;
-        let fetch: ToolBody =
-            std::sync::Arc::new(|call| Box::pin(async move { web_fetch(call).await }));
-        let search: ToolBody =
-            std::sync::Arc::new(|call| Box::pin(async move { web_search(call).await }));
-        own_registered(
+    plugin(
+        "tool-web",
+        Inject::from([TOOLS]),
+        |ctx, params: &WebFetchParams| {
+            let tools = ctx.require::<Tools>(TOOLS)?;
+            let fetch_params = params.clone();
+            let search_params = params.clone();
+            let fetch: ToolBody = std::sync::Arc::new(move |call| {
+                let params = fetch_params.clone();
+                Box::pin(async move { web_fetch(call, &params).await })
+            });
+            let search: ToolBody = std::sync::Arc::new(move |call| {
+                let params = search_params.clone();
+                Box::pin(async move { web_search(call, &params).await })
+            });
+            own_registered(
             ctx,
             vec![
                 tools.register(
@@ -47,8 +64,9 @@ pub fn tool_web() -> Plugin {
                 )?,
             ],
         )?;
-        Ok(None)
-    })
+            Ok(None)
+        },
+    )
 }
 
 fn arg_url(raw: &str) -> Option<String> {
@@ -76,23 +94,21 @@ fn arg_query(raw: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn web_fetch(call: ToolCall) -> ToolResult {
+async fn web_fetch(call: ToolCall, params: &WebFetchParams) -> ToolResult {
     let Some(url) = arg_url(&call.arguments) else {
         return tool_result(call, "Error: url is required");
     };
-    let params = WebFetchParams::default();
-    match fetch_url(&url, &params).await {
+    match fetch_url(&url, params).await {
         Ok(body) => tool_result(call, body),
         Err(e) => tool_result(call, e.to_string()),
     }
 }
 
-async fn web_search(call: ToolCall) -> ToolResult {
+async fn web_search(call: ToolCall, params: &WebFetchParams) -> ToolResult {
     let Some(query) = arg_query(&call.arguments) else {
         return tool_result(call, "Error: query is required");
     };
-    let params = WebFetchParams::default();
-    match search_web(&query, &params).await {
+    match search_web(&query, params).await {
         Ok(body) => tool_result(call, body),
         Err(e) => tool_result(call, e.to_string()),
     }

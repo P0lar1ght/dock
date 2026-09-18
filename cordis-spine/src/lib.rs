@@ -124,7 +124,7 @@ pub use tools::tool_images::{
     cap_images, user_image_from_bytes, user_image_from_path, IMAGE_INLINE_PLACEHOLDER,
     MAX_TOOL_IMAGES,
 };
-pub use tools::web_fetch::tool_web;
+pub use tools::web_fetch::{tool_web, web_fetch_params, WebFetchParams};
 pub use tools::workflow::{
     extra_tool_slash_arguments, tool_workflow, workflow_command_arguments,
     workflow_slash_arguments, WorkflowInfo, WorkflowRunSnap, Workflows, WORKFLOW_TOOL_NAME,

@@ -4,10 +4,15 @@
 //! - Non-public addresses (loopback, RFC 1918, link-local, CGNAT, TEST-NET,
 //!   multicast, etc.) are blocked by default.
 //! - Local access is opt-in via tool params (`WebFetchParams::allow_local`,
-//!   set from `[toolset.web_fetch] allow_local` or `GROK_WEB_FETCH_ALLOW_LOCAL=1`).
-//!   Even when enabled, only **explicit** loopback hosts are allowed
-//!   (`localhost`, `127.0.0.0/8` literals, `::1`). A public hostname that
-//!   resolves to loopback/private stays blocked.
+//!   set from `[toolset.web_fetch] allow_local`). Even when enabled, only
+//!   **explicit** loopback hosts are allowed (`localhost`, `127.0.0.0/8`
+//!   literals, `::1`). A public hostname that resolves to loopback/private
+//!   stays blocked.
+//! - A configured forward proxy (`WebFetchParams::proxy_endpoint`) switches the
+//!   DNS pre-check off for plain hostnames — see [`skips_local_dns`]. The
+//!   address the request actually reaches is resolved by the proxy, so the local
+//!   lookup is not evidence. IP literals and explicit local hostnames are still
+//!   judged locally.
 //!
 //! Reference: [IANA IPv4 Special-Purpose Address Registry](https://www.iana.org/assignments/iana-ipv4-special-registry/)
 
@@ -122,12 +127,35 @@ pub(crate) fn is_blocked_for_host(ip: IpAddr, host: &str, allow_local: bool) -> 
     true
 }
 
+/// 配了转发代理时，这个 host 要不要跳过**本地** DNS 预检。
+///
+/// 为什么跳过：出口是代理，连接目的地址由代理侧解析，本地那次 `lookup_host`
+/// 的结果跟这次请求会连到哪里**没有关系**。fake-ip / 分流 DNS 下它返回的是保留
+/// 段假址（本机实测 `example.com` → `198.18.0.164`，落在下面的 RFC 2544 段里），
+/// 拿它当证据就会把每一次取页面都判成 SSRF。
+///
+/// 两处仍然不跳过，它们不依赖本地解析：
+/// - **IP 字面量**——URL 自己点名了地址，代理救不了它
+/// - **显式本地主机名**（`localhost` / `127.0.0.0/8` / `::1`）——仍由 `allow_local` 决定
+///
+/// 代价说清楚：代理若是本机在跑（Clash 那种），它自己会去解析并连内网，也就是
+/// 「代理成为信任边界」。这是配置代理这一动作隐含的信任转移，不是这里放出来的。
+pub(crate) fn skips_local_dns(host: &str, via_proxy: bool) -> bool {
+    via_proxy && host.parse::<IpAddr>().is_err() && !is_explicit_local_host(host)
+}
+
 /// Resolve hostname via DNS and verify none of the resolved addresses are
 /// blocked under the SSRF policy.
 ///
 /// `allow_local` comes from tool config (`WebFetchParams::allow_local`); it is
 /// not read from the environment here so the agent cannot flip the policy.
-pub(crate) async fn check_ssrf(url: &Url, allow_local: bool) -> Result<(), WebFetchError> {
+/// `via_proxy` likewise comes from the resolved tool params
+/// (`WebFetchParams::via_proxy`), never from the request.
+pub(crate) async fn check_ssrf(
+    url: &Url,
+    allow_local: bool,
+    via_proxy: bool,
+) -> Result<(), WebFetchError> {
     let host = url
         .host_str()
         .ok_or_else(|| WebFetchError::SingleLabelHost {
@@ -142,6 +170,10 @@ pub(crate) async fn check_ssrf(url: &Url, allow_local: bool) -> Result<(), WebFe
                 ip,
             });
         }
+        return Ok(());
+    }
+
+    if skips_local_dns(host, via_proxy) {
         return Ok(());
     }
 
@@ -389,7 +421,7 @@ mod tests {
     #[tokio::test]
     async fn ssrf_blocks_ip_literal_private() {
         let url = Url::parse("https://10.0.0.1/secret").unwrap();
-        let result = check_ssrf(&url, false).await;
+        let result = check_ssrf(&url, false, false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("private"));
     }
@@ -397,20 +429,72 @@ mod tests {
     #[tokio::test]
     async fn ssrf_blocks_loopback_literal_by_default() {
         let url = Url::parse("http://127.0.0.1:8080/").unwrap();
-        let result = check_ssrf(&url, false).await;
+        let result = check_ssrf(&url, false, false).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn ssrf_allows_loopback_literal_when_opted_in() {
         let url = Url::parse("http://127.0.0.1:8080/").unwrap();
-        assert!(check_ssrf(&url, true).await.is_ok());
+        assert!(check_ssrf(&url, true, false).await.is_ok());
     }
 
     #[tokio::test]
     async fn ssrf_allows_ip_literal_public() {
         let url = Url::parse("https://1.1.1.1/").unwrap();
-        let result = check_ssrf(&url, false).await;
+        let result = check_ssrf(&url, false, false).await;
         assert!(result.is_ok());
+    }
+
+    // ── via_proxy ───────────────────────────────────────────────────────
+
+    #[test]
+    fn skips_local_dns_only_for_plain_names_under_proxy() {
+        // 名字 + 代理 = 本地解析不作数，跳过。
+        assert!(skips_local_dns("example.com", true));
+        assert!(skips_local_dns("html.duckduckgo.com", true));
+        // 没配代理：一切照旧。
+        assert!(!skips_local_dns("example.com", false));
+        // IP 字面量：URL 自己点名了地址，代理救不了它。
+        assert!(!skips_local_dns("10.0.0.1", true));
+        assert!(!skips_local_dns("127.0.0.1", true));
+        assert!(!skips_local_dns("169.254.169.254", true));
+        assert!(!skips_local_dns("::1", true));
+        // 显式本地主机名：仍由 allow_local 决定。
+        assert!(!skips_local_dns("localhost", true));
+        assert!(!skips_local_dns("localhost.", true));
+    }
+
+    /// 配了代理时，普通域名不再触发本地 DNS——用 `.invalid`（RFC 2606，永不解析）
+    /// 来证。旧行为下这个名字必然走 DNS 并失败（NXDOMAIN，或 fake-ip 环境里解成
+    /// 198.18 保留段被拦），两种都是 `Err`，所以这条用例是真能打到原缺陷的。
+    #[tokio::test]
+    async fn via_proxy_skips_dns_for_plain_hostname() {
+        let url = Url::parse("https://not-a-real-host.invalid/page").unwrap();
+        assert!(
+            check_ssrf(&url, false, true).await.is_ok(),
+            "配了代理时不该再拿本地 DNS 结果判私网"
+        );
+        // 同一个 URL 不配代理：还是一路走到 DNS，解析不出来就报错。
+        assert!(check_ssrf(&url, false, false).await.is_err());
+    }
+
+    /// 开了代理也不能靠 IP 字面量摸内网。
+    #[tokio::test]
+    async fn via_proxy_still_blocks_ip_literals() {
+        for raw in [
+            "https://10.0.0.1/secret",
+            "http://127.0.0.1:8080/",
+            "http://169.254.169.254/latest/meta-data/",
+        ] {
+            let url = Url::parse(raw).unwrap();
+            assert!(
+                check_ssrf(&url, false, true).await.is_err(),
+                "{raw} 不该因为配了代理就放行"
+            );
+        }
+        // 公网字面量照常。
+        let public = Url::parse("https://1.1.1.1/").unwrap();
+        assert!(check_ssrf(&public, false, true).await.is_ok());
     }
 }

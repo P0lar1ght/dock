@@ -39,7 +39,7 @@
 | `tool-skills` | → `"tools"`（live `"skills"`） | `skill` | 按需读 `SKILL.md` 正文 | [skills](docs/tools/skills.md) |
 | `project-instructions` | → `agent/step-start` | — | `AGENTS.md` 进历史尾部 reminder，**不进系统提示** | [project-instructions](docs/tools/project-instructions.md) |
 | `agent-presets` | `"agentPresets"` | — | YAML 人设 + 工具允许名单；`task` 的 `subagent_type` enum 来源 | [agent-presets](docs/tools/agent-presets.md) |
-| `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 | — |
+| `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 | [web_fetch](docs/tools/web_fetch.md) |
 | `tool-browser` | `"browser"` + `"tools"` | `browser_*` 21 颗（按需） | BUA P2，in-process chromiumoxide CDP | [browser](docs/tools/browser.md) |
 | `tool-computer` | `"computer"` | — | CUA C0 薄驾驶舱；桌面键鼠经 `cua-driver` MCP | [computer](docs/tools/computer.md) |
 | `tool-todo` | `"todos"` + `"tools"` | `todo_write` | Grok merge/replace + 两条续跑 / 提醒 waterfall | [todo](docs/tools/todo.md) |
@@ -71,7 +71,7 @@
 - `read_file`：纯文本（图片走多模态），无 PDF / PPTX / ipynb；**无单行长度帽**，minified 单行大文件仍能吃掉窗口；**不拦 NUL**（合法 UTF-8 含 NUL 的文件会把字节灌进上下文，grep 那边已拦）
 - `list_dir` 大目录摘要的头部采样：扩展名计数是对的，但「前 100 个文件名」对**同前缀爆炸**的目录信息量很低（`target/debug/deps` 下前 100 个几乎全是同一 crate 的 CGU 分片）。可考虑按公共前缀去重后再采样。实测踩到过
 - `tool-images/` 与 `screenshots/` 没有清理，无限增长（`tool-output/` 已有，见 [workspace](docs/tools/workspace.md)）
-- `web_search`：不是 xAI Responses API
+- `web_search`：不是 xAI Responses API；结果是从 DuckDuckGo HTML 里扫出的**百分号编码**跳转链接，没有标题与摘要
 - `task`：无 worktree / ACP / MCP pool；子代理共用父模型、父工具集与父工作目录
 - `update_goal`：尚未自动 spawn Grok 的 goal plan writer / classifier / strategist
 - MCP：`x-mcp-header` 自定义头未镜像

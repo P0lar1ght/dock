@@ -390,6 +390,50 @@ struct FileConfig {
     /// `[browser]` — BUA Chromium display prefs (headed vs headless).
     #[serde(default)]
     browser: BrowserSection,
+    /// `[toolset.<tool>]` — per-tool runtime knobs owned by the tool plugins.
+    #[serde(default)]
+    toolset: ToolsetSection,
+}
+
+/// `[toolset.web_fetch]` —— `tool-web` 的运行时旋钮。
+///
+/// 只收**真会生效**的键。Grok 的 `WebFetchParams` 还带 `cache_ttl_secs` /
+/// `max_cache_entries` / `context_window_tokens`，但 dock 的 fetch 管道没有页面
+/// 缓存、也没实现那个 3% 上下文帽——把死键摆进配置面只会让人以为自己配上了。
+///
+/// 故意**不加** `deny_unknown_fields`：`read_file` 是把整个 `FileConfig` 一把
+/// `toml::from_str` 的，任何一处解析失败都会让**整份文件**（含 models）被静默
+/// 丢弃。一个拼错的键不该有这种后果，改为在 `warn_unknown_web_fetch_keys` 里喊
+/// 一声。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct WebFetchToolConfig {
+    /// HTTP 请求总超时（秒）。默认 60；connect 恒 10s，不可配。
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// 响应体上限（字节）。默认 10 MB。**下完才判**，不是流式中断。
+    #[serde(default)]
+    pub max_content_length: Option<usize>,
+    /// 喂给模型的 markdown 上限（字节）。默认 100 000，超了截断并追加 `[truncated]`。
+    #[serde(default)]
+    pub max_markdown_length: Option<usize>,
+    /// 只允许抓这些域。默认不设 = 不额外限制（SSRF 仍在）。
+    /// 注意 `[]`（显式空表）= **全部拒绝**，和省略不是一个意思。
+    #[serde(default)]
+    pub allowed_domains: Option<Vec<String>>,
+    /// 转发代理。设上之后出口由代理解析，SSRF 的本地 DNS 预检随之失去依据
+    /// （见 `cordis-spine` 的 `tools/web_fetch/ssrf.rs`）。
+    #[serde(default)]
+    pub proxy_endpoint: Option<String>,
+    /// 只放行**显式**本地主机名（`localhost` / `127.0.0.0/8` / `::1`）。
+    /// 私有段与云元数据地址永不放行。默认 false。
+    #[serde(default)]
+    pub allow_local: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ToolsetSection {
+    #[serde(default)]
+    web_fetch: WebFetchToolConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -842,6 +886,77 @@ pub fn load_browser_headed_from(paths: &[PathBuf]) -> bool {
         }
     }
     headed
+}
+
+/// 认得的 `[toolset.web_fetch]` 键。和 [`WebFetchToolConfig`] 的字段一一对应。
+const WEB_FETCH_TOOLSET_KEYS: &[&str] = &[
+    "timeout_secs",
+    "max_content_length",
+    "max_markdown_length",
+    "allowed_domains",
+    "proxy_endpoint",
+    "allow_local",
+];
+
+/// Live-read `[toolset.web_fetch]`. Later files overlay earlier ones **逐字段**
+/// ——`~/.dock/config.toml` < 项目 `.dock/config.toml`，项目只写一个 `timeout_secs`
+/// 不会把用户那份的 `proxy_endpoint` 一起清掉。整段表则不做合并：写了
+/// `allowed_domains` 就是覆盖，不是追加。
+pub fn load_web_fetch_config() -> WebFetchToolConfig {
+    load_web_fetch_config_from(&catalog_paths())
+}
+
+pub fn load_web_fetch_config_from(paths: &[PathBuf]) -> WebFetchToolConfig {
+    let mut out = WebFetchToolConfig::default();
+    for path in paths {
+        warn_unknown_web_fetch_keys(path);
+        let Some(file) = read_file(path) else {
+            continue;
+        };
+        let row = file.toolset.web_fetch;
+        // 逐字段 overlay：`Some` 才盖，`None` 表示这个文件没表态。
+        macro_rules! overlay {
+            ($($f:ident),+ $(,)?) => { $( if row.$f.is_some() { out.$f = row.$f; } )+ };
+        }
+        overlay!(
+            timeout_secs,
+            max_content_length,
+            max_markdown_length,
+            allowed_domains,
+            proxy_endpoint,
+            allow_local,
+        );
+    }
+    out
+}
+
+/// `[toolset.web_fetch]` 里认不出的键。
+///
+/// 结构体是宽容的（一个 typo 不能让整份 config.toml 被丢弃），所以这里显式喊
+/// 一声——否则「配了没生效」会变成一次纯靠猜的排查。
+fn warn_unknown_web_fetch_keys(path: &Path) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(doc) = raw.parse::<toml::Value>() else {
+        return;
+    };
+    let Some(table) = doc
+        .get("toolset")
+        .and_then(|t| t.get("web_fetch"))
+        .and_then(|t| t.as_table())
+    else {
+        return;
+    };
+    for key in table.keys() {
+        if !WEB_FETCH_TOOLSET_KEYS.contains(&key.as_str()) {
+            tracing::warn!(
+                path = %path.display(),
+                key = key.as_str(),
+                "unknown [toolset.web_fetch] key; ignored"
+            );
+        }
+    }
 }
 
 /// Write `[browser].headed` into user dock config (or an existing file that already has `[browser]`).
@@ -2218,5 +2333,113 @@ default = "grok-4"
         assert!(!dock_browser_headed_env_override());
         std::env::set_var("DOCK_BROWSER_HEADED", "1");
         assert!(dock_browser_headed_env_override());
+    }
+
+    // ── [toolset.web_fetch] ─────────────────────────────────────────────
+
+    #[test]
+    fn web_fetch_toolset_defaults_to_all_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[models]\ndefault = \"x\"\n").unwrap();
+        assert_eq!(
+            load_web_fetch_config_from(std::slice::from_ref(&path)),
+            WebFetchToolConfig::default()
+        );
+        // 文件不存在也一样，不 panic。
+        assert_eq!(
+            load_web_fetch_config_from(&[dir.path().join("missing.toml")]),
+            WebFetchToolConfig::default()
+        );
+    }
+
+    #[test]
+    fn web_fetch_toolset_parses_every_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[toolset.web_fetch]
+timeout_secs = 15
+max_content_length = 2048
+max_markdown_length = 512
+allowed_domains = ["docs.rs"]
+proxy_endpoint = "http://127.0.0.1:7890"
+allow_local = true
+"#,
+        )
+        .unwrap();
+        let cfg = load_web_fetch_config_from(&[path]);
+        assert_eq!(cfg.timeout_secs, Some(15));
+        assert_eq!(cfg.max_content_length, Some(2048));
+        assert_eq!(cfg.max_markdown_length, Some(512));
+        assert_eq!(cfg.allowed_domains, Some(vec!["docs.rs".to_string()]));
+        assert_eq!(cfg.proxy_endpoint.as_deref(), Some("http://127.0.0.1:7890"));
+        assert_eq!(cfg.allow_local, Some(true));
+    }
+
+    /// 逐字段 overlay：项目文件只写一个键，不能把用户那份的其余键清掉。
+    #[test]
+    fn web_fetch_toolset_overlays_field_by_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(
+            &user,
+            "[toolset.web_fetch]\ntimeout_secs = 5\nproxy_endpoint = \"http://127.0.0.1:7890\"\n",
+        )
+        .unwrap();
+        std::fs::write(&project, "[toolset.web_fetch]\ntimeout_secs = 90\n").unwrap();
+        let cfg = load_web_fetch_config_from(&[user, project]);
+        assert_eq!(cfg.timeout_secs, Some(90), "项目文件赢");
+        assert_eq!(
+            cfg.proxy_endpoint.as_deref(),
+            Some("http://127.0.0.1:7890"),
+            "项目没表态的键要保住用户那份"
+        );
+    }
+
+    /// 显式空表不能被当成「没写」——`DomainMatcher` 对空表是**全拒**。
+    #[test]
+    fn web_fetch_toolset_keeps_explicit_empty_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(
+            &user,
+            "[toolset.web_fetch]\nallowed_domains = [\"docs.rs\"]\n",
+        )
+        .unwrap();
+        std::fs::write(&project, "[toolset.web_fetch]\nallowed_domains = []\n").unwrap();
+        let cfg = load_web_fetch_config_from(&[user, project]);
+        assert_eq!(cfg.allowed_domains, Some(Vec::new()));
+    }
+
+    /// 认不出的键不能让**整份文件**失效（models 也得还在）——只在日志里喊一声。
+    #[test]
+    fn unknown_web_fetch_key_does_not_drop_the_rest_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[models]
+default = "local-llm"
+
+[toolset.web_fetch]
+timeout_secs = 30
+proxy_endpont = "http://127.0.0.1:7890"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_default_model_from(std::slice::from_ref(&path)).as_deref(),
+            Some("local-llm"),
+            "拼错的键不该让 models 一起消失"
+        );
+        let cfg = load_web_fetch_config_from(&[path]);
+        assert_eq!(cfg.timeout_secs, Some(30));
+        assert_eq!(cfg.proxy_endpoint, None, "拼错的键就是没配上");
     }
 }

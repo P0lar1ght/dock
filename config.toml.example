@@ -144,3 +144,25 @@ prompt_cache = true
 #
 # [browser]
 # headed = false
+
+# --- Web 取回：web_fetch / web_search ---
+# 每颗工具一节的 [toolset.<tool>]。取 ~/.dock/config.toml < 项目 .dock/config.toml，
+# **逐字段**覆盖：项目只写 timeout_secs，不会把用户那份的 proxy_endpoint 清掉。
+# 只列真正会生效的键；写认不出的键会被忽略并记一条 warn。
+#
+# [toolset.web_fetch]
+# timeout_secs = 60          # 请求总超时。缺省 60；connect 恒 10s，不可配。
+# max_content_length = 10485760   # 响应体上限（字节），缺省 10 MB。下完才判。
+# max_markdown_length = 100000    # 喂给模型的 markdown 上限，缺省 100 000，超了截断并标 [truncated]。
+# allowed_domains = ["docs.rs", "developer.mozilla.org"]
+#                            # 只许这些域。**不写 = 不设这道闸**（SSRF 仍在）；
+#                            # 写 [] = 全部拒绝，两者不是一个意思。
+#                            # 对 web_search 不生效（它打的是自己的固定端点）。
+# proxy_endpoint = "http://127.0.0.1:7890"
+#                            # 转发代理。设上之后出口由代理解析，SSRF 的本地 DNS
+#                            # 预检随之跳过——TUN + fake-ip（Clash/Surge）把公网域名
+#                            # 解成 198.18.0.0/15 假址，不跳过会让每次取页面都被判 SSRF。
+#                            # 代价：代理成为信任边界（本机代理会替你去连内网）。
+#                            # IP 字面量（10.x / 127.x / 169.254.169.254）照旧拦。
+# allow_local = false        # 只放行显式本地主机名（localhost / 127.0.0.0/8 / ::1）。
+#                            # 私有段与云元数据地址永不放行。缺省 false。
