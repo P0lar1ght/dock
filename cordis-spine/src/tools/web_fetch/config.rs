@@ -4,7 +4,21 @@
 
 use std::time::Duration;
 
+use cordis_base::config::WebFetchToolConfig;
 use serde::{Deserialize, Serialize};
+
+/// 空白串当没写：`proxy_endpoint = ""` 不该被当成「配了代理」——下游
+/// `reqwest::Proxy::all("")` 会直接报配置错，而 SSRF 那步会先一步放行。
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    })
+}
 
 // Safety-boundary constants. Not configurable.
 pub const MAX_URL_LENGTH: usize = 2_000;
@@ -43,7 +57,8 @@ pub struct WebFetchParams {
     /// When true, allow fetches to **explicit** loopback hosts only
     /// (`localhost`, `127.0.0.0/8`, `::1`). Private/metadata stay blocked.
     /// Default: `false` (fail closed). Set via `[toolset.web_fetch]
-    /// allow_local = true` or `GROK_WEB_FETCH_ALLOW_LOCAL=1`.
+    /// allow_local = true`；dock 没有实现 Grok 的
+    /// `GROK_WEB_FETCH_ALLOW_LOCAL` 环境变量，配置面只有 config.toml 这一条。
     #[serde(default)]
     pub allow_local: Option<bool>,
 }
@@ -51,6 +66,33 @@ pub struct WebFetchParams {
 // Keep defaults here so call-sites don't have to manage unwrapping.
 // Vars are still public following other conventions though.
 impl WebFetchParams {
+    /// `[toolset.web_fetch]` 的解析结果 → 运行时参数。
+    ///
+    /// 只搬 6 个**真会生效**的键；`cache_ttl_secs` / `max_cache_entries` /
+    /// `context_window_tokens` 留 `None`——dock 的管道没有页面缓存，也没实现那个
+    /// 上下文帽（见 [`WebFetchToolConfig`](cordis_base::config::WebFetchToolConfig)）。
+    pub fn from_tool_config(cfg: &WebFetchToolConfig) -> Self {
+        Self {
+            timeout_secs: cfg.timeout_secs,
+            max_content_length: cfg.max_content_length,
+            max_markdown_length: cfg.max_markdown_length,
+            allowed_domains: cfg.allowed_domains.clone(),
+            proxy_endpoint: nonempty(cfg.proxy_endpoint.clone()),
+            allow_local: cfg.allow_local,
+            ..Self::default()
+        }
+    }
+
+    /// 配了转发代理吗。
+    ///
+    /// 出口由代理解析时，SSRF 那步的**本地** DNS 预检不再构成证据：fake-ip /
+    /// 分流 DNS 把公网域名解成保留段假址（本机实测 `example.com` → `198.18.0.164`），
+    /// 照判就会把每一次取页面都拦掉。判定不在配置里做，而在
+    /// [`ssrf::check_ssrf`](super::ssrf) 里——那里才知道自己要不要查 DNS。
+    pub fn via_proxy(&self) -> bool {
+        nonempty(self.proxy_endpoint.clone()).is_some()
+    }
+
     pub fn cache_ttl_secs(&self) -> Duration {
         Duration::from_secs(self.cache_ttl_secs.unwrap_or(15 * 60))
     }

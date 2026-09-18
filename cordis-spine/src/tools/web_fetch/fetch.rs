@@ -76,12 +76,13 @@ async fn fetch_hops(
     url: &Url,
     max_content_length: usize,
     allow_local: bool,
+    via_proxy: bool,
 ) -> Result<FetchResult, WebFetchError> {
     let mut current_url = url.clone();
     let mut hops = 0;
 
     loop {
-        check_ssrf(&current_url, allow_local).await?;
+        check_ssrf(&current_url, allow_local, via_proxy).await?;
 
         let resp = client
             .get(current_url.as_str())
@@ -210,6 +211,7 @@ pub async fn fetch_url(raw: &str, params: &WebFetchParams) -> Result<String, Web
         &url,
         params.max_content_length(),
         params.allow_local(),
+        params.via_proxy(),
     )
     .await
     {
@@ -233,7 +235,12 @@ pub async fn search_web(query: &str, params: &WebFetchParams) -> Result<String, 
     }
     let url = Url::parse_with_params("https://html.duckduckgo.com/html/", &[("q", q)])
         .map_err(WebFetchError::InvalidUrl)?;
-    let body = fetch_url(url.as_str(), params).await?;
+    // `allowed_domains` 是给**模型点名的 URL**用的闸；搜索端点是这里写死的，
+    // 不该受它管——`html.duckduckgo.com` 不可能出现在任何人的白名单里，照判
+    // 就是整颗 `web_search` 报废。SSRF 与其余参数照常生效。
+    let mut params = params.clone();
+    params.allowed_domains = None;
+    let body = fetch_url(url.as_str(), &params).await?;
     Ok(extract_results(&body, q))
 }
 

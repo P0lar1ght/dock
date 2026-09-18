@@ -34,7 +34,7 @@ use crate::tools::skills::{skills, tool_skills};
 use crate::tools::task::{tool_task, TaskConfig};
 use crate::tools::todo_write::tool_todo;
 use crate::tools::tool_cordis::tool_cordis;
-use crate::tools::web_fetch::tool_web;
+use crate::tools::web_fetch::{tool_web, web_fetch_params};
 use crate::tools::workflow::tool_workflow;
 
 /// Sessions / context / systemPrompt / agents. No `llm` or `tools` — the harness mounts those.
@@ -114,7 +114,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tui_slots(), ())?.wait().await?;
     ctx.plugin(agent_presets(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;
-    ctx.plugin(tool_web(), ())?.wait().await?;
+    ctx.plugin(tool_web(), web_fetch_params())?.wait().await?;
     ctx.plugin(tool_browser(), ())?.wait().await?;
     ctx.plugin(tool_todo(), ())?.wait().await?;
     ctx.plugin(plan_mode(), ())?.wait().await?;
