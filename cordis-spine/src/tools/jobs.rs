@@ -627,7 +627,7 @@ pub fn tool_jobs() -> Plugin {
                     tools.register(
                         ToolSpec {
                             name: "get_task_output".into(),
-                            description: "Get output and status from a background terminal command or a subagent.\n- Pass task_ids with one or more ids from is_background=true commands or a task spawn subagent_id; omit timeout_ms or pass 0 for a non-blocking snapshot.\n- A subagent pushes its turn end to you, so poll only when you need the result now.".into(),
+                            description: "Get output and status from a background terminal command or a subagent.\n- Pass task_ids with one or more ids from is_background=true commands, from a command that outlived its foreground budget, or a task spawn subagent_id; omit timeout_ms or pass 0 for a non-blocking snapshot.\n- Omit task_ids entirely to inventory every background task in this session: one line each with how long it has been running, no output bodies. Use this when you have lost track of what is still running, then kill_task the ones you no longer need.\n- A subagent pushes its turn end to you, so poll only when you need the result now.".into(),
                             parameters_json: OUTPUT_PARAMS.into(),
                         },
                         output,
@@ -679,7 +679,54 @@ fn parse_ids(raw: &str) -> (Vec<String>, u64) {
 
 fn render_snap(s: &JobSnapshot) -> String {
     let status = if s.done { "done" } else { "running" };
-    format!("[{status}] {} {}\n{}", s.id, s.command, s.output)
+    format!(
+        "[{status}{}] {} {}\n{}",
+        elapsed_suffix(s),
+        s.id,
+        s.command,
+        s.output
+    )
+}
+
+/// `[running 12m04s]`——「跑了多久」是模型判断一条后台任务还有没有用的唯一依据。
+///
+/// 只给还在跑的加：已完成的任务，耗时不影响任何决定。
+fn elapsed_suffix(s: &JobSnapshot) -> String {
+    if s.done {
+        return String::new();
+    }
+    match s.start_time.elapsed() {
+        Ok(d) => {
+            let secs = d.as_secs();
+            if secs >= 60 {
+                format!(" {}m{:02}s", secs / 60, secs % 60)
+            } else {
+                format!(" {secs}s")
+            }
+        }
+        // 系统时钟往回跳过：宁可不印，也不印一个负数似的怪值。
+        Err(_) => String::new(),
+    }
+}
+
+/// 清单里的一行：没有输出正文，只有状态 / 已跑多久 / id / 命令。
+///
+/// 清点「还有什么在跑」不该把每个任务最多 20KB 的输出全倒进上下文——模型付一次
+/// 那个代价就不会再清点第二次，而这是它唯一能发现自己忘了哪个任务的途径。
+fn render_brief(s: &JobSnapshot) -> String {
+    let status = if s.done { "done" } else { "running" };
+    let tail = s.output.trim();
+    let tail = if tail.is_empty() {
+        String::new()
+    } else {
+        format!("\n    {tail}")
+    };
+    format!(
+        "[{status}{}] {} {}{tail}",
+        elapsed_suffix(s),
+        s.id,
+        s.command
+    )
 }
 
 async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
@@ -690,11 +737,13 @@ async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         let mut parts = Vec::new();
         if let Some(jobs) = &jobs {
             // 前台命令只是为了让 TUI 看见进度才挂在同一张表上，不是后台任务。
+            // `list_brief` 而不是 `list`：清点用不着每条任务的完整输出，见
+            // [`render_brief`]。
             parts.extend(
-                jobs.list()
+                jobs.list_brief()
                     .iter()
                     .filter(|j| !j.foreground)
-                    .map(render_snap),
+                    .map(render_brief),
             );
         }
         if let Some(sub) = &sub {
@@ -830,6 +879,44 @@ async fn collect_output(
 mod tests {
     use super::*;
 
+    /// 清点「还有什么在跑」是模型发现自己忘了哪个后台任务的唯一途径，所以这一行
+    /// 必须**便宜**（不带输出正文）且**说得出已跑多久**——否则它分不清 `[running]`
+    /// 是 3 秒还是 40 分钟，也就无从判断该不该 kill。
+    #[test]
+    fn the_inventory_line_is_cheap_and_says_how_long_it_has_run() {
+        let snap = JobSnapshot {
+            id: "job-7".into(),
+            command: "cargo build --release".into(),
+            description: None,
+            output: "Compiling serde".into(),
+            done: false,
+            is_monitor: false,
+            foreground: false,
+            start_time: std::time::SystemTime::now() - Duration::from_secs(724),
+        };
+        let line = render_brief(&snap);
+        assert!(line.contains("job-7"), "{line}");
+        assert!(line.contains("cargo build --release"), "{line}");
+        assert!(
+            line.contains("[running 12m04s]"),
+            "要说得出跑了多久：{line}"
+        );
+
+        // 已完成的任务不印耗时：那个数字不影响任何决定。
+        let done = JobSnapshot { done: true, ..snap };
+        assert_eq!(
+            render_brief(&done)
+                .lines()
+                .next()
+                .unwrap()
+                .split(']')
+                .next(),
+            Some("[done"),
+            "{}",
+            render_brief(&done)
+        );
+    }
+
     /// S2：超出内存预算的输出要边跑边落盘，**一个字节都不能丢**。
     ///
     /// `push` 里的 `tail.drain` 是即时丢弃，所以落盘必须在跨过阈值之前发生；
@@ -896,7 +983,8 @@ mod tests {
 
         assert!(outcome.timed_out, "300ms 到点时 sleep 5 还在跑：{body}");
         assert!(!outcome.subagent_pending, "跑的是 bash job，不是子代理");
-        assert!(body.contains("[running]"), "{body}");
+        // `[running` 而不是 `[running]`：状态后面还跟着已运行时长。
+        assert!(body.contains("[running"), "{body}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(4),
             "等待该按 timeout 返回，而不是挂到任务结束"
