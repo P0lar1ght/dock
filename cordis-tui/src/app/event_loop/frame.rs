@@ -177,6 +177,10 @@ pub(super) fn draw(
     pointer: (u16, u16),
 ) -> Result<()> {
     let theme = Theme::current();
+    // 输入框的位置每帧重新认领：这一帧没画它，鼠标就不该还落得进去。
+    if let Some(prompt) = ctx.get::<PromptWidget>(TUI_PROMPT) {
+        prompt.begin_frame();
+    }
     *hits = PickerHits::default();
     dock_hits.clear();
     goal_hits.clear();

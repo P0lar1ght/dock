@@ -451,6 +451,14 @@ impl WorkflowHost {
             })?),
         };
         let llm = self.llm_override(&opts);
+        // dock 的子代理没有独立 worktree，也不继承父会话上下文，`resume_from` 归
+        // 契约重试自己管。悄悄吞掉会让脚本以为自己隔离过了，至少记一条。
+        if opts.isolation_worktree || opts.fork_context || opts.resume_from.is_some() {
+            tracing::debug!(
+                run_id = %self.params.run_id,
+                "workflow agent() 的 isolation_worktree / fork_context / resume_from 在 dock 被忽略"
+            );
+        }
 
         // 先占位再记 running：排队中的子代理不该显示成在跑。整个契约循环共用
         // 一个位子，重试不额外占并发。

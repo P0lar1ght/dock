@@ -1334,6 +1334,12 @@ pub(super) fn apply_goal_hit(ctx: &Context, overlay: &mut Overlay, hit: GoalHit)
     }
 }
 
+/// 这一帧的输入框有没有盖住这个坐标。没挂输入框（裁剪过的树）就当没有。
+pub(super) fn prompt_hit(ctx: &Context, column: u16, row: u16) -> bool {
+    ctx.get::<crate::views::prompt::PromptWidget>(crate::names::TUI_PROMPT)
+        .is_some_and(|p| p.hit(column, row))
+}
+
 pub(super) fn welcome_open(ctx: &Context) -> bool {
     ctx.get::<Welcome>(TUI_WELCOME)
         .is_some_and(|w| w.empty_session())

@@ -650,6 +650,9 @@ mod tests {
         let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"dock-guide"), "{names:?}");
         assert!(names.contains(&"dock-config"), "{names:?}");
+        // `workflow` 工具的描述直接指着 create-workflow：装了 dock 就得有这一份，
+        // 不能只在仓库 `skills/` 里躺着。
+        assert!(names.contains(&"create-workflow"), "{names:?}");
         let sc = skills.iter().find(|s| s.name == "dock-guide").unwrap();
         assert_eq!(sc.scope, SkillScope::Builtin);
         // 同名用户技能覆盖内置。
