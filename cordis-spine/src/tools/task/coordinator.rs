@@ -177,7 +177,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 }
                 SubagentCancelTarget::WorkflowRunId(run_id) => {
                     self.cancel_workflow_children(&run_id, request.parent_session_id.as_deref());
-                    let _ = request.respond_to.send(SubagentCancelOutcome::Cancelled);
+                    // 还有孩子在收尾就先挂起回执，等最后一个落地再回
+                    // （`resolve_workflow_cancel_waiters`）。取消是异步的：立刻
+                    // 回执等于告诉调用方"已经排空"，而它们还在烧 token。
+                    if workflow_outstanding(&self.pending, &self.active, &run_id) == 0 {
+                        let _ = request.respond_to.send(SubagentCancelOutcome::Cancelled);
+                    } else {
+                        self.workflow_cancel_waiters
+                            .entry(run_id)
+                            .or_default()
+                            .push(request.respond_to);
+                    }
                 }
             },
             SubagentEvent::TeardownSession {

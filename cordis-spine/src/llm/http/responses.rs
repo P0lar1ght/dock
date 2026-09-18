@@ -119,7 +119,11 @@ pub fn input_items(
                     ));
                 }
             }
-            LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::LlmStream(_) => {}
+            // Notice 到不了这里（`model_history` 已滤掉）。
+            LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::Notice { .. }
+            | LogEvent::LlmStream(_) => {}
         }
     }
     flush_unmatched(&mut out, &mut pending);

@@ -17,6 +17,29 @@ pub enum MermaidEngineKind {
     Mmdc,
 }
 
+/// 单次委派的采样覆写，挂在**子会话**的 `"model-override"` 上。
+///
+/// 主会话永远没有这一项 = 跟 [`AppSettings`] 走。之所以另起一个服务而不是给子
+/// 会话隔离一份 `AppSettings`：那里面还有权限档位、时间戳、思考开关这些**会话
+/// 级**状态，隔离一份等于让子代理带着一张过期的权限快照跑。
+///
+/// 只有 workflow 脚本的 `agent(model:, effort:, max_output_tokens:)` 会填它。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelOverride {
+    /// 必须是用户模型目录（`config.toml`）里真有的 id——不在目录里的名字解析不出
+    /// 端点，发出去就是一个 404。校验在 workflow host 那边做，到这里的都已经过关。
+    pub model: Option<String>,
+    /// 推理强度。模型不支持推理时无效（那时一律不发强度）。
+    pub effort: Option<String>,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl ModelOverride {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// Live-looked-up app settings. Do not capture this `Arc` in a long-lived closure.
 #[derive(Debug)]
 pub struct AppSettings {

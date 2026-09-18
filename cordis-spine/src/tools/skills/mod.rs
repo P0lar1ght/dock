@@ -29,6 +29,9 @@ const SKILL_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"name":{"type"
 struct SkillsInner {
     catalog: Vec<SkillInfo>,
     announced: HashSet<String>,
+    /// 本会话**中途**发现的技能名。启动时就在目录里的不算——那些在冻结的
+    /// listing 段里，压缩不会让模型忘掉它们。
+    discovered: Vec<String>,
     activated: HashSet<String>,
     extras: Vec<Disposable>,
     overlay: Option<Disposable>,
@@ -53,6 +56,7 @@ impl Skills {
             inner: Arc::new(Mutex::new(SkillsInner {
                 catalog,
                 announced,
+                discovered: Vec::new(),
                 activated: HashSet::new(),
                 extras: Vec::new(),
                 overlay: None,
@@ -96,6 +100,22 @@ impl Skills {
         let text = render_listing(&list, listing_budget_chars(window));
         inner.frozen_listing = Some(text.clone());
         text
+    }
+
+    /// 压缩后重发的「中途发现」提示，没有中途发现就返回 `None`。
+    ///
+    /// listing 段是冻结的（见 [`Self::occupancy_rows`] 的说明：系统提示从不
+    /// 重写技能段），所以这些技能只靠历史里那条 reminder 让模型知道；压缩抹掉
+    /// 它之后得再说一遍。
+    pub fn rediscovery_notice(&self) -> Option<String> {
+        let found = self.inner.lock().unwrap().discovered.clone();
+        if found.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "本会话中途发现的技能：{}。用 `/name` 或 skill 工具加载全文。",
+            found.join("、")
+        ))
     }
 
     /// Rows behind the `/context` 技能 slice.
@@ -211,6 +231,7 @@ impl Skills {
                 if !inner.announced.contains(&skill.name) {
                     new_names.push(skill.name.clone());
                     inner.announced.insert(skill.name.clone());
+                    inner.discovered.push(skill.name.clone());
                 }
                 inner.catalog.push(skill);
             }

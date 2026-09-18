@@ -18,9 +18,11 @@ pub(crate) struct BuiltinWorkflow {
 pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[BuiltinWorkflow {
     name: "deep-research",
     script: include_str!("workflows/deep_research.rhai"),
+    // 展示给用户和模型的路径，必须与上面 `include_str!` 真正编进去的那份一致
+    // ——它是相对本文件解析的，所以真实位置带 `tools/`。
     path: concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/workflow/workflows/deep_research.rhai"
+        "/src/tools/workflow/workflows/deep_research.rhai"
     ),
 }];
 
@@ -713,9 +715,19 @@ mod tests {
             "{:?}",
             meta.when_to_use
         );
-        assert!(builtin
-            .path
-            .ends_with("src/workflow/workflows/deep_research.rhai"));
+        // 展示路径要指向真实存在的文件，不然用户照着它去找会扑空。
+        assert!(
+            builtin
+                .path
+                .ends_with("src/tools/workflow/workflows/deep_research.rhai"),
+            "{}",
+            builtin.path
+        );
+        assert!(
+            std::path::Path::new(builtin.path).is_file(),
+            "内置工作流的展示路径不存在：{}",
+            builtin.path
+        );
         assert!(builtin.script.contains("没有提供调研问题"));
         assert!(builtin.script.contains("label: \"report-synthesizer\""));
         assert!(is_compiled_in_builtin("deep-research"));

@@ -11,6 +11,7 @@
 
 pub mod ask_user;
 pub mod browser;
+pub mod capability;
 pub mod computer;
 pub mod cron;
 pub mod dynamic_runner;

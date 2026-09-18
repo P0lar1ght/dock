@@ -38,6 +38,15 @@ pub struct ArchivedSession {
     pub compact_from: usize,
 }
 
+/// 这条事件进不进模型上下文。
+///
+/// [`LogEvent::Notice`] 是**只给用户看**的：滚动区渲染成卡片，但它既不该占上下
+/// 文，也不该让模型觉得需要回应。这是唯一被滤掉的一类——[`Sessions::model_history`]
+/// 是采样看到的全部，漏在这里就等于漏进模型。
+fn model_visible(event: &LogEvent) -> bool {
+    !matches!(event, LogEvent::Notice { .. })
+}
+
 /// Session log. DSH `ctx.sessions`; Grok conversation folders on disk after
 /// [`Sessions::attach_disk`].
 #[derive(Clone)]
@@ -397,13 +406,15 @@ impl Sessions {
     pub fn model_history(&self) -> Vec<LogEvent> {
         let prefix = self.compact_prefix.lock().unwrap();
         let Some(prefix) = prefix.as_ref() else {
-            return self.events();
+            let mut out = self.events();
+            out.retain(model_visible);
+            return out;
         };
         let from = *self.compact_from.lock().unwrap();
         let events = self.events.lock().unwrap();
         let start = from.min(events.len());
         let mut out = prefix.clone();
-        out.extend(events[start..].iter().cloned());
+        out.extend(events[start..].iter().filter(|e| model_visible(e)).cloned());
         out
     }
 
@@ -1106,7 +1117,10 @@ fn inflight_has_output(tail: &[LogEvent]) -> bool {
         LogEvent::LlmStream(out) => {
             !out.text.is_empty() || !out.reasoning.is_empty() || !out.tool_calls.is_empty()
         }
-        LogEvent::User(_) | LogEvent::PreStep | LogEvent::Prompt(_) => false,
+        // Notice 只是给用户看的卡片，不算"这一轮产出过东西"。
+        LogEvent::User(_) | LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::Notice { .. } => {
+            false
+        }
     })
 }
 
@@ -1504,5 +1518,33 @@ mod tests {
             e,
             LogEvent::User(t) if t == "after compact"
         )));
+    }
+
+    #[tokio::test]
+    async fn notice_stays_on_the_pager_and_out_of_model_history() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.append(LogEvent::Notice {
+            kind: cordis_base::types::NoticeKind::WorkflowReport,
+            title: "deep-research · planner 上报".into(),
+            body: "阶段性结论".into(),
+        });
+        let pager = sessions.events();
+        assert!(
+            pager.iter().any(|e| matches!(
+                e,
+                LogEvent::Notice { title, .. } if title.contains("planner")
+            )),
+            "{pager:?}"
+        );
+        let model = sessions.model_history();
+        assert!(
+            !model.iter().any(|e| matches!(e, LogEvent::Notice { .. })),
+            "Notice 进了模型历史就会把主线程叫醒：{model:?}"
+        );
+        assert!(model
+            .iter()
+            .any(|e| matches!(e, LogEvent::User(t) if t == "hi")));
     }
 }

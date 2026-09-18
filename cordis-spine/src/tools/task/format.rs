@@ -64,6 +64,21 @@ pub(super) fn cap_turn_text(output: &str) -> String {
     }
 }
 
+/// 一条 workflow 子代理上报在收尾通知里占的篇幅。
+///
+/// 一次 deep-research 有十来个孩子，原样附上能把整份上下文吃掉；而最终结果本来
+/// 就是这些上报的提炼，这里只留够主线程判断"过程有没有出岔子"。
+const WORKFLOW_REPORT_CHARS: usize = 600;
+
+pub(super) fn cap_report_text(output: &str) -> String {
+    let body = output.trim();
+    if body.is_empty() {
+        "（空）".to_string()
+    } else {
+        cap_chars(body, WORKFLOW_REPORT_CHARS)
+    }
+}
+
 fn cap_chars(s: &str, max: usize) -> String {
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
@@ -81,6 +96,41 @@ pub(super) fn format_parent_notice(notice: &super::store::ParentNotice) -> Strin
     match notice {
         ParentNotice::Report { from, output } => {
             format!("子代理 {from} 上报:\n{output}")
+        }
+        ParentNotice::WorkflowDone {
+            name,
+            status,
+            elapsed_ms,
+            summary,
+            reports,
+            dropped_reports,
+        } => {
+            let mut text = format!(
+                "工作流 \"{name}\" 已{}（耗时 {:.1}s）。\n结果:\n{summary}",
+                match status.as_str() {
+                    "complete" => "完成",
+                    "cancelled" => "被停止",
+                    "failed" => "失败",
+                    _ => "结束",
+                },
+                *elapsed_ms as f64 / 1000.0,
+            );
+            if !reports.is_empty() {
+                text.push_str("\n\n过程中各子代理的上报:");
+                for report in reports {
+                    text.push_str(&format!(
+                        "\n- {}: {}",
+                        report.agent_id,
+                        cap_report_text(&report.output)
+                    ));
+                }
+                if *dropped_reports > 0 {
+                    text.push_str(&format!(
+                        "\n（另有 {dropped_reports} 条更早的上报没有列出）"
+                    ));
+                }
+            }
+            text
         }
         ParentNotice::TurnEnd {
             id,

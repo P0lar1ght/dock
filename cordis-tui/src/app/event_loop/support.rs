@@ -15,8 +15,8 @@ use cordis_spine::{
 use crate::app::clipboard;
 use crate::error::Result;
 use crate::grok::mcps;
-use crate::grok::tasks_pane::{self, GroupKind, TaskEntry};
-use crate::grok::workflows::WorkflowRunSnapshot;
+use crate::grok::tasks_pane::{self, GroupKind, KillTarget, TaskEntry};
+use crate::grok::workflows::{WorkflowAgentRowView, WorkflowRunSnapshot};
 use crate::names::{
     GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS, TUI_WELCOME,
 };
@@ -757,20 +757,45 @@ pub(super) fn to_tui_workflow(snap: cordis_spine::WorkflowRunSnap) -> WorkflowRu
         status: snap.status,
         management_available: true,
         builtin: snap.builtin,
-        phases: Vec::new(),
+        phases: snap.phases.as_ref().clone(),
         current_phase: snap.current_phase,
-        agents: Vec::new(),
-        agent_budget: None,
-        agents_used: 0,
+        agents: snap
+            .agents
+            .iter()
+            .map(|row| WorkflowAgentRowView {
+                agent_id: row.agent_id.clone(),
+                label: row.label.clone(),
+                phase: row.phase.clone(),
+                // dock 的子代理共享父模型，没有 per-agent 覆盖。
+                model: None,
+                state: row.state.clone(),
+                tokens_used: row.tokens_used,
+                duration_ms: row.duration_ms,
+                latest_report: row.latest_report.clone(),
+            })
+            .collect(),
+        agent_budget: Some(snap.agent_budget),
+        // 预留即扣减，一个池子：`agents_used` 已含在跑的那些，所以 reserved 记 0。
+        agents_used: snap.agents_used,
         agents_reserved: 0,
-        agents_remaining: None,
+        agents_remaining: Some(snap.agent_budget.saturating_sub(snap.agents_used)),
         agent_usage_incomplete: false,
         active_agents: snap.agents_running,
         elapsed_ms: snap.elapsed_ms,
         received_at: snap.received_at,
         pause_message: snap.pause_message,
         result_summary: snap.result_summary,
+        logs: snap.logs,
     }
+}
+
+/// 详情页左栏有几行可选。脚本没声明阶段时只有「Agents」那一行。
+pub(super) fn workflow_phase_count(ctx: &Context, query: &str, run_id: &str) -> usize {
+    workflow_rows(ctx, query)
+        .iter()
+        .find(|r| r.run_id == run_id)
+        .map(|run| crate::grok::workflows::phase_buckets(run).len())
+        .unwrap_or(1)
 }
 
 pub(super) fn workflow_rows(ctx: &Context, query: &str) -> Vec<WorkflowRunSnapshot> {
@@ -1237,6 +1262,25 @@ pub(super) fn cancel_scheduled(ctx: &Context, id: &str) {
         Some(cron) if cron.cancel(id) => flash(ctx, format!("已关闭 {id}")),
         Some(_) => flash(ctx, format!("没有定时任务 {id}")),
         None => flash(ctx, "cron 未挂载"),
+    }
+}
+
+/// 停一次 workflow run。`needle` 可以是 run id，也可以是显示名。
+pub(super) fn stop_workflow(ctx: &Context, needle: &str) {
+    match ctx.get::<Workflows>(WORKFLOWS) {
+        Some(wf) => match wf.stop(needle) {
+            Some(run_id) => flash(ctx, format!("已停止 {run_id}")),
+            None => flash(ctx, format!("没有在跑的工作流 {needle}")),
+        },
+        None => flash(ctx, "workflows 未挂载"),
+    }
+}
+
+/// `[✗]` / `x` 的落点：按目标类型分派。
+pub(super) fn kill_task_target(ctx: &Context, target: &KillTarget) {
+    match target {
+        KillTarget::Scheduled(id) => cancel_scheduled(ctx, id),
+        KillTarget::Workflow(run_id) => stop_workflow(ctx, run_id),
     }
 }
 

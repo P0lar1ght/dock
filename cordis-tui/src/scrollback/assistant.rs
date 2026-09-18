@@ -56,6 +56,13 @@ pub fn render(text: &str, theme: &Theme, width: usize) -> Rendered {
 fn render_uncached(text: &str, theme: &Theme, width: usize) -> Rendered {
     let syntect = cordis_markdown::default_syntect();
     let mut renderer = cordis_markdown::StreamingMarkdownRenderer::new(md_style::style(), true);
+    // 表格得在**排版时**就知道能用多宽。正文靠后面的 word wrap 兜底，表格不
+    // 行——`word_wrap_line` 对表格行是直接 `fit_line_to_width` 裁掉的（折行会
+    // 毁掉列对齐），所以排宽了就是右边一截连同右边框被切掉。渲染器自己会按列
+    // 等比收窄。
+    if width > 0 {
+        renderer.set_max_table_width(Some(width));
+    }
     renderer.push(text);
     let output = renderer.finish_into_output(Some(syntect));
     let mut lines = output.lines;
@@ -135,6 +142,40 @@ mod tests {
         );
         assert_eq!(rendered.mermaid.len(), 1);
         assert!(rendered.mermaid[0].1.contains("flowchart"));
+    }
+
+    /// 表格要跟着面板宽度重排，不是排成自然宽度再被裁掉。
+    ///
+    /// 表格行**不参与 word wrap**（折行会毁掉列对齐），`word_wrap_line` 对它们
+    /// 只做 `fit_line_to_width`。所以排版时不给上限，宽表格就是右边一截连同右
+    /// 边框被整齐地切掉——看起来像"表格没画完"。渲染器自己会按列等比收窄。
+    #[test]
+    fn tables_are_laid_out_at_the_pane_width() {
+        use unicode_width::UnicodeWidthStr;
+
+        let theme = Theme::groknight();
+        let md = "| 实现 | 权重 | 许可 |\n|---|---|---|\n\
+                  | TheoLeeCJ/openjev | 单张 RTX 3090 上用冻结 Qwen3.5-4B 复现，\
+                  Safetensors 在子目录 | MIT |\n\
+                  | b | RTX 3090 + WebGPU demo | MIT, 242★ |\n";
+        for width in [44usize, 60, 100] {
+            let rows: Vec<String> = render(md, &theme, width)
+                .lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .filter(|s: &String| !s.trim().is_empty())
+                .collect();
+            assert!(rows.len() >= 4, "width={width} {rows:?}");
+            for row in &rows {
+                assert!(row.width() <= width, "width={width} 行超出面板：{row:?}");
+                // 每一行都得自己收口。少了右边框就说明它是被裁掉的，不是排出来的。
+                let last = row.trim_end().chars().last().unwrap_or(' ');
+                assert!(
+                    matches!(last, '\u{2502}' | '\u{2510}' | '\u{2524}' | '\u{2518}'),
+                    "width={width} 表格右边框被裁掉了：{row:?}"
+                );
+            }
+        }
     }
 
     /// 窄窗下 affordance 行不折行：折成两截会把一个块认成两个，

@@ -13,9 +13,9 @@ use serde_json::{json, Value};
 
 use crate::agent::runtime::BoxFuture;
 use crate::agent::turn::TurnControl;
-use crate::host::settings::AppSettings;
+use crate::host::settings::{AppSettings, ModelOverride};
 use crate::llm::sampler::Sampler;
-use crate::names::{SESSIONS, SETTINGS, TURN};
+use crate::names::{MODEL_OVERRIDE, SESSIONS, SETTINGS, TURN};
 use crate::session::log::Sessions;
 use cordis_base::chat_chunk::ChatCompletionChunk;
 use cordis_base::config::{self, ApiBackend, AuthScheme};
@@ -66,7 +66,11 @@ pub(crate) struct WireParams {
 }
 
 impl WireParams {
-    fn resolve(choice: Option<&config::ModelChoice>, settings: Option<&AppSettings>) -> Self {
+    fn resolve(
+        choice: Option<&config::ModelChoice>,
+        settings: Option<&AppSettings>,
+        over: Option<&ModelOverride>,
+    ) -> Self {
         let thinking = settings.is_none_or(AppSettings::thinking);
         let reasoning = if !choice.is_none_or(config::ModelChoice::supports_reasoning) {
             Reasoning::Unsupported
@@ -75,11 +79,13 @@ impl WireParams {
         } else {
             Reasoning::Off
         };
-        // 运行时强度优先（用户在 /model 或设置里选过），否则用该模型的默认。
+        // 这次委派点名的强度最优先（workflow 脚本的 `agent(effort:)`），其次是
+        // 运行时强度（用户在 /model 或设置里选过），最后才是该模型的默认。
         let effort = match reasoning {
-            Reasoning::On => settings
-                .map(AppSettings::effort)
+            Reasoning::On => over
+                .and_then(|o| o.effort.clone())
                 .filter(|e| !e.is_empty())
+                .or_else(|| settings.map(AppSettings::effort).filter(|e| !e.is_empty()))
                 .or_else(|| choice.map(config::ModelChoice::default_effort))
                 .unwrap_or_default(),
             _ => String::new(),
@@ -87,7 +93,9 @@ impl WireParams {
         Self {
             reasoning,
             effort,
-            max_output_tokens: choice.and_then(|c| c.max_output_tokens),
+            max_output_tokens: over
+                .and_then(|o| o.max_output_tokens)
+                .or_else(|| choice.and_then(|c| c.max_output_tokens)),
             images: choice.is_none_or(config::ModelChoice::accepts_images),
         }
     }
@@ -193,14 +201,21 @@ async fn sample_http(
     // `interrupt_agent` 打不断正在跑的这个流。`"settings"` 这类没被隔离的服务，
     // 从哪个 ctx 查都解析到同一个对象。
     let exec = crate::llm::sampler::sampling_ctx().unwrap_or_else(|| sampler.ctx.clone());
-    let model = exec
-        .get::<AppSettings>(SETTINGS)
-        .map(|s| s.model())
-        .filter(|m| !m.is_empty())
+    // 这次委派点名的模型优先。只有受限子会话挂得上 `"model-override"`，主会话
+    // 没有这一项，所以这条分支对主线程是死的。
+    let over = exec.get::<ModelOverride>(MODEL_OVERRIDE);
+    let model = over
+        .as_deref()
+        .and_then(|o| o.model.clone())
+        .or_else(|| {
+            exec.get::<AppSettings>(SETTINGS)
+                .map(|s| s.model())
+                .filter(|m| !m.is_empty())
+        })
         .unwrap_or_else(|| sampler.fallback_model.clone());
     let choice = config::lookup_model(&model);
     let settings = exec.get::<AppSettings>(SETTINGS);
-    let params = WireParams::resolve(choice.as_ref(), settings.as_deref());
+    let params = WireParams::resolve(choice.as_ref(), settings.as_deref(), over.as_deref());
     // 协议是运行时状态（`/protocol`），不是模型的固定属性：一个端点可以同时开
     // /responses 与 /chat/completions。settings 会对着目录校一遍再给出来。
     let backend = settings
@@ -614,7 +629,7 @@ fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
             }
             LogEvent::LlmStream(out) => bump(&out.text, &mut ascii, &mut other),
             LogEvent::ToolExecute { content, .. } => bump(content, &mut ascii, &mut other),
-            LogEvent::PreStep => {}
+            LogEvent::PreStep | LogEvent::Notice { .. } => {}
         }
     }
     other + ascii.saturating_add(3) / 4
@@ -697,7 +712,11 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], vision: boo
                     }
                 }
             }
-            LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::LlmStream(_) => {}
+            // Notice 到不了这里（`model_history` 已滤掉）。
+            LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::Notice { .. }
+            | LogEvent::LlmStream(_) => {}
         }
     }
     flush_unmatched_tools(&mut out, &mut pending);
@@ -1041,7 +1060,7 @@ mod tests {
     /// 目录里没这个模型（或压根没 config）时不替上游做任何假设。
     #[test]
     fn wire_params_default_to_sending_nothing() {
-        let params = WireParams::resolve(None, None);
+        let params = WireParams::resolve(None, None, None);
         assert_eq!(params.reasoning, Reasoning::On);
         assert!(params.effort.is_empty(), "强度缺省不发");
         assert_eq!(params.max_output_tokens, None);
@@ -1054,15 +1073,49 @@ mod tests {
         choice.reasoning_effort = Some("high".into());
         choice.max_output_tokens = Some(8192);
         choice.supports_images = Some(false);
-        let params = WireParams::resolve(Some(&choice), None);
+        let params = WireParams::resolve(Some(&choice), None, None);
         assert_eq!(params.effort, "high");
         assert_eq!(params.max_output_tokens, Some(8192));
         assert!(!params.images);
 
         choice.reasoning = Some(false);
-        let params = WireParams::resolve(Some(&choice), None);
+        let params = WireParams::resolve(Some(&choice), None, None);
         assert_eq!(params.reasoning, Reasoning::Unsupported);
         assert!(params.effort.is_empty(), "不支持推理就不带强度");
+    }
+
+    /// 这次委派点名的强度 / 输出上限压过模型目录的默认值。
+    ///
+    /// 只有受限子会话挂得上 `"model-override"`（workflow 脚本的
+    /// `agent(effort:, max_output_tokens:)`），主会话永远没有这一项。
+    #[test]
+    fn wire_params_take_the_delegation_override_first() {
+        let mut choice = model("m");
+        choice.reasoning_effort = Some("high".into());
+        choice.max_output_tokens = Some(8192);
+        let over = ModelOverride {
+            model: Some("m".into()),
+            effort: Some("low".into()),
+            max_output_tokens: Some(1024),
+        };
+        let params = WireParams::resolve(Some(&choice), None, Some(&over));
+        assert_eq!(params.effort, "low");
+        assert_eq!(params.max_output_tokens, Some(1024));
+
+        // 没点名的那几项照旧回落到模型目录。
+        let partial = ModelOverride {
+            model: Some("m".into()),
+            ..ModelOverride::default()
+        };
+        let params = WireParams::resolve(Some(&choice), None, Some(&partial));
+        assert_eq!(params.effort, "high");
+        assert_eq!(params.max_output_tokens, Some(8192));
+
+        // 模型不支持推理时，点名的强度也不发——那个字段对这个端点是未知字段。
+        choice.reasoning = Some(false);
+        let params = WireParams::resolve(Some(&choice), None, Some(&over));
+        assert_eq!(params.reasoning, Reasoning::Unsupported);
+        assert!(params.effort.is_empty());
     }
 
     /// 三态各自发什么：不支持 = 什么都不发，关掉 = 显式 none，开着 = 按强度。

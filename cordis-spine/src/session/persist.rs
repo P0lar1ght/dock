@@ -55,6 +55,17 @@ enum WireEvent {
     SystemReminder {
         text: String,
     },
+    /// 只给用户看的卡片（`LogEvent::Notice`）。`kind` 是自由字符串：认不得的值
+    /// 读成 `NoticeKind::Other`，不会让整条会话读不出来。
+    Notice {
+        /// 不能叫 `kind`：那是整个枚举的内部 tag 名。
+        #[serde(default)]
+        notice_kind: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        body: String,
+    },
     Llm {
         #[serde(default)]
         text: String,
@@ -327,6 +338,7 @@ fn last_history_line(path: &Path) -> Option<HistoryLine> {
 fn wire_summary(event: &WireEvent) -> String {
     let raw = match event {
         WireEvent::User { text } | WireEvent::Prompt { text } => text.as_str(),
+        WireEvent::Notice { title, .. } => title.as_str(),
         WireEvent::SystemReminder { .. } | WireEvent::PreStep => "",
         WireEvent::Llm {
             text, tool_calls, ..
@@ -521,6 +533,11 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
         LogEvent::PreStep => WireEvent::PreStep,
         LogEvent::Prompt(text) => WireEvent::Prompt { text: text.clone() },
         LogEvent::SystemReminder(text) => WireEvent::SystemReminder { text: text.clone() },
+        LogEvent::Notice { kind, title, body } => WireEvent::Notice {
+            notice_kind: kind.as_str().to_string(),
+            title: title.clone(),
+            body: body.clone(),
+        },
         LogEvent::LlmStream(out) => WireEvent::Llm {
             text: out.text.clone(),
             reasoning: out.reasoning.clone(),
@@ -559,6 +576,15 @@ fn from_wire(event: WireEvent) -> LogEvent {
         WireEvent::PreStep => LogEvent::PreStep,
         WireEvent::Prompt { text } => LogEvent::Prompt(text),
         WireEvent::SystemReminder { text } => LogEvent::SystemReminder(text),
+        WireEvent::Notice {
+            notice_kind,
+            title,
+            body,
+        } => LogEvent::Notice {
+            kind: cordis_base::types::NoticeKind::from_str_lenient(&notice_kind),
+            title,
+            body,
+        },
         WireEvent::Llm {
             text,
             reasoning,
@@ -944,5 +970,40 @@ mod tests {
             e,
             LogEvent::SystemReminder(t) if t.contains("compacted earlier")
         )));
+    }
+
+    #[tokio::test]
+    async fn notice_round_trips_and_stays_out_of_model_history() {
+        let _home = cordis_base::test_env::scoped().home();
+        let sessions = reload();
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.append(LogEvent::Notice {
+            kind: cordis_base::types::NoticeKind::WorkflowDone,
+            title: "工作流 deep-research · 完成".into(),
+            body: "report.md".into(),
+        });
+        let id = sessions
+            .archive_current()
+            .expect("archive writes a folder")
+            .id;
+        let again = reload();
+        assert!(again.restore(&id));
+        assert!(
+            again.events().iter().any(|e| matches!(
+                e,
+                LogEvent::Notice { title, body, .. }
+                    if title.contains("deep-research") && body == "report.md"
+            )),
+            "{:?}",
+            again.events()
+        );
+        assert!(
+            !again
+                .model_history()
+                .iter()
+                .any(|e| matches!(e, LogEvent::Notice { .. })),
+            "{:?}",
+            again.model_history()
+        );
     }
 }

@@ -20,9 +20,11 @@ use cordis::{plugin, Context, Inject, Plugin};
 use crate::agent::turn::TurnControl;
 use crate::error::{Error, Result};
 use crate::llm::sampler::Llm;
-use crate::names::{COMPACT, LLM, SESSIONS, SYSTEM_PROMPT, TURN};
+use crate::names::{COMPACT, LLM, SESSIONS, SKILLS, SYSTEM_PROMPT, TURN, WORKFLOWS};
 use crate::prompt::assemble::SystemPrompt;
 use crate::session::log::Sessions;
+use crate::tools::skills::Skills;
+use crate::tools::workflow::Workflows;
 use cordis_base::stream_acc::StreamDelta;
 use cordis_base::types::{LogEvent, PromptRequest};
 use cordis_base::usage::TokenUsage;
@@ -214,9 +216,32 @@ async fn compact_session_locked(
         }
         let compacted = build_compacted_events(&history, &output.text);
         sessions.replace_compacted(compacted);
+        re_announce_discoveries(ctx, sessions);
         return Ok(());
     }
     Err(last_err)
+}
+
+/// 压缩之后把「中途发现的技能 / 工作流」再说一遍。
+///
+/// 两边的 listing 段都是**冻结**的（系统提示不重写，为的是保住前缀缓存），所以
+/// 中途在磁盘上发现的技能 / 工作流只靠历史里那条 `SystemReminder` 让模型知道。
+/// 压缩把它抹掉之后，发现集合又认为"已经通知过了"，模型就永久失去了这些条目。
+fn re_announce_discoveries(ctx: &Context, sessions: &Sessions) {
+    let mut lines = Vec::new();
+    if let Some(skills) = ctx.get::<Skills>(SKILLS) {
+        if let Some(text) = skills.rediscovery_notice() {
+            lines.push(text);
+        }
+    }
+    if let Some(workflows) = ctx.get::<Workflows>(WORKFLOWS) {
+        if let Some(text) = workflows.rediscovery_notice() {
+            lines.push(text);
+        }
+    }
+    for line in lines {
+        sessions.append(LogEvent::SystemReminder(line));
+    }
 }
 
 fn cancelled(ctx: &Context) -> bool {

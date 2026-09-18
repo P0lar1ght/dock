@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::presets::AgentPresets;
 use crate::agent::runtime::{GrokStep, LoopHandle};
 use crate::agent::turn::TurnControl;
-use crate::names::{AGENT_PRESETS, SESSIONS, TURN};
+use crate::names::{AGENT_PRESETS, CAPABILITY, MODEL_OVERRIDE, SESSIONS, TURN};
 use crate::session::log::Sessions;
 use cordis_base::types::{LogEvent, TurnOutcome};
 
@@ -131,10 +131,23 @@ async fn run_dock_child(
         );
     };
 
-    let child = parent
+    let mut child = parent
         .isolate("sessions")
         .isolate("turn")
         .isolate("agentPresets");
+    // 这两项要**先隔离再 provide**：没隔离的名字 provide 进的是共用注册表，
+    // 第二个同样收窄的孩子会撞上「service 已注册」直接起不来——一次
+    // `parallel(jobs)` 起四个 read-only researcher 就是四个全挂。
+    //
+    // 只在真要收窄时隔离：不隔离才继承得到父会话那一份（虽然 `MAX_SUBAGENT_DEPTH`
+    // 目前不允许孙子，但别让这条依赖埋在这里）。
+    if run.request.runtime_overrides.capability_mode.is_some() {
+        child = child.isolate(CAPABILITY);
+    }
+    if !run.request.runtime_overrides.llm.is_empty() {
+        child = child.isolate(MODEL_OVERRIDE);
+    }
+    let child = child;
     let sessions = Sessions::isolated_as(child.clone(), id.clone());
     if !resume.is_empty() {
         sessions.seed(resume);
@@ -150,6 +163,31 @@ async fn run_dock_child(
         Ok(d) => hold.push(d),
         Err(e) => {
             return failed(&id, &store, wall, format!("child turn: {e}"), false);
+        }
+    }
+    // 能力档位只在收窄时才挂：没挂等于不设限，主会话永远没有这一项。
+    if let Some(mode) = run.request.runtime_overrides.capability_mode {
+        match child.provide(CAPABILITY, mode) {
+            Ok(d) => hold.push(d),
+            Err(e) => {
+                return failed(&id, &store, wall, format!("child capability: {e}"), false);
+            }
+        }
+    }
+    // 采样覆写同理：没点名就一项都不挂，采样照 `"settings"` 走。
+    if !run.request.runtime_overrides.llm.is_empty() {
+        let over = run.request.runtime_overrides.llm.clone();
+        match child.provide(MODEL_OVERRIDE, over) {
+            Ok(d) => hold.push(d),
+            Err(e) => {
+                return failed(
+                    &id,
+                    &store,
+                    wall,
+                    format!("child model override: {e}"),
+                    false,
+                );
+            }
         }
     }
     let mut preset = def.to_preset(&typ);
@@ -199,6 +237,7 @@ async fn run_dock_child(
     let id_w = id.clone();
     let parent_w = parent.clone();
     let coord_cancel = run.cancellation.clone();
+    let surface_completion = run.request.surface_completion;
     tokio::spawn(async move {
         drive_child(
             parent_w,
@@ -208,6 +247,7 @@ async fn run_dock_child(
             prompt,
             cancelled,
             coord_cancel,
+            surface_completion,
             first_tx,
         )
         .await;
@@ -228,6 +268,8 @@ async fn drive_child(
     mut prompt: String,
     cancelled: Arc<AtomicBool>,
     coord_cancel: CancellationToken,
+    // `SubagentRequest::surface_completion`：false 时回合结束通知不入父信箱。
+    surface_completion: bool,
     first_tx: oneshot::Sender<ChildRunOutput>,
 ) {
     let wall = Instant::now();
@@ -345,11 +387,16 @@ async fn drive_child(
         let reported = store
             .get(&id)
             .is_some_and(|s| s.reported_this_turn.load(Ordering::Relaxed));
-        store.push_turn_end(
-            &id,
-            (!reported).then(|| super::format::cap_turn_text(&output)),
-            was_cancelled && interrupt,
-        );
+        // `surface_completion: false` 的孩子（workflow 的子代理、以后的 harness
+        // 内部子代理）根本不该在父信箱里露面：run 还没结束就推一条"某个孩子跑
+        // 完了"，主线程就会在半份结果上开一轮。
+        if surface_completion {
+            store.push_turn_end(
+                &id,
+                (!reported).then(|| super::format::cap_turn_text(&output)),
+                was_cancelled && interrupt,
+            );
+        }
         let next_ready = take_inbox(&store, &id);
         if next_ready.is_none() {
             store.park_idle(&id, output.clone(), was_cancelled && interrupt);

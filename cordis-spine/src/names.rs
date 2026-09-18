@@ -16,6 +16,13 @@ pub const MCP: &str = "mcp";
 /// Subagent coordinator (`ctx.subagents`). `tool-task` provides it; the
 /// spawn + mailbox tools live-look it.
 pub const SUBAGENTS: &str = "subagents";
+/// 本会话的能力档位（`crate::tools::capability::CapabilityMode`）。**只挂在受限
+/// 子代理的隔离 ctx 上**：主会话没有这一项，等于不设限。工具允许名单查它，且
+/// 它压在 MCP / 动态包的允许名单豁免之上。
+pub const CAPABILITY: &str = "capability";
+/// 这次委派的采样覆写（`crate::host::settings::ModelOverride`）。**只挂在子代理
+/// 的隔离 ctx 上**：主会话没有这一项，采样照 `"settings"` 走。
+pub const MODEL_OVERRIDE: &str = "model-override";
 /// Local memory files (`ctx.memory`).
 pub const MEMORY: &str = "memory";
 /// External Chromium cockpit (`ctx.browser`). chromiumoxide CDP + live `/browser` TUI cockpit (lean a11y refs).

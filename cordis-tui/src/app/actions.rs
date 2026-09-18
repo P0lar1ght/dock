@@ -194,6 +194,10 @@ pub enum Effect {
     ShowTasks,
     ShowAgents,
     ToggleWorkflows,
+    /// `/workflow stop <name|run_id>`：停一次在跑的 run。
+    StopWorkflow {
+        target: String,
+    },
     ShowMcps,
     /// `/lsp`：空/`setup` 写项目配置，`user` 写用户配置，`status` 只看不写。
     ShowLsp {
@@ -398,8 +402,18 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
             if args.is_empty() || args.eq_ignore_ascii_case("runs") {
                 Effect::ToggleWorkflows
             } else {
-                let first = args.split_whitespace().next().unwrap_or("");
-                if matches!(first, "pause" | "resume" | "stop" | "save") {
+                let mut words = args.split_whitespace();
+                let first = words.next().unwrap_or("");
+                // `stop` 带名字就直接停；不带名字仍开 overlay 让用户挑一个。
+                // `pause` / `resume` / `save` 还没接后端，一律开 overlay。
+                if first == "stop" {
+                    match words.next() {
+                        Some(target) => Effect::StopWorkflow {
+                            target: target.to_string(),
+                        },
+                        None => Effect::ToggleWorkflows,
+                    }
+                } else if matches!(first, "pause" | "resume" | "save") {
                     Effect::ToggleWorkflows
                 } else {
                     match workflow_command_arguments(args) {

@@ -48,6 +48,26 @@ pub fn body(lines: Vec<Line<'static>>, pane: usize) -> Vec<Line<'static>> {
     wrapped.into_iter().map(indent).collect()
 }
 
+/// 正文自带前缀时的换行宽度：只留一格右边距。
+///
+/// 和 [`body_width`] 差在缩进算谁的：[`body`] 的行是裸的、缩进由它加，所以要
+/// 先扣掉 [`BODY_INDENT`]；`  目标  ` 这类行的前缀已经在行里了。
+pub fn prefixed_width(pane: usize) -> usize {
+    pane.saturating_sub(1).max(20)
+}
+
+/// 把**自带前缀**的正文行折到面板宽度，不额外缩进。
+///
+/// 模型写的字段（目标 / 进度 / 摘要 / 上报正文）长度不可控。少了这一步，一行
+/// 就一路冲出右边缘被终端裁掉——窄窗下只看得见开头那几个字。
+pub fn wrap_prefixed(lines: Vec<Line<'static>>, pane: usize) -> Vec<Line<'static>> {
+    if pane == 0 {
+        lines
+    } else {
+        word_wrap_lines(lines, prefixed_width(pane))
+    }
+}
+
 /// 给一行正文加上统一缩进。
 pub fn indent(mut line: Line<'static>) -> Line<'static> {
     line.spans.insert(0, Span::raw(" ".repeat(BODY_INDENT)));

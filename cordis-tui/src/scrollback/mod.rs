@@ -41,6 +41,7 @@ mod goal;
 mod list_dir;
 pub(crate) mod live;
 mod mcp;
+mod notice;
 mod plan;
 mod read;
 mod sched;
@@ -731,12 +732,21 @@ pub(crate) fn subagent_live_activity(events: &[LogEvent]) -> Option<String> {
 
 #[cfg(test)]
 pub(crate) fn lines_from_events(events: &[LogEvent]) -> Vec<Line<'static>> {
+    lines_from_events_with(events, 80, &HashMap::new())
+}
+
+#[cfg(test)]
+pub(crate) fn lines_from_events_with(
+    events: &[LogEvent],
+    width: usize,
+    fold: &HashMap<String, tool::ToolMode>,
+) -> Vec<Line<'static>> {
     build_frame(
         events,
         &[],
-        80,
+        width,
         &HashSet::new(),
-        &HashMap::new(),
+        fold,
         false,
         false,
         &[],
@@ -948,6 +958,21 @@ fn build_frame(
                     &job_snaps,
                     presets,
                 );
+            }
+            LogEvent::Notice { kind, title, body } => {
+                // 只给用户看的卡片：模型历史里没有它，所以它不属于任何一轮工具
+                // 往返，自己按事件下标折叠。
+                let id = notice::header_id(i, title, body);
+                let mode = tool_fold
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(tool::ToolMode::Collapsed);
+                let card = notice::lines(*kind, title, body, &theme, width, mode);
+                if !card.is_empty() {
+                    tool_headers.push((lines.len(), id));
+                    lines.extend(card);
+                    lines.push(Line::from(""));
+                }
             }
             LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::SystemReminder(_) => {}
         }
@@ -3009,6 +3034,97 @@ mod card_shell_tests {
                 "出现连续两行空白:\n{}",
                 blanks.join("\n")
             );
+        }
+    }
+
+    /// 卡片正文必须跟着面板宽度折行。
+    ///
+    /// 盯的是**共性**而不是某一张卡：正文里的字段（目标 / 进度 / 摘要 / 子代理
+    /// 上报）全是模型写的，长度不可控。少了折行就一路冲出右边缘被终端裁掉——
+    /// 窄窗下只看得见开头几个字。新卡忘了走 `card::body` / `card::wrap_prefixed`
+    /// 会在这里被抓住。
+    #[test]
+    fn card_bodies_wrap_to_the_pane_width() {
+        use unicode_width::UnicodeWidthStr;
+
+        const W: usize = 44;
+        let long = "本环境联网被封（web_search 与 web_fetch 均报 SSRF blocked），只能读本地只读证据，这句话故意写得很长很长";
+
+        let cases: Vec<(&str, Vec<LogEvent>)> = vec![
+            (
+                "goal",
+                vec![tool_event(
+                    "g1",
+                    "update_goal",
+                    &format!(r#"{{"message":"{long}"}}"#),
+                    r#"{"summary":"已记下"}"#,
+                )],
+            ),
+            (
+                "sched",
+                vec![tool_event(
+                    "s1",
+                    "scheduler_create",
+                    &format!(r#"{{"prompt":"{long}"}}"#),
+                    r#"{"summary":"已排上"}"#,
+                )],
+            ),
+            (
+                "notice",
+                vec![LogEvent::Notice {
+                    kind: cordis_spine::NoticeKind::WorkflowReport,
+                    title: "deep-research · researcher-2 上报".into(),
+                    body: format!("researcher-2 完成。\n{long}"),
+                }],
+            ),
+            (
+                "assistant table",
+                vec![LogEvent::LlmStream(cordis_spine::LlmOutput {
+                    text: "| 实现 | 权重 | 许可 |\n|---|---|---|\n| TheoLeeCJ/openjev | 单张 RTX 3090 上用冻结 Qwen3.5-4B 复现，Safetensors 在子目录 | MIT |\n| b | RTX 3090 + WebGPU demo | MIT, 242★ |\n".into(),
+                    ..cordis_spine::LlmOutput::default()
+                })],
+            ),
+            (
+                "assistant markdown",
+                vec![LogEvent::LlmStream(cordis_spine::LlmOutput {
+                    text: format!("**结论**：{long}"),
+                    ..cordis_spine::LlmOutput::default()
+                })],
+            ),
+        ];
+
+        for (name, events) in cases {
+            // 每张卡都按展开态画：折叠态只有标题，遮住的正是正文这条路。
+            let mut fold = HashMap::new();
+            for (i, event) in events.iter().enumerate() {
+                match event {
+                    LogEvent::ToolExecute { id, .. } => {
+                        fold.insert(id.clone(), tool::ToolMode::Expanded);
+                    }
+                    LogEvent::Notice { title, body, .. } => {
+                        fold.insert(notice::header_id(i, title, body), tool::ToolMode::Expanded);
+                    }
+                    _ => {}
+                }
+            }
+            for line in lines_from_events_with(&events, W, &fold) {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(
+                    text.width() <= W,
+                    "{name} 有一行没折到面板宽度（{} > {W}）：{text:?}",
+                    text.width()
+                );
+            }
+        }
+    }
+
+    fn tool_event(id: &str, name: &str, arguments: &str, content: &str) -> LogEvent {
+        LogEvent::ToolExecute {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            content: content.into(),
+            images: Vec::new(),
         }
     }
 }

@@ -38,6 +38,33 @@ fn slash_accept_inserts_highlighted_row() {
     assert_eq!(prompt.text(), "/quit ");
 }
 
+/// `/workflow stop <name>` 要真的去停，不是像以前那样只把 overlay 打开。
+#[test]
+fn workflow_stop_maps_to_a_stop_effect() {
+    let prompt = PromptWidget::default();
+    let stop = dispatch(
+        Action::SendPrompt("/workflow stop deep-research".into()),
+        &prompt,
+    );
+    assert!(
+        matches!(
+            stop.as_slice(),
+            [Effect::StopWorkflow { target }] if target == "deep-research"
+        ),
+        "{stop:?}"
+    );
+    // 不带名字仍然开 overlay 让用户挑。
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/workflow stop".into()), &prompt).as_slice(),
+        [Effect::ToggleWorkflows]
+    ));
+    // 还没接后端的动词维持原样。
+    assert!(matches!(
+        dispatch(Action::SendPrompt("/workflow pause x".into()), &prompt).as_slice(),
+        [Effect::ToggleWorkflows]
+    ));
+}
+
 #[test]
 fn slash_plan_tasks_mcps_map() {
     let prompt = PromptWidget::default();

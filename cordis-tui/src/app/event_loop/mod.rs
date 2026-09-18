@@ -568,8 +568,13 @@ pub async fn run(root: Context) -> Result<()> {
                                         overlay = Overlay::Workflows {
                                             selected: 0,
                                             query: String::new(),
+                                            detail: None,
+                                            phase: 0,
                                         };
                                     }
+                                }
+                                Effect::StopWorkflow { target } => {
+                                    stop_workflow(&ctx, &target);
                                 }
                                 Effect::ShowMcps => {
                                     overlay = Overlay::Mcps {

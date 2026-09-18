@@ -89,6 +89,7 @@ pub enum TaskEntry {
     },
     Workflow {
         id: u64,
+        run_id: String,
         name: String,
         label: String,
         styled: Line<'static>,
@@ -281,7 +282,11 @@ impl TaskEntry {
                 (Some(p), Some(a)) => format!("{p} · {a}"),
                 (Some(p), None) => p.to_string(),
                 (None, Some(a)) => a,
-                (None, None) => "running".to_string(),
+                // 还没进阶段、也没有子代理时，最新一条 `log()` 是唯一的活口。
+                (None, None) => run
+                    .latest_log()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "running".to_string()),
             }
         } else {
             run.status.replace('_', " ")
@@ -303,6 +308,7 @@ impl TaskEntry {
         let id = hasher.finish();
         TaskEntry::Workflow {
             id,
+            run_id: run.run_id.clone(),
             name: run.name.clone(),
             label,
             styled: Line::from(spans),
@@ -476,6 +482,25 @@ impl TaskEntry {
             _ => None,
         }
     }
+
+    /// 这一行的 `[✗]` 要停什么。`None` = 这行停不了，不画按钮。
+    pub fn kill_target(&self) -> Option<KillTarget> {
+        match self {
+            TaskEntry::Scheduled { task_id, .. } => Some(KillTarget::Scheduled(task_id.clone())),
+            TaskEntry::Workflow {
+                run_id, stoppable, ..
+            } if *stoppable => Some(KillTarget::Workflow(run_id.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// `[✗]` / `x` 停掉的是哪一类任务。两类的停法不同：定时任务是关掉排程，
+/// workflow 是取消一次运行并收掉它的子代理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KillTarget {
+    Scheduled(String),
+    Workflow(String),
 }
 
 pub fn collect_items(
@@ -644,7 +669,7 @@ pub fn render_tasks_overlay(
         };
     }
     let sel = selected.min(entries.len() - 1);
-    let has_loop = entries.iter().any(|e| e.scheduled_task_id().is_some());
+    let has_loop = entries.iter().any(|e| e.kill_target().is_some());
     let hint_h = if has_loop { 1 } else { 0 };
     let visible = list_h.saturating_sub(hint_h) as usize;
     let start = sel.saturating_sub(visible.saturating_sub(1) / 2);
@@ -678,15 +703,15 @@ pub fn render_tasks_overlay(
             spans.extend(line.spans);
             line.spans = spans;
         }
-        let scheduled_id = entries[idx].scheduled_task_id();
-        let text_w = if scheduled_id.is_some() {
+        let kill_target = entries[idx].kill_target();
+        let text_w = if kill_target.is_some() {
             content.width.saturating_sub(kill_w + 1)
         } else {
             content.width.saturating_sub(1)
         };
         let clipped = crate::grok::line_utils::truncate_line(line, text_w as usize);
         buf.set_line(content.x, y, &clipped, text_w.max(1));
-        if let Some(task_id) = scheduled_id {
+        if let Some(target) = kill_target {
             let bx = content.x + content.width.saturating_sub(kill_w);
             let kill_style = if selected_row {
                 Style::default().fg(theme.accent_error)
@@ -699,7 +724,7 @@ pub fn render_tasks_overlay(
                 &Span::styled(glyphs::ballot_x_button(), kill_style),
                 kill_w,
             );
-            kill_buttons.push((Rect::new(bx, y, kill_w, 1), task_id.to_string()));
+            kill_buttons.push((Rect::new(bx, y, kill_w, 1), target));
         }
         hits.push((idx, row_rect));
     }
@@ -707,7 +732,7 @@ pub fn render_tasks_overlay(
         let hint_y = list_y.saturating_add(visible as u16);
         if hint_y < content.y.saturating_add(content.height) {
             let hint = Line::from(Span::styled(
-                "x / [✗] 关闭 loop",
+                "x / [✗] 关闭 loop 或停止 workflow",
                 Style::default().fg(theme.gray),
             ));
             buf.set_line(

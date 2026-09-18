@@ -87,6 +87,11 @@ pub enum Overlay {
     Workflows {
         selected: usize,
         query: String,
+        /// 打开了哪个 run 的详情页（run id）。`None` = 还在列表。
+        detail: Option<String>,
+        /// 详情页左栏选中的阶段。用下标而不是标题：阶段标题可以重名之外，
+        /// 「未声明阶段」的脚本也要能选中那一行 `agents`。
+        phase: usize,
     },
     Goal {
         selected: usize,
@@ -873,12 +878,16 @@ pub fn hit_close(hits: &PickerHits, column: u16, row: u16) -> bool {
     hits.close_button.contains(Position { x: column, y: row })
 }
 
-pub fn hit_kill(hits: &PickerHits, column: u16, row: u16) -> Option<String> {
+pub fn hit_kill(
+    hits: &PickerHits,
+    column: u16,
+    row: u16,
+) -> Option<crate::grok::tasks_pane::KillTarget> {
     let pos = Position { x: column, y: row };
     hits.kill_buttons
         .iter()
         .find(|(r, _)| r.contains(pos))
-        .map(|(_, id)| id.clone())
+        .map(|(_, target)| target.clone())
 }
 
 #[cfg(test)]
