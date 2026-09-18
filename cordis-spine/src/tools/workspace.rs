@@ -99,10 +99,11 @@ const WRITE_FILE_DESC: &str = "Write contents to a file, creating it or replacin
 - Parent directories are created automatically.";
 
 const BASH_DESC: &str = "Run a bash command in the workspace and return its output.\n\
-- Prefer the dedicated tools when one fits: read_file over `cat`, grep over `grep`/`rg`, glob over `find`, list_dir over `ls`, search_replace over `sed -i`. They are cheaper, are not gated behind a permission prompt, keep working in plan mode, and report what they truncated.\n\
+- Do not use bash for file work: `cat`/`head`/`sed -n` → read_file, `grep`/`rg` → grep, `find` → glob, `ls` → list_dir, `sed -i` → search_replace. The dedicated tools are cheaper, are not gated behind a permission prompt, keep working in plan mode, and report what they truncated. Shell `grep` also reads everything on disk including build output (`target/`), so a repo-wide search the grep tool finishes in tens of milliseconds can take bash minutes.\n\
 - Each call runs in a fresh shell: cwd, variables and functions do not persist between calls. Pass workdir instead of using `cd`. Once you pass workdir, every relative path in the command is relative to it — do not also prefix those paths with the directory you just moved into.\n\
 - Foreground commands are killed after timeout_ms (default and cap 300000 ms); on expiry you still get whatever the command already printed.\n\
 - Set is_background true (or block_until_ms: 0) for dev servers and long builds: you get a task id immediately and check it with get_task_output / kill_task.\n\
+- Piping command output into `grep` (e.g. `cargo test 2>&1 | grep FAILED`) is what bash is for.\n\
 - Output is capped; the head and tail are kept and the middle is reported as elided.";
 
 pub fn specs() -> Vec<ToolSpec> {
