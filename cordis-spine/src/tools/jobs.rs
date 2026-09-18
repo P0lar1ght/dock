@@ -321,6 +321,25 @@ impl Jobs {
         self.inner.lock().unwrap().remove(id);
     }
 
+    /// 把一条还在跑的前台命令转成后台任务：**进程不动**，只是不再阻塞这一轮。
+    ///
+    /// 前台预算到点时用它替代 `kill`。命令本身已经过了权限门、也已经跑了几分钟，
+    /// 杀掉等于把那几分钟扔了、还逼模型原样重跑一次；转后台则是把它留在 `Jobs`
+    /// 里，`get_task_output` 随时能收。
+    ///
+    /// 返回 `false` = 没有这个 id（已经收尾并被 `forget` 掉了）。
+    pub fn detach(&self, id: &str) -> bool {
+        match self.inner.lock().unwrap().get(id) {
+            Some(job) => {
+                // `foreground` 决定它算不算「挡着这一轮」：`live_count` 与 tasks
+                // pane 都看这一位。
+                job.foreground.store(false, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn spawn_job(
         &self,
         command: impl Into<String>,
