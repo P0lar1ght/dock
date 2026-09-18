@@ -3,7 +3,7 @@
 //! 全部针对 2026-09 核实出的四个缺陷，先红后绿：
 //!
 //! 1. 运行期 `snapshot().output` 恒为空 —— `run_job` 只在进程退出后才写一次，
-//!    所以 `get_task_output` 对运行中的任务毫无信息，TUI 的 tasks pane 同理。
+//!    所以 `job` 对运行中的任务毫无信息，TUI 的 tasks pane 同理。
 //! 2. stderr 超过管道缓冲（64KB）即永久挂死 —— 旧实现先 `read_to_end(stdout)`
 //!    读到 EOF 才轮到 stderr，而 stdout 的 EOF 要等进程退出，进程又卡在写
 //!    stderr 上。

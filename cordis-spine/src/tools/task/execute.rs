@@ -36,7 +36,7 @@ one-shot handoff.\n\
 (same as the live roster, including user overlay roles).\n\
 - run_in_background: default true. Returns subagent_id immediately; its turn end reaches you as \
 a notification. Set false only when the next action needs the result now. To collect a one-shot \
-result instead of conversing, pair it with get_task_output.\n\
+result instead of conversing, pair it with the job tool.\n\
 - resume_from: a disposed subagent_id only.\n\
 - reload_roster: refresh the subagent_type enum after writing a new agents/<id>.yml (does not spawn).\n\
 Talking to a child: send_message (idle — queued and urgent both start its next turn now; urgent \
@@ -143,7 +143,7 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
                     call,
                     format!(
                         "subagent {src} has not been disposed; resume_from is for a disposed subagent_id. \
-                         Continue it with send_message, or collect with get_task_output."
+                         Continue it with send_message, or collect with the job tool."
                     ),
                 );
             }

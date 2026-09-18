@@ -1196,7 +1196,7 @@ fn push_tool_card(
         lines.extend(task_ops::lines(
             name, arguments, content, agents, job_snaps, theme, width,
         ));
-        // `wait_tasks` / `get_task_output` can hang for minutes. The clock is
+        // A `job` call with a positive timeout_ms can hang for minutes. The clock is
         // painted (`started` = when the model asked), never baked.
         if running {
             mark_live(live_rows, lines, header_at, started);
@@ -2351,7 +2351,7 @@ mod live_chrome_tests {
             .any(|w| w[0].is_ascii_digit() && w[1] == '.' && w[2].is_ascii_digit() && w[3] == 's')
     }
 
-    /// `wait_tasks` parks on this card for minutes, and the clock it used to
+    /// A waiting `job` call parks on this card for minutes, and the clock it used to
     /// bake was the *target's* birth time, not this call's start. It has to ride
     /// the same paint-time pass as every other running card.
     #[test]
@@ -2363,7 +2363,7 @@ mod live_chrome_tests {
         sessions.append(LogEvent::LlmStream(LlmOutput {
             tool_calls: vec![ToolCall {
                 id: "call-1".into(),
-                name: "wait_tasks".into(),
+                name: "job".into(),
                 arguments: r#"{"ids":["kid-1"]}"#.into(),
             }],
             ..LlmOutput::default()

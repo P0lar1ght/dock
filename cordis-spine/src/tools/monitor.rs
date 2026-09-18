@@ -79,7 +79,7 @@ fn start_monitor(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
              description: {description}\n\
              timeout_ms: {timeout_ms}\n\
              persistent: {persistent}\n\n\
-             When you need its result, use get_task_output with task_ids=[\"{id}\"] and a positive timeout_ms. Stop with kill_task."
+             When you need its result, use the job tool with job_ids=[\"{id}\"] and a positive timeout_ms. Stop with kill_task."
         ),
     )
 }

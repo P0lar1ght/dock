@@ -31,7 +31,7 @@
 |---|---|---|---|---|
 | `tools`（`workspace_tools`） | `"tools"` | `list_dir` `read_file` `grep` `search_replace` `bash`（别名 `run_terminal_cmd`）`glob` `write_file` | 工作区内建七颗，不能被 register 盖掉 | [workspace](docs/tools/workspace.md) |
 | `jobs` | `"jobs"` | — | 进程表；前台 bash 也在表上 | [jobs](docs/tools/jobs.md) |
-| `tool-jobs` | → `"tools"` | `get_task_output` `wait_tasks` `kill_task` | 查 / 等 / 杀后台 bash 或子代理 | [jobs](docs/tools/jobs.md) |
+| `tool-jobs` | → `"tools"` | `job` `kill_task` | 列 / 查 / 等后台 bash 或子代理，以及杀 | [jobs](docs/tools/jobs.md) |
 | `tool-monitor` | → `"tools"`（live `"jobs"`） | `monitor`（按需） | 长命令 stdout 盯梢 | [jobs](docs/tools/jobs.md) |
 | `slash` | `"slash"` | — | 额外斜杠命令表，TUI live-lookup；内建 `CATALOG` 不能被盖掉。`kind`：`prompt` / `overlay` / `slot`（开已登记的 `tui.slots` id）/ `tool`（`text`=工具名，直接 `Tools::execute`，结果 Notice，权限门仍生效） | — |
 | `tui.slots` | `"tui.slots"` | — | 动态包登记的 TUI 插槽（数据+回调，不是 ratatui widget）。始终挂上；TUI 用一次通用 `Overlay::Slot` 臂 | — |

@@ -237,7 +237,7 @@ pub struct JobSnapshot {
     ///
     /// Foreground commands live in the same table purely so the TUI can render
     /// their output while they run; they are not background tasks and are kept
-    /// out of the tasks pane and out of `get_task_output`'s no-id listing.
+    /// out of the tasks pane and out of the `job` tool's no-id listing.
     pub foreground: bool,
     pub start_time: SystemTime,
 }
@@ -325,7 +325,7 @@ impl Jobs {
     ///
     /// 前台预算到点时用它替代 `kill`。命令本身已经过了权限门、也已经跑了几分钟，
     /// 杀掉等于把那几分钟扔了、还逼模型原样重跑一次；转后台则是把它留在 `Jobs`
-    /// 里，`get_task_output` 随时能收。
+    /// 里，`job` 工具随时能收。
     ///
     /// 返回 `false` = 没有这个 id（已经收尾并被 `forget` 掉了）。
     pub fn detach(&self, id: &str) -> bool {
@@ -592,8 +592,7 @@ pub fn jobs() -> Plugin {
     })
 }
 
-const OUTPUT_PARAMS: &str = r#"{"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"},"description":"Background task ids."},"timeout_ms":{"type":"integer","description":"Wait up to this many ms; omit or 0 for a snapshot."}}}"#;
-const WAIT_PARAMS: &str = r#"{"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["task_ids"]}"#;
+const JOB_PARAMS: &str = r#"{"type":"object","properties":{"job_ids":{"type":"array","items":{"type":"string"},"description":"Job ids, as printed by the tool that started them (\"job-7\") or a subagent_id. Omit to list every job in this session."},"timeout_ms":{"type":"integer","description":"Wait up to this many ms for the named jobs to finish; omit or 0 for an immediate snapshot."}}}"#;
 const KILL_PARAMS: &str =
     r#"{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}"#;
 
@@ -605,13 +604,6 @@ pub fn tool_jobs() -> Plugin {
             std::sync::Arc::new(move |call| {
                 let ctx = ctx.clone();
                 Box::pin(async move { job_output(&ctx, call).await })
-            })
-        };
-        let wait: ToolBody = {
-            let ctx = ctx.clone();
-            std::sync::Arc::new(move |call| {
-                let ctx = ctx.clone();
-                Box::pin(async move { wait_tasks(&ctx, call).await })
             })
         };
         let kill: ToolBody = {
@@ -626,24 +618,16 @@ pub fn tool_jobs() -> Plugin {
                 vec![
                     tools.register(
                         ToolSpec {
-                            name: "get_task_output".into(),
-                            description: "Get output and status from a background terminal command or a subagent.\n- Pass task_ids with one or more ids from is_background=true commands, from a command that outlived its foreground budget, or a task spawn subagent_id; omit timeout_ms or pass 0 for a non-blocking snapshot.\n- Omit task_ids entirely to inventory every background task in this session: one line each with how long it has been running, no output bodies. Use this when you have lost track of what is still running, then kill_task the ones you no longer need.\n- A subagent pushes its turn end to you, so poll only when you need the result now.".into(),
-                            parameters_json: OUTPUT_PARAMS.into(),
+                            name: "job".into(),
+                            description: "List background jobs, or read output and status from specific ones. Covers background terminal commands and subagents.\n- Omit job_ids to list every job in this session: one line each with status, how long it has been running, and the command, without output bodies. Use this when you have lost track of what is still running, then kill_task the ones you no longer need.\n- Pass job_ids to read their output: ids come from is_background=true commands, from a command that outlived its foreground budget, or from a task spawn subagent_id.\n- timeout_ms waits that long for the named jobs to finish; omit it or pass 0 for an immediate snapshot. Waiting never terminates a job — a timed-out wait returns the output so far and says so.\n- A subagent pushes its turn end to you, so poll only when you need the result now.".into(),
+                            parameters_json: JOB_PARAMS.into(),
                         },
                         output,
                     )?,
                     tools.register(
                         ToolSpec {
-                            name: "wait_tasks".into(),
-                            description: "Wait until background commands or subagents complete. Prefer get_task_output with a positive timeout_ms.".into(),
-                            parameters_json: WAIT_PARAMS.into(),
-                        },
-                        wait,
-                    )?,
-                    tools.register(
-                        ToolSpec {
                             name: "kill_task".into(),
-                            description: "Terminate a running background terminal command, or dispose a live subagent. For a subagent, use interrupt_agent instead when you only want to stop its current turn.".into(),
+                            description: "Terminate a running background terminal command, or dispose a live subagent. Use job with no job_ids first if you are not sure what is still running. For a subagent, use interrupt_agent instead when you only want to stop its current turn.".into(),
                             parameters_json: KILL_PARAMS.into(),
                         },
                         kill,
@@ -654,10 +638,21 @@ pub fn tool_jobs() -> Plugin {
     })
 }
 
+/// `job_ids` 是现在的名字，`task_ids` / `task_id` 是旧名。
+///
+/// 继续认旧名不是为了兼容磁盘格式，是为了模型：`get_task_output` / `wait_tasks`
+/// 存在了很久，`/resume` 回来的历史里全是 `task_ids`，模型照着抄一遍是常态。
+/// 认下来比回一句「参数名错了」便宜。
+const ID_KEYS: [&str; 2] = ["job_ids", "task_ids"];
+const ID_KEYS_SINGULAR: [&str; 2] = ["job_id", "task_id"];
+
 fn parse_ids(raw: &str) -> (Vec<String>, u64) {
     let v: serde_json::Value = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
     let mut ids = Vec::new();
-    if let Some(arr) = v.get("task_ids").and_then(|x| x.as_array()) {
+    for key in ID_KEYS {
+        let Some(arr) = v.get(key).and_then(|x| x.as_array()) else {
+            continue;
+        };
         for item in arr {
             if let Some(s) = item.as_str() {
                 if !s.is_empty() {
@@ -665,11 +660,17 @@ fn parse_ids(raw: &str) -> (Vec<String>, u64) {
                 }
             }
         }
+        if !ids.is_empty() {
+            break;
+        }
     }
     if ids.is_empty() {
-        if let Some(s) = v.get("task_id").and_then(|x| x.as_str()) {
-            if !s.is_empty() {
-                ids.push(s.to_string());
+        for key in ID_KEYS_SINGULAR {
+            if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                if !s.is_empty() {
+                    ids.push(s.to_string());
+                    break;
+                }
             }
         }
     }
@@ -754,18 +755,6 @@ async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         }
         return tool_result(call, parts.join("\n\n"));
     }
-    let body = collect_output(jobs.as_deref(), sub.as_deref(), &ids, timeout).await;
-    tool_result(call, with_wait_note(body))
-}
-
-async fn wait_tasks(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
-    let (ids, timeout) = parse_ids(&call.arguments);
-    let timeout = if timeout == 0 { 30_000 } else { timeout };
-    if ids.is_empty() {
-        return tool_result(call, "Error: task_ids is required");
-    }
-    let jobs = ctx.get::<Jobs>(JOBS);
-    let sub = ctx.get::<Subagents>(SUBAGENTS);
     let body = collect_output(jobs.as_deref(), sub.as_deref(), &ids, timeout).await;
     tool_result(call, with_wait_note(body))
 }

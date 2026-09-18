@@ -47,7 +47,7 @@ use types::{
 pub const MAX_SUBAGENT_DEPTH: u32 = 1;
 
 /// Idle children older than this are disposed (their slot and transcript stay
-/// readable, so `get_task_output` and `resume_from` keep working).
+/// readable, so `job` and `resume_from` keep working).
 const IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// How often the idle sweep runs.
