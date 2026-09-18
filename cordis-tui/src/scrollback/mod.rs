@@ -3078,6 +3078,13 @@ mod card_shell_tests {
                 }],
             ),
             (
+                "assistant table",
+                vec![LogEvent::LlmStream(cordis_spine::LlmOutput {
+                    text: "| 实现 | 权重 | 许可 |\n|---|---|---|\n| TheoLeeCJ/openjev | 单张 RTX 3090 上用冻结 Qwen3.5-4B 复现，Safetensors 在子目录 | MIT |\n| b | RTX 3090 + WebGPU demo | MIT, 242★ |\n".into(),
+                    ..cordis_spine::LlmOutput::default()
+                })],
+            ),
+            (
                 "assistant markdown",
                 vec![LogEvent::LlmStream(cordis_spine::LlmOutput {
                     text: format!("**结论**：{long}"),

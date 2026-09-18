@@ -487,8 +487,8 @@ async fn a_contract_miss_is_retried_once_and_then_succeeds() {
 
     assert_eq!(run.status, "complete", "{run:?}");
     let summary = run.result_summary.clone().unwrap_or_default();
-    assert!(summary.contains("\"success\":true"), "{summary}");
-    assert!(summary.contains("\"ok\":true"), "{summary}");
+    assert!(summary.contains("success: true"), "{summary}");
+    assert!(summary.contains("ok: true"), "{summary}");
     assert_eq!(turns.load(Ordering::SeqCst), 2, "应当正好重试一次");
     // 重试不扣预算：预算算的是逻辑 agent 调用。
     assert_eq!(run.agents_used, 1);
@@ -504,7 +504,7 @@ async fn a_persistent_contract_miss_fails_the_agent() {
 
     assert_eq!(run.status, "complete", "脚本自己跑完了：{run:?}");
     let summary = run.result_summary.clone().unwrap_or_default();
-    assert!(summary.contains("\"success\":false"), "{summary}");
+    assert!(summary.contains("success: false"), "{summary}");
     assert!(summary.contains("结构化产出校验失败"), "{summary}");
     assert_eq!(turns.load(Ordering::SeqCst), 2, "只该重试一次就放弃");
 }

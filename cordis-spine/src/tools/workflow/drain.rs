@@ -452,7 +452,7 @@ async fn handle_launch(
     state.patch(&run_id, |snap| match &outcome {
         WorkflowOutcome::Completed { result } => {
             snap.status = "complete".into();
-            snap.result_summary = Some(result.to_string());
+            snap.result_summary = Some(readable_result(result));
         }
         WorkflowOutcome::Paused { kind, message } => {
             snap.status = format!("{}_paused", kind.as_str());
@@ -517,6 +517,52 @@ fn notify_done(ctx: &cordis::Context, state: &Arc<WorkflowState>, run_id: &str) 
         reports,
         dropped,
     );
+}
+
+/// 把 `complete()` 的结果摊成人和模型都读得下去的文本。
+///
+/// 原样 `to_string()` 交出去的是一整行转义过的 JSON：`deep_research.rhai` 的
+/// `complete(#{ path: …, report: … })` 会变成 `{"path":"…","report":"# Research
+/// result\n\n**Status…"}` —— 报告正文里的换行全成了字面量 `\n`，滚动区那张收尾
+/// 卡和主线程收到的通知都只能看见这么一条长得吓人的单行。
+fn readable_result(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(key, v)| {
+                let text = readable_result(v);
+                // 多行的值和嵌套结构另起一行并缩进，`path: /x/y` 这种标量留在
+                // 同一行。不缩进的话 `output: ok: true` 读起来像两层键挤在一起。
+                let nested = matches!(
+                    v,
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_)
+                );
+                if text.is_empty() {
+                    format!("{key}:")
+                } else if nested || text.contains('\n') {
+                    format!("{key}:\n{}", indent_block(&text))
+                } else {
+                    format!("{key}: {text}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(readable_result)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    }
+}
+
+fn indent_block(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn status_text(status: &str) -> &str {
@@ -610,6 +656,33 @@ mod tests {
         assert_eq!(reports[0].output, "第 3 条", "丢的该是最旧的");
         let (again, dropped) = state.take_reports("wf_1");
         assert!(again.is_empty() && dropped == 0, "取过一次就清空");
+    }
+
+    /// `complete()` 的结果要摊成读得下去的文本，不是一整行转义 JSON。
+    ///
+    /// `deep_research.rhai` 收尾写的是 `complete(#{ path: …, report: … })`。
+    /// 原样 `to_string()` 交出去，报告正文里的换行全成了字面量 `\n`，收尾卡和
+    /// 主线程收到的通知都只剩一条长得吓人的单行。
+    #[test]
+    fn a_complete_result_is_readable_not_escaped_json() {
+        let value = serde_json::json!({
+            "path": "/Users/polar/.dock/scratch/wf_1-abc/report.md",
+            "report": "# Research result\n\n**Status: Partial**\n\n没有可支撑的结论。",
+        });
+        let text = readable_result(&value);
+        assert!(!text.contains("\\n"), "换行不该是字面量：{text:?}");
+        assert!(text.contains("# Research result"), "{text}");
+        assert!(text.contains("**Status: Partial**"), "{text}");
+        assert!(
+            text.contains("path: /Users/polar/.dock/scratch/wf_1-abc/report.md"),
+            "标量留在同一行：{text}"
+        );
+
+        // 纯字符串结果原样交出去，别再套一层引号。
+        assert_eq!(readable_result(&serde_json::json!("done")), "done");
+        // 嵌套结构缩进，不然 `output: ok: true` 像两层键挤在一起。
+        let nested = readable_result(&serde_json::json!({ "output": { "ok": true } }));
+        assert_eq!(nested, "output:\n  ok: true");
     }
 
     /// 两个 dock 同时开着，各自的 `wf_1` 不能共用一个 scratch 目录。
