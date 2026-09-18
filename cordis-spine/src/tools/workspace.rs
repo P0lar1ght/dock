@@ -12,20 +12,21 @@ use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 const LIST_DIR_PARAMS: &str = r#"{"type":"object","properties":{"target_directory":{"type":"string","description":"Path to directory to list, relative to cwd or absolute."}},"required":["target_directory"]}"#;
 const READ_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{"type":"string","description":"Path of the file to read (relative to cwd or absolute)."},"offset":{"type":"integer","description":"1-based start line. Omit to start at line 1. Use with limit for large files."},"limit":{"type":"integer","description":"Max lines to return. Omit to use the default cap (1000). Pass a smaller value for a tight window."}},"required":["target_file"]}"#;
 const SEARCH_REPLACE_PARAMS: &str = r#"{"type":"object","properties":{"file_path":{"type":"string","description":"Path of the file to modify, relative to cwd or absolute."},"old_string":{"type":"string","description":"Exact text to replace. Must match exactly one place in the file unless replace_all is true. Set to an empty string to create a new file."},"new_string":{"type":"string","description":"Replacement text. Must differ from old_string."},"replace_all":{"type":"boolean","description":"Replace every occurrence instead of requiring old_string to be unique. Use when renaming an identifier."}},"required":["file_path","old_string","new_string"]}"#;
-const BASH_PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The bash command to run."},"description":{"type":"string","description":"Clear, concise description of what this command does in active voice, 5-10 words (shown to the user in the permission prompt and the UI). Examples: \"git status\" -> \"Show working tree status\"; \"npm install\" -> \"Install package dependencies\"."},"workdir":{"type":"string","description":"Working directory for this command. Defaults to the session cwd; if you pass a relative workdir it resolves against the session cwd. Prefer this over a leading cd. IMPORTANT: relative paths inside command then resolve against workdir, not against the session cwd — with workdir \"sub\", write \"src/file.txt\", not \"sub/src/file.txt\"."},"timeout_ms":{"type":"integer","description":"Foreground timeout in ms for this command. Defaults to 300000 (5 min) and is capped at it. On expiry the command is killed and whatever it already printed is returned."},"is_background":{"type":"boolean","description":"Set to true for long-running commands (dev servers, long builds). Returns a task id immediately; collect with get_task_output, stop with kill_task."},"block_until_ms":{"type":"integer","description":"Foreground wait in ms. 0 backgrounds immediately."}},"required":["command"]}"#;
+const BASH_PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The bash command to run."},"description":{"type":"string","description":"Clear, concise description of what this command does in active voice, 5-10 words (shown to the user in the permission prompt and the UI). Examples: \"git status\" -> \"Show working tree status\"; \"npm install\" -> \"Install package dependencies\"."},"workdir":{"type":"string","description":"Working directory for this command. Defaults to the session cwd; if you pass a relative workdir it resolves against the session cwd. Prefer this over a leading cd. IMPORTANT: relative paths inside command then resolve against workdir, not against the session cwd — with workdir \"sub\", write \"src/file.txt\", not \"sub/src/file.txt\"."},"timeout_ms":{"type":"integer","description":"How long to wait in the foreground, in ms. Defaults to 300000 (5 min) and is capped at it. On expiry the command is NOT killed: it moves to the background and you get a task id plus whatever it printed so far."},"is_background":{"type":"boolean","description":"Set to true for long-running commands (dev servers, long builds). Returns a task id immediately; collect with get_task_output, stop with kill_task."},"block_until_ms":{"type":"integer","description":"Foreground wait in ms. 0 backgrounds immediately."}},"required":["command"]}"#;
 const GLOB_PARAMS: &str = r#"{"type":"object","properties":{"glob_pattern":{"type":"string","description":"Glob to match file paths against, e.g. \"**/*.rs\" or \"src/**/test_*.py\". * does not cross directory separators; use ** to span directories. A pattern with no / matches the basename at any depth."},"target_directory":{"type":"string","description":"Directory to search in. Defaults to the current working directory."}},"required":["glob_pattern"]}"#;
 const WRITE_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{"type":"string","description":"Path to write, relative to cwd or absolute. Parent directories are created."},"contents":{"type":"string","description":"Full text content to write. Existing files are overwritten in full."}},"required":["target_file","contents"]}"#;
 
 /// Default max lines when the model omits `limit` (grok `MAX_LINES_READ`).
 const MAX_LINES_READ: usize = 1_000;
 
-/// 前台 bash 的阻塞预算。到点把命令收掉并把已产出的输出带回来。
+/// 前台 bash 的阻塞预算。到点把命令**转入后台**并带回已产出的输出
+/// （见 [`detach_to_background`]），不是杀掉。
 ///
 /// Grok 这里是 30s（`block_until_ms` 的省略默认值），用意是催模型把长命令交后台。
 /// 在本仓库太短：一条 `cargo clippy -p cordis-spine` 就 1 分多钟，`cargo test` 全量
 /// 更久，30s 到点必然被收掉——模型只能反复「起后台 + `get_task_output` 轮询」，多花
-/// 的回合比省下的等待贵。放宽到 5 分钟：仍有上限（挂不死），到点照旧把已产出的输出
-/// 带回来。覆盖用的 env 对齐 Grok 的 `GROK_MAX_FOREGROUND_BLOCK_MS`。
+/// 的回合比省下的等待贵。放宽到 5 分钟：仍有上限（这一轮挂不死）。覆盖用的 env
+/// 对齐 Grok 的 `GROK_MAX_FOREGROUND_BLOCK_MS`。
 const FOREGROUND_MS_ENV: &str = "DOCK_BASH_FOREGROUND_MS";
 const DEFAULT_FOREGROUND_MS: u64 = 300_000;
 
@@ -101,7 +102,7 @@ const WRITE_FILE_DESC: &str = "Write contents to a file, creating it or replacin
 const BASH_DESC: &str = "Run a bash command in the workspace and return its output.\n\
 - Do not use bash for file work: `cat`/`head`/`sed -n` → read_file, `grep`/`rg` → grep, `find` → glob, `ls` → list_dir, `sed -i` → search_replace. The dedicated tools are cheaper, are not gated behind a permission prompt, keep working in plan mode, and report what they truncated. Shell `grep` also reads everything on disk including build output (`target/`), so a repo-wide search the grep tool finishes in tens of milliseconds can take bash minutes.\n\
 - Each call runs in a fresh shell: cwd, variables and functions do not persist between calls. Pass workdir instead of using `cd`. Once you pass workdir, every relative path in the command is relative to it — do not also prefix those paths with the directory you just moved into.\n\
-- Foreground commands are killed after timeout_ms (default and cap 300000 ms); on expiry you still get whatever the command already printed.\n\
+- A foreground command that outlives timeout_ms (default and cap 300000 ms) is not killed: it moves to the background and you get a task id plus the output so far. Never re-run it — collect with get_task_output.\n\
 - Set is_background true (or block_until_ms: 0) for dev servers and long builds: you get a task id immediately and check it with get_task_output / kill_task.\n\
 - Piping command output into `grep` (e.g. `cargo test 2>&1 | grep FAILED`) is what bash is for.\n\
 - Output is capped; the head and tail are kept and the middle is reported as elided.";
@@ -509,6 +510,9 @@ async fn bash(
     // 没挂 `"jobs"` 服务时（单测、精简装配）临时起一张本地表，行为完全一致，
     // 只是没人能查它 —— 所以后台请求仍然退回前台执行，不发无处可查的 task_id。
     let local;
+    // 有没有**别人能查**的任务表，决定了超时能不能转后台：本地表随本次调用一起
+    // 析构，往外发它的 task_id 等于发一张空头支票。
+    let collectable = jobs.is_some();
     let jobs = match jobs {
         Some(jobs) => jobs,
         None => {
@@ -536,13 +540,18 @@ async fn bash(
             return finish_early(jobs, &id, "cancelled".into()).await;
         }
         if start.elapsed() >= budget {
-            let secs = budget.as_secs_f64();
+            if collectable {
+                return detach_to_background(jobs, &id, budget);
+            }
+            // 没有可查的任务表：转后台就成了「还在跑，但你永远拿不到」。退回旧的
+            // kill + 说明，宁可诚实地失败。
             return finish_early(
                 jobs,
                 &id,
                 format!(
-                    "Error: 命令超时（前台预算 {secs:.0}s）已被终止。\
-                     下面是终止前已产出的输出；需要跑完就用 is_background: true 重跑。"
+                    "Error: 命令超时（前台等待 {}）已被终止。\
+                     下面是终止前已产出的输出。",
+                    human_budget(budget)
                 ),
             )
             .await;
@@ -551,7 +560,48 @@ async fn bash(
     }
 }
 
-/// 取消 / 超时的收尾：杀掉命令，把已经产出的输出带回来，再把任务摘掉。
+/// 预算的人读形式。秒级预算用 `{:.0}s` 会把 500ms 印成「0s」，那看着像个 bug。
+fn human_budget(budget: Duration) -> String {
+    if budget < Duration::from_secs(1) {
+        format!("{}ms", budget.as_millis())
+    } else {
+        format!("{:.0}s", budget.as_secs_f64())
+    }
+}
+
+/// 前台预算到点：**不杀命令**，把它转成后台任务，带回已产出的输出与 task_id。
+///
+/// 杀掉再让模型重跑是双重浪费：那几分钟的工作扔了，重跑还要再花同样的时间，
+/// 而且大概率再超时一次——`cargo build` 不会因为重跑就变快。命令已经过了权限门、
+/// 进程还活着，留着它比杀掉严格更优。
+///
+/// 这里**不是错误**，所以开头不写 `Error:`：模型看到 `Error:` 的第一反应是重试或
+/// 换路子，而这次它什么都没做错，只是命令比预算长。
+///
+/// 取消（用户按 Esc）仍然走 [`finish_early`] 杀掉——那是明确要它停。
+fn detach_to_background(jobs: &Jobs, id: &str, budget: Duration) -> String {
+    let out = jobs.snapshot(id).map(|s| s.output).unwrap_or_default();
+    // 转不动只有一种情况：这一瞬间它自己跑完了。那就当正常完成，别报超时。
+    if !jobs.detach(id) {
+        jobs.forget(id);
+        return out;
+    }
+    let waited = human_budget(budget);
+    let head = format!(
+        "[命令仍在运行，已转入后台]（前台等待 {waited} 到点）\n\n\
+         task_id: {id}\n\n\
+         进程没有被终止，还在继续跑。不要重跑这条命令——用 get_task_output 配 \
+         task_ids=[\"{id}\"] 取后续输出，要停就用 kill_task。\n\
+         下面是转入后台前已产出的输出。"
+    );
+    if out.trim().is_empty() || out.trim() == "(no output)" {
+        head
+    } else {
+        format!("{head}\n{out}")
+    }
+}
+
+/// 取消的收尾：杀掉命令，把已经产出的输出带回来，再把任务摘掉。
 ///
 /// 旧实现在这里直接 `kill` 后返回一句错误字符串，从不读管道，模型拿不到任何
 /// 已完成的工作。
@@ -941,10 +991,11 @@ mod tests {
     async fn bash_timeout_ms_cannot_exceed_the_ceiling() {
         let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "500");
         let start = std::time::Instant::now();
+        let jobs = Jobs::new();
         let out = bash(
             r#"{"command":"sleep 30","timeout_ms":600000}"#,
             &|| false,
-            None,
+            Some(&jobs),
         )
         .await;
         assert!(
@@ -952,7 +1003,7 @@ mod tests {
             "不该被放宽到 10 分钟，实际 {:?}",
             start.elapsed()
         );
-        assert!(out.contains("超时"), "{out}");
+        assert!(out.contains("转入后台"), "预算到点要转后台：{out}");
     }
 
     #[tokio::test]
@@ -1116,17 +1167,95 @@ mod tests {
     #[tokio::test]
     async fn bash_timeout_keeps_partial_output() {
         let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "700");
+        let jobs = Jobs::new();
         let out = bash(
             r#"{"command":"echo early-line; sleep 30"}"#,
             &|| false,
-            None,
+            Some(&jobs),
         )
         .await;
         assert!(
             out.contains("early-line"),
             "超时也要带回已产出的输出：{out}"
         );
-        assert!(out.contains("超时"), "要说明是超时：{out}");
+        assert!(out.contains("转入后台"), "要说明去向：{out}");
+    }
+
+    /// 前台预算到点**不杀进程**，转后台接着跑。
+    ///
+    /// 旧行为是 kill + 「需要跑完就用 is_background: true 重跑」：那条命令已经跑了
+    /// 几分钟，杀掉等于把这几分钟扔了，重跑还要再花同样的时间、大概率再超时一次。
+    #[tokio::test]
+    async fn bash_timeout_backgrounds_instead_of_killing() {
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "500");
+        let jobs = Jobs::new();
+        let out = bash(
+            r#"{"command":"echo before-budget; sleep 1.2; echo after-budget"}"#,
+            &|| false,
+            Some(&jobs),
+        )
+        .await;
+
+        // 返回的不是错误：模型看到 `Error:` 会重试或换路子，而它什么都没做错。
+        assert!(!out.contains("Error:"), "超时转后台不是错误：{out}");
+        assert!(out.contains("before-budget"), "已产出的输出要带回：{out}");
+        assert!(out.contains("不要重跑"), "要明说别重跑：{out}");
+
+        // task_id 必须能对上一条还活着的任务，否则这条提示是空头支票。
+        let id = out
+            .lines()
+            .find_map(|l| l.strip_prefix("task_id: "))
+            .expect("要给出 task_id")
+            .trim()
+            .to_string();
+        let snap = jobs.snapshot(&id).expect("任务还在表里");
+        assert!(!snap.foreground, "转后台后不该再算前台：{id}");
+
+        // 关键：进程没被杀，预算之后的那一行照样产出。
+        let mut tail = String::new();
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tail = jobs.snapshot(&id).map(|s| s.output).unwrap_or_default();
+            if tail.contains("after-budget") {
+                break;
+            }
+        }
+        assert!(
+            tail.contains("after-budget"),
+            "转后台后命令应继续跑完，实际：{tail}"
+        );
+    }
+
+    /// 取消（用户按 Esc）仍然是**杀掉**，不是转后台——那是明确要它停。
+    #[tokio::test]
+    async fn bash_cancel_still_kills() {
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
+        let jobs = Jobs::new();
+        let cancel_at = std::time::Instant::now() + Duration::from_millis(400);
+        let out = bash(
+            r#"{"command":"echo started; sleep 30"}"#,
+            &|| std::time::Instant::now() >= cancel_at,
+            Some(&jobs),
+        )
+        .await;
+        assert!(out.contains("cancelled"), "取消要说明自己是取消：{out}");
+        assert!(out.contains("started"), "已产出的输出仍要带回：{out}");
+        assert!(!out.contains("task_id"), "取消不该留下后台任务：{out}");
+        assert!(jobs.list().is_empty(), "取消后任务要摘掉");
+    }
+
+    /// 没挂 `"jobs"` 服务时不能转后台：本地表随调用一起析构，那个 task_id 没人
+    /// 查得到。宁可退回 kill + 诚实报错，也不发空头支票。
+    #[tokio::test]
+    async fn bash_timeout_without_a_jobs_service_still_kills() {
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "500");
+        let out = bash(r#"{"command":"echo only-line; sleep 30"}"#, &|| false, None).await;
+        assert!(out.contains("only-line"), "已产出的输出要带回：{out}");
+        assert!(
+            out.contains("超时"),
+            "没有可查的任务表就该照实报超时：{out}"
+        );
+        assert!(!out.contains("task_id"), "不该发无处可查的 task_id：{out}");
     }
 
     /// 前台命令必须在 `jobs` 里现身，否则 TUI 无处读它的实时输出；

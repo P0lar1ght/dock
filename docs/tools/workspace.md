@@ -82,7 +82,19 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 - `workdir`——不存在直接报错，不让命令在意外目录里跑掉。注意命令内的相对路径此后相对 `workdir` 解析
 - `description`——5–10 词，进 `JobSnapshot`
 
-前台预算与「到点 / 取消都带回已产出输出」不变。
+**前台预算到点 = 转后台，不是 kill。** `Jobs::detach` 把 `foreground` 翻成 `false`，进程一点不动，返回已产出的输出 + `task_id`，模型用 `get_task_output` 接着收。
+
+旧行为是 kill + 「需要跑完就用 `is_background: true` 重跑」，那是双重浪费：已经跑掉的几分钟扔了，重跑还要再花同样的时间，而且大概率**再超时一次**——`cargo build` 不会因为重跑就变快。命令已经过了权限门、进程还活着，留着它严格更优。
+
+三处刻意的边界：
+
+- 返回文案**不以 `Error:` 开头**。模型看到 `Error:` 的第一反应是重试或换路子，而这次它什么都没做错，只是命令比预算长。
+- **取消（用户按 Esc）仍然是 kill**，不是转后台——那是明确要它停（`bash_cancel_still_kills`）。
+- **没挂 `"jobs"` 服务时（单测、精简装配）退回 kill + 报错**：那时的任务表是本次调用临时起的本地表，随调用一起析构，发出去的 `task_id` 没人查得到。宁可诚实地失败，也不发空头支票（`bash_timeout_without_a_jobs_service_still_kills`）。
+
+已知代价：命令不再被超时兜住，一条跑飞的命令会一直跑到会话结束（和 `is_background: true` 的任务同一处境，目前都没有后台兜底上限）。`kill_task` 是唯一的收口。
+
+「取消带回已产出输出」不变。
 
 ### `read_file` / `write_file`
 
