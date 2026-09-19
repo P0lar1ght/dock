@@ -208,6 +208,8 @@ fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str) -> Result<(), String
     super::rhai_http::register(&mut engine, ctx.clone(), plugin_id.to_string(), http_params);
     // Codecs + HMAC: pure, no perms — still runtime-only so define-time preflight cannot call them.
     super::rhai_codec::register(&mut engine);
+    // Wall clock: SystemTime epoch helpers (timestamp() is Instant-only).
+    super::rhai_time::register(&mut engine);
     let ast = engine
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;
@@ -893,6 +895,7 @@ pub fn builtins_lines() -> Vec<String> {
     HOST_BUILTINS
         .iter()
         .chain(super::rhai_codec::BUILTINS.iter())
+        .chain(super::rhai_time::BUILTINS.iter())
         .flat_map(|(name, purpose, sigs)| {
             let mut lines = vec![format!("- {name} — {purpose}")];
             for sig in *sigs {

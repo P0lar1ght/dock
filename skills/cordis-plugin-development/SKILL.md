@@ -245,6 +245,7 @@ Pure helpers for Basic auth, signed query strings, and content digests. **No I/O
 | `to_hex(input)` / `from_hex(text)` | Lowercase hex; `from_hex` rejects odd length / bad digits → `Blob` |
 | `sha256(input)` / `sha256_blob(input)` | SHA-256 as lowercase hex or 32-byte `Blob` |
 | `hmac_sha256(key, message)` / `hmac_sha256_blob(key, message)` | HMAC-SHA256 as hex or `Blob`; key/message are `String` or `Blob` |
+| `unix_time()` / `unix_time_ms()` | Absolute UTC epoch seconds / milliseconds (`SystemTime`). Rhai's built-in `timestamp()` is `Instant` (relative/monotonic) — use these for API signing (SigV4, Aliyun, etc.) |
 
 Inputs larger than 1 MiB throw a runtime error.
 

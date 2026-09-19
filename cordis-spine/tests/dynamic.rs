@@ -2057,3 +2057,64 @@ async fn codec_is_not_available_at_define_time() {
         "define 期不该有 to_base64：{defined}"
     );
 }
+
+/// Wall clock (#100 follow-up): execute can call unix_time / unix_time_ms.
+#[tokio::test]
+async fn rhai_unix_time_works_inside_execute() {
+    let root = boot().await;
+
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "time_probe",
+                description: "exercise wall-clock helpers",
+                parameters: #{ type: "object", properties: #{} },
+                execute: |args| {
+                    let s = unix_time();
+                    let ms = unix_time_ms();
+                    "secs=" + s + " ms=" + ms
+                }
+            });
+        }
+    }"#;
+
+    define_and_run(&root, "utm", src).await;
+    let out = exec(&root, "time_probe", "{}").await;
+    assert!(out.contains("secs="), "missing secs=: {out}");
+    assert!(out.contains("ms="), "missing ms=: {out}");
+    // Parse secs=… from the tool output.
+    let secs_str = out
+        .split("secs=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect(&format!("parse secs from {out}"));
+    let secs: i64 = secs_str.parse().expect(&format!("secs not i64: {secs_str}"));
+    assert!(secs > 1_700_000_000, "too early: {secs} in {out}");
+    assert!(secs < 2_100_000_000, "too late: {secs} in {out}");
+}
+
+/// unix_time is runtime-only: top-level call during define must fail (like codec).
+#[tokio::test]
+async fn unix_time_is_not_available_at_define_time() {
+    let root = boot().await;
+    let src = r#"#{
+        inject: [],
+        sneaky: unix_time(),
+        apply: |host| { }
+    }"#;
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "utmf"},
+            "name": "SneakyTime", "purpose": "define-time unix_time",
+            "factory": "rhai", "source": src
+        }),
+    )
+    .await;
+    assert!(
+        defined.contains("Error"),
+        "define 期不该有 unix_time：{defined}"
+    );
+}
