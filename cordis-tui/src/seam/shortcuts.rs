@@ -9,7 +9,7 @@ use crate::seam::session::SessionRef;
 use crate::views::ask_view;
 use crate::views::overlay::Overlay;
 use crate::views::prompt::PromptWidget;
-use cordis_spine::{Ask, Computer, ASK, COMPUTER};
+use cordis_spine::{Ask, Computer, Sessions, ASK, COMPUTER, SESSIONS};
 
 pub struct Shortcuts {
     ctx: Context,
@@ -334,6 +334,19 @@ impl Shortcuts {
             .get::<SessionRef>(SESSION_PORT)
             .is_some_and(|s| !s.queued_prompts().is_empty());
         let mut hints = idle_hints(can_send, working, queued);
+        // 条件要和 `rewind_idle_send` 的闸一致（含 `queued`），否则底栏写着
+        // `Esc undo` 按下去却什么都不发生。`has_undoable_send` 不克隆日志——
+        // 这行每帧都会算。
+        if !can_send
+            && !working
+            && !queued
+            && self
+                .ctx
+                .get::<Sessions>(SESSIONS)
+                .is_some_and(|s| s.has_undoable_send())
+        {
+            hints.insert(0, HintItem::new("Esc", "undo"));
+        }
         if !can_send
             && !working
             && self

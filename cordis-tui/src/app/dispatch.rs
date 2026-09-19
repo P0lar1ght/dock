@@ -49,6 +49,9 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
         | Action::ToggleGoalDetail
         | Action::ToggleTodoFold => Vec::new(),
         Action::CancelTurn => vec![Effect::CancelTurn],
+        Action::UndoLastSend { announce_failure } => {
+            vec![Effect::UndoLastSend { announce_failure }]
+        }
         Action::PromoteQueued { id } => vec![Effect::PromoteQueued { id }],
         Action::EditQueued { id } => vec![Effect::EditQueued { id }],
         Action::SettingsModal => vec![Effect::SettingsModal],

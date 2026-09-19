@@ -65,6 +65,10 @@ pub enum Action {
     HistoryPicker,
     Find,
     CancelTurn,
+    /// Idle Esc / `/undo`: peel last user send when that turn had no model output.
+    UndoLastSend {
+        announce_failure: bool,
+    },
     FileSearchMove(i16),
     FileSearchAccept,
     FileSearchDismiss,
@@ -162,6 +166,10 @@ pub enum Effect {
     ChangeDir(PathBuf),
     SettingsModal,
     CancelTurn,
+    /// Idle Esc / `/undo`: peel last user send when that turn had no model output.
+    UndoLastSend {
+        announce_failure: bool,
+    },
     SendPrompt {
         text: String,
         send_now: bool,
@@ -445,6 +453,9 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         SlashCmd::Context => Effect::ShowContext,
         SlashCmd::Compact => Effect::Compact {
             context: args.to_string(),
+        },
+        SlashCmd::Undo => Effect::UndoLastSend {
+            announce_failure: true,
         },
     }
 }

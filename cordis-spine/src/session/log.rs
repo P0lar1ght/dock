@@ -647,6 +647,19 @@ impl Sessions {
         }
     }
 
+    /// [`Self::rewind_inflight_user`] 会不会成功——但**不克隆**日志。
+    ///
+    /// 快捷键条每帧都要问一次「现在能不能撤」，所以这里只上一次锁、反向扫到最近
+    /// 一条 `User` 为止。用 `events()` 判会把整条会话（连同助手正文、工具结果、
+    /// 图片）深拷贝一遍，每帧一次。
+    pub fn has_undoable_send(&self) -> bool {
+        let events = self.events.lock().unwrap();
+        match events.iter().rposition(|e| matches!(e, LogEvent::User(_))) {
+            None => false,
+            Some(i) => !inflight_has_output(&events[i + 1..]),
+        }
+    }
+
     /// Drop the in-flight user turn when it has no model/tool output yet.
     /// Returns the restored prompt (Grok cancel-rewind).
     pub fn rewind_inflight_user(&self) -> Option<(String, Vec<cordis_base::types::UserImage>)> {
@@ -1399,6 +1412,74 @@ mod tests {
         sessions.append(LogEvent::User("keep me".into()));
         sessions.begin_llm();
         sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Text("Hi".into()));
+        assert!(sessions.last_turn_has_output());
+        assert!(sessions.rewind_inflight_user().is_none());
+        assert_eq!(sessions.events().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rewind_allows_error_only_llm_stream() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("retry me".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            error: Some("llm request failed: boom".into()),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        assert!(!sessions.last_turn_has_output());
+        let restored = sessions
+            .rewind_inflight_user()
+            .expect("error-only stream does not block undo");
+        assert_eq!(restored.0, "retry me");
+        assert!(sessions.events().is_empty());
+    }
+
+    /// `has_undoable_send` 是底栏每帧问的那个谓词，必须和真正执行的
+    /// `rewind_inflight_user` 同进退——否则会出现「写着 Esc:undo，按下去没反应」。
+    #[tokio::test]
+    async fn has_undoable_send_matches_rewind_outcome() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+
+        // 空会话：没得撤。
+        assert!(!sessions.has_undoable_send());
+
+        // 只有用户消息：可撤。
+        sessions.append(LogEvent::User("retry me".into()));
+        assert!(sessions.has_undoable_send());
+
+        // 只有 error 的那一轮不算输出：仍可撤。
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            error: Some("llm stream failed: boom".into()),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        assert!(sessions.has_undoable_send());
+
+        // 有正文之后：撤不动，两个判定要一致。
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "ok".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        assert!(!sessions.has_undoable_send());
+        assert!(sessions.rewind_inflight_user().is_none());
+
+        // 谓词说能撤，执行就得真能撤。
+        let sessions2 = Sessions::new(Context::new());
+        sessions2.append(LogEvent::User("undo me".into()));
+        assert!(sessions2.has_undoable_send());
+        assert_eq!(sessions2.rewind_inflight_user().unwrap().0, "undo me");
+        assert!(!sessions2.has_undoable_send(), "撤完就不该再说能撤");
+    }
+
+    #[tokio::test]
+    async fn rewind_blocks_when_assistant_text_is_present() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("keep".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "ok".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
         assert!(sessions.last_turn_has_output());
         assert!(sessions.rewind_inflight_user().is_none());
         assert_eq!(sessions.events().len(), 2);

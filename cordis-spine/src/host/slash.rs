@@ -55,6 +55,8 @@ pub const RESERVED_SLASH: &[&str] = &[
     "cost",
     "context",
     "compact",
+    "undo",
+    "rewind",
     "theme",
     "t",
     "timestamps",
