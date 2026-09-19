@@ -11,6 +11,7 @@ base64 = "0.22"
 bm25 = "2.3"
 getrandom = "0.2"
 sha2 = "0.10"
+hmac = "0.12"
 webbrowser = "1"
 cordis = { path = "../cordis-rust" }
 cordis-base = { path = "../cordis-base" }
@@ -29,6 +30,7 @@ tokio = { version = "1", features = ["rt", "sync", "macros", "time", "process", 
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 uuid = { version = "1", features = ["v7"] }
 url = "2"
+percent-encoding = "2.3"
 indexmap = { version = "2", features = ["serde"] }
 rhai = { version = "1.25", features = ["serde", "sync"] }
 async-lsp = { version = "=0.2.3", features = ["tokio", "tracing"] }
