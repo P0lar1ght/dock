@@ -2156,3 +2156,100 @@ async fn utc_now_is_not_available_at_define_time() {
         "define 期不该有 utc_now：{defined}"
     );
 }
+
+/// `host.secret`：从 `$DOCK_HOME/secrets.json` 读密钥，经权限门（测试里 Allow）后进 execute。
+#[tokio::test]
+async fn rhai_host_secret_reads_secrets_json() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("secrets.json"),
+        r#"{"openai":"sk-from-file","aliyun-ak":"ak-from-file"}"#,
+    )
+    .unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
+
+    let root = boot().await;
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "read_secret",
+                description: "read openai secret",
+                parameters: #{ type: "object", properties: #{} },
+                execute: |args| {
+                    let key = host.secret("openai");
+                    "Authorization: Bearer " + key
+                }
+            });
+        }
+    }"#;
+    define_and_run(&root, "sec", src).await;
+    assert_eq!(
+        exec(&root, "read_secret", "{}").await,
+        "Authorization: Bearer sk-from-file"
+    );
+}
+
+/// 文件没有时回落到 `DOCK_SECRET_<NAME>`（NAME 大写、非字母数字 → `_`）。
+#[tokio::test]
+async fn rhai_host_secret_falls_back_to_dock_secret_env() {
+    let home = tempfile::tempdir().unwrap();
+    // 故意不写 secrets.json
+    let _env = cordis_base::test_env::scoped()
+        .set("DOCK_HOME", home.path())
+        .set("DOCK_SECRET_ALIYUN_AK", "ak-from-env");
+
+    let root = boot().await;
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "read_ak",
+                description: "env fallback",
+                parameters: #{ type: "object", properties: #{} },
+                execute: |args| { host.secret("aliyun-ak") }
+            });
+        }
+    }"#;
+    define_and_run(&root, "akenv", src).await;
+    assert_eq!(exec(&root, "read_ak", "{}").await, "ak-from-env");
+}
+
+/// 缺失密钥必须 throw，不能静默返回空串。
+#[tokio::test]
+async fn rhai_host_secret_missing_throws_not_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
+
+    let root = boot().await;
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "missing_secret",
+                description: "should throw",
+                parameters: #{ type: "object", properties: #{} },
+                execute: |args| { host.secret("openai") }
+            });
+        }
+    }"#;
+    define_and_run(&root, "miss", src).await;
+    let out = exec(&root, "missing_secret", "{}").await;
+    assert!(out.contains("Error"), "应当是错误：{out}");
+    assert!(out.contains("不存在") || out.contains("openai"), "{out}");
+    assert_ne!(out.trim(), "");
+    assert!(!out.contains("Authorization: Bearer  "), "{out}");
+}
+
+/// `cordis_inspect` builtins 列出 `host.secret`，但不泄密。
+#[tokio::test]
+async fn cordis_inspect_lists_host_secret_builtin() {
+    let root = boot().await;
+    let out = exec(&root, "cordis_inspect", r#"{"what":"builtins"}"#).await;
+    assert!(out.contains("host.secret"), "{out}");
+    assert!(
+        out.contains("DOCK_SECRET_") || out.contains("secrets.json"),
+        "应当提到查找路径：{out}"
+    );
+    assert!(!out.contains("sk-"), "{out}");
+}

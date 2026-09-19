@@ -82,6 +82,7 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         &["host.log(message: String)"],
     ),
     super::rhai_http::HTTP_BUILTIN,
+    super::rhai_secret::SECRET_BUILTIN,
 ];
 
 pub struct RhaiMeta {
@@ -278,6 +279,7 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("call_tool", Host::call_tool);
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
+    engine.register_fn("secret", Host::secret);
 }
 
 #[derive(Clone)]
@@ -648,6 +650,16 @@ impl Host {
 
     fn log(&mut self, message: ImmutableString) {
         eprintln!("[cordis:{}] {message}", self.inner.plugin_id);
+    }
+
+    fn secret(
+        &mut self,
+        name: ImmutableString,
+    ) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        let value =
+            super::rhai_secret::resolve(&self.inner.ctx, &self.inner.plugin_id, name.as_str())
+                .map_err(eval_err)?;
+        Ok(value.into())
     }
 
     fn own(&self, d: cordis::Disposable) -> Result<(), Box<rhai::EvalAltResult>> {

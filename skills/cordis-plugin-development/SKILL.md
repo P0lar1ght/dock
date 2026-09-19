@@ -185,6 +185,7 @@ Confirm signatures with `cordis_inspect` `what: "builtins"`.
 | `host.on("agent/step-start", \|step\| { ... })` | — | Runs **before every sample** of a turn. `step` is `#{ step, identity, main }` — `step` counts from 0 and keeps counting across turn-end continuations, so per-turn state rearms at 0. Return a `<system-reminder>` string to inject it before this sample, or `()` for no opinion |
 | `host.on("agent/turn-end", \|end\| { ... })` | — | Runs when the turn wants to end. `end` is `#{ text, rounds, ended_with_text, queued_followups, identity, main }`. Return a `<system-reminder>` string to keep the turn going, or `()` to let it end. The host **skips the hook entirely** when the user has queued the next message, so `queued_followups` is always `false` here — the user steers, no script gets the wheel. Subagent turns still call the hook: the reminder lands in that child's own transcript, so read `main` if you only mean the user-facing session |
 | `host.log(message)` / `print` | — | Tagged `[cordis:{pluginId}]` |
+| `host.secret(name)` | — | Read a named secret → `String`. Lookup: `$DOCK_HOME/secrets.json` (flat `name→string`, owner-only `0600`; missing file = empty), then env `DOCK_SECRET_<NAME>` where NAME is uppercased and non-alnum → `_` (`openai` → `DOCK_SECRET_OPENAI`, `aliyun-ak` → `DOCK_SECRET_ALIYUN_AK`). First use gates `secret {name}` like `http_request` (summary never includes the value). Missing or denied **throws** — never an empty-string success. Name: `[a-zA-Z][a-zA-Z0-9_-]{0,63}`. **Host only exists on the run engine** — define-time preflight has no `Host`, so do not call this at the top level of the source |
 
 The evaluator is not a security boundary (same trust as bash). Sync steps are bounded by operation limits.
 
@@ -208,9 +209,15 @@ Shape of the whole thing — this is the entire plugin:
       description: "Read one GitHub issue",
       parameters: #{ type: "object", properties: #{ repo: #{ type: "string" }, n: #{ type: "integer" } }, required: ["repo", "n"] },
       execute: |args| {
+        // Put the token in `$DOCK_HOME/secrets.json` as `"github": "…"` or export `DOCK_SECRET_GITHUB`.
+        let token = host.secret("github");
         let resp = http_request(#{
           url: "https://api.github.com/repos/" + args.repo + "/issues/" + args.n,
-          headers: #{ "Accept": "application/vnd.github+json", "User-Agent": "dock" }
+          headers: #{
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "dock",
+            "Authorization": "Bearer " + token
+          }
         });
         if !resp.ok { return "HTTP " + resp.status + ": " + resp.body; }
         let issue = parse_json(resp.body);
@@ -221,7 +228,7 @@ Shape of the whole thing — this is the entire plugin:
 }
 ```
 
-`execute` closures capture `host` and see `http_request` / `parse_json`, so all of this works from inside a registered tool. A top-level `fn` does **not** capture the enclosing scope — pass `host` in explicitly if you factor one out.
+`execute` closures capture `host` and see `http_request` / `parse_json` / `host.secret`, so all of this works from inside a registered tool. A top-level `fn` does **not** capture the enclosing scope — pass `host` in explicitly if you factor one out.
 
 Boundaries, so you can tell a bug from a rule:
 
@@ -232,6 +239,7 @@ Boundaries, so you can tell a bug from a rule:
 - **Credentials go in `headers`, never in the URL** — `https://user:pw@host/` is rejected. Header values may not contain newlines.
 - Request body ≤ 1 MiB, response body ≤ 4 MiB, ≤ 32 headers.
 - `http_request` exists only while the plugin **runs**. It is not available during `cordis_define` (the define-time preflight evaluates your top-level map — a request there would dodge the permission gate), so never call it at the top level of the source; call it inside `apply` or inside an `execute` / handler closure.
+- `host.secret` is the same story: `Host` is registered only on the run engine, so define-time preflight cannot call it. Put secret reads inside `apply` / `execute` (permissions still apply there).
 
 ### Script-level codecs + HMAC
 
