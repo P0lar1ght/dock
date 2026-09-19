@@ -1130,6 +1130,33 @@ pub(super) fn rewind_cancelled_send(ctx: &Context) -> bool {
     true
 }
 
+/// Idle Esc / `/undo`: restore the last user send when that turn still has no
+/// model/tool output. Unlike cancel-rewind, there is no `last_sent` fallback —
+/// the turn already finished (error-only / cancelled earlier).
+pub(super) fn rewind_idle_send(ctx: &Context) -> bool {
+    let Some(prompt) = ctx.get::<PromptWidget>(TUI_PROMPT) else {
+        return false;
+    };
+    if prompt.can_send() {
+        return false;
+    }
+    if ctx
+        .get::<SessionRef>(SESSION_PORT)
+        .is_some_and(|s| s.has_queued())
+    {
+        return false;
+    }
+    let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
+        return false;
+    };
+    if let Some((text, images)) = sessions.rewind_inflight_user() {
+        prompt.restore_sent(&text, pasted_from_user(&text, images));
+        prompt.take_last_sent();
+        return true;
+    }
+    false
+}
+
 pub(super) fn pasted_from_user(text: &str, images: Vec<UserImage>) -> Vec<PastedImage> {
     let ns = image_chip_numbers(text);
     images

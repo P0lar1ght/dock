@@ -639,6 +639,11 @@ const HELP: &[HelpEntry] = &[
         kind: HelpKind::Slash(SlashCmd::Compact),
     }),
     HelpEntry::Row(HelpRow {
+        key: "/undo",
+        label: "撤销上一轮未产生模型输出的用户消息",
+        kind: HelpKind::Slash(SlashCmd::Undo),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "/copy",
         label: "复制上一条回复",
         kind: HelpKind::Slash(SlashCmd::Copy),

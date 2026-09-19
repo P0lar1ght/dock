@@ -51,6 +51,7 @@ pub enum SlashCmd {
     Usage,
     Context,
     Compact,
+    Undo,
 }
 
 /// Builtin catalog entry or a live extra from `"slash"`.
@@ -370,6 +371,16 @@ pub const CATALOG: &[SlashDef] = &[
         display: "/compact",
         description: "压缩旧对话",
         takes_args: true,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Undo,
+        name: "undo",
+        aliases: &["rewind"],
+        display: "/undo",
+        description: "撤销上一轮未产生模型输出的用户消息（失败重发可连撤）",
+        takes_args: false,
         args_required: false,
         arg_kind: None,
     },
@@ -869,6 +880,8 @@ mod tests {
     #[test]
     fn alias_maps() {
         assert_eq!(lookup("t").map(|d| d.cmd), Some(SlashCmd::Theme));
+        assert_eq!(lookup("undo").map(|d| d.cmd), Some(SlashCmd::Undo));
+        assert_eq!(lookup("rewind").map(|d| d.cmd), Some(SlashCmd::Undo));
         assert_eq!(lookup("cron").map(|d| d.cmd), Some(SlashCmd::Loop));
         assert_eq!(lookup("plan").map(|d| d.cmd), Some(SlashCmd::Plan));
         assert_eq!(lookup("goal").map(|d| d.cmd), Some(SlashCmd::Goal));

@@ -465,6 +465,16 @@ pub async fn run(root: Context) -> Result<()> {
                                         flash(&ctx, "已取消");
                                     }
                                 }
+                                Effect::UndoLastSend { announce_failure } => {
+                                    if rewind_idle_send(&ctx) {
+                                        flash(&ctx, "已撤销发送");
+                                    } else if announce_failure {
+                                        flash(
+                                            &ctx,
+                                            "无法撤销：上一轮已有模型输出，或没有可撤的消息",
+                                        );
+                                    }
+                                }
                                 Effect::PromoteQueued { id } => {
                                     if let Ok(session) = ctx.require::<SessionRef>(SESSION_PORT) {
                                         session.promote(id);

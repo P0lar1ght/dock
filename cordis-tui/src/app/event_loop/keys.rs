@@ -1808,8 +1808,11 @@ pub(super) fn to_action(
                             return None;
                         }
                     }
-                    // Grok swallows idle-empty Esc (welcome / no turns). Quit is ctrl+q.
-                    None
+                    // Idle empty Esc: undo last send when the turn had no model
+                    // output. When nothing to undo, stay quiet (Grok swallow).
+                    Some(Action::UndoLastSend {
+                        announce_failure: false,
+                    })
                 }
                 KeyCode::Enter if shift || alt => Some(Action::InsertChar('\n')),
                 KeyCode::Enter if ctrl => {

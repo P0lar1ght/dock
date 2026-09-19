@@ -9,7 +9,7 @@ use crate::seam::session::SessionRef;
 use crate::views::ask_view;
 use crate::views::overlay::Overlay;
 use crate::views::prompt::PromptWidget;
-use cordis_spine::{Ask, Computer, ASK, COMPUTER};
+use cordis_spine::{Ask, Computer, LogEvent, Sessions, ASK, COMPUTER, SESSIONS};
 
 pub struct Shortcuts {
     ctx: Context,
@@ -334,6 +334,18 @@ impl Shortcuts {
             .get::<SessionRef>(SESSION_PORT)
             .is_some_and(|s| !s.queued_prompts().is_empty());
         let mut hints = idle_hints(can_send, working, queued);
+        if !can_send
+            && !working
+            && self.ctx.get::<Sessions>(SESSIONS).is_some_and(|s| {
+                !s.last_turn_has_output()
+                    && s.events()
+                        .iter()
+                        .rev()
+                        .any(|e| matches!(e, LogEvent::User(_)))
+            })
+        {
+            hints.insert(0, HintItem::new("Esc", "undo"));
+        }
         if !can_send
             && !working
             && self

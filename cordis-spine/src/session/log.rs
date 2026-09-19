@@ -1405,6 +1405,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rewind_allows_error_only_llm_stream() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("retry me".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            error: Some("llm request failed: boom".into()),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        assert!(!sessions.last_turn_has_output());
+        let restored = sessions
+            .rewind_inflight_user()
+            .expect("error-only stream does not block undo");
+        assert_eq!(restored.0, "retry me");
+        assert!(sessions.events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rewind_blocks_when_assistant_text_is_present() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("keep".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "ok".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        assert!(sessions.last_turn_has_output());
+        assert!(sessions.rewind_inflight_user().is_none());
+        assert_eq!(sessions.events().len(), 2);
+    }
+
+    #[tokio::test]
     async fn seal_inserts_interrupted_results_before_following_user() {
         let ctx = Context::new();
         let sessions = Sessions::new(ctx);
