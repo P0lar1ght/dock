@@ -90,6 +90,9 @@ struct State {
     /// Grok `PromptStyle.focused`. Empty composer during a turn is unfocused
     /// (`Build anything` placeholder, no cursor) so Enter does not steal the run.
     unfocused: bool,
+    /// 上一帧回合是否在跑。只用来认**边沿**：起一轮时把空框失焦、收一轮时还回
+    /// 焦点。每帧照着 `working` 重设焦点会把鼠标点击、打字的意图当场盖掉。
+    turn_working: bool,
     images: Vec<PastedImage>,
     image_counter: u32,
     paste_bodies: Vec<(String, String)>,
@@ -224,13 +227,35 @@ impl PromptWidget {
         self.state.lock().unwrap().chrome_info = info.into();
     }
 
-    /// Grok agent-view `prompt_focused`: unfocus the empty composer while a turn runs.
+    /// Grok agent-view `prompt_focused`。焦点是事件驱动的：鼠标点框 / 打字设上，
+    /// 点框外设下，回合起落交给 [`Self::set_turn_working`]。
     pub fn set_focused(&self, focused: bool) {
         self.state.lock().unwrap().unfocused = !focused;
     }
 
     pub fn focused(&self) -> bool {
         !self.state.lock().unwrap().unfocused
+    }
+
+    /// 每帧把「回合是否在跑」喂进来，只在边沿动焦点：
+    ///
+    /// - 起一轮且框是空的 → 失焦（Grok：`Build anything`、不露光标）
+    /// - 收一轮 → 还回焦点，别让空框一直暗着
+    ///
+    /// 中间的帧一概不碰，鼠标点框、打字设的焦点才留得住。
+    pub(crate) fn set_turn_working(&self, working: bool) {
+        let mut state = self.state.lock().unwrap();
+        if working == state.turn_working {
+            return;
+        }
+        state.turn_working = working;
+        if working {
+            if state.input.trim().is_empty() && state.images.is_empty() {
+                state.unfocused = true;
+            }
+        } else {
+            state.unfocused = false;
+        }
     }
 
     pub fn handle_paste(&self, text: &str) {
@@ -1601,6 +1626,74 @@ mod tests {
         prompt.push('a');
         assert!(prompt.focused());
         assert_eq!(prompt.text(), "a");
+    }
+
+    /// `frame.rs` 每帧喂 `working` 的那两行，测里照着跑，别只测组件方法。
+    fn frame(prompt: &PromptWidget, working: bool) {
+        prompt.set_turn_working(working);
+        if prompt.can_send() {
+            prompt.set_focused(true);
+        }
+    }
+
+    /// 回合跑着的时候点输入框要能聚焦。之前每帧 `set_focused(can_send())` 会把
+    /// `mouse_down` 刚设上的焦点当场抹掉，点了跟没点一样。
+    #[test]
+    fn clicking_the_composer_mid_turn_keeps_focus() {
+        let prompt = PromptWidget::default();
+        let area = Rect::new(0, 0, 40, 3);
+        let _ = render_at(&prompt, area);
+
+        frame(&prompt, true); // 起一轮：空框失焦
+        assert!(!prompt.focused());
+
+        assert!(prompt.mouse_down(4, 1));
+        assert!(prompt.focused(), "回合中点框应聚焦");
+
+        frame(&prompt, true); // 后续帧不许再抢
+        frame(&prompt, true);
+        assert!(prompt.focused(), "回合中的后续帧不该抹掉点击拿到的焦点");
+    }
+
+    /// 回合结束后空框要亮回来：清空输入不动 `unfocused`，空闲帧又不再强制聚焦，
+    /// 边框会一直暗着直到用户点一下。
+    #[test]
+    fn empty_composer_refocuses_when_the_turn_ends() {
+        let prompt = PromptWidget::default();
+
+        prompt.insert_str("hi");
+        frame(&prompt, false);
+        assert!(prompt.focused());
+
+        let _ = prompt.take(); // 发送：输入清空
+        frame(&prompt, true);
+        assert!(!prompt.focused(), "回合中空框应失焦");
+
+        frame(&prompt, false); // 回合结束
+        assert!(prompt.focused(), "回合结束后空框应恢复聚焦");
+        frame(&prompt, false);
+        assert!(prompt.focused());
+    }
+
+    /// 回合中打字，焦点也要留住（`insert_at_cursor` 设的焦点 + 有内容）。
+    #[test]
+    fn typing_mid_turn_keeps_focus() {
+        let prompt = PromptWidget::default();
+        frame(&prompt, true);
+        assert!(!prompt.focused());
+
+        prompt.push('x');
+        frame(&prompt, true);
+        assert!(prompt.focused(), "回合中打字应保持聚焦");
+    }
+
+    /// 起一轮时框里已经有下一条消息：不能把用户正在编辑的内容弄失焦。
+    #[test]
+    fn a_turn_starting_does_not_blur_a_non_empty_composer() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("next");
+        frame(&prompt, true);
+        assert!(prompt.focused());
     }
 
     #[test]
