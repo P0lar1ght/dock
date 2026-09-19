@@ -188,6 +188,51 @@ Confirm signatures with `cordis_inspect` `what: "builtins"`.
 
 The evaluator is not a security boundary (same trust as bash). Sync steps are bounded by operation limits.
 
+### Script-level HTTP + JSON — wrap an API as a tool
+
+You do **not** need an existing tool to talk to an API. The script has HTTP and JSON of its own, so one plugin is enough to turn any HTTP endpoint into a Dock tool.
+
+| Call | Needs `inject` | Contract |
+| --- | --- | --- |
+| `http_request(#{ url, method?, headers?, body?, timeout_secs? })` | — | Returns `#{ status, ok, url, headers, body }`. `body` is always a **string** — run `parse_json(body)` for JSON APIs. `method` defaults to `"GET"` (`GET` `POST` `PUT` `PATCH` `DELETE` `HEAD` `OPTIONS`). `headers` is a map (`#{ "Authorization": "Bearer …" }`), not an array. `timeout_secs` defaults to 30, clamped to 120 |
+| `parse_json(text)` / `value.to_json()` | — | Rhai builtins. `parse_json` gives a map/array you can index; `to_json()` serialises a map back to a string for `body` |
+
+Shape of the whole thing — this is the entire plugin:
+
+```rhai
+#{
+  inject: ["tools"],
+  apply: |host| {
+    host.register_tool(#{
+      name: "gh_issue",
+      description: "Read one GitHub issue",
+      parameters: #{ type: "object", properties: #{ repo: #{ type: "string" }, n: #{ type: "integer" } }, required: ["repo", "n"] },
+      execute: |args| {
+        let resp = http_request(#{
+          url: "https://api.github.com/repos/" + args.repo + "/issues/" + args.n,
+          headers: #{ "Accept": "application/vnd.github+json", "User-Agent": "dock" }
+        });
+        if !resp.ok { return "HTTP " + resp.status + ": " + resp.body; }
+        let issue = parse_json(resp.body);
+        issue.title + "\n\n" + issue.body
+      }
+    });
+  }
+}
+```
+
+`execute` closures capture `host` and see `http_request` / `parse_json`, so all of this works from inside a registered tool. A top-level `fn` does **not** capture the enclosing scope — pass `host` in explicitly if you factor one out.
+
+Boundaries, so you can tell a bug from a rule:
+
+- **4xx/5xx are not errors.** They come back with `ok: false` and the status; check `resp.ok`. Only network failures, bad specs, SSRF blocks and permission denials throw.
+- **3xx redirects are returned as-is** (not followed). Same as `web_fetch`'s client policy: SSRF and host permission only cover the URL you pass in, so auto-following a `302` to loopback/metadata would bypass them. If you need the next hop, call `http_request` again with the `Location` (and expect another permission prompt if the host differs).
+- **Private and loopback addresses are blocked** by the same SSRF policy as `web_fetch` (DNS is resolved first, so a name pointing at `127.0.0.1` is blocked too). You cannot reach `localhost` services this way unless `[toolset.web_fetch] allow_local` is on.
+- **The first request to a host asks the user for permission**, like `bash`. "Always allow" is remembered **per host**, so a plugin that talks to one API asks once.
+- **Credentials go in `headers`, never in the URL** — `https://user:pw@host/` is rejected. Header values may not contain newlines.
+- Request body ≤ 1 MiB, response body ≤ 4 MiB, ≤ 32 headers.
+- `http_request` exists only while the plugin **runs**. It is not available during `cordis_define` (the define-time preflight evaluates your top-level map — a request there would dodge the permission gate), so never call it at the top level of the source; call it inside `apply` or inside an `execute` / handler closure.
+
 The two intercept hooks run **inline on the turn**, so the script blocks the sample until it returns (bounded by the same operation limit); keep them short and avoid `host.call_tool` there. A throw is treated as no opinion — it is logged and the turn carries on, as is any return value that is not a string (returning `42` or a map logs and injects nothing, rather than stringifying it into the model's history). The host always passes control to the next handler for you, so a script cannot swallow the chain, and cannot append to `Sessions` itself: it returns text, the loop appends it. Built-in slots win: `tool-todo` (10) and `tool-goal` (20) outrank a script (50) when both want the same round.
 
 ## Preset factories (teaching / regression)
