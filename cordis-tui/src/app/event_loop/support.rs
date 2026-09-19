@@ -256,14 +256,41 @@ pub(super) fn navigate_ask(ctx: &Context, overlay: &mut Overlay, delta: i16) {
     let Some(ask) = ctx.get::<Ask>(ASK) else {
         return;
     };
-    if !ask.navigate(delta as i32) {
+    if ask.navigate(delta as i32) {
+        let Some(front) = ask.front() else {
+            overlay.close();
+            return;
+        };
+        *overlay = ask_overlay_from_prompt(&front);
+        return;
+    }
+    // 往前走不动 = 当前就是第一道还没答的题（`Ask::navigate` 按 `max_reachable`
+    // 夹住了下标）。抬头明写着「← → 切换」，停在这儿按 → 一点反应都没有说不过去：
+    // 把当前高亮当答案记下来再前进，和 Enter 同一条路。
+    if delta <= 0 {
         return;
     }
     let Some(front) = ask.front() else {
-        overlay.close();
         return;
     };
-    *overlay = ask_overlay_from_prompt(&front);
+    // 只在**后面还有题**时这么做，别让一个导航键顺手把整个提问提交掉。
+    // 导航被 `max_reachable` 夹着，所以第一道未答题之后的题必然也没答过，
+    // 记下这一题一定落到下一题上，不会走到收尾那条分支。
+    if front.index != front.max_index || front.index + 1 >= front.questions.len() {
+        return;
+    }
+    let answer = match overlay {
+        Overlay::Ask {
+            selected,
+            picked,
+            draft,
+            ..
+        } => Some((*selected, picked.clone(), draft.clone())),
+        _ => None,
+    };
+    if let Some((selected, picked, draft)) = answer {
+        accept_ask(ctx, overlay, selected, picked, &draft);
+    }
 }
 
 fn ask_overlay_from_prompt(front: &cordis_spine::AskPrompt) -> Overlay {
@@ -273,6 +300,7 @@ fn ask_overlay_from_prompt(front: &cordis_spine::AskPrompt) -> Overlay {
             picked: Vec::new(),
             draft: String::new(),
             draft_cursor: 0,
+            draft_focused: false,
         };
     };
     let labs = ask_view::labels(q);
@@ -300,11 +328,54 @@ fn ask_overlay_from_prompt(front: &cordis_spine::AskPrompt) -> Overlay {
         }
     }
     let draft_cursor = draft.chars().count();
+    // 焦点要跟 `selected` 自洽：上面刚把高亮挪到「其他」（带着上次填的内容）的话，
+    // 这里再写死 false，回到这题就成了死状态——打字、退格、←→ 全被 `draft_focused`
+    // 挡掉，而 ←→ 的问题切换又被 `other_active` 挡掉，只能上下跳一次才救得回来。
+    let draft_focused = labs
+        .get(selected)
+        .is_some_and(|l| ask_view::is_other_label(l));
     Overlay::Ask {
         selected,
         picked,
         draft,
         draft_cursor,
+        draft_focused,
+    }
+}
+
+/// `(「其他」在选项里的下标, 这题是否多选)`。
+pub(super) fn ask_other_index_and_mode(ctx: &Context) -> Option<(usize, bool)> {
+    let front = ctx.get::<Ask>(ASK).and_then(|a| a.front())?;
+    let q = front.questions.get(front.index)?;
+    let other = ask_view::labels(q)
+        .iter()
+        .position(|l| ask_view::is_other_label(l))?;
+    Some((other, q.multi_select.unwrap_or(false)))
+}
+
+/// True when the highlighted Ask option is the Other freeform choice.
+pub(super) fn ask_selected_is_other(ctx: &Context, selected: usize) -> bool {
+    ctx.get::<Ask>(ASK)
+        .and_then(|a| a.front())
+        .and_then(|p| {
+            p.questions.get(p.index).map(|q| {
+                ask_view::labels(q)
+                    .get(selected)
+                    .is_some_and(|l| ask_view::is_other_label(l))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Keep Other draft focus in sync after keyboard selection changes.
+pub(super) fn sync_ask_draft_focus(ctx: &Context, overlay: &mut Overlay) {
+    if let Overlay::Ask {
+        selected,
+        draft_focused,
+        ..
+    } = overlay
+    {
+        *draft_focused = ask_selected_is_other(ctx, *selected);
     }
 }
 
@@ -1440,6 +1511,78 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回到一道已经用「其他」答过的题：高亮停在「其他」行上，焦点就得跟着给，
+    /// 否则打字 / 退格 / ←→ 全被 `draft_focused` 挡掉，而 ←→ 的问题切换又被
+    /// `other_active` 挡掉，整行变成谁也进不去的死状态。
+    #[test]
+    fn restored_other_answer_keeps_the_draft_focused() {
+        use cordis_spine::{AskPrompt, Question, QuestionOption};
+        let front = AskPrompt {
+            questions: vec![Question {
+                question: "选哪个？".into(),
+                options: vec![QuestionOption {
+                    label: "甲".into(),
+                    description: String::new(),
+                    preview: None,
+                    id: None,
+                }],
+                multi_select: Some(false),
+                id: None,
+            }],
+            index: 0,
+            current_labels: vec!["Other".into()],
+            current_notes: Some("上次填的内容".into()),
+            max_index: 0,
+        };
+        match ask_overlay_from_prompt(&front) {
+            Overlay::Ask {
+                selected,
+                draft,
+                draft_focused,
+                ..
+            } => {
+                assert_eq!(draft, "上次填的内容");
+                assert!(selected > 0, "应停在「其他」那行");
+                assert!(draft_focused, "回到这题要能直接改");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 反向：没答过「其他」的题，开出来不该白白占着焦点。
+    #[test]
+    fn a_fresh_question_does_not_focus_the_draft() {
+        use cordis_spine::{AskPrompt, Question, QuestionOption};
+        let front = AskPrompt {
+            questions: vec![Question {
+                question: "选哪个？".into(),
+                options: vec![QuestionOption {
+                    label: "甲".into(),
+                    description: String::new(),
+                    preview: None,
+                    id: None,
+                }],
+                multi_select: Some(false),
+                id: None,
+            }],
+            index: 0,
+            current_labels: Vec::new(),
+            current_notes: None,
+            max_index: 0,
+        };
+        match ask_overlay_from_prompt(&front) {
+            Overlay::Ask {
+                selected,
+                draft_focused,
+                ..
+            } => {
+                assert_eq!(selected, 0);
+                assert!(!draft_focused);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn image_chip_numbers_reads_in_order() {

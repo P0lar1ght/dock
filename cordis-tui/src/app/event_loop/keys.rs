@@ -96,15 +96,33 @@ pub(super) fn run_action(
                 }
             }
             if let Overlay::Ask {
+                selected,
+                picked,
                 draft,
                 draft_cursor,
-                ..
+                draft_focused,
             } = overlay
             {
                 if !draft.is_empty() {
                     draft.clear();
                     *draft_cursor = 0;
                     return Vec::new();
+                }
+                // 空草稿还停在「其他」上：先退出「其他」，别一脚把整题拒掉。
+                // 单选里高亮就是答案，所以把它挪回第一项；多选只取消勾选，高亮不动。
+                if let Some((other, multi)) = ask_other_index_and_mode(ctx) {
+                    let on_other = *selected == other;
+                    let picked_other = multi && picked.get(other).copied().unwrap_or(false);
+                    if on_other || picked_other {
+                        if let Some(slot) = picked.get_mut(other) {
+                            *slot = false;
+                        }
+                        if !multi && on_other {
+                            *selected = 0;
+                        }
+                        *draft_focused = false;
+                        return Vec::new();
+                    }
                 }
                 if let Some(ask) = ctx.get::<Ask>(ASK) {
                     ask.cancel();
@@ -213,6 +231,7 @@ pub(super) fn run_action(
             }
             let len = overlay_len(ctx, overlay);
             overlay.move_sel(delta, len);
+            sync_ask_draft_focus(ctx, overlay);
             Vec::new()
         }
         Action::OverlayAccept => {
@@ -464,9 +483,10 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::push_draft_char(draft, draft_cursor, c);
                     return Vec::new();
                 }
@@ -474,10 +494,12 @@ pub(super) fn run_action(
                     let i = i as usize;
                     if (1..=picked.len().max(9)).contains(&i) {
                         *selected = i - 1;
-                        if ask_other_active(ctx, *selected, picked) {
+                        if ask_selected_is_other(ctx, *selected) {
+                            *draft_focused = true;
                             ask_view::clamp_draft_cursor(draft, draft_cursor);
                             return Vec::new();
                         }
+                        *draft_focused = false;
                         return accept_overlay(ctx, overlay);
                     }
                 }
@@ -649,9 +671,10 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::backspace_draft(draft, draft_cursor);
                     return Vec::new();
                 }
@@ -676,9 +699,10 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::push_draft(draft, draft_cursor, &text);
                     return Vec::new();
                 }
@@ -700,6 +724,7 @@ pub(super) fn run_action(
         }
         Action::OverlaySelect(idx) => {
             overlay.set_selected(idx);
+            sync_ask_draft_focus(ctx, overlay);
             Vec::new()
         }
         Action::OverlaySpace => {
@@ -735,14 +760,42 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
-                    if let Some(slot) = picked.get_mut(*selected) {
-                        *slot = true;
+                let multi = ask_other_index_and_mode(ctx).is_some_and(|(_, m)| m);
+                // 「其他」这行既是勾选项又是输入框，空格得二选一：**有字**时打进
+                // 草稿，**空着**时回到 toggle。否则勾上之后空格永远被草稿吃掉，
+                // 这一项再也取消不了。
+                if ask_selected_is_other(ctx, *selected) {
+                    if *draft_focused && !draft.is_empty() {
+                        ask_view::push_draft_char(draft, draft_cursor, ' ');
+                        return Vec::new();
                     }
+                    if !multi {
+                        // 单选：高亮就是答案，空格只负责把输入框叫醒。
+                        *draft_focused = true;
+                        return Vec::new();
+                    }
+                    let was_on = picked.get(*selected).copied().unwrap_or(false);
+                    if let Some(slot) = picked.get_mut(*selected) {
+                        *slot = !was_on;
+                    }
+                    *draft_focused = !was_on;
+                    return Vec::new();
+                }
+                // 多选里「其他」勾着但高亮在别的行：空格仍归草稿。
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::push_draft_char(draft, draft_cursor, ' ');
                     return Vec::new();
+                }
+                *draft_focused = false;
+                // 单选里高亮就是答案，空格即「选定」——所以顺手前进到下一题，跟
+                // Enter 同一条路。不然只有 Enter 能往前，按空格什么都不发生。
+                // 也不写 `picked`：答案只取 `selected`，写进去的行会一直留着一个
+                // 实心点，屏幕上看起来像同时选中了好几项。
+                if !multi {
+                    return accept_overlay(ctx, overlay);
                 }
                 if let Some(slot) = picked.get_mut(*selected) {
                     *slot = !*slot;
@@ -829,9 +882,10 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::move_draft_cursor(draft, draft_cursor, delta);
                     return Vec::new();
                 }
@@ -1042,6 +1096,7 @@ pub(super) fn run_action(
             }
             if overlay.is_open() {
                 overlay.move_sel(if delta > 0 { -1 } else { 1 }, overlay_len(ctx, overlay));
+                sync_ask_draft_focus(ctx, overlay);
                 return Vec::new();
             }
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
@@ -1212,9 +1267,14 @@ pub(super) fn run_action(
                     }
                     overlay.set_selected(idx);
                     if let Overlay::Ask {
-                        selected, picked, ..
+                        selected,
+                        picked,
+                        draft_focused,
+                        ..
                     } = overlay
                     {
+                        // Option click focuses draft only when that row is Other.
+                        *draft_focused = ask_selected_is_other(ctx, *selected);
                         if ask_other_active(ctx, *selected, picked) {
                             return Vec::new();
                         }
@@ -1229,6 +1289,12 @@ pub(super) fn run_action(
                     }
                     if !matches!(overlay, Overlay::Settings { .. }) {
                         return accept_overlay(ctx, overlay);
+                    }
+                }
+                if let Overlay::Ask { draft_focused, .. } = overlay {
+                    if overlay::hit_draft_input(hits, column, row) {
+                        *draft_focused = true;
+                        return Vec::new();
                     }
                 }
                 return Vec::new();
@@ -1933,9 +1999,10 @@ pub(super) fn apply_paste(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::push_draft(draft, draft_cursor, &text);
                     return;
                 }
@@ -2224,6 +2291,282 @@ mod tests {
         // 框里按下：要回焦点（mouse_down 里 set_focused(true)）。
         assert!(go(Action::MouseDown { column: 6, row: 21 }).is_empty());
         assert!(prompt.focused(), "点回输入框应重新聚焦");
+    }
+
+    async fn pending_ask(
+        multi: bool,
+    ) -> (Context, tokio::task::JoinHandle<()>, std::sync::Arc<Ask>) {
+        pending_ask_n(multi, 1).await
+    }
+
+    /// 同上，但一次挂 `n` 道题——切题那几条要多于一题才测得到。
+    async fn pending_ask_n(
+        multi: bool,
+        n: usize,
+    ) -> (Context, tokio::task::JoinHandle<()>, std::sync::Arc<Ask>) {
+        use cordis_spine::{Question, QuestionOption};
+
+        let ctx = Context::new();
+        std::mem::forget(ctx.provide(ASK, Ask::new(ctx.clone())).unwrap());
+        let ask = ctx.get::<Ask>(ASK).unwrap();
+        let questions: Vec<Question> = (0..n)
+            .map(|i| Question {
+                question: format!("第 {} 题选哪个？", i + 1),
+                options: vec![
+                    QuestionOption {
+                        label: "甲".into(),
+                        description: String::new(),
+                        preview: None,
+                        id: None,
+                    },
+                    QuestionOption {
+                        label: "乙".into(),
+                        description: String::new(),
+                        preview: None,
+                        id: None,
+                    },
+                ],
+                multi_select: Some(multi),
+                id: None,
+            })
+            .collect();
+        let handle = tokio::spawn({
+            let ask = ask.clone();
+            async move {
+                let _ = ask.ask(questions).await;
+            }
+        });
+        for _ in 0..100 {
+            if ask.front().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        (ctx, handle, ask)
+    }
+
+    fn dispatch(ctx: &Context, overlay: &mut Overlay, action: Action) -> Vec<Effect> {
+        run_action(
+            ctx,
+            action,
+            overlay,
+            &PickerHits::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+    }
+
+    /// 单选停在「其他」上、草稿是空的：Esc 先退出「其他」，不该一脚把整题拒掉。
+    #[tokio::test]
+    async fn esc_leaves_other_before_rejecting_the_question() {
+        let (ctx, handle, ask) = pending_ask(false).await;
+        let other = 2; // 甲 / 乙 / 其他
+        let mut overlay = Overlay::Ask {
+            selected: other,
+            picked: vec![false; 3],
+            draft: String::new(),
+            draft_cursor: 0,
+            draft_focused: true,
+        };
+
+        dispatch(&ctx, &mut overlay, Action::OverlayClose);
+        match &overlay {
+            Overlay::Ask {
+                selected,
+                draft_focused,
+                ..
+            } => {
+                assert_eq!(*selected, 0, "单选里高亮就是答案，应退回第一项");
+                assert!(!*draft_focused);
+            }
+            other => panic!("不该关掉 overlay：{other:?}"),
+        }
+        assert!(ask.front().is_some(), "第一下 Esc 不该拒掉整题");
+
+        // 再按一次才是拒绝。
+        dispatch(&ctx, &mut overlay, Action::OverlayClose);
+        assert!(ask.front().is_none(), "退出「其他」之后 Esc 才拒题");
+        let _ = handle.await;
+    }
+
+    /// 有字时 Esc 仍然先清空草稿——这一级不变。
+    #[tokio::test]
+    async fn esc_clears_the_draft_first() {
+        let (ctx, handle, ask) = pending_ask(false).await;
+        let mut overlay = Overlay::Ask {
+            selected: 2,
+            picked: vec![false; 3],
+            draft: "写了点东西".into(),
+            draft_cursor: 5,
+            draft_focused: true,
+        };
+
+        dispatch(&ctx, &mut overlay, Action::OverlayClose);
+        match &overlay {
+            Overlay::Ask {
+                selected, draft, ..
+            } => {
+                assert!(draft.is_empty(), "第一下 Esc 清空草稿");
+                assert_eq!(*selected, 2, "清空阶段不该挪高亮");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(ask.front().is_some());
+        ask.cancel();
+        let _ = handle.await;
+    }
+
+    /// 多选勾上「其他」之后要取消得掉：草稿空着时空格回到 toggle。
+    #[tokio::test]
+    async fn space_toggles_other_off_when_the_draft_is_empty() {
+        let (ctx, handle, ask) = pending_ask(true).await;
+        let other = 2;
+        let mut overlay = Overlay::Ask {
+            selected: other,
+            picked: vec![false; 3],
+            draft: String::new(),
+            draft_cursor: 0,
+            draft_focused: false,
+        };
+
+        dispatch(&ctx, &mut overlay, Action::OverlaySpace);
+        match &overlay {
+            Overlay::Ask {
+                picked,
+                draft_focused,
+                ..
+            } => {
+                assert!(picked[other], "空格先勾上");
+                assert!(*draft_focused, "勾上就该聚焦输入框");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        dispatch(&ctx, &mut overlay, Action::OverlaySpace);
+        match &overlay {
+            Overlay::Ask {
+                picked,
+                draft,
+                draft_focused,
+                ..
+            } => {
+                assert!(!picked[other], "草稿空着时空格要能取消勾选");
+                assert!(!*draft_focused);
+                assert!(draft.is_empty(), "取消不该往草稿里塞空格：{draft:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        ask.cancel();
+        let _ = handle.await;
+    }
+
+    /// 单选里空格即「选定」，要跟 Enter 一样把答案记下并前进到下一题。
+    /// 原先空格只改 `picked`（还把每一行都点亮），停在原题上什么也不发生。
+    #[tokio::test]
+    async fn space_answers_and_advances_in_single_select() {
+        let (ctx, handle, ask) = pending_ask_n(false, 2).await;
+        let mut overlay = Overlay::Ask {
+            selected: 1,
+            picked: vec![false; 3],
+            draft: String::new(),
+            draft_cursor: 0,
+            draft_focused: false,
+        };
+
+        dispatch(&ctx, &mut overlay, Action::OverlaySpace);
+        let front = ask.front().expect("还有第二题，不该收尾");
+        assert_eq!(front.index, 1, "空格应前进到下一题");
+        assert_eq!(
+            front.questions[0]
+                .options
+                .get(1)
+                .map(|o| o.label.as_str())
+                .unwrap(),
+            "乙"
+        );
+        match &overlay {
+            Overlay::Ask { picked, .. } => {
+                assert!(
+                    picked.iter().all(|p| !p),
+                    "新一题的勾选状态应是干净的：{picked:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        ask.cancel();
+        let _ = handle.await;
+    }
+
+    /// 上下选完按 →：抬头写着「← → 切换」，就得真能切。原先 `navigate` 被
+    /// `max_reachable` 夹在当前题上、返回 false，按下去一点反应都没有。
+    #[tokio::test]
+    async fn right_arrow_answers_the_current_question_and_advances() {
+        let (ctx, handle, ask) = pending_ask_n(false, 3).await;
+        let mut overlay = Overlay::Ask {
+            selected: 0,
+            picked: vec![false; 3],
+            draft: String::new(),
+            draft_cursor: 0,
+            draft_focused: false,
+        };
+
+        dispatch(&ctx, &mut overlay, Action::OverlayMove(1));
+        dispatch(&ctx, &mut overlay, Action::OverlayNavH(1));
+        assert_eq!(ask.front().map(|f| f.index), Some(1), "→ 应切到第二题");
+
+        // ← 回头看已答过的题：不重新作答，只是换下标。
+        dispatch(&ctx, &mut overlay, Action::OverlayNavH(-1));
+        assert_eq!(ask.front().map(|f| f.index), Some(0));
+        ask.cancel();
+        let _ = handle.await;
+    }
+
+    /// 但 → 是导航键，不许在最后一题上顺手把整个提问提交掉。
+    #[tokio::test]
+    async fn right_arrow_does_not_submit_on_the_last_question() {
+        let (ctx, handle, ask) = pending_ask_n(false, 1).await;
+        let mut overlay = Overlay::Ask {
+            selected: 0,
+            picked: vec![false; 3],
+            draft: String::new(),
+            draft_cursor: 0,
+            draft_focused: false,
+        };
+
+        dispatch(&ctx, &mut overlay, Action::OverlayNavH(1));
+        assert!(ask.front().is_some(), "最后一题上 → 不该提交");
+        assert!(matches!(overlay, Overlay::Ask { .. }));
+        ask.cancel();
+        let _ = handle.await;
+    }
+
+    /// 但有字时空格照旧打进草稿，别把多词答案打断。
+    #[tokio::test]
+    async fn space_still_types_into_a_non_empty_draft() {
+        let (ctx, handle, ask) = pending_ask(true).await;
+        let other = 2;
+        let mut picked = vec![false; 3];
+        picked[other] = true;
+        let mut overlay = Overlay::Ask {
+            selected: other,
+            picked,
+            draft: "ab".into(),
+            draft_cursor: 2,
+            draft_focused: true,
+        };
+
+        dispatch(&ctx, &mut overlay, Action::OverlaySpace);
+        match &overlay {
+            Overlay::Ask { picked, draft, .. } => {
+                assert_eq!(draft, "ab ");
+                assert!(picked[other], "打字阶段不该把勾选弄掉");
+            }
+            other => panic!("{other:?}"),
+        }
+        ask.cancel();
+        let _ = handle.await;
     }
 
     /// 分页键不能踩现有键位：`Ctrl+W` 还是新会话，`Ctrl+D` 还是半页下滚。

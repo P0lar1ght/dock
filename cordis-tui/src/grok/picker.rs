@@ -4,7 +4,7 @@
 //! mode / fold fields are omitted.
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Widget};
@@ -29,6 +29,13 @@ pub struct PickerHits {
     pub rows: Vec<(usize, Rect)>,
     /// `(kill_rect, target)`：任务面板里能停的那些行（`/loop` 与 workflow）。
     pub kill_buttons: Vec<(Rect, crate::grok::tasks_pane::KillTarget)>,
+    /// Ask-view 「其他」freeform input row (empty when inactive).
+    pub draft_input: Rect,
+    /// 「其他」输入框里真实光标该落的格子（只在聚焦时有值）。
+    ///
+    /// 画个反显方块当光标是不够的：终端的**硬件光标**没挪过去，macOS 输入法的
+    /// 候选条就锚在旧位置，打中文时整条飘到屏幕别处。
+    pub draft_caret: Option<Position>,
 }
 
 /// A selectable leaf row (Grok non-expandable `PickerRow`).

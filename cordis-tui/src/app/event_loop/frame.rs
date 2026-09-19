@@ -491,14 +491,21 @@ pub(super) fn draw(
                     }
                 } else if ask_open {
                     if let Some(prompt) = ctx.get::<Ask>(ASK).and_then(|a| a.front()) {
-                        let (selected, picked, draft, draft_cursor) = match overlay {
+                        let (selected, picked, draft, draft_cursor, draft_focused) = match overlay {
                             Overlay::Ask {
                                 selected,
                                 picked,
                                 draft,
                                 draft_cursor,
-                            } => (*selected, picked.clone(), draft.clone(), *draft_cursor),
-                            _ => (0, Vec::new(), String::new(), 0),
+                                draft_focused,
+                            } => (
+                                *selected,
+                                picked.clone(),
+                                draft.clone(),
+                                *draft_cursor,
+                                *draft_focused,
+                            ),
+                            _ => (0, Vec::new(), String::new(), 0, false),
                         };
                         *hits = ask_view::render(
                             frame.buffer_mut(),
@@ -506,9 +513,17 @@ pub(super) fn draw(
                             &prompt,
                             selected,
                             &picked,
-                            &draft,
-                            draft_cursor,
+                            ask_view::AskDraft {
+                                text: &draft,
+                                cursor: draft_cursor,
+                                focused: draft_focused,
+                            },
                         );
+                        // 真实光标要跟到「其他」输入框里。只画反显方块的话终端光标
+                        // 还停在别处，输入法候选条就飘到屏幕另一头去了。
+                        if let Some(pos) = hits.draft_caret {
+                            frame.set_cursor_position(pos);
+                        }
                     }
                 } else if elicit_open {
                     if let Some(prompt) = elicit_front(ctx) {

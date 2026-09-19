@@ -92,7 +92,7 @@ order: 10
 | 面 | 行为 |
 |---|---|
 | `g`（输入框空、有目标、且当前没在生成） | 打开/关闭目标 overlay，可改标题、暂停、清除 |
-| 提问 overlay | 听 `ask/pending`，和权限 overlay 同款 |
+| 提问 overlay | 听 `ask/pending`，和权限 overlay 同款。单选画圆点 `(○)` / `(●)`，多选画方框 `□` / `☑`。选中「其他」时下方展开**自由输入框**：跟输入栏同一套圆角边框，聚焦走 `prompt_border_active`、失焦走 `prompt_border`；**终端真实光标跟进框里**（只画反显方块的话输入法候选条会锚在旧位置，打中文整条飘走），字超出框宽时窗口右滑、光标始终可见。`←→` 在框里移光标（此时不切题）。**Esc 逐级退**：有字先清空 → 空着退出「其他」（单选把高亮退回第一项，多选取消勾选）→ 再按才拒掉整题。**Space**：单选里等于「选定」，和 Enter 一样记下答案并前进到下一题（不写 `picked`——写了会让按过空格的行都留着实心点，看着像多选）；多选里是勾选 / 取消勾选；停在「其他」上时草稿为空则勾选 / 取消，有字则照常打空格，所以勾上之后取消得掉。**`←→` 切题**：`→` 停在第一道未答的题上时，把当前高亮当答案记下再前进（`Ask::navigate` 被 `max_reachable` 夹着，否则按下去毫无反应，而抬头明写着「← → 切换」）；**最后一题上 `→` 不做事**，提交只归 Enter。`←` 只回看已答过的题，不重新作答 |
 | 浏览器配对 overlay | 听 `gateway/pairing`。`/pair` 第一行开启或关闭监听；首次 Origin 请求弹出「允许浏览器连接？」；下列待批与已绑来源（Enter 批准 / `x` 拒绝或撤销） |
 | MCP elicitation | 听 `mcp/elicit`。权限 / 提问 overlay 会抢前台（队列仍在）。表单逐步填：选项带「其他」、自由输入空内容闪「请输入具体内容」。URL 模式 Enter 开浏览器，等 `notifications/elicitation/complete` 或 Esc 取消 |
 | 动态插槽 `Overlay::Slot` | `"tui.slots"` 登记的纯文本 pane（复用 Notice 布局）。Esc 关闭；↑/↓ 滚动并把规范化键名转给 `on_key`（`esc` / `enter` / `up` / `down` / `char:x`）。脚本 `open_slot` 或 slash `kind: slot` 打开 |
