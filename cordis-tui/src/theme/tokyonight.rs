@@ -75,8 +75,9 @@ impl Theme {
             accent_verify: MAGENTA,
             accent_remember: Color::Rgb(139, 195, 74),
             selection_border: rgb(58, 72, 115),
-            prompt_border: rgb(60, 75, 120),
-            prompt_border_active: rgb(75, 92, 140),
+            // Storm blues were ~15 RGB apart — widen to dim gutter vs accent blue.
+            prompt_border: rgb(45, 52, 80), // dim idle chrome
+            prompt_border_active: BLUE,     // #7aa2f7 — accent when focused
             hover_border: rgb(55, 58, 80),
             accent_model: TEAL,
             scrollbar_bg: BG_STORM_DARK,

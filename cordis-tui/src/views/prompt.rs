@@ -637,6 +637,9 @@ impl PromptWidget {
         let Some(byte) = byte_at(&state, area, column, row) else {
             return false;
         };
+        // Clicking the box claims focus (border + caret); scrollback clicks blur
+        // via the event loop so idle empty chrome can go dim.
+        state.unfocused = false;
         state.pending = Some((column, row, byte));
         state.set_cursor_keep_selection(byte);
         true
@@ -1187,6 +1190,8 @@ fn insert_at_cursor(state: &mut State, s: &str) {
     state.cursor = i + s.len();
     state.slash_selected = None;
     state.file_dismissed = false;
+    // Typing into an idle-blurred empty box claims focus again.
+    state.unfocused = false;
 }
 
 fn chip_ranges(s: &str) -> Vec<Range<usize>> {
@@ -1573,6 +1578,29 @@ mod tests {
         assert!(prompt.cursor_position(area).is_none());
         prompt.set_focused(true);
         assert!(prompt.cursor_position(area).is_some());
+    }
+
+    /// 点在框里要把焦点要回来：边框亮、光标露出来。
+    #[test]
+    fn mouse_down_on_the_box_claims_focus() {
+        let prompt = PromptWidget::default();
+        prompt.set_focused(false);
+        let area = Rect::new(0, 0, 40, 3);
+        let _ = render_at(&prompt, area);
+        assert!(!prompt.focused());
+        assert!(prompt.mouse_down(4, 1));
+        assert!(prompt.focused());
+    }
+
+    /// 打字也要把失焦的空框唤回来，不然边框一直暗着。
+    #[test]
+    fn typing_reclaims_focus_on_an_idle_blurred_box() {
+        let prompt = PromptWidget::default();
+        prompt.set_focused(false);
+        assert!(!prompt.focused());
+        prompt.push('a');
+        assert!(prompt.focused());
+        assert_eq!(prompt.text(), "a");
     }
 
     #[test]
