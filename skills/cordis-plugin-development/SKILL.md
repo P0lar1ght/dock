@@ -195,7 +195,9 @@ You do **not** need an existing tool to talk to an API. The script has HTTP and 
 
 | Call | Needs `inject` | Contract |
 | --- | --- | --- |
-| `http_request(#{ url, method?, headers?, body?, timeout_secs? })` | — | Returns `#{ status, ok, url, headers, body }`. `body` is always a **string** — run `parse_json(body)` for JSON APIs. `method` defaults to `"GET"` (`GET` `POST` `PUT` `PATCH` `DELETE` `HEAD` `OPTIONS`). `headers` is a map (`#{ "Authorization": "Bearer …" }`), not an array. `timeout_secs` defaults to 30, clamped to 120 |
+| `http_request(#{ url, method?, headers?, body?, multipart?, timeout_secs? })` | — | Returns `#{ status, ok, url, headers, body, body_blob }`. `body` is a lossy UTF-8 **string** (compat); `body_blob` is the raw `Blob` for signing / re-upload. Request `body` accepts `String` **or** `Blob`. `multipart` is an **array** of `#{ name, value? \| blob?, filename?, content_type? }` (array order is wire order — put file parts last for OSS PostObject); mutually exclusive with `body`. Oversize request bodies **throw** (never silent truncate; cap 1MiB). No auto-follow 3xx; no auto-replay POST. `method` defaults to `"GET"`. `timeout_secs` defaults to 30, clamped to 120 |
+| `host.read_bytes(path)` | — | Read a **workspace path** into a `Blob` for upload. Path-only contract (like `read_file`): relative to cwd or absolute **under** cwd; rejects `..`, symlink escape, and paths outside the workspace. First use gates `read_bytes {path}` (summary never includes bytes). Empty files OK; over 1MiB throws. **Prefer this** so tool args carry only a path — never file body / base64. Runtime Host only |
+| `regex_is_match` / `regex_find` / `regex_captures` / `regex_replace` | — | Thin wrappers over the `regex` crate. Caps: pattern ≤4KiB, text ≤1MiB, compiled size limit, replace output ≤1MiB, ≤10000 replacements. `regex_replace` supports limited `$n` / `${n}` / `$$` — **no** fancy-regex. Runtime only |
 | `parse_json(text)` / `value.to_json()` | — | Rhai builtins. `parse_json` gives a map/array you can index; `to_json()` serialises a map back to a string for `body` |
 
 Shape of the whole thing — this is the entire plugin:
@@ -238,6 +240,8 @@ Boundaries, so you can tell a bug from a rule:
 - **The first request to a host asks the user for permission**, like `bash`. "Always allow" is remembered **per host**, so a plugin that talks to one API asks once.
 - **Credentials go in `headers`, never in the URL** — `https://user:pw@host/` is rejected. Header values may not contain newlines.
 - Request body ≤ 1 MiB, response body ≤ 4 MiB, ≤ 32 headers.
+- **Upload by path reference:** tool parameters should pass a workspace `path` string only. Inside `execute`, call `host.read_bytes(path)` and feed the `Blob` to `http_request` (`body` or `multipart`). Do not put file contents, base64, or large CSV into tool args — the model must never generate/embed the file.
+- Telegram Bot API (and similar) may place a bot token in the URL **path**; treat that as a host-permission / secret-handling concern (same as putting credentials in headers) — do not invent a separate path-token feature.
 - `http_request` exists only while the plugin **runs**. It is not available during `cordis_define` (the define-time preflight evaluates your top-level map — a request there would dodge the permission gate), so never call it at the top level of the source; call it inside `apply` or inside an `execute` / handler closure.
 - `host.secret` is the same story: `Host` is registered only on the run engine, so define-time preflight cannot call it. Put secret reads inside `apply` / `execute` (permissions still apply there).
 

@@ -29,6 +29,16 @@ const SOURCE_SHAPE_HINT: &str = "source must be a map #{ inject: [...], apply: |
 const PARAMETERS_MUST_BE_MAP: &str = "host.register_tool parameters must be a map, not a JSON string. Use:\n\
     parameters: #{ type: \"object\", properties: #{ text: #{ type: \"string\" } }, required: [\"text\"] }";
 
+
+const READ_BYTES_BUILTIN: (&str, &str, &[&str]) = (
+    "host.read_bytes",
+    "Read a workspace file into a Rhai Blob for http_request body/multipart. Path only (like read_file): relative to cwd or absolute under cwd; rejects `..`, symlink escape, and paths outside the workspace. First use gates `read_bytes {path}` (summary never includes bytes). Empty files OK; over 1MiB throws. Runtime Host only — not available at define-time preflight. Prefer this over embedding file content in tool args.",
+    &[
+        "host.read_bytes(\"data.csv\") -> Blob",
+        "http_request(#{ method: \"POST\", url, multipart: [#{ name: \"file\", blob: host.read_bytes(args.path), filename: \"data.csv\" }] })",
+    ],
+);
+
 pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     (
         "host.provide",
@@ -83,6 +93,7 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     super::rhai_http::HTTP_BUILTIN,
     super::rhai_secret::SECRET_BUILTIN,
+    READ_BYTES_BUILTIN,
 ];
 
 pub struct RhaiMeta {
@@ -209,6 +220,7 @@ fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str) -> Result<(), String
     super::rhai_http::register(&mut engine, ctx.clone(), plugin_id.to_string(), http_params);
     // Codecs + HMAC: pure, no perms — still runtime-only so define-time preflight cannot call them.
     super::rhai_codec::register(&mut engine);
+    super::rhai_regex::register(&mut engine);
     // Wall clock: SystemTime epoch helpers (timestamp() is Instant-only).
     super::rhai_time::register(&mut engine);
     let ast = engine
@@ -280,6 +292,7 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
     engine.register_fn("secret", Host::secret);
+    engine.register_fn("read_bytes", Host::read_bytes);
 }
 
 #[derive(Clone)]
@@ -662,6 +675,20 @@ impl Host {
         Ok(value.into())
     }
 
+    
+    fn read_bytes(
+        &mut self,
+        path: ImmutableString,
+    ) -> Result<rhai::Blob, Box<rhai::EvalAltResult>> {
+        let bytes = super::path_bytes::read_bytes_gated(
+            &self.inner.ctx,
+            &self.inner.plugin_id,
+            path.as_str(),
+        )
+        .map_err(eval_err)?;
+        Ok(bytes)
+    }
+
     fn own(&self, d: cordis::Disposable) -> Result<(), Box<rhai::EvalAltResult>> {
         let fallback = d.clone();
         match self.inner.ctx.effect("host.register", move |scope| {
@@ -907,6 +934,7 @@ pub fn builtins_lines() -> Vec<String> {
     HOST_BUILTINS
         .iter()
         .chain(super::rhai_codec::BUILTINS.iter())
+        .chain(super::rhai_regex::BUILTINS.iter())
         .chain(super::rhai_time::BUILTINS.iter())
         .flat_map(|(name, purpose, sigs)| {
             let mut lines = vec![format!("- {name} — {purpose}")];

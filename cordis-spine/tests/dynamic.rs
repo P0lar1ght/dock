@@ -2253,3 +2253,156 @@ async fn cordis_inspect_lists_host_secret_builtin() {
     );
     assert!(!out.contains("sk-"), "{out}");
 }
+
+/// #102 hard acceptance: tool args carry only a **path**; host.read_bytes loads
+/// bytes; multipart upload succeeds; args/return never contain file body.
+#[tokio::test]
+async fn path_reference_upload_args_are_path_only() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, seen) = spawn_api_server();
+
+    // Workspace-relative file (cwd-bounded). Payload must NOT appear in tool args.
+    let rel = format!(
+        ".tmp-dock-upload-{}e2e.bin",
+        std::process::id()
+    );
+    let payload = b"REF_UPLOAD_PAYLOAD_bytes_\xff\x00_END";
+    std::fs::write(&rel, payload).unwrap();
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "upload_by_path",
+                description: "upload workspace file by path reference",
+                parameters: #{{
+                    type: "object",
+                    properties: #{{ path: #{{ type: "string" }} }},
+                    required: ["path"]
+                }},
+                execute: |args| {{
+                    let bytes = host.read_bytes(args.path);
+                    let resp = http_request(#{{
+                        method: "POST",
+                        url: "{base}/echo",
+                        multipart: [
+                            #{{ name: "purpose", value: "assistants" }},
+                            #{{ name: "file", blob: bytes, filename: "data.bin", content_type: "application/octet-stream" }}
+                        ]
+                    }});
+                    if !resp.ok {{ return "HTTP " + resp.status; }}
+                    // Return only status + size — never the file body.
+                    "uploaded size=" + bytes.len() + " status=" + resp.status
+                }}
+            }});
+        }}
+    }}"#
+    );
+    define_and_run(&root, "upref", &src).await;
+
+    let args = format!(r#"{{"path":"{rel}"}}"#);
+    assert!(
+        !args.as_bytes().windows(payload.len()).any(|w| w == payload),
+        "tool args must not embed file bytes: {args}"
+    );
+    assert!(!args.contains("REF_UPLOAD_PAYLOAD"), "{args}");
+
+    let out = exec(&root, "upload_by_path", &args).await;
+    assert!(
+        out.contains("uploaded size=") && out.contains("status=200"),
+        "upload should succeed: {out}"
+    );
+    assert!(
+        !out.as_bytes().windows(payload.len()).any(|w| w == payload),
+        "tool return must not contain file body: {out}"
+    );
+    assert!(!out.contains("REF_UPLOAD_PAYLOAD"), "{out}");
+
+    let requests = seen.lock().unwrap().clone();
+    let last = requests.last().expect("server should see the upload");
+    assert!(last.contains("multipart/form-data") || last.contains("Content-Type: multipart"), "{last}");
+    // Raw capture may be lossy for non-utf8; check the ASCII marker at least.
+    assert!(
+        last.contains("REF_UPLOAD_PAYLOAD") || last.contains("filename=\"data.bin\""),
+        "server must receive the file part: {last}"
+    );
+    let _ = std::fs::remove_file(&rel);
+}
+
+/// Out-of-allowlist paths are rejected (no silent read of /etc/passwd or `..`).
+#[tokio::test]
+async fn host_read_bytes_rejects_escape_paths() {
+    let root = boot().await;
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "read_escape",
+                description: "should fail",
+                parameters: #{
+                    type: "object",
+                    properties: #{ path: #{ type: "string" } },
+                    required: ["path"]
+                },
+                execute: |args| {
+                    host.read_bytes(args.path);
+                    "should-not-reach"
+                }
+            });
+        }
+    }"#;
+    define_and_run(&root, "esc", src).await;
+
+    for bad in ["/etc/passwd", "../Cargo.toml", "/tmp/nope"] {
+        let out = exec(
+            &root,
+            "read_escape",
+            &format!(r#"{{"path":"{bad}"}}"#),
+        )
+        .await;
+        assert!(
+            out.contains("Error") || out.contains("escapes") || out.contains("..") || out.contains("reject"),
+            "path {bad:?} should be rejected: {out}"
+        );
+        assert!(!out.contains("should-not-reach"), "{out}");
+    }
+}
+
+/// Regex helpers are runtime-only and listed in builtins.
+#[tokio::test]
+async fn rhai_regex_and_read_bytes_listed_in_builtins() {
+    let root = boot().await;
+    let out = exec(&root, "cordis_inspect", r#"{"what":"builtins"}"#).await;
+    assert!(out.contains("regex_is_match"), "{out}");
+    assert!(out.contains("regex_replace"), "{out}");
+    assert!(out.contains("host.read_bytes"), "{out}");
+    assert!(out.contains("body_blob") || out.contains("multipart"), "{out}");
+}
+
+/// Regex works inside execute (runtime engine).
+#[tokio::test]
+async fn rhai_regex_works_inside_execute() {
+    let root = boot().await;
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "regex_probe",
+                description: "regex",
+                parameters: #{ type: "object", properties: #{} },
+                execute: |args| {
+                    let ok = regex_is_match("\\d+", "ab12");
+                    let found = regex_find("\\d+", "ab12cd");
+                    let caps = regex_captures("(\\w+)=(\\w+)", "a=1");
+                    let rep = regex_replace("(\\w+)=(\\w+)", "a=1 b=2", "$2:$1");
+                    "ok=" + ok + " found=" + found + " g1=" + caps[1] + " rep=" + rep
+                }
+            });
+        }
+    }"#;
+    define_and_run(&root, "rex", src).await;
+    let out = exec(&root, "regex_probe", "{}").await;
+    assert_eq!(out, "ok=true found=12 g1=a rep=1:a 2:b");
+}
