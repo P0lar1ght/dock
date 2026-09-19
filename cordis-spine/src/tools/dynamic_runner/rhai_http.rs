@@ -4,10 +4,13 @@
 //! `web_fetch` 之类现成工具的话，模型就得同时懂两套东西，而且 `web_fetch`
 //! 只有 GET、不能带 header、正文还会被转成 markdown，根本封装不了带认证的接口。
 //!
-//! 两道闸不放：
+//! 安全边界：
 //!
 //! - **SSRF** 复用 [`crate::tools::web_fetch::ssrf`] 的同一份策略。不另写一份——
 //!   策略分叉成两份，改一处漏一处。
+//! - **不跟随重定向**（`reqwest::redirect::Policy::none()`），与 `web_fetch` 的
+//!   client 侧一致。SSRF / 权限只校验初始 URL；若自动跟 302，攻击者可用公开域
+//!   跳到 `127.0.0.1` / 元数据 IP。3xx 原样返回，由调用方决定是否再请求。
 //! - **权限**走 `"permissions"` named service，与 `bash` 同级。按 **host** 记
 //!   「始终允许」，所以一颗插件访问同一个域只问一次，不会变成每次调用都弹窗，
 //!   也不会因为允许了一个域就放开全网。
@@ -208,17 +211,24 @@ async fn send(
     // 权限按 host 记，不按 "http_request" 记：允许一个域不该等于放开全网。
     if let Some(perms) = ctx.get::<Permissions>(PERMISSIONS) {
         let gate = format!("http_request {host}");
+        // TUI 摘要去掉 query/fragment，避免 token 落进权限确认文案。
+        let mut summary_url = spec.url.clone();
+        summary_url.set_query(None);
+        summary_url.set_fragment(None);
         let summary = format!(
             "{} {} （插件 {plugin_id}）",
             spec.method.as_str(),
-            spec.url.as_str()
+            summary_url.as_str()
         );
         if !perms.request(&gate, &summary).await {
             return Err(format!("权限被拒绝：{} {}", spec.method.as_str(), host));
         }
     }
 
-    let mut builder = reqwest::Client::builder().timeout(spec.timeout);
+    // 与 web_fetch 一致：不自动跟重定向。SSRF 只校验初始 URL，跟跳会绕过。
+    let mut builder = reqwest::Client::builder()
+        .timeout(spec.timeout)
+        .redirect(reqwest::redirect::Policy::none());
     if let Some(proxy) = params.proxy_endpoint.as_deref() {
         builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| e.to_string())?);
     }
@@ -425,5 +435,90 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("SSRF"), "{err}");
+    }
+
+    /// 302 → 环回：client 不得自动跟随，否则 SSRF 只校验初始 URL 会被绕过。
+    fn spawn_redirect_to(target: &str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let location = target.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let body = b"redirected";
+            let resp = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        });
+        (format!("http://{addr}/start"), handle)
+    }
+
+    /// 第二跳监听器：若被跟到会置位；Policy::none 下应保持 false。
+    fn spawn_probe_listener() -> (String, std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hit = Arc::new(AtomicBool::new(false));
+        let hit2 = hit.clone();
+        // 短超时 accept，避免测试卡住；无人来就正常结束。
+        listener.set_nonblocking(true).unwrap();
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        hit2.store(true, Ordering::SeqCst);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        );
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (format!("http://{addr}/secret"), hit, handle)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn does_not_follow_redirects() {
+        use std::sync::atomic::Ordering;
+        let (probe_url, probe_hit, probe_server) = spawn_probe_listener();
+        let (url, redirect_server) = spawn_redirect_to(&probe_url);
+        let ctx = Context::new();
+        let spec = parse_spec(&url_spec(&url)).unwrap();
+
+        let out = send(&ctx, "probe-1", &local_params(), spec).await.unwrap();
+        assert_eq!(out.get("status").unwrap().as_int().unwrap(), 302);
+        assert!(!out.get("ok").unwrap().as_bool().unwrap(), "302 不是 2xx");
+        let body = dynamic_text(out.get("body").unwrap());
+        assert_eq!(body, "redirected");
+        let headers = out.get("headers").unwrap().read_lock::<Map>().unwrap();
+        let location = dynamic_text(headers.get("location").unwrap());
+        assert_eq!(location, probe_url);
+
+        redirect_server.join().unwrap();
+        probe_server.join().unwrap();
+        assert!(
+            !probe_hit.load(Ordering::SeqCst),
+            "redirect Location must not be fetched"
+        );
     }
 }

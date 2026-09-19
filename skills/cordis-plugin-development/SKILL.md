@@ -226,6 +226,7 @@ Shape of the whole thing — this is the entire plugin:
 Boundaries, so you can tell a bug from a rule:
 
 - **4xx/5xx are not errors.** They come back with `ok: false` and the status; check `resp.ok`. Only network failures, bad specs, SSRF blocks and permission denials throw.
+- **3xx redirects are returned as-is** (not followed). Same as `web_fetch`'s client policy: SSRF and host permission only cover the URL you pass in, so auto-following a `302` to loopback/metadata would bypass them. If you need the next hop, call `http_request` again with the `Location` (and expect another permission prompt if the host differs).
 - **Private and loopback addresses are blocked** by the same SSRF policy as `web_fetch` (DNS is resolved first, so a name pointing at `127.0.0.1` is blocked too). You cannot reach `localhost` services this way unless `[toolset.web_fetch] allow_local` is on.
 - **The first request to a host asks the user for permission**, like `bash`. "Always allow" is remembered **per host**, so a plugin that talks to one API asks once.
 - **Credentials go in `headers`, never in the URL** — `https://user:pw@host/` is rejected. Header values may not contain newlines.
