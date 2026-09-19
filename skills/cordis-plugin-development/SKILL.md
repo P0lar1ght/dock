@@ -245,7 +245,9 @@ Pure helpers for Basic auth, signed query strings, and content digests. **No I/O
 | `to_hex(input)` / `from_hex(text)` | Lowercase hex; `from_hex` rejects odd length / bad digits → `Blob` |
 | `sha256(input)` / `sha256_blob(input)` | SHA-256 as lowercase hex or 32-byte `Blob` |
 | `hmac_sha256(key, message)` / `hmac_sha256_blob(key, message)` | HMAC-SHA256 as hex or `Blob`; key/message are `String` or `Blob` |
-| `unix_time()` / `unix_time_ms()` | Absolute UTC epoch seconds / milliseconds (`SystemTime`). Rhai's built-in `timestamp()` is `Instant` (relative/monotonic) — use these for API signing (SigV4, Aliyun, etc.) |
+| `utc_now()` | One `SystemTime` snapshot as a map: `secs` / `ms` (epoch i64), `date` (`YYYY-MM-DD`), `rfc3339` (`YYYY-MM-DDTHH:MM:SSZ`), `year` / `month` / `day` / `hour` / `minute` / `second` (i64). Hand-rolled UTC civil calendar (no chrono). Runtime only. Prefer over `timestamp()` (`Instant`) for API signing |
+| `unix_time()` / `unix_time_ms()` | Thin helpers: epoch seconds / milliseconds (same clock as `utc_now`) |
+| `utc_date()` / `now_date()` | Sugar for `utc_now().date` — UTC `YYYY-MM-DD` (zero-padded month/day) |
 
 Inputs larger than 1 MiB throw a runtime error.
 
