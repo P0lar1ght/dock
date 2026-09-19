@@ -2018,21 +2018,15 @@ async fn rhai_codec_helpers_work_inside_execute() {
     assert!(out.contains("url=a%20b"), "url_encode: {out}");
     assert!(out.contains("hex=4162"), "to_hex: {out}");
     assert!(
-        out.contains(
-            "sha_empty=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        ),
+        out.contains("sha_empty=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
         "sha256 empty: {out}"
     );
     assert!(
-        out.contains(
-            "sha_hi=8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4"
-        ),
+        out.contains("sha_hi=8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4"),
         "sha256 hi: {out}"
     );
     assert!(
-        out.contains(
-            "hmac=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
-        ),
+        out.contains("hmac=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"),
         "hmac_sha256: {out}"
     );
     assert!(out.contains("round=user:pass"), "base64 roundtrip: {out}");

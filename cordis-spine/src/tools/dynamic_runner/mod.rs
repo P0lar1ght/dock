@@ -6,8 +6,8 @@ mod factories;
 mod lifecycle;
 mod persist;
 mod registry;
-mod rhai_host;
 mod rhai_codec;
+mod rhai_host;
 mod rhai_http;
 
 use std::sync::{Arc, Mutex};

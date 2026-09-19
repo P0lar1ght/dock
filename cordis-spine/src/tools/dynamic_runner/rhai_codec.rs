@@ -100,9 +100,7 @@ pub(crate) const BUILTINS: &[(&str, &str, &[&str])] = &[
     (
         "hmac_sha256",
         "HMAC-SHA256 as lowercase hex. key and message are String or Blob. Runtime only.",
-        &[
-            "hmac_sha256(key: String | Blob, message: String | Blob) -> String",
-        ],
+        &["hmac_sha256(key: String | Blob, message: String | Blob) -> String"],
     ),
     (
         "hmac_sha256_blob",
@@ -120,9 +118,7 @@ fn err(message: impl Into<String>) -> Box<EvalAltResult> {
 
 fn check_len(n: usize, what: &str) -> Result<(), Box<EvalAltResult>> {
     if n > MAX_INPUT {
-        return Err(err(format!(
-            "{what} exceeds {MAX_INPUT} bytes (got {n})"
-        )));
+        return Err(err(format!("{what} exceeds {MAX_INPUT} bytes (got {n})")));
     }
     Ok(())
 }
@@ -152,10 +148,7 @@ fn from_hex_bytes(text: &str) -> Result<Blob, Box<EvalAltResult>> {
     check_len(text.len(), "hex input")?;
     let t = text.trim();
     if t.len() % 2 != 0 {
-        return Err(err(format!(
-            "from_hex: odd length {}",
-            t.len()
-        )));
+        return Err(err(format!("from_hex: odd length {}", t.len())));
     }
     let mut out = Vec::with_capacity(t.len() / 2);
     let bytes = t.as_bytes();
@@ -174,10 +167,7 @@ fn hex_digit(b: u8) -> Result<u8, Box<EvalAltResult>> {
         b'0'..=b'9' => Ok(b - b'0'),
         b'a'..=b'f' => Ok(b - b'a' + 10),
         b'A'..=b'F' => Ok(b - b'A' + 10),
-        _ => Err(err(format!(
-            "from_hex: bad digit {:?}",
-            b as char
-        ))),
+        _ => Err(err(format!("from_hex: bad digit {:?}", b as char))),
     }
 }
 
@@ -197,18 +187,27 @@ fn hmac_bytes(key: &[u8], message: &[u8]) -> Result<[u8; 32], Box<EvalAltResult>
 
 pub(crate) fn register(engine: &mut Engine) {
     // --- base64 ---
-    engine.register_fn("to_base64", |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
-        Ok(STANDARD.encode(bytes_from_str(&s)?))
-    });
-    engine.register_fn("to_base64", |b: Blob| -> Result<String, Box<EvalAltResult>> {
-        Ok(STANDARD.encode(bytes_from_blob(&b)?))
-    });
-    engine.register_fn("from_base64", |s: ImmutableString| -> Result<Blob, Box<EvalAltResult>> {
-        check_len(s.len(), "base64 input")?;
-        STANDARD
-            .decode(s.as_bytes())
-            .map_err(|e| err(format!("from_base64: {e}")))
-    });
+    engine.register_fn(
+        "to_base64",
+        |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
+            Ok(STANDARD.encode(bytes_from_str(&s)?))
+        },
+    );
+    engine.register_fn(
+        "to_base64",
+        |b: Blob| -> Result<String, Box<EvalAltResult>> {
+            Ok(STANDARD.encode(bytes_from_blob(&b)?))
+        },
+    );
+    engine.register_fn(
+        "from_base64",
+        |s: ImmutableString| -> Result<Blob, Box<EvalAltResult>> {
+            check_len(s.len(), "base64 input")?;
+            STANDARD
+                .decode(s.as_bytes())
+                .map_err(|e| err(format!("from_base64: {e}")))
+        },
+    );
 
     engine.register_fn(
         "to_base64url",
@@ -216,9 +215,12 @@ pub(crate) fn register(engine: &mut Engine) {
             Ok(URL_SAFE_NO_PAD.encode(bytes_from_str(&s)?))
         },
     );
-    engine.register_fn("to_base64url", |b: Blob| -> Result<String, Box<EvalAltResult>> {
-        Ok(URL_SAFE_NO_PAD.encode(bytes_from_blob(&b)?))
-    });
+    engine.register_fn(
+        "to_base64url",
+        |b: Blob| -> Result<String, Box<EvalAltResult>> {
+            Ok(URL_SAFE_NO_PAD.encode(bytes_from_blob(&b)?))
+        },
+    );
     engine.register_fn(
         "from_base64url",
         |s: ImmutableString| -> Result<Blob, Box<EvalAltResult>> {
@@ -226,50 +228,67 @@ pub(crate) fn register(engine: &mut Engine) {
             // Accept both padded and unpadded URL-safe input.
             URL_SAFE_NO_PAD
                 .decode(s.as_bytes())
-                .or_else(|_| {
-                    base64::engine::general_purpose::URL_SAFE.decode(s.as_bytes())
-                })
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(s.as_bytes()))
                 .map_err(|e| err(format!("from_base64url: {e}")))
         },
     );
 
     // --- url ---
-    engine.register_fn("url_encode", |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
-        check_len(s.len(), "url_encode input")?;
-        Ok(utf8_percent_encode(&s, QUERY_VALUE).to_string())
-    });
-    engine.register_fn("url_decode", |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
-        check_len(s.len(), "url_decode input")?;
-        percent_decode(s.as_bytes())
-            .decode_utf8()
-            .map(|c| c.into_owned())
-            .map_err(|e| err(format!("url_decode: invalid UTF-8: {e}")))
-    });
+    engine.register_fn(
+        "url_encode",
+        |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
+            check_len(s.len(), "url_encode input")?;
+            Ok(utf8_percent_encode(&s, QUERY_VALUE).to_string())
+        },
+    );
+    engine.register_fn(
+        "url_decode",
+        |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
+            check_len(s.len(), "url_decode input")?;
+            percent_decode(s.as_bytes())
+                .decode_utf8()
+                .map(|c| c.into_owned())
+                .map_err(|e| err(format!("url_decode: invalid UTF-8: {e}")))
+        },
+    );
 
     // --- hex ---
-    engine.register_fn("to_hex", |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
-        Ok(to_hex_bytes(bytes_from_str(&s)?))
-    });
+    engine.register_fn(
+        "to_hex",
+        |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
+            Ok(to_hex_bytes(bytes_from_str(&s)?))
+        },
+    );
     engine.register_fn("to_hex", |b: Blob| -> Result<String, Box<EvalAltResult>> {
         Ok(to_hex_bytes(bytes_from_blob(&b)?))
     });
-    engine.register_fn("from_hex", |s: ImmutableString| -> Result<Blob, Box<EvalAltResult>> {
-        from_hex_bytes(&s)
-    });
+    engine.register_fn(
+        "from_hex",
+        |s: ImmutableString| -> Result<Blob, Box<EvalAltResult>> { from_hex_bytes(&s) },
+    );
 
     // --- sha256 ---
-    engine.register_fn("sha256", |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
-        Ok(to_hex_bytes(&sha256_bytes(bytes_from_str(&s)?)))
-    });
+    engine.register_fn(
+        "sha256",
+        |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
+            Ok(to_hex_bytes(&sha256_bytes(bytes_from_str(&s)?)))
+        },
+    );
     engine.register_fn("sha256", |b: Blob| -> Result<String, Box<EvalAltResult>> {
         Ok(to_hex_bytes(&sha256_bytes(bytes_from_blob(&b)?)))
     });
-    engine.register_fn("sha256_blob", |s: ImmutableString| -> Result<Blob, Box<EvalAltResult>> {
-        Ok(sha256_bytes(bytes_from_str(&s)?).to_vec())
-    });
-    engine.register_fn("sha256_blob", |b: Blob| -> Result<Blob, Box<EvalAltResult>> {
-        Ok(sha256_bytes(bytes_from_blob(&b)?).to_vec())
-    });
+    engine.register_fn(
+        "sha256_blob",
+        |s: ImmutableString| -> Result<Blob, Box<EvalAltResult>> {
+            Ok(sha256_bytes(bytes_from_str(&s)?).to_vec())
+        },
+    );
+    engine.register_fn(
+        "sha256_blob",
+        |b: Blob| -> Result<Blob, Box<EvalAltResult>> {
+            Ok(sha256_bytes(bytes_from_blob(&b)?).to_vec())
+        },
+    );
 
     // --- hmac_sha256 (all String/Blob combos) ---
     engine.register_fn(
@@ -414,9 +433,7 @@ mod tests {
         let e = eng();
         // RFC 4231 / common test: key="key", msg=fox sentence
         let got: String = e
-            .eval(
-                r#"hmac_sha256("key", "The quick brown fox jumps over the lazy dog")"#,
-            )
+            .eval(r#"hmac_sha256("key", "The quick brown fox jumps over the lazy dog")"#)
             .unwrap();
         assert_eq!(
             got,
