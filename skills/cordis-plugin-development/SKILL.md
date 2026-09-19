@@ -233,6 +233,36 @@ Boundaries, so you can tell a bug from a rule:
 - Request body ≤ 1 MiB, response body ≤ 4 MiB, ≤ 32 headers.
 - `http_request` exists only while the plugin **runs**. It is not available during `cordis_define` (the define-time preflight evaluates your top-level map — a request there would dodge the permission gate), so never call it at the top level of the source; call it inside `apply` or inside an `execute` / handler closure.
 
+### Script-level codecs + HMAC
+
+Pure helpers for Basic auth, signed query strings, and content digests. **No I/O, no permission prompts.** Same runtime-only rule as `http_request` — not available during `cordis_define`.
+
+| Call | Contract |
+| --- | --- |
+| `to_base64(input)` / `from_base64(text)` | Standard Base64. Input is `String` or `Blob`; decode returns `Blob` |
+| `to_base64url(input)` / `from_base64url(text)` | URL-safe Base64 **without** padding on encode; decode accepts padded or unpadded |
+| `url_encode(text)` / `url_decode(text)` | Percent-encode/decode UTF-8 for query values (` ` → `%20`) |
+| `to_hex(input)` / `from_hex(text)` | Lowercase hex; `from_hex` rejects odd length / bad digits → `Blob` |
+| `sha256(input)` / `sha256_blob(input)` | SHA-256 as lowercase hex or 32-byte `Blob` |
+| `hmac_sha256(key, message)` / `hmac_sha256_blob(key, message)` | HMAC-SHA256 as hex or `Blob`; key/message are `String` or `Blob` |
+
+Inputs larger than 1 MiB throw a runtime error.
+
+Basic auth example (pair with `http_request`):
+
+```rhai
+execute: |args| {
+  let token = to_base64(args.user + ":" + args.pass);
+  let resp = http_request(#{
+    url: "https://api.example.com/v1/me",
+    headers: #{ "Authorization": "Basic " + token }
+  });
+  if !resp.ok { return "HTTP " + resp.status + ": " + resp.body; }
+  resp.body
+}
+```
+
+
 The two intercept hooks run **inline on the turn**, so the script blocks the sample until it returns (bounded by the same operation limit); keep them short and avoid `host.call_tool` there. A throw is treated as no opinion — it is logged and the turn carries on, as is any return value that is not a string (returning `42` or a map logs and injects nothing, rather than stringifying it into the model's history). The host always passes control to the next handler for you, so a script cannot swallow the chain, and cannot append to `Sessions` itself: it returns text, the loop appends it. Built-in slots win: `tool-todo` (10) and `tool-goal` (20) outrank a script (50) when both want the same round.
 
 ## Preset factories (teaching / regression)

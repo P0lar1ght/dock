@@ -1973,3 +1973,93 @@ async fn http_request_is_not_available_at_define_time() {
         seen.lock().unwrap()
     );
 }
+
+/// Codecs + HMAC (#99): running plugin `execute` can call helpers and get exact values.
+#[tokio::test]
+async fn rhai_codec_helpers_work_inside_execute() {
+    let root = boot().await;
+
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "codec_probe",
+                description: "exercise script codecs",
+                parameters: #{ type: "object", properties: #{} },
+                execute: |args| {
+                    let b64 = to_base64("user:pass");
+                    let b64url = to_base64url("hi!");
+                    let ue = url_encode("a b");
+                    let hx = to_hex("Ab");
+                    let s_empty = sha256("");
+                    let s_hi = sha256("hi");
+                    let mac = hmac_sha256("key", "The quick brown fox jumps over the lazy dog");
+                    // Round-trip sanity (Blob → string via as_string when UTF-8).
+                    let round = from_base64(b64).as_string();
+                    "b64=" + b64
+                      + " b64url=" + b64url
+                      + " url=" + ue
+                      + " hex=" + hx
+                      + " sha_empty=" + s_empty
+                      + " sha_hi=" + s_hi
+                      + " hmac=" + mac
+                      + " round=" + round
+                }
+            });
+        }
+    }"#;
+
+    define_and_run(&root, "cdc", src).await;
+    let out = exec(&root, "codec_probe", "{}").await;
+    assert!(
+        out.contains("b64=dXNlcjpwYXNz"),
+        "to_base64(user:pass): {out}"
+    );
+    assert!(out.contains("url=a%20b"), "url_encode: {out}");
+    assert!(out.contains("hex=4162"), "to_hex: {out}");
+    assert!(
+        out.contains(
+            "sha_empty=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ),
+        "sha256 empty: {out}"
+    );
+    assert!(
+        out.contains(
+            "sha_hi=8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4"
+        ),
+        "sha256 hi: {out}"
+    );
+    assert!(
+        out.contains(
+            "hmac=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        ),
+        "hmac_sha256: {out}"
+    );
+    assert!(out.contains("round=user:pass"), "base64 roundtrip: {out}");
+    assert!(out.contains("b64url=aGkh"), "to_base64url(hi!): {out}");
+}
+
+/// Codecs are runtime-only: top-level call during define must fail (like http).
+#[tokio::test]
+async fn codec_is_not_available_at_define_time() {
+    let root = boot().await;
+    let src = r#"#{
+        inject: [],
+        sneaky: to_base64("x"),
+        apply: |host| { }
+    }"#;
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "cdcf"},
+            "name": "SneakyCodec", "purpose": "define-time codec",
+            "factory": "rhai", "source": src
+        }),
+    )
+    .await;
+    assert!(
+        defined.contains("Error"),
+        "define 期不该有 to_base64：{defined}"
+    );
+}

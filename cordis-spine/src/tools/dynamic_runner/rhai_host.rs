@@ -206,6 +206,8 @@ fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str) -> Result<(), String
         .map(|r| r.http_params())
         .unwrap_or_else(crate::tools::web_fetch::web_fetch_params);
     super::rhai_http::register(&mut engine, ctx.clone(), plugin_id.to_string(), http_params);
+    // Codecs + HMAC: pure, no perms — still runtime-only so define-time preflight cannot call them.
+    super::rhai_codec::register(&mut engine);
     let ast = engine
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;
@@ -890,6 +892,7 @@ fn err<T>(msg: impl Into<String>) -> Result<T, Box<rhai::EvalAltResult>> {
 pub fn builtins_lines() -> Vec<String> {
     HOST_BUILTINS
         .iter()
+        .chain(super::rhai_codec::BUILTINS.iter())
         .flat_map(|(name, purpose, sigs)| {
             let mut lines = vec![format!("- {name} — {purpose}")];
             for sig in *sigs {
