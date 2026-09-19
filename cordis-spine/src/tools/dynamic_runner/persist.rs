@@ -4,16 +4,17 @@
 //! not persist dynamic packages; this is Dock's Host-only stand-in for "write
 //! a real plugin" when the user cannot ship a cordis-rust crate.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::registry::{Package, PersistScope, PluginOrigin};
-use super::{DefineReceipt, DefineTarget, DynamicRunner, RunMode};
+use super::{DefineReceipt, DefineTarget, DynamicRunner, RunMode, SourceInput};
 use crate::host::slash::{slash_entry_from_define, SlashEntry};
 use crate::tools::dynamic_runner::factories::RHAI_FACTORY;
+use crate::tools::dynamic_runner::rhai_host::{MAX_FILE_SOURCE, MAX_INLINE_SOURCE};
 use cordis_base::config::dock_home;
 
 /// Session id of autoloaded disk plugins. Visible to every chat session.
@@ -64,7 +65,7 @@ pub struct DiskSpec {
     pub purpose: String,
     pub factory: String,
     pub enabled: bool,
-    pub source: Option<String>,
+    pub source_path: Option<PathBuf>,
     pub contrib: Option<SlashEntry>,
 }
 
@@ -92,6 +93,107 @@ pub fn valid_disk_id(id: &str) -> bool {
         && bytes
             .iter()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// Resolve `cordis_define` `source_path` under project or user plugin roots.
+/// Rejects `..`, paths outside the roots, and non-files.
+pub fn resolve_source_path(raw: &str) -> Result<PathBuf, String> {
+    resolve_source_path_in(raw, &plugin_roots())
+}
+
+pub fn resolve_source_path_in(
+    raw: &str,
+    roots: &[(PersistScope, PathBuf)],
+) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("source_path must be non-empty".into());
+    }
+    let path = PathBuf::from(raw);
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err("source_path must not contain '..'".into());
+    }
+    let abs = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let canon = abs
+        .canonicalize()
+        .map_err(|e| format!("source_path {}: {e}", abs.display()))?;
+    if !canon.is_file() {
+        return Err(format!("source_path is not a file: {}", canon.display()));
+    }
+    let under = roots.iter().any(|(_, root)| match root_canonicalize(root) {
+        Some(root_canon) => path_under_plugin_root(&canon, &root_canon),
+        None => false,
+    });
+    if !under {
+        return Err(format!(
+            "source_path must resolve under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/; got {}",
+            canon.display()
+        ));
+    }
+    Ok(canon)
+}
+
+fn root_canonicalize(root: &Path) -> Option<PathBuf> {
+    if !root.exists() {
+        return None;
+    }
+    root.canonicalize().ok()
+}
+
+fn path_under_plugin_root(canon: &Path, root_canon: &Path) -> bool {
+    let Ok(rel) = canon.strip_prefix(root_canon) else {
+        return false;
+    };
+    let mut comps = rel.components();
+    let Some(Component::Normal(id)) = comps.next() else {
+        return false;
+    };
+    let Some(id) = id.to_str() else {
+        return false;
+    };
+    valid_disk_id(id) && comps.next().is_some()
+}
+
+pub fn read_source_file(path: &Path, max_bytes: usize) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if meta.len() as usize > max_bytes {
+        if max_bytes <= MAX_INLINE_SOURCE {
+            return Err("rhai source exceeds 128KiB".into());
+        }
+        return Err("rhai source file exceeds 1MiB".into());
+    }
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if text.len() > max_bytes {
+        if max_bytes <= MAX_INLINE_SOURCE {
+            return Err("rhai source exceeds 128KiB".into());
+        }
+        return Err("rhai source file exceeds 1MiB".into());
+    }
+    Ok(text)
+}
+
+pub fn package_source_text(pkg: &Package) -> Result<(String, usize), String> {
+    match (&pkg.source, &pkg.source_path) {
+        (Some(s), None) => Ok((s.clone(), MAX_INLINE_SOURCE)),
+        (None, Some(p)) => Ok((read_source_file(p, MAX_FILE_SOURCE)?, MAX_FILE_SOURCE)),
+        (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),
+        (None, None) => Err("rhai package has no source to read".into()),
+    }
+}
+
+fn source_input_for_package(pkg: &Package) -> Option<SourceInput> {
+    match (&pkg.source, &pkg.source_path) {
+        (Some(s), _) => Some(SourceInput::Inline(s.clone())),
+        (None, Some(p)) => Some(SourceInput::ResolvedPath(p.clone())),
+        (None, None) => None,
+    }
 }
 
 pub fn default_disk_id(plugin_id: &str) -> String {
@@ -138,11 +240,12 @@ fn load_dir(dir: &Path, id: &str, scope: PersistScope) -> Result<DiskSpec, Strin
     if man.name.trim().is_empty() || man.purpose.trim().is_empty() {
         return Err("plugin.toml needs name and purpose".into());
     }
-    let source = if man.factory == RHAI_FACTORY {
-        Some(
-            std::fs::read_to_string(dir.join("source.rhai"))
-                .map_err(|e| format!("read source.rhai: {e}"))?,
-        )
+    let source_path = if man.factory == RHAI_FACTORY {
+        let p = dir.join("source.rhai");
+        if !p.is_file() {
+            return Err("rhai plugin needs source.rhai".into());
+        }
+        Some(p)
     } else {
         None
     };
@@ -169,7 +272,7 @@ fn load_dir(dir: &Path, id: &str, scope: PersistScope) -> Result<DiskSpec, Strin
         purpose: man.purpose,
         factory: man.factory,
         enabled: man.enabled,
-        source,
+        source_path,
         contrib,
     })
 }
@@ -207,10 +310,7 @@ fn write_plugin(root: &Path, id: &str, pkg: &Package, enabled: bool) -> Result<P
     let toml = toml::to_string_pretty(&man).map_err(|e| format!("encode plugin.toml: {e}"))?;
     std::fs::write(dir.join("plugin.toml"), toml).map_err(|e| format!("write plugin.toml: {e}"))?;
     if pkg.factory == RHAI_FACTORY {
-        let src = pkg
-            .source
-            .as_deref()
-            .ok_or("rhai package has no source to promote")?;
+        let (src, _) = package_source_text(pkg)?;
         std::fs::write(dir.join("source.rhai"), src)
             .map_err(|e| format!("write source.rhai: {e}"))?;
     }
@@ -260,7 +360,7 @@ impl DynamicRunner {
         purpose: &str,
         factory: &str,
         contrib: Option<SlashEntry>,
-        source: Option<String>,
+        source: Option<SourceInput>,
         origin: PluginOrigin,
     ) -> Result<DefineReceipt, String> {
         self.define_at(
@@ -278,13 +378,17 @@ impl DynamicRunner {
     }
 
     fn install_disk(&self, spec: &DiskSpec) -> Result<DefineReceipt, String> {
+        let source = spec
+            .source_path
+            .as_ref()
+            .map(|p| SourceInput::ResolvedPath(p.clone()));
         self.define_persistent(
             &spec.id,
             &spec.name,
             &spec.purpose,
             &spec.factory,
             spec.contrib.clone(),
-            spec.source.clone(),
+            source,
             PluginOrigin::Disk {
                 path: spec.path.clone(),
                 scope: spec.scope,
@@ -390,7 +494,7 @@ impl DynamicRunner {
                     &pkg.purpose,
                     &pkg.factory,
                     pkg.contrib.clone(),
-                    pkg.source.clone(),
+                    source_input_for_package(&pkg),
                     origin,
                 )?;
                 self.run(
@@ -413,7 +517,7 @@ impl DynamicRunner {
                     &pkg.purpose,
                     &pkg.factory,
                     pkg.contrib.clone(),
-                    pkg.source.clone(),
+                    source_input_for_package(&pkg),
                 )?;
                 let mode = {
                     let inner = self.inner.lock().unwrap();
@@ -556,6 +660,7 @@ mod tests {
             tools: Vec::new(),
             contrib: None,
             source: Some("#{ inject: [\"tools\"], apply: |host| { host.log(\"hi\") } }".into()),
+            source_path: None,
         };
         let written = write_plugin(dir.path(), "memo", &pkg, true).unwrap();
         assert!(written.join("plugin.toml").exists());
@@ -565,7 +670,8 @@ mod tests {
         assert_eq!(specs[0].id, "memo");
         assert_eq!(specs[0].name, "便签");
         assert_eq!(specs[0].factory, RHAI_FACTORY);
-        assert!(specs[0].source.as_deref().unwrap().contains("apply"));
+        let src = std::fs::read_to_string(specs[0].source_path.as_ref().unwrap()).unwrap();
+        assert!(src.contains("apply"));
     }
 
     #[test]
@@ -582,6 +688,7 @@ mod tests {
             tools: Vec::new(),
             contrib: None,
             source: None,
+            source_path: None,
         };
         write_plugin(user.path(), "echo", &pkg("home"), true).unwrap();
         write_plugin(project.path(), "echo", &pkg("proj"), true).unwrap();
@@ -592,5 +699,33 @@ mod tests {
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "proj");
         assert_eq!(specs[0].scope, PersistScope::Project);
+    }
+
+    #[test]
+    fn resolve_source_path_under_root() {
+        let root = tempfile::tempdir().unwrap();
+        let plug = root.path().join("demo");
+        std::fs::create_dir_all(&plug).unwrap();
+        let file = plug.join("source.rhai");
+        std::fs::write(&file, "#{ inject: [], apply: |host| { } }").unwrap();
+        let roots = vec![(PersistScope::Project, root.path().to_path_buf())];
+        let got = resolve_source_path_in(file.to_str().unwrap(), &roots).unwrap();
+        assert_eq!(got, file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_source_path_rejects_dotdot() {
+        let roots = vec![(PersistScope::Project, PathBuf::from("/tmp"))];
+        let err = resolve_source_path_in("../etc/passwd", &roots).unwrap_err();
+        assert!(err.contains(".."), "{err}");
+    }
+
+    #[test]
+    fn resolve_source_path_rejects_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let roots = vec![(PersistScope::Project, root.path().to_path_buf())];
+        let err = resolve_source_path_in(outside.path().to_str().unwrap(), &roots).unwrap_err();
+        assert!(err.contains("must resolve under"), "{err}");
     }
 }

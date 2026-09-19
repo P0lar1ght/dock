@@ -14,7 +14,7 @@ First inspect what is actually live, then define a Package, then run it. Do not 
 
 This Skill is Dock's internalization of the DSH `cordis-plugin-development` workflow. Lifecycle is the same (`define` ≠ `run`; `run` / `update`; `stop` keeps Packages; `undefine` drops memory). Cordis is **not** the default for every request.
 
-**How to customize:** session experiments are dynamic Packages (process memory). Lasting Host extensions that the user cannot ship as a `cordis-spine` crate go on disk: `cordis_promote` writes `.dock/plugins/<id>/` (project) or `~/.dock/plugins/<id>/` (user) and the next `install_app` autoloads them. Teaching factories (`echo` / `note` / `hold` / `slash`) are fixed Rust bodies — you pick the id, you do not edit their code. **Any custom Host behavior is `factory: "rhai"` plus a `source` string.** There is no browser Client / JSX. TUI slots are plain-text callbacks on `tui.slots`.
+**How to customize:** session experiments are dynamic Packages (process memory). Lasting Host extensions that the user cannot ship as a `cordis-spine` crate go on disk under `.dock/plugins/<id>/` (project) or `~/.dock/plugins/<id>/` (user). Teaching factories (`echo` / `note` / `hold` / `slash`) are fixed Rust bodies — you pick the id, you do not edit their code. **Any custom Host behavior is `factory: "rhai"`.** Prefer writing `plugin.toml` + `source.rhai` with `write_file` / `search_replace`, then `cordis_define` with `source_path` — do **not** paste large Rhai into the tool call. Inline `source` is only for tiny samples; `cordis_promote` still turns a small inline experiment into a disk plugin. There is no browser Client / JSX. TUI slots are plain-text callbacks on `tui.slots`.
 
 Hot-plugged bodies always go through cordis-rust `ctx.plugin` / `fiber.dispose` under the `cordis-dynamic` group fiber. Do not ask to change the kernel. Do not wrap `bash` / `read_file` / MCP in a Plugin when those tools already do the job.
 
@@ -23,13 +23,19 @@ Hot-plugged bodies always go through cordis-rust `ctx.plugin` / `fiber.dispose` 
 ## Standard workflow
 
 1. `cordis_inspect` (omit `what`, or `services` / `fibers` / `tools` / `factories` / `builtins` / `events` / `slots` / `temporary` / `permanent`).
-2. New Plugin: pick the smallest factory. Custom logic → `rhai`. Existing Plugin: `cordis_inspect_self(pluginId, packageId)` first (Rhai source is only in that call).
-3. `cordis_define`. For `rhai`, pass `source`. Define compiles; it does not call `apply`, request approval, or change `currentPackageId`. Syntax failure must not mint an id.
-4. `cordis_run` with the returned ids. Approval is the same permission overlay as `bash`.
-5. User reject → do not retry that activation unless they ask. Technical failure → inspect, define a **new** Package on the **same** Plugin, retry with the correct mode.
-6. Verify with `cordis_call` (name = dynamic tool, arguments JSON). Do not wait for a TUI slash or a later model turn just to exercise a Host-registered tool.
-7. Survive restart → `cordis_promote` (permission overlay). Default id strips `-N`. `undefine` of the session copy is optional after promote stops it.
-8. `cordis_stop` keeps in-memory definitions. `cordis_undefine` drops the in-memory Plugin; disk files stay.
+2. New Plugin: pick the smallest factory. Custom logic → `rhai`. Existing Plugin: `cordis_inspect_self(pluginId, packageId)` first (`source_path` or inline source).
+3. **Primary (file-first) for `rhai`:**
+   1. `write_file` / `search_replace` → `.dock/plugins/<id>/plugin.toml` + `source.rhai` (or under `~/.dock/plugins/<id>/`).
+   2. `cordis_define` with `source_path` (e.g. `.dock/plugins/demo/source.rhai`) — **not** a giant inline `source`.
+   3. `cordis_run` with the returned ids.
+   4. On failure: **edit the file**, `cordis_define` a **new** Package on the same Plugin (same `source_path`), then `update` / `run`. Do **not** re-paste the whole Rhai into the tool call.
+4. **Tiny samples only:** `cordis_define` with inline `source` (≤128KiB). Prefer promoting later with `cordis_promote` if it should survive restart.
+5. Define compiles; it does not call `apply`, request approval, or change `currentPackageId`. Syntax failure must not mint an id. `source` XOR `source_path`.
+6. `cordis_run` approval is the same permission overlay as `bash`.
+7. User reject → do not retry that activation unless they ask. Technical failure → inspect, edit file (or tiny inline), define a **new** Package on the **same** Plugin, retry with the correct mode.
+8. Verify with `cordis_call` (name = dynamic tool, arguments JSON). Do not wait for a TUI slash or a later model turn just to exercise a Host-registered tool.
+9. Session inline experiment → lasting disk: `cordis_promote` (permission overlay). Default id strips `-N`. Files already under `.dock/plugins/<id>/` autoload on next start without promote.
+10. `cordis_stop` keeps in-memory definitions. `cordis_undefine` drops the in-memory Plugin; disk files stay.
 
 Do not treat a successful `define` as running.
 
@@ -38,8 +44,8 @@ Do not treat a successful `define` as running.
 | Tool | Use it when | Do not |
 | --- | --- | --- |
 | `cordis_inspect` | Live fibers, named services (`tools` / `slash` / `tui.slots` include method signatures), tools (names only), factories, `what: "builtins"` (Rhai `host`), `what: "events"`, `what: "slots"`, `temporary` / `permanent` | Invent `cordis_inspect_list` / `query`; treat the report as a business API |
-| `cordis_inspect_self` | List Plugins, version pointers, or one Package's factory id, Rhai source, diagnostics | Fetch everything just to build a list; use it to start a Plugin |
-| `cordis_define` | First Package, or append an immutable Package | Expect define to run `apply` or request approval |
+| `cordis_inspect_self` | List Plugins, version pointers, or one Package's factory id, `source_path` / inline source, diagnostics | Dump huge Rhai when only the path is needed; use it to start a Plugin |
+| `cordis_define` | First Package, or append an immutable Package; prefer `source_path` for rhai | Paste large Rhai as `source`; pass both `source` and `source_path`; expect define to run `apply` |
 | `cordis_run` | Activate an exact Package; `run` = first start / restart current / rollback; `update` = switch versions | Use `run` to switch versions implicitly |
 | `cordis_call` | Host-execute a live tool (incl. dynamic `register_tool`) in this turn | Expect slash `/test` or a later model step to verify; call `cordis_call` recursively |
 | `cordis_promote` | Write current/latest Package to `.dock/plugins/<id>/` and autostart it | Treat define as durable; delete disk files with undefine |
@@ -60,9 +66,57 @@ Prefer the capability closest to the data owner. Do not create a dynamic Plugin 
 
 ## Custom Host: `factory: "rhai"`
 
-`cordis_define` fields: `plugin` (`kind: "new"` + `idPrefix` of 3–6 lowercase English letters, or `kind: "existing"` + `pluginId`), `name`, `purpose`, `factory: "rhai"`, `source` (Rhai string). Then `cordis_run`.
+`cordis_define` fields: `plugin` (`kind: "new"` + `idPrefix` of 3–6 lowercase English letters, or `kind: "existing"` + `pluginId`), `name`, `purpose`, `factory: "rhai"`, and **either** `source_path` **or** `source` (not both). Then `cordis_run`.
 
-`source` must evaluate to a map. `apply` is a function; define does not call it. `inject` is an array of named services that must already be live, or the fiber stays pending (same as `hold`). Omit `inject` → `["tools"]`. Typical extras: `"slash"`, `"tui.slots"`. Scripts cannot `ctx.plugin`, cannot load disk modules, cannot nest `eval`. `host.on` reaches three events only: `"session/event"` (observe), `"agent/step-start"` and `"agent/turn-end"` (intercept) — the other waterfalls are not scriptable.
+| Input | When | Limit | Storage |
+| --- | --- | --- | --- |
+| `source_path` | **Default** for real plugins | ≤1 MiB | Path under `.dock/plugins/<id>/` or `~/.dock/plugins/<id>/`; Host re-reads on run/update |
+| `source` | Tiny samples / one-liners only | ≤128 KiB | Inline on the Package |
+
+`source_path` must not contain `..` and must resolve under those plugin roots. Inspect shows the path and does not dump the file.
+
+The Rhai body (file or inline) must evaluate to a map. `apply` is a function; define does not call it. `inject` is an array of named services that must already be live, or the fiber stays pending (same as `hold`). Omit `inject` → `["tools"]`. Typical extras: `"slash"`, `"tui.slots"`. Scripts cannot `ctx.plugin`, cannot load disk modules, cannot nest `eval`. `host.on` reaches three events only: `"session/event"` (observe), `"agent/step-start"` and `"agent/turn-end"` (intercept) — the other waterfalls are not scriptable.
+
+### File-first example (copy-paste)
+
+`.dock/plugins/demo/plugin.toml`:
+
+```toml
+name = "Demo"
+purpose = "File-backed rhai sample"
+factory = "rhai"
+enabled = true
+```
+
+`.dock/plugins/demo/source.rhai`:
+
+```rhai
+#{
+    inject: ["tools"],
+    apply: |host| {
+        host.register_tool(#{
+            name: "demo_ping",
+            description: "Return pong",
+            parameters: #{ type: "object", properties: #{} },
+            execute: |args| { "pong" }
+        });
+    }
+}
+```
+
+`cordis_define` JSON (no giant `source` string):
+
+```json
+{
+  "plugin": { "kind": "new", "idPrefix": "demo" },
+  "name": "Demo",
+  "purpose": "File-backed rhai sample",
+  "factory": "rhai",
+  "source_path": ".dock/plugins/demo/source.rhai"
+}
+```
+
+Then `cordis_run` with the returned `pluginId` / `packageId`. On failure, edit `source.rhai`, define again with `kind: "existing"` and the same `source_path`, then `mode: "update"` (or `run` per the version table).
 
 ```rhai
 #{
@@ -110,19 +164,7 @@ Prefer the capability closest to the data owner. Do not create a dynamic Plugin 
 }
 ```
 
-Call `cordis_define` with that string in `source`. Example payload:
-
-```json
-{
-  "plugin": { "kind": "new", "idPrefix": "memo" },
-  "name": "Memo",
-  "purpose": "Session-local memo bag and tool",
-  "factory": "rhai",
-  "source": "<the Rhai map above>"
-}
-```
-
-After define returns `memo-N` / `pkg-N`, call `cordis_run` with `mode: "run"`. While the Package is running, `memo_get` / `memo_set` are visible to the model even if the Agent preset YAML omitted them. Verify immediately with `cordis_call` `name: "memo_get"` (arguments `{}`). `cordis_stop` unregisters tools, slash, slots, and the bag.
+The memo map above is the body of `source.rhai` (preferred) or a tiny inline `source`. After define returns `memo-N` / `pkg-N`, call `cordis_run` with `mode: "run"`. While the Package is running, `memo_get` / `memo_set` are visible to the model even if the Agent preset YAML omitted them. Verify immediately with `cordis_call` `name: "memo_get"` (arguments `{}`). `cordis_stop` unregisters tools, slash, slots, and the bag.
 
 Keep mutable state in variables closed over by `execute` / `render` / `on_key` inside `apply` (as `store` above). `host.provide` mounts a JSON snapshot under a service name for other Packages to `inject` / `host.get`. `host.get` returns a **copy** (or `true` if that name is live but not a bag, or `()` if missing). It does not write back.
 
@@ -200,7 +242,7 @@ After a technical failure:
 When the user names `@pluginId`, do not create another Plugin.
 
 1. `cordis_inspect_self(pluginId, packageId)` (pre-step reminder is identity only — not source).
-2. `cordis_define` with `plugin.kind: "existing"` and the original `pluginId`. For Rhai, pass a new `source`.
+2. `cordis_define` with `plugin.kind: "existing"` and the original `pluginId`. For Rhai, edit `source.rhai` (or pass a new tiny inline `source`) and the same `source_path` when file-backed.
 3. `cordis_run` `run` or `update` per the table.
 
 If the id is gone (removed or lost on restart), say so. Do not mint a same-named replacement.
@@ -209,7 +251,9 @@ If the id is gone (removed or lost on restart), say so. Do not mint a same-named
 
 | Failure | Check first |
 | --- | --- |
-| `rhai syntax` / define Error | `source` must be a map with `apply` as a function; no id is minted |
+| `rhai syntax` / define Error | File or inline body must be a map with `apply` as a function; no id is minted |
+| `source_path` / `..` / outside roots | Path must sit under `.dock/plugins/<id>/` or `~/.dock/plugins/<id>/` |
+| both `source` and `source_path` | Pass exactly one |
 | `has been registered` / already registered | Another **running** Package still provides that name or tool; `cordis_stop` it. A throwing apply must not leave orphans |
 | `unknown factory` | `cordis_inspect` `what: "factories"` |
 | `invalid-mode` / use mode `"update"` | current vs target Package |
@@ -222,6 +266,8 @@ If the id is gone (removed or lost on restart), say so. Do not mint a same-named
 
 Layout: `{project .dock or ~/.dock}/plugins/<id>/plugin.toml` plus `source.rhai` for `factory: "rhai"`. The **directory name** is `pluginId` (`[a-z][a-z0-9-]{1,31}`). Project overlays user on the same id. `enabled = false` skips autostart.
 
+You can **author here first** and `cordis_define` with `source_path`, or start from a tiny inline `source` and `cordis_promote` later. Autoload on `install_app` does not show the permission overlay (workspace-trusted). `/cordis` lists both layers. `cordis_undefine` does not delete the directory.
+
 ```toml
 name = "便签"
 purpose = "Session memo bag"
@@ -229,4 +275,4 @@ factory = "rhai"
 enabled = true
 ```
 
-`cordis_promote` writes this from a live Package (`scope`: `project` default, or `user`). Autoload on `install_app` does not show the permission overlay (workspace-trusted). `/cordis` lists both layers. `cordis_undefine` does not delete the directory.
+`cordis_promote` writes this from a live Package (`scope`: `project` default, or `user`) and still materializes `source.rhai` content even when the Package was file-backed.

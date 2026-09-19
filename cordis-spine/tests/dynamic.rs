@@ -418,6 +418,111 @@ async fn rhai_compile_reject_does_not_mint() {
 }
 
 #[tokio::test]
+async fn rhai_source_path_define_run_and_inspect_shows_path() {
+    let root = boot().await;
+    let cwd = std::env::current_dir().unwrap();
+    let plug = cwd.join(".dock/plugins/demopath");
+    std::fs::create_dir_all(&plug).unwrap();
+    let source_file = plug.join("source.rhai");
+    std::fs::write(
+        plug.join("plugin.toml"),
+        "name = \"DemoPath\"\npurpose = \"file backed\"\nfactory = \"rhai\"\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &source_file,
+        r#"#{
+            inject: ["tools"],
+            apply: |host| {
+                host.register_tool(#{
+                    name: "demopath_ping",
+                    description: "pong from file",
+                    parameters: #{ type: "object", properties: #{} },
+                    execute: |args| { "file-pong" }
+                });
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let both = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "dpath"},
+            "name": "DemoPath",
+            "purpose": "file backed",
+            "factory": "rhai",
+            "source": "#{ inject: [], apply: |host| { } }",
+            "source_path": ".dock/plugins/demopath/source.rhai"
+        }),
+    )
+    .await;
+    assert!(both.contains("Error"), "{both}");
+    assert!(
+        both.contains("not both") || both.contains("source or source_path"),
+        "{both}"
+    );
+
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "dpath"},
+            "name": "DemoPath",
+            "purpose": "file backed",
+            "factory": "rhai",
+            "source_path": ".dock/plugins/demopath/source.rhai"
+        }),
+    )
+    .await;
+    assert!(defined.contains("dpath-1/pkg-1"), "{defined}");
+
+    let ran = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"dpath-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+    assert_eq!(exec(&root, "demopath_ping", "{}").await, "file-pong");
+
+    let inspect = exec_json(
+        &root,
+        "cordis_inspect_self",
+        json!({ "pluginId": "dpath-1", "packageId": "pkg-1" }),
+    )
+    .await;
+    assert!(inspect.contains("source_path:"), "{inspect}");
+    assert!(inspect.contains("demopath"), "{inspect}");
+    assert!(!inspect.contains("file-pong"), "{inspect}");
+    assert!(!inspect.contains("register_tool"), "{inspect}");
+
+    // Escape / outside root rejected
+    let escape = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "nope"},
+            "name": "Nope",
+            "purpose": "escape",
+            "factory": "rhai",
+            "source_path": ".dock/plugins/demopath/../../../Cargo.toml"
+        }),
+    )
+    .await;
+    assert!(escape.contains("Error"), "{escape}");
+    assert!(
+        escape.contains("..")
+            || escape.contains("must resolve under")
+            || escape.contains("source_path"),
+        "{escape}"
+    );
+
+    let _ = std::fs::remove_dir_all(plug);
+}
+
+#[tokio::test]
 async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
     let root = boot().await;
     let defined = exec_json(

@@ -132,7 +132,9 @@ pub fn render_inspect_self(
                     c.description
                 ));
             }
-            if let Some(source) = &pkg.source {
+            if let Some(path) = &pkg.source_path {
+                lines.push(format!("source_path: {}", path.display()));
+            } else if let Some(source) = &pkg.source {
                 lines.push("source:".into());
                 lines.push(source.clone());
             }
