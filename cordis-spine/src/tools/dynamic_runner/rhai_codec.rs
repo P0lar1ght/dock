@@ -147,7 +147,7 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 fn from_hex_bytes(text: &str) -> Result<Blob, Box<EvalAltResult>> {
     check_len(text.len(), "hex input")?;
     let t = text.trim();
-    if t.len() % 2 != 0 {
+    if !t.len().is_multiple_of(2) {
         return Err(err(format!("from_hex: odd length {}", t.len())));
     }
     let mut out = Vec::with_capacity(t.len() / 2);
