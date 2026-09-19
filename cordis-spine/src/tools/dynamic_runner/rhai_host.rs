@@ -174,10 +174,6 @@ pub fn preflight_limited(source: &str, max_bytes: usize) -> Result<RhaiMeta, Str
     })
 }
 
-pub fn build_rhai(fiber_name: &str, source: &str) -> Result<Plugin, String> {
-    build_rhai_limited(fiber_name, source, MAX_FILE_SOURCE)
-}
-
 pub fn build_rhai_limited(
     fiber_name: &str,
     source: &str,
@@ -952,5 +948,14 @@ mod tests {
         let err = tool_parameters_json(&spec).unwrap_err();
         assert!(err.contains("undeclared property"), "{err}");
         assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn build_rhai_limited_honors_inline_ceiling() {
+        let oversized = "x".repeat(MAX_INLINE_SOURCE + 1);
+        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE) {
+            Err(err) => assert!(err.contains("128KiB"), "{err}"),
+            Ok(_) => panic!("expected oversized inline source to fail"),
+        }
     }
 }

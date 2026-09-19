@@ -39,7 +39,8 @@ use rhai_host::{MAX_FILE_SOURCE, MAX_INLINE_SOURCE};
 pub enum SourceInput {
     Inline(String),
     Path(String),
-    /// Already-canonical path (disk autoload / promote). Skips root re-check.
+    /// Already-resolved path (disk autoload / promote). Still re-checked under
+    /// plugin roots on every read so a post-define symlink swap cannot escape.
     #[doc(hidden)]
     ResolvedPath(std::path::PathBuf),
 }
@@ -395,8 +396,8 @@ impl DynamicRunner {
         let info = lookup_factory(&plan.factory)
             .ok_or_else(|| format!("factory {} is no longer registered", plan.factory))?;
         let built = if plan.factory == RHAI_FACTORY {
-            let (source, _) = resolve_plan_source(&plan)?;
-            rhai_host::build_rhai(plugin_id, &source)?
+            let (source, limit) = resolve_plan_source(&plan)?;
+            rhai_host::build_rhai_limited(plugin_id, &source, limit)?
         } else {
             info.build(plugin_id, plan.contrib.as_ref())
         };

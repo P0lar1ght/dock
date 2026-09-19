@@ -523,6 +523,80 @@ async fn rhai_source_path_define_run_and_inspect_shows_path() {
 }
 
 #[tokio::test]
+async fn rhai_source_path_rejects_symlink_swap_after_define() {
+    let root = boot().await;
+    let cwd = std::env::current_dir().unwrap();
+    let plug = cwd.join(".dock/plugins/swapprobe");
+    std::fs::create_dir_all(&plug).unwrap();
+    let source_file = plug.join("source.rhai");
+    std::fs::write(
+        plug.join("plugin.toml"),
+        "name = \"SwapProbe\"\npurpose = \"symlink swap\"\nfactory = \"rhai\"\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &source_file,
+        r#"#{
+            inject: ["tools"],
+            apply: |host| {
+                host.register_tool(#{
+                    name: "swapprobe_ping",
+                    description: "should not run after swap",
+                    parameters: #{ type: "object", properties: #{} },
+                    execute: |args| { "file-pong" }
+                });
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "swap"},
+            "name": "SwapProbe",
+            "purpose": "symlink swap",
+            "factory": "rhai",
+            "source_path": ".dock/plugins/swapprobe/source.rhai"
+        }),
+    )
+    .await;
+    assert!(defined.contains("swap-1/pkg-1"), "{defined}");
+
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(outside.path(), "TOP SECRET").unwrap();
+    std::fs::remove_file(&source_file).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &source_file).unwrap();
+
+    let ran = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"swap-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(ran.contains("Error"), "{ran}");
+    assert!(
+        ran.contains("must resolve under")
+            || ran.contains("source_path")
+            || ran.contains("not a file"),
+        "{ran}"
+    );
+    assert!(!ran.contains("TOP SECRET"), "{ran}");
+    let names: Vec<_> = tools_of(&root)
+        .specs()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(
+        !names.iter().any(|n| n == "swapprobe_ping"),
+        "tool must not register after symlink escape: {names:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(plug);
+}
+
+#[tokio::test]
 async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
     let root = boot().await;
     let defined = exec_json(

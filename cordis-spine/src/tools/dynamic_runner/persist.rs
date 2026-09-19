@@ -120,9 +120,22 @@ pub fn resolve_source_path_in(
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
-    let canon = abs
+    assert_under_plugin_root_in(&abs, roots)
+}
+
+/// Re-canonicalize `path` and verify it still resolves under a plugin root.
+/// Call before every re-read of a stored `source_path` (run/update/promote).
+pub fn assert_under_plugin_root(path: &Path) -> Result<PathBuf, String> {
+    assert_under_plugin_root_in(path, &plugin_roots())
+}
+
+pub fn assert_under_plugin_root_in(
+    path: &Path,
+    roots: &[(PersistScope, PathBuf)],
+) -> Result<PathBuf, String> {
+    let canon = path
         .canonicalize()
-        .map_err(|e| format!("source_path {}: {e}", abs.display()))?;
+        .map_err(|e| format!("source_path {}: {e}", path.display()))?;
     if !canon.is_file() {
         return Err(format!("source_path is not a file: {}", canon.display()));
     }
@@ -160,21 +173,25 @@ fn path_under_plugin_root(canon: &Path, root_canon: &Path) -> bool {
     valid_disk_id(id) && comps.next().is_some()
 }
 
+fn source_too_large_msg(max_bytes: usize) -> String {
+    match max_bytes {
+        MAX_INLINE_SOURCE => "rhai source exceeds 128KiB".into(),
+        MAX_FILE_SOURCE => "rhai source file exceeds 1MiB".into(),
+        n => format!("rhai source exceeds {n} bytes"),
+    }
+}
+
+/// Read a path-backed Rhai source after re-validating it under plugin roots.
 pub fn read_source_file(path: &Path, max_bytes: usize) -> Result<String, String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let path = assert_under_plugin_root(path)?;
+    let meta = std::fs::metadata(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if meta.len() as usize > max_bytes {
-        if max_bytes <= MAX_INLINE_SOURCE {
-            return Err("rhai source exceeds 128KiB".into());
-        }
-        return Err("rhai source file exceeds 1MiB".into());
+        return Err(source_too_large_msg(max_bytes));
     }
     let text =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if text.len() > max_bytes {
-        if max_bytes <= MAX_INLINE_SOURCE {
-            return Err("rhai source exceeds 128KiB".into());
-        }
-        return Err("rhai source file exceeds 1MiB".into());
+        return Err(source_too_large_msg(max_bytes));
     }
     Ok(text)
 }
@@ -188,11 +205,12 @@ pub fn package_source_text(pkg: &Package) -> Result<(String, usize), String> {
     }
 }
 
-fn source_input_for_package(pkg: &Package) -> Option<SourceInput> {
+fn source_input_for_package(pkg: &Package) -> Result<Option<SourceInput>, String> {
     match (&pkg.source, &pkg.source_path) {
-        (Some(s), _) => Some(SourceInput::Inline(s.clone())),
-        (None, Some(p)) => Some(SourceInput::ResolvedPath(p.clone())),
-        (None, None) => None,
+        (Some(s), None) => Ok(Some(SourceInput::Inline(s.clone()))),
+        (None, Some(p)) => Ok(Some(SourceInput::ResolvedPath(p.clone()))),
+        (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),
+        (None, None) => Ok(None),
     }
 }
 
@@ -494,7 +512,7 @@ impl DynamicRunner {
                     &pkg.purpose,
                     &pkg.factory,
                     pkg.contrib.clone(),
-                    source_input_for_package(&pkg),
+                    source_input_for_package(&pkg)?,
                     origin,
                 )?;
                 self.run(
@@ -517,7 +535,7 @@ impl DynamicRunner {
                     &pkg.purpose,
                     &pkg.factory,
                     pkg.contrib.clone(),
-                    source_input_for_package(&pkg),
+                    source_input_for_package(&pkg)?,
                 )?;
                 let mode = {
                     let inner = self.inner.lock().unwrap();
@@ -727,5 +745,29 @@ mod tests {
         let roots = vec![(PersistScope::Project, root.path().to_path_buf())];
         let err = resolve_source_path_in(outside.path().to_str().unwrap(), &roots).unwrap_err();
         assert!(err.contains("must resolve under"), "{err}");
+    }
+
+    #[test]
+    fn assert_under_plugin_root_rejects_symlink_swap_after_resolve() {
+        let root = tempfile::tempdir().unwrap();
+        let plug = root.path().join("demo");
+        std::fs::create_dir_all(&plug).unwrap();
+        let file = plug.join("source.rhai");
+        std::fs::write(&file, "#{ inject: [], apply: |host| { } }").unwrap();
+        let roots = vec![(PersistScope::Project, root.path().to_path_buf())];
+        let canon = resolve_source_path_in(file.to_str().unwrap(), &roots).unwrap();
+        assert_eq!(
+            assert_under_plugin_root_in(&canon, &roots).unwrap(),
+            canon
+        );
+
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "TOP SECRET").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &file).unwrap();
+
+        let err = assert_under_plugin_root_in(&canon, &roots).unwrap_err();
+        assert!(err.contains("must resolve under"), "{err}");
+        assert!(!err.contains("TOP SECRET"), "{err}");
     }
 }
