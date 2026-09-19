@@ -2089,7 +2089,9 @@ async fn rhai_unix_time_works_inside_execute() {
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next())
         .expect(&format!("parse secs from {out}"));
-    let secs: i64 = secs_str.parse().expect(&format!("secs not i64: {secs_str}"));
+    let secs: i64 = secs_str
+        .parse()
+        .expect(&format!("secs not i64: {secs_str}"));
     assert!(secs > 1_700_000_000, "too early: {secs} in {out}");
     assert!(secs < 2_100_000_000, "too late: {secs} in {out}");
 }
