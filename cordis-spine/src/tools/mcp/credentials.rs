@@ -13,6 +13,8 @@ use url::Url;
 
 use cordis_base::config::dock_home;
 
+use crate::tools::fs_perms::ensure_owner_only;
+
 const CREDENTIALS_FILENAME: &str = "mcp_credentials.json";
 
 #[derive(Debug, thiserror::Error)]
@@ -126,30 +128,6 @@ impl McpCredentialStore {
         ensure_owner_only(&tmp)?;
         std::fs::rename(&tmp, path)?;
         ensure_owner_only(path)?;
-        Ok(())
-    }
-}
-
-fn ensure_owner_only(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match std::fs::metadata(path) {
-            Ok(metadata) => {
-                if metadata.permissions().mode() & 0o777 != 0o600 {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o600);
-                    std::fs::set_permissions(path, perms)?;
-                }
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
         Ok(())
     }
 }

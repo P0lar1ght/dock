@@ -15,6 +15,7 @@ pub mod capability;
 pub mod computer;
 pub mod cron;
 pub mod dynamic_runner;
+pub mod fs_perms;
 pub mod goal;
 pub mod jobs;
 pub mod lsp;

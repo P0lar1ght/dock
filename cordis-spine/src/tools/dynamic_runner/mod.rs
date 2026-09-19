@@ -9,6 +9,7 @@ mod registry;
 mod rhai_codec;
 mod rhai_host;
 mod rhai_http;
+mod rhai_secret;
 mod rhai_time;
 
 use std::sync::{Arc, Mutex};
