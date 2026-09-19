@@ -20,6 +20,8 @@
   Dock 的 release **不带** driver 二进制。
 - 桌面类关键词（click / screenshot / 桌面 …）搜不到工具且 driver 没连上时，`search_tool` 的 note
   会直接指向 `/computer` 的安装键。
+- **覆盖层右上角的 `[✗]` 支持鼠标悬停高亮**：指针落在按钮上提亮加粗，移开复位；悬停区与点击区
+  共用各覆盖层已上报的 `close_button` 矩形，新覆盖层照常返回该矩形就自动有悬停反馈。
 
 ### 变更
 
