@@ -467,7 +467,11 @@ mod tests {
     }
 
     /// 第二跳监听器：若被跟到会置位；Policy::none 下应保持 false。
-    fn spawn_probe_listener() -> (String, std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+    fn spawn_probe_listener() -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
