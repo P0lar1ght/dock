@@ -563,9 +563,15 @@ pub(super) fn draw(
                         let working = ctx
                             .get::<SessionRef>(SESSION_PORT)
                             .is_some_and(|s| s.working());
-                        // Grok unfocuses the empty composer while a turn runs
-                        // (`Build anything`, Enter does not send).
-                        prompt.set_focused(!working || prompt.can_send());
+                        // Turn-working behavior (unchanged): the empty composer
+                        // blurs when a turn starts (`Build anything`, no caret)
+                        // and comes back when it ends. Focus is otherwise
+                        // event-driven — re-deriving it every frame wiped out
+                        // click-to-focus and typing mid-turn.
+                        prompt.set_turn_working(working);
+                        if prompt.can_send() {
+                            prompt.set_focused(true);
+                        }
                         frame.render_widget(&*prompt, prompt_area);
                         if let (Some(snap), true) =
                             (slash_snap.as_ref(), slash_is_open && !overlay.is_open())

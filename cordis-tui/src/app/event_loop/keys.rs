@@ -901,18 +901,24 @@ pub(super) fn run_action(
         Action::MouseDown { column, row } => {
             // 按在标签栏上不要起选区：切页在 MouseUp 那边做。
             if tab_bar::hit(tab_hits, column, row).is_some() {
+                blur_empty_composer(ctx);
                 return Vec::new();
             }
             if queue_pane::hit(queue_hits, column, row).is_some() {
+                blur_empty_composer(ctx);
                 return Vec::new();
             }
             if goal_pane::hit(goal_hits, column, row).is_some() {
+                blur_empty_composer(ctx);
                 return Vec::new();
             }
             if open_context_from_status(ctx, overlay, column, row) {
+                blur_empty_composer(ctx);
                 return Vec::new();
             }
             // 输入框先挑：按在框里就是在框里选字，不该再去起滚动区的选区。
+            // `mouse_down` 命中时会 `set_focused(true)`；未命中则把空框失焦，
+            // 边框才看得出「焦点在滚动区」。
             if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
                 if prompt.mouse_down(column, row) {
                     if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
@@ -920,6 +926,7 @@ pub(super) fn run_action(
                     }
                     return Vec::new();
                 }
+                blur_empty_composer(ctx);
             }
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
                 scrollback.mouse_down(column, row);
@@ -2003,8 +2010,19 @@ pub(super) fn overlay_keys(code: KeyCode, ctrl: bool) -> Option<Action> {
     }
 }
 
+/// 空输入框点到框外：失焦，边框切到 `prompt_border`，光标藏起来。
+/// 有内容时不瞎失焦——用户还在编辑，只是在拖滚动区选字。
+fn blur_empty_composer(ctx: &Context) {
+    if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
+        if !prompt.can_send() {
+            prompt.set_focused(false);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn mcps_overlay() -> Overlay {
@@ -2171,6 +2189,41 @@ mod tests {
             matches!(down(6, 2), Some(Action::Click { .. })),
             "框外仍旧是点击，别把欢迎页菜单弄坏"
         );
+    }
+
+    /// 点滚动区要把空输入框失焦；点回框里再聚焦。边框对比才看得见。
+    #[tokio::test]
+    async fn mouse_hands_focus_between_scrollback_and_prompt() {
+        let ctx = Context::new();
+        let prompt = PromptWidget::default();
+        let area = ratatui::layout::Rect::new(0, 20, 60, 3);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(&prompt, area, &mut buf);
+        prompt.set_focused(true);
+        let _p = ctx.provide(TUI_PROMPT, prompt).unwrap();
+        let prompt = ctx.get::<PromptWidget>(TUI_PROMPT).unwrap();
+        assert!(prompt.focused());
+
+        let go = |action: Action| {
+            run_action(
+                &ctx,
+                action,
+                &mut Overlay::None,
+                &PickerHits::default(),
+                &[],
+                &[],
+                &[],
+                &[],
+            )
+        };
+
+        // 框外按下：空框失焦。
+        assert!(go(Action::MouseDown { column: 6, row: 2 }).is_empty());
+        assert!(!prompt.focused(), "点滚动区应失焦空输入框");
+
+        // 框里按下：要回焦点（mouse_down 里 set_focused(true)）。
+        assert!(go(Action::MouseDown { column: 6, row: 21 }).is_empty());
+        assert!(prompt.focused(), "点回输入框应重新聚焦");
     }
 
     /// 分页键不能踩现有键位：`Ctrl+W` 还是新会话，`Ctrl+D` 还是半页下滚。

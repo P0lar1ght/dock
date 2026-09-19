@@ -111,8 +111,10 @@ impl Theme {
             accent_remember: Color::Rgb(139, 195, 74), // #8BC34A — Material Design light green
 
             selection_border: rgb(60, 60, 65),
-            prompt_border: rgb(50, 50, 55), // #323237 — dimmer prompt chrome
-            prompt_border_active: rgb(80, 80, 88), // #505058 — brighter when focused
+            // Idle empty composer vs focused: gray vs accent so smoke screenshots
+            // stop looking identical (old 50/50/55 vs 80/80/88 was too close).
+            prompt_border: rgb(42, 42, 46), // #2A2A2E — dim idle chrome
+            prompt_border_active: BLUE,     // #7aa2f7 — accent when focused
             hover_border: rgb(30, 30, 34),
 
             accent_model: TEAL,

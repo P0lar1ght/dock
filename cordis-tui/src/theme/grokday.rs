@@ -95,8 +95,9 @@ impl Theme {
             accent_remember: rgb(76, 175, 80), // #4CAF50 — Material Design green (readable on light bg)
 
             selection_border: rgb(185, 185, 190),
-            prompt_border: rgb(200, 200, 205), // #C8C8CD — dimmer prompt chrome
-            prompt_border_active: rgb(165, 165, 175), // #A5A5AF — darker (more apparent) when focused
+            // Light bg: idle stays pale gray; focused uses deep blue (not another gray).
+            prompt_border: rgb(210, 210, 216), // #D2D2D8 — pale idle chrome
+            prompt_border_active: BLUE,        // #2F64D2 — accent when focused
             hover_border: rgb(212, 212, 216),
 
             accent_model: TEAL,

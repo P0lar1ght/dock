@@ -212,3 +212,39 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rgb_of(c: Color) -> (u8, u8, u8) {
+        match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("expected Rgb, got {other:?}"),
+        }
+    }
+
+    /// Idle vs focused prompt chrome must stay far apart — desktop smoke
+    /// screenshots of the two states were nearly identical on 0.1.1.
+    #[test]
+    fn prompt_border_active_is_clearly_brighter_than_idle() {
+        let _g = test_guard();
+        for kind in ThemeKind::ALL {
+            Theme::apply_kind(*kind);
+            let theme = Theme::current();
+            let (ir, ig, ib) = rgb_of(theme.prompt_border);
+            let (ar, ag, ab) = rgb_of(theme.prompt_border_active);
+            let dist = (ar as i16 - ir as i16).unsigned_abs() as u32
+                + (ag as i16 - ig as i16).unsigned_abs() as u32
+                + (ab as i16 - ib as i16).unsigned_abs() as u32;
+            assert!(
+                dist >= 120,
+                "{}: prompt_border {:?} vs active {:?} only {dist} apart",
+                kind.display_name(),
+                theme.prompt_border,
+                theme.prompt_border_active
+            );
+        }
+        Theme::apply_kind(ThemeKind::GrokNight);
+    }
+}
