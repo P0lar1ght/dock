@@ -16,7 +16,9 @@ use crate::names::{CONTEXT, DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, TOOLS};
 use crate::prompt::assemble::ORDER_CORDIS;
 use crate::prompt::context_book::{own_sections, ContextBook};
 use crate::session::log::Sessions;
-use crate::tools::dynamic_runner::{DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode};
+use crate::tools::dynamic_runner::{
+    DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode, SourceInput,
+};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
@@ -28,11 +30,11 @@ type ExecFut = Pin<Box<dyn Future<Output = ToolResult> + Send + 'static>>;
 const INSPECT_DESC: &str = "Read-only live Cordis directory for this session: fibers under cordis-dynamic, named services that are actually mounted (tools / slash / tui.slots include callable methods; other services are names only), model tools (names only), preset factories, Rhai host builtins, session/event contract, TUI slots, this session's dynamic Plugins, and disk plugins. Omit `what` for the full report. This does not execute apply or change version pointers. Before defining a Plugin, also read skills/cordis-plugin-development/SKILL.md.";
 const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"what":{"type":"string","enum":["services","fibers","tools","temporary","permanent","factories","builtins","events","slots"],"description":"Omit for the full live directory."}}}"#;
 
-const SELF_DESC: &str = "Inspect dynamic Cordis Plugins owned by this session. With no IDs, list Plugin summaries. With pluginId, return version pointers, the latest Run, and every Package. pluginId plus packageId returns that Package's factory id, Rhai source when present, and runtime diagnostics. Read-only: it does not execute code or change currentPackageId. Read skills/cordis-plugin-development/SKILL.md before modifying a Plugin.";
+const SELF_DESC: &str = "Inspect dynamic Cordis Plugins owned by this session. With no IDs, list Plugin summaries. With pluginId, return version pointers, the latest Run, and every Package. pluginId plus packageId returns that Package's factory id, source_path (preferred) or inline Rhai source, and runtime diagnostics. Read-only: it does not execute code or change currentPackageId. Read skills/cordis-plugin-development/SKILL.md before modifying a Plugin.";
 const SELF_PARAMS: &str = r#"{"type":"object","properties":{"pluginId":{"type":"string","description":"Stable Plugin ID from cordis_define; omit to list every Plugin."},"packageId":{"type":"string","description":"Exact Package ID; requires pluginId."}}}"#;
 
-const DEFINE_DESC: &str = "Define an immutable Cordis Package. For a new Plugin, kind:\"new\" and idPrefix of 3–6 lowercase English letters. To modify an existing Plugin, kind:\"existing\" with its pluginId — this appends a Package and never overwrites older versions. factory is echo, note, hold, slash, or rhai (see cordis_inspect what:\"factories\"). factory rhai needs source: a Rhai map #{ inject: [...], apply: |host| { ... } }; define compiles it and does not run apply. The slash factory also needs command, kind (prompt, overlay, slot, or tool), and text; it only appends a prompt-bar command and cannot replace builtins. kind tool: text is the live tool name; typed slash args become JSON (empty→{}, leading { → raw object, else {\"args\":…}). Define only records metadata: it does not request approval, execute apply, or change currentPackageId. On success, call cordis_run with the returned IDs. Read skills/cordis-plugin-development/SKILL.md first.";
-const DEFINE_PARAMS: &str = r#"{"type":"object","required":["plugin","name","purpose","factory"],"properties":{"plugin":{"type":"object","description":"kind:\"new\" + idPrefix, or kind:\"existing\" + pluginId."},"name":{"type":"string"},"purpose":{"type":"string"},"factory":{"type":"string","description":"Preset factory id: echo, note, hold, slash, or rhai."},"source":{"type":"string","description":"rhai factory: Rhai map with inject and apply."},"command":{"type":"string","description":"slash factory: extra /command token; cannot collide with builtins."},"kind":{"type":"string","enum":["prompt","overlay","slot","tool"],"description":"slash factory: prompt injects/sends text; overlay opens a read-only TUI pane; slot opens a registered tui.slots id (text = slot id); tool runs a live model tool (text = tool name; typed args become JSON)."},"text":{"type":"string","description":"slash factory: prompt template, overlay body, slot id, or tool name. {args} is replaced with typed arguments for prompt/overlay."},"title":{"type":"string","description":"slash overlay/tool Notice title; defaults to /command or /command → tool."},"send":{"type":"boolean","description":"slash prompt: true sends immediately; false fills the composer."},"description":{"type":"string","description":"slash dropdown /help label; defaults to purpose."}}}"#;
+const DEFINE_DESC: &str = "Define an immutable Cordis Package. For a new Plugin, kind:\"new\" and idPrefix of 3–6 lowercase English letters. To modify an existing Plugin, kind:\"existing\" with its pluginId — this appends a Package and never overwrites older versions. factory is echo, note, hold, slash, or rhai (see cordis_inspect what:\"factories\"). For factory rhai prefer source_path to a file under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/ (≤1MiB; re-read on run); use inline source only for tiny samples (≤128KiB). Provide source XOR source_path — not both. source / source_path must evaluate to #{ inject: [...], apply: |host| { ... } }; define compiles and does not run apply. The slash factory also needs command, kind (prompt, overlay, slot, or tool), and text; it only appends a prompt-bar command and cannot replace builtins. kind tool: text is the live tool name; typed slash args become JSON (empty→{}, leading { → raw object, else {\"args\":…}). Define only records metadata: it does not request approval, execute apply, or change currentPackageId. On success, call cordis_run with the returned IDs. Read skills/cordis-plugin-development/SKILL.md first.";
+const DEFINE_PARAMS: &str = r#"{"type":"object","required":["plugin","name","purpose","factory"],"properties":{"plugin":{"type":"object","description":"kind:\"new\" + idPrefix, or kind:\"existing\" + pluginId."},"name":{"type":"string"},"purpose":{"type":"string"},"factory":{"type":"string","description":"Preset factory id: echo, note, hold, slash, or rhai."},"source":{"type":"string","description":"rhai factory (inline, ≤128KiB): Rhai map with inject and apply. XOR with source_path; prefer source_path for real plugins."},"source_path":{"type":"string","description":"rhai factory: path to source.rhai under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/ (≤1MiB). XOR with source. Rejects .. escape."},"command":{"type":"string","description":"slash factory: extra /command token; cannot collide with builtins."},"kind":{"type":"string","enum":["prompt","overlay","slot","tool"],"description":"slash factory: prompt injects/sends text; overlay opens a read-only TUI pane; slot opens a registered tui.slots id (text = slot id); tool runs a live model tool (text = tool name; typed args become JSON)."},"text":{"type":"string","description":"slash factory: prompt template, overlay body, slot id, or tool name. {args} is replaced with typed arguments for prompt/overlay."},"title":{"type":"string","description":"slash overlay/tool Notice title; defaults to /command or /command → tool."},"send":{"type":"boolean","description":"slash prompt: true sends immediately; false fills the composer."},"description":{"type":"string","description":"slash dropdown /help label; defaults to purpose."}}}"#;
 
 const RUN_DESC: &str = "Activate one exact Package of a dynamic Plugin. mode:\"run\" for the first activation, restarting current, or rollback. When current exists, mode:\"update\" switches to a different Package by disposing the previous host-half fiber entirely (every provide/register_* from that Run) and starting the new Package on a clean fiber — it does not overlay. Host-only factories start immediately after the user allows the permission prompt (same overlay as bash). currentPackageId changes only after success. A throwing apply rolls back registrations before the error returns. After a technical failure, inspect the Package, define a new Package on the same Plugin, and retry. Do not request approval again after the user rejects it.";
 const RUN_PARAMS: &str = r#"{"type":"object","required":["pluginId","packageId","mode"],"properties":{"pluginId":{"type":"string"},"packageId":{"type":"string"},"mode":{"type":"string","enum":["run","update"]}}}"#;
@@ -243,10 +245,20 @@ fn define_tool(ctx: Context, call: ToolCall) -> ExecFut {
             }
             _ => None,
         };
-        let source = v
-            .get("source")
-            .and_then(Value::as_str)
-            .map(|s| s.to_string());
+        let source = match (
+            v.get("source").and_then(Value::as_str),
+            v.get("source_path").and_then(Value::as_str),
+        ) {
+            (Some(_), Some(_)) => {
+                return tool_result(
+                    call,
+                    "Error: provide source or source_path for factory \"rhai\", not both",
+                );
+            }
+            (Some(s), None) => Some(SourceInput::Inline(s.to_string())),
+            (None, Some(p)) => Some(SourceInput::Path(p.to_string())),
+            (None, None) => None,
+        };
         match runner.define(
             session_id(&ctx).as_str(),
             plugin,

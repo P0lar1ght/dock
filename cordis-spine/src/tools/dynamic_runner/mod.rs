@@ -30,7 +30,24 @@ pub use factories::{
 };
 pub use persist::{plugin_roots, PromoteReceipt};
 pub use registry::{Attempt, AttemptStatus, Package, PersistScope, PluginOrigin, RunMode};
-pub use rhai_host::{builtins_lines, preflight, RhaiBag, RhaiBags};
+pub use rhai_host::{builtins_lines, RhaiBag, RhaiBags};
+
+use rhai_host::{MAX_FILE_SOURCE, MAX_INLINE_SOURCE};
+
+/// Rhai body for `cordis_define`: inline string or path under a plugin root.
+#[derive(Clone, Debug)]
+pub enum SourceInput {
+    Inline(String),
+    Path(String),
+    /// Already-resolved path (disk autoload / promote). 每次读之前仍然重新校验，
+    /// 免得 define 之后被换成软链溜出去；`dir` 是授权边界，`None` 表示按全局
+    /// plugin roots 判。
+    #[doc(hidden)]
+    ResolvedPath {
+        path: std::path::PathBuf,
+        dir: Option<std::path::PathBuf>,
+    },
+}
 
 #[derive(Clone, Debug)]
 pub struct DefineReceipt {
@@ -148,7 +165,7 @@ impl DynamicRunner {
         purpose: &str,
         factory: &str,
         contrib: Option<SlashEntry>,
-        source: Option<String>,
+        source: Option<SourceInput>,
     ) -> Result<DefineReceipt, String> {
         let target = match plugin {
             PluginSel::New { id_prefix } => DefineTarget::New { id_prefix },
@@ -166,7 +183,7 @@ impl DynamicRunner {
         purpose: &str,
         factory: &str,
         contrib: Option<SlashEntry>,
-        source: Option<String>,
+        source: Option<SourceInput>,
     ) -> Result<DefineReceipt, String> {
         let name = name.trim();
         let purpose = purpose.trim();
@@ -193,14 +210,14 @@ impl DynamicRunner {
         if info.id != "slash" && contrib.is_some() {
             return Err("command/kind/text are only for factory \"slash\"".into());
         }
-        if info.id == RHAI_FACTORY {
-            let Some(src) = source.as_deref() else {
-                return Err("factory \"rhai\" needs `source`".into());
-            };
-            preflight(src)?;
+
+        let prepared_rhai = if info.id == RHAI_FACTORY {
+            Some(prepare_rhai_source(source)?)
         } else if source.is_some() {
-            return Err("source is only for factory \"rhai\"".into());
-        }
+            return Err("source / source_path are only for factory \"rhai\"".into());
+        } else {
+            None
+        };
 
         let mut inner = self.inner.lock().unwrap();
         let plugin_id = match target {
@@ -256,15 +273,14 @@ impl DynamicRunner {
             .registry
             .get_mut(&plugin_id)
             .expect("just inserted or looked up");
-        let pkg = if info.id == RHAI_FACTORY {
-            let src = source.expect("checked above");
-            let meta = preflight(&src).expect("checked above");
+        let pkg = if let Some(prepared) = prepared_rhai {
             package_from_rhai(
                 package_id.clone(),
                 name.into(),
                 purpose.into(),
-                meta.inject,
-                src,
+                prepared.inject,
+                prepared.inline,
+                prepared.path,
             )
         } else {
             package_from_factory(
@@ -384,11 +400,8 @@ impl DynamicRunner {
         let info = lookup_factory(&plan.factory)
             .ok_or_else(|| format!("factory {} is no longer registered", plan.factory))?;
         let built = if plan.factory == RHAI_FACTORY {
-            let source = plan
-                .source
-                .as_deref()
-                .ok_or_else(|| "rhai package is missing source".to_string())?;
-            rhai_host::build_rhai(plugin_id, source)?
+            let (source, limit) = resolve_plan_source(&plan)?;
+            rhai_host::build_rhai_limited(plugin_id, &source, limit)?
         } else {
             info.build(plugin_id, plan.contrib.as_ref())
         };
@@ -740,6 +753,9 @@ struct Plan {
     factory: String,
     contrib: Option<SlashEntry>,
     source: Option<String>,
+    source_path: Option<std::path::PathBuf>,
+    /// `source_path` 的授权边界（磁盘插件是它自己的目录；`None` 走全局 roots）。
+    source_dir: Option<std::path::PathBuf>,
     inject: Vec<String>,
     provides: Vec<String>,
 }
@@ -796,6 +812,8 @@ fn resolve_plan(
         factory: pkg.factory.clone(),
         contrib: pkg.contrib.clone(),
         source: pkg.source.clone(),
+        source_path: pkg.source_path.clone(),
+        source_dir: persist::origin_source_dir(&rec.origin).map(|p| p.to_path_buf()),
         inject: pkg.inject.clone(),
         provides: pkg.provides.clone(),
     })
@@ -853,6 +871,59 @@ fn missing_plugin_message(id: &str) -> String {
 fn valid_prefix(prefix: &str) -> bool {
     let bytes = prefix.as_bytes();
     (3..=6).contains(&bytes.len()) && bytes.iter().all(|b| b.is_ascii_lowercase())
+}
+
+struct PreparedRhai {
+    inject: Vec<String>,
+    inline: Option<String>,
+    path: Option<std::path::PathBuf>,
+}
+
+/// Compile-check Rhai at define time.
+fn prepare_rhai_source(source: Option<SourceInput>) -> Result<PreparedRhai, String> {
+    let input = source
+        .ok_or_else(|| "factory \"rhai\" needs `source` or `source_path` (not both)".to_string())?;
+    match input {
+        SourceInput::Inline(src) => {
+            let meta = rhai_host::preflight(&src)?;
+            Ok(PreparedRhai {
+                inject: meta.inject,
+                inline: Some(src),
+                path: None,
+            })
+        }
+        SourceInput::Path(raw) => {
+            let path = persist::resolve_source_path(&raw)?;
+            let text = persist::read_source_file(&path, MAX_FILE_SOURCE, None)?;
+            let meta = rhai_host::preflight_limited(&text, MAX_FILE_SOURCE)?;
+            Ok(PreparedRhai {
+                inject: meta.inject,
+                inline: None,
+                path: Some(path),
+            })
+        }
+        SourceInput::ResolvedPath { path, dir } => {
+            let text = persist::read_source_file(&path, MAX_FILE_SOURCE, dir.as_deref())?;
+            let meta = rhai_host::preflight_limited(&text, MAX_FILE_SOURCE)?;
+            Ok(PreparedRhai {
+                inject: meta.inject,
+                inline: None,
+                path: Some(path),
+            })
+        }
+    }
+}
+
+fn resolve_plan_source(plan: &Plan) -> Result<(String, usize), String> {
+    match (&plan.source, &plan.source_path) {
+        (Some(s), None) => Ok((s.clone(), MAX_INLINE_SOURCE)),
+        (None, Some(p)) => Ok((
+            persist::read_source_file(p, MAX_FILE_SOURCE, plan.source_dir.as_deref())?,
+            MAX_FILE_SOURCE,
+        )),
+        (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),
+        (None, None) => Err("rhai package is missing source".into()),
+    }
 }
 
 /// Named `"dynamicCordisRunner"` service. Hot-plugged bodies hang under a

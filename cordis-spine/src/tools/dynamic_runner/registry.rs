@@ -76,7 +76,10 @@ pub struct Package {
     pub inject: Vec<String>,
     pub tools: Vec<String>,
     pub contrib: Option<SlashEntry>,
+    /// Inline Rhai source (≤128KiB). Mutually exclusive with [`Self::source_path`].
     pub source: Option<String>,
+    /// Canonical path under a plugin root; re-read on run/update (≤1MiB).
+    pub source_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +285,7 @@ pub fn package_from_factory(
         tools: info.tools.iter().map(|s| s.to_string()).collect(),
         contrib,
         source: None,
+        source_path: None,
     }
 }
 
@@ -290,7 +294,8 @@ pub fn package_from_rhai(
     name: String,
     purpose: String,
     inject: Vec<String>,
-    source: String,
+    source: Option<String>,
+    source_path: Option<PathBuf>,
 ) -> Package {
     Package {
         package_id,
@@ -301,7 +306,8 @@ pub fn package_from_rhai(
         inject,
         tools: Vec::new(),
         contrib: None,
-        source: Some(source),
+        source,
+        source_path,
     }
 }
 

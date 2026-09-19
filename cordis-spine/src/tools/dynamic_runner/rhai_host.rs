@@ -17,7 +17,10 @@ use cordis_base::types::{
     ORDER_TURN_END_DYNAMIC,
 };
 
-const MAX_SOURCE: usize = 128 * 1024;
+/// Inline `source` ceiling (tool-call payload).
+pub const MAX_INLINE_SOURCE: usize = 128 * 1024;
+/// File-backed `source_path` ceiling (re-read on run/update).
+pub const MAX_FILE_SOURCE: usize = 1024 * 1024;
 const DEFINE_MAX_OPS: u64 = 100_000;
 const RUN_MAX_OPS: u64 = 1_000_000;
 
@@ -134,12 +137,19 @@ pub fn sandboxed_engine(max_ops: u64) -> Engine {
 }
 
 pub fn preflight(source: &str) -> Result<RhaiMeta, String> {
+    preflight_limited(source, MAX_INLINE_SOURCE)
+}
+
+pub fn preflight_limited(source: &str, max_bytes: usize) -> Result<RhaiMeta, String> {
     let source = source.trim();
     if source.is_empty() {
         return Err("factory \"rhai\" needs non-empty `source`".into());
     }
-    if source.len() > MAX_SOURCE {
-        return Err("rhai source exceeds 128KiB".into());
+    if source.len() > max_bytes {
+        if max_bytes <= MAX_INLINE_SOURCE {
+            return Err("rhai source exceeds 128KiB".into());
+        }
+        return Err("rhai source file exceeds 1MiB".into());
     }
     let engine = sandboxed_engine(DEFINE_MAX_OPS);
     engine
@@ -164,8 +174,12 @@ pub fn preflight(source: &str) -> Result<RhaiMeta, String> {
     })
 }
 
-pub fn build_rhai(fiber_name: &str, source: &str) -> Result<Plugin, String> {
-    let meta = preflight(source)?;
+pub fn build_rhai_limited(
+    fiber_name: &str,
+    source: &str,
+    max_bytes: usize,
+) -> Result<Plugin, String> {
+    let meta = preflight_limited(source, max_bytes)?;
     let name = fiber_name.to_string();
     let source = source.to_string();
     let inject = if meta.inject.is_empty() {
@@ -934,5 +948,14 @@ mod tests {
         let err = tool_parameters_json(&spec).unwrap_err();
         assert!(err.contains("undeclared property"), "{err}");
         assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn build_rhai_limited_honors_inline_ceiling() {
+        let oversized = "x".repeat(MAX_INLINE_SOURCE + 1);
+        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE) {
+            Err(err) => assert!(err.contains("128KiB"), "{err}"),
+            Ok(_) => panic!("expected oversized inline source to fail"),
+        }
     }
 }
