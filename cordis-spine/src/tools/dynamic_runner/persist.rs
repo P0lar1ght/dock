@@ -181,9 +181,47 @@ fn source_too_large_msg(max_bytes: usize) -> String {
     }
 }
 
-/// Read a path-backed Rhai source after re-validating it under plugin roots.
-pub fn read_source_file(path: &Path, max_bytes: usize) -> Result<String, String> {
-    let path = assert_under_plugin_root(path)?;
+/// 重读前再确认一次路径**仍然**落在授权范围内，防的是 define 之后把文件换成
+/// 软链的那一手。
+///
+/// `allowed_dir` 是这次授权的边界：
+/// - `None` —— 走全局 [`plugin_roots`]，`cordis_define` 传进来的 `source_path` 用这条。
+/// - `Some(dir)` —— 只认这个插件自己的目录。磁盘插件走这条，因为扫描用的 root
+///   可以是调用方传进来的（[`DynamicRunner::boot_disk_from`]），写死全局 root 会
+///   让它**静默**加载不上。
+fn assert_still_authorized(path: &Path, allowed_dir: Option<&Path>) -> Result<PathBuf, String> {
+    match allowed_dir {
+        None => assert_under_plugin_root(path),
+        Some(dir) => {
+            let canon = path
+                .canonicalize()
+                .map_err(|e| format!("source_path {}: {e}", path.display()))?;
+            if !canon.is_file() {
+                return Err(format!("source_path is not a file: {}", canon.display()));
+            }
+            let dir_canon = dir
+                .canonicalize()
+                .map_err(|e| format!("source_path {}: {e}", dir.display()))?;
+            if !canon.starts_with(&dir_canon) {
+                return Err(format!(
+                    "source_path must resolve under {}; got {}",
+                    dir_canon.display(),
+                    canon.display()
+                ));
+            }
+            Ok(canon)
+        }
+    }
+}
+
+/// Read a path-backed Rhai source after re-validating it. See
+/// [`assert_still_authorized`] for what `allowed_dir` means.
+pub fn read_source_file(
+    path: &Path,
+    max_bytes: usize,
+    allowed_dir: Option<&Path>,
+) -> Result<String, String> {
+    let path = assert_still_authorized(path, allowed_dir)?;
     let meta = std::fs::metadata(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if meta.len() as usize > max_bytes {
         return Err(source_too_large_msg(max_bytes));
@@ -196,21 +234,41 @@ pub fn read_source_file(path: &Path, max_bytes: usize) -> Result<String, String>
     Ok(text)
 }
 
-pub fn package_source_text(pkg: &Package) -> Result<(String, usize), String> {
+pub fn package_source_text(
+    pkg: &Package,
+    allowed_dir: Option<&Path>,
+) -> Result<(String, usize), String> {
     match (&pkg.source, &pkg.source_path) {
         (Some(s), None) => Ok((s.clone(), MAX_INLINE_SOURCE)),
-        (None, Some(p)) => Ok((read_source_file(p, MAX_FILE_SOURCE)?, MAX_FILE_SOURCE)),
+        (None, Some(p)) => Ok((
+            read_source_file(p, MAX_FILE_SOURCE, allowed_dir)?,
+            MAX_FILE_SOURCE,
+        )),
         (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),
         (None, None) => Err("rhai package has no source to read".into()),
     }
 }
 
-fn source_input_for_package(pkg: &Package) -> Result<Option<SourceInput>, String> {
+fn source_input_for_package(
+    pkg: &Package,
+    allowed_dir: Option<&Path>,
+) -> Result<Option<SourceInput>, String> {
     match (&pkg.source, &pkg.source_path) {
         (Some(s), None) => Ok(Some(SourceInput::Inline(s.clone()))),
-        (None, Some(p)) => Ok(Some(SourceInput::ResolvedPath(p.clone()))),
+        (None, Some(p)) => Ok(Some(SourceInput::ResolvedPath {
+            path: p.clone(),
+            dir: allowed_dir.map(|d| d.to_path_buf()),
+        })),
         (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),
         (None, None) => Ok(None),
+    }
+}
+
+/// 磁盘插件的授权边界就是它自己那个目录。
+pub(super) fn origin_source_dir(origin: &PluginOrigin) -> Option<&Path> {
+    match origin {
+        PluginOrigin::Disk { path, .. } => Some(path.as_path()),
+        _ => None,
     }
 }
 
@@ -328,7 +386,8 @@ fn write_plugin(root: &Path, id: &str, pkg: &Package, enabled: bool) -> Result<P
     let toml = toml::to_string_pretty(&man).map_err(|e| format!("encode plugin.toml: {e}"))?;
     std::fs::write(dir.join("plugin.toml"), toml).map_err(|e| format!("write plugin.toml: {e}"))?;
     if pkg.factory == RHAI_FACTORY {
-        let (src, _) = package_source_text(pkg)?;
+        // promote 读的是会话包，它的 source_path 当初是按全局 root 授权的。
+        let (src, _) = package_source_text(pkg, None)?;
         std::fs::write(dir.join("source.rhai"), src)
             .map_err(|e| format!("write source.rhai: {e}"))?;
     }
@@ -396,10 +455,15 @@ impl DynamicRunner {
     }
 
     fn install_disk(&self, spec: &DiskSpec) -> Result<DefineReceipt, String> {
+        // 授权边界是这个插件自己的目录，不是全局 root——扫描用的 root 可能是
+        // `boot_disk_from` 传进来的。
         let source = spec
             .source_path
             .as_ref()
-            .map(|p| SourceInput::ResolvedPath(p.clone()));
+            .map(|p| SourceInput::ResolvedPath {
+                path: p.clone(),
+                dir: Some(spec.path.clone()),
+            });
         self.define_persistent(
             &spec.id,
             &spec.name,
@@ -512,7 +576,7 @@ impl DynamicRunner {
                     &pkg.purpose,
                     &pkg.factory,
                     pkg.contrib.clone(),
-                    source_input_for_package(&pkg)?,
+                    source_input_for_package(&pkg, None)?,
                     origin,
                 )?;
                 self.run(
@@ -535,7 +599,7 @@ impl DynamicRunner {
                     &pkg.purpose,
                     &pkg.factory,
                     pkg.contrib.clone(),
-                    source_input_for_package(&pkg)?,
+                    source_input_for_package(&pkg, None)?,
                 )?;
                 let mode = {
                     let inner = self.inner.lock().unwrap();
@@ -756,10 +820,7 @@ mod tests {
         std::fs::write(&file, "#{ inject: [], apply: |host| { } }").unwrap();
         let roots = vec![(PersistScope::Project, root.path().to_path_buf())];
         let canon = resolve_source_path_in(file.to_str().unwrap(), &roots).unwrap();
-        assert_eq!(
-            assert_under_plugin_root_in(&canon, &roots).unwrap(),
-            canon
-        );
+        assert_eq!(assert_under_plugin_root_in(&canon, &roots).unwrap(), canon);
 
         let outside = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(outside.path(), "TOP SECRET").unwrap();

@@ -39,10 +39,14 @@ use rhai_host::{MAX_FILE_SOURCE, MAX_INLINE_SOURCE};
 pub enum SourceInput {
     Inline(String),
     Path(String),
-    /// Already-resolved path (disk autoload / promote). Still re-checked under
-    /// plugin roots on every read so a post-define symlink swap cannot escape.
+    /// Already-resolved path (disk autoload / promote). 每次读之前仍然重新校验，
+    /// 免得 define 之后被换成软链溜出去；`dir` 是授权边界，`None` 表示按全局
+    /// plugin roots 判。
     #[doc(hidden)]
-    ResolvedPath(std::path::PathBuf),
+    ResolvedPath {
+        path: std::path::PathBuf,
+        dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -750,6 +754,8 @@ struct Plan {
     contrib: Option<SlashEntry>,
     source: Option<String>,
     source_path: Option<std::path::PathBuf>,
+    /// `source_path` 的授权边界（磁盘插件是它自己的目录；`None` 走全局 roots）。
+    source_dir: Option<std::path::PathBuf>,
     inject: Vec<String>,
     provides: Vec<String>,
 }
@@ -807,6 +813,7 @@ fn resolve_plan(
         contrib: pkg.contrib.clone(),
         source: pkg.source.clone(),
         source_path: pkg.source_path.clone(),
+        source_dir: persist::origin_source_dir(&rec.origin).map(|p| p.to_path_buf()),
         inject: pkg.inject.clone(),
         provides: pkg.provides.clone(),
     })
@@ -887,7 +894,7 @@ fn prepare_rhai_source(source: Option<SourceInput>) -> Result<PreparedRhai, Stri
         }
         SourceInput::Path(raw) => {
             let path = persist::resolve_source_path(&raw)?;
-            let text = persist::read_source_file(&path, MAX_FILE_SOURCE)?;
+            let text = persist::read_source_file(&path, MAX_FILE_SOURCE, None)?;
             let meta = rhai_host::preflight_limited(&text, MAX_FILE_SOURCE)?;
             Ok(PreparedRhai {
                 inject: meta.inject,
@@ -895,8 +902,8 @@ fn prepare_rhai_source(source: Option<SourceInput>) -> Result<PreparedRhai, Stri
                 path: Some(path),
             })
         }
-        SourceInput::ResolvedPath(path) => {
-            let text = persist::read_source_file(&path, MAX_FILE_SOURCE)?;
+        SourceInput::ResolvedPath { path, dir } => {
+            let text = persist::read_source_file(&path, MAX_FILE_SOURCE, dir.as_deref())?;
             let meta = rhai_host::preflight_limited(&text, MAX_FILE_SOURCE)?;
             Ok(PreparedRhai {
                 inject: meta.inject,
@@ -911,7 +918,7 @@ fn resolve_plan_source(plan: &Plan) -> Result<(String, usize), String> {
     match (&plan.source, &plan.source_path) {
         (Some(s), None) => Ok((s.clone(), MAX_INLINE_SOURCE)),
         (None, Some(p)) => Ok((
-            persist::read_source_file(p, MAX_FILE_SOURCE)?,
+            persist::read_source_file(p, MAX_FILE_SOURCE, plan.source_dir.as_deref())?,
             MAX_FILE_SOURCE,
         )),
         (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),

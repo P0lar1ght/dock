@@ -1532,3 +1532,48 @@ async fn a_rhai_hook_returning_a_non_string_injects_nothing() {
     assert_eq!(samples(&root), 1);
     assert!(reminders(&root).is_empty(), "{:?}", reminders(&root));
 }
+
+/// `boot_disk_from` 得认自己收到的 `roots`：磁盘 rhai 插件重读 `source.rhai` 时
+/// 如果拿全局 `plugin_roots()` 去判，传进来的 root 就被无视，插件**静默**加载不上
+/// （`install_disk` 的 Err 分支不打印）。
+#[tokio::test]
+async fn rhai_disk_plugin_autoloads_from_the_given_roots() {
+    let root = boot().await;
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_dir = dir.path().join("probeplug");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        "name = \"Probe\"\npurpose = \"rhai from disk\"\nfactory = \"rhai\"\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_dir.join("source.rhai"),
+        r#"#{
+            inject: ["tools"],
+            apply: |host| {
+                host.register_tool(#{
+                    name: "probeplug_ping",
+                    description: "pong",
+                    parameters: #{ type: "object", properties: #{} },
+                    execute: |args| { "probe-pong" }
+                });
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let runner = root
+        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap();
+    runner
+        .boot_disk_from(&[(PersistScope::Project, dir.path().to_path_buf())])
+        .await;
+
+    let row = runner.inspect_plugin(MAIN, "probeplug");
+    assert!(
+        row.is_ok(),
+        "rhai 磁盘插件应能从传入的 root 自动加载，实际：{:?}",
+        row.err()
+    );
+}
