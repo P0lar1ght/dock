@@ -2,10 +2,10 @@
 
 mod config;
 mod domain;
-mod error;
+pub(crate) mod error;
 mod fetch;
 mod http;
-mod ssrf;
+pub(crate) mod ssrf;
 
 use cordis::{plugin, Inject, Plugin};
 

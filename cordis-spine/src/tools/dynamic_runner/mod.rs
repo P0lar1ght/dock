@@ -7,6 +7,7 @@ mod lifecycle;
 mod persist;
 mod registry;
 mod rhai_host;
+mod rhai_http;
 
 use std::sync::{Arc, Mutex};
 
@@ -138,6 +139,10 @@ pub(crate) struct Inner {
 pub struct DynamicRunner {
     ctx: Context,
     pub(crate) inner: Arc<Mutex<Inner>>,
+    /// 脚本 `http_request` 的出网策略（SSRF / 代理）。**在这里存一份**而不是让
+    /// `apply_rhai` 每次现读磁盘配置：`tool-web` 也是组合根把 `WebFetchParams`
+    /// 递进去、插件体自己不 live-read 环境，这里跟它保持一致，顺带让测试能换掉它。
+    http_params: Arc<Mutex<crate::tools::web_fetch::WebFetchParams>>,
 }
 
 impl DynamicRunner {
@@ -149,7 +154,18 @@ impl DynamicRunner {
                 group: None,
                 start_hold: None,
             })),
+            http_params: Arc::new(Mutex::new(crate::tools::web_fetch::web_fetch_params())),
         }
+    }
+
+    /// 脚本 HTTP 的出网策略。组合根想换（或测试要开 `allow_local` 打本地服务端）
+    /// 就调 [`Self::set_http_params`]。
+    pub fn http_params(&self) -> crate::tools::web_fetch::WebFetchParams {
+        self.http_params.lock().unwrap().clone()
+    }
+
+    pub fn set_http_params(&self, params: crate::tools::web_fetch::WebFetchParams) {
+        *self.http_params.lock().unwrap() = params;
     }
 
     pub fn factories(&self) -> &'static [FactoryInfo] {

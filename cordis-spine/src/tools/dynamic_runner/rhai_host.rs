@@ -81,6 +81,7 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         "Tagged host log, also used by print().",
         &["host.log(message: String)"],
     ),
+    super::rhai_http::HTTP_BUILTIN,
 ];
 
 pub struct RhaiMeta {
@@ -198,6 +199,13 @@ fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str) -> Result<(), String
     let tag = format!("[cordis:{plugin_id}]");
     engine.on_print(move |s| eprintln!("{tag} {s}"));
     register_host(&mut engine);
+    // 只挂在**运行期**引擎上。define 期的 `preflight` 会 eval 源码顶层，挂上去
+    // 等于 `cordis_define` 本身就能发请求——那是权限门够不着的时机。
+    let http_params = ctx
+        .get::<super::DynamicRunner>(crate::names::DYNAMIC_CORDIS_RUNNER)
+        .map(|r| r.http_params())
+        .unwrap_or_else(crate::tools::web_fetch::web_fetch_params);
+    super::rhai_http::register(&mut engine, ctx.clone(), plugin_id.to_string(), http_params);
     let ast = engine
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;

@@ -1533,8 +1533,6 @@ async fn a_rhai_hook_returning_a_non_string_injects_nothing() {
     assert!(reminders(&root).is_empty(), "{:?}", reminders(&root));
 }
 
-/// `boot_disk_from` 得认自己收到的 `roots`：磁盘 rhai 插件重读 `source.rhai` 时
-/// 如果拿全局 `plugin_roots()` 去判，传进来的 root 就被无视，插件**静默**加载不上
 /// （`install_disk` 的 Err 分支不打印）。
 #[tokio::test]
 async fn rhai_disk_plugin_autoloads_from_the_given_roots() {
@@ -1575,5 +1573,403 @@ async fn rhai_disk_plugin_autoloads_from_the_given_roots() {
         row.is_ok(),
         "rhai 磁盘插件应能从传入的 root 自动加载，实际：{:?}",
         row.err()
+    );
+}
+
+/// 最小多路由服务端。用裸 TcpListener 手写，别为测试拖一个 mock 框架进来。
+/// 返回 `(base_url, 收到的请求原文)`。线程随进程退出。
+fn spawn_api_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            if head.is_empty() {
+                continue;
+            }
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                let _ = reader.read_exact(&mut body);
+            }
+            let body = String::from_utf8_lossy(&body).to_string();
+            let request_line = head.lines().next().unwrap_or_default().to_string();
+            log.lock().unwrap().push(format!("{head}{body}"));
+
+            let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+            let (status, ctype, payload) = match path {
+                p if p.starts_with("/issues?") || p == "/issues" => (
+                    "200 OK",
+                    "application/json",
+                    r#"{"total":2,"page":{"next":null},"items":[{"id":11,"title":"first bug","labels":["p0","ui"],"open":true},{"id":12,"title":"second bug","labels":[],"open":false}]}"#
+                        .to_string(),
+                ),
+                "/issues/11" => (
+                    "200 OK",
+                    "application/json",
+                    r#"{"id":11,"title":"first bug","author":{"login":"polar"},"comments":3}"#
+                        .to_string(),
+                ),
+                "/plain" => (
+                    "200 OK",
+                    "text/plain; charset=utf-8",
+                    "alpha\nbeta\ngamma".to_string(),
+                ),
+                "/missing" => (
+                    "404 Not Found",
+                    "application/json",
+                    r#"{"error":"no such issue"}"#.to_string(),
+                ),
+                "/echo" => (
+                    "200 OK",
+                    "application/json",
+                    format!(r#"{{"echoed":{}}}"#, if body.is_empty() { "null" } else { &body }),
+                ),
+                _ => ("200 OK", "text/plain", "ok".to_string()),
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nX-Api-Version: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(payload.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    (format!("http://{addr}"), seen)
+}
+
+/// 打开 `allow_local`，否则 SSRF 会把 127.0.0.1 挡掉。
+fn allow_local_http(root: &Context) {
+    let runner = root
+        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap();
+    runner.set_http_params(cordis_spine::WebFetchParams {
+        allow_local: Some(true),
+        ..Default::default()
+    });
+}
+
+async fn define_and_run(root: &Context, prefix: &str, src: &str) {
+    let defined = exec_json(
+        root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": prefix},
+            "name": "Api", "purpose": "wrap an api",
+            "factory": "rhai", "source": src
+        }),
+    )
+    .await;
+    assert!(defined.contains("pkg-1"), "{defined}");
+    let ran = exec(
+        root,
+        "cordis_run",
+        &format!(r#"{{"pluginId":"{prefix}-1","packageId":"pkg-1","mode":"run"}}"#),
+    )
+    .await;
+    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+}
+
+/// 主场景：GET JSON → `parse_json` → 取嵌套字段、数组元素、数组里的数组、布尔与数字。
+/// 这就是「封装一个 API」实际要做的事。
+#[tokio::test]
+async fn rhai_http_parses_json_and_extracts_nested_data() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, _seen) = spawn_api_server();
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "issues_summary",
+                description: "list issues",
+                parameters: #{{ type: "object", properties: #{{}} }},
+                execute: |args| {{
+                    let resp = http_request(#{{ url: "{base}/issues?state=open" }});
+                    if !resp.ok {{ return "HTTP " + resp.status; }}
+                    let data = parse_json(resp.body);
+                    let first = data.items[0];
+                    "total=" + data.total
+                      + " id=" + first.id
+                      + " title=" + first.title
+                      + " label0=" + first.labels[0]
+                      + " open=" + first.open
+                      + " second=" + data.items[1].title
+                      + " count=" + data.items.len()
+                      + " next=" + type_of(data.page.next)
+                }}
+            }});
+        }}
+    }}"#
+    );
+    define_and_run(&root, "jsn", &src).await;
+
+    let out = exec(&root, "issues_summary", "{}").await;
+    assert_eq!(
+        out,
+        "total=2 id=11 title=first bug label0=p0 open=true second=second bug count=2 next=()"
+    );
+}
+
+/// 响应的其余部分也要拿得到：状态码、`ok`、响应头、最终 URL。
+#[tokio::test]
+async fn rhai_http_exposes_status_headers_and_url() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, _seen) = spawn_api_server();
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "probe_meta",
+                description: "response metadata",
+                parameters: #{{ type: "object", properties: #{{}} }},
+                execute: |args| {{
+                    let resp = http_request(#{{ url: "{base}/issues/11" }});
+                    "status=" + resp.status
+                      + " ok=" + resp.ok
+                      + " ctype=" + resp.headers["content-type"]
+                      + " api=" + resp.headers["x-api-version"]
+                      + " url_ok=" + resp.url.ends_with("/issues/11")
+                }}
+            }});
+        }}
+    }}"#
+    );
+    define_and_run(&root, "meta", &src).await;
+
+    let out = exec(&root, "probe_meta", "{}").await;
+    assert_eq!(
+        out,
+        "status=200 ok=true ctype=application/json api=2 url_ok=true"
+    );
+}
+
+/// 非 JSON 响应：直接拿 `body` 当字符串切。不是所有 API 都返回 JSON。
+#[tokio::test]
+async fn rhai_http_handles_plain_text_bodies() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, _seen) = spawn_api_server();
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "probe_text",
+                description: "plain body",
+                parameters: #{{ type: "object", properties: #{{}} }},
+                execute: |args| {{
+                    let resp = http_request(#{{ url: "{base}/plain" }});
+                    let lines = resp.body.split("\n");
+                    "lines=" + lines.len() + " second=" + lines[1] + " has_gamma=" + resp.body.contains("gamma")
+                }}
+            }});
+        }}
+    }}"#
+    );
+    define_and_run(&root, "txt", &src).await;
+
+    assert_eq!(
+        exec(&root, "probe_text", "{}").await,
+        "lines=3 second=beta has_gamma=true"
+    );
+}
+
+/// 4xx 不是错误：正常返回，`ok` 为假，正文照样读得到（错误体常常是 JSON）。
+#[tokio::test]
+async fn rhai_http_returns_4xx_as_data_not_as_a_throw() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, _seen) = spawn_api_server();
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "probe_404",
+                description: "not found",
+                parameters: #{{ type: "object", properties: #{{}} }},
+                execute: |args| {{
+                    let resp = http_request(#{{ url: "{base}/missing" }});
+                    let err = parse_json(resp.body);
+                    "status=" + resp.status + " ok=" + resp.ok + " msg=" + err.error
+                }}
+            }});
+        }}
+    }}"#
+    );
+    define_and_run(&root, "nfnd", &src).await;
+
+    assert_eq!(
+        exec(&root, "probe_404", "{}").await,
+        "status=404 ok=false msg=no such issue"
+    );
+}
+
+/// POST：方法、自定义 header、`to_json` 出去的请求体，服务端都要真的收到；
+/// 工具入参也要能流进请求体。
+#[tokio::test]
+async fn rhai_http_posts_headers_and_body_from_tool_args() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, seen) = spawn_api_server();
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "create_issue",
+                description: "post one",
+                parameters: #{{ type: "object", properties: #{{ title: #{{ type: "string" }} }}, required: ["title"] }},
+                execute: |args| {{
+                    let resp = http_request(#{{
+                        method: "POST",
+                        url: "{base}/echo",
+                        headers: #{{ "Authorization": "Bearer s3cret", "Content-Type": "application/json" }},
+                        body: to_json(#{{ title: args.title, open: true }})
+                    }});
+                    let back = parse_json(resp.body);
+                    "echoed_title=" + back.echoed.title + " open=" + back.echoed.open
+                }}
+            }});
+        }}
+    }}"#
+    );
+    define_and_run(&root, "post", &src).await;
+
+    let out = exec(&root, "create_issue", r#"{"title":"从工具入参来的"}"#).await;
+    assert_eq!(out, "echoed_title=从工具入参来的 open=true");
+
+    let requests = seen.lock().unwrap().clone();
+    let last = requests.last().expect("服务端应当收到请求");
+    assert!(last.starts_with("POST /echo "), "{last}");
+    assert!(last.contains("authorization: Bearer s3cret"), "{last}");
+    assert!(last.contains(r#""title":"从工具入参来的""#), "{last}");
+}
+
+/// 一次 execute 里连打两跳：先列表、再按 id 取详情。真实的 API 封装就是这个形状。
+#[tokio::test]
+async fn rhai_http_chains_two_requests_in_one_tool_call() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, seen) = spawn_api_server();
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "first_issue_detail",
+                description: "list then fetch",
+                parameters: #{{ type: "object", properties: #{{}} }},
+                execute: |args| {{
+                    let list = parse_json(http_request(#{{ url: "{base}/issues" }}).body);
+                    let id = list.items[0].id;
+                    let detail = parse_json(http_request(#{{ url: "{base}/issues/" + id }}).body);
+                    detail.title + " by " + detail.author.login + " (" + detail.comments + " comments)"
+                }}
+            }});
+        }}
+    }}"#
+    );
+    define_and_run(&root, "chain", &src).await;
+
+    assert_eq!(
+        exec(&root, "first_issue_detail", "{}").await,
+        "first bug by polar (3 comments)"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2, "应当打了两跳");
+}
+
+/// 闸仍在：换回默认策略，环回地址被 SSRF 挡住，且错误是抛出来的（不是静默空串）。
+#[tokio::test]
+async fn rhai_http_still_blocks_loopback_under_default_policy() {
+    let root = boot().await;
+    let (base, _seen) = spawn_api_server();
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "probe_blocked",
+                description: "ssrf",
+                parameters: #{{ type: "object", properties: #{{}} }},
+                execute: |args| {{ http_request(#{{ url: "{base}/issues" }}).body }}
+            }});
+        }}
+    }}"#
+    );
+    define_and_run(&root, "blk", &src).await;
+
+    let out = exec(&root, "probe_blocked", "{}").await;
+    assert!(out.contains("SSRF"), "默认策略应当挡住环回：{out}");
+}
+
+/// `http_request` 只挂在**运行期**引擎上：define 期的 preflight 会 eval 源码顶层，
+/// 挂上去等于 `cordis_define` 本身就能发请求——那是权限门够不着的时机。
+#[tokio::test]
+async fn http_request_is_not_available_at_define_time() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, seen) = spawn_api_server();
+
+    let src = format!(
+        r#"#{{
+        inject: [],
+        sneaky: http_request(#{{ url: "{base}/issues" }}),
+        apply: |host| {{ }}
+    }}"#
+    );
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "sneak"},
+            "name": "Sneaky", "purpose": "define-time fetch",
+            "factory": "rhai", "source": src
+        }),
+    )
+    .await;
+    assert!(
+        defined.contains("Error"),
+        "define 期不该能发请求：{defined}"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "服务端不该收到任何请求：{:?}",
+        seen.lock().unwrap()
     );
 }
