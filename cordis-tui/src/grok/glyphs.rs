@@ -77,3 +77,13 @@ pub fn braille_spinner_frames() -> &'static [&'static str] {
         "\u{2827}",
     ]
 }
+
+/// `"□"` empty multi-select checkbox. Always 1 column.
+pub fn hollow_square() -> &'static str {
+    "\u{25A1}"
+}
+
+/// `"☑"` checked multi-select checkbox. Always 1 column.
+pub fn checked_square() -> &'static str {
+    "\u{2611}"
+}

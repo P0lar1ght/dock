@@ -747,6 +747,7 @@ pub fn render_tasks_overlay(
         close_button: frame.close_button,
         rows: hits,
         kill_buttons,
+        ..Default::default()
     }
 }
 

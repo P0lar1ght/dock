@@ -29,6 +29,8 @@ pub struct PickerHits {
     pub rows: Vec<(usize, Rect)>,
     /// `(kill_rect, target)`：任务面板里能停的那些行（`/loop` 与 workflow）。
     pub kill_buttons: Vec<(Rect, crate::grok::tasks_pane::KillTarget)>,
+    /// Ask-view 「其他」freeform input row (empty when inactive).
+    pub draft_input: Rect,
 }
 
 /// A selectable leaf row (Grok non-expandable `PickerRow`).

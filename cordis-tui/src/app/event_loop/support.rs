@@ -273,6 +273,7 @@ fn ask_overlay_from_prompt(front: &cordis_spine::AskPrompt) -> Overlay {
             picked: Vec::new(),
             draft: String::new(),
             draft_cursor: 0,
+            draft_focused: false,
         };
     };
     let labs = ask_view::labels(q);
@@ -305,6 +306,33 @@ fn ask_overlay_from_prompt(front: &cordis_spine::AskPrompt) -> Overlay {
         picked,
         draft,
         draft_cursor,
+        draft_focused: false,
+    }
+}
+
+/// True when the highlighted Ask option is the Other freeform choice.
+pub(super) fn ask_selected_is_other(ctx: &Context, selected: usize) -> bool {
+    ctx.get::<Ask>(ASK)
+        .and_then(|a| a.front())
+        .and_then(|p| {
+            p.questions.get(p.index).map(|q| {
+                ask_view::labels(q)
+                    .get(selected)
+                    .is_some_and(|l| ask_view::is_other_label(l))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Keep Other draft focus in sync after keyboard selection changes.
+pub(super) fn sync_ask_draft_focus(ctx: &Context, overlay: &mut Overlay) {
+    if let Overlay::Ask {
+        selected,
+        draft_focused,
+        ..
+    } = overlay
+    {
+        *draft_focused = ask_selected_is_other(ctx, *selected);
     }
 }
 

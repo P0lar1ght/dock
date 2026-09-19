@@ -67,6 +67,8 @@ pub enum Overlay {
         draft: String,
         /// Char index into `draft` for the Other freeform field.
         draft_cursor: usize,
+        /// Whether the Other freeform field has keyboard/mouse focus (caret).
+        draft_focused: bool,
     },
     Elicit {
         selected: usize,
@@ -876,6 +878,11 @@ pub fn hit_index(hits: &PickerHits, column: u16, row: u16) -> Option<usize> {
 
 pub fn hit_close(hits: &PickerHits, column: u16, row: u16) -> bool {
     hits.close_button.contains(Position { x: column, y: row })
+}
+
+pub fn hit_draft_input(hits: &PickerHits, column: u16, row: u16) -> bool {
+    let r = hits.draft_input;
+    r.width > 0 && r.height > 0 && r.contains(Position { x: column, y: row })
 }
 
 pub fn hit_kill(

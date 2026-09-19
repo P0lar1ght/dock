@@ -213,6 +213,7 @@ pub(super) fn run_action(
             }
             let len = overlay_len(ctx, overlay);
             overlay.move_sel(delta, len);
+            sync_ask_draft_focus(ctx, overlay);
             Vec::new()
         }
         Action::OverlayAccept => {
@@ -464,9 +465,10 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::push_draft_char(draft, draft_cursor, c);
                     return Vec::new();
                 }
@@ -474,10 +476,12 @@ pub(super) fn run_action(
                     let i = i as usize;
                     if (1..=picked.len().max(9)).contains(&i) {
                         *selected = i - 1;
-                        if ask_other_active(ctx, *selected, picked) {
+                        if ask_selected_is_other(ctx, *selected) {
+                            *draft_focused = true;
                             ask_view::clamp_draft_cursor(draft, draft_cursor);
                             return Vec::new();
                         }
+                        *draft_focused = false;
                         return accept_overlay(ctx, overlay);
                     }
                 }
@@ -649,9 +653,10 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::backspace_draft(draft, draft_cursor);
                     return Vec::new();
                 }
@@ -676,9 +681,10 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::push_draft(draft, draft_cursor, &text);
                     return Vec::new();
                 }
@@ -700,6 +706,7 @@ pub(super) fn run_action(
         }
         Action::OverlaySelect(idx) => {
             overlay.set_selected(idx);
+            sync_ask_draft_focus(ctx, overlay);
             Vec::new()
         }
         Action::OverlaySpace => {
@@ -735,15 +742,24 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     if let Some(slot) = picked.get_mut(*selected) {
                         *slot = true;
                     }
                     ask_view::push_draft_char(draft, draft_cursor, ' ');
                     return Vec::new();
                 }
+                if ask_selected_is_other(ctx, *selected) {
+                    *draft_focused = true;
+                    if let Some(slot) = picked.get_mut(*selected) {
+                        *slot = true;
+                    }
+                    return Vec::new();
+                }
+                *draft_focused = false;
                 if let Some(slot) = picked.get_mut(*selected) {
                     *slot = !*slot;
                 }
@@ -829,9 +845,10 @@ pub(super) fn run_action(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::move_draft_cursor(draft, draft_cursor, delta);
                     return Vec::new();
                 }
@@ -1042,6 +1059,7 @@ pub(super) fn run_action(
             }
             if overlay.is_open() {
                 overlay.move_sel(if delta > 0 { -1 } else { 1 }, overlay_len(ctx, overlay));
+                sync_ask_draft_focus(ctx, overlay);
                 return Vec::new();
             }
             if let Ok(scrollback) = ctx.require::<Scrollback>(TUI_SCROLLBACK) {
@@ -1212,9 +1230,14 @@ pub(super) fn run_action(
                     }
                     overlay.set_selected(idx);
                     if let Overlay::Ask {
-                        selected, picked, ..
+                        selected,
+                        picked,
+                        draft_focused,
+                        ..
                     } = overlay
                     {
+                        // Option click focuses draft only when that row is Other.
+                        *draft_focused = ask_selected_is_other(ctx, *selected);
                         if ask_other_active(ctx, *selected, picked) {
                             return Vec::new();
                         }
@@ -1229,6 +1252,12 @@ pub(super) fn run_action(
                     }
                     if !matches!(overlay, Overlay::Settings { .. }) {
                         return accept_overlay(ctx, overlay);
+                    }
+                }
+                if let Overlay::Ask { draft_focused, .. } = overlay {
+                    if overlay::hit_draft_input(hits, column, row) {
+                        *draft_focused = true;
+                        return Vec::new();
                     }
                 }
                 return Vec::new();
@@ -1933,9 +1962,10 @@ pub(super) fn apply_paste(
                 picked,
                 draft,
                 draft_cursor,
+                draft_focused,
             } = overlay
             {
-                if ask_other_active(ctx, *selected, picked) {
+                if *draft_focused && ask_other_active(ctx, *selected, picked) {
                     ask_view::push_draft(draft, draft_cursor, &text);
                     return;
                 }

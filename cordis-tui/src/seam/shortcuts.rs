@@ -23,10 +23,13 @@ impl Shortcuts {
     /// Live-look prompt / `session.port`. Overlay is event-loop local state.
     pub fn hints(&self, overlay: &Overlay, slash: bool, files: bool) -> Vec<HintItem> {
         if let Overlay::Ask {
-            selected, picked, ..
+            selected,
+            picked,
+            draft_focused,
+            ..
         } = overlay
         {
-            let typing = self
+            let other_on = self
                 .ctx
                 .get::<Ask>(ASK)
                 .and_then(|a| a.front())
@@ -38,6 +41,7 @@ impl Shortcuts {
                     })
                 })
                 .unwrap_or(false);
+            let typing = *draft_focused && other_on;
             if typing {
                 return vec![
                     HintItem::new("type", "other"),

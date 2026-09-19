@@ -1,4 +1,4 @@
-//! Ask-user overlay chrome, same radio layout as `permission_view`.
+//! Ask-user overlay chrome: radio dots for single-select, checkbox squares for multi.
 //! Option labels come from Grok `ask_user_question`; "Other" is appended
 //! (Grok always offers a freeform choice). Display uses 其他.
 //! Selecting 其他 requires typed notes; the wire label stays `"Other"`.
@@ -112,14 +112,20 @@ pub fn chrome_height(prompt: &AskPrompt, width: u16, selected: usize, picked: &[
     (2 + q_rows + 1 + n + 1 + extra).clamp(8, 18)
 }
 
+/// Freeform 「其他」field state passed into [`render`].
+pub struct AskDraft<'a> {
+    pub text: &'a str,
+    pub cursor: usize,
+    pub focused: bool,
+}
+
 pub fn render(
     buf: &mut Buffer,
     area: Rect,
     prompt: &AskPrompt,
     selected: usize,
     picked: &[bool],
-    draft: &str,
-    draft_cursor: usize,
+    draft: AskDraft<'_>,
 ) -> PickerHits {
     if area.height == 0 || area.width == 0 {
         return PickerHits::default();
@@ -213,10 +219,21 @@ pub fn render(
             cell.set_style(Style::default().fg(theme.accent_user).bg(row_bg));
         }
         let num_style = Style::default().fg(theme.accent_user).bg(row_bg);
-        let marker = if on {
+        let marker = if multi {
+            if on {
+                glyphs::checked_square()
+            } else {
+                glyphs::hollow_square()
+            }
+        } else if on {
             glyphs::filled_dot()
         } else {
             glyphs::hollow_dot()
+        };
+        let marker_span = if multi {
+            format!("{marker} ")
+        } else {
+            format!("({marker}) ")
         };
         let text_style = if selected {
             Style::default()
@@ -231,7 +248,7 @@ pub fn render(
             y,
             &Line::from(vec![
                 Span::styled(format!("{} ", i + 1), num_style),
-                Span::styled(format!("({marker}) "), text_style),
+                Span::styled(marker_span, text_style),
                 Span::styled(label.clone(), text_style),
             ]),
             content_w,
@@ -250,7 +267,11 @@ pub fn render(
 
     if other_active(&opts, sel, picked, multi) && y.saturating_add(1) < area.y + area.height {
         y = y.saturating_add(1);
-        let row_bg = theme.bg_visual;
+        let row_bg = if draft.focused {
+            theme.bg_visual
+        } else {
+            theme.bg_light
+        };
         let row_rect = Rect {
             x: area.x.saturating_add(1),
             y,
@@ -263,10 +284,14 @@ pub fn render(
             cell.set_style(Style::default().fg(theme.accent_user).bg(row_bg));
         }
         let label_style = Style::default().fg(theme.gray).bg(row_bg);
-        let text_style = Style::default()
-            .fg(theme.text_primary)
-            .bg(row_bg)
-            .add_modifier(Modifier::BOLD);
+        let text_style = if draft.focused {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.gray).bg(row_bg)
+        };
         let placeholder_style = Style::default().fg(theme.gray).bg(row_bg);
         let cursor_style = Style::default()
             .fg(theme.bg_light)
@@ -276,14 +301,16 @@ pub fn render(
             Span::styled("› ", Style::default().fg(theme.accent_user).bg(row_bg)),
             Span::styled("其他 ", label_style),
         ];
-        let cursor = draft_cursor.min(draft.chars().count());
-        if draft.is_empty() {
-            spans.push(Span::styled("█", cursor_style));
-            spans.push(Span::styled(" 输入具体内容…", placeholder_style));
-        } else {
-            let before: String = draft.chars().take(cursor).collect();
-            let at = draft.chars().nth(cursor);
-            let after: String = draft.chars().skip(cursor.saturating_add(1)).collect();
+        let cursor = draft.cursor.min(draft.text.chars().count());
+        if draft.text.is_empty() {
+            if draft.focused {
+                spans.push(Span::styled("█", cursor_style));
+            }
+            spans.push(Span::styled("输入具体内容…", placeholder_style));
+        } else if draft.focused {
+            let before: String = draft.text.chars().take(cursor).collect();
+            let at = draft.text.chars().nth(cursor);
+            let after: String = draft.text.chars().skip(cursor.saturating_add(1)).collect();
             if !before.is_empty() {
                 spans.push(Span::styled(before, text_style));
             }
@@ -294,8 +321,16 @@ pub fn render(
             if !after.is_empty() {
                 spans.push(Span::styled(after, text_style));
             }
+        } else {
+            spans.push(Span::styled(draft.text.to_string(), text_style));
         }
         buf.set_line(content_x, y, &Line::from(spans), content_w);
+        hits.draft_input = Rect {
+            x: content_x,
+            y,
+            width: content_w,
+            height: 1,
+        };
     }
     hits
 }
@@ -338,7 +373,8 @@ fn wrap_line(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cordis_spine::{Question, QuestionOption};
+    use cordis_spine::{AskPrompt, Question, QuestionOption};
+    use ratatui::buffer::Buffer;
 
     fn sample(label: &str) -> Question {
         Question {
@@ -402,5 +438,117 @@ mod tests {
         assert_eq!(cursor, 0);
         move_draft_cursor(&draft, &mut cursor, 99);
         assert_eq!(cursor, 3);
+    }
+
+    fn sample_prompt(multi: bool) -> AskPrompt {
+        AskPrompt {
+            questions: vec![Question {
+                question: "Which?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "Alpha".into(),
+                        description: String::new(),
+                        preview: None,
+                        id: None,
+                    },
+                    QuestionOption {
+                        label: "Beta".into(),
+                        description: String::new(),
+                        preview: None,
+                        id: None,
+                    },
+                ],
+                multi_select: Some(multi),
+                id: None,
+            }],
+            index: 0,
+            current_labels: Vec::new(),
+            current_notes: None,
+            max_index: 0,
+        }
+    }
+
+    fn paint(
+        prompt: &AskPrompt,
+        selected: usize,
+        picked: &[bool],
+        draft: &str,
+        focused: bool,
+    ) -> (String, PickerHits) {
+        let area = Rect::new(0, 0, 48, 14);
+        let mut buf = Buffer::empty(area);
+        let hits = render(
+            &mut buf,
+            area,
+            prompt,
+            selected,
+            picked,
+            AskDraft {
+                text: draft,
+                cursor: draft.chars().count(),
+                focused,
+            },
+        );
+        let mut painted = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                painted.push_str(buf[(x, y)].symbol());
+            }
+        }
+        // Wide CJK glyphs leave blank continuation cells in the buffer.
+        let compact: String = painted
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '┃')
+            .collect();
+        (compact, hits)
+    }
+
+    #[test]
+    fn single_select_uses_radio_dots() {
+        let prompt = sample_prompt(false);
+        let (painted, _) = paint(&prompt, 0, &[true, false, false], "", false);
+        assert!(
+            painted.contains(glyphs::filled_dot()) && painted.contains(glyphs::hollow_dot()),
+            "{painted}"
+        );
+        assert!(
+            !painted.contains(glyphs::hollow_square())
+                && !painted.contains(glyphs::checked_square()),
+            "{painted}"
+        );
+    }
+
+    #[test]
+    fn multi_select_uses_checkbox_squares() {
+        let prompt = sample_prompt(true);
+        let (painted, _) = paint(&prompt, 0, &[true, false, false], "", false);
+        assert!(
+            painted.contains(glyphs::checked_square()) && painted.contains(glyphs::hollow_square()),
+            "{painted}"
+        );
+        assert!(
+            !painted.contains(glyphs::filled_dot()) && !painted.contains(glyphs::hollow_dot()),
+            "{painted}"
+        );
+    }
+
+    #[test]
+    fn draft_caret_only_when_focused() {
+        let prompt = sample_prompt(false);
+        let other = labels(prompt.questions.first().unwrap()).len() - 1;
+        let (focused, hits_f) = paint(&prompt, other, &vec![false; other + 1], "", true);
+        let (blurred, hits_b) = paint(&prompt, other, &vec![false; other + 1], "", false);
+        assert!(focused.contains('█'), "{focused}");
+        assert!(!blurred.contains('█'), "{blurred}");
+        assert!(blurred.contains("输入具体内容"), "{blurred}");
+        assert!(hits_f.draft_input.width > 0 && hits_f.draft_input.height > 0);
+        assert!(hits_b.draft_input.width > 0 && hits_b.draft_input.height > 0);
+    }
+
+    #[test]
+    fn draft_hit_rect_empty_when_other_inactive() {
+        let prompt = sample_prompt(false);
+        let (_, hits) = paint(&prompt, 0, &[false, false, false], "", false);
+        assert_eq!(hits.draft_input.width, 0);
     }
 }
