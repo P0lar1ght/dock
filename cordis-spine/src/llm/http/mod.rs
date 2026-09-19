@@ -914,13 +914,9 @@ mod tests {
             true,
         ))
         .unwrap();
-        let resp = serde_json::to_string(&responses::body(
-            "m",
-            &request,
-            &[],
-            &WireParams::default(),
-        ))
-        .unwrap();
+        let resp =
+            serde_json::to_string(&responses::body("m", &request, &[], &WireParams::default()))
+                .unwrap();
         for (name, json) in [("chat", &chat), ("messages", &msgs), ("responses", &resp)] {
             assert!(
                 !json.contains("llm stream failed"),
