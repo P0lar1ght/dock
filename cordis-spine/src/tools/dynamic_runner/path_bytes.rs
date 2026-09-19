@@ -28,10 +28,7 @@ pub fn resolve_workspace_file(raw: &str) -> Result<PathBuf, String> {
         return Err("host.read_bytes: path must not contain NUL".into());
     }
     let path = PathBuf::from(raw);
-    if path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-    {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err("host.read_bytes: path must not contain '..'".into());
     }
 
@@ -80,11 +77,7 @@ fn display_path(path: &Path, cwd: &Path) -> String {
 }
 
 /// Permission gate + read. Summary carries path only — never file bytes.
-pub fn read_bytes_gated(
-    ctx: &Context,
-    plugin_id: &str,
-    raw_path: &str,
-) -> Result<Vec<u8>, String> {
+pub fn read_bytes_gated(ctx: &Context, plugin_id: &str, raw_path: &str) -> Result<Vec<u8>, String> {
     let canon = resolve_workspace_file(raw_path)?;
     let cwd = std::env::current_dir().ok();
     let shown = cwd
@@ -95,16 +88,15 @@ pub fn read_bytes_gated(
 
     request_permission(ctx, plugin_id, &shown)?;
 
-    let meta = std::fs::metadata(&canon)
-        .map_err(|e| format!("host.read_bytes: metadata {shown}: {e}"))?;
+    let meta =
+        std::fs::metadata(&canon).map_err(|e| format!("host.read_bytes: metadata {shown}: {e}"))?;
     let len = meta.len() as usize;
     if len > MAX_READ_BYTES {
         return Err(format!(
             "host.read_bytes: file exceeds {MAX_READ_BYTES} bytes ({len} in {shown})"
         ));
     }
-    let bytes =
-        std::fs::read(&canon).map_err(|e| format!("host.read_bytes: read {shown}: {e}"))?;
+    let bytes = std::fs::read(&canon).map_err(|e| format!("host.read_bytes: read {shown}: {e}"))?;
     if bytes.len() > MAX_READ_BYTES {
         return Err(format!(
             "host.read_bytes: file exceeds {MAX_READ_BYTES} bytes ({} in {shown})",
@@ -181,10 +173,7 @@ mod tests {
         {
             std::os::unix::fs::symlink(outside.path().join("secret"), abs.join("link")).unwrap();
             let err = resolve_workspace_file(&format!("{rel}/link")).unwrap_err();
-            assert!(
-                err.contains("escapes") || err.contains("symlink"),
-                "{err}"
-            );
+            assert!(err.contains("escapes") || err.contains("symlink"), "{err}");
         }
         let _ = fs::remove_dir_all(&abs);
     }

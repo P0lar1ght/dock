@@ -4,11 +4,11 @@
 
 mod factories;
 mod lifecycle;
+mod path_bytes;
 mod persist;
 mod registry;
 mod rhai_codec;
 mod rhai_host;
-mod path_bytes;
 mod rhai_http;
 mod rhai_regex;
 mod rhai_secret;

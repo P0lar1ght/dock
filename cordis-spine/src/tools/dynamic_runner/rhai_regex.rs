@@ -248,9 +248,7 @@ mod tests {
         assert!(e
             .eval::<bool>(r#"regex_is_match("\\d+", "ab12cd")"#)
             .unwrap());
-        assert!(!e
-            .eval::<bool>(r#"regex_is_match("\\d+", "abcd")"#)
-            .unwrap());
+        assert!(!e.eval::<bool>(r#"regex_is_match("\\d+", "abcd")"#).unwrap());
         assert_eq!(
             e.eval::<String>(r#"regex_find("\\d+", "ab12cd")"#).unwrap(),
             "12"
@@ -268,7 +266,8 @@ mod tests {
             "1:a 2:b"
         );
         assert_eq!(
-            e.eval::<String>(r#"regex_replace("x", "x", "$$")"#).unwrap(),
+            e.eval::<String>(r#"regex_replace("x", "x", "$$")"#)
+                .unwrap(),
             "$"
         );
         assert_eq!(

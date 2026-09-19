@@ -153,10 +153,7 @@ fn parse_spec(spec: &Map) -> Result<RequestSpec, String> {
 }
 
 fn parse_body(spec: &Map) -> Result<BodyKind, String> {
-    let has_multipart = spec
-        .get("multipart")
-        .map(|v| !v.is_unit())
-        .unwrap_or(false);
+    let has_multipart = spec.get("multipart").map(|v| !v.is_unit()).unwrap_or(false);
     let has_body = spec.get("body").map(|v| !v.is_unit()).unwrap_or(false);
     if has_multipart && has_body {
         return Err("http_request: `multipart` and `body` are mutually exclusive".into());
@@ -200,14 +197,12 @@ fn parse_multipart(spec: &Map) -> Result<Vec<MultipartPart>, String> {
         let map = item
             .read_lock::<Map>()
             .ok_or_else(|| format!("multipart[{i}] must be a map"))?;
-        let name = str_field(&map, "name")
-            .ok_or_else(|| format!("multipart[{i}] needs `name`"))?;
+        let name = str_field(&map, "name").ok_or_else(|| format!("multipart[{i}] needs `name`"))?;
         if name.is_empty() {
             return Err(format!("multipart[{i}].name must not be empty"));
         }
         let filename = str_field(&map, "filename");
-        let content_type = str_field(&map, "content_type")
-            .or_else(|| str_field(&map, "mime"));
+        let content_type = str_field(&map, "content_type").or_else(|| str_field(&map, "mime"));
         let has_value = map.get("value").map(|v| !v.is_unit()).unwrap_or(false);
         let has_blob = map.get("blob").map(|v| !v.is_unit()).unwrap_or(false);
         if has_value == has_blob {
@@ -347,8 +342,7 @@ async fn send(
     let mut req = client.request(spec.method.clone(), spec.url.clone());
     for (name, value) in &spec.headers {
         // multipart sets its own Content-Type with boundary — drop a caller-supplied one.
-        if matches!(spec.body, BodyKind::Multipart(_))
-            && name.eq_ignore_ascii_case("content-type")
+        if matches!(spec.body, BodyKind::Multipart(_)) && name.eq_ignore_ascii_case("content-type")
         {
             continue;
         }
@@ -676,13 +670,10 @@ mod tests {
             ("body", Dynamic::from("x".to_string())),
             (
                 "multipart",
-                Dynamic::from(rhai::Array::from(vec![Dynamic::from(map(&[(
-                    "name",
-                    Dynamic::from("a".to_string()),
-                ), (
-                    "value",
-                    Dynamic::from("1".to_string()),
-                )]))])),
+                Dynamic::from(rhai::Array::from(vec![Dynamic::from(map(&[
+                    ("name", Dynamic::from("a".to_string())),
+                    ("value", Dynamic::from("1".to_string())),
+                ]))])),
             ),
         ]);
         let err = parse_spec(&spec).unwrap_err();
@@ -856,5 +847,4 @@ mod tests {
         assert!(body.contains("FILEBYTES"), "{body}");
         assert!(body.contains("filename=\"doc.txt\""), "{body}");
     }
-
 }

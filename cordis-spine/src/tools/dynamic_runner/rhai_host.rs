@@ -29,7 +29,6 @@ const SOURCE_SHAPE_HINT: &str = "source must be a map #{ inject: [...], apply: |
 const PARAMETERS_MUST_BE_MAP: &str = "host.register_tool parameters must be a map, not a JSON string. Use:\n\
     parameters: #{ type: \"object\", properties: #{ text: #{ type: \"string\" } }, required: [\"text\"] }";
 
-
 const READ_BYTES_BUILTIN: (&str, &str, &[&str]) = (
     "host.read_bytes",
     "Read a workspace file into a Rhai Blob for http_request body/multipart. Path only (like read_file): relative to cwd or absolute under cwd; rejects `..`, symlink escape, and paths outside the workspace. First use gates `read_bytes {path}` (summary never includes bytes). Empty files OK; over 1MiB throws. Runtime Host only — not available at define-time preflight. Prefer this over embedding file content in tool args.",
@@ -675,7 +674,6 @@ impl Host {
         Ok(value.into())
     }
 
-    
     fn read_bytes(
         &mut self,
         path: ImmutableString,

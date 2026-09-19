@@ -2263,10 +2263,7 @@ async fn path_reference_upload_args_are_path_only() {
     let (base, seen) = spawn_api_server();
 
     // Workspace-relative file (cwd-bounded). Payload must NOT appear in tool args.
-    let rel = format!(
-        ".tmp-dock-upload-{}e2e.bin",
-        std::process::id()
-    );
+    let rel = format!(".tmp-dock-upload-{}e2e.bin", std::process::id());
     let payload = b"REF_UPLOAD_PAYLOAD_bytes_\xff\x00_END";
     std::fs::write(&rel, payload).unwrap();
 
@@ -2322,7 +2319,10 @@ async fn path_reference_upload_args_are_path_only() {
 
     let requests = seen.lock().unwrap().clone();
     let last = requests.last().expect("server should see the upload");
-    assert!(last.contains("multipart/form-data") || last.contains("Content-Type: multipart"), "{last}");
+    assert!(
+        last.contains("multipart/form-data") || last.contains("Content-Type: multipart"),
+        "{last}"
+    );
     // Raw capture may be lossy for non-utf8; check the ASCII marker at least.
     assert!(
         last.contains("REF_UPLOAD_PAYLOAD") || last.contains("filename=\"data.bin\""),
@@ -2356,14 +2356,12 @@ async fn host_read_bytes_rejects_escape_paths() {
     define_and_run(&root, "esc", src).await;
 
     for bad in ["/etc/passwd", "../Cargo.toml", "/tmp/nope"] {
-        let out = exec(
-            &root,
-            "read_escape",
-            &format!(r#"{{"path":"{bad}"}}"#),
-        )
-        .await;
+        let out = exec(&root, "read_escape", &format!(r#"{{"path":"{bad}"}}"#)).await;
         assert!(
-            out.contains("Error") || out.contains("escapes") || out.contains("..") || out.contains("reject"),
+            out.contains("Error")
+                || out.contains("escapes")
+                || out.contains("..")
+                || out.contains("reject"),
             "path {bad:?} should be rejected: {out}"
         );
         assert!(!out.contains("should-not-reach"), "{out}");
@@ -2378,7 +2376,10 @@ async fn rhai_regex_and_read_bytes_listed_in_builtins() {
     assert!(out.contains("regex_is_match"), "{out}");
     assert!(out.contains("regex_replace"), "{out}");
     assert!(out.contains("host.read_bytes"), "{out}");
-    assert!(out.contains("body_blob") || out.contains("multipart"), "{out}");
+    assert!(
+        out.contains("body_blob") || out.contains("multipart"),
+        "{out}"
+    );
 }
 
 /// Regex works inside execute (runtime engine).
