@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "cordis"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cordis",
  "cordis-gateway",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-base"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "grep-matcher",
  "grep-regex",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-gateway"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-markdown"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anstyle",
  "anstyle-lossy",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-spine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "async-lsp",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anstyle",
  "chrono",
@@ -4806,7 +4806,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-mermaid"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fontdb",
  "image",

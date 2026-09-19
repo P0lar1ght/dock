@@ -21,7 +21,7 @@ members = [
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
-version = "0.1.0"
+version = "0.1.1"
 
 # 调试信息占了构建产物的绝大头：`cordis-spine` 的 rlib 一份 200MB、`dock` 二进制
 # 165MB，链接时间也随之走高。`line-tables-only` 保留 backtrace 的「文件:行」

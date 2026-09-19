@@ -607,7 +607,7 @@ mod tests {
         let text = compact(&buf);
         assert!(text.contains('\u{256d}') || text.contains('╭'), "{text}");
         assert!(text.contains('\u{256f}') || text.contains('╯'), "{text}");
-        assert!(text.contains("0.1.0"), "{text}");
+        assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
         assert!(text.contains("Cordis"), "{text}");
         assert!(
             rects[0].0.x > 20,
