@@ -6,7 +6,7 @@ use cordis_spine::{
     TuiSlots, AGENT_PRESETS, ASK, BROWSER, GOAL, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
     TUI_SLOTS,
 };
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Widget};
@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use crate::error::{Error, Result};
 use crate::file_search;
 use crate::grok::mcps;
-use crate::grok::picker::{PickerHits, PickerRow};
+use crate::grok::picker::{render_close_button, PickerHits, PickerRow};
 use crate::grok::shortcuts::ShortcutsBar;
 use crate::grok::tasks_pane;
 use crate::grok::workflows;
@@ -401,6 +401,7 @@ pub(super) fn draw(
                         composer,
                         *composer_cursor,
                     );
+                    hover_close_button(frame.buffer_mut(), hits, pointer);
                     if matches!(target, InspectTarget::Subagent(_)) {
                         if let Some(pos) =
                             inspect_overlay::composer_cursor(composer, *composer_cursor)
@@ -421,7 +422,14 @@ pub(super) fn draw(
             let mut slash_is_open = false;
             let mut files_open = false;
             if !inspect_open {
-                *hits = paint_overlay(ctx, frame.buffer_mut(), scroll_area, overlay, on_welcome);
+                *hits = paint_overlay(
+                    ctx,
+                    frame.buffer_mut(),
+                    scroll_area,
+                    overlay,
+                    on_welcome,
+                    pointer,
+                );
                 *dock_hits = task_dock::paint(frame.buffer_mut(), dock_area, &dock_rows);
                 if goal_h > 0 {
                     if let Some(goal) = ctx.get::<Goal>(GOAL) {
@@ -648,8 +656,9 @@ pub(super) fn paint_overlay(
     area: Rect,
     overlay: &Overlay,
     on_welcome: bool,
+    pointer: (u16, u16),
 ) -> PickerHits {
-    match overlay {
+    let hits = match overlay {
         Overlay::None => PickerHits::default(),
         Overlay::Resume { selected, query } => {
             let archived = ctx
@@ -946,7 +955,35 @@ pub(super) fn paint_overlay(
             ..
         } => inspect_overlay::render(ctx, buf, area, target, *scroll, composer, *composer_cursor),
         Overlay::Presets(view) => preset_overlay::render(ctx, buf, area, view),
+    };
+    hover_close_button(buf, &hits, pointer);
+    hits
+}
+
+/// 右上角 `[×]` 的悬停高亮（Grok 的 close button hover）。
+///
+/// 按钮位置是各覆盖层渲染时自己算出来的（`PickerHits::close_button`），所以这里
+/// 拿指针去命中那块矩形，命中就按悬停样式原地重画一遍 —— 让每个覆盖层再抄一遍
+/// 那段布局公式，迟早会和真正的按钮位置走散。
+pub(super) fn hover_close_button(
+    buf: &mut ratatui::buffer::Buffer,
+    hits: &PickerHits,
+    pointer: (u16, u16),
+) {
+    let rect = hits.close_button;
+    if rect.width == 0 || !rect.contains(Position::new(pointer.0, pointer.1)) {
+        return;
     }
+    let theme = Theme::current();
+    render_close_button(
+        buf,
+        rect.x,
+        rect.y,
+        rect.width,
+        &theme,
+        true,
+        Some(theme.bg_base),
+    );
 }
 
 pub(super) fn arg_picker_title(kind: crate::slash::ArgKind) -> &'static str {
@@ -965,7 +1002,7 @@ pub(super) fn arg_picker_title(kind: crate::slash::ArgKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cordis_spine::ModelChoice;
+    use cordis_spine::{JobSnapshot, ModelChoice};
 
     fn choice(id: &str, name: &str, description: &str) -> ModelChoice {
         ModelChoice {
@@ -1032,5 +1069,43 @@ mod tests {
         let _svc = ctx.provide(SETTINGS, AppSettings::new("")).unwrap();
         let line = prompt_chrome_info(&ctx);
         assert!(line.starts_with("dock · 思考"), "line={line}");
+    }
+
+    /// Tasks 覆盖层（以及所有共用 `PickerHits::close_button` 的浮层）右上角的
+    /// `[×]`：指针停上去要变亮加粗，移开恢复灰的。
+    #[test]
+    fn hovering_the_close_button_bolds_it() {
+        use ratatui::buffer::Buffer;
+        use ratatui::style::Modifier;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let job = JobSnapshot {
+            id: "job-1".into(),
+            command: "echo hi".into(),
+            done: false,
+            output: String::new(),
+            description: Some("say hi".into()),
+            is_monitor: false,
+            foreground: false,
+            start_time: std::time::SystemTime::now(),
+        };
+        let entries = tasks_pane::collect_items(&[job], &[], &[], &[], None);
+        let mut buf = Buffer::empty(area);
+        let hits = tasks_pane::render_tasks_overlay(&mut buf, area, &entries, 0, "");
+        let button = hits.close_button;
+        assert!(button.width > 0, "close button rect");
+        let mid = (button.x + 1, button.y);
+
+        hover_close_button(&mut buf, &hits, (button.x - 5, button.y));
+        assert!(
+            !buf.cell(mid).unwrap().modifier.contains(Modifier::BOLD),
+            "指针不在按钮上时不该高亮"
+        );
+
+        hover_close_button(&mut buf, &hits, mid);
+        assert!(
+            buf.cell(mid).unwrap().modifier.contains(Modifier::BOLD),
+            "指针压在 [×] 上时必须高亮"
+        );
     }
 }
