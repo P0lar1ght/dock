@@ -25,6 +25,7 @@ impl Shortcuts {
         if let Overlay::Ask {
             selected,
             picked,
+            draft,
             draft_focused,
             ..
         } = overlay
@@ -43,11 +44,12 @@ impl Shortcuts {
                 .unwrap_or(false);
             let typing = *draft_focused && other_on;
             if typing {
+                // Esc 是一级级退：有字先清空，空着再退出「其他」。
                 return vec![
                     HintItem::new("type", "other"),
                     HintItem::new("←→", "cursor"),
                     HintItem::new("Enter", "submit"),
-                    HintItem::new("Esc", "clear"),
+                    HintItem::new("Esc", if draft.is_empty() { "back" } else { "clear" }),
                 ];
             }
             let mut hints = vec![

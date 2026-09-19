@@ -519,6 +519,11 @@ pub(super) fn draw(
                                 focused: draft_focused,
                             },
                         );
+                        // 真实光标要跟到「其他」输入框里。只画反显方块的话终端光标
+                        // 还停在别处，输入法候选条就飘到屏幕另一头去了。
+                        if let Some(pos) = hits.draft_caret {
+                            frame.set_cursor_position(pos);
+                        }
                     }
                 } else if elicit_open {
                     if let Some(prompt) = elicit_front(ctx) {

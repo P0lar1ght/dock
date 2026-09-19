@@ -5,11 +5,11 @@
 
 use cordis_spine::{AskPrompt, Question};
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::grok::glyphs;
 use crate::grok::picker::PickerHits;
@@ -18,6 +18,8 @@ use crate::theme::Theme;
 const OTHER: &str = "其他";
 const OTHER_WIRE: &str = "Other";
 pub const MAX_ASK_DRAFT: usize = 4096;
+/// 「其他」输入框占的行数：上边框 + 输入行 + 下边框。
+const DRAFT_BOX_ROWS: u16 = 3;
 
 pub fn labels(q: &Question) -> Vec<String> {
     let mut out: Vec<String> = q.options.iter().map(|o| o.label.clone()).collect();
@@ -104,8 +106,9 @@ pub fn chrome_height(prompt: &AskPrompt, width: u16, selected: usize, picked: &[
     let opts = labels(q);
     let n = opts.len() as u16;
     let multi = q.multi_select.unwrap_or(false);
+    // 「其他」字段是个三行圆角框（上边框 / 输入行 / 下边框），前面再留一行空隙。
     let extra = if other_active(&opts, selected, picked, multi) {
-        2
+        DRAFT_BOX_ROWS + 1
     } else {
         0
     };
@@ -201,7 +204,13 @@ pub fn render(
             break;
         }
         let selected = i == sel;
-        let on = picked.get(i).copied().unwrap_or(false) || (!multi && selected);
+        // 单选的实心点**只**跟高亮走。掺进 `picked` 会让按过空格的行都留着一个
+        // 点，屏幕上像是多选了，而 `accept_ask` 单选时只认 `selected`。
+        let on = if multi {
+            picked.get(i).copied().unwrap_or(false)
+        } else {
+            selected
+        };
         let row_bg = if selected {
             theme.bg_visual
         } else {
@@ -265,74 +274,226 @@ pub fn render(
         y = y.saturating_add(1);
     }
 
-    if other_active(&opts, sel, picked, multi) && y.saturating_add(1) < area.y + area.height {
-        y = y.saturating_add(1);
-        let row_bg = if draft.focused {
-            theme.bg_visual
-        } else {
-            theme.bg_light
-        };
-        let row_rect = Rect {
-            x: area.x.saturating_add(1),
-            y,
-            width: area.width.saturating_sub(1),
-            height: 1,
-        };
-        fill_rect(buf, row_rect, Style::default().bg(row_bg));
-        if let Some(cell) = buf.cell_mut((area.x, y)) {
-            cell.set_symbol(glyphs::accent_bar());
-            cell.set_style(Style::default().fg(theme.accent_user).bg(row_bg));
+    if other_active(&opts, sel, picked, multi) {
+        let rows_left = (area.y + area.height).saturating_sub(y.saturating_add(1));
+        if rows_left >= DRAFT_BOX_ROWS {
+            y = y.saturating_add(1);
+            draw_draft_box(
+                buf,
+                Rect {
+                    x: area.x.saturating_add(1),
+                    y,
+                    width: area.width.saturating_sub(2),
+                    height: DRAFT_BOX_ROWS,
+                },
+                &draft,
+                &theme,
+                &mut hits,
+            );
+        } else if rows_left >= 1 {
+            // 终端太矮，框放不下：退回单行，至少让人还能打字。
+            y = y.saturating_add(1);
+            draw_draft_line(
+                buf,
+                Rect {
+                    x: content_x,
+                    y,
+                    width: content_w,
+                    height: 1,
+                },
+                &draft,
+                &theme,
+                &mut hits,
+            );
         }
-        let label_style = Style::default().fg(theme.gray).bg(row_bg);
-        let text_style = if draft.focused {
-            Style::default()
-                .fg(theme.text_primary)
-                .bg(row_bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.gray).bg(row_bg)
-        };
-        let placeholder_style = Style::default().fg(theme.gray).bg(row_bg);
-        let cursor_style = Style::default()
-            .fg(theme.bg_light)
-            .bg(theme.accent_user)
-            .add_modifier(Modifier::BOLD);
-        let mut spans = vec![
-            Span::styled("› ", Style::default().fg(theme.accent_user).bg(row_bg)),
-            Span::styled("其他 ", label_style),
-        ];
-        let cursor = draft.cursor.min(draft.text.chars().count());
-        if draft.text.is_empty() {
-            if draft.focused {
-                spans.push(Span::styled("█", cursor_style));
-            }
-            spans.push(Span::styled("输入具体内容…", placeholder_style));
-        } else if draft.focused {
-            let before: String = draft.text.chars().take(cursor).collect();
-            let at = draft.text.chars().nth(cursor);
-            let after: String = draft.text.chars().skip(cursor.saturating_add(1)).collect();
-            if !before.is_empty() {
-                spans.push(Span::styled(before, text_style));
-            }
-            match at {
-                Some(ch) => spans.push(Span::styled(ch.to_string(), cursor_style)),
-                None => spans.push(Span::styled("█", cursor_style)),
-            }
-            if !after.is_empty() {
-                spans.push(Span::styled(after, text_style));
-            }
-        } else {
-            spans.push(Span::styled(draft.text.to_string(), text_style));
-        }
-        buf.set_line(content_x, y, &Line::from(spans), content_w);
-        hits.draft_input = Rect {
-            x: content_x,
-            y,
-            width: content_w,
-            height: 1,
-        };
     }
     hits
+}
+
+/// 「其他」输入框：跟输入栏同一套圆角边框语言，聚焦时走 `prompt_border_active`。
+///
+/// 焦点不能只靠底色区分——`bg_visual` 与 `bg_light` 在深色主题里只差 8/255，
+/// 截图上根本分不出来。
+fn draw_draft_box(
+    buf: &mut Buffer,
+    area: Rect,
+    draft: &AskDraft<'_>,
+    theme: &Theme,
+    hits: &mut PickerHits,
+) {
+    let bg = theme.bg_light;
+    let border_color = if draft.focused {
+        theme.prompt_border_active
+    } else {
+        theme.prompt_border
+    };
+    let border = Style::default().fg(border_color).bg(bg);
+    let left = area.x;
+    let right = area.x + area.width.saturating_sub(1);
+    let bottom = area.y + area.height.saturating_sub(1);
+
+    fill_rect(buf, area, Style::default().bg(bg));
+    for x in area.x..area.x + area.width {
+        if let Some(cell) = buf.cell_mut((x, area.y)) {
+            cell.set_char(if x == left {
+                '\u{256d}'
+            } else if x == right {
+                '\u{256e}'
+            } else {
+                '\u{2500}'
+            });
+            cell.set_style(border);
+        }
+        if let Some(cell) = buf.cell_mut((x, bottom)) {
+            cell.set_char(if x == left {
+                '\u{2570}'
+            } else if x == right {
+                '\u{256f}'
+            } else {
+                '\u{2500}'
+            });
+            cell.set_style(border);
+        }
+    }
+    let field_y = area.y.saturating_add(1);
+    for x in [left, right] {
+        if let Some(cell) = buf.cell_mut((x, field_y)) {
+            cell.set_char('\u{2502}');
+            cell.set_style(border);
+        }
+    }
+    // 标题压在上边框上，跟输入栏底边的 `╰─ model ─╯` 一个写法。
+    let title = Line::from(vec![
+        Span::styled("\u{2500} ", border),
+        Span::styled(
+            OTHER,
+            Style::default()
+                .fg(if draft.focused {
+                    theme.accent_user
+                } else {
+                    theme.gray
+                })
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" \u{2500}", border),
+    ]);
+    if area.width > 10 {
+        buf.set_line(
+            left.saturating_add(1),
+            area.y,
+            &title,
+            area.width.saturating_sub(2),
+        );
+    }
+
+    let field = Rect {
+        x: left.saturating_add(2),
+        y: field_y,
+        width: area.width.saturating_sub(4),
+        height: 1,
+    };
+    draw_draft_field(buf, field, draft, theme, hits);
+}
+
+/// 放不下框时的单行退化版本。
+fn draw_draft_line(
+    buf: &mut Buffer,
+    area: Rect,
+    draft: &AskDraft<'_>,
+    theme: &Theme,
+    hits: &mut PickerHits,
+) {
+    let bg = theme.bg_light;
+    fill_rect(buf, area, Style::default().bg(bg));
+    let prefix = Line::from(vec![
+        Span::styled("\u{203a} ", Style::default().fg(theme.accent_user).bg(bg)),
+        Span::styled(format!("{OTHER} "), Style::default().fg(theme.gray).bg(bg)),
+    ]);
+    buf.set_line(area.x, area.y, &prefix, area.width);
+    let used = 2 + OTHER.width() as u16 + 1;
+    draw_draft_field(
+        buf,
+        Rect {
+            x: area.x.saturating_add(used),
+            y: area.y,
+            width: area.width.saturating_sub(used),
+            height: 1,
+        },
+        draft,
+        theme,
+        hits,
+    );
+}
+
+/// 画文本 / 占位，并把真实光标该落的格子记进 `hits`。
+fn draw_draft_field(
+    buf: &mut Buffer,
+    field: Rect,
+    draft: &AskDraft<'_>,
+    theme: &Theme,
+    hits: &mut PickerHits,
+) {
+    if field.width == 0 {
+        return;
+    }
+    let bg = theme.bg_light;
+    let text_style = if draft.focused {
+        Style::default().fg(theme.text_primary).bg(bg)
+    } else {
+        Style::default().fg(theme.gray).bg(bg)
+    };
+    let placeholder_style = Style::default().fg(theme.gray).bg(bg);
+    if draft.text.is_empty() {
+        buf.set_line(
+            field.x,
+            field.y,
+            &Line::from(Span::styled("输入具体内容…", placeholder_style)),
+            field.width,
+        );
+        if draft.focused {
+            hits.draft_caret = Some(Position::new(field.x, field.y));
+        }
+    } else {
+        let cursor = if draft.focused { draft.cursor } else { 0 };
+        let (visible, caret_col) = draft_window(draft.text, cursor, field.width as usize);
+        buf.set_line(
+            field.x,
+            field.y,
+            &Line::from(Span::styled(visible, text_style)),
+            field.width,
+        );
+        if draft.focused {
+            hits.draft_caret = Some(Position::new(field.x.saturating_add(caret_col), field.y));
+        }
+    }
+    hits.draft_input = field;
+}
+
+/// 字段装不下时把可见窗口往右滑，让光标始终留在框内。
+///
+/// 真实光标一旦跑出字段，输入法的候选条就又锚到别处去了——这正是要修的那个偏移。
+/// 返回 `(可见文本, 光标相对字段左沿的列偏移)`。
+fn draft_window(text: &str, cursor: usize, field_w: usize) -> (String, u16) {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let width_of = |cs: &[char]| -> usize { cs.iter().filter_map(|c| c.width()).sum() };
+    let mut start = 0usize;
+    // 光标自己也要占一格，所以留一格余量。
+    while start < cursor && width_of(&chars[start..cursor]).saturating_add(1) > field_w {
+        start += 1;
+    }
+    let mut visible = String::new();
+    let mut used = 0usize;
+    for c in &chars[start..] {
+        let cw = c.width().unwrap_or(0);
+        if used + cw > field_w {
+            break;
+        }
+        visible.push(*c);
+        used += cw;
+    }
+    (visible, width_of(&chars[start..cursor]) as u16)
 }
 
 fn fill_rect(buf: &mut Buffer, area: Rect, style: Style) {
@@ -518,6 +679,25 @@ mod tests {
         );
     }
 
+    /// 单选任何时候都只该有一个实心点。空格按过几行就点亮几行（`picked` 掺进了
+    /// 单选的显示），看着像多选——虽然 `accept_ask` 只取 `selected`。
+    #[test]
+    fn single_select_shows_exactly_one_filled_dot() {
+        let prompt = sample_prompt(false);
+        let picked = vec![true, true, true];
+        let (painted, _) = paint(&prompt, 1, &picked, "", false);
+        assert_eq!(
+            painted.matches(glyphs::filled_dot()).count(),
+            1,
+            "{painted}"
+        );
+        assert_eq!(
+            painted.matches(glyphs::hollow_dot()).count(),
+            picked.len() - 1,
+            "{painted}"
+        );
+    }
+
     #[test]
     fn multi_select_uses_checkbox_squares() {
         let prompt = sample_prompt(true);
@@ -532,17 +712,93 @@ mod tests {
         );
     }
 
+    /// 聚焦才报真实光标位置，且必须落在输入框里——`frame.rs` 拿它去调
+    /// `set_cursor_position`，报到框外输入法候选条又要飘。
     #[test]
     fn draft_caret_only_when_focused() {
         let prompt = sample_prompt(false);
         let other = labels(prompt.questions.first().unwrap()).len() - 1;
         let (focused, hits_f) = paint(&prompt, other, &vec![false; other + 1], "", true);
         let (blurred, hits_b) = paint(&prompt, other, &vec![false; other + 1], "", false);
-        assert!(focused.contains('█'), "{focused}");
-        assert!(!blurred.contains('█'), "{blurred}");
+
+        let caret = hits_f.draft_caret.expect("聚焦时要给出真实光标位置");
+        assert!(
+            hits_f.draft_input.contains(caret),
+            "光标 {caret:?} 落在输入框 {:?} 外",
+            hits_f.draft_input
+        );
+        assert!(hits_b.draft_caret.is_none(), "失焦不该占用终端光标");
+
+        assert!(focused.contains("输入具体内容"), "{focused}");
         assert!(blurred.contains("输入具体内容"), "{blurred}");
         assert!(hits_f.draft_input.width > 0 && hits_f.draft_input.height > 0);
         assert!(hits_b.draft_input.width > 0 && hits_b.draft_input.height > 0);
+    }
+
+    /// 光标要跟着字走：打了字之后不能还停在字段左沿。
+    #[test]
+    fn draft_caret_follows_the_text() {
+        let prompt = sample_prompt(false);
+        let other = labels(prompt.questions.first().unwrap()).len() - 1;
+        let (_, empty) = paint(&prompt, other, &vec![false; other + 1], "", true);
+        let (_, typed) = paint(&prompt, other, &vec![false; other + 1], "ab", true);
+        let x0 = empty.draft_caret.unwrap().x;
+        let x1 = typed.draft_caret.unwrap().x;
+        assert_eq!(x1, x0 + 2, "两个半角字符应让光标右移两列");
+
+        // CJK 占两列，光标偏移要按显示宽度算，不是按字符数。
+        let (_, cjk) = paint(&prompt, other, &vec![false; other + 1], "中", true);
+        assert_eq!(cjk.draft_caret.unwrap().x, x0 + 2);
+    }
+
+    /// 聚焦 / 失焦的边框要用两支不同的颜色——只靠底色分不出来（深色主题里
+    /// `bg_visual` 与 `bg_light` 只差 8/255，截图上看着一模一样）。
+    #[test]
+    fn draft_box_border_follows_focus() {
+        let _g = crate::theme::test_guard();
+        let theme = Theme::current();
+        let prompt = sample_prompt(false);
+        let other = labels(prompt.questions.first().unwrap()).len() - 1;
+        let picked = vec![false; other + 1];
+
+        let corner = |focused: bool| {
+            let area = Rect::new(0, 0, 48, 14);
+            let mut buf = Buffer::empty(area);
+            render(
+                &mut buf,
+                area,
+                &prompt,
+                other,
+                &picked,
+                AskDraft {
+                    text: "",
+                    cursor: 0,
+                    focused,
+                },
+            );
+            // 找上边框左上角那颗圆角。
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if buf[(x, y)].symbol() == "\u{256d}" {
+                        return buf[(x, y)].style().fg;
+                    }
+                }
+            }
+            None
+        };
+
+        assert_eq!(corner(true), Some(theme.prompt_border_active));
+        assert_eq!(corner(false), Some(theme.prompt_border));
+        assert_ne!(theme.prompt_border, theme.prompt_border_active);
+    }
+
+    /// 长文本要把窗口往右滑，光标不能溢出字段。
+    #[test]
+    fn draft_window_keeps_the_caret_inside() {
+        let (visible, col) = draft_window("abcdefghij", 10, 5);
+        assert!(col < 5, "光标列 {col} 应留在宽 5 的字段里");
+        assert!(visible.chars().count() <= 5, "{visible}");
+        assert!(visible.ends_with('j'), "窗口应跟到末尾：{visible}");
     }
 
     #[test]
