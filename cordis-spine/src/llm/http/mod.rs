@@ -177,6 +177,16 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
     chain.join(" ← ")
 }
 
+/// bytes_stream 传输失败并入 [`LlmOutput`]：只写 `error`，绝不填 `text`。
+///
+/// 抽成纯函数是为了可测——造一条活的 HTTP `bytes_stream` Err 在单测里太重。
+fn merge_stream_transport_error(mut out: LlmOutput, detail: String) -> LlmOutput {
+    if out.error.is_none() {
+        out.error = Some(format!("llm stream failed: {detail}"));
+    }
+    out
+}
+
 /// 各家用的 request-id 头名不一样，挨个试。
 fn response_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
     ["request-id", "x-request-id", "cf-ray", "x-amzn-requestid"]
@@ -429,11 +439,9 @@ async fn sample_http(
         let mut bytes = match chunk {
             Ok(b) => b,
             Err(e) => {
-                let mut out = acc.finish();
-                if out.text.is_empty() {
-                    out.text = format!("llm stream failed: {e}");
-                }
-                return out;
+                // 传输层失败只进 error，永不填 text——与 HTTP 503 / SSE 错误信封同契约
+                //（types.rs LlmOutput::error 注释；假 text 会进 wire 并挡 Esc rewind）。
+                return merge_stream_transport_error(acc.finish(), transport_detail(&e));
             }
         };
         if first {
@@ -890,15 +898,84 @@ mod tests {
             history: vec![
                 LogEvent::User("hi".into()),
                 LogEvent::LlmStream(LlmOutput {
-                    error: Some("[连接失败] connection reset by peer".into()),
+                    error: Some("llm stream failed: [传输] connection reset by peer".into()),
                     ..LlmOutput::default()
                 }),
             ],
             tools: vec![],
         };
-        let json =
+        let chat =
             serde_json::to_string(&chat_body("m", &request, &[], &WireParams::default())).unwrap();
-        assert!(!json.contains("connection reset"), "{json}");
+        let msgs = serde_json::to_string(&messages::body(
+            "m",
+            &request,
+            &[],
+            &WireParams::default(),
+            true,
+        ))
+        .unwrap();
+        let resp = serde_json::to_string(&responses::body(
+            "m",
+            &request,
+            &[],
+            &WireParams::default(),
+        ))
+        .unwrap();
+        for (name, json) in [("chat", &chat), ("messages", &msgs), ("responses", &resp)] {
+            assert!(
+                !json.contains("llm stream failed"),
+                "{name} wire leaked stream failure: {json}"
+            );
+            assert!(
+                !json.contains("connection reset"),
+                "{name} wire leaked detail: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_transport_error_goes_to_error_not_text() {
+        let out = merge_stream_transport_error(LlmOutput::default(), "boom".into());
+        assert!(out.text.is_empty(), "{}", out.text);
+        assert!(
+            out.error
+                .as_deref()
+                .is_some_and(|e| e.contains("llm stream failed") && e.contains("boom")),
+            "{:?}",
+            out.error
+        );
+    }
+
+    #[test]
+    fn stream_transport_error_keeps_partial_text() {
+        let out = merge_stream_transport_error(
+            LlmOutput {
+                text: "he".into(),
+                ..LlmOutput::default()
+            },
+            "boom".into(),
+        );
+        assert_eq!(out.text, "he");
+        assert!(
+            out.error
+                .as_deref()
+                .is_some_and(|e| e.contains("llm stream failed") && e.contains("boom")),
+            "{:?}",
+            out.error
+        );
+    }
+
+    #[test]
+    fn stream_transport_error_does_not_clobber_existing_error() {
+        let out = merge_stream_transport_error(
+            LlmOutput {
+                error: Some("first".into()),
+                ..LlmOutput::default()
+            },
+            "boom".into(),
+        );
+        assert_eq!(out.error.as_deref(), Some("first"));
+        assert!(out.text.is_empty());
     }
 
     /// reqwest 的 `Display` 只印外壳，真正的原因在 `source()` 链里——摊平函数
