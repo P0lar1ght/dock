@@ -36,6 +36,8 @@ pub struct ArchivedSession {
     pub compact_prefix: Option<Vec<LogEvent>>,
     /// Display index from which new events are appended onto [`Self::compact_prefix`].
     pub compact_from: usize,
+    /// Agent preset id active when archived. `None` on sessions saved before this field.
+    pub preset_id: Option<String>,
 }
 
 /// 这条事件进不进模型上下文。
@@ -90,6 +92,8 @@ pub struct Sessions {
     /// `$DOCK_HOME/sessions/<cwd-key>/`. Isolated child logs stay memory-only.
     disk_cwd: Arc<Mutex<Option<PathBuf>>>,
     live_id: Arc<Mutex<String>>,
+    /// Preset id stamped into `meta.json` on save / archive. Updated by the TUI.
+    live_preset_id: Arc<Mutex<Option<String>>>,
     /// Compacted prefix sent to the sampler. `None` = display log is the model history.
     compact_prefix: Arc<Mutex<Option<Vec<LogEvent>>>>,
     compact_from: Arc<Mutex<usize>>,
@@ -189,6 +193,7 @@ impl Sessions {
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
             disk_cwd: Arc::new(Mutex::new(None)),
             live_id: Arc::new(Mutex::new(String::new())),
+            live_preset_id: Arc::new(Mutex::new(None)),
             compact_prefix: Arc::new(Mutex::new(None)),
             compact_from: Arc::new(Mutex::new(0)),
             compact_images: Arc::new(Mutex::new(Vec::new())),
@@ -197,6 +202,16 @@ impl Sessions {
 
     /// Load `$DOCK_HOME/sessions/<cwd>/` into the resume list. No-op for
     /// isolated child logs. Safe to call more than once (replaces the list).
+    /// Stamp the active agent preset into subsequent `meta.json` writes.
+    pub fn set_preset_id(&self, id: Option<String>) {
+        *self.live_preset_id.lock().unwrap() = id.filter(|s| !s.trim().is_empty());
+    }
+
+    /// Preset stamped on the live session (also set by `/resume` when meta has one).
+    pub fn preset_id(&self) -> Option<String> {
+        self.live_preset_id.lock().unwrap().clone()
+    }
+
     pub fn attach_disk(&self) {
         if !self.emit {
             return;
@@ -952,6 +967,7 @@ impl Sessions {
             times,
             compact_prefix,
             compact_from,
+            preset_id: self.live_preset_id.lock().unwrap().clone(),
         };
         self.write_archived(&item);
         self.archive.lock().unwrap().insert(0, item.clone());
@@ -988,6 +1004,10 @@ impl Sessions {
         *self.pending_call.lock().unwrap() = None;
         self.rewound.store(false, Ordering::Relaxed);
         self.apply_compact_snapshot(item.compact_prefix, item.compact_from);
+        // Old sessions omit preset_id — keep the live preset as-is.
+        if let Some(pid) = item.preset_id {
+            *self.live_preset_id.lock().unwrap() = Some(pid);
+        }
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
         if let Some(event) = last {
@@ -1119,6 +1139,7 @@ impl Sessions {
             times: self.times(),
             compact_prefix,
             compact_from,
+            preset_id: self.live_preset_id.lock().unwrap().clone(),
         };
         let _ = crate::session::persist::save(&item, &cwd);
     }

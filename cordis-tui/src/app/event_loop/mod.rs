@@ -273,6 +273,14 @@ pub async fn run(root: Context) -> Result<()> {
                                     if let Ok(sessions) = ctx.require::<Sessions>(SESSIONS) {
                                         sessions.archive_current();
                                         sessions.restore(&id);
+                                        // Old sessions have no preset_id — leave AgentPresets alone.
+                                        if let Some(pid) = sessions.preset_id() {
+                                            if let Some(presets) =
+                                                ctx.get::<AgentPresets>(AGENT_PRESETS)
+                                            {
+                                                let _ = presets.apply(&pid);
+                                            }
+                                        }
                                     }
                                     overlay.close();
                                 }

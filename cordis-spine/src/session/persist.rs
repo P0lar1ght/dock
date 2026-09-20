@@ -26,6 +26,9 @@ struct MetaFile {
     cwd: String,
     #[serde(default)]
     updated_unix: u64,
+    /// Agent preset active when this session was saved. Absent on old sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preset_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -146,6 +149,7 @@ pub fn save(item: &ArchivedSession, cwd: &Path) -> std::io::Result<()> {
         title: item.title.clone(),
         cwd: cwd.to_string_lossy().into_owned(),
         updated_unix: unix(updated),
+        preset_id: item.preset_id.clone(),
     };
     atomic_write(
         &dir.join(META),
@@ -176,12 +180,14 @@ pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
             title: String::new(),
             cwd: cwd.to_string_lossy().into_owned(),
             updated_unix: unix(SystemTime::now()),
+            preset_id: None,
         }),
         Err(_) => MetaFile {
             id: id.into(),
             title: String::new(),
             cwd: cwd.to_string_lossy().into_owned(),
             updated_unix: unix(SystemTime::now()),
+            preset_id: None,
         },
     };
     meta.title = title.into();
@@ -425,6 +431,7 @@ fn load_one(dir: &Path) -> Option<(u64, ArchivedSession)> {
             times,
             compact_prefix,
             compact_from,
+            preset_id: meta.as_ref().and_then(|m| m.preset_id.clone()),
         },
     ))
 }
@@ -662,6 +669,44 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_preset_id_and_old_meta_without_field() {
+        let _home = cordis_base::test_env::scoped().home();
+        let cwd = Path::new("/tmp/dock-persist-preset-test");
+        let _ = remove("p1", cwd);
+        let _ = remove("old", cwd);
+        let item = ArchivedSession {
+            id: "p1".into(),
+            title: "with preset".into(),
+            events: vec![LogEvent::User("hi".into())],
+            times: vec![SystemTime::now()],
+            compact_prefix: None,
+            compact_from: 0,
+            preset_id: Some("warden".into()),
+        };
+        save(&item, cwd).unwrap();
+        let loaded = load_cwd(cwd);
+        assert_eq!(loaded[0].preset_id.as_deref(), Some("warden"));
+
+        let dir = sessions_cwd_dir(cwd).join("old");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(META),
+            br#"{"id":"old","title":"legacy","cwd":"/tmp","updated_unix":1}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join(HISTORY),
+            "{\"ts\":1,\"kind\":\"user\",\"text\":\"legacy\"}\n",
+        )
+        .unwrap();
+        let loaded = load_cwd(cwd);
+        let old = loaded.iter().find(|s| s.id == "old").expect("old session");
+        assert_eq!(old.preset_id, None, "missing field must stay None");
+        remove("p1", cwd).unwrap();
+        remove("old", cwd).unwrap();
+    }
+
+    #[test]
     fn roundtrip_user_and_tool() {
         let _home = cordis_base::test_env::scoped().home();
         let cwd = Path::new("/tmp/dock-persist-test");
@@ -682,6 +727,7 @@ mod tests {
             times: vec![SystemTime::now(), SystemTime::now()],
             compact_prefix: None,
             compact_from: 0,
+            preset_id: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -710,6 +756,7 @@ mod tests {
             times: vec![SystemTime::now()],
             compact_prefix: None,
             compact_from: 0,
+            preset_id: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -744,6 +791,7 @@ mod tests {
             times: vec![SystemTime::now()],
             compact_prefix: None,
             compact_from: 0,
+            preset_id: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -789,6 +837,7 @@ mod tests {
             times: vec![SystemTime::now(), SystemTime::now()],
             compact_prefix: None,
             compact_from: 0,
+            preset_id: None,
         };
         save(&item, cwd).unwrap();
         // image_paths should land under DOCK_HOME/tool-images/

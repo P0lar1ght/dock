@@ -1020,6 +1020,10 @@ pub(super) fn run_action(
             }
             if let Some(target) = task_dock::hit(dock_hits, column, row) {
                 *overlay = match target {
+                    TaskDockHit::Kill(target) => {
+                        kill_task_target(ctx, &target);
+                        return Vec::new();
+                    }
                     TaskDockHit::Subagent(id) => Overlay::inspect_subagent(id, false),
                     TaskDockHit::Job(id) => Overlay::inspect_job(id, false),
                     // workflow / 定时任务没有单独的全屏视图，退回整张表。
@@ -1144,6 +1148,10 @@ pub(super) fn run_action(
             }
             if let Some(target) = task_dock::hit(dock_hits, column, row) {
                 *overlay = match target {
+                    TaskDockHit::Kill(target) => {
+                        kill_task_target(ctx, &target);
+                        return Vec::new();
+                    }
                     TaskDockHit::Subagent(id) => Overlay::inspect_subagent(id, false),
                     TaskDockHit::Job(id) => Overlay::inspect_job(id, false),
                     // workflow / 定时任务没有单独的全屏视图，退回整张表。

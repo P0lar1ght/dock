@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::grok::glyphs;
 use crate::grok::picker::PickerHits;
@@ -165,26 +165,218 @@ fn fill_rect(buf: &mut Buffer, area: Rect, style: Style) {
 }
 
 fn wrap_line(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
+    bash_quote_aware_wrap(text, width, usize::MAX)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Grok pager `bash_quote_aware_wrap`: prefer breaks at whitespace *outside*
+/// quotes so wide quoted args stay intact until they themselves overflow.
+fn bash_quote_aware_wrap(line: &str, width: usize, max_rows: usize) -> Vec<&str> {
+    if max_rows == 0 {
+        return Vec::new();
     }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_w = 0usize;
-    for ch in text.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(1);
-        if current_w + w > width && !current.is_empty() {
-            lines.push(current);
-            current = String::new();
-            current_w = 0;
+    if width == 0 || UnicodeWidthStr::width(line) <= width {
+        return vec![line];
+    }
+
+    let mut rows: Vec<&str> = Vec::new();
+    let mut row_start = 0usize;
+    let mut last_break = 0usize;
+    let candidates = QuoteAwareBreaks::new(line).chain(std::iter::once(line.len()));
+
+    for b in candidates {
+        if b <= row_start {
+            continue;
         }
-        current.push(ch);
-        current_w += w;
+        let candidate = line.get(row_start..b).unwrap_or("").trim_end();
+        if UnicodeWidthStr::width(candidate) <= width {
+            last_break = b;
+            continue;
+        }
+        if last_break > row_start {
+            let row = line.get(row_start..last_break).unwrap_or("").trim_end();
+            if !row.is_empty() {
+                rows.push(row);
+                if rows.len() >= max_rows {
+                    return rows;
+                }
+            }
+            row_start = last_break;
+            while row_start < line.len()
+                && line
+                    .as_bytes()
+                    .get(row_start)
+                    .is_some_and(|b| b.is_ascii_whitespace())
+            {
+                row_start += 1;
+            }
+            last_break = row_start;
+            if b > row_start {
+                let candidate = line.get(row_start..b).unwrap_or("").trim_end();
+                if UnicodeWidthStr::width(candidate) <= width {
+                    last_break = b;
+                } else {
+                    extend_display_width_rows(&mut rows, line, row_start, b, width, max_rows);
+                    if rows.len() >= max_rows {
+                        return rows;
+                    }
+                    row_start = b;
+                    while row_start < line.len()
+                        && line
+                            .as_bytes()
+                            .get(row_start)
+                            .is_some_and(|b| b.is_ascii_whitespace())
+                    {
+                        row_start += 1;
+                    }
+                    last_break = row_start;
+                }
+            }
+        } else {
+            extend_display_width_rows(&mut rows, line, row_start, b, width, max_rows);
+            if rows.len() >= max_rows {
+                return rows;
+            }
+            row_start = b;
+            while row_start < line.len()
+                && line
+                    .as_bytes()
+                    .get(row_start)
+                    .is_some_and(|b| b.is_ascii_whitespace())
+            {
+                row_start += 1;
+            }
+            last_break = row_start;
+        }
     }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
+    if row_start < line.len() && rows.len() < max_rows {
+        let row = line.get(row_start..).unwrap_or("").trim_end();
+        if !row.is_empty() {
+            rows.push(row);
+        }
     }
-    lines
+    if rows.is_empty() {
+        vec![line]
+    } else {
+        rows
+    }
+}
+
+fn display_width_end(s: &str, start: usize, limit: usize, width: usize) -> usize {
+    let Some(rest) = s.get(start..limit.min(s.len())) else {
+        return start;
+    };
+    let mut used = 0usize;
+    let mut end = start;
+    for ch in rest.chars() {
+        let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_w > width && end > start {
+            break;
+        }
+        used += ch_w;
+        end += ch.len_utf8();
+        if used >= width {
+            break;
+        }
+    }
+    end
+}
+
+fn extend_display_width_rows<'a>(
+    rows: &mut Vec<&'a str>,
+    line: &'a str,
+    start: usize,
+    end: usize,
+    width: usize,
+    max_rows: usize,
+) {
+    let end = end.min(line.len());
+    let mut pos = start.min(end);
+    while pos < end && rows.len() < max_rows {
+        let chunk_end = display_width_end(line, pos, end, width);
+        if chunk_end <= pos {
+            break;
+        }
+        match line.get(pos..chunk_end) {
+            Some(row) => rows.push(row),
+            None => break,
+        }
+        pos = chunk_end;
+    }
+}
+
+struct QuoteAwareBreaks<'a> {
+    bytes: &'a [u8],
+    i: usize,
+    in_single: bool,
+    in_double: bool,
+}
+
+impl<'a> QuoteAwareBreaks<'a> {
+    fn new(line: &'a str) -> Self {
+        Self {
+            bytes: line.as_bytes(),
+            i: 0,
+            in_single: false,
+            in_double: false,
+        }
+    }
+}
+
+impl Iterator for QuoteAwareBreaks<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        while self.i < self.bytes.len() {
+            let c = *self.bytes.get(self.i)?;
+            if self.in_single {
+                if c == b'\'' {
+                    self.in_single = false;
+                }
+                self.i += 1;
+                continue;
+            }
+            if self.in_double {
+                if c == b'\\' && self.i + 1 < self.bytes.len() {
+                    self.i += 2;
+                    continue;
+                }
+                if c == b'"' {
+                    self.in_double = false;
+                }
+                self.i += 1;
+                continue;
+            }
+            match c {
+                b'\'' => {
+                    self.in_single = true;
+                    self.i += 1;
+                }
+                b'"' => {
+                    self.in_double = true;
+                    self.i += 1;
+                }
+                b if b.is_ascii_whitespace() => {
+                    let start = self.i;
+                    while self.i < self.bytes.len()
+                        && self
+                            .bytes
+                            .get(self.i)
+                            .is_some_and(|b| b.is_ascii_whitespace())
+                    {
+                        self.i += 1;
+                    }
+                    if start > 0 {
+                        return Some(start);
+                    }
+                }
+                _ => self.i += 1,
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -224,5 +416,36 @@ mod tests {
         assert!(!compact.contains("alwaysaid"), "{compact}");
         assert!(compact.contains("允许一次"), "{compact}");
         assert!(compact.contains("始终拒绝"), "{compact}");
+    }
+
+    #[test]
+    fn bash_quote_aware_wrap_keeps_single_quoted_span_together() {
+        let line = "prefix_ok_here '.[] | not a pipe' trailing_words_here_too";
+        let width = 20;
+        let rows = bash_quote_aware_wrap(line, width, usize::MAX);
+        let has_split_inside_quotes = rows
+            .iter()
+            .any(|r| r.contains(".[]") && !r.contains("not a pipe"));
+        assert!(!has_split_inside_quotes, "split inside quotes: {rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("'.[] | not a pipe'")),
+            "quoted span must be intact in some row: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn bash_quote_aware_wrap_force_breaks_overwide_single_quoted_arg() {
+        let payload = "a".repeat(200);
+        let line = format!("ssh host '{payload}'");
+        let width = 40;
+        let rows = bash_quote_aware_wrap(&line, width, usize::MAX);
+        for r in &rows {
+            assert!(UnicodeWidthStr::width(*r) <= width, "{r:?}");
+        }
+        assert_eq!(rows[0], "ssh host");
+        assert_eq!(
+            rows.get(1..).unwrap_or(&[]).concat(),
+            format!("'{payload}'")
+        );
     }
 }

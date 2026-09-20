@@ -130,6 +130,7 @@ mod tests {
             events,
             compact_prefix: None,
             compact_from: 0,
+            preset_id: None,
         }
     }
 

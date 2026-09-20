@@ -490,17 +490,30 @@ impl TaskEntry {
             TaskEntry::Workflow {
                 run_id, stoppable, ..
             } if *stoppable => Some(KillTarget::Workflow(run_id.clone())),
+            TaskEntry::BgTask {
+                task_id, running, ..
+            } if *running => Some(KillTarget::Job(task_id.clone())),
+            TaskEntry::Agent {
+                subagent_id,
+                running,
+                ..
+            } if *running => Some(KillTarget::Subagent(subagent_id.clone())),
             _ => None,
         }
     }
 }
 
-/// `[✗]` / `x` 停掉的是哪一类任务。两类的停法不同：定时任务是关掉排程，
-/// workflow 是取消一次运行并收掉它的子代理。
+/// `[✗]` / `x` 停掉的是哪一类任务。
+///
+/// - 定时任务：关掉排程
+/// - workflow：取消一次运行并收掉它的子代理
+/// - Job / Subagent：走与 `kill_task` 相同的 Jobs / Subagents 路径
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KillTarget {
     Scheduled(String),
     Workflow(String),
+    Job(String),
+    Subagent(String),
 }
 
 pub fn collect_items(
