@@ -106,6 +106,14 @@ impl MemoryIndex {
         })
     }
 
+    /// True when the chunks table has no rows (fresh / wiped DB).
+    pub fn is_empty(&self) -> bool {
+        self.db
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get::<_, i64>(0))
+            .map(|n| n == 0)
+            .unwrap_or(true)
+    }
+
     pub fn reindex_file(
         &mut self,
         path: &Path,

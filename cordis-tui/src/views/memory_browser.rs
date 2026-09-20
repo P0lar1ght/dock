@@ -1,44 +1,514 @@
-//! `/memory` read-only browser (list + preview) rendered as Notice body.
+//! `/memory` dual-pane browser: left file list (global/workspace), right
+//! markdown preview via `cordis_markdown` (same path as scrollback/plan).
+//!
+//! Narrow terminals (< 64 cols) collapse to list-only; Enter opens preview.
+//! `/` filters filenames; Esc closes (or exits filter / preview first).
+//! Optional `t` toggles session memory (DOCK_MEMORY=0 still forces off).
 
-use dock_memory::browse::list_memory_files;
-use dock_memory::layout::MemoryRoot;
+use std::path::PathBuf;
 
-/// Build a markdown-ish text body: file list with inline previews.
-pub fn render_text() -> String {
-    let cfg = cordis_base::config::load_memory_config();
-    if !cfg.enabled {
-        return "Memory is disabled.\n\nEnable with `[memory] enabled = true` in config.toml\nor `DOCK_MEMORY=1`.\n\nLegacy files under ~/.dock/memory remain readable when enabled.".into();
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let root = MemoryRoot::open_default(&cwd);
-    let files = list_memory_files(&root);
-    if files.is_empty() {
-        return format!(
-            "No memory files yet.\n\nLayout: {}\n  global/{{topics,observations}}/\n  workspace-{}/{{topics,observations}}/\n\nUse /remember, /flush, or /dream to create entries.",
-            root.home.display(),
-            root.slug
-        );
-    }
-    let mut out = format!(
-        "Memory root: {}\nWorkspace: workspace-{}\nFiles: {}\n\n",
-        root.home.display(),
-        root.slug,
-        files.len()
-    );
-    for entry in &files {
-        out.push_str(&format!("## {}\n", entry.label));
-        out.push_str(&format!("`{}`\n\n", entry.path.display()));
-        match std::fs::read_to_string(&entry.path) {
-            Ok(body) => {
-                let preview: String = body.chars().take(800).collect();
-                out.push_str(&preview);
-                if body.chars().count() > 800 {
-                    out.push_str("\n…");
-                }
-                out.push_str("\n\n");
-            }
-            Err(e) => out.push_str(&format!("(unreadable: {e})\n\n")),
+use cordis::Context;
+use crossterm::event::KeyCode;
+use dock_memory::browse::{list_memory_files, MemoryFileEntry};
+use dock_memory::layout::{MemoryRoot, MemoryScope};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+
+use crate::grok::line_utils::truncate_str;
+use crate::grok::md_style;
+use crate::grok::picker::{render_divider, render_floating_frame_height, PickerHits};
+use crate::grok::wrapping::word_wrap_lines;
+use crate::theme::Theme;
+use cordis_spine::{Memory, MEMORY};
+
+const SPLIT_MIN_WIDTH: u16 = 64;
+const LIST_RATIO: f64 = 0.40;
+const PAD: u16 = 1;
+const TITLE_ROWS: u16 = 2;
+const MAX_PREVIEW_BYTES: u64 = 1_048_576;
+const MAX_PICKER_INNER: u16 = 28;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryFocus {
+    List,
+    Filter,
+    Preview,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryBrowserState {
+    pub selected: usize,
+    pub filter: String,
+    pub focus: MemoryFocus,
+    pub list_scroll: usize,
+    pub preview_scroll: usize,
+}
+
+impl Default for MemoryBrowserState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            filter: String::new(),
+            focus: MemoryFocus::List,
+            list_scroll: 0,
+            preview_scroll: 0,
         }
     }
-    out
+}
+
+#[derive(Debug, Clone)]
+enum Row {
+    Header {
+        label: String,
+    },
+    File {
+        entry: MemoryFileEntry,
+        label: String,
+    },
+}
+
+fn build_rows(filter: &str) -> Vec<Row> {
+    let cfg = cordis_base::config::load_memory_config();
+    // Layout still listed when process-forced off so the user can browse disk.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root = MemoryRoot::open_default(&cwd);
+    let _ = root.ensure_layout();
+    let files = list_memory_files(&root);
+    let filter_l = filter.trim().to_lowercase();
+    let mut rows = Vec::new();
+    if !cfg.enabled && std::env::var("DOCK_MEMORY").ok().as_deref() != Some("1") {
+        // Still show files if any exist; empty state notes disabled below.
+    }
+    for (scope, title) in [
+        (MemoryScope::Global, "Global"),
+        (MemoryScope::Workspace, "Workspace"),
+    ] {
+        let group: Vec<_> = files
+            .iter()
+            .filter(|e| e.scope == scope)
+            .filter(|e| filter_l.is_empty() || e.label.to_lowercase().contains(&filter_l))
+            .cloned()
+            .collect();
+        if group.is_empty() && !filter_l.is_empty() {
+            continue;
+        }
+        rows.push(Row::Header {
+            label: title.into(),
+        });
+        if group.is_empty() {
+            continue;
+        }
+        for entry in group {
+            let label = entry.label.clone();
+            rows.push(Row::File { entry, label });
+        }
+    }
+    rows
+}
+
+fn selectable_indices(rows: &[Row]) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(i, r)| matches!(r, Row::File { .. }).then_some(i))
+        .collect()
+}
+
+fn selected_entry(rows: &[Row], selected: usize) -> Option<&MemoryFileEntry> {
+    let idxs = selectable_indices(rows);
+    let row_i = *idxs.get(selected)?;
+    match rows.get(row_i) {
+        Some(Row::File { entry, .. }) => Some(entry),
+        _ => None,
+    }
+}
+
+fn load_preview(path: &PathBuf) -> String {
+    match std::fs::File::open(path) {
+        Ok(mut f) => {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = std::io::Read::by_ref(&mut f)
+                .take(MAX_PREVIEW_BYTES)
+                .read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        Err(e) => format!("(unreadable: {e})"),
+    }
+}
+
+fn render_md(text: &str, width: usize) -> Vec<Line<'static>> {
+    let syntect = cordis_markdown::default_syntect();
+    let mut renderer = cordis_markdown::StreamingMarkdownRenderer::new(md_style::style(), true);
+    renderer.set_max_table_width(Some(width.max(8)));
+    renderer.push(text);
+    let output = renderer.finish_into_output(Some(syntect));
+    word_wrap_lines(output.lines, width.max(8))
+}
+
+fn empty_markdown(enabled: bool) -> String {
+    if !enabled {
+        return "**Memory is disabled.**\n\nEnable with `[memory] enabled = true` in config.toml or `DOCK_MEMORY=1`.\n\nPress **t** to try a session override (blocked if `DOCK_MEMORY=0`).".into();
+    }
+    "**Nothing remembered yet.**\n\n- `/remember <note>` saves something specific right now.\n- `/flush` summarizes the session into workspace observations.\n- `/dream` consolidates observations into topics.\n\nNotes live under `$DOCK_HOME/memory/global|workspace-<slug>/{topics,observations}/` with a generated `MEMORY.md` index.".into()
+}
+
+/// Open browser state (fresh selection).
+pub fn open_state() -> MemoryBrowserState {
+    MemoryBrowserState::default()
+}
+
+pub fn render(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &MemoryBrowserState,
+    ctx: &Context,
+) -> PickerHits {
+    let theme = Theme::current();
+    let enabled = ctx
+        .get::<Memory>(MEMORY)
+        .map(|m| m.enabled())
+        .unwrap_or_else(|| cordis_base::config::load_memory_config().enabled);
+    let rows = build_rows(&state.filter);
+    let selectable = selectable_indices(&rows);
+    let sel = if selectable.is_empty() {
+        0
+    } else {
+        state.selected.min(selectable.len() - 1)
+    };
+
+    let inner_rows = MAX_PICKER_INNER;
+    let Some(frame) = render_floating_frame_height(buf, area, &theme, false, inner_rows) else {
+        return PickerHits::default();
+    };
+    let inner = frame.content;
+    if inner.height < 4 || inner.width < 20 {
+        return PickerHits {
+            close_button: frame.close_button,
+            ..Default::default()
+        };
+    }
+
+    let title = if state.focus == MemoryFocus::Filter {
+        format!("/memory  filter: {}", state.filter)
+    } else if enabled {
+        "/memory".into()
+    } else {
+        "/memory (off)".into()
+    };
+    paint_title(buf, inner, &theme, &title, frame.close_button);
+    if inner.height >= 2 {
+        render_divider(
+            buf,
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            &theme,
+            Some(theme.bg_base),
+        );
+    }
+
+    let body = Rect {
+        x: inner.x + PAD,
+        y: inner.y.saturating_add(TITLE_ROWS),
+        width: inner.width.saturating_sub(PAD.saturating_mul(2)),
+        height: inner.height.saturating_sub(TITLE_ROWS + 1),
+    };
+    if body.height == 0 {
+        return PickerHits {
+            close_button: frame.close_button,
+            ..Default::default()
+        };
+    }
+
+    let split = body.width >= SPLIT_MIN_WIDTH && state.focus != MemoryFocus::Preview;
+    let (list_area, preview_area) = if split {
+        let list_w = ((body.width as f64) * LIST_RATIO) as u16;
+        let list_w = list_w.max(18).min(body.width.saturating_sub(24));
+        (
+            Rect {
+                x: body.x,
+                y: body.y,
+                width: list_w,
+                height: body.height,
+            },
+            Rect {
+                x: body.x.saturating_add(list_w.saturating_add(1)),
+                y: body.y,
+                width: body.width.saturating_sub(list_w.saturating_add(1)),
+                height: body.height,
+            },
+        )
+    } else if state.focus == MemoryFocus::Preview {
+        (Rect::default(), body)
+    } else {
+        (body, Rect::default())
+    };
+
+    if list_area.width > 0 {
+        paint_list(
+            buf,
+            list_area,
+            &rows,
+            &selectable,
+            sel,
+            state.list_scroll,
+            &theme,
+        );
+    }
+
+    if preview_area.width > 0 {
+        let md = if let Some(entry) = selected_entry(&rows, sel) {
+            load_preview(&entry.path)
+        } else {
+            empty_markdown(enabled)
+        };
+        let lines = render_md(&md, preview_area.width.saturating_sub(1) as usize);
+        let max_scroll = lines.len().saturating_sub(preview_area.height as usize);
+        let scroll = state.preview_scroll.min(max_scroll);
+        for (i, line) in lines
+            .into_iter()
+            .skip(scroll)
+            .take(preview_area.height as usize)
+            .enumerate()
+        {
+            let y = preview_area.y.saturating_add(i as u16);
+            buf.set_line(
+                preview_area.x,
+                y,
+                &line_on_bg(&line, theme.bg_base),
+                preview_area.width,
+            );
+        }
+    }
+
+    // Footer hint
+    let hint_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+    let hint = match state.focus {
+        MemoryFocus::Filter => "type to filter  Esc:exit filter",
+        MemoryFocus::Preview => "Esc:back  ↑↓:scroll",
+        MemoryFocus::List if split => "↑↓:select  /:filter  t:toggle  Esc:close",
+        MemoryFocus::List => "↑↓:select  Enter:preview  /:filter  t:toggle  Esc:close",
+    };
+    let hint_line = Line::from(Span::styled(
+        truncate_str(hint, inner.width.saturating_sub(2) as usize),
+        Style::default().fg(theme.gray).bg(theme.bg_base),
+    ));
+    buf.set_line(
+        inner.x + 1,
+        hint_y,
+        &hint_line,
+        inner.width.saturating_sub(2),
+    );
+
+    PickerHits {
+        close_button: frame.close_button,
+        ..Default::default()
+    }
+}
+
+fn paint_title(buf: &mut Buffer, inner: Rect, theme: &Theme, title: &str, close: Rect) {
+    let reserve = if close.width == 0 { 0 } else { close.width + 1 };
+    let budget = inner.width.saturating_sub(PAD + reserve) as usize;
+    let shown = truncate_str(title, budget);
+    buf.set_line(
+        inner.x + PAD,
+        inner.y,
+        &Line::from(Span::styled(
+            shown,
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(theme.bg_base)
+                .add_modifier(Modifier::BOLD),
+        )),
+        inner.width.saturating_sub(PAD + reserve),
+    );
+}
+
+fn paint_list(
+    buf: &mut Buffer,
+    area: Rect,
+    rows: &[Row],
+    selectable: &[usize],
+    sel: usize,
+    list_scroll: usize,
+    theme: &Theme,
+) {
+    let selected_row = selectable.get(sel).copied();
+    let visible = area.height as usize;
+    let scroll = list_scroll.min(rows.len().saturating_sub(visible));
+    for (i, row) in rows.iter().skip(scroll).take(visible).enumerate() {
+        let y = area.y.saturating_add(i as u16);
+        let abs_i = scroll + i;
+        let (text, style) = match row {
+            Row::Header { label } => (
+                format!(" {label}"),
+                Style::default()
+                    .fg(theme.accent_remember)
+                    .bg(theme.bg_base)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Row::File { label, .. } => {
+                let selected = Some(abs_i) == selected_row;
+                let mark = if selected { "› " } else { "  " };
+                (
+                    format!(
+                        "{mark}{}",
+                        truncate_str(label, area.width.saturating_sub(3) as usize)
+                    ),
+                    if selected {
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .bg(theme.bg_highlight)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.text_secondary).bg(theme.bg_base)
+                    },
+                )
+            }
+        };
+        buf.set_line(
+            area.x,
+            y,
+            &Line::from(Span::styled(text, style)),
+            area.width,
+        );
+    }
+}
+
+fn line_on_bg(line: &Line<'static>, bg: ratatui::style::Color) -> Line<'static> {
+    let mut line = line.clone();
+    for span in &mut line.spans {
+        if span.style.bg.is_none() {
+            span.style = span.style.bg(bg);
+        }
+    }
+    if line.style.bg.is_none() {
+        line.style = line.style.bg(bg);
+    }
+    line
+}
+
+/// Key handling. Returns `true` when the overlay should close.
+pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> KeyResult {
+    let rows = build_rows(&state.filter);
+    let selectable = selectable_indices(&rows);
+    let n = selectable.len();
+
+    match state.focus {
+        MemoryFocus::Filter => match code {
+            KeyCode::Esc => {
+                state.focus = MemoryFocus::List;
+                KeyResult::Handled
+            }
+            KeyCode::Enter => {
+                state.focus = MemoryFocus::List;
+                KeyResult::Handled
+            }
+            KeyCode::Backspace => {
+                state.filter.pop();
+                state.selected = 0;
+                KeyResult::Handled
+            }
+            KeyCode::Char(c) => {
+                state.filter.push(c);
+                state.selected = 0;
+                KeyResult::Handled
+            }
+            _ => KeyResult::Handled,
+        },
+        MemoryFocus::Preview => match code {
+            KeyCode::Esc => {
+                state.focus = MemoryFocus::List;
+                state.preview_scroll = 0;
+                KeyResult::Handled
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.preview_scroll = state.preview_scroll.saturating_sub(1);
+                KeyResult::Handled
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.preview_scroll = state.preview_scroll.saturating_add(1);
+                KeyResult::Handled
+            }
+            _ => KeyResult::Handled,
+        },
+        MemoryFocus::List => match code {
+            KeyCode::Esc => KeyResult::Close,
+            KeyCode::Char('/') => {
+                state.focus = MemoryFocus::Filter;
+                KeyResult::Handled
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                if let Some(mem) = ctx.get::<Memory>(MEMORY) {
+                    match mem.toggle_session() {
+                        Ok(on) => KeyResult::Flash(if on {
+                            "Memory on for this session".into()
+                        } else {
+                            "Memory off for this session".into()
+                        }),
+                        Err(msg) => KeyResult::Flash(msg.into()),
+                    }
+                } else {
+                    KeyResult::Flash("memory service not mounted".into())
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if n > 0 {
+                    state.selected = state.selected.saturating_sub(1);
+                    state.preview_scroll = 0;
+                }
+                KeyResult::Handled
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if n > 0 {
+                    state.selected = (state.selected + 1).min(n - 1);
+                    state.preview_scroll = 0;
+                }
+                KeyResult::Handled
+            }
+            KeyCode::Enter => {
+                // Narrow (or any) fallback: Enter focuses full-area preview.
+                // Wide split already shows preview beside the list.
+                if n > 0 {
+                    state.focus = MemoryFocus::Preview;
+                }
+                KeyResult::Handled
+            }
+            _ => KeyResult::Ignored,
+        },
+    }
+}
+
+#[derive(Debug)]
+pub enum KeyResult {
+    Handled,
+    Ignored,
+    Close,
+    Flash(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_rows_groups_scopes() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let cwd = std::env::current_dir().unwrap();
+        let root = MemoryRoot::open_default(&cwd);
+        root.ensure_layout().unwrap();
+        std::fs::write(root.global.topics.join("prefs.md"), "# Prefs\n\nhi\n").unwrap();
+        let _ = dock_memory::manifest::refresh_all(&root);
+        let rows = build_rows("");
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, Row::Header { label } if label == "Global")));
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, Row::File { label, .. } if label.contains("prefs"))));
+    }
 }

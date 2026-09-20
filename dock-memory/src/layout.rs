@@ -68,6 +68,8 @@ impl MemoryRoot {
         std::fs::create_dir_all(&self.home)?;
         self.global.ensure()?;
         self.workspace.ensure()?;
+        // Refresh lean MEMORY.md indexes (idempotent; cheap when empty).
+        let _ = crate::manifest::refresh_all(self);
         Ok(())
     }
 

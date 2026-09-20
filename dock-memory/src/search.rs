@@ -3,13 +3,20 @@
 use crate::index::{MemoryIndex, SearchHit};
 use crate::layout::MemoryRoot;
 
+/// Open the index and query. Does **not** reindex the tree on every call —
+/// writes already call [`MemoryIndex::reindex_file`]. Reindexes once when the
+/// DB is missing or still empty (cold start / legacy files).
 pub fn search_memory(
     root: &MemoryRoot,
     query: &str,
     max_results: usize,
 ) -> Result<Vec<SearchHit>, String> {
-    let mut index = MemoryIndex::open_or_create(&root.search_db()).map_err(|e| e.to_string())?;
-    let _ = index.reindex_tree(root);
+    let db = root.search_db();
+    let missing = !db.exists();
+    let mut index = MemoryIndex::open_or_create(&db).map_err(|e| e.to_string())?;
+    if missing || index.is_empty() {
+        let _ = index.reindex_tree(root);
+    }
     index.search(query, max_results).map_err(|e| e.to_string())
 }
 

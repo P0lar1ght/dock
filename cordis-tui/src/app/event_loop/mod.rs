@@ -728,18 +728,16 @@ pub async fn run(root: Context) -> Result<()> {
                                     });
                                 }
                                 Effect::MemoryRemember { note } => {
-                                    let msg = match cordis_spine::run_remember(&note) {
+                                    let msg = match cordis_spine::run_remember(&ctx, &note) {
                                         Ok(m) => m,
                                         Err(e) => format!("remember failed: {e}"),
                                     };
                                     flash(&ctx, msg);
                                 }
                                 Effect::OpenMemoryBrowser => {
-                                    overlay = Overlay::Notice {
-                                        title: "/memory".into(),
-                                        body: crate::views::memory_browser::render_text(),
-                                        scroll: 0,
-                                    };
+                                    overlay = Overlay::MemoryBrowser(
+                                        crate::views::memory_browser::open_state(),
+                                    );
                                 }
                                 Effect::ShowNotice { title, body } => {
                                     overlay = Overlay::Notice {

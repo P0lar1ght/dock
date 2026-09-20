@@ -54,6 +54,7 @@ pub fn write_flush_observation(
     root.ensure_layout()?;
     let path = persist_observation(&root.workspace, content, "flush")?;
     index.reindex_file(&path, "workspace")?;
+    let _ = crate::manifest::regenerate_scope(&root.workspace, MemoryScope::Workspace);
     Ok(path)
 }
 
@@ -71,6 +72,7 @@ pub fn save_remember_note(
     let body = format!("## Remember\n\n{normalized}\n");
     let path = persist_observation(&root.global, &body, "remember")?;
     index.reindex_file(&path, "global")?;
+    let _ = crate::manifest::regenerate_scope(&root.global, MemoryScope::Global);
     Ok(path)
 }
 

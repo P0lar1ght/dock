@@ -1559,6 +1559,7 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
         }
         Overlay::Usage { .. }
         | Overlay::Notice { .. }
+        | Overlay::MemoryBrowser(_)
         | Overlay::Slot { .. }
         | Overlay::Browser { .. }
         | Overlay::Computer { .. }

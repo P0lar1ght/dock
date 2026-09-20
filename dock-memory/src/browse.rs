@@ -19,6 +19,19 @@ pub fn list_memory_files(root: &MemoryRoot) -> Vec<MemoryFileEntry> {
         (MemoryScope::Global, &root.global),
         (MemoryScope::Workspace, &root.workspace),
     ] {
+        let md = paths.root.join("MEMORY.md");
+        if md.is_file() {
+            let scope_s = match scope {
+                MemoryScope::Global => "global",
+                MemoryScope::Workspace => "workspace",
+            };
+            out.push(MemoryFileEntry {
+                scope,
+                kind: "index",
+                label: format!("{scope_s}/MEMORY.md"),
+                path: md,
+            });
+        }
         collect_dir(&mut out, scope, "topics", &paths.topics);
         collect_dir(&mut out, scope, "observations", &paths.observations);
     }
@@ -69,6 +82,10 @@ mod tests {
         std::fs::write(root.global.topics.join("prefs.md"), "# prefs\n").unwrap();
         std::fs::write(root.workspace.observations.join("flush-1.md"), "## x\n").unwrap();
         let list = list_memory_files(&root);
-        assert_eq!(list.len(), 2);
+        // 2 notes + MEMORY.md for each scope created by ensure_layout.
+        assert!(list.len() >= 2, "len={}", list.len());
+        assert!(list.iter().any(|e| e.label.contains("prefs")));
+        assert!(list.iter().any(|e| e.label.contains("flush-1")));
+        assert!(list.iter().any(|e| e.label.ends_with("MEMORY.md")));
     }
 }

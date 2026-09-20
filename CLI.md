@@ -52,8 +52,8 @@
 | `/undo`（别名 `/rewind`） | 撤销上一轮**没产生模型输出**的用户消息：把它从会话日志里摘掉并还原回输入框（含图片）。闸与 cancel-rewind 同一条（`Sessions::rewind_inflight_user`）——最后一条 `User` 之后只要有非空 `text` / `reasoning` / `tool_calls` 就拒绝，成功的助手回合撤不掉；只有 `LlmOutput.error`（请求失败）、PreStep、Notice **不算**输出，所以provider 报错那一轮可以直接撤了重发，不必 `/new`。输入框为空、没有排队、当前没在生成时，**空闲 Esc** 走同一条路（撤不动就沉默，不闪提示）；`/undo` 撤不动会闪一条说明。底栏在可撤时显示 `Esc:undo`（判定与实际行为同一个谓词 `Sessions::has_undoable_send`，不克隆会话日志） |
 | `/flush` | 把本会话要点写入 `$DOCK_HOME/memory/.../observations/`（需 `[memory] enabled` / `DOCK_MEMORY=1`）。压缩前达门槛时也会自动 flush；只写 memory，不写 compaction 段 |
 | `/dream` | 手动 consolidate observations → topics（LLM） |
-| `/memory` | 只读浏览 memory 文件（list + preview） |
-| `/remember <note>` | 写一条 global observation |
+| `/memory` | 双栏浏览 memory（左列表 / 右 markdown 预览；`/` 过滤；`t` 会话开关；`DOCK_MEMORY=0` 仍强制关） |
+| `/remember` / `/remember <note>` | 无参留下用法；有参写一条 global observation |
 | `/theme` `/t` | 切换配色 |
 | `/timestamps` | 开关滚动区时间戳 |
 | `/effort` | 设置推理强度。**菜单来自当前模型的 `[model.<id>].reasoning_efforts`**，不写才列通用四档（low / medium / high / xhigh），写 `[]` 表示会推理但不接受档位参数（菜单空着、永不发 effort）——各家认识的档位不一样，列死一份会让人选到上游不认的值。不选就用 `reasoning_effort`，那个也没写就不发这个参数（上游默认）。`reasoning = false` 的模型这一项与 `/think` 都置灰，菜单只给一条说明、回车不会填进输入框 |

@@ -506,9 +506,8 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         SlashCmd::Remember => {
             let note = args.trim();
             if note.is_empty() {
-                Effect::ShowNotice {
-                    title: "/remember".into(),
-                    body: "Usage: /remember <note>".into(),
+                Effect::SetPrompt {
+                    text: "用法: /remember <note>\n/remember ".into(),
                 }
             } else {
                 Effect::MemoryRemember {

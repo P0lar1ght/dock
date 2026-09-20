@@ -4,8 +4,8 @@
 //! ```text
 //! memory/
 //!   search.sqlite
-//!   global/{topics,observations}/
-//!   workspace-<slug>/{topics,observations}/
+//!   global/{topics,observations}/ + MEMORY.md
+//!   workspace-<slug>/{topics,observations}/ + MEMORY.md
 //! ```
 //!
 //! No embeddings / sqlite-vec / watcher GC in this phase. Tool names stay
@@ -21,6 +21,7 @@ pub mod flush;
 pub mod index;
 pub mod keywords;
 pub mod layout;
+pub mod manifest;
 pub mod search;
 pub mod slug;
 pub mod storage;
@@ -36,6 +37,7 @@ pub use flush::{
 };
 pub use index::{ChunkRecord, FtsHit, MemoryIndex, ReindexResult, SearchHit};
 pub use layout::{MemoryRoot, MemoryScope, ScopePaths};
+pub use manifest::{refresh_all, regenerate_scope, Manifest};
 pub use search::{format_search_results, search_memory};
 pub use slug::workspace_slug;
 pub use storage::{persist_observation, save_remember_note, write_flush_observation};

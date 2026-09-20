@@ -289,6 +289,7 @@ impl Shortcuts {
         if matches!(
             overlay,
             Overlay::Notice { .. }
+                | Overlay::MemoryBrowser(_)
                 | Overlay::Slot { .. }
                 | Overlay::Browser { .. }
                 | Overlay::Inspect { .. }

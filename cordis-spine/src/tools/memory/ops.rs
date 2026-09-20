@@ -30,7 +30,7 @@ pub async fn maybe_flush_before_compact(ctx: &Context) {
         return;
     };
     let cfg = memory.config();
-    if !cfg.enabled || !cfg.flush.enabled {
+    if !memory.enabled() || !cfg.flush.enabled {
         return;
     }
     let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
@@ -78,7 +78,7 @@ pub async fn run_flush(ctx: &Context, force: bool) -> Result<String> {
         .get::<Memory>(MEMORY)
         .ok_or_else(|| Error::Compact("memory service not mounted".into()))?;
     let cfg = memory.config();
-    if !cfg.enabled {
+    if !memory.enabled() {
         return Err(Error::Compact(
             "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.".into(),
         ));
@@ -152,7 +152,7 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
         .get::<Memory>(MEMORY)
         .ok_or_else(|| Error::Compact("memory service not mounted".into()))?;
     let cfg = memory.config();
-    if !cfg.enabled {
+    if !memory.enabled() {
         return Err(Error::Compact(
             "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.".into(),
         ));
@@ -218,6 +218,10 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
             let mut index = MemoryIndex::open_or_create(&root.search_db())
                 .map_err(|e| Error::Compact(format!("memory index: {e}")))?;
             let _ = index.reindex_tree(&root);
+            let _ = dock_memory::manifest::regenerate_scope(
+                &root.workspace,
+                dock_memory::MemoryScope::Workspace,
+            );
             // Archive processed observations by renaming aside (keep for audit).
             let archive = root.workspace.root.join("archive");
             let _ = std::fs::create_dir_all(&archive);
@@ -232,7 +236,20 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
 }
 
 /// `/remember <text>` — write a global observation.
-pub fn run_remember(note: &str) -> Result<String> {
+pub fn run_remember(ctx: &Context, note: &str) -> Result<String> {
+    if let Some(memory) = ctx.get::<Memory>(MEMORY) {
+        if !memory.enabled() {
+            return Err(Error::Compact(
+                "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.".into(),
+            ));
+        }
+        let root = memory.root();
+        let mut index = MemoryIndex::open_or_create(&root.search_db())
+            .map_err(|e| Error::Compact(format!("memory index: {e}")))?;
+        let path = save_remember_note(&root, note, &mut index)
+            .map_err(|e| Error::Compact(format!("remember: {e}")))?;
+        return Ok(format!("Memory saved to {}", path.display()));
+    }
     let cfg = load_memory_config();
     if !cfg.enabled {
         return Err(Error::Compact(

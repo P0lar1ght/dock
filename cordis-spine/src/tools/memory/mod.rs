@@ -8,9 +8,10 @@
 //! Default off (`[memory] enabled = false`); `DOCK_MEMORY=1/0` overrides.
 
 mod ops;
+mod prompt;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Inject, Plugin};
 use cordis_base::config::{load_memory_config, MemoryConfig};
@@ -18,7 +19,9 @@ use dock_memory::layout::MemoryRoot;
 use dock_memory::storage::{format_with_line_numbers, read_memory_file};
 use dock_memory::{format_search_results, search_memory};
 
-use crate::names::{MEMORY, TOOLS};
+use crate::names::{CONTEXT, MEMORY, TOOLS};
+use crate::prompt::assemble::ORDER_MEMORY;
+use crate::prompt::context_book::{own_sections, ContextBook};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
@@ -27,28 +30,64 @@ pub use ops::{run_dream, run_flush, run_remember};
 const SEARCH_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query. Prefer specific technical terms."},"max_results":{"type":"integer"},"min_score":{"type":"number"}},"required":["query"]}"#;
 const GET_PARAMS: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Memory file path from memory_search."},"from":{"type":"integer","description":"1-based start line."},"lines":{"type":"integer","description":"Max lines to return."}},"required":["path"]}"#;
 
-/// Named `"memory"` — live-looked by TUI / tools / compact flush hook.
-pub struct Memory {
+struct MemoryInner {
     config: Mutex<MemoryConfig>,
+    /// Session override: `None` = follow config; `Some(bool)` toggled via `/memory` `t`.
+    /// `DOCK_MEMORY=0` (`force_disabled`) still wins process-wide.
+    session_override: Mutex<Option<bool>>,
+}
+
+/// Named `"memory"` — live-looked by TUI / tools / compact flush hook.
+#[derive(Clone)]
+pub struct Memory {
+    inner: Arc<MemoryInner>,
 }
 
 impl Memory {
     pub fn new() -> Self {
         Self {
-            config: Mutex::new(load_memory_config()),
+            inner: Arc::new(MemoryInner {
+                config: Mutex::new(load_memory_config()),
+                session_override: Mutex::new(None),
+            }),
         }
     }
 
     pub fn config(&self) -> MemoryConfig {
-        self.config.lock().unwrap().clone()
+        self.inner.config.lock().unwrap().clone()
     }
 
     pub fn reload(&self) {
-        *self.config.lock().unwrap() = load_memory_config();
+        *self.inner.config.lock().unwrap() = load_memory_config();
     }
 
+    /// Effective on/off: process force-off → session override → config.
     pub fn enabled(&self) -> bool {
-        self.config().enabled
+        let cfg = self.config();
+        if cfg.force_disabled {
+            return false;
+        }
+        if let Some(over) = *self.inner.session_override.lock().unwrap() {
+            return over;
+        }
+        cfg.enabled
+    }
+
+    /// Toggle session override. Returns new effective enabled, or `Err` if
+    /// process-wide force-off (`DOCK_MEMORY=0`) blocks enabling.
+    pub fn toggle_session(&self) -> Result<bool, &'static str> {
+        let cfg = self.config();
+        if cfg.force_disabled {
+            return Err("Memory is forced off for this process (DOCK_MEMORY=0).");
+        }
+        let mut slot = self.inner.session_override.lock().unwrap();
+        let currently = slot.unwrap_or(cfg.enabled);
+        *slot = Some(!currently);
+        Ok(!currently)
+    }
+
+    pub fn session_override(&self) -> Option<bool> {
+        *self.inner.session_override.lock().unwrap()
     }
 
     pub fn root_for_cwd(&self, cwd: &std::path::Path) -> MemoryRoot {
@@ -68,43 +107,64 @@ impl Default for Memory {
 }
 
 pub fn tool_memory() -> Plugin {
-    plugin("tool-memory", Inject::from([TOOLS]), |ctx, _: &()| {
-        ctx.provide(MEMORY, Memory::new())?;
-        let tools = ctx.require::<Tools>(TOOLS)?;
-        let search: ToolBody =
-            std::sync::Arc::new(|call| Box::pin(async move { memory_search(call) }));
-        let get: ToolBody = std::sync::Arc::new(|call| Box::pin(async move { memory_get(call) }));
-        own_registered(
-            ctx,
-            vec![
-                tools.register_deferred(
-                    ToolSpec {
-                        name: "memory_search".into(),
-                        description: "Search cross-session local memory for relevant knowledge chunks. Returns ranked results from $DOCK_HOME/memory (topics/observations) and legacy ~/.dock/memory when present.\n\nUse this proactively when a question references prior work, decisions, or conventions you do not have in the current transcript.\n\nMemory is historical context, not automatically the current plan. Verify recalled facts against live sources before relying on them.".into(),
-                        parameters_json: SEARCH_PARAMS.into(),
-                    },
-                    search,
-                )?,
-                tools.register_deferred(
-                    ToolSpec {
-                        name: "memory_get".into(),
-                        description: "Read a memory file by path. Returns the file content with line numbers, optionally limited to a range of lines.\n\nUse after memory_search returns a relevant result. Line numbers are 1-based and match the from parameter.".into(),
-                        parameters_json: GET_PARAMS.into(),
-                    },
-                    get,
-                )?,
-            ],
-        )?;
-        Ok(None)
-    })
+    plugin(
+        "tool-memory",
+        Inject::from([TOOLS, CONTEXT]),
+        |ctx, _: &()| {
+            let memory = Memory::new();
+            ctx.provide(MEMORY, memory.clone())?;
+            let book = ctx.require::<ContextBook>(CONTEXT)?;
+            own_sections(
+                ctx,
+                vec![book.section(ORDER_MEMORY, "memory", move |exec| {
+                    let mem = exec.get::<Memory>(MEMORY)?;
+                    if !mem.enabled() {
+                        return None;
+                    }
+                    let root = mem.root();
+                    let _ = root.ensure_layout();
+                    Some(prompt::memory_section_body(&root))
+                })?],
+            )?;
+            let tools = ctx.require::<Tools>(TOOLS)?;
+            let mem_search = memory.clone();
+            let search: ToolBody = std::sync::Arc::new(move |call| {
+                let mem = mem_search.clone();
+                Box::pin(async move { memory_search(&mem, call) })
+            });
+            let mem_get = memory.clone();
+            let get: ToolBody = std::sync::Arc::new(move |call| {
+                let mem = mem_get.clone();
+                Box::pin(async move { memory_get(&mem, call) })
+            });
+            own_registered(
+                ctx,
+                vec![
+                    tools.register_deferred(
+                        ToolSpec {
+                            name: "memory_search".into(),
+                            description: "Search cross-session local memory for relevant knowledge chunks. Returns ranked results from $DOCK_HOME/memory (topics/observations) and legacy ~/.dock/memory when present.\n\nUse this proactively when a question references prior work, decisions, or conventions you do not have in the current transcript.\n\nMemory is historical context, not automatically the current plan. Verify recalled facts against live sources before relying on them.".into(),
+                            parameters_json: SEARCH_PARAMS.into(),
+                        },
+                        search,
+                    )?,
+                    tools.register_deferred(
+                        ToolSpec {
+                            name: "memory_get".into(),
+                            description: "Read a memory file by path. Returns the file content with line numbers, optionally limited to a range of lines.\n\nUse after memory_search returns a relevant result. Line numbers are 1-based and match the from parameter.".into(),
+                            parameters_json: GET_PARAMS.into(),
+                        },
+                        get,
+                    )?,
+                ],
+            )?;
+            Ok(None)
+        },
+    )
 }
 
-fn memory_enabled() -> bool {
-    load_memory_config().enabled
-}
-
-fn memory_search(call: ToolCall) -> ToolResult {
-    if !memory_enabled() {
+fn memory_search(memory: &Memory, call: ToolCall) -> ToolResult {
+    if !memory.enabled() {
         return tool_result(
             call,
             "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.",
@@ -120,8 +180,7 @@ fn memory_search(call: ToolCall) -> ToolResult {
         .and_then(|x| x.as_u64())
         .unwrap_or(6)
         .clamp(1, 20) as usize;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let root = MemoryRoot::open_default(&cwd);
+    let root = memory.root();
     let _ = root.ensure_layout();
     match search_memory(&root, query, max) {
         Ok(hits) => {
@@ -133,8 +192,8 @@ fn memory_search(call: ToolCall) -> ToolResult {
     }
 }
 
-fn memory_get(call: ToolCall) -> ToolResult {
-    if !memory_enabled() {
+fn memory_get(memory: &Memory, call: ToolCall) -> ToolResult {
+    if !memory.enabled() {
         return tool_result(
             call,
             "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.",
@@ -147,8 +206,7 @@ fn memory_get(call: ToolCall) -> ToolResult {
     }
     let from = v.get("from").and_then(|x| x.as_u64()).map(|n| n as usize);
     let lines = v.get("lines").and_then(|x| x.as_u64()).map(|n| n as usize);
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let root = MemoryRoot::open_default(&cwd);
+    let root = memory.root();
     match read_memory_file(&root, PathBuf::from(path).as_path(), from, lines) {
         Ok(body) => {
             let start = from.unwrap_or(1).max(1);
@@ -189,6 +247,51 @@ mod tests {
         save_remember_note(&root, "prefer conventional commits for dock", &mut idx).unwrap();
         let hits = search_memory(&root, "conventional commits", 5).unwrap();
         assert!(!hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn context_book_injects_memory_when_enabled() {
+        use crate::prompt::context_book::ContextBook;
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let root = Context::new();
+        crate::install_without_llm(&root).await.unwrap();
+        root.plugin(tool_memory(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let book = root.get::<ContextBook>(CONTEXT).unwrap();
+        let rendered = book.assemble_on(&root).render();
+        assert!(
+            rendered.contains("<memory>"),
+            "expected <memory> section when enabled; got: {}",
+            &rendered[..rendered.len().min(800)]
+        );
+        assert!(rendered.contains("memory_search"));
+        assert!(rendered.contains("MEMORY.md"));
+    }
+
+    #[tokio::test]
+    async fn context_book_skips_memory_when_disabled() {
+        use crate::prompt::context_book::ContextBook;
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "0");
+        let root = Context::new();
+        crate::install_without_llm(&root).await.unwrap();
+        root.plugin(tool_memory(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let book = root.get::<ContextBook>(CONTEXT).unwrap();
+        let rendered = book.assemble_on(&root).render();
+        assert!(
+            !rendered.contains("<memory>"),
+            "disabled must not inject <memory>"
+        );
     }
 }
 
