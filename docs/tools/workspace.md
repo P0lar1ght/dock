@@ -140,4 +140,4 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 
 ## 依赖
 
-`ignore` / `globset` 原本就随 `vendor/xai/fuzzy-file-search` 进了二进制，这里提成 `cordis-spine` 的直接依赖（无新包）；`grep-searcher` / `grep-regex` / `grep-matcher` / `encoding_rs_io` 是 4 个新包，全是 ripgrep 家族。
+`ignore` / `globset` 原本就随 `cordis-tui/fuzzy-file-search`（crate `xai-fuzzy-file-search`）进了二进制，这里提成 `cordis-spine` 的直接依赖（无新包）；`grep-searcher` / `grep-regex` / `grep-matcher` / `encoding_rs_io` 是 4 个新包，全是 ripgrep 家族。
