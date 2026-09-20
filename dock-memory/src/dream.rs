@@ -209,11 +209,8 @@ mod tests {
     #[test]
     fn write_topics_splits() {
         let tmp = tempfile::tempdir().unwrap();
-        let n = write_topics_from_dream(
-            tmp.path(),
-            "## Auth\nuse JWT\n\n## Database\npostgres\n",
-        )
-        .unwrap();
+        let n = write_topics_from_dream(tmp.path(), "## Auth\nuse JWT\n\n## Database\npostgres\n")
+            .unwrap();
         assert_eq!(n, 2);
         assert!(tmp.path().join("auth.md").exists());
         assert!(tmp.path().join("database.md").exists());

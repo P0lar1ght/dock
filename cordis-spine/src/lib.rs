@@ -107,7 +107,9 @@ pub use tools::mcp::{
     is_mcp_public_name, mcp_client, public_tool_name, split_mcp_public_name, ElicitPrompt,
     Elicitation, Mcp, McpReloadReport, McpStatus, McpToolStatus, SEARCH_TOOL_NAME, USE_TOOL_NAME,
 };
-pub use tools::memory::{tool_memory, Memory, run_dream, run_flush, run_remember, maybe_flush_before_compact};
+pub use tools::memory::{
+    maybe_flush_before_compact, run_dream, run_flush, run_remember, tool_memory, Memory,
+};
 pub use tools::monitor::tool_monitor;
 pub use tools::plan_mode::{
     is_plan_file_edit, plan_instruction, plan_mode, plan_system_addon, PlanApprovalPrompt,

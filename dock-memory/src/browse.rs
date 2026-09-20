@@ -26,12 +26,7 @@ pub fn list_memory_files(root: &MemoryRoot) -> Vec<MemoryFileEntry> {
     out
 }
 
-fn collect_dir(
-    out: &mut Vec<MemoryFileEntry>,
-    scope: MemoryScope,
-    kind: &'static str,
-    dir: &Path,
-) {
+fn collect_dir(out: &mut Vec<MemoryFileEntry>, scope: MemoryScope, kind: &'static str, dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

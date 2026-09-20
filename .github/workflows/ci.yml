@@ -29,7 +29,7 @@ jobs:
 
       # 格式门禁：只覆盖第一方 crate，vendor/ 是冻结副本，不要格式化。
       - name: Format
-        run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid"
+        run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory"
 
       # lint 门禁：第一方 crate 已清零，这里挡住新增。vendor/ 冻结副本不参与。
       - name: Clippy

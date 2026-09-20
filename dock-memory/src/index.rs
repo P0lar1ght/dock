@@ -220,8 +220,7 @@ impl MemoryIndex {
         db: &Connection,
         path: &str,
     ) -> Result<std::collections::HashMap<String, (String, i64, String)>, rusqlite::Error> {
-        let mut stmt =
-            db.prepare("SELECT id, hash, rowid, text FROM chunks WHERE path = ?1")?;
+        let mut stmt = db.prepare("SELECT id, hash, rowid, text FROM chunks WHERE path = ?1")?;
         let rows = stmt.query_map(params![path], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -280,7 +279,11 @@ impl MemoryIndex {
         Ok(result)
     }
 
-    pub fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchHit>, rusqlite::Error> {
+    pub fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchHit>, rusqlite::Error> {
         let fts = self.search_fts(query, max_results.max(1))?;
         let mut out = Vec::with_capacity(fts.len());
         for hit in fts {
@@ -300,12 +303,12 @@ impl MemoryIndex {
         Ok(out)
     }
 
-    pub fn reindex_tree(&mut self, root: &crate::layout::MemoryRoot) -> Result<usize, rusqlite::Error> {
+    pub fn reindex_tree(
+        &mut self,
+        root: &crate::layout::MemoryRoot,
+    ) -> Result<usize, rusqlite::Error> {
         let mut n = 0;
-        for (scope_paths, source) in [
-            (&root.global, "global"),
-            (&root.workspace, "workspace"),
-        ] {
+        for (scope_paths, source) in [(&root.global, "global"), (&root.workspace, "workspace")] {
             for dir in [&scope_paths.topics, &scope_paths.observations] {
                 n += self.reindex_dir(dir, source)?;
             }
@@ -345,7 +348,11 @@ mod tests {
         let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-proj"));
         root.ensure_layout().unwrap();
         let topic = root.workspace.topics.join("rust.md");
-        std::fs::write(&topic, "## Ownership\n\nrust ownership and borrowing rules\n").unwrap();
+        std::fs::write(
+            &topic,
+            "## Ownership\n\nrust ownership and borrowing rules\n",
+        )
+        .unwrap();
 
         let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
         let r = idx.reindex_file(&topic, "workspace").unwrap();
@@ -353,6 +360,11 @@ mod tests {
 
         let hits = idx.search("rust ownership", 5).unwrap();
         assert!(!hits.is_empty());
-        assert!(hits.first().unwrap().text.to_lowercase().contains("ownership"));
+        assert!(hits
+            .first()
+            .unwrap()
+            .text
+            .to_lowercase()
+            .contains("ownership"));
     }
 }

@@ -127,6 +127,10 @@ pub async fn run_flush(ctx: &Context, force: bool) -> Result<String> {
         )
         .await;
 
+    if let Some(err) = output.error {
+        return Err(Error::Compact(format!("memory flush LLM failed: {err}")));
+    }
+
     match process_flush_response(&output.text, &cfg.flush) {
         FlushResult::NothingToStore => Ok("Memory flush: nothing to store.".into()),
         FlushResult::Rejected(reason) => Ok(format!("Memory flush rejected: {reason}")),
@@ -183,8 +187,7 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
         }
     };
 
-    let Some(msg) =
-        build_dream_user_message(&root.workspace.observations, existing.as_deref())
+    let Some(msg) = build_dream_user_message(&root.workspace.observations, existing.as_deref())
     else {
         return Ok("Dream: no observations to consolidate.".into());
     };
@@ -201,6 +204,10 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
             |_delta: &StreamDelta| {},
         )
         .await;
+
+    if let Some(err) = output.error {
+        return Err(Error::Compact(format!("memory dream LLM failed: {err}")));
+    }
 
     match process_dream_response(&output.text) {
         DreamStatus::NothingToConsolidate => Ok("Dream: nothing to consolidate.".into()),

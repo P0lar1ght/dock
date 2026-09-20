@@ -14,9 +14,7 @@ pub fn workspace_slug(cwd: &Path) -> String {
             (slugify(slug_source, 40), repo_id.clone())
         }
         None => {
-            let canonical = cwd
-                .canonicalize()
-                .unwrap_or_else(|_| cwd.to_path_buf());
+            let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
             let dir_name = canonical
                 .file_name()
                 .and_then(|n| n.to_str())

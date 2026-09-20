@@ -8,12 +8,9 @@ pub fn search_memory(
     query: &str,
     max_results: usize,
 ) -> Result<Vec<SearchHit>, String> {
-    let mut index =
-        MemoryIndex::open_or_create(&root.search_db()).map_err(|e| e.to_string())?;
+    let mut index = MemoryIndex::open_or_create(&root.search_db()).map_err(|e| e.to_string())?;
     let _ = index.reindex_tree(root);
-    index
-        .search(query, max_results)
-        .map_err(|e| e.to_string())
+    index.search(query, max_results).map_err(|e| e.to_string())
 }
 
 pub fn format_search_results(hits: &[SearchHit]) -> String {

@@ -30,8 +30,8 @@ use cordis_base::stream_acc::StreamDelta;
 use cordis_base::types::{LogEvent, PromptRequest};
 use cordis_base::usage::TokenUsage;
 
-use history::{build_compacted_events, prepare_conversation_for_summarization};
 use crate::tools::memory::maybe_flush_before_compact;
+use history::{build_compacted_events, prepare_conversation_for_summarization};
 
 pub(crate) use history::{estimate_context_tokens, VISIBLE_NOTICE};
 use prompt::{build_summary_prompt_kind, SummaryPromptKind};

@@ -279,4 +279,55 @@ mod flush_mock_tests {
             .collect();
         assert!(!files.is_empty(), "expected observation file");
     }
+
+    struct ErrFlush;
+    impl Sampler for ErrFlush {
+        fn sample<'a>(
+            &'a self,
+            _request: PromptRequest,
+            _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        ) -> BoxFuture<'a, LlmOutput> {
+            Box::pin(async move {
+                LlmOutput {
+                    // Tempting text that would otherwise be accepted as a flush.
+                    text: "## Decisions\n\n- should not be written\n".into(),
+                    error: Some("llm request failed: 503".into()),
+                    ..LlmOutput::default()
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_short_circuits_on_llm_error_without_writing() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        sessions.append(LogEvent::User("note something".into()));
+        let _s = root.provide(SESSIONS, sessions).unwrap();
+        root.provide(LLM, Llm::from_sampler(root.clone(), Arc::new(ErrFlush)))
+            .unwrap();
+        root.provide(MEMORY, Memory::new()).unwrap();
+
+        let err = run_flush(&root, true)
+            .await
+            .expect_err("must fail on LlmOutput.error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("memory flush LLM failed"),
+            "unexpected err: {msg}"
+        );
+        let mem = MemoryRoot::open_default(&std::env::current_dir().unwrap());
+        let _ = std::fs::create_dir_all(&mem.workspace.observations);
+        let files: Vec<_> = std::fs::read_dir(&mem.workspace.observations)
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(
+            files.is_empty(),
+            "failed stream must not write observations"
+        );
+    }
 }

@@ -50,10 +50,7 @@ pub fn chunk_markdown(content: &str, config: &ChunkConfig) -> Vec<Chunk> {
                 .get(i)
                 .is_some_and(|l| l.starts_with("## ") || l.starts_with("# "));
         if (at_header && i > section_start) || i == lines.len() {
-            let section = lines
-                .get(section_start..i)
-                .unwrap_or(&[])
-                .join("\n");
+            let section = lines.get(section_start..i).unwrap_or(&[]).join("\n");
             if !section.trim().is_empty() {
                 push_section(&mut chunks, &section, section_start, max_chars);
             }
@@ -118,11 +115,7 @@ mod tests {
 
     #[test]
     fn splits_on_headers() {
-        let text = format!(
-            "## A\n{}\n## B\n{}",
-            "x".repeat(100),
-            "y".repeat(100)
-        );
+        let text = format!("## A\n{}\n## B\n{}", "x".repeat(100), "y".repeat(100));
         let c = chunk_markdown(
             &text,
             &ChunkConfig {
