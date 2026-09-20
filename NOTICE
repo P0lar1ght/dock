@@ -23,18 +23,18 @@ The following directories contain frozen copies of third-party code that are
 NOT covered by the license above. Each retains its own upstream license, and
 its own LICENSE file next to the source is authoritative:
 
-  vendor/xai/grok-tools/          Apache-2.0
-  vendor/xai/fuzzy-file-search/   Apache-2.0
-  vendor/xai/workflow/            Apache-2.0
-  vendor/mermaid/ordered_hashmap/ Apache-2.0
-  vendor/mermaid/graphlib_rust/   Apache-2.0
-  vendor/mermaid/dagre_rust/      Apache-2.0
-  vendor/mermaid/mermaid-to-svg/  MIT
+  vendor/xai/grok-tools/                    Apache-2.0
+  cordis-tui/fuzzy-file-search/             Apache-2.0
+  vendor/xai/workflow/                      Apache-2.0
+  dock-render/third_party/ordered_hashmap/  Apache-2.0
+  dock-render/third_party/graphlib_rust/    Apache-2.0
+  dock-render/third_party/dagre_rust/       Apache-2.0
+  dock-render/third_party/mermaid-to-svg/   MIT
 
 The rendering crates are derivative works of Apache-2.0 upstreams and stay
 Apache-2.0 independently of this project's license:
 
-  cordis-render/markdown/         Apache-2.0 (from xai-grok-markdown)
-  cordis-render/mermaid/          Apache-2.0 (from the mermaid layout stack)
+  dock-render/markdown/                     Apache-2.0 (from xai-grok-markdown)
+  dock-render/mermaid/                      Apache-2.0 (from the mermaid layout stack)
 
 Bundled agent skills under skills/ carry their own LICENSE.txt files.

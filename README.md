@@ -120,7 +120,7 @@ flowchart TB
   api["模型 API"]
   mcp["MCP stdio / HTTP"]
   disk["~/.dock · 项目 .dock"]
-  render["cordis-render · Markdown / Mermaid"]
+  render["dock-render · Markdown / Mermaid"]
 
   spine -->|"采样"| api
   grains -->|"mcp-client"| mcp
@@ -267,9 +267,9 @@ dock/
 ├── cordis-tui/           # 全屏终端 UI
 ├── cordis-gateway/       # 回环 HTTP/WS：配对与 dock.1 投影
 ├── cordis-app/           # 二进制入口
-├── cordis-render/        # Markdown / Mermaid
+├── dock-render/          # Markdown / Mermaid（crate 名暂仍 cordis-markdown / xai-grok-mermaid）
 ├── embed-sdk/            # 宿主页 JS 注入（dock-embed.js）
-├── vendor/               # 冻结副本：mermaid 布局栈、xai Grok 拷贝
+├── vendor/               # 冻结副本：xai Grok 拷贝（mermaid 栈在 dock-render/third_party/）
 ├── skills/               # Agent skills（内置，Bundled scope）
 ├── .agents/skills/       # 仓库流程 skills（Agents scope）
 ├── docs/                 # 架构与开发细节
