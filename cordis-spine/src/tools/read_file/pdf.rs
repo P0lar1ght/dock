@@ -1,19 +1,23 @@
-//! PDF text extraction via `pdf_oxide` (Grok-aligned).
+//! PDF text extraction and page rendering via `pdf_oxide` (Grok-aligned).
 //!
 //! **Dependency choice:** `pdf_oxide` on `cordis-spine` (not `cordis-base`).
-//! Same pure-Rust engine Grok vendors against. Default features only —
-//! the `rendering` feature (page→JPEG) pulls `hayro-jpeg2000` (rustc 1.92+)
-//! which exceeds dock's MSRV 1.88, so `format=image` is deferred. Dock
-//! therefore defaults `format` to **text** (Grok defaults to image).
+//! Same pure-Rust engine Grok vendors against. The `rendering` feature
+//! (page→JPEG at 150 DPI / q85) needs rustc ≥ 1.92; dock MSRV is 1.94 to
+//! match live xai-org/grok-build. Default `format` is **image**.
 
 use std::fmt::Write as _;
 use std::time::Duration;
 
 use cordis_base::types::UserImage;
 
+use crate::tools::tool_images;
+
 pub const MAX_PDF_BYTES: usize = 50 * 1024 * 1024;
 const PDF_AUTO_READ_THRESHOLD: usize = 10;
 pub const PDF_MAX_PAGES_PER_READ: usize = 20;
+/// Aligned with live xai-org/grok-build `implementations/read_file/pdf.rs`.
+const PDF_RENDER_DPI: u32 = 150;
+const PDF_RENDER_JPEG_QUALITY: u8 = 85;
 pub const PDF_PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Three-tier PDF detection: magic bytes or extension.
@@ -156,7 +160,47 @@ fn line_number_text(raw: &str) -> String {
     content
 }
 
-/// Handle a PDF. Dock defaults to `format=text` (see module docs).
+/// Render selected pages to JPEG [`UserImage`]s (Grok `render_pdf_pages`).
+fn render_pdf_pages(
+    bytes: Vec<u8>,
+    pages_spec: Option<&str>,
+    file_size: usize,
+) -> Result<(String, Vec<UserImage>), String> {
+    let (doc, page_count, page_indices) = open_pdf_and_resolve_pages(bytes, pages_spec)?;
+
+    let opts = pdf_oxide::rendering::RenderOptions::with_dpi(PDF_RENDER_DPI)
+        .as_jpeg(PDF_RENDER_JPEG_QUALITY);
+
+    let mut images = Vec::with_capacity(page_indices.len());
+    let mut page_numbers = Vec::with_capacity(page_indices.len());
+    for &page_idx in &page_indices {
+        let image = pdf_oxide::rendering::render_page(&doc, page_idx, &opts)
+            .map_err(|e| format!("Failed to render page {}: {e}", page_idx + 1))?;
+        let page_number = page_idx + 1;
+        let user_img = tool_images::user_image_from_bytes(image.data, Some("image/jpeg"))
+            .ok_or_else(|| {
+                format!(
+                    "Rendered page {page_number} outside tool image size bounds ({}..{} bytes)",
+                    tool_images::MIN_TOOL_IMAGE_BYTES,
+                    tool_images::MAX_TOOL_IMAGE_BYTES,
+                )
+            })?;
+        images.push(user_img);
+        page_numbers.push(page_number.to_string());
+    }
+
+    // Prompt text mirrors Grok `PdfPageImages::to_prompt_format`.
+    let content = format!(
+        "[Read PDF: {} pages rendered (pages {}). Total document: {} pages, {:.1} KB]",
+        images.len(),
+        page_numbers.join(", "),
+        page_count,
+        file_size as f64 / 1024.0,
+    );
+    Ok((content, images))
+}
+
+/// Handle a PDF. Default `format` is `image` (Grok-aligned).
 pub async fn handle_pdf(
     path_display: &str,
     file_bytes: Vec<u8>,
@@ -171,22 +215,15 @@ pub async fn handle_pdf(
         ));
     }
 
-    match format {
-        None | Some("text") => {}
-        Some("image") => {
-            return Err(
-                "PDF format=image (page rasterisation) is not available yet on this \
-                 rustc MSRV — pdf_oxide's `rendering` feature needs rustc ≥ 1.92. \
-                 Use format=text (default) to extract text, or raise the workspace MSRV."
-                    .into(),
-            );
-        }
+    let extract_text = match format {
+        None | Some("image") => false,
+        Some("text") => true,
         Some(other) => {
             return Err(format!(
-                "Invalid format '{other}'. Supported values: 'text' (default), 'image' (deferred)."
+                "Invalid format '{other}'. Supported values: 'image' (default), 'text'."
             ));
         }
-    }
+    };
 
     let pages_owned = pages.map(str::to_owned);
     let path_owned = path_display.to_owned();
@@ -195,10 +232,16 @@ pub async fn handle_pdf(
         PDF_PROCESS_TIMEOUT,
         tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let raw = extract_pdf_text(file_bytes, pages_owned.as_deref())?;
-                let content = line_number_text(&raw);
-                let _ = path_owned;
-                Ok::<_, String>((content, Vec::new()))
+                if extract_text {
+                    let raw = extract_pdf_text(file_bytes, pages_owned.as_deref())?;
+                    let content = line_number_text(&raw);
+                    let _ = path_owned;
+                    Ok::<_, String>((content, Vec::new()))
+                } else {
+                    let file_size = file_bytes.len();
+                    let _ = path_owned;
+                    render_pdf_pages(file_bytes, pages_owned.as_deref(), file_size)
+                }
             }))
         }),
     )
@@ -335,6 +378,36 @@ mod tests {
         assert!(err.contains("auto-read limit"), "{err}");
     }
 
+    #[test]
+    fn render_pdf_pages_smoke() {
+        let pdf = make_test_pdf(&["Some Text"]);
+        let file_size = pdf.len();
+        let (content, images) = render_pdf_pages(pdf, None, file_size).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime, "image/jpeg");
+        assert!(images[0].data.starts_with(&[0xff, 0xd8, 0xff]));
+        assert!(content.contains("1 pages rendered"));
+        assert!(content.contains("pages 1"));
+    }
+
+    #[test]
+    fn render_pdf_pages_multi_page() {
+        let pdf = make_test_pdf(&["A", "B", "C"]);
+        let file_size = pdf.len();
+        let (content, images) = render_pdf_pages(pdf, Some("1-2"), file_size).unwrap();
+        assert_eq!(images.len(), 2);
+        assert!(content.contains("pages 1, 2"));
+        assert!(content.contains("Total document: 3 pages"));
+    }
+
+    #[test]
+    fn render_rejects_large_without_pages() {
+        let pages: Vec<&str> = (0..12).map(|_| "x").collect();
+        let pdf = make_test_pdf(&pages);
+        let err = render_pdf_pages(pdf, None, 100).unwrap_err();
+        assert!(err.contains("auto-read limit"), "{err}");
+    }
+
     #[tokio::test]
     async fn handle_pdf_format_text() {
         let pdf = make_test_pdf(&["Hello World"]);
@@ -346,20 +419,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_pdf_default_is_text() {
-        let pdf = make_test_pdf(&["Default Text"]);
+    async fn handle_pdf_default_is_image() {
+        let pdf = make_test_pdf(&["Default Image"]);
         let (content, images) = handle_pdf("/tmp/t.pdf", pdf, None, None).await.unwrap();
-        assert!(images.is_empty());
-        assert!(content.contains("Default Text"));
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime, "image/jpeg");
+        assert!(content.contains("pages rendered"));
+        assert!(!content.contains("Default Image"));
     }
 
     #[tokio::test]
-    async fn handle_pdf_format_image_deferred() {
+    async fn handle_pdf_format_image() {
         let pdf = make_test_pdf(&["Some Text"]);
-        let err = handle_pdf("/tmp/t.pdf", pdf, None, Some("image"))
+        let (content, images) = handle_pdf("/tmp/t.pdf", pdf, None, Some("image"))
+            .await
+            .unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime, "image/jpeg");
+        assert!(content.contains("1 pages rendered"));
+    }
+
+    #[tokio::test]
+    async fn handle_pdf_invalid_format() {
+        let pdf = make_test_pdf(&["x"]);
+        let err = handle_pdf("/tmp/t.pdf", pdf, None, Some("html"))
             .await
             .unwrap_err();
-        assert!(err.contains("format=image"), "{err}");
-        assert!(err.contains("format=text"), "{err}");
+        assert!(err.contains("Invalid format"), "{err}");
+        assert!(err.contains("'image' (default)"), "{err}");
     }
 }

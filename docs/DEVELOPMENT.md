@@ -6,7 +6,7 @@
 
 | 需要 | 版本 | 说明 |
 |---|---|---|
-| rustc / cargo | **1.88+** | 由根 `Cargo.toml` 的 `[workspace.package].rust-version = "1.88"` 声明，第一方 crate 用 `rust-version.workspace = true` 继承（`vendor/` 冻结副本不继承）。`README.md` 的 badge 与「快速开始」同步声明（原文：`cordis-gateway` 在 1.85 编不过）。用旧工具链编不过就升到 1.88+，不要改写法去迁就旧编译器。`Context::new()` 需要 tokio runtime |
+| rustc / cargo | **1.94+** | 由根 `Cargo.toml` 的 `[workspace.package].rust-version = "1.94"` 声明，第一方 crate 用 `rust-version.workspace = true` 继承（`vendor/` 冻结副本不继承）。`README.md` 的 badge 与「快速开始」同步声明（原文：`cordis-gateway` 在 1.85 编不过）。用旧工具链编不过就升到 1.94+，不要改写法去迁就旧编译器。`Context::new()` 需要 tokio runtime |
 | Node / npm | **>= 18** | 只给 `embed-sdk/`（`package.json` 的 `engines.node`） |
 | 模型端点 | — | `~/.dock/config.toml` 或项目 `.dock/config.toml`，样例 `config.toml.example` |
 
@@ -102,7 +102,7 @@ cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
 cargo test --locked -p cordis-spine
 ```
 
-工具链用 rustup 的 stable，仓库下限由 `[workspace.package].rust-version` 兜底。代理环境要放行回环地址（见上文 `no_proxy`）。
+工具链下限由 `[workspace.package].rust-version` 兜底；CI / release 钉 `1.94.0`（对齐 live xai-org/grok-build `rust-toolchain.toml`）。本地用 rustup 的 1.94+ 即可。代理环境要放行回环地址（见上文 `no_proxy`）。
 
 改 workflow 后先本地校验：
 

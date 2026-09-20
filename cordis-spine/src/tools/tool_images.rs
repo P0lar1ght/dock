@@ -11,7 +11,7 @@ use cordis_base::types::UserImage;
 /// Cap images attached to one tool result.
 ///
 /// Raised from Grok MCP's 5 to 20 so a single `read_file` PDF `format=image`
-/// call can return up to [`crate::tools::read_file`]'s max pages-per-call.
+/// call can return up to [`crate::tools::read_file`]'s max pages-per-call (≤20).
 /// Browser / CUA screenshots rarely approach this.
 pub const MAX_TOOL_IMAGES: usize = 20;
 /// Soft max decoded bytes per image before we refuse to attach.
