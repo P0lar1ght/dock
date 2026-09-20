@@ -1257,11 +1257,13 @@ dependencies = [
 name = "dock-memory"
 version = "0.1.1"
 dependencies = [
+ "arc-swap",
  "blake3",
  "chrono",
  "cordis-base",
  "rusqlite",
  "serde",
+ "sqlite-vec",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -4273,6 +4275,15 @@ name = "spin"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
+
+[[package]]
+name = "sqlite-vec"
+version = "0.1.7-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2388d9b97b32baa48a059df2f15a9bb49217fa1f9fb076e98c89e8fc02c8f2c4"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "stable_deref_trait"

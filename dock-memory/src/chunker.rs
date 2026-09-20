@@ -102,6 +102,22 @@ fn push_section(chunks: &mut Vec<Chunk>, section: &str, start_line: usize, max_c
     }
 }
 
+
+/// Detect markdown header level (1 for `#`, 2 for `##`, etc.). Returns `None` if not a header.
+pub(crate) fn header_level(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let level = trimmed.chars().take_while(|&c| c == '#').count();
+    let rest = trimmed.get(level..)?;
+    if rest.is_empty() || rest.starts_with(' ') {
+        Some(level)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

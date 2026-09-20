@@ -21,17 +21,22 @@
 
 pub mod browse;
 pub mod chunker;
+pub mod config;
 pub mod dream;
 pub mod flush;
 pub mod index;
 pub mod keywords;
 pub mod layout;
 pub mod manifest;
+pub mod mmr;
+pub mod query_expansion;
+pub mod schema;
 pub mod search;
 pub mod slug;
 pub mod storage;
 pub mod text_utils;
 
+pub use config::{MemoryEmbeddingConfig, MemorySearchConfig, MmrConfig, SearchResult};
 pub use dream::{
     build_dream_user_message, process_dream_response, DreamMessage, DreamResult, DreamStatus,
     DREAM_SYSTEM_PROMPT,
@@ -40,7 +45,7 @@ pub use flush::{
     process_flush_response, should_flush, FlushResult, FLUSH_DELTA_SYSTEM_PROMPT,
     FLUSH_SYSTEM_PROMPT,
 };
-pub use index::{ChunkRecord, FtsHit, MemoryIndex, ReindexResult, SearchHit};
+pub use index::{init_sqlite_vec, ChunkRecord, FtsHit, MemoryIndex, ReindexResult, SearchHit};
 pub use layout::{MemoryRoot, MemoryScope, ScopePaths};
 pub use manifest::{refresh_all, regenerate_scope, Manifest, ManifestBudget};
 pub use search::{format_search_results, search_memory};
