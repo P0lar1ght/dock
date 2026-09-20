@@ -11,8 +11,9 @@ use crate::layout::MemoryRoot;
 use crate::mmr;
 
 /// Open the index and query. Reindexes once when the DB is missing or empty.
-/// Optional dirty watcher sync is wired in a later commit.
-
+/// Callers that hold a [`crate::MemoryFileWatcher`] should [`sync_dirty_paths`]
+/// before search when [`crate::MemoryFileWatcher::is_dirty`].
+///
 /// If a watcher reports dirty paths, reindex existing files and delete_path missing ones.
 pub fn sync_dirty_paths(root: &MemoryRoot, index: &mut MemoryIndex, dirty: &[std::path::PathBuf]) {
     for path in dirty {
@@ -33,8 +34,10 @@ pub fn search_memory(
     query: &str,
     max_results: usize,
 ) -> Result<Vec<SearchHit>, String> {
-    let mut config = MemorySearchConfig::default();
-    config.max_results = max_results.max(1);
+    let config = MemorySearchConfig {
+        max_results: max_results.max(1),
+        ..MemorySearchConfig::default()
+    };
     search_memory_with_config(root, query, &config, None)
 }
 
@@ -46,7 +49,9 @@ pub fn search_memory_with_config(
 ) -> Result<Vec<SearchHit>, String> {
     let db = root.search_db();
     let missing = !db.exists();
-    let mut index = MemoryIndex::open_or_create(&db).map_err(|e| e.to_string())?;
+    let dims = query_embedding.map(|e| e.len()).unwrap_or(1024);
+    let mut index =
+        MemoryIndex::open_or_create_with_dimensions(&db, dims).map_err(|e| e.to_string())?;
     if missing || index.is_empty() {
         let _ = index.reindex_tree(root);
     }
@@ -356,5 +361,72 @@ mod tests {
         let cfg = MemorySearchConfig::default();
         let merge = hybrid_search_merge(&idx, "semantic embeddings", Some(&q[0]), &cfg).unwrap();
         assert!(!merge.results.is_empty() || cfg.min_score > 0.9);
+    }
+
+    #[test]
+    fn dirty_sync_before_search_picks_up_external_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/dirty-sync"));
+        root.ensure_layout().unwrap();
+        let path = root.workspace.topics.join("ext.md");
+        std::fs::write(&path, "## Before\n\nold content about zebras\n").unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        let _ = idx.reindex_tree(&root);
+        drop(idx);
+
+        // External edit (as a file watcher would observe).
+        std::fs::write(&path, "## After\n\nnew content about platypus secrets\n").unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        sync_dirty_paths(&root, &mut idx, &[path.clone()]);
+        drop(idx);
+
+        let hits = search_memory(&root, "platypus secrets", 5).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.text.to_lowercase().contains("platypus")),
+            "dirty sync should reindex external edit; hits={hits:?}"
+        );
+        let stale = search_memory(&root, "zebras", 5).unwrap();
+        assert!(
+            !stale
+                .iter()
+                .any(|h| h.text.to_lowercase().contains("zebras")),
+            "old chunk text should be gone after reindex"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_memory_with_config_embedding_path() {
+        use crate::embedding::{embed_missing_chunks, EmbeddingProvider, MockEmbeddingProvider};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/embed-path"));
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.workspace.topics.join("emb.md"),
+            "## Embed path\n\nquery vectors unlock hybrid recall\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create_with_dimensions(&root.search_db(), 8).unwrap();
+        let _ = idx.reindex_tree(&root);
+        if !idx.vec_available() {
+            return;
+        }
+        let provider = MockEmbeddingProvider { dimensions: 8 };
+        assert!(embed_missing_chunks(&idx, &provider).await >= 1);
+        let q = provider
+            .embed_batch(&["query vectors hybrid"])
+            .await
+            .unwrap();
+        let cfg = MemorySearchConfig {
+            min_score: 0.0,
+            ..MemorySearchConfig::default()
+        };
+        let hits =
+            search_memory_with_config(&root, "query vectors hybrid", &cfg, Some(&q[0])).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "embedding path must return hits; got {hits:?}"
+        );
     }
 }

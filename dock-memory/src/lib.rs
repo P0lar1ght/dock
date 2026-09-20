@@ -46,7 +46,9 @@ pub use dream::{
     auto_dream_eligibility, build_dream_user_message, process_dream_response, DreamEligibility,
     DreamMessage, DreamResult, DreamStatus, DREAM_SYSTEM_PROMPT,
 };
-pub use embedding::{embed_missing_chunks, ApiEmbeddingProvider, EmbeddingProvider};
+pub use embedding::{
+    embed_missing_chunks, embed_missing_chunks_owned, ApiEmbeddingProvider, EmbeddingProvider,
+};
 pub use flush::{
     process_flush_response, should_flush, FlushResult, FLUSH_DELTA_SYSTEM_PROMPT,
     FLUSH_SYSTEM_PROMPT,
@@ -55,7 +57,9 @@ pub use index::{init_sqlite_vec, ChunkRecord, FtsHit, MemoryIndex, ReindexResult
 pub use layout::{MemoryRoot, MemoryScope, ScopePaths};
 pub use manifest::{refresh_all, regenerate_scope, Manifest, ManifestBudget};
 pub use rewrite::{rewrite_user_message, REMEMBER_REWRITE_SYSTEM_PROMPT};
-pub use search::{format_search_results, search_memory, sync_dirty_paths};
+pub use search::{
+    format_search_results, search_memory, search_memory_with_config, sync_dirty_paths,
+};
 pub use slug::workspace_slug;
 pub use storage::{persist_observation, save_remember_note, write_flush_observation};
 pub use watcher::MemoryFileWatcher;

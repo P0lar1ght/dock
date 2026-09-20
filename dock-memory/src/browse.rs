@@ -33,7 +33,9 @@ pub fn list_memory_files(root: &MemoryRoot) -> Vec<MemoryFileEntry> {
             });
         }
         collect_dir(&mut out, scope, "topics", &paths.topics);
-        collect_dir(&mut out, scope, "observations", &paths.inbox);
+        // Inbox lives at observations/_inbox/; include that segment in labels
+        // (list + delete-confirm flash), matching on-disk layout.
+        collect_dir(&mut out, scope, "observations/_inbox", &paths.inbox);
         // Legacy flat observations/*.md (pre-migrate / collision left behind).
         collect_flat_obs(&mut out, scope, &paths.observations);
     }
@@ -123,5 +125,14 @@ mod tests {
         assert!(list.iter().any(|e| e.label.contains("prefs")));
         assert!(list.iter().any(|e| e.label.contains("flush-1")));
         assert!(list.iter().any(|e| e.label.ends_with("MEMORY.md")));
+        let inbox = list
+            .iter()
+            .find(|e| e.label.contains("flush-1"))
+            .expect("inbox observation");
+        assert!(
+            inbox.label.contains("observations/_inbox/"),
+            "inbox label must include _inbox segment, got {}",
+            inbox.label
+        );
     }
 }

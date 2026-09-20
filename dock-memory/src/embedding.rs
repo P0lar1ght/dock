@@ -190,9 +190,30 @@ impl EmbeddingProvider for MockEmbeddingProvider {
     }
 }
 
-/// Embed all chunks lacking vectors. Call after writes / reindex when a provider exists.
+/// Embed all chunks lacking vectors. Soft-fail per batch.
+///
+/// Prefer [`embed_missing_chunks_owned`] from `Send` async tasks: rusqlite
+/// `Connection` is `Send` + !`Sync`, so `&MemoryIndex` across `.await` is not
+/// `Send`.
 pub async fn embed_missing_chunks(
     index: &crate::index::MemoryIndex,
+    provider: &dyn EmbeddingProvider,
+) -> usize {
+    // Local !Send future is fine for tests / single-threaded callers.
+    let chunks = match index.chunks_without_embeddings() {
+        Ok(c) if c.is_empty() => return 0,
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to query chunks without embeddings");
+            return 0;
+        }
+    };
+    embed_batches(index, provider, &chunks).await
+}
+
+/// `Send`-friendly: owns the index so the async future can move across threads.
+pub async fn embed_missing_chunks_owned(
+    index: crate::index::MemoryIndex,
     provider: &dyn EmbeddingProvider,
 ) -> usize {
     let chunks = match index.chunks_without_embeddings() {
@@ -203,6 +224,36 @@ pub async fn embed_missing_chunks(
             return 0;
         }
     };
+    let total = chunks.len();
+    let mut embedded = 0;
+    for batch in chunks.chunks(32) {
+        let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
+        match provider.embed_batch(&texts).await {
+            Ok(embeddings) => {
+                for ((chunk_id, _), embedding) in batch.iter().zip(embeddings.iter()) {
+                    if let Err(e) = index.upsert_embedding(chunk_id, embedding) {
+                        tracing::warn!(chunk_id, error = %e, "failed to upsert embedding");
+                    } else {
+                        embedded += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, batch_size = texts.len(), "embedding batch failed");
+            }
+        }
+    }
+    if embedded > 0 {
+        tracing::info!(embedded, total, "embedded missing chunks");
+    }
+    embedded
+}
+
+async fn embed_batches(
+    index: &crate::index::MemoryIndex,
+    provider: &dyn EmbeddingProvider,
+    chunks: &[(String, String)],
+) -> usize {
     let total = chunks.len();
     let mut embedded = 0;
     for batch in chunks.chunks(32) {

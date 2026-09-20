@@ -44,11 +44,15 @@ $DOCK_HOME/memory/
 
 ## 工具
 
-- `memory_search` — FTS5（无 embedding）。写入路径已 `reindex_file`；搜索只 open+query，DB 缺失或空时才全树 reindex 一次
+- `memory_search` — FTS5；若 `[memory.embedding]` 已配置则查询侧 embed + hybrid；搜索前若 file watcher dirty 则 `sync_dirty_paths`。写入后 soft-fail `embed_missing_chunks`
 - `memory_get` — 按路径读文件
 
 经 `search_tool` / `use_tool` 按需暴露（`register_deferred`）。
 
+
+## /memory list labels
+
+Inbox notes show as `global|workspace/observations/_inbox/<file>.md` (not bare `observations/<file>.md`).
 
 ## Hybrid search & embeddings
 

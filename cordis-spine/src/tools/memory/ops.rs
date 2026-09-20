@@ -23,7 +23,7 @@ use crate::llm::sampler::Llm;
 use crate::names::{LLM, MEMORY, SESSIONS, SYSTEM_PROMPT};
 use crate::prompt::assemble::SystemPrompt;
 use crate::session::log::Sessions;
-use crate::tools::memory::Memory;
+use crate::tools::memory::{embed_missing_after_write, spawn_embed_missing_after_write, Memory};
 
 /// Run memory flush before compact when gates pass. Fail-open.
 pub async fn maybe_flush_before_compact(ctx: &Context) {
@@ -142,6 +142,7 @@ pub async fn run_flush(ctx: &Context, force: bool) -> Result<String> {
             let path = write_flush_observation(&root, &content, &mut index)
                 .map_err(|e| Error::Compact(format!("memory write: {e}")))?;
             sessions.set_last_flush_content(Some(content));
+            embed_missing_after_write(&memory.config().embedding, &root).await;
             Ok(format!("Memory flush wrote {}", path.display()))
         }
     }
@@ -224,6 +225,7 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
                 &root.workspace,
                 dock_memory::MemoryScope::Workspace,
             );
+            embed_missing_after_write(&cfg.embedding, &root).await;
             // Archive processed observations by renaming aside (keep for audit).
             let archive = root.workspace.archive.clone();
             let _ = std::fs::create_dir_all(&archive);
@@ -254,6 +256,7 @@ fn save_remember(ctx: &Context, note: &str) -> Result<String> {
             .map_err(|e| Error::Compact(format!("memory index: {e}")))?;
         let path = save_remember_note(&root, note, &mut index)
             .map_err(|e| Error::Compact(format!("remember: {e}")))?;
+        spawn_embed_missing_after_write(memory.config().embedding, root);
         return Ok(format!("Memory saved to {}", path.display()));
     }
     let cfg = load_memory_config();
@@ -268,6 +271,7 @@ fn save_remember(ctx: &Context, note: &str) -> Result<String> {
         .map_err(|e| Error::Compact(format!("memory index: {e}")))?;
     let path = save_remember_note(&root, note, &mut index)
         .map_err(|e| Error::Compact(format!("remember: {e}")))?;
+    spawn_embed_missing_after_write(cfg.embedding, root);
     Ok(format!("Memory saved to {}", path.display()))
 }
 

@@ -150,9 +150,8 @@ fn ensure_state_db(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let db = rusqlite::Connection::open(path).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("open state db: {e}"))
-    })?;
+    let db = rusqlite::Connection::open(path)
+        .map_err(|e| std::io::Error::other(format!("open state db: {e}")))?;
     db.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS meta (
@@ -169,12 +168,12 @@ fn ensure_state_db(path: &Path) -> std::io::Result<()> {
         );
         ",
     )
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("state schema: {e}")))?;
+    .map_err(|e| std::io::Error::other(format!("state schema: {e}")))?;
     db.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
         rusqlite::params![STATE_SCHEMA_VERSION],
     )
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("state meta: {e}")))?;
+    .map_err(|e| std::io::Error::other(format!("state meta: {e}")))?;
     Ok(())
 }
 

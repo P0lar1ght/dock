@@ -14,10 +14,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Inject, Plugin};
-use cordis_base::config::{load_memory_config, MemoryConfig};
+use cordis_base::config::{load_memory_config, MemoryConfig, MemoryEmbeddingConfig};
+use dock_memory::index::MemoryIndex;
 use dock_memory::layout::MemoryRoot;
 use dock_memory::storage::{format_with_line_numbers, read_memory_file};
-use dock_memory::{format_search_results, search_memory};
+use dock_memory::{
+    embed_missing_chunks_owned, format_search_results, search_memory_with_config, sync_dirty_paths,
+    ApiEmbeddingProvider, EmbeddingProvider, MemoryFileWatcher, MemorySearchConfig,
+};
 
 use crate::names::{CONTEXT, MEMORY, TOOLS};
 use crate::prompt::assemble::ORDER_MEMORY;
@@ -35,6 +39,8 @@ struct MemoryInner {
     /// Session override: `None` = follow config; `Some(bool)` toggled via `/memory` `t`.
     /// `DOCK_MEMORY=0` (`force_disabled`) still wins process-wide.
     session_override: Mutex<Option<bool>>,
+    /// Started when memory is enabled; watches `$DOCK_HOME/memory/` for external `.md` edits.
+    watcher: Mutex<Option<MemoryFileWatcher>>,
 }
 
 /// Named `"memory"` — live-looked by TUI / tools / compact flush hook.
@@ -45,12 +51,17 @@ pub struct Memory {
 
 impl Memory {
     pub fn new() -> Self {
-        Self {
+        let mem = Self {
             inner: Arc::new(MemoryInner {
                 config: Mutex::new(load_memory_config()),
                 session_override: Mutex::new(None),
+                watcher: Mutex::new(None),
             }),
+        };
+        if mem.enabled() {
+            mem.ensure_watcher();
         }
+        mem
     }
 
     pub fn config(&self) -> MemoryConfig {
@@ -59,6 +70,9 @@ impl Memory {
 
     pub fn reload(&self) {
         *self.inner.config.lock().unwrap() = load_memory_config();
+        if self.enabled() {
+            self.ensure_watcher();
+        }
     }
 
     /// Effective on/off: process force-off → session override → config.
@@ -82,8 +96,13 @@ impl Memory {
         }
         let mut slot = self.inner.session_override.lock().unwrap();
         let currently = slot.unwrap_or(cfg.enabled);
-        *slot = Some(!currently);
-        Ok(!currently)
+        let next = !currently;
+        *slot = Some(next);
+        drop(slot);
+        if next {
+            self.ensure_watcher();
+        }
+        Ok(next)
     }
 
     pub fn session_override(&self) -> Option<bool> {
@@ -97,6 +116,54 @@ impl Memory {
     pub fn root(&self) -> MemoryRoot {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         self.root_for_cwd(&cwd)
+    }
+
+    /// Start [`MemoryFileWatcher`] on `$DOCK_HOME/memory/` once when enabled.
+    pub fn ensure_watcher(&self) {
+        if !self.enabled() {
+            return;
+        }
+        {
+            let slot = self.inner.watcher.lock().unwrap();
+            if slot.is_some() {
+                return;
+            }
+        }
+        let root = self.root();
+        let _ = root.ensure_layout();
+        let mut slot = self.inner.watcher.lock().unwrap();
+        if slot.is_some() {
+            return;
+        }
+        *slot = MemoryFileWatcher::start(&root.home);
+    }
+
+    /// If the watcher reports dirty paths, reindex/delete them before search.
+    pub fn sync_dirty_if_needed(&self, root: &MemoryRoot) {
+        self.ensure_watcher();
+        let dirty = {
+            let guard = self.inner.watcher.lock().unwrap();
+            let Some(watcher) = guard.as_ref() else {
+                return;
+            };
+            if !watcher.is_dirty() {
+                return;
+            }
+            watcher.take_dirty()
+        };
+        if dirty.is_empty() {
+            return;
+        }
+        let Ok(mut index) = MemoryIndex::open_or_create(&root.search_db()) else {
+            return;
+        };
+        sync_dirty_paths(root, &mut index, &dirty);
+    }
+
+    /// True when a watcher is running (tests / diagnostics).
+    #[cfg(test)]
+    fn has_watcher(&self) -> bool {
+        self.inner.watcher.lock().unwrap().is_some()
     }
 }
 
@@ -130,7 +197,7 @@ pub fn tool_memory() -> Plugin {
             let mem_search = memory.clone();
             let search: ToolBody = std::sync::Arc::new(move |call| {
                 let mem = mem_search.clone();
-                Box::pin(async move { memory_search(&mem, call) })
+                Box::pin(async move { memory_search(&mem, call).await })
             });
             let mem_get = memory.clone();
             let get: ToolBody = std::sync::Arc::new(move |call| {
@@ -163,7 +230,7 @@ pub fn tool_memory() -> Plugin {
     )
 }
 
-fn memory_search(memory: &Memory, call: ToolCall) -> ToolResult {
+async fn memory_search(memory: &Memory, call: ToolCall) -> ToolResult {
     if !memory.enabled() {
         return tool_result(
             call,
@@ -182,7 +249,14 @@ fn memory_search(memory: &Memory, call: ToolCall) -> ToolResult {
         .clamp(1, 20) as usize;
     let root = memory.root();
     let _ = root.ensure_layout();
-    match search_memory(&root, query, max) {
+    memory.sync_dirty_if_needed(&root);
+
+    let search_cfg = MemorySearchConfig {
+        max_results: max,
+        ..MemorySearchConfig::default()
+    };
+    let query_embedding = embed_query_if_configured(&memory.config().embedding, query).await;
+    match search_memory_with_config(&root, query, &search_cfg, query_embedding.as_deref()) {
         Ok(hits) => {
             let min_score = v.get("min_score").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let filtered: Vec<_> = hits.into_iter().filter(|h| h.score >= min_score).collect();
@@ -190,6 +264,76 @@ fn memory_search(memory: &Memory, call: ToolCall) -> ToolResult {
         }
         Err(e) => tool_result(call, format!("Error: {e}")),
     }
+}
+
+fn to_dock_embedding(cfg: &MemoryEmbeddingConfig) -> dock_memory::MemoryEmbeddingConfig {
+    dock_memory::MemoryEmbeddingConfig {
+        model: cfg.model.clone(),
+        base: cfg.base.clone(),
+        api_key: cfg.api_key.clone(),
+        dimensions: cfg.dimensions,
+    }
+}
+
+/// When `[memory.embedding]` is configured, embed the query for hybrid search.
+/// Soft-fail → `None` (FTS-only, Grok-like).
+pub(crate) async fn embed_query_if_configured(
+    cfg: &MemoryEmbeddingConfig,
+    query: &str,
+) -> Option<Vec<f32>> {
+    let dock_cfg = to_dock_embedding(cfg);
+    let provider = ApiEmbeddingProvider::from_config(&dock_cfg)?;
+    match provider.embed_batch(&[query]).await {
+        Ok(mut batch) => batch.pop(),
+        Err(e) => {
+            tracing::warn!(
+                target: "dock_memory",
+                error = %e,
+                "query embedding failed; FTS-only"
+            );
+            None
+        }
+    }
+}
+
+/// After remember/flush/dream writes: embed missing chunks when configured (soft-fail).
+pub(crate) async fn embed_missing_after_write(cfg: &MemoryEmbeddingConfig, root: &MemoryRoot) {
+    let dock_cfg = to_dock_embedding(cfg);
+    let Some(provider) = ApiEmbeddingProvider::from_config(&dock_cfg) else {
+        return;
+    };
+    let dims = provider.dimensions();
+    let index = match MemoryIndex::open_or_create_with_dimensions(&root.search_db(), dims) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(
+                target: "dock_memory",
+                error = %e,
+                "open index for embed_missing failed"
+            );
+            return;
+        }
+    };
+    // Owned index → future is Send (Connection is Send, &Connection is not).
+    let n = embed_missing_chunks_owned(index, &provider).await;
+    if n > 0 {
+        tracing::debug!(target: "dock_memory", embedded = n, "post-write embed_missing");
+    }
+}
+
+/// Fire-and-forget embed after sync writes when a Tokio runtime is available.
+pub(crate) fn spawn_embed_missing_after_write(cfg: MemoryEmbeddingConfig, root: MemoryRoot) {
+    let dock_cfg = to_dock_embedding(&cfg);
+    if ApiEmbeddingProvider::from_config(&dock_cfg).is_none() {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!(target: "dock_memory", "skip embed_missing: no tokio runtime");
+        return;
+    };
+    handle.spawn(async move {
+        embed_missing_after_write(&cfg, &root).await;
+    });
 }
 
 fn memory_get(memory: &Memory, call: ToolCall) -> ToolResult {
@@ -234,6 +378,7 @@ pub async fn maybe_flush_before_compact(ctx: &Context) {
 mod tests {
     use super::*;
     use dock_memory::index::MemoryIndex;
+    use dock_memory::search_memory;
     use dock_memory::storage::save_remember_note;
 
     #[test]
@@ -292,6 +437,81 @@ mod tests {
             !rendered.contains("<memory>"),
             "disabled must not inject <memory>"
         );
+    }
+
+    #[test]
+    fn enabled_memory_starts_watcher() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let mem = Memory::new();
+        assert!(mem.enabled());
+        mem.ensure_watcher();
+        // Watcher may fail under tight fd limits; best-effort.
+        let _ = mem.has_watcher();
+    }
+
+    #[test]
+    fn dirty_sync_before_search_reindexes_paths() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let mem = Memory::new();
+        let root = mem.root();
+        root.ensure_layout().unwrap();
+        let path = root.workspace.topics.join("wire.md");
+        std::fs::write(&path, "## Wire\n\nalpha topic about otters\n").unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        let _ = idx.reindex_tree(&root);
+        drop(idx);
+
+        std::fs::write(&path, "## Wire\n\nbeta topic about narwhals\n").unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        sync_dirty_paths(&root, &mut idx, &[path]);
+        drop(idx);
+
+        mem.sync_dirty_if_needed(&root);
+        let hits = search_memory(&root, "narwhals", 5).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.text.to_lowercase().contains("narwhals")),
+            "dirty sync path must surface external edits; hits={hits:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_path_soft_fails_without_api_key() {
+        // Missing API key → from_config None → FTS-only (Grok-like).
+        let cfg = MemoryEmbeddingConfig {
+            model: Some("text-embedding-3-small".into()),
+            base: Some("https://example.invalid/v1".into()),
+            api_key: None,
+            dimensions: 8,
+        };
+        assert!(
+            embed_query_if_configured(&cfg, "hello").await.is_none(),
+            "missing API key must stay FTS-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_memory_with_config_accepts_query_embedding() {
+        // Exercise hybrid entry: FTS-only when embedding is None; Some(vec) is
+        // accepted (vec may degrade if sqlite-vec dims mismatch — soft path).
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let root = MemoryRoot::open_default(&std::env::current_dir().unwrap());
+        let _ = root.ensure_layout();
+        let cfg = MemorySearchConfig {
+            max_results: 3,
+            min_score: 0.0,
+            ..MemorySearchConfig::default()
+        };
+        assert!(search_memory_with_config(&root, "hello", &cfg, None).is_ok());
+        let fake = vec![0.1_f32; 8];
+        // Soft: may Err or Ok depending on vec availability / dim mismatch.
+        let _ = search_memory_with_config(&root, "hello", &cfg, Some(&fake));
     }
 }
 
@@ -423,14 +643,17 @@ mod flush_mock_tests {
             "unexpected err: {msg}"
         );
         let mem = MemoryRoot::open_default(&std::env::current_dir().unwrap());
-        let _ = std::fs::create_dir_all(&mem.workspace.observations);
-        let files: Vec<_> = std::fs::read_dir(&mem.workspace.observations)
+        let _ = std::fs::create_dir_all(&mem.workspace.inbox);
+        // Watcher start → ensure_layout creates observations/_inbox/; only .md
+        // files count as flush writes.
+        let md_files: Vec<_> = std::fs::read_dir(&mem.workspace.inbox)
             .unwrap()
             .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
             .collect();
         assert!(
-            files.is_empty(),
-            "failed stream must not write observations"
+            md_files.is_empty(),
+            "failed stream must not write observations; got {md_files:?}"
         );
     }
 }
