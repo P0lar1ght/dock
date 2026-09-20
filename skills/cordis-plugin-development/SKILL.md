@@ -195,7 +195,9 @@ You do **not** need an existing tool to talk to an API. The script has HTTP and 
 
 | Call | Needs `inject` | Contract |
 | --- | --- | --- |
-| `http_request(#{ url, method?, headers?, body?, timeout_secs? })` | — | Returns `#{ status, ok, url, headers, body }`. `body` is always a **string** — run `parse_json(body)` for JSON APIs. `method` defaults to `"GET"` (`GET` `POST` `PUT` `PATCH` `DELETE` `HEAD` `OPTIONS`). `headers` is a map (`#{ "Authorization": "Bearer …" }`), not an array. `timeout_secs` defaults to 30, clamped to 120 |
+| `http_request(#{ url, method?, headers?, body?, multipart?, timeout_secs? })` | — | Returns `#{ status, ok, url, headers, body, body_blob }`. `body` is a lossy UTF-8 **string** (compat); `body_blob` is the raw `Blob` for signing / re-upload. Request `body` accepts `String` **or** `Blob`. `multipart` is an **array** of `#{ name, value? \| blob?, filename?, content_type? }` (array order is wire order — put file parts last for OSS PostObject); mutually exclusive with `body`. Oversize request bodies **throw** (never silent truncate). Two ceilings: bytes the script builds cap at **1MiB**, bytes from `host.read_bytes(path)` cap at **16MiB**. No auto-follow 3xx; no auto-replay POST. `method` defaults to `"GET"`. `timeout_secs` defaults to 30, clamped to 120 |
+| `host.read_bytes(path)` | — | Read a file into a `Blob` for upload. Path-only contract, same reach as `read_file`: relative to cwd, absolute, or `~/…`. One file per call — no directory walks, globs or writes. First use gates `read_bytes {path}`, remembered **per path** (the prompt shows the path, never the bytes). Empty files OK; over 16MiB throws. **Prefer this** so tool args carry only a path — never file body / base64. Runtime Host only |
+| `regex_is_match` / `regex_find` / `regex_captures` / `regex_replace` | — | Thin wrappers over the `regex` crate. Caps: pattern ≤4KiB, text ≤1MiB, compiled size limit, replace output ≤1MiB, ≤10000 replacements. `regex_replace` supports limited `$n` / `${n}` / `$$` — **no** fancy-regex. Runtime only |
 | `parse_json(text)` / `value.to_json()` | — | Rhai builtins. `parse_json` gives a map/array you can index; `to_json()` serialises a map back to a string for `body` |
 
 Shape of the whole thing — this is the entire plugin:
@@ -237,7 +239,13 @@ Boundaries, so you can tell a bug from a rule:
 - **Private and loopback addresses are blocked** by the same SSRF policy as `web_fetch` (DNS is resolved first, so a name pointing at `127.0.0.1` is blocked too). You cannot reach `localhost` services this way unless `[toolset.web_fetch] allow_local` is on.
 - **The first request to a host asks the user for permission**, like `bash`. "Always allow" is remembered **per host**, so a plugin that talks to one API asks once.
 - **Credentials go in `headers`, never in the URL** — `https://user:pw@host/` is rejected. Header values may not contain newlines.
-- Request body ≤ 1 MiB, response body ≤ 4 MiB, ≤ 32 headers.
+- Response body ≤ 4 MiB, ≤ 32 headers. Request bodies have **two** ceilings, and which one applies depends on where the bytes came from:
+  - **≤ 1 MiB** for anything the script built — string concatenation, `to_json`, a `blob(…)` literal. This is the model-content path and it stays small on purpose.
+  - **≤ 16 MiB** for bytes returned by `host.read_bytes(path)`. Going over the small cap with script-built bytes throws and tells you to use the file route; it is never silently truncated.
+  - Editing a `Blob` after reading it (appending, slicing) makes it script content again and drops it back to the 1 MiB cap. Read, then send.
+- **Upload by path reference:** tool parameters should pass a `path` string only. Inside `execute`, call `host.read_bytes(path)` and feed the `Blob` to `http_request` (`body` or `multipart`). Do not put file contents, base64, or large CSV into tool args — the model must never generate or embed the file. This is not just style: it is the only route to the 16 MiB ceiling.
+- **The path gate is the control, not a sandbox.** `host.read_bytes` reaches any file the user could name, like `read_file` does — the protection is the per-path permission prompt, so the user sees exactly which file a plugin wants before any byte is read. It is still one file per call: no directory listing, no globbing, no writes.
+- Telegram Bot API (and similar) may place a bot token in the URL **path**; treat that as a host-permission / secret-handling concern (same as putting credentials in headers) — do not invent a separate path-token feature.
 - `http_request` exists only while the plugin **runs**. It is not available during `cordis_define` (the define-time preflight evaluates your top-level map — a request there would dodge the permission gate), so never call it at the top level of the source; call it inside `apply` or inside an `execute` / handler closure.
 - `host.secret` is the same story: `Host` is registered only on the run engine, so define-time preflight cannot call it. Put secret reads inside `apply` / `execute` (permissions still apply there).
 
@@ -257,7 +265,7 @@ Pure helpers for Basic auth, signed query strings, and content digests. **No I/O
 | `unix_time()` / `unix_time_ms()` | Thin helpers: epoch seconds / milliseconds (same clock as `utc_now`) |
 | `utc_date()` / `now_date()` | Sugar for `utc_now().date` — UTC `YYYY-MM-DD` (zero-padded month/day) |
 
-Inputs larger than 1 MiB throw a runtime error.
+Inputs larger than 1 MiB throw a runtime error — except the thing being **hashed**, which takes the same 16 MiB ceiling as a file upload. A presigned PUT has to sign exactly the bytes it sends, so `sha256(blob)` and the `message` side of `hmac_sha256` accept a full `host.read_bytes` payload. HMAC *keys* and every encoder (`to_base64`, `to_hex`, `url_encode`, …) stay at 1 MiB: their output grows and tends to end up in context.
 
 Basic auth example (pair with `http_request`):
 

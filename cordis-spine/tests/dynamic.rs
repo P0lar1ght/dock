@@ -2253,3 +2253,300 @@ async fn cordis_inspect_lists_host_secret_builtin() {
     );
     assert!(!out.contains("sk-"), "{out}");
 }
+
+/// Removes its file even when an assertion unwinds — a failing test must not
+/// leave scratch bytes in the crate directory.
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn new(name: &str, bytes: &[u8]) -> Self {
+        let path = std::env::current_dir().unwrap().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        Self(path)
+    }
+
+    fn name(&self) -> String {
+        self.0.file_name().unwrap().to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+const UPLOAD_BY_PATH_SRC: &str = r#"#{
+    inject: ["tools"],
+    apply: |host| {
+        host.register_tool(#{
+            name: "upload_by_path",
+            description: "upload a file by path reference",
+            parameters: #{
+                type: "object",
+                properties: #{ path: #{ type: "string" } },
+                required: ["path"]
+            },
+            execute: |args| {
+                let bytes = host.read_bytes(args.path);
+                let resp = http_request(#{
+                    method: "POST",
+                    url: "__BASE__/echo",
+                    multipart: [
+                        #{ name: "purpose", value: "assistants" },
+                        #{ name: "file", blob: bytes, filename: "data.bin", content_type: "application/octet-stream" }
+                    ]
+                });
+                if !resp.ok { return "HTTP " + resp.status; }
+                // Return only status + size — never the file body.
+                "uploaded size=" + bytes.len() + " status=" + resp.status
+            }
+        });
+    }
+}"#;
+
+/// #102 hard acceptance: tool args carry only a **path**; host.read_bytes loads
+/// bytes; multipart upload succeeds; args/return never contain the file body.
+#[tokio::test]
+async fn path_reference_upload_args_are_path_only() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, seen) = spawn_api_server();
+
+    let payload = b"REF_UPLOAD_PAYLOAD_bytes_\xff\x00_END";
+    let file = TempFile::new(
+        &format!(".tmp-dock-upload-{}e2e.bin", std::process::id()),
+        payload,
+    );
+    define_and_run(
+        &root,
+        "upref",
+        &UPLOAD_BY_PATH_SRC.replace("__BASE__", &base),
+    )
+    .await;
+
+    let args = format!(r#"{{"path":"{}"}}"#, file.name());
+    assert!(
+        !args.as_bytes().windows(payload.len()).any(|w| w == payload),
+        "tool args must not embed file bytes: {args}"
+    );
+    assert!(!args.contains("REF_UPLOAD_PAYLOAD"), "{args}");
+
+    let out = exec(&root, "upload_by_path", &args).await;
+    assert_eq!(
+        out,
+        format!("uploaded size={} status=200", payload.len()),
+        "upload should succeed and report size only"
+    );
+    assert!(
+        !out.as_bytes().windows(payload.len()).any(|w| w == payload),
+        "tool return must not contain file body: {out}"
+    );
+
+    let requests = seen.lock().unwrap().clone();
+    let last = requests.last().expect("server should see the upload");
+    assert!(last.contains("multipart/form-data"), "{last}");
+    assert!(
+        last.contains(r#"name="purpose""#) && last.contains(r#"name="file""#),
+        "both parts must reach the server: {last}"
+    );
+    assert!(
+        last.contains(r#"filename="data.bin""#),
+        "file part must carry its filename: {last}"
+    );
+    // Part order is wire order: text field first, file last (OSS PostObject rule).
+    assert!(
+        last.find(r#"name="purpose""#) < last.find(r#"name="file""#),
+        "array order must be wire order: {last}"
+    );
+    assert!(
+        last.contains("REF_UPLOAD_PAYLOAD"),
+        "server must receive the file bytes: {last}"
+    );
+}
+
+/// Convenience requirement: a file outside the workspace uploads by absolute
+/// path, exactly like `read_file` can read it. The permission gate is the
+/// control, not a directory allowlist.
+#[tokio::test]
+async fn host_read_bytes_accepts_absolute_path_outside_cwd() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, _seen) = spawn_api_server();
+
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("outside-upload.bin");
+    let payload = b"OUTSIDE_WORKSPACE_PAYLOAD";
+    std::fs::write(&target, payload).unwrap();
+
+    define_and_run(
+        &root,
+        "upabs",
+        &UPLOAD_BY_PATH_SRC.replace("__BASE__", &base),
+    )
+    .await;
+
+    let out = exec(
+        &root,
+        "upload_by_path",
+        &serde_json::json!({ "path": target.to_str().unwrap() }).to_string(),
+    )
+    .await;
+    assert_eq!(out, format!("uploaded size={} status=200", payload.len()));
+}
+
+/// What still fails: nothing to read. Missing files, directories and blank
+/// paths throw instead of silently yielding empty bytes.
+#[tokio::test]
+async fn host_read_bytes_rejects_unreadable_paths() {
+    let root = boot().await;
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "read_probe",
+                description: "should fail",
+                parameters: #{
+                    type: "object",
+                    properties: #{ path: #{ type: "string" } },
+                    required: ["path"]
+                },
+                execute: |args| {
+                    let b = host.read_bytes(args.path);
+                    "read-ok size=" + b.len()
+                }
+            });
+        }
+    }"#;
+    define_and_run(&root, "rdprb", src).await;
+
+    for (bad, needle) in [
+        ("no/such/file-xyz.bin", "cannot resolve"),
+        (".", "not a regular file"),
+        ("   ", "must not be empty"),
+    ] {
+        let out = exec(
+            &root,
+            "read_probe",
+            &serde_json::json!({ "path": bad }).to_string(),
+        )
+        .await;
+        assert!(
+            out.contains(needle),
+            "path {bad:?} should fail with {needle:?}, got: {out}"
+        );
+        assert!(!out.contains("read-ok"), "{out}");
+    }
+}
+
+/// The raised upload ceiling is reachable only through a file reference.
+/// Same size, two provenances, two outcomes.
+#[tokio::test]
+async fn over_1mib_uploads_only_by_file_reference() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, _seen) = spawn_api_server();
+
+    // Distinct from the script-built blob below on purpose: provenance is a
+    // digest, so byte-identical content is by definition indistinguishable
+    // (and harmless — a script that can emit the exact bytes already has them).
+    let big: Vec<u8> = (0..1024 * 1024 + 4096).map(|i| (i % 251) as u8).collect();
+    let file = TempFile::new(&format!(".tmp-dock-big-{}.bin", std::process::id()), &big);
+
+    let src = format!(
+        r#"#{{
+        inject: ["tools"],
+        apply: |host| {{
+            host.register_tool(#{{
+                name: "put_big",
+                description: "PUT a large body, by path or script-built",
+                parameters: #{{
+                    type: "object",
+                    properties: #{{ path: #{{ type: "string" }}, inline: #{{ type: "boolean" }} }},
+                    required: []
+                }},
+                execute: |args| {{
+                    let body = if args.inline == true {{
+                        // Script-built payload of the same size. Strings are
+                        // capped at 1MiB by the engine, so a Blob is the only
+                        // way a script can even hold this much — the gate that
+                        // must stop it is provenance, not the engine.
+                        blob({size}, 90)
+                    }} else {{
+                        host.read_bytes(args.path)
+                    }};
+                    let resp = http_request(#{{ method: "PUT", url: "{base}/put", body: body }});
+                    "status=" + resp.status
+                }}
+            }});
+        }}
+    }}"#,
+        size = big.len(),
+    );
+    define_and_run(&root, "bigput", &src).await;
+
+    let out = exec(
+        &root,
+        "put_big",
+        &serde_json::json!({ "path": file.name() }).to_string(),
+    )
+    .await;
+    assert_eq!(out, "status=200", "file-referenced upload should succeed");
+
+    let out = exec(
+        &root,
+        "put_big",
+        &serde_json::json!({ "inline": true }).to_string(),
+    )
+    .await;
+    assert!(
+        out.contains("host.read_bytes"),
+        "a script-built body of the same size must be refused and point at the file route: {out}"
+    );
+    assert!(!out.contains("status=200"), "{out}");
+}
+
+/// Regex helpers and read_bytes are listed for the model via `cordis_inspect`.
+#[tokio::test]
+async fn rhai_regex_and_read_bytes_listed_in_builtins() {
+    let root = boot().await;
+    let out = exec(&root, "cordis_inspect", r#"{"what":"builtins"}"#).await;
+    for needle in [
+        "regex_is_match",
+        "regex_find",
+        "regex_captures",
+        "regex_replace",
+        "host.read_bytes",
+        "body_blob",
+        "multipart",
+    ] {
+        assert!(out.contains(needle), "builtins must list {needle}: {out}");
+    }
+}
+
+/// Regex works inside execute (runtime engine), including non-ASCII replacement.
+#[tokio::test]
+async fn rhai_regex_works_inside_execute() {
+    let root = boot().await;
+    let src = r#"#{
+        inject: ["tools"],
+        apply: |host| {
+            host.register_tool(#{
+                name: "regex_probe",
+                description: "regex",
+                parameters: #{ type: "object", properties: #{} },
+                execute: |args| {
+                    let ok = regex_is_match("\\d+", "ab12");
+                    let found = regex_find("\\d+", "ab12cd");
+                    let caps = regex_captures("(\\w+)=(\\w+)", "a=1");
+                    let rep = regex_replace("(\\w+)=(\\w+)", "a=1 b=2", "$2:$1");
+                    let cn = regex_replace("token", "my token", "密钥");
+                    "ok=" + ok + " found=" + found + " g1=" + caps[1] + " rep=" + rep + " cn=" + cn
+                }
+            });
+        }
+    }"#;
+    define_and_run(&root, "rex", src).await;
+    let out = exec(&root, "regex_probe", "{}").await;
+    assert_eq!(out, "ok=true found=12 g1=a rep=1:a 2:b cn=my 密钥");
+}
