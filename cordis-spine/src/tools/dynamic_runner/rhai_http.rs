@@ -32,7 +32,11 @@ use crate::tools::web_fetch::{ssrf, WebFetchParams};
 
 /// 与 `web_fetch` 的 `MAX_URL_LENGTH` 同值，安全边界，不可配。
 const MAX_URL_LEN: usize = 2000;
+/// Ceiling for bytes the **script** built (strings, `to_json`, concatenation).
+/// Model-generated content must stay small — big payloads go by file reference.
 const MAX_REQUEST_BODY: usize = 1024 * 1024;
+/// Ceiling once the bytes came from [`super::path_bytes`] (`host.read_bytes`).
+const MAX_FILE_REQUEST_BODY: usize = super::path_bytes::MAX_READ_BYTES;
 const MAX_RESPONSE_BODY: usize = 4 * 1024 * 1024;
 const MAX_HEADERS: usize = 32;
 const MAX_HEADER_LEN: usize = 4096;
@@ -43,7 +47,7 @@ const METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPT
 
 pub(crate) const HTTP_BUILTIN: (&str, &str, &[&str]) = (
     "http_request",
-    "Make an HTTP request from the script itself (no tool needed). Returns #{ status, ok, url, headers, body, body_blob }; `body` is a lossy UTF-8 string (compat); `body_blob` is the raw bytes (Rhai Blob) for signing / re-upload. `body` accepts String | Blob. `multipart` is an array of #{ name, value? | blob?, filename?, content_type? } — mutually exclusive with `body`. Oversize request bodies throw (never silent truncate; cap 1MiB). 4xx/5xx return normally; network/SSRF/permission failures throw. No auto-follow 3xx; no auto-replay POST. First call to a host asks permission like bash.",
+    "Make an HTTP request from the script itself (no tool needed). Returns #{ status, ok, url, headers, body, body_blob }; `body` is a lossy UTF-8 string (compat); `body_blob` is the raw bytes (Rhai Blob) for signing / re-upload. `body` accepts String | Blob. `multipart` is an array of #{ name, value? | blob?, filename?, content_type? } — mutually exclusive with `body`. Oversize request bodies throw (never silent truncate). Two ceilings: bytes the script builds itself cap at 1MiB, bytes that came from host.read_bytes(path) cap at 16MiB — so a large upload must be a file reference, never model-generated content. 4xx/5xx return normally; network/SSRF/permission failures throw. No auto-follow 3xx; no auto-replay POST. First call to a host asks permission like bash.",
     &[
         "http_request(#{ url }) -> #{ status, ok, url, headers, body, body_blob }",
         "http_request(#{ method: \"POST\", url, headers: #{ \"Authorization\": \"Bearer …\" }, body: to_json(#{ … }), timeout_secs: 30 })",
@@ -166,15 +170,37 @@ fn parse_body(spec: &Map) -> Result<BodyKind, String> {
         Some(v) if v.is_unit() => Ok(BodyKind::None),
         Some(v) => {
             let bytes = dynamic_bytes(v)?;
-            if bytes.len() > MAX_REQUEST_BODY {
-                return Err(format!(
-                    "request body exceeds {MAX_REQUEST_BODY} bytes (got {})",
-                    bytes.len()
-                ));
-            }
+            check_payload_size(&bytes, "request body", 0)?;
             Ok(BodyKind::Bytes(bytes))
         }
     }
+}
+
+/// Two ceilings, one rule: bytes that came off disk via `host.read_bytes` may be
+/// large; anything the script built itself may not. `inline_so_far` carries the
+/// running inline total for multipart, which must stay under the small cap as a
+/// whole (32 × 1 MiB of model-written parts is still model-written).
+fn check_payload_size(bytes: &[u8], what: &str, inline_so_far: usize) -> Result<(), String> {
+    if bytes.len() <= MAX_REQUEST_BODY
+        && inline_so_far.saturating_add(bytes.len()) <= MAX_REQUEST_BODY
+    {
+        return Ok(());
+    }
+    if super::path_bytes::is_file_sourced(bytes) {
+        return if bytes.len() > MAX_FILE_REQUEST_BODY {
+            Err(format!(
+                "{what} exceeds {MAX_FILE_REQUEST_BODY} bytes (got {})",
+                bytes.len()
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    Err(format!(
+        "{what} exceeds {MAX_REQUEST_BODY} bytes (got {}); payloads over that limit must come from \
+         host.read_bytes(path) — pass a file path, do not build the bytes in the script",
+        bytes.len()
+    ))
 }
 
 fn parse_multipart(spec: &Map) -> Result<Vec<MultipartPart>, String> {
@@ -192,7 +218,8 @@ fn parse_multipart(spec: &Map) -> Result<Vec<MultipartPart>, String> {
         return Err("multipart exceeds 32 parts".into());
     }
     let mut parts = Vec::with_capacity(arr.len());
-    let mut total = 0usize;
+    let mut inline_total = 0usize;
+    let mut grand_total = 0usize;
     for (i, item) in arr.iter().enumerate() {
         let map = item
             .read_lock::<Map>()
@@ -212,16 +239,22 @@ fn parse_multipart(spec: &Map) -> Result<Vec<MultipartPart>, String> {
         }
         let payload = if has_value {
             let text = dynamic_text(map.get("value").unwrap());
-            total = total.saturating_add(text.len());
+            check_payload_size(text.as_bytes(), &format!("multipart[{i}]"), inline_total)?;
+            inline_total = inline_total.saturating_add(text.len());
+            grand_total = grand_total.saturating_add(text.len());
             PartPayload::Text(text)
         } else {
             let bytes = dynamic_bytes(map.get("blob").unwrap())?;
-            total = total.saturating_add(bytes.len());
+            check_payload_size(&bytes, &format!("multipart[{i}]"), inline_total)?;
+            if !super::path_bytes::is_file_sourced(&bytes) {
+                inline_total = inline_total.saturating_add(bytes.len());
+            }
+            grand_total = grand_total.saturating_add(bytes.len());
             PartPayload::Bytes(bytes)
         };
-        if total > MAX_REQUEST_BODY {
+        if grand_total > MAX_FILE_REQUEST_BODY {
             return Err(format!(
-                "multipart total exceeds {MAX_REQUEST_BODY} bytes (got {total})"
+                "multipart total exceeds {MAX_FILE_REQUEST_BODY} bytes (got {grand_total})"
             ));
         }
         parts.push(MultipartPart {
@@ -354,24 +387,27 @@ async fn send(
         BodyKind::Multipart(parts) => {
             let mut form = reqwest::multipart::Form::new();
             for part in parts {
-                match part.payload {
-                    PartPayload::Text(text) => {
-                        form = form.text(part.name, text);
-                    }
-                    PartPayload::Bytes(bytes) => {
-                        let mut p = reqwest::multipart::Part::bytes(bytes);
-                        if let Some(filename) = part.filename {
-                            p = p.file_name(filename);
-                        }
-                        let mime = part
-                            .content_type
-                            .unwrap_or_else(|| "application/octet-stream".into());
-                        p = p
-                            .mime_str(&mime)
-                            .map_err(|e| format!("multipart content_type: {e}"))?;
-                        form = form.part(part.name, p);
-                    }
+                // `filename` / `content_type` are honoured on text parts too —
+                // some APIs want an explicit mime on a JSON field.
+                let (mut p, default_mime) = match part.payload {
+                    PartPayload::Text(text) => (reqwest::multipart::Part::text(text), None),
+                    PartPayload::Bytes(bytes) => (
+                        reqwest::multipart::Part::bytes(bytes),
+                        Some("application/octet-stream"),
+                    ),
+                };
+                if let Some(filename) = part.filename {
+                    p = p.file_name(filename);
                 }
+                if let Some(mime) = part
+                    .content_type
+                    .or_else(|| default_mime.map(str::to_string))
+                {
+                    p = p
+                        .mime_str(&mime)
+                        .map_err(|e| format!("multipart content_type: {e}"))?;
+                }
+                form = form.part(part.name, p);
             }
             req.multipart(form)
         }
@@ -393,8 +429,10 @@ async fn send(
             bytes.len()
         ));
     }
-    let body = String::from_utf8_lossy(&bytes).to_string();
-    let body_blob: rhai::Blob = bytes.to_vec();
+    // Move the response buffer into the blob (no copy when uniquely owned), then
+    // borrow it for the lossy string — one payload copy, not two.
+    let body_blob: rhai::Blob = bytes.into();
+    let body = String::from_utf8_lossy(&body_blob).to_string();
 
     let mut out = Map::new();
     out.insert("status".into(), Dynamic::from(status.as_u16() as i64));
@@ -704,6 +742,116 @@ mod tests {
         ]);
         let err = parse_spec(&spec).unwrap_err();
         assert!(err.contains("exceeds"), "{err}");
+        assert!(
+            err.contains("host.read_bytes"),
+            "the error must point at the file-reference route: {err}"
+        );
+    }
+
+    fn big_body_spec(bytes: Vec<u8>) -> Map {
+        map(&[
+            ("url", Dynamic::from("https://example.com/put".to_string())),
+            ("method", Dynamic::from("PUT".to_string())),
+            ("body", Dynamic::from(bytes as rhai::Blob)),
+        ])
+    }
+
+    /// The raised ceiling is reachable **only** by file reference: identical
+    /// bytes are rejected before `host.read_bytes` has seen them, accepted after.
+    #[test]
+    fn over_1mib_needs_file_provenance() {
+        let payload: Vec<u8> = (0..MAX_REQUEST_BODY + 4096)
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        let err = parse_spec(&big_body_spec(payload.clone())).unwrap_err();
+        assert!(
+            err.contains("host.read_bytes"),
+            "script-built payload must be rejected: {err}"
+        );
+
+        super::super::path_bytes::remember_file_bytes(&payload);
+        match parse_spec(&big_body_spec(payload.clone())).unwrap().body {
+            BodyKind::Bytes(b) => assert_eq!(b.len(), payload.len()),
+            other => panic!("expected bytes, got {other:?}"),
+        }
+
+        // Append one byte and the provenance is gone — it is model content again.
+        let mut edited = payload.clone();
+        edited.push(0);
+        let err = parse_spec(&big_body_spec(edited)).unwrap_err();
+        assert!(err.contains("host.read_bytes"), "{err}");
+    }
+
+    #[test]
+    fn file_sourced_body_still_capped_at_file_ceiling() {
+        let payload: Vec<u8> = vec![7u8; MAX_FILE_REQUEST_BODY + 1];
+        super::super::path_bytes::remember_file_bytes(&payload);
+        let err = parse_spec(&big_body_spec(payload)).unwrap_err();
+        assert!(
+            err.contains(&MAX_FILE_REQUEST_BODY.to_string()),
+            "even a file reference stops at the file ceiling: {err}"
+        );
+    }
+
+    /// Many model-written parts must not add up past the small cap, even though
+    /// the multipart total is allowed to reach the file ceiling.
+    #[test]
+    fn inline_multipart_parts_share_the_small_cap() {
+        let half = "y".repeat(MAX_REQUEST_BODY / 2 + 16);
+        let parts = rhai::Array::from(vec![
+            Dynamic::from(map(&[
+                ("name", Dynamic::from("a".to_string())),
+                ("value", Dynamic::from(half.clone())),
+            ])),
+            Dynamic::from(map(&[
+                ("name", Dynamic::from("b".to_string())),
+                ("value", Dynamic::from(half)),
+            ])),
+        ]);
+        let spec = map(&[
+            ("url", Dynamic::from("https://example.com".to_string())),
+            ("method", Dynamic::from("POST".to_string())),
+            ("multipart", Dynamic::from(parts)),
+        ]);
+        let err = parse_spec(&spec).unwrap_err();
+        assert!(err.contains("multipart[1]"), "{err}");
+        assert!(err.contains("host.read_bytes"), "{err}");
+    }
+
+    /// A file part over the small cap rides alongside small text fields.
+    #[test]
+    fn multipart_mixes_file_part_with_text_fields() {
+        let file: Vec<u8> = (0..MAX_REQUEST_BODY + 2048)
+            .map(|i| (i % 253) as u8)
+            .collect();
+        super::super::path_bytes::remember_file_bytes(&file);
+        let parts = rhai::Array::from(vec![
+            Dynamic::from(map(&[
+                ("name", Dynamic::from("purpose".to_string())),
+                ("value", Dynamic::from("assistants".to_string())),
+            ])),
+            Dynamic::from(map(&[
+                ("name", Dynamic::from("file".to_string())),
+                ("blob", Dynamic::from(file.clone() as rhai::Blob)),
+                ("filename", Dynamic::from("big.bin".to_string())),
+            ])),
+        ]);
+        let spec = map(&[
+            ("url", Dynamic::from("https://example.com".to_string())),
+            ("method", Dynamic::from("POST".to_string())),
+            ("multipart", Dynamic::from(parts)),
+        ]);
+        match parse_spec(&spec).unwrap().body {
+            BodyKind::Multipart(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[1].payload {
+                    PartPayload::Bytes(b) => assert_eq!(b.len(), file.len()),
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

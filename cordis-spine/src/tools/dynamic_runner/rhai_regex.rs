@@ -82,11 +82,20 @@ fn expand_replacement(
     let bytes = template.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] != b'$' {
-            out.push(bytes[i] as char);
-            i += 1;
+        // Copy the run up to the next `$` as a &str slice. Walking byte-by-byte
+        // and pushing `b as char` would decode each UTF-8 byte as Latin-1 and
+        // shred any non-ASCII replacement (`密钥` → `å¯é¥`).
+        let Some(offset) = bytes[i..].iter().position(|b| *b == b'$') else {
+            out.push_str(&template[i..]);
+            break;
+        };
+        if offset > 0 {
+            out.push_str(&template[i..i + offset]);
+            i += offset;
+            check_output(&out)?;
             continue;
         }
+        // `$` is ASCII, so the byte after it is always a char boundary.
         i += 1;
         if i >= bytes.len() {
             out.push('$');
@@ -107,6 +116,7 @@ fn expand_replacement(
                     out.push('$');
                     out.push('{');
                     i = start;
+                    check_output(&out)?;
                     continue;
                 }
                 let idx: usize = template[start..i]
@@ -130,6 +140,7 @@ fn expand_replacement(
                             out.push_str(m.as_str());
                         }
                         i += 1;
+                        check_output(&out)?;
                         continue;
                     }
                 }
@@ -138,19 +149,22 @@ fn expand_replacement(
                     out.push_str(m.as_str());
                 }
             }
-            _ => {
-                out.push('$');
-                out.push(bytes[i] as char);
-                i += 1;
-            }
+            // Not a group reference: emit a literal `$` and let the next pass
+            // copy the following run as text (it may be multi-byte).
+            _ => out.push('$'),
         }
-        if out.len() > MAX_REPLACE_OUTPUT {
-            return Err(err(format!(
-                "regex_replace: output exceeds {MAX_REPLACE_OUTPUT} bytes"
-            )));
-        }
+        check_output(&out)?;
     }
     Ok(out)
+}
+
+fn check_output(out: &str) -> Result<(), Box<EvalAltResult>> {
+    if out.len() > MAX_REPLACE_OUTPUT {
+        return Err(err(format!(
+            "regex_replace: output exceeds {MAX_REPLACE_OUTPUT} bytes"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn register(engine: &mut Engine) {
@@ -214,19 +228,11 @@ pub(crate) fn register(engine: &mut Engine) {
                 let m = caps.get(0).expect("full match");
                 out.push_str(&text[last..m.start()]);
                 out.push_str(&expand_replacement(&replacement, &caps)?);
-                if out.len() > MAX_REPLACE_OUTPUT {
-                    return Err(err(format!(
-                        "regex_replace: output exceeds {MAX_REPLACE_OUTPUT} bytes"
-                    )));
-                }
+                check_output(&out)?;
                 last = m.end();
             }
             out.push_str(&text[last..]);
-            if out.len() > MAX_REPLACE_OUTPUT {
-                return Err(err(format!(
-                    "regex_replace: output exceeds {MAX_REPLACE_OUTPUT} bytes"
-                )));
-            }
+            check_output(&out)?;
             Ok(out)
         },
     );
@@ -281,5 +287,56 @@ mod tests {
     fn rejects_empty_pattern() {
         let e = eng();
         assert!(e.eval::<bool>(r#"regex_is_match("", "a")"#).is_err());
+    }
+
+    /// Regression: the replacement template used to be walked byte-by-byte with
+    /// `b as char`, turning every multi-byte char into Latin-1 mojibake. Masking
+    /// with a Chinese literal is the headline use, so it must survive verbatim.
+    #[test]
+    fn non_ascii_replacement_survives() {
+        let e = eng();
+        assert_eq!(
+            e.eval::<String>(r#"regex_replace("token", "my token here", "密钥")"#)
+                .unwrap(),
+            "my 密钥 here"
+        );
+        assert_eq!(
+            e.eval::<String>(r#"regex_replace("(\\w+)", "abc", "【$1】")"#)
+                .unwrap(),
+            "【abc】"
+        );
+        // A `$` that is not a group reference stays literal, and the multi-byte
+        // run right after it is copied as text rather than re-decoded.
+        assert_eq!(
+            e.eval::<String>(r#"regex_replace("x", "x", "$中$$元")"#)
+                .unwrap(),
+            "$中$元"
+        );
+        // Non-ASCII in the haystack and in captured groups round-trips too.
+        assert_eq!(
+            e.eval::<String>(r#"regex_replace("(\\S+)=(\\S+)", "名字=张三", "$2←$1")"#)
+                .unwrap(),
+            "张三←名字"
+        );
+    }
+
+    #[test]
+    fn trailing_dollar_and_unclosed_brace_stay_literal() {
+        let e = eng();
+        assert_eq!(
+            e.eval::<String>(r#"regex_replace("x", "x", "a$")"#)
+                .unwrap(),
+            "a$"
+        );
+        assert_eq!(
+            e.eval::<String>(r#"regex_replace("x", "x", "${}")"#)
+                .unwrap(),
+            "${}"
+        );
+        assert_eq!(
+            e.eval::<String>(r#"regex_replace("x", "x", "${1")"#)
+                .unwrap(),
+            "${1"
+        );
     }
 }

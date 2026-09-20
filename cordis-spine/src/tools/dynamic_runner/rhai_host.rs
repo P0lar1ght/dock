@@ -31,7 +31,7 @@ const PARAMETERS_MUST_BE_MAP: &str = "host.register_tool parameters must be a ma
 
 const READ_BYTES_BUILTIN: (&str, &str, &[&str]) = (
     "host.read_bytes",
-    "Read a workspace file into a Rhai Blob for http_request body/multipart. Path only (like read_file): relative to cwd or absolute under cwd; rejects `..`, symlink escape, and paths outside the workspace. First use gates `read_bytes {path}` (summary never includes bytes). Empty files OK; over 1MiB throws. Runtime Host only — not available at define-time preflight. Prefer this over embedding file content in tool args.",
+    "Read a file into a Rhai Blob for http_request body/multipart. Path only (like read_file): relative to cwd, absolute, or `~/…`. One file per call — no directory walks, globs or writes. First use gates `read_bytes {path}` (per path; the prompt shows the path, never the bytes). Empty files OK; over 16MiB throws. Bytes read here are the **only** way to send a request body over 1MiB — script-built payloads stay capped at 1MiB. Runtime Host only — not available at define-time preflight. Prefer this over embedding file content in tool args.",
     &[
         "host.read_bytes(\"data.csv\") -> Blob",
         "http_request(#{ method: \"POST\", url, multipart: [#{ name: \"file\", blob: host.read_bytes(args.path), filename: \"data.csv\" }] })",
@@ -140,8 +140,14 @@ pub fn sandboxed_engine(max_ops: u64) -> Engine {
     engine.set_max_operations(max_ops);
     engine.set_max_call_levels(64);
     engine.set_max_expr_depths(128, 64);
+    // Strings stay at 1MiB — that is the ceiling for script-built request bodies.
     engine.set_max_string_size(1024 * 1024);
-    engine.set_max_array_size(16_384);
+    // Rhai measures arrays and Blobs with the same knob, and a Blob element is
+    // one byte, so this is also the ceiling on `host.read_bytes`. It has to clear
+    // the file-upload limit or a file reference could never reach the script.
+    // Script-built arrays stay bounded by `set_max_operations` above: growing one
+    // costs an operation per element, so the ops cap bites long before this does.
+    engine.set_max_array_size(super::path_bytes::MAX_READ_BYTES);
     engine.set_max_map_size(16_384);
     engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
     engine.disable_symbol("eval");

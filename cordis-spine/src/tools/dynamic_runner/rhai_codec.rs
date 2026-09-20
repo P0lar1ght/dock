@@ -123,6 +123,18 @@ fn check_len(n: usize, what: &str) -> Result<(), Box<EvalAltResult>> {
     Ok(())
 }
 
+/// Hashing takes the same ceiling as a file-referenced upload: a presigned PUT
+/// has to sign the exact bytes it sends, so capping digests below the upload
+/// limit would make the sign-then-upload flow unusable. Encoders keep the small
+/// cap — their *output* grows and tends to end up in context.
+fn check_digest_len(n: usize, what: &str) -> Result<(), Box<EvalAltResult>> {
+    let max = super::path_bytes::MAX_READ_BYTES;
+    if n > max {
+        return Err(err(format!("{what} exceeds {max} bytes (got {n})")));
+    }
+    Ok(())
+}
+
 fn bytes_from_str(s: &str) -> Result<&[u8], Box<EvalAltResult>> {
     check_len(s.len(), "input")?;
     Ok(s.as_bytes())
@@ -130,6 +142,16 @@ fn bytes_from_str(s: &str) -> Result<&[u8], Box<EvalAltResult>> {
 
 fn bytes_from_blob(b: &Blob) -> Result<&[u8], Box<EvalAltResult>> {
     check_len(b.len(), "input")?;
+    Ok(b.as_slice())
+}
+
+fn digest_from_str(s: &str) -> Result<&[u8], Box<EvalAltResult>> {
+    check_digest_len(s.len(), "input")?;
+    Ok(s.as_bytes())
+}
+
+fn digest_from_blob(b: &Blob) -> Result<&[u8], Box<EvalAltResult>> {
+    check_digest_len(b.len(), "input")?;
     Ok(b.as_slice())
 }
 
@@ -179,7 +201,7 @@ fn sha256_bytes(data: &[u8]) -> [u8; 32] {
 
 fn hmac_bytes(key: &[u8], message: &[u8]) -> Result<[u8; 32], Box<EvalAltResult>> {
     check_len(key.len(), "hmac key")?;
-    check_len(message.len(), "hmac message")?;
+    check_digest_len(message.len(), "hmac message")?;
     let mut mac = HmacSha256::new_from_slice(key).map_err(|e| err(format!("hmac: {e}")))?;
     mac.update(message);
     Ok(mac.finalize().into_bytes().into())
@@ -271,22 +293,22 @@ pub(crate) fn register(engine: &mut Engine) {
     engine.register_fn(
         "sha256",
         |s: ImmutableString| -> Result<String, Box<EvalAltResult>> {
-            Ok(to_hex_bytes(&sha256_bytes(bytes_from_str(&s)?)))
+            Ok(to_hex_bytes(&sha256_bytes(digest_from_str(&s)?)))
         },
     );
     engine.register_fn("sha256", |b: Blob| -> Result<String, Box<EvalAltResult>> {
-        Ok(to_hex_bytes(&sha256_bytes(bytes_from_blob(&b)?)))
+        Ok(to_hex_bytes(&sha256_bytes(digest_from_blob(&b)?)))
     });
     engine.register_fn(
         "sha256_blob",
         |s: ImmutableString| -> Result<Blob, Box<EvalAltResult>> {
-            Ok(sha256_bytes(bytes_from_str(&s)?).to_vec())
+            Ok(sha256_bytes(digest_from_str(&s)?).to_vec())
         },
     );
     engine.register_fn(
         "sha256_blob",
         |b: Blob| -> Result<Blob, Box<EvalAltResult>> {
-            Ok(sha256_bytes(bytes_from_blob(&b)?).to_vec())
+            Ok(sha256_bytes(digest_from_blob(&b)?).to_vec())
         },
     );
 
