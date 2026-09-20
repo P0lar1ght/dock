@@ -38,6 +38,9 @@ pub use persist::{plugin_roots, PromoteReceipt};
 pub use registry::{Attempt, AttemptStatus, Package, PersistScope, PluginOrigin, RunMode};
 pub use rhai_host::{builtins_lines, RhaiBag, RhaiBags};
 
+#[cfg(test)]
+pub(crate) use persist::PROMOTE_SESSION_COLLISION_HINT;
+
 use rhai_host::{MAX_FILE_SOURCE, MAX_INLINE_SOURCE};
 
 /// Rhai body for `cordis_define`: inline string or path under a plugin root.

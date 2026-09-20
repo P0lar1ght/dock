@@ -86,25 +86,17 @@ pub fn render_inspect(
     sections.join("\n\n")
 }
 
-pub fn render_inspect_self(
+/// One Plugin, or one Package of it. Listing *every* Plugin is `what:
+/// "temporary"` / `"permanent"` — that is why `cordis_inspect_self` could fold
+/// into `cordis_inspect` without losing a question anyone asks.
+pub fn render_plugin(
     runner: &DynamicRunner,
     session_id: &str,
-    plugin_id: Option<&str>,
+    plugin_id: &str,
     package_id: Option<&str>,
 ) -> Result<String, String> {
-    match (plugin_id, package_id) {
-        (None, None) => {
-            let rows = runner.snapshot(session_id);
-            if rows.is_empty() {
-                return Ok("No dynamic Plugins are visible in this session. Session definitions live only in memory (a restart clears them). Disk plugins under .dock/plugins/ autoload at startup; inspect what:\"permanent\".".into());
-            }
-            let mut lines = vec!["mode: plugins".into()];
-            for row in rows {
-                lines.push(plugin_line(&row));
-            }
-            Ok(lines.join("\n"))
-        }
-        (Some(plugin_id), None) => {
+    match package_id {
+        None => {
             let row = runner.inspect_plugin(session_id, plugin_id)?;
             let mut lines = vec!["mode: plugin".into(), plugin_line(&row)];
             for pkg in &row.packages {
@@ -117,7 +109,7 @@ pub fn render_inspect_self(
             }
             Ok(lines.join("\n"))
         }
-        (Some(plugin_id), Some(package_id)) => {
+        Some(package_id) => {
             let (row, pkg) = runner.inspect_package(session_id, plugin_id, package_id)?;
             let active = row
                 .active_run
@@ -163,7 +155,6 @@ pub fn render_inspect_self(
             }
             Ok(lines.join("\n"))
         }
-        (None, Some(_)) => Err("cordis_inspect_self packageId requires pluginId".into()),
     }
 }
 
