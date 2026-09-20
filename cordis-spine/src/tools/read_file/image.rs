@@ -124,10 +124,10 @@ pub fn compress_image_for_conversation(
             && u64::from(w) * u64::from(h) <= MAX_IMAGE_PIXELS
     });
 
-    let passthrough_sendable = match image::guess_format(&raw_bytes) {
-        Ok(ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP) => true,
-        _ => false,
-    };
+    let passthrough_sendable = matches!(
+        image::guess_format(&raw_bytes),
+        Ok(ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP)
+    );
 
     if (raw_bytes.len() * 4).div_ceil(3) <= MAX_IMAGE_PAYLOAD_BYTES
         && within_pixel_budget
