@@ -24,6 +24,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.0"
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
       # 格式门禁：只覆盖第一方 crate，vendor/ 是冻结副本，不要格式化。

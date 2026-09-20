@@ -27,6 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.0"
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
       # tag 与 Cargo.toml 的 workspace 版本必须同源，否则会发出版本号对不上的产物。
@@ -94,6 +95,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.0"
+          components: rustfmt, clippy
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
