@@ -22,6 +22,12 @@ use cordis_base::config::dock_home;
 /// Session id of autoloaded disk plugins. Visible to every chat session.
 pub const PERSIST_SESSION: &str = "*";
 
+/// Tail of the promote-vs-session-Plugin collision error. A const so
+/// `every_cordis_name_in_model_text_is_a_live_tool` covers it: the first
+/// version said "undefine it".
+pub const PROMOTE_SESSION_COLLISION_HINT: &str =
+    "cordis_stop it with drop:true, or pass a different `id`";
+
 #[derive(Clone, Debug)]
 pub struct PromoteReceipt {
     pub plugin_id: String,
@@ -621,7 +627,7 @@ impl DynamicRunner {
             }
             Some(_) => {
                 return Err(format!(
-                    "wrote {} but \"{wanted}\" is already a session Plugin; undefine it or pass a different `id`",
+                    "wrote {} but \"{wanted}\" is already a session Plugin; {PROMOTE_SESSION_COLLISION_HINT}",
                     path.display()
                 ));
             }

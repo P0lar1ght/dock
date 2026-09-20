@@ -3,7 +3,7 @@ name: cordis-plugin-development
 description: >-
   Create, modify, debug, or extend Cordis Plugins in Dock: inspect the live
   fiber/service directory, define a Rhai or preset Package, run it (permission
-  overlay), observe session/event, promote to a disk plugin, stop, undefine,
+  overlay), observe session/event, promote to a disk plugin, stop or drop it,
   repair, or roll back. Use when the user wants a Host extension — session-local
   or lasting under .dock/plugins — rather than wrapping an existing tool.
 ---
@@ -12,7 +12,7 @@ description: >-
 
 First inspect what is actually live, then define a Package, then run it. Do not infer a complete API from a service name or an example.
 
-This Skill is Dock's internalization of the DSH `cordis-plugin-development` workflow. Lifecycle is the same (`define` ≠ `run`; `run` / `update`; `stop` keeps Packages; `undefine` drops memory). Cordis is **not** the default for every request.
+This Skill is Dock's internalization of the DSH `cordis-plugin-development` workflow. Lifecycle is the same (`define` ≠ `run`; `run` / `update`; `stop` keeps Packages; `stop` `drop: true` forgets them). Cordis is **not** the default for every request.
 
 **How to customize:** session experiments are dynamic Packages (process memory). Lasting Host extensions that the user cannot ship as a `cordis-spine` crate go on disk under `.dock/plugins/<id>/` (project) or `~/.dock/plugins/<id>/` (user). Teaching factories (`echo` / `note` / `hold` / `slash`) are fixed Rust bodies — you pick the id, you do not edit their code. **Any custom Host behavior is `factory: "rhai"`.** Prefer writing `plugin.toml` + `source.rhai` with `write_file` / `search_replace`, then `cordis_define` with `source_path` — do **not** paste large Rhai into the tool call. Inline `source` is only for tiny samples; `cordis_promote` still turns a small inline experiment into a disk plugin. There is no browser Client / JSX. TUI slots are plain-text callbacks on `tui.slots`.
 
@@ -311,7 +311,7 @@ Reserved slash names (`/agents`, `/help`, …) fail at the start of `register_sl
 
 ## Versions, approval, and repair
 
-- Plugin = stable id (`idPrefix` 3–6 letters; Host mints `prefix-N` with a monotonic counter). `undefine` does not recycle `agent-7`. Retry a failed Plugin with `kind: "existing"` and the same `pluginId`; a new `idPrefix` mints another Plugin.
+- Plugin = stable id (`idPrefix` 3–6 letters; Host mints `prefix-N` with a monotonic counter). Dropping a Plugin does not recycle `agent-7`. Retry a failed Plugin with `kind: "existing"` and the same `pluginId`; a new `idPrefix` mints another Plugin.
 - Package = immutable version (`packageId`). Change anything → new Package, never overwrite.
 - `currentPackageId` = last successful version (not “is running”).
 - `nextPackageId` = in-flight or last-failed target.

@@ -1,4 +1,4 @@
-//! Model-facing Cordis inspect / define / run / call / stop / undefine tools.
+//! Model-facing Cordis inspect / define / run / call / stop / promote tools.
 //! Injects `"dynamicCordisRunner"` + `"tools"`; does not own the registry.
 
 mod inspect;
@@ -56,10 +56,26 @@ const CALL_PARAMS: &str = r#"{"type":"object","required":["name"],"properties":{
 /// easier to teach side by side than as two descriptions that each end with
 /// "use the other one instead".
 const STOP_DESC: &str = "Stop a dynamic Plugin's current Run: its fiber is disposed, so every tool, slash, slot and bag that Run registered goes away. Stopping an already stopped Plugin succeeds. By default the Plugin, its Packages and currentPackageId stay, so it can run or update again later. drop:true also deletes the in-memory definition (use it only when no version needs to remain). Neither one touches disk: files under .dock/plugins/<id>/ stay and autoload next start unless you set enabled=false or delete that directory.";
-const STOP_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string"},"drop":{"type":"boolean","description":"Also forget the definition and every Package (was cordis_undefine). Default false."}}}"#;
+const STOP_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string"},"drop":{"type":"boolean","description":"Also forget the definition and every Package. Default false."}}}"#;
 
 const PROMOTE_DESC: &str = "Write the Plugin's current (or latest) Package to disk so it survives restart, then autostart it from there (no second permission prompt). scope \"project\" (default) writes {cwd}/.dock/plugins/<id>/, \"user\" writes ~/.dock/plugins/<id>/; default id strips the minted -N suffix (echo-1 → echo). If the disk id differs from the session Plugin, the session copy is stopped to avoid duplicate tools — cordis_stop drop:true it if you no longer need the in-memory definition. Files stay until you delete them.";
 const PROMOTE_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string","description":"Session or already-loaded Plugin to persist."},"id":{"type":"string","description":"Disk directory / stable pluginId. Default: strip -N from pluginId."},"scope":{"type":"string","enum":["project","user"],"description":"project (default) = workspace .dock/plugins; user = ~/.dock/plugins."}}}"#;
+
+/// Runtime half of the promote receipt. A const so `every_cordis_name_in_model_text_is_a_live_tool`
+/// covers it: the first version of this sentence outlived `cordis_undefine` and
+/// spent a turn telling the model to call a tool that no longer existed.
+const PROMOTE_STOP_NOTE: &str = "was stopped to avoid duplicate tools; cordis_stop it with drop:true if you no longer need the in-memory copy.";
+
+/// The registered surface, in one place so registration and the text guard
+/// cannot drift apart.
+const TOOL_NAMES: [&str; 6] = [
+    "cordis_inspect",
+    "cordis_define",
+    "cordis_run",
+    "cordis_call",
+    "cordis_stop",
+    "cordis_promote",
+];
 
 pub fn tool_cordis() -> Plugin {
     plugin(
@@ -90,7 +106,7 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        "cordis_inspect",
+                        TOOL_NAMES[0],
                         INSPECT_DESC,
                         INSPECT_PARAMS,
                         inspect_tool,
@@ -98,7 +114,7 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        "cordis_define",
+                        TOOL_NAMES[1],
                         DEFINE_DESC,
                         DEFINE_PARAMS,
                         define_tool,
@@ -106,7 +122,7 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        "cordis_run",
+                        TOOL_NAMES[2],
                         RUN_DESC,
                         RUN_PARAMS,
                         run_tool,
@@ -114,7 +130,7 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        "cordis_call",
+                        TOOL_NAMES[3],
                         CALL_DESC,
                         CALL_PARAMS,
                         call_tool,
@@ -122,7 +138,7 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        "cordis_stop",
+                        TOOL_NAMES[4],
                         STOP_DESC,
                         STOP_PARAMS,
                         stop_tool,
@@ -130,7 +146,7 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        "cordis_promote",
+                        TOOL_NAMES[5],
                         PROMOTE_DESC,
                         PROMOTE_PARAMS,
                         promote_tool,
@@ -448,10 +464,7 @@ fn promote_tool(ctx: Context, call: ToolCall) -> ExecFut {
         {
             Ok(r) => {
                 let stop_note = if r.stopped_source {
-                    format!(
-                        " Session Plugin {} was stopped to avoid duplicate tools; undefine it if you no longer need the in-memory copy.",
-                        r.source_plugin_id
-                    )
+                    format!(" Session Plugin {} {PROMOTE_STOP_NOTE}", r.source_plugin_id)
                 } else {
                     String::new()
                 };
@@ -577,5 +590,90 @@ fn parse_plugin_sel(v: &Value) -> Result<PluginSel, String> {
         other => Err(format!(
             "plugin.kind must be \"new\" or \"existing\", got {other:?}"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Model-facing text may only name tools that exist. Descriptions, schemas,
+    /// the repair loop and the promote receipt all outlive the tool table they
+    /// were written against: `cordis_undefine` survived in four of them after
+    /// the tool itself was folded into `cordis_stop drop:true`, so the model was
+    /// being told to call something that answers "is not registered".
+    #[test]
+    fn every_cordis_name_in_model_text_is_a_live_tool() {
+        const MODEL_TEXT: &[(&str, &str)] = &[
+            ("INSPECT_DESC", INSPECT_DESC),
+            ("INSPECT_PARAMS", INSPECT_PARAMS),
+            ("DEFINE_DESC", DEFINE_DESC),
+            ("DEFINE_PARAMS", DEFINE_PARAMS),
+            ("RUN_DESC", RUN_DESC),
+            ("RUN_PARAMS", RUN_PARAMS),
+            ("RUN_REPAIR_HINT", RUN_REPAIR_HINT),
+            ("CALL_DESC", CALL_DESC),
+            ("CALL_PARAMS", CALL_PARAMS),
+            ("STOP_DESC", STOP_DESC),
+            ("STOP_PARAMS", STOP_PARAMS),
+            ("PROMOTE_DESC", PROMOTE_DESC),
+            ("PROMOTE_PARAMS", PROMOTE_PARAMS),
+            ("PROMOTE_STOP_NOTE", PROMOTE_STOP_NOTE),
+            (
+                "PROMOTE_SESSION_COLLISION_HINT",
+                crate::tools::dynamic_runner::PROMOTE_SESSION_COLLISION_HINT,
+            ),
+            ("CORDIS_SYSTEM_PROMPT", CORDIS_SYSTEM_PROMPT),
+        ];
+        // Folded-away verbs, bare. The receipt that started this said "undefine
+        // it", never "cordis_undefine", so prefixed-name matching alone would
+        // have waved it through — it did, when this test was first written.
+        const RETIRED: &[(&str, &str)] = &[
+            ("undefine", "cordis_stop with drop:true"),
+            ("inspect_self", "cordis_inspect with pluginId"),
+        ];
+        for (label, text) in MODEL_TEXT {
+            for name in cordis_names(text) {
+                assert!(
+                    TOOL_NAMES.contains(&name.as_str()),
+                    "{label} names {name:?}, which is not a registered tool: {TOOL_NAMES:?}"
+                );
+            }
+            for (gone, now) in RETIRED {
+                assert!(
+                    !text.contains(gone),
+                    "{label} still says {gone:?}; that surface is now {now}"
+                );
+            }
+        }
+        // The Skill is what the system prompt tells the model to load before
+        // authoring. Same leftover-verb class as the tool consts; names like
+        // `cordis_inspect_list` in a "do not invent" row are not live tools,
+        // so this surface only gets the retired-verb check.
+        const SKILL: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../skills/cordis-plugin-development/SKILL.md"
+        ));
+        for (gone, now) in RETIRED {
+            assert!(
+                !SKILL.contains(gone),
+                "SKILL.md still says {gone:?}; that surface is now {now}"
+            );
+        }
+    }
+
+    /// `cordis_` followed by the identifier characters a tool name can use.
+    fn cordis_names(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("cordis_") {
+            let tail = &rest[at..];
+            let end = tail
+                .find(|c: char| !c.is_ascii_lowercase() && c != '_')
+                .unwrap_or(tail.len());
+            out.push(tail[..end].to_string());
+            rest = &tail[end..];
+        }
+        out
     }
 }
