@@ -72,7 +72,7 @@ config.toml.example      用户 / 项目模型目录样例
 
 新东西往 `cordis-base` 还是 `cordis-spine` 放，判据是**有没有插件**：base 不 `provide` 任何 named service、不认识 ctx 键（所以 `names` 不在那儿）、也不依赖内核 crate `cordis`；它只有 wire 类型、`config.toml` 解析和纯引擎（ripgrep、cua 发现）。反过来，`settings` / `permissions` / `slash` / `cron` 虽然也不成环，但它们 provide 服务，留在 spine。这条线由编译器守着——base 反向依赖 spine 会直接编译失败，以前只能靠约定。
 
-`cordis-spine/src/tools/` 把注册表与全部工具实现收在一起，对齐 Grok 的 `xai-grok-tools`（那边同样是 `registry/` + `implementations/` 一个 crate）。注册表要问预设的允许名单、工具又要往注册表 register，这圈依赖是工具表这件事的固有形态，不是 dock 特有的耦合，所以不拆成两个 crate。
+`cordis-spine/src/tools/` 把注册表与全部工具实现收在一起，对齐 Grok 的 `xai-grok-tools`（那边同样是 `registry/` + `implementations/` 一个 crate）。注册表要问预设的允许名单、工具又要往注册表 register，这圈依赖是工具表这件事的固有形态，不是 dock 特有的耦合，所以不拆成两个 crate。**布局标准**：一能力一顶层目录（`ask_user/`、`browser/`、`read_file/`、`bash/`…）；共享助手可以是旁边的 `*_common.rs`；工作区七颗由薄 `workspace.rs` 套件调度，**没有** `tools/workspace/` 伞目录。
 
 `roster` 与 `sessions` 不是一回事，别混：`sessions` 是**本页**的会话日志（每页一份，`archived()` 走 `load_cwd`，只看当前 cwd 且会把整份 transcript 解出来）；`roster` 是**跨 cwd** 的会话抬头名册（全局一份，扫 `$DOCK_HOME/sessions/*/*/`，每条只读 `meta.json` 加 jsonl 尾部 64KB 取一行摘要，压 2s TTL 备忘挡住每帧重扫）。名册项的 `cwd` **只能从 `meta.json` 读**——`encode_cwd_dirname` 把 `/` 和非字母数字都压成 `-` 再折叠连续 `-`，目录名是有损的、反解不回来。对应 Grok pager 的 `app/roster.rs`，是 agent dashboard 的行来源之一。
 

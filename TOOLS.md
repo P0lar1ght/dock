@@ -30,6 +30,8 @@
 | 插件 | ctx | 模型工具 | 一句话 | 细节 |
 |---|---|---|---|---|
 | `tools`（`workspace_tools`） | `"tools"` | `list_dir` `read_file` `grep` `search_replace` `bash`（别名 `run_terminal_cmd`）`glob` `write_file` | 工作区内建七颗，不能被 register 盖掉 | [workspace](docs/tools/workspace.md) |
+
+> 布局标准：一能力一顶层目录（`cordis-spine/src/tools/<tool_name>/`）。七颗文件工具各自一目录 + `fs_common.rs` + 薄 `workspace.rs` 套件调度；详见 [workspace](docs/tools/workspace.md#源码布局)。
 | `jobs` | `"jobs"` | — | 进程表；前台 bash 也在表上 | [jobs](docs/tools/jobs.md) |
 | `tool-jobs` | → `"tools"` | `job` `kill_task` | 列 / 查 / 等后台 bash 或子代理，以及杀 | [jobs](docs/tools/jobs.md) |
 | `tool-monitor` | → `"tools"`（live `"jobs"`） | `monitor`（按需） | 长命令 stdout 盯梢 | [jobs](docs/tools/jobs.md) |
