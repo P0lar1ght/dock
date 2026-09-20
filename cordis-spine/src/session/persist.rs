@@ -169,6 +169,13 @@ pub fn save(item: &ArchivedSession, cwd: &Path) -> std::io::Result<()> {
     }
     atomic_write(&dir.join(HISTORY), body.into_bytes())?;
     save_compact(&dir, item);
+    crate::session::search::index_session(&crate::session::search::SessionDoc::from_session(
+        &item.id,
+        cwd,
+        &item.title,
+        unix(updated),
+        &item.events,
+    ));
     Ok(())
 }
 
@@ -203,6 +210,7 @@ pub fn remove(id: &str, cwd: &Path) -> std::io::Result<()> {
     if dir.is_dir() {
         fs::remove_dir_all(dir)?;
     }
+    crate::session::search::evict_session(id);
     Ok(())
 }
 

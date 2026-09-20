@@ -243,6 +243,8 @@ pub async fn run(root: Context) -> Result<()> {
                                     overlay.close();
                                 }
                                 Effect::ResumePicker => {
+                                    // Fill FTS from disk once if the index is still empty.
+                                    cordis_spine::ensure_session_search();
                                     overlay = Overlay::Resume {
                                         selected: 0,
                                         query: String::new(),

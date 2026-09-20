@@ -1976,6 +1976,10 @@ pub(super) fn take_send(ctx: &Context, send_now: bool) -> Action {
             Action::SendPrompt(String::new())
         };
     };
+    // Grok: rebind orphans, then toast if any `[Image #N]` still has no record.
+    if let Some(notice) = prompt.unbound_image_notice() {
+        super::support::flash(ctx, notice);
+    }
     let taken = prompt.take_prompt();
     if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
         sessions.queue_user_images(

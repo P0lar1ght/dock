@@ -1105,6 +1105,18 @@ impl Sessions {
         self.live_id.lock().unwrap().clone()
     }
 
+    /// `$DOCK_HOME/sessions/<cwd-key>/<id>/` for the live thread, when disk-backed.
+    pub fn disk_session_dir(&self) -> Option<std::path::PathBuf> {
+        let cwd = self.disk_cwd.lock().unwrap().clone()?;
+        let mut live = self.live_id.lock().unwrap();
+        if live.is_empty() {
+            *live = crate::session::persist::new_id();
+        }
+        let dir = crate::session::persist::sessions_cwd_dir(&cwd).join(live.as_str());
+        let _ = std::fs::create_dir_all(&dir);
+        Some(dir)
+    }
+
     fn take_archive_id(&self) -> String {
         if self.disk_cwd.lock().unwrap().is_some() {
             let mut live = self.live_id.lock().unwrap();
