@@ -112,7 +112,9 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 
 ### `read_file` / `write_file`
 
-行为未变，只加厚描述。
+`read_file` 按 Grok 顺序分流：字节读入 → 图片（magic / 扩展名，压缩进 `ToolResult.images`）→ PDF（`pdf_oxide` 在 spine；**默认 `format=text`** 抽文本——Grok 默认 image，但 `rendering` 特征要 rustc ≥ 1.92，超过 dock MSRV 1.88，所以 page→JPEG 延后；`pages` 超 10 页必填，每呼最多 20 页，50MB / 60s）→ PPTX（DrawingML，`--- Slide N ---` + notes）→ binary gate（对齐 Grok `BINARY_EXTENSIONS`，docx 等拒绝；pdf/pptx/已识别图片豁免）→ 文本分页。`MAX_TOOL_IMAGES` 提到 20，给将来的多页渲染留额度。
+
+`write_file` 行为未变。
 
 ## 输出预算
 

@@ -51,18 +51,16 @@ pub async fn execute_with(
     jobs: Option<&Jobs>,
 ) -> ToolResult {
     if call.name == "read_file" {
-        if let Some((content, images)) = read_file::maybe_image(&call.arguments) {
-            return ToolResult {
-                call_id: call.id,
-                name: call.name,
-                content,
-                images: crate::tools::tool_images::cap_images(images),
-            };
-        }
+        let (content, images) = read_file::execute(&call.arguments).await;
+        return ToolResult {
+            call_id: call.id,
+            name: call.name,
+            content,
+            images: crate::tools::tool_images::cap_images(images),
+        };
     }
     let content = match call.name.as_str() {
         "list_dir" => list_dir::run(&call.arguments),
-        "read_file" => read_file::run(&call.arguments),
         "grep" => grep::run(&call.id, &call.arguments).await,
         "search_replace" => search_replace::run(&call.arguments),
         "bash" | "run_terminal_cmd" => bash::run(&call.arguments, &is_cancelled, jobs).await,
@@ -471,16 +469,13 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_returns_image_for_png() {
+        use image::{ImageBuffer, ImageFormat, Rgba};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shot.png");
-        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-        png.extend_from_slice(&[0, 0, 0, 13]);
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&1u32.to_be_bytes());
-        png.extend_from_slice(&1u32.to_be_bytes());
-        png.extend_from_slice(&[8, 2, 0, 0, 0]);
-        png.extend(std::iter::repeat_n(0u8, 40));
-        std::fs::write(&path, &png).unwrap();
+        let img = ImageBuffer::from_pixel(32, 32, Rgba([1u8, 2, 3, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, ImageFormat::Png).unwrap();
+        std::fs::write(&path, buf.into_inner()).unwrap();
         let args = serde_json::json!({"target_file": path}).to_string();
         let call = ToolCall {
             id: "1".into(),
