@@ -638,7 +638,7 @@ async fn session_toggle_removes_and_restores_resident_tools() {
         .specs_for_model()
         .iter()
         .any(|s| s.name == "memory_search"));
-    assert!(mem.toggle_session().unwrap() == false);
+    assert!(!mem.toggle_session().unwrap());
     let model_off: Vec<_> = tools
         .specs_for_model()
         .into_iter()
