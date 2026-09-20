@@ -22,10 +22,10 @@ use super::schema_contract::{
     compile_contract_schema, contract_prompt, retry_prompt, validate_contract_output,
     SCHEMA_CONTRACT_RETRIES,
 };
+use crate::agent::capability::CapabilityMode;
 use crate::host::settings::ModelOverride;
 use crate::names::{SESSIONS, SUBAGENTS};
 use crate::session::log::Sessions;
-use crate::tools::capability::CapabilityMode;
 use crate::tools::task::types::SubagentRuntimeOverrides;
 use crate::tools::task::{Subagents, WorkflowSpawn};
 

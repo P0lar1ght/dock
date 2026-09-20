@@ -16,7 +16,7 @@ cordis-base/             spine 的底座：wire 类型、config.toml、纯引擎
   src/cua.rs             cua-driver 发现与授权          src/acp.rs     ACP 权限选项种类
 cordis-spine/            Agent 循环、工具粒、MCP、会话、预设、权限；install_app
   src/*.rs               lib / names（ctx 键）/ error / bundle（组合根）
-  src/agent/             runtime、loop_plugin、turn、agents、presets
+  src/agent/             runtime、loop_plugin、turn、agents、presets、capability（子会话委派档位）
   src/session/           log（内存事件流）、persist（落盘）、roster（跨 cwd 名册）
   src/llm/               sampler、http/（三条 wire）、compact/
   src/prompt/            assemble、context_book、listing、project_instructions、context_usage
@@ -72,7 +72,7 @@ config.toml.example      用户 / 项目模型目录样例
 
 新东西往 `cordis-base` 还是 `cordis-spine` 放，判据是**有没有插件**：base 不 `provide` 任何 named service、不认识 ctx 键（所以 `names` 不在那儿）、也不依赖内核 crate `cordis`；它只有 wire 类型、`config.toml` 解析和纯引擎（ripgrep、cua 发现）。反过来，`settings` / `permissions` / `slash` / `cron` 虽然也不成环，但它们 provide 服务，留在 spine。这条线由编译器守着——base 反向依赖 spine 会直接编译失败，以前只能靠约定。
 
-`cordis-spine/src/tools/` 把注册表与全部工具实现收在一起，对齐 Grok 的 `xai-grok-tools`（那边同样是 `registry/` + `implementations/` 一个 crate）。注册表要问预设的允许名单、工具又要往注册表 register，这圈依赖是工具表这件事的固有形态，不是 dock 特有的耦合，所以不拆成两个 crate。**布局标准**：一能力一顶层目录（`ask_user/`、`browser/`、`read_file/`、`bash/`…）；共享助手可以是旁边的 `*_common.rs`；工作区七颗由薄 `workspace.rs` 套件调度，**没有** `tools/workspace/` 伞目录。
+`cordis-spine/src/tools/` 把注册表与全部工具实现收在一起，对齐 Grok 的 `xai-grok-tools`（那边同样是 `registry/` + `implementations/` 一个 crate）。注册表要问预设的允许名单、工具又要往注册表 register，这圈依赖是工具表这件事的固有形态，不是 dock 特有的耦合，所以不拆成两个 crate。**布局标准**：一能力一顶层目录（`ask_user/`、`browser/`、`read_file/`、`bash/`、`jobs/`…）；共享助手可以是旁边的 `*_common.rs`；工作区七颗由薄 `workspace.rs` 套件调度，**没有** `tools/workspace/` 伞目录。子会话委派档位（`CapabilityMode`）在 `agent/capability.rs`，不是模型工具，不进 `tools/`。
 
 `roster` 与 `sessions` 不是一回事，别混：`sessions` 是**本页**的会话日志（每页一份，`archived()` 走 `load_cwd`，只看当前 cwd 且会把整份 transcript 解出来）；`roster` 是**跨 cwd** 的会话抬头名册（全局一份，扫 `$DOCK_HOME/sessions/*/*/`，每条只读 `meta.json` 加 jsonl 尾部 64KB 取一行摘要，压 2s TTL 备忘挡住每帧重扫）。名册项的 `cwd` **只能从 `meta.json` 读**——`encode_cwd_dirname` 把 `/` 和非字母数字都压成 `-` 再折叠连续 `-`，目录名是有损的、反解不回来。对应 Grok pager 的 `app/roster.rs`，是 agent dashboard 的行来源之一。
 
@@ -171,7 +171,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 9. **reasoning 不混进助手 markdown。** 推理走 `StreamDelta::Reasoning` / `LlmOutput.reasoning`；工具卡折叠显示 name + 参数摘要，展开先「输入」再「输出」，参数在 `LogEvent::ToolExecute.arguments`。
 10. **一次 workflow run 一个预算 + 一个并发池。** host 在 `cordis-spine/src/tools/workflow/host.rs`，每 run 一个 `WorkflowHost`。引擎（`vendor/xai/workflow`）**自己不记账**——`agent()` 预留 1、`parallel()` 一次预留整批，全靠 host 的 `ReserveAgentCalls` 回执决定放不放行，所以 `agent_budget` 只能在这里兑现；超了回 `AgentCallQuotaExceeded`，引擎翻成 `WorkflowOutcome::BudgetExceeded`。并发同理：`admission.rs` 对 workflow owner 的子代理**直接放行**（注释里的 "follow the run's own pool"），会话限流管不到它们，那个 pool 就是 host 的 semaphore。子代理的 owner 必须带**真实 run id** 并共用 run 的 `CancellationToken`，否则按 run 取消（`cancel_workflow_children` + `workflow_cancel_waiters`）一个也匹配不到。`workflow` 工具在 `depth > 0` 拒绝：宽口径角色的工具集里有它，不挡则每层递归都拿一份全新预算。
 11. **workflow 只在收尾时叫醒主线程一次。** 子代理通往父信箱的两条路都按 owner 拦在 `ChildStore`：回合结束通知看 `SubagentRequest::surface_completion`（`runner.rs` 真的读它），`report` 看 `owner.workflow_run_id()` 分流进 run 自己的队列。run 还在跑时推「某个孩子跑完了」，主线程就会在一份残缺的中间结果上烧一整轮，而一次 deep-research 有十来个孩子。过程上报折进 run 快照供 overlay 显示，并在 run 里按发生顺序攒着（上限 64 条），收尾时随 `ParentNotice::WorkflowDone` **整批**交付——行上的 `latest_report` 是覆盖写的，从它反推等于对主线程少说一半。
-12. **能力档位压在允许名单之上。** `tools::capability::CapabilityMode` 挂在**受限子会话**的 `"capability"`（主会话没有这一项 = 不设限），`Tools::outside_allowlist` 与 `specs_for_model_on` 两处都查，且查在 `bypasses_allowlist` **之前**——MCP 与动态包工具绕过预设允许名单是有意的，但绕不过「这次委派只准读」。分类按工具名、**默认关闭**：新工具忘了归类是在受限子代理里不可用，而不是带着写盘能力溜进只读会话。同一套做法给采样：`"model-override"` 只挂在受限子会话上，`llm` 采样器先查它再回落 `"settings"`。**两个名字都必须先 `isolate` 再 `provide`**——没隔离的名字 provide 进的是共用注册表，第二个同样收窄的孩子会撞「service 已注册」直接起不来，而那张 `Disposable` 被 `ChildStore` 攥到孩子被处置为止，期间**主会话**自己也查得到那份 read-only，工具表跟着被收窄。**不给子会话隔离一份 `AppSettings`**——那里面还有权限档位这类会话级状态，隔离一份等于让子代理带着一张过期的权限快照跑。
+12. **能力档位压在允许名单之上。** `agent::capability::CapabilityMode` 挂在**受限子会话**的 `"capability"`（主会话没有这一项 = 不设限），`Tools::outside_allowlist` 与 `specs_for_model_on` 两处都查，且查在 `bypasses_allowlist` **之前**——MCP 与动态包工具绕过预设允许名单是有意的，但绕不过「这次委派只准读」。分类按工具名、**默认关闭**：新工具忘了归类是在受限子代理里不可用，而不是带着写盘能力溜进只读会话。同一套做法给采样：`"model-override"` 只挂在受限子会话上，`llm` 采样器先查它再回落 `"settings"`。**两个名字都必须先 `isolate` 再 `provide`**——没隔离的名字 provide 进的是共用注册表，第二个同样收窄的孩子会撞「service 已注册」直接起不来，而那张 `Disposable` 被 `ChildStore` 攥到孩子被处置为止，期间**主会话**自己也查得到那份 read-only，工具表跟着被收窄。**不给子会话隔离一份 `AppSettings`**——那里面还有权限档位这类会话级状态，隔离一份等于让子代理带着一张过期的权限快照跑。
 13. **skills 覆盖顺序。** `scan_all` 按 Builtin（`$DOCK_HOME/bundled/skills`，编译期嵌入、启动物化）→ Bundled（`{cwd}/skills`）→ User（`~/.dock/skills`）→ Agents（`{cwd}/.agents/skills`）→ Project（`{cwd}/.dock/skills`）合并，同名后者覆盖前者。
 
 ## 磁盘

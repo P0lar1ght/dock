@@ -240,7 +240,7 @@ async fn run_streaming(
         .map_err(|e| format!("启动 {} 失败：{e}", program.to_string_lossy()))?;
 
     // stdout / stderr 必须并发抽干：任一侧写满管道缓冲子进程就阻塞，另一侧
-    // 再也读不到 EOF（jobs.rs 的死锁同款）。
+    // 再也读不到 EOF（jobs 的死锁同款）。
     let out = tokio::spawn(pump(child.stdout.take(), sink.clone()));
     let err = tokio::spawn(pump(child.stderr.take(), sink));
     let status = match tokio::time::timeout(timeout, child.wait()).await {

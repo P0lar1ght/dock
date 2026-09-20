@@ -24,7 +24,7 @@ Grok Rhai 引擎（`vendor/xai/workflow`）+ 同款 oneshot ack。内置 `deep-r
 
 `SpawnAgent` live-lookup `"subagents"`，走 `Subagents::spawn_for_workflow`（返回 `SubagentResult` 原件，失败如实标 `success: false`）。`output_schema` 编译成 `jsonschema::Validator`（拒外部 `$ref`）拼进 prompt；产出不合约就带错误 `resume_from` 重试一次，再不合约就 `success: false`。
 
-`capability_mode` 真正生效：解析成 `tools::capability::CapabilityMode`（`read-only` / `read-write` / `execute` / `all`，档位语义与 grok 一致，读写与执行互不包含），挂进子会话 ctx 的 `"capability"`，工具允许名单与 sampler 工具表都查它。它**压在 MCP / 动态包的允许名单豁免之上**——那两类绕过预设允许名单是有意的，但绕不过「这次委派只准读」。分类按工具名做且**默认关闭**：认不出来的名字只有 `all` 放行。档位名写错当场报错，不会按不设限跑。子会话 ctx **先 `isolate("capability")` 再 `provide`**：没隔离的名字落的是共用注册表，一次 `parallel` 起四个 read-only researcher 会有三个撞「service 已注册」起不来，而且那份档位会漏给主会话（`/deep-research` 变成「当前 Agent 预设未包含此工具」）。`"model-override"` 同理。
+`capability_mode` 真正生效：解析成 `agent::capability::CapabilityMode`（`read-only` / `read-write` / `execute` / `all`，档位语义与 grok 一致，读写与执行互不包含），挂进子会话 ctx 的 `"capability"`，工具允许名单与 sampler 工具表都查它。它**压在 MCP / 动态包的允许名单豁免之上**——那两类绕过预设允许名单是有意的，但绕不过「这次委派只准读」。分类按工具名做且**默认关闭**：认不出来的名字只有 `all` 放行。档位名写错当场报错，不会按不设限跑。子会话 ctx **先 `isolate("capability")` 再 `provide`**：没隔离的名字落的是共用注册表，一次 `parallel` 起四个 read-only researcher 会有三个撞「service 已注册」起不来，而且那份档位会漏给主会话（`/deep-research` 变成「当前 Agent 预设未包含此工具」）。`"model-override"` 同理。
 
 `model` / `effort` / `max_output_tokens` 走 `ModelOverride`，挂进子会话 ctx 的 `"model-override"`，由 `llm` 采样器读（主会话永远没有这一项 = 跟 `"settings"` 走）。**不是**给子会话隔离一份 `AppSettings`：那里面还有权限档位这类会话级状态，隔离一份等于让子代理带着一张过期的权限快照跑。
 

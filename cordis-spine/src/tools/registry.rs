@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use indexmap::IndexMap;
 
+use crate::agent::capability::CapabilityMode;
 use crate::agent::presets::{blocked_tool_message, AgentPresets, MINIMAL_PRESET_ID};
 use crate::agent::runtime::BoxFuture;
 use crate::agent::turn::TurnControl;
@@ -13,7 +14,6 @@ use crate::names::{
     AGENT_PRESETS, CAPABILITY, JOBS, PERMISSIONS, PLAN_MODE, SESSIONS, TOOLS, TOOLS_EXECUTE,
     TOOLS_PRE_EXECUTE, TURN,
 };
-use crate::tools::capability::CapabilityMode;
 use crate::tools::plan_mode::PlanMode;
 use crate::tools::workspace;
 use cordis_base::acp;

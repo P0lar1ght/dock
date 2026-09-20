@@ -10,7 +10,7 @@
 //! `web_fetch` 一颗插件同时挂 `web_fetch` 与 `web_search`。
 //!
 //! Layout standard: one capability per top-level dir under `tools/`
-//! (`ask_user/`, `browser/`, `read_file/`, …). Shared helpers may sit beside
+//! (`ask_user/`, `browser/`, `jobs/`, `read_file/`, …). Shared helpers may sit beside
 //! them as `*_common.rs` (e.g. [`fs_common`]). The workspace suite
 //! ([`workspace`]) is a thin dispatcher — there is no `tools/workspace/`
 //! umbrella holding the seven file tools.
@@ -18,7 +18,6 @@
 pub mod ask_user;
 pub mod bash;
 pub mod browser;
-pub mod capability;
 pub mod computer;
 pub mod cron;
 pub mod dynamic_runner;
