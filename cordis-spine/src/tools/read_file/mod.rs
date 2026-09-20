@@ -19,8 +19,8 @@ const READ_FILE_DESC: &str = "Read a file.\n\
 - For large files, pass offset + limit to page through; the result notes how many lines remain.\n\
 - Line anchors appear as N→ on line 1 and every 10th line. That prefix is not part of the file — when passing text to search_replace, match only what comes after the →.\n\
 - This tool can read PDF files (.pdf), PowerPoint files (.pptx), and image files (PNG, JPG, GIF, WebP, …).\n\
-- When reading an image (or a PDF with format=image) the contents are presented visually via multimodal images.\n\
-- PDF: `pages` selects a page range (required when the document has more than 10 pages; max 20 per call). `format` is `image` (default, render pages) or `text` (extract text).\n\
+- When reading an image, the contents are presented visually via multimodal images.\n\
+- PDF: `pages` selects a page range (required when the document has more than 10 pages; max 20 per call). `format` is `text` (default, extract text) or `image` (page rasterisation, deferred until MSRV allows pdf_oxide rendering; currently returns an error).\n\
 - Binary office formats like .docx / .xlsx are rejected — use an external converter.";
 
 /// Default max lines when the model omits `limit` (grok `MAX_LINES_READ`).
