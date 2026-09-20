@@ -13,7 +13,7 @@ mod prompt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Context, Inject, Plugin};
+use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use cordis_base::config::{load_memory_config, MemoryConfig, MemoryEmbeddingConfig};
 use dock_memory::index::MemoryIndex;
 use dock_memory::layout::MemoryRoot;
@@ -41,6 +41,10 @@ struct MemoryInner {
     session_override: Mutex<Option<bool>>,
     /// Started when memory is enabled; watches `$DOCK_HOME/memory/` for external `.md` edits.
     watcher: Mutex<Option<MemoryFileWatcher>>,
+    /// Tools table used to (un)register resident memory_* sampler tools.
+    tools: Mutex<Option<Tools>>,
+    /// Live disposables while `memory_search` / `memory_get` are resident.
+    tool_regs: Mutex<Vec<Disposable>>,
 }
 
 /// Named `"memory"` — live-looked by TUI / tools / compact flush hook.
@@ -56,6 +60,8 @@ impl Memory {
                 config: Mutex::new(load_memory_config()),
                 session_override: Mutex::new(None),
                 watcher: Mutex::new(None),
+                tools: Mutex::new(None),
+                tool_regs: Mutex::new(Vec::new()),
             }),
         };
         if mem.enabled() {
@@ -73,6 +79,7 @@ impl Memory {
         if self.enabled() {
             self.ensure_watcher();
         }
+        self.sync_tool_registration();
     }
 
     /// Effective on/off: process force-off → session override → config.
@@ -102,6 +109,7 @@ impl Memory {
         if next {
             self.ensure_watcher();
         }
+        self.sync_tool_registration();
         Ok(next)
     }
 
@@ -165,6 +173,72 @@ impl Memory {
     fn has_watcher(&self) -> bool {
         self.inner.watcher.lock().unwrap().is_some()
     }
+
+    /// Bind the live [`Tools`] table and sync resident memory tools to [`Self::enabled`].
+    pub fn bind_tools(&self, tools: Tools) {
+        *self.inner.tools.lock().unwrap() = Some(tools);
+        self.sync_tool_registration();
+    }
+
+    /// Drop resident `memory_search` / `memory_get` (plugin dispose).
+    pub fn clear_tool_registration(&self) {
+        let regs = std::mem::take(&mut *self.inner.tool_regs.lock().unwrap());
+        for d in regs {
+            d.dispose_sync();
+        }
+    }
+
+    /// Enabled → `register` (sampler-visible). Disabled → remove from the table.
+    /// Handlers still no-op with a disabled message if somehow invoked.
+    pub fn sync_tool_registration(&self) {
+        self.clear_tool_registration();
+        if !self.enabled() {
+            return;
+        }
+        let tools = {
+            let guard = self.inner.tools.lock().unwrap();
+            match guard.clone() {
+                Some(t) => t,
+                None => return,
+            }
+        };
+
+        let mem_search = self.clone();
+        let search: ToolBody = std::sync::Arc::new(move |call| {
+            let mem = mem_search.clone();
+            Box::pin(async move { memory_search(&mem, call).await })
+        });
+        let mem_get = self.clone();
+        let get: ToolBody = std::sync::Arc::new(move |call| {
+            let mem = mem_get.clone();
+            Box::pin(async move { memory_get(&mem, call) })
+        });
+
+        let mut regs = Vec::new();
+        match tools.register(
+            ToolSpec {
+                name: "memory_search".into(),
+                description: "Search cross-session local memory for relevant knowledge chunks. Returns ranked results from $DOCK_HOME/memory (topics/observations) and legacy ~/.dock/memory when present.\n\nUse this proactively when a question references prior work, decisions, or conventions you do not have in the current transcript.\n\nMemory is historical context, not automatically the current plan. Verify recalled facts against live sources before relying on them.".into(),
+                parameters_json: SEARCH_PARAMS.into(),
+            },
+            search,
+        ) {
+            Ok(d) => regs.push(d),
+            Err(e) => tracing::warn!(target: "dock_memory", error = %e, "failed to register memory_search"),
+        }
+        match tools.register(
+            ToolSpec {
+                name: "memory_get".into(),
+                description: "Read a memory file by path. Returns the file content with line numbers, optionally limited to a range of lines.\n\nUse after memory_search returns a relevant result. Line numbers are 1-based and match the from parameter.".into(),
+                parameters_json: GET_PARAMS.into(),
+            },
+            get,
+        ) {
+            Ok(d) => regs.push(d),
+            Err(e) => tracing::warn!(target: "dock_memory", error = %e, "failed to register memory_get"),
+        }
+        *self.inner.tool_regs.lock().unwrap() = regs;
+    }
 }
 
 impl Default for Memory {
@@ -194,36 +268,13 @@ pub fn tool_memory() -> Plugin {
                 })?],
             )?;
             let tools = ctx.require::<Tools>(TOOLS)?;
-            let mem_search = memory.clone();
-            let search: ToolBody = std::sync::Arc::new(move |call| {
-                let mem = mem_search.clone();
-                Box::pin(async move { memory_search(&mem, call).await })
-            });
-            let mem_get = memory.clone();
-            let get: ToolBody = std::sync::Arc::new(move |call| {
-                let mem = mem_get.clone();
-                Box::pin(async move { memory_get(&mem, call) })
-            });
+            memory.bind_tools((*tools).clone());
+            let mem_dispose = memory.clone();
             own_registered(
                 ctx,
-                vec![
-                    tools.register_deferred(
-                        ToolSpec {
-                            name: "memory_search".into(),
-                            description: "Search cross-session local memory for relevant knowledge chunks. Returns ranked results from $DOCK_HOME/memory (topics/observations) and legacy ~/.dock/memory when present.\n\nUse this proactively when a question references prior work, decisions, or conventions you do not have in the current transcript.\n\nMemory is historical context, not automatically the current plan. Verify recalled facts against live sources before relying on them.".into(),
-                            parameters_json: SEARCH_PARAMS.into(),
-                        },
-                        search,
-                    )?,
-                    tools.register_deferred(
-                        ToolSpec {
-                            name: "memory_get".into(),
-                            description: "Read a memory file by path. Returns the file content with line numbers, optionally limited to a range of lines.\n\nUse after memory_search returns a relevant result. Line numbers are 1-based and match the from parameter.".into(),
-                            parameters_json: GET_PARAMS.into(),
-                        },
-                        get,
-                    )?,
-                ],
+                vec![Disposable::from_fn(move || {
+                    mem_dispose.clear_tool_registration();
+                })],
             )?;
             Ok(None)
         },
@@ -513,6 +564,102 @@ mod tests {
         // Soft: may Err or Ok depending on vec availability / dim mismatch.
         let _ = search_memory_with_config(&root, "hello", &cfg, Some(&fake));
     }
+}
+
+#[tokio::test]
+async fn enabled_registers_memory_tools_in_sampler_table() {
+    let _env = cordis_base::test_env::scoped()
+        .home()
+        .set("DOCK_MEMORY", "1");
+    let root = Context::new();
+    crate::install_without_llm(&root).await.unwrap();
+    root.plugin(tool_memory(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let tools = (*root.get::<Tools>(TOOLS).unwrap()).clone();
+    let model: Vec<String> = tools
+        .specs_for_model()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(
+        model.iter().any(|n| n == "memory_search"),
+        "enabled memory_search must be sampler-resident: {model:?}"
+    );
+    assert!(
+        model.iter().any(|n| n == "memory_get"),
+        "enabled memory_get must be sampler-resident: {model:?}"
+    );
+    assert!(
+        !tools.is_deferred("memory_search") && !tools.is_deferred("memory_get"),
+        "memory tools must not be deferred when enabled"
+    );
+}
+
+#[tokio::test]
+async fn disabled_omits_memory_tools_from_table() {
+    let _env = cordis_base::test_env::scoped()
+        .home()
+        .set("DOCK_MEMORY", "0");
+    let root = Context::new();
+    crate::install_without_llm(&root).await.unwrap();
+    root.plugin(tool_memory(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let tools = (*root.get::<Tools>(TOOLS).unwrap()).clone();
+    let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
+    assert!(
+        !names
+            .iter()
+            .any(|n| n == "memory_search" || n == "memory_get"),
+        "disabled memory must leave tools out of the table: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_toggle_removes_and_restores_resident_tools() {
+    let _env = cordis_base::test_env::scoped()
+        .home()
+        .set("DOCK_MEMORY", "1");
+    let root = Context::new();
+    crate::install_without_llm(&root).await.unwrap();
+    root.plugin(tool_memory(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let mem = (*root.get::<Memory>(MEMORY).unwrap()).clone();
+    let tools = (*root.get::<Tools>(TOOLS).unwrap()).clone();
+    assert!(tools
+        .specs_for_model()
+        .iter()
+        .any(|s| s.name == "memory_search"));
+    assert!(mem.toggle_session().unwrap() == false);
+    let model_off: Vec<_> = tools
+        .specs_for_model()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(
+        !model_off
+            .iter()
+            .any(|n| n == "memory_search" || n == "memory_get"),
+        "toggle off must remove resident tools: {model_off:?}"
+    );
+    assert!(mem.toggle_session().unwrap());
+    let model_on: Vec<_> = tools
+        .specs_for_model()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(
+        model_on.iter().any(|n| n == "memory_search") && model_on.iter().any(|n| n == "memory_get"),
+        "toggle on must restore resident tools: {model_on:?}"
+    );
 }
 
 #[cfg(test)]

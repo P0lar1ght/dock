@@ -9,6 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use crate::index::MemoryIndex;
 use crate::layout::{MemoryRoot, MemoryScope, ScopePaths};
 
+/// Largest file [`forget`] will hash and remove (Grok-scale).
+pub const MAX_FORGET_FILE_BYTES: u64 = 256 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathClass {
     Outside,
@@ -52,6 +55,12 @@ pub enum AccessError {
     NonMarkdown(PathBuf),
     #[error("memory path is outside configured scopes: {0}")]
     Outside(PathBuf),
+    #[error("memory file is too large to forget ({size} bytes; limit {limit} bytes): {path}")]
+    TooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
+    },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -169,7 +178,32 @@ pub fn forget(
     let scope = class.scope().expect("scoped");
     let scope_paths = root.scope(scope);
 
-    let bytes = std::fs::read(path)?;
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(AccessError::Protected(path.to_path_buf()));
+    }
+    if meta.len() > MAX_FORGET_FILE_BYTES {
+        return Err(AccessError::TooLarge {
+            path: path.to_path_buf(),
+            size: meta.len(),
+            limit: MAX_FORGET_FILE_BYTES,
+        });
+    }
+    // Bound the read so a racing grow cannot inflate into a huge allocation.
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    {
+        use std::io::Read as _;
+        std::fs::File::open(path)?
+            .take(MAX_FORGET_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+    }
+    if bytes.len() as u64 > MAX_FORGET_FILE_BYTES {
+        return Err(AccessError::TooLarge {
+            path: path.to_path_buf(),
+            size: bytes.len() as u64,
+            limit: MAX_FORGET_FILE_BYTES,
+        });
+    }
     let actual = blake3::hash(&bytes);
     let actual_hex = actual.to_hex().to_string();
     if actual_hex != expected_content_hash {
@@ -292,5 +326,26 @@ mod tests {
         assert!(!path.exists());
         assert!(result.archived_to.as_ref().unwrap().exists());
         assert!(idx.search("forget this", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn forget_rejects_oversize_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/forget-huge-proj"));
+        root.ensure_layout().unwrap();
+        let path = root.global.topics.join("huge.md");
+        let body = "y".repeat((MAX_FORGET_FILE_BYTES as usize) + 64);
+        std::fs::write(&path, &body).unwrap();
+        let hash = blake3::hash(body.as_bytes()).to_hex().to_string();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        let err = forget(&root, &path, &hash, &mut idx).unwrap_err();
+        match err {
+            AccessError::TooLarge { size, limit, .. } => {
+                assert!(size > limit);
+                assert_eq!(limit, MAX_FORGET_FILE_BYTES);
+            }
+            other => panic!("expected TooLarge, got {other}"),
+        }
+        assert!(path.exists(), "oversize forget must refuse delete");
     }
 }

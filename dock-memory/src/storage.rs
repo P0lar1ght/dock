@@ -82,16 +82,34 @@ pub fn normalize_memory_content(content: &str) -> String {
     content.trim().to_string()
 }
 
-/// Safe read of a memory file; path must resolve under allowed roots.
+/// Largest file `memory_get` / [`read_memory_file`] will return (Grok-scale).
+pub const MAX_MEMORY_READ_BYTES: u64 = 256 * 1024;
+
+/// Safe read of a memory markdown file; path must resolve under allowed roots.
+///
+/// Only `.md` files are readable. SQLite/binary/oversize paths are rejected with
+/// a clear error (no full-body load of huge files).
 pub fn read_memory_file(
     root: &MemoryRoot,
     path: &Path,
     from: Option<usize>,
     lines: Option<usize>,
 ) -> Result<String, String> {
+    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        return Err(format!(
+            "memory_get only reads .md files under the memory root (refused: {})",
+            path.display()
+        ));
+    }
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("cannot resolve path: {e}"))?;
+    if canonical.extension().and_then(|e| e.to_str()) != Some("md") {
+        return Err(format!(
+            "memory_get only reads .md files under the memory root (refused: {})",
+            canonical.display()
+        ));
+    }
     let allowed = root.read_roots().iter().any(|r| {
         r.canonicalize()
             .ok()
@@ -101,7 +119,27 @@ pub fn read_memory_file(
     if !allowed {
         return Err("path is outside memory directories".into());
     }
+    let meta = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("not a regular file: {}", canonical.display()));
+    }
+    if meta.len() > MAX_MEMORY_READ_BYTES {
+        return Err(format!(
+            "memory file is too large to read ({} bytes; limit {} bytes): {}",
+            meta.len(),
+            MAX_MEMORY_READ_BYTES,
+            canonical.display()
+        ));
+    }
     let text = std::fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
+    if text.len() as u64 > MAX_MEMORY_READ_BYTES {
+        return Err(format!(
+            "memory file is too large to read ({} bytes; limit {} bytes): {}",
+            text.len(),
+            MAX_MEMORY_READ_BYTES,
+            canonical.display()
+        ));
+    }
     let all: Vec<&str> = text.split('\n').collect();
     let start = from.unwrap_or(1).max(1);
     let start_idx = start.saturating_sub(1).min(all.len());
@@ -150,5 +188,47 @@ mod tests {
         );
         let hits = idx.search("PR links", 5).unwrap();
         assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn read_memory_file_rejects_non_md_and_sqlite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/read-gate-proj"));
+        root.ensure_layout().unwrap();
+        let sqlite = root.search_db();
+        // ensure search db exists
+        let _ = crate::index::MemoryIndex::open_or_create(&sqlite).unwrap();
+        let err = read_memory_file(&root, &sqlite, None, None).unwrap_err();
+        assert!(
+            err.contains(".md") || err.to_lowercase().contains("refused"),
+            "unexpected: {err}"
+        );
+        let bin = root.global.root.join("notes.bin");
+        std::fs::write(&bin, b"not markdown").unwrap();
+        let err = read_memory_file(&root, &bin, None, None).unwrap_err();
+        assert!(err.contains(".md"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn read_memory_file_rejects_oversize_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/read-size-proj"));
+        root.ensure_layout().unwrap();
+        let path = root.global.topics.join("huge.md");
+        let body = "x".repeat((MAX_MEMORY_READ_BYTES as usize) + 8);
+        std::fs::write(&path, &body).unwrap();
+        let err = read_memory_file(&root, &path, None, None).unwrap_err();
+        assert!(err.contains("too large"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn read_memory_file_allows_md_under_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/read-ok-proj"));
+        root.ensure_layout().unwrap();
+        let path = root.global.topics.join("ok.md");
+        std::fs::write(&path, "## Hello\n\nworld\n").unwrap();
+        let body = read_memory_file(&root, &path, None, None).unwrap();
+        assert!(body.contains("world"));
     }
 }

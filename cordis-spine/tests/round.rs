@@ -393,8 +393,6 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "lsp",
         "skill",
         "update_goal",
-        "memory_search",
-        "memory_get",
         "monitor",
         "workflow",
         "search_tool",
@@ -461,6 +459,8 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     // `skill` / `workflow` are named by the system-prompt listings, so they
     // have to be callable without a `search_tool` round-trip first. Everything
     // else that is only reachable through discovery stays off the sampler.
+    // `memory_search` / `memory_get` are sampler-resident when memory is enabled
+    // and absent from the table when disabled (default in this install test).
     for listed in ["skill", "workflow"] {
         assert!(
             model.iter().any(|n| n == listed),
@@ -469,7 +469,6 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     }
     for hidden in [
         "scheduler_create",
-        "memory_search",
         "monitor",
         "update_goal",
         "lsp",

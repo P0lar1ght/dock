@@ -169,6 +169,9 @@ prompt_cache = true
 
 
 # Cross-session memory (default off). Override with DOCK_MEMORY=1/0.
+# When enabled, memory_search / memory_get are sampler-resident (no search_tool).
+# Optional [memory.embedding] enables sqlite-vec hybrid; missing → FTS-only.
+# File watcher dirty-syncs before search; post-write embed_missing is soft-fail.
 # [memory]
 # enabled = false
 # [memory.flush]

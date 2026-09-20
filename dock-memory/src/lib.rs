@@ -40,7 +40,9 @@ pub mod storage;
 pub mod text_utils;
 pub mod watcher;
 
-pub use access::{forget, AccessError, ForgetResult, MemoryAccessPolicy, PathClass};
+pub use access::{
+    forget, AccessError, ForgetResult, MemoryAccessPolicy, PathClass, MAX_FORGET_FILE_BYTES,
+};
 pub use config::{MemoryEmbeddingConfig, MemorySearchConfig, MmrConfig, SearchResult};
 pub use dream::{
     auto_dream_eligibility, build_dream_user_message, process_dream_response, DreamEligibility,

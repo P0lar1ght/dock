@@ -45,9 +45,14 @@ $DOCK_HOME/memory/
 ## 工具
 
 - `memory_search` — FTS5；若 `[memory.embedding]` 已配置则查询侧 embed + hybrid；搜索前若 file watcher dirty 则 `sync_dirty_paths`。写入后 soft-fail `embed_missing_chunks`
-- `memory_get` — 按路径读文件
+- `memory_get` — 仅读取 memory 根下 `.md`（拒绝 sqlite/二进制）；体量上限 256KiB
 
-经 `search_tool` / `use_tool` 按需暴露（`register_deferred`）。
+Memory **启用**时两颗工具 `register` 进 sampler 工具表（模型可直接调用，无需 `search_tool`/`use_tool`）。`DOCK_MEMORY=0` / 配置关闭 / 会话 `t` 关掉：从表移除（或调用返回 disabled）。会话 `t` 再打开则恢复常驻。
+
+## Safety gates
+
+- `memory_get` / `read_memory_file`：仅 `.md`；超过 `MAX_MEMORY_READ_BYTES`（256KiB）拒绝。
+- `/memory` forget：超过 `MAX_FORGET_FILE_BYTES`（256KiB）拒绝删除（不整文件读入再 hash）。
 
 
 ## /memory list labels
@@ -64,3 +69,7 @@ sqlite-vec hybrid search; missing config stays FTS-only.
 In `/memory`, press `x` twice to delete the selected topic/inbox note (archives
 under `archive/`, tombstones in `memory_state.sqlite`, drops index rows).
 `MEMORY.md` is not deletable.
+
+## Deferred (not in this tip)
+
+auto-capture / auto-dream timer / drag_select.
