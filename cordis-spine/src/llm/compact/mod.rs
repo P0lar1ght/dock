@@ -13,6 +13,7 @@
 mod config;
 mod history;
 mod prompt;
+mod segments;
 mod summary;
 
 use cordis::{plugin, Context, Inject, Plugin};
@@ -215,6 +216,10 @@ async fn compact_session_locked(
             continue;
         }
         let compacted = build_compacted_events(&history, &output.text);
+        if let Some(dir) = sessions.disk_session_dir() {
+            // Fail-open: compact already succeeded in memory.
+            let _ = segments::persist_compaction_segment(&dir, &history, &output.text);
+        }
         sessions.replace_compacted(compacted);
         re_announce_discoveries(ctx, sessions);
         return Ok(());

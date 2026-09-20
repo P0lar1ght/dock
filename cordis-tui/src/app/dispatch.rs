@@ -72,8 +72,9 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
         Action::CopyAssistant { n, file } => vec![Effect::CopyAssistant { n, file }],
         Action::CopyText(text) => vec![Effect::CopyText(text)],
         Action::OpenImage(path) => vec![Effect::OpenImage(path)],
-        Action::SendPrompt(text) => {
-            let text = text.trim().to_string();
+        Action::SendPrompt(send) => {
+            let unbound_image_notice = send.unbound_image_notice;
+            let text = send.text.trim().to_string();
             prompt.clear();
             if text.is_empty() {
                 return Vec::new();
@@ -85,10 +86,12 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
             vec![Effect::SendPrompt {
                 text,
                 send_now: false,
+                unbound_image_notice,
             }]
         }
-        Action::SendPromptNow { text } => {
-            let text = text.trim().to_string();
+        Action::SendPromptNow(send) => {
+            let unbound_image_notice = send.unbound_image_notice;
+            let text = send.text.trim().to_string();
             prompt.clear();
             if text.is_empty() {
                 return Vec::new();
@@ -96,6 +99,7 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
             vec![Effect::SendPrompt {
                 text,
                 send_now: true,
+                unbound_image_notice,
             }]
         }
         Action::InsertChar(c) => {

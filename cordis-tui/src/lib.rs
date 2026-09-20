@@ -16,7 +16,7 @@ mod slash;
 mod theme;
 mod views;
 
-pub use app::actions::{Action, Effect};
+pub use app::actions::{Action, Effect, PromptSend};
 pub use app::dispatch::dispatch;
 pub use names::{
     GATEWAY, GATEWAY_PAIRING, SESSION, SESSION_PORT, THEME, TUI, TUI_PAIRING, TUI_PROMPT,

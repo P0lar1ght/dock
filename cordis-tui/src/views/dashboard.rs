@@ -176,7 +176,17 @@ pub fn build_rows(ctx: &Context, query: &str, collapsed: &HashSet<RowState>) -> 
 fn shape(mut rows: Vec<DashRow>, query: &str, collapsed: &HashSet<RowState>) -> Vec<DashRow> {
     let needle = query.trim().to_lowercase();
     if !needle.is_empty() {
-        rows.retain(|r| r.haystack().to_lowercase().contains(&needle));
+        let fts_ids: HashSet<String> = cordis_spine::session_search::search(query.trim(), None, 50)
+            .into_iter()
+            .map(|h| h.session_id)
+            .collect();
+        rows.retain(|r| {
+            r.haystack().to_lowercase().contains(&needle)
+                || match r {
+                    DashRow::Archived { id, .. } => fts_ids.contains(id),
+                    DashRow::Tab { .. } | DashRow::Header { .. } => false,
+                }
+        });
     }
     group(rows, collapsed)
 }

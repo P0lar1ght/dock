@@ -94,6 +94,8 @@ struct State {
     /// 焦点。每帧照着 `working` 重设焦点会把鼠标点击、打字的意图当场盖掉。
     turn_working: bool,
     images: Vec<PastedImage>,
+    /// Detached image records (chip text gone after cut/yank/undo). Rebind pulls them back.
+    image_stash: Vec<PastedImage>,
     image_counter: u32,
     paste_bodies: Vec<(String, String)>,
     /// Last submitted composer text (Grok `in_flight_prompt`), for Esc rewind.
@@ -221,6 +223,7 @@ impl PromptWidget {
     pub fn insert_str(&self, s: &str) {
         let mut state = self.state.lock().unwrap();
         insert_at_cursor(&mut state, s);
+        rebind_image_placeholders(&mut state);
     }
 
     pub fn set_info(&self, info: impl Into<String>) {
@@ -412,6 +415,7 @@ impl PromptWidget {
         state.file_dismissed = false;
         state.last_at_query.clear();
         state.images.clear();
+        state.image_stash.clear();
         state.image_counter = 0;
         state.paste_bodies.clear();
         state.last_sent = None;
@@ -423,6 +427,7 @@ impl PromptWidget {
 
     pub fn take_prompt(&self) -> TakenPrompt {
         let mut state = self.state.lock().unwrap();
+        rebind_image_placeholders(&mut state);
         let mut text = std::mem::take(&mut state.input);
         for (chip, body) in state.paste_bodies.drain(..) {
             text = text.replace(&chip, &body);
@@ -430,7 +435,9 @@ impl PromptWidget {
         if !text.trim().is_empty() {
             state.history.push(text.clone());
         }
-        let images = std::mem::take(&mut state.images);
+        let images = drain_images_in_chip_order(&mut state, &text);
+        state.images.clear();
+        state.image_stash.clear();
         state.history_idx = None;
         state.stash.clear();
         state.cursor = 0;
@@ -470,8 +477,40 @@ impl PromptWidget {
         state.history_idx = None;
         state.last_sent = None;
         state.images = images;
+        state.image_stash.clear();
         state.image_counter = state.images.iter().map(|img| img.n).max().unwrap_or(0);
         state.unfocused = false;
+    }
+
+    /// Re-bind orphan `[Image #N]` text to records still held (or in the undo stash).
+    pub fn rebind_image_placeholders(&self) {
+        let mut state = self.state.lock().unwrap();
+        rebind_image_placeholders(&mut state);
+    }
+
+    /// Display numbers of `[Image #N]` placeholders with no backing image record.
+    pub fn unbound_image_placeholders(&self) -> Vec<u32> {
+        let state = self.state.lock().unwrap();
+        unbound_image_placeholders(&state)
+    }
+
+    /// Status-bar notice after rebind when some placeholders still lack records.
+    pub fn unbound_image_notice(&self) -> Option<String> {
+        self.rebind_image_placeholders();
+        let unbound = self.unbound_image_placeholders();
+        if unbound.is_empty() {
+            return None;
+        }
+        let numbers = unbound
+            .iter()
+            .map(|n| format!("#{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(if unbound.len() == 1 {
+            format!("Image {numbers} not attached — placeholder sent as text")
+        } else {
+            format!("Images {numbers} not attached — placeholders sent as text")
+        })
     }
 
     fn slash_settings(&self) -> Option<std::sync::Arc<AppSettings>> {
@@ -529,9 +568,12 @@ impl PromptWidget {
         state.file_dismissed = false;
         if text.is_empty() {
             state.images.clear();
+            state.image_stash.clear();
             state.image_counter = 0;
             state.paste_bodies.clear();
             state.last_at_query.clear();
+        } else {
+            rebind_image_placeholders(&mut state);
         }
     }
 
@@ -625,6 +667,7 @@ impl PromptWidget {
         }
         state.cursor = state.input.len();
         state.file_dismissed = false;
+        rebind_image_placeholders(&mut state);
     }
 
     pub fn history_next(&self) {
@@ -641,6 +684,7 @@ impl PromptWidget {
         }
         state.cursor = state.input.len();
         state.file_dismissed = false;
+        rebind_image_placeholders(&mut state);
     }
 
     /// Chrome (2) + content rows, capped at `max` (Grok: prompt ≤ half screen).
@@ -1258,14 +1302,123 @@ fn drop_chip_at(state: &mut State, range: Range<usize>) {
     state.cursor = range.start;
     state.slash_selected = None;
     state.file_dismissed = false;
-    state.images.retain(|img| img.chip() != chip);
+    stash_images_for_chip(state, &chip);
     state.paste_bodies.retain(|(c, _)| c != &chip);
 }
 
 fn sync_chips(state: &mut State) {
     let input = state.input.clone();
-    state.images.retain(|img| input.contains(&img.chip()));
+    let (kept, detached): (Vec<_>, Vec<_>) = state
+        .images
+        .drain(..)
+        .partition(|img| input.contains(&img.chip()));
+    state.images = kept;
+    for img in detached {
+        stash_image(state, img);
+    }
     state.paste_bodies.retain(|(chip, _)| input.contains(chip));
+}
+
+fn stash_image(state: &mut State, img: PastedImage) {
+    state.image_stash.retain(|s| s.n != img.n);
+    state.image_stash.push(img);
+}
+
+fn stash_images_for_chip(state: &mut State, chip: &str) {
+    let mut kept = Vec::new();
+    let mut gone = Vec::new();
+    for img in state.images.drain(..) {
+        if img.chip() == chip {
+            gone.push(img);
+        } else {
+            kept.push(img);
+        }
+    }
+    state.images = kept;
+    for img in gone {
+        stash_image(state, img);
+    }
+}
+
+/// Re-register orphan `[Image #N]` text against held or stashed records (Grok image_state).
+fn rebind_image_placeholders(state: &mut State) {
+    sync_chips(state);
+    if !state.input.contains("[Image #") {
+        return;
+    }
+    let numbers = image_placeholder_numbers(&state.input);
+    let mut claimed: std::collections::HashSet<u32> =
+        state.images.iter().map(|img| img.n).collect();
+    for number in numbers {
+        if state.images.iter().any(|img| img.n == number) {
+            claimed.insert(number);
+            continue;
+        }
+        if claimed.contains(&number) {
+            continue;
+        }
+        let Some(pos) = state.image_stash.iter().position(|img| img.n == number) else {
+            continue;
+        };
+        if state.images.len() >= IMAGE_CAP {
+            break;
+        }
+        let img = state.image_stash.remove(pos);
+        claimed.insert(number);
+        state.images.push(img);
+    }
+    state.image_counter = state
+        .image_counter
+        .max(state.images.iter().map(|img| img.n).max().unwrap_or(0))
+        .max(state.image_stash.iter().map(|img| img.n).max().unwrap_or(0));
+}
+
+fn unbound_image_placeholders(state: &State) -> Vec<u32> {
+    let attached: std::collections::HashSet<u32> = state.images.iter().map(|img| img.n).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for n in image_placeholder_numbers(&state.input) {
+        if attached.contains(&n) {
+            continue;
+        }
+        if seen.insert(n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+fn image_placeholder_numbers(text: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    let marker = "[Image #";
+    while let Some(at) = rest.find(marker) {
+        rest = &rest[at + marker.len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let ok_close = rest.get(digits.len()..).is_some_and(|s| s.starts_with(']'));
+        if ok_close {
+            if let Ok(n) = digits.parse::<u32>() {
+                if n > 0 {
+                    out.push(n);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn drain_images_in_chip_order(state: &mut State, text: &str) -> Vec<PastedImage> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for n in image_placeholder_numbers(text) {
+        if !seen.insert(n) {
+            continue;
+        }
+        if let Some(pos) = state.images.iter().position(|img| img.n == n) {
+            out.push(state.images.remove(pos));
+        }
+    }
+    out
 }
 
 fn format_bytes(n: usize) -> String {
@@ -1709,6 +1862,44 @@ mod tests {
         prompt.restore_sent(&taken.text, taken.images);
         assert_eq!(prompt.text(), "undo me [Image #1]");
         assert!(prompt.history().is_empty());
+    }
+
+    fn sample_png() -> ClipboardImage {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&32u32.to_be_bytes());
+        png.extend_from_slice(&32u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0]);
+        ClipboardImage::from_bytes(png, Some("image/png")).unwrap()
+    }
+
+    /// Cutting the chip text stashes the record; pasting `[Image #N]` back rebinds it.
+    #[test]
+    fn yank_chip_text_rebinds_stashed_image() {
+        let prompt = PromptWidget::default();
+        prompt.insert_image(sample_png()).unwrap();
+        assert!(prompt.text().starts_with("[Image #1]"));
+        // Drop the chip (backspace) → stash; retype the placeholder → rebind.
+        prompt.backspace();
+        prompt.backspace();
+        assert!(prompt.text().is_empty());
+        prompt.insert_str("[Image #1] ");
+        prompt.rebind_image_placeholders();
+        assert!(prompt.unbound_image_placeholders().is_empty());
+        let taken = prompt.take_prompt();
+        assert_eq!(taken.images.len(), 1);
+        assert_eq!(taken.images[0].n, 1);
+    }
+
+    #[test]
+    fn unbound_placeholder_is_reported_before_send() {
+        let prompt = PromptWidget::default();
+        prompt.insert_str("see [Image #1]");
+        assert_eq!(prompt.unbound_image_placeholders(), vec![1]);
+        let notice = prompt.unbound_image_notice().unwrap();
+        assert!(notice.contains("#1"));
+        assert!(notice.contains("not attached"));
     }
 
     #[test]

@@ -76,6 +76,10 @@ pub use session::log::{sessions, ArchivedSession, Sessions, TokenUsage};
 pub use session::persist::RosterEntry;
 pub use session::resume_preset::{apply_restored_preset, ApplyRestoredPreset};
 pub use session::roster::{roster, Roster};
+pub use session::search::{
+    self as session_search, ensure_index as ensure_session_search,
+    rebuild_all as rebuild_session_search, SessionHit,
+};
 pub use tools::ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
 pub use tools::browser::{
     tool_browser, Browser, BrowserSession, BrowserTabInfo, BROWSER_TOOL_NAMES,

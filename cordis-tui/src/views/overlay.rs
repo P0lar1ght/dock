@@ -786,10 +786,28 @@ pub fn matches_query(hay: &str, query: &str) -> bool {
 }
 
 pub fn filter_sessions<'a>(items: &'a [ArchivedSession], query: &str) -> Vec<&'a ArchivedSession> {
-    items
+    if query.is_empty() {
+        return items.iter().collect();
+    }
+    let q = query.to_ascii_lowercase();
+    let mut out: Vec<&ArchivedSession> = items
         .iter()
-        .filter(|s| matches_query(&s.title, query) || matches_query(&s.id, query))
-        .collect()
+        .filter(|s| {
+            s.title.to_ascii_lowercase().contains(&q) || s.id.to_ascii_lowercase().contains(&q)
+        })
+        .collect();
+    // Cross-session FTS (title + user prompts). Closest UX: /resume search box.
+    let fts_ids: std::collections::HashSet<String> =
+        cordis_spine::session_search::search(query, None, 50)
+            .into_iter()
+            .map(|h| h.session_id)
+            .collect();
+    for s in items {
+        if fts_ids.contains(&s.id) && !out.iter().any(|x| x.id == s.id) {
+            out.push(s);
+        }
+    }
+    out
 }
 
 pub fn filter_strings<'a>(items: &'a [String], query: &str) -> Vec<(usize, &'a str)> {
