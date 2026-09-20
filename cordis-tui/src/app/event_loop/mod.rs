@@ -306,9 +306,18 @@ pub async fn run(root: Context) -> Result<()> {
                                     }
                                     overlay.close();
                                 }
-                                Effect::SendPrompt { text, send_now } => {
+                                Effect::SendPrompt {
+                                    text,
+                                    send_now,
+                                    unbound_image_notice,
+                                } => {
                                     if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
                                         status.clear_notice();
+                                    }
+                                    // Flash *after* clear_notice so A6 unbound-image
+                                    // toast survives the send-path wipe.
+                                    if let Some(notice) = unbound_image_notice {
+                                        flash(&ctx, notice);
                                     }
                                     if let Some(more) = intercept_goal_send(&ctx, &text) {
                                         for extra in more.into_iter().rev() {

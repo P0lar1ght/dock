@@ -11,6 +11,44 @@ use cordis_spine::{
     SlashEntry, GOAL_RESERVED_SUBCOMMANDS, WORKFLOW_TOOL_NAME,
 };
 
+/// Text submitted from the prompt, plus any A6 unbound-image toast.
+///
+/// `From<String>` / `From<&str>` keep `Action::SendPrompt("…".into())` working
+/// for slash/tests (notice defaults to `None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSend {
+    pub text: String,
+    pub unbound_image_notice: Option<String>,
+}
+
+impl PromptSend {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            unbound_image_notice: None,
+        }
+    }
+
+    pub fn with_notice(text: impl Into<String>, notice: Option<String>) -> Self {
+        Self {
+            text: text.into(),
+            unbound_image_notice: notice,
+        }
+    }
+}
+
+impl From<String> for PromptSend {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for PromptSend {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
 /// Synchronous, side-effect-free user intent.
 #[derive(Debug)]
 pub enum Action {
@@ -78,10 +116,10 @@ pub enum Action {
     },
     CopyText(String),
     OpenImage(PathBuf),
-    SendPrompt(String),
-    SendPromptNow {
-        text: String,
-    },
+    /// Submit the prompt buffer. `unbound_image_notice` is flashed *after*
+    /// `Effect::SendPrompt` clears the status line (see take_send).
+    SendPrompt(PromptSend),
+    SendPromptNow(PromptSend),
     PromoteQueued {
         id: Option<String>,
     },
@@ -173,6 +211,8 @@ pub enum Effect {
     SendPrompt {
         text: String,
         send_now: bool,
+        /// Captured before take_prompt; flashed after clear_notice.
+        unbound_image_notice: Option<String>,
     },
     PromoteQueued {
         id: Option<String>,
@@ -488,6 +528,7 @@ pub fn effect_for_extra(entry: &SlashEntry, args: &str) -> Effect {
                 Effect::SendPrompt {
                     text,
                     send_now: true,
+                    unbound_image_notice: None,
                 }
             } else {
                 Effect::SetPrompt { text }

@@ -1967,19 +1967,20 @@ pub(super) fn is_paste_key(code: KeyCode, ctrl: bool, super_key: bool) -> bool {
 }
 
 pub(super) fn take_send(ctx: &Context, send_now: bool) -> Action {
+    use crate::app::actions::PromptSend;
+
     let Some(prompt) = ctx.get::<PromptWidget>(TUI_PROMPT) else {
+        let empty = PromptSend::new(String::new());
         return if send_now {
-            Action::SendPromptNow {
-                text: String::new(),
-            }
+            Action::SendPromptNow(empty)
         } else {
-            Action::SendPrompt(String::new())
+            Action::SendPrompt(empty)
         };
     };
-    // Grok: rebind orphans, then toast if any `[Image #N]` still has no record.
-    if let Some(notice) = prompt.unbound_image_notice() {
-        super::support::flash(ctx, notice);
-    }
+    // Capture unbound notice *before* take_prompt empties the buffer.
+    // Do NOT flash here: Effect::SendPrompt clears the status notice first,
+    // so we pass the string through Action/Effect and flash after clear_notice.
+    let unbound_image_notice = prompt.unbound_image_notice();
     let taken = prompt.take_prompt();
     if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
         sessions.queue_user_images(
@@ -1995,10 +1996,11 @@ pub(super) fn take_send(ctx: &Context, send_now: bool) -> Action {
                 .collect(),
         );
     }
+    let send = PromptSend::with_notice(taken.text, unbound_image_notice);
     if send_now {
-        Action::SendPromptNow { text: taken.text }
+        Action::SendPromptNow(send)
     } else {
-        Action::SendPrompt(taken.text)
+        Action::SendPrompt(send)
     }
 }
 
@@ -2206,7 +2208,7 @@ mod tests {
         // 没动过下拉：Enter 照旧直接发，`/model` 这种「不带参数也有意义」的命令
         // 不用多按一下。
         prompt.insert_str("/tab ");
-        assert!(matches!(enter(&ctx), Some(Action::SendPrompt(t)) if t.trim() == "/tab"));
+        assert!(matches!(enter(&ctx), Some(Action::SendPrompt(p)) if p.text.trim() == "/tab"));
 
         // 选到 `/tab close` 再回车。
         prompt.insert_str("/tab ");
@@ -2225,7 +2227,9 @@ mod tests {
         assert_eq!(prompt.text(), "/tab close ");
 
         // 填完就当没选过：下一下 Enter 才是发送。
-        assert!(matches!(enter(&ctx), Some(Action::SendPrompt(t)) if t.trim() == "/tab close"));
+        assert!(
+            matches!(enter(&ctx), Some(Action::SendPrompt(p)) if p.text.trim() == "/tab close")
+        );
     }
 
     /// 欢迎页上输入框里照样能拖选。
@@ -2779,5 +2783,53 @@ mod tests {
         let effects = run(&ctx, Action::OverlayChar('p'), &mut overlay);
         assert!(effects.is_empty(), "{effects:?}");
         assert!(matches!(overlay, Overlay::Computer { pending: None, .. }));
+    }
+
+    /// A6 real-machine: bare `[Image #N]` Enter must flash after Effect::SendPrompt
+    /// clears the status notice. Flashing inside take_send is wiped by clear_notice.
+    #[test]
+    fn unbound_image_notice_flashes_after_send_clears_status() {
+        let ctx = Context::new();
+        let prompt = PromptWidget::default();
+        prompt.insert_str("see [Image #9]");
+        let status = StatusLine::new(ctx.clone());
+        // A stale toast that the send path clears first.
+        status.flash("stale");
+        let _p = ctx.provide(TUI_PROMPT, prompt).unwrap();
+        let _s = ctx.provide(TUI_STATUS, status).unwrap();
+        let prompt = ctx.get::<PromptWidget>(TUI_PROMPT).unwrap();
+        let status = ctx.get::<StatusLine>(TUI_STATUS).unwrap();
+
+        let action = take_send(&ctx, false);
+        // take_send must not flash — otherwise clear_notice would erase the A6 toast.
+        assert_eq!(status.right().as_deref(), Some("stale"));
+
+        let notice = match &action {
+            Action::SendPrompt(p) => {
+                assert!(p.text.contains("[Image #9]"), "text={}", p.text);
+                p.unbound_image_notice
+                    .clone()
+                    .expect("unbound notice on Action")
+            }
+            other => panic!("expected SendPrompt, got {other:?}"),
+        };
+        assert!(notice.contains("#9"), "{notice}");
+        assert!(notice.contains("not attached"), "{notice}");
+
+        let effects = crate::app::dispatch::dispatch(action, &prompt);
+        let effect_notice = match effects.as_slice() {
+            [Effect::SendPrompt {
+                unbound_image_notice: Some(n),
+                send_now: false,
+                ..
+            }] => n.clone(),
+            other => panic!("expected Effect::SendPrompt with notice, got {other:?}"),
+        };
+        assert_eq!(effect_notice, notice);
+
+        // Reproduce Effect::SendPrompt ordering: clear then flash.
+        status.clear_notice();
+        flash(&ctx, effect_notice.clone());
+        assert_eq!(status.right().as_deref(), Some(notice.as_str()));
     }
 }
