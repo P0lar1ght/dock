@@ -151,7 +151,7 @@ fn empty_markdown(enabled: bool) -> String {
     if !enabled {
         return "**Memory is disabled.**\n\nEnable with `[memory] enabled = true` in config.toml or `DOCK_MEMORY=1`.\n\nPress **t** to try a session override (blocked if `DOCK_MEMORY=0`).".into();
     }
-    "**Nothing remembered yet.**\n\n- `/remember <note>` saves something specific right now.\n- `/flush` summarizes the session into workspace observations.\n- `/dream` consolidates observations into topics.\n\nNotes live under `$DOCK_HOME/memory/global|workspace-<slug>/{topics,observations}/` with a generated `MEMORY.md` index.".into()
+    "**Nothing remembered yet.**\n\n- `/remember <note>` saves something specific right now.\n- `/flush` summarizes the session into workspace observations.\n- `/dream` consolidates observations into topics.\n\nNotes live under `$DOCK_HOME/memory/global|workspace-<slug>/{topics,observations/_inbox}/` with a generated `MEMORY.md` index.".into()
 }
 
 /// Open browser state (fresh selection).

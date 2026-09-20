@@ -33,7 +33,9 @@ pub fn list_memory_files(root: &MemoryRoot) -> Vec<MemoryFileEntry> {
             });
         }
         collect_dir(&mut out, scope, "topics", &paths.topics);
-        collect_dir(&mut out, scope, "observations", &paths.observations);
+        collect_dir(&mut out, scope, "observations", &paths.inbox);
+        // Legacy flat observations/*.md (pre-migrate / collision left behind).
+        collect_flat_obs(&mut out, scope, &paths.observations);
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out
@@ -70,6 +72,41 @@ fn collect_dir(out: &mut Vec<MemoryFileEntry>, scope: MemoryScope, kind: &'stati
     }
 }
 
+
+fn collect_flat_obs(out: &mut Vec<MemoryFileEntry>, scope: MemoryScope, observations: &Path) {
+    let Ok(entries) = std::fs::read_dir(observations) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let scope_s = match scope {
+            MemoryScope::Global => "global",
+            MemoryScope::Workspace => "workspace",
+        };
+        let label = format!("{scope_s}/observations/{name}");
+        if out.iter().any(|e| e.label == label || e.path == path) {
+            continue;
+        }
+        out.push(MemoryFileEntry {
+            scope,
+            kind: "observations",
+            label,
+            path,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,7 +117,7 @@ mod tests {
         let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/browse-proj"));
         root.ensure_layout().unwrap();
         std::fs::write(root.global.topics.join("prefs.md"), "# prefs\n").unwrap();
-        std::fs::write(root.workspace.observations.join("flush-1.md"), "## x\n").unwrap();
+        std::fs::write(root.workspace.inbox.join("flush-1.md"), "## x\n").unwrap();
         let list = list_memory_files(&root);
         // 2 notes + MEMORY.md for each scope created by ensure_layout.
         assert!(list.len() >= 2, "len={}", list.len());

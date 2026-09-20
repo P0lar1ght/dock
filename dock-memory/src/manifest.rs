@@ -1,6 +1,8 @@
 //! Lean per-scope `MEMORY.md` index (title + relative path summaries).
 //!
 //! Generated after remember/flush/dream and on [`crate::layout::MemoryRoot::ensure_layout`].
+//! Budget mirrors Grok `V2ManifestBudget` (8 KiB / 64 entries).
+//! Indexes `topics/` + `observations/_inbox/` (plus flat `observations/*.md` read-compat).
 //! Read-only for tools/model; shown by `memory_get` / `/memory`.
 
 use std::io::Read;
@@ -17,6 +19,24 @@ const MAX_SOURCE_BYTES: u64 = 8 * 1024;
 pub struct Manifest {
     pub content: String,
     pub included_entries: usize,
+}
+
+/// Manifest size budget (Grok `V2ManifestBudget` without the v2 name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManifestBudget {
+    pub max_bytes: usize,
+    pub max_entries: usize,
+    pub max_description_bytes: usize,
+}
+
+impl Default for ManifestBudget {
+    fn default() -> Self {
+        Self {
+            max_bytes: MAX_MANIFEST_BYTES,
+            max_entries: MAX_MANIFEST_ENTRIES,
+            max_description_bytes: MAX_DESCRIPTION_BYTES,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -71,12 +91,14 @@ fn render_scope(scope_dir: &Path, which: MemoryScope) -> std::io::Result<Manifes
         EntryKind::Topic,
         &mut entries,
     )?;
+    // Canonical inbox; also flat observations/*.md for read-compat pre-migrate.
     collect_entries(
         scope_dir,
-        Path::new("observations"),
+        Path::new("observations/_inbox"),
         EntryKind::Observation,
         &mut entries,
     )?;
+    collect_flat_observation_entries(scope_dir, &mut entries)?;
 
     entries.sort_by(|left, right| {
         left.kind.cmp(&right.kind).then_with(|| match left.kind {
@@ -187,6 +209,59 @@ fn collect_entries(
         });
         entries.push(Entry {
             kind,
+            relative_path: sanitize_inline(&relative_path),
+            title: sanitize_inline(&truncate_chars(&title, MAX_DESCRIPTION_BYTES)),
+            description: sanitize_inline(&description),
+            modified,
+        });
+    }
+    Ok(())
+}
+
+
+/// Immediate `.md` children of `observations/` (not `_inbox` / archive / nested).
+fn collect_flat_observation_entries(
+    scope_dir: &Path,
+    entries: &mut Vec<Entry>,
+) -> std::io::Result<()> {
+    let directory = scope_dir.join("observations");
+    let read_dir = match std::fs::read_dir(&directory) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut candidates = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let relative = match path.strip_prefix(scope_dir) {
+            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        // Skip if already listed via _inbox (same basename after migrate race).
+        if entries.iter().any(|e| e.relative_path == relative.replace('\\', "/")) {
+            continue;
+        }
+        let modified = entry.metadata().and_then(|m| m.modified()).ok();
+        candidates.push((relative, path, modified));
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    for (relative_path, path, modified) in candidates {
+        let (title, description) = summarize_file(&path).unwrap_or_else(|_| {
+            let title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("memory")
+                .to_owned();
+            (title, String::new())
+        });
+        entries.push(Entry {
+            kind: EntryKind::Observation,
             relative_path: sanitize_inline(&relative_path),
             title: sanitize_inline(&truncate_chars(&title, MAX_DESCRIPTION_BYTES)),
             description: sanitize_inline(&description),

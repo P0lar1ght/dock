@@ -1,16 +1,21 @@
-//! Cross-session memory for Dock (Phase 1).
+//! Cross-session memory for Dock.
 //!
 //! Disk layout (under `$DOCK_HOME/memory/`):
 //! ```text
 //! memory/
 //!   search.sqlite
-//!   global/{topics,observations}/ + MEMORY.md
-//!   workspace-<slug>/{topics,observations}/ + MEMORY.md
+//!   global/
+//!     topics/
+//!     observations/_inbox/
+//!     archive/
+//!     MEMORY.md
+//!     memory_state.sqlite
+//!   workspace-<slug>/  (same shape)
 //! ```
 //!
-//! No embeddings / sqlite-vec / watcher GC in this phase. Tool names stay
-//! `memory_search` / `memory_get`. Default off; `DOCK_MEMORY=1/0` overrides
-//! `[memory] enabled`.
+//! Tool names stay `memory_search` / `memory_get`. Default off; `DOCK_MEMORY=1/0`
+//! overrides `[memory] enabled`. No public "v2" naming — paths use topics,
+//! observations/_inbox, MEMORY.md.
 
 #![deny(clippy::indexing_slicing)]
 
@@ -37,7 +42,7 @@ pub use flush::{
 };
 pub use index::{ChunkRecord, FtsHit, MemoryIndex, ReindexResult, SearchHit};
 pub use layout::{MemoryRoot, MemoryScope, ScopePaths};
-pub use manifest::{refresh_all, regenerate_scope, Manifest};
+pub use manifest::{refresh_all, regenerate_scope, Manifest, ManifestBudget};
 pub use search::{format_search_results, search_memory};
 pub use slug::workspace_slug;
 pub use storage::{persist_observation, save_remember_note, write_flush_observation};

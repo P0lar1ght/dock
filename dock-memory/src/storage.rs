@@ -1,4 +1,6 @@
 //! Write observations / remember notes; reindex after writes.
+//!
+//! New observations always land in `observations/_inbox/`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,7 +20,7 @@ pub enum MemoryWriteError {
     Index(#[from] rusqlite::Error),
 }
 
-/// Persist an observation markdown file under the scope's `observations/` dir.
+/// Persist an observation markdown file under the scope's `observations/_inbox/`.
 pub fn persist_observation(
     scope: &crate::layout::ScopePaths,
     content: &str,
@@ -31,21 +33,21 @@ pub fn persist_observation(
             limit: MAX_OBSERVATION_BYTES,
         });
     }
-    std::fs::create_dir_all(&scope.observations)?;
+    std::fs::create_dir_all(&scope.inbox)?;
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let name = format!("{prefix}-{stamp}.md");
-    let path = scope.observations.join(&name);
+    let path = scope.inbox.join(&name);
     let mut tmp = tempfile::Builder::new()
         .prefix(".obs-")
         .suffix(".tmp")
-        .tempfile_in(&scope.observations)?;
+        .tempfile_in(&scope.inbox)?;
     tmp.write_all(trimmed.as_bytes())?;
     tmp.as_file().sync_all()?;
     tmp.persist(&path).map_err(|e| e.error)?;
     Ok(path)
 }
 
-/// Flush accepted content → workspace observations + FTS reindex.
+/// Flush accepted content → workspace inbox + FTS reindex.
 pub fn write_flush_observation(
     root: &MemoryRoot,
     content: &str,
@@ -134,12 +136,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remember_writes_and_indexes() {
+    fn remember_writes_inbox_and_indexes() {
         let tmp = tempfile::tempdir().unwrap();
         let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/remember-proj"));
         let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
         let path = save_remember_note(&root, "always open PR links", &mut idx).unwrap();
         assert!(path.exists());
+        assert!(
+            path.starts_with(&root.global.inbox),
+            "path={} inbox={}",
+            path.display(),
+            root.global.inbox.display()
+        );
         let hits = idx.search("PR links", 5).unwrap();
         assert!(!hits.is_empty());
     }

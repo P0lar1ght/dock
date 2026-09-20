@@ -187,7 +187,8 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
         }
     };
 
-    let Some(msg) = build_dream_user_message(&root.workspace.observations, existing.as_deref())
+    let Some(msg) = build_dream_user_message(&root.workspace.inbox, existing.as_deref())
+        .or_else(|| build_dream_user_message(&root.workspace.observations, existing.as_deref()))
     else {
         return Ok("Dream: no observations to consolidate.".into());
     };
@@ -223,7 +224,7 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
                 dock_memory::MemoryScope::Workspace,
             );
             // Archive processed observations by renaming aside (keep for audit).
-            let archive = root.workspace.root.join("archive");
+            let archive = root.workspace.archive.clone();
             let _ = std::fs::create_dir_all(&archive);
             for path in msg.observation_paths {
                 if let Some(name) = path.file_name() {

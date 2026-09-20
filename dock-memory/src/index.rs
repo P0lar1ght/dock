@@ -1,4 +1,4 @@
-//! FTS5-only memory index at `$DOCK_HOME/memory/search.sqlite`.
+//! FTS5 memory index at `$DOCK_HOME/memory/search.sqlite` (vec added in a later commit).
 
 use std::path::Path;
 
@@ -317,14 +317,43 @@ impl MemoryIndex {
     ) -> Result<usize, rusqlite::Error> {
         let mut n = 0;
         for (scope_paths, source) in [(&root.global, "global"), (&root.workspace, "workspace")] {
-            for dir in [&scope_paths.topics, &scope_paths.observations] {
-                n += self.reindex_dir(dir, source)?;
-            }
+            n += self.reindex_dir(&scope_paths.topics, source, true)?;
+            // Inbox (recursive not needed — flat .md only) + legacy flat observations.
+            n += self.reindex_dir(&scope_paths.inbox, source, false)?;
+            n += self.reindex_flat_observations(&scope_paths.observations, source)?;
         }
         Ok(n)
     }
 
-    fn reindex_dir(&mut self, dir: &Path, source: &str) -> Result<usize, rusqlite::Error> {
+    fn reindex_flat_observations(
+        &mut self,
+        observations: &Path,
+        source: &str,
+    ) -> Result<usize, rusqlite::Error> {
+        let Ok(entries) = std::fs::read_dir(observations) else {
+            return Ok(0);
+        };
+        let mut n = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let r = self.reindex_file(&path, source)?;
+            n += r.added + r.updated;
+        }
+        Ok(n)
+    }
+
+    fn reindex_dir(
+        &mut self,
+        dir: &Path,
+        source: &str,
+        recurse: bool,
+    ) -> Result<usize, rusqlite::Error> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Ok(0);
         };
@@ -332,7 +361,9 @@ impl MemoryIndex {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                n += self.reindex_dir(&path, source)?;
+                if recurse {
+                    n += self.reindex_dir(&path, source, true)?;
+                }
                 continue;
             }
             if path.extension().and_then(|e| e.to_str()) != Some("md") {

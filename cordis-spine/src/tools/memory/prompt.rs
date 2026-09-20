@@ -26,7 +26,7 @@ a note marked as a past agent decision is a record, not a rule, so verify it aga
         "- `{global_path}/topics/` — maintained Markdown notes\n"
     ));
     body.push_str(&format!(
-        "- `{global_path}/observations/` — new Markdown observations\n"
+        "- `{global_path}/observations/_inbox/` — new Markdown observations\n"
     ));
     body.push_str(&format!(
         "- `{global_path}/MEMORY.md` — generated index (read-only)\n\n"
@@ -36,18 +36,18 @@ a note marked as a past agent decision is a record, not a rule, so verify it aga
         "- `{workspace_path}/topics/` — maintained Markdown notes\n"
     ));
     body.push_str(&format!(
-        "- `{workspace_path}/observations/` — new Markdown observations\n"
+        "- `{workspace_path}/observations/_inbox/` — new Markdown observations\n"
     ));
     body.push_str(&format!(
         "- `{workspace_path}/MEMORY.md` — generated index (read-only)\n\n"
     ));
     body.push_str(
         "`topics/` holds durable preferences, conventions, architecture, decisions, recurring workflows, \
-and other facts worth reusing. `observations/` holds new observations that may later be consolidated into topics. \
+and other facts worth reusing. `observations/_inbox/` holds new observations that may later be consolidated into topics. \
 `MEMORY.md` is a bounded generated index; it is already injected below, and you must NEVER edit it directly.\n\n",
     );
     body.push_str(
-        "Writes are allowed only to `.md` files under `topics/` or `observations/`; generated indexes, \
+        "Writes are allowed only to `.md` files under `topics/` or `observations/_inbox/`; generated indexes, \
 archives, databases, and other internals are protected.\n\n",
     );
     body.push_str(
@@ -109,6 +109,7 @@ mod tests {
         assert!(body.ends_with("</memory>"));
         assert!(body.contains("memory_search"));
         assert!(body.contains("MEMORY.md"));
+        assert!(body.contains("observations/_inbox"));
         assert!(body.contains("Global memory manifest"));
         assert!(body.contains("Workspace memory manifest"));
     }

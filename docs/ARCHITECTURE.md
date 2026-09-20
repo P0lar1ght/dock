@@ -178,7 +178,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 ## 磁盘
 
 - `~/.dock`（可用 `DOCK_HOME` 覆盖）：config、presets、plugins、skills、memory、`sessions/`、`mcp_credentials.json`。
-- Memory（Phase 1，默认关）：`$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,observations}/`，索引 `$DOCK_HOME/memory/search.sqlite`。`/flush` 只写 memory；compact 仍写 `sessions/.../compaction/`（A7）。斜杠 `/flush` `/dream` `/memory` `/remember`；工具名仍 `memory_search` / `memory_get`。
+- Memory（Phase 1，默认关）：`$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,observations/_inbox,archive}/`，索引 `$DOCK_HOME/memory/search.sqlite`。`/flush` 只写 memory；compact 仍写 `sessions/.../compaction/`（A7）。斜杠 `/flush` `/dream` `/memory` `/remember`；工具名仍 `memory_search` / `memory_get`。
 - 项目 `.dock/`：覆盖 config、presets、plugins、skills、`plan.md`、workflows。
 - HTTP MCP 的 OAuth token 在 `~/.dock/mcp_credentials.json`，**不写进** `config.toml`。它不是 grok.com 账号登录。
 

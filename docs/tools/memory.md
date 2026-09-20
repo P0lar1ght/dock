@@ -17,8 +17,8 @@ enabled = true
 ```
 $DOCK_HOME/memory/
   search.sqlite
-  global/{topics,observations}/ + MEMORY.md
-  workspace-<slug>/{topics,observations}/ + MEMORY.md
+  global/{topics,observations/_inbox,archive}/ + MEMORY.md + memory_state.sqlite
+  workspace-<slug>/{topics,observations/_inbox,archive}/ + MEMORY.md + memory_state.sqlite
 ```
 
 `workspace-<slug>`：优先 git `origin` 的 `org/repo` + blake3 短哈希，否则 cwd 路径哈希。
@@ -35,7 +35,7 @@ $DOCK_HOME/memory/
 
 | 命令 | 作用 |
 |---|---|
-| `/flush` | LLM 摘要当前会话 → workspace `observations/` |
+| `/flush` | LLM 摘要当前会话 → workspace `observations/_inbox/` |
 | `/dream` | 手动 consolidate observations → `topics/` |
 | `/memory` | 双栏浏览器：左文件列表（global/workspace），右 markdown 预览（`cordis_markdown`）。窄屏单栏；`↑↓`/`Enter` 选择；`/` 过滤文件名；`Esc` 关闭；可选 `t` 会话开关记忆 |
 | `/remember` | 无参数：输入框留下用法；有参数：写一条 global observation |
