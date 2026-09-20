@@ -127,7 +127,7 @@ pub struct SubagentRuntimeOverrides {
     ///
     /// 挂进子会话 ctx 的 `"capability"`，与预设工具集取交集，**MCP / 动态包工具
     /// 也受它管**。
-    pub capability_mode: Option<crate::tools::capability::CapabilityMode>,
+    pub capability_mode: Option<crate::agent::capability::CapabilityMode>,
     /// 这次委派点名的模型 / 推理强度 / 输出上限。空 = 跟父会话走。
     ///
     /// 挂进子会话 ctx 的 `"model-override"`，由 `llm` 采样器读。**不是**给子会话

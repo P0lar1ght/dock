@@ -548,7 +548,7 @@ complete("done");
 
     // 这个脚手架只挂了 `report` + `workflow`（没有 workspace 工具），所以断言
     // 落在这两颗上：`workflow` 是执行类，`report` 是元工具。分类本身的覆盖在
-    // `tools::capability` 的单测里。
+    // `agent::capability` 的单测里。
     let tools = seen.lock().unwrap().clone();
     assert!(!tools.is_empty(), "子代理那一轮应当看到过工具表");
     assert!(

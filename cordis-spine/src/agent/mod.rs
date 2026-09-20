@@ -4,6 +4,7 @@
 //! （`agent/pre-step`、`agent/step-start`、`agent/turn-end`），不在这里加 `if`。
 
 pub mod agents;
+pub mod capability;
 pub mod loop_plugin;
 pub mod presets;
 pub mod runtime;
