@@ -168,6 +168,87 @@ async fn second_echo_fails_and_does_not_leave_a_fiber() {
         .is_none());
 }
 
+/// 两颗工具并成一颗之后，两个问题都还能问，而且问错了要报错而不是静默回目录。
+#[tokio::test]
+async fn inspect_answers_both_questions_and_rejects_a_bare_package_id() {
+    let root = boot().await;
+    exec(
+        &root,
+        "cordis_define",
+        r#"{"plugin":{"kind":"new","idPrefix":"both"},"name":"Both","purpose":"merge","factory":"note"}"#,
+    )
+    .await;
+
+    let directory = exec(&root, "cordis_inspect", r#"{"what":"factories"}"#).await;
+    assert!(directory.contains("factories:"), "{directory}");
+
+    let plugin = exec(&root, "cordis_inspect", r#"{"pluginId":"both-1"}"#).await;
+    assert!(plugin.contains("mode: plugin"), "{plugin}");
+    assert!(plugin.contains("pkg-1"), "{plugin}");
+
+    let package = exec(
+        &root,
+        "cordis_inspect",
+        r#"{"pluginId":"both-1","packageId":"pkg-1"}"#,
+    )
+    .await;
+    assert!(package.contains("mode: package"), "{package}");
+    assert!(package.contains("factory: note"), "{package}");
+
+    // pluginId 比 what 窄，窄的赢。
+    let both = exec(
+        &root,
+        "cordis_inspect",
+        r#"{"what":"factories","pluginId":"both-1"}"#,
+    )
+    .await;
+    assert!(both.contains("mode: plugin"), "{both}");
+    assert!(!both.contains("factories:"), "{both}");
+
+    let orphan = exec(&root, "cordis_inspect", r#"{"packageId":"pkg-1"}"#).await;
+    assert!(orphan.contains("requires pluginId"), "{orphan}");
+}
+
+/// `drop` 是开关不是第二颗工具：停掉保留版本，drop 才丢定义；两者都不碰磁盘。
+#[tokio::test]
+async fn stop_keeps_the_definition_unless_drop_is_set() {
+    let root = boot().await;
+    exec(
+        &root,
+        "cordis_define",
+        r#"{"plugin":{"kind":"new","idPrefix":"keep"},"name":"Keep","purpose":"stop vs drop","factory":"echo"}"#,
+    )
+    .await;
+    exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"keep-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+
+    let stopped = exec(&root, "cordis_stop", r#"{"pluginId":"keep-1"}"#).await;
+    assert!(
+        stopped.contains("definition and versions remain"),
+        "{stopped}"
+    );
+    let still = exec(&root, "cordis_inspect", r#"{"pluginId":"keep-1"}"#).await;
+    assert!(still.contains("pkg-1"), "stop must keep Packages: {still}");
+    // 停下来的包可以再 run 起来，这正是不 drop 的理由。
+    let again = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"keep-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(again.contains("\"status\":\"running\""), "{again}");
+
+    let dropped = exec(&root, "cordis_stop", r#"{"pluginId":"keep-1","drop":true}"#).await;
+    assert!(dropped.contains("Removed"), "{dropped}");
+    assert!(dropped.contains("wasRunning=true"), "{dropped}");
+    let gone = exec(&root, "cordis_inspect", r#"{"pluginId":"keep-1"}"#).await;
+    assert!(gone.contains("Error"), "{gone}");
+}
+
 #[tokio::test]
 async fn hold_stays_pending() {
     let root = boot().await;
@@ -199,7 +280,7 @@ async fn hold_stays_pending() {
 }
 
 #[tokio::test]
-async fn update_mode_and_undefine() {
+async fn update_mode_and_drop() {
     let root = boot().await;
     exec(
         &root,
@@ -233,11 +314,11 @@ async fn update_mode_and_undefine() {
     )
     .await;
     assert!(updated.contains("pkg-2"), "{updated}");
-    let gone = exec(&root, "cordis_undefine", r#"{"pluginId":"note-1"}"#).await;
+    let gone = exec(&root, "cordis_stop", r#"{"pluginId":"note-1","drop":true}"#).await;
     assert!(gone.contains("Removed"), "{gone}");
-    let listed = exec(&root, "cordis_inspect_self", "{}").await;
+    let listed = exec(&root, "cordis_inspect", r#"{"what":"temporary"}"#).await;
     assert!(
-        listed.contains("No dynamic Plugins") || !listed.contains("note-1"),
+        listed.contains("No session-local Plugins") || !listed.contains("note-1"),
         "{listed}"
     );
 }
@@ -404,9 +485,9 @@ async fn rhai_compile_reject_does_not_mint() {
     assert!(out.contains("rhai"), "{out}");
     assert!(out.contains("source must be a map"), "{out}");
     assert!(out.contains("does not call apply"), "{out}");
-    let listed = exec(&root, "cordis_inspect_self", "{}").await;
+    let listed = exec(&root, "cordis_inspect", r#"{"what":"temporary"}"#).await;
     assert!(
-        listed.contains("No dynamic Plugins") || !listed.contains("bad-1"),
+        listed.contains("No session-local Plugins") || !listed.contains("bad-1"),
         "{listed}"
     );
 }
@@ -520,7 +601,7 @@ async fn oversized_inline_source_points_at_source_path() {
     assert!(out.contains("128KiB"), "{out}");
     assert!(out.contains("source_path"), "{out}");
     assert!(out.contains("write_file"), "{out}");
-    let listed = exec(&root, "cordis_inspect_self", "{}").await;
+    let listed = exec(&root, "cordis_inspect", r#"{"what":"temporary"}"#).await;
     assert!(
         !listed.contains("big-1"),
         "oversize must not mint: {listed}"
@@ -553,7 +634,7 @@ async fn a_failed_apply_carries_the_repair_loop_and_a_mode_error_does_not() {
     .await;
     assert!(failed.contains("Error"), "{failed}");
     assert!(failed.contains("kind \"existing\""), "{failed}");
-    assert!(failed.contains("cordis_inspect_self"), "{failed}");
+    assert!(failed.contains("cordis_inspect"), "{failed}");
 
     let bad_mode = exec(
         &root,
@@ -640,7 +721,7 @@ async fn rhai_source_path_define_run_and_inspect_shows_path() {
 
     let inspect = exec_json(
         &root,
-        "cordis_inspect_self",
+        "cordis_inspect",
         json!({ "pluginId": "dpath-1", "packageId": "pkg-1" }),
     )
     .await;
@@ -778,7 +859,7 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
 
     let inspect = exec_json(
         &root,
-        "cordis_inspect_self",
+        "cordis_inspect",
         json!({
             "pluginId": "memo-1",
             "packageId": "pkg-1"
@@ -1054,7 +1135,7 @@ async fn rhai_apply_throw_rolls_back_register_tool_and_provide() {
     let names = extra_names(&root);
     assert!(!names.iter().any(|n| n == "orb_list"), "{names:?}");
 
-    exec(&root, "cordis_undefine", r#"{"pluginId":"orb-1"}"#).await;
+    exec(&root, "cordis_stop", r#"{"pluginId":"orb-1","drop":true}"#).await;
     let again = exec_json(
         &root,
         "cordis_define",
@@ -1145,9 +1226,9 @@ async fn rhai_define_without_apply_teaches_and_does_not_mint() {
     )
     .await;
     assert!(out.contains("apply"), "{out}");
-    let listed = exec(&root, "cordis_inspect_self", "{}").await;
+    let listed = exec(&root, "cordis_inspect", r#"{"what":"temporary"}"#).await;
     assert!(
-        listed.contains("No dynamic Plugins") || !listed.contains("noap-1"),
+        listed.contains("No session-local Plugins") || !listed.contains("noap-1"),
         "{listed}"
     );
 }
@@ -1426,7 +1507,7 @@ async fn disk_plugin_autoloads_and_is_visible_to_other_sessions() {
         "{permanent}"
     );
 
-    let gone = exec(&root, "cordis_undefine", r#"{"pluginId":"echo"}"#).await;
+    let gone = exec(&root, "cordis_stop", r#"{"pluginId":"echo","drop":true}"#).await;
     assert!(gone.contains("Removed"), "{gone}");
     assert!(plugin_dir.join("plugin.toml").exists());
 }

@@ -400,12 +400,10 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "search_tool",
         "use_tool",
         "cordis_inspect",
-        "cordis_inspect_self",
         "cordis_define",
         "cordis_run",
         "cordis_call",
         "cordis_stop",
-        "cordis_undefine",
         "cordis_promote",
         "browser_open",
         "browser_navigate",
@@ -432,6 +430,15 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         assert!(
             names.iter().any(|n| n == need),
             "missing {need} in {names:?}"
+        );
+    }
+    // 合并掉的两颗（inspect_self → inspect 的 pluginId，undefine → stop drop:true）
+    // 不该再出现：八颗挤不进 search_tool 默认的五个命中，define / run 就是这么掉出
+    // 窗口的。要加回来得是有意的决定，不是手滑。
+    for retired in ["cordis_inspect_self", "cordis_undefine"] {
+        assert!(
+            !names.iter().any(|n| n == retired),
+            "{retired} was folded into another cordis tool: {names:?}"
         );
     }
     let mcp = root

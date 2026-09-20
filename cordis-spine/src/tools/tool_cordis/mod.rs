@@ -22,21 +22,23 @@ use crate::tools::dynamic_runner::{
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
-use inspect::{render_inspect, render_inspect_self};
+use inspect::{render_inspect, render_plugin};
 use prompt::CORDIS_SYSTEM_PROMPT;
 
 type ExecFut = Pin<Box<dyn Future<Output = ToolResult> + Send + 'static>>;
 
-const INSPECT_DESC: &str = "Read-only live Cordis directory for this session: fibers under cordis-dynamic, named services that are actually mounted (tools / slash / tui.slots include callable methods; other services are names only), model tools (names only), preset factories, Rhai host builtins, session/event contract, TUI slots, this session's dynamic Plugins, and disk plugins. Omit `what` for the full report. This does not execute apply or change version pointers. Before defining a Plugin, also read skills/cordis-plugin-development/SKILL.md.";
-const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"what":{"type":"string","enum":["services","fibers","tools","temporary","permanent","factories","builtins","events","slots"],"description":"Omit for the full live directory."}}}"#;
+/// One read-only tool, two questions: "what is live in this process" (`what`)
+/// and "what is in this Plugin" (`pluginId`). They used to be `cordis_inspect`
+/// and `cordis_inspect_self`; both are ungated reads over the same registry, and
+/// splitting them cost a whole extra row in `search_tool`'s window — which is
+/// how `cordis_define` / `cordis_run` fell out of the default five hits.
+const INSPECT_DESC: &str = "Read-only Cordis directory. With `what`: services (reachable from Rhai vs merely mounted), fibers, tools, factories, builtins (Rhai host API), events, slots, temporary (session Plugins), permanent (disk plugins); omit `what` for all of it. With `pluginId`: that Plugin's version pointers, latest Run and Packages; add `packageId` for one Package's factory, source_path or inline source, and runtime diagnostics. Never executes apply or moves version pointers. Read skills/cordis-plugin-development/SKILL.md before writing a Plugin.";
+const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"what":{"type":"string","enum":["services","fibers","tools","temporary","permanent","factories","builtins","events","slots"],"description":"Live directory section. Omit for all sections. Ignored when pluginId is given."},"pluginId":{"type":"string","description":"Inspect this Plugin instead of the directory."},"packageId":{"type":"string","description":"One Package of pluginId; requires pluginId."}}}"#;
 
-const SELF_DESC: &str = "Inspect dynamic Cordis Plugins owned by this session. With no IDs, list Plugin summaries. With pluginId, return version pointers, the latest Run, and every Package. pluginId plus packageId returns that Package's factory id, source_path (preferred) or inline Rhai source, and runtime diagnostics. Read-only: it does not execute code or change currentPackageId. Read skills/cordis-plugin-development/SKILL.md before modifying a Plugin.";
-const SELF_PARAMS: &str = r#"{"type":"object","properties":{"pluginId":{"type":"string","description":"Stable Plugin ID from cordis_define; omit to list every Plugin."},"packageId":{"type":"string","description":"Exact Package ID; requires pluginId."}}}"#;
+const DEFINE_DESC: &str = "Record an immutable Package. New Plugin: plugin.kind \"new\" + idPrefix (3–6 lowercase letters). Change an existing one: plugin.kind \"existing\" + its pluginId, which appends a Package and never overwrites an older one. factory is echo, note, hold, slash, or rhai (cordis_inspect what:\"factories\"). Custom behaviour is factory rhai: write the script to .dock/plugins/<id>/source.rhai and pass source_path; inline source is for tiny samples only. source XOR source_path. Define compiles the source and stops there — no approval, no apply, currentPackageId unchanged; call cordis_run next. Load skills/cordis-plugin-development/SKILL.md before authoring: it has the Rhai contract, the host API and the slash fields.";
+const DEFINE_PARAMS: &str = r#"{"type":"object","required":["plugin","name","purpose","factory"],"properties":{"plugin":{"type":"object","description":"kind:\"new\" + idPrefix, or kind:\"existing\" + pluginId."},"name":{"type":"string"},"purpose":{"type":"string"},"factory":{"type":"string","description":"echo, note, hold, slash, or rhai."},"source":{"type":"string","description":"rhai, inline (≤128KiB, tiny samples): #{ inject: [...], apply: |host| { ... } }. XOR source_path."},"source_path":{"type":"string","description":"rhai, preferred: path under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/ (≤1MiB, re-read on run). XOR source. No .. escape."},"command":{"type":"string","description":"slash: extra /command token; cannot collide with builtins."},"kind":{"type":"string","enum":["prompt","overlay","slot","tool"],"description":"slash: what /command does. prompt = template, overlay = read-only pane, slot = open a tui.slots id, tool = run a live tool."},"text":{"type":"string","description":"slash: prompt template, overlay body, slot id, or tool name. {args} takes the typed arguments."},"title":{"type":"string","description":"slash overlay/tool Notice title."},"send":{"type":"boolean","description":"slash prompt: send immediately (default) or fill the composer."},"description":{"type":"string","description":"slash /help label; defaults to purpose."}}}"#;
 
-const DEFINE_DESC: &str = "Define an immutable Cordis Package. For a new Plugin, kind:\"new\" and idPrefix of 3–6 lowercase English letters. To modify an existing Plugin, kind:\"existing\" with its pluginId — this appends a Package and never overwrites older versions. factory is echo, note, hold, slash, or rhai (see cordis_inspect what:\"factories\"). For factory rhai prefer source_path to a file under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/ (≤1MiB; re-read on run); use inline source only for tiny samples (≤128KiB). Provide source XOR source_path — not both. source / source_path must evaluate to #{ inject: [...], apply: |host| { ... } }; define compiles and does not run apply. The slash factory also needs command, kind (prompt, overlay, slot, or tool), and text; it only appends a prompt-bar command and cannot replace builtins. kind tool: text is the live tool name; typed slash args become JSON (empty→{}, leading { → raw object, else {\"args\":…}). Define only records metadata: it does not request approval, execute apply, or change currentPackageId. On success, call cordis_run with the returned IDs. Read skills/cordis-plugin-development/SKILL.md first.";
-const DEFINE_PARAMS: &str = r#"{"type":"object","required":["plugin","name","purpose","factory"],"properties":{"plugin":{"type":"object","description":"kind:\"new\" + idPrefix, or kind:\"existing\" + pluginId."},"name":{"type":"string"},"purpose":{"type":"string"},"factory":{"type":"string","description":"Preset factory id: echo, note, hold, slash, or rhai."},"source":{"type":"string","description":"rhai factory (inline, ≤128KiB): Rhai map with inject and apply. XOR with source_path; prefer source_path for real plugins."},"source_path":{"type":"string","description":"rhai factory: path to source.rhai under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/ (≤1MiB). XOR with source. Rejects .. escape."},"command":{"type":"string","description":"slash factory: extra /command token; cannot collide with builtins."},"kind":{"type":"string","enum":["prompt","overlay","slot","tool"],"description":"slash factory: prompt injects/sends text; overlay opens a read-only TUI pane; slot opens a registered tui.slots id (text = slot id); tool runs a live model tool (text = tool name; typed args become JSON)."},"text":{"type":"string","description":"slash factory: prompt template, overlay body, slot id, or tool name. {args} is replaced with typed arguments for prompt/overlay."},"title":{"type":"string","description":"slash overlay/tool Notice title; defaults to /command or /command → tool."},"send":{"type":"boolean","description":"slash prompt: true sends immediately; false fills the composer."},"description":{"type":"string","description":"slash dropdown /help label; defaults to purpose."}}}"#;
-
-const RUN_DESC: &str = "Activate one exact Package of a dynamic Plugin. mode:\"run\" for the first activation, restarting current, or rollback. When current exists, mode:\"update\" switches to a different Package by disposing the previous host-half fiber entirely (every provide/register_* from that Run) and starting the new Package on a clean fiber — it does not overlay. Host-only factories start immediately after the user allows the permission prompt (same overlay as bash). currentPackageId changes only after success. A throwing apply rolls back registrations before the error returns. After a technical failure, inspect the Package, define a new Package on the same Plugin, and retry. Do not request approval again after the user rejects it.";
+const RUN_DESC: &str = "Activate one exact Package. mode \"run\" = first start, restart of current, or rollback to it; mode \"update\" = switch to a different Package, which disposes the previous Run's fiber entirely (every provide / register_* it made) and starts clean — it does not overlay. Asks the same permission overlay as bash. currentPackageId moves only on success; a throwing apply rolls its registrations back first. Do not re-request approval the user rejected.";
 const RUN_PARAMS: &str = r#"{"type":"object","required":["pluginId","packageId","mode"],"properties":{"pluginId":{"type":"string"},"packageId":{"type":"string"},"mode":{"type":"string","enum":["run","update"]}}}"#;
 
 /// The repair loop is in `RUN_DESC` and the Skill, but `cordis_*` are deferred
@@ -44,20 +46,19 @@ const RUN_PARAMS: &str = r#"{"type":"object","required":["pluginId","packageId",
 /// them up. A failed apply is the one place the loop is needed, so it ships with
 /// the failure instead of being remembered. Only for host failures — a mode /
 /// id validation error already says what to do, and this on top would bury it.
-const RUN_REPAIR_HINT: &str = "Packages are immutable — do not retry this same packageId. Repair: cordis_inspect_self with pluginId+packageId for the source and hostError; fix the file (or the inline source); cordis_define again with plugin.kind \"existing\" and the SAME pluginId, which appends a new Package; then cordis_run that new packageId (mode \"update\" when the Plugin already has a current Package, otherwise \"run\"). Do not mint a second Plugin for the same purpose.";
+const RUN_REPAIR_HINT: &str = "Packages are immutable — do not retry this same packageId. Repair: cordis_inspect with pluginId+packageId for the source and hostError; fix the file (or the inline source); cordis_define again with plugin.kind \"existing\" and the SAME pluginId, which appends a new Package; then cordis_run that new packageId (mode \"update\" when the Plugin already has a current Package, otherwise \"run\"). Do not mint a second Plugin for the same purpose.";
 
 const CALL_DESC: &str = "Execute one live model-facing tool by exact name, including tools a running dynamic Package registered with host.register_tool / register_dynamic. Use this after cordis_run to verify a dynamic tool in the same Host turn — do not wait for a later model step or a TUI slash like /test. `arguments` is a JSON object (or a JSON string of that object); omit for {}. Permissions, plan-mode gates, and Agent preset allowlists still apply (dynamic tools bypass the allowlist). Do not call cordis_call recursively.";
 const CALL_PARAMS: &str = r#"{"type":"object","required":["name"],"properties":{"name":{"type":"string","description":"Exact tool name from cordis_inspect what:\"tools\" or a dynamic register_tool name."},"arguments":{"description":"JSON object of tool arguments, or a JSON string. Default {}."}}}"#;
 
-const STOP_DESC: &str = "Stop the current Run of a dynamic Plugin. Retain the Plugin, every Package, and currentPackageId so it can later run or update. Stopping an already stopped Plugin succeeds. Disk files are not deleted; enabled disk plugins autoload on the next process start. Use cordis_undefine to drop the in-memory Plugin.";
-const STOP_PARAMS: &str =
-    r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string"}}}"#;
+/// Teardown is one tool with one switch, not two tools. Both halves are ungated
+/// and differ in exactly one thing — whether the definition survives — which is
+/// easier to teach side by side than as two descriptions that each end with
+/// "use the other one instead".
+const STOP_DESC: &str = "Stop a dynamic Plugin's current Run: its fiber is disposed, so every tool, slash, slot and bag that Run registered goes away. Stopping an already stopped Plugin succeeds. By default the Plugin, its Packages and currentPackageId stay, so it can run or update again later. drop:true also deletes the in-memory definition (use it only when no version needs to remain). Neither one touches disk: files under .dock/plugins/<id>/ stay and autoload next start unless you set enabled=false or delete that directory.";
+const STOP_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string"},"drop":{"type":"boolean","description":"Also forget the definition and every Package (was cordis_undefine). Default false."}}}"#;
 
-const UNDEFINE_DESC: &str = "Remove a dynamic Plugin from this process. If it is running, stop it first, then delete every in-memory Package and version pointer. Does not delete disk files under .dock/plugins/<id>/; set enabled=false or delete that directory to stop autoload. Do not call this when versions must remain for restart or rollback; use cordis_stop instead.";
-const UNDEFINE_PARAMS: &str =
-    r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string"}}}"#;
-
-const PROMOTE_DESC: &str = "Write the Plugin's current (or latest) Package to disk so it survives restart. Default id strips the minted -N suffix (echo-1 → echo). scope \"project\" writes {cwd}/.dock/plugins/<id>/; \"user\" writes ~/.dock/plugins/<id>/. Then autostarts that disk Plugin (no second permission prompt). If the disk id differs from the session Plugin, the session copy is stopped to avoid duplicate tools — undefine it if you no longer need the in-memory definition. Does not delete files on later cordis_undefine.";
+const PROMOTE_DESC: &str = "Write the Plugin's current (or latest) Package to disk so it survives restart, then autostart it from there (no second permission prompt). scope \"project\" (default) writes {cwd}/.dock/plugins/<id>/, \"user\" writes ~/.dock/plugins/<id>/; default id strips the minted -N suffix (echo-1 → echo). If the disk id differs from the session Plugin, the session copy is stopped to avoid duplicate tools — cordis_stop drop:true it if you no longer need the in-memory definition. Files stay until you delete them.";
 const PROMOTE_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string","description":"Session or already-loaded Plugin to persist."},"id":{"type":"string","description":"Disk directory / stable pluginId. Default: strip -N from pluginId."},"scope":{"type":"string","enum":["project","user"],"description":"project (default) = workspace .dock/plugins; user = ~/.dock/plugins."}}}"#;
 
 pub fn tool_cordis() -> Plugin {
@@ -97,14 +98,6 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        "cordis_inspect_self",
-                        SELF_DESC,
-                        SELF_PARAMS,
-                        inspect_self_tool,
-                    )?,
-                    spec(
-                        ctx,
-                        tools.as_ref(),
                         "cordis_define",
                         DEFINE_DESC,
                         DEFINE_PARAMS,
@@ -133,14 +126,6 @@ pub fn tool_cordis() -> Plugin {
                         STOP_DESC,
                         STOP_PARAMS,
                         stop_tool,
-                    )?,
-                    spec(
-                        ctx,
-                        tools.as_ref(),
-                        "cordis_undefine",
-                        UNDEFINE_DESC,
-                        UNDEFINE_PARAMS,
-                        undefine_tool,
                     )?,
                     spec(
                         ctx,
@@ -182,47 +167,30 @@ fn spec(
 
 fn inspect_tool(ctx: Context, call: ToolCall) -> ExecFut {
     Box::pin(async move {
-        let what = json(&call)
-            .get("what")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
-            return tool_result(call, "Error: dynamicCordisRunner is not mounted");
-        };
-        let Some(tools) = ctx.get::<Tools>(TOOLS) else {
-            return tool_result(call, "Error: tools is not mounted");
-        };
-        tool_result(
-            call,
-            render_inspect(
-                &ctx,
-                &runner,
-                &tools,
-                session_id(&ctx).as_str(),
-                what.as_deref(),
-            ),
-        )
-    })
-}
-
-fn inspect_self_tool(ctx: Context, call: ToolCall) -> ExecFut {
-    Box::pin(async move {
         let v = json(&call);
         let plugin_id = v.get("pluginId").and_then(Value::as_str);
         let package_id = v.get("packageId").and_then(Value::as_str);
-        if package_id.is_some() && plugin_id.is_none() {
-            return tool_result(
-                call,
-                "Error: cordis_inspect_self packageId requires pluginId",
-            );
-        }
         let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
             return tool_result(call, "Error: dynamicCordisRunner is not mounted");
         };
-        match render_inspect_self(&runner, &session_id(&ctx), plugin_id, package_id) {
-            Ok(text) => tool_result(call, text),
-            Err(e) => tool_result(call, format!("Error: {e}")),
+        // One Package is the narrowest question, so it wins over `what`.
+        if let Some(plugin_id) = plugin_id {
+            return match render_plugin(&runner, &session_id(&ctx), plugin_id, package_id) {
+                Ok(text) => tool_result(call, text),
+                Err(e) => tool_result(call, format!("Error: {e}")),
+            };
         }
+        if package_id.is_some() {
+            return tool_result(call, "Error: cordis_inspect packageId requires pluginId");
+        }
+        let Some(tools) = ctx.get::<Tools>(TOOLS) else {
+            return tool_result(call, "Error: tools is not mounted");
+        };
+        let what = v.get("what").and_then(Value::as_str);
+        tool_result(
+            call,
+            render_inspect(&ctx, &runner, &tools, session_id(&ctx).as_str(), what),
+        )
     })
 }
 
@@ -400,37 +368,13 @@ fn call_tool(ctx: Context, call: ToolCall) -> ExecFut {
 
 fn stop_tool(ctx: Context, call: ToolCall) -> ExecFut {
     Box::pin(async move {
-        let plugin_id = json(&call)
+        let v = json(&call);
+        let plugin_id = v
             .get("pluginId")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
-            return tool_result(call, "Error: dynamicCordisRunner is not mounted");
-        };
-        if plugin_id.is_empty() {
-            return tool_result(call, "Error: pluginId is required");
-        }
-        match runner.stop(&session_id(&ctx), &plugin_id).await {
-            Ok(r) => tool_result(
-                call,
-                format!(
-                    "Dynamic Plugin {} is stopped; its definition and versions remain.",
-                    r.plugin_id
-                ),
-            ),
-            Err(e) => tool_result(call, format!("Error: {e}")),
-        }
-    })
-}
-
-fn undefine_tool(ctx: Context, call: ToolCall) -> ExecFut {
-    Box::pin(async move {
-        let plugin_id = json(&call)
-            .get("pluginId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let drop = v.get("drop").and_then(Value::as_bool).unwrap_or(false);
         let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
             return tool_result(call, "Error: dynamicCordisRunner is not mounted");
         };
@@ -438,6 +382,20 @@ fn undefine_tool(ctx: Context, call: ToolCall) -> ExecFut {
             return tool_result(call, "Error: pluginId is required");
         }
         let sid = session_id(&ctx);
+        if !drop {
+            return match runner.stop(&sid, &plugin_id).await {
+                Ok(r) => tool_result(
+                    call,
+                    format!(
+                        "Dynamic Plugin {} is stopped; its definition and versions remain.",
+                        r.plugin_id
+                    ),
+                ),
+                Err(e) => tool_result(call, format!("Error: {e}")),
+            };
+        }
+        // Read the origin before the definition is gone — that is the only place
+        // the disk path lives, and the model needs it to hear "files remain".
         let origin = runner
             .inspect_plugin(&sid, &plugin_id)
             .ok()
@@ -535,7 +493,7 @@ fn inject_plugin_mentions(ctx: &Context, user: &str) {
     for id in mentioned_plugin_ids(user) {
         let text = match runner.reference(&sid, &id) {
             Ok(r) => format!(
-                "# @{} context\npluginId: {}\npackageId: {} (baseline)\nname: {}\npurpose: {}\nrunning: {}\nCall cordis_inspect_self with these ids, then cordis_define kind existing. Do not create a replacement Plugin. Source is not included here.",
+                "# @{} context\npluginId: {}\npackageId: {} (baseline)\nname: {}\npurpose: {}\nrunning: {}\nCall cordis_inspect with these ids, then cordis_define kind existing. Do not create a replacement Plugin. Source is not included here.",
                 r.plugin_id, r.plugin_id, r.package_id, r.name, r.purpose, r.running
             ),
             Err(_) if looks_like_minted_id(&id) => format!(
