@@ -15,7 +15,7 @@
 | 目录 | 内容 |
 |---|---|
 | `mermaid/` | Warp Mermaid 布局栈：`dagre_rust`、`graphlib_rust`、`mermaid-to-svg`、`ordered_hashmap`，给 `cordis-render/mermaid`（crate `xai-grok-mermaid`）用 |
-| `xai/` | Grok 拷贝：`xai-workflow`、`xai-fuzzy-file-search`（workspace 成员）、`grok-tools`（仅对照源） |
+| `xai/` | Grok 拷贝：`xai-workflow`（workspace 成员）、`grok-tools`（仅对照源）；`xai-fuzzy-file-search` 已迁至 `cordis-tui/fuzzy-file-search` |
 
 ## 许可证
 
@@ -25,7 +25,6 @@
 
 ```bash
 cargo test -p xai-workflow
-cargo test -p xai-fuzzy-file-search
 cargo test -p cordis-markdown -p xai-grok-mermaid
 ```
 

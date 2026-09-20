@@ -24,7 +24,7 @@ cordis-spine/            Agent 循环、工具粒、MCP、会话、预设、权�
   src/host/              宿主 live-look 的表：settings、permissions、slash、tui_slots
   presets/               内置 Agent 预设 YAML（code / minimal / cordis / warden）
   tests/                 round.rs（install_app_registers）、dynamic.rs、subagents.rs
-cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、statusBar、shortcuts…
+cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、statusBar、shortcuts…；fuzzy-file-search crate
   src/app/               状态与派发：actions、dispatch、event_loop、input、clipboard
   src/views/             画出来的东西：overlay、dashboard、各 *_view / *_modal / pane
   src/seam/              TUI live-look 的 named service 座：session、gateway、shortcuts、tabs
@@ -37,7 +37,7 @@ cordis-render/markdown/  crate `cordis-markdown`
 cordis-render/mermaid/   crate `xai-grok-mermaid`
 embed-sdk/               宿主页 JS SDK（`dist/dock-embed.js`，协议 dock.1）
 vendor/mermaid/          冻结的 mermaid 布局栈（dagre / graphlib / to-svg / ordered_hashmap）
-vendor/xai/              冻结的 xai 拷贝（fuzzy-file-search、workflow、grok-tools）
+vendor/xai/              冻结的 xai 拷贝（workflow、grok-tools；fuzzy-file-search 在 cordis-tui/）
 skills/                  Bundled skills
 .agents/skills/          Agents scope skills（仓库流程）
 assets/logo/             品牌图

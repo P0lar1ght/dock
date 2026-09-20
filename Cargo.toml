@@ -13,7 +13,7 @@ members = [
     "vendor/mermaid/graphlib_rust",
     "vendor/mermaid/dagre_rust",
     "vendor/mermaid/mermaid-to-svg",
-    "vendor/xai/fuzzy-file-search",
+    "cordis-tui/fuzzy-file-search",
     "vendor/xai/workflow",
 ]
 

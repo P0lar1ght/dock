@@ -1,5 +1,5 @@
-//! @-completion. Chrome matches the slash dropdown; matching uses Grok's
-//! copied `xai-fuzzy-file-search` (nucleo + ignore walk).
+//! @-completion. Chrome matches the slash dropdown; matching uses the
+//! `xai-fuzzy-file-search` crate under `cordis-tui/fuzzy-file-search` (nucleo + ignore walk).
 
 mod context;
 
