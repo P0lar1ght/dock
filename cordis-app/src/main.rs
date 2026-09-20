@@ -1,6 +1,9 @@
 use cordis_app::{cron_driver, session_actor, system_prompt, tab_mount};
 use cordis_gateway::gateway;
-use cordis_spine::{agent_loop, install_app, Sessions, SESSIONS};
+use cordis_spine::{
+    agent_loop, apply_restored_preset, install_app, AgentPresets, ApplyRestoredPreset, Sessions,
+    AGENT_PRESETS, SESSIONS,
+};
 use cordis_tui::{tabs, tui};
 
 enum ResumeArg {
@@ -64,6 +67,21 @@ Sessions are stored in $DOCK_HOME/sessions/<cwd>/ (default ~/.dock/sessions/).
     );
 }
 
+fn notify_preset_apply(outcome: ApplyRestoredPreset) {
+    if let ApplyRestoredPreset::Failed { id, error } = outcome {
+        eprintln!("dock: resume preset `{id}` not applied: {error}");
+    }
+}
+
+fn resume_and_apply_preset(sessions: &Sessions, presets: &AgentPresets, id: &str) -> bool {
+    let stamped = sessions.archived_preset_id(id);
+    if !sessions.restore(id) {
+        return false;
+    }
+    notify_preset_apply(apply_restored_preset(presets, stamped.as_deref()));
+    true
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resume = parse_args();
@@ -71,13 +89,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_app(&root).await?;
     if let Some(sessions) = root.get::<Sessions>(SESSIONS) {
         sessions.attach_disk();
+        if let Some(presets) = root.get::<AgentPresets>(AGENT_PRESETS) {
+            // Stamp the live preset on new archives even before `/preset`.
+            sessions.seed_preset_if_unset(&presets.current_id());
+        }
         match resume {
             ResumeArg::Off => {}
             ResumeArg::Latest => {
-                let _ = sessions.resume_latest();
+                if let Some(presets) = root.get::<AgentPresets>(AGENT_PRESETS) {
+                    if let Some(id) = sessions.archived().into_iter().next().map(|s| s.id) {
+                        let _ = resume_and_apply_preset(&sessions, &presets, &id);
+                    }
+                } else {
+                    let _ = sessions.resume_latest();
+                }
             }
             ResumeArg::Id(id) => {
-                let _ = sessions.resume_id(&id);
+                if let Some(presets) = root.get::<AgentPresets>(AGENT_PRESETS) {
+                    let _ = resume_and_apply_preset(&sessions, &presets, &id);
+                } else {
+                    let _ = sessions.resume_id(&id);
+                }
             }
         }
     }

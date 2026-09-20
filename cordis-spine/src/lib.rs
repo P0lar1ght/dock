@@ -74,6 +74,7 @@ pub use prompt::context_usage::{
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
 pub use session::log::{sessions, ArchivedSession, Sessions, TokenUsage};
 pub use session::persist::RosterEntry;
+pub use session::resume_preset::{apply_restored_preset, ApplyRestoredPreset};
 pub use session::roster::{roster, Roster};
 pub use tools::ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
 pub use tools::browser::{

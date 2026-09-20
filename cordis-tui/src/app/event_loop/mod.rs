@@ -17,11 +17,11 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets, AppSettings,
-    DynamicRunner, Goal, LogEvent, LspBackendAdapter, LspSetupScope, PlanMode, Sessions, Slash,
-    Subagents, ToolCall, Tools, AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL, LSP,
-    MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT, SETTINGS,
-    SLASH, SUBAGENTS, TOOLS,
+    apply_restored_preset, goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets,
+    AppSettings, ApplyRestoredPreset, DynamicRunner, Goal, LogEvent, LspBackendAdapter,
+    LspSetupScope, PlanMode, Sessions, Slash, Subagents, ToolCall, Tools, AGENT_PRESETS, ASK_EVENT,
+    DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE,
+    SESSIONS, SESSION_EVENT, SETTINGS, SLASH, SUBAGENTS, TOOLS,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -271,14 +271,22 @@ pub async fn run(root: Context) -> Result<()> {
                                 }
                                 Effect::RestoreSession(id) => {
                                     if let Ok(sessions) = ctx.require::<Sessions>(SESSIONS) {
+                                        let stamped = sessions.archived_preset_id(&id);
                                         sessions.archive_current();
                                         sessions.restore(&id);
-                                        // Old sessions have no preset_id — leave AgentPresets alone.
-                                        if let Some(pid) = sessions.preset_id() {
-                                            if let Some(presets) =
-                                                ctx.get::<AgentPresets>(AGENT_PRESETS)
+                                        if let Some(presets) =
+                                            ctx.get::<AgentPresets>(AGENT_PRESETS)
+                                        {
+                                            if let ApplyRestoredPreset::Failed { id, error } =
+                                                apply_restored_preset(
+                                                    &presets,
+                                                    stamped.as_deref(),
+                                                )
                                             {
-                                                let _ = presets.apply(&pid);
+                                                flash(
+                                                    &ctx,
+                                                    format!("预设 {id} 未恢复：{error}"),
+                                                );
                                             }
                                         }
                                     }

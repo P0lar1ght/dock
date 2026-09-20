@@ -16,7 +16,7 @@ const READ_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{
 const READ_FILE_DESC: &str = "Read a file.\n\
 - Use this instead of `cat` / `head` / `sed -n` through bash: it is gated as read-only, works in plan mode, and tells you how much of the file you have not seen.\n\
 - By default reads up to 1000 lines from offset (default line 1).\n\
-- Skill markdown (`**/SKILL.md` and Markdown under a `skills/` path segment) and project instruction files (`AGENTS.md`, `CLAUDE.md`, …) are read whole when under the byte/token cap — not stuck on the 1000-line default.\n\
+- Skill markdown (`**/SKILL.md` and Markdown under a `skills/` path segment) and project instruction files (`AGENTS.md`, `CLAUDE.md`, …) are read whole when under the token cap (25k) — not stuck on the 1000-line default.\n\
 - For large files, pass offset + limit to page through; the result notes how many lines remain.\n\
 - Line anchors appear as N→ on line 1 and every 10th line. That prefix is not part of the file — when passing text to search_replace, match only what comes after the →.\n\
 - This tool can read PDF files (.pdf), PowerPoint files (.pptx), and image files (PNG, JPG, GIF, WebP, …).\n\

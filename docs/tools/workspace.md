@@ -112,7 +112,7 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 
 ### `read_file` / `write_file`
 
-`read_file` 按 Grok 顺序分流：字节读入 → 图片（magic / 扩展名，压缩进 `ToolResult.images`）→ PDF（`pdf_oxide` + `rendering` 在 spine；**默认 `format=image`** 按页渲 JPEG→`UserImage`，与 Grok 一致；`format=text` 抽文本；`pages` 超 10 页必填，每呼最多 20 页，对齐 `MAX_TOOL_IMAGES=20`，50MB / 60s，DPI 150 / JPEG q85）→ PPTX（DrawingML，`--- Slide N ---` + notes）→ binary gate（对齐 Grok `BINARY_EXTENSIONS`，docx 等拒绝；pdf/pptx/已识别图片豁免）→ 文本分页。
+`read_file` 按 Grok 顺序分流：字节读入 → 图片（magic / 扩展名，压缩进 `ToolResult.images`）→ PDF（`pdf_oxide` + `rendering` 在 spine；**默认 `format=image`** 按页渲 JPEG→`UserImage`，与 Grok 一致；`format=text` 抽文本；`pages` 超 10 页必填，每呼最多 20 页，对齐 `MAX_TOOL_IMAGES=20`，50MB / 60s，DPI 150 / JPEG q85）→ PPTX（DrawingML，`--- Slide N ---` + notes）→ binary gate（对齐 Grok `BINARY_EXTENSIONS`，docx 等拒绝；pdf/pptx/已识别图片豁免）→ 文本分页。技能 markdown（`**/SKILL.md` 与 `skills/` 路径下的 Markdown）以及工程指令文件（`AGENTS.md` / `CLAUDE.md` 等）在 **token 上限**（25k，非字节）内整读，显式 `offset`/`limit` 仍走窗口。
 
 `write_file` 行为未变。
 
