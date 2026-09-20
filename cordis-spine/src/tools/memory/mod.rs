@@ -25,7 +25,7 @@ use crate::prompt::context_book::{own_sections, ContextBook};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
-pub use ops::{run_dream, run_flush, run_remember};
+pub use ops::{run_dream, run_flush, run_remember, run_remember_async};
 
 const SEARCH_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query. Prefer specific technical terms."},"max_results":{"type":"integer"},"min_score":{"type":"number"}},"required":["query"]}"#;
 const GET_PARAMS: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Memory file path from memory_search."},"from":{"type":"integer","description":"1-based start line."},"lines":{"type":"integer","description":"Max lines to return."}},"required":["path"]}"#;

@@ -14,6 +14,7 @@ use dock_memory::flush::{
 };
 use dock_memory::index::MemoryIndex;
 use dock_memory::layout::MemoryRoot;
+use dock_memory::rewrite::{rewrite_user_message, REMEMBER_REWRITE_SYSTEM_PROMPT};
 use dock_memory::storage::{save_remember_note, write_flush_observation};
 
 use crate::error::{Error, Result};
@@ -236,8 +237,12 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
     }
 }
 
-/// `/remember <text>` — write a global observation.
+/// `/remember <text>` — write a global observation (no LLM rewrite).
 pub fn run_remember(ctx: &Context, note: &str) -> Result<String> {
+    save_remember(ctx, note)
+}
+
+fn save_remember(ctx: &Context, note: &str) -> Result<String> {
     if let Some(memory) = ctx.get::<Memory>(MEMORY) {
         if !memory.enabled() {
             return Err(Error::Compact(
@@ -264,4 +269,50 @@ pub fn run_remember(ctx: &Context, note: &str) -> Result<String> {
     let path = save_remember_note(&root, note, &mut index)
         .map_err(|e| Error::Compact(format!("remember: {e}")))?;
     Ok(format!("Memory saved to {}", path.display()))
+}
+
+/// `/remember <text>` with optional Dock sampler rewrite (Grok-aligned).
+/// Falls back to the raw note when LLM fails or is unavailable.
+pub async fn run_remember_async(ctx: &Context, note: &str) -> Result<String> {
+    let trimmed = note.trim();
+    if trimmed.is_empty() {
+        return Err(Error::Compact(
+            "Usage: /remember <note> — empty opens the composer.".into(),
+        ));
+    }
+    let rewritten = try_rewrite_remember(ctx, trimmed).await;
+    let body = rewritten.as_deref().unwrap_or(trimmed);
+    save_remember(ctx, body)
+}
+
+async fn try_rewrite_remember(ctx: &Context, raw: &str) -> Option<String> {
+    let llm = ctx.get::<Llm>(LLM)?;
+    // Skip rewrite for notes that already look structured.
+    if raw.lines().any(|l| l.trim_start().starts_with("## ")) {
+        return None;
+    }
+    const MAX_INPUT: usize = 32 * 1024;
+    if raw.len() > MAX_INPUT {
+        return None;
+    }
+    let iso = ctx.isolate("sessions");
+    let output = llm
+        .stream_observed(
+            &iso,
+            PromptRequest {
+                system: REMEMBER_REWRITE_SYSTEM_PROMPT.to_string(),
+                history: vec![LogEvent::User(rewrite_user_message(raw, ""))],
+                tools: Vec::new(),
+            },
+            |_delta: &StreamDelta| {},
+        )
+        .await;
+    if output.error.is_some() {
+        return None;
+    }
+    let text = output.text.trim().to_string();
+    if text.is_empty() || !text.contains('#') {
+        return None;
+    }
+    Some(text)
 }

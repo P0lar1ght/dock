@@ -2,7 +2,46 @@
 
 use std::path::Path;
 
+use cordis_base::config::MemoryDreamConfig;
+
 use crate::text_utils::{has_markdown_headers, is_no_reply};
+
+/// Whether auto-dream may run (manual `/dream` always allowed when memory+dream enabled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DreamEligibility {
+    Ready,
+    TooSoon { hours_since: u64, min_hours: u64 },
+    NotEnoughSessions { sessions: u64, min_sessions: u64 },
+}
+
+pub fn auto_dream_eligibility(
+    hours_since_last: Option<u64>,
+    sessions_since_last: u64,
+    config: &MemoryDreamConfig,
+) -> DreamEligibility {
+    if !config.enabled {
+        return DreamEligibility::TooSoon {
+            hours_since: 0,
+            min_hours: config.min_hours,
+        };
+    }
+    if let Some(h) = hours_since_last {
+        if h < config.min_hours {
+            return DreamEligibility::TooSoon {
+                hours_since: h,
+                min_hours: config.min_hours,
+            };
+        }
+    }
+    if sessions_since_last < config.min_sessions {
+        return DreamEligibility::NotEnoughSessions {
+            sessions: sessions_since_last,
+            min_sessions: config.min_sessions,
+        };
+    }
+    DreamEligibility::Ready
+}
+
 
 pub const DREAM_SYSTEM_PROMPT: &str = "\
 You are performing a dream — a reflective pass over memory files. \

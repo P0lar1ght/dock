@@ -728,11 +728,21 @@ pub async fn run(root: Context) -> Result<()> {
                                     });
                                 }
                                 Effect::MemoryRemember { note } => {
-                                    let msg = match cordis_spine::run_remember(&ctx, &note) {
-                                        Ok(m) => m,
-                                        Err(e) => format!("remember failed: {e}"),
-                                    };
-                                    flash(&ctx, msg);
+                                    flash(&ctx, "正在 remember…");
+                                    let redraw = redraw_tx.clone();
+                                    let c = ctx.clone();
+                                    tokio::spawn(async move {
+                                        let msg =
+                                            match cordis_spine::run_remember_async(&c, &note).await
+                                            {
+                                                Ok(m) => m,
+                                                Err(e) => format!("remember failed: {e}"),
+                                            };
+                                        if let Some(slash) = c.get::<Slash>(SLASH) {
+                                            slash.queue_notice("/remember", msg);
+                                        }
+                                        let _ = redraw.send(());
+                                    });
                                 }
                                 Effect::OpenMemoryBrowser => {
                                     overlay = Overlay::MemoryBrowser(

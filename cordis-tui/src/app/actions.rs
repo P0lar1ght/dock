@@ -507,7 +507,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
             let note = args.trim();
             if note.is_empty() {
                 Effect::SetPrompt {
-                    text: "用法: /remember <note>\n/remember ".into(),
+                    text: "Usage: /remember <note> — leave empty to edit in composer.\n/remember ".into(),
                 }
             } else {
                 Effect::MemoryRemember {

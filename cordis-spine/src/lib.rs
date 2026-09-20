@@ -108,7 +108,7 @@ pub use tools::mcp::{
     Elicitation, Mcp, McpReloadReport, McpStatus, McpToolStatus, SEARCH_TOOL_NAME, USE_TOOL_NAME,
 };
 pub use tools::memory::{
-    maybe_flush_before_compact, run_dream, run_flush, run_remember, tool_memory, Memory,
+    maybe_flush_before_compact, run_dream, run_flush, run_remember, run_remember_async, tool_memory, Memory,
 };
 pub use tools::monitor::tool_monitor;
 pub use tools::plan_mode::{
