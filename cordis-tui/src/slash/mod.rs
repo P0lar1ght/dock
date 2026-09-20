@@ -886,8 +886,11 @@ mod tests {
 
     #[test]
     fn nucleo_ranks_resume() {
-        let snap = snapshot("/re", 0);
+        let snap = snapshot("/res", 0);
         assert_eq!(snap.matches[0].display, "/resume");
+
+        let snap = snapshot("/rem", 0);
+        assert_eq!(snap.matches[0].display, "/remember");
     }
 
     /// `/tab ` 之后补子命令；页号是自由输入，下拉该让开。
