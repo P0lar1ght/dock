@@ -8,8 +8,12 @@ use std::sync::Arc;
 
 use cordis_base::types::UserImage;
 
-/// Cap images attached to one tool result (Grok `MAX_IMAGES`).
-pub const MAX_TOOL_IMAGES: usize = 5;
+/// Cap images attached to one tool result.
+///
+/// Raised from Grok MCP's 5 to 20 so a single `read_file` PDF `format=image`
+/// call can return up to [`crate::tools::read_file`]'s max pages-per-call.
+/// Browser / CUA screenshots rarely approach this.
+pub const MAX_TOOL_IMAGES: usize = 20;
 /// Soft max decoded bytes per image before we refuse to attach.
 pub const MAX_TOOL_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// Skip tiny decorative icons.
@@ -220,9 +224,11 @@ mod tests {
     }
 
     #[test]
-    fn caps_at_five() {
+    fn caps_at_max() {
         let one = user_image_from_bytes(tiny_png(), None).unwrap();
-        let many = (0..8).map(|_| one.clone()).collect::<Vec<_>>();
+        let many = (0..(MAX_TOOL_IMAGES + 3))
+            .map(|_| one.clone())
+            .collect::<Vec<_>>();
         assert_eq!(cap_images(many).len(), MAX_TOOL_IMAGES);
     }
 
