@@ -100,17 +100,11 @@ async fn run_stop_roundtrip_mounts_fiber_and_tool() {
     let services = exec(&root, "cordis_inspect", r#"{"what":"services"}"#).await;
     assert!(services.contains("dynEcho"), "{services}");
     assert!(services.contains("dynamicCordisRunner"), "{services}");
-    assert!(
-        services.contains("register / register_dynamic"),
-        "{services}"
-    );
+    assert!(services.contains("host.register_tool"), "{services}");
     assert!(services.contains("cannot replace /agents"), "{services}");
-    assert!(services.contains("request_open"), "{services}");
+    assert!(services.contains("host.open_slot"), "{services}");
     let tools_only = exec(&root, "cordis_inspect", r#"{"what":"tools"}"#).await;
-    assert!(
-        !tools_only.contains("register / register_dynamic"),
-        "{tools_only}"
-    );
+    assert!(!tools_only.contains("host.register_tool"), "{tools_only}");
 
     exec(&root, "cordis_stop", r#"{"pluginId":"echo-1"}"#).await;
     assert!(root.get::<DynEcho>(DYN_ECHO).is_none());
@@ -414,6 +408,163 @@ async fn rhai_compile_reject_does_not_mint() {
     assert!(
         listed.contains("No dynamic Plugins") || !listed.contains("bad-1"),
         "{listed}"
+    );
+}
+
+/// `inject` 进的是**内核**的 `Inject`，内核按名字查 store（类型擦除），所以一个
+/// 脚本够不着的 spine 服务照样能满足它——fiber active、apply 跑过、工具可调。
+/// 以前 `waiting for` 拿 `service_present` 那张只认几个名字的表单独判，于是这种包
+/// 被报成 waiting，模型会去修一个没坏的插件。
+#[tokio::test]
+async fn injecting_a_mounted_spine_service_runs_and_is_not_reported_as_waiting() {
+    let root = boot().await;
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "gate"},
+            "name": "Gate",
+            "purpose": "inject a spine service the script cannot reach",
+            "factory": "rhai",
+            "source": r#"
+#{
+  inject: ["tools", "settings", "permissions"],
+  apply: |host| {
+    host.register_tool(#{
+      name: "gate_ping",
+      description: "probe",
+      parameters: #{ type: "object", properties: #{} },
+      execute: |args| { "pong" }
+    });
+  }
+}
+"#,
+        }),
+    )
+    .await;
+    assert!(defined.contains("gate-1/pkg-1"), "{defined}");
+
+    let ran = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"gate-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    let receipt: serde_json::Value = serde_json::from_str(&ran).expect("run receipt json");
+    assert_eq!(receipt["status"], "running", "{ran}");
+    assert_eq!(receipt["host"]["fiberState"], "active", "{ran}");
+    assert_eq!(
+        receipt["host"]["waitingFor"],
+        json!([]),
+        "a resolved inject is not a wait: {ran}"
+    );
+
+    let fibers = exec(&root, "cordis_inspect", r#"{"what":"fibers"}"#).await;
+    assert!(fibers.contains("gate-1 [active]"), "{fibers}");
+    assert!(
+        !fibers.contains("waiting for"),
+        "running plugin must not be listed as waiting: {fibers}"
+    );
+
+    // 真跑起来了，不只是状态好看。
+    let called = exec(&root, "cordis_call", r#"{"name":"gate_ping"}"#).await;
+    assert!(called.contains("pong"), "{called}");
+
+    // 而脚本**仍然**够不着那两个名字：inject 是启动闸，不是授权。
+    let services = exec(&root, "cordis_inspect", r#"{"what":"services"}"#).await;
+    let (reachable, mounted) = services
+        .split_once("also mounted")
+        .expect("services must split reachable from merely mounted");
+    for name in ["settings", "permissions", "context", "sessions"] {
+        assert!(
+            mounted.contains(name),
+            "{name} belongs under 'also mounted': {services}"
+        );
+        assert!(
+            !reachable.contains(&format!("- {name}")),
+            "{name} must not be listed as reachable from Rhai: {services}"
+        );
+    }
+    for name in ["tools", "slash", "tui.slots"] {
+        assert!(
+            reachable.contains(&format!("- {name}")),
+            "{name} is reachable: {services}"
+        );
+    }
+    assert!(
+        reachable.contains("host.register_tool") && reachable.contains("host.call_tool"),
+        "reachable names carry their host.* signatures: {services}"
+    );
+}
+
+/// 超限时该说的是「改走 source_path」，不是「把脚本写短点」。
+#[tokio::test]
+async fn oversized_inline_source_points_at_source_path() {
+    let root = boot().await;
+    let big = format!(
+        "#{{ inject: [], apply: |host| {{ }} }}\n// {}",
+        "x".repeat(130 * 1024)
+    );
+    let out = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "big"},
+            "name": "Big",
+            "purpose": "oversize",
+            "factory": "rhai",
+            "source": big,
+        }),
+    )
+    .await;
+    assert!(out.contains("128KiB"), "{out}");
+    assert!(out.contains("source_path"), "{out}");
+    assert!(out.contains("write_file"), "{out}");
+    let listed = exec(&root, "cordis_inspect_self", "{}").await;
+    assert!(
+        !listed.contains("big-1"),
+        "oversize must not mint: {listed}"
+    );
+}
+
+/// `cordis_*` 是 deferred 工具，描述不常驻上下文。apply 炸了的那一刻是唯一需要
+/// 修复闭环的时刻，所以闭环跟着失败一起回；而 mode/id 这类校验错误自己已经写清了
+/// 下一步，再贴一段会把它埋掉。
+#[tokio::test]
+async fn a_failed_apply_carries_the_repair_loop_and_a_mode_error_does_not() {
+    let root = boot().await;
+    exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "boom"},
+            "name": "Boom",
+            "purpose": "throwing apply",
+            "factory": "rhai",
+            "source": r#"#{ inject: ["tools"], apply: |host| { throw "nope" } }"#,
+        }),
+    )
+    .await;
+    let failed = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"boom-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(failed.contains("Error"), "{failed}");
+    assert!(failed.contains("kind \"existing\""), "{failed}");
+    assert!(failed.contains("cordis_inspect_self"), "{failed}");
+
+    let bad_mode = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"boom-1","packageId":"pkg-404","mode":"run"}"#,
+    )
+    .await;
+    assert!(bad_mode.contains("Error"), "{bad_mode}");
+    assert!(
+        !bad_mode.contains("kind \"existing\""),
+        "a validation error must not carry the repair essay: {bad_mode}"
     );
 }
 

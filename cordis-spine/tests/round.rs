@@ -300,6 +300,68 @@ async fn install_fakes_echo_has_no_capability_tools() {
     }
 }
 
+/// inspect 的 services 目录是手抄的（`Context` 没有类型擦除的「这个名字活着吗」），
+/// 漏一个就是对模型少报一件活着的能力，而且没有任何症状：它会绕路，或者回「做不到」。
+/// 这里把「`install_app` 真的挂了」和「报告里有」钉在一起。
+#[tokio::test]
+async fn cordis_inspect_services_covers_everything_install_app_mounts() {
+    isolated_home();
+    let root = Context::new();
+    cordis_spine::install_app(&root).await.unwrap();
+    // 默认 code preset 不含 cordis_*，走工具执行会被允许名单挡掉。
+    root.require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
+        .unwrap()
+        .apply(cordis_spine::CORDIS_PRESET_ID)
+        .unwrap();
+    let services = root
+        .require::<cordis_spine::Tools>(TOOLS)
+        .unwrap()
+        .execute(cordis_spine::ToolCall {
+            id: "svc".into(),
+            name: "cordis_inspect".into(),
+            arguments: r#"{"what":"services"}"#.into(),
+        })
+        .await
+        .content;
+    for need in [
+        "sessions",
+        "llm",
+        "tools",
+        "systemPrompt",
+        "context",
+        "agents",
+        "settings",
+        "turn",
+        "permissions",
+        "cron",
+        "roster",
+        "jobs",
+        "slash",
+        "skills",
+        "tui.slots",
+        "agentPresets",
+        "todos",
+        "planMode",
+        "ask",
+        "mcp",
+        "subagents",
+        "memory",
+        "browser",
+        "lsp",
+        "goal",
+        "workflows",
+        "computer",
+        "compact",
+        "dynamicCordisRunner",
+        "rhaiBags",
+    ] {
+        assert!(
+            services.contains(need),
+            "cordis_inspect services must report the live service {need}: {services}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     // 隔离 home：真实 `~/.dock` 里若有 `roster.yml`，默认 code preset 上的

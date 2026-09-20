@@ -14,7 +14,9 @@ use super::registry::{Package, PersistScope, PluginOrigin};
 use super::{DefineReceipt, DefineTarget, DynamicRunner, RunMode, SourceInput};
 use crate::host::slash::{slash_entry_from_define, SlashEntry};
 use crate::tools::dynamic_runner::factories::RHAI_FACTORY;
-use crate::tools::dynamic_runner::rhai_host::{MAX_FILE_SOURCE, MAX_INLINE_SOURCE};
+use crate::tools::dynamic_runner::rhai_host::{
+    FILE_TOO_LARGE, INLINE_TOO_LARGE, MAX_FILE_SOURCE, MAX_INLINE_SOURCE,
+};
 use cordis_base::config::dock_home;
 
 /// Session id of autoloaded disk plugins. Visible to every chat session.
@@ -175,8 +177,8 @@ fn path_under_plugin_root(canon: &Path, root_canon: &Path) -> bool {
 
 fn source_too_large_msg(max_bytes: usize) -> String {
     match max_bytes {
-        MAX_INLINE_SOURCE => "rhai source exceeds 128KiB".into(),
-        MAX_FILE_SOURCE => "rhai source file exceeds 1MiB".into(),
+        MAX_INLINE_SOURCE => INLINE_TOO_LARGE.into(),
+        MAX_FILE_SOURCE => FILE_TOO_LARGE.into(),
         n => format!("rhai source exceeds {n} bytes"),
     }
 }

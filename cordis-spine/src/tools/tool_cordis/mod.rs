@@ -17,7 +17,7 @@ use crate::prompt::assemble::ORDER_CORDIS;
 use crate::prompt::context_book::{own_sections, ContextBook};
 use crate::session::log::Sessions;
 use crate::tools::dynamic_runner::{
-    DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode, SourceInput,
+    AttemptStatus, DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode, SourceInput,
 };
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
@@ -38,6 +38,13 @@ const DEFINE_PARAMS: &str = r#"{"type":"object","required":["plugin","name","pur
 
 const RUN_DESC: &str = "Activate one exact Package of a dynamic Plugin. mode:\"run\" for the first activation, restarting current, or rollback. When current exists, mode:\"update\" switches to a different Package by disposing the previous host-half fiber entirely (every provide/register_* from that Run) and starting the new Package on a clean fiber — it does not overlay. Host-only factories start immediately after the user allows the permission prompt (same overlay as bash). currentPackageId changes only after success. A throwing apply rolls back registrations before the error returns. After a technical failure, inspect the Package, define a new Package on the same Plugin, and retry. Do not request approval again after the user rejects it.";
 const RUN_PARAMS: &str = r#"{"type":"object","required":["pluginId","packageId","mode"],"properties":{"pluginId":{"type":"string"},"packageId":{"type":"string"},"mode":{"type":"string","enum":["run","update"]}}}"#;
+
+/// The repair loop is in `RUN_DESC` and the Skill, but `cordis_*` are deferred
+/// tools: their descriptions are not in context unless the model just looked
+/// them up. A failed apply is the one place the loop is needed, so it ships with
+/// the failure instead of being remembered. Only for host failures — a mode /
+/// id validation error already says what to do, and this on top would bury it.
+const RUN_REPAIR_HINT: &str = "Packages are immutable — do not retry this same packageId. Repair: cordis_inspect_self with pluginId+packageId for the source and hostError; fix the file (or the inline source); cordis_define again with plugin.kind \"existing\" and the SAME pluginId, which appends a new Package; then cordis_run that new packageId (mode \"update\" when the Plugin already has a current Package, otherwise \"run\"). Do not mint a second Plugin for the same purpose.";
 
 const CALL_DESC: &str = "Execute one live model-facing tool by exact name, including tools a running dynamic Package registered with host.register_tool / register_dynamic. Use this after cordis_run to verify a dynamic tool in the same Host turn — do not wait for a later model step or a TUI slash like /test. `arguments` is a JSON object (or a JSON string of that object); omit for {}. Permissions, plan-mode gates, and Agent preset allowlists still apply (dynamic tools bypass the allowlist). Do not call cordis_call recursively.";
 const CALL_PARAMS: &str = r#"{"type":"object","required":["name"],"properties":{"name":{"type":"string","description":"Exact tool name from cordis_inspect what:\"tools\" or a dynamic register_tool name."},"arguments":{"description":"JSON object of tool arguments, or a JSON string. Default {}."}}}"#;
@@ -318,7 +325,22 @@ fn run_tool(ctx: Context, call: ToolCall) -> ExecFut {
                 })
                 .to_string(),
             ),
-            Err(e) => tool_result(call, format!("Error: {e}")),
+            Err(e) => {
+                // 只有真的起过 host 半才谈得上"修 source 再来一版"：`resolve_plan`
+                // 的 mode / id 报错自己已经写清了下一步。
+                let host_failed = runner
+                    .inspect_plugin(&session_id(&ctx), plugin_id)
+                    .ok()
+                    .and_then(|row| row.latest)
+                    .is_some_and(|a| {
+                        a.status == AttemptStatus::Failed && a.host_error.as_deref() == Some(&e)
+                    });
+                if host_failed {
+                    tool_result(call, format!("Error: {e}\n\n{RUN_REPAIR_HINT}"))
+                } else {
+                    tool_result(call, format!("Error: {e}"))
+                }
+            }
         }
     })
 }
