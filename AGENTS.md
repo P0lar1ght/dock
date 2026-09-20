@@ -24,9 +24,9 @@ cordis-spine/    Agent 循环、工具、MCP、会话、预设；install_app 挂
 cordis-tui/      全屏终端 UI 插件（theme / scrollback / prompt / overlay / 快捷键）
 cordis-gateway/  回环 HTTP/WS 插件：Origin 配对、dock.1 投影、slash list|execute
 cordis-app/      二进制入口：install_app + agent-loop + gateway + tui
-cordis-render/   markdown（`cordis-markdown`）、mermaid（`xai-grok-mermaid`）
+dock-render/     markdown（`cordis-markdown`）、mermaid（`xai-grok-mermaid`）；third_party/ 为 Mermaid 布局栈
 embed-sdk/       宿主页 SDK（npm，`dist/dock-embed.js`，协议 dock.1）；见 embed-sdk/AGENTS.md
-vendor/          冻结副本：mermaid 布局栈、xai 拷贝；见 vendor/AGENTS.md
+vendor/          冻结副本：xai 拷贝；见 vendor/AGENTS.md（mermaid 栈在 dock-render/third_party/）
 skills/          Agent skills（Bundled scope，产品运行时读取）
 .agents/skills/  仓库流程 skills（Agents scope，运行时同样读取）
 assets/          品牌图

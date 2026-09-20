@@ -15,7 +15,7 @@ tracing = "0.1"
 wait-timeout = "0.2"
 tempfile = "3"
 which = "7"
-mermaid-to-svg = { path = "../../vendor/mermaid/mermaid-to-svg" }
+mermaid-to-svg = { path = "../third_party/mermaid-to-svg" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

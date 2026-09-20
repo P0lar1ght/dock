@@ -33,10 +33,10 @@ cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、
   src/grok/              从 grok pager 冻结复制的 chrome（glyphs、picker、wrapping…）
 cordis-gateway/          回环 HTTP/WS 插件：配对、dock.1 JSON-RPC 投影、slash list|execute
 cordis-app/              二进制入口：一个 Context，install_app + agent-loop + gateway + tui
-cordis-render/markdown/  crate `cordis-markdown`
-cordis-render/mermaid/   crate `xai-grok-mermaid`
+dock-render/markdown/    crate `cordis-markdown`
+dock-render/mermaid/     crate `xai-grok-mermaid`
 embed-sdk/               宿主页 JS SDK（`dist/dock-embed.js`，协议 dock.1）
-vendor/mermaid/          冻结的 mermaid 布局栈（dagre / graphlib / to-svg / ordered_hashmap）
+dock-render/third_party/ 冻结的 mermaid 布局栈（dagre / graphlib / to-svg / ordered_hashmap）
 vendor/xai/              冻结的 xai 拷贝（workflow、grok-tools；fuzzy-file-search 在 cordis-tui/）
 skills/                  Bundled skills
 .agents/skills/          Agents scope skills（仓库流程）
@@ -183,6 +183,6 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 ## 已知边界
 
 - `cordis-gateway` 的 rustc **1.94+** 下限由根 `Cargo.toml` 的 `[workspace.package].rust-version` 固化，见 [DEVELOPMENT.md](DEVELOPMENT.md)。
-- `cordis-render` 的 mermaid 面依赖 `vendor/mermaid/` 冻结副本。
+- `dock-render` 的 mermaid 面依赖 `dock-render/third_party/` 冻结副本。
 - `embed-sdk` 只解析、采集（截图）、把 Gateway 的 `{ kind }` 画出来；斜杠目录迭代 `cordis_tui::slash_catalog()` + `"slash"` extras + `/screenshot*`，不手抄表。标 `terminal` 的命令（`/cd`、`/settings` 含带参）execute 拒绝。
 - 本机桌面 CUA 走外部 cua-driver MCP，不自研键鼠；全部与 `bash` 同级权限 / 计划门。cua-driver 自带的 `browser_*` ≠ Dock BUA 的 `browser_*`。

@@ -6,7 +6,7 @@
 
 | 需要 | 版本 | 说明 |
 |---|---|---|
-| rustc / cargo | **1.94+** | 由根 `Cargo.toml` 的 `[workspace.package].rust-version = "1.94"` 声明，第一方 crate 用 `rust-version.workspace = true` 继承（`vendor/` 冻结副本不继承）。`README.md` 的 badge 与「快速开始」同步声明（原文：`cordis-gateway` 在 1.85 编不过）。用旧工具链编不过就升到 1.94+，不要改写法去迁就旧编译器。`Context::new()` 需要 tokio runtime |
+| rustc / cargo | **1.94+** | 由根 `Cargo.toml` 的 `[workspace.package].rust-version = "1.94"` 声明，第一方 crate 用 `rust-version.workspace = true` 继承（`vendor/` 与 `dock-render/third_party/` 冻结副本不继承）。`README.md` 的 badge 与「快速开始」同步声明（原文：`cordis-gateway` 在 1.85 编不过）。用旧工具链编不过就升到 1.94+，不要改写法去迁就旧编译器。`Context::new()` 需要 tokio runtime |
 | Node / npm | **>= 18** | 只给 `embed-sdk/`（`package.json` 的 `engines.node`） |
 | 模型端点 | — | `~/.dock/config.toml` 或项目 `.dock/config.toml`，样例 `config.toml.example` |
 
@@ -60,12 +60,12 @@ cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings
 
 注意事项，都是当前仓库的真实状态：
 
-- 第一方 crate 已 rustfmt-clean，CI 会跑上面的格式门禁。**不要对 `vendor/` 跑 rustfmt**（冻结副本，见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
-- 第一方 crate 的 clippy 已清零，`-D warnings` 是 CI 门禁。命令要带 **`--no-deps`**：workspace 成员里有 `vendor/` 冻结副本，不带就会被一起 lint，然后被上游既有 warning 打红。新增代码要么真消掉 warning，要么在那一处 `#[allow(clippy::…)]` 并写清理由 —— 不要往 workspace 级 lint 配置里塞 allow。
+- 第一方 crate 已 rustfmt-clean，CI 会跑上面的格式门禁。**不要对 `vendor/` 或 `dock-render/third_party/` 跑 rustfmt**（冻结副本；`vendor/` 见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
+- 第一方 crate 的 clippy 已清零，`-D warnings` 是 CI 门禁。命令要带 **`--no-deps`**：workspace 成员里有 `vendor/` / `dock-render/third_party/` 冻结副本，不带就会被一起 lint，然后被上游既有 warning 打红。新增代码要么真消掉 warning，要么在那一处 `#[allow(clippy::…)]` 并写清理由 —— 不要往 workspace 级 lint 配置里塞 allow。
 - `too_many_arguments` / `large_enum_variant` / `result_large_err` 这类是设计取舍，仓库当前一律**逐处 allow + 理由注释**，不动签名；要抽结构体或 boxing 就单独提 PR。
 - 改行为只跑对应 crate，不要动辄全量。不要为了跑测试切 `--release`。
 - `install_fakes` 保持 echo（`cordis-spine/tests/round.rs` 期望 `echoed: hello`）；测试默认不配 `mcp_servers`，`mcp_client` 仍挂载并 fail-open，不要改成默认连接。
-- `vendor/` 里的 crate 是冻结副本，测试不过就当已知边界上报，不要就地改（见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
+- `vendor/` 与 `dock-render/third_party/` 里的 crate 是冻结副本，测试不过就当已知边界上报，不要就地改（`vendor/` 见 [vendor/AGENTS.md](../vendor/AGENTS.md)）。
 - `cordis-spine` 的测试改进程级 env / cwd 必须走 `crate::test_env::scoped()`（单一进程锁 + drop 还原）。不要各模块自建 `static Mutex`，私锁之间不互斥，正是并行随机红的成因。
 
 ## 构建速度

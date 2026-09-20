@@ -4,5 +4,6 @@
 
 | 目录 | 干什么 |
 |---|---|
-| [`mermaid/`](mermaid/) | Warp Mermaid 布局栈，给 `cordis-render/mermaid` 用 |
 | [`xai/`](xai/) | Grok 拷贝：工作流；`grok-tools` 只作对照源（模糊搜文件已迁至 `cordis-tui/fuzzy-file-search`） |
+
+Mermaid 布局栈已迁至 [`dock-render/third_party/`](../dock-render/third_party/)。
