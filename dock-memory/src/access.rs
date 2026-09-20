@@ -107,7 +107,7 @@ impl MemoryAccessPolicy {
             }
             PathClass::Nested(_) => Err(AccessError::NestedPath(path.to_path_buf())),
             PathClass::Outside => Err(AccessError::Outside(path.to_path_buf())),
-             _ => Err(AccessError::Protected(path.to_path_buf())),
+            _ => Err(AccessError::Protected(path.to_path_buf())),
         }
     }
 }
@@ -117,7 +117,8 @@ fn classify_relative(rel: &Path, scope: MemoryScope) -> PathClass {
     match parts.as_slice() {
         [Component::Normal(a)] if *a == "MEMORY.md" => PathClass::Manifest(scope),
         [Component::Normal(a), Component::Normal(file)]
-            if *a == "topics" && Path::new(file).extension().and_then(|e| e.to_str()) == Some("md") =>
+            if *a == "topics"
+                && Path::new(file).extension().and_then(|e| e.to_str()) == Some("md") =>
         {
             PathClass::Topic(scope)
         }
@@ -129,9 +130,7 @@ fn classify_relative(rel: &Path, scope: MemoryScope) -> PathClass {
             PathClass::Observation(scope)
         }
         [Component::Normal(a), ..] if *a == "archive" => PathClass::Archive(scope),
-        [Component::Normal(a), ..]
-            if *a == "topics" || *a == "observations" =>
-        {
+        [Component::Normal(a), ..] if *a == "topics" || *a == "observations" => {
             PathClass::Nested(scope)
         }
         [Component::Normal(a), ..]
@@ -164,10 +163,7 @@ pub fn forget(
 ) -> AccessResult<ForgetResult> {
     let policy = MemoryAccessPolicy::new(root);
     let class = policy.classify(path);
-    if !matches!(
-        class,
-        PathClass::Topic(_) | PathClass::Observation(_)
-    ) {
+    if !matches!(class, PathClass::Topic(_) | PathClass::Observation(_)) {
         return Err(AccessError::Protected(path.to_path_buf()));
     }
     let scope = class.scope().expect("scoped");
@@ -190,7 +186,10 @@ pub fn forget(
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    let tombstone_id = format!("{}", blake3::hash(format!("forget:{rel}:{actual_hex}").as_bytes()).to_hex());
+    let tombstone_id = format!(
+        "{}",
+        blake3::hash(format!("forget:{rel}:{actual_hex}").as_bytes()).to_hex()
+    );
 
     insert_tombstone(scope_paths, &tombstone_id, &rel, &actual_hex)?;
 

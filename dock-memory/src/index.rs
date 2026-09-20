@@ -139,10 +139,7 @@ impl MemoryIndex {
             };
 
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
-        db.execute(
-            schema::UPSERT_META_SQL,
-            params!["schema_version", want],
-        )?;
+        db.execute(schema::UPSERT_META_SQL, params!["schema_version", want])?;
 
         let stored_dims: Option<String> = db
             .query_row(schema::GET_META_SQL, params!["embedding_dimensions"], |r| {
@@ -316,7 +313,10 @@ impl MemoryIndex {
                     params![old.1, old.2],
                 )?;
                 if self.vec_available {
-                    let _ = tx.execute("DELETE FROM chunks_vec WHERE chunk_id = ?1", params![old_id]);
+                    let _ = tx.execute(
+                        "DELETE FROM chunks_vec WHERE chunk_id = ?1",
+                        params![old_id],
+                    );
                 }
                 tx.execute("DELETE FROM chunks WHERE id = ?1", params![old_id])?;
                 result.removed += 1;
@@ -406,7 +406,8 @@ impl MemoryIndex {
         for s in sources {
             vals.push(Box::new(s.to_string()));
         }
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            vals.iter().map(|b| b.as_ref()).collect();
         let rows = stmt.query_map(params_ref.as_slice(), |row| {
             Ok(FtsResult {
                 chunk_id: row.get(0)?,

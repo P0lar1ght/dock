@@ -43,8 +43,8 @@ pub mod watcher;
 pub use access::{forget, AccessError, ForgetResult, MemoryAccessPolicy, PathClass};
 pub use config::{MemoryEmbeddingConfig, MemorySearchConfig, MmrConfig, SearchResult};
 pub use dream::{
-    build_dream_user_message, process_dream_response, DreamEligibility, DreamMessage, DreamResult, DreamStatus, auto_dream_eligibility,
-    DREAM_SYSTEM_PROMPT,
+    auto_dream_eligibility, build_dream_user_message, process_dream_response, DreamEligibility,
+    DreamMessage, DreamResult, DreamStatus, DREAM_SYSTEM_PROMPT,
 };
 pub use embedding::{embed_missing_chunks, ApiEmbeddingProvider, EmbeddingProvider};
 pub use flush::{

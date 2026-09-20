@@ -88,9 +88,7 @@ fn entry_matches_filter(entry: &MemoryFileEntry, filter_l: &str) -> bool {
         return false;
     };
     let lower = text.to_lowercase();
-    filter_l
-        .split_whitespace()
-        .all(|term| lower.contains(term))
+    filter_l.split_whitespace().all(|term| lower.contains(term))
 }
 
 fn build_rows(filter: &str) -> Vec<Row> {
@@ -543,10 +541,7 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
                     }
                 } else {
                     state.pending_delete = Some(entry.path.clone());
-                    KeyResult::Flash(format!(
-                        "Press x again to delete {}",
-                        entry.label
-                    ))
+                    KeyResult::Flash(format!("Press x again to delete {}", entry.label))
                 }
             }
             _ => KeyResult::Ignored,
@@ -657,9 +652,9 @@ mod tests {
         // Select the doomed file if present
         let rows = build_rows("");
         let idxs = selectable_indices(&rows);
-        if let Some((sel, _)) = idxs.iter().enumerate().find(|(_, &ri)| {
-            matches!(&rows[ri], Row::File { label, .. } if label.contains("doomed"))
-        }) {
+        if let Some((sel, _)) = idxs.iter().enumerate().find(
+            |(_, &ri)| matches!(&rows[ri], Row::File { label, .. } if label.contains("doomed")),
+        ) {
             state.selected = sel;
         }
         let first = on_key(&ctx, &mut state, KeyCode::Char('x'));

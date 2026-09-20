@@ -218,7 +218,6 @@ fn collect_entries(
     Ok(())
 }
 
-
 /// Immediate `.md` children of `observations/` (not `_inbox` / archive / nested).
 fn collect_flat_observation_entries(
     scope_dir: &Path,
@@ -244,7 +243,10 @@ fn collect_flat_observation_entries(
             Err(_) => continue,
         };
         // Skip if already listed via _inbox (same basename after migrate race).
-        if entries.iter().any(|e| e.relative_path == relative.replace('\\', "/")) {
+        if entries
+            .iter()
+            .any(|e| e.relative_path == relative.replace('\\', "/"))
+        {
             continue;
         }
         let modified = entry.metadata().and_then(|m| m.modified()).ok();

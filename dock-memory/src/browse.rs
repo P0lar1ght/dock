@@ -72,7 +72,6 @@ fn collect_dir(out: &mut Vec<MemoryFileEntry>, scope: MemoryScope, kind: &'stati
     }
 }
 
-
 fn collect_flat_obs(out: &mut Vec<MemoryFileEntry>, scope: MemoryScope, observations: &Path) {
     let Ok(entries) = std::fs::read_dir(observations) else {
         return;

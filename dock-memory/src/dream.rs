@@ -42,7 +42,6 @@ pub fn auto_dream_eligibility(
     DreamEligibility::Ready
 }
 
-
 pub const DREAM_SYSTEM_PROMPT: &str = "\
 You are performing a dream — a reflective pass over memory files. \
 Synthesize recent observations into durable, well-organized topic notes \
