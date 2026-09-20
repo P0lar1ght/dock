@@ -399,10 +399,14 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
     match state.focus {
         MemoryFocus::Filter => match code {
             KeyCode::Esc => {
+                state.filter.clear();
+                state.selected = 0;
                 state.focus = MemoryFocus::List;
                 KeyResult::Handled
             }
             KeyCode::Enter => {
+                state.filter.clear();
+                state.selected = 0;
                 state.focus = MemoryFocus::List;
                 KeyResult::Handled
             }
@@ -492,6 +496,28 @@ pub enum KeyResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaving_filter_clears_filter_and_selection() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let ctx = Context::new();
+
+        for code in [KeyCode::Esc, KeyCode::Enter] {
+            let mut state = MemoryBrowserState {
+                selected: 3,
+                filter: "prefs".into(),
+                focus: MemoryFocus::Filter,
+                ..Default::default()
+            };
+
+            assert!(matches!(on_key(&ctx, &mut state, code), KeyResult::Handled));
+            assert_eq!(state.filter, "");
+            assert_eq!(state.selected, 0);
+            assert_eq!(state.focus, MemoryFocus::List);
+        }
+    }
 
     #[test]
     fn build_rows_groups_scopes() {
