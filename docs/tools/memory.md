@@ -48,3 +48,15 @@ $DOCK_HOME/memory/
 - `memory_get` — 按路径读文件
 
 经 `search_tool` / `use_tool` 按需暴露（`register_deferred`）。
+
+
+## Hybrid search & embeddings
+
+FTS5 is always on. Optional `[memory.embedding]` (model + base + API key) enables
+sqlite-vec hybrid search; missing config stays FTS-only.
+
+## Forget
+
+In `/memory`, press `x` twice to delete the selected topic/inbox note (archives
+under `archive/`, tombstones in `memory_state.sqlite`, drops index rows).
+`MEMORY.md` is not deletable.
