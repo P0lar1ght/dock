@@ -11,7 +11,7 @@ mod pptx;
 use cordis_base::types::{ToolSpec, UserImage};
 
 use crate::tools::fs_common::{int_field, parse_args, resolve, str_field};
-const READ_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{"type":"string","description":"Path of the file to read (relative to cwd or absolute)."},"offset":{"type":"integer","description":"1-based start line. Omit to start at line 1. Use with limit for large files."},"limit":{"type":"integer","description":"Max lines to return. Omit to use the default cap (1000). Pass a smaller value for a tight window."},"pages":{"type":"string","description":"Page range for PDF files (e.g. '1-5', '3', '10-'). Required for PDFs with more than 10 pages. Max 20 pages per call. Ignored for non-PDF files."},"format":{"type":"string","description":"Output format for PDF files. 'text' (default) extracts text. 'image' (page rasterisation) is deferred until MSRV allows pdf_oxide rendering. Ignored for non-PDF files."}},"required":["target_file"]}"#;
+const READ_FILE_PARAMS: &str = r#"{"type":"object","properties":{"target_file":{"type":"string","description":"Path of the file to read (relative to cwd or absolute)."},"offset":{"type":"integer","description":"1-based start line. Omit to start at line 1. Use with limit for large files."},"limit":{"type":"integer","description":"Max lines to return. Omit to use the default cap (1000). Pass a smaller value for a tight window."},"pages":{"type":"string","description":"Page range for PDF files (e.g. '1-5', '3', '10-'). Required for PDFs with more than 10 pages. Max 20 pages per call. Ignored for non-PDF files."},"format":{"type":"string","description":"Output format for PDF files. 'image' (default) renders pages as images. 'text' extracts text content. Ignored for non-PDF files."}},"required":["target_file"]}"#;
 
 const READ_FILE_DESC: &str = "Read a file.\n\
 - Use this instead of `cat` / `head` / `sed -n` through bash: it is gated as read-only, works in plan mode, and tells you how much of the file you have not seen.\n\
@@ -20,7 +20,7 @@ const READ_FILE_DESC: &str = "Read a file.\n\
 - Line anchors appear as N→ on line 1 and every 10th line. That prefix is not part of the file — when passing text to search_replace, match only what comes after the →.\n\
 - This tool can read PDF files (.pdf), PowerPoint files (.pptx), and image files (PNG, JPG, GIF, WebP, …).\n\
 - When reading an image, the contents are presented visually via multimodal images.\n\
-- PDF: `pages` selects a page range (required when the document has more than 10 pages; max 20 per call). `format` is `text` (default, extract text) or `image` (page rasterisation, deferred until MSRV allows pdf_oxide rendering; currently returns an error).\n\
+- PDF: `pages` selects a page range (required when the document has more than 10 pages; max 20 per call). `format` is `image` (default, render pages as JPEG images) or `text` (extract text).\n\
 - Binary office formats like .docx / .xlsx are rejected — use an external converter.";
 
 /// Default max lines when the model omits `limit` (grok `MAX_LINES_READ`).

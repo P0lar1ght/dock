@@ -488,7 +488,7 @@ impl ChildStore {
                 continue;
             }
             let parked = *slot.parked_at.lock().unwrap();
-            if !parked.is_some_and(|at| at.elapsed() >= ttl) {
+            if parked.is_none_or(|at| at.elapsed() < ttl) {
                 continue;
             }
             if slot.queued.lock().unwrap().is_empty() && slot.urgent.lock().unwrap().is_none() {

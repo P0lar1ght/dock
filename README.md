@@ -9,7 +9,7 @@
   <img src="assets/logo/lockup.png" width="360" alt="Dock">
 </p>
 <p align="center">
-  <img src="https://img.shields.io/badge/rust-1.88+-dea584?logo=rust&logoColor=white" alt="Rust 1.88+">
+  <img src="https://img.shields.io/badge/rust-1.94+-dea584?logo=rust&logoColor=white" alt="Rust 1.94+">
   <img src="https://img.shields.io/badge/cordis-plugin_tree-132238" alt="Cordis plugin tree">
   <img src="https://img.shields.io/badge/gateway-loopback-73dbff" alt="Loopback gateway">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow" alt="Apache 2.0">
@@ -198,7 +198,7 @@ Debian 13+ / Fedora 40+）；更老的发行版与 Windows 暂无可用产物，
 
 ## 快速开始
 
-需要 **Rust 1.88+**（版本下限说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）和本机 API key，或在配置里写好端点。
+需要 **Rust 1.94+**（版本下限说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）和本机 API key，或在配置里写好端点。
 
 ```bash
 cargo run -p cordis-app

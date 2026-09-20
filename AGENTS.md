@@ -33,7 +33,7 @@ assets/          品牌图
 config.toml.example  用户 / 项目模型目录样例
 ```
 
-工具链：rustc **1.88+**、Node **>= 18**（`embed-sdk/package.json` 的 `engines.node`）。Rust 下限由根 `Cargo.toml` 的 `[workspace.package].rust-version` 固化，细节见 `docs/DEVELOPMENT.md`。`Context::new()` 需要 tokio runtime。
+工具链：rustc **1.94+**、Node **>= 18**（`embed-sdk/package.json` 的 `engines.node`）。Rust 下限由根 `Cargo.toml` 的 `[workspace.package].rust-version` 固化，细节见 `docs/DEVELOPMENT.md`。`Context::new()` 需要 tokio runtime。
 
 产品面的权威清单是三份：`TOOLS.md`（模型工具**索引**；单颗工具的细节在 `docs/tools/<name>.md`，改一块只读那一份）、`CLI.md`（斜杠 / 快捷键 / overlay）、`docs/ARCHITECTURE.md`（插件树与不变式）。Crate README 管该包的 API。
 
