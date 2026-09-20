@@ -662,6 +662,123 @@ async fn session_toggle_removes_and_restores_resident_tools() {
     );
 }
 
+#[tokio::test]
+async fn acceptance_remember_search_get_and_negatives() {
+    let _env = cordis_base::test_env::scoped()
+        .home()
+        .set("DOCK_MEMORY", "1");
+    let root = Context::new();
+    crate::install_without_llm(&root).await.unwrap();
+    root.plugin(tool_memory(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let tools = (*root.get::<Tools>(TOOLS).unwrap()).clone();
+    let model: Vec<String> = tools
+        .specs_for_model()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    println!(
+        "SAMPLER_TOOLS memory_search={} memory_get={} deferred_search={}",
+        model.iter().any(|n| n == "memory_search"),
+        model.iter().any(|n| n == "memory_get"),
+        tools.is_deferred("memory_search")
+    );
+    assert!(model.iter().any(|n| n == "memory_search"));
+    assert!(model.iter().any(|n| n == "memory_get"));
+    assert!(!tools.is_deferred("memory_search"));
+
+    for fact in [
+        "Dock memory search uses blake3 workspace slugs under $DOCK_HOME/memory",
+        "sqlite-vec hybrid path is embed_query_if_configured in cordis-spine memory tools",
+        "MAX_FORGET_FILE_BYTES is 256 KiB aligned with Grok v2_maintenance",
+    ] {
+        let msg = run_remember_async(&root, fact).await.expect("remember");
+        println!("REMEMBER: {msg}");
+    }
+
+    let search = tools
+        .execute(ToolCall {
+            id: "acc-search".into(),
+            name: "memory_search".into(),
+            arguments: r#"{"query":"MAX_FORGET_FILE_BYTES Grok","max_results":6}"#.into(),
+        })
+        .await;
+    println!(
+        "MEMORY_SEARCH:
+{}",
+        search.content
+    );
+    assert!(
+        search.content.to_lowercase().contains("forget")
+            || search.content.to_lowercase().contains("256")
+            || search.content.to_lowercase().contains("grok"),
+        "{}",
+        search.content
+    );
+
+    let mem = (*root.get::<Memory>(MEMORY).unwrap()).clone();
+    let mroot = mem.root();
+    let md = std::fs::read_dir(&mroot.global.inbox)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .expect("inbox md");
+    let get = tools
+        .execute(ToolCall {
+            id: "acc-get".into(),
+            name: "memory_get".into(),
+            arguments: format!(r#"{{"path":"{}"}}"#, md.display()),
+        })
+        .await;
+    let preview: String = get.content.chars().take(600).collect();
+    println!(
+        "MEMORY_GET:
+{preview}"
+    );
+    assert!(!get.content.to_lowercase().contains("error: path"));
+
+    let sqlite = mroot.search_db();
+    let bad = tools
+        .execute(ToolCall {
+            id: "acc-sqlite".into(),
+            name: "memory_get".into(),
+            arguments: format!(r#"{{"path":"{}"}}"#, sqlite.display()),
+        })
+        .await;
+    println!("MEMORY_GET_SQLITE: {}", bad.content);
+    assert!(
+        bad.content.contains(".md")
+            || bad.content.to_lowercase().contains("refus")
+            || bad.content.to_lowercase().contains("only")
+    );
+
+    let huge = mroot.global.topics.join("huge-acc.md");
+    let body = "Z".repeat((dock_memory::MAX_FORGET_FILE_BYTES as usize) + 128);
+    std::fs::write(&huge, &body).unwrap();
+    // Size gate runs before hash verification — dummy hash is fine.
+    let mut idx = MemoryIndex::open_or_create(&mroot.search_db()).unwrap();
+    let err = dock_memory::forget(&mroot, &huge, "0".repeat(64).as_str(), &mut idx)
+        .expect_err("oversize forget");
+    println!("FORGET_OVERSIZE: {err}");
+    assert!(huge.exists());
+
+    assert!(!mem.toggle_session().unwrap());
+    let off: Vec<_> = tools
+        .specs_for_model()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    println!(
+        "TOGGLE_OFF_HAS_SEARCH={}",
+        off.iter().any(|n| n == "memory_search")
+    );
+    assert!(!off.iter().any(|n| n == "memory_search"));
+}
+
 #[cfg(test)]
 mod compact_hook_tests {
     use cordis_base::config::MemoryFlushConfig;
