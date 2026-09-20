@@ -179,3 +179,9 @@ prompt_cache = true
 # enabled = true
 # min_hours = 24
 # min_sessions = 5
+# Optional embeddings for hybrid search (missing → FTS-only).
+# [memory.embedding]
+# model = "text-embedding-3-small"
+# base = "https://api.openai.com/v1"
+# dimensions = 1024
+# api_key = ""   # or DOCK_MEMORY_EMBEDDING_API_KEY / OPENAI_API_KEY

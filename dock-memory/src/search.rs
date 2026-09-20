@@ -12,6 +12,26 @@ use crate::mmr;
 
 /// Open the index and query. Reindexes once when the DB is missing or empty.
 /// Optional dirty watcher sync is wired in a later commit.
+
+/// If a watcher reports dirty paths, reindex existing files and delete_path missing ones.
+pub fn sync_dirty_paths(
+    root: &MemoryRoot,
+    index: &mut MemoryIndex,
+    dirty: &[std::path::PathBuf],
+) {
+    for path in dirty {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        if path.is_file() {
+            let source = root.classify_source(path);
+            let _ = index.reindex_file(path, source);
+        } else {
+            let _ = index.delete_path(path);
+        }
+    }
+}
+
 pub fn search_memory(
     root: &MemoryRoot,
     query: &str,
@@ -293,6 +313,7 @@ pub fn format_search_results(hits: &[SearchHit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::MemoryIndex;
     use std::path::Path;
 
     #[test]
@@ -308,5 +329,33 @@ mod tests {
         let hits = search_memory(&root, "bearer tokens", 5).unwrap();
         assert!(!hits.is_empty(), "hits={hits:?}");
         assert!(hits[0].text.to_lowercase().contains("bearer"));
+    }
+
+    #[tokio::test]
+    async fn hybrid_with_mock_embedding() {
+        use crate::embedding::{embed_missing_chunks, EmbeddingProvider, MockEmbeddingProvider};
+        use crate::config::MemorySearchConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/hybrid-vec"));
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.workspace.topics.join("vec.md"),
+            "## Vectors\n\nsemantic search needs embeddings\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create_with_dimensions(&root.search_db(), 8).unwrap();
+        let _ = idx.reindex_tree(&root);
+        if !idx.vec_available() {
+            // CI without vec still exercises FTS path via other tests.
+            return;
+        }
+        let provider = MockEmbeddingProvider { dimensions: 8 };
+        let n = embed_missing_chunks(&idx, &provider).await;
+        assert!(n >= 1, "embedded={n}");
+        let q = provider.embed_batch(&["semantic embeddings"]).await.unwrap();
+        let cfg = MemorySearchConfig::default();
+        let merge = hybrid_search_merge(&idx, "semantic embeddings", Some(&q[0]), &cfg).unwrap();
+        assert!(!merge.results.is_empty() || cfg.min_score > 0.9);
     }
 }

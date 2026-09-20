@@ -454,6 +454,16 @@ pub struct MemorySection {
     pub enabled: Option<bool>,
     pub flush: MemoryFlushSection,
     pub dream: MemoryDreamSection,
+    pub embedding: MemoryEmbeddingSection,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct MemoryEmbeddingSection {
+    pub model: Option<String>,
+    pub base: Option<String>,
+    pub api_key: Option<String>,
+    pub dimensions: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -481,6 +491,26 @@ pub struct MemoryConfig {
     pub force_disabled: bool,
     pub flush: MemoryFlushConfig,
     pub dream: MemoryDreamConfig,
+    pub embedding: MemoryEmbeddingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryEmbeddingConfig {
+    pub model: Option<String>,
+    pub base: Option<String>,
+    pub api_key: Option<String>,
+    pub dimensions: usize,
+}
+
+impl Default for MemoryEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            base: None,
+            api_key: None,
+            dimensions: 1024,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -551,6 +581,15 @@ impl MemoryConfig {
                 enabled: dream_s.enabled.unwrap_or(defaults.dream.enabled),
                 min_hours: dream_s.min_hours.unwrap_or(defaults.dream.min_hours),
                 min_sessions: dream_s.min_sessions.unwrap_or(defaults.dream.min_sessions),
+            },
+            embedding: {
+                let e = &section.embedding;
+                MemoryEmbeddingConfig {
+                    model: e.model.clone().filter(|m| !m.is_empty()),
+                    base: e.base.clone().filter(|b| !b.is_empty()),
+                    api_key: e.api_key.clone().filter(|k| !k.is_empty()),
+                    dimensions: e.dimensions.unwrap_or(1024),
+                }
             },
         }
     }
