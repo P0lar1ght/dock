@@ -6,6 +6,20 @@
 
 `list_dir` `read_file` `grep` `search_replace` `bash`（别名 `run_terminal_cmd`）`glob` `write_file`
 
+## 源码布局
+
+七颗各自一目录，挂在 `cordis-spine/src/tools/` 顶层（与 `ask_user/`、`browser/` 同级），**没有** `tools/workspace/` 伞目录：
+
+```
+tools/read_file/   tools/bash/   tools/list_dir/   tools/glob/
+tools/write_file/  tools/search_replace/   tools/grep/   # grep 薄包装，引擎在 cordis-base
+tools/fs_common.rs          # resolve / parse_args / 字段解析
+tools/workspace.rs          # 薄套件：specs / handles / execute_with（注册入口不变）
+```
+
+`workspace_tools` / `handles` / `specs` / `execute_with` 仍从 `tools::workspace` 导出，权限门 / 计划门 / preset 不受影响。
+
+
 ## 设计前提
 
 **模型总是绕回 `bash`，很大程度上是因为内置工具真的更弱。** 所以先把工具修到值得用，再谈引导。引导只加厚了工具描述，**没有**往系统提示里加段（`system-prompt/assemble` 仍是 `ORDER_CORDIS/PERSONA/WORKFLOWS/SKILLS` 四个槽）。
