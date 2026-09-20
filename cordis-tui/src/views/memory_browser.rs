@@ -2,8 +2,9 @@
 //! markdown preview via `cordis_markdown` (same path as scrollback/plan).
 //!
 //! Narrow terminals (< 64 cols) collapse to list-only; Enter opens preview.
-//! `/` filters filenames; Esc closes (or exits filter / preview first).
-//! Optional `t` toggles session memory (DOCK_MEMORY=0 still forces off).
+//! `/` filters by filename **or file content**; Esc closes (or exits filter / preview first).
+//! `x` deletes with dual-confirm (forget → archive + index). Optional `t` toggles session
+//! memory (DOCK_MEMORY=0 still forces off).
 
 use std::path::PathBuf;
 
@@ -44,6 +45,10 @@ pub struct MemoryBrowserState {
     pub focus: MemoryFocus,
     pub list_scroll: usize,
     pub preview_scroll: usize,
+    /// First `x` arms delete; second `x` confirms. Esc / other nav clears.
+    pub pending_delete: Option<std::path::PathBuf>,
+    /// BLAKE3 hex of the previewed bytes (sent with forget).
+    pub preview_hash: Option<String>,
 }
 
 impl Default for MemoryBrowserState {
@@ -54,6 +59,8 @@ impl Default for MemoryBrowserState {
             focus: MemoryFocus::List,
             list_scroll: 0,
             preview_scroll: 0,
+            pending_delete: None,
+            preview_hash: None,
         }
     }
 }
@@ -67,6 +74,23 @@ enum Row {
         entry: MemoryFileEntry,
         label: String,
     },
+}
+
+fn entry_matches_filter(entry: &MemoryFileEntry, filter_l: &str) -> bool {
+    if filter_l.is_empty() {
+        return true;
+    }
+    if entry.label.to_lowercase().contains(filter_l) {
+        return true;
+    }
+    // Content filter (Grok-aligned): match if every whitespace term appears in the file body.
+    let Ok(text) = std::fs::read_to_string(&entry.path) else {
+        return false;
+    };
+    let lower = text.to_lowercase();
+    filter_l
+        .split_whitespace()
+        .all(|term| lower.contains(term))
 }
 
 fn build_rows(filter: &str) -> Vec<Row> {
@@ -88,7 +112,7 @@ fn build_rows(filter: &str) -> Vec<Row> {
         let group: Vec<_> = files
             .iter()
             .filter(|e| e.scope == scope)
-            .filter(|e| filter_l.is_empty() || e.label.to_lowercase().contains(&filter_l))
+            .filter(|e| entry_matches_filter(e, &filter_l))
             .cloned()
             .collect();
         if group.is_empty() && !filter_l.is_empty() {
@@ -149,7 +173,7 @@ fn render_md(text: &str, width: usize) -> Vec<Line<'static>> {
 
 fn empty_markdown(enabled: bool) -> String {
     if !enabled {
-        return "**Memory is disabled.**\n\nEnable with `[memory] enabled = true` in config.toml or `DOCK_MEMORY=1`.\n\nPress **t** to try a session override (blocked if `DOCK_MEMORY=0`).".into();
+        return "**Memory is disabled.**\n\nEnable with `[memory] enabled = true` in `~/.dock/config.toml` or `DOCK_MEMORY=1`.\n\nPress **t** to try a session override (blocked if `DOCK_MEMORY=0`).".into();
     }
     "**Nothing remembered yet.**\n\n- `/remember <note>` saves something specific right now.\n- `/flush` summarizes the session into workspace observations.\n- `/dream` consolidates observations into topics.\n\nNotes live under `$DOCK_HOME/memory/global|workspace-<slug>/{topics,observations/_inbox}/` with a generated `MEMORY.md` index.".into()
 }
@@ -286,10 +310,11 @@ pub fn render(
     // Footer hint
     let hint_y = inner.y.saturating_add(inner.height.saturating_sub(1));
     let hint = match state.focus {
-        MemoryFocus::Filter => "type to filter  Esc:exit filter",
+        MemoryFocus::Filter => "type to filter name/content  Esc:exit filter",
         MemoryFocus::Preview => "Esc:back  ↑↓:scroll",
-        MemoryFocus::List if split => "↑↓:select  /:filter  t:toggle  Esc:close",
-        MemoryFocus::List => "↑↓:select  Enter:preview  /:filter  t:toggle  Esc:close",
+        MemoryFocus::List if state.pending_delete.is_some() => "x:confirm delete  Esc:cancel",
+        MemoryFocus::List if split => "↑↓:select  /:filter  x:delete  t:toggle  Esc:close",
+        MemoryFocus::List => "↑↓:select  Enter:preview  /:filter  x:delete  t:toggle  Esc:close",
     };
     let hint_line = Line::from(Span::styled(
         truncate_str(hint, inner.width.saturating_sub(2) as usize),
@@ -439,8 +464,15 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
             _ => KeyResult::Handled,
         },
         MemoryFocus::List => match code {
-            KeyCode::Esc => KeyResult::Close,
+            KeyCode::Esc => {
+                if state.pending_delete.take().is_some() {
+                    KeyResult::Flash("delete cancelled".into())
+                } else {
+                    KeyResult::Close
+                }
+            }
             KeyCode::Char('/') => {
+                state.pending_delete = None;
                 state.focus = MemoryFocus::Filter;
                 KeyResult::Handled
             }
@@ -459,6 +491,7 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
+                state.pending_delete = None;
                 if n > 0 {
                     state.selected = state.selected.saturating_sub(1);
                     state.preview_scroll = 0;
@@ -466,6 +499,7 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
                 KeyResult::Handled
             }
             KeyCode::Down | KeyCode::Char('j') => {
+                state.pending_delete = None;
                 if n > 0 {
                     state.selected = (state.selected + 1).min(n - 1);
                     state.preview_scroll = 0;
@@ -475,14 +509,56 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
             KeyCode::Enter => {
                 // Narrow (or any) fallback: Enter focuses full-area preview.
                 // Wide split already shows preview beside the list.
+                state.pending_delete = None;
                 if n > 0 {
                     state.focus = MemoryFocus::Preview;
+                    refresh_preview_hash(state, &rows, state.selected.min(n.saturating_sub(1)));
                 }
                 KeyResult::Handled
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                if n == 0 {
+                    return KeyResult::Flash("nothing to delete".into());
+                }
+                let sel = state.selected.min(n - 1);
+                let Some(entry) = selected_entry(&rows, sel) else {
+                    return KeyResult::Handled;
+                };
+                // Indexes / MEMORY.md are not deletable via forget path gate.
+                if entry.kind == "index" {
+                    return KeyResult::Flash("MEMORY.md is generated — cannot delete".into());
+                }
+                refresh_preview_hash(state, &rows, sel);
+                let Some(hash) = state.preview_hash.clone() else {
+                    return KeyResult::Flash(
+                        "Can't delete: this note couldn't be read for verification.".into(),
+                    );
+                };
+                if state.pending_delete.as_ref() == Some(&entry.path) {
+                    let path = entry.path.clone();
+                    state.pending_delete = None;
+                    KeyResult::Forget {
+                        path,
+                        expected_content_hash: hash,
+                    }
+                } else {
+                    state.pending_delete = Some(entry.path.clone());
+                    KeyResult::Flash(format!(
+                        "Press x again to delete {}",
+                        entry.label
+                    ))
+                }
             }
             _ => KeyResult::Ignored,
         },
     }
+}
+
+fn refresh_preview_hash(state: &mut MemoryBrowserState, rows: &[Row], sel: usize) {
+    state.preview_hash = selected_entry(rows, sel).and_then(|e| {
+        let bytes = std::fs::read(&e.path).ok()?;
+        Some(blake3::hash(&bytes).to_hex().to_string())
+    });
 }
 
 #[derive(Debug)]
@@ -491,6 +567,11 @@ pub enum KeyResult {
     Ignored,
     Close,
     Flash(String),
+    /// Dual-confirmed forget: archive + tombstone + index drop.
+    Forget {
+        path: PathBuf,
+        expected_content_hash: String,
+    },
 }
 
 #[cfg(test)]
@@ -536,5 +617,55 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| matches!(r, Row::File { label, .. } if label.contains("prefs"))));
+    }
+
+    #[test]
+    fn content_filter_matches_body() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let cwd = std::env::current_dir().unwrap();
+        let root = MemoryRoot::open_default(&cwd);
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.global.topics.join("secret-topic.md"),
+            "# Secret\n\nunique-zebra-phrase lives here\n",
+        )
+        .unwrap();
+        let _ = dock_memory::manifest::refresh_all(&root);
+        let rows = build_rows("unique-zebra-phrase");
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, Row::File { label, .. } if label.contains("secret-topic"))),
+            "rows={rows:?}"
+        );
+    }
+
+    #[test]
+    fn delete_requires_dual_confirm() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let ctx = Context::new();
+        let cwd = std::env::current_dir().unwrap();
+        let root = MemoryRoot::open_default(&cwd);
+        root.ensure_layout().unwrap();
+        std::fs::write(root.global.topics.join("doomed.md"), "# Doomed\n\nbye\n").unwrap();
+        let _ = dock_memory::manifest::refresh_all(&root);
+
+        let mut state = MemoryBrowserState::default();
+        // Select the doomed file if present
+        let rows = build_rows("");
+        let idxs = selectable_indices(&rows);
+        if let Some((sel, _)) = idxs.iter().enumerate().find(|(_, &ri)| {
+            matches!(&rows[ri], Row::File { label, .. } if label.contains("doomed"))
+        }) {
+            state.selected = sel;
+        }
+        let first = on_key(&ctx, &mut state, KeyCode::Char('x'));
+        assert!(matches!(first, KeyResult::Flash(_)), "{first:?}");
+        assert!(state.pending_delete.is_some());
+        let second = on_key(&ctx, &mut state, KeyCode::Char('x'));
+        assert!(matches!(second, KeyResult::Forget { .. }), "{second:?}");
     }
 }

@@ -2118,6 +2118,39 @@ fn apply_memory_key(
             flash(ctx, msg);
             Some(Vec::new())
         }
+        crate::views::memory_browser::KeyResult::Forget {
+            path,
+            expected_content_hash,
+        } => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let root = dock_memory::MemoryRoot::open_default(&cwd);
+            let mut index = match dock_memory::MemoryIndex::open_or_create(&root.search_db()) {
+                Ok(i) => i,
+                Err(e) => {
+                    flash(ctx, format!("memory index: {e}"));
+                    return Some(Vec::new());
+                }
+            };
+            match dock_memory::forget(&root, &path, &expected_content_hash, &mut index) {
+                Ok(r) => {
+                    let dest = r
+                        .archived_to
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(gone)".into());
+                    flash(
+                        ctx,
+                        format!("Deleted (archived to {dest}, index -{})", r.index_removed),
+                    );
+                    // Refresh selection
+                    state.selected = 0;
+                    state.pending_delete = None;
+                    state.preview_hash = None;
+                }
+                Err(e) => flash(ctx, format!("delete failed: {e}")),
+            }
+            Some(Vec::new())
+        }
     }
 }
 
