@@ -36,6 +36,8 @@ pub struct ArchivedSession {
     pub compact_prefix: Option<Vec<LogEvent>>,
     /// Display index from which new events are appended onto [`Self::compact_prefix`].
     pub compact_from: usize,
+    /// Agent preset id active when archived. `None` on sessions saved before this field.
+    pub preset_id: Option<String>,
 }
 
 /// 这条事件进不进模型上下文。
@@ -90,6 +92,8 @@ pub struct Sessions {
     /// `$DOCK_HOME/sessions/<cwd-key>/`. Isolated child logs stay memory-only.
     disk_cwd: Arc<Mutex<Option<PathBuf>>>,
     live_id: Arc<Mutex<String>>,
+    /// Preset id stamped into `meta.json` on save / archive. Updated by the TUI.
+    live_preset_id: Arc<Mutex<Option<String>>>,
     /// Compacted prefix sent to the sampler. `None` = display log is the model history.
     compact_prefix: Arc<Mutex<Option<Vec<LogEvent>>>>,
     compact_from: Arc<Mutex<usize>>,
@@ -189,9 +193,48 @@ impl Sessions {
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
             disk_cwd: Arc::new(Mutex::new(None)),
             live_id: Arc::new(Mutex::new(String::new())),
+            live_preset_id: Arc::new(Mutex::new(None)),
             compact_prefix: Arc::new(Mutex::new(None)),
             compact_from: Arc::new(Mutex::new(0)),
             compact_images: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Stamp the active agent preset into subsequent `meta.json` writes.
+    pub fn set_preset_id(&self, id: Option<String>) {
+        *self.live_preset_id.lock().unwrap() = id.filter(|s| !s.trim().is_empty());
+    }
+
+    /// Preset stamped on the live session (also set by `/resume` when meta has one).
+    pub fn preset_id(&self) -> Option<String> {
+        self.live_preset_id.lock().unwrap().clone()
+    }
+
+    /// `preset_id` field on an archived session, if present.
+    ///
+    /// Use this (not [`Self::preset_id`] after [`Self::restore`]) when calling
+    /// [`crate::session::resume_preset::apply_restored_preset`]: restore leaves
+    /// a startup seed alone when meta omitted the field.
+    pub fn archived_preset_id(&self, id: &str) -> Option<String> {
+        self.archive
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.preset_id.clone())
+    }
+
+    /// Seed `live_preset_id` from [`crate::agent::presets::AgentPresets::current_id`]
+    /// when still unset so the first persist stamps a real id (old metas stay
+    /// loadable with the field absent).
+    pub fn seed_preset_if_unset(&self, current_id: &str) {
+        let trimmed = current_id.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let mut live = self.live_preset_id.lock().unwrap();
+        if live.is_none() {
+            *live = Some(trimmed.to_string());
         }
     }
 
@@ -952,6 +995,7 @@ impl Sessions {
             times,
             compact_prefix,
             compact_from,
+            preset_id: self.live_preset_id.lock().unwrap().clone(),
         };
         self.write_archived(&item);
         self.archive.lock().unwrap().insert(0, item.clone());
@@ -988,6 +1032,10 @@ impl Sessions {
         *self.pending_call.lock().unwrap() = None;
         self.rewound.store(false, Ordering::Relaxed);
         self.apply_compact_snapshot(item.compact_prefix, item.compact_from);
+        // Old sessions omit preset_id — keep the live preset as-is.
+        if let Some(pid) = item.preset_id {
+            *self.live_preset_id.lock().unwrap() = Some(pid);
+        }
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
         if let Some(event) = last {
@@ -1119,6 +1167,7 @@ impl Sessions {
             times: self.times(),
             compact_prefix,
             compact_from,
+            preset_id: self.live_preset_id.lock().unwrap().clone(),
         };
         let _ = crate::session::persist::save(&item, &cwd);
     }
@@ -1627,5 +1676,57 @@ mod tests {
         assert!(model
             .iter()
             .any(|e| matches!(e, LogEvent::User(t) if t == "hi")));
+    }
+
+    #[test]
+    fn seed_preset_if_unset_only_fills_none() {
+        let sessions = Sessions::new(Context::new());
+        assert!(sessions.preset_id().is_none());
+        sessions.seed_preset_if_unset("code");
+        assert_eq!(sessions.preset_id().as_deref(), Some("code"));
+        sessions.seed_preset_if_unset("warden");
+        assert_eq!(
+            sessions.preset_id().as_deref(),
+            Some("code"),
+            "must not overwrite an existing stamp"
+        );
+        sessions.set_preset_id(Some("warden".into()));
+        assert_eq!(sessions.preset_id().as_deref(), Some("warden"));
+    }
+
+    #[tokio::test]
+    async fn restore_copies_preset_id_but_absent_keeps_seed() {
+        let sessions = Sessions::new(Context::new());
+        sessions.set_preset_id(Some("warden".into()));
+        sessions.append(LogEvent::User("with preset".into()));
+        let with = sessions.archive_current().unwrap();
+        assert_eq!(with.preset_id.as_deref(), Some("warden"));
+
+        sessions.clear();
+        sessions.set_preset_id(None);
+        sessions.append(LogEvent::User("old style".into()));
+        // Simulate pre-field archive: clear stamp before snapshotting.
+        sessions.set_preset_id(None);
+        let mut old = sessions.archive_current().unwrap();
+        old.preset_id = None;
+        // Replace archived entry with field-absent copy.
+        {
+            let mut archive = sessions.archive.lock().unwrap();
+            if let Some(slot) = archive.iter_mut().find(|s| s.id == old.id) {
+                *slot = old.clone();
+            }
+        }
+        assert!(sessions.archived_preset_id(&old.id).is_none());
+
+        sessions.seed_preset_if_unset("code");
+        assert!(sessions.restore(&old.id));
+        assert_eq!(
+            sessions.preset_id().as_deref(),
+            Some("code"),
+            "absent meta must leave the seed alone"
+        );
+        assert!(sessions.archived_preset_id(&with.id).as_deref() == Some("warden"));
+        assert!(sessions.restore(&with.id));
+        assert_eq!(sessions.preset_id().as_deref(), Some("warden"));
     }
 }

@@ -70,7 +70,7 @@
 
 核心名字都已挂上。`workflow` 是 Rhai；`task` 走 Grok coordinator，child 仍是 dock isolate + `GrokStep`（无 worktree / MvpAgent）。补的时候改对应插件，不要新焊一层。
 
-- `read_file`：文本 + 图片压缩多模态 + PDF（`pages` / `format=image|text`）+ PPTX DrawingML；无 ipynb / docx；**无单行长度帽**；binary gate 拦 docx 等（NUL / 扩展名）
+- `read_file`：文本 + 图片压缩多模态 + PDF（`pages` / `format=image|text`）+ PPTX DrawingML；无 ipynb / docx；**无单行长度帽**；binary gate 拦 docx 等（NUL / 扩展名）；技能 / 指令文件在 25k **token** 上限内整读（显式 offset/limit 仍窗口）
 - `list_dir` 大目录摘要的头部采样：扩展名计数是对的，但「前 100 个文件名」对**同前缀爆炸**的目录信息量很低（`target/debug/deps` 下前 100 个几乎全是同一 crate 的 CGU 分片）。可考虑按公共前缀去重后再采样。实测踩到过
 - `tool-images/` 与 `screenshots/` 没有清理，无限增长（`tool-output/` 已有，见 [workspace](docs/tools/workspace.md)）
 - `web_search`：不是 xAI Responses API；结果是从 DuckDuckGo HTML 里扫出的**百分号编码**跳转链接，没有标题与摘要

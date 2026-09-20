@@ -391,11 +391,7 @@ impl Tools {
             });
             if acp::needs_permission(&call.name) && !plan_file_edit {
                 if let Some(perms) = exec.get::<Permissions>(PERMISSIONS) {
-                    let summary = format!(
-                        "{} {}",
-                        call.name,
-                        call.arguments.chars().take(120).collect::<String>()
-                    );
+                    let summary = permission_summary(&call.name, &call.arguments);
                     if !perms.request(&call.name, &summary).await {
                         return finish(
                             exec,
@@ -457,6 +453,116 @@ impl Tools {
 
 fn finish(ctx: &Context, result: ToolResult) -> ToolResult {
     ctx.waterfall(TOOLS_EXECUTE, result.clone(), move || result)
+}
+
+/// Human-readable permission prompt body.
+///
+/// Default path truncates raw args to 120 chars (loses CUA target / role+label).
+/// MCP tools — especially `mcp_cua-driver__*` — get a structured summary that
+/// highlights action + role/label and hides long tokens.
+fn permission_summary(name: &str, arguments: &str) -> String {
+    if looks_like_mcp_name(name) {
+        return format!("{name} {}", summarize_mcp_args(name, arguments));
+    }
+    format!("{name} {}", arguments.chars().take(120).collect::<String>())
+}
+
+fn summarize_mcp_args(name: &str, arguments: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return redact_long_tokens(arguments).chars().take(120).collect();
+    };
+    let obj = v.as_object();
+    let mut parts: Vec<String> = Vec::new();
+    let cua = name.starts_with("mcp_cua-driver__");
+
+    let action = obj
+        .and_then(|o| {
+            o.get("action")
+                .or_else(|| o.get("type"))
+                .or_else(|| o.get("method"))
+                .and_then(|x| x.as_str())
+        })
+        .map(str::to_string)
+        .or_else(|| name.rsplit("__").next().map(str::to_string));
+    if let Some(action) = action {
+        parts.push(action);
+    }
+
+    if let Some(obj) = obj {
+        for key in [
+            "role", "label", "name", "title", "app", "window", "text", "value",
+        ] {
+            if let Some(val) = obj
+                .get(key)
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                let short = if val.chars().count() > 40 {
+                    format!("{}…", val.chars().take(40).collect::<String>())
+                } else {
+                    val.to_string()
+                };
+                parts.push(format!("{key}={short}"));
+            }
+        }
+        if cua {
+            if let Some(tok) = obj.get("element_token").and_then(|x| x.as_str()) {
+                let head: String = tok.chars().take(12).collect();
+                parts.push(format!("element_token={head}…"));
+            }
+            if let (Some(x), Some(y)) = (
+                obj.get("x").and_then(|v| v.as_i64()),
+                obj.get("y").and_then(|v| v.as_i64()),
+            ) {
+                parts.push(format!("@({x},{y})"));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return redact_long_tokens(arguments).chars().take(120).collect();
+    }
+    parts.join(" ")
+}
+
+fn redact_long_tokens(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            out.push(c);
+            continue;
+        }
+        out.push(c);
+        let mut lit = String::new();
+        while let Some(&n) = chars.peek() {
+            chars.next();
+            lit.push(n);
+            if n == '"' {
+                break;
+            }
+            if n == '\\' {
+                if let Some(&esc) = chars.peek() {
+                    chars.next();
+                    lit.push(esc);
+                }
+            }
+        }
+        let inner = lit.trim_end_matches('"');
+        if inner.len() > 48
+            && inner
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
+        {
+            let head: String = inner.chars().take(12).collect();
+            out.push_str(&head);
+            out.push('…');
+            out.push('"');
+        } else {
+            out.push_str(&lit);
+        }
+    }
+    out
 }
 
 fn looks_like_mcp_name(name: &str) -> bool {
@@ -1032,5 +1138,28 @@ mod pre_execute_tests {
         tools.register(spec("probe"), echo_body()).unwrap();
         let out = tools.execute(call("probe", "原样")).await;
         assert_eq!(out.content, "原样");
+    }
+    #[test]
+    fn cua_permission_summary_highlights_action_and_role() {
+        let args = r#"{"action":"click","role":"button","label":"Save","element_token":"s00abcdef0123456789","x":10,"y":20}"#;
+        let s = permission_summary("mcp_cua-driver__click", args);
+        assert!(s.contains("mcp_cua-driver__click"), "{s}");
+        assert!(s.contains("click"), "{s}");
+        assert!(s.contains("role=button"), "{s}");
+        assert!(s.contains("label=Save"), "{s}");
+        assert!(s.contains("element_token="), "{s}");
+        assert!(
+            !s.contains("s00abcdef0123456789"),
+            "full token must be hidden: {s}"
+        );
+    }
+
+    #[test]
+    fn generic_mcp_summary_redacts_long_tokens() {
+        let tok = "a".repeat(64);
+        let args = format!(r#"{{"name":"tool","token":"{tok}"}}"#);
+        let s = permission_summary("mcp_other__do", &args);
+        assert!(s.contains("mcp_other__do"), "{s}");
+        assert!(!s.contains(&tok), "long token must be redacted: {s}");
     }
 }

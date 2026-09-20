@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
-use cordis_spine::{ArchivedSession, Sessions, SESSIONS};
+use cordis_spine::{
+    apply_restored_preset, AgentPresets, ApplyRestoredPreset, ArchivedSession, Sessions,
+    AGENT_PRESETS, SESSIONS,
+};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError, LIVE_THREAD_ID};
@@ -100,9 +103,17 @@ pub fn restore(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         }));
     }
     let sessions = live_sessions(gateway)?;
+    let stamped = sessions.archived_preset_id(&id);
     sessions.archive_current();
     if !sessions.restore(&id) {
         return Err(RpcError::app("not_found", format!("thread {id} not found")));
+    }
+    if let Some(presets) = gateway.ctx().get::<AgentPresets>(AGENT_PRESETS) {
+        if let ApplyRestoredPreset::Failed { id, error } =
+            apply_restored_preset(&presets, stamped.as_deref())
+        {
+            eprintln!("dock: thread/restore preset `{id}` not applied: {error}");
+        }
     }
     gateway.reset_transcript();
     Ok(json!({

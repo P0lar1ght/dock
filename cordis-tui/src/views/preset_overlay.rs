@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    is_shipped, AgentPreset, AgentPresets, PresetOrigin, SubagentDef, ToolSpec, Tools,
-    AGENT_PRESETS, TOOLS,
+    is_shipped, AgentPreset, AgentPresets, PresetOrigin, Sessions, SubagentDef, ToolSpec, Tools,
+    AGENT_PRESETS, SESSIONS, TOOLS,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -208,6 +208,9 @@ pub fn open_canvas(ctx: &Context, id: &str) -> Result<PresetView, String> {
         return Err("Agent 预设服务未挂载".into());
     };
     let preset = presets.apply(id)?;
+    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+        sessions.set_preset_id(Some(preset.id.clone()));
+    }
     Ok(PresetView::Canvas(CanvasState {
         id: preset.id,
         pane: PresetPane::Catalog,
@@ -594,7 +597,12 @@ pub fn on_roster_char(ctx: &Context, view: &mut PresetView, c: char) -> PresetAc
                 return PresetAction::None;
             };
             match presets.apply(&src.id) {
-                Ok(p) => PresetAction::Flash(format!("已应用 {}", p.name)),
+                Ok(p) => {
+                    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+                        sessions.set_preset_id(Some(p.id.clone()));
+                    }
+                    PresetAction::Flash(format!("已应用 {}", p.name))
+                }
                 Err(e) => PresetAction::Flash(e),
             }
         }

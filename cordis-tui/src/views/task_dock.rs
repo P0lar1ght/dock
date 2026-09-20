@@ -18,7 +18,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use crate::grok::glyphs;
 use crate::grok::line_utils::{truncate_line, truncate_str};
+use crate::grok::tasks_pane::KillTarget;
 use crate::theme::Theme;
 
 /// 最多画几条任务行。超出的折进一条溢出行。
@@ -29,6 +31,8 @@ const MARK_W: u16 = 2;
 const GAP: u16 = 2;
 /// 低于这个宽度就不画尾行摘要了，先保证描述和耗时完整。
 const TAIL_MIN_W: u16 = 12;
+/// Trailing `[✗]` width (same as `/tasks`).
+const KILL_W: u16 = 3;
 
 /// 点到某一行之后要打开什么。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,8 @@ pub enum TaskDockHit {
     /// Workflow / 定时任务没有单独的全屏视图（`/tasks` 的 Enter 对它们也是空操作），
     /// 点击退回整张 `/tasks` 表，不做死点击。
     OpenTasks,
+    /// Trailing `[✗]` — same kill path as `/tasks` / `kill_task`.
+    Kill(KillTarget),
 }
 
 /// 一条已经备好、可以直接画的任务行。
@@ -50,6 +56,8 @@ pub struct Row {
     pub elapsed: Duration,
     /// 最新一行输出；没有就空串。
     pub tail: String,
+    /// Trailing kill control (same targets as `/tasks`).
+    pub kill: Option<KillTarget>,
 }
 
 pub fn desired_height(n: usize) -> u16 {
@@ -111,8 +119,33 @@ pub fn paint(buf: &mut Buffer, area: Rect, rows: &[Row]) -> Vec<(Rect, TaskDockH
             height: 1,
         };
         clear_row(buf, rect, theme.bg_base);
-        paint_row(buf, rect, row, &theme);
-        hits.push((rect, row.hit.clone()));
+        let mut body = rect;
+        if row.kill.is_some() && rect.width > KILL_W + 1 {
+            let kx = rect.x.saturating_add(rect.width.saturating_sub(KILL_W));
+            let kill_rect = Rect {
+                x: kx,
+                y: rect.y,
+                width: KILL_W,
+                height: 1,
+            };
+            // Kill hit first so click-test prefers the button over the row.
+            if let Some(target) = row.kill.clone() {
+                hits.push((kill_rect, TaskDockHit::Kill(target)));
+            }
+            body.width = rect.width.saturating_sub(KILL_W + 1);
+        }
+        paint_row(buf, body, row, &theme);
+        if row.kill.is_some() && rect.width > KILL_W + 1 {
+            let kx = rect.x.saturating_add(rect.width.saturating_sub(KILL_W));
+            let kill_style = Style::default().fg(theme.accent_error);
+            buf.set_line(
+                kx,
+                rect.y,
+                &Line::from(Span::styled(glyphs::ballot_x_button(), kill_style)),
+                KILL_W,
+            );
+        }
+        hits.push((body, row.hit.clone()));
     }
     let overflow = rows.len().saturating_sub(shown);
     if overflow > 0 {
@@ -241,6 +274,7 @@ mod tests {
             running,
             elapsed: Duration::from_secs(secs),
             tail: tail.to_string(),
+            kill: None,
         }
     }
 
@@ -402,6 +436,46 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_secs(12)), "0:12");
         assert_eq!(format_elapsed(Duration::from_secs(63)), "1:03");
         assert_eq!(format_elapsed(Duration::from_secs(3787)), "1:03:07");
+    }
+
+    #[test]
+    fn kill_button_registers_kill_hit() {
+        let rows = vec![Row {
+            hit: TaskDockHit::Job("job-1".into()),
+            styled: Line::from(Span::styled(
+                "Task cargo test".to_string(),
+                Style::default().fg(Color::White),
+            )),
+            running: true,
+            elapsed: Duration::from_secs(12),
+            tail: String::new(),
+            kill: Some(KillTarget::Job("job-1".into())),
+        }];
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        let hits = paint(&mut buf, area, &rows);
+        assert!(
+            hits.iter().any(|(_, h)| {
+                matches!(h, TaskDockHit::Kill(KillTarget::Job(id)) if id == "job-1")
+            }),
+            "kill hit missing: {hits:?}"
+        );
+        let line: String = (0..60)
+            .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(
+            line.contains('\u{2717}') || line.contains('✗'),
+            "kill glyph missing: {line}"
+        );
+        let kill_rect = hits
+            .iter()
+            .find(|(_, h)| matches!(h, TaskDockHit::Kill(_)))
+            .map(|(r, _)| *r)
+            .expect("kill rect");
+        assert_eq!(
+            hit(&hits, kill_rect.x, kill_rect.y),
+            Some(TaskDockHit::Kill(KillTarget::Job("job-1".into()))),
+        );
     }
 
     #[test]

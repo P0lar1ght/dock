@@ -11,10 +11,11 @@
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    extra_tool_slash_arguments, goal_composer_fill, loop_composer_fill, loop_schedule_instruction,
-    session_usage_block_text, workflow_command_arguments, ApiBackend, AppSettings, ExtraSlashKind,
-    Goal, LoopFireMode, PlanMode, Sessions, Slash, SlashEntry, ToolCall, Tools, GOAL,
-    GOAL_RESERVED_SUBCOMMANDS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, TOOLS, WORKFLOW_TOOL_NAME,
+    apply_restored_preset, extra_tool_slash_arguments, goal_composer_fill, loop_composer_fill,
+    loop_schedule_instruction, session_usage_block_text, workflow_command_arguments, AgentPresets,
+    ApiBackend, AppSettings, ApplyRestoredPreset, ExtraSlashKind, Goal, LoopFireMode, PlanMode,
+    Sessions, Slash, SlashEntry, ToolCall, Tools, AGENT_PRESETS, GOAL, GOAL_RESERVED_SUBCOMMANDS,
+    PLAN_MODE, SESSIONS, SETTINGS, SLASH, TOOLS, WORKFLOW_TOOL_NAME,
 };
 use cordis_tui::{resolve_slash, slash_catalog, SessionRef, SlashCatalogEntry, SESSION_PORT};
 
@@ -316,9 +317,17 @@ fn cmd_resume(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     let Some(item) = sessions.archived().into_iter().next() else {
         return Ok(notice("恢复会话", "没有可恢复的会话。"));
     };
+    let stamped = item.preset_id.clone();
     sessions.archive_current();
     if !sessions.restore(&item.id) {
         return Ok(notice("恢复会话", "没有可恢复的会话。"));
+    }
+    if let Some(presets) = gateway.ctx().get::<AgentPresets>(AGENT_PRESETS) {
+        if let ApplyRestoredPreset::Failed { id, error } =
+            apply_restored_preset(&presets, stamped.as_deref())
+        {
+            eprintln!("dock: /resume preset `{id}` not applied: {error}");
+        }
     }
     gateway.reset_transcript();
     Ok(applied("已恢复上次会话"))

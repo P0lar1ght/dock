@@ -740,6 +740,7 @@ fn task_dock_row(
     live_agents: &HashSet<String>,
     now: Instant,
 ) -> Option<task_dock::Row> {
+    let kill = entry.kill_target();
     match entry {
         TaskEntry::BgTask {
             task_id,
@@ -761,6 +762,7 @@ fn task_dock_row(
                     .duration_since(start_time)
                     .unwrap_or_default(),
                 tail,
+                kill,
             })
         }
         TaskEntry::Agent {
@@ -780,6 +782,7 @@ fn task_dock_row(
                 running,
                 elapsed: now.duration_since(started_at),
                 tail,
+                kill,
             })
         }
         TaskEntry::Workflow {
@@ -793,6 +796,7 @@ fn task_dock_row(
             running,
             elapsed: now.duration_since(started_at),
             tail: String::new(),
+            kill,
         }),
         TaskEntry::Scheduled {
             styled, started_at, ..
@@ -802,6 +806,7 @@ fn task_dock_row(
             running: false,
             elapsed: now.duration_since(started_at),
             tail: String::new(),
+            kill,
         }),
         TaskEntry::Header { .. } => None,
     }
@@ -1379,6 +1384,33 @@ pub(super) fn kill_task_target(ctx: &Context, target: &KillTarget) {
     match target {
         KillTarget::Scheduled(id) => cancel_scheduled(ctx, id),
         KillTarget::Workflow(run_id) => stop_workflow(ctx, run_id),
+        KillTarget::Job(id) => kill_job(ctx, id),
+        KillTarget::Subagent(id) => kill_subagent(ctx, id),
+    }
+}
+
+/// Same path as the `kill_task` tool for background jobs.
+fn kill_job(ctx: &Context, id: &str) {
+    let Some(jobs) = ctx.get::<Jobs>(JOBS) else {
+        flash(ctx, "jobs 未挂载");
+        return;
+    };
+    let jobs = jobs.clone();
+    let id = id.to_string();
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let msg = jobs.kill(&id).await;
+        flash(&ctx, msg);
+    });
+}
+
+fn kill_subagent(ctx: &Context, id: &str) {
+    match ctx.get::<Subagents>(SUBAGENTS) {
+        Some(sub) => match sub.kill(id) {
+            Some(msg) => flash(ctx, msg),
+            None => flash(ctx, format!("没有子代理 {id}")),
+        },
+        None => flash(ctx, "subagents 未挂载"),
     }
 }
 
