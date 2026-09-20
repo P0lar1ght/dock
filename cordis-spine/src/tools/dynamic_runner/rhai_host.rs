@@ -21,6 +21,10 @@ use cordis_base::types::{
 pub const MAX_INLINE_SOURCE: usize = 128 * 1024;
 /// File-backed `source_path` ceiling (re-read on run/update).
 pub const MAX_FILE_SOURCE: usize = 1024 * 1024;
+/// Over the inline ceiling the answer is never "shorten the script" — it is the
+/// file route, which is the documented default for anything real anyway.
+pub const INLINE_TOO_LARGE: &str = "rhai source exceeds 128KiB — inline `source` is for tiny samples. Write the script to .dock/plugins/<id>/source.rhai (or ~/.dock/plugins/<id>/) with write_file, then cordis_define with `source_path` instead of `source` (≤1MiB, re-read on every run).";
+pub const FILE_TOO_LARGE: &str = "rhai source file exceeds 1MiB — split the plugin into smaller Packages, or move the bulk out of the script (read it at runtime with host.read_bytes).";
 const DEFINE_MAX_OPS: u64 = 100_000;
 const RUN_MAX_OPS: u64 = 1_000_000;
 
@@ -165,9 +169,9 @@ pub fn preflight_limited(source: &str, max_bytes: usize) -> Result<RhaiMeta, Str
     }
     if source.len() > max_bytes {
         if max_bytes <= MAX_INLINE_SOURCE {
-            return Err("rhai source exceeds 128KiB".into());
+            return Err(INLINE_TOO_LARGE.into());
         }
-        return Err("rhai source file exceeds 1MiB".into());
+        return Err(FILE_TOO_LARGE.into());
     }
     let engine = sandboxed_engine(DEFINE_MAX_OPS);
     engine

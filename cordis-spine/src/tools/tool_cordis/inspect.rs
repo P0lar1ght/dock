@@ -5,24 +5,31 @@ use cordis::Context;
 
 use crate::agent::agents::Agents;
 use crate::agent::presets::AgentPresets;
+use crate::agent::runtime::LoopHandle;
 use crate::agent::turn::TurnControl;
 use crate::host::permissions::Permissions;
 use crate::host::settings::AppSettings;
 use crate::host::slash::Slash;
 use crate::host::tui_slots::TuiSlots;
+use crate::llm::compact::Compact;
 use crate::llm::sampler::Llm;
 use crate::names::{
-    AGENTS, AGENT_PRESETS, ASK, BROWSER, CONTEXT, CRON, DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM,
-    LSP, MCP, MEMORY, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, SYSTEM_PROMPT,
-    TODOS, TOOLS, TUI_SLOTS, TURN, WORKFLOWS,
+    AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
+    DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LSP, MCP, MEMORY, PERMISSIONS, PLAN_MODE, RHAI_BAGS,
+    ROSTER, SESSIONS, SETTINGS, SKILLS, SLASH, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TUI_SLOTS,
+    TURN, WORKFLOWS,
 };
 use crate::prompt::assemble::SystemPrompt;
 use crate::prompt::context_book::ContextBook;
 use crate::session::log::Sessions;
+use crate::session::roster::Roster;
 use crate::tools::ask_user::Ask;
 use crate::tools::browser::Browser;
+use crate::tools::computer::Computer;
 use crate::tools::cron::Cron;
-use crate::tools::dynamic_runner::{builtins_lines, DynamicRunner, PluginOrigin, SnapshotRow};
+use crate::tools::dynamic_runner::{
+    builtins_lines, DynamicRunner, PluginOrigin, RhaiBags, SnapshotRow,
+};
 use crate::tools::goal::Goal;
 use crate::tools::jobs::Jobs;
 use crate::tools::lsp::LspBackendAdapter;
@@ -30,6 +37,7 @@ use crate::tools::mcp::Mcp;
 use crate::tools::memory::Memory;
 use crate::tools::plan_mode::PlanMode;
 use crate::tools::registry::Tools;
+use crate::tools::skills::Skills;
 use crate::tools::task::Subagents;
 use crate::tools::todo_write::Todos;
 use crate::tools::workflow::Workflows;
@@ -159,32 +167,93 @@ pub fn render_inspect_self(
     }
 }
 
+/// The three named services a Rhai `host` actually has methods for. Everything
+/// else a script might name is a startup gate only — see [`describe_services`].
+const REACHABLE: &[(&str, &[&str])] = &[
+    (
+        TOOLS,
+        &[
+            "host.register_tool(#{ name, description, parameters, execute }) — model-facing extra; execute still applies permissions",
+            "host.call_tool(name, args) — run a live tool by name (permissions and plan mode apply)",
+        ],
+    ),
+    (
+        SLASH,
+        &[
+            "host.register_slash(#{ command, kind, text, title?, send?, description? }) — additive only; cannot replace /agents, /help, /quit, …",
+        ],
+    ),
+    (
+        TUI_SLOTS,
+        &[
+            "host.register_slot(#{ id, title?, hud?, render, on_key? }) — plain-text overlay",
+            "host.open_slot(id) — ask the TUI to open that overlay",
+        ],
+    ),
+];
+
+/// Two buckets, because `inject` and reach are **different things**.
+///
+/// `inject` goes straight into the kernel's `Inject`, which resolves any name
+/// that is mounted (type-erased). So injecting `sessions` or `settings` starts
+/// fine — and then `host.get` on it returns `()`, because `host` has no method
+/// for it. Listing everything flat used to read as "these are all yours".
 fn describe_services(ctx: &Context, runner: &DynamicRunner) -> Vec<String> {
-    let mut lines = probe_spine(ctx);
-    for (name, owner) in runner.live_dynamic_services() {
-        lines.push(format!("- {name} (provided by {owner})"));
-    }
-    if lines.is_empty() {
-        return vec!["(no services provided)".into()];
-    }
-    lines.sort();
-    annotate_injectable_services(&mut lines);
-    if let Some(slash) = ctx.get::<Slash>(SLASH) {
-        let extras = slash.list();
-        if !extras.is_empty() {
-            for entry in extras {
-                lines.push(format!(
-                    "  - /{} ({}) — {}",
-                    entry.command,
-                    entry.kind.as_str(),
-                    entry.description
-                ));
+    let mut lines =
+        vec!["reachable from a Rhai package (host.* has methods for these):".to_string()];
+    for (name, sigs) in REACHABLE {
+        if !service_live(ctx, name) {
+            continue;
+        }
+        lines.push(format!("- {name}"));
+        for sig in *sigs {
+            lines.push(format!("    {sig}"));
+        }
+        if *name == SLASH {
+            if let Some(slash) = ctx.get::<Slash>(SLASH) {
+                for entry in slash.list() {
+                    lines.push(format!(
+                        "    already registered: /{} ({}) — {}",
+                        entry.command,
+                        entry.kind.as_str(),
+                        entry.description
+                    ));
+                }
             }
         }
     }
+    for (name, owner) in runner.live_dynamic_services() {
+        lines.push(format!(
+            "- {name} — bag from {owner}; host.get(\"{name}\") returns a copy, inject it to wait for that package"
+        ));
+    }
+    let mut mounted = probe_spine(ctx);
+    mounted.retain(|name| !REACHABLE.iter().any(|(r, _)| r == name));
+    mounted.sort();
+    lines.push(String::new());
+    lines.push(
+        "also mounted — an inject name here resolves (the fiber starts), but no host.* method \
+         reaches it and host.get returns (). For what they do, call the matching model tool with \
+         host.call_tool, which keeps the permission gate:"
+            .into(),
+    );
+    lines.push(format!("  {}", mounted.join(", ")));
     lines
 }
 
+fn service_live(ctx: &Context, name: &str) -> bool {
+    match name {
+        TOOLS => ctx.get::<Tools>(TOOLS).is_some(),
+        SLASH => ctx.get::<Slash>(SLASH).is_some(),
+        TUI_SLOTS => ctx.get::<TuiSlots>(TUI_SLOTS).is_some(),
+        _ => false,
+    }
+}
+
+/// Hand-kept probe: `Context` has no type-erased "is this name live" lookup, so
+/// each name costs one line. A missing name under-reports a live process with no
+/// symptom, which is why `install_app_registers_capability_tools_and_mcp_fail_open`
+/// (tests/round.rs) asserts the report covers everything `install_app` mounts.
 fn probe_spine(ctx: &Context) -> Vec<String> {
     let mut lines = Vec::new();
     push_live::<Sessions>(&mut lines, ctx, SESSIONS);
@@ -212,61 +281,19 @@ fn probe_spine(ctx: &Context) -> Vec<String> {
     push_live::<Memory>(&mut lines, ctx, MEMORY);
     push_live::<Browser>(&mut lines, ctx, BROWSER);
     push_live::<LspBackendAdapter>(&mut lines, ctx, LSP);
+    push_live::<Skills>(&mut lines, ctx, SKILLS);
+    push_live::<Computer>(&mut lines, ctx, COMPUTER);
+    push_live::<Compact>(&mut lines, ctx, COMPACT);
+    push_live::<Roster>(&mut lines, ctx, ROSTER);
+    push_live::<LoopHandle>(&mut lines, ctx, AGENT_LOOP);
+    push_live::<RhaiBags>(&mut lines, ctx, RHAI_BAGS);
     lines
 }
 
-fn push_live<T: Send + Sync + 'static>(lines: &mut Vec<String>, ctx: &Context, name: &str) {
+fn push_live<T: Send + Sync + 'static>(names: &mut Vec<String>, ctx: &Context, name: &str) {
     if ctx.get::<T>(name).is_some() {
-        lines.push(format!("- {name}"));
+        names.push(name.to_string());
     }
-}
-
-/// Rhai `inject` targets get 1–3 callable methods. Other live services stay names-only.
-fn annotate_injectable_services(lines: &mut Vec<String>) {
-    const ANNOTATIONS: &[(&str, &[&str])] = &[
-        (
-            TOOLS,
-            &[
-                "register / register_dynamic(spec, body) — model-facing extras; execute still applies permissions",
-                "execute(call) — run a live tool by name (permissions apply)",
-            ],
-        ),
-        (
-            SLASH,
-            &[
-                "register(#{ command, kind, text, title?, send?, description? }) — additive only; cannot replace /agents, /help, /quit, …",
-                "list() — extra commands (not the TUI builtin catalog)",
-            ],
-        ),
-        (
-            CONTEXT,
-            &[
-                "set_base / section / replace_base — prompt fragments; dispose unregisters",
-                "window() / detail(kind) — occupancy snapshot for /context",
-            ],
-        ),
-        (
-            TUI_SLOTS,
-            &[
-                "register(id, handler) — render() / on_key(); host.register_slot",
-                "request_open(id) — ask the TUI to open that overlay",
-            ],
-        ),
-    ];
-    let mut out = Vec::with_capacity(lines.len() + 8);
-    for line in lines.drain(..) {
-        let methods = ANNOTATIONS
-            .iter()
-            .find(|(name, _)| line == format!("- {name}"))
-            .map(|(_, sigs)| *sigs);
-        out.push(line);
-        if let Some(sigs) = methods {
-            for sig in sigs {
-                out.push(format!("    {sig}"));
-            }
-        }
-    }
-    *lines = out;
 }
 
 fn describe_fibers(runner: &DynamicRunner, session_id: &str) -> Vec<String> {

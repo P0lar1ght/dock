@@ -34,13 +34,14 @@ pub fn missing_services(names: &[String], live: impl Fn(&str) -> bool) -> Vec<St
     names.iter().filter(|name| !live(name)).cloned().collect()
 }
 
-pub fn host_status(fiber: Option<&Fiber>, waiting: &[String]) -> &'static str {
+/// 状态只看内核的 fiber 状态。以前还拿「我们认不认得 inject 里的名字」当第二判据，
+/// 于是 `inject: ["settings"]` 这种**已经 active** 的包被报成 waiting——内核按名字
+/// 解析，认不认得是我们这边的事，不是插件的事。
+pub fn host_status(fiber: Option<&Fiber>) -> &'static str {
     match fiber {
         None => "absent",
         Some(fiber) => match fiber.state() {
-            FiberState::Pending | FiberState::Loading if !waiting.is_empty() => "waiting",
-            FiberState::Active if waiting.is_empty() => "running",
-            FiberState::Active => "waiting",
+            FiberState::Active => "running",
             FiberState::Failed => "failed",
             FiberState::Disposed | FiberState::Unloading => "stopped",
             FiberState::Pending | FiberState::Loading => "waiting",

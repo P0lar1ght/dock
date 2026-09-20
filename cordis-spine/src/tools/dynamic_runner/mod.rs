@@ -592,7 +592,7 @@ impl DynamicRunner {
         for rec in inner.registry.all().filter(|r| visible_to(r, session_id)) {
             let Some(run) = &rec.run else { continue };
             let Some(fiber) = &run.fiber else { continue };
-            let waiting = missing_services(&run.inject, |n| service_present(&self.ctx, n));
+            let waiting = waiting_names(&self.ctx, Some(fiber), &run.inject);
             rows.push(FiberRow {
                 name: fiber.name(),
                 state: fiber_label(fiber.state()).into(),
@@ -662,8 +662,8 @@ impl DynamicRunner {
         let started = start_host_half(&group, built).await;
         match started {
             Ok(fiber) => {
-                let waiting = missing_services(&inject, |n| service_present(&self.ctx, n));
-                let status = host_status(Some(&fiber), &waiting);
+                let waiting = waiting_names(&self.ctx, Some(&fiber), &inject);
+                let status = host_status(Some(&fiber));
                 let fiber_state = fiber_label(fiber.state()).to_string();
                 let mut provides_live: Vec<String> = provides
                     .iter()
@@ -842,7 +842,7 @@ fn resolve_plan(
 
 fn snapshot_row(ctx: &Context, rec: &PluginRec) -> SnapshotRow {
     let active_run = rec.run.as_ref().map(|run| {
-        let waiting = missing_services(&run.inject, |n| service_present(ctx, n));
+        let waiting = waiting_names(ctx, run.fiber.as_ref(), &run.inject);
         RunView {
             plugin_run_id: run.plugin_run_id.clone(),
             package_id: run.package_id.clone(),
@@ -871,6 +871,34 @@ fn snapshot_row(ctx: &Context, rec: &PluginRec) -> SnapshotRow {
     }
 }
 
+/// 这颗 fiber 在等谁，**以内核的 fiber 状态为准**。
+///
+/// `inject` 原样进了内核的 `Inject`，内核按名字查 store（类型擦除），所以任何真的
+/// 挂着的名字都会被满足——包括脚本够不着的 spine 服务（`inject: ["settings"]` 照样
+/// 起得来）。[`service_present`] 只认得 Rhai 够得着的那几个，拿它单独判「等谁」会
+/// 把跑起来的包报成 waiting，模型就会去修一个没坏的插件。
+///
+/// 所以只有内核说「还没起来」时才去猜名字：猜不出来（我们这张表认不出的名字全被
+/// 当成活的）就把整份 `inject` 报出去，宁可说"等这几个里的某个"，不说"没在等"。
+fn waiting_names(ctx: &Context, fiber: Option<&Fiber>, inject: &[String]) -> Vec<String> {
+    let Some(fiber) = fiber else {
+        return Vec::new();
+    };
+    match fiber.state() {
+        FiberState::Pending | FiberState::Loading => {
+            let missing = missing_services(inject, |n| service_present(ctx, n));
+            if missing.is_empty() {
+                inject.to_vec()
+            } else {
+                missing
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Rhai 够得着的名字活没活。**只用于 `provides` 与 [`waiting_names`] 的猜测**，
+/// 不是「这个名字在不在插件树里」——后者只有内核知道。
 fn service_present(ctx: &Context, name: &str) -> bool {
     match name {
         TOOLS => ctx.get::<Tools>(TOOLS).is_some(),

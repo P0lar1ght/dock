@@ -43,7 +43,7 @@ Do not treat a successful `define` as running.
 
 | Tool | Use it when | Do not |
 | --- | --- | --- |
-| `cordis_inspect` | Live fibers, named services (`tools` / `slash` / `tui.slots` include method signatures), tools (names only), factories, `what: "builtins"` (Rhai `host`), `what: "events"`, `what: "slots"`, `temporary` / `permanent` | Invent `cordis_inspect_list` / `query`; treat the report as a business API |
+| `cordis_inspect` | Live fibers, named services (reachable ones carry their `host.*` signatures; the rest are names only), tools (names only), factories, `what: "builtins"` (Rhai `host`), `what: "events"`, `what: "slots"`, `temporary` / `permanent` | Invent `cordis_inspect_list` / `query`; treat the report as a business API; read a name under "also mounted" as something the script can call |
 | `cordis_inspect_self` | List Plugins, version pointers, or one Package's factory id, `source_path` / inline source, diagnostics | Dump huge Rhai when only the path is needed; use it to start a Plugin |
 | `cordis_define` | First Package, or append an immutable Package; prefer `source_path` for rhai | Paste large Rhai as `source`; pass both `source` and `source_path`; expect define to run `apply` |
 | `cordis_run` | Activate an exact Package; `run` = first start / restart current / rollback; `update` = switch versions | Use `run` to switch versions implicitly |
@@ -75,7 +75,9 @@ Prefer the capability closest to the data owner. Do not create a dynamic Plugin 
 
 `source_path` must not contain `..` and must resolve under those plugin roots. Inspect shows the path and does not dump the file.
 
-The Rhai body (file or inline) must evaluate to a map. `apply` is a function; define does not call it. `inject` is an array of named services that must already be live, or the fiber stays pending (same as `hold`). Omit `inject` → `["tools"]`. Typical extras: `"slash"`, `"tui.slots"`. Scripts cannot `ctx.plugin`, cannot load disk modules, cannot nest `eval`. `host.on` reaches three events only: `"session/event"` (observe), `"agent/step-start"` and `"agent/turn-end"` (intercept) — the other waterfalls are not scriptable.
+The Rhai body (file or inline) must evaluate to a map. `apply` is a function; define does not call it. `inject` is an array of named services that must already be live, or the fiber stays pending (same as `hold`). Omit `inject` → `["tools"]`. Typical extras: `"slash"`, `"tui.slots"`.
+
+**`inject` is a startup gate, not a grant.** The kernel resolves it by name against everything mounted, so `inject: ["sessions"]` starts fine — and then `host.get("sessions")` returns `()`, because `host` has no method for it. The only names a script can actually *use* are `tools` / `slash` / `tui.slots` (the `host.*` table below) plus bags another package called `host.provide` on. `cordis_inspect what: "services"` splits the two lists for exactly this reason. To use what a mounted service does, call its model tool with `host.call_tool` — that keeps the permission gate. Inject a name only when this package must **wait** for it (a bag from another package is the real use). Scripts cannot `ctx.plugin`, cannot load disk modules, cannot nest `eval`. `host.on` reaches three events only: `"session/event"` (observe), `"agent/step-start"` and `"agent/turn-end"` (intercept) — the other waterfalls are not scriptable.
 
 ### File-first example (copy-paste)
 
@@ -351,7 +353,7 @@ If the id is gone (removed or lost on restart), say so. Do not mint a same-named
 | `has been registered` / already registered | Another **running** Package still provides that name or tool; `cordis_stop` it. A throwing apply must not leave orphans |
 | `unknown factory` | `cordis_inspect` `what: "factories"` |
 | `invalid-mode` / use mode `"update"` | current vs target Package |
-| Fiber `[pending]` / `waiting for` | Unsatisfied `inject` (legal) |
+| Fiber `[pending]` / `waiting for` | Unsatisfied `inject` (legal). `[active]` never lists a wait — if the fiber is active, the plugin is running, so look at `hostError` instead |
 | Permission rejected | Do not request the same `cordis_run` unless the user asks |
 | Lost after restart | Session Plugins are process memory. Promote to disk, or expect this |
 | Want JS / Client / Wasm | Use `factory: "rhai"` or a static plugin |
