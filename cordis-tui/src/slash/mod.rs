@@ -51,6 +51,10 @@ pub enum SlashCmd {
     Usage,
     Context,
     Compact,
+    Flush,
+    Dream,
+    Memory,
+    Remember,
     Undo,
 }
 
@@ -372,6 +376,46 @@ pub const CATALOG: &[SlashDef] = &[
         description: "压缩旧对话",
         takes_args: true,
         args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Flush,
+        name: "flush",
+        aliases: &[],
+        display: "/flush",
+        description: "把本会话要点写入 memory（需启用）",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Dream,
+        name: "dream",
+        aliases: &[],
+        display: "/dream",
+        description: "consolidate observations → topics（需启用）",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Memory,
+        name: "memory",
+        aliases: &["mem"],
+        display: "/memory",
+        description: "浏览本地 memory（只读）",
+        takes_args: false,
+        args_required: false,
+        arg_kind: None,
+    },
+    SlashDef {
+        cmd: SlashCmd::Remember,
+        name: "remember",
+        aliases: &[],
+        display: "/remember",
+        description: "记下一条跨会话偏好/事实",
+        takes_args: true,
+        args_required: true,
         arg_kind: None,
     },
     SlashDef {
@@ -897,6 +941,11 @@ mod tests {
         assert_eq!(lookup("cost").map(|d| d.cmd), Some(SlashCmd::Usage));
         assert_eq!(lookup("context").map(|d| d.cmd), Some(SlashCmd::Context));
         assert_eq!(lookup("compact").map(|d| d.cmd), Some(SlashCmd::Compact));
+        assert_eq!(lookup("flush").map(|d| d.cmd), Some(SlashCmd::Flush));
+        assert_eq!(lookup("dream").map(|d| d.cmd), Some(SlashCmd::Dream));
+        assert_eq!(lookup("memory").map(|d| d.cmd), Some(SlashCmd::Memory));
+        assert_eq!(lookup("mem").map(|d| d.cmd), Some(SlashCmd::Memory));
+        assert_eq!(lookup("remember").map(|d| d.cmd), Some(SlashCmd::Remember));
     }
 
     #[test]

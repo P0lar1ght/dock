@@ -1,0 +1,79 @@
+//! Read-only listing for `/memory` overlay.
+
+use std::path::{Path, PathBuf};
+
+use crate::layout::{MemoryRoot, MemoryScope};
+
+#[derive(Debug, Clone)]
+pub struct MemoryFileEntry {
+    pub scope: MemoryScope,
+    pub kind: &'static str,
+    pub path: PathBuf,
+    pub label: String,
+}
+
+/// List browsable markdown under global + workspace topics/observations.
+pub fn list_memory_files(root: &MemoryRoot) -> Vec<MemoryFileEntry> {
+    let mut out = Vec::new();
+    for (scope, paths) in [
+        (MemoryScope::Global, &root.global),
+        (MemoryScope::Workspace, &root.workspace),
+    ] {
+        collect_dir(&mut out, scope, "topics", &paths.topics);
+        collect_dir(&mut out, scope, "observations", &paths.observations);
+    }
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    out
+}
+
+fn collect_dir(
+    out: &mut Vec<MemoryFileEntry>,
+    scope: MemoryScope,
+    kind: &'static str,
+    dir: &Path,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dir(out, scope, kind, &path);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let scope_s = match scope {
+            MemoryScope::Global => "global",
+            MemoryScope::Workspace => "workspace",
+        };
+        out.push(MemoryFileEntry {
+            scope,
+            kind,
+            label: format!("{scope_s}/{kind}/{name}"),
+            path,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_topics_and_observations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/browse-proj"));
+        root.ensure_layout().unwrap();
+        std::fs::write(root.global.topics.join("prefs.md"), "# prefs\n").unwrap();
+        std::fs::write(root.workspace.observations.join("flush-1.md"), "## x\n").unwrap();
+        let list = list_memory_files(&root);
+        assert_eq!(list.len(), 2);
+    }
+}

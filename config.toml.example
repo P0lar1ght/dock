@@ -166,3 +166,16 @@ prompt_cache = true
 #                            # IP 字面量（10.x / 127.x / 169.254.169.254）照旧拦。
 # allow_local = false        # 只放行显式本地主机名（localhost / 127.0.0.0/8 / ::1）。
 #                            # 私有段与云元数据地址永不放行。缺省 false。
+
+
+# Cross-session memory (default off). Override with DOCK_MEMORY=1/0.
+# [memory]
+# enabled = false
+# [memory.flush]
+# enabled = true
+# soft_threshold_tokens = 4000
+# max_flush_write_chars = 8000
+# [memory.dream]
+# enabled = true
+# min_hours = 24
+# min_sessions = 5

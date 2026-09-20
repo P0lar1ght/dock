@@ -33,6 +33,7 @@ cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、
   src/grok/              从 grok pager 冻结复制的 chrome（glyphs、picker、wrapping…）
 cordis-gateway/          回环 HTTP/WS 插件：配对、dock.1 JSON-RPC 投影、slash list|execute
 cordis-app/              二进制入口：一个 Context，install_app + agent-loop + gateway + tui
+dock-memory/             crate `dock-memory`：跨会话 topics/observations + FTS（默认关）
 dock-render/markdown/    crate `cordis-markdown`
 dock-render/mermaid/     crate `xai-grok-mermaid`
 embed-sdk/               宿主页 JS SDK（`dist/dock-embed.js`，协议 dock.1）
@@ -177,6 +178,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 ## 磁盘
 
 - `~/.dock`（可用 `DOCK_HOME` 覆盖）：config、presets、plugins、skills、memory、`sessions/`、`mcp_credentials.json`。
+- Memory（Phase 1，默认关）：`$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,observations}/`，索引 `$DOCK_HOME/memory/search.sqlite`。`/flush` 只写 memory；compact 仍写 `sessions/.../compaction/`（A7）。斜杠 `/flush` `/dream` `/memory` `/remember`；工具名仍 `memory_search` / `memory_get`。
 - 项目 `.dock/`：覆盖 config、presets、plugins、skills、`plan.md`、workflows。
 - HTTP MCP 的 OAuth token 在 `~/.dock/mcp_credentials.json`，**不写进** `config.toml`。它不是 grok.com 账号登录。
 

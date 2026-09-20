@@ -639,6 +639,26 @@ const HELP: &[HelpEntry] = &[
         kind: HelpKind::Slash(SlashCmd::Compact),
     }),
     HelpEntry::Row(HelpRow {
+        key: "/flush",
+        label: "把本会话要点写入 memory",
+        kind: HelpKind::Slash(SlashCmd::Flush),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/dream",
+        label: "consolidate observations → topics",
+        kind: HelpKind::Slash(SlashCmd::Dream),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/memory",
+        label: "浏览本地 memory（只读）",
+        kind: HelpKind::Slash(SlashCmd::Memory),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/remember",
+        label: "记下一条跨会话偏好/事实",
+        kind: HelpKind::Slash(SlashCmd::Remember),
+    }),
+    HelpEntry::Row(HelpRow {
         key: "/undo",
         label: "撤销上一轮未产生模型输出的用户消息",
         kind: HelpKind::Slash(SlashCmd::Undo),

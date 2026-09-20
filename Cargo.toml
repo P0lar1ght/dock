@@ -7,6 +7,7 @@ members = [
     "cordis-tui",
     "cordis-gateway",
     "cordis-app",
+    "dock-memory",
     "dock-render/markdown",
     "dock-render/mermaid",
     "dock-render/third_party/ordered_hashmap",

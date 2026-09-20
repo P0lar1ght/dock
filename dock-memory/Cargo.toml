@@ -1,0 +1,20 @@
+[package]
+name = "dock-memory"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+description = "Dock cross-session memory: topics/observations layout, FTS search, flush, dream"
+license = "Apache-2.0"
+
+[dependencies]
+blake3 = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+cordis-base = { path = "../cordis-base" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"

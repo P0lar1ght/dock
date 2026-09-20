@@ -697,6 +697,50 @@ pub async fn run(root: Context) -> Result<()> {
                                         session.compact(context);
                                     }
                                 }
+                                Effect::MemoryFlush => {
+                                    flash(&ctx, "正在 flush memory…");
+                                    let redraw = redraw_tx.clone();
+                                    let c = ctx.clone();
+                                    tokio::spawn(async move {
+                                        let msg = match cordis_spine::run_flush(&c, true).await {
+                                            Ok(m) => m,
+                                            Err(e) => format!("flush failed: {e}"),
+                                        };
+                                        if let Some(slash) = c.get::<Slash>(SLASH) {
+                                            slash.queue_notice("/flush", msg);
+                                        }
+                                        let _ = redraw.send(());
+                                    });
+                                }
+                                Effect::MemoryDream => {
+                                    flash(&ctx, "正在 dream…");
+                                    let redraw = redraw_tx.clone();
+                                    let c = ctx.clone();
+                                    tokio::spawn(async move {
+                                        let msg = match cordis_spine::run_dream(&c).await {
+                                            Ok(m) => m,
+                                            Err(e) => format!("dream failed: {e}"),
+                                        };
+                                        if let Some(slash) = c.get::<Slash>(SLASH) {
+                                            slash.queue_notice("/dream", msg);
+                                        }
+                                        let _ = redraw.send(());
+                                    });
+                                }
+                                Effect::MemoryRemember { note } => {
+                                    let msg = match cordis_spine::run_remember(&note) {
+                                        Ok(m) => m,
+                                        Err(e) => format!("remember failed: {e}"),
+                                    };
+                                    flash(&ctx, msg);
+                                }
+                                Effect::OpenMemoryBrowser => {
+                                    overlay = Overlay::Notice {
+                                        title: "/memory".into(),
+                                        body: crate::views::memory_browser::render_text(),
+                                        scroll: 0,
+                                    };
+                                }
                                 Effect::ShowNotice { title, body } => {
                                     overlay = Overlay::Notice {
                                         title,
