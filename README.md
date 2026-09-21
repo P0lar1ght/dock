@@ -29,7 +29,7 @@
 
 ## 简介
 
-**Dock** 是跑在 [Cordis](https://github.com/cordiverse/cordis) 插件树上的本地 Agent。Chrome 对齐 Grok pager，数据面走 spine 的会话日志与工具表。和 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 一样：**没有可私自打补丁的内核**。新行为是再挂一个插件，或接到已有 named service / waterfall 上。
+**Dock** 是跑在 [Cordis](https://github.com/cordiverse/cordis) 插件树上的本地 Agent：界面 chrome 对齐 Grok pager，数据面走 spine 的会话日志与一张 `"tools"` 表。和 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 一样，它**没有可以私自打补丁的内核**——新行为只能是再挂一颗插件，或接到已有 named service / waterfall 上。
 
 Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。本仓库是 Rust 实现（crate `cordis`），不是上游 JS `cordis/` 的 fork。
 
@@ -38,6 +38,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 - 全屏 TUI：思考折叠、工具卡片、计划 / 目标 / 子代理、斜杠与 overlay
 - Spine 五件套 + `agent-loop`：会话、采样、工具、系统提示、Agent 预设
 - 工作区读写跑、联网、MCP、计划模式、调度、动态 Cordis 插件
+- 浏览器与桌面驾驶舱：`/browser`（chromiumoxide CDP）与 `/computer`（cua-driver MCP，零配置接入）
 - 回环 Gateway：Origin 配对、`dock.1` 投影、斜杠 list/execute
 - 宿主页 SDK：一份 `dock-embed.js` 注入宠物和 Chat
 
@@ -49,7 +50,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 - 循环本身也是插件。换采样换 UI 换工具，不要焊进 `event_loop`
 - 一张 `"tools"` 表：`inject: ["tools"]` 后 `register`，MCP 也进同一张表
-- 扩展走 waterfall（`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/execute`、`system-prompt/assemble`）
+- 扩展走七条 waterfall（`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/pre-execute`、`tools/execute`、`system-prompt/assemble`）
 - Named service **live-lookup**：调用点再 `ctx.get`，不要把 `Arc` 关进长生命周期闭包
 
 ### 🖥️ Grok 外形 TUI
@@ -62,9 +63,9 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 ### 🛠️ 工具与 MCP
 
-- 工作区：`bash` `read_file` `grep` `glob` `write_file` `search_replace`
-- 计划、提问、后台任务、调度、子代理、记忆、LSP、workflow
-- 浏览器驾驶舱（`browser_*`，`register_deferred`，chromiumoxide CDP + `/browser` 完整 TUI 驾驶舱 overlay（PR C））
+- 工作区七颗：`list_dir` `read_file` `grep` `search_replace` `bash` `glob` `write_file`
+- 计划 / 提问 / 后台任务 / 调度 / 子代理 / 目标 / 记忆 / LSP / workflow
+- 浏览器驾驶舱（`browser_*`，`register_deferred`，chromiumoxide CDP + `/browser` overlay）；本机桌面走 `/computer` 与 cua-driver MCP
 - MCP 与不常用本地工具走 `search_tool` / `use_tool` 渐进披露；内部公名 `mcp_{server}__{tool}`，不能盖掉 `bash`
 - 动态包：`cordis_define` / `cordis_run` / `cordis_promote` 写成 `.dock/plugins`
 
@@ -151,7 +152,9 @@ flowchart LR
   start --> pre["agent/pre-step<br/>每轮一次"]
   pre --> asm["system-prompt/assemble<br/>每轮一次"]
   asm --> stream["llm/stream"]
-  stream -->|"工具调用"| exec["tools/execute<br/>权限 / 计划门"]
+  stream -->|"工具调用"| gate["tools/pre-execute<br/>改写 / 改道 / 拒绝"]
+  gate --> perm["计划门 / 权限门"]
+  perm --> exec["tools/execute"]
   exec -->|"结果回灌"| stream
   stream -->|"文本"| done(["turn 结束"])
 
@@ -159,7 +162,7 @@ flowchart LR
   class stream,exec hub;
 ```
 
-`llm/stream` 是枢纽：出工具调用就过 `tools/execute`（权限 / 计划门在这里挡）再回来，出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
+`llm/stream` 是枢纽：出工具调用就先过 `tools/pre-execute`（改写参数 / 改道 / 拒绝），再走计划门与权限门，工具体跑完经 `tools/execute` 回采样；出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
 
 `system-prompt/assemble` 的载荷是 `PromptAssembly`。贡献插件 `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（对标 `"tools".register`，fiber dispose 注销）。`systemPrompt` 只做 facade：live-lookup `"context"` 求值，再跑 waterfall 供拦截。基座（`system-prompt.base`）只写身份与按需发现，不列工具名；persona/roster 来自 `agent-presets`（写路径用 `.dock/presets`，不用绝对 `{cwd}`），listing 来自 `skills` / `tool-workflow`（同样用 `skills/`、`.dock/skills/`、`~/.dock/skills/` 这类通用路径）。计划 / 目标走历史尾部 `<system-reminder>`，不进系统提示。Cordis 只留短指针。`/context` 与顶栏 live-lookup `ContextBook.window()`，系统提示按段看 token。加/改一段提示词就是在贡献插件里登记，不动 assembler。
 
@@ -220,7 +223,7 @@ cargo run -p cordis-app -- --resume <id>     # 恢复指定会话
 测试：
 
 ```bash
-cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
+cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway -p dock-memory
 cargo test -p cordis-spine --test round -- install_app_registers
 ```
 
@@ -258,15 +261,17 @@ npm run build
 
 ## 仓库
 
-第一方库统一 `cordis-*`。其余是入口、注入、冻结副本。
+第一方 crate 多为 `cordis-*`；`dock-memory` 与二进制 `dock` 用产品名。其余是入口、注入与冻结副本。
 
 ```
 dock/
 ├── cordis-rust/          # 插件内核 crate `cordis`：Context、inject、named services
+├── cordis-base/          # spine 底座：wire 类型、config.toml、纯引擎（不含插件）
 ├── cordis-spine/         # Agent 循环、工具、MCP、会话、预设
 ├── cordis-tui/           # 全屏终端 UI
 ├── cordis-gateway/       # 回环 HTTP/WS：配对与 dock.1 投影
 ├── cordis-app/           # 二进制入口
+├── dock-memory/          # 跨会话记忆引擎（默认关）
 ├── dock-render/          # Markdown / Mermaid（crate 名暂仍 cordis-markdown / xai-grok-mermaid）
 ├── embed-sdk/            # 宿主页 JS 注入（dock-embed.js）
 ├── vendor/               # 冻结副本：xai Grok 拷贝（mermaid 栈在 dock-render/third_party/）
@@ -274,6 +279,7 @@ dock/
 ├── .agents/skills/       # 仓库流程 skills（Agents scope）
 ├── docs/                 # 架构与开发细节
 ├── assets/               # 品牌图
+├── CHANGELOG.md          # 用户可见变更
 ├── LICENSE               # Apache-2.0（第一方 crate）
 ├── NOTICE                # 版权归属 + vendor/ 第三方授权清单
 └── config.toml.example   # 用户 / 项目模型目录样例
@@ -292,6 +298,7 @@ dock/
 | [CLI.md](CLI.md) | 斜杠、快捷键、overlay、底栏 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 人类贡献流程 |
 | [SECURITY.md](SECURITY.md) | 漏洞上报与安全边界 |
+| [CHANGELOG.md](CHANGELOG.md) | 用户可见变更（Keep a Changelog 格式） |
 | [embed-sdk/README.md](embed-sdk/README.md) | 浏览器 SDK 属性、事件、配对 |
 | [skills/cordis-plugin-development/SKILL.md](skills/cordis-plugin-development/SKILL.md) | 动态 Cordis 插件工作流 |
 | [.agents/skills/](.agents/skills/) | 仓库流程 skills：git-commit、create-pr |
