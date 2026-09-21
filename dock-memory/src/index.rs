@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::chunker::{chunk_hash, chunk_markdown, ChunkConfig};
 use crate::query_expansion::extract_keywords;
 use crate::schema;
+use crate::tokenize;
 
 static SQLITE_VEC_INIT: Once = Once::new();
 
@@ -260,7 +261,7 @@ impl MemoryIndex {
                     )?;
                     tx.execute(
                         "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                        params![old.1, old.2],
+                        params![old.1, fts_text(&old.2)],
                     )?;
                     let rid: i64 = tx.query_row(
                         "SELECT rowid FROM chunks WHERE id = ?1",
@@ -269,7 +270,7 @@ impl MemoryIndex {
                     )?;
                     tx.execute(
                         "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
-                        params![rid, chunk.text],
+                        params![rid, fts_text(&chunk.text)],
                     )?;
                     if self.vec_available {
                         let _ = tx.execute(
@@ -299,7 +300,7 @@ impl MemoryIndex {
                     let rowid = tx.last_insert_rowid();
                     tx.execute(
                         "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
-                        params![rowid, chunk.text],
+                        params![rowid, fts_text(&chunk.text)],
                     )?;
                     result.added += 1;
                 }
@@ -310,7 +311,7 @@ impl MemoryIndex {
             if !seen_ids.contains(old_id) {
                 tx.execute(
                     "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                    params![old.1, old.2],
+                    params![old.1, fts_text(&old.2)],
                 )?;
                 if self.vec_available {
                     let _ = tx.execute(
@@ -504,7 +505,7 @@ impl MemoryIndex {
         for (id, old) in &existing {
             tx.execute(
                 "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                params![old.1, old.2],
+                params![old.1, fts_text(&old.2)],
             )?;
             if self.vec_available {
                 let _ = tx.execute("DELETE FROM chunks_vec WHERE chunk_id = ?1", params![id]);
@@ -608,8 +609,33 @@ impl MemoryIndex {
 ///
 /// Multi-keyword queries use **AND** so every term must appear. OR made queries
 /// like `"Lynn Dock review style"` match notes that only mention Dock.
+///
+/// CJK text is normalized the same way as at index time: a run like `语言偏好`
+/// becomes overlapping bigrams (`语言 言偏 偏好`) so a single Chinese keyword can
+/// match inside a longer run. Terms containing FTS5 syntax characters such as
+/// `dock.1` or `agent/pre-step` are wrapped as phrases instead of raising a
+/// syntax error.
 fn fts_match_query(query: &str) -> String {
-    extract_keywords(query).join(" AND ")
+    extract_keywords(query)
+        .into_iter()
+        .flat_map(|keyword| {
+            // A keyword may mix scripts; the bigram expansion must match the
+            // stored text token-for-token.
+            tokenize::tokenize_for_fts(&keyword)
+        })
+        .map(|token| tokenize::escape_fts_term(&token))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+/// Normalize chunk text for FTS indexing.
+///
+/// CJK runs become overlapping bigrams so a single Chinese keyword can match
+/// inside a longer run; everything else is unchanged. Inserted text and the
+/// text supplied to FTS5 `'delete'` statements must both go through this so the
+/// indexed tokens stay in sync.
+fn fts_text(text: &str) -> String {
+    tokenize::tokenize_for_fts(text).join(" ")
 }
 
 fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
@@ -694,6 +720,155 @@ mod tests {
         assert!(
             hits.is_empty(),
             "AND FTS must not return Dock-only notes for multi-term query; hits={hits:?}"
+        );
+    }
+
+    /// Regression: a Chinese keyword could not match inside a longer CJK run.
+    ///
+    /// Without CJK segmentation, `语言偏好` is one FTS token and a query for
+    /// `底栏` alone returned nothing.
+    #[test]
+    fn fts_finds_chinese_keyword_inside_cjk_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-cjk"));
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("cjk.md");
+        std::fs::write(
+            &topic,
+            "## 偏好\n\n语言偏好：用户可见文案用中文，底栏短 hint 保持英文。\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+
+        for needle in ["底栏", "偏好", "语言"] {
+            let hits = idx.search_fts(needle, 5).unwrap();
+            assert!(
+                !hits.is_empty(),
+                "Chinese keyword {needle:?} must recall; hits={hits:?}"
+            );
+        }
+    }
+
+    /// Regression: every keyword of a multi-word Chinese query had to appear,
+    /// and each failed to match because CJK runs were not segmented.
+    #[test]
+    fn fts_multi_word_chinese_query_recalls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-cjk-multi"));
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("cjk-multi.md");
+        std::fs::write(&topic, "## 构建\n\n安装应用并注册能力，然后调度分发。\n").unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+
+        let hits = idx.search_fts("安装 应用 注册 能力", 5).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "multi-word Chinese query must recall; hits={hits:?}"
+        );
+    }
+
+    /// `dock.1` and `agent/pre-step` are FTS5 syntax characters. A bare MATCH
+    /// raised a syntax error; they must now match as phrases.
+    #[test]
+    fn fts_matches_terms_with_fts_syntax_characters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-dotted"));
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("dotted.md");
+        std::fs::write(
+            &topic,
+            "## 协议\n\n宿主页 SDK 用 dock.1 协议，走 agent/pre-step 钩子。\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+
+        for needle in ["dock.1", "agent/pre-step"] {
+            let hits = idx.search_fts(needle, 5).unwrap();
+            assert!(
+                !hits.is_empty(),
+                "term {needle:?} must recall instead of erroring; hits={hits:?}"
+            );
+        }
+    }
+
+    /// A Chinese keyword shared by two notes must not leak into unrelated ones.
+    #[test]
+    fn fts_chinese_keyword_stays_precise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-cjk-precise"));
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.workspace.topics.join("a.md"),
+            "## A\n\n语言偏好与底栏文案\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.workspace.topics.join("b.md"),
+            "## B\n\n数据库迁移与回滚策略\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_tree(&root).unwrap();
+
+        let hits = idx.search_fts("底栏", 5).unwrap();
+        assert!(!hits.is_empty(), "底栏 must recall; hits={hits:?}");
+        for hit in &hits {
+            let chunk = idx.get_chunk(&hit.chunk_id).unwrap().unwrap();
+            assert!(
+                chunk.text.contains('底'),
+                "底栏 query must not return unrelated note; got {:?}",
+                chunk.text
+            );
+        }
+    }
+
+    /// Regression: contentless FTS delete must pass the same `fts_text` tokens
+    /// that insert used. Otherwise a rewrite that drops a CJK keyword (or a
+    /// `delete_path`) leaves stale bigrams in `chunks_fts`, so MATCH still hits.
+    #[test]
+    fn cjk_rewrite_and_delete_path_drop_stale_fts_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-cjk-stale"));
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("cjk-stale.md");
+        std::fs::write(
+            &topic,
+            "## 偏好\n\n语言偏好：用户可见文案用中文，底栏短 hint 保持英文。\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+        assert!(
+            !idx.search_fts("底栏", 5).unwrap().is_empty(),
+            "indexed note must recall 底栏"
+        );
+
+        // Rewrite removes the keyword; reindex must delete the old FTS row with
+        // the same normalized text that was inserted.
+        std::fs::write(
+            &topic,
+            "## 偏好\n\n语言偏好：用户可见文案用中文，短 hint 保持英文。\n",
+        )
+        .unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+        let after_rewrite = idx.search_fts("底栏", 5).unwrap();
+        assert!(
+            after_rewrite.is_empty(),
+            "rewrite without 底栏 must not MATCH; hits={after_rewrite:?}"
+        );
+        assert!(
+            !idx.search_fts("偏好", 5).unwrap().is_empty(),
+            "remaining CJK terms must still recall"
+        );
+
+        idx.delete_path(&topic).unwrap();
+        let after_delete = idx.search_fts("偏好", 5).unwrap();
+        assert!(
+            after_delete.is_empty(),
+            "delete_path must clear FTS tokens; hits={after_delete:?}"
         );
     }
 }
