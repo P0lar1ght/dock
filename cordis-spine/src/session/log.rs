@@ -98,6 +98,12 @@ pub struct Sessions {
     compact_prefix: Arc<Mutex<Option<Vec<LogEvent>>>>,
     compact_from: Arc<Mutex<usize>>,
     compact_images: Arc<Mutex<Vec<Vec<cordis_base::types::UserImage>>>>,
+    /// Successful compact cycles (for flush-once-per-cycle gating).
+    compaction_count: Arc<AtomicU64>,
+    /// Compaction cycle when memory was last flushed.
+    last_flush_compaction: Arc<AtomicU64>,
+    /// Last accepted flush markdown (for delta flushes).
+    last_flush_content: Arc<Mutex<Option<String>>>,
 }
 
 /// Official SSE usage held until [`Sessions::finish_llm`] so one sample is
@@ -197,6 +203,9 @@ impl Sessions {
             compact_prefix: Arc::new(Mutex::new(None)),
             compact_from: Arc::new(Mutex::new(0)),
             compact_images: Arc::new(Mutex::new(Vec::new())),
+            compaction_count: Arc::new(AtomicU64::new(0)),
+            last_flush_compaction: Arc::new(AtomicU64::new(0)),
+            last_flush_content: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -786,6 +795,30 @@ impl Sessions {
 
     pub fn set_auto_compact_suppressed(&self, on: bool) {
         self.auto_compact_suppressed.store(on, Ordering::Relaxed);
+    }
+
+    pub fn compaction_count(&self) -> u64 {
+        self.compaction_count.load(Ordering::Relaxed)
+    }
+
+    pub fn bump_compaction_count(&self) {
+        self.compaction_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn last_flush_compaction(&self) -> u64 {
+        self.last_flush_compaction.load(Ordering::Relaxed)
+    }
+
+    pub fn mark_flushed_for_compaction(&self, cycle: u64) {
+        self.last_flush_compaction.store(cycle, Ordering::Relaxed);
+    }
+
+    pub fn last_flush_content(&self) -> Option<String> {
+        self.last_flush_content.lock().unwrap().clone()
+    }
+
+    pub fn set_last_flush_content(&self, content: Option<String>) {
+        *self.last_flush_content.lock().unwrap() = content;
     }
 
     /// Drop a trailing empty `begin_llm` slot and insert interrupted

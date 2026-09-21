@@ -9,6 +9,7 @@ pub mod goal_overlay;
 pub mod goal_pane;
 pub mod inspect_overlay;
 pub mod mcp_elicit_view;
+pub mod memory_browser;
 pub mod overlay;
 pub mod pairing;
 pub mod permission_view;

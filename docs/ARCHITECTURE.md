@@ -33,6 +33,7 @@ cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、
   src/grok/              从 grok pager 冻结复制的 chrome（glyphs、picker、wrapping…）
 cordis-gateway/          回环 HTTP/WS 插件：配对、dock.1 JSON-RPC 投影、slash list|execute
 cordis-app/              二进制入口：一个 Context，install_app + agent-loop + gateway + tui
+dock-memory/             crate `dock-memory`：跨会话 topics/observations + FTS（默认关）
 dock-render/markdown/    crate `cordis-markdown`
 dock-render/mermaid/     crate `xai-grok-mermaid`
 embed-sdk/               宿主页 JS SDK（`dist/dock-embed.js`，协议 dock.1）
@@ -165,7 +166,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 3. **live-lookup，不捕获。** 调用点 `ctx.get` / `ctx.require`。不要把 `Arc<T>` 关进长生命周期闭包（TUI frame、HTTP 重试、cron tick、sampler `on_delta` 这类闭包里也要重新 `get`）。
 4. **扩展走 waterfall。** 七条：`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/pre-execute`、`tools/execute`、`system-prompt/assemble`。工具那两条分工是**时机**：`tools/pre-execute` 夹在允许名单的两次检查之间（入站一次挡模型越界、改写后一次挡插件替它越界）、计划门与权限门之前，载荷 `PreExecute` 带着 `arguments`，可以 `rewrite_args`（改参数）/ `rewrite`（改道到另一颗工具）/ `deny`（拒绝，理由直接成为模型看到的结果）；两道门读的是改写**之后**的名字，所以改道会跟着换一套门。`deny` 是**单调**的——第一次拒绝说了算，后面的 handler 掀不翻，否则「这条策略成不成立」就由挂载顺序决定了。它是**同步**的（内核 waterfall 收同步 handler），做不了异步询问，自定义权限询问仍走 `acp::needs_permission` + `Permissions::request`。`tools/execute` 则是 post-hoc 的，载荷 `ToolResult`。循环里不留第八条私有扩展点。拦截接 `on_waterfall`，默认实现放在 `waterfall(..., || default)` 的闭包里。监听必须把控制权交给下一环，不许吞链。handler **拿不到执行 ctx**（`EventArgs` 只有 payload 和 `next`），只有注册时捕获的那个 ctx；跟着会话走的东西（如 `identity`）要放进载荷，per-turn 状态由 handler 自己存、按载荷里的信号（如 `StepStart::step == 0`）重置。`agent/step-start` 是例外：循环把**当前这个 agent 的** ctx 挂成 task-local（`cordis_spine` 的 `tools::exec_ctx()` / `with_exec_ctx`），要子代理自己那份会话 / 窗口的 handler 走它——子代理是隔离 ctx，注册时捕获的那个只看得见主会话。多个 handler 会抢同一个结果、或要定彼此先后时用显式 order 槽（`system-prompt/assemble` 的段序、`agent/turn-end` 的 `ORDER_TURN_END_*`、`agent/step-start` 的 `ORDER_STEP_START_*` = 规约 5 / todo 10 / 动态 50），不靠挂载顺序定胜负。其中 `agent/step-start` 与 `agent/turn-end` 对磁盘 Rhai 包开放（`host.on`，槽位 `*_DYNAMIC = 50`，排在内建之后）—— 这两条的契约是「返回正文、循环 append」，脚本既碰不到 `Sessions` 也吞不掉链；其余五条不可脚本化。
 5. **提示词分段归贡献插件。** `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（fiber dispose 注销）。`systemPrompt` 只是 facade；基座只写身份与按需发现，**不列工具名**。计划 / 目标**与工作区规约（`AGENTS.md`）**走历史尾部 `<system-reminder>`，不进系统提示——`AGENTS.md` 是仓库内容，不能借用 harness 自己的声音（中和 `<system-reminder>` 变体后再包进带来源标注的块）。段序：`ORDER_CORDIS=10` < `ORDER_PERSONA=20` < `ORDER_WORKFLOWS=40` < `ORDER_SKILLS=41`——**这张表里没有任何一段跟着 cwd 变**，`/cd` 不再让前缀作废，主会话、各分页、子代理共享的头更长。**工具用法不进系统提示**——子代理名册与信箱语义归 `task` / `send_message` / `report` / `interrupt_agent` 的 description，基座只写身份、按需发现与不随预设改变的工作底线。技能 / 工作流两段只发主会话（子代理靠 `agents/<type>.yml` 的 `listings: true` opt-in），且各自 header 点名的 loader（`skill` / `workflow`）必须在本会话的 `specs_for_model_on` 里才发——listing 不能宣传一个这个预设调不动的工具。预算与渲染共用 `src/listing.rs`。
-6. **MCP / 按需工具 fail-open。** 连不上仍是 `Active`，往 `"mcp"` 写空 / 失败状态。不常用本地工具（`register_deferred`：scheduler / memory / monitor / goal / lsp / skill / workflow / cordis_* / browser_*）注册进 `"tools"` 但**不进** sampler 的 `specs_for_model`；模型侧固定 `search_tool` + `use_tool`。工具描述保持静态，以保住 tools JSON 前缀缓存。
+6. **MCP / 按需工具 fail-open。** 连不上仍是 `Active`，往 `"mcp"` 写空 / 失败状态。不常用本地工具（`register_deferred`：scheduler / monitor / goal / lsp / skill / workflow / cordis_* / browser_*）注册进 `"tools"` 但**不进** sampler 的 `specs_for_model`；模型侧固定 `search_tool` + `use_tool`。`memory_search` / `memory_get` 在 memory **启用**时走 `register`（sampler 常驻），关闭时不进表。工具描述保持静态，以保住 tools JSON 前缀缓存。
 7. **工具名不撞车。** MCP 公名 `mcp_{server}__{tool}`，不能盖掉 `bash` 之类的内置名。
 8. **Gateway 默认不监听。** 只绑 loopback（首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`；`DOCK_GATEWAY_BIND` 只改首选）。`/pair` 开启；鉴权靠配对 + 一次性 ticket + 回环，CORS 反射 Origin 是有意的。
 9. **reasoning 不混进助手 markdown。** 推理走 `StreamDelta::Reasoning` / `LlmOutput.reasoning`；工具卡折叠显示 name + 参数摘要，展开先「输入」再「输出」，参数在 `LogEvent::ToolExecute.arguments`。
@@ -177,6 +178,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 ## 磁盘
 
 - `~/.dock`（可用 `DOCK_HOME` 覆盖）：config、presets、plugins、skills、memory、`sessions/`、`mcp_credentials.json`。
+- Memory（Stage 3，默认关）：`$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,observations/_inbox,archive}/`，索引 `$DOCK_HOME/memory/search.sqlite`（FTS5 + 可选 sqlite-vec hybrid + MMR）。启用时 file watcher dirty sync、可选 `[memory.embedding]` 查询 embed + 写后 `embed_missing`。`/flush` 只写 memory；compact 仍写 `sessions/.../compaction/`（A7）并 bump cycle。斜杠 `/flush` `/dream` `/memory` `/remember`；工具 `memory_search` / `memory_get` 启用时 sampler 常驻。仍 deferred：auto-capture / auto-dream timer / drag_select。
 - 项目 `.dock/`：覆盖 config、presets、plugins、skills、`plan.md`、workflows。
 - HTTP MCP 的 OAuth token 在 `~/.dock/mcp_credentials.json`，**不写进** `config.toml`。它不是 grok.com 账号登录。
 

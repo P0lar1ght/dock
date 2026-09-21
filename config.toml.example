@@ -166,3 +166,25 @@ prompt_cache = true
 #                            # IP 字面量（10.x / 127.x / 169.254.169.254）照旧拦。
 # allow_local = false        # 只放行显式本地主机名（localhost / 127.0.0.0/8 / ::1）。
 #                            # 私有段与云元数据地址永不放行。缺省 false。
+
+
+# Cross-session memory (default off). Override with DOCK_MEMORY=1/0.
+# When enabled, memory_search / memory_get are sampler-resident (no search_tool).
+# Optional [memory.embedding] enables sqlite-vec hybrid; missing → FTS-only.
+# File watcher dirty-syncs before search; post-write embed_missing is soft-fail.
+# [memory]
+# enabled = false
+# [memory.flush]
+# enabled = true
+# soft_threshold_tokens = 4000
+# max_flush_write_chars = 8000
+# [memory.dream]
+# enabled = true
+# min_hours = 24
+# min_sessions = 5
+# Optional embeddings for hybrid search (missing → FTS-only).
+# [memory.embedding]
+# model = "text-embedding-3-small"
+# base = "https://api.openai.com/v1"
+# dimensions = 1024
+# api_key = ""   # or DOCK_MEMORY_EMBEDDING_API_KEY / OPENAI_API_KEY

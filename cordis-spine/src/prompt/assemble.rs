@@ -17,6 +17,7 @@ pub const ORDER_CORDIS: i32 = 10;
 pub const ORDER_PERSONA: i32 = 20;
 pub const ORDER_WORKFLOWS: i32 = 40;
 pub const ORDER_SKILLS: i32 = 41;
+pub const ORDER_MEMORY: i32 = 42;
 
 /// Structured payload carried by the `system-prompt/assemble` waterfall.
 ///

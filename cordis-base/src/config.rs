@@ -393,6 +393,9 @@ struct FileConfig {
     /// `[toolset.<tool>]` — per-tool runtime knobs owned by the tool plugins.
     #[serde(default)]
     toolset: ToolsetSection,
+    /// `[memory]` — cross-session topics/observations memory (default off).
+    #[serde(default)]
+    memory: MemorySection,
 }
 
 /// `[toolset.web_fetch]` —— `tool-web` 的运行时旋钮。
@@ -442,6 +445,154 @@ struct BrowserSection {
     /// `None` = key absent (do not override earlier catalog paths).
     #[serde(default)]
     headed: Option<bool>,
+}
+
+/// Raw `[memory]` table from config.toml.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct MemorySection {
+    pub enabled: Option<bool>,
+    pub flush: MemoryFlushSection,
+    pub dream: MemoryDreamSection,
+    pub embedding: MemoryEmbeddingSection,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct MemoryEmbeddingSection {
+    pub model: Option<String>,
+    pub base: Option<String>,
+    pub api_key: Option<String>,
+    pub dimensions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct MemoryFlushSection {
+    pub enabled: Option<bool>,
+    pub soft_threshold_tokens: Option<u64>,
+    pub flush_model: Option<String>,
+    pub max_flush_write_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct MemoryDreamSection {
+    pub enabled: Option<bool>,
+    pub min_hours: Option<u64>,
+    pub min_sessions: Option<u64>,
+}
+
+/// Resolved `[memory]` settings. Default `enabled = false`; `DOCK_MEMORY=1/0` overrides.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    /// Process-wide force off (`DOCK_MEMORY=0`).
+    pub force_disabled: bool,
+    pub flush: MemoryFlushConfig,
+    pub dream: MemoryDreamConfig,
+    pub embedding: MemoryEmbeddingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryEmbeddingConfig {
+    pub model: Option<String>,
+    pub base: Option<String>,
+    pub api_key: Option<String>,
+    pub dimensions: usize,
+}
+
+impl Default for MemoryEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            base: None,
+            api_key: None,
+            dimensions: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryFlushConfig {
+    pub enabled: bool,
+    pub soft_threshold_tokens: u64,
+    pub flush_model: Option<String>,
+    pub max_flush_write_chars: usize,
+}
+
+impl Default for MemoryFlushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            soft_threshold_tokens: 4000,
+            flush_model: None,
+            max_flush_write_chars: 8000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MemoryDreamConfig {
+    pub enabled: bool,
+    pub min_hours: u64,
+    pub min_sessions: u64,
+}
+
+impl Default for MemoryDreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_hours: 24,
+            min_sessions: 5,
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// Resolve from optional TOML section + `DOCK_MEMORY` env.
+    pub fn resolve(section: &MemorySection) -> Self {
+        let defaults = Self::default();
+        let env = std::env::var("DOCK_MEMORY").ok();
+        let (enabled, force_disabled) = match env.as_deref().map(str::trim) {
+            Some("0") | Some("false") | Some("off") | Some("no") => (false, true),
+            Some("1") | Some("true") | Some("on") | Some("yes") => (true, false),
+            _ => (section.enabled.unwrap_or(false), false),
+        };
+        let flush_s = &section.flush;
+        let dream_s = &section.dream;
+        Self {
+            enabled,
+            force_disabled,
+            flush: MemoryFlushConfig {
+                enabled: flush_s.enabled.unwrap_or(defaults.flush.enabled),
+                soft_threshold_tokens: flush_s
+                    .soft_threshold_tokens
+                    .unwrap_or(defaults.flush.soft_threshold_tokens),
+                flush_model: match flush_s.flush_model.as_deref() {
+                    Some("") | None => None,
+                    Some(m) => Some(m.to_owned()),
+                },
+                max_flush_write_chars: flush_s
+                    .max_flush_write_chars
+                    .unwrap_or(defaults.flush.max_flush_write_chars),
+            },
+            dream: MemoryDreamConfig {
+                enabled: dream_s.enabled.unwrap_or(defaults.dream.enabled),
+                min_hours: dream_s.min_hours.unwrap_or(defaults.dream.min_hours),
+                min_sessions: dream_s.min_sessions.unwrap_or(defaults.dream.min_sessions),
+            },
+            embedding: {
+                let e = &section.embedding;
+                MemoryEmbeddingConfig {
+                    model: e.model.clone().filter(|m| !m.is_empty()),
+                    base: e.base.clone().filter(|b| !b.is_empty()),
+                    api_key: e.api_key.clone().filter(|k| !k.is_empty()),
+                    dimensions: e.dimensions.unwrap_or(1024),
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -904,6 +1055,58 @@ const WEB_FETCH_TOOLSET_KEYS: &[&str] = &[
 /// `allowed_domains` 就是覆盖，不是追加。
 pub fn load_web_fetch_config() -> WebFetchToolConfig {
     load_web_fetch_config_from(&catalog_paths())
+}
+
+/// Live-read `[memory]`. Default off; `DOCK_MEMORY` overrides TOML.
+pub fn load_memory_config() -> MemoryConfig {
+    load_memory_config_from(&catalog_paths())
+}
+
+pub fn load_memory_config_from(paths: &[PathBuf]) -> MemoryConfig {
+    let mut section = MemorySection::default();
+    for path in paths {
+        let Some(file) = read_file(path) else {
+            continue;
+        };
+        // Field-wise overlay: later files win per-option.
+        if file.memory.enabled.is_some() {
+            section.enabled = file.memory.enabled;
+        }
+        if file.memory.flush.enabled.is_some() {
+            section.flush.enabled = file.memory.flush.enabled;
+        }
+        if file.memory.flush.soft_threshold_tokens.is_some() {
+            section.flush.soft_threshold_tokens = file.memory.flush.soft_threshold_tokens;
+        }
+        if file.memory.flush.flush_model.is_some() {
+            section.flush.flush_model = file.memory.flush.flush_model.clone();
+        }
+        if file.memory.flush.max_flush_write_chars.is_some() {
+            section.flush.max_flush_write_chars = file.memory.flush.max_flush_write_chars;
+        }
+        if file.memory.dream.enabled.is_some() {
+            section.dream.enabled = file.memory.dream.enabled;
+        }
+        if file.memory.dream.min_hours.is_some() {
+            section.dream.min_hours = file.memory.dream.min_hours;
+        }
+        if file.memory.dream.min_sessions.is_some() {
+            section.dream.min_sessions = file.memory.dream.min_sessions;
+        }
+        if file.memory.embedding.model.is_some() {
+            section.embedding.model = file.memory.embedding.model.clone();
+        }
+        if file.memory.embedding.base.is_some() {
+            section.embedding.base = file.memory.embedding.base.clone();
+        }
+        if file.memory.embedding.api_key.is_some() {
+            section.embedding.api_key = file.memory.embedding.api_key.clone();
+        }
+        if file.memory.embedding.dimensions.is_some() {
+            section.embedding.dimensions = file.memory.embedding.dimensions;
+        }
+    }
+    MemoryConfig::resolve(&section)
 }
 
 pub fn load_web_fetch_config_from(paths: &[PathBuf]) -> WebFetchToolConfig {
@@ -2441,5 +2644,118 @@ proxy_endpont = "http://127.0.0.1:7890"
         let cfg = load_web_fetch_config_from(&[path]);
         assert_eq!(cfg.timeout_secs, Some(30));
         assert_eq!(cfg.proxy_endpoint, None, "拼错的键就是没配上");
+    }
+
+    // ── [memory] ───────────────────────────────────────────────────────
+
+    #[test]
+    fn memory_defaults_disabled() {
+        let _env = crate::test_env::scoped().remove("DOCK_MEMORY");
+        let cfg = load_memory_config_from(&[PathBuf::from("/nonexistent/memory.toml")]);
+        assert!(!cfg.enabled);
+        assert!(!cfg.force_disabled);
+        assert!(cfg.flush.enabled);
+    }
+
+    #[test]
+    fn memory_toml_enables() {
+        let _env = crate::test_env::scoped().remove("DOCK_MEMORY");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[memory]
+enabled = true
+[memory.flush]
+soft_threshold_tokens = 2000
+[memory.dream]
+min_sessions = 3
+"#,
+        )
+        .unwrap();
+        let cfg = load_memory_config_from(&[path]);
+        assert!(cfg.enabled, "enabled should be true, got {cfg:?}");
+        assert_eq!(cfg.flush.soft_threshold_tokens, 2000);
+        assert_eq!(cfg.dream.min_sessions, 3);
+    }
+
+    #[test]
+    fn memory_env_overrides_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[memory]\nenabled = true\n").unwrap();
+        let _guard = crate::test_env::scoped().set("DOCK_MEMORY", "0");
+        let cfg = load_memory_config_from(&[path]);
+        assert!(!cfg.enabled);
+        assert!(cfg.force_disabled);
+    }
+
+    #[test]
+    fn memory_embedding_overlay_from_toml() {
+        let _env = crate::test_env::scoped().remove("DOCK_MEMORY");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[memory]
+enabled = true
+[memory.embedding]
+model = "text-embedding-3-small"
+base = "https://api.openai.com/v1"
+api_key = "sk-test"
+dimensions = 1536
+"#,
+        )
+        .unwrap();
+        let cfg = load_memory_config_from(&[path]);
+        assert_eq!(
+            cfg.embedding.model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(
+            cfg.embedding.base.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(cfg.embedding.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(cfg.embedding.dimensions, 1536);
+        assert!(
+            !cfg.embedding.model.as_deref().unwrap_or("").is_empty()
+                && !cfg.embedding.base.as_deref().unwrap_or("").is_empty(),
+            "embedding model/base must be non-empty for hybrid"
+        );
+    }
+
+    #[test]
+    fn memory_embedding_later_file_wins() {
+        let _env = crate::test_env::scoped().remove("DOCK_MEMORY");
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.toml");
+        let second = dir.path().join("b.toml");
+        std::fs::write(
+            &first,
+            r#"
+[memory.embedding]
+model = "old-model"
+base = "https://old.example/v1"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            r#"
+[memory.embedding]
+model = "new-model"
+base = "https://new.example/v1"
+"#,
+        )
+        .unwrap();
+        let cfg = load_memory_config_from(&[first, second]);
+        assert_eq!(cfg.embedding.model.as_deref(), Some("new-model"));
+        assert_eq!(
+            cfg.embedding.base.as_deref(),
+            Some("https://new.example/v1")
+        );
     }
 }

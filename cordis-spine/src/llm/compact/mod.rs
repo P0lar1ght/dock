@@ -30,6 +30,7 @@ use cordis_base::stream_acc::StreamDelta;
 use cordis_base::types::{LogEvent, PromptRequest};
 use cordis_base::usage::TokenUsage;
 
+use crate::tools::memory::maybe_flush_before_compact;
 use history::{build_compacted_events, prepare_conversation_for_summarization};
 
 pub(crate) use history::{estimate_context_tokens, VISIBLE_NOTICE};
@@ -136,6 +137,9 @@ async fn compact_session_locked(
     {
         return Err(Error::Compact("没有可压缩的对话。".into()));
     }
+    // Memory flush writes only under $DOCK_HOME/memory/; compact segments stay
+    // under sessions/.../compaction/ (A7). Fail-open if flush errors.
+    maybe_flush_before_compact(ctx).await;
     let llm = ctx.require::<Llm>(LLM)?;
     let mut request_history = prepare_conversation_for_summarization(&history);
     request_history.push(LogEvent::User(build_summary_prompt_kind(
@@ -221,6 +225,7 @@ async fn compact_session_locked(
             let _ = segments::persist_compaction_segment(&dir, &history, &output.text);
         }
         sessions.replace_compacted(compacted);
+        sessions.bump_compaction_count();
         re_announce_discoveries(ctx, sessions);
         return Ok(());
     }

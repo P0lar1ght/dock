@@ -170,6 +170,9 @@ pub(super) fn run_action(
                     computer.clear_finished();
                 }
             }
+            if apply_memory_key(ctx, overlay, KeyCode::Esc).is_some() {
+                return Vec::new();
+            }
             let _ = dispatch_slot_key(ctx, overlay, "esc");
             overlay.close();
             Vec::new()
@@ -182,6 +185,15 @@ pub(super) fn run_action(
             } = overlay
             {
                 scroll_usage(*tab, *detail, scroll, delta);
+                return Vec::new();
+            }
+            if matches!(overlay, Overlay::MemoryBrowser(_)) {
+                let code = if delta < 0 {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
+                let _ = apply_memory_key(ctx, overlay, code);
                 return Vec::new();
             }
             if let Overlay::Notice { body, scroll, .. } = overlay {
@@ -279,12 +291,18 @@ pub(super) fn run_action(
                     computer.clear_finished();
                 }
             }
+            if apply_memory_key(ctx, overlay, KeyCode::Enter).is_some() {
+                return Vec::new();
+            }
             if dispatch_slot_key(ctx, overlay, "enter") {
                 return Vec::new();
             }
             accept_overlay(ctx, overlay)
         }
         Action::OverlayChar(c) => {
+            if apply_memory_key(ctx, overlay, KeyCode::Char(c)).is_some() {
+                return Vec::new();
+            }
             if let Overlay::Dashboard {
                 focus: crate::views::dashboard::Focus::Composer,
                 composer,
@@ -656,6 +674,9 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::OverlayBackspace => {
+            if apply_memory_key(ctx, overlay, KeyCode::Backspace).is_some() {
+                return Vec::new();
+            }
             if let Overlay::Dashboard {
                 focus: crate::views::dashboard::Focus::Composer,
                 composer,
@@ -1688,6 +1709,7 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         | Overlay::Goal { .. }
         | Overlay::Usage { .. }
         | Overlay::Notice { .. }
+        | Overlay::MemoryBrowser(_)
         | Overlay::Slot { .. }
         | Overlay::Browser { .. }
         | Overlay::Computer { .. }
@@ -2067,6 +2089,61 @@ fn open_context_from_status(ctx: &Context, overlay: &mut Overlay, column: u16, r
     }
     *overlay = Overlay::usage(UsageTab::Context);
     true
+}
+
+fn apply_memory_key(
+    ctx: &Context,
+    overlay: &mut Overlay,
+    code: crossterm::event::KeyCode,
+) -> Option<Vec<Effect>> {
+    let Overlay::MemoryBrowser(state) = overlay else {
+        return None;
+    };
+    match crate::views::memory_browser::on_key(ctx, state, code) {
+        crate::views::memory_browser::KeyResult::Handled => Some(Vec::new()),
+        crate::views::memory_browser::KeyResult::Ignored => Some(Vec::new()),
+        crate::views::memory_browser::KeyResult::Close => {
+            overlay.close();
+            Some(Vec::new())
+        }
+        crate::views::memory_browser::KeyResult::Flash(msg) => {
+            flash(ctx, msg);
+            Some(Vec::new())
+        }
+        crate::views::memory_browser::KeyResult::Forget {
+            path,
+            expected_content_hash,
+        } => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let root = dock_memory::MemoryRoot::open_default(&cwd);
+            let mut index = match dock_memory::MemoryIndex::open_or_create(&root.search_db()) {
+                Ok(i) => i,
+                Err(e) => {
+                    flash(ctx, format!("记忆索引：{e}"));
+                    return Some(Vec::new());
+                }
+            };
+            match dock_memory::forget(&root, &path, &expected_content_hash, &mut index) {
+                Ok(r) => {
+                    let dest = r
+                        .archived_to
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "（已移除）".into());
+                    flash(
+                        ctx,
+                        format!("已删除（归档至 {dest}，索引 -{}）", r.index_removed),
+                    );
+                    // Refresh selection
+                    state.selected = 0;
+                    state.pending_delete = None;
+                    state.preview_hash = None;
+                }
+                Err(e) => flash(ctx, format!("删除失败：{e}")),
+            }
+            Some(Vec::new())
+        }
+    }
 }
 
 pub(super) fn overlay_keys(code: KeyCode, ctrl: bool) -> Option<Action> {

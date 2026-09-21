@@ -42,7 +42,7 @@ cargo build -p cordis-app
 cargo run -p cordis-app
 
 # 测试：默认回归集合
-cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
+cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway -p dock-memory
 cargo test -p cordis                      # 内核（目录 cordis-rust/，包名 cordis）
 cargo test -p cordis-markdown             # markdown 渲染
 
@@ -54,8 +54,8 @@ cargo test -p cordis-spine --test subagents
 cargo test -p cordis-gateway --test gateway
 
 # lint / 格式
-cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid
-cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings
+cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory
+cargo clippy -p cordis-spine -p dock-memory --all-targets --no-deps -- -D warnings
 ```
 
 注意事项，都是当前仓库的真实状态：
@@ -96,9 +96,10 @@ cargo test -p cordis-spine --test instructions          # 只链这一个集成�
 `.github/workflows/ci.yml` 在 `main` 的 push 与所有 PR 上跑四步：
 
 ```bash
-cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid
-cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets --no-deps -- -D warnings
+cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory
+cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory --all-targets --no-deps -- -D warnings
 cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
+cargo test --locked -p dock-memory
 cargo test --locked -p cordis-spine
 ```
 

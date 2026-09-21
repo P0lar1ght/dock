@@ -934,6 +934,9 @@ pub(super) fn paint_overlay(
             body,
             scroll,
         } => text_overlay::render(buf, area, title, body, *scroll),
+        Overlay::MemoryBrowser(state) => {
+            crate::views::memory_browser::render(buf, area, state, ctx)
+        }
         Overlay::Slot { id, scroll } => {
             let slots = ctx.get::<TuiSlots>(TUI_SLOTS);
             let title = slots

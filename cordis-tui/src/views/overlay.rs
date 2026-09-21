@@ -14,6 +14,7 @@ use crate::grok::tasks_pane::GroupKind;
 use crate::slash::{ArgKind, SlashCmd};
 use crate::theme::Theme;
 use crate::views::dashboard;
+use crate::views::memory_browser::MemoryBrowserState;
 use crate::views::plan_approval_view::PlanWrapCache;
 use crate::views::preset_overlay::{
     CanvasState, PresetPane, PresetView, RoleNamingDraft, RoleNamingStep,
@@ -122,6 +123,8 @@ pub enum Overlay {
         body: String,
         scroll: usize,
     },
+    /// `/memory` dual-pane browser (list + markdown preview).
+    MemoryBrowser(MemoryBrowserState),
     /// Dynamic package TUI slot (generic; body comes from `"tui.slots"`).
     Slot {
         id: String,
@@ -249,6 +252,11 @@ impl Overlay {
             | Self::History { query, .. }
             | Self::Find { query, .. }
             | Self::Args { query, .. } => query,
+            Self::MemoryBrowser(s)
+                if s.focus == crate::views::memory_browser::MemoryFocus::Filter =>
+            {
+                &s.filter
+            }
             Self::Settings { .. }
             | Self::Permission { .. }
             | Self::PairingPending { .. }
@@ -258,6 +266,7 @@ impl Overlay {
             | Self::PlanApproval { .. }
             | Self::Usage { .. }
             | Self::Notice { .. }
+            | Self::MemoryBrowser(_)
             | Self::Slot { .. }
             | Self::Browser { .. }
             | Self::Computer { .. }
@@ -379,6 +388,7 @@ impl Overlay {
             | Self::Workflows { selected, .. }
             | Self::Dashboard { selected, .. }
             | Self::Goal { selected, .. } => *selected,
+            Self::MemoryBrowser(s) => s.selected,
             Self::Usage { .. }
             | Self::Notice { .. }
             | Self::Slot { .. }
@@ -415,6 +425,7 @@ impl Overlay {
             | Self::Workflows { selected: s, .. }
             | Self::Dashboard { selected: s, .. }
             | Self::Goal { selected: s, .. } => *s = selected,
+            Self::MemoryBrowser(st) => st.selected = selected,
             Self::Usage { .. }
             | Self::Notice { .. }
             | Self::Slot { .. }
@@ -477,6 +488,11 @@ impl Overlay {
                 editing_persona: false,
                 ..
             })) => Some(catalog_query),
+            Self::MemoryBrowser(s)
+                if s.focus == crate::views::memory_browser::MemoryFocus::Filter =>
+            {
+                Some(&mut s.filter)
+            }
             Self::Settings { .. }
             | Self::Permission { .. }
             | Self::PairingPending { .. }
@@ -486,6 +502,7 @@ impl Overlay {
             | Self::PlanApproval { .. }
             | Self::Usage { .. }
             | Self::Notice { .. }
+            | Self::MemoryBrowser(_)
             | Self::Slot { .. }
             | Self::Browser { .. }
             | Self::Computer { .. }
@@ -637,6 +654,26 @@ const HELP: &[HelpEntry] = &[
         key: "/compact",
         label: "压缩旧对话",
         kind: HelpKind::Slash(SlashCmd::Compact),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/flush",
+        label: "把本会话要点写入 memory",
+        kind: HelpKind::Slash(SlashCmd::Flush),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/dream",
+        label: "consolidate observations → topics",
+        kind: HelpKind::Slash(SlashCmd::Dream),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/memory",
+        label: "浏览本地 memory（只读）",
+        kind: HelpKind::Slash(SlashCmd::Memory),
+    }),
+    HelpEntry::Row(HelpRow {
+        key: "/remember",
+        label: "记下一条跨会话偏好/事实",
+        kind: HelpKind::Slash(SlashCmd::Remember),
     }),
     HelpEntry::Row(HelpRow {
         key: "/undo",

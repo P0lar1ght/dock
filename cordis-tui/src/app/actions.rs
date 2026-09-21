@@ -265,6 +265,12 @@ pub enum Effect {
     Compact {
         context: String,
     },
+    MemoryFlush,
+    MemoryDream,
+    OpenMemoryBrowser,
+    MemoryRemember {
+        note: String,
+    },
     ShowNotice {
         title: String,
         body: String,
@@ -494,6 +500,21 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         SlashCmd::Compact => Effect::Compact {
             context: args.to_string(),
         },
+        SlashCmd::Flush => Effect::MemoryFlush,
+        SlashCmd::Dream => Effect::MemoryDream,
+        SlashCmd::Memory => Effect::OpenMemoryBrowser,
+        SlashCmd::Remember => {
+            let note = args.trim();
+            if note.is_empty() {
+                Effect::SetPrompt {
+                    text: "用法：/remember <笔记> — 留空则在输入框中编辑。\n/remember ".into(),
+                }
+            } else {
+                Effect::MemoryRemember {
+                    note: note.to_string(),
+                }
+            }
+        }
         SlashCmd::Undo => Effect::UndoLastSend {
             announce_failure: true,
         },

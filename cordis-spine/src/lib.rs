@@ -29,9 +29,10 @@ pub use bundle::{
 pub use cordis_base::acp::PermissionOptionKind;
 pub use cordis_base::config::{
     effective_browser_headed, load_browser_headed, load_catalog, load_disabled_mcp_tools,
-    load_mcp_servers, persist_browser_headed, persist_disabled_mcp_tools,
+    load_mcp_servers, load_memory_config, persist_browser_headed, persist_disabled_mcp_tools,
     persist_mcp_server_enabled, ApiBackend, AuthScheme, McpOAuthConfig, McpServer, McpStdioFraming,
-    McpTransport, ModelChoice, ModelPricing, DEFAULT_EFFORT_CHOICES,
+    McpTransport, MemoryConfig, MemoryDreamConfig, MemoryFlushConfig, ModelChoice, ModelPricing,
+    DEFAULT_EFFORT_CHOICES,
 };
 pub use cordis_base::stream_acc::StreamDelta;
 pub use cordis_base::types::{
@@ -106,7 +107,10 @@ pub use tools::mcp::{
     is_mcp_public_name, mcp_client, public_tool_name, split_mcp_public_name, ElicitPrompt,
     Elicitation, Mcp, McpReloadReport, McpStatus, McpToolStatus, SEARCH_TOOL_NAME, USE_TOOL_NAME,
 };
-pub use tools::memory::{tool_memory, Memory};
+pub use tools::memory::{
+    maybe_flush_before_compact, run_dream, run_flush, run_remember, run_remember_async,
+    tool_memory, Memory,
+};
 pub use tools::monitor::tool_monitor;
 pub use tools::plan_mode::{
     is_plan_file_edit, plan_instruction, plan_mode, plan_system_addon, PlanApprovalPrompt,
