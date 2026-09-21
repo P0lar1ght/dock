@@ -44,14 +44,14 @@ cargo run -p cordis-app                      # 起 TUI
 cargo run -p cordis-app -- --resume          # 恢复本 cwd 最近一次会话（--resume <id> 指定）
 
 # 默认回归集合（改行为的常规验证）
-cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
+cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway -p dock-memory
 cargo test -p cordis                         # 内核单独跑（包名是 cordis，目录是 cordis-rust）
 # 单文件 / 单测
 cargo test -p cordis-tui --test dispatch
 cargo test -p cordis-spine --test round -- install_app_registers
 cargo test -p cordis-spine --test dynamic -- <test_name>   # 动态插件相关
 
-cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid   # 格式门禁（CI 同款，七个第一方 crate）
+cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory   # 格式门禁（CI 同款，第一方 crate）
 cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings   # lint（按改动的 crate 跑，CI 同款）
 ```
 

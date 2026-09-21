@@ -36,11 +36,14 @@ jobs:
         # `--no-deps` 必须有：--locked 下的 workspace 成员含 vendor/ 冻结副本，
         # 不排除的话它们会一起被 lint，`-D warnings` 会被上游的既有 warning 打红
         # （2026-09 那次就是在 vendor/xai/workflow 上挂的）。
-        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets --no-deps -- -D warnings
+        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory --all-targets --no-deps -- -D warnings
 
       # 默认回归集合里除 spine 之外的部分。
       - name: Test (gateway / tui / app)
         run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
+
+      - name: Test (dock-memory)
+        run: cargo test --locked -p dock-memory
 
       # 需要真实 Chrome 的 browser 冒烟已标 #[ignore]；其余用例的进程级
       # DOCK_HOME / cwd 由 test_env::scoped() 串行化，可以并行跑。见 docs/DEVELOPMENT.md「CI」。

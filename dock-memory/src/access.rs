@@ -245,7 +245,8 @@ pub fn forget(
     })
 }
 
-fn unique_archive_path(archive: &Path, name: &std::ffi::OsStr) -> PathBuf {
+/// Pick a non-colliding path under `archive/` (used by forget and dream).
+pub fn unique_archive_path(archive: &Path, name: &std::ffi::OsStr) -> PathBuf {
     let base = archive.join(name);
     if !base.exists() {
         return base;

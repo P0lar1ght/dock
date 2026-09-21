@@ -41,7 +41,8 @@ pub mod text_utils;
 pub mod watcher;
 
 pub use access::{
-    forget, AccessError, ForgetResult, MemoryAccessPolicy, PathClass, MAX_FORGET_FILE_BYTES,
+    forget, unique_archive_path, AccessError, ForgetResult, MemoryAccessPolicy, PathClass,
+    MAX_FORGET_FILE_BYTES,
 };
 pub use config::{MemoryEmbeddingConfig, MemorySearchConfig, MmrConfig, SearchResult};
 pub use dream::{

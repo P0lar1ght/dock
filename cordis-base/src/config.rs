@@ -1093,6 +1093,18 @@ pub fn load_memory_config_from(paths: &[PathBuf]) -> MemoryConfig {
         if file.memory.dream.min_sessions.is_some() {
             section.dream.min_sessions = file.memory.dream.min_sessions;
         }
+        if file.memory.embedding.model.is_some() {
+            section.embedding.model = file.memory.embedding.model.clone();
+        }
+        if file.memory.embedding.base.is_some() {
+            section.embedding.base = file.memory.embedding.base.clone();
+        }
+        if file.memory.embedding.api_key.is_some() {
+            section.embedding.api_key = file.memory.embedding.api_key.clone();
+        }
+        if file.memory.embedding.dimensions.is_some() {
+            section.embedding.dimensions = file.memory.embedding.dimensions;
+        }
     }
     MemoryConfig::resolve(&section)
 }
@@ -2677,5 +2689,73 @@ min_sessions = 3
         let cfg = load_memory_config_from(&[path]);
         assert!(!cfg.enabled);
         assert!(cfg.force_disabled);
+    }
+
+    #[test]
+    fn memory_embedding_overlay_from_toml() {
+        let _env = crate::test_env::scoped().remove("DOCK_MEMORY");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[memory]
+enabled = true
+[memory.embedding]
+model = "text-embedding-3-small"
+base = "https://api.openai.com/v1"
+api_key = "sk-test"
+dimensions = 1536
+"#,
+        )
+        .unwrap();
+        let cfg = load_memory_config_from(&[path]);
+        assert_eq!(
+            cfg.embedding.model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(
+            cfg.embedding.base.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(cfg.embedding.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(cfg.embedding.dimensions, 1536);
+        assert!(
+            !cfg.embedding.model.as_deref().unwrap_or("").is_empty()
+                && !cfg.embedding.base.as_deref().unwrap_or("").is_empty(),
+            "embedding model/base must be non-empty for hybrid"
+        );
+    }
+
+    #[test]
+    fn memory_embedding_later_file_wins() {
+        let _env = crate::test_env::scoped().remove("DOCK_MEMORY");
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.toml");
+        let second = dir.path().join("b.toml");
+        std::fs::write(
+            &first,
+            r#"
+[memory.embedding]
+model = "old-model"
+base = "https://old.example/v1"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            r#"
+[memory.embedding]
+model = "new-model"
+base = "https://new.example/v1"
+"#,
+        )
+        .unwrap();
+        let cfg = load_memory_config_from(&[first, second]);
+        assert_eq!(cfg.embedding.model.as_deref(), Some("new-model"));
+        assert_eq!(
+            cfg.embedding.base.as_deref(),
+            Some("https://new.example/v1")
+        );
     }
 }

@@ -225,13 +225,17 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
                 &root.workspace,
                 dock_memory::MemoryScope::Workspace,
             );
+            // Reindex + embed topics first; archive is not in the searchable tree
+            // (`reindex_tree` skips archive/), so drop old index rows after rename.
             embed_missing_after_write(&cfg.embedding, &root).await;
-            // Archive processed observations by renaming aside (keep for audit).
             let archive = root.workspace.archive.clone();
             let _ = std::fs::create_dir_all(&archive);
             for path in msg.observation_paths {
                 if let Some(name) = path.file_name() {
-                    let _ = std::fs::rename(&path, archive.join(name));
+                    let dest = dock_memory::unique_archive_path(&archive, name);
+                    if std::fs::rename(&path, &dest).is_ok() {
+                        let _ = index.delete_path(&path);
+                    }
                 }
             }
             Ok(format!("Dream wrote {n} topic file(s)."))

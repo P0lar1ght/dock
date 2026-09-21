@@ -12,6 +12,7 @@ use cordis::Context;
 use crossterm::event::KeyCode;
 use dock_memory::browse::{list_memory_files, MemoryFileEntry};
 use dock_memory::layout::{MemoryRoot, MemoryScope};
+use dock_memory::MAX_FORGET_FILE_BYTES;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -91,18 +92,28 @@ fn entry_matches_filter(entry: &MemoryFileEntry, filter_l: &str) -> bool {
     filter_l.split_whitespace().all(|term| lower.contains(term))
 }
 
-fn build_rows(filter: &str) -> Vec<Row> {
-    let cfg = cordis_base::config::load_memory_config();
-    // Layout still listed when process-forced off so the user can browse disk.
+fn memory_enabled_for_list(ctx: Option<&Context>) -> bool {
+    if let Some(ctx) = ctx {
+        if let Some(mem) = ctx.get::<Memory>(MEMORY) {
+            return mem.enabled();
+        }
+    }
+    cordis_base::config::load_memory_config().enabled
+}
+
+/// List memory files without creating layout. `ensure_layout` belongs to write
+/// paths (`/remember`, `/flush`); opening `/memory` must not mkdir when disabled.
+fn build_rows_with_ctx(ctx: Option<&Context>, filter: &str) -> Vec<Row> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let root = MemoryRoot::open_default(&cwd);
-    let _ = root.ensure_layout();
+    let enabled = memory_enabled_for_list(ctx);
     let files = list_memory_files(&root);
+    // When disabled, only surface rows if something already exists on disk.
+    if !enabled && files.is_empty() {
+        return Vec::new();
+    }
     let filter_l = filter.trim().to_lowercase();
     let mut rows = Vec::new();
-    if !cfg.enabled && std::env::var("DOCK_MEMORY").ok().as_deref() != Some("1") {
-        // Still show files if any exist; empty state notes disabled below.
-    }
     for (scope, title) in [
         (MemoryScope::Global, "Global"),
         (MemoryScope::Workspace, "Workspace"),
@@ -192,7 +203,7 @@ pub fn render(
         .get::<Memory>(MEMORY)
         .map(|m| m.enabled())
         .unwrap_or_else(|| cordis_base::config::load_memory_config().enabled);
-    let rows = build_rows(&state.filter);
+    let rows = build_rows_with_ctx(Some(ctx), &state.filter);
     let selectable = selectable_indices(&rows);
     let sel = if selectable.is_empty() {
         0
@@ -415,7 +426,7 @@ fn line_on_bg(line: &Line<'static>, bg: ratatui::style::Color) -> Line<'static> 
 
 /// Key handling. Returns `true` when the overlay should close.
 pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> KeyResult {
-    let rows = build_rows(&state.filter);
+    let rows = build_rows_with_ctx(Some(ctx), &state.filter);
     let selectable = selectable_indices(&rows);
     let n = selectable.len();
 
@@ -510,7 +521,8 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
                 state.pending_delete = None;
                 if n > 0 {
                     state.focus = MemoryFocus::Preview;
-                    refresh_preview_hash(state, &rows, state.selected.min(n.saturating_sub(1)));
+                    let _ =
+                        refresh_preview_hash(state, &rows, state.selected.min(n.saturating_sub(1)));
                 }
                 KeyResult::Handled
             }
@@ -526,7 +538,19 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
                 if entry.kind == "index" {
                     return KeyResult::Flash("MEMORY.md is generated — cannot delete".into());
                 }
-                refresh_preview_hash(state, &rows, sel);
+                match refresh_preview_hash(state, &rows, sel) {
+                    Ok(()) => {}
+                    Err(PreviewHashError::TooLarge { size, limit }) => {
+                        return KeyResult::Flash(format!(
+                            "File too large to forget ({size} bytes; limit {limit} bytes)"
+                        ));
+                    }
+                    Err(PreviewHashError::Unreadable) => {
+                        return KeyResult::Flash(
+                            "Can't delete: this note couldn't be read for verification.".into(),
+                        );
+                    }
+                }
                 let Some(hash) = state.preview_hash.clone() else {
                     return KeyResult::Flash(
                         "Can't delete: this note couldn't be read for verification.".into(),
@@ -549,11 +573,43 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
     }
 }
 
-fn refresh_preview_hash(state: &mut MemoryBrowserState, rows: &[Row], sel: usize) {
-    state.preview_hash = selected_entry(rows, sel).and_then(|e| {
-        let bytes = std::fs::read(&e.path).ok()?;
-        Some(blake3::hash(&bytes).to_hex().to_string())
-    });
+enum PreviewHashError {
+    TooLarge { size: u64, limit: u64 },
+    Unreadable,
+}
+
+/// Hash selected file for forget confirm — align with `forget`: metadata len gate
+/// first, then bounded `File::open` + `take(limit)` (never full-read huge files).
+fn refresh_preview_hash(
+    state: &mut MemoryBrowserState,
+    rows: &[Row],
+    sel: usize,
+) -> Result<(), PreviewHashError> {
+    state.preview_hash = None;
+    let entry = selected_entry(rows, sel).ok_or(PreviewHashError::Unreadable)?;
+    let meta = std::fs::metadata(&entry.path).map_err(|_| PreviewHashError::Unreadable)?;
+    if !meta.is_file() {
+        return Err(PreviewHashError::Unreadable);
+    }
+    if meta.len() > MAX_FORGET_FILE_BYTES {
+        return Err(PreviewHashError::TooLarge {
+            size: meta.len(),
+            limit: MAX_FORGET_FILE_BYTES,
+        });
+    }
+    use std::io::Read as _;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    std::fs::File::open(&entry.path)
+        .and_then(|f| f.take(MAX_FORGET_FILE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|_| PreviewHashError::Unreadable)?;
+    if bytes.len() as u64 > MAX_FORGET_FILE_BYTES {
+        return Err(PreviewHashError::TooLarge {
+            size: bytes.len() as u64,
+            limit: MAX_FORGET_FILE_BYTES,
+        });
+    }
+    state.preview_hash = Some(blake3::hash(&bytes).to_hex().to_string());
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -596,6 +652,23 @@ mod tests {
     }
 
     #[test]
+    fn build_rows_disabled_does_not_ensure_layout() {
+        let _env = cordis_base::test_env::scoped().home().remove("DOCK_MEMORY");
+        let cwd = std::env::current_dir().unwrap();
+        let root = MemoryRoot::open_default(&cwd);
+        assert!(
+            !root.global.topics.exists(),
+            "precondition: no layout yet under test DOCK_HOME"
+        );
+        let rows = build_rows_with_ctx(None, "");
+        assert!(rows.is_empty(), "disabled + empty disk → no rows");
+        assert!(
+            !root.global.topics.exists() && !root.workspace.inbox.exists(),
+            "opening /memory must not mkdir when memory is disabled"
+        );
+    }
+
+    #[test]
     fn build_rows_groups_scopes() {
         let _env = cordis_base::test_env::scoped()
             .home()
@@ -605,7 +678,7 @@ mod tests {
         root.ensure_layout().unwrap();
         std::fs::write(root.global.topics.join("prefs.md"), "# Prefs\n\nhi\n").unwrap();
         let _ = dock_memory::manifest::refresh_all(&root);
-        let rows = build_rows("");
+        let rows = build_rows_with_ctx(None, "");
         assert!(rows
             .iter()
             .any(|r| matches!(r, Row::Header { label } if label == "Global")));
@@ -628,7 +701,7 @@ mod tests {
         )
         .unwrap();
         let _ = dock_memory::manifest::refresh_all(&root);
-        let rows = build_rows("unique-zebra-phrase");
+        let rows = build_rows_with_ctx(None, "unique-zebra-phrase");
         assert!(
             rows.iter()
                 .any(|r| matches!(r, Row::File { label, .. } if label.contains("secret-topic"))),
@@ -650,7 +723,7 @@ mod tests {
 
         let mut state = MemoryBrowserState::default();
         // Select the doomed file if present
-        let rows = build_rows("");
+        let rows = build_rows_with_ctx(None, "");
         let idxs = selectable_indices(&rows);
         if let Some((sel, _)) = idxs.iter().enumerate().find(
             |(_, &ri)| matches!(&rows[ri], Row::File { label, .. } if label.contains("doomed")),

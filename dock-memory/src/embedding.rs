@@ -35,12 +35,19 @@ pub struct ApiEmbeddingProvider {
 
 impl ApiEmbeddingProvider {
     pub fn new(api_base: String, api_key: String, model: String, dimensions: usize) -> Self {
+        // Soft-fail to FTS on hang: bound connect + per-request so sampler
+        // `embed_query_if_configured` cannot stall forever.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_base: api_base.trim_end_matches('/').to_string(),
             api_key,
             model,
             dimensions,
-            client: reqwest::Client::new(),
+            client,
             max_batch_size: 32,
         }
     }

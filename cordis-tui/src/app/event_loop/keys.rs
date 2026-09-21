@@ -196,14 +196,6 @@ pub(super) fn run_action(
                 let _ = apply_memory_key(ctx, overlay, code);
                 return Vec::new();
             }
-            if let Overlay::MemoryBrowser(state) = overlay {
-                if delta > 0 {
-                    state.preview_scroll = state.preview_scroll.saturating_sub(1);
-                } else {
-                    state.preview_scroll = state.preview_scroll.saturating_add(1);
-                }
-                return Vec::new();
-            }
             if let Overlay::Notice { body, scroll, .. } = overlay {
                 scroll_text(scroll, delta, body);
                 return Vec::new();
