@@ -40,7 +40,7 @@ fn body_cache_key(path: &str, content: &str, mode: ToolMode, width: usize) -> u6
 }
 
 pub fn is_read_tool(name: &str) -> bool {
-    matches!(name, "read_file" | "read")
+    matches!(name, "read_file" | "read" | "memory_get")
 }
 
 pub fn lines(
@@ -112,11 +112,14 @@ impl ReadMeta {
             .to_string();
         let offset = v
             .get("offset")
+            .or_else(|| v.get("from"))
             .and_then(|x| x.as_i64().or_else(|| x.as_u64().map(|n| n as i64)))
             .unwrap_or(1)
             .max(1) as usize;
+        // `memory_get` uses `lines`; ordinary read tools use `limit`.
         let limit = v
             .get("limit")
+            .or_else(|| v.get("lines"))
             .and_then(|x| x.as_u64().or_else(|| x.as_i64().map(|n| n.max(0) as u64)))
             .map(|n| n.max(1) as usize);
         Self {
@@ -430,6 +433,30 @@ mod tests {
         assert!(text.contains("Skill "), "{text}");
         assert!(text.contains("deploy"), "{text}");
         assert!(!text.contains("Read "), "{text}");
+    }
+
+    #[test]
+    fn memory_get_is_a_read_tool() {
+        assert!(is_read_tool("memory_get"));
+        assert!(is_read_tool("read_file"));
+        assert!(!is_read_tool("memory_search"));
+    }
+
+    #[test]
+    fn memory_get_args_map_path_from_lines() {
+        let theme = Theme::current();
+        let lines = lines(
+            r#"{"path":"topics/api.md","from":10,"lines":5}"#,
+            "10→hello\n",
+            &theme,
+            80,
+            ToolMode::Collapsed,
+            false,
+        );
+        let text = plain(&lines);
+        assert!(text.contains("Read "), "{text}");
+        assert!(text.contains("topics/api.md"), "{text}");
+        assert!(text.contains("(10-14)"), "{text}");
     }
 
     #[test]
