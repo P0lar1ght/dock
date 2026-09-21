@@ -113,8 +113,7 @@ impl MemoryIndex {
             .optional()
             .unwrap_or(None);
         let want = schema::SCHEMA_VERSION.to_string();
-        let was_reset = stored.as_deref().is_some_and(|v| v != want);
-        if was_reset {
+        if stored.as_deref().is_some_and(|v| v != want) {
             let _ = db.execute_batch(
                 "
                 DROP TABLE IF EXISTS chunks_vec;
@@ -142,21 +141,6 @@ impl MemoryIndex {
 
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
         db.execute(schema::UPSERT_META_SQL, params!["schema_version", want])?;
-
-        // A version upgrade wiped the index. Flag it so the search path runs a
-        // full rebuild instead of trusting whatever the dirty-path sync put
-        // back, which only covers files edited since the upgrade.
-        if was_reset {
-            tracing::warn!(
-                from = stored.as_deref().unwrap_or("<none>"),
-                to = %want,
-                "memory schema upgraded, forcing full reindex"
-            );
-            db.execute(
-                schema::UPSERT_META_SQL,
-                params![schema::NEEDS_REBUILD_KEY, "1"],
-            )?;
-        }
 
         let stored_dims: Option<String> = db
             .query_row(schema::GET_META_SQL, params!["embedding_dimensions"], |r| {
@@ -222,33 +206,6 @@ impl MemoryIndex {
             .unwrap_or(true)
     }
 
-    /// True when a previous open dropped every table because the stored schema
-    /// version disagreed with [`schema::SCHEMA_VERSION`].
-    ///
-    /// Callers must then run a full [`Self::reindex_tree`]: the index is empty
-    /// except for whatever the dirty-path sync happened to restore first, so
-    /// [`Self::is_empty`] alone cannot detect the missing notes.
-    pub fn needs_rebuild(&self) -> bool {
-        self.db
-            .query_row(
-                schema::GET_META_SQL,
-                params![schema::NEEDS_REBUILD_KEY],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .unwrap_or(None)
-            .as_deref()
-            == Some("1")
-    }
-
-    /// Clear the rebuild flag after a successful full reindex.
-    pub fn clear_needs_rebuild(&self) {
-        let _ = self.db.execute(
-            schema::UPSERT_META_SQL,
-            params![schema::NEEDS_REBUILD_KEY, "0"],
-        );
-    }
-
     pub fn reindex_file(
         &mut self,
         path: &Path,
@@ -304,7 +261,7 @@ impl MemoryIndex {
                     )?;
                     tx.execute(
                         "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                        params![old.1, old.2],
+                        params![old.1, fts_text(&old.2)],
                     )?;
                     let rid: i64 = tx.query_row(
                         "SELECT rowid FROM chunks WHERE id = ?1",
@@ -354,7 +311,7 @@ impl MemoryIndex {
             if !seen_ids.contains(old_id) {
                 tx.execute(
                     "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                    params![old.1, old.2],
+                    params![old.1, fts_text(&old.2)],
                 )?;
                 if self.vec_available {
                     let _ = tx.execute(
@@ -548,7 +505,7 @@ impl MemoryIndex {
         for (id, old) in &existing {
             tx.execute(
                 "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                params![old.1, old.2],
+                params![old.1, fts_text(&old.2)],
             )?;
             if self.vec_available {
                 let _ = tx.execute("DELETE FROM chunks_vec WHERE chunk_id = ?1", params![id]);
@@ -768,8 +725,8 @@ mod tests {
 
     /// Regression: a Chinese keyword could not match inside a longer CJK run.
     ///
-    /// v1 had no CJK segmentation, so `语言偏好` was one FTS token and a query
-    /// for `底栏` alone returned nothing.
+    /// Without CJK segmentation, `语言偏好` is one FTS token and a query for
+    /// `底栏` alone returned nothing.
     #[test]
     fn fts_finds_chinese_keyword_inside_cjk_run() {
         let tmp = tempfile::tempdir().unwrap();
@@ -868,57 +825,50 @@ mod tests {
         }
     }
 
-    /// Regression: a schema upgrade dropped every table, then the dirty-path
-    /// sync restored only the files the watcher knew about. Because
-    /// `is_empty()` was already false, the search path skipped the full
-    /// rebuild and every note that had not been edited since the upgrade
-    /// became unsearchable.
+    /// Regression: contentless FTS delete must pass the same `fts_text` tokens
+    /// that insert used. Otherwise a rewrite that drops a CJK keyword (or a
+    /// `delete_path`) leaves stale bigrams in `chunks_fts`, so MATCH still hits.
     #[test]
-    fn schema_reset_forces_full_reindex_on_search() {
-        use crate::search::search_memory;
-
+    fn cjk_rewrite_and_delete_path_drop_stale_fts_tokens() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/rebuild-flag"));
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-cjk-stale"));
         root.ensure_layout().unwrap();
-        let edited = root.workspace.topics.join("edited.md");
-        let untouched = root.workspace.topics.join("untouched.md");
-        std::fs::write(&edited, "## Edited\n\nzebra alpha content\n").unwrap();
-        std::fs::write(&untouched, "## Untouched\n\nplatypus beta content\n").unwrap();
-
+        let topic = root.workspace.topics.join("cjk-stale.md");
+        std::fs::write(
+            &topic,
+            "## 偏好\n\n语言偏好：用户可见文案用中文，底栏短 hint 保持英文。\n",
+        )
+        .unwrap();
         let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
-        idx.reindex_tree(&root).unwrap();
-
-        // Pretend an older build wrote this index.
-        idx.db
-            .execute(
-                "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
-                [],
-            )
-            .unwrap();
-        drop(idx);
-
-        // New open drops everything and must raise the rebuild flag.
-        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
-        assert!(idx.needs_rebuild(), "schema reset must flag a full rebuild");
-
-        // The dirty-path sync restores only the edited file, so the index is
-        // no longer empty — exactly the state that used to hide the loss.
-        idx.reindex_file(&edited, "workspace").unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
         assert!(
-            !idx.is_empty(),
-            "dirty sync should have repopulated the index"
+            !idx.search_fts("底栏", 5).unwrap().is_empty(),
+            "indexed note must recall 底栏"
         );
-        drop(idx);
 
-        // Search must recover the untouched note, not just the edited one.
-        let hits = search_memory(&root, "platypus", 5).unwrap();
+        // Rewrite removes the keyword; reindex must delete the old FTS row with
+        // the same normalized text that was inserted.
+        std::fs::write(
+            &topic,
+            "## 偏好\n\n语言偏好：用户可见文案用中文，短 hint 保持英文。\n",
+        )
+        .unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+        let after_rewrite = idx.search_fts("底栏", 5).unwrap();
         assert!(
-            !hits.is_empty(),
-            "full rebuild must recover untouched notes; hits={hits:?}"
+            after_rewrite.is_empty(),
+            "rewrite without 底栏 must not MATCH; hits={after_rewrite:?}"
         );
         assert!(
-            hits.iter().any(|h| h.text.contains("platypus")),
-            "expected the untouched note; hits={hits:?}"
+            !idx.search_fts("偏好", 5).unwrap().is_empty(),
+            "remaining CJK terms must still recall"
+        );
+
+        idx.delete_path(&topic).unwrap();
+        let after_delete = idx.search_fts("偏好", 5).unwrap();
+        assert!(
+            after_delete.is_empty(),
+            "delete_path must clear FTS tokens; hits={after_delete:?}"
         );
     }
 }

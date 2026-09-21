@@ -52,14 +52,8 @@ pub fn search_memory_with_config(
     let dims = query_embedding.map(|e| e.len()).unwrap_or(1024);
     let mut index =
         MemoryIndex::open_or_create_with_dimensions(&db, dims).map_err(|e| e.to_string())?;
-    // A schema upgrade empties the index, but the dirty-path sync may have
-    // already restored the handful of files it was told about — leaving
-    // `is_empty()` false and silently dropping every note that was not edited
-    // since the upgrade. `needs_rebuild` closes that hole; the flag is only
-    // cleared once the rebuild succeeds, so a failure retries next search.
-    let needs_full_reindex = missing || index.needs_rebuild() || index.is_empty();
-    if needs_full_reindex && index.reindex_tree(root).is_ok() {
-        index.clear_needs_rebuild();
+    if missing || index.is_empty() {
+        let _ = index.reindex_tree(root);
     }
     let merge =
         hybrid_search_merge(&index, query, query_embedding, config).map_err(|e| e.to_string())?;
