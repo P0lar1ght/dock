@@ -97,9 +97,7 @@ pub fn process_flush_response(response: &str, config: &MemoryFlushConfig) -> Flu
     };
 
     if !has_markdown_headers(&content) {
-        return FlushResult::Rejected(
-            "flush response lacks markdown structure (no ## headers)".into(),
-        );
+        return FlushResult::Rejected("flush 响应缺少 markdown 结构（无 ## 标题）".into());
     }
     FlushResult::Accepted(content)
 }

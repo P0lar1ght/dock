@@ -2119,7 +2119,7 @@ fn apply_memory_key(
             let mut index = match dock_memory::MemoryIndex::open_or_create(&root.search_db()) {
                 Ok(i) => i,
                 Err(e) => {
-                    flash(ctx, format!("memory index: {e}"));
+                    flash(ctx, format!("记忆索引：{e}"));
                     return Some(Vec::new());
                 }
             };
@@ -2129,17 +2129,17 @@ fn apply_memory_key(
                         .archived_to
                         .as_ref()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "(gone)".into());
+                        .unwrap_or_else(|| "（已移除）".into());
                     flash(
                         ctx,
-                        format!("Deleted (archived to {dest}, index -{})", r.index_removed),
+                        format!("已删除（归档至 {dest}，索引 -{}）", r.index_removed),
                     );
                     // Refresh selection
                     state.selected = 0;
                     state.pending_delete = None;
                     state.preview_hash = None;
                 }
-                Err(e) => flash(ctx, format!("delete failed: {e}")),
+                Err(e) => flash(ctx, format!("删除失败：{e}")),
             }
             Some(Vec::new())
         }

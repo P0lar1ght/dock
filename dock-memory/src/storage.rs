@@ -14,7 +14,7 @@ const MAX_OBSERVATION_BYTES: usize = 64 * 1024;
 pub enum MemoryWriteError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("observation is {actual} bytes, exceeding the {limit}-byte limit")]
+    #[error("观察记录为 {actual} 字节，超过 {limit} 字节上限")]
     TooLarge { actual: usize, limit: usize },
     #[error(transparent)]
     Index(#[from] rusqlite::Error),

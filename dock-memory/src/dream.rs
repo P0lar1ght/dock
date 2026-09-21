@@ -146,9 +146,7 @@ pub fn process_dream_response(response: &str) -> DreamStatus {
         return DreamStatus::NothingToConsolidate;
     }
     if !has_markdown_headers(trimmed) {
-        return DreamStatus::Failed(
-            "dream response lacks markdown structure (no ## headers)".into(),
-        );
+        return DreamStatus::Failed("dream 响应缺少 markdown 结构（无 ## 标题）".into());
     }
     DreamStatus::Completed {
         chars_written: trimmed.len(),

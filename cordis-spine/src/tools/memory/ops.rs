@@ -77,15 +77,15 @@ pub async fn maybe_flush_before_compact(ctx: &Context) {
 pub async fn run_flush(ctx: &Context, force: bool) -> Result<String> {
     let memory = ctx
         .get::<Memory>(MEMORY)
-        .ok_or_else(|| Error::Compact("memory service not mounted".into()))?;
+        .ok_or_else(|| Error::Compact("记忆服务未挂载".into()))?;
     let cfg = memory.config();
     if !memory.enabled() {
         return Err(Error::Compact(
-            "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.".into(),
+            "记忆功能已关闭。请设置 [memory] enabled = true 或 DOCK_MEMORY=1。".into(),
         ));
     }
     if !force && !cfg.flush.enabled {
-        return Err(Error::Compact("memory flush is disabled in config".into()));
+        return Err(Error::Compact("配置中已关闭 memory flush".into()));
     }
     let sessions = ctx.require::<Sessions>(SESSIONS)?;
     let llm = ctx.require::<Llm>(LLM)?;
@@ -129,21 +129,21 @@ pub async fn run_flush(ctx: &Context, force: bool) -> Result<String> {
         .await;
 
     if let Some(err) = output.error {
-        return Err(Error::Compact(format!("memory flush LLM failed: {err}")));
+        return Err(Error::Compact(format!("记忆 flush 的 LLM 调用失败：{err}")));
     }
 
     match process_flush_response(&output.text, &cfg.flush) {
-        FlushResult::NothingToStore => Ok("Memory flush: nothing to store.".into()),
-        FlushResult::Rejected(reason) => Ok(format!("Memory flush rejected: {reason}")),
+        FlushResult::NothingToStore => Ok("记忆 flush：没有需要保存的内容。".into()),
+        FlushResult::Rejected(reason) => Ok(format!("记忆 flush 被拒绝：{reason}")),
         FlushResult::Accepted(content) => {
             let root = memory.root();
             let mut index = MemoryIndex::open_or_create(&root.search_db())
-                .map_err(|e| Error::Compact(format!("memory index: {e}")))?;
+                .map_err(|e| Error::Compact(format!("记忆索引：{e}")))?;
             let path = write_flush_observation(&root, &content, &mut index)
-                .map_err(|e| Error::Compact(format!("memory write: {e}")))?;
+                .map_err(|e| Error::Compact(format!("记忆写入：{e}")))?;
             sessions.set_last_flush_content(Some(content));
             embed_missing_after_write(&memory.config().embedding, &root).await;
-            Ok(format!("Memory flush wrote {}", path.display()))
+            Ok(format!("记忆 flush 已写入 {}", path.display()))
         }
     }
 }
@@ -152,20 +152,20 @@ pub async fn run_flush(ctx: &Context, force: bool) -> Result<String> {
 pub async fn run_dream(ctx: &Context) -> Result<String> {
     let memory = ctx
         .get::<Memory>(MEMORY)
-        .ok_or_else(|| Error::Compact("memory service not mounted".into()))?;
+        .ok_or_else(|| Error::Compact("记忆服务未挂载".into()))?;
     let cfg = memory.config();
     if !memory.enabled() {
         return Err(Error::Compact(
-            "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.".into(),
+            "记忆功能已关闭。请设置 [memory] enabled = true 或 DOCK_MEMORY=1。".into(),
         ));
     }
     if !cfg.dream.enabled {
-        return Err(Error::Compact("memory dream is disabled in config".into()));
+        return Err(Error::Compact("配置中已关闭 memory dream".into()));
     }
     let llm = ctx.require::<Llm>(LLM)?;
     let root = memory.root();
     root.ensure_layout()
-        .map_err(|e| Error::Compact(format!("memory layout: {e}")))?;
+        .map_err(|e| Error::Compact(format!("记忆目录：{e}")))?;
 
     let existing = {
         let mut buf = String::new();
@@ -192,7 +192,7 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
     let Some(msg) = build_dream_user_message(&root.workspace.inbox, existing.as_deref())
         .or_else(|| build_dream_user_message(&root.workspace.observations, existing.as_deref()))
     else {
-        return Ok("Dream: no observations to consolidate.".into());
+        return Ok("Dream：没有可整理的观察记录。".into());
     };
 
     let iso = ctx.isolate("sessions");
@@ -209,17 +209,17 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
         .await;
 
     if let Some(err) = output.error {
-        return Err(Error::Compact(format!("memory dream LLM failed: {err}")));
+        return Err(Error::Compact(format!("记忆 dream 的 LLM 调用失败：{err}")));
     }
 
     match process_dream_response(&output.text) {
-        DreamStatus::NothingToConsolidate => Ok("Dream: nothing to consolidate.".into()),
-        DreamStatus::Failed(reason) => Ok(format!("Dream failed: {reason}")),
+        DreamStatus::NothingToConsolidate => Ok("Dream：没有需要整理的内容。".into()),
+        DreamStatus::Failed(reason) => Ok(format!("Dream 失败：{reason}")),
         DreamStatus::Completed { .. } => {
             let n = write_topics_from_dream(&root.workspace.topics, &output.text)
-                .map_err(|e| Error::Compact(format!("dream write: {e}")))?;
+                .map_err(|e| Error::Compact(format!("dream 写入：{e}")))?;
             let mut index = MemoryIndex::open_or_create(&root.search_db())
-                .map_err(|e| Error::Compact(format!("memory index: {e}")))?;
+                .map_err(|e| Error::Compact(format!("记忆索引：{e}")))?;
             let _ = index.reindex_tree(&root);
             let _ = dock_memory::manifest::regenerate_scope(
                 &root.workspace,
@@ -238,7 +238,7 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
                     }
                 }
             }
-            Ok(format!("Dream wrote {n} topic file(s)."))
+            Ok(format!("Dream 已写入 {n} 个主题文件。"))
         }
     }
 }
@@ -252,31 +252,31 @@ fn save_remember(ctx: &Context, note: &str) -> Result<String> {
     if let Some(memory) = ctx.get::<Memory>(MEMORY) {
         if !memory.enabled() {
             return Err(Error::Compact(
-                "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.".into(),
+                "记忆功能已关闭。请设置 [memory] enabled = true 或 DOCK_MEMORY=1。".into(),
             ));
         }
         let root = memory.root();
         let mut index = MemoryIndex::open_or_create(&root.search_db())
-            .map_err(|e| Error::Compact(format!("memory index: {e}")))?;
+            .map_err(|e| Error::Compact(format!("记忆索引：{e}")))?;
         let path = save_remember_note(&root, note, &mut index)
-            .map_err(|e| Error::Compact(format!("remember: {e}")))?;
+            .map_err(|e| Error::Compact(format!("remember：{e}")))?;
         spawn_embed_missing_after_write(memory.config().embedding, root);
-        return Ok(format!("Memory saved to {}", path.display()));
+        return Ok(format!("记忆已保存到 {}", path.display()));
     }
     let cfg = load_memory_config();
     if !cfg.enabled {
         return Err(Error::Compact(
-            "Memory is disabled. Set [memory] enabled = true or DOCK_MEMORY=1.".into(),
+            "记忆功能已关闭。请设置 [memory] enabled = true 或 DOCK_MEMORY=1。".into(),
         ));
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let root = MemoryRoot::open_default(&cwd);
     let mut index = MemoryIndex::open_or_create(&root.search_db())
-        .map_err(|e| Error::Compact(format!("memory index: {e}")))?;
+        .map_err(|e| Error::Compact(format!("记忆索引：{e}")))?;
     let path = save_remember_note(&root, note, &mut index)
-        .map_err(|e| Error::Compact(format!("remember: {e}")))?;
+        .map_err(|e| Error::Compact(format!("remember：{e}")))?;
     spawn_embed_missing_after_write(cfg.embedding, root);
-    Ok(format!("Memory saved to {}", path.display()))
+    Ok(format!("记忆已保存到 {}", path.display()))
 }
 
 /// `/remember <text>` with optional Dock sampler rewrite (Grok-aligned).
@@ -285,7 +285,7 @@ pub async fn run_remember_async(ctx: &Context, note: &str) -> Result<String> {
     let trimmed = note.trim();
     if trimmed.is_empty() {
         return Err(Error::Compact(
-            "Usage: /remember <note> — empty opens the composer.".into(),
+            "用法：/remember <笔记> — 留空则打开输入框。".into(),
         ));
     }
     let rewritten = try_rewrite_remember(ctx, trimmed).await;

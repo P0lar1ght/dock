@@ -43,19 +43,19 @@ impl PathClass {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
-    #[error("memory path must be absolute: {0}")]
+    #[error("记忆路径必须是绝对路径：{0}")]
     RelativePath(PathBuf),
-    #[error("memory path contains traversal components: {0}")]
+    #[error("记忆路径包含越界组件：{0}")]
     Traversal(PathBuf),
-    #[error("writes are not allowed to protected memory path: {0}")]
+    #[error("不允许写入受保护的记忆路径：{0}")]
     Protected(PathBuf),
-    #[error("memory files must live directly under topics/ or observations/_inbox/: {0}")]
+    #[error("记忆文件必须直接位于 topics/ 或 observations/_inbox/ 下：{0}")]
     NestedPath(PathBuf),
-    #[error("memory writes require a .md file: {0}")]
+    #[error("记忆写入要求 .md 文件：{0}")]
     NonMarkdown(PathBuf),
-    #[error("memory path is outside configured scopes: {0}")]
+    #[error("记忆路径不在已配置的作用域内：{0}")]
     Outside(PathBuf),
-    #[error("memory file is too large to forget ({size} bytes; limit {limit} bytes): {path}")]
+    #[error("记忆文件过大，无法遗忘（{size} 字节；上限 {limit} 字节）：{path}")]
     TooLarge {
         path: PathBuf,
         size: u64,
@@ -210,7 +210,7 @@ pub fn forget(
         return Err(AccessError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "content hash mismatch (expected {expected_content_hash}, got {actual_hex}); re-open and confirm delete"
+                "内容哈希不匹配（期望 {expected_content_hash}，实际 {actual_hex}）；请重新打开并确认删除"
             ),
         )));
     }

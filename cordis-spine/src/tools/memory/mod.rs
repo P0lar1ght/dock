@@ -99,7 +99,7 @@ impl Memory {
     pub fn toggle_session(&self) -> Result<bool, &'static str> {
         let cfg = self.config();
         if cfg.force_disabled {
-            return Err("Memory is forced off for this process (DOCK_MEMORY=0).");
+            return Err("本进程已强制关闭记忆（DOCK_MEMORY=0）。");
         }
         let mut slot = self.inner.session_override.lock().unwrap();
         let currently = slot.unwrap_or(cfg.enabled);
@@ -858,7 +858,7 @@ mod flush_mock_tests {
         root.provide(MEMORY, Memory::new()).unwrap();
 
         let msg = run_flush(&root, true).await.unwrap();
-        assert!(msg.contains("Memory flush wrote"), "{msg}");
+        assert!(msg.contains("记忆 flush 已写入"), "{msg}");
         let mem = MemoryRoot::open_default(&std::env::current_dir().unwrap());
         let files: Vec<_> = std::fs::read_dir(&mem.workspace.observations)
             .unwrap()
@@ -903,7 +903,7 @@ mod flush_mock_tests {
             .expect_err("must fail on LlmOutput.error");
         let msg = err.to_string();
         assert!(
-            msg.contains("memory flush LLM failed"),
+            msg.contains("记忆 flush 的 LLM 调用失败"),
             "unexpected err: {msg}"
         );
         let mem = MemoryRoot::open_default(&std::env::current_dir().unwrap());

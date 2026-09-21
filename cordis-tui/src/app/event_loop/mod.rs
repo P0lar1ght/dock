@@ -698,13 +698,13 @@ pub async fn run(root: Context) -> Result<()> {
                                     }
                                 }
                                 Effect::MemoryFlush => {
-                                    flash(&ctx, "正在 flush memory…");
+                                    flash(&ctx, "正在 flush 记忆…");
                                     let redraw = redraw_tx.clone();
                                     let c = ctx.clone();
                                     tokio::spawn(async move {
                                         let msg = match cordis_spine::run_flush(&c, true).await {
                                             Ok(m) => m,
-                                            Err(e) => format!("flush failed: {e}"),
+                                            Err(e) => format!("flush 失败：{e}"),
                                         };
                                         if let Some(slash) = c.get::<Slash>(SLASH) {
                                             slash.queue_notice("/flush", msg);
@@ -719,7 +719,7 @@ pub async fn run(root: Context) -> Result<()> {
                                     tokio::spawn(async move {
                                         let msg = match cordis_spine::run_dream(&c).await {
                                             Ok(m) => m,
-                                            Err(e) => format!("dream failed: {e}"),
+                                            Err(e) => format!("dream 失败：{e}"),
                                         };
                                         if let Some(slash) = c.get::<Slash>(SLASH) {
                                             slash.queue_notice("/dream", msg);
@@ -736,7 +736,7 @@ pub async fn run(root: Context) -> Result<()> {
                                             match cordis_spine::run_remember_async(&c, &note).await
                                             {
                                                 Ok(m) => m,
-                                                Err(e) => format!("remember failed: {e}"),
+                                                Err(e) => format!("remember 失败：{e}"),
                                             };
                                         if let Some(slash) = c.get::<Slash>(SLASH) {
                                             slash.queue_notice("/remember", msg);

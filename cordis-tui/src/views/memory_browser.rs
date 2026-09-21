@@ -115,8 +115,8 @@ fn build_rows_with_ctx(ctx: Option<&Context>, filter: &str) -> Vec<Row> {
     let filter_l = filter.trim().to_lowercase();
     let mut rows = Vec::new();
     for (scope, title) in [
-        (MemoryScope::Global, "Global"),
-        (MemoryScope::Workspace, "Workspace"),
+        (MemoryScope::Global, "全局"),
+        (MemoryScope::Workspace, "工作区"),
     ] {
         let group: Vec<_> = files
             .iter()
@@ -167,7 +167,7 @@ fn load_preview(path: &PathBuf) -> String {
                 .read_to_end(&mut buf);
             String::from_utf8_lossy(&buf).into_owned()
         }
-        Err(e) => format!("(unreadable: {e})"),
+        Err(e) => format!("（无法读取：{e}）"),
     }
 }
 
@@ -182,9 +182,9 @@ fn render_md(text: &str, width: usize) -> Vec<Line<'static>> {
 
 fn empty_markdown(enabled: bool) -> String {
     if !enabled {
-        return "**Memory is disabled.**\n\nEnable with `[memory] enabled = true` in `~/.dock/config.toml` or `DOCK_MEMORY=1`.\n\nPress **t** to try a session override (blocked if `DOCK_MEMORY=0`).".into();
+        return "**记忆功能已关闭。**\n\n请在 `~/.dock/config.toml` 中设置 `[memory] enabled = true`，或设置环境变量 `DOCK_MEMORY=1`。\n\n按 **t** 可尝试本会话覆盖（若 `DOCK_MEMORY=0` 则会被拦截）。".into();
     }
-    "**Nothing remembered yet.**\n\n- `/remember <note>` saves something specific right now.\n- `/flush` summarizes the session into workspace observations.\n- `/dream` consolidates observations into topics.\n\nNotes live under `$DOCK_HOME/memory/global|workspace-<slug>/{topics,observations/_inbox}/` with a generated `MEMORY.md` index.".into()
+    "**还没有记住任何内容。**\n\n- `/remember <笔记>`：立刻保存一条具体笔记。\n- `/flush`：将会话摘要写入工作区观察记录。\n- `/dream`：将观察记录整理成主题。\n\n笔记位于 `$DOCK_HOME/memory/global|workspace-<slug>/{topics,observations/_inbox}/`，并会生成 `MEMORY.md` 索引。".into()
 }
 
 /// Open browser state (fresh selection).
@@ -228,7 +228,7 @@ pub fn render(
     } else if enabled {
         "/memory".into()
     } else {
-        "/memory (off)".into()
+        "/memory（已关闭）".into()
     };
     paint_title(buf, inner, &theme, &title, frame.close_button);
     if inner.height >= 2 {
@@ -475,7 +475,7 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
         MemoryFocus::List => match code {
             KeyCode::Esc => {
                 if state.pending_delete.take().is_some() {
-                    KeyResult::Flash("delete cancelled".into())
+                    KeyResult::Flash("已取消删除".into())
                 } else {
                     KeyResult::Close
                 }
@@ -489,14 +489,14 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
                 if let Some(mem) = ctx.get::<Memory>(MEMORY) {
                     match mem.toggle_session() {
                         Ok(on) => KeyResult::Flash(if on {
-                            "Memory on for this session".into()
+                            "本会话已开启记忆".into()
                         } else {
-                            "Memory off for this session".into()
+                            "本会话已关闭记忆".into()
                         }),
                         Err(msg) => KeyResult::Flash(msg.into()),
                     }
                 } else {
-                    KeyResult::Flash("memory service not mounted".into())
+                    KeyResult::Flash("记忆服务未挂载".into())
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -528,7 +528,7 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
             }
             KeyCode::Char('x') | KeyCode::Char('X') => {
                 if n == 0 {
-                    return KeyResult::Flash("nothing to delete".into());
+                    return KeyResult::Flash("没有可删除的条目".into());
                 }
                 let sel = state.selected.min(n - 1);
                 let Some(entry) = selected_entry(&rows, sel) else {
@@ -536,25 +536,21 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
                 };
                 // Indexes / MEMORY.md are not deletable via forget path gate.
                 if entry.kind == "index" {
-                    return KeyResult::Flash("MEMORY.md is generated — cannot delete".into());
+                    return KeyResult::Flash("MEMORY.md 为自动生成，无法删除".into());
                 }
                 match refresh_preview_hash(state, &rows, sel) {
                     Ok(()) => {}
                     Err(PreviewHashError::TooLarge { size, limit }) => {
                         return KeyResult::Flash(format!(
-                            "File too large to forget ({size} bytes; limit {limit} bytes)"
+                            "文件过大，无法遗忘（{size} 字节；上限 {limit} 字节）"
                         ));
                     }
                     Err(PreviewHashError::Unreadable) => {
-                        return KeyResult::Flash(
-                            "Can't delete: this note couldn't be read for verification.".into(),
-                        );
+                        return KeyResult::Flash("无法删除：无法读取该笔记以核验。".into());
                     }
                 }
                 let Some(hash) = state.preview_hash.clone() else {
-                    return KeyResult::Flash(
-                        "Can't delete: this note couldn't be read for verification.".into(),
-                    );
+                    return KeyResult::Flash("无法删除：无法读取该笔记以核验。".into());
                 };
                 if state.pending_delete.as_ref() == Some(&entry.path) {
                     let path = entry.path.clone();
@@ -565,7 +561,7 @@ pub fn on_key(ctx: &Context, state: &mut MemoryBrowserState, code: KeyCode) -> K
                     }
                 } else {
                     state.pending_delete = Some(entry.path.clone());
-                    KeyResult::Flash(format!("Press x again to delete {}", entry.label))
+                    KeyResult::Flash(format!("再按一次 x 确认删除 {}", entry.label))
                 }
             }
             _ => KeyResult::Ignored,
@@ -681,7 +677,7 @@ mod tests {
         let rows = build_rows_with_ctx(None, "");
         assert!(rows
             .iter()
-            .any(|r| matches!(r, Row::Header { label } if label == "Global")));
+            .any(|r| matches!(r, Row::Header { label } if label == "全局")));
         assert!(rows
             .iter()
             .any(|r| matches!(r, Row::File { label, .. } if label.contains("prefs"))));
