@@ -38,6 +38,7 @@ pub mod search;
 pub mod slug;
 pub mod storage;
 pub mod text_utils;
+pub mod tokenize;
 pub mod watcher;
 
 pub use access::{
