@@ -2234,11 +2234,7 @@ mod tests {
             theme.text_primary,
             "悬停用 text_primary"
         );
-        assert_eq!(
-            buf.cell(mid).unwrap().bg,
-            theme.bg_hover,
-            "悬停用 bg_hover"
-        );
+        assert_eq!(buf.cell(mid).unwrap().bg, theme.bg_hover, "悬停用 bg_hover");
     }
 
     #[test]
