@@ -27,7 +27,7 @@ impl Default for MemorySearchConfig {
         source_weights.insert("legacy".to_string(), 0.8);
         Self {
             max_results: 6,
-            // Slightly lower than Grok's 0.7 so FTS-only Dock stays useful without embeddings.
+            // Default gate for hybrid/vec. FTS-only raises to ~0.7 in search.rs.
             min_score: 0.35,
             vector_weight: 0.7,
             text_weight: 0.3,

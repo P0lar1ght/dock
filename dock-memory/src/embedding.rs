@@ -295,7 +295,7 @@ mod tests {
     async fn mock_embedding_different_texts() {
         let provider = MockEmbeddingProvider { dimensions: 4 };
         let results = provider.embed_batch(&["hello", "world"]).await.unwrap();
-        assert_ne!(results[0], results[1]);
+        assert_ne!(results.first(), results.get(1));
     }
 
     #[tokio::test]

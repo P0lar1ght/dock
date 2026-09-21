@@ -147,6 +147,13 @@ fn temporal_decay_multiplier(
     (-lambda * age_days).exp()
 }
 
+/// Floor applied when searching without a query embedding.
+///
+/// FTS ranks are min-max normalized into [0, 1], so a lone weak BM25 hit can
+/// land at ~1.0. Raising the FTS-only gate toward Grok's 0.7 avoids relying on
+/// that lift alone; hybrid (vec) paths keep `config.min_score`.
+const FTS_ONLY_MIN_SCORE: f64 = 0.7;
+
 /// Sync merge: FTS (+ optional vector) → normalize → decay → source weight → MMR.
 pub fn hybrid_search_merge(
     index: &MemoryIndex,
@@ -155,6 +162,11 @@ pub fn hybrid_search_merge(
     config: &MemorySearchConfig,
 ) -> Result<SearchMerge, Box<dyn std::error::Error>> {
     let candidate_limit = config.max_results.saturating_mul(3).max(1);
+    let effective_min_score = if query_embedding.is_none() {
+        (config.min_score as f64).max(FTS_ONLY_MIN_SCORE)
+    } else {
+        config.min_score as f64
+    };
 
     let mut fts_results = index.search_fts(query, candidate_limit).unwrap_or_default();
     let evergreen = index
@@ -249,7 +261,7 @@ pub fn hybrid_search_merge(
         let access_boost = 1.0 + (chunk.access_count as f64).ln_1p() * 0.05;
         let raw_score = base_score * decay_multiplier * source_weight * access_boost;
         let display_score = raw_score.clamp(0.0, 1.0);
-        if display_score >= config.min_score as f64 {
+        if display_score >= effective_min_score {
             ranked.push((
                 raw_score,
                 SearchResult {
@@ -329,7 +341,7 @@ mod tests {
         .unwrap();
         let hits = search_memory(&root, "bearer tokens", 5).unwrap();
         assert!(!hits.is_empty(), "hits={hits:?}");
-        assert!(hits[0].text.to_lowercase().contains("bearer"));
+        assert!(hits.first().unwrap().text.to_lowercase().contains("bearer"));
     }
 
     #[tokio::test]
@@ -359,7 +371,9 @@ mod tests {
             .await
             .unwrap();
         let cfg = MemorySearchConfig::default();
-        let merge = hybrid_search_merge(&idx, "semantic embeddings", Some(&q[0]), &cfg).unwrap();
+        let merge =
+            hybrid_search_merge(&idx, "semantic embeddings", Some(q.first().unwrap()), &cfg)
+                .unwrap();
         assert!(!merge.results.is_empty() || cfg.min_score > 0.9);
     }
 
@@ -377,7 +391,7 @@ mod tests {
         // External edit (as a file watcher would observe).
         std::fs::write(&path, "## After\n\nnew content about platypus secrets\n").unwrap();
         let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
-        sync_dirty_paths(&root, &mut idx, &[path.clone()]);
+        sync_dirty_paths(&root, &mut idx, std::slice::from_ref(&path));
         drop(idx);
 
         let hits = search_memory(&root, "platypus secrets", 5).unwrap();
@@ -422,11 +436,78 @@ mod tests {
             min_score: 0.0,
             ..MemorySearchConfig::default()
         };
-        let hits =
-            search_memory_with_config(&root, "query vectors hybrid", &cfg, Some(&q[0])).unwrap();
+        let hits = search_memory_with_config(
+            &root,
+            "query vectors hybrid",
+            &cfg,
+            Some(q.first().unwrap()),
+        )
+        .unwrap();
         assert!(
             !hits.is_empty(),
             "embedding path must return hits; got {hits:?}"
         );
+    }
+
+    /// Regression: OR-style FTS matched Dock-only notes for "Lynn Dock review style".
+    #[test]
+    fn fts_only_rejects_partial_term_overlap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-partial"));
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.workspace.topics.join("dock.md"),
+            "## Dock\n\nDock TUI keyboard shortcuts and session layout.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.workspace.topics.join("ship.md"),
+            "## Shipping\n\nDock release checklist for the memory crate.\n",
+        )
+        .unwrap();
+        let hits = search_memory(&root, "Lynn Dock review style", 5).unwrap();
+        assert!(
+            hits.is_empty(),
+            "Dock-only corpus must not match multi-term query; hits={hits:?}"
+        );
+    }
+
+    #[test]
+    fn fts_only_recalls_when_all_terms_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-full"));
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.workspace.topics.join("lynn-style.md"),
+            "## Review\n\nLynn Dock review style: prefer short PRs, cite tip SHA, no merge.\n",
+        )
+        .unwrap();
+        let hits = search_memory(&root, "Lynn Dock review style", 5).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "all-terms note must recall; hits={hits:?}"
+        );
+        assert!(
+            hits.iter().any(|h| h.text.to_lowercase().contains("lynn")),
+            "expected Lynn note; hits={hits:?}"
+        );
+    }
+
+    #[test]
+    fn fts_single_keyword_still_hits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-blake3"));
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.workspace.topics.join("hash.md"),
+            "## Slugs\n\nWorkspace memory slugs use blake3 over the identity string.\n",
+        )
+        .unwrap();
+        let hits = search_memory(&root, "blake3", 5).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "single keyword blake3 must still hit; hits={hits:?}"
+        );
+        assert!(hits.first().unwrap().text.to_lowercase().contains("blake3"));
     }
 }

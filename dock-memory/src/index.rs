@@ -351,8 +351,7 @@ impl MemoryIndex {
     }
 
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>, rusqlite::Error> {
-        let keywords = extract_keywords(query);
-        let fts_query = keywords.join(" OR ");
+        let fts_query = fts_match_query(query);
         if fts_query.is_empty() {
             return Ok(vec![]);
         }
@@ -382,8 +381,7 @@ impl MemoryIndex {
         if sources.is_empty() {
             return self.search_fts(query, limit);
         }
-        let keywords = extract_keywords(query);
-        let fts_query = keywords.join(" OR ");
+        let fts_query = fts_match_query(query);
         if fts_query.is_empty() {
             return Ok(vec![]);
         }
@@ -606,6 +604,14 @@ impl MemoryIndex {
     }
 }
 
+/// Build an FTS5 MATCH expression from free text.
+///
+/// Multi-keyword queries use **AND** so every term must appear. OR made queries
+/// like `"Lynn Dock review style"` match notes that only mention Dock.
+fn fts_match_query(query: &str) -> String {
+    extract_keywords(query).join(" AND ")
+}
+
 fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(embedding.len() * 4);
     for v in embedding {
@@ -659,5 +665,35 @@ mod tests {
         assert!(n >= 1);
         assert!(idx.search("delete me", 5).unwrap().is_empty());
         assert_eq!(idx.delete_path(&topic).unwrap(), 0);
+    }
+
+    #[test]
+    fn fts_match_query_joins_with_and() {
+        assert_eq!(
+            fts_match_query("Lynn Dock review style"),
+            "lynn AND dock AND review AND style"
+        );
+        assert_eq!(fts_match_query("blake3"), "blake3");
+        assert!(fts_match_query("what is that?").is_empty());
+    }
+
+    #[test]
+    fn fts_and_does_not_match_partial_overlap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-and-partial"));
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("dock-only.md");
+        std::fs::write(
+            &topic,
+            "## Dock notes\n\nDock ships a TUI and a memory index.\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+        let hits = idx.search_fts("Lynn Dock review style", 10).unwrap();
+        assert!(
+            hits.is_empty(),
+            "AND FTS must not return Dock-only notes for multi-term query; hits={hits:?}"
+        );
     }
 }
