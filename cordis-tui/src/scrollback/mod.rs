@@ -41,6 +41,7 @@ mod goal;
 mod list_dir;
 pub(crate) mod live;
 mod mcp;
+mod memory_search;
 mod notice;
 mod plan;
 mod read;
@@ -411,11 +412,19 @@ impl Scrollback {
                 expanded.insert(id);
             }
         } else {
+            let binary = tool_name_for_fold(&self.ctx, &id)
+                .as_deref()
+                .is_some_and(memory_search::is_memory_search);
             let mut folds = self.tool_fold.lock().unwrap();
             let current = folds.get(&id).copied().unwrap_or(tool::ToolMode::Collapsed);
-            match current.next() {
-                Some(next) => {
-                    folds.insert(id, next);
+            let next = if binary {
+                memory_search::next_mode(current)
+            } else {
+                current.next()
+            };
+            match next {
+                Some(n) => {
+                    folds.insert(id, n);
                 }
                 None => {
                     folds.remove(&id);
@@ -1320,6 +1329,29 @@ fn paint_visible_lines(buf: &mut Buffer, area: Rect, lines: &[Line<'static>], sc
     }
 }
 
+/// Resolve a tool card id to its tool name (completed execute or pending call).
+fn tool_name_for_fold(ctx: &Context, id: &str) -> Option<String> {
+    let sessions = ctx.get::<Sessions>(SESSIONS)?;
+    sessions.with_log(|events, _| {
+        for ev in events.iter().rev() {
+            match ev {
+                LogEvent::ToolExecute { id: tid, name, .. } if tid == id => {
+                    return Some(name.clone());
+                }
+                LogEvent::LlmStream(llm) => {
+                    for call in &llm.tool_calls {
+                        if call.id == id {
+                            return Some(call.name.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    })
+}
+
 fn tool_card_lines(
     name: &str,
     arguments: &str,
@@ -1355,6 +1387,8 @@ fn tool_card_lines(
         mcp::lines(name, arguments, content, theme, width, mode, running)
     } else if ask::is_ask_tool(name) {
         ask::lines(name, arguments, content, theme, width, mode, running)
+    } else if memory_search::is_memory_search(name) {
+        memory_search::lines(arguments, content, theme, width, mode, running)
     } else {
         tool::lines(name, arguments, content, theme, width, mode, running)
     }
@@ -2839,6 +2873,18 @@ mod card_shell_tests {
                 "todo_write",
                 r#"{"merge":false,"todos":[{"id":"1","content":"干活","status":"pending"}]}"#,
                 "ok".into(),
+            ),
+            (
+                "memory_search",
+                "memory_search",
+                r#"{"query":"bearer"}"#,
+                concat!(
+                    "Found 1 memory result(s):\n\n",
+                    "### Result 1 (score: 0.85, source: workspace)\n",
+                    "**File:** /x/memory/ws/topics/api.md (lines 1-5)\n",
+                    "```\nREST bearer\n```\n"
+                )
+                .into(),
             ),
         ]
     }
