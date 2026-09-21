@@ -96,7 +96,8 @@ pub use tools::dynamic_runner::{
 };
 pub use tools::goal::{
     goal_composer_fill, goal_continuation_directive, goal_instruction, goal_offer_addon,
-    goal_usage_message, tool_goal, Goal, GOAL_RESERVED_SUBCOMMANDS,
+    goal_service, goal_tool_registration, goal_usage_message, tool_goal, Goal,
+    GOAL_RESERVED_SUBCOMMANDS,
 };
 pub use tools::jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
 pub use tools::lsp::{
@@ -126,7 +127,8 @@ pub use tools::skills::{skills, tool_skills, SkillInfo, SkillScope, Skills};
 pub use tools::task::admission::SubagentLimits;
 pub use tools::task::{tool_task, SubagentSnap, Subagents, TaskConfig};
 pub use tools::todo_write::{
-    tool_todo, TodoItem, TodoStats, TodoStatus, Todos, TODO_GATE_SENTINEL,
+    todo_service, todo_tool_registration, tool_todo, TodoItem, TodoStats, TodoStatus, Todos,
+    TODO_GATE_SENTINEL,
 };
 pub use tools::tool_cordis::tool_cordis;
 pub use tools::tool_images::{

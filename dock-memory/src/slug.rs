@@ -47,21 +47,7 @@ fn extract_repo_identity(cwd: &Path) -> Option<String> {
 }
 
 fn normalize_remote_url(url: &str) -> Option<String> {
-    let path = if let Some(colon_pos) = url.find(':') {
-        if url
-            .get(..colon_pos)
-            .is_some_and(|h| h.contains('@') && !h.contains('/'))
-        {
-            url.get(colon_pos + 1..)?
-        } else {
-            url.split("//")
-                .nth(1)
-                .and_then(|after_scheme| after_scheme.split_once('/'))
-                .map(|(_, path)| path)?
-        }
-    } else {
-        return None;
-    };
+    let path = resolve_remote_path(url)?;
 
     let cleaned = path
         .trim_end_matches(".git")
@@ -72,6 +58,23 @@ fn normalize_remote_url(url: &str) -> Option<String> {
         return None;
     }
     Some(cleaned.to_string())
+}
+
+/// Pull the repository path out of a remote URL, accepting both SCP-like
+/// (`git@host:owner/repo`) and URL (`https://host/owner/repo`) forms.
+fn resolve_remote_path(url: &str) -> Option<&str> {
+    let colon_pos = url.find(':')?;
+    if url
+        .get(..colon_pos)
+        .is_some_and(|h| h.contains('@') && !h.contains('/'))
+    {
+        url.get(colon_pos + 1..)
+    } else {
+        url.split("//")
+            .nth(1)
+            .and_then(|after_scheme| after_scheme.split_once('/'))
+            .map(|(_, path)| path)
+    }
 }
 
 pub fn slugify(input: &str, max_len: usize) -> String {

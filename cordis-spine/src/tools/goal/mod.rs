@@ -94,8 +94,12 @@ impl Goal {
     }
 }
 
-pub fn tool_goal() -> Plugin {
-    plugin("tool-goal", Inject::from([TOOLS]), |ctx, _: &()| {
+/// Named `"goal"` service + the waterfall wiring. Mounted once per isolate
+/// subtree that wants its own goal: the root session and every tab page. The
+/// `update_goal` tool itself is registered separately by
+/// [`goal_tool_registration`], once, against the global `"tools"` table.
+pub fn goal_service() -> Plugin {
+    plugin("tool-goal", Inject::new(), |ctx, _: &()| {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let state = Arc::new(GoalState::new());
         {
@@ -137,6 +141,88 @@ pub fn tool_goal() -> Plugin {
             }
             // Both endings continue a goal: text without `update_goal(completed)`
             // is stopping short, and a blown step budget still leaves the goal open.
+            if let Some(body) = continuation_reminder(&ctx_end) {
+                next.keep_working(ORDER_TURN_END_GOAL, body);
+            }
+            next
+        });
+        let ctx_exec = ctx.clone();
+        let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
+            let result = args.next::<ToolResult>().unwrap_or(result);
+            if result.name == UPDATE_GOAL_TOOL_NAME {
+                inject_goal_instruction(&ctx_exec);
+            }
+            result
+        });
+        Ok(None)
+    })
+}
+
+/// Register the single `update_goal` tool against the global `"tools"` table.
+/// Registered once; the body dispatches on the **executing** context so a call
+/// from any tab page reaches that page's own `"goal"` service.
+pub fn goal_tool_registration() -> Plugin {
+    plugin("tool-goal.tools", Inject::from([TOOLS]), |ctx, _: &()| {
+        let tools = ctx.require::<Tools>(TOOLS)?;
+        let root_ctx = ctx.clone();
+        let body: ToolBody = {
+            std::sync::Arc::new(move |call| {
+                // `GOAL` is isolated per tab page, so resolve the caller's
+                // subtree, not the (root) one that registered the tool.
+                let ctx = crate::tools::registry::exec_ctx().unwrap_or_else(|| root_ctx.clone());
+                Box::pin(async move { run_update_goal(&ctx, call).await })
+            })
+        };
+        own_registered(
+            ctx,
+            vec![tools.register_deferred(
+                ToolSpec {
+                    name: UPDATE_GOAL_TOOL_NAME.into(),
+                    description: "Set a goal for a multi-step task, or report progress on the active goal. Call with objective to start or retitle. Then message for progress, completed:true when done, blocked_reason when stuck after 3+ failures.".into(),
+                    parameters_json: r#"{"type":"object","properties":{"objective":{"type":"string","description":"Set or replace the goal. Call this when the task is multi-step and should run until complete. Omit for a one-shot question."},"completed":{"type":"boolean","description":"Set to true ONLY when the goal is fully achieved. This ends goal mode. Use together with message to include a completion summary."},"message":{"type":"string"},"blocked_reason":{"type":"string"}}}"#.into(),
+                },
+                body,
+            )?],
+        )?;
+        Ok(None)
+    })
+}
+
+/// Backwards-compatible single mount: service + tool registration together.
+/// New code mounts [`goal_service`] per isolate subtree and
+/// [`goal_tool_registration`] once at the root.
+pub fn tool_goal() -> Plugin {
+    plugin("tool-goal", Inject::from([TOOLS]), |ctx, _: &()| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(GoalState::new());
+        {
+            let state = state.clone();
+            tokio::spawn(drain::drain_loop(state, rx));
+        }
+        ctx.provide(
+            GOAL,
+            Goal {
+                state,
+                handle: GoalUpdateHandle(tx),
+            },
+        )?;
+        let ctx_pre = ctx.clone();
+        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+            let next = args.next::<PreStep>().unwrap_or(step);
+            if next.enter && next.is_main_session() {
+                inject_goal_instruction(&ctx_pre);
+            }
+            next
+        });
+        let ctx_end = ctx.clone();
+        let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
+            let mut next = args.next::<TurnEnd>().unwrap_or(end);
+            if !next.is_main_session() {
+                return next;
+            }
+            if next.queued_followups || next.rounds >= MAX_GOAL_ROUNDS {
+                return next;
+            }
             if let Some(body) = continuation_reminder(&ctx_end) {
                 next.keep_working(ORDER_TURN_END_GOAL, body);
             }

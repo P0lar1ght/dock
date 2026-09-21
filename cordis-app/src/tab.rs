@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use cordis::{plugin, plugin_async, Inject, Plugin};
 use cordis_spine::{
-    agent_loop, turn, AgentPresets, Sessions, SubagentDef, AGENT_PRESETS, SESSIONS,
+    agent_loop, goal_service, todo_service, turn, AgentPresets, Sessions, SubagentDef,
+    AGENT_PRESETS, SESSIONS,
 };
 use cordis_tui::{prompt, scrollback, status_bar, welcome, TabKind, TabMount};
 
@@ -54,6 +55,12 @@ fn tab(index: usize, kind: TabKind) -> Plugin {
             // 旁问页自带一份只读预设；常驻页照旧用根上那份。
             ctx.plugin(aside_presets(), ())?.wait().await?;
         }
+        // `GOAL` / `TODOS` 按页隔离（PER_TAB_SERVICES）：每页有自己的目标
+        // 与待办服务，第 2 页的 /goal / todo_write 不再写进第 1 页。
+        // `update_goal` / `todo_write` 工具仍在全局工具表里注册一份，靠
+        // 执行期 ctx 派发到调用者那一页。
+        ctx.plugin(goal_service(), ())?.wait().await?;
+        ctx.plugin(todo_service(), ())?.wait().await?;
         ctx.plugin(turn(), ())?.wait().await?;
         ctx.plugin(agent_loop(), ())?.wait().await?;
         ctx.plugin(session_actor(), ())?.wait().await?;

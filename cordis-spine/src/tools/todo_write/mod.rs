@@ -105,8 +105,12 @@ Send only the items you are changing (`merge` defaults to true); id + status is 
 
 const PARAMS: &str = r#"{"type":"object","properties":{"merge":{"type":"boolean","description":"When true (default), merge the given items into the list by id — send only what changed. When false, the given items replace the whole list."},"todos":{"type":"array","description":"Items to write. In merge mode, id + status is enough to flip an existing item.","items":{"type":"object","properties":{"id":{"type":"string","description":"Stable identifier, reused across calls to update the same item."},"content":{"type":"string","description":"Imperative one-liner describing the step. Optional when updating an existing item."},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"],"description":"pending | in_progress (keep exactly one) | completed (finished and verified) | cancelled (dropped or blocked)."}},"required":["id"]}}},"required":["todos"]}"#;
 
-pub fn tool_todo() -> Plugin {
-    plugin("tool-todo", Inject::from([TOOLS]), |ctx, _: &()| {
+/// Named `"todos"` service + the waterfall wiring. Mounted once per isolate
+/// subtree that wants its own list: the root session and every tab page. The
+/// `todo_write` tool itself is registered separately by
+/// [`todo_tool_registration`], once, against the global `"tools"` table.
+pub fn todo_service() -> Plugin {
+    plugin("tool-todo", Inject::new(), |ctx, _: &()| {
         ctx.provide(TODOS, Todos::new())?;
         // Gate quota. Plugin-local (not on `Todos`) — it is policy state of
         // this handler pair, not part of the named service. `Todos` outlives
@@ -158,6 +162,91 @@ pub fn tool_todo() -> Plugin {
             if let Some(body) = todos.gate_reminder(backing_tasks(&ctx_end)) {
                 // Charged on the win, not on the vote: a handler in a lower
                 // slot can take the round, and the user never saw this nudge.
+                let spent = fires.clone();
+                next.keep_working_with(ORDER_TURN_END_TODO, body, move || {
+                    spent.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+            next
+        });
+        Ok(None)
+    })
+}
+
+/// Register the single `todo_write` tool against the global `"tools"` table.
+/// Registered once; the body dispatches on the **executing** context so a call
+/// from any tab page reaches that page's own `"todos"` service.
+pub fn todo_tool_registration() -> Plugin {
+    plugin("tool-todo.tools", Inject::from([TOOLS]), |ctx, _: &()| {
+        let tools = ctx.require::<Tools>(TOOLS)?;
+        let root_ctx = ctx.clone();
+        let body: ToolBody = {
+            std::sync::Arc::new(move |call| {
+                // `TODOS` is isolated per tab page, so resolve the caller's
+                // subtree, not the (root) one that registered the tool.
+                let ctx = crate::tools::registry::exec_ctx().unwrap_or_else(|| root_ctx.clone());
+                Box::pin(async move { write_todos(&ctx, call) })
+            })
+        };
+        own_registered(
+            ctx,
+            vec![tools.register(
+                ToolSpec {
+                    name: "todo_write".into(),
+                    description: TODO_WRITE_DESC.into(),
+                    parameters_json: PARAMS.into(),
+                },
+                body,
+            )?],
+        )?;
+        Ok(None)
+    })
+}
+
+/// Backwards-compatible single mount: service + tool registration together.
+/// New code mounts [`todo_service`] per isolate subtree and
+/// [`todo_tool_registration`] once at the root.
+pub fn tool_todo() -> Plugin {
+    plugin("tool-todo", Inject::from([TOOLS]), |ctx, _: &()| {
+        ctx.provide(TODOS, Todos::new())?;
+        let fires = Arc::new(AtomicUsize::new(0));
+        let fires_pre = fires.clone();
+        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+            let next = args.next::<PreStep>().unwrap_or(step);
+            if next.enter && next.is_main_session() {
+                fires_pre.store(0, Ordering::Relaxed);
+            }
+            next
+        });
+        let watch = Arc::new(Mutex::new(TodoWatch::default()));
+        let ctx_step = ctx.clone();
+        let _ = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
+            let mut next = args.next::<StepStart>().unwrap_or(start);
+            if !next.is_main_session() {
+                return next;
+            }
+            let Some(todos) = ctx_step.get::<Todos>(TODOS) else {
+                return next;
+            };
+            let mut watch = watch.lock().unwrap();
+            if next.step == 0 {
+                *watch = TodoWatch::armed_at(todos.revision());
+            }
+            if let Some(body) = watch.stale_nudge(&todos) {
+                next.remind(ORDER_STEP_START_TODO, body);
+            }
+            next
+        });
+        let ctx_end = ctx.clone();
+        let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
+            let mut next = args.next::<TurnEnd>().unwrap_or(end);
+            if !gate_applies(&next) || fires.load(Ordering::Relaxed) >= MAX_TODO_GATE_FIRES {
+                return next;
+            }
+            let Some(todos) = ctx_end.get::<Todos>(TODOS) else {
+                return next;
+            };
+            if let Some(body) = todos.gate_reminder(backing_tasks(&ctx_end)) {
                 let spent = fires.clone();
                 next.keep_working_with(ORDER_TURN_END_TODO, body, move || {
                     spent.fetch_add(1, Ordering::Relaxed);
