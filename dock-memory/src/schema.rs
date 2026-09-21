@@ -9,7 +9,12 @@
 //! - `chunks_vec`: vec0 virtual table for KNN vector search
 
 /// Bump when a breaking schema change requires dropping and recreating tables.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 indexes CJK text as overlapping bigrams so a single Chinese keyword can
+/// match inside a longer run (v1 stored `语言偏好` as one unsegmented token).
+/// Existing indexes must rebuild their FTS table, which the open path does when
+/// this value disagrees with the stored one.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Generate the SQL schema for the memory index.
 /// If `vec_available` is false, the `chunks_vec` table is not created.
@@ -60,6 +65,16 @@ INSERT OR IGNORE INTO meta(key, value) VALUES ('reindex_claim', '');
 pub const UPSERT_META_SQL: &str = "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)";
 
 pub const GET_META_SQL: &str = "SELECT value FROM meta WHERE key = ?1";
+
+/// Meta key set to `"1"` when [`crate::index::MemoryIndex`] dropped every table
+/// because the stored schema version disagreed with [`SCHEMA_VERSION`].
+///
+/// A version upgrade empties `chunks`, but the memory watcher may reindex a few
+/// dirty files before the search path looks at the index, which makes
+/// `is_empty()` false and would otherwise skip the full rebuild — silently
+/// dropping every note that was not edited since the upgrade. The flag forces
+/// one full `reindex_tree` and is cleared only once that rebuild succeeds.
+pub const NEEDS_REBUILD_KEY: &str = "needs_rebuild";
 
 #[cfg(test)]
 mod tests {

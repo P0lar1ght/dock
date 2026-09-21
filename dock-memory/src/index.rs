@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::chunker::{chunk_hash, chunk_markdown, ChunkConfig};
 use crate::query_expansion::extract_keywords;
 use crate::schema;
+use crate::tokenize;
 
 static SQLITE_VEC_INIT: Once = Once::new();
 
@@ -112,7 +113,8 @@ impl MemoryIndex {
             .optional()
             .unwrap_or(None);
         let want = schema::SCHEMA_VERSION.to_string();
-        if stored.as_deref().is_some_and(|v| v != want) {
+        let was_reset = stored.as_deref().is_some_and(|v| v != want);
+        if was_reset {
             let _ = db.execute_batch(
                 "
                 DROP TABLE IF EXISTS chunks_vec;
@@ -140,6 +142,21 @@ impl MemoryIndex {
 
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
         db.execute(schema::UPSERT_META_SQL, params!["schema_version", want])?;
+
+        // A version upgrade wiped the index. Flag it so the search path runs a
+        // full rebuild instead of trusting whatever the dirty-path sync put
+        // back, which only covers files edited since the upgrade.
+        if was_reset {
+            tracing::warn!(
+                from = stored.as_deref().unwrap_or("<none>"),
+                to = %want,
+                "memory schema upgraded, forcing full reindex"
+            );
+            db.execute(
+                schema::UPSERT_META_SQL,
+                params![schema::NEEDS_REBUILD_KEY, "1"],
+            )?;
+        }
 
         let stored_dims: Option<String> = db
             .query_row(schema::GET_META_SQL, params!["embedding_dimensions"], |r| {
@@ -203,6 +220,33 @@ impl MemoryIndex {
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get::<_, i64>(0))
             .map(|n| n == 0)
             .unwrap_or(true)
+    }
+
+    /// True when a previous open dropped every table because the stored schema
+    /// version disagreed with [`schema::SCHEMA_VERSION`].
+    ///
+    /// Callers must then run a full [`Self::reindex_tree`]: the index is empty
+    /// except for whatever the dirty-path sync happened to restore first, so
+    /// [`Self::is_empty`] alone cannot detect the missing notes.
+    pub fn needs_rebuild(&self) -> bool {
+        self.db
+            .query_row(
+                schema::GET_META_SQL,
+                params![schema::NEEDS_REBUILD_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap_or(None)
+            .as_deref()
+            == Some("1")
+    }
+
+    /// Clear the rebuild flag after a successful full reindex.
+    pub fn clear_needs_rebuild(&self) {
+        let _ = self.db.execute(
+            schema::UPSERT_META_SQL,
+            params![schema::NEEDS_REBUILD_KEY, "0"],
+        );
     }
 
     pub fn reindex_file(
@@ -269,7 +313,7 @@ impl MemoryIndex {
                     )?;
                     tx.execute(
                         "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
-                        params![rid, chunk.text],
+                        params![rid, fts_text(&chunk.text)],
                     )?;
                     if self.vec_available {
                         let _ = tx.execute(
@@ -299,7 +343,7 @@ impl MemoryIndex {
                     let rowid = tx.last_insert_rowid();
                     tx.execute(
                         "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
-                        params![rowid, chunk.text],
+                        params![rowid, fts_text(&chunk.text)],
                     )?;
                     result.added += 1;
                 }
@@ -608,8 +652,33 @@ impl MemoryIndex {
 ///
 /// Multi-keyword queries use **AND** so every term must appear. OR made queries
 /// like `"Lynn Dock review style"` match notes that only mention Dock.
+///
+/// CJK text is normalized the same way as at index time: a run like `语言偏好`
+/// becomes overlapping bigrams (`语言 言偏 偏好`) so a single Chinese keyword can
+/// match inside a longer run. Terms containing FTS5 syntax characters such as
+/// `dock.1` or `agent/pre-step` are wrapped as phrases instead of raising a
+/// syntax error.
 fn fts_match_query(query: &str) -> String {
-    extract_keywords(query).join(" AND ")
+    extract_keywords(query)
+        .into_iter()
+        .flat_map(|keyword| {
+            // A keyword may mix scripts; the bigram expansion must match the
+            // stored text token-for-token.
+            tokenize::tokenize_for_fts(&keyword)
+        })
+        .map(|token| tokenize::escape_fts_term(&token))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+/// Normalize chunk text for FTS indexing.
+///
+/// CJK runs become overlapping bigrams so a single Chinese keyword can match
+/// inside a longer run; everything else is unchanged. Inserted text and the
+/// text supplied to FTS5 `'delete'` statements must both go through this so the
+/// indexed tokens stay in sync.
+fn fts_text(text: &str) -> String {
+    tokenize::tokenize_for_fts(text).join(" ")
 }
 
 fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
@@ -694,6 +763,162 @@ mod tests {
         assert!(
             hits.is_empty(),
             "AND FTS must not return Dock-only notes for multi-term query; hits={hits:?}"
+        );
+    }
+
+    /// Regression: a Chinese keyword could not match inside a longer CJK run.
+    ///
+    /// v1 had no CJK segmentation, so `语言偏好` was one FTS token and a query
+    /// for `底栏` alone returned nothing.
+    #[test]
+    fn fts_finds_chinese_keyword_inside_cjk_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-cjk"));
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("cjk.md");
+        std::fs::write(
+            &topic,
+            "## 偏好\n\n语言偏好：用户可见文案用中文，底栏短 hint 保持英文。\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+
+        for needle in ["底栏", "偏好", "语言"] {
+            let hits = idx.search_fts(needle, 5).unwrap();
+            assert!(
+                !hits.is_empty(),
+                "Chinese keyword {needle:?} must recall; hits={hits:?}"
+            );
+        }
+    }
+
+    /// Regression: every keyword of a multi-word Chinese query had to appear,
+    /// and each failed to match because CJK runs were not segmented.
+    #[test]
+    fn fts_multi_word_chinese_query_recalls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-cjk-multi"));
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("cjk-multi.md");
+        std::fs::write(&topic, "## 构建\n\n安装应用并注册能力，然后调度分发。\n").unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+
+        let hits = idx.search_fts("安装 应用 注册 能力", 5).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "multi-word Chinese query must recall; hits={hits:?}"
+        );
+    }
+
+    /// `dock.1` and `agent/pre-step` are FTS5 syntax characters. A bare MATCH
+    /// raised a syntax error; they must now match as phrases.
+    #[test]
+    fn fts_matches_terms_with_fts_syntax_characters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-dotted"));
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("dotted.md");
+        std::fs::write(
+            &topic,
+            "## 协议\n\n宿主页 SDK 用 dock.1 协议，走 agent/pre-step 钩子。\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_file(&topic, "workspace").unwrap();
+
+        for needle in ["dock.1", "agent/pre-step"] {
+            let hits = idx.search_fts(needle, 5).unwrap();
+            assert!(
+                !hits.is_empty(),
+                "term {needle:?} must recall instead of erroring; hits={hits:?}"
+            );
+        }
+    }
+
+    /// A Chinese keyword shared by two notes must not leak into unrelated ones.
+    #[test]
+    fn fts_chinese_keyword_stays_precise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-cjk-precise"));
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.workspace.topics.join("a.md"),
+            "## A\n\n语言偏好与底栏文案\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.workspace.topics.join("b.md"),
+            "## B\n\n数据库迁移与回滚策略\n",
+        )
+        .unwrap();
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_tree(&root).unwrap();
+
+        let hits = idx.search_fts("底栏", 5).unwrap();
+        assert!(!hits.is_empty(), "底栏 must recall; hits={hits:?}");
+        for hit in &hits {
+            let chunk = idx.get_chunk(&hit.chunk_id).unwrap().unwrap();
+            assert!(
+                chunk.text.contains('底'),
+                "底栏 query must not return unrelated note; got {:?}",
+                chunk.text
+            );
+        }
+    }
+
+    /// Regression: a schema upgrade dropped every table, then the dirty-path
+    /// sync restored only the files the watcher knew about. Because
+    /// `is_empty()` was already false, the search path skipped the full
+    /// rebuild and every note that had not been edited since the upgrade
+    /// became unsearchable.
+    #[test]
+    fn schema_reset_forces_full_reindex_on_search() {
+        use crate::search::search_memory;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/rebuild-flag"));
+        root.ensure_layout().unwrap();
+        let edited = root.workspace.topics.join("edited.md");
+        let untouched = root.workspace.topics.join("untouched.md");
+        std::fs::write(&edited, "## Edited\n\nzebra alpha content\n").unwrap();
+        std::fs::write(&untouched, "## Untouched\n\nplatypus beta content\n").unwrap();
+
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        idx.reindex_tree(&root).unwrap();
+
+        // Pretend an older build wrote this index.
+        idx.db
+            .execute(
+                "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(idx);
+
+        // New open drops everything and must raise the rebuild flag.
+        let mut idx = MemoryIndex::open_or_create(&root.search_db()).unwrap();
+        assert!(idx.needs_rebuild(), "schema reset must flag a full rebuild");
+
+        // The dirty-path sync restores only the edited file, so the index is
+        // no longer empty — exactly the state that used to hide the loss.
+        idx.reindex_file(&edited, "workspace").unwrap();
+        assert!(
+            !idx.is_empty(),
+            "dirty sync should have repopulated the index"
+        );
+        drop(idx);
+
+        // Search must recover the untouched note, not just the edited one.
+        let hits = search_memory(&root, "platypus", 5).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "full rebuild must recover untouched notes; hits={hits:?}"
+        );
+        assert!(
+            hits.iter().any(|h| h.text.contains("platypus")),
+            "expected the untouched note; hits={hits:?}"
         );
     }
 }
