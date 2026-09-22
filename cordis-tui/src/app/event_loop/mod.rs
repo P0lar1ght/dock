@@ -283,6 +283,17 @@ pub async fn run(root: Context) -> Result<()> {
                                     overlay.close();
                                 }
                                 Effect::RestoreSession(id) => {
+                                    // 已有页正 live 在这份会话上时切过去，
+                                    // 不再恢复一份：两页同时写同一个
+                                    // `chat_history.jsonl` 会损坏历史。
+                                    if let Some(tab_id) = tabs_service(&root)
+                                        .and_then(|tabs| tabs.switch_to_live_session(&id))
+                                    {
+                                        flash(&root, format!("已在第 {tab_id} 页打开"));
+                                        ctx = active_ctx(&root);
+                                        overlay.close();
+                                        continue;
+                                    }
                                     if let Ok(sessions) = ctx.require::<Sessions>(SESSIONS) {
                                         let stamped = sessions.archived_preset_id(&id);
                                         sessions.archive_current();

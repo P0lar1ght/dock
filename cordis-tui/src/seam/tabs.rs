@@ -302,6 +302,22 @@ impl Tabs {
         })
     }
 
+    /// 已有页正 live 在这份磁盘会话上时切到那一页，返回页号。
+    ///
+    /// `/resume` / `--resume` 直接 `restore(id)` 会让两页同时往同一个
+    /// `chat_history.jsonl` 追加，损坏历史；和 [`Self::open_archived`] 一样，
+    /// 已开着的会话只切不复制。当前页自己的 live id 不会出现在归档列表里，
+    /// 所以命中的一定是别的页。
+    pub fn switch_to_live_session(&self, session_id: &str) -> Option<usize> {
+        let index = self.index_of_session(session_id)?;
+        let id = {
+            let tabs = self.inner.tabs.lock().unwrap();
+            tabs.get(index).map(|tab| tab.id)
+        };
+        self.activate(index);
+        id
+    }
+
     /// 起一棵页子树并把快照种进去。旁问页与常驻页共用这条路。
     async fn mount_page(
         &self,
@@ -478,6 +494,14 @@ impl Tabs {
             tabs.remove(index)
         };
         let id = tab.id;
+        // 该页的 MCP elicitation 队列是全局的，fiber dispose 带不走它：
+        // 不 cancel 的话这条 job 哪页都不显示，工具调用永远不返回。
+        if let (Some(sessions), Some(mcp)) =
+            (tab.ctx.get::<Sessions>(SESSIONS), tab.ctx.get::<Mcp>(MCP))
+        {
+            let page = sessions.ui_page();
+            mcp.elicitation().cancel_for(page.as_deref());
+        }
         if let Some(sessions) = tab.ctx.get::<Sessions>(SESSIONS) {
             cordis_spine::discard_ephemeral_plan(&sessions);
         }

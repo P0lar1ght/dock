@@ -4,6 +4,7 @@
 //! TUI live-looks [`Elicitation::front`] and resolves with accept / decline / cancel.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use cordis::Context;
@@ -112,20 +113,32 @@ struct Job {
 struct Inner {
     ctx: Context,
     queue: Mutex<VecDeque<Job>>,
-    /// Pages of in-flight MCP calls, innermost last. The read loop that
-    /// receives `elicitation/create` is not the tool task, so it cannot see
-    /// `exec_ctx`; the tool task pushes here for the duration of `tools/call`.
-    callers: Mutex<Vec<Option<String>>>,
+    /// In-flight MCP calls and the page each belongs to, innermost last. The
+    /// read loop that receives `elicitation/create` is not the tool task, so
+    /// it cannot see `exec_ctx`; the tool task pushes here for the duration of
+    /// `tools/call` and its guard removes its own entry on return.
+    callers: Mutex<Vec<Caller>>,
+    next_caller: AtomicU64,
 }
 
-/// Pops one in-flight caller page when the MCP tool returns.
+/// One in-flight `tools/call`. The id lets a returning call drop its own entry
+/// instead of the stack top — two pages calling concurrently return in any
+/// order, and a blind pop would leave the other page's entry behind.
+struct Caller {
+    id: u64,
+    page: Option<String>,
+}
+
+/// Removes this call's own entry when the MCP tool returns.
 pub struct PageGuard {
     inner: Arc<Inner>,
+    id: u64,
 }
 
 impl Drop for PageGuard {
     fn drop(&mut self) {
-        self.inner.callers.lock().unwrap().pop();
+        let mut callers = self.inner.callers.lock().unwrap();
+        callers.retain(|c| c.id != self.id);
     }
 }
 
@@ -151,6 +164,7 @@ impl Elicitation {
                 ctx,
                 queue: Mutex::new(VecDeque::new()),
                 callers: Mutex::new(Vec::new()),
+                next_caller: AtomicU64::new(0),
             }),
         }
     }
@@ -171,7 +185,13 @@ impl Elicitation {
                 return decline_value();
             }
         };
-        let origin = self.inner.callers.lock().unwrap().last().cloned().flatten();
+        let origin = self
+            .inner
+            .callers
+            .lock()
+            .unwrap()
+            .last()
+            .and_then(|c| c.page.clone());
         let (tx, rx) = oneshot::channel();
         {
             let mut q = self.inner.queue.lock().unwrap();
@@ -197,9 +217,17 @@ impl Elicitation {
     }
 
     pub fn scope_page(&self, page: Option<String>) -> PageGuard {
-        self.inner.callers.lock().unwrap().push(page);
+        let id = self
+            .inner
+            .next_caller
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.callers.lock().unwrap().push(Caller {
+            id,
+            page: page.clone(),
+        });
         PageGuard {
             inner: Arc::clone(&self.inner),
+            id,
         }
     }
 
@@ -1073,6 +1101,46 @@ mod tests {
         assert!(elicit.front_for(Some("main#2")).is_some());
         elicit.cancel_for(Some("main#2"));
         assert!(elicit.front().is_none());
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_returning_call_does_not_drop_the_other_pages_caller() {
+        // 两页同时调同一个 MCP 服务器时，先返回的那一页不能把后返回那页的来源页
+        // 条目一起弹掉，否则它的提问会盖到不存在的页上。
+        let elicit = Elicitation::new(Context::new());
+        let first = elicit.scope_page(Some("main#2".into()));
+        let _second = elicit.scope_page(Some("main#3".into()));
+        drop(first);
+        {
+            let callers = elicit.inner.callers.lock().unwrap();
+            assert_eq!(
+                callers.last().map(|c| c.page.as_deref()),
+                Some(Some("main#3")),
+                "后返回那页的条目该还在"
+            );
+            assert_eq!(callers.len(), 1);
+        }
+
+        let params = json!({ "message": "环境？" });
+        let handle = tokio::spawn({
+            let elicit = elicit.clone();
+            async move { elicit.create("local", params).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let origin = elicit
+            .inner
+            .queue
+            .lock()
+            .unwrap()
+            .front()
+            .and_then(|job| job.origin.clone());
+        assert_eq!(
+            origin.as_deref(),
+            Some("main#3"),
+            "提问该盖在还在跑的那一页上"
+        );
+        elicit.cancel();
         let _ = handle.await;
     }
 

@@ -7,7 +7,7 @@
 //!
 //! Plan file is per-session (Grok uses `$GROK_HOME/sessions/<cwd>/<id>/plan.md`):
 //! `$DOCK_HOME/sessions/<cwd-key>/<id>/plan.md`, or
-//! `sessions/<cwd-key>/tabs/<main#N>/plan.md` for a non-disk tab page.
+//! `sessions/<cwd-key>/tabs/<pid>/<main#N>/plan.md` for a non-disk tab page.
 //! The model is told that absolute path. See [`plan_path_for`].
 
 use std::path::{Path, PathBuf};
@@ -328,7 +328,13 @@ fn path_targets_plan_file(path: &str, expected: &Path) -> bool {
     if path.is_empty() {
         return false;
     }
-    Path::new(path) == expected
+    // 模型可能把路径正规化（macOS 的 /var ↔ /private/var、含 `..` / `./`、
+    // 尾斜杠）。两侧都 canonicalize 后再比，仍是「只认本页这个文件」。
+    // 文件不存在（计划还没建）时 canonicalize 会失败，回落逐字比较，保持原行为。
+    match (std::fs::canonicalize(path), std::fs::canonicalize(expected)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => Path::new(path) == expected,
+    }
 }
 
 /// Backwards-compatible single mount: service + tool registration together, in
@@ -467,7 +473,7 @@ pub fn clear_plan_for_session_switch(ctx: &Context) {
 /// 互不覆盖（对齐 grok-build 的 `$GROK_HOME/sessions/<cwd>/<id>/plan.md`）。
 ///
 /// - 已落盘的会话（主会话）→ 自己的 session 目录
-/// - 未落盘的分页（`main#N`，不 attach_disk）→ `sessions/<cwd-key>/tabs/<identity>/`
+/// - 未落盘的分页（`main#N`，不 attach_disk）→ `sessions/<cwd-key>/tabs/<pid>/<identity>/`
 /// - 拿不到会话（测试 / 未挂载）→ 回落到 cwd 下的 `.dock/plan.md`
 fn plan_path_for(sessions: Option<&Sessions>) -> PathBuf {
     if let Some(sessions) = sessions {
@@ -485,6 +491,10 @@ fn plan_path_for(sessions: Option<&Sessions>) -> PathBuf {
 
 /// Directory of a non-disk tab's plan. `None` for the root session and for
 /// subagents — those either have a disk session dir or no plan of their own.
+///
+/// `<pid>` 段把不同进程的同一页号隔开：`main#N` 每个进程都从 2 开始编号，
+/// 两个 dock 进程共用同一 `DOCK_HOME` 与工作目录时，没有 pid 段就会开页
+/// 删掉对方正在写的计划。同一进程内页号唯一，不会撞。
 fn ephemeral_plan_dir(sessions: &Sessions) -> Option<PathBuf> {
     if sessions.on_disk() {
         return None;
@@ -497,6 +507,7 @@ fn ephemeral_plan_dir(sessions: &Sessions) -> Option<PathBuf> {
     Some(
         crate::session::persist::sessions_cwd_dir(&cwd)
             .join("tabs")
+            .join(std::process::id().to_string())
             .join(id),
     )
 }
@@ -505,8 +516,9 @@ fn ephemeral_plan_dir(sessions: &Sessions) -> Option<PathBuf> {
 ///
 /// Tabs are not persisted. The directory name is `main#N`, and that number
 /// restarts at 2 next process, so a leftover file would be treated as this
-/// page's plan. Called when the page opens (drop the previous process) and
-/// when it closes (drop this one).
+/// page's plan. Called when the page opens (drop the previous run of this
+/// process) and when it closes (drop this one). The `<pid>` parent makes sure
+/// that only ever touches this process's own pages.
 pub fn discard_ephemeral_plan(sessions: &Sessions) {
     let Some(dir) = ephemeral_plan_dir(sessions) else {
         return;
@@ -779,6 +791,70 @@ mod tests {
             ),
             "相对路径不再是本页计划，不能给每一页开一张共用写门"
         );
+    }
+
+    /// 回归：分页计划目录带 `<pid>` 段。`main#N` 每个进程都从 2 开始编号，
+    /// 不隔开的话，另一个 dock 进程开它的第 2 页会把这一进程第 2 页正在写的
+    /// 计划删掉（`discard_ephemeral_plan` 按页号删目录）。
+    #[test]
+    fn tab_plan_dir_is_scoped_to_this_process() {
+        let ctx = Context::new();
+        let page = Sessions::tab(ctx, 2);
+        page.pin_plan_cwd("/work/alpha");
+        let path = plan_path_for(Some(&page));
+        let comps: Vec<String> = path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let pid = std::process::id().to_string();
+        assert!(
+            comps.iter().any(|c| c == &pid),
+            "分页计划目录该带 pid 段: {path:?}"
+        );
+        assert!(comps.iter().any(|c| c == "main#2"), "{path:?}");
+    }
+
+    /// 回归：模型回传的计划路径可能正规化过（`..` / `.` / 符号链接前缀），
+    /// 逐字比较会连「写自己的计划」一起挡下，计划模式下没有别的出路。
+    /// 两侧 canonicalize 后该放行同名同位置的文件，别的文件仍挡。
+    #[test]
+    fn plan_gate_accepts_normalized_variants_of_the_same_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = dir.path().join("plan.md");
+        std::fs::write(&plan, "").unwrap();
+        std::fs::write(dir.path().join("other.md"), "").unwrap();
+
+        // 模型回传的路径可能带 `.` / `..` 这类冗余段，或走过符号链接前缀
+        // （macOS 的 /var ↔ /private/var）。两侧 canonicalize 后该认成同一个文件。
+        let dotted = dir.path().join(".").join("plan.md");
+        assert!(path_targets_plan_file(&dotted.to_string_lossy(), &plan));
+        let name = dir.path().file_name().expect("tempdir has a name");
+        let up_down = dir.path().parent().unwrap().join(name).join("plan.md");
+        assert!(
+            path_targets_plan_file(&up_down.to_string_lossy(), &plan),
+            "{} 该是 {} 的正规化写法",
+            up_down.display(),
+            plan.display()
+        );
+        assert!(
+            path_targets_plan_file(
+                &std::fs::canonicalize(&plan)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| plan.to_string_lossy().into_owned()),
+                &plan
+            ),
+            "符号链接前缀的正规化写法也该认"
+        );
+        assert!(!path_targets_plan_file(
+            &dir.path().join("other.md").to_string_lossy(),
+            &plan
+        ));
+        // canonicalize 不了（文件不存在）时回落逐字比较，仍只认这一个文件。
+        assert!(!path_targets_plan_file(
+            &dir.path().join("missing.md").to_string_lossy(),
+            &plan
+        ));
+        assert!(path_targets_plan_file(&plan.to_string_lossy(), &plan));
     }
 
     #[test]

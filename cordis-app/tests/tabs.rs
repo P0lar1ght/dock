@@ -7,8 +7,8 @@ use cordis_spine::{
     agent_loop, clear_plan_for_session_switch, expected_plan_path, goal_service,
     goal_tool_registration, install_fakes, is_plan_file_edit, permissions, plan_mode_service,
     plan_mode_tool_registration, settings, todo_service, todo_tool_registration, AppSettings, Goal,
-    LlmOutput, LogEvent, PermissionMode, Permissions, PlanMode, PlanPhase, PreStep, Sessions,
-    Todos, ToolCall, Tools, TurnEnd, AGENT_PRESETS, GOAL, PERMISSIONS, PLAN_MODE, PRE_STEP,
+    LlmOutput, LogEvent, Mcp, PermissionMode, Permissions, PlanMode, PlanPhase, PreStep, Sessions,
+    Todos, ToolCall, Tools, TurnEnd, AGENT_PRESETS, GOAL, MCP, PERMISSIONS, PLAN_MODE, PRE_STEP,
     SESSIONS, SETTINGS, TODOS, TOOLS, TURN, TURN_END,
 };
 use cordis_tui::{
@@ -16,15 +16,15 @@ use cordis_tui::{
     TUI_TABS,
 };
 
-/// 整个测试二进制共用一个隔离的 `DOCK_HOME`，免得读到本机 `~/.dock`。
+/// 每个测试自己一个隔离的 `DOCK_HOME`，免得读到本机 `~/.dock`，也免得
+/// 并行跑的测试抢同一个分页计划目录（分页目录按页号命名，两页都叫 `main#2`）。
 fn isolated_home() {
-    static HOME: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("dock-tabs-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("DOCK_HOME", &dir);
-        std::env::set_var("DOCK_CUA_DRIVER", "off");
-    });
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("dock-tabs-test-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("DOCK_HOME", &dir);
+    std::env::set_var("DOCK_CUA_DRIVER", "off");
 }
 
 async fn boot() -> Context {
@@ -416,6 +416,90 @@ async fn each_page_keeps_its_model_mode_and_permission_queue() {
     .expect("第二页的权限请求该进第二页的队列");
     assert!(first_q.front().is_none(), "第一页不该看见第二页的批准框");
     assert_eq!(second_q.front().unwrap().summary, "只属于第二页");
+}
+
+/// 关页要清掉那一页的 MCP elicitation：队列是全局的，fiber dispose 带不走它，
+/// 不 cancel 的话那条工具调用永远等不到答复。
+#[tokio::test]
+async fn closing_a_tab_cancels_its_pending_elicitation() {
+    let root = boot().await;
+    root.plugin(cordis_spine::mcp_client(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let mcp = root.get::<Mcp>(MCP).unwrap();
+    let elicit = mcp.elicitation();
+
+    tabs.open().await.unwrap();
+    let page = tabs.active_ctx();
+    let page_name = page
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| s.ui_page())
+        .expect("分页有自己的页名");
+
+    // 这一页正在跑的 MCP 工具发来的提问
+    let _scope = elicit.scope_page(Some(page_name.clone()));
+    let queued = elicit.clone();
+    let created = tokio::spawn(async move {
+        queued
+            .create("fake-server", serde_json::json!({"message": "选哪个？"}))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while elicit.front_for(Some(&page_name)).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("提问该排进这一页的队列");
+
+    tabs.close(1).await.unwrap();
+
+    assert!(
+        elicit.front_for(Some(&page_name)).is_none(),
+        "关页该带走这一页的提问"
+    );
+    let value = tokio::time::timeout(std::time::Duration::from_secs(3), created)
+        .await
+        .expect("关页该给那条调用一个答复")
+        .unwrap();
+    assert!(
+        value
+            .get("action")
+            .is_some_and(|a| a.as_str() == Some("cancel")),
+        "提问被取消，工具调用才不会挂住: {value}"
+    );
+}
+
+/// `/resume` 恢复时，若别的页正 live 在这份会话上，切过去而不是再开一份：
+/// 两页同时往同一个 `chat_history.jsonl` 追加会损坏历史。
+#[tokio::test]
+async fn restoring_an_id_live_on_another_tab_switches_there() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let main = root.get::<Sessions>(SESSIONS).unwrap();
+    main.attach_disk();
+    main.append(LogEvent::User("历史里的那句".into()));
+    let id = main.archive_current().unwrap().id;
+
+    let tab_id = tabs.open_archived(&id).await.unwrap();
+    assert_eq!(tabs.len(), 2, "开一份历史会话该多一页");
+
+    // 回到第一页，模拟 /resume 选中同一个 id：不复制，只切到开着的那一页
+    tabs.activate(0);
+    assert_eq!(
+        tabs.switch_to_live_session(&id),
+        Some(tab_id),
+        "已经开着就该切过去"
+    );
+    assert_eq!(tabs.active_id(), tab_id);
+    assert_eq!(tabs.len(), 2, "不该再开一页");
+    assert!(
+        tabs.switch_to_live_session("unknown-id").is_none(),
+        "没开着的会话不该被当成已开"
+    );
 }
 
 fn turn_end(identity: &str) -> TurnEnd {

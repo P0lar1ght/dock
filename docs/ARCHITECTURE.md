@@ -86,7 +86,7 @@ config.toml.example      用户 / 项目模型目录样例
 | 每页一份 | 全局一份（落回根） |
 |---|---|
 | `sessions` `turn` `agentLoop` `session` `session.port` `goal` `todos` `planMode` `settings` `permissions` `ask` | `tools` `llm` `systemPrompt` `agents` `mcp` `skills` |
-| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp` `workflows` `slash` `agentPresets` `theme` `gateway` |
+| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp` `workflows` `slash` `agentPresets` `theme` `gateway` `memory` |
 
 服务按 `(isolate realm, name)` 解析，没被 isolate 的名字自然落回根 —— 所以**一张
 `"tools"` 表**的不变式没有被破坏，两页共用同一张表、同一个 `llm`。模型、协议、
