@@ -85,8 +85,8 @@ config.toml.example      用户 / 项目模型目录样例
 
 | 每页一份 | 全局一份（落回根） |
 |---|---|
-| `sessions` `turn` `agentLoop` `session` `session.port` `goal` `todos` | `tools` `llm` `systemPrompt` `agents` `permissions` `ask` `mcp` `settings` `skills` |
-| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp` `workflows` `slash` `agentPresets` `theme` `gateway` `planMode` |
+| `sessions` `turn` `agentLoop` `session` `session.port` `goal` `todos` `planMode` | `tools` `llm` `systemPrompt` `agents` `permissions` `ask` `mcp` `settings` `skills` |
+| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp` `workflows` `slash` `agentPresets` `theme` `gateway` |
 
 服务按 `(isolate realm, name)` 解析，没被 isolate 的名字自然落回根 —— 所以**一张
 `"tools"` 表**的不变式没有被破坏，两页共用同一张表、同一个 `llm`、同一套权限浮层。
@@ -118,7 +118,15 @@ config.toml.example      用户 / 项目模型目录样例
 **已知边界**：分页不落盘（`--resume`、gateway `dock.1` 投影、会话归档都只跟第 1
 页）；权限浮层 / `ask` / MCP elicit 是全局队列且**还没有来源标记**，后台页触发的
 弹窗会在你正看的那一页弹出；全局单例（浏览器、cua、后台任务表）两页会抢；
-`planMode` 目前也是全局一份，两页共用；`goal` / `todos` 已按页隔离，见上表。
+`goal` / `todos` / `planMode` 已按页隔离，见上表。
+
+**计划文件按页划分**：`planMode` 隔离之后，计划文件也跟着按会话分 ——
+`$DOCK_HOME/sessions/<cwd-key>/<id>/plan.md`（主会话）或
+`sessions/<cwd-key>/tabs/<identity>/plan.md`（不落盘的分页，identity = `main#N`），
+对齐 grok-build 的 `$GROK_HOME/sessions/<cwd>/<id>/plan.md`。这样第 2 页的计划
+不会覆盖第 1 页的。写门（`tools/pre-execute`）按本页期望路径判定，只有写**本页**
+计划文件的 `write_file` / `search_replace` 才算计划编辑而豁免只读门；旧相对路径
+`.dock/plan.md` 仍被认作计划编辑（模型在 `enter_plan_mode` 输出里拿到的还是它）。
 
 **子代理按页记账**：`"subagents"` 仍是全局一份，但协调器本来就按
 `parent_session_id` 分账（`spawn_blocked_sessions` / `session_running_count` /

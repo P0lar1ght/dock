@@ -369,10 +369,17 @@ impl Tools {
         };
 
         if self.workspace {
+            let plan_expected = crate::tools::plan_mode::expected_plan_path(
+                exec.get::<crate::session::log::Sessions>(SESSIONS)
+                    .as_deref(),
+            );
             if let Some(plan) = exec.get::<PlanMode>(PLAN_MODE) {
                 if plan.gated() && acp::blocked_in_plan(&call.name) {
-                    let plan_file_edit =
-                        crate::tools::plan_mode::is_plan_file_edit(&call.name, &call.arguments);
+                    let plan_file_edit = crate::tools::plan_mode::is_plan_file_edit(
+                        &call.name,
+                        &call.arguments,
+                        &plan_expected,
+                    );
                     if !plan_file_edit {
                         return finish(
                             exec,
@@ -387,7 +394,12 @@ impl Tools {
                 }
             }
             let plan_file_edit = exec.get::<PlanMode>(PLAN_MODE).is_some_and(|p| {
-                p.gated() && crate::tools::plan_mode::is_plan_file_edit(&call.name, &call.arguments)
+                p.gated()
+                    && crate::tools::plan_mode::is_plan_file_edit(
+                        &call.name,
+                        &call.arguments,
+                        &plan_expected,
+                    )
             });
             if acp::needs_permission(&call.name) && !plan_file_edit {
                 if let Some(perms) = exec.get::<Permissions>(PERMISSIONS) {

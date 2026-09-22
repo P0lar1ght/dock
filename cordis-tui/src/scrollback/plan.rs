@@ -69,7 +69,7 @@ fn enter_lines(
     let failed = content.starts_with("Error") || content.contains("未挂载");
     let open = mode != ToolMode::Collapsed;
     let muted = (!open && !running) || failed;
-    let path = extract_plan_path(content).unwrap_or_else(|| ".dock/plan.md".into());
+    let path = extract_plan_path(content).unwrap_or_else(|| "plan.md".into());
 
     let mut header = header_line("Plan: Enter", &path, None, muted, failed, theme, width);
     prepend_diamond(&mut header, theme, failed);
@@ -110,7 +110,7 @@ fn exit_lines(
         || content.contains("当前不在计划模式");
     let open = mode != ToolMode::Collapsed;
     let muted = (!open && !running) || failed;
-    let path = extract_plan_path(content).unwrap_or_else(|| ".dock/plan.md".into());
+    let path = extract_plan_path(content).unwrap_or_else(|| "plan.md".into());
     let plan_md = extract_plan_markdown(content);
     let empty = plan_md.as_ref().is_none_or(|s| s.trim().is_empty());
     let line_count = plan_md

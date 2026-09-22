@@ -27,7 +27,7 @@ use crate::tools::lsp::tool_lsp;
 use crate::tools::mcp::mcp_client;
 use crate::tools::memory::tool_memory;
 use crate::tools::monitor::tool_monitor;
-use crate::tools::plan_mode::plan_mode;
+use crate::tools::plan_mode::{plan_mode_service, plan_mode_tool_registration};
 use crate::tools::registry::{tools, workspace_tools};
 use crate::tools::sched::tool_scheduler;
 use crate::tools::skills::{skills, tool_skills};
@@ -120,7 +120,6 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(todo_service(), ())?.wait().await?;
     // todo_write 工具只在全局工具表注册一份，靠执行期 ctx 派发到调用页。
     ctx.plugin(todo_tool_registration(), ())?.wait().await?;
-    ctx.plugin(plan_mode(), ())?.wait().await?;
     ctx.plugin(tool_ask_user(), ())?.wait().await?;
     ctx.plugin(tool_jobs(), ())?.wait().await?;
     ctx.plugin(tool_scheduler(), ())?.wait().await?;
@@ -133,6 +132,12 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(goal_service(), ())?.wait().await?;
     // update_goal 工具只在全局工具表注册一份，靠执行期 ctx 派发到调用页。
     ctx.plugin(goal_tool_registration(), ())?.wait().await?;
+    // 根会话的 plan-mode 服务（`PLAN_MODE` 按页隔离：分页各自挂 plan_mode_service）。
+    ctx.plugin(plan_mode_service(), ())?.wait().await?;
+    // enter_plan_mode / exit_plan_mode 工具只在全局工具表注册一份，靠执行期 ctx 派发到调用页。
+    ctx.plugin(plan_mode_tool_registration(), ())?
+        .wait()
+        .await?;
     ctx.plugin(tool_lsp(), ())?.wait().await?;
     ctx.plugin(tool_skills(), ())?.wait().await?;
     ctx.plugin(tool_workflow(), ())?.wait().await?;

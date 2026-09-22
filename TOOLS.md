@@ -45,7 +45,7 @@
 | `tool-browser` | `"browser"` + `"tools"` | `browser_*` 21 颗（按需） | BUA P2，in-process chromiumoxide CDP | [browser](docs/tools/browser.md) |
 | `tool-computer` | `"computer"` | — | CUA C0 薄驾驶舱；桌面键鼠经 `cua-driver` MCP | [computer](docs/tools/computer.md) |
 | `tool-todo` | `"todos"` + `"tools"` | `todo_write` | Grok merge/replace + 两条续跑 / 提醒 waterfall | [todo](docs/tools/todo.md) |
-| `plan-mode` | `"planMode"` + `"tools"` | `enter_plan_mode` `exit_plan_mode` | 计划文件 `.dock/plan.md`；计划态挡住 bash / 写文件等 | — |
+| `plan-mode` | `"planMode"` + `"tools"` | `enter_plan_mode` `exit_plan_mode` | 计划文件按会话划分（见下）；计划态挡住 bash / 写文件等 | — |
 | `tool-ask-user` | `"ask"` + `"tools"` | `ask_user_question` | 事件 `ask/pending` | — |
 | `tool-scheduler` | → `"tools"`（live `"cron"`） | `scheduler_create` `scheduler_list` `scheduler_delete`（按需） | 包着已有 `"cron"`，`register_deferred`。`fire_immediately` 立刻跑第一次；循环 7 天后过期（过期不跑最后一次，滚动区留中文说明）；最多 50 条；`task_id` 原地更新并保持相位。滚动区 Loop 卡；`/tasks` 里 `x` / `[✗]` 关闭 | — |
 | `tool-task` | `"subagents"` + `"tools"` | `task` `send_message` `list_agents` `interrupt_agent` `report` | Grok coordinator + dock `ChildRunner` isolate | [task](docs/tools/task.md) |
@@ -62,7 +62,13 @@
 
 **权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `browser_evaluate`，以及全部 `mcp_cua-driver__*`。
 
-**计划门**：同上（`enter_plan_mode` 之后返回 blocked，直到 `exit_plan_mode`）。例外：对 `.dock/plan.md` 的 `search_replace` / `write_file` 自动放行（对齐 grok）。
+**计划门**：同上（`enter_plan_mode` 之后返回 blocked，直到 `exit_plan_mode`）。例外：对**本页**计划文件的 `search_replace` / `write_file` 自动放行（对齐 grok）。
+
+**计划文件路径**（`plan-mode`）：按会话划分，同 cwd 下多个分页各有自己的计划，互不覆盖 ——
+`$DOCK_HOME/sessions/<cwd-key>/<id>/plan.md`（主会话）或
+`sessions/<cwd-key>/tabs/<main#N>/plan.md`（不落盘的分页）。`"planMode"` 本身也按页隔离
+（`PER_TAB_SERVICES`），`enter_plan_mode` / `exit_plan_mode` 工具仍只有全局工具表一份，
+靠执行期 ctx 派发到调用者那一页。旧相对路径 `.dock/plan.md` 仍被写门认作计划编辑。
 
 ---
 

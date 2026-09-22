@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use cordis::{plugin, plugin_async, Inject, Plugin};
 use cordis_spine::{
-    agent_loop, goal_service, todo_service, turn, AgentPresets, Sessions, SubagentDef,
-    AGENT_PRESETS, SESSIONS,
+    agent_loop, goal_service, plan_mode_service, todo_service, turn, AgentPresets, Sessions,
+    SubagentDef, AGENT_PRESETS, SESSIONS,
 };
 use cordis_tui::{prompt, scrollback, status_bar, welcome, TabKind, TabMount};
 
@@ -61,6 +61,8 @@ fn tab(index: usize, kind: TabKind) -> Plugin {
         // 执行期 ctx 派发到调用者那一页。
         ctx.plugin(goal_service(), ())?.wait().await?;
         ctx.plugin(todo_service(), ())?.wait().await?;
+        // `PLAN_MODE` 按页隔离：分页各有自己的计划模式状态与计划文件。
+        ctx.plugin(plan_mode_service(), ())?.wait().await?;
         ctx.plugin(turn(), ())?.wait().await?;
         ctx.plugin(agent_loop(), ())?.wait().await?;
         ctx.plugin(session_actor(), ())?.wait().await?;

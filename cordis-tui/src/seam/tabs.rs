@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Fiber, Inject, Plugin};
-use cordis_spine::{LogEvent, Sessions, AGENT_LOOP, AGENT_PRESETS, GOAL, SESSIONS, TODOS, TURN};
+use cordis_spine::{
+    LogEvent, Sessions, AGENT_LOOP, AGENT_PRESETS, GOAL, PLAN_MODE, SESSIONS, TODOS, TURN,
+};
 
 use crate::names::{
     SESSION, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS, TUI_WELCOME,
@@ -26,9 +28,10 @@ use crate::views::prompt::PromptWidget;
 /// 每页各有一份的服务。没列进来的一律落回根（全局单例：工具表、LLM、权限、
 /// MCP、浏览器、cua、后台任务……），两页会真的抢同一个。
 ///
-/// `GOAL` / `TODOS` 在这里：分页各有自己的目标与待办，第 2 页的 `/goal` /
-/// `todo_write` 不再串进第 1 页。`update_goal` / `todo_write` 工具仍只有一张
-/// 表里的一份，靠执行期 ctx 派发到调用者那一页。
+/// `GOAL` / `TODOS` / `PLAN_MODE` 在这里：分页各有自己的目标、待办与计划模式，
+/// 第 2 页的 `/goal` / `todo_write` / `enter_plan_mode` 不再串进第 1 页。
+/// `update_goal` / `todo_write` / `enter_plan_mode` / `exit_plan_mode` 工具仍只有
+/// 一张表里的一份，靠执行期 ctx 派发到调用者那一页。
 pub const PER_TAB_SERVICES: &[&str] = &[
     SESSIONS,
     TURN,
@@ -41,6 +44,7 @@ pub const PER_TAB_SERVICES: &[&str] = &[
     TUI_WELCOME,
     GOAL,
     TODOS,
+    PLAN_MODE,
 ];
 
 /// 旁问页额外要 isolate 的名字：它得有一份**自己的**只读预设，不能用全局那份。
