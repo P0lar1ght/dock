@@ -118,6 +118,10 @@ struct Inner {
     /// it cannot see `exec_ctx`; the tool task pushes here for the duration of
     /// `tools/call` and its guard removes its own entry on return.
     callers: Mutex<Vec<Caller>>,
+    /// `tools/call` JSON-RPC id → page, in the order they were sent. A question
+    /// that arrives on that request's own HTTP response is looked up by id, so
+    /// two pages can call the same server at once and each keep its own prompt.
+    inflight: Mutex<Vec<(u64, Option<String>)>>,
     next_caller: AtomicU64,
 }
 
@@ -142,6 +146,61 @@ impl Drop for PageGuard {
     }
 }
 
+/// Removes this `tools/call` from the in-flight map when the RPC returns.
+pub struct RequestGuard {
+    inner: Arc<Inner>,
+    request_id: u64,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.inner
+            .inflight
+            .lock()
+            .unwrap()
+            .retain(|(id, _)| *id != self.request_id);
+    }
+}
+
+/// Which page should see this question.
+///
+/// A related `tools/call` id wins. Otherwise the oldest in-flight page that
+/// does not already have a prompt — never `callers.last()`, which is whichever
+/// page happened to start second.
+fn pick_origin(
+    inflight: &[(u64, Option<String>)],
+    callers: &[Caller],
+    queue: &VecDeque<Job>,
+    related: Option<u64>,
+) -> Option<String> {
+    if let Some(id) = related {
+        if let Some(page) = inflight
+            .iter()
+            .find(|(rid, _)| *rid == id)
+            .and_then(|(_, page)| page.clone())
+        {
+            return Some(page);
+        }
+    }
+    let pages: Vec<String> = if inflight.iter().any(|(_, page)| page.is_some()) {
+        inflight
+            .iter()
+            .filter_map(|(_, page)| page.clone())
+            .collect()
+    } else {
+        callers.iter().filter_map(|c| c.page.clone()).collect()
+    };
+    pages
+        .iter()
+        .find(|page| {
+            !queue
+                .iter()
+                .any(|job| job.origin.as_deref() == Some(page.as_str()))
+        })
+        .cloned()
+        .or_else(|| pages.into_iter().next())
+}
+
 fn index_of(queue: &VecDeque<Job>, page: Option<&str>) -> Option<usize> {
     match page {
         None => (!queue.is_empty()).then_some(0),
@@ -164,6 +223,7 @@ impl Elicitation {
                 ctx,
                 queue: Mutex::new(VecDeque::new()),
                 callers: Mutex::new(Vec::new()),
+                inflight: Mutex::new(Vec::new()),
                 next_caller: AtomicU64::new(0),
             }),
         }
@@ -178,6 +238,17 @@ impl Elicitation {
     }
 
     pub async fn create(&self, server: &str, params: Value) -> Value {
+        self.create_for(server, params, None).await
+    }
+
+    /// `related` is the client `tools/call` id this question belongs to.
+    ///
+    /// HTTP carries the question on that call's own POST response, so the id
+    /// is known and the prompt stays on the page that sent it. A shared stdio
+    /// stream has no such channel: with one call in flight it takes that page,
+    /// with several it takes the oldest call that does not already have a
+    /// prompt, instead of whoever pushed last.
+    pub async fn create_for(&self, server: &str, params: Value, related: Option<u64>) -> Value {
         let (kind, message) = match parse_params(&params) {
             Ok(v) => v,
             Err(e) => {
@@ -185,16 +256,12 @@ impl Elicitation {
                 return decline_value();
             }
         };
-        let origin = self
-            .inner
-            .callers
-            .lock()
-            .unwrap()
-            .last()
-            .and_then(|c| c.page.clone());
         let (tx, rx) = oneshot::channel();
         {
+            let inflight = self.inner.inflight.lock().unwrap();
+            let callers = self.inner.callers.lock().unwrap();
             let mut q = self.inner.queue.lock().unwrap();
+            let origin = pick_origin(&inflight, &callers, &q, related);
             q.push_back(Job {
                 server: server.to_string(),
                 message,
@@ -205,6 +272,16 @@ impl Elicitation {
         }
         self.inner.ctx.emit(MCP_ELICIT_EVENT, ());
         rx.await.unwrap_or_else(|_| cancel_value())
+    }
+
+    /// Bind a `tools/call` JSON-RPC id to the page that sent it. Held until the
+    /// call returns, including while its elicitation is on screen.
+    pub fn track_request(&self, request_id: u64, page: Option<String>) -> RequestGuard {
+        self.inner.inflight.lock().unwrap().push((request_id, page));
+        RequestGuard {
+            inner: Arc::clone(&self.inner),
+            request_id,
+        }
     }
 
     /// Remember which page's tool call is in flight so a server elicitation
@@ -1141,6 +1218,27 @@ mod tests {
             "提问该盖在还在跑的那一页上"
         );
         elicit.cancel();
+        let _ = handle.await;
+    }
+
+    /// 后发出的那次调用先被服务器提问时，框仍留在它自己的页上，不盖到先发出的那页。
+    #[tokio::test]
+    async fn a_later_calls_question_stays_on_its_own_page() {
+        let elicit = Elicitation::new(Context::new());
+        let _first = elicit.track_request(1, Some("main".into()));
+        let _second = elicit.track_request(2, Some("main#2".into()));
+        let params = json!({ "message": "后一页" });
+        let handle = tokio::spawn({
+            let elicit = elicit.clone();
+            async move { elicit.create_for("local", params, Some(2)).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            elicit.front_for(Some("main#2")).map(|p| p.message),
+            Some("后一页".into())
+        );
+        assert!(elicit.front_for(Some("main")).is_none());
+        elicit.cancel_for(Some("main#2"));
         let _ = handle.await;
     }
 

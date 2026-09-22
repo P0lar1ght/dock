@@ -112,7 +112,6 @@ async fn connect_once(
         modern: AtomicBool::new(true),
         wire,
         hooks,
-        call_lock: Arc::new(tokio::sync::Mutex::new(())),
         _child: Mutex::new(Some(child)),
     });
     let reader_shared = shared.clone();
@@ -139,10 +138,6 @@ async fn connect_once(
     let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
         let session = session_call.clone();
         Box::pin(async move {
-            // 见 `http.rs` 的 call fn：锁必须跟 `session` 拆开借，否则盖不住 `rpc`。
-            // 同一服务器一次只跑一页的调用，elicitation 才不会盖到后 push 的那一页。
-            let lock = Arc::clone(&session.call_lock);
-            let _call_lock = lock.lock().await;
             let raw_name = raw_tool_name(&public);
             let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
             let body = json!({ "name": raw_name, "arguments": args });
@@ -151,7 +146,6 @@ async fn connect_once(
             } else {
                 body
             };
-            let _page = session.hooks.elicit.scope_caller();
             match rpc(&session, "tools/call", params).await {
                 Ok(v) => {
                     let (text, images) = protocol::format_call_result_parts(&v);
@@ -183,8 +177,6 @@ struct Shared {
     modern: AtomicBool,
     wire: WireFraming,
     hooks: LiveHooks,
-    /// 一次只让一页的 `tools/call` 在飞（见 call fn）。
-    call_lock: Arc<tokio::sync::Mutex<()>>,
     _child: Mutex<Option<tokio::process::Child>>,
 }
 
@@ -311,6 +303,14 @@ async fn list_all(s: &Shared, server_name: &str) -> Result<Vec<protocol::ListedT
 
 async fn rpc(s: &Shared, method: &str, params: Value) -> Result<Value, String> {
     let id = s.next_id.fetch_add(1, Ordering::Relaxed);
+    // stdio 是一条共享流，提问不一定带 related id。记下这次调用的页，
+    // 只有一路在飞时归它；多路同时在飞时按发送顺序各领一题，不互相排队。
+    let _owner = (method == "tools/call").then(|| {
+        let page = crate::tools::registry::exec_ctx()
+            .as_ref()
+            .and_then(crate::session::log::Sessions::page_of);
+        s.hooks.elicit.track_request(id, page)
+    });
     let (tx, rx) = oneshot::channel();
     s.pending.lock().unwrap().insert(id, tx);
     let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -409,7 +409,7 @@ async fn reader_loop(
                         let shared = shared.clone();
                         tokio::spawn(async move {
                             let reply =
-                                incoming::request(&shared.hooks, id, method, params).await;
+                                incoming::request(&shared.hooks, id, method, params, None).await;
                             let _ = write_msg(&shared, &reply).await;
                         });
                     }

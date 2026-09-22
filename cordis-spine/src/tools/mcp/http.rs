@@ -30,6 +30,7 @@ use crate::tools::registry::{tool_result, tool_result_with_images};
 use cordis_base::config::{McpServer, McpTransport};
 use cordis_base::types::ToolCall;
 
+use super::elicitation::Elicitation;
 use super::incoming::{self, LiveHooks};
 use super::sse::{self, SseParser};
 use super::tools_list;
@@ -68,7 +69,6 @@ pub(super) async fn connect(
         skip_oauth,
         pending: Mutex::new(HashMap::new()),
         hooks,
-        call_lock: Arc::new(tokio::sync::Mutex::new(())),
         handshake: tokio::sync::Mutex::new(()),
         reply_tx,
     });
@@ -106,17 +106,8 @@ pub(super) async fn connect(
     let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
         let session = session_call.clone();
         Box::pin(async move {
-            // 锁单独拿一份 Arc：守卫如果借在 `session` 的字段上，就没法再把
-            // 整个 `session` 借给 `rpc`。
-            //
-            // 同一服务器一次只跑一页的调用。elicitation 的来源页是「当前在飞
-            // 的调用」里最后 push 的那一页；两页同时打进来，提问会盖到后一页。
-            // 锁覆盖整次 `rpc`（含服务器等用户填完表单才回的结果），后一页排队。
-            let lock = Arc::clone(&session.call_lock);
-            let _call_lock = lock.lock().await;
             let raw_name = raw_tool_name(&public);
             let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
-            let _page = session.hooks.elicit.scope_caller();
             match rpc(
                 &session,
                 "tools/call",
@@ -157,10 +148,6 @@ struct HttpShared {
     skip_oauth: bool,
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     hooks: LiveHooks,
-    /// 一次只让一页的 `tools/call` 在飞（见 call fn）。
-    ///
-    /// `Arc` 是为了让守卫不借 `HttpShared` 本身，调用期间还能把 `self` 传给 `rpc`。
-    call_lock: Arc<tokio::sync::Mutex<()>>,
     handshake: tokio::sync::Mutex<()>,
     /// 服务器发来的请求（`elicitation/create`）的回复出口。
     ///
@@ -352,6 +339,14 @@ async fn rpc_inner(
     recovered: bool,
 ) -> Result<Value, String> {
     let id = s.next_id.fetch_add(1, Ordering::Relaxed);
+    // 提问若出现在这次 POST 的响应里，按这个 id 找回发出调用的那一页。
+    // 守卫要活过整次等待，不能在用户填表之前丢掉。
+    let _owner = (method == "tools/call").then(|| {
+        let page = crate::tools::registry::exec_ctx()
+            .as_ref()
+            .and_then(crate::session::log::Sessions::page_of);
+        s.hooks.elicit.track_request(id, page)
+    });
     let params = if s.modern.load(Ordering::Relaxed) && method != "initialize" {
         with_meta(params, &s.protocol())
     } else {
@@ -436,8 +431,10 @@ async fn ingest(s: &HttpShared, v: Value, want_id: Option<u64>) -> Option<Value>
             // tools/call 的结果）都读不到。JSON-RPC 按 id 配对，回复不需要保序。
             let hooks = s.hooks.clone();
             let tx = s.reply_tx.clone();
+            // 这条 POST 正在等 `want_id`。流上的提问属于这次调用，不看「最后 push 的页」。
+            let related = Elicitation::is_create(&method).then_some(want_id).flatten();
             tokio::spawn(async move {
-                let reply = incoming::request(&hooks, id, method, params).await;
+                let reply = incoming::request(&hooks, id, method, params, related).await;
                 let _ = tx.send(reply);
             });
             None
@@ -1084,12 +1081,10 @@ mod tests {
         handle.abort();
     }
 
-    /// 两页同时打同一台服务器时，先发起那页的提问必须留在它自己的页上。
+    /// 两页同时打同一台服务器，各自的提问留在各自的页上，调用本身不排队。
     ///
-    /// 服务器把第一次 `tools/call` 按住，等第二次进来（或超时），再只先推
-    /// `elicitation/create`，结果留到测试看完提问才发。这样盖来源页的时候第一次
-    /// 调用还在飞。没加锁时第二次已经 push 了来源页，提问盖到后一页；加锁后
-    /// 第二次还排着队，提问留在第一页，且两次调用不重叠。
+    /// 后一页的 `elicitation/create` 先到。归属如果还是「最后 push 的那一页」，
+    /// 两道题都会盖到后一页；按 POST 自己的请求 id 对上之后，各页只看见自己的。
     #[tokio::test]
     async fn concurrent_calls_keep_elicitation_on_the_calling_page() {
         let overlap = Arc::new(CallOverlap::default());
@@ -1145,28 +1140,28 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if elicit.front_for(Some("main")).is_some()
-                    || elicit.front_for(Some("main#2")).is_some()
-                {
+                let main = elicit.front_for(Some("main")).is_some();
+                let other = elicit.front_for(Some("main#2")).is_some();
+                if main && other {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("elicitation never queued");
-        assert!(
-            elicit.front_for(Some("main")).is_some(),
-            "提问该盖在先调用的那一页"
+        .expect("both pages should have their own prompt");
+        assert_eq!(
+            elicit.front_for(Some("main")).map(|p| p.message),
+            Some("先一页".into())
         );
-        assert!(
-            elicit.front_for(Some("main#2")).is_none(),
-            "后一页不该看见先一页的提问"
+        assert_eq!(
+            elicit.front_for(Some("main#2")).map(|p| p.message),
+            Some("后一页".into())
         );
         assert_eq!(
             overlap.max_inflight.load(Ordering::SeqCst),
-            1,
-            "同一连接的 tools/call 必须串行"
+            2,
+            "两页的调用要同时在飞"
         );
         overlap.release_first.store(true, Ordering::SeqCst);
 
@@ -1178,8 +1173,8 @@ mod tests {
             .await
             .expect("call b timed out")
             .expect("call b join");
-        assert_eq!(a.content, "先一页");
-        assert_eq!(b.content, "后一页");
+        assert_eq!(a.content, "先一页的结果");
+        assert_eq!(b.content, "后一页的结果");
         elicit.cancel();
         handle.abort();
     }
@@ -1191,8 +1186,7 @@ mod tests {
         max_inflight: AtomicU32,
         first_seen: AtomicBool,
         second_arrived: AtomicBool,
-        first_done: AtomicBool,
-        /// 测试看完提问之后才放行第一次调用的结果。
+        /// 测试看完两页的提问之后才放行调用结果。
         release_first: AtomicBool,
     }
 
@@ -1274,26 +1268,12 @@ mod tests {
                 }
             };
             let _ = tokio::time::timeout(Duration::from_millis(500), wait_second).await;
-            held_elicit_then_result(stream, &id, overlap).await
+            // 让后一页的提问先盖上。按「最后一页」归属的话，先一页的题也会跟过去。
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            held_elicit_then_result(stream, &id, overlap, 9001, "先一页", "先一页的结果").await
         } else {
             overlap.second_arrived.store(true, Ordering::SeqCst);
-            let wait_first = async {
-                while !overlap.first_done.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            };
-            let _ = tokio::time::timeout(Duration::from_secs(3), wait_first).await;
-            let resp = json_response(
-                200,
-                "",
-                &json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": { "content": [{ "type": "text", "text": "后一页" }] }
-                })
-                .to_string(),
-            );
-            stream.write_all(&resp).await.is_ok()
+            held_elicit_then_result(stream, &id, overlap, 9002, "后一页", "后一页的结果").await
         };
         overlap.inflight.fetch_sub(1, Ordering::SeqCst);
         ok
@@ -1305,6 +1285,9 @@ mod tests {
         stream: &mut tokio::net::TcpStream,
         id: &Value,
         overlap: &CallOverlap,
+        elicit_id: u64,
+        message: &str,
+        result_text: &str,
     ) -> bool {
         let header = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\r\n";
         if stream.write_all(header).await.is_err() {
@@ -1312,10 +1295,10 @@ mod tests {
         }
         let elicit = json!({
             "jsonrpc": "2.0",
-            "id": 9001,
+            "id": elicit_id,
             "method": "elicitation/create",
             "params": {
-                "message": "确认？",
+                "message": message,
                 "requestedSchema": {
                     "type": "object",
                     "properties": { "ok": { "type": "boolean" } }
@@ -1334,12 +1317,9 @@ mod tests {
         let result = json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "content": [{ "type": "text", "text": "先一页" }] }
+            "result": { "content": [{ "type": "text", "text": result_text }] }
         });
-        let ok =
-            write_sse_chunk(stream, &result).await && stream.write_all(b"0\r\n\r\n").await.is_ok();
-        overlap.first_done.store(true, Ordering::SeqCst);
-        ok
+        write_sse_chunk(stream, &result).await && stream.write_all(b"0\r\n\r\n").await.is_ok()
     }
 
     async fn write_sse_chunk(stream: &mut tokio::net::TcpStream, event: &Value) -> bool {
