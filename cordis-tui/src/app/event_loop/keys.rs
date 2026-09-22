@@ -134,7 +134,7 @@ pub(super) fn run_action(
                     return Vec::new();
                 }
                 if let Some(mcp) = ctx.get::<Mcp>(MCP) {
-                    mcp.elicitation().cancel();
+                    mcp.elicitation().cancel_for(page_name(ctx).as_deref());
                 }
             }
             if let Overlay::PlanApproval {
@@ -1208,7 +1208,7 @@ pub(super) fn run_action(
                     }
                     if matches!(overlay, Overlay::Elicit { .. }) {
                         if let Some(mcp) = ctx.get::<Mcp>(MCP) {
-                            mcp.elicitation().cancel();
+                            mcp.elicitation().cancel_for(page_name(ctx).as_deref());
                         }
                     }
                     if let Overlay::PlanApproval {
@@ -1636,9 +1636,8 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
             }
             crate::views::dashboard::DashRow::Archived { id, cwd, .. } => {
                 if !resumable {
-                    // 不在当前工作目录下的会话恢复不了：`Sessions::restore` 只认
-                    // `archived()`，那份列表是 `load_cwd(当前 cwd)` 填的。与其
-                    // 按下去毫无反应，不如说清楚。
+                    // 不在当前工作目录下的会话开不了页：`adopt_archived` 只认
+                    // `load_cwd(当前 cwd)`。与其按下去毫无反应，不如说清楚。
                     flash(
                         ctx,
                         format!("该会话属于 {}，先 /cd 过去再恢复", cwd.display()),
@@ -1646,7 +1645,7 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
                     return Vec::new();
                 }
                 overlay.close();
-                return vec![Effect::RestoreSession(id)];
+                return vec![Effect::OpenSession(id)];
             }
         }
     }

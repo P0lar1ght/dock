@@ -91,6 +91,10 @@ pub struct Sessions {
     /// When set, archive / live snapshots write Grok-style folders under
     /// `$DOCK_HOME/sessions/<cwd-key>/`. Isolated child logs stay memory-only.
     disk_cwd: Arc<Mutex<Option<PathBuf>>>,
+    /// Cwd captured when a non-disk tab opens. Its plan file stays under this
+    /// cwd after a later process-wide `cd`. This does not turn persistence on;
+    /// only [`Self::disk_cwd`] does that.
+    plan_cwd: Arc<Mutex<Option<PathBuf>>>,
     live_id: Arc<Mutex<String>>,
     /// Preset id stamped into `meta.json` on save / archive. Updated by the TUI.
     live_preset_id: Arc<Mutex<Option<String>>>,
@@ -104,6 +108,9 @@ pub struct Sessions {
     last_flush_compaction: Arc<AtomicU64>,
     /// Last accepted flush markdown (for delta flushes).
     last_flush_content: Arc<Mutex<Option<String>>>,
+    /// User-facing page that owns a child log (`main` / `main#N`).
+    /// Main and tab sessions leave this empty and report their own identity.
+    page_home: Arc<Mutex<Option<String>>>,
 }
 
 /// Official SSE usage held until [`Sessions::finish_llm`] so one sample is
@@ -145,8 +152,36 @@ impl Sessions {
 
     /// 第 `index` 个分页的会话（`index >= 2`；第一页就是 [`Self::new`]）。
     /// 与主会话同级：照发 TUI 事件、系统提示照给目录，只是换一个身份。
+    ///
+    /// 开页时把 cwd 钉在 [`Self::plan_cwd`] 上。分页不 `attach_disk`，但计划
+    /// 文件要跟着开页时的工作区走，不能每次再读 `current_dir()`。
     pub fn tab(ctx: Context, index: usize) -> Self {
-        Self::with_identity(ctx, format!("{TAB_IDENTITY_PREFIX}{index}"), true)
+        let session = Self::with_identity(ctx, format!("{TAB_IDENTITY_PREFIX}{index}"), true);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        session.pin_plan_cwd(cwd);
+        session
+    }
+
+    /// Pin the cwd used for this page's ephemeral plan directory.
+    pub fn pin_plan_cwd(&self, cwd: impl Into<PathBuf>) {
+        *self.plan_cwd.lock().unwrap() = Some(cwd.into());
+    }
+
+    /// Cwd pinned at tab open. `None` for the disk-backed root session and
+    /// for subagents.
+    pub fn plan_cwd(&self) -> Option<PathBuf> {
+        self.plan_cwd.lock().unwrap().clone()
+    }
+
+    /// The user-facing page (`main` / `main#N`) this context belongs to.
+    pub fn page_of(ctx: &Context) -> Option<String> {
+        ctx.get::<Sessions>(SESSIONS).and_then(|s| s.ui_page())
+    }
+
+    /// True after [`Self::attach_disk`]. Those sessions persist; tab plans must
+    /// not be deleted out from under them.
+    pub fn on_disk(&self) -> bool {
+        self.disk_cwd.lock().unwrap().is_some()
     }
 
     /// 用户面的会话（根会话或分页），不是子代理。
@@ -198,6 +233,7 @@ impl Sessions {
             queued_followups: Arc::new(AtomicUsize::new(0)),
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
             disk_cwd: Arc::new(Mutex::new(None)),
+            plan_cwd: Arc::new(Mutex::new(None)),
             live_id: Arc::new(Mutex::new(String::new())),
             live_preset_id: Arc::new(Mutex::new(None)),
             compact_prefix: Arc::new(Mutex::new(None)),
@@ -206,7 +242,22 @@ impl Sessions {
             compaction_count: Arc::new(AtomicU64::new(0)),
             last_flush_compaction: Arc::new(AtomicU64::new(0)),
             last_flush_content: Arc::new(Mutex::new(None)),
+            page_home: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Page this log should surface prompts on. Tabs are their own page.
+    /// A subagent copies the spawning page so its permission prompt opens there.
+    pub fn ui_page(&self) -> Option<String> {
+        if self.is_main() {
+            Some(self.identity().to_string())
+        } else {
+            self.page_home.lock().unwrap().clone()
+        }
+    }
+
+    pub fn pin_page_home(&self, page: impl Into<String>) {
+        *self.page_home.lock().unwrap() = Some(page.into());
     }
 
     /// Stamp the active agent preset into subsequent `meta.json` writes.
@@ -274,6 +325,39 @@ impl Sessions {
         self.restore(id)
     }
 
+    /// Whether the current cwd has this session on disk. Does not touch the live log.
+    pub fn can_adopt_archived(id: &str) -> bool {
+        if id.is_empty() {
+            return false;
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        crate::session::persist::load_session(id, &cwd).is_some()
+    }
+
+    /// Load one on-disk session of the current cwd into an **empty** log and
+    /// keep writing back to that same id.
+    ///
+    /// A new tab starts empty. [`Self::resume_id`] would archive that empty log
+    /// first; once `live_id` is set, persisting an empty log deletes the folder.
+    /// This skips the archive step and refuses a log that already has events,
+    /// so opening history on a page cannot wipe the thread it is adopting.
+    pub fn adopt_archived(&self, id: &str) -> bool {
+        if !self.emit || !Self::can_adopt_archived(id) {
+            return false;
+        }
+        if !self.events.lock().unwrap().is_empty() {
+            return false;
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let loaded = crate::session::persist::load_cwd(&cwd);
+        if !loaded.iter().any(|s| s.id == id) {
+            return false;
+        }
+        *self.archive.lock().unwrap() = loaded;
+        *self.disk_cwd.lock().unwrap() = Some(cwd);
+        self.restore(id)
+    }
+
     /// Queue a hidden model-only reminder for the next user bubble whose
     /// visible text equals `expected_user` (so a queued `/loop` cannot steal
     /// an unrelated follow-up).
@@ -286,6 +370,16 @@ impl Sessions {
 
     pub fn identity(&self) -> &str {
         &self.identity
+    }
+
+    /// A per-tab waterfall handler may act only when `identity` is this page.
+    ///
+    /// Listeners are process-global (`Context::waterfall` passes no isolate
+    /// filter). [`cordis_base::types::is_main_identity`] is true for every tab,
+    /// so it does not keep page 2's turn out of page 1's handler.
+    pub fn turn_is_this_page(ctx: &Context, identity: &str) -> bool {
+        ctx.get::<Sessions>(SESSIONS)
+            .is_some_and(|sessions| sessions.identity() == identity)
     }
 
     pub fn set_queued_followups(&self, n: usize) {

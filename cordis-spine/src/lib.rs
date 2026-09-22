@@ -114,9 +114,9 @@ pub use tools::memory::{
 };
 pub use tools::monitor::tool_monitor;
 pub use tools::plan_mode::{
-    expected_plan_path, is_plan_file_edit, plan_instruction, plan_mode, plan_mode_service,
-    plan_mode_tool_registration, plan_system_addon, PlanApprovalPrompt, PlanDecision, PlanMode,
-    PlanPhase, PLAN_REL,
+    clear_plan_for_session_switch, discard_ephemeral_plan, expected_plan_path, is_plan_file_edit,
+    plan_instruction, plan_mode, plan_mode_service, plan_mode_tool_registration, plan_system_addon,
+    PlanApprovalPrompt, PlanDecision, PlanMode, PlanPhase, PLAN_REL,
 };
 pub use tools::registry::{own_registered, tools, workspace_tools, ToolBody, Tools};
 pub use tools::sched::{

@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Fiber, Inject, Plugin};
 use cordis_spine::{
-    LogEvent, Sessions, AGENT_LOOP, AGENT_PRESETS, GOAL, PLAN_MODE, SESSIONS, TODOS, TURN,
+    Ask, LogEvent, Mcp, Permissions, PlanMode, Sessions, AGENT_LOOP, AGENT_PRESETS, ASK, GOAL, MCP,
+    PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TODOS, TURN,
 };
 
 use crate::names::{
@@ -25,13 +26,12 @@ use crate::names::{
 use crate::seam::session::SessionRef;
 use crate::views::prompt::PromptWidget;
 
-/// 每页各有一份的服务。没列进来的一律落回根（全局单例：工具表、LLM、权限、
-/// MCP、浏览器、cua、后台任务……），两页会真的抢同一个。
+/// 每页各有一份的服务。没列进来的一律落回根（全局单例：工具表、LLM、MCP 连接、
+/// 浏览器、cua、后台任务……）。
 ///
-/// `GOAL` / `TODOS` / `PLAN_MODE` 在这里：分页各有自己的目标、待办与计划模式，
-/// 第 2 页的 `/goal` / `todo_write` / `enter_plan_mode` 不再串进第 1 页。
-/// `update_goal` / `todo_write` / `enter_plan_mode` / `exit_plan_mode` 工具仍只有
-/// 一张表里的一份，靠执行期 ctx 派发到调用者那一页。
+/// `settings` 是这一页选的模型、协议、权限模式。`permissions` / `ask` 是这一页
+/// 自己的队列：后台页的批准框不会弹到正在看的那一页上。MCP 连接仍是全局的，
+/// elicitation 在请求上盖来源页。
 pub const PER_TAB_SERVICES: &[&str] = &[
     SESSIONS,
     TURN,
@@ -45,6 +45,9 @@ pub const PER_TAB_SERVICES: &[&str] = &[
     GOAL,
     TODOS,
     PLAN_MODE,
+    SETTINGS,
+    PERMISSIONS,
+    ASK,
 ];
 
 /// 旁问页额外要 isolate 的名字：它得有一份**自己的**只读预设，不能用全局那份。
@@ -79,6 +82,8 @@ pub struct TabInfo {
     pub origin: Option<usize>,
     /// 常驻页还是只读旁问页。
     pub kind: TabKind,
+    /// 这一页有权限 / 提问 / 计划批准 / MCP elicitation 在等你。
+    pub pending: bool,
 }
 
 struct Tab {
@@ -174,6 +179,7 @@ impl Tabs {
                 active: i == active,
                 origin: tab.origin,
                 kind: tab.kind,
+                pending: tab_pending(&tab.ctx),
             })
             .collect()
     }
@@ -241,6 +247,59 @@ impl Tabs {
             return Err("当前页还没有对话，先说点什么再分叉".into());
         }
         self.open_with(Some((origin, snapshot))).await
+    }
+
+    /// 把一份磁盘会话开成自己的常驻页，并切过去。
+    ///
+    /// 当前页不动。已经有一页的 `live_session_id` 就是它时，只切到那一页，
+    /// 不再复制一份。空白页不落盘；这一页会 `adopt_archived`，之后的对话写回
+    /// 原来的会话目录。
+    pub async fn open_archived(&self, session_id: &str) -> Result<usize, String> {
+        if let Some(index) = self.index_of_session(session_id) {
+            self.activate(index);
+            let tabs = self.inner.tabs.lock().unwrap();
+            return Ok(tabs[index].id);
+        }
+        if self.len() >= MAX_TABS {
+            return Err(format!("最多 {MAX_TABS} 页"));
+        }
+        // 先确认磁盘上有这份会话，再挂页。挂完才发现没有，会白白占掉一个页号。
+        if !Sessions::can_adopt_archived(session_id) {
+            return Err("这个会话开不了页（只认当前工作目录下的历史）".into());
+        }
+        let (id, child, fiber) = self.mount_page(TabKind::Normal, None).await?;
+        let adopted = child
+            .get::<Sessions>(SESSIONS)
+            .is_some_and(|sessions| sessions.adopt_archived(session_id));
+        if !adopted {
+            let _ = fiber.dispose().await;
+            return Err("这个会话开不了页（只认当前工作目录下的历史）".into());
+        }
+        let index = {
+            let mut tabs = self.inner.tabs.lock().unwrap();
+            tabs.push(Tab {
+                id,
+                ctx: child,
+                fiber: Some(fiber),
+                origin: None,
+                kind: TabKind::Normal,
+            });
+            tabs.len() - 1
+        };
+        self.activate(index);
+        Ok(id)
+    }
+
+    /// 哪一页正在写这份磁盘会话。空 id 不算（空白页的 `live_id` 都是空的）。
+    fn index_of_session(&self, session_id: &str) -> Option<usize> {
+        if session_id.is_empty() {
+            return None;
+        }
+        self.inner.tabs.lock().unwrap().iter().position(|tab| {
+            tab.ctx
+                .get::<Sessions>(SESSIONS)
+                .is_some_and(|sessions| sessions.live_session_id() == session_id)
+        })
     }
 
     /// 起一棵页子树并把快照种进去。旁问页与常驻页共用这条路。
@@ -419,6 +478,9 @@ impl Tabs {
             tabs.remove(index)
         };
         let id = tab.id;
+        if let Some(sessions) = tab.ctx.get::<Sessions>(SESSIONS) {
+            cordis_spine::discard_ephemeral_plan(&sessions);
+        }
         if let Some(fiber) = tab.fiber {
             // 整页的插件都挂在这颗 fiber 下：dispose 一次，会话 / 循环 / 视图一起走。
             fiber
@@ -462,6 +524,20 @@ fn carried_block(from: usize, text: &str) -> String {
 fn tab_working(ctx: &Context) -> bool {
     ctx.get::<SessionRef>(SESSION_PORT)
         .is_some_and(|s| s.working())
+}
+
+/// 这一页自己的队列里有没有在等人回答的东西。切走之后标签上标出来。
+fn tab_pending(ctx: &Context) -> bool {
+    let page = ctx.get::<Sessions>(SESSIONS).and_then(|s| s.ui_page());
+    ctx.get::<Permissions>(PERMISSIONS)
+        .is_some_and(|p| p.front().is_some())
+        || ctx.get::<Ask>(ASK).is_some_and(|a| a.front().is_some())
+        || ctx
+            .get::<PlanMode>(PLAN_MODE)
+            .is_some_and(|p| p.front().is_some())
+        || ctx
+            .get::<Mcp>(MCP)
+            .is_some_and(|m| m.elicitation().front_for(page.as_deref()).is_some())
 }
 
 /// 标签标题：会话自己的标题 > 第一条用户消息 > 「新会话」。

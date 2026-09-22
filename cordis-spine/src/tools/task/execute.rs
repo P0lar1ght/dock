@@ -222,6 +222,11 @@ async fn spawn_child(
     let id = task_id
         .filter(|s| super::types::is_not_sentinel(s))
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    // `exec_ctx` is the calling page (or the child, for a grandchild). The
+    // runner was built on the root and would otherwise isolate from page 1.
+    if let Some(parent) = crate::tools::registry::exec_ctx() {
+        sub.note_spawn_parent(&id, parent);
+    }
     sub.remember(
         &id,
         description.clone(),

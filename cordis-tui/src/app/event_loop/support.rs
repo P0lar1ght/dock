@@ -87,11 +87,13 @@ pub(super) fn open_permission_if_needed(ctx: &Context, overlay: &mut Overlay) {
     // 反过来写（看见 elicit 就先 close 再看有没有东西要显示）会在没有待授权项时
     // 把正在填的 elicit 表单每轮拆掉重建 —— 它的 selected / picked / draft 活在
     // overlay 上，重建就等于全部打回默认。
-    if ctx
-        .get::<Permissions>(PERMISSIONS)
-        .and_then(|p| p.front())
-        .is_none()
-    {
+    //
+    // 权限队列按页隔离。切到没有待授权项的页时把框收掉，那一项还留在原来那页。
+    let front = ctx.get::<Permissions>(PERMISSIONS).and_then(|p| p.front());
+    if matches!(overlay, Overlay::Permission { .. }) && front.is_none() {
+        overlay.close();
+    }
+    if front.is_none() {
         return;
     }
     // 授权门优先级高于 elicit，可以抢；其余已开的 overlay 让位给它们。
@@ -379,8 +381,14 @@ pub(super) fn sync_ask_draft_focus(ctx: &Context, overlay: &mut Overlay) {
     }
 }
 
+pub(super) fn page_name(ctx: &Context) -> Option<String> {
+    ctx.get::<Sessions>(SESSIONS).and_then(|s| s.ui_page())
+}
+
 pub(super) fn elicit_front(ctx: &Context) -> Option<cordis_spine::ElicitPrompt> {
-    ctx.get::<Mcp>(MCP).and_then(|m| m.elicitation().front())
+    let page = page_name(ctx);
+    ctx.get::<Mcp>(MCP)
+        .and_then(|m| m.elicitation().front_for(page.as_deref()))
 }
 
 pub(super) fn elicit_needs_draft(ctx: &Context, selected: usize, picked: &[bool]) -> bool {
@@ -637,7 +645,8 @@ pub(super) fn accept_elicit(
         overlay.close();
         return;
     };
-    let Some(front) = elicit.front() else {
+    let page = page_name(ctx);
+    let Some(front) = elicit.front_for(page.as_deref()) else {
         overlay.close();
         return;
     };
@@ -650,9 +659,9 @@ pub(super) fn accept_elicit(
     // 永远不 resolve，工具调用和整轮对话一起卡死。多选里光标恰好停在「其他」
     // 但没勾它时同理。
     let result = if front.typing {
-        elicit.accept_text(draft)
+        elicit.accept_text_on(page.as_deref(), draft)
     } else {
-        elicit.accept_option(selected, &picked, draft)
+        elicit.accept_option_on(page.as_deref(), selected, &picked, draft)
     };
     match result {
         Ok(()) => overlay.close(),

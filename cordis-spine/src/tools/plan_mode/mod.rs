@@ -8,7 +8,7 @@
 //! Plan file is per-session (Grok uses `$GROK_HOME/sessions/<cwd>/<id>/plan.md`):
 //! `$DOCK_HOME/sessions/<cwd-key>/<id>/plan.md`, or
 //! `sessions/<cwd-key>/tabs/<main#N>/plan.md` for a non-disk tab page.
-//! See [`plan_path_for`].
+//! The model is told that absolute path. See [`plan_path_for`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -38,7 +38,7 @@ pub enum PlanPhase {
 pub enum PlanDecision {
     /// Leave plan mode and start implementing.
     Approve,
-    /// Stay in plan mode; revise `.dock/plan.md`.
+    /// Stay in plan mode; revise this page's plan file.
     Revise,
     /// Abandon the plan and turn plan mode off.
     Quit,
@@ -89,6 +89,12 @@ impl PlanMode {
 
     pub fn phase(&self) -> PlanPhase {
         self.mode.lock().unwrap().phase
+    }
+
+    /// Sessions of the page this service was mounted on. A child looking up
+    /// `planMode` still gets this page, not its own isolated log.
+    fn page_sessions(&self) -> Option<std::sync::Arc<Sessions>> {
+        self.ctx.get::<Sessions>(SESSIONS)
     }
 
     /// Chrome chip / Shift+Tab: any non-inactive phase, or parked approval.
@@ -298,10 +304,9 @@ impl PlanMode {
 
 /// Whether this tool call is an edit of the session plan file.
 ///
-/// `expected` is the caller's page plan path (see [`resolve_plan`]) — the plan
-/// file is per-session now, so a write only counts as a plan edit when it hits
-/// **this** page's file. The legacy `.dock/plan.md` relative path still matches,
-/// because the model is told that path in `enter_plan_mode` output.
+/// `expected` is the caller's page plan path (see [`resolve_plan`]). Only that
+/// path counts: `enter_plan_mode` tells the model the absolute path, and a
+/// shared relative name would let two active pages write one file.
 pub fn is_plan_file_edit(tool: &str, arguments: &str, expected: &Path) -> bool {
     if !matches!(
         tool,
@@ -323,20 +328,7 @@ fn path_targets_plan_file(path: &str, expected: &Path) -> bool {
     if path.is_empty() {
         return false;
     }
-    // Legacy relative path the model was told about.
-    if path == PLAN_REL || path.ends_with("/.dock/plan.md") || path.ends_with("\\.dock\\plan.md") {
-        return true;
-    }
-    let p = Path::new(path);
-    if p == expected {
-        return true;
-    }
-    // Legacy layout: `<cwd>/.dock/plan.md`.
-    p.file_name().and_then(|n| n.to_str()) == Some("plan.md")
-        && p.parent()
-            .and_then(|par| par.file_name())
-            .and_then(|n| n.to_str())
-            == Some(".dock")
+    Path::new(path) == expected
 }
 
 /// Backwards-compatible single mount: service + tool registration together, in
@@ -346,18 +338,7 @@ fn path_targets_plan_file(path: &str, expected: &Path) -> bool {
 pub fn plan_mode() -> Plugin {
     plugin("plan-mode", Inject::from([TOOLS]), |ctx, _: &()| {
         ctx.provide(PLAN_MODE, PlanMode::new(ctx.clone()))?;
-        let ctx_pre = ctx.clone();
-        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
-            let next = args.next::<PreStep>().unwrap_or(step);
-            // Main session only: the plan is the user's, so Pending → Active is
-            // the user's own turn to make, not a subagent's.
-            if next.enter && next.is_main_session() {
-                if let Some(plan) = ctx_pre.get::<PlanMode>(PLAN_MODE) {
-                    plan.inject_turn_reminder();
-                }
-            }
-            next
-        });
+        wire_plan_pre_step(ctx);
         let root_ctx = ctx.clone();
         let enter: ToolBody = {
             let root_ctx = root_ctx.clone();
@@ -403,18 +384,7 @@ pub fn plan_mode() -> Plugin {
 pub fn plan_mode_service() -> Plugin {
     plugin("plan-mode.service", Inject::new(), |ctx, _: &()| {
         ctx.provide(PLAN_MODE, PlanMode::new(ctx.clone()))?;
-        let ctx_pre = ctx.clone();
-        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
-            let next = args.next::<PreStep>().unwrap_or(step);
-            // Main session only: the plan is the user's, so Pending → Active is
-            // the user's own turn to make, not a subagent's.
-            if next.enter && next.is_main_session() {
-                if let Some(plan) = ctx_pre.get::<PlanMode>(PLAN_MODE) {
-                    plan.inject_turn_reminder();
-                }
-            }
-            next
-        });
+        wire_plan_pre_step(ctx);
         Ok(None)
     })
 }
@@ -467,26 +437,45 @@ pub fn plan_mode_tool_registration() -> Plugin {
     })
 }
 
+/// Pending → Active belongs to the page whose turn is starting. A subagent
+/// identity matches no page, so it cannot promote or remind the user's plan.
+fn wire_plan_pre_step(ctx: &Context) {
+    let ctx_pre = ctx.clone();
+    let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+        let next = args.next::<PreStep>().unwrap_or(step);
+        if next.enter && Sessions::turn_is_this_page(&ctx_pre, &next.identity) {
+            if let Some(plan) = ctx_pre.get::<PlanMode>(PLAN_MODE) {
+                plan.inject_turn_reminder();
+            }
+        }
+        next
+    });
+}
+
+/// Drop plan mode because the live thread on this page just changed.
+///
+/// Phase is in memory and is not stored with the session. New session and
+/// resume both have to come through here, or the write gate follows the new
+/// `live_id` while the chip still says the previous thread is planning.
+pub fn clear_plan_for_session_switch(ctx: &Context) {
+    if let Some(plan) = ctx.get::<PlanMode>(PLAN_MODE) {
+        plan.set(false);
+    }
+}
+
 /// 计划文件按**会话**划分，而不是按工作区 cwd：同 cwd 下多个分页各有自己的计划，
 /// 互不覆盖（对齐 grok-build 的 `$GROK_HOME/sessions/<cwd>/<id>/plan.md`）。
 ///
 /// - 已落盘的会话（主会话）→ 自己的 session 目录
-/// - 未落盘的分页（`main#N`，不 attach_disk）→ `tabs/<identity>` 目录
+/// - 未落盘的分页（`main#N`，不 attach_disk）→ `sessions/<cwd-key>/tabs/<identity>/`
 /// - 拿不到会话（测试 / 未挂载）→ 回落到 cwd 下的 `.dock/plan.md`
 fn plan_path_for(sessions: Option<&Sessions>) -> PathBuf {
     if let Some(sessions) = sessions {
         if let Some(dir) = sessions.disk_session_dir() {
             return dir.join(PLAN_FILENAME);
         }
-        if !sessions.identity().is_empty() {
-            if let Ok(cwd) = std::env::current_dir() {
-                if let Some(base) = crate::session::persist::sessions_cwd_dir(&cwd).parent() {
-                    return base
-                        .join("tabs")
-                        .join(sessions.identity())
-                        .join(PLAN_FILENAME);
-                }
-            }
+        if let Some(dir) = ephemeral_plan_dir(sessions) {
+            return dir.join(PLAN_FILENAME);
         }
     }
     std::env::current_dir()
@@ -494,13 +483,47 @@ fn plan_path_for(sessions: Option<&Sessions>) -> PathBuf {
         .join(PLAN_REL)
 }
 
-/// Resolve `(path, display)` for the caller's page.
+/// Directory of a non-disk tab's plan. `None` for the root session and for
+/// subagents — those either have a disk session dir or no plan of their own.
+fn ephemeral_plan_dir(sessions: &Sessions) -> Option<PathBuf> {
+    if sessions.on_disk() {
+        return None;
+    }
+    let cwd = sessions.plan_cwd()?;
+    let id = sessions.identity();
+    if !id.starts_with(cordis_base::types::TAB_IDENTITY_PREFIX) {
+        return None;
+    }
+    Some(
+        crate::session::persist::sessions_cwd_dir(&cwd)
+            .join("tabs")
+            .join(id),
+    )
+}
+
+/// Remove a non-disk tab's plan directory.
 ///
-/// `display` is what the model and the approval overlay are told to write to.
-/// It is the absolute path now that the plan file lives under the session dir,
-/// because `.dock/plan.md` no longer names it uniquely per page.
+/// Tabs are not persisted. The directory name is `main#N`, and that number
+/// restarts at 2 next process, so a leftover file would be treated as this
+/// page's plan. Called when the page opens (drop the previous process) and
+/// when it closes (drop this one).
+pub fn discard_ephemeral_plan(sessions: &Sessions) {
+    let Some(dir) = ephemeral_plan_dir(sessions) else {
+        return;
+    };
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Resolve `(path, display)` for the page that owns plan mode.
+///
+/// A child isolate has its own `Sessions` but inherits the parent's
+/// `planMode`. The file has to be the parent's, or the write lands under the
+/// child's id while the gate watches the page.
 fn resolve_plan(ctx: &Context) -> (PathBuf, String) {
-    let sessions = ctx.get::<Sessions>(SESSIONS);
+    let sessions = ctx
+        .get::<PlanMode>(PLAN_MODE)
+        .and_then(|plan| plan.page_sessions())
+        .or_else(|| ctx.get::<Sessions>(SESSIONS));
     let path = plan_path_for(sessions.as_deref());
     let display = path.to_string_lossy().to_string();
     (path, display)
@@ -668,14 +691,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plan_file_edit_detects_relative_and_nested() {
-        let expected = std::path::Path::new("/work/.dock/plan.md");
+    fn plan_file_edit_matches_only_the_expected_path() {
+        let expected = std::path::Path::new("/dock/sessions/aaa/plan.md");
         assert!(is_plan_file_edit(
+            "write_file",
+            r##"{"target_file":"/dock/sessions/aaa/plan.md","contents":"# x"}"##,
+            expected
+        ));
+        assert!(!is_plan_file_edit(
             "write_file",
             r##"{"target_file":".dock/plan.md","contents":"# x"}"##,
             expected
         ));
-        assert!(is_plan_file_edit(
+        assert!(!is_plan_file_edit(
             "search_replace",
             r#"{"file_path":"/repo/.dock/plan.md","old_string":"a","new_string":"b"}"#,
             expected
@@ -697,13 +725,34 @@ mod tests {
     #[test]
     fn tab_pages_get_distinct_plan_paths() {
         let ctx = Context::new();
-        let p1 = Sessions::tab(ctx.clone(), 1);
-        let p2 = Sessions::tab(ctx, 2);
+        let p1 = Sessions::tab(ctx.clone(), 2);
+        p1.pin_plan_cwd("/work/alpha");
+        let p2 = Sessions::tab(ctx.clone(), 2);
+        p2.pin_plan_cwd("/work/beta");
+        let other = Sessions::tab(ctx, 3);
+        other.pin_plan_cwd("/work/alpha");
         let a = plan_path_for(Some(&p1));
         let b = plan_path_for(Some(&p2));
-        assert_ne!(a, b, "两个分页不能共用一个计划文件");
-        assert!(a.to_string_lossy().contains("main#1"), "{a:?}");
-        assert!(b.to_string_lossy().contains("main#2"), "{b:?}");
+        let c = plan_path_for(Some(&other));
+        assert_ne!(a, b, "不同工作区的 main#2 不能写同一个计划");
+        assert_ne!(a, c, "同一工作区的两个分页不能共用一个计划文件");
+        for path in [&a, &b, &c] {
+            let lossy = path.to_string_lossy();
+            assert!(
+                !lossy.contains("/sessions/tabs/") && !lossy.contains("\\sessions\\tabs\\"),
+                "cwd-key 被丢掉了: {path:?}"
+            );
+            let comps: Vec<String> = path
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let tabs = comps.iter().position(|c| c == "tabs").expect("{path:?}");
+            assert_ne!(comps[tabs - 1], "sessions", "{path:?}");
+        }
+        assert!(a.to_string_lossy().contains("main#2"), "{a:?}");
+        assert!(c.to_string_lossy().contains("main#3"), "{c:?}");
+        let key = crate::session::persist::encode_cwd_dirname(std::path::Path::new("/work/alpha"));
+        assert!(a.to_string_lossy().contains(&key), "{a:?}");
     }
 
     /// 回归：计划文件按页划分后，只有写**本页**的 session 目录才算计划编辑——
@@ -722,12 +771,14 @@ mod tests {
             r##"{"target_file":"/dock/sessions/bbb/plan.md","contents":"# x"}"##,
             mine
         ));
-        // 旧相对路径仍然认：模型拿到的是 enter_plan_mode 里给出的路径。
-        assert!(is_plan_file_edit(
-            "write_file",
-            r##"{"target_file":".dock/plan.md","contents":"# x"}"##,
-            theirs
-        ));
+        assert!(
+            !is_plan_file_edit(
+                "write_file",
+                r##"{"target_file":".dock/plan.md","contents":"# x"}"##,
+                theirs
+            ),
+            "相对路径不再是本页计划，不能给每一页开一张共用写门"
+        );
     }
 
     #[test]

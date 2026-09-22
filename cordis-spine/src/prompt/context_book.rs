@@ -174,12 +174,24 @@ impl ContextBook {
         a
     }
 
+    /// Occupancy of the context this book was mounted on (the root page).
     pub fn window(&self) -> ContextSnapshot {
-        snapshot_context(&self.ctx)
+        self.window_on(&self.ctx)
+    }
+
+    /// Occupancy of `exec`: that page's session, model, and protocol.
+    /// The section registry stays this book; [`assemble_on`](Self::assemble_on)
+    /// already threads `exec` into each section.
+    pub fn window_on(&self, exec: &Context) -> ContextSnapshot {
+        snapshot_context(exec)
     }
 
     pub fn detail(&self, kind: OccupancyKind) -> OccupancyDetail {
-        occupancy_detail(&self.ctx, kind)
+        self.detail_on(&self.ctx, kind)
+    }
+
+    pub fn detail_on(&self, exec: &Context, kind: OccupancyKind) -> OccupancyDetail {
+        occupancy_detail(exec, kind)
     }
 }
 
@@ -279,6 +291,24 @@ mod tests {
             !book.assemble().render().contains("hello cordis"),
             "{}",
             book.assemble().render()
+        );
+    }
+
+    /// The book is mounted on the root. A later page must still see its own model.
+    #[tokio::test]
+    async fn window_on_follows_the_callers_page() {
+        let root = Context::new();
+        root.plugin(context(), ()).unwrap().wait().await.unwrap();
+        let book = root.get::<ContextBook>(CONTEXT).unwrap();
+        let page = root.isolate(crate::SETTINGS);
+        let _hold = page
+            .provide(crate::SETTINGS, crate::AppSettings::new("page-two-model"))
+            .unwrap();
+        assert_eq!(book.window_on(&page).model, "page-two-model");
+        assert!(
+            book.window().model.is_empty(),
+            "root has no model selected: {}",
+            book.window().model
         );
     }
 }

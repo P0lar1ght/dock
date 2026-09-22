@@ -103,12 +103,39 @@ struct Job {
     server: String,
     message: String,
     kind: Kind,
+    /// `main` / `main#N` of the call that was in flight. `None` shows on
+    /// whichever page is open.
+    origin: Option<String>,
     tx: oneshot::Sender<Value>,
 }
 
 struct Inner {
     ctx: Context,
     queue: Mutex<VecDeque<Job>>,
+    /// Pages of in-flight MCP calls, innermost last. The read loop that
+    /// receives `elicitation/create` is not the tool task, so it cannot see
+    /// `exec_ctx`; the tool task pushes here for the duration of `tools/call`.
+    callers: Mutex<Vec<Option<String>>>,
+}
+
+/// Pops one in-flight caller page when the MCP tool returns.
+pub struct PageGuard {
+    inner: Arc<Inner>,
+}
+
+impl Drop for PageGuard {
+    fn drop(&mut self) {
+        self.inner.callers.lock().unwrap().pop();
+    }
+}
+
+fn index_of(queue: &VecDeque<Job>, page: Option<&str>) -> Option<usize> {
+    match page {
+        None => (!queue.is_empty()).then_some(0),
+        Some(page) => queue
+            .iter()
+            .position(|job| job.origin.as_deref().is_none_or(|origin| origin == page)),
+    }
 }
 
 /// Named queue on `"mcp"`. Clone shares the same jobs.
@@ -123,6 +150,7 @@ impl Elicitation {
             inner: Arc::new(Inner {
                 ctx,
                 queue: Mutex::new(VecDeque::new()),
+                callers: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -143,6 +171,7 @@ impl Elicitation {
                 return decline_value();
             }
         };
+        let origin = self.inner.callers.lock().unwrap().last().cloned().flatten();
         let (tx, rx) = oneshot::channel();
         {
             let mut q = self.inner.queue.lock().unwrap();
@@ -150,6 +179,7 @@ impl Elicitation {
                 server: server.to_string(),
                 message,
                 kind,
+                origin,
                 tx,
             });
         }
@@ -157,32 +187,72 @@ impl Elicitation {
         rx.await.unwrap_or_else(|_| cancel_value())
     }
 
+    /// Remember which page's tool call is in flight so a server elicitation
+    /// opened on the read loop lands on that page.
+    pub fn scope_caller(&self) -> PageGuard {
+        let page = crate::tools::registry::exec_ctx()
+            .as_ref()
+            .and_then(crate::session::log::Sessions::page_of);
+        self.scope_page(page)
+    }
+
+    pub fn scope_page(&self, page: Option<String>) -> PageGuard {
+        self.inner.callers.lock().unwrap().push(page);
+        PageGuard {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
     pub fn front(&self) -> Option<ElicitPrompt> {
+        self.front_for(None)
+    }
+
+    /// First prompt that belongs on `page`. `None` is the raw head (tests).
+    pub fn front_for(&self, page: Option<&str>) -> Option<ElicitPrompt> {
         let q = self.inner.queue.lock().unwrap();
-        q.front().map(job_prompt)
+        index_of(&q, page).and_then(|i| q.get(i).map(job_prompt))
     }
 
     pub fn cancel(&self) {
-        if let Some(job) = self.inner.queue.lock().unwrap().pop_front() {
+        self.cancel_for(None);
+    }
+
+    pub fn cancel_for(&self, page: Option<&str>) {
+        let mut q = self.inner.queue.lock().unwrap();
+        if let Some(i) = index_of(&q, page) {
+            let job = q.remove(i).unwrap();
             let _ = job.tx.send(cancel_value());
         }
+        drop(q);
         self.inner.ctx.emit(MCP_ELICIT_EVENT, ());
     }
 
     pub fn decline(&self) {
-        if let Some(job) = self.inner.queue.lock().unwrap().pop_front() {
+        self.decline_for(None);
+    }
+
+    pub fn decline_for(&self, page: Option<&str>) {
+        let mut q = self.inner.queue.lock().unwrap();
+        if let Some(i) = index_of(&q, page) {
+            let job = q.remove(i).unwrap();
             let _ = job.tx.send(decline_value());
         }
+        drop(q);
         self.inner.ctx.emit(MCP_ELICIT_EVENT, ());
     }
 
     /// URL mode: open the browser. Does not finish the JSON-RPC request.
     pub fn open_url(&self) -> Result<String, String> {
+        self.open_url_on(None)
+    }
+
+    pub fn open_url_on(&self, page: Option<&str>) -> Result<String, String> {
         let url = {
             let mut q = self.inner.queue.lock().unwrap();
-            let Some(job) = q.front_mut() else {
+            let Some(i) = index_of(&q, page) else {
                 return Err("没有待处理的 elicitation".into());
             };
+            let job = q.get_mut(i).unwrap();
             let Kind::Url { url, opened, .. } = &mut job.kind else {
                 return Err("当前不是链接 elicitation".into());
             };
@@ -200,17 +270,28 @@ impl Elicitation {
         picked: &[bool],
         draft: &str,
     ) -> Result<(), String> {
+        self.accept_option_on(None, selected, picked, draft)
+    }
+
+    pub fn accept_option_on(
+        &self,
+        page: Option<&str>,
+        selected: usize,
+        picked: &[bool],
+        draft: &str,
+    ) -> Result<(), String> {
         let mut q = self.inner.queue.lock().unwrap();
-        let Some(job) = q.front_mut() else {
+        let Some(i) = index_of(&q, page) else {
             return Ok(());
         };
+        let job = q.get_mut(i).unwrap();
         match &mut job.kind {
             Kind::Url { .. } => {
                 if selected == 0 {
                     drop(q);
-                    self.open_url().map(|_| ())
+                    self.open_url_on(page).map(|_| ())
                 } else {
-                    let job = q.pop_front().unwrap();
+                    let job = q.remove(i).unwrap();
                     let _ = job.tx.send(decline_value());
                     drop(q);
                     self.inner.ctx.emit(MCP_ELICIT_EVENT, ());
@@ -230,7 +311,7 @@ impl Elicitation {
                 answers.insert(field.name.clone(), value);
                 *index += 1;
                 if *index >= fields.len() {
-                    let job = q.pop_front().unwrap();
+                    let job = q.remove(i).unwrap();
                     let Kind::Form { answers, .. } = job.kind else {
                         unreachable!();
                     };
@@ -248,10 +329,15 @@ impl Elicitation {
     }
 
     pub fn accept_text(&self, text: &str) -> Result<(), String> {
+        self.accept_text_on(None, text)
+    }
+
+    pub fn accept_text_on(&self, page: Option<&str>, text: &str) -> Result<(), String> {
         let mut q = self.inner.queue.lock().unwrap();
-        let Some(job) = q.front_mut() else {
+        let Some(i) = index_of(&q, page) else {
             return Ok(());
         };
+        let job = q.get_mut(i).unwrap();
         let Kind::Form {
             fields,
             index,
@@ -268,7 +354,7 @@ impl Elicitation {
         answers.insert(field.name.clone(), value);
         *index += 1;
         if *index >= fields.len() {
-            let job = q.pop_front().unwrap();
+            let job = q.remove(i).unwrap();
             let Kind::Form { answers, .. } = job.kind else {
                 unreachable!();
             };
@@ -285,10 +371,20 @@ impl Elicitation {
 
     /// Dual-resolve from the web gateway. Empty queue is an error.
     pub fn resolve(&self, action: &str, content: Option<Value>) -> Result<(), String> {
+        self.resolve_on(None, action, content)
+    }
+
+    pub fn resolve_on(
+        &self,
+        page: Option<&str>,
+        action: &str,
+        content: Option<Value>,
+    ) -> Result<(), String> {
         let mut q = self.inner.queue.lock().unwrap();
-        let Some(job) = q.pop_front() else {
+        let Some(i) = index_of(&q, page) else {
             return Err("no pending elicitation".into());
         };
+        let job = q.remove(i).unwrap();
         let payload = match action {
             "accept" | "approve" => accept_value(content.unwrap_or_else(|| json!({}))),
             "decline" | "deny" => decline_value(),
@@ -951,6 +1047,33 @@ mod tests {
             }
             other => panic!("expected single select, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_prompt_stamped_for_one_page_stays_off_the_other() {
+        let elicit = Elicitation::new(Context::new());
+        let params = json!({
+            "message": "环境？",
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "env": { "enum": ["dev"] } }
+            }
+        });
+        let handle = tokio::spawn({
+            let elicit = elicit.clone();
+            async move {
+                let _page = elicit.scope_page(Some("main#2".into()));
+                elicit.create("local", params).await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(elicit.front_for(Some("main")).is_none());
+        assert!(elicit.front_for(Some("main#2")).is_some());
+        elicit.cancel_for(Some("main"));
+        assert!(elicit.front_for(Some("main#2")).is_some());
+        elicit.cancel_for(Some("main#2"));
+        assert!(elicit.front().is_none());
+        let _ = handle.await;
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::names::{JOBS, PRE_STEP, STEP_START, SUBAGENTS, TODOS, TOOLS, TURN_END};
+use crate::session::log::Sessions;
 use crate::tools::jobs::Jobs;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use crate::tools::task::Subagents;
@@ -112,63 +113,7 @@ const PARAMS: &str = r#"{"type":"object","properties":{"merge":{"type":"boolean"
 pub fn todo_service() -> Plugin {
     plugin("tool-todo", Inject::new(), |ctx, _: &()| {
         ctx.provide(TODOS, Todos::new())?;
-        // Gate quota. Plugin-local (not on `Todos`) — it is policy state of
-        // this handler pair, not part of the named service. `Todos` outlives
-        // the turn, so the counter needs an explicit per-prompt reset.
-        let fires = Arc::new(AtomicUsize::new(0));
-        let fires_pre = fires.clone();
-        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
-            let next = args.next::<PreStep>().unwrap_or(step);
-            // Main session only: the quota belongs to the main session's
-            // prompt, and a child starting a turn must not hand it a refill.
-            if next.enter && next.is_main_session() {
-                fires_pre.store(0, Ordering::Relaxed);
-            }
-            next
-        });
-        // Mid-turn watchdog. Same shape as the gate quota: plugin-local policy
-        // state, rearmed from the payload (step 0) instead of by the loop.
-        let watch = Arc::new(Mutex::new(TodoWatch::default()));
-        let ctx_step = ctx.clone();
-        let _ = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
-            let mut next = args.next::<StepStart>().unwrap_or(start);
-            // Main session only — see [`gate_applies`]. A child sharing the
-            // parent's list must not be nagged about it, and must not disturb
-            // the parent's counters while it runs alongside.
-            if !next.is_main_session() {
-                return next;
-            }
-            let Some(todos) = ctx_step.get::<Todos>(TODOS) else {
-                return next;
-            };
-            let mut watch = watch.lock().unwrap();
-            if next.step == 0 {
-                *watch = TodoWatch::armed_at(todos.revision());
-            }
-            if let Some(body) = watch.stale_nudge(&todos) {
-                next.remind(ORDER_STEP_START_TODO, body);
-            }
-            next
-        });
-        let ctx_end = ctx.clone();
-        let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
-            let mut next = args.next::<TurnEnd>().unwrap_or(end);
-            if !gate_applies(&next) || fires.load(Ordering::Relaxed) >= MAX_TODO_GATE_FIRES {
-                return next;
-            }
-            let Some(todos) = ctx_end.get::<Todos>(TODOS) else {
-                return next;
-            };
-            if let Some(body) = todos.gate_reminder(backing_tasks(&ctx_end)) {
-                // Charged on the win, not on the vote: a handler in a lower
-                // slot can take the round, and the user never saw this nudge.
-                let spent = fires.clone();
-                next.keep_working_with(ORDER_TURN_END_TODO, body, move || {
-                    spent.fetch_add(1, Ordering::Relaxed);
-                });
-            }
-            next
-        });
+        wire_todo_waterfalls(ctx);
         Ok(None)
     })
 }
@@ -209,51 +154,7 @@ pub fn todo_tool_registration() -> Plugin {
 pub fn tool_todo() -> Plugin {
     plugin("tool-todo", Inject::from([TOOLS]), |ctx, _: &()| {
         ctx.provide(TODOS, Todos::new())?;
-        let fires = Arc::new(AtomicUsize::new(0));
-        let fires_pre = fires.clone();
-        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
-            let next = args.next::<PreStep>().unwrap_or(step);
-            if next.enter && next.is_main_session() {
-                fires_pre.store(0, Ordering::Relaxed);
-            }
-            next
-        });
-        let watch = Arc::new(Mutex::new(TodoWatch::default()));
-        let ctx_step = ctx.clone();
-        let _ = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
-            let mut next = args.next::<StepStart>().unwrap_or(start);
-            if !next.is_main_session() {
-                return next;
-            }
-            let Some(todos) = ctx_step.get::<Todos>(TODOS) else {
-                return next;
-            };
-            let mut watch = watch.lock().unwrap();
-            if next.step == 0 {
-                *watch = TodoWatch::armed_at(todos.revision());
-            }
-            if let Some(body) = watch.stale_nudge(&todos) {
-                next.remind(ORDER_STEP_START_TODO, body);
-            }
-            next
-        });
-        let ctx_end = ctx.clone();
-        let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
-            let mut next = args.next::<TurnEnd>().unwrap_or(end);
-            if !gate_applies(&next) || fires.load(Ordering::Relaxed) >= MAX_TODO_GATE_FIRES {
-                return next;
-            }
-            let Some(todos) = ctx_end.get::<Todos>(TODOS) else {
-                return next;
-            };
-            if let Some(body) = todos.gate_reminder(backing_tasks(&ctx_end)) {
-                let spent = fires.clone();
-                next.keep_working_with(ORDER_TURN_END_TODO, body, move || {
-                    spent.fetch_add(1, Ordering::Relaxed);
-                });
-            }
-            next
-        });
+        wire_todo_waterfalls(ctx);
         let tools = ctx.require::<Tools>(TOOLS)?;
         let body: ToolBody = {
             let ctx = ctx.clone();
@@ -275,6 +176,67 @@ pub fn tool_todo() -> Plugin {
         )?;
         Ok(None)
     })
+}
+
+/// Per-page listeners. Same identity rule as goal: a waterfall is process-global,
+/// and each tab is its own main session.
+fn wire_todo_waterfalls(ctx: &Context) {
+    // Gate quota. Plugin-local (not on `Todos`) — it is policy state of
+    // this handler pair, not part of the named service. `Todos` outlives
+    // the turn, so the counter needs an explicit per-prompt reset.
+    let fires = Arc::new(AtomicUsize::new(0));
+    let fires_pre = fires.clone();
+    let ctx_pre = ctx.clone();
+    let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+        let next = args.next::<PreStep>().unwrap_or(step);
+        // The quota belongs to this page's prompt. Another page, or a child,
+        // must not refill it.
+        if next.enter && Sessions::turn_is_this_page(&ctx_pre, &next.identity) {
+            fires_pre.store(0, Ordering::Relaxed);
+        }
+        next
+    });
+    // Mid-turn watchdog. Rearmed from the payload (step 0) instead of by the loop.
+    let watch = Arc::new(Mutex::new(TodoWatch::default()));
+    let ctx_step = ctx.clone();
+    let _ = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
+        let mut next = args.next::<StepStart>().unwrap_or(start);
+        // A child sharing this page's list must not be nagged about it, and
+        // must not reset this page's counters. Another tab has its own watch.
+        if !Sessions::turn_is_this_page(&ctx_step, &next.identity) {
+            return next;
+        }
+        let Some(todos) = ctx_step.get::<Todos>(TODOS) else {
+            return next;
+        };
+        let mut watch = watch.lock().unwrap();
+        if next.step == 0 {
+            *watch = TodoWatch::armed_at(todos.revision());
+        }
+        if let Some(body) = watch.stale_nudge(&todos) {
+            next.remind(ORDER_STEP_START_TODO, body);
+        }
+        next
+    });
+    let ctx_end = ctx.clone();
+    let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
+        let mut next = args.next::<TurnEnd>().unwrap_or(end);
+        if !gate_applies(&ctx_end, &next) || fires.load(Ordering::Relaxed) >= MAX_TODO_GATE_FIRES {
+            return next;
+        }
+        let Some(todos) = ctx_end.get::<Todos>(TODOS) else {
+            return next;
+        };
+        if let Some(body) = todos.gate_reminder(backing_tasks(&ctx_end)) {
+            // Charged on the win, not on the vote: a handler in a lower
+            // slot can take the round, and the user never saw this nudge.
+            let spent = fires.clone();
+            next.keep_working_with(ORDER_TURN_END_TODO, body, move || {
+                spent.fetch_add(1, Ordering::Relaxed);
+            });
+        }
+        next
+    });
 }
 
 /// Mid-turn `todo_write` watchdog. Counts sampling steps since the list last
@@ -323,12 +285,13 @@ impl TodoWatch {
 /// - Only a text ending: a blown step budget means the model is stuck in a tool
 ///   loop, and one more round of "advance your todos" will not unstick it.
 /// - Not while the user has queued the next message — they steer.
-/// - Main session only. `"todos"` is **not** isolated per subagent (the child
+/// - This page only. `"todos"` is **not** isolated per subagent (the child
 ///   runner isolates `sessions` / `turn` / `agentPresets`), so a child would
-///   otherwise be gated by its parent's list. The identity rides on the payload
-///   because a waterfall handler cannot see the executing context.
-fn gate_applies(end: &TurnEnd) -> bool {
-    end.ended_with_text && !end.queued_followups && end.is_main_session()
+///   otherwise be gated by its parent's list. Another tab is a different main
+///   session; `is_main_session` does not separate them. The identity rides on
+///   the payload because a waterfall handler cannot see the executing context.
+fn gate_applies(ctx: &Context, end: &TurnEnd) -> bool {
+    end.ended_with_text && !end.queued_followups && Sessions::turn_is_this_page(ctx, &end.identity)
 }
 
 /// Live background work that can legitimately back an `in_progress` item —

@@ -113,47 +113,7 @@ pub fn goal_service() -> Plugin {
                 handle: GoalUpdateHandle(tx),
             },
         )?;
-        let ctx_pre = ctx.clone();
-        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
-            let next = args.next::<PreStep>().unwrap_or(step);
-            // Main session only: `take_instruction` is one-shot, so a child
-            // turn would eat the objective the user's own next turn should see
-            // — and drop it into the parent's history at that.
-            if next.enter && next.is_main_session() {
-                inject_goal_instruction(&ctx_pre);
-            }
-            next
-        });
-        let ctx_end = ctx.clone();
-        let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
-            let mut next = args.next::<TurnEnd>().unwrap_or(end);
-            // Main session only. `"goal"` is not isolated per subagent (the
-            // child runner isolates `sessions` / `turn` / `agentPresets`), so
-            // without this a child turn is continued by its parent's goal all
-            // the way to the hard stop. The identity rides on the payload
-            // because a waterfall handler cannot see the executing context.
-            if !next.is_main_session() {
-                return next;
-            }
-            // The user queued the next message: they steer, not the goal loop.
-            if next.queued_followups || next.rounds >= MAX_GOAL_ROUNDS {
-                return next;
-            }
-            // Both endings continue a goal: text without `update_goal(completed)`
-            // is stopping short, and a blown step budget still leaves the goal open.
-            if let Some(body) = continuation_reminder(&ctx_end) {
-                next.keep_working(ORDER_TURN_END_GOAL, body);
-            }
-            next
-        });
-        let ctx_exec = ctx.clone();
-        let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
-            let result = args.next::<ToolResult>().unwrap_or(result);
-            if result.name == UPDATE_GOAL_TOOL_NAME {
-                inject_goal_instruction(&ctx_exec);
-            }
-            result
-        });
+        wire_goal_waterfalls(ctx);
         Ok(None)
     })
 }
@@ -206,36 +166,7 @@ pub fn tool_goal() -> Plugin {
                 handle: GoalUpdateHandle(tx),
             },
         )?;
-        let ctx_pre = ctx.clone();
-        let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
-            let next = args.next::<PreStep>().unwrap_or(step);
-            if next.enter && next.is_main_session() {
-                inject_goal_instruction(&ctx_pre);
-            }
-            next
-        });
-        let ctx_end = ctx.clone();
-        let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
-            let mut next = args.next::<TurnEnd>().unwrap_or(end);
-            if !next.is_main_session() {
-                return next;
-            }
-            if next.queued_followups || next.rounds >= MAX_GOAL_ROUNDS {
-                return next;
-            }
-            if let Some(body) = continuation_reminder(&ctx_end) {
-                next.keep_working(ORDER_TURN_END_GOAL, body);
-            }
-            next
-        });
-        let ctx_exec = ctx.clone();
-        let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
-            let result = args.next::<ToolResult>().unwrap_or(result);
-            if result.name == UPDATE_GOAL_TOOL_NAME {
-                inject_goal_instruction(&ctx_exec);
-            }
-            result
-        });
+        wire_goal_waterfalls(ctx);
         let tools = ctx.require::<Tools>(TOOLS)?;
         let body: ToolBody = {
             let ctx = ctx.clone();
@@ -257,6 +188,63 @@ pub fn tool_goal() -> Plugin {
         )?;
         Ok(None)
     })
+}
+
+/// Per-page listeners. Waterfalls reach every isolate, so each handler acts
+/// only for the page it was mounted on. A subagent identity matches neither
+/// page, which keeps a child turn from consuming or continuing the user's goal.
+fn wire_goal_waterfalls(ctx: &cordis::Context) {
+    let ctx_pre = ctx.clone();
+    let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
+        let next = args.next::<PreStep>().unwrap_or(step);
+        // One-shot: the wrong page (or a child) would eat the instruction the
+        // user's own next turn on this page should see.
+        if next.enter && Sessions::turn_is_this_page(&ctx_pre, &next.identity) {
+            inject_goal_instruction(&ctx_pre);
+        }
+        next
+    });
+    let ctx_end = ctx.clone();
+    let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
+        let mut next = args.next::<TurnEnd>().unwrap_or(end);
+        if !Sessions::turn_is_this_page(&ctx_end, &next.identity) {
+            return next;
+        }
+        // The user queued the next message: they steer, not the goal loop.
+        if next.queued_followups || next.rounds >= MAX_GOAL_ROUNDS {
+            return next;
+        }
+        // Both endings continue a goal: text without `update_goal(completed)`
+        // is stopping short, and a blown step budget still leaves the goal open.
+        if let Some(body) = continuation_reminder(&ctx_end) {
+            next.keep_working(ORDER_TURN_END_GOAL, body);
+        }
+        next
+    });
+    let ctx_exec = ctx.clone();
+    let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
+        let result = args.next::<ToolResult>().unwrap_or(result);
+        // `tools/execute` carries no identity. The executing ctx is still set
+        // around `finish`, so match the `Goal` arc the call would resolve.
+        if result.name == UPDATE_GOAL_TOOL_NAME && goal_call_is_this_page(&ctx_exec) {
+            inject_goal_instruction(&ctx_exec);
+        }
+        result
+    });
+}
+
+/// True when the in-flight tool call resolves to this page's `"goal"`.
+///
+/// A child isolate does not get its own goal, so its lookup walks up to the
+/// page that spawned it. Another tab's service is a different arc.
+fn goal_call_is_this_page(page: &cordis::Context) -> bool {
+    let Some(exec) = crate::tools::registry::exec_ctx() else {
+        return false;
+    };
+    match (page.get::<Goal>(GOAL), exec.get::<Goal>(GOAL)) {
+        (Some(here), Some(there)) => Arc::ptr_eq(&here, &there),
+        _ => false,
+    }
 }
 
 /// `<system-reminder>` body that keeps an active goal going, or `None` when no

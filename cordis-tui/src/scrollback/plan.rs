@@ -221,16 +221,13 @@ fn prepend_diamond(line: &mut Line<'static>, theme: &Theme, failed: bool) {
     );
 }
 
-/// Prefer relative `.dock/plan.md`; fall back to any path mentioned after 保存在 / saved at.
+/// Path the tool told the model to write. `enter_plan_mode` says
+/// `把计划写到 {绝对路径}。`; exit still uses `保存在` / `计划路径`.
 fn extract_plan_path(content: &str) -> Option<String> {
     for line in content.lines() {
         let t = line.trim();
-        if t.contains(".dock/plan.md") {
-            if let Some(idx) = t.find(".dock/plan.md") {
-                return Some(t[idx..].split_whitespace().next()?.to_string());
-            }
-        }
         for marker in [
+            "把计划写到 ",
             "保存在：",
             "保存在:",
             "saved at:",
@@ -240,9 +237,15 @@ fn extract_plan_path(content: &str) -> Option<String> {
         ] {
             if let Some(rest) = t.split_once(marker) {
                 let p = rest.1.trim();
+                let p = p.split(['。', ' ']).next().unwrap_or(p).trim();
                 if !p.is_empty() {
                     return Some(p.to_string());
                 }
+            }
+        }
+        if t.contains(".dock/plan.md") {
+            if let Some(idx) = t.find(".dock/plan.md") {
+                return Some(t[idx..].split_whitespace().next()?.to_string());
             }
         }
     }
@@ -299,6 +302,24 @@ mod tests {
         let text = plain(&lines);
         assert!(text.contains("Plan: Enter"), "{text}");
         assert!(text.contains(".dock/plan.md"), "{text}");
+        assert!(!text.contains("只读探索"), "{text}");
+    }
+
+    #[test]
+    fn enter_collapsed_shows_the_session_plan_path() {
+        let theme = Theme::current();
+        let path = "/tmp/dock/sessions/work/tabs/main#2/plan.md";
+        let lines = lines(
+            "enter_plan_mode",
+            "{}",
+            &format!("已进入计划模式\n\n把计划写到 {path}。文件已存在且为空。"),
+            &theme,
+            80,
+            ToolMode::Collapsed,
+            false,
+        );
+        let text = plain(&lines);
+        assert!(text.contains("main#2/plan.md"), "{text}");
         assert!(!text.contains("只读探索"), "{text}");
     }
 

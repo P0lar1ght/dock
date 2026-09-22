@@ -146,6 +146,7 @@ async fn connect_once(
             } else {
                 body
             };
+            let _page = session.hooks.elicit.scope_caller();
             match rpc(&session, "tools/call", params).await {
                 Ok(v) => {
                     let (text, images) = protocol::format_call_result_parts(&v);

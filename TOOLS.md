@@ -68,7 +68,7 @@
 `$DOCK_HOME/sessions/<cwd-key>/<id>/plan.md`（主会话）或
 `sessions/<cwd-key>/tabs/<main#N>/plan.md`（不落盘的分页）。`"planMode"` 本身也按页隔离
 （`PER_TAB_SERVICES`），`enter_plan_mode` / `exit_plan_mode` 工具仍只有全局工具表一份，
-靠执行期 ctx 派发到调用者那一页。旧相对路径 `.dock/plan.md` 仍被写门认作计划编辑。
+靠执行期 ctx 派发到调用者那一页。写门只认本页的绝对路径。
 
 ---
 

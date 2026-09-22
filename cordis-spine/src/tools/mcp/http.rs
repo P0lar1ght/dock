@@ -107,6 +107,7 @@ pub(super) async fn connect(
         Box::pin(async move {
             let raw_name = raw_tool_name(&public);
             let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
+            let _page = session.hooks.elicit.scope_caller();
             match rpc(
                 &session,
                 "tools/call",

@@ -7,8 +7,8 @@
 //!
 //! `/resume` 是「挑一个历史会话恢复到当前页」——一次性的选择器，选完就没了。
 //! 这里是**工作面板**：上半屏列出所有会话（开着的 + 磁盘上的），下半屏是选中
-//! 那个会话的实时尾巴加一个输入框，**Tab 进输入框打字回车就把消息发进那一个
-//! 会话，不切页、不离开面板**。所以它能盯着三个会话轮流派活，`/resume` 不能。
+//! 那个会话的对话加一个输入框。已经开着的分页，Tab 进输入框打字回车就把消息
+//! 发进那一个会话，不切页。历史会话按 Enter **开成自己的一页**再聊，当前页留着。
 //!
 //! 驱动走的是每页自己的 `"session.port"`（[`SessionRef::submit`]）——分页本来
 //! 就一页一棵 isolate 子树，各有各的会话与循环，面板只是换个地方按下回车。
@@ -16,7 +16,7 @@
 //! | 来源 | 服务 | 说明 |
 //! |---|---|---|
 //! | 分页 | `"tui.tabs"` | 本进程开着的会话，能观察也能驱动 |
-//! | 磁盘会话 | `"roster"` | 跨 cwd 的历史会话，只能看和恢复 |
+//! | 磁盘会话 | `"roster"` | 跨 cwd 的历史会话。当前目录下的按 Enter 开成新的一页 |
 //!
 //! ## 为什么不是带框的 overlay
 //!
@@ -96,7 +96,7 @@ pub enum DashRow {
         title: String,
         summary: String,
         cwd: PathBuf,
-        /// 是否就在当前工作目录下。不是的话 Enter 恢复不了，见
+        /// 是否就在当前工作目录下。不是的话 Enter 开不了页，见
         /// [`DashRow::resumable`]。
         here: bool,
         updated: SystemTime,
@@ -124,11 +124,10 @@ impl DashRow {
         }
     }
 
-    /// 磁盘会话只有在**当前工作目录**下才能直接恢复。
+    /// 磁盘会话只有在**当前工作目录**下才能开成一页。
     ///
-    /// `Sessions::restore` 是从 `archived()` 里找的，而那份列表由
-    /// `attach_disk` → `load_cwd(当前 cwd)` 填——换个目录的会话根本不在里面。
-    /// 跨目录恢复要连带切工作目录，那是另一个决定，不在这一版里。
+    /// `Sessions::adopt_archived` 读的是 `load_cwd(当前 cwd)`。换个目录的会话
+    /// 不在里面。跨目录打开要连带切工作目录，那是另一个决定，不在这一版里。
     pub fn resumable(&self) -> bool {
         match self {
             DashRow::Archived { here, .. } => *here,
@@ -656,7 +655,7 @@ fn paint_peek(buf: &mut Buffer, area: Rect, theme: &Theme, view: &PanelView<'_>)
         truncate_str(view.composer, room)
     } else if view.rows.get(view.selected).is_some_and(DashRow::resumable) {
         // 历史会话没有活着的循环，发不了；别让人对着一个发不出去的框打字。
-        truncate_str("Enter 恢复这个会话后才能派活", room)
+        truncate_str("Enter 开成一页后再派活", room)
     } else {
         truncate_str("Tab 进来给这个会话派活", room)
     };
@@ -864,7 +863,7 @@ pub fn submit_to(ctx: &Context, row: &DashRow, text: &str) -> Result<(), String>
         return Err("先写点什么".into());
     }
     let Some(tab) = tab_ctx(ctx, row) else {
-        return Err("只能给开着的会话派活；历史会话先按 Enter 恢复".into());
+        return Err("只能给开着的会话派活；历史会话先按 Enter 开成一页".into());
     };
     let port = tab
         .get::<SessionRef>(SESSION_PORT)
@@ -1075,8 +1074,8 @@ mod tests {
 
     /// 别的工作目录下的会话不可恢复，且行尾要标出来。
     ///
-    /// `Sessions::restore` 只认 `load_cwd(当前 cwd)` 填出来的那份列表，跨目录
-    /// 按下去必然无声失败——宁可提前标死。
+    /// `Sessions::adopt_archived` 只认 `load_cwd(当前 cwd)` 填出来的那份列表，跨目录
+    /// 按下去开不出页——宁可提前标死。
     #[test]
     fn a_session_from_another_cwd_is_not_resumable_and_says_so() {
         let here = archived("h", "本目录", true, 10);
@@ -1241,6 +1240,10 @@ mod tests {
         let typed = render_text(&view(&rows, 0, Focus::Composer, "跑一下测试"), 70, 30);
         assert!(typed.contains("跑一下测试"), "{typed}");
         assert!(!typed.contains("Tab 进来给"), "{typed}");
+
+        let archived_row = vec![archived("a", "历史", true, 10)];
+        let hint = render_text(&view(&archived_row, 0, Focus::List, ""), 80, 30);
+        assert!(hint.contains("Enter 开成一页后再派活"), "{hint}");
     }
 
     /// 右上角汇总只数会话，不数抬头。

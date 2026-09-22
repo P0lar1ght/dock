@@ -425,10 +425,18 @@ impl Tools {
             .unwrap()
             .get(&call.name)
             .map(|e| e.body.clone());
-        let result = if let Some(body) = body {
+        // Keep `EXEC_CTX` alive across `tools/execute`. That waterfall has no
+        // identity of its own, and every tab's listener still runs.
+        if let Some(body) = body {
             let exec = exec.clone();
-            EXEC_CTX.scope(exec, body(call)).await
-        } else if looks_like_mcp_name(&call.name) {
+            return EXEC_CTX
+                .scope(exec.clone(), async move {
+                    let result = body(call).await;
+                    finish(&exec, result)
+                })
+                .await;
+        }
+        let result = if looks_like_mcp_name(&call.name) {
             ToolResult {
                 call_id: call.id,
                 name: call.name,

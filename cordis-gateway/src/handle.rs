@@ -341,7 +341,10 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             return;
         };
         let mut t = for_elicit.transcript.lock().unwrap();
-        if let Some(front) = mcp.elicitation().front() {
+        let page = ctx_elicit
+            .get::<cordis_spine::Sessions>(cordis_spine::SESSIONS)
+            .and_then(|s| s.ui_page());
+        if let Some(front) = mcp.elicitation().front_for(page.as_deref()) {
             t.elicit_requested(&front);
         } else {
             t.elicit_resolved();
