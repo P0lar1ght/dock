@@ -9,7 +9,7 @@ use cordis_spine::{
     BROWSER, COMPUTER, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TUI_SLOTS,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 
 use crate::grok::mcps;
 use crate::grok::picker::PickerHits;
@@ -42,6 +42,88 @@ use crate::views::prompt::PromptWidget;
 use crate::views::status::StatusLine;
 use crate::views::usage_overlay;
 use crate::views::welcome::{Welcome, WelcomeHit};
+
+/// Agents 的滚轮和翻页。列表和下面的对话各滚各的，两头都停住。
+///
+/// 有落点时只认那一块：落在对话上滚对话，落在列表上移选中行，落在抬头上不动。
+/// 没有落点（Ctrl+J/K）时，焦点在输入框就滚对话，否则移选中行。翻页永远滚对话。
+fn scroll_dashboard(
+    ctx: &Context,
+    overlay: &mut Overlay,
+    hits: &PickerHits,
+    delta: i16,
+    at: Option<(u16, u16)>,
+    by_page: bool,
+) -> bool {
+    let focus_composer = match overlay {
+        Overlay::Dashboard { focus, .. } => *focus == crate::views::dashboard::Focus::Composer,
+        _ => return false,
+    };
+    let over_peek =
+        at.is_some_and(|(column, row)| hits.dash_peek.contains(Position { x: column, y: row }));
+    let over_list =
+        at.is_some_and(|(column, row)| hits.dash_list.contains(Position { x: column, y: row }));
+    if at.is_some() && !over_peek && !over_list {
+        return true;
+    }
+    let scroll_peek = if at.is_some() {
+        over_peek
+    } else {
+        by_page || focus_composer
+    };
+    if scroll_peek {
+        let body = hits.dash_peek.height as usize;
+        if body == 0 {
+            return true;
+        }
+        let width = hits.dash_peek.width as usize;
+        let lines = match overlay {
+            Overlay::Dashboard {
+                selected,
+                query,
+                collapsed,
+                ..
+            } => {
+                let rows = crate::views::dashboard::build_rows(ctx, query, collapsed);
+                rows.get(*selected)
+                    .map(|row| crate::views::dashboard::peek_line_count(ctx, row, width))
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        };
+        let step = if by_page {
+            i32::from(delta).saturating_mul(body as i32)
+        } else {
+            i32::from(delta)
+        };
+        if let Overlay::Dashboard { peek_scroll, .. } = overlay {
+            *peek_scroll =
+                crate::views::dashboard::clamp_peek_scroll(*peek_scroll, step, lines, body);
+        }
+        return true;
+    }
+    let len = overlay_len(ctx, overlay);
+    let step = if delta > 0 {
+        -1
+    } else if delta < 0 {
+        1
+    } else {
+        0
+    };
+    if let Overlay::Dashboard {
+        selected,
+        peek_scroll,
+        ..
+    } = overlay
+    {
+        let next = crate::views::dashboard::clamp_selected(*selected, step, len);
+        if next != *selected {
+            *peek_scroll = 0;
+        }
+        *selected = next;
+    }
+    true
+}
 
 #[allow(clippy::too_many_arguments)]
 // 后四个参数都是上一帧的点击命中表（picker / 任务条 / 目标条 / 排队条 / 标签栏）：
@@ -134,7 +216,7 @@ pub(super) fn run_action(
                     return Vec::new();
                 }
                 if let Some(mcp) = ctx.get::<Mcp>(MCP) {
-                    mcp.elicitation().cancel();
+                    mcp.elicitation().cancel_for(page_name(ctx).as_deref());
                 }
             }
             if let Overlay::PlanApproval {
@@ -239,6 +321,22 @@ pub(super) fn run_action(
                 *phase = phase
                     .saturating_add_signed(delta as isize)
                     .min(len.saturating_sub(1));
+                return Vec::new();
+            }
+            if matches!(overlay, Overlay::Dashboard { .. }) {
+                let len = overlay_len(ctx, overlay);
+                if let Overlay::Dashboard {
+                    selected,
+                    peek_scroll,
+                    ..
+                } = overlay
+                {
+                    let next = crate::views::dashboard::clamp_selected(*selected, delta, len);
+                    if next != *selected {
+                        *peek_scroll = 0;
+                    }
+                    *selected = next;
+                }
                 return Vec::new();
             }
             let len = overlay_len(ctx, overlay);
@@ -1081,7 +1179,25 @@ pub(super) fn run_action(
             apply_paste(ctx, overlay, crate::app::clipboard::paste_from_clipboard());
             Vec::new()
         }
+        Action::MouseScroll { delta, column, row } => {
+            if scroll_dashboard(ctx, overlay, hits, delta, Some((column, row)), false) {
+                return Vec::new();
+            }
+            run_action(
+                ctx,
+                Action::Scroll(delta),
+                overlay,
+                hits,
+                dock_hits,
+                goal_hits,
+                queue_hits,
+                tab_hits,
+            )
+        }
         Action::Scroll(delta) => {
+            if scroll_dashboard(ctx, overlay, hits, delta, None, false) {
+                return Vec::new();
+            }
             if let Overlay::PlanApproval {
                 scroll,
                 prompt,
@@ -1130,6 +1246,9 @@ pub(super) fn run_action(
             Vec::new()
         }
         Action::ScrollPage(pages) => {
+            if scroll_dashboard(ctx, overlay, hits, pages, None, true) {
+                return Vec::new();
+            }
             if let Overlay::Inspect { target, scroll, .. } = overlay {
                 scroll_inspect(ctx, target, scroll, pages.saturating_mul(8));
                 return Vec::new();
@@ -1208,7 +1327,7 @@ pub(super) fn run_action(
                     }
                     if matches!(overlay, Overlay::Elicit { .. }) {
                         if let Some(mcp) = ctx.get::<Mcp>(MCP) {
-                            mcp.elicitation().cancel();
+                            mcp.elicitation().cancel_for(page_name(ctx).as_deref());
                         }
                     }
                     if let Overlay::PlanApproval {
@@ -1591,6 +1710,7 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         focus: crate::views::dashboard::Focus::Composer,
         composer,
         composer_cursor,
+        ..
     } = overlay
     {
         let rows = crate::views::dashboard::build_rows(ctx, query, collapsed);
@@ -1636,9 +1756,8 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
             }
             crate::views::dashboard::DashRow::Archived { id, cwd, .. } => {
                 if !resumable {
-                    // 不在当前工作目录下的会话恢复不了：`Sessions::restore` 只认
-                    // `archived()`，那份列表是 `load_cwd(当前 cwd)` 填的。与其
-                    // 按下去毫无反应，不如说清楚。
+                    // 不在当前工作目录下的会话开不了页：`adopt_archived` 只认
+                    // `load_cwd(当前 cwd)`。与其按下去毫无反应，不如说清楚。
                     flash(
                         ctx,
                         format!("该会话属于 {}，先 /cd 过去再恢复", cwd.display()),
@@ -1646,7 +1765,7 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
                     return Vec::new();
                 }
                 overlay.close();
-                return vec![Effect::RestoreSession(id)];
+                return vec![Effect::OpenSession(id)];
             }
         }
     }
@@ -1918,8 +2037,16 @@ pub(super) fn to_action(
             }
         }
         Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => Some(Action::Scroll(3)),
-            MouseEventKind::ScrollDown => Some(Action::Scroll(-3)),
+            MouseEventKind::ScrollUp => Some(Action::MouseScroll {
+                delta: 3,
+                column: mouse.column,
+                row: mouse.row,
+            }),
+            MouseEventKind::ScrollDown => Some(Action::MouseScroll {
+                delta: -3,
+                column: mouse.column,
+                row: mouse.row,
+            }),
             MouseEventKind::Moved => Some(Action::MouseMove {
                 column: mouse.column,
                 row: mouse.row,

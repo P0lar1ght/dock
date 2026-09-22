@@ -138,6 +138,7 @@ pub struct Subagents {
     backend: ChannelBackend,
     store: ChildStore,
     workflow_max_concurrent_agents: usize,
+    spawn_parents: runner::SpawnParents,
 }
 
 impl Subagents {
@@ -312,6 +313,9 @@ impl Subagents {
     ) -> (String, Result<SubagentResult, String>) {
         let id = spawn.id;
         let owner = SubagentOwner::workflow(&spawn.run_id);
+        if let Some(parent) = crate::tools::registry::exec_ctx() {
+            self.note_spawn_parent(&id, parent);
+        }
         self.remember(
             &id,
             spawn.description.clone(),
@@ -354,6 +358,12 @@ impl Subagents {
         self.backend.clone()
     }
 
+    /// Remember which page called `task`, so the child isolate is cut from
+    /// that page rather than from the root ctx the runner captured.
+    pub(crate) fn note_spawn_parent(&self, id: &str, parent: cordis::Context) {
+        self.spawn_parents.note(id, parent);
+    }
+
     pub(super) fn remember(
         &self,
         id: &str,
@@ -374,9 +384,11 @@ pub fn tool_task() -> Plugin {
             let (tx, rx) = mpsc::unbounded_channel();
             let store = ChildStore::new();
             let backend = ChannelBackend::for_session(tx, ROOT_IDENTITY);
+            let spawn_parents = runner::SpawnParents::default();
             let runner = DockChildRunner {
                 ctx: ctx.clone(),
                 store: store.clone(),
+                spawn_parents: spawn_parents.clone(),
             };
             let coord = SubagentCoordinator::new(
                 rx,
@@ -406,6 +418,7 @@ pub fn tool_task() -> Plugin {
                     backend,
                     store,
                     workflow_max_concurrent_agents: cfg.workflow_max_concurrent_agents,
+                    spawn_parents,
                 },
             )?;
             let tools = ctx.require::<Tools>(TOOLS)?;

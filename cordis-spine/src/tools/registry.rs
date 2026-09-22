@@ -50,6 +50,16 @@ pub(crate) fn with_exec_ctx<R>(ctx: &Context, f: impl FnOnce() -> R) -> R {
     EXEC_CTX.sync_scope(ctx.clone(), f)
 }
 
+/// 异步版 [`with_exec_ctx`]。工具体本身跑在 `Tools::execute_on` 的 scope 里；
+/// 传输层测试要复现「两页各调一次」时走这里。
+#[cfg(test)]
+pub(crate) async fn with_exec_ctx_async<T>(
+    ctx: Context,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    EXEC_CTX.scope(ctx, fut).await
+}
+
 /// Body stored by [`Tools::register`]. Owns what it needs; do not capture `Tools`.
 pub type ToolBody = Arc<dyn Fn(ToolCall) -> BoxFuture<'static, ToolResult> + Send + Sync>;
 
@@ -369,10 +379,17 @@ impl Tools {
         };
 
         if self.workspace {
+            let plan_expected = crate::tools::plan_mode::expected_plan_path(
+                exec.get::<crate::session::log::Sessions>(SESSIONS)
+                    .as_deref(),
+            );
             if let Some(plan) = exec.get::<PlanMode>(PLAN_MODE) {
                 if plan.gated() && acp::blocked_in_plan(&call.name) {
-                    let plan_file_edit =
-                        crate::tools::plan_mode::is_plan_file_edit(&call.name, &call.arguments);
+                    let plan_file_edit = crate::tools::plan_mode::is_plan_file_edit(
+                        &call.name,
+                        &call.arguments,
+                        &plan_expected,
+                    );
                     if !plan_file_edit {
                         return finish(
                             exec,
@@ -387,7 +404,12 @@ impl Tools {
                 }
             }
             let plan_file_edit = exec.get::<PlanMode>(PLAN_MODE).is_some_and(|p| {
-                p.gated() && crate::tools::plan_mode::is_plan_file_edit(&call.name, &call.arguments)
+                p.gated()
+                    && crate::tools::plan_mode::is_plan_file_edit(
+                        &call.name,
+                        &call.arguments,
+                        &plan_expected,
+                    )
             });
             if acp::needs_permission(&call.name) && !plan_file_edit {
                 if let Some(perms) = exec.get::<Permissions>(PERMISSIONS) {
@@ -413,10 +435,18 @@ impl Tools {
             .unwrap()
             .get(&call.name)
             .map(|e| e.body.clone());
-        let result = if let Some(body) = body {
+        // Keep `EXEC_CTX` alive across `tools/execute`. That waterfall has no
+        // identity of its own, and every tab's listener still runs.
+        if let Some(body) = body {
             let exec = exec.clone();
-            EXEC_CTX.scope(exec, body(call)).await
-        } else if looks_like_mcp_name(&call.name) {
+            return EXEC_CTX
+                .scope(exec.clone(), async move {
+                    let result = body(call).await;
+                    finish(&exec, result)
+                })
+                .await;
+        }
+        let result = if looks_like_mcp_name(&call.name) {
             ToolResult {
                 call_id: call.id,
                 name: call.name,

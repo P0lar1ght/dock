@@ -140,6 +140,12 @@ pub enum Action {
     HistoryPrev,
     HistoryNext,
     Scroll(i16),
+    /// 滚轮，带落点。Agents 用它区分列表和下面的对话。
+    MouseScroll {
+        delta: i16,
+        column: u16,
+        row: u16,
+    },
     ScrollPage(i16),
     Click {
         column: u16,
@@ -170,6 +176,8 @@ pub enum Effect {
     TabFork,
     /// 把当前页最近一条回复填进来源页的输入框并切过去。
     TabCarryBack,
+    /// 把一份磁盘会话开成自己的分页并切过去。不替换当前页。
+    OpenSession(String),
     /// Async: `/btw`：开一张只读分页问一句，不进主线上下文。
     AsideAsk {
         question: String,

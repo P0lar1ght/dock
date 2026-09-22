@@ -22,9 +22,11 @@ pub fn hit(hits: &[(Rect, TabHit)], column: u16, row: u16) -> Option<TabHit> {
     hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, h)| *h)
 }
 
-/// 一页在标签上的记号：跑着 `●`、闲着 `○`。
+/// 一页在标签上的记号：等人回答 `◆`、跑着 `●`、闲着 `○`。
 fn mark(tab: &TabInfo) -> &'static str {
-    if tab.working {
+    if tab.pending {
+        "◆"
+    } else if tab.working {
         "●"
     } else {
         "○"
@@ -113,6 +115,7 @@ mod tests {
             active,
             origin: None,
             kind: TabKind::Normal,
+            pending: false,
         }
     }
 

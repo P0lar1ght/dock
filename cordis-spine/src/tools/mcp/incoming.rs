@@ -32,7 +32,9 @@ pub async fn dispatch(hooks: &LiveHooks, v: Value) -> Option<Value> {
             note(hooks, &method, &params);
             None
         }
-        Incoming::Request { id, method, params } => Some(request(hooks, id, method, params).await),
+        Incoming::Request { id, method, params } => {
+            Some(request(hooks, id, method, params, None).await)
+        }
     }
 }
 
@@ -46,15 +48,38 @@ pub fn note(hooks: &LiveHooks, method: &str, params: &Value) {
     }
 }
 
-pub async fn request(hooks: &LiveHooks, id: Value, method: String, params: Value) -> Value {
+pub async fn request(
+    hooks: &LiveHooks,
+    id: Value,
+    method: String,
+    params: Value,
+    related: Option<u64>,
+) -> Value {
     if method == "ping" {
         return protocol::jsonrpc_result(id, protocol::ping_result());
     }
     if Elicitation::is_create(&method) {
-        let result = hooks.elicit.create(&hooks.server, params).await;
+        let related = related.or_else(|| related_request_id(&params));
+        let result = hooks
+            .elicit
+            .create_for(&hooks.server, params, related)
+            .await;
         return protocol::jsonrpc_result(id, result);
     }
     protocol::jsonrpc_method_not_found(id, &method)
+}
+
+/// Some servers stamp the client request this question belongs to. Absent on
+/// the 2025 elicitation schema; HTTP uses the POST's own id instead.
+fn related_request_id(params: &Value) -> Option<u64> {
+    params
+        .get("relatedRequestId")
+        .or_else(|| params.pointer("/_meta/relatedRequestId"))
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_u64().or_else(|| n.as_i64().map(|i| i as u64)),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
 }
 
 pub fn pending_id(v: &Value) -> Option<u64> {

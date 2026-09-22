@@ -234,9 +234,7 @@ pub async fn run(root: Context) -> Result<()> {
                                         sessions.archive_current();
                                         sessions.clear();
                                     }
-                                    if let Some(plan) = ctx.get::<PlanMode>(PLAN_MODE) {
-                                        plan.set(false);
-                                    }
+                                    cordis_spine::clear_plan_for_session_switch(&ctx);
                                     if let Some(goal) = ctx.get::<Goal>(GOAL) {
                                         goal.clear();
                                     }
@@ -271,7 +269,31 @@ pub async fn run(root: Context) -> Result<()> {
                                         query: String::new(),
                                     };
                                 }
+                                Effect::OpenSession(id) => {
+                                    match tabs_service(&root) {
+                                        Some(tabs) => match tabs.open_archived(&id).await {
+                                            Ok(tab_id) => {
+                                                flash(&root, format!("已在第 {tab_id} 页打开"))
+                                            }
+                                            Err(e) => flash(&root, e),
+                                        },
+                                        None => flash(&root, "分页服务未挂载"),
+                                    }
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
                                 Effect::RestoreSession(id) => {
+                                    // 已有页正 live 在这份会话上时切过去，
+                                    // 不再恢复一份：两页同时写同一个
+                                    // `chat_history.jsonl` 会损坏历史。
+                                    if let Some(tab_id) = tabs_service(&root)
+                                        .and_then(|tabs| tabs.switch_to_live_session(&id))
+                                    {
+                                        flash(&root, format!("已在第 {tab_id} 页打开"));
+                                        ctx = active_ctx(&root);
+                                        overlay.close();
+                                        continue;
+                                    }
                                     if let Ok(sessions) = ctx.require::<Sessions>(SESSIONS) {
                                         let stamped = sessions.archived_preset_id(&id);
                                         sessions.archive_current();
@@ -292,6 +314,7 @@ pub async fn run(root: Context) -> Result<()> {
                                             }
                                         }
                                     }
+                                    cordis_spine::clear_plan_for_session_switch(&ctx);
                                     overlay.close();
                                 }
                                 Effect::InsertHistory(text) => {

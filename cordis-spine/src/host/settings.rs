@@ -56,6 +56,21 @@ pub struct AppSettings {
 }
 
 impl AppSettings {
+    /// 新开一页时抄一份。之后两页各改各的：模型、协议、权限模式不再串页。
+    ///
+    /// 不走 [`Self::new`]：那个会按模型重新播种，把这一页已经选好的协议和强度清掉。
+    pub fn fork(&self) -> Self {
+        Self {
+            model: Mutex::new(self.model()),
+            effort: Mutex::new(self.effort()),
+            backend: Mutex::new(*self.backend.lock().unwrap()),
+            thinking: Mutex::new(self.thinking()),
+            timestamps: Mutex::new(self.timestamps()),
+            permission_mode: Mutex::new(self.permission_mode()),
+            mermaid_engine: Mutex::new(self.mermaid_engine()),
+        }
+    }
+
     pub fn new(model: impl Into<String>) -> Self {
         let model = model.into();
         let settings = Self {
@@ -235,6 +250,22 @@ pub fn settings() -> Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_keeps_model_protocol_and_mode_until_the_copy_changes() {
+        let settings = AppSettings::new("x");
+        settings.set_permission_mode(PermissionMode::Allow);
+        settings.set_backend(ApiBackend::Messages);
+        let other = settings.fork();
+        assert_eq!(other.model(), "x");
+        assert_eq!(other.permission_mode(), PermissionMode::Allow);
+        assert_eq!(other.backend(), ApiBackend::Messages);
+        other.set_model("page-two");
+        other.set_permission_mode(PermissionMode::Ask);
+        assert_eq!(settings.model(), "x");
+        assert_eq!(settings.permission_mode(), PermissionMode::Allow);
+        assert_eq!(other.model(), "page-two");
+    }
 
     #[test]
     fn timestamps_default_on_like_grok() {

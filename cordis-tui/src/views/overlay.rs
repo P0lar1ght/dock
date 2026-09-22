@@ -162,6 +162,8 @@ pub enum Overlay {
         /// peek 输入框的内容与光标（字节下标）。
         composer: String,
         composer_cursor: usize,
+        /// peek 对话里藏在视口**下面**的行数。0 是尾巴。到顶就停，不绕回。
+        peek_scroll: usize,
     },
 }
 
@@ -423,8 +425,16 @@ impl Overlay {
             | Self::Tasks { selected: s, .. }
             | Self::Mcps { selected: s, .. }
             | Self::Workflows { selected: s, .. }
-            | Self::Dashboard { selected: s, .. }
             | Self::Goal { selected: s, .. } => *s = selected,
+            // 换行就是换了一条会话，对话回到尾巴。搜索把第 0 行换成另一条时也一样。
+            Self::Dashboard {
+                selected: s,
+                peek_scroll,
+                ..
+            } => {
+                *s = selected;
+                *peek_scroll = 0;
+            }
             Self::MemoryBrowser(st) => st.selected = selected,
             Self::Usage { .. }
             | Self::Notice { .. }

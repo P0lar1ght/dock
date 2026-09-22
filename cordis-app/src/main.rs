@@ -73,11 +73,17 @@ fn notify_preset_apply(outcome: ApplyRestoredPreset) {
     }
 }
 
-fn resume_and_apply_preset(sessions: &Sessions, presets: &AgentPresets, id: &str) -> bool {
+fn resume_and_apply_preset(
+    ctx: &cordis::Context,
+    sessions: &Sessions,
+    presets: &AgentPresets,
+    id: &str,
+) -> bool {
     let stamped = sessions.archived_preset_id(id);
     if !sessions.restore(id) {
         return false;
     }
+    cordis_spine::clear_plan_for_session_switch(ctx);
     notify_preset_apply(apply_restored_preset(presets, stamped.as_deref()));
     true
 }
@@ -98,17 +104,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ResumeArg::Latest => {
                 if let Some(presets) = root.get::<AgentPresets>(AGENT_PRESETS) {
                     if let Some(id) = sessions.archived().into_iter().next().map(|s| s.id) {
-                        let _ = resume_and_apply_preset(&sessions, &presets, &id);
+                        let _ = resume_and_apply_preset(&root, &sessions, &presets, &id);
                     }
-                } else {
-                    let _ = sessions.resume_latest();
+                } else if sessions.resume_latest() {
+                    cordis_spine::clear_plan_for_session_switch(&root);
                 }
             }
             ResumeArg::Id(id) => {
                 if let Some(presets) = root.get::<AgentPresets>(AGENT_PRESETS) {
-                    let _ = resume_and_apply_preset(&sessions, &presets, &id);
-                } else {
-                    let _ = sessions.resume_id(&id);
+                    let _ = resume_and_apply_preset(&root, &sessions, &presets, &id);
+                } else if sessions.resume_id(&id) {
+                    cordis_spine::clear_plan_for_session_switch(&root);
                 }
             }
         }

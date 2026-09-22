@@ -302,9 +302,7 @@ fn cmd_new(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     let sessions = sessions(gateway)?;
     sessions.archive_current();
     sessions.clear();
-    if let Some(plan) = gateway.ctx().get::<PlanMode>(PLAN_MODE) {
-        plan.set(false);
-    }
+    cordis_spine::clear_plan_for_session_switch(gateway.ctx());
     if let Some(goal) = gateway.ctx().get::<Goal>(GOAL) {
         goal.clear();
     }
@@ -322,6 +320,7 @@ fn cmd_resume(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     if !sessions.restore(&item.id) {
         return Ok(notice("恢复会话", "没有可恢复的会话。"));
     }
+    cordis_spine::clear_plan_for_session_switch(gateway.ctx());
     if let Some(presets) = gateway.ctx().get::<AgentPresets>(AGENT_PRESETS) {
         if let ApplyRestoredPreset::Failed { id, error } =
             apply_restored_preset(&presets, stamped.as_deref())

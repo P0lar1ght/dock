@@ -235,13 +235,8 @@ pub fn tool_ask_user() -> Plugin {
     plugin("tool-ask-user", Inject::from([TOOLS]), |ctx, _: &()| {
         ctx.provide(ASK, Ask::new(ctx.clone()))?;
         let tools = ctx.require::<Tools>(TOOLS)?;
-        let body: ToolBody = {
-            let ctx = ctx.clone();
-            std::sync::Arc::new(move |call| {
-                let ctx = ctx.clone();
-                Box::pin(async move { ask_user(&ctx, call).await })
-            })
-        };
+        let body: ToolBody =
+            std::sync::Arc::new(|call| Box::pin(async move { ask_user(call).await }));
         own_registered(
             ctx,
             vec![tools.register(
@@ -257,10 +252,14 @@ pub fn tool_ask_user() -> Plugin {
     })
 }
 
-async fn ask_user(ctx: &Context, call: ToolCall) -> ToolResult {
+async fn ask_user(call: ToolCall) -> ToolResult {
     let input: AskUserQuestionInput = match serde_json::from_str(&call.arguments) {
         Ok(v) => v,
         Err(e) => return tool_result(call, format!("Error: invalid ask_user_question args ({e})")),
+    };
+    // 工具体注册在根上。提问队列按页隔离，必须问执行期那一页，不能问捕获的根。
+    let Some(ctx) = crate::tools::registry::exec_ctx() else {
+        return tool_result(call, format::NO_OPERATOR_TEXT);
     };
     let Some(ask) = ctx.get::<Ask>(ASK) else {
         return tool_result(call, format::NO_OPERATOR_TEXT);

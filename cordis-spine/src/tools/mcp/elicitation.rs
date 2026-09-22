@@ -4,6 +4,7 @@
 //! TUI live-looks [`Elicitation::front`] and resolves with accept / decline / cancel.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use cordis::Context;
@@ -103,12 +104,110 @@ struct Job {
     server: String,
     message: String,
     kind: Kind,
+    /// `main` / `main#N` of the call that was in flight. `None` shows on
+    /// whichever page is open.
+    origin: Option<String>,
     tx: oneshot::Sender<Value>,
 }
 
 struct Inner {
     ctx: Context,
     queue: Mutex<VecDeque<Job>>,
+    /// In-flight MCP calls and the page each belongs to, innermost last. The
+    /// read loop that receives `elicitation/create` is not the tool task, so
+    /// it cannot see `exec_ctx`; the tool task pushes here for the duration of
+    /// `tools/call` and its guard removes its own entry on return.
+    callers: Mutex<Vec<Caller>>,
+    /// `tools/call` JSON-RPC id → page, in the order they were sent. A question
+    /// that arrives on that request's own HTTP response is looked up by id, so
+    /// two pages can call the same server at once and each keep its own prompt.
+    inflight: Mutex<Vec<(u64, Option<String>)>>,
+    next_caller: AtomicU64,
+}
+
+/// One in-flight `tools/call`. The id lets a returning call drop its own entry
+/// instead of the stack top — two pages calling concurrently return in any
+/// order, and a blind pop would leave the other page's entry behind.
+struct Caller {
+    id: u64,
+    page: Option<String>,
+}
+
+/// Removes this call's own entry when the MCP tool returns.
+pub struct PageGuard {
+    inner: Arc<Inner>,
+    id: u64,
+}
+
+impl Drop for PageGuard {
+    fn drop(&mut self) {
+        let mut callers = self.inner.callers.lock().unwrap();
+        callers.retain(|c| c.id != self.id);
+    }
+}
+
+/// Removes this `tools/call` from the in-flight map when the RPC returns.
+pub struct RequestGuard {
+    inner: Arc<Inner>,
+    request_id: u64,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.inner
+            .inflight
+            .lock()
+            .unwrap()
+            .retain(|(id, _)| *id != self.request_id);
+    }
+}
+
+/// Which page should see this question.
+///
+/// A related `tools/call` id wins. Otherwise the oldest in-flight page that
+/// does not already have a prompt — never `callers.last()`, which is whichever
+/// page happened to start second.
+fn pick_origin(
+    inflight: &[(u64, Option<String>)],
+    callers: &[Caller],
+    queue: &VecDeque<Job>,
+    related: Option<u64>,
+) -> Option<String> {
+    if let Some(id) = related {
+        if let Some(page) = inflight
+            .iter()
+            .find(|(rid, _)| *rid == id)
+            .and_then(|(_, page)| page.clone())
+        {
+            return Some(page);
+        }
+    }
+    let pages: Vec<String> = if inflight.iter().any(|(_, page)| page.is_some()) {
+        inflight
+            .iter()
+            .filter_map(|(_, page)| page.clone())
+            .collect()
+    } else {
+        callers.iter().filter_map(|c| c.page.clone()).collect()
+    };
+    pages
+        .iter()
+        .find(|page| {
+            !queue
+                .iter()
+                .any(|job| job.origin.as_deref() == Some(page.as_str()))
+        })
+        .cloned()
+        .or_else(|| pages.into_iter().next())
+}
+
+fn index_of(queue: &VecDeque<Job>, page: Option<&str>) -> Option<usize> {
+    match page {
+        None => (!queue.is_empty()).then_some(0),
+        Some(page) => queue
+            .iter()
+            .position(|job| job.origin.as_deref().is_none_or(|origin| origin == page)),
+    }
 }
 
 /// Named queue on `"mcp"`. Clone shares the same jobs.
@@ -123,6 +222,9 @@ impl Elicitation {
             inner: Arc::new(Inner {
                 ctx,
                 queue: Mutex::new(VecDeque::new()),
+                callers: Mutex::new(Vec::new()),
+                inflight: Mutex::new(Vec::new()),
+                next_caller: AtomicU64::new(0),
             }),
         }
     }
@@ -136,6 +238,17 @@ impl Elicitation {
     }
 
     pub async fn create(&self, server: &str, params: Value) -> Value {
+        self.create_for(server, params, None).await
+    }
+
+    /// `related` is the client `tools/call` id this question belongs to.
+    ///
+    /// HTTP carries the question on that call's own POST response, so the id
+    /// is known and the prompt stays on the page that sent it. A shared stdio
+    /// stream has no such channel: with one call in flight it takes that page,
+    /// with several it takes the oldest call that does not already have a
+    /// prompt, instead of whoever pushed last.
+    pub async fn create_for(&self, server: &str, params: Value, related: Option<u64>) -> Value {
         let (kind, message) = match parse_params(&params) {
             Ok(v) => v,
             Err(e) => {
@@ -145,11 +258,15 @@ impl Elicitation {
         };
         let (tx, rx) = oneshot::channel();
         {
+            let inflight = self.inner.inflight.lock().unwrap();
+            let callers = self.inner.callers.lock().unwrap();
             let mut q = self.inner.queue.lock().unwrap();
+            let origin = pick_origin(&inflight, &callers, &q, related);
             q.push_back(Job {
                 server: server.to_string(),
                 message,
                 kind,
+                origin,
                 tx,
             });
         }
@@ -157,32 +274,90 @@ impl Elicitation {
         rx.await.unwrap_or_else(|_| cancel_value())
     }
 
+    /// Bind a `tools/call` JSON-RPC id to the page that sent it. Held until the
+    /// call returns, including while its elicitation is on screen.
+    pub fn track_request(&self, request_id: u64, page: Option<String>) -> RequestGuard {
+        self.inner.inflight.lock().unwrap().push((request_id, page));
+        RequestGuard {
+            inner: Arc::clone(&self.inner),
+            request_id,
+        }
+    }
+
+    /// Remember which page's tool call is in flight so a server elicitation
+    /// opened on the read loop lands on that page.
+    pub fn scope_caller(&self) -> PageGuard {
+        let page = crate::tools::registry::exec_ctx()
+            .as_ref()
+            .and_then(crate::session::log::Sessions::page_of);
+        self.scope_page(page)
+    }
+
+    pub fn scope_page(&self, page: Option<String>) -> PageGuard {
+        let id = self
+            .inner
+            .next_caller
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.callers.lock().unwrap().push(Caller {
+            id,
+            page: page.clone(),
+        });
+        PageGuard {
+            inner: Arc::clone(&self.inner),
+            id,
+        }
+    }
+
     pub fn front(&self) -> Option<ElicitPrompt> {
+        self.front_for(None)
+    }
+
+    /// First prompt that belongs on `page`. `None` is the raw head (tests).
+    pub fn front_for(&self, page: Option<&str>) -> Option<ElicitPrompt> {
         let q = self.inner.queue.lock().unwrap();
-        q.front().map(job_prompt)
+        index_of(&q, page).and_then(|i| q.get(i).map(job_prompt))
     }
 
     pub fn cancel(&self) {
-        if let Some(job) = self.inner.queue.lock().unwrap().pop_front() {
+        self.cancel_for(None);
+    }
+
+    pub fn cancel_for(&self, page: Option<&str>) {
+        let mut q = self.inner.queue.lock().unwrap();
+        if let Some(i) = index_of(&q, page) {
+            let job = q.remove(i).unwrap();
             let _ = job.tx.send(cancel_value());
         }
+        drop(q);
         self.inner.ctx.emit(MCP_ELICIT_EVENT, ());
     }
 
     pub fn decline(&self) {
-        if let Some(job) = self.inner.queue.lock().unwrap().pop_front() {
+        self.decline_for(None);
+    }
+
+    pub fn decline_for(&self, page: Option<&str>) {
+        let mut q = self.inner.queue.lock().unwrap();
+        if let Some(i) = index_of(&q, page) {
+            let job = q.remove(i).unwrap();
             let _ = job.tx.send(decline_value());
         }
+        drop(q);
         self.inner.ctx.emit(MCP_ELICIT_EVENT, ());
     }
 
     /// URL mode: open the browser. Does not finish the JSON-RPC request.
     pub fn open_url(&self) -> Result<String, String> {
+        self.open_url_on(None)
+    }
+
+    pub fn open_url_on(&self, page: Option<&str>) -> Result<String, String> {
         let url = {
             let mut q = self.inner.queue.lock().unwrap();
-            let Some(job) = q.front_mut() else {
+            let Some(i) = index_of(&q, page) else {
                 return Err("没有待处理的 elicitation".into());
             };
+            let job = q.get_mut(i).unwrap();
             let Kind::Url { url, opened, .. } = &mut job.kind else {
                 return Err("当前不是链接 elicitation".into());
             };
@@ -200,17 +375,28 @@ impl Elicitation {
         picked: &[bool],
         draft: &str,
     ) -> Result<(), String> {
+        self.accept_option_on(None, selected, picked, draft)
+    }
+
+    pub fn accept_option_on(
+        &self,
+        page: Option<&str>,
+        selected: usize,
+        picked: &[bool],
+        draft: &str,
+    ) -> Result<(), String> {
         let mut q = self.inner.queue.lock().unwrap();
-        let Some(job) = q.front_mut() else {
+        let Some(i) = index_of(&q, page) else {
             return Ok(());
         };
+        let job = q.get_mut(i).unwrap();
         match &mut job.kind {
             Kind::Url { .. } => {
                 if selected == 0 {
                     drop(q);
-                    self.open_url().map(|_| ())
+                    self.open_url_on(page).map(|_| ())
                 } else {
-                    let job = q.pop_front().unwrap();
+                    let job = q.remove(i).unwrap();
                     let _ = job.tx.send(decline_value());
                     drop(q);
                     self.inner.ctx.emit(MCP_ELICIT_EVENT, ());
@@ -230,7 +416,7 @@ impl Elicitation {
                 answers.insert(field.name.clone(), value);
                 *index += 1;
                 if *index >= fields.len() {
-                    let job = q.pop_front().unwrap();
+                    let job = q.remove(i).unwrap();
                     let Kind::Form { answers, .. } = job.kind else {
                         unreachable!();
                     };
@@ -248,10 +434,15 @@ impl Elicitation {
     }
 
     pub fn accept_text(&self, text: &str) -> Result<(), String> {
+        self.accept_text_on(None, text)
+    }
+
+    pub fn accept_text_on(&self, page: Option<&str>, text: &str) -> Result<(), String> {
         let mut q = self.inner.queue.lock().unwrap();
-        let Some(job) = q.front_mut() else {
+        let Some(i) = index_of(&q, page) else {
             return Ok(());
         };
+        let job = q.get_mut(i).unwrap();
         let Kind::Form {
             fields,
             index,
@@ -268,7 +459,7 @@ impl Elicitation {
         answers.insert(field.name.clone(), value);
         *index += 1;
         if *index >= fields.len() {
-            let job = q.pop_front().unwrap();
+            let job = q.remove(i).unwrap();
             let Kind::Form { answers, .. } = job.kind else {
                 unreachable!();
             };
@@ -285,10 +476,20 @@ impl Elicitation {
 
     /// Dual-resolve from the web gateway. Empty queue is an error.
     pub fn resolve(&self, action: &str, content: Option<Value>) -> Result<(), String> {
+        self.resolve_on(None, action, content)
+    }
+
+    pub fn resolve_on(
+        &self,
+        page: Option<&str>,
+        action: &str,
+        content: Option<Value>,
+    ) -> Result<(), String> {
         let mut q = self.inner.queue.lock().unwrap();
-        let Some(job) = q.pop_front() else {
+        let Some(i) = index_of(&q, page) else {
             return Err("no pending elicitation".into());
         };
+        let job = q.remove(i).unwrap();
         let payload = match action {
             "accept" | "approve" => accept_value(content.unwrap_or_else(|| json!({}))),
             "decline" | "deny" => decline_value(),
@@ -951,6 +1152,94 @@ mod tests {
             }
             other => panic!("expected single select, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_prompt_stamped_for_one_page_stays_off_the_other() {
+        let elicit = Elicitation::new(Context::new());
+        let params = json!({
+            "message": "环境？",
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "env": { "enum": ["dev"] } }
+            }
+        });
+        let handle = tokio::spawn({
+            let elicit = elicit.clone();
+            async move {
+                let _page = elicit.scope_page(Some("main#2".into()));
+                elicit.create("local", params).await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(elicit.front_for(Some("main")).is_none());
+        assert!(elicit.front_for(Some("main#2")).is_some());
+        elicit.cancel_for(Some("main"));
+        assert!(elicit.front_for(Some("main#2")).is_some());
+        elicit.cancel_for(Some("main#2"));
+        assert!(elicit.front().is_none());
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_returning_call_does_not_drop_the_other_pages_caller() {
+        // 两页同时调同一个 MCP 服务器时，先返回的那一页不能把后返回那页的来源页
+        // 条目一起弹掉，否则它的提问会盖到不存在的页上。
+        let elicit = Elicitation::new(Context::new());
+        let first = elicit.scope_page(Some("main#2".into()));
+        let _second = elicit.scope_page(Some("main#3".into()));
+        drop(first);
+        {
+            let callers = elicit.inner.callers.lock().unwrap();
+            assert_eq!(
+                callers.last().map(|c| c.page.as_deref()),
+                Some(Some("main#3")),
+                "后返回那页的条目该还在"
+            );
+            assert_eq!(callers.len(), 1);
+        }
+
+        let params = json!({ "message": "环境？" });
+        let handle = tokio::spawn({
+            let elicit = elicit.clone();
+            async move { elicit.create("local", params).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let origin = elicit
+            .inner
+            .queue
+            .lock()
+            .unwrap()
+            .front()
+            .and_then(|job| job.origin.clone());
+        assert_eq!(
+            origin.as_deref(),
+            Some("main#3"),
+            "提问该盖在还在跑的那一页上"
+        );
+        elicit.cancel();
+        let _ = handle.await;
+    }
+
+    /// 后发出的那次调用先被服务器提问时，框仍留在它自己的页上，不盖到先发出的那页。
+    #[tokio::test]
+    async fn a_later_calls_question_stays_on_its_own_page() {
+        let elicit = Elicitation::new(Context::new());
+        let _first = elicit.track_request(1, Some("main".into()));
+        let _second = elicit.track_request(2, Some("main#2".into()));
+        let params = json!({ "message": "后一页" });
+        let handle = tokio::spawn({
+            let elicit = elicit.clone();
+            async move { elicit.create_for("local", params, Some(2)).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            elicit.front_for(Some("main#2")).map(|p| p.message),
+            Some("后一页".into())
+        );
+        assert!(elicit.front_for(Some("main")).is_none());
+        elicit.cancel_for(Some("main#2"));
+        let _ = handle.await;
     }
 
     #[tokio::test]

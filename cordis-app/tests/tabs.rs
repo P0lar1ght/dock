@@ -4,28 +4,64 @@
 use cordis::Context;
 use cordis_app::{session_actor, tab_mount};
 use cordis_spine::{
-    agent_loop, install_fakes, LlmOutput, LogEvent, Sessions, Tools, SESSIONS, TOOLS,
+    agent_loop, clear_plan_for_session_switch, expected_plan_path, goal_service,
+    goal_tool_registration, install_fakes, is_plan_file_edit, permissions, plan_mode_service,
+    plan_mode_tool_registration, settings, todo_service, todo_tool_registration, AppSettings, Goal,
+    LlmOutput, LogEvent, Mcp, PermissionMode, Permissions, PlanMode, PlanPhase, PreStep, Sessions,
+    Todos, ToolCall, Tools, TurnEnd, AGENT_PRESETS, GOAL, MCP, PERMISSIONS, PLAN_MODE, PRE_STEP,
+    SESSIONS, SETTINGS, TODOS, TOOLS, TURN, TURN_END,
 };
 use cordis_tui::{
     prompt, tabs, theme, PromptWidget, SessionRef, TabKind, Tabs, SESSION_PORT, TUI_PROMPT,
     TUI_TABS,
 };
 
-/// 整个测试二进制共用一个隔离的 `DOCK_HOME`，免得读到本机 `~/.dock`。
+/// 每个测试自己一个隔离的 `DOCK_HOME`，免得读到本机 `~/.dock`，也免得
+/// 并行跑的测试抢同一个分页计划目录（分页目录按页号命名，两页都叫 `main#2`）。
 fn isolated_home() {
-    static HOME: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("dock-tabs-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("DOCK_HOME", &dir);
-        std::env::set_var("DOCK_CUA_DRIVER", "off");
-    });
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("dock-tabs-test-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("DOCK_HOME", &dir);
+    std::env::set_var("DOCK_CUA_DRIVER", "off");
 }
 
 async fn boot() -> Context {
     isolated_home();
     let root = Context::new();
     install_fakes(&root).await.unwrap();
+    // 第 1 页就是根。分页子树由 `tab_mount` 再挂一份，这里补上根上那一份。
+    root.plugin(goal_service(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(goal_tool_registration(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(todo_service(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(todo_tool_registration(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(plan_mode_service(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(plan_mode_tool_registration(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
     root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
     root.plugin(session_actor(), ())
         .unwrap()
@@ -254,4 +290,391 @@ async fn closing_a_tab_leaves_the_main_session_alone() {
     let events = main.events();
     assert_eq!(events.len(), 1, "关掉分页不该动主会话");
     assert!(matches!(&events[0], LogEvent::User(t) if t == "主线的话"));
+}
+
+/// 历史会话开成自己的一页：当前页留着，这一页能接着收消息，再开一次只是切回去。
+#[tokio::test]
+async fn opening_history_adds_a_tab_you_can_talk_to() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    assert!(
+        tabs.open_archived("missing").await.is_err(),
+        "没有这份会话不该留下半页"
+    );
+    assert_eq!(tabs.len(), 1);
+
+    let main = root.get::<Sessions>(SESSIONS).unwrap();
+    main.attach_disk();
+    main.append(LogEvent::User("历史里的那句".into()));
+    let id = main.archive_current().unwrap().id;
+    main.append(LogEvent::User("当前页还在".into()));
+    assert_ne!(main.live_session_id(), id);
+
+    let tab_id = tabs.open_archived(&id).await.unwrap();
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(tabs.active_id(), tab_id);
+    assert_eq!(tabs.active_index(), 1);
+
+    let page = tabs.active_ctx();
+    let opened = page.get::<Sessions>(SESSIONS).unwrap();
+    assert_eq!(opened.live_session_id(), id);
+    assert_eq!(opened.identity(), "main#2");
+    assert!(
+        opened
+            .events()
+            .iter()
+            .any(|e| matches!(e, LogEvent::User(t) if t == "历史里的那句")),
+        "新页要带着那份历史"
+    );
+    assert!(page.get::<SessionRef>(SESSION_PORT).is_some());
+    assert!(page.get::<PromptWidget>(TUI_PROMPT).is_some());
+
+    page.get::<SessionRef>(SESSION_PORT)
+        .unwrap()
+        .submit("接着说".into(), true);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if opened
+                .events()
+                .iter()
+                .any(|e| matches!(e, LogEvent::User(t) if t == "接着说"))
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("这一页自己的循环该收下这句话");
+    page.get::<SessionRef>(SESSION_PORT).unwrap().cancel();
+
+    assert!(
+        main.events()
+            .iter()
+            .any(|e| matches!(e, LogEvent::User(t) if t == "当前页还在")),
+        "当前页还在"
+    );
+    assert!(
+        !main
+            .events()
+            .iter()
+            .any(|e| matches!(e, LogEvent::User(t) if t == "接着说")),
+        "发给新页的话不该进当前页"
+    );
+
+    let again = tabs.open_archived(&id).await.unwrap();
+    assert_eq!(again, tab_id, "已经开着就切过去，不再复制一页");
+    assert_eq!(tabs.len(), 2);
+}
+
+/// 切页之后底栏读的是这一页的模型、协议和权限模式；批准框也只挂在这一页的队列上。
+#[tokio::test]
+async fn each_page_keeps_its_model_mode_and_permission_queue() {
+    let root = boot().await;
+    root.plugin(settings(), ()).unwrap().wait().await.unwrap();
+    root.plugin(permissions(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let main = root.get::<AppSettings>(SETTINGS).unwrap();
+    main.set_model("page-one");
+    main.set_permission_mode(PermissionMode::Ask);
+
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    tabs.open().await.unwrap();
+    let page = tabs.active_ctx();
+    let second = page.get::<AppSettings>(SETTINGS).unwrap();
+    assert_eq!(second.model(), "page-one", "新页从当前页抄一份");
+    second.set_model("page-two");
+    second.set_permission_mode(PermissionMode::Allow);
+    assert_eq!(main.model(), "page-one");
+    assert_eq!(main.permission_mode(), PermissionMode::Ask);
+    assert_eq!(second.permission_mode(), PermissionMode::Allow);
+    // 始终允许不会入队。下面要看的是队列隔离，先回到询问。
+    second.set_permission_mode(PermissionMode::Ask);
+
+    let first_q = root.get::<Permissions>(PERMISSIONS).unwrap();
+    let second_q = page.get::<Permissions>(PERMISSIONS).unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&first_q, &second_q),
+        "两页不该共用一个权限队列"
+    );
+    let waiting = std::sync::Arc::clone(&second_q);
+    tokio::spawn(async move {
+        waiting.request("bash", "只属于第二页").await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if second_q.front().is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("第二页的权限请求该进第二页的队列");
+    assert!(first_q.front().is_none(), "第一页不该看见第二页的批准框");
+    assert_eq!(second_q.front().unwrap().summary, "只属于第二页");
+}
+
+/// 关页要清掉那一页的 MCP elicitation：队列是全局的，fiber dispose 带不走它，
+/// 不 cancel 的话那条工具调用永远等不到答复。
+#[tokio::test]
+async fn closing_a_tab_cancels_its_pending_elicitation() {
+    let root = boot().await;
+    root.plugin(cordis_spine::mcp_client(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let mcp = root.get::<Mcp>(MCP).unwrap();
+    let elicit = mcp.elicitation();
+
+    tabs.open().await.unwrap();
+    let page = tabs.active_ctx();
+    let page_name = page
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| s.ui_page())
+        .expect("分页有自己的页名");
+
+    // 这一页正在跑的 MCP 工具发来的提问
+    let _scope = elicit.scope_page(Some(page_name.clone()));
+    let queued = elicit.clone();
+    let created = tokio::spawn(async move {
+        queued
+            .create("fake-server", serde_json::json!({"message": "选哪个？"}))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while elicit.front_for(Some(&page_name)).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("提问该排进这一页的队列");
+
+    tabs.close(1).await.unwrap();
+
+    assert!(
+        elicit.front_for(Some(&page_name)).is_none(),
+        "关页该带走这一页的提问"
+    );
+    let value = tokio::time::timeout(std::time::Duration::from_secs(3), created)
+        .await
+        .expect("关页该给那条调用一个答复")
+        .unwrap();
+    assert!(
+        value
+            .get("action")
+            .is_some_and(|a| a.as_str() == Some("cancel")),
+        "提问被取消，工具调用才不会挂住: {value}"
+    );
+}
+
+/// `/resume` 恢复时，若别的页正 live 在这份会话上，切过去而不是再开一份：
+/// 两页同时往同一个 `chat_history.jsonl` 追加会损坏历史。
+#[tokio::test]
+async fn restoring_an_id_live_on_another_tab_switches_there() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let main = root.get::<Sessions>(SESSIONS).unwrap();
+    main.attach_disk();
+    main.append(LogEvent::User("历史里的那句".into()));
+    let id = main.archive_current().unwrap().id;
+
+    let tab_id = tabs.open_archived(&id).await.unwrap();
+    assert_eq!(tabs.len(), 2, "开一份历史会话该多一页");
+
+    // 回到第一页，模拟 /resume 选中同一个 id：不复制，只切到开着的那一页
+    tabs.activate(0);
+    assert_eq!(
+        tabs.switch_to_live_session(&id),
+        Some(tab_id),
+        "已经开着就该切过去"
+    );
+    assert_eq!(tabs.active_id(), tab_id);
+    assert_eq!(tabs.len(), 2, "不该再开一页");
+    assert!(
+        tabs.switch_to_live_session("unknown-id").is_none(),
+        "没开着的会话不该被当成已开"
+    );
+}
+
+fn turn_end(identity: &str) -> TurnEnd {
+    TurnEnd::new("说完了", 0, true, false, identity)
+}
+
+fn pre_step(identity: &str) -> PreStep {
+    PreStep::new("继续", true, identity)
+}
+
+/// `Ctrl+N` 开出来的第二页，和主线的目标、待办、计划互不续跑、互不覆盖。
+///
+/// 走的是 `tab_mount` 那条真分页，不是手搓两份服务。
+#[tokio::test]
+async fn two_pages_keep_goal_todos_and_plan_apart() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tools = root.get::<Tools>(TOOLS).unwrap();
+
+    let probe = Sessions::tab(root.clone(), 2);
+    let stale = expected_plan_path(Some(&probe));
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    std::fs::write(&stale, "上一轮的计划").unwrap();
+
+    tabs.open().await.unwrap();
+    assert!(
+        !stale.exists(),
+        "开页要丢掉上一进程留下的 main#2 计划: {stale:?}"
+    );
+
+    let page = tabs.active_ctx();
+    let page_sessions = page.get::<Sessions>(SESSIONS).unwrap();
+    assert_eq!(page_sessions.identity(), "main#2");
+
+    root.get::<Goal>(GOAL).unwrap().start("只属于第一页");
+    let end = turn_end("main#2");
+    let out = root.waterfall(TURN_END, end.clone(), || end);
+    assert!(
+        out.decision().is_none(),
+        "第 2 页收尾不能被第 1 页的目标续跑: {:?}",
+        out.decision()
+    );
+    let end = turn_end("main");
+    let out = root.waterfall(TURN_END, end.clone(), || end);
+    assert!(out.decision().is_some(), "第 1 页自己的目标还要续跑");
+
+    let step = pre_step("main#2");
+    root.waterfall(PRE_STEP, step.clone(), || step);
+    assert!(
+        root.get::<Goal>(GOAL).unwrap().take_instruction().is_some(),
+        "第 2 页的 pre-step 不能吃掉第 1 页的一次性目标指令"
+    );
+
+    let listed = tools
+        .execute_on(
+            &root,
+            ToolCall {
+                id: "p1".into(),
+                name: "todo_write".into(),
+                arguments:
+                    r#"{"merge":false,"todos":[{"id":"p1","content":"第一页","status":"pending"}]}"#
+                        .into(),
+            },
+        )
+        .await;
+    assert!(!listed.content.starts_with("Error"), "{}", listed.content);
+    let end = turn_end("main#2");
+    let out = root.waterfall(TURN_END, end.clone(), || end);
+    assert!(
+        out.decision().is_none(),
+        "第 1 页未完成的待办不能逼第 2 页续跑: {:?}",
+        out.decision()
+    );
+
+    let listed = tools
+        .execute_on(
+            &page,
+            ToolCall {
+                id: "p2".into(),
+                name: "todo_write".into(),
+                arguments:
+                    r#"{"merge":false,"todos":[{"id":"p2","content":"第二页","status":"pending"}]}"#
+                        .into(),
+            },
+        )
+        .await;
+    assert!(!listed.content.starts_with("Error"), "{}", listed.content);
+    assert_eq!(root.get::<Todos>(TODOS).unwrap().snapshot().len(), 1);
+    assert_eq!(page.get::<Todos>(TODOS).unwrap().snapshot().len(), 1);
+    assert_eq!(page.get::<Todos>(TODOS).unwrap().snapshot()[0].0, "p2");
+
+    root.get::<PlanMode>(PLAN_MODE).unwrap().enter_pending();
+    let step = pre_step("main#2");
+    root.waterfall(PRE_STEP, step.clone(), || step);
+    assert_eq!(
+        root.get::<PlanMode>(PLAN_MODE).unwrap().phase(),
+        PlanPhase::Pending,
+        "第 2 页开一轮不能把第 1 页的计划推进成 Active"
+    );
+    clear_plan_for_session_switch(&root);
+    assert_eq!(
+        root.get::<PlanMode>(PLAN_MODE).unwrap().phase(),
+        PlanPhase::Inactive
+    );
+
+    let entered = tools
+        .execute_on(
+            &page,
+            ToolCall {
+                id: "plan".into(),
+                name: "enter_plan_mode".into(),
+                arguments: "{}".into(),
+            },
+        )
+        .await;
+    assert!(entered.content.contains("main#2"), "{}", entered.content);
+    let path = expected_plan_path(Some(page_sessions.as_ref()));
+    assert!(path.exists(), "计划该写到 {path:?}");
+    assert!(
+        entered
+            .content
+            .contains(&path.to_string_lossy().to_string()),
+        "{}",
+        entered.content
+    );
+    let comps: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let tabs_at = comps.iter().position(|c| c == "tabs").expect("{path:?}");
+    assert_ne!(comps[tabs_at - 1], "sessions", "cwd-key 被丢掉了: {path:?}");
+    let args = format!(r#"{{"target_file":"{}"}}"#, path.display());
+    assert!(is_plan_file_edit("write_file", &args, &path));
+    assert!(!is_plan_file_edit(
+        "write_file",
+        r#"{"target_file":".dock/plan.md"}"#,
+        &path
+    ));
+    assert_eq!(
+        root.get::<PlanMode>(PLAN_MODE).unwrap().phase(),
+        PlanPhase::Inactive,
+        "第 2 页进入计划模式不能打开第 1 页的写门"
+    );
+    assert_eq!(
+        page.get::<PlanMode>(PLAN_MODE).unwrap().phase(),
+        PlanPhase::Active
+    );
+
+    let child = page.isolate(SESSIONS).isolate(TURN).isolate(AGENT_PRESETS);
+    child
+        .provide(
+            SESSIONS,
+            Sessions::isolated_as(child.clone(), "child-from-2"),
+        )
+        .unwrap();
+    let listed = tools
+        .execute_on(
+            &child,
+            ToolCall {
+                id: "c".into(),
+                name: "todo_write".into(),
+                arguments:
+                    r#"{"merge":true,"todos":[{"id":"c","content":"孩子写的","status":"pending"}]}"#
+                        .into(),
+            },
+        )
+        .await;
+    assert!(!listed.content.starts_with("Error"), "{}", listed.content);
+    assert_eq!(
+        root.get::<Todos>(TODOS).unwrap().snapshot().len(),
+        1,
+        "第 2 页的孩子不能改第 1 页的待办"
+    );
+    assert_eq!(page.get::<Todos>(TODOS).unwrap().snapshot().len(), 2);
+
+    tabs.close(1).await.unwrap();
+    assert!(!path.exists(), "关页要删掉这一页的计划文件: {path:?}");
 }

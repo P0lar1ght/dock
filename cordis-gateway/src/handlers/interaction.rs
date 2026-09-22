@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use cordis_spine::{Ask, Mcp, PlanDecision, PlanMode, ASK, MCP, PLAN_MODE};
+use cordis_spine::{Ask, Mcp, PlanDecision, PlanMode, Sessions, ASK, MCP, PLAN_MODE, SESSIONS};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;
@@ -65,8 +65,12 @@ pub fn elicit_resolve(gateway: &GatewayHandle, params: Value) -> Result<Value, R
         .ctx()
         .get::<Mcp>(MCP)
         .ok_or_else(|| RpcError::app("unavailable", "mcp service is not mounted"))?;
+    let page = gateway
+        .ctx()
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| s.ui_page());
     mcp.elicitation()
-        .resolve(action, content)
+        .resolve_on(page.as_deref(), action, content)
         .map_err(|e| RpcError::app("empty_queue", e))?;
     Ok(json!({ "ok": true, "resumed": true }))
 }

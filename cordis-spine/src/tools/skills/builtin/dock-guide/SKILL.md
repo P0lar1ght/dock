@@ -77,5 +77,5 @@ Dock 是跑在终端里的编码 agent。底部输入框发消息，`/` 唤出�
 
 ## 计划与插件
 
-- `/plan [说明]` 进入计划模式；`/view-plan` 查看 `.dock/plan.md`。
+- `/plan [说明]` 进入计划模式；`/view-plan` 查看本页计划文件。
 - `/cordis` 查看已挂载的插件（项目 `.dock/plugins/` 与会话内存插件）。

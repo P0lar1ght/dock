@@ -85,12 +85,13 @@ config.toml.example      用户 / 项目模型目录样例
 
 | 每页一份 | 全局一份（落回根） |
 |---|---|
-| `sessions` `turn` `agentLoop` `session` `session.port` | `tools` `llm` `systemPrompt` `agents` `permissions` `ask` `mcp` `settings` `skills` `memory` |
-| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp` `workflows` `slash` `agentPresets` `theme` `gateway` `todos` `planMode` `goal` |
+| `sessions` `turn` `agentLoop` `session` `session.port` `goal` `todos` `planMode` `settings` `permissions` `ask` | `tools` `llm` `systemPrompt` `agents` `mcp` `skills` |
+| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp` `workflows` `slash` `agentPresets` `theme` `gateway` `memory` |
 
 服务按 `(isolate realm, name)` 解析，没被 isolate 的名字自然落回根 —— 所以**一张
-`"tools"` 表**的不变式没有被破坏，两页共用同一张表、同一个 `llm`、同一套权限浮层。
-系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的是各页自己的 ctx。
+`"tools"` 表**的不变式没有被破坏，两页共用同一张表、同一个 `llm`。模型、协议、
+权限模式在这一页的 `settings` 上；权限队列和 `ask` 也按页各一份，底栏读的是
+当前页。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的是各页自己的 ctx。
 
 事件**不分 realm**（`ctx.emit` 不看 isolate），后台页的 `session/event` 照样能把
 前台叫醒重绘，标签栏上的 `●` 就是靠这个活的。
@@ -116,9 +117,17 @@ config.toml.example      用户 / 项目模型目录样例
 （判错会让第 2 页拿不到工具目录）。
 
 **已知边界**：分页不落盘（`--resume`、gateway `dock.1` 投影、会话归档都只跟第 1
-页）；权限浮层 / `ask` / MCP elicit 是全局队列且**还没有来源标记**，后台页触发的
-弹窗会在你正看的那一页弹出；全局单例（浏览器、cua、后台任务表）两页会抢；
-`todos` / `planMode` / `goal` 目前也是全局一份，两页共用。
+页）。权限队列和 `ask` 按页隔离，只在那一页上弹出；MCP 连接仍是全局的，
+elicitation 盖了来源页，也只在那一页上显示。同一台 MCP 服务器两页可以同时调用：HTTP 上提问跟着那次 POST 的响应走，各页弹各页的框。标签上 `◆` 表示那一页有东西在等回答。
+浏览器、cua、后台任务表仍是全局单例，两页会抢。
+
+**计划文件按页划分**：`planMode` 隔离之后，计划文件也跟着按会话分 ——
+`$DOCK_HOME/sessions/<cwd-key>/<id>/plan.md`（主会话）或
+`sessions/<cwd-key>/tabs/<pid>/<identity>/plan.md`（不落盘的分页，identity = `main#N`；`pid` 隔开不同进程的同一页号），
+对齐 grok-build 的 `$GROK_HOME/sessions/<cwd>/<id>/plan.md`。这样第 2 页的计划
+不会覆盖第 1 页的。写门按本页期望路径判定，只有写**本页**计划文件的 `write_file` /
+`search_replace` 才算计划编辑而豁免只读门。`enter_plan_mode` 交给模型的是这条
+绝对路径，相对路径 `.dock/plan.md` 不再放行。
 
 **子代理按页记账**：`"subagents"` 仍是全局一份，但协调器本来就按
 `parent_session_id` 分账（`spawn_blocked_sessions` / `session_running_count` /
@@ -150,11 +159,11 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 
 **中途盯梢也是插件说了算。** `agent/step-start` 每个采样步之前跑一次 —— `agent/pre-step` 是每轮一次、`agent/turn-end` 是收尾一次，都盯不住跑起来的一轮。载荷 `StepStart` 带 `step`（本轮已采样步数，续跑不清零）和 `identity`，handler 用 `remind(order, 正文)` 排队，循环按 order 顺序落成 `SystemReminder`。带 per-turn 状态的 handler 在 `step == 0` 自己重置，循环不替谁存状态。现有一个：
 
-- `tool-todo`（`ORDER_STEP_START_TODO = 10`）：待办列表连续 6 步没动且仍有未完成项时提醒勾选 / 调整，每轮最多 3 次（`Todos::revision()` 计数）。只在主会话生效 —— `"todos"` 不随子代理 isolate，靠载荷里的 `identity` 判断。
+- `tool-todo`（`ORDER_STEP_START_TODO = 10`）：待办列表连续 6 步没动且仍有未完成项时提醒勾选 / 调整，每轮最多 3 次（`Todos::revision()` 计数）。只在主会话生效 —— 子代理不 isolate `"todos"`，靠载荷里的 `identity` 判断；分页则**各有**一份 `"todos"`（`PER_TAB_SERVICES`），各提醒各的。
 
 **收不收尾是插件说了算。** 循环只跑 `agent/turn-end` 链、数轮数（硬止损 64 轮）、把胜出的正文落成 `SystemReminder`；`append` 不交给 handler，免得 reminder 插进 `tool_calls` 和它的 `ToolExecute` 之间。载荷 `TurnEnd` 带 `text` / `rounds` / `ended_with_text` / `queued_followups` / `identity`，handler 用 `keep_working(order, 正文)` 表态，order 小的赢。没有 handler 就正常收尾（fail-open）。handler **看不到链外的表态**，也就不知道自己赢没赢，所以自限配额这类账要用 `keep_working_with(order, 正文, on_win)` —— 循环选出胜者后只跑胜者的 `on_win`，输掉的那轮不扣（`settle` 取走所有权，扣两次这种事写不出来）。现有两个：
 
-- `tool-todo`（`ORDER_TURN_END_TODO = 10`）：出文本收尾但还有 pending / 无后台任务托底的 in_progress 时续跑，每条用户消息最多 2 次（`keep_working_with` 扣在胜出，计数在 `agent/pre-step` 清零）。只在主会话生效 —— `"todos"` 不随子代理 isolate，靠载荷里的 `identity` 判断。
+- `tool-todo`（`ORDER_TURN_END_TODO = 10`）：出文本收尾但还有 pending / 无后台任务托底的 in_progress 时续跑，每条用户消息最多 2 次（`keep_working_with` 扣在胜出，计数在 `agent/pre-step` 清零）。只在主会话生效 —— 子代理不 isolate `"todos"`，靠载荷里的 `identity` 判断；分页各有自己的清单。
 - `tool-goal`（`ORDER_TURN_END_GOAL = 20`）：`/goal` 没 `update_goal(completed)` 就一直续，最多 64 轮；两种收尾都续。
 
 两个都尊重 `queued_followups`：用户已经排了下一条时不抢方向盘。

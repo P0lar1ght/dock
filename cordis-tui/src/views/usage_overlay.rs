@@ -57,6 +57,9 @@ static HITS: Mutex<Hits> = Mutex::new(Hits {
 static HOVER: Mutex<Option<OccupancyKind>> = Mutex::new(None);
 
 struct BodyMemo {
+    /// `main` / `main#N`. Two pages can share a rev and a token count; without
+    /// this the overlay keeps painting the previous page's model and split.
+    page: String,
     tab: UsageTab,
     detail: Option<OccupancyKind>,
     width: u16,
@@ -81,6 +84,12 @@ fn occupancy_stamp(ctx: &Context) -> (u64, TokenUsage) {
     ctx.get::<Sessions>(SESSIONS)
         .map(|s| s.occupancy_stamp())
         .unwrap_or((0, TokenUsage::default()))
+}
+
+fn page_key(ctx: &Context) -> String {
+    ctx.get::<Sessions>(SESSIONS)
+        .and_then(|s| s.ui_page())
+        .unwrap_or_default()
 }
 
 pub fn hit_tab(column: u16, row: u16) -> Option<UsageTab> {
@@ -151,11 +160,13 @@ pub fn render(
     };
     let hovered = *HOVER.lock().unwrap();
     let (rev, usage) = occupancy_stamp(ctx);
+    let page = page_key(ctx);
     let theme_kind = Theme::current_kind();
     let visible = {
         let mut memo = BODY.lock().unwrap();
         let reuse = memo.as_ref().is_some_and(|m| {
-            m.tab == tab
+            m.page == page
+                && m.tab == tab
                 && m.detail == detail
                 && m.width == body_area.width
                 && m.hovered == hovered
@@ -165,7 +176,7 @@ pub fn render(
         });
         if !reuse {
             let prev_snap = memo.as_ref().and_then(|m| {
-                if m.rev == rev && m.usage == usage {
+                if m.page == page && m.rev == rev && m.usage == usage {
                     m.snap.clone()
                 } else {
                     None
@@ -173,6 +184,7 @@ pub fn render(
             });
             *memo = Some(rebuild_body(
                 ctx,
+                page,
                 tab,
                 detail,
                 body_area.width,
@@ -234,6 +246,7 @@ pub fn max_scroll(tab: UsageTab, detail: Option<OccupancyKind>) -> usize {
 #[allow(clippy::too_many_arguments)]
 fn rebuild_body(
     ctx: &Context,
+    page: String,
     tab: UsageTab,
     detail: Option<OccupancyKind>,
     width: u16,
@@ -247,6 +260,7 @@ fn rebuild_body(
         (UsageTab::Context, Some(kind)) => {
             let lines = occupancy_detail_lines(ctx, kind, width);
             BodyMemo {
+                page,
                 tab,
                 detail,
                 width,
@@ -265,11 +279,12 @@ fn rebuild_body(
         (UsageTab::Context, None) => {
             let snap = prev_snap.unwrap_or_else(|| {
                 ctx.get::<ContextBook>(CONTEXT)
-                    .map(|b| b.window())
+                    .map(|b| b.window_on(ctx))
                     .unwrap_or_else(|| snapshot_context(ctx))
             });
             let view = context_view(&snap, width, hovered);
             BodyMemo {
+                page,
                 tab,
                 detail,
                 width,
@@ -286,6 +301,7 @@ fn rebuild_body(
             }
         }
         (UsageTab::Session, _) => BodyMemo {
+            page,
             tab,
             detail: None,
             width,
@@ -682,7 +698,7 @@ fn occupancy_detail_lines(ctx: &Context, kind: OccupancyKind, width: u16) -> Vec
     let theme = Theme::current();
     let detail = ctx
         .get::<ContextBook>(CONTEXT)
-        .map(|b| b.detail(kind))
+        .map(|b| b.detail_on(ctx, kind))
         .unwrap_or_else(|| occupancy_detail(ctx, kind));
     paint_occupancy_detail(&detail, &theme, width)
 }

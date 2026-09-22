@@ -74,7 +74,10 @@ impl Shortcuts {
             let typing = self
                 .ctx
                 .get::<cordis_spine::Mcp>(cordis_spine::MCP)
-                .and_then(|m| m.elicitation().front())
+                .and_then(|m| {
+                    let page = self.ctx.get::<Sessions>(SESSIONS).and_then(|s| s.ui_page());
+                    m.elicitation().front_for(page.as_deref())
+                })
                 .is_some_and(|p| crate::views::mcp_elicit_view::needs_draft(&p, *selected, picked));
             if typing {
                 return vec![

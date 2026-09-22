@@ -31,6 +31,10 @@ pub struct PickerHits {
     pub kill_buttons: Vec<(Rect, crate::grok::tasks_pane::KillTarget)>,
     /// Ask-view 「其他」freeform input row (empty when inactive).
     pub draft_input: Rect,
+    /// Agents 面板这一帧的列表区。空矩形表示没画。滚轮按落点决定滚哪一块。
+    pub dash_list: Rect,
+    /// Agents 面板这一帧的 peek 对话区（不含边框和输入行）。
+    pub dash_peek: Rect,
     /// 「其他」输入框里真实光标该落的格子（只在聚焦时有值）。
     ///
     /// 画个反显方块当光标是不够的：终端的**硬件光标**没挪过去，macOS 输入法的

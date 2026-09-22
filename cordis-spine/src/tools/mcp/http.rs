@@ -30,6 +30,7 @@ use crate::tools::registry::{tool_result, tool_result_with_images};
 use cordis_base::config::{McpServer, McpTransport};
 use cordis_base::types::ToolCall;
 
+use super::elicitation::Elicitation;
 use super::incoming::{self, LiveHooks};
 use super::sse::{self, SseParser};
 use super::tools_list;
@@ -338,6 +339,14 @@ async fn rpc_inner(
     recovered: bool,
 ) -> Result<Value, String> {
     let id = s.next_id.fetch_add(1, Ordering::Relaxed);
+    // 提问若出现在这次 POST 的响应里，按这个 id 找回发出调用的那一页。
+    // 守卫要活过整次等待，不能在用户填表之前丢掉。
+    let _owner = (method == "tools/call").then(|| {
+        let page = crate::tools::registry::exec_ctx()
+            .as_ref()
+            .and_then(crate::session::log::Sessions::page_of);
+        s.hooks.elicit.track_request(id, page)
+    });
     let params = if s.modern.load(Ordering::Relaxed) && method != "initialize" {
         with_meta(params, &s.protocol())
     } else {
@@ -422,8 +431,10 @@ async fn ingest(s: &HttpShared, v: Value, want_id: Option<u64>) -> Option<Value>
             // tools/call 的结果）都读不到。JSON-RPC 按 id 配对，回复不需要保序。
             let hooks = s.hooks.clone();
             let tx = s.reply_tx.clone();
+            // 这条 POST 正在等 `want_id`。流上的提问属于这次调用，不看「最后 push 的页」。
+            let related = Elicitation::is_create(&method).then_some(want_id).flatten();
             tokio::spawn(async move {
-                let reply = incoming::request(&hooks, id, method, params).await;
+                let reply = incoming::request(&hooks, id, method, params, related).await;
                 let _ = tx.send(reply);
             });
             None
@@ -605,14 +616,20 @@ mod tests {
         ElicitThenResult,
     }
 
-    async fn connect_test(
+    async fn connect_with(
         server: &McpServer,
+        hooks: LiveHooks,
     ) -> Result<(Vec<protocol::ListedTool>, CallFn), String> {
         let (stop_tx, stop_rx) = watch::channel(false);
-        let hooks = incoming::dummy_hooks(&server.name);
         let (listed, call, _) = connect(server, hooks, stop_rx).await?;
         std::mem::forget(stop_tx);
         Ok((listed, call))
+    }
+
+    async fn connect_test(
+        server: &McpServer,
+    ) -> Result<(Vec<protocol::ListedTool>, CallFn), String> {
+        connect_with(server, incoming::dummy_hooks(&server.name)).await
     }
 
     async fn spawn_server(mode: Mode) -> (String, tokio::task::JoinHandle<()>) {
@@ -1062,5 +1079,270 @@ mod tests {
         .await;
         assert_eq!(result.content, "pong");
         handle.abort();
+    }
+
+    /// 两页同时打同一台服务器，各自的提问留在各自的页上，调用本身不排队。
+    ///
+    /// 后一页的 `elicitation/create` 先到。归属如果还是「最后 push 的那一页」，
+    /// 两道题都会盖到后一页；按 POST 自己的请求 id 对上之后，各页只看见自己的。
+    #[tokio::test]
+    async fn concurrent_calls_keep_elicitation_on_the_calling_page() {
+        let overlap = Arc::new(CallOverlap::default());
+        let (url, handle) = spawn_exclusive_server(overlap.clone()).await;
+        let hooks = incoming::dummy_hooks("local");
+        let elicit = hooks.elicit.clone();
+        let (_, call) = connect_with(&http_server(url), hooks)
+            .await
+            .expect("connect");
+
+        let call_a = call.clone();
+        let call_b = call;
+        let main = page_ctx("main");
+        let other = page_ctx("main#2");
+
+        let a = tokio::spawn(async move {
+            crate::tools::registry::with_exec_ctx_async(main, async move {
+                call_a(
+                    "mcp_local__echo".into(),
+                    ToolCall {
+                        id: "a".into(),
+                        name: "mcp_local__echo".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+                .await
+            })
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !overlap.first_seen.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first call never reached the server");
+
+        let b = tokio::spawn(async move {
+            crate::tools::registry::with_exec_ctx_async(other, async move {
+                call_b(
+                    "mcp_local__echo".into(),
+                    ToolCall {
+                        id: "b".into(),
+                        name: "mcp_local__echo".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+                .await
+            })
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let main = elicit.front_for(Some("main")).is_some();
+                let other = elicit.front_for(Some("main#2")).is_some();
+                if main && other {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("both pages should have their own prompt");
+        assert_eq!(
+            elicit.front_for(Some("main")).map(|p| p.message),
+            Some("先一页".into())
+        );
+        assert_eq!(
+            elicit.front_for(Some("main#2")).map(|p| p.message),
+            Some("后一页".into())
+        );
+        assert_eq!(
+            overlap.max_inflight.load(Ordering::SeqCst),
+            2,
+            "两页的调用要同时在飞"
+        );
+        overlap.release_first.store(true, Ordering::SeqCst);
+
+        let a = tokio::time::timeout(Duration::from_secs(5), a)
+            .await
+            .expect("call a timed out")
+            .expect("call a join");
+        let b = tokio::time::timeout(Duration::from_secs(5), b)
+            .await
+            .expect("call b timed out")
+            .expect("call b join");
+        assert_eq!(a.content, "先一页的结果");
+        assert_eq!(b.content, "后一页的结果");
+        elicit.cancel();
+        handle.abort();
+    }
+
+    #[derive(Default)]
+    struct CallOverlap {
+        calls: AtomicU32,
+        inflight: AtomicU32,
+        max_inflight: AtomicU32,
+        first_seen: AtomicBool,
+        second_arrived: AtomicBool,
+        /// 测试看完两页的提问之后才放行调用结果。
+        release_first: AtomicBool,
+    }
+
+    /// 第一次调用按住，给第二次一个重叠窗口；elicitation 与结果拆成两段 SSE，
+    /// 结果要等测试看完提问才写。第二次停到第一次整段响应写完。
+    async fn spawn_exclusive_server(
+        overlap: Arc<CallOverlap>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let _ = stream.set_nodelay(true);
+                let overlap = overlap.clone();
+                tokio::spawn(async move {
+                    while let Ok((headers, body)) = read_http(&mut stream).await {
+                        if !exclusive_turn(&mut stream, &headers, &body, &overlap).await {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}/mcp"), handle)
+    }
+
+    async fn exclusive_turn(
+        stream: &mut tokio::net::TcpStream,
+        headers: &str,
+        body: &[u8],
+        overlap: &CallOverlap,
+    ) -> bool {
+        if headers.starts_with("GET ") {
+            return stream
+                .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .is_ok();
+        }
+        let v: Value = serde_json::from_slice(body).unwrap_or(json!({}));
+        let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let id = v.get("id").cloned().unwrap_or(Value::Null);
+        if method != "tools/call" {
+            let resp = if method == "tools/list" {
+                json_response(
+                    200,
+                    "",
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "tools": [{
+                            "name": "echo",
+                            "description": "echo",
+                            "inputSchema": { "type": "object" }
+                        }] }
+                    })
+                    .to_string(),
+                )
+            } else {
+                json_response(
+                    200,
+                    "",
+                    &json!({ "jsonrpc": "2.0", "id": id, "result": {} }).to_string(),
+                )
+            };
+            return stream.write_all(&resp).await.is_ok();
+        }
+
+        let seq = overlap.calls.fetch_add(1, Ordering::SeqCst);
+        let now = overlap.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        overlap.max_inflight.fetch_max(now, Ordering::SeqCst);
+        let ok = if seq == 0 {
+            overlap.first_seen.store(true, Ordering::SeqCst);
+            let wait_second = async {
+                while !overlap.second_arrived.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            };
+            let _ = tokio::time::timeout(Duration::from_millis(500), wait_second).await;
+            // 让后一页的提问先盖上。按「最后一页」归属的话，先一页的题也会跟过去。
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            held_elicit_then_result(stream, &id, overlap, 9001, "先一页", "先一页的结果").await
+        } else {
+            overlap.second_arrived.store(true, Ordering::SeqCst);
+            held_elicit_then_result(stream, &id, overlap, 9002, "后一页", "后一页的结果").await
+        };
+        overlap.inflight.fetch_sub(1, Ordering::SeqCst);
+        ok
+    }
+
+    /// 先把 elicitation 推出去并停住，等测试看完提问再写调用结果。
+    /// 结果如果跟 elicitation 在同一段里写完，`create` 还没盖上来源页调用就返回了。
+    async fn held_elicit_then_result(
+        stream: &mut tokio::net::TcpStream,
+        id: &Value,
+        overlap: &CallOverlap,
+        elicit_id: u64,
+        message: &str,
+        result_text: &str,
+    ) -> bool {
+        let header = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\r\n";
+        if stream.write_all(header).await.is_err() {
+            return false;
+        }
+        let elicit = json!({
+            "jsonrpc": "2.0",
+            "id": elicit_id,
+            "method": "elicitation/create",
+            "params": {
+                "message": message,
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": { "ok": { "type": "boolean" } }
+                }
+            }
+        });
+        if !write_sse_chunk(stream, &elicit).await {
+            return false;
+        }
+        let wait_release = async {
+            while !overlap.release_first.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(3), wait_release).await;
+        let result = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [{ "type": "text", "text": result_text }] }
+        });
+        write_sse_chunk(stream, &result).await && stream.write_all(b"0\r\n\r\n").await.is_ok()
+    }
+
+    async fn write_sse_chunk(stream: &mut tokio::net::TcpStream, event: &Value) -> bool {
+        let payload = format!("data: {event}\n\n");
+        let frame = format!("{:X}\r\n{payload}\r\n", payload.len());
+        stream.write_all(frame.as_bytes()).await.is_ok()
+    }
+
+    fn page_ctx(identity: &str) -> cordis::Context {
+        let ctx = cordis::Context::new();
+        let sessions = if identity == "main" {
+            crate::Sessions::new(ctx.clone())
+        } else {
+            let n: usize = identity
+                .strip_prefix("main#")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(2);
+            crate::Sessions::tab(ctx.clone(), n)
+        };
+        // Drop 不会反注册，服务留在这份 ctx 上。
+        let _reg = ctx
+            .provide(crate::SESSIONS, sessions)
+            .expect("provide sessions");
+        ctx
     }
 }

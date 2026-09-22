@@ -1,8 +1,9 @@
 //! Dock `ChildRunner`: Grok coordinator seam; child body is isolate
 //! `"sessions"`+`"turn"`+`"agentPresets"` + [`GrokStep`].
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cordis::Context;
@@ -42,9 +43,28 @@ impl ChildControl for DockChildControl {
     }
 }
 
+/// Page context captured when `task` is called, keyed by the child id.
+///
+/// The runner itself is built on the root ctx (one coordinator). The child
+/// has to be isolated from the calling page, or `goal` / `todos` / `planMode`
+/// — not re-isolated for subagents — resolve to page 1.
+#[derive(Clone, Default)]
+pub(super) struct SpawnParents(Arc<Mutex<HashMap<String, Context>>>);
+
+impl SpawnParents {
+    pub(super) fn note(&self, id: &str, parent: Context) {
+        self.0.lock().unwrap().insert(id.to_string(), parent);
+    }
+
+    fn take(&self, id: &str) -> Option<Context> {
+        self.0.lock().unwrap().remove(id)
+    }
+}
+
 pub(super) struct DockChildRunner {
     pub ctx: Context,
     pub store: ChildStore,
+    pub spawn_parents: SpawnParents,
 }
 
 impl ChildRunner for DockChildRunner {
@@ -53,7 +73,7 @@ impl ChildRunner for DockChildRunner {
     type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
-        let parent = self.ctx.clone();
+        let parent = self.parent_for(&run.request.id);
         let store = self.store.clone();
         Box::pin(async move { run_dock_child(parent, store, run).await })
     }
@@ -77,6 +97,16 @@ impl ChildRunner for DockChildRunner {
         }
         self.store
             .set_output(&completion.request.id, completion.result.output.to_string());
+    }
+}
+
+impl DockChildRunner {
+    /// Calling page when `task` noted one; otherwise the root ctx this runner
+    /// was built with (tests and spawns that have no executing page).
+    fn parent_for(&self, child_id: &str) -> Context {
+        self.spawn_parents
+            .take(child_id)
+            .unwrap_or_else(|| self.ctx.clone())
     }
 }
 
@@ -149,6 +179,9 @@ async fn run_dock_child(
     }
     let child = child;
     let sessions = Sessions::isolated_as(child.clone(), id.clone());
+    if let Some(page) = parent.get::<Sessions>(SESSIONS).and_then(|s| s.ui_page()) {
+        sessions.pin_page_home(page);
+    }
     if !resume.is_empty() {
         sessions.seed(resume);
     }
@@ -611,5 +644,52 @@ mod inbox_tests {
             .join("\n");
         assert!(!text.contains("\"a\""), "{text}");
         assert!(text.contains("\"b\""), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use super::*;
+    use crate::names::{AGENT_PRESETS, SESSIONS, TODOS};
+    use crate::session::log::Sessions;
+    use crate::tools::todo_write::Todos;
+    use std::sync::Arc;
+
+    /// 第 2 页记下的父 ctx 才是孩子的隔离根。从根隔离的话，没再隔离的
+    /// `todos` 会落到第 1 页。
+    #[tokio::test]
+    async fn child_isolated_from_the_noted_page_sees_that_pages_todos() {
+        let root = Context::new();
+        root.provide(TODOS, Todos::new()).unwrap();
+        let page = root.isolate(SESSIONS).isolate(TODOS);
+        page.provide(SESSIONS, Sessions::tab(page.clone(), 2))
+            .unwrap();
+        page.provide(TODOS, Todos::new()).unwrap();
+
+        let parents = SpawnParents::default();
+        parents.note("child-1", page.clone());
+        let runner = DockChildRunner {
+            ctx: root.clone(),
+            store: ChildStore::new(),
+            spawn_parents: parents,
+        };
+        let parent = runner.parent_for("child-1");
+        let child = parent
+            .isolate(SESSIONS)
+            .isolate("turn")
+            .isolate(AGENT_PRESETS);
+        child
+            .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+            .unwrap();
+
+        let seen = child.get::<Todos>(TODOS).unwrap();
+        assert!(Arc::ptr_eq(&seen, &page.get::<Todos>(TODOS).unwrap()));
+        assert!(!Arc::ptr_eq(&seen, &root.get::<Todos>(TODOS).unwrap()));
+
+        let fallback = runner.parent_for("missing");
+        assert!(Arc::ptr_eq(
+            &fallback.get::<Todos>(TODOS).unwrap(),
+            &root.get::<Todos>(TODOS).unwrap()
+        ));
     }
 }

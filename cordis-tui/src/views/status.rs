@@ -211,7 +211,7 @@ impl StatusLine {
         let snap = self
             .ctx
             .get::<ContextBook>(CONTEXT)
-            .map(|b| b.window())
+            .map(|b| b.window_on(&self.ctx))
             .unwrap_or_else(|| snapshot_context(&self.ctx));
         *memo = Some(SnapMemo {
             rev,

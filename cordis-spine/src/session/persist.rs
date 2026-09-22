@@ -905,6 +905,52 @@ mod tests {
         ));
     }
 
+    /// A blank tab adopts the folder and later turns land back in it.
+    /// Archiving the empty log first would mint another id and drop this one.
+    #[tokio::test]
+    async fn adopt_archived_continues_the_same_folder() {
+        let _home = cordis_base::test_env::scoped().home();
+        let sessions = crate::session::log::Sessions::new(cordis::Context::new());
+        sessions.attach_disk();
+        sessions.append(LogEvent::User("keep me".into()));
+        let id = sessions
+            .archive_current()
+            .expect("archive writes a folder")
+            .id;
+
+        let tab = crate::session::log::Sessions::tab(cordis::Context::new(), 2);
+        assert!(tab.adopt_archived(&id), "empty tab should adopt {id}");
+        assert_eq!(tab.live_session_id(), id);
+        assert!(tab.on_disk());
+        assert!(matches!(
+            tab.events().first(),
+            Some(LogEvent::User(t)) if t == "keep me"
+        ));
+        tab.append(LogEvent::User("and this".into()));
+
+        let again = crate::session::log::Sessions::new(cordis::Context::new());
+        again.attach_disk();
+        assert!(again.restore(&id));
+        let texts: Vec<String> = again
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::User(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["keep me", "and this"]);
+
+        let busy = crate::session::log::Sessions::tab(cordis::Context::new(), 3);
+        busy.append(LogEvent::User("already talking".into()));
+        assert!(
+            !busy.adopt_archived(&id),
+            "a page that already has a log must not be replaced"
+        );
+        assert!(!busy.adopt_archived("missing"), "unknown id");
+        assert_eq!(busy.live_session_id(), "");
+    }
+
     fn reload() -> crate::session::log::Sessions {
         let sessions = crate::session::log::Sessions::new(cordis::Context::new());
         sessions.attach_disk();

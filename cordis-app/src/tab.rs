@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use cordis::{plugin, plugin_async, Inject, Plugin};
 use cordis_spine::{
-    agent_loop, turn, AgentPresets, Sessions, SubagentDef, AGENT_PRESETS, SESSIONS,
+    agent_loop, goal_service, plan_mode_service, todo_service, turn, AgentPresets, AppSettings,
+    Ask, Permissions, Sessions, SubagentDef, AGENT_PRESETS, ASK, PERMISSIONS, SESSIONS, SETTINGS,
 };
-use cordis_tui::{prompt, scrollback, status_bar, welcome, TabKind, TabMount};
+use cordis_tui::{prompt, scrollback, status_bar, welcome, TabKind, TabMount, Tabs, TUI_TABS};
 
 use crate::session_actor;
 
@@ -43,9 +44,8 @@ fn aside_preset() -> AgentPresets {
 
 /// 一页 = 自己的会话 + 轮次 + agent 循环 + 会话 actor + 四个视图。
 ///
-/// 其余一律落回根：一张 `"tools"` 表、一个 `llm`、一套 `permissions` / `mcp` /
-/// `browser` / `computer` / `jobs`。两页会真的抢这些全局单例，这是分页的已知
-/// 代价，不是疏漏。
+/// 其余落回根：一张 `"tools"` 表、一个 `llm`、MCP 连接、`browser` / `computer` /
+/// `jobs`。模型、协议、权限模式、权限队列和提问队列是这一页自己的。
 fn tab(index: usize, kind: TabKind) -> Plugin {
     plugin_async("tab", Inject::new(), move |ctx, _: &()| async move {
         // 顺序照 main：会话与轮次先落地，循环和 actor 都 inject 它们。
@@ -54,6 +54,17 @@ fn tab(index: usize, kind: TabKind) -> Plugin {
             // 旁问页自带一份只读预设；常驻页照旧用根上那份。
             ctx.plugin(aside_presets(), ())?.wait().await?;
         }
+        // `GOAL` / `TODOS` 按页隔离（PER_TAB_SERVICES）：每页有自己的目标
+        // 与待办服务，第 2 页的 /goal / todo_write 不再写进第 1 页。
+        // `update_goal` / `todo_write` 工具仍在全局工具表里注册一份，靠
+        // 执行期 ctx 派发到调用者那一页。
+        ctx.plugin(goal_service(), ())?.wait().await?;
+        ctx.plugin(todo_service(), ())?.wait().await?;
+        // `PLAN_MODE` 按页隔离：分页各有自己的计划模式状态与计划文件。
+        ctx.plugin(plan_mode_service(), ())?.wait().await?;
+        ctx.plugin(tab_settings(), ())?.wait().await?;
+        ctx.plugin(tab_permissions(), ())?.wait().await?;
+        ctx.plugin(tab_ask(), ())?.wait().await?;
         ctx.plugin(turn(), ())?.wait().await?;
         ctx.plugin(agent_loop(), ())?.wait().await?;
         ctx.plugin(session_actor(), ())?.wait().await?;
@@ -66,6 +77,33 @@ fn tab(index: usize, kind: TabKind) -> Plugin {
     })
 }
 
+/// 抄当前页的模型、协议、权限模式。开页之后两页各改各的。
+fn tab_settings() -> Plugin {
+    plugin("tab.settings", Inject::new(), |ctx, _: &()| {
+        let forked = ctx
+            .get::<Tabs>(TUI_TABS)
+            .map(|tabs| tabs.active_ctx())
+            .and_then(|page| page.get::<AppSettings>(SETTINGS))
+            .map(|settings| settings.fork())
+            .unwrap_or_else(|| AppSettings::new(""));
+        Ok(Some(ctx.provide(SETTINGS, forked)?))
+    })
+}
+
+fn tab_permissions() -> Plugin {
+    plugin("tab.permissions", Inject::new(), |ctx, _: &()| {
+        Ok(Some(
+            ctx.provide(PERMISSIONS, Permissions::new(ctx.clone()))?,
+        ))
+    })
+}
+
+fn tab_ask() -> Plugin {
+    plugin("tab.ask", Inject::new(), |ctx, _: &()| {
+        Ok(Some(ctx.provide(ASK, Ask::new(ctx.clone()))?))
+    })
+}
+
 /// 旁问页的预设：isolate 过 `agentPresets`，所以必须自己 provide 一份。
 fn aside_presets() -> Plugin {
     plugin("tab.asidePresets", Inject::new(), |ctx, _: &()| {
@@ -74,12 +112,15 @@ fn aside_presets() -> Plugin {
 }
 
 /// 分页会话：身份是 `main#<index>`，与主会话同级（不是子代理）。
-/// 不 `attach_disk` —— 分页目前是内存态，退出即丢（落盘要改会话文件布局）。
+///
+/// 空白页不 `attach_disk`，退出即丢。从历史打开的那一页随后走
+/// `Sessions::adopt_archived`，接着写回原来的会话目录，不另起一份布局。
 fn tab_sessions(index: usize) -> Plugin {
     plugin("tab.sessions", Inject::new(), move |ctx, _: &()| {
-        Ok(Some(
-            ctx.provide(SESSIONS, Sessions::tab(ctx.clone(), index))?,
-        ))
+        let sessions = Sessions::tab(ctx.clone(), index);
+        // `main#N` is reused next process. Drop whatever the last process left.
+        cordis_spine::discard_ephemeral_plan(&sessions);
+        Ok(Some(ctx.provide(SESSIONS, sessions)?))
     })
 }
 

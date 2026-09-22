@@ -22,6 +22,7 @@ pub fn start(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> 
     let sessions = live_sessions(gateway)?;
     sessions.archive_current();
     sessions.clear();
+    cordis_spine::clear_plan_for_session_switch(gateway.ctx());
     if let Some(title) = params.get("title").and_then(Value::as_str) {
         sessions.set_live_title(title);
     }
@@ -108,6 +109,7 @@ pub fn restore(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
     if !sessions.restore(&id) {
         return Err(RpcError::app("not_found", format!("thread {id} not found")));
     }
+    cordis_spine::clear_plan_for_session_switch(gateway.ctx());
     if let Some(presets) = gateway.ctx().get::<AgentPresets>(AGENT_PRESETS) {
         if let ApplyRestoredPreset::Failed { id, error } =
             apply_restored_preset(&presets, stamped.as_deref())
