@@ -50,6 +50,16 @@ pub(crate) fn with_exec_ctx<R>(ctx: &Context, f: impl FnOnce() -> R) -> R {
     EXEC_CTX.sync_scope(ctx.clone(), f)
 }
 
+/// 异步版 [`with_exec_ctx`]。工具体本身跑在 `Tools::execute_on` 的 scope 里；
+/// 传输层测试要复现「两页各调一次」时走这里。
+#[cfg(test)]
+pub(crate) async fn with_exec_ctx_async<T>(
+    ctx: Context,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    EXEC_CTX.scope(ctx, fut).await
+}
+
 /// Body stored by [`Tools::register`]. Owns what it needs; do not capture `Tools`.
 pub type ToolBody = Arc<dyn Fn(ToolCall) -> BoxFuture<'static, ToolResult> + Send + Sync>;
 

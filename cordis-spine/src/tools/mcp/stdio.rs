@@ -112,6 +112,7 @@ async fn connect_once(
         modern: AtomicBool::new(true),
         wire,
         hooks,
+        call_lock: Arc::new(tokio::sync::Mutex::new(())),
         _child: Mutex::new(Some(child)),
     });
     let reader_shared = shared.clone();
@@ -138,6 +139,10 @@ async fn connect_once(
     let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
         let session = session_call.clone();
         Box::pin(async move {
+            // 见 `http.rs` 的 call fn：锁必须跟 `session` 拆开借，否则盖不住 `rpc`。
+            // 同一服务器一次只跑一页的调用，elicitation 才不会盖到后 push 的那一页。
+            let lock = Arc::clone(&session.call_lock);
+            let _call_lock = lock.lock().await;
             let raw_name = raw_tool_name(&public);
             let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
             let body = json!({ "name": raw_name, "arguments": args });
@@ -178,6 +183,8 @@ struct Shared {
     modern: AtomicBool,
     wire: WireFraming,
     hooks: LiveHooks,
+    /// 一次只让一页的 `tools/call` 在飞（见 call fn）。
+    call_lock: Arc<tokio::sync::Mutex<()>>,
     _child: Mutex<Option<tokio::process::Child>>,
 }
 

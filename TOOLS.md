@@ -66,7 +66,7 @@
 
 **计划文件路径**（`plan-mode`）：按会话划分，同 cwd 下多个分页各有自己的计划，互不覆盖 ——
 `$DOCK_HOME/sessions/<cwd-key>/<id>/plan.md`（主会话）或
-`sessions/<cwd-key>/tabs/<main#N>/plan.md`（不落盘的分页）。`"planMode"` 本身也按页隔离
+`sessions/<cwd-key>/tabs/<pid>/<main#N>/plan.md`（不落盘的分页，`pid` 隔开不同进程的同一页号）。`"planMode"` 本身也按页隔离
 （`PER_TAB_SERVICES`），`enter_plan_mode` / `exit_plan_mode` 工具仍只有全局工具表一份，
 靠执行期 ctx 派发到调用者那一页。写门只认本页的绝对路径。
 

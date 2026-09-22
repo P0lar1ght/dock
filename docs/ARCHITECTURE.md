@@ -118,12 +118,12 @@ config.toml.example      用户 / 项目模型目录样例
 
 **已知边界**：分页不落盘（`--resume`、gateway `dock.1` 投影、会话归档都只跟第 1
 页）。权限队列和 `ask` 按页隔离，只在那一页上弹出；MCP 连接仍是全局的，
-elicitation 盖了来源页，也只在那一页上显示。标签上 `◆` 表示那一页有东西在等回答。
+elicitation 盖了来源页，也只在那一页上显示。同一台 MCP 服务器的 `tools/call` 按连接串行，另一页排队，提问不会盖到后发起的那一页。标签上 `◆` 表示那一页有东西在等回答。
 浏览器、cua、后台任务表仍是全局单例，两页会抢。
 
 **计划文件按页划分**：`planMode` 隔离之后，计划文件也跟着按会话分 ——
 `$DOCK_HOME/sessions/<cwd-key>/<id>/plan.md`（主会话）或
-`sessions/<cwd-key>/tabs/<identity>/plan.md`（不落盘的分页，identity = `main#N`），
+`sessions/<cwd-key>/tabs/<pid>/<identity>/plan.md`（不落盘的分页，identity = `main#N`；`pid` 隔开不同进程的同一页号），
 对齐 grok-build 的 `$GROK_HOME/sessions/<cwd>/<id>/plan.md`。这样第 2 页的计划
 不会覆盖第 1 页的。写门按本页期望路径判定，只有写**本页**计划文件的 `write_file` /
 `search_replace` 才算计划编辑而豁免只读门。`enter_plan_mode` 交给模型的是这条
