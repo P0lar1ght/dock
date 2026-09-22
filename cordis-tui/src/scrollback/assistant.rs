@@ -5,6 +5,9 @@ use std::sync::Mutex;
 
 use ratatui::text::Line;
 
+use unicode_width::UnicodeWidthStr;
+
+use crate::grok::line_utils::fit_line_to_width;
 use crate::grok::md_style;
 use crate::grok::mermaid;
 use crate::grok::wrapping::word_wrap_lines;
@@ -53,63 +56,102 @@ pub fn render(text: &str, theme: &Theme, width: usize) -> Rendered {
     value
 }
 
+fn line_display_width(line: &Line<'_>) -> usize {
+    line.spans.iter().map(|s| s.content.width()).sum()
+}
+
 fn render_uncached(text: &str, theme: &Theme, width: usize) -> Rendered {
     let syntect = cordis_markdown::default_syntect();
     let mut renderer = cordis_markdown::StreamingMarkdownRenderer::new(md_style::style(), true);
-    // 表格得在**排版时**就知道能用多宽。正文靠后面的 word wrap 兜底，表格不
-    // 行——`word_wrap_line` 对表格行是直接 `fit_line_to_width` 裁掉的（折行会
-    // 毁掉列对齐），所以排宽了就是右边一截连同右边框被切掉。渲染器自己会按列
-    // 等比收窄。
+    // 表格与流程图得在**排版时**就知道能用多宽。正文靠后面的 word wrap 兜底，表格与流程图
+    // 不行——word wrap 对它们会破坏对齐与图表连线。渲染器自己会按可用宽度排版。
     if width > 0 {
         renderer.set_max_table_width(Some(width));
     }
     renderer.push(text);
     let output = renderer.finish_into_output(Some(syntect));
-    let mut lines = output.lines;
-    // 插入位置按原 `output.lines` 坐标算。倒序插入互不影响低位的坐标，
-    // 但每个先插的高位元素会被后续所有更低的插入推后一位：最终下标 =
-    // 原下标 + 升序排名。wrap 之后靠这份下标显式映射，不再回认文本
-    // （窄窗下折行会把一个块认成两个，第二块的源码被第一块吃掉）。
-    //
-    // 源码跟着 `inserts` 走，不另开一个按 `code_blocks` 顺序的平行数组：
-    // 这里按位置排过序，平行数组只有在「块顺序恰好等于位置顺序」时才对得上。
-    let mut inserts: Vec<(usize, &str)> = output
+    let lines = output.lines;
+
+    struct MermaidBlockMeta<'a> {
+        start: usize,
+        end: usize,
+        body: &'a str,
+    }
+
+    let mut mermaid_blocks: Vec<MermaidBlockMeta<'_>> = output
         .code_blocks
         .iter()
         .filter(|cb| cb.info.split_whitespace().next() == Some("mermaid"))
-        .map(|cb| (cb.output_line_range.end.min(lines.len()), cb.body.as_str()))
+        .map(|cb| MermaidBlockMeta {
+            start: cb.output_line_range.start.min(lines.len()),
+            end: cb.output_line_range.end.min(lines.len()),
+            body: cb.body.as_str(),
+        })
         .collect();
-    inserts.sort_by_key(|(at, _)| *at);
-    // `(最终行号, 源码)`，按行号升序。
-    let mut affordances: Vec<(usize, &str)> = Vec::with_capacity(inserts.len());
-    for (rank, (at, body)) in inserts.iter().enumerate().rev() {
-        lines.insert(*at, mermaid_affordance(theme, width));
-        affordances.push((at + rank, *body));
-    }
-    affordances.reverse();
-    let mut mermaid = Vec::new();
-    let lines: Vec<Line<'static>> = if width == 0 {
-        mermaid.extend(affordances.iter().map(|(at, body)| (*at, body.to_string())));
-        lines
-    } else {
-        // affordance 行不参与 word wrap：宽度不够时少画按钮
-        // （`mermaid::line_for_width`），折行会让 `[Copy Source]` 掉到
-        // 下一行，映射和点击都错位。
-        let mut out = Vec::new();
-        let mut next = affordances.iter().peekable();
-        for (i, line) in lines.into_iter().enumerate() {
-            match next.peek() {
-                Some((at, body)) if *at == i => {
-                    mermaid.push((out.len(), body.to_string()));
-                    next.next();
-                    out.push(line);
-                }
-                _ => out.extend(word_wrap_lines(vec![line], width)),
+    mermaid_blocks.sort_by_key(|m| m.start);
+
+    // 标记哪些行属于 Mermaid 字符画（图表行绝对不走普通 word_wrap_lines）
+    let mut is_diagram_line = vec![false; lines.len()];
+    for mb in &mermaid_blocks {
+        for row in mb.start..mb.end {
+            if let Some(slot) = is_diagram_line.get_mut(row) {
+                *slot = true;
             }
         }
-        out
-    };
-    Rendered { lines, mermaid }
+    }
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut mermaid: Vec<(usize, String)> = Vec::new();
+    let mut mb_iter = mermaid_blocks.iter().peekable();
+
+    for (i, line) in lines.into_iter().enumerate() {
+        // 先检查是否有空图表（start == end == i）需要在此处插入 affordance 行
+        while let Some(mb) = mb_iter.peek() {
+            if mb.start == i && mb.start == mb.end {
+                mermaid.push((out.len(), mb.body.to_string()));
+                out.push(mermaid_affordance(theme, width));
+                mb_iter.next();
+            } else {
+                break;
+            }
+        }
+
+        let is_diag = is_diagram_line.get(i).copied().unwrap_or(false);
+        if is_diag {
+            // Mermaid 字符图行：保持整行原样，若超出面板宽度做安全右裁切，绝不拆成折行碎片
+            if width > 0 && line_display_width(&line) > width {
+                out.push(fit_line_to_width(line, width));
+            } else {
+                out.push(line);
+            }
+        } else if width == 0 {
+            out.push(line);
+        } else {
+            out.extend(word_wrap_lines(vec![line], width));
+        }
+
+        // 检查当前行是否为某个非空图表的结束行（i + 1 == mb.end）
+        while let Some(mb) = mb_iter.peek() {
+            if mb.end == i + 1 && mb.start < mb.end {
+                mermaid.push((out.len(), mb.body.to_string()));
+                out.push(mermaid_affordance(theme, width));
+                mb_iter.next();
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 处理位于末尾的空图表
+    for mb in mb_iter {
+        mermaid.push((out.len(), mb.body.to_string()));
+        out.push(mermaid_affordance(theme, width));
+    }
+
+    Rendered {
+        lines: out,
+        mermaid,
+    }
 }
 
 fn mermaid_affordance(theme: &Theme, width: usize) -> Line<'static> {
@@ -248,5 +290,85 @@ mod tests {
         assert!(text.contains("[Open Image]"), "{text}");
         assert!(!text.contains("[Copy Image Path]"), "{text}");
         assert!(!text.contains("[Copy Source]"), "{text}");
+    }
+
+    /// 流程图字符画不参与普通文本的 word wrap：
+    /// 流程图内部有大量的对齐空格、居中对齐符号（例如 `▼`、`│`、`┌` 等）。
+    /// 字符图行必须保持完整，不能被当成普通段落拆成折行碎片。
+    #[test]
+    fn mermaid_diagram_lines_are_not_word_wrapped() {
+        let theme = Theme::groknight();
+        let md = concat!(
+            "```mermaid\n",
+            "flowchart TD\n",
+            "    A[Start Node Here] --> B{Is it working?}\n",
+            "    B -->|Yes| C[Ship it]\n",
+            "    B -->|No| D[Debug it]\n",
+            "```\n",
+        );
+        let rendered = render(md, &theme, 60);
+        assert_eq!(rendered.mermaid.len(), 1);
+        let joined: String = rendered
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 验证含有 box-drawing 制表符与箭头
+        assert!(
+            joined.contains('┌') || joined.contains('╭'),
+            "got:\n{joined}"
+        );
+        assert!(joined.contains('│'), "got:\n{joined}");
+        assert!(
+            joined.contains('▼') || joined.contains('▲'),
+            "got:\n{joined}"
+        );
+        // 验证每一行都不以孤立的断裂碎片出现，节点文字完整
+        assert!(joined.contains("Start Node Here"), "got:\n{joined}");
+        assert!(joined.contains("Is it working?"), "got:\n{joined}");
+        assert!(joined.contains("Ship it"), "got:\n{joined}");
+        // 验证 affordance 行排在图表后面
+        let affordance_line_idx = rendered.mermaid[0].0;
+        let affordance_row_text: String = rendered.lines[affordance_line_idx]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(affordance_row_text.contains("[Open Image]"));
+    }
+
+    /// 图表前后的普通段落文本，仍然遵循正常的 word wrap 规则。
+    #[test]
+    fn text_around_mermaid_still_wraps_normally() {
+        let theme = Theme::groknight();
+        let md = concat!(
+            "This is a long introductory sentence that definitely exceeds the small column limit and needs to be wrapped.\n\n",
+            "```mermaid\nflowchart TD\nA-->B\n```\n\n",
+            "This is a trailing sentence after the diagram that also needs normal word wrapping across lines.\n",
+        );
+        let rendered = render(md, &theme, 35);
+        assert_eq!(rendered.mermaid.len(), 1);
+        // 验证前后的普通长句被折成了多行
+        assert!(rendered.lines.len() > 10);
+        let joined: String = rendered
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("introductory") && joined.contains("sentence"));
+        assert!(joined.contains("trailing") && joined.contains("sentence"));
+        assert!(joined.contains("[Open Image]"));
     }
 }
