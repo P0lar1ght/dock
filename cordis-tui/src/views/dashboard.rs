@@ -440,8 +440,10 @@ pub struct PanelView<'a> {
     pub query: &'a str,
     pub focus: Focus,
     pub composer: &'a str,
-    /// 选中会话的尾巴（已经渲染好的行）。
+    /// 选中会话的对话（已经渲染好的行，整段，不是视口）。
     pub peek_lines: Vec<Line<'static>>,
+    /// 藏在 peek 视口下面的行数。0 贴着尾巴。
+    pub peek_scroll: usize,
     /// peek 面板的抬头，例如 `重构状态栏 · 进行中`。
     pub peek_title: String,
     /// peek 抬头右上角的时距（历史会话才有）。
@@ -466,9 +468,10 @@ pub fn render_panel(buf: &mut Buffer, area: Rect, view: &PanelView<'_>) -> Picke
 
     paint_header(buf, panes.header, &theme, &view.summary);
     paint_actions(buf, panes.actions, &theme, view.query, view.focus);
+    hits.dash_list = panes.list;
     hits.rows = paint_list(buf, panes.list, &theme, view);
     if let Some(peek) = panes.peek {
-        paint_peek(buf, peek, &theme, view);
+        hits.dash_peek = paint_peek(buf, peek, &theme, view);
     }
     paint_hints(buf, panes.hints, &theme, view.focus);
     hits
@@ -586,7 +589,7 @@ fn paint_list(
 }
 
 /// 下半屏：选中会话的尾巴 + 输入框。这一块才是「驱动」。
-fn paint_peek(buf: &mut Buffer, area: Rect, theme: &Theme, view: &PanelView<'_>) {
+fn paint_peek(buf: &mut Buffer, area: Rect, theme: &Theme, view: &PanelView<'_>) -> Rect {
     let base = Style::default().bg(theme.bg_base);
     let border = if view.focus == Focus::Composer {
         theme.accent_user
@@ -594,7 +597,7 @@ fn paint_peek(buf: &mut Buffer, area: Rect, theme: &Theme, view: &PanelView<'_>)
         theme.gray_dim
     };
     let Some(frame) = render_bordered_frame(buf, area, border, theme.bg_base) else {
-        return;
+        return Rect::default();
     };
     let title = truncate_str(
         &view.peek_title,
@@ -619,19 +622,19 @@ fn paint_peek(buf: &mut Buffer, area: Rect, theme: &Theme, view: &PanelView<'_>)
 
     let inner = frame.content;
     if inner.height == 0 {
-        return;
+        return Rect::default();
     }
-    // 最后一行留给输入框，其余给尾巴；尾巴取**末尾**那几行。
+    // 最后一行留给输入框。上面是对话视口：`peek_scroll == 0` 贴着尾巴，
+    // 往上滚只露出更早的行，到顶停住。
     let body_h = inner.height.saturating_sub(1);
-    let tail = view
-        .peek_lines
-        .iter()
-        .rev()
-        .take(body_h as usize)
-        .rev()
-        .cloned()
-        .collect::<Vec<_>>();
-    for (i, line) in tail.iter().enumerate() {
+    let body = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: body_h,
+    };
+    let (start, end) = peek_window(view.peek_lines.len(), body_h as usize, view.peek_scroll);
+    for (i, line) in view.peek_lines[start..end].iter().enumerate() {
         buf.set_line(inner.x, inner.y + i as u16, line, inner.width);
     }
 
@@ -670,6 +673,7 @@ fn paint_peek(buf: &mut Buffer, area: Rect, theme: &Theme, view: &PanelView<'_>)
         &Span::styled(text.clone(), style),
         text.width() as u16,
     );
+    body
 }
 
 fn paint_hints(buf: &mut Buffer, area: Rect, theme: &Theme, focus: Focus) {
@@ -696,6 +700,30 @@ fn paint_hints(buf: &mut Buffer, area: Rect, theme: &Theme, focus: Focus) {
         spans.push(Span::styled((*label).to_string(), base.fg(theme.gray_dim)));
     }
     buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+}
+
+/// 列表选中项。到第一行再往上、到最后一行再往下，都停住。
+pub fn clamp_selected(selected: usize, delta: i16, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let last = (len - 1) as i32;
+    (selected as i32 + i32::from(delta)).clamp(0, last) as usize
+}
+
+/// peek 滚动。`scroll` 是藏在视口下面的行数，正的 `delta` 往更早的行走。
+/// 两端都钳住，不会从顶绕回底。
+pub fn clamp_peek_scroll(scroll: usize, delta: i32, line_count: usize, body_rows: usize) -> usize {
+    let max = line_count.saturating_sub(body_rows);
+    (scroll as i32 + delta).clamp(0, max as i32) as usize
+}
+
+/// 视口在整段对话里的 `[start, end)`。`scroll == 0` 贴着尾巴。
+pub fn peek_window(line_count: usize, body_rows: usize, scroll: usize) -> (usize, usize) {
+    let scroll = clamp_peek_scroll(scroll, 0, line_count, body_rows);
+    let end = line_count.saturating_sub(scroll);
+    let start = end.saturating_sub(body_rows);
+    (start, end)
 }
 
 /// 让 `selected` 落进 `viewport` 的第一条可见行下标。
@@ -838,6 +866,7 @@ pub fn open(ctx: &Context) -> crate::views::overlay::Overlay {
         focus: Focus::default(),
         composer: String::new(),
         composer_cursor: 0,
+        peek_scroll: 0,
     }
 }
 
@@ -879,12 +908,18 @@ pub struct PanelInput<'a> {
     pub query: &'a str,
     pub focus: Focus,
     pub composer: &'a str,
+    pub peek_scroll: usize,
 }
 
 /// 装配 [`PanelView`] 并画出来。把「取数据」和「画」分开，渲染那半边才好测。
 pub fn render(buf: &mut Buffer, area: Rect, ctx: &Context, input: &PanelInput<'_>) -> PickerHits {
+    // 和 `paint_peek` 里边框内宽对齐，滚动时的行数才和画出来的是同一份。
+    let wrap = layout(area)
+        .peek
+        .map(|pane| pane.width.saturating_sub(2).max(8) as usize)
+        .unwrap_or(8);
     let (peek_lines, peek_title) = match input.rows.get(input.selected) {
-        Some(r) => peek_for(ctx, r, area.width.saturating_sub(4) as usize),
+        Some(r) => peek_for(ctx, r, wrap),
         None => (Vec::new(), String::new()),
     };
     let view = PanelView {
@@ -894,6 +929,7 @@ pub fn render(buf: &mut Buffer, area: Rect, ctx: &Context, input: &PanelInput<'_
         focus: input.focus,
         composer: input.composer,
         peek_lines,
+        peek_scroll: input.peek_scroll,
         peek_title,
         peek_age: match input.rows.get(input.selected) {
             Some(DashRow::Archived { updated, .. }) => age_label(*updated),
@@ -921,6 +957,11 @@ fn summary_label(rows: &[DashRow]) -> String {
     } else {
         format!("{} {}", glyphs::diamond_hollow(), parts.join(" · "))
     }
+}
+
+/// 选中行整段对话的行数。滚轮钳制用它，和 [`render`] 同一套宽度。
+pub fn peek_line_count(ctx: &Context, row: &DashRow, width: usize) -> usize {
+    peek_for(ctx, row, width.max(8)).0.len()
 }
 
 /// 选中行的对话尾巴 + peek 抬头。
@@ -1133,6 +1174,30 @@ mod tests {
         assert_eq!(scroll_start(&rows, 0, 10), 0);
     }
 
+    /// 列表到两头停住。绕回去会把下面的对话突然换成另一头那条。
+    #[test]
+    fn list_selection_stops_at_both_ends() {
+        assert_eq!(clamp_selected(0, -1, 5), 0);
+        assert_eq!(clamp_selected(4, 1, 5), 4);
+        assert_eq!(clamp_selected(2, -1, 5), 1);
+        assert_eq!(clamp_selected(2, 1, 5), 3);
+        assert_eq!(clamp_selected(9, 1, 0), 0);
+    }
+
+    /// peek 往上滚到第一行就停，再滚不会从顶跳回尾巴。
+    #[test]
+    fn peek_scroll_stops_at_the_top() {
+        let body = 3;
+        let lines = 10;
+        let mut scroll = 0usize;
+        assert_eq!(peek_window(lines, body, scroll), (7, 10));
+        scroll = clamp_peek_scroll(scroll, 100, lines, body);
+        assert_eq!(scroll, 7, "最多藏住视口放不下的那些行");
+        assert_eq!(peek_window(lines, body, scroll), (0, 3));
+        assert_eq!(clamp_peek_scroll(scroll, 5, lines, body), 7);
+        assert_eq!(clamp_peek_scroll(scroll, -100, lines, body), 0);
+    }
+
     fn view<'a>(
         rows: &'a [DashRow],
         selected: usize,
@@ -1146,6 +1211,7 @@ mod tests {
             focus,
             composer,
             peek_lines: vec![Line::from("尾巴一行")],
+            peek_scroll: 0,
             peek_title: "某会话 · 空闲".into(),
             peek_age: String::new(),
             summary: summary_label(rows),

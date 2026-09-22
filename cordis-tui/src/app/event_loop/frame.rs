@@ -207,6 +207,7 @@ pub(super) fn draw(
                 collapsed,
                 focus,
                 composer,
+                peek_scroll,
                 ..
             } = overlay
             {
@@ -228,6 +229,7 @@ pub(super) fn draw(
                         query,
                         focus: *focus,
                         composer,
+                        peek_scroll: *peek_scroll,
                     },
                 );
                 return;

@@ -140,6 +140,12 @@ pub enum Action {
     HistoryPrev,
     HistoryNext,
     Scroll(i16),
+    /// 滚轮，带落点。Agents 用它区分列表和下面的对话。
+    MouseScroll {
+        delta: i16,
+        column: u16,
+        row: u16,
+    },
     ScrollPage(i16),
     Click {
         column: u16,

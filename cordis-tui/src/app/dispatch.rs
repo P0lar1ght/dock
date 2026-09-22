@@ -150,6 +150,9 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
             prompt.history_next();
             Vec::new()
         }
-        Action::Scroll(_) | Action::ScrollPage(_) | Action::Click { .. } => Vec::new(),
+        Action::Scroll(_)
+        | Action::MouseScroll { .. }
+        | Action::ScrollPage(_)
+        | Action::Click { .. } => Vec::new(),
     }
 }
