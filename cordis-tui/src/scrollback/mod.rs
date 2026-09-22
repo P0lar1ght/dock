@@ -1290,10 +1290,13 @@ impl Widget for &Scrollback {
             &theme,
             crate::grok::color::shimmer_tick(),
         );
+        let mouse = *self.mouse.lock().unwrap();
         if show_ts {
-            let mouse = *self.mouse.lock().unwrap();
             paint_timestamps(buf, area, &frame, scroll, mouse, &theme);
         }
+        // Mermaid affordance hover is independent of timestamps — always overlay
+        // when the pointer is known (MouseMove already redraws every frame).
+        paint_mermaid_hover(buf, area, &frame, scroll, mouse, &theme);
         let sel = self.selection.lock().unwrap();
         if let Some(drag) = sel.drag.filter(|d| d.is_non_empty()) {
             let plain: Vec<String> = frame
@@ -1500,6 +1503,44 @@ fn paint_timestamps(
         let x = area.x + area.width - w;
         buf.set_string(x, y, &ts, style);
     }
+}
+
+/// Restyle the mermaid affordance button under the pointer (Open Image /
+/// Copy Image Path / Copy Source) with the same hover chrome as goal-pane
+/// buttons: primary fg + bg_hover + BOLD. Frame lines stay muted; this is a
+/// post-paint overlay so mouse moves do not force a layout rebuild.
+fn paint_mermaid_hover(
+    buf: &mut Buffer,
+    area: Rect,
+    frame: &Frame,
+    scroll: u16,
+    mouse: Option<(u16, u16)>,
+    theme: &Theme,
+) {
+    let Some((mx, my)) = mouse else {
+        return;
+    };
+    if !area.contains(ratatui::layout::Position { x: mx, y: my }) {
+        return;
+    }
+    let line_idx = (my.saturating_sub(area.y) as usize).saturating_add(scroll as usize);
+    if !frame.mermaid.iter().any(|(i, _)| *i == line_idx) {
+        return;
+    }
+    let Some(kind) = mermaid::hit_kind(mx.saturating_sub(area.x), area.width) else {
+        return;
+    };
+    let Some(btn) = mermaid::affordance_buttons_for_width(area.width)
+        .into_iter()
+        .find(|b| b.kind == kind)
+    else {
+        return;
+    };
+    let style = Style::default()
+        .fg(theme.text_primary)
+        .bg(theme.bg_hover)
+        .add_modifier(Modifier::BOLD);
+    buf.set_string(area.x + btn.col, my, btn.label, style);
 }
 
 #[cfg(test)]
@@ -2147,6 +2188,53 @@ mod tests {
         let text = plain(&lines);
         assert!(text.contains("[Copy Source]"), "{text}");
         assert!(text.contains("[Open Image]"), "{text}");
+    }
+
+    /// 指针压在 `[Open Image]` 上时，post-paint 叠一层 BOLD + bg_hover；
+    /// 离开后下一帧只画 muted，不再带 Modifier::BOLD。
+    #[test]
+    fn hovering_a_mermaid_affordance_button_bolds_it() {
+        let theme = Theme::current();
+        let width = 80u16;
+        let line = mermaid::line_for_width(&theme, width);
+        let frame = Frame {
+            lines: vec![line],
+            tool_headers: Vec::new(),
+            mermaid: vec![(0, "flowchart TD\nA-->B".into())],
+            stamps: Vec::new(),
+            live: Vec::new(),
+        };
+        let area = Rect::new(0, 0, width, 1);
+        let open = mermaid::affordance_buttons_for_width(width)
+            .into_iter()
+            .find(|b| b.kind == AffordanceKind::Open)
+            .expect("[Open Image] should fit at width 80");
+        let mid = (area.x + open.col + 1, area.y);
+
+        let mut buf = Buffer::empty(area);
+        paint_visible_lines(&mut buf, area, &frame.lines, 0);
+        paint_mermaid_hover(&mut buf, area, &frame, 0, Some((0, area.y)), &theme);
+        assert!(
+            !buf.cell(mid).unwrap().modifier.contains(Modifier::BOLD),
+            "指针不在按钮上时不该高亮"
+        );
+        assert_ne!(
+            buf.cell(mid).unwrap().bg,
+            theme.bg_hover,
+            "指针不在按钮上时不该用 bg_hover"
+        );
+
+        paint_mermaid_hover(&mut buf, area, &frame, 0, Some(mid), &theme);
+        assert!(
+            buf.cell(mid).unwrap().modifier.contains(Modifier::BOLD),
+            "指针压在 [Open Image] 上时必须高亮"
+        );
+        assert_eq!(
+            buf.cell(mid).unwrap().fg,
+            theme.text_primary,
+            "悬停用 text_primary"
+        );
+        assert_eq!(buf.cell(mid).unwrap().bg, theme.bg_hover, "悬停用 bg_hover");
     }
 
     #[test]
