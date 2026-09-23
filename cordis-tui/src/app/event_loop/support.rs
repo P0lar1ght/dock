@@ -487,10 +487,11 @@ pub(super) fn scroll_plan_body(
 pub(super) fn scroll_usage(
     tab: crate::views::overlay::UsageTab,
     detail: Option<cordis_spine::OccupancyKind>,
+    item: Option<&str>,
     scroll: &mut usize,
     delta: i16,
 ) {
-    let max = usage_overlay::max_scroll(tab, detail);
+    let max = usage_overlay::max_scroll(tab, detail, item);
     let next = (*scroll as i32 + delta as i32).clamp(0, max as i32) as usize;
     *scroll = next;
 }

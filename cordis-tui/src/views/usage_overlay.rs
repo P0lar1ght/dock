@@ -30,6 +30,7 @@ struct Hits {
     session: Rect,
     back: Rect,
     slices: Vec<(Rect, OccupancyKind)>,
+    items: Vec<(Rect, String)>,
 }
 
 static HITS: Mutex<Hits> = Mutex::new(Hits {
@@ -52,6 +53,7 @@ static HITS: Mutex<Hits> = Mutex::new(Hits {
         height: 0,
     },
     slices: Vec::new(),
+    items: Vec::new(),
 });
 
 static HOVER: Mutex<Option<OccupancyKind>> = Mutex::new(None);
@@ -62,6 +64,7 @@ struct BodyMemo {
     page: String,
     tab: UsageTab,
     detail: Option<OccupancyKind>,
+    item: Option<String>,
     width: u16,
     hovered: Option<OccupancyKind>,
     /// The body is coloured in `rebuild_body`, so it is theme-dependent:
@@ -72,6 +75,7 @@ struct BodyMemo {
     usage: TokenUsage,
     snap: Option<ContextSnapshot>,
     lines: Vec<Line<'static>>,
+    item_rows: Vec<(usize, String)>,
     legend: Vec<(usize, usize, OccupancyKind)>,
     bar: Vec<(usize, usize, OccupancyKind)>,
     bar_row_len: usize,
@@ -114,6 +118,16 @@ pub fn hit_slice(column: u16, row: u16) -> Option<OccupancyKind> {
         .map(|(_, kind)| *kind)
 }
 
+pub fn hit_item(column: u16, row: u16) -> Option<String> {
+    let hits = HITS.lock().unwrap();
+    let pos = Position { x: column, y: row };
+    hits.items
+        .iter()
+        .rev()
+        .find(|(rect, _)| rect.contains(pos))
+        .map(|(_, name)| name.clone())
+}
+
 pub fn hit_back(column: u16, row: u16) -> bool {
     HITS.lock()
         .unwrap()
@@ -139,6 +153,7 @@ pub fn render(
     tab: UsageTab,
     scroll: usize,
     detail: Option<OccupancyKind>,
+    item: Option<&str>,
 ) -> PickerHits {
     let theme = Theme::current();
     let Some(frame) = render_floating_frame(buf, area, &theme, false) else {
@@ -168,6 +183,7 @@ pub fn render(
             m.page == page
                 && m.tab == tab
                 && m.detail == detail
+                && m.item.as_deref() == item
                 && m.width == body_area.width
                 && m.hovered == hovered
                 && m.theme_kind == theme_kind
@@ -187,6 +203,7 @@ pub fn render(
                 page,
                 tab,
                 detail,
+                item,
                 body_area.width,
                 hovered,
                 rev,
@@ -201,9 +218,21 @@ pub fn render(
         } else {
             Vec::new()
         };
+        let item_hits = if tab == UsageTab::Context && detail.is_some() && item.is_none() {
+            let mut hits = Vec::new();
+            for (line_idx, name) in &memo.item_rows {
+                if *line_idx >= scroll && *line_idx < scroll + body_area.height as usize {
+                    let y = body_area.y + (*line_idx - scroll) as u16;
+                    hits.push((Rect::new(body_area.x, y, body_area.width, 1), name.clone()));
+                }
+            }
+            hits
+        } else {
+            Vec::new()
+        };
         let back = match (tab, detail) {
             (UsageTab::Context, Some(kind)) if scroll == 0 => {
-                let label = format!("‹ {}", kind.title());
+                let label = back_label(kind, item.is_some());
                 Rect::new(
                     body_area.x,
                     body_area.y,
@@ -216,6 +245,7 @@ pub fn render(
         {
             let mut hits = HITS.lock().unwrap();
             hits.slices = slice_hits;
+            hits.items = item_hits;
             hits.back = back;
         }
         memo.lines
@@ -232,12 +262,12 @@ pub fn render(
     }
 }
 
-pub fn max_scroll(tab: UsageTab, detail: Option<OccupancyKind>) -> usize {
+pub fn max_scroll(tab: UsageTab, detail: Option<OccupancyKind>, item: Option<&str>) -> usize {
     let memo = BODY.lock().unwrap();
     let Some(m) = memo.as_ref() else {
         return 0;
     };
-    if m.tab != tab || m.detail != detail {
+    if m.tab != tab || m.detail != detail || m.item.as_deref() != item {
         return 0;
     }
     m.lines.len().saturating_sub((m.viewport as usize).max(1))
@@ -249,6 +279,7 @@ fn rebuild_body(
     page: String,
     tab: UsageTab,
     detail: Option<OccupancyKind>,
+    item: Option<&str>,
     width: u16,
     hovered: Option<OccupancyKind>,
     rev: u64,
@@ -256,13 +287,17 @@ fn rebuild_body(
     prev_snap: Option<ContextSnapshot>,
 ) -> BodyMemo {
     let theme_kind = Theme::current_kind();
+    // 缓存键原样记下调用方给的 `item`，不按分支改写：否则键和入参对不上，
+    // 缓存就永远不命中、每次重绘都重建。
+    let item_key = item.map(str::to_string);
     match (tab, detail) {
         (UsageTab::Context, Some(kind)) => {
-            let lines = occupancy_detail_lines(ctx, kind, width);
+            let (lines, item_rows) = occupancy_detail_lines(ctx, kind, item, width);
             BodyMemo {
                 page,
                 tab,
                 detail,
+                item: item_key,
                 width,
                 hovered: None,
                 theme_kind,
@@ -270,6 +305,7 @@ fn rebuild_body(
                 usage,
                 snap: None,
                 lines,
+                item_rows,
                 legend: Vec::new(),
                 bar: Vec::new(),
                 bar_row_len: 0,
@@ -287,6 +323,7 @@ fn rebuild_body(
                 page,
                 tab,
                 detail,
+                item: item_key,
                 width,
                 hovered,
                 theme_kind,
@@ -294,6 +331,7 @@ fn rebuild_body(
                 usage,
                 snap: Some(snap),
                 lines: view.lines,
+                item_rows: Vec::new(),
                 legend: view.legend,
                 bar: view.bar,
                 bar_row_len: view.bar_row_len,
@@ -304,6 +342,7 @@ fn rebuild_body(
             page,
             tab,
             detail: None,
+            item: item_key,
             width,
             hovered: None,
             theme_kind,
@@ -311,6 +350,7 @@ fn rebuild_body(
             usage,
             snap: None,
             lines: session_lines(ctx, width),
+            item_rows: Vec::new(),
             legend: Vec::new(),
             bar: Vec::new(),
             bar_row_len: 0,
@@ -694,38 +734,76 @@ fn paint_tab(
     Rect::new(x, y, w, 1)
 }
 
-fn occupancy_detail_lines(ctx: &Context, kind: OccupancyKind, width: u16) -> Vec<Line<'static>> {
+/// 技能 / 工作流的明细是一张可点的清单：点一行进该项的单项页。
+fn drillable(kind: OccupancyKind) -> bool {
+    matches!(kind, OccupancyKind::Skills | OccupancyKind::Workflows)
+}
+
+/// 明细页左上角的返回标签，画字和算点击区用同一个。可点清单那一层回的是
+/// 总览（`‹ 上下文`）；单项页回到所属类别的清单，其余明细页写当前类别。
+fn back_label(kind: OccupancyKind, drilled: bool) -> String {
+    if drillable(kind) && !drilled {
+        "‹ 上下文".into()
+    } else {
+        format!("‹ {}", kind.title())
+    }
+}
+
+fn occupancy_detail_lines(
+    ctx: &Context,
+    kind: OccupancyKind,
+    item: Option<&str>,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
     let theme = Theme::current();
+    if let Some(name) = item {
+        let detail = match kind {
+            OccupancyKind::Skills => cordis_spine::skill_item_detail(ctx, name),
+            OccupancyKind::Workflows => cordis_spine::workflow_item_detail(ctx, name),
+            _ => None,
+        };
+        if let Some(detail) = detail {
+            return paint_occupancy_detail(&detail, &theme, width, true);
+        }
+    }
     let detail = ctx
         .get::<ContextBook>(CONTEXT)
         .map(|b| b.detail_on(ctx, kind))
         .unwrap_or_else(|| occupancy_detail(ctx, kind));
-    paint_occupancy_detail(&detail, &theme, width)
+    // 点开的那一项已经不在目录里时退回画清单，但仍按单项页的层级画：
+    // `render` 按 `item` 算返回区，标签得和它对得上；Esc 一次就回到可点的清单。
+    paint_occupancy_detail(&detail, &theme, width, item.is_some())
 }
 
+/// 明细页与单项页共用一套排版。`drilled` = 单项页：行不再可点，正文前加一条
+/// 分隔线。返回的第二项是可点行（行号, 名字），给 `render` 算点击区。
 fn paint_occupancy_detail(
     detail: &OccupancyDetail,
     theme: &Theme,
     width: u16,
-) -> Vec<Line<'static>> {
+    drilled: bool,
+) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
     let muted = theme.muted();
     let primary = Style::default()
         .fg(theme.text_primary)
         .add_modifier(Modifier::BOLD);
     let secondary = Style::default().fg(theme.text_secondary);
+    let clickable = drillable(detail.kind) && !drilled;
     let mut lines = vec![
-        Line::from(Span::styled(format!("‹ {}", detail.kind.title()), primary)),
+        Line::from(Span::styled(back_label(detail.kind, drilled), primary)),
         Line::from(Span::styled(
             format!("{} tokens", fmt_tok_big(detail.tokens)),
             secondary,
         )),
         Line::from(""),
     ];
+    let mut item_rows = Vec::new();
     for group in &detail.groups {
         if !group.heading.is_empty() {
             lines.push(Line::from(Span::styled(group.heading.clone(), secondary)));
         }
         for row in &group.rows {
+            let line_idx = lines.len();
             let mut spans = vec![Span::styled(row.label.clone(), secondary)];
             if let Some(tok) = row.tokens {
                 spans.push(Span::styled(format!("  {}", fmt_tok(tok)), muted));
@@ -733,11 +811,19 @@ fn paint_occupancy_detail(
             if let Some(note) = &row.note {
                 spans.push(Span::styled(format!("  {note}"), muted));
             }
+            if clickable {
+                spans.push(Span::styled("  ›", primary));
+                item_rows.push((line_idx, row.label.clone()));
+            }
             lines.push(Line::from(spans));
         }
         lines.push(Line::from(""));
     }
     if let Some(text) = &detail.text {
+        if drilled {
+            lines.push(Line::from(Span::styled("─── 源码正文 ───", secondary)));
+            lines.push(Line::from(""));
+        }
         let wrap_w = (width as usize).max(8);
         for raw in text.lines() {
             if raw.is_empty() {
@@ -762,7 +848,7 @@ fn paint_occupancy_detail(
             }
         }
     }
-    lines
+    (lines, item_rows)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1029,6 +1115,7 @@ fn category_kind(label: &str) -> OccupancyKind {
         OccupancyKind::Workflows,
         OccupancyKind::Skills,
         OccupancyKind::Instructions,
+        OccupancyKind::Memory,
     ]
     .into_iter()
     .find(|kind| kind.title() == label)
@@ -1345,7 +1432,7 @@ mod tests {
             .expect("floating frame")
             .content;
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, ctx, UsageTab::Session, 0, None);
+        render(&mut buf, area, ctx, UsageTab::Session, 0, None, None);
         let body = Rect::new(
             inner.x,
             inner.y + 1,
@@ -1739,6 +1826,7 @@ mod tests {
             OccupancyKind::Workflows,
             OccupancyKind::Skills,
             OccupancyKind::Instructions,
+            OccupancyKind::Memory,
         ] {
             assert_eq!(category_kind(kind.title()), kind, "{}", kind.title());
         }
@@ -1764,6 +1852,21 @@ mod tests {
         assert!(all_text(&view.lines).contains("工程规约"));
     }
 
+    /// 「记忆」要能画进分类区并且可点击。
+    #[test]
+    fn memory_row_is_clickable() {
+        let mut snap = snapshot();
+        snap.categories.push(ContextCategory {
+            label: OccupancyKind::Memory.title().into(),
+            tokens: 450,
+            detail: Some("MEMORY.md · 已计入消息".into()),
+        });
+        let view = context_view(&snap, 80, None);
+        let kinds: Vec<_> = view.legend.iter().map(|h| h.2).collect();
+        assert!(kinds.contains(&OccupancyKind::Memory), "{kinds:?}");
+        assert!(all_text(&view.lines).contains("记忆"));
+    }
+
     #[test]
     fn paint_detail_has_back_affordance() {
         let detail = OccupancyDetail {
@@ -1772,9 +1875,64 @@ mod tests {
             groups: Vec::new(),
             text: Some("You are a test agent.".into()),
         };
-        let lines = paint_occupancy_detail(&detail, &Theme::current(), 40);
+        let (lines, _) = paint_occupancy_detail(&detail, &Theme::current(), 40, false);
         let all = all_text(&lines);
         assert!(all.contains("‹ 系统提示"), "{all}");
         assert!(all.contains("You are a test agent."), "{all}");
+    }
+
+    #[test]
+    fn skills_and_workflows_list_include_arrow_and_drill_down_shows_script() {
+        let list_detail = OccupancyDetail {
+            kind: OccupancyKind::Skills,
+            tokens: 100,
+            groups: vec![cordis_spine::DetailGroup {
+                heading: "2 个技能".into(),
+                rows: vec![cordis_spine::DetailRow {
+                    label: "git-commit".into(),
+                    tokens: Some(50),
+                    note: Some("Commit files".into()),
+                }],
+            }],
+            text: None,
+        };
+        let (lines, items) = paint_occupancy_detail(&list_detail, &Theme::current(), 40, false);
+        let all = all_text(&lines);
+        assert!(all.contains("‹ 上下文"), "{all}");
+        assert!(all.contains("›"), "{all}");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1, "git-commit");
+
+        // 测试下钻详情页
+        let item_detail = OccupancyDetail {
+            kind: OccupancyKind::Skills,
+            tokens: 50,
+            groups: vec![cordis_spine::DetailGroup {
+                heading: "技能 `git-commit` · 50 tokens".into(),
+                rows: vec![cordis_spine::DetailRow {
+                    label: "文件路径".into(),
+                    tokens: None,
+                    note: Some("/path/to/SKILL.md".into()),
+                }],
+            }],
+            text: Some("# Skill Content\nDo the commit.".into()),
+        };
+        let (item_lines, item_rows) =
+            paint_occupancy_detail(&item_detail, &Theme::current(), 40, true);
+        let item_all = all_text(&item_lines);
+        assert!(item_all.contains("‹ 技能"), "{item_all}");
+        assert!(item_all.contains("源码正文"), "{item_all}");
+        assert!(item_all.contains("Do the commit."), "{item_all}");
+        assert!(item_rows.is_empty(), "单项页的行不可再点");
+        assert!(!item_all.contains('›'), "{item_all}");
+    }
+
+    /// 画出来的返回字样和 `render` 算点击区用的是同一个标签。
+    #[test]
+    fn back_label_matches_each_level() {
+        assert_eq!(back_label(OccupancyKind::Skills, false), "‹ 上下文");
+        assert_eq!(back_label(OccupancyKind::Skills, true), "‹ 技能");
+        assert_eq!(back_label(OccupancyKind::Workflows, false), "‹ 上下文");
+        assert_eq!(back_label(OccupancyKind::System, false), "‹ 系统提示");
     }
 }

@@ -1,5 +1,5 @@
-//! Workspace engineering conventions: `AGENTS.md` as a **history-tail
-//! reminder**, not a system-prompt section.
+//! Workspace engineering conventions: `AGENTS.md` as a **history reminder**,
+//! not a system-prompt section.
 //!
 //! Two layers, user then project, both optional and both appended (the project
 //! file adds to the user file, it does not shadow it):
@@ -34,6 +34,14 @@
 //!
 //! 判据来自 [`Sessions::model_history`]，所以不需要额外的状态、也不需要给压缩和
 //! 恢复各挂一个钩子。认副本靠 [`MARKER`] 这个结构化开头。
+//!
+//! # 放在哪
+//!
+//! 走 [`StepStart::remind_preamble`]：会话还没向模型发过请求时（新会话、新子代理的
+//! 第一步）排在第一条用户消息**之前**，每个新会话的请求头因此逐字节相同，跨会话
+//! 命中上游前缀缓存——排在用户消息之后时，前缀从用户消息那里就分叉，整份规约每个
+//! 新会话都按未命中重付。之后的注入（中途改文件、压缩后重注）一律追加在尾部，
+//! 不改写已经发出去的前缀。见 [`Sessions::insert_preamble`]。
 //!
 //! Fail-open: a missing or unreadable file contributes nothing and the plugin
 //! still goes Active.
@@ -81,7 +89,7 @@ const SYSTEM_REMINDER_TAG_PATTERN: &str = r"(?i)<(\s*/?\s*system[-_]reminder)";
 static SYSTEM_REMINDER_TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(SYSTEM_REMINDER_TAG_PATTERN).unwrap());
 
-fn neutralize_reminder_tags(content: &str) -> String {
+pub(crate) fn neutralize_reminder_tags(content: &str) -> String {
     SYSTEM_REMINDER_TAG_RE
         .replace_all(content, "&lt;$1")
         .into_owned()
@@ -199,7 +207,7 @@ pub fn project_instructions() -> Plugin {
                 return next;
             };
             if let Some(body) = pending(&exec) {
-                next.remind(ORDER_STEP_START_INSTRUCTIONS, body);
+                next.remind_preamble(ORDER_STEP_START_INSTRUCTIONS, body);
             }
             next
         })?;

@@ -10,7 +10,7 @@ use crate::host::settings::AppSettings;
 use crate::llm::compact::{
     estimate_context_tokens, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, VISIBLE_NOTICE,
 };
-use crate::names::{SESSIONS, SETTINGS, SKILLS, SYSTEM_PROMPT, TOOLS};
+use crate::names::{MEMORY, SESSIONS, SETTINGS, SKILLS, SYSTEM_PROMPT, TOOLS};
 use crate::prompt::assemble::{PromptAssembly, SystemPrompt};
 use crate::session::log::{Sessions, TokenUsage};
 use crate::tools::mcp::{is_mcp_public_name, split_mcp_public_name};
@@ -33,6 +33,8 @@ pub enum OccupancyKind {
     Skills,
     /// 工作区规约（`AGENTS.md`）。在消息流里，不在系统提示里。
     Instructions,
+    /// 跨会话长期记忆（`MEMORY.md`）。在消息流里，不在系统提示里。
+    Memory,
 }
 
 impl OccupancyKind {
@@ -44,6 +46,7 @@ impl OccupancyKind {
             Self::Free => "空闲",
             Self::Tools => "工具定义",
             Self::Instructions => "工程规约",
+            Self::Memory => "记忆",
             Self::Mcp => "MCP 服务器",
             Self::Deferred => "本地按需",
             Self::Workflows => "工作流",
@@ -131,6 +134,7 @@ pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
         OccupancyKind::Workflows => workflows_detail(&snap),
         OccupancyKind::Skills => skills_detail(ctx, &snap),
         OccupancyKind::Instructions => instructions_detail(ctx, &snap),
+        OccupancyKind::Memory => memory_detail(ctx, &snap),
     }
 }
 
@@ -635,7 +639,7 @@ fn workflows_detail(snap: &ContextSnapshot) -> OccupancyDetail {
         kind: OccupancyKind::Workflows,
         tokens,
         groups: vec![DetailGroup {
-            heading: format!("{} 个工作流", rows.len()),
+            heading: format!("{} 个工作流（点击查看各工作流具体内容）", rows.len()),
             rows,
         }],
         text: None,
@@ -675,6 +679,54 @@ fn instructions_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail
     }
 }
 
+/// 记忆模块的明细：全局与工作区 MEMORY.md 索引，以及模型实际看到的那份原文。
+fn memory_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
+    let tokens = snap
+        .categories
+        .iter()
+        .find(|c| c.label == OccupancyKind::Memory.title())
+        .map(|c| c.tokens)
+        .unwrap_or(0);
+    let mut rows = Vec::new();
+    let mem = ctx.get::<crate::tools::memory::Memory>(MEMORY);
+    if let Some(mem) = mem.as_ref() {
+        let root = mem.root();
+        let _ = root.ensure_layout();
+        let global_manifest = root.global.root.join("MEMORY.md");
+        let global_tokens = std::fs::read_to_string(&global_manifest)
+            .ok()
+            .map(|s| estimate_text(&s));
+        rows.push(DetailRow {
+            label: "全局记忆 (Global)".into(),
+            tokens: global_tokens,
+            note: Some(global_manifest.display().to_string()),
+        });
+
+        let ws_manifest = root.workspace.root.join("MEMORY.md");
+        let ws_tokens = std::fs::read_to_string(&ws_manifest)
+            .ok()
+            .map(|s| estimate_text(&s));
+        rows.push(DetailRow {
+            label: "工作区记忆 (Workspace)".into(),
+            tokens: ws_tokens,
+            note: Some(ws_manifest.display().to_string()),
+        });
+    }
+    let text = crate::tools::memory::injected_copy(ctx).or_else(|| {
+        mem.as_ref()
+            .map(|m| crate::tools::memory::render_reminder_body(&m.root()))
+    });
+    OccupancyDetail {
+        kind: OccupancyKind::Memory,
+        tokens,
+        groups: vec![DetailGroup {
+            heading: format!("{} 个范围 · 作为 <system-reminder> 注入消息流", rows.len()),
+            rows,
+        }],
+        text,
+    }
+}
+
 fn skills_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
     let tokens = snap
         .categories
@@ -706,11 +758,103 @@ fn skills_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         kind: OccupancyKind::Skills,
         tokens,
         groups: vec![DetailGroup {
-            heading: format!("{} 个技能（listing，已计入系统提示）", rows.len()),
+            heading: format!("{} 个技能（点击查看各技能具体内容）", rows.len()),
             rows,
         }],
         text: None,
     }
+}
+
+/// 单个技能的下钻明细：来源、绝对路径、Token 估计、以及 SKILL.md 的正文全文。
+pub fn skill_item_detail(ctx: &Context, name: &str) -> Option<OccupancyDetail> {
+    let skills = ctx.get::<crate::tools::skills::Skills>(SKILLS)?;
+    let skill = skills.get(name)?;
+    let raw = std::fs::read_to_string(&skill.path).unwrap_or_default();
+    let tokens = estimate_text(&raw);
+    let mut rows = vec![
+        DetailRow {
+            label: "来源".into(),
+            tokens: None,
+            note: Some(format!(
+                "{} ({})",
+                skill.scope.label(),
+                skill.display_path()
+            )),
+        },
+        DetailRow {
+            label: "文件路径".into(),
+            tokens: None,
+            note: Some(skill.path.display().to_string()),
+        },
+    ];
+    if !skill.description.trim().is_empty() {
+        rows.push(DetailRow {
+            label: "简要说明".into(),
+            tokens: None,
+            note: Some(skill.description.trim().to_string()),
+        });
+    }
+    if let Some(w) = &skill.when_to_use {
+        if !w.trim().is_empty() {
+            rows.push(DetailRow {
+                label: "使用时机".into(),
+                tokens: None,
+                note: Some(w.trim().to_string()),
+            });
+        }
+    }
+    Some(OccupancyDetail {
+        kind: OccupancyKind::Skills,
+        tokens,
+        groups: vec![DetailGroup {
+            heading: format!("技能 `{}` · {} tokens", skill.name, tokens),
+            rows,
+        }],
+        text: Some(raw),
+    })
+}
+
+/// 单个工作流的下钻明细：来源、文件路径、Token 估计、以及 Rhai 脚本的正文全文。
+pub fn workflow_item_detail(_ctx: &Context, name: &str) -> Option<OccupancyDetail> {
+    let (info, script) = crate::tools::workflow::workflow_detail(name)?;
+    let tokens = estimate_text(&script);
+    let mut rows = vec![DetailRow {
+        label: "来源".into(),
+        tokens: None,
+        note: Some(info.source.to_string()),
+    }];
+    if let Some(path) = &info.path {
+        rows.push(DetailRow {
+            label: "文件路径".into(),
+            tokens: None,
+            note: Some(path.clone()),
+        });
+    }
+    if !info.description.trim().is_empty() {
+        rows.push(DetailRow {
+            label: "简要说明".into(),
+            tokens: None,
+            note: Some(info.description.trim().to_string()),
+        });
+    }
+    if let Some(w) = &info.when_to_use {
+        if !w.trim().is_empty() {
+            rows.push(DetailRow {
+                label: "使用时机".into(),
+                tokens: None,
+                note: Some(w.trim().to_string()),
+            });
+        }
+    }
+    Some(OccupancyDetail {
+        kind: OccupancyKind::Workflows,
+        tokens,
+        groups: vec![DetailGroup {
+            heading: format!("工作流 `{}` · {} tokens", info.name, tokens),
+            rows,
+        }],
+        text: Some(script),
+    })
 }
 
 fn preview(text: &str, max_chars: usize) -> String {
@@ -790,7 +934,7 @@ fn extra_categories(ctx: &Context, assembly: &PromptAssembly) -> Vec<ContextCate
             }),
         });
     }
-    // 规约不在系统提示里（它是消息流尾部的 reminder），但用户问的是「我的
+    // 规约不在系统提示里（它是消息流里的 reminder），但用户问的是「我的
     // AGENTS.md 占了多少」——单列一行，并写明它算在消息里。
     if let Some(copy) = crate::prompt::project_instructions::injected_copy(ctx) {
         rows.push(ContextCategory {
@@ -801,6 +945,26 @@ fn extra_categories(ctx: &Context, assembly: &PromptAssembly) -> Vec<ContextCate
                 crate::prompt::project_instructions::INSTRUCTIONS_FILE
             )),
         });
+    }
+    // 记忆同理：消息流里的 reminder，不在系统提示里。单列一行写明算在消息里；
+    // 开着但本会话还没注入时，按下一步将要注入的那份估。
+    if let Some(mem) = ctx.get::<crate::tools::memory::Memory>(MEMORY) {
+        let injected = crate::tools::memory::injected_copy(ctx);
+        if mem.enabled() || injected.is_some() {
+            let (tokens, note) = if let Some(copy) = injected {
+                (estimate_text(&copy), "MEMORY.md · 已计入消息")
+            } else {
+                let root = mem.root();
+                let _ = root.ensure_layout();
+                let body = crate::tools::memory::render_reminder_body(&root);
+                (estimate_text(&body), "MEMORY.md · 待轮次注入消息")
+            };
+            rows.push(ContextCategory {
+                label: OccupancyKind::Memory.title().into(),
+                tokens,
+                detail: Some(note.into()),
+            });
+        }
     }
     let workflows = crate::tools::workflow::catalog_listing();
     let workflows_section = section_tokens(assembly, "workflows");
@@ -889,7 +1053,9 @@ fn partition_model_specs(ctx: &Context) -> (Vec<ToolSpec>, Vec<ToolSpec>, Vec<To
     for spec in tools.specs() {
         if tools.is_mcp(&spec.name) || is_mcp_public_name(&spec.name) {
             mcp.push(spec);
-        } else if tools.is_deferred(&spec.name) {
+        } else if tools.is_hidden(&spec.name) {
+            // `register_deferred` 的本地工具与运行中动态包注册的工具：都不进
+            // 采样表、经 search_tool 发现，归同一类。
             deferred.push(spec);
         }
     }
@@ -1270,5 +1436,176 @@ context_window = 1000000
                 .saturating_add(snap.tool_definitions_tokens)
         );
         assert!(hidden > 0);
+    }
+
+    /// 动态包工具不进采样表之后，`/context` 要把它们算进「本地按需」，
+    /// 不能哪一类都不归、从面板上消失。
+    #[tokio::test]
+    async fn dynamic_package_tools_are_listed_as_on_demand() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let tools = ctx.get::<Tools>(TOOLS).unwrap();
+        let body: crate::tools::registry::ToolBody = std::sync::Arc::new(|call| {
+            Box::pin(async move { crate::tools::registry::tool_result(call, "") })
+        });
+        let _keep = tools
+            .register_dynamic(
+                ToolSpec {
+                    name: "dyn_probe".into(),
+                    description: "dynamic occupancy probe".into(),
+                    parameters_json: r#"{"type":"object"}"#.into(),
+                },
+                body,
+            )
+            .unwrap();
+
+        let snap = snapshot_context(&ctx);
+        let on_demand = snap
+            .categories
+            .iter()
+            .find(|c| c.label == "本地按需")
+            .expect("本地按需 legend");
+        assert_eq!(on_demand.tokens, 0, "{on_demand:?}");
+        let detail = occupancy_detail(&ctx, OccupancyKind::Deferred);
+        assert!(
+            detail
+                .groups
+                .iter()
+                .flat_map(|g| &g.rows)
+                .any(|r| r.label == "dyn_probe"),
+            "{detail:?}"
+        );
+        let tools_detail = occupancy_detail(&ctx, OccupancyKind::Tools);
+        assert!(
+            !tools_detail
+                .groups
+                .iter()
+                .flat_map(|g| &g.rows)
+                .any(|r| r.label == "dyn_probe"),
+            "{tools_detail:?}"
+        );
+    }
+
+    /// 记忆那一类点开来要是它自己的明细：全局/工作区范围 + 实际注入的原文。
+    /// 记忆走消息流，系统提示里不能再有它。
+    #[tokio::test]
+    async fn detail_memory_lists_the_scopes_and_the_injected_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::tools::memory::tool_memory(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+
+        let mem = ctx.require::<crate::tools::memory::Memory>(MEMORY).unwrap();
+        let _ = mem.toggle_session(); // 显式开启 session 记忆
+        assert!(mem.enabled());
+
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        let body = crate::tools::memory::render_reminder_body(&mem.root());
+        sessions.append(LogEvent::SystemReminder(body.clone()));
+
+        let d = occupancy_detail(&ctx, OccupancyKind::Memory);
+        assert_eq!(d.kind, OccupancyKind::Memory);
+        assert_eq!(d.text.as_deref(), Some(body.as_str()), "要给注入的那份原文");
+        let rows: Vec<&str> = d.groups[0].rows.iter().map(|r| r.label.as_str()).collect();
+        assert!(rows.contains(&"全局记忆 (Global)"), "{rows:?}");
+        assert!(rows.contains(&"工作区记忆 (Workspace)"), "{rows:?}");
+
+        // 分类行包含记忆，且注明已计入消息
+        let snap = snapshot_context(&ctx);
+        let mem_cat = snap
+            .categories
+            .iter()
+            .find(|c| c.label == OccupancyKind::Memory.title())
+            .expect("Memory legend");
+        assert!(mem_cat.tokens > 0, "{mem_cat:?}");
+        assert!(mem_cat.detail.as_deref().unwrap().contains("已计入消息"));
+
+        // 系统提示里不能再有记忆段
+        let sys_detail = occupancy_detail(&ctx, OccupancyKind::System);
+        let sys_text = sys_detail.text.unwrap_or_default();
+        assert!(
+            !sys_text.contains("<memory>") && !sys_text.contains("长期记忆"),
+            "System prompt must not contain memory: {sys_text}"
+        );
+    }
+
+    /// 技能单项下钻：来源、文件路径、token 估算与 SKILL.md 全文。
+    #[tokio::test]
+    async fn skill_item_detail_reads_the_skill_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
+        let skill_dir = dir
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("my-test-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-test-skill\ndescription: Test skill description\n---\n# My Skill Body\nHello from skill!",
+        )
+        .unwrap();
+
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::host::slash::slash(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        ctx.plugin(crate::tools::skills::skills(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        ctx.plugin(crate::tools::skills::tool_skills(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+
+        let d = skill_item_detail(&ctx, "my-test-skill").expect("should find my-test-skill");
+        assert_eq!(d.kind, OccupancyKind::Skills);
+        assert!(d.tokens > 0);
+        let text = d.text.expect("should contain full SKILL.md body");
+        assert!(text.contains("Hello from skill!"));
+        let rows = &d.groups[0].rows;
+        assert!(
+            rows.iter()
+                .any(|r| r.label == "文件路径"
+                    && r.note.as_deref().unwrap().contains("my-test-skill"))
+        );
+        assert!(skill_item_detail(&ctx, "no-such-skill").is_none());
+    }
+
+    /// 工作流单项下钻：来源、token 估算与 Rhai 脚本全文。
+    #[tokio::test]
+    async fn workflow_item_detail_reads_the_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
+
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::host::slash::slash(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+
+        let d = workflow_item_detail(&ctx, "deep-research").expect("should find deep-research");
+        assert_eq!(d.kind, OccupancyKind::Workflows);
+        assert!(d.tokens > 0);
+        let script = d.text.expect("should contain full rhai script");
+        assert!(script.contains("deep-research") || script.contains("meta"));
+        let rows = &d.groups[0].rows;
+        assert!(rows
+            .iter()
+            .any(|r| r.label == "来源" && r.note.as_deref().unwrap().contains("builtin")));
+        assert!(workflow_item_detail(&ctx, "no-such-workflow").is_none());
     }
 }

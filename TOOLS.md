@@ -39,7 +39,7 @@
 | `tui.slots` | `"tui.slots"` | — | 动态包登记的 TUI 插槽（数据+回调，不是 ratatui widget）。始终挂上；TUI 用一次通用 `Overlay::Slot` 臂 | — |
 | `skills` | `"skills"` | — | 发现 `SKILL.md`，登记 listing 段与 slash extras | [skills](docs/tools/skills.md) |
 | `tool-skills` | → `"tools"`（live `"skills"`） | `skill` | 按需读 `SKILL.md` 正文 | [skills](docs/tools/skills.md) |
-| `project-instructions` | → `agent/step-start` | — | `AGENTS.md` 进历史尾部 reminder，**不进系统提示** | [project-instructions](docs/tools/project-instructions.md) |
+| `project-instructions` | → `agent/step-start` | — | `AGENTS.md` 进历史 reminder（新会话排在首条用户消息前），**不进系统提示** | [project-instructions](docs/tools/project-instructions.md) |
 | `agent-presets` | `"agentPresets"` | — | YAML 人设 + 工具允许名单；`task` 的 `subagent_type` enum 来源 | [agent-presets](docs/tools/agent-presets.md) |
 | `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 | [web_fetch](docs/tools/web_fetch.md) |
 | `tool-browser` | `"browser"` + `"tools"` | `browser_*` 21 颗（按需） | BUA P2，in-process chromiumoxide CDP | [browser](docs/tools/browser.md) |

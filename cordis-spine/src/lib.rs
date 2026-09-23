@@ -38,8 +38,8 @@ pub use cordis_base::stream_acc::StreamDelta;
 pub use cordis_base::types::{
     LlmOutput, LogEvent, NoticeKind, PreExecute, PreStep, PromptRequest, StepStart, ToolCall,
     ToolResult, ToolSpec, TurnEnd, TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
-    ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_TODO,
-    ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
+    ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MEMORY,
+    ORDER_STEP_START_TODO, ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
 };
 pub use cordis_base::usage::{
     calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,
@@ -69,8 +69,8 @@ pub use names::{
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
 pub use prompt::context_usage::{
-    occupancy_detail, snapshot_context, ContextCategory, ContextSnapshot, OccupancyDetail,
-    OccupancyKind,
+    occupancy_detail, skill_item_detail, snapshot_context, workflow_item_detail, ContextCategory,
+    ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
 pub use session::log::{sessions, ArchivedSession, Sessions, TokenUsage};

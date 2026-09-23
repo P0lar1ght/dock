@@ -21,7 +21,7 @@ pub const SEARCH_TOOL_NAME: &str = "search_tool";
 pub const USE_TOOL_NAME: &str = "use_tool";
 
 const SEARCH_TOOL_DESC: &str = "Search on-demand tools by keyword and retrieve their input schemas. \
-Matches MCP integrations and infrequent local tools (scheduler, memory, lsp, skill, workflow, cordis_*, browser_*, …). \
+Matches MCP integrations, dynamic packages, and infrequent local tools (scheduler, memory, lsp, skill, workflow, cordis_*, browser_*, …). \
 Returns only hits, each with a full input_schema, capped by limit (default 5, max 255). \
 Unmatched tools stay hidden; total_hidden_tools is the catalog size. \
 A hit whose schema is already earlier in this conversation comes back as schema_in_context \
@@ -265,7 +265,7 @@ fn hidden_index(tools: &Tools) -> Vec<IndexedTool> {
         .specs()
         .iter()
         .filter(|s| tools.is_hidden(&s.name))
-        .map(|s| tool_index::index_tool(s, catalog_group(&s.name)))
+        .map(|s| tool_index::index_tool(s, catalog_group(tools, &s.name)))
         .collect()
 }
 
@@ -451,9 +451,12 @@ fn format_server_line(server: &ServerSummary) -> String {
     }
 }
 
-fn catalog_group(name: &str) -> String {
+fn catalog_group(tools: &Tools, name: &str) -> String {
     if let Some((server, _)) = split_mcp_public_name(name) {
         return server.to_string();
+    }
+    if tools.is_dynamic(name) {
+        return "dynamic".into();
     }
     match name {
         n if n.starts_with("cordis_") => "cordis".into(),

@@ -72,7 +72,8 @@ struct Entry {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExtraKind {
     Regular,
-    /// Running dynamic Cordis package — bypasses Agent preset allowlist.
+    /// Running dynamic Cordis package — hidden from the sampler, discovered
+    /// via `search_tool` / `use_tool`, bypasses Agent preset allowlist.
     Dynamic,
     /// Live MCP tool — bypasses Agent preset allowlist while the server/tool is on.
     Mcp,
@@ -115,8 +116,9 @@ impl Tools {
         self.register_inner(spec, body, ExtraKind::Regular)
     }
 
-    /// Same as [`Self::register`], tagged so Agent preset allowlists still
-    /// show and execute the tool while the dynamic package is running.
+    /// Register a tool from a dynamic Cordis package. Hidden from the sampler
+    /// (discovered via `search_tool` and called with `use_tool`), but bypasses
+    /// Agent preset allowlist so dynamic tools remain callable while active.
     pub fn register_dynamic(&self, spec: ToolSpec, body: ToolBody) -> cordis::Result<Disposable> {
         self.register_inner(spec, body, ExtraKind::Dynamic)
     }
@@ -206,9 +208,9 @@ impl Tools {
             .is_some_and(|e| e.kind == ExtraKind::Deferred)
     }
 
-    /// Hidden from the sampler: MCP extras and infrequent local tools.
+    /// Hidden from the sampler: MCP extras, infrequent local tools, and dynamic packages.
     pub fn is_hidden(&self, name: &str) -> bool {
-        self.is_mcp(name) || self.is_deferred(name)
+        self.is_mcp(name) || self.is_deferred(name) || self.is_dynamic(name)
     }
 
     fn bypasses_allowlist(&self, name: &str) -> bool {
@@ -258,7 +260,12 @@ impl Tools {
         let extra = self.extra.lock().unwrap();
         let mut regular: Vec<ToolSpec> = extra
             .values()
-            .filter(|e| !matches!(e.kind, ExtraKind::Mcp | ExtraKind::Deferred))
+            .filter(|e| {
+                !matches!(
+                    e.kind,
+                    ExtraKind::Mcp | ExtraKind::Deferred | ExtraKind::Dynamic
+                )
+            })
             .map(|e| e.spec.clone())
             .collect();
         regular.sort_by(|a, b| a.name.cmp(&b.name));
@@ -266,7 +273,10 @@ impl Tools {
         // Hidden from the sampler (`specs_for_model`); still registered for
         // `use_tool` dispatch. Occupancy does not count these schemas.
         for entry in extra.values() {
-            if matches!(entry.kind, ExtraKind::Mcp | ExtraKind::Deferred) {
+            if matches!(
+                entry.kind,
+                ExtraKind::Mcp | ExtraKind::Deferred | ExtraKind::Dynamic
+            ) {
                 specs.push(entry.spec.clone());
             }
         }
@@ -274,8 +284,9 @@ impl Tools {
     }
 
     /// Specs the sampler should see: live `"tools"` minus hidden extras
-    /// (MCP + infrequent local; Grok `tool_definitions_builtins_only` plus
-    /// Dock's deferred locals), then the current agent preset allowlist.
+    /// (MCP + dynamic packages + infrequent local; Grok
+    /// `tool_definitions_builtins_only` plus Dock's deferred locals), then the
+    /// current agent preset allowlist.
     /// Hidden tools stay registered for `use_tool` dispatch.
     /// Inspect / the TUI catalog still use [`Tools::specs`]. Occupancy
     /// counts [`Self::specs_for_model`] only.
@@ -293,11 +304,7 @@ impl Tools {
             Some(presets) => {
                 let mut out: Vec<ToolSpec> = specs
                     .into_iter()
-                    .filter(|s| {
-                        self.is_dynamic(&s.name)
-                            || self.mcp_meta_visible(exec, &s.name)
-                            || presets.allows(&s.name)
-                    })
+                    .filter(|s| self.mcp_meta_visible(exec, &s.name) || presets.allows(&s.name))
                     .map(|mut spec| {
                         presets.bind_spawn_schema(&mut spec);
                         spec

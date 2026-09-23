@@ -146,9 +146,15 @@ async fn grok_sample_loop(
             // counts steps and appends — the policy lives in the handlers.
             // handler 要能看见**当前这个** agent 的会话（子代理是它自己的隔离
             // ctx），而 waterfall 不传 ctx —— 挂成 task-local。
-            for reminder in crate::tools::registry::with_exec_ctx(ctx, || {
+            // 前导那一份（规约、记忆）在还没发过请求时排到首条用户消息之前，
+            // 见 `Sessions::insert_preamble`；其余一律追加在尾部。
+            let (preamble, tail) = crate::tools::registry::with_exec_ctx(ctx, || {
                 step_start_reminders(ctx, sessions, steps)
-            }) {
+            });
+            for reminder in preamble {
+                sessions.insert_preamble(LogEvent::SystemReminder(reminder));
+            }
+            for reminder in tail {
                 sessions.append(LogEvent::SystemReminder(reminder));
             }
             steps += 1;
@@ -255,13 +261,17 @@ fn turn_end_decision(
     ctx.waterfall(TURN_END, end, move || seed).settle()
 }
 
-/// Run `agent/step-start` and collect what to inject before this sample, in
-/// slot order. No handlers means no reminders — fail-open.
-fn step_start_reminders(ctx: &Context, sessions: &Sessions, step: usize) -> Vec<String> {
+/// Run `agent/step-start` and collect what to inject before this sample as
+/// `(preamble, tail)`, each in slot order. No handlers means no reminders —
+/// fail-open.
+fn step_start_reminders(
+    ctx: &Context,
+    sessions: &Sessions,
+    step: usize,
+) -> (Vec<String>, Vec<String>) {
     let start = StepStart::new(step, sessions.identity());
     let seed = start.clone();
-    ctx.waterfall(STEP_START, start, move || seed)
-        .into_reminders()
+    ctx.waterfall(STEP_START, start, move || seed).into_parts()
 }
 
 /// Continuable `subagent` mailbox: inject after a complete tool round (or at
