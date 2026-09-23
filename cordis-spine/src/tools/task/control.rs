@@ -33,7 +33,7 @@ pub(super) fn interrupt_spec() -> ToolSpec {
     ToolSpec {
         name: "interrupt_agent".into(),
         description: "Stop the subagent's current turn and park it idle. Queued messages are kept and will run next. Already-idle is a no-op — it does not start a turn. Use send_message to wake an idle child. Not a prerequisite for urgent send_message.".into(),
-        parameters_json: r#"{"type":"object","properties":{"agent_id":{"type":"string"}},"required":["agent_id"]}"#.into(),
+        parameters_json: r#"{"type":"object","properties":{"subagent_id":{"type":"string"}},"required":["subagent_id"]}"#.into(),
     }
 }
 
@@ -55,7 +55,9 @@ struct SendInput {
 
 #[derive(Debug, Deserialize)]
 struct InterruptInput {
-    agent_id: String,
+    /// 与 `send_message` 同名；旧名 `agent_id` 仍然收。
+    #[serde(alias = "agent_id")]
+    subagent_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,7 +97,7 @@ pub(super) async fn run_interrupt(sub: &Subagents, call: ToolCall) -> ToolResult
             );
         }
     };
-    tool_result(call, sub.interrupt_agent(&input.agent_id))
+    tool_result(call, sub.interrupt_agent(&input.subagent_id))
 }
 
 pub(super) async fn run_report(
@@ -182,9 +184,7 @@ impl Subagents {
             return Err("direct parent is not live; report was not delivered".into());
         };
         self.store.push_report(from_id, output);
-        Ok(format!(
-            "report accepted by the agent that started you as message {from_id}"
-        ))
+        Ok("report accepted by the agent that started you".into())
     }
 
     /// Grok-style next-sample reminders. Bodies already wrapped in `<system-reminder>`.
@@ -215,5 +215,29 @@ fn send_ack(id: &str, urgent: bool, was_running: bool) -> String {
         (false, false) => {
             format!("queued message delivered to idle subagent {id}; the next turn is starting now")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 同族工具用同一个参数名：`send_message` 叫 `subagent_id`，`interrupt_agent`
+    /// 也得叫 `subagent_id`，否则模型照着前一颗的写法调后一颗就是一次参数错误。
+    /// 旧名 `agent_id` 继续收，历史里、脚本里已有的调用不至于失效。
+    #[test]
+    fn interrupt_takes_the_same_id_name_as_send_message() {
+        let params: serde_json::Value =
+            serde_json::from_str(&interrupt_spec().parameters_json).unwrap();
+        assert_eq!(params["required"], serde_json::json!(["subagent_id"]));
+        assert!(
+            params["properties"].get("subagent_id").is_some(),
+            "{params}"
+        );
+
+        let new: InterruptInput = serde_json::from_str(r#"{"subagent_id":"kid-1"}"#).unwrap();
+        assert_eq!(new.subagent_id, "kid-1");
+        let old: InterruptInput = serde_json::from_str(r#"{"agent_id":"kid-2"}"#).unwrap();
+        assert_eq!(old.subagent_id, "kid-2");
     }
 }

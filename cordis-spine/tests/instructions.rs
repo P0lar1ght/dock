@@ -74,7 +74,8 @@ async fn agents_md_lands_in_the_history_not_the_system_prompt() {
         "要带来源标注：{body}"
     );
 
-    // 位置：在用户那条之后、模型回答之前 —— 模型这一步就该看见规则。
+    // 位置：新会话里排在第一条用户消息**之前**（见下一条用例为什么），且在模型
+    // 回答之前 —— 模型这一步就该看见规则。
     let kinds = sessions.kinds();
     let user = kinds.iter().position(|k| *k == "user").expect("user");
     let rule = kinds
@@ -85,7 +86,7 @@ async fn agents_md_lands_in_the_history_not_the_system_prompt() {
         .iter()
         .rposition(|k| *k == "llm/stream")
         .expect("assistant");
-    assert!(user < rule && rule < reply, "{kinds:?}");
+    assert!(rule < user && user < reply, "{kinds:?}");
 
     // 系统提示这边一个字都不该有 —— 那正是这次搬家的目的。
     let system = root
@@ -93,6 +94,48 @@ async fn agents_md_lands_in_the_history_not_the_system_prompt() {
         .unwrap()
         .assemble_on(&root);
     assert!(!system.contains(RULE), "规约仍在系统提示里：{system}");
+}
+
+/// 新会话的规约排在第一条用户消息**前面**：两个首句不同的新会话，第一次请求在
+/// 用户消息之前逐字节相同，上游前缀缓存才能跨会话命中。排在用户消息后面时，
+/// 前缀从用户消息那里就分叉了，每个新会话都要把整份规约按未命中重付一遍。
+#[tokio::test]
+async fn fresh_sessions_share_the_head_before_the_first_prompt() {
+    home_with_rules();
+    let mut heads = Vec::new();
+    for prompt in ["hello", "完全不同的另一句"] {
+        let root = Context::new();
+        install_fakes(&root).await.unwrap();
+        root.plugin(project_instructions(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        LoopHandle::new(root.clone(), Arc::new(GrokStep))
+            .run(prompt)
+            .await
+            .unwrap();
+
+        let history = sessions.model_history();
+        let user = history
+            .iter()
+            .position(|e| matches!(e, LogEvent::User(_)))
+            .expect("user");
+        let head = &history[..user];
+        assert!(
+            head.iter()
+                .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains(RULE))),
+            "规约要排在第一条用户消息之前：{:?}",
+            sessions.kinds()
+        );
+        heads.push(format!("{head:?}"));
+    }
+    assert_eq!(
+        heads[0], heads[1],
+        "两个新会话在用户消息之前的请求头要一模一样"
+    );
 }
 
 /// 第二轮不该再注一份：文件没变，历史里那份还在。

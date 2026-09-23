@@ -44,6 +44,16 @@ fn scan_catalog() -> Vec<WorkflowListing> {
     registry::list_workflows(cwd.as_deref())
 }
 
+/// One workflow's metadata plus its full Rhai script (builtin + disk), for the
+/// `/context` drill-down.
+pub fn workflow_detail(name: &str) -> Option<(WorkflowInfo, String)> {
+    let cwd = std::env::current_dir().ok();
+    let (registry, listings) = registry::workflow_snapshot(cwd.as_deref());
+    let listing = listings.into_iter().find(|l| l.name == name)?;
+    let resolved = registry.resolve_by_name(name).ok()?;
+    Some((WorkflowInfo::from(listing), resolved.script))
+}
+
 /// Map typed slash args for an extra `kind: tool` command.
 /// Workflow extras (`text` = `workflow`) build `source.type=name` JSON.
 pub fn extra_tool_slash_arguments(entry: &SlashEntry, args: &str) -> Result<String, String> {

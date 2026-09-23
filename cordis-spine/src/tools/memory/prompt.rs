@@ -1,4 +1,6 @@
-//! System-prompt `<memory>` section body (Dock paths; Grok-aligned copy).
+//! `<memory>` block body (Dock paths; Grok-aligned copy). Injected as an
+//! `agent/step-start` reminder, not a system-prompt section — see
+//! `render_reminder_body` in the parent module.
 
 use dock_memory::layout::{MemoryRoot, MemoryScope};
 use dock_memory::manifest;
@@ -6,7 +8,7 @@ use dock_memory::manifest;
 /// Soft cap per scope's injected MEMORY.md body (chars).
 pub const MANIFEST_INJECT_CAP: usize = 6_000;
 
-/// Build the `<memory>…</memory>` system section when memory is enabled.
+/// Build the `<memory>…</memory>` block when memory is enabled.
 pub fn memory_section_body(root: &MemoryRoot) -> String {
     let global_path = root.global.root.display().to_string();
     let workspace_path = root.workspace.root.display().to_string();

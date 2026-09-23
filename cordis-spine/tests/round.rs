@@ -457,14 +457,30 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "sampler must hide MCP extras: {model:?}"
     );
     // `skill` / `workflow` are named by the system-prompt listings, so they
-    // have to be callable without a `search_tool` round-trip first. Everything
-    // else that is only reachable through discovery stays off the sampler.
+    // have to be callable without a `search_tool` round-trip first. The rest
+    // are named by resident descriptions and reminders (bash → job / kill_task,
+    // task → send_message / list_agents / interrupt_agent, plan mode →
+    // exit_plan_mode), or are needed by read-only subagents, which cannot reach
+    // `use_tool` (web_*). Everything else that is only reachable through
+    // discovery stays off the sampler.
     // `memory_search` / `memory_get` are sampler-resident when memory is enabled
     // and absent from the table when disabled (default in this install test).
-    for listed in ["skill", "workflow"] {
+    for listed in [
+        "skill",
+        "workflow",
+        "web_fetch",
+        "web_search",
+        "job",
+        "kill_task",
+        "enter_plan_mode",
+        "exit_plan_mode",
+        "send_message",
+        "list_agents",
+        "interrupt_agent",
+    ] {
         assert!(
             model.iter().any(|n| n == listed),
-            "sampler must expose the listed tool {listed}: {model:?}"
+            "sampler must expose the resident tool {listed}: {model:?}"
         );
     }
     for hidden in [

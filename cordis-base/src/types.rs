@@ -376,6 +376,8 @@ impl PreStep {
 /// 工作区规约（`AGENTS.md`）。排在所有提醒最前：它是这一步的**规则**，其余提醒
 /// 都是在这些规则之下的具体催办。
 pub const ORDER_STEP_START_INSTRUCTIONS: i32 = 5;
+/// 跨会话长期记忆（`MEMORY.md` 索引）。排在工程规约之后、待办之前。
+pub const ORDER_STEP_START_MEMORY: i32 = 7;
 pub const ORDER_STEP_START_TODO: i32 = 10;
 /// Disk / dynamic Cordis plugins (`host.on("agent/step-start", ...)`). Behind
 /// the built-ins: a script may add to the turn's discipline, not outrank it.
@@ -401,6 +403,8 @@ pub struct StepStart {
     /// for why it rides the payload.
     pub identity: String,
     reminders: Vec<(i32, String)>,
+    /// [`Self::remind_preamble`] 排进来的：整场对话的背景，不是对这一步的催办。
+    preamble: Vec<(i32, String)>,
 }
 
 impl StepStart {
@@ -409,6 +413,7 @@ impl StepStart {
             step,
             identity: identity.into(),
             reminders: Vec::new(),
+            preamble: Vec::new(),
         }
     }
 
@@ -417,16 +422,42 @@ impl StepStart {
         self.reminders.push((order, reminder.into()));
     }
 
-    /// Queued reminders in slot order (ties keep registration order).
-    pub fn into_reminders(mut self) -> Vec<String> {
-        self.reminders.sort_by_key(|(order, _)| *order);
-        self.reminders.into_iter().map(|(_, body)| body).collect()
+    /// Queue a `<system-reminder>` that is standing context for the whole
+    /// conversation (workspace conventions, long-term memory) rather than a
+    /// nudge about this step.
+    ///
+    /// 会话还没向模型发过任何请求时，循环把它放在第一条用户消息**之前**：这样
+    /// 每个新会话的请求在用户消息之前逐字节相同，上游前缀缓存能跨会话命中。已经
+    /// 发过之后就和 [`Self::remind`] 一样追加到尾部——那时再往前插会改写已经
+    /// 发出去的前缀。
+    pub fn remind_preamble(&mut self, order: i32, reminder: impl Into<String>) {
+        self.preamble.push((order, reminder.into()));
+    }
+
+    /// Every queued reminder in slot order (ties keep registration order),
+    /// preamble ones included — for a caller that only knows how to append.
+    pub fn into_reminders(self) -> Vec<String> {
+        let mut all = self.preamble;
+        all.extend(self.reminders);
+        ordered(all)
+    }
+
+    /// `(preamble, tail)`, each in slot order. The loop places the first list
+    /// with [`Self::remind_preamble`]'s rule and appends the second.
+    pub fn into_parts(self) -> (Vec<String>, Vec<String>) {
+        (ordered(self.preamble), ordered(self.reminders))
     }
 
     /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
     pub fn is_main_session(&self) -> bool {
         is_main_identity(&self.identity)
     }
+}
+
+/// Stable sort by slot, bodies only.
+fn ordered(mut slots: Vec<(i32, String)>) -> Vec<String> {
+    slots.sort_by_key(|(order, _)| *order);
+    slots.into_iter().map(|(_, body)| body).collect()
 }
 
 /// Order slots on the `agent/turn-end` waterfall. Two handlers can both want
@@ -563,5 +594,24 @@ impl TurnEnd {
     /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
     pub fn is_main_session(&self) -> bool {
         is_main_identity(&self.identity)
+    }
+}
+
+#[cfg(test)]
+mod step_start_tests {
+    use super::*;
+
+    /// 前导与尾部各自按槽位排；只会追加的旧调用方拿到的是全部，一条都不丢。
+    #[test]
+    fn preamble_and_tail_split_but_nothing_is_dropped() {
+        let mut step = StepStart::new(0, "main");
+        step.remind(ORDER_STEP_START_TODO, "todo");
+        step.remind_preamble(ORDER_STEP_START_MEMORY, "memory");
+        step.remind_preamble(ORDER_STEP_START_INSTRUCTIONS, "rules");
+
+        let (preamble, tail) = step.clone().into_parts();
+        assert_eq!(preamble, ["rules", "memory"]);
+        assert_eq!(tail, ["todo"]);
+        assert_eq!(step.into_reminders(), ["rules", "memory", "todo"]);
     }
 }

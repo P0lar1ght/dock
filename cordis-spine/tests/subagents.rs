@@ -651,6 +651,8 @@ async fn report_appends_parent_system_reminder() {
         "{}",
         result.content
     );
+    // 回执里的 id 是发送者自己的，不是消息号——别写成「as message <id>」误导模型。
+    assert!(!result.content.contains("as message"), "{}", result.content);
     let events = h.root.require::<Sessions>(SESSIONS).unwrap().events();
     assert!(
         !events

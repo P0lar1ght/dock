@@ -113,3 +113,46 @@ async fn web_search(call: ToolCall, params: &WebFetchParams) -> ToolResult {
         Err(e) => tool_result(call, e.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::capability::CapabilityMode;
+    use crate::names::CAPABILITY;
+    use cordis::Context;
+
+    /// 只读子代理（`deep-research` 的 researcher 就是）要能直接调 web_search / web_fetch。
+    ///
+    /// 只读档挡 `use_tool`（它能派发到写盘的按需工具），所以这两颗一旦改成
+    /// `register_deferred`，只读子代理就既看不到、也叫不动它们，联网调研整条断掉。
+    #[tokio::test]
+    async fn read_only_children_keep_the_web_tools_on_their_sampler() {
+        let _env = cordis_base::test_env::scoped().home();
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(tool_web(), web_fetch_params())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let child = ctx.isolate(CAPABILITY);
+        let _cap = child.provide(CAPABILITY, CapabilityMode::ReadOnly).unwrap();
+        assert!(
+            !CapabilityMode::ReadOnly.allows("use_tool"),
+            "前提：只读档不给 use_tool"
+        );
+
+        let tools = ctx.require::<Tools>(TOOLS).unwrap();
+        let names: Vec<String> = tools
+            .specs_for_model_on(&child)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        for name in ["web_search", "web_fetch"] {
+            assert!(
+                names.iter().any(|n| n == name),
+                "只读子代理必须直接看得到 {name}：{names:?}"
+            );
+        }
+    }
+}

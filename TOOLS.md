@@ -39,7 +39,7 @@
 | `tui.slots` | `"tui.slots"` | — | 动态包登记的 TUI 插槽（数据+回调，不是 ratatui widget）。始终挂上；TUI 用一次通用 `Overlay::Slot` 臂 | — |
 | `skills` | `"skills"` | — | 发现 `SKILL.md`，登记 listing 段与 slash extras | [skills](docs/tools/skills.md) |
 | `tool-skills` | → `"tools"`（live `"skills"`） | `skill` | 按需读 `SKILL.md` 正文 | [skills](docs/tools/skills.md) |
-| `project-instructions` | → `agent/step-start` | — | `AGENTS.md` 进历史尾部 reminder，**不进系统提示** | [project-instructions](docs/tools/project-instructions.md) |
+| `project-instructions` | → `agent/step-start` | — | `AGENTS.md` 进历史 reminder（新会话排在首条用户消息前），**不进系统提示** | [project-instructions](docs/tools/project-instructions.md) |
 | `agent-presets` | `"agentPresets"` | — | YAML 人设 + 工具允许名单；`task` 的 `subagent_type` enum 来源 | [agent-presets](docs/tools/agent-presets.md) |
 | `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 | [web_fetch](docs/tools/web_fetch.md) |
 | `tool-browser` | `"browser"` + `"tools"` | `browser_*` 21 颗（按需） | BUA P2，in-process chromiumoxide CDP | [browser](docs/tools/browser.md) |
@@ -49,7 +49,7 @@
 | `tool-ask-user` | `"ask"` + `"tools"` | `ask_user_question` | 事件 `ask/pending` | — |
 | `tool-scheduler` | → `"tools"`（live `"cron"`） | `scheduler_create` `scheduler_list` `scheduler_delete`（按需） | 包着已有 `"cron"`，`register_deferred`。`fire_immediately` 立刻跑第一次；循环 7 天后过期（过期不跑最后一次，滚动区留中文说明）；最多 50 条；`task_id` 原地更新并保持相位。滚动区 Loop 卡；`/tasks` 里 `x` / `[✗]` 关闭 | — |
 | `tool-task` | `"subagents"` + `"tools"` | `task` `send_message` `list_agents` `interrupt_agent` `report` | Grok coordinator + dock `ChildRunner` isolate | [task](docs/tools/task.md) |
-| `tool-memory` | `"memory"` + `"tools"` | `memory_search` `memory_get`（启用时常驻） | `$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,observations}/` + FTS `search.sqlite` + 可选 sqlite-vec hybrid（crate `dock-memory`）。默认关；`[memory] enabled` / `DOCK_MEMORY=1`。启用时 `register` 进 sampler；关则从表移除。旧 `~/.dock/memory` 只读兼容 | `/flush` `/dream` `/memory` `/remember` |
+| `tool-memory` | `"memory"` + `"tools"`；`MEMORY.md` 注入挂 `agent/step-start`（order 7，不进系统提示） | `memory_search` `memory_get`（启用时常驻） | `$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,observations}/` + FTS `search.sqlite` + 可选 sqlite-vec hybrid（crate `dock-memory`）。默认关；`[memory] enabled` / `DOCK_MEMORY=1`。启用时 `register` 进 sampler；关则从表移除。旧 `~/.dock/memory` 只读兼容 | `/flush` `/dream` `/memory` `/remember` |
 | `tool-goal` | `"goal"` + `"tools"` | `update_goal`（按需） | Grok oneshot ack + drain，带续跑 waterfall | [goal](docs/tools/goal.md) |
 | `tool-lsp` | `"lsp"` + `"tools"` | `lsp`（按需） | Grok `LspManager`/`dispatch`，没服务器时 fail-open | [lsp](docs/tools/lsp.md) |
 | `tool-workflow` | `"workflows"` + `"tools"` | `workflow` | Grok Rhai 引擎 + listing 段 | [workflow](docs/tools/workflow.md) |

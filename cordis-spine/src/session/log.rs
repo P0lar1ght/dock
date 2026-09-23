@@ -520,6 +520,45 @@ impl Sessions {
         self.persist_live();
     }
 
+    /// 放一条整场对话的背景（工作区规约、长期记忆）：本会话还没向模型发过任何
+    /// 请求时，插到第一条用户消息**之前**；否则和 [`Self::append`] 一样追加。
+    ///
+    /// 只在「什么都还没发」时往前插：那时插在哪都改写不到已经发出去、被上游缓存
+    /// 过的前缀，而排在用户消息之前能让每个新会话的请求头逐字节相同，跨会话命中
+    /// 前缀缓存。有过任何一条模型输出（失败的也算——请求已经出去了），或模型历史
+    /// 从压缩头开始，就退回追加。
+    pub fn insert_preamble(&self, event: LogEvent) {
+        if matches!(event, LogEvent::User(_)) || self.rewound.load(Ordering::Relaxed) {
+            return self.append(event);
+        }
+        // 锁序与 `model_history` 一致：先压缩头，再事件表。
+        let compacted = self.compact_prefix.lock().unwrap().is_some();
+        let at = {
+            let mut events = self.events.lock().unwrap();
+            let sent = compacted || events.iter().any(|e| matches!(e, LogEvent::LlmStream(_)));
+            let at = if sent {
+                None
+            } else {
+                events.iter().position(|e| matches!(e, LogEvent::User(_)))
+            };
+            if let Some(at) = at {
+                events.insert(at, event.clone());
+            }
+            at
+        };
+        let Some(at) = at else {
+            return self.append(event);
+        };
+        {
+            let mut times = self.times.lock().unwrap();
+            let at = at.min(times.len());
+            times.insert(at, SystemTime::now());
+        }
+        self.bump_events_rev();
+        self.emit_session(event);
+        self.persist_live();
+    }
+
     fn emit_session(&self, event: LogEvent) {
         if self.emit {
             self.ctx.emit(SESSION_EVENT, event);
@@ -1815,6 +1854,41 @@ mod tests {
         assert!(model
             .iter()
             .any(|e| matches!(e, LogEvent::User(t) if t == "hi")));
+    }
+
+    /// 前导只在「什么都还没发」时往前插；发过之后退回追加，已发出的前缀一字节
+    /// 不动。时间戳跟着事件一起插，两张表始终对齐。
+    #[tokio::test]
+    async fn preamble_goes_first_only_until_something_is_sent() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.append(LogEvent::PreStep);
+        sessions.insert_preamble(LogEvent::SystemReminder("rules".into()));
+        sessions.insert_preamble(LogEvent::SystemReminder("memory".into()));
+        assert_eq!(
+            sessions.kinds(),
+            ["system-reminder", "system-reminder", "user", "pre-step"],
+            "还没发过：排在首条用户消息之前，且保持插入顺序"
+        );
+        assert!(matches!(
+            &sessions.events()[..2],
+            [LogEvent::SystemReminder(a), LogEvent::SystemReminder(b)]
+                if a == "rules" && b == "memory"
+        ));
+        assert_eq!(sessions.times().len(), sessions.events().len());
+
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "ok".into(),
+            ..Default::default()
+        }));
+        sessions.insert_preamble(LogEvent::SystemReminder("rules v2".into()));
+        assert!(
+            matches!(sessions.events().last(), Some(LogEvent::SystemReminder(t)) if t == "rules v2"),
+            "发过之后要追加在尾部：{:?}",
+            sessions.kinds()
+        );
+        assert_eq!(sessions.times().len(), sessions.events().len());
     }
 
     #[test]

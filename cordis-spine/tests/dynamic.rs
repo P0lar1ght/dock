@@ -898,7 +898,14 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
 
 #[tokio::test]
 async fn dynamic_tools_bypass_agent_preset_allowlist() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
     let root = boot().await;
+    root.plugin(cordis_spine::mcp_client(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
     root.plugin(agent_presets(), ())
         .unwrap()
         .wait()
@@ -926,15 +933,60 @@ async fn dynamic_tools_bypass_agent_preset_allowlist() {
     )
     .await;
 
+    // 动态工具按需加载：对采样器隐藏，不再占用模型上下文
     let model: Vec<_> = tools_of(&root)
         .specs_for_model()
         .into_iter()
         .map(|s| s.name)
         .collect();
     assert!(
-        model.iter().any(|n| n == DYN_ECHO_TOOL),
-        "dynamic tool must be visible to the sampler: {model:?}"
+        !model.iter().any(|n| n == DYN_ECHO_TOOL),
+        "dynamic tool must be hidden from sampler: {model:?}"
     );
+
+    // 但在全量 specs 中已注册为 hidden 工具
+    let all: Vec<_> = tools_of(&root)
+        .specs()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(all.iter().any(|n| n == DYN_ECHO_TOOL));
+    assert!(tools_of(&root).is_hidden(DYN_ECHO_TOOL));
+
+    // 可以通过 search_tool 搜索到
+    let search_res = exec(&root, "search_tool", r#"{"query":"dynEcho"}"#).await;
+    assert!(search_res.contains(DYN_ECHO_TOOL), "{search_res}");
+    assert!(
+        search_res.contains("\"server\": \"dynamic\""),
+        "动态包工具在目录里归 dynamic 组：{search_res}"
+    );
+
+    // 可以通过 use_tool 调度执行（即使当前 AgentPreset 允许名单里没有该工具，Bypass 也依然生效）
+    let use_res = exec(
+        &root,
+        "use_tool",
+        &json!({
+            "tool_name": DYN_ECHO_TOOL,
+            "tool_input": {}
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(use_res, "pong");
+
+    // 也可以通过 cordis_call 调度执行
+    let call_res = exec(
+        &root,
+        "cordis_call",
+        &json!({
+            "name": DYN_ECHO_TOOL,
+            "arguments": {}
+        })
+        .to_string(),
+    )
+    .await;
+    assert!(call_res.contains("pong"), "{call_res}");
+
     assert_eq!(exec(&root, DYN_ECHO_TOOL, "{}").await, "pong");
 }
 
@@ -1793,6 +1845,12 @@ async fn rhai_disk_plugin_autoloads_from_the_given_roots() {
     )
     .unwrap();
 
+    root.plugin(cordis_spine::mcp_client(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+
     let runner = root
         .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
         .unwrap();
@@ -1806,6 +1864,29 @@ async fn rhai_disk_plugin_autoloads_from_the_given_roots() {
         "rhai 磁盘插件应能从传入的 root 自动加载，实际：{:?}",
         row.err()
     );
+
+    let tools = tools_of(&root);
+    assert!(tools.is_hidden("probeplug_ping"));
+    let model_specs: Vec<_> = tools
+        .specs_for_model()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(!model_specs.iter().any(|n| n == "probeplug_ping"));
+    let all_specs: Vec<_> = tools.specs().into_iter().map(|s| s.name).collect();
+    assert!(all_specs.iter().any(|n| n == "probeplug_ping"));
+
+    let use_res = exec(
+        &root,
+        "use_tool",
+        &json!({
+            "tool_name": "probeplug_ping",
+            "tool_input": {}
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(use_res, "probe-pong");
 }
 
 /// 最小多路由服务端。用裸 TcpListener 手写，别为测试拖一个 mock 框架进来。

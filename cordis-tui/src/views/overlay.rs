@@ -116,6 +116,9 @@ pub enum Overlay {
         tab: UsageTab,
         scroll: usize,
         detail: Option<OccupancyKind>,
+        /// 技能 / 工作流明细里点开的那一项（名字）。跟 `detail` 一样是这个
+        /// overlay 自己的状态：切 tab、换类别、关窗都随它一起没了。
+        item: Option<String>,
     },
     /// Extra slash overlay (read-only title + body).
     Notice {
@@ -204,6 +207,7 @@ impl Overlay {
             tab,
             scroll: 0,
             detail: None,
+            item: None,
         }
     }
 

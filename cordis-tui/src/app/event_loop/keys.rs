@@ -236,7 +236,17 @@ pub(super) fn run_action(
             if matches!(overlay, Overlay::Inspect { .. }) {
                 return close_inspect(overlay);
             }
-            if let Overlay::Usage { detail, scroll, .. } = overlay {
+            if let Overlay::Usage {
+                detail,
+                scroll,
+                item,
+                ..
+            } = overlay
+            {
+                if item.take().is_some() {
+                    *scroll = 0;
+                    return Vec::new();
+                }
                 if detail.is_some() {
                     *detail = None;
                     *scroll = 0;
@@ -264,9 +274,10 @@ pub(super) fn run_action(
                 tab,
                 scroll,
                 detail,
+                item,
             } = overlay
             {
-                scroll_usage(*tab, *detail, scroll, delta);
+                scroll_usage(*tab, *detail, item.as_deref(), scroll, delta);
                 return Vec::new();
             }
             if matches!(overlay, Overlay::MemoryBrowser(_)) {
@@ -1039,10 +1050,12 @@ pub(super) fn run_action(
                 tab,
                 scroll,
                 detail,
+                item,
             } = overlay
             {
                 *tab = tab.next();
                 *detail = None;
+                *item = None;
                 *scroll = 0;
             }
             Vec::new()
@@ -1212,9 +1225,10 @@ pub(super) fn run_action(
                 tab,
                 scroll,
                 detail,
+                item,
             } = overlay
             {
-                scroll_usage(*tab, *detail, scroll, delta);
+                scroll_usage(*tab, *detail, item.as_deref(), scroll, delta);
                 return Vec::new();
             }
             if let Overlay::Notice { body, scroll, .. } = overlay {
@@ -1351,22 +1365,35 @@ pub(super) fn run_action(
                     tab,
                     scroll,
                     detail,
+                    item,
                 } = overlay
                 {
                     if let Some(next) = usage_overlay::hit_tab(column, row) {
                         *tab = next;
                         *detail = None;
+                        *item = None;
                         *scroll = 0;
                         return Vec::new();
                     }
                     if *tab == UsageTab::Context {
                         if usage_overlay::hit_back(column, row) {
-                            *detail = None;
+                            // 单项页退回清单，清单 / 明细页退回总览。
+                            if item.take().is_none() {
+                                *detail = None;
+                            }
                             *scroll = 0;
                             return Vec::new();
                         }
+                        if item.is_none() {
+                            if let Some(name) = usage_overlay::hit_item(column, row) {
+                                *item = Some(name);
+                                *scroll = 0;
+                                return Vec::new();
+                            }
+                        }
                         if let Some(kind) = usage_overlay::hit_slice(column, row) {
                             *detail = Some(kind);
+                            *item = None;
                             *scroll = 0;
                             return Vec::new();
                         }
@@ -3035,5 +3062,76 @@ mod tests {
         status.clear_notice();
         flash(&ctx, effect_notice.clone());
         assert_eq!(status.right().as_deref(), Some(notice.as_str()));
+    }
+
+    #[test]
+    fn usage_overlay_esc_hierarchical_dismissal() {
+        let ctx = Context::new();
+        let mut overlay = Overlay::Usage {
+            tab: UsageTab::Context,
+            scroll: 5,
+            detail: Some(cordis_spine::OccupancyKind::Skills),
+            item: Some("my-skill".into()),
+        };
+
+        // 第 1 次 Esc：先退出单项详情，回到列表，重置 scroll = 0，保持 detail 打开
+        let effects = dispatch(&ctx, &mut overlay, Action::OverlayClose);
+        assert!(effects.is_empty());
+        assert!(matches!(
+            overlay,
+            Overlay::Usage {
+                scroll: 0,
+                detail: Some(cordis_spine::OccupancyKind::Skills),
+                item: None,
+                ..
+            }
+        ));
+        assert!(overlay.is_open());
+
+        // 第 2 次 Esc：退出列表，回到 Context 总览，重置 scroll = 0，detail 变 None
+        let effects = dispatch(&ctx, &mut overlay, Action::OverlayClose);
+        assert!(effects.is_empty());
+        assert!(matches!(
+            overlay,
+            Overlay::Usage {
+                scroll: 0,
+                detail: None,
+                ..
+            }
+        ));
+        assert!(overlay.is_open());
+
+        // 第 3 次 Esc：退出整个 Usage 面板
+        let effects = dispatch(&ctx, &mut overlay, Action::OverlayClose);
+        assert!(effects.is_empty());
+        assert!(!overlay.is_open());
+    }
+
+    /// 下钻到单项后用键盘 Tab 切走再切回：回到的是总览，一次 Esc 就该关掉。
+    /// 下钻状态得跟 `detail` 一起清掉，残留下来会吃掉一次 Esc、还让总览滚不动。
+    #[test]
+    fn usage_overlay_tab_drops_the_drilled_item() {
+        let ctx = Context::new();
+        let mut overlay = Overlay::Usage {
+            tab: UsageTab::Context,
+            scroll: 0,
+            detail: Some(cordis_spine::OccupancyKind::Skills),
+            item: Some("my-skill".into()),
+        };
+
+        dispatch(&ctx, &mut overlay, Action::OverlayTab);
+        dispatch(&ctx, &mut overlay, Action::OverlayTab);
+        assert!(matches!(
+            overlay,
+            Overlay::Usage {
+                tab: UsageTab::Context,
+                detail: None,
+                item: None,
+                ..
+            }
+        ));
+
+        dispatch(&ctx, &mut overlay, Action::OverlayClose);
+        assert!(!overlay.is_open(), "总览页一次 Esc 就该关掉");
     }
 }

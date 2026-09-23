@@ -930,7 +930,8 @@ pub(super) fn paint_overlay(
             tab,
             scroll,
             detail,
-        } => usage_overlay::render(buf, area, ctx, *tab, *scroll, *detail),
+            item,
+        } => usage_overlay::render(buf, area, ctx, *tab, *scroll, *detail, item.as_deref()),
         Overlay::Notice {
             title,
             body,
