@@ -44,7 +44,7 @@ pub struct UserImage {
 /// [`Self::Other`]（丢一个配色，不丢一整条会话）。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NoticeKind {
-    /// workflow 的某个子代理 `report` 了。
+    /// workflow 的某个子代理给父级发了消息（`send_message`）。
     WorkflowReport,
     /// 一次 workflow run 收尾。
     WorkflowDone,

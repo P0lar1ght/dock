@@ -15,7 +15,7 @@ use crate::agent::runtime::{GrokStep, LoopHandle};
 use crate::agent::turn::TurnControl;
 use crate::names::{AGENT_PRESETS, CAPABILITY, MODEL_OVERRIDE, SESSIONS, TURN};
 use crate::session::log::Sessions;
-use cordis_base::types::{LogEvent, TurnOutcome};
+use cordis_base::types::TurnOutcome;
 
 use super::coordinator::{
     ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, SendBoxFuture,
@@ -139,7 +139,14 @@ async fn run_dock_child(
     let id = run.request.id.clone();
     let typ = run.request.subagent_type.clone();
     let desc = run.request.description.clone();
-    store.ensure_owned(&id, desc.clone(), typ.clone(), run.request.owner.clone());
+    let parent_id = run.request.parent_session_id.clone();
+    store.ensure_owned(
+        &id,
+        desc.clone(),
+        typ.clone(),
+        run.request.owner.clone(),
+        &parent_id,
+    );
 
     let resume = run
         .request
@@ -147,7 +154,7 @@ async fn run_dock_child(
         .as_deref()
         .map(|src| store.events(src))
         .unwrap_or_default();
-    let prompt = child_prompt(&typ, &desc, &run.request.prompt);
+    let mut prompt = child_prompt(&typ, &desc, &run.request.prompt);
 
     let parent_presets = parent.get::<AgentPresets>(AGENT_PRESETS);
     let def = parent_presets.as_ref().and_then(|p| p.subagent(&typ));
@@ -223,8 +230,7 @@ async fn run_dock_child(
             }
         }
     }
-    let mut preset = def.to_preset(&typ);
-    super::format::append_report_duty(&mut preset.persona);
+    let preset = def.to_preset(&typ);
     // 工具表的排序依据从父会话继承：子代理那张表要和主会话那张共用同一个分组，
     // 才会是它的真前缀，公共头（system + tools）才有得命中。
     let order = parent_presets
@@ -239,6 +245,15 @@ async fn run_dock_child(
         Err(e) => {
             return failed(&id, &store, wall, format!("child agentPresets: {e}"), false);
         }
+    }
+    // 「做完要回报」写进初始任务，不进人设或工具描述：那两处排在请求头里，
+    // 子代理专属的一段会让它的头和父级分叉。角色拿不到 `send_message` 就不写，
+    // 别让它去调一颗看不见的工具。
+    if child
+        .get::<AgentPresets>(AGENT_PRESETS)
+        .is_some_and(|p| p.allows(super::control::SEND_TOOL_NAME))
+    {
+        super::format::append_reply_instruction(&mut prompt, &parent_id);
     }
     let Some(turn) = child.get::<TurnControl>(TURN) else {
         return failed(&id, &store, wall, "child turn missing".into(), false);
@@ -332,11 +347,6 @@ async fn drive_child(
         store
             .get(&id)
             .inspect(|s| s.set_life(SubagentLife::Running));
-        if let Some(s) = child.get::<Sessions>(SESSIONS) {
-            s.append(LogEvent::SystemReminder(super::format::wrap_reminder(
-                super::format::REPORT_TURN_REMINDER,
-            )));
-        }
 
         let outcome = if first_tx.is_some() {
             tokio::select! {
@@ -415,8 +425,8 @@ async fn drive_child(
             Err(e) => (false, format!("failed: {e}")),
         };
         // One parent notice per finished turn. The child's text rides it when
-        // it did not call `report`; a caller that already has the result
-        // (foreground spawn, `job` poll) drops the notice again.
+        // it did not message its parent; a caller that already has the result
+        // (foreground spawn) drops the notice again.
         let reported = store
             .get(&id)
             .is_some_and(|s| s.reported_this_turn.load(Ordering::Relaxed));

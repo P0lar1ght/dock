@@ -1,5 +1,5 @@
-//! Task-family control-op cards — `job` / `kill_task` / `interrupt_agent` / `send_message` / `list_agents` /
-//! `report`.
+//! Task-family control-op cards — `job` / `kill_task` / `interrupt_agent` / `send_message` / `list_agents`,
+//! plus `report` (merged into `send_message`; kept so resumed histories still render).
 //! The spawn call (`task`) has its own card in [`super::subagent`]; the
 //! `skill` card lives in [`super::skill`]. These render the follow-up ops:
 //! status verb + target label + result preview.
@@ -220,7 +220,9 @@ fn verb_ok(name: &str, content: &str, pending: bool) -> (&'static str, Option<&'
             }
         }
         "send_message" => {
-            if content.contains("urgent message delivered to running") {
+            if content.contains("delivered to running agent") {
+                ("已送达", Some("运行中，下一步读到"))
+            } else if content.contains("urgent message delivered to running") {
                 ("已插话", Some("运行中，本轮生效"))
             } else if content.contains("queued message accepted") {
                 ("已排队", Some("本轮结束后执行"))

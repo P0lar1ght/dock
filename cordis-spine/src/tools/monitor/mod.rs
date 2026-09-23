@@ -75,7 +75,7 @@ fn start_monitor(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         call,
         format!(
             "Monitor started in background.\n\
-             task_id: {id}\n\
+             job_id: {id}\n\
              description: {description}\n\
              timeout_ms: {timeout_ms}\n\
              persistent: {persistent}\n\n\

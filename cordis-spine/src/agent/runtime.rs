@@ -86,7 +86,7 @@ async fn grok_turn(ctx: &Context, prompt: String) -> Result<TurnOutcome> {
     grok_sample_loop(ctx, &sessions, &llm, &tools, system).await
 }
 
-/// Parent mailbox: sample without a new user bubble so `report` reaches the model.
+/// Parent mailbox: sample without a new user bubble so a child's message reaches the model.
 async fn grok_continue_mailbox(ctx: &Context) -> Result<TurnOutcome> {
     let sessions = ctx.require::<Sessions>(SESSIONS)?;
     if sessions.identity() != "main" {
@@ -276,14 +276,19 @@ fn step_start_reminders(
 
 /// Continuable `subagent` mailbox: inject after a complete tool round (or at
 /// turn start), never between `tool_calls` and their `ToolExecute` rows.
+///
+/// 两个方向同一个位置：主线程取子代理发来的消息与回合结束通知；在跑的子代理
+/// 取父级 `send_message` 排给它的消息（「在跑就在最近一步读到」）。
 fn drain_parent_mailbox(ctx: &Context, sessions: &Sessions) {
-    if sessions.identity() != "main" {
-        return;
-    }
     let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
         return;
     };
-    for text in sub.drain_parent_notices() {
+    let texts = if sessions.identity() == "main" {
+        sub.drain_parent_notices()
+    } else {
+        sub.drain_child_inbox(sessions.identity())
+    };
+    for text in texts {
         sessions.append(LogEvent::SystemReminder(text));
     }
 }
@@ -350,7 +355,7 @@ impl LoopHandle {
         self.driver.handle_prompt(&self.ctx, prompt.into()).await
     }
 
-    /// Drain `report` / first-idle notices into the parent session and sample.
+    /// Drain child messages / turn-end notices into the parent session and sample.
     pub async fn continue_mailbox(&self) -> Result<TurnOutcome> {
         grok_continue_mailbox(&self.ctx).await
     }

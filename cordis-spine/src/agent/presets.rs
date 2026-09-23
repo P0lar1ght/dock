@@ -1523,7 +1523,10 @@ fn tool_allowed(allow: &[String], name: &str) -> bool {
     if allow.iter().any(|n| n == name) {
         return true;
     }
-    name == "run_terminal_cmd" && allow.iter().any(|n| n == "bash")
+    // `report` 已并进 `send_message`（子→父同一颗工具）。用户写过的
+    // `agents/<type>.yml` 里还留着旧名，照旧名放行，免得升级后子代理回不了话。
+    (name == "run_terminal_cmd" && allow.iter().any(|n| n == "bash"))
+        || (name == "send_message" && allow.iter().any(|n| n == "report"))
 }
 
 /// Overlay YAML snapshots an allowlist. When crate adds `search_tool` /
@@ -1730,7 +1733,7 @@ mod tests {
                 for id in ["岑", "锁", "甲", "乙", "丙", "衡", "验", "观", "突击"] {
                     let def = p.agents.get(id).unwrap_or_else(|| panic!("{id}"));
                     let tools = def.tools.as_ref().unwrap();
-                    assert!(tools.iter().any(|n| n == "report"), "{id}");
+                    assert!(tools.iter().any(|n| n == "send_message"), "{id}");
                     assert!(tools.iter().any(|n| n == "bash"), "{id}");
                     assert!(!tools.iter().any(|n| n == "task"), "{id}");
                     assert!(!tools.iter().any(|n| n == "subagent"), "{id}");
@@ -1752,7 +1755,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .iter()
-                    .any(|n| n == "report"));
+                    .any(|n| n == "send_message"));
                 assert!(
                     p.tools
                         .as_ref()
@@ -1828,6 +1831,16 @@ mod tests {
         assert!(presets.subagent("jia").is_none());
         assert!(!presets.allows("write_file"));
         assert!(!presets.allows("cordis_run"));
+    }
+
+    /// `report` 并进了 `send_message`。用户自己写的角色 YAML 里还列着旧名时，
+    /// 照样放行 `send_message`，否则升级后这些子代理就回不了话。
+    #[test]
+    fn report_in_a_user_allowlist_still_allows_send_message() {
+        let allow = vec!["read_file".to_string(), "report".to_string()];
+        assert!(tool_allowed(&allow, "send_message"));
+        assert!(!tool_allowed(&allow, "interrupt_agent"));
+        assert!(!tool_allowed(&["read_file".to_string()], "send_message"));
     }
 
     #[test]

@@ -1,58 +1,25 @@
 //! Copied from grok-build `xai-tool-types` task notices / completion footer.
 
-pub struct BackgroundNoticeNaming<'a> {
-    pub task_output_tool: &'a str,
-    pub task_ids_param: &'a str,
-    pub timeout_ms_param: &'a str,
-}
-
-impl BackgroundNoticeNaming<'static> {
-    pub const CANONICAL: Self = Self {
-        task_output_tool: "job",
-        task_ids_param: "job_ids",
-        timeout_ms_param: "timeout_ms",
-    };
-}
-
-fn background_result_line(subagent_id: &str, naming: &BackgroundNoticeNaming<'_>) -> String {
-    let BackgroundNoticeNaming {
-        task_output_tool,
-        task_ids_param,
-        timeout_ms_param,
-    } = *naming;
-    format!(
-        "When you need its result, use {task_output_tool} with {task_ids_param}=[\"{subagent_id}\"] and a positive {timeout_ms_param}."
-    )
-}
-
 /// Grok `wrap_reminder`. Parent mailbox drains into `LogEvent::SystemReminder`.
 pub fn wrap_reminder(text: &str) -> String {
     format!("<system-reminder>\n{text}\n</system-reminder>")
 }
 
-/// Injected into every child persona.
-pub(super) const REPORT_MARK: &str = "# 子代理上报";
+/// 子代理初始任务末尾的回报指令。
+///
+/// 只进第一条任务、不进人设也不进工具描述：人设和工具排在请求头里，子代理专属
+/// 的一段会让它的头和父级分叉；而工具描述只在模型已经想到那颗工具时才起作用，
+/// 「以为做完了、根本没想到要回报」的孩子读不到它。
+const REPLY_INSTRUCTION: &str = "启动你的代理（agent_id 为 {parent}）看不到你的工具输出，你的回合正文也只会被截断转发。\
+做完后用 send_message 给它发一条自包含的结果；中途有会改变它下一步的发现、失败或空结果，也可以先发。";
 
-pub(super) const REPORT_TURN_REMINDER: &str = "主代理看不到你的实时正文。report 是你和主代理的交流通道：有进展、失败、空结果、或需要主代理转发/改派时都要调用。同一轮可以多次。不要只写最终回复。";
-
-const REPORT_DUTY: &str = "\
-# 子代理上报
-你的助手正文只在每轮结束时由运行时代为转发（可能被截断），report 是更可靠的通道：有进展、失败、空结果、需要主代理转发或改派时都要调用。同一轮可以多次。
-不要只写最终回复而不调用 report。
-";
+pub(super) fn append_reply_instruction(prompt: &mut String, parent: &str) {
+    let parent = serde_json::to_string(parent).unwrap_or_else(|_| format!("\"{parent}\""));
+    prompt.push_str("\n\n---\n");
+    prompt.push_str(&REPLY_INSTRUCTION.replace("{parent}", &parent));
+}
 
 const TURN_TEXT_CHARS: usize = 8000;
-
-pub(super) fn append_report_duty(persona: &mut String) {
-    if persona.contains(REPORT_MARK) {
-        return;
-    }
-    if !persona.is_empty() && !persona.ends_with('\n') {
-        persona.push('\n');
-    }
-    persona.push('\n');
-    persona.push_str(REPORT_DUTY);
-}
 
 /// Cap a child's turn text before it rides a parent notice.
 pub(super) fn cap_turn_text(output: &str) -> String {
@@ -95,7 +62,7 @@ pub(super) fn format_parent_notice(notice: &super::store::ParentNotice) -> Strin
     use super::store::ParentNotice;
     match notice {
         ParentNotice::Report { from, output } => {
-            format!("子代理 {from} 上报:\n{output}")
+            format!("Agent {from} sent a message:\n{output}")
         }
         ParentNotice::WorkflowDone {
             name,
@@ -148,8 +115,8 @@ pub(super) fn format_parent_notice(notice: &super::store::ParentNotice) -> Strin
             let mut text = format!(
                 "Background subagent \"{id}\" ({subagent_type}: \"{description}\") {status}.\n\
                  Duration: {:.1}s\n\
-                 Follow up with send_message \
-                 (idle starts the next turn immediately; urgent steers a running child now). \
+                 Follow up with send_message (agent_id=\"{id}\"); \
+                 it starts the next turn immediately. \
                  Use list_agents if you lost the id.",
                 *duration_ms as f64 / 1000.0,
             );
@@ -167,20 +134,15 @@ pub fn format_subagent_started_background(
     subagent_id: &str,
     subagent_type: &str,
     description: &str,
-    naming: &BackgroundNoticeNaming<'_>,
 ) -> String {
-    let result_line = background_result_line(subagent_id, naming);
     format!(
         "Subagent started in background.\n\
-         subagent_id: {subagent_id}\n\
+         agent_id: {subagent_id}\n\
          type: {subagent_type}\n\
          description: {description}\n\n\
-         The child stays idle after its turn and talks to you with report \
-         (progress and results, many times across turns — not a one-shot handoff). \
-         You are notified when a turn ends; to follow up use send_message \
-         (idle queued or urgent both start the next turn now; urgent on a running child is send-now). \
-         List with list_agents.\n\n\
-         {result_line}"
+         It stays idle after each turn and can message you with send_message while it works. \
+         When a turn ends you are notified (with its text if it sent you nothing), so do not poll. \
+         To follow up use send_message; list your subagents with list_agents."
     )
 }
 
@@ -189,17 +151,14 @@ pub fn format_subagent_auto_backgrounded(
     subagent_id: &str,
     subagent_type: &str,
     description: &str,
-    naming: &BackgroundNoticeNaming<'_>,
 ) -> String {
-    let result_line = background_result_line(subagent_id, naming);
     format!(
         "Subagent took longer than the foreground budget and was moved to the \
          background to keep the conversation responsive. It is still running — \
-         you will be notified when its turn ends.\n\
-         subagent_id: {subagent_id}\n\
+         you will be notified when its turn ends, so do not poll.\n\
+         agent_id: {subagent_id}\n\
          type: {subagent_type}\n\
-         description: {description}\n\n\
-         {result_line}"
+         description: {description}"
     )
 }
 
@@ -207,7 +166,7 @@ pub fn format_subagent_auto_backgrounded(
 pub fn format_result_footer(subagent_id: &str, subagent_type: &str) -> String {
     format!(
         "<subagent_result>\n\
-         subagent_id: {subagent_id}\n\
+         agent_id: {subagent_id}\n\
          subagent_type: {subagent_type}\n\
          The child is idle and can be continued with send_message. \
          After it is disposed, resume_from=\"{subagent_id}\" starts from its transcript.\n\
@@ -236,14 +195,19 @@ pub fn format_subagent_completed(
 mod tests {
     use super::*;
 
+    /// 回报指令点名父级 id（JSON 编码，孩子照抄就能填进 `agent_id`），
+    /// 并且指向 `send_message` 而不是已经删掉的 `report`。
     #[test]
-    fn report_duty_appends_once() {
-        let mut persona = "你是甲。".to_string();
-        append_report_duty(&mut persona);
-        append_report_duty(&mut persona);
-        assert_eq!(persona.matches(REPORT_MARK).count(), 1);
-        assert!(persona.contains("不是一次性交卷") || persona.contains("同一轮可以多次"));
-        assert!(persona.contains("report 是更可靠的通道"));
+    fn reply_instruction_names_the_parent_and_the_tool() {
+        let mut prompt = "[explore] look\n\nfind it".to_string();
+        append_reply_instruction(&mut prompt, "main#2");
+        assert!(
+            prompt.starts_with("[explore] look\n\nfind it\n\n---\n"),
+            "{prompt}"
+        );
+        assert!(prompt.contains(r#"agent_id 为 "main#2""#), "{prompt}");
+        assert!(prompt.contains("send_message"), "{prompt}");
+        assert!(!prompt.contains("report"), "{prompt}");
     }
 
     #[test]

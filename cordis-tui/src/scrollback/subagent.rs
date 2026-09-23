@@ -19,7 +19,11 @@ pub fn opens_child_overlay(name: &str) -> bool {
 
 pub fn parse_id(content: &str) -> Option<String> {
     for line in content.lines() {
-        if let Some(rest) = line.trim().strip_prefix("subagent_id:") {
+        if let Some(rest) = line
+            .trim()
+            .strip_prefix("agent_id:")
+            .or_else(|| line.trim().strip_prefix("subagent_id:"))
+        {
             let id = rest.trim();
             if !id.is_empty() {
                 return Some(id.to_string());
@@ -288,6 +292,14 @@ mod tests {
         assert_eq!(parse_id(text).as_deref(), Some("abc-1"));
         assert_eq!(quoted_from_notice(text).as_deref(), Some("观 观察"));
         assert_eq!(typed_from_notice(text).as_deref(), Some("观"));
+    }
+
+    /// spine 现在打印 `agent_id:`；旧会话里的 `subagent_id:` 也得认。
+    #[test]
+    fn parses_agent_id_and_the_old_label() {
+        let text = "Subagent started in background.\nagent_id: abc-2\ntype: explore\n";
+        assert_eq!(parse_id(text).as_deref(), Some("abc-2"));
+        assert_eq!(parse_id("subagent_id: abc-3\n").as_deref(), Some("abc-3"));
     }
 
     #[test]
