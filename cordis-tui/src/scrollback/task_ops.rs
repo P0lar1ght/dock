@@ -225,7 +225,7 @@ fn verb_ok(name: &str, content: &str, pending: bool) -> (&'static str, Option<&'
             } else if content.contains("urgent message delivered to running") {
                 ("已插话", Some("运行中，本轮生效"))
             } else if content.contains("queued message accepted") {
-                ("已排队", Some("本轮结束后执行"))
+                ("已排队", Some("运行中，下一步读到"))
             } else if content.contains("delivered to idle") {
                 ("已送达", Some("下一轮已开始"))
             } else {
@@ -416,7 +416,7 @@ mod tests {
         let card = lines(
             "send_message",
             r#"{"subagent_id":"kid-1","message":"再加一个 mod 函数\n并补测试"}"#,
-            "queued message accepted for running subagent kid-1; it will run after the current turn ends",
+            "queued message accepted for running subagent kid-1; it reads it at its next step",
             &agents,
             &[],
             &theme,
@@ -424,7 +424,7 @@ mod tests {
         );
         let text = flat(&card);
         assert!(text.contains("已排队"), "{text}");
-        assert!(text.contains("本轮结束后执行"), "{text}");
+        assert!(text.contains("下一步读到"), "{text}");
         assert!(text.contains("修复 calc.py 的 add"), "{text}");
         assert!(text.contains("再加一个 mod 函数"), "{text}");
         assert!(text.contains("点击查看"), "{text}");
