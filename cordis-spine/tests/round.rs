@@ -389,7 +389,6 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "send_message",
         "list_agents",
         "interrupt_agent",
-        "report",
         "lsp",
         "skill",
         "update_goal",
@@ -795,8 +794,8 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         .await;
     assert!(
         started.content.contains("Subagent started in background")
-            && started.content.contains("subagent_id:")
-            && started.content.contains("use job with job_ids="),
+            && started.content.contains("agent_id:")
+            && !started.content.contains("job_ids"),
         "{}",
         started.content
     );

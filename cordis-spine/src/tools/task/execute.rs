@@ -1,7 +1,7 @@
 //! Grok `TaskTool::run`, adapted to dock `ToolCall` / `ChannelBackend`.
 //!
 //! One spawn tool: the child runs a turn, parks idle, and can be continued
-//! with the mailbox tools (`send_message` / `report` / `list_agents` /
+//! with the mailbox tools (`send_message` / `list_agents` /
 //! `interrupt_agent`). A finished turn pushes a notice to the parent, so a
 //! background spawn never has to be polled.
 
@@ -15,7 +15,7 @@ use cordis_base::types::{ToolCall, ToolResult};
 use super::backend::SubagentBackend;
 use super::format::{
     format_subagent_auto_backgrounded, format_subagent_completed,
-    format_subagent_started_background, BackgroundNoticeNaming,
+    format_subagent_started_background,
 };
 use super::runner::PARENT_SESSION_ID;
 use super::types::{
@@ -24,25 +24,24 @@ use super::types::{
 };
 use super::{current_depth, Subagents, MAX_SUBAGENT_DEPTH};
 
-const TASK_PARAMS: &str = r#"{"type":"object","properties":{"prompt":{"type":"string","description":"Complete standalone task for this role. The child does not see this conversation."},"description":{"type":"string","description":"Short (3-5 word) label for the delegated work."},"subagent_type":{"type":"string","description":"Role id from the live agents/ roster. The enum on this field is the callable set — extra YAML roles are included."},"run_in_background":{"type":"boolean","description":"Default true. Returns a durable subagent_id immediately; you are notified when a turn ends. Set false only when the next action needs the result now."},"resume_from":{"type":"string","description":"A disposed subagent_id: starts from that child's transcript with this prompt appended."},"reload_roster":{"type":"boolean","description":"If true, re-read this mode's agents/*.yml and return the live subagent_type ids. Does not spawn. Use after writing a new agents/<id>.yml so the next model step's enum includes it. Omit the spawn fields."}},"required":["prompt","description"]}"#;
+const TASK_PARAMS: &str = r#"{"type":"object","properties":{"prompt":{"type":"string","description":"Complete standalone task for this role. The child does not see this conversation."},"description":{"type":"string","description":"Short (3-5 word) label for the delegated work."},"subagent_type":{"type":"string","description":"Role id from the live agents/ roster. The enum on this field is the callable set — extra YAML roles are included."},"run_in_background":{"type":"boolean","description":"Default true. Returns a durable agent_id immediately; you are notified when a turn ends. Set false only when the next action needs the result now."},"resume_from":{"type":"string","description":"A disposed agent_id: starts from that child's transcript with this prompt appended."},"reload_roster":{"type":"boolean","description":"If true, re-read this mode's agents/*.yml and return the live subagent_type ids. Does not spawn. Use after writing a new agents/<id>.yml so the next model step's enum includes it. Omit the spawn fields."}},"required":["prompt","description"]}"#;
 
 const TASK_DESC: &str = "Delegate work to a role from the current Agent mode agents/ roster \
 (a YAML file under this preset's agents/). The child runs in its own context, keeps a durable \
-subagent_id, and stays idle between turns, so a delegation is a conversation rather than a \
-one-shot handoff.\n\
+agent_id, and stays idle between turns, so a delegation is a conversation rather than a \
+one-shot handoff. Subagents are not jobs: job / kill_task do not see them.\n\
 - prompt: the full task for the child. It does not see this conversation.\n\
 - description: 3-5 words.\n\
 - subagent_type: id from this mode's agents/ YAML. The tool parameter enum is the callable set \
 (same as the live roster, including user overlay roles).\n\
-- run_in_background: default true. Returns subagent_id immediately; its turn end reaches you as \
-a notification. Set false only when the next action needs the result now. To collect a one-shot \
-result instead of conversing, pair it with the job tool.\n\
-- resume_from: a disposed subagent_id only.\n\
+- run_in_background: default true. Returns agent_id immediately; its turn end reaches you as \
+a notification, so never poll. Set false only when the next action needs the result now.\n\
+- resume_from: a disposed agent_id only.\n\
 - reload_roster: refresh the subagent_type enum after writing a new agents/<id>.yml (does not spawn).\n\
-Talking to a child: send_message (idle — queued and urgent both start its next turn now; urgent \
-is send-now only while it is running), list_agents for state, interrupt_agent to stop the current \
-turn. The child reaches you with report (many times, across turns), and a turn that ends without \
-report has its text forwarded. After writing a new Agent mode directory, apply that id with \
+Talking to a child: send_message (a running child reads it at its next step; an idle one starts \
+its next turn), list_agents for state, interrupt_agent to stop the current turn. The child \
+messages you with the same send_message, and a turn that ends without one has its text \
+forwarded. After writing a new Agent mode directory, apply that id with \
 /preset before spawning its roles; reload_roster does not switch modes.\n\
 Max nesting depth is 1.";
 
@@ -142,8 +141,8 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
                 return tool_result(
                     call,
                     format!(
-                        "subagent {src} has not been disposed; resume_from is for a disposed subagent_id. \
-                         Continue it with send_message, or collect with the job tool."
+                        "subagent {src} has not been disposed; resume_from is for a disposed agent_id. \
+                         Continue it with send_message."
                     ),
                 );
             }
@@ -232,6 +231,7 @@ async fn spawn_child(
         description.clone(),
         subagent_type.clone(),
         SubagentOwner::Task,
+        &parent_session_id,
     );
 
     let request = SubagentRequest {
@@ -249,7 +249,6 @@ async fn spawn_child(
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
-    let naming = BackgroundNoticeNaming::CANONICAL;
     if run_in_background {
         let bg_backend = sub.backend().clone();
         let bg_id = id.clone();
@@ -276,7 +275,7 @@ async fn spawn_child(
         });
         return tool_result(
             call,
-            format_subagent_started_background(&id, &subagent_type, &description, &naming),
+            format_subagent_started_background(&id, &subagent_type, &description),
         );
     }
 
@@ -288,7 +287,7 @@ async fn spawn_child(
     if result.backgrounded {
         return tool_result(
             call,
-            format_subagent_auto_backgrounded(&id, &subagent_type, &description, &naming),
+            format_subagent_auto_backgrounded(&id, &subagent_type, &description),
         );
     }
 

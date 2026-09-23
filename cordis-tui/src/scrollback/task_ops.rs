@@ -1,5 +1,5 @@
-//! Task-family control-op cards — `job` / `kill_task` / `interrupt_agent` / `send_message` / `list_agents` /
-//! `report`.
+//! Task-family control-op cards — `job` / `kill_task` / `interrupt_agent` / `send_message` / `list_agents`,
+//! plus `report` (merged into `send_message`; kept so resumed histories still render).
 //! The spawn call (`task`) has its own card in [`super::subagent`]; the
 //! `skill` card lives in [`super::skill`]. These render the follow-up ops:
 //! status verb + target label + result preview.
@@ -220,10 +220,12 @@ fn verb_ok(name: &str, content: &str, pending: bool) -> (&'static str, Option<&'
             }
         }
         "send_message" => {
-            if content.contains("urgent message delivered to running") {
+            if content.contains("delivered to running agent") {
+                ("已送达", Some("运行中，下一步读到"))
+            } else if content.contains("urgent message delivered to running") {
                 ("已插话", Some("运行中，本轮生效"))
             } else if content.contains("queued message accepted") {
-                ("已排队", Some("本轮结束后执行"))
+                ("已排队", Some("运行中，下一步读到"))
             } else if content.contains("delivered to idle") {
                 ("已送达", Some("下一轮已开始"))
             } else {
@@ -414,7 +416,7 @@ mod tests {
         let card = lines(
             "send_message",
             r#"{"subagent_id":"kid-1","message":"再加一个 mod 函数\n并补测试"}"#,
-            "queued message accepted for running subagent kid-1; it will run after the current turn ends",
+            "queued message accepted for running subagent kid-1; it reads it at its next step",
             &agents,
             &[],
             &theme,
@@ -422,7 +424,7 @@ mod tests {
         );
         let text = flat(&card);
         assert!(text.contains("已排队"), "{text}");
-        assert!(text.contains("本轮结束后执行"), "{text}");
+        assert!(text.contains("下一步读到"), "{text}");
         assert!(text.contains("修复 calc.py 的 add"), "{text}");
         assert!(text.contains("再加一个 mod 函数"), "{text}");
         assert!(text.contains("点击查看"), "{text}");

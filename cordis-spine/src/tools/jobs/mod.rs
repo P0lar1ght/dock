@@ -10,9 +10,8 @@ use std::time::{Duration, SystemTime};
 use cordis::{plugin, Inject, Plugin};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::names::{JOBS, SUBAGENTS, TOOLS};
+use crate::names::{JOBS, TOOLS};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
-use crate::tools::task::{render_subagent, Subagents};
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 /// 单个任务保留的输出上限。对齐 Grok 的 `output_byte_limit`（默认 20k chars）。
@@ -489,7 +488,7 @@ impl Jobs {
         let job = self.inner.lock().unwrap().get(id).cloned();
         let Some(job) = job else {
             return format!(
-                "Task or subagent {id} not found. No background tasks or subagents exist in this session."
+                "Job {id} not found. Subagents are not jobs: use list_agents / interrupt_agent for them."
             );
         };
         if job.done.load(Ordering::Relaxed) {
@@ -592,9 +591,9 @@ pub fn jobs() -> Plugin {
     })
 }
 
-const JOB_PARAMS: &str = r#"{"type":"object","properties":{"job_ids":{"type":"array","items":{"type":"string"},"description":"Job ids, as printed by the tool that started them (\"job-7\") or a subagent_id. Omit to list every job in this session."},"timeout_ms":{"type":"integer","description":"Wait up to this many ms for the named jobs to finish; omit or 0 for an immediate snapshot."}}}"#;
+const JOB_PARAMS: &str = r#"{"type":"object","properties":{"job_ids":{"type":"array","items":{"type":"string"},"description":"Job ids, as printed by the tool that started them (\"job-7\"). Omit to list every job in this session."},"timeout_ms":{"type":"integer","description":"Wait up to this many ms for the named jobs to finish; omit or 0 for an immediate snapshot."}}}"#;
 const KILL_PARAMS: &str =
-    r#"{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}"#;
+    r#"{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}"#;
 
 pub fn tool_jobs() -> Plugin {
     plugin("tool-jobs", Inject::from([TOOLS, JOBS]), |ctx, _: &()| {
@@ -619,7 +618,7 @@ pub fn tool_jobs() -> Plugin {
                     tools.register(
                         ToolSpec {
                             name: "job".into(),
-                            description: "List background jobs, or read output and status from specific ones. Covers background terminal commands and subagents.\n- Omit job_ids to list every job in this session: one line each with status, how long it has been running, and the command, without output bodies. Use this when you have lost track of what is still running, then kill_task the ones you no longer need.\n- Pass job_ids to read their output: ids come from is_background=true commands, from a command that outlived its foreground budget, or from a task spawn subagent_id.\n- timeout_ms waits that long for the named jobs to finish; omit it or pass 0 for an immediate snapshot. Waiting never terminates a job — a timed-out wait returns the output so far and says so.\n- A subagent pushes its turn end to you, so poll only when you need the result now.".into(),
+                            description: "List background jobs, or read output and status from specific ones. Jobs are background terminal commands and monitors; subagents are not jobs (use list_agents).\n- Omit job_ids to list every job in this session: one line each with status, how long it has been running, and the command, without output bodies. Use this when you have lost track of what is still running, then kill_task the ones you no longer need.\n- Pass job_ids to read their output: ids come from is_background=true commands, from a command that outlived its foreground budget, or from monitor.\n- timeout_ms waits that long for the named jobs to finish; omit it or pass 0 for an immediate snapshot. Waiting never terminates a job — a timed-out wait returns the output so far and says so.".into(),
                             parameters_json: JOB_PARAMS.into(),
                         },
                         output,
@@ -627,7 +626,7 @@ pub fn tool_jobs() -> Plugin {
                     tools.register(
                         ToolSpec {
                             name: "kill_task".into(),
-                            description: "Terminate a running background terminal command, or dispose a live subagent. Use job with no job_ids first if you are not sure what is still running. For a subagent, use interrupt_agent instead when you only want to stop its current turn.".into(),
+                            description: "Terminate a running background terminal command or monitor. Use job with no job_ids first if you are not sure what is still running. Subagents are not jobs: stop a subagent's turn with interrupt_agent.".into(),
                             parameters_json: KILL_PARAMS.into(),
                         },
                         kill,
@@ -638,7 +637,7 @@ pub fn tool_jobs() -> Plugin {
     })
 }
 
-/// `job_ids` 是现在的名字，`task_ids` / `task_id` 是旧名。
+/// `job_ids` / `job_id` 是现在的名字，`task_ids` / `task_id` 是旧名。
 ///
 /// 继续认旧名不是为了兼容磁盘格式，是为了模型：`get_task_output` / `wait_tasks`
 /// 存在了很久，`/resume` 回来的历史里全是 `task_ids`，模型照着抄一遍是常态。
@@ -733,7 +732,6 @@ fn render_brief(s: &JobSnapshot) -> String {
 async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     let (ids, timeout) = parse_ids(&call.arguments);
     let jobs = ctx.get::<Jobs>(JOBS);
-    let sub = ctx.get::<Subagents>(SUBAGENTS);
     if ids.is_empty() {
         let mut parts = Vec::new();
         if let Some(jobs) = &jobs {
@@ -747,28 +745,20 @@ async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
                     .map(render_brief),
             );
         }
-        if let Some(sub) = &sub {
-            parts.extend(sub.list().iter().map(render_subagent));
-        }
         if parts.is_empty() {
             return tool_result(call, "No background tasks exist in this session.");
         }
         return tool_result(call, parts.join("\n\n"));
     }
-    let body = collect_output(jobs.as_deref(), sub.as_deref(), &ids, timeout).await;
+    let body = collect_output(jobs.as_deref(), &ids, timeout).await;
     tool_result(call, with_wait_note(body))
 }
 
 async fn kill_task(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     let (ids, _) = parse_ids(&call.arguments);
     let Some(id) = ids.first() else {
-        return tool_result(call, "Error: task_id is required");
+        return tool_result(call, "Error: job_id is required");
     };
-    if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
-        if let Some(msg) = sub.kill(id) {
-            return tool_result(call, msg);
-        }
-    }
     let Some(jobs) = ctx.get::<Jobs>(JOBS) else {
         return tool_result(call, "Error: jobs is not mounted");
     };
@@ -776,89 +766,45 @@ async fn kill_task(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     tool_result(call, msg)
 }
 
-/// 一次 `collect_output` 的收尾状态，决定正文后面补不补说明、补哪句。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct WaitOutcome {
-    /// 等到点了仍有任务在跑（不是「等到任务完成」）。
-    timed_out: bool,
-    /// 仍在跑的里面有子代理 —— 它会自己推回合结束，不必轮询。
-    subagent_pending: bool,
-}
-
 /// 等到点了任务还没跑完时补一句：上面是**快照**不是结论，任务仍在跑。
 ///
-/// 不加这句时，一个 `[running]` 快照很容易被当成最终结果读掉。turn-end 那半句
-/// 只在真的有子代理在跑时给：后台 bash 和 monitor 不推通知，让它们去等一个永远
-/// 不来的通知，等于换个方向再骗一次。
-fn with_wait_note((body, outcome): (String, WaitOutcome)) -> String {
-    if !outcome.timed_out {
+/// 不加这句时，一个 `[running]` 快照很容易被当成最终结果读掉。
+fn with_wait_note((body, timed_out): (String, bool)) -> String {
+    if !timed_out {
         return body;
     }
-    let mut note = String::from(
-        "Still running when the wait timed out. The snapshot above is the output so far, not a \
-         result — call again later.",
-    );
-    if outcome.subagent_pending {
-        note.push_str(
-            " A subagent pushes its turn end to you, so waiting for that notice works too.",
-        );
-    }
-    format!("{body}\n\n{note}")
+    format!(
+        "{body}\n\nStill running when the wait timed out. The snapshot above is the output so \
+         far, not a result — call again later."
+    )
 }
 
-/// 收集 `ids` 的输出，返回正文与本次等待的收尾状态。
+/// 收集 `ids` 的输出，返回正文与这次等待是否到点仍有任务在跑。
 ///
 /// `timeout_ms` 是**本次调用愿意等多久**，不是任务的生命周期：到点返回的是当前
 /// 快照（已产出输出 + `[running]`），任务照跑，下次调用接着查 —— 长任务不会因为
 /// 某次等待到期而丢结果。`timeout_ms == 0` 是不等待的即时快照。
-async fn collect_output(
-    jobs: Option<&Jobs>,
-    sub: Option<&Subagents>,
-    ids: &[String],
-    timeout_ms: u64,
-) -> (String, WaitOutcome) {
+async fn collect_output(jobs: Option<&Jobs>, ids: &[String], timeout_ms: u64) -> (String, bool) {
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(if timeout_ms == 0 { 1 } else { timeout_ms });
     loop {
         let mut parts = Vec::new();
         let mut all_done = true;
-        let mut subagent_pending = false;
         for id in ids {
-            if let Some(s) = sub.and_then(|s| s.snapshot(id)) {
-                if s.running() {
-                    all_done = false;
-                    subagent_pending = true;
-                }
-                parts.push(render_subagent(&s));
-            } else if let Some(j) = jobs.and_then(|j| j.snapshot(id)) {
+            if let Some(j) = jobs.and_then(|j| j.snapshot(id)) {
                 if !j.done {
                     all_done = false;
                 }
                 parts.push(render_snap(&j));
             } else {
                 parts.push(format!(
-                    "Task {id} not found. No background tasks or subagents exist in this session."
+                    "Job {id} not found. Subagents are not jobs: their turn end is pushed to you, \
+                     and list_agents shows their state."
                 ));
             }
         }
         if timeout_ms == 0 || all_done || tokio::time::Instant::now() >= deadline {
-            // The parent has the result now, so drop the redundant turn-end
-            // notice for whatever it just collected.
-            if let Some(sub) = sub {
-                for id in ids {
-                    if sub.snapshot(id).is_some_and(|s| !s.running()) {
-                        sub.consume_completion(id);
-                    }
-                }
-            }
-            let timed_out = timeout_ms > 0 && !all_done;
-            return (
-                parts.join("\n\n"),
-                WaitOutcome {
-                    timed_out,
-                    subagent_pending: timed_out && subagent_pending,
-                },
-            );
+            return (parts.join("\n\n"), timeout_ms > 0 && !all_done);
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -965,37 +911,23 @@ mod tests {
         let jobs = Jobs::new();
         let id = jobs.start("sleep 5");
         let started = std::time::Instant::now();
-        let (body, outcome) =
-            collect_output(Some(&jobs), None, std::slice::from_ref(&id), 300).await;
+        let (body, timed_out) = collect_output(Some(&jobs), std::slice::from_ref(&id), 300).await;
         // 先收进程再断言，免得中途失败漏一个 sleep 出去。
         assert!(jobs.kill(&id).await.contains("killed"), "收不掉测试进程");
 
-        assert!(outcome.timed_out, "300ms 到点时 sleep 5 还在跑：{body}");
-        assert!(!outcome.subagent_pending, "跑的是 bash job，不是子代理");
+        assert!(timed_out, "300ms 到点时 sleep 5 还在跑：{body}");
         // `[running` 而不是 `[running]`：状态后面还跟着已运行时长。
         assert!(body.contains("[running"), "{body}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(4),
             "等待该按 timeout 返回，而不是挂到任务结束"
         );
-        let note = with_wait_note((body, outcome));
+        let note = with_wait_note((body, timed_out));
         assert!(note.contains("not a result"), "{note}");
         assert!(
             !note.contains("turn end"),
             "bash job 没有 turn-end 通知：{note}"
         );
-    }
-
-    /// 等到点的是子代理时才提「它会自己推回合结束」。
-    #[test]
-    fn subagent_wait_note_points_at_the_turn_end_notice() {
-        let outcome = WaitOutcome {
-            timed_out: true,
-            subagent_pending: true,
-        };
-        let note = with_wait_note(("[running] sub-1".into(), outcome));
-        assert!(note.contains("not a result"), "{note}");
-        assert!(note.contains("turn end"), "{note}");
     }
 
     /// 跑完的任务不报「等到点了」，也不加提示。
@@ -1009,12 +941,11 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
 
-        let (body, outcome) =
-            collect_output(Some(&jobs), None, std::slice::from_ref(&id), 300).await;
-        assert_eq!(outcome, WaitOutcome::default(), "{body}");
+        let (body, timed_out) = collect_output(Some(&jobs), std::slice::from_ref(&id), 300).await;
+        assert!(!timed_out, "{body}");
         assert!(body.contains("[done]"), "{body}");
         assert_eq!(
-            with_wait_note((body.clone(), outcome)),
+            with_wait_note((body.clone(), timed_out)),
             body,
             "跑完了不该加提示"
         );

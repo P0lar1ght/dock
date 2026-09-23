@@ -2,29 +2,27 @@
 
 use serde::Deserialize;
 
-use crate::session::log::Sessions;
 use crate::tools::registry::tool_result;
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 use super::store::InterruptOutcome;
 use super::Subagents;
 
+pub(super) const SEND_TOOL_NAME: &str = "send_message";
+
 pub(super) fn send_spec() -> ToolSpec {
     ToolSpec {
-        name: "send_message".into(),
-        description: "Send a follow-up to a continuable subagent started with the task tool. Does not return the child's reply; use list_agents to confirm status.\n\
-- subagent_id: id from subagent / list_agents.\n\
-- message: text for the child.\n\
-- priority: queued (default) waits if the child is running; urgent is send-now and steers a running child (not interrupt-then-send). If the child is idle, both queued and urgent start the next turn immediately. The tool result says idle→starting now vs running→queued vs running→steer."
+        name: SEND_TOOL_NAME.into(),
+        description: "Send a message to an adjacent agent: one of your direct subagents (agent_id from task / list_agents), or, when you are a subagent, the agent that started you (its id is in your first task). Siblings and yourself are rejected. A running target reads it at its next step; an idle subagent starts its next turn. Does not wait for a reply and does not end your turn."
             .into(),
-        parameters_json: r#"{"type":"object","properties":{"subagent_id":{"type":"string"},"message":{"type":"string"},"priority":{"type":"string","enum":["queued","urgent"],"description":"queued waits if running; urgent steers a running child now. Idle children start the next turn for either."}},"required":["subagent_id","message"]}"#.into(),
+        parameters_json: r#"{"type":"object","properties":{"agent_id":{"type":"string"},"message":{"type":"string"}},"required":["agent_id","message"]}"#.into(),
     }
 }
 
 pub(super) fn list_spec() -> ToolSpec {
     ToolSpec {
         name: "list_agents".into(),
-        description: "List continuable subagents started from this session (running or idle). Shows pending queued/urgent inbox counts. One-shot/disposed ids are omitted. This is the status source of truth after send_message.".into(),
+        description: "List your subagents that can still be continued (running or idle), with queued message counts. Disposed ones are omitted. This is the status source of truth after send_message.".into(),
         parameters_json: r#"{"type":"object","properties":{}}"#.into(),
     }
 }
@@ -32,40 +30,27 @@ pub(super) fn list_spec() -> ToolSpec {
 pub(super) fn interrupt_spec() -> ToolSpec {
     ToolSpec {
         name: "interrupt_agent".into(),
-        description: "Stop the subagent's current turn and park it idle. Queued messages are kept and will run next. Already-idle is a no-op — it does not start a turn. Use send_message to wake an idle child. Not a prerequisite for urgent send_message.".into(),
-        parameters_json: r#"{"type":"object","properties":{"subagent_id":{"type":"string"}},"required":["subagent_id"]}"#.into(),
-    }
-}
-
-pub(super) fn report_spec() -> ToolSpec {
-    ToolSpec {
-        name: "report".into(),
-        description: "Send a message to the agent that started you. This is the only channel the parent can see — assistant text, inbox files, and todos are not delivered. Call it for progress, findings, failures, empty results, or whenever the parent must act. You may call it many times in one turn and across turns. Does not end your turn.".into(),
-        parameters_json: r#"{"type":"object","properties":{"output":{"type":"string","description":"Self-contained findings for the parent."}},"required":["output"]}"#.into(),
+        description: "Stop your subagent's current turn and park it idle. Queued messages are kept and will run next. Already-idle is a no-op — it does not start a turn; use send_message to wake an idle subagent.".into(),
+        parameters_json: r#"{"type":"object","properties":{"agent_id":{"type":"string"}},"required":["agent_id"]}"#.into(),
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct SendInput {
-    subagent_id: String,
+    /// 旧名 `subagent_id` 仍然收：`/resume` 回来的历史里全是它。
+    #[serde(alias = "subagent_id")]
+    agent_id: String,
     message: String,
-    #[serde(default)]
-    priority: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct InterruptInput {
-    /// 与 `send_message` 同名；旧名 `agent_id` 仍然收。
-    #[serde(alias = "agent_id")]
-    subagent_id: String,
+    /// 与 `send_message` 同名；旧名 `subagent_id` 仍然收。
+    #[serde(alias = "subagent_id")]
+    agent_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct ReportInput {
-    output: String,
-}
-
-pub(super) async fn run_send(sub: &Subagents, call: ToolCall) -> ToolResult {
+pub(super) async fn run_send(sub: &Subagents, sender: String, call: ToolCall) -> ToolResult {
     let input: SendInput = match serde_json::from_str(&call.arguments) {
         Ok(v) => v,
         Err(e) => return tool_result(call, format!("Error: invalid send_message arguments: {e}")),
@@ -73,21 +58,17 @@ pub(super) async fn run_send(sub: &Subagents, call: ToolCall) -> ToolResult {
     if input.message.trim().is_empty() {
         return tool_result(call, "Error: message is required");
     }
-    let urgent = input
-        .priority
-        .as_deref()
-        .is_some_and(|s| s.trim().eq_ignore_ascii_case("urgent"));
-    match sub.send_message(&input.subagent_id, &input.message, urgent) {
+    match sub.send_between(&sender, input.agent_id.trim(), &input.message) {
         Ok(msg) => tool_result(call, msg),
         Err(e) => tool_result(call, format!("Error: {e}")),
     }
 }
 
-pub(super) async fn run_list(sub: &Subagents, call: ToolCall) -> ToolResult {
-    tool_result(call, sub.list_agents())
+pub(super) async fn run_list(sub: &Subagents, sender: String, call: ToolCall) -> ToolResult {
+    tool_result(call, sub.list_agents_of(&sender))
 }
 
-pub(super) async fn run_interrupt(sub: &Subagents, call: ToolCall) -> ToolResult {
+pub(super) async fn run_interrupt(sub: &Subagents, sender: String, call: ToolCall) -> ToolResult {
     let input: InterruptInput = match serde_json::from_str(&call.arguments) {
         Ok(v) => v,
         Err(e) => {
@@ -97,38 +78,15 @@ pub(super) async fn run_interrupt(sub: &Subagents, call: ToolCall) -> ToolResult
             );
         }
     };
-    tool_result(call, sub.interrupt_agent(&input.subagent_id))
-}
-
-pub(super) async fn run_report(
-    sub: &Subagents,
-    sessions: Option<std::sync::Arc<Sessions>>,
-    call: ToolCall,
-) -> ToolResult {
-    let input: ReportInput = match serde_json::from_str(&call.arguments) {
-        Ok(v) => v,
-        Err(e) => return tool_result(call, format!("Error: invalid report arguments: {e}")),
-    };
-    if input.output.trim().is_empty() {
-        return tool_result(call, "Error: output is required");
+    let id = input.agent_id.trim();
+    if let Err(e) = sub.ensure_child_of(&sender, id) {
+        return tool_result(call, format!("Error: {e}"));
     }
-    let Some(sessions) = sessions else {
-        return tool_result(call, "Error: sessions is not mounted");
-    };
-    let from = sessions.identity();
-    if from == "main" {
-        return tool_result(
-            call,
-            "Error: report is for subagents; the parent uses list_agents / send_message",
-        );
-    }
-    match sub.deliver_report(from, &input.output) {
-        Ok(msg) => tool_result(call, msg),
-        Err(e) => tool_result(call, format!("Error: {e}")),
-    }
+    tool_result(call, sub.interrupt_agent(id))
 }
 
 impl Subagents {
+    /// 用户（TUI 框底输入）发给子代理：不走相邻授权，`urgent` 打断本轮插话。
     pub fn send_message(&self, id: &str, message: &str, urgent: bool) -> Result<String, String> {
         let was_running = if urgent {
             self.store.push_urgent(id, message.to_string())?
@@ -138,10 +96,62 @@ impl Subagents {
         Ok(send_ack(id, urgent, was_running))
     }
 
-    pub fn list_agents(&self) -> String {
+    /// 模型的 `send_message`：只走相邻的一条边。
+    ///
+    /// - 父 → 直接子：进孩子的队列。在跑就在下一步读到，idle 就开下一轮。
+    /// - 子 → 启动它的会话：进父信箱（workflow 的孩子进 run 自己的队列）。
+    ///
+    /// 兄弟、隔代、自己一律拒绝。发送方身份由调用方的会话给出，模型填不了。
+    pub fn send_between(
+        &self,
+        sender: &str,
+        target: &str,
+        message: &str,
+    ) -> Result<String, String> {
+        if target.is_empty() {
+            return Err("agent_id 不能为空".into());
+        }
+        if target == sender {
+            return Err("不能给自己发消息".into());
+        }
+        if self.store.get(target).is_some() {
+            self.ensure_child_of(sender, target)?;
+            let was_running = self.store.enqueue_queued(target, message.to_string())?;
+            return Ok(if was_running {
+                format!("message delivered to running agent {target}; it reads it at its next step")
+            } else {
+                format!("message delivered to idle agent {target}; its next turn is starting now")
+            });
+        }
+        match self.store.get(sender) {
+            Some(me) if me.parent == target => {
+                self.deliver_report(sender, message)?;
+                Ok(format!("message delivered to {target}"))
+            }
+            Some(me) => Err(format!(
+                "{target} 不是启动你的代理；子代理只能发给 {}",
+                me.parent
+            )),
+            None => Err(format!("未知的代理 {target}")),
+        }
+    }
+
+    /// `target` 必须是 `sender` 的直接子代理。
+    pub(super) fn ensure_child_of(&self, sender: &str, target: &str) -> Result<(), String> {
+        match self.store.get(target) {
+            None => Err(format!("未知的代理 {target}")),
+            Some(slot) if slot.parent != sender => Err(format!(
+                "{target} 不是你的直接子代理；只能发给自己启动的子代理或启动你的代理"
+            )),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// `parent` 名下还能续的孩子。
+    pub fn list_agents_of(&self, parent: &str) -> String {
         let rows: Vec<String> = self
             .store
-            .list()
+            .children_of(parent)
             .into_iter()
             .filter(|s| !s.done)
             .map(|s| {
@@ -181,10 +191,22 @@ impl Subagents {
 
     pub fn deliver_report(&self, from_id: &str, output: &str) -> Result<String, String> {
         if self.store.snapshot(from_id).is_none() {
-            return Err("direct parent is not live; report was not delivered".into());
+            return Err("direct parent is not live; message was not delivered".into());
         };
         self.store.push_report(from_id, output);
-        Ok("report accepted by the agent that started you".into())
+        Ok("message delivered to the agent that started you".into())
+    }
+
+    /// 在跑的子代理 `id` 在步边界取走父级排队的消息，已包好 `<system-reminder>`。
+    pub fn drain_child_inbox(&self, id: &str) -> Vec<String> {
+        let Some(parent) = self.store.get(id).map(|s| s.parent.clone()) else {
+            return Vec::new();
+        };
+        self.store
+            .take_queued_for_step(id)
+            .iter()
+            .map(|m| super::format::wrap_reminder(&format!("Agent {parent} sent a message:\n{m}")))
+            .collect()
     }
 
     /// Grok-style next-sample reminders. Bodies already wrapped in `<system-reminder>`.
@@ -210,7 +232,7 @@ fn send_ack(id: &str, urgent: bool, was_running: bool) -> String {
             format!("urgent message delivered to idle subagent {id}; the next turn is starting now")
         }
         (false, true) => format!(
-            "queued message accepted for running subagent {id}; it will run after the current turn ends"
+            "queued message accepted for running subagent {id}; it reads it at its next step"
         ),
         (false, false) => {
             format!("queued message delivered to idle subagent {id}; the next turn is starting now")
@@ -222,22 +244,34 @@ fn send_ack(id: &str, urgent: bool, was_running: bool) -> String {
 mod tests {
     use super::*;
 
-    /// 同族工具用同一个参数名：`send_message` 叫 `subagent_id`，`interrupt_agent`
-    /// 也得叫 `subagent_id`，否则模型照着前一颗的写法调后一颗就是一次参数错误。
-    /// 旧名 `agent_id` 继续收，历史里、脚本里已有的调用不至于失效。
+    /// 同族工具用同一个参数名：`send_message` 与 `interrupt_agent` 都叫
+    /// `agent_id`，否则模型照着前一颗的写法调后一颗就是一次参数错误。
+    /// 旧名 `subagent_id` 继续收，`/resume` 回来的历史里已有的调用不至于失效。
     #[test]
-    fn interrupt_takes_the_same_id_name_as_send_message() {
-        let params: serde_json::Value =
-            serde_json::from_str(&interrupt_spec().parameters_json).unwrap();
-        assert_eq!(params["required"], serde_json::json!(["subagent_id"]));
-        assert!(
-            params["properties"].get("subagent_id").is_some(),
-            "{params}"
-        );
+    fn mailbox_tools_take_one_id_name() {
+        for spec in [send_spec(), interrupt_spec()] {
+            let params: serde_json::Value = serde_json::from_str(&spec.parameters_json).unwrap();
+            assert!(
+                params["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("agent_id")),
+                "{}: {params}",
+                spec.name
+            );
+            assert!(
+                params["properties"].get("subagent_id").is_none(),
+                "{params}"
+            );
+        }
 
-        let new: InterruptInput = serde_json::from_str(r#"{"subagent_id":"kid-1"}"#).unwrap();
-        assert_eq!(new.subagent_id, "kid-1");
-        let old: InterruptInput = serde_json::from_str(r#"{"agent_id":"kid-2"}"#).unwrap();
-        assert_eq!(old.subagent_id, "kid-2");
+        let new: InterruptInput = serde_json::from_str(r#"{"agent_id":"kid-1"}"#).unwrap();
+        assert_eq!(new.agent_id, "kid-1");
+        let old: InterruptInput = serde_json::from_str(r#"{"subagent_id":"kid-2"}"#).unwrap();
+        assert_eq!(old.agent_id, "kid-2");
+        let old: SendInput =
+            serde_json::from_str(r#"{"subagent_id":"kid-3","message":"hi","priority":"urgent"}"#)
+                .unwrap();
+        assert_eq!(old.agent_id, "kid-3");
     }
 }

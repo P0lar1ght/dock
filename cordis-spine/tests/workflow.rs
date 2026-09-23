@@ -546,8 +546,8 @@ complete("done");
     let run = wait_terminal(&h, &run_id).await;
     assert_eq!(run.status, "complete", "{run:?}");
 
-    // 这个脚手架只挂了 `report` + `workflow`（没有 workspace 工具），所以断言
-    // 落在这两颗上：`workflow` 是执行类，`report` 是元工具。分类本身的覆盖在
+    // 这个脚手架只挂了 `send_message` + `workflow`（没有 workspace 工具），所以断言
+    // 落在这两颗上：`workflow` 是执行类，`send_message` 是元工具。分类本身的覆盖在
     // `agent::capability` 的单测里。
     let tools = seen.lock().unwrap().clone();
     assert!(!tools.is_empty(), "子代理那一轮应当看到过工具表");
@@ -556,8 +556,8 @@ complete("done");
         "只读子代理不该看到 workflow：{tools:?}"
     );
     assert!(
-        tools.iter().any(|t| t == "report"),
-        "只读子代理应当还有 report，否则它连做不到都说不出口：{tools:?}"
+        tools.iter().any(|t| t == "send_message"),
+        "只读子代理应当还有 send_message，否则它连做不到都说不出口：{tools:?}"
     );
 }
 
@@ -599,8 +599,8 @@ complete("done");
     assert!(message.contains("capability_mode 只能是"), "{message}");
 }
 
-/// 先 `report` 一次再收尾的子代理——`general-purpose` 的人设就是这么要求的
-/// （「结束前用 report 向启动你的主代理上报自足结论」）。
+/// 先给父级 `send_message` 一次再收尾的子代理——初始任务末尾的回报指令就是
+/// 这么要求的。
 struct Reporting {
     /// 还没报过的那一步发工具调用，之后正常收尾；否则会卡在工具循环里。
     pending: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -619,8 +619,9 @@ impl Sampler for Reporting {
             let tool_calls = if first {
                 vec![ToolCall {
                     id: "r1".into(),
-                    name: "report".into(),
-                    arguments: serde_json::json!({ "output": "阶段性结论" }).to_string(),
+                    name: "send_message".into(),
+                    arguments: serde_json::json!({ "agent_id": "main", "message": "阶段性结论" })
+                        .to_string(),
                 }]
             } else {
                 Vec::new()
@@ -643,8 +644,8 @@ fn reporting() -> Arc<dyn Sampler> {
 /// run 没跑完之前，主线程一次也不该被叫醒。
 ///
 /// 改动前有**两条**通道漏过去：子代理的回合结束通知（`surface_completion: false`
-/// 声明了不该发，但那个字段全仓没人读），以及 `report`（人设明文要求每个子代理
-/// 都调）。一条 deep-research 能把主线程叫醒十几次，每次都在半份结果上开一轮。
+/// 声明了不该发，但那个字段全仓没人读），以及子代理发给父级的消息（每个子代理
+/// 都被要求回报）。一条 deep-research 能把主线程叫醒十几次，每次都在半份结果上开一轮。
 #[tokio::test]
 async fn a_running_workflow_never_wakes_the_main_thread() {
     let h = boot(reporting(), TaskConfig::default()).await;
@@ -922,7 +923,7 @@ async fn a_finished_run_cannot_be_stopped_again() {
     assert_eq!(wf.stop(&run_id), None, "结束了的 run 不该还能停");
 }
 
-/// 每一步都 `report` 的子代理：同一个孩子会报好几次。
+/// 每一步都给父级发消息的子代理：同一个孩子会报好几次。
 struct ReportingTwice {
     /// 每个 prompt 报过几次。
     seen: std::sync::Mutex<std::collections::HashMap<String, u32>>,
@@ -946,9 +947,12 @@ impl Sampler for ReportingTwice {
             let tool_calls = match nth {
                 1 | 2 => vec![ToolCall {
                     id: format!("r{nth}"),
-                    name: "report".into(),
-                    arguments: serde_json::json!({ "output": format!("第 {nth} 条结论") })
-                        .to_string(),
+                    name: "send_message".into(),
+                    arguments: serde_json::json!({
+                        "agent_id": "main",
+                        "message": format!("第 {nth} 条结论"),
+                    })
+                    .to_string(),
                 }],
                 _ => Vec::new(),
             };

@@ -2,11 +2,16 @@
 //!
 //! One plugin provides the named service `"subagents"` and registers the whole
 //! model-facing surface: `task` (spawn) plus the mailbox tools
-//! (`send_message` / `list_agents` / `interrupt_agent` / `report`).
+//! (`send_message` / `list_agents` / `interrupt_agent`).
 //!
 //! Every child is continuable: it runs a turn, parks idle, accepts
 //! `send_message`, and pushes a turn-end notice to the parent. The parent is
-//! never required to poll.
+//! never required to poll. Subagents are not jobs: `job` / `kill_task` only
+//! see background commands.
+//!
+//! `send_message` is direction-neutral. Parent and child share one definition;
+//! the service authorizes one adjacent edge (parent → direct child, child →
+//! the session that started it) from the caller's session identity.
 
 pub mod admission;
 pub mod backend;
@@ -47,7 +52,7 @@ use types::{
 pub const MAX_SUBAGENT_DEPTH: u32 = 1;
 
 /// Idle children older than this are disposed (their slot and transcript stay
-/// readable, so `job` and `resume_from` keep working).
+/// readable, so `resume_from` keeps working).
 const IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// How often the idle sweep runs.
@@ -121,7 +126,7 @@ impl Default for TaskConfig {
 pub struct WorkflowSpawn {
     pub run_id: String,
     /// 子代理 id。由调用方生成，这样它在孩子起跑**之前**就能把这一行挂进自己
-    /// 的进度表——`report` 回来时才对得上号。
+    /// 的进度表——孩子的消息回来时才对得上号。
     pub id: String,
     pub prompt: String,
     pub description: String,
@@ -321,6 +326,7 @@ impl Subagents {
             spawn.description.clone(),
             spawn.subagent_type.clone(),
             owner.clone(),
+            ROOT_IDENTITY,
         );
         let request = SubagentRequest {
             id: id.clone(),
@@ -370,9 +376,10 @@ impl Subagents {
         description: String,
         subagent_type: String,
         owner: SubagentOwner,
+        parent: &str,
     ) {
         self.store
-            .ensure_owned(id, description, subagent_type, owner);
+            .ensure_owned(id, description, subagent_type, owner, parent);
     }
 }
 
@@ -443,7 +450,7 @@ pub fn tool_task() -> Plugin {
                         let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
                             return tool_result(call, "Error: subagents is not mounted");
                         };
-                        control::run_send(&sub, call).await
+                        control::run_send(&sub, caller_identity(&ctx), call).await
                     })
                 })
             };
@@ -455,7 +462,7 @@ pub fn tool_task() -> Plugin {
                         let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
                             return tool_result(call, "Error: subagents is not mounted");
                         };
-                        control::run_list(&sub, call).await
+                        control::run_list(&sub, caller_identity(&ctx), call).await
                     })
                 })
             };
@@ -467,30 +474,10 @@ pub fn tool_task() -> Plugin {
                         let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
                             return tool_result(call, "Error: subagents is not mounted");
                         };
-                        control::run_interrupt(&sub, call).await
+                        control::run_interrupt(&sub, caller_identity(&ctx), call).await
                     })
                 })
             };
-            let report_body: ToolBody = {
-                let ctx = ctx.clone();
-                Arc::new(move |call: ToolCall| {
-                    let ctx = ctx.clone();
-                    Box::pin(async move {
-                        let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
-                            return tool_result(call, "Error: subagents is not mounted");
-                        };
-                        let sessions = crate::tools::registry::exec_ctx()
-                            .and_then(|c| {
-                                c.get::<crate::session::log::Sessions>(crate::names::SESSIONS)
-                            })
-                            .or_else(|| {
-                                ctx.get::<crate::session::log::Sessions>(crate::names::SESSIONS)
-                            });
-                        control::run_report(&sub, sessions, call).await
-                    })
-                })
-            };
-
             own_registered(
                 ctx,
                 vec![
@@ -498,7 +485,6 @@ pub fn tool_task() -> Plugin {
                     tools.register(control::send_spec(), send_body)?,
                     tools.register(control::list_spec(), list_body)?,
                     tools.register(control::interrupt_spec(), interrupt_body)?,
-                    tools.register(control::report_spec(), report_body)?,
                 ],
             )?;
             Ok(None)
@@ -506,20 +492,16 @@ pub fn tool_task() -> Plugin {
     )
 }
 
-pub fn render_subagent(s: &SubagentSnap) -> String {
-    let status = if s.cancelled {
-        "cancelled"
-    } else if s.done {
-        "done"
-    } else if s.idle {
-        "idle"
-    } else {
-        "running"
-    };
-    format!(
-        "[{status}] {} [{}] {}\n{}",
-        s.id, s.subagent_type, s.description, s.output
-    )
+/// 发起这次工具调用的会话身份：主线 `main` / `main#2`，或子代理自己的 id。
+///
+/// 工具体捕获的是根 ctx，身份要问执行期 ctx（`Tools::execute_on` 递下来的那个）；
+/// 拿不到时退回根 ctx 上的会话（也就是 `main`）。
+fn caller_identity(ctx: &cordis::Context) -> String {
+    crate::tools::registry::exec_ctx()
+        .and_then(|c| c.get::<crate::session::log::Sessions>(crate::names::SESSIONS))
+        .or_else(|| ctx.get::<crate::session::log::Sessions>(crate::names::SESSIONS))
+        .map(|s| s.identity().to_string())
+        .unwrap_or_else(|| ROOT_IDENTITY.to_string())
 }
 
 #[cfg(test)]

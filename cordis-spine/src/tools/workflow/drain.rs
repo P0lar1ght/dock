@@ -61,7 +61,7 @@ pub struct WorkflowAgentRow {
     pub state: String,
     pub tokens_used: u64,
     pub duration_ms: u64,
-    /// 这个孩子 `report` 的最后一条。不进主线程上下文，只做可见进度。
+    /// 这个孩子发给父级的最后一条消息。不进主线程上下文，只做可见进度。
     pub latest_report: Option<String>,
 }
 

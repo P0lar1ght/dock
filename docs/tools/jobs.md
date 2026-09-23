@@ -14,15 +14,15 @@
 - **ctx**：→ `"tools"`
 - **模型工具**：`job` `kill_task`
 
-列 / 查 / 等后台 bash **或子代理**（同一 id 空间），以及杀。
+列 / 查 / 等后台 bash 与 `monitor`，以及杀。**子代理不是作业**：这两颗工具看不见子代理（它们走 `send_message` / `list_agents` / `interrupt_agent`，见 [task](task.md)）。
 
 `job` 是查询面，一颗工具三种用法：省略 `job_ids` 列全部（一条一行，带已运行多久，**不带输出正文**——清点不该把每条最多 20KB 的输出全倒进上下文）；给 `job_ids` 读它们的输出；再给 `timeout_ms` 就等它们跑完。`wait_tasks` 已并入——它自己的描述本来就写着「Prefer get_task_output with a positive timeout_ms」，等于官方劝退。
 
 `kill_task` **刻意留在外面**：dock 的权限门与计划门是 tool-level 的（`gated_builtin` 里有 `kill_task`、没有查询工具），并成一颗就只剩两条路——要么整颗进门、连「看看还有什么在跑」都弹权限窗且计划模式下不可用，要么 kill 失去权限门。分开正好让工具边界与权限边界重合。
 
-旧名 `task_ids` / `task_id` 继续认（`ID_KEYS`）：`/resume` 回来的历史里全是旧参数名，模型照抄是常态，认下来比回一句「参数名错了」便宜。
+`kill_task` 的参数叫 `job_id`（与 bash / monitor 返回的 `job_id:` 同名）。旧名 `task_ids` / `task_id` 继续认（`ID_KEYS`）：`/resume` 回来的历史里全是旧参数名，模型照抄是常态，认下来比回一句「参数名错了」便宜。
 
-`timeout_ms` 是**本次调用愿意等多久**，不是任务寿命：等到任务完成、或等到点返回当前快照（`[running 12m04s]` + 已产出输出）——**不设上限、不中止任务**，长任务下次调用接着查。等到点仍未完成时正文补一句「这是快照不是结论」，免得 `[running …]` 被当结果读掉；只有仍在跑的是子代理才加「等它推回合结束」那半句（bash / monitor 不推通知）。`timeout_ms: 0` 或省略 = 不等待的即时快照
+`timeout_ms` 是**本次调用愿意等多久**，不是任务寿命：等到任务完成、或等到点返回当前快照（`[running 12m04s]` + 已产出输出）——**不设上限、不中止任务**，长任务下次调用接着查。等到点仍未完成时正文补一句「这是快照不是结论」，免得 `[running …]` 被当结果读掉。`timeout_ms: 0` 或省略 = 不等待的即时快照
 
 ## `tool-monitor`
 

@@ -110,9 +110,9 @@ async fn boot_with(sampler: Arc<dyn Sampler>, cfg: TaskConfig) -> Harness {
 
 fn parse_id(text: &str) -> String {
     text.lines()
-        .find_map(|l| l.trim().strip_prefix("subagent_id:"))
+        .find_map(|l| l.trim().strip_prefix("agent_id:"))
         .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| panic!("no subagent_id in {text}"))
+        .unwrap_or_else(|| panic!("no agent_id in {text}"))
 }
 
 async fn spawn_bg(tools: &Tools, prompt: &str, subagent_type: &str) -> String {
@@ -132,7 +132,8 @@ async fn spawn_bg(tools: &Tools, prompt: &str, subagent_type: &str) -> String {
     assert!(
         started.content.contains("Subagent started in background")
             && started.content.contains("send_message")
-            && started.content.contains("use job with job_ids="),
+            && started.content.contains("do not poll")
+            && !started.content.contains("job_ids"),
         "{}",
         started.content
     );
@@ -336,7 +337,7 @@ async fn queued_waits_until_current_turn_ends() {
     wait_running(&sub, &id).await;
     let ack = sub.send_message(&id, "QUEUED_FOLLOWUP", false).unwrap();
     assert!(
-        ack.contains("queued") && ack.contains("running") && ack.contains("after the current turn"),
+        ack.contains("queued") && ack.contains("running") && ack.contains("next step"),
         "{ack}"
     );
     assert!(
@@ -611,54 +612,75 @@ async fn reload_roster_picks_up_new_yml() {
     assert!(ids.iter().any(|id| id == "explore"), "{ids:?}");
 }
 
-/// `report` stays the child→parent channel, and it queues until the parent
-/// samples rather than mutating the parent's live history.
-#[tokio::test]
-async fn report_appends_parent_system_reminder() {
-    let h = boot(Arc::new(LastUser)).await;
-    let tools = h.root.require::<Tools>(TOOLS).unwrap();
-    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
-    let id = spawn_bg(&tools, "FIRST_TURN", "explore").await;
-    wait_idle(&sub, &id).await;
+/// A context that executes tools as child `id` would: its own isolated
+/// session (so the caller identity is the child's id) and its role's preset.
+fn child_ctx(h: &Harness, id: &str, role: &str) -> Context {
     let def = h
         .root
         .require::<AgentPresets>(AGENT_PRESETS)
         .unwrap()
-        .subagent("explore")
+        .subagent(role)
         .unwrap();
     let child = h.root.isolate("sessions").isolate("agentPresets");
     child
-        .provide(SESSIONS, Sessions::isolated_as(child.clone(), id.clone()))
+        .provide(
+            SESSIONS,
+            Sessions::isolated_as(child.clone(), id.to_string()),
+        )
         .unwrap();
     child
-        .provide(
-            AGENT_PRESETS,
-            AgentPresets::overlay(def.to_preset("explore")),
-        )
+        .provide(AGENT_PRESETS, AgentPresets::overlay(def.to_preset(role)))
         .unwrap();
-    let result = tools
+    child
+}
+
+/// A context that executes tools as a second main page (`main#2`).
+fn page_ctx(h: &Harness) -> Context {
+    let tab = h.root.isolate("sessions");
+    tab.provide(SESSIONS, Sessions::tab(tab.clone(), 2))
+        .unwrap();
+    tab
+}
+
+async fn call_on(tools: &Tools, ctx: &Context, name: &str, args: serde_json::Value) -> String {
+    tools
         .execute_on(
-            &child,
+            ctx,
             ToolCall {
-                id: "rp".into(),
-                name: "report".into(),
-                arguments: r#"{"output":"仓库只有 README"}"#.into(),
+                id: format!("c-{name}"),
+                name: name.into(),
+                arguments: args.to_string(),
             },
         )
-        .await;
-    assert!(
-        result.content.contains("report accepted"),
-        "{}",
-        result.content
-    );
-    // 回执里的 id 是发送者自己的，不是消息号——别写成「as message <id>」误导模型。
-    assert!(!result.content.contains("as message"), "{}", result.content);
+        .await
+        .content
+}
+
+/// `report` 并进了 `send_message`：子代理用同一颗工具、填启动它的会话 id 回话，
+/// 消息排进父信箱，等父级采样时才进历史，不改父级的现场历史。
+#[tokio::test]
+async fn child_send_message_reaches_the_parent_mailbox() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    // `explore` 是只读角色：它也得能回话。
+    let id = spawn_bg(&tools, "FIRST_TURN", "explore").await;
+    wait_idle(&sub, &id).await;
+    let child = child_ctx(&h, &id, "explore");
+    let ack = call_on(
+        &tools,
+        &child,
+        "send_message",
+        serde_json::json!({"agent_id": "main", "message": "仓库只有 README"}),
+    )
+    .await;
+    assert!(ack.contains("delivered to main"), "{ack}");
     let events = h.root.require::<Sessions>(SESSIONS).unwrap().events();
     assert!(
         !events
             .iter()
             .any(|e| matches!(e, LogEvent::SystemReminder(_))),
-        "report must queue until the parent samples: {events:?}"
+        "the message must queue until the parent samples: {events:?}"
     );
     let notices = sub.drain_parent_notices();
     assert!(
@@ -667,4 +689,246 @@ async fn report_appends_parent_system_reminder() {
             .any(|t| t.contains(&id) && t.contains("仓库只有 README")),
         "{notices:?}"
     );
+    assert!(
+        !tools.specs_for_model().iter().any(|s| s.name == "report"),
+        "report 已并进 send_message，不该再注册"
+    );
+}
+
+/// 相邻授权：父只能发给直接子，子只能发给启动它的会话；兄弟、自己、别的分页
+/// 一律拒绝。`list_agents` / `interrupt_agent` 同样只看调用方自己的孩子。
+#[tokio::test]
+async fn send_message_follows_exactly_one_adjacent_edge() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let a = spawn_bg(&tools, "A_TURN", "general-purpose").await;
+    let b = spawn_bg(&tools, "B_TURN", "general-purpose").await;
+    wait_idle(&sub, &a).await;
+    wait_idle(&sub, &b).await;
+    sub.drain_parent_notices();
+
+    let child_a = child_ctx(&h, &a, "general-purpose");
+    let msg = |to: &str| serde_json::json!({"agent_id": to, "message": "hi"});
+    let sibling = call_on(&tools, &child_a, "send_message", msg(&b)).await;
+    assert!(sibling.starts_with("Error"), "兄弟之间不能发：{sibling}");
+    let own = call_on(&tools, &child_a, "send_message", msg(&a)).await;
+    assert!(own.starts_with("Error"), "不能发给自己：{own}");
+    let other_page = call_on(&tools, &child_a, "send_message", msg("main#2")).await;
+    assert!(
+        other_page.starts_with("Error"),
+        "只认启动它的会话：{other_page}"
+    );
+    assert!(
+        sub.drain_parent_notices().is_empty(),
+        "被拒的消息不该进父信箱"
+    );
+
+    let page = page_ctx(&h);
+    let foreign = call_on(&tools, &page, "send_message", msg(&a)).await;
+    assert!(
+        foreign.starts_with("Error"),
+        "别的分页不是它的父级：{foreign}"
+    );
+    let listed = call_on(&tools, &page, "list_agents", serde_json::json!({})).await;
+    assert_eq!(listed, "(no subagents)");
+    let interrupt = call_on(
+        &tools,
+        &page,
+        "interrupt_agent",
+        serde_json::json!({"agent_id": a}),
+    )
+    .await;
+    assert!(interrupt.starts_with("Error"), "{interrupt}");
+
+    let listed = tools
+        .execute(ToolCall {
+            id: "ls".into(),
+            name: "list_agents".into(),
+            arguments: "{}".into(),
+        })
+        .await
+        .content;
+    assert!(listed.contains(&a) && listed.contains(&b), "{listed}");
+    let ok = tools
+        .execute(ToolCall {
+            id: "ok".into(),
+            name: "send_message".into(),
+            arguments: msg(&a).to_string(),
+        })
+        .await
+        .content;
+    assert!(ok.contains("delivered to idle agent"), "{ok}");
+}
+
+/// 回报指令写在子代理的初始任务里，并点名父级 id；人设里不再有上报段。
+#[tokio::test]
+async fn the_first_task_tells_the_child_whom_to_reply_to() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "FIRST_TURN", "explore").await;
+    wait_idle(&sub, &id).await;
+    let events = sub.events(&id);
+    let first_user = events
+        .iter()
+        .find_map(|e| match e {
+            LogEvent::User(t) => Some(t.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(first_user.contains("FIRST_TURN"), "{first_user}");
+    assert!(
+        first_user.contains(r#"agent_id 为 "main""#) && first_user.contains("send_message"),
+        "{first_user}"
+    );
+    let prompts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::Prompt(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        prompts.iter().all(|p| !p.contains("子代理上报")),
+        "上报段不该再进系统提示：{prompts:?}"
+    );
+}
+
+/// 第一步发一次工具调用（被 gate 挡住），之后把收到的父级消息原样当正文输出。
+struct ToolThenEchoMessages {
+    gate: Arc<Gate>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl Sampler for ToolThenEchoMessages {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let gate = self.gate.clone();
+        let nth = self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            if nth == 0 {
+                let notified = gate.release.notified();
+                gate.started.store(true, Ordering::SeqCst);
+                notified.await;
+                return LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: "step-1".into(),
+                        name: "list_agents".into(),
+                        arguments: "{}".into(),
+                    }],
+                    ..LlmOutput::default()
+                };
+            }
+            let text: String = request
+                .history
+                .iter()
+                .filter_map(|e| match e {
+                    LogEvent::SystemReminder(t) if t.contains("sent a message") => Some(t.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            on_delta(StreamDelta::Text(text.clone()));
+            LlmOutput {
+                text,
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+/// 在跑的子代理在**下一步**读到父级的消息，而不是等整轮结束再开一轮。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_child_reads_a_parent_message_at_its_next_step() {
+    let gate = Arc::new(Gate {
+        started: AtomicBool::new(false),
+        release: Notify::new(),
+    });
+    let h = boot(Arc::new(ToolThenEchoMessages {
+        gate: gate.clone(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    }))
+    .await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "FIRST_TURN", "general-purpose").await;
+    wait_flag(&gate.started).await;
+    wait_running(&sub, &id).await;
+    let ack = tools
+        .execute(ToolCall {
+            id: "mid".into(),
+            name: "send_message".into(),
+            arguments: serde_json::json!({"agent_id": id, "message": "MID_TURN"}).to_string(),
+        })
+        .await
+        .content;
+    assert!(
+        ack.contains("running") && ack.contains("next step"),
+        "{ack}"
+    );
+    gate.release.notify_waiters();
+    let out = wait_output_contains(&sub, &id, "MID_TURN").await;
+    assert!(
+        out.contains("Agent main sent a message:\nMID_TURN"),
+        "{out}"
+    );
+    let notices = sub.drain_parent_notices();
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|t| t.contains("finished its turn"))
+            .count(),
+        1,
+        "消息在同一轮里读到，不该多开一轮：{notices:?}"
+    );
+}
+
+/// 子代理不是作业：`job` 列不出它，`kill_task` 也处置不了它。
+#[tokio::test]
+async fn jobs_do_not_see_subagents() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    h.root
+        .plugin(cordis_spine::jobs(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    h.root
+        .plugin(cordis_spine::tool_jobs(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let id = spawn_bg(&tools, "FIRST_TURN", "general-purpose").await;
+    wait_idle(&sub, &id).await;
+    let run = |name: &str, args: serde_json::Value| {
+        let tools = tools.clone();
+        let name = name.to_string();
+        async move {
+            tools
+                .execute(ToolCall {
+                    id: "j".into(),
+                    name,
+                    arguments: args.to_string(),
+                })
+                .await
+                .content
+        }
+    };
+    let listed = run("job", serde_json::json!({})).await;
+    assert!(
+        listed.contains("No background tasks") && !listed.contains(&id),
+        "{listed}"
+    );
+    let polled = run("job", serde_json::json!({"job_ids": [id]})).await;
+    assert!(polled.contains("not found"), "{polled}");
+    let killed = run("kill_task", serde_json::json!({"job_id": id})).await;
+    assert!(killed.contains("not found"), "{killed}");
+    assert!(!sub.snapshot(&id).unwrap().done, "kill_task 不该处置子代理");
 }

@@ -87,7 +87,12 @@ enum Class {
 fn class_of(tool: &str) -> Class {
     match tool {
         "enter_plan_mode" | "exit_plan_mode" | "ask_user_question" | "todo_write" | "skill"
-        | "search_tool" | "update_goal" | "report" => Class::Meta,
+        | "search_tool" | "update_goal" => Class::Meta,
+
+        // 子代理回报父级走的就是它，只读子代理也得能用。放开是安全的：受限
+        // 子代理派不出孙代理，服务层的相邻授权又只认父子这一条边，兄弟之间
+        // 发不了、打断不了。
+        "send_message" => Class::Meta,
 
         "read_file" | "memory_get" | "memory_search" => Class::Read,
 
@@ -97,8 +102,8 @@ fn class_of(tool: &str) -> Class {
 
         "search_replace" | "write_file" | "memory_write" => Class::Edit,
 
-        "bash" | "monitor" | "task" | "send_message" | "interrupt_agent" | "job" | "kill_task"
-        | "workflow" | "scheduler_create" | "scheduler_delete" | "scheduler_list" => Class::Execute,
+        "bash" | "monitor" | "task" | "interrupt_agent" | "job" | "kill_task" | "workflow"
+        | "scheduler_create" | "scheduler_delete" | "scheduler_list" => Class::Execute,
 
         "use_tool" => Class::Dispatch,
 
@@ -156,7 +161,7 @@ mod tests {
             "lsp",
             "memory_search",
             "ask_user_question",
-            "report",
+            "send_message",
             "skill",
         ] {
             assert!(m.allows(allowed), "只读档不该挡 {allowed}");
@@ -166,6 +171,7 @@ mod tests {
             "write_file",
             "search_replace",
             "task",
+            "interrupt_agent",
             "monitor",
             "kill_task",
             "browser_evaluate",

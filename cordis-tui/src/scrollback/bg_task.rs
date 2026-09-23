@@ -20,7 +20,11 @@ pub fn is_bg_tool(name: &str) -> bool {
 
 pub fn parse_id(content: &str) -> Option<String> {
     for line in content.lines() {
-        if let Some(rest) = line.trim().strip_prefix("task_id:") {
+        if let Some(rest) = line
+            .trim()
+            .strip_prefix("job_id:")
+            .or_else(|| line.trim().strip_prefix("task_id:"))
+        {
             let id = rest.trim();
             if !id.is_empty() {
                 return Some(id.to_string());
@@ -199,6 +203,15 @@ mod tests {
         assert!(is_bg_notice(text));
         let hid = header_id("bash", text, r#"{"command":"sleep 9"}"#, &[]).unwrap();
         assert_eq!(open_id(&hid), Some("job-3"));
+    }
+
+    /// bash / monitor 现在打印 `job_id:`（与 `kill_task` 的参数同名）。
+    #[test]
+    fn parses_job_id_label() {
+        let text = "Monitor started in background.\njob_id: job-4\ndescription: watch\n";
+        assert_eq!(parse_id(text).as_deref(), Some("job-4"));
+        let hid = header_id("monitor", text, "{}", &[]).unwrap();
+        assert_eq!(open_id(&hid), Some("job-4"));
     }
 
     #[test]

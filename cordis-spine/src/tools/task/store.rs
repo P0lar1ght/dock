@@ -1,4 +1,4 @@
-//! TUI / jobs / resume cache. Spawn still goes through [`ChannelBackend`].
+//! TUI / mailbox / resume cache. Spawn still goes through [`ChannelBackend`].
 
 #![allow(dead_code)] // Grok-copied API kept for later wiring.
 
@@ -39,7 +39,10 @@ pub(super) struct ChildSlot {
     /// idle sweep.
     pub parked_at: Mutex<Option<Instant>>,
     pub owner: SubagentOwner,
-    /// True if `report` ran during the current child turn.
+    /// 启动这个孩子的会话身份（`main` / `main#2`）。`send_message` 的相邻授权
+    /// 看它：父只能发给自己的直接子，子只能发给它。
+    pub parent: String,
+    /// True if the child sent its parent a message during the current turn.
     pub reported_this_turn: AtomicBool,
 }
 
@@ -87,7 +90,7 @@ pub struct WorkflowReport {
 /// turn (`LogEvent::SystemReminder`).
 #[derive(Clone, Debug)]
 pub(super) enum ParentNotice {
-    /// Child called `report` during its turn.
+    /// Child sent its parent a message during its turn.
     Report { from: String, output: String },
     /// 一次 workflow run 收尾。整条 run 只有这一条通知——过程都在里面了。
     WorkflowDone {
@@ -109,7 +112,7 @@ pub(super) enum ParentNotice {
         description: String,
         duration_ms: u64,
         cancelled: bool,
-        /// The child's turn text, carried when it did not `report` this turn so
+        /// The child's turn text, carried when it did not message the parent this turn so
         /// the parent is not left waiting on an empty notice.
         output: Option<String>,
     },
@@ -136,7 +139,13 @@ impl ChildStore {
     }
 
     pub fn ensure(&self, id: &str, description: String, subagent_type: String) -> Arc<ChildSlot> {
-        self.ensure_owned(id, description, subagent_type, SubagentOwner::Task)
+        self.ensure_owned(
+            id,
+            description,
+            subagent_type,
+            SubagentOwner::Task,
+            crate::session::log::ROOT_IDENTITY,
+        )
     }
 
     pub fn ensure_owned(
@@ -145,6 +154,7 @@ impl ChildStore {
         description: String,
         subagent_type: String,
         owner: SubagentOwner,
+        parent: &str,
     ) -> Arc<ChildSlot> {
         let mut map = self.inner.lock().unwrap();
         if let Some(slot) = map.get(id) {
@@ -169,6 +179,7 @@ impl ChildStore {
             started_at: Instant::now(),
             parked_at: Mutex::new(None),
             owner,
+            parent: parent.to_owned(),
             reported_this_turn: AtomicBool::new(false),
         });
         map.insert(id.to_owned(), slot.clone());
@@ -184,6 +195,17 @@ impl ChildStore {
             .lock()
             .unwrap()
             .iter()
+            .map(|(id, s)| snap(id, s))
+            .collect()
+    }
+
+    /// `parent` 启动的孩子（不论死活）。
+    pub fn children_of(&self, parent: &str) -> Vec<SubagentSnap> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| s.parent == parent)
             .map(|(id, s)| snap(id, s))
             .collect()
     }
@@ -369,7 +391,22 @@ impl ChildStore {
             .and_then(|s| s.queued.lock().unwrap().pop_front())
     }
 
-    /// 子代理 `report` 的落点。
+    /// 在跑的孩子在下一步边界取走父级排队的消息（全部，按到达顺序）。
+    ///
+    /// 只在孩子 `Running` 时取：idle 的孩子由 `wait_next` 拿消息开下一轮，
+    /// 这里抢走就会让那一轮起不来。
+    pub fn take_queued_for_step(&self, id: &str) -> Vec<String> {
+        let Some(slot) = self.get(id) else {
+            return Vec::new();
+        };
+        if slot.life() != SubagentLife::Running || slot.disposed() {
+            return Vec::new();
+        }
+        let drained = slot.queued.lock().unwrap().drain(..).collect();
+        drained
+    }
+
+    /// 子代理发给父级的消息（`send_message` 子→父方向）的落点。
     ///
     /// workflow 的孩子**不进父信箱**：run 还在跑时把中间结论推给主线程，主线程
     /// 就会在半份结果上开一轮。它们攒进 run 自己的队列，由 workflow host 取走
@@ -442,10 +479,10 @@ impl ChildStore {
         }
     }
 
-    /// Mailbox children that end a turn without `report` still reach the parent.
+    /// Mailbox children that end a turn without messaging the parent still reach it.
     ///
     /// One notice per finished turn: the child is idle and continuable, plus
-    /// its turn text when it did not `report` (the parent cannot see assistant
+    /// its turn text when it did not message the parent (the parent cannot see assistant
     /// text otherwise). Callers that already delivered the result inline
     /// ([`Self::consume_completion`]) drop it again.
     pub fn push_turn_end(&self, id: &str, output: Option<String>, cancelled: bool) {
@@ -465,7 +502,7 @@ impl ChildStore {
     }
 
     /// Drop the queued turn-end notice for `id`: the caller already has the
-    /// result (inline foreground spawn, or a `job` poll).
+    /// result (inline foreground spawn).
     pub fn consume_completion(&self, id: &str) {
         self.inbox
             .lock()
@@ -479,8 +516,8 @@ impl ChildStore {
     }
 
     /// Dispose children that have been idle and unaddressed for longer than
-    /// `ttl`. Their slot and transcript survive, so `job` and
-    /// `resume_from` keep working.
+    /// `ttl`. Their slot and transcript survive, so `resume_from` keeps
+    /// working.
     pub fn sweep_idle(&self, ttl: Duration) -> Vec<String> {
         let mut swept = Vec::new();
         for (id, slot) in self.inner.lock().unwrap().iter() {

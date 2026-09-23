@@ -34,9 +34,9 @@ Grok Rhai 引擎（`vendor/xai/workflow`）+ 同款 oneshot ack。内置 `deep-r
 
 ### 主线程只在收尾时被叫醒一次
 
-workflow 子代理有两条会通到主线程的路，**都被按 owner 拦住了**：回合结束通知（`surface_completion: false`，`runner.rs` 真的会读它）与 `report`（`ChildStore::push_report` 按 owner 分流，进 run 自己的队列）。理由是同一条：run 还在跑时把「某个孩子跑完了」推给主线程，主线程就会在一份残缺的中间结果上烧一整轮——一次 deep-research 有十来个孩子。
+workflow 子代理有两条会通到主线程的路，**都被按 owner 拦住了**：回合结束通知（`surface_completion: false`，`runner.rs` 真的会读它）与子代理发给父级的 `send_message`（`ChildStore::push_report` 按 owner 分流，进 run 自己的队列）。理由是同一条：run 还在跑时把「某个孩子跑完了」推给主线程，主线程就会在一份残缺的中间结果上烧一整轮——一次 deep-research 有十来个孩子。
 
-子代理的 `report` 立刻进两处给**用户**看的通道：run 快照（overlay 那一行的 `latest_report` + 进度流）和滚动区 `LogEvent::Notice` 卡片。`Notice` **不进** `model_history`，所以看得见不等于叫醒主模型。run 收尾时**一条** `WorkflowDone` 信箱带着最终结果与全部过程上报（按发生顺序、每条截断到 600 字、最多 64 条，丢掉的在通知里如实报数）叫醒主线程，兑现工具描述里「完成后会自动汇报」；滚动区另有一张收尾卡。带的是**每一条**上报而不是每行的 `latest_report`——后者是覆盖写的，同一个孩子报第二次就把第一次挤掉了。每条上报署的是行上的 label（`researcher-0`），不是子代理 UUID。
+子代理发给父级的消息立刻进两处给**用户**看的通道：run 快照（overlay 那一行的 `latest_report` + 进度流）和滚动区 `LogEvent::Notice` 卡片。`Notice` **不进** `model_history`，所以看得见不等于叫醒主模型。run 收尾时**一条** `WorkflowDone` 信箱带着最终结果与全部过程上报（按发生顺序、每条截断到 600 字、最多 64 条，丢掉的在通知里如实报数）叫醒主线程，兑现工具描述里「完成后会自动汇报」；滚动区另有一张收尾卡。带的是**每一条**上报而不是每行的 `latest_report`——后者是覆盖写的，同一个孩子报第二次就把第一次挤掉了。每条上报署的是行上的 label（`researcher-0`），不是子代理 UUID。
 
 scratch 在 `~/.dock/scratch/<run_id>-<进程标记>/`：run id 是**会话内**序号（`wf_1`、`wf_2`…），两个 dock 同时开着会各自从 `wf_1` 起，光按 run id 建目录会让两次无关的 run 共用一个 scratch（互相读到对方的 `report.md`，配额也算在一起）。旧目录不自动删——那个路径是当着用户面给出去的。文件名必须是单个相对路径组件、拒符号链接、64 文件 / 单文件 10MB / 总量 64MB 配额、先写临时文件再 rename，读写都在 `spawn_blocking` 里。`render_template` 与 `git_diff_since` 返回 `Unsupported`（dock 没有模板表；仓库读写走 bash 权限门）。
 
@@ -48,7 +48,7 @@ scratch 在 `~/.dock/scratch/<run_id>-<进程标记>/`：run id 是**会话内**
 
 ### Workflow Runs 详情页
 
-`/workflow` 列表里 Enter 打开详情页（`/tasks` 里不展开：那是五类任务的总表）：左栏是脚本 `meta.phases` 声明的阶段（带 `已完成/总数`），右栏是该阶段的子代理行——`:: label · 状态 · tokens · 耗时`，下面缩进一行是它最新的 `report`。`↑↓` 换阶段、`x` 停这条 run、`esc` 回列表。
+`/workflow` 列表里 Enter 打开详情页（`/tasks` 里不展开：那是五类任务的总表）：左栏是脚本 `meta.phases` 声明的阶段（带 `已完成/总数`），右栏是该阶段的子代理行——`:: label · 状态 · tokens · 耗时`，下面缩进一行是它最新发给父级的消息。`↑↓` 换阶段、`x` 停这条 run、`esc` 回列表。
 
 子代理归到哪一阶段：先看 `agent(phase:)`，没写就回退到脚本当时 `phase()` 的那一段。两者都没有的才落到末尾的「其它」；脚本完全没声明阶段时左栏整个收掉。
 
