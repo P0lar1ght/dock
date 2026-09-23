@@ -33,14 +33,14 @@ Call matched tools with use_tool. Do not guess parameter names.";
 const SEARCH_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Keywords to match against tool names, server/group names, and descriptions (e.g. \"linear create issue\", \"scheduler\", \"browser\", \"cordis define\")."},"limit":{"type":"integer","minimum":1,"maximum":255,"description":"Maximum number of results (default 5, max 255)."}},"required":["query"]}"#;
 
 const USE_TOOL_DESC: &str = "Call an on-demand tool discovered via search_tool. \
-tool_name is the name search_tool returned (mcp_server__tool, or a local name like scheduler_create). \
+tool_name is the name search_tool returned (mcp_server__tool, a local name like scheduler_create, or a dynamic package tool). \
 tool_input must match that tool's input_schema. \
 If the schema is already in this conversation you may call use_tool again without searching; \
 after a new session, subagent, or compaction, search again. Never guess parameter names. \
 Do not route first-class tools (bash, read_file, …) through use_tool — call them directly. \
 Output is capped at 20KB; anything past the cap is written to a file whose path is in the truncation notice.";
 
-const USE_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"tool_name":{"type":"string","description":"Name from search_tool (mcp_server__tool or a deferred local tool)."},"tool_input":{"type":"object","description":"Arguments conforming to the tool's input_schema.","additionalProperties":true}},"required":["tool_name"]}"#;
+const USE_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"tool_name":{"type":"string","description":"Name from search_tool (mcp_server__tool, a deferred local tool, or a tool from a running dynamic package)."},"tool_input":{"type":"object","description":"Arguments conforming to the tool's input_schema.","additionalProperties":true}},"required":["tool_name"]}"#;
 
 /// Grok `MCP_MAX_OUTPUT_BYTES`.
 pub const USE_TOOL_MAX_OUTPUT_BYTES: usize = 20_000;
