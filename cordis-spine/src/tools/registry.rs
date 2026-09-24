@@ -51,8 +51,8 @@ pub(crate) fn with_exec_ctx<R>(ctx: &Context, f: impl FnOnce() -> R) -> R {
 }
 
 /// 异步版 [`with_exec_ctx`]。工具体本身跑在 `Tools::execute_on` 的 scope 里；
-/// 传输层测试要复现「两页各调一次」时走这里。
-#[cfg(test)]
+/// 整轮（[`crate::LoopHandle`]）也挂一层，让系统提示、压缩这些轮内逻辑能拿到
+/// 当前这页。传输层测试要复现「两页各调一次」时也走这里。
 pub(crate) async fn with_exec_ctx_async<T>(
     ctx: Context,
     fut: impl std::future::Future<Output = T>,

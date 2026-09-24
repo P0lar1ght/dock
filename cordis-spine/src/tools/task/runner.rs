@@ -189,6 +189,13 @@ async fn run_dock_child(
     if let Some(page) = parent.get::<Sessions>(SESSIONS).and_then(|s| s.ui_page()) {
         sessions.pin_page_home(page);
     }
+    // 子代理在父会话的工作目录里干活；父会话没钉就一起跟随进程 cwd。
+    if let Some(cwd) = parent
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| s.workspace_cwd())
+    {
+        sessions.pin_workspace_cwd(cwd);
+    }
     if !resume.is_empty() {
         sessions.seed(resume);
     }

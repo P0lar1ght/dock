@@ -302,7 +302,7 @@ pub async fn drain_loop_with_ctx(
     mut rx: mpsc::UnboundedReceiver<WorkflowLaunchEnvelope>,
 ) {
     while let Some((req, ack)) = rx.recv().await {
-        handle_launch(state.clone(), ctx.clone(), req.input, ack).await;
+        handle_launch(state.clone(), ctx.clone(), req.input, req.cwd, ack).await;
     }
 }
 
@@ -310,6 +310,7 @@ async fn handle_launch(
     state: Arc<WorkflowState>,
     ctx: cordis::Context,
     mut input: WorkflowToolInput,
+    cwd: std::path::PathBuf,
     ack: tokio::sync::oneshot::Sender<WorkflowLaunchAck>,
 ) {
     input.normalize();
@@ -321,7 +322,6 @@ async fn handle_launch(
         return;
     }
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let resolved = match &input.source {
         WorkflowSource::Name { name } => resolve_by_name(name, Some(&cwd)).map_err(resolve_detail),
         WorkflowSource::Script { script } => resolve_inline(script.clone()).map_err(resolve_detail),

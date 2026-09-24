@@ -18,7 +18,7 @@ use crate::names::{
 use crate::prompt::assemble::SystemPrompt;
 use crate::session::log::Sessions;
 use crate::tools::goal::continuation_reminder as goal_continuation_reminder;
-use crate::tools::registry::Tools;
+use crate::tools::registry::{with_exec_ctx_async, Tools};
 use crate::tools::task::Subagents;
 use cordis_base::types::{LogEvent, PreStep, PromptRequest, StepStart, TurnEnd, TurnOutcome};
 
@@ -298,8 +298,7 @@ fn system_cache_key(ctx: &Context) -> (String, PathBuf) {
         .get::<AgentPresets>(AGENT_PRESETS)
         .map(|p| p.current_id())
         .unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    (mode, cwd)
+    (mode, crate::session::cwd::session_cwd(ctx))
 }
 
 fn cancelled(ctx: &Context) -> bool {
@@ -351,18 +350,26 @@ impl LoopHandle {
         Self { ctx, driver }
     }
 
+    // 三个入口都把整轮挂在这页的 exec ctx 下：系统提示、压缩、reminder 这些
+    // 轮内逻辑经 `current_cwd()` 取到的是这页的工作目录，而不是进程 cwd。
+
     pub async fn run(&self, prompt: impl Into<String>) -> Result<TurnOutcome> {
-        self.driver.handle_prompt(&self.ctx, prompt.into()).await
+        let prompt = prompt.into();
+        with_exec_ctx_async(
+            self.ctx.clone(),
+            self.driver.handle_prompt(&self.ctx, prompt),
+        )
+        .await
     }
 
     /// Drain child messages / turn-end notices into the parent session and sample.
     pub async fn continue_mailbox(&self) -> Result<TurnOutcome> {
-        grok_continue_mailbox(&self.ctx).await
+        with_exec_ctx_async(self.ctx.clone(), grok_continue_mailbox(&self.ctx)).await
     }
 
     /// Hidden GoalSummary turn: reminder then sample, no user bubble.
     pub async fn continue_goal(&self) -> Result<TurnOutcome> {
-        grok_continue_goal(&self.ctx).await
+        with_exec_ctx_async(self.ctx.clone(), grok_continue_goal(&self.ctx)).await
     }
 }
 

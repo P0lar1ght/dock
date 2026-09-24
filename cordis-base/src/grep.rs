@@ -107,6 +107,9 @@ pub enum OutputMode {
 pub struct Input {
     pattern: String,
     path: PathBuf,
+    /// 调用方会话的工作目录：相对 `path` 按它展开，结果也显示成相对它的路径。
+    /// 由调用方传入，不读进程 cwd（同一进程可能同时服务多个项目）。
+    cwd: PathBuf,
     glob: Option<String>,
     file_type: Option<String>,
     case_insensitive: bool,
@@ -154,7 +157,7 @@ fn bool_field(v: &Value, keys: &[&str]) -> bool {
     })
 }
 
-pub fn parse(args: &str) -> Result<Input, String> {
+pub fn parse(args: &str, cwd: &Path) -> Result<Input, String> {
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
     let Some(pattern) = str_field(&v, &["pattern", "regex", "query"]) else {
         return Err("Error: pattern is required".into());
@@ -170,9 +173,7 @@ pub fn parse(args: &str) -> Result<Input, String> {
         if p.is_absolute() {
             p
         } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(p)
+            cwd.join(p)
         }
     };
     let context = usize_field(&v, &["-C", "context"]);
@@ -183,6 +184,7 @@ pub fn parse(args: &str) -> Result<Input, String> {
     Ok(Input {
         pattern,
         path,
+        cwd: cwd.to_path_buf(),
         glob: str_field(&v, &["glob", "include"]),
         file_type: str_field(&v, &["type"]),
         case_insensitive: bool_field(&v, &["-i", "case_insensitive", "ignore_case"]),
@@ -318,8 +320,9 @@ fn display_path(path: &Path, root: &Path, cwd: &Path) -> String {
         .replace('\\', "/")
 }
 
-pub async fn run(call_id: &str, args: &str) -> String {
-    let input = match parse(args) {
+/// `cwd` 是调用方会话的工作目录，见 [`Input::cwd`]。
+pub async fn run(call_id: &str, args: &str, cwd: &Path) -> String {
+    let input = match parse(args, cwd) {
         Ok(i) => i,
         Err(e) => return e,
     };
@@ -690,12 +693,10 @@ fn search(input: &Input) -> Result<Outcome, String> {
     let mut batch_size = INITIAL_BATCH.min(max_batch);
     // 显式点名一颗文件时不设大小闸：那是模型明说要搜它，跳过等于答非所问。
     let size_guard = !input.path.is_file();
-    // cwd 取一次就够：以前它是每颗文件的 `getcwd`。
-    let cwd = std::env::current_dir().unwrap_or_else(|_| input.path.clone());
     let ctx = ScanCtx {
         input,
         root: &input.path,
-        cwd: &cwd,
+        cwd: &input.cwd,
         size_guard,
     };
     let deadline = Instant::now() + WALL_CLOCK;
@@ -896,7 +897,26 @@ mod tests {
     async fn grep(dir: &tempfile::TempDir, args: serde_json::Value) -> String {
         let mut args = args;
         args["path"] = serde_json::json!(dir.path());
-        run("t", &args.to_string()).await
+        run("t", &args.to_string(), &std::env::current_dir().unwrap()).await
+    }
+
+    /// 相对 `path` 按调用方给的会话 cwd 展开，不按进程 cwd：同一进程里两页
+    /// 可能在不同项目，按进程 cwd 会搜错仓库。
+    #[tokio::test]
+    async fn relative_path_resolves_against_the_given_cwd() {
+        let dir = fixture();
+        let out = run(
+            "t",
+            r#"{"pattern":"beta","path":"src","output_mode":"files_with_matches"}"#,
+            dir.path(),
+        )
+        .await;
+        assert!(
+            out.contains("src/a.rs"),
+            "应在会话 cwd 下的 src/ 里找到：{out}"
+        );
+        // 按进程 cwd 展开的话搜的是 cordis-base/src，本文件自己就含 "beta"。
+        assert!(!out.contains("grep.rs"), "搜到了进程 cwd 下的仓库：{out}");
     }
 
     #[tokio::test]
@@ -1026,7 +1046,11 @@ mod tests {
             paths.push(p);
         }
         paths.sort();
-        let input = parse(r#"{"pattern":"alpha","path":".","head_limit":100}"#).unwrap();
+        let input = parse(
+            r#"{"pattern":"alpha","path":".","head_limit":100}"#,
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
         let matcher = RegexMatcherBuilder::new()
             .build("alpha")
             .expect("valid regex");
@@ -1034,12 +1058,11 @@ mod tests {
             .iter()
             .map(|p| FileEntry { path: p.clone() })
             .collect();
-        let cwd = std::env::current_dir().unwrap();
         let root = dir.path().to_path_buf();
         let ctx = ScanCtx {
             input: &input,
             root: &root,
-            cwd: &cwd,
+            cwd: &input.cwd,
             size_guard: true,
         };
 
@@ -1075,7 +1098,11 @@ mod tests {
     /// 这条守住的是「worker 崩了不能静悄悄给不完整结果」。
     #[test]
     fn a_failed_worker_marks_the_result_incomplete() {
-        let input = parse(r#"{"pattern":"x","path":"."}"#).unwrap();
+        let input = parse(
+            r#"{"pattern":"x","path":"."}"#,
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
         let mut acc = SearchAcc::new(&input);
         acc.absorb(BatchScan {
             scans: vec![FileScan::NoMatch],
@@ -1104,6 +1131,7 @@ mod tests {
         let out = run(
             "t",
             &serde_json::json!({"pattern": "needle", "path": dir.path()}).to_string(),
+            &std::env::current_dir().unwrap(),
         )
         .await;
         assert!(out.contains("small.txt:1:needle here"), "{out}");
@@ -1117,6 +1145,7 @@ mod tests {
         let only_big = run(
             "t",
             &serde_json::json!({"pattern": "xxxxxx", "path": dir.path()}).to_string(),
+            &std::env::current_dir().unwrap(),
         )
         .await;
         assert!(only_big.contains("no matches"), "{only_big}");
@@ -1136,6 +1165,7 @@ mod tests {
         let out = run(
             "t",
             &serde_json::json!({"pattern": "needle", "path": big}).to_string(),
+            &std::env::current_dir().unwrap(),
         )
         .await;
         assert!(out.contains("needle"), "{out}");
@@ -1161,6 +1191,7 @@ mod tests {
             "multi-file-limit",
             &serde_json::json!({"pattern": "hit", "path": dir.path(), "head_limit": 200})
                 .to_string(),
+            &std::env::current_dir().unwrap(),
         )
         .await;
         let inline = out.lines().filter(|l| l.contains(":hit ")).count();
@@ -1185,6 +1216,7 @@ mod tests {
                 "output_mode": "files_with_matches",
             })
             .to_string(),
+            &std::env::current_dir().unwrap(),
         )
         .await;
         let files: Vec<&str> = out.lines().filter(|l| l.ends_with(".txt")).collect();
@@ -1204,6 +1236,7 @@ mod tests {
         let out = run(
             "spill-1",
             &serde_json::json!({"pattern": "hit", "path": dir.path(), "head_limit": 5}).to_string(),
+            &std::env::current_dir().unwrap(),
         )
         .await;
         assert_eq!(out.matches("big.txt:").count(), 5, "只内联 5 行：{out}");
@@ -1234,6 +1267,7 @@ mod tests {
         let out = run(
             "t",
             &serde_json::json!({"pattern": "needle", "path": dir.path()}).to_string(),
+            &std::env::current_dir().unwrap(),
         )
         .await;
         assert!(out.contains("line truncated"), "{out}");
@@ -1252,6 +1286,7 @@ mod tests {
         let out = run(
             "t",
             &serde_json::json!({"pattern": "needle", "path": dir.path()}).to_string(),
+            &std::env::current_dir().unwrap(),
         )
         .await;
         assert!(!out.contains("\u{1}"), "不该吐出二进制字节：{out:?}");
@@ -1266,16 +1301,28 @@ mod tests {
 
     #[test]
     fn head_limit_is_clamped_to_the_hard_cap() {
-        let input = parse(r#"{"pattern":"x","head_limit":999999}"#).unwrap();
+        let input = parse(
+            r#"{"pattern":"x","head_limit":999999}"#,
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
         assert_eq!(input.head_limit, CONTENT_LINE_LIMIT);
-        let files = parse(r#"{"pattern":"x","output_mode":"count","head_limit":999999}"#).unwrap();
+        let files = parse(
+            r#"{"pattern":"x","output_mode":"count","head_limit":999999}"#,
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
         assert_eq!(files.head_limit, ENTRY_LIMIT);
     }
 
     /// `-C` 要同时盖住 `-A` / `-B`（对齐 rg）。
     #[test]
     fn context_flag_overrides_before_and_after() {
-        let input = parse(r#"{"pattern":"x","-A":1,"-B":1,"-C":5}"#).unwrap();
+        let input = parse(
+            r#"{"pattern":"x","-A":1,"-B":1,"-C":5}"#,
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
         assert_eq!((input.before, input.after), (5, 5));
     }
 }
