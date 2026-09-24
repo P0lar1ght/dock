@@ -886,6 +886,7 @@ fn build_frame(
                         &call.arguments,
                         "",
                         true,
+                        false,
                         &theme,
                         width,
                         tool_fold,
@@ -903,7 +904,7 @@ fn build_frame(
                 arguments,
                 content,
                 images: _,
-                is_error: _,
+                is_error,
             } => {
                 // 相邻的、都已完成的前台 bash 合成一张卡。后台 bash 归 bg_task
                 // 卡（自带任务 id 与实时输出），不参与合并。
@@ -923,11 +924,13 @@ fn build_frame(
                                 id,
                                 arguments,
                                 content,
+                                is_error,
                                 ..
                             } => Some(execute::Call {
                                 id,
                                 arguments,
                                 content,
+                                failed: *is_error,
                                 // 缺省继承组的折叠态，用户单独点过那条才有自己的值。
                                 mode: tool_fold.get(id).copied().unwrap_or(group_mode),
                             }),
@@ -959,6 +962,7 @@ fn build_frame(
                     arguments,
                     content,
                     false,
+                    *is_error,
                     &theme,
                     width,
                     tool_fold,
@@ -1116,6 +1120,8 @@ fn push_tool_card(
     arguments: &str,
     content: &str,
     running: bool,
+    // `ToolExecute::is_error`：Dock 落下的失败标记，渲染器不再按输出猜。
+    failed: bool,
     theme: &Theme,
     width: usize,
     tool_fold: &HashMap<String, tool::ToolMode>,
@@ -1187,6 +1193,7 @@ fn push_tool_card(
             snap.as_ref(),
             theme,
             width,
+            failed,
         ));
         if still_running {
             mark_live(
@@ -1222,7 +1229,7 @@ fn push_tool_card(
             .copied()
             .unwrap_or(tool::ToolMode::Collapsed);
         lines.extend(tool_card_lines(
-            name, arguments, content, theme, width, mode, running,
+            name, arguments, content, theme, width, mode, running, failed,
         ));
         if running {
             mark_live(live_rows, lines, header_at, started);
@@ -1356,6 +1363,8 @@ fn tool_name_for_fold(ctx: &Context, id: &str) -> Option<String> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+// 绘制函数：参数是主题 / 宽度 / 折叠态 / 运行与失败标记这些绘制碎片，同 `push_tool_card` 的取舍。
 fn tool_card_lines(
     name: &str,
     arguments: &str,
@@ -1364,19 +1373,20 @@ fn tool_card_lines(
     width: usize,
     mode: tool::ToolMode,
     running: bool,
+    failed: bool,
 ) -> Vec<Line<'static>> {
     if read::is_read_tool(name) {
         read::lines(arguments, content, theme, width, mode, running)
     } else if edit::is_edit_tool(name) {
         edit::lines(name, arguments, content, theme, width, mode, running)
     } else if search_tool::is_search_tool(name) {
-        search_tool::lines(arguments, content, theme, width, mode, running)
+        search_tool::lines(arguments, content, theme, width, mode, running, failed)
     } else if search::is_search_tool(name) {
         search::lines(name, arguments, content, theme, width, mode, running)
     } else if list_dir::is_list_dir_tool(name) {
         list_dir::lines(arguments, content, theme, width, mode, running)
     } else if execute::is_execute_tool(name) {
-        execute::lines(arguments, content, theme, width, mode, running)
+        execute::lines(arguments, content, theme, width, mode, running, failed)
     } else if web::is_web_tool(name) {
         web::lines(name, arguments, content, theme, width, mode, running)
     } else if todo::is_todo_tool(name) {
@@ -1388,11 +1398,13 @@ fn tool_card_lines(
     } else if sched::is_scheduler_tool(name) {
         sched::lines(name, arguments, content, theme, width, mode, running)
     } else if mcp::is_mcp_tool(name) {
-        mcp::lines(name, arguments, content, theme, width, mode, running)
+        mcp::lines(
+            name, arguments, content, theme, width, mode, running, failed,
+        )
     } else if ask::is_ask_tool(name) {
         ask::lines(name, arguments, content, theme, width, mode, running)
     } else if memory_search::is_memory_search(name) {
-        memory_search::lines(arguments, content, theme, width, mode, running)
+        memory_search::lines(arguments, content, theme, width, mode, running, failed)
     } else {
         tool::lines(name, arguments, content, theme, width, mode, running)
     }
@@ -1997,12 +2009,14 @@ mod tests {
                 id: "1",
                 arguments: r#"{"command":"cargo fmt --check"}"#,
                 content: "",
+                failed: false,
                 mode: tool::ToolMode::Expanded,
             },
             execute::Call {
                 id: "2",
                 arguments: r#"{"command":"cargo test"}"#,
                 content: "test result: ok",
+                failed: false,
                 mode: tool::ToolMode::Expanded,
             },
         ];
@@ -2025,12 +2039,14 @@ mod tests {
                 id: "c1",
                 arguments: r#"{"command":"one"}"#,
                 content: "OUT-ONE",
+                failed: false,
                 mode: tool::ToolMode::Expanded,
             },
             execute::Call {
                 id: "c2",
                 arguments: r#"{"command":"two"}"#,
                 content: "OUT-TWO",
+                failed: false,
                 mode: tool::ToolMode::Collapsed,
             },
         ];
@@ -2990,7 +3006,16 @@ mod card_shell_tests {
     }
 
     fn render(name: &str, args: &str, content: &str, mode: tool::ToolMode) -> Vec<Line<'static>> {
-        tool_card_lines(name, args, content, &Theme::current(), 60, mode, false)
+        tool_card_lines(
+            name,
+            args,
+            content,
+            &Theme::current(),
+            60,
+            mode,
+            false,
+            false,
+        )
     }
 
     /// 正文一律缩进 [`card::BODY_INDENT`] 列，和标题文字对齐。原先 0 / 2 /
@@ -3083,6 +3108,7 @@ mod card_shell_tests {
                     &Theme::current(),
                     pane,
                     tool::ToolMode::Collapsed,
+                    false,
                     false,
                 )
                 .remove(0);

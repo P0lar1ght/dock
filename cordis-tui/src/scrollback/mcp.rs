@@ -17,6 +17,8 @@ pub fn is_mcp_tool(name: &str) -> bool {
     name == USE_TOOL_NAME || is_mcp_public_name(name)
 }
 
+#[allow(clippy::too_many_arguments)]
+// 绘制函数：参数是主题 / 宽度 / 折叠态 / 运行与失败标记这些绘制碎片，同 `push_tool_card` 的取舍。
 pub fn lines(
     name: &str,
     arguments: &str,
@@ -25,8 +27,9 @@ pub fn lines(
     width: usize,
     mode: ToolMode,
     running: bool,
+    // Dock 落下的 `is_error`，不按输出猜。
+    failed: bool,
 ) -> Vec<Line<'static>> {
-    let failed = looks_failed(content);
     let open = mode != ToolMode::Collapsed;
     let muted = (!open && !running) || failed;
     let mut header = header_line(
@@ -83,11 +86,6 @@ pub fn lines(
         }
     }
     out
-}
-
-fn looks_failed(content: &str) -> bool {
-    let t = content.trim_start();
-    t.starts_with("Error") || t.starts_with("error") || t.starts_with("{\"error")
 }
 
 /// Grok `mcp_titleize_segment`: split on `_`, title-case each word.
@@ -257,6 +255,7 @@ mod tests {
             80,
             ToolMode::Collapsed,
             false,
+            false,
         ));
         assert!(text.contains("Local"), "{text}");
         assert!(text.contains("Echo"), "{text}");
@@ -281,6 +280,7 @@ mod tests {
             80,
             ToolMode::Collapsed,
             false,
+            false,
         ));
         assert!(text.contains("Local"), "{text}");
         assert!(text.contains("Echo"), "{text}");
@@ -298,6 +298,7 @@ mod tests {
             &theme,
             80,
             ToolMode::Expanded,
+            false,
             false,
         ));
         assert!(text.contains("Local"), "{text}");
@@ -318,6 +319,7 @@ mod tests {
             80,
             ToolMode::Expanded,
             false,
+            false,
         ));
         assert!(text.contains("text: "), "{text}");
         assert!(text.contains("hi"), "{text}");
@@ -335,6 +337,7 @@ mod tests {
             &theme,
             80,
             ToolMode::Truncated,
+            false,
             false,
         ));
         assert!(text.contains("L01"), "{text}");
