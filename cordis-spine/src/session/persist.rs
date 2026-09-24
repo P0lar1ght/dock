@@ -689,6 +689,20 @@ fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
     fs::rename(tmp, path)
 }
 
+/// 这份记录里有没有「对话」：用户消息、模型输出、工具结果、通知卡。只有后台
+/// 记账（开场提醒、提示词组装、轮次结束）的会话不落盘——比如刚开页就收到
+/// 「MCP 已连接」，没人说过话，写下来只会在会话列表里多一个空会话。
+pub fn has_conversation(events: &[LogEvent]) -> bool {
+    events.iter().any(|e| match e {
+        LogEvent::User(_) | LogEvent::ToolExecute { .. } | LogEvent::Notice { .. } => true,
+        LogEvent::LlmStream(out) => !out.text.is_empty() || !out.tool_calls.is_empty(),
+        LogEvent::PreStep
+        | LogEvent::Prompt(_)
+        | LogEvent::SystemReminder(_)
+        | LogEvent::TurnEnd(_) => false,
+    })
+}
+
 pub fn empty_llm_placeholder(events: &[LogEvent]) -> bool {
     matches!(
         events.last(),
@@ -980,6 +994,45 @@ mod tests {
             loaded.is_empty(),
             "must skip paths outside tool-images: {loaded:?}"
         );
+    }
+
+    /// 回归：只收到一条后台提醒（如「MCP 已连接」）、没人说过话的会话也被写了盘，
+    /// 在会话列表里多出一个空会话。只有真有内容（用户消息、模型输出、工具结果、
+    /// 通知卡）才落盘；有了之后照常写。
+    #[tokio::test]
+    async fn a_session_with_only_bookkeeping_is_not_saved() {
+        let _home = cordis_base::test_env::scoped().home();
+        let saved = || {
+            walk_files(&dock_home().join("sessions"))
+                .into_iter()
+                .filter(|p| p.ends_with(HISTORY))
+                .count()
+        };
+        let sessions = crate::session::log::Sessions::new(cordis::Context::new());
+        sessions.attach_disk();
+        sessions.append(LogEvent::SystemReminder("MCP 服务器已连接".into()));
+        sessions.append(LogEvent::PreStep);
+        assert_eq!(saved(), 0, "只有后台提醒的会话不该落盘");
+
+        sessions.append(LogEvent::User("hi".into()));
+        assert_eq!(saved(), 1, "有了用户消息就该落盘");
+    }
+
+    fn walk_files(dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .flat_map(|e| {
+                let p = e.path();
+                if p.is_dir() {
+                    walk_files(&p)
+                } else {
+                    vec![p]
+                }
+            })
+            .collect()
     }
 
     #[tokio::test]

@@ -1239,10 +1239,12 @@ impl Sessions {
         other + ascii.saturating_add(3) / 4
     }
 
-    /// Snapshot the live log into the resume list. No-op when empty.
+    /// Snapshot the live log into the resume list. No-op when it has no
+    /// conversation yet (empty, or only bookkeeping — see
+    /// [`crate::session::persist::has_conversation`]).
     pub fn archive_current(&self) -> Option<ArchivedSession> {
         let events = self.events();
-        if events.is_empty() {
+        if !crate::session::persist::has_conversation(&events) {
             return None;
         }
         self.persist_live();
@@ -1425,7 +1427,9 @@ impl Sessions {
         }
         let id = live.clone();
         drop(live);
-        if events.is_empty() {
+        // 空的、或只有后台记账的（见 `has_conversation`）：不写，写过的删掉——
+        // 撤回第一条消息后只剩开场提醒，也是这种。
+        if !crate::session::persist::has_conversation(&events) {
             let _ = crate::session::persist::remove(&id, &cwd);
             return;
         }
