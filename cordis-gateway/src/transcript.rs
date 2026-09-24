@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 
 use cordis_spine::{
     Ask, ElicitPrompt, LogEvent, PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt,
-    PlanDecision, Sessions, UserImage, ROOT_IDENTITY,
+    PlanDecision, Sessions, TurnEndStatus, UserImage, ROOT_IDENTITY,
 };
 
 use crate::protocol::LIVE_THREAD_ID;
@@ -86,6 +86,9 @@ struct Projector {
     seen_tools: HashSet<String>,
     pending_tools: HashSet<String>,
     turn_open: bool,
+    /// 这一轮最后一次采样的 `LlmOutput::error`。模型请求失败不会让循环返回
+    /// `Err`，只能从这里知道，收尾时把 completed 改报 failed。
+    sample_error: Option<String>,
     perm_id: Option<String>,
     ask_id: Option<String>,
     plan_id: Option<String>,
@@ -178,6 +181,7 @@ impl Transcript {
                 self.projector.turn_n += 1;
                 self.projector.turn_id = format!("t{}", self.projector.turn_n);
                 self.projector.last_text.clear();
+                self.projector.sample_error = None;
                 self.projector.seen_tools.clear();
                 self.projector.pending_tools.clear();
                 self.projector.turn_open = true;
@@ -197,6 +201,7 @@ impl Transcript {
                     self.push("item/message_delta", json!({ "delta": delta }));
                 }
                 self.projector.last_text.clone_from(&out.text);
+                self.projector.sample_error.clone_from(&out.error);
                 for call in &out.tool_calls {
                     if self.projector.seen_tools.insert(call.id.clone()) {
                         self.projector.pending_tools.insert(call.id.clone());
@@ -475,9 +480,23 @@ impl Transcript {
         self.push("turn/started", json!({ "status": "running" }));
     }
 
-    /// 这一页的 `LoopHandle` 跑完一轮（`session/turn-end`）。
-    pub fn turn_ended(&mut self) {
-        self.complete_turn_if_open();
+    /// 这一页的 `LoopHandle` 跑完一轮（`session/turn-end`）。`status` 是
+    /// completed / cancelled / failed；失败带 `error`，否则客户端只见一轮空结束。
+    pub fn turn_ended(&mut self, status: &TurnEndStatus) {
+        let sample_error = self.projector.sample_error.take();
+        if !self.projector.turn_open {
+            return;
+        }
+        self.projector.turn_open = false;
+        let payload = match status {
+            TurnEndStatus::Completed => match sample_error {
+                Some(error) => json!({ "status": "failed", "error": error }),
+                None => json!({ "status": "completed" }),
+            },
+            TurnEndStatus::Cancelled => json!({ "status": "cancelled" }),
+            TurnEndStatus::Failed(error) => json!({ "status": "failed", "error": error }),
+        };
+        self.push("turn/completed", payload);
     }
 
     fn complete_turn_if_open(&mut self) {
@@ -768,8 +787,8 @@ mod tests {
             "流式中途不该结束：{:?}",
             methods(&t)
         );
-        t.turn_ended();
-        t.turn_ended();
+        t.turn_ended(&TurnEndStatus::Completed);
+        t.turn_ended(&TurnEndStatus::Completed);
         assert_eq!(deltas(&t).concat(), "当前目录只有");
         let m = methods(&t);
         assert_eq!(
@@ -783,6 +802,67 @@ mod tests {
             "{m:?}"
         );
         assert_eq!(m.last().map(String::as_str), Some("turn/completed"));
+    }
+
+    /// 回归：一轮出错（如模型请求失败）以前只回给 TUI，dock.1 客户端只看到
+    /// `turn/completed {status: completed}`、没有任何产出，不知道出了错。
+    #[test]
+    fn turn_end_reports_failure_and_cancel() {
+        let completed = |t: &Transcript| {
+            t.history_since(0)
+                .into_iter()
+                .filter(|e| e.method == "turn/completed")
+                .map(|e| e.payload)
+                .collect::<Vec<_>>()
+        };
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.turn_ended(&TurnEndStatus::Failed("模型请求失败：HTTP 400".into()));
+        t.ingest_log(LogEvent::User("again".into()));
+        t.turn_ended(&TurnEndStatus::Cancelled);
+        let ends = completed(&t);
+        assert_eq!(ends.len(), 2, "{ends:?}");
+        assert_eq!(ends[0]["status"], "failed");
+        assert_eq!(ends[0]["error"], "模型请求失败：HTTP 400");
+        assert_eq!(ends[1]["status"], "cancelled");
+        assert!(ends[1].get("error").is_none(), "{:?}", ends[1]);
+    }
+
+    /// 回归：模型请求失败不是 `Err`，而是写在 `LlmOutput::error` 里（不进 `text`，
+    /// 免得回放给模型），循环照常收尾成 Ok —— 所以网关要自己记住这一轮最后一次
+    /// 采样的错误，否则客户端看到的是「completed、没有任何回复」。
+    #[test]
+    fn sampling_error_turns_a_completed_turn_into_failed() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            error: Some("llm request failed: HTTP 404 model not found".into()),
+            ..Default::default()
+        }));
+        t.turn_ended(&TurnEndStatus::Completed);
+        // 下一轮先失败后重试成功：以最后一次采样为准，不沿用上一轮的错误。
+        t.ingest_log(LogEvent::User("again".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            error: Some("transient".into()),
+            ..Default::default()
+        }));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "ok".into(),
+            ..Default::default()
+        }));
+        t.turn_ended(&TurnEndStatus::Completed);
+        let ends: Vec<_> = t
+            .history_since(0)
+            .into_iter()
+            .filter(|e| e.method == "turn/completed")
+            .map(|e| e.payload)
+            .collect();
+        assert_eq!(ends[0]["status"], "failed");
+        assert_eq!(
+            ends[0]["error"],
+            "llm request failed: HTTP 404 model not found"
+        );
+        assert_eq!(ends[1]["status"], "completed", "{:?}", ends[1]);
     }
 
     #[test]

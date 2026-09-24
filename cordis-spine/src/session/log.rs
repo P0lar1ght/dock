@@ -149,10 +149,21 @@ fn estimated_cost_ticks(wire_model: &str, usage: &cordis_base::usage::TokenUsage
     ))
 }
 
-/// [`SESSION_TURN_END`] 的载荷：哪一页的一轮结束了。
+/// 一轮是怎么结束的。网关投影成 `turn/completed` 的 `status`（失败时带 `error`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnEndStatus {
+    Completed,
+    /// 用户停止（`Error::Cancelled`）。
+    Cancelled,
+    /// 其它错误：模型请求失败、超步数等。带给用户看的错误文本。
+    Failed(String),
+}
+
+/// [`SESSION_TURN_END`] 的载荷：哪一页的一轮结束了、怎么结束的。
 #[derive(Clone, Debug)]
 pub struct PageTurnEnd {
     pub page: Arc<str>,
+    pub status: TurnEndStatus,
 }
 
 /// [`SESSION_PAGE_EVENT`] 的载荷：哪一页（`main` / `main#N`）发了哪条事件。
@@ -596,7 +607,7 @@ impl Sessions {
     }
 
     /// 这一页的一轮跑完了。[`crate::LoopHandle`] 的每个入口结束时调一次。
-    pub fn end_turn(&self) {
+    pub fn end_turn(&self, status: TurnEndStatus) {
         if !self.emit {
             return;
         }
@@ -604,6 +615,7 @@ impl Sessions {
             SESSION_TURN_END,
             PageTurnEnd {
                 page: self.identity.clone(),
+                status,
             },
         );
     }
@@ -2005,7 +2017,7 @@ mod tests {
         use cordis_base::stream_acc::StreamDelta;
         let root = Context::new();
         let streams = Arc::new(Mutex::new(Vec::<String>::new()));
-        let ends = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ends = Arc::new(Mutex::new(Vec::<(String, TurnEndStatus)>::new()));
         let _a = {
             let streams = streams.clone();
             root.on(SESSION_PAGE_EVENT, move |e: &PageLogEvent| {
@@ -2018,7 +2030,9 @@ mod tests {
         let _b = {
             let ends = ends.clone();
             root.on(SESSION_TURN_END, move |e: &PageTurnEnd| {
-                ends.lock().unwrap().push(e.page.to_string());
+                ends.lock()
+                    .unwrap()
+                    .push((e.page.to_string(), e.status.clone()));
             })
             .unwrap()
         };
@@ -2032,14 +2046,17 @@ mod tests {
             model: String::new(),
             cost_usd_ticks: None,
         });
-        sessions.end_turn();
+        sessions.end_turn(TurnEndStatus::Completed);
 
         assert_eq!(
             *streams.lock().unwrap(),
             ["", "你好", "你好"],
             "开头那条空的是 begin_llm（新一步），用量更新不能再发空文本"
         );
-        assert_eq!(*ends.lock().unwrap(), ["main#3"]);
+        assert_eq!(
+            *ends.lock().unwrap(),
+            [("main#3".to_string(), TurnEndStatus::Completed)]
+        );
     }
 
     #[test]

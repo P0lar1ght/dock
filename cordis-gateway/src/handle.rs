@@ -398,7 +398,9 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             .into_iter()
             .find(|p| p.identity == *end.page)
             .map(|p| p.thread_id());
-        with_transcript(&for_turn_end, &end.page, thread_id, |t| t.turn_ended());
+        with_transcript(&for_turn_end, &end.page, thread_id, |t| {
+            t.turn_ended(&end.status)
+        });
     });
     // 队列事件载荷是 `()`，也不知道是哪一页的：挨页对账，序号没变的页不动。
     let for_perm = inner.clone();

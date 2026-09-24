@@ -16,7 +16,7 @@ use crate::names::{
     TOOLS, TURN, TURN_END,
 };
 use crate::prompt::assemble::SystemPrompt;
-use crate::session::log::Sessions;
+use crate::session::log::{Sessions, TurnEndStatus};
 use crate::tools::goal::continuation_reminder as goal_continuation_reminder;
 use crate::tools::registry::{with_exec_ctx_async, Tools};
 use crate::tools::task::Subagents;
@@ -360,28 +360,34 @@ impl LoopHandle {
             self.driver.handle_prompt(&self.ctx, prompt),
         )
         .await;
-        self.end_turn();
+        self.end_turn(&out);
         out
     }
 
     /// Drain child messages / turn-end notices into the parent session and sample.
     pub async fn continue_mailbox(&self) -> Result<TurnOutcome> {
         let out = with_exec_ctx_async(self.ctx.clone(), grok_continue_mailbox(&self.ctx)).await;
-        self.end_turn();
+        self.end_turn(&out);
         out
     }
 
     /// Hidden GoalSummary turn: reminder then sample, no user bubble.
     pub async fn continue_goal(&self) -> Result<TurnOutcome> {
         let out = with_exec_ctx_async(self.ctx.clone(), grok_continue_goal(&self.ctx)).await;
-        self.end_turn();
+        self.end_turn(&out);
         out
     }
 
     /// 成功、出错、取消都发：流式事件分不出哪段是最后一段，一轮何时结束只有这里知道。
-    fn end_turn(&self) {
+    /// 错误只有这里拿得到（TUI 以外没人等这一轮的返回值），所以顺带报出去。
+    fn end_turn(&self, out: &Result<TurnOutcome>) {
+        let status = match out {
+            Ok(_) => TurnEndStatus::Completed,
+            Err(Error::Cancelled) => TurnEndStatus::Cancelled,
+            Err(e) => TurnEndStatus::Failed(e.to_string()),
+        };
         if let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) {
-            sessions.end_turn();
+            sessions.end_turn(status);
         }
     }
 }
