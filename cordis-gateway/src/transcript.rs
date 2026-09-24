@@ -107,6 +107,8 @@ pub struct Transcript {
     tx: broadcast::Sender<ProjectedEvent>,
     page: String,
     thread_id: String,
+    /// 回放时给事件打的落盘时间（毫秒）；`None` 用当前时间。
+    clock: Option<u128>,
 }
 
 impl Transcript {
@@ -127,6 +129,7 @@ impl Transcript {
             tx,
             page: page.into(),
             thread_id: thread_id.into(),
+            clock: None,
         }
     }
 
@@ -153,11 +156,28 @@ impl Transcript {
     }
 
     pub fn reset_from_sessions(&mut self, sessions: &Sessions) {
+        self.replay(
+            &sessions.events(),
+            &sessions.times(),
+            &sessions.user_images(),
+        );
+    }
+
+    /// 从落盘事件重建投影：重开会话（`reset_from_sessions`）和看关着的会话
+    /// （`thread/history`）走同一条路。时间戳用落盘时间；落盘里没有
+    /// `session/turn-end`，所以每轮在下一条用户消息前、以及末尾按它最后一条事件
+    /// 的时间收尾——重建只发生在页空闲时（`thread/start` / restore 之后、关着的会话）。
+    pub fn replay(&mut self, events: &[LogEvent], times: &[SystemTime], images: &[Vec<UserImage>]) {
         self.events.clear();
         self.projector = Projector::default();
-        let images = sessions.user_images();
+        let ms = |i: usize| times.get(i).map(|t| unix_ms(*t));
         let mut user_i = 0usize;
-        for event in sessions.events() {
+        for (i, event) in events.iter().enumerate() {
+            if matches!(event, LogEvent::User(_)) && i > 0 {
+                self.clock = ms(i - 1);
+                self.turn_ended(&TurnEndStatus::Completed);
+            }
+            self.clock = ms(i);
             let attachments = if matches!(event, LogEvent::User(_)) {
                 let row = images.get(user_i).cloned().unwrap_or_default();
                 user_i += 1;
@@ -165,8 +185,11 @@ impl Transcript {
             } else {
                 Vec::new()
             };
-            self.ingest_log_with(event, &attachments);
+            self.ingest_log_with(event.clone(), &attachments);
         }
+        self.clock = events.len().checked_sub(1).and_then(ms);
+        self.turn_ended(&TurnEndStatus::Completed);
+        self.clock = None;
     }
 
     #[cfg(test)]
@@ -532,7 +555,7 @@ impl Transcript {
             page: self.page.clone(),
             thread_id: self.thread_id.clone(),
             turn_id,
-            timestamp: iso_now(),
+            timestamp: self.clock.map_or_else(iso_now, |ms| ms.to_string()),
             payload,
         };
         self.events.push(event.clone());
@@ -544,6 +567,10 @@ impl Default for Transcript {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn unix_ms(t: SystemTime) -> u128 {
+    t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
 }
 
 fn iso_now() -> String {
@@ -898,6 +925,41 @@ mod tests {
             .map(|e| e.payload["status"].as_str().unwrap_or("").to_string())
             .collect();
         assert_eq!(statuses, ["completed", "failed", "cancelled"]);
+    }
+
+    /// 回归：从落盘事件重建投影（重开会话、看关着的会话）以前时间戳全是「现在」，
+    /// 最后一轮只有 turn/started 没有 turn/completed —— 客户端当它还在跑。
+    #[test]
+    fn replay_closes_every_turn_and_keeps_recorded_times() {
+        let at = |s: u64| UNIX_EPOCH + std::time::Duration::from_secs(s);
+        let events = vec![
+            LogEvent::User("a".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "ok".into(),
+                ..Default::default()
+            }),
+            LogEvent::User("b".into()),
+            LogEvent::LlmStream(LlmOutput {
+                error: Some("HTTP 500".into()),
+                ..Default::default()
+            }),
+        ];
+        let times = vec![at(100), at(130), at(200), at(203)];
+        let mut t = Transcript::new();
+        t.replay(&events, &times, &[]);
+        let all = t.history_since(0);
+        let ends: Vec<_> = all
+            .iter()
+            .filter(|e| e.method == "turn/completed")
+            .collect();
+        assert_eq!(ends.len(), 2, "每一轮都要收尾：{:?}", methods(&t));
+        assert_eq!(ends[0].payload["status"], "completed");
+        assert_eq!(ends[1].payload["status"], "failed");
+        assert_eq!(ends[1].payload["error"], "HTTP 500");
+        let started: Vec<_> = all.iter().filter(|e| e.method == "turn/started").collect();
+        assert_eq!(started[0].timestamp, "100000", "用落盘的时间");
+        assert_eq!(ends[0].timestamp, "130000");
+        assert_eq!(ends[1].timestamp, "203000");
     }
 
     #[test]
