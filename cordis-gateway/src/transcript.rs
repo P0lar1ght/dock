@@ -364,7 +364,8 @@ impl Transcript {
                     "id": q.id.clone().unwrap_or_else(|| format!("question_{}", i + 1)),
                     "header": q.question.chars().take(80).collect::<String>(),
                     "question": q.question,
-                    "options": options
+                    "options": options,
+                    "multiSelect": q.multi_select.unwrap_or(false)
                 })
             })
             .collect();
@@ -737,6 +738,44 @@ mod tests {
         ask.cancel();
         t.sync_interaction(ask.front_seq(), &ask);
         assert_eq!(methods(&t).last().unwrap(), "interaction/resolved");
+        asked.await.unwrap();
+    }
+
+    /// 多选题要把 `multiSelect` 带出去，客户端才知道能选几个；没写的算单选。
+    #[tokio::test]
+    async fn interaction_requested_carries_multi_select() {
+        let ask = std::sync::Arc::new(Ask::new(cordis::Context::new()));
+        let question = |text: &str, multi: Option<bool>| cordis_spine::Question {
+            question: text.into(),
+            options: vec![cordis_spine::QuestionOption {
+                label: "好".into(),
+                description: String::new(),
+                preview: None,
+                id: None,
+            }],
+            multi_select: multi,
+            id: None,
+        };
+        let waiting = ask.clone();
+        let asked = tokio::spawn(async move {
+            waiting
+                .ask(vec![question("多？", Some(true)), question("单？", None)])
+                .await
+        });
+        while ask.front_seq().is_none() {
+            tokio::task::yield_now().await;
+        }
+        let mut t = Transcript::new();
+        t.sync_interaction(ask.front_seq(), &ask);
+        let requested = t
+            .history_since(0)
+            .into_iter()
+            .find(|e| e.method == "interaction/requested")
+            .unwrap();
+        let questions = requested.payload["questions"].as_array().unwrap();
+        assert_eq!(questions[0]["multiSelect"], true);
+        assert_eq!(questions[1]["multiSelect"], false);
+        ask.cancel();
         asked.await.unwrap();
     }
 
