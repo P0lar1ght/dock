@@ -76,6 +76,10 @@ pub const TOOLS_PRE_EXECUTE: &str = "tools/pre-execute";
 /// replace what already happened.
 pub const TOOLS_EXECUTE: &str = "tools/execute";
 pub const SESSION_EVENT: &str = "session/event";
+/// 同一条会话事件，再带上发出它的**页**（`main` / `main#N`，载荷
+/// [`crate::PageLogEvent`]）。`session/event` 不分 realm、载荷也不带身份，任何一页
+/// 说话根上都收得到；要按页区分的监听者（网关的线程投影）订这一条。
+pub const SESSION_PAGE_EVENT: &str = "session/page-event";
 pub const PERMISSION_EVENT: &str = "permissions/pending";
 pub const ASK_EVENT: &str = "ask/pending";
 pub const PLAN_EVENT: &str = "plan/pending";

@@ -89,7 +89,7 @@ cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080
 - 改动限定在本仓库（`P0lar1ght/dock`）。
 - 跑与改动对应的 crate 测试；改工具表跑 `install_app_registers`。
 - 保持插件树不变式：一张 `"tools"` 表、named service live-lookup、waterfall 链不吞。
-- Gateway 只绑 loopback，默认挂载但不监听。
+- Gateway 只绑 loopback，默认挂载但不监听（`dock serve` 例外：由父进程拉起、挂载即监听，ticket 只经 stdout 交给父进程）。
 - 同步 `TOOLS.md` / `CLI.md` / 相关 crate README。
 
 **Ask first**

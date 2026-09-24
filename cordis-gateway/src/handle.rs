@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use cordis::Context;
 use cordis_spine::{
-    Ask, LogEvent, Mcp, Permissions, PlanMode, Sessions, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT,
-    PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, SESSIONS, SESSION_EVENT,
+    Ask, LogEvent, Mcp, PageLogEvent, Permissions, PlanMode, Sessions, ASK, ASK_EVENT, MCP,
+    MCP_ELICIT_EVENT, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, ROOT_IDENTITY,
+    SESSIONS, SESSION_PAGE_EVENT,
 };
 use cordis_tui::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
@@ -174,6 +175,20 @@ impl GatewayHandle {
             .issue_for_binding(application, origin)
     }
 
+    /// 见 [`crate::pairing::PairingStore::issue_trusted`]：只给 `dock serve` 的
+    /// stdout 控制通道用。
+    pub fn issue_trusted_ticket(
+        &self,
+        application: &str,
+        origin: &str,
+    ) -> Result<IssuedTicket, PairingError> {
+        self.inner
+            .pairing
+            .lock()
+            .unwrap()
+            .issue_trusted(application, origin)
+    }
+
     pub fn authenticate(&self, ticket: &str, origin: &str) -> Result<IssuedTicket, PairingError> {
         self.inner
             .pairing
@@ -283,18 +298,26 @@ impl GatewayPort for GatewayHandle {
 
 fn listen_events(inner: &Arc<GatewayInner>) {
     let for_session = inner.clone();
-    let _ = inner.ctx.on(SESSION_EVENT, move |event: &LogEvent| {
-        let attachments = if matches!(event, LogEvent::User(_)) {
-            last_user_attachments(&for_session.ctx)
-        } else {
-            Vec::new()
-        };
-        for_session
-            .transcript
-            .lock()
-            .unwrap()
-            .ingest_log_with(event.clone(), &attachments);
-    });
+    // `live` 线程只投影第 1 页。`session/event` 不分 realm、也不带页身份，TUI 开着
+    // 多页时别的页说的话也会到这里——订带身份的那条，只收 `main`。
+    let _ = inner
+        .ctx
+        .on(SESSION_PAGE_EVENT, move |tagged: &PageLogEvent| {
+            if &*tagged.page != ROOT_IDENTITY {
+                return;
+            }
+            let event = &*tagged.event;
+            let attachments = if matches!(event, LogEvent::User(_)) {
+                last_user_attachments(&for_session.ctx)
+            } else {
+                Vec::new()
+            };
+            for_session
+                .transcript
+                .lock()
+                .unwrap()
+                .ingest_log_with(event.clone(), &attachments);
+        });
     let for_perm = inner.clone();
     let ctx_perm = inner.ctx.clone();
     let _ = inner.ctx.on(PERMISSION_EVENT, move |_: &()| {
