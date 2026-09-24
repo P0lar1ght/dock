@@ -101,6 +101,8 @@ enum Kind {
 }
 
 struct Job {
+    /// 入队序号，见 [`Elicitation::front_seq_for`]。
+    seq: u64,
     server: String,
     message: String,
     kind: Kind,
@@ -123,6 +125,7 @@ struct Inner {
     /// two pages can call the same server at once and each keep its own prompt.
     inflight: Mutex<Vec<(u64, Option<String>)>>,
     next_caller: AtomicU64,
+    next_job: AtomicU64,
 }
 
 /// One in-flight `tools/call`. The id lets a returning call drop its own entry
@@ -225,6 +228,7 @@ impl Elicitation {
                 callers: Mutex::new(Vec::new()),
                 inflight: Mutex::new(Vec::new()),
                 next_caller: AtomicU64::new(0),
+                next_job: AtomicU64::new(0),
             }),
         }
     }
@@ -263,6 +267,11 @@ impl Elicitation {
             let mut q = self.inner.queue.lock().unwrap();
             let origin = pick_origin(&inflight, &callers, &q, related);
             q.push_back(Job {
+                seq: self
+                    .inner
+                    .next_job
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1,
                 server: server.to_string(),
                 message,
                 kind,
@@ -316,6 +325,12 @@ impl Elicitation {
     pub fn front_for(&self, page: Option<&str>) -> Option<ElicitPrompt> {
         let q = self.inner.queue.lock().unwrap();
         index_of(&q, page).and_then(|i| q.get(i).map(job_prompt))
+    }
+
+    /// `front_for(page)` 那一条的入队序号（单调递增），投影方用它去重。
+    pub fn front_seq_for(&self, page: Option<&str>) -> Option<u64> {
+        let q = self.inner.queue.lock().unwrap();
+        index_of(&q, page).and_then(|i| q.get(i).map(|job| job.seq))
     }
 
     pub fn cancel(&self) {

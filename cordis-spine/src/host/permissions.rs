@@ -18,6 +18,8 @@ pub struct PermissionPrompt {
 }
 
 struct Pending {
+    /// 入队序号，见 [`Permissions::front_seq`]。
+    seq: u64,
     prompt: PermissionPrompt,
     tx: oneshot::Sender<PermissionOptionKind>,
 }
@@ -28,6 +30,7 @@ pub struct Permissions {
     always: Mutex<HashSet<String>>,
     never: Mutex<HashSet<String>>,
     last_resolve: Mutex<Option<PermissionOptionKind>>,
+    next_seq: std::sync::atomic::AtomicU64,
 }
 
 impl Permissions {
@@ -38,7 +41,14 @@ impl Permissions {
             always: Mutex::new(HashSet::new()),
             never: Mutex::new(HashSet::new()),
             last_resolve: Mutex::new(None),
+            next_seq: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// 队首那条请求的入队序号（这个队列里单调递增）。事件载荷是 `()`，同一条请求
+    /// 还挂着时也可能再收到事件；投影方拿它判断「队首换没换」，不重复报同一条。
+    pub fn front_seq(&self) -> Option<u64> {
+        self.queue.lock().unwrap().front().map(|p| p.seq)
     }
 
     pub fn front(&self) -> Option<PermissionPrompt> {
@@ -91,7 +101,12 @@ impl Permissions {
             return false;
         }
         let (tx, rx) = oneshot::channel();
+        let seq = self
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         self.queue.lock().unwrap().push_back(Pending {
+            seq,
             prompt: PermissionPrompt {
                 tool: tool.to_string(),
                 summary: summary.to_string(),

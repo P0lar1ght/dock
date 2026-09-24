@@ -4,7 +4,8 @@ use cordis_spine::{Sessions, UserImage, SESSIONS};
 use cordis_tui::{SessionRef, SESSION_PORT};
 
 use crate::handle::GatewayHandle;
-use crate::protocol::{RpcError, LIVE_THREAD_ID};
+use crate::protocol::RpcError;
+use crate::threads::{self, Page};
 
 pub fn start(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     submit(gateway, params, true)
@@ -18,21 +19,24 @@ pub fn steer(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> 
     submit(gateway, params, true)
 }
 
-pub fn cancel(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
-    let port = session_port(gateway)?;
+pub fn cancel(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let page = threads::resolve_param(gateway, &params)?;
+    let port = session_port(&page)?;
     port.cancel();
     Ok(json!({ "cancelled": true }))
 }
 
-pub fn queue_list(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
-    let port = session_port(gateway)?;
+pub fn queue_list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let thread_id = threads::thread_param(&params);
+    let page = threads::resolve(gateway, &thread_id)?;
+    let port = session_port(&page)?;
     let items: Vec<Value> = port
         .queued_prompts()
         .into_iter()
         .map(|q| {
             json!({
                 "id": q.id,
-                "threadId": LIVE_THREAD_ID,
+                "threadId": thread_id,
                 "message": q.text,
                 "kind": "queue",
                 "status": "queued",
@@ -43,7 +47,7 @@ pub fn queue_list(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcE
         .collect();
     let active = if port.working() {
         json!({
-            "threadId": LIVE_THREAD_ID,
+            "threadId": thread_id,
             "turnId": "live",
             "status": "running"
         })
@@ -58,33 +62,37 @@ pub fn queue_remove(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
         .get("queueId")
         .and_then(Value::as_str)
         .map(|s| s.to_string());
-    let port = session_port(gateway)?;
+    let thread_id = threads::thread_param(&params);
+    let page = threads::resolve(gateway, &thread_id)?;
+    let port = session_port(&page)?;
     let removed = port.take_queued(id.clone()).is_some();
     Ok(json!({
-        "threadId": LIVE_THREAD_ID,
+        "threadId": thread_id,
         "queueId": id.unwrap_or_default(),
         "removed": removed
     }))
 }
 
 fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Value, RpcError> {
+    let thread_id = threads::thread_param(&params);
+    let page = threads::resolve(gateway, &thread_id)?;
     let mut message = params
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let images = resolve_turn_images(gateway, &params)?;
+    let images = resolve_turn_images(gateway, &page, &params)?;
     if !images.is_empty() {
         message = with_image_chips(&message, images.len());
-        if let Some(sessions) = gateway.ctx().get::<Sessions>(SESSIONS) {
+        if let Some(sessions) = page.ctx.get::<Sessions>(SESSIONS) {
             sessions.queue_user_images(images);
         }
     }
     if message.trim().is_empty() {
         return Err(RpcError::invalid_params("message is required"));
     }
-    apply_turn_intent(gateway, &params, &message)?;
-    let port = session_port(gateway)?;
+    apply_turn_intent(&page, &params, &message)?;
+    let port = session_port(&page)?;
     let working = port.working();
     port.submit(message, send_now);
     let status = if working && !send_now {
@@ -93,14 +101,15 @@ fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Valu
         "running"
     };
     Ok(json!({
-        "threadId": LIVE_THREAD_ID,
-        "turnId": format!("t{}", gateway.latest_seq().saturating_add(1)),
+        "threadId": thread_id,
+        "turnId": format!("t{}", gateway.latest_seq(&page.identity).saturating_add(1)),
         "status": status
     }))
 }
 
 fn resolve_turn_images(
     gateway: &GatewayHandle,
+    page: &Page,
     params: &Value,
 ) -> Result<Vec<UserImage>, RpcError> {
     let Some(list) = params.get("imageInputs").and_then(Value::as_array) else {
@@ -115,7 +124,7 @@ fn resolve_turn_images(
     let mut out = Vec::with_capacity(list.len());
     for item in list {
         if let Some(reuse) = item.get("reuseTurnId").and_then(Value::as_str) {
-            out.extend(reuse_turn_images(gateway, reuse)?);
+            out.extend(reuse_turn_images(page, reuse)?);
             continue;
         }
         let id = item
@@ -131,8 +140,8 @@ fn resolve_turn_images(
     Ok(out)
 }
 
-fn reuse_turn_images(gateway: &GatewayHandle, turn_id: &str) -> Result<Vec<UserImage>, RpcError> {
-    let Some(sessions) = gateway.ctx().get::<Sessions>(SESSIONS) else {
+fn reuse_turn_images(page: &Page, turn_id: &str) -> Result<Vec<UserImage>, RpcError> {
+    let Some(sessions) = page.ctx.get::<Sessions>(SESSIONS) else {
         return Err(RpcError::app("unavailable", "sessions is not mounted"));
     };
     let index = turn_id
@@ -176,15 +185,11 @@ fn with_image_chips(message: &str, count: usize) -> String {
     }
 }
 
-fn apply_turn_intent(
-    gateway: &GatewayHandle,
-    params: &Value,
-    message: &str,
-) -> Result<(), RpcError> {
+fn apply_turn_intent(page: &Page, params: &Value, message: &str) -> Result<(), RpcError> {
     let intent = params.get("intent");
     if intent.and_then(|v| v.get("mode")).and_then(Value::as_str) == Some("plan") {
-        if let Some(plan) = gateway
-            .ctx()
+        if let Some(plan) = page
+            .ctx
             .get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE)
         {
             plan.set(true);
@@ -198,7 +203,7 @@ fn apply_turn_intent(
     if op.is_empty() {
         return Ok(());
     }
-    let Some(goal) = gateway.ctx().get::<cordis_spine::Goal>(cordis_spine::GOAL) else {
+    let Some(goal) = page.ctx.get::<cordis_spine::Goal>(cordis_spine::GOAL) else {
         return Ok(());
     };
     match op {
@@ -219,9 +224,8 @@ fn apply_turn_intent(
     Ok(())
 }
 
-fn session_port(gateway: &GatewayHandle) -> Result<std::sync::Arc<SessionRef>, RpcError> {
-    gateway
-        .ctx()
+fn session_port(page: &Page) -> Result<std::sync::Arc<SessionRef>, RpcError> {
+    page.ctx
         .get::<SessionRef>(SESSION_PORT)
         .ok_or_else(|| RpcError::app("unavailable", "session.port is not mounted"))
 }

@@ -1,6 +1,7 @@
 //! Named `"gateway"` implementation. Pairing + transcript live here; HTTP
 //! handlers live-look spine services off `Context`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +17,7 @@ use cordis_tui::{
 
 use crate::image_store::ImageInputStore;
 use crate::pairing::{IssuedTicket, PairingStatus, PairingStore};
+use crate::protocol::LIVE_THREAD_ID;
 use crate::transcript::{ProjectedEvent, Transcript};
 
 struct ListenSlot {
@@ -28,7 +30,10 @@ struct ListenSlot {
 pub struct GatewayInner {
     pub ctx: Context,
     pub pairing: Mutex<PairingStore>,
-    pub transcript: Mutex<Transcript>,
+    /// 每页一份投影，按分页身份（`main` / `main#N`）存，懒建。
+    transcripts: Mutex<HashMap<String, Transcript>>,
+    /// 各页投影共用的推送通道；事件上带页身份，`ws.rs` 按订阅过滤。
+    events_tx: tokio::sync::broadcast::Sender<ProjectedEvent>,
     pub images: Mutex<ImageInputStore>,
     preferred: SocketAddr,
     listen: Mutex<ListenSlot>,
@@ -37,13 +42,17 @@ pub struct GatewayInner {
 #[derive(Clone)]
 pub struct GatewayHandle {
     inner: Arc<GatewayInner>,
+    /// 线程级处理（`slash/execute` 等）作用在哪一页；`None` 是第 1 页（根）。
+    /// 见 [`Self::scoped`]。
+    scope: Option<crate::threads::Page>,
 }
 
 impl GatewayHandle {
     pub fn idle(ctx: Context, preferred: SocketAddr) -> Self {
         let inner = Arc::new(GatewayInner {
             pairing: Mutex::new(PairingStore::new(ctx.clone())),
-            transcript: Mutex::new(Transcript::new()),
+            transcripts: Mutex::new(HashMap::new()),
+            events_tx: Transcript::channel(),
             images: Mutex::new(ImageInputStore::new()),
             preferred,
             listen: Mutex::new(ListenSlot {
@@ -55,7 +64,7 @@ impl GatewayHandle {
             ctx: ctx.clone(),
         });
         listen_events(&inner);
-        Self { inner }
+        Self { inner, scope: None }
     }
 
     fn slot(&self) -> std::sync::MutexGuard<'_, ListenSlot> {
@@ -127,8 +136,28 @@ impl GatewayHandle {
         Ok(())
     }
 
+    /// 这个句柄作用的那一页的 ctx（没 [`scoped`](Self::scoped) 就是根 / 第 1 页）。
+    /// 全局服务（MCP、工具表……）从哪一页查都落回根。
     pub fn ctx(&self) -> &Context {
-        &self.inner.ctx
+        self.scope
+            .as_ref()
+            .map_or(&self.inner.ctx, |page| &page.ctx)
+    }
+
+    /// 同一个网关，但 `ctx()` / 投影都指向 `page`。线程级的处理（斜杠命令一大串
+    /// 函数都读 `gateway.ctx()`）在入口解析出页之后换成它，不用逐层传页。
+    pub fn scoped(&self, page: crate::threads::Page) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            scope: Some(page),
+        }
+    }
+
+    /// 这个句柄作用的那一页的分页身份。
+    pub fn page_identity(&self) -> &str {
+        self.scope
+            .as_ref()
+            .map_or(ROOT_IDENTITY, |page| page.identity.as_str())
     }
 
     pub fn inner(&self) -> Arc<GatewayInner> {
@@ -197,32 +226,50 @@ impl GatewayHandle {
             .authenticate(ticket, origin)
     }
 
-    pub fn history_since(&self, since_seq: u64) -> Vec<ProjectedEvent> {
-        self.inner
-            .transcript
-            .lock()
-            .unwrap()
-            .history_since(since_seq)
+    /// `page` 那一页的投影里 `since_seq` 之后的事件。
+    pub fn history_since(&self, page: &str, since_seq: u64) -> Vec<ProjectedEvent> {
+        self.with_transcript(page, |t| t.history_since(since_seq))
     }
 
-    pub fn latest_seq(&self) -> u64 {
-        self.inner.transcript.lock().unwrap().latest_seq()
+    pub fn latest_seq(&self, page: &str) -> u64 {
+        self.with_transcript(page, |t| t.latest_seq())
     }
 
+    /// 所有页的投影事件（带页身份）。
     pub fn subscribe_transcript(&self) -> tokio::sync::broadcast::Receiver<ProjectedEvent> {
-        self.inner.transcript.lock().unwrap().subscribe()
+        self.inner.events_tx.subscribe()
     }
 
+    /// 这个句柄那一页的投影按它当前的会话重建（`thread/start` / `restore` 之后）。
     pub fn reset_transcript(&self) {
-        if let Some(sessions) = self.inner.ctx.get::<cordis_spine::Sessions>(SESSIONS) {
-            self.inner
-                .transcript
-                .lock()
-                .unwrap()
-                .reset_from_sessions(&sessions);
-        } else {
-            *self.inner.transcript.lock().unwrap() = Transcript::new();
+        let page = match &self.scope {
+            Some(page) => Some(page.clone()),
+            None => crate::threads::page_by_identity(self, ROOT_IDENTITY),
+        };
+        if let Some(page) = page {
+            self.reset_page(&page);
         }
+    }
+
+    /// 按这一页当前的会话重建它的投影，`threadId` 跟着换成它现在的会话 id。
+    pub fn reset_page(&self, page: &crate::threads::Page) {
+        let thread_id = page.thread_id();
+        let sessions = page.ctx.get::<Sessions>(SESSIONS);
+        self.with_transcript(&page.identity, |t| {
+            t.set_thread_id(thread_id);
+            if let Some(sessions) = sessions {
+                t.reset_from_sessions(&sessions);
+            }
+        });
+    }
+
+    /// 关页后丢掉它的投影。
+    pub fn drop_page(&self, identity: &str) {
+        self.inner.transcripts.lock().unwrap().remove(identity);
+    }
+
+    fn with_transcript<R>(&self, page: &str, f: impl FnOnce(&mut Transcript) -> R) -> R {
+        with_transcript(&self.inner, page, None, f)
     }
 
     pub fn put_image(
@@ -296,81 +343,105 @@ impl GatewayPort for GatewayHandle {
     }
 }
 
+/// 取（没有就建）`page` 的投影。新建时 `threadId` 用 `thread_id`；没给就按页
+/// 身份猜：第 1 页 `live`，其它页先用身份占位，`reset_page` 会换成会话 id。
+fn with_transcript<R>(
+    inner: &GatewayInner,
+    page: &str,
+    thread_id: Option<String>,
+    f: impl FnOnce(&mut Transcript) -> R,
+) -> R {
+    let mut all = inner.transcripts.lock().unwrap();
+    let t = all.entry(page.to_string()).or_insert_with(|| {
+        let id = thread_id.unwrap_or_else(|| {
+            if page == ROOT_IDENTITY {
+                LIVE_THREAD_ID.to_string()
+            } else {
+                page.to_string()
+            }
+        });
+        Transcript::for_page(page, id, inner.events_tx.clone())
+    });
+    f(t)
+}
+
+/// 所有开着的页（第 1 页在前）。监听器里用：拿不到 `GatewayHandle`，只有 inner。
+fn pages(inner: &Arc<GatewayInner>) -> Vec<crate::threads::Page> {
+    crate::threads::open_pages(&GatewayHandle {
+        inner: inner.clone(),
+        scope: None,
+    })
+}
+
 fn listen_events(inner: &Arc<GatewayInner>) {
+    // 会话事件按页投影：`session/event` 不分 realm、不带页身份，订带身份的那条。
     let for_session = inner.clone();
-    // `live` 线程只投影第 1 页。`session/event` 不分 realm、也不带页身份，TUI 开着
-    // 多页时别的页说的话也会到这里——订带身份的那条，只收 `main`。
     let _ = inner
         .ctx
         .on(SESSION_PAGE_EVENT, move |tagged: &PageLogEvent| {
-            if &*tagged.page != ROOT_IDENTITY {
-                return;
-            }
+            let page = pages(&for_session)
+                .into_iter()
+                .find(|p| p.identity == *tagged.page);
             let event = &*tagged.event;
-            let attachments = if matches!(event, LogEvent::User(_)) {
-                last_user_attachments(&for_session.ctx)
-            } else {
-                Vec::new()
+            let attachments = match (&page, event) {
+                (Some(page), LogEvent::User(_)) => last_user_attachments(&page.ctx),
+                _ => Vec::new(),
             };
-            for_session
-                .transcript
-                .lock()
-                .unwrap()
-                .ingest_log_with(event.clone(), &attachments);
+            let thread_id = page.as_ref().map(|p| p.thread_id());
+            with_transcript(&for_session, &tagged.page, thread_id, |t| {
+                t.ingest_log_with(event.clone(), &attachments)
+            });
         });
+    // 队列事件载荷是 `()`，也不知道是哪一页的：挨页对账，序号没变的页不动。
     let for_perm = inner.clone();
-    let ctx_perm = inner.ctx.clone();
     let _ = inner.ctx.on(PERMISSION_EVENT, move |_: &()| {
-        let Some(perms) = ctx_perm.get::<Permissions>(PERMISSIONS) else {
-            return;
-        };
-        let mut t = for_perm.transcript.lock().unwrap();
-        if let Some(front) = perms.front() {
-            t.permission_requested(&front);
-        } else if let Some(kind) = perms.last_resolve() {
-            t.permission_resolved(kind);
+        for page in pages(&for_perm) {
+            let Some(perms) = page.ctx.get::<Permissions>(PERMISSIONS) else {
+                continue;
+            };
+            let front = perms.front_seq().zip(perms.front());
+            with_transcript(&for_perm, &page.identity, Some(page.thread_id()), |t| {
+                t.sync_permission(front, perms.last_resolve())
+            });
         }
     });
     let for_ask = inner.clone();
-    let ctx_ask = inner.ctx.clone();
     let _ = inner.ctx.on(ASK_EVENT, move |_: &()| {
-        let Some(ask) = ctx_ask.get::<Ask>(ASK) else {
-            return;
-        };
-        let mut t = for_ask.transcript.lock().unwrap();
-        if ask.front().is_some() {
-            t.interaction_requested(&ask);
-        } else {
-            t.interaction_resolved();
+        for page in pages(&for_ask) {
+            let Some(ask) = page.ctx.get::<Ask>(ASK) else {
+                continue;
+            };
+            with_transcript(&for_ask, &page.identity, Some(page.thread_id()), |t| {
+                t.sync_interaction(ask.front_seq(), &ask)
+            });
         }
     });
     let for_plan = inner.clone();
-    let ctx_plan = inner.ctx.clone();
     let _ = inner.ctx.on(PLAN_EVENT, move |_: &()| {
-        let Some(plan) = ctx_plan.get::<PlanMode>(PLAN_MODE) else {
-            return;
-        };
-        let mut t = for_plan.transcript.lock().unwrap();
-        if let Some(front) = plan.front() {
-            t.plan_requested(&front);
-        } else if let Some(decision) = plan.last_decision() {
-            t.plan_resolved(decision);
+        for page in pages(&for_plan) {
+            let Some(plan) = page.ctx.get::<PlanMode>(PLAN_MODE) else {
+                continue;
+            };
+            let front = plan.front_seq().zip(plan.front());
+            with_transcript(&for_plan, &page.identity, Some(page.thread_id()), |t| {
+                t.sync_plan(front, plan.last_decision())
+            });
         }
     });
     let for_elicit = inner.clone();
-    let ctx_elicit = inner.ctx.clone();
     let _ = inner.ctx.on(MCP_ELICIT_EVENT, move |_: &()| {
-        let Some(mcp) = ctx_elicit.get::<Mcp>(MCP) else {
+        let Some(mcp) = for_elicit.ctx.get::<Mcp>(MCP) else {
             return;
         };
-        let mut t = for_elicit.transcript.lock().unwrap();
-        let page = ctx_elicit
-            .get::<cordis_spine::Sessions>(cordis_spine::SESSIONS)
-            .and_then(|s| s.ui_page());
-        if let Some(front) = mcp.elicitation().front_for(page.as_deref()) {
-            t.elicit_requested(&front);
-        } else {
-            t.elicit_resolved();
+        let elicitation = mcp.elicitation();
+        for page in pages(&for_elicit) {
+            let who = Some(page.identity.as_str());
+            let front = elicitation
+                .front_seq_for(who)
+                .zip(elicitation.front_for(who));
+            with_transcript(&for_elicit, &page.identity, Some(page.thread_id()), |t| {
+                t.sync_elicit(front)
+            });
         }
     });
 }

@@ -17,7 +17,13 @@ use crate::session_actor;
 
 /// 建页工厂，交给 `cordis_tui::tabs()` 当配置。
 pub fn tab_mount() -> TabMount {
-    Arc::new(tab)
+    Arc::new(|index, kind| tab(index, kind, true))
+}
+
+/// 无头（`dock serve`）的建页工厂：同一套会话 / 循环 / 设置，不挂终端视图。
+/// 页由网关按线程开（`thread/open` / `thread/start {cwd}`）。
+pub fn tab_mount_headless() -> TabMount {
+    Arc::new(|index, kind| tab(index, kind, false))
 }
 
 /// 旁问页的只读预设。
@@ -46,7 +52,7 @@ fn aside_preset() -> AgentPresets {
 ///
 /// 其余落回根：一张 `"tools"` 表、一个 `llm`、MCP 连接、`browser` / `computer` /
 /// `jobs`。模型、协议、权限模式、权限队列和提问队列是这一页自己的。
-fn tab(index: usize, kind: TabKind) -> Plugin {
+fn tab(index: usize, kind: TabKind, views: bool) -> Plugin {
     plugin_async("tab", Inject::new(), move |ctx, _: &()| async move {
         // 顺序照 main：会话与轮次先落地，循环和 actor 都 inject 它们。
         ctx.plugin(tab_sessions(index, kind), ())?.wait().await?;
@@ -71,11 +77,13 @@ fn tab(index: usize, kind: TabKind) -> Plugin {
         ctx.plugin(turn(), ())?.wait().await?;
         ctx.plugin(agent_loop(), ())?.wait().await?;
         ctx.plugin(session_actor(), ())?.wait().await?;
-        // 视图：每页各自的滚动区、输入框、状态栏、欢迎屏。
-        ctx.plugin(scrollback(), ())?.wait().await?;
-        ctx.plugin(prompt(), ())?.wait().await?;
-        ctx.plugin(status_bar(), ())?.wait().await?;
-        ctx.plugin(welcome(), ())?.wait().await?;
+        // 视图：每页各自的滚动区、输入框、状态栏、欢迎屏。无头模式没有终端，不挂。
+        if views {
+            ctx.plugin(scrollback(), ())?.wait().await?;
+            ctx.plugin(prompt(), ())?.wait().await?;
+            ctx.plugin(status_bar(), ())?.wait().await?;
+            ctx.plugin(welcome(), ())?.wait().await?;
+        }
         Ok(None)
     })
 }

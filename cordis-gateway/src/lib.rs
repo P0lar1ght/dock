@@ -17,6 +17,7 @@ mod plugin;
 mod protocol;
 mod rpc;
 mod serve;
+mod threads;
 mod transcript;
 mod ws;
 

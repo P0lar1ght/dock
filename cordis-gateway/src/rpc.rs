@@ -1,7 +1,5 @@
 //! JSON-RPC method dispatch. Unknown methods return `method_not_found`.
 
-use std::collections::HashSet;
-
 use serde_json::Value;
 
 use crate::handle::GatewayHandle;
@@ -14,13 +12,18 @@ pub async fn dispatch(
     gateway: GatewayHandle,
     method: &str,
     params: Value,
-    subscribed: &mut HashSet<String>,
+    subscribed: &mut thread::Subscriptions,
 ) -> Result<Value, RpcError> {
     match method {
-        protocol::WORKSPACE_LIST => connection::workspace_list(&gateway),
+        protocol::WORKSPACE_LIST => connection::workspace_list(&gateway, params),
         protocol::MCP_RELOAD => connection::mcp_reload(&gateway),
         protocol::THREAD_LIST => thread::list(&gateway, params),
+        protocol::THREAD_START if params.get("cwd").is_some() => {
+            thread::start_at(&gateway, params).await
+        }
         protocol::THREAD_START => thread::start(&gateway, params),
+        protocol::THREAD_OPEN => thread::open(&gateway, params).await,
+        protocol::THREAD_CLOSE => thread::close(&gateway, params).await,
         protocol::THREAD_RENAME => thread::rename(&gateway, params),
         protocol::THREAD_ARCHIVE => thread::archive(&gateway, params),
         protocol::THREAD_RESTORE => thread::restore(&gateway, params),

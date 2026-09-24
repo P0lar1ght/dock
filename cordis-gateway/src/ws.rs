@@ -1,6 +1,5 @@
 //! JSON-RPC WebSocket at `/api/ws`.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -36,7 +35,8 @@ struct Conn {
     auth: Option<IssuedTicket>,
     initialized: bool,
     connection_lease_id: Option<String>,
-    subscribed: HashSet<String>,
+    /// 分页身份 → 这条连接订阅时用的 `threadId`。
+    subscribed: crate::handlers::thread::Subscriptions,
 }
 
 async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String) {
@@ -48,7 +48,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
         auth: None,
         initialized: false,
         connection_lease_id: None,
-        subscribed: HashSet::new(),
+        subscribed: Default::default(),
     }));
 
     let writer = tokio::spawn(async move {
@@ -67,12 +67,15 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
             loop {
                 match events_rx.recv().await {
                     Ok(event) => {
-                        let subscribed = {
+                        // 按页匹配订阅，推送时用这条连接订阅时的 `threadId`。
+                        let alias = {
                             let c = conn.lock().await;
-                            c.initialized && c.subscribed.contains(&event.thread_id)
+                            c.initialized
+                                .then(|| c.subscribed.get(&event.page).cloned())
+                                .flatten()
                         };
-                        if subscribed {
-                            let _ = out_tx.send(event.as_notification().to_string());
+                        if let Some(alias) = alias {
+                            let _ = out_tx.send(event.as_notification_as(&alias).to_string());
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

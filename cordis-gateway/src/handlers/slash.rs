@@ -20,7 +20,8 @@ use cordis_spine::{
 use cordis_tui::{resolve_slash, slash_catalog, SessionRef, SlashCatalogEntry, SESSION_PORT};
 
 use crate::handle::GatewayHandle;
-use crate::protocol::{RpcError, LIVE_THREAD_ID};
+use crate::protocol::RpcError;
+use crate::threads;
 
 #[derive(Clone, Copy)]
 struct Item {
@@ -182,7 +183,9 @@ pub fn list(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> 
 }
 
 pub async fn execute(gateway: GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    require_live_thread(&params)?;
+    // 斜杠命令作用在 `threadId` 那一页：下面整串 `cmd_*` 读的都是 `gateway.ctx()`。
+    let page = threads::resolve_param(&gateway, &params)?;
+    let gateway = gateway.scoped(page);
     let text = params
         .get("text")
         .or_else(|| params.get("message"))
@@ -196,19 +199,6 @@ pub async fn execute(gateway: GatewayHandle, params: Value) -> Result<Value, Rpc
         None => Ok(passthrough()),
         Some((name, args)) => dispatch_named(&gateway, &name, &args).await,
     }
-}
-
-fn require_live_thread(params: &Value) -> Result<(), RpcError> {
-    let Some(id) = params.get("threadId").and_then(Value::as_str) else {
-        return Ok(());
-    };
-    let id = id.trim();
-    if id.is_empty() || id == LIVE_THREAD_ID {
-        return Ok(());
-    }
-    Err(RpcError::invalid_params(format!(
-        "threadId must be \"{LIVE_THREAD_ID}\" or omitted"
-    )))
 }
 
 async fn dispatch_named(
@@ -557,8 +547,13 @@ fn submit_text(gateway: &GatewayHandle, text: String) -> Result<Value, RpcError>
         "ok": true,
         "kind": "submitted",
         "turn": {
-            "threadId": LIVE_THREAD_ID,
-            "turnId": format!("t{}", gateway.latest_seq().saturating_add(1)),
+            "threadId": crate::threads::Page::thread_id_of(gateway.ctx()),
+            "turnId": format!(
+                "t{}",
+                gateway
+                    .latest_seq(gateway.page_identity())
+                    .saturating_add(1)
+            ),
             "status": if working { "queued" } else { "running" }
         }
     }))

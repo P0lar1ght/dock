@@ -21,6 +21,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("hostTools", false),
     ("imageInputs", true),
     ("slash", true),
+    // 多线程：`thread/list {scope:"all"}` / `thread/open` / `thread/close` /
+    // `thread/start {cwd}`，其它线程级方法接受任意开着的线程的会话 id。
+    ("openThreads", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -36,6 +39,8 @@ pub const INITIALIZE: &str = "initialize";
 pub const WORKSPACE_LIST: &str = "workspace/list";
 pub const THREAD_LIST: &str = "thread/list";
 pub const THREAD_START: &str = "thread/start";
+pub const THREAD_OPEN: &str = "thread/open";
+pub const THREAD_CLOSE: &str = "thread/close";
 pub const THREAD_RENAME: &str = "thread/rename";
 pub const THREAD_ARCHIVE: &str = "thread/archive";
 pub const THREAD_RESTORE: &str = "thread/restore";

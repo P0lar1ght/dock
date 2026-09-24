@@ -11,6 +11,7 @@
 //! 装一页要挂哪些插件由**组合根**（`cordis-app`）给：TUI 不认识 spine / app
 //! 的插件树，只负责开、关、切。
 
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -379,6 +380,53 @@ impl Tabs {
         };
         self.activate(index);
         Ok(index)
+    }
+
+    /// 在 `cwd` 开一张常驻页，**不切过去**；给了 `archived` 就把那份磁盘会话
+    /// 开进来（它得在 `cwd` 下）。网关 / 桌面 GUI 用：远端开一页不该把终端里正在
+    /// 看的那页换走。那份会话已经有一页开着时直接回那一页。
+    pub async fn open_at(&self, cwd: &Path, archived: Option<&str>) -> Result<Context, String> {
+        if let Some(index) = archived.and_then(|id| self.index_of_session(id)) {
+            return Ok(self.inner.tabs.lock().unwrap()[index].ctx.clone());
+        }
+        if self.len() >= MAX_TABS {
+            return Err(format!("最多 {MAX_TABS} 页"));
+        }
+        let (id, child, fiber) = self.mount_page(TabKind::Normal, None).await?;
+        let opened = (|| {
+            // 建页时继承的是当前页的 cwd；改钉到 `cwd`，再按新目录重新挂盘。
+            cordis_spine::change_dir(&child, cwd)?;
+            let sessions = child
+                .get::<Sessions>(SESSIONS)
+                .ok_or_else(|| "新页没有会话".to_string())?;
+            sessions.attach_disk();
+            if let Some(archived) = archived {
+                if !sessions.adopt_archived(archived) {
+                    return Err(format!("{} 下没有会话 {archived}", cwd.display()));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = opened {
+            let _ = fiber.dispose().await;
+            return Err(e);
+        }
+        self.inner.tabs.lock().unwrap().push(Tab {
+            id,
+            ctx: child.clone(),
+            fiber: Some(fiber),
+            origin: None,
+            kind: TabKind::Normal,
+        });
+        Ok(child)
+    }
+
+    /// 关掉正在写 `session_id` 的那一页。第一页（主会话）关不掉。
+    pub async fn close_session(&self, session_id: &str) -> Result<(), String> {
+        let index = self
+            .index_of_session(session_id)
+            .ok_or_else(|| format!("会话 {session_id} 没有开着"))?;
+        self.close(index).await.map(|_| ())
     }
 
     /// `/btw`：从当前页分叉一个**只读**分页，把问题发进去并切过去。

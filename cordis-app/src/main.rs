@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cordis_app::{cron_driver, session_actor, system_prompt, tab_mount};
+use cordis_app::{cron_driver, session_actor, system_prompt, tab_mount, tab_mount_headless};
 use cordis_gateway::{gateway, gateway_serve, ServeConfig, ServeControl, GATEWAY_SERVE};
 use cordis_spine::{
     agent_loop, apply_restored_preset, install_app, AgentPresets, ApplyRestoredPreset, Sessions,
@@ -187,11 +187,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             root.plugin(tui(), ())?.wait().await?;
         }
         Mode::Serve(args) => {
-            // 无头：不挂 TUI 与分页。网关挂载即监听，stdout 只写控制行。
+            // 无头：不挂 TUI。分页服务照挂（不带视图），网关按线程开页；
+            // 网关挂载即监听，stdout 只写控制行。
             root.plugin(gateway_serve(args.bind), args.config)?
                 .wait()
                 .await?;
             root.plugin(cron_driver(), ())?.wait().await?;
+            root.plugin(tabs(), tab_mount_headless())?.wait().await?;
             let control: Arc<ServeControl> = root.require::<ServeControl>(GATEWAY_SERVE)?;
             let stdin = tokio::io::BufReader::new(tokio::io::stdin());
             // 父进程关了 stdin（退出或崩了）就收尾：会话是逐条实时落盘的，不用额外保存。
