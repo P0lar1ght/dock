@@ -3,6 +3,7 @@
 .DS_Store
 .dock/
 embed-sdk/node_modules/
+dock-core/node_modules/
 embed-sdk/dist/
 
 # 密钥 / 本地环境（不进源码、commit、PR）
