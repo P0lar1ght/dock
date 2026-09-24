@@ -166,6 +166,9 @@ mod tests {
     /// `/cd` 是 `set_current_dir`，所有页一起被搬走。
     #[tokio::test]
     async fn change_dir_moves_only_this_page() {
+        // 要断言进程 cwd 没动，就得拿住进程环境锁：别的用例（`scoped().cwd(..)`）
+        // 会在并行时改它，不拿锁这条断言读到的是别人的目录。
+        let _env = cordis_base::test_env::scoped();
         let base = tempfile::tempdir().unwrap();
         std::fs::create_dir(base.path().join("sub")).unwrap();
         let a = page(Some(base.path()));
