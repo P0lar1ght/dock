@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::log::ArchivedSession;
 use cordis_base::config::dock_home;
-use cordis_base::types::{LlmOutput, LogEvent, ToolCall};
+use cordis_base::types::{LlmOutput, LogEvent, ToolCall, TurnEndStatus};
 
 const HISTORY: &str = "chat_history.jsonl";
 const META: &str = "meta.json";
@@ -101,6 +101,14 @@ enum WireEvent {
         /// 在读回时被兜底规则改掉。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+    },
+    /// 一轮结束。`status` 是 completed / cancelled / failed，认不得的值读成
+    /// completed；`error` 只在 failed 时写。更早的会话没有这一行，旧版本读到
+    /// 它会整行跳过。
+    TurnEnd {
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
@@ -338,7 +346,8 @@ fn roster_entry(dir: &Path) -> Option<RosterEntry> {
     })
 }
 
-/// 最后一条能解出来的 `HistoryLine`。只读文件尾部 [`TAIL_SCAN_BYTES`]。
+/// 最后一条能解出来、有内容的 `HistoryLine`（跳过 `turn-end`：名册要的是
+/// 对话本身的末条）。只读文件尾部 [`TAIL_SCAN_BYTES`]。
 fn last_history_line(path: &Path) -> Option<HistoryLine> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -353,7 +362,8 @@ fn last_history_line(path: &Path) -> Option<HistoryLine> {
     text.lines()
         .rev()
         .filter(|l| !l.trim().is_empty())
-        .find_map(|l| serde_json::from_str::<HistoryLine>(l).ok())
+        .filter_map(|l| serde_json::from_str::<HistoryLine>(l).ok())
+        .find(|l| !matches!(l.event, WireEvent::TurnEnd { .. }))
 }
 
 /// 末条事件压成一行给名册用。
@@ -361,7 +371,7 @@ fn wire_summary(event: &WireEvent) -> String {
     let raw = match event {
         WireEvent::User { text } | WireEvent::Prompt { text } => text.as_str(),
         WireEvent::Notice { title, .. } => title.as_str(),
-        WireEvent::SystemReminder { .. } | WireEvent::PreStep => "",
+        WireEvent::SystemReminder { .. } | WireEvent::PreStep | WireEvent::TurnEnd { .. } => "",
         WireEvent::Llm {
             text, tool_calls, ..
         } => {
@@ -592,6 +602,13 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
             image_paths: persist_tool_images(id, images),
             is_error: Some(*is_error),
         },
+        LogEvent::TurnEnd(status) => WireEvent::TurnEnd {
+            status: status.as_str().to_string(),
+            error: match status {
+                TurnEndStatus::Failed(error) => Some(error.clone()),
+                _ => None,
+            },
+        },
     })
 }
 
@@ -648,6 +665,11 @@ fn from_wire(event: WireEvent) -> LogEvent {
             content,
             images: load_tool_images(&image_paths),
         },
+        WireEvent::TurnEnd { status, error } => LogEvent::TurnEnd(match status.as_str() {
+            "cancelled" => TurnEndStatus::Cancelled,
+            "failed" => TurnEndStatus::Failed(error.unwrap_or_default()),
+            _ => TurnEndStatus::Completed,
+        }),
     }
 }
 
@@ -823,6 +845,41 @@ mod tests {
         assert!(old("exit status: 1\nboom"));
         assert!(old("Error: nope"));
         assert!(!old("fine"));
+    }
+
+    /// 一轮的结果落盘、读回（停止、出错带原文）；名册摘要跳过这一行，还是对话
+    /// 的末条；认不得的状态读成完成。
+    #[test]
+    fn turn_end_rows_round_trip_and_stay_out_of_the_roster_summary() {
+        let _home = cordis_base::test_env::scoped().home();
+        let cwd = Path::new("/tmp/dock-persist-turn-end-test");
+        let item = ArchivedSession {
+            id: "te1".into(),
+            title: "turn end".into(),
+            events: vec![
+                LogEvent::User("hi".into()),
+                LogEvent::LlmStream(LlmOutput {
+                    text: "answer".into(),
+                    ..LlmOutput::default()
+                }),
+                LogEvent::TurnEnd(TurnEndStatus::Cancelled),
+                LogEvent::User("again".into()),
+                LogEvent::TurnEnd(TurnEndStatus::Failed("HTTP 404".into())),
+            ],
+            times: vec![SystemTime::now(); 5],
+            compact_prefix: None,
+            compact_from: 0,
+            preset_id: None,
+        };
+        save(&item, cwd).unwrap();
+        assert_eq!(load_cwd(cwd)[0].events, item.events);
+        let entry = roster_entry(&sessions_cwd_dir(cwd).join("te1")).unwrap();
+        assert_eq!(entry.summary, "again");
+        remove("te1", cwd).unwrap();
+
+        let row: WireEvent =
+            serde_json::from_str(r#"{"kind":"turn-end","status":"paused"}"#).unwrap();
+        assert_eq!(from_wire(row), LogEvent::TurnEnd(TurnEndStatus::Completed));
     }
 
     /// Responses 的推理链要跨会话活下来；旧文件没有这个字段也得读得出来。

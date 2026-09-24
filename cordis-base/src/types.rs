@@ -83,6 +83,27 @@ mod notice_kind_tests {
     }
 }
 
+/// 一轮是怎么结束的。落盘成 `turn-end` 行，网关投影成 `turn/completed` 的
+/// `status`（失败时带 `error`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnEndStatus {
+    Completed,
+    /// 用户停止。
+    Cancelled,
+    /// 模型请求失败、超步数等。带给用户看的错误文本。
+    Failed(String),
+}
+
+impl TurnEndStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LogEvent {
     User(String),
@@ -117,6 +138,9 @@ pub enum LogEvent {
         /// 见 [`ToolResult::is_error`]。
         is_error: bool,
     },
+    /// 一轮结束（完成、停止、出错都记）。和 [`Self::Notice`] 一样只给用户看，
+    /// 不进模型上下文。只有会落盘的页会写；更早的会话没有这一行。
+    TurnEnd(TurnEndStatus),
 }
 
 impl LogEvent {
@@ -129,6 +153,7 @@ impl LogEvent {
             Self::LlmStream(_) => "llm/stream",
             Self::Notice { .. } => "notice",
             Self::ToolExecute { .. } => "tools/execute",
+            Self::TurnEnd(_) => "turn-end",
         }
     }
 }
@@ -143,6 +168,8 @@ impl fmt::Display for LogEvent {
             Self::LlmStream(out) => write!(f, "llm: {}", out.summary()),
             Self::Notice { kind, title, .. } => write!(f, "notice[{}]: {title}", kind.as_str()),
             Self::ToolExecute { name, content, .. } => write!(f, "tool {name}: {content}"),
+            Self::TurnEnd(TurnEndStatus::Failed(error)) => write!(f, "turn-end: failed: {error}"),
+            Self::TurnEnd(status) => write!(f, "turn-end: {}", status.as_str()),
         }
     }
 }

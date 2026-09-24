@@ -119,10 +119,11 @@ pub fn input_items(
                     ));
                 }
             }
-            // Notice 到不了这里（`model_history` 已滤掉）。
+            // Notice / TurnEnd 到不了这里（`model_history` 已滤掉）。
             LogEvent::PreStep
             | LogEvent::Prompt(_)
             | LogEvent::Notice { .. }
+            | LogEvent::TurnEnd(_)
             | LogEvent::LlmStream(_) => {}
         }
     }

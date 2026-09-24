@@ -988,7 +988,11 @@ fn build_frame(
                     lines.push(Line::from(""));
                 }
             }
-            LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::SystemReminder(_) => {}
+            // TUI 自己等这一轮的返回值来提示错误，不画这一行。
+            LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::SystemReminder(_)
+            | LogEvent::TurnEnd(_) => {}
         }
     }
     let todo_card = todo::lines(todos, todo_fold, &theme, width);

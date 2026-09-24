@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use cordis_base::types::LogEvent;
+use cordis_base::types::{LogEvent, TurnEndStatus};
 
 use super::summary::format_compact_summary;
 
@@ -132,7 +132,7 @@ fn role_label(event: &LogEvent) -> &'static str {
         LogEvent::LlmStream(_) => "Assistant",
         LogEvent::ToolExecute { .. } => "Function",
         LogEvent::SystemReminder(_) | LogEvent::Prompt(_) => "System",
-        LogEvent::PreStep | LogEvent::Notice { .. } => "System",
+        LogEvent::PreStep | LogEvent::Notice { .. } | LogEvent::TurnEnd(_) => "System",
     }
 }
 
@@ -155,7 +155,9 @@ fn event_body(event: &LogEvent) -> String {
                 format!("{title}\n{body}")
             }
         }
-        LogEvent::PreStep => String::new(),
+        LogEvent::TurnEnd(TurnEndStatus::Failed(error)) => format!("本轮出错：{error}"),
+        LogEvent::TurnEnd(TurnEndStatus::Cancelled) => "本轮已停止".into(),
+        LogEvent::PreStep | LogEvent::TurnEnd(TurnEndStatus::Completed) => String::new(),
     }
 }
 

@@ -20,7 +20,8 @@ pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEv
             LogEvent::ToolExecute { .. }
             | LogEvent::PreStep
             | LogEvent::Prompt(_)
-            | LogEvent::Notice { .. } => None,
+            | LogEvent::Notice { .. }
+            | LogEvent::TurnEnd(_) => None,
             LogEvent::LlmStream(out) => {
                 let mut text = out.text.clone();
                 if !out.tool_calls.is_empty() {
@@ -83,8 +84,9 @@ pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
             LogEvent::User(_)
             | LogEvent::PreStep
             | LogEvent::Prompt(_)
-            // 只给用户看的卡片，不进被摘要的那份历史。
-            | LogEvent::Notice { .. } => None,
+            // 只给用户看的，不进被摘要的那份历史。
+            | LogEvent::Notice { .. }
+            | LogEvent::TurnEnd(_) => None,
         })
         .collect()
 }
@@ -152,7 +154,10 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
                 n += estimate_text(arguments);
                 n += estimate_text(content);
             }
-            LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::Notice { .. } => {}
+            LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::Notice { .. }
+            | LogEvent::TurnEnd(_) => {}
         }
     }
     n

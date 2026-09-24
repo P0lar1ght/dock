@@ -207,11 +207,12 @@ pub fn transcript(
                     ));
                 }
             }
-            // Notice 到不了这里（`model_history` 已滤掉），列出来只是让编译器
+            // Notice / TurnEnd 到不了这里（`model_history` 已滤掉），列出来只是让编译器
             // 在以后新增变体时继续报错。
             LogEvent::PreStep
             | LogEvent::Prompt(_)
             | LogEvent::Notice { .. }
+            | LogEvent::TurnEnd(_)
             | LogEvent::LlmStream(_) => {}
         }
     }

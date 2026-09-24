@@ -777,6 +777,7 @@ fn event_line(ev: &LogEvent) -> Option<String> {
         LogEvent::SystemReminder(text) => format!("reminder\t{}", preview(text, 80)),
         LogEvent::PreStep | LogEvent::Prompt(_) => return None,
         LogEvent::Notice { kind, title, .. } => format!("notice[{}]\t{title}", kind.as_str()),
+        LogEvent::TurnEnd(status) => format!("turn-end\t{}", status.as_str()),
     };
     Some(line)
 }

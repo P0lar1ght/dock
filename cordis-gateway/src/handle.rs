@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use cordis::Context;
 use cordis_spine::{
-    Ask, LogEvent, Mcp, PageLogEvent, PageTurnEnd, Permissions, PlanMode, Sessions, ASK, ASK_EVENT,
-    MCP, MCP_ELICIT_EVENT, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, ROOT_IDENTITY,
-    SESSIONS, SESSION_PAGE_EVENT, SESSION_TURN_END,
+    Ask, LogEvent, Mcp, PageLogEvent, Permissions, PlanMode, Sessions, ASK, ASK_EVENT, MCP,
+    MCP_ELICIT_EVENT, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, ROOT_IDENTITY,
+    SESSIONS, SESSION_PAGE_EVENT,
 };
 use cordis_tui::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
@@ -392,16 +392,6 @@ fn listen_events(inner: &Arc<GatewayInner>) {
                 t.ingest_log_with(event.clone(), &attachments)
             });
         });
-    let for_turn_end = inner.clone();
-    let _ = inner.ctx.on(SESSION_TURN_END, move |end: &PageTurnEnd| {
-        let thread_id = pages(&for_turn_end)
-            .into_iter()
-            .find(|p| p.identity == *end.page)
-            .map(|p| p.thread_id());
-        with_transcript(&for_turn_end, &end.page, thread_id, |t| {
-            t.turn_ended(&end.status)
-        });
-    });
     // 队列事件载荷是 `()`，也不知道是哪一页的：挨页对账，序号没变的页不动。
     let for_perm = inner.clone();
     let _ = inner.ctx.on(PERMISSION_EVENT, move |_: &()| {
