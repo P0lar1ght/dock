@@ -63,9 +63,9 @@ pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
     DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
     PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
-    ROSTER, SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT, SETTINGS, SKILLS, SLASH, STEP_START,
-    SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TUI_SLOTS, TURN,
-    TURN_END, WORKFLOWS,
+    ROSTER, SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END, SETTINGS, SKILLS, SLASH,
+    STEP_START, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE,
+    TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
@@ -76,7 +76,7 @@ pub use prompt::context_usage::{
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
 pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
 pub use session::log::{
-    sessions, ArchivedSession, PageLogEvent, Sessions, TokenUsage, ROOT_IDENTITY,
+    sessions, ArchivedSession, PageLogEvent, PageTurnEnd, Sessions, TokenUsage, ROOT_IDENTITY,
 };
 pub use session::persist::RosterEntry;
 pub use session::resume_preset::{apply_restored_preset, ApplyRestoredPreset};

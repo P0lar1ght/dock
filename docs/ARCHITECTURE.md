@@ -101,7 +101,9 @@ cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的�
 前台叫醒重绘，标签栏上的 `●` 就是靠这个活的。反过来，`session/event` 的载荷也**不带**
 是哪一页发的；要按页区分的监听者订 `session/page-event`（`PageLogEvent { page, event }`，
 每条会话事件和老事件一起发、共用同一个 `LogEvent`）——网关的 `live` 线程就只收
-`page == "main"`，否则别的页说的话会混进浏览器那一侧。
+`page == "main"`，否则别的页说的话会混进浏览器那一侧。流式事件分不出哪段是最后一段，
+一轮何时结束看 `session/turn-end`（`PageTurnEnd { page }`，`LoopHandle` 每个入口结束时
+发，成功 / 出错 / 取消都算）；网关的 `turn/completed` 只由它触发，一轮一次。
 
 装一页要挂哪些插件由**组合根**决定（`cordis-app` 的 `tab_mount()`），TUI 只管开 /
 关 / 切：`"tui.tabs"` 拿到的是一个建页插件工厂。关页 `dispose` 那一颗页 fiber，

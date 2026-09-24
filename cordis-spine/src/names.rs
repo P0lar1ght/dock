@@ -80,6 +80,10 @@ pub const SESSION_EVENT: &str = "session/event";
 /// [`crate::PageLogEvent`]）。`session/event` 不分 realm、载荷也不带身份，任何一页
 /// 说话根上都收得到；要按页区分的监听者（网关的线程投影）订这一条。
 pub const SESSION_PAGE_EVENT: &str = "session/page-event";
+/// 一页的一轮跑完了（成功、出错、被取消都算），载荷 [`crate::PageTurnEnd`]。
+/// 流式事件本身分不出「这一段是不是最后一段」，要知道一轮何时结束的监听者
+/// （网关的 `turn/completed`）订这一条。
+pub const SESSION_TURN_END: &str = "session/turn-end";
 pub const PERMISSION_EVENT: &str = "permissions/pending";
 pub const ASK_EVENT: &str = "ask/pending";
 pub const PLAN_EVENT: &str = "plan/pending";

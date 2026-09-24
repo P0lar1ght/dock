@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime};
 
 use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::names::{SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT};
+use crate::names::{SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END};
 pub use cordis_base::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
 use cordis_base::types::{LogEvent, COMPACT_NOTICE};
 use cordis_base::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
@@ -147,6 +147,12 @@ fn estimated_cost_ticks(wire_model: &str, usage: &cordis_base::usage::TokenUsage
         usage.cache_creation_prompt_tokens,
         usage.completion_tokens,
     ))
+}
+
+/// [`SESSION_TURN_END`] 的载荷：哪一页的一轮结束了。
+#[derive(Clone, Debug)]
+pub struct PageTurnEnd {
+    pub page: Arc<str>,
 }
 
 /// [`SESSION_PAGE_EVENT`] 的载荷：哪一页（`main` / `main#N`）发了哪条事件。
@@ -589,6 +595,19 @@ impl Sessions {
         self.persist_live();
     }
 
+    /// 这一页的一轮跑完了。[`crate::LoopHandle`] 的每个入口结束时调一次。
+    pub fn end_turn(&self) {
+        if !self.emit {
+            return;
+        }
+        self.ctx.emit(
+            SESSION_TURN_END,
+            PageTurnEnd {
+                page: self.identity.clone(),
+            },
+        );
+    }
+
     fn emit_session(&self, event: LogEvent) {
         if !self.emit {
             return;
@@ -788,7 +807,14 @@ impl Sessions {
                         cost_usd_ticks: *cost_usd_ticks,
                     });
                 }
-                self.emit_session(LogEvent::LlmStream(cordis_base::types::LlmOutput::default()));
+                // 只是「用量变了」的通知：发当前这条流的原样副本。以前发空的
+                // `LlmStream`，按页投影的监听者（网关）会把它当成新一步开始，把
+                // 已推送的文本基准清空，下一条完整文本就被整段重推一遍。
+                let current = match self.events.lock().unwrap().last() {
+                    Some(event @ LogEvent::LlmStream(_)) => event.clone(),
+                    _ => LogEvent::LlmStream(cordis_base::types::LlmOutput::default()),
+                };
+                self.emit_session(current);
             }
         }
     }
@@ -1968,6 +1994,52 @@ mod tests {
         assert_eq!(pages, ["main#2", "main"]);
         assert!(matches!(&tagged[0].1, LogEvent::User(t) if t == "二"));
         assert_eq!(plain.lock().unwrap().len(), 2, "老事件照发、载荷不变");
+    }
+
+    /// 回归：流式中途的用量更新以前发一条**空的** `LlmStream`，按页投影的网关
+    /// 把它当成新一步开始、清空已推送的文本基准，于是完整回复被整段重推一遍
+    /// （GUI 里回复出现两次）。现在发当前这条流的原样副本。一轮结束另发
+    /// `session/turn-end`，带页身份。
+    #[tokio::test]
+    async fn usage_update_keeps_stream_text_and_turn_end_names_the_page() {
+        use cordis_base::stream_acc::StreamDelta;
+        let root = Context::new();
+        let streams = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ends = Arc::new(Mutex::new(Vec::<String>::new()));
+        let _a = {
+            let streams = streams.clone();
+            root.on(SESSION_PAGE_EVENT, move |e: &PageLogEvent| {
+                if let LogEvent::LlmStream(out) = &*e.event {
+                    streams.lock().unwrap().push(out.text.clone());
+                }
+            })
+            .unwrap()
+        };
+        let _b = {
+            let ends = ends.clone();
+            root.on(SESSION_TURN_END, move |e: &PageTurnEnd| {
+                ends.lock().unwrap().push(e.page.to_string());
+            })
+            .unwrap()
+        };
+        let page = root.isolate("sessions");
+        let sessions = Sessions::tab(page, 3);
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&StreamDelta::Text("你好".into()));
+        sessions.apply_llm_delta(&StreamDelta::Usage {
+            tokens: Default::default(),
+            official: false,
+            model: String::new(),
+            cost_usd_ticks: None,
+        });
+        sessions.end_turn();
+
+        assert_eq!(
+            *streams.lock().unwrap(),
+            ["", "你好", "你好"],
+            "开头那条空的是 begin_llm（新一步），用量更新不能再发空文本"
+        );
+        assert_eq!(*ends.lock().unwrap(), ["main#3"]);
     }
 
     #[test]

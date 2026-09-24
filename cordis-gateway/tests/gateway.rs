@@ -1265,6 +1265,12 @@ async fn threads_open_run_close_and_reopen_per_page() {
         .wait_notification("item/user_message", Duration::from_secs(5))
         .await;
     assert_eq!(said["params"]["threadId"], json!(id), "{said}");
+    // 一轮跑完（`LoopHandle` 发 `session/turn-end`）才有 turn/completed，且只一次。
+    let done = rpc
+        .wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+    assert_eq!(done["params"]["threadId"], json!(id), "{done}");
+    assert_eq!(done["params"]["turnId"], said["params"]["turnId"], "{done}");
 
     let live = rpc
         .call("thread/history", json!({ "threadId": "live" }))
