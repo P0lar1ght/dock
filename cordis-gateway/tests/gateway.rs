@@ -78,7 +78,60 @@ struct Harness {
     http: reqwest::Client,
 }
 
+/// 这个测试二进制共用一个隔离的 `DOCK_HOME`：多线程用例的分页会落盘，
+/// 不能写进本机 `~/.dock`，也不能读到本机的模型配置。
+fn isolated_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("dock-gateway-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("DOCK_HOME", &dir);
+        std::env::set_var("DOCK_CUA_DRIVER", "off");
+    });
+}
+
+/// 一个存在的、这次独有的项目目录。
+fn project_dir(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("dock-gw-{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.canonicalize().unwrap()
+}
+
+/// 测试用的建页工厂：每页自己的会话（落盘）、设置、权限队列、轮次、循环和
+/// session.port——和 `cordis-app` 的真分页一样按 `PER_TAB_SERVICES` 隔离。
+fn test_page_mount() -> cordis_tui::TabMount {
+    Arc::new(|index, _kind| {
+        cordis::plugin_async(
+            "test.page",
+            cordis::Inject::new(),
+            move |ctx, _: &()| async move {
+                let sessions = Sessions::tab(ctx.clone(), index);
+                sessions.attach_disk();
+                let _ = ctx.provide(SESSIONS, sessions)?;
+                ctx.plugin(settings(), ())?.wait().await?;
+                ctx.plugin(permissions(), ())?.wait().await?;
+                ctx.plugin(turn(), ())?.wait().await?;
+                ctx.plugin(agent_loop(), ())?.wait().await?;
+                let port = TestSession {
+                    ctx: ctx.clone(),
+                    working: Arc::new(AtomicBool::new(false)),
+                };
+                let _ = ctx.provide(
+                    SESSION_PORT,
+                    SessionRef::new(Arc::new(port) as Arc<dyn SessionPort>),
+                )?;
+                Ok(None)
+            },
+        )
+    })
+}
+
 async fn harness_root() -> Context {
+    isolated_home();
     let root = Context::new();
     install_fakes(&root).await.unwrap();
     root.plugin(settings(), ()).unwrap().wait().await.unwrap();
@@ -112,7 +165,21 @@ async fn harness_root() -> Context {
 
 impl Harness {
     async fn boot() -> Self {
+        Self::boot_on(harness_root().await).await
+    }
+
+    /// 带分页服务：网关能按线程开页（`thread/open` / `thread/start {cwd}`）。
+    async fn boot_with_pages() -> Self {
         let root = harness_root().await;
+        root.plugin(cordis_tui::tabs(), test_page_mount())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        Self::boot_on(root).await
+    }
+
+    async fn boot_on(root: Context) -> Self {
         root.plugin(gateway_bind("127.0.0.1:0"), ())
             .unwrap()
             .wait()
@@ -1125,4 +1192,107 @@ async fn serve_hands_the_parent_a_working_ticket() {
         .expect("stdin 关闭后控制循环该结束")
         .unwrap()
         .unwrap();
+}
+
+/// 多线程：在一个目录开一页 → 在那一页跑一轮（只推给它的订阅，不进 `live`）→
+/// 设置按页 → 关页后不能再发 → 从磁盘重新打开，对话还在。
+#[tokio::test]
+async fn threads_open_run_close_and_reopen_per_page() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["openThreads"], true);
+
+    let dir = project_dir("a");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!id.is_empty() && id != "live", "{started}");
+    assert_eq!(
+        started["result"]["thread"]["cwd"],
+        dir.display().to_string()
+    );
+
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let threads = listed["result"]["threads"].as_array().unwrap().clone();
+    assert!(
+        threads
+            .iter()
+            .any(|t| t["alias"] == "live" && t["open"] == true),
+        "{listed}"
+    );
+    assert!(
+        threads
+            .iter()
+            .any(|t| t["id"] == json!(id) && t["open"] == true),
+        "{listed}"
+    );
+
+    let sub = rpc
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    assert_eq!(sub["result"]["ok"], true, "{sub}");
+    let turn = rpc
+        .call(
+            "turn/start",
+            json!({ "threadId": id, "message": "A 页的话" }),
+        )
+        .await;
+    assert_eq!(turn["result"]["threadId"], json!(id), "{turn}");
+    let said = rpc
+        .wait_notification("item/user_message", Duration::from_secs(5))
+        .await;
+    assert_eq!(said["params"]["threadId"], json!(id), "{said}");
+
+    let live = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    assert!(
+        !live.to_string().contains("A 页的话"),
+        "不该进 live：{live}"
+    );
+
+    rpc.call(
+        "thread/model/set",
+        json!({ "threadId": id, "modelId": "only-a" }),
+    )
+    .await;
+    let env_a = rpc
+        .call("thread/environment/get", json!({ "threadId": id }))
+        .await;
+    let env_live = rpc
+        .call("thread/environment/get", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(env_a["result"]["model"]["id"], "only-a");
+    assert_ne!(env_live["result"]["model"]["id"], "only-a", "设置按页");
+
+    let closed = rpc.call("thread/close", json!({ "threadId": id })).await;
+    assert_eq!(closed["result"]["ok"], true, "{closed}");
+    let refused = rpc
+        .call("turn/start", json!({ "threadId": id, "message": "x" }))
+        .await;
+    assert_eq!(refused["error"]["details"]["code"], "thread_not_open");
+    let live_close = rpc
+        .call("thread/close", json!({ "threadId": "live" }))
+        .await;
+    assert!(
+        live_close.get("error").is_some(),
+        "第 1 页关不掉：{live_close}"
+    );
+
+    let reopened = rpc.call("thread/open", json!({ "threadId": id })).await;
+    assert_eq!(reopened["result"]["thread"]["id"], json!(id), "{reopened}");
+    let history = rpc.call("thread/history", json!({ "threadId": id })).await;
+    assert!(history.to_string().contains("A 页的话"), "{history}");
+
+    let workspaces = rpc.call("workspace/list", json!({ "scope": "all" })).await;
+    assert!(
+        workspaces.to_string().contains(&dir.display().to_string()),
+        "{workspaces}"
+    );
 }

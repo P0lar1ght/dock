@@ -64,7 +64,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | handler | 域 |
 |---|---|
 | `connection` | `connection/authenticate` |
-| `thread` | 会话列表 / 启动 / 改名 / 归档 / 恢复 / 删除 / 历史 / 订阅 |
+| `thread` | 会话列表 / 启动 / 改名 / 归档 / 恢复 / 删除 / 历史 / 订阅；多线程：`thread/open` / `thread/close` / `thread/start {cwd}` / `thread/list {scope:"all"}` |
 | `turn` | 发消息、流式回报 |
 | `environment` | 环境信息、模型 / reasoning / approval / plan / memory / goal 设置 |
 | `interaction` | `ask_user` 问答、权限请求 |
@@ -73,7 +73,23 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `image_inputs` | 图片输入 |
 
 - `transcript.rs`：把会话事件流转成 `dock.1` 的增量报文
-- `LIVE_THREAD_ID` = `"live"` 指代当前实时会话
+- `LIVE_THREAD_ID` = `"live"` 指代第 1 页（根）的会话；老客户端只用它
+
+### 多线程（能力 `openThreads`）
+
+一个线程 = 一页（`threads.rs`）。`threadId` 是**落盘会话 id**，`live` 仍是第 1 页的别名；分页身份 `main#N` 只在网关内部用来路由事件。
+
+| 方法 | 作用 |
+|---|---|
+| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open`，第 1 页另带 `alias: "live"` |
+| `workspace/list { scope: "all" }` | 有会话的所有目录（`id` = 路径，`hasOpenThreads`） |
+| `thread/start { cwd, title? }` | 在 `cwd` 另开一页（不动第 1 页），回它的会话 id；不带 `cwd` 是老语义 |
+| `thread/open { threadId }` | 把落盘会话开成一页（在它自己的 cwd 下）；已开着就回那一页 |
+| `thread/close { threadId }` | 关页，会话留在磁盘上；第 1 页关不掉 |
+
+其它线程级方法（`turn/*`、`thread/environment/*` 与各种 `set`、`thread/history|subscribe`、`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve`、`slash/execute`）接受任意**开着的**线程的 id，没开着回 `thread_not_open`。开页走 `"tui.tabs"` 的 `Tabs::open_at`（不切终端里正在看的页）；没挂分页服务时只有第 1 页。
+
+投影每页一份（`handle.rs` 的 `transcripts`，共用一条 broadcast，事件带页身份）；订阅是「页 → 客户端订阅时用的 `threadId`」，推送时用那个 id。会话事件按 `session/page-event` 路由；权限 / 提问 / 计划 / elicitation 的事件载荷是 `()`，挨页按队首序号（`front_seq`）对账——同一条不重报，换了一条先报旧的 resolved。线程级的斜杠命令用 `GatewayHandle::scoped(page)`，下面一串 `cmd_*` 读的 `gateway.ctx()` 就是那一页。
 
 ## 依赖注入
 

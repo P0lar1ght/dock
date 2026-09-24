@@ -125,7 +125,7 @@ cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的�
 
 **落盘**：常驻页和主会话一样 `attach_disk`，落在**这一页自己的 cwd** 下（`tab.sessions`
 建页时做；`Sessions::attach_disk` 用会话自己的 cwd），关页后仍在历史里；`/btw` 旁问页
-不落盘。**已知边界**：`--resume` 与 gateway `dock.1` 投影仍只跟第 1 页。权限队列和 `ask` 按页隔离，只在那一页上弹出；MCP 连接仍是全局的，
+不落盘。**已知边界**：`--resume` 只跟第 1 页。gateway 的 `dock.1` 按线程投影**每一页**：`threadId` 是落盘会话 id（`live` 是第 1 页的别名），`thread/open` / `thread/start {cwd}` 经 `Tabs::open_at` 开页（不切终端里正在看的页），`dock serve` 挂不带视图的建页工厂（`tab_mount_headless`）。队列事件（权限 / 提问 / 计划 / elicitation）载荷是 `()`、不带页，网关挨页按队首序号（`front_seq`）对账，同一条不重报。权限队列和 `ask` 按页隔离，只在那一页上弹出；MCP 连接仍是全局的，
 elicitation 盖了来源页，也只在那一页上显示。同一台 MCP 服务器两页可以同时调用：HTTP 上提问跟着那次 POST 的响应走，各页弹各页的框。标签上 `◆` 表示那一页有东西在等回答。
 浏览器、cua、后台任务表仍是全局单例，两页会抢。
 

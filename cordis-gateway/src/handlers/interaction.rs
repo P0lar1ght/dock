@@ -1,13 +1,15 @@
 use serde_json::{json, Value};
 
-use cordis_spine::{Ask, Mcp, PlanDecision, PlanMode, Sessions, ASK, MCP, PLAN_MODE, SESSIONS};
+use cordis_spine::{Ask, Mcp, PlanDecision, PlanMode, ASK, MCP, PLAN_MODE};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;
+use crate::threads;
 
 pub fn respond(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let ask = gateway
-        .ctx()
+    let page = threads::resolve_param(gateway, &params)?;
+    let ask = page
+        .ctx
         .get::<Ask>(ASK)
         .ok_or_else(|| RpcError::app("unavailable", "ask service is not mounted"))?;
     let answers = params
@@ -44,8 +46,9 @@ pub fn plan_resolve(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
             ))
         }
     };
-    let plan = gateway
-        .ctx()
+    let page = threads::resolve_param(gateway, &params)?;
+    let plan = page
+        .ctx
         .get::<PlanMode>(PLAN_MODE)
         .ok_or_else(|| RpcError::app("unavailable", "planMode service is not mounted"))?;
     if !plan.resolve(decision) {
@@ -65,12 +68,10 @@ pub fn elicit_resolve(gateway: &GatewayHandle, params: Value) -> Result<Value, R
         .ctx()
         .get::<Mcp>(MCP)
         .ok_or_else(|| RpcError::app("unavailable", "mcp service is not mounted"))?;
-    let page = gateway
-        .ctx()
-        .get::<Sessions>(SESSIONS)
-        .and_then(|s| s.ui_page());
+    // MCP 连接是全局的，elicitation 队列按页区分：解的是这个线程那一页的队首。
+    let page = threads::resolve_param(gateway, &params)?;
     mcp.elicitation()
-        .resolve_on(page.as_deref(), action, content)
+        .resolve_on(Some(page.identity.as_str()), action, content)
         .map_err(|e| RpcError::app("empty_queue", e))?;
     Ok(json!({ "ok": true, "resumed": true }))
 }

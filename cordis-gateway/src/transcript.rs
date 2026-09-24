@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 
 use cordis_spine::{
     Ask, ElicitPrompt, LogEvent, PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt,
-    PlanDecision, Sessions, UserImage,
+    PlanDecision, Sessions, UserImage, ROOT_IDENTITY,
 };
 
 use crate::protocol::LIVE_THREAD_ID;
@@ -19,6 +19,9 @@ const BROADCAST_CAP: usize = 256;
 pub struct ProjectedEvent {
     pub seq: u64,
     pub method: String,
+    /// 发出它的页（`main` / `main#N`）。订阅按页匹配，见 `ws.rs`。
+    pub page: String,
+    /// 推送时这一页在协议里的 `threadId`（第 1 页 `live`，其它页是会话 id）。
     pub thread_id: String,
     pub turn_id: String,
     pub timestamp: String,
@@ -27,10 +30,15 @@ pub struct ProjectedEvent {
 
 impl ProjectedEvent {
     pub fn as_notification(&self) -> Value {
+        self.as_notification_as(&self.thread_id)
+    }
+
+    /// 以订阅方用的 `threadId` 推送：第 1 页既可以按 `live` 也可以按会话 id 订。
+    pub fn as_notification_as(&self, thread_id: &str) -> Value {
         let mut params = flatten_payload(&self.payload);
         params.insert("seq".into(), json!(self.seq));
         params.insert("transcriptSeq".into(), json!(self.seq));
-        params.insert("threadId".into(), json!(self.thread_id));
+        params.insert("threadId".into(), json!(thread_id));
         params.insert("turnId".into(), json!(self.turn_id));
         params.insert("timestamp".into(), json!(self.timestamp));
         json!({
@@ -40,12 +48,16 @@ impl ProjectedEvent {
     }
 
     pub fn as_history_item(&self) -> Value {
+        self.as_history_item_as(&self.thread_id)
+    }
+
+    pub fn as_history_item_as(&self, thread_id: &str) -> Value {
         let mut payload = flatten_payload(&self.payload);
-        payload.insert("threadId".into(), json!(self.thread_id));
+        payload.insert("threadId".into(), json!(thread_id));
         payload.insert("turnId".into(), json!(self.turn_id));
         json!({
             "timestamp": self.timestamp,
-            "threadId": self.thread_id,
+            "threadId": thread_id,
             "turnId": self.turn_id,
             "seq": self.seq,
             "method": self.method,
@@ -78,26 +90,51 @@ struct Projector {
     ask_id: Option<String>,
     plan_id: Option<String>,
     elicit_id: Option<String>,
+    /// 已经报过 requested 的队首序号（`front_seq`）。同一条还挂着时再来事件不重报。
+    perm_seq: Option<u64>,
+    ask_seq: Option<u64>,
+    plan_seq: Option<u64>,
+    elicit_seq: Option<u64>,
 }
 
+/// 一页的投影。各页的 `Transcript` 共用网关的一条 broadcast，事件上带着页身份。
 pub struct Transcript {
     events: Vec<ProjectedEvent>,
     projector: Projector,
     tx: broadcast::Sender<ProjectedEvent>,
+    page: String,
+    thread_id: String,
 }
 
 impl Transcript {
+    /// 第 1 页、自带一条 broadcast（单测用）。
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
+        Self::for_page(ROOT_IDENTITY, LIVE_THREAD_ID, tx)
+    }
+
+    pub fn for_page(
+        page: impl Into<String>,
+        thread_id: impl Into<String>,
+        tx: broadcast::Sender<ProjectedEvent>,
+    ) -> Self {
         Self {
             events: Vec::new(),
             projector: Projector::default(),
             tx,
+            page: page.into(),
+            thread_id: thread_id.into(),
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<ProjectedEvent> {
-        self.tx.subscribe()
+    /// 网关共用的那条 broadcast 的容量。
+    pub fn channel() -> broadcast::Sender<ProjectedEvent> {
+        broadcast::channel(BROADCAST_CAP).0
+    }
+
+    /// 这一页换了会话（`thread/start` 等）之后，之后推的事件用新 id。
+    pub fn set_thread_id(&mut self, thread_id: impl Into<String>) {
+        self.thread_id = thread_id.into();
     }
 
     pub fn latest_seq(&self) -> u64 {
@@ -129,6 +166,7 @@ impl Transcript {
         }
     }
 
+    #[cfg(test)]
     pub fn ingest_log(&mut self, event: LogEvent) {
         self.ingest_log_with(event, &[]);
     }
@@ -369,6 +407,67 @@ impl Transcript {
         self.push("elicit/resolved", json!({ "elicitId": id, "ok": true }));
     }
 
+    /// 按权限队列对账：队首换了才报 `permission/requested`（先把被换下的那条报
+    /// resolved），队空了报 resolved。队列事件的载荷是 `()`，别的页排队、同一条
+    /// 还挂着都会再来一次事件——没有序号就会重复报。
+    pub fn sync_permission(
+        &mut self,
+        front: Option<(u64, PermissionPrompt)>,
+        last: Option<PermissionOptionKind>,
+    ) {
+        let seq = front.as_ref().map(|(s, _)| *s);
+        if seq == self.projector.perm_seq {
+            return;
+        }
+        self.permission_resolved(last.unwrap_or(PermissionOptionKind::RejectOnce));
+        self.projector.perm_seq = seq;
+        if let Some((_, prompt)) = front {
+            self.permission_requested(&prompt);
+        }
+    }
+
+    /// 同 [`Self::sync_permission`]，提问队列。翻题、作答也会发事件，序号不变就不重报。
+    pub fn sync_interaction(&mut self, seq: Option<u64>, ask: &Ask) {
+        if seq == self.projector.ask_seq {
+            return;
+        }
+        self.interaction_resolved();
+        self.projector.ask_seq = seq;
+        if seq.is_some() {
+            self.interaction_requested(ask);
+        }
+    }
+
+    /// 同 [`Self::sync_permission`]，计划审批。
+    pub fn sync_plan(
+        &mut self,
+        front: Option<(u64, PlanApprovalPrompt)>,
+        last: Option<PlanDecision>,
+    ) {
+        let seq = front.as_ref().map(|(s, _)| *s);
+        if seq == self.projector.plan_seq {
+            return;
+        }
+        self.plan_resolved(last.unwrap_or(PlanDecision::Quit));
+        self.projector.plan_seq = seq;
+        if let Some((_, prompt)) = front {
+            self.plan_requested(&prompt);
+        }
+    }
+
+    /// 同 [`Self::sync_permission`]，MCP elicitation（按页取队首）。
+    pub fn sync_elicit(&mut self, front: Option<(u64, ElicitPrompt)>) {
+        let seq = front.as_ref().map(|(s, _)| *s);
+        if seq == self.projector.elicit_seq {
+            return;
+        }
+        self.elicit_resolved();
+        self.projector.elicit_seq = seq;
+        if let Some((_, prompt)) = front {
+            self.elicit_requested(&prompt);
+        }
+    }
+
     fn ensure_turn(&mut self) {
         if self.projector.turn_open {
             return;
@@ -395,12 +494,13 @@ impl Transcript {
             obj.entry("turnId")
                 .or_insert_with(|| Value::String(turn_id.clone()));
             obj.entry("threadId")
-                .or_insert_with(|| Value::String(LIVE_THREAD_ID.into()));
+                .or_insert_with(|| Value::String(self.thread_id.clone()));
         }
         let event = ProjectedEvent {
             seq,
             method: method.into(),
-            thread_id: LIVE_THREAD_ID.into(),
+            page: self.page.clone(),
+            thread_id: self.thread_id.clone(),
             turn_id,
             timestamp: iso_now(),
             payload,
@@ -482,6 +582,94 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    fn methods(t: &Transcript) -> Vec<String> {
+        t.history_since(0).into_iter().map(|e| e.method).collect()
+    }
+
+    fn prompt(summary: &str) -> PermissionPrompt {
+        PermissionPrompt {
+            tool: "bash".into(),
+            summary: summary.into(),
+        }
+    }
+
+    /// 回归：权限事件载荷是 `()`，别的页排队、同一条还挂着都会再来事件。按队首
+    /// 序号对账：同一条不重报；换了一条先报旧的 resolved 再报新的 requested；
+    /// 队空了报 resolved。以前第二条排队的请求会让第一条永远等不到 resolved。
+    #[test]
+    fn permission_sync_reports_each_request_once() {
+        let mut t = Transcript::new();
+        t.sync_permission(Some((1, prompt("ls"))), None);
+        t.sync_permission(Some((1, prompt("ls"))), None);
+        assert_eq!(
+            methods(&t)
+                .iter()
+                .filter(|m| m.starts_with("permission/"))
+                .count(),
+            1,
+            "同一条请求只报一次：{:?}",
+            methods(&t)
+        );
+
+        t.sync_permission(
+            Some((2, prompt("rm"))),
+            Some(PermissionOptionKind::AllowOnce),
+        );
+        t.sync_permission(None, Some(PermissionOptionKind::RejectOnce));
+        let perms: Vec<String> = methods(&t)
+            .into_iter()
+            .filter(|m| m.starts_with("permission/"))
+            .collect();
+        assert_eq!(
+            perms,
+            [
+                "permission/requested",
+                "permission/resolved",
+                "permission/requested",
+                "permission/resolved"
+            ]
+        );
+    }
+
+    /// 回归：翻题、作答也会发 `ask/pending`；以前每翻一次就重报一次
+    /// `interaction/requested`（每次一个新 id）。
+    #[tokio::test]
+    async fn interaction_sync_ignores_navigation() {
+        let ask = std::sync::Arc::new(Ask::new(cordis::Context::new()));
+        let question = |text: &str| cordis_spine::Question {
+            question: text.into(),
+            options: vec![cordis_spine::QuestionOption {
+                label: "好".into(),
+                description: String::new(),
+                preview: None,
+                id: None,
+            }],
+            multi_select: None,
+            id: None,
+        };
+        let waiting = ask.clone();
+        let asked =
+            tokio::spawn(
+                async move { waiting.ask(vec![question("一？"), question("二？")]).await },
+            );
+        while ask.front_seq().is_none() {
+            tokio::task::yield_now().await;
+        }
+
+        let mut t = Transcript::new();
+        t.sync_interaction(ask.front_seq(), &ask);
+        ask.answer_current(vec!["好".into()], None);
+        ask.navigate(1);
+        t.sync_interaction(ask.front_seq(), &ask);
+        t.sync_interaction(ask.front_seq(), &ask);
+        assert_eq!(methods(&t), ["turn/started", "interaction/requested"]);
+
+        ask.cancel();
+        t.sync_interaction(ask.front_seq(), &ask);
+        assert_eq!(methods(&t).last().unwrap(), "interaction/resolved");
+        asked.await.unwrap();
     }
 
     #[test]

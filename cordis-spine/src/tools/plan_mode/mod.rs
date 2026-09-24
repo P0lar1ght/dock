@@ -53,6 +53,8 @@ pub struct PlanApprovalPrompt {
 }
 
 struct PendingApproval {
+    /// 序号，见 [`PlanMode::front_seq`]。
+    seq: u64,
     prompt: PlanApprovalPrompt,
     tx: oneshot::Sender<PlanDecision>,
 }
@@ -70,6 +72,7 @@ pub struct PlanMode {
     mode: Mutex<ModeState>,
     approval: Mutex<Option<PendingApproval>>,
     last_decision: Mutex<Option<PlanDecision>>,
+    next_seq: std::sync::atomic::AtomicU64,
 }
 
 impl PlanMode {
@@ -84,7 +87,13 @@ impl PlanMode {
             }),
             approval: Mutex::new(None),
             last_decision: Mutex::new(None),
+            next_seq: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// 挂着的计划审批的序号（单调递增）；投影方用它判断是不是新的一次审批。
+    pub fn front_seq(&self) -> Option<u64> {
+        self.approval.lock().unwrap().as_ref().map(|p| p.seq)
     }
 
     pub fn phase(&self) -> PlanPhase {
@@ -224,6 +233,10 @@ impl PlanMode {
                 let _ = prev.tx.send(PlanDecision::Quit);
             }
             *slot = Some(PendingApproval {
+                seq: self
+                    .next_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1,
                 prompt: PlanApprovalPrompt { path, body, empty },
                 tx,
             });

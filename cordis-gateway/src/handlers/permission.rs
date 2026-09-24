@@ -4,6 +4,7 @@ use cordis_spine::{PermissionOptionKind, Permissions, PERMISSIONS};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;
+use crate::threads;
 
 pub fn resolve(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let decision = params.get("decision").and_then(Value::as_str).unwrap_or("");
@@ -22,8 +23,9 @@ pub fn resolve(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         ("reject_always" | "RejectAlways", _) => PermissionOptionKind::RejectAlways,
         _ => return Err(RpcError::invalid_params("decision must be approve or deny")),
     };
-    let perms = gateway
-        .ctx()
+    let page = threads::resolve_param(gateway, &params)?;
+    let perms = page
+        .ctx
         .get::<Permissions>(PERMISSIONS)
         .ok_or_else(|| RpcError::app("unavailable", "permissions service is not mounted"))?;
     if !perms.resolve(kind) {

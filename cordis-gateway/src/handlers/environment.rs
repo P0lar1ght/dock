@@ -6,13 +6,25 @@ use cordis_spine::{
 };
 use cordis_tui::{SessionRef, SESSION_PORT};
 
-use crate::handle::GatewayHandle;
-use crate::protocol::{RpcError, LIVE_THREAD_ID};
+use cordis::Context;
 
-pub fn get(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
-    let mut map = environment_fields(gateway)?;
-    map.insert("threadId".into(), json!(LIVE_THREAD_ID));
+use crate::handle::GatewayHandle;
+use crate::protocol::RpcError;
+use crate::threads;
+
+// 这些都是**线程级**的：模型、推理、审批、计划、目标各页一份（`threadId` 解析到
+// 哪一页就改哪一页），MCP 仍是全局的。
+
+pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let thread_id = threads::thread_param(&params);
+    let page = threads::resolve(gateway, &thread_id)?;
+    let mut map = environment_fields(&page.ctx)?;
+    map.insert("threadId".into(), json!(thread_id));
     Ok(Value::Object(map))
+}
+
+fn page_ctx(gateway: &GatewayHandle, params: &Value) -> Result<Context, RpcError> {
+    Ok(threads::resolve_param(gateway, params)?.ctx)
 }
 
 pub fn refresh_models(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
@@ -24,7 +36,7 @@ pub fn set_reasoning(gateway: &GatewayHandle, params: Value) -> Result<Value, Rp
         .get("effort")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::invalid_params("effort is required"))?;
-    let settings = settings(gateway)?;
+    let settings = settings(&page_ctx(gateway, &params)?)?;
     match effort {
         "none" => {
             settings.set_thinking(false);
@@ -57,7 +69,7 @@ pub fn set_goal(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcErro
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| RpcError::invalid_params("content is required"))?;
-    goal_service(gateway)?.start(content);
+    goal_service(&page_ctx(gateway, &params)?)?.start(content);
     get(gateway, params)
 }
 
@@ -68,26 +80,28 @@ pub fn edit_goal(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcErr
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| RpcError::invalid_params("content is required"))?;
-    let goal = goal_service(gateway)?;
+    let ctx = page_ctx(gateway, &params)?;
+    let goal = goal_service(&ctx)?;
     if !goal.present() {
         return Err(RpcError::app("not_found", "no active goal"));
     }
     goal.set_title(content);
-    Ok(json!({ "goal": goal_object(gateway) }))
+    Ok(json!({ "goal": goal_object(&ctx) }))
 }
 
-pub fn pause_goal(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
-    let goal = goal_service(gateway)?;
+pub fn pause_goal(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let ctx = page_ctx(gateway, &params)?;
+    let goal = goal_service(&ctx)?;
     if !goal.pause() {
         return Err(RpcError::app("not_found", "no active goal to pause"));
     }
-    Ok(json!({ "goal": goal_object(gateway) }))
+    Ok(json!({ "goal": goal_object(&ctx) }))
 }
 
 pub fn clear_goal(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let _ = params;
-    goal_service(gateway)?.clear();
-    Ok(json!({ "goal": goal_object(gateway) }))
+    let ctx = page_ctx(gateway, &params)?;
+    goal_service(&ctx)?.clear();
+    Ok(json!({ "goal": goal_object(&ctx) }))
 }
 
 pub fn set_model(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
@@ -95,14 +109,14 @@ pub fn set_model(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcErr
         .get("modelId")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::invalid_params("modelId is required"))?;
-    let settings = settings(gateway)?;
+    let settings = settings(&page_ctx(gateway, &params)?)?;
     settings.set_model(model_id);
     get(gateway, params)
 }
 
 pub fn set_approval(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let mode = params.get("mode").and_then(Value::as_str).unwrap_or("");
-    let settings = settings(gateway)?;
+    let settings = settings(&page_ctx(gateway, &params)?)?;
     match mode {
         "ask" => settings.set_permission_mode(PermissionMode::Ask),
         "auto" => settings.set_permission_mode(PermissionMode::Allow),
@@ -122,8 +136,7 @@ pub fn set_plan(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcErro
         .get("enabled")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let plan = gateway
-        .ctx()
+    let plan = page_ctx(gateway, &params)?
         .get::<PlanMode>(PLAN_MODE)
         .ok_or_else(|| RpcError::app("unavailable", "planMode service is not mounted"))?;
     plan.set(enabled);
@@ -137,34 +150,31 @@ pub fn compact(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let port = gateway
-        .ctx()
+    let thread_id = threads::thread_param(&params);
+    let port = threads::resolve(gateway, &thread_id)?
+        .ctx
         .get::<SessionRef>(SESSION_PORT)
         .ok_or_else(|| RpcError::app("unavailable", "session.port is not mounted"))?;
     port.compact(extra);
     Ok(json!({
-        "threadId": LIVE_THREAD_ID,
+        "threadId": thread_id,
         "ok": true,
         "status": "running"
     }))
 }
 
-fn settings(gateway: &GatewayHandle) -> Result<std::sync::Arc<AppSettings>, RpcError> {
-    gateway
-        .ctx()
-        .get::<AppSettings>(SETTINGS)
+fn settings(ctx: &Context) -> Result<std::sync::Arc<AppSettings>, RpcError> {
+    ctx.get::<AppSettings>(SETTINGS)
         .ok_or_else(|| RpcError::app("unavailable", "settings service is not mounted"))
 }
 
-fn goal_service(gateway: &GatewayHandle) -> Result<std::sync::Arc<Goal>, RpcError> {
-    gateway
-        .ctx()
-        .get::<Goal>(GOAL)
+fn goal_service(ctx: &Context) -> Result<std::sync::Arc<Goal>, RpcError> {
+    ctx.get::<Goal>(GOAL)
         .ok_or_else(|| RpcError::app("unavailable", "goal service is not mounted"))
 }
 
-fn goal_object(gateway: &GatewayHandle) -> Value {
-    match gateway.ctx().get::<Goal>(GOAL) {
+fn goal_object(ctx: &Context) -> Value {
+    match ctx.get::<Goal>(GOAL) {
         Some(goal) if goal.present() => {
             let status = if goal.paused() { "paused" } else { "active" };
             json!({
@@ -183,8 +193,8 @@ fn goal_object(gateway: &GatewayHandle) -> Value {
     }
 }
 
-fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String, Value>, RpcError> {
-    let settings = settings(gateway)?;
+fn environment_fields(ctx: &Context) -> Result<serde_json::Map<String, Value>, RpcError> {
+    let settings = settings(ctx)?;
     let model = settings.model();
     let catalog = settings.catalog();
     let options: Vec<Value> = catalog
@@ -202,11 +212,8 @@ fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String,
         PermissionMode::Ask => "ask",
         PermissionMode::Allow => "auto",
     };
-    let plan_on = gateway
-        .ctx()
-        .get::<PlanMode>(PLAN_MODE)
-        .is_some_and(|p| p.active());
-    let mcp = gateway.ctx().get::<Mcp>(MCP);
+    let plan_on = ctx.get::<PlanMode>(PLAN_MODE).is_some_and(|p| p.active());
+    let mcp = ctx.get::<Mcp>(MCP);
     let servers: Vec<Value> = mcp
         .as_ref()
         .map(|m| {
@@ -242,11 +249,10 @@ fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String,
                 .sum()
         })
         .unwrap_or(0);
-    let snap = gateway
-        .ctx()
+    let snap = ctx
         .get::<ContextBook>(CONTEXT)
-        .map(|b| b.window())
-        .unwrap_or_else(|| snapshot_context(gateway.ctx()));
+        .map(|b| b.window_on(ctx))
+        .unwrap_or_else(|| snapshot_context(ctx));
     let (used, total, pct, trigger) = (
         snap.used,
         snap.total,
@@ -285,7 +291,7 @@ fn environment_fields(gateway: &GatewayHandle) -> Result<serde_json::Map<String,
             "options": ["none", "low", "medium", "high"]
         }),
     );
-    map.insert("goal".into(), goal_object(gateway));
+    map.insert("goal".into(), goal_object(ctx));
     map.insert(
         "plan".into(),
         json!({

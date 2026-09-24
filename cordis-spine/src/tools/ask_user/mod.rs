@@ -31,6 +31,8 @@ pub struct AskPrompt {
 }
 
 struct Pending {
+    /// 入队序号，见 [`Ask::front_seq`]。
+    seq: u64,
     questions: Vec<Question>,
     answers: IndexMap<String, Vec<String>>,
     annotations: HashMap<String, QuestionAnnotation>,
@@ -42,6 +44,7 @@ struct Pending {
 pub struct Ask {
     ctx: Context,
     queue: Mutex<VecDeque<Pending>>,
+    next_seq: std::sync::atomic::AtomicU64,
 }
 
 impl Ask {
@@ -49,7 +52,14 @@ impl Ask {
         Self {
             ctx,
             queue: Mutex::new(VecDeque::new()),
+            next_seq: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// 队首那组提问的入队序号（单调递增）。翻题、作答也会发 `ask/pending`，
+    /// 投影方拿它区分「换了一组提问」和「还是同一组」。
+    pub fn front_seq(&self) -> Option<u64> {
+        self.queue.lock().unwrap().front().map(|p| p.seq)
     }
 
     pub fn front(&self) -> Option<AskPrompt> {
@@ -195,7 +205,12 @@ impl Ask {
             return format::CANCEL_TEXT.to_string();
         }
         let (tx, rx) = oneshot::channel();
+        let seq = self
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         self.queue.lock().unwrap().push_back(Pending {
+            seq,
             questions,
             answers: IndexMap::new(),
             annotations: HashMap::new(),
@@ -294,6 +309,7 @@ mod tests {
         let ask = Ask::new(cordis::Context::new());
         let (tx, _rx) = oneshot::channel();
         ask.queue.lock().unwrap().push_back(Pending {
+            seq: 0,
             questions: vec![q("Q1", &["A", "B"]), q("Q2", &["C", "D"]), q("Q3", &["E"])],
             answers: IndexMap::new(),
             annotations: HashMap::new(),
@@ -316,6 +332,7 @@ mod tests {
         let ask = Ask::new(cordis::Context::new());
         let (tx, _rx) = oneshot::channel();
         ask.queue.lock().unwrap().push_back(Pending {
+            seq: 0,
             questions: vec![q("Q1", &["A"]), q("Q2", &["B"]), q("Q3", &["C"])],
             answers: IndexMap::new(),
             annotations: HashMap::new(),
@@ -343,6 +360,7 @@ mod tests {
             .is_err());
         let (tx, mut rx) = oneshot::channel();
         ask.queue.lock().unwrap().push_back(Pending {
+            seq: 0,
             questions: vec![q("Q1", &["A"])],
             answers: IndexMap::new(),
             annotations: HashMap::new(),
