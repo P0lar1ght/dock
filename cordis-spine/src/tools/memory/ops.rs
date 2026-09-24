@@ -269,8 +269,7 @@ fn save_remember(ctx: &Context, note: &str) -> Result<String> {
             "记忆功能已关闭。请设置 [memory] enabled = true 或 DOCK_MEMORY=1。".into(),
         ));
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let root = MemoryRoot::open_default(&cwd);
+    let root = MemoryRoot::open_default(&crate::session::cwd::current_cwd());
     let mut index = MemoryIndex::open_or_create(&root.search_db())
         .map_err(|e| Error::Compact(format!("记忆索引：{e}")))?;
     let path = save_remember_note(&root, note, &mut index)

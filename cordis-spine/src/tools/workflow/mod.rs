@@ -40,15 +40,14 @@ pub(crate) fn catalog_listing() -> Vec<(String, String)> {
 }
 
 fn scan_catalog() -> Vec<WorkflowListing> {
-    let cwd = std::env::current_dir().ok();
-    registry::list_workflows(cwd.as_deref())
+    registry::list_workflows(Some(&crate::session::cwd::current_cwd()))
 }
 
 /// One workflow's metadata plus its full Rhai script (builtin + disk), for the
 /// `/context` drill-down.
 pub fn workflow_detail(name: &str) -> Option<(WorkflowInfo, String)> {
-    let cwd = std::env::current_dir().ok();
-    let (registry, listings) = registry::workflow_snapshot(cwd.as_deref());
+    let cwd = crate::session::cwd::current_cwd();
+    let (registry, listings) = registry::workflow_snapshot(Some(&cwd));
     let listing = listings.into_iter().find(|l| l.name == name)?;
     let resolved = registry.resolve_by_name(name).ok()?;
     Some((WorkflowInfo::from(listing), resolved.script))
@@ -406,7 +405,13 @@ async fn run_workflow_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult 
     if wf
         .handle
         .0
-        .send((grok_tool::WorkflowLaunchRequest { input }, ack_tx))
+        .send((
+            grok_tool::WorkflowLaunchRequest {
+                input,
+                cwd: crate::session::cwd::current_cwd(),
+            },
+            ack_tx,
+        ))
         .is_err()
     {
         return tool_result(

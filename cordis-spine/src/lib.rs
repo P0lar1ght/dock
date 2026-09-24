@@ -73,6 +73,7 @@ pub use prompt::context_usage::{
     ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
+pub use session::cwd::{current_cwd, session_cwd};
 pub use session::log::{sessions, ArchivedSession, Sessions, TokenUsage};
 pub use session::persist::RosterEntry;
 pub use session::resume_preset::{apply_restored_preset, ApplyRestoredPreset};

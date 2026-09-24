@@ -484,9 +484,7 @@ fn plan_path_for(sessions: Option<&Sessions>) -> PathBuf {
             return dir.join(PLAN_FILENAME);
         }
     }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(PLAN_REL)
+    crate::session::cwd::current_cwd().join(PLAN_REL)
 }
 
 /// Directory of a non-disk tab's plan. `None` for the root session and for
