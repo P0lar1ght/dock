@@ -38,9 +38,10 @@ pub fn try_lines(
     width: usize,
     mode: ToolMode,
     running: bool,
+    // Dock 落下的 `is_error`，不按输出猜。
+    failed: bool,
 ) -> Option<Vec<Line<'static>>> {
     let query = parse_query(arguments);
-    let failed = looks_failed(content);
     let parsed = if failed || (running && content.is_empty()) {
         Some(Vec::new())
     } else {
@@ -140,8 +141,10 @@ pub fn lines(
     width: usize,
     mode: ToolMode,
     running: bool,
+    // Dock 落下的 `is_error`，不按输出猜。
+    failed: bool,
 ) -> Vec<Line<'static>> {
-    try_lines(arguments, content, theme, width, mode, running).unwrap_or_else(|| {
+    try_lines(arguments, content, theme, width, mode, running, failed).unwrap_or_else(|| {
         tool::lines(
             "memory_search",
             arguments,
@@ -171,11 +174,6 @@ fn parse_query(arguments: &str) -> String {
         .unwrap_or(arguments.trim())
         .trim()
         .to_string()
-}
-
-fn looks_failed(content: &str) -> bool {
-    let t = content.trim_start();
-    t.starts_with("Error") || t.starts_with("error")
 }
 
 /// `Some` when `content` is `format_search_results` output (including empty).
@@ -402,6 +400,7 @@ session content
             80,
             ToolMode::Collapsed,
             false,
+            false,
         ));
         // Generic tool card titles with the tool name, not "Memory Search".
         assert!(
@@ -424,6 +423,7 @@ session content
             80,
             ToolMode::Collapsed,
             false,
+            false,
         ));
         assert!(text.contains("Memory Search "), "{text}");
         assert!(text.contains("bearer tokens"), "{text}");
@@ -440,6 +440,7 @@ session content
             &theme,
             80,
             ToolMode::Expanded,
+            false,
             false,
         ));
         assert!(text.contains("1. "), "{text}");
@@ -460,6 +461,7 @@ session content
             80,
             ToolMode::Expanded,
             false,
+            false,
         ));
         assert!(text.contains("(no results)"), "{text}");
         assert!(text.contains("0 results"), "{text}");
@@ -475,6 +477,7 @@ session content
             80,
             ToolMode::Expanded,
             false,
+            true,
         );
         let text = plain(&out);
         assert!(text.contains("Memory Search "), "{text}");

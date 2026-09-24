@@ -24,10 +24,11 @@ pub fn lines(
     width: usize,
     mode: ToolMode,
     running: bool,
+    // Dock 落下的 `is_error`，不按输出猜。
+    failed: bool,
 ) -> Vec<Line<'static>> {
     let query = parse_query(arguments);
     let results = parse_results(content);
-    let failed = looks_failed(content);
     let open = mode != ToolMode::Collapsed;
     let muted = (!open && !running) || failed;
     let mut header = header_line(
@@ -158,11 +159,6 @@ fn titleize(name: &str) -> String {
         .join(" ")
 }
 
-fn looks_failed(content: &str) -> bool {
-    let t = content.trim_start();
-    t.starts_with("Error") || t.starts_with("error")
-}
-
 fn header_line(
     query: &str,
     count: usize,
@@ -263,6 +259,7 @@ mod tests {
             80,
             ToolMode::Collapsed,
             false,
+            false,
         ));
         assert!(text.contains("Search Tools "), "{text}");
         assert!(text.contains("linear issue"), "{text}");
@@ -281,6 +278,7 @@ mod tests {
             &theme,
             80,
             ToolMode::Expanded,
+            false,
             false,
         ));
         assert!(text.contains("1. "), "{text}");
@@ -317,6 +315,7 @@ mod tests {
             80,
             ToolMode::Expanded,
             false,
+            false,
         ));
         assert!(text.contains("（无结果）"), "{text}");
     }
@@ -330,6 +329,7 @@ mod tests {
             &theme,
             80,
             ToolMode::Truncated,
+            false,
             false,
         ));
         assert!(text.contains("Save Issue"), "{text}");

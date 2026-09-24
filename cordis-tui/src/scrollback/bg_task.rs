@@ -86,6 +86,8 @@ pub fn lines(
     snap: Option<&JobSnapshot>,
     theme: &Theme,
     width: usize,
+    // 这次调用的结果失败（`is_error`）。任务本身跑挂了看下面的实时快照。
+    failed: bool,
 ) -> Vec<Line<'static>> {
     let monitor = name == "monitor" || snap.is_some_and(|s| s.is_monitor);
     let desc = snap
@@ -97,8 +99,9 @@ pub fn lines(
         .or_else(|| json_field(arguments, "command"))
         .or_else(|| snap.map(|s| s.command.clone()))
         .unwrap_or_else(|| "任务".into());
-    let failed =
-        snap.is_some_and(|s| s.done && looks_failed(&s.output)) || content.starts_with("Error");
+    // 快照是后台任务的实时状态（不是工具结果），它的失败由 job 自己写的
+    // `exit …` 首行表示（`jobs::run_job`），这里读的是 Dock 自己的格式。
+    let failed = failed || snap.is_some_and(|s| s.done && looks_failed(&s.output));
     let running = is_running(content, snap);
     let (verb, color) = if failed {
         ("任务失败", theme.accent_error)
@@ -240,6 +243,7 @@ mod tests {
             Some(&snap),
             &theme,
             80,
+            false,
         )
         .iter()
         .map(|l| {

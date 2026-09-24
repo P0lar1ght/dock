@@ -24,9 +24,10 @@ pub fn lines(
     width: usize,
     mode: ToolMode,
     running: bool,
+    // Dock 落下的 `is_error`（非零退出、被拒、被中断），不按输出猜。
+    failed: bool,
 ) -> Vec<Line<'static>> {
     let command = command_from_args(arguments).unwrap_or_else(|| "\u{2026}".into());
-    let failed = is_failure(content);
     let open = mode != ToolMode::Collapsed;
     let muted = (!open && !running) || failed;
 
@@ -108,6 +109,8 @@ pub struct Call<'a> {
     pub id: &'a str,
     pub arguments: &'a str,
     pub content: &'a str,
+    /// 这条调用失败了（`ToolExecute::is_error`）。
+    pub failed: bool,
     /// 这一段的折叠态。缺省继承组的折叠态，用户单独点过才有自己的值。
     pub mode: ToolMode,
 }
@@ -139,7 +142,7 @@ pub fn group_lines(
     width: usize,
     mode: ToolMode,
 ) -> GroupCard {
-    let failed = calls.iter().any(|c| is_failure(c.content));
+    let failed = calls.iter().any(|c| c.failed);
     let open = mode != ToolMode::Collapsed;
     let muted = !open || failed;
     let text_style = if muted {
@@ -174,7 +177,13 @@ pub fn group_lines(
             Span::styled(command.replace('\n', " "), theme.primary()),
         ])));
         if call.mode != ToolMode::Collapsed {
-            out.extend(call_body(call.content, theme, width, call.mode));
+            out.extend(call_body(
+                call.content,
+                call.failed,
+                theme,
+                width,
+                call.mode,
+            ));
         }
         // 这条命令的 `$ cmd` 与正文都归它自己的 id——点它只折它。
         for row in start..out.len() {
@@ -188,14 +197,20 @@ pub fn group_lines(
 }
 
 /// 一条命令的输出块（合并卡里用）。空输出也要留一行，否则读不出这条跑过没有。
-fn call_body(content: &str, theme: &Theme, width: usize, mode: ToolMode) -> Vec<Line<'static>> {
+fn call_body(
+    content: &str,
+    failed: bool,
+    theme: &Theme,
+    width: usize,
+    mode: ToolMode,
+) -> Vec<Line<'static>> {
     if content.is_empty() || content == "(no output)" {
         return vec![card::indent(Line::from(Span::styled(
             "（无输出）".to_string(),
             theme.muted(),
         )))];
     }
-    let body_style = if is_failure(content) {
+    let body_style = if failed {
         Style::default().fg(theme.accent_error)
     } else {
         theme.muted()
@@ -210,10 +225,6 @@ fn call_body(content: &str, theme: &Theme, width: usize, mode: ToolMode) -> Vec<
     } else {
         rows
     }
-}
-
-fn is_failure(content: &str) -> bool {
-    content.starts_with("exit ") || content.starts_with("Error") || content.contains("\nexit ")
 }
 
 fn prepend_diamond(line: &mut Line<'static>, theme: &Theme, failed: bool) {
@@ -248,6 +259,33 @@ mod tests {
             .join("\n")
     }
 
+    /// 回归：失败以前按输出猜（`Error` / `exit` 开头），打印了 `Error` 字样但成功的
+    /// 命令会被标红，真失败但输出正常的反而不标。现在只看 Dock 落下的 `is_error`。
+    #[test]
+    fn failure_color_follows_the_flag_not_the_output() {
+        let theme = Theme::current();
+        let diamond_fg = |content: &str, failed: bool| {
+            lines(
+                r#"{"command":"x"}"#,
+                content,
+                &theme,
+                80,
+                ToolMode::Collapsed,
+                false,
+                failed,
+            )
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains(glyphs::diamond_filled()))
+            .and_then(|s| s.style.fg)
+        };
+        assert_eq!(
+            diamond_fg("Error: 只是打印出来的字", false),
+            Some(theme.accent_tool)
+        );
+        assert_eq!(diamond_fg("看着正常", true), Some(theme.accent_error));
+    }
+
     #[test]
     fn truncated_hides_middle() {
         let theme = Theme::current();
@@ -258,6 +296,7 @@ mod tests {
             &theme,
             80,
             ToolMode::Truncated,
+            false,
             false,
         );
         let text = plain(&lines);
