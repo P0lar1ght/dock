@@ -24,6 +24,8 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // 多线程：`thread/list {scope:"all"}` / `thread/open` / `thread/close` /
     // `thread/start {cwd}`，其它线程级方法接受任意开着的线程的会话 id。
     ("openThreads", true),
+    // `preset/list`：新对话选预设（只读，预设在创建会话时定下）。
+    ("presets", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -38,6 +40,7 @@ pub const CONNECTION_AUTHENTICATE: &str = "connection/authenticate";
 pub const INITIALIZE: &str = "initialize";
 pub const WORKSPACE_LIST: &str = "workspace/list";
 pub const THREAD_LIST: &str = "thread/list";
+pub const PRESET_LIST: &str = "preset/list";
 pub const THREAD_START: &str = "thread/start";
 pub const THREAD_OPEN: &str = "thread/open";
 pub const THREAD_CLOSE: &str = "thread/close";
