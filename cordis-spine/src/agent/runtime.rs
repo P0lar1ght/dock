@@ -355,21 +355,34 @@ impl LoopHandle {
 
     pub async fn run(&self, prompt: impl Into<String>) -> Result<TurnOutcome> {
         let prompt = prompt.into();
-        with_exec_ctx_async(
+        let out = with_exec_ctx_async(
             self.ctx.clone(),
             self.driver.handle_prompt(&self.ctx, prompt),
         )
-        .await
+        .await;
+        self.end_turn();
+        out
     }
 
     /// Drain child messages / turn-end notices into the parent session and sample.
     pub async fn continue_mailbox(&self) -> Result<TurnOutcome> {
-        with_exec_ctx_async(self.ctx.clone(), grok_continue_mailbox(&self.ctx)).await
+        let out = with_exec_ctx_async(self.ctx.clone(), grok_continue_mailbox(&self.ctx)).await;
+        self.end_turn();
+        out
     }
 
     /// Hidden GoalSummary turn: reminder then sample, no user bubble.
     pub async fn continue_goal(&self) -> Result<TurnOutcome> {
-        with_exec_ctx_async(self.ctx.clone(), grok_continue_goal(&self.ctx)).await
+        let out = with_exec_ctx_async(self.ctx.clone(), grok_continue_goal(&self.ctx)).await;
+        self.end_turn();
+        out
+    }
+
+    /// 成功、出错、取消都发：流式事件分不出哪段是最后一段，一轮何时结束只有这里知道。
+    fn end_turn(&self) {
+        if let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) {
+            sessions.end_turn();
+        }
     }
 }
 

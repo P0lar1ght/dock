@@ -214,12 +214,9 @@ impl Transcript {
                         );
                     }
                 }
-                if out.tool_calls.is_empty()
-                    && self.projector.pending_tools.is_empty()
-                    && !self.projector.last_text.is_empty()
-                {
-                    self.complete_turn_if_open();
-                }
+                // 不在这里结束一轮：流式每一段都是「有文本、没工具」，以前每段都发一
+                // 对 turn/completed + turn/started。一轮结束只看 `session/turn-end`
+                // （[`Transcript::turn_ended`]）。
             }
             LogEvent::ToolExecute {
                 id,
@@ -476,6 +473,11 @@ impl Transcript {
         self.projector.turn_id = format!("t{}", self.projector.turn_n);
         self.projector.turn_open = true;
         self.push("turn/started", json!({ "status": "running" }));
+    }
+
+    /// 这一页的 `LoopHandle` 跑完一轮（`session/turn-end`）。
+    pub fn turn_ended(&mut self) {
+        self.complete_turn_if_open();
     }
 
     fn complete_turn_if_open(&mut self) {
@@ -744,6 +746,43 @@ mod tests {
             got.last().map(String::as_str),
             Some("bash 工具被权限拒 1m29 需要审批）。我用")
         );
+    }
+
+    /// 回归：流式每一段都是「有文本、没工具」，以前每段都发一对
+    /// turn/completed + turn/started（轮次 id 一路涨）。现在一轮只在
+    /// `session/turn-end`（`turn_ended`）时结束一次；用量更新发的是原样副本，
+    /// 完整回复只推一次。
+    #[test]
+    fn a_streamed_reply_is_one_turn_and_pushed_once() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput::default()));
+        for s in ["当前", "当前目录", "当前目录只有", "当前目录只有"] {
+            t.ingest_log(LogEvent::LlmStream(LlmOutput {
+                text: s.into(),
+                ..Default::default()
+            }));
+        }
+        assert!(
+            !methods(&t).iter().any(|m| m == "turn/completed"),
+            "流式中途不该结束：{:?}",
+            methods(&t)
+        );
+        t.turn_ended();
+        t.turn_ended();
+        assert_eq!(deltas(&t).concat(), "当前目录只有");
+        let m = methods(&t);
+        assert_eq!(
+            m.iter().filter(|m| *m == "turn/started").count(),
+            1,
+            "{m:?}"
+        );
+        assert_eq!(
+            m.iter().filter(|m| *m == "turn/completed").count(),
+            1,
+            "{m:?}"
+        );
+        assert_eq!(m.last().map(String::as_str), Some("turn/completed"));
     }
 
     #[test]
