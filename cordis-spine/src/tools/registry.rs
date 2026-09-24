@@ -335,6 +335,7 @@ impl Tools {
                     call_id: call.id,
                     name: call.name,
                     content: blocked_tool_message().into(),
+                    is_error: true,
                     ..Default::default()
                 },
             );
@@ -363,6 +364,7 @@ impl Tools {
                     call_id: call.id,
                     name: pre.name().to_string(),
                     content: reason.to_string(),
+                    is_error: true,
                     ..Default::default()
                 },
             );
@@ -374,6 +376,7 @@ impl Tools {
                     call_id: call.id,
                     name: pre.name().to_string(),
                     content: blocked_tool_message().into(),
+                    is_error: true,
                     ..Default::default()
                 },
             );
@@ -404,6 +407,7 @@ impl Tools {
                                 call_id: call.id,
                                 name: call.name,
                                 content: "计划模式已阻止：用户批准计划后使用 exit_plan_mode".into(),
+                                is_error: true,
                                 ..Default::default()
                             },
                         );
@@ -428,6 +432,7 @@ impl Tools {
                                 call_id: call.id,
                                 name: call.name,
                                 content: "权限被拒绝".into(),
+                                is_error: true,
                                 ..Default::default()
                             },
                         );
@@ -458,6 +463,7 @@ impl Tools {
                 call_id: call.id,
                 name: call.name,
                 content: "MCP 工具未启用或已关闭".into(),
+                is_error: true,
                 ..Default::default()
             }
         } else {
@@ -488,7 +494,12 @@ impl Tools {
     }
 }
 
-fn finish(ctx: &Context, result: ToolResult) -> ToolResult {
+/// 所有结果的出口。工具没表态失败时按 [`tool_output_looks_failed`] 补一次（唯一
+/// 的兜底点，客户端不再各自猜）；放在 `tools/execute` 之前，插件看得到这个标记。
+fn finish(ctx: &Context, mut result: ToolResult) -> ToolResult {
+    if !result.is_error {
+        result.is_error = cordis_base::types::tool_output_looks_failed(&result.content);
+    }
     ctx.waterfall(TOOLS_EXECUTE, result.clone(), move || result)
 }
 
@@ -640,6 +651,7 @@ pub fn tool_result_with_images(
         name: call.name,
         content: content.into(),
         images: crate::tools::tool_images::cap_images(images),
+        is_error: false,
     }
 }
 
@@ -970,6 +982,34 @@ mod pre_execute_tests {
 
         let out = tools.execute(call("probe", "{}")).await;
         assert_eq!(out.content, "先拒了");
+    }
+
+    /// 回归：结果带 `is_error`（以前没有，客户端各按输出猜）。拒绝由门明确标；
+    /// 工具没表态、但输出是 Dock 的失败格式时由 `finish` 补；正常输出不标。
+    #[tokio::test]
+    async fn results_carry_the_error_flag() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("probe"), echo_body()).unwrap();
+        assert!(!tools.execute(call("probe", "fine")).await.is_error);
+        assert!(
+            tools
+                .execute(call("probe", "Error: no such file"))
+                .await
+                .is_error,
+            "工具没表态时按 Dock 的失败格式补"
+        );
+        let _h = ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                next.deny("这次不行");
+                next
+            })
+            .unwrap();
+        assert!(
+            tools.execute(call("probe", "{}")).await.is_error,
+            "被拒要标错"
+        );
     }
 
     /// 载荷带得出「模型原本叫的是什么」和「实际会跑什么」，两者都要。

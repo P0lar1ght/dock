@@ -315,6 +315,7 @@ mod tests {
                 content: "fn login() { buggy }".into(),
 
                 images: Vec::new(),
+                is_error: false,
             },
             LogEvent::User("also add a test".into()),
         ]
@@ -514,6 +515,7 @@ mod tests {
             content: "y".repeat(400),
 
             images: Vec::new(),
+            is_error: false,
         });
         let used = estimate_context_tokens("", &sessions.events());
         assert!(

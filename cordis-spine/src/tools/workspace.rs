@@ -57,6 +57,7 @@ pub async fn execute_with(
             name: call.name,
             content,
             images: crate::tools::tool_images::cap_images(images),
+            is_error: false,
         };
     }
     let content = match call.name.as_str() {
@@ -66,7 +67,15 @@ pub async fn execute_with(
         "bash" | "run_terminal_cmd" => bash::run(&call.arguments, &is_cancelled, jobs).await,
         "glob" => glob::run(&call.arguments),
         "write_file" => write_file::run(&call.arguments),
-        other => format!("unknown tool: {other}"),
+        other => {
+            return ToolResult {
+                content: format!("unknown tool: {other}"),
+                is_error: true,
+                call_id: call.id,
+                name: call.name,
+                ..Default::default()
+            }
+        }
     };
     ToolResult {
         call_id: call.id,

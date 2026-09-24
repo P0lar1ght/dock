@@ -683,6 +683,7 @@ mod tests {
                 content: "ok".into(),
 
                 images: Vec::new(),
+                is_error: false,
             },
             LogEvent::User("follow-up".into()),
         ]);
@@ -852,6 +853,7 @@ mod tests {
                     arguments: "{}".into(),
                     content: "ok".into(),
                     images: Vec::new(),
+                    is_error: false,
                 },
             ],
             tools: vec![],
