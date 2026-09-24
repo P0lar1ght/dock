@@ -175,6 +175,20 @@ impl GatewayHandle {
             .issue_for_binding(application, origin)
     }
 
+    /// 见 [`crate::pairing::PairingStore::issue_trusted`]：只给 `dock serve` 的
+    /// stdout 控制通道用。
+    pub fn issue_trusted_ticket(
+        &self,
+        application: &str,
+        origin: &str,
+    ) -> Result<IssuedTicket, PairingError> {
+        self.inner
+            .pairing
+            .lock()
+            .unwrap()
+            .issue_trusted(application, origin)
+    }
+
     pub fn authenticate(&self, ticket: &str, origin: &str) -> Result<IssuedTicket, PairingError> {
         self.inner
             .pairing
