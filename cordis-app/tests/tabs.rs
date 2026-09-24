@@ -27,7 +27,30 @@ fn isolated_home() {
     std::env::set_var("DOCK_CUA_DRIVER", "off");
 }
 
-async fn boot() -> Context {
+/// `boot()` 的结果：根上下文 + 串行锁。解引用成 `Context`，用例照常 `root.get(..)`。
+///
+/// 为什么要串行：同一个测试二进制里的用例**共用 pid**，而 `DOCK_HOME` 是进程级
+/// 环境变量（`isolated_home` 后设的会盖掉先设的），所以分页的临时计划目录
+/// `sessions/<cwd>/tabs/<pid>/main#2` 实际上是大家共用的。任何一个用例开第 2 页都会
+/// `discard_ephemeral_plan` 删掉它——别的用例刚写下的 `plan.md` 就没了。生产里一个
+/// 进程只有一个 `"tui.tabs"`，不存在这种并发，所以这里让开页的用例一个一个来，而
+/// 不是改产品代码或放宽断言。
+struct Booted {
+    root: Context,
+    _serial: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for Booted {
+    type Target = Context;
+
+    fn deref(&self) -> &Context {
+        &self.root
+    }
+}
+
+async fn boot() -> Booted {
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let serial = SERIAL.lock().await;
     isolated_home();
     let root = Context::new();
     install_fakes(&root).await.unwrap();
@@ -76,7 +99,10 @@ async fn boot() -> Context {
         .wait()
         .await
         .unwrap();
-    root
+    Booted {
+        root,
+        _serial: serial,
+    }
 }
 
 #[tokio::test]
