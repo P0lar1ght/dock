@@ -997,3 +997,41 @@ async fn gateway_idle_until_start_listen() {
     }
     assert!(down, "HTTP still serving {addr} after stop_listen");
 }
+
+/// 回归：`live` 线程只投影第 1 页。TUI 开着多页时，第 2 页说的话以前也会混进来
+/// （`session/event` 不分 realm、不带页身份）；主会话自己的话照常进来。
+#[tokio::test]
+async fn live_thread_ignores_other_pages() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let page = h.ctx.isolate("sessions");
+    let _reg = page
+        .provide(SESSIONS, Sessions::tab(page.clone(), 2))
+        .unwrap();
+    page.get::<Sessions>(SESSIONS)
+        .unwrap()
+        .append(LogEvent::User("第二页的话".into()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let history = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    let text = history.to_string();
+    assert!(
+        !text.contains("第二页的话"),
+        "第 2 页的话混进了 live：{text}"
+    );
+
+    h.ctx
+        .get::<Sessions>(SESSIONS)
+        .unwrap()
+        .append(LogEvent::User("主会话的话".into()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let history = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    assert!(history.to_string().contains("主会话的话"), "{history}");
+}

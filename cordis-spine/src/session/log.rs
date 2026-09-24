@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime};
 
 use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::names::{SESSIONS, SESSION_EVENT};
+use crate::names::{SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT};
 pub use cordis_base::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
 use cordis_base::types::{LogEvent, COMPACT_NOTICE};
 use cordis_base::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
@@ -147,6 +147,13 @@ fn estimated_cost_ticks(wire_model: &str, usage: &cordis_base::usage::TokenUsage
         usage.cache_creation_prompt_tokens,
         usage.completion_tokens,
     ))
+}
+
+/// [`SESSION_PAGE_EVENT`] 的载荷：哪一页（`main` / `main#N`）发了哪条事件。
+#[derive(Clone, Debug)]
+pub struct PageLogEvent {
+    pub page: Arc<str>,
+    pub event: Arc<LogEvent>,
 }
 
 impl Sessions {
@@ -583,9 +590,22 @@ impl Sessions {
     }
 
     fn emit_session(&self, event: LogEvent) {
-        if self.emit {
-            self.ctx.emit(SESSION_EVENT, event);
+        if !self.emit {
+            return;
         }
+        // 先发带页身份的一份，再发老的 `session/event`（Rhai `host.on` 的契约，载荷
+        // 不能改）。两份共用同一个 `LogEvent`：流式输出每个 delta 都是一整段文本，
+        // 白克隆一次太贵——监听器是同步跑完的，发完就能拿回独占。
+        let shared = Arc::new(event);
+        self.ctx.emit(
+            SESSION_PAGE_EVENT,
+            PageLogEvent {
+                page: self.identity.clone(),
+                event: shared.clone(),
+            },
+        );
+        let event = Arc::try_unwrap(shared).unwrap_or_else(|still| (*still).clone());
+        self.ctx.emit(SESSION_EVENT, event);
     }
 
     pub fn queue_user_images(&self, images: Vec<cordis_base::types::UserImage>) {
@@ -1912,6 +1932,42 @@ mod tests {
             sessions.kinds()
         );
         assert_eq!(sessions.times().len(), sessions.events().len());
+    }
+
+    /// 每条会话事件发两份：带页身份的 `session/page-event`，和载荷不变的老
+    /// `session/event`（Rhai `host.on` 的契约）。子代理的隔离日志两份都不发。
+    #[tokio::test]
+    async fn events_are_tagged_with_their_page() {
+        let root = Context::new();
+        let tagged = Arc::new(Mutex::new(Vec::<(String, LogEvent)>::new()));
+        let plain = Arc::new(Mutex::new(Vec::<LogEvent>::new()));
+        let _a = {
+            let tagged = tagged.clone();
+            root.on(SESSION_PAGE_EVENT, move |e: &PageLogEvent| {
+                tagged
+                    .lock()
+                    .unwrap()
+                    .push((e.page.to_string(), (*e.event).clone()));
+            })
+            .unwrap()
+        };
+        let _b = {
+            let plain = plain.clone();
+            root.on(SESSION_EVENT, move |e: &LogEvent| {
+                plain.lock().unwrap().push(e.clone());
+            })
+            .unwrap()
+        };
+        let page = root.isolate("sessions");
+        Sessions::tab(page.clone(), 2).append(LogEvent::User("二".into()));
+        Sessions::new(root.clone()).append(LogEvent::User("一".into()));
+        Sessions::isolated(root.clone()).append(LogEvent::User("孩子".into()));
+
+        let tagged = tagged.lock().unwrap();
+        let pages: Vec<&str> = tagged.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(pages, ["main#2", "main"]);
+        assert!(matches!(&tagged[0].1, LogEvent::User(t) if t == "二"));
+        assert_eq!(plain.lock().unwrap().len(), 2, "老事件照发、载荷不变");
     }
 
     #[test]
