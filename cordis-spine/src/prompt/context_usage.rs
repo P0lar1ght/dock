@@ -1262,6 +1262,7 @@ context_window = 1000000
             arguments: r#"{"query":"screenshot"}"#.into(),
             content: r#"{"results":[],"total_hidden_tools":95}"#.into(),
             images: Vec::new(),
+            is_error: false,
         });
         let rows = |kind| {
             occupancy_detail(&ctx, kind)

@@ -1120,6 +1120,7 @@ impl Sessions {
                     content: cordis_base::types::INTERRUPTED_TOOL_RESULT.into(),
 
                     images: Vec::new(),
+                    is_error: true,
                 },
             );
             times.insert(insert_at, now);
@@ -1820,6 +1821,7 @@ mod tests {
             content: "ok".into(),
 
             images: Vec::new(),
+            is_error: false,
         });
         sessions.append(LogEvent::User("follow-up".into()));
         sessions.seal_incomplete_tool_calls();
@@ -1866,6 +1868,7 @@ mod tests {
             content: "secret body".into(),
 
             images: Vec::new(),
+            is_error: false,
         });
         sessions.append(LogEvent::User("second".into()));
         let prefix = vec![

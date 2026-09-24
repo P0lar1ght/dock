@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 
 use cordis_spine::{
     Ask, ElicitPrompt, LogEvent, PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt,
-    PlanDecision, Sessions, TurnEndStatus, UserImage, ROOT_IDENTITY,
+    PlanDecision, Sessions, TurnEndStatus, UserImage, INTERRUPTED_TOOL_RESULT, ROOT_IDENTITY,
 };
 
 use crate::protocol::LIVE_THREAD_ID;
@@ -229,6 +229,7 @@ impl Transcript {
                 arguments,
                 content,
                 images: _,
+                is_error,
             } => {
                 if !self.projector.turn_open {
                     self.ensure_turn();
@@ -247,6 +248,14 @@ impl Transcript {
                     );
                 }
                 self.projector.pending_tools.remove(&id);
+                // 照 Dock 落下的标记报，不按输出猜。停止时补的中断结果算 cancelled。
+                let status = if !is_error {
+                    "completed"
+                } else if content.trim() == INTERRUPTED_TOOL_RESULT {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
                 self.push(
                     "item/tool_completed",
                     json!({
@@ -255,7 +264,7 @@ impl Transcript {
                         "toolName": name,
                         "title": name,
                         "output": content,
-                        "status": "completed"
+                        "status": status
                     }),
                 );
             }
@@ -863,6 +872,32 @@ mod tests {
             "llm request failed: HTTP 404 model not found"
         );
         assert_eq!(ends[1]["status"], "completed", "{:?}", ends[1]);
+    }
+
+    /// 回归：`item/tool_completed` 以前恒为 completed，客户端只能按输出猜失败。
+    /// 现在照 Dock 落下的 `is_error` 报：失败 failed、停止时补的「已中断。」cancelled。
+    #[test]
+    fn tool_completed_status_follows_the_recorded_flag() {
+        let tool = |id: &str, content: &str, is_error: bool| LogEvent::ToolExecute {
+            id: id.into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            content: content.into(),
+            images: Vec::new(),
+            is_error,
+        };
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(tool("a", "ok", false));
+        t.ingest_log(tool("b", "exit status: 1\nboom", true));
+        t.ingest_log(tool("c", cordis_spine::INTERRUPTED_TOOL_RESULT, true));
+        let statuses: Vec<_> = t
+            .history_since(0)
+            .into_iter()
+            .filter(|e| e.method == "item/tool_completed")
+            .map(|e| e.payload["status"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(statuses, ["completed", "failed", "cancelled"]);
     }
 
     #[test]

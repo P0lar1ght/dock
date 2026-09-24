@@ -96,6 +96,11 @@ enum WireEvent {
         /// Filesystem paths for tool images (never base64 in JSONL).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         image_paths: Vec<String>,
+        /// 新记录总写（true / false）；缺失 = 旧会话，读回时按
+        /// `tool_output_looks_failed` 推断。只在 true 时写会让工具明确的 false
+        /// 在读回时被兜底规则改掉。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
     },
 }
 
@@ -578,12 +583,14 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
             arguments,
             content,
             images,
+            is_error,
         } => WireEvent::Tool {
             id: id.clone(),
             name: name.clone(),
             arguments: arguments.clone(),
             content: content.clone(),
             image_paths: persist_tool_images(id, images),
+            is_error: Some(*is_error),
         },
     })
 }
@@ -631,10 +638,13 @@ fn from_wire(event: WireEvent) -> LogEvent {
             arguments,
             content,
             image_paths,
+            is_error,
         } => LogEvent::ToolExecute {
             id,
             name,
             arguments,
+            is_error: is_error
+                .unwrap_or_else(|| cordis_base::types::tool_output_looks_failed(&content)),
             content,
             images: load_tool_images(&image_paths),
         },
@@ -733,6 +743,7 @@ mod tests {
                     content: "/tmp".into(),
 
                     images: Vec::new(),
+                    is_error: false,
                 },
             ],
             times: vec![SystemTime::now(), SystemTime::now()],
@@ -779,6 +790,39 @@ mod tests {
             panic!("expected llm row");
         };
         assert_eq!(out.error, None);
+    }
+
+    /// 工具的 `is_error` 原样落盘、读回；旧行没有这个字段时按兜底规则推断，
+    /// 新行里工具明确的 false 不能被规则改掉。
+    #[test]
+    fn tool_error_flag_round_trips_and_old_rows_are_inferred() {
+        let tool = |content: &str, is_error: bool| LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            content: content.into(),
+            images: Vec::new(),
+            is_error,
+        };
+        for event in [
+            tool("ok", false),
+            tool("boom", true),
+            tool("Error: 但工具说没事", false),
+        ] {
+            let back = from_wire(to_wire(&event).unwrap());
+            assert_eq!(back, event);
+        }
+        let old = |content: &str| {
+            let row =
+                serde_json::json!({"kind": "tool", "id": "c1", "name": "bash", "content": content});
+            match from_wire(serde_json::from_value(row).unwrap()) {
+                LogEvent::ToolExecute { is_error, .. } => is_error,
+                other => panic!("expected tool row, got {other:?}"),
+            }
+        };
+        assert!(old("exit status: 1\nboom"));
+        assert!(old("Error: nope"));
+        assert!(!old("fine"));
     }
 
     /// Responses 的推理链要跨会话活下来；旧文件没有这个字段也得读得出来。
@@ -843,6 +887,7 @@ mod tests {
                     arguments: "{}".into(),
                     content: "Image content included inline".into(),
                     images: vec![img.clone()],
+                    is_error: false,
                 },
             ],
             times: vec![SystemTime::now(), SystemTime::now()],
@@ -1045,6 +1090,7 @@ mod tests {
             content: "full tool body".into(),
 
             images: Vec::new(),
+            is_error: false,
         });
         sessions.replace_compacted(vec![
             LogEvent::User("keep visible".into()),

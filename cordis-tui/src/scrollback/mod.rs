@@ -903,6 +903,7 @@ fn build_frame(
                 arguments,
                 content,
                 images: _,
+                is_error: _,
             } => {
                 // 相邻的、都已完成的前台 bash 合成一张卡。后台 bash 归 bg_task
                 // 卡（自带任务 id 与实时输出），不参与合并。
@@ -1754,6 +1755,7 @@ mod tests {
             arguments: r#"{"target_file":"src/lib.rs","offset":1,"limit":20}"#.into(),
             content: "1→pub fn x() {}\n".into(),
             images: vec![],
+            is_error: false,
         }]);
         let text = plain(&lines);
         assert!(text.contains("Read "), "{text}");
@@ -1774,6 +1776,7 @@ mod tests {
 </skill>"#
                 .into(),
             images: vec![],
+            is_error: false,
         }]);
         let text = plain(&lines);
         assert!(text.contains("已加载技能"), "{text}");
@@ -1789,6 +1792,7 @@ mod tests {
             arguments: r#"{"objective":"理解并分析 TUI"}"#.into(),
             content: r#"{"success":true,"summary":"Goal set: 理解并分析 TUI."}"#.into(),
             images: vec![],
+            is_error: false,
         }]);
         let text = plain(&lines);
         assert!(text.contains("Goal: 设定"), "{text}");
@@ -1807,6 +1811,7 @@ mod tests {
             arguments: r#"{"interval":"5m","prompt":"检查部署","fire_immediately":true}"#.into(),
             content: "已设定 cron-1（every 5 minutes）".into(),
             images: vec![],
+            is_error: false,
         }]);
         let text = plain(&lines);
         assert!(text.contains("Loop: 设定"), "{text}");
@@ -1825,6 +1830,7 @@ mod tests {
             arguments: r#"{"prompt":"x","description":"观 观察","subagent_type":"观"}"#.into(),
             content: "Subagent started in background.\n         subagent_id: kid-1\n         type: 观\n         description: 观 观察\n".into(),
             images: vec![],
+            is_error: false,
         }]);
         let text = plain(&lines);
         assert!(text.contains("子代理"), "{text}");
@@ -1842,6 +1848,7 @@ mod tests {
             arguments: r#"{"prompt":"x","description":"观 观察","subagent_type":"观"}"#.into(),
             content: "Subagent started in background.\n         subagent_id: kid-2\n         type: 观\n         description: 观 观察\n".into(),
             images: vec![],
+            is_error: false,
         }]);
         let text = plain(&lines);
         assert!(text.contains("子代理"), "{text}");
@@ -1925,6 +1932,7 @@ mod tests {
             arguments: r#"{"command":"sleep 9"}"#.into(),
             content: notice.into(),
             images: vec![],
+            is_error: false,
         }]);
         let text = plain(&lines);
         assert!(text.contains("任务"), "{text}");
@@ -1958,6 +1966,7 @@ mod tests {
             arguments: serde_json::json!({ "command": command }).to_string(),
             content: content.into(),
             images: vec![],
+            is_error: false,
         }
     }
 
@@ -2088,6 +2097,7 @@ mod tests {
                 arguments: r#"{"target_directory":"."}"#.into(),
                 content: "a.txt".into(),
                 images: vec![],
+                is_error: false,
             },
             shell_exec("3", "whoami", "polar"),
         ]);
@@ -2117,6 +2127,7 @@ mod tests {
             arguments: r#"{"target_directory":"."}"#.into(),
             content: "MARKER.txt\nother".into(),
             images: vec![],
+            is_error: false,
         }]);
         let text = plain(&lines);
         assert!(text.contains('\u{25C6}'), "{text}");
@@ -2528,6 +2539,7 @@ mod live_chrome_tests {
             arguments: r#"{"command":"echo hi"}"#.into(),
             content: "hi\n".into(),
             images: vec![],
+            is_error: false,
         });
         let sb = Scrollback::new(root);
         assert!(sb.build(80).live.is_empty());
@@ -3094,6 +3106,7 @@ mod card_shell_tests {
                 arguments: r#"{"command":"cargo test"}"#.into(),
                 content: "一\n二\n三\n".into(),
                 images: vec![],
+                is_error: false,
             }],
             &[],
             60,
@@ -3137,6 +3150,7 @@ mod card_shell_tests {
                     arguments: r#"{"text":"hi"}"#.into(),
                     content: String::new(),
                     images: vec![],
+                    is_error: false,
                 },
                 LogEvent::ToolExecute {
                     id: "b".into(),
@@ -3144,6 +3158,7 @@ mod card_shell_tests {
                     arguments: r#"{"text":"ho"}"#.into(),
                     content: String::new(),
                     images: vec![],
+                    is_error: false,
                 },
             ],
             &[],
@@ -3259,6 +3274,7 @@ mod card_shell_tests {
             arguments: arguments.into(),
             content: content.into(),
             images: Vec::new(),
+            is_error: false,
         }
     }
 }

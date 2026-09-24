@@ -114,6 +114,8 @@ pub enum LogEvent {
         /// In-memory only for the live turn / HTTP builders. Persist stores
         /// filesystem path refs, never raw bytes in JSONL.
         images: Vec<UserImage>,
+        /// 见 [`ToolResult::is_error`]。
+        is_error: bool,
     },
 }
 
@@ -285,6 +287,21 @@ pub struct ToolResult {
     /// `read_file` on PNG). Empty for text-only tools. Not serialized as
     /// base64 into the session transcript — see `session_persist` path refs.
     pub images: Vec<UserImage>,
+    /// 这次调用没做成（工具报错、被拒、被拦、命令非零退出、被中断）。随结果落盘，
+    /// 客户端直接读它，不再各自按输出猜。工具不表态时由注册表按
+    /// [`tool_output_looks_failed`] 补一次。
+    pub is_error: bool,
+}
+
+/// 工具没显式表态时的**唯一**兜底规则：Dock 自己产出的失败格式——`Error` /
+/// `error` 开头、job 非零退出的首行 `exit …`、中断回填 [`INTERRUPTED_TOOL_RESULT`]。
+/// 读旧会话（落盘时还没有 `is_error`）也用它，新旧表现一致。
+pub fn tool_output_looks_failed(content: &str) -> bool {
+    let t = content.trim_start();
+    t.starts_with("Error")
+        || t.starts_with("error")
+        || t.starts_with("exit ")
+        || t.trim_end() == INTERRUPTED_TOOL_RESULT
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

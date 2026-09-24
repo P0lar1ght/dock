@@ -209,6 +209,7 @@ async fn grok_sample_loop(
                     arguments,
                     content: result.content,
                     images: result.images,
+                    is_error: result.is_error,
                 });
             }
         }

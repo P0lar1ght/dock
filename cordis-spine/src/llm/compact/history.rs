@@ -68,6 +68,7 @@ pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
                 id,
                 name,
                 arguments,
+                is_error,
                 ..
             } => Some(LogEvent::ToolExecute {
                 id: id.clone(),
@@ -76,6 +77,7 @@ pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
                 content: "Tool call omitted...".into(),
 
                 images: Vec::new(),
+                is_error: *is_error,
             }),
             LogEvent::SystemReminder(text) => Some(LogEvent::SystemReminder(text.clone())),
             LogEvent::User(_)
@@ -195,6 +197,7 @@ mod tests {
                 content: "fn login() { buggy }".into(),
 
                 images: Vec::new(),
+                is_error: false,
             },
             LogEvent::User("also add a test".into()),
         ]
@@ -247,6 +250,7 @@ mod tests {
             arguments: "{}".into(),
             content: "test body".into(),
             images: Vec::new(),
+            is_error: false,
         });
         // 纯文本收尾的一轮同样在尾巴里，同样被要求回传推理。
         history.push(LogEvent::LlmStream(LlmOutput {
@@ -329,6 +333,7 @@ mod tests {
             content: "test body".into(),
 
             images: Vec::new(),
+            is_error: false,
         });
         let events = build_compacted_events(
             &history,

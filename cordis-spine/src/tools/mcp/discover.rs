@@ -620,6 +620,7 @@ mod tests {
             arguments: r#"{"query":"linear issue"}"#.into(),
             content: content.into(),
             images: Vec::new(),
+            is_error: false,
         }
     }
 
