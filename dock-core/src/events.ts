@@ -27,6 +27,8 @@ export interface Question {
   header: string;
   question: string;
   options: { label: string; description: string; recommended: boolean }[];
+  /** 多选题：可以选多个选项。旧网关不带这个字段，算单选。 */
+  multiSelect: boolean;
 }
 
 export type DockEvent = EventBase &
@@ -162,6 +164,7 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
                 description: str(o.description),
                 recommended: bool(o.recommended),
               })),
+            multiSelect: bool(q.multiSelect),
           })),
       };
     case 'interaction/resolved':

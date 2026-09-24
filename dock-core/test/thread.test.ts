@@ -88,6 +88,25 @@ test('交互：权限、提问、计划在等用户时进 pendingItems，resolve
   assert.equal(isRunning(s), true);
 });
 
+test('提问：多选题带 multiSelect，旧网关没这个字段时算单选', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started'),
+    note('interaction/requested', {
+      interactionId: 'q1',
+      questions: [
+        { id: 'a', question: '多选？', options: [], multiSelect: true },
+        { id: 'b', question: '单选？', options: [] },
+      ],
+    }),
+  );
+  const item = pendingItems(s)[0];
+  assert.deepEqual(
+    item.kind === 'question' && item.questions.map((q) => q.multiSelect),
+    [true, false],
+  );
+});
+
 test('工具失败照网关的 status，不按输出猜', () => {
   seq = 0;
   const s = run(
