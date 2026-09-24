@@ -641,7 +641,8 @@ async fn two_pages_keep_goal_todos_and_plan_apart() {
             },
         )
         .await;
-    assert!(entered.content.contains("main#2"), "{}", entered.content);
+    // 常驻页落盘：计划在这一页**自己的**会话目录里（和主会话同一种布局），
+    // 不再是 `tabs/<pid>/main#2` 那个临时目录（现在只有 `/btw` 旁问页用它）。
     let path = expected_plan_path(Some(page_sessions.as_ref()));
     assert!(path.exists(), "计划该写到 {path:?}");
     assert!(
@@ -655,8 +656,18 @@ async fn two_pages_keep_goal_todos_and_plan_apart() {
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
-    let tabs_at = comps.iter().position(|c| c == "tabs").expect("{path:?}");
-    assert_ne!(comps[tabs_at - 1], "sessions", "cwd-key 被丢掉了: {path:?}");
+    let n = comps.len();
+    assert_eq!(
+        comps[n - 2],
+        page_sessions.live_session_id(),
+        "计划该在第 2 页自己的会话目录里: {path:?}"
+    );
+    assert_ne!(comps[n - 3], "sessions", "cwd-key 被丢掉了: {path:?}");
+    assert_ne!(
+        path,
+        expected_plan_path(root.get::<Sessions>(SESSIONS).as_deref()),
+        "两页不能共用一个计划文件"
+    );
     let args = format!(r#"{{"target_file":"{}"}}"#, path.display());
     assert!(is_plan_file_edit("write_file", &args, &path));
     assert!(!is_plan_file_edit(
@@ -701,8 +712,13 @@ async fn two_pages_keep_goal_todos_and_plan_apart() {
     );
     assert_eq!(page.get::<Todos>(TODOS).unwrap().snapshot().len(), 2);
 
+    // 常驻页是落盘的会话：关页只是不再开着，计划跟会话一起留在磁盘上，
+    // `/resume` 回来还在（和主会话一样）。临时计划目录只有旁问页有，关页时删。
     tabs.close(1).await.unwrap();
-    assert!(!path.exists(), "关页要删掉这一页的计划文件: {path:?}");
+    assert!(
+        path.exists(),
+        "关页后计划该留在这一页的会话目录里: {path:?}"
+    );
 }
 
 /// 回归：预设和工作目录都按页。新页从当前页抄一份预设、继承它钉住的 cwd；之后
@@ -739,4 +755,44 @@ async fn a_new_page_forks_presets_and_inherits_the_cwd() {
         project,
         "新页继承当前页的 cwd"
     );
+}
+
+/// 回归：常驻页落盘，而且落在**这一页自己的** cwd 下（以前分页不落盘，退出即
+/// 丢）；关页后还在历史里。旁问页（`/btw`）是一次性的插话，不落盘。
+#[tokio::test]
+async fn resident_pages_persist_under_their_own_cwd() {
+    let root = boot().await;
+    let home = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap());
+    let project = home.join("project-c");
+    std::fs::create_dir_all(&project).unwrap();
+    root.get::<Sessions>(SESSIONS)
+        .unwrap()
+        .pin_workspace_cwd(&project);
+
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    tabs.open().await.unwrap();
+    let page = tabs.active_ctx();
+    let sessions = page.get::<Sessions>(SESSIONS).unwrap();
+    assert!(sessions.on_disk(), "常驻页该落盘");
+    sessions.append(LogEvent::User("第二页说的话".into()));
+    let id = sessions.live_session_id();
+    assert!(
+        Sessions::can_adopt_archived(&id, &project),
+        "该落在这一页的 cwd（{project:?}）下"
+    );
+    let process_cwd = std::env::current_dir().unwrap();
+    assert!(
+        !Sessions::can_adopt_archived(&id, &process_cwd),
+        "不该落到进程 cwd 下"
+    );
+
+    tabs.close(1).await.unwrap();
+    assert!(
+        Sessions::can_adopt_archived(&id, &project),
+        "关页后会话还在历史里"
+    );
+
+    tabs.ask_aside("顺便问一句".into()).await.unwrap();
+    let aside = tabs.active_ctx().get::<Sessions>(SESSIONS).unwrap();
+    assert!(!aside.on_disk(), "旁问页不落盘");
 }

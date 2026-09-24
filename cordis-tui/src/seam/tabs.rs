@@ -251,8 +251,8 @@ impl Tabs {
     /// 把一份磁盘会话开成自己的常驻页，并切过去。
     ///
     /// 当前页不动。已经有一页的 `live_session_id` 就是它时，只切到那一页，
-    /// 不再复制一份。空白页不落盘；这一页会 `adopt_archived`，之后的对话写回
-    /// 原来的会话目录。
+    /// 不再复制一份。新页先按自己的 cwd `attach_disk`，再 `adopt_archived`，
+    /// 之后的对话写回原来的会话目录。
     pub async fn open_archived(&self, session_id: &str) -> Result<usize, String> {
         if let Some(index) = self.index_of_session(session_id) {
             self.activate(index);

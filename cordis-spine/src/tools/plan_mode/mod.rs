@@ -472,8 +472,8 @@ pub fn clear_plan_for_session_switch(ctx: &Context) {
 /// 计划文件按**会话**划分，而不是按工作区 cwd：同 cwd 下多个分页各有自己的计划，
 /// 互不覆盖（对齐 grok-build 的 `$GROK_HOME/sessions/<cwd>/<id>/plan.md`）。
 ///
-/// - 已落盘的会话（主会话）→ 自己的 session 目录
-/// - 未落盘的分页（`main#N`，不 attach_disk）→ `sessions/<cwd-key>/tabs/<pid>/<identity>/`
+/// - 已落盘的会话（主会话、常驻分页）→ 自己的 session 目录
+/// - 未落盘的页（`/btw` 旁问页，`main#N`，不 attach_disk）→ `sessions/<cwd-key>/tabs/<pid>/<identity>/`
 /// - 拿不到会话（测试 / 未挂载）→ 回落到 cwd 下的 `.dock/plan.md`
 fn plan_path_for(sessions: Option<&Sessions>) -> PathBuf {
     if let Some(sessions) = sessions {
@@ -512,7 +512,8 @@ fn ephemeral_plan_dir(sessions: &Sessions) -> Option<PathBuf> {
 
 /// Remove a non-disk tab's plan directory.
 ///
-/// Tabs are not persisted. The directory name is `main#N`, and that number
+/// Aside pages (`/btw`) are not persisted; resident tabs are, and this is a
+/// no-op for them. The directory name is `main#N`, and that number
 /// restarts at 2 next process, so a leftover file would be treated as this
 /// page's plan. Called when the page opens (drop the previous run of this
 /// process) and when it closes (drop this one). The `<pid>` parent makes sure
