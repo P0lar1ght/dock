@@ -26,6 +26,7 @@ cordis-gateway/  回环 HTTP/WS 插件：Origin 配对、dock.1 投影、slash l
 cordis-app/      二进制入口：install_app + agent-loop + gateway + tui
 dock-render/     markdown（`cordis-markdown`）、mermaid（`xai-grok-mermaid`）；third_party/ 为 Mermaid 布局栈
 embed-sdk/       宿主页 SDK（npm，`dist/dock-embed.js`，协议 dock.1）；见 embed-sdk/AGENTS.md
+dock-core/       dock.1 协议核心（TS）：类型化线程事件 + 线程状态 reducer，无 DOM；见 dock-core/README.md
 vendor/          冻结副本：xai 拷贝；见 vendor/AGENTS.md（mermaid 栈在 dock-render/third_party/）
 skills/          Agent skills（Bundled scope，产品运行时读取）
 .agents/skills/  仓库流程 skills（Agents scope，运行时同样读取）
@@ -58,6 +59,7 @@ cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings   # lint（�
 ```bash
 cd embed-sdk && npm ci && npm run build      # 构建 dock-embed.js
 cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080
+cd dock-core && npm ci && npm test && npm run typecheck   # 协议核心（Node 22.18+ 直接跑 .ts 测试）
 ```
 
 - 不要为了证明一次小改去跑全量套件（workspace 含 `vendor/` 冻结 crate）。改哪个 crate 跑哪个。

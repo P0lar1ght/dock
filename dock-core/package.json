@@ -1,0 +1,21 @@
+{
+  "name": "dock-core",
+  "version": "0.1.0",
+  "description": "dock.1 协议核心：类型化线程事件 + 线程状态 reducer。纯 TS，无 DOM、无运行时依赖。",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.3"
+  }
+}
