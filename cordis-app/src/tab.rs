@@ -49,7 +49,7 @@ fn aside_preset() -> AgentPresets {
 fn tab(index: usize, kind: TabKind) -> Plugin {
     plugin_async("tab", Inject::new(), move |ctx, _: &()| async move {
         // 顺序照 main：会话与轮次先落地，循环和 actor 都 inject 它们。
-        ctx.plugin(tab_sessions(index), ())?.wait().await?;
+        ctx.plugin(tab_sessions(index, kind), ())?.wait().await?;
         // 预设按页（`agentPresets` 在 PER_TAB_SERVICES 里）：旁问页一份只读的，
         // 常驻页从开它的那一页复制一份。
         if kind == TabKind::Aside {
@@ -123,11 +123,12 @@ fn tab_presets() -> Plugin {
         let Some(presets) = presets else {
             return Ok(None);
         };
-        if let Some(cwd) = ctx
-            .get::<Sessions>(SESSIONS)
-            .and_then(|s| s.workspace_cwd())
-        {
-            presets.set_workspace_root(&cwd);
+        if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+            if let Some(cwd) = sessions.workspace_cwd() {
+                presets.set_workspace_root(&cwd);
+            }
+            // 和主会话一样：落盘的 `meta.json` 从一开始就盖上这页的预设。
+            sessions.seed_preset_if_unset(&presets.current_id());
         }
         Ok(Some(ctx.provide(AGENT_PRESETS, presets)?))
     })
@@ -142,9 +143,11 @@ fn aside_presets() -> Plugin {
 
 /// 分页会话：身份是 `main#<index>`，与主会话同级（不是子代理）。
 ///
-/// 空白页不 `attach_disk`，退出即丢。从历史打开的那一页随后走
-/// `Sessions::adopt_archived`，接着写回原来的会话目录，不另起一份布局。
-fn tab_sessions(index: usize) -> Plugin {
+/// 常驻页和主会话一样落盘：`attach_disk` 到**这一页自己的 cwd** 下，关页后
+/// 还在历史里，`/resume` / 会话面板能找回来。从历史打开的那一页随后走
+/// `Sessions::adopt_archived`，接着写回原来的会话目录，不另起一份布局。旁问页
+/// （`/btw`）是一次性的只读插话，不落盘。
+fn tab_sessions(index: usize, kind: TabKind) -> Plugin {
     plugin("tab.sessions", Inject::new(), move |ctx, _: &()| {
         let sessions = Sessions::tab(ctx.clone(), index);
         // 新页在开它的那一页的目录里起步（那一页 `/cd` 过就跟过去）。没钉的页跟随
@@ -158,6 +161,9 @@ fn tab_sessions(index: usize) -> Plugin {
         }
         // `main#N` is reused next process. Drop whatever the last process left.
         cordis_spine::discard_ephemeral_plan(&sessions);
+        if kind == TabKind::Normal {
+            sessions.attach_disk();
+        }
         Ok(Some(ctx.provide(SESSIONS, sessions)?))
     })
 }

@@ -313,13 +313,15 @@ impl Sessions {
         }
     }
 
-    /// Load `$DOCK_HOME/sessions/<cwd>/` into the resume list. No-op for
-    /// isolated child logs. Safe to call more than once (replaces the list).
+    /// Load `$DOCK_HOME/sessions/<cwd>/` into the resume list and start writing
+    /// this log there. `<cwd>` 是这个会话自己的工作目录（钉住的，没钉就是进程
+    /// cwd）——分页各落到各自项目下。No-op for isolated child logs. Safe to call
+    /// more than once (replaces the list).
     pub fn attach_disk(&self) {
         if !self.emit {
             return;
         }
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let cwd = self.own_cwd();
         let loaded = crate::session::persist::load_cwd(&cwd);
         *self.archive.lock().unwrap() = loaded;
         *self.live_id.lock().unwrap() = crate::session::persist::new_id();
