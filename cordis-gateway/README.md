@@ -81,9 +81,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 | 方法 | 作用 |
 |---|---|
-| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open`，第 1 页另带 `alias: "live"` |
+| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open` / `presetId`（开着的页是它当前的预设，落盘的是 `meta.json` 记的，老会话为 `null`），第 1 页另带 `alias: "live"` |
 | `workspace/list { scope: "all" }` | 有会话的所有目录（`id` = 路径，`hasOpenThreads`） |
-| `thread/start { cwd, title? }` | 在 `cwd` 另开一页（不动第 1 页），回它的会话 id；不带 `cwd` 是老语义 |
+| `thread/start { cwd, title?, presetId? }` | 在 `cwd` 另开一页（不动第 1 页），回它的会话 id；`presetId` 只切这一页的预设，预设不存在就报 `invalid_params`、不开页；不带 `cwd` 是老语义 |
 | `thread/open { threadId }` | 把落盘会话开成一页（在它自己的 cwd 下）；已开着就回那一页 |
 | `thread/close { threadId }` | 关页，会话留在磁盘上；第 1 页关不掉 |
 
