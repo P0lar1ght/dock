@@ -176,8 +176,8 @@ pub fn restore(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
 }
 
 /// `thread/start { cwd, title?, presetId? }`：在 `cwd` 另开一页（不动第 1 页、不切
-/// 终端里正在看的页），回它的会话 id。给了 `presetId` 就只在这一页切过去，并记进
-/// 这份会话的 `meta.json`；不给就沿用新页继承来的预设。
+/// 终端里正在看的页），回它的会话 id。预设在创建时定下：给了 `presetId` 就只在这一
+/// 页切过去并记进这份会话的 `meta.json`（不改全局默认）；不给就沿用新页继承来的。
 pub async fn start_at(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let cwd = PathBuf::from(text(&params, "cwd")?);
     let preset = params
@@ -213,7 +213,8 @@ pub async fn start_at(gateway: &GatewayHandle, params: Value) -> Result<Value, R
 }
 
 /// `thread/open { threadId }`：把一份落盘会话开成一页（在它自己的 cwd 下），已经
-/// 开着就回那一页。之后 `turn/start` 等都用这个 `threadId`。
+/// 开着就回那一页。之后 `turn/start` 等都用这个 `threadId`。预设跟着会话走：
+/// 这一页切回它 `meta.json` 记的那个（老会话没记就沿用新页继承的）。
 pub async fn open(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = text(&params, "threadId")?;
     if let Ok(page) = threads::resolve(gateway, &id) {
@@ -224,6 +225,12 @@ pub async fn open(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
         .find(|e| e.id == id)
         .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
     let page = open_page(gateway, &entry.cwd, Some(&id)).await?;
+    if let Some(preset) = entry.preset_id.as_deref() {
+        // fail-open，和 `/resume` 一样：预设没了 / 坏了就用继承来的，只记一笔。
+        if let Err(e) = apply_page_preset(&page, preset) {
+            eprintln!("dock: thread/open preset `{preset}` not applied: {e}");
+        }
+    }
     Ok(json!({ "thread": open_summary(&page)? }))
 }
 
@@ -248,7 +255,7 @@ fn apply_page_preset(page: &Page, id: &str) -> Result<(), String> {
         .ctx
         .get::<AgentPresets>(AGENT_PRESETS)
         .ok_or_else(|| "预设服务没有挂载".to_string())?;
-    let applied = presets.apply(id)?;
+    let applied = presets.pin(id)?;
     if let Ok(sessions) = page.sessions() {
         sessions.set_preset_id(Some(applied.id));
     }

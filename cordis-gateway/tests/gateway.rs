@@ -1379,6 +1379,23 @@ async fn thread_start_with_preset_is_per_page_and_listed() {
     assert_eq!(closed["open"], false, "{closed}");
     assert_eq!(closed["presetId"], other, "{closed}");
 
+    // 预设跟着会话走：重新打开，这一页用的还是创建时选的，不是开它的那一页的。
+    let reopened = rpc.call("thread/open", json!({ "threadId": id })).await;
+    assert_eq!(
+        reopened["result"]["thread"]["presetId"], other,
+        "{reopened}"
+    );
+    rpc.call("thread/close", json!({ "threadId": id })).await;
+
+    // 给新会话选预设不改全局默认：下次启动 / 新开的页仍是原来的。
+    let roster_yml = std::fs::read_to_string(
+        std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap())
+            .join("presets")
+            .join("roster.yml"),
+    )
+    .unwrap_or_default();
+    assert!(!roster_yml.contains(other), "默认预设被改了：{roster_yml}");
+
     let before = rpc.call("thread/list", json!({ "scope": "all" })).await;
     let bad = rpc
         .call(
