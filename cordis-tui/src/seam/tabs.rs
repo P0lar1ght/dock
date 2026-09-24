@@ -30,8 +30,9 @@ use crate::views::prompt::PromptWidget;
 /// 浏览器、cua、后台任务……）。
 ///
 /// `settings` 是这一页选的模型、协议、权限模式。`permissions` / `ask` 是这一页
-/// 自己的队列：后台页的批准框不会弹到正在看的那一页上。MCP 连接仍是全局的，
-/// elicitation 在请求上盖来源页。
+/// 自己的队列：后台页的批准框不会弹到正在看的那一页上。`agentPresets` 也各一份：
+/// 一页 `/preset` 或 `/cd` 不改别的页（旁问页的是只读 overlay）。MCP 连接仍是
+/// 全局的，elicitation 在请求上盖来源页。
 pub const PER_TAB_SERVICES: &[&str] = &[
     SESSIONS,
     TURN,
@@ -48,10 +49,8 @@ pub const PER_TAB_SERVICES: &[&str] = &[
     SETTINGS,
     PERMISSIONS,
     ASK,
+    AGENT_PRESETS,
 ];
-
-/// 旁问页额外要 isolate 的名字：它得有一份**自己的**只读预设，不能用全局那份。
-const ASIDE_ISOLATES: &[&str] = &[AGENT_PRESETS];
 
 /// `Alt+1..9` 能直达的上限，也是总页数上限（旁问页不占名额）。
 pub const MAX_TABS: usize = 9;
@@ -264,7 +263,9 @@ impl Tabs {
             return Err(format!("最多 {MAX_TABS} 页"));
         }
         // 先确认磁盘上有这份会话，再挂页。挂完才发现没有，会白白占掉一个页号。
-        if !Sessions::can_adopt_archived(session_id) {
+        // 新页继承当前页的 cwd（`tab.sessions`），所以按当前页的 cwd 查。
+        let cwd = cordis_spine::session_cwd(&self.active_ctx());
+        if !Sessions::can_adopt_archived(session_id, &cwd) {
             return Err("这个会话开不了页（只认当前工作目录下的历史）".into());
         }
         let (id, child, fiber) = self.mount_page(TabKind::Normal, None).await?;
@@ -327,12 +328,7 @@ impl Tabs {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         // 只把该隔离的名字拉进新 realm，其余照旧解析到根。
         let mut child = self.inner.root.clone();
-        let extra = if kind == TabKind::Aside {
-            ASIDE_ISOLATES
-        } else {
-            &[][..]
-        };
-        for name in PER_TAB_SERVICES.iter().chain(extra) {
+        for name in PER_TAB_SERVICES {
             child = child.isolate(name);
         }
         let fiber = child

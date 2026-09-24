@@ -211,7 +211,7 @@ fn collect_rows(ctx: &Context) -> Vec<DashRow> {
     // 磁盘会话。已经开着的那一个不重复列——它在上面已经是一行 Tab 了。
     if let Some(roster) = ctx.get::<Roster>(ROSTER) {
         let open = open_session_ids(ctx);
-        let here = std::env::current_dir().unwrap_or_default();
+        let here = cordis_spine::session_cwd(ctx);
         rows.extend(
             roster
                 .list()
@@ -435,6 +435,8 @@ fn layout(area: Rect) -> Panes {
 
 /// 面板要画的东西。调用点先备好，渲染只管画。
 pub struct PanelView<'a> {
+    /// 抬头左边的 cwd（当前这页的），见 [`crate::views::status::cwd_display`]。
+    pub cwd: String,
     pub rows: &'a [DashRow],
     pub selected: usize,
     pub query: &'a str,
@@ -466,7 +468,7 @@ pub fn render_panel(buf: &mut Buffer, area: Rect, view: &PanelView<'_>) -> Picke
     let panes = layout(area);
     let mut hits = PickerHits::default();
 
-    paint_header(buf, panes.header, &theme, &view.summary);
+    paint_header(buf, panes.header, &theme, &view.cwd, &view.summary);
     paint_actions(buf, panes.actions, &theme, view.query, view.focus);
     hits.dash_list = panes.list;
     hits.rows = paint_list(buf, panes.list, &theme, view);
@@ -478,10 +480,9 @@ pub fn render_panel(buf: &mut Buffer, area: Rect, view: &PanelView<'_>) -> Picke
 }
 
 /// `main ~/Desktop/AILab/dock                    ◇ 2 空闲`
-fn paint_header(buf: &mut Buffer, area: Rect, theme: &Theme, summary: &str) {
+fn paint_header(buf: &mut Buffer, area: Rect, theme: &Theme, cwd: &str, summary: &str) {
     let base = Style::default().bg(theme.bg_base);
-    let cwd = crate::views::status::cwd_display();
-    let left = truncate_str(&cwd, area.width.saturating_sub(16) as usize);
+    let left = truncate_str(cwd, area.width.saturating_sub(16) as usize);
     buf.set_span(
         area.x,
         area.y,
@@ -923,6 +924,7 @@ pub fn render(buf: &mut Buffer, area: Rect, ctx: &Context, input: &PanelInput<'_
         None => (Vec::new(), String::new()),
     };
     let view = PanelView {
+        cwd: crate::views::status::cwd_display(ctx),
         rows: input.rows,
         selected: input.selected,
         query: input.query,
@@ -1205,6 +1207,7 @@ mod tests {
         composer: &'a str,
     ) -> PanelView<'a> {
         PanelView {
+            cwd: "~/work".into(),
             rows,
             selected,
             query: "",

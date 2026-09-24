@@ -220,9 +220,8 @@ pub fn resolve_tool_path(path: &str) -> PathBuf {
     if p.is_absolute() {
         p.canonicalize().unwrap_or(p)
     } else {
-        let joined = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(p);
+        // 相对路径按调用方会话的 cwd 展开（多页可能在不同项目）。
+        let joined = crate::session::cwd::current_cwd().join(p);
         joined.canonicalize().unwrap_or(joined)
     }
 }

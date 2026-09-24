@@ -50,7 +50,14 @@ impl FileSearchSnapshot {
     }
 }
 
-pub fn snapshot(text: &str, cursor: usize, selected: usize, dismissed: bool) -> FileSearchSnapshot {
+/// `root` 是这一页的工作目录（`@` 补全在它下面找文件）。
+pub fn snapshot(
+    text: &str,
+    cursor: usize,
+    selected: usize,
+    dismissed: bool,
+    root: &Path,
+) -> FileSearchSnapshot {
     if dismissed {
         return FileSearchSnapshot {
             open: false,
@@ -65,9 +72,8 @@ pub fn snapshot(text: &str, cursor: usize, selected: usize, dismissed: bool) -> 
             matches: Vec::new(),
         };
     };
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let hits = nucleo_hits(
-        &root,
+        root,
         ctx.matcher_query(),
         ctx.is_dir_mode(),
         ctx.is_hidden_mode(),
@@ -127,19 +133,19 @@ mod tests {
 
     #[test]
     fn empty_at_is_open() {
-        let snap = snapshot("@", 1, 0, false);
+        let snap = snapshot("@", 1, 0, false, Path::new("."));
         assert!(snap.open);
     }
 
     #[test]
     fn dismissed_is_closed() {
-        let snap = snapshot("@src", 4, 0, true);
+        let snap = snapshot("@src", 4, 0, true, Path::new("."));
         assert!(!snap.open);
     }
 
     #[test]
     fn prose_without_at_is_closed() {
-        let snap = snapshot("hello", 5, 0, false);
+        let snap = snapshot("hello", 5, 0, false, Path::new("."));
         assert!(!snap.open);
     }
 }

@@ -50,9 +50,12 @@ fn tab(index: usize, kind: TabKind) -> Plugin {
     plugin_async("tab", Inject::new(), move |ctx, _: &()| async move {
         // 顺序照 main：会话与轮次先落地，循环和 actor 都 inject 它们。
         ctx.plugin(tab_sessions(index), ())?.wait().await?;
+        // 预设按页（`agentPresets` 在 PER_TAB_SERVICES 里）：旁问页一份只读的，
+        // 常驻页从开它的那一页复制一份。
         if kind == TabKind::Aside {
-            // 旁问页自带一份只读预设；常驻页照旧用根上那份。
             ctx.plugin(aside_presets(), ())?.wait().await?;
+        } else {
+            ctx.plugin(tab_presets(), ())?.wait().await?;
         }
         // `GOAL` / `TODOS` 按页隔离（PER_TAB_SERVICES）：每页有自己的目标
         // 与待办服务，第 2 页的 /goal / todo_write 不再写进第 1 页。
@@ -77,12 +80,15 @@ fn tab(index: usize, kind: TabKind) -> Plugin {
     })
 }
 
+/// 开这一页时正在看的那一页（新页从它继承设置、cwd、预设）。
+fn active_page(ctx: &cordis::Context) -> Option<cordis::Context> {
+    ctx.get::<Tabs>(TUI_TABS).map(|tabs| tabs.active_ctx())
+}
+
 /// 抄当前页的模型、协议、权限模式。开页之后两页各改各的。
 fn tab_settings() -> Plugin {
     plugin("tab.settings", Inject::new(), |ctx, _: &()| {
-        let forked = ctx
-            .get::<Tabs>(TUI_TABS)
-            .map(|tabs| tabs.active_ctx())
+        let forked = active_page(ctx)
             .and_then(|page| page.get::<AppSettings>(SETTINGS))
             .map(|settings| settings.fork())
             .unwrap_or_else(|| AppSettings::new(""));
@@ -104,6 +110,29 @@ fn tab_ask() -> Plugin {
     })
 }
 
+/// 常驻页的预设：复制开它的那一页的（同样的层、同样的当前预设），项目层指向
+/// 这一页的 cwd。之后两页各切各的。
+///
+/// 来源页没挂预设（精简装配）时这页也不挂——和预设的 fail-open 一致：没有
+/// `agentPresets` 的会话不设允许名单，跟以前落回根时一样。
+fn tab_presets() -> Plugin {
+    plugin("tab.presets", Inject::new(), |ctx, _: &()| {
+        let presets = active_page(ctx)
+            .and_then(|page| page.get::<AgentPresets>(AGENT_PRESETS))
+            .map(|presets| presets.fork());
+        let Some(presets) = presets else {
+            return Ok(None);
+        };
+        if let Some(cwd) = ctx
+            .get::<Sessions>(SESSIONS)
+            .and_then(|s| s.workspace_cwd())
+        {
+            presets.set_workspace_root(&cwd);
+        }
+        Ok(Some(ctx.provide(AGENT_PRESETS, presets)?))
+    })
+}
+
 /// 旁问页的预设：isolate 过 `agentPresets`，所以必须自己 provide 一份。
 fn aside_presets() -> Plugin {
     plugin("tab.asidePresets", Inject::new(), |ctx, _: &()| {
@@ -118,6 +147,15 @@ fn aside_presets() -> Plugin {
 fn tab_sessions(index: usize) -> Plugin {
     plugin("tab.sessions", Inject::new(), move |ctx, _: &()| {
         let sessions = Sessions::tab(ctx.clone(), index);
+        // 新页在开它的那一页的目录里起步（那一页 `/cd` 过就跟过去）。没钉的页跟随
+        // 进程 cwd，新页也不钉，保持原样。
+        if let Some(cwd) = active_page(ctx)
+            .and_then(|page| page.get::<Sessions>(SESSIONS))
+            .and_then(|s| s.workspace_cwd())
+        {
+            sessions.pin_plan_cwd(&cwd);
+            sessions.pin_workspace_cwd(cwd);
+        }
         // `main#N` is reused next process. Drop whatever the last process left.
         cordis_spine::discard_ephemeral_plan(&sessions);
         Ok(Some(ctx.provide(SESSIONS, sessions)?))

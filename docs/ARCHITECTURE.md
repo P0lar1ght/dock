@@ -85,13 +85,16 @@ config.toml.example      用户 / 项目模型目录样例
 
 | 每页一份 | 全局一份（落回根） |
 |---|---|
-| `sessions` `turn` `agentLoop` `session` `session.port` `goal` `todos` `planMode` `settings` `permissions` `ask` | `tools` `llm` `systemPrompt` `agents` `mcp` `skills` |
-| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp` `workflows` `slash` `agentPresets` `theme` `gateway` `memory` |
+| `sessions` `turn` `agentLoop` `session` `session.port` `goal` `todos` `planMode` `settings` `permissions` `ask` `agentPresets` | `tools` `llm` `systemPrompt` `agents` `mcp` `skills` |
+| `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` | `browser` `computer` `jobs` `cron` `lsp`（按项目根分，见不变式 13） `workflows` `slash` `theme` `gateway` `memory` |
 
 服务按 `(isolate realm, name)` 解析，没被 isolate 的名字自然落回根 —— 所以**一张
 `"tools"` 表**的不变式没有被破坏，两页共用同一张表、同一个 `llm`。模型、协议、
 权限模式在这一页的 `settings` 上；权限队列和 `ask` 也按页各一份，底栏读的是
-当前页。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的是各页自己的 ctx。
+当前页。预设也按页（`tab.presets` 从开它的那一页 `AgentPresets::fork` 一份），
+所以在工具体里读预设要用 `exec_ctx()`（调用方那页），不能用注册时捕获的根 ctx
+——`task` 的名册 / 默认角色就是这么取的。工作目录同理，新页继承开它那页钉住的
+cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的是各页自己的 ctx。
 
 事件**不分 realm**（`ctx.emit` 不看 isolate），后台页的 `session/event` 照样能把
 前台叫醒重绘，标签栏上的 `●` 就是靠这个活的。
@@ -105,8 +108,8 @@ config.toml.example      用户 / 项目模型目录样例
 一条有正文的回复填进来源页的 `PromptWidget` 并切过去 —— **不**往来源页的历史里写，
 替用户说话不是分页该做的事。
 
-**旁问**（`/btw`）是第三种语义：同样是分叉，但那一页 `TabKind::Aside` —— 多 isolate
-一个 `agentPresets` 并 provide 一份**只读**预设（`cordis-app` 的 `aside_preset()`）。
+**旁问**（`/btw`）是第三种语义：同样是分叉，但那一页 `TabKind::Aside` —— 它的
+`agentPresets` 不从来源页复制，而是一份**只读**预设（`cordis-app` 的 `aside_preset()`）。
 它就是一张**普通分页**，进标签栏（标 `?`）、有自己的滚动区，所以答案走的是和主线
 一样的渲染路径（markdown、工具卡、流式）。「不打断」指的是主线那一轮照跑，不是把
 答案塞进一个额外的面板里 —— 早先那版把它画成输入框上方的 pane，既不渲染 markdown
@@ -182,7 +185,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 10. **一次 workflow run 一个预算 + 一个并发池。** host 在 `cordis-spine/src/tools/workflow/host.rs`，每 run 一个 `WorkflowHost`。引擎（`vendor/xai/workflow`）**自己不记账**——`agent()` 预留 1、`parallel()` 一次预留整批，全靠 host 的 `ReserveAgentCalls` 回执决定放不放行，所以 `agent_budget` 只能在这里兑现；超了回 `AgentCallQuotaExceeded`，引擎翻成 `WorkflowOutcome::BudgetExceeded`。并发同理：`admission.rs` 对 workflow owner 的子代理**直接放行**（注释里的 "follow the run's own pool"），会话限流管不到它们，那个 pool 就是 host 的 semaphore。子代理的 owner 必须带**真实 run id** 并共用 run 的 `CancellationToken`，否则按 run 取消（`cancel_workflow_children` + `workflow_cancel_waiters`）一个也匹配不到。`workflow` 工具在 `depth > 0` 拒绝：宽口径角色的工具集里有它，不挡则每层递归都拿一份全新预算。
 11. **workflow 只在收尾时叫醒主线程一次。** 子代理通往父信箱的两条路都按 owner 拦在 `ChildStore`：回合结束通知看 `SubagentRequest::surface_completion`（`runner.rs` 真的读它），子代理发给父级的 `send_message` 看 `owner.workflow_run_id()` 分流进 run 自己的队列。run 还在跑时推「某个孩子跑完了」，主线程就会在一份残缺的中间结果上烧一整轮，而一次 deep-research 有十来个孩子。过程上报折进 run 快照供 overlay 显示，并在 run 里按发生顺序攒着（上限 64 条），收尾时随 `ParentNotice::WorkflowDone` **整批**交付——行上的 `latest_report` 是覆盖写的，从它反推等于对主线程少说一半。
 12. **能力档位压在允许名单之上。** `agent::capability::CapabilityMode` 挂在**受限子会话**的 `"capability"`（主会话没有这一项 = 不设限），`Tools::outside_allowlist` 与 `specs_for_model_on` 两处都查，且查在 `bypasses_allowlist` **之前**——MCP 与动态包工具绕过预设允许名单是有意的，但绕不过「这次委派只准读」。分类按工具名、**默认关闭**：新工具忘了归类是在受限子代理里不可用，而不是带着写盘能力溜进只读会话。同一套做法给采样：`"model-override"` 只挂在受限子会话上，`llm` 采样器先查它再回落 `"settings"`。**两个名字都必须先 `isolate` 再 `provide`**——没隔离的名字 provide 进的是共用注册表，第二个同样收窄的孩子会撞「service 已注册」直接起不来，而那张 `Disposable` 被 `ChildStore` 攥到孩子被处置为止，期间**主会话**自己也查得到那份 read-only，工具表跟着被收窄。**不给子会话隔离一份 `AppSettings`**——那里面还有权限档位这类会话级状态，隔离一份等于让子代理带着一张过期的权限快照跑。
-13. **cwd 跟会话走，不跟进程走。** 同一进程里的分页（将来 GUI 的多项目会话）可以在不同目录，所以工具、系统提示的辅助函数、子进程不直接读 `std::env::current_dir()`：有 ctx 用 `cordis_spine::session_cwd(ctx)`，没有就用 `current_cwd()`（读 `exec_ctx()`——`LoopHandle` 把整轮、`Tools::execute_on` 把每次工具调用都挂在这页的 ctx 下）。来源是 `Sessions::workspace_cwd`：没钉 = 跟随进程 cwd（TUI 单页的现状），子代理起步时继承父会话钉住的值。起子进程一律显式 `current_dir`（`bash` 不传 `workdir` 也给会话 cwd）；在后台任务里执行的（如 workflow 启动）要在工具调用时取好 cwd 随请求带过去，那里没有 exec ctx。`cordis-base` 不依赖 spine，需要 cwd 的函数由调用方传入（如 `grep::run(.., cwd)`）。**尚未迁移**的：项目级 config / 预设 / skills / LSP（启动时读一次、全局一份）、会话落盘（`attach_disk` 等）、动态插件的路径解析、TUI 视图——它们仍读进程 cwd。
+13. **cwd 跟会话走，不跟进程走。** 同一进程里的分页（将来 GUI 的多项目会话）可以在不同目录，所以工具、系统提示的辅助函数、子进程、TUI 视图不直接读 `std::env::current_dir()`：有 ctx 用 `cordis_spine::session_cwd(ctx)`，没有就用 `current_cwd()`（读 `exec_ctx()`——`LoopHandle` 把整轮、`Tools::execute_on` 把每次工具调用都挂在这页的 ctx 下）。来源是 `Sessions::workspace_cwd`：没钉 = 跟随进程 cwd，子代理起步时继承父会话钉住的值，新分页继承开它那页的。`/cd` 走 `cordis_spine::change_dir`，只钉这一页（连同这页预设的项目层），**不调 `set_current_dir`**，所以进程 cwd 从启动起就不再变。起子进程一律显式 `current_dir`（`bash` 不传 `workdir` 也给会话 cwd）；在后台任务里执行的（如 workflow 启动）要在工具调用时取好 cwd 随请求带过去，那里没有 exec ctx。`cordis-base` 不依赖 spine，需要 cwd 的函数由调用方传入（如 `grep::run(.., cwd)`）。LSP 按项目根各一份（`LspHub::for_root`）。**只认启动目录（进程 cwd）的项目级资源**：`.dock/config.toml`（模型目录、MCP、浏览器、web_fetch、memory 配置）、skills、动态插件——它们在启动时装进全局服务 / 斜杠表，按页拆要动一张 `"tools"` 表与前缀缓存；`/cd` 到带这些的目录时 flash 会说明。会话落盘（`attach_disk`）也仍按启动目录。
 14. **skills 覆盖顺序。** `scan_all` 按 Builtin（`$DOCK_HOME/bundled/skills`，编译期嵌入、启动物化）→ Bundled（`{cwd}/skills`）→ User（`~/.dock/skills`）→ Agents（`{cwd}/.agents/skills`）→ Project（`{cwd}/.dock/skills`）合并，同名后者覆盖前者。
 
 ## 磁盘

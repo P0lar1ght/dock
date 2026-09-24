@@ -57,6 +57,11 @@ impl LspBackendAdapter {
         }
     }
 
+    /// 这份 LSP 绑定的项目根。
+    pub async fn workspace_root(&self) -> PathBuf {
+        self.lsp_manager.lock().await.workspace_root.clone()
+    }
+
     /// After `/lsp` writes lsp.json: merge disk config and start any new servers.
     pub fn apply_disk_config_background(&self) {
         let lsp_manager = self.lsp_manager.clone();
@@ -69,10 +74,10 @@ impl LspBackendAdapter {
                 }
             }
             {
+                // 每个 adapter 绑定一个项目根（`LspHub::for_root`），不读进程 cwd。
                 let mut mgr = lsp_manager.lock().await;
-                let cwd = std::env::current_dir().unwrap_or_else(|_| mgr.workspace_root.clone());
-                mgr.workspace_root = cwd.canonicalize().unwrap_or(cwd.clone());
-                for (name, cfg) in super::setup::merged_after_setup(&cwd) {
+                let root = mgr.workspace_root.clone();
+                for (name, cfg) in super::setup::merged_after_setup(&root) {
                     mgr.servers.entry(name).or_insert(cfg);
                 }
                 if mgr.initialized {
@@ -129,8 +134,6 @@ async fn bootstrap_lsp(
     let restartable = {
         let mut mgr = lsp_manager.lock().await;
         if !mgr.initialized && mgr.servers.is_empty() {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| mgr.workspace_root.clone());
-            mgr.workspace_root = cwd.canonicalize().unwrap_or(cwd);
             mgr.servers = super::config::load_servers_or_defaults(&mgr.workspace_root);
         }
         mgr.ensure_initialized().await;

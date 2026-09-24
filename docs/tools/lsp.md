@@ -7,7 +7,7 @@
 - **ctx**：`"lsp"` + `"tools"`
 - **模型工具**：`lsp`（按需）
 
-Grok `LspManager`/`dispatch`。第一次调用时读 `~/.dock/lsp.json` 与 `<cwd>/.dock/lsp.json`（项目盖用户）；没有配置则按工作区标记探测 PATH 上的 `rust-analyzer` / `typescript-language-server` / `gopls` / `pyright-langserver`（标记可在子目录，跳过 `node_modules` / `target`）。`/lsp` 把缺的服务器写入项目 `.dock/lsp.json`（不覆盖已有条目）；`/lsp user` 写 `~/.dock/lsp.json`。`search_replace` / `write_file` 之后后台 `didChange`。相对路径按 cwd 展开。没服务器时 fail-open（工具仍注册，调用返回配置说明）。`register_deferred`
+Grok `LspManager`/`dispatch`。**按项目根各一份**（`LspHub::for_root`，根是调用方会话的 cwd，多页在不同项目时各起各的 server）。某个根第一次调用时读 `~/.dock/lsp.json` 与 `<cwd>/.dock/lsp.json`（项目盖用户）；没有配置则按工作区标记探测 PATH 上的 `rust-analyzer` / `typescript-language-server` / `gopls` / `pyright-langserver`（标记可在子目录，跳过 `node_modules` / `target`）。`/lsp` 把缺的服务器写入项目 `.dock/lsp.json`（不覆盖已有条目）；`/lsp user` 写 `~/.dock/lsp.json`。`search_replace` / `write_file` 之后后台 `didChange`。相对路径按调用方会话的 cwd 展开。没服务器时 fail-open（工具仍注册，调用返回配置说明）。`register_deferred`
 
 ## 配置样例
 

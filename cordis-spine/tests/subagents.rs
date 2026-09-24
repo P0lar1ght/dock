@@ -932,3 +932,41 @@ async fn jobs_do_not_see_subagents() {
     assert!(killed.contains("not found"), "{killed}");
     assert!(!sub.snapshot(&id).unwrap().done, "kill_task 不该处置子代理");
 }
+
+/// 回归：预设按页之后，`task` 要读**发起调用那一页**的角色表。工具体捕获的是
+/// 根 ctx，以前所有页共用根上那份预设所以没差；现在第 2 页切了模式，名册必须
+/// 跟着它，而不是第 1 页的。
+#[tokio::test]
+async fn task_reads_the_calling_pages_presets() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let root_presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap();
+    let page_presets = root_presets.fork();
+    page_presets.apply("warden").unwrap();
+    let page = h.root.isolate("agentPresets");
+    page.provide(AGENT_PRESETS, page_presets).unwrap();
+
+    let reload = |ctx: Context| {
+        let tools = tools.clone();
+        async move {
+            tools
+                .execute_on(
+                    &ctx,
+                    ToolCall {
+                        id: "r".into(),
+                        name: "task".into(),
+                        arguments: r#"{"reload_roster":true}"#.into(),
+                    },
+                )
+                .await
+                .content
+        }
+    };
+    let on_page = reload(page).await;
+    assert!(on_page.contains("for mode warden"), "{on_page}");
+    let on_root = reload(h.root.clone()).await;
+    assert!(
+        !on_root.contains("for mode warden"),
+        "根页不该跟着切：{on_root}"
+    );
+}
