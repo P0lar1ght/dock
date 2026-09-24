@@ -36,13 +36,13 @@ pub(crate) fn bool_field(v: &Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 相对路径按**当前会话**的工作目录展开（[`crate::session::cwd::current_cwd`]），
+/// 不按进程 cwd——同一进程里的两页可能在不同项目。
 pub(crate) fn resolve(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     if p.is_absolute() {
         p
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(p)
+        crate::session::cwd::current_cwd().join(p)
     }
 }

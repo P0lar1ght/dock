@@ -4,6 +4,9 @@
 //! on `start_listen` (`gateway_bind` for tests). Dispose stops the server.
 //! Call sites live-look spine services — do not capture `Arc<Sessions>` in
 //! the HTTP lifetime.
+//!
+//! `gateway_serve` is the headless variant for `dock serve`: listens at mount and
+//! hands tickets to the parent process over stdout (`"gateway.serve"`).
 
 mod bind;
 mod handle;
@@ -13,14 +16,16 @@ mod pairing;
 mod plugin;
 mod protocol;
 mod rpc;
+mod serve;
 mod transcript;
 mod ws;
 
 pub mod handlers;
 
 pub use handle::GatewayHandle;
-pub use plugin::{gateway, gateway_bind, gateway_idle, DEFAULT_BIND};
+pub use plugin::{gateway, gateway_bind, gateway_idle, gateway_serve, DEFAULT_BIND};
 pub use protocol::{CAPABILITIES, LIVE_THREAD_ID, PROTOCOL_VERSION};
+pub use serve::{ServeConfig, ServeControl, GATEWAY_SERVE};
 
 pub const GATEWAY: &str = cordis_tui::GATEWAY;
 pub const GATEWAY_PAIRING: &str = cordis_tui::GATEWAY_PAIRING;

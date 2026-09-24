@@ -74,6 +74,7 @@ pub use prompt::context_usage::{
     ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
+pub use session::cwd::{current_cwd, session_cwd};
 pub use session::log::{
     sessions, ArchivedSession, PageLogEvent, Sessions, TokenUsage, ROOT_IDENTITY,
 };

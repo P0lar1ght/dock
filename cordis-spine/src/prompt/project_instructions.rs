@@ -104,9 +104,9 @@ fn budget_chars(window_tokens: u64) -> usize {
     ((window as f64) * 4.0 * BUDGET_PERCENT) as usize
 }
 
-/// User layer then project layer. Both optional.
+/// User layer then project layer. Both optional. 项目层取当前会话的 cwd。
 pub fn instruction_paths() -> Vec<(&'static str, PathBuf)> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = crate::session::cwd::current_cwd();
     vec![
         ("~/.dock/AGENTS.md", dock_home().join(INSTRUCTIONS_FILE)),
         ("AGENTS.md", cwd.join(INSTRUCTIONS_FILE)),

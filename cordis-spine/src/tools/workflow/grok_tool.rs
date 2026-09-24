@@ -198,6 +198,9 @@ impl WorkflowToolInput {
 #[derive(Debug)]
 pub struct WorkflowLaunchRequest {
     pub input: WorkflowToolInput,
+    /// 发起调用的会话的工作目录。启动在后台 drain 任务里做，那里拿不到调用方
+    /// 的 exec ctx，所以在工具调用时取好、随请求带过去。
+    pub cwd: std::path::PathBuf,
 }
 
 #[derive(Debug)]

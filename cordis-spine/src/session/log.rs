@@ -95,6 +95,10 @@ pub struct Sessions {
     /// cwd after a later process-wide `cd`. This does not turn persistence on;
     /// only [`Self::disk_cwd`] does that.
     plan_cwd: Arc<Mutex<Option<PathBuf>>>,
+    /// 这一页（或子代理）的工作目录。`None` = 跟随进程 cwd，也就是 TUI 单页的
+    /// 现状；钉住之后，工具、系统提示、子进程都按它走，进程 cwd 再变也不影响。
+    /// 读取走 [`crate::session::cwd::session_cwd`]，不要直接读这个字段。
+    workspace_cwd: Arc<Mutex<Option<PathBuf>>>,
     live_id: Arc<Mutex<String>>,
     /// Preset id stamped into `meta.json` on save / archive. Updated by the TUI.
     live_preset_id: Arc<Mutex<Option<String>>>,
@@ -241,6 +245,7 @@ impl Sessions {
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
             disk_cwd: Arc::new(Mutex::new(None)),
             plan_cwd: Arc::new(Mutex::new(None)),
+            workspace_cwd: Arc::new(Mutex::new(None)),
             live_id: Arc::new(Mutex::new(String::new())),
             live_preset_id: Arc::new(Mutex::new(None)),
             compact_prefix: Arc::new(Mutex::new(None)),
@@ -265,6 +270,16 @@ impl Sessions {
 
     pub fn pin_page_home(&self, page: impl Into<String>) {
         *self.page_home.lock().unwrap() = Some(page.into());
+    }
+
+    /// 把这一页的工作目录钉在 `cwd` 上。子代理在起步时继承父会话钉住的值。
+    pub fn pin_workspace_cwd(&self, cwd: impl Into<PathBuf>) {
+        *self.workspace_cwd.lock().unwrap() = Some(cwd.into());
+    }
+
+    /// 钉住的工作目录；`None` 表示跟随进程 cwd。
+    pub fn workspace_cwd(&self) -> Option<PathBuf> {
+        self.workspace_cwd.lock().unwrap().clone()
     }
 
     /// Stamp the active agent preset into subsequent `meta.json` writes.

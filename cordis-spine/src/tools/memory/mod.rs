@@ -168,9 +168,9 @@ impl Memory {
         MemoryRoot::open_default(cwd)
     }
 
+    /// 当前会话所在项目的记忆根。
     pub fn root(&self) -> MemoryRoot {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        self.root_for_cwd(&cwd)
+        self.root_for_cwd(&crate::session::cwd::current_cwd())
     }
 
     /// Start [`MemoryFileWatcher`] on `$DOCK_HOME/memory/` once when enabled.

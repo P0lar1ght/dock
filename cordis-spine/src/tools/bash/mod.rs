@@ -51,13 +51,16 @@ fn call_budget(v: &Value) -> Duration {
     }
 }
 
-/// 解析 `workdir`：相对路径按 cwd 展开；必须是已存在的目录。
+/// 解析 `workdir`：不传就是会话 cwd，相对路径按会话 cwd 展开；必须是已存在的目录。
+///
+/// 不传也要显式给出目录：子进程默认继承的是**进程** cwd，而同一进程里的两页
+/// 可能在不同项目。
 ///
 /// 不存在就直接报错，而不是让 bash 在一个意外的目录里把命令跑掉——后者会产生
 /// 「命令看起来成功了但作用在错误的地方」这种最难查的失败。
 fn resolve_workdir(v: &Value) -> Result<Option<PathBuf>, String> {
     let Some(raw) = str_field(v, &["workdir", "cwd"]) else {
-        return Ok(None);
+        return Ok(Some(crate::session::cwd::current_cwd()));
     };
     let path = resolve(&raw);
     if !path.is_dir() {

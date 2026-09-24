@@ -70,7 +70,13 @@ fn start_monitor(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     let Some(jobs) = ctx.get::<Jobs>(JOBS) else {
         return tool_result(call, "Error: jobs is not mounted");
     };
-    let id = jobs.start_ex(command, Some(description.to_string()), true);
+    // 显式给会话 cwd：不给的话子进程继承进程 cwd，多页时会跑错项目。
+    let id = jobs.start_ex_in(
+        command,
+        Some(description.to_string()),
+        true,
+        Some(crate::session::cwd::current_cwd()),
+    );
     tool_result(
         call,
         format!(

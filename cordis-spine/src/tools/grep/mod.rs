@@ -11,5 +11,5 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn run(call_id: &str, args: &str) -> String {
-    cordis_base::grep::run(call_id, args).await
+    cordis_base::grep::run(call_id, args, &crate::session::cwd::current_cwd()).await
 }

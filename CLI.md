@@ -4,7 +4,7 @@
 
 用户可见文案中文；Grok 底栏那种短 hint（`Enter:send`）保持英文无空格。
 
-进程入口（`cargo run -p cordis-app -- …`）：`--resume` 恢复本 cwd 最近一次落盘会话，`--resume <id>` 指定 id，`--help` 看用法。对话在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。
+进程入口（`cargo run -p cordis-app -- …`）：`--resume` 恢复本 cwd 最近一次落盘会话，`--resume <id>` 指定 id，`--help` 看用法。`dock serve --origin <origin> [--application <id>] [--bind <addr>]` 是给父进程（桌面 GUI）用的**无头**入口：不挂 TUI，网关挂载即在回环上监听（默认 `127.0.0.1:0` 由 OS 分配端口）；stdout 一行一个 JSON——先 `{"event":"ready","ws":…,"ticket":…}`，之后 stdin 每写一行 `{"cmd":"ticket"}` 回一张新 ticket；stdin 关闭即退出。ticket 只经这条管道交给父进程，不开放 HTTP 领取，也不留下 Origin 绑定。对话在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。
 
 ---
 

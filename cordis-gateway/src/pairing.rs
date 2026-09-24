@@ -177,6 +177,24 @@ impl PairingStore {
         Ok(ticket)
     }
 
+    /// 给**受信父进程**签一张 ticket，不要求绑定、不经过 TUI 确认。
+    ///
+    /// 只给 `dock serve` 用：ticket 经 stdout 管道交给拉起 Dock 的那个进程
+    /// （桌面 GUI），信任锚是「能读到这个进程 stdout 的人」。**不要**把它接到
+    /// HTTP 上——Origin 在浏览器之外可以伪造，那样任何本机进程都能领 ticket。
+    pub fn issue_trusted(
+        &mut self,
+        application: &str,
+        origin: &str,
+    ) -> Result<IssuedTicket, PairingError> {
+        let application = normalize_application(application)?;
+        let origin = require_origin(origin)?;
+        self.gc();
+        let ticket = mint_ticket(&application, &origin);
+        self.tickets.insert(ticket.digest.clone(), ticket.clone());
+        Ok(ticket)
+    }
+
     pub fn authenticate(
         &mut self,
         token: &str,
@@ -442,6 +460,24 @@ mod tests {
         store
             .authenticate(&first.token, ORIGIN)
             .expect("ticket remains valid for websocket authenticate");
+    }
+
+    /// 受信签发不需要绑定，但 ticket 照样钉在签发时的 Origin 上；也不会顺带
+    /// 留下一条绑定——否则别的进程伪造同一个 Origin 就能走 HTTP 领 ticket。
+    #[tokio::test]
+    async fn trusted_ticket_needs_no_binding_and_leaves_none() {
+        let mut store = store();
+        let ticket = store.issue_trusted("dock-gui", ORIGIN).unwrap();
+        store.authenticate(&ticket.token, ORIGIN).unwrap();
+        let err = store
+            .authenticate(&ticket.token, "http://evil.local")
+            .unwrap_err();
+        assert_eq!(err.code, "origin_mismatch");
+        assert!(store.bindings().is_empty(), "受信签发不能留下绑定");
+        let err = store.issue_for_binding("dock-gui", ORIGIN).unwrap_err();
+        assert_eq!(err.code, "pairing_required");
+        assert!(store.issue_trusted("Bad App!", ORIGIN).is_err());
+        assert!(store.issue_trusted("dock-gui", " ").is_err());
     }
 
     #[tokio::test]
