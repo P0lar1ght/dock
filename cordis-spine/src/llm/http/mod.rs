@@ -246,6 +246,14 @@ async fn sample_http(
         .map(|m| m.wire_model_for(backend).to_string())
         .unwrap_or_else(|| model.clone());
     let (api_base, api_key) = resolve_endpoint(sampler, &model, backend);
+    // 没有地址就别发：拼出来的是相对路径，reqwest 只会报「relative URL without a
+    // base」。最常见的原因是模型名写错（目录里查不到，又没有全局地址）。
+    if api_base.trim().is_empty() {
+        return LlmOutput {
+            error: Some(missing_endpoint_error(&model, choice.is_some(), backend)),
+            ..LlmOutput::default()
+        };
+    }
     if let Some(sessions) = exec.get::<Sessions>(SESSIONS) {
         let window = choice
             .as_ref()
@@ -615,6 +623,19 @@ fn resolve_endpoint(sampler: &HttpSampler, model: &str, backend: ApiBackend) -> 
             }
         });
     (api_base, api_key)
+}
+
+fn missing_endpoint_error(model: &str, in_catalog: bool, backend: ApiBackend) -> String {
+    if in_catalog {
+        format!(
+            "模型「{model}」没配 {} 协议的地址：在 config.toml 的 [model.\"{model}\"] 里写上 api_base_url。",
+            backend.name()
+        )
+    } else {
+        format!(
+            "模型「{model}」不在模型目录里：检查模型名，或在 config.toml 里加上 [model.\"{model}\"] 并配好 api_base_url。"
+        )
+    }
 }
 
 fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
@@ -1128,6 +1149,31 @@ mod tests {
         let out = llm.stream_on(&child, empty_request()).await;
 
         assert!(out.text.is_empty(), "采样器听的还是主会话那把取消：{out:?}");
+    }
+
+    /// 回归：模型名不在目录里、又没有全局 `api_base` 时，请求地址拼成了相对路径，
+    /// 用户只看到 reqwest 的「relative URL without a base」，看不出是模型名写错了。
+    #[tokio::test]
+    async fn an_unknown_model_without_an_endpoint_says_so() {
+        let _home = cordis_base::test_env::scoped().home();
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        let llm = crate::llm::sampler::Llm::from_sampler(
+            ctx.clone(),
+            std::sync::Arc::new(HttpSampler {
+                ctx: ctx.clone(),
+                api_key: String::new(),
+                api_base: String::new(),
+                fallback_model: "no-such-model".into(),
+            }),
+        );
+        let out = llm.stream_on(&ctx, empty_request()).await;
+
+        let error = out.error.unwrap_or_default();
+        assert!(
+            error.contains("no-such-model") && error.contains("不在模型目录里"),
+            "{error}"
+        );
     }
 
     /// 目录里没这个模型（或压根没 config）时不替上游做任何假设。
