@@ -81,8 +81,11 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
         Ok(v) => v,
         Err(e) => return tool_result(call, format!("Error: invalid task arguments: {e}")),
     };
+    // 预设按页：工具体捕获的是根 ctx，名册 / 默认角色要看**发起调用的那一页**
+    // （`exec_ctx`）的预设，否则第 2 页会拿第 1 页的角色表派活。
+    let caller = crate::tools::registry::exec_ctx().unwrap_or_else(|| ctx.clone());
     if input.reload_roster {
-        let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+        let Some(presets) = caller.get::<AgentPresets>(AGENT_PRESETS) else {
             return tool_result(call, "Error: agentPresets is not mounted");
         };
         return tool_result(call, presets.reload_roster_report());
@@ -103,11 +106,11 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
         if !t.is_empty() {
             t.to_string()
         } else {
-            default_type(ctx)
+            default_type(&caller)
         }
     };
     if subagent_type.is_empty() {
-        let (agents, presets_root) = ctx
+        let (agents, presets_root) = caller
             .get::<AgentPresets>(AGENT_PRESETS)
             .map(|p| (p.workspace_agents_dir(), p.workspace_presets_dir()))
             .unwrap_or_else(|| (".dock/presets/<mode>/agents".into(), ".dock/presets".into()));

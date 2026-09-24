@@ -104,7 +104,10 @@ fn memory_enabled_for_list(ctx: Option<&Context>) -> bool {
 /// List memory files without creating layout. `ensure_layout` belongs to write
 /// paths (`/remember`, `/flush`); opening `/memory` must not mkdir when disabled.
 fn build_rows_with_ctx(ctx: Option<&Context>, filter: &str) -> Vec<Row> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // 这一页所在项目的记忆；没 ctx（测试）时退回进程 cwd。
+    let cwd = ctx
+        .map(cordis_spine::session_cwd)
+        .unwrap_or_else(cordis_spine::current_cwd);
     let root = MemoryRoot::open_default(&cwd);
     let enabled = memory_enabled_for_list(ctx);
     let files = list_memory_files(&root);

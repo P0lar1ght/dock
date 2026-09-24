@@ -296,6 +296,34 @@ impl AgentPresets {
         }
     }
 
+    /// 给新分页的一份：同样的层（内置 / 用户 / 项目）、同样的当前预设，之后两页
+    /// 各切各的——一页 `/preset` 不再改掉所有页。
+    ///
+    /// 只读 overlay（旁问页、子代理）不能被复制成常驻页的预设，那会把只读工具集
+    /// 带进一个全权页；这时按默认层重新加载一份。
+    pub fn fork(&self) -> Self {
+        let (user, project, current) = {
+            let inner = self.inner.lock().unwrap();
+            if !inner.persist {
+                let (user, project) = default_layers();
+                return Self::load_layers(user, project);
+            }
+            (
+                inner.user_dir.clone(),
+                inner.project_dir.clone(),
+                inner.current.clone(),
+            )
+        };
+        let forked = Self::load_layers(user, project);
+        {
+            let mut inner = forked.inner.lock().unwrap();
+            if inner.presets.contains_key(&current) {
+                inner.current = current;
+            }
+        }
+        forked
+    }
+
     /// `/cd`: point the project overlay at the new workspace and drop the
     /// write-path cache so the next assemble picks up the new mode dir.
     pub fn set_workspace_root(&self, cwd: &Path) {
@@ -967,12 +995,18 @@ pub fn is_shipped(id: &str) -> bool {
     SHIPPED.iter().any(|m| m.id == id)
 }
 
+/// 根会话的预设层：`~/.dock/presets` + 启动目录的 `.dock/presets`。
+fn default_layers() -> (PathBuf, Option<PathBuf>) {
+    let user = cordis_base::config::dock_home().join("presets");
+    let project = std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join(".dock").join("presets"));
+    (user, project)
+}
+
 pub fn agent_presets() -> Plugin {
     plugin("agent-presets", Inject::from([CONTEXT]), |ctx, _: &()| {
-        let user = cordis_base::config::dock_home().join("presets");
-        let project = std::env::current_dir()
-            .ok()
-            .map(|cwd| cwd.join(".dock").join("presets"));
+        let (user, project) = default_layers();
         let provided = ctx.provide(AGENT_PRESETS, AgentPresets::load_layers(user, project))?;
         let book = ctx.require::<ContextBook>(CONTEXT)?;
         own_sections(
@@ -1767,6 +1801,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 回归：分页各持一份预设。第 2 页切预设、`/cd` 换项目层，都不能改到
+    /// 第 1 页——以前所有常驻页共用根上那一份。
+    #[test]
+    fn forked_presets_switch_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let page1 = AgentPresets::load(dir.path().to_path_buf());
+        page1.apply(CORDIS_PRESET_ID).unwrap();
+        let page2 = page1.fork();
+        assert_eq!(page2.current_id(), CORDIS_PRESET_ID, "新页照抄当前预设");
+
+        page2.apply(MINIMAL_PRESET_ID).unwrap();
+        assert_eq!(page1.current_id(), CORDIS_PRESET_ID, "第 1 页不该跟着切");
+
+        let project = tempfile::tempdir().unwrap();
+        page2.set_workspace_root(project.path());
+        assert_eq!(
+            page1.inner.lock().unwrap().project_dir,
+            None,
+            "第 1 页的项目层不该被第 2 页的 /cd 改掉"
+        );
+    }
+
+    /// 只读 overlay（旁问页）不能被复制成常驻页的预设。
+    #[test]
+    fn forking_a_read_only_overlay_reloads_full_presets() {
+        let overlay = AgentPresets::overlay(AgentPreset::new("aside"));
+        let forked = overlay.fork();
+        assert!(
+            forked.inner.lock().unwrap().persist,
+            "常驻页要能落盘的完整预设"
+        );
+        assert!(forked.get(DEFAULT_PRESET_ID).is_some());
     }
 
     #[test]

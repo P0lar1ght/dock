@@ -63,7 +63,7 @@ impl StatusLine {
     }
 
     pub fn left(&self) -> String {
-        cwd_label()
+        cwd_label(&cordis_spine::session_cwd(&self.ctx))
     }
 
     pub fn center(&self) -> Option<String> {
@@ -361,13 +361,13 @@ fn occupancy_color(pct: u8, theme: &Theme) -> ratatui::style::Color {
     blend_occupancy_color(pct as f64, &occupancy_breakpoints(theme))
 }
 
-/// `~/Desktop/AILab/dock` 那样的紧凑 cwd。面板抬头也用它，保持和状态栏一致。
-pub fn cwd_display() -> String {
-    cwd_label()
+/// `~/Desktop/AILab/dock` 那样的紧凑 cwd（`ctx` 所在那页的）。面板抬头也用它，
+/// 保持和状态栏一致。
+pub fn cwd_display(ctx: &Context) -> String {
+    cwd_label(&cordis_spine::session_cwd(ctx))
 }
 
-fn cwd_label() -> String {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+fn cwd_label(cwd: &std::path::Path) -> String {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     if let Some(home) = home {
         if let Ok(rel) = cwd.strip_prefix(&home) {
@@ -732,12 +732,20 @@ mod tests {
         let Ok(home) = std::env::var("HOME") else {
             return;
         };
-        let Ok(cwd) = std::env::current_dir() else {
-            return;
-        };
-        if cwd.starts_with(&home) {
-            assert!(cwd_label().starts_with('~'), "cwd_label={}", cwd_label());
-        }
+        let cwd = std::path::Path::new(&home).join("proj");
+        assert_eq!(cwd_label(&cwd), "~/proj");
+    }
+
+    /// 回归：状态栏显示的是**这一页**钉住的 cwd，不是进程 cwd——两页在不同
+    /// 项目时，各自的状态栏要写各自的目录。
+    #[tokio::test]
+    async fn left_shows_the_page_cwd() {
+        let ctx = Context::new();
+        let sessions = Sessions::tab(ctx.clone(), 2);
+        sessions.pin_workspace_cwd("/work/page-two-project");
+        let _reg = ctx.provide(SESSIONS, sessions).unwrap();
+        let line = StatusLine::new(ctx);
+        assert_eq!(line.left(), "page-two-project");
     }
 
     #[test]

@@ -622,7 +622,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         .get::<cordis_spine::DynamicRunner>(cordis_spine::DYNAMIC_CORDIS_RUNNER)
         .is_some());
     assert!(root
-        .get::<cordis_spine::LspBackendAdapter>(cordis_spine::LSP)
+        .get::<cordis_spine::LspHub>(cordis_spine::LSP)
         .is_some());
     assert!(root
         .get::<cordis_spine::Browser>(cordis_spine::BROWSER)

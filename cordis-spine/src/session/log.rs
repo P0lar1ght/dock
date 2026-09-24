@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
@@ -347,16 +347,22 @@ impl Sessions {
         self.restore(id)
     }
 
-    /// Whether the current cwd has this session on disk. Does not touch the live log.
-    pub fn can_adopt_archived(id: &str) -> bool {
+    /// Whether `cwd` has this session on disk. Does not touch the live log.
+    /// `cwd` 是要开页的那一页的工作目录（[`crate::session_cwd`]），不是进程 cwd。
+    pub fn can_adopt_archived(id: &str, cwd: &Path) -> bool {
         if id.is_empty() {
             return false;
         }
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        crate::session::persist::load_session(id, &cwd).is_some()
+        crate::session::persist::load_session(id, cwd).is_some()
     }
 
-    /// Load one on-disk session of the current cwd into an **empty** log and
+    /// 这个会话的工作目录：钉住的值，没钉就是进程 cwd。
+    fn own_cwd(&self) -> PathBuf {
+        self.workspace_cwd()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// Load one on-disk session of this page's cwd into an **empty** log and
     /// keep writing back to that same id.
     ///
     /// A new tab starts empty. [`Self::resume_id`] would archive that empty log
@@ -364,13 +370,13 @@ impl Sessions {
     /// This skips the archive step and refuses a log that already has events,
     /// so opening history on a page cannot wipe the thread it is adopting.
     pub fn adopt_archived(&self, id: &str) -> bool {
-        if !self.emit || !Self::can_adopt_archived(id) {
+        let cwd = self.own_cwd();
+        if !self.emit || !Self::can_adopt_archived(id, &cwd) {
             return false;
         }
         if !self.events.lock().unwrap().is_empty() {
             return false;
         }
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let loaded = crate::session::persist::load_cwd(&cwd);
         if !loaded.iter().any(|s| s.id == id) {
             return false;

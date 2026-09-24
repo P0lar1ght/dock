@@ -2268,8 +2268,7 @@ fn apply_memory_key(
             path,
             expected_content_hash,
         } => {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let root = dock_memory::MemoryRoot::open_default(&cwd);
+            let root = dock_memory::MemoryRoot::open_default(&cordis_spine::session_cwd(ctx));
             let mut index = match dock_memory::MemoryIndex::open_or_create(&root.search_db()) {
                 Ok(i) => i,
                 Err(e) => {

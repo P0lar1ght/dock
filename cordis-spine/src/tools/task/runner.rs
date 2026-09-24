@@ -83,7 +83,8 @@ impl ChildRunner for DockChildRunner {
         subagent_type: String,
         _parent_session_id: String,
     ) -> Self::ValidateFuture {
-        let ctx = self.ctx.clone();
+        // 角色表跟着发起调用的那一页走（预设按页）；不在调用链上时退回根。
+        let ctx = crate::tools::registry::exec_ctx().unwrap_or_else(|| self.ctx.clone());
         Box::pin(async move { validate_roster(&ctx, &subagent_type) })
     }
 

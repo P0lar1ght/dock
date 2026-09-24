@@ -74,7 +74,7 @@ pub use prompt::context_usage::{
     ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
-pub use session::cwd::{current_cwd, session_cwd};
+pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
 pub use session::log::{
     sessions, ArchivedSession, PageLogEvent, Sessions, TokenUsage, ROOT_IDENTITY,
 };
@@ -105,7 +105,7 @@ pub use tools::goal::{
 };
 pub use tools::jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
 pub use tools::lsp::{
-    lsp_auto_setup, lsp_composer_fill, lsp_status_report, tool_lsp, LspBackendAdapter,
+    lsp_auto_setup, lsp_composer_fill, lsp_status_report, tool_lsp, LspBackendAdapter, LspHub,
     LspSetupReport, LspSetupScope,
 };
 pub use tools::mcp::{

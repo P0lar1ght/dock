@@ -577,6 +577,14 @@ impl PromptWidget {
         }
     }
 
+    /// `@` 文件补全的根：这一页的工作目录。
+    fn workspace_root(&self) -> std::path::PathBuf {
+        self.ctx
+            .as_ref()
+            .map(cordis_spine::session_cwd)
+            .unwrap_or_else(cordis_spine::current_cwd)
+    }
+
     pub fn file_search_snapshot(&self) -> FileSearchSnapshot {
         let mut state = self.state.lock().unwrap();
         if let Some(ctx) = file_search::detect(&state.input, state.cursor) {
@@ -593,6 +601,7 @@ impl PromptWidget {
             state.cursor,
             state.file_selected,
             state.file_dismissed,
+            &self.workspace_root(),
         )
     }
 
@@ -603,6 +612,7 @@ impl PromptWidget {
             state.cursor,
             state.file_selected,
             state.file_dismissed,
+            &self.workspace_root(),
         );
         if !snap.open || snap.matches.is_empty() {
             return;

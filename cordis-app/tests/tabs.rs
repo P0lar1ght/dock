@@ -6,10 +6,10 @@ use cordis_app::{session_actor, tab_mount};
 use cordis_spine::{
     agent_loop, clear_plan_for_session_switch, expected_plan_path, goal_service,
     goal_tool_registration, install_fakes, is_plan_file_edit, permissions, plan_mode_service,
-    plan_mode_tool_registration, settings, todo_service, todo_tool_registration, AppSettings, Goal,
-    LlmOutput, LogEvent, Mcp, PermissionMode, Permissions, PlanMode, PlanPhase, PreStep, Sessions,
-    Todos, ToolCall, Tools, TurnEnd, AGENT_PRESETS, GOAL, MCP, PERMISSIONS, PLAN_MODE, PRE_STEP,
-    SESSIONS, SETTINGS, TODOS, TOOLS, TURN, TURN_END,
+    plan_mode_tool_registration, settings, todo_service, todo_tool_registration, AgentPresets,
+    AppSettings, Goal, LlmOutput, LogEvent, Mcp, PermissionMode, Permissions, PlanMode, PlanPhase,
+    PreStep, Sessions, Todos, ToolCall, Tools, TurnEnd, AGENT_PRESETS, GOAL, MCP, PERMISSIONS,
+    PLAN_MODE, PRE_STEP, SESSIONS, SETTINGS, TODOS, TOOLS, TURN, TURN_END,
 };
 use cordis_tui::{
     prompt, tabs, theme, PromptWidget, SessionRef, TabKind, Tabs, SESSION_PORT, TUI_PROMPT,
@@ -703,4 +703,40 @@ async fn two_pages_keep_goal_todos_and_plan_apart() {
 
     tabs.close(1).await.unwrap();
     assert!(!path.exists(), "关页要删掉这一页的计划文件: {path:?}");
+}
+
+/// 回归：预设和工作目录都按页。新页从当前页抄一份预设、继承它钉住的 cwd；之后
+/// 第 2 页切预设不改第 1 页——以前常驻页共用根上那一份。
+#[tokio::test]
+async fn a_new_page_forks_presets_and_inherits_the_cwd() {
+    let root = boot().await;
+    let home = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap());
+    root.provide(AGENT_PRESETS, AgentPresets::load(home.join("presets")))
+        .unwrap();
+    let first = root.get::<AgentPresets>(AGENT_PRESETS).unwrap();
+    first.apply("cordis").unwrap();
+    let project = home.join("project-b");
+    std::fs::create_dir_all(&project).unwrap();
+    root.get::<Sessions>(SESSIONS)
+        .unwrap()
+        .pin_workspace_cwd(&project);
+
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    tabs.open().await.unwrap();
+    let page = tabs.active_ctx();
+
+    let second = page.get::<AgentPresets>(AGENT_PRESETS).unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &second),
+        "两页不该共用一份预设"
+    );
+    assert_eq!(second.current_id(), "cordis", "新页从当前页抄当前预设");
+    second.apply("warden").unwrap();
+    assert_eq!(first.current_id(), "cordis", "第 1 页不该跟着切");
+
+    assert_eq!(
+        cordis_spine::session_cwd(&page),
+        project,
+        "新页继承当前页的 cwd"
+    );
 }

@@ -32,7 +32,7 @@ use crate::tools::dynamic_runner::{
 };
 use crate::tools::goal::Goal;
 use crate::tools::jobs::Jobs;
-use crate::tools::lsp::LspBackendAdapter;
+use crate::tools::lsp::LspHub;
 use crate::tools::mcp::Mcp;
 use crate::tools::memory::Memory;
 use crate::tools::plan_mode::PlanMode;
@@ -271,7 +271,7 @@ fn probe_spine(ctx: &Context) -> Vec<String> {
     push_live::<DynamicRunner>(&mut lines, ctx, DYNAMIC_CORDIS_RUNNER);
     push_live::<Memory>(&mut lines, ctx, MEMORY);
     push_live::<Browser>(&mut lines, ctx, BROWSER);
-    push_live::<LspBackendAdapter>(&mut lines, ctx, LSP);
+    push_live::<LspHub>(&mut lines, ctx, LSP);
     push_live::<Skills>(&mut lines, ctx, SKILLS);
     push_live::<Computer>(&mut lines, ctx, COMPUTER);
     push_live::<Compact>(&mut lines, ctx, COMPACT);

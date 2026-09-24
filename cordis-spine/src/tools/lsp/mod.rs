@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod dispatch;
 pub mod documents;
 pub mod format;
+pub mod hub;
 pub mod manager;
 pub mod notify;
 pub mod pending;
@@ -18,6 +19,7 @@ mod types;
 pub mod workspace_open;
 
 pub use dispatch::LspBackendAdapter;
+pub use hub::LspHub;
 #[allow(unused_imports)]
 pub use manager::{drain_lsp_diagnostics, DiagnosticsSummary, LspManager};
 pub use restart::restart_monitor;
@@ -92,8 +94,6 @@ pub fn tool_lsp() -> cordis::Plugin {
     use crate::tools::registry::{own_registered, ToolBody, Tools};
     use cordis::{plugin, Inject};
     use cordis_base::types::{ToolResult, ToolSpec};
-    use notify::ToolNotificationHandle;
-    use tokio::sync::Mutex as TokioMutex;
 
     const DESC: &str = "Code intelligence via language servers. Prefer over grep/read_file for understanding code.\n\
 Operations: goToDefinition (jump to where a symbol is defined), findReferences (all usages of a symbol), hover (type info/docs at a position), goToImplementation (trait/interface implementations), documentSymbol (list all symbols in a file), workspaceSymbol (search symbols by name across the workspace — requires query parameter, not file_path).\n\
@@ -101,16 +101,9 @@ Requires file_path + line + character for position-based operations. line/charac
     const PARAMS: &str = r#"{"type":"object","properties":{"operation":{"type":"string","enum":["goToDefinition","findReferences","hover","goToImplementation","documentSymbol","workspaceSymbol"],"description":"LSP operation."},"file_path":{"type":"string","description":"Path to the file. Absolute, or relative to cwd."},"line":{"type":"integer","description":"0-based line. read_file N→ is 1-based: subtract 1."},"character":{"type":"integer","description":"0-based UTF-16 column."},"query":{"type":"string","description":"Symbol query for workspaceSymbol."}},"required":["operation"]}"#;
 
     plugin("tool-lsp", Inject::from([TOOLS]), |ctx, _: &()| {
-        // Servers are loaded at first use (live cwd / lsp.json / PATH defaults).
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let mgr = std::sync::Arc::new(TokioMutex::new(manager::LspManager::new(
-            Default::default(),
-            cwd,
-            true,
-            ToolNotificationHandle::noop(),
-        )));
-        let backend = dispatch::LspBackendAdapter::new(mgr);
-        ctx.provide(LSP, backend)?;
+        // 按项目根懒建（`LspHub::for_root`）；servers 在首次使用时加载
+        // （lsp.json / PATH 默认）。
+        ctx.provide(LSP, LspHub::default())?;
         let _ = ctx.on_waterfall(TOOLS_EXECUTE, {
             let ctx = ctx.clone();
             move |result: ToolResult, _| {
@@ -148,9 +141,11 @@ fn notify_edit_if_needed(ctx: &cordis::Context, result: &cordis_base::types::Too
     let Some(path) = edited_path_from_result(&result.content) else {
         return;
     };
-    let Some(handle) = ctx.get::<LspBackendAdapter>(crate::names::LSP) else {
+    let Some(hub) = ctx.get::<LspHub>(crate::names::LSP) else {
         return;
     };
+    // 编辑发生在调用方会话里（这条 waterfall 跑在 `execute_on` 的作用域内）。
+    let handle = hub.current();
     handle.ensure_started_background();
     tokio::spawn(async move {
         if let Ok(content) = tokio::fs::read_to_string(&path).await {
@@ -179,9 +174,10 @@ async fn lsp_run(
     use crate::names::LSP;
     use crate::tools::registry::tool_result;
     // Copied from Grok `LspTool::run`.
-    let Some(handle) = ctx.get::<LspBackendAdapter>(LSP) else {
+    let Some(hub) = ctx.get::<LspHub>(LSP) else {
         return tool_result(call, LSP_UNAVAILABLE);
     };
+    let handle = hub.current();
     let input: types::LspToolInput = match serde_json::from_str(&call.arguments) {
         Ok(v) => v,
         Err(e) => return tool_result(call, format!("Error: {e}")),

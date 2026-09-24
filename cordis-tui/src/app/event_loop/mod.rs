@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use cordis::Context;
 use cordis_spine::{
     apply_restored_preset, goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets,
-    AppSettings, ApplyRestoredPreset, DynamicRunner, Goal, LogEvent, LspBackendAdapter,
-    LspSetupScope, PlanMode, Sessions, Slash, Subagents, ToolCall, Tools, AGENT_PRESETS, ASK_EVENT,
+    AppSettings, ApplyRestoredPreset, DynamicRunner, Goal, LogEvent, LspHub, LspSetupScope,
+    PlanMode, Sessions, Slash, Subagents, ToolCall, Tools, AGENT_PRESETS, ASK_EVENT,
     DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE,
     SESSIONS, SESSION_EVENT, SETTINGS, SLASH, SUBAGENTS, TOOLS,
 };
@@ -486,16 +486,17 @@ pub async fn run(root: Context) -> Result<()> {
                                     }
                                     overlay.close();
                                 }
-                                Effect::ChangeDir(path) => match std::env::set_current_dir(&path) {
-                                    Ok(()) => {
-                                        let cwd = std::env::current_dir().unwrap_or(path.clone());
-                                        if let Some(presets) = ctx.get::<AgentPresets>(AGENT_PRESETS) {
-                                            presets.set_workspace_root(&cwd);
-                                        }
+                                // 只改当前这页：别的页、MCP 这类全局服务不跟着搬。
+                                Effect::ChangeDir(path) => match cordis_spine::change_dir(&ctx, &path) {
+                                    Ok(changed) => {
                                         overlay.close();
-                                        flash(&ctx, format!("cwd {}", path.display()));
+                                        let mut msg = format!("cwd {}", changed.cwd.display());
+                                        if let Some(note) = changed.note {
+                                            msg = format!("{msg} · {note}");
+                                        }
+                                        flash(&ctx, msg);
                                     }
-                                    Err(e) => flash(&ctx, e.to_string()),
+                                    Err(e) => flash(&ctx, e),
                                 },
                                 Effect::SettingsModal => {
                                     overlay = Overlay::Settings {
@@ -648,8 +649,7 @@ pub async fn run(root: Context) -> Result<()> {
                                     spawn_mcp_reload(ctx.clone(), redraw_tx.clone(), true);
                                 }
                                 Effect::ShowLsp { write, user } => {
-                                    let cwd = std::env::current_dir()
-                                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                    let cwd = cordis_spine::session_cwd(&ctx);
                                     let body = if write {
                                         let scope = if user {
                                             LspSetupScope::User
@@ -658,10 +658,9 @@ pub async fn run(root: Context) -> Result<()> {
                                         };
                                         match lsp_auto_setup(&cwd, scope) {
                                             Ok(report) => {
-                                                if let Some(handle) =
-                                                    ctx.get::<LspBackendAdapter>(LSP)
-                                                {
-                                                    handle.apply_disk_config_background();
+                                                if let Some(hub) = ctx.get::<LspHub>(LSP) {
+                                                    hub.for_root(&cwd)
+                                                        .apply_disk_config_background();
                                                 }
                                                 report.display()
                                             }
