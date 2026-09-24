@@ -1415,3 +1415,37 @@ async fn thread_start_with_preset_is_per_page_and_listed() {
     };
     assert_eq!(open(&before), open(&after), "不该留下空页");
 }
+
+/// `preset/list`：新对话页选预设。内置四个都在、顺序和 TUI 一样从「编码」开始，
+/// `defaultId` 是不带 `presetId` 开新会话时用的那个；列出来的 id 能直接拿去开会话。
+#[tokio::test]
+async fn preset_list_feeds_thread_start() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["presets"], true, "{init}");
+
+    let listed = rpc.call("preset/list", json!({})).await;
+    let presets = listed["result"]["presets"].as_array().unwrap().clone();
+    let ids: Vec<&str> = presets.iter().filter_map(|p| p["id"].as_str()).collect();
+    for id in ["code", "minimal", "cordis", "warden"] {
+        assert!(ids.contains(&id), "{listed}");
+    }
+    assert_eq!(ids[0], "code", "{listed}");
+    let warden = presets.iter().find(|p| p["id"] == "warden").unwrap();
+    assert_eq!(warden["origin"], "shipped", "{warden}");
+    assert_eq!(warden["available"], true, "{warden}");
+    assert!(!warden["label"].as_str().unwrap().is_empty(), "{warden}");
+    let default = listed["result"]["defaultId"].as_str().unwrap();
+    assert!(ids.contains(&default), "{listed}");
+
+    let dir = project_dir("preset-list");
+    let started = rpc
+        .call(
+            "thread/start",
+            json!({ "cwd": dir.display().to_string(), "presetId": ids[1] }),
+        )
+        .await;
+    assert_eq!(started["result"]["thread"]["presetId"], ids[1], "{started}");
+}
