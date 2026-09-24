@@ -104,6 +104,12 @@ cargo test --locked -p dock-memory
 cargo test --locked -p cordis-spine
 ```
 
+另有一个并行的 `dock-core` job（Node 22，测试直接跑 `.ts`，需要 22.18+）：
+
+```bash
+cd dock-core && npm ci && npm test && npm run typecheck
+```
+
 工具链下限由 `[workspace.package].rust-version` 兜底；CI / release 钉 `1.94.0`（对齐 live xai-org/grok-build `rust-toolchain.toml`）。本地用 rustup 的 1.94+ 即可。代理环境要放行回环地址（见上文 `no_proxy`）。
 
 改 workflow 后先本地校验：

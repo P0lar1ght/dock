@@ -49,3 +49,24 @@ jobs:
       # DOCK_HOME / cwd 由 test_env::scoped() 串行化，可以并行跑。见 docs/DEVELOPMENT.md「CI」。
       - name: Test (spine)
         run: cargo test --locked -p cordis-spine
+
+  # dock.1 协议核心（TS）：线程事件契约 + reducer。与 Rust 那一组并行，几十秒跑完。
+  # 测试直接跑 .ts（Node 22.18+ 默认剥类型），所以 Node 不能低于 22.18。
+  dock-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dock-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dock-core/package-lock.json
+      - run: npm ci
+      - name: Test
+        run: npm test
+      - name: Typecheck
+        run: npm run typecheck
