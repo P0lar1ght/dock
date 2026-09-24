@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cordis::Context;
-use cordis_gateway::{gateway_bind, gateway_idle, GATEWAY, PROTOCOL_VERSION};
+use cordis_gateway::{
+    gateway_bind, gateway_idle, gateway_serve, ServeConfig, ServeControl, GATEWAY, GATEWAY_SERVE,
+    PROTOCOL_VERSION,
+};
 use cordis_spine::{
     agent_loop, install_fakes, mcp_client, permissions, plan_mode, settings, slash, tool_ask_user,
     tool_goal, turn, AppSettings, ExtraSlashKind, Goal, LogEvent, LoopHandle, PermissionOptionKind,
@@ -215,10 +218,18 @@ struct Rpc {
 
 impl Rpc {
     async fn connect(addr: SocketAddr, ticket: &str) -> Self {
+        let (mut rpc, auth) = Self::connect_as(addr, ticket, PAGE_ORIGIN).await;
+        assert_eq!(auth["result"]["ok"], true);
+        rpc.next_id = 2;
+        rpc
+    }
+
+    /// 以 `origin` 握手并用 `ticket` 鉴权，回鉴权那一帧（不断言成败）。
+    async fn connect_as(addr: SocketAddr, ticket: &str, origin: &str) -> (Self, Value) {
         let url = format!("ws://{addr}/api/ws");
         let mut req = url.into_client_request().unwrap();
         req.headers_mut()
-            .insert(ORIGIN_HEADER, PAGE_ORIGIN.parse().unwrap());
+            .insert(ORIGIN_HEADER, origin.parse().unwrap());
         let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
         let (write, read) = ws.split();
         let mut rpc = Self {
@@ -229,8 +240,7 @@ impl Rpc {
         let auth = rpc
             .call("connection/authenticate", json!({ "ticket": ticket }))
             .await;
-        assert_eq!(auth["result"]["ok"], true);
-        rpc
+        (rpc, auth)
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Value {
@@ -996,4 +1006,85 @@ async fn gateway_idle_until_start_listen() {
         }
     }
     assert!(down, "HTTP still serving {addr} after stop_listen");
+}
+
+const GUI_ORIGIN: &str = "tauri://localhost";
+
+/// `dock serve`：父进程从 stdout 拿到的 ticket 直接能连 WS，不走配对；ticket
+/// 钉在 GUI 的 Origin 上，换个 Origin 用不了；网关不因此留下绑定，走 HTTP 领
+/// ticket 仍然要配对；stdin 关闭时控制循环结束。
+#[tokio::test]
+async fn serve_hands_the_parent_a_working_ticket() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let root = harness_root().await;
+    root.plugin(
+        gateway_serve("127.0.0.1:0"),
+        ServeConfig {
+            application: "dock-gui".into(),
+            origin: GUI_ORIGIN.into(),
+        },
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    let control = (*root.require::<ServeControl>(GATEWAY_SERVE).unwrap()).clone();
+    let addr = control.addr();
+    assert!(addr.ip().is_loopback());
+
+    let (mut to_dock, dock_in) = tokio::io::duplex(4096);
+    let (dock_out, from_dock) = tokio::io::duplex(64 * 1024);
+    let task = tokio::spawn(async move { control.run(BufReader::new(dock_in), dock_out).await });
+    let mut lines = BufReader::new(from_dock).lines();
+    async fn next<R: tokio::io::AsyncBufRead + Unpin>(lines: &mut tokio::io::Lines<R>) -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("stdout timeout")
+            .unwrap()
+            .expect("stdout closed");
+        serde_json::from_str::<Value>(&line).unwrap()
+    }
+
+    let ready = next(&mut lines).await;
+    assert_eq!(ready["event"], "ready");
+    assert_eq!(ready["ws"], format!("ws://{addr}/api/ws"));
+    let ticket = ready["ticket"].as_str().unwrap().to_string();
+
+    let (_, wrong) = Rpc::connect_as(addr, &ticket, PAGE_ORIGIN).await;
+    assert!(
+        wrong.get("error").is_some(),
+        "换个 Origin 不该认这张 ticket：{wrong}"
+    );
+
+    let (mut rpc, auth) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["protocolVersion"], PROTOCOL_VERSION);
+
+    let via_http = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/connection/tickets"))
+        .header("Origin", GUI_ORIGIN)
+        .json(&json!({ "application": "dock-gui" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        via_http.status(),
+        403,
+        "受信签发不能顺带开放 HTTP 领 ticket"
+    );
+
+    to_dock.write_all(b"{\"cmd\":\"ticket\"}\n").await.unwrap();
+    let renewed = next(&mut lines).await;
+    assert_eq!(renewed["event"], "ticket");
+    let (_, auth) = Rpc::connect_as(addr, renewed["ticket"].as_str().unwrap(), GUI_ORIGIN).await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+
+    drop(to_dock);
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("stdin 关闭后控制循环该结束")
+        .unwrap()
+        .unwrap();
 }

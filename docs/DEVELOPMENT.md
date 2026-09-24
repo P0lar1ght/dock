@@ -19,6 +19,7 @@ git status -sb                 # 当前分支与未提交改动
 cargo run -p cordis-app        # 全屏接管终端
 cargo run -p cordis-app -- --resume        # 恢复本 cwd 最近一次会话
 cargo run -p cordis-app -- --resume <id>   # 指定会话
+cargo run -p cordis-app -- serve --origin tauri://localhost   # 无头：给桌面 GUI 当子进程（stdout 出 JSON 行）
 cargo run -p cordis-app -- --help
 ```
 
