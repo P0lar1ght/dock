@@ -94,7 +94,10 @@ config.toml.example      用户 / 项目模型目录样例
 当前页。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的是各页自己的 ctx。
 
 事件**不分 realm**（`ctx.emit` 不看 isolate），后台页的 `session/event` 照样能把
-前台叫醒重绘，标签栏上的 `●` 就是靠这个活的。
+前台叫醒重绘，标签栏上的 `●` 就是靠这个活的。反过来，`session/event` 的载荷也**不带**
+是哪一页发的；要按页区分的监听者订 `session/page-event`（`PageLogEvent { page, event }`，
+每条会话事件和老事件一起发、共用同一个 `LogEvent`）——网关的 `live` 线程就只收
+`page == "main"`，否则别的页说的话会混进浏览器那一侧。
 
 装一页要挂哪些插件由**组合根**决定（`cordis-app` 的 `tab_mount()`），TUI 只管开 /
 关 / 切：`"tui.tabs"` 拿到的是一个建页插件工厂。关页 `dispose` 那一颗页 fiber，
