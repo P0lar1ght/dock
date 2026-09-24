@@ -13,6 +13,7 @@ use cordis_tui::{Tabs, TUI_TABS};
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError, LIVE_THREAD_ID};
 use crate::threads::{self, Page};
+use crate::transcript::Transcript;
 
 /// 订阅：分页身份 → 客户端订阅时用的 `threadId`（第 1 页可以按 `live` 也可以按
 /// 会话 id 订，推送时用它订的那个）。
@@ -311,7 +312,7 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         return Ok(json!({
             "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID),
             "messages": archived_messages(&item),
-            "events": []
+            "events": replayed_events(&id, &item)
         }));
     }
     // 别的目录下的会话：从跨目录名册读。
@@ -319,12 +320,28 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         .into_iter()
         .find(|e| e.id == id)
         .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
-    let events = fresh_roster(gateway).transcript(&entry.id, &entry.cwd);
+    let archived = fresh_roster(gateway).session(&entry.id, &entry.cwd);
+    let (messages, events) = match &archived {
+        Some(item) => (messages_of(&item.events, &id), replayed_events(&id, item)),
+        None => (Vec::new(), Vec::new()),
+    };
     Ok(json!({
         "thread": roster_summary(&entry),
-        "messages": messages_of(&events, &id),
-        "events": []
+        "messages": messages,
+        "events": events
     }))
+}
+
+/// 关着的会话：落盘事件按真实时间回放成和开着的页同一种 `events`，客户端只要
+/// 一条路径。用一份临时投影（自带 broadcast），不碰任何页、不推给订阅者。
+fn replayed_events(id: &str, item: &ArchivedSession) -> Vec<Value> {
+    let mut t = Transcript::new();
+    t.set_thread_id(id);
+    t.replay(&item.events, &item.times, &[]);
+    t.history_since(0)
+        .into_iter()
+        .map(|e| e.as_history_item_as(id))
+        .collect()
 }
 
 pub fn subscribe(

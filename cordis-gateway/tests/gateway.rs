@@ -1308,10 +1308,37 @@ async fn threads_open_run_close_and_reopen_per_page() {
         "第 1 页关不掉：{live_close}"
     );
 
+    // 关着的会话也回放成事件（以前只有纯文本 messages），每轮都收了尾。
+    let methods = |h: &Value| -> Vec<String> {
+        h["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["method"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+    let closed_history = rpc.call("thread/history", json!({ "threadId": id })).await;
+    let closed_methods = methods(&closed_history);
+    assert!(
+        closed_methods.iter().any(|m| m == "item/user_message"),
+        "{closed_history}"
+    );
+    assert_eq!(
+        closed_methods.last().map(String::as_str),
+        Some("turn/completed"),
+        "{closed_methods:?}"
+    );
+
     let reopened = rpc.call("thread/open", json!({ "threadId": id })).await;
     assert_eq!(reopened["result"]["thread"]["id"], json!(id), "{reopened}");
     let history = rpc.call("thread/history", json!({ "threadId": id })).await;
     assert!(history.to_string().contains("A 页的话"), "{history}");
+    // 重开时按落盘重建投影：最后一轮不能挂着（以前只有 turn/started）。
+    assert_eq!(
+        methods(&history).last().map(String::as_str),
+        Some("turn/completed"),
+        "{history}"
+    );
 
     let workspaces = rpc.call("workspace/list", json!({ "scope": "all" })).await;
     assert!(

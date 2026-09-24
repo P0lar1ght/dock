@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use cordis::{plugin, Inject, Plugin};
 
 use crate::names::ROSTER;
+use crate::session::log::ArchivedSession;
 use crate::session::persist::{self, RosterEntry};
 
 /// 两次磁盘扫描之间的最短间隔。
@@ -34,7 +35,7 @@ struct Memo {
 pub struct Roster {
     memo: Mutex<Option<Memo>>,
     /// 最近读过的那一份 transcript（id → events）。见 [`Roster::transcript`]。
-    transcript_memo: Mutex<Option<(String, Vec<cordis_base::types::LogEvent>)>>,
+    transcript_memo: Mutex<Option<(String, Option<ArchivedSession>)>>,
 }
 
 impl Default for Roster {
@@ -80,19 +81,23 @@ impl Roster {
     /// 缓存不设 TTL——历史会话的 transcript 不会再变（还在写的那个是活的分页，
     /// 走的是内存里的 `Sessions`，不到这里来）。
     pub fn transcript(&self, id: &str, cwd: &std::path::Path) -> Vec<cordis_base::types::LogEvent> {
+        self.session(id, cwd).map(|s| s.events).unwrap_or_default()
+    }
+
+    /// 同 [`transcript`](Self::transcript)，但整个会话（带每条事件的落盘时间），
+    /// 给要按真实时间回放的调用方（网关的 `thread/history`）。共用同一格缓存。
+    pub fn session(&self, id: &str, cwd: &std::path::Path) -> Option<ArchivedSession> {
         {
             let cached = self.transcript_memo.lock().unwrap();
-            if let Some((cached_id, events)) = cached.as_ref() {
+            if let Some((cached_id, session)) = cached.as_ref() {
                 if cached_id == id {
-                    return events.clone();
+                    return session.clone();
                 }
             }
         }
-        let events = persist::load_session(id, cwd)
-            .map(|s| s.events)
-            .unwrap_or_default();
-        *self.transcript_memo.lock().unwrap() = Some((id.to_string(), events.clone()));
-        events
+        let session = persist::load_session(id, cwd);
+        *self.transcript_memo.lock().unwrap() = Some((id.to_string(), session.clone()));
+        session
     }
 
     /// 从磁盘删掉一个会话，并让备忘失效。
