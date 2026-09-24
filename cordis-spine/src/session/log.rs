@@ -42,11 +42,11 @@ pub struct ArchivedSession {
 
 /// 这条事件进不进模型上下文。
 ///
-/// [`LogEvent::Notice`] 是**只给用户看**的：滚动区渲染成卡片，但它既不该占上下
-/// 文，也不该让模型觉得需要回应。这是唯一被滤掉的一类——[`Sessions::model_history`]
-/// 是采样看到的全部，漏在这里就等于漏进模型。
+/// [`LogEvent::Notice`] 和 [`LogEvent::TurnEnd`] 是**只给用户看**的：滚动区 / GUI
+/// 拿来渲染，但它们既不该占上下文，也不该让模型觉得需要回应。只滤这两类——
+/// [`Sessions::model_history`] 是采样看到的全部，漏在这里就等于漏进模型。
 fn model_visible(event: &LogEvent) -> bool {
-    !matches!(event, LogEvent::Notice { .. })
+    !matches!(event, LogEvent::Notice { .. } | LogEvent::TurnEnd(_))
 }
 
 /// Session log. DSH `ctx.sessions`; Grok conversation folders on disk after
@@ -149,15 +149,7 @@ fn estimated_cost_ticks(wire_model: &str, usage: &cordis_base::usage::TokenUsage
     ))
 }
 
-/// 一轮是怎么结束的。网关投影成 `turn/completed` 的 `status`（失败时带 `error`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TurnEndStatus {
-    Completed,
-    /// 用户停止（`Error::Cancelled`）。
-    Cancelled,
-    /// 其它错误：模型请求失败、超步数等。带给用户看的错误文本。
-    Failed(String),
-}
+pub use cordis_base::types::TurnEndStatus;
 
 /// [`SESSION_TURN_END`] 的载荷：哪一页的一轮结束了、怎么结束的。
 #[derive(Clone, Debug)]
@@ -607,9 +599,28 @@ impl Sessions {
     }
 
     /// 这一页的一轮跑完了。[`crate::LoopHandle`] 的每个入口结束时调一次。
+    ///
+    /// 记一条 [`LogEvent::TurnEnd`]（随会话落盘，关着的会话回放靠它），再发
+    /// [`SESSION_TURN_END`]。模型请求失败不是 `Err`（错误在 `LlmOutput.error`
+    /// 里，循环照常收尾），所以 `Completed` 而本轮最后一次采样带错误时记成失败。
+    /// 撤回了这一轮（`rewind_inflight_user`）时只推事件不落盘：那一轮已经不在
+    /// 记录里了。
     pub fn end_turn(&self, status: TurnEndStatus) {
         if !self.emit {
             return;
+        }
+        let status = match status {
+            TurnEndStatus::Completed => match self.last_sample_error() {
+                Some(error) => TurnEndStatus::Failed(error),
+                None => TurnEndStatus::Completed,
+            },
+            other => other,
+        };
+        let event = LogEvent::TurnEnd(status.clone());
+        if self.rewound.load(Ordering::Relaxed) {
+            self.emit_session(event);
+        } else {
+            self.append(event);
         }
         self.ctx.emit(
             SESSION_TURN_END,
@@ -618,6 +629,20 @@ impl Sessions {
                 status,
             },
         );
+    }
+
+    /// 本轮（最后一条用户消息之后）最后一次采样的错误。
+    fn last_sample_error(&self) -> Option<String> {
+        let events = self.events.lock().unwrap();
+        events
+            .iter()
+            .rev()
+            .take_while(|e| !matches!(e, LogEvent::User(_) | LogEvent::TurnEnd(_)))
+            .find_map(|e| match e {
+                LogEvent::LlmStream(out) => Some(out.error.clone()),
+                _ => None,
+            })
+            .flatten()
     }
 
     fn emit_session(&self, event: LogEvent) {
@@ -1439,10 +1464,12 @@ fn inflight_has_output(tail: &[LogEvent]) -> bool {
         LogEvent::LlmStream(out) => {
             !out.text.is_empty() || !out.reasoning.is_empty() || !out.tool_calls.is_empty()
         }
-        // Notice 只是给用户看的卡片，不算"这一轮产出过东西"。
-        LogEvent::User(_) | LogEvent::PreStep | LogEvent::Prompt(_) | LogEvent::Notice { .. } => {
-            false
-        }
+        // Notice / TurnEnd 只是给用户看的，不算"这一轮产出过东西"。
+        LogEvent::User(_)
+        | LogEvent::PreStep
+        | LogEvent::Prompt(_)
+        | LogEvent::Notice { .. }
+        | LogEvent::TurnEnd(_) => false,
     })
 }
 
@@ -2009,6 +2036,85 @@ mod tests {
         assert_eq!(pages, ["main#2", "main"]);
         assert!(matches!(&tagged[0].1, LogEvent::User(t) if t == "二"));
         assert_eq!(plain.lock().unwrap().len(), 2, "老事件照发、载荷不变");
+    }
+
+    /// 一轮结束记进会话（随它落盘），但不进模型历史。模型请求失败不是 `Err`，
+    /// 循环照常收尾成 Completed——以本轮最后一次采样为准改记成失败；上一轮的
+    /// 错误不沿用。
+    #[tokio::test]
+    async fn end_turn_records_the_outcome_and_folds_in_sampling_errors() {
+        let sessions = Sessions::tab(Context::new().isolate("sessions"), 1);
+        let turn_ends = |s: &Sessions| {
+            s.events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    LogEvent::TurnEnd(status) => Some(status),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            error: Some("HTTP 404 model not found".into()),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        sessions.end_turn(TurnEndStatus::Completed);
+        sessions.append(LogEvent::User("again".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            error: Some("transient".into()),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "ok".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        sessions.end_turn(TurnEndStatus::Completed);
+        sessions.append(LogEvent::User("stop".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "partial".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        sessions.end_turn(TurnEndStatus::Cancelled);
+
+        assert_eq!(
+            turn_ends(&sessions),
+            [
+                TurnEndStatus::Failed("HTTP 404 model not found".into()),
+                TurnEndStatus::Completed,
+                TurnEndStatus::Cancelled,
+            ]
+        );
+        assert!(
+            !sessions
+                .model_history()
+                .iter()
+                .any(|e| matches!(e, LogEvent::TurnEnd(_))),
+            "TurnEnd 进了模型历史"
+        );
+    }
+
+    /// 撤回了还没产出的一轮（Esc 取消把消息退回输入框）：那一轮已经不在记录里，
+    /// 结束只推给界面，不落一条没有对应轮次的 TurnEnd。
+    #[tokio::test]
+    async fn end_turn_after_rewind_is_announced_but_not_recorded() {
+        let root = Context::new();
+        let seen = Arc::new(Mutex::new(Vec::<TurnEndStatus>::new()));
+        let _sub = {
+            let seen = seen.clone();
+            root.on(SESSION_PAGE_EVENT, move |e: &PageLogEvent| {
+                if let LogEvent::TurnEnd(status) = &*e.event {
+                    seen.lock().unwrap().push(status.clone());
+                }
+            })
+            .unwrap()
+        };
+        let sessions = Sessions::tab(root.isolate("sessions"), 1);
+        sessions.append(LogEvent::User("oops".into()));
+        assert!(sessions.rewind_inflight_user().is_some());
+        sessions.end_turn(TurnEndStatus::Cancelled);
+
+        assert!(sessions.events().is_empty(), "{:?}", sessions.events());
+        assert_eq!(*seen.lock().unwrap(), [TurnEndStatus::Cancelled]);
     }
 
     /// 回归：流式中途的用量更新以前发一条**空的** `LlmStream`，按页投影的网关

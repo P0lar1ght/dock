@@ -69,7 +69,8 @@ async fn one_round_writes_log_in_order() {
             "prompt",
             "llm/stream",
             "tools/execute",
-            "llm/stream"
+            "llm/stream",
+            "turn-end"
         ]
     );
 

@@ -86,8 +86,9 @@ struct Projector {
     seen_tools: HashSet<String>,
     pending_tools: HashSet<String>,
     turn_open: bool,
-    /// 这一轮最后一次采样的 `LlmOutput::error`。模型请求失败不会让循环返回
-    /// `Err`，只能从这里知道，收尾时把 completed 改报 failed。
+    /// 这一轮最后一次采样的 `LlmOutput::error`。只给没有 `turn-end` 行的旧会话
+    /// 回放用（[`Transcript::close_legacy_turn`]）；新记录里 Dock 已经把它算进
+    /// `TurnEnd` 的状态了。
     sample_error: Option<String>,
     perm_id: Option<String>,
     ask_id: Option<String>,
@@ -164,9 +165,10 @@ impl Transcript {
     }
 
     /// 从落盘事件重建投影：重开会话（`reset_from_sessions`）和看关着的会话
-    /// （`thread/history`）走同一条路。时间戳用落盘时间；落盘里没有
-    /// `session/turn-end`，所以每轮在下一条用户消息前、以及末尾按它最后一条事件
-    /// 的时间收尾——重建只发生在页空闲时（`thread/start` / restore 之后、关着的会话）。
+    /// （`thread/history`）走同一条路。时间戳用落盘时间；每轮按落盘的
+    /// [`LogEvent::TurnEnd`] 收尾。更早的会话没有这一行，就在下一条用户消息前、
+    /// 以及末尾按它最后一条事件的时间补一个（[`Self::close_legacy_turn`]）——重建
+    /// 只发生在页空闲时（`thread/start` / restore 之后、关着的会话）。
     pub fn replay(&mut self, events: &[LogEvent], times: &[SystemTime], images: &[Vec<UserImage>]) {
         self.events.clear();
         self.projector = Projector::default();
@@ -175,7 +177,7 @@ impl Transcript {
         for (i, event) in events.iter().enumerate() {
             if matches!(event, LogEvent::User(_)) && i > 0 {
                 self.clock = ms(i - 1);
-                self.turn_ended(&TurnEndStatus::Completed);
+                self.close_legacy_turn();
             }
             self.clock = ms(i);
             let attachments = if matches!(event, LogEvent::User(_)) {
@@ -188,7 +190,7 @@ impl Transcript {
             self.ingest_log_with(event.clone(), &attachments);
         }
         self.clock = events.len().checked_sub(1).and_then(ms);
-        self.turn_ended(&TurnEndStatus::Completed);
+        self.close_legacy_turn();
         self.clock = None;
     }
 
@@ -291,6 +293,7 @@ impl Transcript {
                     }),
                 );
             }
+            LogEvent::TurnEnd(status) => self.turn_ended(&status),
             // Notice 只给 TUI 用户看，不进 dock.1 投影，也不该变成一条聊天消息。
             LogEvent::PreStep
             | LogEvent::Prompt(_)
@@ -512,23 +515,31 @@ impl Transcript {
         self.push("turn/started", json!({ "status": "running" }));
     }
 
-    /// 这一页的 `LoopHandle` 跑完一轮（`session/turn-end`）。`status` 是
-    /// completed / cancelled / failed；失败带 `error`，否则客户端只见一轮空结束。
+    /// 一轮结束（[`LogEvent::TurnEnd`]，实时和回放同一条路）。`status` 是
+    /// completed / cancelled / failed，照 Dock 记的报；失败带 `error`，否则客户端
+    /// 只见一轮空结束。
     pub fn turn_ended(&mut self, status: &TurnEndStatus) {
-        let sample_error = self.projector.sample_error.take();
+        self.projector.sample_error = None;
         if !self.projector.turn_open {
             return;
         }
         self.projector.turn_open = false;
         let payload = match status {
-            TurnEndStatus::Completed => match sample_error {
-                Some(error) => json!({ "status": "failed", "error": error }),
-                None => json!({ "status": "completed" }),
-            },
+            TurnEndStatus::Completed => json!({ "status": "completed" }),
             TurnEndStatus::Cancelled => json!({ "status": "cancelled" }),
             TurnEndStatus::Failed(error) => json!({ "status": "failed", "error": error }),
         };
         self.push("turn/completed", payload);
+    }
+
+    /// 旧会话没有 `turn-end` 行：按当时的规则补一个——最后一次采样带错误算失败，
+    /// 否则算完成（停止在旧记录里看不出来）。这一轮已经收尾时什么都不做。
+    fn close_legacy_turn(&mut self) {
+        let status = match self.projector.sample_error.clone() {
+            Some(error) => TurnEndStatus::Failed(error),
+            None => TurnEndStatus::Completed,
+        };
+        self.turn_ended(&status);
     }
 
     fn complete_turn_if_open(&mut self) {
@@ -864,41 +875,51 @@ mod tests {
         assert!(ends[1].get("error").is_none(), "{:?}", ends[1]);
     }
 
-    /// 回归：模型请求失败不是 `Err`，而是写在 `LlmOutput::error` 里（不进 `text`，
-    /// 免得回放给模型），循环照常收尾成 Ok —— 所以网关要自己记住这一轮最后一次
-    /// 采样的错误，否则客户端看到的是「completed、没有任何回复」。
+    /// 回放照落盘的 `turn-end` 报每一轮的结果（停止、出错带原文，用它的时间），
+    /// 不再一律补成完成；只有更早、没有这一行的会话才按旧规则补（最后一次采样
+    /// 带错误算失败）。
     #[test]
-    fn sampling_error_turns_a_completed_turn_into_failed() {
+    fn replay_reports_recorded_turn_ends_and_falls_back_for_old_rows() {
+        let at = |s: u64| UNIX_EPOCH + std::time::Duration::from_secs(s);
+        let events = vec![
+            LogEvent::User("a".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "partial".into(),
+                ..Default::default()
+            }),
+            LogEvent::TurnEnd(TurnEndStatus::Cancelled),
+            LogEvent::User("b".into()),
+            LogEvent::TurnEnd(TurnEndStatus::Failed("HTTP 404".into())),
+            // 旧会话接着往下聊：这一轮没有 turn-end。
+            LogEvent::User("c".into()),
+            LogEvent::LlmStream(LlmOutput {
+                error: Some("HTTP 500".into()),
+                ..Default::default()
+            }),
+        ];
+        let times = vec![
+            at(100),
+            at(110),
+            at(133),
+            at(200),
+            at(201),
+            at(300),
+            at(302),
+        ];
         let mut t = Transcript::new();
-        t.ingest_log(LogEvent::User("hi".into()));
-        t.ingest_log(LogEvent::LlmStream(LlmOutput {
-            error: Some("llm request failed: HTTP 404 model not found".into()),
-            ..Default::default()
-        }));
-        t.turn_ended(&TurnEndStatus::Completed);
-        // 下一轮先失败后重试成功：以最后一次采样为准，不沿用上一轮的错误。
-        t.ingest_log(LogEvent::User("again".into()));
-        t.ingest_log(LogEvent::LlmStream(LlmOutput {
-            error: Some("transient".into()),
-            ..Default::default()
-        }));
-        t.ingest_log(LogEvent::LlmStream(LlmOutput {
-            text: "ok".into(),
-            ..Default::default()
-        }));
-        t.turn_ended(&TurnEndStatus::Completed);
+        t.replay(&events, &times, &[]);
         let ends: Vec<_> = t
             .history_since(0)
             .into_iter()
             .filter(|e| e.method == "turn/completed")
-            .map(|e| e.payload)
             .collect();
-        assert_eq!(ends[0]["status"], "failed");
-        assert_eq!(
-            ends[0]["error"],
-            "llm request failed: HTTP 404 model not found"
-        );
-        assert_eq!(ends[1]["status"], "completed", "{:?}", ends[1]);
+        assert_eq!(ends.len(), 3, "{:?}", methods(&t));
+        assert_eq!(ends[0].payload["status"], "cancelled");
+        assert_eq!(ends[0].timestamp, "133000", "用 turn-end 自己的时间");
+        assert_eq!(ends[1].payload["status"], "failed");
+        assert_eq!(ends[1].payload["error"], "HTTP 404");
+        assert_eq!(ends[2].payload["status"], "failed");
+        assert_eq!(ends[2].payload["error"], "HTTP 500");
     }
 
     /// 回归：`item/tool_completed` 以前恒为 completed，客户端只能按输出猜失败。

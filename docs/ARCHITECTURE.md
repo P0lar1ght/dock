@@ -102,9 +102,12 @@ cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的�
 是哪一页发的；要按页区分的监听者订 `session/page-event`（`PageLogEvent { page, event }`，
 每条会话事件和老事件一起发、共用同一个 `LogEvent`）——网关的 `live` 线程就只收
 `page == "main"`，否则别的页说的话会混进浏览器那一侧。流式事件分不出哪段是最后一段，
-一轮何时结束看 `session/turn-end`（`PageTurnEnd { page, status }`，`LoopHandle` 每个入口结束时
-发，成功 / 出错 / 取消都算，`TurnEndStatus` 说是哪种、出错带文本）；网关的 `turn/completed`
-只由它触发，一轮一次，`status` 随之是 completed / cancelled / failed（failed 带 `error`）。
+一轮何时结束由 `LoopHandle` 每个入口结束时调的 `Sessions::end_turn` 说：成功 / 出错 / 取消都算，
+记一条 `LogEvent::TurnEnd(TurnEndStatus)`（随会话落盘成 `turn-end` 行，出错带文本；模型请求
+失败不是 `Err`，本轮最后一次采样带错误时也记成失败），再发 `session/turn-end`
+（`PageTurnEnd { page, status }`）。它和 `Notice` 一样只给用户看，不进模型历史。网关的
+`turn/completed` 只由这条事件触发，实时和回放同一条路，一轮一次，`status` 随之是
+completed / cancelled / failed（failed 带 `error`）；更早的会话没有这一行，回放时按旧规则补。
 
 装一页要挂哪些插件由**组合根**决定（`cordis-app` 的 `tab_mount()`），TUI 只管开 /
 关 / 切：`"tui.tabs"` 拿到的是一个建页插件工厂。关页 `dispose` 那一颗页 fiber，
