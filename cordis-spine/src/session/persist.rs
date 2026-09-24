@@ -249,6 +249,8 @@ pub struct RosterEntry {
     pub updated: SystemTime,
     /// 末条事件的一行摘要，读不出来就是空串。
     pub summary: String,
+    /// 落盘时生效的 Agent 预设（`meta.json` 的 `preset_id`）；老会话没有。
+    pub preset_id: Option<String>,
 }
 
 /// 只在 jsonl 尾部读这么多字节找最后一行。一条 `chat_history.jsonl` 可以有几
@@ -327,6 +329,7 @@ fn roster_entry(dir: &Path) -> Option<RosterEntry> {
         cwd,
         updated,
         summary: last.map(|l| wire_summary(&l.event)).unwrap_or_default(),
+        preset_id: meta.and_then(|m| m.preset_id),
     })
 }
 

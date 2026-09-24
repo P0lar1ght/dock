@@ -44,6 +44,7 @@ fn list_all(gateway: &GatewayHandle) -> Result<Value, RpcError> {
         item["id"] = json!(id);
         item["cwd"] = json!(session_cwd(&page.ctx).display().to_string());
         item["open"] = json!(true);
+        item["presetId"] = page_preset(&page);
         if page.is_root() {
             item["alias"] = json!(LIVE_THREAD_ID);
         }
@@ -174,11 +175,37 @@ pub fn restore(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
     }))
 }
 
-/// `thread/start { cwd, title? }`：在 `cwd` 另开一页（不动第 1 页、不切终端里
-/// 正在看的页），回它的会话 id。
+/// `thread/start { cwd, title?, presetId? }`：在 `cwd` 另开一页（不动第 1 页、不切
+/// 终端里正在看的页），回它的会话 id。预设在创建时定下：给了 `presetId` 就只在这一
+/// 页切过去并记进这份会话的 `meta.json`（不改全局默认）；不给就沿用新页继承来的。
 pub async fn start_at(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let cwd = PathBuf::from(text(&params, "cwd")?);
+    let preset = params
+        .get("presetId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    // 先验再开页：预设不存在就别留下一个空页。
+    if let Some(id) = preset {
+        let presets = gateway
+            .ctx()
+            .get::<AgentPresets>(AGENT_PRESETS)
+            .ok_or_else(|| RpcError::app("unavailable", "预设服务没有挂载"))?;
+        if presets.get(id).is_none() {
+            return Err(RpcError::invalid_params(format!("没有预设 {id}")));
+        }
+    }
     let page = open_page(gateway, &cwd, None).await?;
+    if let Some(id) = preset {
+        if let Err(e) = apply_page_preset(&page, id) {
+            // 开出来了但切不过去（预设坏了）：把这页关掉，不留半成品。
+            if let Ok(tabs) = tabs(gateway) {
+                let _ = tabs.close_session(&page.session_id()).await;
+            }
+            gateway.drop_page(&page.identity);
+            return Err(RpcError::invalid_params(e));
+        }
+    }
     if let Some(title) = params.get("title").and_then(Value::as_str) {
         page.sessions()?.set_live_title(title);
     }
@@ -186,7 +213,8 @@ pub async fn start_at(gateway: &GatewayHandle, params: Value) -> Result<Value, R
 }
 
 /// `thread/open { threadId }`：把一份落盘会话开成一页（在它自己的 cwd 下），已经
-/// 开着就回那一页。之后 `turn/start` 等都用这个 `threadId`。
+/// 开着就回那一页。之后 `turn/start` 等都用这个 `threadId`。预设跟着会话走：
+/// 这一页切回它 `meta.json` 记的那个（老会话没记就沿用新页继承的）。
 pub async fn open(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = text(&params, "threadId")?;
     if let Ok(page) = threads::resolve(gateway, &id) {
@@ -197,6 +225,12 @@ pub async fn open(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
         .find(|e| e.id == id)
         .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
     let page = open_page(gateway, &entry.cwd, Some(&id)).await?;
+    if let Some(preset) = entry.preset_id.as_deref() {
+        // fail-open，和 `/resume` 一样：预设没了 / 坏了就用继承来的，只记一笔。
+        if let Err(e) = apply_page_preset(&page, preset) {
+            eprintln!("dock: thread/open preset `{preset}` not applied: {e}");
+        }
+    }
     Ok(json!({ "thread": open_summary(&page)? }))
 }
 
@@ -214,6 +248,18 @@ pub async fn close(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcE
         .map_err(|e| RpcError::app("close_failed", e))?;
     gateway.drop_page(&page.identity);
     Ok(json!({ "ok": true, "threadId": id }))
+}
+
+fn apply_page_preset(page: &Page, id: &str) -> Result<(), String> {
+    let presets = page
+        .ctx
+        .get::<AgentPresets>(AGENT_PRESETS)
+        .ok_or_else(|| "预设服务没有挂载".to_string())?;
+    let applied = presets.pin(id)?;
+    if let Ok(sessions) = page.sessions() {
+        sessions.set_preset_id(Some(applied.id));
+    }
+    Ok(())
 }
 
 async fn open_page(
@@ -359,6 +405,7 @@ fn roster_summary(entry: &RosterEntry) -> Value {
         "title": entry.title,
         "workspaceId": protocol::DEFAULT_WORKSPACE_ID,
         "cwd": entry.cwd.display().to_string(),
+        "presetId": entry.preset_id,
         "open": false,
         "createdAt": 0,
         "updatedAt": updated,
@@ -372,7 +419,16 @@ fn open_summary(page: &Page) -> Result<Value, RpcError> {
     item["id"] = json!(page.thread_id());
     item["cwd"] = json!(session_cwd(&page.ctx).display().to_string());
     item["open"] = json!(true);
+    item["presetId"] = page_preset(page);
     Ok(item)
+}
+
+/// 开着的页当前用的预设（预设按页，见 `AgentPresets::fork`）。没挂预设服务是 `null`。
+fn page_preset(page: &Page) -> Value {
+    page.ctx
+        .get::<AgentPresets>(AGENT_PRESETS)
+        .map(|p| json!(p.current_id()))
+        .unwrap_or(Value::Null)
 }
 
 fn live_sessions(gateway: &GatewayHandle) -> Result<std::sync::Arc<Sessions>, RpcError> {

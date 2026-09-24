@@ -181,6 +181,26 @@ mod tests {
         assert_eq!(row.cwd, cwd);
     }
 
+    /// 名册带出落盘时的预设：GUI 左侧按「预设 → 项目 → 会话」分组靠它。老会话
+    /// 没有这个字段，读出来是 `None`。
+    #[test]
+    fn roster_carries_the_archived_preset() {
+        let _env = cordis_base::test_env::scoped().home();
+        let mut stamped = archive("ddd", "守望", vec![LogEvent::User("x".into())]);
+        stamped.preset_id = Some("warden".into());
+        persist::save(&stamped, Path::new("/tmp/preset-one")).unwrap();
+        persist::save(
+            &archive("eee", "老会话", vec![LogEvent::User("y".into())]),
+            Path::new("/tmp/preset-two"),
+        )
+        .unwrap();
+
+        let rows = Roster::new().list();
+        let preset = |id: &str| rows.iter().find(|r| r.id == id).unwrap().preset_id.clone();
+        assert_eq!(preset("ddd").as_deref(), Some("warden"));
+        assert_eq!(preset("eee"), None);
+    }
+
     /// 摘要取**末条**事件，且压成一行——名册每条只占一行，换行会撑破它。
     #[test]
     fn summary_is_the_last_event_on_one_line() {

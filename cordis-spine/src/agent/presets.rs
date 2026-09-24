@@ -397,6 +397,20 @@ impl AgentPresets {
         Ok(preset)
     }
 
+    /// 只切这一份（按页 fork 出来的）预设，**不写** `roster.yml`：会话的预设在
+    /// 创建时定下、跟着会话走，不该顺手改掉下次启动的默认。
+    pub fn pin(&self, id: &str) -> Result<AgentPreset, String> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(preset) = inner.presets.get(id).cloned() else {
+            return Err(format!("没有预设 {id}"));
+        };
+        if let Some(reason) = &preset.broken {
+            return Err(reason.clone());
+        }
+        inner.current = id.to_string();
+        Ok(preset)
+    }
+
     pub fn create(&self) -> Result<AgentPreset, String> {
         let mut inner = self.inner.lock().unwrap();
         let id = mint_id(&inner.presets);
@@ -1801,6 +1815,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `pin` 只切这一份，不写 `roster.yml`：重新加载还是原来的默认。
+    #[test]
+    fn pin_does_not_touch_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AgentPresets::load(dir.path().to_path_buf());
+        root.apply(CORDIS_PRESET_ID).unwrap();
+        let page = root.fork();
+        page.pin(WARDEN_PRESET_ID).unwrap();
+        assert_eq!(page.current_id(), WARDEN_PRESET_ID);
+        assert_eq!(root.current_id(), CORDIS_PRESET_ID);
+        let reloaded = AgentPresets::load(dir.path().to_path_buf());
+        assert_eq!(reloaded.current_id(), CORDIS_PRESET_ID, "默认不该被改");
+        assert!(page.pin("no-such").is_err());
+        assert_eq!(page.current_id(), WARDEN_PRESET_ID);
     }
 
     /// 回归：分页各持一份预设。第 2 页切预设、`/cd` 换项目层，都不能改到

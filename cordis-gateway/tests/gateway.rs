@@ -11,10 +11,11 @@ use cordis_gateway::{
     PROTOCOL_VERSION,
 };
 use cordis_spine::{
-    agent_loop, install_fakes, mcp_client, permissions, plan_mode, settings, slash, tool_ask_user,
-    tool_goal, turn, AppSettings, ExtraSlashKind, Goal, LogEvent, LoopHandle, PermissionOptionKind,
-    Permissions, PlanMode, Sessions, Slash, SlashEntry, TurnControl, AGENT_LOOP, GOAL, PERMISSIONS,
-    PLAN_MODE, SESSIONS, SETTINGS, SLASH, TURN,
+    agent_loop, agent_presets, install_fakes, mcp_client, permissions, plan_mode, settings, slash,
+    tool_ask_user, tool_goal, turn, AgentPresets, AppSettings, ExtraSlashKind, Goal, LogEvent,
+    LoopHandle, PermissionOptionKind, Permissions, PlanMode, Sessions, Slash, SlashEntry,
+    TurnControl, AGENT_LOOP, AGENT_PRESETS, GOAL, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
+    SLASH, TURN,
 };
 use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use futures_util::{SinkExt, StreamExt};
@@ -111,7 +112,18 @@ fn test_page_mount() -> cordis_tui::TabMount {
             move |ctx, _: &()| async move {
                 let sessions = Sessions::tab(ctx.clone(), index);
                 sessions.attach_disk();
+                // 预设按页：和 `cordis-app` 的 `tab.presets` 一样从上层 fork 一份。
+                let presets = ctx
+                    .get::<cordis_tui::Tabs>(cordis_tui::TUI_TABS)
+                    .and_then(|tabs| tabs.active_ctx().get::<AgentPresets>(AGENT_PRESETS))
+                    .map(|p| p.fork());
+                if let Some(presets) = &presets {
+                    sessions.seed_preset_if_unset(&presets.current_id());
+                }
                 let _ = ctx.provide(SESSIONS, sessions)?;
+                if let Some(presets) = presets {
+                    let _ = ctx.provide(AGENT_PRESETS, presets)?;
+                }
                 ctx.plugin(settings(), ())?.wait().await?;
                 ctx.plugin(permissions(), ())?.wait().await?;
                 ctx.plugin(turn(), ())?.wait().await?;
@@ -171,6 +183,11 @@ impl Harness {
     /// 带分页服务：网关能按线程开页（`thread/open` / `thread/start {cwd}`）。
     async fn boot_with_pages() -> Self {
         let root = harness_root().await;
+        root.plugin(agent_presets(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
         root.plugin(cordis_tui::tabs(), test_page_mount())
             .unwrap()
             .wait()
@@ -1295,4 +1312,106 @@ async fn threads_open_run_close_and_reopen_per_page() {
         workspaces.to_string().contains(&dir.display().to_string()),
         "{workspaces}"
     );
+}
+
+/// `thread/start { presetId }` 只在新页切预设（第 1 页不动），列表里带出来；关页
+/// 后从磁盘名册读回来的也是它。不存在的预设直接拒，不留空页。
+#[tokio::test]
+async fn thread_start_with_preset_is_per_page_and_listed() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    rpc.call("initialize", json!({})).await;
+    let root_preset = h
+        .ctx
+        .require::<AgentPresets>(AGENT_PRESETS)
+        .unwrap()
+        .current_id();
+    let other = if root_preset == "warden" {
+        "minimal"
+    } else {
+        "warden"
+    };
+
+    let dir = project_dir("preset");
+    let started = rpc
+        .call(
+            "thread/start",
+            json!({ "cwd": dir.display().to_string(), "presetId": other }),
+        )
+        .await;
+    let thread = &started["result"]["thread"];
+    assert_eq!(thread["presetId"], other, "{started}");
+    let id = thread["id"].as_str().unwrap().to_string();
+
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let threads = listed["result"]["threads"].as_array().unwrap().clone();
+    let find = |key: &str, val: &str| {
+        threads
+            .iter()
+            .find(|t| t[key] == val)
+            .unwrap_or_else(|| panic!("{listed}"))
+            .clone()
+    };
+    assert_eq!(find("id", &id)["presetId"], other);
+    assert_eq!(
+        find("alias", "live")["presetId"],
+        json!(root_preset),
+        "第 1 页不动"
+    );
+
+    // 跑一轮让它落盘，关掉后名册里读回预设。
+    rpc.call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    rpc.call("turn/start", json!({ "threadId": id, "message": "预设页" }))
+        .await;
+    rpc.wait_notification("item/user_message", Duration::from_secs(5))
+        .await;
+    rpc.call("thread/close", json!({ "threadId": id })).await;
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let closed = listed["result"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(id))
+        .cloned()
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(closed["open"], false, "{closed}");
+    assert_eq!(closed["presetId"], other, "{closed}");
+
+    // 预设跟着会话走：重新打开，这一页用的还是创建时选的，不是开它的那一页的。
+    let reopened = rpc.call("thread/open", json!({ "threadId": id })).await;
+    assert_eq!(
+        reopened["result"]["thread"]["presetId"], other,
+        "{reopened}"
+    );
+    rpc.call("thread/close", json!({ "threadId": id })).await;
+
+    // 给新会话选预设不改全局默认：下次启动 / 新开的页仍是原来的。
+    let roster_yml = std::fs::read_to_string(
+        std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap())
+            .join("presets")
+            .join("roster.yml"),
+    )
+    .unwrap_or_default();
+    assert!(!roster_yml.contains(other), "默认预设被改了：{roster_yml}");
+
+    let before = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let bad = rpc
+        .call(
+            "thread/start",
+            json!({ "cwd": dir.display().to_string(), "presetId": "no-such-preset" }),
+        )
+        .await;
+    assert!(bad.get("error").is_some(), "{bad}");
+    let after = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let open = |v: &Value| {
+        v["result"]["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["open"] == true)
+            .count()
+    };
+    assert_eq!(open(&before), open(&after), "不该留下空页");
 }
