@@ -20,7 +20,10 @@ pub fn steer(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> 
 }
 
 pub fn cancel(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let page = threads::resolve_param(gateway, &params)?;
+    // 关着的页没有在跑的一轮：没什么可停的。
+    let Some(page) = open_or_none(threads::resolve_param(gateway, &params))? else {
+        return Ok(json!({ "cancelled": false }));
+    };
     let port = session_port(&page)?;
     port.cancel();
     Ok(json!({ "cancelled": true }))
@@ -28,7 +31,10 @@ pub fn cancel(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
 
 pub fn queue_list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let thread_id = threads::thread_param(&params);
-    let page = threads::resolve(gateway, &thread_id)?;
+    // 队列跟着页走，关着的页队列是空的。
+    let Some(page) = open_or_none(threads::resolve(gateway, &thread_id))? else {
+        return Ok(json!({ "active": Value::Null, "items": [] }));
+    };
     let port = session_port(&page)?;
     let items: Vec<Value> = port
         .queued_prompts()
@@ -63,14 +69,24 @@ pub fn queue_remove(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
         .and_then(Value::as_str)
         .map(|s| s.to_string());
     let thread_id = threads::thread_param(&params);
-    let page = threads::resolve(gateway, &thread_id)?;
-    let port = session_port(&page)?;
-    let removed = port.take_queued(id.clone()).is_some();
+    let removed = match open_or_none(threads::resolve(gateway, &thread_id))? {
+        Some(page) => session_port(&page)?.take_queued(id.clone()).is_some(),
+        None => false,
+    };
     Ok(json!({
         "threadId": thread_id,
         "queueId": id.unwrap_or_default(),
         "removed": removed
     }))
+}
+
+/// `thread_not_open` → `None`（停止、队列这类方法对关着的页回空结果，不开页）。
+fn open_or_none(page: Result<Page, RpcError>) -> Result<Option<Page>, RpcError> {
+    match page {
+        Ok(page) => Ok(Some(page)),
+        Err(e) if e.details_code == "thread_not_open" => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Value, RpcError> {

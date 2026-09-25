@@ -14,6 +14,9 @@ pub async fn dispatch(
     params: Value,
     subscribed: &mut thread::Subscriptions,
 ) -> Result<Value, RpcError> {
+    if opens_on_demand(method) {
+        thread::open_on_demand(&gateway, &params).await?;
+    }
     match method {
         protocol::WORKSPACE_LIST => connection::workspace_list(&gateway, params),
         protocol::MCP_RELOAD => connection::mcp_reload(&gateway).await,
@@ -67,4 +70,31 @@ pub async fn dispatch(
         protocol::IMAGE_INPUTS_PUT => image_inputs::put(&gateway, params),
         _ => Err(RpcError::method_not_found(method)),
     }
+}
+
+/// 这些线程级方法遇到关着的会话先开页再做（见 `thread::open_on_demand`）。不在里面的：
+/// 停止 / 队列对关着的页回空结果；权限、提问、计划、elicitation 的应答只对开着的页
+/// 有意义（关着的会话没有待处理的请求），仍回 `thread_not_open`。
+fn opens_on_demand(method: &str) -> bool {
+    matches!(
+        method,
+        protocol::THREAD_SUBSCRIBE
+            | protocol::THREAD_ENVIRONMENT_GET
+            | protocol::THREAD_MODEL_SET
+            | protocol::THREAD_MODEL_REFRESH
+            | protocol::THREAD_REASONING_SET
+            | protocol::THREAD_APPROVAL_SET
+            | protocol::THREAD_PLAN_SET
+            | protocol::THREAD_MEMORY_SET
+            | protocol::THREAD_GOAL_SET
+            | protocol::THREAD_GOAL_EDIT
+            | protocol::THREAD_GOAL_PAUSE
+            | protocol::THREAD_GOAL_COMPLETE
+            | protocol::THREAD_GOAL_CLEAR
+            | protocol::THREAD_CONTEXT_COMPACT
+            | protocol::TURN_START
+            | protocol::TURN_ENQUEUE
+            | protocol::TURN_STEER
+            | protocol::SLASH_EXECUTE
+    )
 }

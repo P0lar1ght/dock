@@ -258,21 +258,38 @@ pub async fn start_at(gateway: &GatewayHandle, params: Value) -> Result<Value, R
 /// 这一页切回它 `meta.json` 记的那个（老会话没记就沿用新页继承的）。
 pub async fn open(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = text(&params, "threadId")?;
-    if let Ok(page) = threads::resolve(gateway, &id) {
-        return Ok(json!({ "thread": open_summary(&page)? }));
+    let page = open_thread(gateway, &id).await?;
+    Ok(json!({ "thread": open_summary(&page)? }))
+}
+
+/// 线程级方法按需开页：`threadId` 是关着的落盘会话就先照 `thread/open` 开成一页，
+/// 客户端不用自己先 open。已开着（含 `live`）什么也不做；认不得的 id 回 `not_found`。
+pub async fn open_on_demand(gateway: &GatewayHandle, params: &Value) -> Result<(), RpcError> {
+    let id = threads::thread_param(params);
+    if threads::resolve(gateway, &id).is_err() {
+        open_thread(gateway, &id).await?;
+    }
+    Ok(())
+}
+
+/// 把落盘会话开成一页（在它自己的 cwd 下，预设切回会话记的那个）；已开着就回那一页。
+async fn open_thread(gateway: &GatewayHandle, id: &str) -> Result<Page, RpcError> {
+    let _opening = gateway.lock_opening().await;
+    if let Ok(page) = threads::resolve(gateway, id) {
+        return Ok(page);
     }
     let entry = roster_entries(gateway)
         .into_iter()
         .find(|e| e.id == id)
         .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
-    let page = open_page(gateway, &entry.cwd, Some(&id)).await?;
+    let page = open_page(gateway, &entry.cwd, Some(id)).await?;
     if let Some(preset) = entry.preset_id.as_deref() {
         // fail-open，和 `/resume` 一样：预设没了 / 坏了就用继承来的，只记一笔。
         if let Err(e) = apply_page_preset(&page, preset) {
             eprintln!("dock: thread/open preset `{preset}` not applied: {e}");
         }
     }
-    Ok(json!({ "thread": open_summary(&page)? }))
+    Ok(page)
 }
 
 /// `thread/close { threadId }`：关掉那一页（会话留在磁盘上，随时能再 open）。
