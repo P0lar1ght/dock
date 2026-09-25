@@ -91,13 +91,23 @@ pub fn rename(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             "thread": live_summary(&sessions, protocol::DEFAULT_WORKSPACE_ID)
         }));
     }
-    let item = sessions
-        .rename_archived(&id, &title)
-        .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
-    Ok(json!({
-        "ok": true,
-        "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID)
-    }))
+    if let Some(item) = sessions.rename_archived(&id, &title) {
+        return Ok(json!({
+            "ok": true,
+            "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID)
+        }));
+    }
+    // 不在第 1 页目录的历史里：按名册找（别的目录下的落盘会话）。
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(RpcError::invalid_params("title is required"));
+    }
+    let (roster, mut entry) = roster_entry(gateway, &id)?;
+    roster
+        .rename(&id, &entry.cwd, title)
+        .map_err(|e| RpcError::app("rename_failed", e.to_string()))?;
+    entry.title = title.to_string();
+    Ok(json!({ "ok": true, "thread": roster_summary(&entry) }))
 }
 
 pub fn archive(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
@@ -139,13 +149,17 @@ pub fn delete(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
         ));
     }
     let sessions = live_sessions(gateway)?;
-    let item = sessions
-        .remove_archived(&id)
-        .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
-    Ok(json!({
-        "ok": true,
-        "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID)
-    }))
+    if let Some(item) = sessions.remove_archived(&id) {
+        return Ok(json!({
+            "ok": true,
+            "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID)
+        }));
+    }
+    let (roster, entry) = roster_entry(gateway, &id)?;
+    roster
+        .remove(&id, &entry.cwd)
+        .map_err(|e| RpcError::app("delete_failed", e.to_string()))?;
+    Ok(json!({ "ok": true, "thread": roster_summary(&entry) }))
 }
 
 pub fn restore(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
@@ -395,6 +409,20 @@ fn reject_open_other_page(gateway: &GatewayHandle, id: &str) -> Result<(), RpcEr
 
 /// 跨目录名册，**不用备忘**：名册的 2 秒备忘是给 TUI 每帧重绘挡重扫的，网关的
 /// 请求是一次次的用户操作——刚关掉的页、刚写进去的话都得看得见。
+/// 名册里的一个落盘会话（任意目录），找不到就是 `not_found`。
+fn roster_entry(
+    gateway: &GatewayHandle,
+    id: &str,
+) -> Result<(std::sync::Arc<Roster>, RosterEntry), RpcError> {
+    let roster = fresh_roster(gateway);
+    let entry = roster
+        .list()
+        .into_iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
+    Ok((roster, entry))
+}
+
 fn roster_entries(gateway: &GatewayHandle) -> Vec<RosterEntry> {
     fresh_roster(gateway).list()
 }
