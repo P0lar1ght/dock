@@ -296,6 +296,26 @@ impl Mcp {
         result
     }
 
+    /// 只重连这一台服务器（断开再连、重新列工具），不改配置文件。停用的不连——
+    /// 那要走 [`set_server_enabled`](Self::set_server_enabled)。连不上时状态记下原因。
+    pub async fn reconnect(&self, name: &str) -> Result<(), String> {
+        let config = {
+            let inner = self.inner.lock().unwrap();
+            let slot = inner
+                .slots
+                .iter()
+                .find(|s| s.config.name == name)
+                .ok_or_else(|| format!("没有叫 {name} 的 MCP 服务器"))?;
+            if !slot.config.enabled {
+                return Err(format!("MCP 服务器 {name} 已停用"));
+            }
+            slot.config.clone()
+        };
+        let result = self.connect_slot(&config).await;
+        self.maybe_inject_reminder();
+        result
+    }
+
     pub async fn set_tool_enabled(
         &self,
         server: &str,
@@ -1111,6 +1131,27 @@ startup_timeout_sec = 1
             !model.iter().any(|n| n.starts_with("mcp_")),
             "sampler tools must hide MCP extras: {model:?}"
         );
+    }
+
+    /// 设置页的「重新连接」：只重连这一台，不写配置；认不得、已停用的报错，连不上的
+    /// 状态变成失败并带原因。
+    #[tokio::test]
+    async fn reconnect_one_server_reports_failures() {
+        let (_ctx, mcp, _tools) = boot().await;
+        attach_fake(&mcp, "probe", &[("ping", "ping")]);
+        assert!(mcp.list()[0].ok);
+
+        assert!(mcp.reconnect("nope").await.unwrap_err().contains("nope"));
+
+        // 假服务器的命令是 `true`：一启动就退出，重连必然失败。
+        let err = mcp.reconnect("probe").await.unwrap_err();
+        assert!(!err.is_empty());
+        let status = &mcp.list()[0];
+        assert!(!status.ok, "{status:?}");
+        assert!(!status.detail.is_empty(), "{status:?}");
+
+        mcp.unplug_server("probe").unwrap();
+        assert!(mcp.reconnect("probe").await.unwrap_err().contains("停用"));
     }
 
     #[tokio::test]
