@@ -37,6 +37,9 @@ pub struct GatewayInner {
     pub images: Mutex<ImageInputStore>,
     preferred: SocketAddr,
     listen: Mutex<ListenSlot>,
+    /// 开页（`thread/open` 与按需开页）一次一个：同一个会话同时来两个请求时，
+    /// 第二个等第一个开完直接用那一页，不会开出两页。
+    opening: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -61,10 +64,16 @@ impl GatewayHandle {
                 companion: CompanionStatus::Stopped,
                 shutdown_tx: None,
             }),
+            opening: tokio::sync::Mutex::new(()),
             ctx: ctx.clone(),
         });
         listen_events(&inner);
         Self { inner, scope: None }
+    }
+
+    /// 开页锁，见 `GatewayInner::opening`。
+    pub async fn lock_opening(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.opening.lock().await
     }
 
     fn slot(&self) -> std::sync::MutexGuard<'_, ListenSlot> {

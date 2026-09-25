@@ -1412,6 +1412,123 @@ async fn closed_threads_in_other_dirs_can_be_renamed_and_deleted() {
     assert_eq!(again["error"]["details"]["code"], "not_found", "{again}");
 }
 
+/// 关着的会话不用先 `thread/open`：发消息、改设置、订阅都按需开页；停止和队列回
+/// 空结果、不开页；应答请求仍回 `thread_not_open`；认不得的 id 是 `not_found`。
+#[tokio::test]
+async fn closed_threads_open_on_demand() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let dir = project_dir("on-demand");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = rpc
+        .call("turn/start", json!({ "threadId": id, "message": "第一句" }))
+        .await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+    let closed = rpc.call("thread/close", json!({ "threadId": id })).await;
+    assert_eq!(closed["result"]["ok"], true, "{closed}");
+
+    let is_open = |listed: &Value| -> bool {
+        listed["result"]["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == json!(id) && t["open"] == true)
+    };
+
+    // 停止、队列：关着的页没有这些，回空结果，也不开页。
+    let cancel = rpc.call("turn/cancel", json!({ "threadId": id })).await;
+    assert_eq!(cancel["result"]["cancelled"], false, "{cancel}");
+    let queue = rpc.call("turn/queue/list", json!({ "threadId": id })).await;
+    assert_eq!(queue["result"]["items"], json!([]), "{queue}");
+    let removed = rpc
+        .call(
+            "turn/queue/remove",
+            json!({ "threadId": id, "queueId": "1" }),
+        )
+        .await;
+    assert_eq!(removed["result"]["removed"], false, "{removed}");
+    let answer = rpc
+        .call(
+            "interaction/respond",
+            json!({ "threadId": id, "answers": [] }),
+        )
+        .await;
+    assert_eq!(
+        answer["error"]["details"]["code"], "thread_not_open",
+        "{answer}"
+    );
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    assert!(!is_open(&listed), "这些不该开页：{listed}");
+
+    // 改设置：先开页再改，改的是这一页。
+    let set = rpc
+        .call(
+            "thread/model/set",
+            json!({ "threadId": id, "modelId": "on-demand" }),
+        )
+        .await;
+    assert!(set.get("error").is_none(), "{set}");
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    assert!(is_open(&listed), "改设置该开页：{listed}");
+    let env = rpc
+        .call("thread/environment/get", json!({ "threadId": id }))
+        .await;
+    assert_eq!(env["result"]["model"]["id"], "on-demand", "{env}");
+
+    // 关掉后直接订阅 + 发消息：接着原来的对话跑，推送照常到。
+    let _ = rpc.call("thread/close", json!({ "threadId": id })).await;
+    let sub = rpc
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    assert_eq!(sub["result"]["ok"], true, "{sub}");
+    let turn = rpc
+        .call("turn/start", json!({ "threadId": id, "message": "第二句" }))
+        .await;
+    assert_eq!(turn["result"]["threadId"], json!(id), "{turn}");
+    let done = rpc
+        .wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+    assert_eq!(done["params"]["threadId"], json!(id), "{done}");
+    let history = rpc.call("thread/history", json!({ "threadId": id })).await;
+    let text = history.to_string();
+    assert!(
+        text.contains("第一句") && text.contains("第二句"),
+        "{history}"
+    );
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let pages = listed["result"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["id"] == json!(id))
+        .count();
+    assert_eq!(pages, 1, "同一个会话只开一页：{listed}");
+
+    let unknown = rpc
+        .call(
+            "turn/start",
+            json!({ "threadId": "no-such-thread", "message": "x" }),
+        )
+        .await;
+    assert_eq!(
+        unknown["error"]["details"]["code"], "not_found",
+        "{unknown}"
+    );
+}
+
 /// 多线程：在一个目录开一页 → 在那一页跑一轮（只推给它的订阅，不进 `live`）→
 /// 设置按页 → 关页后不能再发 → 从磁盘重新打开，对话还在。
 #[tokio::test]
@@ -1497,8 +1614,12 @@ async fn threads_open_run_close_and_reopen_per_page() {
 
     let closed = rpc.call("thread/close", json!({ "threadId": id })).await;
     assert_eq!(closed["result"]["ok"], true, "{closed}");
+    // 发消息会按需开页（见 `closed_threads_open_on_demand`）；应答请求不会。
     let refused = rpc
-        .call("turn/start", json!({ "threadId": id, "message": "x" }))
+        .call(
+            "permission/resolve",
+            json!({ "threadId": id, "decision": "approve" }),
+        )
         .await;
     assert_eq!(refused["error"]["details"]["code"], "thread_not_open");
     let live_close = rpc

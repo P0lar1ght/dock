@@ -102,12 +102,7 @@ pub fn resolve(gateway: &GatewayHandle, thread_id: &str) -> Result<Page, RpcErro
             .into_iter()
             .find(|page| page.session_id() == thread_id)
     };
-    found.ok_or_else(|| {
-        RpcError::app(
-            "thread_not_open",
-            format!("线程 {thread_id} 没有开着（先 thread/open）"),
-        )
-    })
+    found.ok_or_else(|| RpcError::app("thread_not_open", format!("线程 {thread_id} 没有开着")))
 }
 
 /// [`resolve`] 参数里的 `threadId`。
