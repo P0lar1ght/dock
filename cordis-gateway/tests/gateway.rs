@@ -1348,6 +1348,104 @@ async fn custom_presets_can_be_created_used_and_deleted() {
     );
 }
 
+/// 预设编辑器：`tool/catalog` 列可选工具（不含 MCP），`preset/get` 给整份定义，
+/// `preset/update` 整份写回（名册增删、工具名单、人设），校验错误回 `invalid_params`；
+/// 内置预设改完成覆盖层（`origin: user`、带文件路径），内置子代理删不掉。
+#[tokio::test]
+async fn preset_editor_reads_and_writes_the_whole_definition() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let catalog = rpc.call("tool/catalog", json!({})).await;
+    let tools = catalog["result"]["tools"].as_array().unwrap().clone();
+    assert!(!tools.is_empty(), "{catalog}");
+    let first = tools[0]["name"].as_str().unwrap().to_string();
+    assert!(
+        tools
+            .iter()
+            .all(|t| t["summary"].is_string() && t["kind"].is_string()),
+        "{catalog}"
+    );
+
+    let made = rpc
+        .call(
+            "preset/create",
+            json!({ "name": "研究员", "basedOn": "minimal" }),
+        )
+        .await;
+    let id = made["result"]["preset"]["id"].as_str().unwrap().to_string();
+
+    let body = json!({
+        "name": "深度研究员",
+        "description": "跨文档综合",
+        "icon": "search",
+        "order": 10,
+        "persona": "你是研究员。",
+        "replacePrompt": false,
+        "tools": [first],
+        "agents": [
+            { "id": "web", "name": "网页", "description": "查网页", "persona": "只查网页",
+              "tools": [first], "replacePrompt": false, "listings": true }
+        ]
+    });
+    let saved = rpc
+        .call("preset/update", json!({ "id": id, "preset": body }))
+        .await;
+    assert_eq!(saved["result"]["preset"]["label"], "深度研究员", "{saved}");
+
+    let got = rpc.call("preset/get", json!({ "id": id })).await;
+    let p = &got["result"]["preset"];
+    assert_eq!(p["name"], "深度研究员", "{got}");
+    assert_eq!(p["icon"], "search");
+    assert_eq!(p["order"], 10);
+    assert_eq!(p["persona"], "你是研究员。");
+    assert_eq!(p["tools"], json!([first]));
+    assert_eq!(p["agents"][0]["id"], "web");
+    assert_eq!(p["agents"][0]["listings"], true);
+    assert_eq!(p["agents"][0]["builtin"], false);
+    assert!(p["path"].as_str().unwrap().ends_with("agent.yml"), "{got}");
+
+    // 整份替换却没有提示词：拒，不写盘。
+    let mut bad = body.clone();
+    bad["replacePrompt"] = json!(true);
+    bad["persona"] = json!(" ");
+    let refused = rpc
+        .call("preset/update", json!({ "id": id, "preset": bad }))
+        .await;
+    assert_eq!(
+        refused["error"]["details"]["code"], "invalid_params",
+        "{refused}"
+    );
+    let still = rpc.call("preset/get", json!({ "id": id })).await;
+    assert_eq!(still["result"]["preset"]["persona"], "你是研究员。");
+
+    // 内置预设：带内置子代理；删内置子代理被拒；原样保存变成用户层覆盖。
+    let code = rpc.call("preset/get", json!({ "id": "code" })).await;
+    let code = code["result"]["preset"].clone();
+    assert_eq!(code["origin"], "shipped", "{code}");
+    assert!(code["path"].is_null(), "没改过没有文件：{code}");
+    let agents = code["agents"].as_array().unwrap().clone();
+    assert!(agents.iter().all(|a| a["builtin"] == true), "{code}");
+    let mut dropped = code.clone();
+    dropped["agents"] = json!(agents[1..].to_vec());
+    let refused = rpc
+        .call("preset/update", json!({ "id": "code", "preset": dropped }))
+        .await;
+    assert!(refused.get("error").is_some(), "{refused}");
+    let saved = rpc
+        .call("preset/update", json!({ "id": "code", "preset": code }))
+        .await;
+    assert_eq!(saved["result"]["preset"]["origin"], "user", "{saved}");
+    let restored = rpc.call("preset/delete", json!({ "id": "code" })).await;
+    assert_eq!(restored["result"]["ok"], true, "恢复内置：{restored}");
+
+    let missing = rpc.call("preset/get", json!({ "id": "nope" })).await;
+    assert_eq!(missing["error"]["details"]["code"], "not_found");
+    let _ = rpc.call("preset/delete", json!({ "id": id })).await;
+}
+
 /// 关着的会话落在别的目录（GUI 每个项目一个 cwd）：改名、删除要按名册找，
 /// 不能只看第 1 页那个目录的历史。
 #[tokio::test]

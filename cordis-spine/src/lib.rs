@@ -17,8 +17,9 @@ mod tools;
 pub use agent::agents::{agents, Agent, Agents};
 pub use agent::loop_plugin::agent_loop;
 pub use agent::presets::{
-    agent_presets, blocked_tool_message, is_shipped, AgentPreset, AgentPresets, PresetOrigin,
-    SubagentDef, CORDIS_PRESET_ID, DEFAULT_PRESET_ID, MINIMAL_PRESET_ID, WARDEN_PRESET_ID,
+    agent_presets, blocked_tool_message, is_shipped, shipped_roles, AgentPreset, AgentPresets,
+    PresetEdit, PresetOrigin, SubagentDef, CORDIS_PRESET_ID, DEFAULT_PRESET_ID, MINIMAL_PRESET_ID,
+    WARDEN_PRESET_ID,
 };
 pub use agent::runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
 pub use agent::turn::{turn, TurnControl};

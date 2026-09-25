@@ -447,14 +447,7 @@ impl AgentPresets {
             return Err("预设名不能为空".into());
         }
         if let Some(icon) = &icon {
-            let ok = !icon.is_empty()
-                && icon.len() <= 40
-                && icon
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-            if !ok {
-                return Err(format!("图标名不合法：{icon}"));
-            }
+            check_icon(icon)?;
         }
         let mut inner = self.inner.lock().unwrap();
         let mut preset = match based_on {
@@ -482,6 +475,108 @@ impl AgentPresets {
         inner.presets.insert(id.clone(), preset.clone());
         persist_preset(&inner, &id)?;
         Ok(preset)
+    }
+
+    /// 整份改一个预设（GUI 预设编辑器）：基本信息、人设、工具名单、子代理名册一次写下。
+    /// 内置预设写成用户层覆盖（同 TUI 画布）；损坏的预设整份重写、不再算损坏（「用默认
+    /// 模板重建」）。名册里去掉的角色删掉它的文件；内置预设自带的角色删不掉（加载时会
+    /// 从内置合回来），回错。
+    pub fn update(&self, id: &str, edit: PresetEdit) -> Result<AgentPreset, String> {
+        let name = edit.name.trim().to_string();
+        if name.is_empty() {
+            return Err("预设名不能为空".into());
+        }
+        if let Some(icon) = &edit.icon {
+            check_icon(icon)?;
+        }
+        if edit.replace_prompt && edit.persona.trim().is_empty() {
+            return Err("整份替换系统提示时，角色提示词不能为空".into());
+        }
+        let mut agents = IndexMap::new();
+        for (role, mut def) in edit.agents {
+            if agents.contains_key(&role) {
+                return Err(format!("子代理 id 重复：{role}"));
+            }
+            if !valid_agent_type_id(&role) {
+                return Err(format!("子代理 id 无效（ascii slug 或 1–16 汉字）: {role}"));
+            }
+            if def.replace_prompt && def.persona.trim().is_empty() {
+                return Err(format!(
+                    "子代理 {role}：整份替换系统提示时，角色提示词不能为空"
+                ));
+            }
+            if def.name.trim().is_empty() {
+                def.name = role.clone();
+            }
+            def.tools = def.tools.map(dedup);
+            agents.insert(role, def);
+        }
+        if let Some(shipped) = parse_shipped(id) {
+            if let Some(role) = shipped.agents.keys().find(|r| !agents.contains_key(*r)) {
+                return Err(format!("内置子代理不能删除：{role}"));
+            }
+        }
+        let removed: Vec<String> = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(preset) = inner.presets.get_mut(id) else {
+                return Err(format!("没有预设 {id}"));
+            };
+            let removed = preset
+                .agents
+                .keys()
+                .filter(|r| !agents.contains_key(*r))
+                .cloned()
+                .collect();
+            if preset.broken.take().is_some() {
+                preset.agents.clear();
+            }
+            preset.name = name;
+            preset.description = edit.description.trim().to_string();
+            preset.icon = edit.icon;
+            preset.order = edit.order;
+            preset.persona = edit.persona;
+            preset.replace_prompt = edit.replace_prompt;
+            preset.tools = edit.tools.map(dedup);
+            preset.agents = agents;
+            if preset.origin == PresetOrigin::Shipped {
+                preset.origin = PresetOrigin::User;
+            }
+            persist_preset(&inner, id)?;
+            removed
+        };
+        for role in removed {
+            self.remove_role_file(id, &role);
+        }
+        self.get(id).ok_or_else(|| format!("没有预设 {id}"))
+    }
+
+    /// 预设落盘的 `agent.yml` 路径（内置未改过的没有文件，回 `None`）。
+    pub fn file_of(&self, id: &str) -> Option<PathBuf> {
+        let inner = self.inner.lock().unwrap();
+        let preset = inner.presets.get(id)?;
+        if preset.origin == PresetOrigin::Shipped {
+            return None;
+        }
+        let path = file_path(&inner, preset);
+        if path.is_file() {
+            return Some(path);
+        }
+        let legacy = legacy_yml(&inner, preset);
+        Some(if legacy.is_file() { legacy } else { path })
+    }
+
+    fn remove_role_file(&self, mode_id: &str, role_id: &str) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(preset) = inner.presets.get(mode_id) {
+            if preset.origin != PresetOrigin::Shipped && preset.broken.is_none() {
+                let path = file_path(&inner, preset)
+                    .parent()
+                    .map(|p| p.join(AGENTS_DIR).join(format!("{role_id}.yml")));
+                if let Some(path) = path {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
     }
 
     pub fn duplicate(&self, from: &str) -> Result<AgentPreset, String> {
@@ -1056,6 +1151,49 @@ impl AgentPresets {
         persist_roster(&inner)?;
         persist_preset(&inner, id)
     }
+}
+
+/// [`AgentPresets::update`] 的整份内容。子代理名册按 id（`agents/<id>.yml` 的文件名）。
+#[derive(Clone, Debug, Default)]
+pub struct PresetEdit {
+    pub name: String,
+    pub description: String,
+    pub icon: Option<String>,
+    pub order: Option<i64>,
+    pub persona: String,
+    pub replace_prompt: bool,
+    /// `None` = 全部已注册工具；`Some(vec![])` = 不用工具；其余是允许名单。
+    pub tools: Option<Vec<String>>,
+    /// 按顺序；id 不能重复。
+    pub agents: Vec<(String, SubagentDef)>,
+}
+
+/// 内置预设自带的子代理 id（不是内置预设为空）。这些角色在覆盖层里删不掉。
+pub fn shipped_roles(id: &str) -> Vec<String> {
+    parse_shipped(id)
+        .map(|p| p.agents.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn check_icon(icon: &str) -> Result<(), String> {
+    let ok = !icon.is_empty()
+        && icon.len() <= 40
+        && icon
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("图标名不合法：{icon}"))
+    }
+}
+
+fn dedup(list: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    list.into_iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty() && seen.insert(n.clone()))
+        .collect()
 }
 
 pub fn blocked_tool_message() -> &'static str {
@@ -2634,6 +2772,135 @@ mod tests {
             .create_custom("x", Some("../evil".into()), "", None)
             .is_err());
         assert!(presets.create_custom("x", None, "", Some("nope")).is_err());
+    }
+
+    #[test]
+    fn update_rewrites_the_whole_preset_and_its_roster() {
+        let home = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        let made = presets
+            .create_custom("研究员", None, "", Some(MINIMAL_PRESET_ID))
+            .unwrap();
+        let role = |persona: &str| SubagentDef {
+            name: String::new(),
+            description: "查网页".into(),
+            persona: persona.into(),
+            tools: Some(vec!["web_fetch".into(), "web_fetch".into()]),
+            replace_prompt: false,
+            listings: true,
+        };
+        let edit = |agents: IndexMap<String, SubagentDef>| PresetEdit {
+            agents: agents.into_iter().collect(),
+            name: "深度研究员".into(),
+            description: " 跨文档综合 ".into(),
+            icon: Some("search".into()),
+            order: Some(10),
+            persona: "你是研究员。".into(),
+            replace_prompt: false,
+            tools: Some(vec!["read_file".into(), "grep".into()]),
+        };
+        let mut roster = IndexMap::new();
+        roster.insert("web".to_string(), role("只查网页"));
+        roster.insert("data".to_string(), role("只算数"));
+        let saved = presets.update(&made.id, edit(roster.clone())).unwrap();
+        assert_eq!(saved.name, "深度研究员");
+        assert_eq!(saved.description, "跨文档综合");
+        assert_eq!(saved.icon.as_deref(), Some("search"));
+        assert_eq!(saved.order, Some(10));
+        assert_eq!(saved.agents["web"].name, "web", "空名字用 id");
+        assert_eq!(
+            saved.agents["web"].tools.as_deref(),
+            Some(&["web_fetch".to_string()][..]),
+            "工具去重"
+        );
+        let agents_dir = home.path().join(&made.id).join(AGENTS_DIR);
+        assert!(agents_dir.join("data.yml").is_file());
+
+        // 名册里去掉的角色：文件也删掉，重读后不再回来。
+        roster.shift_remove("data");
+        presets.update(&made.id, edit(roster.clone())).unwrap();
+        assert!(!agents_dir.join("data.yml").exists());
+        let reloaded = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        let back = reloaded.get(&made.id).unwrap();
+        assert_eq!(back.persona, "你是研究员。");
+        assert_eq!(back.tools.as_ref().map(Vec::len), Some(2));
+        assert_eq!(back.agents.keys().collect::<Vec<_>>(), vec!["web"]);
+        assert!(back.agents["web"].listings);
+
+        // 校验：空名、整份替换却没有提示词、坏的角色 id、坏的图标。
+        let mut bad = edit(roster.clone());
+        bad.name = " ".into();
+        assert!(presets.update(&made.id, bad).is_err());
+        let mut bad = edit(roster.clone());
+        bad.replace_prompt = true;
+        bad.persona = "  ".into();
+        assert!(presets.update(&made.id, bad).is_err());
+        let mut bad = edit(IndexMap::new());
+        bad.agents.push(("Bad Id".into(), role("x")));
+        assert!(presets.update(&made.id, bad).is_err());
+        let mut bad = edit(roster);
+        bad.icon = Some("../x".into());
+        assert!(presets.update(&made.id, bad).is_err());
+        assert!(presets.update("nope", edit(IndexMap::new())).is_err());
+    }
+
+    #[test]
+    fn update_on_builtin_writes_an_overlay_and_keeps_shipped_roles() {
+        let home = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        let code = presets.get(DEFAULT_PRESET_ID).unwrap();
+        assert!(
+            presets.file_of(DEFAULT_PRESET_ID).is_none(),
+            "没改过没有文件"
+        );
+        let edit = |agents: IndexMap<String, SubagentDef>| PresetEdit {
+            agents: agents.into_iter().collect(),
+            name: code.name.clone(),
+            description: "改过".into(),
+            icon: None,
+            order: code.order,
+            persona: code.persona.clone(),
+            replace_prompt: false,
+            tools: code.tools.clone(),
+        };
+        let mut dropped = code.agents.clone();
+        let first = dropped.keys().next().unwrap().clone();
+        dropped.shift_remove(&first);
+        let err = presets
+            .update(DEFAULT_PRESET_ID, edit(dropped))
+            .unwrap_err();
+        assert!(err.contains(&first), "{err}");
+
+        let saved = presets
+            .update(DEFAULT_PRESET_ID, edit(code.agents.clone()))
+            .unwrap();
+        assert_eq!(saved.origin, PresetOrigin::User);
+        let file = presets.file_of(DEFAULT_PRESET_ID).unwrap();
+        assert!(file.starts_with(home.path()) && file.is_file(), "{file:?}");
+        let reloaded = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        assert_eq!(reloaded.get(DEFAULT_PRESET_ID).unwrap().description, "改过");
+    }
+
+    #[test]
+    fn update_rebuilds_a_broken_preset() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(AGENT_FILE), "tools: [bash\n").unwrap();
+        let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        assert!(presets.get("broken").unwrap().broken.is_some());
+        let fixed = presets
+            .update(
+                "broken",
+                PresetEdit {
+                    name: "broken".into(),
+                    ..PresetEdit::default()
+                },
+            )
+            .unwrap();
+        assert!(fixed.broken.is_none());
+        let reloaded = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        assert!(reloaded.get("broken").unwrap().broken.is_none());
     }
 
     #[test]
