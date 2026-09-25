@@ -32,6 +32,32 @@ pub fn list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     Ok(json!({ "threads": threads }))
 }
 
+/// `thread/search { query, cwd?, limit? }`：按标题和用户消息搜落盘会话（全部目录），
+/// 每条带一小段命中处的纯文本片段（只命中标题时为 `null`）。还没落过盘的内容搜不到。
+pub fn search(params: Value) -> Result<Value, RpcError> {
+    let query = text(&params, "query")?;
+    let cwd = params.get("cwd").and_then(Value::as_str);
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(50)
+        .clamp(1, 200) as usize;
+    cordis_spine::ensure_session_search();
+    let hits: Vec<Value> = cordis_spine::session_search::search(&query, cwd, limit)
+        .into_iter()
+        .map(|h| {
+            json!({
+                "threadId": h.session_id,
+                "title": h.title,
+                "cwd": h.cwd,
+                "snippet": h.snippet,
+                "updatedAt": h.updated_at_unix.max(0) as u64 * 1000
+            })
+        })
+        .collect();
+    Ok(json!({ "hits": hits }))
+}
+
 /// `thread/list { scope: "all" }`：所有开着的页 + 所有目录下的落盘会话，`id` 一律是
 /// 会话 id（第 1 页另带 `alias: "live"`），带 `cwd` 与 `open`。GUI 左侧项目树用。
 fn list_all(gateway: &GatewayHandle) -> Result<Value, RpcError> {
