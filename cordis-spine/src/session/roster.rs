@@ -110,6 +110,13 @@ impl Roster {
         self.invalidate();
         result
     }
+
+    /// 改一个落盘会话的标题（写 `meta.json`），并让备忘失效。`cwd` 同 [`remove`](Self::remove)。
+    pub fn rename(&self, id: &str, cwd: &std::path::Path, title: &str) -> std::io::Result<()> {
+        let result = persist::save_title(id, title, cwd);
+        self.invalidate();
+        result
+    }
 }
 
 pub fn roster() -> Plugin {

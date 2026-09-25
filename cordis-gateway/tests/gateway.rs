@@ -1211,6 +1211,70 @@ async fn serve_hands_the_parent_a_working_ticket() {
         .unwrap();
 }
 
+/// 关着的会话落在别的目录（GUI 每个项目一个 cwd）：改名、删除要按名册找，
+/// 不能只看第 1 页那个目录的历史。
+#[tokio::test]
+async fn closed_threads_in_other_dirs_can_be_renamed_and_deleted() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let dir = project_dir("edit-elsewhere");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = rpc
+        .call(
+            "turn/start",
+            json!({ "threadId": id, "message": "别处的会话" }),
+        )
+        .await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+    let closed = rpc.call("thread/close", json!({ "threadId": id })).await;
+    assert_eq!(closed["result"]["ok"], true, "{closed}");
+
+    let listed_title = |listed: &Value| -> Option<String> {
+        listed["result"]["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == json!(id))
+            .map(|t| t["title"].as_str().unwrap_or("").to_string())
+    };
+
+    let renamed = rpc
+        .call(
+            "thread/rename",
+            json!({ "threadId": id, "title": "改过的名字" }),
+        )
+        .await;
+    assert!(renamed.get("error").is_none(), "{renamed}");
+    assert_eq!(renamed["result"]["thread"]["title"], "改过的名字");
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    assert_eq!(
+        listed_title(&listed).as_deref(),
+        Some("改过的名字"),
+        "{listed}"
+    );
+
+    let deleted = rpc.call("thread/delete", json!({ "threadId": id })).await;
+    assert_eq!(deleted["result"]["ok"], true, "{deleted}");
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    assert_eq!(listed_title(&listed), None, "删了还在：{listed}");
+
+    let again = rpc.call("thread/delete", json!({ "threadId": id })).await;
+    assert_eq!(again["error"]["details"]["code"], "not_found", "{again}");
+}
+
 /// 多线程：在一个目录开一页 → 在那一页跑一轮（只推给它的订阅，不进 `live`）→
 /// 设置按页 → 关页后不能再发 → 从磁盘重新打开，对话还在。
 #[tokio::test]
