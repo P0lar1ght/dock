@@ -1868,7 +1868,7 @@ fn is_cjk(c: char) -> bool {
 }
 
 /// Roster role id: ascii slug *or* 1–16 CJK characters (`甲`, `突击`).
-fn valid_agent_type_id(id: &str) -> bool {
+pub(crate) fn valid_agent_type_id(id: &str) -> bool {
     if valid_id(id) {
         return true;
     }

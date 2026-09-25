@@ -2,12 +2,13 @@
 //! {presetId}`），之后不在会话中途换，所以不给切换方法。
 //! `preset/create` / `preset/delete`：GUI 的自定义预设（写用户层 `~/.dock/presets`）。
 //! `preset/get` / `preset/update` / `tool/catalog`：GUI 预设编辑器（同 TUI `/preset` 画布）。
+//! `preset/draft` / `preset/rewrite` / `preset/suggestTools`：AI 辅助起草，只回草稿、不写盘。
 
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    is_shipped, shipped_roles, AgentPreset, AgentPresets, PresetEdit, PresetOrigin, SubagentDef,
-    Tools, AGENT_PRESETS, TOOLS,
+    draft_preset, is_shipped, rewrite_persona, shipped_roles, AgentPreset, AgentPresets,
+    PresetEdit, PresetOrigin, Rewrite, SubagentDef, ToolChoice, Tools, AGENT_PRESETS, TOOLS,
 };
 
 use crate::handle::GatewayHandle;
@@ -188,6 +189,82 @@ pub fn tool_catalog(gateway: &GatewayHandle) -> Result<Value, RpcError> {
         })
         .collect();
     Ok(json!({ "tools": items }))
+}
+
+/// `preset/draft { description, icons? }`：按一两句描述起草整份预设（用默认模型采样一次）。
+/// 回 `draft`：`name` / `description` / `icon` / `persona` / `replacePrompt` / `tools`
+/// （`null` = 全部工具）/ `toolReasons[]` / `agents[]`。**不写盘**；工具只留目录里有的，
+/// 图标只留 `icons`（客户端的图标库）里有的。模型没配好或回得不对是 `draft_failed`。
+pub async fn draft(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let description = params
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let icons: Vec<String> = params
+        .get("icons")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(String::from)
+        .collect();
+    let catalog = choices(gateway)?;
+    let draft = draft_preset(gateway.ctx(), description, &catalog, &icons)
+        .await
+        .map_err(|e| RpcError::app("draft_failed", e))?;
+    Ok(json!({ "draft": draft }))
+}
+
+/// `preset/rewrite { persona, mode: "polish" | "expand", description? }`：润色 / 扩写角色
+/// 提示词，回 `persona`。不写盘。
+pub async fn rewrite(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or("");
+    let mode = match text("mode") {
+        "polish" => Rewrite::Polish,
+        "expand" => Rewrite::Expand,
+        other => {
+            return Err(RpcError::invalid_params(format!(
+                "mode 只能是 polish / expand：{other}"
+            )))
+        }
+    };
+    let persona = rewrite_persona(gateway.ctx(), text("persona"), mode, text("description"))
+        .await
+        .map_err(|e| RpcError::app("draft_failed", e))?;
+    Ok(json!({ "persona": persona }))
+}
+
+/// `preset/suggestTools { description, persona? }`：按描述推荐工具，回 `tools[]`
+/// （`name` / `reason`，都在 `tool/catalog` 里）。不写盘。
+pub async fn suggest_tools(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or("");
+    let catalog = choices(gateway)?;
+    let picks = cordis_spine::suggest_tools(
+        gateway.ctx(),
+        text("description"),
+        text("persona"),
+        &catalog,
+    )
+    .await
+    .map_err(|e| RpcError::app("draft_failed", e))?;
+    Ok(json!({ "tools": picks }))
+}
+
+/// 给模型挑的工具目录：同 `tool/catalog`（不含 MCP）。
+fn choices(gateway: &GatewayHandle) -> Result<Vec<ToolChoice>, RpcError> {
+    let tools = gateway
+        .ctx()
+        .get::<Tools>(TOOLS)
+        .ok_or_else(|| RpcError::app("unavailable", "工具表没有挂载"))?;
+    Ok(tools
+        .specs()
+        .into_iter()
+        .filter(|s| !tools.is_mcp(&s.name))
+        .map(|s| ToolChoice {
+            summary: first_sentence(&s.description),
+            name: s.name,
+        })
+        .collect())
 }
 
 /// 描述的第一句（到第一个句号 / 换行），最多 80 个字符。
