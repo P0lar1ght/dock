@@ -1,10 +1,14 @@
 //! `preset/list`：GUI 新对话页选预设用。预设在创建会话时选定（`thread/start
 //! {presetId}`），之后不在会话中途换，所以不给切换方法。
 //! `preset/create` / `preset/delete`：GUI 的自定义预设（写用户层 `~/.dock/presets`）。
+//! `preset/get` / `preset/update` / `tool/catalog`：GUI 预设编辑器（同 TUI `/preset` 画布）。
 
 use serde_json::{json, Value};
 
-use cordis_spine::{is_shipped, AgentPreset, AgentPresets, PresetOrigin, AGENT_PRESETS};
+use cordis_spine::{
+    is_shipped, shipped_roles, AgentPreset, AgentPresets, PresetEdit, PresetOrigin, SubagentDef,
+    Tools, AGENT_PRESETS, TOOLS,
+};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;
@@ -49,6 +53,168 @@ pub fn delete(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
         .delete(id)
         .map_err(|e| RpcError::app("invalid_params", e))?;
     Ok(json!({ "ok": true, "id": id }))
+}
+
+/// `preset/get { id }`：一个预设的完整定义，给编辑器用。损坏的预设 `available: false`，
+/// `error` 是解析错误，`path` 是它的文件（客户端可以让用户去外部编辑器改）。
+pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let id = id_param(&params)?;
+    let presets = service(gateway)?;
+    let p = presets
+        .get(id)
+        .ok_or_else(|| RpcError::app("not_found", format!("没有预设 {id}")))?;
+    let path = presets.file_of(id).map(|p| p.display().to_string());
+    let shipped_roles = shipped_roles(id);
+    let agents: Vec<Value> = p
+        .agents
+        .iter()
+        .map(|(role, def)| {
+            json!({
+                "id": role,
+                "name": def.name,
+                "description": def.description,
+                "persona": def.persona,
+                "tools": def.tools,
+                "replacePrompt": def.replace_prompt,
+                "listings": def.listings,
+                "builtin": shipped_roles.iter().any(|r| r == role),
+            })
+        })
+        .collect();
+    let mut item = summary(p.clone());
+    let obj = item.as_object_mut().expect("summary is an object");
+    obj.insert("name".into(), json!(p.name));
+    obj.insert("order".into(), json!(p.order));
+    obj.insert("persona".into(), json!(p.persona));
+    obj.insert("replacePrompt".into(), json!(p.replace_prompt));
+    obj.insert("tools".into(), json!(p.tools));
+    obj.insert("agents".into(), json!(agents));
+    obj.insert("path".into(), json!(path));
+    Ok(json!({ "preset": item }))
+}
+
+/// `preset/update { id, preset }`：整份写下（`preset` 同 `preset/get` 的字段：`name`
+/// `description` `icon` `order` `persona` `replacePrompt` `tools` `agents[]`）。内置预设
+/// 写成用户层覆盖；损坏的预设整份重写。回 `preset`（同 `preset/list` 的一项）。
+pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let id = id_param(&params)?;
+    let body = params
+        .get("preset")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| RpcError::invalid_params("preset is required"))?;
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let flag = |v: &Value, key: &str| v.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let tools = |v: &Value| -> Result<Option<Vec<String>>, RpcError> {
+        match v.get("tools") {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Array(items)) => Ok(Some(
+                items
+                    .iter()
+                    .map(|t| {
+                        t.as_str()
+                            .map(String::from)
+                            .ok_or_else(|| RpcError::invalid_params("tools 只收字符串"))
+                    })
+                    .collect::<Result<_, _>>()?,
+            )),
+            Some(_) => Err(RpcError::invalid_params("tools 是数组或 null")),
+        }
+    };
+    let mut agents: Vec<(String, SubagentDef)> = Vec::new();
+    for a in body
+        .get("agents")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let role = text(a, "id");
+        if agents.iter().any(|(r, _)| *r == role) {
+            return Err(RpcError::app(
+                "invalid_params",
+                format!("子代理 id 重复：{role}"),
+            ));
+        }
+        let def = SubagentDef {
+            name: text(a, "name"),
+            description: text(a, "description"),
+            persona: text(a, "persona"),
+            tools: tools(a)?,
+            replace_prompt: flag(a, "replacePrompt"),
+            listings: flag(a, "listings"),
+        };
+        agents.push((role, def));
+    }
+    let edit = PresetEdit {
+        name: text(body, "name"),
+        description: text(body, "description"),
+        icon: body
+            .get("icon")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from),
+        order: body.get("order").and_then(Value::as_i64),
+        persona: text(body, "persona"),
+        replace_prompt: flag(body, "replacePrompt"),
+        tools: tools(body)?,
+        agents,
+    };
+    let saved = service(gateway)?
+        .update(id, edit)
+        .map_err(|e| RpcError::app("invalid_params", e))?;
+    Ok(json!({ "preset": summary(saved) }))
+}
+
+/// `tool/catalog`：预设能选的工具（同 TUI `/preset` 画布左栏：已注册的工具，不含 MCP）。
+/// `summary` 是描述的第一句；`kind`：`resident` 常驻 / `deferred` 按需 / `dynamic`
+/// 运行中的动态包（不受允许名单限制）。
+pub fn tool_catalog(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let tools = gateway
+        .ctx()
+        .get::<Tools>(TOOLS)
+        .ok_or_else(|| RpcError::app("unavailable", "工具表没有挂载"))?;
+    let items: Vec<Value> = tools
+        .specs()
+        .into_iter()
+        .filter(|s| !tools.is_mcp(&s.name))
+        .map(|s| {
+            let kind = if tools.is_dynamic(&s.name) {
+                "dynamic"
+            } else if tools.is_deferred(&s.name) {
+                "deferred"
+            } else {
+                "resident"
+            };
+            json!({ "name": s.name, "summary": first_sentence(&s.description), "kind": kind })
+        })
+        .collect();
+    Ok(json!({ "tools": items }))
+}
+
+/// 描述的第一句（到第一个句号 / 换行），最多 80 个字符。
+fn first_sentence(description: &str) -> String {
+    let line = description.trim().lines().next().unwrap_or("").trim();
+    let mut end = line.len();
+    for pat in ["。", ". ", "；"] {
+        if let Some(i) = line.find(pat) {
+            end = end.min(i + if pat == ". " { 1 } else { pat.len() });
+        }
+    }
+    let cut = &line[..end];
+    if cut.chars().count() > 80 {
+        let mut s: String = cut.chars().take(79).collect();
+        s.push('…');
+        s
+    } else {
+        cut.to_string()
+    }
+}
+
+fn id_param(params: &Value) -> Result<&str, RpcError> {
+    params
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::invalid_params("id is required"))
 }
 
 fn service(gateway: &GatewayHandle) -> Result<std::sync::Arc<AgentPresets>, RpcError> {

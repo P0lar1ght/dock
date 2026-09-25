@@ -28,6 +28,9 @@ pub async fn dispatch(
         protocol::PRESET_LIST => preset::list(&gateway, params),
         protocol::PRESET_CREATE => preset::create(&gateway, params),
         protocol::PRESET_DELETE => preset::delete(&gateway, params),
+        protocol::PRESET_GET => preset::get(&gateway, params),
+        protocol::PRESET_UPDATE => preset::update(&gateway, params),
+        protocol::TOOL_CATALOG => preset::tool_catalog(&gateway),
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
