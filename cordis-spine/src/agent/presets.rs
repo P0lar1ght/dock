@@ -154,6 +154,7 @@ impl SubagentDef {
             replace_prompt: self.replace_prompt,
             listings: self.listings,
             order: None,
+            icon: None,
             agents: IndexMap::new(),
             broken: None,
             origin: PresetOrigin::User,
@@ -183,6 +184,9 @@ pub struct AgentPreset {
     pub listings: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i64>,
+    /// 客户端显示用的图标名（lucide 名，如 `rocket`）；TUI 不用。没写就按 id 猜。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     /// Child roster. Stored in `agents/*.yml`, not in `agent.yml`.
     #[serde(default, skip_serializing)]
     pub agents: IndexMap<String, SubagentDef>,
@@ -204,6 +208,7 @@ impl AgentPreset {
             replace_prompt: false,
             listings: false,
             order: None,
+            icon: None,
             agents: IndexMap::new(),
             broken: None,
             origin: PresetOrigin::User,
@@ -423,6 +428,58 @@ impl AgentPresets {
         inner.presets.insert(id.clone(), preset.clone());
         inner.current = id.clone();
         persist_roster(&inner)?;
+        persist_preset(&inner, &id)?;
+        Ok(preset)
+    }
+
+    /// 新建一个用户层预设（GUI「新建自定义预设」）：起名、可带图标，`based_on` 给了就照
+    /// 它复制人设、工具名单和子代理名册。写 `~/.dock/presets/<id>/`，**不切**当前预设
+    /// ——预设在开会话时选。
+    pub fn create_custom(
+        &self,
+        name: &str,
+        icon: Option<String>,
+        description: &str,
+        based_on: Option<&str>,
+    ) -> Result<AgentPreset, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("预设名不能为空".into());
+        }
+        if let Some(icon) = &icon {
+            let ok = !icon.is_empty()
+                && icon.len() <= 40
+                && icon
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            if !ok {
+                return Err(format!("图标名不合法：{icon}"));
+            }
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let mut preset = match based_on {
+            Some(from) => {
+                let base = inner
+                    .presets
+                    .get(from)
+                    .cloned()
+                    .ok_or_else(|| format!("没有预设 {from}"))?;
+                if base.broken.is_some() {
+                    return Err("损坏的预设不能当底子".into());
+                }
+                base
+            }
+            None => AgentPreset::new(String::new()),
+        };
+        let id = mint_id(&inner.presets);
+        preset.id = id.clone();
+        preset.name = name.to_string();
+        preset.description = description.trim().to_string();
+        preset.icon = icon;
+        preset.order = None;
+        preset.broken = None;
+        preset.origin = PresetOrigin::User;
+        inner.presets.insert(id.clone(), preset.clone());
         persist_preset(&inner, &id)?;
         Ok(preset)
     }
@@ -2536,6 +2593,47 @@ mod tests {
         assert!(!rendered.contains("本模式子代理"), "{rendered}");
         assert!(!rendered.contains("send_message"), "{rendered}");
         assert!(!rendered.contains("reload_roster"), "{rendered}");
+    }
+
+    /// GUI 的「新建自定义预设」：起名、带图标、照某个预设复制人设和工具；写用户层，
+    /// 不切当前预设；重新加载后图标还在。
+    #[test]
+    fn create_custom_names_it_keeps_the_icon_and_leaves_current_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let proj = tempfile::tempdir().unwrap();
+        let presets =
+            AgentPresets::load_layers(home.path().to_path_buf(), Some(proj.path().to_path_buf()));
+        let before = presets.current_id();
+        let base = presets.get(MINIMAL_PRESET_ID).unwrap();
+
+        let made = presets
+            .create_custom(
+                "我的助手",
+                Some("rocket".into()),
+                "说明",
+                Some(MINIMAL_PRESET_ID),
+            )
+            .unwrap();
+        assert_eq!(made.name, "我的助手");
+        assert_eq!(made.icon.as_deref(), Some("rocket"));
+        assert_eq!(made.tools, base.tools, "照 minimal 复制工具名单");
+        assert_eq!(made.origin, PresetOrigin::User);
+        assert!(home.path().join(&made.id).join(AGENT_FILE).is_file());
+        assert!(!proj.path().join(&made.id).join(AGENT_FILE).is_file());
+        assert_eq!(presets.current_id(), before, "新建不切当前预设");
+
+        let reloaded =
+            AgentPresets::load_layers(home.path().to_path_buf(), Some(proj.path().to_path_buf()));
+        assert_eq!(
+            reloaded.get(&made.id).unwrap().icon.as_deref(),
+            Some("rocket")
+        );
+
+        assert!(presets.create_custom("  ", None, "", None).is_err());
+        assert!(presets
+            .create_custom("x", Some("../evil".into()), "", None)
+            .is_err());
+        assert!(presets.create_custom("x", None, "", Some("nope")).is_err());
     }
 
     #[test]
