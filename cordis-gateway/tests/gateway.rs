@@ -1282,6 +1282,72 @@ async fn thread_search_finds_saved_sessions_by_their_messages() {
     assert_eq!(bad["error"]["code"], -32602, "{bad}");
 }
 
+/// GUI 的自定义预设：新建（带图标）→ 列表里有 → 能用它开会话 → 删掉。
+#[tokio::test]
+async fn custom_presets_can_be_created_used_and_deleted() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let before = rpc.call("preset/list", json!({})).await;
+    let default_id = before["result"]["defaultId"].clone();
+
+    let made = rpc
+        .call(
+            "preset/create",
+            json!({ "name": "我的助手", "icon": "rocket", "basedOn": "minimal" }),
+        )
+        .await;
+    let id = made["result"]["preset"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{made}"))
+        .to_string();
+    assert_eq!(made["result"]["preset"]["icon"], "rocket", "{made}");
+
+    let listed = rpc.call("preset/list", json!({})).await;
+    let item = listed["result"]["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(id))
+        .cloned()
+        .unwrap_or_else(|| panic!("新预设不在列表里：{listed}"));
+    assert_eq!(item["label"], "我的助手");
+    assert_eq!(item["origin"], "user");
+    assert_eq!(item["builtin"], false);
+    let code = listed["result"]["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "code")
+        .cloned()
+        .unwrap();
+    assert_eq!(code["builtin"], true, "{code}");
+    assert_eq!(listed["result"]["defaultId"], default_id, "新建不改默认");
+
+    let dir = project_dir("custom-preset");
+    let started = rpc
+        .call(
+            "thread/start",
+            json!({ "cwd": dir.display().to_string(), "presetId": id }),
+        )
+        .await;
+    assert!(started.get("error").is_none(), "{started}");
+
+    let bad = rpc.call("preset/create", json!({ "name": "  " })).await;
+    assert_eq!(bad["error"]["details"]["code"], "invalid_params", "{bad}");
+    let shipped = rpc.call("preset/delete", json!({ "id": "code" })).await;
+    assert!(shipped.get("error").is_some(), "内置的删不掉：{shipped}");
+
+    let deleted = rpc.call("preset/delete", json!({ "id": id })).await;
+    assert_eq!(deleted["result"]["ok"], true, "{deleted}");
+    let listed = rpc.call("preset/list", json!({})).await;
+    assert!(
+        !listed.to_string().contains("我的助手"),
+        "删了还在：{listed}"
+    );
+}
+
 /// 关着的会话落在别的目录（GUI 每个项目一个 cwd）：改名、删除要按名册找，
 /// 不能只看第 1 页那个目录的历史。
 #[tokio::test]
