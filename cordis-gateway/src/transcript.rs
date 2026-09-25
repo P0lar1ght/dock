@@ -8,7 +8,8 @@ use tokio::sync::broadcast;
 
 use cordis_spine::{
     Ask, ElicitPrompt, LogEvent, PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt,
-    PlanDecision, Sessions, TurnEndStatus, UserImage, INTERRUPTED_TOOL_RESULT, ROOT_IDENTITY,
+    PlanDecision, Sessions, TurnEndStatus, UserImage, INTERRUPTED_TOOL_RESULT,
+    PERMISSION_DENIED_TOOL_RESULT, ROOT_IDENTITY,
 };
 
 use crate::protocol::LIVE_THREAD_ID;
@@ -273,11 +274,14 @@ impl Transcript {
                     );
                 }
                 self.projector.pending_tools.remove(&id);
-                // 照 Dock 落下的标记报，不按输出猜。停止时补的中断结果算 cancelled。
+                // 照 Dock 落下的标记报，不按输出猜。停止时补的中断结果算 cancelled，
+                // 权限门拒绝的算 denied。
                 let status = if !is_error {
                     "completed"
                 } else if content.trim() == INTERRUPTED_TOOL_RESULT {
                     "cancelled"
+                } else if content.trim() == PERMISSION_DENIED_TOOL_RESULT {
+                    "denied"
                 } else {
                     "failed"
                 };
@@ -962,7 +966,8 @@ mod tests {
     }
 
     /// 回归：`item/tool_completed` 以前恒为 completed，客户端只能按输出猜失败。
-    /// 现在照 Dock 落下的 `is_error` 报：失败 failed、停止时补的「已中断。」cancelled。
+    /// 现在照 Dock 落下的 `is_error` 报：失败 failed、停止时补的「已中断。」cancelled、
+    /// 用户在权限门拒绝的 denied。
     #[test]
     fn tool_completed_status_follows_the_recorded_flag() {
         let tool = |id: &str, content: &str, is_error: bool| LogEvent::ToolExecute {
@@ -978,13 +983,14 @@ mod tests {
         t.ingest_log(tool("a", "ok", false));
         t.ingest_log(tool("b", "exit status: 1\nboom", true));
         t.ingest_log(tool("c", cordis_spine::INTERRUPTED_TOOL_RESULT, true));
+        t.ingest_log(tool("d", cordis_spine::PERMISSION_DENIED_TOOL_RESULT, true));
         let statuses: Vec<_> = t
             .history_since(0)
             .into_iter()
             .filter(|e| e.method == "item/tool_completed")
             .map(|e| e.payload["status"].as_str().unwrap_or("").to_string())
             .collect();
-        assert_eq!(statuses, ["completed", "failed", "cancelled"]);
+        assert_eq!(statuses, ["completed", "failed", "cancelled", "denied"]);
     }
 
     /// 回归：从落盘事件重建投影（重开会话、看关着的会话）以前时间戳全是「现在」，

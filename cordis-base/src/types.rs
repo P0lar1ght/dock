@@ -5,6 +5,10 @@ use std::fmt;
 /// tool call" if a user message follows unmatched `tool_calls`.
 pub const INTERRUPTED_TOOL_RESULT: &str = "已中断。";
 
+/// 用户在权限门拒绝一次工具调用时，这次调用的结果（`is_error`）。客户端据此把它
+/// 和普通失败分开（网关报 `denied`）。
+pub const PERMISSION_DENIED_TOOL_RESULT: &str = "权限被拒绝";
+
 /// Visible compact marker. The pager keeps older bubbles; this assistant
 /// line is appended so the user sees that a compact ran. The model history
 /// carries the same bubble plus a hidden continuation summary.

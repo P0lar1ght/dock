@@ -40,6 +40,7 @@ pub use cordis_base::types::{
     ToolResult, ToolSpec, TurnEnd, TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
     ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MEMORY,
     ORDER_STEP_START_TODO, ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
+    PERMISSION_DENIED_TOOL_RESULT,
 };
 pub use cordis_base::usage::{
     calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,

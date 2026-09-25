@@ -431,7 +431,7 @@ impl Tools {
                             ToolResult {
                                 call_id: call.id,
                                 name: call.name,
-                                content: "权限被拒绝".into(),
+                                content: cordis_base::types::PERMISSION_DENIED_TOOL_RESULT.into(),
                                 is_error: true,
                                 ..Default::default()
                             },

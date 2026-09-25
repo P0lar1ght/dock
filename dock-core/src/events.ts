@@ -12,7 +12,8 @@ export interface EventBase {
 }
 
 export type TurnEndStatus = 'completed' | 'cancelled' | 'failed';
-export type ToolEndStatus = 'completed' | 'failed' | 'cancelled';
+/** `denied`：用户在权限门拒绝了这次调用（工具没跑）。 */
+export type ToolEndStatus = 'completed' | 'failed' | 'cancelled' | 'denied';
 
 export interface ImageAttachment {
   type: 'image';
@@ -128,7 +129,7 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
         toolCallId: str(params.toolCallId),
         toolName: str(params.toolName),
         output: str(params.output),
-        status: oneOf(params.status, ['completed', 'failed', 'cancelled'] as const, 'completed'),
+        status: oneOf(params.status, ['completed', 'failed', 'cancelled', 'denied'] as const, 'completed'),
       };
     case 'permission/requested':
       return {
