@@ -552,6 +552,8 @@ function toolId(params: Record<string, unknown>) {
 function toolTerminalStatus(value: unknown): SessionToolActivity['status'] {
   const status = text(value);
   if (status === 'failed' || status === 'cancelled') return status;
+  // 权限门拒绝（工具没跑）：这里没有单独的样式，按失败显示，别落到「完成」。
+  if (status === 'denied') return 'failed';
   return 'completed';
 }
 

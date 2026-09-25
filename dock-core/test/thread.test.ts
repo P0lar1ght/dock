@@ -118,6 +118,17 @@ test('工具失败照网关的 status，不按输出猜', () => {
   assert.equal(tool.kind === 'tool' && tool.status, 'completed');
 });
 
+test('权限门拒绝的工具是 denied，和普通失败分开', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started'),
+    note('item/tool_started', { toolCallId: 'c', toolName: 'bash', arguments: { command: 'rm -rf x' } }),
+    note('item/tool_completed', { toolCallId: 'c', toolName: 'bash', output: '权限被拒绝', status: 'denied' }),
+  );
+  const tool = s.turns[0].items[0];
+  assert.equal(tool.kind === 'tool' && tool.status, 'denied');
+});
+
 test('没见过 turn/started 的事件（订阅晚了）补一轮，不丢', () => {
   seq = 0;
   const s = run(note('item/message_delta', { delta: '中途加入' }, 't9'));
