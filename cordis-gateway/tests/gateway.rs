@@ -1314,6 +1314,15 @@ async fn custom_presets_can_be_created_used_and_deleted() {
         .unwrap_or_else(|| panic!("新预设不在列表里：{listed}"));
     assert_eq!(item["label"], "我的助手");
     assert_eq!(item["origin"], "user");
+    assert_eq!(item["builtin"], false);
+    let code = listed["result"]["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "code")
+        .cloned()
+        .unwrap();
+    assert_eq!(code["builtin"], true, "{code}");
     assert_eq!(listed["result"]["defaultId"], default_id, "新建不改默认");
 
     let dir = project_dir("custom-preset");

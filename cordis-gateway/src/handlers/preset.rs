@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 
-use cordis_spine::{AgentPreset, AgentPresets, PresetOrigin, AGENT_PRESETS};
+use cordis_spine::{is_shipped, AgentPreset, AgentPresets, PresetOrigin, AGENT_PRESETS};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;
@@ -64,6 +64,9 @@ fn summary(p: AgentPreset) -> Value {
         "label": if p.name.trim().is_empty() { p.id.clone() } else { p.name },
         "description": p.description,
         "icon": p.icon,
+        // 内置预设的 id（`origin` 可能是 user / project：用户改过的覆盖层）。删它 = 丢掉
+        // 改动、恢复内置版本，客户端要照这个说清楚。
+        "builtin": is_shipped(&p.id),
         "origin": match p.origin {
             PresetOrigin::Shipped => "shipped",
             PresetOrigin::User => "user",
