@@ -15,3 +15,5 @@
 - `AgentPresets::update` 整份写下。
 - 内置预设写成用户层覆盖。
 - 损坏的预设整份重写。
+- AI 起草：`agent::preset_assist`（`draft_preset` / `rewrite_persona` / `suggest_tools`）。
+- 起草只采样一次、不写盘；模型输出按工具目录和 id 规矩过滤后才回。

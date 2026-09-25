@@ -31,6 +31,9 @@ pub async fn dispatch(
         protocol::PRESET_GET => preset::get(&gateway, params),
         protocol::PRESET_UPDATE => preset::update(&gateway, params),
         protocol::TOOL_CATALOG => preset::tool_catalog(&gateway),
+        protocol::PRESET_DRAFT | protocol::PRESET_REWRITE | protocol::PRESET_SUGGEST_TOOLS => {
+            dispatch_detached(gateway, method, params).await
+        }
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
@@ -100,4 +103,27 @@ fn opens_on_demand(method: &str) -> bool {
             | protocol::TURN_STEER
             | protocol::SLASH_EXECUTE
     )
+}
+
+/// 要调模型的方法：一次几秒。`ws.rs` 不在连接锁里跑它们（锁住会卡住这条连接的
+/// 推送和其它请求），鉴权过了就另起任务，跑完再回帧。
+pub fn is_detached(method: &str) -> bool {
+    matches!(
+        method,
+        protocol::PRESET_DRAFT | protocol::PRESET_REWRITE | protocol::PRESET_SUGGEST_TOOLS
+    )
+}
+
+/// [`is_detached`] 的方法：不碰连接状态，只要网关句柄。
+pub async fn dispatch_detached(
+    gateway: GatewayHandle,
+    method: &str,
+    params: Value,
+) -> Result<Value, RpcError> {
+    match method {
+        protocol::PRESET_DRAFT => preset::draft(&gateway, params).await,
+        protocol::PRESET_REWRITE => preset::rewrite(&gateway, params).await,
+        protocol::PRESET_SUGGEST_TOOLS => preset::suggest_tools(&gateway, params).await,
+        _ => Err(RpcError::method_not_found(method)),
+    }
 }

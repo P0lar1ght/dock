@@ -1446,6 +1446,69 @@ async fn preset_editor_reads_and_writes_the_whole_definition() {
     let _ = rpc.call("preset/delete", json!({ "id": id })).await;
 }
 
+/// AI 辅助写预设：走 `"llm"`，结果只回不写盘。测试装配的 echo 只回工具调用、没有正文，
+/// 三个方法都报 `draft_failed`（成功路径见 spine `tests/preset_assist.rs`）；参数错是
+/// `invalid_params`；另起任务回帧之后连接照常可用。
+#[tokio::test]
+async fn preset_assist_calls_the_model_and_never_writes() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let before = rpc.call("preset/list", json!({})).await;
+
+    let drafted = rpc
+        .call(
+            "preset/draft",
+            json!({ "description": "帮我审代码，只读", "icons": ["shield"] }),
+        )
+        .await;
+    assert_eq!(
+        drafted["error"]["details"]["code"], "draft_failed",
+        "{drafted}"
+    );
+    assert!(
+        drafted["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("JSON"),
+        "{drafted}"
+    );
+
+    let empty = rpc
+        .call("preset/draft", json!({ "description": "  " }))
+        .await;
+    assert_eq!(empty["error"]["details"]["code"], "draft_failed", "{empty}");
+
+    let polished = rpc
+        .call(
+            "preset/rewrite",
+            json!({ "persona": "你审代码", "mode": "polish" }),
+        )
+        .await;
+    assert_eq!(
+        polished["error"]["details"]["code"], "draft_failed",
+        "{polished}"
+    );
+
+    let bad_mode = rpc
+        .call("preset/rewrite", json!({ "persona": "x", "mode": "shout" }))
+        .await;
+    assert_eq!(
+        bad_mode["error"]["details"]["code"], "invalid_params",
+        "{bad_mode}"
+    );
+
+    let tools = rpc
+        .call("preset/suggestTools", json!({ "description": "搜代码" }))
+        .await;
+    assert_eq!(tools["error"]["details"]["code"], "draft_failed", "{tools}");
+
+    // 另起任务回帧之后，这条连接照常能用。
+    let after = rpc.call("preset/list", json!({})).await;
+    assert_eq!(after["result"], before["result"], "起草不写盘");
+}
+
 /// 关着的会话落在别的目录（GUI 每个项目一个 cwd）：改名、删除要按名册找，
 /// 不能只看第 1 页那个目录的历史。
 #[tokio::test]

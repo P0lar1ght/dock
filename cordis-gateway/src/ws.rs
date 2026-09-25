@@ -89,6 +89,14 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
         let Message::Text(text) = msg else {
             continue;
         };
+        // 要调模型的方法另起任务：不能占着连接锁等好几秒。
+        if let Some(job) = detached(&conn, &text).await {
+            let out_tx = out_tx.clone();
+            tokio::spawn(async move {
+                let _ = out_tx.send(job.await);
+            });
+            continue;
+        }
         let reply = dispatch_text(&conn, &text).await;
         if let Some(reply) = reply {
             if out_tx.send(reply).is_err() {
@@ -99,6 +107,47 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
     fanout.abort();
     drop(out_tx);
     let _ = writer.await;
+}
+
+/// [`rpc::is_detached`] 的请求：锁里只查鉴权、拿网关句柄，放锁后再跑。不是这类请求
+/// （或没法解析）回 `None`，照常走 [`dispatch_text`]。
+async fn detached(
+    conn: &Arc<Mutex<Conn>>,
+    text: &str,
+) -> Option<impl std::future::Future<Output = String>> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let method = value.get("method").and_then(Value::as_str)?.to_string();
+    if !rpc::is_detached(&method) {
+        return None;
+    }
+    let id = value.get("id").cloned();
+    let params = value.get("params").cloned().unwrap_or(json!({}));
+    let ready = {
+        let c = conn.lock().await;
+        if c.auth.is_none() {
+            Err(RpcError::app(
+                "unauthenticated",
+                "connection/authenticate is required",
+            ))
+        } else if !c.initialized {
+            Err(RpcError::app(
+                "not_initialized",
+                "initialize is required after authenticate",
+            ))
+        } else {
+            Ok(c.gateway.clone())
+        }
+    };
+    Some(async move {
+        let result = match ready {
+            Ok(gateway) => rpc::dispatch_detached(gateway, &method, params).await,
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(result) => json!({ "id": id.unwrap_or(Value::Null), "result": result }).to_string(),
+            Err(err) => rpc_error_frame(id, err),
+        }
+    })
 }
 
 async fn dispatch_text(conn: &Arc<Mutex<Conn>>, text: &str) -> Option<String> {
