@@ -18,6 +18,7 @@ pub async fn dispatch(
         protocol::WORKSPACE_LIST => connection::workspace_list(&gateway, params),
         protocol::MCP_RELOAD => connection::mcp_reload(&gateway),
         protocol::THREAD_LIST => thread::list(&gateway, params),
+        protocol::THREAD_SEARCH => thread::search(params),
         protocol::PRESET_LIST => preset::list(&gateway, params),
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await

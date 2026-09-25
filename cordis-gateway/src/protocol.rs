@@ -40,6 +40,7 @@ pub const CONNECTION_AUTHENTICATE: &str = "connection/authenticate";
 pub const INITIALIZE: &str = "initialize";
 pub const WORKSPACE_LIST: &str = "workspace/list";
 pub const THREAD_LIST: &str = "thread/list";
+pub const THREAD_SEARCH: &str = "thread/search";
 pub const PRESET_LIST: &str = "preset/list";
 pub const THREAD_START: &str = "thread/start";
 pub const THREAD_OPEN: &str = "thread/open";

@@ -1211,6 +1211,58 @@ async fn serve_hands_the_parent_a_working_ticket() {
         .unwrap();
 }
 
+/// `thread/search`：落盘会话按用户消息搜得到（中英文都行），带命中片段。
+#[tokio::test]
+async fn thread_search_finds_saved_sessions_by_their_messages() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let dir = project_dir("search-me");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = rpc
+        .call(
+            "turn/start",
+            json!({ "threadId": id, "message": "把 zebraquokka 模块的登录按钮改成圆角" }),
+        )
+        .await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+    let _ = rpc.call("thread/close", json!({ "threadId": id })).await;
+
+    for query in ["zebraquokka", "圆角"] {
+        let found = rpc.call("thread/search", json!({ "query": query })).await;
+        let hits = found["result"]["hits"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let hit = hits
+            .iter()
+            .find(|h| h["threadId"] == json!(id))
+            .unwrap_or_else(|| panic!("{query} 没搜到：{found}"));
+        assert!(
+            hit["snippet"].as_str().unwrap_or("").contains(query),
+            "{found}"
+        );
+    }
+    let none = rpc
+        .call("thread/search", json!({ "query": "不存在的词xyz" }))
+        .await;
+    assert_eq!(none["result"]["hits"], json!([]), "{none}");
+    let bad = rpc.call("thread/search", json!({})).await;
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+}
+
 /// 关着的会话落在别的目录（GUI 每个项目一个 cwd）：改名、删除要按名册找，
 /// 不能只看第 1 页那个目录的历史。
 #[tokio::test]

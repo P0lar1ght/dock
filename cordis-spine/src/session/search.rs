@@ -224,12 +224,17 @@ impl SessionSearchIndex {
         cwd: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SessionHit>, rusqlite::Error> {
+        // FTS 的默认分词对中日韩文按整段算一个词，查询构造也只留 ASCII 词：
+        // 带这类字的查询改走子串匹配（会话数量级下直接扫表够快）。
+        if !query.is_ascii() {
+            return self.substring_query(query, cwd, limit);
+        }
         let Some(match_q) = build_match_query(query) else {
             return Ok(Vec::new());
         };
         let mut stmt = self.db.prepare(
             "SELECT d.session_id, d.cwd, d.title, d.updated_at,
-                    snippet(session_docs_fts, 1, '[', ']', ' … ', 12) AS snip
+                    snippet(session_docs_fts, 1, '', '', ' … ', 12) AS snip
              FROM session_docs_fts
              JOIN session_docs d ON d.rowid = session_docs_fts.rowid
              WHERE session_docs_fts MATCH ?1
@@ -248,7 +253,83 @@ impl SessionSearchIndex {
         })?;
         rows.collect()
     }
+
+    /// 每个词都要出现在标题或内容里（不分大小写的子串）。片段取内容里第一个
+    /// 命中词前后各一小段。
+    fn substring_query(
+        &self,
+        query: &str,
+        cwd: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SessionHit>, rusqlite::Error> {
+        let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.db.prepare(
+            "SELECT session_id, cwd, title, updated_at, content FROM session_docs
+             WHERE (?1 IS NULL OR cwd = ?1)
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map(params![cwd], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (session_id, cwd, title, updated_at_unix, content) = row?;
+            let (t, c) = (title.to_lowercase(), content.to_lowercase());
+            if !terms.iter().all(|w| t.contains(w) || c.contains(w)) {
+                continue;
+            }
+            hits.push(SessionHit {
+                session_id,
+                cwd,
+                title,
+                updated_at_unix,
+                snippet: terms.iter().find_map(|w| window(&content, w)),
+            });
+            if hits.len() >= limit {
+                break;
+            }
+        }
+        Ok(hits)
+    }
 }
+
+/// `text` 里第一个 `term`（不分大小写）前后各 [`SNIPPET_CHARS`] 个字，截断处补「 … 」。
+fn window(text: &str, term: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = text.to_lowercase().chars().collect();
+    // to_lowercase 可能改变字符数（少数字符），对不上就不给片段。
+    if lower.len() != chars.len() {
+        return None;
+    }
+    let needle: Vec<char> = term.chars().collect();
+    let at = lower
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())?;
+    let start = at.saturating_sub(SNIPPET_CHARS);
+    let end = (at + needle.len() + SNIPPET_CHARS).min(chars.len());
+    let body: String = chars[start..end]
+        .iter()
+        .map(|&c| if c == '\n' { ' ' } else { c })
+        .collect();
+    Some(format!(
+        "{}{}{}",
+        if start > 0 { " … " } else { "" },
+        body,
+        if end < chars.len() { " … " } else { "" }
+    ))
+}
+
+/// 片段里命中词两边各留几个字。
+const SNIPPET_CHARS: usize = 12;
 
 fn build_match_query(query: &str) -> Option<String> {
     let tokens: Vec<String> = query
@@ -384,5 +465,46 @@ mod tests {
         assert_eq!(index.query("cargo", Some("/a"), 10).unwrap().len(), 1);
         index.delete_doc("a").unwrap();
         assert_eq!(index.query("cargo", None, 10).unwrap().len(), 1);
+    }
+
+    /// 回归：FTS 的查询构造只留 ASCII 词，中文一个都搜不到。
+    #[test]
+    fn chinese_queries_match_titles_and_prompts() {
+        let tmp = TempDir::new().unwrap();
+        let index = SessionSearchIndex::open_or_create(&tmp.path().join("t.sqlite")).unwrap();
+        index
+            .upsert_doc(&doc(
+                "s1",
+                "修复登录页样式",
+                "把登录页按钮改成圆角并跑一遍构建",
+            ))
+            .unwrap();
+        index
+            .upsert_doc(&doc("s2", "重构 store", "拆分状态与购物车模块"))
+            .unwrap();
+        let by_content = index.query("圆角", None, 10).unwrap();
+        assert_eq!(by_content.len(), 1);
+        assert_eq!(by_content[0].session_id, "s1");
+        let snippet = by_content[0].snippet.as_deref().unwrap_or("");
+        assert!(snippet.contains("圆角"), "{snippet}");
+        let by_title = index.query("登录", None, 10).unwrap();
+        assert_eq!(by_title.len(), 1);
+        // 中英混在一起：每个词都要命中。
+        assert_eq!(index.query("store 购物车", None, 10).unwrap().len(), 1);
+        assert!(index.query("store 登录", None, 10).unwrap().is_empty());
+    }
+
+    /// 片段只是纯文本：不带 FTS 的高亮括号（客户端自己按查询词高亮）。
+    #[test]
+    fn snippets_are_plain_text() {
+        let tmp = TempDir::new().unwrap();
+        let index = SessionSearchIndex::open_or_create(&tmp.path().join("t.sqlite")).unwrap();
+        index
+            .upsert_doc(&doc("s1", "Rust", "fix the borrow checker today"))
+            .unwrap();
+        let hits = index.query("borrow", None, 10).unwrap();
+        let snippet = hits[0].snippet.as_deref().unwrap_or("");
+        assert!(snippet.contains("borrow"), "{snippet}");
+        assert!(!snippet.contains('['), "{snippet}");
     }
 }
