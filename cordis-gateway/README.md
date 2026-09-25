@@ -63,7 +63,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 | handler | 域 |
 |---|---|
-| `connection` | `connection/authenticate` |
+| `connection` | `connection/authenticate`；设置页用的 `mcp/list`、`mcp/reload`、`mcp/reconnect`、`model/list`（见下） |
 | `thread` | 会话列表 / 启动 / 改名 / 归档 / 恢复 / 删除 / 历史 / 订阅；多线程：`thread/open` / `thread/close` / `thread/start {cwd}` / `thread/list {scope:"all"}` |
 | `turn` | 发消息、流式回报 |
 | `environment` | 环境信息、模型 / reasoning / approval / plan / memory / goal 设置 |
@@ -71,6 +71,15 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `permission` | 权限授予状态 |
 | `slash` | 斜杠命令远程执行 |
 | `image_inputs` | 图片输入 |
+
+### 设置页（MCP 与模型）
+
+| 方法 | 作用 |
+|---|---|
+| `mcp/list` | 每台 MCP 服务器：`name` / `status`（`connected` / `failed` / `needs_auth` / `disabled`）/ `detail`（连着时是工具数说明，没连上时是原因）/ `toolCount` / `enabledToolCount`。不给启动命令（参数里可能带密钥） |
+| `mcp/reload` | 重读 `[mcp_servers.*]`：新增的连上、删掉的断开、改过的和上次没连上的重连。回 `ok` / `serverCount`（老字段）、`summary`、`added` / `removed` / `reconnected` / `disabled` / `failed[]` 和 `servers` |
+| `mcp/reconnect { name }` | 只重连这一台，不改配置；停用或认不得的回 `reconnect_failed`，连不上也是，状态里记着原因 |
+| `model/list` | config.toml 模型目录（只读）：`id` / `label` / `description` / `apiBase` / `contextWindow` / `backends` / `auth`（`key` / `env` / `none`，不给密钥本身）/ `default`，外加当前全局默认 `default` |
 
 - `transcript.rs`：把会话事件流转成 `dock.1` 的增量报文
 - `LIVE_THREAD_ID` = `"live"` 指代第 1 页（根）的会话；老客户端只用它

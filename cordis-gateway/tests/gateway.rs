@@ -652,13 +652,32 @@ async fn turn_intent_starts_goal_and_plan() {
 }
 
 #[tokio::test]
-async fn mcp_reload_and_model_refresh_are_implemented() {
+async fn mcp_and_model_settings_methods_are_implemented() {
     let h = Harness::boot().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
     let _ = rpc.call("initialize", json!({})).await;
     let reload = rpc.call("mcp/reload", json!({})).await;
     assert_eq!(reload["result"]["ok"], true);
+    // 真重载：带这次做了什么和每台服务器的状态（以前只回一个数）。
+    assert!(reload["result"]["summary"].is_string(), "{reload}");
+    assert!(reload["result"]["servers"].is_array(), "{reload}");
+    let listed = rpc.call("mcp/list", json!({})).await;
+    assert!(listed["result"]["servers"].is_array(), "{listed}");
+    let unknown = rpc
+        .call("mcp/reconnect", json!({ "name": "no-such-server" }))
+        .await;
+    assert_eq!(
+        unknown["error"]["details"]["code"], "reconnect_failed",
+        "{unknown}"
+    );
+    let models = rpc.call("model/list", json!({})).await;
+    assert!(models["result"]["models"].is_array(), "{models}");
+    assert!(models["result"]["default"].is_string(), "{models}");
+    assert!(
+        !models.to_string().contains("api_key"),
+        "不能把密钥字段带出去：{models}"
+    );
     let refresh = rpc
         .call("thread/model/refresh", json!({ "threadId": "live" }))
         .await;
