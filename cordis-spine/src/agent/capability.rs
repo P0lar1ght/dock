@@ -53,6 +53,11 @@ impl CapabilityMode {
         if matches!(self, Self::All) {
             return true;
         }
+        // 只读档也给 bash：没有 shell 的只读代理查东西太笨。给了不等于放开——执行时
+        // 按只读场景把关（`tools::read_only`）：只读命令直接跑，别的一律问用户。
+        if tool == "bash" && matches!(self, Self::ReadOnly) {
+            return true;
+        }
         match class_of(tool) {
             // 元工具：问用户、上报、计划、技能发现，任何档位都得留着，
             // 否则受限子代理连"我做不到"都说不出口。
@@ -163,11 +168,12 @@ mod tests {
             "ask_user_question",
             "send_message",
             "skill",
+            // bash 放进工具表，执行时再按只读命令把关（`tools::read_only` 的测试管那一半）。
+            "bash",
         ] {
             assert!(m.allows(allowed), "只读档不该挡 {allowed}");
         }
         for denied in [
-            "bash",
             "write_file",
             "search_replace",
             "task",

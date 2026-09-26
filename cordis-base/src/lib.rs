@@ -25,6 +25,7 @@ pub mod chat_chunk;
 pub mod config;
 pub mod cua;
 pub mod grep;
+pub mod read_only_shell;
 pub mod stream_acc;
 pub mod test_env;
 pub mod tool_output;

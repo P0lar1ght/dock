@@ -29,7 +29,8 @@ pub fn tab_mount_headless() -> TabMount {
 /// 旁问页的只读预设。
 ///
 /// **不给写工具**：旁问和主线并发跑、共用同一个工作目录，主线正在改文件时
-/// 让旁问也能写就是在制造竞态。也**不给** `search_tool` / `use_tool` —— MCP
+/// 让旁问也能写就是在制造竞态。bash 给，但标成只读角色：只读命令直接跑，
+/// 会改东西的要用户批准（`cordis_spine::tools::read_only`）。也**不给** `search_tool` / `use_tool` —— MCP
 /// 那边有 cua-driver 这种能点桌面的工具，插一嘴不该有这个本事。
 fn aside_preset() -> AgentPresets {
     let def = SubagentDef {
@@ -38,11 +39,12 @@ fn aside_preset() -> AgentPresets {
         persona: "你在旁路回答用户的一句插话。你看到的是主线对话的快照。\n                  只回答问题本身，简短、直给；不要接管主线的任务，不要改任何文件，\n                  也不要假设你的回答会进入主线上下文。"
             .into(),
         tools: Some(
-            ["read_file", "grep", "list_dir", "glob"]
+            ["read_file", "grep", "list_dir", "glob", "bash"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
         ),
+        read_only: true,
         ..Default::default()
     };
     AgentPresets::overlay(def.to_preset("aside"))
@@ -185,8 +187,9 @@ mod tests {
     #[test]
     fn aside_preset_has_no_write_or_mcp_tools() {
         let presets = aside_preset();
+        // bash 在，但靠只读角色把关：只读命令直接跑，别的要用户批准。
+        assert!(presets.current().read_only, "旁问必须是只读角色");
         for denied in [
-            "bash",
             "write_file",
             "edit_file",
             "apply_patch",
@@ -196,7 +199,7 @@ mod tests {
         ] {
             assert!(!presets.allows(denied), "旁问不该有 {denied}");
         }
-        for allowed in ["read_file", "grep", "list_dir", "glob"] {
+        for allowed in ["read_file", "grep", "list_dir", "glob", "bash"] {
             assert!(presets.allows(allowed), "旁问该能用 {allowed}");
         }
     }

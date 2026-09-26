@@ -89,13 +89,25 @@ impl Permissions {
     }
 
     pub async fn request(&self, tool: &str, summary: &str) -> bool {
-        if let Some(settings) = self.ctx.get::<AppSettings>(SETTINGS) {
-            if settings.permission_mode() == PermissionMode::Allow {
+        self.ask(tool, summary, false).await
+    }
+
+    /// 只读场景（计划模式、只读子代理、旁问页）里一条可能改东西的 bash：一定要人点头。
+    /// 自动批准和「以后都允许」都不算数——它们是在普通模式下给的；「以后都拒绝」照旧生效。
+    pub async fn request_strict(&self, tool: &str, summary: &str) -> bool {
+        self.ask(tool, summary, true).await
+    }
+
+    async fn ask(&self, tool: &str, summary: &str, strict: bool) -> bool {
+        if !strict {
+            if let Some(settings) = self.ctx.get::<AppSettings>(SETTINGS) {
+                if settings.permission_mode() == PermissionMode::Allow {
+                    return true;
+                }
+            }
+            if self.always.lock().unwrap().contains(tool) {
                 return true;
             }
-        }
-        if self.always.lock().unwrap().contains(tool) {
-            return true;
         }
         if self.never.lock().unwrap().contains(tool) {
             return false;

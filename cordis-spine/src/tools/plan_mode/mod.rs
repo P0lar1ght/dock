@@ -593,8 +593,9 @@ pub fn plan_system_addon() -> &'static str {
     "计划模式已开启。除计划文件外，不要改文件或跑会改环境的命令。\n\n\
      计划写到 enter_plan_mode 返回的计划文件里。这是唯一允许编辑的文件。\n\
      若文件还不存在，先调用 enter_plan_mode 创建。\n\n\
-     只读探索代码并写出实现计划。需要澄清时用 ask_user_question。\
-     准备好后用 exit_plan_mode 把计划交给用户。"
+     只读探索代码并写出实现计划。bash 可以直接跑只读命令（ls、cat、grep/rg、find、\
+     git status/log/diff 等，不带重定向）；会改东西的命令要用户批准。\
+     需要澄清时用 ask_user_question。准备好后用 exit_plan_mode 把计划交给用户。"
 }
 
 fn plan_sparse_addon() -> &'static str {

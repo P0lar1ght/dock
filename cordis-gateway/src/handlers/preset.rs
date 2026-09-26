@@ -78,6 +78,7 @@ pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
                 "tools": def.tools,
                 "replacePrompt": def.replace_prompt,
                 "listings": def.listings,
+                "readOnly": def.read_only,
                 "builtin": shipped_roles.iter().any(|r| r == role),
             })
         })
@@ -142,6 +143,7 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             tools: tools(a)?,
             replace_prompt: flag(a, "replacePrompt"),
             listings: flag(a, "listings"),
+            read_only: flag(a, "readOnly"),
         };
         agents.push((role, def));
     }

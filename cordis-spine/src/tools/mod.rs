@@ -34,6 +34,7 @@ pub mod memory;
 pub mod monitor;
 pub mod plan_mode;
 pub mod read_file;
+pub mod read_only;
 pub mod registry;
 pub mod sched;
 pub mod search_replace;

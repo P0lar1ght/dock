@@ -389,12 +389,41 @@ impl Tools {
         };
 
         if self.workspace {
+            // 只读场景里的 bash 自己把关（见 `tools::read_only`）：只读命令直接跑，别的
+            // 一律问用户、自动批准也不算。过了这一关就不再走下面的计划门和普通权限门。
+            let bash_cleared =
+                if call.name == "bash" && crate::tools::read_only::in_read_only_scene(exec) {
+                    let command = crate::tools::read_only::bash_command(&call.arguments);
+                    let approved = cordis_base::read_only_shell::is_read_only_command(&command)
+                        || match exec.get::<Permissions>(PERMISSIONS) {
+                            Some(perms) => {
+                                let summary = permission_summary(&call.name, &call.arguments);
+                                perms.request_strict(&call.name, &summary).await
+                            }
+                            None => false,
+                        };
+                    if !approved {
+                        return finish(
+                            exec,
+                            ToolResult {
+                                call_id: call.id,
+                                name: call.name,
+                                content: crate::tools::read_only::DENIED.into(),
+                                is_error: true,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    true
+                } else {
+                    false
+                };
             let plan_expected = crate::tools::plan_mode::expected_plan_path(
                 exec.get::<crate::session::log::Sessions>(SESSIONS)
                     .as_deref(),
             );
             if let Some(plan) = exec.get::<PlanMode>(PLAN_MODE) {
-                if plan.gated() && acp::blocked_in_plan(&call.name) {
+                if !bash_cleared && plan.gated() && acp::blocked_in_plan(&call.name) {
                     let plan_file_edit = crate::tools::plan_mode::is_plan_file_edit(
                         &call.name,
                         &call.arguments,
@@ -422,7 +451,7 @@ impl Tools {
                         &plan_expected,
                     )
             });
-            if acp::needs_permission(&call.name) && !plan_file_edit {
+            if acp::needs_permission(&call.name) && !plan_file_edit && !bash_cleared {
                 if let Some(perms) = exec.get::<Permissions>(PERMISSIONS) {
                     let summary = permission_summary(&call.name, &call.arguments);
                     if !perms.request(&call.name, &summary).await {
@@ -1205,6 +1234,55 @@ mod pre_execute_tests {
         let out = tools.execute(call("monitor", "原样")).await;
         assert_eq!(out.content, "改道了", "改道后该按 probe 放行");
         assert_eq!(out.name, "probe");
+    }
+
+    /// 计划模式下的 bash：只读命令直接跑；会改东西的一定问用户，自动批准也不算，
+    /// 用户拒了回给模型一句能照着改的话。计划模式以前把 bash 整个挡掉。
+    #[tokio::test]
+    async fn plan_mode_runs_read_only_bash_and_asks_for_the_rest_even_on_auto() {
+        use crate::host::settings::{AppSettings, PermissionMode};
+        use crate::names::SETTINGS;
+        use cordis_base::acp::PermissionOptionKind;
+
+        let ctx = Context::new();
+        let plan = PlanMode::new(ctx.clone());
+        plan.enter_active();
+        let _p = ctx.provide(PLAN_MODE, plan).unwrap();
+        let settings = AppSettings::new("x");
+        settings.set_permission_mode(PermissionMode::Allow);
+        let _s = ctx.provide(SETTINGS, settings).unwrap();
+        let _perm = ctx
+            .provide(PERMISSIONS, Permissions::new(ctx.clone()))
+            .unwrap();
+        // workspace 表自带真的 bash：只读那条真跑；要问的那条换成无害的写
+        // （关卡坏了也只是在 /tmp 落一个文件），拒掉以后确认它没跑。
+        let tools = Tools::workspace(ctx.clone());
+        let marker = std::env::temp_dir().join(format!("dock-ro-gate-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+
+        let read = tools
+            .execute(call("bash", r#"{"command":"echo read-only-ok | head -1"}"#))
+            .await;
+        assert!(!read.is_error, "只读命令该直接跑：{}", read.content);
+        assert!(read.content.contains("read-only-ok"), "{}", read.content);
+
+        let t = tools.clone();
+        let args =
+            serde_json::json!({ "command": format!("echo x > {}", marker.display()) }).to_string();
+        let write = tokio::spawn(async move { t.execute(call("bash", &args)).await });
+        let perms = ctx.get::<Permissions>(PERMISSIONS).unwrap();
+        for _ in 0..100 {
+            if perms.front().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(perms.front().is_some(), "自动批准下也得弹框问用户");
+        perms.resolve(PermissionOptionKind::RejectOnce);
+        let out = write.await.unwrap();
+        assert!(out.is_error);
+        assert_eq!(out.content, crate::tools::read_only::DENIED);
+        assert!(!marker.exists(), "被拒的命令不该跑");
     }
 
     /// 没人挂 handler 时行为不变——这个位点是纯加法。

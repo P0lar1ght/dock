@@ -137,6 +137,10 @@ pub struct SubagentDef {
     /// concurrent child pays for the catalog again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub listings: bool,
+    /// 只读角色（explore、plan、旁问）：给了 bash 也只放行只读命令，别的一律问用户，
+    /// 自动批准也不算数。见 [`crate::tools::read_only`]。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 impl SubagentDef {
@@ -153,6 +157,7 @@ impl SubagentDef {
             tools: self.tools.clone(),
             replace_prompt: self.replace_prompt,
             listings: self.listings,
+            read_only: self.read_only,
             order: None,
             icon: None,
             agents: IndexMap::new(),
@@ -182,6 +187,9 @@ pub struct AgentPreset {
     /// always gets them; see [`SubagentDef::listings`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub listings: bool,
+    /// 只读角色，见 [`SubagentDef::read_only`]。主会话的预设一般不标。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i64>,
     /// 客户端显示用的图标名（lucide 名，如 `rocket`）；TUI 不用。没写就按 id 猜。
@@ -207,6 +215,7 @@ impl AgentPreset {
             tools: None,
             replace_prompt: false,
             listings: false,
+            read_only: false,
             order: None,
             icon: None,
             agents: IndexMap::new(),
@@ -1992,7 +2001,12 @@ mod tests {
                     .unwrap()
                     .iter()
                     .any(|n| n == "write_file"));
-                assert!(!explore.tools.as_ref().unwrap().iter().any(|n| n == "bash"));
+                // 只读角色带 bash，靠 `read_only` 把关（只读命令直接跑，别的问用户）。
+                assert!(explore.tools.as_ref().unwrap().iter().any(|n| n == "bash"));
+                assert!(explore.read_only, "{}: explore 必须是只读角色", mode.id);
+                let plan = p.agents.get("plan").unwrap();
+                assert!(plan.tools.as_ref().unwrap().iter().any(|n| n == "bash"));
+                assert!(plan.read_only, "{}: plan 必须是只读角色", mode.id);
                 assert!(explore
                     .tools
                     .as_ref()
@@ -2788,6 +2802,7 @@ mod tests {
             tools: Some(vec!["web_fetch".into(), "web_fetch".into()]),
             replace_prompt: false,
             listings: true,
+            read_only: false,
         };
         let edit = |agents: IndexMap<String, SubagentDef>| PresetEdit {
             agents: agents.into_iter().collect(),

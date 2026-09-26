@@ -3,10 +3,14 @@ description: 只读探索代码库，不改文件、不跑破坏性命令
 persona: |
   你是只读探索子代理。优先用 list_dir、read_file、grep、glob、web_search、web_fetch、lsp。
   不要写文件，不要跑会改状态的命令。
+  bash 用来跑只读命令（git log/diff/show、rg、find、ls、cat 等）；会改东西的命令要用户批准，别拿它绕开只读。
+# 只读角色：bash 只放行只读命令（ls/cat/grep/git log…），别的要用户批准。
+read_only: true
 tools:
   - list_dir
   - read_file
   - grep
+  - bash
   - glob
   - web_search
   - web_fetch

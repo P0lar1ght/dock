@@ -681,11 +681,21 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         .get::<cordis_spine::PlanMode>(cordis_spine::PLAN_MODE)
         .is_some_and(|p| p.active()));
 
-    let blocked = tools
+    // 计划模式里 bash 的只读命令直接跑（只读场景把关，见 `tools::read_only`）……
+    let read = tools
         .execute(cordis_spine::ToolCall {
             id: "b1".into(),
             name: "bash".into(),
-            arguments: r#"{"command":"echo should-block"}"#.into(),
+            arguments: r#"{"command":"echo plan-read-ok"}"#.into(),
+        })
+        .await;
+    assert!(read.content.contains("plan-read-ok"), "{}", read.content);
+    // ……写文件照样被计划门挡下（计划文件以外）。
+    let blocked = tools
+        .execute(cordis_spine::ToolCall {
+            id: "b2".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path":"not-the-plan.md","content":"x"}"#.into(),
         })
         .await;
     assert!(
