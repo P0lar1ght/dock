@@ -6,7 +6,8 @@ use std::time::{Instant, SystemTime};
 
 use cordis::{plugin, Context, Inject, Plugin};
 
-use crate::names::{SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END};
+use crate::host::settings::AppSettings;
+use crate::names::{SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END, SETTINGS};
 pub use cordis_base::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
 use cordis_base::types::{LogEvent, COMPACT_NOTICE};
 use cordis_base::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
@@ -38,6 +39,17 @@ pub struct ArchivedSession {
     pub compact_from: usize,
     /// Agent preset id active when archived. `None` on sessions saved before this field.
     pub preset_id: Option<String>,
+    /// 落盘时这一页选的模型与推理强度。`None` = 老会话，或那一页没有 `settings`。
+    pub sampling: Option<Sampling>,
+}
+
+/// 一个会话选的模型 + 推理强度（`meta.json` 的 `model` / `effort`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sampling {
+    /// 模型目录（`config.toml`）里的 id。
+    pub model: String,
+    /// 推理强度；`"none"` = 思考关着；空 = 这个模型不发强度。
+    pub effort: String,
 }
 
 /// 这条事件进不进模型上下文。
@@ -299,6 +311,52 @@ impl Sessions {
     /// Preset stamped on the live session (also set by `/resume` when meta has one).
     pub fn preset_id(&self) -> Option<String> {
         self.live_preset_id.lock().unwrap().clone()
+    }
+
+    /// 这一页此刻的模型与推理强度，落盘时盖进 `meta.json`。`settings` 在调用点
+    /// live-lookup：子代理、测试里的裸会话没有它，就不记。
+    fn sampling_snapshot(&self) -> Option<Sampling> {
+        let settings = self.ctx.get::<AppSettings>(SETTINGS)?;
+        let model = settings.model();
+        if model.trim().is_empty() {
+            return None;
+        }
+        let effort = if settings.thinking() {
+            settings.effort()
+        } else {
+            "none".into()
+        };
+        Some(Sampling { model, effort })
+    }
+
+    /// 模型 / 推理强度刚改过：马上写进 `meta.json`，不等下一条事件。切完就关掉
+    /// 的会话，下次开还是切过的那一份。还没说过话的会话照旧不落盘。
+    pub fn persist_sampling(&self) {
+        self.persist_live();
+    }
+
+    /// 把会话记下的模型与推理强度切回这一页。fail-open：模型已经不在目录里就
+    /// 留着当前的（换成一个没端点的名字，下一轮就是 404）；强度不在这个模型的
+    /// 档位里就用模型默认档。
+    fn apply_sampling(&self, sampling: &Sampling) {
+        let Some(settings) = self.ctx.get::<AppSettings>(SETTINGS) else {
+            return;
+        };
+        if cordis_base::config::lookup_model(&sampling.model).is_none() {
+            return;
+        }
+        settings.set_model(sampling.model.clone());
+        match sampling.effort.as_str() {
+            "none" => {
+                settings.set_thinking(false);
+                settings.set_effort("none");
+            }
+            effort if settings.effort_choices().iter().any(|e| e == effort) => {
+                settings.set_thinking(true);
+                settings.set_effort(effort);
+            }
+            _ => {}
+        }
     }
 
     /// `preset_id` field on an archived session, if present.
@@ -1271,6 +1329,7 @@ impl Sessions {
             compact_prefix,
             compact_from,
             preset_id: self.live_preset_id.lock().unwrap().clone(),
+            sampling: self.sampling_snapshot(),
         };
         self.write_archived(&item);
         self.archive.lock().unwrap().insert(0, item.clone());
@@ -1310,6 +1369,10 @@ impl Sessions {
         // Old sessions omit preset_id — keep the live preset as-is.
         if let Some(pid) = item.preset_id {
             *self.live_preset_id.lock().unwrap() = Some(pid);
+        }
+        // 老会话没记模型：这一页的设置照旧。
+        if let Some(sampling) = &item.sampling {
+            self.apply_sampling(sampling);
         }
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
@@ -1457,6 +1520,7 @@ impl Sessions {
             compact_prefix,
             compact_from,
             preset_id: self.live_preset_id.lock().unwrap().clone(),
+            sampling: self.sampling_snapshot(),
         };
         let _ = crate::session::persist::save(&item, &cwd);
     }

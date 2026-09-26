@@ -36,7 +36,8 @@ pub fn set_reasoning(gateway: &GatewayHandle, params: Value) -> Result<Value, Rp
         .get("effort")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::invalid_params("effort is required"))?;
-    let settings = settings(&page_ctx(gateway, &params)?)?;
+    let page = threads::resolve_param(gateway, &params)?;
+    let settings = settings(&page.ctx)?;
     match effort {
         "none" => {
             settings.set_thinking(false);
@@ -52,6 +53,8 @@ pub fn set_reasoning(gateway: &GatewayHandle, params: Value) -> Result<Value, Rp
             ))
         }
     }
+    // 切了就落盘：会话下次开还是这一档。
+    page.sessions()?.persist_sampling();
     get(gateway, params)
 }
 
@@ -109,8 +112,9 @@ pub fn set_model(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcErr
         .get("modelId")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::invalid_params("modelId is required"))?;
-    let settings = settings(&page_ctx(gateway, &params)?)?;
-    settings.set_model(model_id);
+    let page = threads::resolve_param(gateway, &params)?;
+    settings(&page.ctx)?.set_model(model_id);
+    page.sessions()?.persist_sampling();
     get(gateway, params)
 }
 

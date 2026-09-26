@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::session::log::ArchivedSession;
+use crate::session::log::{ArchivedSession, Sampling};
 use cordis_base::config::dock_home;
 use cordis_base::types::{LlmOutput, LogEvent, ToolCall, TurnEndStatus};
 
@@ -29,6 +29,22 @@ struct MetaFile {
     /// Agent preset active when this session was saved. Absent on old sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preset_id: Option<String>,
+    /// 这个会话选的模型（目录 id）。老会话没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// 推理强度，`"none"` = 思考关着。只和 `model` 一起有意义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+}
+
+impl MetaFile {
+    fn sampling(&self) -> Option<Sampling> {
+        let model = self.model.clone().filter(|m| !m.trim().is_empty())?;
+        Some(Sampling {
+            model,
+            effort: self.effort.clone().unwrap_or_default(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -163,6 +179,8 @@ pub fn save(item: &ArchivedSession, cwd: &Path) -> std::io::Result<()> {
         cwd: cwd.to_string_lossy().into_owned(),
         updated_unix: unix(updated),
         preset_id: item.preset_id.clone(),
+        model: item.sampling.as_ref().map(|s| s.model.clone()),
+        effort: item.sampling.as_ref().map(|s| s.effort.clone()),
     };
     atomic_write(
         &dir.join(META),
@@ -201,6 +219,8 @@ pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
             cwd: cwd.to_string_lossy().into_owned(),
             updated_unix: unix(SystemTime::now()),
             preset_id: None,
+            model: None,
+            effort: None,
         }),
         Err(_) => MetaFile {
             id: id.into(),
@@ -208,6 +228,8 @@ pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
             cwd: cwd.to_string_lossy().into_owned(),
             updated_unix: unix(SystemTime::now()),
             preset_id: None,
+            model: None,
+            effort: None,
         },
     };
     meta.title = title.into();
@@ -458,6 +480,7 @@ fn load_one(dir: &Path) -> Option<(u64, ArchivedSession)> {
             compact_prefix,
             compact_from,
             preset_id: meta.as_ref().and_then(|m| m.preset_id.clone()),
+            sampling: meta.as_ref().and_then(MetaFile::sampling),
         },
     ))
 }
@@ -739,6 +762,7 @@ mod tests {
             compact_prefix: None,
             compact_from: 0,
             preset_id: Some("warden".into()),
+            sampling: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -786,6 +810,7 @@ mod tests {
             compact_prefix: None,
             compact_from: 0,
             preset_id: None,
+            sampling: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -815,6 +840,7 @@ mod tests {
             compact_prefix: None,
             compact_from: 0,
             preset_id: None,
+            sampling: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -884,6 +910,7 @@ mod tests {
             compact_prefix: None,
             compact_from: 0,
             preset_id: None,
+            sampling: None,
         };
         save(&item, cwd).unwrap();
         assert_eq!(load_cwd(cwd)[0].events, item.events);
@@ -918,6 +945,7 @@ mod tests {
             compact_prefix: None,
             compact_from: 0,
             preset_id: None,
+            sampling: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -965,6 +993,7 @@ mod tests {
             compact_prefix: None,
             compact_from: 0,
             preset_id: None,
+            sampling: None,
         };
         save(&item, cwd).unwrap();
         // image_paths should land under DOCK_HOME/tool-images/
@@ -1061,6 +1090,79 @@ mod tests {
             again.events().first(),
             Some(LogEvent::User(t)) if t == "disk hello"
         ));
+    }
+
+    /// 会话选的模型 + 推理强度随 `meta.json` 落盘，别的页开这个会话时切回来。
+    /// 模型已经不在目录里：留着开页那一页原来的，不换成一个没端点的名字。
+    #[tokio::test]
+    async fn sampling_is_saved_in_meta_and_restored_on_open() {
+        use crate::host::settings::AppSettings;
+        use crate::names::SETTINGS;
+
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join("config.toml"),
+            r#"
+[model.fast]
+api_base_url = "https://example.test/v1"
+reasoning_effort = "low"
+
+[model.deep]
+api_base_url = "https://example.test/v1"
+reasoning_effort = "medium"
+"#,
+        )
+        .unwrap();
+        let _env = cordis_base::test_env::scoped()
+            .set("DOCK_HOME", home.path())
+            .cwd(cwd.path());
+        let page = |model: &str| {
+            let ctx = cordis::Context::new();
+            let guard = ctx.provide(SETTINGS, AppSettings::new(model)).unwrap();
+            let settings = ctx.get::<AppSettings>(SETTINGS).unwrap();
+            let sessions = crate::session::log::Sessions::new(ctx);
+            sessions.attach_disk();
+            (sessions, settings, guard)
+        };
+
+        let (sessions, settings, _g1) = page("fast");
+        sessions.append(LogEvent::User("hi".into()));
+        settings.set_model("deep");
+        settings.set_effort("high");
+        // 只切设置、没有新事件：也要写进 meta。
+        sessions.persist_sampling();
+        let id = sessions.live_session_id();
+        // 会话按进程 cwd 落盘（macOS 上临时目录会解析成 /private/...）。
+        let here = std::env::current_dir().unwrap();
+        let meta = fs::read_to_string(sessions_cwd_dir(&here).join(&id).join(META)).unwrap();
+        assert!(meta.contains(r#""model": "deep""#), "{meta}");
+        assert!(meta.contains(r#""effort": "high""#), "{meta}");
+
+        let (again, other, _g2) = page("fast");
+        assert_eq!(other.model(), "fast");
+        assert!(again.restore(&id));
+        assert_eq!(other.model(), "deep");
+        assert_eq!(other.effort(), "high");
+        assert!(other.thinking());
+
+        // 思考关着记成 none，开回来也关着。
+        other.set_thinking(false);
+        again.persist_sampling();
+        let (third, closed, _g3) = page("fast");
+        assert!(third.restore(&id));
+        assert_eq!(closed.model(), "deep");
+        assert!(!closed.thinking());
+
+        // 目录里删掉 deep：开页那一页原来的模型不动。
+        fs::write(
+            home.path().join("config.toml"),
+            "[model.fast]\napi_base_url = \"https://example.test/v1\"\n",
+        )
+        .unwrap();
+        let (fourth, kept, _g4) = page("fast");
+        assert!(fourth.restore(&id));
+        assert_eq!(kept.model(), "fast");
     }
 
     /// A blank tab adopts the folder and later turns land back in it.

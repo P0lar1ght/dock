@@ -143,6 +143,7 @@ mod tests {
             compact_prefix: None,
             compact_from: 0,
             preset_id: None,
+            sampling: None,
         }
     }
 

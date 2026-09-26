@@ -82,8 +82,8 @@ pub use prompt::context_usage::{
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
 pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
 pub use session::log::{
-    sessions, ArchivedSession, PageLogEvent, PageTurnEnd, Sessions, TokenUsage, TurnEndStatus,
-    ROOT_IDENTITY,
+    sessions, ArchivedSession, PageLogEvent, PageTurnEnd, Sampling, Sessions, TokenUsage,
+    TurnEndStatus, ROOT_IDENTITY,
 };
 pub use session::persist::RosterEntry;
 pub use session::resume_preset::{apply_restored_preset, ApplyRestoredPreset};
