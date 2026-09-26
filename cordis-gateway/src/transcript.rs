@@ -84,6 +84,8 @@ struct Projector {
     turn_n: u64,
     turn_id: String,
     last_text: String,
+    /// 同 `last_text`，给 `item/reasoning_delta`（模型的思考过程）用。
+    last_reasoning: String,
     seen_tools: HashSet<String>,
     pending_tools: HashSet<String>,
     turn_open: bool,
@@ -207,6 +209,7 @@ impl Transcript {
                 self.projector.turn_n += 1;
                 self.projector.turn_id = format!("t{}", self.projector.turn_n);
                 self.projector.last_text.clear();
+                self.projector.last_reasoning.clear();
                 self.projector.sample_error = None;
                 self.projector.seen_tools.clear();
                 self.projector.pending_tools.clear();
@@ -223,6 +226,13 @@ impl Transcript {
                 if !self.projector.turn_open {
                     self.ensure_turn();
                 }
+                // 思考先于正文：一次采样里模型先想再答，推送顺序跟着走。
+                if let Some(delta) =
+                    stream_text_delta(&self.projector.last_reasoning, &out.reasoning)
+                {
+                    self.push("item/reasoning_delta", json!({ "delta": delta }));
+                }
+                self.projector.last_reasoning.clone_from(&out.reasoning);
                 if let Some(delta) = stream_text_delta(&self.projector.last_text, &out.text) {
                     self.push("item/message_delta", json!({ "delta": delta }));
                 }
@@ -820,6 +830,51 @@ mod tests {
             Some(current)
         );
         assert_eq!(stream_text_delta(&previous, "").as_deref(), None);
+    }
+
+    /// 模型的思考过程按增量推 `item/reasoning_delta`，排在同一次采样的正文前面；
+    /// 下一轮从头算，不把上一轮的思考当前缀。
+    #[test]
+    fn llm_stream_projects_reasoning_deltas_before_text() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            reasoning: "先看".into(),
+            ..Default::default()
+        }));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            reasoning: "先看文件".into(),
+            text: "好".into(),
+            ..Default::default()
+        }));
+        t.ingest_log(LogEvent::User("again".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            reasoning: "先看文件".into(),
+            ..Default::default()
+        }));
+        let got: Vec<(String, String)> = t
+            .history_since(0)
+            .into_iter()
+            .filter(|e| e.method.ends_with("_delta"))
+            .map(|e| {
+                let delta = e
+                    .payload
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                (e.method.clone(), delta.to_string())
+            })
+            .collect();
+        let want = [
+            ("item/reasoning_delta", "先看"),
+            ("item/reasoning_delta", "文件"),
+            ("item/message_delta", "好"),
+            ("item/reasoning_delta", "先看文件"),
+        ];
+        assert_eq!(
+            got,
+            want.map(|(m, d)| (m.to_string(), d.to_string())).to_vec()
+        );
     }
 
     #[test]

@@ -13,6 +13,11 @@ export type TurnItem =
   | { kind: 'user'; id: string; text: string; at: number; attachments: ImageAttachment[] }
   /** 助手文字。工具 / 交互之后的文字另起一条，保持出现顺序。 */
   | { kind: 'text'; id: string; text: string }
+  /**
+   * 模型的思考过程。连续的增量并成一条；这一轮里接着来了别的事（正文、工具、结束）
+   * 就算想完了，`endedAt` 记那件事的时间（回放历史也算得出想了多久）。
+   */
+  | { kind: 'reasoning'; id: string; text: string; startedAt: number; endedAt: number | null }
   | {
       kind: 'tool';
       id: string;
@@ -95,6 +100,15 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
           at: event.at,
           attachments: event.attachments,
         });
+
+      case 'item/reasoning_delta': {
+        if (!event.delta) return turn;
+        const last = turn.items[turn.items.length - 1];
+        if (last?.kind === 'reasoning' && last.endedAt === null) {
+          return replaceLast(turn, { ...last, text: last.text + event.delta });
+        }
+        return push(turn, { kind: 'reasoning', id: `r${event.seq}`, text: event.delta, startedAt: event.at, endedAt: null });
+      }
 
       case 'item/message_delta': {
         if (!event.delta) return turn;
@@ -242,11 +256,19 @@ function withTurn(state: ThreadState, event: DockEvent, f: (turn: Turn) => Turn)
     index = turns.length - 1;
   }
   const before = turns[index];
-  const after = settle(f(before));
+  const after = settle(f(closeReasoning(before, event)));
   if (after === before && turns === state.turns) return state;
   const next = turns === state.turns ? [...turns] : turns;
   next[index] = after;
   return { ...state, turns: next };
+}
+
+/** 这一轮来了思考以外的事：还开着的思考算想完了。 */
+function closeReasoning(turn: Turn, event: DockEvent): Turn {
+  if (event.method === 'item/reasoning_delta') return turn;
+  const last = turn.items[turn.items.length - 1];
+  if (last?.kind !== 'reasoning' || last.endedAt !== null) return turn;
+  return replaceLast(turn, { ...last, endedAt: event.at });
 }
 
 function push(turn: Turn, item: TurnItem): Turn {

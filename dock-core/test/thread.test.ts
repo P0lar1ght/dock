@@ -158,3 +158,28 @@ test('没变的轮次保持同一个引用（UI 按引用比较）', () => {
 test('认不出的方法返回 null（协议只做加法）', () => {
   assert.equal(parseEvent('future/thing', {}), null);
 });
+
+test('思考：连续增量并成一条，来了正文就算想完（endedAt 取正文的时间）', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started', {}, 't1', 1000),
+    note('item/reasoning_delta', { delta: '先看' }, 't1', 1100),
+    note('item/reasoning_delta', { delta: '文件' }, 't1', 1500),
+    note('item/message_delta', { delta: '好' }, 't1', 4100),
+    note('item/reasoning_delta', { delta: '再想' }, 't1', 5000),
+    note('turn/completed', { status: 'completed' }, 't1', 6000),
+  );
+  const items = s.turns[0].items;
+  assert.deepEqual(
+    items.map((i) => [i.kind, 'text' in i ? i.text : '']),
+    [
+      ['reasoning', '先看文件'],
+      ['text', '好'],
+      ['reasoning', '再想'],
+    ],
+  );
+  const [first, , second] = items;
+  assert.ok(first.kind === 'reasoning' && first.startedAt === 1100 && first.endedAt === 4100);
+  // 一轮结束时还开着的思考也收口。
+  assert.ok(second.kind === 'reasoning' && second.endedAt === 6000);
+});

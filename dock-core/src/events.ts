@@ -38,6 +38,8 @@ export type DockEvent = EventBase &
     | { method: 'turn/completed'; status: TurnEndStatus; error?: string }
     | { method: 'item/user_message'; content: string; attachments: ImageAttachment[] }
     | { method: 'item/message_delta'; delta: string }
+    /** 模型的思考过程（增量）。旧网关不推，就没有。 */
+    | { method: 'item/reasoning_delta'; delta: string }
     | { method: 'item/tool_started'; toolCallId: string; toolName: string; arguments: Record<string, unknown> }
     | { method: 'item/tool_completed'; toolCallId: string; toolName: string; output: string; status: ToolEndStatus }
     | { method: 'permission/requested'; requestId: string; toolName: string; summary: string }
@@ -113,6 +115,7 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
           })),
       };
     case 'item/message_delta':
+    case 'item/reasoning_delta':
       return { ...base, method, delta: str(params.delta) };
     case 'item/tool_started':
       return {
