@@ -6,6 +6,170 @@
 0.x 期间不承诺 `config.toml` 的键与 `dock.1` 协议的向后兼容：破坏性变更会写进对应版本，
 并在升级说明里给出改法。
 
+## [0.1.2] - 2026-09-29
+
+### 新增
+
+- **长期记忆换成 `dock-memory`**：以前是「递归 grep `~/.dock/memory` 下的 md/txt」的纯关键词搜索，
+  现在是有索引的检索。落盘布局改成 `$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,
+  observations/_inbox,archive}/`，每个 scope 一份生成的 `MEMORY.md` 索引（标题 + 相对路径摘要）；
+  检索是 FTS5 + MMR，配了 `[memory.embedding]`（model / base / api_key / dimensions，或
+  `DOCK_MEMORY_EMBEDDING_API_KEY`）再叠加 sqlite-vec 向量混合，不配就只走关键词；文件被外部
+  改动后写入 watcher 的 dirty 集，下次搜索前增量同步。**默认关闭**，`[memory] enabled = true`
+  或 `DOCK_MEMORY=1` 打开（`DOCK_MEMORY=0` 是进程级强制关，会话里也开不回来）。
+- **长期记忆怎么进上下文**：不再塞进系统提示，改挂在 `agent/step-start`（order 7）的
+  `<system-reminder>` 上，并且与 `AGENTS.md` 一样排在**第一条用户消息之前**，让跨会话的这段
+  前缀能命中缓存；`/context` 单列一行「记忆」，点开看实际注入的原文。
+- **记忆的四条斜杠**：`/flush`（把本会话要点写进 workspace 的 `observations/`，压缩前达门槛也会
+  自动 flush）、`/dream`（把 observations 整理成 topics）、`/memory`（双栏浏览：左列表右预览，
+  `/` 按文件名或正文过滤，`t` 是会话开关）、`/remember <note>`（让模型改写成结构化 markdown
+  后落一条 global observation，改写失败就存原文）。
+- **`/memory` 里能删条目**：`x` 连按两次删掉选中的 topic / inbox note —— 归档进 `archive/`、
+  在 `memory_state.sqlite` 留墓碑、从索引里删行；`MEMORY.md`、`archive/` 与两个 db 只读，
+  可写范围只有 `topics/*.md` 与 `observations/_inbox/*.md`。
+- **`memory_search` / `memory_get` 变成常驻工具**：记忆启用时直接 `register` 进工具表，不再需要
+  `search_tool` 发现（启用开关与 `t` 都会即时反映到表里）；`memory_search` 的结果在 TUI 里画成
+  Grok 风格的折叠卡，`memory_get` 走 Read 卡。
+- **多会话分页（tabs）完全隔离**：goal、todos、plan-mode、模型与协议、权限模式与权限队列、
+  提问队列都按页各一份 —— 后台页弹的批准框 / 提问不再串进正在看的那一页；工具表、LLM、MCP
+  连接、浏览器、cua、后台任务仍全局一份。标签栏用 `◆` 标出有待回答的页。
+- **分页各自落盘**：常驻分页按**自己的 cwd** 落盘，关页或退出后都能在 `/resume` 与会话面板里
+  找到，从历史会话开的页接着写回原会话目录；`/btw` 旁问页仍不落盘。dashboard 的历史会话按
+  `Enter` 开成**自己的一页**（原来只是恢复到当前页），已经开着的再按只切过去，别的 cwd 的行尾
+  标「其它目录」并提示先 `/cd`。
+- **`dock serve` 无头入口**：`dock serve --origin <origin> [--application <id>] [--bind <addr>]`
+  不挂 TUI，网关挂载即在回环上监听（默认端口交给 OS 分配）；stdout 一行一个 JSON，先报
+  `ready`（含 ws / ticket / 过期时间），之后 stdin 每写一行 `{"cmd":"ticket"}` 回一张新 ticket，
+  stdin 关掉即退出。ticket 只走这条管道交给父进程，不开放 HTTP 领取。桌面 GUI 就靠它拉起单个
+  Dock 进程、跨目录列会话。
+- **`dock.1` 改按会话开页**：`thread/start` 另开一页、`thread/open` 打开关着的会话、
+  `thread/close` 关页、`thread/list {scope:"all"}` 列开着的页加跨目录名册（第 1 页的别名仍是
+  `live`），每页一份投影；`turn/start|enqueue|steer`、`environment/*`、`slash/execute` 对关着的
+  会话**按需开页**，而 `turn/cancel`、`queue/*` 这类不产生内容的调用不开页。
+- **网关的查询与状态**：`thread/search` 按消息内容搜会话（中文按子串匹配，空格分词要全命中）；
+  `thread/history` 对关着的会话也回放成 `events`（按真实时间、每轮以 `turn/completed` 收尾，
+  重开会话不再挂着一轮）；`thread/rename` / `thread/delete` 对别的 cwd 的关着会话也能用。
+- **一轮的结果落盘**：每轮结束往 `chat_history.jsonl` 写一行 `turn-end`（completed / cancelled /
+  failed，失败时带 `error` 原文），关着的会话回放时能看出这一轮是停止还是出错；旧会话没有这行
+  就整行跳过，读法照旧。
+- **一轮的结果推给浏览器**：`turn/completed` 带 `status`（completed / cancelled / failed）与失败
+  的 `error` 原文；工具完成状态 `item/tool_completed.status` 由落盘的 `is_error` 与权限拒绝判定，
+  报 completed / failed / cancelled / denied；模型的思考过程新增 `item/reasoning_delta` 增量推送；
+  提问支持多选（`interaction/requested` 每题带 `multiSelect`）。
+- **预设（`presets`）从只读变可写**：新增 `preset/list`（带 builtin / origin / icon，另给
+  `defaultId`）、`preset/create`（可 `basedOn` 复制一份人设 / 工具 / 子代理）、`preset/delete`
+  （删掉覆盖层即恢复内置，没改过的内置拒删）、`preset/get` / `preset/update`（整份读写，损坏
+  预设可整份重写）、`tool/catalog`（resident / deferred / dynamic），以及经 "llm" 采样一次的
+  `preset/draft` / `preset/rewrite` / `preset/suggestTools`（AI 起草预设、改写提示词、按目录推荐
+  工具；跑在隔离会话里，不写盘）。`agent.yml` 多一个可选 `icon`。
+- **设置页要的数据**：`mcp/list`（每台的连接状态、工具数，不含启动命令）、`mcp/reconnect`、
+  `model/list`（只给鉴权类型，不给密钥）。
+- **动态插件的 Rhai 能力扩了一圈**：脚本可自己发 HTTP（`http_request`，禁跟随重定向）、正则
+  一族、Blob body / multipart 上传与 `host.read_bytes` 按路径读文件、codecs 与 `hmac_sha256`
+  （签名 query / Basic auth）、`unix_time` / `utc_now` / `utc_date`、`host.secret`（读
+  `secrets.json` 或 `DOCK_SECRET_*`，首次读走 Ask 且摘要不带内容）；`cordis_define` 支持
+  `source_path` 指向磁盘上的脚本文件，不必再把大段 Rhai 塞进参数。
+- **`read_file` 支持文档与图片**：按字节判断类型 —— 图片压进多模态结果、PDF 解析（新 `format`
+  默认 `image`，按页渲染成图，10 页以上必须给 `pages`，单次最多 20 页；`format=text` 仍抽文本）、
+  PPTX 按 `--- Slide N ---` 输出含备注，docx 这类不认识的二进制直接拒；新增 `pages` / `format`
+  两个参数。
+- **会话记住模型与推理强度**：`meta.json` 新增 `model` / `effort`，切完立刻写回，`/resume`、
+  `--resume`、网关开页时切回来（模型已经不在 `config.toml` 里就留着当前的，不报错）。
+- **`/undo`（别名 `/rewind`）与空闲 Esc**：撤销上一轮**没有模型输出**的用户消息 —— 从会话日志
+  里摘掉并还原回输入框（含图片，图片 chip 重新绑定回输入框）。只有请求失败、PreStep、提醒不算
+  输出，所以 provider 报错那轮可以直接撤了重发，不必 `/new`；底栏可撤时显示 `Esc:undo`。
+- **只读场景也给 `bash`**：计划模式开着、子会话能力档是 `read-only`、或角色预设标了
+  `read_only: true`（内置 `explore` / `plan`、`/btw` 页）时，判定为只读的命令（白名单程序、无写盘
+  重定向、无命令替换与后台、无 `git commit` / `sed -i` 这类改动参数）直接跑，其余一律问用户；
+  自动批准与「以后都允许」在这里不算数。
+- **压缩分段与会话全文搜索**：compact 成功后往会话目录写 `compaction/segment_NNN.md` 与
+  `INDEX.md`；`/resume` 与会话面板的搜索建 FTS 索引（随会话目录重建），按用户提示词内容也能
+  命中，不再只搜标题。
+- **`dock-core`**：新的 TS 包，把 `dock.1` 的线程事件做成类型化契约外加线程状态 reducer，
+  无运行时依赖、Node 22 直跑 `.ts`；`npm test` 与 `npm run typecheck` 进了 CI。
+- **提问 overlay 支持多选**：多选画 `□` / `☑`，「其他」是真输入框（有光标与聚焦框，输入法
+  候选条不再飘位），`Space` / `→` 切题、`Esc` 逐级退。
+- **权限框的摘要**：长参数按 grok 风格做引号感知换行，动作与角色 / 标签高亮，长 token 隐去。
+
+### 变更
+
+- **子代理只走信箱**：`report` 工具删除，并入方向中立的 `send_message({agent_id, message})`；
+  「做完要回报」变成写进子代理初始任务的一句话。子代理不再是作业（`job` / `kill_task` 只管
+  后台 bash 与 monitor，列不出子代理），id 一族一名字（子代理 `agent_id`、作业 `job_id`）。
+  排队回执的字幕从「本轮结束后执行」改成「运行中，下一步读到」；文档同时写明**分页父信箱尚未
+  端到端** —— 从 `main#N` 派出的子代理回话进的是全局父信箱，只有 `main` 去取。
+- **`/cd` 不再改进程 cwd**：进程从启动起 cwd 就不动，目录挂在会话上 —— 工具、系统提示的辅助
+  函数、子进程、TUI 视图都读会话自己的 cwd；`/cd` 只钉当前这一页，新分页继承开它那页的目录，
+  子代理继承父会话。项目级资源（`.dock/config.toml`、skills、动态插件）只认启动目录，`/cd` 到
+  带这些的目录会提示「只在启动目录生效」。
+- **计划文件按会话 / 页落盘**：主会话在 `sessions/<cwd-key>/<id>/plan.md`，不落盘的分页在
+  `tabs/<pid>/<main#N>/plan.md`；`/view-plan` 看本页的计划，计划写门只豁免本页那一个文件。
+- **`cordis_*` 从八颗收成六颗**：`cordis_inspect_self` 并入 `cordis_inspect`（给 pluginId /
+  packageId），`cordis_undefine` 并入 `cordis_stop(drop: true)`；两者都不删磁盘文件。目的是让
+  这几颗挤进 `search_tool` 的默认命中数。
+- **工具卡失败改读 `is_error`**：工具结果新增 `is_error` 并落盘，TUI 不再按输出文本猜成败
+  （删掉 execute / mcp / search_tool / memory_search 四份各自的规则）。
+- **技能与规约路径整读**：`read_file` 对 `SKILL.md`、`AGENTS.md` 这类路径在 token 上限内整份读完，
+  不再被 1000 行截断。
+- **`inject` 明确是启动闸不是授权**：`waiting` 以内核 fiber 状态为准不是权限；`cordis_inspect`
+  的 services 分「reachable」「also mounted」。
+- **dashboard 滚轮按落点分工**：落在对话区滚对话、落在列表区移选中行、落在别处不动；
+  `Ctrl+J` / `Ctrl+K` 按焦点分工；peek 从只看尾巴改成看整段。
+- **工具链下限提到 rustc 1.94**（`[workspace.package].rust-version`，CI 与 release 钉 1.94.0）。
+- **主任务 dock 的 `[✗]`** 走与 `/tasks` 相同的 kill_task / Jobs 路径，不再是一套私有取消。
+- **输入框焦点改成事件驱动**：只在 working 边沿变化，回合中点输入框能聚焦、回合结束空框自动还焦；
+  聚焦边框对比拉高，点滚动区失焦、点回框里夺焦。
+
+### 修复
+
+- **中文记忆搜索恒为空**：FTS5 的 unicode61 不切 CJK，写入与查询两侧把连续中文展开成重叠二元组；
+  含 FTS5 语法字符的词按 phrase 转义。
+- **记忆假命中**：多词查询从 OR 改成 AND，FTS-only 的分数下限抬高，生成的 `MEMORY.md` 不再
+  参与排序归一化。
+- **记忆的体量门**：`memory_get` 只收 memory 根下的 `.md`、超过 256 KiB 拒绝；`/memory` 的删除
+  对超过 256 KiB 的文件直接拒绝（不整份读进来算 hash）；记忆相关的错误与通知全部改成中文。
+- **流式回复在浏览器里重复**：用量更新不再多发一次空的 `LlmStream`，一轮只发一次
+  `turn/completed`。
+- **`mcp/reload` 以前什么都没重载**（只回服务器个数），现在真的重载并回报
+  added / removed / reconnected / disabled / failed。
+- **`http_request` 禁跟随重定向**：SSRF 与 host 门只护得住第一个 URL，3xx 现在原样返回。
+- **`regex_replace` 的 UTF-8**：`$n` 替换模板按字节拼接会把中文写坏，改成按字符。
+- **关着的会话改名 / 删除**：在别的 cwd 的会话以前一律回落 not_found，现在按名册找到并用会话
+  自带的 cwd 改 `meta.json` 或删目录。
+- **没有对话内容的会话不再落盘**：只有「MCP 已连接」这类后台提醒、提示词组装或 turn-end 记账的
+  会话不写盘（写过的删掉），会话列表不再冒空会话（归档同一条规则）。
+- **恢复时应用会话记的预设**：TUI `/resume`、进程 `--resume`、网关恢复、slash resume 四条路
+  统一走 `apply_restored_preset`。
+- **恢复撞车**：别的页正 live 在同一份会话上时切过去，而不是再恢复一份（两页同时追加同一个
+  `chat_history.jsonl` 会弄坏历史）。
+- **MCP elicitation 串页**：串行化按 `tools/call` 的 id 归属，而不是按连接把整台服务器串起来 ——
+  两页可以同时调用、各弹各的框；关页时这一页未答的 elicitation 会被 cancel 掉，不再卡住工具调用。
+- **分页杂项**：跨进程的计划目录、关页残留、写门路径（`..` 与 macOS `/var` ↔ `/private/var`
+  符号链接前缀不再误挡）等一批 review 问题。
+- **流传输失败**改放进 `LlmOutput.error`，不再当正文写进 wire 历史（此前它会挡住 Esc 取消-收回）。
+- **模型选不到的报错**：模型不在目录里又没有地址时直说，并指向 `config.toml` 的
+  `[model."<id>"]`；在目录里但当前协议没配地址就说缺哪个 `api_base_url`，不再报
+  `relative URL without a base`。
+- **Mermaid 流程图**的内联排版不再被换行拆断，操作行紧跟图表并能鼠标悬停高亮。
+- **`ask` 提问**的单选不再画多个实心点，「其他」有真实焦点，`Space` / `→` 切题。
+- **CI**：显式安装 rustfmt / clippy 组件。
+
+### 破坏性变更（升级注意）
+
+- 记忆落盘布局从扁平的 `~/.dock/memory/*.md` / `.dock/memory/` 换成
+  `$DOCK_HOME/memory/{global,workspace-<slug>}/`。旧路径仍然**只读**兼容（`memory_get` 按路径
+  还能读），但不再被索引，也不会再双写；旧路径下的 `.txt` 不再可读。想继续用就把文件搬进新布局
+  的 `topics/` 或 `observations/_inbox/`。
+- 子代理协议：`report` 没了，用 `send_message` 回话；`subagent_id` / `task_id` 分别改成
+  `agent_id` / `job_id`（旧字段仍收）。旧的 `agents/*.yml` 里写着 `report` 的仍能读。
+- 动态插件：`cordis_inspect_self` → `cordis_inspect`，`cordis_undefine` → `cordis_stop(drop:true)`。
+- `dock.1`：`turn/completed` 改成**一轮一次**（以前每个「有文本、没工具」的流式片段后都发，
+  客户端按它切分会看到轮数变少）；`item/tool_completed.status` 是四值枚举，按输出文本猜成败的
+  客户端必须改；`scope:"all"` 的列表会带回跨目录会话（不带 scope 仍是旧语义）。
+- `/cd` 不再改进程 cwd，项目级 `.dock/` 配置与 skills 只在启动目录生效；计划文件位置按会话 / 页
+  划分（旧的 `.dock/plan.md` 相对路径仍被写门认作兼容）。
+- 从源码构建需要 rustc 1.94+。
+
 ## [0.1.1] - 2026-09-19
 
 ### 新增
