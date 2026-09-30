@@ -2205,3 +2205,84 @@ async fn local_gateway_also_accepts_device_tokens() {
     let _ = Rpc::connect(h.addr, &ticket).await;
     devices::revoke("local-test-device").unwrap();
 }
+
+/// `fs/*`：只读看会话 cwd 里的文件。列目录照 `.gitignore`、目录在前；读文本 / 图片 /
+/// 二进制；按名字找；出了工作区、没开的会话、缺参数都拒绝。
+#[tokio::test]
+async fn fs_methods_browse_the_sessions_workspace_read_only() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["workspaceFiles"], true,
+        "{init}"
+    );
+
+    let dir = project_dir("fs-panel");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("target")).unwrap();
+    std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(dir.join("notes.md"), "# 笔记\n").unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+    std::fs::write(dir.join("target/app"), [0u8, 1]).unwrap();
+    std::fs::write(dir.join("dot.png"), [0x89, b'P', b'N', b'G']).unwrap();
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let root = rpc.call("fs/list", json!({ "threadId": id })).await;
+    let names: Vec<&str> = root["result"]["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{root}"))
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["src", "dot.png", "notes.md"], "{root}");
+    assert_eq!(root["result"]["entries"][0]["kind"], "dir");
+
+    let sub = rpc
+        .call("fs/list", json!({ "threadId": id, "path": "src" }))
+        .await;
+    assert_eq!(sub["result"]["entries"][0]["path"], "src/lib.rs", "{sub}");
+
+    let text = rpc
+        .call("fs/read", json!({ "threadId": id, "path": "notes.md" }))
+        .await;
+    assert_eq!(text["result"]["kind"], "text", "{text}");
+    assert_eq!(text["result"]["text"], "# 笔记\n");
+    let image = rpc
+        .call("fs/read", json!({ "threadId": id, "path": "dot.png" }))
+        .await;
+    assert_eq!(image["result"]["kind"], "image", "{image}");
+    assert_eq!(image["result"]["data"], "iVBORw==");
+
+    let found = rpc
+        .call("fs/find", json!({ "threadId": id, "query": "lib" }))
+        .await;
+    assert_eq!(found["result"]["paths"], json!(["src/lib.rs"]), "{found}");
+
+    let escape = rpc
+        .call("fs/read", json!({ "threadId": id, "path": "../x" }))
+        .await;
+    assert_eq!(
+        escape["error"]["details"]["code"], "invalid_params",
+        "{escape}"
+    );
+    let missing = rpc.call("fs/read", json!({ "threadId": id })).await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "invalid_params",
+        "{missing}"
+    );
+    let closed = rpc
+        .call("fs/list", json!({ "threadId": "no-such-thread" }))
+        .await;
+    assert_eq!(
+        closed["error"]["details"]["code"], "thread_not_open",
+        "{closed}"
+    );
+}
