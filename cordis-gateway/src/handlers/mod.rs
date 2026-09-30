@@ -1,3 +1,4 @@
+pub mod browser_view;
 pub mod connection;
 pub mod environment;
 pub mod image_inputs;

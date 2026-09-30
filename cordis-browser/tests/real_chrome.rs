@@ -258,3 +258,81 @@ async fn p2_evaluate_network_iframe() {
     assert!(missing.is_error, "{}", missing.text);
     hub.shutdown().await;
 }
+
+/// 网关看画面的那条路：hub 开页 → 名册里查到这个会话的活动 target → View 挂上去
+/// 收到帧 → 以用户身份点按钮、页面有反应 → 导航与后退。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn view_streams_frames_and_forwards_input() {
+    use cordis_browser::view::{ScreencastOptions, View};
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("view") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "gui-thread",
+        "browser_open",
+        json!({"url": "data:text/html,<title>Before</title><button style='position:fixed;left:0;top:0;width:200px;height:100px' onclick=\"document.title='Clicked'\">Go</button>"}),
+    )
+    .await;
+    let tabs = cordis_browser::registry::lookup("gui-thread").expect("hub publishes its tabs");
+    let target = tabs.active.clone().expect("active target");
+    assert_eq!(tabs.targets, vec![target.clone()]);
+
+    let view = View::attach(&target).await.unwrap();
+    let mut frames = view.screencast(ScreencastOptions::default()).await.unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(10), frames.next())
+        .await
+        .expect("a frame within 10s")
+        .expect("stream open");
+    assert!(frame.data.len() > 100, "base64 jpeg");
+    assert!(
+        frame.device_width > 0.0 && frame.device_height > 0.0,
+        "{frame:?}"
+    );
+    view.ack(frame.ack_id).await;
+
+    assert_eq!(view.info().await.title, "Before");
+    view.input(&json!({"type": "mouse", "action": "click", "x": 50, "y": 50}))
+        .await
+        .unwrap();
+    let mut clicked = false;
+    for _ in 0..40 {
+        if view.info().await.title == "Clicked" {
+            clicked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(clicked, "user click reached the page");
+
+    let title_becomes = |want: &'static str| {
+        let view = &view;
+        async move {
+            for _ in 0..60 {
+                if view.info().await.title == want {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            false
+        }
+    };
+    view.navigate(&json!({"url": "data:text/html,<title>Second</title>"}))
+        .await
+        .unwrap();
+    assert!(title_becomes("Second").await, "address bar navigation");
+    view.navigate(&json!({"action": "back"})).await.unwrap();
+    // 后退会重新加载上一页：标题回到页面自己写的 Before（Clicked 是运行时改的）。
+    assert!(title_becomes("Before").await, "history back");
+
+    // 关 View 不关页：agent 那边照常。
+    view.close().await;
+    ok(&hub, "gui-thread", "browser_snapshot", json!({})).await;
+    ok(&hub, "gui-thread", "browser_close", json!({})).await;
+    assert!(cordis_browser::registry::lookup("gui-thread").is_none());
+    hub.shutdown().await;
+}

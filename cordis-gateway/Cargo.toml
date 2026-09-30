@@ -10,6 +10,7 @@ license = "Apache-2.0"
 base64 = "0.22"
 axum = { version = "0.8", features = ["ws", "json"] }
 cordis = { path = "../cordis-rust" }
+cordis-browser = { path = "../cordis-browser" }
 cordis-spine = { path = "../cordis-spine" }
 cordis-tui = { path = "../cordis-tui" }
 futures-util = "0.3"

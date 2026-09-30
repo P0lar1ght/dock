@@ -115,8 +115,9 @@ pub use tools::lsp::{
     LspSetupReport, LspSetupScope,
 };
 pub use tools::mcp::{
-    is_mcp_public_name, mcp_client, public_tool_name, split_mcp_public_name, ElicitPrompt,
-    Elicitation, Mcp, McpReloadReport, McpStatus, McpToolStatus, SEARCH_TOOL_NAME, USE_TOOL_NAME,
+    is_mcp_public_name, mcp_client, public_tool_name, session_key as mcp_session_key,
+    split_mcp_public_name, ElicitPrompt, Elicitation, Mcp, McpReloadReport, McpStatus,
+    McpToolStatus, SEARCH_TOOL_NAME, USE_TOOL_NAME,
 };
 pub use tools::memory::{
     maybe_flush_before_compact, run_dream, run_flush, run_remember, run_remember_async,

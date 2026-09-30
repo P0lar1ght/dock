@@ -825,6 +825,7 @@ dependencies = [
  "axum",
  "base64",
  "cordis",
+ "cordis-browser",
  "cordis-spine",
  "cordis-tui",
  "futures-util",

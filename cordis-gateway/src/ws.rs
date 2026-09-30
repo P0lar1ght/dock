@@ -8,9 +8,10 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::handle::GatewayHandle;
+use crate::handlers::browser_view::{self, BrowserViews};
 use crate::http::AppState;
 use crate::pairing::IssuedTicket;
 use crate::protocol::{self, RpcError};
@@ -29,6 +30,18 @@ pub async fn upgrade(
     ws.on_upgrade(move |socket| handle_socket(socket, state.gateway, origin))
 }
 
+/// 发往这条连接的一条消息。画面帧带「写出去了」的回执：写完才让 Chrome 发下一帧，
+/// 慢客户端不会在这里攒出一长串帧（见 [`browser_view`]）。
+pub(crate) enum Outgoing {
+    Text(String),
+    Frame {
+        text: String,
+        written: oneshot::Sender<()>,
+    },
+}
+
+pub(crate) type OutTx = mpsc::UnboundedSender<Outgoing>;
+
 struct Conn {
     gateway: GatewayHandle,
     origin: String,
@@ -41,7 +54,9 @@ struct Conn {
 
 async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String) {
     let (mut sink, mut stream) = socket.split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Outgoing>();
+    // 连接级：断开时随它一起丢掉，推送任务全部中止。
+    let views = Arc::new(BrowserViews::default());
     let conn = Arc::new(Mutex::new(Conn {
         gateway: gateway.clone(),
         origin,
@@ -53,8 +68,15 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
-            if sink.send(Message::Text(msg.into())).await.is_err() {
+            let (text, written) = match msg {
+                Outgoing::Text(text) => (text, None),
+                Outgoing::Frame { text, written } => (text, Some(written)),
+            };
+            if sink.send(Message::Text(text.into())).await.is_err() {
                 break;
+            }
+            if let Some(written) = written {
+                let _ = written.send(());
             }
         }
     });
@@ -75,7 +97,8 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
                                 .flatten()
                         };
                         if let Some(alias) = alias {
-                            let _ = out_tx.send(event.as_notification_as(&alias).to_string());
+                            let _ = out_tx
+                                .send(Outgoing::Text(event.as_notification_as(&alias).to_string()));
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -89,37 +112,43 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
         let Message::Text(text) = msg else {
             continue;
         };
-        // 要调模型的方法另起任务：不能占着连接锁等好几秒。
-        if let Some(job) = detached(&conn, &text).await {
+        // 要调模型的方法、挂浏览器画面另起任务：不能占着连接锁等好几秒。
+        if let Some(job) = detached(&conn, &views, &out_tx, &text).await {
             let out_tx = out_tx.clone();
             tokio::spawn(async move {
-                let _ = out_tx.send(job.await);
+                let _ = out_tx.send(Outgoing::Text(job.await));
             });
             continue;
         }
         let reply = dispatch_text(&conn, &text).await;
         if let Some(reply) = reply {
-            if out_tx.send(reply).is_err() {
+            if out_tx.send(Outgoing::Text(reply)).is_err() {
                 break;
             }
         }
     }
     fanout.abort();
+    drop(views);
     drop(out_tx);
     let _ = writer.await;
 }
 
-/// [`rpc::is_detached`] 的请求：锁里只查鉴权、拿网关句柄，放锁后再跑。不是这类请求
-/// （或没法解析）回 `None`，照常走 [`dispatch_text`]。
+/// [`rpc::is_detached`] 与 `browser/view/*` 的请求：锁里只查鉴权、拿网关句柄，放锁后
+/// 再跑。不是这类请求（或没法解析）回 `None`，照常走 [`dispatch_text`]。
 async fn detached(
     conn: &Arc<Mutex<Conn>>,
+    views: &Arc<BrowserViews>,
+    out: &OutTx,
     text: &str,
 ) -> Option<impl std::future::Future<Output = String>> {
     let value: Value = serde_json::from_str(text).ok()?;
     let method = value.get("method").and_then(Value::as_str)?.to_string();
-    if !rpc::is_detached(&method) {
+    let viewing = browser_view::is_browser_view(&method);
+    if !rpc::is_detached(&method) && !viewing {
         return None;
     }
+    let views = views.clone();
+    let out = out.clone();
     let id = value.get("id").cloned();
     let params = value.get("params").cloned().unwrap_or(json!({}));
     let ready = {
@@ -140,6 +169,9 @@ async fn detached(
     };
     Some(async move {
         let result = match ready {
+            Ok(gateway) if viewing => {
+                browser_view::dispatch(&gateway, &views, &out, &method, params).await
+            }
             Ok(gateway) => rpc::dispatch_detached(gateway, &method, params).await,
             Err(e) => Err(e),
         };
