@@ -55,6 +55,20 @@ root.plugin(gateway(), ())?;
 
 ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI 确认，但照样钉在 `origin` 上、照样一小时过期。**只经 stdout 交给父进程**，不留绑定——所以 `/v1/connection/tickets` 仍然 403，别的本机进程伪造同一个 Origin 也领不到。serve 模式下 stdout 只能写这些行，诊断走 stderr。
 
+## 远程模式与设备令牌（`devices.rs`，`dock serve --remote`）
+
+部署步骤见 [docs/REMOTE.md](../docs/REMOTE.md)。这里只记网关的行为。
+
+- `gateway_remote(bind)`：挂载即监听，**仍只绑回环**，端口占用直接报错（不顺延、不开 `[::1]`）。
+- 路由只剩 `/api/ws`：配对与 ticket 的 HTTP 路由不挂。
+- `connection/authenticate { token }`：设备令牌，任何模式都认；远程模式**只**认它。
+  - `initialize.connection.application` 报 `device:<名字>`，`origin` 是这条连接的 Origin。
+- `connection/authenticate { ticket }`：本机配对 / `dock serve`；远程模式回 `unauthenticated`。
+- 同一条连接鉴权失败 5 次：服务端关连接，关闭码 `4429`。
+- 连着的设备每 2 秒复查一次；被撤销就关连接，关闭码 `4401`。
+- 令牌名单：`$DOCK_HOME/devices.json`（只存 sha256，unix 0600，只有 `dock device add|revoke` 写）。
+- 最后使用时间：`$DOCK_HOME/devices.seen.json`（只有网关写，和名单分开，不会覆盖新加的设备）。
+
 ## 协议（`protocol.rs` / `rpc.rs`）
 
 - `PROTOCOL_VERSION` = `"dock.1"`，WS 路径 `WS_PATH` = `/api/ws`

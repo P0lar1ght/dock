@@ -93,6 +93,7 @@ cd dock-core && npm ci && npm test && npm run typecheck   # 协议核心（Node 
 - 跑与改动对应的 crate 测试；改工具表跑 `install_app_registers`。
 - 保持插件树不变式：一张 `"tools"` 表、named service live-lookup、waterfall 链不吞。
 - Gateway 只绑 loopback，默认挂载但不监听（`dock serve` 例外：由父进程拉起、挂载即监听，ticket 只经 stdout 交给父进程）。
+- 远程访问走 `dock serve --remote`：仍只绑 loopback，只认设备令牌（`dock device`），TLS 交给反向代理 / Tailscale（见 `docs/REMOTE.md`）。不要让网关自己监听非回环地址。
 - 同步 `TOOLS.md` / `CLI.md` / 相关 crate README。
 
 **Ask first**
