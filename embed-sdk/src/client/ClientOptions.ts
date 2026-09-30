@@ -7,6 +7,12 @@ import type { StorageLike } from './ThreadStore.js';
 export interface DockClientOptions {
   application: string;
   gatewayUrl?: string;
+  /**
+   * Device token from `dock device add` for a remote gateway (`dock serve --remote`).
+   * When set, `connect()` authenticates with it instead of pairing, `gatewayUrl`
+   * is required and must be `https://` (or loopback `http://`). Kept in memory only.
+   */
+  deviceToken?: string;
   requestTimeoutMs?: number;
   fetch?: typeof globalThis.fetch;
   webSocketFactory?: WebSocketFactory;

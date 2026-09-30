@@ -2,7 +2,7 @@ import { HttpBootstrapClient } from '../bootstrap/HttpBootstrapClient.js';
 import { PairingFlow } from '../bootstrap/PairingFlow.js';
 import { TicketFlow } from '../bootstrap/TicketFlow.js';
 import type { PairingRequestResult, TicketResult } from '../bootstrap/types.js';
-import { DEFAULT_GATEWAY_URL } from '../bootstrap/GatewayUrlPolicy.js';
+import { DEFAULT_GATEWAY_URL, normalizeRemoteGatewayUrl } from '../bootstrap/GatewayUrlPolicy.js';
 import { CONNECTION_AUTHENTICATE, INITIALIZE, WORKSPACE_LIST } from '../protocol/methods.js';
 import type {
   AuthorizedWorkspace,
@@ -55,8 +55,9 @@ export class DockClient {
   readonly hostTools: HostToolsClient;
   readonly imageInputs: ImageInputsClient;
   readonly mcp: McpClient;
-  private readonly pairing: PairingFlow;
-  private readonly tickets: TicketFlow;
+  private readonly pairing?: PairingFlow;
+  private readonly tickets?: TicketFlow;
+  private readonly deviceToken?: string;
   private readonly timeoutMs: number;
   private readonly webSocketFactory?: WebSocketFactory;
   private readonly threadStore: ThreadStore;
@@ -84,13 +85,20 @@ export class DockClient {
       ? undefined
       : options.storage || defaultSessionStorage();
     this.clientInstanceId = stableClientInstanceId(this.application, clientStorage);
-    const http = new HttpBootstrapClient({
-      gatewayUrl: options.gatewayUrl || DEFAULT_GATEWAY_URL,
-      fetch: options.fetch
-    });
-    this.gatewayUrl = http.gatewayUrl;
-    this.pairing = new PairingFlow(http, this.application);
-    this.tickets = new TicketFlow(http, this.application);
+    const deviceToken = String(options.deviceToken || '').trim();
+    if (deviceToken) {
+      // 远程网关：只认设备令牌，没有配对 / ticket 的 HTTP 入口。
+      this.gatewayUrl = normalizeRemoteGatewayUrl(options.gatewayUrl);
+      this.deviceToken = deviceToken;
+    } else {
+      const http = new HttpBootstrapClient({
+        gatewayUrl: options.gatewayUrl || DEFAULT_GATEWAY_URL,
+        fetch: options.fetch
+      });
+      this.gatewayUrl = http.gatewayUrl;
+      this.pairing = new PairingFlow(http, this.application);
+      this.tickets = new TicketFlow(http, this.application);
+    }
     this.timeoutMs = options.requestTimeoutMs || 10_000;
     this.webSocketFactory = options.webSocketFactory;
     this.hostTools = new HostToolsClient();
@@ -146,21 +154,21 @@ export class DockClient {
   }
 
   requestPairing(): Promise<PairingRequestResult> {
-    return this.pairing.begin();
+    return this.pairingFlow().begin();
   }
 
   pollPairing(pairingRequestId: string) {
-    return this.pairing.poll(pairingRequestId);
+    return this.pairingFlow().poll(pairingRequestId);
   }
 
   waitForPairingTicket(pairingRequestId: string): Promise<TicketResult> {
-    return this.pairing.waitUntilApproved(pairingRequestId);
+    return this.pairingFlow().waitUntilApproved(pairingRequestId);
   }
 
   async completePairing(pairingRequestId: string, _tokenValue?: string) {
     this.beginManualConnection();
     try {
-      const exchanged = await this.pairing.complete(pairingRequestId);
+      const exchanged = await this.pairingFlow().complete(pairingRequestId);
       return await this.connectWithTicket(exchanged.ticket);
     } catch (error) {
       this.events.set('error', error);
@@ -179,8 +187,7 @@ export class DockClient {
   async connect() {
     this.beginManualConnection();
     try {
-      const issued = await this.tickets.acquire();
-      return await this.connectWithTicket(issued.ticket);
+      return await this.connectOnce();
     } catch (error) {
       this.events.set('error', error);
       throw error;
@@ -284,17 +291,44 @@ export class DockClient {
     return session.steerTurn(message);
   }
 
-  private async connectWithTicket(ticketValue: string): Promise<ClientConnectionSnapshot> {
+  /** 设备令牌就用它；否则向本机网关要一张 ticket。 */
+  private async connectOnce(): Promise<ClientConnectionSnapshot> {
+    if (this.deviceToken) return this.connectWithCredentials({ token: this.deviceToken });
+    const issued = await this.pairingFlowTickets().acquire();
+    return this.connectWithTicket(issued.ticket);
+  }
+
+  private pairingFlow() {
+    if (!this.pairing) {
+      throw new DockClientError('pairing_unavailable', 'Remote gateways use a device token, not pairing');
+    }
+    return this.pairing;
+  }
+
+  private pairingFlowTickets() {
+    if (!this.tickets) {
+      throw new DockClientError('pairing_unavailable', 'Remote gateways use a device token, not tickets');
+    }
+    return this.tickets;
+  }
+
+  private connectWithTicket(ticket: string): Promise<ClientConnectionSnapshot> {
+    return this.connectWithCredentials({ ticket });
+  }
+
+  private async connectWithCredentials(
+    credentials: { ticket: string } | { token: string }
+  ): Promise<ClientConnectionSnapshot> {
     this.detachPeer(true);
-    let ticket = ticketValue;
+    let auth: { ticket: string } | { token: string } | undefined = credentials;
     const transport = await WebSocketTransport.connect(
       gatewayWebSocketUrl(this.gatewayUrl),
       this.webSocketFactory
     );
     const peer = new JsonRpcPeer(transport, this.timeoutMs);
     try {
-      await peer.request(CONNECTION_AUTHENTICATE, { ticket });
-      ticket = '';
+      await peer.request(CONNECTION_AUTHENTICATE, auth);
+      auth = undefined;
       const initialize = await peer.request<InitializeResult>(INITIALIZE, {
         clientInfo: {
           name: '@dock/embed',
@@ -341,7 +375,7 @@ export class DockClient {
       else peer.close();
       throw error;
     } finally {
-      ticket = '';
+      auth = undefined;
     }
   }
 
@@ -550,8 +584,7 @@ export class DockClient {
       await reconnectDelay(policy.delay(attempt));
       if (this.explicitlyDisconnected || generation !== this.reconnectGeneration) return;
       try {
-        const issued = await this.tickets.acquire();
-        await this.connectWithTicket(issued.ticket);
+        await this.connectOnce();
         return;
       } catch (error) {
         lastError = error;
