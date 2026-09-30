@@ -19,7 +19,8 @@
 - **截图会吃图片配额**：`get_window_state` **默认同时返回截图**，而 `tool_images.rs` 的 `MAX_TOOL_IMAGES = 5` 是每轮硬上限。纯重新索引时传 `include_screenshot: false`（便宜路径，只要树）；只要预览不要树则 `include_accessibility_tree: false`（AX walk 是贵的那半，最长 20s）。两个都 false 是错误。大树（Electron / Obsidian 10k+ 元素）用 `max_elements` / `max_depth` / `query` 收口；缺省是 ≤2000 元素、深度 ≤25。`capture_mode` 已废弃且被忽略。
 - **权限 / 计划门**：所有 `mcp_cua-driver__*` 与 `bash` 同级（`needs_permission` + `blocked_in_plan`）。`use_tool` 内层 `execute` 会命中该门。**权限摘要**：`mcp_cua-driver__*`（及一般长 JSON MCP）走结构化摘要（action + role/label，长 token 脱敏），不再用裸 `format!("{} {}", name, args[..120])` 把 CUA 目标挤掉。
 - **Allowlist**：MCP extras 仍按现规则 **穿过** Agent preset allowlist；但 `code` / `cordis`（含 general-purpose）须保留 `search_tool` / `use_tool`。`minimal` / `warden` 主代理不含这两项则调不到 cua-driver。
-- **勿混 BUA**：`cua-driver` 自带的 `browser_*` MCP 工具 ≠ Dock chromiumoxide `browser_*`。网页自动化优先 Dock BUA；桌面键鼠 / 开应用走 cua-driver。
+- **勿混 BUA**：`cua-driver` 自带的 `browser_*` MCP 工具 ≠ Dock 浏览器 `mcp_browser__browser_*`。
+- 网页自动化优先 Dock 浏览器（内置 MCP `browser`，见 [browser](browser.md)）；桌面键鼠 / 开应用走 cua-driver。
 - **Linux 坑**（写进安装说明）：需要 **X11 或 XWayland**（原生 Wayland 仍预览）；`DISPLAY` / `XAUTHORITY`；`at-spi2-core`（+ 必要时 toolkit-accessibility）否则 AT-SPI / `get_window_state` 弱；把 `~/.local/bin` 放进 `PATH`，或用 `cua-driver mcp-config` 给出的绝对 command；telemetry 默开，可 `cua-driver telemetry disable`。
 - **TUI**：`/computer` 驾驶舱带状态机（未挂载 / 未安装 / 缺授权 / 已禁用 / 未连上 / 已连接）与两个动作键：`i` 安装或重装 driver、`p`（macOS）跑 `permissions grant`，`Ctrl+R` 重新探测并重载 MCP 配置。两个动作都是**两步**：先在确认块里列出要执行什么，Enter 才跑；进度一行行进驾驶舱。状态、文案、动作全在 named `"computer"` 里，TUI 只渲染 + 路由按键。不嵌真桌面。
 - **冒烟**：装好后 `/mcps` 见 `cua-driver` → `search_tool` 查桌面工具 → `use_tool`（先过权限门）完成截图或点按一类动作。

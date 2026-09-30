@@ -1,4 +1,5 @@
-//! Chromiumoxide CDP session: launch, navigate, tabs, dispose.
+//! Chromiumoxide CDP：一个共享的 Chromium 进程（[`Chromium`]），每个会话一组标签页
+//! （[`ConnectedSession`]）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::accessibility::{
     EnableParams as AxEnableParams, GetFullAxTreeParams,
 };
+use chromiumoxide::cdp::browser_protocol::browser::CloseParams as BrowserCloseParams;
 use chromiumoxide::cdp::browser_protocol::dom::{
     FocusParams, GetBoxModelParams, ResolveNodeParams, ScrollIntoViewIfNeededParams,
     SetFileInputFilesParams,
@@ -38,10 +40,14 @@ use tokio::task::JoinHandle;
 
 use cordis_base::config::dock_home;
 
-use super::snapshot::{self, LeanSnapshot, RefEntry};
-use super::wait::{poll_until, retry_async, with_timeout};
+use crate::snapshot::{self, LeanSnapshot, RefEntry};
+use crate::wait::{poll_until, retry_async, with_timeout};
+use crate::TabInfo;
 
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// 连已经在跑的 Chromium：本机回环，连不上就是没在跑（或文件过期），别久等。
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(3);
+const DEVTOOLS_ACTIVE_PORT: &str = "DevToolsActivePort";
 const NAV_TIMEOUT: Duration = Duration::from_secs(45);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -154,32 +160,43 @@ fn remote_object_text(obj: &RemoteObject) -> String {
     }
 }
 
-#[allow(dead_code)] // retained for status / debugging profile path
-pub struct ConnectedSession {
-    browser: Browser,
-    pages: Vec<Page>,
-    active: usize,
+/// 一个 Chromium 进程，所有会话共用（共用 profile，登录态共享）。
+///
+/// 先按 user-data 下的 `DevToolsActivePort` 连已经在跑的那个（另一个 Dock 进程拉起的，
+/// 或者 GUI 正开着看的）；连不上才自己拉起。只有自己拉起的才归自己关。
+pub struct Chromium {
+    browser: Arc<Browser>,
     handler: JoinHandle<()>,
-    dialog_tasks: Vec<JoinHandle<()>>,
-    capture_tasks: Vec<JoinHandle<()>>,
-    pending_dialog: Arc<std::sync::Mutex<Option<PendingDialog>>>,
-    capture: Arc<AsyncMutex<CaptureBuffers>>,
-    pub(crate) user_data_dir: PathBuf,
-    pub refs: HashMap<String, RefEntry>,
+    launched: bool,
 }
 
-impl ConnectedSession {
-    /// Launch Chromium. `headed` comes from cockpit pref + `DOCK_BROWSER_HEADED` override
+impl Chromium {
+    /// `headed` comes from cockpit pref + `DOCK_BROWSER_HEADED` override
     /// (see [`cordis_base::config::effective_browser_headed`]); default remains headless.
-    pub async fn launch(url: Option<&str>, headed: bool) -> Result<Self, String> {
+    /// Attaching to a running instance keeps whatever mode it already has.
+    pub async fn attach_or_launch(headed: bool) -> Result<Self, String> {
         let user_data_dir = browser_user_data_dir();
         std::fs::create_dir_all(&user_data_dir)
             .map_err(|e| format!("create user-data-dir {}: {e}", user_data_dir.display()))?;
+        if let Some(ws) = devtools_ws_url(&user_data_dir) {
+            if let Ok(Ok((browser, handler))) =
+                tokio::time::timeout(ATTACH_TIMEOUT, Browser::connect(ws)).await
+            {
+                return Ok(Self {
+                    browser: Arc::new(browser),
+                    handler: spawn_handler(handler),
+                    launched: false,
+                });
+            }
+        }
+        Self::launch(&user_data_dir, headed).await
+    }
 
+    async fn launch(user_data_dir: &Path, headed: bool) -> Result<Self, String> {
         let exe = discover_chrome()?;
         let mut builder = BrowserConfig::builder()
             .chrome_executable(&exe)
-            .user_data_dir(&user_data_dir)
+            .user_data_dir(user_data_dir)
             .no_sandbox()
             .launch_timeout(LAUNCH_TIMEOUT)
             // chromiumoxide Arg::from does not auto-prepend "--" for bare keys in 0.9,
@@ -198,7 +215,7 @@ impl ConnectedSession {
 
         let config = builder.build().map_err(|e| format!("BrowserConfig: {e}"))?;
 
-        let (browser, mut handler) = with_timeout(
+        let (browser, handler) = with_timeout(
             LAUNCH_TIMEOUT,
             async {
                 Browser::launch(config)
@@ -210,14 +227,85 @@ impl ConnectedSession {
         .await
         .map_err(|e| format!("launch Chromium ({exe}): {e}"))?;
 
-        let handler = tokio::spawn(async move {
-            while let Some(h) = handler.next().await {
-                if h.is_err() {
-                    break;
+        Ok(Self {
+            browser: Arc::new(browser),
+            handler: spawn_handler(handler),
+            launched: true,
+        })
+    }
+
+    /// CDP 连接还在吗。Chromium 被关掉（或别的进程拉起的那个退出了）时 handler 流结束。
+    pub fn is_alive(&self) -> bool {
+        !self.handler.is_finished()
+    }
+
+    /// 自己拉起的才关进程；连上的只断开，不关别人的浏览器。
+    pub async fn shutdown(self) {
+        let Self {
+            browser,
+            handler,
+            launched,
+        } = self;
+        if launched {
+            match Arc::try_unwrap(browser) {
+                Ok(mut browser) => {
+                    let _ = browser.close().await;
+                    let _ = browser.wait().await;
+                }
+                // 还有标签页组攥着句柄：发 CDP Browser.close，进程退出后 kill_on_drop 兜底。
+                Err(shared) => {
+                    let _ = shared.execute(BrowserCloseParams::default()).await;
                 }
             }
-        });
+        }
+        handler.abort();
+    }
+}
 
+fn spawn_handler(mut handler: chromiumoxide::Handler) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(h) = handler.next().await {
+            if h.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// 读 Chromium 写在 user-data 下的 `DevToolsActivePort`（第一行端口，第二行
+/// `/devtools/browser/<id>`），拼成 CDP 的 ws 地址。
+pub fn devtools_ws_url(user_data_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(user_data_dir.join(DEVTOOLS_ACTIVE_PORT)).ok()?;
+    parse_devtools_active_port(&raw)
+}
+
+pub fn parse_devtools_active_port(raw: &str) -> Option<String> {
+    let mut lines = raw.lines();
+    let port: u16 = lines.next()?.trim().parse().ok()?;
+    let path = lines.next()?.trim();
+    if port == 0 || !path.starts_with("/devtools/browser/") {
+        return None;
+    }
+    Some(format!("ws://127.0.0.1:{port}{path}"))
+}
+
+/// 一个会话的标签页组：自己开的页、快照 refs、对话框、network / console 捕获。
+/// 进程是共享的 [`Chromium`]，这里只攥句柄。
+pub struct ConnectedSession {
+    browser: Arc<Browser>,
+    pages: Vec<Page>,
+    active: usize,
+    dialog_tasks: Vec<JoinHandle<()>>,
+    capture_tasks: Vec<JoinHandle<()>>,
+    pending_dialog: Arc<std::sync::Mutex<Option<PendingDialog>>>,
+    capture: Arc<AsyncMutex<CaptureBuffers>>,
+    pub refs: HashMap<String, RefEntry>,
+}
+
+impl ConnectedSession {
+    /// 在共享的 Chromium 里给这个会话开第一个标签页。
+    pub async fn open(chromium: &Chromium, url: Option<&str>) -> Result<Self, String> {
+        let browser = chromium.browser.clone();
         let start = url.unwrap_or("about:blank");
         let page = with_timeout(
             NAV_TIMEOUT,
@@ -243,14 +331,27 @@ impl ConnectedSession {
             browser,
             pages: vec![page],
             active: 0,
-            handler,
             dialog_tasks,
             capture_tasks,
             pending_dialog,
             capture,
-            user_data_dir,
             refs: HashMap::new(),
         })
+    }
+
+    /// 本组标签页的 CDP target id（GUI 按它把画面对到会话上）。
+    pub fn target_ids(&self) -> Vec<String> {
+        self.pages
+            .iter()
+            .map(|p| p.target_id().inner().to_string())
+            .collect()
+    }
+
+    /// 当前活动标签页的 target id。
+    pub fn active_target_id(&self) -> Option<String> {
+        self.pages
+            .get(self.active)
+            .map(|p| p.target_id().inner().to_string())
     }
 
     async fn spawn_dialog_listener(
@@ -535,11 +636,11 @@ impl ConnectedSession {
     }
 
     /// Sync-friendly tab rows for the `/browser` cockpit cache.
-    pub async fn tab_infos(&self) -> Vec<super::BrowserTabInfo> {
+    pub async fn tab_infos(&self) -> Vec<TabInfo> {
         let mut out = Vec::with_capacity(self.pages.len());
         for (i, p) in self.pages.iter().enumerate() {
             let u = p.url().await.ok().flatten().unwrap_or_default();
-            out.push(super::BrowserTabInfo {
+            out.push(TabInfo {
                 index: i,
                 url: u,
                 active: i == self.active,
@@ -1010,6 +1111,7 @@ impl ConnectedSession {
         Ok(format!("navigated back to {cur}"))
     }
 
+    /// 关掉本组自己的标签页；Chromium 进程归 [`Chromium`] 管。
     pub async fn shutdown(mut self) {
         self.refs.clear();
         for t in self.dialog_tasks.drain(..) {
@@ -1018,9 +1120,10 @@ impl ConnectedSession {
         for t in self.capture_tasks.drain(..) {
             t.abort();
         }
-        let _ = self.browser.close().await;
-        let _ = self.browser.wait().await;
-        self.handler.abort();
+        for page in self.pages.drain(..) {
+            let tid = page.target_id().clone();
+            let _ = self.browser.execute(CloseTargetParams::new(tid)).await;
+        }
     }
 
     async fn point_for_backend(

@@ -764,11 +764,11 @@ pub(super) fn run_action(
                         match browser.toggle_headed() {
                             Ok(true) => flash(
                                 ctx,
-                                "已切换为有头（需 browser_close 后再 browser_open 才生效）",
+                                "已切换为有头（所有会话 browser_close 后下次拉起 Chromium 生效）",
                             ),
                             Ok(false) => flash(
                                 ctx,
-                                "已切换为无头（需 browser_close 后再 browser_open 才生效）",
+                                "已切换为无头（所有会话 browser_close 后下次拉起 Chromium 生效）",
                             ),
                             Err(e) => flash(ctx, format!("切换显示失败：{e}")),
                         }

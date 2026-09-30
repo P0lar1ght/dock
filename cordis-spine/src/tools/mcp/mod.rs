@@ -37,6 +37,32 @@ pub(super) type CallFn = std::sync::Arc<
     dyn Fn(String, ToolCall) -> crate::agent::runtime::BoxFuture<'static, ToolResult> + Send + Sync,
 >;
 
+/// 调用方会话的持久 id（落盘会话 id，即 GUI 的 threadId）；还没落过盘的用页身份
+/// （`main` / `main#2` / 子代理身份）。在工具执行的 [`crate::tools::registry::exec_ctx`]
+/// 里读，所以是**发起这次调用的那一页 / 那个子代理**，不是当前焦点页。
+pub(super) fn calling_session() -> Option<String> {
+    let exec = crate::tools::registry::exec_ctx()?;
+    let sessions = exec.get::<Sessions>(SESSIONS)?;
+    let id = sessions.live_session_id();
+    Some(if id.is_empty() {
+        sessions.identity().to_string()
+    } else {
+        id
+    })
+}
+
+/// `tools/call` 的 JSON-RPC 结果 → [`ToolResult`]：文本 + 图片，外加服务器的 `isError`。
+pub(super) fn call_result(call: ToolCall, v: &serde_json::Value) -> ToolResult {
+    let (text, images) = protocol::format_call_result_parts(v);
+    let mut result = if images.is_empty() {
+        tool_result(call, text)
+    } else {
+        crate::tools::registry::tool_result_with_images(call, text, images)
+    };
+    result.is_error = protocol::call_is_error(v);
+    result
+}
+
 pub(super) type RelistFn = std::sync::Arc<
     dyn Fn() -> crate::agent::runtime::BoxFuture<'static, Result<Vec<protocol::ListedTool>, String>>
         + Send
@@ -1152,6 +1178,44 @@ startup_timeout_sec = 1
 
         mcp.unplug_server("probe").unwrap();
         assert!(mcp.reconnect("probe").await.unwrap_err().contains("停用"));
+    }
+
+    /// 服务器说 `isError: true` 就是失败，哪怕正文看不出来（不以 "Error:" 开头）。
+    /// 兜底的 `tool_output_looks_failed` 只认那种前缀，这条路径必须自己标。
+    #[test]
+    fn call_result_honours_is_error_without_error_looking_text() {
+        let call = ToolCall {
+            id: "c".into(),
+            name: "mcp_s__t".into(),
+            arguments: "{}".into(),
+        };
+        let failed = serde_json::json!({
+            "result": { "content": [{"type": "text", "text": "quota exceeded"}], "isError": true }
+        });
+        assert!(!cordis_base::types::tool_output_looks_failed(
+            "quota exceeded"
+        ));
+        let result = call_result(call.clone(), &failed);
+        assert!(result.is_error);
+        assert_eq!(result.content, "quota exceeded");
+        let fine = serde_json::json!({ "result": { "content": [{"type": "text", "text": "ok"}] } });
+        assert!(!call_result(call, &fine).is_error);
+    }
+
+    /// 会话身份取自发起调用的那一页（exec ctx），不在工具执行里就没有。
+    #[tokio::test]
+    async fn calling_session_reads_the_exec_page() {
+        let (ctx, _mcp, _tools) = boot().await;
+        assert_eq!(calling_session(), None);
+        let inside =
+            crate::tools::registry::with_exec_ctx_async(ctx.clone(), async { calling_session() })
+                .await;
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        let expected = match sessions.live_session_id() {
+            id if id.is_empty() => sessions.identity().to_string(),
+            id => id,
+        };
+        assert_eq!(inside.as_deref(), Some(expected.as_str()));
     }
 
     #[tokio::test]

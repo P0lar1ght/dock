@@ -43,7 +43,6 @@ schemars = "0.8"
 jsonschema = { version = "0.30", default-features = false }
 libc = "0.2"
 xai-workflow = { path = "../vendor/xai/workflow" }
-chromiumoxide = { version = "0.9", default-features = true }
 ignore = "0.4"
 globset = "0.4"
 # read_file document/multimodal (Grok-aligned)

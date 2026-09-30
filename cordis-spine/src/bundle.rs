@@ -115,7 +115,6 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(agent_presets(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;
     ctx.plugin(tool_web(), web_fetch_params())?.wait().await?;
-    ctx.plugin(tool_browser(), ())?.wait().await?;
     // 根会话的 todos 服务（`TODOS` 按页隔离：分页各自挂 todo_service）。
     ctx.plugin(todo_service(), ())?.wait().await?;
     // todo_write 工具只在全局工具表注册一份，靠执行期 ctx 派发到调用页。
@@ -143,6 +142,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_workflow(), ())?.wait().await?;
     ctx.plugin(mcp_client(), ())?.wait().await?;
     ctx.plugin(tool_computer(), ())?.wait().await?;
+    // 浏览器驾驶舱：工具在内置 MCP `browser` 里，这里只看它的状态。
+    ctx.plugin(tool_browser(), ())?.wait().await?;
     ctx.plugin(dynamic_runner(), ())?.wait().await?;
     if let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) {
         tokio::spawn(async move {

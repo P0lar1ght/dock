@@ -42,7 +42,7 @@
 | `project-instructions` | → `agent/step-start` | — | `AGENTS.md` 进历史 reminder（新会话排在首条用户消息前），**不进系统提示** | [project-instructions](docs/tools/project-instructions.md) |
 | `agent-presets` | `"agentPresets"` | — | YAML 人设 + 工具允许名单；`task` 的 `subagent_type` enum 来源 | [agent-presets](docs/tools/agent-presets.md) |
 | `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 | [web_fetch](docs/tools/web_fetch.md) |
-| `tool-browser` | `"browser"` + `"tools"` | `browser_*` 21 颗（按需） | BUA P2，in-process chromiumoxide CDP | [browser](docs/tools/browser.md) |
+| `tool-browser` | `"browser"` | —（工具在内置 MCP `browser`，见下） | `/browser` 薄驾驶舱 | [browser](docs/tools/browser.md) |
 | `tool-computer` | `"computer"` | — | CUA C0 薄驾驶舱；桌面键鼠经 `cua-driver` MCP | [computer](docs/tools/computer.md) |
 | `tool-todo` | `"todos"` + `"tools"` | `todo_write` | Grok merge/replace + 两条续跑 / 提醒 waterfall | [todo](docs/tools/todo.md) |
 | `plan-mode` | `"planMode"` + `"tools"` | `enter_plan_mode` `exit_plan_mode` | 计划文件按会话划分（见下）；计划态挡住 bash / 写文件等 | — |
@@ -58,9 +58,12 @@
 | `tool-cordis` | → `"tools"` | `cordis_*`（按需） | 预置工厂 + Rhai；热挂插件 | [cordis](docs/tools/cordis.md) |
 | `compact` | `"compact"` | — | Grok 会话压缩，85% 自动 | [compact](docs/tools/compact.md) |
 
+浏览器工具：内置 MCP `browser`（`dock mcp browser`，crate `cordis-browser`）。
+公名 `mcp_browser__browser_*` 21 颗，按会话分标签页，详见 [browser](docs/tools/browser.md)。
+
 另见 [工具结果图](docs/tools/images.md)（多模态，`ToolResult.images`）。
 
-**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `browser_evaluate`，以及全部 `mcp_cua-driver__*`。
+**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `mcp_browser__browser_evaluate`，以及全部 `mcp_cua-driver__*`。
 
 **计划门**：同上（`enter_plan_mode` 之后返回 blocked，直到 `exit_plan_mode`）。例外：对**本页**计划文件的 `search_replace` / `write_file` 自动放行（对齐 grok）。
 

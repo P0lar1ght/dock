@@ -35,8 +35,9 @@ pub use cordis_base::acp::PermissionOptionKind;
 pub use cordis_base::config::{
     effective_browser_headed, load_browser_headed, load_catalog, load_disabled_mcp_tools,
     load_mcp_servers, load_memory_config, persist_browser_headed, persist_disabled_mcp_tools,
-    persist_mcp_server_enabled, ApiBackend, AuthScheme, McpOAuthConfig, McpServer, McpStdioFraming,
-    McpTransport, MemoryConfig, MemoryDreamConfig, MemoryFlushConfig, ModelChoice, ModelPricing,
+    persist_mcp_server_enabled, register_builtin_browser_mcp, ApiBackend, AuthScheme,
+    McpOAuthConfig, McpServer, McpStdioFraming, McpTransport, MemoryConfig, MemoryDreamConfig,
+    MemoryFlushConfig, ModelChoice, ModelPricing, BROWSER_MCP_ENV, BROWSER_MCP_SERVER,
     DEFAULT_EFFORT_CHOICES,
 };
 pub use cordis_base::stream_acc::StreamDelta;
@@ -93,9 +94,7 @@ pub use session::search::{
     rebuild_all as rebuild_session_search, SessionHit,
 };
 pub use tools::ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
-pub use tools::browser::{
-    tool_browser, Browser, BrowserSession, BrowserTabInfo, BROWSER_TOOL_NAMES,
-};
+pub use tools::browser::{tool_browser, Browser, BrowserState, BROWSER_MCP_PREFIX};
 pub use tools::computer::{tool_computer, Computer, ComputerState, CuaAction, CUA_DRIVER_SERVER};
 pub use tools::cron::{
     cron, Cron, CronError, CronJob, CronTick, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS,
