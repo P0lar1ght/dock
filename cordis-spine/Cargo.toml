@@ -27,7 +27,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 toml_edit = "0.22"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync", "macros", "time", "process", "io-util", "net", "fs"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time", "process", "io-util", "net", "fs"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 uuid = { version = "1", features = ["v7"] }
 url = "2"
