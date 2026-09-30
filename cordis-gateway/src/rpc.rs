@@ -48,6 +48,7 @@ pub async fn dispatch(
         protocol::THREAD_RESTORE => thread::restore(&gateway, params),
         protocol::THREAD_DELETE => thread::delete(&gateway, params),
         protocol::THREAD_HISTORY => thread::history(&gateway, params),
+        protocol::ITEM_IMAGE => thread::item_image(&gateway, params),
         protocol::THREAD_SUBSCRIBE => thread::subscribe(&gateway, params, subscribed),
         protocol::THREAD_UNSUBSCRIBE => thread::unsubscribe(params, subscribed),
         protocol::THREAD_ENVIRONMENT_GET => environment::get(&gateway, params),

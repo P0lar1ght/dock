@@ -2286,3 +2286,97 @@ async fn fs_methods_browse_the_sessions_workspace_read_only() {
         "{closed}"
     );
 }
+
+/// 工具结果里的图（cua-driver 截图之类）：`item/tool_completed` 带 `attachments`
+/// 元数据（`index` 是在这次结果里的位置），像素走 `item/image`；归档后从落盘读也一样。
+#[tokio::test]
+async fn tool_images_are_listed_and_fetched_by_item() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["toolImages"], true, "{init}");
+
+    // 1×1 PNG。
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0,
+        0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0, 0, 13, 0x49, 0x44, 0x41,
+        0x54, 0x78, 0xDA, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0, 0x05, 0x00, 0x01, 0xFF, 0x89,
+        0x99, 0x3D, 0x1D, 0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let image = |data: Vec<u8>| cordis_spine::UserImage {
+        mime: "image/png".into(),
+        data: data.into(),
+        width: 1,
+        height: 1,
+    };
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("看看桌面".into()));
+    sessions.append(LogEvent::ToolExecute {
+        id: "shot-1".into(),
+        name: "mcp_cua-driver__get_window_state".into(),
+        arguments: "{}".into(),
+        content: "window tree".into(),
+        // 第 0 张是空的（不投影、不占号），第 1 张才是真图。
+        images: vec![image(Vec::new()), image(png.clone())],
+        is_error: false,
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let history = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    let completed = history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["method"] == "item/tool_completed")
+        .unwrap_or_else(|| panic!("{history}"))
+        .clone();
+    let attachments = &completed["payload"]["attachments"];
+    assert_eq!(attachments.as_array().map(Vec::len), Some(1), "{completed}");
+    assert_eq!(attachments[0]["index"], 1);
+    assert_eq!(attachments[0]["mimeType"], "image/png");
+
+    use base64::Engine;
+    let want = base64::engine::general_purpose::STANDARD.encode(&png);
+    let got = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": "live", "itemId": "shot-1", "index": 1 }),
+        )
+        .await;
+    assert_eq!(got["result"]["data"], want, "{got}");
+    assert_eq!(got["result"]["width"], 1);
+
+    let empty = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": "live", "itemId": "shot-1", "index": 0 }),
+        )
+        .await;
+    assert_eq!(empty["error"]["details"]["code"], "not_found", "{empty}");
+    let missing = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": "live", "itemId": "nope" }),
+        )
+        .await;
+    assert_eq!(missing["error"]["details"]["code"], "not_found");
+
+    // 归档（关掉）之后从落盘读回来。
+    let archived = rpc
+        .call("thread/archive", json!({ "threadId": "live" }))
+        .await;
+    let id = archived["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{archived}"))
+        .to_string();
+    let from_disk = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": id, "itemId": "shot-1", "index": 1 }),
+        )
+        .await;
+    assert_eq!(from_disk["result"]["data"], want, "{from_disk}");
+}

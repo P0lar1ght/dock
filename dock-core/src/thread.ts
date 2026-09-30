@@ -3,7 +3,7 @@
 //
 // 保真：工具的原始参数、完整输出都留着——脱敏、截断是展示层的事。
 
-import type { DockEvent, ImageAttachment, Question, ToolEndStatus, TurnEndStatus } from './events.ts';
+import type { DockEvent, ImageAttachment, Question, ToolEndStatus, ToolImage, TurnEndStatus } from './events.ts';
 import { parseHistoryItem } from './events.ts';
 
 export type TurnStatus = 'running' | TurnEndStatus;
@@ -27,6 +27,8 @@ export type TurnItem =
       status: ToolStatus;
       startedAt: number;
       endedAt: number | null;
+      /** 结果里的图（截图等）；跑完之前是空的。 */
+      images: ToolImage[];
     }
   | {
       kind: 'permission';
@@ -128,10 +130,11 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
           status: 'running',
           startedAt: event.at,
           endedAt: null,
+          images: [],
         });
 
       case 'item/tool_completed': {
-        const done = { output: event.output, status: event.status, endedAt: event.at };
+        const done = { output: event.output, status: event.status, endedAt: event.at, images: event.images };
         if (turn.items.some((i) => i.kind === 'tool' && i.id === event.toolCallId)) {
           return update(turn, (i) => (i.kind === 'tool' && i.id === event.toolCallId ? { ...i, ...done } : i));
         }
