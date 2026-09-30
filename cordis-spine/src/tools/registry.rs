@@ -295,16 +295,26 @@ impl Tools {
     }
 
     pub fn specs_for_model_on(&self, exec: &Context) -> Vec<ToolSpec> {
+        let presets = exec.get::<AgentPresets>(AGENT_PRESETS);
+        // 预设的常驻工具（`resident_tools`）：本来藏着的也进工具表。
+        let resident = |name: &str| presets.as_ref().is_some_and(|p| p.is_resident(name));
         let specs: Vec<ToolSpec> = self
             .specs()
             .into_iter()
-            .filter(|s| !self.is_hidden(&s.name) && !capability_denies(exec, &s.name))
+            .filter(|s| {
+                (!self.is_hidden(&s.name) || resident(&s.name)) && !capability_denies(exec, &s.name)
+            })
             .collect();
-        match exec.get::<AgentPresets>(AGENT_PRESETS) {
+        match presets {
             Some(presets) => {
                 let mut out: Vec<ToolSpec> = specs
                     .into_iter()
-                    .filter(|s| self.mcp_meta_visible(exec, &s.name) || presets.allows(&s.name))
+                    // MCP / 动态包本来就绕过允许名单：常驻了就上表。按需本地工具仍要在名单里。
+                    .filter(|s| {
+                        self.mcp_meta_visible(exec, &s.name)
+                            || presets.allows(&s.name)
+                            || (self.bypasses_allowlist(&s.name) && presets.is_resident(&s.name))
+                    })
                     .map(|mut spec| {
                         presets.bind_spawn_schema(&mut spec);
                         spec
@@ -858,6 +868,65 @@ mod tests {
         assert!(tools.specs().iter().any(|s| s.name == "scheduler_create"));
         assert!(tools.is_hidden("scheduler_create"));
         assert!(tools.is_deferred("scheduler_create"));
+    }
+
+    /// 预设的 `resident_tools`：MCP 命中就上表（它本来就绕过允许名单）；按需本地工具
+    /// 还得在允许名单里；没命中的照旧藏着；能力档位照样挡。
+    #[test]
+    fn resident_tools_surface_hidden_specs() {
+        let ctx = Context::new();
+        let tools = Tools::echo(ctx.clone());
+        tools.register(spec("alpha"), stub_body()).unwrap();
+        let _a = tools
+            .register_mcp(spec("mcp_browser__browser_open"), stub_body())
+            .unwrap();
+        let _b = tools
+            .register_mcp(spec("mcp_browser__browser_click"), stub_body())
+            .unwrap();
+        let _c = tools
+            .register_mcp(spec("mcp_other__x"), stub_body())
+            .unwrap();
+        let _d = tools
+            .register_deferred(spec("scheduler_create"), stub_body())
+            .unwrap();
+        let _e = tools.register_deferred(spec("lsp"), stub_body()).unwrap();
+
+        let mut preset = crate::agent::presets::AgentPreset::new("t");
+        preset.tools = Some(vec!["alpha".into(), "lsp".into()]);
+        preset.resident_tools = vec![
+            "mcp_browser__*".into(),
+            "lsp".into(),
+            "scheduler_create".into(),
+        ];
+        let _p = ctx
+            .provide(AGENT_PRESETS, AgentPresets::overlay(preset))
+            .unwrap();
+        let model = |exec: &Context| -> Vec<String> {
+            let mut names: Vec<String> = tools
+                .specs_for_model_on(exec)
+                .into_iter()
+                .map(|s| s.name)
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            model(&ctx),
+            [
+                "alpha",
+                "lsp",
+                "mcp_browser__browser_click",
+                "mcp_browser__browser_open"
+            ],
+            "scheduler_create 常驻了但不在允许名单；mcp_other 没常驻"
+        );
+
+        // 只读档：点击属于执行，常驻也上不了表；打开网页算检索，留着。
+        let child = ctx.isolate("capability");
+        let _cap = child.provide(CAPABILITY, CapabilityMode::ReadOnly).unwrap();
+        let visible = model(&child);
+        assert!(visible.contains(&"mcp_browser__browser_open".to_string()));
+        assert!(!visible.contains(&"mcp_browser__browser_click".to_string()));
     }
 
     #[tokio::test]

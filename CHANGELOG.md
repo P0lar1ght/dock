@@ -19,6 +19,12 @@
 - **多个 Dock 共用一个 Chromium**：第二个进程读 `DevToolsActivePort` 连上已开的那个，不再抢 profile。
 - `/browser` 驾驶舱只显示内置 MCP 的状态与有头 / 无头偏好，不再列标签页和截图。
 
+### 新增
+
+- **预设常驻工具** `resident_tools`：写全名或 `前缀*`（如 `mcp_browser__*`）。
+  - 藏在 `search_tool` 后面的工具（MCP、按需、动态包）直接进模型工具表。
+  - 网关 `preset/get|update` 多了 `residentTools`（不传 = 保持原样）；`tool/catalog {includeMcp:true}` 带 MCP 行。
+
 ### 修复
 
 - MCP 工具的 `isError: true` 现在会把结果标成失败；以前只有正文以 `Error:` 开头才算。

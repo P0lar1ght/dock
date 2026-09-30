@@ -130,6 +130,11 @@ pub struct SubagentDef {
     /// `None` = every live registered tool. `Some` = allowlist (order kept).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// 常驻工具：本来藏在 `search_tool` 后面的工具（MCP、按需本地、动态包）直接进
+    /// 模型工具表。写全名，或以 `*` 结尾的前缀（`mcp_browser__*`）。非 MCP 的仍要在
+    /// `tools` 允许名单里才算数。见 [`resident_matches`]。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resident_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace_prompt: bool,
     /// Carry the skills / workflows listings into this child's system prompt.
@@ -155,6 +160,7 @@ impl SubagentDef {
             description: self.description.clone(),
             persona: self.persona.clone(),
             tools: self.tools.clone(),
+            resident_tools: self.resident_tools.clone(),
             replace_prompt: self.replace_prompt,
             listings: self.listings,
             read_only: self.read_only,
@@ -180,6 +186,11 @@ pub struct AgentPreset {
     /// `None` = every live registered tool. `Some` = allowlist (order kept).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// 常驻工具：本来藏在 `search_tool` 后面的工具（MCP、按需本地、动态包）直接进
+    /// 模型工具表。写全名，或以 `*` 结尾的前缀（`mcp_browser__*`）。非 MCP 的仍要在
+    /// `tools` 允许名单里才算数。见 [`resident_matches`]。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resident_tools: Vec<String>,
     /// Persona replaces the assembled system prompt instead of appending.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace_prompt: bool,
@@ -213,6 +224,7 @@ impl AgentPreset {
             description: String::new(),
             persona: String::new(),
             tools: None,
+            resident_tools: Vec::new(),
             replace_prompt: false,
             listings: false,
             read_only: false,
@@ -518,8 +530,14 @@ impl AgentPresets {
                 def.name = role.clone();
             }
             def.tools = def.tools.map(dedup);
+            def.resident_tools = check_resident(dedup(def.resident_tools))
+                .map_err(|e| format!("子代理 {role}：{e}"))?;
             agents.insert(role, def);
         }
+        let resident_tools = edit
+            .resident_tools
+            .map(|list| check_resident(dedup(list)))
+            .transpose()?;
         if let Some(shipped) = parse_shipped(id) {
             if let Some(role) = shipped.agents.keys().find(|r| !agents.contains_key(*r)) {
                 return Err(format!("内置子代理不能删除：{role}"));
@@ -546,6 +564,9 @@ impl AgentPresets {
             preset.persona = edit.persona;
             preset.replace_prompt = edit.replace_prompt;
             preset.tools = edit.tools.map(dedup);
+            if let Some(list) = resident_tools {
+                preset.resident_tools = list;
+            }
             preset.agents = agents;
             if preset.origin == PresetOrigin::Shipped {
                 preset.origin = PresetOrigin::User;
@@ -930,6 +951,17 @@ impl AgentPresets {
         }
     }
 
+    /// 当前预设把 `name` 设成常驻了吗（见 [`AgentPreset::resident_tools`]）。坏掉的
+    /// 预设不常驻任何东西——它放行一切，但不该把按需目录整个塞进工具表。
+    pub fn is_resident(&self, name: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .presets
+            .get(&inner.current)
+            .filter(|p| p.broken.is_none())
+            .is_some_and(|p| resident_matches(&p.resident_tools, name))
+    }
+
     pub fn filter_specs(&self, specs: Vec<ToolSpec>) -> Vec<ToolSpec> {
         let inner = self.inner.lock().unwrap();
         let Some(preset) = inner.presets.get(&inner.current) else {
@@ -1173,6 +1205,9 @@ pub struct PresetEdit {
     pub replace_prompt: bool,
     /// `None` = 全部已注册工具；`Some(vec![])` = 不用工具；其余是允许名单。
     pub tools: Option<Vec<String>>,
+    /// 常驻工具（全名或 `前缀*`），见 [`AgentPreset::resident_tools`]。
+    /// `None` = 保持原样（不认识这个字段的客户端整份写回时不会把它清掉）。
+    pub resident_tools: Option<Vec<String>>,
     /// 按顺序；id 不能重复。
     pub agents: Vec<(String, SubagentDef)>,
 }
@@ -1195,6 +1230,31 @@ fn check_icon(icon: &str) -> Result<(), String> {
     } else {
         Err(format!("图标名不合法：{icon}"))
     }
+}
+
+/// 常驻工具的写法：全名，或以 `*` 结尾的前缀。不收单独的 `*`（等于把整个按需目录
+/// 塞回工具表），也不收中间带 `*` 的。
+fn check_resident(list: Vec<String>) -> Result<Vec<String>, String> {
+    for entry in &list {
+        let body = entry.strip_suffix('*').unwrap_or(entry);
+        if body.is_empty() {
+            return Err("常驻工具不能只写 *，请写前缀，如 mcp_browser__*".into());
+        }
+        if body.contains('*') || body.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "常驻工具写法不对：{entry}（全名，或以 * 结尾的前缀）"
+            ));
+        }
+    }
+    Ok(list)
+}
+
+/// `name` 命中常驻名单吗：全名相等，或命中 `前缀*`。单独的 `*` 不算。
+pub fn resident_matches(list: &[String], name: &str) -> bool {
+    list.iter().any(|entry| match entry.strip_suffix('*') {
+        Some(prefix) => !prefix.is_empty() && name.starts_with(prefix),
+        None => entry == name,
+    })
 }
 
 fn dedup(list: Vec<String>) -> Vec<String> {
@@ -2800,6 +2860,7 @@ mod tests {
             description: "查网页".into(),
             persona: persona.into(),
             tools: Some(vec!["web_fetch".into(), "web_fetch".into()]),
+            resident_tools: vec!["mcp_browser__browser_open".into()],
             replace_prompt: false,
             listings: true,
             read_only: false,
@@ -2813,6 +2874,7 @@ mod tests {
             persona: "你是研究员。".into(),
             replace_prompt: false,
             tools: Some(vec!["read_file".into(), "grep".into()]),
+            resident_tools: Some(vec!["mcp_browser__*".into(), " mcp_browser__* ".into()]),
         };
         let mut roster = IndexMap::new();
         roster.insert("web".to_string(), role("只查网页"));
@@ -2841,6 +2903,23 @@ mod tests {
         assert_eq!(back.tools.as_ref().map(Vec::len), Some(2));
         assert_eq!(back.agents.keys().collect::<Vec<_>>(), vec!["web"]);
         assert!(back.agents["web"].listings);
+        assert_eq!(
+            back.resident_tools,
+            vec!["mcp_browser__*"],
+            "常驻去重、去空白"
+        );
+        let mut keep = edit(roster.clone());
+        keep.resident_tools = None;
+        let kept = presets.update(&made.id, keep).unwrap();
+        assert_eq!(
+            kept.resident_tools,
+            vec!["mcp_browser__*"],
+            "None = 保持原样"
+        );
+        assert_eq!(
+            back.agents["web"].resident_tools,
+            vec!["mcp_browser__browser_open"]
+        );
 
         // 校验：空名、整份替换却没有提示词、坏的角色 id、坏的图标。
         let mut bad = edit(roster.clone());
@@ -2853,8 +2932,19 @@ mod tests {
         let mut bad = edit(IndexMap::new());
         bad.agents.push(("Bad Id".into(), role("x")));
         assert!(presets.update(&made.id, bad).is_err());
-        let mut bad = edit(roster);
+        let mut bad = edit(roster.clone());
         bad.icon = Some("../x".into());
+        assert!(presets.update(&made.id, bad).is_err());
+        // 常驻：不收单独的 *，也不收中间带 * 的。
+        for wrong in ["*", "mcp_*_x", "a b"] {
+            let mut bad = edit(roster.clone());
+            bad.resident_tools = Some(vec![wrong.into()]);
+            assert!(presets.update(&made.id, bad).is_err(), "{wrong}");
+        }
+        let mut bad = edit(IndexMap::new());
+        let mut role_bad = role("x");
+        role_bad.resident_tools = vec!["*".into()];
+        bad.agents.push(("web".into(), role_bad));
         assert!(presets.update(&made.id, bad).is_err());
         assert!(presets.update("nope", edit(IndexMap::new())).is_err());
     }
@@ -2877,6 +2967,7 @@ mod tests {
             persona: code.persona.clone(),
             replace_prompt: false,
             tools: code.tools.clone(),
+            resident_tools: None,
         };
         let mut dropped = code.agents.clone();
         let first = dropped.keys().next().unwrap().clone();
@@ -3210,5 +3301,31 @@ mod tests {
             })
             .await;
         assert_eq!(allowed.content, "ok");
+    }
+
+    #[test]
+    fn resident_matches_full_names_and_prefixes() {
+        let list = vec![
+            "mcp_browser__*".to_string(),
+            "lsp".to_string(),
+            "*".to_string(),
+        ];
+        assert!(resident_matches(&list, "mcp_browser__browser_open"));
+        assert!(resident_matches(&list, "lsp"));
+        assert!(!resident_matches(&list, "lsp_extra"));
+        // 单独的 * 不算通配（校验也会拒），不能把整个按需目录塞回工具表。
+        assert!(!resident_matches(&list, "mcp_linear__save_issue"));
+        assert!(!resident_matches(&[], "lsp"));
+    }
+
+    #[test]
+    fn is_resident_follows_the_current_preset() {
+        let mut preset = AgentPreset::new("t");
+        preset.resident_tools = vec!["mcp_browser__*".into()];
+        let presets = AgentPresets::overlay(preset);
+        assert!(presets.is_resident("mcp_browser__browser_snapshot"));
+        assert!(!presets.is_resident("mcp_cua-driver__click"));
+        let plain = AgentPresets::overlay(AgentPreset::new("u"));
+        assert!(!plain.is_resident("mcp_browser__browser_snapshot"));
     }
 }

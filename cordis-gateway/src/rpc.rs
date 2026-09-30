@@ -30,7 +30,7 @@ pub async fn dispatch(
         protocol::PRESET_DELETE => preset::delete(&gateway, params),
         protocol::PRESET_GET => preset::get(&gateway, params),
         protocol::PRESET_UPDATE => preset::update(&gateway, params),
-        protocol::TOOL_CATALOG => preset::tool_catalog(&gateway),
+        protocol::TOOL_CATALOG => preset::tool_catalog(&gateway, params),
         protocol::PRESET_DRAFT | protocol::PRESET_REWRITE | protocol::PRESET_SUGGEST_TOOLS => {
             dispatch_detached(gateway, method, params).await
         }
