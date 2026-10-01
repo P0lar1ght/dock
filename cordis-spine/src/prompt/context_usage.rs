@@ -1,18 +1,20 @@
 //! Live context-window occupancy. TUI live-looks [`snapshot_context`].
 //!
-//! Estimates match auto-compact (`ascii/4` + CJK chars as 1). Tool schemas
-//! and images are added on top so the overlay matches what the next sample
-//! actually sends. Not grok.com billing.
+//! 占用只有一个数：[`context_tokens_used`]。自动压缩判定、压缩前记忆 flush
+//! 门槛、顶栏 / `/context` / 网关快照都读它，不各算各的。估算是 `ascii/4` +
+//! 非 ASCII 字符各 1，外加工具表与图片，对齐下一次采样实际发的内容。
+//! Not grok.com billing.
 
 use cordis::Context;
 
 use crate::host::settings::AppSettings;
 use crate::llm::compact::{
-    estimate_context_tokens, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, VISIBLE_NOTICE,
+    estimate_context_tokens, estimate_reasoning, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+    VISIBLE_NOTICE,
 };
 use crate::names::{MEMORY, SESSIONS, SETTINGS, SKILLS, SYSTEM_PROMPT, TOOLS};
 use crate::prompt::assemble::{PromptAssembly, SystemPrompt};
-use crate::session::log::{Sessions, TokenUsage};
+use crate::session::log::Sessions;
 use crate::tools::mcp::{is_mcp_public_name, split_mcp_public_name};
 use crate::tools::registry::Tools;
 use cordis_base::types::{LogEvent, ToolSpec};
@@ -144,55 +146,104 @@ fn assembled_parts(ctx: &Context) -> PromptAssembly {
         .unwrap_or_default()
 }
 
-fn snapshot_with_parts(ctx: &Context, parts: &PromptAssembly) -> ContextSnapshot {
-    let system = parts.render();
-    let system_prompt_tokens = estimate_text(&system);
+/// 下一次请求的上下文占用（token）。
+///
+/// - 有锚点（上一次采样上游报了用量）：锚点 + 那之后模型历史的估算增量。上游
+///   的数是真账，含 system、工具表、回放的推理；估算只补锚点之后追加的工具
+///   结果、提醒（Grok `total_tokens + estimated_tokens_since_model`，Codex
+///   `get_total_token_usage`）。
+/// - 没有锚点（上游不报用量，或刚压缩 / 换会话还没发请求）：system + 工具表 +
+///   图片 + 模型历史（含推理）全靠估算。
+pub(crate) fn context_tokens_used(ctx: &Context, system: &str) -> u64 {
+    measure(ctx, system).used
+}
+
+struct Measure {
+    system: u64,
+    /// 模型历史，含推理。
+    history: u64,
+    /// `history` 里推理那一份。
+    reasoning: u64,
+    tools: u64,
+    tool_count: u64,
+    used: u64,
+}
+
+fn measure(ctx: &Context, system: &str) -> Measure {
+    let system_tokens = estimate_text(system);
     let sessions = ctx.get::<Sessions>(SESSIONS);
-    let (base, reasoning, turn_count, tool_call_count, compaction_count) =
-        if let Some(sessions) = sessions.as_ref() {
-            let history = sessions.model_history();
-            let display = sessions.events();
+    let (history, reasoning, images, anchor) = match sessions.as_ref() {
+        Some(sessions) => {
+            let events = sessions.model_history();
             (
-                estimate_context_tokens(&system, &history),
-                reasoning_tokens(&history),
-                display
-                    .iter()
-                    .filter(|e| matches!(e, LogEvent::User(t) if !t.trim().is_empty()))
-                    .count() as u64,
-                display
-                    .iter()
-                    .filter(|e| matches!(e, LogEvent::ToolExecute { .. }))
-                    .count() as u64,
-                display
-                    .iter()
-                    .filter(|e| matches!(e, LogEvent::LlmStream(out) if out.text == VISIBLE_NOTICE))
-                    .count() as u64,
+                estimate_context_tokens("", &events),
+                reasoning_tokens(&events),
+                sessions
+                    .model_user_image_count()
+                    .saturating_mul(IMAGE_TOKEN_ESTIMATE),
+                sessions.context_anchor(),
             )
-        } else {
-            (system_prompt_tokens, 0, 0, 0, 0)
-        };
-    let message_tokens = base.saturating_sub(system_prompt_tokens);
-    let image_tokens = sessions
-        .as_ref()
-        .map(|s| {
-            s.model_user_image_count()
-                .saturating_mul(IMAGE_TOKEN_ESTIMATE)
-        })
-        .unwrap_or(0);
-
-    let (builtin_specs, _, _) = partition_model_specs(ctx);
-    let tool_definitions_count = builtin_specs.len() as u64;
-    let tool_definitions_tokens = estimate_tool_definitions(&builtin_specs);
-
+        }
+        None => (0, 0, 0, None),
+    };
     // Hidden extras (MCP + deferred local) stay registered for `use_tool`
     // but are omitted from the sampler tools array. Occupancy matches that send.
-    let estimate = base
-        .saturating_add(tool_definitions_tokens)
-        .saturating_add(image_tokens)
-        .saturating_add(reasoning);
-    let usage = sessions.as_ref().map(|s| s.usage()).unwrap_or_default();
-    let total = window_size(usage.window, ctx);
-    let used = used_tokens(usage, estimate).min(total.saturating_mul(4));
+    let specs = ctx
+        .get::<Tools>(TOOLS)
+        .map(|t| t.specs_for_model_on(ctx))
+        .unwrap_or_default();
+    let tools = estimate_tool_definitions(&specs);
+    let used = match anchor {
+        Some(anchor) => anchor
+            .tokens
+            .saturating_add(history.saturating_sub(anchor.history_estimate)),
+        None => system_tokens
+            .saturating_add(history)
+            .saturating_add(tools)
+            .saturating_add(images),
+    };
+    Measure {
+        system: system_tokens,
+        history,
+        reasoning,
+        tools,
+        tool_count: specs.len() as u64,
+        used,
+    }
+}
+
+fn snapshot_with_parts(ctx: &Context, parts: &PromptAssembly) -> ContextSnapshot {
+    let system = parts.render();
+    let m = measure(ctx, &system);
+    let system_prompt_tokens = m.system;
+    let sessions = ctx.get::<Sessions>(SESSIONS);
+    let (turn_count, tool_call_count, compaction_count) = if let Some(sessions) = sessions.as_ref()
+    {
+        let display = sessions.events();
+        (
+            display
+                .iter()
+                .filter(|e| matches!(e, LogEvent::User(t) if !t.trim().is_empty()))
+                .count() as u64,
+            display
+                .iter()
+                .filter(|e| matches!(e, LogEvent::ToolExecute { .. }))
+                .count() as u64,
+            display
+                .iter()
+                .filter(|e| matches!(e, LogEvent::LlmStream(out) if out.text == VISIBLE_NOTICE))
+                .count() as u64,
+        )
+    } else {
+        (0, 0, 0)
+    };
+    // 推理归「附加开销」那一格（见 `overhead_detail`），不进消息。
+    let message_tokens = m.history.saturating_sub(m.reasoning);
+    let tool_definitions_count = m.tool_count;
+    let tool_definitions_tokens = m.tools;
+    let window = sessions.as_ref().map(|s| s.usage().window).unwrap_or(0);
+    let total = window_size(window, ctx);
+    let used = m.used.min(total.saturating_mul(4));
     let usage_pct = usage_percentage_u8(used, total);
 
     ContextSnapshot {
@@ -404,7 +455,9 @@ fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
     let reasoning = reasoning_tokens(&history);
     let reasoning_n = history
         .iter()
-        .filter(|e| matches!(e, LogEvent::LlmStream(o) if !o.reasoning.is_empty()))
+        .filter(|e| {
+            matches!(e, LogEvent::LlmStream(o) if !o.reasoning.is_empty() || !o.reasoning_items.is_empty())
+        })
         .count() as u64;
     let image_n = ctx
         .get::<Sessions>(SESSIONS)
@@ -869,14 +922,6 @@ fn preview(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn used_tokens(usage: TokenUsage, estimate: u64) -> u64 {
-    if usage.official {
-        usage.prompt.max(estimate)
-    } else {
-        estimate
-    }
-}
-
 fn window_size(session_window: u64, ctx: &Context) -> u64 {
     if session_window > 0 {
         return session_window;
@@ -1023,7 +1068,7 @@ fn reasoning_tokens(history: &[LogEvent]) -> u64 {
     history
         .iter()
         .map(|e| match e {
-            LogEvent::LlmStream(out) => estimate_text(&out.reasoning),
+            LogEvent::LlmStream(out) => estimate_reasoning(out),
             _ => 0,
         })
         .sum()
@@ -1139,45 +1184,72 @@ mod tests {
         assert_eq!(snap.remaining_to_compact(), 5_000);
     }
 
-    #[test]
-    fn official_prompt_wins_when_larger() {
-        let estimate = 100;
-        assert_eq!(
-            used_tokens(
-                TokenUsage {
-                    prompt: 500,
-                    official: true,
-                    window: 1_000,
-                    ..TokenUsage::default()
-                },
-                estimate
-            ),
-            500
+    /// 采一次「上游报了用量」的样：prompt + completion 成为锚点。
+    fn sample_with_usage(sessions: &Sessions, prompt: u64, completion: u64) {
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Usage {
+            tokens: cordis_base::usage::TokenUsage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                ..Default::default()
+            },
+            official: true,
+            model: "m".into(),
+            cost_usd_ticks: None,
+        });
+        sessions.finish_llm(&cordis_base::types::LlmOutput {
+            text: "ok".into(),
+            ..Default::default()
+        });
+    }
+
+    /// 有锚点时占用 = 上游报的 prompt + completion + 之后追加的估算。completion
+    /// 里含这一轮的推理，下一次请求会原样回放，以前只认 prompt 就整整慢一步（#154）。
+    #[tokio::test]
+    async fn anchored_usage_is_upstream_total_plus_later_growth() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::User("go".into()));
+        sample_with_usage(&sessions, 5_000, 1_000);
+        assert_eq!(context_tokens_used(&ctx, ""), 6_000);
+
+        let tool = LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            content: "x".repeat(4_000),
+            images: Vec::new(),
+            is_error: false,
+        };
+        let grown = estimate_context_tokens("", std::slice::from_ref(&tool));
+        sessions.append(tool);
+        assert_eq!(context_tokens_used(&ctx, ""), 6_000 + grown);
+    }
+
+    /// 顶栏 / `/context` 显示的就是自动压缩判定用的那个数。
+    #[tokio::test]
+    async fn snapshot_shows_the_number_auto_compact_uses() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.set_window(1_000_000);
+        sessions.append(LogEvent::User("go".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "ok".into(),
+            reasoning: "r".repeat(8_000),
+            ..Default::default()
+        }));
+        let system = assembled_parts(&ctx).render();
+        let unanchored = snapshot_context(&ctx);
+        assert_eq!(unanchored.used, context_tokens_used(&ctx, &system));
+        assert!(
+            unanchored.used >= unanchored.system_prompt_tokens + unanchored.message_tokens + 2_000,
+            "推理要算进占用：{unanchored:?}"
         );
-        assert_eq!(
-            used_tokens(
-                TokenUsage {
-                    prompt: 50,
-                    official: true,
-                    window: 1_000,
-                    ..TokenUsage::default()
-                },
-                estimate
-            ),
-            100
-        );
-        assert_eq!(
-            used_tokens(
-                TokenUsage {
-                    prompt: 999,
-                    official: false,
-                    window: 1_000,
-                    ..TokenUsage::default()
-                },
-                estimate
-            ),
-            100
-        );
+
+        sample_with_usage(&sessions, 40_000, 2_000);
+        assert_eq!(snapshot_context(&ctx).used, 42_000);
     }
 
     #[test]

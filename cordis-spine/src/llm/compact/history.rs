@@ -139,6 +139,7 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
             LogEvent::User(t) | LogEvent::SystemReminder(t) => n += estimate_text(t),
             LogEvent::LlmStream(out) => {
                 n += estimate_text(&out.text);
+                n += estimate_reasoning(out);
                 for call in &out.tool_calls {
                     n += estimate_text(&call.name);
                     n += estimate_text(&call.arguments);
@@ -161,6 +162,35 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
         }
     }
     n
+}
+
+/// 一轮输出里**会回放给上游**的推理占多少 token。
+///
+/// 推理是原样回传的（见 [`extract_messages_since_last_user`]）：Responses 回放
+/// `reasoning_items` 原件，chat/completions 回放 `reasoning` 文本。有原件就按原件算，
+/// 没有才退到文本——`reasoning` 本身就是从原件里拼出来的，两者相加会算两遍。
+///
+/// 每个原件里明文与 `encrypted_content` 是同一段推理的两种形态，取大的那个，不相加；
+/// 密文是 base64，比原始字节大约 4/3（Grok `estimate_item_tokens` 的 Reasoning 臂）。
+pub fn estimate_reasoning(out: &LlmOutput) -> u64 {
+    if out.reasoning_items.is_empty() {
+        return estimate_text(&out.reasoning);
+    }
+    out.reasoning_items
+        .iter()
+        .map(|item| {
+            let mut text = String::new();
+            for key in ["content", "summary"] {
+                for part in item[key].as_array().into_iter().flatten() {
+                    if let Some(t) = part["text"].as_str() {
+                        text.push_str(t);
+                    }
+                }
+            }
+            let encrypted = item["encrypted_content"].as_str().map_or(0, str::len) as u64;
+            estimate_text(&text).max(encrypted * 3 / 4 / 4)
+        })
+        .sum()
 }
 
 fn estimate_text(text: &str) -> u64 {
@@ -382,5 +412,38 @@ mod tests {
             })
             .collect();
         assert_eq!(users, ["only"]);
+    }
+
+    /// #154：推理是原样回放给上游的，估算漏掉它，推理模型的上下文就被压到阈值以下。
+    #[test]
+    fn estimate_counts_replayed_reasoning() {
+        let text_only = vec![LogEvent::LlmStream(LlmOutput {
+            text: "ok".into(),
+            reasoning: "x".repeat(4_000),
+            ..LlmOutput::default()
+        })];
+        assert_eq!(estimate_context_tokens("", &text_only), 1 + 1_000);
+    }
+
+    /// 有原件就按原件算，`reasoning` 文本是从原件拼出来的，不能再加一遍；
+    /// 原件里明文和密文取大的那个。
+    #[test]
+    fn reasoning_items_win_over_text_and_are_not_double_counted() {
+        let out = LlmOutput {
+            reasoning: "y".repeat(4_000),
+            reasoning_items: vec![
+                serde_json::json!({
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": "y".repeat(4_000)}],
+                }),
+                serde_json::json!({
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "s".repeat(40)}],
+                    "encrypted_content": "e".repeat(16_000),
+                }),
+            ],
+            ..LlmOutput::default()
+        };
+        assert_eq!(estimate_reasoning(&out), 1_000 + 3_000);
     }
 }

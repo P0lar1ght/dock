@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::llm::sampler::Llm;
 use crate::names::{COMPACT, LLM, SESSIONS, SKILLS, SYSTEM_PROMPT, TURN, WORKFLOWS};
 use crate::prompt::assemble::SystemPrompt;
+use crate::prompt::context_usage::context_tokens_used;
 use crate::session::log::Sessions;
 use crate::tools::skills::Skills;
 use crate::tools::workflow::Workflows;
@@ -33,7 +34,7 @@ use cordis_base::usage::TokenUsage;
 use crate::tools::memory::maybe_flush_before_compact;
 use history::{build_compacted_events, prepare_conversation_for_summarization};
 
-pub(crate) use history::{estimate_context_tokens, VISIBLE_NOTICE};
+pub(crate) use history::{estimate_context_tokens, estimate_reasoning, VISIBLE_NOTICE};
 use prompt::{build_summary_prompt_kind, SummaryPromptKind};
 use summary::is_degenerate_summary;
 
@@ -69,14 +70,14 @@ impl Compact {
             .get::<SystemPrompt>(SYSTEM_PROMPT)
             .map(|p| p.assemble_on(ctx))
             .unwrap_or_default();
-        let used = context_tokens_used(&sessions, &system);
+        let used = context_tokens_used(ctx, &system);
         let window = sessions.usage().window;
         if !exceeds_threshold(used, window, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT) {
             return Ok(false);
         }
         match compact_session(ctx, None, FullReplaceConfig::default()).await {
             Ok(()) => {
-                let used_after = context_tokens_used(&sessions, &system);
+                let used_after = context_tokens_used(ctx, &system);
                 if exceeds_threshold(
                     used_after,
                     sessions.usage().window,
@@ -99,16 +100,6 @@ pub fn compact() -> Plugin {
     plugin("compact", Inject::from([SESSIONS, LLM]), |ctx, _: &()| {
         Ok(Some(ctx.provide(COMPACT, Compact)?))
     })
-}
-
-fn context_tokens_used(sessions: &Sessions, system: &str) -> u64 {
-    let estimate = estimate_context_tokens(system, &sessions.model_history());
-    let u = sessions.usage();
-    if u.official {
-        u.prompt.max(estimate)
-    } else {
-        estimate
-    }
 }
 
 async fn compact_session(ctx: &Context, extra: Option<&str>, cfg: FullReplaceConfig) -> Result<()> {
@@ -537,5 +528,107 @@ mod tests {
             e,
             LogEvent::ToolExecute { content, .. } if content.contains('y')
         )));
+    }
+
+    /// 采一次「上游报了用量」的样：prompt + completion 成为占用锚点。
+    fn sample_with_usage(sessions: &Sessions, prompt: u64, completion: u64) {
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&StreamDelta::Usage {
+            tokens: TokenUsage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                ..TokenUsage::default()
+            },
+            official: true,
+            model: "m".into(),
+            cost_usd_ticks: None,
+        });
+        sessions.finish_llm(&LlmOutput {
+            text: "ok".into(),
+            ..LlmOutput::default()
+        });
+    }
+
+    fn with_summary_llm(root: &Context) {
+        root.provide(
+            LLM,
+            Llm::from_sampler(root.clone(), Arc::new(FixedSummary(healthy_summary()))),
+        )
+        .unwrap();
+    }
+
+    /// #154：上游不报用量时全靠估算，估算漏了推理，推理模型的长工具循环永远到
+    /// 不了阈值。5 轮 × 约 5000 token 推理塞进 10000 的窗口，必须压。
+    #[tokio::test]
+    async fn reasoning_heavy_history_triggers_without_upstream_usage() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        sessions.set_window(10_000);
+        sessions.append(LogEvent::User("go".into()));
+        for i in 0..5 {
+            sessions.append(LogEvent::LlmStream(LlmOutput {
+                reasoning: "r".repeat(20_000),
+                tool_calls: vec![ToolCall {
+                    id: format!("c{i}"),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }],
+                ..LlmOutput::default()
+            }));
+            sessions.append(LogEvent::ToolExecute {
+                id: format!("c{i}"),
+                name: "bash".into(),
+                arguments: "{}".into(),
+                content: "ok".into(),
+                images: Vec::new(),
+                is_error: false,
+            });
+        }
+        let _s = root.provide(SESSIONS, sessions.clone()).unwrap();
+        with_summary_llm(&root);
+        assert!(Compact.maybe_auto(&root).await.unwrap());
+    }
+
+    /// 上一次采样的输出（含推理）和之后的工具结果都会进下一次请求。以前只认上游
+    /// 的 prompt，这部分要等再采一次才看得见，一步跨过阈值就直接撞窗口。
+    #[tokio::test]
+    async fn last_output_and_later_tool_results_count_toward_the_threshold() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        sessions.set_window(1_000);
+        sessions.append(LogEvent::User("go".into()));
+        // prompt 700 + completion 100 = 800，还在 85% 以下。
+        sample_with_usage(&sessions, 700, 100);
+        sessions.append(LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            content: "y".repeat(400),
+            images: Vec::new(),
+            is_error: false,
+        });
+        let _s = root.provide(SESSIONS, sessions.clone()).unwrap();
+        with_summary_llm(&root);
+        assert!(Compact.maybe_auto(&root).await.unwrap());
+    }
+
+    /// 压缩后占用必须按新历史算。以前上游报的压缩**前** prompt 留在账上，
+    /// 「压完还超」的判定恒真，一次自动压缩之后整轮都被抑制，长工具循环第二次
+    /// 写满窗口时就不再压了。
+    #[tokio::test]
+    async fn auto_compact_is_not_suppressed_by_the_pre_compact_usage() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        sessions.set_window(1_000);
+        sessions.append(LogEvent::User("go".into()));
+        sample_with_usage(&sessions, 890, 10);
+        let _s = root.provide(SESSIONS, sessions.clone()).unwrap();
+        with_summary_llm(&root);
+        assert!(Compact.maybe_auto(&root).await.unwrap());
+        assert!(
+            !sessions.auto_compact_suppressed(),
+            "压缩后 {} token，不该判成压了还超",
+            context_tokens_used(&root, "")
+        );
     }
 }
