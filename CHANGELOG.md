@@ -21,6 +21,9 @@
 
 ### 新增
 
+- **预设常驻工具** `resident_tools`：写全名或 `前缀*`（如 `mcp_browser__*`）。
+  - 藏在 `search_tool` 后面的工具（MCP、按需、动态包）直接进模型工具表。
+  - 网关 `preset/get|update` 多了 `residentTools`（不传 = 保持原样）；`tool/catalog {includeMcp:true}` 带 MCP 行。
 - **网关浏览器画面** `browser/view/*`（能力 `browserView`）：看会话正在用的标签页、接手操作。
   - CDP screencast 推 JPEG 帧；鼠标 / 滚轮 / 按键 / 文字转回页面；地址栏、前进后退刷新。
   - agent 换标签页画面跟着换；帧写出去才让 Chrome 发下一帧。

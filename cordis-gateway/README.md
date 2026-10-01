@@ -114,7 +114,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `preset/create { name, icon?, description?, basedOn? }` | 新建用户层预设（`~/.dock/presets/<id>/`），**不改**默认预设；`basedOn` 照它复制人设、工具名单和子代理。`icon` 只收小写字母、数字、`-`。回 `preset`（同列表的一项） |
 | `preset/get { id }` | 整份定义，编辑器用（见下） |
 | `preset/update { id, preset }` | 整份写回（见下） |
-| `tool/catalog` | 预设能选的工具（见下） |
+| `tool/catalog { includeMcp? }` | 预设能选的工具（见下） |
 | `preset/delete { id }` | 删用户 / 项目层预设；未改过的内置预设回错，改过的内置预设删掉覆盖层、恢复内置版本。已用它开过的会话不受影响 |
 
 #### 预设编辑器（`preset/get` / `preset/update` / `tool/catalog`）
@@ -122,15 +122,20 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `preset/get`：列表那几项，外加 `name` / `order` / `persona` / `replacePrompt`。
 - `tools`：`null` = 全部已注册工具，`[]` = 不用工具，数组 = 允许名单。
 - `agents[]`：`id` / `name` / `description` / `persona` / `tools` / `replacePrompt` / `listings`。
+- `residentTools`（预设与 `agents[]` 各一份）：常驻工具，全名或以 `*` 结尾的前缀。
+  - 让本来藏在 `search_tool` 后面的工具（MCP、按需、动态包）直接进模型工具表。
 - `agents[].builtin`：内置预设自带的角色。
 - `path`：落盘的 `agent.yml`；内置没改过为 `null`。
 - 损坏的预设照样回：`available: false` + `error`。
 - `preset/update`：字段同 `preset/get`，整份写回。
+- `residentTools` 不传（或 `null`）= 保持原样：老客户端整份写回不会把它清掉。
 - 内置预设写成 `~/.dock/presets/<id>/` 覆盖层。
 - 名册里去掉的角色删掉它的文件；内置自带的角色删不掉。
 - 损坏的预设整份重写。
 - 校验不过回 `invalid_params`、不写盘：名为空、整份替换却没有提示词、角色 id 不合法或重复、图标名不合法。
-- `tool/catalog`：同 TUI `/preset` 画布左栏，不含 MCP。
+- 常驻工具写法不对也回 `invalid_params`：单独的 `*`、中间带 `*`、含空白。
+- `tool/catalog`：同 TUI `/preset` 画布左栏，默认不含 MCP。
+- `includeMcp: true` 另带 MCP 行：`kind: "mcp"` + `server`（给常驻工具选）。
 - 每项 `name` / `summary`（描述第一句）/ `kind`。
 - `kind`：`resident` 常驻、`deferred` 按需、`dynamic` 运行中的动态包（不受允许名单限制）。
 

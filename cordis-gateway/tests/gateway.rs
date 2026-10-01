@@ -1515,6 +1515,91 @@ async fn preset_editor_reads_and_writes_the_whole_definition() {
     let _ = rpc.call("preset/delete", json!({ "id": id })).await;
 }
 
+/// 常驻工具：`residentTools` 写得进、读得回（预设和子代理各一份）；不带这个字段整份写回
+/// 时保持原样（老客户端不清掉它）；写法不对回 `invalid_params`。`tool/catalog
+/// {includeMcp:true}` 才带 MCP 行。
+#[tokio::test]
+async fn preset_resident_tools_round_trip_and_survive_old_clients() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let plain = rpc.call("tool/catalog", json!({})).await;
+    let with_mcp = rpc
+        .call("tool/catalog", json!({ "includeMcp": true }))
+        .await;
+    let rows = |v: &serde_json::Value| v["result"]["tools"].as_array().unwrap().len();
+    assert!(rows(&with_mcp) >= rows(&plain), "{with_mcp}");
+    assert!(
+        plain["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["kind"] != "mcp"),
+        "{plain}"
+    );
+
+    let made = rpc
+        .call(
+            "preset/create",
+            json!({ "name": "通用", "basedOn": "minimal" }),
+        )
+        .await;
+    let id = made["result"]["preset"]["id"].as_str().unwrap().to_string();
+    let body = json!({
+        "name": "通用",
+        "tools": ["read_file"],
+        "residentTools": ["mcp_browser__*", "mcp_browser__*"],
+        "agents": [
+            { "id": "web", "name": "网页", "tools": ["read_file"],
+              "residentTools": ["mcp_browser__browser_open"] }
+        ]
+    });
+    let saved = rpc
+        .call("preset/update", json!({ "id": id, "preset": body }))
+        .await;
+    assert!(saved.get("error").is_none(), "{saved}");
+    let got = rpc.call("preset/get", json!({ "id": id })).await;
+    let p = &got["result"]["preset"];
+    assert_eq!(p["residentTools"], json!(["mcp_browser__*"]), "{got}");
+    assert_eq!(
+        p["agents"][0]["residentTools"],
+        json!(["mcp_browser__browser_open"])
+    );
+
+    // 老客户端：拿 preset/get 的结果去掉 residentTools 整份写回。
+    let mut old = p.clone();
+    old.as_object_mut().unwrap().remove("residentTools");
+    for a in old["agents"].as_array_mut().unwrap() {
+        a.as_object_mut().unwrap().remove("residentTools");
+    }
+    let saved = rpc
+        .call("preset/update", json!({ "id": id, "preset": old }))
+        .await;
+    assert!(saved.get("error").is_none(), "{saved}");
+    let kept = rpc.call("preset/get", json!({ "id": id })).await;
+    assert_eq!(
+        kept["result"]["preset"]["residentTools"],
+        json!(["mcp_browser__*"])
+    );
+    assert_eq!(
+        kept["result"]["preset"]["agents"][0]["residentTools"],
+        json!(["mcp_browser__browser_open"])
+    );
+
+    let mut bad = body.clone();
+    bad["residentTools"] = json!(["*"]);
+    let refused = rpc
+        .call("preset/update", json!({ "id": id, "preset": bad }))
+        .await;
+    assert_eq!(
+        refused["error"]["details"]["code"], "invalid_params",
+        "{refused}"
+    );
+    let _ = rpc.call("preset/delete", json!({ "id": id })).await;
+}
+
 /// AI 辅助写预设：走 `"llm"`，结果只回不写盘。测试装配的 echo 只回工具调用、没有正文，
 /// 三个方法都报 `draft_failed`（成功路径见 spine `tests/preset_assist.rs`）；参数错是
 /// `invalid_params`；另起任务回帧之后连接照常可用。

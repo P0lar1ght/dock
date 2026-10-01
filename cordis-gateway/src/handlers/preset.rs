@@ -76,6 +76,7 @@ pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
                 "description": def.description,
                 "persona": def.persona,
                 "tools": def.tools,
+                "residentTools": def.resident_tools,
                 "replacePrompt": def.replace_prompt,
                 "listings": def.listings,
                 "readOnly": def.read_only,
@@ -90,14 +91,17 @@ pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     obj.insert("persona".into(), json!(p.persona));
     obj.insert("replacePrompt".into(), json!(p.replace_prompt));
     obj.insert("tools".into(), json!(p.tools));
+    obj.insert("residentTools".into(), json!(p.resident_tools));
     obj.insert("agents".into(), json!(agents));
     obj.insert("path".into(), json!(path));
     Ok(json!({ "preset": item }))
 }
 
 /// `preset/update { id, preset }`：整份写下（`preset` 同 `preset/get` 的字段：`name`
-/// `description` `icon` `order` `persona` `replacePrompt` `tools` `agents[]`）。内置预设
-/// 写成用户层覆盖；损坏的预设整份重写。回 `preset`（同 `preset/list` 的一项）。
+/// `description` `icon` `order` `persona` `replacePrompt` `tools` `residentTools`
+/// `agents[]`）。内置预设写成用户层覆盖；损坏的预设整份重写。回 `preset`（同
+/// `preset/list` 的一项）。`residentTools` 不传就保持原样（预设和各子代理都是），
+/// 免得不认识它的客户端整份写回时把 yml 里配的常驻工具清掉。
 pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = id_param(&params)?;
     let body = params
@@ -122,6 +126,29 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             Some(_) => Err(RpcError::invalid_params("tools 是数组或 null")),
         }
     };
+    let resident = |v: &Value| -> Result<Option<Vec<String>>, RpcError> {
+        match v.get("residentTools") {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|t| {
+                    t.as_str()
+                        .map(String::from)
+                        .ok_or_else(|| RpcError::invalid_params("residentTools 只收字符串"))
+                })
+                .collect::<Result<_, _>>()
+                .map(Some),
+            Some(_) => Err(RpcError::invalid_params("residentTools 是数组或 null")),
+        }
+    };
+    let existing = service(gateway)?.get(id);
+    let existing_resident = |role: &str| -> Vec<String> {
+        existing
+            .as_ref()
+            .and_then(|p| p.agents.get(role))
+            .map(|def| def.resident_tools.clone())
+            .unwrap_or_default()
+    };
     let mut agents: Vec<(String, SubagentDef)> = Vec::new();
     for a in body
         .get("agents")
@@ -141,6 +168,7 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             description: text(a, "description"),
             persona: text(a, "persona"),
             tools: tools(a)?,
+            resident_tools: resident(a)?.unwrap_or_else(|| existing_resident(&role)),
             replace_prompt: flag(a, "replacePrompt"),
             listings: flag(a, "listings"),
             read_only: flag(a, "readOnly"),
@@ -159,6 +187,7 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
         persona: text(body, "persona"),
         replace_prompt: flag(body, "replacePrompt"),
         tools: tools(body)?,
+        resident_tools: resident(body)?,
         agents,
     };
     let saved = service(gateway)?
@@ -167,10 +196,15 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
     Ok(json!({ "preset": summary(saved) }))
 }
 
-/// `tool/catalog`：预设能选的工具（同 TUI `/preset` 画布左栏：已注册的工具，不含 MCP）。
-/// `summary` 是描述的第一句；`kind`：`resident` 常驻 / `deferred` 按需 / `dynamic`
-/// 运行中的动态包（不受允许名单限制）。
-pub fn tool_catalog(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+/// `tool/catalog { includeMcp? }`：预设能选的工具（同 TUI `/preset` 画布左栏：已注册的
+/// 工具，默认不含 MCP）。`summary` 是描述的第一句；`kind`：`resident` 常驻 / `deferred`
+/// 按需 / `dynamic` 运行中的动态包（不受允许名单限制）/ `mcp`（只在 `includeMcp: true`
+/// 时出现，另带 `server`；给「常驻工具」选，MCP 不受允许名单限制）。
+pub fn tool_catalog(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let include_mcp = params
+        .get("includeMcp")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let tools = gateway
         .ctx()
         .get::<Tools>(TOOLS)
@@ -178,8 +212,17 @@ pub fn tool_catalog(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     let items: Vec<Value> = tools
         .specs()
         .into_iter()
-        .filter(|s| !tools.is_mcp(&s.name))
+        .filter(|s| include_mcp || !tools.is_mcp(&s.name))
         .map(|s| {
+            if tools.is_mcp(&s.name) {
+                let server = cordis_spine::split_mcp_public_name(&s.name).map(|(server, _)| server);
+                return json!({
+                    "name": s.name,
+                    "summary": first_sentence(&s.description),
+                    "kind": "mcp",
+                    "server": server,
+                });
+            }
             let kind = if tools.is_dynamic(&s.name) {
                 "dynamic"
             } else if tools.is_deferred(&s.name) {

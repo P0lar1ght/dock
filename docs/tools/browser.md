@@ -27,7 +27,8 @@
   - `browser_file_upload` `browser_resize` `browser_evaluate`
   - `browser_console_messages` `browser_network_requests`
   - `browser_screenshot` `browser_tabs` `browser_close`
-- 和其它 MCP 一样：不进 sampler，经 `search_tool` / `use_tool`。
+- 和其它 MCP 一样：默认不进 sampler，经 `search_tool` / `use_tool`。
+- 想让某个预设直接看见：`resident_tools: [mcp_browser__*]`（见 [agent-presets](agent-presets.md)）。
 - MCP 工具绕过预设允许名单；预设 yml 里不再列 `browser_*`。
 - `tools/list` 带 `annotations.readOnlyHint`（snapshot / screenshot / console / network / wait_for）。
 - 失败回 `isError: true`；Dock 客户端据此标 `ToolResult.is_error`，不靠猜文本。
