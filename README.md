@@ -72,6 +72,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 ### 🌐 浏览器 companion
 
 - Gateway **默认挂插件但不监听**。TUI `/pair` 开启/关闭回环端口；首选 `127.0.0.1:18991`，占用则换下一个，同端口再试 `[::1]`
+- 远程连接：`dock serve --remote` + 设备令牌（`dock device add`），仍只绑回环、TLS 交给反向代理，见 [docs/REMOTE.md](docs/REMOTE.md)
 - 鉴权靠 TUI `/pair` + 一次性 ticket，不是 Origin 白名单
 - 斜杠走 Gateway；SDK 只解析、截图、把 `{ kind }` 画出来
 - `/view-plan` `/help` 等 notice 用命令输出卡片，不当错误粉字

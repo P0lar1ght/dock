@@ -24,9 +24,36 @@
 - **预设常驻工具** `resident_tools`：写全名或 `前缀*`（如 `mcp_browser__*`）。
   - 藏在 `search_tool` 后面的工具（MCP、按需、动态包）直接进模型工具表。
   - 网关 `preset/get|update` 多了 `residentTools`（不传 = 保持原样）；`tool/catalog {includeMcp:true}` 带 MCP 行。
+- **网关浏览器画面** `browser/view/*`（能力 `browserView`）：看会话正在用的标签页、接手操作。
+  - CDP screencast 推 JPEG 帧；鼠标 / 滚轮 / 按键 / 文字转回页面；地址栏、前进后退刷新。
+  - agent 换标签页画面跟着换；帧写出去才让 Chrome 发下一帧。
+  - 本地、远程、网页端同一条路，不需要客户端碰 CDP 端口。
+- **画布**：模型写自包含 HTML，Dock 桌面端在会话旁的沙箱 iframe 里跑。
+  - 工具 `canvas_create` / `canvas_edit`（局部替换或整页重写，每次一版）/ `canvas_data`（只换数据）/ `canvas_read`。
+  - 落在会话目录 `canvas/<id>/`：`meta.json` + `v<n>.html` + `data.json`。
+  - 网关 `canvas/list` / `get` / `setData` / `rollback`（能力 `canvas`）。
+- **网关工作区文件** `fs/list` / `fs/read` / `fs/find`（能力 `workspaceFiles`）：只读，给文件面板。
+  - 路径相对会话 cwd，出了目录就拒；照 `.gitignore`，默认不列点文件。
+  - 文本截在字符边界；常见图片回 base64；其它二进制只给大小。
+- **工具结果里的图进 dock.1**（能力 `toolImages`）：`item/tool_completed.attachments` + `item/image`。
+  - 以前网关把工具截图丢了，客户端看不到 agent 看到的画面（cua-driver 截图）。
+  - dock-core 的工具项多了 `images`。
+
+### 新增（远程）
+
+- **`dock serve --remote`**：给别的机器上的 GUI / 浏览器 UI 连的常驻网关。
+  - 仍只绑回环（默认 `127.0.0.1:18990`，占用直接报错）；TLS 交给反向代理或 Tailscale。
+  - 只认设备令牌，不挂配对与 ticket 的 HTTP 路由；跑到 SIGTERM 为止。
+- **设备令牌** `dock device add|list|revoke`：盘上只存 sha256；撤销立刻生效并断开连接。
+  - 同一条连接鉴权失败 5 次断开。
+- SDK：`DockClient({ deviceToken, gatewayUrl: 'https://…' })`；令牌模式对非回环地址强制 https。
+- 部署说明：`docs/REMOTE.md`（Caddy / nginx / systemd / Tailscale）。
 
 ### 修复
 
+- 网关浏览器画面：同一会话连发 `browser/view/open` 不再悄悄关掉已回给客户端的那个视图。
+  - 最后收到的留下；被顶掉的推 `closed { reason: "replaced" }`，开到一半就过时的回 `superseded`。
+- 网关浏览器画面：同一视图连发的 `browser/view/input` 按收到的顺序进页面（以前按下 / 抬起、连打的字会乱序）。
 - MCP 工具的 `isError: true` 现在会把结果标成失败；以前只有正文以 `Error:` 开头才算。
 
 ## [0.1.2] - 2026-09-29

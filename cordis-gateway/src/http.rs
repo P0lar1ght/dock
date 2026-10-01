@@ -38,6 +38,13 @@ pub(crate) fn spawn_listener(
 }
 
 pub fn router(gateway: GatewayHandle) -> Router {
+    if gateway.is_remote() {
+        // 远程模式只有 WebSocket：配对与 ticket 路由不挂，公网上的人连申请都发不了。
+        return Router::new()
+            .route(protocol::WS_PATH, get(ws::upgrade))
+            .fallback(not_found)
+            .with_state(AppState { gateway });
+    }
     Router::new()
         .route("/v1/pairing/requests", post(create_pairing))
         .route("/v1/pairing/requests/{id}", get(poll_pairing))

@@ -1,5 +1,8 @@
+pub mod browser_view;
+pub mod canvas;
 pub mod connection;
 pub mod environment;
+pub mod fs;
 pub mod image_inputs;
 pub mod interaction;
 pub mod permission;

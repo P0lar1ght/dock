@@ -4,7 +4,8 @@ use serde_json::Value;
 
 use crate::handle::GatewayHandle;
 use crate::handlers::{
-    connection, environment, image_inputs, interaction, permission, preset, slash, thread, turn,
+    canvas, connection, environment, fs, image_inputs, interaction, permission, preset, slash,
+    thread, turn,
 };
 use crate::protocol::{self, RpcError};
 
@@ -31,9 +32,16 @@ pub async fn dispatch(
         protocol::PRESET_GET => preset::get(&gateway, params),
         protocol::PRESET_UPDATE => preset::update(&gateway, params),
         protocol::TOOL_CATALOG => preset::tool_catalog(&gateway, params),
-        protocol::PRESET_DRAFT | protocol::PRESET_REWRITE | protocol::PRESET_SUGGEST_TOOLS => {
-            dispatch_detached(gateway, method, params).await
-        }
+        protocol::PRESET_DRAFT
+        | protocol::PRESET_REWRITE
+        | protocol::PRESET_SUGGEST_TOOLS
+        | protocol::FS_LIST
+        | protocol::FS_READ
+        | protocol::FS_FIND
+        | protocol::CANVAS_LIST
+        | protocol::CANVAS_GET
+        | protocol::CANVAS_SET_DATA
+        | protocol::CANVAS_ROLLBACK => dispatch_detached(gateway, method, params).await,
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
@@ -45,6 +53,7 @@ pub async fn dispatch(
         protocol::THREAD_RESTORE => thread::restore(&gateway, params),
         protocol::THREAD_DELETE => thread::delete(&gateway, params),
         protocol::THREAD_HISTORY => thread::history(&gateway, params),
+        protocol::ITEM_IMAGE => thread::item_image(&gateway, params),
         protocol::THREAD_SUBSCRIBE => thread::subscribe(&gateway, params, subscribed),
         protocol::THREAD_UNSUBSCRIBE => thread::unsubscribe(params, subscribed),
         protocol::THREAD_ENVIRONMENT_GET => environment::get(&gateway, params),
@@ -105,12 +114,21 @@ fn opens_on_demand(method: &str) -> bool {
     )
 }
 
-/// 要调模型的方法：一次几秒。`ws.rs` 不在连接锁里跑它们（锁住会卡住这条连接的
-/// 推送和其它请求），鉴权过了就另起任务，跑完再回帧。
+/// 要调模型的方法（一次几秒）和读盘的 `fs/*` / `canvas/*`（大仓库里找文件要走很多目录）。`ws.rs` 不在
+/// 连接锁里跑它们（锁住会卡住这条连接的推送和其它请求），鉴权过了就另起任务，跑完再回帧。
 pub fn is_detached(method: &str) -> bool {
     matches!(
         method,
-        protocol::PRESET_DRAFT | protocol::PRESET_REWRITE | protocol::PRESET_SUGGEST_TOOLS
+        protocol::PRESET_DRAFT
+            | protocol::PRESET_REWRITE
+            | protocol::PRESET_SUGGEST_TOOLS
+            | protocol::FS_LIST
+            | protocol::FS_READ
+            | protocol::FS_FIND
+            | protocol::CANVAS_LIST
+            | protocol::CANVAS_GET
+            | protocol::CANVAS_SET_DATA
+            | protocol::CANVAS_ROLLBACK
     )
 }
 
@@ -124,6 +142,13 @@ pub async fn dispatch_detached(
         protocol::PRESET_DRAFT => preset::draft(&gateway, params).await,
         protocol::PRESET_REWRITE => preset::rewrite(&gateway, params).await,
         protocol::PRESET_SUGGEST_TOOLS => preset::suggest_tools(&gateway, params).await,
+        protocol::FS_LIST | protocol::FS_READ | protocol::FS_FIND => {
+            fs::dispatch(&gateway, method, params).await
+        }
+        protocol::CANVAS_LIST
+        | protocol::CANVAS_GET
+        | protocol::CANVAS_SET_DATA
+        | protocol::CANVAS_ROLLBACK => canvas::dispatch(&gateway, method, params).await,
         _ => Err(RpcError::method_not_found(method)),
     }
 }

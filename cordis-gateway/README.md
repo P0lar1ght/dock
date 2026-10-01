@@ -55,6 +55,20 @@ root.plugin(gateway(), ())?;
 
 ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI 确认，但照样钉在 `origin` 上、照样一小时过期。**只经 stdout 交给父进程**，不留绑定——所以 `/v1/connection/tickets` 仍然 403，别的本机进程伪造同一个 Origin 也领不到。serve 模式下 stdout 只能写这些行，诊断走 stderr。
 
+## 远程模式与设备令牌（`devices.rs`，`dock serve --remote`）
+
+部署步骤见 [docs/REMOTE.md](../docs/REMOTE.md)。这里只记网关的行为。
+
+- `gateway_remote(bind)`：挂载即监听，**仍只绑回环**，端口占用直接报错（不顺延、不开 `[::1]`）。
+- 路由只剩 `/api/ws`：配对与 ticket 的 HTTP 路由不挂。
+- `connection/authenticate { token }`：设备令牌，任何模式都认；远程模式**只**认它。
+  - `initialize.connection.application` 报 `device:<名字>`，`origin` 是这条连接的 Origin。
+- `connection/authenticate { ticket }`：本机配对 / `dock serve`；远程模式回 `unauthenticated`。
+- 同一条连接鉴权失败 5 次：服务端关连接，关闭码 `4429`。
+- 连着的设备每 2 秒复查一次；被撤销就关连接，关闭码 `4401`。
+- 令牌名单：`$DOCK_HOME/devices.json`（只存 sha256，unix 0600，只有 `dock device add|revoke` 写）。
+- 最后使用时间：`$DOCK_HOME/devices.seen.json`（只有网关写，和名单分开，不会覆盖新加的设备）。
+
 ## 协议（`protocol.rs` / `rpc.rs`）
 
 - `PROTOCOL_VERSION` = `"dock.1"`，WS 路径 `WS_PATH` = `/api/ws`
@@ -139,6 +153,83 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 其它线程级方法（`turn/*`、`thread/environment/*` 与各种 `set`、`thread/subscribe`、`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve`、`slash/execute`）接受任意线程的 id。关着的会话**按需开页**（同 `thread/open`，客户端不用先 open；同时来的请求只开一页）：`turn/start` / `enqueue` / `steer`、`thread/subscribe`、`thread/environment/*` 与各种 `set`、`slash/execute`。`turn/cancel` 与 `turn/queue/*` 对关着的会话回空结果（`cancelled: false`、空队列、`removed: false`），不开页；`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve` 只对开着的页有意义，仍回 `thread_not_open`；认不得的 id 回 `not_found`。`thread/history` 例外：关着的会话也给，`events` 由落盘事件按真实时间回放（`Transcript::replay`，和重开会话重建投影同一条路），每轮都以 `turn/completed` 收尾（结果照落盘的 `turn-end` 行报，停止、出错也看得出；更早的会话没有这一行，一律补成完成，最后一次采样带错误的补成失败），客户端开着关着只要一条路径。开页走 `"tui.tabs"` 的 `Tabs::open_at`（不切终端里正在看的页）；没挂分页服务时只有第 1 页。
 
 投影每页一份（`handle.rs` 的 `transcripts`，共用一条 broadcast，事件带页身份）；订阅是「页 → 客户端订阅时用的 `threadId`」，推送时用那个 id。会话事件按 `session/page-event` 路由，`turn/completed` 只在那一页记下 `LogEvent::TurnEnd` 时发（一轮一次，流式中途不发；和其它会话事件一样按 `session/page-event` 路由），`status` 是 `completed` / `cancelled` / `failed`，失败带 `error`（错误文本，以前只回给 TUI）；`item/tool_completed` 的 `status` 照 Dock 落下的 `is_error` 报：`completed` / `failed`，停止时补的「已中断。」为 `cancelled`，权限门拒绝的为 `denied`；权限 / 提问 / 计划 / elicitation 的事件载荷是 `()`，挨页按队首序号（`front_seq`）对账——同一条不重报，换了一条先报旧的 resolved。提问（`interaction/requested`）每题带 `multiSelect`（多选题可以选多个）；`interaction/respond` 的 `answers[]` 每题 `{questionId, values: [选项标签…], other?}`，`other` 是自己写的回答，既算答案也作为备注交给模型；旧形状 `{questionId, value, kind: option|other}` 仍收。线程级的斜杠命令用 `GatewayHandle::scoped(page)`，下面一串 `cmd_*` 读的 `gateway.ctx()` 就是那一页。
+
+### 浏览器画面（能力 `browserView`，`handlers/browser_view.rs`）
+
+看某个会话正在用的浏览器标签页，并能接手操作。本地、远程、网页端走同一条路。
+
+| 方法 / 推送 | 作用 |
+|---|---|
+| `browser/view/open { threadId?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` |
+| `browser/view/input { viewId, event }` | 用户输入，见下 |
+| `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` |
+| `browser/view/close { viewId }` | 关视图（不关页）；连接断开时自动全关 |
+| 推送 `browser/view/frame` | 一帧：`data`（base64 JPEG）、`mime`、`width` / `height`（视口 CSS 像素）等 |
+| 推送 `browser/view/status` | 换了标签页，或地址 / 标题变了 |
+| 推送 `browser/view/closed` | 视图结束：`no_tab`（会话的标签页都关了）/ `browser_exited` |
+
+- 标签页来源：浏览器 MCP 写的运行时名册 `$DOCK_HOME/browser/sessions/<pid>.json`。
+- 按页的会话身份找（`cordis_spine::mcp_session_key`，和 MCP 调用带的是同一个）。
+- 会话还没开标签页：`no_tab`；浏览器没在跑或 target 没了：`browser_unavailable`。
+- agent 换了活动标签页，画面跟着换（每 700ms 看一次名册），推 `status`。
+- 流控：帧写到 WebSocket 之后才回 CDP `screencastFrameAck`，慢客户端不会攒帧。
+- `event` 的形状（坐标是页面视口 CSS 像素，客户端按帧的 `width` / `height` 换算）：
+  - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, clickCount?, modifiers?}`
+  - `{type:"wheel", x, y, deltaX, deltaY, modifiers?}`
+  - `{type:"key", action:"down"|"up"|"press", key, modifiers?}`（DOM 键名：`Enter`、`a`）
+  - `{type:"text", text}`（输入法上屏、粘贴）
+  - `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
+- 地址栏：没写协议补 `https://`；只放行 http / https / about / data / file（`javascript:` 拒）。
+- 这四个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
+- 同一会话连发 `open`：最后收到的那个留下。
+  - 先完成、已回了 `viewId` 的被顶掉时推 `closed { reason: "replaced" }`；
+  - 晚完成、已经不是最新的回错误 `superseded`。
+- 同一视图的 `input` 按收到的顺序一个个发给页面，客户端不用等回包再发下一个。
+
+### 工具结果里的图（能力 `toolImages`）
+
+- `item/tool_completed` 带 `attachments`：每张图 `{ type, index, mimeType, width, height, byteLength }`。
+- 只给元数据；`index` 是在这次工具结果里的位置（空图不投影、不占号）。
+- 像素：`item/image { threadId, itemId, index? }` → `{ mimeType, width, height, data }`（base64）。
+- 开着的会话读内存，关着的读落盘（和 `thread/history` 同一套查找）；找不到回 `not_found`。
+- 典型来源：cua-driver 的 `get_window_state` 截图；GUI 的 CUA 面板和工具卡用它。
+
+### 工作区文件（能力 `workspaceFiles`，`handlers/fs.rs`）
+
+只读看会话 cwd 里的文件（GUI 的文件面板）。路径都相对会话 cwd，用 `/` 分隔。
+
+| 方法 | 作用 |
+|---|---|
+| `fs/list { threadId?, path?, hidden? }` | 列一层：`entries[{ name, path, kind, size?, modifiedMs? }]`、`truncated` |
+| `fs/read { threadId?, path, maxBytes? }` | 读一个文件，`kind` 见下 |
+| `fs/find { threadId?, query, limit? }` | 按名字找文件（快速打开）：`paths` |
+
+- `kind`：`dir` / `file` / `symlink`（列目录）；`text` / `image` / `binary`（读文件）。
+- `text` 带 `text`、`truncated`（默认上限 512 KB，`maxBytes` 可调小）；截在字符边界上。
+- `image`（png / jpg / gif / webp / bmp / ico，≤ 8 MB）带 `mime` 和 base64 `data`。
+- svg 按文本回，另带 `mime: image/svg+xml`；其它二进制只给大小。
+- 照 `.gitignore`（不管是不是 git 仓库）；默认不列点开头的文件，`hidden: true` 才列。
+- 一层最多 5000 项；找文件最多走 10 万个文件，按文件名连续命中打分。
+- 出了会话 cwd 就拒（`..`、绝对路径、指到外面的符号链接）：`invalid_params`。
+- 只认开着的会话（`thread_not_open`）；不占连接锁，读盘在阻塞线程里。
+- 没有写方法：改文件交给 agent（走权限门）。
+
+### 画布（能力 `canvas`，`handlers/canvas.rs`）
+
+模型用 `canvas_*` 工具写的 HTML（见 `docs/tools/canvas.md`），GUI 的画布面板读它。
+
+| 方法 | 作用 |
+|---|---|
+| `canvas/list { threadId? }` | 本会话的画布，最近改过的在前：`canvases[Meta]` |
+| `canvas/get { threadId?, canvasId, version? }` | 一版 HTML + 数据：`{ canvas, version, html, data, path }` |
+| `canvas/setData { threadId?, canvasId, data }` | 用户在画布里改的数据，不出新版 |
+| `canvas/rollback { threadId?, canvasId, version }` | 把那一版拷成新的最新版 |
+
+- `Meta`：`{ id, title, createdMs, updatedMs, dataUpdatedMs, latest, versions[{ n, note, createdMs, bytes }] }`。
+- 默认最新版；`data` 没有就是 `null`；`path` 是画布目录（本机才有意义）。
+- 关着的会话从名册找目录，历史会话的画布也读得到；还没落过盘的新会话回空列表。
+- `canvasId` 只认 `canvas-<n>`（`invalid`）；没有这个画布 / 这一版回 `not_found`。
+- 不推通知：客户端看 `canvas_*` 的工具项刷新。不占连接锁，读盘在阻塞线程里。
 
 ## 依赖注入
 

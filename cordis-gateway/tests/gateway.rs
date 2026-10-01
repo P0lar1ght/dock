@@ -1,5 +1,6 @@
 //! Origin pairing, dock.1 handshake, turn projection, permission dual-resolve.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -7,8 +8,8 @@ use std::time::Duration;
 
 use cordis::Context;
 use cordis_gateway::{
-    gateway_bind, gateway_idle, gateway_serve, ServeConfig, ServeControl, GATEWAY, GATEWAY_SERVE,
-    PROTOCOL_VERSION,
+    devices, gateway_bind, gateway_idle, gateway_remote, gateway_serve, ServeConfig, ServeControl,
+    GATEWAY, GATEWAY_SERVE, PROTOCOL_VERSION,
 };
 use cordis_spine::{
     agent_loop, agent_presets, install_fakes, mcp_client, permissions, plan_mode, settings, slash,
@@ -197,11 +198,16 @@ impl Harness {
     }
 
     async fn boot_on(root: Context) -> Self {
-        root.plugin(gateway_bind("127.0.0.1:0"), ())
-            .unwrap()
-            .wait()
-            .await
-            .unwrap();
+        Self::boot_with(root, gateway_bind("127.0.0.1:0")).await
+    }
+
+    /// 远程模式（`dock serve --remote`）的网关。
+    async fn boot_remote() -> Self {
+        Self::boot_with(harness_root().await, gateway_remote("127.0.0.1:0")).await
+    }
+
+    async fn boot_with(root: Context, gateway: cordis::Plugin) -> Self {
+        root.plugin(gateway, ()).unwrap().wait().await.unwrap();
         let addr = root
             .require::<cordis_tui::GatewayRef>(GATEWAY)
             .unwrap()
@@ -310,21 +316,42 @@ impl Rpc {
 
     /// 以 `origin` 握手并用 `ticket` 鉴权，回鉴权那一帧（不断言成败）。
     async fn connect_as(addr: SocketAddr, ticket: &str, origin: &str) -> (Self, Value) {
+        let mut rpc = Self::open(addr, origin).await;
+        let auth = rpc
+            .call("connection/authenticate", json!({ "ticket": ticket }))
+            .await;
+        (rpc, auth)
+    }
+
+    /// 只握手、不鉴权。
+    async fn open(addr: SocketAddr, origin: &str) -> Self {
         let url = format!("ws://{addr}/api/ws");
         let mut req = url.into_client_request().unwrap();
         req.headers_mut()
             .insert(ORIGIN_HEADER, origin.parse().unwrap());
         let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
         let (write, read) = ws.split();
-        let mut rpc = Self {
+        Self {
             write,
             read,
             next_id: 1,
-        };
-        let auth = rpc
-            .call("connection/authenticate", json!({ "ticket": ticket }))
-            .await;
-        (rpc, auth)
+        }
+    }
+
+    /// 等服务端关连接，回关闭码（没带关闭帧就断了回 `None`）。
+    async fn wait_closed(&mut self, deadline: Duration) -> Option<u16> {
+        let start = tokio::time::Instant::now();
+        loop {
+            let left = deadline.saturating_sub(start.elapsed());
+            let msg = tokio::time::timeout(left, self.read.next())
+                .await
+                .expect("server did not close the connection in time");
+            match msg {
+                Some(Ok(Message::Close(frame))) => return frame.map(|f| u16::from(f.code)),
+                Some(Ok(_)) => continue,
+                Some(Err(_)) | None => return None,
+            }
+        }
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Value {
@@ -350,6 +377,48 @@ impl Rpc {
                 return value;
             }
         }
+    }
+
+    /// 只发不等，回请求 id（连发几个请求测并发用）。
+    async fn send(&mut self, method: &str, params: Value) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.write
+            .send(Message::Text(
+                json!({ "id": id, "method": method, "params": params })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        id
+    }
+
+    /// 收齐 `ids` 的回包；顺手收下其间的推送。
+    async fn collect(
+        &mut self,
+        ids: &[i64],
+        deadline: Duration,
+    ) -> (HashMap<i64, Value>, Vec<Value>) {
+        let start = tokio::time::Instant::now();
+        let mut replies = HashMap::new();
+        let mut notes = Vec::new();
+        while replies.len() < ids.len() {
+            let left = deadline.saturating_sub(start.elapsed());
+            let msg = tokio::time::timeout(left, self.read.next())
+                .await
+                .unwrap_or_else(|_| panic!("timed out; got {replies:?}"))
+                .expect("ws closed")
+                .unwrap();
+            let value: Value = serde_json::from_str(&msg.into_text().unwrap()).unwrap();
+            match value.get("id").and_then(Value::as_i64) {
+                Some(id) if ids.contains(&id) => {
+                    replies.insert(id, value);
+                }
+                _ => notes.push(value),
+            }
+        }
+        (replies, notes)
     }
 
     async fn wait_notification(&mut self, method: &str, deadline: Duration) -> Value {
@@ -2049,4 +2118,610 @@ async fn preset_list_feeds_thread_start() {
         )
         .await;
     assert_eq!(started["result"]["thread"]["presetId"], ids[1], "{started}");
+}
+
+/// `browser/view/*` 的错误路径（不需要 Chrome）：会话还没开标签页回 `no_tab`；
+/// 视图 id 不对回 `not_found`；缺 viewId 回 `invalid_params`；没鉴权的连接用不了。
+#[tokio::test]
+async fn browser_view_errors_without_a_tab() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["browserView"], true,
+        "{init}"
+    );
+
+    let opened = rpc.call("browser/view/open", json!({})).await;
+    assert_eq!(opened["error"]["details"]["code"], "no_tab", "{opened}");
+    let input = rpc
+        .call(
+            "browser/view/input",
+            json!({ "viewId": "nope", "event": { "type": "text", "text": "x" } }),
+        )
+        .await;
+    assert_eq!(input["error"]["details"]["code"], "not_found", "{input}");
+    let missing = rpc.call("browser/view/close", json!({})).await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "invalid_params",
+        "{missing}"
+    );
+
+    let (mut stranger, _) = Rpc::connect_as(h.addr, "bogus", PAGE_ORIGIN).await;
+    let refused = stranger.call("browser/view/open", json!({})).await;
+    assert_eq!(
+        refused["error"]["details"]["code"], "unauthenticated",
+        "{refused}"
+    );
+}
+
+/// 真 Chrome：agent（这里直接用浏览器 MCP 的 hub）给第 1 页开了标签页 → 客户端
+/// `browser/view/open` 收到帧 → 以用户身份点按钮 → 地址栏导航推 `status` →
+/// agent 关掉自己的标签页，视图推 `closed { reason: "no_tab" }`。
+#[tokio::test]
+#[ignore = "needs a real Chrome"]
+async fn browser_view_streams_the_agents_tab() {
+    if cordis_browser::session::discover_chrome().is_err() {
+        eprintln!("skip: chrome not installed");
+        return;
+    }
+    let h = Harness::boot().await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    let key = cordis_spine::mcp_session_key(&sessions);
+    let hub = cordis_browser::BrowserHub::new();
+    let opened = hub
+        .call(
+            &key,
+            "browser_open",
+            &json!({"url": "data:text/html,<title>Before</title><button style='position:fixed;left:0;top:0;width:200px;height:100px' onclick=\"document.title='Clicked'\">Go</button>"}),
+        )
+        .await;
+    assert!(!opened.is_error, "{}", opened.text);
+
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let view = rpc
+        .call("browser/view/open", json!({ "maxWidth": 640 }))
+        .await;
+    let view_id = view["result"]["viewId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{view}"))
+        .to_string();
+    assert_eq!(view["result"]["title"], "Before", "{view}");
+    let frame = rpc
+        .wait_notification("browser/view/frame", Duration::from_secs(10))
+        .await;
+    assert_eq!(frame["params"]["viewId"], view_id.as_str());
+    assert_eq!(frame["params"]["mime"], "image/jpeg");
+    assert!(frame["params"]["data"].as_str().unwrap().len() > 100);
+    assert!(frame["params"]["width"].as_f64().unwrap() > 0.0, "{frame}");
+
+    let click = rpc
+        .call(
+            "browser/view/input",
+            json!({ "viewId": view_id, "event": { "type": "mouse", "action": "click", "x": 50, "y": 50 } }),
+        )
+        .await;
+    assert_eq!(click["result"]["ok"], true, "{click}");
+    let status = rpc
+        .wait_notification("browser/view/status", Duration::from_secs(5))
+        .await;
+    assert_eq!(status["params"]["title"], "Clicked", "{status}");
+
+    let nav = rpc
+        .call(
+            "browser/view/navigate",
+            json!({ "viewId": view_id, "url": "data:text/html,<title>Second</title>" }),
+        )
+        .await;
+    assert_eq!(nav["result"]["ok"], true, "{nav}");
+    let bad = rpc
+        .call(
+            "browser/view/navigate",
+            json!({ "viewId": view_id, "url": "javascript:alert(1)" }),
+        )
+        .await;
+    assert_eq!(bad["error"]["details"]["code"], "invalid_params", "{bad}");
+    loop {
+        let status = rpc
+            .wait_notification("browser/view/status", Duration::from_secs(5))
+            .await;
+        if status["params"]["title"] == "Second" {
+            break;
+        }
+    }
+
+    // agent 关掉自己的标签页：视图跟着结束。
+    let closed = hub.call(&key, "browser_close", &json!({})).await;
+    assert!(!closed.is_error, "{}", closed.text);
+    let ended = rpc
+        .wait_notification("browser/view/closed", Duration::from_secs(5))
+        .await;
+    assert_eq!(ended["params"]["reason"], "no_tab", "{ended}");
+    hub.shutdown().await;
+}
+
+/// 真 Chrome：同一会话连发两次 `browser/view/open`，后发的那个一定活着；先发的要么回
+/// `superseded`，要么成功后收到 `closed { reason: "replaced" }`——不会悄悄死掉。
+/// 不等回包连发的文字，按发送顺序进页面（网关每个请求各开任务，以前会乱序）。
+// 多线程运行时：`dock serve` 就是这样跑的；单线程下任务按开的顺序轮到，乱序复现不了。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real Chrome"]
+async fn browser_view_concurrent_opens_and_inputs_keep_order() {
+    if cordis_browser::session::discover_chrome().is_err() {
+        eprintln!("skip: chrome not installed");
+        return;
+    }
+    let h = Harness::boot().await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    let key = cordis_spine::mcp_session_key(&sessions);
+    let hub = cordis_browser::BrowserHub::new();
+    let opened = hub
+        .call(
+            &key,
+            "browser_open",
+            &json!({"url": "data:text/html,<input id=i style='position:fixed;left:0;top:0;width:300px;height:40px'>"}),
+        )
+        .await;
+    assert!(!opened.is_error, "{}", opened.text);
+
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let mut live = String::new();
+    for round in 0..6 {
+        let a = rpc
+            .send("browser/view/open", json!({ "maxWidth": 320 }))
+            .await;
+        let b = rpc
+            .send("browser/view/open", json!({ "maxWidth": 320 }))
+            .await;
+        let (replies, mut notes) = rpc.collect(&[a, b], Duration::from_secs(20)).await;
+        live = replies[&b]["result"]["viewId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("round {round}: 后发的 open 要成功：{replies:?}"))
+            .to_string();
+        let first = &replies[&a];
+        if let Some(stale) = first["result"]["viewId"].as_str() {
+            // 先发的成功了，就一定要被告知它被顶掉了。
+            let replaced =
+                |n: &Value| n["method"] == "browser/view/closed" && n["params"]["viewId"] == stale;
+            if !notes.iter().any(replaced) {
+                loop {
+                    let n = rpc
+                        .wait_notification("browser/view/closed", Duration::from_secs(5))
+                        .await;
+                    notes.push(n.clone());
+                    if replaced(&n) {
+                        break;
+                    }
+                }
+            }
+            let note = notes.iter().find(|n| replaced(n)).unwrap();
+            assert_eq!(note["params"]["reason"], "replaced", "{note}");
+        } else {
+            assert_eq!(first["error"]["details"]["code"], "superseded", "{first}");
+        }
+        let ok = rpc
+            .call(
+                "browser/view/input",
+                json!({ "viewId": live, "event": { "type": "mouse", "action": "move", "x": 5, "y": 5 } }),
+            )
+            .await;
+        assert_eq!(
+            ok["result"]["ok"], true,
+            "round {round}: 活着的视图要能用：{ok}"
+        );
+    }
+
+    let click = rpc
+        .call(
+            "browser/view/input",
+            json!({ "viewId": live, "event": { "type": "mouse", "action": "click", "x": 20, "y": 20 } }),
+        )
+        .await;
+    assert_eq!(click["result"]["ok"], true, "{click}");
+    let typed = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(4);
+    let mut ids = Vec::new();
+    for ch in typed.chars() {
+        ids.push(
+            rpc.send(
+                "browser/view/input",
+                json!({ "viewId": live, "event": { "type": "text", "text": ch.to_string() } }),
+            )
+            .await,
+        );
+    }
+    let (replies, _) = rpc.collect(&ids, Duration::from_secs(20)).await;
+    assert!(
+        replies.values().all(|r| r["result"]["ok"] == true),
+        "{replies:?}"
+    );
+    let value = hub
+        .call(
+            &key,
+            "browser_evaluate",
+            &json!({ "expression": "document.getElementById('i').value" }),
+        )
+        .await;
+    assert!(
+        value.text.contains(&typed),
+        "文字要按发送顺序进页面：{}",
+        value.text
+    );
+    hub.shutdown().await;
+}
+
+/// 远程模式：配对 HTTP 不挂；ticket 不认；设备令牌能进，`initialize` 报 `device:<名字>`；
+/// 撤销后几秒内连接被服务端关掉（4401）。
+#[tokio::test]
+async fn remote_gateway_accepts_only_device_tokens_and_drops_revoked() {
+    let h = Harness::boot_remote().await;
+    let pairing = h
+        .post("/v1/pairing/requests", json!({ "application": APP }))
+        .await;
+    assert_eq!(pairing.status(), 404, "远程模式没有配对入口");
+    let tickets = h.post("/v1/connection/tickets", json!({})).await;
+    assert_eq!(tickets.status(), 404);
+
+    let mut stranger = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    let refused = stranger
+        .call("connection/authenticate", json!({ "ticket": "whatever" }))
+        .await;
+    assert_eq!(
+        refused["error"]["details"]["code"], "unauthenticated",
+        "{refused}"
+    );
+    assert!(refused.to_string().contains("设备令牌"), "{refused}");
+
+    let (device, token) = devices::add("remote-test-laptop").unwrap();
+    // 设备令牌不绑 Origin：换一个页面来源照样能进。
+    let mut rpc = Rpc::open(h.addr, "https://dock.example.com").await;
+    let auth = rpc
+        .call("connection/authenticate", json!({ "token": token }))
+        .await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["connection"]["application"], "device:remote-test-laptop",
+        "{init}"
+    );
+    assert_eq!(
+        init["result"]["connection"]["origin"],
+        "https://dock.example.com"
+    );
+    let listed = rpc.call("thread/list", json!({})).await;
+    assert!(listed.get("result").is_some(), "{listed}");
+
+    devices::revoke(&device.id).unwrap();
+    let code = rpc.wait_closed(Duration::from_secs(8)).await;
+    assert_eq!(code, Some(4401), "撤销后断开");
+    let mut again = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    let denied = again
+        .call("connection/authenticate", json!({ "token": token }))
+        .await;
+    assert_eq!(
+        denied["error"]["details"]["code"], "unauthenticated",
+        "{denied}"
+    );
+}
+
+/// 同一条连接鉴权失败 5 次就被断开（4429）。
+#[tokio::test]
+async fn repeated_failed_authentication_closes_the_connection() {
+    let h = Harness::boot_remote().await;
+    let mut rpc = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    for _ in 0..4 {
+        let bad = rpc
+            .call("connection/authenticate", json!({ "token": "dock_wrong" }))
+            .await;
+        assert_eq!(bad["error"]["details"]["code"], "unauthenticated", "{bad}");
+    }
+    rpc.write
+        .send(Message::Text(
+            json!({ "id": 99, "method": "connection/authenticate", "params": { "token": "dock_wrong" } })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rpc.wait_closed(Duration::from_secs(5)).await, Some(4429));
+}
+
+/// 本机网关也认设备令牌（凭据就是凭据）；本机的 ticket 配对照旧。
+#[tokio::test]
+async fn local_gateway_also_accepts_device_tokens() {
+    let h = Harness::boot().await;
+    let (_device, token) = devices::add("local-test-device").unwrap();
+    let mut rpc = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    let auth = rpc
+        .call("connection/authenticate", json!({ "token": token }))
+        .await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let ticket = h.pair_ticket().await;
+    let _ = Rpc::connect(h.addr, &ticket).await;
+    devices::revoke("local-test-device").unwrap();
+}
+
+/// `fs/*`：只读看会话 cwd 里的文件。列目录照 `.gitignore`、目录在前；读文本 / 图片 /
+/// 二进制；按名字找；出了工作区、没开的会话、缺参数都拒绝。
+#[tokio::test]
+async fn fs_methods_browse_the_sessions_workspace_read_only() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["workspaceFiles"], true,
+        "{init}"
+    );
+
+    let dir = project_dir("fs-panel");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("target")).unwrap();
+    std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(dir.join("notes.md"), "# 笔记\n").unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+    std::fs::write(dir.join("target/app"), [0u8, 1]).unwrap();
+    std::fs::write(dir.join("dot.png"), [0x89, b'P', b'N', b'G']).unwrap();
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let root = rpc.call("fs/list", json!({ "threadId": id })).await;
+    let names: Vec<&str> = root["result"]["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{root}"))
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["src", "dot.png", "notes.md"], "{root}");
+    assert_eq!(root["result"]["entries"][0]["kind"], "dir");
+
+    let sub = rpc
+        .call("fs/list", json!({ "threadId": id, "path": "src" }))
+        .await;
+    assert_eq!(sub["result"]["entries"][0]["path"], "src/lib.rs", "{sub}");
+
+    let text = rpc
+        .call("fs/read", json!({ "threadId": id, "path": "notes.md" }))
+        .await;
+    assert_eq!(text["result"]["kind"], "text", "{text}");
+    assert_eq!(text["result"]["text"], "# 笔记\n");
+    let image = rpc
+        .call("fs/read", json!({ "threadId": id, "path": "dot.png" }))
+        .await;
+    assert_eq!(image["result"]["kind"], "image", "{image}");
+    assert_eq!(image["result"]["data"], "iVBORw==");
+
+    let found = rpc
+        .call("fs/find", json!({ "threadId": id, "query": "lib" }))
+        .await;
+    assert_eq!(found["result"]["paths"], json!(["src/lib.rs"]), "{found}");
+
+    let escape = rpc
+        .call("fs/read", json!({ "threadId": id, "path": "../x" }))
+        .await;
+    assert_eq!(
+        escape["error"]["details"]["code"], "invalid_params",
+        "{escape}"
+    );
+    let missing = rpc.call("fs/read", json!({ "threadId": id })).await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "invalid_params",
+        "{missing}"
+    );
+    let closed = rpc
+        .call("fs/list", json!({ "threadId": "no-such-thread" }))
+        .await;
+    assert_eq!(
+        closed["error"]["details"]["code"], "thread_not_open",
+        "{closed}"
+    );
+}
+
+/// 工具结果里的图（cua-driver 截图之类）：`item/tool_completed` 带 `attachments`
+/// 元数据（`index` 是在这次结果里的位置），像素走 `item/image`；归档后从落盘读也一样。
+#[tokio::test]
+async fn tool_images_are_listed_and_fetched_by_item() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["toolImages"], true, "{init}");
+
+    // 1×1 PNG。
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0,
+        0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0, 0, 13, 0x49, 0x44, 0x41,
+        0x54, 0x78, 0xDA, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0, 0x05, 0x00, 0x01, 0xFF, 0x89,
+        0x99, 0x3D, 0x1D, 0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let image = |data: Vec<u8>| cordis_spine::UserImage {
+        mime: "image/png".into(),
+        data: data.into(),
+        width: 1,
+        height: 1,
+    };
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("看看桌面".into()));
+    sessions.append(LogEvent::ToolExecute {
+        id: "shot-1".into(),
+        name: "mcp_cua-driver__get_window_state".into(),
+        arguments: "{}".into(),
+        content: "window tree".into(),
+        // 第 0 张是空的（不投影、不占号），第 1 张才是真图。
+        images: vec![image(Vec::new()), image(png.clone())],
+        is_error: false,
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let history = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    let completed = history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["method"] == "item/tool_completed")
+        .unwrap_or_else(|| panic!("{history}"))
+        .clone();
+    let attachments = &completed["payload"]["attachments"];
+    assert_eq!(attachments.as_array().map(Vec::len), Some(1), "{completed}");
+    assert_eq!(attachments[0]["index"], 1);
+    assert_eq!(attachments[0]["mimeType"], "image/png");
+
+    use base64::Engine;
+    let want = base64::engine::general_purpose::STANDARD.encode(&png);
+    let got = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": "live", "itemId": "shot-1", "index": 1 }),
+        )
+        .await;
+    assert_eq!(got["result"]["data"], want, "{got}");
+    assert_eq!(got["result"]["width"], 1);
+
+    let empty = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": "live", "itemId": "shot-1", "index": 0 }),
+        )
+        .await;
+    assert_eq!(empty["error"]["details"]["code"], "not_found", "{empty}");
+    let missing = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": "live", "itemId": "nope" }),
+        )
+        .await;
+    assert_eq!(missing["error"]["details"]["code"], "not_found");
+
+    // 归档（关掉）之后从落盘读回来。
+    let archived = rpc
+        .call("thread/archive", json!({ "threadId": "live" }))
+        .await;
+    let id = archived["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{archived}"))
+        .to_string();
+    let from_disk = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": id, "itemId": "shot-1", "index": 1 }),
+        )
+        .await;
+    assert_eq!(from_disk["result"]["data"], want, "{from_disk}");
+}
+
+/// 画布：模型工具写进会话目录的 `canvas/<id>/`，`canvas/*` 列 / 读版本 / 改数据 / 回滚；
+/// 会话归档（关掉）之后从名册找到目录，照样读得到。
+#[tokio::test]
+async fn canvas_methods_read_the_sessions_canvases() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["canvas"], true, "{init}");
+
+    // 不落盘的会话、还没落过盘的新会话：空列表，不替它建目录。
+    let empty = rpc.call("canvas/list", json!({ "threadId": "live" })).await;
+    assert_eq!(empty["result"]["canvases"], json!([]), "{empty}");
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.attach_disk();
+    let empty = rpc.call("canvas/list", json!({ "threadId": "live" })).await;
+    assert_eq!(empty["result"]["canvases"], json!([]), "{empty}");
+
+    sessions.append(LogEvent::User("画个图".into()));
+    let dir = sessions.disk_session_dir().expect("disk-backed session");
+    cordis_base::canvas::create(&dir, "销售", "<h1>A</h1>", Some(&json!({ "n": 1 }))).unwrap();
+    cordis_base::canvas::edit(
+        &dir,
+        "canvas-1",
+        cordis_base::canvas::Edit::Rewrite { html: "<h1>B</h1>" },
+        "换标题",
+        None,
+    )
+    .unwrap();
+
+    let list = rpc.call("canvas/list", json!({ "threadId": "live" })).await;
+    let first = &list["result"]["canvases"][0];
+    assert_eq!(first["id"], "canvas-1", "{list}");
+    assert_eq!(first["latest"], 2);
+    assert_eq!(first["versions"][1]["note"], "换标题");
+
+    let got = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": "live", "canvasId": "canvas-1" }),
+        )
+        .await;
+    assert_eq!(got["result"]["html"], "<h1>B</h1>", "{got}");
+    assert_eq!(got["result"]["data"], json!({ "n": 1 }));
+    let v1 = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": "live", "canvasId": "canvas-1", "version": 1 }),
+        )
+        .await;
+    assert_eq!(v1["result"]["html"], "<h1>A</h1>", "{v1}");
+
+    let set = rpc
+        .call(
+            "canvas/setData",
+            json!({ "threadId": "live", "canvasId": "canvas-1", "data": [1, 2] }),
+        )
+        .await;
+    assert_eq!(
+        set["result"]["canvas"]["latest"], 2,
+        "改数据不出新版：{set}"
+    );
+    let back = rpc
+        .call(
+            "canvas/rollback",
+            json!({ "threadId": "live", "canvasId": "canvas-1", "version": 1 }),
+        )
+        .await;
+    assert_eq!(back["result"]["canvas"]["latest"], 3, "{back}");
+
+    let bad = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": "live", "canvasId": "../canvas-1" }),
+        )
+        .await;
+    assert_eq!(bad["error"]["details"]["code"], "invalid", "{bad}");
+    let missing = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": "live", "canvasId": "canvas-9" }),
+        )
+        .await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
+
+    let archived = rpc
+        .call("thread/archive", json!({ "threadId": "live" }))
+        .await;
+    let id = archived["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{archived}"))
+        .to_string();
+    let closed = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": id, "canvasId": "canvas-1" }),
+        )
+        .await;
+    assert_eq!(closed["result"]["html"], "<h1>A</h1>", "{closed}");
+    assert_eq!(closed["result"]["data"], json!([1, 2]));
 }

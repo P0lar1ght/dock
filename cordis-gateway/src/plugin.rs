@@ -46,6 +46,18 @@ pub fn gateway_serve(bind_addr: impl Into<String>) -> Plugin {
     })
 }
 
+/// 远程网关（`dock serve --remote`）：挂载即监听，只认设备令牌，端口不顺延。仍只绑回环，
+/// TLS 与对外暴露交给前面的反向代理（Caddy / nginx）或 Tailscale。
+pub fn gateway_remote(bind_addr: impl Into<String>) -> Plugin {
+    let bind_addr = bind_addr.into();
+    plugin("gateway", inject(), move |ctx, _: &()| {
+        let preferred = bind::parse_bind(&bind_addr).map_err(cordis::Error::message)?;
+        let handle = GatewayHandle::idle_remote(ctx.clone(), preferred);
+        let provided = finish_mount(ctx, handle, true)?.1;
+        Ok(Some(provided))
+    })
+}
+
 fn inject() -> Inject {
     Inject::from([
         SESSIONS,
@@ -74,7 +86,18 @@ fn mount_handle(
     auto_listen: bool,
 ) -> Result<(GatewayHandle, Disposable), cordis::Error> {
     let preferred = bind::parse_bind(bind_addr).map_err(cordis::Error::message)?;
-    let handle = GatewayHandle::idle(ctx.clone(), preferred);
+    finish_mount(
+        ctx,
+        GatewayHandle::idle(ctx.clone(), preferred),
+        auto_listen,
+    )
+}
+
+fn finish_mount(
+    ctx: &Context,
+    handle: GatewayHandle,
+    auto_listen: bool,
+) -> Result<(GatewayHandle, Disposable), cordis::Error> {
     handle.reset_transcript();
     if auto_listen {
         handle

@@ -841,39 +841,13 @@ impl ConnectedSession {
             Self::focus_backend(&page, backend).await?;
         }
         let (modifiers, key_name) = parse_key_chord(key)?;
-        let def = keys::get_key_definition(&key_name).ok_or_else(|| {
+        let down = key_event(&key_name, modifiers, KeyPhase::Down).map_err(|e| {
             format!(
-                "unknown key `{key_name}` (from `{key}`). Use names like Enter, Tab, Escape, ArrowDown, a, Control+a"
+                "{e} (from `{key}`). Use names like Enter, Tab, Escape, ArrowDown, a, Control+a"
             )
         })?;
-        let key_down_type = if def.text.is_some() || def.key.len() == 1 {
-            DispatchKeyEventType::KeyDown
-        } else {
-            DispatchKeyEventType::RawKeyDown
-        };
-        let mut down = DispatchKeyEventParams::builder()
-            .r#type(key_down_type)
-            .key(def.key)
-            .code(def.code)
-            .windows_virtual_key_code(def.key_code)
-            .native_virtual_key_code(def.key_code)
-            .modifiers(modifiers);
-        if let Some(txt) = def.text {
-            down = down.text(txt);
-        } else if def.key.len() == 1 && modifiers == 0 {
-            down = down.text(def.key);
-        }
-        let down = down.build().map_err(|e| e.to_string())?;
         page.execute(down).await.map_err(|e| e.to_string())?;
-        let up = DispatchKeyEventParams::builder()
-            .r#type(DispatchKeyEventType::KeyUp)
-            .key(def.key)
-            .code(def.code)
-            .windows_virtual_key_code(def.key_code)
-            .native_virtual_key_code(def.key_code)
-            .modifiers(modifiers)
-            .build()
-            .map_err(|e| e.to_string())?;
+        let up = key_event(&key_name, modifiers, KeyPhase::Up)?;
         page.execute(up).await.map_err(|e| e.to_string())?;
         Ok(format!("pressed {key}"))
     }
@@ -1568,6 +1542,44 @@ pub fn discover_chrome() -> Result<String, String> {
             ))
         }
     }
+}
+
+/// 按下 / 抬起。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyPhase {
+    Down,
+    Up,
+}
+
+/// 一次按键事件（`Input.dispatchKeyEvent`）：按 chromiumoxide 的键表补 code / keyCode /
+/// text。模型的 `browser_press_key` 与网关画面上用户的按键共用。
+pub fn key_event(
+    key_name: &str,
+    modifiers: i64,
+    phase: KeyPhase,
+) -> Result<DispatchKeyEventParams, String> {
+    let def =
+        keys::get_key_definition(key_name).ok_or_else(|| format!("unknown key `{key_name}`"))?;
+    let kind = match phase {
+        KeyPhase::Up => DispatchKeyEventType::KeyUp,
+        KeyPhase::Down if def.text.is_some() || def.key.len() == 1 => DispatchKeyEventType::KeyDown,
+        KeyPhase::Down => DispatchKeyEventType::RawKeyDown,
+    };
+    let mut builder = DispatchKeyEventParams::builder()
+        .r#type(kind)
+        .key(def.key)
+        .code(def.code)
+        .windows_virtual_key_code(def.key_code)
+        .native_virtual_key_code(def.key_code)
+        .modifiers(modifiers);
+    if phase == KeyPhase::Down {
+        if let Some(txt) = def.text {
+            builder = builder.text(txt);
+        } else if def.key.len() == 1 && modifiers == 0 {
+            builder = builder.text(def.key);
+        }
+    }
+    builder.build().map_err(|e| e.to_string())
 }
 
 /// Bit field: Alt=1, Ctrl=2, Meta=4, Shift=8. Returns (modifiers, main_key).

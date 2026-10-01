@@ -9,6 +9,7 @@
 //! hands tickets to the parent process over stdout (`"gateway.serve"`).
 
 mod bind;
+pub mod devices;
 mod handle;
 mod http;
 mod image_store;
@@ -24,7 +25,9 @@ mod ws;
 pub mod handlers;
 
 pub use handle::GatewayHandle;
-pub use plugin::{gateway, gateway_bind, gateway_idle, gateway_serve, DEFAULT_BIND};
+pub use plugin::{
+    gateway, gateway_bind, gateway_idle, gateway_remote, gateway_serve, DEFAULT_BIND,
+};
 pub use protocol::{CAPABILITIES, LIVE_THREAD_ID, PROTOCOL_VERSION};
 pub use serve::{ServeConfig, ServeControl, GATEWAY_SERVE};
 

@@ -26,6 +26,14 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("openThreads", true),
     // `preset/list`：新对话选预设（只读，预设在创建会话时定下）。
     ("presets", true),
+    // `browser/view/*`：看会话正在用的浏览器标签页（CDP 画面流）并能接手操作。
+    ("browserView", true),
+    // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
+    ("workspaceFiles", true),
+    // `item/tool_completed.attachments` + `item/image`：工具结果里的截图等。
+    ("toolImages", true),
+    // `canvas/list` / `get` / `setData` / `rollback`：模型写的画布（HTML 分版 + 数据）。
+    ("canvas", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -58,6 +66,8 @@ pub const THREAD_ARCHIVE: &str = "thread/archive";
 pub const THREAD_RESTORE: &str = "thread/restore";
 pub const THREAD_DELETE: &str = "thread/delete";
 pub const THREAD_HISTORY: &str = "thread/history";
+/// 一条工具结果里的一张图的像素（`item/tool_completed` 的 `attachments` 只带元数据）。
+pub const ITEM_IMAGE: &str = "item/image";
 pub const THREAD_SUBSCRIBE: &str = "thread/subscribe";
 pub const THREAD_UNSUBSCRIBE: &str = "thread/unsubscribe";
 pub const THREAD_ENVIRONMENT_GET: &str = "thread/environment/get";
@@ -91,6 +101,28 @@ pub const SLASH_LIST: &str = "slash/list";
 pub const SLASH_EXECUTE: &str = "slash/execute";
 pub const IMAGE_INPUTS_SYNC: &str = "imageInputs/sync";
 pub const IMAGE_INPUTS_PUT: &str = "imageInputs/put";
+
+pub const BROWSER_VIEW_OPEN: &str = "browser/view/open";
+pub const BROWSER_VIEW_INPUT: &str = "browser/view/input";
+pub const BROWSER_VIEW_NAVIGATE: &str = "browser/view/navigate";
+pub const BROWSER_VIEW_CLOSE: &str = "browser/view/close";
+/// 推送：一帧画面（base64 JPEG + 视口元数据）。
+pub const BROWSER_VIEW_FRAME: &str = "browser/view/frame";
+/// 推送：视图换了标签页，或页面地址 / 标题变了。
+pub const BROWSER_VIEW_STATUS: &str = "browser/view/status";
+/// 推送：视图结束了（`reason`：`no_tab` 会话的标签页都关了 / `browser_exited`）。
+pub const BROWSER_VIEW_CLOSED: &str = "browser/view/closed";
+
+/// 只读看会话工作区：列一层目录 / 读一个文件 / 按名字找文件。
+pub const FS_LIST: &str = "fs/list";
+pub const FS_READ: &str = "fs/read";
+pub const FS_FIND: &str = "fs/find";
+
+/// 会话的画布：列 / 读一版 / 改数据 / 回滚。
+pub const CANVAS_LIST: &str = "canvas/list";
+pub const CANVAS_GET: &str = "canvas/get";
+pub const CANVAS_SET_DATA: &str = "canvas/setData";
+pub const CANVAS_ROLLBACK: &str = "canvas/rollback";
 pub const IMAGE_INPUTS_LIMITS_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]

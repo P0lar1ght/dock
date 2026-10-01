@@ -183,3 +183,23 @@ test('思考：连续增量并成一条，来了正文就算想完（endedAt 取
   // 一轮结束时还开着的思考也收口。
   assert.ok(second.kind === 'reasoning' && second.endedAt === 6000);
 });
+
+test('工具结果里的图：带网关给的 index，旧网关不带就是空数组', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started'),
+    note('item/tool_started', { toolCallId: 'shot', toolName: 'mcp_cua-driver__get_window_state', arguments: {} }),
+    note('item/tool_completed', {
+      toolCallId: 'shot',
+      toolName: 'mcp_cua-driver__get_window_state',
+      output: 'tree',
+      status: 'completed',
+      attachments: [{ type: 'image', index: 1, mimeType: 'image/png', width: 1440, height: 900, byteLength: 2048 }],
+    }),
+    note('item/tool_started', { toolCallId: 'old', toolName: 'bash', arguments: {} }),
+    note('item/tool_completed', { toolCallId: 'old', toolName: 'bash', output: '', status: 'completed' }),
+  );
+  const [shot, old] = s.turns[0].items;
+  assert.deepEqual(shot.kind === 'tool' && shot.images.map((i) => [i.index, i.width, i.height]), [[1, 1440, 900]]);
+  assert.deepEqual(old.kind === 'tool' && old.images, []);
+});

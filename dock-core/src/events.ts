@@ -23,6 +23,12 @@ export interface ImageAttachment {
   byteLength: number;
 }
 
+/** 工具结果里的一张图（截图等）：只有元数据，像素用 `item/image { itemId, index }` 取。 */
+export interface ToolImage extends ImageAttachment {
+  /** 在这次工具结果里的位置；空图不投影也不占号，所以不能按数组下标算。 */
+  index: number;
+}
+
 export interface Question {
   id: string;
   header: string;
@@ -41,7 +47,15 @@ export type DockEvent = EventBase &
     /** 模型的思考过程（增量）。旧网关不推，就没有。 */
     | { method: 'item/reasoning_delta'; delta: string }
     | { method: 'item/tool_started'; toolCallId: string; toolName: string; arguments: Record<string, unknown> }
-    | { method: 'item/tool_completed'; toolCallId: string; toolName: string; output: string; status: ToolEndStatus }
+    | {
+        method: 'item/tool_completed';
+        toolCallId: string;
+        toolName: string;
+        output: string;
+        status: ToolEndStatus;
+        /** 旧网关不带：空数组。 */
+        images: ToolImage[];
+      }
     | { method: 'permission/requested'; requestId: string; toolName: string; summary: string }
     | { method: 'permission/resolved'; requestId: string; decision: 'approve' | 'deny'; always: boolean }
     | { method: 'interaction/requested'; interactionId: string; questions: Question[] }
@@ -133,6 +147,17 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
         toolName: str(params.toolName),
         output: str(params.output),
         status: oneOf(params.status, ['completed', 'failed', 'cancelled', 'denied'] as const, 'completed'),
+        images: list(params.attachments)
+          .map(obj)
+          .filter((a) => a.type === 'image')
+          .map((a) => ({
+            type: 'image' as const,
+            index: num(a.index),
+            mimeType: str(a.mimeType),
+            width: num(a.width),
+            height: num(a.height),
+            byteLength: num(a.byteLength),
+          })),
       };
     case 'permission/requested':
       return {

@@ -7,16 +7,20 @@
 //!   登录态共享），每个会话一组标签页（[`ConnectedSession`]）。
 //! - [`hub`]：按会话 id 管标签页组，把 `browser_*` 调用分派到对应的组。
 //! - [`tools`]：工具清单（MCP `tools/list` 的形状）与参数解析。
+//! - [`registry`]：会话 → 标签页的运行时名册（`$DOCK_HOME/browser/sessions/<pid>.json`），网关按它推画面。
+//! - [`view`]：网关看某个标签页：CDP screencast 推帧、转发鼠标键盘、导航。
 //! - [`server`]：NDJSON JSON-RPC over stdio，`server/discover` 与 `initialize` 两代握手都认。
 //!
 //! 会话身份由 Dock 在 `tools/call` 的 `_meta["dock/sessionId"]` 里带；没带的
 //! （别的 MCP 客户端）归到同一个默认组。
 
 pub mod hub;
+pub mod registry;
 pub mod server;
 pub mod session;
 mod snapshot;
 pub mod tools;
+pub mod view;
 mod wait;
 
 pub use hub::{BrowserHub, CallOutput};

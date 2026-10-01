@@ -264,7 +264,7 @@ impl Transcript {
                 name,
                 arguments,
                 content,
-                images: _,
+                images,
                 is_error,
             } => {
                 if !self.projector.turn_open {
@@ -303,7 +303,9 @@ impl Transcript {
                         "toolName": name,
                         "title": name,
                         "output": content,
-                        "status": status
+                        "status": status,
+                        // 工具结果里的图（截图之类）：只给元数据，像素走 `item/image` 按需取。
+                        "attachments": tool_attachment_values(&images)
                     }),
                 );
             }
@@ -615,6 +617,26 @@ pub(crate) fn attachment_values(images: &[UserImage]) -> Vec<Value> {
         .map(|img| {
             json!({
                 "type": "image",
+                "mimeType": img.mime,
+                "width": img.width,
+                "height": img.height,
+                "byteLength": img.data.len()
+            })
+        })
+        .collect()
+}
+
+/// 工具结果里的图：同 [`attachment_values`] 的形状，另带 `index`（在这次工具结果里的
+/// 位置，`item/image` 用它取像素；过滤掉的图不占号，所以不能按数组下标算）。
+pub(crate) fn tool_attachment_values(images: &[UserImage]) -> Vec<Value> {
+    images
+        .iter()
+        .enumerate()
+        .filter(|(_, img)| !img.data.is_empty())
+        .map(|(index, img)| {
+            json!({
+                "type": "image",
+                "index": index,
                 "mimeType": img.mime,
                 "width": img.width,
                 "height": img.height,

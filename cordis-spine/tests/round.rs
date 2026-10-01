@@ -283,6 +283,10 @@ async fn install_fakes_echo_has_no_capability_tools() {
     for banned in [
         "web_fetch",
         "todo_write",
+        "canvas_create",
+        "canvas_edit",
+        "canvas_data",
+        "canvas_read",
         "ask_user_question",
         "enter_plan_mode",
         "job",
@@ -446,6 +450,10 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     // and absent from the table when disabled (default in this install test).
     for listed in [
         "skill",
+        "canvas_create",
+        "canvas_edit",
+        "canvas_data",
+        "canvas_read",
         "workflow",
         "web_fetch",
         "web_search",

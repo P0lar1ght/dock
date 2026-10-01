@@ -3,13 +3,14 @@
 //! 一个 [`Chromium`] 进程（懒启动），每个会话 id 一个 [`ConnectedSession`]。
 //! 同一会话的调用排队（组上一把锁），不同会话并行。最后一组关掉时 Chromium 也关。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use crate::registry::{self, SessionTabs};
 use crate::session::{Chromium, ConnectedSession};
 use crate::tools::{
     arg_bool, arg_f64, arg_i64, arg_str, arg_u64, arg_usize, parse_fill_fields, parse_paths,
@@ -56,11 +57,62 @@ type Group = Arc<Mutex<ConnectedSession>>;
 pub struct BrowserHub {
     chromium: Mutex<Option<Chromium>>,
     groups: Mutex<HashMap<String, Group>>,
+    /// 各会话的 target id，镜像到运行时名册（[`registry`]）给网关推画面用。单独一把
+    /// 同步锁：不能去锁各组——别的会话可能正攥着自己的组跑一个 30 秒的 wait_for。
+    index: std::sync::Mutex<BTreeMap<String, SessionTabs>>,
+    /// 测试把名册写到临时目录；`None` 用 `$DOCK_HOME/browser/sessions`。
+    registry_dir: Option<std::path::PathBuf>,
 }
 
 impl BrowserHub {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 名册写到 `dir`（测试用）。
+    pub fn with_registry_dir(dir: std::path::PathBuf) -> Self {
+        Self {
+            registry_dir: Some(dir),
+            ..Self::default()
+        }
+    }
+
+    fn publish(&self) {
+        let snapshot = self.index.lock().unwrap().clone();
+        match &self.registry_dir {
+            Some(dir) => registry::publish_in(dir, &snapshot),
+            None => registry::publish(&snapshot),
+        }
+    }
+
+    /// 某组的标签页可能变了：记下并重写名册。调用方攥着这一组的锁。
+    fn record(&self, session: &str, group: &ConnectedSession) {
+        let tabs = SessionTabs {
+            targets: group.target_ids(),
+            active: group.active_target_id(),
+        };
+        let changed = self
+            .index
+            .lock()
+            .unwrap()
+            .insert(session.to_string(), tabs.clone())
+            != Some(tabs);
+        if changed {
+            self.publish();
+        }
+    }
+
+    fn forget(&self, session: Option<&str>) {
+        {
+            let mut index = self.index.lock().unwrap();
+            match session {
+                Some(id) => {
+                    index.remove(id);
+                }
+                None => index.clear(),
+            }
+        }
+        self.publish();
     }
 
     /// 有标签页的会话 id（排好序，测试和状态行用）。
@@ -93,7 +145,11 @@ impl BrowserHub {
                 match self.live_group(session).await {
                     Some(group) => {
                         let mut g = group.lock().await;
-                        return dispatch_connected(&mut g, name, args).await;
+                        let out = dispatch_connected(&mut g, name, args).await;
+                        if name == "browser_tabs" {
+                            self.record(session, &g);
+                        }
+                        return out;
                     }
                     None => Err(NEED_OPEN.into()),
                 }
@@ -108,6 +164,7 @@ impl BrowserHub {
 
     /// 关掉全部标签页组和自己拉起的 Chromium（stdin 关了、进程要退出时）。
     pub async fn shutdown(&self) {
+        self.forget(None);
         let groups: Vec<Group> = self.groups.lock().await.drain().map(|(_, g)| g).collect();
         for group in groups {
             if let Ok(g) = Arc::try_unwrap(group) {
@@ -142,6 +199,7 @@ impl BrowserHub {
     }
 
     async fn forget_dead_chromium(&self) {
+        self.forget(None);
         self.groups.lock().await.clear();
         if let Some(dead) = self.chromium.lock().await.take() {
             dead.shutdown().await;
@@ -167,6 +225,7 @@ impl BrowserHub {
             Ok(p) => p.url().await.ok().flatten().unwrap_or_else(|| url.into()),
             Err(_) => url.into(),
         };
+        let (targets, active) = (fresh.target_ids(), fresh.active_target_id());
         let group = Arc::new(Mutex::new(fresh));
         // 两次并发 open 同一会话：后到的那组关掉，别留孤儿标签页。
         let loser = {
@@ -179,6 +238,13 @@ impl BrowserHub {
                 }
             }
         };
+        if loser.is_none() {
+            self.index
+                .lock()
+                .unwrap()
+                .insert(session.to_string(), SessionTabs { targets, active });
+            self.publish();
+        }
         if let Some(loser) = loser {
             if let Ok(g) = Arc::try_unwrap(loser) {
                 g.into_inner().shutdown().await;
@@ -188,6 +254,7 @@ impl BrowserHub {
     }
 
     async fn close(&self, session: &str) {
+        self.forget(Some(session));
         let removed = self.groups.lock().await.remove(session);
         if let Some(group) = removed {
             // 还有调用在跑就等它跑完再关。
@@ -375,6 +442,15 @@ mod tests {
         let out = hub.call("a", "browser_fly", &json!({})).await;
         assert!(out.is_error);
         assert!(out.text.contains("unknown browser tool"), "{}", out.text);
+    }
+
+    #[tokio::test]
+    async fn registry_stays_empty_without_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = BrowserHub::with_registry_dir(dir.path().to_path_buf());
+        let _ = hub.call("a", "browser_close", &json!({})).await;
+        hub.shutdown().await;
+        assert!(crate::registry::lookup_in(dir.path(), "a").is_none());
     }
 
     #[tokio::test]
