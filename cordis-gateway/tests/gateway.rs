@@ -1965,3 +1965,126 @@ async fn preset_list_feeds_thread_start() {
         .await;
     assert_eq!(started["result"]["thread"]["presetId"], ids[1], "{started}");
 }
+
+/// `browser/view/*` 的错误路径（不需要 Chrome）：会话还没开标签页回 `no_tab`；
+/// 视图 id 不对回 `not_found`；缺 viewId 回 `invalid_params`；没鉴权的连接用不了。
+#[tokio::test]
+async fn browser_view_errors_without_a_tab() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["browserView"], true,
+        "{init}"
+    );
+
+    let opened = rpc.call("browser/view/open", json!({})).await;
+    assert_eq!(opened["error"]["details"]["code"], "no_tab", "{opened}");
+    let input = rpc
+        .call(
+            "browser/view/input",
+            json!({ "viewId": "nope", "event": { "type": "text", "text": "x" } }),
+        )
+        .await;
+    assert_eq!(input["error"]["details"]["code"], "not_found", "{input}");
+    let missing = rpc.call("browser/view/close", json!({})).await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "invalid_params",
+        "{missing}"
+    );
+
+    let (mut stranger, _) = Rpc::connect_as(h.addr, "bogus", PAGE_ORIGIN).await;
+    let refused = stranger.call("browser/view/open", json!({})).await;
+    assert_eq!(
+        refused["error"]["details"]["code"], "unauthenticated",
+        "{refused}"
+    );
+}
+
+/// 真 Chrome：agent（这里直接用浏览器 MCP 的 hub）给第 1 页开了标签页 → 客户端
+/// `browser/view/open` 收到帧 → 以用户身份点按钮 → 地址栏导航推 `status` →
+/// agent 关掉自己的标签页，视图推 `closed { reason: "no_tab" }`。
+#[tokio::test]
+#[ignore = "needs a real Chrome"]
+async fn browser_view_streams_the_agents_tab() {
+    if cordis_browser::session::discover_chrome().is_err() {
+        eprintln!("skip: chrome not installed");
+        return;
+    }
+    let h = Harness::boot().await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    let key = cordis_spine::mcp_session_key(&sessions);
+    let hub = cordis_browser::BrowserHub::new();
+    let opened = hub
+        .call(
+            &key,
+            "browser_open",
+            &json!({"url": "data:text/html,<title>Before</title><button style='position:fixed;left:0;top:0;width:200px;height:100px' onclick=\"document.title='Clicked'\">Go</button>"}),
+        )
+        .await;
+    assert!(!opened.is_error, "{}", opened.text);
+
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let view = rpc
+        .call("browser/view/open", json!({ "maxWidth": 640 }))
+        .await;
+    let view_id = view["result"]["viewId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{view}"))
+        .to_string();
+    assert_eq!(view["result"]["title"], "Before", "{view}");
+    let frame = rpc
+        .wait_notification("browser/view/frame", Duration::from_secs(10))
+        .await;
+    assert_eq!(frame["params"]["viewId"], view_id.as_str());
+    assert_eq!(frame["params"]["mime"], "image/jpeg");
+    assert!(frame["params"]["data"].as_str().unwrap().len() > 100);
+    assert!(frame["params"]["width"].as_f64().unwrap() > 0.0, "{frame}");
+
+    let click = rpc
+        .call(
+            "browser/view/input",
+            json!({ "viewId": view_id, "event": { "type": "mouse", "action": "click", "x": 50, "y": 50 } }),
+        )
+        .await;
+    assert_eq!(click["result"]["ok"], true, "{click}");
+    let status = rpc
+        .wait_notification("browser/view/status", Duration::from_secs(5))
+        .await;
+    assert_eq!(status["params"]["title"], "Clicked", "{status}");
+
+    let nav = rpc
+        .call(
+            "browser/view/navigate",
+            json!({ "viewId": view_id, "url": "data:text/html,<title>Second</title>" }),
+        )
+        .await;
+    assert_eq!(nav["result"]["ok"], true, "{nav}");
+    let bad = rpc
+        .call(
+            "browser/view/navigate",
+            json!({ "viewId": view_id, "url": "javascript:alert(1)" }),
+        )
+        .await;
+    assert_eq!(bad["error"]["details"]["code"], "invalid_params", "{bad}");
+    loop {
+        let status = rpc
+            .wait_notification("browser/view/status", Duration::from_secs(5))
+            .await;
+        if status["params"]["title"] == "Second" {
+            break;
+        }
+    }
+
+    // agent 关掉自己的标签页：视图跟着结束。
+    let closed = hub.call(&key, "browser_close", &json!({})).await;
+    assert!(!closed.is_error, "{}", closed.text);
+    let ended = rpc
+        .wait_notification("browser/view/closed", Duration::from_secs(5))
+        .await;
+    assert_eq!(ended["params"]["reason"], "no_tab", "{ended}");
+    hub.shutdown().await;
+}

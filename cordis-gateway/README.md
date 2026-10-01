@@ -135,6 +135,34 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 投影每页一份（`handle.rs` 的 `transcripts`，共用一条 broadcast，事件带页身份）；订阅是「页 → 客户端订阅时用的 `threadId`」，推送时用那个 id。会话事件按 `session/page-event` 路由，`turn/completed` 只在那一页记下 `LogEvent::TurnEnd` 时发（一轮一次，流式中途不发；和其它会话事件一样按 `session/page-event` 路由），`status` 是 `completed` / `cancelled` / `failed`，失败带 `error`（错误文本，以前只回给 TUI）；`item/tool_completed` 的 `status` 照 Dock 落下的 `is_error` 报：`completed` / `failed`，停止时补的「已中断。」为 `cancelled`，权限门拒绝的为 `denied`；权限 / 提问 / 计划 / elicitation 的事件载荷是 `()`，挨页按队首序号（`front_seq`）对账——同一条不重报，换了一条先报旧的 resolved。提问（`interaction/requested`）每题带 `multiSelect`（多选题可以选多个）；`interaction/respond` 的 `answers[]` 每题 `{questionId, values: [选项标签…], other?}`，`other` 是自己写的回答，既算答案也作为备注交给模型；旧形状 `{questionId, value, kind: option|other}` 仍收。线程级的斜杠命令用 `GatewayHandle::scoped(page)`，下面一串 `cmd_*` 读的 `gateway.ctx()` 就是那一页。
 
+### 浏览器画面（能力 `browserView`，`handlers/browser_view.rs`）
+
+看某个会话正在用的浏览器标签页，并能接手操作。本地、远程、网页端走同一条路。
+
+| 方法 / 推送 | 作用 |
+|---|---|
+| `browser/view/open { threadId?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` |
+| `browser/view/input { viewId, event }` | 用户输入，见下 |
+| `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` |
+| `browser/view/close { viewId }` | 关视图（不关页）；连接断开时自动全关 |
+| 推送 `browser/view/frame` | 一帧：`data`（base64 JPEG）、`mime`、`width` / `height`（视口 CSS 像素）等 |
+| 推送 `browser/view/status` | 换了标签页，或地址 / 标题变了 |
+| 推送 `browser/view/closed` | 视图结束：`no_tab`（会话的标签页都关了）/ `browser_exited` |
+
+- 标签页来源：浏览器 MCP 写的运行时名册 `$DOCK_HOME/browser/sessions/<pid>.json`。
+- 按页的会话身份找（`cordis_spine::mcp_session_key`，和 MCP 调用带的是同一个）。
+- 会话还没开标签页：`no_tab`；浏览器没在跑或 target 没了：`browser_unavailable`。
+- agent 换了活动标签页，画面跟着换（每 700ms 看一次名册），推 `status`。
+- 流控：帧写到 WebSocket 之后才回 CDP `screencastFrameAck`，慢客户端不会攒帧。
+- `event` 的形状（坐标是页面视口 CSS 像素，客户端按帧的 `width` / `height` 换算）：
+  - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, clickCount?, modifiers?}`
+  - `{type:"wheel", x, y, deltaX, deltaY, modifiers?}`
+  - `{type:"key", action:"down"|"up"|"press", key, modifiers?}`（DOM 键名：`Enter`、`a`）
+  - `{type:"text", text}`（输入法上屏、粘贴）
+  - `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
+- 地址栏：没写协议补 `https://`；只放行 http / https / about / data / file（`javascript:` 拒）。
+- 这四个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
+
 ## 依赖注入
 
 `mount` 声明依赖：`SESSIONS`、`SESSION_PORT`、`PERMISSIONS`、`ASK`、`PLAN_MODE`、`MCP`、`TURN`、`SETTINGS`。这些是 named service，在 `apply` 时 live-lookup，**不要**在闭包里持有 `Arc`。

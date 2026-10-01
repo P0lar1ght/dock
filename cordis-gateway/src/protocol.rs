@@ -26,6 +26,8 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("openThreads", true),
     // `preset/list`：新对话选预设（只读，预设在创建会话时定下）。
     ("presets", true),
+    // `browser/view/*`：看会话正在用的浏览器标签页（CDP 画面流）并能接手操作。
+    ("browserView", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -91,6 +93,17 @@ pub const SLASH_LIST: &str = "slash/list";
 pub const SLASH_EXECUTE: &str = "slash/execute";
 pub const IMAGE_INPUTS_SYNC: &str = "imageInputs/sync";
 pub const IMAGE_INPUTS_PUT: &str = "imageInputs/put";
+
+pub const BROWSER_VIEW_OPEN: &str = "browser/view/open";
+pub const BROWSER_VIEW_INPUT: &str = "browser/view/input";
+pub const BROWSER_VIEW_NAVIGATE: &str = "browser/view/navigate";
+pub const BROWSER_VIEW_CLOSE: &str = "browser/view/close";
+/// 推送：一帧画面（base64 JPEG + 视口元数据）。
+pub const BROWSER_VIEW_FRAME: &str = "browser/view/frame";
+/// 推送：视图换了标签页，或页面地址 / 标题变了。
+pub const BROWSER_VIEW_STATUS: &str = "browser/view/status";
+/// 推送：视图结束了（`reason`：`no_tab` 会话的标签页都关了 / `browser_exited`）。
+pub const BROWSER_VIEW_CLOSED: &str = "browser/view/closed";
 pub const IMAGE_INPUTS_LIMITS_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]

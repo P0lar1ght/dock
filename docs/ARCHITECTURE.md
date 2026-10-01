@@ -214,3 +214,4 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 - 本机桌面 CUA 走外部 cua-driver MCP，不自研键鼠；全部与 `bash` 同级权限 / 计划门。cua-driver 自带的 `browser_*` ≠ Dock BUA 的 `mcp_browser__browser_*`。
 - 浏览器（BUA）是内置 MCP `browser`：`dock mcp browser`（crate `cordis-browser`），不在进程内注册工具。
   `tool-browser` 只剩 `/browser` 驾驶舱。按会话分标签页，会话身份走 `tools/call` 的 `_meta`。
+  网关 `browser/view/*` 按 MCP 写的运行时名册找到会话的标签页，另开 CDP 连接推画面；客户端不碰 CDP 端口。

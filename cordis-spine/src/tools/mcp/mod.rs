@@ -43,12 +43,18 @@ pub(super) type CallFn = std::sync::Arc<
 pub(super) fn calling_session() -> Option<String> {
     let exec = crate::tools::registry::exec_ctx()?;
     let sessions = exec.get::<Sessions>(SESSIONS)?;
+    Some(session_key(&sessions))
+}
+
+/// 一页在 MCP 服务眼里的会话身份：落盘会话 id，还没落盘就用页身份。
+/// MCP 客户端（`_meta["dock/sessionId"]`）和网关（按会话找浏览器标签页）共用这条规则。
+pub fn session_key(sessions: &Sessions) -> String {
     let id = sessions.live_session_id();
-    Some(if id.is_empty() {
+    if id.is_empty() {
         sessions.identity().to_string()
     } else {
         id
-    })
+    }
 }
 
 /// `tools/call` 的 JSON-RPC 结果 → [`ToolResult`]：文本 + 图片，外加服务器的 `isError`。

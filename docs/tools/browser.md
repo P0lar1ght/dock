@@ -55,6 +55,17 @@
 - Chromium 被关掉或崩了：下一次调用把各组作废，提示先 `browser_open`。
 - stdin 关闭（Dock 退出）：关掉全部标签页和自己拉起的 Chromium。
 
+## 运行时名册与网关画面
+
+- MCP 服务把「会话 → 标签页」写到 `$DOCK_HOME/browser/sessions/<pid>.json`。
+  - 标签页变了（开、关、切）就整份重写，先写临时文件再改名；都关了就删掉。
+  - 一个进程一份，多个 Dock 共用 Chromium 时互不覆盖。
+  - 运行时状态，不是会话数据。
+- 网关 `browser/view/*` 按它找到会话的活动标签页，另开一条 CDP 连接推画面（`cordis_browser::view`）。
+  - 协议见 `cordis-gateway/README.md`「浏览器画面」。
+  - 关视图只断自己的连接，不关页、不改 agent 那页的视口。
+- 为什么不让 GUI 直连 CDP：Dock 可能在远程机器上，调试端口只在那台机器的回环上，也不该暴露。
+
 ## 显示（有头 / 无头）
 
 - `[browser].headed`，默认无头；`DOCK_BROWSER_HEADED`（任意非空）覆盖为有头。
@@ -83,4 +94,5 @@
 - `cargo test -p cordis-browser`：工具清单、协议（两代握手、isError、未知方法、坏行）。
 - `cargo test -p cordis-app --test browser_mcp`：真起 `dock mcp browser`，经 `search_tool` / `use_tool`。
 - 真 Chrome 冒烟（`#[ignore]`）：`cargo test -p cordis-browser --test real_chrome -- --ignored --test-threads=1`。
-  - 覆盖按会话分页、第二个进程连上已有 Chromium、P0–P2。
+  - 覆盖按会话分页、第二个进程连上已有 Chromium、P0–P2、画面与用户输入。
+- 网关画面端到端（`#[ignore]`）：`cargo test -p cordis-gateway --test gateway -- --ignored browser_view_streams`。

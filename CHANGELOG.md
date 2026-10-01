@@ -19,6 +19,13 @@
 - **多个 Dock 共用一个 Chromium**：第二个进程读 `DevToolsActivePort` 连上已开的那个，不再抢 profile。
 - `/browser` 驾驶舱只显示内置 MCP 的状态与有头 / 无头偏好，不再列标签页和截图。
 
+### 新增
+
+- **网关浏览器画面** `browser/view/*`（能力 `browserView`）：看会话正在用的标签页、接手操作。
+  - CDP screencast 推 JPEG 帧；鼠标 / 滚轮 / 按键 / 文字转回页面；地址栏、前进后退刷新。
+  - agent 换标签页画面跟着换；帧写出去才让 Chrome 发下一帧。
+  - 本地、远程、网页端同一条路，不需要客户端碰 CDP 端口。
+
 ### 修复
 
 - MCP 工具的 `isError: true` 现在会把结果标成失败；以前只有正文以 `Error:` 开头才算。
