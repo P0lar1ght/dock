@@ -28,6 +28,8 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("presets", true),
     // `browser/view/*`：看会话正在用的浏览器标签页（CDP 画面流）并能接手操作。
     ("browserView", true),
+    // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
+    ("workspaceFiles", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -104,6 +106,11 @@ pub const BROWSER_VIEW_FRAME: &str = "browser/view/frame";
 pub const BROWSER_VIEW_STATUS: &str = "browser/view/status";
 /// 推送：视图结束了（`reason`：`no_tab` 会话的标签页都关了 / `browser_exited`）。
 pub const BROWSER_VIEW_CLOSED: &str = "browser/view/closed";
+
+/// 只读看会话工作区：列一层目录 / 读一个文件 / 按名字找文件。
+pub const FS_LIST: &str = "fs/list";
+pub const FS_READ: &str = "fs/read";
+pub const FS_FIND: &str = "fs/find";
 pub const IMAGE_INPUTS_LIMITS_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]
