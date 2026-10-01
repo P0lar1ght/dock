@@ -464,7 +464,7 @@ impl Computer {
             "  桌面键鼠 / 开应用走 search_tool → use_tool(\"mcp_cua-driver__…\")；全部与 bash 同级 permissions。\n",
         );
         out.push_str(
-            "  勿与 Dock browser_*（chromiumoxide）混淆；cua-driver 自带 browser_* 也不是 BUA。\n",
+            "  勿与 Dock 浏览器 mcp_browser__*（chromiumoxide）混淆；cua-driver 自带 browser_* 也不是 BUA。\n",
         );
         out.push_str("  不嵌真桌面；无 Docker / 不自研键鼠。\n");
         if let Some(line) = approval_line {

@@ -24,7 +24,7 @@ use crate::tools::mcp::protocol::{
     self, client_capabilities, client_info, discover_versions, pick_version, raw_tool_name,
     with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
-use crate::tools::registry::{tool_result, tool_result_with_images};
+use crate::tools::registry::tool_result;
 use cordis_base::config::{McpServer, McpStdioFraming, McpTransport};
 use cordis_base::types::ToolCall;
 
@@ -140,21 +140,17 @@ async fn connect_once(
         Box::pin(async move {
             let raw_name = raw_tool_name(&public);
             let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
-            let body = json!({ "name": raw_name, "arguments": args });
+            let body = protocol::with_session(
+                json!({ "name": raw_name, "arguments": args }),
+                super::calling_session().as_deref(),
+            );
             let params = if session.modern.load(Ordering::Relaxed) {
                 with_meta(body, &session.protocol.lock().unwrap())
             } else {
                 body
             };
             match rpc(&session, "tools/call", params).await {
-                Ok(v) => {
-                    let (text, images) = protocol::format_call_result_parts(&v);
-                    if images.is_empty() {
-                        tool_result(c, text)
-                    } else {
-                        tool_result_with_images(c, text, images)
-                    }
-                }
+                Ok(v) => super::call_result(c, &v),
                 Err(e) => tool_result(c, e),
             }
         })

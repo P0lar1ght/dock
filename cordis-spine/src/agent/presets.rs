@@ -2099,8 +2099,8 @@ mod tests {
         assert!(presets.allows("send_message"));
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
-        assert!(presets.allows("browser_open"));
-        assert!(presets.allows("browser_snapshot"));
+        // 浏览器走内置 MCP（`mcp_browser__*`，经 use_tool，不看允许名单）；名单里不再列 browser_*。
+        assert!(!presets.allows("browser_open"));
         assert!(!presets.allows("report"));
         assert!(!presets.allows("cordis_define"));
         assert!(!presets.allows("scheduler_create"));
@@ -2118,7 +2118,7 @@ mod tests {
         assert!(presets.allows("skill"));
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
-        assert!(presets.allows("browser_open"));
+        assert!(!presets.allows("browser_open"));
         assert!(presets.allows("cordis_run"));
         assert!(presets.allows("cordis_promote"));
         assert!(!presets.allows("scheduler_create"));

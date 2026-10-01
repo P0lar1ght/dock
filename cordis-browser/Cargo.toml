@@ -1,0 +1,19 @@
+[package]
+name = "cordis-browser"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+description = "Dock 浏览器 MCP 服务：chromiumoxide CDP，按会话分标签页，`dock mcp browser` 跑在 stdio 上"
+license = "Apache-2.0"
+
+[dependencies]
+base64 = "0.22"
+chromiumoxide = { version = "0.9", default-features = true }
+cordis-base = { path = "../cordis-base" }
+futures-util = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "io-std", "io-util", "fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }

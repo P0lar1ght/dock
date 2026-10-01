@@ -38,7 +38,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 - 全屏 TUI：思考折叠、工具卡片、计划 / 目标 / 子代理、斜杠与 overlay
 - Spine 五件套 + `agent-loop`：会话、采样、工具、系统提示、Agent 预设
 - 工作区读写跑、联网、MCP、计划模式、调度、动态 Cordis 插件
-- 浏览器与桌面驾驶舱：`/browser`（chromiumoxide CDP）与 `/computer`（cua-driver MCP，零配置接入）
+- 浏览器与桌面驾驶舱：`/browser`（内置浏览器 MCP，`dock mcp browser`）与 `/computer`（cua-driver MCP，零配置接入）
 - 回环 Gateway：Origin 配对、`dock.1` 投影、斜杠 list/execute
 - 宿主页 SDK：一份 `dock-embed.js` 注入宠物和 Chat
 
@@ -65,7 +65,7 @@ Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](htt
 
 - 工作区七颗：`list_dir` `read_file` `grep` `search_replace` `bash` `glob` `write_file`
 - 计划 / 提问 / 后台任务 / 调度 / 子代理 / 目标 / 记忆 / LSP / workflow
-- 浏览器驾驶舱（`browser_*`，`register_deferred`，chromiumoxide CDP + `/browser` overlay）；本机桌面走 `/computer` 与 cua-driver MCP
+- 浏览器：内置 MCP `browser`（`mcp_browser__browser_*`，chromiumoxide CDP，按会话分标签页）+ `/browser` 驾驶舱；本机桌面走 `/computer` 与 cua-driver MCP
 - MCP 与不常用本地工具走 `search_tool` / `use_tool` 渐进披露；内部公名 `mcp_{server}__{tool}`，不能盖掉 `bash`
 - 动态包：`cordis_define` / `cordis_run` / `cordis_promote` 写成 `.dock/plugins`
 

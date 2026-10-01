@@ -403,27 +403,6 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "cordis_call",
         "cordis_stop",
         "cordis_promote",
-        "browser_open",
-        "browser_navigate",
-        "browser_navigate_back",
-        "browser_snapshot",
-        "browser_click",
-        "browser_hover",
-        "browser_type",
-        "browser_press_key",
-        "browser_select_option",
-        "browser_fill_form",
-        "browser_wait_for",
-        "browser_drag",
-        "browser_handle_dialog",
-        "browser_file_upload",
-        "browser_resize",
-        "browser_screenshot",
-        "browser_tabs",
-        "browser_evaluate",
-        "browser_console_messages",
-        "browser_network_requests",
-        "browser_close",
     ] {
         assert!(
             names.iter().any(|n| n == need),
@@ -489,27 +468,6 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "update_goal",
         "lsp",
         "cordis_inspect",
-        "browser_open",
-        "browser_navigate",
-        "browser_navigate_back",
-        "browser_snapshot",
-        "browser_click",
-        "browser_hover",
-        "browser_type",
-        "browser_press_key",
-        "browser_select_option",
-        "browser_fill_form",
-        "browser_wait_for",
-        "browser_drag",
-        "browser_handle_dialog",
-        "browser_file_upload",
-        "browser_resize",
-        "browser_screenshot",
-        "browser_tabs",
-        "browser_evaluate",
-        "browser_console_messages",
-        "browser_network_requests",
-        "browser_close",
     ] {
         assert!(
             !model.iter().any(|n| n == hidden),
@@ -528,54 +486,12 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "search_tool should surface deferred locals: {}",
         sched_search.content
     );
-    let browser_search = tools
-        .execute(cordis_spine::ToolCall {
-            id: "st-browser".into(),
-            name: "search_tool".into(),
-            arguments: r#"{"query":"browser","limit":30}"#.into(),
-        })
-        .await;
-    for need in [
-        "browser_open",
-        "browser_navigate",
-        "browser_navigate_back",
-        "browser_snapshot",
-        "browser_click",
-        "browser_hover",
-        "browser_type",
-        "browser_press_key",
-        "browser_select_option",
-        "browser_fill_form",
-        "browser_wait_for",
-        "browser_drag",
-        "browser_handle_dialog",
-        "browser_file_upload",
-        "browser_resize",
-        "browser_screenshot",
-        "browser_tabs",
-        "browser_evaluate",
-        "browser_console_messages",
-        "browser_network_requests",
-        "browser_close",
-    ] {
-        assert!(
-            browser_search.content.contains(need),
-            "search_tool should surface deferred {need}: {}",
-            browser_search.content
-        );
-    }
-    // Session stays Closed until browser_open; snapshot without open needs no Chromium.
-    let browser_closed = tools
-        .execute(cordis_spine::ToolCall {
-            id: "br-snap".into(),
-            name: "browser_snapshot".into(),
-            arguments: r#"{"interactive":true}"#.into(),
-        })
-        .await;
+    // 浏览器不再是进程内工具：它是内置 MCP `browser`（`dock mcp browser`），由 `dock`
+    // 二进制登记后才注入。测试进程不登记，所以工具表里一颗 browser_* 都不该有；
+    // MCP 那条路径的端到端测试在 cordis-app/tests/browser_mcp.rs。
     assert!(
-        browser_closed.content.contains("not connected"),
-        "browser closed snapshot: {}",
-        browser_closed.content
+        !tools.specs().iter().any(|s| s.name.starts_with("browser_")),
+        "in-process browser_* tools must be gone"
     );
     let search = tools
         .execute(cordis_spine::ToolCall {
@@ -627,7 +543,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         .is_some());
     assert!(root
         .get::<cordis_spine::Browser>(cordis_spine::BROWSER)
-        .is_some_and(|b| b.session() == cordis_spine::BrowserSession::Closed));
+        .is_some_and(|b| b.state() == cordis_spine::BrowserState::Missing));
     assert!(root
         .require::<cordis_spine::Slash>(cordis_spine::SLASH)
         .unwrap()

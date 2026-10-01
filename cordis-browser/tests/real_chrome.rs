@@ -1,0 +1,260 @@
+//! 真 Chrome 冒烟（`#[ignore]`）：`cargo test -p cordis-browser -- --ignored`。
+//! 从 spine 的 `tool-browser` 测试搬来，改走 [`BrowserHub`]，并补上按会话分标签页。
+
+use cordis_browser::{session::discover_chrome, BrowserHub, CallOutput};
+use serde_json::{json, Value};
+
+fn chrome_or_skip(what: &str) -> bool {
+    if discover_chrome().is_err() {
+        eprintln!("skip {what}: chrome not installed");
+        return false;
+    }
+    true
+}
+
+async fn ok(hub: &BrowserHub, session: &str, name: &str, args: Value) -> CallOutput {
+    let out = hub.call(session, name, &args).await;
+    assert!(!out.is_error, "{name}: {}", out.text);
+    out
+}
+
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn sessions_get_their_own_tabs() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("sessions") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "a",
+        "browser_open",
+        json!({"url": "data:text/html,<p>PageA</p>"}),
+    )
+    .await;
+    ok(
+        &hub,
+        "b",
+        "browser_open",
+        json!({"url": "data:text/html,<p>PageB</p>"}),
+    )
+    .await;
+    assert_eq!(hub.sessions().await, vec!["a", "b"]);
+
+    let a = ok(&hub, "a", "browser_tabs", json!({})).await;
+    assert!(a.text.contains("PageA"), "{}", a.text);
+    assert!(
+        !a.text.contains("PageB"),
+        "a must not see b's tab: {}",
+        a.text
+    );
+
+    // a 关掉自己的，不影响 b。
+    ok(&hub, "a", "browser_close", json!({})).await;
+    let gone = hub.call("a", "browser_snapshot", &json!({})).await;
+    assert!(gone.is_error, "{}", gone.text);
+    ok(
+        &hub,
+        "b",
+        "browser_wait_for",
+        json!({"text": "PageB", "timeout_ms": 5000}),
+    )
+    .await;
+
+    ok(&hub, "b", "browser_close", json!({})).await;
+    assert!(hub.sessions().await.is_empty());
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn second_hub_attaches_to_running_chromium() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("attach") {
+        return;
+    }
+    let first = BrowserHub::new();
+    ok(&first, "a", "browser_open", json!({"url": "about:blank"})).await;
+    let user_data = cordis_browser::browser_user_data_dir();
+    assert!(
+        cordis_browser::devtools_ws_url(&user_data).is_some(),
+        "Chromium should write DevToolsActivePort under {}",
+        user_data.display()
+    );
+
+    // 同一 profile 的第二个进程（比如 TUI 与 GUI 各一个 Dock）连上同一个 Chromium。
+    let second = BrowserHub::new();
+    ok(
+        &second,
+        "b",
+        "browser_open",
+        json!({"url": "data:text/html,<p>Second</p>"}),
+    )
+    .await;
+    // 连上的那边关自己的组，不能把别人的 Chromium 关掉。
+    second.shutdown().await;
+    ok(&first, "a", "browser_snapshot", json!({})).await;
+    first.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn p0_navigate_press_wait() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("p0") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<html><body><h1>HelloBUA</h1><select id=s><option value=a>A</option><option value=b>B</option></select><input id=i /></body></html>"}),
+    )
+    .await;
+    let nav = ok(
+        &hub,
+        "s",
+        "browser_navigate",
+        json!({"url": "data:text/html,<html><body><p>NavOK</p><input id=x /></body></html>"}),
+    )
+    .await;
+    assert!(nav.text.contains("navigated"), "{}", nav.text);
+    ok(
+        &hub,
+        "s",
+        "browser_wait_for",
+        json!({"text": "NavOK", "timeout_ms": 5000}),
+    )
+    .await;
+    ok(&hub, "s", "browser_press_key", json!({"key": "Tab"})).await;
+    let shot = ok(&hub, "s", "browser_screenshot", json!({})).await;
+    assert!(shot.image.as_ref().is_some_and(|p| p.is_file()), "{shot:?}");
+
+    ok(&hub, "s", "browser_close", json!({})).await;
+    let closed = hub
+        .call("s", "browser_navigate", &json!({"url": "about:blank"}))
+        .await;
+    assert!(
+        closed.is_error && closed.text.contains("browser_open"),
+        "{}",
+        closed.text
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn p1_resize_dialog_upload_drag() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("p1") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<html><body><div id=a style='width:40px;height:40px'>A</div><div id=b style='width:40px;height:40px;margin-top:80px'>B</div><input id=f type=file /><script>setTimeout(function(){alert('BUA-D2');},50);</script></body></html>"}),
+    )
+    .await;
+    let resize = ok(
+        &hub,
+        "s",
+        "browser_resize",
+        json!({"width": 1024, "height": 768}),
+    )
+    .await;
+    assert!(resize.text.contains("1024x768"), "{}", resize.text);
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    ok(&hub, "s", "browser_handle_dialog", json!({"accept": true})).await;
+    ok(
+        &hub,
+        "s",
+        "browser_drag",
+        json!({"start_x": 20, "start_y": 20, "end_x": 20, "end_y": 120, "steps": 5}),
+    )
+    .await;
+
+    let upload_path = dock_home.path().join("upload.txt");
+    std::fs::write(&upload_path, b"hello").unwrap();
+    let snap = ok(&hub, "s", "browser_snapshot", json!({"interactive": true})).await;
+    // 页上只有文件框一个可交互元素；按钮文案随系统语言变（「选择文件」/ "Choose File"），
+    // 所以直接取第一个 ref。
+    let file_ref = snap
+        .text
+        .lines()
+        .find_map(|l| {
+            let idx = l.find("ref=e")?;
+            let id: String = l[idx + 4..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            Some(format!("@{id}"))
+        })
+        .unwrap_or_else(|| panic!("expected file input ref in snapshot:\n{}", snap.text));
+    ok(
+        &hub,
+        "s",
+        "browser_file_upload",
+        json!({"ref": file_ref, "paths": [upload_path.display().to_string()]}),
+    )
+    .await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn p2_evaluate_network_iframe() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("p2") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(&hub, "s", "browser_open", json!({"url": "about:blank"})).await;
+    ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "(() => { document.body.innerHTML = '<h1 id=t>P2Main</h1><iframe id=f name=child src=\"data:text/html,<html><body><p id=p>InsideFrame</p></body></html>\"></iframe>'; console.log('BUA-P2-LOG'); return document.title = 'p2'; })()"}),
+    )
+    .await;
+    let ev = ok(&hub, "s", "browser_evaluate", json!({"expression": "1+2"})).await;
+    assert!(ev.text.contains('3'), "{}", ev.text);
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let console = ok(&hub, "s", "browser_console_messages", json!({})).await;
+    assert!(
+        console.text.contains("BUA-P2-LOG") || console.text.contains("log:"),
+        "{}",
+        console.text
+    );
+    ok(&hub, "s", "browser_network_requests", json!({})).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let framed = ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "document.getElementById('p') && document.getElementById('p').textContent", "frame_selector": "#f"}),
+    )
+    .await;
+    assert!(framed.text.contains("InsideFrame"), "{}", framed.text);
+
+    let missing = hub
+        .call(
+            "s",
+            "browser_evaluate",
+            &json!({"expression": "1", "frame_selector": "#missing"}),
+        )
+        .await;
+    assert!(missing.is_error, "{}", missing.text);
+    hub.shutdown().await;
+}

@@ -105,12 +105,51 @@ pub fn request_meta(protocol: &str) -> Value {
     })
 }
 
+/// 合并进已有的 `_meta`（[`with_session`] 可能先放了会话身份），不整个覆盖。
 pub fn with_meta(mut params: Value, protocol: &str) -> Value {
     if !params.is_object() {
         params = json!({});
     }
-    params["_meta"] = request_meta(protocol);
+    let meta = request_meta(protocol);
+    match params.get_mut("_meta").and_then(Value::as_object_mut) {
+        Some(existing) => {
+            if let Value::Object(fields) = meta {
+                existing.extend(fields);
+            }
+        }
+        None => params["_meta"] = meta,
+    }
     params
+}
+
+/// Dock 在 `tools/call` 的 `_meta` 里带调用方会话。内置浏览器 MCP 按它分标签页；
+/// 其它服务器不认这个键，照 MCP 规范忽略即可。
+pub const META_SESSION: &str = "dock/sessionId";
+
+pub fn with_session(mut params: Value, session: Option<&str>) -> Value {
+    let Some(session) = session.filter(|s| !s.is_empty()) else {
+        return params;
+    };
+    if !params.is_object() {
+        params = json!({});
+    }
+    let meta = params
+        .as_object_mut()
+        .expect("just ensured object")
+        .entry("_meta")
+        .or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    meta[META_SESSION] = json!(session);
+    params
+}
+
+/// `tools/call` 结果的 `isError`：服务器明说失败的，结果就标失败，不靠猜文本。
+pub fn call_is_error(v: &Value) -> bool {
+    v.pointer("/result/isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub fn is_modern(protocol: &str) -> bool {
@@ -655,6 +694,24 @@ mod tests {
         assert!(text.contains("shot"), "{text}");
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime, "image/png");
+    }
+
+    #[test]
+    fn with_meta_keeps_session_meta() {
+        let p = with_session(json!({"name": "browser_open"}), Some("0199-t"));
+        let p = with_meta(p, PROTOCOL_LATEST);
+        assert_eq!(p["_meta"][META_SESSION], "0199-t");
+        assert_eq!(p["_meta"][META_PROTOCOL], PROTOCOL_LATEST);
+        let untouched = with_session(json!({"name": "x"}), None);
+        assert!(untouched.get("_meta").is_none());
+    }
+
+    #[test]
+    fn is_error_reads_result_flag() {
+        assert!(call_is_error(
+            &json!({"result": {"content": [], "isError": true}})
+        ));
+        assert!(!call_is_error(&json!({"result": {"content": []}})));
     }
 
     #[test]

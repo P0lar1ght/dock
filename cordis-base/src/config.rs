@@ -746,26 +746,64 @@ pub fn load_mcp_servers() -> Vec<McpServer> {
 
 /// 代码里自带的 MCP 行：零配置就能用，优先级低于任何配置文件。
 ///
-/// 目前只有 cua-driver，而且**发现得到二进制才注入** —— 没装就当没有这条，
-/// `/mcps` 不会多出一条永远连不上的死行（computer 驾驶舱自己会说「未安装」）。
+/// - `browser`：Dock 自己的浏览器 MCP（`<dock> mcp browser`），**只有 `dock` 二进制
+///   登记过自己**（[`register_builtin_browser_mcp`]）才注入。
+/// - `cua-driver`：**发现得到二进制才注入** —— 没装就当没有这条，`/mcps` 不会多出
+///   一条永远连不上的死行（computer 驾驶舱自己会说「未安装」）。
 pub fn builtin_mcp_servers() -> Vec<McpServer> {
-    crate::cua::discover()
-        .map(|path| {
-            vec![McpServer {
-                name: crate::cua::CUA_DRIVER_SERVER.to_string(),
-                transport: McpTransport::Stdio {
-                    // 绝对路径：从 GUI 起的终端常常没有 `~/.local/bin`。
-                    command: path.to_string_lossy().into_owned(),
-                    args: vec!["mcp".to_string()],
-                    env: BTreeMap::new(),
-                    framing: McpStdioFraming::Ndjson,
-                },
-                startup_timeout_sec: DEFAULT_MCP_STARTUP_TIMEOUT_SECS,
-                enabled: true,
-                oauth: McpOAuthConfig::default(),
-            }]
-        })
-        .unwrap_or_default()
+    let browser = builtin_browser_mcp_with(
+        BROWSER_MCP_COMMAND.get().map(PathBuf::as_path),
+        std::env::var(BROWSER_MCP_ENV).ok().as_deref(),
+    );
+    let cua = crate::cua::discover().map(|path| McpServer {
+        name: crate::cua::CUA_DRIVER_SERVER.to_string(),
+        transport: McpTransport::Stdio {
+            // 绝对路径：从 GUI 起的终端常常没有 `~/.local/bin`。
+            command: path.to_string_lossy().into_owned(),
+            args: vec!["mcp".to_string()],
+            env: BTreeMap::new(),
+            framing: McpStdioFraming::Ndjson,
+        },
+        startup_timeout_sec: DEFAULT_MCP_STARTUP_TIMEOUT_SECS,
+        enabled: true,
+        oauth: McpOAuthConfig::default(),
+    });
+    browser.into_iter().chain(cua).collect()
+}
+
+/// 内置浏览器 MCP 的服务器键名：公名前缀 `mcp_browser__`，必须与 TOOLS.md 一致。
+pub const BROWSER_MCP_SERVER: &str = "browser";
+/// 设成 `off` / `0` / `false` / `none` 则不注入内置浏览器行。
+pub const BROWSER_MCP_ENV: &str = "DOCK_BROWSER_MCP";
+
+static BROWSER_MCP_COMMAND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// `dock` 二进制启动时登记自己的路径：内置浏览器行 = `<dock> mcp browser`。
+///
+/// 只有登记过才注入 —— 测试进程、把 spine 嵌进别的宿主时不会凭空拉起一个子进程
+/// （`current_exe` 在测试里是测试二进制，拿它跑 `mcp browser` 只会跑一遍测试）。
+pub fn register_builtin_browser_mcp(command: PathBuf) {
+    let _ = BROWSER_MCP_COMMAND.set(command);
+}
+
+/// [`builtin_mcp_servers`] 里浏览器那条的可测版本：登记的命令与 env 全由调用方给。
+pub fn builtin_browser_mcp_with(command: Option<&Path>, env: Option<&str>) -> Option<McpServer> {
+    if env.is_some_and(crate::cua::is_off) {
+        return None;
+    }
+    let command = command?;
+    Some(McpServer {
+        name: BROWSER_MCP_SERVER.to_string(),
+        transport: McpTransport::Stdio {
+            command: command.to_string_lossy().into_owned(),
+            args: vec!["mcp".to_string(), "browser".to_string()],
+            env: BTreeMap::new(),
+            framing: McpStdioFraming::Ndjson,
+        },
+        startup_timeout_sec: DEFAULT_MCP_STARTUP_TIMEOUT_SECS,
+        enabled: true,
+        oauth: McpOAuthConfig::default(),
+    })
 }
 
 /// 内置行在前，配置文件的同名行整条替换它（位置保持内置那条的次序）。
@@ -2295,6 +2333,23 @@ command = "npx"
         let cua = merged.iter().find(|s| s.name == "cua-driver").unwrap();
         assert!(!cua.enabled);
         assert_eq!(cua.endpoint(), "/opt/mine/cua-driver");
+    }
+
+    /// 浏览器行只在 `dock` 二进制登记过自己时出现，`DOCK_BROWSER_MCP=off` 关掉。
+    #[test]
+    fn builtin_browser_row_needs_registration_and_respects_off() {
+        assert!(builtin_browser_mcp_with(None, None).is_none());
+        let dock = Path::new("/opt/dock/bin/dock");
+        let row = builtin_browser_mcp_with(Some(dock), None).unwrap();
+        assert_eq!(row.name, "browser");
+        assert_eq!(row.endpoint(), "/opt/dock/bin/dock");
+        let McpTransport::Stdio { args, framing, .. } = &row.transport else {
+            panic!("stdio");
+        };
+        assert_eq!(args, &["mcp", "browser"]);
+        assert_eq!(*framing, McpStdioFraming::Ndjson);
+        assert!(builtin_browser_mcp_with(Some(dock), Some("off")).is_none());
+        assert!(builtin_browser_mcp_with(Some(dock), Some("")).is_some());
     }
 
     /// `/mcps` 里给内置行按 Space：文件里没有实体行，要落一条完整的，

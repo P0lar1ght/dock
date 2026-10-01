@@ -29,9 +29,12 @@ fn gated_builtin(tool: &str) -> bool {
             | "monitor"
             | "cordis_run"
             | "cordis_promote"
-            | "browser_evaluate"
     )
 }
+
+/// 内置浏览器 MCP 里跑任意 JS 的那一颗：和 bash 同级。其余 `mcp_browser__*` 只动页面，
+/// 不过门（以前进程内的 `browser_*` 也是这个划分）。
+pub const BROWSER_EVALUATE_MCP: &str = "mcp_browser__browser_evaluate";
 
 /// Computer-use via cua-driver MCP: same ask/plan gate as bash (C0).
 /// All `mcp_cua-driver__*` tools are gated — desktop control is sensitive even
@@ -41,12 +44,12 @@ pub fn is_cua_driver_mcp(tool: &str) -> bool {
 }
 
 pub fn needs_permission(tool: &str) -> bool {
-    gated_builtin(tool) || is_cua_driver_mcp(tool)
+    gated_builtin(tool) || is_cua_driver_mcp(tool) || tool == BROWSER_EVALUATE_MCP
 }
 
 /// File/shell/computer mutations blocked while `"settings"` plan mode is on.
 pub fn blocked_in_plan(tool: &str) -> bool {
-    gated_builtin(tool) || is_cua_driver_mcp(tool)
+    gated_builtin(tool) || is_cua_driver_mcp(tool) || tool == BROWSER_EVALUATE_MCP
 }
 
 impl PermissionOptionKind {
@@ -68,14 +71,16 @@ mod tests {
         assert!(needs_permission("cordis_run"));
         assert!(needs_permission("cordis_promote"));
         assert!(!needs_permission("cordis_inspect"));
-        assert!(needs_permission("browser_evaluate"));
-        assert!(!needs_permission("browser_snapshot"));
-        assert!(!needs_permission("browser_network_requests"));
+        assert!(needs_permission("mcp_browser__browser_evaluate"));
+        assert!(!needs_permission("mcp_browser__browser_snapshot"));
+        assert!(!needs_permission("mcp_browser__browser_network_requests"));
+        // 进程内的 browser_* 已经没了：同名的裸工具不再自动过门。
+        assert!(!needs_permission("browser_evaluate"));
         assert!(blocked_in_plan("cordis_run"));
         assert!(blocked_in_plan("cordis_promote"));
         assert!(!blocked_in_plan("cordis_inspect"));
-        assert!(blocked_in_plan("browser_evaluate"));
-        assert!(!blocked_in_plan("browser_console_messages"));
+        assert!(blocked_in_plan("mcp_browser__browser_evaluate"));
+        assert!(!blocked_in_plan("mcp_browser__browser_console_messages"));
     }
 
     #[test]

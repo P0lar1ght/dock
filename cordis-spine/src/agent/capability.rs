@@ -90,6 +90,12 @@ enum Class {
 
 /// 工具名 → 能力种类。**新工具默认 `Unknown`（只有 `All` 放行）**。
 fn class_of(tool: &str) -> Class {
+    // 内置浏览器 MCP 的工具按本名归类（`mcp_browser__browser_click` → `browser_click`）；
+    // 别的 MCP 仍不归类。
+    let tool = match tool.strip_prefix(crate::tools::browser::BROWSER_MCP_PREFIX) {
+        Some(raw) if raw.starts_with("browser_") => raw,
+        _ => tool,
+    };
     match tool {
         "enter_plan_mode" | "exit_plan_mode" | "ask_user_question" | "todo_write" | "skill"
         | "search_tool" | "update_goal" => Class::Meta,
@@ -180,12 +186,15 @@ mod tests {
             "interrupt_agent",
             "monitor",
             "kill_task",
-            "browser_evaluate",
-            "browser_click",
+            "mcp_browser__browser_evaluate",
+            "mcp_browser__browser_click",
+            "mcp_other__browser_snapshot",
             "use_tool",
         ] {
             assert!(!m.allows(denied), "只读档必须挡 {denied}");
         }
+        // 内置浏览器 MCP 看页面的那一半仍算检索。
+        assert!(m.allows("mcp_browser__browser_snapshot"));
     }
 
     /// `workflow` 归执行类：只读子代理起不了新的工作流 run。

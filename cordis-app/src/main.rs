@@ -14,10 +14,12 @@ enum ResumeArg {
     Id(String),
 }
 
-/// `dock` 起 TUI；`dock serve` 起无头网关给父进程（桌面 GUI）用。
+/// `dock` 起 TUI；`dock serve` 起无头网关给父进程（桌面 GUI）用；
+/// `dock mcp browser` 是内置浏览器 MCP 服务（由 Dock 自己按内置行拉起）。
 enum Mode {
     Tui,
     Serve(ServeArgs),
+    McpBrowser,
 }
 
 struct ServeArgs {
@@ -33,6 +35,21 @@ const SERVE_DEFAULT_APPLICATION: &str = "dock-gui";
 fn parse_args() -> (Mode, ResumeArg) {
     let mut args = std::env::args().skip(1).peekable();
     let mut resume = ResumeArg::Off;
+    if args.peek().is_some_and(|a| a == "mcp") {
+        args.next();
+        let service = args.next();
+        let extra = args.next();
+        return match (service.as_deref(), extra) {
+            (Some(cordis_browser::SERVER_NAME), None) => (Mode::McpBrowser, resume),
+            (Some(cordis_browser::SERVER_NAME), Some(extra)) => {
+                usage_error(&format!("dock mcp browser 不认识参数 {extra}"))
+            }
+            (Some(other), _) => {
+                usage_error(&format!("dock mcp 不认识服务 {other}（目前只有 browser）"))
+            }
+            (None, _) => usage_error("dock mcp 需要服务名（目前只有 browser）"),
+        };
+    }
     let serve = args.peek().is_some_and(|a| a == "serve");
     if serve {
         args.next();
@@ -104,6 +121,7 @@ Dock — Grok-shaped TUI on a Cordis plugin tree.
 Usage:
   dock [options]
   dock serve --origin <origin> [--application <id>] [--bind <addr>] [options]
+  dock mcp browser
 
 Options:
   -r, --resume [id]  Restore the latest session for this cwd, or a specific id
@@ -117,6 +135,9 @@ on loopback right away; stdout carries one JSON line per event: first
   --origin <origin>     Origin the tickets are bound to (e.g. tauri://localhost)
   --application <id>    Application id (default dock-gui)
   --bind <addr>         Loopback address (default 127.0.0.1:0, OS-assigned port)
+
+mcp browser: Dock's browser MCP server on stdio (NDJSON JSON-RPC). Dock starts it
+itself as the built-in [mcp_servers.browser] row; DOCK_BROWSER_MCP=off disables it.
 
 Sessions are stored in $DOCK_HOME/sessions/<cwd>/ (default ~/.dock/sessions/).
 "
@@ -147,6 +168,15 @@ fn resume_and_apply_preset(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mode, resume) = parse_args();
+    if let Mode::McpBrowser = mode {
+        // stdout 是协议通道：这里什么都不能往 stdout 打。
+        cordis_browser::serve_stdio().await?;
+        return Ok(());
+    }
+    // 内置浏览器行拉起的就是自己这个二进制（`dock mcp browser`）。
+    if let Ok(exe) = std::env::current_exe() {
+        cordis_spine::register_builtin_browser_mcp(exe);
+    }
     let root = cordis::Context::new();
     install_app(&root).await?;
     if let Some(sessions) = root.get::<Sessions>(SESSIONS) {
@@ -199,6 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 父进程关了 stdin（退出或崩了）就收尾：会话是逐条实时落盘的，不用额外保存。
             control.run(stdin, tokio::io::stdout()).await?;
         }
+        Mode::McpBrowser => unreachable!("handled before install_app"),
     }
     Ok(())
 }

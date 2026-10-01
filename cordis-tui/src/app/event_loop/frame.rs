@@ -3,8 +3,8 @@
 use cordis::Context;
 use cordis_spine::{
     AgentPresets, AppSettings, Ask, Browser, Goal, PermissionMode, Permissions, PlanMode, Sessions,
-    TuiSlots, AGENT_PRESETS, ASK, BROWSER, GOAL, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
-    TUI_SLOTS,
+    TuiSlots, AGENT_PRESETS, ASK, BROWSER, BROWSER_MCP_PREFIX, GOAL, PERMISSIONS, PLAN_MODE,
+    SESSIONS, SETTINGS, TUI_SLOTS,
 };
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::prelude::CrosstermBackend;
@@ -956,7 +956,7 @@ pub(super) fn paint_overlay(
             let approval = ctx
                 .get::<Permissions>(PERMISSIONS)
                 .and_then(|p| p.front())
-                .filter(|pr| pr.tool.starts_with("browser_"))
+                .filter(|pr| pr.tool.starts_with(BROWSER_MCP_PREFIX))
                 .map(|pr| {
                     if pr.summary.is_empty() {
                         pr.tool

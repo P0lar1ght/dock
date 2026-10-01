@@ -8,8 +8,8 @@ use cordis_spine::{
     goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
     Ask, Browser, Computer, Cron, CuaAction, Goal, Jobs, LoopFireMode, Mcp, McpStatus,
     MermaidEngineKind, Permissions, PlanMode, Sessions, Slash, SlotKeyResult, Subagents, TuiSlots,
-    UserImage, Workflows, AGENT_PRESETS, ASK, BROWSER, COMPUTER, CRON, GOAL, JOBS, MCP,
-    PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
+    UserImage, Workflows, AGENT_PRESETS, ASK, BROWSER, BROWSER_MCP_PREFIX, COMPUTER, CRON, GOAL,
+    JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
 
 use crate::app::clipboard;
@@ -152,7 +152,7 @@ pub(super) fn browser_cockpit_body(ctx: &Context) -> String {
     let approval = ctx
         .get::<Permissions>(PERMISSIONS)
         .and_then(|p| p.front())
-        .filter(|pr| pr.tool.starts_with("browser_"))
+        .filter(|pr| pr.tool.starts_with(BROWSER_MCP_PREFIX))
         .map(|pr| {
             if pr.summary.is_empty() {
                 pr.tool

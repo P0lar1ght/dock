@@ -122,11 +122,13 @@ actionlint .github/workflows/ci.yml
 
 CI 不跑的：
 
-- 标了 `#[ignore]` 的用例：`browser` 里 4 个要真实 Chrome 的冒烟（`p0_` / `p1_` / `p2_` / `open_close_`）。页面文本与快照随 Chrome 版本、界面语言变化 —— 例如中文本地化下 `<input type=file>` 的标签是「选择文件」，而 `p1_` 的过滤器只匹配 ASCII `file`。要跑就本地跑：
+- 标了 `#[ignore]` 的用例：`cordis-browser/tests/real_chrome.rs` 里 5 个要真实 Chrome 的冒烟。
+  - 页面文本与快照随 Chrome 版本、界面语言变化，所以 CI 不跑。
+  - 要跑就本地跑：
 
   ```bash
-  cargo test -p cordis-spine --lib -- --ignored           # 全跑，需要装 Chrome
-  cargo test -p cordis-spine --lib -- p1_ --ignored       # 单个
+  cargo test -p cordis-browser --test real_chrome -- --ignored --test-threads=1   # 全跑，需要装 Chrome
+  cargo test -p cordis-browser --test real_chrome -- p1_ --ignored                # 单个
   ```
 
 - `embed-sdk` 的 js 检查：目前没有 lint / test 脚本，类型检查就是 `npm run build:types`。

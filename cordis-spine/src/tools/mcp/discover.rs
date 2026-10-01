@@ -21,7 +21,7 @@ pub const SEARCH_TOOL_NAME: &str = "search_tool";
 pub const USE_TOOL_NAME: &str = "use_tool";
 
 const SEARCH_TOOL_DESC: &str = "Search on-demand tools by keyword and retrieve their input schemas. \
-Matches MCP integrations, dynamic packages, and infrequent local tools (scheduler, memory, lsp, skill, workflow, cordis_*, browser_*, …). \
+Matches MCP integrations, dynamic packages, and infrequent local tools (scheduler, memory, lsp, skill, workflow, cordis_*, …; the built-in browser is the MCP server `browser`, tools mcp_browser__browser_*). \
 Returns only hits, each with a full input_schema, capped by limit (default 5, max 255). \
 Unmatched tools stay hidden; total_hidden_tools is the catalog size. \
 A hit whose schema is already earlier in this conversation comes back as schema_in_context \
@@ -462,7 +462,6 @@ fn catalog_group(tools: &Tools, name: &str) -> String {
         n if n.starts_with("cordis_") => "cordis".into(),
         n if n.starts_with("scheduler_") => "scheduler".into(),
         n if n.starts_with("memory_") => "memory".into(),
-        n if n.starts_with("browser_") => "browser".into(),
         "monitor" => "monitor".into(),
         "update_goal" => "goal".into(),
         "lsp" => "lsp".into(),

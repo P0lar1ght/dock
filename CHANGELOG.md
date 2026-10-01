@@ -6,6 +6,23 @@
 0.x 期间不承诺 `config.toml` 的键与 `dock.1` 协议的向后兼容：破坏性变更会写进对应版本，
 并在升级说明里给出改法。
 
+## [Unreleased]
+
+### 变更
+
+- **浏览器工具改成内置 MCP**：`dock mcp browser`（新 crate `cordis-browser`）。
+  - Dock 自动注入内置行 `[mcp_servers.browser]`，零配置；`DOCK_BROWSER_MCP=off` 关掉。
+  - 工具公名从 `browser_*` 变成 `mcp_browser__browser_*`，照旧经 `search_tool` / `use_tool`。
+  - 进程内的 `browser_*` 已删除；预设允许名单里不再列它们。
+  - 权限门随之改名：`mcp_browser__browser_evaluate` 与 bash 同级。
+- **按会话分标签页**：一个 Chromium、共用登录态，每个会话只看得到、只关得掉自己的标签页。
+- **多个 Dock 共用一个 Chromium**：第二个进程读 `DevToolsActivePort` 连上已开的那个，不再抢 profile。
+- `/browser` 驾驶舱只显示内置 MCP 的状态与有头 / 无头偏好，不再列标签页和截图。
+
+### 修复
+
+- MCP 工具的 `isError: true` 现在会把结果标成失败；以前只有正文以 `Error:` 开头才算。
+
 ## [0.1.2] - 2026-09-29
 
 ### 新增

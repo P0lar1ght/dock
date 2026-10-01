@@ -40,8 +40,8 @@ fn bin_name() -> &'static str {
     }
 }
 
-/// `DOCK_CUA_DRIVER` 的关闭值：显式关掉内置 cua-driver。
-fn is_off(value: &str) -> bool {
+/// 内置 MCP 行开关的关闭值（`DOCK_CUA_DRIVER`、`DOCK_BROWSER_MCP` 共用）。
+pub(crate) fn is_off(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "off" | "0" | "false" | "no" | "none" | "disabled"
