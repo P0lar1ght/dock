@@ -34,3 +34,22 @@ npm run build
 公开事件：`dock:ready`、`dock:state`、`dock:toggle`、`dock:error`。`connect()` 在 Origin 未绑定时**不会当终态失败**：它创建配对请求并等到 Dock 终端批准（`/pair` 或弹出 overlay），再 `POST /v1/pairing/exchanges` 拿 ticket、挂上 live thread，然后才 `dock:ready`。没有 `dock pair` CLI。`openChat()` 会等同一条连接路径，所以 composer 在 ready 之后可以发消息。
 
 斜杠补全来自 Gateway `slash/list`，发送走 `slash/execute`（接到同一套 spine / agent harness）。嵌入脚本只做前缀过滤和结果渲染；`/screenshot` 仍在浏览器里截图，再作为 Turn 交给 Gateway。
+
+## 连远程 Dock（设备令牌）
+
+`dock serve --remote` 挂在反向代理后面时（见 [docs/REMOTE.md](../docs/REMOTE.md)），用 `DockClient` 直接连：
+
+```js
+import { DockClient } from 'dock-embed/client';
+
+const client = new DockClient({
+  application: 'my-app',
+  gatewayUrl: 'https://dock.example.com',
+  deviceToken: tokenFromUser, // `dock device add` 打印的那串
+});
+await client.connect();
+```
+
+- 给了 `deviceToken` 就不走配对：`requestPairing()` 等方法回 `pairing_unavailable`。
+- `gatewayUrl` 必须显式给，且是 `https://`；`http://` 只允许回环（SSH 隧道、本机测试）。
+- 令牌只存在内存里，断线重连照用；不要写进页面 HTML（`data-*` 属性不支持令牌）。

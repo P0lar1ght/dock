@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use cordis::Context;
 use cordis_gateway::{
-    gateway_bind, gateway_idle, gateway_serve, ServeConfig, ServeControl, GATEWAY, GATEWAY_SERVE,
-    PROTOCOL_VERSION,
+    devices, gateway_bind, gateway_idle, gateway_remote, gateway_serve, ServeConfig, ServeControl,
+    GATEWAY, GATEWAY_SERVE, PROTOCOL_VERSION,
 };
 use cordis_spine::{
     agent_loop, agent_presets, install_fakes, mcp_client, permissions, plan_mode, settings, slash,
@@ -197,11 +197,16 @@ impl Harness {
     }
 
     async fn boot_on(root: Context) -> Self {
-        root.plugin(gateway_bind("127.0.0.1:0"), ())
-            .unwrap()
-            .wait()
-            .await
-            .unwrap();
+        Self::boot_with(root, gateway_bind("127.0.0.1:0")).await
+    }
+
+    /// 远程模式（`dock serve --remote`）的网关。
+    async fn boot_remote() -> Self {
+        Self::boot_with(harness_root().await, gateway_remote("127.0.0.1:0")).await
+    }
+
+    async fn boot_with(root: Context, gateway: cordis::Plugin) -> Self {
+        root.plugin(gateway, ()).unwrap().wait().await.unwrap();
         let addr = root
             .require::<cordis_tui::GatewayRef>(GATEWAY)
             .unwrap()
@@ -310,21 +315,42 @@ impl Rpc {
 
     /// 以 `origin` 握手并用 `ticket` 鉴权，回鉴权那一帧（不断言成败）。
     async fn connect_as(addr: SocketAddr, ticket: &str, origin: &str) -> (Self, Value) {
+        let mut rpc = Self::open(addr, origin).await;
+        let auth = rpc
+            .call("connection/authenticate", json!({ "ticket": ticket }))
+            .await;
+        (rpc, auth)
+    }
+
+    /// 只握手、不鉴权。
+    async fn open(addr: SocketAddr, origin: &str) -> Self {
         let url = format!("ws://{addr}/api/ws");
         let mut req = url.into_client_request().unwrap();
         req.headers_mut()
             .insert(ORIGIN_HEADER, origin.parse().unwrap());
         let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
         let (write, read) = ws.split();
-        let mut rpc = Self {
+        Self {
             write,
             read,
             next_id: 1,
-        };
-        let auth = rpc
-            .call("connection/authenticate", json!({ "ticket": ticket }))
-            .await;
-        (rpc, auth)
+        }
+    }
+
+    /// 等服务端关连接，回关闭码（没带关闭帧就断了回 `None`）。
+    async fn wait_closed(&mut self, deadline: Duration) -> Option<u16> {
+        let start = tokio::time::Instant::now();
+        loop {
+            let left = deadline.saturating_sub(start.elapsed());
+            let msg = tokio::time::timeout(left, self.read.next())
+                .await
+                .expect("server did not close the connection in time");
+            match msg {
+                Some(Ok(Message::Close(frame))) => return frame.map(|f| u16::from(f.code)),
+                Some(Ok(_)) => continue,
+                Some(Err(_)) | None => return None,
+            }
+        }
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Value {
@@ -2087,4 +2113,95 @@ async fn browser_view_streams_the_agents_tab() {
         .await;
     assert_eq!(ended["params"]["reason"], "no_tab", "{ended}");
     hub.shutdown().await;
+}
+
+/// 远程模式：配对 HTTP 不挂；ticket 不认；设备令牌能进，`initialize` 报 `device:<名字>`；
+/// 撤销后几秒内连接被服务端关掉（4401）。
+#[tokio::test]
+async fn remote_gateway_accepts_only_device_tokens_and_drops_revoked() {
+    let h = Harness::boot_remote().await;
+    let pairing = h
+        .post("/v1/pairing/requests", json!({ "application": APP }))
+        .await;
+    assert_eq!(pairing.status(), 404, "远程模式没有配对入口");
+    let tickets = h.post("/v1/connection/tickets", json!({})).await;
+    assert_eq!(tickets.status(), 404);
+
+    let mut stranger = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    let refused = stranger
+        .call("connection/authenticate", json!({ "ticket": "whatever" }))
+        .await;
+    assert_eq!(
+        refused["error"]["details"]["code"], "unauthenticated",
+        "{refused}"
+    );
+    assert!(refused.to_string().contains("设备令牌"), "{refused}");
+
+    let (device, token) = devices::add("remote-test-laptop").unwrap();
+    // 设备令牌不绑 Origin：换一个页面来源照样能进。
+    let mut rpc = Rpc::open(h.addr, "https://dock.example.com").await;
+    let auth = rpc
+        .call("connection/authenticate", json!({ "token": token }))
+        .await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["connection"]["application"], "device:remote-test-laptop",
+        "{init}"
+    );
+    assert_eq!(
+        init["result"]["connection"]["origin"],
+        "https://dock.example.com"
+    );
+    let listed = rpc.call("thread/list", json!({})).await;
+    assert!(listed.get("result").is_some(), "{listed}");
+
+    devices::revoke(&device.id).unwrap();
+    let code = rpc.wait_closed(Duration::from_secs(8)).await;
+    assert_eq!(code, Some(4401), "撤销后断开");
+    let mut again = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    let denied = again
+        .call("connection/authenticate", json!({ "token": token }))
+        .await;
+    assert_eq!(
+        denied["error"]["details"]["code"], "unauthenticated",
+        "{denied}"
+    );
+}
+
+/// 同一条连接鉴权失败 5 次就被断开（4429）。
+#[tokio::test]
+async fn repeated_failed_authentication_closes_the_connection() {
+    let h = Harness::boot_remote().await;
+    let mut rpc = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    for _ in 0..4 {
+        let bad = rpc
+            .call("connection/authenticate", json!({ "token": "dock_wrong" }))
+            .await;
+        assert_eq!(bad["error"]["details"]["code"], "unauthenticated", "{bad}");
+    }
+    rpc.write
+        .send(Message::Text(
+            json!({ "id": 99, "method": "connection/authenticate", "params": { "token": "dock_wrong" } })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rpc.wait_closed(Duration::from_secs(5)).await, Some(4429));
+}
+
+/// 本机网关也认设备令牌（凭据就是凭据）；本机的 ticket 配对照旧。
+#[tokio::test]
+async fn local_gateway_also_accepts_device_tokens() {
+    let h = Harness::boot().await;
+    let (_device, token) = devices::add("local-test-device").unwrap();
+    let mut rpc = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    let auth = rpc
+        .call("connection/authenticate", json!({ "token": token }))
+        .await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let ticket = h.pair_ticket().await;
+    let _ = Rpc::connect(h.addr, &ticket).await;
+    devices::revoke("local-test-device").unwrap();
 }

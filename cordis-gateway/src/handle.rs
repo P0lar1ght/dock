@@ -40,6 +40,8 @@ pub struct GatewayInner {
     /// 开页（`thread/open` 与按需开页）一次一个：同一个会话同时来两个请求时，
     /// 第二个等第一个开完直接用那一页，不会开出两页。
     opening: tokio::sync::Mutex<()>,
+    /// 远程模式（`dock serve --remote`）：只认设备令牌，不开配对 HTTP，端口不顺延。
+    remote: bool,
 }
 
 #[derive(Clone)]
@@ -52,6 +54,16 @@ pub struct GatewayHandle {
 
 impl GatewayHandle {
     pub fn idle(ctx: Context, preferred: SocketAddr) -> Self {
+        Self::build(ctx, preferred, false)
+    }
+
+    /// 远程模式的网关：仍只绑回环（TLS 与对外暴露交给反向代理 / Tailscale），
+    /// 鉴权只认设备令牌（[`crate::devices`]），不挂配对与 ticket 的 HTTP 路由。
+    pub fn idle_remote(ctx: Context, preferred: SocketAddr) -> Self {
+        Self::build(ctx, preferred, true)
+    }
+
+    fn build(ctx: Context, preferred: SocketAddr, remote: bool) -> Self {
         let inner = Arc::new(GatewayInner {
             pairing: Mutex::new(PairingStore::new(ctx.clone())),
             transcripts: Mutex::new(HashMap::new()),
@@ -65,6 +77,7 @@ impl GatewayHandle {
                 shutdown_tx: None,
             }),
             opening: tokio::sync::Mutex::new(()),
+            remote,
             ctx: ctx.clone(),
         });
         listen_events(&inner);
@@ -92,13 +105,23 @@ impl GatewayHandle {
         self.slot().listening
     }
 
+    pub fn is_remote(&self) -> bool {
+        self.inner.remote
+    }
+
     pub fn start_listen(&self) -> Result<SocketAddr, PairingError> {
         let mut g = self.slot();
         if g.listening {
             return Ok(g.local_addr);
         }
         let preferred = self.inner.preferred;
-        let (listener, actual) = match crate::bind::listen(&preferred.to_string()) {
+        // 远程模式前面挂着反向代理，端口得是配好的那个：占用了就报错，不顺延。
+        let bound = if self.inner.remote {
+            crate::bind::listen_exact(&preferred.to_string())
+        } else {
+            crate::bind::listen(&preferred.to_string())
+        };
+        let (listener, actual) = match bound {
             Ok(ok) => ok,
             Err(msg) => {
                 g.companion = CompanionStatus::Failed {
@@ -111,7 +134,12 @@ impl GatewayHandle {
         if preferred.port() != 0 && actual.port() != preferred.port() {
             eprintln!("dock gateway: {} 已被占用，改绑 {}", preferred, actual);
         }
-        let companion = crate::bind::companion_listener(actual);
+        let companion = if self.inner.remote {
+            // 反向代理连的是配好的那个地址，不另开 [::1]。
+            crate::bind::CompanionListener::stopped()
+        } else {
+            crate::bind::companion_listener(actual)
+        };
         if let CompanionStatus::Failed { addr, error } = &companion.status {
             eprintln!(
                 "dock gateway: 未能监听 {addr}（{error}）。本机 IPv6 / localhost 可能连不上。"

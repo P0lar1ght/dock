@@ -26,6 +26,16 @@
   - agent 换标签页画面跟着换；帧写出去才让 Chrome 发下一帧。
   - 本地、远程、网页端同一条路，不需要客户端碰 CDP 端口。
 
+### 新增（远程）
+
+- **`dock serve --remote`**：给别的机器上的 GUI / 浏览器 UI 连的常驻网关。
+  - 仍只绑回环（默认 `127.0.0.1:18990`，占用直接报错）；TLS 交给反向代理或 Tailscale。
+  - 只认设备令牌，不挂配对与 ticket 的 HTTP 路由；跑到 SIGTERM 为止。
+- **设备令牌** `dock device add|list|revoke`：盘上只存 sha256；撤销立刻生效并断开连接。
+  - 同一条连接鉴权失败 5 次断开。
+- SDK：`DockClient({ deviceToken, gatewayUrl: 'https://…' })`；令牌模式对非回环地址强制 https。
+- 部署说明：`docs/REMOTE.md`（Caddy / nginx / systemd / Tailscale）。
+
 ### 修复
 
 - MCP 工具的 `isError: true` 现在会把结果标成失败；以前只有正文以 `Error:` 开头才算。

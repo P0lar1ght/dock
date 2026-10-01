@@ -2,14 +2,16 @@
 
 use std::sync::Arc;
 
+use axum::extract::ws::CloseFrame;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
+use crate::devices::{self, Device};
 use crate::handle::GatewayHandle;
 use crate::handlers::browser_view::{self, BrowserViews};
 use crate::http::AppState;
@@ -38,6 +40,43 @@ pub(crate) enum Outgoing {
         text: String,
         written: oneshot::Sender<()>,
     },
+    /// 服务端主动断开（设备被撤销、鉴权失败太多次）。
+    Close {
+        code: u16,
+        reason: &'static str,
+    },
+}
+
+/// 同一条连接鉴权失败这么多次就断开（反向代理那头再做全局限速）。
+const MAX_FAILED_AUTH: u32 = 5;
+/// 连着的设备多久复查一次有没有被撤销。
+const DEVICE_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+/// 断开原因的 WebSocket 关闭码（4000–4999 留给应用）。
+const CLOSE_REVOKED: u16 = 4401;
+const CLOSE_TOO_MANY_ATTEMPTS: u16 = 4429;
+
+/// 这条连接凭什么进来的。
+enum Auth {
+    /// 本机配对 / `dock serve` 父进程给的一次性 ticket，绑 Origin。
+    Ticket(IssuedTicket),
+    /// 设备令牌（远程客户端），不绑 Origin。
+    Device(Device),
+}
+
+impl Auth {
+    fn application(&self) -> String {
+        match self {
+            Self::Ticket(t) => t.application.clone(),
+            Self::Device(d) => format!("device:{}", d.name),
+        }
+    }
+
+    fn origin(&self, connection_origin: &str) -> String {
+        match self {
+            Self::Ticket(t) => t.origin.clone(),
+            Self::Device(_) => connection_origin.to_string(),
+        }
+    }
 }
 
 pub(crate) type OutTx = mpsc::UnboundedSender<Outgoing>;
@@ -45,7 +84,10 @@ pub(crate) type OutTx = mpsc::UnboundedSender<Outgoing>;
 struct Conn {
     gateway: GatewayHandle,
     origin: String,
-    auth: Option<IssuedTicket>,
+    auth: Option<Auth>,
+    failed_auth: u32,
+    /// 置上就断开这条连接（`handle_socket` 盯着它）。
+    kick: watch::Sender<Option<(u16, &'static str)>>,
     initialized: bool,
     connection_lease_id: Option<String>,
     /// 分页身份 → 这条连接订阅时用的 `threadId`。
@@ -57,10 +99,13 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Outgoing>();
     // 连接级：断开时随它一起丢掉，推送任务全部中止。
     let views = Arc::new(BrowserViews::default());
+    let (kick, mut kicked) = watch::channel(None);
     let conn = Arc::new(Mutex::new(Conn {
         gateway: gateway.clone(),
         origin,
         auth: None,
+        failed_auth: 0,
+        kick,
         initialized: false,
         connection_lease_id: None,
         subscribed: Default::default(),
@@ -71,6 +116,14 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
             let (text, written) = match msg {
                 Outgoing::Text(text) => (text, None),
                 Outgoing::Frame { text, written } => (text, Some(written)),
+                Outgoing::Close { code, reason } => {
+                    let frame = CloseFrame {
+                        code,
+                        reason: reason.into(),
+                    };
+                    let _ = sink.send(Message::Close(Some(frame))).await;
+                    break;
+                }
             };
             if sink.send(Message::Text(text.into())).await.is_err() {
                 break;
@@ -108,7 +161,19 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
         })
     };
 
-    while let Some(Ok(msg)) = stream.next().await {
+    loop {
+        let msg = tokio::select! {
+            msg = stream.next() => msg,
+            _ = kicked.changed() => {
+                if let Some((code, reason)) = *kicked.borrow() {
+                    let _ = out_tx.send(Outgoing::Close { code, reason });
+                }
+                break;
+            }
+        };
+        let Some(Ok(msg)) = msg else {
+            break;
+        };
         let Message::Text(text) = msg else {
             continue;
         };
@@ -205,13 +270,7 @@ async fn dispatch_text(conn: &Arc<Mutex<Conn>>, text: &str) -> Option<String> {
 
 async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result<Value, RpcError> {
     if method == protocol::CONNECTION_AUTHENTICATE {
-        let ticket = params.get("ticket").and_then(Value::as_str).unwrap_or("");
-        let auth = conn
-            .gateway
-            .authenticate(ticket, &conn.origin)
-            .map_err(|e| RpcError::app(e.code, e.message))?;
-        conn.auth = Some(auth);
-        return Ok(json!({ "ok": true }));
+        return authenticate(conn, &params);
     }
     if conn.auth.is_none() {
         return Err(RpcError::app(
@@ -221,6 +280,7 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
     }
     if method == protocol::INITIALIZE {
         let auth = conn.auth.as_ref().unwrap();
+        let (application, origin) = (auth.application(), auth.origin(&conn.origin));
         conn.initialized = true;
         let lease = uuid::Uuid::new_v4().to_string();
         conn.connection_lease_id = Some(lease.clone());
@@ -233,8 +293,8 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
             "protocolVersion": protocol::PROTOCOL_VERSION,
             "capabilities": protocol::capabilities_object(),
             "connection": {
-                "application": auth.application,
-                "origin": auth.origin,
+                "application": application,
+                "origin": origin,
                 "defaultWorkspaceId": protocol::DEFAULT_WORKSPACE_ID,
                 "connectionLeaseId": lease,
                 "listen": conn.gateway.listen_addr().to_string(),
@@ -261,6 +321,66 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
         ));
     }
     rpc::dispatch(conn.gateway.clone(), method, params, &mut conn.subscribed).await
+}
+
+/// `connection/authenticate { token }`（设备令牌）或 `{ ticket }`（本机配对 / `dock serve`）。
+/// 远程网关只认前者。失败太多次断开连接。
+fn authenticate(conn: &mut Conn, params: &Value) -> Result<Value, RpcError> {
+    let token = params.get("token").and_then(Value::as_str);
+    let result = match token {
+        Some(token) => devices::verify(token)
+            .map(Auth::Device)
+            .ok_or_else(|| RpcError::app("unauthenticated", "设备令牌无效或已撤销")),
+        None if conn.gateway.is_remote() => Err(RpcError::app(
+            "unauthenticated",
+            "远程网关只认设备令牌：connection/authenticate { token }",
+        )),
+        None => {
+            let ticket = params.get("ticket").and_then(Value::as_str).unwrap_or("");
+            conn.gateway
+                .authenticate(ticket, &conn.origin)
+                .map(Auth::Ticket)
+                .map_err(|e| RpcError::app(e.code, e.message))
+        }
+    };
+    match result {
+        Ok(auth) => {
+            if let Auth::Device(device) = &auth {
+                if conn.gateway.is_remote() {
+                    eprintln!("dock gateway: 设备「{}」已连接", device.name);
+                }
+                watch_device(device.id.clone(), conn.kick.clone());
+            }
+            conn.auth = Some(auth);
+            conn.failed_auth = 0;
+            Ok(json!({ "ok": true }))
+        }
+        Err(err) => {
+            conn.failed_auth += 1;
+            if conn.failed_auth >= MAX_FAILED_AUTH {
+                let _ = conn
+                    .kick
+                    .send(Some((CLOSE_TOO_MANY_ATTEMPTS, "too many failed attempts")));
+            }
+            Err(err)
+        }
+    }
+}
+
+/// 设备被撤销就断开它的连接。连接没了（watch 的接收端丢了）任务自己结束。
+fn watch_device(id: String, kick: watch::Sender<Option<(u16, &'static str)>>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(DEVICE_RECHECK).await;
+            if kick.is_closed() {
+                return;
+            }
+            if !devices::is_active(&id) {
+                let _ = kick.send(Some((CLOSE_REVOKED, "device revoked")));
+                return;
+            }
+        }
+    });
 }
 
 fn rpc_error_frame(id: Option<Value>, err: RpcError) -> String {

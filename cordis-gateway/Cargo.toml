@@ -10,6 +10,7 @@ license = "Apache-2.0"
 base64 = "0.22"
 axum = { version = "0.8", features = ["ws", "json"] }
 cordis = { path = "../cordis-rust" }
+cordis-base = { path = "../cordis-base" }
 cordis-browser = { path = "../cordis-browser" }
 cordis-spine = { path = "../cordis-spine" }
 cordis-tui = { path = "../cordis-tui" }
@@ -23,6 +24,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net",
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+tempfile = "3"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect"] }

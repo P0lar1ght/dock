@@ -57,9 +57,25 @@ pub fn listen(raw: &str) -> Result<(TcpListener, SocketAddr), String> {
     }
 }
 
+/// 只绑 `raw` 这一个地址，占用就报错（远程模式：反向代理只认配好的端口）。
+pub fn listen_exact(raw: &str) -> Result<(TcpListener, SocketAddr), String> {
+    let addr = parse_bind(raw)?;
+    bind_loopback(addr).map_err(|e| format!("bind {addr}: {e}"))
+}
+
 pub struct CompanionListener {
     pub status: CompanionStatus,
     pub listener: Option<TcpListener>,
+}
+
+impl CompanionListener {
+    /// 不开另一族回环。
+    pub fn stopped() -> Self {
+        Self {
+            status: CompanionStatus::Stopped,
+            listener: None,
+        }
+    }
 }
 
 /// The other loopback family on the same port (`127.0.0.1` ↔ `::1`).
@@ -160,6 +176,16 @@ mod tests {
             }
             CompanionStatus::Stopped => panic!("companion should report failure, not stopped"),
         }
+    }
+
+    #[test]
+    fn listen_exact_does_not_walk_and_stays_loopback() {
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = held.local_addr().unwrap();
+        assert!(listen_exact(&busy.to_string()).is_err(), "占用就报错");
+        assert!(listen_exact("0.0.0.0:0").is_err(), "远程模式也只绑回环");
+        let (_l, addr) = listen_exact("127.0.0.1:0").unwrap();
+        assert!(addr.ip().is_loopback());
     }
 
     #[test]
