@@ -177,6 +177,14 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 地址栏：没写协议补 `https://`；只放行 http / https / about / data / file（`javascript:` 拒）。
 - 这四个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
 
+### 工具结果里的图（能力 `toolImages`）
+
+- `item/tool_completed` 带 `attachments`：每张图 `{ type, index, mimeType, width, height, byteLength }`。
+- 只给元数据；`index` 是在这次工具结果里的位置（空图不投影、不占号）。
+- 像素：`item/image { threadId, itemId, index? }` → `{ mimeType, width, height, data }`（base64）。
+- 开着的会话读内存，关着的读落盘（和 `thread/history` 同一套查找）；找不到回 `not_found`。
+- 典型来源：cua-driver 的 `get_window_state` 截图；GUI 的 CUA 面板和工具卡用它。
+
 ### 工作区文件（能力 `workspaceFiles`，`handlers/fs.rs`）
 
 只读看会话 cwd 里的文件（GUI 的文件面板）。路径都相对会话 cwd，用 `/` 分隔。

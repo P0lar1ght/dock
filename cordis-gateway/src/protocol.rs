@@ -30,6 +30,8 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("browserView", true),
     // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
     ("workspaceFiles", true),
+    // `item/tool_completed.attachments` + `item/image`：工具结果里的截图等。
+    ("toolImages", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -62,6 +64,8 @@ pub const THREAD_ARCHIVE: &str = "thread/archive";
 pub const THREAD_RESTORE: &str = "thread/restore";
 pub const THREAD_DELETE: &str = "thread/delete";
 pub const THREAD_HISTORY: &str = "thread/history";
+/// 一条工具结果里的一张图的像素（`item/tool_completed` 的 `attachments` 只带元数据）。
+pub const ITEM_IMAGE: &str = "item/image";
 pub const THREAD_SUBSCRIBE: &str = "thread/subscribe";
 pub const THREAD_UNSUBSCRIBE: &str = "thread/unsubscribe";
 pub const THREAD_ENVIRONMENT_GET: &str = "thread/environment/get";

@@ -28,6 +28,9 @@
 - **网关工作区文件** `fs/list` / `fs/read` / `fs/find`（能力 `workspaceFiles`）：只读，给文件面板。
   - 路径相对会话 cwd，出了目录就拒；照 `.gitignore`，默认不列点文件。
   - 文本截在字符边界；常见图片回 base64；其它二进制只给大小。
+- **工具结果里的图进 dock.1**（能力 `toolImages`）：`item/tool_completed.attachments` + `item/image`。
+  - 以前网关把工具截图丢了，客户端看不到 agent 看到的画面（cua-driver 截图）。
+  - dock-core 的工具项多了 `images`。
 
 ### 新增（远程）
 

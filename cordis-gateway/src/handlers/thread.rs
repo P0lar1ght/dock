@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
+use base64::Engine;
+use cordis_spine::LogEvent;
 use serde_json::{json, Value};
 
 use cordis_spine::{
@@ -387,6 +389,50 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         "messages": messages,
         "events": events
     }))
+}
+
+/// `item/image { threadId, itemId, index? }`：一条工具结果里第 `index` 张图的像素
+/// （base64）。开着的页读内存，关着的读落盘（和 `thread/history` 同一套查找）。
+pub fn item_image(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let id = threads::thread_param(&params);
+    let item = text(&params, "itemId")?;
+    let index = params.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let events = match threads::resolve(gateway, &id) {
+        Ok(page) => page.sessions()?.events(),
+        Err(_) => closed_events(gateway, &id)?,
+    };
+    let image = events
+        .iter()
+        .find_map(|e| match e {
+            LogEvent::ToolExecute { id, images, .. } if *id == item => images.get(index).cloned(),
+            _ => None,
+        })
+        .filter(|img| !img.data.is_empty())
+        .ok_or_else(|| RpcError::app("not_found", format!("没有这张图：{item} #{index}")))?;
+    Ok(json!({
+        "itemId": item,
+        "index": index,
+        "mimeType": image.mime,
+        "width": image.width,
+        "height": image.height,
+        "data": base64::engine::general_purpose::STANDARD.encode(&image.data),
+    }))
+}
+
+/// 关着的会话的落盘事件：本目录的归档，或跨目录名册里的。
+fn closed_events(gateway: &GatewayHandle, id: &str) -> Result<Vec<LogEvent>, RpcError> {
+    let sessions = live_sessions(gateway)?;
+    if let Some(item) = sessions.archived().into_iter().find(|s| s.id == id) {
+        return Ok(item.events);
+    }
+    let entry = roster_entries(gateway)
+        .into_iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
+    Ok(fresh_roster(gateway)
+        .session(&entry.id, &entry.cwd)
+        .map(|item| item.events)
+        .unwrap_or_default())
 }
 
 /// 关着的会话：落盘事件按真实时间回放成和开着的页同一种 `events`，客户端只要
