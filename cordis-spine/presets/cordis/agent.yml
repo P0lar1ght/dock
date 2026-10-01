@@ -30,6 +30,10 @@ tools:
   - exit_plan_mode
   - ask_user_question
   - todo_write
+  - canvas_create
+  - canvas_edit
+  - canvas_data
+  - canvas_read
   - web_fetch
   - web_search
   - lsp

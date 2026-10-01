@@ -2380,3 +2380,108 @@ async fn tool_images_are_listed_and_fetched_by_item() {
         .await;
     assert_eq!(from_disk["result"]["data"], want, "{from_disk}");
 }
+
+/// 画布：模型工具写进会话目录的 `canvas/<id>/`，`canvas/*` 列 / 读版本 / 改数据 / 回滚；
+/// 会话归档（关掉）之后从名册找到目录，照样读得到。
+#[tokio::test]
+async fn canvas_methods_read_the_sessions_canvases() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["canvas"], true, "{init}");
+
+    // 不落盘的会话、还没落过盘的新会话：空列表，不替它建目录。
+    let empty = rpc.call("canvas/list", json!({ "threadId": "live" })).await;
+    assert_eq!(empty["result"]["canvases"], json!([]), "{empty}");
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.attach_disk();
+    let empty = rpc.call("canvas/list", json!({ "threadId": "live" })).await;
+    assert_eq!(empty["result"]["canvases"], json!([]), "{empty}");
+
+    sessions.append(LogEvent::User("画个图".into()));
+    let dir = sessions.disk_session_dir().expect("disk-backed session");
+    cordis_base::canvas::create(&dir, "销售", "<h1>A</h1>", Some(&json!({ "n": 1 }))).unwrap();
+    cordis_base::canvas::edit(
+        &dir,
+        "canvas-1",
+        cordis_base::canvas::Edit::Rewrite { html: "<h1>B</h1>" },
+        "换标题",
+        None,
+    )
+    .unwrap();
+
+    let list = rpc.call("canvas/list", json!({ "threadId": "live" })).await;
+    let first = &list["result"]["canvases"][0];
+    assert_eq!(first["id"], "canvas-1", "{list}");
+    assert_eq!(first["latest"], 2);
+    assert_eq!(first["versions"][1]["note"], "换标题");
+
+    let got = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": "live", "canvasId": "canvas-1" }),
+        )
+        .await;
+    assert_eq!(got["result"]["html"], "<h1>B</h1>", "{got}");
+    assert_eq!(got["result"]["data"], json!({ "n": 1 }));
+    let v1 = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": "live", "canvasId": "canvas-1", "version": 1 }),
+        )
+        .await;
+    assert_eq!(v1["result"]["html"], "<h1>A</h1>", "{v1}");
+
+    let set = rpc
+        .call(
+            "canvas/setData",
+            json!({ "threadId": "live", "canvasId": "canvas-1", "data": [1, 2] }),
+        )
+        .await;
+    assert_eq!(
+        set["result"]["canvas"]["latest"], 2,
+        "改数据不出新版：{set}"
+    );
+    let back = rpc
+        .call(
+            "canvas/rollback",
+            json!({ "threadId": "live", "canvasId": "canvas-1", "version": 1 }),
+        )
+        .await;
+    assert_eq!(back["result"]["canvas"]["latest"], 3, "{back}");
+
+    let bad = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": "live", "canvasId": "../canvas-1" }),
+        )
+        .await;
+    assert_eq!(bad["error"]["details"]["code"], "invalid", "{bad}");
+    let missing = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": "live", "canvasId": "canvas-9" }),
+        )
+        .await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
+
+    let archived = rpc
+        .call("thread/archive", json!({ "threadId": "live" }))
+        .await;
+    let id = archived["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{archived}"))
+        .to_string();
+    let closed = rpc
+        .call(
+            "canvas/get",
+            json!({ "threadId": id, "canvasId": "canvas-1" }),
+        )
+        .await;
+    assert_eq!(closed["result"]["html"], "<h1>A</h1>", "{closed}");
+    assert_eq!(closed["result"]["data"], json!([1, 2]));
+}

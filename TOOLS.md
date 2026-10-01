@@ -45,6 +45,7 @@
 | `tool-browser` | `"browser"` | —（工具在内置 MCP `browser`，见下） | `/browser` 薄驾驶舱 | [browser](docs/tools/browser.md) |
 | `tool-computer` | `"computer"` | — | CUA C0 薄驾驶舱；桌面键鼠经 `cua-driver` MCP | [computer](docs/tools/computer.md) |
 | `tool-todo` | `"todos"` + `"tools"` | `todo_write` | Grok merge/replace + 两条续跑 / 提醒 waterfall | [todo](docs/tools/todo.md) |
+| `tool-canvas` | → `"tools"` | `canvas_create` `canvas_edit` `canvas_data` `canvas_read` | 模型写 HTML，桌面端在会话旁渲染；按版本落在会话目录 | [canvas](docs/tools/canvas.md) |
 | `plan-mode` | `"planMode"` + `"tools"` | `enter_plan_mode` `exit_plan_mode` | 计划文件按会话划分（见下）；计划态挡住 bash / 写文件等 | — |
 | `tool-ask-user` | `"ask"` + `"tools"` | `ask_user_question` | 事件 `ask/pending` | — |
 | `tool-scheduler` | → `"tools"`（live `"cron"`） | `scheduler_create` `scheduler_list` `scheduler_delete`（按需） | 包着已有 `"cron"`，`register_deferred`。`fire_immediately` 立刻跑第一次；循环 7 天后过期（过期不跑最后一次，滚动区留中文说明）；最多 50 条；`task_id` 原地更新并保持相位。滚动区 Loop 卡；`/tasks` 里 `x` / `[✗]` 关闭 | — |

@@ -25,6 +25,10 @@
   - CDP screencast 推 JPEG 帧；鼠标 / 滚轮 / 按键 / 文字转回页面；地址栏、前进后退刷新。
   - agent 换标签页画面跟着换；帧写出去才让 Chrome 发下一帧。
   - 本地、远程、网页端同一条路，不需要客户端碰 CDP 端口。
+- **画布**：模型写自包含 HTML，Dock 桌面端在会话旁的沙箱 iframe 里跑。
+  - 工具 `canvas_create` / `canvas_edit`（局部替换或整页重写，每次一版）/ `canvas_data`（只换数据）/ `canvas_read`。
+  - 落在会话目录 `canvas/<id>/`：`meta.json` + `v<n>.html` + `data.json`。
+  - 网关 `canvas/list` / `get` / `setData` / `rollback`（能力 `canvas`）。
 - **网关工作区文件** `fs/list` / `fs/read` / `fs/find`（能力 `workspaceFiles`）：只读，给文件面板。
   - 路径相对会话 cwd，出了目录就拒；照 `.gitignore`，默认不列点文件。
   - 文本截在字符边界；常见图片回 base64；其它二进制只给大小。

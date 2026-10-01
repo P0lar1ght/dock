@@ -205,6 +205,23 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 只认开着的会话（`thread_not_open`）；不占连接锁，读盘在阻塞线程里。
 - 没有写方法：改文件交给 agent（走权限门）。
 
+### 画布（能力 `canvas`，`handlers/canvas.rs`）
+
+模型用 `canvas_*` 工具写的 HTML（见 `docs/tools/canvas.md`），GUI 的画布面板读它。
+
+| 方法 | 作用 |
+|---|---|
+| `canvas/list { threadId? }` | 本会话的画布，最近改过的在前：`canvases[Meta]` |
+| `canvas/get { threadId?, canvasId, version? }` | 一版 HTML + 数据：`{ canvas, version, html, data, path }` |
+| `canvas/setData { threadId?, canvasId, data }` | 用户在画布里改的数据，不出新版 |
+| `canvas/rollback { threadId?, canvasId, version }` | 把那一版拷成新的最新版 |
+
+- `Meta`：`{ id, title, createdMs, updatedMs, dataUpdatedMs, latest, versions[{ n, note, createdMs, bytes }] }`。
+- 默认最新版；`data` 没有就是 `null`；`path` 是画布目录（本机才有意义）。
+- 关着的会话从名册找目录，历史会话的画布也读得到；还没落过盘的新会话回空列表。
+- `canvasId` 只认 `canvas-<n>`（`invalid`）；没有这个画布 / 这一版回 `not_found`。
+- 不推通知：客户端看 `canvas_*` 的工具项刷新。不占连接锁，读盘在阻塞线程里。
+
 ## 依赖注入
 
 `mount` 声明依赖：`SESSIONS`、`SESSION_PORT`、`PERMISSIONS`、`ASK`、`PLAN_MODE`、`MCP`、`TURN`、`SETTINGS`。这些是 named service，在 `apply` 时 live-lookup，**不要**在闭包里持有 `Arc`。

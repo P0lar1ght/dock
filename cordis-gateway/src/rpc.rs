@@ -4,7 +4,8 @@ use serde_json::Value;
 
 use crate::handle::GatewayHandle;
 use crate::handlers::{
-    connection, environment, fs, image_inputs, interaction, permission, preset, slash, thread, turn,
+    canvas, connection, environment, fs, image_inputs, interaction, permission, preset, slash,
+    thread, turn,
 };
 use crate::protocol::{self, RpcError};
 
@@ -36,7 +37,11 @@ pub async fn dispatch(
         | protocol::PRESET_SUGGEST_TOOLS
         | protocol::FS_LIST
         | protocol::FS_READ
-        | protocol::FS_FIND => dispatch_detached(gateway, method, params).await,
+        | protocol::FS_FIND
+        | protocol::CANVAS_LIST
+        | protocol::CANVAS_GET
+        | protocol::CANVAS_SET_DATA
+        | protocol::CANVAS_ROLLBACK => dispatch_detached(gateway, method, params).await,
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
@@ -109,7 +114,7 @@ fn opens_on_demand(method: &str) -> bool {
     )
 }
 
-/// 要调模型的方法（一次几秒）和读盘的 `fs/*`（大仓库里找文件要走很多目录）。`ws.rs` 不在
+/// 要调模型的方法（一次几秒）和读盘的 `fs/*` / `canvas/*`（大仓库里找文件要走很多目录）。`ws.rs` 不在
 /// 连接锁里跑它们（锁住会卡住这条连接的推送和其它请求），鉴权过了就另起任务，跑完再回帧。
 pub fn is_detached(method: &str) -> bool {
     matches!(
@@ -120,6 +125,10 @@ pub fn is_detached(method: &str) -> bool {
             | protocol::FS_LIST
             | protocol::FS_READ
             | protocol::FS_FIND
+            | protocol::CANVAS_LIST
+            | protocol::CANVAS_GET
+            | protocol::CANVAS_SET_DATA
+            | protocol::CANVAS_ROLLBACK
     )
 }
 
@@ -136,6 +145,10 @@ pub async fn dispatch_detached(
         protocol::FS_LIST | protocol::FS_READ | protocol::FS_FIND => {
             fs::dispatch(&gateway, method, params).await
         }
+        protocol::CANVAS_LIST
+        | protocol::CANVAS_GET
+        | protocol::CANVAS_SET_DATA
+        | protocol::CANVAS_ROLLBACK => canvas::dispatch(&gateway, method, params).await,
         _ => Err(RpcError::method_not_found(method)),
     }
 }

@@ -2,7 +2,7 @@
 # tools 省略 = 当前进程全部已注册工具；[] = 空；列表 = 允许名单（Dock `"tools"` 名）。
 # 子代理在 agents/<type>.yml，各自人设和工具集。
 name: 编码
-description: 工作区读写跑，加上计划、提问、后台任务、网页、LSP、委派
+description: 工作区读写跑，加上计划、提问、后台任务、网页、LSP、委派、画布
 order: 1
 persona: |
   你是编码助手，工作区是当前目录。可用工具、后台任务、联网、计划、委派与名册都在系统提示其余部分，不再重述。
@@ -22,6 +22,10 @@ tools:
   - exit_plan_mode
   - ask_user_question
   - todo_write
+  - canvas_create
+  - canvas_edit
+  - canvas_data
+  - canvas_read
   - web_fetch
   - web_search
   - lsp

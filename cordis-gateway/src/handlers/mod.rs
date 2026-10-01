@@ -1,4 +1,5 @@
 pub mod browser_view;
+pub mod canvas;
 pub mod connection;
 pub mod environment;
 pub mod fs;
