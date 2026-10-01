@@ -21,6 +21,12 @@
 
 ### 新增
 
+- **压缩进展**：压缩那几秒看得到它在干什么，不再像卡住。
+  - TUI 状态行：`正在压缩上下文 · 生成摘要 · 第 2/3 次（上次摘要过短）· 12s`，`↓` 是摘要已写的 token。
+  - 完成那行：`✓ 上下文已自动压缩 · 182K → 21K`（前后占用只在实时显示）。
+  - 网关：推送 `context/compacted`、完成标记 `item/compaction`、`context.lastCompaction`（能力 `compactionProgress`）。
+  - 「已压缩上下文。」与「自动压缩失败：…」不再作为助手消息推给客户端。
+  - embed-sdk：上下文浮层跟着 `context/compacted` 走——压缩中按钮显示「正在压缩」，完成显示前后占用，停止了也有说明。
 - **预设常驻工具** `resident_tools`：写全名或 `前缀*`（如 `mcp_browser__*`）。
   - 藏在 `search_tool` 后面的工具（MCP、按需、动态包）直接进模型工具表。
   - 网关 `preset/get|update` 多了 `residentTools`（不传 = 保持原样）；`tool/catalog {includeMcp:true}` 带 MCP 行。

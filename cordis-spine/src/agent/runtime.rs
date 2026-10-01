@@ -167,7 +167,10 @@ async fn grok_sample_loop(
                     }
                     Err(err) => {
                         sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
-                            text: format!("自动压缩失败：{err}"),
+                            text: format!(
+                                "{}{err}",
+                                cordis_base::types::AUTO_COMPACT_FAILED_PREFIX
+                            ),
                             ..cordis_base::types::LlmOutput::default()
                         }));
                     }

@@ -3,7 +3,15 @@
 //
 // 保真：工具的原始参数、完整输出都留着——脱敏、截断是展示层的事。
 
-import type { DockEvent, ImageAttachment, Question, ToolEndStatus, ToolImage, TurnEndStatus } from './events.ts';
+import type {
+  CompactionProgress,
+  DockEvent,
+  ImageAttachment,
+  Question,
+  ToolEndStatus,
+  ToolImage,
+  TurnEndStatus,
+} from './events.ts';
 import { parseHistoryItem } from './events.ts';
 
 export type TurnStatus = 'running' | TurnEndStatus;
@@ -48,7 +56,20 @@ export type TurnItem =
       empty: boolean;
       decision: 'approve' | 'revise' | 'quit' | 'cancelled' | null;
     }
-  | { kind: 'elicit'; id: string; server: string; message: string; heading: string; resolved: boolean };
+  | { kind: 'elicit'; id: string; server: string; message: string; heading: string; resolved: boolean }
+  /**
+   * 上下文在这里压缩过。谁发起的、前后占用、用时只有实时看着它压完才有
+   * （`context/compacted` 带来的）；回放历史时是 `null`。
+   */
+  | {
+      kind: 'compaction';
+      id: string;
+      at: number;
+      trigger: 'auto' | 'manual' | null;
+      beforeTokens: number | null;
+      afterTokens: number | null;
+      elapsedMs: number | null;
+    };
 
 export interface Turn {
   id: string;
@@ -64,9 +85,11 @@ export interface ThreadState {
   /** 已经吃进来的最大 `seq`；不大于它的事件视为重复，跳过。 */
   seq: number;
   turns: Turn[];
+  /** 正在进行（或最近一次）的压缩；没见过压缩是 `null`。 */
+  compaction: CompactionProgress | null;
 }
 
-export const EMPTY_THREAD: ThreadState = { seq: 0, turns: [] };
+export const EMPTY_THREAD: ThreadState = { seq: 0, turns: [], compaction: null };
 
 /** 从 `thread/history` 的 `events` 重建（开着、关着的会话同一条路）。 */
 export function replayHistory(events: readonly Record<string, unknown>[]): ThreadState {
@@ -86,7 +109,16 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
     const existing = state.turns.find((t) => t.id === event.turnId);
     if (existing) return { ...state, seq };
     const turn: Turn = { id: event.turnId, status: 'running', error: null, startedAt: event.at, endedAt: null, items: [] };
-    return { seq, turns: [...state.turns, turn] };
+    // 没压成 / 被停掉的压缩只交代到下一轮开始：用户已经往下走了。
+    const settled = state.compaction?.status === 'failed' || state.compaction?.status === 'cancelled';
+    return { ...state, seq, turns: [...state.turns, turn], compaction: settled ? null : state.compaction };
+  }
+
+  if (event.method === 'context/compacted') {
+    const progress = event.progress;
+    const next = { ...state, compaction: progress };
+    // 完成标记（`item/compaction`）先到，带前后占用的完成推送随后：补到最近那个标记上。
+    return progress.status === 'completed' ? withLastCompaction(next, progress) : next;
   }
 
   return withTurn({ ...state, seq }, event, (turn) => {
@@ -191,8 +223,47 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
         });
       case 'elicit/resolved':
         return update(turn, (i) => (i.kind === 'elicit' && i.id === event.elicitId ? { ...i, resolved: true } : i));
+
+      case 'item/compaction':
+        if (turn.items.some((i) => i.kind === 'compaction' && i.id === event.itemId)) return turn;
+        return push(turn, {
+          kind: 'compaction',
+          id: event.itemId,
+          at: event.at,
+          trigger: null,
+          beforeTokens: null,
+          afterTokens: null,
+          elapsedMs: null,
+        });
     }
   });
+}
+
+/**
+ * 最近那个压缩标记补上谁发起的、前后占用、用时。连着压两次、中间没别的事时 Dock
+ * 只留一个标记（不重复追加），这时它该显示的是最新那次，所以补过的也照样覆盖。
+ */
+function withLastCompaction(state: ThreadState, progress: CompactionProgress): ThreadState {
+  for (let t = state.turns.length - 1; t >= 0; t--) {
+    const turn = state.turns[t];
+    let i = turn.items.length - 1;
+    while (i >= 0 && turn.items[i].kind !== 'compaction') i--;
+    if (i < 0) continue;
+    const item = turn.items[i];
+    if (item.kind !== 'compaction') return state;
+    const items = [...turn.items];
+    items[i] = {
+      ...item,
+      trigger: progress.trigger,
+      beforeTokens: progress.beforeTokens,
+      afterTokens: progress.afterTokens,
+      elapsedMs: progress.elapsedMs,
+    };
+    const turns = [...state.turns];
+    turns[t] = { ...turn, items };
+    return { ...state, turns };
+  }
+  return state;
 }
 
 // ---- 查询 ----

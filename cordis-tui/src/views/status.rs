@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    snapshot_context, AppSettings, ContextBook, ContextSnapshot, LlmOutput, LogEvent, Sessions,
-    TokenUsage, CONTEXT, SESSIONS, SETTINGS,
+    snapshot_context, AppSettings, CompactProgress, ContextBook, ContextSnapshot, LlmOutput,
+    LogEvent, Sessions, TokenUsage, CONTEXT, SESSIONS, SETTINGS,
 };
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
@@ -433,16 +433,68 @@ pub fn format_duration_short(d: std::time::Duration) -> String {
 /// Show each braille spinner frame for this many shimmer ticks (~7.5fps at 30Hz).
 const SPINNER_DIVISOR: u64 = 4;
 
-/// Only while a turn is running or a permission prompt is open.
-/// Idle "就绪" is not a Grok chrome row — it sat on top of the user block.
+/// Only while a turn is running, a compaction is running, or a permission
+/// prompt is open. Idle "就绪" is not a Grok chrome row — it sat on top of the
+/// user block.
 pub fn turn_status_height(ctx: &Context, waiting_permission: bool) -> u16 {
     if waiting_permission {
         return 1;
     }
     u16::from(
         ctx.get::<SessionRef>(SESSION_PORT)
-            .is_some_and(|h| h.working()),
+            .is_some_and(|h| h.working())
+            || running_compaction(ctx).is_some(),
     )
+}
+
+/// 正在跑的压缩（自动或 `/compact`）。
+fn running_compaction(ctx: &Context) -> Option<CompactProgress> {
+    ctx.get::<Sessions>(SESSIONS)
+        .and_then(|s| s.compaction())
+        .filter(CompactProgress::running)
+}
+
+/// 状态行开头那几个字。光扫过的就是它。
+const COMPACTING: &str = "正在压缩上下文";
+
+/// 压缩中的状态行文字：`正在压缩上下文 · 生成摘要 · 第 2/3 次（上次摘要过短）· 12s`。
+fn compaction_label(p: &CompactProgress) -> String {
+    let mut label = format!("{COMPACTING} · {}", p.phase.label());
+    if p.attempt > 1 {
+        label.push_str(&format!(" · 第 {}/{} 次", p.attempt, p.max_attempts));
+        if let Some(reason) = &p.retry_reason {
+            label.push_str(&format!("（上次{reason}）"));
+        }
+    }
+    label.push_str(&format!(" · {}", format_duration_short(p.elapsed())));
+    label
+}
+
+/// `label` 开头的 [`COMPACTING`] 走一道光（和运行中卡片头同一个 [`shine_at`]），
+/// 其余照 `style` 画。状态行每帧都重画，不进布局缓存，颜色可以现算。
+///
+/// [`shine_at`]: crate::scrollback::live::shine_at
+fn shining_label(label: String, style: Style, accent: ratatui::style::Color) -> Vec<Span<'static>> {
+    let Some(rest) = label.strip_prefix(COMPACTING) else {
+        return vec![Span::styled(label, style)];
+    };
+    let tick = crate::grok::color::shimmer_tick();
+    let width = COMPACTING.width();
+    let mut col = 0usize;
+    let mut spans: Vec<Span<'static>> = COMPACTING
+        .chars()
+        .map(|c| {
+            let heat = crate::scrollback::live::shine_at(col, width, tick);
+            col += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            let fg = style
+                .fg
+                .and_then(|fg| crate::grok::color::blend_color(fg, accent, heat))
+                .unwrap_or(accent);
+            Span::styled(c.to_string(), style.fg(fg))
+        })
+        .collect();
+    spans.push(Span::styled(rest.to_string(), style));
+    spans
 }
 
 /// Grok turn-status row: `⠧ Waiting…` … `↓15.7k [stop]`.
@@ -462,14 +514,21 @@ pub fn render_turn_status(buf: &mut Buffer, area: Rect, ctx: &Context, waiting_p
     let working = ctx
         .get::<SessionRef>(SESSION_PORT)
         .is_some_and(|h| h.working());
-    if !waiting_permission && !working {
+    let compaction = running_compaction(ctx);
+    if !waiting_permission && !working && compaction.is_none() {
         return;
     }
     let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
         return;
     };
-    let (label, label_style) =
-        sessions.with_log(|events, _| turn_activity_label(events, waiting_permission, &theme));
+    // 压缩那几秒没有流式输出、事件也不动：不单独说一声，看着就是卡住了。
+    let (label, label_style) = match (&compaction, waiting_permission) {
+        (Some(p), false) => (
+            compaction_label(p),
+            Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+        ),
+        _ => sessions.with_log(|events, _| turn_activity_label(events, waiting_permission, &theme)),
+    };
     let queued = ctx
         .get::<SessionRef>(SESSION_PORT)
         .map(|s| s.queued_prompts().len())
@@ -494,9 +553,13 @@ pub fn render_turn_status(buf: &mut Buffer, area: Rect, ctx: &Context, waiting_p
         label_style
     };
 
-    let usage = sessions.usage();
+    // 压缩时右边的 ↓ 是摘要已经写出来的 token。
+    let output = match &compaction {
+        Some(p) => p.output_tokens,
+        None => sessions.usage().completion,
+    };
     let down = crate::grok::glyphs::token_down();
-    let tokens = format!("{down}{}", format_tokens(usage.completion));
+    let tokens = format!("{down}{}", format_tokens(output));
     let stop = "[stop]";
     let right_w = tokens.width() + 1 + stop.width();
     let budget = area.width as usize;
@@ -516,12 +579,14 @@ pub fn render_turn_status(buf: &mut Buffer, area: Rect, ctx: &Context, waiting_p
         left_w = spin.width() + label.width();
     }
     if left_w > right_budget {
-        label = short_activity_label(waiting_permission);
+        label = if compaction.is_some() && !waiting_permission {
+            COMPACTING.to_string()
+        } else {
+            short_activity_label(waiting_permission)
+        };
     }
-    let mut left_spans = vec![
-        Span::styled(spin, spinner_style),
-        Span::styled(label, label_style),
-    ];
+    let mut left_spans = vec![Span::styled(spin, spinner_style)];
+    left_spans.extend(shining_label(label, label_style, theme.accent_running));
     if !hint.is_empty() {
         left_spans.push(Span::styled(hint, base));
     }
@@ -604,6 +669,54 @@ fn pending_tool_name(events: &[LogEvent], out: &LlmOutput) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn progress(attempt: u32, retry: Option<&str>) -> CompactProgress {
+        CompactProgress {
+            trigger: cordis_spine::CompactTrigger::Auto,
+            status: cordis_spine::CompactStatus::Running,
+            phase: cordis_spine::CompactPhase::Summary,
+            attempt,
+            max_attempts: 3,
+            retry_reason: retry.map(str::to_string),
+            output_tokens: 1_400,
+            before_tokens: 180_000,
+            after_tokens: None,
+            started: Instant::now(),
+            finished: Some(Duration::from_secs(12)),
+        }
+    }
+
+    /// 压缩那几秒状态行要说清在干什么：阶段、重试到第几次和上次为什么没成、耗时。
+    #[test]
+    fn compaction_label_says_phase_retry_and_elapsed() {
+        assert_eq!(
+            compaction_label(&progress(1, None)),
+            "正在压缩上下文 · 生成摘要 · 12s"
+        );
+        assert_eq!(
+            compaction_label(&progress(2, Some("摘要过短"))),
+            "正在压缩上下文 · 生成摘要 · 第 2/3 次（上次摘要过短） · 12s"
+        );
+    }
+
+    /// 光只扫「正在压缩上下文」几个字，文字本身不变；别的状态文字原样一段。
+    #[test]
+    fn only_the_compacting_title_shines() {
+        let theme = Theme::current();
+        let style = Style::default().fg(theme.text_secondary);
+        let spans = shining_label(
+            "正在压缩上下文 · 生成摘要".into(),
+            style,
+            theme.accent_running,
+        );
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "正在压缩上下文 · 生成摘要");
+        assert_eq!(spans.len(), COMPACTING.chars().count() + 1);
+        assert_eq!(spans.last().unwrap().style, style, "后半句不跟着闪");
+
+        let plain = shining_label("生成中…".into(), style, theme.accent_running);
+        assert_eq!(plain.len(), 1);
+    }
 
     #[test]
     fn token_compact() {

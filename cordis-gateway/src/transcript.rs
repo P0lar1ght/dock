@@ -7,8 +7,9 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use cordis_spine::{
-    Ask, ElicitPrompt, LogEvent, PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt,
-    PlanDecision, Sessions, TurnEndStatus, UserImage, INTERRUPTED_TOOL_RESULT,
+    Ask, CompactProgress, CompactStatus, ElicitPrompt, LogEvent, PermissionOptionKind,
+    PermissionPrompt, PlanApprovalPrompt, PlanDecision, Sessions, TurnEndStatus, UserImage,
+    AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
     PERMISSION_DENIED_TOOL_RESULT, ROOT_IDENTITY,
 };
 
@@ -221,6 +222,30 @@ impl Transcript {
                     payload["attachments"] = Value::Array(user_attachments.to_vec());
                 }
                 self.push("item/user_message", payload);
+            }
+            // 压缩完成那条通知不是助手说的话：投影成一个压缩标记。空闲时手动
+            // `/compact` 没有一轮包着它，就开一轮、马上收掉，不留一轮挂着「运行中」。
+            LogEvent::LlmStream(out) if is_compact_notice(&out) => {
+                let opened = !self.projector.turn_open;
+                if opened {
+                    self.ensure_turn();
+                }
+                self.projector.last_text.clear();
+                self.projector.last_reasoning.clear();
+                let item_id = format!("compaction-{}", self.projector.seq + 1);
+                self.push(
+                    "item/compaction",
+                    json!({ "itemId": item_id, "status": "completed" }),
+                );
+                if opened {
+                    self.complete_turn_if_open();
+                }
+            }
+            // 自动压缩失败的说明同理不是助手说的：失败由 `context/compacted` 推，
+            // 客户端画失败卡，这里不再重复一条消息。
+            LogEvent::LlmStream(out) if is_auto_compact_failure(&out) => {
+                self.projector.last_text.clear();
+                self.projector.last_reasoning.clear();
             }
             LogEvent::LlmStream(out) => {
                 if !self.projector.turn_open {
@@ -522,6 +547,26 @@ impl Transcript {
         }
     }
 
+    /// 压缩进展（`context/compacted`）。只推不记：不占序号（`seq` 为 0），
+    /// 不进 `thread/history`，中途接入的客户端从 `thread/environment/get` 的
+    /// `context.lastCompaction` 拿当前状态。
+    pub fn compaction(&mut self, progress: &CompactProgress) {
+        let mut payload = compaction_value(progress);
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("threadId".into(), json!(self.thread_id));
+            obj.insert("turnId".into(), json!(self.projector.turn_id));
+        }
+        let _ = self.tx.send(ProjectedEvent {
+            seq: 0,
+            method: "context/compacted".into(),
+            page: self.page.clone(),
+            thread_id: self.thread_id.clone(),
+            turn_id: self.projector.turn_id.clone(),
+            timestamp: iso_now(),
+            payload,
+        });
+    }
+
     fn ensure_turn(&mut self) {
         if self.projector.turn_open {
             return;
@@ -595,6 +640,40 @@ impl Default for Transcript {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn is_auto_compact_failure(out: &cordis_spine::LlmOutput) -> bool {
+    out.text.starts_with(AUTO_COMPACT_FAILED_PREFIX)
+        && out.tool_calls.is_empty()
+        && out.reasoning.is_empty()
+}
+
+fn is_compact_notice(out: &cordis_spine::LlmOutput) -> bool {
+    out.text == COMPACT_NOTICE && out.tool_calls.is_empty() && out.reasoning.is_empty()
+}
+
+/// 一次压缩的进展，`context/compacted` 推送与 `context.lastCompaction` 共用。
+pub(crate) fn compaction_value(p: &CompactProgress) -> Value {
+    let mut v = json!({
+        "status": p.status.as_str(),
+        "trigger": p.trigger.as_str(),
+        "phase": p.phase.as_str(),
+        "attempt": p.attempt,
+        "maxAttempts": p.max_attempts,
+        "outputTokens": p.output_tokens,
+        "beforeTokens": p.before_tokens,
+        "elapsedMs": p.elapsed().as_millis() as u64,
+    });
+    if let Some(reason) = &p.retry_reason {
+        v["retryReason"] = json!(reason);
+    }
+    if let Some(after) = p.after_tokens {
+        v["afterTokens"] = json!(after);
+    }
+    if let CompactStatus::Failed(error) = &p.status {
+        v["error"] = json!(error);
+    }
+    v
 }
 
 fn unix_ms(t: SystemTime) -> u128 {
@@ -813,6 +892,104 @@ mod tests {
         assert_eq!(questions[1]["multiSelect"], false);
         ask.cancel();
         asked.await.unwrap();
+    }
+
+    fn notice() -> LogEvent {
+        LogEvent::LlmStream(LlmOutput {
+            text: COMPACT_NOTICE.into(),
+            ..LlmOutput::default()
+        })
+    }
+
+    /// 压缩完成那条通知投影成 `item/compaction`，不是一条助手消息。轮中的
+    /// 自动压缩就落在这一轮里；空闲时手动 `/compact` 开一轮马上收掉，不留一轮挂着。
+    #[test]
+    fn compact_notice_becomes_a_compaction_item() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "working".into(),
+            ..LlmOutput::default()
+        }));
+        t.ingest_log(notice());
+        t.ingest_log(LogEvent::LlmStream(LlmOutput::default()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "done".into(),
+            ..LlmOutput::default()
+        }));
+        t.ingest_log(LogEvent::TurnEnd(TurnEndStatus::Completed));
+        assert_eq!(
+            methods(&t),
+            [
+                "turn/started",
+                "item/user_message",
+                "item/message_delta",
+                "item/compaction",
+                "item/message_delta",
+                "turn/completed",
+            ]
+        );
+        assert_eq!(deltas(&t), ["working", "done"]);
+
+        t.ingest_log(notice());
+        assert_eq!(
+            methods(&t)[6..],
+            ["turn/started", "item/compaction", "turn/completed"]
+        );
+    }
+
+    /// 自动压缩失败那条说明不是助手消息：失败卡由 `context/compacted` 画，
+    /// 不再多推一条一样意思的文字。之后模型照常说话，增量不受影响。
+    #[test]
+    fn auto_compact_failure_text_is_not_a_message() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: format!("{AUTO_COMPACT_FAILED_PREFIX}压缩失败：摘要过短。"),
+            ..LlmOutput::default()
+        }));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            text: "继续".into(),
+            ..LlmOutput::default()
+        }));
+        assert_eq!(deltas(&t), ["继续"]);
+    }
+
+    /// 压缩进展只推不记：不占序号、不进 `thread/history`。
+    #[test]
+    fn compaction_progress_is_pushed_but_not_recorded() {
+        let mut t = Transcript::new();
+        let mut rx = t.tx.subscribe();
+        t.ingest_log(LogEvent::User("hi".into()));
+        let before = t.latest_seq();
+        t.compaction(&CompactProgress {
+            trigger: cordis_spine::CompactTrigger::Auto,
+            status: CompactStatus::Running,
+            phase: cordis_spine::CompactPhase::Summary,
+            attempt: 2,
+            max_attempts: 3,
+            retry_reason: Some("摘要过短".into()),
+            output_tokens: 120,
+            before_tokens: 90_000,
+            after_tokens: None,
+            started: std::time::Instant::now(),
+            finished: None,
+        });
+        assert_eq!(t.latest_seq(), before);
+        assert!(!methods(&t).iter().any(|m| m == "context/compacted"));
+        let pushed = std::iter::from_fn(|| rx.try_recv().ok())
+            .find(|e| e.method == "context/compacted")
+            .expect("推给订阅者");
+        let params = &pushed.as_notification()["params"];
+        assert_eq!(params["seq"], 0);
+        assert_eq!(params["status"], "running");
+        assert_eq!(params["trigger"], "auto");
+        assert_eq!(params["phase"], "summary");
+        assert_eq!(params["attempt"], 2);
+        assert_eq!(params["retryReason"], "摘要过短");
+        assert_eq!(params["outputTokens"], 120);
+        assert_eq!(params["beforeTokens"], 90_000);
+        assert_eq!(params["turnId"], "t1");
     }
 
     #[test]

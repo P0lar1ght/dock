@@ -7,7 +7,12 @@ use std::time::{Instant, SystemTime};
 use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::host::settings::AppSettings;
-use crate::names::{SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END, SETTINGS};
+use crate::names::{
+    SESSIONS, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END, SETTINGS,
+};
+use crate::session::compaction::{
+    CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
+};
 pub use cordis_base::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
 use cordis_base::types::{LogEvent, COMPACT_NOTICE};
 use cordis_base::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
@@ -39,6 +44,9 @@ pub(crate) struct ContextAnchor {
     /// 同一时刻模型历史（不含 system / 工具表）的本地估算。
     pub history_estimate: u64,
 }
+
+/// 摘要流式计数的事件节流间隔。
+const COMPACTION_EMIT_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A previous conversation, kept so `/resume` can restore it.
 #[derive(Clone, Debug)]
@@ -108,6 +116,10 @@ pub struct Sessions {
     /// ignores this.
     auto_compact_suppressed: Arc<AtomicBool>,
     compacting: Arc<AtomicBool>,
+    /// 当前（或最近一次）压缩的进展，见 [`Self::compaction`]。
+    compaction: Arc<Mutex<Option<CompactProgress>>>,
+    /// 上一次发 [`SESSION_COMPACTION`] 的时刻：摘要流式计数按它节流。
+    compaction_emitted: Arc<Mutex<Option<Instant>>>,
     /// Optional live-thread title (gateway `thread/rename` / `thread/start`).
     /// Empty means derive from the first user message, same as `/resume`.
     display_title: Arc<Mutex<Option<String>>>,
@@ -279,6 +291,8 @@ impl Sessions {
             identity: Arc::from(identity.into()),
             auto_compact_suppressed: Arc::new(AtomicBool::new(false)),
             compacting: Arc::new(AtomicBool::new(false)),
+            compaction: Arc::new(Mutex::new(None)),
+            compaction_emitted: Arc::new(Mutex::new(None)),
             display_title: Arc::new(Mutex::new(None)),
             queued_followups: Arc::new(AtomicUsize::new(0)),
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
@@ -532,6 +546,7 @@ impl Sessions {
         *self.times.lock().unwrap() = vec![SystemTime::now(); n];
         self.reset_compact();
         *self.context_anchor.lock().unwrap() = None;
+        *self.compaction.lock().unwrap() = None;
         self.bump_events_rev();
         self.persist_live();
     }
@@ -1119,6 +1134,7 @@ impl Sessions {
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
         *self.context_anchor.lock().unwrap() = None;
+        *self.compaction.lock().unwrap() = None;
         {
             let mut usage = self.usage.lock().unwrap();
             let window = usage.window;
@@ -1269,6 +1285,99 @@ impl Sessions {
             .is_ok()
     }
 
+    /// 压缩正在进行（自动或 `/compact`）。TUI 底栏读它显示「正在压缩」，
+    /// 不然摘要采样那段时间界面看起来像卡住——只有跑完才追加完成通知。
+    pub fn compacting(&self) -> bool {
+        self.compacting.load(Ordering::Relaxed)
+    }
+
+    /// 当前（或最近一次）压缩的进展。换会话、清空之后是 `None`。
+    pub fn compaction(&self) -> Option<CompactProgress> {
+        self.compaction.lock().unwrap().clone()
+    }
+
+    pub(crate) fn compaction_start(
+        &self,
+        trigger: CompactTrigger,
+        max_attempts: u32,
+        before_tokens: u64,
+    ) {
+        *self.compaction.lock().unwrap() =
+            Some(CompactProgress::start(trigger, max_attempts, before_tokens));
+        self.emit_compaction(true);
+    }
+
+    pub(crate) fn compaction_phase(&self, phase: CompactPhase) {
+        self.update_compaction(true, |p| p.phase = phase);
+    }
+
+    /// 开始第 `attempt` 次摘要（从 1 起）。`retry_reason` 是上一次没成的原因。
+    pub(crate) fn compaction_attempt(&self, attempt: u32, retry_reason: Option<String>) {
+        self.update_compaction(true, |p| {
+            p.phase = CompactPhase::Summary;
+            p.attempt = attempt;
+            p.retry_reason = retry_reason;
+            p.output_tokens = 0;
+        });
+    }
+
+    /// 摘要又吐了一段。每段都记，事件最多 250ms 发一次。
+    pub(crate) fn compaction_output(&self, output_tokens: u64) {
+        self.update_compaction(false, |p| p.output_tokens = output_tokens);
+    }
+
+    pub(crate) fn compaction_finish(&self, status: CompactStatus, after_tokens: Option<u64>) {
+        self.update_compaction(true, |p| {
+            p.finished = Some(p.started.elapsed());
+            p.status = status;
+            p.after_tokens = after_tokens;
+        });
+        // 滚动区里那条「已压缩」要带上前后占用，布局缓存按 events_rev 认。
+        self.bump_events_rev();
+    }
+
+    fn update_compaction(&self, force: bool, f: impl FnOnce(&mut CompactProgress)) {
+        {
+            let mut slot = self.compaction.lock().unwrap();
+            // 跑完的那份是定格的结果，后来的零星更新（比如记忆 flush 不经压缩被
+            // 调到）不该把它改回去。
+            let Some(progress) = slot.as_mut().filter(|p| p.running()) else {
+                return;
+            };
+            let before = progress.clone();
+            f(progress);
+            // 没变就不推（第一次尝试开始时阶段、次数都和开始时一样）。
+            if *progress == before {
+                return;
+            }
+        }
+        self.emit_compaction(force);
+    }
+
+    fn emit_compaction(&self, force: bool) {
+        if !self.emit {
+            return;
+        }
+        {
+            let mut last = self.compaction_emitted.lock().unwrap();
+            let now = Instant::now();
+            if !force && last.is_some_and(|t| now.duration_since(t) < COMPACTION_EMIT_EVERY) {
+                return;
+            }
+            *last = Some(now);
+        }
+        let Some(progress) = self.compaction() else {
+            return;
+        };
+        self.ctx.emit(
+            SESSION_COMPACTION,
+            PageCompaction {
+                page: self.identity.clone(),
+                progress,
+            },
+        );
+    }
+
     pub fn end_compact(&self) {
         self.compacting.store(false, Ordering::Relaxed);
     }
@@ -1416,6 +1525,7 @@ impl Sessions {
         self.apply_compact_snapshot(item.compact_prefix, item.compact_from);
         // 锚点是上一个会话的，留着会让刚恢复的小会话一开口就被判超阈值。
         *self.context_anchor.lock().unwrap() = None;
+        *self.compaction.lock().unwrap() = None;
         // Old sessions omit preset_id — keep the live preset as-is.
         if let Some(pid) = item.preset_id {
             *self.live_preset_id.lock().unwrap() = Some(pid);

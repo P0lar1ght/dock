@@ -159,6 +159,9 @@ function compactionSummary(value: SessionEnvironment['context']['lastCompaction'
       </p>
     `;
   }
+  if (value.status === 'cancelled') {
+    return html`<p class="context-compaction" data-status="failed">上次压缩已停止，当前上下文已保留</p>`;
+  }
   if (value.status === 'suppressed') {
     return html`<p class="context-compaction" data-status="suppressed">当前输入暂不重复尝试压缩</p>`;
   }

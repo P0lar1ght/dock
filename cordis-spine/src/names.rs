@@ -84,6 +84,9 @@ pub const SESSION_PAGE_EVENT: &str = "session/page-event";
 /// 流式事件本身分不出「这一段是不是最后一段」，要知道一轮何时结束的监听者
 /// （网关的 `turn/completed`）订这一条。
 pub const SESSION_TURN_END: &str = "session/turn-end";
+/// 一页的压缩进展变了（开始、换阶段、摘要又吐了一段、结束），载荷
+/// [`crate::PageCompaction`]。摘要计数最多 250ms 一条。
+pub const SESSION_COMPACTION: &str = "session/compaction";
 pub const PERMISSION_EVENT: &str = "permissions/pending";
 pub const ASK_EVENT: &str = "ask/pending";
 pub const PLAN_EVENT: &str = "plan/pending";

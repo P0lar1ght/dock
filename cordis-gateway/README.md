@@ -231,6 +231,30 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `canvasId` 只认 `canvas-<n>`（`invalid`）；没有这个画布 / 这一版回 `not_found`。
 - 不推通知：客户端看 `canvas_*` 的工具项刷新。不占连接锁，读盘在阻塞线程里。
 
+### 压缩进展（能力 `compactionProgress`）
+
+压缩那几秒没有流式输出，客户端靠这几条知道它在干什么。
+
+| 推送 / 字段 | 作用 |
+|---|---|
+| 推送 `context/compacted` | 压缩进展：开始、换阶段、摘要又写了一段（最多 250ms 一条）、结束 |
+| 推送 `item/compaction { itemId, status }` | 压缩完成的标记，落在当时那一轮里，进 `thread/history` |
+| `thread/environment/get` 的 `context.lastCompaction` | 正在进行或最近一次压缩，外形同 `context/compacted` |
+
+- `context/compacted` 的字段：
+  - `status`：`running` / `completed` / `failed` / `cancelled`；
+  - `trigger`：`auto` / `manual`；
+  - `phase`：`memory`（整理记忆）/ `summary`（生成摘要）/ `apply`（替换历史）；
+  - `attempt` / `maxAttempts`、`retryReason?`（上一次为什么没成）；
+  - `outputTokens`（这次尝试摘要已输出，估算）、`beforeTokens`、`afterTokens?`（压成了才有）；
+  - `elapsedMs`、`error?`（失败原因）。
+- 只推不记：`seq` 为 0、不进 `thread/history`；中途接入的客户端从 `lastCompaction` 补。
+- 顺序：`item/compaction` 先到，带 `afterTokens` 的完成推送随后。
+- 「已压缩上下文。」不再投影成 `item/message_delta`；自动压缩失败那条「自动压缩失败：…」也不投影
+  （失败由 `context/compacted` 的 `failed` 说）。
+  - 空闲时手动压缩没有一轮包着：开一轮、推标记、马上 `turn/completed`。
+- 重开会话 / 回放历史只有 `item/compaction`，没有前后占用。
+
 ## 依赖注入
 
 `mount` 声明依赖：`SESSIONS`、`SESSION_PORT`、`PERMISSIONS`、`ASK`、`PLAN_MODE`、`MCP`、`TURN`、`SETTINGS`。这些是 named service，在 `apply` 时 live-lookup，**不要**在闭包里持有 `Arc`。

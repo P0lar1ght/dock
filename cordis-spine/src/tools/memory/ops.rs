@@ -54,6 +54,7 @@ pub async fn maybe_flush_before_compact(ctx: &Context) {
     ) {
         return;
     }
+    sessions.compaction_phase(crate::session::compaction::CompactPhase::Memory);
     match run_flush(ctx, false).await {
         Ok(msg) => {
             tracing::info!(target: "dock_memory", %msg, "pre-compact memory flush");

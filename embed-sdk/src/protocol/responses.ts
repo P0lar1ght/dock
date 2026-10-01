@@ -69,7 +69,7 @@ export interface ThreadHistoryResult {
   events: TranscriptEvent[];
 }
 
-export type ContextCompactionStatus = 'running' | 'completed' | 'failed' | 'suppressed';
+export type ContextCompactionStatus = 'running' | 'completed' | 'failed' | 'suppressed' | 'cancelled';
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type ApprovalMode = 'ask' | 'auto' | 'full_access';
 export type ThreadGoalStatus = 'none' | 'active' | 'paused' | 'blocked' | 'completed';
