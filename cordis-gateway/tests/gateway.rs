@@ -12,11 +12,12 @@ use cordis_gateway::{
     GATEWAY, GATEWAY_SERVE, PROTOCOL_VERSION,
 };
 use cordis_spine::{
-    agent_loop, agent_presets, install_fakes, mcp_client, permissions, plan_mode, settings, slash,
-    tool_ask_user, tool_goal, turn, AgentPresets, AppSettings, ExtraSlashKind, Goal, LogEvent,
-    LoopHandle, PermissionOptionKind, Permissions, PlanMode, Sessions, Slash, SlashEntry,
-    TurnControl, AGENT_LOOP, AGENT_PRESETS, GOAL, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
-    SLASH, TURN,
+    agent_loop, agent_presets, compact, install_fakes, install_without_llm, mcp_client,
+    permissions, plan_mode, settings, slash, tool_ask_user, tool_goal, turn, AgentPresets,
+    AppSettings, BoxFuture, Compact, ExtraSlashKind, Goal, Llm, LlmOutput, LogEvent, LoopHandle,
+    PermissionOptionKind, Permissions, PlanMode, PromptRequest, Sampler, Sessions, Slash,
+    SlashEntry, StreamDelta, TurnControl, AGENT_LOOP, AGENT_PRESETS, COMPACT, GOAL, LLM,
+    PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, TURN,
 };
 use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use futures_util::{SinkExt, StreamExt};
@@ -61,7 +62,15 @@ impl SessionPort for TestSession {
         false
     }
 
-    fn compact(&self, _context: String) {}
+    fn compact(&self, context: String) {
+        let ctx = self.ctx.clone();
+        tokio::spawn(async move {
+            if let Some(compact) = ctx.get::<Compact>(COMPACT) {
+                let extra = (!context.is_empty()).then_some(context.as_str());
+                let _ = compact.run_on(&ctx, extra).await;
+            }
+        });
+    }
 
     fn queued_prompts(&self) -> Vec<QueuedItem> {
         Vec::new()
@@ -144,9 +153,21 @@ fn test_page_mount() -> cordis_tui::TabMount {
 }
 
 async fn harness_root() -> Context {
+    harness_root_with(None).await
+}
+
+/// 同 [`harness_root`]；给了 `sampler` 就用它当模型，不用 echo 假模型。
+async fn harness_root_with(sampler: Option<Arc<dyn Sampler>>) -> Context {
     isolated_home();
     let root = Context::new();
-    install_fakes(&root).await.unwrap();
+    match sampler {
+        Some(sampler) => {
+            install_without_llm(&root).await.unwrap();
+            root.provide(LLM, Llm::from_sampler(root.clone(), sampler))
+                .unwrap();
+        }
+        None => install_fakes(&root).await.unwrap(),
+    }
     root.plugin(settings(), ()).unwrap().wait().await.unwrap();
     root.plugin(turn(), ()).unwrap().wait().await.unwrap();
     root.plugin(permissions(), ())
@@ -582,6 +603,101 @@ async fn turn_start_projects_echo() {
         }
     }
     assert!(saw_echo, "expected projected echo text");
+}
+
+struct EchoLastUser;
+
+impl Sampler for EchoLastUser {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let text = request
+            .history
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                LogEvent::User(t) => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Box::pin(async move {
+            on_delta(StreamDelta::Text(text.clone()));
+            LlmOutput {
+                text,
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+/// 压缩那几秒客户端要看得到进展：`context/compacted` 推运行中与完成（带前后
+/// 占用），完成标记是 `item/compaction` 而不是一条助手消息；中途接入的客户端从
+/// `context.lastCompaction` 拿状态。
+#[tokio::test]
+async fn compaction_progress_reaches_subscribers() {
+    // echo 假模型总是调工具，摘要永远不成；换一个把最后一条用户消息原样
+    // 写回来的——压缩时那就是摘要提示词，够长、不调工具。
+    let root = harness_root_with(Some(Arc::new(EchoLastUser))).await;
+    root.plugin(compact(), ()).unwrap().wait().await.unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    let _ = rpc.call("turn/start", json!({ "message": "hello" })).await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+
+    let asked = rpc
+        .send("thread/context/compact", json!({ "threadId": "live" }))
+        .await;
+    let (_, mut notes) = rpc.collect(&[asked], Duration::from_secs(5)).await;
+    let start = tokio::time::Instant::now();
+    // 完成标记（`item/compaction`）先到，带前后占用的完成推送随后。
+    while !notes
+        .iter()
+        .any(|n| n["method"] == "context/compacted" && n["params"]["status"] != "running")
+    {
+        let left = Duration::from_secs(5).saturating_sub(start.elapsed());
+        let msg = tokio::time::timeout(left, rpc.read.next())
+            .await
+            .unwrap_or_else(|_| panic!("等压缩结束超时：{notes:#?}"))
+            .unwrap()
+            .unwrap();
+        notes.push(serde_json::from_str(&msg.into_text().unwrap()).unwrap());
+    }
+    let progress: Vec<&Value> = notes
+        .iter()
+        .filter(|n| n["method"] == "context/compacted")
+        .map(|n| &n["params"])
+        .collect();
+    assert_eq!(
+        progress.first().map(|p| &p["status"]),
+        Some(&json!("running"))
+    );
+    assert_eq!(progress[0]["trigger"], "manual");
+    let done = progress
+        .iter()
+        .find(|p| p["status"] == "completed")
+        .unwrap_or_else(|| panic!("要推完成：{progress:?}"));
+    assert!(done["afterTokens"].as_u64().is_some(), "{done}");
+    assert!(notes.iter().any(|n| n["method"] == "item/compaction"));
+    assert!(
+        !notes.iter().any(|n| n["method"] == "item/message_delta"
+            && n["params"]["delta"] == cordis_spine::COMPACT_NOTICE),
+        "压缩通知不该再是一条助手消息"
+    );
+
+    let env = rpc
+        .call("thread/environment/get", json!({ "threadId": "live" }))
+        .await;
+    let last = &env["result"]["context"]["lastCompaction"];
+    assert_eq!(last["status"], "completed", "{env}");
+    assert_eq!(last["trigger"], "manual");
 }
 
 #[tokio::test]

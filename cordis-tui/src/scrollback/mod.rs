@@ -15,8 +15,9 @@ use std::time::SystemTime;
 use chrono::{DateTime, Local};
 use cordis::Context;
 use cordis_spine::{
-    AgentPresets, AppSettings, JobSnapshot, Jobs, LogEvent, Sessions, Subagents, Todos,
-    AGENT_PRESETS, JOBS, SESSIONS, SETTINGS, SUBAGENTS, TODOS,
+    AgentPresets, AppSettings, CompactProgress, CompactStatus, CompactTrigger, JobSnapshot, Jobs,
+    LlmOutput, LogEvent, Sessions, Subagents, Todos, AGENT_PRESETS, COMPACT_NOTICE, JOBS, SESSIONS,
+    SETTINGS, SUBAGENTS, TODOS,
 };
 
 use crate::names::SESSION_PORT;
@@ -545,8 +546,10 @@ impl Scrollback {
         let subagents = self.ctx.get::<Subagents>(SUBAGENTS);
         let jobs = self.ctx.get::<Jobs>(JOBS);
         let presets = self.ctx.get::<AgentPresets>(AGENT_PRESETS);
+        let compaction = sessions.compaction();
         sessions.with_log(|events, times| {
-            build_frame(
+            build_frame_with(
+                compaction.as_ref(),
                 events,
                 times,
                 width,
@@ -797,7 +800,34 @@ fn build_frame(
     jobs: Option<&Jobs>,
     presets: Option<&AgentPresets>,
 ) -> Frame {
+    build_frame_with(
+        None, events, times, width, expanded, tool_fold, working, show_ts, todos, todo_fold,
+        subagents, jobs, presets,
+    )
+}
+
+/// 同 [`build_frame`]，多带这一页最近一次压缩：最后那条「已压缩」标上谁发起的、
+/// 前后占用（只有实时看着它压完才有，重开历史就只剩一行「上下文已压缩」）。
+#[allow(clippy::too_many_arguments)]
+fn build_frame_with(
+    compaction: Option<&CompactProgress>,
+    events: &[LogEvent],
+    times: &[SystemTime],
+    width: usize,
+    expanded: &HashSet<String>,
+    tool_fold: &HashMap<String, tool::ToolMode>,
+    working: bool,
+    show_ts: bool,
+    todos: &[(String, cordis_spine::TodoItem)],
+    todo_fold: todo::TodoFold,
+    subagents: Option<&Subagents>,
+    jobs: Option<&Jobs>,
+    presets: Option<&AgentPresets>,
+) -> Frame {
     let theme = Theme::current();
+    let last_notice = events
+        .iter()
+        .rposition(|e| matches!(e, LogEvent::LlmStream(llm) if is_compact_notice(llm)));
     let agents = subagents.map(|s| s.list()).unwrap_or_default();
     let job_snaps = jobs.map(|j| j.list()).unwrap_or_default();
     let mut lines = Vec::new();
@@ -813,6 +843,15 @@ fn build_frame(
             continue;
         }
         match event {
+            LogEvent::LlmStream(llm) if is_compact_notice(llm) => {
+                if let Some(at) = stamp {
+                    stamps.push((lines.len(), at));
+                }
+                let done = compaction
+                    .filter(|p| last_notice == Some(i) && p.status == CompactStatus::Completed);
+                lines.push(compaction_note(done, &theme));
+                lines.push(Line::from(""));
+            }
             LogEvent::User(text) => {
                 let block = user::lines(text, &theme, message_wrap(width, show_ts), width);
                 if let Some(at) = stamp {
@@ -1015,6 +1054,30 @@ fn build_frame(
 /// 这段**只进滚动区**。错误存在 `LlmOutput::error` 而不是 `text` 里，三条 wire
 /// builder 都以 `text` 非空或有 tool_call 为门槛，所以它不会被回放给模型——
 /// 否则「LLM 请求失败…」会变成模型自己说过的一句话，还要为它反复付 token。
+/// 压缩完成那条通知不是助手说的话（它进的是显示日志，不进模型历史）。
+fn is_compact_notice(llm: &LlmOutput) -> bool {
+    llm.text == COMPACT_NOTICE && llm.tool_calls.is_empty() && llm.reasoning.is_empty()
+}
+
+/// `✓ 上下文已自动压缩 · 182K → 21K`。`done` 是这条通知对应的那次压缩（只有最后
+/// 一条、且这次进程里看着它压完才有）。
+fn compaction_note(done: Option<&CompactProgress>, theme: &Theme) -> Line<'static> {
+    let style = Style::default().fg(theme.gray);
+    let mut text = match done.map(|p| p.trigger) {
+        Some(CompactTrigger::Auto) => "✓ 上下文已自动压缩".to_string(),
+        _ => "✓ 上下文已压缩".to_string(),
+    };
+    if let Some(after) = done.and_then(|p| p.after_tokens) {
+        let before = done.map_or(0, |p| p.before_tokens);
+        text.push_str(&format!(
+            " · {} → {}",
+            crate::views::status::format_tokens(before),
+            crate::views::status::format_tokens(after)
+        ));
+    }
+    Line::from(Span::styled(text, style))
+}
+
 fn llm_error_lines(err: &str, theme: &Theme, wrap: usize) -> Vec<Line<'static>> {
     let style = Style::default().fg(theme.accent_error);
     let mut out = vec![Line::from(Span::styled(
@@ -1702,6 +1765,69 @@ mod tests {
             unicode_width::UnicodeWidthStr::width(hover.as_str()) <= TIMESTAMP_RESERVED,
             "{hover}"
         );
+    }
+
+    fn notice() -> LogEvent {
+        LogEvent::LlmStream(LlmOutput {
+            text: COMPACT_NOTICE.into(),
+            ..LlmOutput::default()
+        })
+    }
+
+    fn text_of(frame: &Frame) -> Vec<String> {
+        frame
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    /// 「已压缩上下文。」不是助手说的话：画成一行灰的分界。只有最后那条、且这次
+    /// 看着它压完，才带谁发起的和前后占用。
+    #[test]
+    fn compact_notice_is_a_note_with_live_numbers_on_the_last_one() {
+        let done = CompactProgress {
+            trigger: CompactTrigger::Auto,
+            status: CompactStatus::Completed,
+            phase: cordis_spine::CompactPhase::Apply,
+            attempt: 1,
+            max_attempts: 3,
+            retry_reason: None,
+            output_tokens: 900,
+            before_tokens: 182_000,
+            after_tokens: Some(21_000),
+            started: std::time::Instant::now(),
+            finished: Some(std::time::Duration::from_secs(9)),
+        };
+        let events = [notice(), LogEvent::User("继续".into()), notice()];
+        let frame = build_frame_with(
+            Some(&done),
+            &events,
+            &[],
+            80,
+            &HashSet::new(),
+            &HashMap::new(),
+            false,
+            false,
+            &[],
+            todo::TodoFold::default(),
+            None,
+            None,
+            None,
+        );
+        let text = text_of(&frame);
+        assert_eq!(
+            text.iter()
+                .filter(|l| l.as_str() == "✓ 上下文已压缩")
+                .count(),
+            1,
+            "前一条没有数字：{text:?}"
+        );
+        assert!(
+            text.iter().any(|l| l == "✓ 上下文已自动压缩 · 182K → 21K"),
+            "{text:?}"
+        );
+        assert!(!text.iter().any(|l| l.contains(COMPACT_NOTICE)), "{text:?}");
     }
 
     #[test]

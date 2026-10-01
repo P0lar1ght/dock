@@ -1105,6 +1105,9 @@ pub(super) fn live_redraw(ctx: &Context, overlay: &Overlay) -> bool {
         // 装 driver 要下几十 MB，进度是子进程一行行吐出来的：不持续重绘的话
         // 驾驶舱会停在按下 Enter 的那一帧。
         || ctx.get::<Computer>(COMPUTER).is_some_and(|c| c.busy())
+        // 压缩期间没有别的 Event 会触发重绘（摘要采样不进显示日志），底栏
+        // 的「正在压缩」要靠 tick 才走得动。
+        || ctx.get::<Sessions>(SESSIONS).is_some_and(|s| s.compacting())
 }
 
 /// Grok cancel-rewind: restore the full sent prompt when the turn has no
@@ -1735,6 +1738,32 @@ mod tests {
             !live_redraw(&root, &Overlay::None),
             "任务结束后要停下来，别一直空转"
         );
+    }
+
+    /// 压缩那几秒不产生任何 Event（摘要采样隔离在 `"sessions"` isolate 之外，
+    /// 不进显示日志），`live_redraw` 要是不认它，底栏的「正在压缩」得等别的
+    /// 事件触发重绘才显示——用户看到的是按了 `/compact` 后界面僵住。
+    #[tokio::test]
+    async fn live_redraw_follows_an_inflight_compact() {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        assert!(
+            !live_redraw(&root, &Overlay::None),
+            "没在压缩时不该空转重绘"
+        );
+
+        let _s = root.provide(SESSIONS, sessions).unwrap();
+        assert!(
+            root.get::<Sessions>(SESSIONS).unwrap().try_begin_compact(),
+            "拿到压缩锁"
+        );
+        assert!(
+            live_redraw(&root, &Overlay::None),
+            "压缩在进行就得继续重绘，否则底栏的标记不会出现"
+        );
+
+        root.get::<Sessions>(SESSIONS).unwrap().end_compact();
+        assert!(!live_redraw(&root, &Overlay::None), "压缩结束后要停下来");
     }
 
     /// 这条打的是改动前真正的缺口：旧 `live_redraw` 只看「子代理 `running()`」和

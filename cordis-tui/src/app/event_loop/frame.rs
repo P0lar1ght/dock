@@ -102,6 +102,14 @@ pub(super) fn prompt_chrome_info(ctx: &Context) -> String {
     if let Some(timer) = timer {
         parts.push(timer);
     }
+    // 压缩（自动或 `/compact`）期间摘要采样不产生流式输出，底栏不动就像
+    // 卡住了。标在计时器旁边，跑完才追加「已压缩上下文。」
+    if ctx
+        .get::<Sessions>(SESSIONS)
+        .is_some_and(|s| s.compacting())
+    {
+        parts.push("正在压缩".into());
+    }
     parts.push(model);
     // 当前走哪条 wire 紧跟在模型后面：切模型会**重新播种**协议，这两条永远
     // 一起变，贴在一起才读得成一条信息。模型没选（空 id）时不留一个孤零零的
@@ -1096,6 +1104,22 @@ mod tests {
         let _svc = ctx.provide(SETTINGS, AppSettings::new("")).unwrap();
         let line = prompt_chrome_info(&ctx);
         assert!(line.starts_with("dock · 思考"), "line={line}");
+    }
+
+    /// 压缩期间没有流式输出，界面唯一的活动迹象就是底栏这两个字；不显示
+    /// 的话从用户角度看跟卡住没区别（完成通知要等摘要跑完才追加）。
+    #[test]
+    fn prompt_chrome_marks_an_inflight_compact() {
+        let ctx = Context::new();
+        let _svc = ctx.provide(SETTINGS, AppSettings::new("")).unwrap();
+        let sessions = Sessions::new(ctx.clone());
+        assert!(!sessions.compacting(), "初始不该在压缩");
+        assert!(sessions.try_begin_compact(), "拿到压缩锁");
+        let _s = ctx.provide(SESSIONS, sessions).unwrap();
+        assert!(
+            prompt_chrome_info(&ctx).contains("正在压缩"),
+            "压缩中要在底栏标出来"
+        );
     }
 
     /// Tasks 覆盖层（以及所有共用 `PickerHits::close_button` 的浮层）右上角的

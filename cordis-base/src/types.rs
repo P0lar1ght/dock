@@ -14,6 +14,10 @@ pub const PERMISSION_DENIED_TOOL_RESULT: &str = "权限被拒绝";
 /// carries the same bubble plus a hidden continuation summary.
 pub const COMPACT_NOTICE: &str = "已压缩上下文。";
 
+/// 自动压缩失败时循环追加的那条说明的开头（后面接原因）。和 [`COMPACT_NOTICE`]
+/// 一样不是模型说的话：网关不把它当助手消息，失败由压缩进展推送说。
+pub const AUTO_COMPACT_FAILED_PREFIX: &str = "自动压缩失败：";
+
 /// Root session identity. The subagent coordinator binds its spawns to this
 /// value, so a Stop or session switch can cancel exactly this session's
 /// children.

@@ -24,6 +24,7 @@ use crate::llm::sampler::Llm;
 use crate::names::{COMPACT, LLM, SESSIONS, SKILLS, SYSTEM_PROMPT, TURN, WORKFLOWS};
 use crate::prompt::assemble::SystemPrompt;
 use crate::prompt::context_usage::context_tokens_used;
+use crate::session::compaction::{CompactPhase, CompactStatus, CompactTrigger, OutputCounter};
 use crate::session::log::Sessions;
 use crate::tools::skills::Skills;
 use crate::tools::workflow::Workflows;
@@ -54,7 +55,13 @@ pub struct Compact;
 impl Compact {
     /// Manual `/compact [ctx]`. Never suppressed.
     pub async fn run_on(&self, ctx: &Context, extra: Option<&str>) -> Result<()> {
-        compact_session(ctx, extra, FullReplaceConfig::default()).await
+        compact_session(
+            ctx,
+            extra,
+            FullReplaceConfig::default(),
+            CompactTrigger::Manual,
+        )
+        .await
     }
 
     /// If the live log is at or above the threshold, compact it.
@@ -75,7 +82,14 @@ impl Compact {
         if !exceeds_threshold(used, window, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT) {
             return Ok(false);
         }
-        match compact_session(ctx, None, FullReplaceConfig::default()).await {
+        match compact_session(
+            ctx,
+            None,
+            FullReplaceConfig::default(),
+            CompactTrigger::Auto,
+        )
+        .await
+        {
             Ok(()) => {
                 let used_after = context_tokens_used(ctx, &system);
                 if exceeds_threshold(
@@ -102,7 +116,12 @@ pub fn compact() -> Plugin {
     })
 }
 
-async fn compact_session(ctx: &Context, extra: Option<&str>, cfg: FullReplaceConfig) -> Result<()> {
+async fn compact_session(
+    ctx: &Context,
+    extra: Option<&str>,
+    cfg: FullReplaceConfig,
+    trigger: CompactTrigger,
+) -> Result<()> {
     let sessions = ctx.require::<Sessions>(SESSIONS)?;
     if cancelled(ctx) {
         return Err(Error::Cancelled);
@@ -110,9 +129,30 @@ async fn compact_session(ctx: &Context, extra: Option<&str>, cfg: FullReplaceCon
     if !sessions.try_begin_compact() {
         return Err(Error::Compact("正在压缩上下文。".into()));
     }
-    let result = compact_session_locked(ctx, &sessions, extra, &cfg).await;
+    let system = ctx
+        .get::<SystemPrompt>(SYSTEM_PROMPT)
+        .map(|p| p.assemble_on(ctx))
+        .unwrap_or_default();
+    sessions.compaction_start(trigger, cfg.max_attempts, context_tokens_used(ctx, &system));
+    let result = compact_session_locked(ctx, &sessions, extra, &cfg, &system).await;
+    let (status, after) = match &result {
+        Ok(()) => (
+            CompactStatus::Completed,
+            Some(context_tokens_used(ctx, &system)),
+        ),
+        Err(Error::Cancelled) => (CompactStatus::Cancelled, None),
+        Err(err) => (CompactStatus::Failed(err.to_string()), None),
+    };
+    sessions.compaction_finish(status, after);
     sessions.end_compact();
     result
+}
+
+/// 失败原因去掉「压缩失败：」和句号，给重试提示用（`摘要过短`）。
+fn retry_reason(err: &Error) -> String {
+    let text = err.to_string();
+    let text = text.strip_prefix("压缩失败：").unwrap_or(&text);
+    text.trim_end_matches('。').to_string()
 }
 
 async fn compact_session_locked(
@@ -120,6 +160,7 @@ async fn compact_session_locked(
     sessions: &Sessions,
     extra: Option<&str>,
     cfg: &FullReplaceConfig,
+    system: &str,
 ) -> Result<()> {
     let history = sessions.model_history();
     if !history
@@ -138,15 +179,12 @@ async fn compact_session_locked(
         extra.map(str::trim).filter(|s| !s.is_empty()),
     )));
     let iso = ctx.isolate("sessions");
-    let system = ctx
-        .get::<SystemPrompt>(SYSTEM_PROMPT)
-        .map(|p| p.assemble_on(ctx))
-        .unwrap_or_default();
     let mut last_err = Error::Compact("压缩失败：摘要为空。".into());
     for attempt in 0..cfg.max_attempts {
         if cancelled(ctx) {
             return Err(Error::Cancelled);
         }
+        sessions.compaction_attempt(attempt + 1, (attempt > 0).then(|| retry_reason(&last_err)));
         if attempt > 0 && cfg.retry_delay_secs > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(cfg.retry_delay_secs)).await;
         }
@@ -158,7 +196,7 @@ async fn compact_session_locked(
             .stream_observed(
                 &iso,
                 PromptRequest {
-                    system: system.clone(),
+                    system: system.to_string(),
                     history: request_history.clone(),
                     // 摘要不该调工具（调了下面就判失败），带着整张工具表只是白
                     // 付几千 token，还会让「带 tools 就必须回传 reasoning_content」
@@ -168,7 +206,12 @@ async fn compact_session_locked(
                 },
                 {
                     let billed = billed.clone();
+                    let sessions = sessions.clone();
+                    let mut counter = OutputCounter::default();
                     move |delta| {
+                        if let StreamDelta::Text(text) | StreamDelta::Reasoning(text) = delta {
+                            sessions.compaction_output(counter.push(text));
+                        }
                         if let StreamDelta::Usage {
                             tokens,
                             official: true,
@@ -203,13 +246,18 @@ async fn compact_session_locked(
             continue;
         }
         if output.text.trim().is_empty() {
-            last_err = Error::Compact("压缩失败：摘要为空。".into());
+            // 请求本身失败（限流、断网）时说真正的原因，别都报成「摘要为空」。
+            last_err = Error::Compact(match output.error.as_deref() {
+                Some(err) => format!("压缩失败：{err}"),
+                None => "压缩失败：摘要为空。".into(),
+            });
             continue;
         }
         if is_degenerate_summary(&output.text) {
             last_err = Error::Compact("压缩失败：摘要过短。".into());
             continue;
         }
+        sessions.compaction_phase(CompactPhase::Apply);
         let compacted = build_compacted_events(&history, &output.text);
         if let Some(dir) = sessions.disk_session_dir() {
             // Fail-open: compact already succeeded in memory.
@@ -630,5 +678,132 @@ mod tests {
             "压缩后 {} token，不该判成压了还超",
             context_tokens_used(&root, "")
         );
+    }
+
+    /// 依次吐出几份摘要：第 n 次采样用第 n 份，用完了重复最后一份。
+    struct Scripted(std::sync::Mutex<Vec<String>>);
+
+    impl Sampler for Scripted {
+        fn sample<'a>(
+            &'a self,
+            _request: PromptRequest,
+            mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        ) -> BoxFuture<'a, LlmOutput> {
+            let text = {
+                let mut queue = self.0.lock().unwrap();
+                if queue.len() > 1 {
+                    queue.remove(0)
+                } else {
+                    queue[0].clone()
+                }
+            };
+            Box::pin(async move {
+                for piece in [&text[..text.len() / 2], &text[text.len() / 2..]] {
+                    on_delta(StreamDelta::Text(piece.to_string()));
+                }
+                LlmOutput {
+                    text,
+                    ..LlmOutput::default()
+                }
+            })
+        }
+    }
+
+    /// 跑一次压缩，收下这期间发出的全部 [`crate::SESSION_COMPACTION`]。
+    async fn compaction_events(
+        summaries: Vec<String>,
+        trigger: CompactTrigger,
+    ) -> (Sessions, Vec<crate::CompactProgress>) {
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        sessions.set_window(1_000_000);
+        for mut e in sample_history() {
+            // 历史要比摘要大，「压完更小」才有意义。
+            if let LogEvent::ToolExecute { content, .. } = &mut e {
+                *content = "x".repeat(20_000);
+            }
+            sessions.append(e);
+        }
+        let _s = root.provide(SESSIONS, sessions.clone()).unwrap();
+        root.provide(
+            LLM,
+            Llm::from_sampler(
+                root.clone(),
+                Arc::new(Scripted(std::sync::Mutex::new(summaries))),
+            ),
+        )
+        .unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let _on = root.on(
+            crate::SESSION_COMPACTION,
+            move |e: &crate::PageCompaction| {
+                sink.lock().unwrap().push(e.progress.clone());
+            },
+        );
+        let cfg = FullReplaceConfig {
+            max_attempts: 3,
+            retry_delay_secs: 0,
+        };
+        let _ = compact_session(&root, None, cfg, trigger).await;
+        let events = seen.lock().unwrap().clone();
+        (sessions, events)
+    }
+
+    /// 压缩那几秒 UI 要看得到进展：开始 → 摘要吐字 → 替换 → 完成，完成时带前后占用。
+    #[tokio::test]
+    async fn compaction_reports_phases_output_and_before_after() {
+        let (sessions, events) =
+            compaction_events(vec![healthy_summary()], CompactTrigger::Manual).await;
+        let first = events.first().expect("开始时就要发");
+        assert!(first.running());
+        assert_eq!(first.trigger, CompactTrigger::Manual);
+        assert_eq!((first.attempt, first.max_attempts), (1, 3));
+        assert!(first.before_tokens > 0);
+        assert!(
+            events.iter().any(|p| p.running() && p.output_tokens > 0),
+            "摘要流式输出要计数：{events:?}"
+        );
+        assert!(events
+            .iter()
+            .any(|p| p.running() && p.phase == CompactPhase::Apply));
+        let last = events.last().unwrap();
+        assert_eq!(last.status, CompactStatus::Completed);
+        let after = last.after_tokens.expect("压成了要带压缩后的占用");
+        assert!(
+            after < last.before_tokens,
+            "{after} < {}",
+            last.before_tokens
+        );
+        assert!(last.finished.is_some());
+        assert_eq!(
+            sessions.compaction().map(|p| p.status),
+            Some(CompactStatus::Completed)
+        );
+    }
+
+    /// 重试时告诉用户第几次、上一次为什么没成；三次都不成就是失败并带原因。
+    #[tokio::test]
+    async fn compaction_reports_retries_and_failure() {
+        let (_, events) = compaction_events(
+            vec!["short".into(), healthy_summary()],
+            CompactTrigger::Auto,
+        )
+        .await;
+        let retry = events
+            .iter()
+            .find(|p| p.attempt == 2)
+            .expect("第二次尝试要发出来");
+        assert_eq!(retry.retry_reason.as_deref(), Some("摘要过短"));
+        assert_eq!(retry.output_tokens, 0, "新一次尝试的计数从 0 起");
+        assert_eq!(events.last().unwrap().status, CompactStatus::Completed);
+
+        let (sessions, events) =
+            compaction_events(vec!["short".into()], CompactTrigger::Auto).await;
+        assert_eq!(
+            events.last().unwrap().status,
+            CompactStatus::Failed("压缩失败：摘要过短。".into())
+        );
+        assert!(!sessions.compacting());
     }
 }

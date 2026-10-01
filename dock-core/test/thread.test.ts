@@ -203,3 +203,58 @@ test('工具结果里的图：带网关给的 index，旧网关不带就是空�
   assert.deepEqual(shot.kind === 'tool' && shot.images.map((i) => [i.index, i.width, i.height]), [[1, 1440, 900]]);
   assert.deepEqual(old.kind === 'tool' && old.images, []);
 });
+
+/** 压缩进展只推不记：`seq` 为 0，不受去重影响。 */
+function progress(params: Record<string, unknown>) {
+  const event = parseEvent('context/compacted', { seq: 0, threadId: 'th', turnId: 't1', timestamp: '0', ...params });
+  assert.ok(event);
+  return event;
+}
+
+test('压缩：进展是线程级状态，完成标记落在轮里，完成推送把前后占用补到标记上', () => {
+  seq = 0;
+  let s = run(note('turn/started', {}, 't1'), note('item/user_message', { content: '读完整个仓库' }));
+  s = reduceThread(
+    s,
+    progress({ status: 'running', trigger: 'auto', phase: 'summary', attempt: 2, maxAttempts: 3, retryReason: '摘要过短', outputTokens: 120, beforeTokens: 180000, elapsedMs: 4200 }),
+  );
+  assert.equal(s.compaction?.status, 'running');
+  assert.equal(s.compaction?.attempt, 2);
+  assert.equal(s.compaction?.retryReason, '摘要过短');
+  assert.equal(s.compaction?.afterTokens, null);
+  const sameSeq = s.seq;
+
+  s = reduceThread(s, note('item/compaction', { itemId: 'compaction-9', status: 'completed' }));
+  s = reduceThread(s, progress({ status: 'completed', trigger: 'auto', phase: 'apply', beforeTokens: 180000, afterTokens: 21000, elapsedMs: 9000 }));
+  assert.equal(s.compaction?.status, 'completed');
+  const item = s.turns[0].items.at(-1);
+  assert.deepEqual(item?.kind === 'compaction' && [item.trigger, item.beforeTokens, item.afterTokens, item.elapsedMs], ['auto', 180000, 21000, 9000]);
+  // 紧接着又压一次、没有新标记：同一个标记换成最新的数。
+  s = reduceThread(s, progress({ status: 'completed', trigger: 'manual', phase: 'apply', beforeTokens: 21000, afterTokens: 15000, elapsedMs: 4000 }));
+  const again = s.turns[0].items.at(-1);
+  assert.deepEqual(again?.kind === 'compaction' && [again.trigger, again.beforeTokens, again.afterTokens], ['manual', 21000, 15000]);
+  s = reduceThread(s, note('turn/started', {}, 't2'));
+  assert.equal(s.compaction?.status, 'completed', '压成了的留着');
+  assert.ok(s.seq > sameSeq, '标记占序号，进展不占');
+
+  const replayed = replayHistory([
+    { method: 'turn/started', seq: 1, timestamp: '1', payload: { turnId: 't1' } },
+    { method: 'item/compaction', seq: 2, timestamp: '2', payload: { turnId: 't1', itemId: 'compaction-2' } },
+  ]);
+  const old = replayed.turns[0].items[0];
+  assert.deepEqual(old.kind === 'compaction' && [old.trigger, old.beforeTokens, old.afterTokens], [null, null, null], '回放历史没有数字');
+  assert.equal(replayed.compaction, null);
+});
+
+test('压缩失败与停止：带原因，标记不动', () => {
+  seq = 0;
+  let s = run(note('turn/started', {}, 't1'));
+  s = reduceThread(s, progress({ status: 'failed', phase: 'summary', attempt: 3, maxAttempts: 3, error: '压缩失败：摘要过短。' }));
+  assert.equal(s.compaction?.status, 'failed');
+  assert.equal(s.compaction?.error, '压缩失败：摘要过短。');
+  s = reduceThread(s, progress({ status: 'cancelled' }));
+  assert.equal(s.compaction?.status, 'cancelled');
+  s = reduceThread(s, note('turn/started', {}, 't2'));
+  assert.equal(s.compaction, null, '下一轮开始，没压成的那次就交代完了');
+  assert.equal(parseEvent('context/compacted', { status: 'weird' }), null);
+});

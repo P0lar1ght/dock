@@ -38,6 +38,50 @@ export interface Question {
   multiSelect: boolean;
 }
 
+export type CompactionStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+/** `memory` 整理记忆 → `summary` 生成摘要 → `apply` 替换历史。 */
+export type CompactionPhase = 'memory' | 'summary' | 'apply';
+
+/** 一次压缩的进展：`context/compacted` 推送与 `context.lastCompaction` 同一个外形。 */
+export interface CompactionProgress {
+  status: CompactionStatus;
+  trigger: 'auto' | 'manual';
+  phase: CompactionPhase;
+  /** 第几次尝试，从 1 起。 */
+  attempt: number;
+  maxAttempts: number;
+  /** 上一次尝试为什么没成（重试时才有）。 */
+  retryReason: string | null;
+  /** 这次尝试摘要已输出的 token（估算）。 */
+  outputTokens: number;
+  beforeTokens: number;
+  /** 压成了才有。 */
+  afterTokens: number | null;
+  elapsedMs: number;
+  /** 失败原因（`status === 'failed'`）。 */
+  error: string | null;
+}
+
+/** `context/compacted` 的载荷（或 `context.lastCompaction`）→ 进展。认不出状态返回 `null`。 */
+export function parseCompaction(params: Record<string, unknown>): CompactionProgress | null {
+  const status = str(params.status);
+  if (!['running', 'completed', 'failed', 'cancelled'].includes(status)) return null;
+  const after = params.afterTokens;
+  return {
+    status: status as CompactionStatus,
+    trigger: oneOf(params.trigger, ['auto', 'manual'] as const, 'auto'),
+    phase: oneOf(params.phase, ['memory', 'summary', 'apply'] as const, 'summary'),
+    attempt: num(params.attempt) || 1,
+    maxAttempts: num(params.maxAttempts) || 1,
+    retryReason: str(params.retryReason) || null,
+    outputTokens: num(params.outputTokens),
+    beforeTokens: num(params.beforeTokens),
+    afterTokens: after == null ? null : num(after),
+    elapsedMs: num(params.elapsedMs),
+    error: str(params.error) || null,
+  };
+}
+
 export type DockEvent = EventBase &
   (
     | { method: 'turn/started' }
@@ -64,6 +108,10 @@ export type DockEvent = EventBase &
     | { method: 'plan/resolved'; planId: string; decision: 'approve' | 'revise' | 'quit' }
     | { method: 'elicit/requested'; elicitId: string; server: string; message: string; heading: string }
     | { method: 'elicit/resolved'; elicitId: string }
+    /** 压缩完成的标记（落在历史里；前后占用只在实时的 `context/compacted` 里）。 */
+    | { method: 'item/compaction'; itemId: string }
+    /** 压缩进展。只推不记（`seq` 为 0），不进 `thread/history`。 */
+    | { method: 'context/compacted'; progress: CompactionProgress }
   );
 
 export type DockEventMethod = DockEvent['method'];
@@ -225,6 +273,12 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
       };
     case 'elicit/resolved':
       return { ...base, method, elicitId: str(params.elicitId) };
+    case 'item/compaction':
+      return { ...base, method, itemId: str(params.itemId) || `compaction-${base.seq}` };
+    case 'context/compacted': {
+      const progress = parseCompaction(params);
+      return progress ? { ...base, method, progress } : null;
+    }
     default:
       return null;
   }

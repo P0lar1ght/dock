@@ -22,4 +22,16 @@ Grok 会话压缩。`install_app` 在 `llm` 之后挂。手动 `/compact [说明
 - 压缩、`/resume` 换会话、清空都作废锚点，下一次采样再落新的。
   - 否则压缩后还按压缩前的数判「压了还超」，整轮被抑制（#154）。
 
+### 压缩进展
+
+`Sessions::compaction()` 是正在进行（或最近一次）的压缩，不落盘。
+
+- 字段：发起方（auto / manual）、阶段、第几次尝试、上次失败原因、摘要已输出 token、
+  压缩前后占用、耗时、结果（running / completed / failed / cancelled）。
+- 阶段：`memory` 整理记忆（flush 到门槛才有）→ `summary` 生成摘要 → `apply` 替换历史。
+- 每次变化发 `session/compaction`（`PageCompaction { page, progress }`）。
+  - 摘要流式计数最多 250ms 一条；没变的不发。
+- TUI 状态行每帧读它；网关投影成 dock.1 `context/compacted`（见 `cordis-gateway/README.md`）。
+- 换会话、清空时清掉。
+
 成功压缩后会在会话目录写入 `compaction/segment_NNN.md` 与 `INDEX.md`（供事后查阅被摘要掉的原文）。

@@ -9,6 +9,11 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
 - **保真**：工具的原始参数、完整输出都留着。脱敏、截断是展示层的事（embed-sdk 嵌进第三方页面要脱敏，就在自己那层做）。
 - **按轮组织**：`Turn { status, error, startedAt, endedAt, items }`，`items` 按出现顺序排：用户消息、助手文字、工具、权限、提问、计划、elicitation。
 - 工具项带 `images`（结果里的截图等，只有元数据）；像素用 `item/image` 按需取。
+- 压缩：`item/compaction` 是轮里的 `compaction` 项；`context/compacted` 是线程级的
+  `ThreadState.compaction`（只推不记，`seq` 为 0）。
+  - 完成推送把发起方、前后占用、用时补到最近那个标记上；回放历史时它们是 `null`。
+  - 连压两次只有一个标记（Dock 不重复追加），它跟着最新那次覆盖。
+  - 没压成 / 被停掉的进展在下一轮 `turn/started` 时清掉。
 - **不猜**：一轮的结果看 `turn/completed.status`，工具的结果看 `item/tool_completed.status`，都由 Dock 给出。
 
 ## 用法

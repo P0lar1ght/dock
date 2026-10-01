@@ -105,7 +105,9 @@ cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的�
 一轮何时结束由 `LoopHandle` 每个入口结束时调的 `Sessions::end_turn` 说：成功 / 出错 / 取消都算，
 记一条 `LogEvent::TurnEnd(TurnEndStatus)`（随会话落盘成 `turn-end` 行，出错带文本；模型请求
 失败不是 `Err`，本轮最后一次采样带错误时也记成失败），再发 `session/turn-end`
-（`PageTurnEnd { page, status }`）。它和 `Notice` 一样只给用户看，不进模型历史。网关的
+（`PageTurnEnd { page, status }`）。它和 `Notice` 一样只给用户看，不进模型历史。
+压缩进展另走 `session/compaction`（`PageCompaction { page, progress }`），不是
+`LogEvent`、不落盘：TUI 每帧直接读 `Sessions::compaction()`，网关推成 `context/compacted`。网关的
 `turn/completed` 只由这条事件触发，实时和回放同一条路，一轮一次，`status` 随之是
 completed / cancelled / failed（failed 带 `error`）；更早的会话没有这一行，回放时按旧规则补。
 

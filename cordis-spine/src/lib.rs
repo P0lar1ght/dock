@@ -43,9 +43,10 @@ pub use cordis_base::config::{
 pub use cordis_base::stream_acc::StreamDelta;
 pub use cordis_base::types::{
     LlmOutput, LogEvent, NoticeKind, PreExecute, PreStep, PromptRequest, StepStart, ToolCall,
-    ToolResult, ToolSpec, TurnEnd, TurnOutcome, UserImage, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
-    ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MEMORY,
-    ORDER_STEP_START_TODO, ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
+    ToolResult, ToolSpec, TurnEnd, TurnOutcome, UserImage, AUTO_COMPACT_FAILED_PREFIX,
+    COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT, ORDER_STEP_START_DYNAMIC,
+    ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MEMORY, ORDER_STEP_START_TODO,
+    ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
     PERMISSION_DENIED_TOOL_RESULT,
 };
 pub use cordis_base::usage::{
@@ -70,9 +71,9 @@ pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
     DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
     PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
-    ROSTER, SESSIONS, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END, SETTINGS, SKILLS, SLASH,
-    STEP_START, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE,
-    TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
+    ROSTER, SESSIONS, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END,
+    SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE,
+    TOOLS_PRE_EXECUTE, TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
@@ -81,6 +82,9 @@ pub use prompt::context_usage::{
     ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
+pub use session::compaction::{
+    CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
+};
 pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
 pub use session::log::{
     sessions, ArchivedSession, PageLogEvent, PageTurnEnd, Sampling, Sessions, TokenUsage,

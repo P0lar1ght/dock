@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    snapshot_context, AppSettings, ContextBook, Goal, Mcp, PermissionMode, PlanMode, CONTEXT, GOAL,
-    MCP, PLAN_MODE, SETTINGS,
+    snapshot_context, AppSettings, ContextBook, Goal, Mcp, PermissionMode, PlanMode, Sessions,
+    CONTEXT, GOAL, MCP, PLAN_MODE, SESSIONS, SETTINGS,
 };
 use cordis_tui::{SessionRef, SESSION_PORT};
 
@@ -329,20 +329,26 @@ fn environment_fields(ctx: &Context) -> Result<serde_json::Map<String, Value>, R
             "order": []
         }),
     );
-    map.insert(
-        "context".into(),
-        json!({
-            "estimatedTokens": used,
-            "maxContextTokens": total,
-            "inputBudgetTokens": total,
-            "reservedOutputTokens": 0,
-            "usagePercent": pct,
-            "compactionEnabled": true,
-            "canCompact": true,
-            "compactionTriggerPercent": trigger,
-            "compactionTriggerTokens": total.saturating_mul(trigger) / 100,
-            "revisionSeq": 0
-        }),
-    );
+    let mut context = json!({
+        "estimatedTokens": used,
+        "maxContextTokens": total,
+        "inputBudgetTokens": total,
+        "reservedOutputTokens": 0,
+        "usagePercent": pct,
+        "compactionEnabled": true,
+        "canCompact": true,
+        "compactionTriggerPercent": trigger,
+        "compactionTriggerTokens": total.saturating_mul(trigger) / 100,
+        "revisionSeq": 0
+    });
+    // 正在压缩或最近一次压缩：订阅到一半才接入的客户端靠它补上进度。
+    if let Some(progress) = ctx.get::<Sessions>(SESSIONS).and_then(|s| s.compaction()) {
+        let mut last = crate::transcript::compaction_value(&progress);
+        let tokens = progress.after_tokens.unwrap_or(progress.before_tokens);
+        last["usagePercent"] = json!((tokens.saturating_mul(100)).checked_div(total).unwrap_or(0));
+        last["seq"] = json!(0);
+        context["lastCompaction"] = last;
+    }
+    map.insert("context".into(), context);
     Ok(map)
 }

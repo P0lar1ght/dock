@@ -34,6 +34,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("toolImages", true),
     // `canvas/list` / `get` / `setData` / `rollback`：模型写的画布（HTML 分版 + 数据）。
     ("canvas", true),
+    // `context/compacted`（压缩进展推送）+ `item/compaction`（压缩完成标记）+
+    // `thread/environment/get` 的 `context.lastCompaction`。
+    ("compactionProgress", true),
 ];
 
 pub fn capabilities_object() -> Value {

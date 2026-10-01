@@ -81,7 +81,8 @@ export function reduceContextUsage(
   params: Record<string, unknown>,
   seq: number
 ): SessionEnvironment | undefined {
-  if (!environment || seq <= environment.context.revisionSeq) return environment;
+  // Dock 的压缩进展（`context/compacted`）只推不记，`seq` 为 0：每条都是最新的。
+  if (!environment || (seq > 0 && seq <= environment.context.revisionSeq)) return environment;
   if (method === 'context/projected') return projectUsage(environment, params, seq);
   if (method === 'context/compacted') return projectCompaction(environment, params, seq);
   return environment;
@@ -223,7 +224,7 @@ function projectCompaction(
     ...environment.context,
     estimatedTokens,
     usagePercent: percent(estimatedTokens, environment.context.maxContextTokens),
-    revisionSeq: seq,
+    revisionSeq: seq || environment.context.revisionSeq,
     lastCompaction: {
       status,
       beforeTokens,
@@ -256,6 +257,7 @@ function normalizeCompaction(value: SessionEnvironment['context']['lastCompactio
 function compactionStatus(value: unknown): ContextCompactionStatus | undefined {
   const status = safeText(value, '');
   return status === 'running' || status === 'completed' || status === 'failed' || status === 'suppressed'
+    || status === 'cancelled'
     ? status
     : undefined;
 }
