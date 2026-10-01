@@ -26,6 +26,20 @@ impl TokenUsage {
     }
 }
 
+/// 上一次主循环采样结束时的上下文锚点（Grok `total_tokens` /
+/// `estimate_at_last_response`，Codex `last_token_usage.total_tokens`）。
+///
+/// 上游报的 input + output 就是下一次请求的起点：这次的输出（含推理）会原样
+/// 回放进去。之后追加的工具结果、提醒等按本地估算补上，见
+/// [`crate::prompt::context_usage::context_tokens_used`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ContextAnchor {
+    /// 上游报的这次调用 prompt + completion。
+    pub tokens: u64,
+    /// 同一时刻模型历史（不含 system / 工具表）的本地估算。
+    pub history_estimate: u64,
+}
+
 /// A previous conversation, kept so `/resume` can restore it.
 #[derive(Clone, Debug)]
 pub struct ArchivedSession {
@@ -73,6 +87,9 @@ pub struct Sessions {
     usage: Arc<Mutex<TokenUsage>>,
     ledger: Arc<Mutex<UsageLedger>>,
     pending_call: Arc<Mutex<Option<PendingCall>>>,
+    /// `None` = 上游没报过用量，或模型历史刚被整段改写（压缩、换会话、清空），
+    /// 旧锚点对不上新历史，此时占用全靠估算，下一次采样再落新锚点。
+    context_anchor: Arc<Mutex<Option<ContextAnchor>>>,
     turn_started: Arc<Mutex<Option<Instant>>>,
     pending_images: Arc<Mutex<Vec<cordis_base::types::UserImage>>>,
     user_images: Arc<Mutex<Vec<Vec<cordis_base::types::UserImage>>>>,
@@ -252,6 +269,7 @@ impl Sessions {
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             ledger: Arc::new(Mutex::new(UsageLedger::default())),
             pending_call: Arc::new(Mutex::new(None)),
+            context_anchor: Arc::new(Mutex::new(None)),
             turn_started: Arc::new(Mutex::new(None)),
             pending_images: Arc::new(Mutex::new(Vec::new())),
             user_images: Arc::new(Mutex::new(Vec::new())),
@@ -513,6 +531,7 @@ impl Sessions {
         *self.events.lock().unwrap() = events;
         *self.times.lock().unwrap() = vec![SystemTime::now(); n];
         self.reset_compact();
+        *self.context_anchor.lock().unwrap() = None;
         self.bump_events_rev();
         self.persist_live();
     }
@@ -952,10 +971,34 @@ impl Sessions {
         out.tool_calls = output.tool_calls.clone();
         let event = events.last().cloned().unwrap();
         drop(events);
+        self.anchor_context();
         self.bump_events_rev();
         self.commit_pending_call();
         self.emit_session(event);
         self.persist_live();
+    }
+
+    /// 这次采样上游报了用量：把它连同此刻的历史估算记成锚点。没报就留着旧锚点——
+    /// 这次的输出比旧锚点多出来的部分照样落在估算增量里。
+    fn anchor_context(&self) {
+        let tokens = match self.pending_call.lock().unwrap().as_ref() {
+            // 只报了 completion 的用量当不了起点，会把整段 prompt 算成 0。
+            Some(call) if call.usage.prompt_tokens > 0 => call
+                .usage
+                .prompt_tokens
+                .saturating_add(call.usage.completion_tokens),
+            _ => return,
+        };
+        let history_estimate =
+            crate::llm::compact::estimate_context_tokens("", &self.model_history());
+        *self.context_anchor.lock().unwrap() = Some(ContextAnchor {
+            tokens,
+            history_estimate,
+        });
+    }
+
+    pub(crate) fn context_anchor(&self) -> Option<ContextAnchor> {
+        *self.context_anchor.lock().unwrap()
     }
 
     fn commit_pending_call(&self) {
@@ -1075,6 +1118,7 @@ impl Sessions {
         self.reset_compact();
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
+        *self.context_anchor.lock().unwrap() = None;
         {
             let mut usage = self.usage.lock().unwrap();
             let window = usage.window;
@@ -1279,6 +1323,10 @@ impl Sessions {
         *self.compact_from.lock().unwrap() = from;
         *self.compact_prefix.lock().unwrap() = Some(prefix);
         *self.pending_call.lock().unwrap() = None;
+        // 锚点量的是压缩**前**的历史。留着它，压缩后的占用还按旧数算，自动压缩
+        // 会把自己判成「压了还超」而抑制到下一条用户消息（#154）。这里退回纯估算，
+        // 下一次采样再落新锚点（Codex `recompute_token_usage`）。
+        *self.context_anchor.lock().unwrap() = None;
         self.rewound.store(false, Ordering::Relaxed);
         self.bump_events_rev();
         self.persist_live();
@@ -1366,6 +1414,8 @@ impl Sessions {
         *self.pending_call.lock().unwrap() = None;
         self.rewound.store(false, Ordering::Relaxed);
         self.apply_compact_snapshot(item.compact_prefix, item.compact_from);
+        // 锚点是上一个会话的，留着会让刚恢复的小会话一开口就被判超阈值。
+        *self.context_anchor.lock().unwrap() = None;
         // Old sessions omit preset_id — keep the live preset as-is.
         if let Some(pid) = item.preset_id {
             *self.live_preset_id.lock().unwrap() = Some(pid);
@@ -2250,6 +2300,32 @@ mod tests {
         );
         sessions.set_preset_id(Some("warden".into()));
         assert_eq!(sessions.preset_id().as_deref(), Some("warden"));
+    }
+
+    /// 换回旧会话时上一个会话的锚点必须作废，否则刚恢复的小会话一开口就按
+    /// 上一个会话的占用被判超阈值、立刻被自动压缩。
+    #[tokio::test]
+    async fn restore_drops_the_previous_sessions_context_anchor() {
+        let sessions = Sessions::new(Context::new());
+        sessions.append(LogEvent::User("small".into()));
+        let small = sessions.archive_current().unwrap();
+        sessions.clear();
+        sessions.append(LogEvent::User("big".into()));
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&cordis_base::stream_acc::StreamDelta::Usage {
+            tokens: CallUsage {
+                prompt_tokens: 900_000,
+                completion_tokens: 1,
+                ..CallUsage::default()
+            },
+            official: true,
+            model: "m".into(),
+            cost_usd_ticks: None,
+        });
+        sessions.finish_llm(&cordis_base::types::LlmOutput::default());
+        assert_eq!(sessions.context_anchor().map(|a| a.tokens), Some(900_001));
+        assert!(sessions.restore(&small.id));
+        assert_eq!(sessions.context_anchor(), None);
     }
 
     #[tokio::test]

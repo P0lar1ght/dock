@@ -18,7 +18,7 @@ use dock_memory::rewrite::{rewrite_user_message, REMEMBER_REWRITE_SYSTEM_PROMPT}
 use dock_memory::storage::{save_remember_note, write_flush_observation};
 
 use crate::error::{Error, Result};
-use crate::llm::compact::{estimate_context_tokens, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
+use crate::llm::compact::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
 use crate::llm::sampler::Llm;
 use crate::names::{LLM, MEMORY, SESSIONS, SYSTEM_PROMPT};
 use crate::prompt::assemble::SystemPrompt;
@@ -41,15 +41,7 @@ pub async fn maybe_flush_before_compact(ctx: &Context) {
         .get::<SystemPrompt>(SYSTEM_PROMPT)
         .map(|p| p.assemble_on(ctx))
         .unwrap_or_default();
-    let used = {
-        let estimate = estimate_context_tokens(&system, &sessions.model_history());
-        let u = sessions.usage();
-        if u.official {
-            u.prompt.max(estimate)
-        } else {
-            estimate
-        }
-    };
+    let used = crate::prompt::context_usage::context_tokens_used(ctx, &system);
     let window = sessions.usage().window;
     let cycle = sessions.compaction_count().saturating_add(1);
     if !should_flush(
