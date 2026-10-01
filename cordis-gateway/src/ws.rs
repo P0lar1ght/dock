@@ -216,6 +216,12 @@ async fn detached(
     let out = out.clone();
     let id = value.get("id").cloned();
     let params = value.get("params").cloned().unwrap_or(json!({}));
+    // 先后要在这里定：下面的 future 各自开任务，开跑的先后不保证。
+    let order = if viewing {
+        views.order(&method, &params)
+    } else {
+        browser_view::Order::None
+    };
     let ready = {
         let c = conn.lock().await;
         if c.auth.is_none() {
@@ -235,7 +241,7 @@ async fn detached(
     Some(async move {
         let result = match ready {
             Ok(gateway) if viewing => {
-                browser_view::dispatch(&gateway, &views, &out, &method, params).await
+                browser_view::dispatch(&gateway, &views, &out, &method, params, order).await
             }
             Ok(gateway) => rpc::dispatch_detached(gateway, &method, params).await,
             Err(e) => Err(e),

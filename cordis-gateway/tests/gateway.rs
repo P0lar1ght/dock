@@ -1,5 +1,6 @@
 //! Origin pairing, dock.1 handshake, turn projection, permission dual-resolve.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -376,6 +377,48 @@ impl Rpc {
                 return value;
             }
         }
+    }
+
+    /// 只发不等，回请求 id（连发几个请求测并发用）。
+    async fn send(&mut self, method: &str, params: Value) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.write
+            .send(Message::Text(
+                json!({ "id": id, "method": method, "params": params })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        id
+    }
+
+    /// 收齐 `ids` 的回包；顺手收下其间的推送。
+    async fn collect(
+        &mut self,
+        ids: &[i64],
+        deadline: Duration,
+    ) -> (HashMap<i64, Value>, Vec<Value>) {
+        let start = tokio::time::Instant::now();
+        let mut replies = HashMap::new();
+        let mut notes = Vec::new();
+        while replies.len() < ids.len() {
+            let left = deadline.saturating_sub(start.elapsed());
+            let msg = tokio::time::timeout(left, self.read.next())
+                .await
+                .unwrap_or_else(|_| panic!("timed out; got {replies:?}"))
+                .expect("ws closed")
+                .unwrap();
+            let value: Value = serde_json::from_str(&msg.into_text().unwrap()).unwrap();
+            match value.get("id").and_then(Value::as_i64) {
+                Some(id) if ids.contains(&id) => {
+                    replies.insert(id, value);
+                }
+                _ => notes.push(value),
+            }
+        }
+        (replies, notes)
     }
 
     async fn wait_notification(&mut self, method: &str, deadline: Duration) -> Value {
@@ -2112,6 +2155,118 @@ async fn browser_view_streams_the_agents_tab() {
         .wait_notification("browser/view/closed", Duration::from_secs(5))
         .await;
     assert_eq!(ended["params"]["reason"], "no_tab", "{ended}");
+    hub.shutdown().await;
+}
+
+/// 真 Chrome：同一会话连发两次 `browser/view/open`，后发的那个一定活着；先发的要么回
+/// `superseded`，要么成功后收到 `closed { reason: "replaced" }`——不会悄悄死掉。
+/// 不等回包连发的文字，按发送顺序进页面（网关每个请求各开任务，以前会乱序）。
+// 多线程运行时：`dock serve` 就是这样跑的；单线程下任务按开的顺序轮到，乱序复现不了。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real Chrome"]
+async fn browser_view_concurrent_opens_and_inputs_keep_order() {
+    if cordis_browser::session::discover_chrome().is_err() {
+        eprintln!("skip: chrome not installed");
+        return;
+    }
+    let h = Harness::boot().await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    let key = cordis_spine::mcp_session_key(&sessions);
+    let hub = cordis_browser::BrowserHub::new();
+    let opened = hub
+        .call(
+            &key,
+            "browser_open",
+            &json!({"url": "data:text/html,<input id=i style='position:fixed;left:0;top:0;width:300px;height:40px'>"}),
+        )
+        .await;
+    assert!(!opened.is_error, "{}", opened.text);
+
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let mut live = String::new();
+    for round in 0..6 {
+        let a = rpc
+            .send("browser/view/open", json!({ "maxWidth": 320 }))
+            .await;
+        let b = rpc
+            .send("browser/view/open", json!({ "maxWidth": 320 }))
+            .await;
+        let (replies, mut notes) = rpc.collect(&[a, b], Duration::from_secs(20)).await;
+        live = replies[&b]["result"]["viewId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("round {round}: 后发的 open 要成功：{replies:?}"))
+            .to_string();
+        let first = &replies[&a];
+        if let Some(stale) = first["result"]["viewId"].as_str() {
+            // 先发的成功了，就一定要被告知它被顶掉了。
+            let replaced =
+                |n: &Value| n["method"] == "browser/view/closed" && n["params"]["viewId"] == stale;
+            if !notes.iter().any(replaced) {
+                loop {
+                    let n = rpc
+                        .wait_notification("browser/view/closed", Duration::from_secs(5))
+                        .await;
+                    notes.push(n.clone());
+                    if replaced(&n) {
+                        break;
+                    }
+                }
+            }
+            let note = notes.iter().find(|n| replaced(n)).unwrap();
+            assert_eq!(note["params"]["reason"], "replaced", "{note}");
+        } else {
+            assert_eq!(first["error"]["details"]["code"], "superseded", "{first}");
+        }
+        let ok = rpc
+            .call(
+                "browser/view/input",
+                json!({ "viewId": live, "event": { "type": "mouse", "action": "move", "x": 5, "y": 5 } }),
+            )
+            .await;
+        assert_eq!(
+            ok["result"]["ok"], true,
+            "round {round}: 活着的视图要能用：{ok}"
+        );
+    }
+
+    let click = rpc
+        .call(
+            "browser/view/input",
+            json!({ "viewId": live, "event": { "type": "mouse", "action": "click", "x": 20, "y": 20 } }),
+        )
+        .await;
+    assert_eq!(click["result"]["ok"], true, "{click}");
+    let typed = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(4);
+    let mut ids = Vec::new();
+    for ch in typed.chars() {
+        ids.push(
+            rpc.send(
+                "browser/view/input",
+                json!({ "viewId": live, "event": { "type": "text", "text": ch.to_string() } }),
+            )
+            .await,
+        );
+    }
+    let (replies, _) = rpc.collect(&ids, Duration::from_secs(20)).await;
+    assert!(
+        replies.values().all(|r| r["result"]["ok"] == true),
+        "{replies:?}"
+    );
+    let value = hub
+        .call(
+            &key,
+            "browser_evaluate",
+            &json!({ "expression": "document.getElementById('i').value" }),
+        )
+        .await;
+    assert!(
+        value.text.contains(&typed),
+        "文字要按发送顺序进页面：{}",
+        value.text
+    );
     hub.shutdown().await;
 }
 
