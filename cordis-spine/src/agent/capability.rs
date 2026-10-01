@@ -105,13 +105,14 @@ fn class_of(tool: &str) -> Class {
         // 发不了、打断不了。
         "send_message" => Class::Meta,
 
-        "read_file" | "memory_get" | "memory_search" => Class::Read,
+        "read_file" | "memory_get" | "memory_search" | "canvas_read" => Class::Read,
 
         "grep" | "glob" | "web_search" | "web_fetch" => Class::Search,
 
         "list_dir" | "lsp" | "list_agents" => Class::Inspect,
 
-        "search_replace" | "write_file" | "memory_write" => Class::Edit,
+        "search_replace" | "write_file" | "memory_write" | "canvas_create" | "canvas_edit"
+        | "canvas_data" => Class::Edit,
 
         "bash" | "monitor" | "task" | "interrupt_agent" | "job" | "kill_task" | "workflow"
         | "scheduler_create" | "scheduler_delete" | "scheduler_list" => Class::Execute,

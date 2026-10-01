@@ -18,6 +18,7 @@ use crate::session::log::sessions;
 use crate::session::roster::roster;
 use crate::tools::ask_user::tool_ask_user;
 use crate::tools::browser::tool_browser;
+use crate::tools::canvas::tool_canvas;
 use crate::tools::computer::tool_computer;
 use crate::tools::cron::cron;
 use crate::tools::dynamic_runner::{dynamic_runner, DynamicRunner};
@@ -137,6 +138,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(plan_mode_tool_registration(), ())?
         .wait()
         .await?;
+    // 画布：模型写 HTML，桌面端在会话旁渲染；落在会话目录 `canvas/` 下。
+    ctx.plugin(tool_canvas(), ())?.wait().await?;
     ctx.plugin(tool_lsp(), ())?.wait().await?;
     ctx.plugin(tool_skills(), ())?.wait().await?;
     ctx.plugin(tool_workflow(), ())?.wait().await?;

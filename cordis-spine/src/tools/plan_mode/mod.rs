@@ -102,7 +102,7 @@ impl PlanMode {
 
     /// Sessions of the page this service was mounted on. A child looking up
     /// `planMode` still gets this page, not its own isolated log.
-    fn page_sessions(&self) -> Option<std::sync::Arc<Sessions>> {
+    pub(crate) fn page_sessions(&self) -> Option<std::sync::Arc<Sessions>> {
         self.ctx.get::<Sessions>(SESSIONS)
     }
 

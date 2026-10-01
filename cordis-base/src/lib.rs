@@ -19,8 +19,10 @@
 //! | [`grep`] | 进程内 ripgrep 引擎（工具插件在 spine） |
 //! | [`tool_output`] | 工具输出的共享预算：语义分页 + 溢出落盘 |
 //! | [`test_env`] | 进程级 env / cwd 的测试互斥 |
+//! | [`canvas`] | 画布落盘引擎：HTML 分版 + data.json |
 
 pub mod acp;
+pub mod canvas;
 pub mod chat_chunk;
 pub mod config;
 pub mod cua;

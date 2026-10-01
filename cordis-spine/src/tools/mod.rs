@@ -18,6 +18,7 @@
 pub mod ask_user;
 pub mod bash;
 pub mod browser;
+pub mod canvas;
 pub mod computer;
 pub mod cron;
 pub mod dynamic_runner;

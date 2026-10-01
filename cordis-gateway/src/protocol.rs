@@ -32,6 +32,8 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("workspaceFiles", true),
     // `item/tool_completed.attachments` + `item/image`：工具结果里的截图等。
     ("toolImages", true),
+    // `canvas/list` / `get` / `setData` / `rollback`：模型写的画布（HTML 分版 + 数据）。
+    ("canvas", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -115,6 +117,12 @@ pub const BROWSER_VIEW_CLOSED: &str = "browser/view/closed";
 pub const FS_LIST: &str = "fs/list";
 pub const FS_READ: &str = "fs/read";
 pub const FS_FIND: &str = "fs/find";
+
+/// 会话的画布：列 / 读一版 / 改数据 / 回滚。
+pub const CANVAS_LIST: &str = "canvas/list";
+pub const CANVAS_GET: &str = "canvas/get";
+pub const CANVAS_SET_DATA: &str = "canvas/setData";
+pub const CANVAS_ROLLBACK: &str = "canvas/rollback";
 pub const IMAGE_INPUTS_LIMITS_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]
