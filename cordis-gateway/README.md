@@ -176,6 +176,10 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
 - 地址栏：没写协议补 `https://`；只放行 http / https / about / data / file（`javascript:` 拒）。
 - 这四个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
+- 同一会话连发 `open`：最后收到的那个留下。
+  - 先完成、已回了 `viewId` 的被顶掉时推 `closed { reason: "replaced" }`；
+  - 晚完成、已经不是最新的回错误 `superseded`。
+- 同一视图的 `input` 按收到的顺序一个个发给页面，客户端不用等回包再发下一个。
 
 ### 工具结果里的图（能力 `toolImages`）
 

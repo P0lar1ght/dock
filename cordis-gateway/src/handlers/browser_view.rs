@@ -12,8 +12,15 @@
 //! 会话的活动标签页。agent 切了标签页，画面跟着切；会话的标签页都关了，推 `closed`。
 //!
 //! 视图是**连接级**的：不进会话、不落盘，只活在这条 WebSocket 上。
+//!
+//! 网关每个请求各开任务跑，这里有两处要按**收到的顺序**来（见 [`BrowserViews::order`]，
+//! 在读循环里同步定序）：
+//! - 同一会话连发 `open`：最后收到的那个留下。先完成的早已回了 `viewId`，被顶掉时推
+//!   `closed { reason: "replaced" }`；晚完成的发现自己不是最新，回 `superseded`。
+//! - 同一视图的 `input`：一个做完下一个才发给页面，按下 / 抬起、连打的字不会乱序。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,6 +43,22 @@ const FOLLOW_EVERY: Duration = Duration::from_millis(700);
 #[derive(Default)]
 pub(crate) struct BrowserViews {
     open: Mutex<HashMap<String, ViewEntry>>,
+    /// 每个会话最后收到的那次 `open` 的序号。
+    latest_open: Mutex<HashMap<String, u64>>,
+    next_open: AtomicU64,
+    /// 每个视图最后一个 `input` 的「做完了」信号，下一个先等它。
+    last_input: Mutex<HashMap<String, oneshot::Receiver<()>>>,
+}
+
+/// 请求在读循环里定下的先后（见 [`BrowserViews::order`]）。
+pub(crate) enum Order {
+    None,
+    Open(u64),
+    Input {
+        prev: Option<oneshot::Receiver<()>>,
+        /// 这一个做完（或失败、被丢掉）时随 drop 通知下一个。
+        _done: oneshot::Sender<()>,
+    },
 }
 
 struct ViewEntry {
@@ -69,7 +92,32 @@ impl BrowserViews {
     }
 
     fn remove(&self, id: &str) -> Option<ViewEntry> {
+        self.last_input.lock().unwrap().remove(id);
         self.open.lock().unwrap().remove(id)
+    }
+
+    /// 在连接的读循环里、按收到的顺序同步调用（不能挪进各自的任务里：任务开跑的先后
+    /// 不保证）。`open` 记下序号，`input` 排到同一视图上一个输入后面。
+    pub(crate) fn order(&self, method: &str, params: &Value) -> Order {
+        match method {
+            protocol::BROWSER_VIEW_OPEN => {
+                let seq = self.next_open.fetch_add(1, Ordering::Relaxed) + 1;
+                self.latest_open
+                    .lock()
+                    .unwrap()
+                    .insert(threads::thread_param(params), seq);
+                Order::Open(seq)
+            }
+            protocol::BROWSER_VIEW_INPUT => {
+                let Ok(id) = view_id(params) else {
+                    return Order::None;
+                };
+                let (done, next) = oneshot::channel();
+                let prev = self.last_input.lock().unwrap().insert(id.to_string(), next);
+                Order::Input { prev, _done: done }
+            }
+            _ => Order::None,
+        }
     }
 }
 
@@ -89,10 +137,27 @@ pub(crate) async fn dispatch(
     out: &OutTx,
     method: &str,
     params: Value,
+    order: Order,
 ) -> Result<Value, RpcError> {
     match method {
-        protocol::BROWSER_VIEW_OPEN => open(gateway, views, out, params).await,
+        protocol::BROWSER_VIEW_OPEN => {
+            let seq = match order {
+                Order::Open(seq) => seq,
+                _ => 0,
+            };
+            open(gateway, views, out, params, seq).await
+        }
         protocol::BROWSER_VIEW_INPUT => {
+            // 等上一个输入做完；`order` 活到这个分支结束，drop 时放下一个。
+            let _order = match order {
+                Order::Input { prev, _done } => {
+                    if let Some(prev) = prev {
+                        let _ = prev.await;
+                    }
+                    Some(_done)
+                }
+                _ => None,
+            };
             let event = params
                 .get("event")
                 .filter(|e| e.is_object())
@@ -133,6 +198,7 @@ async fn open(
     views: &Arc<BrowserViews>,
     out: &OutTx,
     params: Value,
+    seq: u64,
 ) -> Result<Value, RpcError> {
     let thread_id = threads::thread_param(&params);
     let page = threads::resolve(gateway, &thread_id)?;
@@ -153,20 +219,6 @@ async fn open(
         .await
         .map_err(|e| RpcError::app("browser_unavailable", e))?;
 
-    // 同一条连接对同一个会话只留一个视图：再开就把旧的关掉。
-    let stale: Vec<ViewEntry> = {
-        let mut open = views.open.lock().unwrap();
-        let ids: Vec<String> = open
-            .iter()
-            .filter(|(_, e)| e.thread_id == thread_id)
-            .map(|(id, _)| id.clone())
-            .collect();
-        ids.into_iter().filter_map(|id| open.remove(&id)).collect()
-    };
-    for entry in stale {
-        entry.task.abort();
-    }
-
     let view_id = uuid::Uuid::new_v4().simple().to_string();
     let current: Current = Arc::new(Mutex::new(Some(Arc::new(view))));
     let pump = Pump {
@@ -180,15 +232,61 @@ async fn open(
         out: out.clone(),
         views: Arc::downgrade(views),
     };
-    let task = tokio::spawn(pump.run(frames));
-    views.open.lock().unwrap().insert(
-        view_id.clone(),
-        ViewEntry {
-            thread_id: thread_id.clone(),
-            current,
-            task,
-        },
-    );
+    // 同一条连接对同一个会话只留一个视图，留最后收到的那次 open。查和装在同一把锁里，
+    // 两个 open 不会都以为自己是最新的。
+    let installed = {
+        let mut open = views.open.lock().unwrap();
+        let latest = views.latest_open.lock().unwrap().get(&thread_id).copied();
+        if seq != 0 && latest.is_some_and(|l| l != seq) {
+            Err(current)
+        } else {
+            let ids: Vec<String> = open
+                .iter()
+                .filter(|(_, e)| e.thread_id == thread_id)
+                .map(|(id, _)| id.clone())
+                .collect();
+            let stale: Vec<(String, ViewEntry)> = ids
+                .into_iter()
+                .filter_map(|id| open.remove(&id).map(|e| (id, e)))
+                .collect();
+            let task = tokio::spawn(pump.run(frames));
+            open.insert(
+                view_id.clone(),
+                ViewEntry {
+                    thread_id: thread_id.clone(),
+                    current,
+                    task,
+                },
+            );
+            Ok(stale)
+        }
+    };
+    let stale = match installed {
+        Ok(stale) => stale,
+        Err(current) => {
+            // 开到一半又来了更新的 open：这个作废，CDP 连接关掉。
+            let view = current.lock().unwrap().take();
+            if let Some(view) = view.and_then(|v| Arc::try_unwrap(v).ok()) {
+                view.close().await;
+            }
+            return Err(RpcError::app(
+                "superseded",
+                "同一会话又开了一个画面，这个作废",
+            ));
+        }
+    };
+    for (id, entry) in stale {
+        entry.task.abort();
+        views.last_input.lock().unwrap().remove(&id);
+        // 它的 viewId 早回给客户端了：告诉它这个视图没了。
+        let _ = out.send(Outgoing::Text(
+            json!({
+                "method": protocol::BROWSER_VIEW_CLOSED,
+                "params": { "viewId": id, "threadId": thread_id, "reason": "replaced" }
+            })
+            .to_string(),
+        ));
+    }
     Ok(json!({
         "viewId": view_id,
         "threadId": thread_id,
