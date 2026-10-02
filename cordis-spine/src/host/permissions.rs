@@ -15,6 +15,9 @@ use cordis_base::acp::PermissionOptionKind;
 pub struct PermissionPrompt {
     pub tool: String,
     pub summary: String,
+    /// 发起这次请求的子代理（agent id）；主会话自己发的是 `None`。只用来展示「来自哪个
+    /// 子代理」，不参与放行规则：子代理和派它的那一页共用同一个队列、同一份「始终允许」。
+    pub agent_id: Option<String>,
 }
 
 struct Pending {
@@ -89,16 +92,26 @@ impl Permissions {
     }
 
     pub async fn request(&self, tool: &str, summary: &str) -> bool {
-        self.ask(tool, summary, false).await
+        self.ask(tool, summary, None, false).await
+    }
+
+    /// 同 [`Self::request`]，并记下是哪个子代理发的（`agent_id`，展示用）。
+    pub async fn request_from(&self, tool: &str, summary: &str, agent_id: Option<String>) -> bool {
+        self.ask(tool, summary, agent_id, false).await
     }
 
     /// 只读场景（计划模式、只读子代理、旁问页）里一条可能改东西的 bash：一定要人点头。
     /// 自动批准和「以后都允许」都不算数——它们是在普通模式下给的；「以后都拒绝」照旧生效。
-    pub async fn request_strict(&self, tool: &str, summary: &str) -> bool {
-        self.ask(tool, summary, true).await
+    pub async fn request_strict(
+        &self,
+        tool: &str,
+        summary: &str,
+        agent_id: Option<String>,
+    ) -> bool {
+        self.ask(tool, summary, agent_id, true).await
     }
 
-    async fn ask(&self, tool: &str, summary: &str, strict: bool) -> bool {
+    async fn ask(&self, tool: &str, summary: &str, agent_id: Option<String>, strict: bool) -> bool {
         if !strict {
             if let Some(settings) = self.ctx.get::<AppSettings>(SETTINGS) {
                 if settings.permission_mode() == PermissionMode::Allow {
@@ -122,6 +135,7 @@ impl Permissions {
             prompt: PermissionPrompt {
                 tool: tool.to_string(),
                 summary: summary.to_string(),
+                agent_id,
             },
             tx,
         });

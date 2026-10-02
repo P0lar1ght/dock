@@ -21,6 +21,8 @@
 
 ### 新增
 
+- **权限请求标出是哪个子代理发的**：`permission/requested` 带 `agentId`（主会话发的是 `null`）。
+  - 客户端可以提供「始终允许」（`permission/resolve { always: true }`），子代理与派它的页共用。
 - **子代理上网关**（能力 `subagents`）：GUI / 嵌入页能看子代理在干什么。
   - 推送 `subagent/updated`（状态）与 `subagent/event`（子代理自己的对话，包在父线程上）。
   - `subagent/list` / `history` 补中途接入；`subagent/send` / `interrupt` / `stop` 能插话、打断、收掉。

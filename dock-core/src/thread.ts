@@ -51,6 +51,8 @@ export type TurnItem =
       id: string;
       toolName: string;
       summary: string;
+      /** 发起请求的子代理（agent id）；主会话自己发的是 `null`。 */
+      agentId: string | null;
       /** `null` = 还在等用户；`cancelled` = 没等到回答这一轮就结束了。 */
       decision: 'approve' | 'deny' | 'cancelled' | null;
       always: boolean;
@@ -198,6 +200,7 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
           id: event.requestId,
           toolName: event.toolName,
           summary: event.summary,
+          agentId: event.agentId,
           decision: null,
           always: false,
         });

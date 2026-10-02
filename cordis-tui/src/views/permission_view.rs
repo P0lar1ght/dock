@@ -400,6 +400,7 @@ mod tests {
         let prompt = PermissionPrompt {
             tool: "search_replace".into(),
             summary: "old_string / new_string".into(),
+            agent_id: None,
         };
         render(&mut buf, area, &prompt, 0);
         let mut painted = String::new();

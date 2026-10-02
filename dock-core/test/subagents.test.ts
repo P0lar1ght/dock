@@ -121,3 +121,15 @@ test('停下的子代理拿到历史后不再接攒着的旧推送（Dock 收掉
   assert.equal(text?.kind === 'text' && text.text, '旧推送', '不重复');
   assert.equal(s.byId.kid.info.status, 'completed');
 });
+
+test('权限请求带发起它的子代理；旧网关不带时是 null', () => {
+  const ask = (params: Record<string, unknown>) =>
+    reduceThread(
+      EMPTY_THREAD,
+      parseEvent('permission/requested', { seq: 1, threadId: 'th', turnId: 't1', timestamp: '1', requestId: 'p1', toolName: 'bash', summary: 'ls', ...params })!,
+    ).turns[0].items[0];
+  const fromKid = ask({ agentId: 'kid' });
+  assert.equal(fromKid.kind === 'permission' && fromKid.agentId, 'kid');
+  const old = ask({});
+  assert.equal(old.kind === 'permission' && old.agentId, null);
+});

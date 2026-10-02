@@ -394,7 +394,9 @@ impl Transcript {
                 "toolName": prompt.tool,
                 "title": prompt.tool,
                 "summary": prompt.summary,
-                "reason": prompt.summary
+                "reason": prompt.summary,
+                // 子代理发的请求带它的 agent id（客户端标「来自子代理」）；主会话发的是 null。
+                "agentId": prompt.agent_id
             }),
         );
     }
@@ -872,6 +874,33 @@ mod tests {
         t.history_since(0).into_iter().map(|e| e.method).collect()
     }
 
+    /// 子代理发的权限请求带它的 agent id，主会话发的是 null（客户端据此标「来自子代理」）。
+    #[test]
+    fn permission_requests_carry_the_requesting_subagent() {
+        let mut t = Transcript::new();
+        t.sync_permission(
+            Some((
+                1,
+                PermissionPrompt {
+                    agent_id: Some("kid-1".into()),
+                    ..prompt("echo hi")
+                },
+            )),
+            None,
+        );
+        t.sync_permission(
+            Some((2, prompt("ls"))),
+            Some(PermissionOptionKind::AllowOnce),
+        );
+        let asked: Vec<_> = t
+            .history_since(0)
+            .into_iter()
+            .filter(|e| e.method == "permission/requested")
+            .map(|e| e.payload["agentId"].clone())
+            .collect();
+        assert_eq!(asked, [json!("kid-1"), Value::Null]);
+    }
+
     /// 子代理在跑时父级发来的话以 system-reminder 进它的会话：子代理的投影把它报成
     /// 一条 `origin: parent` 的消息；主会话的 reminder 照旧不投影。推送包成
     /// `subagent/event`，不占父线程的历史。
@@ -913,6 +942,7 @@ mod tests {
         PermissionPrompt {
             tool: "bash".into(),
             summary: summary.into(),
+            agent_id: None,
         }
     }
 

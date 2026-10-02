@@ -163,7 +163,14 @@ export type DockEvent = EventBase &
         /** 旧网关不带：空数组。 */
         images: ToolImage[];
       }
-    | { method: 'permission/requested'; requestId: string; toolName: string; summary: string }
+    | {
+        method: 'permission/requested';
+        requestId: string;
+        toolName: string;
+        summary: string;
+        /** 发起请求的子代理（agent id）；主会话自己发的是 `null`。旧网关不带：`null`。 */
+        agentId: string | null;
+      }
     | { method: 'permission/resolved'; requestId: string; decision: 'approve' | 'deny'; always: boolean }
     | { method: 'interaction/requested'; interactionId: string; questions: Question[] }
     | { method: 'interaction/resolved'; interactionId: string }
@@ -282,6 +289,7 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
         requestId: str(params.requestId),
         toolName: str(params.toolName),
         summary: str(params.summary),
+        agentId: str(params.agentId) || null,
       };
     case 'permission/resolved':
       return {
