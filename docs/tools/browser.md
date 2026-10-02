@@ -57,6 +57,10 @@
 - **连已有的 Chromium**：先读 user-data 下的 `DevToolsActivePort`。
   - 连得上就直接用（比如 TUI 和 GUI 各起了一个 Dock）；连上的一方不关别人的进程。
   - 连不上（文件过期）才自己拉起。
+- 拉起时不带 `--enable-automation`、关掉 `AutomationControlled`（`navigator.webdriver` 为 false）；
+  无头时 UA 换成同版本普通 Chrome（不写 `HeadlessChrome`）。
+  - 以前两样都露着，Google 搜索一直弹人机验证，人在面板里也过不去。
+  - 只管自己拉起的；连上已有的 Chromium 时沿用它启动时的参数。
 - Chromium 被关掉或崩了：下一次调用把各组作废，提示先 `browser_open`。
 - stdin 关闭（Dock 退出）：关掉全部标签页和自己拉起的 Chromium。
 

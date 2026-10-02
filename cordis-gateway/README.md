@@ -196,7 +196,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 每 400ms 对一次，变了推 `browser/view/tabs`；名册里有、Chrome 里已经没了的页不列。
   - `browser/view/tab` 以那页的身份调浏览器 MCP 的 `browser_tabs`（序号按名册现查）：
     用户和 agent 共用当前页，面板切到哪页 agent 就在哪页；画面和标签栏由推送跟上。
-  - 关最后一页回 `tab_failed`（关浏览器交给 `browser_close`）；页不在了回 `not_found`。
+  - 关最后一页改调 `browser_close`（关掉这个会话的浏览器页），随后推 `closed { reason: "no_tab" }`；
+    页不在了回 `not_found`，MCP 回错是 `tab_failed`。
   - 和 `input` / `resize` 排同一条队：点了新标签页紧接着敲的字落在新页上。
   - 页面自己开的新页（`target=_blank`、`window.open`）要浏览器 MCP 收进会话才进名册：
     看到 opener 是本会话的页、还没进名册的，就（至多每秒一次）在后台调一次 `browser_tabs` 催它收。
@@ -209,6 +210,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
 - 地址栏：没写协议补 `https://`，本机和内网地址（`localhost`、`127.0.0.1`、`192.168.x.x`…）补 `http://`；
   只放行 http / https / about / data / file（`javascript:` 拒）。
+  - 不像网址的拿去 Google 搜索（`抖音`、带空格的词）；`?` 开头强制搜索。
+  - 像网址：认得的协议、本机、IP，或主机名里有点且最后一段是字母（`douyin.com`、`例子.中国`）。
 - 这几个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
 - 同一会话连发 `open`：最后收到的那个留下。
   - 先完成、已回了 `viewId` 的被顶掉时推 `closed { reason: "replaced" }`；

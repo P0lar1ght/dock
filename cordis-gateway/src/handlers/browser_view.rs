@@ -422,8 +422,9 @@ async fn open(
     }))
 }
 
-/// `browser/view/tab`：以这页的身份调浏览器 MCP 的 `browser_tabs`。序号按名册现在的顺序
-/// 现查（和 `browser_tabs` 的一致）；画面、标签栏由推送任务下一拍跟上。
+/// `browser/view/tab`：以这页的身份调浏览器 MCP 的 `browser_tabs`（关最后一页调
+/// `browser_close`）。序号按名册现在的顺序现查（和 `browser_tabs` 的一致）；画面、标签栏由
+/// 推送任务下一拍跟上。
 async fn tab(views: &BrowserViews, params: &Value) -> Result<Value, RpcError> {
     let id = view_id(params)?;
     let (page, key) = views
@@ -434,18 +435,30 @@ async fn tab(views: &BrowserViews, params: &Value) -> Result<Value, RpcError> {
         .map(|e| (e.page.clone(), e.key.clone()))
         .ok_or_else(|| RpcError::app("not_found", format!("没有视图 {id}")))?;
     let action = params.get("action").and_then(Value::as_str).unwrap_or("");
-    let index = || -> Result<usize, RpcError> {
+    // 这一页在名册里的序号和会话一共几页（序号和 `browser_tabs` 的一致）。
+    let position = || -> Result<(usize, usize), RpcError> {
         let target = params
             .get("targetId")
             .and_then(Value::as_str)
             .ok_or_else(|| RpcError::invalid_params("targetId is required"))?;
         registry::lookup(&key)
-            .and_then(|tabs| tabs.targets.iter().position(|t| t == target))
+            .and_then(|tabs| {
+                let at = tabs.targets.iter().position(|t| t == target)?;
+                Some((at, tabs.targets.len()))
+            })
             .ok_or_else(|| RpcError::app("not_found", "这个标签页已经不在了"))
     };
-    let args = match action {
-        "switch" => json!({ "action": "switch", "index": index()? }),
-        "close" => json!({ "action": "close", "index": index()? }),
+    let (tool, args) = match action {
+        "switch" => (
+            "browser_tabs",
+            json!({ "action": "switch", "index": position()?.0 }),
+        ),
+        // 关最后一页 = 关掉这个会话的浏览器页（同 agent 的 `browser_close`）：`browser_tabs`
+        // 不让关最后一页。之后推送任务推 `closed { reason: "no_tab" }`，面板回到「还没打开网页」。
+        "close" => match position()? {
+            (_, 1) => ("browser_close", json!({})),
+            (index, _) => ("browser_tabs", json!({ "action": "close", "index": index })),
+        },
         "new" => {
             let url = match params.get("url").and_then(Value::as_str).map(str::trim) {
                 Some(raw) if !raw.is_empty() => {
@@ -453,7 +466,7 @@ async fn tab(views: &BrowserViews, params: &Value) -> Result<Value, RpcError> {
                 }
                 _ => "about:blank".to_string(),
             };
-            json!({ "action": "new", "url": url })
+            ("browser_tabs", json!({ "action": "new", "url": url }))
         }
         other => {
             return Err(RpcError::invalid_params(format!(
@@ -463,16 +476,11 @@ async fn tab(views: &BrowserViews, params: &Value) -> Result<Value, RpcError> {
     };
     let out = mcp(&page)
         .map_err(|e| RpcError::app("browser_unavailable", e))?
-        .call_as(&page, BROWSER_MCP_SERVER, "browser_tabs", args)
+        .call_as(&page, BROWSER_MCP_SERVER, tool, args)
         .await
         .map_err(|e| RpcError::app("browser_unavailable", e))?;
     if out.is_error {
-        let message = if out.content.contains("last tab") {
-            "这是最后一个标签页，不能关".to_string()
-        } else {
-            out.content
-        };
-        return Err(RpcError::app("tab_failed", message));
+        return Err(RpcError::app("tab_failed", out.content));
     }
     Ok(json!({ "ok": true }))
 }

@@ -516,3 +516,28 @@ async fn tabs_the_page_opens_join_the_session() {
     assert!(!b.contains("#link") && !b.contains("#script"), "{b}");
     hub.shutdown().await;
 }
+
+/// 拉起的 Chromium 不自报「被自动化控制」：`navigator.webdriver` 是 false、UA 里没有
+/// `HeadlessChrome`。以前两样都露着，Google 搜索一直弹人机验证，人在面板里也过不去。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn launched_chromium_does_not_announce_automation() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("fingerprint") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(&hub, "a", "browser_open", json!({"url": "about:blank"})).await;
+    let out = ok(
+        &hub,
+        "a",
+        "browser_evaluate",
+        json!({"expression": "JSON.stringify([navigator.webdriver, navigator.userAgent])"}),
+    )
+    .await;
+    assert!(out.text.contains("false"), "{}", out.text);
+    assert!(!out.text.contains("HeadlessChrome"), "{}", out.text);
+    assert!(out.text.contains("Chrome/"), "{}", out.text);
+    hub.shutdown().await;
+}
