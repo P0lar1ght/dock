@@ -201,18 +201,31 @@ impl Chromium {
             .user_data_dir(user_data_dir)
             .no_sandbox()
             .launch_timeout(LAUNCH_TIMEOUT)
-            // chromiumoxide Arg::from does not auto-prepend "--" for bare keys in 0.9,
-            // but Builder::arg historically treated "--foo" as key "--foo" and some
-            // formatters double the dashes — pass bare flag names without leading "--".
-            // (Lynn: "--force-…" became "----force-…" and accessibility never applied.)
-            .arg("disable-dev-shm-usage")
-            .arg("force-renderer-accessibility");
+            // 不自报「被自动化控制」：chromiumoxide 默认带 `--enable-automation`
+            // （`navigator.webdriver = true`、顶上一条提示栏），Google 搜索这类站点见了就一直
+            // 弹人机验证，人在面板里也过不去。默认参数照抄、去掉这一条（见 LAUNCH_ARGS）。
+            .disable_default_args()
+            .hide();
+
+        for raw in LAUNCH_ARGS {
+            builder = match raw.split_once('=') {
+                Some(pair) => builder.arg(pair),
+                None => builder.arg(*raw),
+            };
+        }
 
         // Headless by default (CI / servers). Prefer with_head when cockpit/env says so.
         // Default Viewport 800×600 Emulation-overrides layout; headed windows then paint
         // only a corner on grey chrome. Clear viewport so the OS window drives layout.
         if headed {
             builder = builder.with_head().viewport(None).window_size(1280, 900);
+        } else if let Some(ua) = chrome_version(&exe)
+            .await
+            .and_then(|v| desktop_user_agent(&v))
+        {
+            // 无头的 UA 写着 `HeadlessChrome`：换成同版本的普通 Chrome（agent 和用户在面板里
+            // 用的就是这个浏览器，网站看到的应该和真 Chrome 一样）。
+            builder = builder.arg(("user-agent", ua.as_str()));
         }
 
         let config = builder.build().map_err(|e| format!("BrowserConfig: {e}"))?;
@@ -312,6 +325,73 @@ pub fn opened_by(
         known.push(id.clone());
         out.push((id.clone(), opener.clone()));
     }
+}
+
+/// 拉起 Chromium 的参数：chromiumoxide 的默认参数（照抄 puppeteer）去掉 `enable-automation`。
+/// `key` 或 `key=value`（多个值用逗号连）；不带前导 `--`（chromiumoxide 会再补一遍，
+/// `--force-…` 变成 `----force-…` 就不生效了）。
+const LAUNCH_ARGS: &[&str] = &[
+    "disable-background-networking",
+    "enable-features=NetworkService,NetworkServiceInProcess",
+    "disable-background-timer-throttling",
+    "disable-backgrounding-occluded-windows",
+    "disable-breakpad",
+    "disable-client-side-phishing-detection",
+    "disable-component-extensions-with-background-pages",
+    "disable-default-apps",
+    "disable-dev-shm-usage",
+    "disable-features=TranslateUI",
+    "disable-hang-monitor",
+    "disable-ipc-flooding-protection",
+    "disable-popup-blocking",
+    "disable-prompt-on-repost",
+    "disable-renderer-backgrounding",
+    "disable-sync",
+    "force-color-profile=srgb",
+    "metrics-recording-only",
+    "no-first-run",
+    "password-store=basic",
+    "use-mock-keychain",
+    "enable-blink-features=IdleDetection",
+    "lang=en_US",
+    "force-renderer-accessibility",
+];
+
+/// `chrome --version` 的版本号（`Google Chrome 154.0.7712.3` → `154.0.7712.3`）；跑不了就 `None`。
+async fn chrome_version(exe: &str) -> Option<String> {
+    let exe = exe.to_string();
+    let out = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new(exe).arg("--version").output()
+        }),
+    )
+    .await
+    .ok()?
+    .ok()?
+    .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()) && w.contains('.'))
+        .map(String::from)
+}
+
+/// 同版本普通桌面 Chrome 的 UA（Chrome 自己也只报大版本，后面是 `.0.0.0`）。
+pub fn desktop_user_agent(version: &str) -> Option<String> {
+    let major = version.split('.').next()?;
+    if major.is_empty() || !major.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let platform = if cfg!(target_os = "macos") {
+        "Macintosh; Intel Mac OS X 10_15_7"
+    } else if cfg!(target_os = "windows") {
+        "Windows NT 10.0; Win64; x64"
+    } else {
+        "X11; Linux x86_64"
+    };
+    Some(format!(
+        "Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    ))
 }
 
 /// 一个会话的标签页组：自己开的页、快照 refs、对话框、network / console 捕获。
@@ -1719,6 +1799,15 @@ fn normalize_modifier(p: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_user_agent_reports_major_version_only() {
+        let ua = desktop_user_agent("154.0.7712.3").unwrap();
+        assert!(ua.contains(" Chrome/154.0.0.0 Safari/537.36"), "{ua}");
+        assert!(!ua.contains("Headless"), "{ua}");
+        assert!(desktop_user_agent("").is_none());
+        assert!(desktop_user_agent("beta").is_none());
+    }
 
     #[test]
     fn opened_by_takes_pages_our_tabs_opened_in_order() {
