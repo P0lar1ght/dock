@@ -2272,6 +2272,75 @@ async fn browser_view_errors_without_a_tab() {
     );
 }
 
+/// 面板跟随与替会话开页（不需要 Chrome）：能力位在；`url` 开页要经浏览器 MCP，没连上回
+/// `browser_unavailable`（不是 `no_tab`）；视口参数不合法回 `invalid_params`；`resize`
+/// 认不得的视图回 `not_found`。
+#[tokio::test]
+async fn browser_view_url_and_viewport_errors() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["browserViewport"], true,
+        "{init}"
+    );
+
+    let opened = rpc
+        .call("browser/view/open", json!({ "url": "example.com" }))
+        .await;
+    assert_eq!(
+        opened["error"]["details"]["code"], "browser_unavailable",
+        "{opened}"
+    );
+    let bad_viewport = rpc
+        .call("browser/view/open", json!({ "viewport": { "width": 10 } }))
+        .await;
+    assert_eq!(
+        bad_viewport["error"]["details"]["code"], "invalid_params",
+        "{bad_viewport}"
+    );
+    let resize = rpc
+        .call(
+            "browser/view/resize",
+            json!({ "viewId": "nope", "width": 800, "height": 600 }),
+        )
+        .await;
+    assert_eq!(resize["error"]["details"]["code"], "not_found", "{resize}");
+}
+
+/// 桌面实时画面（不需要 cua-driver）：能力位在；驱动没连上 `open` 直接回
+/// `driver_unavailable`，不先给一个马上就死的 viewId；`close` 缺 viewId 回 `invalid_params`。
+#[tokio::test]
+async fn desktop_view_errors_without_a_driver() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["desktopView"], true,
+        "{init}"
+    );
+
+    let opened = rpc.call("desktop/view/open", json!({})).await;
+    assert_eq!(
+        opened["error"]["details"]["code"], "driver_unavailable",
+        "{opened}"
+    );
+    let missing = rpc.call("desktop/view/close", json!({})).await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "invalid_params",
+        "{missing}"
+    );
+    let unknown = rpc
+        .call("desktop/view/close", json!({ "viewId": "nope" }))
+        .await;
+    assert_eq!(
+        unknown["error"]["details"]["code"], "not_found",
+        "{unknown}"
+    );
+}
+
 /// 真 Chrome：agent（这里直接用浏览器 MCP 的 hub）给第 1 页开了标签页 → 客户端
 /// `browser/view/open` 收到帧 → 以用户身份点按钮 → 地址栏导航推 `status` →
 /// agent 关掉自己的标签页，视图推 `closed { reason: "no_tab" }`。
@@ -2357,6 +2426,76 @@ async fn browser_view_streams_the_agents_tab() {
         .await;
     assert_eq!(ended["params"]["reason"], "no_tab", "{ended}");
     hub.shutdown().await;
+}
+
+/// 真 Chrome：页面早就加载完、一动不动时打开视图。无头 screencast 只出 CSS 像素、页面
+/// 不动时可能一帧都不推（以前面板会一直停在骨架屏）；现在画面停下来一定补一张静止帧
+/// （`still: true`），并按 `viewport.deviceScaleFactor` 倍截（这里没接浏览器 MCP，视口
+/// 本身改不了，页面仍是 800×600，静止帧就是 1600 像素宽）。
+#[tokio::test]
+#[ignore = "needs a real Chrome"]
+async fn browser_view_static_page_still_gets_a_frame() {
+    if cordis_browser::session::discover_chrome().is_err() {
+        eprintln!("skip: chrome not installed");
+        return;
+    }
+    let h = Harness::boot().await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    let key = cordis_spine::mcp_session_key(&sessions);
+    let hub = cordis_browser::BrowserHub::new();
+    let opened = hub
+        .call(
+            &key,
+            "browser_open",
+            &json!({"url": "data:text/html,<title>Still</title><h1>nothing moves</h1>"}),
+        )
+        .await;
+    assert!(!opened.is_error, "{}", opened.text);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let view = rpc
+        .call(
+            "browser/view/open",
+            json!({ "viewport": { "width": 800, "height": 600, "deviceScaleFactor": 2 } }),
+        )
+        .await;
+    assert!(view["result"]["viewId"].is_string(), "{view}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let still = loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let frame = rpc.wait_notification("browser/view/frame", left).await;
+        if frame["params"]["still"] == true {
+            break frame;
+        }
+    };
+    assert_eq!(still["params"]["width"], 800.0, "{still}");
+    let jpeg = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        still["params"]["data"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(jpeg_width(&jpeg), Some(1600));
+    hub.shutdown().await;
+}
+
+/// JPEG 的像素宽（第一个 SOF 段里）。
+fn jpeg_width(bytes: &[u8]) -> Option<u16> {
+    let mut i = 2;
+    while i + 9 < bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        let marker = bytes[i + 1];
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        if (0xC0..=0xC2).contains(&marker) {
+            return Some(u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]));
+        }
+        i += 2 + len;
+    }
+    None
 }
 
 /// 真 Chrome：同一会话连发两次 `browser/view/open`，后发的那个一定活着；先发的要么回

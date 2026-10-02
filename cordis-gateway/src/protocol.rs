@@ -28,6 +28,11 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("presets", true),
     // `browser/view/*`：看会话正在用的浏览器标签页（CDP 画面流）并能接手操作。
     ("browserView", true),
+    // `browser/view/open` 的 `url` / `viewport` + `browser/view/resize`：没标签页时替会话开页，
+    // 页面视口跟着面板走。
+    ("browserViewport", true),
+    // `desktop/view/*`：桌面面板的实时画面（agent 操作的窗口，经 cua-driver 只截图）。
+    ("desktopView", true),
     // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
     ("workspaceFiles", true),
     // `item/tool_completed.attachments` + `item/image`：工具结果里的截图等。
@@ -109,12 +114,22 @@ pub const BROWSER_VIEW_OPEN: &str = "browser/view/open";
 pub const BROWSER_VIEW_INPUT: &str = "browser/view/input";
 pub const BROWSER_VIEW_NAVIGATE: &str = "browser/view/navigate";
 pub const BROWSER_VIEW_CLOSE: &str = "browser/view/close";
+/// 面板大小变了：按新的 CSS 尺寸和设备像素比改页面视口（agent 看到的也一起变）。
+pub const BROWSER_VIEW_RESIZE: &str = "browser/view/resize";
 /// 推送：一帧画面（base64 JPEG + 视口元数据）。
 pub const BROWSER_VIEW_FRAME: &str = "browser/view/frame";
 /// 推送：视图换了标签页，或页面地址 / 标题变了。
 pub const BROWSER_VIEW_STATUS: &str = "browser/view/status";
 /// 推送：视图结束了（`reason`：`no_tab` 会话的标签页都关了 / `browser_exited`）。
 pub const BROWSER_VIEW_CLOSED: &str = "browser/view/closed";
+
+/// 桌面（CUA）面板的实时画面：agent 正在操作的窗口，经 cua-driver 只截图。
+pub const DESKTOP_VIEW_OPEN: &str = "desktop/view/open";
+pub const DESKTOP_VIEW_CLOSE: &str = "desktop/view/close";
+/// 推送：一帧画面（base64 PNG + 窗口信息 + `source`：`agent` / `front`）。
+pub const DESKTOP_VIEW_FRAME: &str = "desktop/view/frame";
+/// 推送：视图结束了（`reason`：`driver_unavailable` / `replaced`）。
+pub const DESKTOP_VIEW_CLOSED: &str = "desktop/view/closed";
 
 /// 只读看会话工作区：列一层目录 / 读一个文件 / 按名字找文件。
 pub const FS_LIST: &str = "fs/list";

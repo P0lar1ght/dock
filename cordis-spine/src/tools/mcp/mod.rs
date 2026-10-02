@@ -274,6 +274,42 @@ impl Mcp {
             .collect()
     }
 
+    /// 不经工具表直接调某个 MCP 服务的一颗工具：不过允许名单、计划门和权限门，结果也
+    /// 不进对话流。会话身份（`_meta["dock/sessionId"]`）按 `page` 这一页算，和那页的
+    /// agent 自己调时一样。
+    ///
+    /// 给网关这类「用户在界面上亲手点的」操作用：浏览器面板地址栏开页、跟着面板改视口、
+    /// 桌面面板截实时画面。开出来的标签页记在这个会话名下，agent 接着就能用。
+    pub async fn call_as(
+        &self,
+        page: &Context,
+        server: &str,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<ToolResult, String> {
+        let call = {
+            let inner = self.inner.lock().unwrap();
+            let slot = inner
+                .slots
+                .iter()
+                .find(|s| s.config.name == server)
+                .ok_or_else(|| format!("没有配置 MCP 服务 {server}"))?;
+            slot.call
+                .clone()
+                .ok_or_else(|| format!("MCP 服务 {server} 没有连上"))?
+        };
+        let public = public_tool_name(server, tool);
+        let tool_call = ToolCall {
+            id: format!("ui-{tool}"),
+            name: public.clone(),
+            arguments: arguments.to_string(),
+        };
+        Ok(
+            crate::tools::registry::with_exec_ctx_async(page.clone(), call(public, tool_call))
+                .await,
+        )
+    }
+
     pub fn catalog_ready(&self) -> bool {
         self.inner
             .lock()
@@ -1222,6 +1258,41 @@ startup_timeout_sec = 1
             id => id,
         };
         assert_eq!(inside.as_deref(), Some(expected.as_str()));
+    }
+
+    /// `call_as` 绕过工具表直调服务，会话身份是传进来的那一页；没配 / 没连上的服务回错。
+    #[tokio::test]
+    async fn call_as_runs_the_server_tool_as_the_given_page() {
+        let (ctx, mcp, _tools) = boot().await;
+        attach_fake(&mcp, "probe", &[("ping", "ping")]);
+        {
+            let mut inner = mcp.inner.lock().unwrap();
+            let slot = inner
+                .slots
+                .iter_mut()
+                .find(|s| s.config.name == "probe")
+                .unwrap();
+            slot.call = Some(Arc::new(|public, c| {
+                Box::pin(async move {
+                    let who = calling_session().unwrap_or_default();
+                    tool_result(c, format!("{public} {who}"))
+                })
+            }));
+        }
+        let result = mcp
+            .call_as(&ctx, "probe", "ping", serde_json::json!({ "n": 1 }))
+            .await
+            .unwrap();
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        assert_eq!(
+            result.content,
+            format!("mcp_probe__ping {}", session_key(&sessions))
+        );
+
+        let missing = mcp
+            .call_as(&ctx, "nope", "ping", serde_json::json!({}))
+            .await;
+        assert!(missing.unwrap_err().contains("nope"));
     }
 
     #[tokio::test]

@@ -7,7 +7,8 @@
 //! 流控靠 CDP 自己：Chrome 收到上一帧的 `screencastFrameAck` 才发下一帧。调用方
 //! 在帧真正写出去之后再 [`View::ack`]，慢客户端就不会攒出一长串帧。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use chromiumoxide::browser::Browser;
@@ -15,9 +16,10 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventType, InsertTextParams, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    EventScreencastFrame, GetNavigationHistoryParams, NavigateParams, NavigateToHistoryEntryParams,
-    ReloadParams, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
-    StopScreencastParams,
+    CaptureScreenshotFormat, CaptureScreenshotParams, EventScreencastFrame,
+    GetNavigationHistoryParams, NavigateParams, NavigateToHistoryEntryParams, ReloadParams,
+    ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams, StopScreencastParams,
+    Viewport,
 };
 use chromiumoxide::cdp::browser_protocol::target::{GetTargetInfoParams, TargetId};
 use chromiumoxide::listeners::EventStream;
@@ -144,6 +146,18 @@ impl View {
             .event_listener::<EventScreencastFrame>()
             .await
             .map_err(|e| format!("监听画面失败：{e}"))?;
+        self.resume(opts).await?;
+        Ok(Frames { events })
+    }
+
+    /// 暂停推画面（监听不动）。补静止帧前用：`clip.scale` 截图时 Chrome 临时放大视口，
+    /// 这几帧过渡画面不该推给客户端。之后 [`View::resume`] 接着推。
+    pub async fn pause(&self) {
+        let _ = self.page.execute(StopScreencastParams::default()).await;
+    }
+
+    /// 接着推画面（[`View::screencast`] 开始时也走这里）。静止的页面恢复后不会自己推帧。
+    pub async fn resume(&self, opts: ScreencastOptions) -> Result<(), String> {
         let params = StartScreencastParams::builder()
             .format(StartScreencastFormat::Jpeg)
             .quality(opts.quality.clamp(10, 100))
@@ -153,8 +167,55 @@ impl View {
         self.page
             .execute(params)
             .await
-            .map_err(|e| format!("开始推画面失败：{e}"))?;
-        Ok(Frames { events })
+            .map(|_| ())
+            .map_err(|e| format!("开始推画面失败：{e}"))
+    }
+
+    /// 静止画面：截一张当前可见的视口（JPEG），按 `scale` 倍重新栅格化。
+    ///
+    /// 无头 Chrome 的 screencast 只按 CSS 像素出帧，页面不动时也一帧不推（刚开始推也不推）；
+    /// 画面停下来时补这一张：静止页面一定有画面，`scale: 2` 时 Retina 上也清楚。
+    /// 用 `clip.scale` 而不是改页面的设备像素比：agent 看到的页面和它的截图都不受影响。
+    /// 返回的 [`Frame`] 元数据取自 `getLayoutMetrics`（CSS 像素），`ack_id` 为 0（不用回 ack）。
+    ///
+    /// 同一页同一时刻只截一张（[`still_lock`]）：两个 View 并发 `clip.scale` 截图时，Chrome
+    /// 把对方的临时视口当成原尺寸恢复，页面视口每次翻倍、回不去。
+    pub async fn still(&self, quality: i64, scale: f64) -> Result<Frame, String> {
+        let lock = still_lock(&self.target_id);
+        let _turn = lock.lock().await;
+        let view = self
+            .page
+            .layout_metrics()
+            .await
+            .map_err(|e| format!("读视口失败：{e}"))?
+            .css_visual_viewport;
+        let shot = self
+            .page
+            .execute(
+                CaptureScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Jpeg)
+                    .quality(quality.clamp(10, 100))
+                    .clip(Viewport {
+                        x: view.page_x,
+                        y: view.page_y,
+                        width: view.client_width,
+                        height: view.client_height,
+                        scale: scale.clamp(1.0, 3.0),
+                    })
+                    .build(),
+            )
+            .await
+            .map_err(|e| format!("截静止画面失败：{e}"))?;
+        Ok(Frame {
+            data: AsRef::<str>::as_ref(&shot.result.data).to_string(),
+            device_width: view.client_width,
+            device_height: view.client_height,
+            page_scale_factor: view.scale,
+            offset_top: 0.0,
+            scroll_x: view.page_x,
+            scroll_y: view.page_y,
+            ack_id: 0,
+        })
     }
 
     /// 这一帧已经送出去了：让 Chrome 发下一帧。
@@ -380,6 +441,15 @@ impl Frames {
             ack_id: ev.session_id,
         })
     }
+}
+
+/// 每页一把「补静止帧」的锁（进程内：看画面的 View 都开在网关进程里）。没人在等的锁顺手清掉。
+fn still_lock(target_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        LazyLock::new(Default::default);
+    let mut locks = LOCKS.lock().unwrap();
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    locks.entry(target_id.to_string()).or_default().clone()
 }
 
 /// 地址栏：没写协议的补 `https://`；只放行 http / https / about / data / file。

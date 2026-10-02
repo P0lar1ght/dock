@@ -75,3 +75,10 @@ enabled = true
 ```
 
 不写这段也能用：装好 driver 后 `/computer` 会自己发现它。`/mcps` 里给内置行按 Space 禁用时，Dock 会把完整的一行落进用户 `config.toml`（带 `enabled = false`），之后就归配置文件管。
+
+## 实时画面（网关 `desktop/view/*`）
+
+- 客户端（GUI 的桌面面板）可以看 agent 正在操作的窗口，约 4 帧/秒。
+- 网关以会话的身份调 `get_window_state { include_accessibility_tree: false }`，只截图、不遍历 UI 树。
+- 不进对话流、不过权限门（只读）；agent 没碰过窗口时看最前面的窗口。
+- 协议细节见 `cordis-gateway/README.md` 的「桌面画面」。

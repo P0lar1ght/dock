@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use crate::devices::{self, Device};
 use crate::handle::GatewayHandle;
 use crate::handlers::browser_view::{self, BrowserViews};
+use crate::handlers::desktop_view::{self, DesktopViews};
 use crate::http::AppState;
 use crate::pairing::IssuedTicket;
 use crate::protocol::{self, RpcError};
@@ -99,6 +100,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Outgoing>();
     // 连接级：断开时随它一起丢掉，推送任务全部中止。
     let views = Arc::new(BrowserViews::default());
+    let desktops = Arc::new(DesktopViews::default());
     let (kick, mut kicked) = watch::channel(None);
     let conn = Arc::new(Mutex::new(Conn {
         gateway: gateway.clone(),
@@ -178,7 +180,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
             continue;
         };
         // 要调模型的方法、挂浏览器画面另起任务：不能占着连接锁等好几秒。
-        if let Some(job) = detached(&conn, &views, &out_tx, &text).await {
+        if let Some(job) = detached(&conn, &views, &desktops, &out_tx, &text).await {
             let out_tx = out_tx.clone();
             tokio::spawn(async move {
                 let _ = out_tx.send(Outgoing::Text(job.await));
@@ -194,6 +196,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
     }
     fanout.abort();
     drop(views);
+    drop(desktops);
     drop(out_tx);
     let _ = writer.await;
 }
@@ -203,16 +206,19 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
 async fn detached(
     conn: &Arc<Mutex<Conn>>,
     views: &Arc<BrowserViews>,
+    desktops: &Arc<DesktopViews>,
     out: &OutTx,
     text: &str,
 ) -> Option<impl std::future::Future<Output = String>> {
     let value: Value = serde_json::from_str(text).ok()?;
     let method = value.get("method").and_then(Value::as_str)?.to_string();
     let viewing = browser_view::is_browser_view(&method);
-    if !rpc::is_detached(&method) && !viewing {
+    let desktop = desktop_view::is_desktop_view(&method);
+    if !rpc::is_detached(&method) && !viewing && !desktop {
         return None;
     }
     let views = views.clone();
+    let desktops = desktops.clone();
     let out = out.clone();
     let id = value.get("id").cloned();
     let params = value.get("params").cloned().unwrap_or(json!({}));
@@ -242,6 +248,9 @@ async fn detached(
         let result = match ready {
             Ok(gateway) if viewing => {
                 browser_view::dispatch(&gateway, &views, &out, &method, params, order).await
+            }
+            Ok(gateway) if desktop => {
+                desktop_view::dispatch(&gateway, &desktops, &out, &method, params).await
             }
             Ok(gateway) => rpc::dispatch_detached(gateway, &method, params).await,
             Err(e) => Err(e),

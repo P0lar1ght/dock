@@ -160,7 +160,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 | 方法 / 推送 | 作用 |
 |---|---|
-| `browser/view/open { threadId?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` |
+| `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title`；见下 |
+| `browser/view/resize { viewId, width, height, deviceScaleFactor? }` | 面板大小变了：改页面视口（能力 `browserViewport`） |
 | `browser/view/input { viewId, event }` | 用户输入，见下 |
 | `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` |
 | `browser/view/close { viewId }` | 关视图（不关页）；连接断开时自动全关 |
@@ -170,8 +171,23 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 - 标签页来源：浏览器 MCP 写的运行时名册 `$DOCK_HOME/browser/sessions/<pid>.json`。
 - 按页的会话身份找（`cordis_spine::mcp_session_key`，和 MCP 调用带的是同一个）。
-- 会话还没开标签页：`no_tab`；浏览器没在跑或 target 没了：`browser_unavailable`。
-- agent 换了活动标签页，画面跟着换（每 700ms 看一次名册），推 `status`。
+- 会话还没开标签页：`no_tab`；浏览器没在跑：`browser_unavailable`。
+- 名册里的页挂不上（崩了 / 被关了、名册还没改）：先经 MCP 调 `browser_tabs` 让它清掉死页。
+  - 会话一页不剩：`no_tab`（推送里同样报 `no_tab`）；带了 `url` 就开新页。
+- `open` 带 `url`、会话又还没有标签页：经浏览器 MCP 替它开一页（能力 `browserViewport`）。
+  - 走 `cordis_spine::Mcp::call_as`：以那页的身份调 `browser_open`，不进对话流、不过权限门。
+  - 开出来的页记在这个会话名下，agent 接着能用；已有标签页时 `url` 不起作用。
+  - 浏览器 MCP 没连上 / 开页失败：`browser_unavailable`。
+- `viewport { width, height, deviceScaleFactor? }`：页面视口跟着面板走（CSS 像素）。
+  - 经浏览器 MCP 的 `browser_resize` 设在 MCP 那条 CDP 连接上：agent 看到的是同一尺寸。
+  - 页面的设备像素比不改（agent 的截图不变）；`deviceScaleFactor` 只决定静止帧按几倍截（1–3）。
+  - 带了 `viewport` 而没给 `maxWidth` / `maxHeight`：流里的帧不再缩小（上限 4096）。
+  - agent 整页截图会清掉覆盖、换标签页新页也没有：帧尺寸对不上就重设（至多 1.5s 一次）。
+  - `resize` 和 `input` 排同一条队，连发时最后那次最后生效；改完补一张静止帧。
+- 静止帧（帧里 `still: true`）：无头 screencast 只出 CSS 像素，页面不动时一帧不推（刚挂上也不推）。
+  - 画面停下 300ms、刚挂上、换了标签页、改了视口：补一张 `captureScreenshot`（`clip.scale` 按 DPR）。
+  - 截的时候先停流再接着推：放大栅格化的过渡帧不推；内容没变的重复帧也不推，不会来回补帧。
+- agent 换了活动标签页，画面跟着换（每 400ms 看一次名册），推 `status`。
 - 流控：帧写到 WebSocket 之后才回 CDP `screencastFrameAck`，慢客户端不会攒帧。
 - `event` 的形状（坐标是页面视口 CSS 像素，客户端按帧的 `width` / `height` 换算）：
   - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, clickCount?, modifiers?}`
@@ -185,6 +201,27 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 先完成、已回了 `viewId` 的被顶掉时推 `closed { reason: "replaced" }`；
   - 晚完成、已经不是最新的回错误 `superseded`。
 - 同一视图的 `input` 按收到的顺序一个个发给页面，客户端不用等回包再发下一个。
+
+### 桌面画面（能力 `desktopView`，`handlers/desktop_view.rs`）
+
+桌面（CUA）面板的实时画面：agent 正在操作的那个窗口，经 cua-driver 只截图。
+
+| 方法 / 推送 | 作用 |
+|---|---|
+| `desktop/view/open { threadId?, maxDimension? }` | 开始推画面，回 `viewId` / `threadId` |
+| `desktop/view/close { viewId }` | 关视图；连接断开时自动全关 |
+| 推送 `desktop/view/frame` | 一帧：`data`（base64）、`mime`、`width` / `height`（像素）、`source`、`window` |
+| 推送 `desktop/view/closed` | 视图结束：`driver_unavailable` / `replaced` |
+
+- 看哪个窗口：会话最近一次带 `pid` + `window_id` 的 cua-driver 调用（`source: "agent"`）。
+  - 直调和经 `use_tool` 的都认；按日志版本缓存，日志没变不重扫。
+  - 还没有就取最前面的普通窗口（`list_windows` 的最大 `z_index`，跳过 Dock 自己，`source: "front"`）。
+- 截图：`get_window_state { include_accessibility_tree: false, max_dimension }`（缺省 1280）。
+  - 以那页的身份调（`Mcp::call_as`），不进对话流、不过权限门（只读）。
+- 节奏：帧写出去了才截下一帧，间隔不短于 250ms（约 4 帧/秒）；截不到时 800ms 后再试。
+- cua-driver 没连上：`open` 直接回 `driver_unavailable`；中途断了推 `closed`。
+- `window`：`pid` / `windowId`，解析得到时还有 `app` / `title` / `bounds` / `screenshotScale`。
+- 同一会话再 `open`：旧的推 `closed { reason: "replaced" }`。
 
 ### 工具结果里的图（能力 `toolImages`）
 
