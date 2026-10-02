@@ -212,14 +212,35 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `desktop/view/close { viewId }` | 关视图；连接断开时自动全关 |
 | 推送 `desktop/view/frame` | 一帧：`data`（base64）、`mime`、`width` / `height`（像素）、`source`、`window` |
 | 推送 `desktop/view/closed` | 视图结束：`driver_unavailable` / `replaced` |
+| 推送 `desktop/view/cursor` | agent 做了一次桌面动作：光标位置 + 动作（能力 `desktopCursor`，见下） |
+| 推送 `desktop/view/status` | 画面状态变了：`live` / `no_window` / `capture_failed`，带 `message` |
 
 - 看哪个窗口：会话最近一次带 `pid` + `window_id` 的 cua-driver 调用（`source: "agent"`）。
   - 直调和经 `use_tool` 的都认；按日志版本缓存，日志没变不重扫。
-  - 还没有就取最前面的普通窗口（`list_windows` 的最大 `z_index`，跳过 Dock 自己，`source: "front"`）。
+  - 还没有就取最前面的普通窗口（`list_windows` 的最大 `z_index`，`source: "front"`）。
+  - 跳过 Dock 自己、系统界面，和 cua-driver 画光标的全屏浮层（「Cua Driver」，截它只会失败）。
 - 截图：`get_window_state { include_accessibility_tree: false, max_dimension }`（缺省 1280）。
   - 以那页的身份调（`Mcp::call_as`），不进对话流、不过权限门（只读）。
-- 节奏：帧写出去了才截下一帧，间隔不短于 250ms（约 4 帧/秒）；截不到时 800ms 后再试。
-- cua-driver 没连上：`open` 直接回 `driver_unavailable`；中途断了推 `closed`。
+- 节奏：帧写出去了才截下一帧。
+  - agent 5 秒内动过桌面：间隔不短于 250ms（约 4 帧/秒）；否则 1 秒一帧。
+  - 会话日志里出现新动作就立刻补一帧；截不到时 800ms 后再试。
+- 每次 cua-driver 调用最多等 5 秒；`open` 时连不上 / 超时直接回 `driver_unavailable`。
+- 中途 cua-driver 断了推 `closed`。
+- 截不到不默默重试：推 `status`。
+  - `no_window`：没有可看的窗口（agent 没碰过、前台只有 Dock / 系统界面）。
+  - `capture_failed`：`message` 带原因，比如「截不到「Grok Bot」：窗口已关闭 · 正在重试」。
+  - 连续 2 次截不到才报（agent 自己的慢调用让截图排队超时一次不算）。
+  - agent 的窗口连续 3 次截不到：先看最前面的窗口，agent 再动手时换回来。
+  - 截到了推 `live`；状态没变不重复推。
+- `cursor`：窗口截图里没有 agent 光标（cua-driver 画在屏幕浮层上），客户端自己画。
+  - 来源：会话日志里 agent 新做的 cua 动作（视图打开前的历史不算）。
+  - 位置：`get_agent_cursor_state`（按动作带的 `session` 问，没带问连接的隐式会话）。
+  - 屏幕坐标按窗口的 `bounds` 换成相对位置：`x` / `y` 在 0–1（窗口外会超出）。
+  - 问不到时 `x` / `y` 为 `null`（按键这类不动光标），客户端留在原处。
+  - `action`：`click` / `double_click` / `right_click` / `drag` / `scroll` / `type` / `key`。
+  - `label`：输入的字（最多 12 字）或滚动方向；`keys`：按键（`["cmd","shift","n"]`）。
+  - `windowId`：画面上这个窗口；动作换了窗口时等新窗口截到再推。
+  - `move_cursor` 不推：它报的位置是原样入参，和别的动作的屏幕坐标对不上。
 - `window`：`pid` / `windowId`，解析得到时还有 `app` / `title` / `bounds` / `screenshotScale`。
 - 同一会话再 `open`：旧的推 `closed { reason: "replaced" }`。
 

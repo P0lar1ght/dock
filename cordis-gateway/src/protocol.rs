@@ -33,6 +33,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("browserViewport", true),
     // `desktop/view/*`：桌面面板的实时画面（agent 操作的窗口，经 cua-driver 只截图）。
     ("desktopView", true),
+    // `desktop/view/cursor` / `desktop/view/status`：agent 光标（画在实时画面上）和画面状态
+    // （没有窗口、截图失败）。
+    ("desktopCursor", true),
     // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
     ("workspaceFiles", true),
     // `item/tool_completed.attachments` + `item/image`：工具结果里的截图等。
@@ -130,6 +133,10 @@ pub const DESKTOP_VIEW_CLOSE: &str = "desktop/view/close";
 pub const DESKTOP_VIEW_FRAME: &str = "desktop/view/frame";
 /// 推送：视图结束了（`reason`：`driver_unavailable` / `replaced`）。
 pub const DESKTOP_VIEW_CLOSED: &str = "desktop/view/closed";
+/// 推送：agent 做了一次桌面动作——光标在窗口里的相对位置（0–1）+ 动作类型。
+pub const DESKTOP_VIEW_CURSOR: &str = "desktop/view/cursor";
+/// 推送：画面状态变了（`state`：`live` / `no_window` / `capture_failed`，带 `message`）。
+pub const DESKTOP_VIEW_STATUS: &str = "desktop/view/status";
 
 /// 只读看会话工作区：列一层目录 / 读一个文件 / 按名字找文件。
 pub const FS_LIST: &str = "fs/list";
