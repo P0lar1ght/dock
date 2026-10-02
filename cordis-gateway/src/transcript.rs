@@ -165,6 +165,11 @@ impl Transcript {
         self.thread_id = thread_id.into();
     }
 
+    /// 这份投影推到哪一页（`main` / `main#N`）。
+    pub fn page(&self) -> &str {
+        &self.page
+    }
+
     pub fn latest_seq(&self) -> u64 {
         self.projector.seq
     }

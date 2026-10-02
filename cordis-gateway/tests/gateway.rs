@@ -3604,6 +3604,21 @@ async fn subagents_project_onto_the_thread_that_started_them() {
         after.get("error").is_some(),
         "收掉的子代理不能再发：{after}"
     );
+    // 收掉后网关丢了它的实时投影，历史改按它的会话回放：还得看得到整段过程。
+    let replayed = rpc
+        .call(
+            "subagent/history",
+            json!({ "threadId": "live", "agentId": agent_id }),
+        )
+        .await;
+    let replayed = replayed["result"]["events"].as_array().unwrap();
+    for needle in ["hi kid", "again"] {
+        assert!(
+            replayed.iter().any(|e| e["method"] == "item/user_message"
+                && e["payload"]["content"].as_str().unwrap().contains(needle)),
+            "收掉后的历史里少了 {needle}：{replayed:#?}"
+        );
+    }
 
     let missing = rpc
         .call(

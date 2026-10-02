@@ -61,7 +61,10 @@ export function withHistory(
   const info = history.agent ? parseSubagent(history.agent) : null;
   const existing = state.byId[agentId] ?? fresh(info ?? placeholder(agentId));
   let thread = replayHistory(history.events);
-  for (const event of existing.backlog) thread = reduceThread(thread, event);
+  // 停下的子代理不会再说话，历史就是全部；攒着的旧推送和历史的序号可能对不上
+  // （Dock 收掉它后按会话重新回放），再接上会重复。
+  const settled = (info ?? existing.info).status !== 'running';
+  if (!settled) for (const event of existing.backlog) thread = reduceThread(thread, event);
   return put(state, { ...existing, info: info ?? existing.info, thread, complete: true, backlog: [] });
 }
 

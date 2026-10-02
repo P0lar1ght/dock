@@ -105,3 +105,19 @@ test('父级中途发来的话带 origin', () => {
   const item = s.byId.kid.thread.turns[0].items[0];
   assert.equal(item.kind === 'user' && item.origin, 'parent');
 });
+
+test('停下的子代理拿到历史后不再接攒着的旧推送（Dock 收掉它后按会话回放，序号对不上）', () => {
+  let s = seedSubagents(EMPTY_SUBAGENTS, [agent('running')]);
+  s = run(s, child(9, 'item/message_delta', { delta: '旧推送' }));
+  s = withHistory(s, 'kid', {
+    agent: agent('completed'),
+    events: [
+      { seq: 1, method: 'turn/started', turnId: 't1', timestamp: '1001', payload: {} },
+      { seq: 2, method: 'item/message_delta', turnId: 't1', timestamp: '1002', payload: { delta: '旧推送' } },
+      { seq: 3, method: 'turn/completed', turnId: 't1', timestamp: '1003', payload: { status: 'completed' } },
+    ],
+  });
+  const text = s.byId.kid.thread.turns[0].items.find((i) => i.kind === 'text');
+  assert.equal(text?.kind === 'text' && text.text, '旧推送', '不重复');
+  assert.equal(s.byId.kid.info.status, 'completed');
+});

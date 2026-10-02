@@ -325,6 +325,11 @@ impl Subagents {
         );
     }
 
+    /// 会话 `parent`（`main#N`）关掉了：丢掉它的信箱唤醒和还没送到的通知。
+    pub fn forget_parent(&self, parent: &str) {
+        self.store.forget_parent(parent);
+    }
+
     /// 会话 `parent` 的信箱唤醒：只有发给它的通知才叫醒它。
     pub fn parent_wake(&self, parent: &str) -> Arc<tokio::sync::Notify> {
         self.store.parent_wake(parent)

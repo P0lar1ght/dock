@@ -304,9 +304,14 @@ impl GatewayHandle {
         });
     }
 
-    /// 关页后丢掉它的投影。
+    /// 关页后丢掉它的投影，连同它派出的子代理的投影。
     pub fn drop_page(&self, identity: &str) {
         self.inner.transcripts.lock().unwrap().remove(identity);
+        self.inner
+            .children
+            .lock()
+            .unwrap()
+            .retain(|_, t| t.page() != identity);
     }
 
     /// 子代理 `agent_id` 的投影事件（`subagent/history`）。网关没见它说过话（比如
@@ -574,8 +579,13 @@ fn listen_subagents(inner: &Arc<GatewayInner>) {
             };
             let events = sub.events(&snap.id);
             if !snap.running() {
-                if let Some(t) = for_changes.children.lock().unwrap().get_mut(&snap.id) {
+                let mut children = for_changes.children.lock().unwrap();
+                if let Some(t) = children.get_mut(&snap.id) {
                     t.close_child_turn(&crate::subagents::turn_status(&snap, &events));
+                }
+                // 收掉的子代理不会再说话：投影丢掉，之后的 `subagent/history` 按它的会话回放。
+                if snap.done {
+                    children.remove(&snap.id);
                 }
             }
             let role = crate::subagents::role_label(&page.ctx, &snap.subagent_type);

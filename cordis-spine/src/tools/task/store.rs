@@ -211,6 +211,16 @@ impl ChildStore {
             .any(|(to, _)| to == parent)
     }
 
+    /// 会话 `parent` 关掉了：丢掉它的唤醒和送不到的通知，别让按页的表只增不减。
+    pub fn forget_parent(&self, parent: &str) {
+        self.parent_wakes.lock().unwrap().remove(parent);
+        self.inbox
+            .lock()
+            .unwrap()
+            .notices
+            .retain(|(to, _)| to != parent);
+    }
+
     /// 启动 `id` 的会话；不认识的孩子算主会话的。
     fn parent_of(&self, id: &str) -> String {
         self.get(id)

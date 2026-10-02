@@ -652,6 +652,30 @@ mod inbox_tests {
     }
 
     #[test]
+    fn forgetting_a_closed_page_drops_its_wake_and_its_notices() {
+        let store = ChildStore::new();
+        store.ensure_owned(
+            "kid",
+            "d".into(),
+            "t".into(),
+            super::super::types::SubagentOwner::Task,
+            "main#3",
+        );
+        store.push_turn_end("kid", Some("late".into()), false);
+        let wake = store.parent_wake("main#3");
+        assert!(store.has_parent_notices("main#3"));
+        store.forget_parent("main#3");
+        assert!(
+            !store.has_parent_notices("main#3"),
+            "关掉的页的通知送不到了，要丢掉"
+        );
+        assert!(
+            !Arc::ptr_eq(&wake, &store.parent_wake("main#3")),
+            "关页后唤醒表里不该还留着那一页"
+        );
+    }
+
+    #[test]
     fn consume_completion_drops_only_that_childs_turn_end() {
         let store = ChildStore::new();
         store.ensure("a", "d".into(), "t".into());

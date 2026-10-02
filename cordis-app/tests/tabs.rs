@@ -6,10 +6,11 @@ use cordis_app::{session_actor, tab_mount};
 use cordis_spine::{
     agent_loop, clear_plan_for_session_switch, expected_plan_path, goal_service,
     goal_tool_registration, install_fakes, is_plan_file_edit, permissions, plan_mode_service,
-    plan_mode_tool_registration, settings, todo_service, todo_tool_registration, AgentPresets,
-    AppSettings, Goal, LlmOutput, LogEvent, Mcp, PermissionMode, Permissions, PlanMode, PlanPhase,
-    PreStep, Sessions, Todos, ToolCall, Tools, TurnEnd, AGENT_PRESETS, GOAL, MCP, PERMISSIONS,
-    PLAN_MODE, PRE_STEP, SESSIONS, SETTINGS, TODOS, TOOLS, TURN, TURN_END,
+    plan_mode_tool_registration, settings, todo_service, todo_tool_registration, tool_task,
+    AgentPresets, AppSettings, Goal, LlmOutput, LogEvent, Mcp, PermissionMode, Permissions,
+    PlanMode, PlanPhase, PreStep, Sessions, Subagents, TaskConfig, Todos, ToolCall, Tools, TurnEnd,
+    AGENT_PRESETS, GOAL, MCP, PERMISSIONS, PLAN_MODE, PRE_STEP, SESSIONS, SETTINGS, SUBAGENTS,
+    TODOS, TOOLS, TURN, TURN_END,
 };
 use cordis_tui::{
     prompt, tabs, theme, PromptWidget, SessionRef, TabKind, Tabs, SESSION_PORT, TUI_PROMPT,
@@ -795,4 +796,33 @@ async fn resident_pages_persist_under_their_own_cwd() {
     tabs.ask_aside("顺便问一句".into()).await.unwrap();
     let aside = tabs.active_ctx().get::<Sessions>(SESSIONS).unwrap();
     assert!(!aside.on_disk(), "旁问页不落盘");
+}
+
+/// 关掉一页：子代理信箱里按页记的唤醒一起丢掉（否则开开关关的分页让这张表只增不减）。
+/// 关页后再要那一页的唤醒，拿到的是新建的。
+#[tokio::test]
+async fn closing_a_tab_forgets_its_subagent_mailbox() {
+    let root = boot().await;
+    root.plugin(tool_task(), TaskConfig::default())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let sub = root.get::<Subagents>(SUBAGENTS).unwrap();
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    tabs.open().await.unwrap();
+    let page = tabs
+        .active_ctx()
+        .get::<Sessions>(SESSIONS)
+        .unwrap()
+        .identity()
+        .to_string();
+    let wake = sub.parent_wake(&page);
+    assert!(std::sync::Arc::ptr_eq(&wake, &sub.parent_wake(&page)));
+
+    tabs.close(1).await.unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&wake, &sub.parent_wake(&page)),
+        "关页后唤醒表里不该还留着那一页"
+    );
 }

@@ -358,6 +358,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 父级在它跑的时候发来的话是 `item/user_message { origin: "parent" }`；
   - 停下时收一次 `turn/completed`（failed 带 `error`）。
 - 两种推送都只推不记：`seq` 为 0，不进父线程的 `thread/history`。
+- 收掉的子代理（`completed`）网关不再留它的实时投影，`subagent/history` 改按它的会话回放：
+  - 序号从头重排，和收掉前的推送对不上；客户端对停下的子代理以历史为准。
+- 页关掉时它派出的子代理的投影一起丢掉。
   - `subagent/event` 里的 `event.seq` 是子代理自己的序号，接着 `subagent/history` 往下数。
 - 找不到、或不是这个线程启动的子代理回 `not_found`；收掉的子代理 `send` 回 `subagent_closed`。
 - 权限请求暂时分不出是不是子代理发的：子代理和父级共用这一页的权限队列。

@@ -22,6 +22,7 @@ Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"session
 - 唤醒也按页（`parent_wake(page)`）：共用一个 `Notify` 时许可会被别的页吃掉。
 - 分页派的孩子不再落到第 1 页，第 1 页也不会拿别页孩子的回报开一轮。
 - workflow 的收尾通知仍交给 drain 循环所在的第 1 页（workflow 还没按页挂）。
+- 页关掉（会话 actor dispose）时 `forget_parent`：丢掉那一页的唤醒和送不到的通知。
 
 **给宿主的事件**：子代理的会话不发 `session/event`，改发 `session/child-event`（`ChildLogEvent`）；
 出现或状态变了发 `subagent/changed`（`SubagentChanged { id }`）。
