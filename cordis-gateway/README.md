@@ -209,6 +209,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
 - 地址栏：没写协议补 `https://`，本机和内网地址（`localhost`、`127.0.0.1`、`192.168.x.x`…）补 `http://`；
   只放行 http / https / about / data / file（`javascript:` 拒）。
+  - 不像网址的拿去 Google 搜索（`抖音`、带空格的词）；`?` 开头强制搜索。
+  - 像网址：认得的协议、本机、IP，或主机名里有点且最后一段是字母（`douyin.com`、`例子.中国`）。
 - 这几个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
 - 同一会话连发 `open`：最后收到的那个留下。
   - 先完成、已回了 `viewId` 的被顶掉时推 `closed { reason: "replaced" }`；

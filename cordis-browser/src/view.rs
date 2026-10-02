@@ -488,6 +488,83 @@ fn still_lock(target_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 /// 地址栏：没写协议的补 `https://`；只放行 http / https / about / data / file。
+/// 像不像网址：带协议（`https://`、`about:` 这类认得的）、本机、IP，或者主机名里有点、
+/// 最后一段是字母（`douyin.com`、`例子.中国`）。有空白、没有点的词（`抖音`）都不算。
+/// 没有后缀名单：`node.js` 会被当成网址，和老一点的浏览器一样。
+fn looks_like_url(raw: &str) -> bool {
+    const SCHEMES: &[&str] = &[
+        "http",
+        "https",
+        "about",
+        "data",
+        "file",
+        "javascript",
+        "vbscript",
+        "chrome",
+        "blob",
+        "view-source",
+        "ftp",
+        "ws",
+        "wss",
+        "mailto",
+    ];
+    if raw.contains("://") {
+        return true;
+    }
+    if let Some((scheme, _)) = raw.split_once(':') {
+        if SCHEMES.contains(&scheme.to_ascii_lowercase().as_str()) {
+            return true;
+        }
+    }
+    if raw.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if raw.starts_with('[') {
+        return true;
+    }
+    let authority = raw.split(['/', '?', '#']).next().unwrap_or("");
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if port.is_some_and(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit())) {
+        return false;
+    }
+    let host = host.to_lowercase();
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.parse::<std::net::IpAddr>().is_ok()
+    {
+        return true;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|l| !l.is_empty())
+        && labels
+            .last()
+            .is_some_and(|tld| tld.chars().count() >= 2 && tld.chars().all(char::is_alphabetic))
+}
+
+/// 搜索地址：搜索词按 UTF-8 百分号编码，空格变 `+`。
+fn search_url(query: &str) -> String {
+    let mut out = String::from(SEARCH_URL);
+    for byte in query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .bytes()
+    {
+        match byte {
+            b' ' => out.push('+'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 /// 没写协议时补哪个：本机和内网地址（`localhost`、`127.0.0.1`、`192.168.x.x`…）补 http——
 /// 本地开发服务几乎都不带证书，真浏览器也是这么补的；其余补 https。
 fn default_scheme(raw: &str) -> &'static str {
@@ -513,10 +590,25 @@ fn default_scheme(raw: &str) -> &'static str {
     }
 }
 
+/// 地址栏里不像网址的输入拿去搜（和真浏览器的地址栏一样）。
+const SEARCH_URL: &str = "https://www.google.com/search?q=";
+
+/// 地址栏输入 → 要打开的地址。像网址的补协议（见 [`default_scheme`]），不像的拿去搜索
+/// （[`looks_like_url`]）；`?` 开头强制搜索。带了协议的只放行 http / https / about / data / file。
 pub fn address_bar_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err("url 不能为空".into());
+    }
+    if let Some(query) = raw.strip_prefix('?') {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err("搜索词不能为空".into());
+        }
+        return Ok(search_url(query));
+    }
+    if !looks_like_url(raw) {
+        return Ok(search_url(raw));
     }
     let with_scheme = match raw.split_once(':') {
         // `[::1]:8080`：方括号里是 IPv6 主机。
@@ -627,6 +719,45 @@ mod tests {
         assert!(address_bar_url("javascript:alert(1)").is_err());
         assert!(address_bar_url("chrome://settings").is_err());
         assert!(address_bar_url("  ").is_err());
+    }
+
+    /// 不像网址的输入拿去搜索（和真浏览器的地址栏一样），像网址的照旧补协议打开。
+    #[test]
+    fn address_bar_searches_what_is_not_a_url() {
+        let search = |q: &str| format!("https://www.google.com/search?q={q}");
+        assert_eq!(
+            address_bar_url("抖音").unwrap(),
+            search("%E6%8A%96%E9%9F%B3")
+        );
+        assert_eq!(
+            address_bar_url(" rust async book ").unwrap(),
+            search("rust+async+book")
+        );
+        assert_eq!(address_bar_url("1.5 + 2?").unwrap(), search("1.5+%2B+2%3F"));
+        assert_eq!(
+            address_bar_url("c++:tutorial").unwrap(),
+            search("c%2B%2B%3Atutorial")
+        );
+        // 以 ? 开头强制搜索（Chrome 同款），哪怕后面像网址。
+        assert_eq!(
+            address_bar_url("?douyin.com").unwrap(),
+            search("douyin.com")
+        );
+        assert!(address_bar_url("?  ").is_err());
+        // 像网址的：有点和字母后缀、本机、IP、带协议。
+        assert_eq!(address_bar_url("douyin.com").unwrap(), "https://douyin.com");
+        assert_eq!(
+            address_bar_url("www.douyin.com/search/抖音").unwrap(),
+            "https://www.douyin.com/search/抖音"
+        );
+        assert_eq!(address_bar_url("例子.中国").unwrap(), "https://例子.中国");
+        assert_eq!(address_bar_url("localhost").unwrap(), "http://localhost");
+        assert_eq!(
+            address_bar_url("10.0.0.2:8080").unwrap(),
+            "http://10.0.0.2:8080"
+        );
+        // 带了协议的照旧校验，不会被当成搜索词放过。
+        assert!(address_bar_url("javascript:alert(1)").is_err());
     }
 
     #[test]
