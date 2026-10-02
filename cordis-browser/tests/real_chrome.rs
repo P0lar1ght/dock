@@ -380,3 +380,68 @@ async fn concurrent_stills_keep_the_viewport() {
     drop((first, second));
     hub.shutdown().await;
 }
+
+/// 标签页在 hub 之外没了（渲染进程崩掉被回收、别的连接关掉）：hub 不能一直攥着死页——
+/// 名册得改（不然网关永远挂不上，面板一直「浏览器已退出」），agent 再 `browser_open`
+/// 要能开出新页，而不是一直报 `receiver is gone`。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn tab_closed_elsewhere_is_forgotten() {
+    use chromiumoxide::browser::Browser;
+    use chromiumoxide::cdp::browser_protocol::target::{CloseTargetParams, TargetId};
+    use cordis_browser::session::{browser_user_data_dir, devtools_ws_url};
+    use futures_util::StreamExt;
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("closed tab") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "a",
+        "browser_open",
+        json!({"url": "data:text/html,<p>First</p>"}),
+    )
+    .await;
+    let dead = cordis_browser::registry::lookup("a")
+        .and_then(|t| t.active)
+        .expect("active target");
+    let (other, mut handler) = Browser::connect(devtools_ws_url(&browser_user_data_dir()).unwrap())
+        .await
+        .unwrap();
+    tokio::spawn(async move { while handler.next().await.is_some() {} });
+    other
+        .execute(CloseTargetParams::new(TargetId::from(dead.clone())))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // 网关挂不上时会先调一次 browser_tabs：调完名册里就没有死页了（会话一页不剩，回「先 open」）。
+    let tabs = hub.call("a", "browser_tabs", &json!({})).await;
+    assert!(tabs.text.contains("browser_open"), "{}", tabs.text);
+    assert!(
+        cordis_browser::registry::lookup("a").is_none(),
+        "registry still points at the closed tab"
+    );
+    let again = ok(
+        &hub,
+        "a",
+        "browser_open",
+        json!({"url": "data:text/html,<p>Second</p>"}),
+    )
+    .await;
+    assert!(again.text.starts_with("opened"), "{}", again.text);
+    let fresh = cordis_browser::registry::lookup("a")
+        .and_then(|t| t.active)
+        .expect("new tab published");
+    assert_ne!(fresh, dead);
+    ok(
+        &hub,
+        "a",
+        "browser_wait_for",
+        json!({"text": "Second", "timeout_ms": 5000}),
+    )
+    .await;
+    hub.shutdown().await;
+}

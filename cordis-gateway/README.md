@@ -171,7 +171,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 - 标签页来源：浏览器 MCP 写的运行时名册 `$DOCK_HOME/browser/sessions/<pid>.json`。
 - 按页的会话身份找（`cordis_spine::mcp_session_key`，和 MCP 调用带的是同一个）。
-- 会话还没开标签页：`no_tab`；浏览器没在跑或 target 没了：`browser_unavailable`。
+- 会话还没开标签页：`no_tab`；浏览器没在跑：`browser_unavailable`。
+- 名册里的页挂不上（崩了 / 被关了、名册还没改）：先经 MCP 调 `browser_tabs` 让它清掉死页。
+  - 会话一页不剩：`no_tab`（推送里同样报 `no_tab`）；带了 `url` 就开新页。
 - `open` 带 `url`、会话又还没有标签页：经浏览器 MCP 替它开一页（能力 `browserViewport`）。
   - 走 `cordis_spine::Mcp::call_as`：以那页的身份调 `browser_open`，不进对话流、不过权限门。
   - 开出来的页记在这个会话名下，agent 接着能用；已有标签页时 `url` 不起作用。

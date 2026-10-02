@@ -182,12 +182,35 @@ impl BrowserHub {
 
     /// 本会话的组，且 Chromium 还活着。Chromium 没了（被关掉 / 崩了）就把所有组
     /// 作废——它们的页都跟着没了，留着只会在下一次调用报一串 CDP 错。
+    /// 单个标签页在别处没了也一样：先去掉死页、重写名册；一页不剩就当这个会话没开过。
     async fn live_group(&self, session: &str) -> Option<Group> {
         if !self.chromium_alive().await {
             self.forget_dead_chromium().await;
             return None;
         }
-        self.group(session).await
+        let group = self.group(session).await?;
+        let mut g = group.lock().await;
+        if !matches!(g.prune_closed().await, Ok(true)) {
+            drop(g);
+            return Some(group);
+        }
+        if !g.is_empty() {
+            self.record(session, &g);
+            drop(g);
+            return Some(group);
+        }
+        drop(g);
+        self.forget(Some(session));
+        {
+            let mut groups = self.groups.lock().await;
+            if groups.get(session).is_some_and(|g| Arc::ptr_eq(g, &group)) {
+                groups.remove(session);
+            }
+        }
+        if let Ok(g) = Arc::try_unwrap(group) {
+            g.into_inner().shutdown().await;
+        }
+        None
     }
 
     async fn chromium_alive(&self) -> bool {

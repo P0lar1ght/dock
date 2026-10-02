@@ -27,7 +27,9 @@ use chromiumoxide::cdp::browser_protocol::page::{
     EventJavascriptDialogOpening, FrameId, FrameTree, GetFrameTreeParams,
     GetNavigationHistoryParams, HandleJavaScriptDialogParams, NavigateToHistoryEntryParams,
 };
-use chromiumoxide::cdp::browser_protocol::target::{ActivateTargetParams, CloseTargetParams};
+use chromiumoxide::cdp::browser_protocol::target::{
+    ActivateTargetParams, CloseTargetParams, GetTargetsParams,
+};
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EvaluateParams, EventConsoleApiCalled, RemoteObject,
 };
@@ -352,6 +354,39 @@ impl ConnectedSession {
         self.pages
             .get(self.active)
             .map(|p| p.target_id().inner().to_string())
+    }
+
+    /// 去掉已经不在 Chrome 里的标签页（渲染进程崩了被回收、被别的连接关掉）。留着它们，
+    /// 之后每个调用都报 `receiver is gone`，名册也一直指着死页。活动页没了就换成最后一页。
+    /// 返回有没有去掉；问不到 Chrome 时什么也不动。
+    pub async fn prune_closed(&mut self) -> Result<bool, String> {
+        let alive: std::collections::HashSet<String> = self
+            .browser
+            .execute(GetTargetsParams::default())
+            .await
+            .map_err(|e| format!("getTargets: {e}"))?
+            .result
+            .target_infos
+            .iter()
+            .map(|t| t.target_id.inner().to_string())
+            .collect();
+        let active = self.active_target_id();
+        let before = self.pages.len();
+        self.pages
+            .retain(|p| alive.contains(p.target_id().inner().as_str()));
+        if self.pages.len() == before {
+            return Ok(false);
+        }
+        self.active = active
+            .and_then(|id| self.target_ids().iter().position(|t| *t == id))
+            .unwrap_or(self.pages.len().saturating_sub(1));
+        self.refs.clear();
+        Ok(true)
+    }
+
+    /// 一个标签页都不剩了（[`ConnectedSession::prune_closed`] 之后）。
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
     }
 
     async fn spawn_dialog_listener(

@@ -278,17 +278,8 @@ async fn open(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let target = match (active_target(&key), url) {
-        (Some(target), _) => target,
-        (None, Some(url)) => open_tab(&page.ctx, &key, url).await?,
-        (None, None) => {
-            return Err(RpcError::app(
-                "no_tab",
-                "这个会话还没有打开浏览器标签页（agent 先 browser_open）",
-            ))
-        }
-    };
-    // 先改视口再挂：第一帧就是面板的尺寸。改不成（MCP 没连上）照样出画面。
+    let (target, view) = attach_session_tab(&page.ctx, &key, url).await?;
+    // 挂上了先改视口再开推流：第一帧就是面板的尺寸。改不成（MCP 没连上）照样出画面。
     if let Some(viewport) = viewport {
         let _ = apply_viewport(&page.ctx, viewport).await;
     }
@@ -301,9 +292,6 @@ async fn open(
             opts.max_height = NATIVE_MAX;
         }
     }
-    let view = View::attach(&target)
-        .await
-        .map_err(|e| RpcError::app("browser_unavailable", e))?;
     let info = view.info().await;
     let frames = view
         .screencast(opts)
@@ -394,6 +382,53 @@ async fn open(
         "url": info.url,
         "title": info.title,
     }))
+}
+
+/// 找到会话的活动标签页并挂上；会话还没有标签页时带了 `url` 就替它开一页。
+///
+/// 名册里的页挂不上，可能是它已经没了（渲染进程崩了、被关掉）而名册还没改：浏览器 MCP
+/// 只在被调用时才发现死页。先以这页的身份调一次 `browser_tabs` 让它清掉，再查一次——
+/// 会话一页不剩就当没开过（`no_tab`，或者带着 `url` 开新页），不报「浏览器退出」。
+async fn attach_session_tab(
+    page: &Context,
+    key: &str,
+    url: Option<&str>,
+) -> Result<(String, View), RpcError> {
+    let no_tab = || {
+        RpcError::app(
+            "no_tab",
+            "这个会话还没有打开浏览器标签页（agent 先 browser_open）",
+        )
+    };
+    let target = match (active_target(key), url) {
+        (Some(target), _) => target,
+        (None, Some(url)) => open_tab(page, key, url).await?,
+        (None, None) => return Err(no_tab()),
+    };
+    let stale = match View::attach(&target).await {
+        Ok(view) => return Ok((target, view)),
+        Err(e) => e,
+    };
+    let target = match (refresh_target(page, key).await, url) {
+        (Some(next), _) if next != target => next,
+        (Some(_), _) => return Err(RpcError::app("browser_unavailable", stale)),
+        (None, Some(url)) => open_tab(page, key, url).await?,
+        (None, None) => return Err(no_tab()),
+    };
+    let view = View::attach(&target)
+        .await
+        .map_err(|e| RpcError::app("browser_unavailable", e))?;
+    Ok((target, view))
+}
+
+/// 让浏览器 MCP 清掉这个会话已经没了的标签页（它重写名册之后才回），再查名册。
+async fn refresh_target(page: &Context, key: &str) -> Option<String> {
+    if let Ok(mcp) = mcp(page) {
+        let _ = mcp
+            .call_as(page, BROWSER_MCP_SERVER, "browser_tabs", json!({}))
+            .await;
+    }
+    active_target(key)
 }
 
 /// 会话还没有标签页：以这页的身份让浏览器 MCP 开一页（需要时拉起 Chromium），
@@ -630,6 +665,10 @@ impl Pump {
                                 frames_open = true;
                                 settle_at = Some(Instant::now() + SETTLE);
                                 last_stream.clear();
+                            }
+                            // 页没了而浏览器还在：清掉名册里的死页，告诉客户端「没有标签页」。
+                            Err(_) if refresh_target(&self.page, &self.key).await.is_none() => {
+                                return Some("no_tab")
                             }
                             Err(_) => return Some("browser_exited"),
                         }
