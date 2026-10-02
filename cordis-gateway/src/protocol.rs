@@ -31,6 +31,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `browser/view/open` 的 `url` / `viewport` + `browser/view/resize`：没标签页时替会话开页，
     // 页面视口跟着面板走。
     ("browserViewport", true),
+    // `browser/view/tabs`（会话的标签页列表推送）+ `browser/view/tab`（切换 / 新开 / 关闭）：
+    // 面板的标签栏。和 agent 共用当前页。
+    ("browserTabs", true),
     // `desktop/view/*`：桌面面板的实时画面（agent 操作的窗口，经 cua-driver 只截图）。
     ("desktopView", true),
     // `desktop/view/cursor` / `desktop/view/status`：agent 光标（画在实时画面上）和画面状态
@@ -119,10 +122,14 @@ pub const BROWSER_VIEW_NAVIGATE: &str = "browser/view/navigate";
 pub const BROWSER_VIEW_CLOSE: &str = "browser/view/close";
 /// 面板大小变了：按新的 CSS 尺寸和设备像素比改页面视口（agent 看到的也一起变）。
 pub const BROWSER_VIEW_RESIZE: &str = "browser/view/resize";
+/// 面板的标签栏：切到 / 新开 / 关掉会话的一个标签页（经浏览器 MCP，agent 也跟着切）。
+pub const BROWSER_VIEW_TAB: &str = "browser/view/tab";
 /// 推送：一帧画面（base64 JPEG + 视口元数据）。
 pub const BROWSER_VIEW_FRAME: &str = "browser/view/frame";
 /// 推送：视图换了标签页，或页面地址 / 标题变了。
 pub const BROWSER_VIEW_STATUS: &str = "browser/view/status";
+/// 推送：会话的标签页列表变了（`tabs`：`[{targetId, url, title, active}]`，按标签栏顺序）。
+pub const BROWSER_VIEW_TABS: &str = "browser/view/tabs";
 /// 推送：视图结束了（`reason`：`no_tab` 会话的标签页都关了 / `browser_exited`）。
 pub const BROWSER_VIEW_CLOSED: &str = "browser/view/closed";
 

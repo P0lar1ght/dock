@@ -160,13 +160,15 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 | 方法 / 推送 | 作用 |
 |---|---|
-| `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title`；见下 |
+| `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` / `tabs`；见下 |
 | `browser/view/resize { viewId, width, height, deviceScaleFactor? }` | 面板大小变了：改页面视口（能力 `browserViewport`） |
 | `browser/view/input { viewId, event }` | 用户输入，见下 |
 | `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` |
+| `browser/view/tab { viewId, action, targetId?, url? }` | 标签栏：`switch` / `close`（带 `targetId`）/ `new`（`url` 可省，默认空白页）；能力 `browserTabs` |
 | `browser/view/close { viewId }` | 关视图（不关页）；连接断开时自动全关 |
 | 推送 `browser/view/frame` | 一帧：`data`（base64 JPEG）、`mime`、`width` / `height`（视口 CSS 像素）等 |
 | 推送 `browser/view/status` | 换了标签页，或地址 / 标题变了 |
+| 推送 `browser/view/tabs` | 会话的标签页列表变了：`tabs` = `[{targetId, url, title, active}]`（能力 `browserTabs`） |
 | 推送 `browser/view/closed` | 视图结束：`no_tab`（会话的标签页都关了）/ `browser_exited` |
 
 - 标签页来源：浏览器 MCP 写的运行时名册 `$DOCK_HOME/browser/sessions/<pid>.json`。
@@ -174,6 +176,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 会话还没开标签页：`no_tab`；浏览器没在跑：`browser_unavailable`。
 - 名册里的页挂不上（崩了 / 被关了、名册还没改）：先经 MCP 调 `browser_tabs` 让它清掉死页。
   - 会话一页不剩：`no_tab`（推送里同样报 `no_tab`）；带了 `url` 就开新页。
+  - MCP 回「这个会话还没有标签页」也算一页不剩：名册里剩的是被杀掉的 MCP 进程留下的旧文件
+    （重启 GUI 后常见），那些页跟着旧 Chromium 没了，不报 `browser_unavailable`。
 - `open` 带 `url`、会话又还没有标签页：经浏览器 MCP 替它开一页（能力 `browserViewport`）。
   - 走 `cordis_spine::Mcp::call_as`：以那页的身份调 `browser_open`，不进对话流、不过权限门。
   - 开出来的页记在这个会话名下，agent 接着能用；已有标签页时 `url` 不起作用。
@@ -188,6 +192,14 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 画面停下 300ms、刚挂上、换了标签页、改了视口：补一张 `captureScreenshot`（`clip.scale` 按 DPR）。
   - 截的时候先停流再接着推：放大栅格化的过渡帧不推；内容没变的重复帧也不推，不会来回补帧。
 - agent 换了活动标签页，画面跟着换（每 400ms 看一次名册），推 `status`。
+- 标签栏（能力 `browserTabs`）：`tabs` 按名册顺序（和 `browser_tabs` 的序号一致），地址标题现查 Chrome。
+  - 每 400ms 对一次，变了推 `browser/view/tabs`；名册里有、Chrome 里已经没了的页不列。
+  - `browser/view/tab` 以那页的身份调浏览器 MCP 的 `browser_tabs`（序号按名册现查）：
+    用户和 agent 共用当前页，面板切到哪页 agent 就在哪页；画面和标签栏由推送跟上。
+  - 关最后一页回 `tab_failed`（关浏览器交给 `browser_close`）；页不在了回 `not_found`。
+  - 和 `input` / `resize` 排同一条队：点了新标签页紧接着敲的字落在新页上。
+  - 页面自己开的新页（`target=_blank`、`window.open`）要浏览器 MCP 收进会话才进名册：
+    看到 opener 是本会话的页、还没进名册的，就（至多每秒一次）在后台调一次 `browser_tabs` 催它收。
 - 流控：帧写到 WebSocket 之后才回 CDP `screencastFrameAck`，慢客户端不会攒帧。
 - `event` 的形状（坐标是页面视口 CSS 像素，客户端按帧的 `width` / `height` 换算）：
   - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, clickCount?, modifiers?}`
@@ -195,8 +207,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `{type:"key", action:"down"|"up"|"press", key, modifiers?}`（DOM 键名：`Enter`、`a`）
   - `{type:"text", text}`（输入法上屏、粘贴）
   - `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
-- 地址栏：没写协议补 `https://`；只放行 http / https / about / data / file（`javascript:` 拒）。
-- 这四个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
+- 地址栏：没写协议补 `https://`，本机和内网地址（`localhost`、`127.0.0.1`、`192.168.x.x`…）补 `http://`；
+  只放行 http / https / about / data / file（`javascript:` 拒）。
+- 这几个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
 - 同一会话连发 `open`：最后收到的那个留下。
   - 先完成、已回了 `viewId` 的被顶掉时推 `closed { reason: "replaced" }`；
   - 晚完成、已经不是最新的回错误 `superseded`。

@@ -28,7 +28,7 @@ use chromiumoxide::cdp::browser_protocol::page::{
     GetNavigationHistoryParams, HandleJavaScriptDialogParams, NavigateToHistoryEntryParams,
 };
 use chromiumoxide::cdp::browser_protocol::target::{
-    ActivateTargetParams, CloseTargetParams, GetTargetsParams,
+    ActivateTargetParams, CloseTargetParams, GetTargetsParams, TargetId,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EvaluateParams, EventConsoleApiCalled, RemoteObject,
@@ -291,6 +291,29 @@ pub fn parse_devtools_active_port(raw: &str) -> Option<String> {
     Some(format!("ws://127.0.0.1:{port}{path}"))
 }
 
+/// 本组的页（`ours`）自己开的新页：`(新页, 打开它的页)`，按要收的顺序。新页开的新页也算
+/// （先收父页，再收它开的）。`targets` 是 Chrome 的 `(target id, type, opener id)`；只收
+/// `page`，已经在本组的不收，别的会话的页开的不收。
+pub fn opened_by(
+    ours: &[String],
+    targets: &[(String, String, Option<String>)],
+) -> Vec<(String, String)> {
+    let mut known: Vec<String> = ours.to_vec();
+    let mut out = Vec::new();
+    loop {
+        let next = targets.iter().find(|(id, kind, opener)| {
+            kind == "page"
+                && !known.contains(id)
+                && opener.as_ref().is_some_and(|o| known.contains(o))
+        });
+        let Some((id, _, Some(opener))) = next else {
+            return out;
+        };
+        known.push(id.clone());
+        out.push((id.clone(), opener.clone()));
+    }
+}
+
 /// 一个会话的标签页组：自己开的页、快照 refs、对话框、network / console 捕获。
 /// 进程是共享的 [`Chromium`]，这里只攥句柄。
 pub struct ConnectedSession {
@@ -356,11 +379,15 @@ impl ConnectedSession {
             .map(|p| p.target_id().inner().to_string())
     }
 
-    /// 去掉已经不在 Chrome 里的标签页（渲染进程崩了被回收、被别的连接关掉）。留着它们，
-    /// 之后每个调用都报 `receiver is gone`，名册也一直指着死页。活动页没了就换成最后一页。
-    /// 返回有没有去掉；问不到 Chrome 时什么也不动。
-    pub async fn prune_closed(&mut self) -> Result<bool, String> {
-        let alive: std::collections::HashSet<String> = self
+    /// 和 Chrome 对一遍本组的标签页：
+    /// - 去掉已经不在 Chrome 里的（渲染进程崩了被回收、被别的连接关掉）。留着它们，之后每个
+    ///   调用都报 `receiver is gone`，名册也一直指着死页。活动页没了就换成最后一页。
+    /// - 收下本组的页自己开的新页（`target=_blank` 链接、`window.open`，见 [`opened_by`]）：
+    ///   插在打开它的页右边并成为活动页，和真浏览器一样——agent 下一步就在新页上。
+    ///
+    /// 返回有没有变；问不到 Chrome 时什么也不动。
+    pub async fn sync_targets(&mut self) -> Result<bool, String> {
+        let infos: Vec<(String, String, Option<String>)> = self
             .browser
             .execute(GetTargetsParams::default())
             .await
@@ -368,23 +395,49 @@ impl ConnectedSession {
             .result
             .target_infos
             .iter()
-            .map(|t| t.target_id.inner().to_string())
+            .map(|t| {
+                (
+                    t.target_id.inner().to_string(),
+                    t.r#type.clone(),
+                    t.opener_id.as_ref().map(|o| o.inner().to_string()),
+                )
+            })
             .collect();
+        let alive: std::collections::HashSet<&str> =
+            infos.iter().map(|(id, _, _)| id.as_str()).collect();
         let active = self.active_target_id();
         let before = self.pages.len();
         self.pages
             .retain(|p| alive.contains(p.target_id().inner().as_str()));
-        if self.pages.len() == before {
-            return Ok(false);
+        let mut changed = self.pages.len() != before;
+        if changed {
+            self.active = active
+                .and_then(|id| self.target_ids().iter().position(|t| *t == id))
+                .unwrap_or(self.pages.len().saturating_sub(1));
         }
-        self.active = active
-            .and_then(|id| self.target_ids().iter().position(|t| *t == id))
-            .unwrap_or(self.pages.len().saturating_sub(1));
-        self.refs.clear();
-        Ok(true)
+        for (new, opener) in opened_by(&self.target_ids(), &infos) {
+            // 刚开出来、chromiumoxide 还没挂上的页拿不到：下一次调用再收。
+            let Ok(page) = self.browser.get_page(TargetId::from(new)).await else {
+                continue;
+            };
+            let Some(at) = self.target_ids().iter().position(|t| *t == opener) else {
+                continue;
+            };
+            self.dialog_tasks
+                .push(Self::spawn_dialog_listener(&page, self.pending_dialog.clone()).await?);
+            self.capture_tasks
+                .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+            self.pages.insert(at + 1, page);
+            self.active = at + 1;
+            changed = true;
+        }
+        if changed {
+            self.refs.clear();
+        }
+        Ok(changed)
     }
 
-    /// 一个标签页都不剩了（[`ConnectedSession::prune_closed`] 之后）。
+    /// 一个标签页都不剩了（[`ConnectedSession::sync_targets`] 之后）。
     pub fn is_empty(&self) -> bool {
         self.pages.is_empty()
     }
@@ -1666,6 +1719,32 @@ fn normalize_modifier(p: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opened_by_takes_pages_our_tabs_opened_in_order() {
+        let t = |id: &str, kind: &str, opener: Option<&str>| {
+            (id.to_string(), kind.to_string(), opener.map(String::from))
+        };
+        let ours = vec!["A".to_string()];
+        let targets = vec![
+            t("A", "page", None),
+            // 新页开的新页排在它后面也能收（先收 C 再收 D）。
+            t("D", "page", Some("C")),
+            t("C", "page", Some("A")),
+            // 别的会话的页开的、不是 page 的、没有 opener 的都不收。
+            t("X", "page", None),
+            t("Y", "page", Some("X")),
+            t("W", "service_worker", Some("A")),
+        ];
+        assert_eq!(
+            opened_by(&ours, &targets),
+            vec![
+                ("C".to_string(), "A".to_string()),
+                ("D".to_string(), "C".to_string())
+            ]
+        );
+        assert!(opened_by(&["A".into(), "C".into(), "D".into()], &targets).is_empty());
+    }
 
     #[test]
     fn user_data_under_dock_home() {

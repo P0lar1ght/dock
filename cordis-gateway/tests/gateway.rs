@@ -2263,6 +2263,21 @@ async fn browser_view_errors_without_a_tab() {
         missing["error"]["details"]["code"], "invalid_params",
         "{missing}"
     );
+    assert_eq!(
+        init["result"]["capabilities"]["browserTabs"], true,
+        "{init}"
+    );
+    let tab = rpc
+        .call(
+            "browser/view/tab",
+            json!({ "viewId": "nope", "action": "switch", "targetId": "T" }),
+        )
+        .await;
+    assert_eq!(tab["error"]["details"]["code"], "not_found", "{tab}");
+    let tab = rpc
+        .call("browser/view/tab", json!({ "action": "new" }))
+        .await;
+    assert_eq!(tab["error"]["details"]["code"], "invalid_params", "{tab}");
 
     let (mut stranger, _) = Rpc::connect_as(h.addr, "bogus", PAGE_ORIGIN).await;
     let refused = stranger.call("browser/view/open", json!({})).await;
@@ -2668,6 +2683,103 @@ async fn browser_view_streams_the_agents_tab() {
         .wait_notification("browser/view/closed", Duration::from_secs(5))
         .await;
     assert_eq!(ended["params"]["reason"], "no_tab", "{ended}");
+    hub.shutdown().await;
+}
+
+/// 真 Chrome：标签栏。`open` 回会话的 `tabs`；agent 新开一页（这里直接用浏览器 MCP 的
+/// hub）→ 推 `browser/view/tabs`（两页、新页是当前页）且画面切到新页；页面自己开的新页
+/// （`target=_blank`）经 agent 下一次调用收进会话后同样出现在标签栏。
+#[tokio::test]
+#[ignore = "needs a real Chrome"]
+async fn browser_view_pushes_the_sessions_tabs() {
+    if cordis_browser::session::discover_chrome().is_err() {
+        eprintln!("skip: chrome not installed");
+        return;
+    }
+    let h = Harness::boot().await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    let key = cordis_spine::mcp_session_key(&sessions);
+    let hub = cordis_browser::BrowserHub::new();
+    let opened = hub
+        .call(
+            &key,
+            "browser_open",
+            &json!({"url": "data:text/html,<title>One</title><a href='about:blank%23three' target='_blank' style='position:fixed;left:0;top:0;width:200px;height:100px;display:block'>Pop</a>"}),
+        )
+        .await;
+    assert!(!opened.is_error, "{}", opened.text);
+
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let view = rpc.call("browser/view/open", json!({})).await;
+    let tabs = view["result"]["tabs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{view}"));
+    assert_eq!(tabs.len(), 1, "{view}");
+    assert_eq!(tabs[0]["title"], "One");
+    assert_eq!(tabs[0]["active"], true);
+    let first = tabs[0]["targetId"].as_str().unwrap().to_string();
+
+    let new = hub
+        .call(
+            &key,
+            "browser_tabs",
+            &json!({"action": "new", "url": "data:text/html,<title>Two</title>"}),
+        )
+        .await;
+    assert!(!new.is_error, "{}", new.text);
+    // 画面先切过去（status），标签栏下一拍跟上。
+    loop {
+        let status = rpc
+            .wait_notification("browser/view/status", Duration::from_secs(5))
+            .await;
+        if status["params"]["title"] == "Two" {
+            break;
+        }
+    }
+    let pushed = loop {
+        let note = rpc
+            .wait_notification("browser/view/tabs", Duration::from_secs(5))
+            .await;
+        let tabs = note["params"]["tabs"].as_array().unwrap().clone();
+        if tabs.len() == 2 && tabs[1]["title"] == "Two" {
+            break tabs;
+        }
+    };
+    assert_eq!(pushed[0]["targetId"], first.as_str());
+    assert_eq!(pushed[1]["active"], true, "{pushed:?}");
+
+    // 回第一页，点 target=_blank 链接：agent 下一次调用把新页收进会话，插在第一页右边。
+    let back = hub
+        .call(
+            &key,
+            "browser_tabs",
+            &json!({"action": "switch", "index": 0}),
+        )
+        .await;
+    assert!(!back.is_error, "{}", back.text);
+    let snap = hub.call(&key, "browser_snapshot", &json!({})).await.text;
+    let line = snap
+        .lines()
+        .find(|l| l.contains("\"Pop\""))
+        .unwrap_or_else(|| panic!("{snap}"));
+    let r = &line[line.find("[ref=").unwrap() + 5..line.rfind(']').unwrap()];
+    let click = hub.call(&key, "browser_click", &json!({ "ref": r })).await;
+    assert!(!click.is_error, "{}", click.text);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let _ = hub.call(&key, "browser_tabs", &json!({})).await;
+    loop {
+        let note = rpc
+            .wait_notification("browser/view/tabs", Duration::from_secs(5))
+            .await;
+        let tabs = note["params"]["tabs"].as_array().unwrap().clone();
+        if tabs.len() == 3 {
+            assert_eq!(tabs[1]["url"], "about:blank#three", "{tabs:?}");
+            assert_eq!(tabs[1]["active"], true, "{tabs:?}");
+            break;
+        }
+    }
     hub.shutdown().await;
 }
 
