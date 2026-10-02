@@ -15,8 +15,8 @@ use cordis_spine::{
     agent_loop, agent_presets, compact, install_fakes, install_without_llm, mcp_client,
     permissions, plan_mode, settings, slash, tool_ask_user, tool_goal, turn, AgentPresets,
     AppSettings, BoxFuture, Compact, ExtraSlashKind, Goal, Llm, LlmOutput, LogEvent, LoopHandle,
-    PermissionOptionKind, Permissions, PlanMode, PromptRequest, Sampler, Sessions, Slash,
-    SlashEntry, StreamDelta, TurnControl, AGENT_LOOP, AGENT_PRESETS, COMPACT, GOAL, LLM,
+    Mcp, PermissionOptionKind, Permissions, PlanMode, PromptRequest, Sampler, Sessions, Slash,
+    SlashEntry, StreamDelta, TurnControl, AGENT_LOOP, AGENT_PRESETS, COMPACT, GOAL, LLM, MCP,
     PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, TURN,
 };
 use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
@@ -2263,6 +2263,21 @@ async fn browser_view_errors_without_a_tab() {
         missing["error"]["details"]["code"], "invalid_params",
         "{missing}"
     );
+    assert_eq!(
+        init["result"]["capabilities"]["browserTabs"], true,
+        "{init}"
+    );
+    let tab = rpc
+        .call(
+            "browser/view/tab",
+            json!({ "viewId": "nope", "action": "switch", "targetId": "T" }),
+        )
+        .await;
+    assert_eq!(tab["error"]["details"]["code"], "not_found", "{tab}");
+    let tab = rpc
+        .call("browser/view/tab", json!({ "action": "new" }))
+        .await;
+    assert_eq!(tab["error"]["details"]["code"], "invalid_params", "{tab}");
 
     let (mut stranger, _) = Rpc::connect_as(h.addr, "bogus", PAGE_ORIGIN).await;
     let refused = stranger.call("browser/view/open", json!({})).await;
@@ -2307,6 +2322,249 @@ async fn browser_view_url_and_viewport_errors() {
         )
         .await;
     assert_eq!(resize["error"]["details"]["code"], "not_found", "{resize}");
+}
+
+/// cua-driver 的结果并进工具文本时截到 8KB：`"key": [...]` 里截断之前完整的那些对象。
+fn objects_after(text: &str, key: &str) -> Vec<Value> {
+    let Some(at) = text.find(&format!("\"{key}\"")) else {
+        return Vec::new();
+    };
+    let Some(open) = text[at..].find('[') else {
+        return Vec::new();
+    };
+    let mut rest = &text[at + open + 1..];
+    let mut out = Vec::new();
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if !rest.starts_with('{') {
+            return out;
+        }
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+        match stream.next() {
+            Some(Ok(v)) => {
+                out.push(v);
+                rest = &rest[stream.byte_offset()..];
+            }
+            _ => return out,
+        }
+    }
+}
+
+/// 工具文本里 `"key": 数字` 的第一个值。
+fn number_after(text: &str, key: &str) -> Option<i64> {
+    let at = text.find(&format!("\"{key}\""))? + key.len() + 2;
+    let rest = text[at..].trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// 真 cua-driver（macOS，要辅助功能 + 屏幕录制权限；会在后台开一个计算器）：agent 按了
+/// 计算器的「1」之后，桌面画面推计算器的帧，再推一次光标——落在「1」的中心（窗口里的
+/// 相对位置），动作是 `click`。
+#[tokio::test]
+#[ignore = "needs cua-driver with Accessibility + Screen Recording; launches Calculator"]
+async fn desktop_view_follows_the_agent_cursor() {
+    isolated_home();
+    // 测试进程默认关掉内置 cua-driver 行；这里按 PATH 找真的那个。
+    let Some(driver) = cordis_base::cua::discover_with(
+        None,
+        std::env::var_os("PATH"),
+        std::env::var_os("HOME").map(std::path::PathBuf::from),
+    ) else {
+        eprintln!("skip: cua-driver not installed");
+        return;
+    };
+    std::env::set_var("DOCK_CUA_DRIVER", &driver);
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    rpc.call("initialize", json!({})).await;
+
+    let mcp = h.ctx.require::<Mcp>(MCP).unwrap();
+    let call = |tool: &'static str, args: Value| {
+        let mcp = mcp.clone();
+        let ctx = h.ctx.clone();
+        async move {
+            let out = mcp.call_as(&ctx, "cua-driver", tool, args).await.unwrap();
+            assert!(!out.is_error, "{tool}: {}", out.content);
+            out.content
+        }
+    };
+    // MCP 客户端连上 cua-driver 要一会儿。
+    let mut launched = None;
+    for _ in 0..40 {
+        let out = mcp
+            .call_as(
+                &h.ctx,
+                "cua-driver",
+                "launch_app",
+                json!({ "bundle_id": "com.apple.calculator" }),
+            )
+            .await;
+        if let Ok(out) = out {
+            if !out.is_error {
+                launched = number_after(&out.content, "pid");
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let pid = launched.expect("cua-driver connects");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let windows = objects_after(
+        &call("list_windows", json!({ "pid": pid })).await,
+        "windows",
+    );
+    let window_id = windows[0]["window_id"].as_i64().unwrap();
+    let elements = objects_after(
+        &call(
+            "get_window_state",
+            json!({ "pid": pid, "window_id": window_id, "query": "1" }),
+        )
+        .await,
+        "elements",
+    );
+    let one = elements
+        .into_iter()
+        .find(|e| e["label"] == "1")
+        .expect("button 1");
+
+    let opened = rpc
+        .call("desktop/view/open", json!({ "maxDimension": 640 }))
+        .await;
+    assert!(opened["result"]["viewId"].is_string(), "{opened}");
+
+    // agent 按下「1」：真点一下，再照 agent 的样子记进会话日志。
+    let args = json!({ "pid": pid, "window_id": window_id, "element_token": one["element_token"] });
+    call("click", args.clone()).await;
+    h.ctx
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .append(LogEvent::ToolExecute {
+            id: "click-1".into(),
+            name: "use_tool".into(),
+            arguments: json!({ "tool_name": "mcp_cua-driver__click", "tool_input": args })
+                .to_string(),
+            content: String::new(),
+            images: Vec::new(),
+            is_error: false,
+        });
+
+    // 开画面时还没有 agent 的窗口，先推的是最前面的窗口；等到计算器那一帧。
+    let frame = loop {
+        let frame = rpc
+            .wait_notification("desktop/view/frame", Duration::from_secs(10))
+            .await;
+        if frame["params"]["window"]["pid"] == pid {
+            break frame;
+        }
+    };
+    assert_eq!(
+        frame["params"]["source"], "agent",
+        "{}",
+        frame["params"]["window"]
+    );
+    let cursor = rpc
+        .wait_notification("desktop/view/cursor", Duration::from_secs(10))
+        .await;
+    let p = &cursor["params"];
+    assert_eq!(p["action"], "click", "{p}");
+    assert_eq!(p["windowId"], window_id, "{p}");
+    let bounds = &frame["params"]["window"]["bounds"];
+    let frame_of = |k: &str| one["frame"][k].as_f64().unwrap();
+    let expect_x = (frame_of("x") + frame_of("w") / 2.0 - bounds["x"].as_f64().unwrap())
+        / bounds["width"].as_f64().unwrap();
+    let expect_y = (frame_of("y") + frame_of("h") / 2.0 - bounds["y"].as_f64().unwrap())
+        / bounds["height"].as_f64().unwrap();
+    assert!(
+        (p["x"].as_f64().unwrap() - expect_x).abs() < 0.03
+            && (p["y"].as_f64().unwrap() - expect_y).abs() < 0.03,
+        "cursor {p} vs button center ({expect_x}, {expect_y})"
+    );
+
+    // 收拾：⌘Q 退出这个计算器（和 agent 平时关应用一样，不强杀）。
+    call(
+        "hotkey",
+        json!({ "pid": pid, "window_id": window_id, "keys": ["cmd", "q"] }),
+    )
+    .await;
+}
+
+/// 真 cua-driver 冒烟：同一会话连发多次 `desktop/view/open`（GUI 开发模式下 StrictMode 双挂载
+/// 就是这样），客户端像 GUI 一样把先发的关掉——最后发的那个必须还活着、接着出帧。
+/// 注意：这里 cua-driver 基本按先来先完成，「旧 open 晚做完、把新的顶掉」的竞态造不出来
+/// （GUI 里实测出现过），排序本身由 `desktop_view` 的单元测试 `only_the_last_received_open_counts` 管。
+#[tokio::test]
+#[ignore = "needs cua-driver with Screen Recording"]
+async fn desktop_view_concurrent_opens_keep_the_latest() {
+    isolated_home();
+    let Some(driver) = cordis_base::cua::discover_with(
+        None,
+        std::env::var_os("PATH"),
+        std::env::var_os("HOME").map(std::path::PathBuf::from),
+    ) else {
+        eprintln!("skip: cua-driver not installed");
+        return;
+    };
+    std::env::set_var("DOCK_CUA_DRIVER", &driver);
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    rpc.call("initialize", json!({})).await;
+    // MCP 客户端连上 cua-driver 要一会儿。
+    for _ in 0..40 {
+        let probe = rpc
+            .call("desktop/view/open", json!({ "maxDimension": 320 }))
+            .await;
+        if let Some(id) = probe["result"]["viewId"].as_str() {
+            rpc.call("desktop/view/close", json!({ "viewId": id }))
+                .await;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    for round in 0..6 {
+        // 一口气发 8 个：并发越多，旧 open 晚做完的机会越大。
+        let mut ids = Vec::new();
+        for _ in 0..8 {
+            ids.push(
+                rpc.send("desktop/view/open", json!({ "maxDimension": 320 }))
+                    .await,
+            );
+        }
+        let (replies, _) = rpc.collect(&ids, Duration::from_secs(20)).await;
+        let last = ids[ids.len() - 1];
+        let live = replies[&last]["result"]["viewId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("round {round}: 最后发的 open 要成功：{replies:?}"))
+            .to_string();
+        for id in &ids[..ids.len() - 1] {
+            match replies[id]["result"]["viewId"].as_str() {
+                // 先发的也成功了（它先做完、随后被顶掉）：GUI 会把它关掉。
+                Some(stale) => {
+                    rpc.call("desktop/view/close", json!({ "viewId": stale }))
+                        .await;
+                }
+                None => assert_eq!(
+                    replies[id]["error"]["details"]["code"], "superseded",
+                    "round {round}: {replies:?}"
+                ),
+            }
+        }
+        loop {
+            let frame = rpc
+                .wait_notification("desktop/view/frame", Duration::from_secs(5))
+                .await;
+            if frame["params"]["viewId"] == live.as_str() {
+                break;
+            }
+        }
+        rpc.call("desktop/view/close", json!({ "viewId": live }))
+            .await;
+    }
 }
 
 /// 桌面实时画面（不需要 cua-driver）：能力位在；驱动没连上 `open` 直接回
@@ -2425,6 +2683,103 @@ async fn browser_view_streams_the_agents_tab() {
         .wait_notification("browser/view/closed", Duration::from_secs(5))
         .await;
     assert_eq!(ended["params"]["reason"], "no_tab", "{ended}");
+    hub.shutdown().await;
+}
+
+/// 真 Chrome：标签栏。`open` 回会话的 `tabs`；agent 新开一页（这里直接用浏览器 MCP 的
+/// hub）→ 推 `browser/view/tabs`（两页、新页是当前页）且画面切到新页；页面自己开的新页
+/// （`target=_blank`）经 agent 下一次调用收进会话后同样出现在标签栏。
+#[tokio::test]
+#[ignore = "needs a real Chrome"]
+async fn browser_view_pushes_the_sessions_tabs() {
+    if cordis_browser::session::discover_chrome().is_err() {
+        eprintln!("skip: chrome not installed");
+        return;
+    }
+    let h = Harness::boot().await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    let key = cordis_spine::mcp_session_key(&sessions);
+    let hub = cordis_browser::BrowserHub::new();
+    let opened = hub
+        .call(
+            &key,
+            "browser_open",
+            &json!({"url": "data:text/html,<title>One</title><a href='about:blank%23three' target='_blank' style='position:fixed;left:0;top:0;width:200px;height:100px;display:block'>Pop</a>"}),
+        )
+        .await;
+    assert!(!opened.is_error, "{}", opened.text);
+
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let view = rpc.call("browser/view/open", json!({})).await;
+    let tabs = view["result"]["tabs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{view}"));
+    assert_eq!(tabs.len(), 1, "{view}");
+    assert_eq!(tabs[0]["title"], "One");
+    assert_eq!(tabs[0]["active"], true);
+    let first = tabs[0]["targetId"].as_str().unwrap().to_string();
+
+    let new = hub
+        .call(
+            &key,
+            "browser_tabs",
+            &json!({"action": "new", "url": "data:text/html,<title>Two</title>"}),
+        )
+        .await;
+    assert!(!new.is_error, "{}", new.text);
+    // 画面先切过去（status），标签栏下一拍跟上。
+    loop {
+        let status = rpc
+            .wait_notification("browser/view/status", Duration::from_secs(5))
+            .await;
+        if status["params"]["title"] == "Two" {
+            break;
+        }
+    }
+    let pushed = loop {
+        let note = rpc
+            .wait_notification("browser/view/tabs", Duration::from_secs(5))
+            .await;
+        let tabs = note["params"]["tabs"].as_array().unwrap().clone();
+        if tabs.len() == 2 && tabs[1]["title"] == "Two" {
+            break tabs;
+        }
+    };
+    assert_eq!(pushed[0]["targetId"], first.as_str());
+    assert_eq!(pushed[1]["active"], true, "{pushed:?}");
+
+    // 回第一页，点 target=_blank 链接：agent 下一次调用把新页收进会话，插在第一页右边。
+    let back = hub
+        .call(
+            &key,
+            "browser_tabs",
+            &json!({"action": "switch", "index": 0}),
+        )
+        .await;
+    assert!(!back.is_error, "{}", back.text);
+    let snap = hub.call(&key, "browser_snapshot", &json!({})).await.text;
+    let line = snap
+        .lines()
+        .find(|l| l.contains("\"Pop\""))
+        .unwrap_or_else(|| panic!("{snap}"));
+    let r = &line[line.find("[ref=").unwrap() + 5..line.rfind(']').unwrap()];
+    let click = hub.call(&key, "browser_click", &json!({ "ref": r })).await;
+    assert!(!click.is_error, "{}", click.text);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let _ = hub.call(&key, "browser_tabs", &json!({})).await;
+    loop {
+        let note = rpc
+            .wait_notification("browser/view/tabs", Duration::from_secs(5))
+            .await;
+        let tabs = note["params"]["tabs"].as_array().unwrap().clone();
+        if tabs.len() == 3 {
+            assert_eq!(tabs[1]["url"], "about:blank#three", "{tabs:?}");
+            assert_eq!(tabs[1]["active"], true, "{tabs:?}");
+            break;
+        }
+    }
     hub.shutdown().await;
 }
 

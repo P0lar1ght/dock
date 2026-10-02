@@ -45,6 +45,10 @@
 - **一个 Chromium，共用 profile**：`$DOCK_HOME/browser/user-data`，登录态所有会话共享。
 - **按会话分标签页**：每个会话一组自己的标签页、快照 refs、对话框、network / console。
 - `browser_tabs` 只列本会话的页；`browser_close` 只关本会话的页。
+- 本会话的页自己开的新页（`target=_blank` 链接、`window.open`）也算本会话的：
+  - 每次调用前和 Chrome 对一遍，收进来、插在打开它的页右边并成为活动页（和真浏览器一样）。
+  - 所以点了新开标签页的链接之后，下一步就在新页上；`browser_tabs` 列得到它。
+  - 别的会话的页开的不收。
 - 最后一组关掉时，自己拉起的 Chromium 也关。
 - **会话身份**：Dock 在 `tools/call` 的 `_meta["dock/sessionId"]` 里带。
   - 取发起调用那一页的落盘会话 id（GUI 的 threadId）。

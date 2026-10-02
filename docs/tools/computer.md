@@ -81,4 +81,7 @@ enabled = true
 - 客户端（GUI 的桌面面板）可以看 agent 正在操作的窗口，约 4 帧/秒。
 - 网关以会话的身份调 `get_window_state { include_accessibility_tree: false }`，只截图、不遍历 UI 树。
 - 不进对话流、不过权限门（只读）；agent 没碰过窗口时看最前面的窗口。
+- agent 光标：每次桌面动作后问 `get_agent_cursor_state`，画在实时画面上。
+  - 窗口截图里没有 cua-driver 的光标浮层，所以客户端自己画。
+- 截不到时说原因（没有窗口 / 截图失败），不一直显示「正在连接」。
 - 协议细节见 `cordis-gateway/README.md` 的「桌面画面」。

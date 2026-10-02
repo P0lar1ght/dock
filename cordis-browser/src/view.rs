@@ -21,7 +21,9 @@ use chromiumoxide::cdp::browser_protocol::page::{
     ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams, StopScreencastParams,
     Viewport,
 };
-use chromiumoxide::cdp::browser_protocol::target::{GetTargetInfoParams, TargetId};
+use chromiumoxide::cdp::browser_protocol::target::{
+    GetTargetInfoParams, GetTargetsParams, TargetId,
+};
 use chromiumoxide::listeners::EventStream;
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
@@ -70,6 +72,18 @@ impl Default for ScreencastOptions {
 pub struct PageInfo {
     pub url: String,
     pub title: String,
+}
+
+/// Chrome 里的一个 target（标签栏用：标题、地址，和谁开的它）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TargetSummary {
+    pub id: String,
+    /// `page` / `iframe` / `service_worker` …
+    pub kind: String,
+    pub url: String,
+    pub title: String,
+    /// 打开它的页（`target=_blank` 链接、`window.open`）。
+    pub opener: Option<String>,
 }
 
 pub struct View {
@@ -242,6 +256,27 @@ impl View {
             },
             Err(_) => PageInfo::default(),
         }
+    }
+
+    /// 整个浏览器的 target（所有会话的都在里面，调用方按名册挑）。
+    pub async fn targets(&self) -> Result<Vec<TargetSummary>, String> {
+        let resp = self
+            .browser
+            .execute(GetTargetsParams::default())
+            .await
+            .map_err(|e| format!("列出标签页失败：{e}"))?;
+        Ok(resp
+            .result
+            .target_infos
+            .iter()
+            .map(|t| TargetSummary {
+                id: t.target_id.inner().to_string(),
+                kind: t.r#type.clone(),
+                url: t.url.clone(),
+                title: t.title.clone(),
+                opener: t.opener_id.as_ref().map(|o| o.inner().to_string()),
+            })
+            .collect())
     }
 
     /// 转发一次用户输入。坐标是页面视口的 CSS 像素（客户端按帧元数据换算）。
@@ -453,12 +488,39 @@ fn still_lock(target_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 /// 地址栏：没写协议的补 `https://`；只放行 http / https / about / data / file。
+/// 没写协议时补哪个：本机和内网地址（`localhost`、`127.0.0.1`、`192.168.x.x`…）补 http——
+/// 本地开发服务几乎都不带证书，真浏览器也是这么补的；其余补 https。
+fn default_scheme(raw: &str) -> &'static str {
+    let authority = raw.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    let host = host.to_ascii_lowercase();
+    let local = host == "localhost"
+        || host.ends_with(".localhost")
+        || match host.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(ip)) => {
+                ip.is_loopback() || ip.is_private() || ip.is_unspecified()
+            }
+            Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+            Err(_) => false,
+        };
+    if local {
+        "http"
+    } else {
+        "https"
+    }
+}
+
 pub fn address_bar_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err("url 不能为空".into());
     }
     let with_scheme = match raw.split_once(':') {
+        // `[::1]:8080`：方括号里是 IPv6 主机。
+        _ if raw.starts_with('[') => format!("{}://{raw}", default_scheme(raw)),
         Some((scheme, _))
             if !scheme.is_empty()
                 && scheme
@@ -469,13 +531,13 @@ pub fn address_bar_url(raw: &str) -> Result<String, String> {
         {
             // `localhost:3000`、`example.com:8080/x` 这种：冒号前是主机，不是协议。
             if raw[scheme.len() + 1..].starts_with(|c: char| c.is_ascii_digit()) {
-                format!("https://{raw}")
+                format!("{}://{raw}", default_scheme(raw))
             } else {
                 raw.to_string()
             }
         }
         Some(_) => raw.to_string(),
-        None => format!("https://{raw}"),
+        None => format!("{}://{raw}", default_scheme(raw)),
     };
     let scheme = with_scheme
         .split_once(':')
@@ -540,9 +602,24 @@ mod tests {
             address_bar_url("example.com").unwrap(),
             "https://example.com"
         );
+        // 本机 / 内网补 http（本地开发服务不带证书），别的补 https。
         assert_eq!(
             address_bar_url(" localhost:3000/x ").unwrap(),
-            "https://localhost:3000/x"
+            "http://localhost:3000/x"
+        );
+        assert_eq!(
+            address_bar_url("127.0.0.1:8765/child.html").unwrap(),
+            "http://127.0.0.1:8765/child.html"
+        );
+        assert_eq!(
+            address_bar_url("192.168.1.8").unwrap(),
+            "http://192.168.1.8"
+        );
+        assert_eq!(address_bar_url("[::1]:8080").unwrap(), "http://[::1]:8080");
+        assert_eq!(address_bar_url("8.8.8.8").unwrap(), "https://8.8.8.8");
+        assert_eq!(
+            address_bar_url("localhost.example.com").unwrap(),
+            "https://localhost.example.com"
         );
         assert_eq!(address_bar_url("http://a.test").unwrap(), "http://a.test");
         assert_eq!(address_bar_url("about:blank").unwrap(), "about:blank");

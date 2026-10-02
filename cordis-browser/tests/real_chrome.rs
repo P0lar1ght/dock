@@ -445,3 +445,74 @@ async fn tab_closed_elsewhere_is_forgotten() {
     .await;
     hub.shutdown().await;
 }
+
+/// 快照里名字是 `name` 的那一行的 ref（`[ref=eN]`）。
+fn ref_of(snapshot: &str, name: &str) -> String {
+    let line = snapshot
+        .lines()
+        .find(|l| l.contains(&format!("\"{name}\"")) && l.contains("[ref="))
+        .unwrap_or_else(|| panic!("no ref for {name}: {snapshot}"));
+    let start = line.find("[ref=").unwrap() + 5;
+    let end = line[start..].find(']').unwrap() + start;
+    line[start..end].to_string()
+}
+
+/// 页面自己开的标签页（`target=_blank` 链接、`window.open`）算这个会话的：agent 下一步
+/// 就在新页上，名册也要有它（面板的标签栏、画面跟着切）。不然 agent 和面板都看不到它。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn tabs_the_page_opens_join_the_session() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("popup tabs") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    let page = "data:text/html,<a href='about:blank%23link' target='_blank'>viaLink</a>\
+        <button onclick=\"window.open('about:blank%23script')\">viaScript</button>";
+    ok(&hub, "a", "browser_open", json!({ "url": page })).await;
+    let first = cordis_browser::registry::lookup("a").expect("published");
+    assert_eq!(first.targets.len(), 1);
+
+    let snap = ok(&hub, "a", "browser_snapshot", json!({})).await.text;
+    ok(
+        &hub,
+        "a",
+        "browser_click",
+        json!({ "ref": ref_of(&snap, "viaLink") }),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let tabs = ok(&hub, "a", "browser_tabs", json!({})).await.text;
+    assert!(tabs.contains("* [1] about:blank#link"), "{tabs}");
+    let after_link = cordis_browser::registry::lookup("a").unwrap();
+    assert_eq!(after_link.targets.len(), 2, "{after_link:?}");
+    assert_eq!(after_link.active.as_ref(), after_link.targets.get(1));
+
+    // 回到第一页，用脚本开：新页插在打开它的页右边。
+    ok(
+        &hub,
+        "a",
+        "browser_tabs",
+        json!({ "action": "switch", "index": 0 }),
+    )
+    .await;
+    let snap = ok(&hub, "a", "browser_snapshot", json!({})).await.text;
+    ok(
+        &hub,
+        "a",
+        "browser_click",
+        json!({ "ref": ref_of(&snap, "viaScript") }),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let tabs = ok(&hub, "a", "browser_tabs", json!({})).await.text;
+    assert!(tabs.contains("* [1] about:blank#script"), "{tabs}");
+    assert!(tabs.contains("  [2] about:blank#link"), "{tabs}");
+
+    // 别的会话看不到这些页。
+    ok(&hub, "b", "browser_open", json!({ "url": "about:blank" })).await;
+    let b = ok(&hub, "b", "browser_tabs", json!({})).await.text;
+    assert!(!b.contains("#link") && !b.contains("#script"), "{b}");
+    hub.shutdown().await;
+}

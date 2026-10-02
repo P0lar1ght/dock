@@ -182,7 +182,8 @@ impl BrowserHub {
 
     /// 本会话的组，且 Chromium 还活着。Chromium 没了（被关掉 / 崩了）就把所有组
     /// 作废——它们的页都跟着没了，留着只会在下一次调用报一串 CDP 错。
-    /// 单个标签页在别处没了也一样：先去掉死页、重写名册；一页不剩就当这个会话没开过。
+    /// 每次先和 Chrome 对一遍标签页（[`ConnectedSession::sync_targets`]）：去掉死页、收下页面
+    /// 自己开的新页，变了就重写名册；一页不剩就当这个会话没开过。
     async fn live_group(&self, session: &str) -> Option<Group> {
         if !self.chromium_alive().await {
             self.forget_dead_chromium().await;
@@ -190,7 +191,7 @@ impl BrowserHub {
         }
         let group = self.group(session).await?;
         let mut g = group.lock().await;
-        if !matches!(g.prune_closed().await, Ok(true)) {
+        if !matches!(g.sync_targets().await, Ok(true)) {
             drop(g);
             return Some(group);
         }

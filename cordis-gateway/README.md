@@ -160,13 +160,15 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 | 方法 / 推送 | 作用 |
 |---|---|
-| `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title`；见下 |
+| `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` / `tabs`；见下 |
 | `browser/view/resize { viewId, width, height, deviceScaleFactor? }` | 面板大小变了：改页面视口（能力 `browserViewport`） |
 | `browser/view/input { viewId, event }` | 用户输入，见下 |
 | `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` |
+| `browser/view/tab { viewId, action, targetId?, url? }` | 标签栏：`switch` / `close`（带 `targetId`）/ `new`（`url` 可省，默认空白页）；能力 `browserTabs` |
 | `browser/view/close { viewId }` | 关视图（不关页）；连接断开时自动全关 |
 | 推送 `browser/view/frame` | 一帧：`data`（base64 JPEG）、`mime`、`width` / `height`（视口 CSS 像素）等 |
 | 推送 `browser/view/status` | 换了标签页，或地址 / 标题变了 |
+| 推送 `browser/view/tabs` | 会话的标签页列表变了：`tabs` = `[{targetId, url, title, active}]`（能力 `browserTabs`） |
 | 推送 `browser/view/closed` | 视图结束：`no_tab`（会话的标签页都关了）/ `browser_exited` |
 
 - 标签页来源：浏览器 MCP 写的运行时名册 `$DOCK_HOME/browser/sessions/<pid>.json`。
@@ -174,6 +176,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 会话还没开标签页：`no_tab`；浏览器没在跑：`browser_unavailable`。
 - 名册里的页挂不上（崩了 / 被关了、名册还没改）：先经 MCP 调 `browser_tabs` 让它清掉死页。
   - 会话一页不剩：`no_tab`（推送里同样报 `no_tab`）；带了 `url` 就开新页。
+  - MCP 回「这个会话还没有标签页」也算一页不剩：名册里剩的是被杀掉的 MCP 进程留下的旧文件
+    （重启 GUI 后常见），那些页跟着旧 Chromium 没了，不报 `browser_unavailable`。
 - `open` 带 `url`、会话又还没有标签页：经浏览器 MCP 替它开一页（能力 `browserViewport`）。
   - 走 `cordis_spine::Mcp::call_as`：以那页的身份调 `browser_open`，不进对话流、不过权限门。
   - 开出来的页记在这个会话名下，agent 接着能用；已有标签页时 `url` 不起作用。
@@ -188,6 +192,14 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 画面停下 300ms、刚挂上、换了标签页、改了视口：补一张 `captureScreenshot`（`clip.scale` 按 DPR）。
   - 截的时候先停流再接着推：放大栅格化的过渡帧不推；内容没变的重复帧也不推，不会来回补帧。
 - agent 换了活动标签页，画面跟着换（每 400ms 看一次名册），推 `status`。
+- 标签栏（能力 `browserTabs`）：`tabs` 按名册顺序（和 `browser_tabs` 的序号一致），地址标题现查 Chrome。
+  - 每 400ms 对一次，变了推 `browser/view/tabs`；名册里有、Chrome 里已经没了的页不列。
+  - `browser/view/tab` 以那页的身份调浏览器 MCP 的 `browser_tabs`（序号按名册现查）：
+    用户和 agent 共用当前页，面板切到哪页 agent 就在哪页；画面和标签栏由推送跟上。
+  - 关最后一页回 `tab_failed`（关浏览器交给 `browser_close`）；页不在了回 `not_found`。
+  - 和 `input` / `resize` 排同一条队：点了新标签页紧接着敲的字落在新页上。
+  - 页面自己开的新页（`target=_blank`、`window.open`）要浏览器 MCP 收进会话才进名册：
+    看到 opener 是本会话的页、还没进名册的，就（至多每秒一次）在后台调一次 `browser_tabs` 催它收。
 - 流控：帧写到 WebSocket 之后才回 CDP `screencastFrameAck`，慢客户端不会攒帧。
 - `event` 的形状（坐标是页面视口 CSS 像素，客户端按帧的 `width` / `height` 换算）：
   - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, clickCount?, modifiers?}`
@@ -195,8 +207,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `{type:"key", action:"down"|"up"|"press", key, modifiers?}`（DOM 键名：`Enter`、`a`）
   - `{type:"text", text}`（输入法上屏、粘贴）
   - `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
-- 地址栏：没写协议补 `https://`；只放行 http / https / about / data / file（`javascript:` 拒）。
-- 这四个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
+- 地址栏：没写协议补 `https://`，本机和内网地址（`localhost`、`127.0.0.1`、`192.168.x.x`…）补 `http://`；
+  只放行 http / https / about / data / file（`javascript:` 拒）。
+- 这几个方法不占连接锁（挂上去要几秒）；视图是连接级的，不进会话、不落盘。
 - 同一会话连发 `open`：最后收到的那个留下。
   - 先完成、已回了 `viewId` 的被顶掉时推 `closed { reason: "replaced" }`；
   - 晚完成、已经不是最新的回错误 `superseded`。
@@ -212,14 +225,35 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `desktop/view/close { viewId }` | 关视图；连接断开时自动全关 |
 | 推送 `desktop/view/frame` | 一帧：`data`（base64）、`mime`、`width` / `height`（像素）、`source`、`window` |
 | 推送 `desktop/view/closed` | 视图结束：`driver_unavailable` / `replaced` |
+| 推送 `desktop/view/cursor` | agent 做了一次桌面动作：光标位置 + 动作（能力 `desktopCursor`，见下） |
+| 推送 `desktop/view/status` | 画面状态变了：`live` / `no_window` / `capture_failed`，带 `message` |
 
 - 看哪个窗口：会话最近一次带 `pid` + `window_id` 的 cua-driver 调用（`source: "agent"`）。
   - 直调和经 `use_tool` 的都认；按日志版本缓存，日志没变不重扫。
-  - 还没有就取最前面的普通窗口（`list_windows` 的最大 `z_index`，跳过 Dock 自己，`source: "front"`）。
+  - 还没有就取最前面的普通窗口（`list_windows` 的最大 `z_index`，`source: "front"`）。
+  - 跳过 Dock 自己、系统界面，和 cua-driver 画光标的全屏浮层（「Cua Driver」，截它只会失败）。
 - 截图：`get_window_state { include_accessibility_tree: false, max_dimension }`（缺省 1280）。
   - 以那页的身份调（`Mcp::call_as`），不进对话流、不过权限门（只读）。
-- 节奏：帧写出去了才截下一帧，间隔不短于 250ms（约 4 帧/秒）；截不到时 800ms 后再试。
-- cua-driver 没连上：`open` 直接回 `driver_unavailable`；中途断了推 `closed`。
+- 节奏：帧写出去了才截下一帧。
+  - agent 5 秒内动过桌面：间隔不短于 250ms（约 4 帧/秒）；否则 1 秒一帧。
+  - 会话日志里出现新动作就立刻补一帧；截不到时 800ms 后再试。
+- 每次 cua-driver 调用最多等 5 秒；`open` 时连不上 / 超时直接回 `driver_unavailable`。
+- 中途 cua-driver 断了推 `closed`。
+- 截不到不默默重试：推 `status`。
+  - `no_window`：没有可看的窗口（agent 没碰过、前台只有 Dock / 系统界面）。
+  - `capture_failed`：`message` 带原因，比如「截不到「Grok Bot」：窗口已关闭 · 正在重试」。
+  - 连续 2 次截不到才报（agent 自己的慢调用让截图排队超时一次不算）。
+  - agent 的窗口连续 3 次截不到：先看最前面的窗口，agent 再动手时换回来。
+  - 截到了推 `live`；状态没变不重复推。
+- `cursor`：窗口截图里没有 agent 光标（cua-driver 画在屏幕浮层上），客户端自己画。
+  - 来源：会话日志里 agent 新做的 cua 动作（视图打开前的历史不算）。
+  - 位置：`get_agent_cursor_state`（按动作带的 `session` 问，没带问连接的隐式会话）。
+  - 屏幕坐标按窗口的 `bounds` 换成相对位置：`x` / `y` 在 0–1（窗口外会超出）。
+  - 问不到时 `x` / `y` 为 `null`（按键这类不动光标），客户端留在原处。
+  - `action`：`click` / `double_click` / `right_click` / `drag` / `scroll` / `type` / `key`。
+  - `label`：输入的字（最多 12 字）或滚动方向；`keys`：按键（`["cmd","shift","n"]`）。
+  - `windowId`：画面上这个窗口；动作换了窗口时等新窗口截到再推。
+  - `move_cursor` 不推：它报的位置是原样入参，和别的动作的屏幕坐标对不上。
 - `window`：`pid` / `windowId`，解析得到时还有 `app` / `title` / `bounds` / `screenshotScale`。
 - 同一会话再 `open`：旧的推 `closed { reason: "replaced" }`。
 

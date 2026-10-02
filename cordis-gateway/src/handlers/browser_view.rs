@@ -1,7 +1,7 @@
 //! `browser/view/*`：看某个会话正在用的浏览器标签页，并能接手操作。
 //!
 //! - `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight? }` →
-//!   `{ viewId, threadId, targetId, url, title }`。之后这条连接收 `browser/view/frame` /
+//!   `{ viewId, threadId, targetId, url, title, tabs }`。之后这条连接收 `browser/view/frame` /
 //!   `status` / `closed` 推送。会话还没有标签页时带 `url` 就替它开一页（经浏览器 MCP，
 //!   记在这个会话名下，agent 接着能用）；`viewport { width, height, deviceScaleFactor? }`
 //!   让页面视口跟着面板走。
@@ -9,7 +9,15 @@
 //! - `browser/view/input { viewId, event }`：用户的鼠标、滚轮、按键、文字（见
 //!   [`cordis_browser::view::View::input`]）。
 //! - `browser/view/navigate { viewId, url? | action? }`：地址栏 / back / forward / reload。
+//! - `browser/view/tab { viewId, action: "switch"|"close"|"new", targetId?, url? }`：标签栏。
+//!   经浏览器 MCP 的 `browser_tabs`（以这页的身份）：用户和 agent 共用一个浏览器，面板切到
+//!   哪页，agent 接着就在哪页操作。
 //! - `browser/view/close { viewId }`；连接断开时自动全关。
+//!
+//! 标签栏：`tabs` = `[{ targetId, url, title, active }]`，按名册里的顺序（和 `browser_tabs`
+//! 的序号一致）。变了推 `browser/view/tabs`。页面自己开的新页（`target=_blank`、
+//! `window.open`）要浏览器 MCP 收进会话（见 `ConnectedSession::sync_targets`）才进名册：
+//! agent 没在调用时，这里看到有没收的就以这页的身份调一次 `browser_tabs` 催它收。
 //!
 //! 标签页来自浏览器 MCP 写的运行时名册（`cordis_browser::registry`）：按页的会话身份
 //! （[`cordis_spine::mcp_session_key`]，和 MCP 客户端带给服务端的是同一个）找到这个
@@ -58,6 +66,10 @@ const NATIVE_MAX: i64 = 4096;
 /// 画面停下来多久补一张静止帧（[`View::still`]）：无头 screencast 只出 CSS 像素、页面不动时
 /// 一帧不推（刚挂上也不推），补这一张静止页面才有画面、Retina 上才清楚。
 const SETTLE: Duration = Duration::from_millis(300);
+/// 浏览器 MCP 对没开过页的会话回的错（`cordis_browser` 的 `NEED_OPEN`）。
+const NO_SESSION_TAB: &str = "has no browser tab yet";
+/// 看到页面自己开的新页还没进名册时，最多隔这么久催一次浏览器 MCP 收下。
+const ADOPT_EVERY: Duration = Duration::from_millis(1000);
 /// 静止帧的 JPEG 质量（它要清楚，比流里的帧高一点）。
 const STILL_QUALITY: i64 = 85;
 
@@ -85,6 +97,8 @@ pub(crate) enum Order {
 
 struct ViewEntry {
     thread_id: String,
+    /// 会话身份（[`mcp_session_key`]）：在名册里找它的标签页。
+    key: String,
     current: Current,
     task: JoinHandle<()>,
     /// 这页的 ctx：以它的身份调浏览器 MCP（改视口）。
@@ -154,8 +168,11 @@ impl BrowserViews {
                     .insert(threads::thread_param(params), seq);
                 Order::Open(seq)
             }
-            // 改视口和输入排同一条队：连拖几下分隔线，最后那次一定最后生效。
-            protocol::BROWSER_VIEW_INPUT | protocol::BROWSER_VIEW_RESIZE => {
+            // 改视口、输入、标签栏排同一条队：连拖几下分隔线，最后那次一定最后生效；
+            // 点了新标签页紧接着敲的字，落在新页上。
+            protocol::BROWSER_VIEW_INPUT
+            | protocol::BROWSER_VIEW_RESIZE
+            | protocol::BROWSER_VIEW_TAB => {
                 let Ok(id) = view_id(params) else {
                     return Order::None;
                 };
@@ -176,6 +193,7 @@ pub(crate) fn is_browser_view(method: &str) -> bool {
             | protocol::BROWSER_VIEW_NAVIGATE
             | protocol::BROWSER_VIEW_CLOSE
             | protocol::BROWSER_VIEW_RESIZE
+            | protocol::BROWSER_VIEW_TAB
     )
 }
 
@@ -238,6 +256,18 @@ pub(crate) async fn dispatch(
             kick.notify_one();
             Ok(json!({ "ok": true }))
         }
+        protocol::BROWSER_VIEW_TAB => {
+            let _order = match order {
+                Order::Input { prev, _done } => {
+                    if let Some(prev) = prev {
+                        let _ = prev.await;
+                    }
+                    Some(_done)
+                }
+                _ => None,
+            };
+            tab(views, &params).await
+        }
         protocol::BROWSER_VIEW_NAVIGATE => {
             views
                 .view(&params)?
@@ -293,6 +323,10 @@ async fn open(
         }
     }
     let info = view.info().await;
+    let tabs = match registry::lookup(&key) {
+        Some(session) => tab_rows(&session, &view.targets().await.unwrap_or_default()).0,
+        None => Vec::new(),
+    };
     let frames = view
         .screencast(opts)
         .await
@@ -305,7 +339,7 @@ async fn open(
     let pump = Pump {
         view_id: view_id.clone(),
         thread_id: thread_id.clone(),
-        key,
+        key: key.clone(),
         target: target.clone(),
         info: info.clone(),
         opts,
@@ -316,6 +350,8 @@ async fn open(
         wanted: wanted.clone(),
         healed_at: None,
         kick: kick.clone(),
+        tabs: tabs.clone(),
+        adopt_at: None,
     };
     // 同一条连接对同一个会话只留一个视图，留最后收到的那次 open。查和装在同一把锁里，
     // 两个 open 不会都以为自己是最新的。
@@ -339,6 +375,7 @@ async fn open(
                 view_id.clone(),
                 ViewEntry {
                     thread_id: thread_id.clone(),
+                    key,
                     current,
                     task,
                     page: page.ctx.clone(),
@@ -381,7 +418,92 @@ async fn open(
         "targetId": target,
         "url": info.url,
         "title": info.title,
+        "tabs": tabs,
     }))
+}
+
+/// `browser/view/tab`：以这页的身份调浏览器 MCP 的 `browser_tabs`。序号按名册现在的顺序
+/// 现查（和 `browser_tabs` 的一致）；画面、标签栏由推送任务下一拍跟上。
+async fn tab(views: &BrowserViews, params: &Value) -> Result<Value, RpcError> {
+    let id = view_id(params)?;
+    let (page, key) = views
+        .open
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|e| (e.page.clone(), e.key.clone()))
+        .ok_or_else(|| RpcError::app("not_found", format!("没有视图 {id}")))?;
+    let action = params.get("action").and_then(Value::as_str).unwrap_or("");
+    let index = || -> Result<usize, RpcError> {
+        let target = params
+            .get("targetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_params("targetId is required"))?;
+        registry::lookup(&key)
+            .and_then(|tabs| tabs.targets.iter().position(|t| t == target))
+            .ok_or_else(|| RpcError::app("not_found", "这个标签页已经不在了"))
+    };
+    let args = match action {
+        "switch" => json!({ "action": "switch", "index": index()? }),
+        "close" => json!({ "action": "close", "index": index()? }),
+        "new" => {
+            let url = match params.get("url").and_then(Value::as_str).map(str::trim) {
+                Some(raw) if !raw.is_empty() => {
+                    cordis_browser::view::address_bar_url(raw).map_err(RpcError::invalid_params)?
+                }
+                _ => "about:blank".to_string(),
+            };
+            json!({ "action": "new", "url": url })
+        }
+        other => {
+            return Err(RpcError::invalid_params(format!(
+                "action 只能是 switch / close / new，收到 {other:?}"
+            )))
+        }
+    };
+    let out = mcp(&page)
+        .map_err(|e| RpcError::app("browser_unavailable", e))?
+        .call_as(&page, BROWSER_MCP_SERVER, "browser_tabs", args)
+        .await
+        .map_err(|e| RpcError::app("browser_unavailable", e))?;
+    if out.is_error {
+        let message = if out.content.contains("last tab") {
+            "这是最后一个标签页，不能关".to_string()
+        } else {
+            out.content
+        };
+        return Err(RpcError::app("tab_failed", message));
+    }
+    Ok(json!({ "ok": true }))
+}
+
+/// 会话的标签栏：名册里的顺序配上 Chrome 里的地址标题；另回有没有「页面自己开了、还没收进
+/// 会话」的页（opener 是本会话的页）。名册里有、Chrome 里已经没了的页不列。
+fn tab_rows(
+    session: &registry::SessionTabs,
+    targets: &[cordis_browser::view::TargetSummary],
+) -> (Vec<Value>, bool) {
+    let rows = session
+        .targets
+        .iter()
+        .filter_map(|id| targets.iter().find(|t| &t.id == id))
+        .map(|t| {
+            json!({
+                "targetId": t.id,
+                "url": t.url,
+                "title": t.title,
+                "active": session.active.as_ref() == Some(&t.id),
+            })
+        })
+        .collect();
+    let unadopted = targets.iter().any(|t| {
+        t.kind == "page"
+            && !session.targets.contains(&t.id)
+            && t.opener
+                .as_ref()
+                .is_some_and(|o| session.targets.contains(o))
+    });
+    (rows, unadopted)
 }
 
 /// 找到会话的活动标签页并挂上；会话还没有标签页时带了 `url` 就替它开一页。
@@ -422,11 +544,17 @@ async fn attach_session_tab(
 }
 
 /// 让浏览器 MCP 清掉这个会话已经没了的标签页（它重写名册之后才回），再查名册。
+///
+/// MCP 说这个会话一页都没有，就当没有：名册里剩下的是被杀掉的 MCP 进程留下的旧文件
+/// （重启 GUI 后常见，进程被杀来不及删自己那份），那些页跟着旧 Chromium 没了。
 async fn refresh_target(page: &Context, key: &str) -> Option<String> {
     if let Ok(mcp) = mcp(page) {
-        let _ = mcp
+        let out = mcp
             .call_as(page, BROWSER_MCP_SERVER, "browser_tabs", json!({}))
             .await;
+        if out.is_ok_and(|o| o.is_error && o.content.contains(NO_SESSION_TAB)) {
+            return None;
+        }
     }
     active_target(key)
 }
@@ -560,6 +688,10 @@ struct Pump {
     /// 视口改了：补一张静止帧（见 [`ViewEntry::kick`]）。
     kick: Arc<Notify>,
     views: std::sync::Weak<BrowserViews>,
+    /// 上次推给客户端的标签栏。
+    tabs: Vec<Value>,
+    /// 上次催浏览器 MCP 收下页面自己开的新页的时间。
+    adopt_at: Option<Instant>,
 }
 
 enum Step {
@@ -684,6 +816,7 @@ impl Pump {
                         self.info = info;
                         self.status();
                     }
+                    self.follow_tabs(&view).await;
                 }
             }
             if self.out.is_closed() {
@@ -761,6 +894,36 @@ impl Pump {
         Ok(frames)
     }
 
+    /// 标签栏变了就推；有页面自己开的新页还没进名册，就（隔一会儿）在后台催浏览器 MCP
+    /// 收下——收下后名册的活动页变成新页，下一拍画面就切过去。
+    async fn follow_tabs(&mut self, view: &View) {
+        let Some(session) = registry::lookup(&self.key) else {
+            return;
+        };
+        let Ok(targets) = view.targets().await else {
+            return;
+        };
+        let (rows, unadopted) = tab_rows(&session, &targets);
+        if rows != self.tabs {
+            self.tabs = rows;
+            self.send(json!({
+                "method": protocol::BROWSER_VIEW_TABS,
+                "params": { "viewId": self.view_id, "threadId": self.thread_id, "tabs": self.tabs }
+            }));
+        }
+        if unadopted && self.adopt_at.is_none_or(|t| t.elapsed() >= ADOPT_EVERY) {
+            self.adopt_at = Some(Instant::now());
+            let page = self.page.clone();
+            tokio::spawn(async move {
+                if let Ok(mcp) = mcp(&page) {
+                    let _ = mcp
+                        .call_as(&page, BROWSER_MCP_SERVER, "browser_tabs", json!({}))
+                        .await;
+                }
+            });
+        }
+    }
+
     fn status(&self) {
         self.send(json!({
             "method": protocol::BROWSER_VIEW_STATUS,
@@ -776,5 +939,54 @@ impl Pump {
 
     fn send(&self, note: Value) {
         let _ = self.out.send(Outgoing::Text(note.to_string()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cordis_browser::view::TargetSummary;
+
+    fn target(id: &str, kind: &str, opener: Option<&str>) -> TargetSummary {
+        TargetSummary {
+            id: id.into(),
+            kind: kind.into(),
+            url: format!("https://{id}.example/"),
+            title: format!("{id} title"),
+            opener: opener.map(String::from),
+        }
+    }
+
+    #[test]
+    fn tab_rows_follow_registry_order_and_spot_unadopted_popups() {
+        let session = registry::SessionTabs {
+            targets: vec!["B".into(), "A".into(), "GONE".into()],
+            active: Some("A".into()),
+        };
+        // Chrome 的顺序和名册不一样；别的会话的页（X）和它开的页（Y）不算。
+        let mut targets = vec![
+            target("A", "page", None),
+            target("X", "page", None),
+            target("B", "page", None),
+            target("Y", "page", Some("X")),
+        ];
+        let (rows, unadopted) = tab_rows(&session, &targets);
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r["targetId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["B", "A"]);
+        assert_eq!(rows[1]["active"], true);
+        assert_eq!(rows[0]["active"], false);
+        assert_eq!(rows[0]["title"], "B title");
+        assert!(!unadopted);
+
+        // 本会话的页开了新页、还没进名册：要催。
+        targets.push(target("C", "page", Some("B")));
+        assert!(tab_rows(&session, &targets).1);
+        // 本会话的页起的 worker 不算。
+        targets.pop();
+        targets.push(target("W", "service_worker", Some("B")));
+        assert!(!tab_rows(&session, &targets).1);
     }
 }
