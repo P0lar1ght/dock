@@ -32,7 +32,7 @@ export function permissionPrompt(
       <summary aria-label=${`${permission.title}，${permissionStatus(permission)}`}>
         <span class="tool-card-diamond" aria-hidden="true">${TOOL_DIAMOND}</span>
         <span class="tool-card-name">${permission.title}</span>
-        <span class="tool-card-summary">${permissionStatus(permission)}${permission.risk === 'high' ? ' · 高风险' : ''}</span>
+        <span class="tool-card-summary">${permissionStatus(permission)}${permission.agentId ? ' · 来自子代理' : ''}${permission.risk === 'high' ? ' · 高风险' : ''}</span>
       </summary>
       <div class="tool-card-body permission-details">
         ${permission.reason ? html`<p class="permission-reason">${permission.reason}</p>` : nothing}

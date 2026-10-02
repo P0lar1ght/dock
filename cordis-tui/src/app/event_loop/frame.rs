@@ -267,7 +267,10 @@ pub(super) fn draw(
             } else if perm_open {
                 ctx.get::<Permissions>(PERMISSIONS)
                     .and_then(|p| p.front())
-                    .map(|pr| permission_view::chrome_height(&pr, inner.width))
+                    .map(|pr| {
+                        let source = permission_source(ctx, &pr);
+                        permission_view::chrome_height(&pr, source.as_deref(), inner.width)
+                    })
                     .unwrap_or(10)
                     .min(inner.height / 2)
                     .max(8)
@@ -492,10 +495,12 @@ pub(super) fn draw(
                             Overlay::Permission { selected } => *selected,
                             _ => 0,
                         };
+                        let source = permission_source(ctx, &prompt);
                         *hits = permission_view::render(
                             frame.buffer_mut(),
                             prompt_area,
                             &prompt,
+                            source.as_deref(),
                             selected,
                         );
                     }
@@ -1032,6 +1037,28 @@ pub(super) fn arg_picker_title(kind: crate::slash::ArgKind) -> &'static str {
         crate::slash::ArgKind::LoopInterval => "循环间隔",
         crate::slash::ArgKind::Lsp => "LSP",
     }
+}
+
+/// 权限请求是子代理发的：「来自子代理 · 角色 · 任务」（角色用这一页预设里的显示名）。
+/// 子代理已经不在名册里了就只写「来自子代理」。
+fn permission_source(ctx: &Context, prompt: &cordis_spine::PermissionPrompt) -> Option<String> {
+    let id = prompt.agent_id.as_deref()?;
+    let Some(snap) = ctx
+        .get::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
+        .and_then(|s| s.snapshot(id))
+    else {
+        return Some("来自子代理".into());
+    };
+    let role = ctx
+        .get::<AgentPresets>(AGENT_PRESETS)
+        .and_then(|p| p.role_label(&snap.subagent_type))
+        .unwrap_or(snap.subagent_type);
+    let mut label = format!("来自子代理 · {role}");
+    if !snap.description.is_empty() {
+        label.push_str(" · ");
+        label.push_str(&snap.description);
+    }
+    Some(label)
 }
 
 #[cfg(test)]

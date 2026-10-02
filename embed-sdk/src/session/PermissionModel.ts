@@ -21,6 +21,8 @@ export interface SessionPermissionRequest {
   decisionSource?: SessionPermissionDecisionSource;
   expiresAt?: number;
   bindingSummary?: string;
+  /** 发起请求的子代理（Gateway `permission/requested.agentId`）；主会话发的没有。 */
+  agentId?: string;
   requestedSeq: number;
   updatedSeq: number;
 }
