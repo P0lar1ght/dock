@@ -89,13 +89,14 @@ async fn grok_turn(ctx: &Context, prompt: String) -> Result<TurnOutcome> {
 /// Parent mailbox: sample without a new user bubble so a child's message reaches the model.
 async fn grok_continue_mailbox(ctx: &Context) -> Result<TurnOutcome> {
     let sessions = ctx.require::<Sessions>(SESSIONS)?;
-    if sessions.identity() != "main" {
+    // 用户面的会话（第 1 页或分页）各取各的信箱；子代理的父级消息走 `drain_child_inbox`。
+    if !sessions.is_main() {
         return Ok(TurnOutcome::Text(String::new()));
     }
     let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
         return Ok(TurnOutcome::Text(String::new()));
     };
-    if !sub.has_parent_notices() {
+    if !sub.has_parent_notices(sessions.identity()) {
         return Ok(TurnOutcome::Text(String::new()));
     }
     sessions.seal_incomplete_tool_calls();
@@ -287,8 +288,8 @@ fn drain_parent_mailbox(ctx: &Context, sessions: &Sessions) {
     let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) else {
         return;
     };
-    let texts = if sessions.identity() == "main" {
-        sub.drain_parent_notices()
+    let texts = if sessions.is_main() {
+        sub.drain_parent_notices(sessions.identity())
     } else {
         sub.drain_child_inbox(sessions.identity())
     };

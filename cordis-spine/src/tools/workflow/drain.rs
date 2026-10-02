@@ -509,7 +509,10 @@ fn notify_done(ctx: &cordis::Context, state: &Arc<WorkflowState>, run_id: &str) 
             body: summary.clone(),
         });
     }
+    // 收尾通知交给 `ctx` 那一页（drain 循环挂在根上，就是第 1 页，和上面的收尾卡同一页）。
+    let page = Sessions::page_of(ctx).unwrap_or_else(|| crate::session::log::ROOT_IDENTITY.into());
     sub.notify_workflow_done(
+        &page,
         snap.name.clone(),
         snap.status.clone(),
         snap.elapsed_ms,

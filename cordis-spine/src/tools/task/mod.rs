@@ -280,8 +280,9 @@ impl Subagents {
         self.store.sweep_idle(ttl)
     }
 
-    pub fn has_parent_notices(&self) -> bool {
-        self.store.has_parent_notices()
+    /// 会话 `parent`（`main` / `main#N`）的信箱里有没有子代理的消息或回合结束通知。
+    pub fn has_parent_notices(&self, parent: &str) -> bool {
+        self.store.has_parent_notices(parent)
     }
 
     /// Enqueue a parent-facing notice and wake the session actor.
@@ -302,8 +303,10 @@ impl Subagents {
     /// **整条 run 只有这一次唤醒**。中间那些「某个子代理跑完了」既不完整也不
     /// 可行动，推给主线程只会让它在半份结果上烧一轮。过程上报已经在 overlay
     /// 和滚动区 `Notice` 里给用户看过；这一条是给主模型的完整交卷。
+    #[allow(clippy::too_many_arguments)] // 一条通知的字段，拆结构体只是搬家
     pub fn notify_workflow_done(
         &self,
+        parent: &str,
         name: String,
         status: String,
         elapsed_ms: u64,
@@ -311,12 +314,20 @@ impl Subagents {
         reports: Vec<WorkflowReport>,
         dropped_reports: usize,
     ) {
-        self.store
-            .push_workflow_done(name, status, elapsed_ms, summary, reports, dropped_reports);
+        self.store.push_workflow_done(
+            parent,
+            name,
+            status,
+            elapsed_ms,
+            summary,
+            reports,
+            dropped_reports,
+        );
     }
 
-    pub fn parent_wake(&self) -> Arc<tokio::sync::Notify> {
-        self.store.parent_wake()
+    /// 会话 `parent` 的信箱唤醒：只有发给它的通知才叫醒它。
+    pub fn parent_wake(&self, parent: &str) -> Arc<tokio::sync::Notify> {
+        self.store.parent_wake(parent)
     }
 
     /// 配置的 workflow 并发上限（未按机器并行度收窄）。workflow host 在挂载

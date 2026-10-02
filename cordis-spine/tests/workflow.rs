@@ -662,7 +662,7 @@ async fn a_running_workflow_never_wakes_the_main_thread() {
         let done = run.as_ref().is_some_and(|r| r.status != "active");
         if !done {
             assert!(
-                !sub.has_parent_notices(),
+                !sub.has_parent_notices("main"),
                 "run 还在跑（子代理 {} 个）就叫醒了主线程",
                 run.map(|r| r.agents.len()).unwrap_or(0)
             );
@@ -674,8 +674,8 @@ async fn a_running_workflow_never_wakes_the_main_thread() {
     }
 
     // 收尾之后正好一条：结果 + 过程。
-    assert!(sub.has_parent_notices(), "收尾了却没通知主线程");
-    let notices = sub.drain_parent_notices();
+    assert!(sub.has_parent_notices("main"), "收尾了却没通知主线程");
+    let notices = sub.drain_parent_notices("main");
     assert_eq!(notices.len(), 1, "整条 run 只该有一条通知：{notices:?}");
     let text = &notices[0];
     assert!(text.contains("budget-probe"), "{text}");
@@ -992,7 +992,7 @@ async fn every_report_reaches_the_main_thread_not_just_the_last() {
     let run = wait_terminal(&h, &run_id).await;
     assert_eq!(run.status, "complete", "{run:?}");
 
-    let notices = sub.drain_parent_notices();
+    let notices = sub.drain_parent_notices("main");
     assert_eq!(notices.len(), 1, "整条 run 只该有一条通知：{notices:?}");
     let text = &notices[0];
     assert!(text.contains("第 1 条结论"), "第一条上报被吃掉了：{text}");
@@ -1018,7 +1018,7 @@ async fn done_notice_names_agents_by_their_label() {
     let run = wait_terminal(&h, &run_id).await;
     assert_eq!(run.status, "complete", "{run:?}");
 
-    let notices = sub.drain_parent_notices();
+    let notices = sub.drain_parent_notices("main");
     let text = &notices[0];
     assert!(
         text.contains("- researcher-0: 阶段性结论"),

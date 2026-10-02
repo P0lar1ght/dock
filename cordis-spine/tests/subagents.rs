@@ -442,7 +442,7 @@ async fn background_turn_end_pushes_notice_with_output() {
     let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
     let id = spawn_bg(&tools, "FIRST_TURN", "general-purpose").await;
     wait_idle(&sub, &id).await;
-    let notices = sub.drain_parent_notices();
+    let notices = sub.drain_parent_notices("main");
     assert!(
         notices.iter().any(|t| t.contains(&id)
             && t.contains("FIRST_TURN")
@@ -473,7 +473,7 @@ async fn foreground_spawn_consumes_its_own_notice() {
         .await;
     assert!(out.content.contains("INLINE_RESULT"), "{}", out.content);
     assert!(out.content.contains("<subagent_meta>"), "{}", out.content);
-    let notices = sub.drain_parent_notices();
+    let notices = sub.drain_parent_notices("main");
     assert!(
         !notices
             .iter()
@@ -683,7 +683,7 @@ async fn child_send_message_reaches_the_parent_mailbox() {
             .any(|e| matches!(e, LogEvent::SystemReminder(_))),
         "the message must queue until the parent samples: {events:?}"
     );
-    let notices = sub.drain_parent_notices();
+    let notices = sub.drain_parent_notices("main");
     assert!(
         notices
             .iter()
@@ -707,7 +707,7 @@ async fn send_message_follows_exactly_one_adjacent_edge() {
     let b = spawn_bg(&tools, "B_TURN", "general-purpose").await;
     wait_idle(&sub, &a).await;
     wait_idle(&sub, &b).await;
-    sub.drain_parent_notices();
+    sub.drain_parent_notices("main");
 
     let child_a = child_ctx(&h, &a, "general-purpose");
     let msg = |to: &str| serde_json::json!({"agent_id": to, "message": "hi"});
@@ -721,7 +721,7 @@ async fn send_message_follows_exactly_one_adjacent_edge() {
         "只认启动它的会话：{other_page}"
     );
     assert!(
-        sub.drain_parent_notices().is_empty(),
+        sub.drain_parent_notices("main").is_empty(),
         "被拒的消息不该进父信箱"
     );
 
@@ -877,7 +877,7 @@ async fn a_running_child_reads_a_parent_message_at_its_next_step() {
         out.contains("Agent main sent a message:\nMID_TURN"),
         "{out}"
     );
-    let notices = sub.drain_parent_notices();
+    let notices = sub.drain_parent_notices("main");
     assert_eq!(
         notices
             .iter()
@@ -1044,4 +1044,55 @@ async fn child_whose_sample_failed_is_marked_failed() {
     let id = spawn_bg(&tools, "x", "explore").await;
     let snap = wait_idle(&sub, &id).await;
     assert!(snap.failed, "模型请求出错的一轮要标失败：{snap:?}");
+}
+
+/// 回归：分页（`main#2`）派的子代理，回合结束通知进**那一页**的信箱，由那一页的循环取走；
+/// 第 1 页（`main`）既看不到也不会替它开一轮。以前只有 `main` 取信箱，分页派的孩子回话
+/// 全落到第 1 页，第 1 页还拿着别人的回报自己跑了一轮，派活的那一页永远等不到。
+#[tokio::test]
+async fn a_tabs_child_reports_to_that_tab_not_page_one() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let page = h.root.isolate(SESSIONS).isolate("turn").isolate(AGENT_LOOP);
+    page.provide(SESSIONS, Sessions::tab(page.clone(), 2))
+        .unwrap();
+    page.plugin(turn(), ()).unwrap().wait().await.unwrap();
+    page.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+
+    let started = call_on(
+        &tools,
+        &page,
+        "task",
+        serde_json::json!({
+            "prompt": "TAB_CHILD",
+            "description": "分页派的",
+            "subagent_type": "explore",
+            "run_in_background": true,
+        }),
+    )
+    .await;
+    let id = parse_id(&started);
+    let snap = wait_idle(&sub, &id).await;
+    assert_eq!(snap.parent, "main#2");
+    assert!(sub.has_parent_notices("main#2"), "通知没进派活那一页的信箱");
+    assert!(!sub.has_parent_notices("main"), "通知不该落到第 1 页");
+
+    let handle = page
+        .require::<cordis_spine::LoopHandle>(AGENT_LOOP)
+        .unwrap();
+    handle.continue_mailbox().await.unwrap();
+    assert!(
+        !sub.has_parent_notices("main#2"),
+        "那一页的循环要把信箱取空"
+    );
+    let reminded = |ctx: &Context| {
+        ctx.require::<Sessions>(SESSIONS)
+            .unwrap()
+            .events()
+            .iter()
+            .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains(&id)))
+    };
+    assert!(reminded(&page), "回合结束通知要进派活那一页的历史");
+    assert!(!reminded(&h.root), "第 1 页的历史里不该有别页孩子的通知");
 }

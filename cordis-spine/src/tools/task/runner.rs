@@ -619,7 +619,7 @@ mod inbox_tests {
         store.ensure("x", "d".into(), "t".into());
         store.push_turn_end("x", Some("FINDINGS".into()), false);
         let rendered: Vec<String> = store
-            .drain_notices()
+            .drain_notices("main")
             .iter()
             .map(super::super::format::format_parent_notice)
             .collect();
@@ -636,7 +636,7 @@ mod inbox_tests {
         store.push_report("x", "progress-2");
         // The runner passes `None` when the child already reported.
         store.push_turn_end("x", None, false);
-        let notices = store.drain_notices();
+        let notices = store.drain_notices("main");
         let text = notices
             .iter()
             .map(super::super::format::format_parent_notice)
@@ -660,7 +660,7 @@ mod inbox_tests {
         store.push_turn_end("b", Some("B".into()), false);
         store.consume_completion("a");
         let text = store
-            .drain_notices()
+            .drain_notices("main")
             .iter()
             .map(super::super::format::format_parent_notice)
             .collect::<Vec<_>>()
