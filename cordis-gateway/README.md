@@ -363,7 +363,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 页关掉时它派出的子代理的投影一起丢掉。
   - `subagent/event` 里的 `event.seq` 是子代理自己的序号，接着 `subagent/history` 往下数。
 - 找不到、或不是这个线程启动的子代理回 `not_found`；收掉的子代理 `send` 回 `subagent_closed`。
-- 权限请求暂时分不出是不是子代理发的：子代理和父级共用这一页的权限队列。
+- 子代理和派它的页共用这一页的权限队列与「始终允许」：
+  - 子代理发的 `permission/requested` 带 `agentId`（它的 id），主会话发的是 `null`；
+  - `permission/resolve { always: true }` 记在这一页上，之后这页和它的子代理调同一颗工具都不再问。
 
 ## 依赖注入
 

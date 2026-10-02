@@ -408,7 +408,9 @@ impl Tools {
                         || match exec.get::<Permissions>(PERMISSIONS) {
                             Some(perms) => {
                                 let summary = permission_summary(&call.name, &call.arguments);
-                                perms.request_strict(&call.name, &summary).await
+                                perms
+                                    .request_strict(&call.name, &summary, subagent_of(exec))
+                                    .await
                             }
                             None => false,
                         };
@@ -464,7 +466,10 @@ impl Tools {
             if acp::needs_permission(&call.name) && !plan_file_edit && !bash_cleared {
                 if let Some(perms) = exec.get::<Permissions>(PERMISSIONS) {
                     let summary = permission_summary(&call.name, &call.arguments);
-                    if !perms.request(&call.name, &summary).await {
+                    if !perms
+                        .request_from(&call.name, &summary, subagent_of(exec))
+                        .await
+                    {
                         return finish(
                             exec,
                             ToolResult {
@@ -547,6 +552,13 @@ fn finish(ctx: &Context, mut result: ToolResult) -> ToolResult {
 /// Default path truncates raw args to 120 chars (loses CUA target / role+label).
 /// MCP tools — especially `mcp_cua-driver__*` — get a structured summary that
 /// highlights action + role/label and hides long tokens.
+/// 调用方是子代理时它的 agent id（子代理的会话身份就是它的 id），主会话（第 1 页、分页）是 `None`。
+fn subagent_of(exec: &Context) -> Option<String> {
+    exec.get::<crate::session::log::Sessions>(SESSIONS)
+        .filter(|s| !s.is_main())
+        .map(|s| s.identity().to_string())
+}
+
 fn permission_summary(name: &str, arguments: &str) -> String {
     if looks_like_mcp_name(name) {
         return format!("{name} {}", summarize_mcp_args(name, arguments));
@@ -1352,6 +1364,44 @@ mod pre_execute_tests {
         assert!(out.is_error);
         assert_eq!(out.content, crate::tools::read_only::DENIED);
         assert!(!marker.exists(), "被拒的命令不该跑");
+    }
+
+    /// 子代理发的权限请求带上它的 agent id（客户端标「来自子代理」），主会话发的不带。
+    /// 放行规则不变：子代理和派它的页共用同一个队列。
+    #[tokio::test]
+    async fn a_subagents_permission_request_names_the_subagent() {
+        use crate::session::log::Sessions;
+        use cordis_base::acp::PermissionOptionKind;
+
+        let ctx = Context::new();
+        let _perm = ctx
+            .provide(PERMISSIONS, Permissions::new(ctx.clone()))
+            .unwrap();
+        let _main = ctx.provide(SESSIONS, Sessions::new(ctx.clone())).unwrap();
+        let child = ctx.isolate(SESSIONS);
+        let _kid = child
+            .provide(SESSIONS, Sessions::isolated_as(child.clone(), "kid-7"))
+            .unwrap();
+        let tools = Tools::workspace(ctx.clone());
+        let perms = ctx.get::<Permissions>(PERMISSIONS).unwrap();
+
+        for (on, expected) in [(child.clone(), Some("kid-7")), (ctx.clone(), None)] {
+            let t = tools.clone();
+            let run = tokio::spawn(async move {
+                t.execute_on(&on, call("bash", r#"{"command":"echo never-runs"}"#))
+                    .await
+            });
+            for _ in 0..100 {
+                if perms.front().is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let front = perms.front().expect("bash 要问用户");
+            assert_eq!(front.agent_id.as_deref(), expected);
+            perms.resolve(PermissionOptionKind::RejectOnce);
+            assert!(run.await.unwrap().is_error);
+        }
     }
 
     /// 没人挂 handler 时行为不变——这个位点是纯加法。

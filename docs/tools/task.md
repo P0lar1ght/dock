@@ -31,4 +31,8 @@ Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"session
 - `failed`（最近一轮以失败收尾，含模型请求出错）、`settled_at`（停下的时刻，`elapsed()` 算到这里）。
 网关据此投影 `subagent/*`（见 `cordis-gateway/README.md`「子代理」）。
 
+**权限**：子代理不另起权限队列，用派它那一页的 `"permissions"` 与审批模式（自动批准、「始终允许」都共用）。
+- `PermissionPrompt::agent_id` 记是哪个子代理发的，只用来展示，不参与放行。
+- 只读角色（explore / plan）的非只读 bash 照旧一定要人点头，自动批准和「始终允许」都不算。
+
 id 参数一族一个名字：子代理这族（`send_message` / `interrupt_agent`，以及 `task` 返回的 `agent_id:`）叫 `agent_id`，作业那族叫 `job_id` / `job_ids`。parent session id = `session::ROOT_IDENTITY`，所以用户 Stop / 新会话会取消本会话子代理，下一次 prompt 重新开放准入

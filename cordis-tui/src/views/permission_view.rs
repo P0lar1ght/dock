@@ -20,16 +20,19 @@ pub const OPTIONS: &[(PermissionOptionKind, &str)] = &[
     (PermissionOptionKind::RejectAlways, "始终拒绝"),
 ];
 
-pub fn chrome_height(prompt: &PermissionPrompt, width: u16) -> u16 {
+/// `source`：请求是子代理发的时，标题上方多一行「来自子代理 · 角色 · 任务」。
+pub fn chrome_height(prompt: &PermissionPrompt, source: Option<&str>, width: u16) -> u16 {
     let content_w = width.saturating_sub(5).max(8) as usize;
     let summary_rows = wrap_line(&prompt.summary, content_w).len().min(3) as u16;
-    (2 + summary_rows + 1 + OPTIONS.len() as u16 + 1).clamp(8, 16)
+    let source_rows = u16::from(source.is_some());
+    (2 + source_rows + summary_rows + 1 + OPTIONS.len() as u16 + 1).clamp(8, 17)
 }
 
 pub fn render(
     buf: &mut Buffer,
     area: Rect,
     prompt: &PermissionPrompt,
+    source: Option<&str>,
     selected: usize,
 ) -> PickerHits {
     if area.height == 0 || area.width == 0 {
@@ -51,6 +54,16 @@ pub fn render(
     let content_x = area.x.saturating_add(3);
     let content_w = area.width.saturating_sub(5);
     let mut y = area.y.saturating_add(1);
+    if let Some(source) = source {
+        let source_style = Style::default().fg(theme.accent_user).bg(theme.bg_light);
+        buf.set_line(
+            content_x,
+            y,
+            &Line::from(Span::styled(source.to_string(), source_style)),
+            content_w,
+        );
+        y = y.saturating_add(1);
+    }
     let title_style = Style::default()
         .fg(theme.text_primary)
         .bg(theme.bg_light)
@@ -400,8 +413,9 @@ mod tests {
         let prompt = PermissionPrompt {
             tool: "search_replace".into(),
             summary: "old_string / new_string".into(),
+            agent_id: None,
         };
-        render(&mut buf, area, &prompt, 0);
+        render(&mut buf, area, &prompt, None, 0);
         let mut painted = String::new();
         for y in area.y..area.y + area.height {
             for x in area.x..area.x + area.width {
@@ -416,6 +430,34 @@ mod tests {
         assert!(!compact.contains("alwaysaid"), "{compact}");
         assert!(compact.contains("允许一次"), "{compact}");
         assert!(compact.contains("始终拒绝"), "{compact}");
+    }
+
+    /// 子代理发的请求在标题上方标出来源，选项照样画全。
+    #[test]
+    fn a_subagents_request_shows_where_it_came_from() {
+        let prompt = PermissionPrompt {
+            tool: "bash".into(),
+            summary: "cargo test".into(),
+            agent_id: Some("kid-1".into()),
+        };
+        let source = "来自子代理 · 探索 · 跑测试";
+        let width = 50;
+        let height = chrome_height(&prompt, Some(source), width);
+        assert_eq!(height, chrome_height(&prompt, None, width) + 1);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &prompt, Some(source), 0);
+        let rows: Vec<String> = (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect();
+        let at = |needle: &str| {
+            rows.iter()
+                .position(|r| r.replace(' ', "").contains(needle))
+        };
+        let src = at("来自子代理·探索·跑测试").expect("来源那一行");
+        let title = at("允许使用bash").expect("标题");
+        assert!(src < title, "来源在标题上方：{rows:#?}");
+        assert!(at("始终拒绝").is_some(), "选项要画全：{rows:#?}");
     }
 
     #[test]

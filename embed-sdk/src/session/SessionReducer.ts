@@ -421,6 +421,7 @@ function withPermissionRequested(
     bindingSummary: automatic
       ? permissionBindingSummary(params.binding)
       : current?.bindingSummary,
+    agentId: permissionText(params.agentId, current?.agentId || '', 96) || undefined,
     requestedSeq: current?.requestedSeq || seq,
     updatedSeq: seq
   });
