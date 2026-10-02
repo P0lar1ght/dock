@@ -651,6 +651,73 @@ mod inbox_tests {
         ));
     }
 
+    /// 收件页被叫醒了没有：`notify_one` 存下的许可会让 `notified()` 立刻返回。
+    async fn woken(store: &ChildStore, parent: &str) -> bool {
+        let wake = store.parent_wake(parent);
+        tokio::time::timeout(Duration::from_millis(30), wake.notified())
+            .await
+            .is_ok()
+    }
+
+    /// #166：这一轮已经回报过，回合结束通知不再叫醒父级（否则父级被多叫醒一轮，空说
+    /// 一句「已收到」），但通知还在，父级下一次采样照样取到。
+    #[tokio::test]
+    async fn a_turn_end_after_a_report_does_not_wake_the_parent_again() {
+        let store = ChildStore::new();
+        store.ensure("x", "d".into(), "t".into());
+        store.push_report("x", "RESULT");
+        assert!(woken(&store, "main").await, "回报要叫醒父级");
+        assert_eq!(
+            store.drain_notices("main").len(),
+            1,
+            "父级为回报开的那一轮取走了它"
+        );
+
+        store.push_turn_end("x", None, false);
+        assert!(!store.has_parent_notices("main"), "回合结束不该再算待处理");
+        assert!(!woken(&store, "main").await, "回合结束不该再叫醒父级");
+        let later = store.drain_notices("main");
+        assert!(
+            matches!(
+                later.as_slice(),
+                [super::super::store::ParentNotice::TurnEnd { .. }]
+            ),
+            "通知还在，父级下一次采样带上"
+        );
+    }
+
+    /// 没回报（通知带回合正文）、回报后失败或被取消的回合结束照旧叫醒父级。
+    #[tokio::test]
+    async fn turn_ends_the_parent_still_needs_wake_it() {
+        let store = ChildStore::new();
+        store.ensure("quiet", "d".into(), "t".into());
+        store.push_turn_end("quiet", Some("FINDINGS".into()), false);
+        assert!(
+            store.has_parent_notices("main"),
+            "没回报：正文只能靠这条通知送到"
+        );
+        assert!(woken(&store, "main").await);
+        store.drain_notices("main");
+
+        store.ensure("failed", "d".into(), "t".into());
+        store.push_report("failed", "half");
+        store.drain_notices("main");
+        let _ = woken(&store, "main").await;
+        store.set_failed("failed", true);
+        store.push_turn_end("failed", None, false);
+        assert!(store.has_parent_notices("main"), "回报后失败要让父级知道");
+        assert!(woken(&store, "main").await);
+        store.drain_notices("main");
+
+        store.ensure("cancelled", "d".into(), "t".into());
+        store.push_report("cancelled", "half");
+        store.drain_notices("main");
+        let _ = woken(&store, "main").await;
+        store.push_turn_end("cancelled", None, true);
+        assert!(store.has_parent_notices("main"), "回报后被取消要让父级知道");
+        assert!(woken(&store, "main").await);
+    }
+
     #[test]
     fn forgetting_a_closed_page_drops_its_wake_and_its_notices() {
         let store = ChildStore::new();

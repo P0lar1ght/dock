@@ -23,6 +23,8 @@ Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"session
 - 分页派的孩子不再落到第 1 页，第 1 页也不会拿别页孩子的回报开一轮。
 - workflow 的收尾通知仍交给 drain 循环所在的第 1 页（workflow 还没按页挂）。
 - 页关掉（会话 actor dispose）时 `forget_parent`：丢掉那一页的唤醒和送不到的通知。
+- 回合结束通知在「这一轮已回报、没失败、没被取消」时不叫醒父级（#166），照样留在信箱里，
+  父级下一次采样带上；没回报（通知带回合正文）、回报后失败或被取消的照旧叫醒。
 
 **给宿主的事件**：子代理的会话不发 `session/event`，改发 `session/child-event`（`ChildLogEvent`）；
 出现或状态变了发 `subagent/changed`（`SubagentChanged { id }`）。

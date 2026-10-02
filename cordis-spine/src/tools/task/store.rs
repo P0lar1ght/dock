@@ -93,8 +93,17 @@ pub(super) struct ChildStore {
 }
 
 struct ParentInbox {
-    /// （收件的会话身份，通知）。收件人是启动那个孩子的会话（`ChildSlot::parent`）。
-    notices: VecDeque<(String, ParentNotice)>,
+    notices: VecDeque<Queued>,
+}
+
+/// 信箱里的一条通知。
+struct Queued {
+    /// 收件的会话身份：启动那个孩子的会话（`ChildSlot::parent`）。
+    to: String,
+    notice: ParentNotice,
+    /// 要不要为它叫醒收件页开一轮。不叫醒的照样留着，收件页下一次采样（不管被
+    /// 什么叫醒）一并取走——见 [`ChildStore::push_turn_end`]。
+    wakes: bool,
 }
 
 /// 一条 workflow 子代理的上报。不进父信箱：它是**过程**，run 还没结束就把它
@@ -201,14 +210,14 @@ impl ChildStore {
             .clone()
     }
 
-    /// 会话 `parent` 的信箱里有没有东西。
+    /// 会话 `parent` 的信箱里有没有**值得为它开一轮**的东西（不叫醒的通知不算）。
     pub fn has_parent_notices(&self, parent: &str) -> bool {
         self.inbox
             .lock()
             .unwrap()
             .notices
             .iter()
-            .any(|(to, _)| to == parent)
+            .any(|q| q.to == parent && q.wakes)
     }
 
     /// 会话 `parent` 关掉了：丢掉它的唤醒和送不到的通知，别让按页的表只增不减。
@@ -218,7 +227,7 @@ impl ChildStore {
             .lock()
             .unwrap()
             .notices
-            .retain(|(to, _)| to != parent);
+            .retain(|q| q.to != parent);
     }
 
     /// 启动 `id` 的会话；不认识的孩子算主会话的。
@@ -533,14 +542,14 @@ impl ChildStore {
             return;
         }
         let parent = self.parent_of(from);
-        self.inbox.lock().unwrap().notices.push_back((
-            parent.clone(),
+        self.enqueue(
+            &parent,
             ParentNotice::Report {
                 from: from.to_string(),
                 output: output.to_string(),
             },
-        ));
-        self.notify_parent(&parent);
+            true,
+        );
     }
 
     /// 取走某次 run 攒下的子代理上报。
@@ -564,8 +573,8 @@ impl ChildStore {
         reports: Vec<WorkflowReport>,
         dropped_reports: usize,
     ) {
-        self.inbox.lock().unwrap().notices.push_back((
-            parent.to_string(),
+        self.enqueue(
+            parent,
             ParentNotice::WorkflowDone {
                 name,
                 status,
@@ -574,8 +583,8 @@ impl ChildStore {
                 reports,
                 dropped_reports,
             },
-        ));
-        self.notify_parent(parent);
+            true,
+        );
     }
 
     pub fn reset_reported(&self, id: &str) {
@@ -590,6 +599,11 @@ impl ChildStore {
     /// its turn text when it did not message the parent (the parent cannot see assistant
     /// text otherwise). Callers that already delivered the result inline
     /// ([`Self::consume_completion`]) drop it again.
+    ///
+    /// 这一轮已经回报过、没失败也没被取消时，通知**不叫醒**父级（#166）：结果已经随
+    /// 回报送到、父级也为它开过一轮，再叫醒只会让它空说一句「已收到」。通知照样留着，
+    /// 父级下一次采样带上，它照样知道孩子闲下来了。没回报（通知带着回合正文，是父级
+    /// 拿到结果的唯一途径）、回报后失败或被取消（父级该知道）的照旧叫醒。
     pub fn push_turn_end(&self, id: &str, output: Option<String>, cancelled: bool) {
         let Some(slot) = self.get(id) else {
             return;
@@ -602,30 +616,40 @@ impl ChildStore {
             cancelled,
             output,
         };
+        let quiet = slot.reported_this_turn.load(Ordering::Relaxed)
+            && !cancelled
+            && !slot.failed.load(Ordering::Relaxed);
         let parent = slot.parent.clone();
-        self.inbox
-            .lock()
-            .unwrap()
-            .notices
-            .push_back((parent.clone(), notice));
-        self.notify_parent(&parent);
+        self.enqueue(&parent, notice, !quiet);
+    }
+
+    /// 放进 `parent` 的信箱；`wakes` 才叫醒它。
+    fn enqueue(&self, parent: &str, notice: ParentNotice, wakes: bool) {
+        self.inbox.lock().unwrap().notices.push_back(Queued {
+            to: parent.to_string(),
+            notice,
+            wakes,
+        });
+        if wakes {
+            self.notify_parent(parent);
+        }
     }
 
     /// Drop the queued turn-end notice for `id`: the caller already has the
     /// result (inline foreground spawn).
     pub fn consume_completion(&self, id: &str) {
         self.inbox.lock().unwrap().notices.retain(
-            |(_, n)| !matches!(n, ParentNotice::TurnEnd { id: queued, .. } if queued == id),
+            |q| !matches!(&q.notice, ParentNotice::TurnEnd { id: queued, .. } if queued == id),
         );
     }
 
-    /// 取走会话 `parent` 的通知（按到达顺序），别的会话的留着。
+    /// 取走会话 `parent` 的全部通知（按到达顺序，叫不叫醒的都取），别的会话的留着。
     pub fn drain_notices(&self, parent: &str) -> Vec<ParentNotice> {
         let mut inbox = self.inbox.lock().unwrap();
         let (mine, rest): (VecDeque<_>, VecDeque<_>) =
-            inbox.notices.drain(..).partition(|(to, _)| to == parent);
+            inbox.notices.drain(..).partition(|q| q.to == parent);
         inbox.notices = rest;
-        mine.into_iter().map(|(_, n)| n).collect()
+        mine.into_iter().map(|q| q.notice).collect()
     }
 
     /// Dispose children that have been idle and unaddressed for longer than
