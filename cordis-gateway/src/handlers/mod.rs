@@ -9,5 +9,6 @@ pub mod interaction;
 pub mod permission;
 pub mod preset;
 pub mod slash;
+pub mod subagent;
 pub mod thread;
 pub mod turn;

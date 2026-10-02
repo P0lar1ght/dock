@@ -147,9 +147,14 @@ pub(super) async fn run_session(
             }
             continue;
         }
+        // 这一页的信箱：每页只收自己启动的子代理的消息（分页不再落到第 1 页）。
+        let page = ctx
+            .get::<Sessions>(SESSIONS)
+            .map(|s| s.identity().to_string())
+            .unwrap_or_else(|| cordis_spine::ROOT_IDENTITY.to_string());
         if ctx
             .get::<Subagents>(SUBAGENTS)
-            .is_some_and(|s| s.has_parent_notices())
+            .is_some_and(|s| s.has_parent_notices(&page))
         {
             let mailbox = run_mailbox(&ctx);
             tokio::pin!(mailbox);
@@ -172,7 +177,9 @@ pub(super) async fn run_session(
                 }
             }
         }
-        let wake = ctx.get::<Subagents>(SUBAGENTS).map(|s| s.parent_wake());
+        let wake = ctx
+            .get::<Subagents>(SUBAGENTS)
+            .map(|s| s.parent_wake(&page));
         let wait_wake = async {
             match &wake {
                 Some(w) => w.notified().await,

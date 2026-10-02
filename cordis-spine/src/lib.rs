@@ -71,9 +71,10 @@ pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
     DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
     PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
-    ROSTER, SESSIONS, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END,
-    SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE,
-    TOOLS_PRE_EXECUTE, TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
+    ROSTER, SESSIONS, SESSION_CHILD_EVENT, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT,
+    SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SUBAGENT_CHANGED,
+    SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TUI_SLOTS, TURN, TURN_END,
+    WORKFLOWS,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
@@ -87,8 +88,8 @@ pub use session::compaction::{
 };
 pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
 pub use session::log::{
-    sessions, ArchivedSession, PageLogEvent, PageTurnEnd, Sampling, Sessions, TokenUsage,
-    TurnEndStatus, ROOT_IDENTITY,
+    sessions, ArchivedSession, ChildLogEvent, PageLogEvent, PageTurnEnd, Sampling, Sessions,
+    TokenUsage, TurnEndStatus, ROOT_IDENTITY,
 };
 pub use session::persist::{sessions_cwd_dir, RosterEntry};
 pub use session::resume_preset::{apply_restored_preset, ApplyRestoredPreset};
@@ -141,7 +142,7 @@ pub use tools::sched::{
 };
 pub use tools::skills::{skills, tool_skills, SkillInfo, SkillScope, Skills};
 pub use tools::task::admission::SubagentLimits;
-pub use tools::task::{tool_task, SubagentSnap, Subagents, TaskConfig};
+pub use tools::task::{tool_task, SubagentChanged, SubagentSnap, Subagents, TaskConfig};
 pub use tools::todo_write::{
     todo_service, todo_tool_registration, tool_todo, TodoItem, TodoStats, TodoStatus, Todos,
     TODO_GATE_SENTINEL,

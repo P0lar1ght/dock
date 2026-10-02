@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use cordis::Context;
 use cordis_spine::{
-    Ask, LogEvent, Mcp, PageCompaction, PageLogEvent, Permissions, PlanMode, Sessions, ASK,
-    ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE,
-    ROOT_IDENTITY, SESSIONS, SESSION_COMPACTION, SESSION_PAGE_EVENT,
+    Ask, ChildLogEvent, LogEvent, Mcp, PageCompaction, PageLogEvent, Permissions, PlanMode,
+    Sessions, SubagentChanged, Subagents, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS,
+    PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, ROOT_IDENTITY, SESSIONS, SESSION_CHILD_EVENT,
+    SESSION_COMPACTION, SESSION_PAGE_EVENT, SUBAGENTS, SUBAGENT_CHANGED,
 };
 use cordis_tui::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
@@ -32,6 +33,8 @@ pub struct GatewayInner {
     pub pairing: Mutex<PairingStore>,
     /// 每页一份投影，按分页身份（`main` / `main#N`）存，懒建。
     transcripts: Mutex<HashMap<String, Transcript>>,
+    /// 每个子代理一份投影，按 agent id 存，它第一次说话时建。
+    children: Mutex<HashMap<String, Transcript>>,
     /// 各页投影共用的推送通道；事件上带页身份，`ws.rs` 按订阅过滤。
     events_tx: tokio::sync::broadcast::Sender<ProjectedEvent>,
     pub images: Mutex<ImageInputStore>,
@@ -67,6 +70,7 @@ impl GatewayHandle {
         let inner = Arc::new(GatewayInner {
             pairing: Mutex::new(PairingStore::new(ctx.clone())),
             transcripts: Mutex::new(HashMap::new()),
+            children: Mutex::new(HashMap::new()),
             events_tx: Transcript::channel(),
             images: Mutex::new(ImageInputStore::new()),
             preferred,
@@ -300,9 +304,32 @@ impl GatewayHandle {
         });
     }
 
-    /// 关页后丢掉它的投影。
+    /// 关页后丢掉它的投影，连同它派出的子代理的投影。
     pub fn drop_page(&self, identity: &str) {
         self.inner.transcripts.lock().unwrap().remove(identity);
+        self.inner
+            .children
+            .lock()
+            .unwrap()
+            .retain(|_, t| t.page() != identity);
+    }
+
+    /// 子代理 `agent_id` 的投影事件（`subagent/history`）。网关没见它说过话（比如
+    /// 网关之后才挂上）就按它现在的会话回放一份。
+    pub fn child_history(&self, agent_id: &str) -> Vec<ProjectedEvent> {
+        if let Some(t) = self.inner.children.lock().unwrap().get(agent_id) {
+            return t.history_since(0);
+        }
+        let events = self
+            .inner
+            .ctx
+            .get::<Subagents>(SUBAGENTS)
+            .map(|sub| sub.events(agent_id))
+            .unwrap_or_default();
+        let (tx, _) = tokio::sync::broadcast::channel(1);
+        let mut t = Transcript::for_child("", "", agent_id, tx);
+        t.replay(&events, &[], &[]);
+        t.history_since(0)
     }
 
     fn with_transcript<R>(&self, page: &str, f: impl FnOnce(&mut Transcript) -> R) -> R {
@@ -429,6 +456,7 @@ fn listen_events(inner: &Arc<GatewayInner>) {
                 t.ingest_log_with(event.clone(), &attachments)
             });
         });
+    listen_subagents(inner);
     // 压缩进展只推不记，同样按页路由。
     let for_compaction = inner.clone();
     let _ = inner
@@ -494,6 +522,78 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             });
         }
     });
+}
+
+/// 子代理：它的对话事件投到它自己的 [`Transcript::for_child`]，状态变化推成父页上的
+/// `subagent/updated`。都挂在启动它的那一页；那一页关了就不推。
+fn listen_subagents(inner: &Arc<GatewayInner>) {
+    let for_events = inner.clone();
+    let _ = inner
+        .ctx
+        .on(SESSION_CHILD_EVENT, move |tagged: &ChildLogEvent| {
+            let Some(sub) = for_events.ctx.get::<Subagents>(SUBAGENTS) else {
+                return;
+            };
+            let Some(snap) = sub.snapshot(&tagged.child) else {
+                return;
+            };
+            let Some(page) = pages(&for_events)
+                .into_iter()
+                .find(|p| p.identity == snap.parent)
+            else {
+                return;
+            };
+            let mut children = for_events.children.lock().unwrap();
+            let t = children.entry(snap.id.clone()).or_insert_with(|| {
+                let mut t = Transcript::for_child(
+                    page.identity.clone(),
+                    page.thread_id(),
+                    snap.id.clone(),
+                    for_events.events_tx.clone(),
+                );
+                // 续跑（`resume_from`）的孩子先灌了旧对话、没发事件：这条之前的都补上。
+                let events = sub.events(&snap.id);
+                if let Some(earlier) = events.len().checked_sub(1) {
+                    t.replay(&events[..earlier], &[], &[]);
+                }
+                t
+            });
+            t.set_thread_id(page.thread_id());
+            t.ingest_log_with((*tagged.event).clone(), &[]);
+        });
+    let for_changes = inner.clone();
+    let _ = inner
+        .ctx
+        .on(SUBAGENT_CHANGED, move |changed: &SubagentChanged| {
+            let Some(sub) = for_changes.ctx.get::<Subagents>(SUBAGENTS) else {
+                return;
+            };
+            let Some(snap) = sub.snapshot(&changed.id) else {
+                return;
+            };
+            let Some(page) = pages(&for_changes)
+                .into_iter()
+                .find(|p| p.identity == snap.parent)
+            else {
+                return;
+            };
+            let events = sub.events(&snap.id);
+            if !snap.running() {
+                let mut children = for_changes.children.lock().unwrap();
+                if let Some(t) = children.get_mut(&snap.id) {
+                    t.close_child_turn(&crate::subagents::turn_status(&snap, &events));
+                }
+                // 收掉的子代理不会再说话：投影丢掉，之后的 `subagent/history` 按它的会话回放。
+                if snap.done {
+                    children.remove(&snap.id);
+                }
+            }
+            let role = crate::subagents::role_label(&page.ctx, &snap.subagent_type);
+            let agent = crate::subagents::info(&snap, &events, role);
+            with_transcript(&for_changes, &page.identity, Some(page.thread_id()), |t| {
+                t.subagent_updated(agent)
+            });
+        });
 }
 
 fn last_user_attachments(ctx: &Context) -> Vec<serde_json::Value> {

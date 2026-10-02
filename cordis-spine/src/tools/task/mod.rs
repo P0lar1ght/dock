@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use cordis::{plugin, Inject, Plugin};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::names::{SUBAGENTS, TOOLS};
+use crate::names::{SUBAGENTS, SUBAGENT_CHANGED, TOOLS};
 use crate::session::log::ROOT_IDENTITY;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::ToolCall;
@@ -83,12 +83,34 @@ pub struct SubagentSnap {
     pub cancelled: bool,
     pub output: String,
     pub started_at: Instant,
+    /// 启动它的会话身份（`main` / `main#N`，workflow 的孩子是它所在的页）。
+    pub parent: String,
+    /// 派出它的那次 `task` 调用；workflow 派的没有。
+    pub tool_call_id: Option<String>,
+    /// 最近一轮以失败收尾。
+    pub failed: bool,
+    /// 停下（空闲或结束）的时刻；在跑时是 `None`。
+    pub settled_at: Option<Instant>,
 }
 
 impl SubagentSnap {
     pub fn running(&self) -> bool {
         !self.done && !self.idle
     }
+
+    /// 从启动到现在（在跑）或到停下为止。
+    pub fn elapsed(&self) -> std::time::Duration {
+        match self.settled_at {
+            Some(at) => at.saturating_duration_since(self.started_at),
+            None => self.started_at.elapsed(),
+        }
+    }
+}
+
+/// [`crate::SUBAGENT_CHANGED`] 的载荷。
+#[derive(Clone, Debug)]
+pub struct SubagentChanged {
+    pub id: std::sync::Arc<str>,
 }
 
 /// Host-supplied coordinator policy. Read at the composition root (env +
@@ -179,6 +201,10 @@ impl Subagents {
                                 "Task or subagent {id} not found. No background tasks or subagents exist in this session."
                             ),
                             started_at: Instant::now(),
+                            parent: String::new(),
+                            tool_call_id: None,
+                            failed: false,
+                            settled_at: None,
                         })
                         .collect()
                 } else {
@@ -187,6 +213,11 @@ impl Subagents {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    /// 记下派出 `id` 的那次 `task` 调用（工具调用 id），见 [`SubagentSnap::tool_call_id`]。
+    pub(super) fn note_spawn_call(&self, id: &str, tool_call_id: &str) {
+        self.store.set_tool_call(id, tool_call_id);
     }
 
     pub fn kill(&self, id: &str) -> Option<String> {
@@ -249,8 +280,9 @@ impl Subagents {
         self.store.sweep_idle(ttl)
     }
 
-    pub fn has_parent_notices(&self) -> bool {
-        self.store.has_parent_notices()
+    /// 会话 `parent`（`main` / `main#N`）的信箱里有没有子代理的消息或回合结束通知。
+    pub fn has_parent_notices(&self, parent: &str) -> bool {
+        self.store.has_parent_notices(parent)
     }
 
     /// Enqueue a parent-facing notice and wake the session actor.
@@ -271,8 +303,10 @@ impl Subagents {
     /// **整条 run 只有这一次唤醒**。中间那些「某个子代理跑完了」既不完整也不
     /// 可行动，推给主线程只会让它在半份结果上烧一轮。过程上报已经在 overlay
     /// 和滚动区 `Notice` 里给用户看过；这一条是给主模型的完整交卷。
+    #[allow(clippy::too_many_arguments)] // 一条通知的字段，拆结构体只是搬家
     pub fn notify_workflow_done(
         &self,
+        parent: &str,
         name: String,
         status: String,
         elapsed_ms: u64,
@@ -280,12 +314,25 @@ impl Subagents {
         reports: Vec<WorkflowReport>,
         dropped_reports: usize,
     ) {
-        self.store
-            .push_workflow_done(name, status, elapsed_ms, summary, reports, dropped_reports);
+        self.store.push_workflow_done(
+            parent,
+            name,
+            status,
+            elapsed_ms,
+            summary,
+            reports,
+            dropped_reports,
+        );
     }
 
-    pub fn parent_wake(&self) -> Arc<tokio::sync::Notify> {
-        self.store.parent_wake()
+    /// 会话 `parent`（`main#N`）关掉了：丢掉它的信箱唤醒和还没送到的通知。
+    pub fn forget_parent(&self, parent: &str) {
+        self.store.forget_parent(parent);
+    }
+
+    /// 会话 `parent` 的信箱唤醒：只有发给它的通知才叫醒它。
+    pub fn parent_wake(&self, parent: &str) -> Arc<tokio::sync::Notify> {
+        self.store.parent_wake(parent)
     }
 
     /// 配置的 workflow 并发上限（未按机器并行度收窄）。workflow host 在挂载
@@ -390,6 +437,12 @@ pub fn tool_task() -> Plugin {
         |ctx, cfg: &TaskConfig| {
             let (tx, rx) = mpsc::unbounded_channel();
             let store = ChildStore::new();
+            {
+                let ctx = ctx.clone();
+                store.set_on_change(Arc::new(move |id: &str| {
+                    ctx.emit(SUBAGENT_CHANGED, SubagentChanged { id: id.into() });
+                }));
+            }
             let backend = ChannelBackend::for_session(tx, ROOT_IDENTITY);
             let spawn_parents = runner::SpawnParents::default();
             let runner = DockChildRunner {

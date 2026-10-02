@@ -406,6 +406,10 @@ mod tests {
             cancelled: false,
             output: String::new(),
             started_at: std::time::Instant::now(),
+            parent: String::new(),
+            tool_call_id: None,
+            failed: false,
+            settled_at: None,
         }
     }
 

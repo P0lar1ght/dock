@@ -866,6 +866,10 @@ mod tests {
             cancelled: false,
             output: String::new(),
             started_at: Instant::now(),
+            parent: String::new(),
+            tool_call_id: None,
+            failed: false,
+            settled_at: None,
         };
         let entry = TaskEntry::from_subagent(&snap, Some("岑"));
         match entry {

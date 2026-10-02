@@ -24,7 +24,7 @@ use super::coordinator::{
 use super::interjection::format_interjection;
 use super::store::ChildStore;
 use super::types::{SubagentResult, SubagentValidateTypeOutcome};
-use super::{current_depth, SubagentLife, DEPTH};
+use super::{current_depth, DEPTH};
 
 /// Session id carried by every child spawn (see [`crate::session::log::ROOT_IDENTITY`]).
 pub(super) const PARENT_SESSION_ID: &str = crate::session::log::ROOT_IDENTITY;
@@ -352,9 +352,7 @@ async fn drive_child(
             turn.reset();
         }
         store.reset_reported(&id);
-        store
-            .get(&id)
-            .inspect(|s| s.set_life(SubagentLife::Running));
+        store.mark_running(&id);
 
         let outcome = if first_tx.is_some() {
             tokio::select! {
@@ -432,6 +430,12 @@ async fn drive_child(
             Ok(text) => (true, text.clone()),
             Err(e) => (false, format!("failed: {e}")),
         };
+        // 模型请求出错不是 `Err`（错误在最后一次采样里，循环照常收尾），照主会话
+        // `end_turn` 的规矩也算失败。
+        let sample_error = child
+            .get::<Sessions>(SESSIONS)
+            .and_then(|s| s.last_sample_error());
+        store.set_failed(&id, !was_cancelled && (!success || sample_error.is_some()));
         // One parent notice per finished turn. The child's text rides it when
         // it did not message its parent; a caller that already has the result
         // (foreground spawn) drops the notice again.
@@ -533,6 +537,7 @@ fn failed(
     msg: String,
     cancelled: bool,
 ) -> ChildRunOutput {
+    store.set_failed(id, !cancelled);
     store.dispose(id, msg.clone(), cancelled);
     ChildRunOutput {
         result: SubagentResult {
@@ -614,7 +619,7 @@ mod inbox_tests {
         store.ensure("x", "d".into(), "t".into());
         store.push_turn_end("x", Some("FINDINGS".into()), false);
         let rendered: Vec<String> = store
-            .drain_notices()
+            .drain_notices("main")
             .iter()
             .map(super::super::format::format_parent_notice)
             .collect();
@@ -631,7 +636,7 @@ mod inbox_tests {
         store.push_report("x", "progress-2");
         // The runner passes `None` when the child already reported.
         store.push_turn_end("x", None, false);
-        let notices = store.drain_notices();
+        let notices = store.drain_notices("main");
         let text = notices
             .iter()
             .map(super::super::format::format_parent_notice)
@@ -647,6 +652,30 @@ mod inbox_tests {
     }
 
     #[test]
+    fn forgetting_a_closed_page_drops_its_wake_and_its_notices() {
+        let store = ChildStore::new();
+        store.ensure_owned(
+            "kid",
+            "d".into(),
+            "t".into(),
+            super::super::types::SubagentOwner::Task,
+            "main#3",
+        );
+        store.push_turn_end("kid", Some("late".into()), false);
+        let wake = store.parent_wake("main#3");
+        assert!(store.has_parent_notices("main#3"));
+        store.forget_parent("main#3");
+        assert!(
+            !store.has_parent_notices("main#3"),
+            "关掉的页的通知送不到了，要丢掉"
+        );
+        assert!(
+            !Arc::ptr_eq(&wake, &store.parent_wake("main#3")),
+            "关页后唤醒表里不该还留着那一页"
+        );
+    }
+
+    #[test]
     fn consume_completion_drops_only_that_childs_turn_end() {
         let store = ChildStore::new();
         store.ensure("a", "d".into(), "t".into());
@@ -655,7 +684,7 @@ mod inbox_tests {
         store.push_turn_end("b", Some("B".into()), false);
         store.consume_completion("a");
         let text = store
-            .drain_notices()
+            .drain_notices("main")
             .iter()
             .map(super::super::format::format_parent_notice)
             .collect::<Vec<_>>()

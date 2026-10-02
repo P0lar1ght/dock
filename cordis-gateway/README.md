@@ -329,6 +329,42 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 空闲时手动压缩没有一轮包着：开一轮、推标记、马上 `turn/completed`。
 - 重开会话 / 回放历史只有 `item/compaction`，没有前后占用。
 
+### 子代理（能力 `subagents`）
+
+模型用 `task` 派的子代理，挂在启动它的那一页：只有那一页的订阅者收到推送，
+`subagent/*` 也只认那一页的 `threadId`。子代理只活在内存里，Dock 重启后就没了。
+
+| 方法 / 推送 | 作用 |
+|---|---|
+| `subagent/list { threadId? }` | 这个线程启动的子代理 `{ agents: [Agent] }`，先启动的在前 |
+| `subagent/history { threadId?, agentId }` | `{ agent, events }`：子代理自己的对话，和 `thread/history` 的 `events` 同形 |
+| `subagent/send { threadId?, agentId, message }` | 用户对子代理说一句：在跑就在下一步读到，空闲就开下一轮 |
+| `subagent/interrupt { threadId?, agentId }` | 停下这一轮，子代理留着能接着聊；没在跑回 `interrupted: false` |
+| `subagent/stop { threadId?, agentId }` | 收掉子代理；已经收掉的回 `stopped: false` |
+| 推送 `subagent/updated { agent }` | 子代理出现了或状态变了 |
+| 推送 `subagent/event { agentId, event }` | 子代理对话里的一条事件，`event` 同 `subagent/history` 的条目 |
+
+- `Agent` 的字段：
+  - `agentId`、`toolCallId`（派它的那次 `task` 调用；workflow 派的是 `null`）；
+  - `subagentType`、`role`（预设里的显示名，如「探索」）、`description`；
+  - `status`：`running` / `idle`（这一轮做完，能接着聊）/ `completed`（收掉了）/
+    `failed` / `cancelled`（最近一轮怎么收的尾）；
+  - `startedAt`（毫秒）、`durationMs`（在跑时算到现在，停下就定住）、`toolCalls`；
+  - `output`（最近一轮的回复，最多 4000 字）、`error?`（失败才有）；
+  - `activity?`（在跑才有）：`{ kind: "tool", toolName, arguments }` / `{ kind: "replying" }` /
+    `{ kind: "thinking" }`。
+- 子代理的事件：
+  - 第一条 `item/user_message` 是父级派的任务（原文，含 `[type] 描述` 开头和回报说明）；
+  - 父级在它跑的时候发来的话是 `item/user_message { origin: "parent" }`；
+  - 停下时收一次 `turn/completed`（failed 带 `error`）。
+- 两种推送都只推不记：`seq` 为 0，不进父线程的 `thread/history`。
+- 收掉的子代理（`completed`）网关不再留它的实时投影，`subagent/history` 改按它的会话回放：
+  - 序号从头重排，和收掉前的推送对不上；客户端对停下的子代理以历史为准。
+- 页关掉时它派出的子代理的投影一起丢掉。
+  - `subagent/event` 里的 `event.seq` 是子代理自己的序号，接着 `subagent/history` 往下数。
+- 找不到、或不是这个线程启动的子代理回 `not_found`；收掉的子代理 `send` 回 `subagent_closed`。
+- 权限请求暂时分不出是不是子代理发的：子代理和父级共用这一页的权限队列。
+
 ## 依赖注入
 
 `mount` 声明依赖：`SESSIONS`、`SESSION_PORT`、`PERMISSIONS`、`ASK`、`PLAN_MODE`、`MCP`、`TURN`、`SETTINGS`。这些是 named service，在 `apply` 时 live-lookup，**不要**在闭包里持有 `Arc`。

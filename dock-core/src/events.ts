@@ -82,11 +82,74 @@ export function parseCompaction(params: Record<string, unknown>): CompactionProg
   };
 }
 
+export type SubagentStatus = 'running' | 'idle' | 'completed' | 'failed' | 'cancelled';
+
+/** 在跑的子代理此刻在做什么（快照；实时的从它的对话里算，见 `subagents.ts`）。 */
+export type SubagentActivity =
+  | { kind: 'tool'; toolName: string; arguments: Record<string, unknown> }
+  | { kind: 'replying' }
+  | { kind: 'thinking' };
+
+/** 一个子代理：`subagent/updated` 的 `agent`、`subagent/list` 的一项。 */
+export interface SubagentInfo {
+  agentId: string;
+  /** 派它的那次 `task` 调用；workflow 派的是 `null`。 */
+  toolCallId: string | null;
+  subagentType: string;
+  /** 预设里的显示名（如「探索」）。 */
+  role: string;
+  description: string;
+  /** `idle`：这一轮做完了，还能接着聊；`completed`：收掉了。 */
+  status: SubagentStatus;
+  startedAt: number;
+  /** 在跑时是到那次快照为止；停下就定住。 */
+  durationMs: number;
+  toolCalls: number;
+  /** 最近一轮的回复（网关截到 4000 字）。 */
+  output: string;
+  error: string | null;
+  activity: SubagentActivity | null;
+}
+
+/** `subagent/updated` 的 `agent`（或 `subagent/list` 的一项）→ 子代理。没有 id 返回 `null`。 */
+export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null {
+  const agentId = str(raw.agentId);
+  if (!agentId) return null;
+  const a = obj(raw.activity);
+  const kind = str(a.kind);
+  const activity: SubagentActivity | null =
+    kind === 'tool'
+      ? { kind, toolName: str(a.toolName), arguments: obj(a.arguments) }
+      : kind === 'replying' || kind === 'thinking'
+        ? { kind }
+        : null;
+  return {
+    agentId,
+    toolCallId: str(raw.toolCallId) || null,
+    subagentType: str(raw.subagentType),
+    role: str(raw.role) || str(raw.subagentType),
+    description: str(raw.description),
+    status: oneOf(raw.status, ['running', 'idle', 'completed', 'failed', 'cancelled'] as const, 'running'),
+    startedAt: num(raw.startedAt),
+    durationMs: num(raw.durationMs),
+    toolCalls: num(raw.toolCalls),
+    output: str(raw.output),
+    error: str(raw.error) || null,
+    activity,
+  };
+}
+
 export type DockEvent = EventBase &
   (
     | { method: 'turn/started' }
     | { method: 'turn/completed'; status: TurnEndStatus; error?: string }
-    | { method: 'item/user_message'; content: string; attachments: ImageAttachment[] }
+    | {
+        method: 'item/user_message';
+        content: string;
+        attachments: ImageAttachment[];
+        /** 子代理的对话里：`parent` = 父级在它跑的时候发来的话。其余没有。 */
+        origin?: 'parent';
+      }
     | { method: 'item/message_delta'; delta: string }
     /** 模型的思考过程（增量）。旧网关不推，就没有。 */
     | { method: 'item/reasoning_delta'; delta: string }
@@ -112,6 +175,10 @@ export type DockEvent = EventBase &
     | { method: 'item/compaction'; itemId: string }
     /** 压缩进展。只推不记（`seq` 为 0），不进 `thread/history`。 */
     | { method: 'context/compacted'; progress: CompactionProgress }
+    /** 子代理出现了或状态变了。只推不记（`seq` 为 0）。 */
+    | { method: 'subagent/updated'; agent: SubagentInfo }
+    /** 子代理对话里的一条事件（包在父线程上，`seq` 为 0；`event.seq` 是子代理自己的）。 */
+    | { method: 'subagent/event'; agentId: string; event: DockEvent }
   );
 
 export type DockEventMethod = DockEvent['method'];
@@ -164,6 +231,7 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
       return {
         ...base,
         method,
+        ...(params.origin === 'parent' ? { origin: 'parent' as const } : {}),
         content: str(params.content),
         attachments: list(params.attachments)
           .map(obj)
@@ -278,6 +346,15 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
     case 'context/compacted': {
       const progress = parseCompaction(params);
       return progress ? { ...base, method, progress } : null;
+    }
+    case 'subagent/updated': {
+      const agent = parseSubagent(obj(params.agent));
+      return agent ? { ...base, method, agent } : null;
+    }
+    case 'subagent/event': {
+      const agentId = str(params.agentId);
+      const event = parseHistoryItem(obj(params.event));
+      return agentId && event ? { ...base, method, agentId, event } : null;
     }
     default:
       return null;

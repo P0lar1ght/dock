@@ -209,10 +209,10 @@ impl Subagents {
             .collect()
     }
 
-    /// Grok-style next-sample reminders. Bodies already wrapped in `<system-reminder>`.
-    pub fn drain_parent_notices(&self) -> Vec<String> {
+    /// 会话 `parent` 的下一次采样要带的通知。Bodies already wrapped in `<system-reminder>`.
+    pub fn drain_parent_notices(&self, parent: &str) -> Vec<String> {
         self.store
-            .drain_notices()
+            .drain_notices(parent)
             .iter()
             .map(|n| super::format::wrap_reminder(&super::format::format_parent_notice(n)))
             .collect()

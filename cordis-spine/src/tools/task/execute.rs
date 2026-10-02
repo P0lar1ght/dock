@@ -236,6 +236,7 @@ async fn spawn_child(
         SubagentOwner::Task,
         &parent_session_id,
     );
+    sub.note_spawn_call(&id, &call.id);
 
     let request = SubagentRequest {
         id: id.clone(),

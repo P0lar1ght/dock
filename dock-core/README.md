@@ -14,6 +14,11 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
   - 完成推送把发起方、前后占用、用时补到最近那个标记上；回放历史时它们是 `null`。
   - 连压两次只有一个标记（Dock 不重复追加），它跟着最新那次覆盖。
   - 没压成 / 被停掉的进展在下一轮 `turn/started` 时清掉。
+- 子代理（`src/subagents.ts`）：`subagent/updated` 是状态，`subagent/event` 是它自己的对话。
+  - 每个子代理的对话用同一个 `reduceThread`；父线程的 `reduceThread` 忽略这两种事件。
+  - 中途接入时对话不全（`complete: false`），实时事件先攒着；`withHistory` 回放
+    `subagent/history` 再接上。
+  - `taskPrompt` 去掉 Dock 给任务加的开头和回报说明。
 - **不猜**：一轮的结果看 `turn/completed.status`，工具的结果看 `item/tool_completed.status`，都由 Dock 给出。
 
 ## 用法

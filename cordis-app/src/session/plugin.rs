@@ -2,7 +2,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Disposable, Inject, Plugin};
-use cordis_spine::{AGENT_LOOP, SESSIONS, TURN};
+use cordis_spine::{Sessions, Subagents, AGENT_LOOP, SESSIONS, SUBAGENTS, TURN};
 use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use tokio::sync::mpsc;
 
@@ -34,9 +34,17 @@ pub fn session_actor() -> Plugin {
                 queued,
                 queued_prompts,
             ));
+            let page = ctx
+                .get::<Sessions>(SESSIONS)
+                .map(|s| s.identity().to_string());
+            let root = ctx.clone();
             ctx.effect("session-actor-task", move |scope| {
                 scope.own(Disposable::from_fn(move || {
                     let _ = cmd_tx.send(SessionCommand::Shutdown);
+                    // 这一页关了：子代理信箱里按页记的唤醒和送不到的通知一起丢掉。
+                    if let (Some(page), Some(sub)) = (&page, root.get::<Subagents>(SUBAGENTS)) {
+                        sub.forget_parent(page);
+                    }
                 }));
                 Ok(())
             })?;

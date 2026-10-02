@@ -18,7 +18,15 @@ export type TurnStatus = 'running' | TurnEndStatus;
 export type ToolStatus = 'running' | ToolEndStatus;
 
 export type TurnItem =
-  | { kind: 'user'; id: string; text: string; at: number; attachments: ImageAttachment[] }
+  | {
+      kind: 'user';
+      id: string;
+      text: string;
+      at: number;
+      attachments: ImageAttachment[];
+      /** 子代理的对话里父级在它跑的时候发来的话；其余没有。 */
+      origin?: 'parent';
+    }
   /** 助手文字。工具 / 交互之后的文字另起一条，保持出现顺序。 */
   | { kind: 'text'; id: string; text: string }
   /**
@@ -102,6 +110,8 @@ export function replayHistory(events: readonly Record<string, unknown>[]): Threa
 }
 
 export function reduceThread(state: ThreadState, event: DockEvent): ThreadState {
+  // 子代理的事件不属于这个线程的时间线（见 `subagents.ts`）。
+  if (event.method === 'subagent/updated' || event.method === 'subagent/event') return state;
   if (event.seq && event.seq <= state.seq) return state;
   const seq = event.seq || state.seq;
 
@@ -133,6 +143,7 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
           text: event.content,
           at: event.at,
           attachments: event.attachments,
+          ...(event.origin ? { origin: event.origin } : {}),
         });
 
       case 'item/reasoning_delta': {

@@ -13,11 +13,12 @@ use cordis_gateway::{
 };
 use cordis_spine::{
     agent_loop, agent_presets, compact, install_fakes, install_without_llm, mcp_client,
-    permissions, plan_mode, settings, slash, tool_ask_user, tool_goal, turn, AgentPresets,
-    AppSettings, BoxFuture, Compact, ExtraSlashKind, Goal, Llm, LlmOutput, LogEvent, LoopHandle,
-    Mcp, PermissionOptionKind, Permissions, PlanMode, PromptRequest, Sampler, Sessions, Slash,
-    SlashEntry, StreamDelta, TurnControl, AGENT_LOOP, AGENT_PRESETS, COMPACT, GOAL, LLM, MCP,
-    PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, TURN,
+    permissions, plan_mode, settings, slash, tool_ask_user, tool_goal, tool_task, turn,
+    AgentPresets, AppSettings, BoxFuture, Compact, ExtraSlashKind, Goal, Llm, LlmOutput, LogEvent,
+    LoopHandle, Mcp, PermissionOptionKind, Permissions, PlanMode, PromptRequest, Sampler, Sessions,
+    Slash, SlashEntry, StreamDelta, TaskConfig, ToolCall, Tools, TurnControl, AGENT_LOOP,
+    AGENT_PRESETS, COMPACT, GOAL, LLM, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH,
+    TOOLS, TURN,
 };
 use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use futures_util::{SinkExt, StreamExt};
@@ -3435,4 +3436,195 @@ async fn canvas_methods_read_the_sessions_canvases() {
         .await;
     assert_eq!(closed["result"]["html"], "<h1>A</h1>", "{closed}");
     assert_eq!(closed["result"]["data"], json!([1, 2]));
+}
+
+/// 收推送直到 `done` 命中，回途中收到的全部推送（含命中那条）。
+async fn notes_until(
+    rpc: &mut Rpc,
+    deadline: Duration,
+    done: impl Fn(&Value) -> bool,
+) -> Vec<Value> {
+    let start = tokio::time::Instant::now();
+    let mut seen = Vec::new();
+    loop {
+        let left = deadline.saturating_sub(start.elapsed());
+        let msg = tokio::time::timeout(left, rpc.read.next())
+            .await
+            .unwrap_or_else(|_| panic!("timed out; got {seen:#?}"))
+            .expect("ws closed")
+            .unwrap();
+        let value: Value = serde_json::from_str(&msg.into_text().unwrap()).unwrap();
+        let hit = done(&value);
+        seen.push(value);
+        if hit {
+            return seen;
+        }
+    }
+}
+
+fn agent_status_is(note: &Value, status: &str) -> bool {
+    note["method"] == "subagent/updated" && note["params"]["agent"]["status"] == status
+}
+
+/// 子代理在 dock.1 上看得见：状态推 `subagent/updated`，它自己的对话包成父线程上的
+/// `subagent/event`，`subagent/list` / `history` 补中途接入，`send` / `stop` 能用。
+#[tokio::test]
+async fn subagents_project_onto_the_thread_that_started_them() {
+    let root = harness_root_with(Some(Arc::new(EchoLastUser))).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(tool_task(), TaskConfig::default())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+
+    let tools = h.ctx.require::<Tools>(TOOLS).unwrap();
+    let started = tools
+        .execute(ToolCall {
+            id: "call-1".into(),
+            name: "task".into(),
+            arguments: json!({
+                "prompt": "hi kid",
+                "description": "看一眼",
+                "subagent_type": "explore",
+                "run_in_background": true,
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(started.content.contains("agent_id:"), "{}", started.content);
+
+    let notes = notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        agent_status_is(n, "idle")
+    })
+    .await;
+    let idle = notes.last().unwrap()["params"]["agent"].clone();
+    assert_eq!(idle["toolCallId"], "call-1");
+    assert_eq!(idle["description"], "看一眼");
+    assert_eq!(idle["role"], "探索");
+    assert_eq!(idle["threadId"], Value::Null, "agent 里不该混进线程字段");
+    let agent_id = idle["agentId"].as_str().unwrap().to_string();
+    assert!(
+        notes.iter().any(|n| agent_status_is(n, "running")),
+        "{notes:#?}"
+    );
+    let child: Vec<&Value> = notes
+        .iter()
+        .filter(|n| n["method"] == "subagent/event")
+        .inspect(|n| assert_eq!(n["params"]["agentId"], agent_id.as_str()))
+        .map(|n| &n["params"]["event"])
+        .collect();
+    assert!(
+        child.iter().any(|e| e["method"] == "item/user_message"
+            && e["payload"]["content"].as_str().unwrap().contains("hi kid")),
+        "子代理的任务要作为它的第一条消息推出来：{child:#?}"
+    );
+    assert!(child.iter().any(|e| e["method"] == "item/message_delta"));
+    assert_eq!(
+        child.last().unwrap()["method"],
+        "turn/completed",
+        "子代理停下要收掉它那一轮"
+    );
+    // 子代理的事件不进父线程自己的历史。
+    let parent = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    assert!(
+        !parent["result"]["events"].to_string().contains("hi kid"),
+        "{parent}"
+    );
+
+    let listed = rpc
+        .call("subagent/list", json!({ "threadId": "live" }))
+        .await;
+    let agents = listed["result"]["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1, "{listed}");
+    assert_eq!(agents[0]["agentId"], agent_id.as_str());
+    assert_eq!(agents[0]["status"], "idle");
+    assert_eq!(agents[0]["toolCalls"], 0);
+
+    let history = rpc
+        .call(
+            "subagent/history",
+            json!({ "threadId": "live", "agentId": agent_id }),
+        )
+        .await;
+    let events = history["result"]["events"].as_array().unwrap();
+    assert_eq!(events.len(), child.len(), "历史和推送是同一份投影");
+    assert_eq!(events[0]["seq"], child[0]["seq"]);
+
+    let sent = rpc
+        .call(
+            "subagent/send",
+            json!({ "threadId": "live", "agentId": agent_id, "message": "again" }),
+        )
+        .await;
+    assert_eq!(sent["result"]["ok"], true, "{sent}");
+    let notes = notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        agent_status_is(n, "idle")
+    })
+    .await;
+    assert!(notes.iter().any(|n| n["method"] == "subagent/event"
+        && n["params"]["event"]["method"] == "item/user_message"
+        && n["params"]["event"]["payload"]["content"] == "again"));
+
+    let stopped = rpc
+        .call(
+            "subagent/stop",
+            json!({ "threadId": "live", "agentId": agent_id }),
+        )
+        .await;
+    assert_eq!(stopped["result"]["stopped"], true, "{stopped}");
+    notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        n["method"] == "subagent/updated"
+            && matches!(
+                n["params"]["agent"]["status"].as_str(),
+                Some("completed" | "cancelled")
+            )
+    })
+    .await;
+    let after = rpc
+        .call(
+            "subagent/send",
+            json!({ "threadId": "live", "agentId": agent_id, "message": "x" }),
+        )
+        .await;
+    assert!(
+        after.get("error").is_some(),
+        "收掉的子代理不能再发：{after}"
+    );
+    // 收掉后网关丢了它的实时投影，历史改按它的会话回放：还得看得到整段过程。
+    let replayed = rpc
+        .call(
+            "subagent/history",
+            json!({ "threadId": "live", "agentId": agent_id }),
+        )
+        .await;
+    let replayed = replayed["result"]["events"].as_array().unwrap();
+    for needle in ["hi kid", "again"] {
+        assert!(
+            replayed.iter().any(|e| e["method"] == "item/user_message"
+                && e["payload"]["content"].as_str().unwrap().contains(needle)),
+            "收掉后的历史里少了 {needle}：{replayed:#?}"
+        );
+    }
+
+    let missing = rpc
+        .call(
+            "subagent/history",
+            json!({ "threadId": "live", "agentId": "nope" }),
+        )
+        .await;
+    assert!(missing.get("error").is_some(), "{missing}");
 }
