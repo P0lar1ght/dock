@@ -8,7 +8,8 @@ use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::host::settings::AppSettings;
 use crate::names::{
-    SESSIONS, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_TURN_END, SETTINGS,
+    SESSIONS, SESSION_CHILD_EVENT, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT,
+    SESSION_TURN_END, SETTINGS,
 };
 use crate::session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
@@ -203,6 +204,14 @@ pub struct PageTurnEnd {
 #[derive(Clone, Debug)]
 pub struct PageLogEvent {
     pub page: Arc<str>,
+    pub event: Arc<LogEvent>,
+}
+
+/// [`SESSION_CHILD_EVENT`] 的载荷：哪个子代理（`child` 是它的 agent id）的会话
+/// 发了哪条事件。
+#[derive(Clone, Debug)]
+pub struct ChildLogEvent {
+    pub child: Arc<str>,
     pub event: Arc<LogEvent>,
 }
 
@@ -724,7 +733,7 @@ impl Sessions {
     }
 
     /// 本轮（最后一条用户消息之后）最后一次采样的错误。
-    fn last_sample_error(&self) -> Option<String> {
+    pub(crate) fn last_sample_error(&self) -> Option<String> {
         let events = self.events.lock().unwrap();
         events
             .iter()
@@ -739,6 +748,16 @@ impl Sessions {
 
     fn emit_session(&self, event: LogEvent) {
         if !self.emit {
+            // 子代理的会话不进 TUI 的会话事件，单发一条带 agent id 的。
+            if !self.is_main() {
+                self.ctx.emit(
+                    SESSION_CHILD_EVENT,
+                    ChildLogEvent {
+                        child: self.identity.clone(),
+                        event: Arc::new(event),
+                    },
+                );
+            }
             return;
         }
         // 先发带页身份的一份，再发老的 `session/event`（Rhai `host.on` 的契约，载荷

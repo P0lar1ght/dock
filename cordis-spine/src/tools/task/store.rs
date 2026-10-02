@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cordis::Disposable;
@@ -44,6 +44,12 @@ pub(super) struct ChildSlot {
     pub parent: String,
     /// True if the child sent its parent a message during the current turn.
     pub reported_this_turn: AtomicBool,
+    /// 最近一轮以失败收尾（模型请求出错、循环报错、起不来）。下一轮开跑时清掉。
+    pub failed: AtomicBool,
+    /// 停下（空闲或结束）的时刻；在跑时是 `None`。快照的用时算到这里为止。
+    pub settled_at: Mutex<Option<Instant>>,
+    /// 派出它的那次 `task` 调用（工具调用 id）。客户端靠它把卡片和子代理对上。
+    pub tool_call_id: Mutex<Option<String>>,
 }
 
 impl ChildSlot {
@@ -58,10 +64,20 @@ impl ChildSlot {
     pub(crate) fn set_life(&self, life: SubagentLife) {
         if life == SubagentLife::Running {
             *self.parked_at.lock().unwrap() = None;
+            *self.settled_at.lock().unwrap() = None;
+            self.failed.store(false, Ordering::Relaxed);
+        } else {
+            self.settled_at
+                .lock()
+                .unwrap()
+                .get_or_insert_with(Instant::now);
         }
         *self.life.lock().unwrap() = life;
     }
 }
+
+/// 子代理出现或状态变了时调的钩子（参数是 agent id）。插件装配时设一次。
+pub(super) type ChangeHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Clone)]
 pub(super) struct ChildStore {
@@ -71,6 +87,7 @@ pub(super) struct ChildStore {
     /// 主线程；由 workflow host 取走。
     workflow_inbox: Arc<Mutex<HashMap<String, Vec<WorkflowReport>>>>,
     parent_wake: Arc<Notify>,
+    on_change: Arc<OnceLock<ChangeHook>>,
 }
 
 struct ParentInbox {
@@ -127,6 +144,47 @@ impl ChildStore {
             })),
             workflow_inbox: Arc::new(Mutex::new(HashMap::new())),
             parent_wake: Arc::new(Notify::new()),
+            on_change: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// 设状态变化钩子（只认第一次）。见 [`crate::SUBAGENT_CHANGED`]。
+    pub fn set_on_change(&self, hook: ChangeHook) {
+        let _ = self.on_change.set(hook);
+    }
+
+    /// 报一次 `id` 变了。调用时不能拿着 `inner` 锁：监听者会回头取快照。
+    fn changed(&self, id: &str) {
+        if let Some(hook) = self.on_change.get() {
+            hook(id);
+        }
+    }
+
+    /// 记下派出 `id` 的那次 `task` 调用。
+    pub fn set_tool_call(&self, id: &str, tool_call_id: &str) {
+        let Some(slot) = self.get(id) else {
+            return;
+        };
+        *slot.tool_call_id.lock().unwrap() = Some(tool_call_id.to_string());
+        self.changed(id);
+    }
+
+    /// 这一轮以失败收尾。紧接着的 `park_idle` / `dispose` 会报变化。
+    pub fn set_failed(&self, id: &str, failed: bool) {
+        if let Some(slot) = self.get(id) {
+            slot.failed.store(failed, Ordering::Relaxed);
+        }
+    }
+
+    /// 开下一轮（第一轮或接着聊）。
+    pub fn mark_running(&self, id: &str) {
+        let Some(slot) = self.get(id) else {
+            return;
+        };
+        let was = slot.life();
+        slot.set_life(SubagentLife::Running);
+        if was != SubagentLife::Running {
+            self.changed(id);
         }
     }
 
@@ -160,6 +218,7 @@ impl ChildStore {
         if let Some(slot) = map.get(id) {
             return slot.clone();
         }
+        let now = Instant::now();
         let slot = Arc::new(ChildSlot {
             description,
             subagent_type,
@@ -176,13 +235,18 @@ impl ChildStore {
             queued: Mutex::new(VecDeque::new()),
             urgent: Mutex::new(None),
             wake: Notify::new(),
-            started_at: Instant::now(),
+            started_at: now,
             parked_at: Mutex::new(None),
             owner,
             parent: parent.to_owned(),
             reported_this_turn: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            settled_at: Mutex::new(None),
+            tool_call_id: Mutex::new(None),
         });
         map.insert(id.to_owned(), slot.clone());
+        drop(map);
+        self.changed(id);
         slot
     }
 
@@ -270,6 +334,7 @@ impl ChildStore {
         *slot.parked_at.lock().unwrap() = Some(Instant::now());
         slot.set_life(SubagentLife::Idle);
         slot.wake.notify_waiters();
+        self.changed(id);
     }
 
     pub fn finish(&self, id: &str, output: String, cancelled: bool) {
@@ -291,6 +356,7 @@ impl ChildStore {
         }
         slot.hold.lock().unwrap().clear();
         slot.wake.notify_waiters();
+        self.changed(id);
     }
 
     pub fn mark_cancelled(&self, id: &str) -> bool {
@@ -346,6 +412,9 @@ impl ChildStore {
             slot.set_life(SubagentLife::Running);
         }
         notify_inbox(&slot);
+        if !running {
+            self.changed(id);
+        }
         Ok(running)
     }
 
@@ -369,6 +438,9 @@ impl ChildStore {
             slot.set_life(SubagentLife::Running);
         }
         notify_inbox(&slot);
+        if !running {
+            self.changed(id);
+        }
         Ok(running)
     }
 
@@ -576,5 +648,9 @@ pub(super) fn snap(id: &str, s: &ChildSlot) -> SubagentSnap {
         cancelled: s.cancelled.load(Ordering::Relaxed),
         output: s.output.lock().unwrap().clone(),
         started_at: s.started_at,
+        parent: s.parent.clone(),
+        tool_call_id: s.tool_call_id.lock().unwrap().clone(),
+        failed: s.failed.load(Ordering::Relaxed),
+        settled_at: *s.settled_at.lock().unwrap(),
     }
 }

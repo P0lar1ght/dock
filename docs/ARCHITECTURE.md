@@ -111,6 +111,13 @@ cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的�
 `turn/completed` 只由这条事件触发，实时和回放同一条路，一轮一次，`status` 随之是
 completed / cancelled / failed（failed 带 `error`）；更早的会话没有这一行，回放时按旧规则补。
 
+子代理的会话（`Sessions::isolated_as`）不发上面这些事件：
+- 它的每条事件改发 `session/child-event`（`ChildLogEvent { child, event }`，`child` 是 agent id）。
+- 子代理出现或状态变了发 `subagent/changed`（`SubagentChanged { id }`），现状在
+  `Subagents::snapshot` 里取。
+- 子代理不记 `TurnEnd`，一轮的收尾看 `subagent/changed` 之后的快照（空闲 / 结束 / 失败）。
+- 网关把这两条投成父页上的 `subagent/event` / `subagent/updated`（见 `cordis-gateway/README.md`）。
+
 装一页要挂哪些插件由**组合根**决定（`cordis-app` 的 `tab_mount()`），TUI 只管开 /
 关 / 切：`"tui.tabs"` 拿到的是一个建页插件工厂。关页 `dispose` 那一颗页 fiber，
 它下面的会话、循环、actor、视图一起走。

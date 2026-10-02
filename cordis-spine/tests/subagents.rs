@@ -3,14 +3,15 @@
 //! parent.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cordis::Context;
 use cordis_spine::{
     agent_loop, blocked_tool_message, install_without_llm, tool_task, turn, AgentPresets,
-    BoxFuture, Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions, StreamDelta, Subagents,
-    TaskConfig, ToolCall, Tools, AGENT_LOOP, AGENT_PRESETS, LLM, SESSIONS, SUBAGENTS, TOOLS,
+    BoxFuture, ChildLogEvent, Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions,
+    StreamDelta, SubagentChanged, Subagents, TaskConfig, ToolCall, Tools, AGENT_LOOP,
+    AGENT_PRESETS, LLM, SESSIONS, SESSION_CHILD_EVENT, SUBAGENTS, SUBAGENT_CHANGED, TOOLS,
 };
 use tokio::sync::Notify;
 
@@ -969,4 +970,78 @@ async fn task_reads_the_calling_pages_presets() {
         !on_root.contains("for mode warden"),
         "根页不该跟着切：{on_root}"
     );
+}
+
+type Recorded<T> = Arc<Mutex<Vec<T>>>;
+
+/// 记下 `subagent/changed` 与 `session/child-event`：网关的子代理投影只靠这两条。
+fn record_subagent_events(root: &Context) -> (Recorded<String>, Recorded<(String, LogEvent)>) {
+    let changed = Arc::new(Mutex::new(Vec::new()));
+    let child_events = Arc::new(Mutex::new(Vec::new()));
+    let c = changed.clone();
+    std::mem::forget(root.on(SUBAGENT_CHANGED, move |e: &SubagentChanged| {
+        c.lock().unwrap().push(e.id.to_string());
+    }));
+    let c = child_events.clone();
+    std::mem::forget(root.on(SESSION_CHILD_EVENT, move |e: &ChildLogEvent| {
+        c.lock()
+            .unwrap()
+            .push((e.child.to_string(), (*e.event).clone()));
+    }));
+    (changed, child_events)
+}
+
+#[tokio::test]
+async fn child_reports_its_changes_and_its_own_events() {
+    let h = boot(Arc::new(LastUser)).await;
+    let (changed, child_events) = record_subagent_events(&h.root);
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "hello child", "explore").await;
+    let snap = wait_idle(&sub, &id).await;
+
+    assert_eq!(snap.tool_call_id.as_deref(), Some("t0"));
+    assert_eq!(snap.parent, "main");
+    assert!(!snap.failed);
+    assert!(snap.settled_at.is_some(), "空闲后用时要停住");
+    // 出现一次、空闲一次，至少两条。
+    let seen = changed.lock().unwrap().iter().filter(|c| **c == id).count();
+    assert!(seen >= 2, "subagent/changed 只收到 {seen} 条");
+    let events = child_events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|(c, e)| c == &id && matches!(e, LogEvent::User(t) if t.contains("hello child"))),
+        "子代理的任务没有作为它自己的事件发出来"
+    );
+    assert!(events
+        .iter()
+        .any(|(c, e)| c == &id && matches!(e, LogEvent::LlmStream(_))));
+}
+
+struct Failing;
+
+impl Sampler for Failing {
+    fn sample<'a>(
+        &'a self,
+        _request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        Box::pin(async move {
+            LlmOutput {
+                error: Some("429 Too Many Requests".into()),
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn child_whose_sample_failed_is_marked_failed() {
+    let h = boot(Arc::new(Failing)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "x", "explore").await;
+    let snap = wait_idle(&sub, &id).await;
+    assert!(snap.failed, "模型请求出错的一轮要标失败：{snap:?}");
 }

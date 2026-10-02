@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::handle::GatewayHandle;
 use crate::handlers::{
     canvas, connection, environment, fs, image_inputs, interaction, permission, preset, slash,
-    thread, turn,
+    subagent, thread, turn,
 };
 use crate::protocol::{self, RpcError};
 
@@ -83,6 +83,11 @@ pub async fn dispatch(
         protocol::SLASH_LIST => slash::list(&gateway, params),
         protocol::SLASH_EXECUTE => slash::execute(gateway, params).await,
         protocol::IMAGE_INPUTS_PUT => image_inputs::put(&gateway, params),
+        protocol::SUBAGENT_LIST => subagent::list(&gateway, params),
+        protocol::SUBAGENT_HISTORY => subagent::history(&gateway, params),
+        protocol::SUBAGENT_SEND => subagent::send(&gateway, params),
+        protocol::SUBAGENT_INTERRUPT => subagent::interrupt(&gateway, params),
+        protocol::SUBAGENT_STOP => subagent::stop(&gateway, params),
         _ => Err(RpcError::method_not_found(method)),
     }
 }

@@ -48,6 +48,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `context/compacted`（压缩进展推送）+ `item/compaction`（压缩完成标记）+
     // `thread/environment/get` 的 `context.lastCompaction`。
     ("compactionProgress", true),
+    // `subagent/list` / `history` / `send` / `interrupt` / `stop` + 推送 `subagent/updated`
+    // （状态）与 `subagent/event`（子代理自己的对话事件，包在父线程上）。
+    ("subagents", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -115,6 +118,18 @@ pub const SLASH_LIST: &str = "slash/list";
 pub const SLASH_EXECUTE: &str = "slash/execute";
 pub const IMAGE_INPUTS_SYNC: &str = "imageInputs/sync";
 pub const IMAGE_INPUTS_PUT: &str = "imageInputs/put";
+
+/// 一个线程启动的子代理（当前状态，和推送 `subagent/updated` 的 `agent` 同形）。
+pub const SUBAGENT_LIST: &str = "subagent/list";
+/// 一个子代理的对话事件（和推送 `subagent/event` 的 `event` 同形）。只在内存里：
+/// Dock 重启后没有。
+pub const SUBAGENT_HISTORY: &str = "subagent/history";
+/// 用户对子代理说一句：在跑就在下一步读到，空闲就开下一轮。
+pub const SUBAGENT_SEND: &str = "subagent/send";
+/// 打断子代理这一轮（留着，能接着聊）。
+pub const SUBAGENT_INTERRUPT: &str = "subagent/interrupt";
+/// 收掉子代理（不能再接着聊）。
+pub const SUBAGENT_STOP: &str = "subagent/stop";
 
 pub const BROWSER_VIEW_OPEN: &str = "browser/view/open";
 pub const BROWSER_VIEW_INPUT: &str = "browser/view/input";

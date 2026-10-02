@@ -114,6 +114,9 @@ pub struct Transcript {
     thread_id: String,
     /// 回放时给事件打的落盘时间（毫秒）；`None` 用当前时间。
     clock: Option<u128>,
+    /// 子代理的投影（[`Self::for_child`]）：它的 agent id。事件照样编号、记进自己的
+    /// 历史，但推送时包成父线程上的一条 `subagent/event`。
+    agent: Option<String>,
 }
 
 impl Transcript {
@@ -135,7 +138,21 @@ impl Transcript {
             page: page.into(),
             thread_id: thread_id.into(),
             clock: None,
+            agent: None,
         }
+    }
+
+    /// 子代理 `agent_id` 的投影。`page` / `thread_id` 是启动它的那一页：推送走那一页的
+    /// 订阅，载荷是 `{ agentId, event }`，`event` 和 `subagent/history` 的条目同形。
+    pub fn for_child(
+        page: impl Into<String>,
+        thread_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        tx: broadcast::Sender<ProjectedEvent>,
+    ) -> Self {
+        let mut t = Self::for_page(page, thread_id, tx);
+        t.agent = Some(agent_id.into());
+        t
     }
 
     /// 网关共用的那条 broadcast 的容量。
@@ -335,6 +352,22 @@ impl Transcript {
                 );
             }
             LogEvent::TurnEnd(status) => self.turn_ended(&status),
+            // 子代理在跑时，父级发来的话在下一步开头以 system-reminder 进它的会话
+            // （`Agent <parent> sent a message:`）。主会话的 reminder 不投影；子代理的
+            // 这一种是对话的一部分，投成一条来自父级的消息。
+            LogEvent::SystemReminder(text) if self.agent.is_some() => {
+                for message in parent_messages(&text) {
+                    if !self.projector.turn_open {
+                        self.ensure_turn();
+                    }
+                    self.projector.last_text.clear();
+                    self.projector.last_reasoning.clear();
+                    self.push(
+                        "item/user_message",
+                        json!({ "content": message, "origin": "parent" }),
+                    );
+                }
+            }
             // Notice 只给 TUI 用户看，不进 dock.1 投影，也不该变成一条聊天消息。
             LogEvent::PreStep
             | LogEvent::Prompt(_)
@@ -567,6 +600,29 @@ impl Transcript {
         });
     }
 
+    /// 一个子代理出现了或状态变了（`subagent/updated`，载荷 `{ agent }`）。和压缩
+    /// 进展一样只推不记：中途接入的客户端用 `subagent/list` 拿当前状态。
+    pub fn subagent_updated(&mut self, agent: Value) {
+        let _ = self.tx.send(ProjectedEvent {
+            seq: 0,
+            method: "subagent/updated".into(),
+            page: self.page.clone(),
+            thread_id: self.thread_id.clone(),
+            turn_id: self.projector.turn_id.clone(),
+            timestamp: iso_now(),
+            payload: json!({
+                "agent": agent,
+                "threadId": self.thread_id,
+                "turnId": self.projector.turn_id,
+            }),
+        });
+    }
+
+    /// 子代理停下（空闲或结束）：收掉它开着的一轮。子代理的会话不记 `TurnEnd`。
+    pub fn close_child_turn(&mut self, status: &TurnEndStatus) {
+        self.turn_ended(status);
+    }
+
     fn ensure_turn(&mut self) {
         if self.projector.turn_open {
             return;
@@ -632,8 +688,47 @@ impl Transcript {
             payload,
         };
         self.events.push(event.clone());
+        if let Some(agent) = &self.agent {
+            let wrapped = ProjectedEvent {
+                seq: 0,
+                method: "subagent/event".into(),
+                page: event.page.clone(),
+                thread_id: event.thread_id.clone(),
+                turn_id: event.turn_id.clone(),
+                timestamp: event.timestamp.clone(),
+                payload: json!({ "agentId": agent, "event": event.as_history_item() }),
+            };
+            let _ = self.tx.send(wrapped);
+            return;
+        }
         let _ = self.tx.send(event);
     }
+}
+
+/// 父级经 `send_message` 发给在跑子代理的话（`format::wrap_reminder` 包的
+/// `Agent <parent> sent a message:\n<正文>`）。一条 reminder 里可能有好几段。
+fn parent_messages(text: &str) -> Vec<String> {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+    let bodies: Vec<&str> = if text.contains(OPEN) {
+        text.split(OPEN)
+            .skip(1)
+            .map(|seg| seg.split(CLOSE).next().unwrap_or_default())
+            .collect()
+    } else {
+        vec![text]
+    };
+    bodies
+        .into_iter()
+        .filter_map(|body| {
+            let (header, message) = body.trim().split_once('\n')?;
+            let message = message.trim();
+            (header.starts_with("Agent ")
+                && header.ends_with(" sent a message:")
+                && !message.is_empty())
+            .then(|| message.to_string())
+        })
+        .collect()
 }
 
 impl Default for Transcript {
@@ -770,6 +865,43 @@ mod tests {
 
     fn methods(t: &Transcript) -> Vec<String> {
         t.history_since(0).into_iter().map(|e| e.method).collect()
+    }
+
+    /// 子代理在跑时父级发来的话以 system-reminder 进它的会话：子代理的投影把它报成
+    /// 一条 `origin: parent` 的消息；主会话的 reminder 照旧不投影。推送包成
+    /// `subagent/event`，不占父线程的历史。
+    #[test]
+    fn child_projects_parent_messages_and_wraps_its_pushes() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut child = Transcript::for_child("main", "live", "kid-1", tx);
+        child.ingest_log(LogEvent::User("[explore] 看一眼\n\nhi".into()));
+        child.ingest_log(LogEvent::SystemReminder(
+            "<system-reminder>\nAgent main sent a message:\n也看看 gateway\n</system-reminder>"
+                .into(),
+        ));
+        child.ingest_log(LogEvent::SystemReminder(
+            "<system-reminder>\n别的提醒\n</system-reminder>".into(),
+        ));
+        let users: Vec<_> = child
+            .history_since(0)
+            .into_iter()
+            .filter(|e| e.method == "item/user_message")
+            .collect();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[1].payload["content"], "也看看 gateway");
+        assert_eq!(users[1].payload["origin"], "parent");
+        let pushed = rx.try_recv().unwrap();
+        assert_eq!(pushed.method, "subagent/event");
+        assert_eq!(pushed.seq, 0);
+        assert_eq!(pushed.payload["agentId"], "kid-1");
+        assert_eq!(pushed.payload["event"]["method"], "turn/started");
+
+        let mut main = Transcript::new();
+        main.ingest_log(LogEvent::User("hi".into()));
+        main.ingest_log(LogEvent::SystemReminder(
+            "<system-reminder>\nAgent kid sent a message:\nx\n</system-reminder>".into(),
+        ));
+        assert_eq!(methods(&main), ["turn/started", "item/user_message"]);
     }
 
     fn prompt(summary: &str) -> PermissionPrompt {

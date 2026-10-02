@@ -324,6 +324,10 @@ mod tests {
             cancelled: false,
             output: "## 结论\n\n第一行预览".into(),
             started_at: std::time::Instant::now(),
+            parent: String::new(),
+            tool_call_id: None,
+            failed: false,
+            settled_at: None,
         };
         let live = CardLive {
             snap: Some(&snap),

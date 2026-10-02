@@ -24,7 +24,7 @@ use super::coordinator::{
 use super::interjection::format_interjection;
 use super::store::ChildStore;
 use super::types::{SubagentResult, SubagentValidateTypeOutcome};
-use super::{current_depth, SubagentLife, DEPTH};
+use super::{current_depth, DEPTH};
 
 /// Session id carried by every child spawn (see [`crate::session::log::ROOT_IDENTITY`]).
 pub(super) const PARENT_SESSION_ID: &str = crate::session::log::ROOT_IDENTITY;
@@ -352,9 +352,7 @@ async fn drive_child(
             turn.reset();
         }
         store.reset_reported(&id);
-        store
-            .get(&id)
-            .inspect(|s| s.set_life(SubagentLife::Running));
+        store.mark_running(&id);
 
         let outcome = if first_tx.is_some() {
             tokio::select! {
@@ -432,6 +430,12 @@ async fn drive_child(
             Ok(text) => (true, text.clone()),
             Err(e) => (false, format!("failed: {e}")),
         };
+        // 模型请求出错不是 `Err`（错误在最后一次采样里，循环照常收尾），照主会话
+        // `end_turn` 的规矩也算失败。
+        let sample_error = child
+            .get::<Sessions>(SESSIONS)
+            .and_then(|s| s.last_sample_error());
+        store.set_failed(&id, !was_cancelled && (!success || sample_error.is_some()));
         // One parent notice per finished turn. The child's text rides it when
         // it did not message its parent; a caller that already has the result
         // (foreground spawn) drops the notice again.
@@ -533,6 +537,7 @@ fn failed(
     msg: String,
     cancelled: bool,
 ) -> ChildRunOutput {
+    store.set_failed(id, !cancelled);
     store.dispose(id, msg.clone(), cancelled);
     ChildRunOutput {
         result: SubagentResult {

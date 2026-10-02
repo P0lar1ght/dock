@@ -87,6 +87,13 @@ pub const SESSION_TURN_END: &str = "session/turn-end";
 /// 一页的压缩进展变了（开始、换阶段、摘要又吐了一段、结束），载荷
 /// [`crate::PageCompaction`]。摘要计数最多 250ms 一条。
 pub const SESSION_COMPACTION: &str = "session/compaction";
+/// 子代理会话发了一条事件，载荷 [`crate::ChildLogEvent`]。子代理的会话不发
+/// `session/event` / `session/page-event`（TUI 只画主会话），要看子代理过程的监听者
+/// （网关的子代理投影）订这一条。
+pub const SESSION_CHILD_EVENT: &str = "session/child-event";
+/// 一个子代理出现了或状态变了（运行 / 空闲 / 结束），载荷 [`crate::SubagentChanged`]。
+/// 只带 id；当前状态在监听里 `Subagents::snapshot` 现取。
+pub const SUBAGENT_CHANGED: &str = "subagent/changed";
 pub const PERMISSION_EVENT: &str = "permissions/pending";
 pub const ASK_EVENT: &str = "ask/pending";
 pub const PLAN_EVENT: &str = "plan/pending";

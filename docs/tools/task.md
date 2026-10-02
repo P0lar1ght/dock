@@ -17,4 +17,11 @@ Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"session
 
 **「做完要回报」写进子代理的初始任务**（`format::append_reply_instruction`，带 JSON 编码的父级 id），不进人设、不进工具描述、也不再每轮追加提醒：人设和工具排在请求头里，子代理专属的一段会让它的请求头和父级分叉；工具描述只在模型已经想到那颗工具时才起作用。角色的工具集里没有 `send_message` 时不写这段。
 
+**给宿主的事件**：子代理的会话不发 `session/event`，改发 `session/child-event`（`ChildLogEvent`）；
+出现或状态变了发 `subagent/changed`（`SubagentChanged { id }`）。
+`SubagentSnap` 带：
+- `parent`（启动它的会话身份）、`tool_call_id`（派它的 `task` 调用）；
+- `failed`（最近一轮以失败收尾，含模型请求出错）、`settled_at`（停下的时刻，`elapsed()` 算到这里）。
+网关据此投影 `subagent/*`（见 `cordis-gateway/README.md`「子代理」）。
+
 id 参数一族一个名字：子代理这族（`send_message` / `interrupt_agent`，以及 `task` 返回的 `agent_id:`）叫 `agent_id`，作业那族叫 `job_id` / `job_ids`。parent session id = `session::ROOT_IDENTITY`，所以用户 Stop / 新会话会取消本会话子代理，下一次 prompt 重新开放准入
