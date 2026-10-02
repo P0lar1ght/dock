@@ -336,3 +336,47 @@ async fn view_streams_frames_and_forwards_input() {
     assert!(cordis_browser::registry::lookup("gui-thread").is_none());
     hub.shutdown().await;
 }
+
+/// 两个画面（主窗口和拖出去的面板窗各开一个）同时补放大静止帧：Chrome 并发的
+/// `clip.scale` 截图互相把对方的临时视口当成原尺寸恢复，视口每次翻倍（900 → 1800 →
+/// 3600…，最后渲染进程崩掉），画面一会儿全一会儿不全。同一页的静止帧要排队截。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn concurrent_stills_keep_the_viewport() {
+    use cordis_browser::view::View;
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("stills") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "a",
+        "browser_open",
+        json!({"url": "data:text/html,<div style='min-width:1100px;height:3000px'>x</div>"}),
+    )
+    .await;
+    ok(
+        &hub,
+        "a",
+        "browser_resize",
+        json!({"width": 900, "height": 642}),
+    )
+    .await;
+    let target = cordis_browser::registry::lookup("a")
+        .and_then(|t| t.active)
+        .expect("active target");
+    let first = View::attach(&target).await.unwrap();
+    let second = View::attach(&target).await.unwrap();
+    let size = json!({"expression": "`${innerWidth}x${innerHeight}`"});
+    for _ in 0..3 {
+        let (a, b) = tokio::join!(first.still(85, 2.0), second.still(85, 2.0));
+        assert_eq!(a.unwrap().device_width, 900.0);
+        assert_eq!(b.unwrap().device_width, 900.0);
+        let now = ok(&hub, "a", "browser_evaluate", size.clone()).await;
+        assert_eq!(now.text, "900x642");
+    }
+    drop((first, second));
+    hub.shutdown().await;
+}

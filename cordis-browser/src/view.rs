@@ -7,7 +7,8 @@
 //! 流控靠 CDP 自己：Chrome 收到上一帧的 `screencastFrameAck` 才发下一帧。调用方
 //! 在帧真正写出去之后再 [`View::ack`]，慢客户端就不会攒出一长串帧。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use chromiumoxide::browser::Browser;
@@ -176,7 +177,12 @@ impl View {
     /// 画面停下来时补这一张：静止页面一定有画面，`scale: 2` 时 Retina 上也清楚。
     /// 用 `clip.scale` 而不是改页面的设备像素比：agent 看到的页面和它的截图都不受影响。
     /// 返回的 [`Frame`] 元数据取自 `getLayoutMetrics`（CSS 像素），`ack_id` 为 0（不用回 ack）。
+    ///
+    /// 同一页同一时刻只截一张（[`still_lock`]）：两个 View 并发 `clip.scale` 截图时，Chrome
+    /// 把对方的临时视口当成原尺寸恢复，页面视口每次翻倍、回不去。
     pub async fn still(&self, quality: i64, scale: f64) -> Result<Frame, String> {
+        let lock = still_lock(&self.target_id);
+        let _turn = lock.lock().await;
         let view = self
             .page
             .layout_metrics()
@@ -435,6 +441,15 @@ impl Frames {
             ack_id: ev.session_id,
         })
     }
+}
+
+/// 每页一把「补静止帧」的锁（进程内：看画面的 View 都开在网关进程里）。没人在等的锁顺手清掉。
+fn still_lock(target_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        LazyLock::new(Default::default);
+    let mut locks = LOCKS.lock().unwrap();
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    locks.entry(target_id.to_string()).or_default().clone()
 }
 
 /// 地址栏：没写协议的补 `https://`；只放行 http / https / about / data / file。
