@@ -2783,6 +2783,107 @@ async fn browser_view_pushes_the_sessions_tabs() {
     hub.shutdown().await;
 }
 
+/// 真 Chrome + 真浏览器 MCP（`target/debug/dock mcp browser`，先 `cargo build -p cordis-app`）：
+/// 标签栏经 `browser/view/tab` 新开、关掉非最后一页、再关最后一页。关最后一页以前回
+/// `tab_failed`（`browser_tabs` 不让关），现在改调 `browser_close`：回 ok 并推
+/// `closed { reason: "no_tab" }`，之后再 open 回 `no_tab`。
+#[tokio::test]
+#[ignore = "needs a real Chrome and a built dock binary"]
+async fn browser_view_tab_closes_the_last_tab() {
+    if cordis_browser::session::discover_chrome().is_err() {
+        eprintln!("skip: chrome not installed");
+        return;
+    }
+    // 测试二进制在 target/debug/deps/ 下，dock 在 target/debug/。
+    let dock = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(|deps| deps.parent())
+        .map(|dir| dir.join("dock"))
+        .filter(|p| p.is_file());
+    let Some(dock) = dock else {
+        eprintln!("skip: target/debug/dock not built (cargo build -p cordis-app)");
+        return;
+    };
+    cordis_base::config::register_builtin_browser_mcp(dock);
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    // MCP 客户端拉起 `dock mcp browser` 要一会儿；开页还要拉起 Chromium。
+    let page = "data:text/html,<title>One</title><h1>one</h1>";
+    let mut view = Value::Null;
+    for _ in 0..40 {
+        view = rpc.call("browser/view/open", json!({ "url": page })).await;
+        if view.get("result").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let view_id = view["result"]["viewId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{view}"))
+        .to_string();
+    let tab = |action: &str, extra: Value| {
+        let mut params = json!({ "viewId": view_id, "action": action });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        params
+    };
+    let tabs_of = |note: &Value| note["params"]["tabs"].as_array().unwrap().clone();
+
+    let new = rpc
+        .call(
+            "browser/view/tab",
+            tab("new", json!({ "url": "data:text/html,<title>Two</title>" })),
+        )
+        .await;
+    assert_eq!(new["result"]["ok"], true, "{new}");
+    let two = loop {
+        let note = rpc
+            .wait_notification("browser/view/tabs", Duration::from_secs(5))
+            .await;
+        if tabs_of(&note).len() == 2 {
+            break tabs_of(&note);
+        }
+    };
+    let first = two[0]["targetId"].as_str().unwrap().to_string();
+    let closed = rpc
+        .call(
+            "browser/view/tab",
+            tab("close", json!({ "targetId": first })),
+        )
+        .await;
+    assert_eq!(closed["result"]["ok"], true, "{closed}");
+    let one = loop {
+        let note = rpc
+            .wait_notification("browser/view/tabs", Duration::from_secs(5))
+            .await;
+        if tabs_of(&note).len() == 1 {
+            break tabs_of(&note);
+        }
+    };
+    assert_eq!(one[0]["title"], "Two", "{one:?}");
+
+    let last = one[0]["targetId"].as_str().unwrap().to_string();
+    let closed = rpc
+        .call(
+            "browser/view/tab",
+            tab("close", json!({ "targetId": last })),
+        )
+        .await;
+    assert_eq!(closed["result"]["ok"], true, "{closed}");
+    let ended = rpc
+        .wait_notification("browser/view/closed", Duration::from_secs(5))
+        .await;
+    assert_eq!(ended["params"]["reason"], "no_tab", "{ended}");
+    let again = rpc.call("browser/view/open", json!({})).await;
+    assert_eq!(again["error"]["details"]["code"], "no_tab", "{again}");
+}
+
 /// 真 Chrome：页面早就加载完、一动不动时打开视图。无头 screencast 只出 CSS 像素、页面
 /// 不动时可能一帧都不推（以前面板会一直停在骨架屏）；现在画面停下来一定补一张静止帧
 /// （`still: true`），并按 `viewport.deviceScaleFactor` 倍截（这里没接浏览器 MCP，视口
