@@ -5,6 +5,7 @@
 
 mod cache_debug;
 mod messages;
+pub mod probe;
 mod responses;
 mod tool_images;
 

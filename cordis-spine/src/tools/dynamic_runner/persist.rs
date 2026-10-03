@@ -77,14 +77,18 @@ pub struct DiskSpec {
     pub contrib: Option<SlashEntry>,
 }
 
+/// 项目级 = **正在跑的那个会话**的工作目录（桌面 GUI 每个会话一个项目）；不在任何
+/// 一轮里（启动、TUI 视图）就是进程 cwd——TUI 从哪启动就认哪的项目插件，和以前一样。
 pub fn persist_root(scope: PersistScope) -> PathBuf {
     match scope {
         PersistScope::User => dock_home().join("plugins"),
-        PersistScope::Project => std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(".dock")
-            .join("plugins"),
+        PersistScope::Project => project_root(&crate::session::cwd::current_cwd()),
     }
+}
+
+/// 某个项目目录下的插件根：`<项目>/.dock/plugins`。
+pub fn project_root(project: &Path) -> PathBuf {
+    project.join(".dock").join("plugins")
 }
 
 pub fn plugin_roots() -> Vec<(PersistScope, PathBuf)> {
@@ -290,7 +294,27 @@ pub fn default_disk_id(plugin_id: &str) -> String {
 }
 
 pub fn scan(roots: &[(PersistScope, PathBuf)]) -> Vec<DiskSpec> {
+    let (specs, broken) = scan_report(roots);
+    for b in broken {
+        eprintln!("[cordis] skip disk plugin {}: {}", b.id, b.error);
+    }
+    specs
+}
+
+/// 读不起来的磁盘插件目录（设置页要把原因列出来，不能只打到 stderr）。
+#[derive(Clone, Debug)]
+pub struct BrokenDisk {
+    pub id: String,
+    pub path: PathBuf,
+    pub scope: PersistScope,
+    pub error: String,
+}
+
+/// [`scan`] 的完整版：能加载的 + 加载失败的。同 id 后面的根（项目）覆盖前面的
+/// （用户）；读不起来的不覆盖已经读起来的那份（和以前只打日志时一样）。
+pub fn scan_report(roots: &[(PersistScope, PathBuf)]) -> (Vec<DiskSpec>, Vec<BrokenDisk>) {
     let mut by_id: IndexMap<String, DiskSpec> = IndexMap::new();
+    let mut broken = Vec::new();
     for (scope, root) in roots {
         let Ok(entries) = std::fs::read_dir(root) else {
             continue;
@@ -310,11 +334,27 @@ pub fn scan(roots: &[(PersistScope, PathBuf)]) -> Vec<DiskSpec> {
                 Ok(spec) => {
                     by_id.insert(id.to_string(), spec);
                 }
-                Err(e) => eprintln!("[cordis] skip disk plugin {id}: {e}"),
+                Err(error) => broken.push(BrokenDisk {
+                    id: id.to_string(),
+                    path: path.clone(),
+                    scope: *scope,
+                    error,
+                }),
             }
         }
     }
-    by_id.into_values().collect()
+    (by_id.into_values().collect(), broken)
+}
+
+/// 改磁盘插件 `plugin.toml` 的 `enabled`（就地改，其余键不动）。
+pub fn write_disk_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
+    let path = dir.join("plugin.toml");
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read plugin.toml: {e}"))?;
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("plugin.toml: {e}"))?;
+    doc["enabled"] = toml_edit::value(enabled);
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("write plugin.toml: {e}"))
 }
 
 fn load_dir(dir: &Path, id: &str, scope: PersistScope) -> Result<DiskSpec, String> {
@@ -714,9 +754,293 @@ impl DynamicRunner {
     }
 }
 
+/// 设置页「永久插件」的一行：磁盘上的一个插件目录。按**目录**认，不按 id——
+/// 不同项目里可以有同名插件，注册表里同一时间只能装其中一个。
+#[derive(Clone, Debug)]
+pub struct DiskPluginView {
+    pub id: String,
+    pub name: String,
+    pub purpose: String,
+    pub scope: PersistScope,
+    /// 插件根（`~/.dock/plugins` 或 `<项目>/.dock/plugins`）。
+    pub root: PathBuf,
+    pub path: PathBuf,
+    /// `plugin.toml` 的 `enabled`。
+    pub enabled: bool,
+    /// 注册表里装的就是这个目录（项目还没开过会话时是 false）。
+    pub loaded: bool,
+    pub running: bool,
+    /// 同名插件已经从别的目录装上了：这一份装不进来。
+    pub shadowed_by: Option<PathBuf>,
+    /// 读不起来或启动失败的原因。
+    pub error: Option<String>,
+}
+
+/// 动态插件：agent 在会话里用 `cordis_define` 定义、只在内存里的插件。
+#[derive(Clone, Debug)]
+pub struct SessionPluginView {
+    pub plugin_id: String,
+    /// 定义它的会话（`Sessions::identity`，如 `main#3`）。
+    pub session_id: String,
+    pub name: String,
+    pub purpose: String,
+    pub factory: String,
+    pub running: bool,
+    pub error: Option<String>,
+}
+
+/// 两个路径是不是同一个目录：先比字面，不同再比规范化后的真实路径（符号链接、
+/// macOS 的 `/var` ↔ `/private/var`）。界面传来的是规范化后的路径，注册表里记的
+/// 是装载时的写法，只比字面会把同一个插件当成「别处的同名插件」。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
+fn disk_path_of(rec: &super::registry::PluginRec) -> Option<&Path> {
+    match &rec.origin {
+        PluginOrigin::Disk { path, .. } => Some(path.as_path()),
+        PluginOrigin::Session => None,
+    }
+}
+
+fn failure(rec: &super::registry::PluginRec) -> Option<String> {
+    rec.latest
+        .as_ref()
+        .filter(|a| a.status == super::AttemptStatus::Failed)
+        .map(|a| a.host_error.clone().unwrap_or_else(|| "启动失败".into()))
+}
+
+impl DynamicRunner {
+    /// `roots` 里每个根下的插件目录（含读不起来的），各自装没装、跑没跑。
+    /// 不合并同名：每个根单独扫，界面按根分组。
+    pub fn disk_plugins_in(&self, roots: &[(PersistScope, PathBuf)]) -> Vec<DiskPluginView> {
+        let inner = self.inner.lock().unwrap();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (scope, root) in roots {
+            if !seen.insert(root.clone()) {
+                continue;
+            }
+            let (specs, broken) = scan_report(&[(*scope, root.clone())]);
+            for spec in specs {
+                let rec = inner.registry.get(&spec.id);
+                let here = rec
+                    .and_then(disk_path_of)
+                    .is_some_and(|p| same_dir(p, &spec.path));
+                let shadowed_by = rec.filter(|_| !here).map(|r| {
+                    disk_path_of(r)
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("（会话插件）"))
+                });
+                out.push(DiskPluginView {
+                    id: spec.id,
+                    name: spec.name,
+                    purpose: spec.purpose,
+                    scope: spec.scope,
+                    root: root.clone(),
+                    path: spec.path,
+                    enabled: spec.enabled,
+                    loaded: here,
+                    running: here && rec.is_some_and(|r| r.run.is_some()),
+                    shadowed_by,
+                    error: if here { rec.and_then(failure) } else { None },
+                });
+            }
+            out.extend(broken.into_iter().map(|b| DiskPluginView {
+                name: b.id.clone(),
+                id: b.id,
+                purpose: String::new(),
+                scope: b.scope,
+                root: root.clone(),
+                path: b.path,
+                enabled: false,
+                loaded: false,
+                running: false,
+                shadowed_by: None,
+                error: Some(b.error),
+            }));
+        }
+        out
+    }
+
+    /// 动态插件（会话里定义、没写成永久的）。
+    pub fn session_plugins(&self) -> Vec<SessionPluginView> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .registry
+            .all()
+            .filter(|r| matches!(r.origin, PluginOrigin::Session))
+            .map(|r| {
+                let pkg = r
+                    .current_package_id
+                    .as_ref()
+                    .and_then(|id| r.packages.get(id))
+                    .or_else(|| r.packages.values().last());
+                SessionPluginView {
+                    plugin_id: r.plugin_id.clone(),
+                    session_id: r.session_id.clone(),
+                    name: pkg
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| r.plugin_id.clone()),
+                    purpose: pkg.map(|p| p.purpose.clone()).unwrap_or_default(),
+                    factory: pkg.map(|p| p.factory.clone()).unwrap_or_default(),
+                    running: r.run.is_some(),
+                    error: failure(r),
+                }
+            })
+            .collect()
+    }
+
+    /// 按目录找一个磁盘插件（`dir` 必须在某个插件根下）。
+    fn disk_spec_at(dir: &Path) -> Result<DiskSpec, String> {
+        let id = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or("不是插件目录")?;
+        let root = dir.parent().ok_or("不是插件目录")?;
+        let scope = if same_dir(root, &persist_root(PersistScope::User)) {
+            PersistScope::User
+        } else {
+            PersistScope::Project
+        };
+        load_dir(dir, id, scope)
+    }
+
+    /// 启用 / 停用一个磁盘插件：写 `plugin.toml` 的 `enabled`，并立刻装上跑 / 停掉。
+    pub async fn set_disk_enabled_at(&self, dir: &Path, enabled: bool) -> Result<(), String> {
+        let spec = Self::disk_spec_at(dir)?;
+        let loaded = {
+            let inner = self.inner.lock().unwrap();
+            match inner.registry.get(&spec.id) {
+                Some(r) if disk_path_of(r).is_some_and(|p| same_dir(p, dir)) => Some((
+                    r.run.is_some(),
+                    r.current_package_id
+                        .clone()
+                        .or_else(|| r.packages.keys().last().cloned()),
+                )),
+                Some(r) => {
+                    if enabled {
+                        let other = disk_path_of(r)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "会话里定义的同名插件".into());
+                        return Err(format!("已经装着同名插件 {}（{other}），先停用它", spec.id));
+                    }
+                    None
+                }
+                None => None,
+            }
+        };
+        write_disk_enabled(&spec.path, enabled)?;
+        if !enabled {
+            if loaded.is_some() {
+                self.stop_any(&spec.id).await?;
+            }
+            return Ok(());
+        }
+        let package_id = match loaded {
+            Some((true, _)) => return Ok(()),
+            Some((false, Some(pkg))) => pkg,
+            _ => self.install_disk(&spec)?.package_id,
+        };
+        self.run(PERSIST_SESSION, &spec.id, &package_id, RunMode::Run)
+            .await
+            .map(|_| ())
+    }
+
+    /// 删一个磁盘插件：装着就先停、从注册表摘掉，再删目录。
+    pub async fn delete_disk_at(&self, dir: &Path) -> Result<(), String> {
+        let id = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|id| valid_disk_id(id))
+            .ok_or("不是插件目录")?
+            .to_string();
+        if !dir.join("plugin.toml").is_file() && !dir.is_dir() {
+            return Err(format!("{} 不存在", dir.display()));
+        }
+        let ours = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .registry
+                .get(&id)
+                .is_some_and(|r| disk_path_of(r).is_some_and(|p| same_dir(p, dir)))
+        };
+        if ours {
+            self.stop_any(&id).await?;
+            self.inner.lock().unwrap().registry.delete(&id);
+        }
+        std::fs::remove_dir_all(dir).map_err(|e| format!("删除 {} 失败：{e}", dir.display()))
+    }
+
+    /// 把一个动态插件写成永久插件，写进 `root`（用户级或某个项目的插件根）。
+    pub async fn promote_session(
+        &self,
+        plugin_id: &str,
+        scope: PersistScope,
+        root: PathBuf,
+    ) -> Result<PromoteReceipt, String> {
+        let session = self.session_owner(plugin_id)?;
+        self.promote_into(&session, plugin_id, None, scope, root)
+            .await
+    }
+
+    /// 丢掉一个动态插件：停掉并从注册表删掉（它本来就只在内存里）。
+    pub async fn discard_session(&self, plugin_id: &str) -> Result<(), String> {
+        let session = self.session_owner(plugin_id)?;
+        self.undefine(&session, plugin_id).await.map(|_| ())
+    }
+
+    fn session_owner(&self, plugin_id: &str) -> Result<String, String> {
+        let inner = self.inner.lock().unwrap();
+        let rec = inner
+            .registry
+            .get(plugin_id)
+            .ok_or_else(|| format!("没有叫 {plugin_id} 的插件"))?;
+        if !matches!(rec.origin, PluginOrigin::Session) {
+            return Err(format!("{plugin_id} 已经是永久插件"));
+        }
+        Ok(rec.session_id.clone())
+    }
+
+    /// 打开某个项目的会话时装上它的永久插件（同名已装的跳过）。和 TUI 从这个目录
+    /// 启动时一样自动跑，不走权限确认。
+    pub async fn boot_project(&self, project: &Path) {
+        self.boot_disk_from(&[(PersistScope::Project, project_root(project))])
+            .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 桌面 GUI：进程 cwd 是 App 数据目录，每个会话钉着自己的项目目录。agent 在会话里
+    /// `cordis_promote` 到项目级，要写进**这个会话的**项目，不是进程 cwd。
+    #[tokio::test]
+    async fn project_root_follows_the_running_session_not_the_process() {
+        let project = tempfile::tempdir().unwrap();
+        let ctx = cordis::Context::new();
+        let sessions = crate::session::log::Sessions::tab(ctx.clone(), 2);
+        sessions.pin_workspace_cwd(project.path());
+        let _reg = ctx.provide(crate::names::SESSIONS, sessions).unwrap();
+        let root = crate::tools::registry::with_exec_ctx_async(ctx, async {
+            persist_root(PersistScope::Project)
+        })
+        .await;
+        assert_eq!(root, project.path().join(".dock").join("plugins"));
+        // 不在任何一轮里（启动时）照旧是进程 cwd：TUI 从哪启动就认哪的项目插件。
+        assert_eq!(
+            persist_root(PersistScope::Project),
+            std::env::current_dir()
+                .unwrap()
+                .join(".dock")
+                .join("plugins")
+        );
+    }
 
     #[test]
     fn default_disk_id_strips_counter() {

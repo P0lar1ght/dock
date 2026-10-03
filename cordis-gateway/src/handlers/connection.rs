@@ -95,6 +95,7 @@ fn mcp(gateway: &GatewayHandle) -> Result<std::sync::Arc<Mcp>, RpcError> {
 }
 
 fn servers(mcp: &Mcp) -> Vec<Value> {
+    let editable = cordis_base::config::edit::user_mcp_names();
     mcp.list()
         .into_iter()
         .map(|s| {
@@ -113,14 +114,24 @@ fn servers(mcp: &Mcp) -> Vec<Value> {
                 // 连着时是工具数的说明，没连上时是原因。
                 "detail": s.detail,
                 "toolCount": s.tools.len(),
-                "enabledToolCount": s.tools.iter().filter(|t| t.enabled).count()
+                "enabledToolCount": s.tools.iter().filter(|t| t.enabled).count(),
+                "tools": s.tools.iter().map(|t| json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "enabled": t.enabled
+                })).collect::<Vec<_>>(),
+                // 用户配置里有这一行才能在设置页编辑 / 删除；内置行只能开关。
+                "editable": editable.contains(&s.name),
+                "builtin": cordis_base::config::edit::is_builtin_mcp(&s.name)
             })
         })
         .collect()
 }
 
-/// `model/list`：config.toml 模型目录（只读）。不给密钥，只说有没有配。
+/// `model/list`：config.toml 模型目录。不给密钥，只说有没有配。`editable` = 写在
+/// 用户配置里（设置页能改）；`keyEnv` / `keyEnvSet` = 读哪个环境变量、本进程里有没有。
 pub fn model_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let editable = cordis_base::config::edit::user_model_ids();
     let settings = gateway
         .ctx()
         .get::<AppSettings>(SETTINGS)
@@ -145,9 +156,19 @@ pub fn model_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
                 "contextWindow": m.context_window,
                 "backends": m.api_backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
                 "auth": auth,
+                "keyEnv": m.env_key,
+                "keyEnvSet": m.env_key.as_deref().is_some_and(|k| {
+                    std::env::var(k).is_ok_and(|v| !v.trim().is_empty())
+                }),
+                "editable": editable.contains(&m.id),
                 "default": m.id == current
             })
         })
         .collect();
-    Ok(json!({ "models": models, "default": current }))
+    Ok(json!({
+        "models": models,
+        "default": current,
+        // 配置文件里写的默认（`current` 是根页正在用的，`DOCK_MODEL` 会盖掉它）。
+        "configDefault": cordis_base::config::load_default_model()
+    }))
 }

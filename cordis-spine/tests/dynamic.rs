@@ -2863,3 +2863,57 @@ async fn rhai_regex_works_inside_execute() {
     let out = exec(&root, "regex_probe", "{}").await;
     assert_eq!(out, "ok=true found=12 g1=a rep=1:a 2:b cn=my 密钥");
 }
+
+/// 插件根经符号链接装上（注册表记的是别名路径），界面拿规范化后的真实路径来停 /
+/// 删：认的是同一个目录，不能当成「别处的同名插件」——停不掉、删了目录插件还在跑。
+#[cfg(unix)] // 用到符号链接
+#[tokio::test]
+async fn disk_plugin_is_matched_by_real_directory_not_spelling() {
+    let root = boot().await;
+    let real = tempfile::tempdir().unwrap();
+    let alias_holder = tempfile::tempdir().unwrap();
+    let alias = alias_holder.path().join("alias");
+    std::os::unix::fs::symlink(real.path(), &alias).unwrap();
+    let plugin_dir = real.path().join("echo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        "name = \"Echo\"\npurpose = \"alias\"\nfactory = \"echo\"\nenabled = true\n",
+    )
+    .unwrap();
+    let runner = root
+        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap();
+    let roots = [(PersistScope::Project, alias.clone())];
+    runner.boot_disk_from(&roots).await;
+    let row = |runner: &DynamicRunner| {
+        runner
+            .disk_plugins_in(&roots)
+            .into_iter()
+            .find(|p| p.id == "echo")
+            .unwrap()
+    };
+    assert!(row(&runner).running, "经别名装上了");
+
+    let canonical = plugin_dir.canonicalize().unwrap();
+    runner.set_disk_enabled_at(&canonical, false).await.unwrap();
+    let after = row(&runner);
+    assert!(!after.running, "按真实路径停用要停得掉：{after:?}");
+    assert!(
+        after.shadowed_by.is_none(),
+        "同一个目录不是同名的别处插件：{after:?}"
+    );
+
+    runner.set_disk_enabled_at(&canonical, true).await.unwrap();
+    assert!(row(&runner).running);
+    runner.delete_disk_at(&canonical).await.unwrap();
+    assert!(!plugin_dir.exists());
+    assert!(
+        runner.session_plugins().is_empty() && runner.disk_plugins_in(&roots).is_empty(),
+        "删掉之后注册表里也不该留着它"
+    );
+    assert!(
+        root.get::<DynEcho>(DYN_ECHO).is_none(),
+        "删掉的插件不能还在跑"
+    );
+}

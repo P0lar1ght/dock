@@ -78,6 +78,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | handler | 域 |
 |---|---|
 | `connection` | `connection/authenticate`；设置页用的 `mcp/list`、`mcp/reload`、`mcp/reconnect`、`model/list`（见下） |
+| `settings` | 设置页写配置（只给受信连接，见下） |
 | `thread` | 会话列表 / 启动 / 改名 / 归档 / 恢复 / 删除 / 历史 / 订阅；多线程：`thread/open` / `thread/close` / `thread/start {cwd}` / `thread/list {scope:"all"}` |
 | `turn` | 发消息、流式回报 |
 | `environment` | 环境信息、模型 / reasoning / approval / plan / memory / goal 设置 |
@@ -93,7 +94,51 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `mcp/list` | 每台 MCP 服务器：`name` / `status`（`connected` / `failed` / `needs_auth` / `disabled`）/ `detail`（连着时是工具数说明，没连上时是原因）/ `toolCount` / `enabledToolCount`。不给启动命令（参数里可能带密钥） |
 | `mcp/reload` | 重读 `[mcp_servers.*]`：新增的连上、删掉的断开、改过的和上次没连上的重连。回 `ok` / `serverCount`（老字段）、`summary`、`added` / `removed` / `reconnected` / `disabled` / `failed[]` 和 `servers` |
 | `mcp/reconnect { name }` | 只重连这一台，不改配置；停用或认不得的回 `reconnect_failed`，连不上也是，状态里记着原因 |
-| `model/list` | config.toml 模型目录（只读）：`id` / `label` / `description` / `apiBase` / `contextWindow` / `backends` / `auth`（`key` / `env` / `none`，不给密钥本身）/ `default`，外加当前全局默认 `default` |
+| `model/list` | config.toml 模型目录：`id` / `label` / `description` / `apiBase` / `contextWindow` / `backends` / `auth`（`key` / `env` / `none`，不给密钥本身）/ `default`，外加当前全局默认 `default`。见下 |
+
+`mcp/list` 与 `model/list` 加了只读字段（老客户端不受影响）：
+
+- `mcp/list` 每台多出 `tools[]`（`name` / `description` / `enabled`）、`editable`、`builtin`。
+- `model/list` 每条多出 `keyEnv` / `keyEnvSet`（读哪个环境变量、本进程里有没有）、`editable`。
+- `model/list` 顶层多出 `configDefault`（配置文件写的默认；`default` 是根页正在用的）。
+
+### 设置页写配置（只给受信连接，`handlers/settings.rs`）
+
+- 只认 `dock serve` 交给父进程的 ticket（`IssuedTicket.trusted`）。
+- 配对来的网页、远程设备调这些一律 `forbidden`：能写 MCP 启动命令 = 能在本机跑程序。
+- 读也挡：MCP 的环境变量、请求头里可能有密钥。
+- 只写用户级 `~/.dock/config.toml`，经 `toml_edit` 就地改，注释和不认识的键都留着。
+- 文件本身解析失败时拒绝写（`config/status` 报行号），免得覆盖掉手写的半截内容。
+- 密钥只进不出：`model/get` 只回 `hasApiKey`，`secret/list` 只回名字。
+
+| 方法 | 作用 |
+|---|---|
+| `config/status` | `dockHome` / `path` / `exists` / `error`（`message` + `line`） |
+| `config/get` | 白名单键的值（`edit::SETTING_KEYS`）+ 盖掉它们的环境变量 + `memoryForcedOff` |
+| `config/set { key, value }` | 写一个白名单键；`null` = 删掉回默认。改 `memory.*` 当场重载记忆 |
+| `config/env { names }` | 这些环境变量在 Dock 进程里设了没有（只回布尔） |
+| `model/get { id }` | 用户配置里这条模型的全部字段 |
+| `model/save { model, originalId?, makeDefault? }` | 新建 / 保存；回 `model/list` |
+| `model/delete { id }` | 删的是默认模型时默认改成目录里下一条 |
+| `model/default { id }` | 写 `[models].default`，根页跟着换（新页从根页抄） |
+| `model/test { model? \| id }` | 发一次最小请求；表单可以没保存。回 `ok` + `ms` 或 `error` |
+| `mcp/get` / `mcp/save` / `mcp/delete` | 编辑 `[mcp_servers.<name>]`，写完当场对账 |
+| `mcp/enable` / `mcp/tool/enable` | 服务器 / 单个工具开关（同 `/mcps` 的 Space） |
+| `mcp/login { name }` | HTTP 服务器的浏览器 OAuth，等授权完才回 |
+| `cua/status` / `cua/action` | cua-driver 状态机；`install` / `grant` 在后台跑，进度靠轮询 `cua/status` |
+| `browser/status` | 内置浏览器状态 + 有头偏好 |
+| `plugin/list` | 永久插件（用户级 + 每个已知项目，按根分组、按目录认）+ 动态插件（带定义它的会话） |
+| `plugin/enable` / `plugin/delete { path }` | 按插件目录启停 / 删除；目录必须在某个插件根下 |
+| `plugin/promote { id, scope }` | 动态插件写成永久：`user` 或定义它的会话的项目 |
+| `plugin/discard { id }` | 丢掉一个动态插件 |
+| `skill/list` | 每层发现的技能，被同名遮住的标 `shadowed` |
+| `secret/list` / `secret/set` / `secret/delete` | `$DOCK_HOME/secrets.json`（0600） |
+| `pairing/list` / `pairing/resolve` / `pairing/revoke` / `pairing/accept` | `dock serve` 没有 TUI：网页配对在 GUI 里批；`accept` 不落盘 |
+| `device/list` / `device/add` / `device/revoke` | 同 `dock device`；令牌只在 `add` 的回包里出现一次 |
+
+会等外部的（`model/test`、`mcp/save|delete|enable|login`、`plugin/enable|promote|discard`）不占连接锁。
+
+开页（`thread/open` / `thread/start {cwd}`）时在后台加载那个项目的 `.dock/plugins`。
 
 - `transcript.rs`：把会话事件流转成 `dock.1` 的增量报文
 - `LIVE_THREAD_ID` = `"live"` 指代第 1 页（根）的会话；老客户端只用它

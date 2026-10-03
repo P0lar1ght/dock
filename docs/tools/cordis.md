@@ -9,6 +9,11 @@
 
 会话注册表 + 磁盘永久插件。热挂体走 `ctx.plugin` / `fiber.dispose`。会话定义盖章 `Sessions::identity()`；磁盘插件 `session_id` 为 `*`，所有会话可见。`cordis_promote` 写 `{cwd}/.dock/plugins/<id>/` 或 `~/.dock/plugins/<id>/`（目录名即 pluginId）；`install_app` 自动加载（fail-open，不走权限 overlay）
 
+项目级的 `{cwd}` 是**调用这颗工具的会话**的工作目录（桌面 GUI 每个会话一个项目）。
+- 不在任何一轮里（启动时）才是进程 cwd：TUI 从哪启动就加载哪的项目插件。
+- 桌面 GUI 开某个项目的会话时，网关加载那个项目的 `.dock/plugins`（同名已装的跳过）。
+- `cordis_define` 的 `source_path` 按同一个项目根解析。
+
 ## `tool-cordis`
 
 - **ctx**：→ `"tools"`（inject `"dynamicCordisRunner"` + `"context"`）

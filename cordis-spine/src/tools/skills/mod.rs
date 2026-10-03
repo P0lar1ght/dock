@@ -20,14 +20,35 @@ use crate::session::log::Sessions;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
-pub use discover::{apply_substitutions, extract_skill_body, SkillInfo, SkillScope};
+pub use discover::{
+    apply_substitutions, extract_skill_body, scan_all_with_shadowed, SkillInfo, SkillScope,
+};
 pub use listing::{listable, listing_budget_chars, overlay_body, render_listing};
 
 const SKILL_TOOL_DESC: &str = "Load a skill's SKILL.md body into this turn. Prefer `/name` (user slash) when the user invoked it; use this tool when a listed skill matches the task. `name` is the skill id from the system listing. Optional `args` fill $ARGUMENTS.";
 const SKILL_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"name":{"type":"string","description":"Skill id (slash name)."},"args":{"type":"string","description":"Optional arguments substituted for $ARGUMENTS."}},"required":["name"]}"#;
 
+/// 一个项目目录看得到的技能：内置 + 用户级 + 这个目录的 `skills/` `.agents/skills/`
+/// `.dock/skills/`。桌面 GUI 每个会话一个项目，所以按目录各存一份。
+struct Catalog {
+    skills: Vec<SkillInfo>,
+    /// First rendered listing, frozen so window/activation changes do not
+    /// rewrite the system-prompt prefix (Grok never mutates system for skills).
+    frozen_listing: Option<String>,
+}
+
+impl Catalog {
+    fn scan(cwd: &std::path::Path) -> Self {
+        Self {
+            skills: discover::scan_all_at(cwd),
+            frozen_listing: None,
+        }
+    }
+}
+
 struct SkillsInner {
-    catalog: Vec<SkillInfo>,
+    /// 项目目录 → 那里看得到的技能。启动目录那份在挂载时扫，其余第一次用到时扫。
+    catalogs: std::collections::HashMap<PathBuf, Catalog>,
     announced: HashSet<String>,
     /// 本会话**中途**发现的技能名。启动时就在目录里的不算——那些在冻结的
     /// listing 段里，压缩不会让模型忘掉它们。
@@ -35,9 +56,6 @@ struct SkillsInner {
     activated: HashSet<String>,
     extras: Vec<Disposable>,
     overlay: Option<Disposable>,
-    /// First rendered listing, frozen so window/activation changes do not
-    /// rewrite the system-prompt prefix (Grok never mutates system for skills).
-    frozen_listing: Option<String>,
 }
 
 /// Named `"skills"` service. Live-look at the call site.
@@ -49,38 +67,83 @@ pub struct Skills {
 
 impl Skills {
     fn discover(ctx: Context) -> Self {
-        let catalog = discover::scan_all();
-        let announced = catalog.iter().map(|s| s.name.clone()).collect();
+        let cwd = crate::session::cwd::current_cwd();
+        let catalog = Catalog::scan(&cwd);
+        let announced = catalog.skills.iter().map(|s| s.name.clone()).collect();
         let skills = Self {
             ctx,
             inner: Arc::new(Mutex::new(SkillsInner {
-                catalog,
+                catalogs: std::collections::HashMap::from([(cwd, catalog)]),
                 announced,
                 discovered: Vec::new(),
                 activated: HashSet::new(),
                 extras: Vec::new(),
                 overlay: None,
-                frozen_listing: None,
             })),
         };
         skills.sync_slash();
         skills
     }
 
+    /// 正在跑的会话的项目目录（不在任何一轮里就是进程 cwd）。
+    fn cwd() -> PathBuf {
+        crate::session::cwd::current_cwd()
+    }
+
+    /// 在 `cwd` 那份目录上做事；第一次用到这个目录就扫一遍（扫出新技能要补斜杠）。
+    fn with_catalog<R>(
+        &self,
+        cwd: &std::path::Path,
+        f: impl FnOnce(&mut Catalog, &HashSet<String>) -> R,
+    ) -> R {
+        let (out, fresh) = {
+            let mut inner = self.inner.lock().unwrap();
+            let fresh = !inner.catalogs.contains_key(cwd);
+            if fresh {
+                inner.catalogs.insert(cwd.to_path_buf(), Catalog::scan(cwd));
+            }
+            let SkillsInner {
+                catalogs,
+                activated,
+                ..
+            } = &mut *inner;
+            let catalog = catalogs.get_mut(cwd).expect("just inserted");
+            (f(catalog, activated), fresh)
+        };
+        if fresh {
+            self.sync_slash();
+        }
+        out
+    }
+
+    /// 写 reminder 的会话：正在跑的那一页；不在任何一轮里才落回挂载时的那页。
+    fn target_sessions(&self) -> Option<Arc<Sessions>> {
+        crate::tools::registry::exec_ctx()
+            .and_then(|ctx| ctx.get::<Sessions>(SESSIONS))
+            .or_else(|| self.ctx.get::<Sessions>(SESSIONS))
+    }
+
+    /// 正在跑的会话的项目看得到的技能。
     pub fn catalog(&self) -> Vec<SkillInfo> {
-        self.inner.lock().unwrap().catalog.clone()
+        self.catalog_at(&Self::cwd())
+    }
+
+    /// 某个项目目录看得到的技能。
+    pub fn catalog_at(&self, cwd: &std::path::Path) -> Vec<SkillInfo> {
+        self.with_catalog(cwd, |c, _| c.skills.clone())
     }
 
     pub fn listing_text(&self) -> String {
-        {
-            let inner = self.inner.lock().unwrap();
-            if let Some(frozen) = inner.frozen_listing.clone() {
-                return frozen;
-            }
+        self.listing_text_at(&Self::cwd())
+    }
+
+    /// `cwd` 那个项目的技能 listing（第一次渲染后冻结）。
+    pub fn listing_text_at(&self, cwd: &std::path::Path) -> String {
+        if let Some(frozen) = self.with_catalog(cwd, |c, _| c.frozen_listing.clone()) {
+            return frozen;
         }
         let window = self
-            .ctx
-            .get::<Sessions>(SESSIONS)
+            .target_sessions()
             .map(|s| s.usage().window)
             .filter(|w| *w > 0)
             .or_else(|| {
@@ -92,14 +155,15 @@ impl Skills {
                 })
             })
             .unwrap_or(128_000);
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(frozen) = inner.frozen_listing.clone() {
-            return frozen;
-        }
-        let list = listable(&inner.catalog, &inner.activated);
-        let text = render_listing(&list, listing_budget_chars(window));
-        inner.frozen_listing = Some(text.clone());
-        text
+        self.with_catalog(cwd, |c, activated| {
+            if let Some(frozen) = c.frozen_listing.clone() {
+                return frozen;
+            }
+            let list = listable(&c.skills, activated);
+            let text = render_listing(&list, listing_budget_chars(window));
+            c.frozen_listing = Some(text.clone());
+            text
+        })
     }
 
     /// 压缩后重发的「中途发现」提示，没有中途发现就返回 `None`。
@@ -124,12 +188,15 @@ impl Skills {
     /// never rewrites its skills section, so re-running `listable` against the
     /// live activation set would report skills the model was never told about.
     pub fn occupancy_rows(&self) -> Vec<(String, u64, String)> {
-        let inner = self.inner.lock().unwrap();
-        let listed = inner
-            .frozen_listing
-            .as_ref()
-            .map(|frozen| listed_names(frozen));
-        let list = listable(&inner.catalog, &inner.activated);
+        let (catalog, frozen, activated) = self.with_catalog(&Self::cwd(), |c, activated| {
+            (
+                c.skills.clone(),
+                c.frozen_listing.clone(),
+                activated.clone(),
+            )
+        });
+        let listed = frozen.as_ref().map(|frozen| listed_names(frozen));
+        let list = listable(&catalog, &activated);
         list.into_iter()
             .filter(|s| listed.as_ref().is_none_or(|names| names.contains(&s.name)))
             .map(|s| {
@@ -146,13 +213,9 @@ impl Skills {
     }
 
     pub fn get(&self, name: &str) -> Option<SkillInfo> {
-        self.inner
-            .lock()
-            .unwrap()
-            .catalog
-            .iter()
-            .find(|s| s.name == name)
-            .cloned()
+        self.with_catalog(&Self::cwd(), |c, _| {
+            c.skills.iter().find(|s| s.name == name).cloned()
+        })
     }
 
     /// paths 渐进披露：匹配文件被触碰过才激活（对齐 Grok，激活前不进 listing
@@ -187,7 +250,7 @@ impl Skills {
         let Ok((skill, body)) = self.load(name, args) else {
             return;
         };
-        let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) else {
+        let Some(sessions) = self.target_sessions() else {
             return;
         };
         sessions.append(LogEvent::SystemReminder(format_skill_block(
@@ -219,27 +282,33 @@ impl Skills {
             return;
         }
         let mut new_names = Vec::new();
-        {
-            let mut inner = self.inner.lock().unwrap();
+        let cwd = Self::cwd();
+        let fresh: Vec<SkillInfo> = self.with_catalog(&cwd, |c, _| {
+            let mut fresh = Vec::new();
             for skill in discovered {
-                if inner.catalog.iter().any(|s| s.path == skill.path) {
+                if c.skills.iter().any(|s| s.path == skill.path) {
                     continue;
                 }
-                if inner.catalog.iter().any(|s| s.name == skill.name) {
-                    inner.catalog.retain(|s| s.name != skill.name);
-                }
+                c.skills.retain(|s| s.name != skill.name);
+                c.skills.push(skill.clone());
+                fresh.push(skill);
+            }
+            fresh
+        });
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for skill in fresh {
                 if !inner.announced.contains(&skill.name) {
                     new_names.push(skill.name.clone());
                     inner.announced.insert(skill.name.clone());
                     inner.discovered.push(skill.name.clone());
                 }
-                inner.catalog.push(skill);
             }
         }
         self.activate_for_paths(paths);
         if !new_names.is_empty() {
             self.sync_slash();
-            if let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) {
+            if let Some(sessions) = self.target_sessions() {
                 sessions.append(LogEvent::SystemReminder(format!(
                     "发现新技能：{}。用 `/name` 或 skill 工具加载全文。",
                     new_names.join("、")
@@ -250,10 +319,10 @@ impl Skills {
 
     fn activate_for_paths(&self, paths: &[PathBuf]) {
         let mut newly = Vec::new();
+        let gated = self.catalog();
         {
             let mut inner = self.inner.lock().unwrap();
-            let names: Vec<String> = inner
-                .catalog
+            let names: Vec<String> = gated
                 .iter()
                 .filter(|skill| {
                     skill
@@ -272,7 +341,7 @@ impl Skills {
         if newly.is_empty() {
             return;
         }
-        if let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) {
+        if let Some(sessions) = self.target_sessions() {
             sessions.append(LogEvent::SystemReminder(format!(
                 "技能现已可用：{}。用 `/name` 或 skill 工具加载全文。",
                 newly.join("、")
@@ -284,7 +353,19 @@ impl Skills {
         let Some(slash) = self.ctx.get::<Slash>(SLASH) else {
             return;
         };
-        let catalog = self.catalog();
+        // 斜杠表是全局的：列出所有已扫过的项目里的技能（同名只留一条）。用不了的
+        // 那个项目里按 `/name` 也只是当普通文字发出去。
+        let catalog: Vec<SkillInfo> = {
+            let inner = self.inner.lock().unwrap();
+            let mut seen = HashSet::new();
+            inner
+                .catalogs
+                .values()
+                .flat_map(|c| c.skills.iter())
+                .filter(|s| seen.insert(s.name.clone()))
+                .cloned()
+                .collect()
+        };
         let overlay_text = overlay_body(&catalog);
         {
             let mut inner = self.inner.lock().unwrap();
@@ -436,7 +517,7 @@ pub fn skills() -> Plugin {
                     return None;
                 }
                 exec.get::<Skills>(SKILLS).and_then(|skills| {
-                    let listing = skills.listing_text();
+                    let listing = skills.listing_text_at(&crate::session::cwd::session_cwd(exec));
                     if listing.trim().is_empty() {
                         None
                     } else {
@@ -645,6 +726,112 @@ mod tests {
             .expect("skill reminder");
         assert!(text.contains("<skill name=\"demo-skill\""), "{text}");
         assert!(text.contains("Do the demo with abc."), "{text}");
+    }
+
+    /// 另一页：自己的 `Sessions`（会话身份 `main#2`），钉在 `project` 目录——桌面 GUI
+    /// 里进程 cwd 是数据目录，每个会话一个项目。
+    fn other_page(root: &Context, project: &std::path::Path) -> Context {
+        let page = root.isolate(SESSIONS);
+        let sessions = Sessions::tab(page.clone(), 2);
+        sessions.pin_workspace_cwd(project);
+        std::mem::forget(page.provide(SESSIONS, sessions).unwrap());
+        page
+    }
+
+    fn reminders(ctx: &Context) -> Vec<String> {
+        ctx.get::<Sessions>(SESSIONS)
+            .unwrap()
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LogEvent::SystemReminder(t) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `/name` 在别的页上：按**那一页的项目**找技能，正文进**那一页**的会话。
+    #[tokio::test]
+    async fn slash_skill_resolves_in_the_pages_project_and_lands_on_that_page() {
+        let startup = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let skill_dir = project
+            .path()
+            .join(".dock")
+            .join("skills")
+            .join("proj-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: proj-skill\ndescription: Only in the project.\n---\n\nProject body $ARGUMENTS.\n",
+        )
+        .unwrap();
+        let _env = cordis_base::test_env::scoped().home().cwd(startup.path());
+        let root = cordis::Context::new();
+        mount_skills(&root).await;
+        let page = other_page(&root, project.path());
+        let step = || PreStep::new("/proj-skill go", true, "main#2");
+        crate::tools::registry::with_exec_ctx_async(page.clone(), async {
+            page.waterfall(PRE_STEP, step(), step);
+        })
+        .await;
+        let on_page = reminders(&page);
+        assert!(
+            on_page.iter().any(|t| t.contains("Project body go.")),
+            "技能正文该进这一页：{on_page:?}"
+        );
+        assert!(
+            reminders(&root).is_empty(),
+            "不该进第 1 页：{:?}",
+            reminders(&root)
+        );
+    }
+
+    /// 那一页的系统提示列出它项目里的技能，`skill` 工具也加载得到。
+    #[tokio::test]
+    async fn listing_and_skill_tool_follow_the_pages_project() {
+        let startup = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let skill_dir = project
+            .path()
+            .join(".dock")
+            .join("skills")
+            .join("proj-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: proj-skill\ndescription: Only in the project.\n---\n\nProject body.\n",
+        )
+        .unwrap();
+        let _env = cordis_base::test_env::scoped().home().cwd(startup.path());
+        let root = cordis::Context::new();
+        mount_skills(&root).await;
+        let page = other_page(&root, project.path());
+        let system = root
+            .require::<SystemPrompt>(crate::names::SYSTEM_PROMPT)
+            .unwrap();
+        let on_page = crate::tools::registry::with_exec_ctx_async(page.clone(), async {
+            system.assemble_on(&page)
+        })
+        .await;
+        assert!(on_page.contains("proj-skill"), "{on_page}");
+        assert!(
+            !system.assemble_on(&root).contains("proj-skill"),
+            "启动目录的页没有这个技能"
+        );
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+        // agent 循环按页调 `execute_on`（工具体跑在那一页的 exec ctx 里）。
+        let out = tools
+            .execute_on(
+                &page,
+                cordis_base::types::ToolCall {
+                    id: "s1".into(),
+                    name: "skill".into(),
+                    arguments: r#"{"name":"proj-skill"}"#.into(),
+                },
+            )
+            .await;
+        assert!(out.content.contains("Project body."), "{}", out.content);
     }
 
     #[tokio::test]

@@ -108,6 +108,53 @@ pub(crate) fn load_from(path: &Path) -> Result<BTreeMap<String, String>, String>
     Ok(out)
 }
 
+/// 设置页「密钥」页签：只列名字，不回值。
+pub fn secret_names() -> Result<Vec<String>, String> {
+    Ok(load_from(&default_path())?.into_keys().collect())
+}
+
+/// 写一个密钥（已有就覆盖）。文件只给本人读写（unix `0600`）。
+pub fn set_secret(name: &str, value: &str) -> Result<(), String> {
+    validate_name(name)?;
+    if value.is_empty() {
+        return Err("密钥值不能为空".into());
+    }
+    let path = default_path();
+    let mut store = load_from(&path)?;
+    store.insert(name.to_string(), value.to_string());
+    write_store(&path, &store)
+}
+
+pub fn delete_secret(name: &str) -> Result<(), String> {
+    let path = default_path();
+    let mut store = load_from(&path)?;
+    if store.remove(name).is_none() {
+        return Err(format!("密钥不存在：{name}"));
+    }
+    write_store(&path, &store)
+}
+
+fn write_store(path: &Path, store: &BTreeMap<String, String>) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+    let text = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .map_err(|e| format!("写入 secrets.json 失败：{e}"))?;
+    std::io::Write::write_all(&mut file, text.as_bytes())
+        .map_err(|e| format!("写入 secrets.json 失败：{e}"))?;
+    // 已存在的文件 open 不改权限位，再收紧一次。
+    ensure_owner_only(path).map_err(|e| format!("收紧 secrets.json 权限失败：{e}"))
+}
+
 /// Lookup without permission gate — for unit tests and the gated resolver.
 pub(crate) fn lookup(name: &str, store_path: &Path) -> Result<String, String> {
     validate_name(name)?;

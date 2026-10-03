@@ -339,6 +339,8 @@ async fn open_page(
     let page = Page { ctx, identity };
     // 从历史开的页带着整段对话：投影按它重建，订阅时才回放得出来。
     gateway.reset_page(&page);
+    // 这个项目的永久插件（`<项目>/.dock/plugins`）跟着装上，和 TUI 从这里启动一样。
+    crate::handlers::settings::boot_project_plugins(gateway, cwd.to_path_buf());
     Ok(page)
 }
 

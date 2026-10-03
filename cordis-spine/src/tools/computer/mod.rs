@@ -81,6 +81,16 @@ impl ComputerState {
     }
 }
 
+/// 一个安装 / 授权动作的进度快照。
+#[derive(Clone, Debug)]
+pub struct CuaJobView {
+    pub action: CuaAction,
+    /// 最近几行输出。
+    pub lines: Vec<String>,
+    /// `None` = 还在跑。
+    pub finished: Option<Result<String, String>>,
+}
+
 /// Named `"computer"` handle. Call sites live-lookup; do not capture the `Arc`.
 /// Clone shares the same inner (slash binding + 探测缓存 + 正在跑的动作)。
 #[derive(Clone)]
@@ -240,6 +250,25 @@ impl Computer {
             this.refresh_slash();
         });
         Ok(())
+    }
+
+    /// 正在跑 / 刚跑完的动作。设置页轮询它画进度。
+    pub fn job_view(&self) -> Option<CuaJobView> {
+        self.inner
+            .job
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|job| CuaJobView {
+                action: job.action,
+                lines: job.lines.iter().cloned().collect(),
+                finished: job.finished.clone(),
+            })
+    }
+
+    /// 本机探测到的 macOS 授权（没探测过是 `Unknown`）。
+    pub fn perms(&self) -> Perms {
+        self.inner.probe.lock().unwrap().perms
     }
 
     /// 清掉已完成动作的进度区（关 overlay 时调）。跑着的不动。

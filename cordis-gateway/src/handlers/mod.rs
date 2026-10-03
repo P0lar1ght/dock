@@ -8,6 +8,7 @@ pub mod image_inputs;
 pub mod interaction;
 pub mod permission;
 pub mod preset;
+pub mod settings;
 pub mod slash;
 pub mod subagent;
 pub mod thread;
