@@ -179,14 +179,22 @@ fn goal_service(ctx: &Context) -> Result<std::sync::Arc<Goal>, RpcError> {
 
 fn goal_object(ctx: &Context) -> Value {
     match ctx.get::<Goal>(GOAL) {
-        Some(goal) if goal.present() => {
-            let status = if goal.paused() { "paused" } else { "active" };
+        Some(goal) if goal.present() || goal.completed() => {
+            let status = if goal.completed() {
+                "completed"
+            } else if goal.paused() {
+                "paused"
+            } else {
+                "active"
+            };
             json!({
                 "status": status,
                 "summary": goal.title(),
                 "truncated": false,
                 "progressSummary": goal.status(),
-                "revision": 1
+                "revision": 1,
+                // 实际在跑的时长（暂停的时段不算）；客户端在 `active` 时自己往上走表。
+                "elapsedMs": goal.elapsed().as_millis() as u64
             })
         }
         _ => json!({

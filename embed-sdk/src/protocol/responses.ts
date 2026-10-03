@@ -157,6 +157,8 @@ export interface ThreadEnvironmentResult {
     blockedReason?: string;
     updatedAt?: number;
     completedAt?: number;
+    /** 目标实际在跑的时长（暂停的时段不算）。 */
+    elapsedMs?: number;
   };
   plan: {
     enabled: boolean;

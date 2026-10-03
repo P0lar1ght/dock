@@ -55,6 +55,16 @@ impl Goal {
         self.state.status()
     }
 
+    /// 上一个目标由模型报完成（`update_goal(completed)`）收尾；`start` / `clear` 后复位。
+    pub fn completed(&self) -> bool {
+        self.state.completed()
+    }
+
+    /// 目标实际在跑的时长，暂停的时段不算。
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.state.elapsed()
+    }
+
     pub fn start(&self, title: impl Into<String>) {
         self.state.start(title);
     }
