@@ -66,6 +66,7 @@ pub use host::tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSl
 pub use llm::compact::{
     compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
 };
+pub use llm::http::probe::probe_model;
 pub use llm::sampler::{llm, Llm, LlmConfig, LlmMode, Sampler};
 pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
@@ -100,14 +101,17 @@ pub use session::search::{
 };
 pub use tools::ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
 pub use tools::browser::{tool_browser, Browser, BrowserState, BROWSER_MCP_PREFIX};
-pub use tools::computer::{tool_computer, Computer, ComputerState, CuaAction, CUA_DRIVER_SERVER};
+pub use tools::computer::{
+    tool_computer, Computer, ComputerState, CuaAction, CuaJobView, CUA_DRIVER_SERVER,
+};
 pub use tools::cron::{
     cron, Cron, CronError, CronJob, CronTick, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS,
 };
 pub use tools::dynamic_runner::{
-    builtins_lines, dynamic_runner, DynEcho, DynNote, DynamicRunner, PersistScope, PluginOrigin,
-    PluginReference, PromoteReceipt, RhaiBag, RhaiBags, RunMode, DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE,
-    RHAI_FACTORY,
+    builtins_lines, delete_secret, dynamic_runner, persist_root, plugin_roots, project_root,
+    secret_names, set_secret, DiskPluginView, DynEcho, DynNote, DynamicRunner, PersistScope,
+    PluginOrigin, PluginReference, PromoteReceipt, RhaiBag, RhaiBags, RunMode, SessionPluginView,
+    DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
 };
 pub use tools::goal::{
     goal_composer_fill, goal_continuation_directive, goal_instruction, goal_offer_addon,
@@ -140,7 +144,9 @@ pub use tools::sched::{
     interval_to_human, loop_composer_fill, loop_schedule_instruction, loop_usage_message,
     parse_interval, tool_scheduler, LoopFireMode, SCHEDULER_CREATE_TOOL_NAME,
 };
-pub use tools::skills::{skills, tool_skills, SkillInfo, SkillScope, Skills};
+pub use tools::skills::{
+    scan_all_with_shadowed, skills, tool_skills, SkillInfo, SkillScope, Skills,
+};
 pub use tools::task::admission::SubagentLimits;
 pub use tools::task::{tool_task, SubagentChanged, SubagentSnap, Subagents, TaskConfig};
 pub use tools::todo_write::{

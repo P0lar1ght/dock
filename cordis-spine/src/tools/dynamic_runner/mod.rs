@@ -34,9 +34,12 @@ use registry::{
 pub use factories::{
     DynEcho, DynNote, FactoryInfo, DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
 };
-pub use persist::{plugin_roots, PromoteReceipt};
+pub use persist::{
+    persist_root, plugin_roots, project_root, DiskPluginView, PromoteReceipt, SessionPluginView,
+};
 pub use registry::{Attempt, AttemptStatus, Package, PersistScope, PluginOrigin, RunMode};
 pub use rhai_host::{builtins_lines, RhaiBag, RhaiBags};
+pub use rhai_secret::{delete_secret, secret_names, set_secret};
 
 #[cfg(test)]
 pub(crate) use persist::PROMOTE_SESSION_COLLISION_HINT;
