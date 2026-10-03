@@ -12,8 +12,8 @@ use cordis_gateway::{
     GATEWAY, GATEWAY_SERVE, PROTOCOL_VERSION,
 };
 use cordis_spine::{
-    agent_loop, agent_presets, compact, install_fakes, install_without_llm, mcp_client,
-    permissions, plan_mode, settings, slash, tool_ask_user, tool_goal, tool_task, turn,
+    agent_loop, agent_presets, compact, dynamic_runner, install_fakes, install_without_llm,
+    mcp_client, permissions, plan_mode, settings, slash, tool_ask_user, tool_goal, tool_task, turn,
     AgentPresets, AppSettings, BoxFuture, Compact, ExtraSlashKind, Goal, Llm, LlmOutput, LogEvent,
     LoopHandle, Mcp, PermissionOptionKind, Permissions, PlanMode, PromptRequest, Sampler, Sessions,
     Slash, SlashEntry, StreamDelta, TaskConfig, ToolCall, Tools, TurnControl, AGENT_LOOP,
@@ -3627,4 +3627,294 @@ async fn subagents_project_onto_the_thread_that_started_them() {
         )
         .await;
     assert!(missing.get("error").is_some(), "{missing}");
+}
+
+/// 设置页方法只认 `dock serve` 交给父进程的 ticket：配对来的网页改不了配置
+/// （能写 MCP 启动命令 = 能在本机跑程序），受信连接能读写模型目录和白名单键。
+#[tokio::test]
+async fn settings_methods_only_answer_the_trusted_gui_ticket() {
+    let root = harness_root().await;
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+
+    // 网页走配对拿到的 ticket：读写都挡（连接内的和另起任务的两条路都要挡）。
+    let http = reqwest::Client::new();
+    let created: Value = http
+        .post(format!("http://{addr}/v1/pairing/requests"))
+        .header("Origin", PAGE_ORIGIN)
+        .json(&json!({ "application": "page" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let request_id = created["pairingRequestId"].as_str().unwrap().to_string();
+
+    let (mut gui, auth) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let _ = gui.call("initialize", json!({})).await;
+    // GUI 在设置页里批准这个网页（`dock serve` 没有 TUI 来批）。
+    let pending = gui.call("pairing/list", json!({})).await;
+    assert_eq!(
+        pending["result"]["pending"][0]["origin"], PAGE_ORIGIN,
+        "{pending}"
+    );
+    let approved = gui
+        .call(
+            "pairing/resolve",
+            json!({ "id": request_id, "approve": true }),
+        )
+        .await;
+    assert_eq!(
+        approved["result"]["bindings"][0]["origin"], PAGE_ORIGIN,
+        "{approved}"
+    );
+    let exchanged: Value = http
+        .post(format!("http://{addr}/v1/pairing/exchanges"))
+        .header("Origin", PAGE_ORIGIN)
+        .json(&json!({ "pairingRequestId": request_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let page_ticket = exchanged["ticket"].as_str().unwrap().to_string();
+    let mut page = Rpc::connect(addr, &page_ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    for (method, params) in [
+        ("config/status", json!({})),
+        (
+            "config/set",
+            json!({ "key": "browser.headed", "value": true }),
+        ),
+        (
+            "mcp/save",
+            json!({ "server": { "name": "x", "transport": "stdio", "command": "sh" } }),
+        ),
+        ("model/test", json!({ "id": "anything" })),
+        ("device/add", json!({ "name": "evil" })),
+    ] {
+        let denied = page.call(method, params).await;
+        assert_eq!(
+            denied["error"]["details"]["code"], "forbidden",
+            "{method} 不该对配对网页开放：{denied}"
+        );
+    }
+    // 只读的老方法照旧对网页开放。
+    let listed = page.call("model/list", json!({})).await;
+    assert!(listed["result"]["models"].is_array(), "{listed}");
+
+    // 受信连接：写一条模型、设成默认、读回来、删掉。
+    let id = format!("gw-settings-{}", std::process::id());
+    let status = gui.call("config/status", json!({})).await;
+    assert!(status["result"]["error"].is_null(), "{status}");
+    let saved = gui
+        .call(
+            "model/save",
+            json!({
+                "model": {
+                    "id": id,
+                    "apiBaseUrl": "https://api.example.com/v1",
+                    "apiBackends": ["chat_completions"],
+                    "keyMode": "inline",
+                    "apiKey": "sk-test-secret"
+                },
+                "makeDefault": true
+            }),
+        )
+        .await;
+    let row = saved["result"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == json!(id))
+        .cloned()
+        .unwrap_or_else(|| panic!("saved model missing: {saved}"));
+    assert_eq!(row["editable"], true, "{row}");
+    assert_eq!(row["auth"], "key", "{row}");
+    assert_eq!(saved["result"]["configDefault"], json!(id), "{saved}");
+    // 新开的页从根页抄设置：根页跟着换默认模型。
+    assert_eq!(saved["result"]["default"], json!(id), "{saved}");
+    let got = gui.call("model/get", json!({ "id": id })).await;
+    assert_eq!(got["result"]["model"]["hasApiKey"], true, "{got}");
+    assert!(
+        !got.to_string().contains("sk-test-secret"),
+        "密钥不能回给界面：{got}"
+    );
+    let bad = gui
+        .call(
+            "model/save",
+            json!({ "model": { "id": id, "apiBaseUrl": "nope", "apiBackends": ["responses"], "keyMode": "env" } }),
+        )
+        .await;
+    assert_eq!(bad["error"]["details"]["code"], "invalid_model", "{bad}");
+    let deleted = gui.call("model/delete", json!({ "id": id })).await;
+    assert!(
+        !deleted["result"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == json!(id)),
+        "{deleted}"
+    );
+
+    // 关掉新配对：网页再来请求直接 403。
+    let closed = gui
+        .call("pairing/accept", json!({ "accepting": false }))
+        .await;
+    assert_eq!(closed["result"]["accepting"], false, "{closed}");
+    let refused = http
+        .post(format!("http://{addr}/v1/pairing/requests"))
+        .header("Origin", "http://localhost:6000")
+        .json(&json!({ "application": "page" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 403);
+}
+
+/// `dock serve` 挂上，回地址 + 交给父进程的受信 ticket。`ServeGuard` 活着控制循环就不退。
+struct ServeGuard {
+    _to_dock: tokio::io::DuplexStream,
+    _task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+async fn serve_trusted(root: &Context) -> (SocketAddr, String, ServeGuard) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    root.plugin(
+        gateway_serve("127.0.0.1:0"),
+        ServeConfig {
+            application: "dock-gui".into(),
+            origin: GUI_ORIGIN.into(),
+        },
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    let control = (*root.require::<ServeControl>(GATEWAY_SERVE).unwrap()).clone();
+    let addr = control.addr();
+    let (to_dock, dock_in) = tokio::io::duplex(4096);
+    let (dock_out, from_dock) = tokio::io::duplex(64 * 1024);
+    let task = tokio::spawn(async move { control.run(BufReader::new(dock_in), dock_out).await });
+    let line = tokio::time::timeout(
+        Duration::from_secs(5),
+        BufReader::new(from_dock).lines().next_line(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let ticket = serde_json::from_str::<Value>(&line).unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (
+        addr,
+        ticket,
+        ServeGuard {
+            _to_dock: to_dock,
+            _task: task,
+        },
+    )
+}
+
+/// 桌面 GUI 的进程 cwd 不是任何项目：项目里的永久插件要按会话的项目目录找。
+/// 列表里看得到还没装的，开了这个项目的会话就装上；界面传的目录必须在插件根下。
+#[tokio::test]
+async fn project_plugins_follow_session_projects_not_the_process_cwd() {
+    let root = harness_root().await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(cordis_tui::tabs(), test_page_mount())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(dynamic_runner(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+
+    let project = project_dir("plugins");
+    let plugin = project.join(".dock").join("plugins").join("echo");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("plugin.toml"),
+        "name = \"Echo\"\npurpose = \"project echo\"\nfactory = \"echo\"\nenabled = true\n",
+    )
+    .unwrap();
+
+    let started = gui
+        .call(
+            "thread/start",
+            json!({ "cwd": project.display().to_string() }),
+        )
+        .await;
+    assert!(started["result"]["thread"]["id"].is_string(), "{started}");
+    // 开页时在后台装：等它装上。
+    let path = plugin.display().to_string();
+    let mut row = Value::Null;
+    for _ in 0..50 {
+        let listed = gui.call("plugin/list", json!({})).await;
+        row = listed["result"]["disk"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["path"] == json!(path))
+            .cloned()
+            .unwrap_or(Value::Null);
+        // 装上（loaded）先于跑起来（running）：等到跑起来。
+        if row["running"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(row["scope"], "project", "{row}");
+    assert_eq!(
+        row["project"],
+        json!(project.display().to_string()),
+        "{row}"
+    );
+    assert_eq!(row["loaded"], true, "开了这个项目的会话就该装上：{row}");
+    assert_eq!(row["running"], true, "{row}");
+
+    let off = gui
+        .call("plugin/enable", json!({ "path": path, "enabled": false }))
+        .await;
+    let row = off["result"]["disk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == json!(path))
+        .cloned()
+        .unwrap();
+    assert_eq!(row["running"], false, "{row}");
+    assert!(std::fs::read_to_string(plugin.join("plugin.toml"))
+        .unwrap()
+        .contains("enabled = false"));
+
+    let outside = gui
+        .call(
+            "plugin/delete",
+            json!({ "path": project.display().to_string() }),
+        )
+        .await;
+    assert_eq!(
+        outside["error"]["details"]["code"], "invalid_params",
+        "{outside}"
+    );
+    assert!(project.exists(), "插件根之外的目录不能删");
+
+    let deleted = gui.call("plugin/delete", json!({ "path": path })).await;
+    assert!(deleted["result"]["disk"].is_array(), "{deleted}");
+    assert!(!plugin.exists());
 }
