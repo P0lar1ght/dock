@@ -439,11 +439,12 @@ impl AgentPresets {
 
     pub fn create(&self) -> Result<AgentPreset, String> {
         let mut inner = self.inner.lock().unwrap();
-        let id = mint_id(&inner.presets);
+        let origin = persist_origin(&inner);
+        let id = mint_id(&inner, origin)?;
         let preset = AgentPreset {
             id: id.clone(),
             name: "未命名".into(),
-            origin: persist_origin(&inner),
+            origin,
             ..AgentPreset::new(id.clone())
         };
         inner.presets.insert(id.clone(), preset.clone());
@@ -485,7 +486,7 @@ impl AgentPresets {
             }
             None => AgentPreset::new(String::new()),
         };
-        let id = mint_id(&inner.presets);
+        let id = mint_id(&inner, PresetOrigin::User)?;
         preset.id = id.clone();
         preset.name = name.to_string();
         preset.description = description.trim().to_string();
@@ -617,11 +618,12 @@ impl AgentPresets {
         if preset.broken.is_some() {
             return Err("损坏的预设不能复制".into());
         }
-        let id = mint_id(&inner.presets);
+        let origin = persist_origin(&inner);
+        let id = mint_id(&inner, origin)?;
         preset.id = id.clone();
         preset.name = format!("{} 副本", preset.name);
         preset.broken = None;
-        preset.origin = persist_origin(&inner);
+        preset.origin = origin;
         preset.order = None;
         inner.presets.insert(id.clone(), preset.clone());
         inner.current = id.clone();
@@ -1874,17 +1876,41 @@ fn append_mcp_discovery(tools: &mut Option<Vec<String>>) {
     }
 }
 
-fn mint_id(presets: &IndexMap<String, AgentPreset>) -> String {
-    if !presets.contains_key("custom") {
-        return "custom".into();
-    }
-    for n in 2..10_000 {
-        let id = format!("custom-{n}");
-        if !presets.contains_key(&id) {
-            return id;
+/// 新预设的 id：`custom`、`custom-2`……第一个**内存里和磁盘上都没被占**的。
+///
+/// 只看内存不够：TUI 和桌面 GUI 两个 Dock 共用 `~/.dock`，各自只认得启动时读到的
+/// 预设，会各起一个 `custom` 写进同一个目录，后写的盖掉先写的。落盘的那层用
+/// `create_dir`（不是 `_all`）原子地占住 `<层>/<id>/`，占不到就换下一个。
+fn mint_id(inner: &Inner, origin: PresetOrigin) -> Result<String, String> {
+    let candidates = std::iter::once("custom".to_string())
+        .chain((2..10_000).map(|n| format!("custom-{n}")))
+        .chain(std::iter::once(format!(
+            "custom-{}",
+            uuid::Uuid::now_v7().as_simple()
+        )));
+    let base = match origin {
+        PresetOrigin::Project => inner.project_dir.as_ref().unwrap_or(&inner.user_dir),
+        _ => &inner.user_dir,
+    };
+    for id in candidates {
+        if inner.presets.contains_key(&id) {
+            continue;
+        }
+        if !inner.persist {
+            return Ok(id);
+        }
+        // 老布局 `<层>/<id>.yml` 也算占用。
+        if base.join(format!("{id}.yml")).exists() {
+            continue;
+        }
+        std::fs::create_dir_all(base).map_err(|e| e.to_string())?;
+        match std::fs::create_dir(base.join(&id)) {
+            Ok(()) => return Ok(id),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
         }
     }
-    format!("custom-{}", uuid::Uuid::now_v7().as_simple())
+    Err("找不到空闲的预设 id".into())
 }
 
 fn mint_role_id(agents: &IndexMap<String, SubagentDef>) -> String {
@@ -1994,6 +2020,26 @@ fn sanitize_stale_warden_overlay(overlay: &mut AgentPreset, base: &AgentPreset) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 两个 Dock（TUI + 桌面 GUI）共用一个 `~/.dock`，各自新建预设：id 不能撞，
+    /// 否则两边写进同一个 `presets/custom/`，后写的盖掉先写的（删一个也删掉另一个）。
+    #[test]
+    fn two_processes_creating_presets_never_share_an_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = AgentPresets::load(dir.path().to_path_buf());
+        let b = AgentPresets::load(dir.path().to_path_buf());
+        let pa = a.create_custom("甲", None, "", None).unwrap();
+        let pb = b.create_custom("乙", None, "", None).unwrap();
+        assert_ne!(pa.id, pb.id, "两个进程各自起的 id 撞了");
+        let c = a.create().unwrap();
+        assert!(c.id != pa.id && c.id != pb.id, "{} 撞了", c.id);
+        for id in [&pa.id, &pb.id, &c.id] {
+            assert!(
+                dir.path().join(id).join(AGENT_FILE).is_file(),
+                "{id} 没落盘"
+            );
+        }
+    }
     use crate::names::{AGENT_PRESETS, TOOLS};
     use crate::tools::registry::{tool_result, Tools};
     use cordis::Context;
