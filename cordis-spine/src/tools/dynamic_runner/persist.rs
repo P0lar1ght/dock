@@ -789,6 +789,17 @@ pub struct SessionPluginView {
     pub error: Option<String>,
 }
 
+/// 两个路径是不是同一个目录：先比字面，不同再比规范化后的真实路径（符号链接、
+/// macOS 的 `/var` ↔ `/private/var`）。界面传来的是规范化后的路径，注册表里记的
+/// 是装载时的写法，只比字面会把同一个插件当成「别处的同名插件」。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
 fn disk_path_of(rec: &super::registry::PluginRec) -> Option<&Path> {
     match &rec.origin {
         PluginOrigin::Disk { path, .. } => Some(path.as_path()),
@@ -817,7 +828,9 @@ impl DynamicRunner {
             let (specs, broken) = scan_report(&[(*scope, root.clone())]);
             for spec in specs {
                 let rec = inner.registry.get(&spec.id);
-                let here = rec.and_then(disk_path_of) == Some(spec.path.as_path());
+                let here = rec
+                    .and_then(disk_path_of)
+                    .is_some_and(|p| same_dir(p, &spec.path));
                 let shadowed_by = rec.filter(|_| !here).map(|r| {
                     disk_path_of(r)
                         .map(Path::to_path_buf)
@@ -889,7 +902,7 @@ impl DynamicRunner {
             .and_then(|s| s.to_str())
             .ok_or("不是插件目录")?;
         let root = dir.parent().ok_or("不是插件目录")?;
-        let scope = if root == persist_root(PersistScope::User) {
+        let scope = if same_dir(root, &persist_root(PersistScope::User)) {
             PersistScope::User
         } else {
             PersistScope::Project
@@ -903,7 +916,7 @@ impl DynamicRunner {
         let loaded = {
             let inner = self.inner.lock().unwrap();
             match inner.registry.get(&spec.id) {
-                Some(r) if disk_path_of(r) == Some(dir) => Some((
+                Some(r) if disk_path_of(r).is_some_and(|p| same_dir(p, dir)) => Some((
                     r.run.is_some(),
                     r.current_package_id
                         .clone()
@@ -954,7 +967,7 @@ impl DynamicRunner {
             inner
                 .registry
                 .get(&id)
-                .is_some_and(|r| disk_path_of(r) == Some(dir))
+                .is_some_and(|r| disk_path_of(r).is_some_and(|p| same_dir(p, dir)))
         };
         if ours {
             self.stop_any(&id).await?;

@@ -3922,6 +3922,7 @@ async fn project_plugins_follow_session_projects_not_the_process_cwd() {
 /// `plugin_dir` 规范化之后才比根：不存在的路径、压平后落在插件根之外的、
 /// 末位分量是指向根外的符号链接的，都要拒；压平后仍在根内的写法（`..`）
 /// 不能被误拒。
+#[cfg(unix)] // 用到符号链接
 #[tokio::test]
 async fn plugin_paths_are_checked_after_canonicalization() {
     let root = harness_root().await;
