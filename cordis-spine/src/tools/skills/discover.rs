@@ -68,31 +68,47 @@ impl SkillInfo {
     }
 }
 
-pub fn scan_all() -> Vec<SkillInfo> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+/// 在 `cwd` 这个项目目录看得到的技能（内置 + 用户级 + 这个目录的三层）。
+pub fn scan_all_at(cwd: &Path) -> Vec<SkillInfo> {
     let mut map = IndexMap::new();
-    // 内置最先合并：同名技能被任何更高层覆盖（对齐 Grok bundled 语义）。
-    merge_scope(
-        &mut map,
+    for layer in scan_layers(cwd) {
+        merge_scope(&mut map, layer);
+    }
+    map.into_values().collect()
+}
+
+/// 各层原样（低优先级在前）。内置最先合并：同名技能被任何更高层覆盖（对齐
+/// Grok bundled 语义）。
+fn scan_layers(cwd: &Path) -> Vec<Vec<SkillInfo>> {
+    vec![
         scan_dir(&materialize_bundled(), SkillScope::Builtin),
-    );
-    merge_scope(&mut map, scan_dir(&cwd.join("skills"), SkillScope::Bundled));
-    merge_scope(
-        &mut map,
+        scan_dir(&cwd.join("skills"), SkillScope::Bundled),
         scan_dir(
             &cordis_base::config::dock_home().join("skills"),
             SkillScope::User,
         ),
-    );
-    merge_scope(
-        &mut map,
         scan_dir(&cwd.join(".agents").join("skills"), SkillScope::Agents),
-    );
-    merge_scope(
-        &mut map,
         scan_dir(&cwd.join(".dock").join("skills"), SkillScope::Project),
-    );
-    map.into_values().collect()
+    ]
+}
+
+/// 设置页用：每一层发现的技能都列出来，被更高层同名技能遮住的标 `true`。
+pub fn scan_all_with_shadowed(cwd: &Path) -> Vec<(SkillInfo, bool)> {
+    let layers = scan_layers(cwd);
+    let mut winner: std::collections::HashMap<String, (usize, usize)> = Default::default();
+    for (li, layer) in layers.iter().enumerate() {
+        for (si, skill) in layer.iter().enumerate() {
+            winner.insert(skill.name.clone(), (li, si));
+        }
+    }
+    let mut out = Vec::new();
+    for (li, layer) in layers.into_iter().enumerate() {
+        for (si, skill) in layer.into_iter().enumerate() {
+            let shadowed = winner.get(&skill.name) != Some(&(li, si));
+            out.push((skill, shadowed));
+        }
+    }
+    out
 }
 
 /// 把编译期嵌入的内置技能物化到 `$DOCK_HOME/bundled/skills/`，返回缓存目录。
@@ -646,7 +662,7 @@ mod tests {
         }
         // 幂等：再次物化不覆盖、不报错。
         let _ = materialize_bundled();
-        let skills = scan_all();
+        let skills = scan_all_at(&std::env::current_dir().unwrap());
         let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"dock-guide"), "{names:?}");
         assert!(names.contains(&"dock-config"), "{names:?}");
@@ -665,7 +681,7 @@ mod tests {
             "---\nname: dock-guide\ndescription: user override\n---\nUser body.\n",
         )
         .unwrap();
-        let skills = scan_all();
+        let skills = scan_all_at(&std::env::current_dir().unwrap());
         let sc = skills.iter().find(|s| s.name == "dock-guide").unwrap();
         assert_eq!(sc.scope, SkillScope::User);
         assert_eq!(sc.description, "user override");
