@@ -15,6 +15,7 @@ use crate::devices::{self, Device};
 use crate::handle::GatewayHandle;
 use crate::handlers::browser_view::{self, BrowserViews};
 use crate::handlers::desktop_view::{self, DesktopViews};
+use crate::handlers::settings;
 use crate::http::AppState;
 use crate::pairing::IssuedTicket;
 use crate::protocol::{self, RpcError};
@@ -78,6 +79,19 @@ impl Auth {
             Self::Device(_) => connection_origin.to_string(),
         }
     }
+
+    /// 设置页方法只认 `dock serve` 交给父进程的 ticket。
+    fn trusted(&self) -> bool {
+        matches!(self, Self::Ticket(t) if t.trusted)
+    }
+}
+
+/// 改配置的方法（能写 MCP 启动命令 = 能在本机跑程序）挡掉配对来的网页和远程设备。
+fn settings_gate(auth: Option<&Auth>, method: &str) -> Result<(), RpcError> {
+    if settings::is_settings_method(method) && !auth.is_some_and(Auth::trusted) {
+        return Err(RpcError::app("forbidden", "只有桌面 GUI 能改 Dock 设置"));
+    }
+    Ok(())
 }
 
 pub(crate) type OutTx = mpsc::UnboundedSender<Outgoing>;
@@ -246,7 +260,7 @@ async fn detached(
                 "initialize is required after authenticate",
             ))
         } else {
-            Ok(c.gateway.clone())
+            settings_gate(c.auth.as_ref(), &method).map(|()| c.gateway.clone())
         }
     };
     Some(async move {
@@ -341,6 +355,7 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
             "initialize is required after authenticate",
         ));
     }
+    settings_gate(conn.auth.as_ref(), method)?;
     rpc::dispatch(conn.gateway.clone(), method, params, &mut conn.subscribed).await
 }
 

@@ -50,6 +50,8 @@ pub struct IssuedTicket {
     pub application: String,
     pub expires_at: Instant,
     pub expires_unix_ms: u64,
+    /// `dock serve` 交给父进程（桌面 GUI）的那张：只有它能调设置页方法。
+    pub trusted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +66,8 @@ pub struct PairingStore {
     pending: VecDeque<PendingRequest>,
     bindings: Vec<Binding>,
     tickets: HashMap<String, IssuedTicket>,
+    /// 关掉后新的网页配对请求直接拒（已配对的照常）。桌面 GUI 设置页的开关。
+    accepting: bool,
 }
 
 impl PairingStore {
@@ -73,7 +77,17 @@ impl PairingStore {
             pending: VecDeque::new(),
             bindings: Vec::new(),
             tickets: HashMap::new(),
+            accepting: true,
         }
+    }
+
+    pub fn accepting(&self) -> bool {
+        self.accepting
+    }
+
+    pub fn set_accepting(&mut self, accepting: bool) {
+        self.accepting = accepting;
+        self.emit();
     }
 
     pub fn request(
@@ -81,6 +95,12 @@ impl PairingStore {
         application: &str,
         origin: &str,
     ) -> Result<(String, u64), PairingError> {
+        if !self.accepting {
+            return Err(PairingError::new(
+                "pairing_closed",
+                "this Dock is not accepting new pairing requests",
+            ));
+        }
         let application = normalize_application(application)?;
         let origin = require_origin(origin)?;
         self.gc();
@@ -190,7 +210,8 @@ impl PairingStore {
         let application = normalize_application(application)?;
         let origin = require_origin(origin)?;
         self.gc();
-        let ticket = mint_ticket(&application, &origin);
+        let mut ticket = mint_ticket(&application, &origin);
+        ticket.trusted = true;
         self.tickets.insert(ticket.digest.clone(), ticket.clone());
         Ok(ticket)
     }
@@ -308,7 +329,8 @@ impl PairingStore {
         }
         let before = self.bindings.len();
         self.bindings.retain(|b| b.origin != origin);
-        self.tickets.retain(|_, t| t.origin != origin);
+        // 受信父进程那张不跟着撤：它没有绑定，撤销网页来源不该把 GUI 自己踢掉。
+        self.tickets.retain(|_, t| t.trusted || t.origin != origin);
         if self.bindings.len() == before {
             return Err(PairingError::new("not_found", "no binding for that origin"));
         }
@@ -366,6 +388,7 @@ fn mint_ticket(application: &str, origin: &str) -> IssuedTicket {
         application: application.to_string(),
         expires_at: Instant::now() + TICKET_TTL,
         expires_unix_ms: unix_ms(now) + TICKET_TTL.as_millis() as u64,
+        trusted: false,
     }
 }
 

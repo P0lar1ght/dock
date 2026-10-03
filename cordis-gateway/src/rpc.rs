@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::handle::GatewayHandle;
 use crate::handlers::{
-    canvas, connection, environment, fs, image_inputs, interaction, permission, preset, slash,
-    subagent, thread, turn,
+    canvas, connection, environment, fs, image_inputs, interaction, permission, preset, settings,
+    slash, subagent, thread, turn,
 };
 use crate::protocol::{self, RpcError};
 
@@ -24,6 +24,32 @@ pub async fn dispatch(
         protocol::MCP_LIST => connection::mcp_list(&gateway),
         protocol::MCP_RECONNECT => connection::mcp_reconnect(&gateway, params).await,
         protocol::MODEL_LIST => connection::model_list(&gateway),
+        protocol::CONFIG_STATUS => settings::config_status(),
+        protocol::CONFIG_GET => settings::config_get(&gateway),
+        protocol::CONFIG_SET => settings::config_set(&gateway, params),
+        protocol::CONFIG_ENV => settings::config_env(params),
+        protocol::MODEL_GET => settings::model_get(params),
+        protocol::MODEL_SAVE => settings::model_save(&gateway, params),
+        protocol::MODEL_DELETE => settings::model_delete(&gateway, params),
+        protocol::MODEL_DEFAULT => settings::model_default(&gateway, params),
+        protocol::MCP_GET => settings::mcp_get(params),
+        protocol::MCP_TOOL_ENABLE => settings::mcp_tool_enable(&gateway, params).await,
+        protocol::CUA_STATUS => settings::cua_status(&gateway),
+        protocol::CUA_ACTION => settings::cua_action(&gateway, params),
+        protocol::BROWSER_STATUS => settings::browser_status(&gateway),
+        protocol::PLUGIN_LIST => settings::plugin_list(&gateway),
+        protocol::PLUGIN_DELETE => settings::plugin_delete(&gateway, params).await,
+        protocol::SKILL_LIST => settings::skill_list(&gateway),
+        protocol::SECRET_LIST => settings::secret_list(),
+        protocol::SECRET_SET => settings::secret_set(params),
+        protocol::SECRET_DELETE => settings::secret_delete(params),
+        protocol::PAIRING_LIST => settings::pairing_list(&gateway),
+        protocol::PAIRING_RESOLVE => settings::pairing_resolve(&gateway, params),
+        protocol::PAIRING_REVOKE => settings::pairing_revoke(&gateway, params),
+        protocol::PAIRING_ACCEPT => settings::pairing_accept(&gateway, params),
+        protocol::DEVICE_LIST => settings::device_list(),
+        protocol::DEVICE_ADD => settings::device_add(params),
+        protocol::DEVICE_REVOKE => settings::device_revoke(params),
         protocol::THREAD_LIST => thread::list(&gateway, params),
         protocol::THREAD_SEARCH => thread::search(params),
         protocol::PRESET_LIST => preset::list(&gateway, params),
@@ -41,7 +67,15 @@ pub async fn dispatch(
         | protocol::CANVAS_LIST
         | protocol::CANVAS_GET
         | protocol::CANVAS_SET_DATA
-        | protocol::CANVAS_ROLLBACK => dispatch_detached(gateway, method, params).await,
+        | protocol::CANVAS_ROLLBACK
+        | protocol::MODEL_TEST
+        | protocol::MCP_SAVE
+        | protocol::MCP_DELETE
+        | protocol::MCP_ENABLE
+        | protocol::MCP_LOGIN
+        | protocol::PLUGIN_ENABLE
+        | protocol::PLUGIN_PROMOTE
+        | protocol::PLUGIN_DISCARD => dispatch_detached(gateway, method, params).await,
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
@@ -134,6 +168,15 @@ pub fn is_detached(method: &str) -> bool {
             | protocol::CANVAS_GET
             | protocol::CANVAS_SET_DATA
             | protocol::CANVAS_ROLLBACK
+            // 设置页里会连服务器 / 跑插件 / 等浏览器登录的：几秒到几分钟。
+            | protocol::MODEL_TEST
+            | protocol::MCP_SAVE
+            | protocol::MCP_DELETE
+            | protocol::MCP_ENABLE
+            | protocol::MCP_LOGIN
+            | protocol::PLUGIN_ENABLE
+            | protocol::PLUGIN_PROMOTE
+            | protocol::PLUGIN_DISCARD
     )
 }
 
@@ -154,6 +197,14 @@ pub async fn dispatch_detached(
         | protocol::CANVAS_GET
         | protocol::CANVAS_SET_DATA
         | protocol::CANVAS_ROLLBACK => canvas::dispatch(&gateway, method, params).await,
+        protocol::MODEL_TEST => settings::model_test(params).await,
+        protocol::MCP_SAVE => settings::mcp_save(&gateway, params).await,
+        protocol::MCP_DELETE => settings::mcp_delete(&gateway, params).await,
+        protocol::MCP_ENABLE => settings::mcp_enable(&gateway, params).await,
+        protocol::MCP_LOGIN => settings::mcp_login(&gateway, params).await,
+        protocol::PLUGIN_ENABLE => settings::plugin_enable(&gateway, params).await,
+        protocol::PLUGIN_PROMOTE => settings::plugin_promote(&gateway, params).await,
+        protocol::PLUGIN_DISCARD => settings::plugin_discard(&gateway, params).await,
         _ => Err(RpcError::method_not_found(method)),
     }
 }
