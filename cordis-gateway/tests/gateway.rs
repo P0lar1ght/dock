@@ -3918,3 +3918,103 @@ async fn project_plugins_follow_session_projects_not_the_process_cwd() {
     assert!(deleted["result"]["disk"].is_array(), "{deleted}");
     assert!(!plugin.exists());
 }
+
+/// `plugin_dir` 规范化之后才比根：不存在的路径、压平后落在插件根之外的、
+/// 末位分量是指向根外的符号链接的，都要拒；压平后仍在根内的写法（`..`）
+/// 不能被误拒。
+#[tokio::test]
+async fn plugin_paths_are_checked_after_canonicalization() {
+    let root = harness_root().await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(cordis_tui::tabs(), test_page_mount())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(dynamic_runner(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+
+    let project = project_dir("plugin-paths");
+    let plugins = project.join(".dock").join("plugins");
+    let plugin = plugins.join("echo");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("plugin.toml"),
+        "name = \"Echo\"\npurpose = \"paths\"\nfactory = \"echo\"\nenabled = true\n",
+    )
+    .unwrap();
+    // 末位分量指向根外的符号链接：删它等于删被指的目录。
+    let outside = project.join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, plugins.join("link-out")).unwrap();
+    let started = gui
+        .call(
+            "thread/start",
+            json!({ "cwd": project.display().to_string() }),
+        )
+        .await;
+    assert!(started["result"]["thread"]["id"].is_string(), "{started}");
+    // 开页在后台装插件：等它跑起来，之后的 plugin/list 才有这个根。
+    let mut row = Value::Null;
+    for _ in 0..50 {
+        let listed = gui.call("plugin/list", json!({})).await;
+        row = listed["result"]["disk"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["path"] == json!(plugin.display().to_string()))
+            .cloned()
+            .unwrap_or(Value::Null);
+        if row["running"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(row["running"], true, "前台等装插件：{row}");
+
+    for path in [
+        // 根之外。
+        project.display().to_string(),
+        // 插件目录里面的文件，不是插件目录本身。
+        plugin.join("plugin.toml").display().to_string(),
+        // 不存在：canonicalize 失败。
+        plugins.join("nope").display().to_string(),
+        // `..` 压平后落在根之外。
+        format!("{}/../../evil", plugins.display()),
+        // 末位分量是指向根外的符号链接。
+        plugins.join("link-out").display().to_string(),
+    ] {
+        let denied = gui.call("plugin/delete", json!({ "path": path })).await;
+        assert_eq!(
+            denied["error"]["details"]["code"], "invalid_params",
+            "该拒：{path} -> {denied}"
+        );
+    }
+    assert!(plugin.exists(), "插件目录不能被删掉");
+    assert!(outside.exists(), "符号链接所指的根外目录不能被删掉");
+
+    // 压平后仍在根内的写法是合法路径，不能被误拒；路径用规范化后的形式。
+    let dotted = format!("{}/../plugins/echo", plugins.display());
+    let deleted = gui.call("plugin/delete", json!({ "path": dotted })).await;
+    assert!(deleted["result"]["disk"].is_array(), "{deleted}");
+    assert!(!plugin.exists());
+    let listed = gui.call("plugin/list", json!({})).await;
+    assert!(
+        listed["result"]["disk"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["path"] != json!(plugin.display().to_string())),
+        "删掉就没有了：{listed}"
+    );
+}

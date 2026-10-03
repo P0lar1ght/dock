@@ -527,19 +527,25 @@ fn plugin_roots_all(gateway: &GatewayHandle) -> Vec<(PersistScope, std::path::Pa
     roots
 }
 
-/// 界面传来的插件目录：必须是某个已知插件根的直接子目录，否则拒
-/// （删除走 `remove_dir_all`，不能让它删到别处去）。
+/// 界面传来的插件目录：规范化后必须是某个已知插件根的直接子目录，否则拒
+/// （删除走 `remove_dir_all`，不能让它删到别处去）。canonicalize 把 symlink
+/// 解开、把 `..` 压平——连最后一个分量的符号链接一起解，否则 `<根>/link -> ~`
+/// 这种能删到根外；不存在的路径直接拒。
 fn plugin_dir(gateway: &GatewayHandle, params: &Value) -> Result<std::path::PathBuf, RpcError> {
-    let raw = std::path::PathBuf::from(text(params, "path")?);
-    let ok = raw.parent().is_some_and(|parent| {
-        plugin_roots_all(gateway)
-            .iter()
-            .any(|(_, root)| root.as_path() == parent)
-    }) && raw.file_name().is_some_and(|n| n != "." && n != "..");
+    let canon = std::path::PathBuf::from(text(params, "path")?)
+        .canonicalize()
+        .map_err(|_| RpcError::invalid_params("不是插件目录"))?;
+    let parent = canon.parent().unwrap_or(std::path::Path::new(""));
+    let ok = plugin_roots_all(gateway).iter().any(|(_, root)| {
+        root.canonicalize()
+            .map(|root| root.as_path() == parent)
+            .unwrap_or(false)
+    });
     if !ok {
         return Err(RpcError::invalid_params("不是插件目录"));
     }
-    Ok(raw)
+    // 用规范化后的全路径，后面不再依赖界面传来的文本形式。
+    Ok(canon)
 }
 
 /// 定义动态插件的那个会话（按 `Sessions::identity` 找开着的页）。
