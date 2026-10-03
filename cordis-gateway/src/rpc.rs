@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::handle::GatewayHandle;
 use crate::handlers::{
-    canvas, connection, environment, fs, image_inputs, interaction, permission, preset, settings,
-    slash, subagent, thread, turn,
+    canvas, connection, context, environment, fs, image_inputs, interaction, permission, preset,
+    settings, slash, subagent, thread, turn,
 };
 use crate::protocol::{self, RpcError};
 
@@ -104,6 +104,7 @@ pub async fn dispatch(
             environment::clear_goal(&gateway, params)
         }
         protocol::THREAD_CONTEXT_COMPACT => environment::compact(&gateway, params),
+        protocol::THREAD_CONTEXT_GET => context::get(&gateway, params),
         protocol::TURN_START => turn::start(&gateway, params),
         protocol::TURN_ENQUEUE => turn::enqueue(&gateway, params),
         protocol::TURN_STEER => turn::steer(&gateway, params),
@@ -146,6 +147,7 @@ fn opens_on_demand(method: &str) -> bool {
             | protocol::THREAD_GOAL_COMPLETE
             | protocol::THREAD_GOAL_CLEAR
             | protocol::THREAD_CONTEXT_COMPACT
+            | protocol::THREAD_CONTEXT_GET
             | protocol::TURN_START
             | protocol::TURN_ENQUEUE
             | protocol::TURN_STEER

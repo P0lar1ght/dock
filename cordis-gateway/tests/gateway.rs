@@ -815,6 +815,91 @@ async fn reasoning_and_goal_project_dock_services() {
     assert_eq!(cleared["result"]["goal"]["status"], "none");
 }
 
+/// 模型报完成后目标不是「没有」：客户端要显示「已完成 · 用时」，所以投影成 `completed`
+/// 并带上实际跑的时长；清掉之后才回到 `none`。
+#[tokio::test]
+async fn goal_completion_projects_completed_with_elapsed_time() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let started = rpc
+        .call(
+            "thread/goal/set",
+            json!({ "threadId": "live", "content": "ship the gateway" }),
+        )
+        .await;
+    assert_eq!(started["result"]["goal"]["status"], "active");
+    assert!(started["result"]["goal"]["elapsedMs"].is_u64(), "{started}");
+    let tools = h.ctx.require::<Tools>(TOOLS).unwrap();
+    let done = tools
+        .execute(ToolCall {
+            id: "g1".into(),
+            name: "update_goal".into(),
+            arguments: r#"{"completed":true,"message":"shipped"}"#.into(),
+        })
+        .await;
+    assert!(!done.is_error, "{}", done.content);
+    let env = rpc
+        .call("thread/environment/get", json!({ "threadId": "live" }))
+        .await;
+    let goal = &env["result"]["goal"];
+    assert_eq!(goal["status"], "completed", "{env}");
+    assert_eq!(goal["summary"], "ship the gateway");
+    assert_eq!(goal["progressSummary"], "shipped");
+    let cleared = rpc
+        .call("thread/goal/clear", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(cleared["result"]["goal"]["status"], "none");
+}
+
+/// `thread/context/get` 的各片互不重叠、加起来正好是整个窗口；每片带明细。
+#[tokio::test]
+async fn context_breakdown_slices_cover_the_window() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call(
+            "turn/start",
+            json!({ "threadId": "live", "message": "hello" }),
+        )
+        .await;
+    let r = rpc
+        .call("thread/context/get", json!({ "threadId": "live" }))
+        .await;
+    let c = &r["result"];
+    assert!(r.get("error").is_none(), "{r}");
+    let total = c["maxContextTokens"].as_u64().unwrap();
+    let used = c["usedTokens"].as_u64().unwrap();
+    assert!(total > 0, "{c}");
+    let slices = c["slices"].as_array().unwrap();
+    let ids: Vec<&str> = slices.iter().map(|s| s["id"].as_str().unwrap()).collect();
+    for id in ["system", "tools", "messages", "free"] {
+        assert!(ids.contains(&id), "缺 {id}：{ids:?}");
+    }
+    let sum: u64 = slices.iter().map(|s| s["tokens"].as_u64().unwrap()).sum();
+    assert_eq!(sum, used.max(total), "各片应当加起来是整个窗口：{c}");
+    let used_sum: u64 = slices
+        .iter()
+        .filter(|s| s["group"] != "free")
+        .map(|s| s["tokens"].as_u64().unwrap())
+        .sum();
+    assert_eq!(used_sum, used, "{c}");
+    let system = slices.iter().find(|s| s["id"] == "system").unwrap();
+    assert!(
+        !system["detail"].as_array().unwrap().is_empty(),
+        "系统提示要有分段明细：{system}"
+    );
+    assert!(c["onDemand"].is_array());
+    let caps = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        caps["result"]["capabilities"]["contextBreakdown"], true,
+        "{caps}"
+    );
+}
+
 #[tokio::test]
 async fn turn_intent_starts_goal_and_plan() {
     let h = Harness::boot().await;

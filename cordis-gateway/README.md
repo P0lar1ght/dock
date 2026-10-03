@@ -412,6 +412,26 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 子代理发的 `permission/requested` 带 `agentId`（它的 id），主会话发的是 `null`；
   - `permission/resolve { always: true }` 记在这一页上，之后这页和它的子代理调同一颗工具都不再问。
 
+### 上下文明细（能力 `contextBreakdown`，`handlers/context.rs`）
+
+`thread/context/get { threadId? }`：下一次请求的上下文窗口按类别拆开，和 TUI `/context` 同一份数。
+
+- 顶层：`usedTokens`、`maxContextTokens`、`usagePercent`、`compactionTriggerPercent` / `compactionTriggerTokens`、
+  `turnCount`、`toolCallCount`、`compactionCount`、`model`。
+- `slices`：互不重叠，加起来是整个窗口（已用 + 空闲）。
+  - `id`：`system` / `tools` / `messages` / `overhead`（推理、图片、上游真账与估算之差；为 0 时不给）/ `free`；
+  - `group`：`prefix`（每轮原样重发）/ `session`（随对话增长）/ `free`；
+  - `label`、`tokens`、`note?`；
+  - `includes[{ label, tokens, note }]`：已算在这一片里的子项（技能 / 工作流在系统提示里，规约 / 记忆在消息里）；
+  - `detail[{ heading, rows[{ label, tokens?, note? }] }]`：明细，每组最多 40 行，其余并成「其余 N 项」。
+- `onDemand[{ id, label, note, detail }]`：MCP / 本地按需工具，不进窗口（`id` 为 `mcp` / `deferred`）。
+- 关着的会话先开页再算。
+
+目标（`thread/environment/get` 的 `goal`）：
+
+- `status` 多了 `completed`：模型报了 `update_goal(completed)`，标题和最后一条进展留着，`start` / `clear` 后复位。
+- `elapsedMs`：目标实际在跑的时长，暂停的时段不算；`active` 时客户端自己往上走表。
+
 ## 依赖注入
 
 `mount` 声明依赖：`SESSIONS`、`SESSION_PORT`、`PERMISSIONS`、`ASK`、`PLAN_MODE`、`MCP`、`TURN`、`SETTINGS`。这些是 named service，在 `apply` 时 live-lookup，**不要**在闭包里持有 `Arc`。
