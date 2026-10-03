@@ -5,6 +5,8 @@
 //! `[models].catalog` sets the list; `[model.<id>]` adds/overrides. 没有配置文件
 //! 就没有模型——内置目录已经删掉，不再假装有可用端点。
 
+pub mod edit;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
