@@ -145,14 +145,10 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
                     n += estimate_text(&call.arguments);
                 }
             }
-            LogEvent::ToolExecute {
-                name,
-                arguments,
-                content,
-                ..
-            } => {
-                n += estimate_text(name);
-                n += estimate_text(arguments);
+            // 工具结果发给上游的只有 `tool_call_id` + content（Messages / Responses /
+            // chat 都把名字和参数 `..` 掉了）；参数已在上面 assistant 的 tool_calls 里
+            // 算过。原先这里再算一遍，写大文件的会话估算能虚高近一半（#176）。
+            LogEvent::ToolExecute { content, .. } => {
                 n += estimate_text(content);
             }
             LogEvent::PreStep
@@ -412,6 +408,33 @@ mod tests {
             })
             .collect();
         assert_eq!(users, ["only"]);
+    }
+
+    /// #176：一次工具调用的参数只发一次（assistant 的 tool_calls），工具结果只带
+    /// content。参数不能在 `ToolExecute` 上再算一遍。
+    #[test]
+    fn tool_arguments_are_counted_once() {
+        let args = format!("{{\"content\":\"{}\"}}", "a".repeat(40_000));
+        let history = vec![
+            LogEvent::LlmStream(LlmOutput {
+                tool_calls: vec![cordis_base::types::ToolCall {
+                    id: "c1".into(),
+                    name: "write_file".into(),
+                    arguments: args.clone(),
+                }],
+                ..LlmOutput::default()
+            }),
+            LogEvent::ToolExecute {
+                id: "c1".into(),
+                name: "write_file".into(),
+                arguments: args.clone(),
+                content: "ok".into(),
+                images: Vec::new(),
+                is_error: false,
+            },
+        ];
+        let once = estimate_text("write_file") + estimate_text(&args) + estimate_text("ok");
+        assert_eq!(estimate_context_tokens("", &history), once);
     }
 
     /// #154：推理是原样回放给上游的，估算漏掉它，推理模型的上下文就被压到阈值以下。

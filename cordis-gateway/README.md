@@ -423,6 +423,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 顶层：`usedTokens`、`maxContextTokens`、`usagePercent`、`compactionTriggerPercent` / `compactionTriggerTokens`、
   `turnCount`、`toolCallCount`、`compactionCount`、`model`。
 - `slices`：互不重叠，加起来是整个窗口（已用 + 空闲）。
+  - `usedTokens` 有上游真账时，分项（系统提示 / 工具定义 / 消息 / 子项 / 明细行）是本地估算缩到它里面的：
+    估算之和超过已用就按同一比例缩，不足的差额在 `overhead`。分项之间的比例仍是估算。
   - `id`：`system` / `tools` / `messages` / `overhead`（推理、图片、上游真账与估算之差；为 0 时不给）/ `free`；
   - `group`：`prefix`（每轮原样重发）/ `session`（随对话增长）/ `free`；
   - `label`、`tokens`、`note?`；
