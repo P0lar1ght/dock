@@ -10,8 +10,8 @@ Gateway 是 Dock 唯一把会话暴露到进程外的地方，三条设计是**�
 
 `bind::parse_bind` 拒绝非回环地址，`bind_loopback` 绑定后**二次校验** `local_addr()` 仍是 loopback（防 OS / 容器把 `0.0.0.0` 解析成回环之类的怪事）。
 
-- **不要**改成可绑非 loopback，不要为"远程访问"加口子
-- 需要远程？走宿主页面 + `embed-sdk`，让页面连本机回环，而不是让网关监听公网
+- **不要**改成可绑非 loopback，远程访问也不例外（见下一条）
+- 需要远程？走 `dock serve --remote`：网关仍只绑回环，只认设备令牌（`dock device`），TLS 交给反向代理 / Tailscale（见 `docs/REMOTE.md`）。不要让网关自己监听公网
 
 ### 2. CORS 反射 Origin（不是白名单）
 
@@ -23,13 +23,15 @@ Gateway 是 Dock 唯一把会话暴露到进程外的地方，三条设计是**�
 
 - **不要**加 Origin 白名单 / allowlist 校验
 - 本地开发页面（vite、`file://` 旁的 http、别的 app）都要能敲回环 bootstrap，白名单会挡死这些合法场景
-- 真正的鉴权在下一层：配对 + 一次性 ticket
+- 真正的鉴权在下一层：配对换 ticket（远程模式是设备令牌）
 
-### 3. 鉴权靠 `/pair` + 一次性 ticket
+### 3. 鉴权靠配对 ticket / 父进程 ticket / 设备令牌
 
 - 宿主页面发配对请求 → 用户在 TUI 确认（`PairingStore::confirm`）→ 换得 ticket（`TICKET_TTL` = 1 小时）→ WS 用 ticket 鉴权
-- ticket **一次性**，交换后失效
+- **配对兑换是一次性的**：同一次批准只能换一张 ticket；ticket 本身在 TTL 内可反复用于 WS 鉴权
 - 未配对时**不监听**：`gateway()` / `gateway_idle()` 只 mount，`start_listen` 由 TUI `/pair` 触发
+- 例外 `dock serve`：挂载即在回环上监听，ticket 由 `PairingStore::issue_trusted` 签、只经 stdout 交给拉起它的父进程（不经 TUI 确认，**不要**接到 HTTP 上）
+- 远程模式 `dock serve --remote`：不挂配对与 ticket 路由，只认设备令牌
 
 因此：任何"简化鉴权"、"默认信任 localhost Origin"、"允许跳过用户确认"的改动都要先和用户确认。
 

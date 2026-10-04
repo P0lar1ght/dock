@@ -13,7 +13,7 @@
 <!-- 贴真实命令与结果摘要；没跑的部分写「未验证」。 -->
 
 ```bash
-cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
+cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway -p dock-memory -p cordis-browser
 ```
 
 ## 影响面

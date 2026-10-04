@@ -57,7 +57,7 @@ pub fn tool_web() -> Plugin {
                 tools.register(
                     ToolSpec {
                         name: "web_search".into(),
-                        description: "Search the web for up-to-date information, tailored for coding and software development tasks.".into(),
+                        description: "Search the public web through DuckDuckGo's HTML results page and return up to 8 result URLs. There are no titles or snippets, and a link may still be a percent-encoded redirect URL. Use it to find candidate pages, then read the ones that matter with web_fetch. When nothing matches, the reply quotes the start of the results page so you can tell an empty result from a page that failed to parse. Requests go through the same SSRF and domain rules as web_fetch.".into(),
                         parameters_json: SEARCH_PARAMS.into(),
                     },
                     search,

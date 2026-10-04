@@ -74,6 +74,10 @@ pub fn body(
             "type": "adaptive",
             "display": "summarized",
         });
+        // 强度和 responses 一样：设了才发，空 = 用上游默认。
+        if !params.effort.is_empty() {
+            body["output_config"] = json!({ "effort": params.effort });
+        }
     }
     body
 }
@@ -725,6 +729,22 @@ mod tests {
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    /// `/effort` 的档位要到上游：只发 `thinking` 等于让 Claude 用自己的默认强度。
+    /// 没设强度就不发，关了思考就两样都不发。
+    #[test]
+    fn effort_reaches_the_wire_only_when_set() {
+        let request = req(vec![]);
+        let low = body("claude", &request, &[], &params_on("low"), true);
+        assert_eq!(low["output_config"]["effort"], "low");
+        let unset = body("claude", &request, &[], &params_on(""), true);
+        assert_eq!(unset["thinking"]["type"], "adaptive");
+        assert!(unset.get("output_config").is_none(), "{unset}");
+        let off = body("claude", &request, &[], &params_on("none"), true);
+        assert!(off.get("thinking").is_none(), "{off}");
+        assert!(off.get("output_config").is_none(), "{off}");
     }
 
     /// 思考开着、给定强度、支持读图的一组参数（测试默认）。

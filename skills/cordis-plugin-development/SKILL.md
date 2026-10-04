@@ -18,8 +18,6 @@ This Skill is Dock's internalization of the DSH `cordis-plugin-development` work
 
 Hot-plugged bodies always go through cordis-rust `ctx.plugin` / `fiber.dispose` under the `cordis-dynamic` group fiber. Do not ask to change the kernel. Do not wrap `bash` / `read_file` / MCP in a Plugin when those tools already do the job.
 
-Hot-plugged bodies always go through cordis-rust `ctx.plugin` / `fiber.dispose` under the `cordis-dynamic` group fiber. Do not ask to change the kernel.
-
 ## Standard workflow
 
 1. `cordis_inspect` (omit `what`, or `services` / `fibers` / `tools` / `factories` / `builtins` / `events` / `slots` / `temporary` / `permanent`). One Plugin: `pluginId` (+ `packageId`) instead of `what`.
