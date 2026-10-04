@@ -528,6 +528,13 @@ fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         .map(|s| s.model_user_image_count())
         .unwrap_or(0);
     let image_tok = image_n.saturating_mul(IMAGE_TOKEN_ESTIMATE);
+    // 行一律给生估算，由 `fit_rows` 统一缩。快照里的 `tool_definitions_tokens`
+    // 已经缩过，直接用会被缩两遍，和工具那一片对不上。
+    let tool_tok = estimate_tool_definitions(
+        &ctx.get::<Tools>(TOOLS)
+            .map(|t| t.specs_for_model_on(ctx))
+            .unwrap_or_default(),
+    );
     let overhead = snap.used.saturating_sub(
         snap.system_prompt_tokens
             .saturating_add(snap.message_tokens),
@@ -545,7 +552,7 @@ fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         },
         DetailRow {
             label: "工具定义".into(),
-            tokens: Some(snap.tool_definitions_tokens),
+            tokens: Some(tool_tok),
             note: Some(format!("{} 个", snap.tool_definitions_count)),
         },
     ];
@@ -1324,6 +1331,20 @@ mod tests {
         let ctx = Context::new();
         crate::bundle::install_fakes(&ctx).await.unwrap();
         let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        let _tool = ctx
+            .get::<Tools>(TOOLS)
+            .unwrap()
+            .register(
+                ToolSpec {
+                    name: "wide_tool".into(),
+                    description: "d".repeat(8_000),
+                    parameters_json: "{}".into(),
+                },
+                std::sync::Arc::new(|call| {
+                    Box::pin(async move { crate::tools::registry::tool_result(call, "ok") })
+                }),
+            )
+            .unwrap();
         sessions.set_window(1_000_000);
         sessions.append(LogEvent::User("写一页".into()));
         sessions.append(LogEvent::ToolExecute {
@@ -1361,6 +1382,42 @@ mod tests {
             each <= detail.tokens,
             "逐条 {each} 超过消息 {}",
             detail.tokens
+        );
+
+        // 开销格里的「工具定义」行和工具那一片是同一个数：只缩一次。
+        assert!(snap.tool_definitions_tokens > 0, "{snap:?}");
+        let overhead = occupancy_detail(&ctx, OccupancyKind::Overhead);
+        let tool_row = overhead.groups[0]
+            .rows
+            .iter()
+            .find(|r| r.label == "工具定义")
+            .unwrap();
+        assert_eq!(tool_row.tokens, Some(snap.tool_definitions_tokens));
+    }
+
+    /// 上游真账比估算大（估算偏低）：分项原样不缩，差额落在「其余」那一格。
+    #[tokio::test]
+    async fn underestimated_parts_keep_their_size_and_the_gap_is_overhead() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.set_window(1_000_000);
+        sessions.append(LogEvent::User("x".repeat(4_000)));
+        let raw = snapshot_context(&ctx);
+        sample_with_usage(&sessions, 50_000, 0);
+        let snap = snapshot_context(&ctx);
+        assert_eq!(snap.used, 50_000);
+        // 采样那一步多了一条「ok」回复，消息只会比采样前多，不能被缩小。
+        assert!(
+            snap.message_tokens >= raw.message_tokens,
+            "不该缩：{snap:?}"
+        );
+        assert_eq!(snap.system_prompt_tokens, raw.system_prompt_tokens);
+        let overhead = occupancy_detail(&ctx, OccupancyKind::Overhead);
+        assert_eq!(
+            overhead.tokens,
+            50_000 - snap.system_prompt_tokens - snap.message_tokens,
+            "差额进其余"
         );
     }
 
