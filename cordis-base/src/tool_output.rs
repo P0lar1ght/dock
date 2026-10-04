@@ -43,7 +43,9 @@ pub enum Shape {
 pub struct Budget {
     /// 字节兜底帽。
     pub max_bytes: usize,
-    /// 截断形状。
+    /// 截断形状。目前两种都是「保头丢尾」、文案也相同，`cap_bytes` 不按它分支；
+    /// 留着是为了调用点能写明意图（列表 / 不透明文本），哪天两者需要不同的
+    /// 预览策略时不用回头改调用点。
     pub shape: Shape,
 }
 
@@ -117,8 +119,14 @@ pub async fn offload(call_id: &str, content: &str) -> Option<String> {
     Some(path.to_string_lossy().into_owned())
 }
 
+/// 落盘目录，**绝对路径**。
+///
+/// `DOCK_HOME` 可以是相对路径，而它是按进程 cwd 解析的；提示里的路径却是交给
+/// `read_file` 按**会话** cwd 解析的（`/cd` 之后两者不同）。相对路径会让模型
+/// 打开另一个文件或根本打不开——落盘后内联只剩预览，这等于把结果弄丢。
 pub fn spill_dir() -> PathBuf {
-    crate::config::dock_home().join("tool-output")
+    let dir = crate::config::dock_home().join("tool-output");
+    std::path::absolute(&dir).unwrap_or(dir)
 }
 
 /// 本进程的落盘前缀，进程内固定、跨进程不重复。
@@ -215,7 +223,37 @@ fn gc_spill_dir_with(max_age: std::time::Duration, max_total: u64) {
     }
 }
 
-/// 字节兜底帽：超帽先落盘，再按 `shape` 截断并附说明。
+/// 落盘之后内联只留这么多做预览（对齐 Claude Code 的 2KB 预览）。
+///
+/// 全文已经在落盘文件里，模型按行号补读缺的那段。内联给得越多，补读时和已经
+/// 看过的重叠越多——原先内联 20KB 又不报行号，模型只能从第 1 行重读（#174）。
+/// 落盘失败时没有文件可读，才退回按 `max_bytes` 内联。
+pub const PREVIEW_BYTES: usize = 2 * 1024;
+
+/// 按 `read_file` 的口径数行（`split_inclusive('\n')`：末尾没换行的残行也算一行）。
+/// 截断提示里的行号必须和 `read_file` 的 `offset` 对得上，否则补读会错位。
+pub fn line_count(bytes: &[u8]) -> usize {
+    let newlines = bytes.iter().filter(|b| **b == b'\n').count();
+    newlines + usize::from(bytes.last().is_some_and(|b| *b != b'\n'))
+}
+
+/// 取开头至多 `max` 字节，尽量停在换行之后；这一段里没有换行就退到字符边界
+/// （此时预览是第 1 行的一截）。
+pub fn head_at_line(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    match s[..end].rfind('\n') {
+        Some(i) => &s[..=i],
+        None => &s[..end],
+    }
+}
+
+/// 字节兜底帽：超帽先落盘，内联只留开头的预览，并按行号告诉模型从哪里接着读。
 ///
 /// 语义分页已经在工具内部做过了，这里只拦「条数不多但单条巨大」的情况。
 pub async fn cap_bytes(call_id: &str, content: String, budget: &Budget) -> String {
@@ -223,25 +261,28 @@ pub async fn cap_bytes(call_id: &str, content: String, budget: &Budget) -> Strin
         return content;
     }
     let total = content.len();
-    let mut end = budget.max_bytes;
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
-    }
-    // 文案保持 `use_tool` 原样（英文）：这条路径是它原本就在走的，提到这里
-    // 只是换了归属，不该顺手改掉模型已经见过的措辞。
-    let hint = match offload(call_id, &content).await {
-        Some(path) => format!(
-            " Full output written to: {path}. Read that path with read_file or grep to retrieve \
-             the rest."
-        ),
-        None => String::new(),
+    let Some(path) = offload(call_id, &content).await else {
+        // 没存下来：没有文件可读，只能尽量多内联。
+        let head = head_at_line(&content, budget.max_bytes);
+        return format!(
+            "{head}\n\n[output truncated: showing the first {} of {total} bytes. The full output \
+             could not be saved.]",
+            head.len()
+        );
     };
-    let head = &content[..end];
-    match budget.shape {
-        Shape::List | Shape::Opaque => {
-            format!("{head}\n\n[output truncated: showing first {end} of {total} bytes.{hint}]")
-        }
-    }
+    let head = head_at_line(&content, PREVIEW_BYTES.min(budget.max_bytes));
+    let lines = line_count(content.as_bytes());
+    let next = head.matches('\n').count() + 1;
+    let shown = if head.ends_with('\n') {
+        format!("lines 1-{} are shown above", next - 1)
+    } else {
+        format!("the preview above stops inside line {next}")
+    };
+    format!(
+        "{head}\n\n[output truncated: {total} bytes / {lines} lines in full; {shown}. Full \
+         output written to: {path}. Read the rest with read_file offset={next}; do not re-read \
+         the lines above. To find something specific, grep that file instead.]"
+    )
 }
 
 /// 渲染语义分页的页脚。没有截断时返回空串。
@@ -410,10 +451,87 @@ mod tests {
         let budget = Budget::opaque(50);
         let out = cap_bytes("c2", "z".repeat(500), &budget).await;
         assert!(out.contains("output truncated"), "{out}");
-        assert!(out.contains("of 500 bytes"), "{out}");
+        assert!(out.contains("500 bytes"), "{out}");
         let path = spill_dir().join(format!("{}.txt", offload_stem("c2")));
         assert!(path.exists(), "完整输出应落盘：{}", path.display());
         assert_eq!(std::fs::read_to_string(&path).unwrap().len(), 500);
+    }
+
+    /// `DOCK_HOME` 是相对路径时，提示里的路径也必须是绝对的：`read_file` 按会话
+    /// cwd 解析，`/cd` 之后与进程 cwd 不同。
+    #[test]
+    fn spill_dir_is_absolute_even_for_a_relative_dock_home() {
+        let _env = crate::test_env::scoped().set("DOCK_HOME", "relative-dock-home");
+        let dir = spill_dir();
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(
+            dir.ends_with("relative-dock-home/tool-output"),
+            "{}",
+            dir.display()
+        );
+    }
+
+    /// 从提示里抠出 `offset=N`。
+    fn offset_in(out: &str) -> usize {
+        let at = out.find("offset=").expect("提示里要给出 offset") + "offset=".len();
+        out[at..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap()
+    }
+
+    /// #174：落盘后内联只给预览，并按行号说清从哪里接着读。按提示的 offset 补读，
+    /// 拼回来要正好是全文：不重叠（模型不必重读看过的行），也不漏行。
+    #[tokio::test]
+    async fn cap_bytes_previews_and_points_at_the_first_unseen_line() {
+        let _env = crate::test_env::scoped().home();
+        let content: String = (1..=3000).map(|i| format!("row {i:05}\n")).collect();
+        let out = cap_bytes("c4", content.clone(), &Budget::opaque(20_000)).await;
+        let preview = &out[..out.find("\n\n[output truncated").unwrap()];
+        assert!(
+            preview.len() <= PREVIEW_BYTES,
+            "落盘后只该内联预览，实际 {} 字节",
+            preview.len()
+        );
+        assert!(out.contains("3000 lines"), "{out}");
+        let offset = offset_in(&out);
+        let path = spill_dir().join(format!("{}.txt", offload_stem("c4")));
+        let file = std::fs::read_to_string(&path).unwrap();
+        let rest: String = file.split_inclusive('\n').skip(offset - 1).collect();
+        assert_eq!(
+            format!("{preview}{rest}"),
+            content,
+            "预览 + 从 offset 起的剩余部分必须正好拼回全文"
+        );
+    }
+
+    /// 开头 2KB 里没有换行（一整行的 JSON）：预览是第 1 行的一截，提示要说清
+    /// 这一行没看完，从第 1 行读。
+    #[tokio::test]
+    async fn cap_bytes_preview_inside_a_long_first_line() {
+        let _env = crate::test_env::scoped().home();
+        let out = cap_bytes("c5", "q".repeat(30_000), &Budget::opaque(20_000)).await;
+        assert!(out.contains("stops inside line 1"), "{out}");
+        assert_eq!(offset_in(&out), 1);
+    }
+
+    /// 写盘失败没有文件可读：退回尽量多内联，并照实说没存下来。
+    #[tokio::test]
+    async fn cap_bytes_without_spill_keeps_the_full_budget_inline() {
+        let _env = crate::test_env::scoped().home();
+        // 让 tool-output 成为一个普通文件，create_dir_all 必然失败。
+        std::fs::create_dir_all(spill_dir().parent().unwrap()).unwrap();
+        std::fs::write(spill_dir(), b"not a dir").unwrap();
+        let content: String = (1..=3000).map(|i| format!("row {i:05}\n")).collect();
+        let out = cap_bytes("c6", content, &Budget::opaque(20_000)).await;
+        assert!(out.contains("could not be saved"), "{out}");
+        assert!(
+            out.len() > 19_000,
+            "没有文件可读时不该缩成预览：{}",
+            out.len()
+        );
     }
 
     /// 截断点必须落在字符边界上，否则多字节中文会被切碎成非法 UTF-8。

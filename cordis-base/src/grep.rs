@@ -338,8 +338,6 @@ pub async fn run(call_id: &str, args: &str, cwd: &Path) -> String {
 
 struct Outcome {
     body: String,
-    /// 完整正文（含被截掉的部分），只在截断时用来落盘。
-    full: Option<String>,
     counts: Counts,
     unit: &'static str,
     next_hint: &'static str,
@@ -770,7 +768,6 @@ fn search(input: &Input) -> Result<Outcome, String> {
     if shown == 0 {
         return Ok(Outcome {
             body: format!("no matches\n{scope}"),
-            full: None,
             counts: Counts::exact(0, 0),
             unit,
             next_hint,
@@ -788,7 +785,6 @@ fn search(input: &Input) -> Result<Outcome, String> {
         Counts::exact(shown, shown)
     };
     Ok(Outcome {
-        full: counts.truncated().then(|| rendered.clone()),
         body: rendered,
         counts,
         unit,
@@ -850,20 +846,19 @@ fn describe_scope(
 async fn render(call_id: &str, outcome: Outcome) -> String {
     let Outcome {
         body,
-        full,
         counts,
         unit,
         next_hint,
         scope,
         skipped_large,
     } = outcome;
-    let spill = match full {
-        Some(full) => tool_output::offload(call_id, &full).await,
-        None => None,
-    };
-    let footer = tool_output::footer(&counts, unit, next_hint, spill.as_deref());
+    // 不落盘：额度填满就停搜，没有比内联更多的结果可存。原先把内联那份原样写成
+    // 文件、提示里叫模型去读，读回来全是看过的（#174）。拿更多靠收窄或调大
+    // head_limit，页脚里说了。
+    let footer = tool_output::footer(&counts, unit, next_hint, None);
     let footer_empty = footer.is_empty();
-    let mut out = body;
+    // 字节帽只套在正文上：页脚和搜索范围是模型判断「看全没有」的依据，不能被切掉。
+    let mut out = tool_output::cap_bytes(call_id, body, &Budget::list(MAX_OUTPUT_BYTES)).await;
     if !footer_empty {
         out.push_str(&footer);
     }
@@ -871,7 +866,7 @@ async fn render(call_id: &str, outcome: Outcome) -> String {
     if !scope.is_empty() && (!footer_empty || skipped_large > 0) {
         out.push_str(&format!("\n{scope}"));
     }
-    tool_output::cap_bytes(call_id, out, &Budget::list(MAX_OUTPUT_BYTES)).await
+    out
 }
 
 #[cfg(test)]
@@ -1225,9 +1220,12 @@ mod tests {
         assert_eq!(files, sorted, "跨批合并必须保持路径顺序");
     }
 
-    /// 截断必须回报「至少 N」并给落盘路径——否则模型会把前 N 条当成全部。
+    /// 截断必须回报「至少 N」——否则模型会把前 N 条当成全部。
+    ///
+    /// 但不能落盘：搜到额度就停了，文件里只会是内联那 N 条。原先照样写文件并叫
+    /// 模型去读，读回来全是重复（#174）。
     #[tokio::test]
-    async fn head_limit_truncates_with_count_and_spill() {
+    async fn head_limit_truncates_with_count_and_no_duplicate_spill() {
         let _env = crate::test_env::scoped().home();
         let dir = tempfile::tempdir().unwrap();
         let body: String = (1..=50).map(|i| format!("hit line {i}\n")).collect();
@@ -1240,10 +1238,40 @@ mod tests {
         .await;
         assert_eq!(out.matches("big.txt:").count(), 5, "只内联 5 行：{out}");
         assert!(out.contains("at least"), "要说是至少而不是精确总数：{out}");
+        assert!(out.contains("head_limit"), "要说怎么拿更多：{out}");
+        assert!(
+            !out.contains("written to"),
+            "不能叫模型去读和内联一样的文件：{out}"
+        );
         let spill =
             tool_output::spill_dir().join(format!("{}.txt", tool_output::offload_stem("spill-1")));
-        assert!(spill.exists(), "完整结果应落盘：{}", spill.display());
-        assert_eq!(std::fs::read_to_string(&spill).unwrap().lines().count(), 5);
+        assert!(
+            !spill.exists(),
+            "没有内联之外的结果，不该落盘：{}",
+            spill.display()
+        );
+    }
+
+    /// 正文超过字节帽：正文落盘给预览，但页脚（「至少 N 条」）不能跟着被切掉——
+    /// 原先帽套在「正文 + 页脚」上，页脚在尾巴上首先被切。
+    #[tokio::test]
+    async fn byte_cap_keeps_the_count_footer() {
+        let _env = crate::test_env::scoped().home();
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("hit {}\n", "w".repeat(900));
+        std::fs::write(dir.path().join("wide.txt"), line.repeat(300)).unwrap();
+        let out = run(
+            "wide-1",
+            &serde_json::json!({"pattern": "hit", "path": dir.path(), "head_limit": 100})
+                .to_string(),
+            &std::env::current_dir().unwrap(),
+        )
+        .await;
+        assert!(
+            out.contains("output truncated"),
+            "100 行 × 900 字节应超帽：{out}"
+        );
+        assert!(out.contains("at least"), "页脚不能被字节帽切掉：{out}");
     }
 
     /// 没截断时不许挂「至少」页脚——那会让模型白白多搜一轮。
