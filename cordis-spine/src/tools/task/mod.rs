@@ -536,6 +536,8 @@ pub fn tool_task() -> Plugin {
                 vec![
                     tools.register(execute::spec(), task_body)?,
                     tools.register(control::send_spec(), send_body)?,
+                    // 后两颗在 code / cordis 的 `on_demand_tools` 里按需；warden 不写，
+                    // 它们常驻。
                     tools.register(control::list_spec(), list_body)?,
                     tools.register(control::interrupt_spec(), interrupt_body)?,
                 ],

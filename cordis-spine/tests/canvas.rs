@@ -27,18 +27,19 @@ async fn canvas_tools_write_versions_into_the_session_dir() {
         .into_iter()
         .map(|s| s.name)
         .collect();
+    // 画布按需加载：不进模型工具表，模型经 `use_tool` 调用。
     for name in ["canvas_create", "canvas_edit", "canvas_data", "canvas_read"] {
         assert!(
-            model.iter().any(|n| n == name),
-            "{name} 应直接进模型工具表：{model:?}"
+            !model.iter().any(|n| n == name),
+            "{name} 应按需加载：{model:?}"
         );
     }
 
-    // 不落盘的会话没地方存。
+    // 不落盘的会话没地方存。走 `use_tool`，和模型平时的调用路径一样。
     let r = call(
         &tools,
-        "canvas_create",
-        serde_json::json!({"title": "t", "html": "<p>"}),
+        "use_tool",
+        serde_json::json!({"tool_name": "canvas_create", "tool_input": {"title": "t", "html": "<p>"}}),
     )
     .await;
     assert!(r.is_error, "{}", r.content);

@@ -29,15 +29,8 @@ const TASK_PARAMS: &str = r#"{"type":"object","properties":{"prompt":{"type":"st
 const TASK_DESC: &str = "Delegate work to a role from the current Agent mode agents/ roster \
 (a YAML file under this preset's agents/). The child runs in its own context, keeps a durable \
 agent_id, and stays idle between turns, so a delegation is a conversation rather than a \
-one-shot handoff. Subagents are not jobs: job / kill_task do not see them.\n\
-- prompt: the full task for the child. It does not see this conversation.\n\
-- description: 3-5 words.\n\
-- subagent_type: id from this mode's agents/ YAML. The tool parameter enum is the callable set \
-(same as the live roster, including user overlay roles).\n\
-- run_in_background: default true. Returns agent_id immediately; its turn end reaches you as \
-a notification, so never poll. Set false only when the next action needs the result now.\n\
-- resume_from: a disposed agent_id only.\n\
-- reload_roster: refresh the subagent_type enum after writing a new agents/<id>.yml (does not spawn).\n\
+one-shot handoff. Subagents are not jobs: job / kill_task do not see them. A background \
+child's turn end reaches you as a notification, so never poll.\n\
 Talking to a child: send_message (a running child reads it at its next step; an idle one starts \
 its next turn), list_agents for state, interrupt_agent to stop the current turn. The child \
 messages you with the same send_message, and a turn that ends without one has its text \

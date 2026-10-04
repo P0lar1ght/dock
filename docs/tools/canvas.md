@@ -5,7 +5,7 @@
 ## `tool-canvas`
 
 - **ctx**：→ `"tools"`（不提供 named service）
-- **模型工具**：`canvas_create` `canvas_edit` `canvas_data` `canvas_read`（常驻）
+- **模型工具**：`canvas_create` `canvas_edit` `canvas_data` `canvas_read`（按需，经 `search_tool` / `use_tool`；GUI 按 `use_tool` 的内层工具名认画布项）
 - **源码**：`cordis-spine/src/tools/canvas/`；落盘引擎 `cordis-base/src/canvas.rs`
 
 模型写一页自包含 HTML，Dock 桌面端放进会话旁的沙箱 iframe 里跑。

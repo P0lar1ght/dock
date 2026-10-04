@@ -5,9 +5,9 @@
 ## `tool-workflow`
 
 - **ctx**：`"workflows"` + `"tools"`
-- **模型工具**：`workflow`
+- **模型工具**：`workflow`（按需；系统提示的工作流 listing 只要 `use_tool` 可达就照常列出）
 
-Grok Rhai 引擎（`vendor/xai/workflow`）+ 同款 oneshot ack。内置 `deep-research` 脚本在 `cordis-spine/src/tools/workflow/workflows/deep_research.rhai`；磁盘扫描 bundled → 内置 → `{cwd}/.dock/workflows/<name>.rhai` → `~/.dock/workflows/`（同名不覆盖已有）。向 `"context"` 登记 listing 段（窗口 token ×4 ×**3%**，与技能共用 `src/listing.rs`）。同样两道门：**只有主会话拿这一段**（同 `listings: true` 开关），且 `workflow` 工具必须对本会话可见才发。每个目录项登记 slash extra（`kind: tool`，`text=workflow`；不可盖 `RESERVED_SLASH` / `/skills`）。`/name` 与 `/workflow <name>` 直接 `Tools::execute`，不经模型。`tools/execute` 路径靠近 workflows 目录时中途发现。`code` / `cordis` 允许名单含 `workflow`。**`register`（进 sampler）**——理由同 `skill`
+Grok Rhai 引擎（`vendor/xai/workflow`）+ 同款 oneshot ack。内置 `deep-research` 脚本在 `cordis-spine/src/tools/workflow/workflows/deep_research.rhai`；磁盘扫描 bundled → 内置 → `{cwd}/.dock/workflows/<name>.rhai` → `~/.dock/workflows/`（同名不覆盖已有）。向 `"context"` 登记 listing 段（窗口 token ×4 ×**3%**，与技能共用 `src/listing.rs`）。同样两道门：**只有主会话拿这一段**（同 `listings: true` 开关），且 `workflow` 工具必须本会话叫得动才发：在工具表上，或按需且经 `use_tool` 可达（`Tools::reachable_on`）。每个目录项登记 slash extra（`kind: tool`，`text=workflow`；不可盖 `RESERVED_SLASH` / `/skills`）。`/name` 与 `/workflow <name>` 直接 `Tools::execute`，不经模型。`tools/execute` 路径靠近 workflows 目录时中途发现。`code` / `cordis` 允许名单含 `workflow`。普通 `register`；`code` / `cordis` 的 `on_demand_tools` 把它设成按需（不进 sampler），listing 点了名，模型按精确名 `search_tool` 一次拿 schema 再经 `use_tool` 启动。
 
 创作手册是内置技能 **`create-workflow`**（`src/tools/skills/builtin/create-workflow/SKILL.md`，编译期嵌入、启动物化到 `$DOCK_HOME/bundled/skills/`）：脚本形状、方言、host API、dock 与 grok 的差异、踩过的坑都在那一份，`workflow` 工具的描述直接指着它。改了这里的行为就同步改它——工具描述让模型「动手前先读」，那份读物过期就是在教错。用户敲 `/create-workflow` 走同一份。
 

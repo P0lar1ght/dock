@@ -121,7 +121,7 @@ Requires file_path + line + character for position-based operations. line/charac
         };
         own_registered(
             ctx,
-            vec![tools.register_deferred(
+            vec![tools.register(
                 ToolSpec {
                     name: "lsp".into(),
                     description: DESC.into(),

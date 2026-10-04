@@ -131,7 +131,7 @@ pub fn live_names(ctx: &Context) -> Vec<String> {
 fn tool_kind_label(ctx: &Context, name: &str) -> &'static str {
     match ctx.get::<Tools>(TOOLS) {
         Some(t) if t.is_mcp(name) => "MCP",
-        Some(t) if t.is_deferred(name) => "延迟",
+        Some(t) if t.hidden_on(ctx, name) => "延迟",
         _ => "常驻",
     }
 }

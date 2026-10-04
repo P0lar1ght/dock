@@ -169,11 +169,15 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `agents[]`：`id` / `name` / `description` / `persona` / `tools` / `replacePrompt` / `listings`。
 - `residentTools`（预设与 `agents[]` 各一份）：常驻工具，全名或以 `*` 结尾的前缀。
   - 让本来藏在 `search_tool` 后面的工具（MCP、按需、动态包）直接进模型工具表。
+- `onDemandTools`（预设与 `agents[]` 各一份）：按需工具，写法同上，见 `docs/tools/agent-presets.md`。
+  - `null` = 不设名单：覆盖内置预设时沿用内置名单，其余预设全部常驻；子代理继承预设的。`[]` = 全部常驻。
 - `agents[].builtin`：内置预设自带的角色。
 - `path`：落盘的 `agent.yml`；内置没改过为 `null`。
 - 损坏的预设照样回：`available: false` + `error`。
 - `preset/update`：字段同 `preset/get`，整份写回。
 - `residentTools` 不传（或 `null`）= 保持原样：老客户端整份写回不会把它清掉。
+- `onDemandTools` 不传 = 保持原样；`null` = 清掉名单（改回不设）；数组 = 新名单。
+- 按需工具写法不对同样回 `invalid_params`；另外不收会盖住 `search_tool` / `use_tool` 的条目。
 - 内置预设写成 `~/.dock/presets/<id>/` 覆盖层。
 - 名册里去掉的角色删掉它的文件；内置自带的角色删不掉。
 - 损坏的预设整份重写。
@@ -182,7 +186,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `tool/catalog`：同 TUI `/preset` 画布左栏，默认不含 MCP。
 - `includeMcp: true` 另带 MCP 行：`kind: "mcp"` + `server`（给常驻工具选）。
 - 每项 `name` / `summary`（描述第一句）/ `kind`。
-- `kind`：`resident` 常驻、`deferred` 按需、`dynamic` 运行中的动态包（不受允许名单限制）。
+- `kind`：`resident` 常驻、`deferred` 按需（按这一页当前预设的 `on_demand_tools` 与登记方式）、`dynamic` 运行中的动态包（不受允许名单限制）。
 
 #### AI 辅助起草（`preset/draft` / `preset/rewrite` / `preset/suggestTools`）
 

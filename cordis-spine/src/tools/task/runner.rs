@@ -238,7 +238,13 @@ async fn run_dock_child(
             }
         }
     }
-    let preset = def.to_preset(&typ);
+    let mut preset = def.to_preset(&typ);
+    // 角色没写按需名单就继承所属预设的。
+    if preset.on_demand_tools.is_none() {
+        preset.on_demand_tools = parent_presets
+            .as_ref()
+            .and_then(|p| p.current().on_demand_tools);
+    }
     // 工具表的排序依据从父会话继承：子代理那张表要和主会话那张共用同一个分组，
     // 才会是它的真前缀，公共头（system + tools）才有得命中。
     let order = parent_presets

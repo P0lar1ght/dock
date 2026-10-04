@@ -54,3 +54,16 @@ tools:
   - cordis_call
   - cordis_stop
   - cordis_promote
+# 按需工具：不进模型工具表，模型只在 search_tool 的描述里看到名字，用时经
+# search_tool / use_tool 调。写全名或以 * 结尾的前缀；resident_tools 优先。
+# 标准：低频，而且不是只读子代理离不开的（web_*、memory_*、send_message 留常驻）。
+on_demand_tools:
+  - kill_task
+  - monitor
+  - canvas_*
+  - lsp
+  - update_goal
+  - list_agents
+  - interrupt_agent
+  - workflow
+  - cordis_*

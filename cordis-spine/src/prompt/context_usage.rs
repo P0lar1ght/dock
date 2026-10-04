@@ -1098,9 +1098,9 @@ fn partition_model_specs(ctx: &Context) -> (Vec<ToolSpec>, Vec<ToolSpec>, Vec<To
     for spec in tools.specs() {
         if tools.is_mcp(&spec.name) || is_mcp_public_name(&spec.name) {
             mcp.push(spec);
-        } else if tools.is_hidden(&spec.name) {
-            // `register_deferred` 的本地工具与运行中动态包注册的工具：都不进
-            // 采样表、经 search_tool 发现，归同一类。
+        } else if tools.hidden_on(ctx, &spec.name) {
+            // 这一页按需的本地工具（预设的 `on_demand_tools`）与运行中动态包注册
+            // 的工具：都不进采样表、经 search_tool 发现，归同一类。
             deferred.push(spec);
         }
     }
@@ -1509,6 +1509,53 @@ context_window = 1000000
                 .saturating_add(snap.tool_definitions_tokens)
         );
         assert!(hidden > 0);
+    }
+
+    /// 预设 `on_demand_tools` 藏起来的普通工具同样归「本地按需」，不算进工具定义。
+    #[tokio::test]
+    async fn preset_on_demand_tools_are_listed_as_on_demand() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let tools = ctx.get::<Tools>(TOOLS).unwrap();
+        let body: crate::tools::registry::ToolBody = std::sync::Arc::new(|call| {
+            Box::pin(async move { crate::tools::registry::tool_result(call, "") })
+        });
+        let mut keep = Vec::new();
+        for name in ["canvas_probe", crate::tools::mcp::USE_TOOL_NAME] {
+            keep.push(
+                tools
+                    .register(
+                        ToolSpec {
+                            name: name.into(),
+                            description: "probe".into(),
+                            parameters_json: r#"{"type":"object"}"#.into(),
+                        },
+                        body.clone(),
+                    )
+                    .unwrap(),
+            );
+        }
+        let page = ctx.isolate(crate::names::AGENT_PRESETS);
+        let mut preset = crate::agent::presets::AgentPreset::new("probe");
+        preset.on_demand_tools = Some(vec!["canvas_*".into()]);
+        page.provide(
+            crate::names::AGENT_PRESETS,
+            crate::agent::presets::AgentPresets::overlay(preset),
+        )
+        .unwrap();
+
+        let rows = |kind| {
+            occupancy_detail(&page, kind)
+                .groups
+                .into_iter()
+                .flat_map(|g| g.rows)
+                .map(|r| r.label)
+                .collect::<Vec<_>>()
+        };
+        let deferred = rows(OccupancyKind::Deferred);
+        assert!(deferred.iter().any(|r| r == "canvas_probe"), "{deferred:?}");
+        let listed = rows(OccupancyKind::Tools);
+        assert!(!listed.iter().any(|r| r == "canvas_probe"), "{listed:?}");
     }
 
     /// 动态包工具不进采样表之后，`/context` 要把它们算进「本地按需」，

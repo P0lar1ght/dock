@@ -5,7 +5,7 @@
 ## `tool-task`
 
 - **ctx**：`"subagents"` + `"tools"`
-- **模型工具**：`task` `send_message` `list_agents` `interrupt_agent`
+- **模型工具**：`task` `send_message`；`list_agents` `interrupt_agent`（`code` / `cordis` 的 `on_demand_tools` 里按需；`warden` 不写，常驻）
 
 Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"sessions"`+`"turn"`+`"agentPresets"`。提供 named `"subagents"`。**只有一个 spawn 工具**：`task`。`subagent_type` = 当前模式 `agents/<id>.yml` 角色 id（模型侧参数 enum 即这份名册）。参数只有 prompt / description / subagent_type / run_in_background / resume_from / reload_roster；`cwd` / `isolation` / `model` 已删（dock 不实现，别再加回来当摆设）。子代理**每轮结束**都会 park idle 并把回合结束推到父级（`<system-reminder>`，本轮没给父级发过消息时带上回合正文）；前台 spawn 内联拿到结果时会消费掉自己那条通知。
 

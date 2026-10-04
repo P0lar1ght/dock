@@ -70,6 +70,8 @@ pub fn tool_canvas() -> Plugin {
                         .unwrap_or_else(|e| failed(shell, format!("画布工具没跑完：{e}")))
                 })
             });
+            // 内置预设把它设成按需（`on_demand_tools`）：画布只有桌面端渲染。GUI 按 `use_tool`
+            // 的内层工具名认画布项（`calledTool`），经不经 `use_tool` 都接得住。
             handles.push(tools.register(
                 ToolSpec {
                     name: name.into(),

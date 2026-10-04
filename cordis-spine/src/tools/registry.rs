@@ -208,9 +208,55 @@ impl Tools {
             .is_some_and(|e| e.kind == ExtraKind::Deferred)
     }
 
-    /// Hidden from the sampler: MCP extras, infrequent local tools, and dynamic packages.
+    /// Hidden by registration kind, whatever the preset says: MCP extras,
+    /// dynamic packages, and tools registered with [`Self::register_deferred`].
+    /// Built-in local tools are hidden per page by the preset's on-demand
+    /// list instead — ask [`Self::hidden_on`].
     pub fn is_hidden(&self, name: &str) -> bool {
         self.is_mcp(name) || self.is_deferred(name) || self.is_dynamic(name)
+    }
+
+    /// 这一页的模型要经 `search_tool` / `use_tool` 才找得到 `name` 吗。
+    ///
+    /// MCP、动态包、显式 `register_deferred` 的按登记方式藏；本地工具按当前预设的
+    /// 按需名单（预设 YAML 的 `on_demand_tools`，[`AgentPresets::is_on_demand`]）。预设的
+    /// `resident_tools` 两类都能拉回工具表。这一页的工具表上没有 `use_tool` 时按需
+    /// 名单不生效：只读子代理、`minimal` 拿不到派发口，藏起来就等于拿走。
+    pub fn hidden_on(&self, exec: &Context, name: &str) -> bool {
+        let presets = exec.get::<AgentPresets>(AGENT_PRESETS);
+        self.hidden_with(exec, presets.as_deref(), None, name)
+    }
+
+    /// [`Self::hidden_on`] 的本体。`dispatch` 是调用方已经算好的「`use_tool` 在不在
+    /// 这一页的工具表上」，整张表一起判断时只算一次。
+    fn hidden_with(
+        &self,
+        exec: &Context,
+        presets: Option<&AgentPresets>,
+        dispatch: Option<bool>,
+        name: &str,
+    ) -> bool {
+        if presets.is_some_and(|p| p.is_resident(name)) {
+            return false;
+        }
+        if self.is_hidden(name) {
+            return true;
+        }
+        presets.is_some_and(|p| p.is_on_demand(name))
+            && dispatch.unwrap_or_else(|| self.dispatch_on_sampler(exec))
+    }
+
+    /// `use_tool` 在这一页的工具表上吗。与 [`Self::specs_for_model_on`] 对它的取舍
+    /// 一致，但不经那条路——那边要反过来问 [`Self::hidden_on`]。
+    fn dispatch_on_sampler(&self, exec: &Context) -> bool {
+        let name = crate::tools::mcp::USE_TOOL_NAME;
+        if !self.extra.lock().unwrap().contains_key(name) || capability_denies(exec, name) {
+            return false;
+        }
+        match exec.get::<AgentPresets>(AGENT_PRESETS) {
+            Some(presets) => self.mcp_meta_visible(exec, name) || presets.allows(name),
+            None => true,
+        }
     }
 
     fn bypasses_allowlist(&self, name: &str) -> bool {
@@ -296,13 +342,36 @@ impl Tools {
 
     pub fn specs_for_model_on(&self, exec: &Context) -> Vec<ToolSpec> {
         let presets = exec.get::<AgentPresets>(AGENT_PRESETS);
-        // 预设的常驻工具（`resident_tools`）：本来藏着的也进工具表。
-        let resident = |name: &str| presets.as_ref().is_some_and(|p| p.is_resident(name));
-        let specs: Vec<ToolSpec> = self
-            .specs()
+        let dispatch = self.dispatch_on_sampler(exec);
+        // 藏着的（MCP、动态包、按需名单里的）不进表，预设的 `resident_tools` 拉回来。
+        let hidden = |name: &str| self.hidden_with(exec, presets.as_deref(), Some(dispatch), name);
+        let all = self.specs();
+        // 模型只需要知道按需工具的名字：列在 `search_tool` 描述末尾，按这一页实际
+        // 藏起来、又叫得动的本地工具生成（MCP / 动态包靠搜，不列）。
+        let on_demand: Vec<String> = {
+            let mut names: Vec<String> = all
+                .iter()
+                .map(|s| s.name.clone())
+                .filter(|n| {
+                    !self.is_mcp(n)
+                        && !self.is_dynamic(n)
+                        && hidden(n)
+                        && !capability_denies(exec, n)
+                        && presets.as_ref().is_none_or(|p| p.allows(n))
+                })
+                .collect();
+            names.sort();
+            names
+        };
+        let specs: Vec<ToolSpec> = all
             .into_iter()
-            .filter(|s| {
-                (!self.is_hidden(&s.name) || resident(&s.name)) && !capability_denies(exec, &s.name)
+            .filter(|s| !hidden(&s.name) && !capability_denies(exec, &s.name))
+            .map(|mut s| {
+                if s.name == crate::tools::mcp::SEARCH_TOOL_NAME {
+                    s.description
+                        .push_str(&crate::tools::mcp::on_demand_line(&on_demand));
+                }
+                s
             })
             .collect();
         match presets {
@@ -331,6 +400,18 @@ impl Tools {
             }
             None => specs,
         }
+    }
+
+    /// 这一页的模型叫得到 `name` 吗：在它的工具表上，或者是藏起来的工具、允许
+    /// 名单放行、而且这一页的工具表上有 `use_tool` 能派发过去。
+    pub(crate) fn reachable_on(&self, exec: &Context, name: &str) -> bool {
+        let sampler = self.specs_for_model_on(exec);
+        let on_sampler = |n: &str| sampler.iter().any(|s| s.name == n);
+        on_sampler(name)
+            || (self.hidden_on(exec, name)
+                && self.extra.lock().unwrap().contains_key(name)
+                && !self.outside_allowlist(exec, name)
+                && on_sampler(crate::tools::mcp::USE_TOOL_NAME))
     }
 
     pub async fn execute(&self, call: ToolCall) -> ToolResult {
@@ -956,6 +1037,139 @@ mod tests {
             )
             .await;
         assert_eq!(out.content, "MCP 工具未启用或已关闭");
+    }
+
+    use crate::agent::presets::AgentPreset;
+
+    /// 一张普通登记的工具表 + 发现口，预设由调用方给。
+    fn on_demand_table(ctx: &Context) -> Tools {
+        let tools = Tools::echo(ctx.clone());
+        for name in [
+            "read_file",
+            "web_search",
+            "canvas_create",
+            "canvas_read",
+            "workflow",
+            crate::tools::mcp::SEARCH_TOOL_NAME,
+            crate::tools::mcp::USE_TOOL_NAME,
+        ] {
+            std::mem::forget(tools.register(spec(name), stub_body()).unwrap());
+        }
+        tools
+    }
+
+    fn preset_with(on_demand: Option<&[&str]>, resident: &[&str]) -> AgentPreset {
+        let mut preset = AgentPreset::new("probe");
+        preset.on_demand_tools = on_demand.map(|l| l.iter().map(|s| s.to_string()).collect());
+        preset.resident_tools = resident.iter().map(|s| s.to_string()).collect();
+        preset
+    }
+
+    fn sampler(tools: &Tools, exec: &Context) -> Vec<String> {
+        tools
+            .specs_for_model_on(exec)
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    }
+
+    /// 常驻还是按需只看预设 YAML 的 `on_demand_tools`：普通登记的工具照名单藏，
+    /// `search_tool` 的描述末尾列出藏起来的名字，`resident_tools` 能拉回来。
+    #[test]
+    fn preset_on_demand_list_decides_what_the_sampler_sees() {
+        let ctx = Context::new();
+        let tools = on_demand_table(&ctx);
+        ctx.provide(
+            AGENT_PRESETS,
+            AgentPresets::overlay(preset_with(
+                Some(&["canvas_*", "workflow"]),
+                &["canvas_read"],
+            )),
+        )
+        .unwrap();
+
+        let seen = sampler(&tools, &ctx);
+        assert!(!seen.contains(&"canvas_create".to_string()), "{seen:?}");
+        assert!(!seen.contains(&"workflow".to_string()), "{seen:?}");
+        assert!(
+            seen.contains(&"canvas_read".to_string()),
+            "常驻优先：{seen:?}"
+        );
+        assert!(seen.contains(&"web_search".to_string()), "{seen:?}");
+        assert!(tools.hidden_on(&ctx, "workflow"));
+        assert!(!tools.hidden_on(&ctx, "canvas_read"));
+
+        let search = tools
+            .specs_for_model_on(&ctx)
+            .into_iter()
+            .find(|s| s.name == crate::tools::mcp::SEARCH_TOOL_NAME)
+            .unwrap();
+        assert!(
+            search
+                .description
+                .ends_with("Built-in on-demand tools: canvas_create, workflow."),
+            "{}",
+            search.description
+        );
+    }
+
+    /// 预设不写 `on_demand_tools` 就什么都不藏，`search_tool` 也不挂空名单。
+    #[test]
+    fn no_on_demand_list_keeps_everything_resident() {
+        let ctx = Context::new();
+        let tools = on_demand_table(&ctx);
+        ctx.provide(AGENT_PRESETS, AgentPresets::overlay(preset_with(None, &[])))
+            .unwrap();
+        let seen = sampler(&tools, &ctx);
+        for name in ["canvas_create", "canvas_read", "workflow"] {
+            assert!(seen.contains(&name.to_string()), "{name}: {seen:?}");
+        }
+        let search = tools
+            .specs_for_model_on(&ctx)
+            .into_iter()
+            .find(|s| s.name == crate::tools::mcp::SEARCH_TOOL_NAME)
+            .unwrap();
+        assert!(
+            !search.description.contains("on-demand tools:"),
+            "{}",
+            search.description
+        );
+    }
+
+    /// 拿不到 `use_tool` 的会话（只读档）按需名单不生效：藏起来就等于拿走。
+    /// 只读子代理照样直接看得到 web_search，哪怕预设把它写成了按需。
+    #[test]
+    fn sessions_without_use_tool_ignore_the_on_demand_list() {
+        let ctx = Context::new();
+        let tools = on_demand_table(&ctx);
+        let child = ctx.isolate(AGENT_PRESETS).isolate(CAPABILITY);
+        child
+            .provide(
+                AGENT_PRESETS,
+                AgentPresets::overlay(preset_with(Some(&["web_search", "canvas_*"]), &[])),
+            )
+            .unwrap();
+        child.provide(CAPABILITY, CapabilityMode::ReadOnly).unwrap();
+        assert!(!CapabilityMode::ReadOnly.allows(crate::tools::mcp::USE_TOOL_NAME));
+
+        let seen = sampler(&tools, &child);
+        assert!(seen.contains(&"web_search".to_string()), "{seen:?}");
+        assert!(!tools.hidden_on(&child, "web_search"));
+    }
+
+    /// 发现口自己不能写进按需名单：藏了它就再也找不回别的工具。
+    #[test]
+    fn discovery_tools_never_go_on_demand() {
+        let ctx = Context::new();
+        let tools = on_demand_table(&ctx);
+        ctx.provide(
+            AGENT_PRESETS,
+            AgentPresets::overlay(preset_with(Some(&["search_*", "use_tool"]), &[])),
+        )
+        .unwrap();
+        let seen = sampler(&tools, &ctx);
+        assert!(seen.contains(&"search_tool".to_string()), "{seen:?}");
+        assert!(seen.contains(&"use_tool".to_string()), "{seen:?}");
     }
 }
 

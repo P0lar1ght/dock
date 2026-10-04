@@ -9,6 +9,34 @@
 
 组装 Agent：YAML 定义人设 + 工具允许名单，运行时只过滤 live `"tools"`。**正在运行的动态包**用 `Tools::register_dynamic` 登记的 extra 工具、以及 **已开启的 MCP 工具**（`register_mcp`，公名 `mcp_{server}__{tool}`，经 `use_tool` 调度）会穿过允许名单。层：crate `presets/<id>/agent.yml` + `agents/*.yml` < `~/.dock/presets` < 项目 `.dock/presets`。仍可读旧 `<id>.yml`（目录优先）。加一个目录就是一个 Agent。内置 `code` / `minimal` / `cordis` / `warden`（守望）。`code`/`cordis` 的 `agents/` 名册是 `general-purpose` / `explore` / `plan`（项目层可加，如 `.dock/presets/创造/agents/review.yml` 叠到 `cordis`）；`warden` 是 `岑` `锁` `甲` `乙` `丙` `衡` `验` `观` `突击`（不要用拼音 id）。发给模型的 `task` 把 `subagent_type` 收成当前名册 enum，并在 description 尾部追加 `subagent_role_hint()`（角色 id + 显示名 + **角色说明** + 写路径 + `reload_roster` 用法）。**系统提示不再有名册段**：它原先是 `task` / `send_message` / `interrupt_agent` description 的中文重写，逐条重复，已整体删除（`ORDER_ROSTER` 一并撤掉）。省略 `tools` = 全部已注册工具。`agent.yml` 可选 `icon`（客户端图标名，lucide 名如 `rocket`；TUI 不用）。新建模式默认写**当前工作区** `.dock/presets/<id>/agent.yml`（`/preset` n/d 有项目层时落到这里；`task` description 注入 `.dock/presets` 与 `.dock/presets/<模式>/agents`，不用绝对 `{cwd}`；id 必须 `[a-z0-9][a-z0-9-]*`，汉字目录只叠内置）。新建子代理默认写 `.dock/presets/<当前模式 id>/agents/<type>.yml`。空名册仍注入这两处路径。只有用户明确要求保存到全局才写 `~/.dock/presets/`。写完人设后 `task` 校验立刻重读；本轮刚写完时用 `task`（`reload_roster: true`）刷新 enum。新建模式写完后用 `/preset` 应用该 id。改 crate `presets/` 要重新编译
 
+### 按需工具（`on_demand_tools`）
+
+- 哪些工具常驻、哪些按需，**只看预设 YAML**；改它不用改代码。
+- 预设 `agent.yml` 与子代理 `agents/<id>.yml` 都可以写，写法同 `resident_tools`：
+
+  ```yaml
+  on_demand_tools:
+    - canvas_*                # 以 * 结尾 = 前缀
+    - workflow                # 全名
+  ```
+
+- 作用：列在这里的工具不进模型工具表，模型只在 `search_tool` 描述末尾的
+  「Built-in on-demand tools: …」里看到名字，用时按精确名搜一次拿 schema，再经 `use_tool` 调。
+  - 名单按**这一页**实际藏起来、又在允许名单里的本地工具生成（`Tools::specs_for_model_on`）。
+- 不写 / `[]` = 全部常驻（MCP 与动态包照旧藏着）。
+- 子代理角色不写就继承所属预设的（`task` 开子代理时补上）。
+- 用户 / 项目层覆盖内置预设而没写这一项：沿用内置的名单。要全部常驻写 `[]`。
+- 新建预设（GUI「新建」、TUI `n`）从 `code` 的名单抄一份写进自己的 YAML。
+- `resident_tools` 优先：两边都命中时常驻。
+- 守卫（代码里，不可配）：
+  - `search_tool` / `use_tool` 不能写进来（`search_*`、`use_*` 这种会盖住它们的前缀也不行）。
+  - 这一页的工具表上没有 `use_tool`（只读档子代理、`minimal`、`/btw`）时名单不生效：藏起来就等于拿走。
+  - 坏掉的预设不藏任何东西。
+- 内置：`code` / `cordis` 写了低频工具（canvas_* / workflow / kill_task / list_agents / interrupt_agent /
+  monitor / update_goal / lsp / scheduler_* / cordis_*）；`warden` 不写，它的调度工具全部常驻。
+- 判断标准：低频，而且不是只读子代理离不开的（`web_*`、`memory_*`、`send_message` 留常驻）。
+- 核对：`cargo test -p cordis-spine --test round -- search_tool_names_every_builtin_on_demand_tool`。
+
 ### 常驻工具（`resident_tools`）
 
 - 预设 `agent.yml` 与子代理 `agents/<id>.yml` 都可以写：
@@ -20,7 +48,7 @@
   ```
 
 - 作用：本来藏在 `search_tool` 后面的工具直接进模型工具表（`specs_for_model`）。
-  - 覆盖 MCP、按需本地工具（`register_deferred`）、运行中的动态包。
+  - 覆盖 MCP、按需本地工具（`on_demand_tools` 或第三方 `register_deferred`）、运行中的动态包。
 - MCP 与动态包本来就绕过允许名单，命中就上表。
 - 按需本地工具仍要在 `tools` 允许名单里，常驻不会把名单外的工具带进来。
 - 子代理能力档位照样挡（只读档看得到 `mcp_browser__browser_snapshot`，看不到 `…_click`）。

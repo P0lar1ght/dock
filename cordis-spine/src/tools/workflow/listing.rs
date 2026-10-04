@@ -7,7 +7,7 @@ use crate::prompt::listing::{self, ListEntry};
 use super::registry::WorkflowListing;
 
 const HEADER: &str =
-    "可用工作流（用 `/name` 或 `workflow` 工具按注册名启动；脚本在启动时加载，listing 只有名称与说明）：\n\n";
+    "可用工作流（用 `/name` 或 `workflow` 工具按注册名启动；`workflow` 是按需工具，先 `search_tool` 搜它的名字取 schema；脚本在启动时加载，listing 只有名称与说明）：\n\n";
 
 pub fn listing_budget_chars(window_tokens: u64) -> usize {
     listing::budget_chars(window_tokens)
