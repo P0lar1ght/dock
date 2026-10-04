@@ -505,7 +505,9 @@ mod tests {
     /// 一条 0.1s 的命令要等满整个前台预算再被杀，输出还全丢。
     #[tokio::test]
     async fn bash_large_output_does_not_deadlock() {
-        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "3000");
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set(FOREGROUND_MS_ENV, "3000");
         let start = std::time::Instant::now();
         let out = bash::run(
             r#"{"command":"yes OUTLINE0123456789 | head -20000; echo finished"}"#,
@@ -518,10 +520,20 @@ mod tests {
             "0.1s 的命令不该耗满前台预算，实际 {:?}",
             start.elapsed()
         );
+        // 200KB 超预算：给模型的只有开头预览（#174），收尾行在落盘的全文里。
         assert!(
-            out.contains("finished"),
-            "收尾行应保留：{}",
-            &out[..out.len().min(200)]
+            out.len() < 4 * 1024,
+            "落盘后只该内联预览：{} 字节",
+            out.len()
+        );
+        let mark = "完整输出已写入：";
+        let at = out.find(mark).expect("要给出落盘路径") + mark.len();
+        let path = &out[at..at + out[at..].find('。').unwrap()];
+        let full = std::fs::read_to_string(path).unwrap();
+        assert!(
+            full.trim_end().ends_with("finished"),
+            "收尾行应保留在全文里：{}",
+            &full[full.len().saturating_sub(200)..]
         );
     }
 

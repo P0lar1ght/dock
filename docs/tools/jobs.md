@@ -7,7 +7,7 @@
 - **ctx**：`"jobs"`
 - **模型工具**：—
 
-进程表。bash `is_background`（以及仍然接受、但不在 schema 里登记的 `block_until_ms: 0`）用它，**前台 bash 也在这张表上**（`foreground: true`，只为让 TUI 边跑边读输出；不进 tasks pane、不进 `job` 的无参列表，结束即摘掉）。前台预算到点时 `Jobs::detach` 把 `foreground` 翻成 `false`——**进程不动**，那条命令就此变成一条普通后台任务（进 tasks pane、`job` 查得到），详见 [workspace](workspace.md) 的 `bash`。stdout / stderr **并发抽干**——顺序读会在任一侧写满 64KB 管道缓冲时把子进程永久堵死。输出流式累积，上限 20KB（头 4KB + 尾 16KB，中间截断并在正文标明省略字节数），对齐 Grok `output_byte_limit`。**超出预算时边跑边把完整输出落盘**到 `$DOCK_HOME/tool-output/<job-id>.txt`，截断提示给出路径（可用 `read_file` / `grep` 取回省略的那段）。落盘**必须在跨过阈值之前发生**：`push` 里的 `tail.drain` 是即时丢弃，命令结束或超时时中间字节早已不在内存里，那时再落盘只能落到已经截断过的那一份。未超预算的命令不建文件
+进程表。bash `is_background`（以及仍然接受、但不在 schema 里登记的 `block_until_ms: 0`）用它，**前台 bash 也在这张表上**（`foreground: true`，只为让 TUI 边跑边读输出；不进 tasks pane、不进 `job` 的无参列表，结束即摘掉）。前台预算到点时 `Jobs::detach` 把 `foreground` 翻成 `false`——**进程不动**，那条命令就此变成一条普通后台任务（进 tasks pane、`job` 查得到），详见 [workspace](workspace.md) 的 `bash`。stdout / stderr **并发抽干**——顺序读会在任一侧写满 64KB 管道缓冲时把子进程永久堵死。输出流式累积，内存里留头 4KB + 尾 16KB（共 20KB，对齐 Grok `output_byte_limit`），不超就原样返回。**超出预算时边跑边把完整输出落盘**到 `$DOCK_HOME/tool-output/<job-id>.txt`，这时给模型的（bash 结果、`job` 工具，走 `Jobs::model_snapshot`）只有开头 2KB 预览，停在行边界上，同 Claude Code。截断提示报全文字节数、行数，给出接着读的 `read_file offset=N`，以及读最后 50 行的 offset（结论多在结尾）（#174；原先内联头 4KB + 尾 16KB 只报字节，模型不知道看过的是第几行，只好从第 1 行重读）。落盘失败时退回内联完整的头 4KB + 尾 16KB。给人看的（TUI 任务行、输出查看器，走 `snapshot` / `list`）不缩，仍是头 4KB + 尾 16KB：人要看最新进度和报错。落盘**必须在跨过阈值之前发生**：`push` 里的 `tail.drain` 是即时丢弃，命令结束或超时时中间字节早已不在内存里，那时再落盘只能落到已经截断过的那一份。未超预算的命令不建文件
 
 ## `tool-jobs`
 

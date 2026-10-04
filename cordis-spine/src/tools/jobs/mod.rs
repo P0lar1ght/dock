@@ -23,6 +23,13 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 20 * 1024;
 const HEAD_BYTES: usize = 4 * 1024;
 /// 尾部保留量：失败原因和汇总几乎总在结尾。
 const TAIL_BYTES: usize = MAX_OUTPUT_BYTES - HEAD_BYTES;
+/// 落盘之后内联的预览：只留开头 2KB（同 Claude Code）。
+///
+/// 全文已在落盘文件里，模型按截断提示里的行号接着读。原先落盘后仍内联
+/// 头 4KB + 尾 16KB 且只报字节，模型不知道这些对应第几行，只好从第 1 行重读
+/// （#174）。结尾不再内联：提示里给出总行数，要看结论就按行号读文件末尾。
+/// 落盘失败时没有文件可读，才退回内联 [`HEAD_BYTES`] + [`TAIL_BYTES`]。
+const PREVIEW_BYTES: usize = 2 * 1024;
 /// 子进程退出后留给读端收尾的窗口。
 ///
 /// 孙进程会继承管道（`sleep 60 &`），子进程退出后读端不一定立刻 EOF。给一个
@@ -37,6 +44,8 @@ pub(crate) struct OutputBuf {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     total: usize,
+    /// 全部输出里的换行数（含已丢弃的中段），截断提示据此报行号。
+    newlines: usize,
     /// 落盘句柄与路径。**必须边跑边写**：`push` 里 `tail.drain` 是即时丢弃，
     /// 命令结束（或超时）时中间字节早已不在内存里，那时再 offload 只能落到
     /// 已经截断过的那一份。
@@ -110,6 +119,7 @@ impl OutputBuf {
             let _ = spill.file.write_all(bytes);
         }
         self.total += bytes.len();
+        self.newlines += bytes.iter().filter(|b| **b == b'\n').count();
         let mut rest = bytes;
         if self.head.len() < HEAD_BYTES {
             let take = (HEAD_BYTES - self.head.len()).min(rest.len());
@@ -131,29 +141,74 @@ impl OutputBuf {
         self.tail.extend(rest);
     }
 
+    /// 给人看的（TUI 任务行、输出查看器）：超预算时保头 4KB + 尾 16KB。人要看的
+    /// 是最新进度和报错，都在尾巴上；落盘时提示里带路径。
     pub(crate) fn render(&self) -> String {
-        let mut s = String::from_utf8_lossy(trim_trailing_partial(&self.head)).into_owned();
         if self.tail.is_empty() {
-            return s;
+            return String::from_utf8_lossy(trim_trailing_partial(&self.head)).into_owned();
         }
         let tail: Vec<u8> = self.tail.iter().copied().collect();
         let dropped = self.total - self.head.len() - self.tail.len();
-        if dropped > 0 {
-            // 有落盘副本时给路径，让模型能把省略的那段捞回来——而不是像原先
-            // 那样叫它把命令改成写文件再跑一遍。
-            let recover = match self.spill.as_ref() {
-                Some(spill) => format!(
-                    "完整输出已写入：{}，用 read_file 或 grep 读它取回省略的部分。",
-                    spill.path
-                ),
-                None => "需要完整内容就把命令改成写进文件再分段读。".into(),
-            };
-            s.push_str(&format!(
-                "\n\n[… 已截断：中间省略 {dropped} 字节，总输出 {} 字节。{recover} …]\n\n",
-                self.total
-            ));
+        if dropped == 0 {
+            // 头尾首尾相接就是全部输出；整体拼起来再解码，跨在接缝上的多字节
+            // 字符才不会被两头各裁一半。
+            let mut all = self.head.clone();
+            all.extend_from_slice(&tail);
+            return String::from_utf8_lossy(trim_trailing_partial(&all)).into_owned();
         }
-        s.push_str(&String::from_utf8_lossy(trim_leading_continuation(&tail)));
+        self.render_head_and_tail(&tail, dropped)
+    }
+
+    /// 给模型的（bash 结果、`job` 工具）：落盘后只内联开头预览，按行号指路；
+    /// 没落盘时和 [`Self::render`] 一样。
+    pub(crate) fn render_for_model(&self) -> String {
+        match self.spill.as_ref() {
+            Some(spill) if self.total > self.head.len() + self.tail.len() => {
+                self.render_preview(&spill.path)
+            }
+            _ => self.render(),
+        }
+    }
+
+    /// 有落盘副本：内联只给开头的预览，提示里报出总行数和一条能照抄的
+    /// `read_file`，模型只读没看过的部分。
+    fn render_preview(&self, path: &str) -> String {
+        let head = head_at_line(&self.head, PREVIEW_BYTES);
+        // 行号口径同 read_file（split_inclusive('\n')）：末尾没换行的残行也算一行。
+        let lines = self.newlines + usize::from(self.tail.back().is_some_and(|b| *b != b'\n'));
+        let next = count_newlines(head) + 1;
+        let shown = if head.ends_with(b"\n") {
+            format!("上面是第 1–{} 行", next - 1)
+        } else {
+            format!("上面是第 {next} 行的开头一截")
+        };
+        let mut s = String::from_utf8_lossy(head).into_owned();
+        if !s.is_empty() && !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str(&format!(
+            "\n[… 输出太长（共 {} 字节、{lines} 行），{shown}。完整输出已写入：{path}。\
+             接着读用 read_file 读这个文件，offset={next}；已经显示的行不用再读。命令的结论\
+             通常在结尾，只看结尾就用 offset={}。找某条报错时用 grep 搜这个文件更省。 …]",
+            self.total,
+            lines.saturating_sub(49).max(next)
+        ));
+        s
+    }
+
+    /// 头 4KB + 尾 16KB。给人看的视图，也是模型侧没有落盘副本（写盘失败或裸
+    /// buf）时的退路——没有文件可读，内联尽量多留。
+    fn render_head_and_tail(&self, tail: &[u8], dropped: usize) -> String {
+        let mut s = String::from_utf8_lossy(trim_trailing_partial(&self.head)).into_owned();
+        let recover = match self.spill.as_ref() {
+            Some(spill) => format!("完整输出已写入：{}。", spill.path),
+            None => "需要完整内容就把命令改成写进文件再分段读。".into(),
+        };
+        s.push_str(&format!(
+            "\n\n[… 已截断：中间省略 {dropped} 字节，总输出 {} 字节。{recover} …]\n\n",
+            self.total
+        ));
+        s.push_str(&String::from_utf8_lossy(trim_leading_continuation(tail)));
         s
     }
 
@@ -220,6 +275,19 @@ fn trim_leading_continuation(bytes: &[u8]) -> &[u8] {
         .take_while(|b| (*b & 0b1100_0000) == 0b1000_0000)
         .count();
     &bytes[skip..]
+}
+
+fn count_newlines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|b| **b == b'\n').count()
+}
+
+/// 头部预览：至多 `max` 字节，尽量停在换行之后；这一段里没有换行就退到字符边界。
+fn head_at_line(head: &[u8], max: usize) -> &[u8] {
+    let head = &head[..head.len().min(max)];
+    match head.iter().rposition(|b| *b == b'\n') {
+        Some(i) => &head[..=i],
+        None => trim_trailing_partial(head),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -368,8 +436,15 @@ impl Jobs {
         id
     }
 
-    fn snap(id: &str, job: &Job) -> JobSnapshot {
-        let body = job.output.lock().unwrap().render();
+    fn snap(id: &str, job: &Job, for_model: bool) -> JobSnapshot {
+        let body = {
+            let buf = job.output.lock().unwrap();
+            if for_model {
+                buf.render_for_model()
+            } else {
+                buf.render()
+            }
+        };
         let note = job.exit_note.lock().unwrap().clone();
         let output = match note {
             Some(note) if body.trim().is_empty() => note,
@@ -393,7 +468,7 @@ impl Jobs {
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, job)| Self::snap(id, job))
+            .map(|(id, job)| Self::snap(id, job, false))
             .collect()
     }
 
@@ -447,12 +522,23 @@ impl Jobs {
             .map(|job| job.done.load(Ordering::Relaxed))
     }
 
+    /// 给人看的快照（TUI）：输出超预算时保头尾，见 [`OutputBuf::render`]。
     pub fn snapshot(&self, id: &str) -> Option<JobSnapshot> {
         self.inner
             .lock()
             .unwrap()
             .get(id)
-            .map(|job| Self::snap(id, job))
+            .map(|job| Self::snap(id, job, false))
+    }
+
+    /// 交给模型的快照（bash 结果、`job` 工具）：落盘后只有开头预览加按行号的
+    /// 读取提示，见 [`OutputBuf::render_for_model`]。
+    pub(crate) fn model_snapshot(&self, id: &str) -> Option<JobSnapshot> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|job| Self::snap(id, job, true))
     }
 
     pub async fn wait(&self, ids: &[String], timeout_ms: u64) -> Vec<JobSnapshot> {
@@ -792,7 +878,7 @@ async fn collect_output(jobs: Option<&Jobs>, ids: &[String], timeout_ms: u64) ->
         let mut parts = Vec::new();
         let mut all_done = true;
         for id in ids {
-            if let Some(j) = jobs.and_then(|j| j.snapshot(id)) {
+            if let Some(j) = jobs.and_then(|j| j.model_snapshot(id)) {
                 if !j.done {
                     all_done = false;
                 }
@@ -868,8 +954,8 @@ mod tests {
             buf.push(chunk.as_bytes());
             expected.extend_from_slice(chunk.as_bytes());
         }
-        let rendered = buf.render();
-        assert!(rendered.contains("已截断"), "{rendered}");
+        let rendered = buf.render_for_model();
+        assert!(rendered.contains("输出太长"), "{rendered}");
         let path = cordis_base::tool_output::spill_dir().join(format!(
             "{}.txt",
             cordis_base::tool_output::offload_stem("spill-job")
@@ -885,6 +971,109 @@ mod tests {
             "落盘副本必须是完整输出，不能有丢失"
         );
         assert_eq!(on_disk, expected, "落盘内容要与原始字节逐字一致");
+    }
+
+    /// 从截断提示里抠出 `key=N`。
+    fn number_after(rendered: &str, key: &str) -> usize {
+        let at = rendered
+            .find(key)
+            .unwrap_or_else(|| panic!("提示里要有 {key}：{rendered}"))
+            + key.len();
+        rendered[at..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap()
+    }
+
+    /// 截断提示之前的那段就是预览。
+    fn preview(rendered: &str) -> &str {
+        &rendered[..rendered.find("\n[… 输出太长").expect("要有截断提示")]
+    }
+
+    /// #174：落盘后只内联开头的预览，并说清从哪一行接着读。按提示的 offset 读，
+    /// 和预览拼起来要正好是全文：不重叠（看过的行不用重读），也不漏行。
+    #[test]
+    fn spilled_output_previews_and_names_the_next_line() {
+        let _env = cordis_base::test_env::scoped().home();
+        let mut buf = OutputBuf::with_id("lines-job");
+        let full: String = (1..=3000).map(|i| format!("line {i:05}\n")).collect();
+        for chunk in full.as_bytes().chunks(700) {
+            buf.push(chunk);
+        }
+        let rendered = buf.render_for_model();
+        let head = preview(&rendered);
+        assert!(head.len() <= PREVIEW_BYTES, "预览 {} 字节", head.len());
+        assert!(rendered.contains("3000 行"), "{rendered}");
+
+        let path = cordis_base::tool_output::spill_dir().join(format!(
+            "{}.txt",
+            cordis_base::tool_output::offload_stem("lines-job")
+        ));
+        let file = std::fs::read_to_string(&path).unwrap();
+        // 和 read_file 同口径取行。
+        let rest: String = file
+            .split_inclusive('\n')
+            .skip(number_after(&rendered, "offset=") - 1)
+            .collect();
+        assert_eq!(
+            format!("{head}{rest}"),
+            full,
+            "预览 + 从 offset 起读到的部分必须正好拼回全文"
+        );
+        // 看结论的那条 offset 指向最后 50 行。
+        let tail_at = rendered.rfind("offset=").unwrap();
+        assert_eq!(number_after(&rendered[tail_at..], "offset="), 2951);
+    }
+
+    /// 整段输出没有换行（一行几十 KB）：预览是这一行的一截，提示要指向第 1 行。
+    #[test]
+    fn spilled_single_line_points_at_line_one() {
+        let _env = cordis_base::test_env::scoped().home();
+        let mut buf = OutputBuf::with_id("one-line-job");
+        buf.push("z".repeat(60_000).as_bytes());
+        let rendered = buf.render_for_model();
+        assert!(rendered.contains("1 行"), "{rendered}");
+        assert!(rendered.contains("第 1 行的开头一截"), "{rendered}");
+        assert_eq!(number_after(&rendered, "offset="), 1);
+    }
+
+    /// 给人看的视图（TUI 任务行、输出查看器）不跟着缩：人要看最新进度和报错，
+    /// 都在尾巴上。落盘时同样给路径。
+    #[test]
+    fn human_view_keeps_the_tail_when_spilled() {
+        let _env = cordis_base::test_env::scoped().home();
+        let mut buf = OutputBuf::with_id("human-job");
+        let full: String = (1..=3000).map(|i| format!("line {i:05}\n")).collect();
+        buf.push(full.as_bytes());
+        let rendered = buf.render();
+        assert!(rendered.trim_end().ends_with("line 03000"), "要保留结尾");
+        assert!(
+            rendered.len() > HEAD_BYTES + TAIL_BYTES - 64,
+            "{}",
+            rendered.len()
+        );
+        assert!(rendered.contains("完整输出已写入"), "{rendered}");
+        assert_eq!(
+            buf.last_line(TAIL_LINE_BYTES),
+            "line 03000",
+            "任务行取的是真正的最后一行"
+        );
+    }
+
+    /// 没有落盘能力：没有文件可读，给模型的也保留完整的头 4KB + 尾 16KB。
+    #[test]
+    fn without_spill_keeps_head_and_tail_inline() {
+        let mut buf = OutputBuf::default();
+        buf.push("y".repeat(100_000).as_bytes());
+        let rendered = buf.render_for_model();
+        assert!(rendered.contains("已截断"), "{rendered}");
+        assert!(
+            rendered.len() > HEAD_BYTES + TAIL_BYTES,
+            "没有文件可读时不该缩成预览：{}",
+            rendered.len()
+        );
     }
 
     /// 没超预算就不该建落盘文件——绝大多数命令都在这条路径上，

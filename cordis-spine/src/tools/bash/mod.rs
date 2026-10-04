@@ -123,7 +123,10 @@ pub(crate) async fn run(
         // 最大 20KB 的 String。
         match jobs.is_done(&id) {
             Some(true) => {
-                let out = jobs.snapshot(&id).map(|s| s.output).unwrap_or_default();
+                let out = jobs
+                    .model_snapshot(&id)
+                    .map(|s| s.output)
+                    .unwrap_or_default();
                 jobs.forget(&id);
                 return out;
             }
@@ -175,7 +178,10 @@ fn human_budget(budget: Duration) -> String {
 ///
 /// 取消（用户按 Esc）仍然走 [`finish_early`] 杀掉——那是明确要它停。
 fn detach_to_background(jobs: &Jobs, id: &str, budget: Duration) -> String {
-    let out = jobs.snapshot(id).map(|s| s.output).unwrap_or_default();
+    let out = jobs
+        .model_snapshot(id)
+        .map(|s| s.output)
+        .unwrap_or_default();
     // 转不动只有一种情况：这一瞬间它自己跑完了。那就当正常完成，别报超时。
     if !jobs.detach(id) {
         jobs.forget(id);
@@ -209,7 +215,10 @@ async fn finish_early(jobs: &Jobs, id: &str, reason: String) -> String {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let out = jobs.snapshot(id).map(|s| s.output).unwrap_or_default();
+    let out = jobs
+        .model_snapshot(id)
+        .map(|s| s.output)
+        .unwrap_or_default();
     jobs.forget(id);
     if out.trim().is_empty() || out.trim() == "(no output)" {
         reason
