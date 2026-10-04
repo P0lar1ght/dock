@@ -460,6 +460,14 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 项目的 GitHub PR，只读，经本机 `gh` CLI。两个方法都在锁外另起任务跑（一次几秒，走网络），单次 gh 调用 20 秒超时。
 
+慢的是建连接（每次 gh 新开一条 TLS，走代理时一两秒），所以：
+- 列表只发一次 `gh api graphql`（我是谁 + 仓库名 + PR；`{owner}/{repo}` 由 gh 本地解析）。
+- 列表按项目缓存 60 秒；判断「变没变」本身就要一次往返（GraphQL 没有 304），只能靠有效期。
+- 详情按 PR 缓存：有比它新的列表时，列表里这个 PR 的 `updatedAt` 和检查汇总都没变就复用，变了就重拉；
+  没有更新的列表时按 60 秒有效期。
+- 同一项目 / 同一 PR 同时来的请求只跑一次 gh。gh 用不了的结果不缓存。
+- 两个方法都收 `force: true` 绕过缓存；成功的结果带 `fetchedAtMs`（从 GitHub 拿的时刻）和 `cached`。
+
 - 项目用 `threadId`（那个线程的 cwd）或 `cwd` 指定；`cwd` 必须是 Dock 认识的项目（开着的页或会话列表里的某个 cwd），否则 `invalid_params`。
 - `vcs/pr/list { threadId | cwd }` → `{ available, repo, viewer, prs[] }`，开着的 PR 最多 50 条：
   - `number` / `title` / `url` / `author` / `isDraft` / `headRefName` / `baseRefName` / `updatedAt`；

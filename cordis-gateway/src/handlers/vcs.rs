@@ -10,11 +10,21 @@
 //!
 //! 找 gh：`DOCK_GH`（给了就只认它）→ `PATH` → Homebrew / `~/.local/bin`。从访达启动的
 //! 桌面端拿到的 `PATH` 通常不含 Homebrew，所以后两处要自己看。
+//!
+//! **慢的是建连接**（每次 gh 都新开一条 TLS，走代理时一次就要一两秒），不是传数据，所以：
+//! - 列表只发**一次** `gh api graphql`（我是谁 + 仓库名 + PR，`{owner}/{repo}` 由 gh 在本地解析）。
+//! - 列表按项目缓存 [`LIST_TTL`]：有效期内直接回（`cached: true`）。判断「变没变」本身就要
+//!   一次往返（GraphQL 没有 304），省不掉，所以只能靠有效期；`force: true` 绕过。
+//! - 详情按 PR 缓存，列表里这个 PR 的 `updatedAt` 和检查汇总都没变就直接回，不再问 GitHub
+//!   （检查跑完不一定动 `updatedAt`，所以两样一起看）。
+//! - 同一个 key 同时来的请求只跑一次 gh，后来的等它的结果。gh 用不了的结果不缓存。
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
@@ -29,18 +39,52 @@ use crate::threads;
 pub const GH_ENV: &str = "DOCK_GH";
 /// 一次 gh 调用最多等这么久（它要走网络）。
 const GH_TIMEOUT: Duration = Duration::from_secs(20);
-/// 列表最多拿这么多条。
-const LIST_LIMIT: &str = "50";
+/// 列表缓存多久。
+pub const LIST_TTL: Duration = Duration::from_secs(60);
+/// 详情在列表里看不出变没变时（列表过期了）缓存多久。
+const DETAIL_TTL: Duration = Duration::from_secs(60);
 
-const LIST_FIELDS: &str = "number,title,url,author,isDraft,headRefName,baseRefName,updatedAt,\
-reviewDecision,statusCheckRollup,mergeable,reviewRequests";
+/// 一次往返拿齐列表要的东西。`{owner}` / `{repo}` 由 gh 按当前目录的仓库在本地替换。
+const LIST_QUERY: &str = "query($owner:String!,$name:String!){viewer{login}\
+repository(owner:$owner,name:$name){nameWithOwner \
+pullRequests(states:OPEN,first:50,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{\
+number title url isDraft headRefName baseRefName updatedAt reviewDecision mergeable author{login} \
+reviewRequests(first:20){nodes{requestedReviewer{... on User{login}}}} \
+commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{__typename \
+... on CheckRun{name status conclusion detailsUrl} ... on StatusContext{context state targetUrl}}}}}}}}}}}";
 const VIEW_FIELDS: &str = "number,title,body,url,author,state,isDraft,headRefName,baseRefName,\
 mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,additions,deletions,changedFiles,\
 createdAt,updatedAt,reviews,comments";
 
 pub async fn list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let cwd = project_cwd(gateway, &params)?;
-    run_blocking(move || list_in(&cwd)).await
+    let force = force(&params);
+    let key = format!("list:{}", cwd.display());
+    let _one = in_flight(&key).lock_owned().await;
+    if !force {
+        if let Some(hit) = cache().lock().unwrap().lists.get(&cwd) {
+            if hit.at.elapsed() < LIST_TTL {
+                return Ok(stamped(&hit.value, hit.fetched_ms, true));
+            }
+        }
+    }
+    let value = run_blocking({
+        let cwd = cwd.clone();
+        move || list_in(&cwd)
+    })
+    .await?;
+    let fetched_ms = now_ms();
+    if value["available"] == true {
+        cache().lock().unwrap().lists.insert(
+            cwd,
+            Cached {
+                at: Instant::now(),
+                fetched_ms,
+                value: value.clone(),
+            },
+        );
+    }
+    Ok(stamped(&value, fetched_ms, false))
 }
 
 pub async fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
@@ -50,7 +94,115 @@ pub async fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcErr
         .and_then(Value::as_u64)
         .filter(|n| *n > 0)
         .ok_or_else(|| RpcError::invalid_params("number 是 PR 编号（正整数）"))?;
-    run_blocking(move || get_in(&cwd, number)).await
+    let force = force(&params);
+    let key = format!("pr:{}#{number}", cwd.display());
+    let _one = in_flight(&key).lock_owned().await;
+    if !force {
+        let cache = cache().lock().unwrap();
+        if let Some(hit) = cache.details.get(&(cwd.clone(), number)) {
+            // 有比这份详情新的列表：只看列表里这个 PR 变没变（变了就算还在有效期内也重拉）。
+            // 没有更新的列表：按有效期。
+            let fresh = match cache.lists.get(&cwd).filter(|list| list.at >= hit.at) {
+                Some(list) => signature(&list.value, number).as_ref() == Some(&hit.signature),
+                None => hit.at.elapsed() < DETAIL_TTL,
+            };
+            if fresh {
+                return Ok(stamped(&hit.value, hit.fetched_ms, true));
+            }
+        }
+    }
+    let value = run_blocking({
+        let cwd = cwd.clone();
+        move || get_in(&cwd, number)
+    })
+    .await?;
+    let fetched_ms = now_ms();
+    if value["available"] == true {
+        let pr = &value["pr"];
+        let signature = format!("{}|{}", pr["updatedAt"], pr["checksSummary"]);
+        cache().lock().unwrap().details.insert(
+            (cwd, number),
+            CachedDetail {
+                at: Instant::now(),
+                fetched_ms,
+                signature,
+                value: value.clone(),
+            },
+        );
+    }
+    Ok(stamped(&value, fetched_ms, false))
+}
+
+fn force(params: &Value) -> bool {
+    params
+        .get("force")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// 回给客户端时盖上「什么时候从 GitHub 拿的」「这次是不是缓存」。
+fn stamped(value: &Value, fetched_ms: u64, cached: bool) -> Value {
+    let mut out = value.clone();
+    if let Some(obj) = out.as_object_mut() {
+        if obj.get("available") == Some(&Value::Bool(true)) {
+            obj.insert("fetchedAtMs".into(), json!(fetched_ms));
+            obj.insert("cached".into(), json!(cached));
+        }
+    }
+    out
+}
+
+/// 列表里一个 PR 的「变没变」：`updatedAt` + 检查汇总，和详情缓存时记的同一个格式。
+fn signature(list: &Value, number: u64) -> Option<String> {
+    let pr = list["prs"]
+        .as_array()?
+        .iter()
+        .find(|p| p["number"].as_u64() == Some(number))?;
+    Some(format!("{}|{}", pr["updatedAt"], pr["checks"]))
+}
+
+struct Cached {
+    at: Instant,
+    fetched_ms: u64,
+    value: Value,
+}
+
+struct CachedDetail {
+    at: Instant,
+    fetched_ms: u64,
+    signature: String,
+    value: Value,
+}
+
+#[derive(Default)]
+struct Cache {
+    lists: HashMap<PathBuf, Cached>,
+    details: HashMap<(PathBuf, u64), CachedDetail>,
+}
+
+/// 进程内一份：多个窗口 / 客户端共用。
+fn cache() -> &'static Mutex<Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// 同一个 key 一次只跑一次 gh：后来的拿到锁时缓存已经是新的了。
+fn in_flight(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(key.to_string())
+        .or_default()
+        .clone()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 async fn run_blocking(f: impl FnOnce() -> Value + Send + 'static) -> Result<Value, RpcError> {
@@ -64,38 +216,42 @@ fn list_in(cwd: &Path) -> Value {
         Ok(gh) => gh,
         Err(unavailable) => return unavailable,
     };
-    let repo = match gh_json(&gh, cwd, &["repo", "view", "--json", "nameWithOwner"]) {
-        Ok(v) => v["nameWithOwner"].as_str().unwrap_or_default().to_string(),
-        Err(e) => return e.into_json(),
-    };
-    let viewer = match gh_json(&gh, cwd, &["api", "user"]) {
-        Ok(v) => v["login"].as_str().unwrap_or_default().to_string(),
-        Err(e) => return e.into_json(),
-    };
+    let query = format!("query={LIST_QUERY}");
     let raw = match gh_json(
         &gh,
         cwd,
         &[
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            LIST_LIMIT,
-            "--json",
-            LIST_FIELDS,
+            "api",
+            "graphql",
+            "-f",
+            &query,
+            "-F",
+            "owner={owner}",
+            "-F",
+            "name={repo}",
         ],
     ) {
         Ok(v) => v,
         Err(e) => return e.into_json(),
     };
-    let prs: Vec<Value> = raw
+    let data = &raw["data"];
+    let viewer = data["viewer"]["login"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let repo = &data["repository"];
+    let prs: Vec<Value> = repo["pullRequests"]["nodes"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|pr| list_row(pr, &viewer))
+        .map(|node| list_row(&from_graphql(node), &viewer))
         .collect();
-    json!({ "available": true, "repo": repo, "viewer": viewer, "prs": prs })
+    json!({
+        "available": true,
+        "repo": repo["nameWithOwner"].as_str().unwrap_or_default(),
+        "viewer": viewer,
+        "prs": prs,
+    })
 }
 
 fn get_in(cwd: &Path, number: u64) -> Value {
@@ -297,6 +453,29 @@ fn run(gh: &Path, cwd: &Path, args: &[&str]) -> Result<(Option<i32>, String, Str
         stdout.join().unwrap_or_default(),
         stderr.join().unwrap_or_default(),
     ))
+}
+
+/// GraphQL 的 PR 节点 → 和 `gh pr list --json` 同形（`reviewRequests[].login`、
+/// `statusCheckRollup[]` 是最后一个提交的检查），后面的整理两边共用。
+fn from_graphql(node: &Value) -> Value {
+    let mut pr = node.clone();
+    let requests: Vec<Value> = node["reviewRequests"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| r["requestedReviewer"].clone())
+        .collect();
+    let checks =
+        node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"].clone();
+    if let Some(obj) = pr.as_object_mut() {
+        obj.insert("reviewRequests".into(), Value::Array(requests));
+        obj.insert(
+            "statusCheckRollup".into(),
+            if checks.is_array() { checks } else { json!([]) },
+        );
+        obj.remove("commits");
+    }
+    pr
 }
 
 /// 列表一行：只留界面要的字段，检查汇总成一个状态。

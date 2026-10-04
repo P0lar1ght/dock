@@ -4244,17 +4244,23 @@ async fn sessions_opened_in_the_background_replay_their_history() {
 }
 
 /// 写一个假 gh：按参数吐固定 JSON（`exit_code` 非 0 时只往 stderr 写 `stderr`）。
+/// 每次调用往同目录的 `calls.log` 记一行（`$1 $2`），PR #7 的 `updatedAt` 读同目录的
+/// `updated` 文件——改它就是「GitHub 上这个 PR 变了」。
 fn fake_gh(dir: &std::path::Path, exit_code: i32, stderr: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join(format!("gh-{exit_code}"));
+    if !dir.join("updated").exists() {
+        std::fs::write(dir.join("updated"), "2026-10-01T00:00:00Z").unwrap();
+    }
+    let d = dir.display();
     let script = format!(
         r#"#!/bin/sh
+echo "$1 $2" >> "{d}/calls.log"
 if [ {exit_code} -ne 0 ]; then echo '{stderr}' >&2; exit {exit_code}; fi
+U=$(cat "{d}/updated")
 case "$1 $2" in
-  "repo view") echo '{{"nameWithOwner":"acme/app"}}' ;;
-  "api user") echo '{{"login":"me"}}' ;;
-  "pr list") echo '[{{"number":7,"title":"mine","url":"https://x/7","author":{{"login":"me"}},"isDraft":false,"headRefName":"feat","baseRefName":"main","updatedAt":"2026-10-01T00:00:00Z","reviewDecision":"","mergeable":"MERGEABLE","reviewRequests":[],"statusCheckRollup":[{{"status":"COMPLETED","conclusion":"FAILURE","name":"test"}}]}},{{"number":8,"title":"theirs","url":"https://x/8","author":{{"login":"bob"}},"isDraft":true,"headRefName":"fix","baseRefName":"main","updatedAt":"2026-10-02T00:00:00Z","reviewDecision":"REVIEW_REQUIRED","mergeable":"UNKNOWN","reviewRequests":[{{"login":"me"}}],"statusCheckRollup":[]}}]' ;;
-  "pr view") echo '{{"number":'"$3"',"title":"mine","body":"b","url":"https://x/7","author":{{"login":"me"}},"state":"OPEN","isDraft":false,"headRefName":"feat","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","reviewDecision":"APPROVED","statusCheckRollup":[{{"status":"COMPLETED","conclusion":"SUCCESS","name":"test","detailsUrl":"https://ci"}}],"additions":3,"deletions":1,"changedFiles":2,"createdAt":"c","updatedAt":"u","reviews":[{{"author":{{"login":"bob"}},"state":"COMMENTED","submittedAt":"1"}},{{"author":{{"login":"bob"}},"state":"APPROVED","submittedAt":"2"}}],"comments":[{{}},{{}}]}}' ;;
+  "api graphql") echo '{{"data":{{"viewer":{{"login":"me"}},"repository":{{"nameWithOwner":"acme/app","pullRequests":{{"nodes":[{{"number":7,"title":"mine","url":"https://x/7","author":{{"login":"me"}},"isDraft":false,"headRefName":"feat","baseRefName":"main","updatedAt":"'"$U"'","reviewDecision":null,"mergeable":"MERGEABLE","reviewRequests":{{"nodes":[]}},"commits":{{"nodes":[{{"commit":{{"statusCheckRollup":{{"contexts":{{"nodes":[{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"test"}}]}}}}}}}}]}}}},{{"number":8,"title":"theirs","url":"https://x/8","author":{{"login":"bob"}},"isDraft":true,"headRefName":"fix","baseRefName":"main","updatedAt":"2026-10-02T00:00:00Z","reviewDecision":"REVIEW_REQUIRED","mergeable":"UNKNOWN","reviewRequests":{{"nodes":[{{"requestedReviewer":{{"login":"me"}}}}]}},"commits":{{"nodes":[{{"commit":{{"statusCheckRollup":null}}}}]}}}}]}}}}}}}}' ;;
+  "pr view") echo '{{"number":'"$3"',"title":"mine","body":"b","url":"https://x/7","author":{{"login":"me"}},"state":"OPEN","isDraft":false,"headRefName":"feat","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","reviewDecision":"APPROVED","statusCheckRollup":[{{"status":"COMPLETED","conclusion":"FAILURE","name":"test","detailsUrl":"https://ci"}}],"additions":3,"deletions":1,"changedFiles":2,"createdAt":"c","updatedAt":"'"$U"'","reviews":[{{"author":{{"login":"bob"}},"state":"COMMENTED","submittedAt":"1"}},{{"author":{{"login":"bob"}},"state":"APPROVED","submittedAt":"2"}}],"comments":[{{}},{{}}]}}' ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
 "#
@@ -4264,8 +4270,18 @@ esac
     path
 }
 
+/// 假 gh 被调了几次 `$1 $2`（如 `api graphql`、`pr view`）。
+fn gh_calls(dir: &std::path::Path, what: &str) -> usize {
+    std::fs::read_to_string(dir.join("calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.trim() == what)
+        .count()
+}
+
 /// `vcs/pr/*`：经 gh 列出 / 查看项目的 PR；gh 没装、没登录不是错误而是
-/// `available: false` + 原因；不认识的目录不让查。全放一个用例里：`DOCK_GH` 是进程级的。
+/// `available: false` + 原因；不认识的目录不让查。列表一次 `api graphql`、按有效期缓存；
+/// 详情在列表里这个 PR 没变时直接复用，变了就重拉。全放一个用例里：`DOCK_GH` 是进程级的。
 #[tokio::test]
 async fn pull_requests_come_from_gh_and_degrade_without_it() {
     let h = boot_with_schedules().await;
@@ -4286,25 +4302,35 @@ async fn pull_requests_come_from_gh_and_degrade_without_it() {
         .await;
     let cwd = json!(project.display().to_string());
     let bin = project_dir("fake-gh");
-
     std::env::set_var("DOCK_GH", fake_gh(&bin, 0, ""));
+
+    // 列表：一次 graphql 拿齐；第二次在有效期内，不再调 gh。
     let listed = rpc.call("vcs/pr/list", json!({ "cwd": cwd })).await;
     let r = &listed["result"];
     assert_eq!(r["available"], true, "{listed}");
+    assert_eq!(r["cached"], false, "{listed}");
+    assert!(r["fetchedAtMs"].as_u64().unwrap() > 0, "{listed}");
     assert_eq!(r["repo"], "acme/app");
+    assert_eq!(r["viewer"], "me");
     let prs = r["prs"].as_array().unwrap();
     assert_eq!(prs.len(), 2, "{listed}");
     assert_eq!(prs[0]["mine"], true);
     assert_eq!(prs[0]["checks"]["state"], "failure");
     assert_eq!(prs[1]["reviewRequested"], true);
     assert_eq!(prs[1]["isDraft"], true);
+    assert_eq!(prs[1]["checks"]["state"], "none");
+    assert_eq!(gh_calls(&bin, "api graphql"), 1);
+    let again = rpc.call("vcs/pr/list", json!({ "cwd": cwd })).await;
+    assert_eq!(again["result"]["cached"], true, "{again}");
+    assert_eq!(gh_calls(&bin, "api graphql"), 1, "有效期内不该再调 gh");
 
+    // 详情：第一次拉，第二次复用。
     let got = rpc
         .call("vcs/pr/get", json!({ "cwd": cwd, "number": 7 }))
         .await;
     let pr = &got["result"]["pr"];
     assert_eq!(pr["number"], 7, "{got}");
-    assert_eq!(pr["checksSummary"]["state"], "success");
+    assert_eq!(pr["checksSummary"]["state"], "failure");
     assert_eq!(pr["comments"], 2);
     assert_eq!(
         pr["reviews"].as_array().unwrap().len(),
@@ -4312,6 +4338,32 @@ async fn pull_requests_come_from_gh_and_degrade_without_it() {
         "每人只留最近一次"
     );
     assert_eq!(pr["reviews"][0]["state"], "APPROVED");
+    let _ = rpc
+        .call("vcs/pr/get", json!({ "cwd": cwd, "number": 7 }))
+        .await;
+    assert_eq!(gh_calls(&bin, "pr view"), 1);
+
+    // 刷新列表、PR 没变：详情照旧复用。
+    let _ = rpc
+        .call("vcs/pr/list", json!({ "cwd": cwd, "force": true }))
+        .await;
+    assert_eq!(gh_calls(&bin, "api graphql"), 2, "force 要绕过缓存");
+    let same = rpc
+        .call("vcs/pr/get", json!({ "cwd": cwd, "number": 7 }))
+        .await;
+    assert_eq!(same["result"]["cached"], true, "{same}");
+    assert_eq!(gh_calls(&bin, "pr view"), 1, "PR 没变不该重拉详情");
+
+    // GitHub 上 PR 变了：刷新列表看到新的 updatedAt，详情就算还在有效期内也重拉。
+    std::fs::write(bin.join("updated"), "2026-10-03T00:00:00Z").unwrap();
+    let _ = rpc
+        .call("vcs/pr/list", json!({ "cwd": cwd, "force": true }))
+        .await;
+    let changed = rpc
+        .call("vcs/pr/get", json!({ "cwd": cwd, "number": 7 }))
+        .await;
+    assert_eq!(changed["result"]["cached"], false, "{changed}");
+    assert_eq!(gh_calls(&bin, "pr view"), 2, "PR 变了要重拉详情");
 
     std::env::set_var(
         "DOCK_GH",
@@ -4321,12 +4373,16 @@ async fn pull_requests_come_from_gh_and_degrade_without_it() {
             "To get started with GitHub CLI, please run:  gh auth login",
         ),
     );
-    let unauth = rpc.call("vcs/pr/list", json!({ "cwd": cwd })).await;
+    let unauth = rpc
+        .call("vcs/pr/list", json!({ "cwd": cwd, "force": true }))
+        .await;
     assert_eq!(unauth["result"]["available"], false, "{unauth}");
     assert_eq!(unauth["result"]["reason"], "gh_unauthenticated", "{unauth}");
 
     std::env::set_var("DOCK_GH", bin.join("not-installed"));
-    let missing = rpc.call("vcs/pr/list", json!({ "cwd": cwd })).await;
+    let missing = rpc
+        .call("vcs/pr/list", json!({ "cwd": cwd, "force": true }))
+        .await;
     assert_eq!(missing["result"]["reason"], "gh_missing", "{missing}");
     assert!(
         missing["result"]["hint"]
