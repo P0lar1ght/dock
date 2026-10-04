@@ -826,3 +826,81 @@ async fn closing_a_tab_forgets_its_subagent_mailbox() {
         "关页后唤醒表里不该还留着那一页"
     );
 }
+
+/// 等到 `cond` 成立（定时任务驱动一秒一跳）。
+async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+    for _ in 0..80 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("等不到：{what}");
+}
+
+fn said(sessions: &Sessions, text: &str) -> bool {
+    sessions
+        .events()
+        .iter()
+        .any(|e| matches!(e, LogEvent::User(t) if t == text))
+}
+
+/// 定时任务送进它所属的那一页，不是第一页；会话关着就在后台把它开成一页再送。
+#[tokio::test]
+async fn scheduled_prompts_reach_their_own_session_even_when_closed() {
+    let root = boot().await;
+    let project = std::env::temp_dir().join(format!("dock-cron-proj-{}", std::process::id()));
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    let _cron = root
+        .provide(cordis_spine::CRON, cordis_spine::Cron::new())
+        .unwrap();
+    root.plugin(cordis_app::cron_driver(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let cron = root.get::<cordis_spine::Cron>(cordis_spine::CRON).unwrap();
+    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let main = root.get::<Sessions>(SESSIONS).unwrap();
+
+    let page = tabs.open_at(&project, None).await.unwrap();
+    let sessions = page.get::<Sessions>(SESSIONS).unwrap();
+    let id = sessions.live_session_id();
+    assert!(!id.is_empty());
+    let owner = cordis_spine::CronOwner {
+        session: id.clone(),
+        cwd: project.clone(),
+    };
+    cron.add_owned(
+        Some(owner.clone()),
+        std::time::Duration::from_secs(600),
+        "第二页的定时提问",
+        true,
+    )
+    .unwrap();
+    eventually("送进第二页", || said(&sessions, "第二页的定时提问")).await;
+    assert!(!said(&main, "第二页的定时提问"), "不该送进第一页");
+    eventually("第二页落盘", || {
+        Sessions::can_adopt_archived(&id, &project)
+    })
+    .await;
+
+    tabs.close_session(&id).await.unwrap();
+    cron.add_owned(
+        Some(owner),
+        std::time::Duration::from_secs(600),
+        "关着时的定时提问",
+        true,
+    )
+    .unwrap();
+    eventually("会话被重新开成一页", || {
+        tabs.contexts().iter().any(|ctx| {
+            ctx.get::<Sessions>(SESSIONS)
+                .is_some_and(|s| s.live_session_id() == id && said(&s, "关着时的定时提问"))
+        })
+    })
+    .await;
+    assert!(!said(&main, "关着时的定时提问"), "不该送进第一页");
+    assert!(cron.list().iter().all(|j| j.last_error.is_none()));
+}

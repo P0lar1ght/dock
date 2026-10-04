@@ -54,6 +54,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `thread/context/get`：上下文窗口按类别拆开（系统提示 / 工具定义 / 消息 / 其余 / 空闲，
     // 各带明细）+ 按需加载、不占窗口的 MCP / 本地工具。
     ("contextBreakdown", true),
+    // `schedule/list` / `create` / `update` / `delete` + 连接级推送 `schedule/changed`：
+    // 定时任务（落盘、属于某个会话、跨重启继续跑）。
+    ("schedules", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -75,6 +78,12 @@ pub const PRESET_DELETE: &str = "preset/delete";
 pub const PRESET_GET: &str = "preset/get";
 pub const PRESET_UPDATE: &str = "preset/update";
 pub const TOOL_CATALOG: &str = "tool/catalog";
+pub const SCHEDULE_LIST: &str = "schedule/list";
+pub const SCHEDULE_CREATE: &str = "schedule/create";
+pub const SCHEDULE_UPDATE: &str = "schedule/update";
+pub const SCHEDULE_DELETE: &str = "schedule/delete";
+/// 连接级推送（不用订阅线程）：定时任务变了，重拉 `schedule/list`。
+pub const SCHEDULE_CHANGED: &str = "schedule/changed";
 pub const PRESET_DRAFT: &str = "preset/draft";
 pub const PRESET_REWRITE: &str = "preset/rewrite";
 pub const PRESET_SUGGEST_TOOLS: &str = "preset/suggestTools";

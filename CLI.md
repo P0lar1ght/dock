@@ -24,7 +24,7 @@
 | `/protocol`（`proto` `wire`） | 在**当前模型声明过的**协议之间切（`responses` / `chat_completions` / `messages`）。空参数或名字打错开 picker，不猜一条发出去；切到没声明的那条会被挡下并提示去 config 里补 `api_backends`。一个端点同时开着 /responses 和 /chat/completions 时用这个，不用再配一个只有协议不同的重复模型条目。运行时状态，不落盘；`/model` 换模型即按新模型的默认重新播种。浏览器 companion 也支持：空参数回一条 notice 列出可选协议 |
 | `/resume` | 打开会话 picker，恢复本工作区已落盘的会话（进程重启后仍在）。模型与推理强度切回那个会话记的（模型已不在 `config.toml` 目录里就不切）。用量账本不随归档恢复（Grok：新进程 resume 清零）。进程入口 `--resume` / `--resume <id>` 启动时直接恢复 |
 | `/pair`（`pairing`） | 浏览器 Origin 配对：第一行开启/关闭回环网关（默认不监听；首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。开启后待批请求可批准，已绑来源可撤销。overlay 显示实际监听地址。首次连接弹出「允许浏览器连接？」；Enter 批准 / `x` 拒绝或撤销（在网关行上 `x` 关闭监听）。浏览器 companion 的 list/execute 限制见上文。CORS 反射任意 Origin：鉴权靠配对 + 回环。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费 |
-| `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
+| `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。任务属于这个会话、落盘跨重启继续跑（到点时会话关着就后台开页），7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
 | `/plan [说明]` | 开计划模式；无说明只切模式（Pending，发第一条 prompt 后变 Active）。有说明则 Active 并提交 |
 | `/view-plan`（`show-plan` `plan-view`） | 查看本页计划文件（打开时读一次，pretty markdown）；若 `exit_plan_mode` 正在等待批准则打开审批 chrome（`a` 批准 / `s` 修改 / `q` 放弃） |
 | `/goal` | 输入框留下用法（`用法: /goal <目标>` + `/goal `），不会清空。再发送即为目标 |

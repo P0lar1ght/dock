@@ -514,7 +514,7 @@ fn roster_entry(
     Ok((roster, entry))
 }
 
-fn roster_entries(gateway: &GatewayHandle) -> Vec<RosterEntry> {
+pub(crate) fn roster_entries(gateway: &GatewayHandle) -> Vec<RosterEntry> {
     fresh_roster(gateway).list()
 }
 

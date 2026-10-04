@@ -37,6 +37,9 @@ pub struct GatewayInner {
     children: Mutex<HashMap<String, Transcript>>,
     /// 各页投影共用的推送通道；事件上带页身份，`ws.rs` 按订阅过滤。
     events_tx: tokio::sync::broadcast::Sender<ProjectedEvent>,
+    /// 连接级推送（不属于哪个线程、不用订阅），整帧 JSON-RPC 通知。现在只有
+    /// `schedule/changed`。
+    notices_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     pub images: Mutex<ImageInputStore>,
     preferred: SocketAddr,
     listen: Mutex<ListenSlot>,
@@ -72,6 +75,7 @@ impl GatewayHandle {
             transcripts: Mutex::new(HashMap::new()),
             children: Mutex::new(HashMap::new()),
             events_tx: Transcript::channel(),
+            notices_tx: tokio::sync::broadcast::channel(64).0,
             images: Mutex::new(ImageInputStore::new()),
             preferred,
             listen: Mutex::new(ListenSlot {
@@ -281,6 +285,11 @@ impl GatewayHandle {
         self.inner.events_tx.subscribe()
     }
 
+    /// 连接级推送，见 `GatewayInner::notices_tx`。
+    pub fn subscribe_notices(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
+        self.inner.notices_tx.subscribe()
+    }
+
     /// 这个句柄那一页的投影按它当前的会话重建（`thread/start` / `restore` 之后）。
     pub fn reset_transcript(&self) {
         let page = match &self.scope {
@@ -457,6 +466,33 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             });
         });
     listen_subagents(inner);
+    // 定时任务变了：推给每条连接（`schedule/changed`），客户端重拉 `schedule/list`。
+    let for_schedule = inner.clone();
+    let _ = inner.ctx.on(cordis_spine::SCHEDULE_CHANGED, move |_: &()| {
+        let _ = for_schedule.notices_tx.send(serde_json::json!({
+            "method": crate::protocol::SCHEDULE_CHANGED,
+            "params": {},
+        }));
+    });
+    // 后台开出来的页（定时任务到点开的会话）：照 `thread/open` 的样子纳入投影——按会话
+    // 回放历史、装上这个项目的永久插件。不然订阅时只看得到开页之后的事件。
+    let for_opened = inner.clone();
+    let _ = inner
+        .ctx
+        .on(cordis_tui::TUI_PAGE_OPENED, move |identity: &String| {
+            let handle = GatewayHandle {
+                inner: for_opened.clone(),
+                scope: None,
+            };
+            let Some(page) = crate::threads::page_by_identity(&handle, identity) else {
+                return;
+            };
+            handle.reset_page(&page);
+            crate::handlers::settings::boot_project_plugins(
+                &handle,
+                cordis_spine::session_cwd(&page.ctx),
+            );
+        });
     // 压缩进展只推不记，同样按页路由。
     let for_compaction = inner.clone();
     let _ = inner

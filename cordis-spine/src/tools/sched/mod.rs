@@ -8,9 +8,13 @@ use std::time::{Duration, Instant};
 use cordis::{plugin, Context, Inject, Plugin};
 use serde_json::Value;
 
-use crate::names::{CRON, TOOLS};
-use crate::tools::cron::{Cron, CronError, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS};
-use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
+use crate::names::{CRON, PLAN_MODE, SESSIONS, TOOLS};
+use crate::session::log::Sessions;
+use crate::tools::cron::{
+    Cron, CronError, CronOwner, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS,
+};
+use crate::tools::plan_mode::PlanMode;
+use crate::tools::registry::{exec_ctx, own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use interval::{interval_to_human, parse_interval};
@@ -70,6 +74,7 @@ To change an existing task, pass its task_id: provided fields replace old values
 Usage notes:\n\
 - Interval format: \"5m\" (minutes), \"2h\" (hours), \"1d\" (days), \"60s\" (seconds, min 60)\n\
 - Maximum {MAX_SCHEDULED_TASKS} scheduled tasks at once\n\
+- Tasks belong to this session and keep running across Dock restarts; each fire is a new turn here (a closed session is reopened)\n\
 - Tasks auto-expire after {RECURRING_TASK_TTL_DAYS} days\n\
 - For one-time delayed work, run a background terminal command (e.g. `sleep 1800 && <command>`) instead; its completion notifies you"
                             ),
@@ -80,7 +85,7 @@ Usage notes:\n\
                     tools.register(
                         ToolSpec {
                             name: "scheduler_list".into(),
-                            description: "List all active scheduled tasks with their IDs, prompts, intervals, and next fire times.".into(),
+                            description: "List this session's scheduled tasks with their IDs, prompts, intervals, and next fire times.".into(),
                             parameters_json: LIST_PARAMS.into(),
                         },
                         list,
@@ -88,7 +93,7 @@ Usage notes:\n\
                     tools.register(
                         ToolSpec {
                             name: "scheduler_delete".into(),
-                            description: "Cancel a scheduled task by ID.".into(),
+                            description: "Cancel one of this session's scheduled tasks by ID.".into(),
                             parameters_json: DELETE_PARAMS.into(),
                         },
                         delete,
@@ -98,6 +103,26 @@ Usage notes:\n\
             Ok(None)
         },
     )
+}
+
+/// 调用方所在的那一页会话（分页各是各的）。子代理的会话不落盘、没有 id：经
+/// `"planMode"` 找到它所在的页（同画布）。都找不到（harness）就不记归属、不限定。
+fn caller_owner(ctx: &Context) -> Option<CronOwner> {
+    let exec = exec_ctx().unwrap_or_else(|| ctx.clone());
+    let own = exec.get::<Sessions>(SESSIONS);
+    let page = exec
+        .get::<PlanMode>(PLAN_MODE)
+        .and_then(|plan| plan.page_sessions());
+    let sessions = [own, page]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.live_session_id().is_empty())?;
+    Some(CronOwner {
+        session: sessions.live_session_id(),
+        cwd: sessions
+            .workspace_cwd()
+            .unwrap_or_else(|| crate::session::cwd::session_cwd(&exec)),
+    })
 }
 
 fn create_job(ctx: &Context, call: ToolCall) -> ToolResult {
@@ -140,7 +165,8 @@ fn create_job(ctx: &Context, call: ToolCall) -> ToolResult {
                 format!("Error: scheduler_create update of {id} needs interval and/or prompt"),
             );
         }
-        return match cron.update(id, every, prompt) {
+        let scope = caller_owner(ctx).map(|o| o.session);
+        return match cron.update_where(id, scope.as_deref(), every, prompt) {
             Ok(job) => {
                 let secs = job.every.as_secs();
                 tool_result(
@@ -170,7 +196,12 @@ fn create_job(ctx: &Context, call: ToolCall) -> ToolResult {
         Ok(s) => s,
         Err(e) => return tool_result(call, e.to_string()),
     };
-    match cron.add_ex(Duration::from_secs(secs), prompt, fire_immediately) {
+    match cron.add_owned(
+        caller_owner(ctx),
+        Duration::from_secs(secs),
+        prompt,
+        fire_immediately,
+    ) {
         Ok(id) => {
             let immediately = if fire_immediately { "是" } else { "否" };
             tool_result(
@@ -192,7 +223,10 @@ fn list_jobs(ctx: &Context, call: ToolCall) -> ToolResult {
     let Some(cron) = ctx.get::<Cron>(CRON) else {
         return tool_result(call, "Error: cron is not mounted");
     };
-    let jobs = cron.list();
+    let jobs = match caller_owner(ctx) {
+        Some(owner) => cron.list_for(&owner.session),
+        None => cron.list(),
+    };
     if jobs.is_empty() {
         return tool_result(call, "没有定时任务。");
     };
@@ -235,13 +269,14 @@ fn delete_job(ctx: &Context, call: ToolCall) -> ToolResult {
     let Some(cron) = ctx.get::<Cron>(CRON) else {
         return tool_result(call, "Error: cron is not mounted");
     };
-    if cron.cancel(id) {
-        tool_result(call, format!("已关闭 {id}"))
-    } else {
-        tool_result(
+    let scope = caller_owner(ctx).map(|o| o.session);
+    match cron.cancel_where(id, scope.as_deref()) {
+        Ok(true) => tool_result(call, format!("已关闭 {id}")),
+        Ok(false) => tool_result(
             call,
             format!("没有 id 为 {id} 的定时任务；用 scheduler_list 查看"),
-        )
+        ),
+        Err(e) => tool_result(call, format!("Error: {e}")),
     }
 }
 
@@ -279,7 +314,7 @@ mod tests {
             result.content
         );
         let cron = ctx.get::<Cron>(CRON).unwrap();
-        let tick = cron.due();
+        let tick = cron.due().unwrap();
         assert_eq!(tick.fires.len(), 1);
         assert_eq!(tick.fires[0].prompt, "check");
     }
@@ -289,7 +324,7 @@ mod tests {
         let ctx = ctx_with_cron();
         create_job(&ctx, call(r#"{"interval":"5m","prompt":"later"}"#));
         let cron = ctx.get::<Cron>(CRON).unwrap();
-        assert!(cron.due().fires.is_empty());
+        assert!(cron.due().unwrap().fires.is_empty());
         assert_eq!(cron.list().len(), 1);
     }
 
@@ -321,5 +356,65 @@ mod tests {
         );
         let cron = ctx.get::<Cron>(CRON).unwrap();
         assert!(cron.list().is_empty());
+    }
+
+    /// 两个会话各建各的：任务记下所属会话，工具只看得到、删得掉自己会话的。
+    #[test]
+    fn tasks_belong_to_the_calling_session() {
+        let _home = cordis_base::test_env::scoped().home();
+        let root = ctx_with_cron();
+        let page = |index: usize| {
+            let page = root.isolate(SESSIONS);
+            let sessions = Sessions::tab(page.clone(), index);
+            sessions.attach_disk();
+            std::mem::forget(page.provide(SESSIONS, sessions).unwrap());
+            page
+        };
+        let (a, b) = (page(2), page(3));
+        let in_page = |p: &Context, args: &str, name: &str| {
+            let call = ToolCall {
+                id: "c".into(),
+                name: name.into(),
+                arguments: args.into(),
+            };
+            crate::tools::registry::with_exec_ctx(p, || match name {
+                "scheduler_create" => create_job(&root, call),
+                "scheduler_list" => list_jobs(&root, call),
+                _ => delete_job(&root, call),
+            })
+        };
+        in_page(
+            &a,
+            r#"{"interval":"5m","prompt":"from a"}"#,
+            "scheduler_create",
+        );
+        let cron = root.get::<Cron>(CRON).unwrap();
+        let job = cron.list()[0].clone();
+        let a_session = a.get::<Sessions>(SESSIONS).unwrap().live_session_id();
+        assert_eq!(
+            job.owner.as_ref().map(|o| o.session.as_str()),
+            Some(a_session.as_str())
+        );
+
+        let seen_by_b = in_page(&b, "{}", "scheduler_list");
+        assert!(
+            !seen_by_b.content.contains("from a"),
+            "{}",
+            seen_by_b.content
+        );
+        let deleted_by_b = in_page(&b, &format!(r#"{{"id":"{}"}}"#, job.id), "scheduler_delete");
+        assert!(
+            deleted_by_b.content.contains("没有 id"),
+            "{}",
+            deleted_by_b.content
+        );
+        assert_eq!(cron.list().len(), 1);
+
+        let seen_by_a = in_page(&a, "{}", "scheduler_list");
+        assert!(
+            seen_by_a.content.contains("from a"),
+            "{}",
+            seen_by_a.content
+        );
     }
 }
