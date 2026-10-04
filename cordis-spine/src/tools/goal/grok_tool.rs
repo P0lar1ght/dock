@@ -98,7 +98,7 @@ pub struct UpdateGoalInput {
 
     #[serde(default)]
     #[schemars(
-        description = "Optional short message logged as progress (visible in tool response, not surfaced to the pager dashboard). Use with `completed: true` for a completion summary."
+        description = "Optional short progress note. It becomes the goal's latest progress, shown to the user in the goal panel until the next note, and is echoed in the tool response. Use with `completed: true` for a completion summary."
     )]
     pub message: Option<String>,
 

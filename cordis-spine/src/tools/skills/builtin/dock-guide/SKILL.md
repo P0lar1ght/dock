@@ -63,8 +63,8 @@ Dock 是跑在终端里的编码 agent。底部输入框发消息，`/` 唤出�
 
 ## 浏览器与桌面控制
 
-- `/browser` 打开浏览器驾驶舱（需 Chromium）：开关有头/无头、标签页、
-  截图、网络与控制台。让模型操作网页用 `browser_*` 工具。
+- `/browser` 看内置浏览器（需 Chromium）的状态，按 `h` 切换有头 / 无头；不渲染网页。
+  让模型操作网页用 `mcp_browser__browser_*` 工具（经 `search_tool` / `use_tool` 调用）。
 - `/computer` 查看本机桌面控制（cua-driver MCP）状态。
 - `/pair` 开启回环网关，配对后在浏览器里用 companion 页面联动。
 

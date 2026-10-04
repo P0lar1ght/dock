@@ -28,9 +28,10 @@ git diff --stat origin/main...HEAD
 按改动范围选，不要为小改跑全量：
 
 ```bash
-cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway
+cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway -p dock-memory -p cordis-browser
 cargo test -p cordis-spine --test round -- install_app_registers   # 改工具表时必跑
-cargo clippy -p <改动的 crate> --all-targets
+cargo fmt --check -p <改动的 crate>                                # CI 门禁
+cargo clippy -p <改动的 crate> --all-targets --no-deps -- -D warnings   # CI 门禁，warning 也会挡
 ```
 
 `embed-sdk/` 改动：

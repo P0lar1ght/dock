@@ -120,7 +120,7 @@ cd dock-core && npm ci && npm test && npm run typecheck   # 协议核心（Node 
 - 密钥、私人配置、真实用户数据（会话 jsonl、截图、memory）不进源码、commit、PR、日志。
 - 未信任 contributor / fork 的代码不要当可信脚本在本地跑（脚本、构建钩子、二进制）。
 - 本机桌面操作经 cua-driver MCP，与 `bash` 同级权限门；不要绕过权限与计划门。
-- Gateway 的 CORS 反射 Origin 是有意的：鉴权靠 `/pair` 配对 + 一次性 ticket + 回环，不靠 Origin 白名单。不要把网关绑到非 loopback 地址。
+- Gateway 的 CORS 反射 Origin 是有意的：鉴权靠配对（一次性兑换）换来的 ticket + 回环，不靠 Origin 白名单。不要把网关绑到非 loopback 地址。
 
 ## Git
 
