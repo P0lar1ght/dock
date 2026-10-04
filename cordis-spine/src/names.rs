@@ -94,6 +94,9 @@ pub const SESSION_CHILD_EVENT: &str = "session/child-event";
 /// 一个子代理出现了或状态变了（运行 / 空闲 / 结束），载荷 [`crate::SubagentChanged`]。
 /// 只带 id；当前状态在监听里 `Subagents::snapshot` 现取。
 pub const SUBAGENT_CHANGED: &str = "subagent/changed";
+/// 定时任务（`"cron"`）变了：增删改、触发、或读到别的 Dock 进程的改动。载荷 `()`；
+/// 现状在监听里 `Cron::list` 现取。`cordis-app` 的定时任务驱动每秒对一次账再发。
+pub const SCHEDULE_CHANGED: &str = "schedule/changed";
 pub const PERMISSION_EVENT: &str = "permissions/pending";
 pub const ASK_EVENT: &str = "ask/pending";
 pub const PLAN_EVENT: &str = "plan/pending";

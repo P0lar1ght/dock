@@ -843,6 +843,13 @@ mod tests {
             prompt: "status".into(),
             created_at: Instant::now(),
             next: Instant::now() + Duration::from_secs(60),
+            owner: None,
+            created_at_ms: 0,
+            next_at_ms: 60_000,
+            expires_at_ms: 0,
+            last_fired_at_ms: None,
+            last_error: None,
+            held_here: true,
         };
         let items = collect_items(&[mon], &[], &[loop_job], &[], None);
         assert!(items.iter().all(|i| i.group_kind() == GroupKind::Watchers));

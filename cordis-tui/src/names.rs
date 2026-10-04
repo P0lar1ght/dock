@@ -10,6 +10,9 @@ pub const TUI_WELCOME: &str = "tui.welcome";
 pub const TUI_SHORTCUTS: &str = "tui.shortcuts";
 /// 分页服务（`Tabs`）。每页一棵 isolate 子树，事件循环按它取当前页的上下文。
 pub const TUI_TABS: &str = "tui.tabs";
+/// [`crate::Tabs::open_session`] 在后台开出一页（不是用户开的）。载荷是那一页的
+/// 身份（`String`）。网关据此把这一页纳入投影（回放历史、装项目插件）。
+pub const TUI_PAGE_OPENED: &str = "tui.tabs/page-opened";
 pub const TUI_PAIRING: &str = "tui.pairing";
 pub const TUI: &str = "tui";
 /// Named service provided by the `gateway` plugin.

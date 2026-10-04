@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::handle::GatewayHandle;
 use crate::handlers::{
     canvas, connection, context, environment, fs, image_inputs, interaction, permission, preset,
-    settings, slash, subagent, thread, turn,
+    schedule, settings, slash, subagent, thread, turn,
 };
 use crate::protocol::{self, RpcError};
 
@@ -58,6 +58,10 @@ pub async fn dispatch(
         protocol::PRESET_GET => preset::get(&gateway, params),
         protocol::PRESET_UPDATE => preset::update(&gateway, params),
         protocol::TOOL_CATALOG => preset::tool_catalog(&gateway, params),
+        protocol::SCHEDULE_LIST => schedule::list(&gateway, params),
+        protocol::SCHEDULE_CREATE => schedule::create(&gateway, params),
+        protocol::SCHEDULE_UPDATE => schedule::update(&gateway, params),
+        protocol::SCHEDULE_DELETE => schedule::delete(&gateway, params),
         protocol::PRESET_DRAFT
         | protocol::PRESET_REWRITE
         | protocol::PRESET_SUGGEST_TOOLS

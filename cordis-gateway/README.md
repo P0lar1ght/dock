@@ -436,6 +436,26 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `status` 多了 `completed`：模型报了 `update_goal(completed)`，标题和最后一条进展留着，`start` / `clear` 后复位。
 - `elapsedMs`：目标实际在跑的时长，暂停的时段不算；`active` 时客户端自己往上走表。
 
+### 定时任务（能力 `schedules`，`handlers/schedule.rs`）
+
+任务落盘在 `$DOCK_HOME/schedules.json`，属于某个会话，跨重启继续跑。到点由 `cordis-app` 的
+`cron_driver` 送进那个会话；会话关着就 `Tabs::open_session` 后台开页，网关监听
+`tui.tabs/page-opened` 把这页纳入投影（回放历史、装项目插件），同 `thread/open`。
+
+- `schedule/list {}` → `{ tasks[] }`：全部会话的任务。每项：
+  - `id` / `prompt` / `everySecs` / `intervalLabel`（「every 10 minutes」）；
+  - `threadId`（会话 id，老任务为 `null`）/ `threadTitle` / `cwd`；
+  - `createdAtMs` / `nextAtMs` / `expiresAtMs`（7 天）/ `lastFiredAtMs`；
+  - `lastError`：上次没送到的原因（开不了页之类），下次送到就清掉；
+  - `heldHere`：这个进程持有它（多个 Dock 共用 `$DOCK_HOME` 时只有持有者触发）。
+- `schedule/create { threadId, interval | everySecs, prompt, fireImmediately? }` → `{ task }`。
+  - `interval` 同 `/loop`（`5m` / `2h` / `1d`）；`everySecs` 最小 60。
+  - `threadId` 开着的页（含 `live`）取它正在写的会话；关着的按会话列表找。还没落盘的回 `invalid_params`。
+- `schedule/update { id, interval? | everySecs?, prompt? }` → `{ task }`：改间隔保持相位，不续期。
+- `schedule/delete { id }` → `{ deleted }`；没有这个 id 回 `not_found`。
+- 推送 `schedule/changed {}`：**连接级**，初始化过就收到，不用订阅线程。任何一处改了（含模型的
+  `scheduler_*`、别的 Dock 进程、到点触发）最多 1 秒后到；收到后重拉 `schedule/list`。
+
 ## 依赖注入
 
 `mount` 声明依赖：`SESSIONS`、`SESSION_PORT`、`PERMISSIONS`、`ASK`、`PLAN_MODE`、`MCP`、`TURN`、`SETTINGS`。这些是 named service，在 `apply` 时 live-lookup，**不要**在闭包里持有 `Arc`。

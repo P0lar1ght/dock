@@ -151,12 +151,29 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
     });
 
     let mut events_rx = gateway.subscribe_transcript();
+    let mut notices_rx = gateway.subscribe_notices();
     let fanout = {
         let conn = conn.clone();
         let out_tx = out_tx.clone();
         tokio::spawn(async move {
             loop {
-                match events_rx.recv().await {
+                let received = tokio::select! {
+                    event = events_rx.recv() => event,
+                    notice = notices_rx.recv() => {
+                        // 连接级推送：初始化过就发，不看订阅。
+                        match notice {
+                            Ok(notice) => {
+                                if conn.lock().await.initialized {
+                                    let _ = out_tx.send(Outgoing::Text(notice.to_string()));
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                        continue;
+                    }
+                };
+                match received {
                     Ok(event) => {
                         // 按页匹配订阅，推送时用这条连接订阅时的 `threadId`。
                         let alias = {

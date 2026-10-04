@@ -4104,3 +4104,141 @@ async fn plugin_paths_are_checked_after_canonicalization() {
         "删掉就没有了：{listed}"
     );
 }
+
+/// 带分页服务 + 一份内存里的定时任务表。
+async fn boot_with_schedules() -> Harness {
+    let root = harness_root().await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(cordis_tui::tabs(), test_page_mount())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.provide(cordis_spine::CRON, cordis_spine::Cron::new())
+        .unwrap();
+    Harness::boot_on(root).await
+}
+
+/// 开一个项目会话、说一句话（会话落盘、有了 id），回它的 id 和目录。
+async fn spoken_thread(rpc: &mut Rpc, tag: &str, message: &str) -> (String, std::path::PathBuf) {
+    let dir = project_dir(tag);
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = rpc
+        .call("turn/start", json!({ "threadId": id, "message": message }))
+        .await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+    (id, dir)
+}
+
+/// `schedule/*`：任务记在某个会话名下（cwd 跟着会话），增删改查与校验；变动推
+/// 连接级的 `schedule/changed`（不用订阅线程）。
+#[tokio::test]
+async fn schedules_belong_to_a_thread_and_push_changes() {
+    let h = boot_with_schedules().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["schedules"], true, "{init}");
+    let (id, dir) = spoken_thread(&mut rpc, "schedule", "建个定时任务").await;
+
+    let created = rpc
+        .call(
+            "schedule/create",
+            json!({ "threadId": id, "interval": "10m", "prompt": "巡检一下" }),
+        )
+        .await;
+    let task = &created["result"]["task"];
+    assert_eq!(task["threadId"], json!(id), "{created}");
+    assert_eq!(task["cwd"], json!(dir.display().to_string()), "{created}");
+    assert_eq!(task["everySecs"], 600, "{created}");
+    assert_eq!(task["heldHere"], true, "{created}");
+    let task_id = task["id"].as_str().unwrap().to_string();
+
+    for (params, code) in [
+        (
+            json!({ "threadId": id, "everySecs": 30, "prompt": "x" }),
+            "invalid_params",
+        ),
+        (
+            json!({ "threadId": id, "interval": "5m" }),
+            "invalid_params",
+        ),
+        (
+            json!({ "threadId": "nope", "interval": "5m", "prompt": "x" }),
+            "not_found",
+        ),
+    ] {
+        let bad = rpc.call("schedule/create", params).await;
+        let got = bad["error"]["details"]["code"]
+            .as_str()
+            .or(bad["error"]["code"].as_i64().map(|_| "invalid_params"));
+        assert_eq!(got, Some(code), "{bad}");
+    }
+
+    let listed = rpc.call("schedule/list", json!({})).await;
+    let tasks = listed["result"]["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1, "{listed}");
+    assert!(tasks[0]["threadTitle"].is_string(), "{listed}");
+
+    let updated = rpc
+        .call(
+            "schedule/update",
+            json!({ "id": task_id, "prompt": "巡检两下" }),
+        )
+        .await;
+    assert_eq!(updated["result"]["task"]["prompt"], "巡检两下", "{updated}");
+
+    h.ctx.emit(cordis_spine::SCHEDULE_CHANGED, ());
+    let pushed = rpc
+        .wait_notification("schedule/changed", Duration::from_secs(5))
+        .await;
+    assert!(pushed["params"].is_object(), "{pushed}");
+
+    let deleted = rpc.call("schedule/delete", json!({ "id": task_id })).await;
+    assert_eq!(deleted["result"]["deleted"], json!(task_id), "{deleted}");
+    let again = rpc.call("schedule/delete", json!({ "id": task_id })).await;
+    assert_eq!(again["error"]["details"]["code"], "not_found", "{again}");
+}
+
+/// 定时任务到点时会话关着：`Tabs::open_session` 在后台开页，网关照 `thread/open`
+/// 的样子纳入投影——订阅时回放得出开页之前的对话，不是只有之后的事件。
+#[tokio::test]
+async fn sessions_opened_in_the_background_replay_their_history() {
+    let h = boot_with_schedules().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let (id, dir) = spoken_thread(&mut rpc, "bg-open", "开页之前说的话").await;
+    let closed = rpc.call("thread/close", json!({ "threadId": id })).await;
+    assert_eq!(closed["result"]["ok"], true, "{closed}");
+
+    let tabs = h
+        .ctx
+        .require::<cordis_tui::Tabs>(cordis_tui::TUI_TABS)
+        .unwrap();
+    tabs.open_session(&id, &dir).await.unwrap();
+
+    let mut fresh = Rpc::connect(h.addr, &h.pair_ticket().await).await;
+    let _ = fresh.call("initialize", json!({})).await;
+    let sub = fresh
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    assert!(
+        sub["result"]["replayed"].as_u64().unwrap_or(0) > 0,
+        "后台开的页要回放历史：{sub}"
+    );
+}

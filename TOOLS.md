@@ -48,7 +48,7 @@
 | `tool-canvas` | → `"tools"` | `canvas_create` `canvas_edit` `canvas_data` `canvas_read`（按需） | 模型写 HTML，桌面端在会话旁渲染；按版本落在会话目录 | [canvas](docs/tools/canvas.md) |
 | `plan-mode` | `"planMode"` + `"tools"` | `enter_plan_mode` `exit_plan_mode` | 计划文件按会话划分（见下）；计划态挡住 bash / 写文件等 | — |
 | `tool-ask-user` | `"ask"` + `"tools"` | `ask_user_question` | 事件 `ask/pending` | — |
-| `tool-scheduler` | → `"tools"`（live `"cron"`） | `scheduler_create` `scheduler_list` `scheduler_delete`（按需） | 包着已有 `"cron"`。`fire_immediately` 立刻跑第一次；循环 7 天后过期（过期不跑最后一次，滚动区留中文说明）；最多 50 条；`task_id` 原地更新并保持相位。滚动区 Loop 卡；`/tasks` 里 `x` / `[✗]` 关闭 | — |
+| `tool-scheduler` | → `"tools"`（live `"cron"`） | `scheduler_create` `scheduler_list` `scheduler_delete`（按需） | 包着已有 `"cron"`。任务**落盘**（`$DOCK_HOME/schedules.json`）、**属于发起它的会话**，跨重启继续跑；到点送进那个会话（关着就后台开页），停机期间错过的不补跑。工具只看得到、改得了本会话的任务。多个 Dock 进程共用 `$DOCK_HOME` 时只有持有者触发，持有者退出由下一个活进程接管。`fire_immediately` 立刻跑第一次；循环 7 天后过期（过期不跑最后一次，滚动区留中文说明）；最多 50 条；`task_id` 原地更新并保持相位。滚动区 Loop 卡；`/tasks` 里 `x` / `[✗]` 关闭 | — |
 | `tool-task` | `"subagents"` + `"tools"` | `task` `send_message` `list_agents` `interrupt_agent`（后两颗按需） | Grok coordinator + dock `ChildRunner` isolate | [task](docs/tools/task.md) |
 | `tool-memory` | `"memory"` + `"tools"`；`MEMORY.md` 注入挂 `agent/step-start`（order 7，不进系统提示） | `memory_search` `memory_get`（启用时常驻） | `$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,observations}/` + FTS `search.sqlite` + 可选 sqlite-vec hybrid（crate `dock-memory`）。默认关；`[memory] enabled` / `DOCK_MEMORY=1`。启用时 `register` 进 sampler；关则从表移除。旧 `~/.dock/memory` 只读兼容 | `/flush` `/dream` `/memory` `/remember` |
 | `tool-goal` | `"goal"` + `"tools"` | `update_goal`（按需） | Grok oneshot ack + drain，带续跑 waterfall | [goal](docs/tools/goal.md) |

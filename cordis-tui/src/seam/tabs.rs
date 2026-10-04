@@ -17,12 +17,13 @@ use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Fiber, Inject, Plugin};
 use cordis_spine::{
-    Ask, LogEvent, Mcp, Permissions, PlanMode, Sessions, AGENT_LOOP, AGENT_PRESETS, ASK, GOAL, MCP,
-    PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TODOS, TURN,
+    AgentPresets, Ask, LogEvent, Mcp, Permissions, PlanMode, Sessions, AGENT_LOOP, AGENT_PRESETS,
+    ASK, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TODOS, TURN,
 };
 
 use crate::names::{
-    SESSION, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS, TUI_WELCOME,
+    SESSION, SESSION_PORT, TUI_PAGE_OPENED, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS,
+    TUI_WELCOME,
 };
 use crate::seam::session::SessionRef;
 use crate::views::prompt::PromptWidget;
@@ -419,6 +420,29 @@ impl Tabs {
             kind: TabKind::Normal,
         });
         Ok(child)
+    }
+
+    /// 把落盘会话 `session_id` 开成一页（在它自己的 `cwd` 下），预设切回它记的那个；
+    /// 已经开着就回那一页。**不切**当前页——这是后台要往某个会话里送东西用的（定时
+    /// 任务到点）。新开的页发 [`TUI_PAGE_OPENED`]，网关据此把它纳入投影。
+    pub async fn open_session(&self, session_id: &str, cwd: &Path) -> Result<Context, String> {
+        if let Some(index) = self.index_of_session(session_id) {
+            return Ok(self.inner.tabs.lock().unwrap()[index].ctx.clone());
+        }
+        let ctx = self.open_at(cwd, Some(session_id)).await?;
+        // 预设跟着会话走（同网关 `thread/open`）；坏了 / 没了就沿用继承来的，只记一笔。
+        let stamped = ctx.get::<Sessions>(SESSIONS).and_then(|s| s.preset_id());
+        if let (Some(id), Some(presets)) = (stamped, ctx.get::<AgentPresets>(AGENT_PRESETS)) {
+            if let Err(e) = presets.pin(&id) {
+                eprintln!("dock: 定时任务开页，预设 `{id}` 没切过去：{e}");
+            }
+        }
+        let identity = ctx
+            .get::<Sessions>(SESSIONS)
+            .map(|s| s.identity().to_string())
+            .unwrap_or_default();
+        self.inner.root.emit(TUI_PAGE_OPENED, identity);
+        Ok(ctx)
     }
 
     /// 关掉正在写 `session_id` 的那一页。第一页（主会话）关不掉。

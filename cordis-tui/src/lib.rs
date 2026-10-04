@@ -19,8 +19,8 @@ mod views;
 pub use app::actions::{Action, Effect, PromptSend};
 pub use app::dispatch::dispatch;
 pub use names::{
-    GATEWAY, GATEWAY_PAIRING, SESSION, SESSION_PORT, THEME, TUI, TUI_PAIRING, TUI_PROMPT,
-    TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_TABS, TUI_WELCOME,
+    GATEWAY, GATEWAY_PAIRING, SESSION, SESSION_PORT, THEME, TUI, TUI_PAGE_OPENED, TUI_PAIRING,
+    TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_TABS, TUI_WELCOME,
 };
 pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui, welcome};
 pub use seam::gateway::{

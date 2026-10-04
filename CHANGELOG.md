@@ -10,6 +10,11 @@
 
 ### 新增
 
+- **定时任务落盘、属于发起它的会话**：`/loop` / `scheduler_create` 建的任务存进 `$DOCK_HOME/schedules.json`，Dock 重启后继续跑。
+  - 到点送进建它的那个会话；会话关着就在后台开成一页再送（以前一律送进第一页）。
+  - 停机期间错过的不补跑；仍 7 天过期。多个 Dock 共用 `~/.dock` 时只有持有它的进程触发，持有者退出后由下一个进程接管。
+  - 模型的 `scheduler_*` 只看得到、改得了本会话的任务。
+  - 网关新增 `schedule/list | create | update | delete` 与连接级推送 `schedule/changed`（能力 `schedules`）。
 - **桌面 GUI 设置页能直接改配置**：`dock.1` 新增一组设置方法（只给 `dock serve` 的父进程）。
   - 模型目录增删改、设默认、测试连接；MCP 服务增删改、开关、OAuth 登录。
   - 记忆、浏览器有头、`[toolset.web_fetch]` 的白名单键；CUA 安装 / 授权进度。

@@ -9,6 +9,7 @@ pub mod image_inputs;
 pub mod interaction;
 pub mod permission;
 pub mod preset;
+pub mod schedule;
 pub mod settings;
 pub mod slash;
 pub mod subagent;
