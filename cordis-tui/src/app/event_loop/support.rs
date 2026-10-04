@@ -1374,10 +1374,14 @@ pub(super) fn intercept_loop_send(text: &str) -> Option<Vec<Effect>> {
 }
 
 pub(super) fn cancel_scheduled(ctx: &Context, id: &str) {
-    match ctx.get::<Cron>(CRON) {
-        Some(cron) if cron.cancel(id) => flash(ctx, format!("已关闭 {id}")),
-        Some(_) => flash(ctx, format!("没有定时任务 {id}")),
-        None => flash(ctx, "cron 未挂载"),
+    let Some(cron) = ctx.get::<Cron>(CRON) else {
+        flash(ctx, "cron 未挂载");
+        return;
+    };
+    match cron.cancel(id) {
+        Ok(true) => flash(ctx, format!("已关闭 {id}")),
+        Ok(false) => flash(ctx, format!("没有定时任务 {id}")),
+        Err(e) => flash(ctx, e.to_string()),
     }
 }
 
@@ -1790,7 +1794,7 @@ mod tests {
             "定时任务要出现在任务条上"
         );
 
-        assert!(cron.cancel(&id));
+        assert!(cron.cancel(&id).unwrap());
         assert!(!live_redraw(&root, &Overlay::None), "取消后要停下来");
     }
 

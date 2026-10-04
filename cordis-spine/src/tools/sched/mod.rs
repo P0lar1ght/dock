@@ -270,13 +270,13 @@ fn delete_job(ctx: &Context, call: ToolCall) -> ToolResult {
         return tool_result(call, "Error: cron is not mounted");
     };
     let scope = caller_owner(ctx).map(|o| o.session);
-    if cron.cancel_where(id, scope.as_deref()) {
-        tool_result(call, format!("已关闭 {id}"))
-    } else {
-        tool_result(
+    match cron.cancel_where(id, scope.as_deref()) {
+        Ok(true) => tool_result(call, format!("已关闭 {id}")),
+        Ok(false) => tool_result(
             call,
             format!("没有 id 为 {id} 的定时任务；用 scheduler_list 查看"),
-        )
+        ),
+        Err(e) => tool_result(call, format!("Error: {e}")),
     }
 }
 
@@ -314,7 +314,7 @@ mod tests {
             result.content
         );
         let cron = ctx.get::<Cron>(CRON).unwrap();
-        let tick = cron.due();
+        let tick = cron.due().unwrap();
         assert_eq!(tick.fires.len(), 1);
         assert_eq!(tick.fires[0].prompt, "check");
     }
@@ -324,7 +324,7 @@ mod tests {
         let ctx = ctx_with_cron();
         create_job(&ctx, call(r#"{"interval":"5m","prompt":"later"}"#));
         let cron = ctx.get::<Cron>(CRON).unwrap();
-        assert!(cron.due().fires.is_empty());
+        assert!(cron.due().unwrap().fires.is_empty());
         assert_eq!(cron.list().len(), 1);
     }
 

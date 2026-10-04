@@ -452,7 +452,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `interval` 同 `/loop`（`5m` / `2h` / `1d`）；`everySecs` 最小 60。
   - `threadId` 开着的页（含 `live`）取它正在写的会话；关着的按会话列表找。还没落盘的回 `invalid_params`。
 - `schedule/update { id, interval? | everySecs?, prompt? }` → `{ task }`：改间隔保持相位，不续期。
-- `schedule/delete { id }` → `{ deleted }`；没有这个 id 回 `not_found`。
+- `schedule/delete { id }` → `{ deleted }`；没有这个 id 回 `not_found`，`schedules.json` 读写失败（如文件写坏了）回 `store_failed`，不混成 `not_found`。
 - 推送 `schedule/changed {}`：**连接级**，初始化过就收到，不用订阅线程。任何一处改了（含模型的
   `scheduler_*`、别的 Dock 进程、到点触发）最多 1 秒后到；收到后重拉 `schedule/list`。
 
