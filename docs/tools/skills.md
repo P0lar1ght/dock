@@ -20,4 +20,4 @@
 - **ctx**：→ `"tools"`（live `"skills"`）
 - **模型工具**：`skill`
 
-按需读 `SKILL.md` 正文（去 frontmatter）+ `$ARGUMENTS` / `$SKILL_DIR`。参数 `name` 必填、`args` 可选。返回 skill 信封和同目录最多约 10 个附属文件名。`disable-model-invocation` 的技能不进 listing / 本工具，斜杠仍可用。带 `paths:` 的技能激活前本工具也拒载（提示 gated on paths），斜杠不受限。没 skill 目录时工具仍注册。`code` / `cordis` 允许名单含 `skill`。**`register`（进 sampler）**——系统提示的技能 listing 直接点名这个工具，不能再让模型先 `search_tool` 绕一圈
+按需读 `SKILL.md` 正文（去 frontmatter）+ `$ARGUMENTS` / `$SKILL_DIR`。参数 `name` 必填、`args` 可选。返回 skill 信封和同目录最多约 10 个附属文件名。`disable-model-invocation` 的技能不进 listing / 本工具，斜杠仍可用。带 `paths:` 的技能激活前本工具也拒载（提示 gated on paths），斜杠不受限。没 skill 目录时工具仍注册。`code` / `cordis` 允许名单含 `skill`。**常驻**：不在任何内置预设的 `on_demand_tools` 里——技能 listing 点名之后几乎每次都要调，按需只会让模型先 `search_tool` 白绕一圈（被点名本身不是常驻的理由，见 [agent-presets](agent-presets.md)）
