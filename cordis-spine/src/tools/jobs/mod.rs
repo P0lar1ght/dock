@@ -50,6 +50,10 @@ pub(crate) struct OutputBuf {
     /// 命令结束（或超时）时中间字节早已不在内存里，那时再 offload 只能落到
     /// 已经截断过的那一份。
     spill: Option<Spill>,
+    /// 已经试过落盘（成没成都算）。**只试一次**：头尾之外的字节一过阈值就开始
+    /// 丢，之后再开文件只能写下头尾，是一份残缺的「全文」。追加失败放弃落盘后
+    /// 同理不能重开。
+    spill_tried: bool,
     /// 用作落盘文件名的任务 id。空串表示这个 buf 不落盘（单测里的裸 buf）。
     id: String,
 }
@@ -111,7 +115,8 @@ impl OutputBuf {
     pub(crate) fn push(&mut self, bytes: &[u8]) {
         // 顺序要紧：先判「这一块会不会让我们开始丢字节」，在真丢之前把已有内容
         // 落盘，再把这一块追加进去。反过来就会漏掉刚好跨过阈值的那一段。
-        if self.spill.is_none() && self.total + bytes.len() > HEAD_BYTES + TAIL_BYTES {
+        if !self.spill_tried && self.total + bytes.len() > HEAD_BYTES + TAIL_BYTES {
+            self.spill_tried = true;
             self.open_spill();
         }
         if let Some(spill) = self.spill.as_mut() {
@@ -120,6 +125,8 @@ impl OutputBuf {
             // 交出去——否则给模型的只剩 2KB 预览，还指向一份残缺的文件。放弃
             // 落盘，退回内联头尾。
             if spill.file.write_all(bytes).is_err() {
+                // 残缺文件留着只会被当成全文，best-effort 删掉。
+                let _ = std::fs::remove_file(&spill.path);
                 self.spill = None;
             }
         }
@@ -1081,6 +1088,11 @@ mod tests {
         buf.spill.as_mut().unwrap().file = std::fs::File::open(&path).unwrap();
         buf.push(b"\nlast line after the disk filled up\n");
         assert!(buf.spill.is_none(), "追加失败要放弃落盘");
+        assert!(!std::path::Path::new(&path).exists(), "残缺文件要删掉");
+        // 磁盘又有空间了：也不能重开——重开只写得下头尾，中间那段早丢了。
+        buf.push(b"more output once the disk recovered\n");
+        assert!(buf.spill.is_none(), "放弃落盘后不能重开：{path}");
+        assert!(!std::path::Path::new(&path).exists(), "不能再写出残缺文件");
         let rendered = buf.render_for_model();
         assert!(
             !rendered.contains("输出太长"),
@@ -1089,8 +1101,28 @@ mod tests {
         assert!(
             rendered
                 .trim_end()
-                .ends_with("last line after the disk filled up"),
+                .ends_with("more output once the disk recovered"),
             "要退回内联头尾"
+        );
+    }
+
+    /// 跨过阈值那一刻没开成文件（目录不可写）：之后目录恢复了也不能补开，那时
+    /// 中间的字节已经丢了。
+    #[test]
+    fn spill_is_not_reopened_after_a_failed_open() {
+        let _env = cordis_base::test_env::scoped().home();
+        let dir = cordis_base::tool_output::spill_dir();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(&dir, b"not a dir").unwrap();
+        let mut buf = OutputBuf::with_id("late-job");
+        buf.push("b".repeat(HEAD_BYTES + TAIL_BYTES + 10).as_bytes());
+        assert!(buf.spill.is_none(), "目录不可写，开不成");
+        std::fs::remove_file(&dir).unwrap();
+        buf.push("c".repeat(30_000).as_bytes());
+        assert!(buf.spill.is_none(), "错过的字节补不回来，不能补开");
+        assert!(
+            !buf.render_for_model().contains("输出太长"),
+            "不能按残缺文件给预览"
         );
     }
 
