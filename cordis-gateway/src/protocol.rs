@@ -51,6 +51,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `subagent/list` / `history` / `send` / `interrupt` / `stop` + 推送 `subagent/updated`
     // （状态）与 `subagent/event`（子代理自己的对话事件，包在父线程上）。
     ("subagents", true),
+    // `thread/context/get`：上下文窗口按类别拆开（系统提示 / 工具定义 / 消息 / 其余 / 空闲，
+    // 各带明细）+ 按需加载、不占窗口的 MCP / 本地工具。
+    ("contextBreakdown", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -100,6 +103,7 @@ pub const THREAD_GOAL_PAUSE: &str = "thread/goal/pause";
 pub const THREAD_GOAL_COMPLETE: &str = "thread/goal/complete";
 pub const THREAD_GOAL_CLEAR: &str = "thread/goal/clear";
 pub const THREAD_CONTEXT_COMPACT: &str = "thread/context/compact";
+pub const THREAD_CONTEXT_GET: &str = "thread/context/get";
 pub const TURN_START: &str = "turn/start";
 pub const TURN_ENQUEUE: &str = "turn/enqueue";
 pub const TURN_STEER: &str = "turn/steer";
