@@ -456,6 +456,34 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 推送 `schedule/changed {}`：**连接级**，初始化过就收到，不用订阅线程。任何一处改了（含模型的
   `scheduler_*`、别的 Dock 进程、到点触发）最多 1 秒后到；收到后重拉 `schedule/list`。
 
+### Pull Request（能力 `pullRequests`，`handlers/vcs.rs`）
+
+项目的 GitHub PR，只读，经本机 `gh` CLI。两个方法都在锁外另起任务跑（一次几秒，走网络），单次 gh 调用 20 秒超时。
+
+慢的是建连接（每次 gh 新开一条 TLS，走代理时一两秒），所以：
+- 列表只发一次 `gh api graphql`（我是谁 + 仓库名 + PR；`{owner}/{repo}` 由 gh 本地解析）。
+- 列表按项目缓存 60 秒；判断「变没变」本身就要一次往返（GraphQL 没有 304），只能靠有效期。
+- 详情按 PR 缓存：有比它新的列表时，列表里这个 PR 的 `updatedAt` 和检查汇总都没变就复用，变了就重拉；
+  没有更新的列表时按 60 秒有效期。
+- 同一项目 / 同一 PR 同时来的请求只跑一次 gh。gh 用不了的结果不缓存。
+- 两个方法都收 `force: true` 绕过缓存；成功的结果带 `fetchedAtMs`（从 GitHub 拿的时刻）和 `cached`。
+
+- 项目用 `threadId`（那个线程的 cwd）或 `cwd` 指定；`cwd` 必须是 Dock 认识的项目（开着的页或会话列表里的某个 cwd），否则 `invalid_params`。
+- `vcs/pr/list { threadId | cwd }` → `{ available, repo, viewer, prs[] }`，开着的 PR 最多 50 条：
+  - `number` / `title` / `url` / `author` / `isDraft` / `headRefName` / `baseRefName` / `updatedAt`；
+  - `reviewDecision` / `mergeable`（空串回 `null`）；
+  - `checks: { state, total, failed, pending }`，`state` 为 `success` / `failure` / `pending` / `none`；
+  - `mine`（作者是我）/ `reviewRequested`（请我 review）。
+- `vcs/pr/get { threadId | cwd, number }` → `{ available, pr }`：上面那些，加 `body` / `state` / `mergeStateStatus` /
+  `additions` / `deletions` / `changedFiles` / `comments`（条数）/ `reviews[]`（每人最近一次）/ `checks[]`（`name` / `state` / `url`）。
+- **gh 用不了不是错误**：回 `{ available: false, reason, hint }`，客户端画空状态。
+  - `gh_missing`：没找到 gh（提示 `brew install gh` + `gh auth login`）；
+  - `gh_unauthenticated`：gh 没登录；
+  - `not_git`：项目不是 git 仓库；`not_github`：没有指向 GitHub 的远端；
+  - `gh_failed`：gh 自己出错或超时，`hint` 带它最后一行原话。
+- 找 gh：`DOCK_GH`（给了就只认它）→ `PATH` → `/opt/homebrew/bin` / `/usr/local/bin` / `~/.local/bin`。
+  从访达启动的桌面端拿到的 `PATH` 通常不含 Homebrew，所以后几处要自己看。
+
 ## 依赖注入
 
 `mount` 声明依赖：`SESSIONS`、`SESSION_PORT`、`PERMISSIONS`、`ASK`、`PLAN_MODE`、`MCP`、`TURN`、`SETTINGS`。这些是 named service，在 `apply` 时 live-lookup，**不要**在闭包里持有 `Arc`。

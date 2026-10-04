@@ -57,6 +57,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `schedule/list` / `create` / `update` / `delete` + 连接级推送 `schedule/changed`：
     // 定时任务（落盘、属于某个会话、跨重启继续跑）。
     ("schedules", true),
+    // `vcs/pr/list` / `vcs/pr/get`：项目的 GitHub PR（只读，经本机 gh）。gh 用不了回
+    // `available: false` + `reason` / `hint`，不是错误。
+    ("pullRequests", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -78,6 +81,8 @@ pub const PRESET_DELETE: &str = "preset/delete";
 pub const PRESET_GET: &str = "preset/get";
 pub const PRESET_UPDATE: &str = "preset/update";
 pub const TOOL_CATALOG: &str = "tool/catalog";
+pub const VCS_PR_LIST: &str = "vcs/pr/list";
+pub const VCS_PR_GET: &str = "vcs/pr/get";
 pub const SCHEDULE_LIST: &str = "schedule/list";
 pub const SCHEDULE_CREATE: &str = "schedule/create";
 pub const SCHEDULE_UPDATE: &str = "schedule/update";

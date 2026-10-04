@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::handle::GatewayHandle;
 use crate::handlers::{
     canvas, connection, context, environment, fs, image_inputs, interaction, permission, preset,
-    schedule, settings, slash, subagent, thread, turn,
+    schedule, settings, slash, subagent, thread, turn, vcs,
 };
 use crate::protocol::{self, RpcError};
 
@@ -79,7 +79,9 @@ pub async fn dispatch(
         | protocol::MCP_LOGIN
         | protocol::PLUGIN_ENABLE
         | protocol::PLUGIN_PROMOTE
-        | protocol::PLUGIN_DISCARD => dispatch_detached(gateway, method, params).await,
+        | protocol::PLUGIN_DISCARD
+        | protocol::VCS_PR_LIST
+        | protocol::VCS_PR_GET => dispatch_detached(gateway, method, params).await,
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
@@ -183,6 +185,9 @@ pub fn is_detached(method: &str) -> bool {
             | protocol::PLUGIN_ENABLE
             | protocol::PLUGIN_PROMOTE
             | protocol::PLUGIN_DISCARD
+            // 跑 gh（走网络，一次几秒）。
+            | protocol::VCS_PR_LIST
+            | protocol::VCS_PR_GET
     )
 }
 
@@ -193,6 +198,8 @@ pub async fn dispatch_detached(
     params: Value,
 ) -> Result<Value, RpcError> {
     match method {
+        protocol::VCS_PR_LIST => vcs::list(&gateway, params).await,
+        protocol::VCS_PR_GET => vcs::get(&gateway, params).await,
         protocol::PRESET_DRAFT => preset::draft(&gateway, params).await,
         protocol::PRESET_REWRITE => preset::rewrite(&gateway, params).await,
         protocol::PRESET_SUGGEST_TOOLS => preset::suggest_tools(&gateway, params).await,

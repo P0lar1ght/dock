@@ -10,6 +10,11 @@
 
 ### 新增
 
+- **网关能列出项目的 GitHub PR**：`vcs/pr/list` / `vcs/pr/get`（能力 `pullRequests`），只读，经本机 `gh`。
+  - 标出「我的」「请我 review」，汇总 CI 检查；详情含 review、改动量、逐项检查。
+  - 没装 / 没登录 gh、不是 git 仓库、没有 GitHub 远端时回 `available: false` + 中文提示，不报错。
+  - 从访达启动的桌面端也找得到 Homebrew 装的 gh（`DOCK_GH` 可指定）。
+  - 列表一次 GraphQL 拿齐（原来三次往返），按项目缓存 60 秒；PR 没变时详情直接复用，`force` 强制刷新。
 - **定时任务落盘、属于发起它的会话**：`/loop` / `scheduler_create` 建的任务存进 `$DOCK_HOME/schedules.json`，Dock 重启后继续跑。
   - 到点送进建它的那个会话；会话关着就在后台开成一页再送（以前一律送进第一页）。
   - 停机期间错过的不补跑；仍 7 天过期。多个 Dock 共用 `~/.dock` 时只有持有它的进程触发，持有者退出后由下一个进程接管。
