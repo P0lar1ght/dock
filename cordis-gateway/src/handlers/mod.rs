@@ -15,3 +15,4 @@ pub mod slash;
 pub mod subagent;
 pub mod thread;
 pub mod turn;
+pub mod vcs;

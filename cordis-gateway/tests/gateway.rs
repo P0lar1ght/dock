@@ -4242,3 +4242,104 @@ async fn sessions_opened_in_the_background_replay_their_history() {
         "后台开的页要回放历史：{sub}"
     );
 }
+
+/// 写一个假 gh：按参数吐固定 JSON（`exit_code` 非 0 时只往 stderr 写 `stderr`）。
+fn fake_gh(dir: &std::path::Path, exit_code: i32, stderr: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(format!("gh-{exit_code}"));
+    let script = format!(
+        r#"#!/bin/sh
+if [ {exit_code} -ne 0 ]; then echo '{stderr}' >&2; exit {exit_code}; fi
+case "$1 $2" in
+  "repo view") echo '{{"nameWithOwner":"acme/app"}}' ;;
+  "api user") echo '{{"login":"me"}}' ;;
+  "pr list") echo '[{{"number":7,"title":"mine","url":"https://x/7","author":{{"login":"me"}},"isDraft":false,"headRefName":"feat","baseRefName":"main","updatedAt":"2026-10-01T00:00:00Z","reviewDecision":"","mergeable":"MERGEABLE","reviewRequests":[],"statusCheckRollup":[{{"status":"COMPLETED","conclusion":"FAILURE","name":"test"}}]}},{{"number":8,"title":"theirs","url":"https://x/8","author":{{"login":"bob"}},"isDraft":true,"headRefName":"fix","baseRefName":"main","updatedAt":"2026-10-02T00:00:00Z","reviewDecision":"REVIEW_REQUIRED","mergeable":"UNKNOWN","reviewRequests":[{{"login":"me"}}],"statusCheckRollup":[]}}]' ;;
+  "pr view") echo '{{"number":'"$3"',"title":"mine","body":"b","url":"https://x/7","author":{{"login":"me"}},"state":"OPEN","isDraft":false,"headRefName":"feat","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","reviewDecision":"APPROVED","statusCheckRollup":[{{"status":"COMPLETED","conclusion":"SUCCESS","name":"test","detailsUrl":"https://ci"}}],"additions":3,"deletions":1,"changedFiles":2,"createdAt":"c","updatedAt":"u","reviews":[{{"author":{{"login":"bob"}},"state":"COMMENTED","submittedAt":"1"}},{{"author":{{"login":"bob"}},"state":"APPROVED","submittedAt":"2"}}],"comments":[{{}},{{}}]}}' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+"#
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// `vcs/pr/*`：经 gh 列出 / 查看项目的 PR；gh 没装、没登录不是错误而是
+/// `available: false` + 原因；不认识的目录不让查。全放一个用例里：`DOCK_GH` 是进程级的。
+#[tokio::test]
+async fn pull_requests_come_from_gh_and_degrade_without_it() {
+    let h = boot_with_schedules().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["pullRequests"], true,
+        "{init}"
+    );
+    let project = project_dir("pr");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let _ = rpc
+        .call(
+            "thread/start",
+            json!({ "cwd": project.display().to_string() }),
+        )
+        .await;
+    let cwd = json!(project.display().to_string());
+    let bin = project_dir("fake-gh");
+
+    std::env::set_var("DOCK_GH", fake_gh(&bin, 0, ""));
+    let listed = rpc.call("vcs/pr/list", json!({ "cwd": cwd })).await;
+    let r = &listed["result"];
+    assert_eq!(r["available"], true, "{listed}");
+    assert_eq!(r["repo"], "acme/app");
+    let prs = r["prs"].as_array().unwrap();
+    assert_eq!(prs.len(), 2, "{listed}");
+    assert_eq!(prs[0]["mine"], true);
+    assert_eq!(prs[0]["checks"]["state"], "failure");
+    assert_eq!(prs[1]["reviewRequested"], true);
+    assert_eq!(prs[1]["isDraft"], true);
+
+    let got = rpc
+        .call("vcs/pr/get", json!({ "cwd": cwd, "number": 7 }))
+        .await;
+    let pr = &got["result"]["pr"];
+    assert_eq!(pr["number"], 7, "{got}");
+    assert_eq!(pr["checksSummary"]["state"], "success");
+    assert_eq!(pr["comments"], 2);
+    assert_eq!(
+        pr["reviews"].as_array().unwrap().len(),
+        1,
+        "每人只留最近一次"
+    );
+    assert_eq!(pr["reviews"][0]["state"], "APPROVED");
+
+    std::env::set_var(
+        "DOCK_GH",
+        fake_gh(
+            &bin,
+            4,
+            "To get started with GitHub CLI, please run:  gh auth login",
+        ),
+    );
+    let unauth = rpc.call("vcs/pr/list", json!({ "cwd": cwd })).await;
+    assert_eq!(unauth["result"]["available"], false, "{unauth}");
+    assert_eq!(unauth["result"]["reason"], "gh_unauthenticated", "{unauth}");
+
+    std::env::set_var("DOCK_GH", bin.join("not-installed"));
+    let missing = rpc.call("vcs/pr/list", json!({ "cwd": cwd })).await;
+    assert_eq!(missing["result"]["reason"], "gh_missing", "{missing}");
+    assert!(
+        missing["result"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("brew install gh"),
+        "{missing}"
+    );
+    std::env::remove_var("DOCK_GH");
+
+    let stranger = rpc.call("vcs/pr/list", json!({ "cwd": "/" })).await;
+    assert_eq!(
+        stranger["error"]["details"]["code"], "invalid_params",
+        "{stranger}"
+    );
+}
