@@ -29,7 +29,7 @@ const TAIL_BYTES: usize = MAX_OUTPUT_BYTES - HEAD_BYTES;
 /// 头 4KB + 尾 16KB 且只报字节，模型不知道这些对应第几行，只好从第 1 行重读
 /// （#174）。结尾不再内联：提示里给出总行数，要看结论就按行号读文件末尾。
 /// 落盘失败时没有文件可读，才退回内联 [`HEAD_BYTES`] + [`TAIL_BYTES`]。
-const PREVIEW_BYTES: usize = 2 * 1024;
+use cordis_base::tool_output::PREVIEW_BYTES;
 /// 子进程退出后留给读端收尾的窗口。
 ///
 /// 孙进程会继承管道（`sleep 60 &`），子进程退出后读端不一定立刻 EOF。给一个
@@ -116,7 +116,12 @@ impl OutputBuf {
         }
         if let Some(spill) = self.spill.as_mut() {
             use std::io::Write;
-            let _ = spill.file.write_all(bytes);
+            // 追加失败（磁盘满、配额、I/O 错误）：文件从此缺一段，不能再当全文
+            // 交出去——否则给模型的只剩 2KB 预览，还指向一份残缺的文件。放弃
+            // 落盘，退回内联头尾。
+            if spill.file.write_all(bytes).is_err() {
+                self.spill = None;
+            }
         }
         self.total += bytes.len();
         self.newlines += bytes.iter().filter(|b| **b == b'\n').count();
@@ -201,7 +206,10 @@ impl OutputBuf {
     fn render_head_and_tail(&self, tail: &[u8], dropped: usize) -> String {
         let mut s = String::from_utf8_lossy(trim_trailing_partial(&self.head)).into_owned();
         let recover = match self.spill.as_ref() {
-            Some(spill) => format!("完整输出已写入：{}。", spill.path),
+            Some(spill) => format!(
+                "完整输出已写入：{}，用 read_file 或 grep 读它取回省略的部分。",
+                spill.path
+            ),
             None => "需要完整内容就把命令改成写进文件再分段读。".into(),
         };
         s.push_str(&format!(
@@ -1059,6 +1067,30 @@ mod tests {
             buf.last_line(TAIL_LINE_BYTES),
             "line 03000",
             "任务行取的是真正的最后一行"
+        );
+    }
+
+    /// 落盘文件开得了、后来写不进（磁盘满）：文件残缺，不能再按它给预览，
+    /// 要退回内联头尾。用只读句柄模拟写失败。
+    #[test]
+    fn spill_append_failure_falls_back_to_head_and_tail() {
+        let _env = cordis_base::test_env::scoped().home();
+        let mut buf = OutputBuf::with_id("broken-job");
+        buf.push("a".repeat(HEAD_BYTES + TAIL_BYTES + 10).as_bytes());
+        let path = buf.spill.as_ref().expect("超预算应已开始落盘").path.clone();
+        buf.spill.as_mut().unwrap().file = std::fs::File::open(&path).unwrap();
+        buf.push(b"\nlast line after the disk filled up\n");
+        assert!(buf.spill.is_none(), "追加失败要放弃落盘");
+        let rendered = buf.render_for_model();
+        assert!(
+            !rendered.contains("输出太长"),
+            "不能按残缺文件给预览：{rendered}"
+        );
+        assert!(
+            rendered
+                .trim_end()
+                .ends_with("last line after the disk filled up"),
+            "要退回内联头尾"
         );
     }
 

@@ -16,7 +16,7 @@ const BASH_DESC: &str = "Run a bash command in the workspace and return its outp
 - Each call runs in a fresh shell: cwd, variables and functions do not persist between calls. Pass workdir instead of using `cd`.\n\
 - A foreground command that outlives timeout_ms is not killed: it moves to the background and you get a job id plus the output so far. Never re-run it — collect it with the job tool; stop jobs with kill_task.\n\
 - Piping command output into `grep` (e.g. `cargo test 2>&1 | grep FAILED`) is what bash is for.\n\
-- Output is capped; the head and tail are kept and the middle is reported as elided.";
+- Output over 20KB is saved to a file and you get only the first 2KB: the end (exit status, test summary, errors) is not shown. The notice gives the file path, its line count, and the read_file offsets to continue from or to read the last lines.";
 
 /// 前台 bash 的阻塞预算。到点把命令**转入后台**并带回已产出的输出
 /// （见 [`detach_to_background`]），不是杀掉。

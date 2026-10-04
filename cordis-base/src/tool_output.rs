@@ -43,7 +43,9 @@ pub enum Shape {
 pub struct Budget {
     /// 字节兜底帽。
     pub max_bytes: usize,
-    /// 截断形状。
+    /// 截断形状。目前两种都是「保头丢尾」、文案也相同，`cap_bytes` 不按它分支；
+    /// 留着是为了调用点能写明意图（列表 / 不透明文本），哪天两者需要不同的
+    /// 预览策略时不用回头改调用点。
     pub shape: Shape,
 }
 
@@ -117,8 +119,14 @@ pub async fn offload(call_id: &str, content: &str) -> Option<String> {
     Some(path.to_string_lossy().into_owned())
 }
 
+/// 落盘目录，**绝对路径**。
+///
+/// `DOCK_HOME` 可以是相对路径，而它是按进程 cwd 解析的；提示里的路径却是交给
+/// `read_file` 按**会话** cwd 解析的（`/cd` 之后两者不同）。相对路径会让模型
+/// 打开另一个文件或根本打不开——落盘后内联只剩预览，这等于把结果弄丢。
 pub fn spill_dir() -> PathBuf {
-    crate::config::dock_home().join("tool-output")
+    let dir = crate::config::dock_home().join("tool-output");
+    std::path::absolute(&dir).unwrap_or(dir)
 }
 
 /// 本进程的落盘前缀，进程内固定、跨进程不重复。
@@ -447,6 +455,20 @@ mod tests {
         let path = spill_dir().join(format!("{}.txt", offload_stem("c2")));
         assert!(path.exists(), "完整输出应落盘：{}", path.display());
         assert_eq!(std::fs::read_to_string(&path).unwrap().len(), 500);
+    }
+
+    /// `DOCK_HOME` 是相对路径时，提示里的路径也必须是绝对的：`read_file` 按会话
+    /// cwd 解析，`/cd` 之后与进程 cwd 不同。
+    #[test]
+    fn spill_dir_is_absolute_even_for_a_relative_dock_home() {
+        let _env = crate::test_env::scoped().set("DOCK_HOME", "relative-dock-home");
+        let dir = spill_dir();
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(
+            dir.ends_with("relative-dock-home/tool-output"),
+            "{}",
+            dir.display()
+        );
     }
 
     /// 从提示里抠出 `offset=N`。
