@@ -900,6 +900,60 @@ async fn context_breakdown_slices_cover_the_window() {
     );
 }
 
+/// #176：有锚点时 `usedTokens` 是上游真账，分项是估算。估算偏高时分项要缩进
+/// 已用里——工具定义不能被「已用 − 系统 − 消息」减成 0，各片仍然正好铺满窗口。
+#[tokio::test]
+async fn context_breakdown_fits_estimates_inside_the_upstream_total() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("写一页".into()));
+    sessions.append(LogEvent::ToolExecute {
+        id: "c1".into(),
+        name: "read_file".into(),
+        arguments: "{}".into(),
+        content: "中".repeat(30_000),
+        images: Vec::new(),
+        is_error: false,
+    });
+    // 上游报的远小于估算（中文按字估 1 token 偏高）。
+    sessions.begin_llm();
+    sessions.apply_llm_delta(&StreamDelta::Usage {
+        tokens: cordis_base::usage::TokenUsage {
+            prompt_tokens: 12_000,
+            completion_tokens: 100,
+            ..Default::default()
+        },
+        official: true,
+        model: "m".into(),
+        cost_usd_ticks: None,
+    });
+    sessions.finish_llm(&LlmOutput {
+        text: "ok".into(),
+        ..Default::default()
+    });
+
+    let r = rpc
+        .call("thread/context/get", json!({ "threadId": "live" }))
+        .await;
+    let c = &r["result"];
+    let used = c["usedTokens"].as_u64().unwrap();
+    let total = c["maxContextTokens"].as_u64().unwrap();
+    let slices = c["slices"].as_array().unwrap();
+    let get = |id: &str| {
+        slices
+            .iter()
+            .find(|s| s["id"] == id)
+            .map_or(0, |s| s["tokens"].as_u64().unwrap())
+    };
+    assert!(get("messages") <= used, "消息不能超过已用：{c}");
+    assert!(get("tools") > 0, "有工具时工具定义不能是 0：{c}");
+    let sum: u64 = slices.iter().map(|s| s["tokens"].as_u64().unwrap()).sum();
+    assert_eq!(sum, used.max(total), "{c}");
+}
+
 #[tokio::test]
 async fn turn_intent_starts_goal_and_plan() {
     let h = Harness::boot().await;

@@ -124,8 +124,8 @@ pub fn snapshot_context(ctx: &Context) -> ContextSnapshot {
 /// Itemized breakdown for one occupancy slice (TUI detail pane).
 pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
     let parts = assembled_parts(ctx);
-    let snap = snapshot_with_parts(ctx, &parts);
-    match kind {
+    let (snap, fit) = snapshot_and_fit(ctx, &parts);
+    let detail = match kind {
         OccupancyKind::System => system_detail(&parts, &snap),
         OccupancyKind::Messages => messages_detail(ctx, &snap),
         OccupancyKind::Overhead => overhead_detail(ctx, &snap),
@@ -137,7 +137,48 @@ pub fn occupancy_detail(ctx: &Context, kind: OccupancyKind) -> OccupancyDetail {
         OccupancyKind::Skills => skills_detail(ctx, &snap),
         OccupancyKind::Instructions => instructions_detail(ctx, &snap),
         OccupancyKind::Memory => memory_detail(ctx, &snap),
+    };
+    fit_rows(detail, fit)
+}
+
+/// 分项估算缩到上游真账时用的比例：`num / den`（`den == 0` 表示不缩）。
+#[derive(Clone, Copy)]
+struct Fit {
+    num: u64,
+    den: u64,
+}
+
+impl Fit {
+    fn apply(self, tokens: u64) -> u64 {
+        if self.den == 0 {
+            tokens
+        } else {
+            scale(tokens, self.num, self.den)
+        }
     }
+}
+
+/// 明细行是逐项估算，和那一片用同一个比例缩（见 [`snapshot_and_fit`]），免得点进去
+/// 看到的分项比总数还大。空闲那一格的行不是估算；MCP / 按需不占窗口，都不动。
+fn fit_rows(mut detail: OccupancyDetail, fit: Fit) -> OccupancyDetail {
+    if matches!(
+        detail.kind,
+        OccupancyKind::Free | OccupancyKind::Mcp | OccupancyKind::Deferred
+    ) {
+        return detail;
+    }
+    for row in detail.groups.iter_mut().flat_map(|g| g.rows.iter_mut()) {
+        row.tokens = row.tokens.map(|t| fit.apply(t));
+    }
+    detail
+}
+
+/// `value × num / den`，向下取整；一组按同一比例缩完，加起来不会超过 `num`。
+fn scale(value: u64, num: u64, den: u64) -> u64 {
+    if den == 0 {
+        return value;
+    }
+    (u128::from(value) * u128::from(num) / u128::from(den)) as u64
 }
 
 fn assembled_parts(ctx: &Context) -> PromptAssembly {
@@ -166,6 +207,7 @@ struct Measure {
     reasoning: u64,
     tools: u64,
     tool_count: u64,
+    images: u64,
     used: u64,
 }
 
@@ -208,11 +250,16 @@ fn measure(ctx: &Context, system: &str) -> Measure {
         reasoning,
         tools,
         tool_count: specs.len() as u64,
+        images,
         used,
     }
 }
 
 fn snapshot_with_parts(ctx: &Context, parts: &PromptAssembly) -> ContextSnapshot {
+    snapshot_and_fit(ctx, parts).0
+}
+
+fn snapshot_and_fit(ctx: &Context, parts: &PromptAssembly) -> (ContextSnapshot, Fit) {
     let system = parts.render();
     let m = measure(ctx, &system);
     let system_prompt_tokens = m.system;
@@ -237,16 +284,38 @@ fn snapshot_with_parts(ctx: &Context, parts: &PromptAssembly) -> ContextSnapshot
     } else {
         (0, 0, 0)
     };
-    // 推理归「附加开销」那一格（见 `overhead_detail`），不进消息。
-    let message_tokens = m.history.saturating_sub(m.reasoning);
-    let tool_definitions_count = m.tool_count;
-    let tool_definitions_tokens = m.tools;
     let window = sessions.as_ref().map(|s| s.usage().window).unwrap_or(0);
     let total = window_size(window, ctx);
     let used = m.used.min(total.saturating_mul(4));
     let usage_pct = usage_percentage_u8(used, total);
+    // 分项全是本地估算，`used` 有锚点时却是上游真账。两本账对不上时（估算偏高：
+    // 中文一字按 1 token、tokenizer 差异），分项加起来会超过总数：百分比过 100%，
+    // 「其余」被减成 0，工具定义跟着被挤成 0（#176）。超出时把分项按同一比例缩到
+    // `used` 里；不足的差额留在「其余」那一格。没锚点时 `used` 就是这些估算之和。
+    let estimated = m
+        .system
+        .saturating_add(m.history)
+        .saturating_add(m.tools)
+        .saturating_add(m.images);
+    let fit = if estimated > used {
+        Fit {
+            num: used,
+            den: estimated,
+        }
+    } else {
+        Fit { num: 0, den: 0 }
+    };
+    let system_prompt_tokens = fit.apply(system_prompt_tokens);
+    // 推理归「附加开销」那一格（见 `overhead_detail`），不进消息。
+    let message_tokens = fit.apply(m.history.saturating_sub(m.reasoning));
+    let tool_definitions_count = m.tool_count;
+    let tool_definitions_tokens = fit.apply(m.tools);
+    let mut categories = extra_categories(ctx, parts);
+    for c in &mut categories {
+        c.tokens = fit.apply(c.tokens);
+    }
 
-    ContextSnapshot {
+    let snap = ContextSnapshot {
         used,
         total,
         model: model_label(ctx),
@@ -260,8 +329,9 @@ fn snapshot_with_parts(ctx: &Context, parts: &PromptAssembly) -> ContextSnapshot
         turn_count,
         tool_call_count,
         compaction_count,
-        categories: extra_categories(ctx, parts),
-    }
+        categories,
+    };
+    (snap, fit)
 }
 
 fn system_detail(assembly: &PromptAssembly, snap: &ContextSnapshot) -> OccupancyDetail {
@@ -366,15 +436,9 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
                     note: Some(note),
                 });
             }
-            LogEvent::ToolExecute {
-                name,
-                arguments,
-                content,
-                ..
-            } => {
-                let tok = estimate_text(name)
-                    .saturating_add(estimate_text(arguments))
-                    .saturating_add(estimate_text(content));
+            // 工具结果只带 content 发给上游，参数已算在助手那条里（#176）。
+            LogEvent::ToolExecute { name, content, .. } => {
+                let tok = estimate_text(content);
                 tool_n += 1;
                 tool_tok += tok;
                 if name == crate::tools::mcp::SEARCH_TOOL_NAME {
@@ -1250,6 +1314,70 @@ mod tests {
 
         sample_with_usage(&sessions, 40_000, 2_000);
         assert_eq!(snapshot_context(&ctx).used, 42_000);
+    }
+
+    /// #176：有锚点时 `used` 是上游真账，分项是本地估算。估算偏高时分项要缩进
+    /// `used` 里：加起来不超过总数，工具定义不能被挤成 0，点进去的明细也不能比
+    /// 那一片还大。
+    #[tokio::test]
+    async fn estimated_parts_fit_inside_the_upstream_total() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.set_window(1_000_000);
+        sessions.append(LogEvent::User("写一页".into()));
+        sessions.append(LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            content: "中".repeat(20_000),
+            images: Vec::new(),
+            is_error: false,
+        });
+        // 上游真账只有估算的一半上下：中文按字估 1 token 偏高。
+        sample_with_usage(&sessions, 10_000, 500);
+        let snap = snapshot_context(&ctx);
+        assert_eq!(snap.used, 10_500);
+        let parts = snap.system_prompt_tokens + snap.message_tokens + snap.tool_definitions_tokens;
+        assert!(parts <= snap.used, "分项 {parts} 超过总数：{snap:?}");
+        assert!(
+            snap.tool_definitions_count == 0 || snap.tool_definitions_tokens > 0,
+            "有工具时工具定义不能被挤成 0：{snap:?}"
+        );
+        assert_eq!(snap.free_tokens, snap.total - snap.used);
+
+        let detail = occupancy_detail(&ctx, OccupancyKind::Messages);
+        assert_eq!(detail.tokens, snap.message_tokens);
+        let each: u64 = detail
+            .groups
+            .iter()
+            .find(|g| g.heading == "逐条")
+            .unwrap()
+            .rows
+            .iter()
+            .filter_map(|r| r.tokens)
+            .sum();
+        assert!(
+            each <= detail.tokens,
+            "逐条 {each} 超过消息 {}",
+            detail.tokens
+        );
+    }
+
+    /// 没锚点时 `used` 就是估算之和，分项原样，不缩。
+    #[tokio::test]
+    async fn unanchored_parts_are_not_scaled() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::User("x".repeat(4_000)));
+        let snap = snapshot_context(&ctx);
+        assert!(snap.message_tokens >= 1_000, "{snap:?}");
+        assert_eq!(
+            snap.used,
+            snap.system_prompt_tokens + snap.message_tokens + snap.tool_definitions_tokens,
+            "{snap:?}"
+        );
     }
 
     #[test]
