@@ -623,6 +623,7 @@ pub fn tool_jobs() -> Plugin {
                         },
                         output,
                     )?,
+                    // kill_task 在内置预设里按需（`on_demand_tools`）。
                     tools.register(
                         ToolSpec {
                             name: "kill_task".into(),

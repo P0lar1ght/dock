@@ -367,6 +367,79 @@ async fn cordis_inspect_services_covers_everything_install_app_mounts() {
     }
 }
 
+/// 按需工具只靠 `search_tool` 描述里的名字被模型知道。名单按这一页实际藏起来、
+/// 又叫得动的本地工具生成：漏一颗，模型不知道它存在；多列一颗常驻工具，模型会
+/// 绕一圈去搜一颗本来就在表上的工具。默认预设（`code`）的 `on_demand_tools` 决定。
+#[tokio::test]
+async fn search_tool_names_every_builtin_on_demand_tool() {
+    isolated_home();
+    let root = Context::new();
+    cordis_spine::install_app(&root).await.unwrap();
+    let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
+    let presets = root
+        .require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
+        .unwrap();
+    let sampler = tools.specs_for_model();
+    let desc = &sampler
+        .iter()
+        .find(|s| s.name == "search_tool")
+        .expect("search_tool on the sampler")
+        .description;
+    let line = desc
+        .split_once("Built-in on-demand tools:")
+        .expect("search_tool lists the built-in on-demand tools")
+        .1;
+    let listed: std::collections::BTreeSet<&str> = line
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    for name in ["canvas_create", "workflow", "kill_task", "list_agents"] {
+        assert!(listed.contains(name), "{name} missing: {line}");
+    }
+    for spec in tools.specs() {
+        let expected = !tools.is_mcp(&spec.name)
+            && !tools.is_dynamic(&spec.name)
+            && tools.hidden_on(&root, &spec.name)
+            && presets.allows(&spec.name);
+        assert_eq!(
+            listed.contains(spec.name.as_str()),
+            expected,
+            "{}: listed vs on-demand disagree: {line}",
+            spec.name
+        );
+    }
+}
+
+/// 守望只调度：它的预设不写 `on_demand_tools`，list_agents / interrupt_agent
+/// 常驻；默认预设（`code`）里这两颗按需加载。
+#[tokio::test]
+async fn warden_keeps_its_subagent_tools_resident() {
+    isolated_home();
+    let root = Context::new();
+    cordis_spine::install_app(&root).await.unwrap();
+    let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
+    let model = |tools: &cordis_spine::Tools| -> Vec<String> {
+        tools
+            .specs_for_model()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    };
+    let before = model(&tools);
+    assert!(!before.iter().any(|n| n == "list_agents"), "{before:?}");
+    root.require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
+        .unwrap()
+        .apply("warden")
+        .unwrap();
+    let after = model(&tools);
+    for name in ["list_agents", "interrupt_agent"] {
+        assert!(
+            after.iter().any(|n| n == name),
+            "warden must keep {name}: {after:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     // 隔离 home：真实 `~/.dock` 里若有 `roster.yml`，默认 code preset 上的
@@ -439,31 +512,20 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         !model.iter().any(|n| n.starts_with("mcp_")),
         "sampler must hide MCP extras: {model:?}"
     );
-    // `skill` / `workflow` are named by the system-prompt listings, so they
-    // have to be callable without a `search_tool` round-trip first. The rest
-    // are named by resident descriptions and reminders (bash → job / kill_task,
-    // task → send_message / list_agents / interrupt_agent, plan mode →
-    // exit_plan_mode), or are needed by read-only subagents, which cannot reach
-    // `use_tool` (web_*). Everything else that is only reachable through
-    // discovery stays off the sampler.
+    // 常驻的是高频工具，和按需拿不到的场景：只读子代理没有 `use_tool`，所以
+    // web_* 必须常驻；子代理回报父级靠 send_message；`skill` 由系统提示的技能
+    // listing 点名、几乎每次都用。低频工具只在 `search_tool` 的描述里留名字，
+    // 用时按精确名搜一次拿 schema（见 `search_tool_names_every_builtin_on_demand_tool`）。
     // `memory_search` / `memory_get` are sampler-resident when memory is enabled
     // and absent from the table when disabled (default in this install test).
     for listed in [
         "skill",
-        "canvas_create",
-        "canvas_edit",
-        "canvas_data",
-        "canvas_read",
-        "workflow",
         "web_fetch",
         "web_search",
         "job",
-        "kill_task",
         "enter_plan_mode",
         "exit_plan_mode",
         "send_message",
-        "list_agents",
-        "interrupt_agent",
     ] {
         assert!(
             model.iter().any(|n| n == listed),
@@ -476,6 +538,14 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "update_goal",
         "lsp",
         "cordis_inspect",
+        "canvas_create",
+        "canvas_edit",
+        "canvas_data",
+        "canvas_read",
+        "workflow",
+        "kill_task",
+        "list_agents",
+        "interrupt_agent",
     ] {
         assert!(
             !model.iter().any(|n| n == hidden),
@@ -489,6 +559,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
             arguments: r#"{"query":"scheduler","limit":5}"#.into(),
         })
         .await;
+    // 已有的 `search_tool` 结果也要能搜到预设名单里的按需工具。
     assert!(
         sched_search.content.contains("scheduler_create"),
         "search_tool should surface deferred locals: {}",

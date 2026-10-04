@@ -13,7 +13,7 @@ use cordis_spine::{
     LlmOutput, LogEvent, PromptRequest, Sampler, Sessions, StreamDelta, ToolCall, Tools,
     WorkflowRunSnap, Workflows, AGENT_LOOP, AGENT_PRESETS, LLM, SESSIONS, TOOLS, WORKFLOWS,
 };
-use cordis_spine::{TaskConfig, WORKFLOW_TOOL_NAME};
+use cordis_spine::{jobs, tool_jobs, TaskConfig, WORKFLOW_TOOL_NAME};
 use tokio::sync::Notify;
 
 struct Harness {
@@ -83,6 +83,9 @@ async fn boot(sampler: Arc<dyn Sampler>, cfg: TaskConfig) -> Harness {
     root.provide(AGENT_PRESETS, AgentPresets::load(home.path().to_path_buf()))
         .unwrap();
     root.plugin(tool_task(), cfg).unwrap().wait().await.unwrap();
+    // `job`：常驻的执行类工具，下面几条能力档位断言拿它当探针。
+    root.plugin(jobs(), ()).unwrap().wait().await.unwrap();
+    root.plugin(tool_jobs(), ()).unwrap().wait().await.unwrap();
     root.provide(LLM, Llm::from_sampler(root.clone(), sampler))
         .unwrap();
     root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
@@ -546,14 +549,14 @@ complete("done");
     let run = wait_terminal(&h, &run_id).await;
     assert_eq!(run.status, "complete", "{run:?}");
 
-    // 这个脚手架只挂了 `send_message` + `workflow`（没有 workspace 工具），所以断言
-    // 落在这两颗上：`workflow` 是执行类，`send_message` 是元工具。分类本身的覆盖在
+    // 这个脚手架只挂了 `send_message` + `job`（没有 workspace 工具），所以断言
+    // 落在这两颗上：`job` 是执行类，`send_message` 是元工具。分类本身的覆盖在
     // `agent::capability` 的单测里。
     let tools = seen.lock().unwrap().clone();
     assert!(!tools.is_empty(), "子代理那一轮应当看到过工具表");
     assert!(
-        !tools.iter().any(|t| t == "workflow"),
-        "只读子代理不该看到 workflow：{tools:?}"
+        !tools.iter().any(|t| t == "job"),
+        "只读子代理不该看到 job：{tools:?}"
     );
     assert!(
         tools.iter().any(|t| t == "send_message"),
@@ -576,7 +579,7 @@ complete("done");
 
     let tools = seen.lock().unwrap().clone();
     assert!(
-        tools.iter().any(|t| t == "workflow"),
+        tools.iter().any(|t| t == "job"),
         "没指定档位就不该被收窄：{tools:?}"
     );
 }
@@ -1103,7 +1106,7 @@ complete("done");
         .map(|s| s.name)
         .collect();
     assert!(
-        names.iter().any(|n| n == WORKFLOW_TOOL_NAME),
+        names.iter().any(|n| n == "job"),
         "只读子代理把主会话一起收窄了：{names:?}"
     );
 

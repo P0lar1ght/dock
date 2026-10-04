@@ -21,14 +21,25 @@ pub const SEARCH_TOOL_NAME: &str = "search_tool";
 pub const USE_TOOL_NAME: &str = "use_tool";
 
 const SEARCH_TOOL_DESC: &str = "Search on-demand tools by keyword and retrieve their input schemas. \
-Matches MCP integrations, dynamic packages, and infrequent local tools (scheduler, memory, lsp, skill, workflow, cordis_*, …; the built-in browser is the MCP server `browser`, tools mcp_browser__browser_*). \
+Matches MCP integrations (the built-in browser is the MCP server `browser`, tools mcp_browser__browser_*), \
+dynamic packages, and the built-in on-demand tools listed below. \
 Returns only hits, each with a full input_schema, capped by limit (default 5, max 255). \
 Unmatched tools stay hidden; total_hidden_tools is the catalog size. \
 A hit whose schema is already earlier in this conversation comes back as schema_in_context \
 instead of repeating the schema — call it with use_tool as-is. \
 Searching an exact tool name always returns that tool's full schema. \
 If status is \"partial\", some MCP servers may still be connecting. \
-Call matched tools with use_tool. Do not guess parameter names.";
+Call matched tools with use_tool. Do not guess parameter names.\n";
+
+/// `search_tool` 描述末尾的按需工具名单。名字来自这一页的实际按需集合（预设的
+/// `on_demand_tools`），由 `Tools::specs_for_model_on`
+/// 拼上；模型只需要知道名字，用时按精确名搜一次拿 schema。
+pub(crate) fn on_demand_line(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    format!("Built-in on-demand tools: {}.", names.join(", "))
+}
 
 const SEARCH_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Keywords to match against tool names, server/group names, and descriptions (e.g. \"linear create issue\", \"scheduler\", \"browser\", \"cordis define\")."},"limit":{"type":"integer","minimum":1,"maximum":255,"description":"Maximum number of results (default 5, max 255)."}},"required":["query"]}"#;
 
@@ -77,6 +88,7 @@ pub fn use_spec() -> ToolSpec {
 /// 命中它们时只回名字与描述，不重复 dump schema。
 pub fn run_search(
     tools: &Tools,
+    exec: &cordis::Context,
     mcp: Option<&Mcp>,
     seen: &HashSet<String>,
     arguments: &str,
@@ -84,7 +96,7 @@ pub fn run_search(
     let query = parse_query(arguments);
     let limit = parse_limit(arguments);
     let ready = mcp.is_none_or(Mcp::catalog_ready);
-    let docs = hidden_index(tools);
+    let docs = hidden_index(tools, exec);
     let total_hidden = docs.len();
     if query.is_empty() {
         return pretty(json!({
@@ -259,12 +271,12 @@ fn search_note(
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-/// 隐藏目录（MCP extras + 按需本地工具），检索与计数都以它为准。
-fn hidden_index(tools: &Tools) -> Vec<IndexedTool> {
+/// 隐藏目录（MCP extras + 这一页的按需本地工具），检索与计数都以它为准。
+fn hidden_index(tools: &Tools, exec: &cordis::Context) -> Vec<IndexedTool> {
     tools
         .specs()
         .iter()
-        .filter(|s| tools.is_hidden(&s.name))
+        .filter(|s| tools.hidden_on(exec, &s.name))
         .map(|s| tool_index::index_tool(s, catalog_group(tools, &s.name)))
         .collect()
 }
@@ -314,8 +326,8 @@ pub async fn run_use_tool(tools: &Tools, exec: &cordis::Context, call: ToolCall)
             "tool_name is required. Use search_tool to discover on-demand tools.",
         );
     }
-    let resolved = resolve_hidden_name(tools, &tool_name);
-    if tools.is_hidden(&resolved) {
+    let resolved = resolve_hidden_name(tools, exec, &tool_name);
+    if tools.hidden_on(exec, &resolved) {
         let inner = ToolCall {
             id: call.id.clone(),
             name: resolved,
@@ -326,7 +338,7 @@ pub async fn run_use_tool(tools: &Tools, exec: &cordis::Context, call: ToolCall)
         result.content = cap_use_tool_output(&result.call_id, result.content).await;
         return result;
     }
-    if is_first_class_tool(tools, &tool_name) {
+    if is_first_class_tool(tools, exec, &tool_name) {
         return tool_result(
             call,
             format!(
@@ -460,6 +472,9 @@ fn catalog_group(tools: &Tools, name: &str) -> String {
     }
     match name {
         n if n.starts_with("cordis_") => "cordis".into(),
+        n if n.starts_with("canvas_") => "canvas".into(),
+        "list_agents" | "interrupt_agent" => "subagents".into(),
+        "kill_task" => "jobs".into(),
         n if n.starts_with("scheduler_") => "scheduler".into(),
         n if n.starts_with("memory_") => "memory".into(),
         "monitor" => "monitor".into(),
@@ -506,20 +521,20 @@ fn parse_use_args(arguments: &str) -> (String, String) {
     (name, input)
 }
 
-fn resolve_hidden_name(tools: &Tools, name: &str) -> String {
-    if tools.is_hidden(name) || is_mcp_public_name(name) {
+fn resolve_hidden_name(tools: &Tools, exec: &cordis::Context, name: &str) -> String {
+    if tools.hidden_on(exec, name) || is_mcp_public_name(name) {
         return name.to_string();
     }
     if let Some((server, tool)) = name.split_once("__") {
         let public = public_tool_name(server, tool);
-        if tools.is_hidden(&public) {
+        if tools.hidden_on(exec, &public) {
             return public;
         }
     }
     name.to_string()
 }
 
-fn is_first_class_tool(tools: &Tools, name: &str) -> bool {
+fn is_first_class_tool(tools: &Tools, exec: &cordis::Context, name: &str) -> bool {
     if is_meta(name) {
         return false;
     }
@@ -527,7 +542,7 @@ fn is_first_class_tool(tools: &Tools, name: &str) -> bool {
         || tools
             .specs()
             .iter()
-            .any(|s| s.name == name && !tools.is_hidden(name))
+            .any(|s| s.name == name && !tools.hidden_on(exec, name))
 }
 
 fn is_meta(name: &str) -> bool {
@@ -633,12 +648,24 @@ mod tests {
             .register_mcp(spec("mcp_linear__save_issue", "save an issue"), stub_body())
             .unwrap();
 
-        let out = run_search(&tools, None, &seen(), r#"{"query":"click desktop window"}"#);
+        let out = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &seen(),
+            r#"{"query":"click desktop window"}"#,
+        );
         assert!(out.contains("/computer"), "{out}");
         assert!(out.contains("cua-driver"), "{out}");
 
         // 非桌面类查询不该被这句噪音污染。
-        let other = run_search(&tools, None, &seen(), r#"{"query":"zzzz nothing"}"#);
+        let other = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &seen(),
+            r#"{"query":"zzzz nothing"}"#,
+        );
         assert!(!other.contains("/computer"), "{other}");
     }
 
@@ -660,13 +687,20 @@ mod tests {
             .unwrap();
         let exact = run_search(
             &tools,
+            &cordis::Context::new(),
             None,
             &seen(),
             r#"{"query":"mcp_linear__save_issue"}"#,
         );
         assert!(exact.contains("mcp_linear__save_issue"), "{exact}");
         assert!(!exact.contains("mcp_github__create_issue"), "{exact}");
-        let ranked = run_search(&tools, None, &seen(), r#"{"query":"linear issue"}"#);
+        let ranked = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &seen(),
+            r#"{"query":"linear issue"}"#,
+        );
         assert!(ranked.contains("\"server\": \"linear\""), "{ranked}");
         assert!(ranked.contains("total_hidden_tools"), "{ranked}");
     }
@@ -710,13 +744,13 @@ mod tests {
         let _fat = fat_tools(&tools);
         let args = r#"{"query":"issue"}"#;
 
-        let first = run_search(&tools, None, &seen(), args);
+        let first = run_search(&tools, &cordis::Context::new(), None, &seen(), args);
         assert!(first.contains("input_schema"), "{first}");
 
         let seen_after = schemas_in_context(&[search_row(&first)]);
         assert!(seen_after.contains("mcp_linear__save_issue"), "{first}");
 
-        let second = run_search(&tools, None, &seen_after, args);
+        let second = run_search(&tools, &cordis::Context::new(), None, &seen_after, args);
         let rows = |out: &str| serde_json::from_str::<Value>(out).unwrap()["results"].to_string();
         assert!(!rows(&second).contains("input_schema"), "{second}");
         assert!(second.contains("\"schema_in_context\": true"), "{second}");
@@ -745,6 +779,7 @@ mod tests {
         already.insert("mcp_linear__save_issue".to_string());
         let exact = run_search(
             &tools,
+            &cordis::Context::new(),
             None,
             &already,
             r#"{"query":"mcp_linear__save_issue"}"#,
@@ -752,7 +787,13 @@ mod tests {
         assert!(exact.contains("input_schema"), "{exact}");
         assert!(!exact.contains("schema_in_context"), "{exact}");
         // 去掉 server 前缀的本名同样是逃生舱。
-        let raw = run_search(&tools, None, &already, r#"{"query":"save_issue"}"#);
+        let raw = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &already,
+            r#"{"query":"save_issue"}"#,
+        );
         assert!(raw.contains("input_schema"), "{raw}");
     }
 
@@ -762,7 +803,7 @@ mod tests {
         let tools = Tools::echo(ctx);
         let _fat = fat_tools(&tools);
         let args = r#"{"query":"issue"}"#;
-        let first = run_search(&tools, None, &seen(), args);
+        let first = run_search(&tools, &cordis::Context::new(), None, &seen(), args);
 
         // 压缩把工具结果换成桩文本：解析不出工具名，schema 重新算"没见过"。
         let stub = search_row("Tool call omitted for brevity");
@@ -771,6 +812,7 @@ mod tests {
         // 降级行本身不算"发过 schema"。
         let second = run_search(
             &tools,
+            &cordis::Context::new(),
             None,
             &schemas_in_context(&[search_row(&first)]),
             args,
@@ -805,6 +847,7 @@ mod tests {
             .collect();
         let out = run_search(
             &tools,
+            &cordis::Context::new(),
             None,
             &seen(),
             r#"{"query":"probe job","limit":255}"#,
@@ -844,6 +887,7 @@ mod tests {
             .collect();
         let out = run_search(
             &tools,
+            &cordis::Context::new(),
             None,
             &seen(),
             r#"{"query":"probe job","limit":255}"#,
@@ -866,7 +910,13 @@ mod tests {
         let tools = Tools::echo(ctx);
         let _fat = fat_tools(&tools);
         // 中文查询：英文描述的目录打不中，note 要给出下一步。
-        let miss = run_search(&tools, None, &seen(), r#"{"query":"定时任务"}"#);
+        let miss = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &seen(),
+            r#"{"query":"定时任务"}"#,
+        );
         assert!(miss.contains("\"results\": []"), "{miss}");
         assert!(miss.contains("No tool matched"), "{miss}");
         assert!(miss.contains("2 on-demand tools are registered"), "{miss}");
@@ -951,7 +1001,13 @@ mod tests {
         let _m = tools
             .register_mcp(spec("mcp_linear__save_issue", "save an issue"), stub_body())
             .unwrap();
-        let found = run_search(&tools, None, &seen(), r#"{"query":"scheduler"}"#);
+        let found = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &seen(),
+            r#"{"query":"scheduler"}"#,
+        );
         assert!(found.contains("scheduler_create"), "{found}");
         assert!(found.contains("\"server\": \"scheduler\""), "{found}");
         assert!(found.contains("\"total_hidden_tools\": 2"), "{found}");
@@ -974,7 +1030,13 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let limited = run_search(&tools, None, &seen(), r#"{"query":"probe","limit":3}"#);
+        let limited = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &seen(),
+            r#"{"query":"probe","limit":3}"#,
+        );
         let n = limited.matches("probe_tool_").count();
         assert_eq!(n, 3, "{limited}");
         assert!(limited.contains("\"total_hidden_tools\": 8"), "{limited}");

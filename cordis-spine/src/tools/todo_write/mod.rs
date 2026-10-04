@@ -101,8 +101,7 @@ Rules:\n\
 - Exactly one item is `in_progress` at a time. Mark it before you touch anything for that item.\n\
 - Mark an item `completed` in the same turn you finish it — never batch completions at the end, and never mark something completed while its verification (tests, build, review) is still pending.\n\
 - When exploration changes the plan, update the list in the same turn you learn it: add the steps you discovered, drop the ones that turned out unnecessary (`cancelled`), re-word items that were wrong. A stale list is worse than no list.\n\
-- Do not end a turn with pending items and no tool call. Either advance the next item, or state the external blocker and mark the affected items `cancelled`.\n\n\
-Send only the items you are changing (`merge` defaults to true); id + status is enough to flip an existing item.";
+- Do not end a turn with pending items and no tool call. Either advance the next item, or state the external blocker and mark the affected items `cancelled`.";
 
 const PARAMS: &str = r#"{"type":"object","properties":{"merge":{"type":"boolean","description":"When true (default), merge the given items into the list by id — send only what changed. When false, the given items replace the whole list."},"todos":{"type":"array","description":"Items to write. In merge mode, id + status is enough to flip an existing item.","items":{"type":"object","properties":{"id":{"type":"string","description":"Stable identifier, reused across calls to update the same item."},"content":{"type":"string","description":"Imperative one-liner describing the step. Optional when updating an existing item."},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"],"description":"pending | in_progress (keep exactly one) | completed (finished and verified) | cancelled (dropped or blocked)."}},"required":["id"]}}},"required":["todos"]}"#;
 

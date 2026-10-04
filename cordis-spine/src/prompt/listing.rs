@@ -46,10 +46,10 @@ pub(crate) fn budget_chars(window_tokens: u64) -> usize {
 ///    only when its `agents/<type>.yml` sets `listings: true` — a narrow child
 ///    rarely loads a skill, and every concurrent child would otherwise re-pay
 ///    for the catalog.
-/// 2. **Can they act on it.** The loader has to be visible to this session's
-///    sampler. A preset whose allowlist omits `skill` (`warden`) would
-///    otherwise be handed a catalog it cannot use: the sampler filters the tool
-///    out, `search_tool` does not index it (it is not deferred), and `use_tool`
+/// 2. **Can they act on it.** The loader has to be callable from this
+///    session: on its sampler, or on-demand behind a `use_tool` it holds. A
+///    preset whose allowlist omits `skill` (`warden`) would otherwise be handed
+///    a catalog it cannot use: the sampler filters the tool out and `use_tool`
 ///    hits the same allowlist — so the listing only buys a failed call.
 ///
 /// Fails open on both: no `"sessions"` counts as main, and no `"tools"` (unit
@@ -62,7 +62,8 @@ pub(crate) fn wants_listing(exec: &Context, loader: &str) -> bool {
     wanted && loader_visible(exec, loader)
 }
 
-/// Whether the sampler for this session will be handed `loader`.
+/// Whether this session's model can call `loader`: on its sampler, or an
+/// on-demand tool it can reach through `use_tool` (`workflow`).
 ///
 /// Asks the live `"tools"` table rather than re-deriving the rule, so this
 /// cannot drift from what `Tools::specs_for_model_on` actually sends or from
@@ -71,10 +72,7 @@ fn loader_visible(exec: &Context, loader: &str) -> bool {
     let Some(tools) = exec.get::<Tools>(TOOLS) else {
         return true;
     };
-    tools
-        .specs_for_model_on(exec)
-        .iter()
-        .any(|s| s.name == loader)
+    tools.reachable_on(exec, loader)
 }
 
 /// One catalog row. `listing_path` is workspace- or home-relative — never an

@@ -49,7 +49,7 @@ pub fn tool_web() -> Plugin {
                 tools.register(
                     ToolSpec {
                         name: "web_fetch".into(),
-                        description: "Fetch the content of a specific URL and return it as markdown.\n\nIMPORTANT: web_fetch WILL FAIL for authenticated or private URLs (e.g. Google Docs, Confluence, Jira, GitHub private repos). Use specialized MCP tools for those instead.\n\nUsage notes:\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - Long pages will be truncated to fit your context window".into(),
+                        description: "Fetch the content of a specific URL and return it as markdown. Fails for authenticated or private URLs (Google Docs, Confluence, Jira, private GitHub repos); use an MCP tool for those. HTTP is upgraded to HTTPS; long pages are truncated.".into(),
                         parameters_json: FETCH_PARAMS.into(),
                     },
                     fetch,

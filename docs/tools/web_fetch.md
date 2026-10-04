@@ -7,7 +7,7 @@
 - **ctx**：`"tools"`
 - **模型工具**：`web_fetch` `web_search`
 
-一颗插件两个 register（`mod.rs:30`）。命名沿用 DSH `tool-web`，粒度是**套件**——两个工具共用同一条 fetch 管道，拆成两颗插件只会让 SSRF 策略出现两份。注册走 `tools.register` 而非 `register_deferred`，所以两颗默认进 sampler 与 `specs_for_model`（`round.rs:314` 断言在册）；`own_registered`（`registry.rs:471`）把 dispose 交给 fiber，插件卸载时两个 register 一起撤。
+一颗插件两个 register（`mod.rs:30`）。命名沿用 DSH `tool-web`，粒度是**套件**——两个工具共用同一条 fetch 管道，拆成两颗插件只会让 SSRF 策略出现两份。两颗不写进任何内置预设的 `on_demand_tools`（只读子代理没有 `use_tool`），所以默认进 sampler 与 `specs_for_model`（`round.rs:314` 断言在册）；`own_registered`（`registry.rs:471`）把 dispose 交给 fiber，插件卸载时两个 register 一起撤。
 
 实现是 Grok `xai-grok-tools` 那套 `web_fetch` 的复制件（`ssrf` / `http` / `domain` / `error`），剥掉了 `register_resource!`、`tracing`、schemars 与 xAI 账号 client。
 

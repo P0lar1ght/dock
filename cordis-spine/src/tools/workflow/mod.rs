@@ -288,12 +288,11 @@ source 只能有一个：已注册 name、内联 script、script_path。\
 可选 args（绑到脚本 args）和 agent_budget（子代理调用上限，默认 128，最大 1024）。\
 调用立即返回；进度看 /workflow runs，完成后会自动汇报，不要轮询 job。\
 **动手写或改脚本之前先读 `create-workflow` 技能的 SKILL.md**：脚本形状、host API、\
-方言规则和 dock 的限制（没有 resume，git_diff_since / render_template 不可用）都在那儿。\
+方言规则、保存位置和 dock 的限制都在那儿。\
 validate_only: true 只做冒烟检查（元数据、编译、一条 canned-host 路径），不证明每个分支或真实工具可用。\
-可复用脚本放到 .dock/workflows/<name>.rhai 或 ~/.dock/workflows/<name>.rhai；斜杠 `/name` 直接启动。\
 停一次在跑的 run 让用户走 /workflow stop <name>。";
 
-const PARAMS: &str = r#"{"type":"object","properties":{"source":{"description":"Exactly one workflow source.","oneOf":[{"type":"object","required":["type","name"],"properties":{"type":{"const":"name"},"name":{"type":"string"}}},{"type":"object","required":["type","script"],"properties":{"type":{"const":"script"},"script":{"type":"string"}}},{"type":"object","required":["type","script_path"],"properties":{"type":{"const":"script_path"},"script_path":{"type":"string"}}}]},"agent_budget":{"type":"integer","minimum":1,"maximum":1024},"args":{},"validate_only":{"type":"boolean"},"name":{"type":"string"},"script":{"type":"string"},"script_path":{"type":"string"}},"required":[]}"#;
+const PARAMS: &str = r#"{"type":"object","properties":{"source":{"description":"Exactly one workflow source.","oneOf":[{"type":"object","required":["type","name"],"properties":{"type":{"const":"name"},"name":{"type":"string"}}},{"type":"object","required":["type","script"],"properties":{"type":{"const":"script"},"script":{"type":"string"}}},{"type":"object","required":["type","script_path"],"properties":{"type":{"const":"script_path"},"script_path":{"type":"string"}}}]},"agent_budget":{"type":"integer","minimum":1,"maximum":1024},"args":{},"validate_only":{"type":"boolean"}},"required":[]}"#;
 
 pub fn tool_workflow() -> Plugin {
     plugin(
@@ -359,9 +358,8 @@ pub fn tool_workflow() -> Plugin {
             };
             own_registered(
                 ctx,
-                // On the sampler table, not deferred: the system-prompt
-                // listing names this tool, so it has to be callable without a
-                // `search_tool` round-trip first.
+                // 内置预设把它设成按需（`on_demand_tools`）。listing 认 `use_tool` 可达，
+                // 见 `Tools::reachable_on`。
                 vec![tools.register(
                     ToolSpec {
                         name: WORKFLOW_TOOL_NAME.into(),
@@ -491,6 +489,12 @@ mod tests {
     async fn mount_workflows(ctx: &Context) {
         crate::install_without_llm(ctx).await.unwrap();
         ctx.plugin(slash(), ()).unwrap().wait().await.unwrap();
+        // `workflow` 按需加载：listing 要看得到 `use_tool` 才算叫得动它。
+        ctx.plugin(crate::tools::mcp::mcp_client(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
         ctx.plugin(tool_workflow(), ())
             .unwrap()
             .wait()

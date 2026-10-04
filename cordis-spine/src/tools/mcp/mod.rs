@@ -75,6 +75,7 @@ pub(super) type RelistFn = std::sync::Arc<
         + Sync,
 >;
 
+pub(crate) use discover::on_demand_line;
 pub use discover::{SEARCH_TOOL_NAME, USE_TOOL_NAME};
 pub use elicitation::{ElicitPrompt, Elicitation};
 pub use protocol::{is_mcp_public_name, public_tool_name, raw_tool_name, split_mcp_public_name};
@@ -913,6 +914,7 @@ pub fn mcp_client() -> Plugin {
                         .unwrap_or_default();
                     let body = discover::run_search(
                         tools.as_ref(),
+                        &exec,
                         mcp.as_deref(),
                         &seen,
                         &call.arguments,

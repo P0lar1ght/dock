@@ -145,7 +145,7 @@ pub fn goal_tool_registration() -> Plugin {
         };
         own_registered(
             ctx,
-            vec![tools.register_deferred(
+            vec![tools.register(
                 ToolSpec {
                     name: UPDATE_GOAL_TOOL_NAME.into(),
                     description: "Set a goal for a multi-step task, or report progress on the active goal. Call with objective to start or retitle. Then message for progress, completed:true when done, blocked_reason when stuck after 3+ failures.".into(),
@@ -187,7 +187,7 @@ pub fn tool_goal() -> Plugin {
         };
         own_registered(
             ctx,
-            vec![tools.register_deferred(
+            vec![tools.register(
                 ToolSpec {
                     name: UPDATE_GOAL_TOOL_NAME.into(),
                     description: "Set a goal for a multi-step task, or report progress on the active goal. Call with objective to start or retitle. Then message for progress, completed:true when done, blocked_reason when stuck after 3+ failures.".into(),

@@ -30,9 +30,16 @@
 - 两个 Dock 共用 `~/.dock` 时新建预设会撞 id：各自都起 `custom`，写进同一个目录互相覆盖。
   - 现在起 id 时在磁盘上原子占住目录，占不到换下一个。
 - 设置页按规范化路径停用 / 删除插件时，经符号链接装上的插件对不上：停不掉、删了目录还在跑。
+- `search_tool` 的描述把常驻的 memory / skill / workflow 说成按需工具，模型会白搜一次。
 
 ### 变更
 
+- **常驻 / 按需工具改成在预设 YAML 里声明**：`agent.yml` / `agents/<id>.yml` 新增 `on_demand_tools`（写法同 `resident_tools`，常驻优先），调整不用改代码。
+  - 内置 `code` / `cordis` 把 `canvas_*`、`workflow`、`kill_task`、`list_agents`、`interrupt_agent` 也设成按需；`code` 预设工具定义从约 7.3K token 降到约 5.4K。
+  - `search_tool` 的描述按这一页实际的按需集合列出名字，模型按精确名搜一次就拿到 schema。
+  - 守望（`warden`）不写这一项，调度工具全部常驻。旧的用户层覆盖没写这一项时沿用内置名单。
+  - 网关 `preset/get` / `preset/update` 多一个 `onDemandTools`；不传保持原样。
+- 工具描述去掉与参数说明重复的内容；`bash` 的 schema 不再登记 `block_until_ms`（仍然接受）。
 - **浏览器工具改成内置 MCP**：`dock mcp browser`（新 crate `cordis-browser`）。
   - Dock 自动注入内置行 `[mcp_servers.browser]`，零配置；`DOCK_BROWSER_MCP=off` 关掉。
   - 工具公名从 `browser_*` 变成 `mcp_browser__browser_*`，照旧经 `search_tool` / `use_tool`。

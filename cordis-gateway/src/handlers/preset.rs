@@ -77,6 +77,7 @@ pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
                 "persona": def.persona,
                 "tools": def.tools,
                 "residentTools": def.resident_tools,
+                "onDemandTools": def.on_demand_tools,
                 "replacePrompt": def.replace_prompt,
                 "listings": def.listings,
                 "readOnly": def.read_only,
@@ -92,6 +93,7 @@ pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     obj.insert("replacePrompt".into(), json!(p.replace_prompt));
     obj.insert("tools".into(), json!(p.tools));
     obj.insert("residentTools".into(), json!(p.resident_tools));
+    obj.insert("onDemandTools".into(), json!(p.on_demand_tools));
     obj.insert("agents".into(), json!(agents));
     obj.insert("path".into(), json!(path));
     Ok(json!({ "preset": item }))
@@ -99,9 +101,10 @@ pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
 
 /// `preset/update { id, preset }`：整份写下（`preset` 同 `preset/get` 的字段：`name`
 /// `description` `icon` `order` `persona` `replacePrompt` `tools` `residentTools`
-/// `agents[]`）。内置预设写成用户层覆盖；损坏的预设整份重写。回 `preset`（同
-/// `preset/list` 的一项）。`residentTools` 不传就保持原样（预设和各子代理都是），
-/// 免得不认识它的客户端整份写回时把 yml 里配的常驻工具清掉。
+/// `onDemandTools` `agents[]`）。内置预设写成用户层覆盖；损坏的预设整份重写。回
+/// `preset`（同 `preset/list` 的一项）。`residentTools` / `onDemandTools` 不传就保持
+/// 原样（预设和各子代理都是），免得不认识它们的客户端整份写回时把 yml 里配的清掉。
+/// `onDemandTools: null` 是「不设按需名单」（预设 = 全部常驻，子代理 = 继承预设的）。
 pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = id_param(&params)?;
     let body = params
@@ -141,7 +144,30 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             Some(_) => Err(RpcError::invalid_params("residentTools 是数组或 null")),
         }
     };
+    // `onDemandTools`：不传 = 保持原样（外层 None）；null = 不设名单；数组 = 名单。
+    let on_demand = |v: &Value| -> Result<Option<Option<Vec<String>>>, RpcError> {
+        match v.get("onDemandTools") {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(None)),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|t| {
+                    t.as_str()
+                        .map(String::from)
+                        .ok_or_else(|| RpcError::invalid_params("onDemandTools 只收字符串"))
+                })
+                .collect::<Result<_, _>>()
+                .map(|list| Some(Some(list))),
+            Some(_) => Err(RpcError::invalid_params("onDemandTools 是数组或 null")),
+        }
+    };
     let existing = service(gateway)?.get(id);
+    let existing_on_demand = |role: &str| -> Option<Vec<String>> {
+        existing
+            .as_ref()
+            .and_then(|p| p.agents.get(role))
+            .and_then(|def| def.on_demand_tools.clone())
+    };
     let existing_resident = |role: &str| -> Vec<String> {
         existing
             .as_ref()
@@ -169,6 +195,7 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             persona: text(a, "persona"),
             tools: tools(a)?,
             resident_tools: resident(a)?.unwrap_or_else(|| existing_resident(&role)),
+            on_demand_tools: on_demand(a)?.unwrap_or_else(|| existing_on_demand(&role)),
             replace_prompt: flag(a, "replacePrompt"),
             listings: flag(a, "listings"),
             read_only: flag(a, "readOnly"),
@@ -188,6 +215,7 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
         replace_prompt: flag(body, "replacePrompt"),
         tools: tools(body)?,
         resident_tools: resident(body)?,
+        on_demand_tools: on_demand(body)?,
         agents,
     };
     let saved = service(gateway)?
@@ -223,9 +251,10 @@ pub fn tool_catalog(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
                     "server": server,
                 });
             }
+            // 按需看的是这一页当前预设（`on_demand_tools`）与登记方式两边。
             let kind = if tools.is_dynamic(&s.name) {
                 "dynamic"
-            } else if tools.is_deferred(&s.name) {
+            } else if tools.hidden_on(gateway.ctx(), &s.name) {
                 "deferred"
             } else {
                 "resident"

@@ -83,14 +83,13 @@ pub const PARAMS: &str = r#"{"type":"object","properties":{
 "-A":{"type":"integer","description":"Lines of context to show after each match."},
 "-B":{"type":"integer","description":"Lines of context to show before each match."},
 "-C":{"type":"integer","description":"Lines of context before and after each match. Overrides -A/-B."},
-"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"description":"content (default) returns matching lines; files_with_matches returns only paths; count returns per-file match counts. Use files_with_matches first when you only need to know where something lives."},
+"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"description":"content (default) returns matching lines; files_with_matches returns only paths; count returns per-file match counts."},
 "head_limit":{"type":"integer","description":"Cap inline results, like | head -N. Defaults to 200 matching lines (content) or 500 entries (other modes)."},
 "multiline":{"type":"boolean","description":"Let . match newlines so a pattern can span lines."}
 },"required":["pattern"]}"#;
 
 pub const DESCRIPTION: &str = "Search file contents with regular expressions (ripgrep, in-process).
 - Use this instead of running `grep` or `rg` through bash: it is gated as read-only, works in plan mode, and reports how many matches it did not show.
-- Full regex syntax, so escape literal special characters: `functionCall\\(`.
 - Respects .gitignore and skips binary files. Hidden files are skipped.
 - Narrow with `glob` or `type` only when you are sure of the file type; import paths often do not match source extensions (.js vs .ts).
 - Start with `output_mode: \"files_with_matches\"` to locate code, then read the file or re-grep with `-C` for context.

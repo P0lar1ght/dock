@@ -135,6 +135,11 @@ pub struct SubagentDef {
     /// `tools` 允许名单里才算数。见 [`resident_matches`]。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resident_tools: Vec<String>,
+    /// 按需工具：不进模型工具表，经 `search_tool` / `use_tool` 调用。`None` = 继承
+    /// 所属预设的 `on_demand_tools`。写法同 [`Self::resident_tools`]；两边都命中时常驻
+    /// 优先。见 [`AgentPreset::on_demand_tools`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_demand_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace_prompt: bool,
     /// Carry the skills / workflows listings into this child's system prompt.
@@ -161,6 +166,7 @@ impl SubagentDef {
             persona: self.persona.clone(),
             tools: self.tools.clone(),
             resident_tools: self.resident_tools.clone(),
+            on_demand_tools: self.on_demand_tools.clone(),
             replace_prompt: self.replace_prompt,
             listings: self.listings,
             read_only: self.read_only,
@@ -191,6 +197,14 @@ pub struct AgentPreset {
     /// `tools` 允许名单里才算数。见 [`resident_matches`]。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resident_tools: Vec<String>,
+    /// 按需工具：本地工具也不进模型工具表，模型只在 `search_tool` 的描述里看到名字，
+    /// 用时经 `search_tool` / `use_tool` 调。`None` / `[]` = 全部常驻（MCP 与动态包
+    /// 照旧藏着）。写法同 [`Self::resident_tools`]，常驻优先。用户 / 项目层覆盖内置
+    /// 预设而没写这一项时沿用内置的名单，见 `absorb_mode_overlay`。
+    /// `search_tool` / `use_tool` 自己永远常驻；拿不到 `use_tool` 的会话（只读子代理、
+    /// `minimal`）按需名单不生效，见 `Tools::hidden_on`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_demand_tools: Option<Vec<String>>,
     /// Persona replaces the assembled system prompt instead of appending.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace_prompt: bool,
@@ -225,6 +239,7 @@ impl AgentPreset {
             persona: String::new(),
             tools: None,
             resident_tools: Vec::new(),
+            on_demand_tools: None,
             replace_prompt: false,
             listings: false,
             read_only: false,
@@ -445,6 +460,7 @@ impl AgentPresets {
             id: id.clone(),
             name: "未命名".into(),
             origin,
+            on_demand_tools: seed_on_demand(),
             ..AgentPreset::new(id.clone())
         };
         inner.presets.insert(id.clone(), preset.clone());
@@ -484,7 +500,10 @@ impl AgentPresets {
                 }
                 base
             }
-            None => AgentPreset::new(String::new()),
+            None => AgentPreset {
+                on_demand_tools: seed_on_demand(),
+                ..AgentPreset::new(String::new())
+            },
         };
         let id = mint_id(&inner, PresetOrigin::User)?;
         preset.id = id.clone();
@@ -533,11 +552,20 @@ impl AgentPresets {
             def.tools = def.tools.map(dedup);
             def.resident_tools = check_resident(dedup(def.resident_tools))
                 .map_err(|e| format!("子代理 {role}：{e}"))?;
+            def.on_demand_tools = def
+                .on_demand_tools
+                .map(|list| check_on_demand(dedup(list)))
+                .transpose()
+                .map_err(|e| format!("子代理 {role}：{e}"))?;
             agents.insert(role, def);
         }
         let resident_tools = edit
             .resident_tools
             .map(|list| check_resident(dedup(list)))
+            .transpose()?;
+        let on_demand_tools = edit
+            .on_demand_tools
+            .map(|list| list.map(|l| check_on_demand(dedup(l))).transpose())
             .transpose()?;
         if let Some(shipped) = parse_shipped(id) {
             if let Some(role) = shipped.agents.keys().find(|r| !agents.contains_key(*r)) {
@@ -567,6 +595,9 @@ impl AgentPresets {
             preset.tools = edit.tools.map(dedup);
             if let Some(list) = resident_tools {
                 preset.resident_tools = list;
+            }
+            if let Some(list) = on_demand_tools {
+                preset.on_demand_tools = list;
             }
             preset.agents = agents;
             if preset.origin == PresetOrigin::Shipped {
@@ -964,6 +995,22 @@ impl AgentPresets {
             .is_some_and(|p| resident_matches(&p.resident_tools, name))
     }
 
+    /// 当前预设把 `name` 设成按需了吗（见 [`AgentPreset::on_demand_tools`]）。常驻
+    /// 优先；坏掉的预设不藏任何东西。`search_tool` / `use_tool` 永远不算按需。
+    pub fn is_on_demand(&self, name: &str) -> bool {
+        if is_discovery_tool(name) {
+            return false;
+        }
+        let inner = self.inner.lock().unwrap();
+        inner
+            .presets
+            .get(&inner.current)
+            .filter(|p| p.broken.is_none())
+            .filter(|p| !resident_matches(&p.resident_tools, name))
+            .and_then(|p| p.on_demand_tools.as_ref())
+            .is_some_and(|list| resident_matches(list, name))
+    }
+
     pub fn filter_specs(&self, specs: Vec<ToolSpec>) -> Vec<ToolSpec> {
         let inner = self.inner.lock().unwrap();
         let Some(preset) = inner.presets.get(&inner.current) else {
@@ -1210,6 +1257,10 @@ pub struct PresetEdit {
     /// 常驻工具（全名或 `前缀*`），见 [`AgentPreset::resident_tools`]。
     /// `None` = 保持原样（不认识这个字段的客户端整份写回时不会把它清掉）。
     pub resident_tools: Option<Vec<String>>,
+    /// 按需工具，见 [`AgentPreset::on_demand_tools`]。外层 `None` = 保持原样；
+    /// `Some(None)` = 不设名单（覆盖内置预设时重新加载即沿用内置名单，其余预设
+    /// 全部常驻）；`Some(Some(list))` = 这份名单，`[]` = 全部常驻。
+    pub on_demand_tools: Option<Option<Vec<String>>>,
     /// 按顺序；id 不能重复。
     pub agents: Vec<(String, SubagentDef)>,
 }
@@ -1257,6 +1308,29 @@ pub fn resident_matches(list: &[String], name: &str) -> bool {
         Some(prefix) => !prefix.is_empty() && name.starts_with(prefix),
         None => entry == name,
     })
+}
+
+/// 从零新建的预设先抄一份默认预设（`code`）的按需名单，写进它自己的 YAML：
+/// 不抄的话 `tools` 省略 = 全部工具，低频的全挤在工具表上。
+fn seed_on_demand() -> Option<Vec<String>> {
+    parse_shipped(DEFAULT_PRESET_ID).and_then(|p| p.on_demand_tools)
+}
+
+/// 按需工具的发现口自己永远常驻：藏起来就再也找不回别的工具。
+fn is_discovery_tool(name: &str) -> bool {
+    name == "search_tool" || name == "use_tool"
+}
+
+/// 按需名单的写法同常驻名单；另外不收会盖住发现口本身的条目（`search_tool`、`se*`）。
+fn check_on_demand(list: Vec<String>) -> Result<Vec<String>, String> {
+    let list = check_resident(list).map_err(|e| e.replace("常驻工具", "按需工具"))?;
+    for entry in &list {
+        let one = std::slice::from_ref(entry);
+        if resident_matches(one, "search_tool") || resident_matches(one, "use_tool") {
+            return Err(format!("search_tool / use_tool 不能设成按需：{entry}"));
+        }
+    }
+    Ok(list)
 }
 
 fn dedup(list: Vec<String>) -> Vec<String> {
@@ -1476,9 +1550,12 @@ fn load_dir(dir: &Path, origin: PresetOrigin, presets: &mut IndexMap<String, Age
         let Some(mut preset) = read_path_preset(&path, id, origin) else {
             continue;
         };
-        if preset.agents.is_empty() {
-            if let Some(base) = presets.get(id) {
+        if let Some(base) = presets.get(id) {
+            if preset.agents.is_empty() {
                 preset.agents = base.agents.clone();
+            }
+            if preset.on_demand_tools.is_none() {
+                preset.on_demand_tools = base.on_demand_tools.clone();
             }
         }
         presets.insert(id.to_string(), preset);
@@ -1542,6 +1619,11 @@ fn absorb_mode_overlay(
             overlay.tools = base.tools.clone();
             overlay.replace_prompt = base.replace_prompt;
             overlay.order = base.order;
+        }
+        // 覆盖文件写于这一项出现之前、或者就是没写：沿用内置的按需名单，别让一份
+        // 旧覆盖把工具表整个撑回去。要全部常驻写 `on_demand_tools: []`。
+        if overlay.on_demand_tools.is_none() {
+            overlay.on_demand_tools = base.on_demand_tools.clone();
         }
         let mut merged = base.agents.clone();
         for (k, v) in overlay.agents {
@@ -2907,6 +2989,7 @@ mod tests {
             persona: persona.into(),
             tools: Some(vec!["web_fetch".into(), "web_fetch".into()]),
             resident_tools: vec!["mcp_browser__browser_open".into()],
+            on_demand_tools: None,
             replace_prompt: false,
             listings: true,
             read_only: false,
@@ -2921,6 +3004,7 @@ mod tests {
             replace_prompt: false,
             tools: Some(vec!["read_file".into(), "grep".into()]),
             resident_tools: Some(vec!["mcp_browser__*".into(), " mcp_browser__* ".into()]),
+            on_demand_tools: None,
         };
         let mut roster = IndexMap::new();
         roster.insert("web".to_string(), role("只查网页"));
@@ -3014,6 +3098,7 @@ mod tests {
             replace_prompt: false,
             tools: code.tools.clone(),
             resident_tools: None,
+            on_demand_tools: None,
         };
         let mut dropped = code.agents.clone();
         let first = dropped.keys().next().unwrap().clone();
@@ -3373,5 +3458,66 @@ mod tests {
         assert!(!presets.is_resident("mcp_cua-driver__click"));
         let plain = AgentPresets::overlay(AgentPreset::new("u"));
         assert!(!plain.is_resident("mcp_browser__browser_snapshot"));
+    }
+
+    /// 按需名单写在预设自己的 YAML 里：内置 `code` 带一份，`warden` 不写 = 全部常驻。
+    #[test]
+    fn on_demand_tools_come_from_the_preset_yaml() {
+        let home = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        assert!(presets.is_on_demand("canvas_create"));
+        assert!(presets.is_on_demand("cordis_run"));
+        assert!(!presets.is_on_demand("web_search"));
+        assert!(!presets.is_on_demand("search_tool"));
+        presets.pin(WARDEN_PRESET_ID).unwrap();
+        assert!(!presets.is_on_demand("list_agents"));
+    }
+
+    /// 旧的用户层覆盖（写于 `on_demand_tools` 出现之前）沿用内置名单，写 `[]` 才是
+    /// 全部常驻。不然一份旧覆盖就把低频工具全塞回工具表。
+    #[test]
+    fn overlay_without_on_demand_keeps_the_shipped_list() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(DEFAULT_PRESET_ID);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(AGENT_FILE),
+            "name: 编码\npersona: 旧覆盖\ntools:\n  - read_file\n  - canvas_create\n",
+        )
+        .unwrap();
+        let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        assert_eq!(presets.current().persona.trim(), "旧覆盖");
+        assert!(presets.is_on_demand("canvas_create"), "沿用内置名单");
+
+        std::fs::write(
+            dir.join(AGENT_FILE),
+            "name: 编码\npersona: 新覆盖\non_demand_tools: []\n",
+        )
+        .unwrap();
+        let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        assert!(!presets.is_on_demand("canvas_create"), "[] = 全部常驻");
+    }
+
+    /// 从零新建的预设把默认名单写进自己的 YAML，之后改它就是改那份文件。
+    #[test]
+    fn new_presets_start_from_the_default_on_demand_list() {
+        let home = tempfile::tempdir().unwrap();
+        let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
+        let made = presets.create_custom("空白", None, "", None).unwrap();
+        assert_eq!(
+            made.on_demand_tools,
+            parse_shipped(DEFAULT_PRESET_ID).unwrap().on_demand_tools
+        );
+        let written = std::fs::read_to_string(presets.file_of(&made.id).unwrap()).unwrap();
+        assert!(written.contains("on_demand_tools:"), "{written}");
+    }
+
+    /// 按需名单的写法同常驻名单，另外不收会盖住发现口的条目。
+    #[test]
+    fn on_demand_entries_are_validated() {
+        assert!(check_on_demand(vec!["canvas_*".into(), "workflow".into()]).is_ok());
+        for bad in ["*", "can*vas", "search_tool", "use_*", "s*"] {
+            assert!(check_on_demand(vec![bad.into()]).is_err(), "{bad}");
+        }
     }
 }

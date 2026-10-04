@@ -171,7 +171,7 @@ fn spec(
         let ctx = ctx.clone();
         Box::pin(async move { exec(ctx, call).await })
     });
-    tools.register_deferred(
+    tools.register(
         ToolSpec {
             name: name.into(),
             description: description.into(),
