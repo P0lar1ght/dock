@@ -47,12 +47,33 @@ pub fn cron_driver() -> Plugin {
     })
 }
 
+/// 上一次 `due()` 失败的原因，用来只报一回。
+fn last_store_error() -> &'static std::sync::Mutex<Option<String>> {
+    static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    &LAST
+}
+
 /// One pass. Services are live-looked here, not captured by the spawned task.
 async fn tick_once(ctx: &Context) {
     let Some(cron) = ctx.get::<Cron>(CRON) else {
         return;
     };
-    let tick = cron.due();
+    let tick = match cron.due() {
+        Ok(tick) => {
+            *last_store_error().lock().unwrap() = None;
+            tick
+        }
+        Err(e) => {
+            // 每秒都会再失败一次：同一个错误只报一回，恢复后再坏再报。
+            let msg = e.to_string();
+            let mut last = last_store_error().lock().unwrap();
+            if last.as_deref() != Some(msg.as_str()) {
+                eprintln!("dock: 定时任务这一轮没法触发：{msg}");
+                *last = Some(msg);
+            }
+            return;
+        }
+    };
     for job in &tick.expired {
         // 过期提示只发给开着的那一页：为一句提示重开一个会话不值得。
         if let Some(page) = open_page_of(ctx, job) {

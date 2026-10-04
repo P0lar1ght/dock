@@ -89,7 +89,7 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
 pub fn delete(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let cron = cron(gateway)?;
     let id = text(&params, "id").ok_or_else(|| RpcError::invalid_params("id is required"))?;
-    if !cron.cancel(&id) {
+    if !cron.cancel(&id).map_err(cron_error)? {
         return Err(RpcError::app("not_found", format!("没有定时任务 {id}")));
     }
     Ok(json!({ "deleted": id }))

@@ -324,12 +324,14 @@ impl Cron {
         self.list().into_iter().find(|j| j.id == id)
     }
 
-    pub fn cancel(&self, id: &str) -> bool {
+    /// 删掉一个任务。`Ok(false)` 是真没有这个 id；文件读写失败是 `Err(Store)`，
+    /// 不能混成「没有」——否则文件坏了时模型 / GUI 只会以为 id 打错了。
+    pub fn cancel(&self, id: &str) -> Result<bool, CronError> {
         self.cancel_where(id, None)
     }
 
     /// 同 [`Self::cancel`]，但只认 `session` 名下的任务。
-    pub fn cancel_where(&self, id: &str, session: Option<&str>) -> bool {
+    pub fn cancel_where(&self, id: &str, session: Option<&str>) -> Result<bool, CronError> {
         self.transact(|tasks| {
             let before = tasks.len();
             tasks.retain(|t| {
@@ -337,7 +339,6 @@ impl Cron {
             });
             tasks.len() != before
         })
-        .unwrap_or(false)
     }
 
     /// 记下这次触发为什么没成（会话开不了之类）。任务留着，下次照常再试。
@@ -351,7 +352,10 @@ impl Cron {
 
     /// Jobs this process holds whose `next` has elapsed (rescheduled by
     /// `every`), plus TTL drops. Adopts tasks whose holder has exited first.
-    pub fn due(&self) -> CronTick {
+    ///
+    /// 文件读写失败回 `Err(Store)`，不当成「这一秒没有要触发的」——那样文件坏了
+    /// 时驱动会一直静默不触发，没有任何线索。
+    pub fn due(&self) -> Result<CronTick, CronError> {
         let me = self.me;
         let persistent = self.path.is_some();
         let tick = self.transact(|tasks| {
@@ -383,13 +387,11 @@ impl Cron {
             });
             (fires, expired)
         });
-        match tick {
-            Ok((fires, expired)) => CronTick {
-                fires: fires.iter().map(|t| self.snap(t)).collect(),
-                expired: expired.iter().map(|t| self.snap(t)).collect(),
-            },
-            Err(_) => CronTick::default(),
-        }
+        let (fires, expired) = tick?;
+        Ok(CronTick {
+            fires: fires.iter().map(|t| self.snap(t)).collect(),
+            expired: expired.iter().map(|t| self.snap(t)).collect(),
+        })
     }
 
     fn snap(&self, task: &Task) -> CronJob {
@@ -564,6 +566,9 @@ impl FileLock {
             .write(true)
             .open(&lock)
             .map_err(|e| format!("打开 {} 失败：{e}", lock.display()))?;
+        // 非 Unix 不加锁：产品主路径是 Unix（持有者存活也靠 `kill(pid, 0)`）。在
+        // 非 Unix 上多个 Dock 共用一个 `$DOCK_HOME` 时，读改写没有互斥，可能
+        // 互相覆盖。
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
@@ -611,11 +616,11 @@ mod tests {
         let cron = Cron::new();
         cron.add(Duration::from_millis(1), "tick").unwrap();
         std::thread::sleep(Duration::from_millis(5));
-        let first = cron.due();
+        let first = cron.due().unwrap();
         assert_eq!(first.fires.len(), 1);
         assert_eq!(first.fires[0].prompt, "tick");
         assert!(first.expired.is_empty());
-        let second = cron.due();
+        let second = cron.due().unwrap();
         assert!(second.fires.is_empty());
         assert!(second.expired.is_empty());
     }
@@ -624,10 +629,10 @@ mod tests {
     fn fire_immediately_is_due_now() {
         let cron = Cron::new();
         cron.add_ex(Duration::from_secs(60), "now", true).unwrap();
-        let tick = cron.due();
+        let tick = cron.due().unwrap();
         assert_eq!(tick.fires.len(), 1);
         assert_eq!(tick.fires[0].prompt, "now");
-        assert!(cron.due().fires.is_empty());
+        assert!(cron.due().unwrap().fires.is_empty());
     }
 
     #[test]
@@ -636,7 +641,7 @@ mod tests {
         let id = cron.add(Duration::from_secs(60), "tick").unwrap();
         cron.transact(|tasks| tasks[0].expires_at_ms = now_ms() - 1_000)
             .unwrap();
-        let tick = cron.due();
+        let tick = cron.due().unwrap();
         assert!(tick.fires.is_empty(), "{tick:?}");
         assert_eq!(tick.expired.len(), 1);
         assert_eq!(tick.expired[0].id, id);
@@ -741,7 +746,7 @@ mod tests {
             .unwrap();
         // pid 1 一直活着（launchd / init）。
         hand_to(&path, 1);
-        let tick = cron.due();
+        let tick = cron.due().unwrap();
         assert!(tick.fires.is_empty(), "{tick:?}");
         assert!(!cron.list()[0].held_here);
     }
@@ -760,7 +765,7 @@ mod tests {
         write_file(&path, &tasks).unwrap();
         hand_to(&path, dead_pid());
 
-        let tick = cron.due();
+        let tick = cron.due().unwrap();
         assert!(tick.fires.is_empty(), "错过的不补跑：{tick:?}");
         let job = &cron.list()[0];
         assert!(job.held_here, "接管了");
@@ -783,7 +788,12 @@ mod tests {
             cron.add(Duration::from_secs(60), "x"),
             Err(CronError::Store(_))
         ));
-        assert!(cron.due().fires.is_empty());
+        // 读写失败要报出来，不能混成「这一秒没有要触发的」「没有这个 id」。
+        assert!(matches!(cron.due(), Err(CronError::Store(_))));
+        assert!(matches!(
+            cron.cancel_where("cron-1", Some("s-a")),
+            Err(CronError::Store(_))
+        ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
     }
 
@@ -798,10 +808,10 @@ mod tests {
             cron.update_where(&a, Some("s-b"), None, Some("hijack")),
             Err(CronError::UnknownId(_))
         ));
-        assert!(!cron.cancel_where(&a, Some("s-b")));
+        assert!(!cron.cancel_where(&a, Some("s-b")).unwrap());
         assert_eq!(cron.list_for("s-a").len(), 1);
         assert!(cron.list_for("s-b").is_empty());
-        assert!(cron.cancel_where(&a, Some("s-a")));
+        assert!(cron.cancel_where(&a, Some("s-a")).unwrap());
         assert!(cron.list().is_empty());
     }
 
@@ -812,9 +822,9 @@ mod tests {
         let id = cron.add(Duration::from_secs(60), "x").unwrap();
         let r1 = cron.revision();
         assert!(r1 > r0);
-        assert!(cron.due().fires.is_empty());
+        assert!(cron.due().unwrap().fires.is_empty());
         assert_eq!(cron.revision(), r1, "没变就不动");
-        cron.cancel(&id);
+        cron.cancel(&id).unwrap();
         assert!(cron.revision() > r1);
     }
 
