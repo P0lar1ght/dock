@@ -130,6 +130,43 @@ pub fn expired_task_notice(prompt: &str, human_schedule: &str) -> String {
     )
 }
 
+/// 人用的 `/loop`：空参数把用法填进输入框；有参数就把排期指令挂在这条用户消息上发出去。
+pub fn loop_command() -> cordis::Plugin {
+    use crate::host::slash::{register_commands, slash_handler, SlashCommand, SlashOutcome};
+    use crate::names::{SESSIONS, SLASH};
+    use crate::session::log::Sessions;
+
+    cordis::plugin(
+        "command-loop",
+        cordis::Inject::from([SLASH]),
+        |ctx, _: &()| {
+            register_commands(
+                ctx,
+                vec![SlashCommand::host(
+                    "loop",
+                    "安排循环提问",
+                    slash_handler(|page, args| {
+                        if args.is_empty() {
+                            return SlashOutcome::Fill(loop_composer_fill());
+                        }
+                        let visible = format!("/loop {args}");
+                        if let Some(sessions) = page.get::<Sessions>(SESSIONS) {
+                            sessions.arm_user_addon(
+                                visible.clone(),
+                                loop_schedule_instruction(args, LoopFireMode::InSession),
+                            );
+                        }
+                        SlashOutcome::Submit(visible)
+                    }),
+                )
+                .aliases(&["cron"])
+                .takes_args(true)],
+            )?;
+            Ok(None)
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

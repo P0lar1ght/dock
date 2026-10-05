@@ -1,6 +1,7 @@
 //! Grok `workflow` tool + Rhai engine, mounted as Cordis `"workflows"` + `"tools"`.
 
 mod args;
+mod command;
 mod drain;
 mod grok_tool;
 mod host;
@@ -15,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
 use crate::host::settings::AppSettings;
-use crate::host::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
+use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::names::{CONTEXT, SESSIONS, SETTINGS, SLASH, TOOLS, TOOLS_EXECUTE, WORKFLOWS};
 use crate::prompt::assemble::ORDER_WORKFLOWS;
 use crate::prompt::context_book::{own_sections, ContextBook};
@@ -25,6 +26,7 @@ use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{LogEvent, ToolCall, ToolResult, ToolSpec};
 
 pub use args::{workflow_command_arguments, workflow_slash_arguments};
+pub use command::workflow_command;
 pub use drain::WorkflowRunSnap;
 pub use grok_tool::{render_ack, WorkflowLaunchHandle, WorkflowToolInput, WORKFLOW_TOOL_NAME};
 pub use host::DEFAULT_MAX_CONCURRENT_AGENTS;
@@ -126,7 +128,7 @@ impl Workflows {
         }
         let mut extras = Vec::new();
         for workflow in scan_catalog() {
-            if slash_name_reserved(&workflow.name) || workflow.name == "skills" {
+            if slash.is_builtin(&workflow.name) || workflow.name == "skills" {
                 continue;
             }
             let entry = SlashEntry {

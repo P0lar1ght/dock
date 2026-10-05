@@ -91,6 +91,10 @@ pub const SESSION_COMPACTION: &str = "session/compaction";
 /// `session/event` / `session/page-event`（TUI 只画主会话），要看子代理过程的监听者
 /// （网关的子代理投影）订这一条。
 pub const SESSION_CHILD_EVENT: &str = "session/child-event";
+/// 一页的实时日志被整份换掉了（`Sessions::clear` / `restore`），载荷是那一页的身份
+/// （`String`）。谁换的都发——终端 `/new`、网关 `thread/start`、恢复会话——投影这一页
+/// 的监听者（网关的线程）据此按当前会话重建。子代理不发。
+pub const SESSION_RESET: &str = "session/reset";
 /// 一个子代理出现了或状态变了（运行 / 空闲 / 结束），载荷 [`crate::SubagentChanged`]。
 /// 只带 id；当前状态在监听里 `Subagents::snapshot` 现取。
 pub const SUBAGENT_CHANGED: &str = "subagent/changed";

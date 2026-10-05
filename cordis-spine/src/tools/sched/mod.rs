@@ -20,7 +20,7 @@ use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 pub use interval::{interval_to_human, parse_interval};
 pub use loop_cmd::{
     expired_task_notice, format_scheduled_task_prompt, format_scheduled_task_reminder,
-    loop_composer_fill, loop_schedule_instruction, loop_usage_message, LoopFireMode,
+    loop_command, loop_composer_fill, loop_schedule_instruction, loop_usage_message, LoopFireMode,
     SCHEDULER_CREATE_TOOL_NAME,
 };
 

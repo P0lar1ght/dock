@@ -6,7 +6,9 @@ mod dropdown;
 mod interval;
 mod matcher;
 
-use cordis_spine::{load_catalog, ApiBackend, AppSettings, ModelChoice, SlashEntry};
+use cordis_spine::{
+    load_catalog, ApiBackend, AppSettings, ModelChoice, Slash, SlashCommand, SlashEntry,
+};
 
 pub use args::ArgItem;
 pub use dropdown::{desired_item_rows, render_dropdown, SuggestionRow};
@@ -89,39 +91,6 @@ pub struct SlashDef {
     pub args_required: bool,
     #[allow(dead_code)]
     pub arg_kind: Option<ArgKind>,
-}
-
-/// Name / alias / description tokens for the TUI slash catalog.
-///
-/// Gateway `slash/list` iterates this so the browser autocomplete cannot
-/// drift from the pager dropdown. Does not expose overlay `Effect`s.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SlashCatalogEntry {
-    pub name: &'static str,
-    pub aliases: &'static [&'static str],
-    pub description: &'static str,
-    pub takes_args: bool,
-}
-
-impl SlashDef {
-    fn catalog_entry(&self) -> SlashCatalogEntry {
-        SlashCatalogEntry {
-            name: self.name,
-            aliases: self.aliases,
-            description: self.description,
-            takes_args: self.takes_args,
-        }
-    }
-}
-
-/// Builtin catalog in dropdown order (TUI `CATALOG`).
-pub fn slash_catalog() -> impl Iterator<Item = SlashCatalogEntry> {
-    CATALOG.iter().map(SlashDef::catalog_entry)
-}
-
-/// Resolve a name or alias to the canonical catalog entry.
-pub fn resolve_slash(raw: &str) -> Option<SlashCatalogEntry> {
-    lookup(raw).map(SlashDef::catalog_entry)
 }
 
 /// Menu order copied from grok `builtin_commands()` (pager-local subset).
@@ -509,6 +478,21 @@ pub const CATALOG: &[SlashDef] = &[
         arg_kind: None,
     },
 ];
+
+/// 终端自己的命令（开浮层、退出、复制……）：目录里 spine 还没登记的那些，
+/// 以 [`SlashSurface::Terminal`] 登记进 `"slash"`。宿主无关的命令（`/goal` `/model`
+/// …）由各功能插件登记，这里跳过——表里有谁，谁就是保留名，别的客户端也看得到。
+pub fn terminal_commands(slash: &Slash) -> Vec<SlashCommand> {
+    CATALOG
+        .iter()
+        .filter(|d| !slash.is_builtin(d.name))
+        .map(|d| {
+            SlashCommand::terminal(d.name, d.description)
+                .aliases(d.aliases)
+                .takes_args(d.takes_args)
+        })
+        .collect()
+}
 
 #[allow(dead_code)]
 pub fn def_for(cmd: SlashCmd) -> &'static SlashDef {
@@ -1041,17 +1025,9 @@ mod tests {
     }
 
     #[test]
-    fn public_catalog_tokens_match_internal() {
-        let internal: Vec<_> = CATALOG
-            .iter()
-            .map(|d| (d.name, d.aliases, d.description, d.takes_args))
-            .collect();
-        let public: Vec<_> = slash_catalog()
-            .map(|e| (e.name, e.aliases, e.description, e.takes_args))
-            .collect();
-        assert_eq!(internal, public);
-        assert_eq!(resolve_slash("cron").map(|e| e.name), Some("loop"));
-        assert_eq!(resolve_slash("cd").map(|e| e.name), Some("cd"));
+    fn lookup_resolves_aliases() {
+        assert_eq!(lookup("cron").map(|d| d.name), Some("loop"));
+        assert_eq!(lookup("/cd").map(|d| d.name), Some("cd"));
     }
 
     #[test]
@@ -1069,21 +1045,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reserved_covers_catalog() {
+    /// 目录里每个名字和别名都进了 `"slash"`：宿主无关的由 spine 的功能插件登记，
+    /// 其余由终端登记。spine 登记的那些说明 / 别名要和下拉里的一样——两份在这一步
+    /// 之后还各存一份，靠这条钉住，直到终端改为直接读表。
+    #[tokio::test]
+    async fn catalog_lands_in_the_slash_table() {
+        let root = cordis::Context::new();
+        for p in [
+            cordis_spine::slash(),
+            cordis_spine::session_commands(),
+            cordis_spine::settings_commands(),
+            cordis_spine::goal_command(),
+            cordis_spine::plan_commands(),
+            cordis_spine::loop_command(),
+            cordis_spine::compact_command(),
+            cordis_spine::workflow_command(),
+        ] {
+            root.plugin(p, ()).unwrap().wait().await.unwrap();
+        }
+        let slash = root.get::<Slash>(cordis_spine::SLASH).unwrap();
+        let host: Vec<SlashCommand> = slash.commands();
+        root.plugin(crate::plugin::commands(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
         for d in CATALOG {
-            assert!(
-                cordis_spine::slash_name_reserved(d.name),
-                "missing reserved {}",
-                d.name
-            );
-            for alias in d.aliases {
-                assert!(
-                    cordis_spine::slash_name_reserved(alias),
-                    "missing reserved alias {alias}"
-                );
+            for token in std::iter::once(&d.name).chain(d.aliases) {
+                assert!(slash.is_builtin(token), "/{token} 没进命令表");
+            }
+            if let Some(cmd) = host.iter().find(|c| c.name == d.name) {
+                assert_eq!(cmd.description, d.description, "/{}", d.name);
+                assert_eq!(cmd.aliases, d.aliases, "/{}", d.name);
+                assert_eq!(cmd.takes_args, d.takes_args, "/{}", d.name);
             }
         }
+        let terminal: Vec<String> = slash
+            .commands()
+            .into_iter()
+            .filter(|c| c.surface == cordis_spine::SlashSurface::Terminal)
+            .map(|c| c.name)
+            .collect();
+        assert!(terminal.contains(&"cd".to_string()), "{terminal:?}");
+        assert!(!terminal.contains(&"goal".to_string()), "{terminal:?}");
     }
 
     #[test]

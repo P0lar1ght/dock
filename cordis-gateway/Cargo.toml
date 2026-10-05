@@ -13,7 +13,6 @@ cordis = { path = "../cordis-rust" }
 cordis-base = { path = "../cordis-base" }
 cordis-browser = { path = "../cordis-browser" }
 cordis-spine = { path = "../cordis-spine" }
-cordis-tui = { path = "../cordis-tui" }
 futures-util = "0.3"
 getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }

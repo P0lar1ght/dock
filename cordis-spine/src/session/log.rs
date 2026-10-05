@@ -9,7 +9,7 @@ use cordis::{plugin, Context, Inject, Plugin};
 use crate::host::settings::AppSettings;
 use crate::names::{
     SESSIONS, SESSION_CHILD_EVENT, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT,
-    SESSION_TURN_END, SETTINGS,
+    SESSION_RESET, SESSION_TURN_END, SETTINGS,
 };
 use crate::session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
@@ -1213,6 +1213,15 @@ impl Sessions {
             };
         }
         self.persist_live();
+        self.emit_reset();
+    }
+
+    /// 整份实时日志被换掉了（清空 / 恢复）。投影这一页的宿主（网关的线程）据此重建，
+    /// 不管是谁换的——终端的 `/new` 不经过网关。载荷是这一页的身份。子代理不发。
+    fn emit_reset(&self) {
+        if self.emit {
+            self.ctx.emit(SESSION_RESET, self.identity.to_string());
+        }
     }
 
     pub fn auto_compact_suppressed(&self) -> bool {
@@ -1612,6 +1621,7 @@ impl Sessions {
         if self.disk_cwd.lock().unwrap().is_some() {
             *self.live_id.lock().unwrap() = item.id;
         }
+        self.emit_reset();
         true
     }
 

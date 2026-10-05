@@ -21,7 +21,7 @@ Node **>= 18**（`package.json` 的 `engines.node`）。
 - `dist/` 与 `node_modules/` 被 gitignore；产物不提交，靠 `npm run build` 现出。
 - 协议是 Gateway 的 `dock.1`。新能力要先加 Gateway 投影，再改 SDK；**不要**为每个斜杠单独适配。
 - SDK 只解析、采集（截图）、把 `{ kind }` 画出来。不要在这里另起 harness，也不要直连 TUI。
-- 斜杠目录来自 `cordis_tui::slash_catalog()` + `"slash"` extras + `/screenshot*`，不要手抄命令表。
+- 斜杠目录来自 spine `"slash"` 命令表 + extras + `/screenshot*`，不要手抄命令表。
 - 运行时依赖版本在 `package.json` 里写死（`lit`、`remark-*`、`vite` 等）；改版本属于「新依赖」，先问。
 - 没有 lint / typecheck 脚本以外的检查：类型检查就是 `npm run build:types`。
 

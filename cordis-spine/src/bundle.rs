@@ -6,14 +6,16 @@ use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
 use crate::host::permissions::permissions;
 use crate::host::settings::settings;
+use crate::host::settings_commands::settings_commands;
 use crate::host::slash::slash;
 use crate::host::tui_slots::tui_slots;
-use crate::llm::compact::compact;
+use crate::llm::compact::{compact, compact_command};
 use crate::llm::sampler::{llm, LlmConfig, LlmMode};
 use crate::names::DYNAMIC_CORDIS_RUNNER;
 use crate::prompt::assemble::system_prompt;
 use crate::prompt::context_book::context;
 use crate::prompt::project_instructions::project_instructions;
+use crate::session::commands::session_commands;
 use crate::session::log::sessions;
 use crate::session::roster::roster;
 use crate::tools::ask_user::tool_ask_user;
@@ -22,21 +24,21 @@ use crate::tools::canvas::tool_canvas;
 use crate::tools::computer::tool_computer;
 use crate::tools::cron::cron;
 use crate::tools::dynamic_runner::{dynamic_runner, DynamicRunner};
-use crate::tools::goal::{goal_service, goal_tool_registration};
+use crate::tools::goal::{goal_command, goal_service, goal_tool_registration};
 use crate::tools::jobs::{jobs, tool_jobs};
 use crate::tools::lsp::tool_lsp;
 use crate::tools::mcp::mcp_client;
 use crate::tools::memory::tool_memory;
 use crate::tools::monitor::tool_monitor;
-use crate::tools::plan_mode::{plan_mode_service, plan_mode_tool_registration};
+use crate::tools::plan_mode::{plan_commands, plan_mode_service, plan_mode_tool_registration};
 use crate::tools::registry::{tools, workspace_tools};
-use crate::tools::sched::tool_scheduler;
+use crate::tools::sched::{loop_command, tool_scheduler};
 use crate::tools::skills::{skills, tool_skills};
 use crate::tools::task::{tool_task, TaskConfig};
 use crate::tools::todo_write::{todo_service, todo_tool_registration};
 use crate::tools::tool_cordis::tool_cordis;
 use crate::tools::web_fetch::{tool_web, web_fetch_params};
-use crate::tools::workflow::tool_workflow;
+use crate::tools::workflow::{tool_workflow, workflow_command};
 
 /// Sessions / context / systemPrompt / agents. No `llm` or `tools` — the harness mounts those.
 pub async fn install_core(ctx: &Context) -> Result<()> {
@@ -110,6 +112,10 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(roster(), ())?.wait().await?;
     ctx.plugin(jobs(), ())?.wait().await?;
     ctx.plugin(slash(), ())?.wait().await?;
+    // 人用的斜杠命令跟着各自的功能登记进 `"slash"`；命令体在调用页上 live-lookup，
+    // 所以这里不必等功能服务先挂好。
+    ctx.plugin(session_commands(), ())?.wait().await?;
+    ctx.plugin(settings_commands(), ())?.wait().await?;
     ctx.plugin(skills(), ())?.wait().await?;
     ctx.plugin(project_instructions(), ())?.wait().await?;
     ctx.plugin(tui_slots(), ())?.wait().await?;
@@ -123,6 +129,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_ask_user(), ())?.wait().await?;
     ctx.plugin(tool_jobs(), ())?.wait().await?;
     ctx.plugin(tool_scheduler(), ())?.wait().await?;
+    ctx.plugin(loop_command(), ())?.wait().await?;
     ctx.plugin(tool_task(), TaskConfig::default())?
         .wait()
         .await?;
@@ -132,17 +139,20 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(goal_service(), ())?.wait().await?;
     // update_goal 工具只在全局工具表注册一份，靠执行期 ctx 派发到调用页。
     ctx.plugin(goal_tool_registration(), ())?.wait().await?;
+    ctx.plugin(goal_command(), ())?.wait().await?;
     // 根会话的 plan-mode 服务（`PLAN_MODE` 按页隔离：分页各自挂 plan_mode_service）。
     ctx.plugin(plan_mode_service(), ())?.wait().await?;
     // enter_plan_mode / exit_plan_mode 工具只在全局工具表注册一份，靠执行期 ctx 派发到调用页。
     ctx.plugin(plan_mode_tool_registration(), ())?
         .wait()
         .await?;
+    ctx.plugin(plan_commands(), ())?.wait().await?;
     // 画布：模型写 HTML，桌面端在会话旁渲染；落在会话目录 `canvas/` 下。
     ctx.plugin(tool_canvas(), ())?.wait().await?;
     ctx.plugin(tool_lsp(), ())?.wait().await?;
     ctx.plugin(tool_skills(), ())?.wait().await?;
     ctx.plugin(tool_workflow(), ())?.wait().await?;
+    ctx.plugin(workflow_command(), ())?.wait().await?;
     ctx.plugin(mcp_client(), ())?.wait().await?;
     ctx.plugin(tool_computer(), ())?.wait().await?;
     // 浏览器驾驶舱：工具在内置 MCP `browser` 里，这里只看它的状态。
@@ -156,5 +166,6 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_cordis(), ())?.wait().await?;
     ctx.plugin(llm(), LlmConfig::from_env())?.wait().await?;
     ctx.plugin(compact(), ())?.wait().await?;
+    ctx.plugin(compact_command(), ())?.wait().await?;
     Ok(())
 }

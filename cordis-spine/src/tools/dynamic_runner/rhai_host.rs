@@ -8,7 +8,7 @@ use cordis::{plugin, Context, Inject, Plugin};
 use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
 use serde_json::Value;
 
-use crate::host::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
+use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::host::tui_slots::{SlotHandler, SlotKeyResult, TuiSlots};
 use crate::names::{RHAI_BAGS, SESSION_EVENT, SLASH, STEP_START, TOOLS, TUI_SLOTS, TURN_END};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
@@ -406,17 +406,17 @@ impl Host {
     fn register_slash(&mut self, spec: Map) -> Result<(), Box<rhai::EvalAltResult>> {
         let command = map_str(&spec, "command")
             .ok_or_else(|| eval_err("register_slash needs command".into()))?;
-        if slash_name_reserved(&command) {
-            let n = command.trim().trim_start_matches('/');
-            return err(format!(
-                "cannot shadow builtin slash /{n} — extras cannot replace /agents, /help, /quit, …; pick a different command"
-            ));
-        }
         let slash = self
             .inner
             .ctx
             .get::<Slash>(SLASH)
             .ok_or_else(|| eval_err("slash is not mounted; inject [\"slash\"]".into()))?;
+        if slash.is_builtin(&command) {
+            let n = command.trim().trim_start_matches('/');
+            return err(format!(
+                "cannot shadow builtin slash /{n} — extras cannot replace /agents, /help, /quit, …; pick a different command"
+            ));
+        }
         let kind = ExtraSlashKind::parse(
             &map_str(&spec, "kind").ok_or_else(|| eval_err("register_slash needs kind".into()))?,
         )

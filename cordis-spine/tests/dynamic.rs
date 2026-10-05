@@ -1077,6 +1077,8 @@ async fn other_session_cannot_see_owned_plugin() {
     assert!(runner.reference("child-other", "echo-1").is_err());
 }
 
+/// 先登记两颗工具和一个服务，再去盖命令表里的 `/help`（`slash` 插件自己登记的，
+/// 不依赖终端是否挂着）——这一步失败，前面登记的都要回滚。
 const RHAI_APPLY_THEN_RESERVED_SLASH: &str = r#"#{
     inject: ["tools", "slash"],
     apply: |host| {
@@ -1094,7 +1096,7 @@ const RHAI_APPLY_THEN_RESERVED_SLASH: &str = r#"#{
             execute: |args| { "y" }
         });
         host.register_slash(#{
-            command: "agents",
+            command: "help",
             kind: "overlay",
             text: "nope"
         });

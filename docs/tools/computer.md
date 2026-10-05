@@ -7,7 +7,7 @@
 - **ctx**：`"computer"`
 - **模型工具**：—（桌面能力全部经 `cua-driver` MCP，见下）
 
-**CUA C0**：薄驾驶舱 named `"computer"`。live-lookup `"mcp"` 看 cua-driver 是否就绪；`/computer` 是 TUI CATALOG builtin（`Overlay::Computer`）。挂在 `mcp-client` 之后，fiber dispose 注销。
+**CUA C0**：薄驾驶舱 named `"computer"`。live-lookup `"mcp"` 看 cua-driver 是否就绪；`/computer` 是本插件登记的 overlay 附加命令（`"slash"`），TUI 画成 `Overlay::Computer`。挂在 `mcp-client` 之后，fiber dispose 注销。
 
 控本机桌面走 **trycua [`cua-driver`](https://github.com/trycua/cua)** MCP，**不**自研键鼠、**不** Docker / cua 云沙箱、**不** path-dep 进 spine。
 
