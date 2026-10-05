@@ -13,6 +13,7 @@ pub mod schedule;
 pub mod settings;
 pub mod slash;
 pub mod subagent;
+pub mod surface;
 pub mod thread;
 pub mod turn;
 pub mod vcs;

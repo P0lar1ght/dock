@@ -4870,3 +4870,114 @@ async fn feature_plugins_register_methods_with_their_policy() {
         "{gone}"
     );
 }
+
+/// 插件面板经 `surface/*` 投给 GUI：列出、取正文与动作、点动作（只认受信 ticket、
+/// 只认声明过的动作）、操作后推 `surface/changed`。
+#[tokio::test]
+async fn plugin_surfaces_reach_the_gui() {
+    use cordis_spine::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots, TUI_SLOTS};
+    use std::sync::atomic::AtomicUsize;
+
+    struct Counter(AtomicUsize);
+    impl SlotHandler for Counter {
+        fn title(&self) -> String {
+            "计数器".into()
+        }
+        fn hud(&self) -> bool {
+            false
+        }
+        fn render(&self) -> String {
+            self.0.load(Ordering::SeqCst).to_string()
+        }
+        fn on_key(&self, key: &str) -> SlotKeyResult {
+            match key {
+                "inc" => {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    SlotKeyResult::Keep
+                }
+                "done" => SlotKeyResult::Close,
+                _ => SlotKeyResult::Keep,
+            }
+        }
+        fn actions(&self) -> Vec<SlotAction> {
+            ["inc", "done"]
+                .into_iter()
+                .map(|id| SlotAction {
+                    id: id.into(),
+                    label: id.into(),
+                })
+                .collect()
+        }
+    }
+
+    let root = harness_root().await;
+    root.plugin(cordis_spine::tui_slots(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let slots = root.require::<TuiSlots>(TUI_SLOTS).unwrap();
+    let _slot = slots
+        .register("counter".into(), Arc::new(Counter(AtomicUsize::new(0))))
+        .unwrap();
+
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let listed = gui.call("surface/list", json!({})).await;
+    assert_eq!(
+        listed["result"]["surfaces"][0],
+        json!({ "id": "counter", "title": "计数器", "hud": false }),
+        "{listed}"
+    );
+    let got = gui.call("surface/get", json!({ "id": "counter" })).await;
+    assert_eq!(got["result"]["surface"]["body"], "0", "{got}");
+    assert_eq!(
+        got["result"]["surface"]["actions"][0],
+        json!({ "id": "inc", "label": "inc" })
+    );
+
+    let clicked = gui
+        .call(
+            "surface/action",
+            json!({ "id": "counter", "action": "inc" }),
+        )
+        .await;
+    assert_eq!(clicked["result"]["closed"], false, "{clicked}");
+    assert_eq!(clicked["result"]["surface"]["body"], "1", "{clicked}");
+    let pushed = gui
+        .wait_notification("surface/changed", Duration::from_secs(5))
+        .await;
+    assert_eq!(pushed["params"]["id"], "counter", "{pushed}");
+
+    let stray = gui
+        .call(
+            "surface/action",
+            json!({ "id": "counter", "action": "esc" }),
+        )
+        .await;
+    assert_eq!(
+        stray["error"]["details"]["code"], "invalid_params",
+        "{stray}"
+    );
+    let done = gui
+        .call(
+            "surface/action",
+            json!({ "id": "counter", "action": "done" }),
+        )
+        .await;
+    assert_eq!(done["result"]["closed"], true, "{done}");
+}
+
+/// 配对来的网页看得到面板，但点不了：动作会跑插件脚本，同设置页只认受信 ticket。
+#[tokio::test]
+async fn paired_pages_cannot_act_on_plugin_surfaces() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let acted = rpc
+        .call("surface/action", json!({ "id": "x", "action": "y" }))
+        .await;
+    assert_eq!(acted["error"]["details"]["code"], "forbidden", "{acted}");
+}

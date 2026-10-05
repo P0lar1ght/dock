@@ -90,6 +90,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `gateway.presets`（`preset/*`、`tool/catalog`）
   - `gateway.fs`（`fs/*`）、`gateway.canvas`（`canvas/*`）
   - `gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`（`schedule/*`）
+  - `gateway.surfaces`（`surface/*`）
+- 功能插件推连接级通知用 `GatewayMethods::notify(method, params)`：
+  `schedule/changed`、`surface/changed` 都是这么推的。
 - 方法按域分在 `handlers/`：
 
 | handler | 域 |
@@ -490,6 +493,18 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `schedule/delete { id }` → `{ deleted }`；没有这个 id 回 `not_found`，`schedules.json` 读写失败（如文件写坏了）回 `store_failed`，不混成 `not_found`。
 - 推送 `schedule/changed {}`：**连接级**，初始化过就收到，不用订阅线程。任何一处改了（含模型的
   `scheduler_*`、别的 Dock 进程、到点触发）最多 1 秒后到；收到后重拉 `schedule/list`。
+
+### 插件面板（能力 `surfaces`，`handlers/surface.rs`）
+
+插件（Rhai `host.register_slot`）登记的面板，不分端：正文是文本，动作是按钮。
+
+- `surface/list {}` → `{ surfaces: [{ id, title, hud }] }`。
+- `surface/get { id }` → `{ surface: { id, title, body, actions: [{ id, label }] } }`。
+- `surface/action { id, action }` → `{ closed, surface }`：
+  - 只认面板声明过的动作，否则 `invalid_params`；
+  - 动作会跑插件脚本，只给受信 ticket（`forbidden`，同设置页）；
+  - `closed` 为真表示插件要关面板。
+- 推送 `surface/changed { id }`：连接级。增删、被操作、插件 `host.slot_changed` 时到。
 
 ### Pull Request（能力 `pullRequests`，`handlers/vcs.rs`）
 

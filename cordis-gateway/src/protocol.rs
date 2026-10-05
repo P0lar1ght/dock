@@ -62,6 +62,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("pullRequests", true),
     // `thread/rewind`：撤回任意一条用户消息——它和之后的对话全部删掉，正文和图片还回来。
     ("threadRewind", true),
+    // `surface/list` / `get` / `action` + 连接级推送 `surface/changed { id }`：插件的面板
+    // （`"tui.slots"`）。正文是文本，动作是按钮；`action` 只认受信 ticket。
+    ("surfaces", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -91,6 +94,11 @@ pub const SCHEDULE_UPDATE: &str = "schedule/update";
 pub const SCHEDULE_DELETE: &str = "schedule/delete";
 /// 连接级推送（不用订阅线程）：定时任务变了，重拉 `schedule/list`。
 pub const SCHEDULE_CHANGED: &str = "schedule/changed";
+pub const SURFACE_LIST: &str = "surface/list";
+pub const SURFACE_GET: &str = "surface/get";
+pub const SURFACE_ACTION: &str = "surface/action";
+/// 连接级推送：插件面板增删了、被操作了或正文要重画（`{ id }`），重拉 `surface/get`。
+pub const SURFACE_CHANGED: &str = "surface/changed";
 pub const PRESET_DRAFT: &str = "preset/draft";
 pub const PRESET_REWRITE: &str = "preset/rewrite";
 pub const PRESET_SUGGEST_TOOLS: &str = "preset/suggestTools";

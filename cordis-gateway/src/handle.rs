@@ -285,6 +285,11 @@ impl GatewayHandle {
         self.inner.events_tx.subscribe()
     }
 
+    /// 功能插件经方法表推连接级通知用的出口（`GatewayMethods::notify`）。
+    pub(crate) fn notices_sender(&self) -> tokio::sync::broadcast::Sender<serde_json::Value> {
+        self.inner.notices_tx.clone()
+    }
+
     /// 连接级推送，见 `GatewayInner::notices_tx`。
     pub fn subscribe_notices(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
         self.inner.notices_tx.subscribe()
@@ -471,14 +476,6 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             });
         });
     listen_subagents(inner);
-    // 定时任务变了：推给每条连接（`schedule/changed`），客户端重拉 `schedule/list`。
-    let for_schedule = inner.clone();
-    let _ = inner.ctx.on(cordis_spine::SCHEDULE_CHANGED, move |_: &()| {
-        let _ = for_schedule.notices_tx.send(serde_json::json!({
-            "method": crate::protocol::SCHEDULE_CHANGED,
-            "params": {},
-        }));
-    });
     // 某一页的实时日志被整份换掉（终端 `/new` / 恢复会话，或网关自己的
     // `thread/start`）：按它现在的会话重建投影，`threadId` 也跟着换。
     let for_reset = inner.clone();

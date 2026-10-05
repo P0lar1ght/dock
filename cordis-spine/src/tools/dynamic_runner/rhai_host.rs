@@ -9,7 +9,7 @@ use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
 use serde_json::Value;
 
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
-use crate::host::tui_slots::{SlotHandler, SlotKeyResult, TuiSlots};
+use crate::host::tui_slots::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots};
 use crate::names::{RHAI_BAGS, SESSION_EVENT, SLASH, STEP_START, TOOLS, TUI_SLOTS, TURN_END};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{
@@ -67,8 +67,13 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.register_slot",
-        "Register a TUI slot: render() -> String, on_key(key) -> \"close\" | ().",
-        &["host.register_slot(#{ id, title, hud?, render, on_key })"],
+        "Register a slot (terminal overlay, GUI panel): render() -> String, on_key(key) -> \"close\" | (). actions: buttons whose id is passed to on_key (GUI clicks, terminal keys).",
+        &["host.register_slot(#{ id, title, hud?, render, on_key, actions?: [#{ id, label }] })"],
+    ),
+    (
+        "host.slot_changed",
+        "Tell clients a slot's body changed (GUI re-fetches; the terminal redraws every frame anyway).",
+        &["host.slot_changed(id: String)"],
     ),
     (
         "host.open_slot",
@@ -297,6 +302,7 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("register_slash", Host::register_slash);
     engine.register_fn("register_slot", Host::register_slot);
     engine.register_fn("open_slot", Host::open_slot);
+    engine.register_fn("slot_changed", Host::slot_changed);
     engine.register_fn("call_tool", Host::call_tool);
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
@@ -463,9 +469,11 @@ impl Host {
             .get("on_key")
             .cloned()
             .and_then(|d| d.try_cast::<FnPtr>());
+        let actions = slot_actions(&spec)?;
         let handler = Arc::new(RhaiSlot {
             title,
             hud,
+            actions,
             engine: self.inner.engine.clone(),
             ast: self.inner.ast.clone(),
             render,
@@ -475,6 +483,16 @@ impl Host {
             .register(id, handler)
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
+        Ok(())
+    }
+
+    fn slot_changed(&mut self, id: ImmutableString) -> Result<(), Box<rhai::EvalAltResult>> {
+        let slots = self
+            .inner
+            .ctx
+            .get::<TuiSlots>(TUI_SLOTS)
+            .ok_or_else(|| eval_err("tui.slots is not mounted".into()))?;
+        slots.changed(id.as_str());
         Ok(())
     }
 
@@ -715,15 +733,41 @@ impl Host {
 struct RhaiSlot {
     title: String,
     hud: bool,
+    actions: Vec<SlotAction>,
     engine: Arc<Engine>,
     ast: AST,
     render: FnPtr,
     on_key: Option<FnPtr>,
 }
 
+/// `register_slot` 的 `actions: [#{ id, label }]`。`label` 省略就用 `id`。
+fn slot_actions(spec: &Map) -> Result<Vec<SlotAction>, Box<rhai::EvalAltResult>> {
+    let Some(raw) = spec.get("actions") else {
+        return Ok(Vec::new());
+    };
+    let list = raw
+        .clone()
+        .try_cast::<rhai::Array>()
+        .ok_or_else(|| eval_err("register_slot actions must be an array".into()))?;
+    list.into_iter()
+        .map(|item| {
+            let map = item
+                .try_cast::<Map>()
+                .ok_or_else(|| eval_err("each slot action must be #{ id, label }".into()))?;
+            let id = map_str(&map, "id").ok_or_else(|| eval_err("slot action needs id".into()))?;
+            let label = map_str(&map, "label").unwrap_or_else(|| id.clone());
+            Ok(SlotAction { id, label })
+        })
+        .collect()
+}
+
 impl SlotHandler for RhaiSlot {
     fn title(&self) -> String {
         self.title.clone()
+    }
+
+    fn actions(&self) -> Vec<SlotAction> {
+        self.actions.clone()
     }
 
     fn hud(&self) -> bool {
