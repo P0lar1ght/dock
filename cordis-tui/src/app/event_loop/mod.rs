@@ -17,11 +17,10 @@ use std::time::{Duration, Instant};
 
 use cordis::Context;
 use cordis_spine::{
-    apply_restored_preset, goal_composer_fill, lsp_auto_setup, lsp_status_report, AgentPresets,
-    AppSettings, ApplyRestoredPreset, DynamicRunner, Goal, LogEvent, LspHub, LspSetupScope,
-    PlanMode, Sessions, Slash, Subagents, ToolCall, Tools, AGENT_PRESETS, ASK_EVENT,
-    DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE,
-    SESSIONS, SESSION_EVENT, SETTINGS, SLASH, SUBAGENTS, TOOLS,
+    apply_restored_preset, lsp_auto_setup, lsp_status_report, AgentPresets, ApplyRestoredPreset,
+    DynamicRunner, Goal, LogEvent, LspHub, LspSetupScope, Sessions, Slash, ToolCall, Tools,
+    AGENT_PRESETS, ASK_EVENT, DYNAMIC_CORDIS_RUNNER, GOAL, LSP, MCP_ELICIT_EVENT, PERMISSION_EVENT,
+    PLAN_EVENT, SESSIONS, SESSION_EVENT, SLASH, TOOLS,
 };
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -45,7 +44,7 @@ use crate::views::overlay::{Overlay, UsageTab};
 use crate::views::queue_pane::QueueHit;
 use cordis_spine::SessionRef;
 
-use crate::app::actions::Effect;
+use crate::app::actions::{effects_for_outcome, Effect};
 use crate::app::input::{drain_events, drain_notifies, spawn_reader};
 use crate::media::mermaid_png;
 use crate::views::goal_pane::GoalHit;
@@ -53,7 +52,7 @@ use crate::views::prompt::PromptWidget;
 use crate::views::status::StatusLine;
 use crate::views::usage_overlay;
 
-use frame::{chrome_model_label, draw};
+use frame::draw;
 use keys::{run_action, to_action};
 use support::*;
 
@@ -215,30 +214,32 @@ pub async fn run(root: Context) -> Result<()> {
                         while let Some(effect) = effects.pop_front() {
                             match effect {
                                 Effect::Quit => quit = true,
-                                Effect::NewSession => {
-                                    // 只收自己这一页的子代理：`"subagents"` 是全局一份、
-                                    // 按 parent session 分账，`cancel_all` 会波及别的分页。
-                                    if let Some(sub) = ctx.get::<Subagents>(SUBAGENTS) {
-                                        match ctx.get::<Sessions>(SESSIONS) {
-                                            Some(sessions) => {
-                                                sub.cancel_session(sessions.identity());
-                                                sub.open_admission_for(sessions.identity());
-                                            }
-                                            None => {
-                                                sub.cancel_all();
-                                                sub.open_admission();
+                                Effect::RunCommand { name, args } => {
+                                    let outcome = match ctx.get::<Slash>(SLASH) {
+                                        Some(slash) => slash.run(&ctx, &name, &args).await,
+                                        None => None,
+                                    };
+                                    match outcome {
+                                        Some(outcome) => {
+                                            for more in effects_for_outcome(outcome).into_iter().rev() {
+                                                effects.push_front(more);
                                             }
                                         }
+                                        None => flash(&ctx, format!("/{name} 不在命令表里")),
                                     }
-                                    if let Ok(sessions) = ctx.require::<Sessions>(SESSIONS) {
-                                        sessions.archive_current();
-                                        sessions.clear();
-                                    }
-                                    cordis_spine::clear_plan_for_session_switch(&ctx);
-                                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
-                                        goal.clear();
-                                    }
+                                }
+                                Effect::Flash(message) => {
                                     overlay.close();
+                                    flash(&ctx, message);
+                                }
+                                Effect::SubmitCommand { text, note } => {
+                                    overlay.close();
+                                    if let Some(note) = note {
+                                        flash(&ctx, note);
+                                    }
+                                    if let Ok(session) = ctx.require::<SessionRef>(SESSION_PORT) {
+                                        session.submit(text, false);
+                                    }
                                 }
                                 Effect::ResumePicker => {
                                     // Fill FTS from disk once if the index is still empty.
@@ -403,79 +404,6 @@ pub async fn run(root: Context) -> Result<()> {
                                     overlay.close();
                                     flash(&ctx, format!("theme {}", kind.display_name()));
                                 }
-                                Effect::SetModel(model) => {
-                                    if let Some(settings) = ctx.get::<AppSettings>(SETTINGS) {
-                                        settings.set_model(model.clone());
-                                        let catalog = settings.catalog();
-                                        overlay.close();
-                                        flash(&ctx, format!("已切换 {}", chrome_model_label(&model, &catalog)));
-                                    } else {
-                                        overlay.close();
-                                        flash(&ctx, format!("已切换 {model}"));
-                                    }
-                                }
-                                Effect::SetProtocol(backend) => {
-                                    let msg = match ctx.get::<AppSettings>(SETTINGS) {
-                                        // 端点没声明的协议切过去就是 404，这里挡
-                                        // 住并说清楚该去 config 里加哪一行。
-                                        Some(settings)
-                                            if !settings.backend_choices().contains(&backend) =>
-                                        {
-                                            format!(
-                                                "{} 未在该模型的 api_backends 里声明",
-                                                backend.name()
-                                            )
-                                        }
-                                        Some(settings) => {
-                                            settings.set_backend(backend);
-                                            format!("协议 {}", backend.name())
-                                        }
-                                        None => format!("协议 {}", backend.name()),
-                                    };
-                                    overlay.close();
-                                    flash(&ctx, msg);
-                                }
-                                Effect::SetEffort(effort) => {
-                                    if let Some(settings) = ctx.get::<AppSettings>(SETTINGS) {
-                                        settings.set_effort(effort.clone());
-                                    }
-                                    overlay.close();
-                                    flash(&ctx, format!("effort {effort}"));
-                                }
-                                Effect::ToggleTimestamps => {
-                                    let on = ctx
-                                        .get::<AppSettings>(SETTINGS)
-                                        .map(|s| s.toggle_timestamps())
-                                        .unwrap_or(false);
-                                    overlay.close();
-                                    flash(
-                                        &ctx,
-                                        if on {
-                                            "时间戳已开"
-                                        } else {
-                                            "时间戳已关"
-                                        },
-                                    );
-                                }
-                                Effect::ToggleThinking => {
-                                    let on = ctx
-                                        .get::<AppSettings>(SETTINGS)
-                                        .map(|s| s.toggle_thinking())
-                                        .unwrap_or(false);
-                                    overlay.close();
-                                    flash(
-                                        &ctx,
-                                        if on {
-                                            "思考模式已开"
-                                        } else {
-                                            "思考模式已关"
-                                        },
-                                    );
-                                }
-                                Effect::EnterLoop { args } => {
-                                    overlay.close();
-                                    start_loop(&ctx, args);
-                                }
                                 Effect::Export(path) => {
                                     let path = path.unwrap_or_else(|| {
                                         std::path::PathBuf::from("dock-transcript.txt")
@@ -541,76 +469,11 @@ pub async fn run(root: Context) -> Result<()> {
                                         }
                                     }
                                 }
-                                Effect::EnterPlan { description } => {
-                                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
-                                        goal.disarm_composer();
-                                    }
-                                    if let Some(plan) = ctx.get::<PlanMode>(PLAN_MODE) {
-                                        if description.is_some() {
-                                            plan.enter_active();
-                                        } else {
-                                            plan.enter_pending();
-                                        }
-                                    }
-                                    overlay.close();
-                                    flash(&ctx, "计划模式");
-                                    if let Some(desc) = description {
-                                        if let Ok(session) = ctx.require::<SessionRef>(SESSION_PORT) {
-                                            session.submit(desc, false);
-                                        }
-                                    }
-                                }
                                 Effect::ViewPlan => {
                                     open_view_plan(&ctx, &mut overlay);
                                 }
-                                Effect::EnterGoal { objective } => {
-                                    overlay.close();
-                                    match objective {
-                                        None => {
-                                            if let Some(goal) = ctx.get::<Goal>(GOAL) {
-                                                goal.arm_composer();
-                                            }
-                                            if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
-                                                prompt.set_text(&goal_composer_fill());
-                                            }
-                                        }
-                                        Some(raw) => start_goal(&ctx, raw),
-                                    }
-                                }
                                 Effect::ShowGoal { editing } => {
                                     open_goal_overlay(&ctx, &mut overlay, editing);
-                                }
-                                Effect::GoalPause => {
-                                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
-                                        goal.disarm_composer();
-                                        if goal.pause() {
-                                            flash(&ctx, "目标已暂停");
-                                        } else {
-                                            flash(&ctx, "没有进行中的目标");
-                                        }
-                                    }
-                                }
-                                Effect::GoalResume => {
-                                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
-                                        goal.disarm_composer();
-                                        if goal.resume() {
-                                            flash(&ctx, "目标已继续");
-                                        } else {
-                                            flash(&ctx, "没有已暂停的目标");
-                                        }
-                                    }
-                                }
-                                Effect::GoalClear => {
-                                    if let Some(goal) = ctx.get::<Goal>(GOAL) {
-                                        if goal.present() {
-                                            goal.clear();
-                                            overlay.close();
-                                            flash(&ctx, "已清除目标");
-                                        } else {
-                                            goal.disarm_composer();
-                                            flash(&ctx, "没有活动目标");
-                                        }
-                                    }
                                 }
                                 Effect::ShowTasks => {
                                     overlay = Overlay::Tasks {
@@ -712,12 +575,6 @@ pub async fn run(root: Context) -> Result<()> {
                                 }
                                 Effect::ShowContext => {
                                     overlay = Overlay::usage(UsageTab::Context);
-                                }
-                                Effect::Compact { context } => {
-                                    flash(&ctx, "正在压缩上下文…");
-                                    if let Ok(session) = ctx.require::<SessionRef>(SESSION_PORT) {
-                                        session.compact(context);
-                                    }
                                 }
                                 Effect::MemoryFlush => {
                                     flash(&ctx, "正在 flush 记忆…");

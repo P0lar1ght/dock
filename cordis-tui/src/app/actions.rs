@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use crate::slash::{self, ArgKind, SlashCmd, SlashPick};
 use crate::theme::ThemeKind;
 use cordis_spine::{
-    extra_tool_slash_arguments, goal_composer_fill, loop_composer_fill, loop_usage_message,
-    lsp_composer_fill, workflow_command_arguments, ApiBackend, CuaAction, ExtraSlashKind,
-    SlashEntry, GOAL_RESERVED_SUBCOMMANDS, WORKFLOW_TOOL_NAME,
+    extra_tool_slash_arguments, loop_composer_fill, loop_usage_message, lsp_composer_fill,
+    workflow_command_arguments, ApiBackend, CuaAction, ExtraSlashKind, SlashEntry, SlashOutcome,
+    GOAL_RESERVED_SUBCOMMANDS, WORKFLOW_TOOL_NAME,
 };
 
 /// Text submitted from the prompt, plus any A6 unbound-image toast.
@@ -160,8 +160,21 @@ pub enum Action {
 /// Produced by dispatch, consumed by the event loop.
 #[derive(Debug)]
 pub enum Effect {
+    /// 跑一条 `"slash"` 命令表里的命令（宿主无关的那些：`/new` `/model` `/goal` …），
+    /// 结果按 [`effects_for_outcome`] 落成下面这些效果——和网关跑的是同一个命令体。
+    RunCommand {
+        name: String,
+        args: String,
+    },
+    /// 关掉浮层，底栏闪一句。
+    Flash(String),
+    /// 命令要把一段话作为用户消息发出去（`/goal <目标>`、`/plan <说明>`）；`note`
+    /// 先闪一句。不进提示词历史，不走输入框的拦截。
+    SubmitCommand {
+        text: String,
+        note: Option<String>,
+    },
     Quit,
-    NewSession,
     /// Async: 起一棵新的分页子树（会话 / 循环 / 视图各一份）。
     TabNew,
     /// 切到标签编号 `id` 的页。
@@ -203,11 +216,6 @@ pub enum Effect {
         cmd: SlashCmd,
     },
     SetTheme(ThemeKind),
-    SetModel(String),
-    SetProtocol(ApiBackend),
-    SetEffort(String),
-    ToggleTimestamps,
-    ToggleThinking,
     Export(Option<PathBuf>),
     ChangeDir(PathBuf),
     SettingsModal,
@@ -231,22 +239,10 @@ pub enum Effect {
     FillPrompt {
         text: String,
     },
-    EnterPlan {
-        description: Option<String>,
-    },
     ViewPlan,
-    EnterGoal {
-        objective: Option<String>,
-    },
-    EnterLoop {
-        args: String,
-    },
     ShowGoal {
         editing: bool,
     },
-    GoalPause,
-    GoalResume,
-    GoalClear,
     ShowTasks,
     ShowAgents,
     ToggleWorkflows,
@@ -270,9 +266,6 @@ pub enum Effect {
     },
     ShowUsage,
     ShowContext,
-    Compact {
-        context: String,
-    },
     MemoryFlush,
     MemoryDream,
     OpenMemoryBrowser,
@@ -349,10 +342,43 @@ fn tab_effect(args: &str) -> Effect {
     }
 }
 
+/// 交给 `"slash"` 命令表跑。
+pub fn run(name: &str, args: &str) -> Effect {
+    Effect::RunCommand {
+        name: name.into(),
+        args: args.into(),
+    }
+}
+
+/// 命令表回的结果落成终端的效果。选择器、目标面板这些按终端自己的样子画。
+pub fn effects_for_outcome(outcome: SlashOutcome) -> Vec<Effect> {
+    match outcome {
+        SlashOutcome::Applied(message) => vec![Effect::Flash(message)],
+        SlashOutcome::Notice { title, body } => vec![Effect::ShowNotice { title, body }],
+        SlashOutcome::Fill(text) => vec![Effect::FillPrompt { text }],
+        SlashOutcome::Submit { text, note } => vec![Effect::SubmitCommand { text, note }],
+        SlashOutcome::Menu(id) => vec![match id.as_str() {
+            "model" => Effect::ArgPicker {
+                kind: ArgKind::Model,
+                cmd: SlashCmd::Model,
+            },
+            "reasoning" => Effect::ArgPicker {
+                kind: ArgKind::Effort,
+                cmd: SlashCmd::Effort,
+            },
+            "context" => Effect::ShowContext,
+            "goal" => Effect::ShowGoal { editing: false },
+            other => Effect::Flash(format!("没有 {other} 菜单")),
+        }],
+        SlashOutcome::OpenSlot(id) => vec![Effect::OpenSlot { id }],
+        SlashOutcome::TerminalOnly(name) => vec![Effect::Flash(format!("/{name} 没有终端实现"))],
+    }
+}
+
 pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
     let args = args.trim();
     match cmd {
-        SlashCmd::New => Effect::NewSession,
+        SlashCmd::New => run("new", ""),
         SlashCmd::Tab => tab_effect(args),
         SlashCmd::Btw => {
             if args.is_empty() {
@@ -402,12 +428,12 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
                     cmd,
                 }
             } else {
-                Effect::SetModel(args.to_string())
+                run("model", args)
             }
         }
         // 名字打错就开菜单，不要猜一条协议发出去——猜错就是一次 404。
         SlashCmd::Protocol => match ApiBackend::from_name(args) {
-            Some(backend) => Effect::SetProtocol(backend),
+            Some(backend) => run("protocol", backend.name()),
             None => Effect::ArgPicker {
                 kind: ArgKind::Protocol,
                 cmd,
@@ -426,9 +452,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
                     text: loop_composer_fill(),
                 }
             } else {
-                Effect::EnterLoop {
-                    args: args.to_string(),
-                }
+                run("loop", args)
             }
         }
         SlashCmd::Export => Effect::Export(if args.is_empty() {
@@ -437,8 +461,8 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
             Some(PathBuf::from(args))
         }),
         SlashCmd::Cd => Effect::ChangeDir(PathBuf::from(if args.is_empty() { "." } else { args })),
-        SlashCmd::Timestamps => Effect::ToggleTimestamps,
-        SlashCmd::Thinking => Effect::ToggleThinking,
+        SlashCmd::Timestamps => run("timestamps", ""),
+        SlashCmd::Thinking => run("think", ""),
         SlashCmd::Effort => {
             if args.is_empty() {
                 Effect::ArgPicker {
@@ -446,16 +470,10 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
                     cmd,
                 }
             } else {
-                Effect::SetEffort(args.to_string())
+                run("effort", args)
             }
         }
-        SlashCmd::Plan => Effect::EnterPlan {
-            description: if args.is_empty() {
-                None
-            } else {
-                Some(args.to_string())
-            },
-        },
+        SlashCmd::Plan => run("plan", args),
         SlashCmd::ViewPlan => Effect::ViewPlan,
         SlashCmd::Goal => goal_effect(args),
         SlashCmd::Tasks => Effect::ShowTasks,
@@ -505,9 +523,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         }
         SlashCmd::Usage => Effect::ShowUsage,
         SlashCmd::Context => Effect::ShowContext,
-        SlashCmd::Compact => Effect::Compact {
-            context: args.to_string(),
-        },
+        SlashCmd::Compact => run("compact", args),
         SlashCmd::Flush => Effect::MemoryFlush,
         SlashCmd::Dream => Effect::MemoryDream,
         SlashCmd::Memory => Effect::OpenMemoryBrowser,
@@ -589,8 +605,8 @@ fn apply_settings_arg(args: &str) -> Effect {
     let key = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
     match key {
-        "timestamps" => Effect::ToggleTimestamps,
-        "think" | "thinking" => Effect::ToggleThinking,
+        "timestamps" => run("timestamps", ""),
+        "think" | "thinking" => run("think", ""),
         "theme" => effect_for_slash(SlashCmd::Theme, rest),
         "model" => effect_for_slash(SlashCmd::Model, rest),
         "protocol" | "proto" | "wire" => effect_for_slash(SlashCmd::Protocol, rest),
@@ -622,23 +638,14 @@ fn lsp_effect(args: &str) -> Effect {
     }
 }
 
+/// `/goal`：看 / 改目标开终端的目标面板，其余（开始、暂停、恢复、清除、空参数）
+/// 交给命令表。
 fn goal_effect(args: &str) -> Effect {
     let args = args.trim();
-    if args.is_empty() {
-        return Effect::FillPrompt {
-            text: goal_composer_fill(),
-        };
-    }
-    let first = args.split_whitespace().next().unwrap_or("");
-    match first {
+    match args.split_whitespace().next().unwrap_or("") {
         "status" => Effect::ShowGoal { editing: false },
         "edit" => Effect::ShowGoal { editing: true },
-        "pause" => Effect::GoalPause,
-        "resume" => Effect::GoalResume,
-        "clear" => Effect::GoalClear,
-        _ => Effect::EnterGoal {
-            objective: Some(args.to_string()),
-        },
+        _ => run("goal", args),
     }
 }
 
@@ -738,6 +745,56 @@ pub fn interpret_loop_composer(text: &str) -> LoopComposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cordis_spine::goal_composer_fill;
+
+    /// 命令表的结果落成终端效果：选择器、目标面板按终端自己的样子开，
+    /// 要发的话先闪回执再发。
+    #[test]
+    fn outcomes_map_to_terminal_effects() {
+        let one = |o| effects_for_outcome(o).into_iter().next().unwrap();
+        assert!(matches!(
+            one(SlashOutcome::Applied("ok".into())),
+            Effect::Flash(m) if m == "ok"
+        ));
+        assert!(matches!(
+            one(SlashOutcome::Fill("x".into())),
+            Effect::FillPrompt { text } if text == "x"
+        ));
+        assert!(matches!(
+            one(SlashOutcome::submit("go", Some("目标模式"))),
+            Effect::SubmitCommand { text, note: Some(n) } if text == "go" && n == "目标模式"
+        ));
+        assert!(matches!(
+            one(SlashOutcome::Menu("model".into())),
+            Effect::ArgPicker {
+                kind: ArgKind::Model,
+                ..
+            }
+        ));
+        assert!(matches!(
+            one(SlashOutcome::Menu("reasoning".into())),
+            Effect::ArgPicker {
+                kind: ArgKind::Effort,
+                ..
+            }
+        ));
+        assert!(matches!(
+            one(SlashOutcome::Menu("context".into())),
+            Effect::ShowContext
+        ));
+        assert!(matches!(
+            one(SlashOutcome::Menu("goal".into())),
+            Effect::ShowGoal { editing: false }
+        ));
+        assert!(matches!(
+            one(SlashOutcome::OpenSlot("s".into())),
+            Effect::OpenSlot { id } if id == "s"
+        ));
+        assert!(matches!(
+            one(SlashOutcome::notice("t", "b")),
+            Effect::ShowNotice { title, body } if title == "t" && body == "b"
+        ));
+    }
 
     /// `/btw` 要带问题；空参给用法而不是起一个空旁问。
     #[test]
@@ -783,7 +840,10 @@ mod tests {
             ("anthropic", ApiBackend::Messages),
         ] {
             match effect_for_slash(SlashCmd::Protocol, args) {
-                Effect::SetProtocol(got) => assert_eq!(got, want, "{args}"),
+                Effect::RunCommand { name, args: got } => {
+                    assert_eq!(name, "protocol");
+                    assert_eq!(got, want.name(), "{args}");
+                }
                 other => panic!("{args}: {other:?}"),
             }
         }

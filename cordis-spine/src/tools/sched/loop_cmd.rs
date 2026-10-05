@@ -156,7 +156,7 @@ pub fn loop_command() -> cordis::Plugin {
                                 loop_schedule_instruction(args, LoopFireMode::InSession),
                             );
                         }
-                        SlashOutcome::Submit(visible)
+                        SlashOutcome::submit(visible, Some("正在安排循环任务"))
                     }),
                 )
                 .aliases(&["cron"])

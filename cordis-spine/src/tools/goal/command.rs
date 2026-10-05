@@ -47,7 +47,7 @@ fn run(page: &Context, args: &str) -> SlashOutcome {
             if goal.pause() {
                 SlashOutcome::Applied("目标已暂停".into())
             } else {
-                SlashOutcome::notice("目标", "没有进行中的目标。")
+                SlashOutcome::Applied("没有进行中的目标".into())
             }
         }
         "resume" => {
@@ -55,7 +55,7 @@ fn run(page: &Context, args: &str) -> SlashOutcome {
             if goal.resume() {
                 SlashOutcome::Applied("目标已继续".into())
             } else {
-                SlashOutcome::notice("目标", "没有已暂停的目标。")
+                SlashOutcome::Applied("没有已暂停的目标".into())
             }
         }
         "clear" => {
@@ -64,14 +64,44 @@ fn run(page: &Context, args: &str) -> SlashOutcome {
                 SlashOutcome::Applied("已清除目标".into())
             } else {
                 goal.disarm_composer();
-                SlashOutcome::notice("目标", "没有活动目标。")
+                SlashOutcome::Applied("没有活动目标".into())
             }
         }
         _ if GOAL_RESERVED_SUBCOMMANDS.contains(&first) => SlashOutcome::Menu("goal".into()),
-        _ => {
-            goal.disarm_composer();
-            goal.start(args);
-            SlashOutcome::Submit(args.to_string())
+        _ => start_goal(page, args),
+    }
+}
+
+/// 把 `objective` 原样定为这一页的目标并发出去，不再按子命令解析——终端在 `/goal`
+/// 之后把下一条消息当目标时走这里（「pause 部署」是目标，不是 `/goal pause`）。
+pub fn start_goal(page: &Context, objective: &str) -> SlashOutcome {
+    let Some(goal) = page.get::<Goal>(GOAL) else {
+        return SlashOutcome::notice("目标", "目标服务未挂载。");
+    };
+    goal.disarm_composer();
+    goal.start(objective);
+    SlashOutcome::submit(objective, Some("目标模式"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::slash::{slash, Slash};
+    use crate::tools::goal::{goal_composer_fill, goal_service};
+
+    /// 空参数的 `/goal`：把用法填进输入框，并让下一条消息当目标（终端和网关一样）。
+    #[tokio::test]
+    async fn bare_goal_fills_usage_and_arms_the_composer() {
+        let root = Context::new();
+        for p in [slash(), goal_service(), goal_command()] {
+            root.plugin(p, ()).unwrap().wait().await.unwrap();
         }
+        let slash = root.get::<Slash>(SLASH).unwrap();
+        let goal = root.get::<Goal>(GOAL).unwrap();
+        assert!(!goal.awaiting_composer());
+        let out = slash.run(&root, "goal", "").await;
+        assert_eq!(out, Some(SlashOutcome::Fill(goal_composer_fill())));
+        assert!(goal_composer_fill().contains("/goal"));
+        assert!(goal.awaiting_composer(), "下一条消息该当目标");
     }
 }

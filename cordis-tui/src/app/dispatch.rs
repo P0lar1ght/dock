@@ -8,7 +8,7 @@ use crate::views::prompt::PromptWidget;
 pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
     match action {
         Action::Quit => vec![Effect::Quit],
-        Action::NewSession => vec![Effect::NewSession],
+        Action::NewSession => vec![crate::app::actions::run("new", "")],
         Action::TabNew => vec![Effect::TabNew],
         Action::TabGo(id) => vec![Effect::TabGo { id }],
         Action::TabFork => vec![Effect::TabFork],

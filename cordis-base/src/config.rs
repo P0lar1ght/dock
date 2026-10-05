@@ -238,7 +238,29 @@ pub struct ModelChoice {
     pub pricing: Option<ModelPricing>,
 }
 
+/// `id` 在目录里给人看的名字（见 [`ModelChoice::display_label`]）；不在目录里就是 id。
+pub fn model_label(catalog: &[ModelChoice], id: &str) -> String {
+    catalog
+        .iter()
+        .find(|m| m.id == id)
+        .map(ModelChoice::display_label)
+        .unwrap_or_else(|| id.to_string())
+}
+
 impl ModelChoice {
+    /// 给人看的名字：`name (description)`；没写 name 就用 id。底栏和切换回执共用。
+    pub fn display_label(&self) -> String {
+        let name = self.name.trim();
+        let description = self.description.trim();
+        if name.is_empty() {
+            self.id.clone()
+        } else if description.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} ({description})")
+        }
+    }
+
     pub fn has_http(&self) -> bool {
         self.api_base_url
             .as_deref()

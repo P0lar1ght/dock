@@ -68,7 +68,7 @@ pub(super) fn prompt_chrome_info(ctx: &Context) -> String {
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "dock".into());
     let catalog = settings.as_ref().map(|s| s.catalog()).unwrap_or_default();
-    let model = chrome_model_label(&id, &catalog);
+    let model = cordis_spine::model_label(&catalog, &id);
     let perm = settings
         .as_ref()
         .map(|s| match s.permission_mode() {
@@ -143,25 +143,6 @@ pub(super) fn prompt_chrome_info(ctx: &Context) -> String {
     parts.join(" · ")
 }
 
-pub(super) fn chrome_model_label(id: &str, catalog: &[cordis_spine::ModelChoice]) -> String {
-    catalog
-        .iter()
-        .find(|m| m.id == id)
-        .map(|m| format_model_display(&m.name, &m.description, id))
-        .unwrap_or_else(|| id.to_string())
-}
-
-pub(super) fn format_model_display(name: &str, description: &str, id: &str) -> String {
-    let name = name.trim();
-    let description = description.trim();
-    if name.is_empty() {
-        id.to_string()
-    } else if description.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} ({description})")
-    }
-}
 pub(super) fn inner_area(area: Rect) -> Rect {
     Block::default()
         .padding(ratatui::widgets::Padding::new(
@@ -1093,15 +1074,15 @@ mod tests {
             "OpenRouter 免费",
         )];
         assert_eq!(
-            chrome_model_label("minimax/minimax-m3:free", &catalog),
+            cordis_spine::model_label(&catalog, "minimax/minimax-m3:free"),
             "MiniMax M3 (OpenRouter 免费)"
         );
+        assert_eq!(choice("grok-4", "Grok 4", "").display_label(), "Grok 4");
+        assert_eq!(choice("raw", "", "x").display_label(), "raw");
         assert_eq!(
-            format_model_display("MiniMax M3", "OpenRouter 免费", "raw"),
-            "MiniMax M3 (OpenRouter 免费)"
+            cordis_spine::model_label(&catalog, "unknown/id"),
+            "unknown/id"
         );
-        assert_eq!(format_model_display("Grok 4", "", "grok-4"), "Grok 4");
-        assert_eq!(chrome_model_label("unknown/id", &catalog), "unknown/id");
     }
 
     /// 底栏在模型旁边写当前协议：切模型会重新播种协议，两条一起变，分开放
