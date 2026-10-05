@@ -89,9 +89,13 @@ named service `"tool.views"`：按工具名登记渲染函数，拿这一次调�
 - 只给人看，不进模型历史；
 - Rhai：`host.register_tool_view(name, |tc| #{ ... })`，或写在 `register_tool` 的 `view` 上；
   `tc` 是 `#{ name, arguments, output, failed }`（`call` 是 Rhai 保留字）；
-- 终端：展开工具卡时头照旧，正文换成视图；
+- 渲染函数只看 `tc`：要是纯函数，不调工具、不读会话（`host.call_tool` 之类），
+  每次重画都可能再跑一遍；
+- 经 `use_tool` 调的按需工具也认：按里面那颗的名字和参数找视图；
+- 终端：展开工具卡时头照旧，正文换成视图（在会话日志的锁外画）；
 - GUI：`tool/views` 列出有视图的工具；展开时 `tool/view { threadId, itemId }` 按需取
-  （只认受信 ticket），右上角「视图 | 原始」切换。
+  （只认受信 ticket）。右上角「视图 | 原始」切换规划中，等 GUI 实现。
+- 暂不覆盖：子代理转录里的工具卡（`tool/view` 只查线程自己的会话日志）。
 
 ## 设置卡的 schema（规划中）
 

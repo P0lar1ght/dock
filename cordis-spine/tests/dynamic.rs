@@ -2996,3 +2996,55 @@ async fn disk_plugin_is_matched_by_real_directory_not_spelling() {
         "删掉的插件不能还在跑"
     );
 }
+
+/// `register_tool` 带 `view`、而这个工具已有别人的卡片视图：apply 失败，作用域回滚，
+/// 先挂上的工具不能留下半截。
+#[tokio::test]
+async fn register_tool_with_a_taken_view_leaves_no_tool_behind() {
+    let root = boot().await;
+    let views = root
+        .require::<cordis_spine::ToolViews>(cordis_spine::TOOL_VIEWS)
+        .unwrap();
+    let _taken = views
+        .register(
+            "dup_tool",
+            std::sync::Arc::new(|_: &cordis_spine::ToolViewInput<'_>| None),
+        )
+        .unwrap();
+    exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "dup"},
+            "name": "Dup",
+            "purpose": "view conflict",
+            "factory": "rhai",
+            "source": r#"#{
+                inject: ["tools"],
+                apply: |host| {
+                    host.register_tool(#{
+                        name: "dup_tool",
+                        parameters: #{ type: "object", properties: #{} },
+                        execute: |args| { "ok" },
+                        view: |tc| #{ type: "text", text: "x" }
+                    });
+                    host.provide("dupAlive", #{ ok: true });
+                }
+            }"#,
+        }),
+    )
+    .await;
+    let out = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"dup-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(out.contains("已有卡片视图"), "{out}");
+    let names: Vec<_> = tools_of(&root)
+        .specs()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(!names.iter().any(|n| n == "dup_tool"), "{names:?}");
+}

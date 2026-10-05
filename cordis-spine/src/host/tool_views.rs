@@ -80,17 +80,46 @@ impl ToolViews {
         self.views.lock().unwrap().keys().cloned().collect()
     }
 
-    /// 画这一次调用；没登记或渲染函数回 `None` 都是 `None`。
+    /// 这次调用有没有视图可画（透过 `use_tool` 看里面那颗）。
+    pub fn covers(&self, name: &str, arguments: &str) -> bool {
+        let (name, _) = effective_call(name, arguments);
+        self.has(&name)
+    }
+
+    /// 画这一次调用；没登记或渲染函数回 `None` 都是 `None`。按需工具（插件的工具
+    /// 都是）经 `use_tool` 调用，日志里记的名字是 `use_tool`：这里透过它按里面那颗的
+    /// 名字和参数找视图、交给渲染函数。
     pub fn render(&self, input: &ToolViewInput<'_>) -> Option<ViewNode> {
+        let (name, arguments) = effective_call(input.name, input.arguments);
         // 先取出函数再调用：渲染函数可能跑插件脚本，不能拿着锁。
-        let view = self.views.lock().unwrap().get(input.name).cloned()?;
-        view(input)
+        let view = self.views.lock().unwrap().get(&name).cloned()?;
+        view(&ToolViewInput {
+            name: &name,
+            arguments: &arguments,
+            ..*input
+        })
     }
 
     /// 每次增删加一。排版缓存把它算进 key，登记 / 卸下视图后重画。
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Relaxed)
     }
+}
+
+/// `use_tool { tool_name, tool_input }` 包着的那次调用的真名和参数；别的原样回。
+pub fn effective_call(name: &str, arguments: &str) -> (String, String) {
+    if name == "use_tool" {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) {
+            if let Some(inner) = v.get("tool_name").and_then(serde_json::Value::as_str) {
+                let input = v
+                    .get("tool_input")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                return (inner.to_string(), input.to_string());
+            }
+        }
+    }
+    (name.to_string(), arguments.to_string())
 }
 
 pub fn tool_views() -> Plugin {
@@ -136,6 +165,15 @@ mod tests {
         };
         assert_eq!(views.render(&input(false)).unwrap().to_plain(), "运行中");
         assert!(views.render(&input(true)).is_none(), "渲染函数可以不给视图");
+        // 按需工具经 `use_tool` 调用：透过它找到里面那颗的视图，参数也换成里面的。
+        let wrapped = ToolViewInput {
+            name: "use_tool",
+            arguments: r#"{"tool_name":"deploy_status","tool_input":{"env":"prod"}}"#,
+            output: "经 use_tool",
+            failed: false,
+        };
+        assert!(views.covers(wrapped.name, wrapped.arguments));
+        assert_eq!(views.render(&wrapped).unwrap().to_plain(), "经 use_tool");
         let rev = views.revision();
         d.dispose_sync();
         assert!(views.revision() > rev);

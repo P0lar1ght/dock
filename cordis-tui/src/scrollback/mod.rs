@@ -548,6 +548,15 @@ impl Scrollback {
         let presets = self.ctx.get::<AgentPresets>(AGENT_PRESETS);
         let tool_views = self.ctx.get::<ToolViews>(TOOL_VIEWS);
         let compaction = sessions.compaction();
+        // 插件视图要跑插件脚本：不能拿着会话日志的锁画。锁里只把要画的那几张卡
+        // （展开着、有视图的）抄出来，出锁再画，画好的按调用 id 交给排版。
+        let wanted = tool_views.as_deref().map(|views| {
+            sessions.with_log(|events, _| tool_view_inputs(events, &tool_fold, views))
+        });
+        let rendered = match (wanted, tool_views.as_deref()) {
+            (Some(wanted), Some(views)) => render_tool_views(wanted, views),
+            _ => ToolViewMap::new(),
+        };
         sessions.with_log(|events, times| {
             build_frame_with(
                 compaction.as_ref(),
@@ -563,7 +572,7 @@ impl Scrollback {
                 subagents.as_deref(),
                 jobs.as_deref(),
                 presets.as_deref(),
-                tool_views.as_deref(),
+                Some(&rendered),
             )
         })
     }
@@ -708,6 +717,10 @@ pub(crate) fn child_transcript(
     } else {
         events.to_vec()
     };
+    // 这里拿的是事件的副本，没持任何锁，直接画插件视图。
+    let rendered = tool_views
+        .map(|views| render_tool_views(tool_view_inputs(&filtered, tool_fold, views), views))
+        .unwrap_or_default();
     let frame = build_frame(
         &filtered,
         &[],
@@ -721,7 +734,7 @@ pub(crate) fn child_transcript(
         subagents,
         None,
         presets,
-        tool_views,
+        Some(&rendered),
     );
     ChildTranscript {
         lines: frame.lines,
@@ -817,7 +830,7 @@ fn build_frame(
     subagents: Option<&Subagents>,
     jobs: Option<&Jobs>,
     presets: Option<&AgentPresets>,
-    tool_views: Option<&ToolViews>,
+    tool_views: Option<&ToolViewMap>,
 ) -> Frame {
     build_frame_with(
         None, events, times, width, expanded, tool_fold, working, show_ts, todos, todo_fold,
@@ -842,7 +855,7 @@ fn build_frame_with(
     subagents: Option<&Subagents>,
     jobs: Option<&Jobs>,
     presets: Option<&AgentPresets>,
-    tool_views: Option<&ToolViews>,
+    tool_views: Option<&ToolViewMap>,
 ) -> Frame {
     let theme = Theme::current();
     let last_notice = events
@@ -1219,7 +1232,7 @@ fn push_tool_card(
     jobs: Option<&Jobs>,
     job_snaps: &[JobSnapshot],
     presets: Option<&AgentPresets>,
-    tool_views: Option<&ToolViews>,
+    tool_views: Option<&ToolViewMap>,
 ) {
     // `use_tool` 是 deferred 工具的包装：内层是 task 族/skill 操作时按内层
     // 操作渲染卡片（参数取 `tool_input`）。
@@ -1320,14 +1333,7 @@ fn push_tool_card(
             .unwrap_or(tool::ToolMode::Collapsed);
         // 插件给这个工具登记了卡片视图：展开时头照旧，正文换成视图（`docs/PLUGIN-VIEWS.md`）。
         let view = (mode != tool::ToolMode::Collapsed && !running)
-            .then(|| {
-                tool_views?.render(&ToolViewInput {
-                    name,
-                    arguments,
-                    output: content,
-                    failed,
-                })
-            })
+            .then(|| tool_views?.get(id).cloned())
             .flatten();
         let card = tool_card_lines(
             name, arguments, content, theme, width, mode, running, failed,
@@ -1466,6 +1472,63 @@ fn tool_name_for_fold(ctx: &Context, id: &str) -> Option<String> {
         }
         None
     })
+}
+
+/// 已画好的插件工具卡视图，按工具调用 id。
+pub(crate) type ToolViewMap = HashMap<String, cordis_base::view::ViewNode>;
+
+/// 一张要画插件视图的工具卡：`(调用 id, 名字, 参数, 输出, 失败)`。
+type ToolViewCall = (String, String, String, String, bool);
+
+/// 展开着、有插件视图的工具卡（透过 `use_tool` 看里面那颗）。只抄字段，不画——
+/// 调用方可能拿着会话日志的锁。
+fn tool_view_inputs(
+    events: &[LogEvent],
+    fold: &HashMap<String, tool::ToolMode>,
+    views: &ToolViews,
+) -> Vec<ToolViewCall> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::ToolExecute {
+                id,
+                name,
+                arguments,
+                content,
+                is_error,
+                ..
+            } if fold
+                .get(id)
+                .is_some_and(|m| *m != tool::ToolMode::Collapsed)
+                && views.covers(name, arguments) =>
+            {
+                Some((
+                    id.clone(),
+                    name.clone(),
+                    arguments.clone(),
+                    content.clone(),
+                    *is_error,
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// 画 [`tool_view_inputs`] 抄出来的那几张卡（会跑插件脚本，别拿着锁调）。
+fn render_tool_views(calls: Vec<ToolViewCall>, views: &ToolViews) -> ToolViewMap {
+    calls
+        .into_iter()
+        .filter_map(|(id, name, arguments, output, failed)| {
+            let view = views.render(&ToolViewInput {
+                name: &name,
+                arguments: &arguments,
+                output: &output,
+                failed,
+            })?;
+            Some((id, view))
+        })
+        .collect()
 }
 
 /// 插件视图的工具卡：沿用通用卡片的头（名字、参数摘要、折叠符），正文换成视图。
@@ -1679,6 +1742,70 @@ fn paint_mermaid_hover(
 mod tests {
     use super::*;
 
+    /// 回归：插件视图要在会话日志的锁外画。渲染函数里读会话日志（插件脚本能做到，
+    /// 比如经 `host.call_tool`）以前会在非重入锁上把终端卡死。
+    #[test]
+    fn plugin_tool_views_render_outside_the_session_log_lock() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let root = cordis::Context::new();
+                root.plugin(cordis_spine::tool_views(), ())
+                    .unwrap()
+                    .wait()
+                    .await
+                    .unwrap();
+                let sessions = Sessions::isolated_as(root.clone(), "main");
+                sessions.append(LogEvent::ToolExecute {
+                    id: "a".into(),
+                    name: "deploy_status".into(),
+                    arguments: "{}".into(),
+                    content: "运行中".into(),
+                    images: vec![],
+                    is_error: false,
+                });
+                let _ = root.provide(SESSIONS, sessions);
+                let views = root.get::<ToolViews>(cordis_spine::TOOL_VIEWS).unwrap();
+                let live = root.clone();
+                let _v = views
+                    .register(
+                        "deploy_status",
+                        std::sync::Arc::new(move |_: &ToolViewInput<'_>| {
+                            // 画的时候回头读会话日志。
+                            let n = live
+                                .get::<Sessions>(SESSIONS)
+                                .map(|s| s.with_log(|events, _| events.len()))
+                                .unwrap_or(0);
+                            Some(cordis_base::view::ViewNode::parse(&serde_json::json!({
+                                "type": "text", "text": format!("日志 {n} 条")
+                            })))
+                        }),
+                    )
+                    .unwrap();
+                let sb = Scrollback::new(root.clone());
+                sb.tool_fold
+                    .lock()
+                    .unwrap()
+                    .insert("a".into(), tool::ToolMode::Expanded);
+                let frame = sb.build(60);
+                let text: String = frame
+                    .lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                    .collect();
+                done_tx.send(text).unwrap();
+            });
+        });
+        let text = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("画插件视图时卡死了（拿着会话日志的锁跑渲染函数）");
+        assert!(text.contains("日志 1 条"), "{text}");
+    }
+
     /// 插件给工具登记了卡片视图：展开时头照旧、正文换成视图；折叠时只有头；
     /// 没登记视图的工具照旧画原始输出。
     #[tokio::test]
@@ -1709,16 +1836,29 @@ mod tests {
             images: vec![],
             is_error: false,
         };
+        // 第三张：按需工具经 `use_tool` 调用，日志里记的名字是 `use_tool`。
+        let wrapped = LogEvent::ToolExecute {
+            id: "c".into(),
+            name: "use_tool".into(),
+            arguments: r#"{"tool_name":"deploy_status","tool_input":{"env":"staging"}}"#.into(),
+            content: "经 use_tool".into(),
+            images: vec![],
+            is_error: false,
+        };
+        let events = vec![exec("a", "deploy_status"), exec("b", "other_tool"), wrapped];
         let render = |mode| {
+            let fold = HashMap::from([
+                ("a".to_string(), mode),
+                ("b".to_string(), tool::ToolMode::Expanded),
+                ("c".to_string(), tool::ToolMode::Expanded),
+            ]);
+            let rendered = render_tool_views(tool_view_inputs(&events, &fold, &views), &views);
             let frame = build_frame(
-                &[exec("a", "deploy_status"), exec("b", "other_tool")],
+                &events,
                 &[],
                 60,
                 &HashSet::new(),
-                &HashMap::from([
-                    ("a".to_string(), mode),
-                    ("b".to_string(), tool::ToolMode::Expanded),
-                ]),
+                &fold,
                 false,
                 false,
                 &[],
@@ -1726,7 +1866,7 @@ mod tests {
                 None,
                 None,
                 None,
-                Some(&*views),
+                Some(&rendered),
             );
             frame
                 .lines
@@ -1748,6 +1888,10 @@ mod tests {
         assert!(
             other.contains("输出"),
             "没视图的工具照旧画原始输出：{other}"
+        );
+        assert!(
+            open.contains("状态  经 use_tool"),
+            "use_tool 包着的也按视图画：{open}"
         );
         let closed = render(tool::ToolMode::Collapsed);
         assert!(!closed.contains("状态  运行中"), "{closed}");

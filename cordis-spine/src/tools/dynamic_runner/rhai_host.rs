@@ -438,7 +438,8 @@ impl Host {
             )
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
-        // `view` 写在工具上 = 给自己登记卡片视图。
+        // `view` 写在工具上 = 给自己登记卡片视图。登记不上 apply 就失败，整个作用域
+        // 回滚，刚挂上的工具跟着卸下（`register_tool_with_a_taken_view_leaves_no_tool_behind`）。
         if let Some(view) = view {
             self.add_tool_view(&name, view)?;
         }

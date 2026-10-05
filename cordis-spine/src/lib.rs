@@ -71,7 +71,7 @@ pub use host::status_items::{status_items, StatusItem, StatusItems};
 pub use host::tabs::{
     tabs, CarryBack, TabInfo, TabKind, TabMount, Tabs, TabsConfig, MAX_TABS, PER_TAB_SERVICES,
 };
-pub use host::tool_views::{tool_views, ToolViewFn, ToolViewInput, ToolViews};
+pub use host::tool_views::{effective_call, tool_views, ToolViewFn, ToolViewInput, ToolViews};
 pub use host::tui_slots::{tui_slots, SlotAction, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
 pub use llm::compact::{
     compact, compact_command, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
