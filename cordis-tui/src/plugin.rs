@@ -91,6 +91,8 @@ pub fn views() -> Vec<Plugin> {
         shortcuts(),
         pairing(),
         commands(),
+        crate::views::registry::overlays(),
+        crate::views::slot_overlay::slot_overlay(),
     ]
 }
 
@@ -112,6 +114,7 @@ pub fn tui() -> Plugin {
             TUI_WELCOME,
             TUI_SHORTCUTS,
             TUI_PAIRING,
+            crate::views::registry::TUI_OVERLAYS,
         ]),
         |ctx, _: &()| async move {
             event_loop::run(ctx)

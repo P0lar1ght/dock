@@ -3,13 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Instant, SystemTime};
 
+use crate::views::registry::{OverlayInput, OverlayReply, OverlayViews, TUI_OVERLAYS};
 use cordis::Context;
 use cordis_base::plugin_settings::FieldKind;
 use cordis_spine::{
     goal_composer_fill, loop_composer_fill, AgentPresets, AppSettings, Ask, Browser, Computer,
     Cron, CuaAction, Goal, Jobs, Mcp, McpStatus, MermaidEngineKind, Permissions, PlanMode,
-    Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage, Workflows, AGENT_PRESETS, ASK,
-    BROWSER, BROWSER_MCP_PREFIX, COMPUTER, CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS,
+    Sessions, Slash, Subagents, TuiSlots, UserImage, Workflows, AGENT_PRESETS, ASK, BROWSER,
+    BROWSER_MCP_PREFIX, COMPUTER, CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS,
     SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
 use cordis_spine::{PluginSettings, PLUGIN_SETTINGS};
@@ -114,7 +115,7 @@ pub(super) fn open_slot_if_needed(ctx: &Context, overlay: &mut Overlay) {
     };
     if let Some(id) = slots.take_open_request() {
         if slots.get(&id).is_some() {
-            *overlay = Overlay::Slot { id, scroll: 0 };
+            *overlay = Overlay::view(crate::views::slot_overlay::KIND, id);
         }
     }
 }
@@ -135,28 +136,27 @@ pub(super) fn open_slash_notice_if_needed(ctx: &Context, overlay: &mut Overlay) 
     }
 }
 
-pub(super) fn dispatch_slot_key(ctx: &Context, overlay: &mut Overlay, key: &str) -> bool {
-    let Overlay::Slot { id, .. } = overlay else {
+/// 把输入交给注册表里的浮层（`Overlay::View`）。不是这种浮层回 `false`。浮层说
+/// 关、或表里已经没有这种浮层（插件卸了）就关掉。
+pub(super) fn dispatch_view_input(
+    ctx: &Context,
+    overlay: &mut Overlay,
+    input: OverlayInput,
+) -> bool {
+    let Overlay::View { kind, state } = overlay else {
         return false;
     };
-    let id = id.clone();
-    let Some(slots) = ctx.get::<TuiSlots>(TUI_SLOTS) else {
-        overlay.close();
-        return true;
+    let view = ctx
+        .get::<OverlayViews>(TUI_OVERLAYS)
+        .and_then(|table| table.get(kind));
+    let reply = match view {
+        Some(view) => view.input(ctx, state, input),
+        None => OverlayReply::Close,
     };
-    // 有视图树时数字键 1–9 是点第几个动作（按钮 / 带动作的列表行），交给插件的
-    // 是那个动作 id，和 GUI 点按钮同一条路。
-    let key = slot_view_action(&slots, &id, key).unwrap_or_else(|| key.to_string());
-    if matches!(slots.on_key(&id, &key), SlotKeyResult::Close) {
+    if reply == OverlayReply::Close {
         overlay.close();
     }
     true
-}
-
-fn slot_view_action(slots: &TuiSlots, id: &str, key: &str) -> Option<String> {
-    let digit = key.strip_prefix("char:")?.parse::<usize>().ok()?;
-    let view = slots.view(id)?;
-    crate::views::plugin_view::action_for_digit(&view, digit)
 }
 
 pub(super) fn browser_cockpit_body(ctx: &Context) -> String {
@@ -1549,7 +1549,7 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
         Overlay::Usage { .. }
         | Overlay::Notice { .. }
         | Overlay::MemoryBrowser(_)
-        | Overlay::Slot { .. }
+        | Overlay::View { .. }
         | Overlay::Browser { .. }
         | Overlay::Computer { .. }
         | Overlay::Inspect { .. } => 0,
@@ -1760,17 +1760,17 @@ mod tests {
                 }),
             )
             .unwrap();
-        let mut overlay = Overlay::Slot {
-            id: "viewed".into(),
-            scroll: 0,
-        };
-        dispatch_slot_key(&ctx, &mut overlay, "char:2");
-        dispatch_slot_key(&ctx, &mut overlay, "char:7");
-        let mut overlay = Overlay::Slot {
-            id: "plain".into(),
-            scroll: 0,
-        };
-        dispatch_slot_key(&ctx, &mut overlay, "char:2");
+        for p in [
+            crate::views::registry::overlays(),
+            crate::views::slot_overlay::slot_overlay(),
+        ] {
+            ctx.plugin(p, ()).unwrap().wait().await.unwrap();
+        }
+        let mut overlay = Overlay::view(crate::views::slot_overlay::KIND, "viewed");
+        dispatch_view_input(&ctx, &mut overlay, OverlayInput::Char('2'));
+        dispatch_view_input(&ctx, &mut overlay, OverlayInput::Char('7'));
+        let mut overlay = Overlay::view(crate::views::slot_overlay::KIND, "plain");
+        dispatch_view_input(&ctx, &mut overlay, OverlayInput::Char('2'));
         assert_eq!(*got.lock().unwrap(), vec!["rollback", "char:7", "char:2"]);
     }
 
@@ -1855,8 +1855,91 @@ mod tests {
         assert!(image_chip_numbers("no chips").is_empty());
     }
 
+    /// 注册表：一颗插件登记的新浮层不用改事件循环就能收按键；那种浮层被卸下后，
+    /// 开着的会被关掉而不是卡在一个画不出来的状态。
+    #[tokio::test]
+    async fn registered_overlays_take_input_and_close_when_gone() {
+        use crate::grok::picker::PickerHits;
+        use crate::views::registry::{register_overlay, OverlayView, ViewState};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct Counter(Arc<AtomicUsize>);
+        impl OverlayView for Counter {
+            fn paint(
+                &self,
+                _: &Context,
+                _: &mut ratatui::buffer::Buffer,
+                _: ratatui::layout::Rect,
+                _: &ViewState,
+            ) -> PickerHits {
+                PickerHits::default()
+            }
+            fn input(
+                &self,
+                _: &Context,
+                state: &mut ViewState,
+                input: OverlayInput,
+            ) -> OverlayReply {
+                match input {
+                    OverlayInput::Enter => {
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                        state.scroll += 1;
+                        OverlayReply::Keep
+                    }
+                    _ => OverlayReply::Close,
+                }
+            }
+        }
+
+        let root = Context::new();
+        root.plugin(crate::views::registry::overlays(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let probe = hits.clone();
+        let fiber = root
+            .plugin(
+                cordis::plugin("test.overlay", cordis::Inject::new(), move |ctx, _: &()| {
+                    register_overlay(ctx, "counter", Arc::new(Counter(probe.clone())))?;
+                    Ok(None)
+                }),
+                (),
+            )
+            .unwrap();
+        fiber.wait().await.unwrap();
+        let mut overlay = Overlay::view("counter", "x");
+        assert!(dispatch_view_input(
+            &root,
+            &mut overlay,
+            OverlayInput::Enter
+        ));
+        assert!(dispatch_view_input(
+            &root,
+            &mut overlay,
+            OverlayInput::Enter
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(matches!(&overlay, Overlay::View { state, .. } if state.scroll == 2));
+        fiber.dispose().await.unwrap();
+        assert!(dispatch_view_input(
+            &root,
+            &mut overlay,
+            OverlayInput::Enter
+        ));
+        assert!(!overlay.is_open(), "浮层被卸下后要关掉");
+        assert!(!dispatch_view_input(
+            &root,
+            &mut Overlay::None,
+            OverlayInput::Esc
+        ));
+    }
+
     #[tokio::test]
     async fn slot_overlay_opens_from_request_and_esc_closes() {
+        use cordis_spine::SlotKeyResult;
         use std::sync::Arc;
 
         struct StaticSlot;
@@ -1883,12 +1966,20 @@ mod tests {
         let root = Context::new();
         let slots = TuiSlots::new();
         let _hold = root.provide(TUI_SLOTS, slots.clone()).unwrap();
+        for p in [
+            crate::views::registry::overlays(),
+            crate::views::slot_overlay::slot_overlay(),
+        ] {
+            root.plugin(p, ()).unwrap().wait().await.unwrap();
+        }
         slots.register("memo".into(), Arc::new(StaticSlot)).unwrap();
         slots.request_open("memo").unwrap();
         let mut overlay = Overlay::None;
         open_slot_if_needed(&root, &mut overlay);
-        assert!(matches!(&overlay, Overlay::Slot { id, .. } if id == "memo"));
-        assert!(dispatch_slot_key(&root, &mut overlay, "esc"));
+        assert!(
+            matches!(&overlay, Overlay::View { kind, state } if kind == "slot" && state.arg == "memo")
+        );
+        assert!(dispatch_view_input(&root, &mut overlay, OverlayInput::Esc));
         assert!(!overlay.is_open());
     }
 

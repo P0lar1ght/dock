@@ -293,7 +293,7 @@ impl Shortcuts {
             overlay,
             Overlay::Notice { .. }
                 | Overlay::MemoryBrowser(_)
-                | Overlay::Slot { .. }
+                | Overlay::View { .. }
                 | Overlay::Browser { .. }
                 | Overlay::Inspect { .. }
         ) {

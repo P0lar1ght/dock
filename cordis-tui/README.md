@@ -11,6 +11,8 @@ Grok pager 界面，拆成 Cordis 插件。组合根逐个挂 `views()`（下表
 | `tui.welcome` | `tui.welcome` | braille logo + 菜单（空 session）；F3 resume 时切到 fullscreen picker |
 | `tui.shortcuts` | `tui.shortcuts` | 快捷键表 |
 | `tui.pairing` | `tui.pairing` | 配对浮层 |
+| `tui.overlays` | `tui.overlays` | 浮层注册表：新浮层实现 `OverlayView`（`paint` / `input`）登记进来，`Overlay::view(kind, arg)` 打开，事件循环只认 `Overlay::View`。插件面板 `slot`（`tui.overlay.slot`）是第一个 |
+| `tui.commands` | — | 终端专属斜杠命令登记进 `"slash"` |
 | `tui` | — | 只跑事件循环；inject `session` + `session.port` 与上面全部视图件，不自己挂它们 |
 
 发消息时 live lookup `session.port`，不把 `Arc` 关进闭包。`session.port`（`SessionRef`）、分页（`Tabs`）、网关配对（`GatewayRef`）是宿主之间的契约，定义在 `cordis_spine`，本 crate 只消费；`PER_TAB_VIEWS` 是交给分页按页隔离的四个视图名，`carry_back` 把分叉页的结论填进来源页输入框。

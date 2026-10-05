@@ -654,7 +654,7 @@ pub async fn run(root: Context) -> Result<()> {
                                     };
                                 }
                                 Effect::OpenSlot { id } => {
-                                    overlay = Overlay::Slot { id, scroll: 0 };
+                                    overlay = Overlay::view(crate::views::slot_overlay::KIND, id);
                                 }
                                 Effect::RunTool {
                                     name,
