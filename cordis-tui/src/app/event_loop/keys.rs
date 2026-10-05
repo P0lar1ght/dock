@@ -1481,7 +1481,7 @@ pub(super) fn run_action(
                 if let Ok(welcome) = ctx.require::<Welcome>(TUI_WELCOME) {
                     if let Some(hit) = welcome.hit(column, row) {
                         return match hit {
-                            WelcomeHit::NewSession => vec![Effect::NewSession],
+                            WelcomeHit::NewSession => vec![crate::app::actions::run("new", "")],
                             WelcomeHit::Resume => vec![Effect::ResumePicker],
                             WelcomeHit::Quit => vec![Effect::Quit],
                         };

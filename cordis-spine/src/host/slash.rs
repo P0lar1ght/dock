@@ -48,8 +48,8 @@ pub enum SlashOutcome {
     Notice { title: String, body: String },
     /// 填进输入框，发不发由人决定。
     Fill(String),
-    /// 作为用户消息发出去。
-    Submit(String),
+    /// 作为用户消息发出去。`note` 是给人看的一句回执（「目标模式」），没有就不提示。
+    Submit { text: String, note: Option<String> },
     /// 让客户端打开它自己的选择器（`model` / `reasoning` / `context` / `goal`）。
     Menu(String),
     /// 打开动态包的终端插槽（`kind: slot`），载荷是插槽 id。
@@ -59,6 +59,13 @@ pub enum SlashOutcome {
 }
 
 impl SlashOutcome {
+    pub fn submit(text: impl Into<String>, note: Option<&str>) -> Self {
+        Self::Submit {
+            text: text.into(),
+            note: note.map(str::to_string),
+        }
+    }
+
     pub fn notice(title: impl Into<String>, body: impl Into<String>) -> Self {
         Self::Notice {
             title: title.into(),
@@ -456,7 +463,7 @@ async fn run_extra(page: &Context, entry: &SlashEntry, args: &str) -> SlashOutco
         ExtraSlashKind::Prompt => {
             let text = entry.expand(args);
             if entry.send {
-                SlashOutcome::Submit(text)
+                SlashOutcome::submit(text, None)
             } else {
                 SlashOutcome::Fill(text)
             }
@@ -697,7 +704,7 @@ mod tests {
         );
         assert_eq!(
             slash.run(&ctx, "standup", "today").await,
-            Some(SlashOutcome::Submit("run standup today".into()))
+            Some(SlashOutcome::submit("run standup today", None))
         );
         assert_eq!(slash.run(&ctx, "nope", "").await, None);
     }

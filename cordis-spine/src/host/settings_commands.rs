@@ -56,7 +56,8 @@ fn model(page: &Context, args: &str) -> SlashOutcome {
     }
     with_settings(page, |settings| {
         settings.set_model(args);
-        SlashOutcome::Applied(format!("已切换 {args}"))
+        let label = crate::model_label(&settings.catalog(), args);
+        SlashOutcome::Applied(format!("已切换 {label}"))
     })
 }
 

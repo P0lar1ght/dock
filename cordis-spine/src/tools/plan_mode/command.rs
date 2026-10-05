@@ -34,7 +34,7 @@ fn plan(page: &Context, args: &str) -> SlashOutcome {
         return SlashOutcome::Applied("计划模式".into());
     }
     plan.enter_active();
-    SlashOutcome::Submit(args.to_string())
+    SlashOutcome::submit(args, Some("计划模式"))
 }
 
 fn view(page: &Context, _: &str) -> SlashOutcome {
@@ -75,7 +75,7 @@ mod tests {
         assert!(goal.awaiting_composer());
         assert_eq!(
             slash.run(&root, "plan", "写个计划").await,
-            Some(SlashOutcome::Submit("写个计划".into()))
+            Some(SlashOutcome::submit("写个计划", Some("计划模式")))
         );
         assert!(!goal.awaiting_composer(), "/plan 之后输入框不该还留给目标");
     }

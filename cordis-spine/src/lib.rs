@@ -34,11 +34,11 @@ pub use bundle::{
 pub use cordis_base::acp::PermissionOptionKind;
 pub use cordis_base::config::{
     effective_browser_headed, load_browser_headed, load_catalog, load_disabled_mcp_tools,
-    load_mcp_servers, load_memory_config, persist_browser_headed, persist_disabled_mcp_tools,
-    persist_mcp_server_enabled, register_builtin_browser_mcp, ApiBackend, AuthScheme,
-    McpOAuthConfig, McpServer, McpStdioFraming, McpTransport, MemoryConfig, MemoryDreamConfig,
-    MemoryFlushConfig, ModelChoice, ModelPricing, BROWSER_MCP_ENV, BROWSER_MCP_SERVER,
-    DEFAULT_EFFORT_CHOICES,
+    load_mcp_servers, load_memory_config, model_label, persist_browser_headed,
+    persist_disabled_mcp_tools, persist_mcp_server_enabled, register_builtin_browser_mcp,
+    ApiBackend, AuthScheme, McpOAuthConfig, McpServer, McpStdioFraming, McpTransport, MemoryConfig,
+    MemoryDreamConfig, MemoryFlushConfig, ModelChoice, ModelPricing, BROWSER_MCP_ENV,
+    BROWSER_MCP_SERVER, DEFAULT_EFFORT_CHOICES,
 };
 pub use cordis_base::stream_acc::StreamDelta;
 pub use cordis_base::types::{
@@ -126,8 +126,8 @@ pub use tools::dynamic_runner::{
 };
 pub use tools::goal::{
     goal_command, goal_composer_fill, goal_continuation_directive, goal_instruction,
-    goal_offer_addon, goal_service, goal_tool_registration, goal_usage_message, tool_goal, Goal,
-    GOAL_RESERVED_SUBCOMMANDS,
+    goal_offer_addon, goal_service, goal_tool_registration, goal_usage_message, start_goal,
+    tool_goal, Goal, GOAL_RESERVED_SUBCOMMANDS,
 };
 pub use tools::jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
 pub use tools::lsp::{

@@ -112,7 +112,7 @@ fn project(gateway: &GatewayHandle, name: &str, outcome: SlashOutcome) -> Result
         SlashOutcome::Applied(message) => applied(message),
         SlashOutcome::Notice { title, body } => notice(title, body),
         SlashOutcome::Fill(text) => filled(text),
-        SlashOutcome::Submit(text) => return submit_text(gateway, text),
+        SlashOutcome::Submit { text, .. } => return submit_text(gateway, text),
         SlashOutcome::Menu(id) => menu(&id),
         SlashOutcome::OpenSlot(_) => notice("终端插槽", format!("/{name} 请在 Dock 终端打开。")),
         SlashOutcome::TerminalOnly(name) => terminal_only(&name),

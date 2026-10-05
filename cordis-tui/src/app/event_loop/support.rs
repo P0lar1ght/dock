@@ -5,11 +5,11 @@ use std::time::{Instant, SystemTime};
 
 use cordis::Context;
 use cordis_spine::{
-    goal_composer_fill, loop_composer_fill, loop_schedule_instruction, AgentPresets, AppSettings,
-    Ask, Browser, Computer, Cron, CuaAction, Goal, Jobs, LoopFireMode, Mcp, McpStatus,
-    MermaidEngineKind, Permissions, PlanMode, Sessions, Slash, SlotKeyResult, Subagents, TuiSlots,
-    UserImage, Workflows, AGENT_PRESETS, ASK, BROWSER, BROWSER_MCP_PREFIX, COMPUTER, CRON, GOAL,
-    JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
+    goal_composer_fill, loop_composer_fill, AgentPresets, AppSettings, Ask, Browser, Computer,
+    Cron, CuaAction, Goal, Jobs, Mcp, McpStatus, MermaidEngineKind, Permissions, PlanMode,
+    Sessions, Slash, SlotKeyResult, Subagents, TuiSlots, UserImage, Workflows, AGENT_PRESETS, ASK,
+    BROWSER, BROWSER_MCP_PREFIX, COMPUTER, CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS,
+    SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
 
 use crate::app::clipboard;
@@ -1320,12 +1320,9 @@ pub(super) fn intercept_goal_send(ctx: &Context, text: &str) -> Option<Vec<Effec
         GoalComposer::Stub => Some(vec![Effect::FillPrompt {
             text: goal_composer_fill(),
         }]),
-        GoalComposer::Objective(obj) => {
-            goal.disarm_composer();
-            Some(vec![Effect::EnterGoal {
-                objective: Some(obj),
-            }])
-        }
+        GoalComposer::Objective(obj) => Some(crate::app::actions::effects_for_outcome(
+            cordis_spine::start_goal(ctx, &obj),
+        )),
         GoalComposer::Slash(line) => {
             goal.disarm_composer();
             let extras = slash_extras(ctx);
@@ -1336,39 +1333,12 @@ pub(super) fn intercept_goal_send(ctx: &Context, text: &str) -> Option<Vec<Effec
     }
 }
 
-pub(super) fn start_goal(ctx: &Context, raw: String) {
-    let Some(goal) = ctx.get::<Goal>(GOAL) else {
-        flash(ctx, "目标服务未挂载");
-        return;
-    };
-    goal.disarm_composer();
-    goal.start(raw.clone());
-    flash(ctx, "目标模式");
-    if let Ok(session) = ctx.require::<SessionRef>(SESSION_PORT) {
-        session.submit(raw, false);
-    }
-}
-
-pub(super) fn start_loop(ctx: &Context, args: String) {
-    let visible = format!("/loop {args}");
-    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
-        sessions.arm_user_addon(
-            visible.clone(),
-            loop_schedule_instruction(&args, LoopFireMode::InSession),
-        );
-    }
-    flash(ctx, "正在安排循环任务");
-    if let Ok(session) = ctx.require::<SessionRef>(SESSION_PORT) {
-        session.submit(visible, false);
-    }
-}
-
 pub(super) fn intercept_loop_send(text: &str) -> Option<Vec<Effect>> {
     match interpret_loop_composer(text) {
         LoopComposer::Stub => Some(vec![Effect::FillPrompt {
             text: loop_composer_fill(),
         }]),
-        LoopComposer::Schedule(args) => Some(vec![Effect::EnterLoop { args }]),
+        LoopComposer::Schedule(args) => Some(vec![crate::app::actions::run("loop", &args)]),
         LoopComposer::Other => None,
     }
 }
@@ -1469,7 +1439,7 @@ pub(super) fn apply_goal_hit(ctx: &Context, overlay: &mut Overlay, hit: GoalHit)
     match hit {
         GoalHit::Pause => goal_pause_resume(ctx),
         GoalHit::Edit => vec![Effect::ShowGoal { editing: true }],
-        GoalHit::Close => vec![Effect::GoalClear],
+        GoalHit::Close => vec![crate::app::actions::run("goal", "clear")],
         GoalHit::Open => {
             if matches!(overlay, Overlay::Goal { .. }) {
                 overlay.close();

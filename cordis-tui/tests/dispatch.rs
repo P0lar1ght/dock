@@ -72,7 +72,7 @@ fn slash_plan_tasks_mcps_map() {
     let plan = dispatch(Action::SendPrompt("/plan".into()), &prompt);
     assert!(matches!(
         plan.as_slice(),
-        [Effect::EnterPlan { description: None }]
+        [Effect::RunCommand { name, args }] if name == "plan" && args.is_empty()
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/view-plan".into()), &prompt).as_slice(),
@@ -81,7 +81,7 @@ fn slash_plan_tasks_mcps_map() {
     let plan_desc = dispatch(Action::SendPrompt("/plan refactor auth".into()), &prompt);
     assert!(matches!(
         plan_desc.as_slice(),
-        [Effect::EnterPlan { description: Some(d) }] if d == "refactor auth"
+        [Effect::RunCommand { name, args }] if name == "plan" && args == "refactor auth"
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/tasks".into()), &prompt).as_slice(),
@@ -177,19 +177,19 @@ fn slash_plan_tasks_mcps_map() {
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/compact".into()), &prompt).as_slice(),
-        [Effect::Compact { context }] if context.is_empty()
+        [Effect::RunCommand { name, args }] if name == "compact" && args.is_empty()
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/compact keep the test".into()), &prompt).as_slice(),
-        [Effect::Compact { context }] if context == "keep the test"
+        [Effect::RunCommand { name, args }] if name == "compact" && args == "keep the test"
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/goal".into()), &prompt).as_slice(),
-        [Effect::FillPrompt { text }] if text.contains("用法") && text.contains("/goal")
+        [Effect::RunCommand { name, args }] if name == "goal" && args.is_empty()
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/goal ship the lsp tool".into()), &prompt).as_slice(),
-        [Effect::EnterGoal { objective: Some(d) }] if d == "ship the lsp tool"
+        [Effect::RunCommand { name, args }] if name == "goal" && args == "ship the lsp tool"
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/goal status".into()), &prompt).as_slice(),
@@ -197,7 +197,7 @@ fn slash_plan_tasks_mcps_map() {
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/goal pause".into()), &prompt).as_slice(),
-        [Effect::GoalPause]
+        [Effect::RunCommand { name, args }] if name == "goal" && args == "pause"
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/loop".into()), &prompt).as_slice(),
@@ -205,11 +205,11 @@ fn slash_plan_tasks_mcps_map() {
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/loop 5m check deploy".into()), &prompt).as_slice(),
-        [Effect::EnterLoop { args }] if args == "5m check deploy"
+        [Effect::RunCommand { name, args }] if name == "loop" && args == "5m check deploy"
     ));
     assert!(matches!(
         dispatch(Action::SendPrompt("/loop check deploy every hour".into()), &prompt).as_slice(),
-        [Effect::EnterLoop { args }] if args == "check deploy every hour"
+        [Effect::RunCommand { name, args }] if name == "loop" && args == "check deploy every hour"
     ));
 }
 

@@ -47,7 +47,7 @@ fn run(page: &Context, args: &str) -> SlashOutcome {
             if goal.pause() {
                 SlashOutcome::Applied("目标已暂停".into())
             } else {
-                SlashOutcome::notice("目标", "没有进行中的目标。")
+                SlashOutcome::Applied("没有进行中的目标".into())
             }
         }
         "resume" => {
@@ -55,7 +55,7 @@ fn run(page: &Context, args: &str) -> SlashOutcome {
             if goal.resume() {
                 SlashOutcome::Applied("目标已继续".into())
             } else {
-                SlashOutcome::notice("目标", "没有已暂停的目标。")
+                SlashOutcome::Applied("没有已暂停的目标".into())
             }
         }
         "clear" => {
@@ -64,14 +64,21 @@ fn run(page: &Context, args: &str) -> SlashOutcome {
                 SlashOutcome::Applied("已清除目标".into())
             } else {
                 goal.disarm_composer();
-                SlashOutcome::notice("目标", "没有活动目标。")
+                SlashOutcome::Applied("没有活动目标".into())
             }
         }
         _ if GOAL_RESERVED_SUBCOMMANDS.contains(&first) => SlashOutcome::Menu("goal".into()),
-        _ => {
-            goal.disarm_composer();
-            goal.start(args);
-            SlashOutcome::Submit(args.to_string())
-        }
+        _ => start_goal(page, args),
     }
+}
+
+/// 把 `objective` 原样定为这一页的目标并发出去，不再按子命令解析——终端在 `/goal`
+/// 之后把下一条消息当目标时走这里（「pause 部署」是目标，不是 `/goal pause`）。
+pub fn start_goal(page: &Context, objective: &str) -> SlashOutcome {
+    let Some(goal) = page.get::<Goal>(GOAL) else {
+        return SlashOutcome::notice("目标", "目标服务未挂载。");
+    };
+    goal.disarm_composer();
+    goal.start(objective);
+    SlashOutcome::submit(objective, Some("目标模式"))
 }
