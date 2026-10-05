@@ -67,6 +67,7 @@ config.toml.example      用户 / 项目模型目录样例
 | Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
 | 其它 spine | `context` `settings` `turn` `permissions` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名 |
+| 斜杠命令 | `command-session` `command-settings` `command-goal` `command-plan` `command-loop` `command-workflow` `command-compact`（宿主无关，带 handler）；TUI 的 `tui.commands`（终端专属） | 向 `"slash"` `register_command`；命令体收调用页的 ctx，回 `SlashOutcome`，TUI / 网关各自呈现 |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
 | 宿主契约 | `session_actor` 提供 `session` / `session.port`（`SessionRef`）；`tabs` 提供 `Tabs` | 同名 |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing`；`tui` 只跑事件循环，视图件由组合根挂（`cordis_tui::views()`） | 同名 |
@@ -108,7 +109,7 @@ cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的�
 记一条 `LogEvent::TurnEnd(TurnEndStatus)`（随会话落盘成 `turn-end` 行，出错带文本；模型请求
 失败不是 `Err`，本轮最后一次采样带错误时也记成失败），再发 `session/turn-end`
 （`PageTurnEnd { page, status }`）。它和 `Notice` 一样只给用户看，不进模型历史。
-压缩进展另走 `session/compaction`（`PageCompaction { page, progress }`），不是
+整份实时日志被换掉（`Sessions::clear` / `restore`，不管是终端 `/new` 还是网关 `thread/start`）发 `session/reset`（载荷是页身份），网关据此重建那一页的投影。压缩进展另走 `session/compaction`（`PageCompaction { page, progress }`），不是
 `LogEvent`、不落盘：TUI 每帧直接读 `Sessions::compaction()`，网关推成 `context/compacted`。网关的
 `turn/completed` 只由这条事件触发，实时和回放同一条路，一轮一次，`status` 随之是
 completed / cancelled / failed（failed 带 `error`）；更早的会话没有这一行，回放时按旧规则补。
@@ -221,7 +222,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 
 - `cordis-gateway` 的 rustc **1.94+** 下限由根 `Cargo.toml` 的 `[workspace.package].rust-version` 固化，见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 - `dock-render` 的 mermaid 面依赖 `dock-render/third_party/` 冻结副本。
-- `embed-sdk` 只解析、采集（截图）、把 Gateway 的 `{ kind }` 画出来；斜杠目录迭代 `cordis_tui::slash_catalog()` + `"slash"` extras + `/screenshot*`，不手抄表。标 `terminal` 的命令（`/cd`、`/settings` 含带参）execute 拒绝。
+- `embed-sdk` 只解析、采集（截图）、把 Gateway 的 `{ kind }` 画出来；斜杠目录迭代 `"slash"` 命令表 + extras + `/screenshot*`，不手抄表。标 `terminal` 的命令（`/cd`、`/settings` 含带参）execute 拒绝。
 - 本机桌面 CUA 走外部 cua-driver MCP，不自研键鼠；全部与 `bash` 同级权限 / 计划门。cua-driver 自带的 `browser_*` ≠ Dock BUA 的 `mcp_browser__browser_*`。
 - 浏览器（BUA）是内置 MCP `browser`：`dock mcp browser`（crate `cordis-browser`），不在进程内注册工具。
   `tool-browser` 只剩 `/browser` 驾驶舱。按会话分标签页，会话身份走 `tools/call` 的 `_meta`。

@@ -511,6 +511,50 @@ async fn cancel_all_stops_children() {
     gate.release.notify_waiters();
 }
 
+/// `/new`（任何客户端发的）要收掉这一页还在跑的子代理，再放开派生——以前只有
+/// 终端自己的 `/new` 这么做，从 GUI / 网关开新会话时旧会话的子代理接着跑。
+#[tokio::test(flavor = "multi_thread")]
+async fn new_session_command_stops_this_pages_children() {
+    let gate = Arc::new(Gate {
+        started: AtomicBool::new(false),
+        release: Notify::new(),
+    });
+    let h = boot(Arc::new(GatedLastUser {
+        gate: gate.clone(),
+        first: AtomicBool::new(true),
+    }))
+    .await;
+    for p in [cordis_spine::slash(), cordis_spine::session_commands()] {
+        h.root.plugin(p, ()).unwrap().wait().await.unwrap();
+    }
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "FIRST_TURN", "general-purpose").await;
+    wait_flag(&gate.started).await;
+    wait_running(&sub, &id).await;
+
+    let slash = h
+        .root
+        .require::<cordis_spine::Slash>(cordis_spine::SLASH)
+        .unwrap();
+    assert_eq!(
+        slash.run(&h.root, "new", "").await,
+        Some(cordis_spine::SlashOutcome::Applied("已开始新会话".into()))
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !sub.snapshot(&id).is_some_and(|s| s.cancelled || s.done) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "/new did not stop {id}"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    gate.release.notify_waiters();
+    // 新会话里还能派子代理：取消时关上的派生闸门要重新打开。
+    let again = spawn_bg(&tools, "SECOND", "general-purpose").await;
+    assert_ne!(again, id);
+}
+
 /// An idle child frees its concurrent slot: with a limit of 1, the second
 /// spawn must start once the first parks.
 #[tokio::test]

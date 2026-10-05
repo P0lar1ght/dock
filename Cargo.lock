@@ -828,7 +828,6 @@ dependencies = [
  "cordis-base",
  "cordis-browser",
  "cordis-spine",
- "cordis-tui",
  "futures-util",
  "getrandom 0.2.17",
  "reqwest 0.12.28",

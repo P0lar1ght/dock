@@ -11,8 +11,8 @@ use std::sync::Arc;
 use cordis::{plugin, Context, Inject, Plugin};
 use serde_json::Value;
 
-use crate::host::slash::{contrib_fields_present, slash_entry_from_define};
-use crate::names::{CONTEXT, DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, TOOLS};
+use crate::host::slash::{contrib_fields_present, slash_entry_from_define, Slash};
+use crate::names::{CONTEXT, DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, SLASH, TOOLS};
 use crate::prompt::assemble::ORDER_CORDIS;
 use crate::prompt::context_book::{own_sections, ContextBook};
 use crate::session::log::Sessions;
@@ -225,6 +225,18 @@ fn define_tool(ctx: Context, call: ToolCall) -> ExecFut {
         let factory = v.get("factory").and_then(Value::as_str).unwrap_or("");
         let contrib = match (factory, contrib_fields_present(&v)) {
             ("slash", _) => match slash_entry_from_define(&v, purpose) {
+                // 命令表里有的名字（`/help`、各功能的命令、终端的命令）不能盖：
+                // define 时就说，别等到 `cordis_run` 才失败。
+                Ok(entry)
+                    if ctx
+                        .get::<Slash>(SLASH)
+                        .is_some_and(|slash| slash.is_builtin(&entry.command)) =>
+                {
+                    return tool_result(
+                        call,
+                        format!("Error: cannot shadow builtin slash /{}", entry.command),
+                    );
+                }
                 Ok(entry) => Some(entry),
                 Err(e) => return tool_result(call, format!("Error: {e}")),
             },

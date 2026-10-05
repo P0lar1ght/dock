@@ -184,6 +184,18 @@ async fn harness_root_with(sampler: Option<Arc<dyn Sampler>>) -> Context {
         .unwrap();
     root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
     root.plugin(slash(), ()).unwrap().wait().await.unwrap();
+    // 人用的斜杠命令，和 `install_app` 一样各功能一颗。
+    for command in [
+        cordis_spine::session_commands(),
+        cordis_spine::settings_commands(),
+        cordis_spine::goal_command(),
+        cordis_spine::plan_commands(),
+        cordis_spine::loop_command(),
+        cordis_spine::compact_command(),
+        cordis_spine::workflow_command(),
+    ] {
+        root.plugin(command, ()).unwrap().wait().await.unwrap();
+    }
     root.plugin(mcp_client(), ()).unwrap().wait().await.unwrap();
     root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
     let port = TestSession {
@@ -1033,71 +1045,46 @@ async fn slash_list_includes_harness_and_screenshot() {
             send: false,
         })
         .unwrap();
+    // 终端 UI 挂上时会把自己的命令登记成 terminal；这里照它的样子登记一条。
+    let _terminal = slash
+        .register_command(cordis_spine::SlashCommand::terminal("cd", "切换工作目录"))
+        .unwrap();
     let listed = rpc.call("slash/list", json!({})).await;
     assert!(listed.get("error").is_none(), "{listed}");
-    let names: Vec<&str> = listed["result"]["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|c| c["name"].as_str())
-        .collect();
-    for expected in [
-        "new",
-        "plan",
-        "goal",
-        "compact",
-        "screenshot",
-        "screenshot --region",
-        "memo",
-        "pair",
-        "cd",
-    ] {
-        assert!(names.contains(&expected), "missing {expected} in {names:?}");
+    let rows = listed["result"]["commands"].as_array().unwrap();
+    let row = |name: &str| {
+        rows.iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name} in {rows:?}"))
+    };
+    for host in ["new", "plan", "goal", "compact", "model", "help", "loop"] {
+        assert_eq!(row(host)["surface"], "gateway", "{host}");
+        assert_eq!(row(host)["kind"], "command", "{host}");
     }
-    let cd = listed["result"]["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["name"] == "cd")
-        .unwrap();
-    assert_eq!(cd["surface"], "terminal");
-    let settings = listed["result"]["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["name"] == "settings")
-        .unwrap();
-    assert_eq!(settings["surface"], "terminal");
-
-    use std::collections::HashSet;
-    let tui: HashSet<String> = cordis_tui::slash_catalog()
-        .flat_map(|e| {
-            std::iter::once(e.name.to_string()).chain(e.aliases.iter().map(|a| (*a).to_string()))
-        })
-        .collect();
-    let gw: HashSet<String> = listed["result"]["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["kind"] == "command")
-        .filter(|c| !c["name"].as_str().unwrap_or("").contains(' '))
-        .flat_map(|c| {
-            let name = c["name"].as_str().unwrap().to_string();
-            let aliases: Vec<String> = c["aliases"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|a| a.as_str().map(str::to_string))
-                .collect();
-            std::iter::once(name).chain(aliases)
-        })
-        .collect();
-    assert_eq!(gw, tui, "slash/list builtins drifted from TUI CATALOG");
+    assert_eq!(row("model")["aliases"], json!(["m"]));
+    assert_eq!(row("goal pause")["surface"], "gateway");
+    assert_eq!(row("screenshot --region")["surface"], "embed");
+    assert_eq!(row("screenshot --region")["capture"], "region");
+    assert_eq!(row("memo")["kind"], "overlay");
+    assert_eq!(row("cd")["surface"], "terminal");
 }
 
 #[tokio::test]
 async fn slash_execute_dispatches_to_spine() {
     let h = Harness::boot().await;
+    // 终端 UI 挂上时登记的那几条（这里没挂终端，照它的样子登记）：网关只回
+    // 「请在 Dock 终端使用」，不改进程状态。
+    let slash = h.ctx.require::<Slash>(SLASH).unwrap();
+    let _terminal: Vec<_> = [
+        cordis_spine::SlashCommand::terminal("pair", "浏览器配对"),
+        cordis_spine::SlashCommand::terminal("cd", "切换工作目录").takes_args(true),
+        cordis_spine::SlashCommand::terminal("settings", "打开设置")
+            .aliases(&["config", "prefs"])
+            .takes_args(true),
+    ]
+    .into_iter()
+    .map(|c| slash.register_command(c).unwrap())
+    .collect();
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
     let _ = rpc.call("initialize", json!({})).await;
@@ -4702,4 +4689,97 @@ async fn pull_requests_come_from_gh_and_degrade_without_it() {
         stranger["error"]["details"]["code"], "invalid_params",
         "{stranger}"
     );
+}
+
+/// 终端里 `/new`（或别的宿主直接清空 / 恢复会话）之后，网关的线程投影要跟着换成
+/// 新会话——以前只有网关自己执行的 `/new` 会重建投影，终端里开新会话后浏览器那一侧
+/// 还挂着旧对话，新消息接在旧消息后面。
+#[tokio::test]
+async fn projection_follows_a_session_reset_from_another_host() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("旧会话里的话".into()));
+    let before: Vec<String> = user_turns(&mut rpc)
+        .await
+        .into_iter()
+        .map(|t| t.1)
+        .collect();
+    assert_eq!(before, vec!["旧会话里的话".to_string()]);
+
+    // 终端的 `/new`：归档、清空，不经过网关。
+    sessions.archive_current();
+    sessions.clear();
+    sessions.append(LogEvent::User("新会话的第一句".into()));
+    let after: Vec<String> = user_turns(&mut rpc)
+        .await
+        .into_iter()
+        .map(|t| t.1)
+        .collect();
+    assert_eq!(after, vec!["新会话的第一句".to_string()]);
+
+    // 终端的 `/resume`：把旧会话换回来，投影也要换回来。
+    let id = sessions
+        .archived()
+        .into_iter()
+        .find(|s| s.title == "旧会话里的话")
+        .map(|s| s.id)
+        .expect("旧会话该在归档里");
+    sessions.archive_current();
+    assert!(sessions.restore(&id));
+    let restored: Vec<String> = user_turns(&mut rpc)
+        .await
+        .into_iter()
+        .map(|t| t.1)
+        .collect();
+    assert_eq!(restored, vec!["旧会话里的话".to_string()]);
+}
+
+/// 同上，换成第 2 页：事件从那一页自己的 `Sessions` 发出，网关在根上监听，
+/// 照样要把**那一页**的线程投影换成新会话（`threadId` 也跟着换）。
+#[tokio::test]
+async fn projection_follows_a_session_reset_on_another_page() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let dir = project_dir("reset-page");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let old_id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tabs = h
+        .ctx
+        .require::<cordis_spine::Tabs>(cordis_spine::TABS)
+        .unwrap();
+    let sessions = tabs
+        .contexts()
+        .into_iter()
+        .filter_map(|c| c.get::<Sessions>(SESSIONS))
+        .find(|s| s.live_session_id() == old_id)
+        .expect("第 2 页的会话");
+    sessions.append(LogEvent::User("第 2 页旧会话的话".into()));
+
+    // 终端在第 2 页 `/new`：不经过网关。
+    sessions.archive_current();
+    sessions.clear();
+    sessions.append(LogEvent::User("第 2 页新会话的话".into()));
+    let new_id = sessions.live_session_id();
+    assert_ne!(new_id, old_id, "清空后该是一个新会话");
+    let history = rpc
+        .call("thread/history", json!({ "threadId": new_id }))
+        .await;
+    let users: Vec<&str> = history["result"]["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{history}"))
+        .iter()
+        .filter(|e| e["method"] == "item/user_message")
+        .map(|e| e["payload"]["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, vec!["第 2 页新会话的话"]);
 }

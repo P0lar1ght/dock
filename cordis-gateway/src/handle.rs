@@ -479,6 +479,20 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             "params": {},
         }));
     });
+    // 某一页的实时日志被整份换掉（终端 `/new` / 恢复会话，或网关自己的
+    // `thread/start`）：按它现在的会话重建投影，`threadId` 也跟着换。
+    let for_reset = inner.clone();
+    let _ = inner
+        .ctx
+        .on(cordis_spine::SESSION_RESET, move |identity: &String| {
+            let handle = GatewayHandle {
+                inner: for_reset.clone(),
+                scope: None,
+            };
+            if let Some(page) = crate::threads::page_by_identity(&handle, identity) {
+                handle.reset_page(&page);
+            }
+        });
     // 后台开出来的页（定时任务到点开的会话）：照 `thread/open` 的样子纳入投影——按会话
     // 回放历史、装上这个项目的永久插件。不然订阅时只看得到开页之后的事件。
     let for_opened = inner.clone();

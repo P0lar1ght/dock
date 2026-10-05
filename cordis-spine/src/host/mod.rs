@@ -12,6 +12,7 @@ pub mod gateway_port;
 pub mod permissions;
 pub mod session_port;
 pub mod settings;
+pub mod settings_commands;
 pub mod slash;
 pub mod tabs;
 pub mod tui_slots;

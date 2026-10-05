@@ -10,6 +10,7 @@
 //! stays the pager transcript; [`Sessions::model_history`] is what the sampler
 //! sees.
 
+mod command;
 mod config;
 mod history;
 mod prompt;
@@ -39,6 +40,7 @@ pub(crate) use history::{estimate_context_tokens, estimate_reasoning, VISIBLE_NO
 use prompt::{build_summary_prompt_kind, SummaryPromptKind};
 use summary::is_degenerate_summary;
 
+pub use command::compact_command;
 pub use config::{exceeds_threshold, FullReplaceConfig, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT};
 
 /// 一次摘要采样的账单，从 SSE 的 `usage` delta 里捞出来的。

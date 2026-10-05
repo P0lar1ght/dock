@@ -23,5 +23,4 @@ pub use names::{
 };
 pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui, views, welcome};
 pub use seam::tabs::{carry_back, PER_TAB_VIEWS};
-pub use slash::{resolve_slash, slash_catalog, SlashCatalogEntry};
 pub use views::prompt::PromptWidget;

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
 use crate::host::settings::AppSettings;
-use crate::host::slash::{slash_name_reserved, ExtraSlashKind, Slash, SlashEntry};
+use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::names::{CONTEXT, PRE_STEP, SESSIONS, SETTINGS, SKILLS, SLASH, TOOLS, TOOLS_EXECUTE};
 use crate::prompt::assemble::ORDER_SKILLS;
 use crate::prompt::context_book::{own_sections, ContextBook};
@@ -238,7 +238,11 @@ impl Skills {
         let Some((name, args)) = parse_slash_invoke(user) else {
             return;
         };
-        if name == "skills" || slash_name_reserved(name) {
+        let builtin = self
+            .ctx
+            .get::<Slash>(SLASH)
+            .is_some_and(|slash| slash.is_builtin(name));
+        if name == "skills" || builtin {
             return;
         }
         let Some(skill) = self.get(name) else {
@@ -387,7 +391,7 @@ impl Skills {
             if !skill.user_invocable || skill.name == "skills" {
                 continue;
             }
-            if slash_name_reserved(&skill.name) {
+            if slash.is_builtin(&skill.name) {
                 continue;
             }
             let entry = SlashEntry {

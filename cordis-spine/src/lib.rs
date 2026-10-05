@@ -62,16 +62,17 @@ pub use host::gateway_port::{
 pub use host::permissions::{permissions, PermissionPrompt, Permissions};
 pub use host::session_port::{QueuedItem, SessionPort, SessionRef};
 pub use host::settings::{settings, AppSettings, MermaidEngineKind, ModelOverride, PermissionMode};
+pub use host::settings_commands::settings_commands;
 pub use host::slash::{
-    slash, slash_name_reserved, tool_slash_arguments, ExtraSlashKind, Slash, SlashEntry,
-    RESERVED_SLASH,
+    register_commands, slash, slash_handler, tool_slash_arguments, ExtraSlashKind, Slash,
+    SlashCommand, SlashEntry, SlashHandler, SlashHint, SlashOutcome, SlashResolved, SlashSurface,
 };
 pub use host::tabs::{
     tabs, CarryBack, TabInfo, TabKind, TabMount, Tabs, TabsConfig, MAX_TABS, PER_TAB_SERVICES,
 };
 pub use host::tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
 pub use llm::compact::{
-    compact, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+    compact, compact_command, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
 };
 pub use llm::http::probe::probe_model;
 pub use llm::sampler::{llm, Llm, LlmConfig, LlmMode, Sampler};
@@ -80,10 +81,10 @@ pub use names::{
     DYNAMIC_CORDIS_RUNNER, GATEWAY, GATEWAY_PAIRING, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP,
     MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP,
     PROMPT_ASSEMBLE, RHAI_BAGS, ROSTER, SCHEDULE_CHANGED, SESSION, SESSIONS, SESSION_CHILD_EVENT,
-    SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_TURN_END,
-    SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS,
-    TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TUI_SLOTS, TURN, TURN_END,
-    WORKFLOWS,
+    SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_RESET,
+    SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SUBAGENT_CHANGED,
+    SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE,
+    TUI_SLOTS, TURN, TURN_END, WORKFLOWS,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
@@ -92,6 +93,7 @@ pub use prompt::context_usage::{
     ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
+pub use session::commands::session_commands;
 pub use session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
 };
@@ -123,8 +125,8 @@ pub use tools::dynamic_runner::{
     DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
 };
 pub use tools::goal::{
-    goal_composer_fill, goal_continuation_directive, goal_instruction, goal_offer_addon,
-    goal_service, goal_tool_registration, goal_usage_message, tool_goal, Goal,
+    goal_command, goal_composer_fill, goal_continuation_directive, goal_instruction,
+    goal_offer_addon, goal_service, goal_tool_registration, goal_usage_message, tool_goal, Goal,
     GOAL_RESERVED_SUBCOMMANDS,
 };
 pub use tools::jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
@@ -144,14 +146,14 @@ pub use tools::memory::{
 pub use tools::monitor::tool_monitor;
 pub use tools::plan_mode::{
     clear_plan_for_session_switch, discard_ephemeral_plan, expected_plan_path, is_plan_file_edit,
-    plan_instruction, plan_mode, plan_mode_service, plan_mode_tool_registration, plan_system_addon,
-    PlanApprovalPrompt, PlanDecision, PlanMode, PlanPhase, PLAN_REL,
+    plan_commands, plan_instruction, plan_mode, plan_mode_service, plan_mode_tool_registration,
+    plan_system_addon, PlanApprovalPrompt, PlanDecision, PlanMode, PlanPhase, PLAN_REL,
 };
 pub use tools::registry::{own_registered, tools, workspace_tools, ToolBody, Tools};
 pub use tools::sched::{
     expired_task_notice, format_scheduled_task_prompt, format_scheduled_task_reminder,
-    interval_to_human, loop_composer_fill, loop_schedule_instruction, loop_usage_message,
-    parse_interval, tool_scheduler, LoopFireMode, SCHEDULER_CREATE_TOOL_NAME,
+    interval_to_human, loop_command, loop_composer_fill, loop_schedule_instruction,
+    loop_usage_message, parse_interval, tool_scheduler, LoopFireMode, SCHEDULER_CREATE_TOOL_NAME,
 };
 pub use tools::skills::{
     scan_all_with_shadowed, skills, tool_skills, SkillInfo, SkillScope, Skills,
@@ -169,6 +171,6 @@ pub use tools::tool_images::{
 };
 pub use tools::web_fetch::{tool_web, web_fetch_params, WebFetchParams};
 pub use tools::workflow::{
-    extra_tool_slash_arguments, tool_workflow, workflow_command_arguments,
+    extra_tool_slash_arguments, tool_workflow, workflow_command, workflow_command_arguments,
     workflow_slash_arguments, WorkflowInfo, WorkflowRunSnap, Workflows, WORKFLOW_TOOL_NAME,
 };

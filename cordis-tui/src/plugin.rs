@@ -1,4 +1,5 @@
 use cordis::{plugin, plugin_async, Inject, Plugin};
+use cordis_spine::{register_commands, Slash, SLASH};
 
 use crate::names::{
     SESSION, SESSION_PORT, THEME, TUI_PAIRING, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS,
@@ -68,6 +69,16 @@ pub fn pairing() -> Plugin {
     })
 }
 
+/// 把终端自己的斜杠命令登记进 `"slash"`（见 [`crate::slash::terminal_commands`]）。
+/// 随 TUI 一起注销：无头的 `dock serve` 不挂它，那边的命令表里也就没有这些。
+pub fn commands() -> Plugin {
+    plugin("tui.commands", Inject::from([SLASH]), |ctx, _: &()| {
+        let slash = ctx.require::<Slash>(SLASH)?;
+        register_commands(ctx, crate::slash::terminal_commands(&slash))?;
+        Ok(None)
+    })
+}
+
 /// 终端 UI 的全部视图件，按挂载顺序。组合根（`cordis-app`）逐个挂，再挂 [`tui`]；
 /// 想换哪一颗就在组合根换，不用动这里。
 pub fn views() -> Vec<Plugin> {
@@ -79,6 +90,7 @@ pub fn views() -> Vec<Plugin> {
         welcome(),
         shortcuts(),
         pairing(),
+        commands(),
     ]
 }
 

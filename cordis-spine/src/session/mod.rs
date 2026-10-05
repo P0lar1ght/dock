@@ -6,8 +6,9 @@
 //! `$DOCK_HOME/sessions/<cwd-key>/<id>/` 的磁盘形态；[`roster`] 是**跨 cwd**
 //! 的抬头名册（只读 `meta.json` 加 jsonl 尾巴，不解整份 transcript）。
 //! [`resume_preset`] 是所有 resume 路径共用的 preset 回放；[`search`] 是
-//! 跨会话 FTS（title + 用户提示，重建索引）。
+//! 跨会话 FTS（title + 用户提示，重建索引）。[`commands`] 是会话本身的斜杠命令。
 
+pub mod commands;
 pub mod compaction;
 pub mod cwd;
 pub mod log;

@@ -207,7 +207,7 @@ npm run pack:skin      # 打包 pet skin
 | 要做的事 | 落点 |
 |---|---|
 | 加 / 改模型工具 | `cordis-spine/src/` 的工具粒 + 同步 `docs/tools/<name>.md`（及 `TOOLS.md` 索引行）|
-| 加 / 改斜杠、快捷键、overlay | `cordis-tui/` + 同步 `CLI.md`；斜杠目录迭代 `cordis_tui::slash_catalog()` |
+| 加 / 改斜杠、快捷键、overlay | 宿主无关的命令：功能插件里 `register_commands`（带 handler）；终端专属：`cordis-tui/` `CATALOG`；同步 `CLI.md` |
 | 加 named service / waterfall 拦截 | `cordis-spine/`，`inject` 后在调用点 live-lookup |
 | 动挂载顺序 | `install_app`（`cordis-spine`）或 `cordis-app` 的 `main` |
 | 回环网关 / `dock.1` | `cordis-gateway/` |

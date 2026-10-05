@@ -1,5 +1,6 @@
 //! Grok `update_goal` + SessionActor drain, mounted as Cordis `"goal"` + `"tools"`.
 
+mod command;
 mod drain;
 mod grok_tool;
 mod serde_lenient;
@@ -19,6 +20,7 @@ use cordis_base::types::{
 /// cancel). The agent loop's `MAX_STEPS` is per round, not per goal.
 const MAX_GOAL_ROUNDS: usize = 64;
 
+pub use command::goal_command;
 pub use drain::GoalState;
 pub use grok_tool::{
     goal_composer_fill, goal_continuation_directive, goal_instruction, goal_offer_addon,

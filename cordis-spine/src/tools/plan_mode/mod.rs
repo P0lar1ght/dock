@@ -10,6 +10,9 @@
 //! `sessions/<cwd-key>/tabs/<pid>/<main#N>/plan.md` for a non-disk tab page.
 //! The model is told that absolute path. See [`plan_path_for`].
 
+mod command;
+pub use command::plan_commands;
+
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 

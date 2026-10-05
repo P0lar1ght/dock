@@ -35,7 +35,7 @@
 | `jobs` | `"jobs"` | — | 进程表；前台 bash 也在表上 | [jobs](docs/tools/jobs.md) |
 | `tool-jobs` | → `"tools"` | `job` `kill_task`（按需） | 列 / 查 / 等后台 bash 与 monitor，以及杀（不管子代理） | [jobs](docs/tools/jobs.md) |
 | `tool-monitor` | → `"tools"`（live `"jobs"`） | `monitor`（按需） | 长命令 stdout 盯梢 | [jobs](docs/tools/jobs.md) |
-| `slash` | `"slash"` | — | 额外斜杠命令表，TUI live-lookup；内建 `CATALOG` 不能被盖掉。`kind`：`prompt` / `overlay` / `slot`（开已登记的 `tui.slots` id）/ `tool`（`text`=工具名，直接 `Tools::execute`，结果 Notice，权限门仍生效） | — |
+| `slash` | `"slash"` | — | 斜杠命令表：各功能插件 `register_command` 登记命令（宿主无关的带 handler，TUI / 网关共用），附加命令不能盖掉它们。`kind`：`prompt` / `overlay` / `slot`（开已登记的 `tui.slots` id）/ `tool`（`text`=工具名，直接 `Tools::execute`，结果 Notice，权限门仍生效） | — |
 | `tui.slots` | `"tui.slots"` | — | 动态包登记的 TUI 插槽（数据+回调，不是 ratatui widget）。始终挂上；TUI 用一次通用 `Overlay::Slot` 臂 | — |
 | `skills` | `"skills"` | — | 发现 `SKILL.md`，登记 listing 段与 slash extras | [skills](docs/tools/skills.md) |
 | `tool-skills` | → `"tools"`（live `"skills"`） | `skill` | 按需读 `SKILL.md` 正文 | [skills](docs/tools/skills.md) |
