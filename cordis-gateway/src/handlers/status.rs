@@ -7,7 +7,9 @@
 use serde_json::{json, Value};
 
 use cordis::{plugin, Inject, Plugin};
-use cordis_spine::{StatusItems, STATUS_CHANGED, STATUS_ITEMS, TUI_SLOTS_CHANGED};
+use cordis_spine::{
+    StatusItems, TuiSlots, STATUS_CHANGED, STATUS_ITEMS, TUI_SLOTS, TUI_SLOTS_CHANGED,
+};
 
 use crate::handle::GatewayHandle;
 use crate::methods::{method, register_methods, GatewayMethods, MethodPolicy, GATEWAY_METHODS};
@@ -30,11 +32,20 @@ pub fn gateway_status() -> Plugin {
                     method(|gw, _| async move { list(&gw) }),
                 )],
             )?;
-            // 状态项本身变了，或 `hud` 插槽变了（它们也在列表里），都推一条。
+            // 状态项本身变了推一条；插槽变了只在它是 `hud`（也在列表里）或刚被注销
+            // （可能是 `hud`）时推，正文重画不推。
             let mut listeners = Vec::new();
             for event in [STATUS_CHANGED, TUI_SLOTS_CHANGED] {
                 let live = ctx.clone();
                 listeners.push(ctx.on(event, move |id: &String| {
+                    if event == TUI_SLOTS_CHANGED {
+                        let hud_or_gone = live
+                            .get::<TuiSlots>(TUI_SLOTS)
+                            .is_none_or(|slots| slots.get(id).is_none_or(|h| h.hud()));
+                        if !hud_or_gone {
+                            return;
+                        }
+                    }
                     if let Some(table) = live.get::<GatewayMethods>(GATEWAY_METHODS) {
                         table.notify(protocol::STATUS_CHANGED, json!({ "id": id }));
                     }

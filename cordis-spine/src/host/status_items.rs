@@ -7,6 +7,7 @@
 //! 旧的插槽 `hud: true` 也算状态项：[`StatusItems::list`] 把它们按面板标题 + 正文
 //! 第一行转进来，`surface` 指向那个面板。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
@@ -40,11 +41,28 @@ impl StatusItem {
     }
 }
 
+/// 登记凭据：谁登记的谁才能改、才能删。卸下旧登记不会误删后来别人同 id 的那一项。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StatusToken(u64);
+
 /// Named `"status.items"`。调用点 live-lookup。
 #[derive(Clone, Default)]
 pub struct StatusItems {
-    items: Arc<Mutex<IndexMap<String, StatusItem>>>,
+    items: Arc<Mutex<IndexMap<String, (StatusToken, StatusItem)>>>,
+    next: Arc<AtomicU64>,
     ctx: Option<Context>,
+}
+
+/// id 去掉首尾空白、不能为空；文字不能为空（空的「● 」没有意义）。
+fn checked(item: StatusItem) -> cordis::Result<StatusItem> {
+    let id = item.id.trim().to_string();
+    if id.is_empty() {
+        return Err(cordis::Error::plugin("状态项 id 不能为空"));
+    }
+    if item.text.trim().is_empty() {
+        return Err(cordis::Error::plugin(format!("状态项 {id} 的文字不能为空")));
+    }
+    Ok(StatusItem { id, ..item })
 }
 
 impl StatusItems {
@@ -61,56 +79,62 @@ impl StatusItems {
         }
     }
 
-    /// 登记一项。同 id 已有就失败；返回的 `Disposable` 注销它。
-    pub fn register(&self, item: StatusItem) -> cordis::Result<Disposable> {
-        let id = item.id.trim().to_string();
-        if id.is_empty() {
-            return Err(cordis::Error::plugin("状态项 id 不能为空"));
-        }
+    /// 登记一项。同 id 已有（不管是谁的）就失败。凭据用来改 / 删它；`Disposable`
+    /// 只注销**这一次**登记——之后别人同 id 再登记的那一项不受影响。
+    pub fn register(&self, item: StatusItem) -> cordis::Result<(StatusToken, Disposable)> {
+        let item = checked(item)?;
+        let id = item.id.clone();
+        let token = StatusToken(self.next.fetch_add(1, Ordering::Relaxed));
         {
             let mut items = self.items.lock().unwrap();
             if items.contains_key(&id) {
-                return Err(cordis::Error::plugin(format!("状态项 {id} 已登记")));
+                return Err(cordis::Error::plugin(format!("状态项 {id} 已被登记")));
             }
-            items.insert(
-                id.clone(),
-                StatusItem {
-                    id: id.clone(),
-                    ..item
-                },
-            );
+            items.insert(id.clone(), (token, item));
         }
         self.changed(&id);
         let this = self.clone();
-        Ok(Disposable::from_fn(move || {
-            this.items.lock().unwrap().shift_remove(&id);
-            this.changed(&id);
-        }))
+        Ok((
+            token,
+            Disposable::from_fn(move || {
+                this.remove(token, &id);
+            }),
+        ))
     }
 
-    /// 改一项的内容（id 不变）。没登记过回 `false`。
-    pub fn update(&self, item: StatusItem) -> bool {
+    /// 用凭据改一项的内容（id 不变）。不是这个凭据登记的、或已经没了回 `false`。
+    pub fn update(&self, token: StatusToken, item: StatusItem) -> bool {
+        let Ok(item) = checked(item) else {
+            return false;
+        };
         let id = item.id.clone();
-        let updated = {
+        let changed = {
             let mut items = self.items.lock().unwrap();
             match items.get_mut(&id) {
-                Some(slot) if *slot != item => {
-                    *slot = item;
-                    true
+                Some((owner, current)) if *owner == token => {
+                    let changed = *current != item;
+                    *current = item;
+                    changed
                 }
-                Some(_) => return true,
-                None => false,
+                _ => return false,
             }
         };
-        if updated {
+        if changed {
             self.changed(&id);
         }
-        updated
+        true
     }
 
-    /// 去掉一项（插件主动清掉）。之后登记它的那颗插件卸下时再注销一次也无妨。
-    pub fn remove(&self, id: &str) -> bool {
-        let removed = self.items.lock().unwrap().shift_remove(id).is_some();
+    /// 用凭据去掉一项。不是这个凭据登记的就不动。
+    pub fn remove(&self, token: StatusToken, id: &str) -> bool {
+        let id = id.trim();
+        let removed = {
+            let mut items = self.items.lock().unwrap();
+            match items.get(id) {
+                Some((owner, _)) if *owner == token => items.shift_remove(id).is_some(),
+                _ => false,
+            }
+        };
         if removed {
             self.changed(id);
         }
@@ -119,7 +143,13 @@ impl StatusItems {
 
     /// 全部状态项：登记的，加上 `hud: true` 的插槽（`surface` 指向它自己）。
     pub fn list(&self) -> Vec<StatusItem> {
-        let mut out: Vec<StatusItem> = self.items.lock().unwrap().values().cloned().collect();
+        let mut out: Vec<StatusItem> = self
+            .items
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(_, item)| item.clone())
+            .collect();
         let slots = self
             .ctx
             .as_ref()
@@ -184,25 +214,32 @@ mod tests {
             })
             .unwrap();
         let status = root.get::<StatusItems>(STATUS_ITEMS).unwrap();
-        let d = status
+        let (token, d) = status
             .register(StatusItem {
                 tone: Tone::Accent,
-                ..StatusItem::new("deploy", "部署中 60%")
+                ..StatusItem::new(" deploy ", "部署中 60%")
             })
             .unwrap();
         assert!(status.register(StatusItem::new("deploy", "x")).is_err());
-        assert!(status.update(StatusItem {
-            tone: Tone::Success,
-            ..StatusItem::new("deploy", "已部署")
-        }));
-        assert!(
-            status.update(StatusItem {
+        assert!(status.register(StatusItem::new("blank", "  ")).is_err());
+        assert!(status.update(
+            token,
+            StatusItem {
                 tone: Tone::Success,
                 ..StatusItem::new("deploy", "已部署")
-            }),
-            "内容没变也算成功"
+            }
+        ));
+        assert!(
+            status.update(
+                token,
+                StatusItem {
+                    tone: Tone::Success,
+                    ..StatusItem::new(" deploy", "已部署")
+                }
+            ),
+            "内容没变也算成功（id 照样去空白）"
         );
-        assert!(!status.update(StatusItem::new("nope", "x")));
+        assert!(!status.update(token, StatusItem::new("nope", "x")));
 
         let slots = root.get::<TuiSlots>(TUI_SLOTS).unwrap();
         let _hud = slots.register("memo".into(), Arc::new(Hud)).unwrap();
@@ -216,5 +253,31 @@ mod tests {
         d.dispose_sync();
         assert_eq!(status.list().len(), 1);
         assert_eq!(*seen.lock().unwrap(), vec!["deploy", "deploy", "deploy"]);
+    }
+
+    /// 归属：别人拿不到凭据就改不了、删不了；旧登记卸下不会误删后来同 id 的那一项。
+    #[tokio::test]
+    async fn items_belong_to_whoever_registered_them() {
+        let root = Context::new();
+        root.plugin(status_items(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let status = root.get::<StatusItems>(STATUS_ITEMS).unwrap();
+        let (a, a_dispose) = status.register(StatusItem::new("x", "A 的")).unwrap();
+        let (b_other, _keep) = status.register(StatusItem::new("y", "B 的")).unwrap();
+        assert!(!status.update(b_other, StatusItem::new("x", "B 改的")));
+        assert!(!status.remove(b_other, "x"));
+        assert!(status.remove(a, "x"));
+        let (b, _b_keep) = status.register(StatusItem::new("x", "B 的")).unwrap();
+        a_dispose.dispose_sync();
+        let x = status
+            .list()
+            .into_iter()
+            .find(|i| i.id == "x")
+            .expect("B 的还在");
+        assert_eq!(x.text, "B 的");
+        assert!(status.update(b, StatusItem::new("x", "B 改的")));
     }
 }

@@ -2,6 +2,7 @@
 //! Engine setup copied from `vendor/xai/workflow` (DummyModuleResolver,
 //! max ops, disable eval) — not the workflow agent-host channel.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Inject, Plugin};
@@ -9,7 +10,7 @@ use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
 use serde_json::Value;
 
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
-use crate::host::status_items::{StatusItem, StatusItems};
+use crate::host::status_items::{StatusItem, StatusItems, StatusToken};
 use crate::host::tui_slots::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots};
 use crate::names::{
     RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS, TUI_SLOTS, TURN_END,
@@ -261,6 +262,7 @@ fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str) -> Result<(), String
         engine: engine.clone(),
         ast: ast.clone(),
         disposers: Mutex::new(Vec::new()),
+        statuses: Mutex::new(HashMap::new()),
     });
     let host = Host {
         inner: inner.clone(),
@@ -337,6 +339,8 @@ struct HostInner {
     engine: Arc<Engine>,
     ast: AST,
     disposers: Mutex<Vec<cordis::Disposable>>,
+    /// 这个包登记的状态项 id → 凭据：只改 / 删自己的，别的包同 id 的碰不到。
+    statuses: Mutex<HashMap<String, StatusToken>>,
 }
 
 impl Host {
@@ -476,23 +480,33 @@ impl Host {
     fn set_status(&mut self, spec: Map) -> Result<(), Box<rhai::EvalAltResult>> {
         let status = self.status_items()?;
         let id = map_str(&spec, "id").ok_or_else(|| eval_err("set_status needs id".into()))?;
-        let text = map_str(&spec, "text").unwrap_or_default();
-        let tone = map_str(&spec, "tone").map(serde_json::Value::String);
+        let text =
+            map_str(&spec, "text").ok_or_else(|| eval_err("set_status needs text".into()))?;
         let item = StatusItem {
-            tone: cordis_base::view::Tone::from_json(tone.as_ref()),
+            tone: cordis_base::view::Tone::from_name(&map_str(&spec, "tone").unwrap_or_default()),
             tooltip: map_str(&spec, "tooltip"),
             surface: map_str(&spec, "surface"),
-            ..StatusItem::new(id, text)
+            ..StatusItem::new(id.clone(), text)
         };
-        if status.update(item.clone()) {
-            return Ok(());
+        let owned = self.inner.statuses.lock().unwrap().get(&id).copied();
+        if let Some(token) = owned {
+            if status.update(token, item.clone()) {
+                return Ok(());
+            }
         }
-        let d = status.register(item).map_err(|e| eval_err(e.to_string()))?;
+        // 第一次（或自己那项被清掉了）：登记一项，随包卸下注销。
+        let (token, d) = status
+            .register(item)
+            .map_err(|e| eval_err(format!("{e}（别的插件占用了这个 id？换个带包名前缀的 id）")))?;
+        self.inner.statuses.lock().unwrap().insert(id, token);
         self.own(d)
     }
 
     fn clear_status(&mut self, id: ImmutableString) -> Result<(), Box<rhai::EvalAltResult>> {
-        self.status_items()?.remove(id.as_str());
+        let token = self.inner.statuses.lock().unwrap().remove(id.as_str());
+        if let Some(token) = token {
+            self.status_items()?.remove(token, id.as_str());
+        }
         Ok(())
     }
 

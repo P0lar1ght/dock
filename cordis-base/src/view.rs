@@ -26,9 +26,9 @@ pub enum Tone {
 }
 
 impl Tone {
-    /// 从 JSON 字符串认色调，不认识的回默认。
-    pub fn from_json(v: Option<&Value>) -> Self {
-        Self::parse(v)
+    /// 按名字认色调（`"success"` …），不认识的回默认。
+    pub fn from_name(name: &str) -> Self {
+        Self::parse(Some(&Value::String(name.trim().to_string())))
     }
 
     fn parse(v: Option<&Value>) -> Self {

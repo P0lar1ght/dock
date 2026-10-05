@@ -37,7 +37,12 @@ pub fn line(items: &[StatusItem], theme: &Theme, max_width: usize) -> Line<'stat
         let text = truncate_str(&item.text, MAX_ITEM);
         let piece = 2 + text.width() + if spans.is_empty() { 0 } else { GAP.len() };
         let rest = items.len() - i - 1;
-        let more = if rest > 0 { 4 } else { 0 };
+        // 后面还有就给「  +N」留位置（N 两位数时多一列）。
+        let more = if rest > 0 {
+            format!("{GAP}+{rest}").width()
+        } else {
+            0
+        };
         if used + piece + more > max_width {
             let left = items.len() - i;
             let tag = format!("{}+{left}", if spans.is_empty() { "" } else { GAP });

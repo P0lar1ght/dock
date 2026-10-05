@@ -5102,7 +5102,7 @@ async fn status_items_reach_the_gui() {
     }
     let (addr, ticket, _serve) = serve_trusted(&root).await;
     let status = root.require::<StatusItems>(STATUS_ITEMS).unwrap();
-    let _item = status
+    let (token, _item) = status
         .register(StatusItem {
             tone: Tone::Accent,
             surface: Some("deploy".into()),
@@ -5120,10 +5120,13 @@ async fn status_items_reach_the_gui() {
                 "tooltip": "部署助手", "surface": "deploy" }),
         "{listed}"
     );
-    status.update(StatusItem {
-        tone: Tone::Success,
-        ..StatusItem::new("deploy", "已部署")
-    });
+    status.update(
+        token,
+        StatusItem {
+            tone: Tone::Success,
+            ..StatusItem::new("deploy", "已部署")
+        },
+    );
     let pushed = gui
         .wait_notification("status/changed", Duration::from_secs(5))
         .await;
