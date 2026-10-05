@@ -12,6 +12,7 @@ pub mod preset;
 pub mod schedule;
 pub mod settings;
 pub mod slash;
+pub mod status;
 pub mod subagent;
 pub mod surface;
 pub mod thread;

@@ -123,3 +123,7 @@ pub const GATEWAY: &str = "gateway";
 pub const GATEWAY_PAIRING: &str = "gateway/pairing";
 /// 插槽（`"tui.slots"`）增删了、被操作了或正文要重画，载荷是插槽 id（`String`）。
 pub const TUI_SLOTS_CHANGED: &str = "tui.slots/changed";
+/// 插件的状态项（[`crate::StatusItems`]）。
+pub const STATUS_ITEMS: &str = "status.items";
+/// 状态项增删改了，载荷是 id（`String`）。
+pub const STATUS_CHANGED: &str = "status/changed";

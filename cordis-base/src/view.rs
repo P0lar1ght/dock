@@ -26,6 +26,11 @@ pub enum Tone {
 }
 
 impl Tone {
+    /// 从 JSON 字符串认色调，不认识的回默认。
+    pub fn from_json(v: Option<&Value>) -> Self {
+        Self::parse(v)
+    }
+
     fn parse(v: Option<&Value>) -> Self {
         match v.and_then(Value::as_str).unwrap_or("") {
             "muted" => Self::Muted,

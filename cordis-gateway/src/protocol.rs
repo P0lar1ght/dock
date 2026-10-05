@@ -65,6 +65,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `surface/list` / `get` / `action` + 连接级推送 `surface/changed { id }`：插件的面板
     // （`"tui.slots"`）。正文是文本，动作是按钮；`action` 只认受信 ticket。
     ("surfaces", true),
+    // `status/list` + 连接级推送 `status/changed { id }`：插件的状态项（短文字 + 色调，
+    // 点它开插件面板）；`hud` 插槽也在里面。只认受信 ticket。
+    ("statusItems", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -99,6 +102,9 @@ pub const SURFACE_GET: &str = "surface/get";
 pub const SURFACE_ACTION: &str = "surface/action";
 /// 连接级推送：插件面板增删了、被操作了或正文要重画（`{ id }`），重拉 `surface/get`。
 pub const SURFACE_CHANGED: &str = "surface/changed";
+pub const STATUS_LIST: &str = "status/list";
+/// 连接级推送：状态项增删改了（`{ id }`），重拉 `status/list`。
+pub const STATUS_CHANGED: &str = "status/changed";
 pub const PRESET_DRAFT: &str = "preset/draft";
 pub const PRESET_REWRITE: &str = "preset/rewrite";
 pub const PRESET_SUGGEST_TOOLS: &str = "preset/suggestTools";

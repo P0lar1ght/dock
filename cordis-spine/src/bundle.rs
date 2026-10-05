@@ -8,6 +8,7 @@ use crate::host::permissions::permissions;
 use crate::host::settings::settings;
 use crate::host::settings_commands::settings_commands;
 use crate::host::slash::slash;
+use crate::host::status_items::status_items;
 use crate::host::tui_slots::tui_slots;
 use crate::llm::compact::{compact, compact_command};
 use crate::llm::sampler::{llm, LlmConfig, LlmMode};
@@ -119,6 +120,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(skills(), ())?.wait().await?;
     ctx.plugin(project_instructions(), ())?.wait().await?;
     ctx.plugin(tui_slots(), ())?.wait().await?;
+    ctx.plugin(status_items(), ())?.wait().await?;
     ctx.plugin(agent_presets(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;
     ctx.plugin(tool_web(), web_fetch_params())?.wait().await?;

@@ -9,8 +9,11 @@ use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
 use serde_json::Value;
 
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
+use crate::host::status_items::{StatusItem, StatusItems};
 use crate::host::tui_slots::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots};
-use crate::names::{RHAI_BAGS, SESSION_EVENT, SLASH, STEP_START, TOOLS, TUI_SLOTS, TURN_END};
+use crate::names::{
+    RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS, TUI_SLOTS, TURN_END,
+};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{
     LogEvent, StepStart, ToolCall, ToolSpec, TurnEnd, ORDER_STEP_START_DYNAMIC,
@@ -80,6 +83,16 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         "host.open_slot",
         "Ask the TUI to open a registered slot overlay.",
         &["host.open_slot(id: String)"],
+    ),
+    (
+        "host.set_status",
+        "Put a small always-on status item on the terminal status row and the GUI (docs/PLUGIN-VIEWS.md). First call registers it (removed when the package stops); later calls with the same id update it. tone: default / muted / accent / success / warning / danger; surface: slot id to open on click.",
+        &["host.set_status(#{ id, text, tone?, tooltip?, surface? })"],
+    ),
+    (
+        "host.clear_status",
+        "Remove a status item set by host.set_status.",
+        &["host.clear_status(id: String)"],
     ),
     (
         "host.call_tool",
@@ -304,6 +317,8 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("register_slot", Host::register_slot);
     engine.register_fn("open_slot", Host::open_slot);
     engine.register_fn("slot_changed", Host::slot_changed);
+    engine.register_fn("set_status", Host::set_status);
+    engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
@@ -447,6 +462,37 @@ impl Host {
             })
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
+        Ok(())
+    }
+
+    fn status_items(&self) -> Result<Arc<StatusItems>, Box<rhai::EvalAltResult>> {
+        self.inner
+            .ctx
+            .get::<StatusItems>(STATUS_ITEMS)
+            .ok_or_else(|| eval_err("status.items is not mounted".into()))
+    }
+
+    /// 第一次登记（随包卸下注销），之后同 id 只改内容。
+    fn set_status(&mut self, spec: Map) -> Result<(), Box<rhai::EvalAltResult>> {
+        let status = self.status_items()?;
+        let id = map_str(&spec, "id").ok_or_else(|| eval_err("set_status needs id".into()))?;
+        let text = map_str(&spec, "text").unwrap_or_default();
+        let tone = map_str(&spec, "tone").map(serde_json::Value::String);
+        let item = StatusItem {
+            tone: cordis_base::view::Tone::from_json(tone.as_ref()),
+            tooltip: map_str(&spec, "tooltip"),
+            surface: map_str(&spec, "surface"),
+            ..StatusItem::new(id, text)
+        };
+        if status.update(item.clone()) {
+            return Ok(());
+        }
+        let d = status.register(item).map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)
+    }
+
+    fn clear_status(&mut self, id: ImmutableString) -> Result<(), Box<rhai::EvalAltResult>> {
+        self.status_items()?.remove(id.as_str());
         Ok(())
     }
 
