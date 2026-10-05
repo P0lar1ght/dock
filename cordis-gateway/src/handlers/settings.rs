@@ -17,46 +17,9 @@ use crate::devices;
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError};
 
-/// 只给受信连接的方法（读也算：里面有 MCP 的环境变量、请求头这类密钥）。
-pub fn is_settings_method(method: &str) -> bool {
-    matches!(
-        method,
-        protocol::CONFIG_STATUS
-            | protocol::CONFIG_GET
-            | protocol::CONFIG_SET
-            | protocol::CONFIG_ENV
-            | protocol::MODEL_GET
-            | protocol::MODEL_SAVE
-            | protocol::MODEL_DELETE
-            | protocol::MODEL_DEFAULT
-            | protocol::MODEL_TEST
-            | protocol::MCP_GET
-            | protocol::MCP_SAVE
-            | protocol::MCP_DELETE
-            | protocol::MCP_ENABLE
-            | protocol::MCP_TOOL_ENABLE
-            | protocol::MCP_LOGIN
-            | protocol::CUA_STATUS
-            | protocol::CUA_ACTION
-            | protocol::BROWSER_STATUS
-            | protocol::PLUGIN_LIST
-            | protocol::PLUGIN_ENABLE
-            | protocol::PLUGIN_DELETE
-            | protocol::PLUGIN_PROMOTE
-            | protocol::PLUGIN_DISCARD
-            | protocol::SKILL_LIST
-            | protocol::SECRET_LIST
-            | protocol::SECRET_SET
-            | protocol::SECRET_DELETE
-            | protocol::PAIRING_LIST
-            | protocol::PAIRING_RESOLVE
-            | protocol::PAIRING_REVOKE
-            | protocol::PAIRING_ACCEPT
-            | protocol::DEVICE_LIST
-            | protocol::DEVICE_ADD
-            | protocol::DEVICE_REVOKE
-    )
-}
+use cordis::{plugin, Inject, Plugin};
+
+use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
 
 fn text<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {
     params
@@ -885,4 +848,229 @@ pub fn device_revoke(params: Value) -> Result<Value, RpcError> {
     let which = text(&params, "id")?;
     devices::revoke(which).map_err(|e| RpcError::app("not_found", e))?;
     device_list()
+}
+
+/// 设置页这一块：读写用户级配置、MCP、插件、密钥、配对、设备的方法。全部
+/// `trusted_only`——能写 MCP 启动命令就等于能在本机跑程序，只认 `dock serve` 交给
+/// 桌面 GUI 的受信 ticket。连服务器 / 跑插件 / 等浏览器登录的几条放到连接锁外跑。
+pub fn gateway_settings() -> Plugin {
+    plugin(
+        "gateway.settings",
+        Inject::from([GATEWAY_METHODS]),
+        |ctx, _: &()| {
+            const TRUSTED: MethodPolicy = MethodPolicy {
+                detached: false,
+                trusted_only: true,
+                opens_thread: false,
+            };
+            register_methods(
+                ctx,
+                vec![
+                    (
+                        protocol::CONFIG_STATUS,
+                        TRUSTED,
+                        method(|_, _| async move { config_status() }),
+                    ),
+                    (
+                        protocol::CONFIG_GET,
+                        TRUSTED,
+                        method(|gw, _| async move { config_get(&gw) }),
+                    ),
+                    (
+                        protocol::CONFIG_SET,
+                        TRUSTED,
+                        method(|gw, params| async move { config_set(&gw, params) }),
+                    ),
+                    (
+                        protocol::CONFIG_ENV,
+                        TRUSTED,
+                        method(|_, params| async move { config_env(params) }),
+                    ),
+                    (
+                        protocol::MODEL_GET,
+                        TRUSTED,
+                        method(|_, params| async move { model_get(params) }),
+                    ),
+                    (
+                        protocol::MODEL_SAVE,
+                        TRUSTED,
+                        method(|gw, params| async move { model_save(&gw, params) }),
+                    ),
+                    (
+                        protocol::MODEL_DELETE,
+                        TRUSTED,
+                        method(|gw, params| async move { model_delete(&gw, params) }),
+                    ),
+                    (
+                        protocol::MODEL_DEFAULT,
+                        TRUSTED,
+                        method(|gw, params| async move { model_default(&gw, params) }),
+                    ),
+                    (
+                        protocol::MCP_GET,
+                        TRUSTED,
+                        method(|_, params| async move { mcp_get(params) }),
+                    ),
+                    (
+                        protocol::MCP_TOOL_ENABLE,
+                        TRUSTED,
+                        method(|gw, params| async move { mcp_tool_enable(&gw, params).await }),
+                    ),
+                    (
+                        protocol::CUA_STATUS,
+                        TRUSTED,
+                        method(|gw, _| async move { cua_status(&gw) }),
+                    ),
+                    (
+                        protocol::CUA_ACTION,
+                        TRUSTED,
+                        method(|gw, params| async move { cua_action(&gw, params) }),
+                    ),
+                    (
+                        protocol::BROWSER_STATUS,
+                        TRUSTED,
+                        method(|gw, _| async move { browser_status(&gw) }),
+                    ),
+                    (
+                        protocol::PLUGIN_LIST,
+                        TRUSTED,
+                        method(|gw, _| async move { plugin_list(&gw) }),
+                    ),
+                    (
+                        protocol::PLUGIN_DELETE,
+                        TRUSTED,
+                        method(|gw, params| async move { plugin_delete(&gw, params).await }),
+                    ),
+                    (
+                        protocol::SKILL_LIST,
+                        TRUSTED,
+                        method(|gw, _| async move { skill_list(&gw) }),
+                    ),
+                    (
+                        protocol::SECRET_LIST,
+                        TRUSTED,
+                        method(|_, _| async move { secret_list() }),
+                    ),
+                    (
+                        protocol::SECRET_SET,
+                        TRUSTED,
+                        method(|_, params| async move { secret_set(params) }),
+                    ),
+                    (
+                        protocol::SECRET_DELETE,
+                        TRUSTED,
+                        method(|_, params| async move { secret_delete(params) }),
+                    ),
+                    (
+                        protocol::PAIRING_LIST,
+                        TRUSTED,
+                        method(|gw, _| async move { pairing_list(&gw) }),
+                    ),
+                    (
+                        protocol::PAIRING_RESOLVE,
+                        TRUSTED,
+                        method(|gw, params| async move { pairing_resolve(&gw, params) }),
+                    ),
+                    (
+                        protocol::PAIRING_REVOKE,
+                        TRUSTED,
+                        method(|gw, params| async move { pairing_revoke(&gw, params) }),
+                    ),
+                    (
+                        protocol::PAIRING_ACCEPT,
+                        TRUSTED,
+                        method(|gw, params| async move { pairing_accept(&gw, params) }),
+                    ),
+                    (
+                        protocol::DEVICE_LIST,
+                        TRUSTED,
+                        method(|_, _| async move { device_list() }),
+                    ),
+                    (
+                        protocol::DEVICE_ADD,
+                        TRUSTED,
+                        method(|_, params| async move { device_add(params) }),
+                    ),
+                    (
+                        protocol::DEVICE_REVOKE,
+                        TRUSTED,
+                        method(|_, params| async move { device_revoke(params) }),
+                    ),
+                    (
+                        protocol::MODEL_TEST,
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|_, params| async move { model_test(params).await }),
+                    ),
+                    (
+                        protocol::MCP_SAVE,
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { mcp_save(&gw, params).await }),
+                    ),
+                    (
+                        protocol::MCP_DELETE,
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { mcp_delete(&gw, params).await }),
+                    ),
+                    (
+                        protocol::MCP_ENABLE,
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { mcp_enable(&gw, params).await }),
+                    ),
+                    (
+                        protocol::MCP_LOGIN,
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { mcp_login(&gw, params).await }),
+                    ),
+                    (
+                        protocol::PLUGIN_ENABLE,
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { plugin_enable(&gw, params).await }),
+                    ),
+                    (
+                        protocol::PLUGIN_PROMOTE,
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { plugin_promote(&gw, params).await }),
+                    ),
+                    (
+                        protocol::PLUGIN_DISCARD,
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { plugin_discard(&gw, params).await }),
+                    ),
+                ],
+            )?;
+            Ok(None)
+        },
+    )
 }

@@ -79,8 +79,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   挂载时往 `"gateway.methods"`（`GatewayMethods`）登记自己的方法，随插件 fiber 注销，
   核心方法与表里同名时核心优先。每个方法带 `MethodPolicy`：`detached`（放到连接锁外跑）、
   `trusted_only`（只认 `dock serve` 的受信 ticket）、`opens_thread`（关着的线程先开页）。
-  `features()` 是本 crate 自带的那几颗：`gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`
-  （`schedule/*`）。给 GUI 加一页 = 再写一颗这样的插件，用 `register_methods` + `method`。
+  `features()` 是本 crate 自带的那几颗：`gateway.settings`（设置页，全部 `trusted_only`）、
+  `gateway.presets`（`preset/*`、`tool/catalog`）、`gateway.fs`（`fs/*`）、`gateway.canvas`
+  （`canvas/*`）、`gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`（`schedule/*`）。给 GUI 加一页 = 再写一颗这样的插件，用 `register_methods` + `method`。
 - 方法按域分在 `handlers/`：
 
 | handler | 域 |

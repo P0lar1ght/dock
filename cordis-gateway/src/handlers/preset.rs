@@ -12,7 +12,11 @@ use cordis_spine::{
 };
 
 use crate::handle::GatewayHandle;
-use crate::protocol::RpcError;
+use crate::protocol::{self, RpcError};
+
+use cordis::{plugin, Inject, Plugin};
+
+use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
 
 /// 顺序和 TUI `/preset` 一样。`defaultId` 是不带 `presetId` 开新会话时用的那个。
 /// 坏掉的预设也列出来（`available: false` + `error`），但 `thread/start` 会拒。
@@ -392,4 +396,66 @@ fn summary(p: AgentPreset) -> Value {
         "available": p.broken.is_none(),
         "error": p.broken,
     })
+}
+
+/// 预设编辑器这一块：`preset/*` 与 `tool/catalog`。AI 起草 / 改写 / 推荐工具要调模型
+/// （一次几秒），放到连接锁外跑。
+pub fn gateway_presets() -> Plugin {
+    plugin(
+        "gateway.presets",
+        Inject::from([GATEWAY_METHODS]),
+        |ctx, _: &()| {
+            register_methods(
+                ctx,
+                vec![
+                    (
+                        protocol::PRESET_LIST,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { list(&gw, params) }),
+                    ),
+                    (
+                        protocol::PRESET_CREATE,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { create(&gw, params) }),
+                    ),
+                    (
+                        protocol::PRESET_DELETE,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { delete(&gw, params) }),
+                    ),
+                    (
+                        protocol::PRESET_GET,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { get(&gw, params) }),
+                    ),
+                    (
+                        protocol::PRESET_UPDATE,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { update(&gw, params) }),
+                    ),
+                    (
+                        protocol::TOOL_CATALOG,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { tool_catalog(&gw, params) }),
+                    ),
+                    (
+                        protocol::PRESET_DRAFT,
+                        MethodPolicy::detached(),
+                        method(|gw, params| async move { draft(&gw, params).await }),
+                    ),
+                    (
+                        protocol::PRESET_REWRITE,
+                        MethodPolicy::detached(),
+                        method(|gw, params| async move { rewrite(&gw, params).await }),
+                    ),
+                    (
+                        protocol::PRESET_SUGGEST_TOOLS,
+                        MethodPolicy::detached(),
+                        method(|gw, params| async move { suggest_tools(&gw, params).await }),
+                    ),
+                ],
+            )?;
+            Ok(None)
+        },
+    )
 }
