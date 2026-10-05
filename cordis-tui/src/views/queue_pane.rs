@@ -12,8 +12,8 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::grok::line_utils::truncate_str;
-use crate::seam::session::QueuedItem;
 use crate::theme::Theme;
+use cordis_spine::QueuedItem;
 
 /// Grok `MAX_QUEUE_HEIGHT`.
 const MAX_QUEUE_HEIGHT: u16 = 3;

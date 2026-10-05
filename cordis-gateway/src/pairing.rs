@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 use cordis::Context;
-use cordis_tui::{PairingBinding, PairingError, PairingPrompt, GATEWAY_PAIRING};
+use cordis_spine::{PairingBinding, PairingError, PairingPrompt, GATEWAY_PAIRING};
 
 pub const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
 pub const TICKET_TTL: Duration = Duration::from_secs(60 * 60);

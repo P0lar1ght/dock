@@ -2,13 +2,13 @@
 //! 第 1 页（根 ctx）的别名，老客户端照旧能用。分页身份 `main#N` 只在网关内部用
 //! 来路由事件（[`cordis_spine::PageLogEvent`] 带的就是它）。
 //!
-//! 开着的页来自 `"tui.tabs"`；没挂分页服务（测试装配）时只有第 1 页。
+//! 开着的页来自 `"tabs"`；没挂分页服务（测试装配）时只有第 1 页。
 
 use std::sync::Arc;
 
 use cordis::Context;
 use cordis_spine::{Sessions, ROOT_IDENTITY, SESSIONS};
-use cordis_tui::{Tabs, TUI_TABS};
+use cordis_spine::{Tabs, TABS};
 use serde_json::Value;
 
 use crate::handle::GatewayHandle;
@@ -69,7 +69,7 @@ impl Page {
 pub fn open_pages(gateway: &GatewayHandle) -> Vec<Page> {
     let root = gateway.ctx().clone();
     let contexts = root
-        .get::<Tabs>(TUI_TABS)
+        .get::<Tabs>(TABS)
         .map(|tabs| tabs.contexts())
         .unwrap_or_else(|| vec![root.clone()]);
     contexts.into_iter().filter_map(Page::of).collect()

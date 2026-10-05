@@ -10,7 +10,7 @@ use cordis_spine::{
     apply_restored_preset, session_cwd, AgentPresets, ApplyRestoredPreset, ArchivedSession, Roster,
     RosterEntry, Sessions, AGENT_PRESETS, ROSTER, SESSIONS,
 };
-use cordis_tui::{SessionRef, Tabs, SESSION_PORT, TUI_TABS};
+use cordis_spine::{SessionRef, Tabs, SESSION_PORT, TABS};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError, LIVE_THREAD_ID};
@@ -347,7 +347,7 @@ async fn open_page(
 fn tabs(gateway: &GatewayHandle) -> Result<std::sync::Arc<Tabs>, RpcError> {
     gateway
         .ctx()
-        .get::<Tabs>(TUI_TABS)
+        .get::<Tabs>(TABS)
         .ok_or_else(|| RpcError::app("unavailable", "分页服务没有挂载，开不了新线程"))
 }
 

@@ -40,10 +40,10 @@ use crate::error::{Error, Result};
 use crate::grok::picker::PickerHits;
 use crate::names::{GATEWAY_PAIRING, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS};
 use crate::scrollback::Scrollback;
-use crate::seam::session::SessionRef;
 use crate::theme::Theme;
 use crate::views::overlay::{Overlay, UsageTab};
 use crate::views::queue_pane::QueueHit;
+use cordis_spine::SessionRef;
 
 use crate::app::actions::Effect;
 use crate::app::input::{drain_events, drain_notifies, spawn_reader};
@@ -897,7 +897,7 @@ pub async fn run(root: Context) -> Result<()> {
                                 }
                                 Effect::TabCarryBack => {
                                     match tabs_service(&root) {
-                                        Some(tabs) => match tabs.carry_back() {
+                                        Some(tabs) => match crate::seam::tabs::carry_back(&tabs) {
                                             Ok(origin) => flash(
                                                 &root,
                                                 format!("已带回第 {origin} 页的输入框，改完再发"),

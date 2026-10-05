@@ -1,6 +1,6 @@
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use cordis_spine::{ASK, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TURN};
-use cordis_tui::{GATEWAY, SESSION_PORT};
+use cordis_spine::{GATEWAY, SESSION_PORT};
 
 use crate::bind;
 use crate::handle::GatewayHandle;

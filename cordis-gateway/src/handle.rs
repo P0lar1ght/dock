@@ -12,7 +12,7 @@ use cordis_spine::{
     PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, ROOT_IDENTITY, SESSIONS, SESSION_CHILD_EVENT,
     SESSION_COMPACTION, SESSION_PAGE_EVENT, SUBAGENTS, SUBAGENT_CHANGED,
 };
-use cordis_tui::{
+use cordis_spine::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
 };
 
@@ -484,7 +484,7 @@ fn listen_events(inner: &Arc<GatewayInner>) {
     let for_opened = inner.clone();
     let _ = inner
         .ctx
-        .on(cordis_tui::TUI_PAGE_OPENED, move |identity: &String| {
+        .on(cordis_spine::TABS_PAGE_OPENED, move |identity: &String| {
             let handle = GatewayHandle {
                 inner: for_opened.clone(),
                 scope: None,

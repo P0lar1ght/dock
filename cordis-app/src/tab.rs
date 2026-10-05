@@ -1,7 +1,7 @@
 //! 一页的组合根：分页子树里挂哪些插件由这里决定。
 //!
-//! TUI 只管开 / 关 / 切页，它不认识 spine 与 app 的插件树，所以建页工厂从这里
-//! 注入进 `"tui.tabs"`。第 1 页就是根上下文本身（`main` 里那一串），这里造的是
+//! 分页服务（`cordis_spine::Tabs`）只管开 / 关 / 切页，它不认识 app 的插件树，
+//! 所以建页工厂从这里注入进 `"tabs"`。第 1 页就是根上下文本身（`main` 里那一串），这里造的是
 //! 第 2 页起的每一页。
 
 use std::sync::Arc;
@@ -11,19 +11,23 @@ use cordis_spine::{
     agent_loop, goal_service, plan_mode_service, todo_service, turn, AgentPresets, AppSettings,
     Ask, Permissions, Sessions, SubagentDef, AGENT_PRESETS, ASK, PERMISSIONS, SESSIONS, SETTINGS,
 };
-use cordis_tui::{prompt, scrollback, status_bar, welcome, TabKind, TabMount, Tabs, TUI_TABS};
+use cordis_spine::{TabKind, Tabs, TabsConfig, TABS};
+use cordis_tui::{prompt, scrollback, status_bar, welcome, PER_TAB_VIEWS};
 
 use crate::session_actor;
 
-/// 建页工厂，交给 `cordis_tui::tabs()` 当配置。
-pub fn tab_mount() -> TabMount {
-    Arc::new(|index, kind| tab(index, kind, true))
+/// 带终端视图的分页配置，交给 `cordis_spine::tabs()`：建页工厂 + TUI 的每页视图名。
+pub fn tab_mount() -> TabsConfig {
+    TabsConfig {
+        mount: Arc::new(|index, kind| tab(index, kind, true)),
+        per_tab: PER_TAB_VIEWS,
+    }
 }
 
 /// 无头（`dock serve`）的建页工厂：同一套会话 / 循环 / 设置，不挂终端视图。
 /// 页由网关按线程开（`thread/open` / `thread/start {cwd}`）。
-pub fn tab_mount_headless() -> TabMount {
-    Arc::new(|index, kind| tab(index, kind, false))
+pub fn tab_mount_headless() -> TabsConfig {
+    TabsConfig::headless(Arc::new(|index, kind| tab(index, kind, false)))
 }
 
 /// 旁问页的只读预设。
@@ -92,7 +96,7 @@ fn tab(index: usize, kind: TabKind, views: bool) -> Plugin {
 
 /// 开这一页时正在看的那一页（新页从它继承设置、cwd、预设）。
 fn active_page(ctx: &cordis::Context) -> Option<cordis::Context> {
-    ctx.get::<Tabs>(TUI_TABS).map(|tabs| tabs.active_ctx())
+    ctx.get::<Tabs>(TABS).map(|tabs| tabs.active_ctx())
 }
 
 /// 抄当前页的模型、协议、权限模式。开页之后两页各改各的。

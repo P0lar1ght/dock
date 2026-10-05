@@ -12,10 +12,8 @@ use cordis_spine::{
     AGENT_PRESETS, GOAL, MCP, PERMISSIONS, PLAN_MODE, PRE_STEP, SESSIONS, SETTINGS, SUBAGENTS,
     TODOS, TOOLS, TURN, TURN_END,
 };
-use cordis_tui::{
-    prompt, tabs, theme, PromptWidget, SessionRef, TabKind, Tabs, SESSION_PORT, TUI_PROMPT,
-    TUI_TABS,
-};
+use cordis_spine::{tabs, SessionRef, TabKind, Tabs, SESSION_PORT, TABS};
+use cordis_tui::{carry_back, prompt, theme, PromptWidget, TUI_PROMPT};
 
 /// 每个测试自己一个隔离的 `DOCK_HOME`，免得读到本机 `~/.dock`，也免得
 /// 并行跑的测试抢同一个分页计划目录（分页目录按页号命名，两页都叫 `main#2`）。
@@ -34,7 +32,7 @@ fn isolated_home() {
 /// 环境变量（`isolated_home` 后设的会盖掉先设的），所以分页的临时计划目录
 /// `sessions/<cwd>/tabs/<pid>/main#2` 实际上是大家共用的。任何一个用例开第 2 页都会
 /// `discard_ephemeral_plan` 删掉它——别的用例刚写下的 `plan.md` 就没了。生产里一个
-/// 进程只有一个 `"tui.tabs"`，不存在这种并发，所以这里让开页的用例一个一个来，而
+/// 进程只有一个 `"tabs"`，不存在这种并发，所以这里让开页的用例一个一个来，而
 /// 不是改产品代码或放宽断言。
 struct Booted {
     root: Context,
@@ -109,7 +107,7 @@ async fn boot() -> Booted {
 #[tokio::test]
 async fn a_new_tab_runs_its_own_session() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
 
     let main = root.get::<Sessions>(SESSIONS).unwrap();
     main.append(LogEvent::User("主线的话".into()));
@@ -144,7 +142,7 @@ async fn a_new_tab_runs_its_own_session() {
 #[tokio::test]
 async fn fork_snapshots_the_context_and_remembers_its_origin() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     let main = root.get::<Sessions>(SESSIONS).unwrap();
     main.append(LogEvent::User("怎么改这个 bug".into()));
     main.append(LogEvent::LlmStream(LlmOutput {
@@ -180,7 +178,7 @@ async fn fork_snapshots_the_context_and_remembers_its_origin() {
 #[tokio::test]
 async fn forking_an_empty_page_is_refused() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     assert!(tabs.fork().await.is_err(), "空会话没什么可分叉的");
     assert_eq!(tabs.len(), 1, "被拒的分叉不该留下半页");
 }
@@ -190,7 +188,7 @@ async fn forking_an_empty_page_is_refused() {
 #[tokio::test]
 async fn carry_back_fills_the_origin_prompt_without_sending() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     let main = root.get::<Sessions>(SESSIONS).unwrap();
     main.append(LogEvent::User("怎么改这个 bug".into()));
 
@@ -203,7 +201,7 @@ async fn carry_back_fills_the_origin_prompt_without_sending() {
             ..Default::default()
         }));
 
-    let origin = tabs.carry_back().unwrap();
+    let origin = carry_back(&tabs).unwrap();
     assert_eq!(origin, 1);
     assert_eq!(tabs.active_index(), 0, "带回之后要切回来源页");
 
@@ -216,12 +214,12 @@ async fn carry_back_fills_the_origin_prompt_without_sending() {
 #[tokio::test]
 async fn carry_back_needs_a_fork() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
-    assert!(tabs.carry_back().is_err(), "第一页没有来源页");
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    assert!(carry_back(&tabs).is_err(), "第一页没有来源页");
 
     tabs.open().await.unwrap();
     assert!(
-        tabs.carry_back().is_err(),
+        carry_back(&tabs).is_err(),
         "空白新页不是分叉出来的，没有来源页"
     );
 }
@@ -231,7 +229,7 @@ async fn carry_back_needs_a_fork() {
 #[tokio::test]
 async fn aside_opens_a_read_only_tab() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     let main = root.get::<Sessions>(SESSIONS).unwrap();
     main.append(LogEvent::User("主线在干活".into()));
 
@@ -255,7 +253,7 @@ async fn aside_opens_a_read_only_tab() {
 #[tokio::test]
 async fn empty_question_is_refused() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     assert!(tabs.ask_aside("   ".into()).await.is_err());
     assert_eq!(tabs.len(), 1, "被拒的旁问不该留下半页");
 }
@@ -264,7 +262,7 @@ async fn empty_question_is_refused() {
 #[tokio::test]
 async fn promoting_an_aside_makes_a_full_tab() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     root.get::<Sessions>(SESSIONS)
         .unwrap()
         .append(LogEvent::User("主线".into()));
@@ -294,14 +292,14 @@ async fn promoting_an_aside_makes_a_full_tab() {
 #[tokio::test]
 async fn promoting_a_normal_tab_is_refused() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     assert!(tabs.promote_active().await.is_err(), "常驻页不用转正");
 }
 
 #[tokio::test]
 async fn closing_a_tab_leaves_the_main_session_alone() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     let main = root.get::<Sessions>(SESSIONS).unwrap();
     main.append(LogEvent::User("主线的话".into()));
 
@@ -323,7 +321,7 @@ async fn closing_a_tab_leaves_the_main_session_alone() {
 #[tokio::test]
 async fn opening_history_adds_a_tab_you_can_talk_to() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     assert!(
         tabs.open_archived("missing").await.is_err(),
         "没有这份会话不该留下半页"
@@ -408,7 +406,7 @@ async fn each_page_keeps_its_model_mode_and_permission_queue() {
     main.set_model("page-one");
     main.set_permission_mode(PermissionMode::Ask);
 
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     tabs.open().await.unwrap();
     let page = tabs.active_ctx();
     let second = page.get::<AppSettings>(SETTINGS).unwrap();
@@ -455,7 +453,7 @@ async fn closing_a_tab_cancels_its_pending_elicitation() {
         .wait()
         .await
         .unwrap();
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     let mcp = root.get::<Mcp>(MCP).unwrap();
     let elicit = mcp.elicitation();
 
@@ -505,7 +503,7 @@ async fn closing_a_tab_cancels_its_pending_elicitation() {
 #[tokio::test]
 async fn restoring_an_id_live_on_another_tab_switches_there() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     let main = root.get::<Sessions>(SESSIONS).unwrap();
     main.attach_disk();
     main.append(LogEvent::User("历史里的那句".into()));
@@ -543,7 +541,7 @@ fn pre_step(identity: &str) -> PreStep {
 #[tokio::test]
 async fn two_pages_keep_goal_todos_and_plan_apart() {
     let root = boot().await;
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     let tools = root.get::<Tools>(TOOLS).unwrap();
 
     let probe = Sessions::tab(root.clone(), 2);
@@ -738,7 +736,7 @@ async fn a_new_page_forks_presets_and_inherits_the_cwd() {
         .unwrap()
         .pin_workspace_cwd(&project);
 
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     tabs.open().await.unwrap();
     let page = tabs.active_ctx();
 
@@ -770,7 +768,7 @@ async fn resident_pages_persist_under_their_own_cwd() {
         .unwrap()
         .pin_workspace_cwd(&project);
 
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     tabs.open().await.unwrap();
     let page = tabs.active_ctx();
     let sessions = page.get::<Sessions>(SESSIONS).unwrap();
@@ -809,7 +807,7 @@ async fn closing_a_tab_forgets_its_subagent_mailbox() {
         .await
         .unwrap();
     let sub = root.get::<Subagents>(SUBAGENTS).unwrap();
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     tabs.open().await.unwrap();
     let page = tabs
         .active_ctx()
@@ -861,7 +859,7 @@ async fn scheduled_prompts_reach_their_own_session_even_when_closed() {
         .await
         .unwrap();
     let cron = root.get::<cordis_spine::Cron>(cordis_spine::CRON).unwrap();
-    let tabs = root.get::<Tabs>(TUI_TABS).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
     let main = root.get::<Sessions>(SESSIONS).unwrap();
 
     let page = tabs.open_at(&project, None).await.unwrap();

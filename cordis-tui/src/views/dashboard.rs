@@ -15,7 +15,7 @@
 //!
 //! | 来源 | 服务 | 说明 |
 //! |---|---|---|
-//! | 分页 | `"tui.tabs"` | 本进程开着的会话，能观察也能驱动 |
+//! | 分页 | `"tabs"` | 本进程开着的会话，能观察也能驱动 |
 //! | 磁盘会话 | `"roster"` | 跨 cwd 的历史会话。当前目录下的按 Enter 开成新的一页 |
 //!
 //! ## 为什么不是带框的 overlay
@@ -41,10 +41,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::grok::glyphs;
 use crate::grok::line_utils::truncate_str;
 use crate::grok::picker::{render_bordered_frame, render_header, PickerHits};
-use crate::names::{SESSION_PORT, TUI_TABS};
-use crate::seam::session::SessionRef;
-use crate::seam::tabs::{TabKind, Tabs};
+use crate::names::{SESSION_PORT, TABS};
 use crate::theme::Theme;
+use cordis_spine::SessionRef;
+use cordis_spine::{TabKind, Tabs};
 
 /// 键盘焦点：列表还是 peek 的输入框。Tab 切换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -194,7 +194,7 @@ fn collect_rows(ctx: &Context) -> Vec<DashRow> {
     let mut rows: Vec<DashRow> = Vec::new();
 
     // 分页。`/btw` 的旁问页不进标签栏，这里同样不列——它是问完就销毁的临时页。
-    if let Some(tabs) = ctx.get::<Tabs>(TUI_TABS) {
+    if let Some(tabs) = ctx.get::<Tabs>(TABS) {
         rows.extend(
             tabs.list()
                 .into_iter()
@@ -245,7 +245,7 @@ fn open_session_ids(ctx: &Context) -> HashSet<String> {
             }
         }
     };
-    match ctx.get::<Tabs>(TUI_TABS) {
+    match ctx.get::<Tabs>(TABS) {
         Some(tabs) => {
             for c in tabs.contexts() {
                 note(&c);
@@ -876,7 +876,7 @@ pub fn tab_ctx(ctx: &Context, row: &DashRow) -> Option<Context> {
     let DashRow::Tab { id, .. } = row else {
         return None;
     };
-    let tabs = ctx.get::<Tabs>(TUI_TABS)?;
+    let tabs = ctx.get::<Tabs>(TABS)?;
     tabs.list()
         .iter()
         .position(|t| t.id == *id)

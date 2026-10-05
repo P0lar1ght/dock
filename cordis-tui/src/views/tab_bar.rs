@@ -1,6 +1,6 @@
 //! 标签栏：分页多于一页时钉在最顶上的一行。
 //!
-//! 只画状态，不持有状态——页表是 `"tui.tabs"` 的，点击命中回传页序号由
+//! 只画状态，不持有状态——页表是 `"tabs"` 的，点击命中回传页序号由
 //! 事件循环去 `Tabs::activate`。
 
 use ratatui::buffer::Buffer;
@@ -10,8 +10,8 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::grok::line_utils::truncate_str;
-use crate::seam::tabs::{TabInfo, TabKind};
 use crate::theme::Theme;
+use cordis_spine::{TabInfo, TabKind};
 
 /// 点到了哪一页 —— 带的是标签上的**稳定编号**，不是位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

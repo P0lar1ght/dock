@@ -2,8 +2,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Disposable, Inject, Plugin};
+use cordis_spine::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use cordis_spine::{Sessions, Subagents, AGENT_LOOP, SESSIONS, SUBAGENTS, TURN};
-use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use tokio::sync::mpsc;
 
 use crate::names::SESSION;

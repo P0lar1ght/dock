@@ -18,12 +18,9 @@ use crate::grok::mcps;
 use crate::grok::tasks_pane::{self, GroupKind, KillTarget, TaskEntry};
 use crate::grok::workflows::{WorkflowAgentRowView, WorkflowRunSnapshot};
 use crate::names::{
-    GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_TABS, TUI_WELCOME,
+    GATEWAY, SESSION_PORT, TABS, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME,
 };
 use crate::scrollback::Scrollback;
-use crate::seam::gateway::GatewayRef;
-use crate::seam::session::SessionRef;
-use crate::seam::tabs::Tabs;
 use crate::slash::{self, filter_args};
 use crate::views::ask_view;
 use crate::views::mcp_elicit_view;
@@ -38,6 +35,9 @@ use crate::views::settings_modal;
 use crate::views::task_dock;
 use crate::views::text_overlay;
 use crate::views::usage_overlay;
+use cordis_spine::GatewayRef;
+use cordis_spine::SessionRef;
+use cordis_spine::Tabs;
 
 use crate::app::actions::{
     interpret_goal_composer_ex, interpret_loop_composer, Effect, GoalComposer, LoopComposer,
@@ -1252,7 +1252,7 @@ pub(super) fn copy_out(ctx: &Context, text: &str, file: Option<&std::path::Path>
 
 /// 分页服务。没挂（裁剪过的树、单元测试）就是单页模式。
 pub(super) fn tabs_service(root: &Context) -> Option<std::sync::Arc<Tabs>> {
-    root.get::<Tabs>(TUI_TABS)
+    root.get::<Tabs>(TABS)
 }
 
 /// 当前分页的上下文；没挂分页服务时就是根本身。

@@ -56,11 +56,18 @@ pub use cordis_base::usage::{
     RECENT_CALLS_KEPT,
 };
 pub use error::{Error, Result};
+pub use host::gateway_port::{
+    CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
+};
 pub use host::permissions::{permissions, PermissionPrompt, Permissions};
+pub use host::session_port::{QueuedItem, SessionPort, SessionRef};
 pub use host::settings::{settings, AppSettings, MermaidEngineKind, ModelOverride, PermissionMode};
 pub use host::slash::{
     slash, slash_name_reserved, tool_slash_arguments, ExtraSlashKind, Slash, SlashEntry,
     RESERVED_SLASH,
+};
+pub use host::tabs::{
+    tabs, CarryBack, TabInfo, TabKind, TabMount, Tabs, TabsConfig, MAX_TABS, PER_TAB_SERVICES,
 };
 pub use host::tui_slots::{tui_slots, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
 pub use llm::compact::{
@@ -70,12 +77,13 @@ pub use llm::http::probe::probe_model;
 pub use llm::sampler::{llm, Llm, LlmConfig, LlmMode, Sampler};
 pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
-    DYNAMIC_CORDIS_RUNNER, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP, MCP_ELICIT_EVENT, MEMORY,
-    PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
-    ROSTER, SCHEDULE_CHANGED, SESSIONS, SESSION_CHILD_EVENT, SESSION_COMPACTION, SESSION_EVENT,
-    SESSION_PAGE_EVENT, SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS,
-    SUBAGENT_CHANGED, SYSTEM_PROMPT, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TUI_SLOTS,
-    TURN, TURN_END, WORKFLOWS,
+    DYNAMIC_CORDIS_RUNNER, GATEWAY, GATEWAY_PAIRING, GOAL, JOBS, LLM, LLM_STREAM, LSP, MCP,
+    MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP,
+    PROMPT_ASSEMBLE, RHAI_BAGS, ROSTER, SCHEDULE_CHANGED, SESSION, SESSIONS, SESSION_CHILD_EVENT,
+    SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_TURN_END,
+    SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS,
+    TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TUI_SLOTS, TURN, TURN_END,
+    WORKFLOWS,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};

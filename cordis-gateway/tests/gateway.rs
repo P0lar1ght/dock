@@ -20,7 +20,7 @@ use cordis_spine::{
     AGENT_PRESETS, COMPACT, GOAL, LLM, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, SLASH,
     TOOLS, TURN,
 };
-use cordis_tui::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
+use cordis_spine::{QueuedItem, SessionPort, SessionRef, SESSION_PORT};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -115,7 +115,7 @@ fn project_dir(tag: &str) -> std::path::PathBuf {
 
 /// 测试用的建页工厂：每页自己的会话（落盘）、设置、权限队列、轮次、循环和
 /// session.port——和 `cordis-app` 的真分页一样按 `PER_TAB_SERVICES` 隔离。
-fn test_page_mount() -> cordis_tui::TabMount {
+fn test_page_mount() -> cordis_spine::TabMount {
     Arc::new(|index, _kind| {
         cordis::plugin_async(
             "test.page",
@@ -125,7 +125,7 @@ fn test_page_mount() -> cordis_tui::TabMount {
                 sessions.attach_disk();
                 // 预设按页：和 `cordis-app` 的 `tab.presets` 一样从上层 fork 一份。
                 let presets = ctx
-                    .get::<cordis_tui::Tabs>(cordis_tui::TUI_TABS)
+                    .get::<cordis_spine::Tabs>(cordis_spine::TABS)
                     .and_then(|tabs| tabs.active_ctx().get::<AgentPresets>(AGENT_PRESETS))
                     .map(|p| p.fork());
                 if let Some(presets) = &presets {
@@ -211,11 +211,14 @@ impl Harness {
             .wait()
             .await
             .unwrap();
-        root.plugin(cordis_tui::tabs(), test_page_mount())
-            .unwrap()
-            .wait()
-            .await
-            .unwrap();
+        root.plugin(
+            cordis_spine::tabs(),
+            cordis_spine::TabsConfig::headless(test_page_mount()),
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
         Self::boot_on(root).await
     }
 
@@ -231,11 +234,11 @@ impl Harness {
     async fn boot_with(root: Context, gateway: cordis::Plugin) -> Self {
         root.plugin(gateway, ()).unwrap().wait().await.unwrap();
         let addr = root
-            .require::<cordis_tui::GatewayRef>(GATEWAY)
+            .require::<cordis_spine::GatewayRef>(GATEWAY)
             .unwrap()
             .local_addr();
         assert!(root
-            .require::<cordis_tui::GatewayRef>(GATEWAY)
+            .require::<cordis_spine::GatewayRef>(GATEWAY)
             .unwrap()
             .is_listening());
         let http = reqwest::Client::new();
@@ -288,8 +291,12 @@ impl Harness {
             .unwrap()
     }
 
-    fn gateway(&self) -> cordis_tui::GatewayRef {
-        (*self.ctx.require::<cordis_tui::GatewayRef>(GATEWAY).unwrap()).clone()
+    fn gateway(&self) -> cordis_spine::GatewayRef {
+        (*self
+            .ctx
+            .require::<cordis_spine::GatewayRef>(GATEWAY)
+            .unwrap())
+        .clone()
     }
 
     async fn pair_ticket(&self) -> String {
@@ -1252,11 +1259,11 @@ async fn companion_ipv6_serves_http() {
     let h = Harness::boot().await;
     let status = h.gateway().companion_status();
     let addr = match status {
-        cordis_tui::CompanionStatus::Listening(addr) => addr,
-        cordis_tui::CompanionStatus::Failed { addr, error } => {
+        cordis_spine::CompanionStatus::Listening(addr) => addr,
+        cordis_spine::CompanionStatus::Failed { addr, error } => {
             panic!("companion {addr} failed: {error}");
         }
-        cordis_tui::CompanionStatus::Stopped => {
+        cordis_spine::CompanionStatus::Stopped => {
             panic!("companion not listening");
         }
     };
@@ -1624,7 +1631,7 @@ async fn gateway_idle_until_start_listen() {
         .wait()
         .await
         .unwrap();
-    let gw = root.require::<cordis_tui::GatewayRef>(GATEWAY).unwrap();
+    let gw = root.require::<cordis_spine::GatewayRef>(GATEWAY).unwrap();
     assert!(!gw.is_listening(), "plugin should not bind until /pair");
     let preferred = gw.local_addr();
     assert_eq!(preferred.port(), 0);
@@ -4203,11 +4210,14 @@ async fn project_plugins_follow_session_projects_not_the_process_cwd() {
         .wait()
         .await
         .unwrap();
-    root.plugin(cordis_tui::tabs(), test_page_mount())
-        .unwrap()
-        .wait()
-        .await
-        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
     root.plugin(dynamic_runner(), ())
         .unwrap()
         .wait()
@@ -4304,11 +4314,14 @@ async fn plugin_paths_are_checked_after_canonicalization() {
         .wait()
         .await
         .unwrap();
-    root.plugin(cordis_tui::tabs(), test_page_mount())
-        .unwrap()
-        .wait()
-        .await
-        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
     root.plugin(dynamic_runner(), ())
         .unwrap()
         .wait()
@@ -4401,11 +4414,14 @@ async fn boot_with_schedules() -> Harness {
         .wait()
         .await
         .unwrap();
-    root.plugin(cordis_tui::tabs(), test_page_mount())
-        .unwrap()
-        .wait()
-        .await
-        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
     root.provide(cordis_spine::CRON, cordis_spine::Cron::new())
         .unwrap();
     Harness::boot_on(root).await
@@ -4516,7 +4532,7 @@ async fn sessions_opened_in_the_background_replay_their_history() {
 
     let tabs = h
         .ctx
-        .require::<cordis_tui::Tabs>(cordis_tui::TUI_TABS)
+        .require::<cordis_spine::Tabs>(cordis_spine::TABS)
         .unwrap();
     tabs.open_session(&id, &dir).await.unwrap();
 

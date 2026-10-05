@@ -1,5 +1,5 @@
-//! Session seam the TUI injects. Harness `session` plugin provides this.
-//! Live-lookup at the send site — do not capture the Arc in a long-lived closure.
+//! 一页的提交口 `"session.port"`。`cordis-app` 的 `session_actor` provide，TUI、
+//! 网关、定时任务驱动在发送点 live-lookup——不要把 Arc 关进长生命周期闭包。
 
 use std::sync::Arc;
 

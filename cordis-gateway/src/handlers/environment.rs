@@ -4,7 +4,7 @@ use cordis_spine::{
     snapshot_context, AppSettings, ContextBook, Goal, Mcp, PermissionMode, PlanMode, Sessions,
     CONTEXT, GOAL, MCP, PLAN_MODE, SESSIONS, SETTINGS,
 };
-use cordis_tui::{SessionRef, SESSION_PORT};
+use cordis_spine::{SessionRef, SESSION_PORT};
 
 use cordis::Context;
 

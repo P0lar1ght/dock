@@ -444,17 +444,17 @@ fn rpc_error_frame(id: Option<Value>, err: RpcError) -> String {
     .to_string()
 }
 
-fn companion_json(status: &cordis_tui::CompanionStatus) -> Value {
+fn companion_json(status: &cordis_spine::CompanionStatus) -> Value {
     match status {
-        cordis_tui::CompanionStatus::Stopped => json!({
+        cordis_spine::CompanionStatus::Stopped => json!({
             "status": "stopped",
             "listening": false
         }),
-        cordis_tui::CompanionStatus::Listening(addr) => json!({
+        cordis_spine::CompanionStatus::Listening(addr) => json!({
             "status": "listening",
             "address": addr.to_string()
         }),
-        cordis_tui::CompanionStatus::Failed { addr, error } => json!({
+        cordis_spine::CompanionStatus::Failed { addr, error } => json!({
             "status": "failed",
             "address": addr.to_string(),
             "error": error
