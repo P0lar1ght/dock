@@ -1,12 +1,13 @@
 //! Overlay and prompt key handling (`run_action` / `to_action`).
 
+use crate::views::registry::OverlayInput;
 use std::time::Instant;
 
 use cordis::Context;
 use cordis_spine::{
     AppSettings, Ask, Browser, Computer, CuaAction, Goal, Mcp, PermissionMode,
-    PermissionOptionKind, Permissions, PlanDecision, PlanMode, Sessions, TuiSlots, UserImage, ASK,
-    BROWSER, COMPUTER, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS, TUI_SLOTS,
+    PermissionOptionKind, Permissions, PlanDecision, PlanMode, Sessions, UserImage, ASK, BROWSER,
+    COMPUTER, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSIONS, SETTINGS,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -265,7 +266,7 @@ pub(super) fn run_action(
             if apply_memory_key(ctx, overlay, KeyCode::Esc).is_some() {
                 return Vec::new();
             }
-            let _ = dispatch_slot_key(ctx, overlay, "esc");
+            let _ = dispatch_view_input(ctx, overlay, OverlayInput::Esc);
             overlay.close();
             Vec::new()
         }
@@ -308,21 +309,7 @@ pub(super) fn run_action(
                 scroll_inspect(ctx, target, scroll, -delta);
                 return Vec::new();
             }
-            if matches!(overlay, Overlay::Slot { .. }) {
-                let key = if delta < 0 { "up" } else { "down" };
-                let _ = dispatch_slot_key(ctx, overlay, key);
-                if let Overlay::Slot { id, scroll } = overlay {
-                    if let Some(slots) = ctx.get::<TuiSlots>(TUI_SLOTS) {
-                        // 和画的时候同一个 key：有视图用视图的纯文本，否则用 `render()`。
-                        let body = slots
-                            .view(id)
-                            .map(|v| v.to_plain())
-                            .or_else(|| slots.render(id));
-                        if let Some(body) = body {
-                            scroll_text(scroll, delta, &body);
-                        }
-                    }
-                }
+            if dispatch_view_input(ctx, overlay, OverlayInput::Scroll(delta)) {
                 return Vec::new();
             }
             // 详情页里 ↑↓ 换的是阶段，不是列表里的 run。
@@ -408,7 +395,7 @@ pub(super) fn run_action(
             if apply_memory_key(ctx, overlay, KeyCode::Enter).is_some() {
                 return Vec::new();
             }
-            if dispatch_slot_key(ctx, overlay, "enter") {
+            if dispatch_view_input(ctx, overlay, OverlayInput::Enter) {
                 return Vec::new();
             }
             accept_overlay(ctx, overlay)
@@ -456,8 +443,7 @@ pub(super) fn run_action(
                 overlay.push_char(c);
                 return Vec::new();
             }
-            if matches!(overlay, Overlay::Slot { .. }) {
-                let _ = dispatch_slot_key(ctx, overlay, &format!("char:{c}"));
+            if dispatch_view_input(ctx, overlay, OverlayInput::Char(c)) {
                 return Vec::new();
             }
             if matches!(overlay, Overlay::Presets(_)) {
@@ -1860,7 +1846,7 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         | Overlay::Usage { .. }
         | Overlay::Notice { .. }
         | Overlay::MemoryBrowser(_)
-        | Overlay::Slot { .. }
+        | Overlay::View { .. }
         | Overlay::Browser { .. }
         | Overlay::Computer { .. }
         | Overlay::Inspect { .. }

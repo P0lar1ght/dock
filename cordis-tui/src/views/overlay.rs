@@ -128,10 +128,11 @@ pub enum Overlay {
     },
     /// `/memory` dual-pane browser (list + markdown preview).
     MemoryBrowser(MemoryBrowserState),
-    /// Dynamic package TUI slot (generic; body comes from `"tui.slots"`).
-    Slot {
-        id: String,
-        scroll: usize,
+    /// 注册表里的浮层（`"tui.overlays"`）：按 `kind` 查表画、交按键。新浮层走这里，
+    /// 不再加变体。插件面板是 `kind = "slot"`、`arg` = 插槽 id。
+    View {
+        kind: String,
+        state: crate::views::registry::ViewState,
     },
     /// Live `/browser` cockpit (status / tabs / screenshot / 审批). Body from `"browser"`.
     Browser {
@@ -202,6 +203,17 @@ pub enum InspectTarget {
 }
 
 impl Overlay {
+    /// 打开注册表里 `kind` 那种浮层，带上参数 `arg`。
+    pub fn view(kind: &str, arg: impl Into<String>) -> Self {
+        Self::View {
+            kind: kind.to_string(),
+            state: crate::views::registry::ViewState {
+                arg: arg.into(),
+                scroll: 0,
+            },
+        }
+    }
+
     pub fn usage(tab: UsageTab) -> Self {
         Self::Usage {
             tab,
@@ -273,7 +285,7 @@ impl Overlay {
             | Self::Usage { .. }
             | Self::Notice { .. }
             | Self::MemoryBrowser(_)
-            | Self::Slot { .. }
+            | Self::View { .. }
             | Self::Browser { .. }
             | Self::Computer { .. }
             | Self::Inspect { .. }
@@ -397,7 +409,7 @@ impl Overlay {
             Self::MemoryBrowser(s) => s.selected,
             Self::Usage { .. }
             | Self::Notice { .. }
-            | Self::Slot { .. }
+            | Self::View { .. }
             | Self::Browser { .. }
             | Self::Computer { .. }
             | Self::Inspect { .. } => 0,
@@ -442,7 +454,7 @@ impl Overlay {
             Self::MemoryBrowser(st) => st.selected = selected,
             Self::Usage { .. }
             | Self::Notice { .. }
-            | Self::Slot { .. }
+            | Self::View { .. }
             | Self::Browser { .. }
             | Self::Computer { .. }
             | Self::Inspect { .. } => {}
@@ -517,7 +529,7 @@ impl Overlay {
             | Self::Usage { .. }
             | Self::Notice { .. }
             | Self::MemoryBrowser(_)
-            | Self::Slot { .. }
+            | Self::View { .. }
             | Self::Browser { .. }
             | Self::Computer { .. }
             | Self::Inspect { .. }
@@ -1015,10 +1027,7 @@ mod tests {
 
     #[test]
     fn slot_overlay_opens_and_closes() {
-        let mut overlay = Overlay::Slot {
-            id: "memo".into(),
-            scroll: 0,
-        };
+        let mut overlay = Overlay::view("slot", "memo");
         assert!(overlay.is_open());
         overlay.close();
         assert!(!overlay.is_open());
