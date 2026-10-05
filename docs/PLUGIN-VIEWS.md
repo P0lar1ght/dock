@@ -5,6 +5,9 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 
 跟踪：#181 第 3、4 阶段。
 
+解析：Rust 在 `cordis-base/src/view.rs`；dock.1 客户端用 `dock-core/src/plugins.ts`
+（同一套规范化，外加面板 / 状态项 / 工具卡的结果解析）。
+
 ## 用在哪
 
 四个扩展点共用这一套节点：

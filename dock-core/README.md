@@ -20,6 +20,14 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
   - 中途接入时对话不全（`complete: false`），实时事件先攒着；`withHistory` 回放
     `subagent/history` 再接上。
   - `taskPrompt` 去掉 Dock 给任务加的开头和回报说明。
+- 插件给界面的东西（`src/plugins.ts`，契约见 `docs/PLUGIN-VIEWS.md`）：
+  - `parseView`：视图树 dock.view.1，规范化与 `cordis-base/src/view.rs` 一一对应
+    （深度 8、节点含条目 500、文字 20000，超出截掉补一行说明；链接只放行 http / https / mailto）。
+  - `viewActions`：能点的动作，默认跳过折叠的 `section`。
+  - `splitPanelFooter`：根 `stack` 最后一行全是按钮 → 固定在面板底部。
+  - 面板 `surface/*`、状态项 `status/list`、工具卡 `tool/views` / `tool/view` 的结果解析；
+    `viewToolName` 透过 `use_tool` 找视图（同 spine 的 `effective_call`）。
+  - `parsePluginPush`：`surface/changed`、`status/changed`、`tool/views/changed`（连接级，不用订阅）。
 - **不猜**：一轮的结果看 `turn/completed.status`，工具的结果看 `item/tool_completed.status`，都由 Dock 给出。
 
 ## 用法
