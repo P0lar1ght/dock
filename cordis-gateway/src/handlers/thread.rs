@@ -429,6 +429,17 @@ pub async fn rewind(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
+            // 等的这几秒不占连接锁：别的连接可能又排进一条、或者开了新的一轮。
+            // 那时撤回点之后又有了要跑的东西，撤了会把它一起删掉。
+            if port.has_queued() {
+                return Err(RpcError::app(
+                    "queued",
+                    "还有排队的消息，先发出或删掉它们再撤回",
+                ));
+            }
+            if port.working() {
+                return Err(RpcError::app("busy", "又开始了新的一轮，稍后再撤回"));
+            }
         }
     }
     let (message, images) = sessions
@@ -455,6 +466,9 @@ pub async fn rewind(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
 
 /// 发送时在正文前面补的 `[Image #1] [Image #2]`（`turn::with_image_chips`）：图片会单独还回去，
 /// 正文里去掉，免得放回输入框后再发一遍又多一组。
+///
+/// 用户自己的正文就以 `[Image #1]` 开头时（那时 `with_image_chips` 不再补），这段字面文本
+/// 也会被去掉；重发时会被补回同样的 chip，所以只是输入框里少了几个字。
 fn strip_image_chips(message: &str, count: usize) -> String {
     let mut rest = message;
     for i in 1..=count {
