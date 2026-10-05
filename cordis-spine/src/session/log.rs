@@ -1086,6 +1086,56 @@ impl Sessions {
         }
     }
 
+    /// 撤回第 `n` 条用户消息（从 0 数，按显示日志）：它和它之后的对话全部删掉
+    /// （内存与落盘），正文和图片还回来，让调用方放回输入框改了再发。
+    ///
+    /// 和 [`Self::rewind_inflight_user`] 的区别：那条只撤最后一条、且这一轮还没有
+    /// 模型输出；这条撤任意一条，后面已经发生的对话一起丢。**工具已经做过的事
+    /// （写过的文件、跑过的命令）不会撤销**——日志只是不再记得它们。
+    ///
+    /// 调用方要保证这一页没在跑（先取消、等它停下）。撤回点早于最近一次压缩时，
+    /// 摘要里含有被删掉的内容，压缩一并作废，模型历史回到完整的显示日志。
+    pub fn rewind_to_user(&self, n: usize) -> Option<(String, Vec<cordis_base::types::UserImage>)> {
+        let mut events = self.events.lock().unwrap();
+        let start = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, LogEvent::User(_)))
+            .nth(n)
+            .map(|(i, _)| i)?;
+        let text = match &events[start] {
+            LogEvent::User(t) => t.clone(),
+            _ => return None,
+        };
+        events.truncate(start);
+        self.times.lock().unwrap().truncate(start);
+        let leftover = events.last().cloned();
+        drop(events);
+        let images = {
+            let mut rows = self.user_images.lock().unwrap();
+            let images = rows.get(n).cloned().unwrap_or_default();
+            rows.truncate(n);
+            images
+        };
+        let compacted_past = self.compact_prefix.lock().unwrap().is_some()
+            && start < *self.compact_from.lock().unwrap();
+        if compacted_past {
+            self.reset_compact();
+        }
+        self.pending_images.lock().unwrap().clear();
+        self.pending_user_addons.lock().unwrap().clear();
+        *self.pending_call.lock().unwrap() = None;
+        *self.turn_started.lock().unwrap() = None;
+        // 历史被整段改写，旧锚点对不上；下一次采样再落新的。
+        *self.context_anchor.lock().unwrap() = None;
+        // 栅栏：万一取消掉的那一轮还有尾巴在路上，下一条用户消息之前不让它写进来。
+        self.rewound.store(true, Ordering::Relaxed);
+        self.bump_events_rev();
+        self.emit_session(leftover.unwrap_or(LogEvent::PreStep));
+        self.persist_live();
+        Some((text, images))
+    }
+
     /// Drop the in-flight user turn when it has no model/tool output yet.
     /// Returns the restored prompt (Grok cancel-rewind).
     pub fn rewind_inflight_user(&self) -> Option<(String, Vec<cordis_base::types::UserImage>)> {
@@ -1962,6 +2012,83 @@ mod tests {
         assert_eq!(parent.ledger().totals.model_calls, 1);
         assert_eq!(parent.ledger().totals.input_tokens, 5);
         assert_eq!(parent.ledger().by_model["child-model"].input_tokens, 5);
+    }
+
+    fn three_turns(sessions: &Sessions) {
+        for (user, reply) in [("one", "r1"), ("two", "r2"), ("three", "r3")] {
+            sessions.append(LogEvent::User(user.into()));
+            sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+                text: reply.into(),
+                ..cordis_base::types::LlmOutput::default()
+            }));
+        }
+    }
+
+    /// 撤回任意一条：它和之后的全部删掉，正文和图片还回来，时间戳 / 图片行跟着对齐。
+    /// 后面有模型输出也照撤（`rewind_inflight_user` 在这种情况下拒绝）。
+    #[tokio::test]
+    async fn rewind_to_user_truncates_from_that_message() {
+        let sessions = Sessions::new(Context::new());
+        sessions.queue_user_images(vec![cordis_base::types::UserImage {
+            mime: "image/png".into(),
+            data: std::sync::Arc::from(vec![1u8, 2, 3]),
+            width: 1,
+            height: 1,
+        }]);
+        three_turns(&sessions);
+        assert!(
+            sessions.rewind_inflight_user().is_none(),
+            "最后一轮有输出，旧撤回不动"
+        );
+        let (text, images) = sessions.rewind_to_user(0).expect("第 1 条能撤");
+        assert_eq!(text, "one");
+        assert_eq!(images.len(), 1, "第 1 条带的图要还回来");
+        assert!(sessions.events().is_empty(), "{:?}", sessions.events());
+        assert!(sessions.times().is_empty());
+        assert!(sessions.user_images().is_empty());
+        assert!(sessions.rewind_to_user(0).is_none(), "没有第 1 条了");
+
+        three_turns(&sessions);
+        let (text, _) = sessions.rewind_to_user(2).unwrap();
+        assert_eq!(text, "three");
+        assert_eq!(sessions.events().len(), 4);
+        assert_eq!(sessions.times().len(), 4);
+        assert_eq!(sessions.user_images().len(), 2);
+        assert!(sessions.rewind_to_user(5).is_none());
+    }
+
+    /// 撤回点早于压缩：摘要里有被删掉的内容，压缩作废，模型历史回到完整日志。
+    /// 撤回点在压缩之后：压缩留着。
+    #[tokio::test]
+    async fn rewind_to_user_drops_a_compaction_it_reaches_into() {
+        let sessions = Sessions::new(Context::new());
+        three_turns(&sessions);
+        sessions.replace_compacted(vec![LogEvent::SystemReminder("summary".into())]);
+        sessions.append(LogEvent::User("four".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "r4".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+
+        sessions.rewind_to_user(3).unwrap();
+        let history = sessions.model_history();
+        assert!(
+            matches!(&history[0], LogEvent::SystemReminder(t) if t == "summary"),
+            "撤回点在压缩之后，摘要留着：{history:?}"
+        );
+
+        sessions.rewind_to_user(1).unwrap();
+        let history = sessions.model_history();
+        assert!(
+            !history
+                .iter()
+                .any(|e| matches!(e, LogEvent::SystemReminder(t) if t == "summary")),
+            "摘要概括了被删掉的轮次，必须作废：{history:?}"
+        );
+        assert!(
+            matches!(&history[0], LogEvent::User(t) if t == "one"),
+            "{history:?}"
+        );
     }
 
     #[tokio::test]

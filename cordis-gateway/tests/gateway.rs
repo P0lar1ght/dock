@@ -1382,6 +1382,175 @@ async fn image_inputs_put_then_turn_projects_attachments() {
     assert!(user["params"]["attachments"][0].get("data").is_none());
 }
 
+/// `thread/history` 里各条用户消息的（`turnId`, 正文）。
+async fn user_turns(rpc: &mut Rpc) -> Vec<(String, String)> {
+    let history = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["method"] == "item/user_message")
+        .map(|e| {
+            (
+                e["turnId"].as_str().unwrap().to_string(),
+                e["payload"]["content"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// `thread/rewind`：撤回任意一条用户消息，它和之后的对话全部删掉；正文和图片还回来，
+/// 发送时补的 `[Image #1]` 从正文里去掉（图片单独还）。
+#[tokio::test]
+async fn thread_rewind_drops_that_message_and_everything_after() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["threadRewind"], true);
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    let data = tiny_png();
+    let digest = sha256_hex(&data);
+    let put = rpc
+        .call(
+            "imageInputs/put",
+            json!({
+                "threadId": "live",
+                "workspaceId": "default",
+                "captureId": "cap-1",
+                "source": "upload",
+                "mimeType": "image/png",
+                "width": 1,
+                "height": 1,
+                "byteLength": data.len(),
+                "digest": digest,
+                "dataBase64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &data
+                )
+            }),
+        )
+        .await;
+    let id = put["result"]["imageInputId"].as_str().unwrap().to_string();
+    for (i, message) in ["one", "two", "three"].into_iter().enumerate() {
+        let mut params = json!({ "message": message });
+        if i == 0 {
+            params["imageInputs"] = json!([{ "id": id, "digest": digest }]);
+        }
+        let started = rpc.call("turn/start", params).await;
+        assert!(started.get("error").is_none(), "{started}");
+        rpc.wait_notification("turn/completed", Duration::from_secs(5))
+            .await;
+    }
+    let turns = user_turns(&mut rpc).await;
+    assert_eq!(turns.len(), 3, "{turns:?}");
+
+    let rewound = rpc
+        .call(
+            "thread/rewind",
+            json!({ "threadId": "live", "turnId": turns[1].0 }),
+        )
+        .await;
+    assert!(rewound.get("error").is_none(), "{rewound}");
+    assert_eq!(rewound["result"]["message"], "two");
+    assert_eq!(rewound["result"]["images"], json!([]));
+    let left = user_turns(&mut rpc).await;
+    assert_eq!(left.len(), 1, "第 2 条和之后的都该删掉：{left:?}");
+    assert!(left[0].1.contains("one"), "{left:?}");
+
+    let rewound = rpc
+        .call(
+            "thread/rewind",
+            json!({ "threadId": "live", "turnId": left[0].0 }),
+        )
+        .await;
+    assert_eq!(rewound["result"]["message"], "one", "{rewound}");
+    let image = &rewound["result"]["images"][0];
+    assert_eq!(image["mimeType"], "image/png");
+    assert_eq!(
+        image["dataBase64"],
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data)
+    );
+    assert!(user_turns(&mut rpc).await.is_empty());
+
+    let missing = rpc
+        .call(
+            "thread/rewind",
+            json!({ "threadId": "live", "turnId": "t9" }),
+        )
+        .await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
+}
+
+/// 一直不回的模型：一个字节都不出，直到这一轮被取消。和 HTTP 采样器一样认
+/// `TurnControl`（真采样器在每个 await 上都和取消赛跑）。
+struct Hang(Arc<std::sync::OnceLock<Context>>);
+
+impl Sampler for Hang {
+    fn sample<'a>(
+        &'a self,
+        _request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let ctx = self.0.clone();
+        Box::pin(async move {
+            loop {
+                let cancelled = ctx
+                    .get()
+                    .and_then(|c| c.get::<TurnControl>(TURN))
+                    .is_some_and(|t| t.is_cancelled());
+                if cancelled {
+                    return LlmOutput::default();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+    }
+}
+
+/// 正在跑的那一条也能撤：先停下这一轮，等它停住再删。
+#[tokio::test]
+async fn thread_rewind_stops_a_running_turn_first() {
+    let slot = Arc::new(std::sync::OnceLock::new());
+    let root = harness_root_with(Some(Arc::new(Hang(slot.clone())))).await;
+    slot.set(root.clone()).unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    let _ = rpc.call("turn/start", json!({ "message": "stuck" })).await;
+    rpc.wait_notification("item/user_message", Duration::from_secs(5))
+        .await;
+    let turns = user_turns(&mut rpc).await;
+    let rewound = rpc
+        .call(
+            "thread/rewind",
+            json!({ "threadId": "live", "turnId": turns[0].0 }),
+        )
+        .await;
+    assert_eq!(rewound["result"]["message"], "stuck", "{rewound}");
+    assert!(user_turns(&mut rpc).await.is_empty());
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    assert!(
+        !sessions
+            .events()
+            .iter()
+            .any(|e| matches!(e, LogEvent::User(_))),
+        "{:?}",
+        sessions.events()
+    );
+}
+
 #[tokio::test]
 async fn gateway_idle_until_start_listen() {
     let root = harness_root().await;

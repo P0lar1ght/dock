@@ -1262,6 +1262,34 @@ reasoning_effort = "medium"
         );
     }
 
+    /// 撤回中间一条：它和它之后的对话从落盘里一起消失，重开会话看到的是截断后的。
+    #[tokio::test]
+    async fn rewind_to_user_persists_truncated_log() {
+        let _home = cordis_base::test_env::scoped().home();
+        let sessions = reload();
+        for (user, reply) in [("one", "r1"), ("two", "r2"), ("three", "r3")] {
+            sessions.append(LogEvent::User(user.into()));
+            sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+                text: reply.into(),
+                ..cordis_base::types::LlmOutput::default()
+            }));
+        }
+        let (text, _) = sessions.rewind_to_user(1).expect("第 2 条能撤");
+        assert_eq!(text, "two");
+        let again = reload();
+        let item = again.archived().into_iter().next().expect("rewound live");
+        assert!(again.restore(&item.id));
+        let users: Vec<String> = again
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::User(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, ["one"], "{:?}", again.events());
+    }
+
     #[tokio::test]
     async fn seal_persists_interrupted_tool_stub() {
         let _home = cordis_base::test_env::scoped().home();

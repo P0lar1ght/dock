@@ -317,6 +317,20 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 开着的会话读内存，关着的读落盘（和 `thread/history` 同一套查找）；找不到回 `not_found`。
 - 典型来源：cua-driver 的 `get_window_state` 截图；GUI 的 CUA 面板和工具卡用它。
 
+### 撤回消息（能力 `threadRewind`，`handlers/thread.rs`）
+
+`thread/rewind { threadId, turnId }` → `{ threadId, message, images[] }`：撤回 `turnId` 那条用户消息。
+
+- 它和它之后的对话全部删掉，内存与落盘一起（`Sessions::rewind_to_user`）。
+- `message` 是原正文，发送时补在前面的 `[Image #N]` 已去掉；`images[{ mimeType, width, height, dataBase64 }]` 是它带的图。
+  客户端放回输入框，改完照常 `turn/start`（图片重新 `imageInputs/put`）。
+- `turnId` 要是用户消息开的那一轮（`item/user_message` 的 `turnId`）；不是或已不存在回 `not_found`。
+- 正在跑就先停（同 `turn/cancel`），等它停下最多 5 秒，停不下回 `busy`。还有排队的消息回 `queued`。
+- 撤回点早于最近一次压缩时，压缩作废，模型历史回到完整的显示日志。
+- **工具已经做过的事（写过的文件、跑过的命令）不会撤销**，日志只是不再记得它们。
+- 投影按截断后的会话重建，`seq` 重新编号：客户端整份重拉 `thread/history`。
+- 关着的会话按需开页；不占连接锁（要等那一轮停下）。
+
 ### 工作区文件（能力 `workspaceFiles`，`handlers/fs.rs`）
 
 只读看会话 cwd 里的文件（GUI 的文件面板）。路径都相对会话 cwd，用 `/` 分隔。
