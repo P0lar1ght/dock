@@ -217,7 +217,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
             continue;
         };
         // 要调模型的方法、挂浏览器画面另起任务：不能占着连接锁等好几秒。
-        if let Some(job) = detached(&conn, &views, &desktops, &out_tx, &text).await {
+        if let Some(job) = detached(&conn, &gateway, &views, &desktops, &out_tx, &text).await {
             let out_tx = out_tx.clone();
             tokio::spawn(async move {
                 let _ = out_tx.send(Outgoing::Text(job.await));
@@ -242,6 +242,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
 /// 再跑。不是这类请求（或没法解析）回 `None`，照常走 [`dispatch_text`]。
 async fn detached(
     conn: &Arc<Mutex<Conn>>,
+    gateway: &GatewayHandle,
     views: &Arc<BrowserViews>,
     desktops: &Arc<DesktopViews>,
     out: &OutTx,
@@ -251,11 +252,9 @@ async fn detached(
     let method = value.get("method").and_then(Value::as_str)?.to_string();
     let viewing = browser_view::is_browser_view(&method);
     let desktop = desktop_view::is_desktop_view(&method);
-    if !viewing && !desktop {
-        let gateway = conn.lock().await.gateway.clone();
-        if !rpc::is_detached(&gateway, &method) {
-            return None;
-        }
+    // 连接上的网关句柄建连后不变，这里不用为了它去拿连接锁。
+    if !viewing && !desktop && !rpc::is_detached(gateway, &method) {
+        return None;
     }
     let views = views.clone();
     let desktops = desktops.clone();

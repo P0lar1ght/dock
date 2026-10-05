@@ -221,3 +221,158 @@ pub async fn dispatch_detached(
         _ => methods::call(gateway, method, params).await,
     }
 }
+
+/// 协议骨架自己处理的方法：上面 [`dispatch`] / [`dispatch_detached`] 的分支，加上 `ws.rs`
+/// 里的连接级方法。浏览器 / 桌面画面（`browser/view/*`、`desktop/view/*`）另由
+/// [`is_core_method`] 认。功能插件不能在 `"gateway.methods"` 里登记这些名字——表里的
+/// 策略（detached、trusted_only……）会套到核心方法上，detached 还会把核心实现顶掉。
+pub const CORE_METHODS: &[&str] = &[
+    protocol::WORKSPACE_LIST,
+    protocol::MCP_RELOAD,
+    protocol::MCP_LIST,
+    protocol::MCP_RECONNECT,
+    protocol::MODEL_LIST,
+    protocol::CONFIG_STATUS,
+    protocol::CONFIG_GET,
+    protocol::CONFIG_SET,
+    protocol::CONFIG_ENV,
+    protocol::MODEL_GET,
+    protocol::MODEL_SAVE,
+    protocol::MODEL_DELETE,
+    protocol::MODEL_DEFAULT,
+    protocol::MCP_GET,
+    protocol::MCP_TOOL_ENABLE,
+    protocol::CUA_STATUS,
+    protocol::CUA_ACTION,
+    protocol::BROWSER_STATUS,
+    protocol::PLUGIN_LIST,
+    protocol::PLUGIN_DELETE,
+    protocol::SKILL_LIST,
+    protocol::SECRET_LIST,
+    protocol::SECRET_SET,
+    protocol::SECRET_DELETE,
+    protocol::PAIRING_LIST,
+    protocol::PAIRING_RESOLVE,
+    protocol::PAIRING_REVOKE,
+    protocol::PAIRING_ACCEPT,
+    protocol::DEVICE_LIST,
+    protocol::DEVICE_ADD,
+    protocol::DEVICE_REVOKE,
+    protocol::THREAD_LIST,
+    protocol::THREAD_SEARCH,
+    protocol::PRESET_LIST,
+    protocol::PRESET_CREATE,
+    protocol::PRESET_DELETE,
+    protocol::PRESET_GET,
+    protocol::PRESET_UPDATE,
+    protocol::TOOL_CATALOG,
+    protocol::PRESET_DRAFT,
+    protocol::PRESET_REWRITE,
+    protocol::PRESET_SUGGEST_TOOLS,
+    protocol::FS_LIST,
+    protocol::FS_READ,
+    protocol::FS_FIND,
+    protocol::CANVAS_LIST,
+    protocol::CANVAS_GET,
+    protocol::CANVAS_SET_DATA,
+    protocol::CANVAS_ROLLBACK,
+    protocol::MODEL_TEST,
+    protocol::MCP_SAVE,
+    protocol::MCP_DELETE,
+    protocol::MCP_ENABLE,
+    protocol::MCP_LOGIN,
+    protocol::PLUGIN_ENABLE,
+    protocol::PLUGIN_PROMOTE,
+    protocol::PLUGIN_DISCARD,
+    protocol::THREAD_REWIND,
+    protocol::THREAD_START,
+    protocol::THREAD_OPEN,
+    protocol::THREAD_CLOSE,
+    protocol::THREAD_RENAME,
+    protocol::THREAD_ARCHIVE,
+    protocol::THREAD_RESTORE,
+    protocol::THREAD_DELETE,
+    protocol::THREAD_HISTORY,
+    protocol::ITEM_IMAGE,
+    protocol::THREAD_SUBSCRIBE,
+    protocol::THREAD_UNSUBSCRIBE,
+    protocol::THREAD_ENVIRONMENT_GET,
+    protocol::THREAD_MODEL_SET,
+    protocol::THREAD_MODEL_REFRESH,
+    protocol::THREAD_REASONING_SET,
+    protocol::THREAD_APPROVAL_SET,
+    protocol::THREAD_PLAN_SET,
+    protocol::THREAD_MEMORY_SET,
+    protocol::THREAD_GOAL_SET,
+    protocol::THREAD_GOAL_EDIT,
+    protocol::THREAD_GOAL_PAUSE,
+    protocol::THREAD_GOAL_COMPLETE,
+    protocol::THREAD_GOAL_CLEAR,
+    protocol::THREAD_CONTEXT_COMPACT,
+    protocol::THREAD_CONTEXT_GET,
+    protocol::TURN_START,
+    protocol::TURN_ENQUEUE,
+    protocol::TURN_STEER,
+    protocol::TURN_CANCEL,
+    protocol::TURN_QUEUE_LIST,
+    protocol::TURN_QUEUE_REMOVE,
+    protocol::PERMISSION_RESOLVE,
+    protocol::INTERACTION_RESPOND,
+    protocol::PLAN_RESOLVE,
+    protocol::ELICIT_RESOLVE,
+    protocol::SLASH_LIST,
+    protocol::SLASH_EXECUTE,
+    protocol::IMAGE_INPUTS_PUT,
+    protocol::SUBAGENT_LIST,
+    protocol::SUBAGENT_HISTORY,
+    protocol::SUBAGENT_SEND,
+    protocol::SUBAGENT_INTERRUPT,
+    protocol::SUBAGENT_STOP,
+    protocol::CONNECTION_AUTHENTICATE,
+    protocol::INITIALIZE,
+    protocol::IMAGE_INPUTS_SYNC,
+];
+
+/// `method` 是不是网关核心方法（见 [`CORE_METHODS`]）。
+pub fn is_core_method(method: &str) -> bool {
+    CORE_METHODS.contains(&method)
+        || crate::handlers::browser_view::is_browser_view(method)
+        || crate::handlers::desktop_view::is_desktop_view(method)
+}
+
+#[cfg(test)]
+mod tests {
+    /// 核心名单不能和 `match` 漂开：这两个函数和 `ws.rs` 里点名处理的方法，一个不多一个不少。
+    #[test]
+    fn core_methods_cover_every_core_branch() {
+        let names = |src: &str| -> Vec<String> {
+            src.split("protocol::")
+                .skip(1)
+                .map(|rest| {
+                    rest.chars()
+                        .take_while(|c| c.is_ascii_uppercase() || *c == '_')
+                        .collect::<String>()
+                })
+                .filter(|n| !n.is_empty())
+                .collect()
+        };
+        let rpc = include_str!("rpc.rs");
+        let dispatch = &rpc[rpc.find("pub async fn dispatch(").unwrap()
+            ..rpc.find("/// 协议骨架自己处理的方法").unwrap()];
+        let ws = include_str!("ws.rs");
+        let mut want = names(dispatch);
+        want.extend(
+            ws.split("method == ")
+                .skip(1)
+                .flat_map(|rest| names(rest.lines().next().unwrap_or(""))),
+        );
+        let listed = names(&rpc[rpc.find("pub const CORE_METHODS").unwrap()..]);
+        for name in &want {
+            assert!(listed.contains(name), "CORE_METHODS 缺 protocol::{name}");
+        }
+        // 反过来也要对上：迁成插件的方法留在名单里，插件就登记不上了。
+        for name in &listed {
+            assert!(want.contains(name), "CORE_METHODS 多了 protocol::{name}");
+        }
+    }
+}

@@ -5,7 +5,8 @@
 //! fiber 一起注销。给 GUI 加一页 = 再挂一颗插件，不用改网关。
 //!
 //! 每个方法带一份 [`MethodPolicy`]：跑多久（要不要放到连接锁外）、谁能调（是否只认
-//! 桌面 GUI 的受信 ticket）、关着的线程要不要先开页。核心方法与表里同名时核心优先。
+//! 桌面 GUI 的受信 ticket）、关着的线程要不要先开页。核心方法（`rpc::CORE_METHODS`）
+//! 不能登记：表里的策略会套到核心方法上，detached 还会把核心实现顶掉。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -80,6 +81,11 @@ impl GatewayMethods {
         if name.is_empty() {
             return Err(cordis::Error::plugin("方法名不能为空"));
         }
+        if crate::rpc::is_core_method(&name) {
+            return Err(cordis::Error::plugin(format!(
+                "方法 {name} 是网关核心方法，插件不能登记"
+            )));
+        }
         {
             let mut entries = self.entries.lock().unwrap();
             if entries.contains_key(&name) {
@@ -103,13 +109,6 @@ impl GatewayMethods {
             .unwrap()
             .get(name)
             .map(|e| e.handler.clone())
-    }
-
-    /// 登记过的方法名（排过序）。
-    pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.entries.lock().unwrap().keys().cloned().collect();
-        names.sort();
-        names
     }
 }
 
@@ -177,5 +176,27 @@ mod tests {
         assert!(table
             .register("x/list", MethodPolicy::default(), noop)
             .is_ok());
+    }
+
+    /// 核心方法名登记不进来：否则 `detached()` 一登记，`turn/start` 就被送去跑插件的
+    /// handler，核心实现和连接上的订阅状态都没了。
+    #[test]
+    fn core_method_names_are_refused() {
+        let table = GatewayMethods::default();
+        let noop = method(|_, _| async { Ok(Value::Null) });
+        for name in [
+            "turn/start",
+            "thread/subscribe",
+            "initialize",
+            "browser/view/open",
+        ] {
+            assert!(
+                table
+                    .register(name, MethodPolicy::detached(), noop.clone())
+                    .is_err(),
+                "{name} 不该登记成功"
+            );
+            assert!(table.policy(name).is_none());
+        }
     }
 }
