@@ -205,6 +205,14 @@ Sessions are stored in $DOCK_HOME/sessions/<cwd>/ (default ~/.dock/sessions/).
     );
 }
 
+/// 网关之后挂 dock.1 的功能插件（vcs、定时任务……，见 `cordis_gateway::features`）。
+async fn mount_gateway_features(root: &cordis::Context) -> Result<(), cordis::Error> {
+    for feature in cordis_gateway::features() {
+        root.plugin(feature, ())?.wait().await?;
+    }
+    Ok(())
+}
+
 fn notify_preset_apply(outcome: ApplyRestoredPreset) {
     if let ApplyRestoredPreset::Failed { id, error } = outcome {
         eprintln!("dock: resume preset `{id}` not applied: {error}");
@@ -276,6 +284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match mode {
         Mode::Tui => {
             root.plugin(gateway(), ())?.wait().await?;
+            mount_gateway_features(&root).await?;
             root.plugin(cron_driver(), ())?.wait().await?;
             // 分页服务要在 TUI 之前挂上：事件循环第一帧就会问它当前是哪一页。
             root.plugin(tabs(), tab_mount())?.wait().await?;
@@ -291,6 +300,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             root.plugin(gateway_serve(args.bind), args.config)?
                 .wait()
                 .await?;
+            mount_gateway_features(&root).await?;
             root.plugin(cron_driver(), ())?.wait().await?;
             root.plugin(tabs(), tab_mount_headless())?.wait().await?;
             let control: Arc<ServeControl> = root.require::<ServeControl>(GATEWAY_SERVE)?;
@@ -300,6 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Mode::Remote { bind } => {
             root.plugin(gateway_remote(bind), ())?.wait().await?;
+            mount_gateway_features(&root).await?;
             root.plugin(cron_driver(), ())?.wait().await?;
             root.plugin(tabs(), tab_mount_headless())?.wait().await?;
             let addr = root.require::<GatewayRef>(GATEWAY)?.local_addr();

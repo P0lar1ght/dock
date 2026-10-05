@@ -30,10 +30,40 @@ use serde_json::{json, Value};
 
 use cordis_spine::session_cwd;
 
+use cordis::{plugin, Inject, Plugin};
+
 use crate::handle::GatewayHandle;
 use crate::handlers::thread::roster_entries;
-use crate::protocol::RpcError;
+use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
+use crate::protocol::{self, RpcError};
 use crate::threads;
+
+/// PR 这一块：把 `vcs/pr/list|get` 登记进网关的方法表。都要跑 gh（走网络，一次几秒），
+/// 放到连接锁外跑。
+pub fn gateway_vcs() -> Plugin {
+    plugin(
+        "gateway.vcs",
+        Inject::from([GATEWAY_METHODS]),
+        |ctx, _: &()| {
+            register_methods(
+                ctx,
+                vec![
+                    (
+                        protocol::VCS_PR_LIST,
+                        MethodPolicy::detached(),
+                        method(|gw, params| async move { list(&gw, params).await }),
+                    ),
+                    (
+                        protocol::VCS_PR_GET,
+                        MethodPolicy::detached(),
+                        method(|gw, params| async move { get(&gw, params).await }),
+                    ),
+                ],
+            )?;
+            Ok(None)
+        },
+    )
+}
 
 /// 指定 gh 路径的环境变量。
 pub const GH_ENV: &str = "DOCK_GH";

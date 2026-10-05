@@ -1,12 +1,14 @@
-//! JSON-RPC method dispatch. Unknown methods return `method_not_found`.
+//! JSON-RPC method dispatch：协议骨架写在这里，其余落到 `"gateway.methods"`（功能插件
+//! 登记的方法）；两边都没有回 `method_not_found`。
 
 use serde_json::Value;
 
 use crate::handle::GatewayHandle;
 use crate::handlers::{
     canvas, connection, context, environment, fs, image_inputs, interaction, permission, preset,
-    schedule, settings, slash, subagent, thread, turn, vcs,
+    settings, slash, subagent, thread, turn,
 };
+use crate::methods;
 use crate::protocol::{self, RpcError};
 
 pub async fn dispatch(
@@ -15,7 +17,7 @@ pub async fn dispatch(
     params: Value,
     subscribed: &mut thread::Subscriptions,
 ) -> Result<Value, RpcError> {
-    if opens_on_demand(method) {
+    if opens_on_demand(method) || methods::policy_of(&gateway, method).opens_thread {
         thread::open_on_demand(&gateway, &params).await?;
     }
     match method {
@@ -58,10 +60,6 @@ pub async fn dispatch(
         protocol::PRESET_GET => preset::get(&gateway, params),
         protocol::PRESET_UPDATE => preset::update(&gateway, params),
         protocol::TOOL_CATALOG => preset::tool_catalog(&gateway, params),
-        protocol::SCHEDULE_LIST => schedule::list(&gateway, params),
-        protocol::SCHEDULE_CREATE => schedule::create(&gateway, params),
-        protocol::SCHEDULE_UPDATE => schedule::update(&gateway, params),
-        protocol::SCHEDULE_DELETE => schedule::delete(&gateway, params),
         protocol::PRESET_DRAFT
         | protocol::PRESET_REWRITE
         | protocol::PRESET_SUGGEST_TOOLS
@@ -80,8 +78,6 @@ pub async fn dispatch(
         | protocol::PLUGIN_ENABLE
         | protocol::PLUGIN_PROMOTE
         | protocol::PLUGIN_DISCARD
-        | protocol::VCS_PR_LIST
-        | protocol::VCS_PR_GET
         | protocol::THREAD_REWIND => dispatch_detached(gateway, method, params).await,
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
@@ -130,7 +126,8 @@ pub async fn dispatch(
         protocol::SUBAGENT_SEND => subagent::send(&gateway, params),
         protocol::SUBAGENT_INTERRUPT => subagent::interrupt(&gateway, params),
         protocol::SUBAGENT_STOP => subagent::stop(&gateway, params),
-        _ => Err(RpcError::method_not_found(method)),
+        // 功能插件登记的方法（`"gateway.methods"`）。
+        _ => methods::call(gateway, method, params).await,
     }
 }
 
@@ -164,7 +161,11 @@ fn opens_on_demand(method: &str) -> bool {
 
 /// 要调模型的方法（一次几秒）和读盘的 `fs/*` / `canvas/*`（大仓库里找文件要走很多目录）。`ws.rs` 不在
 /// 连接锁里跑它们（锁住会卡住这条连接的推送和其它请求），鉴权过了就另起任务，跑完再回帧。
-pub fn is_detached(method: &str) -> bool {
+pub fn is_detached(gateway: &GatewayHandle, method: &str) -> bool {
+    methods::policy_of(gateway, method).detached || is_core_detached(method)
+}
+
+fn is_core_detached(method: &str) -> bool {
     matches!(
         method,
         protocol::PRESET_DRAFT
@@ -186,9 +187,6 @@ pub fn is_detached(method: &str) -> bool {
             | protocol::PLUGIN_ENABLE
             | protocol::PLUGIN_PROMOTE
             | protocol::PLUGIN_DISCARD
-            // 跑 gh（走网络，一次几秒）。
-            | protocol::VCS_PR_LIST
-            | protocol::VCS_PR_GET
             // 在跑的话要先停、等它停下来（最多几秒）。
             | protocol::THREAD_REWIND
     )
@@ -201,8 +199,6 @@ pub async fn dispatch_detached(
     params: Value,
 ) -> Result<Value, RpcError> {
     match method {
-        protocol::VCS_PR_LIST => vcs::list(&gateway, params).await,
-        protocol::VCS_PR_GET => vcs::get(&gateway, params).await,
         protocol::THREAD_REWIND => thread::rewind(&gateway, params).await,
         protocol::PRESET_DRAFT => preset::draft(&gateway, params).await,
         protocol::PRESET_REWRITE => preset::rewrite(&gateway, params).await,
@@ -222,6 +218,6 @@ pub async fn dispatch_detached(
         protocol::PLUGIN_ENABLE => settings::plugin_enable(&gateway, params).await,
         protocol::PLUGIN_PROMOTE => settings::plugin_promote(&gateway, params).await,
         protocol::PLUGIN_DISCARD => settings::plugin_discard(&gateway, params).await,
-        _ => Err(RpcError::method_not_found(method)),
+        _ => methods::call(gateway, method, params).await,
     }
 }

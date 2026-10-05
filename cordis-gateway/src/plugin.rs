@@ -4,6 +4,7 @@ use cordis_spine::{GATEWAY, SESSION_PORT};
 
 use crate::bind;
 use crate::handle::GatewayHandle;
+use crate::methods::{GatewayMethods, GATEWAY_METHODS};
 use crate::pairing::{normalize_application, require_origin};
 use crate::serve::{ServeConfig, ServeControl, GATEWAY_SERVE};
 
@@ -111,6 +112,17 @@ fn finish_mount(
         }));
         Ok(())
     })?;
+    // 功能方法表：vcs、定时任务……各自的插件挂载时往里登记（见 [`features`]）。
+    ctx.provide(GATEWAY_METHODS, GatewayMethods::default())?;
     let provided = ctx.provide(GATEWAY, handle.as_ref_service())?;
     Ok((handle, provided))
+}
+
+/// dock.1 的功能插件，按挂载顺序。组合根挂完网关后逐个挂；想去掉或换掉哪一块，
+/// 就在组合根换，网关本身不用改。
+pub fn features() -> Vec<Plugin> {
+    vec![
+        crate::handlers::vcs::gateway_vcs(),
+        crate::handlers::schedule::gateway_schedule(),
+    ]
 }

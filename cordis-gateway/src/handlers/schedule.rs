@@ -16,10 +16,50 @@ use cordis_spine::{
     interval_to_human, parse_interval, session_cwd, Cron, CronError, CronJob, CronOwner, CRON,
 };
 
+use cordis::{plugin, Inject, Plugin};
+
 use crate::handle::GatewayHandle;
 use crate::handlers::thread::roster_entries;
-use crate::protocol::RpcError;
+use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
+use crate::protocol::{self, RpcError};
 use crate::threads;
+
+/// 定时任务这一块：把 `schedule/*` 登记进网关的方法表。推送 `schedule/changed` 由网关
+/// 本体转发（连接级通知），这里只管方法。
+pub fn gateway_schedule() -> Plugin {
+    plugin(
+        "gateway.schedule",
+        Inject::from([GATEWAY_METHODS]),
+        |ctx, _: &()| {
+            register_methods(
+                ctx,
+                vec![
+                    (
+                        protocol::SCHEDULE_LIST,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { list(&gw, params) }),
+                    ),
+                    (
+                        protocol::SCHEDULE_CREATE,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { create(&gw, params) }),
+                    ),
+                    (
+                        protocol::SCHEDULE_UPDATE,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { update(&gw, params) }),
+                    ),
+                    (
+                        protocol::SCHEDULE_DELETE,
+                        MethodPolicy::default(),
+                        method(|gw, params| async move { delete(&gw, params) }),
+                    ),
+                ],
+            )?;
+            Ok(None)
+        },
+    )
+}
 
 /// 和 `scheduler_create` 同一个下限。
 const MIN_EVERY_SECS: u64 = 60;

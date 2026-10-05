@@ -245,6 +245,10 @@ impl Harness {
 
     async fn boot_with(root: Context, gateway: cordis::Plugin) -> Self {
         root.plugin(gateway, ()).unwrap().wait().await.unwrap();
+        // 功能插件（vcs、定时任务……）和 `cordis-app` 一样挂在网关后面。
+        for feature in cordis_gateway::features() {
+            root.plugin(feature, ()).unwrap().wait().await.unwrap();
+        }
         let addr = root
             .require::<cordis_spine::GatewayRef>(GATEWAY)
             .unwrap()
@@ -1723,6 +1727,9 @@ async fn serve_hands_the_parent_a_working_ticket() {
     .wait()
     .await
     .unwrap();
+    for feature in cordis_gateway::features() {
+        root.plugin(feature, ()).unwrap().wait().await.unwrap();
+    }
     let control = (*root.require::<ServeControl>(GATEWAY_SERVE).unwrap()).clone();
     let addr = control.addr();
     assert!(addr.ip().is_loopback());
@@ -4160,6 +4167,9 @@ async fn serve_trusted(root: &Context) -> (SocketAddr, String, ServeGuard) {
     .wait()
     .await
     .unwrap();
+    for feature in cordis_gateway::features() {
+        root.plugin(feature, ()).unwrap().wait().await.unwrap();
+    }
     let control = (*root.require::<ServeControl>(GATEWAY_SERVE).unwrap()).clone();
     let addr = control.addr();
     let (to_dock, dock_in) = tokio::io::duplex(4096);
@@ -4782,4 +4792,81 @@ async fn projection_follows_a_session_reset_on_another_page() {
         .map(|e| e["payload"]["content"].as_str().unwrap())
         .collect();
     assert_eq!(users, vec!["第 2 页新会话的话"]);
+}
+
+/// 功能插件往 `"gateway.methods"` 登记的方法照 dock.1 调得到，并且按各自的策略跑：
+/// `detached` 的放在连接锁外（它卡着时同一条连接的别的请求照样回），`trusted_only`
+/// 的挡掉配对来的网页；插件卸下后方法跟着没了。
+#[tokio::test]
+async fn feature_plugins_register_methods_with_their_policy() {
+    use cordis_gateway::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
+    let h = Harness::boot().await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let held = gate.clone();
+    let feature = cordis::plugin(
+        "test.feature",
+        cordis::Inject::from([GATEWAY_METHODS]),
+        move |ctx, _: &()| {
+            let held = held.clone();
+            register_methods(
+                ctx,
+                vec![
+                    (
+                        "test/echo",
+                        MethodPolicy::default(),
+                        method(|_, params| async move { Ok(params) }),
+                    ),
+                    (
+                        "test/slow",
+                        MethodPolicy::detached(),
+                        method(move |_, _| {
+                            let held = held.clone();
+                            async move {
+                                held.notified().await;
+                                Ok(json!("slow done"))
+                            }
+                        }),
+                    ),
+                    (
+                        "test/secret",
+                        MethodPolicy {
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|_, _| async { Ok(json!("secret")) }),
+                    ),
+                ],
+            )?;
+            Ok(None)
+        },
+    );
+    let fiber = h.ctx.plugin(feature, ()).unwrap();
+    fiber.wait().await.unwrap();
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let echo = rpc.call("test/echo", json!({ "a": 1 })).await;
+    assert_eq!(echo["result"], json!({ "a": 1 }), "{echo}");
+
+    let slow = rpc.send("test/slow", json!({})).await;
+    let meanwhile = rpc.call("test/echo", json!({ "b": 2 })).await;
+    assert_eq!(
+        meanwhile["result"],
+        json!({ "b": 2 }),
+        "慢方法不该卡住这条连接"
+    );
+    gate.notify_one();
+    let (replies, _) = rpc.collect(&[slow], Duration::from_secs(5)).await;
+    assert_eq!(replies[&slow]["result"], "slow done");
+
+    let secret = rpc.call("test/secret", json!({})).await;
+    assert_eq!(secret["error"]["details"]["code"], "forbidden", "{secret}");
+
+    fiber.dispose().await.unwrap();
+    let gone = rpc.call("test/echo", json!({})).await;
+    assert_eq!(
+        gone["error"]["details"]["code"], "method_not_found",
+        "{gone}"
+    );
 }
