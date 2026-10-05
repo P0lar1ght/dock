@@ -499,11 +499,12 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 插件（Rhai `host.register_slot`）登记的面板，不分端：正文是文本，动作是按钮。
 
 - `surface/list {}` → `{ surfaces: [{ id, title, hud }] }`。
-- `surface/get { id }` → `{ surface: { id, title, body, actions: [{ id, label }] } }`。
+- `surface/get { id }` → `{ surface: { id, title, body, actions: [{ id, label }] } }`：
+  画正文要跑插件脚本、正文可能带本机信息，只给受信 ticket。
 - `surface/action { id, action }` → `{ closed, surface }`：
   - 只认面板声明过的动作，否则 `invalid_params`；
   - 动作会跑插件脚本，只给受信 ticket（`forbidden`，同设置页）；
-  - `closed` 为真表示插件要关面板。
+  - `closed` 为真表示插件要关面板；插件在动作里注销了面板时 `surface` 为 `null`。
 - 推送 `surface/changed { id }`：连接级。增删、被操作、插件 `host.slot_changed` 时到。
 
 ### Pull Request（能力 `pullRequests`，`handlers/vcs.rs`）

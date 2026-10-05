@@ -3,10 +3,12 @@
 //! 面板不分端：正文是一段文本，动作是按钮。终端里按键、GUI 里点按钮都落到插件的
 //! `on_key`（动作 id 就是那个键）。
 //!
-//! - `surface/list {}` → `{ surfaces: [{ id, title, hud }] }`。
-//! - `surface/get { id }` → `{ surface: { id, title, body, actions: [{ id, label }] } }`。
-//! - `surface/action { id, action }` → `{ closed, surface }`：只认面板声明过的动作；
-//!   动作会跑插件脚本，所以只给受信 ticket（同设置页）。`closed` 为真表示插件要关面板。
+//! - `surface/list {}` → `{ surfaces: [{ id, title, hud }] }`：谁都能看（只有 id 和标题）。
+//! - `surface/get { id }` → `{ surface: { id, title, body, actions: [{ id, label }] } }`：
+//!   画正文要跑插件脚本，正文也可能带本机信息，只给受信 ticket（同设置页）。
+//! - `surface/action { id, action }` → `{ closed, surface }`：只认面板声明过的动作，
+//!   只给受信 ticket。`closed` 为真表示插件要关面板；插件在动作里把面板注销了时
+//!   `surface` 是 `null`（动作已经执行，不算错）。
 //! - 推送 `surface/changed { id }`（连接级，不用订阅）：增删、被操作或插件说正文变了。
 
 use serde_json::{json, Value};
@@ -34,7 +36,10 @@ pub fn gateway_surfaces() -> Plugin {
                     ),
                     (
                         protocol::SURFACE_GET,
-                        MethodPolicy::default(),
+                        MethodPolicy {
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
                         method(|gw, params| async move { get(&gw, params) }),
                     ),
                     (
@@ -77,9 +82,13 @@ fn surface_id(params: &Value) -> Result<String, RpcError> {
         .ok_or_else(|| RpcError::invalid_params("id is required"))
 }
 
+/// 没挂插槽服务就是一张空表（和 MCP 一样 fail-open），不报错。
 fn list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
-    let surfaces: Vec<Value> = slots(gateway)?
-        .list()
+    let surfaces: Vec<Value> = gateway
+        .ctx()
+        .get::<TuiSlots>(TUI_SLOTS)
+        .map(|slots| slots.list())
+        .unwrap_or_default()
         .into_iter()
         .map(|s| json!({ "id": s.id, "title": s.title, "hud": s.hud }))
         .collect();
@@ -125,5 +134,10 @@ fn action(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
         )));
     }
     let closed = matches!(slots.on_key(&id, action), SlotKeyResult::Close);
-    Ok(json!({ "closed": closed, "surface": snapshot(&slots, &id)? }))
+    // 插件可能在动作里把自己的面板注销了：动作已经执行，回 `surface: null`，不报错。
+    let surface = match slots.get(&id) {
+        Some(_) => snapshot(&slots, &id)?,
+        None => Value::Null,
+    };
+    Ok(json!({ "closed": closed || surface.is_null(), "surface": surface }))
 }

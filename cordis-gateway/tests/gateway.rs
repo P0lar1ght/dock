@@ -4967,15 +4967,57 @@ async fn plugin_surfaces_reach_the_gui() {
         )
         .await;
     assert_eq!(done["result"]["closed"], true, "{done}");
+
+    // 插件在动作里把自己的面板注销了：动作照样算成功，`surface` 是 null。
+    struct SelfRemoving(Arc<std::sync::Mutex<Option<cordis::Disposable>>>);
+    impl SlotHandler for SelfRemoving {
+        fn title(&self) -> String {
+            "一次性".into()
+        }
+        fn hud(&self) -> bool {
+            false
+        }
+        fn render(&self) -> String {
+            String::new()
+        }
+        fn on_key(&self, _key: &str) -> SlotKeyResult {
+            if let Some(d) = self.0.lock().unwrap().take() {
+                d.dispose_sync();
+            }
+            SlotKeyResult::Keep
+        }
+        fn actions(&self) -> Vec<SlotAction> {
+            vec![SlotAction {
+                id: "bye".into(),
+                label: "bye".into(),
+            }]
+        }
+    }
+    let holder = Arc::new(std::sync::Mutex::new(None));
+    let d = slots
+        .register("once".into(), Arc::new(SelfRemoving(holder.clone())))
+        .unwrap();
+    *holder.lock().unwrap() = Some(d);
+    let bye = gui
+        .call("surface/action", json!({ "id": "once", "action": "bye" }))
+        .await;
+    assert!(bye.get("error").is_none(), "{bye}");
+    assert_eq!(bye["result"]["surface"], Value::Null, "{bye}");
+    assert_eq!(bye["result"]["closed"], true, "{bye}");
 }
 
-/// 配对来的网页看得到面板，但点不了：动作会跑插件脚本，同设置页只认受信 ticket。
+/// 配对来的网页只看得到面板列表（id、标题）：取正文、点动作都要跑插件脚本，正文也可能
+/// 带本机信息，同设置页只认受信 ticket。
 #[tokio::test]
 async fn paired_pages_cannot_act_on_plugin_surfaces() {
     let h = Harness::boot().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
     let _ = rpc.call("initialize", json!({})).await;
+    let listed = rpc.call("surface/list", json!({})).await;
+    assert_eq!(listed["result"]["surfaces"], json!([]), "{listed}");
+    let got = rpc.call("surface/get", json!({ "id": "x" })).await;
+    assert_eq!(got["error"]["details"]["code"], "forbidden", "{got}");
     let acted = rpc
         .call("surface/action", json!({ "id": "x", "action": "y" }))
         .await;
