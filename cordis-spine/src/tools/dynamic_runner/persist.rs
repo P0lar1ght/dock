@@ -1022,6 +1022,8 @@ mod tests {
     /// `cordis_promote` 到项目级，要写进**这个会话的**项目，不是进程 cwd。
     #[tokio::test]
     async fn project_root_follows_the_running_session_not_the_process() {
+        // 断言里读进程 cwd：拿住进程环境锁，别的用例切 cwd 时不会读到两个不同的目录。
+        let _env = cordis_base::test_env::scoped();
         let project = tempfile::tempdir().unwrap();
         let ctx = cordis::Context::new();
         let sessions = crate::session::log::Sessions::tab(ctx.clone(), 2);

@@ -174,8 +174,16 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Subdir under the real cwd (no set_current_dir — parallel-safe).
-    fn scratch() -> (std::path::PathBuf, String) {
+    /// 在临时目录里建一个子目录，并把 cwd 切到那个临时目录。返回的 guard 持有进程环境锁：
+    /// 别的用例会切 cwd，相对路径必须在锁里解析，不然会解析到别人的目录上。
+    fn scratch() -> (
+        cordis_base::test_env::EnvScope,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        String,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let env = cordis_base::test_env::scoped().cwd(dir.path());
         let name = format!(
             ".tmp-path-bytes-{}-{}",
             std::process::id(),
@@ -186,36 +194,34 @@ mod tests {
         );
         let abs = std::env::current_dir().unwrap().join(&name);
         fs::create_dir_all(&abs).unwrap();
-        (abs, name)
+        (env, dir, abs, name)
     }
 
     #[test]
     fn rejects_empty_missing_and_directories() {
+        let (_env, _dir, _abs, rel) = scratch();
         assert!(resolve_readable_file("   ").unwrap_err().contains("empty"));
         assert!(resolve_readable_file("no/such/file-xyz")
             .unwrap_err()
             .contains("cannot resolve"));
-        let (abs, rel) = scratch();
         let err = resolve_readable_file(&rel).unwrap_err();
         assert!(err.contains("not a regular file"), "{err}");
-        let _ = fs::remove_dir_all(&abs);
     }
 
     #[test]
     fn accepts_file_under_cwd() {
-        let (abs, rel) = scratch();
+        let (_env, _dir, abs, rel) = scratch();
         fs::write(abs.join("a.bin"), b"hi").unwrap();
         let got = resolve_readable_file(&format!("{rel}/a.bin")).unwrap();
         assert_eq!(std::fs::read(&got).unwrap(), b"hi");
         fs::write(abs.join("empty"), b"").unwrap();
         resolve_readable_file(&format!("{rel}/empty")).unwrap();
-        let _ = fs::remove_dir_all(&abs);
     }
 
     /// Convenience is the point now: `..`, absolute and symlinked paths resolve.
     #[test]
     fn accepts_parent_dir_absolute_and_symlink_targets() {
-        let (abs, rel) = scratch();
+        let (_env, _dir, abs, rel) = scratch();
         fs::write(abs.join("t.bin"), b"data").unwrap();
 
         let up = format!("{rel}/../{rel}/t.bin");
@@ -233,18 +239,17 @@ mod tests {
             let via_link = resolve_readable_file(&format!("{rel}/link")).unwrap();
             assert_eq!(via_link, target.canonicalize().unwrap());
         }
-        let _ = fs::remove_dir_all(&abs);
     }
 
     #[test]
     fn tilde_expands_to_home() {
-        let Some(home) = home_dir() else { return };
-        let probe = home.join(format!(".tmp-dock-tilde-{}", std::process::id()));
-        fs::write(&probe, b"tilde").unwrap();
-        let name = probe.file_name().unwrap().to_str().unwrap().to_string();
-        let got = resolve_readable_file(&format!("~/{name}")).unwrap();
+        // 家目录指向临时目录：不往真家目录写文件，也不和别的改 HOME 的用例抢。
+        let home = tempfile::tempdir().unwrap();
+        let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let _env = cordis_base::test_env::scoped().set(key, home.path());
+        fs::write(home.path().join("probe.bin"), b"tilde").unwrap();
+        let got = resolve_readable_file("~/probe.bin").unwrap();
         assert_eq!(fs::read(&got).unwrap(), b"tilde");
-        let _ = fs::remove_file(&probe);
     }
 
     /// Both provenance tests mutate one process-wide ring, so they must not
