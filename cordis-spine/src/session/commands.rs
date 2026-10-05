@@ -7,10 +7,10 @@ use cordis::{plugin, Context, Inject, Plugin};
 use cordis_base::usage::session_usage_block_text;
 
 use crate::host::slash::{register_commands, slash_handler, SlashCommand, SlashOutcome};
-use crate::names::{AGENT_PRESETS, GOAL, SESSIONS, SLASH};
+use crate::names::{AGENT_PRESETS, GOAL, SESSIONS, SLASH, SUBAGENTS};
 use crate::session::log::Sessions;
 use crate::session::resume_preset::{apply_restored_preset, ApplyRestoredPreset};
-use crate::{AgentPresets, Goal};
+use crate::{AgentPresets, Goal, Subagents};
 
 pub fn session_commands() -> Plugin {
     plugin("command-session", Inject::from([SLASH]), |ctx, _: &()| {
@@ -48,6 +48,12 @@ fn new(page: &Context) -> SlashOutcome {
     let Some(sessions) = page.get::<Sessions>(SESSIONS) else {
         return no_sessions();
     };
+    // 旧会话还在跑的子代理一起收掉，再放开派生。只收这一页的：`"subagents"` 是全局
+    // 一份、按父会话分账，`cancel_all` 会波及别的分页。
+    if let Some(sub) = page.get::<Subagents>(SUBAGENTS) {
+        sub.cancel_session(sessions.identity());
+        sub.open_admission_for(sessions.identity());
+    }
     sessions.archive_current();
     sessions.clear();
     crate::clear_plan_for_session_switch(page);
