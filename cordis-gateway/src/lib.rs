@@ -13,6 +13,7 @@ pub mod devices;
 mod handle;
 mod http;
 mod image_store;
+mod methods;
 mod pairing;
 mod plugin;
 mod protocol;
@@ -26,10 +27,13 @@ mod ws;
 pub mod handlers;
 
 pub use handle::GatewayHandle;
-pub use plugin::{
-    gateway, gateway_bind, gateway_idle, gateway_remote, gateway_serve, DEFAULT_BIND,
+pub use methods::{
+    method, register_methods, GatewayMethods, MethodHandler, MethodPolicy, GATEWAY_METHODS,
 };
-pub use protocol::{CAPABILITIES, LIVE_THREAD_ID, PROTOCOL_VERSION};
+pub use plugin::{
+    features, gateway, gateway_bind, gateway_idle, gateway_remote, gateway_serve, DEFAULT_BIND,
+};
+pub use protocol::{RpcError, CAPABILITIES, LIVE_THREAD_ID, PROTOCOL_VERSION};
 pub use serve::{ServeConfig, ServeControl, GATEWAY_SERVE};
 
 pub const GATEWAY: &str = cordis_spine::GATEWAY;

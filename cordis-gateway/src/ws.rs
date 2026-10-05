@@ -87,8 +87,14 @@ impl Auth {
 }
 
 /// 改配置的方法（能写 MCP 启动命令 = 能在本机跑程序）挡掉配对来的网页和远程设备。
-fn settings_gate(auth: Option<&Auth>, method: &str) -> Result<(), RpcError> {
-    if settings::is_settings_method(method) && !auth.is_some_and(Auth::trusted) {
+fn settings_gate(
+    auth: Option<&Auth>,
+    gateway: &GatewayHandle,
+    method: &str,
+) -> Result<(), RpcError> {
+    let trusted_only = settings::is_settings_method(method)
+        || crate::methods::policy_of(gateway, method).trusted_only;
+    if trusted_only && !auth.is_some_and(Auth::trusted) {
         return Err(RpcError::app("forbidden", "只有桌面 GUI 能改 Dock 设置"));
     }
     Ok(())
@@ -211,7 +217,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
             continue;
         };
         // 要调模型的方法、挂浏览器画面另起任务：不能占着连接锁等好几秒。
-        if let Some(job) = detached(&conn, &views, &desktops, &out_tx, &text).await {
+        if let Some(job) = detached(&conn, &gateway, &views, &desktops, &out_tx, &text).await {
             let out_tx = out_tx.clone();
             tokio::spawn(async move {
                 let _ = out_tx.send(Outgoing::Text(job.await));
@@ -236,6 +242,7 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
 /// 再跑。不是这类请求（或没法解析）回 `None`，照常走 [`dispatch_text`]。
 async fn detached(
     conn: &Arc<Mutex<Conn>>,
+    gateway: &GatewayHandle,
     views: &Arc<BrowserViews>,
     desktops: &Arc<DesktopViews>,
     out: &OutTx,
@@ -245,7 +252,8 @@ async fn detached(
     let method = value.get("method").and_then(Value::as_str)?.to_string();
     let viewing = browser_view::is_browser_view(&method);
     let desktop = desktop_view::is_desktop_view(&method);
-    if !rpc::is_detached(&method) && !viewing && !desktop {
+    // 连接上的网关句柄建连后不变，这里不用为了它去拿连接锁。
+    if !viewing && !desktop && !rpc::is_detached(gateway, &method) {
         return None;
     }
     let views = views.clone();
@@ -277,7 +285,7 @@ async fn detached(
                 "initialize is required after authenticate",
             ))
         } else {
-            settings_gate(c.auth.as_ref(), &method).map(|()| c.gateway.clone())
+            settings_gate(c.auth.as_ref(), &c.gateway, &method).map(|()| c.gateway.clone())
         }
     };
     Some(async move {
@@ -372,7 +380,7 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
             "initialize is required after authenticate",
         ));
     }
-    settings_gate(conn.auth.as_ref(), method)?;
+    settings_gate(conn.auth.as_ref(), &conn.gateway, method)?;
     rpc::dispatch(conn.gateway.clone(), method, params, &mut conn.subscribed).await
 }
 

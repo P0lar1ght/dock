@@ -20,6 +20,8 @@
 ```rust
 // 生产：挂载但不监听（/pair 时才 start_listen）
 root.plugin(gateway(), ())?;
+// 再挂 dock.1 的功能插件（vcs、定时任务……），各自往 "gateway.methods" 登记方法
+for feature in features() { root.plugin(feature, ())?; }
 
 // gateway_idle(bind_addr)：指定首选地址，仍不监听
 // gateway_bind(bind_addr)：立即绑定（仅集成测试用）
@@ -73,6 +75,12 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 - `PROTOCOL_VERSION` = `"dock.1"`，WS 路径 `WS_PATH` = `/api/ws`
 - `CAPABILITIES`：`(name, supported)` 数组，`initialize` 时回给宿主
+- 协议骨架（连接、线程、轮次、交互、斜杠……）写在 `rpc::dispatch` 里；**功能**是插件：
+  挂载时往 `"gateway.methods"`（`GatewayMethods`）登记自己的方法，随插件 fiber 注销，
+  核心方法与表里同名时核心优先。每个方法带 `MethodPolicy`：`detached`（放到连接锁外跑）、
+  `trusted_only`（只认 `dock serve` 的受信 ticket）、`opens_thread`（关着的线程先开页）。
+  `features()` 是本 crate 自带的那几颗：`gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`
+  （`schedule/*`）。给 GUI 加一页 = 再写一颗这样的插件，用 `register_methods` + `method`。
 - 方法按域分在 `handlers/`：
 
 | handler | 域 |
