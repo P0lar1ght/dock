@@ -1,7 +1,8 @@
 use cordis::{plugin, plugin_async, Inject, Plugin};
 
 use crate::names::{
-    SESSION, SESSION_PORT, THEME, TUI_PAIRING, TUI_PROMPT, TUI_SCROLLBACK, TUI_STATUS, TUI_WELCOME,
+    SESSION, SESSION_PORT, THEME, TUI_PAIRING, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS,
+    TUI_STATUS, TUI_WELCOME,
 };
 use crate::scrollback::Scrollback;
 use crate::theme::Theme;
@@ -67,20 +68,40 @@ pub fn pairing() -> Plugin {
     })
 }
 
-/// Pager event loop. Injects session + view plugins; swap this plugin to
-/// change the UI without touching the loop.
+/// 终端 UI 的全部视图件，按挂载顺序。组合根（`cordis-app`）逐个挂，再挂 [`tui`]；
+/// 想换哪一颗就在组合根换，不用动这里。
+pub fn views() -> Vec<Plugin> {
+    vec![
+        theme(),
+        scrollback(),
+        prompt(),
+        status_bar(),
+        welcome(),
+        shortcuts(),
+        pairing(),
+    ]
+}
+
+/// Pager event loop. 只跑事件循环：视图件由组合根挂（见 [`views`]），这里
+/// inject 它们——换掉任何一颗都不用碰循环。
+///
+/// **必须先挂 [`views`]**。inject 的依赖没到齐时插件只是一直等着、不报错：忘了挂
+/// 视图件，`tui` 会停在等依赖的状态，终端上什么都不出现。
 pub fn tui() -> Plugin {
     plugin_async(
         "tui",
-        Inject::from([SESSION, SESSION_PORT]),
+        Inject::from([
+            SESSION,
+            SESSION_PORT,
+            THEME,
+            TUI_SCROLLBACK,
+            TUI_PROMPT,
+            TUI_STATUS,
+            TUI_WELCOME,
+            TUI_SHORTCUTS,
+            TUI_PAIRING,
+        ]),
         |ctx, _: &()| async move {
-            ctx.plugin(theme(), ())?.wait().await?;
-            ctx.plugin(scrollback(), ())?.wait().await?;
-            ctx.plugin(prompt(), ())?.wait().await?;
-            ctx.plugin(status_bar(), ())?.wait().await?;
-            ctx.plugin(welcome(), ())?.wait().await?;
-            ctx.plugin(shortcuts(), ())?.wait().await?;
-            ctx.plugin(pairing(), ())?.wait().await?;
             event_loop::run(ctx)
                 .await
                 .map_err(|e| cordis::Error::message(e.to_string()))?;

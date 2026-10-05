@@ -8,7 +8,8 @@ use cordis_spine::{
     agent_loop, apply_restored_preset, install_app, AgentPresets, ApplyRestoredPreset, Sessions,
     AGENT_PRESETS, SESSIONS,
 };
-use cordis_tui::{tabs, tui, GatewayRef, GATEWAY};
+use cordis_spine::{tabs, GatewayRef, GATEWAY};
+use cordis_tui::{tui, views};
 
 enum ResumeArg {
     Off,
@@ -278,6 +279,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             root.plugin(cron_driver(), ())?.wait().await?;
             // 分页服务要在 TUI 之前挂上：事件循环第一帧就会问它当前是哪一页。
             root.plugin(tabs(), tab_mount())?.wait().await?;
+            // 第 1 页的视图件挂在根上（第 2 页起由 `tab_mount` 按页挂），再起事件循环。
+            for view in views() {
+                root.plugin(view, ())?.wait().await?;
+            }
             root.plugin(tui(), ())?.wait().await?;
         }
         Mode::Serve(args) => {

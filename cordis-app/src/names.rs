@@ -1,1 +1,1 @@
-pub const SESSION: &str = "session";
+pub use cordis_spine::SESSION;

@@ -3,7 +3,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 
-use cordis_tui::CompanionStatus;
+use cordis_spine::CompanionStatus;
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:18991";
 /// How many consecutive ports to try after `EADDRINUSE` (requested port included).

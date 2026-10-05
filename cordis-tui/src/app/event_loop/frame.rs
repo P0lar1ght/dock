@@ -20,13 +20,9 @@ use crate::grok::shortcuts::ShortcutsBar;
 use crate::grok::tasks_pane;
 use crate::grok::workflows;
 use crate::names::{
-    GATEWAY, SESSION_PORT, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_TABS,
-    TUI_WELCOME,
+    GATEWAY, SESSION_PORT, TABS, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
 };
 use crate::scrollback::Scrollback;
-use crate::seam::gateway::GatewayRef;
-use crate::seam::session::SessionRef;
-use crate::seam::tabs::Tabs;
 use crate::slash::{desired_item_rows, filter_args, render_dropdown, SlashSnapshot};
 use crate::theme::Theme;
 use crate::views::ask_view;
@@ -45,6 +41,9 @@ use crate::views::tab_bar;
 use crate::views::task_dock::{self, TaskDockHit};
 use crate::views::text_overlay;
 use crate::views::usage_overlay;
+use cordis_spine::GatewayRef;
+use cordis_spine::SessionRef;
+use cordis_spine::Tabs;
 
 use super::support::*;
 use crate::seam::shortcuts::Shortcuts;
@@ -195,10 +194,7 @@ pub(super) fn draw(
     queue_hits.clear();
     tab_hits.clear();
     // 标签栏与旁问面板都活在根上（`Tabs` 不分 realm），当前页的 ctx 一样查得到。
-    let tab_rows = ctx
-        .get::<Tabs>(TUI_TABS)
-        .map(|t| t.list())
-        .unwrap_or_default();
+    let tab_rows = ctx.get::<Tabs>(TABS).map(|t| t.list()).unwrap_or_default();
     terminal
         .draw(|frame| {
             let area = frame.area();

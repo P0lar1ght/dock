@@ -19,14 +19,9 @@ mod views;
 pub use app::actions::{Action, Effect, PromptSend};
 pub use app::dispatch::dispatch;
 pub use names::{
-    GATEWAY, GATEWAY_PAIRING, SESSION, SESSION_PORT, THEME, TUI, TUI_PAGE_OPENED, TUI_PAIRING,
-    TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_TABS, TUI_WELCOME,
+    THEME, TUI, TUI_PAIRING, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
 };
-pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui, welcome};
-pub use seam::gateway::{
-    CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
-};
-pub use seam::session::{QueuedItem, SessionPort, SessionRef};
-pub use seam::tabs::{tabs, TabInfo, TabKind, TabMount, Tabs, MAX_TABS, PER_TAB_SERVICES};
+pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui, views, welcome};
+pub use seam::tabs::{carry_back, PER_TAB_VIEWS};
 pub use slash::{resolve_slash, slash_catalog, SlashCatalogEntry};
 pub use views::prompt::PromptWidget;

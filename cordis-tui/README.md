@@ -1,6 +1,6 @@
 # cordis-tui
 
-Grok pager 界面，拆成 Cordis 插件。Harness 只 `plugin(tui())`。全屏接管和 Grok 一样：raw mode + **stderr 备用屏**，启动后占满窗口，不再露出 shell 里刚输入的命令。
+Grok pager 界面，拆成 Cordis 插件。组合根逐个挂 `views()`（下表除 `tui` 外的几颗），再 `plugin(tui())`。全屏接管和 Grok 一样：raw mode + **stderr 备用屏**，启动后占满窗口，不再露出 shell 里刚输入的命令。
 
 | 插件 | ctx key | 做什么 |
 |---|---|---|
@@ -9,9 +9,11 @@ Grok pager 界面，拆成 Cordis 插件。Harness 只 `plugin(tui())`。全屏�
 | `tui.prompt` | `tui.prompt` | 随内容长高的 `┃` + `╭─╮` composer；粘贴 / 历史上翻；`/` 弹出 slash 下拉 |
 | `tui.statusBar` | `tui.statusBar` | 顶栏 cwd / turn / idle |
 | `tui.welcome` | `tui.welcome` | braille logo + 菜单（空 session）；F3 resume 时切到 fullscreen picker |
-| `tui` | — | 事件循环；inject `session` + `session.port` |
+| `tui.shortcuts` | `tui.shortcuts` | 快捷键表 |
+| `tui.pairing` | `tui.pairing` | 配对浮层 |
+| `tui` | — | 只跑事件循环；inject `session` + `session.port` 与上面全部视图件，不自己挂它们 |
 
-发消息时 live lookup `session.port`，不把 `Arc` 关进闭包。
+发消息时 live lookup `session.port`，不把 `Arc` 关进闭包。`session.port`（`SessionRef`）、分页（`Tabs`）、网关配对（`GatewayRef`）是宿主之间的契约，定义在 `cordis_spine`，本 crate 只消费；`PER_TAB_VIEWS` 是交给分页按页隔离的四个视图名，`carry_back` 把分叉页的结论填进来源页输入框。
 
 Slash / 快捷键：`/new` `Ctrl+W` 归档后清空；`/resume` / F3 会话 picker（可搜索）；`/history` 提示词历史；`/find` 搜索 scrollback；`/copy` 复制上一条助手回复；`/help` 或 `Ctrl+.` 快捷键速查；`/quit` 退出。Composer 支持左右光标、`Shift+Enter` 换行、`@` 文件补全。Mermaid 块可点 `[Copy Source]`（affordance 行不换行：面板放不下时按 `[Copy Image Path]` → `[Copy Source]` 的顺序省按钮，画出的列位与点击判定共用同一张表）。
 

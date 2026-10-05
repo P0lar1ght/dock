@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{mpsc, oneshot};
 
-use cordis_tui::QueuedItem;
+use cordis_spine::QueuedItem;
 
 static PROMPT_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -89,7 +89,7 @@ impl SessionHandle {
     }
 }
 
-impl cordis_tui::SessionPort for SessionHandle {
+impl cordis_spine::SessionPort for SessionHandle {
     fn submit(&self, text: String, send_now: bool) {
         SessionHandle::submit(self, text, send_now);
     }

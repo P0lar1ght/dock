@@ -174,7 +174,7 @@ fn origin_header(headers: &HeaderMap) -> String {
         .to_string()
 }
 
-fn pairing_http_error(e: cordis_tui::PairingError) -> Response {
+fn pairing_http_error(e: cordis_spine::PairingError) -> Response {
     let status = match e.code {
         "origin_required" | "invalid_application" | "invalid_params" => StatusCode::BAD_REQUEST,
         "pairing_required" | "origin_mismatch" | "denied" | "pairing_closed" => {

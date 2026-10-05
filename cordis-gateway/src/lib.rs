@@ -32,5 +32,5 @@ pub use plugin::{
 pub use protocol::{CAPABILITIES, LIVE_THREAD_ID, PROTOCOL_VERSION};
 pub use serve::{ServeConfig, ServeControl, GATEWAY_SERVE};
 
-pub const GATEWAY: &str = cordis_tui::GATEWAY;
-pub const GATEWAY_PAIRING: &str = cordis_tui::GATEWAY_PAIRING;
+pub const GATEWAY: &str = cordis_spine::GATEWAY;
+pub const GATEWAY_PAIRING: &str = cordis_spine::GATEWAY_PAIRING;

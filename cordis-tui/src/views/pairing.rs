@@ -13,10 +13,10 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::grok::glyphs;
 use crate::grok::picker::{PickerHits, PickerRow};
-use crate::names::GATEWAY;
-use crate::seam::gateway::{GatewayRef, PairingBinding, PairingPrompt};
 use crate::theme::Theme;
 use crate::views::overlay::{self, Overlay};
+use cordis_spine::GATEWAY;
+use cordis_spine::{GatewayRef, PairingBinding, PairingPrompt};
 
 pub const PENDING_OPTIONS: &[&str] = &["批准", "拒绝"];
 

@@ -13,9 +13,9 @@ use ratatui::style::Style;
 use unicode_width::UnicodeWidthStr;
 
 use crate::names::SESSION_PORT;
-use crate::seam::session::SessionRef;
 use crate::theme::Theme;
 use crate::views::status_bar;
+use cordis_spine::SessionRef;
 use ratatui::buffer::Buffer;
 use ratatui::text::{Line, Span};
 

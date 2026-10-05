@@ -1,5 +1,5 @@
-//! Named `"gateway"` seam. The gateway plugin provides this; TUI live-looks it.
-//! Do not capture the Arc in a long-lived closure.
+//! Named `"gateway"` seam. `cordis-gateway` 的插件 provide，TUI 的配对浮层
+//! live-look 它。Do not capture the Arc in a long-lived closure.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

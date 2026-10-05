@@ -5,10 +5,10 @@ use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::grok::shortcuts::HintItem;
 use crate::names::{SESSION_PORT, TUI_PROMPT, TUI_SHORTCUTS};
-use crate::seam::session::SessionRef;
 use crate::views::ask_view;
 use crate::views::overlay::Overlay;
 use crate::views::prompt::PromptWidget;
+use cordis_spine::SessionRef;
 use cordis_spine::{Ask, Computer, Sessions, ASK, COMPUTER, SESSIONS};
 
 pub struct Shortcuts {

@@ -21,13 +21,14 @@ cordis-spine/            Agent 循环、工具粒、MCP、会话、预设、权�
   src/llm/               sampler、http/（三条 wire）、compact/
   src/prompt/            assemble、context_book、listing、project_instructions、context_usage
   src/tools/             registry（那张唯一的 "tools" 表）+ 全部工具插件
-  src/host/              宿主 live-look 的表：settings、permissions、slash、tui_slots
+  src/host/              宿主 live-look 的表：settings、permissions、slash、tui_slots；
+                         宿主之间的契约：session_port、tabs（分页）、gateway_port（配对）
   presets/               内置 Agent 预设 YAML（code / minimal / cordis / warden）
   tests/                 round.rs（install_app_registers）、dynamic.rs、subagents.rs
 cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、statusBar、shortcuts…；fuzzy-file-search crate
   src/app/               状态与派发：actions、dispatch、event_loop、input、clipboard
   src/views/             画出来的东西：overlay、dashboard、各 *_view / *_modal / pane
-  src/seam/              TUI live-look 的 named service 座：session、gateway、shortcuts、tabs
+  src/seam/              TUI 自己的座：shortcuts；分页落到终端的部分（每页视图名、带回输入框）
   src/theme/             调色板（grokday / groknight / tokyonight）
   src/scrollback/        transcript 渲染与卡片
   src/grok/              从 grok pager 冻结复制的 chrome（glyphs、picker、wrapping…）
@@ -52,8 +53,8 @@ config.toml.example      用户 / 项目模型目录样例
 `cordis-app` 起**一个** `Context`，分两步：
 
 1. `install_app` 先挂 Spine 五件套 + Harness 服务 + 工具粒；尾部是 `llm`，之后 `compact`。
-2. `main` 再挂 `system-prompt.base`、`agent-loop`、`session_actor`、`gateway`（默认不监听）、`cron-driver`、`tui`。
-   `dock serve`（无头，给桌面 GUI 当子进程）同一条组装，但不挂 `tabs` / `tui`，网关换成 `gateway_serve`：挂载即监听，额外 provide `"gateway.serve"`（`ServeControl`），`main` 用它跑 stdin / stdout 控制通道，stdin 关闭即返回退出。
+2. `main` 再挂 `system-prompt.base`、`agent-loop`、`session_actor`、`gateway`（默认不监听）、`cron-driver`、`tabs`、TUI 视图件（`cordis_tui::views()`），最后 `tui`。
+   `dock serve`（无头，给桌面 GUI 当子进程）同一条组装，分页照挂（不带视图），不挂 TUI 视图件与 `tui`，网关换成 `gateway_serve`：挂载即监听，额外 provide `"gateway.serve"`（`ServeControl`），`main` 用它跑 stdin / stdout 控制通道，stdin 关闭即返回退出。
 
 `main` 只做组装，不焊行为逻辑——基座系统提示、1s 调度都是各自一颗插件。TUI 与 Gateway 都是树上的插件，不是旁路进程。`embed-sdk` 只连回环 Gateway（`dock.1`），不另起 harness，也不直连 TUI。
 
@@ -67,7 +68,8 @@ config.toml.example      用户 / 项目模型目录样例
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
 | 其它 spine | `context` `settings` `turn` `permissions` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `agentPresets` `dynamicCordisRunner` `compact` | 同名 |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
-| TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing` `tui.tabs` | 同名 |
+| 宿主契约 | `session_actor` 提供 `session` / `session.port`（`SessionRef`）；`tabs` 提供 `Tabs` | 同名 |
+| TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing`；`tui` 只跑事件循环，视图件由组合根挂（`cordis_tui::views()`） | 同名 |
 | 回环网关 | `gateway` | `"gateway"`（`GatewayRef`），事件 `gateway/pairing` |
 
 `settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。`meta.json` 记着这个会话的预设、模型、推理强度；恢复（`/resume`、`--resume`、开页）时 `Sessions::restore` live-lookup 这一页的 `settings` 把模型和强度切回去，模型已不在目录里就留着当前的。
@@ -81,8 +83,8 @@ config.toml.example      用户 / 项目模型目录样例
 ## 分页：一个终端里的多个会话
 
 `Ctrl+N` 开的每一页 = **一棵 isolate 子树**。第 1 页就是根上下文本身；第 2 页起由
-`root.isolate("sessions").isolate("turn")…` 派生，只有 `PER_TAB_SERVICES` 里的名字
-各有一份：
+`root.isolate("sessions").isolate("turn")…` 派生，只有 `PER_TAB_SERVICES`（spine）加上宿主经 `TabsConfig::per_tab` 补的
+名字（TUI 的 `PER_TAB_VIEWS`）各有一份：
 
 | 每页一份 | 全局一份（落回根） |
 |---|---|
@@ -119,7 +121,7 @@ completed / cancelled / failed（failed 带 `error`）；更早的会话没有�
 - 网关把这两条投成父页上的 `subagent/event` / `subagent/updated`（见 `cordis-gateway/README.md`）。
 
 装一页要挂哪些插件由**组合根**决定（`cordis-app` 的 `tab_mount()`），TUI 只管开 /
-关 / 切：`"tui.tabs"` 拿到的是一个建页插件工厂。关页 `dispose` 那一颗页 fiber，
+关 / 切：`"tabs"` 拿到的是一个建页插件工厂。关页 `dispose` 那一颗页 fiber，
 它下面的会话、循环、actor、视图一起走。
 
 **分叉**（`Ctrl+F`）= 建页时把来源页的 `model_history()` 快照 `seed` 进新页的会话，

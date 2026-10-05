@@ -28,8 +28,9 @@ root.plugin(agent_loop(), ())?         // Agent 循环
 root.plugin(session_actor(), ())?      // 会话 actor（UI 与 loop 之间的队列）
 root.plugin(gateway(), ())?            // 回环网关：挂载但不监听
 root.plugin(cron_driver(), ())?        // 定时任务驱动
-root.plugin(tabs(), tab_mount())?      // 分页：必须在 TUI 前，第一帧就问当前页
-root.plugin(tui(), ())?                // 全屏 TUI（最后）
+root.plugin(tabs(), tab_mount())?      // 分页（cordis_spine::tabs）：必须在 TUI 前，第一帧就问当前页
+for view in views() { root.plugin(view, ())? }  // 第 1 页的 TUI 视图件，换哪颗就在这里换
+root.plugin(tui(), ())?                // 全屏 TUI 事件循环（最后）
 ```
 
 - `--resume` 时 `resume_and_apply_preset` 会同时恢复会话并应用归档时记下的 preset（失败只 `eprintln!`，不阻断启动）
@@ -41,9 +42,9 @@ root.plugin(tui(), ())?                // 全屏 TUI（最后）
 |---|---|
 | `system_prompt` | 基础 `<system>` 内容，注册到 `"context"`（`ContextBook::set_base`）。换 preset 不换它：persona 说"是谁"，这段说"怎么干活" |
 | `session_actor` / `SessionHandle` | 会话 actor；`SessionHandle` 暴露 `submit` / `compact` / `cancel` / `promote` / `queued_prompts` 等 |
-| `tab_mount` | 建页工厂，注入 `cordis_tui::tabs()`。第 1 页是根上下文，这里造第 2 页起每一页 |
+| `tab_mount` / `tab_mount_headless` | 分页配置（`TabsConfig`：建页工厂 + 每页视图名），注入 `cordis_spine::tabs()`。第 1 页是根上下文，这里造第 2 页起每一页 |
 | `cron_driver` | 定时任务（`cron` 工具）的驱动循环 |
-| `SESSION` / `Error` / `Result` | named service key 与错误类型 |
+| `SESSION` / `Error` / `Result` | named service key（转自 `cordis_spine`）与错误类型 |
 
 ## 旁问页（aside）
 

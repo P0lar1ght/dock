@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cordis::Context;
+use cordis_spine::QueuedItem;
 use cordis_spine::{
     Compact, Goal, LoopHandle, Sessions, Subagents, TurnControl, TurnOutcome, AGENT_LOOP, COMPACT,
     GOAL, SESSIONS, SUBAGENTS, TURN,
 };
-use cordis_tui::QueuedItem;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::oneshot;

@@ -17,7 +17,8 @@ use cordis_spine::{
     Sessions, Slash, SlashEntry, ToolCall, Tools, AGENT_PRESETS, GOAL, GOAL_RESERVED_SUBCOMMANDS,
     PLAN_MODE, SESSIONS, SETTINGS, SLASH, TOOLS, WORKFLOW_TOOL_NAME,
 };
-use cordis_tui::{resolve_slash, slash_catalog, SessionRef, SlashCatalogEntry, SESSION_PORT};
+use cordis_spine::{SessionRef, SESSION_PORT};
+use cordis_tui::{resolve_slash, slash_catalog, SlashCatalogEntry};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;

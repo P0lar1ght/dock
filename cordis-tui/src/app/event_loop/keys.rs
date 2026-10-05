@@ -169,11 +169,11 @@ pub(super) fn run_action(
             }
             if matches!(overlay, Overlay::PairingPending { .. }) {
                 if let Some(id) = ctx
-                    .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
+                    .get::<cordis_spine::GatewayRef>(cordis_spine::GATEWAY)
                     .and_then(|g| g.pairing_front().map(|p| p.id))
                 {
                     let _ = ctx
-                        .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
+                        .get::<cordis_spine::GatewayRef>(cordis_spine::GATEWAY)
                         .and_then(|g| g.pairing_deny(&id).ok());
                 }
             }
@@ -1326,11 +1326,11 @@ pub(super) fn run_action(
                     }
                     if matches!(overlay, Overlay::PairingPending { .. }) {
                         if let Some(id) = ctx
-                            .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
+                            .get::<cordis_spine::GatewayRef>(cordis_spine::GATEWAY)
                             .and_then(|g| g.pairing_front().map(|p| p.id))
                         {
                             let _ = ctx
-                                .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
+                                .get::<cordis_spine::GatewayRef>(cordis_spine::GATEWAY)
                                 .and_then(|g| g.pairing_deny(&id).ok());
                         }
                     }
@@ -1599,11 +1599,10 @@ pub(super) fn accept_overlay(ctx: &Context, overlay: &mut Overlay) -> Vec<Effect
         }
         Overlay::PairingPending { selected } => {
             if let Some(id) = ctx
-                .get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
+                .get::<cordis_spine::GatewayRef>(cordis_spine::GATEWAY)
                 .and_then(|g| g.pairing_front().map(|p| p.id))
             {
-                if let Some(gw) = ctx.get::<crate::seam::gateway::GatewayRef>(crate::names::GATEWAY)
-                {
+                if let Some(gw) = ctx.get::<cordis_spine::GatewayRef>(cordis_spine::GATEWAY) {
                     if *selected == 0 {
                         let _ = gw.pairing_confirm(&id);
                     } else {

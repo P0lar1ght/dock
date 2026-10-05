@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
+use cordis_spine::{SessionRef, SESSION_PORT};
 use cordis_spine::{Sessions, UserImage, SESSIONS};
-use cordis_tui::{SessionRef, SESSION_PORT};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;

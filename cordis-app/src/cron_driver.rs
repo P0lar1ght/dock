@@ -13,9 +13,9 @@ use std::time::Duration;
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use cordis_spine::{
     expired_task_notice, format_scheduled_task_reminder, interval_to_human, Cron, CronJob,
-    LlmOutput, LogEvent, Sessions, CRON, SCHEDULE_CHANGED, SESSIONS,
+    LlmOutput, LogEvent, SessionRef, Sessions, Tabs, CRON, SCHEDULE_CHANGED, SESSIONS,
+    SESSION_PORT, TABS,
 };
-use cordis_tui::{SessionRef, Tabs, SESSION_PORT, TUI_TABS};
 
 /// Grok polls scheduled prompts once a second.
 const TICK: Duration = Duration::from_secs(1);
@@ -108,7 +108,7 @@ async fn deliver(ctx: &Context, job: &CronJob) -> Result<(), String> {
                 .as_ref()
                 .ok_or_else(|| "没有会话可送".to_string())?;
             let tabs = ctx
-                .get::<Tabs>(TUI_TABS)
+                .get::<Tabs>(TABS)
                 .ok_or_else(|| format!("会话 {} 没开着，也没有分页服务", owner.session))?;
             tabs.open_session(&owner.session, &owner.cwd).await?
         }
@@ -133,7 +133,7 @@ fn open_page_of(ctx: &Context, job: &CronJob) -> Option<Context> {
         return Some(ctx.clone());
     };
     let pages = ctx
-        .get::<Tabs>(TUI_TABS)
+        .get::<Tabs>(TABS)
         .map(|tabs| tabs.contexts())
         .unwrap_or_else(|| vec![ctx.clone()]);
     pages.into_iter().find(|page| {

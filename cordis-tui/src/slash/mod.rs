@@ -833,7 +833,7 @@ pub fn loop_interval_args() -> Vec<ArgItem> {
         .collect()
 }
 
-/// `/tab` 的子命令补全。页号不在这里 —— `args_for` 看不到 `"tui.tabs"`，
+/// `/tab` 的子命令补全。页号不在这里 —— `args_for` 看不到 `"tabs"`，
 /// 而且数字查询本来就该让下拉关掉、直接把 `/tab 3` 提交出去。
 pub fn tab_args() -> Vec<ArgItem> {
     vec![

@@ -102,3 +102,18 @@ pub const ASK_EVENT: &str = "ask/pending";
 pub const PLAN_EVENT: &str = "plan/pending";
 /// MCP `elicitation/create` waiting on the TUI.
 pub const MCP_ELICIT_EVENT: &str = "mcp/elicit";
+/// 一页的会话 actor 句柄（`cordis-app` 的 `session_actor` provide）。
+pub const SESSION: &str = "session";
+/// 一页的提交口（[`crate::SessionRef`]）：排队一条输入、问在不在跑、取消。
+/// TUI、网关、定时任务驱动都在调用点 live-lookup 它。
+pub const SESSION_PORT: &str = "session.port";
+/// 分页服务（[`crate::Tabs`]）。每页一棵 isolate 子树；TUI 按它取当前页，
+/// 网关按它开 / 关线程，定时任务驱动按它把会话开成一页。
+pub const TABS: &str = "tabs";
+/// [`crate::Tabs::open_session`] 在后台开出一页（不是用户开的）。载荷是那一页的
+/// 身份（`String`）。网关据此把这一页纳入投影（回放历史、装项目插件）。
+pub const TABS_PAGE_OPENED: &str = "tabs/page-opened";
+/// 回环网关（[`crate::GatewayRef`]），由 `cordis-gateway` 的插件 provide。
+pub const GATEWAY: &str = "gateway";
+/// 配对队列 / 绑定变了。载荷 `()`。
+pub const GATEWAY_PAIRING: &str = "gateway/pairing";
