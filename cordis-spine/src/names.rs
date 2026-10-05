@@ -127,3 +127,7 @@ pub const TUI_SLOTS_CHANGED: &str = "tui.slots/changed";
 pub const STATUS_ITEMS: &str = "status.items";
 /// 状态项增删改了，载荷是 id（`String`）。
 pub const STATUS_CHANGED: &str = "status/changed";
+/// 插件给工具登记的卡片视图（[`crate::ToolViews`]）。
+pub const TOOL_VIEWS: &str = "tool.views";
+/// 有工具的卡片视图登记或卸下了，载荷是工具名（`String`）。
+pub const TOOL_VIEWS_CHANGED: &str = "tool.views/changed";

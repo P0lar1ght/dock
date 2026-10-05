@@ -11,9 +11,11 @@ use serde_json::Value;
 
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::host::status_items::{StatusItem, StatusItems, StatusToken};
+use crate::host::tool_views::{ToolViewFn, ToolViewInput, ToolViews};
 use crate::host::tui_slots::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots};
 use crate::names::{
-    RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS, TUI_SLOTS, TURN_END,
+    RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS, TOOL_VIEWS, TUI_SLOTS,
+    TURN_END,
 };
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{
@@ -84,6 +86,11 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         "host.open_slot",
         "Ask the TUI to open a registered slot overlay.",
         &["host.open_slot(id: String)"],
+    ),
+    (
+        "host.register_tool_view",
+        "Draw a tool's card as a dock.view.1 tree (docs/PLUGIN-VIEWS.md) in the terminal and the GUI instead of raw output. view(tc) gets #{ name, arguments, output, failed } (`call` is a reserved word in Rhai) and returns a view map, or () for the plain card. Also accepted as `view` on host.register_tool. UI only — never reaches the model.",
+        &["host.register_tool_view(name: String, |tc| #{ type: \"kv\", items: [...] })"],
     ),
     (
         "host.set_status",
@@ -320,6 +327,7 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("open_slot", Host::open_slot);
     engine.register_fn("slot_changed", Host::slot_changed);
     engine.register_fn("set_status", Host::set_status);
+    engine.register_fn("register_tool_view", Host::register_tool_view);
     engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
     engine.register_fn("on", Host::on);
@@ -415,10 +423,14 @@ impl Host {
                 tool_result(call, content)
             })
         });
+        let view = spec
+            .get("view")
+            .cloned()
+            .and_then(|d| d.try_cast::<FnPtr>());
         let d = tools
             .register_dynamic(
                 ToolSpec {
-                    name,
+                    name: name.clone(),
                     description,
                     parameters_json: parameters,
                 },
@@ -426,7 +438,52 @@ impl Host {
             )
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
+        // `view` 写在工具上 = 给自己登记卡片视图。登记不上 apply 就失败，整个作用域
+        // 回滚，刚挂上的工具跟着卸下（`register_tool_with_a_taken_view_leaves_no_tool_behind`）。
+        if let Some(view) = view {
+            self.add_tool_view(&name, view)?;
+        }
         Ok(())
+    }
+
+    /// 给任意工具（自己注册的或别的）登记卡片视图：`|tc| #{ ... }`，`tc` 是
+    /// `#{ name, arguments, output, failed }`（`arguments` 能解析就是 map）。
+    fn register_tool_view(
+        &mut self,
+        name: ImmutableString,
+        view: FnPtr,
+    ) -> Result<(), Box<rhai::EvalAltResult>> {
+        self.add_tool_view(name.as_str(), view)
+    }
+
+    fn add_tool_view(&mut self, name: &str, view: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        let views = self
+            .inner
+            .ctx
+            .get::<ToolViews>(TOOL_VIEWS)
+            .ok_or_else(|| eval_err("tool.views is not mounted".into()))?;
+        let engine = self.inner.engine.clone();
+        let ast = self.inner.ast.clone();
+        let render: ToolViewFn = Arc::new(move |input: &ToolViewInput<'_>| {
+            let mut call = Map::new();
+            call.insert("name".into(), Dynamic::from(input.name.to_string()));
+            call.insert("arguments".into(), json_str_to_dynamic(input.arguments));
+            call.insert("output".into(), Dynamic::from(input.output.to_string()));
+            call.insert("failed".into(), Dynamic::from(input.failed));
+            match call_fnptr_raw(&engine, &ast, &view, Dynamic::from_map(call)) {
+                // `()` = 这次不给视图，用通用卡片。
+                Ok(tree) if tree.is_unit() => None,
+                Ok(tree) => Some(match dynamic_to_json(&tree) {
+                    Ok(json) => ViewNode::parse(&json),
+                    Err(e) => view_error(&e),
+                }),
+                Err(e) => Some(view_error(&e)),
+            }
+        });
+        let d = views
+            .register(name, render)
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)
     }
 
     fn register_slash(&mut self, spec: Map) -> Result<(), Box<rhai::EvalAltResult>> {
@@ -840,11 +897,7 @@ impl SlotHandler for RhaiSlot {
 
     fn view(&self) -> Option<ViewNode> {
         let view = self.view.as_ref()?;
-        let error = |e: String| {
-            Some(ViewNode::parse(&serde_json::json!({
-                "type": "text", "tone": "danger", "text": format!("（视图出错：{e}）")
-            })))
-        };
+        let error = |e: String| Some(view_error(&e));
         match call_fnptr_raw(&self.engine, &self.ast, view, Dynamic::UNIT) {
             // 返回 `()` = 这次不给视图，回退到 `render()`：插件可以按条件给。
             Ok(tree) if tree.is_unit() => None,
@@ -1019,6 +1072,13 @@ fn normalize_tool_parameters(value: Value) -> Result<Value, String> {
         }
     }
     Ok(Value::Object(obj))
+}
+
+/// 插件的视图函数出错时画的那一行（中文、红字），不吞掉原因。
+fn view_error(e: &str) -> ViewNode {
+    ViewNode::parse(&serde_json::json!({
+        "type": "text", "tone": "danger", "text": format!("（视图出错：{e}）")
+    }))
 }
 
 fn map_str(map: &Map, key: &str) -> Option<String> {

@@ -23,11 +23,9 @@ async fn boot() -> Context {
         .unwrap();
     root.plugin(slash(), ()).unwrap().wait().await.unwrap();
     root.plugin(tui_slots(), ()).unwrap().wait().await.unwrap();
-    root.plugin(cordis_spine::status_items(), ())
-        .unwrap()
-        .wait()
-        .await
-        .unwrap();
+    for p in [cordis_spine::status_items(), cordis_spine::tool_views()] {
+        root.plugin(p, ()).unwrap().wait().await.unwrap();
+    }
     root.plugin(dynamic_runner(), ())
         .unwrap()
         .wait()
@@ -459,8 +457,13 @@ const RHAI_MEMO: &str = r#"#{
             name: "memo_get",
             description: "Read the memo bag",
             parameters: #{ type: "object", properties: #{} },
-            execute: |args| { "memo-ok" }
+            execute: |args| { "memo-ok" },
+            view: |tc| #{ type: "kv", items: [
+                #{ label: "输出", value: tc.output },
+                #{ label: "失败", value: tc.failed }
+            ] }
         });
+        host.register_tool_view("bash", |tc| ());
         host.register_slot(#{
             id: "memo",
             title: "便签",
@@ -924,6 +927,23 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
     assert!(tui.view("later").is_none());
     assert_eq!(tui.render("later").as_deref(), Some("还没准备好"));
 
+    // 工具卡视图：写在工具上的 `view` 和 register_tool_view 都登记进 `"tool.views"`；
+    // 回 `()` 的是「这次不给视图」。
+    let views = root
+        .require::<cordis_spine::ToolViews>(cordis_spine::TOOL_VIEWS)
+        .unwrap();
+    let call = |name| cordis_spine::ToolViewInput {
+        name,
+        arguments: "{}",
+        output: "memo-ok",
+        failed: false,
+    };
+    let drawn = views.render(&call("memo_get")).expect("memo_get 有视图");
+    assert!(drawn.to_plain().contains("输出：memo-ok"), "{drawn:?}");
+    assert!(drawn.to_plain().contains("失败：false"), "{drawn:?}");
+    assert!(views.has("bash"));
+    assert!(views.render(&call("bash")).is_none());
+
     // 状态项：第一次登记、第二次改内容；包停了跟着消失。
     let status = root
         .require::<cordis_spine::StatusItems>(cordis_spine::STATUS_ITEMS)
@@ -942,6 +962,7 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
         status.list().iter().all(|i| i.id != "memo-count"),
         "包停了状态项要跟着走"
     );
+    assert!(views.names().is_empty(), "包停了卡片视图要跟着走");
     assert!(root.get::<RhaiBag>("dynMemo").is_none());
     let names: Vec<_> = tools_of(&root)
         .specs()
@@ -2974,4 +2995,56 @@ async fn disk_plugin_is_matched_by_real_directory_not_spelling() {
         root.get::<DynEcho>(DYN_ECHO).is_none(),
         "删掉的插件不能还在跑"
     );
+}
+
+/// `register_tool` 带 `view`、而这个工具已有别人的卡片视图：apply 失败，作用域回滚，
+/// 先挂上的工具不能留下半截。
+#[tokio::test]
+async fn register_tool_with_a_taken_view_leaves_no_tool_behind() {
+    let root = boot().await;
+    let views = root
+        .require::<cordis_spine::ToolViews>(cordis_spine::TOOL_VIEWS)
+        .unwrap();
+    let _taken = views
+        .register(
+            "dup_tool",
+            std::sync::Arc::new(|_: &cordis_spine::ToolViewInput<'_>| None),
+        )
+        .unwrap();
+    exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "dup"},
+            "name": "Dup",
+            "purpose": "view conflict",
+            "factory": "rhai",
+            "source": r#"#{
+                inject: ["tools"],
+                apply: |host| {
+                    host.register_tool(#{
+                        name: "dup_tool",
+                        parameters: #{ type: "object", properties: #{} },
+                        execute: |args| { "ok" },
+                        view: |tc| #{ type: "text", text: "x" }
+                    });
+                    host.provide("dupAlive", #{ ok: true });
+                }
+            }"#,
+        }),
+    )
+    .await;
+    let out = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"dup-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(out.contains("已有卡片视图"), "{out}");
+    let names: Vec<_> = tools_of(&root)
+        .specs()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(!names.iter().any(|n| n == "dup_tool"), "{names:?}");
 }

@@ -1000,6 +1000,8 @@ fn peek_for(ctx: &Context, row: &DashRow, width: usize) -> (Vec<Line<'static>>, 
             .as_deref(),
         ctx.get::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
             .as_deref(),
+        ctx.get::<cordis_spine::ToolViews>(cordis_spine::TOOL_VIEWS)
+            .as_deref(),
     );
     (view.lines, title)
 }

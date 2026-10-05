@@ -244,6 +244,8 @@ fn paint_subagent(
         true,
         presets.as_deref(),
         sub.as_deref(),
+        ctx.get::<cordis_spine::ToolViews>(cordis_spine::TOOL_VIEWS)
+            .as_deref(),
     );
     let mut lines = view.lines;
     if lines.is_empty() {
@@ -502,6 +504,8 @@ fn subagent_lines(
         true,
         presets.as_deref(),
         sub.as_deref(),
+        ctx.get::<cordis_spine::ToolViews>(cordis_spine::TOOL_VIEWS)
+            .as_deref(),
     );
     (view.lines, view.tool_headers)
 }
