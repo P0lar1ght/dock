@@ -1418,21 +1418,12 @@ pub(super) fn open_goal_overlay(ctx: &Context, overlay: &mut Overlay, editing: b
     };
 }
 
+/// 目标面板上的暂停 / 继续按钮：按现在的状态选 `/goal pause` 或 `/goal resume`，
+/// 交给命令表跑。
 pub(super) fn goal_pause_resume(ctx: &Context) -> Vec<Effect> {
-    let Some(goal) = ctx.get::<Goal>(GOAL) else {
-        flash(ctx, "目标服务未挂载");
-        return Vec::new();
-    };
-    if goal.paused() {
-        if goal.resume() {
-            flash(ctx, "目标已继续");
-        }
-    } else if goal.pause() {
-        flash(ctx, "目标已暂停");
-    } else {
-        flash(ctx, "没有进行中的目标");
-    }
-    Vec::new()
+    let paused = ctx.get::<Goal>(GOAL).is_some_and(|goal| goal.paused());
+    let sub = if paused { "resume" } else { "pause" };
+    vec![crate::app::actions::run("goal", sub)]
 }
 
 pub(super) fn apply_goal_hit(ctx: &Context, overlay: &mut Overlay, hit: GoalHit) -> Vec<Effect> {

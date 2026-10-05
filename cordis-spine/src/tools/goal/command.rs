@@ -82,3 +82,26 @@ pub fn start_goal(page: &Context, objective: &str) -> SlashOutcome {
     goal.start(objective);
     SlashOutcome::submit(objective, Some("目标模式"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::slash::{slash, Slash};
+    use crate::tools::goal::{goal_composer_fill, goal_service};
+
+    /// 空参数的 `/goal`：把用法填进输入框，并让下一条消息当目标（终端和网关一样）。
+    #[tokio::test]
+    async fn bare_goal_fills_usage_and_arms_the_composer() {
+        let root = Context::new();
+        for p in [slash(), goal_service(), goal_command()] {
+            root.plugin(p, ()).unwrap().wait().await.unwrap();
+        }
+        let slash = root.get::<Slash>(SLASH).unwrap();
+        let goal = root.get::<Goal>(GOAL).unwrap();
+        assert!(!goal.awaiting_composer());
+        let out = slash.run(&root, "goal", "").await;
+        assert_eq!(out, Some(SlashOutcome::Fill(goal_composer_fill())));
+        assert!(goal_composer_fill().contains("/goal"));
+        assert!(goal.awaiting_composer(), "下一条消息该当目标");
+    }
+}
