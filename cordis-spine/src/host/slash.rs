@@ -283,8 +283,16 @@ impl Slash {
                 "host slash /{name} needs a handler"
             )));
         }
+        // 别名和主名一样规整（`/m` → `m`），否则永远匹配不上。
+        let aliases = command
+            .aliases
+            .iter()
+            .map(|a| a.trim().trim_start_matches('/').to_string())
+            .filter(|a| !a.is_empty())
+            .collect();
         let command = SlashCommand {
             name: name.clone(),
+            aliases,
             ..command
         };
         {
@@ -629,6 +637,16 @@ mod tests {
             .is_err());
         assert!(slash.is_builtin("/cp"));
         assert!(!slash.is_builtin("standup"));
+    }
+
+    #[test]
+    fn aliases_are_normalized_like_names() {
+        let slash = Slash::new();
+        let _m = slash
+            .register_command(SlashCommand::terminal("/model", "模型").aliases(&[" /m ", ""]))
+            .unwrap();
+        assert!(slash.is_builtin("m"));
+        assert_eq!(slash.commands()[0].aliases, vec!["m".to_string()]);
     }
 
     #[test]

@@ -4736,3 +4736,50 @@ async fn projection_follows_a_session_reset_from_another_host() {
         .collect();
     assert_eq!(restored, vec!["旧会话里的话".to_string()]);
 }
+
+/// 同上，换成第 2 页：事件从那一页自己的 `Sessions` 发出，网关在根上监听，
+/// 照样要把**那一页**的线程投影换成新会话（`threadId` 也跟着换）。
+#[tokio::test]
+async fn projection_follows_a_session_reset_on_another_page() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let dir = project_dir("reset-page");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let old_id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tabs = h
+        .ctx
+        .require::<cordis_spine::Tabs>(cordis_spine::TABS)
+        .unwrap();
+    let sessions = tabs
+        .contexts()
+        .into_iter()
+        .filter_map(|c| c.get::<Sessions>(SESSIONS))
+        .find(|s| s.live_session_id() == old_id)
+        .expect("第 2 页的会话");
+    sessions.append(LogEvent::User("第 2 页旧会话的话".into()));
+
+    // 终端在第 2 页 `/new`：不经过网关。
+    sessions.archive_current();
+    sessions.clear();
+    sessions.append(LogEvent::User("第 2 页新会话的话".into()));
+    let new_id = sessions.live_session_id();
+    assert_ne!(new_id, old_id, "清空后该是一个新会话");
+    let history = rpc
+        .call("thread/history", json!({ "threadId": new_id }))
+        .await;
+    let users: Vec<&str> = history["result"]["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{history}"))
+        .iter()
+        .filter(|e| e["method"] == "item/user_message")
+        .map(|e| e["payload"]["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, vec!["第 2 页新会话的话"]);
+}

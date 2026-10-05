@@ -482,13 +482,20 @@ pub const CATALOG: &[SlashDef] = &[
 /// 终端自己的命令（开浮层、退出、复制……）：目录里 spine 还没登记的那些，
 /// 以 [`SlashSurface::Terminal`] 登记进 `"slash"`。宿主无关的命令（`/goal` `/model`
 /// …）由各功能插件登记，这里跳过——表里有谁，谁就是保留名，别的客户端也看得到。
+/// 别名已经被表里别的命令占了就只丢那个别名，不让整颗 `tui.commands` 挂不上。
 pub fn terminal_commands(slash: &Slash) -> Vec<SlashCommand> {
     CATALOG
         .iter()
         .filter(|d| !slash.is_builtin(d.name))
         .map(|d| {
+            let aliases: Vec<&str> = d
+                .aliases
+                .iter()
+                .copied()
+                .filter(|a| !slash.is_builtin(a))
+                .collect();
             SlashCommand::terminal(d.name, d.description)
-                .aliases(d.aliases)
+                .aliases(&aliases)
                 .takes_args(d.takes_args)
         })
         .collect()
@@ -1043,6 +1050,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 别名撞上表里已有的命令时只丢那个别名，终端命令照样登记得上。
+    #[test]
+    fn terminal_commands_skip_taken_aliases() {
+        let slash = Slash::new();
+        let _taken = slash
+            .register_command(SlashCommand::terminal("exit", "别的插件占了 exit"))
+            .unwrap();
+        let commands = terminal_commands(&slash);
+        let quit = commands.iter().find(|c| c.name == "quit").unwrap();
+        assert!(quit.aliases.is_empty(), "{:?}", quit.aliases);
+        for command in commands {
+            slash.register_command(command).unwrap();
+        }
+        assert!(slash.is_builtin("quit"));
     }
 
     /// 目录里每个名字和别名都进了 `"slash"`：宿主无关的由 spine 的功能插件登记，
