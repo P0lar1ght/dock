@@ -652,6 +652,13 @@ impl PromptWidget {
         self.state.lock().unwrap().history.clone()
     }
 
+    /// 从上箭头历史里删掉符合条件的条目（比如带密钥原文的 `/cordis set`）。
+    pub fn forget_history(&self, matches: impl Fn(&str) -> bool) {
+        let mut state = self.state.lock().unwrap();
+        state.history.retain(|h| !matches(h));
+        state.history_idx = None;
+    }
+
     pub fn apply_text(&self, text: &str) {
         self.apply_slash_insert(text);
     }
@@ -1857,6 +1864,18 @@ mod tests {
         prompt.insert_str("next");
         frame(&prompt, true);
         assert!(prompt.focused());
+    }
+
+    /// 带密钥原文的条目能从上箭头历史里删掉，别的条目留着。
+    #[test]
+    fn forget_history_drops_matching_entries() {
+        let prompt = PromptWidget::default();
+        for line in ["hello", "/cordis set deploy token sk-1", "world"] {
+            prompt.insert_str(line);
+            prompt.take_prompt();
+        }
+        prompt.forget_history(|h| h.contains("sk-1"));
+        assert_eq!(prompt.history(), vec!["hello", "world"]);
     }
 
     #[test]

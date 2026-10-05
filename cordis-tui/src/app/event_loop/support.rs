@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Instant, SystemTime};
 
 use cordis::Context;
+use cordis_base::plugin_settings::FieldKind;
 use cordis_spine::{
     goal_composer_fill, loop_composer_fill, AgentPresets, AppSettings, Ask, Browser, Computer,
     Cron, CuaAction, Goal, Jobs, Mcp, McpStatus, MermaidEngineKind, Permissions, PlanMode,
@@ -1592,6 +1593,14 @@ pub(super) fn plugin_settings_listing(ctx: &Context) -> Option<String> {
     Some(out)
 }
 
+/// 插件 `plugin` 的 `key` 是不是密钥字段。
+pub(super) fn is_secret_setting(ctx: &Context, plugin: &str, key: &str) -> bool {
+    ctx.get::<PluginSettings>(PLUGIN_SETTINGS)
+        .and_then(|s| s.schema(plugin))
+        .and_then(|schema| schema.field(key).map(|f| f.kind == FieldKind::Secret))
+        .unwrap_or(false)
+}
+
 /// `/cordis set`：按插件的设置卡写一项，回一句给底栏闪的话。
 pub(super) fn set_plugin_setting(ctx: &Context, plugin: &str, key: &str, value: &str) -> String {
     let Some(settings) = ctx.get::<PluginSettings>(PLUGIN_SETTINGS) else {
@@ -1621,22 +1630,15 @@ pub(super) fn set_plugin_setting(ctx: &Context, plugin: &str, key: &str, value: 
 mod tests {
     use super::*;
 
-    /// 有视图树的插件面板：数字键点第几个动作，插件收到的是动作 id 而不是 `char:2`；
-    /// 没视图的面板照旧把原键交给插件。
     /// `/cordis set`：数字按 JSON 解析、不合法回原因、`null` 清回默认；列表里密钥只说设没设。
     #[tokio::test]
     async fn cordis_set_writes_plugin_settings() {
         use cordis_base::plugin_settings::SettingsSchema;
         use cordis_spine::{PluginSettings, PLUGIN_SETTINGS};
 
-        let path = std::env::temp_dir().join(format!(
-            "dock-tui-plugin-settings-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        // 密钥库在 DOCK_HOME 下：指到临时目录，不读写真的 secrets.json。
+        let _env = cordis_base::test_env::scoped().home();
+        let path = cordis_base::config::dock_home().join("plugin-settings.json");
         let ctx = Context::new();
         let _ = ctx.provide(PLUGIN_SETTINGS, PluginSettings::at(path.clone()));
         let settings = ctx.get::<PluginSettings>(PLUGIN_SETTINGS).unwrap();
@@ -1685,9 +1687,22 @@ mod tests {
             listing.contains("令牌（tuitest-token）：未设置"),
             "{listing}"
         );
-        let _ = std::fs::remove_file(path);
+        assert!(is_secret_setting(&ctx, "deploy", "tuitest-token"));
+        assert!(!is_secret_setting(&ctx, "deploy", "region"));
+        assert_eq!(
+            set_plugin_setting(&ctx, "deploy", "tuitest-token", "sk-1"),
+            "已保存 deploy · tuitest-token"
+        );
+        let listing = plugin_settings_listing(&ctx).unwrap();
+        assert!(
+            listing.contains("令牌（tuitest-token）：已设置"),
+            "{listing}"
+        );
+        assert!(!listing.contains("sk-1"), "{listing}");
     }
 
+    /// 有视图树的插件面板：数字键点第几个动作，插件收到的是动作 id 而不是 `char:2`；
+    /// 没视图的面板照旧把原键交给插件。
     #[tokio::test]
     async fn digits_press_view_actions_in_slot_overlays() {
         use cordis_spine::{tui_slots, SlotHandler, SlotKeyResult, TuiSlots, TUI_SLOTS};

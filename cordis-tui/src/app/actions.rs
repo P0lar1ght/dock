@@ -645,8 +645,6 @@ fn lsp_effect(args: &str) -> Effect {
     }
 }
 
-/// `/goal`：看 / 改目标开终端的目标面板，其余（开始、暂停、恢复、清除、空参数）
-/// 交给命令表。
 /// `/cordis`：看插件；`/cordis set <插件> <key> <值>` 改一项设置。
 fn cordis_effect(args: &str) -> Effect {
     let mut parts = args.trim().splitn(4, char::is_whitespace);
@@ -669,6 +667,8 @@ fn cordis_effect(args: &str) -> Effect {
     }
 }
 
+/// `/goal`：看 / 改目标开终端的目标面板，其余（开始、暂停、恢复、清除、空参数）
+/// 交给命令表。
 fn goal_effect(args: &str) -> Effect {
     let args = args.trim();
     match args.split_whitespace().next().unwrap_or("") {

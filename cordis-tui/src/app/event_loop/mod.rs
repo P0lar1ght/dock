@@ -560,6 +560,16 @@ pub async fn run(root: Context) -> Result<()> {
                                     };
                                 }
                                 Effect::SetPluginSetting { plugin, key, value } => {
+                                    // 密钥原文不留在上箭头历史里。
+                                    if is_secret_setting(&ctx, &plugin, &key) {
+                                        if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT)
+                                        {
+                                            prompt.forget_history(|h| {
+                                                h.trim_start().starts_with("/cordis")
+                                                    && h.contains(value.as_str())
+                                            });
+                                        }
+                                    }
                                     let msg = set_plugin_setting(&ctx, &plugin, &key, &value);
                                     flash(&ctx, msg);
                                 }
