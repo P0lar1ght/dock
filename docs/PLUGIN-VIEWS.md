@@ -100,9 +100,17 @@ named service `"tool.views"`：按工具名登记渲染函数，拿这一次调�
   （只认受信 ticket）。右上角「视图 | 原始」切换规划中，等 GUI 实现。
 - 暂不覆盖：子代理转录里的工具卡（`tool/view` 只查线程自己的会话日志）。
 
-## 设置卡的 schema（规划中）
+## 设置卡的 schema
 
 插件声明配置项，界面按它生成表单；值按插件存，插件用 `host.setting(key)` 读。
+
+- named service `"plugin.settings"`，一颗插件一份，包停了消失；
+- 普通字段存 `$DOCK_HOME/plugin-settings.json`（`{ 插件 id: { key: 值 } }`），没写过读到 `default`；
+- 密钥字段存密钥库 `secrets.json`，名字就是字段 `key`，插件用 `host.secret(key)` 读；
+- Rhai：`host.register_settings(#{ title, fields })`；`default` 是 Rhai 关键字，写 `"default": 10`；
+- 写入按 schema 校验，有一个字段不合法整组不写；
+- 终端：`/cordis` 列出当前值，`/cordis set <插件> <key> <值>` 改一项；
+- GUI：设置 › 插件，`plugin/settings/list|get|set`（只认受信 ticket）。
 
 ```json
 {

@@ -71,6 +71,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `tool/views` / `tool/view` + 推送 `tool/views/changed`：插件给工具登记的卡片视图，
     // 展开工具卡时按需取（`tool/view` 只认受信 ticket）。
     ("toolViews", true),
+    // `plugin/settings/list|get|set` + 推送 `plugin/settings/changed`：插件声明的设置卡，
+    // 设置页按 schema 生成表单。只认受信 ticket。
+    ("pluginSettings", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -112,6 +115,11 @@ pub const TOOL_VIEWS: &str = "tool/views";
 pub const TOOL_VIEW: &str = "tool/view";
 /// 连接级推送：有工具的卡片视图登记或卸下了（`{ name }`），重拉 `tool/views`。
 pub const TOOL_VIEWS_CHANGED: &str = "tool/views/changed";
+pub const PLUGIN_SETTINGS_LIST: &str = "plugin/settings/list";
+pub const PLUGIN_SETTINGS_GET: &str = "plugin/settings/get";
+pub const PLUGIN_SETTINGS_SET: &str = "plugin/settings/set";
+/// 连接级推送：插件的设置卡登记 / 卸下了或值改了（`{ pluginId }`）。
+pub const PLUGIN_SETTINGS_CHANGED: &str = "plugin/settings/changed";
 pub const PRESET_DRAFT: &str = "preset/draft";
 pub const PRESET_REWRITE: &str = "preset/rewrite";
 pub const PRESET_SUGGEST_TOOLS: &str = "preset/suggestTools";

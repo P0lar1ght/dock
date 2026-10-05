@@ -122,7 +122,7 @@ order: 10
 | 浏览器配对 overlay | 听 `gateway/pairing`。`/pair` 第一行开启或关闭监听；首次 Origin 请求弹出「允许浏览器连接？」；下列待批与已绑来源（Enter 批准 / `x` 拒绝或撤销） |
 | MCP elicitation | 听 `mcp/elicit`。权限 / 提问 overlay 会抢前台（队列仍在）。表单逐步填：选项带「其他」、自由输入空内容闪「请输入具体内容」。URL 模式 Enter 开浏览器，等 `notifications/elicitation/complete` 或 Esc 取消 |
 | 动态插槽 `Overlay::Slot` | `"tui.slots"` 登记的 pane（复用 Notice 布局）。有视图树（`docs/PLUGIN-VIEWS.md`）就按视图画，否则画 `render()` 的纯文本。Esc 关闭；↑/↓ 滚动并把规范化键名转给 `on_key`（`esc` / `enter` / `up` / `down` / `char:x`）。有视图时可见的动作编号 `[1]`–`[9]`，按数字键就是点它，插件收到的是动作 id 而不是 `char:n`（折叠段里的不编号）。脚本 `open_slot` 或 slash `kind: slot` 打开 |
-| `/cordis` | Notice：永久（磁盘）与会话（内存）插件一览 |
+| `/cordis` | Notice：永久（磁盘）与会话（内存）插件一览；有设置卡的插件另列一段「插件设置」（普通字段给当前值，密钥只说已设置 / 未设置）。`/cordis set <插件 id> <key> <值>` 改一项：值能按 JSON 解析就按 JSON（数字、`true` / `false`、`null` 清回默认），否则当文字；按插件的 schema 校验，不合法底栏闪原因；写密钥字段时这条输入不留在上箭头历史里 |
 | 插件工具卡视图 | 插件给某个工具登记了卡片视图（`"tool.views"`，Rhai `host.register_tool_view` 或 `register_tool` 的 `view`）：展开那张工具卡时头照旧，正文换成插件给的视图（`docs/PLUGIN-VIEWS.md`）；插件这次回 `()` 或已卸下就照旧画原始输出 |
 | 插件状态项 | `"status.items"`（Rhai `host.set_status`）与 `hud: true` 的插槽（正文第一行）画在快捷键条那一行**右侧**：「● 文字」按色调上色，单项超宽截断，放不下的折成「+N」；快捷键条让出那几列。没挂状态项服务的装配退回老样子（`hud` 进快捷键条） |
 | `/preset` 画布 | 左侧完整目录（当前 `"tools"`，右侧工具简介）、右侧本预设工具集。身份区列出本模式 `agents/` id。Enter 左加右删。名册 `n`/`d` 新建或复制默认写项目 `.dock/presets/<id>/`；改内置会写到 `~/.dock/presets/<id>/agent.yml` 覆盖。Esc 从画布回名册 |

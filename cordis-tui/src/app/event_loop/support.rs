@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Instant, SystemTime};
 
 use cordis::Context;
+use cordis_base::plugin_settings::FieldKind;
 use cordis_spine::{
     goal_composer_fill, loop_composer_fill, AgentPresets, AppSettings, Ask, Browser, Computer,
     Cron, CuaAction, Goal, Jobs, Mcp, McpStatus, MermaidEngineKind, Permissions, PlanMode,
@@ -11,6 +12,7 @@ use cordis_spine::{
     BROWSER, BROWSER_MCP_PREFIX, COMPUTER, CRON, GOAL, JOBS, MCP, PERMISSIONS, PLAN_MODE, SESSIONS,
     SETTINGS, SLASH, SUBAGENTS, TUI_SLOTS, WORKFLOWS,
 };
+use cordis_spine::{PluginSettings, PLUGIN_SETTINGS};
 
 use crate::app::clipboard;
 use crate::error::Result;
@@ -1555,9 +1557,149 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
     }
 }
 
+/// `/cordis` 里的「插件设置」一段：每颗有设置卡的插件一组，普通字段给当前值，
+/// 密钥只说设没设。没有设置卡就不画这一段。
+pub(super) fn plugin_settings_listing(ctx: &Context) -> Option<String> {
+    let settings = ctx.get::<PluginSettings>(PLUGIN_SETTINGS)?;
+    let plugins = settings.list();
+    if plugins.is_empty() {
+        return None;
+    }
+    let mut out = String::from("插件设置（/cordis set <插件> <key> <值>）\n");
+    for (id, title) in plugins {
+        out.push_str(&format!("\n{title}  {id}\n"));
+        let Some(snap) = settings.snapshot(&id) else {
+            continue;
+        };
+        for field in snap["schema"]["fields"].as_array().into_iter().flatten() {
+            let key = field["key"].as_str().unwrap_or("");
+            let label = field["label"].as_str().unwrap_or(key);
+            let shown = if field["type"] == "secret" {
+                if snap["secrets"][key] == true {
+                    "已设置".to_string()
+                } else {
+                    "未设置".to_string()
+                }
+            } else {
+                match &snap["values"][key] {
+                    serde_json::Value::Null => "（空）".to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                }
+            };
+            out.push_str(&format!("  {label}（{key}）：{shown}\n"));
+        }
+    }
+    Some(out)
+}
+
+/// 插件 `plugin` 的 `key` 是不是密钥字段。
+pub(super) fn is_secret_setting(ctx: &Context, plugin: &str, key: &str) -> bool {
+    ctx.get::<PluginSettings>(PLUGIN_SETTINGS)
+        .and_then(|s| s.schema(plugin))
+        .and_then(|schema| schema.field(key).map(|f| f.kind == FieldKind::Secret))
+        .unwrap_or(false)
+}
+
+/// `/cordis set`：按插件的设置卡写一项，回一句给底栏闪的话。
+pub(super) fn set_plugin_setting(ctx: &Context, plugin: &str, key: &str, value: &str) -> String {
+    let Some(settings) = ctx.get::<PluginSettings>(PLUGIN_SETTINGS) else {
+        return "插件设置服务没有挂载".into();
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(value)
+        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+    let mut values = serde_json::Map::new();
+    values.insert(key.to_string(), parsed);
+    match settings.set(plugin, &values) {
+        Ok(()) => format!("已保存 {plugin} · {key}"),
+        Err(errors) => errors
+            .into_iter()
+            .map(|(k, m)| {
+                if k.is_empty() {
+                    m
+                } else {
+                    format!("{k}：{m}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("；"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/cordis set`：数字按 JSON 解析、不合法回原因、`null` 清回默认；列表里密钥只说设没设。
+    #[tokio::test]
+    async fn cordis_set_writes_plugin_settings() {
+        use cordis_base::plugin_settings::SettingsSchema;
+        use cordis_spine::{PluginSettings, PLUGIN_SETTINGS};
+
+        // 密钥库在 DOCK_HOME 下：指到临时目录，不读写真的 secrets.json。
+        let _env = cordis_base::test_env::scoped().home();
+        let path = cordis_base::config::dock_home().join("plugin-settings.json");
+        let ctx = Context::new();
+        let _ = ctx.provide(PLUGIN_SETTINGS, PluginSettings::at(path.clone()));
+        let settings = ctx.get::<PluginSettings>(PLUGIN_SETTINGS).unwrap();
+        let _card = settings
+            .register(
+                "deploy",
+                SettingsSchema::parse(&serde_json::json!({
+                    "title": "部署助手",
+                    "fields": [
+                        { "key": "timeout", "type": "number", "min": 10, "default": 30 },
+                        { "key": "region", "type": "select", "options": ["cn", "us"] },
+                        { "key": "tuitest-token", "type": "secret", "label": "令牌" }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            set_plugin_setting(&ctx, "deploy", "timeout", "45"),
+            "已保存 deploy · timeout"
+        );
+        assert_eq!(
+            settings.get("deploy", "timeout"),
+            Some(serde_json::json!(45.0))
+        );
+        assert_eq!(
+            set_plugin_setting(&ctx, "deploy", "region", "us"),
+            "已保存 deploy · region"
+        );
+        assert_eq!(
+            set_plugin_setting(&ctx, "deploy", "timeout", "5"),
+            "timeout：最小 10"
+        );
+        assert_eq!(
+            set_plugin_setting(&ctx, "deploy", "timeout", "null"),
+            "已保存 deploy · timeout"
+        );
+        assert_eq!(
+            settings.get("deploy", "timeout"),
+            Some(serde_json::json!(30))
+        );
+        let listing = plugin_settings_listing(&ctx).unwrap();
+        assert!(listing.contains("部署助手  deploy"), "{listing}");
+        assert!(listing.contains("region（region）：us"), "{listing}");
+        assert!(
+            listing.contains("令牌（tuitest-token）：未设置"),
+            "{listing}"
+        );
+        assert!(is_secret_setting(&ctx, "deploy", "tuitest-token"));
+        assert!(!is_secret_setting(&ctx, "deploy", "region"));
+        assert_eq!(
+            set_plugin_setting(&ctx, "deploy", "tuitest-token", "sk-1"),
+            "已保存 deploy · tuitest-token"
+        );
+        let listing = plugin_settings_listing(&ctx).unwrap();
+        assert!(
+            listing.contains("令牌（tuitest-token）：已设置"),
+            "{listing}"
+        );
+        assert!(!listing.contains("sk-1"), "{listing}");
+    }
 
     /// 有视图树的插件面板：数字键点第几个动作，插件收到的是动作 id 而不是 `char:2`；
     /// 没视图的面板照旧把原键交给插件。

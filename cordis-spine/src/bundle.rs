@@ -5,6 +5,7 @@ use crate::agent::loop_plugin::agent_loop;
 use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
 use crate::host::permissions::permissions;
+use crate::host::plugin_settings::plugin_settings;
 use crate::host::settings::settings;
 use crate::host::settings_commands::settings_commands;
 use crate::host::slash::slash;
@@ -123,6 +124,7 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tui_slots(), ())?.wait().await?;
     ctx.plugin(status_items(), ())?.wait().await?;
     ctx.plugin(tool_views(), ())?.wait().await?;
+    ctx.plugin(plugin_settings(), ())?.wait().await?;
     ctx.plugin(agent_presets(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;
     ctx.plugin(tool_web(), web_fetch_params())?.wait().await?;

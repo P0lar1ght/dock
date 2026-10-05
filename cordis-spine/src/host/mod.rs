@@ -10,6 +10,7 @@
 
 pub mod gateway_port;
 pub mod permissions;
+pub mod plugin_settings;
 pub mod session_port;
 pub mod settings;
 pub mod settings_commands;

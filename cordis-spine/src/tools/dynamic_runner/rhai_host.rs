@@ -9,15 +9,17 @@ use cordis::{plugin, Context, Inject, Plugin};
 use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
 use serde_json::Value;
 
+use crate::host::plugin_settings::PluginSettings;
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::host::status_items::{StatusItem, StatusItems, StatusToken};
 use crate::host::tool_views::{ToolViewFn, ToolViewInput, ToolViews};
 use crate::host::tui_slots::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots};
 use crate::names::{
-    RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS, TOOL_VIEWS, TUI_SLOTS,
-    TURN_END,
+    PLUGIN_SETTINGS, RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS, TOOL_VIEWS,
+    TUI_SLOTS, TURN_END,
 };
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
+use cordis_base::plugin_settings::SettingsSchema;
 use cordis_base::types::{
     LogEvent, StepStart, ToolCall, ToolSpec, TurnEnd, ORDER_STEP_START_DYNAMIC,
     ORDER_TURN_END_DYNAMIC,
@@ -91,6 +93,16 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         "host.register_tool_view",
         "Draw a tool's card as a dock.view.1 tree (docs/PLUGIN-VIEWS.md) in the terminal and the GUI instead of raw output. view(tc) gets #{ name, arguments, output, failed } (`call` is a reserved word in Rhai) and returns a view map, or () for the plain card. Also accepted as `view` on host.register_tool. UI only — never reaches the model.",
         &["host.register_tool_view(name: String, |tc| #{ type: \"kv\", items: [...] })"],
+    ),
+    (
+        "host.register_settings",
+        "Declare this plugin's settings card (docs/PLUGIN-VIEWS.md): the GUI settings page and the terminal `/cordis set` build a form from it. Field types: string / text / number (min, max) / boolean / select (options) / secret (stored in secrets.json under the field key; read it with host.secret(key)). One card per plugin; removed when the package stops. `default` is a Rhai keyword — quote it: `\"default\": 10`.",
+        &["host.register_settings(#{ title, fields: [#{ key, type, label?, description?, default?, required?, options?, min?, max? }] })"],
+    ),
+    (
+        "host.setting",
+        "Read a non-secret field of this plugin's settings card: the saved value, else the field default, else (). Secrets: use host.secret(key).",
+        &["host.setting(key: String) -> value | ()"],
     ),
     (
         "host.set_status",
@@ -327,6 +339,8 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("open_slot", Host::open_slot);
     engine.register_fn("slot_changed", Host::slot_changed);
     engine.register_fn("set_status", Host::set_status);
+    engine.register_fn("register_settings", Host::register_settings);
+    engine.register_fn("setting", Host::setting);
     engine.register_fn("register_tool_view", Host::register_tool_view);
     engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
@@ -524,6 +538,31 @@ impl Host {
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
         Ok(())
+    }
+
+    fn plugin_settings(&self) -> Result<Arc<PluginSettings>, Box<rhai::EvalAltResult>> {
+        self.inner
+            .ctx
+            .get::<PluginSettings>(PLUGIN_SETTINGS)
+            .ok_or_else(|| eval_err("plugin.settings is not mounted".into()))
+    }
+
+    fn register_settings(&mut self, spec: Map) -> Result<(), Box<rhai::EvalAltResult>> {
+        let settings = self.plugin_settings()?;
+        let json = dynamic_to_json(&Dynamic::from_map(spec)).map_err(eval_err)?;
+        let schema = SettingsSchema::parse(&json).map_err(eval_err)?;
+        let d = settings
+            .register(&self.inner.plugin_id, schema)
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)
+    }
+
+    fn setting(&mut self, key: ImmutableString) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+        let settings = self.plugin_settings()?;
+        Ok(settings
+            .get(&self.inner.plugin_id, key.as_str())
+            .map(|v| json_to_dynamic(&v))
+            .unwrap_or(Dynamic::UNIT))
     }
 
     fn status_items(&self) -> Result<Arc<StatusItems>, Box<rhai::EvalAltResult>> {

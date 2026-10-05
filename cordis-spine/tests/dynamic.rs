@@ -26,6 +26,19 @@ async fn boot() -> Context {
     for p in [cordis_spine::status_items(), cordis_spine::tool_views()] {
         root.plugin(p, ()).unwrap().wait().await.unwrap();
     }
+    // 设置卡的值落在临时文件，不碰本机 `$DOCK_HOME`。
+    let settings_file = std::env::temp_dir().join(format!(
+        "dock-dynamic-plugin-settings-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = root.provide(
+        cordis_spine::PLUGIN_SETTINGS,
+        cordis_spine::PluginSettings::at(settings_file),
+    );
     root.plugin(dynamic_runner(), ())
         .unwrap()
         .wait()
@@ -482,6 +495,11 @@ const RHAI_MEMO: &str = r#"#{
             view: || ()
         });
         host.slot_changed("memo");
+        host.register_settings(#{ title: "便签", fields: [
+            #{ key: "limit", type: "number", min: 1, max: 50, "default": 10 },
+            #{ key: "memo-token", type: "secret", label: "令牌" }
+        ] });
+        host.provide("dynMemoLimit", #{ limit: host.setting("limit"), none: host.setting("nope") });
         host.set_status(#{ id: "memo-count", text: "2 条", tone: "accent", surface: "memo" });
         host.set_status(#{ id: "memo-count", text: "3 条", tone: "success", surface: "memo" });
         host.open_slot("memo");
@@ -944,6 +962,18 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
     assert!(views.has("bash"));
     assert!(views.render(&call("bash")).is_none());
 
+    // 设置卡：按插件 id 登记；没写过的字段读到 default，没有的字段读到 ()。
+    let settings = root
+        .require::<cordis_spine::PluginSettings>(cordis_spine::PLUGIN_SETTINGS)
+        .unwrap();
+    assert_eq!(
+        settings.list(),
+        vec![("memo-1".to_string(), "便签".to_string())]
+    );
+    let bag = root.require::<RhaiBag>("dynMemoLimit").unwrap().get();
+    assert_eq!(bag["limit"], serde_json::json!(10), "{bag}");
+    assert!(bag.get("none").is_none_or(|v| v.is_null()), "{bag}");
+
     // 状态项：第一次登记、第二次改内容；包停了跟着消失。
     let status = root
         .require::<cordis_spine::StatusItems>(cordis_spine::STATUS_ITEMS)
@@ -963,6 +993,7 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
         "包停了状态项要跟着走"
     );
     assert!(views.names().is_empty(), "包停了卡片视图要跟着走");
+    assert!(settings.list().is_empty(), "包停了设置卡要跟着走");
     assert!(root.get::<RhaiBag>("dynMemo").is_none());
     let names: Vec<_> = tools_of(&root)
         .specs()
