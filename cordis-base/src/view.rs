@@ -202,6 +202,27 @@ fn clip(s: String) -> String {
     }
 }
 
+/// `kv` / `table` / `list` 的条目也算进节点预算：一张几万行的表不该绕过限额。
+fn take_items<'a>(v: Option<&'a Value>, budget: &mut Budget) -> Vec<&'a Value> {
+    let Some(items) = v.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let n = items.len().min(budget.nodes);
+    if n < items.len() {
+        budget.truncated = true;
+    }
+    budget.nodes -= n;
+    items[..n].iter().collect()
+}
+
+/// 链接只放行 http / https / mailto；别的（`file:`、自定义协议）不能交给系统去开。
+fn safe_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|p| lower.starts_with(p))
+}
+
 fn badge_of(v: Option<&Value>) -> Option<Badge> {
     let v = v?;
     let text = text_of(v.get("text"));
@@ -295,20 +316,14 @@ impl ViewNode {
                 lang: opt_text(v.get("lang")),
             },
             "kv" => ViewNode::Kv {
-                items: v
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .map(|i| KvItem {
-                                label: text_of(i.get("label")),
-                                value: text_of(i.get("value")),
-                                tone: Tone::parse(i.get("tone")),
-                            })
-                            .collect()
+                items: take_items(v.get("items"), budget)
+                    .into_iter()
+                    .map(|i| KvItem {
+                        label: text_of(i.get("label")),
+                        value: text_of(i.get("value")),
+                        tone: Tone::parse(i.get("tone")),
                     })
-                    .unwrap_or_default(),
+                    .collect(),
             },
             "table" => ViewNode::Table {
                 columns: v
@@ -316,36 +331,25 @@ impl ViewNode {
                     .and_then(Value::as_array)
                     .map(|c| c.iter().map(|x| text_of(Some(x))).collect())
                     .unwrap_or_default(),
-                rows: v
-                    .get("rows")
-                    .and_then(Value::as_array)
-                    .map(|rows| {
-                        rows.iter()
-                            .map(|r| {
-                                r.as_array()
-                                    .map(|cells| cells.iter().map(|c| text_of(Some(c))).collect())
-                                    .unwrap_or_default()
-                            })
-                            .collect()
+                rows: take_items(v.get("rows"), budget)
+                    .into_iter()
+                    .map(|r| {
+                        r.as_array()
+                            .map(|cells| cells.iter().map(|c| text_of(Some(c))).collect())
+                            .unwrap_or_default()
                     })
-                    .unwrap_or_default(),
+                    .collect(),
             },
             "list" => ViewNode::List {
-                items: v
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .map(|i| ListItem {
-                                title: text_of(i.get("title")),
-                                subtitle: opt_text(i.get("subtitle")),
-                                badge: badge_of(i.get("badge")),
-                                action: opt_text(i.get("action")),
-                            })
-                            .collect()
+                items: take_items(v.get("items"), budget)
+                    .into_iter()
+                    .map(|i| ListItem {
+                        title: text_of(i.get("title")),
+                        subtitle: opt_text(i.get("subtitle")),
+                        badge: badge_of(i.get("badge")),
+                        action: opt_text(i.get("action")),
                     })
-                    .unwrap_or_default(),
+                    .collect(),
             },
             "badge" => ViewNode::Badge(Badge {
                 text: text_of(v.get("text")),
@@ -367,10 +371,20 @@ impl ViewNode {
                     _ => ButtonStyle::Secondary,
                 },
             },
-            "link" => ViewNode::Link {
-                label: text_of(v.get("label")),
-                url: text_of(v.get("url")),
-            },
+            "link" => {
+                let label = text_of(v.get("label"));
+                let url = text_of(v.get("url"));
+                if safe_url(&url) {
+                    ViewNode::Link { label, url }
+                } else {
+                    ViewNode::Text {
+                        text: format!("{label}（已拦下不安全的链接）"),
+                        tone: Tone::Muted,
+                        bold: false,
+                        size: Size::M,
+                    }
+                }
+            }
             "divider" => ViewNode::Divider,
             "empty" => ViewNode::Empty {
                 title: text_of(v.get("title")),
@@ -498,24 +512,36 @@ impl ViewNode {
     }
 
     /// 树里所有可点的动作 id（按钮、列表行、空状态按钮），按出现顺序、去重。
+    /// 包括折叠段里的（GUI 能展开）；网关据此校验点击。
     pub fn actions(&self) -> Vec<String> {
         let mut out = Vec::new();
-        self.collect_actions(&mut out);
+        self.collect_actions(&mut out, true);
         out
     }
 
-    fn collect_actions(&self, out: &mut Vec<String>) {
+    /// 同 [`Self::actions`]，但跳过折叠段里的：终端不画折叠段的内容，给看不见的
+    /// 动作编号会让数字键点到藏起来的按钮。
+    pub fn visible_actions(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_actions(&mut out, false);
+        out
+    }
+
+    fn collect_actions(&self, out: &mut Vec<String>, hidden: bool) {
         let mut push = |a: &str| {
             if !a.is_empty() && !out.iter().any(|x| x == a) {
                 out.push(a.to_string());
             }
         };
         match self {
+            ViewNode::Section {
+                collapsed: true, ..
+            } if !hidden => {}
             ViewNode::Stack { children, .. }
             | ViewNode::Row { children, .. }
             | ViewNode::Section { children, .. } => {
                 for c in children {
-                    c.collect_actions(out);
+                    c.collect_actions(out, hidden);
                 }
             }
             ViewNode::Button { action, .. } => push(action),
@@ -646,6 +672,33 @@ mod tests {
         assert!(node.to_plain().contains("不支持的视图：chart"));
     }
 
+    /// 折叠段里的动作：网关照样认（GUI 能展开），终端不编号（看不见就点不到）。
+    #[test]
+    fn collapsed_sections_hide_actions_from_the_terminal() {
+        let node = ViewNode::parse(&json!({ "type": "stack", "children": [
+            { "type": "section", "title": "危险", "collapsed": true, "children": [
+                { "type": "button", "label": "删除", "action": "delete", "style": "danger" }
+            ]},
+            { "type": "button", "label": "部署", "action": "deploy" }
+        ]}));
+        assert_eq!(node.actions(), vec!["delete", "deploy"]);
+        assert_eq!(node.visible_actions(), vec!["deploy"]);
+    }
+
+    #[test]
+    fn unsafe_links_are_not_links() {
+        let ok =
+            ViewNode::parse(&json!({ "type": "link", "label": "日志", "url": "https://x.dev" }));
+        assert!(matches!(ok, ViewNode::Link { .. }));
+        for url in ["file:///etc/passwd", "javascript:alert(1)", "vscode://x"] {
+            let node = ViewNode::parse(&json!({ "type": "link", "label": "日志", "url": url }));
+            assert!(
+                matches!(&node, ViewNode::Text { text, .. } if text.contains("不安全")),
+                "{url}: {node:?}"
+            );
+        }
+    }
+
     #[test]
     fn oversized_trees_are_cut_with_a_note() {
         let mut deep = json!({ "type": "text", "text": "底" });
@@ -663,6 +716,18 @@ mod tests {
             panic!()
         };
         assert_eq!(kept.len(), MAX_NODES - 1, "根节点自己占一个名额");
+
+        // 条目也算预算：一张超大的表被截短并提示。
+        let rows = vec![json!(["a", "b"]); MAX_NODES * 4];
+        let big = ViewNode::parse(&json!({ "type": "table", "columns": ["x", "y"], "rows": rows }));
+        assert!(big.to_plain().contains("视图过大"));
+        let ViewNode::Stack { children, .. } = &big else {
+            panic!()
+        };
+        let ViewNode::Table { rows, .. } = &children[0] else {
+            panic!()
+        };
+        assert_eq!(rows.len(), MAX_NODES - 1);
 
         let long = ViewNode::parse(&json!({ "type": "text", "text": "a".repeat(MAX_TEXT + 10) }));
         let ViewNode::Text { text, .. } = long else {

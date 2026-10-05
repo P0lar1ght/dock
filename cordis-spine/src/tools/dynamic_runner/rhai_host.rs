@@ -780,13 +780,20 @@ impl SlotHandler for RhaiSlot {
 
     fn view(&self) -> Option<ViewNode> {
         let view = self.view.as_ref()?;
-        let json = match call_fnptr_raw(&self.engine, &self.ast, view, Dynamic::UNIT) {
-            Ok(tree) => dynamic_to_json(&tree).unwrap_or(serde_json::Value::Null),
-            Err(e) => serde_json::json!({
-                "type": "text", "tone": "danger", "text": format!("（view error: {e}）")
-            }),
+        let error = |e: String| {
+            Some(ViewNode::parse(&serde_json::json!({
+                "type": "text", "tone": "danger", "text": format!("（视图出错：{e}）")
+            })))
         };
-        Some(ViewNode::parse(&json))
+        match call_fnptr_raw(&self.engine, &self.ast, view, Dynamic::UNIT) {
+            // 返回 `()` = 这次不给视图，回退到 `render()`：插件可以按条件给。
+            Ok(tree) if tree.is_unit() => None,
+            Ok(tree) => match dynamic_to_json(&tree) {
+                Ok(json) => Some(ViewNode::parse(&json)),
+                Err(e) => error(e),
+            },
+            Err(e) => error(e),
+        }
     }
 
     fn hud(&self) -> bool {
@@ -796,7 +803,7 @@ impl SlotHandler for RhaiSlot {
     fn render(&self) -> String {
         match call_fnptr(&self.engine, &self.ast, &self.render, Dynamic::UNIT) {
             Ok(text) => text,
-            Err(e) => format!("(render error: {e})"),
+            Err(e) => format!("（正文出错：{e}）"),
         }
     }
 

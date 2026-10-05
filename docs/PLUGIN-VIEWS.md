@@ -18,7 +18,7 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 
 ## 节点
 
-每个节点：`{ "type": "...", ... }`。可选 `id`（动作、局部刷新用）。
+每个节点：`{ "type": "...", ... }`。
 
 色调 `tone`：`default` `muted` `accent` `success` `warning` `danger`。
 
@@ -56,10 +56,13 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 
 交互：
 
+终端里只给看得见的动作编号（折叠段里的不编号），按数字键 1–9 点。
+
 - `button { label, action, style? }`：
   - `style`：`primary` `secondary` `danger`；
   - `action` 是动作 id，回到插件（面板走 `on_key(action)`）。
 - `link { label, url }`：
+  - 只认 `http` / `https` / `mailto`，别的协议画成灰字「已拦下不安全的链接」；
   - GUI 用系统浏览器打开；
   - TUI 显示 url，可复制。
 
@@ -72,11 +75,12 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 
 - 不认识的 `type`：画一行灰字「不支持的视图：<type>」，不报错。
   新节点只加不改，旧客户端照样能用。
-- 深度最多 8 层，节点最多 500 个。超出部分丢弃并在末尾画一行提示。
+- 深度最多 8 层，节点最多 500 个；`kv` / `table` / `list` 的每个条目也算一个。
+  超出部分丢弃并在末尾画一行提示。
 - 单个字符串最长 20 000 字符，超出截断。
 - 视图是纯数据：不能带脚本、样式、HTML。
 
-## 设置卡的 schema
+## 设置卡的 schema（规划中）
 
 插件声明配置项，界面按它生成表单；值按插件存，插件用 `host.setting(key)` 读。
 
@@ -103,7 +107,7 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 
 每个字段可选 `description`、`default`、`required`。
 
-## 状态项
+## 状态项（规划中）
 
 `{ id, text, tone?, tooltip?, surface? }`：
 
@@ -116,5 +120,5 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 - `image`：图片节点（TUI 显示 alt）。
 - 表单节点：面板里直接填参数再点按钮。
 - 工具卡上的按钮（现在工具卡只读）。
-- 视图局部刷新：按节点 `id` 推增量，而不是整棵重拉。
+- 节点 `id` 与视图局部刷新：按 `id` 推增量，而不是整棵重拉。
 - 对话流里的插件消息卡（不是工具结果，而是插件主动插一张卡）。

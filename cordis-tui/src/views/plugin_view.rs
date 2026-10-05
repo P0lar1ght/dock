@@ -1,6 +1,6 @@
 //! 插件视图（dock.view.1，见 `docs/PLUGIN-VIEWS.md`）在终端里的画法：一棵树压成
-//! 带样式的行。可点的东西（按钮、带动作的列表行、空状态按钮）按出现顺序编号 1–9，
-//! 面板里按数字键就是点它。
+//! 带样式的行。看得见的可点的东西（按钮、带动作的列表行、空状态按钮）按出现顺序
+//! 编号 1–9，面板里按数字键就是点它；折叠段里的不编号。
 
 use cordis_base::view::{ButtonStyle, Size, Tone, ViewNode};
 use ratatui::style::{Modifier, Style};
@@ -17,7 +17,7 @@ pub fn action_for_digit(node: &ViewNode, n: usize) -> Option<String> {
     if n == 0 || n > MAX_NUMBERED {
         return None;
     }
-    node.actions().into_iter().nth(n - 1)
+    node.visible_actions().into_iter().nth(n - 1)
 }
 
 fn tone_style(tone: Tone, theme: &Theme) -> Style {
@@ -148,7 +148,7 @@ impl Painter<'_> {
             }
             ViewNode::Markdown { text } => {
                 let width = self.width.saturating_sub(indent).max(8);
-                for line in crate::scrollback::markdown_lines(text, width) {
+                for line in crate::scrollback::markdown_lines_with(text, theme, width) {
                     self.indented(indent, line);
                 }
             }
@@ -356,7 +356,7 @@ pub fn lines(node: &ViewNode, theme: &Theme, width: usize) -> Vec<Line<'static>>
     let mut painter = Painter {
         theme,
         width: width.max(8),
-        numbers: node.actions(),
+        numbers: node.visible_actions(),
         out: Vec::new(),
     };
     painter.node(node, 0);
@@ -401,6 +401,22 @@ mod tests {
         assert!(out.contains("不支持的视图：chart"), "{out}");
         assert_eq!(action_for_digit(&node, 2).as_deref(), Some("rollback"));
         assert_eq!(action_for_digit(&node, 4), None);
+    }
+
+    /// 折叠段里的按钮不编号：数字键点不到看不见的动作。
+    #[test]
+    fn collapsed_actions_get_no_digit() {
+        let node = ViewNode::parse(&json!({ "type": "stack", "children": [
+            { "type": "section", "title": "危险", "collapsed": true, "children": [
+                { "type": "button", "label": "删除", "action": "delete" }
+            ]},
+            { "type": "button", "label": "部署", "action": "deploy" }
+        ]}));
+        let out = text(&lines(&node, &Theme::groknight(), 60));
+        assert!(out.contains("[1] 部署"), "{out}");
+        assert!(!out.contains("删除"), "{out}");
+        assert_eq!(action_for_digit(&node, 1).as_deref(), Some("deploy"));
+        assert_eq!(action_for_digit(&node, 2), None);
     }
 
     #[test]

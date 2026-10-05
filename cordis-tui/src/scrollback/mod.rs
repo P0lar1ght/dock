@@ -733,9 +733,15 @@ fn skip_first_user_event(events: &[LogEvent]) -> Vec<LogEvent> {
         .collect()
 }
 
-/// 和助手消息同一套 markdown 渲染（插件视图的 `markdown` 节点也用它）。
+/// 和助手消息同一套 markdown 渲染。
+#[cfg(test)]
 pub fn markdown_lines(text: &str, width: usize) -> Vec<Line<'static>> {
-    assistant::render(text, &Theme::current(), width).lines
+    markdown_lines_with(text, &Theme::current(), width)
+}
+
+/// 同 [`markdown_lines`]，用调用方给的配色（插件视图的 `markdown` 节点）。
+pub fn markdown_lines_with(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    assistant::render(text, theme, width).lines
 }
 
 pub(crate) fn subagent_live_activity(events: &[LogEvent]) -> Option<String> {
