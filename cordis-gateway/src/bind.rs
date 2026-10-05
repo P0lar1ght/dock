@@ -158,9 +158,17 @@ mod tests {
 
     #[test]
     fn companion_reports_busy_port() {
-        let held = TcpListener::bind("[::1]:0").expect("test host must allow ::1");
-        let port = held.local_addr().unwrap().port();
-        let (_v4, addr) = listen(&format!("127.0.0.1:{port}")).unwrap();
+        // 先拿 v4 端口，再占住同号的 [::1]。以前反过来：先占 v6、再让 `listen` 绑同号 v4，
+        // 同号 v4 碰巧被别的用例 / 进程占着时 `listen` 会顺延到下一个端口，伴随监听自然
+        // 绑得上，用例偶发失败。同号 v6 被别人占着就换一对端口（准备场景，不是重试断言）。
+        let (_v4, addr, _held) = (0..20)
+            .find_map(|_| {
+                let (v4, addr) = listen_exact("127.0.0.1:0").ok()?;
+                let held = TcpListener::bind(("::1", addr.port())).ok()?;
+                Some((v4, addr, held))
+            })
+            .expect("test host must allow ::1");
+        let port = addr.port();
         let companion = companion_listener(addr);
         match companion.status {
             CompanionStatus::Failed {
