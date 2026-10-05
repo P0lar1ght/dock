@@ -1527,10 +1527,9 @@ async fn thread_rewind_maps_turns_past_an_idle_compaction() {
         .to_string();
     let turns = user_turns(&mut rpc).await;
     assert_eq!(turns.len(), 2, "{turns:?}");
-    assert_ne!(
-        turns[1].0, "t2",
-        "压缩占了一轮，第 2 条用户消息不在 t2：{turns:?}"
-    );
+    // 第 1 条 t1，压缩占 t2，第 2 条用户消息在 t3：按 tN 换算会错位。
+    assert_eq!(compaction_turn, "t2");
+    assert_eq!(turns[1].0, "t3", "{turns:?}");
 
     let missing = rpc
         .call(
