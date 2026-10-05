@@ -16,5 +16,6 @@ pub mod status;
 pub mod subagent;
 pub mod surface;
 pub mod thread;
+pub mod tool_view;
 pub mod turn;
 pub mod vcs;

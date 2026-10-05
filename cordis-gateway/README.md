@@ -91,6 +91,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `gateway.fs`（`fs/*`）、`gateway.canvas`（`canvas/*`）
   - `gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`（`schedule/*`）
   - `gateway.surfaces`（`surface/*`）、`gateway.status`（`status/list`）
+  - `gateway.toolViews`（`tool/views`、`tool/view`）
 - 功能插件推连接级通知用 `GatewayMethods::notify(method, params)`：
   `schedule/changed`、`surface/changed` 都是这么推的。
 - 方法按域分在 `handlers/`：
@@ -515,6 +516,15 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 含 `hud: true` 的插槽（文字是正文第一行，`surface` 指向它）；
   - 文字是插件内容，只给受信 ticket；没挂状态项服务时回空表。
 - 推送 `status/changed { id }`：连接级。状态项增删改、或插槽变了时到。
+
+### 插件工具卡视图（能力 `toolViews`，`handlers/tool_view.rs`）
+
+- `tool/views {}` → `{ tools: [name] }`：哪些工具有卡片视图。
+- `tool/view { threadId?, itemId }` → `{ view }`：
+  - 按需画：GUI 展开工具卡时才调，`itemId` 是工具调用 id；
+  - 插件这次不给 / 没登记时 `view` 是 `null`；找不到那次调用回 `not_found`；
+  - 会跑插件脚本，只给受信 ticket。
+- 推送 `tool/views/changed { name }`：连接级。有工具的视图登记或卸下时到。
 
 ### Pull Request（能力 `pullRequests`，`handlers/vcs.rs`）
 

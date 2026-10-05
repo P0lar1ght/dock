@@ -68,6 +68,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `status/list` + 连接级推送 `status/changed { id }`：插件的状态项（短文字 + 色调，
     // 点它开插件面板）；`hud` 插槽也在里面。只认受信 ticket。
     ("statusItems", true),
+    // `tool/views` / `tool/view` + 推送 `tool/views/changed`：插件给工具登记的卡片视图，
+    // 展开工具卡时按需取（`tool/view` 只认受信 ticket）。
+    ("toolViews", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -105,6 +108,10 @@ pub const SURFACE_CHANGED: &str = "surface/changed";
 pub const STATUS_LIST: &str = "status/list";
 /// 连接级推送：状态项增删改了（`{ id }`），重拉 `status/list`。
 pub const STATUS_CHANGED: &str = "status/changed";
+pub const TOOL_VIEWS: &str = "tool/views";
+pub const TOOL_VIEW: &str = "tool/view";
+/// 连接级推送：有工具的卡片视图登记或卸下了（`{ name }`），重拉 `tool/views`。
+pub const TOOL_VIEWS_CHANGED: &str = "tool/views/changed";
 pub const PRESET_DRAFT: &str = "preset/draft";
 pub const PRESET_REWRITE: &str = "preset/rewrite";
 pub const PRESET_SUGGEST_TOOLS: &str = "preset/suggestTools";

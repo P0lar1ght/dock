@@ -80,6 +80,19 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 - 单个字符串最长 20 000 字符，超出截断。
 - 视图是纯数据：不能带脚本、样式、HTML。
 
+## 工具卡
+
+named service `"tool.views"`：按工具名登记渲染函数，拿这一次调用的参数、输出、成败，回一棵视图树。
+
+- 回 `None` / Rhai 回 `()` = 这次不给视图，用通用卡片；
+- 可以给任何工具登记（插件自己的或内置的），同名只能登记一个；
+- 只给人看，不进模型历史；
+- Rhai：`host.register_tool_view(name, |tc| #{ ... })`，或写在 `register_tool` 的 `view` 上；
+  `tc` 是 `#{ name, arguments, output, failed }`（`call` 是 Rhai 保留字）；
+- 终端：展开工具卡时头照旧，正文换成视图；
+- GUI：`tool/views` 列出有视图的工具；展开时 `tool/view { threadId, itemId }` 按需取
+  （只认受信 ticket），右上角「视图 | 原始」切换。
+
 ## 设置卡的 schema（规划中）
 
 插件声明配置项，界面按它生成表单；值按插件存，插件用 `host.setting(key)` 读。

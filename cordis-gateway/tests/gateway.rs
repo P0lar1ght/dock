@@ -5143,3 +5143,78 @@ async fn paired_pages_cannot_list_status_items() {
     let listed = rpc.call("status/list", json!({})).await;
     assert_eq!(listed["error"]["details"]["code"], "forbidden", "{listed}");
 }
+
+/// 工具卡视图按需取：`tool/views` 列出有视图的工具，`tool/view` 按日志里那次调用画；
+/// 配对网页取不到（会跑插件脚本）。
+#[tokio::test]
+async fn tool_views_render_logged_calls_on_demand() {
+    use cordis_base::view::ViewNode;
+    use cordis_spine::{ToolViewInput, ToolViews, TOOL_VIEWS};
+
+    let root = harness_root().await;
+    root.plugin(cordis_spine::tool_views(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let views = root.require::<ToolViews>(TOOL_VIEWS).unwrap();
+    let _v = views
+        .register(
+            "deploy_status",
+            Arc::new(|input: &ToolViewInput<'_>| {
+                Some(ViewNode::parse(&json!({
+                    "type": "kv",
+                    "items": [{ "label": "状态", "value": input.output, "tone": "success" }]
+                })))
+            }),
+        )
+        .unwrap();
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .append(LogEvent::ToolExecute {
+            id: "call-1".into(),
+            name: "deploy_status".into(),
+            arguments: r#"{"env":"production"}"#.into(),
+            content: "运行中".into(),
+            images: vec![],
+            is_error: false,
+        });
+
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let listed = gui.call("tool/views", json!({})).await;
+    assert_eq!(
+        listed["result"]["tools"],
+        json!(["deploy_status"]),
+        "{listed}"
+    );
+    let drawn = gui
+        .call(
+            "tool/view",
+            json!({ "threadId": "live", "itemId": "call-1" }),
+        )
+        .await;
+    assert_eq!(
+        drawn["result"]["view"],
+        json!({ "type": "kv", "items": [{ "label": "状态", "value": "运行中", "tone": "success" }] }),
+        "{drawn}"
+    );
+    let missing = gui
+        .call("tool/view", json!({ "threadId": "live", "itemId": "nope" }))
+        .await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
+}
+
+#[tokio::test]
+async fn paired_pages_cannot_render_tool_views() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let drawn = rpc.call("tool/view", json!({ "itemId": "x" })).await;
+    assert_eq!(drawn["error"]["details"]["code"], "forbidden", "{drawn}");
+}

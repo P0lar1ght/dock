@@ -16,8 +16,8 @@ use chrono::{DateTime, Local};
 use cordis::Context;
 use cordis_spine::{
     AgentPresets, AppSettings, CompactProgress, CompactStatus, CompactTrigger, JobSnapshot, Jobs,
-    LlmOutput, LogEvent, Sessions, Subagents, Todos, AGENT_PRESETS, COMPACT_NOTICE, JOBS, SESSIONS,
-    SETTINGS, SUBAGENTS, TODOS,
+    LlmOutput, LogEvent, Sessions, Subagents, Todos, ToolViewInput, ToolViews, AGENT_PRESETS,
+    COMPACT_NOTICE, JOBS, SESSIONS, SETTINGS, SUBAGENTS, TODOS, TOOL_VIEWS,
 };
 
 use crate::names::SESSION_PORT;
@@ -546,6 +546,7 @@ impl Scrollback {
         let subagents = self.ctx.get::<Subagents>(SUBAGENTS);
         let jobs = self.ctx.get::<Jobs>(JOBS);
         let presets = self.ctx.get::<AgentPresets>(AGENT_PRESETS);
+        let tool_views = self.ctx.get::<ToolViews>(TOOL_VIEWS);
         let compaction = sessions.compaction();
         sessions.with_log(|events, times| {
             build_frame_with(
@@ -562,6 +563,7 @@ impl Scrollback {
                 subagents.as_deref(),
                 jobs.as_deref(),
                 presets.as_deref(),
+                tool_views.as_deref(),
             )
         })
     }
@@ -596,6 +598,11 @@ impl Scrollback {
         self.ctx
             .get::<SessionRef>(SESSION_PORT)
             .is_some_and(|s| s.working())
+            .hash(&mut h);
+        // 插件登记 / 卸下工具卡视图后要重画。
+        self.ctx
+            .get::<ToolViews>(TOOL_VIEWS)
+            .map(|v| v.revision())
             .hash(&mut h);
         self.ctx
             .get::<AppSettings>(SETTINGS)
@@ -654,6 +661,7 @@ pub fn inspect_lines(events: &[LogEvent], width: usize, running: bool) -> Vec<Li
         false,
         None,
         None,
+        None,
     )
     .lines
 }
@@ -668,6 +676,7 @@ pub fn inspect_child_lines(events: &[LogEvent], width: usize, running: bool) -> 
         &HashMap::new(),
         running,
         true,
+        None,
         None,
         None,
     )
@@ -692,6 +701,7 @@ pub(crate) fn child_transcript(
     skip_first_user: bool,
     presets: Option<&AgentPresets>,
     subagents: Option<&Subagents>,
+    tool_views: Option<&ToolViews>,
 ) -> ChildTranscript {
     let filtered = if skip_first_user {
         skip_first_user_event(events)
@@ -711,6 +721,7 @@ pub(crate) fn child_transcript(
         subagents,
         None,
         presets,
+        tool_views,
     );
     ChildTranscript {
         lines: frame.lines,
@@ -772,6 +783,7 @@ pub(crate) fn lines_from_events_with(
         None,
         None,
         None,
+        None,
     )
     .lines
 }
@@ -805,10 +817,11 @@ fn build_frame(
     subagents: Option<&Subagents>,
     jobs: Option<&Jobs>,
     presets: Option<&AgentPresets>,
+    tool_views: Option<&ToolViews>,
 ) -> Frame {
     build_frame_with(
         None, events, times, width, expanded, tool_fold, working, show_ts, todos, todo_fold,
-        subagents, jobs, presets,
+        subagents, jobs, presets, tool_views,
     )
 }
 
@@ -829,6 +842,7 @@ fn build_frame_with(
     subagents: Option<&Subagents>,
     jobs: Option<&Jobs>,
     presets: Option<&AgentPresets>,
+    tool_views: Option<&ToolViews>,
 ) -> Frame {
     let theme = Theme::current();
     let last_notice = events
@@ -940,6 +954,7 @@ fn build_frame_with(
                         jobs,
                         &job_snaps,
                         presets,
+                        tool_views,
                     );
                 }
             }
@@ -1016,6 +1031,7 @@ fn build_frame_with(
                     jobs,
                     &job_snaps,
                     presets,
+                    tool_views,
                 );
             }
             LogEvent::Notice { kind, title, body } => {
@@ -1203,6 +1219,7 @@ fn push_tool_card(
     jobs: Option<&Jobs>,
     job_snaps: &[JobSnapshot],
     presets: Option<&AgentPresets>,
+    tool_views: Option<&ToolViews>,
 ) {
     // `use_tool` 是 deferred 工具的包装：内层是 task 族/skill 操作时按内层
     // 操作渲染卡片（参数取 `tool_input`）。
@@ -1301,9 +1318,24 @@ fn push_tool_card(
             .get(id)
             .copied()
             .unwrap_or(tool::ToolMode::Collapsed);
-        lines.extend(tool_card_lines(
+        // 插件给这个工具登记了卡片视图：展开时头照旧，正文换成视图（`docs/PLUGIN-VIEWS.md`）。
+        let view = (mode != tool::ToolMode::Collapsed && !running)
+            .then(|| {
+                tool_views?.render(&ToolViewInput {
+                    name,
+                    arguments,
+                    output: content,
+                    failed,
+                })
+            })
+            .flatten();
+        let card = tool_card_lines(
             name, arguments, content, theme, width, mode, running, failed,
-        ));
+        );
+        match view {
+            Some(view) => lines.extend(plugin_tool_card(card, &view, theme, width)),
+            None => lines.extend(card),
+        }
         if running {
             mark_live(live_rows, lines, header_at, started);
         }
@@ -1434,6 +1466,20 @@ fn tool_name_for_fold(ctx: &Context, id: &str) -> Option<String> {
         }
         None
     })
+}
+
+/// 插件视图的工具卡：沿用通用卡片的头（名字、参数摘要、折叠符），正文换成视图。
+fn plugin_tool_card(
+    card: Vec<Line<'static>>,
+    view: &cordis_base::view::ViewNode,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = card.into_iter().take(1).collect();
+    out.push(Line::from(""));
+    let body = crate::views::plugin_view::lines(view, theme, card::body_width(width));
+    out.extend(card::body(body, width));
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1632,6 +1678,80 @@ fn paint_mermaid_hover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 插件给工具登记了卡片视图：展开时头照旧、正文换成视图；折叠时只有头；
+    /// 没登记视图的工具照旧画原始输出。
+    #[tokio::test]
+    async fn plugin_tool_views_replace_the_card_body() {
+        let root = cordis::Context::new();
+        root.plugin(cordis_spine::tool_views(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let views = root.get::<ToolViews>(cordis_spine::TOOL_VIEWS).unwrap();
+        let _v = views
+            .register(
+                "deploy_status",
+                std::sync::Arc::new(|input: &ToolViewInput<'_>| {
+                    Some(cordis_base::view::ViewNode::parse(&serde_json::json!({
+                        "type": "kv",
+                        "items": [{ "label": "状态", "value": input.output }]
+                    })))
+                }),
+            )
+            .unwrap();
+        let exec = |id: &str, name: &str| LogEvent::ToolExecute {
+            id: id.into(),
+            name: name.into(),
+            arguments: r#"{"env":"production"}"#.into(),
+            content: "运行中".into(),
+            images: vec![],
+            is_error: false,
+        };
+        let render = |mode| {
+            let frame = build_frame(
+                &[exec("a", "deploy_status"), exec("b", "other_tool")],
+                &[],
+                60,
+                &HashSet::new(),
+                &HashMap::from([
+                    ("a".to_string(), mode),
+                    ("b".to_string(), tool::ToolMode::Expanded),
+                ]),
+                false,
+                false,
+                &[],
+                todo::TodoFold::default(),
+                None,
+                None,
+                None,
+                Some(&*views),
+            );
+            frame
+                .lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let open = render(tool::ToolMode::Expanded);
+        assert!(open.contains("deploy_status"), "{open}");
+        assert!(open.contains("状态  运行中"), "{open}");
+        let (mine, other) = open.split_once("◆ other_tool").expect("两张卡");
+        assert!(!mine.contains("输出"), "视图替掉了原始输出：{mine}");
+        assert!(
+            other.contains("输出"),
+            "没视图的工具照旧画原始输出：{other}"
+        );
+        let closed = render(tool::ToolMode::Collapsed);
+        assert!(!closed.contains("状态  运行中"), "{closed}");
+    }
     use cordis_spine::{LlmOutput, ToolCall};
     use ratatui::widgets::Paragraph;
 
@@ -1820,6 +1940,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let text = text_of(&frame);
         assert_eq!(
@@ -1849,6 +1970,7 @@ mod tests {
             true,
             &[],
             todo::TodoFold::default(),
+            None,
             None,
             None,
             None,
@@ -2484,6 +2606,7 @@ mod tests {
             false,
             todos,
             fold,
+            None,
             None,
             None,
             None,
@@ -3281,6 +3404,7 @@ mod card_shell_tests {
             None,
             None,
             None,
+            None,
         );
         let body_rows: Vec<usize> = frame
             .lines
@@ -3334,6 +3458,7 @@ mod card_shell_tests {
             false,
             &[],
             todo::TodoFold::default(),
+            None,
             None,
             None,
             None,

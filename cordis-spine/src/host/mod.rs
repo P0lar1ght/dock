@@ -16,4 +16,5 @@ pub mod settings_commands;
 pub mod slash;
 pub mod status_items;
 pub mod tabs;
+pub mod tool_views;
 pub mod tui_slots;
