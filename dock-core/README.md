@@ -28,6 +28,9 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
   - 面板 `surface/*`、状态项 `status/list`、工具卡 `tool/views` / `tool/view` 的结果解析；
     `viewToolName` 透过 `use_tool` 找视图（同 spine 的 `effective_call`）。
   - `parsePluginPush`：`surface/changed`、`status/changed`、`tool/views/changed`（连接级，不用订阅）。
+- 插件设置卡（`src/pluginSettings.ts`）：`plugin/settings/*` 的结果解析；
+  `checkSettingsField` / `settingsErrors` 与 `cordis-base/src/plugin_settings.rs` 同一套校验与文案，
+  界面先标错、禁用保存，最终以 Dock 回的 `errors` 为准。
 - **不猜**：一轮的结果看 `turn/completed.status`，工具的结果看 `item/tool_completed.status`，都由 Dock 给出。
 
 ## 用法
