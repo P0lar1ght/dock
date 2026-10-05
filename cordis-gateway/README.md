@@ -75,12 +75,21 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 - `PROTOCOL_VERSION` = `"dock.1"`，WS 路径 `WS_PATH` = `/api/ws`
 - `CAPABILITIES`：`(name, supported)` 数组，`initialize` 时回给宿主
-- 协议骨架（连接、线程、轮次、交互、斜杠……）写在 `rpc::dispatch` 里；**功能**是插件：
-  挂载时往 `"gateway.methods"`（`GatewayMethods`）登记自己的方法，随插件 fiber 注销，
-  核心方法与表里同名时核心优先。每个方法带 `MethodPolicy`：`detached`（放到连接锁外跑）、
-  `trusted_only`（只认 `dock serve` 的受信 ticket）、`opens_thread`（关着的线程先开页）。
-  `features()` 是本 crate 自带的那几颗：`gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`
-  （`schedule/*`）。给 GUI 加一页 = 再写一颗这样的插件，用 `register_methods` + `method`。
+- 协议骨架（连接、线程、轮次、交互、斜杠……）写在 `rpc::dispatch` 里。
+- **功能**是插件：挂载时往 `"gateway.methods"`（`GatewayMethods`）登记方法，
+  随插件 fiber 注销。用 `register_methods` + `method`；给 GUI 加一页 = 再写一颗。
+- 核心方法名（`rpc::CORE_METHODS`）登记不进来。
+- 设置页命名空间（`config/` `secret/` `mcp/` `model/` `plugin/` `pairing/` `device/`
+  `cua/`、`browser/status`、`skill/list`）只能登记成 `trusted_only`。
+- 每个方法带 `MethodPolicy`：
+  - `detached`：放到连接锁外跑；
+  - `trusted_only`：只认 `dock serve` 的受信 ticket；
+  - `opens_thread`：关着的线程先开页。
+- `features()` 是本 crate 自带的那几颗：
+  - `gateway.settings`（设置页，全部 `trusted_only`）
+  - `gateway.presets`（`preset/*`、`tool/catalog`）
+  - `gateway.fs`（`fs/*`）、`gateway.canvas`（`canvas/*`）
+  - `gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`（`schedule/*`）
 - 方法按域分在 `handlers/`：
 
 | handler | 域 |

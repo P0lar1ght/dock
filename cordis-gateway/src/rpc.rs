@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::handle::GatewayHandle;
 use crate::handlers::{
-    canvas, connection, context, environment, fs, image_inputs, interaction, permission, preset,
-    settings, slash, subagent, thread, turn,
+    connection, context, environment, image_inputs, interaction, permission, slash, subagent,
+    thread, turn,
 };
 use crate::methods;
 use crate::protocol::{self, RpcError};
@@ -26,59 +26,9 @@ pub async fn dispatch(
         protocol::MCP_LIST => connection::mcp_list(&gateway),
         protocol::MCP_RECONNECT => connection::mcp_reconnect(&gateway, params).await,
         protocol::MODEL_LIST => connection::model_list(&gateway),
-        protocol::CONFIG_STATUS => settings::config_status(),
-        protocol::CONFIG_GET => settings::config_get(&gateway),
-        protocol::CONFIG_SET => settings::config_set(&gateway, params),
-        protocol::CONFIG_ENV => settings::config_env(params),
-        protocol::MODEL_GET => settings::model_get(params),
-        protocol::MODEL_SAVE => settings::model_save(&gateway, params),
-        protocol::MODEL_DELETE => settings::model_delete(&gateway, params),
-        protocol::MODEL_DEFAULT => settings::model_default(&gateway, params),
-        protocol::MCP_GET => settings::mcp_get(params),
-        protocol::MCP_TOOL_ENABLE => settings::mcp_tool_enable(&gateway, params).await,
-        protocol::CUA_STATUS => settings::cua_status(&gateway),
-        protocol::CUA_ACTION => settings::cua_action(&gateway, params),
-        protocol::BROWSER_STATUS => settings::browser_status(&gateway),
-        protocol::PLUGIN_LIST => settings::plugin_list(&gateway),
-        protocol::PLUGIN_DELETE => settings::plugin_delete(&gateway, params).await,
-        protocol::SKILL_LIST => settings::skill_list(&gateway),
-        protocol::SECRET_LIST => settings::secret_list(),
-        protocol::SECRET_SET => settings::secret_set(params),
-        protocol::SECRET_DELETE => settings::secret_delete(params),
-        protocol::PAIRING_LIST => settings::pairing_list(&gateway),
-        protocol::PAIRING_RESOLVE => settings::pairing_resolve(&gateway, params),
-        protocol::PAIRING_REVOKE => settings::pairing_revoke(&gateway, params),
-        protocol::PAIRING_ACCEPT => settings::pairing_accept(&gateway, params),
-        protocol::DEVICE_LIST => settings::device_list(),
-        protocol::DEVICE_ADD => settings::device_add(params),
-        protocol::DEVICE_REVOKE => settings::device_revoke(params),
         protocol::THREAD_LIST => thread::list(&gateway, params),
         protocol::THREAD_SEARCH => thread::search(params),
-        protocol::PRESET_LIST => preset::list(&gateway, params),
-        protocol::PRESET_CREATE => preset::create(&gateway, params),
-        protocol::PRESET_DELETE => preset::delete(&gateway, params),
-        protocol::PRESET_GET => preset::get(&gateway, params),
-        protocol::PRESET_UPDATE => preset::update(&gateway, params),
-        protocol::TOOL_CATALOG => preset::tool_catalog(&gateway, params),
-        protocol::PRESET_DRAFT
-        | protocol::PRESET_REWRITE
-        | protocol::PRESET_SUGGEST_TOOLS
-        | protocol::FS_LIST
-        | protocol::FS_READ
-        | protocol::FS_FIND
-        | protocol::CANVAS_LIST
-        | protocol::CANVAS_GET
-        | protocol::CANVAS_SET_DATA
-        | protocol::CANVAS_ROLLBACK
-        | protocol::MODEL_TEST
-        | protocol::MCP_SAVE
-        | protocol::MCP_DELETE
-        | protocol::MCP_ENABLE
-        | protocol::MCP_LOGIN
-        | protocol::PLUGIN_ENABLE
-        | protocol::PLUGIN_PROMOTE
-        | protocol::PLUGIN_DISCARD
-        | protocol::THREAD_REWIND => dispatch_detached(gateway, method, params).await,
+        protocol::THREAD_REWIND => dispatch_detached(gateway, method, params).await,
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
@@ -159,37 +109,15 @@ fn opens_on_demand(method: &str) -> bool {
     )
 }
 
-/// 要调模型的方法（一次几秒）和读盘的 `fs/*` / `canvas/*`（大仓库里找文件要走很多目录）。`ws.rs` 不在
-/// 连接锁里跑它们（锁住会卡住这条连接的推送和其它请求），鉴权过了就另起任务，跑完再回帧。
+/// 一次要几秒的方法：`ws.rs` 不在连接锁里跑它们（锁住会卡住这条连接的推送和其它请求），
+/// 鉴权过了就另起任务，跑完再回帧。功能插件的方法按各自的 `MethodPolicy::detached`。
 pub fn is_detached(gateway: &GatewayHandle, method: &str) -> bool {
     methods::policy_of(gateway, method).detached || is_core_detached(method)
 }
 
 fn is_core_detached(method: &str) -> bool {
-    matches!(
-        method,
-        protocol::PRESET_DRAFT
-            | protocol::PRESET_REWRITE
-            | protocol::PRESET_SUGGEST_TOOLS
-            | protocol::FS_LIST
-            | protocol::FS_READ
-            | protocol::FS_FIND
-            | protocol::CANVAS_LIST
-            | protocol::CANVAS_GET
-            | protocol::CANVAS_SET_DATA
-            | protocol::CANVAS_ROLLBACK
-            // 设置页里会连服务器 / 跑插件 / 等浏览器登录的：几秒到几分钟。
-            | protocol::MODEL_TEST
-            | protocol::MCP_SAVE
-            | protocol::MCP_DELETE
-            | protocol::MCP_ENABLE
-            | protocol::MCP_LOGIN
-            | protocol::PLUGIN_ENABLE
-            | protocol::PLUGIN_PROMOTE
-            | protocol::PLUGIN_DISCARD
-            // 在跑的话要先停、等它停下来（最多几秒）。
-            | protocol::THREAD_REWIND
-    )
+    // 在跑的话要先停、等它停下来（最多几秒）。功能插件的方法看它自己的 `MethodPolicy`。
+    method == protocol::THREAD_REWIND
 }
 
 /// [`is_detached`] 的方法：不碰连接状态，只要网关句柄。
@@ -200,24 +128,6 @@ pub async fn dispatch_detached(
 ) -> Result<Value, RpcError> {
     match method {
         protocol::THREAD_REWIND => thread::rewind(&gateway, params).await,
-        protocol::PRESET_DRAFT => preset::draft(&gateway, params).await,
-        protocol::PRESET_REWRITE => preset::rewrite(&gateway, params).await,
-        protocol::PRESET_SUGGEST_TOOLS => preset::suggest_tools(&gateway, params).await,
-        protocol::FS_LIST | protocol::FS_READ | protocol::FS_FIND => {
-            fs::dispatch(&gateway, method, params).await
-        }
-        protocol::CANVAS_LIST
-        | protocol::CANVAS_GET
-        | protocol::CANVAS_SET_DATA
-        | protocol::CANVAS_ROLLBACK => canvas::dispatch(&gateway, method, params).await,
-        protocol::MODEL_TEST => settings::model_test(params).await,
-        protocol::MCP_SAVE => settings::mcp_save(&gateway, params).await,
-        protocol::MCP_DELETE => settings::mcp_delete(&gateway, params).await,
-        protocol::MCP_ENABLE => settings::mcp_enable(&gateway, params).await,
-        protocol::MCP_LOGIN => settings::mcp_login(&gateway, params).await,
-        protocol::PLUGIN_ENABLE => settings::plugin_enable(&gateway, params).await,
-        protocol::PLUGIN_PROMOTE => settings::plugin_promote(&gateway, params).await,
-        protocol::PLUGIN_DISCARD => settings::plugin_discard(&gateway, params).await,
         _ => methods::call(gateway, method, params).await,
     }
 }
@@ -232,58 +142,8 @@ pub const CORE_METHODS: &[&str] = &[
     protocol::MCP_LIST,
     protocol::MCP_RECONNECT,
     protocol::MODEL_LIST,
-    protocol::CONFIG_STATUS,
-    protocol::CONFIG_GET,
-    protocol::CONFIG_SET,
-    protocol::CONFIG_ENV,
-    protocol::MODEL_GET,
-    protocol::MODEL_SAVE,
-    protocol::MODEL_DELETE,
-    protocol::MODEL_DEFAULT,
-    protocol::MCP_GET,
-    protocol::MCP_TOOL_ENABLE,
-    protocol::CUA_STATUS,
-    protocol::CUA_ACTION,
-    protocol::BROWSER_STATUS,
-    protocol::PLUGIN_LIST,
-    protocol::PLUGIN_DELETE,
-    protocol::SKILL_LIST,
-    protocol::SECRET_LIST,
-    protocol::SECRET_SET,
-    protocol::SECRET_DELETE,
-    protocol::PAIRING_LIST,
-    protocol::PAIRING_RESOLVE,
-    protocol::PAIRING_REVOKE,
-    protocol::PAIRING_ACCEPT,
-    protocol::DEVICE_LIST,
-    protocol::DEVICE_ADD,
-    protocol::DEVICE_REVOKE,
     protocol::THREAD_LIST,
     protocol::THREAD_SEARCH,
-    protocol::PRESET_LIST,
-    protocol::PRESET_CREATE,
-    protocol::PRESET_DELETE,
-    protocol::PRESET_GET,
-    protocol::PRESET_UPDATE,
-    protocol::TOOL_CATALOG,
-    protocol::PRESET_DRAFT,
-    protocol::PRESET_REWRITE,
-    protocol::PRESET_SUGGEST_TOOLS,
-    protocol::FS_LIST,
-    protocol::FS_READ,
-    protocol::FS_FIND,
-    protocol::CANVAS_LIST,
-    protocol::CANVAS_GET,
-    protocol::CANVAS_SET_DATA,
-    protocol::CANVAS_ROLLBACK,
-    protocol::MODEL_TEST,
-    protocol::MCP_SAVE,
-    protocol::MCP_DELETE,
-    protocol::MCP_ENABLE,
-    protocol::MCP_LOGIN,
-    protocol::PLUGIN_ENABLE,
-    protocol::PLUGIN_PROMOTE,
-    protocol::PLUGIN_DISCARD,
     protocol::THREAD_REWIND,
     protocol::THREAD_START,
     protocol::THREAD_OPEN,

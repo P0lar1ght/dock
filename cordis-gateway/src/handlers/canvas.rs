@@ -24,6 +24,10 @@ use crate::handlers::thread::fresh_roster;
 use crate::protocol::{self, RpcError};
 use crate::threads;
 
+use cordis::{plugin, Inject, Plugin};
+
+use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
+
 pub async fn dispatch(
     gateway: &GatewayHandle,
     method: &str,
@@ -125,4 +129,31 @@ fn get(dir: &std::path::Path, params: &Value) -> Result<Value, RpcError> {
         "data": c.data,
         "path": canvas::root(dir).join(id).display().to_string(),
     }))
+}
+
+/// 画布这一块：`canvas/list|get|setData|rollback`。读写会话目录下的文件，放到连接锁外跑。
+pub fn gateway_canvas() -> Plugin {
+    plugin(
+        "gateway.canvas",
+        Inject::from([GATEWAY_METHODS]),
+        |ctx, _: &()| {
+            let entry = |name: &'static str| {
+                (
+                    name,
+                    MethodPolicy::detached(),
+                    method(move |gw, params| async move { dispatch(&gw, name, params).await }),
+                )
+            };
+            register_methods(
+                ctx,
+                vec![
+                    entry(protocol::CANVAS_LIST),
+                    entry(protocol::CANVAS_GET),
+                    entry(protocol::CANVAS_SET_DATA),
+                    entry(protocol::CANVAS_ROLLBACK),
+                ],
+            )?;
+            Ok(None)
+        },
+    )
 }

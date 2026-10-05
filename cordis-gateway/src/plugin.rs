@@ -122,6 +122,10 @@ fn finish_mount(
 /// 就在组合根换，网关本身不用改。
 pub fn features() -> Vec<Plugin> {
     vec![
+        crate::handlers::settings::gateway_settings(),
+        crate::handlers::preset::gateway_presets(),
+        crate::handlers::fs::gateway_fs(),
+        crate::handlers::canvas::gateway_canvas(),
         crate::handlers::vcs::gateway_vcs(),
         crate::handlers::schedule::gateway_schedule(),
     ]

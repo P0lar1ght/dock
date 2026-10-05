@@ -15,7 +15,6 @@ use crate::devices::{self, Device};
 use crate::handle::GatewayHandle;
 use crate::handlers::browser_view::{self, BrowserViews};
 use crate::handlers::desktop_view::{self, DesktopViews};
-use crate::handlers::settings;
 use crate::http::AppState;
 use crate::pairing::IssuedTicket;
 use crate::protocol::{self, RpcError};
@@ -92,9 +91,7 @@ fn settings_gate(
     gateway: &GatewayHandle,
     method: &str,
 ) -> Result<(), RpcError> {
-    let trusted_only = settings::is_settings_method(method)
-        || crate::methods::policy_of(gateway, method).trusted_only;
-    if trusted_only && !auth.is_some_and(Auth::trusted) {
+    if crate::methods::policy_of(gateway, method).trusted_only && !auth.is_some_and(Auth::trusted) {
         return Err(RpcError::app("forbidden", "只有桌面 GUI 能改 Dock 设置"));
     }
     Ok(())

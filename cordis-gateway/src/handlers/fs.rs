@@ -18,6 +18,10 @@ use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError};
 use crate::threads;
 
+use cordis::{plugin, Inject, Plugin};
+
+use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
+
 const FIND_DEFAULT: usize = 50;
 const FIND_MAX: usize = 500;
 
@@ -115,4 +119,30 @@ fn find(root: &std::path::Path, params: &Value) -> Result<Value, RpcError> {
         .unwrap_or(FIND_DEFAULT);
     let paths = files::find(root, query, limit).map_err(RpcError::invalid_params)?;
     Ok(json!({ "paths": paths }))
+}
+
+/// 工作区文件这一块：`fs/list|read|find`。读大仓库要走很多目录，放到连接锁外跑。
+pub fn gateway_fs() -> Plugin {
+    plugin(
+        "gateway.fs",
+        Inject::from([GATEWAY_METHODS]),
+        |ctx, _: &()| {
+            let entry = |name: &'static str| {
+                (
+                    name,
+                    MethodPolicy::detached(),
+                    method(move |gw, params| async move { dispatch(&gw, name, params).await }),
+                )
+            };
+            register_methods(
+                ctx,
+                vec![
+                    entry(protocol::FS_LIST),
+                    entry(protocol::FS_READ),
+                    entry(protocol::FS_FIND),
+                ],
+            )?;
+            Ok(None)
+        },
+    )
 }
