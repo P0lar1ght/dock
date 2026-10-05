@@ -131,3 +131,7 @@ pub const STATUS_CHANGED: &str = "status/changed";
 pub const TOOL_VIEWS: &str = "tool.views";
 /// 有工具的卡片视图登记或卸下了，载荷是工具名（`String`）。
 pub const TOOL_VIEWS_CHANGED: &str = "tool.views/changed";
+/// 插件声明的设置卡（[`crate::PluginSettings`]）。
+pub const PLUGIN_SETTINGS: &str = "plugin.settings";
+/// 设置卡登记 / 卸下了，或值改了，载荷是插件 id（`String`）。
+pub const PLUGIN_SETTINGS_CHANGED: &str = "plugin.settings/changed";

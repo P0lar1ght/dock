@@ -91,7 +91,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `gateway.fs`（`fs/*`）、`gateway.canvas`（`canvas/*`）
   - `gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`（`schedule/*`）
   - `gateway.surfaces`（`surface/*`）、`gateway.status`（`status/list`）
-  - `gateway.toolViews`（`tool/views`、`tool/view`）
+  - `gateway.toolViews`（`tool/views`、`tool/view`）、`gateway.pluginSettings`（`plugin/settings/*`）
 - 功能插件推连接级通知用 `GatewayMethods::notify(method, params)`：
   `schedule/changed`、`surface/changed` 都是这么推的。
 - 方法按域分在 `handlers/`：
@@ -525,6 +525,20 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 插件这次不给 / 没登记时 `view` 是 `null`；找不到那次调用回 `not_found`；
   - 会跑插件脚本，只给受信 ticket。
 - 推送 `tool/views/changed { name }`：连接级。有工具的视图登记或卸下时到。
+
+### 插件设置卡（能力 `pluginSettings`，`handlers/plugin_settings.rs`）
+
+都在设置页命名空间，只认受信 ticket。
+
+- `plugin/settings/list {}` → `{ plugins: [{ pluginId, title }] }`。
+- `plugin/settings/get { pluginId }` → `{ pluginId, schema, values, secrets }`：
+  - `values`：普通字段的当前值（没写过是 default）；
+  - `secrets`：密钥字段设没设，永远不回原值。
+- `plugin/settings/set { pluginId, values }`：
+  - 成功 `{ ok: true, settings }`；
+  - 字段不合法 `{ ok: false, errors: { key: 原因 } }`，整组不写；
+  - 密钥字段：空串不改，`null` 删掉。
+- 推送 `plugin/settings/changed { pluginId }`：连接级。
 
 ### Pull Request（能力 `pullRequests`，`handlers/vcs.rs`）
 

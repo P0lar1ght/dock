@@ -257,6 +257,13 @@ pub enum Effect {
         user: bool,
     },
     ShowCordis,
+    /// `/cordis set <插件> <key> <值>`：按插件的设置卡写一项（值能按 JSON 解析就按 JSON，
+    /// 否则当文字；`null` 清回默认）。
+    SetPluginSetting {
+        plugin: String,
+        key: String,
+        value: String,
+    },
     /// Live `/browser` cockpit overlay (status / tabs / screenshot / 审批).
     ShowBrowser,
     /// Live `/computer` thin cockpit (cua-driver MCP status / 审批). No embedded desktop.
@@ -512,7 +519,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         }
         SlashCmd::Mcps => Effect::ShowMcps,
         SlashCmd::Lsp => lsp_effect(args),
-        SlashCmd::Cordis => Effect::ShowCordis,
+        SlashCmd::Cordis => cordis_effect(args),
         SlashCmd::Preset => {
             let focus = if args.is_empty() {
                 None
@@ -640,6 +647,28 @@ fn lsp_effect(args: &str) -> Effect {
 
 /// `/goal`：看 / 改目标开终端的目标面板，其余（开始、暂停、恢复、清除、空参数）
 /// 交给命令表。
+/// `/cordis`：看插件；`/cordis set <插件> <key> <值>` 改一项设置。
+fn cordis_effect(args: &str) -> Effect {
+    let mut parts = args.trim().splitn(4, char::is_whitespace);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("set"), Some(plugin), Some(key), Some(value)) if !value.trim().is_empty() => {
+            Effect::SetPluginSetting {
+                plugin: plugin.into(),
+                key: key.into(),
+                value: value.trim().into(),
+            }
+        }
+        (Some("set"), ..) => Effect::ShowNotice {
+            title: "插件设置".into(),
+            body: "用法：/cordis set <插件 id> <key> <值>\n\
+                   值能按 JSON 解析就按 JSON（数字、true / false、null 清回默认），否则当文字。\n\
+                   密钥字段写进密钥库，插件用 host.secret(key) 读。\n"
+                .into(),
+        },
+        _ => Effect::ShowCordis,
+    }
+}
+
 fn goal_effect(args: &str) -> Effect {
     let args = args.trim();
     match args.split_whitespace().next().unwrap_or("") {

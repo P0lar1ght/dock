@@ -5218,3 +5218,116 @@ async fn paired_pages_cannot_render_tool_views() {
     let drawn = rpc.call("tool/view", json!({ "itemId": "x" })).await;
     assert_eq!(drawn["error"]["details"]["code"], "forbidden", "{drawn}");
 }
+
+/// 插件设置卡：设置页按 schema 拿表单、改值；不合法整组不写；密钥只说设没设。
+#[tokio::test]
+async fn plugin_settings_cards_reach_the_settings_page() {
+    use cordis_base::plugin_settings::SettingsSchema;
+    use cordis_spine::{PluginSettings, PLUGIN_SETTINGS};
+
+    let root = harness_root().await;
+    root.plugin(cordis_spine::plugin_settings(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let settings = root.require::<PluginSettings>(PLUGIN_SETTINGS).unwrap();
+    let _card = settings
+        .register(
+            "deploy",
+            SettingsSchema::parse(&json!({
+                "title": "部署助手",
+                "fields": [
+                    { "key": "region", "type": "select", "options": ["cn", "us"], "default": "cn" },
+                    { "key": "timeout", "type": "number", "min": 10, "max": 600 },
+                    { "key": "gwtest-deploy-token", "type": "secret" }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let listed = gui.call("plugin/settings/list", json!({})).await;
+    assert_eq!(
+        listed["result"]["plugins"],
+        json!([{ "pluginId": "deploy", "title": "部署助手" }]),
+        "{listed}"
+    );
+    let got = gui
+        .call("plugin/settings/get", json!({ "pluginId": "deploy" }))
+        .await;
+    assert_eq!(got["result"]["values"]["region"], "cn", "{got}");
+    assert_eq!(got["result"]["secrets"]["gwtest-deploy-token"], false);
+    assert_eq!(got["result"]["schema"]["fields"][0]["type"], "select");
+
+    let bad = gui
+        .call(
+            "plugin/settings/set",
+            json!({ "pluginId": "deploy", "values": { "region": "us", "timeout": 5 } }),
+        )
+        .await;
+    assert_eq!(bad["result"]["ok"], false, "{bad}");
+    assert_eq!(bad["result"]["errors"]["timeout"], "最小 10");
+    assert_eq!(
+        settings.get("deploy", "region"),
+        Some(json!("cn")),
+        "整组不写"
+    );
+
+    let ok = gui
+        .call(
+            "plugin/settings/set",
+            json!({ "pluginId": "deploy", "values": {
+                "region": "us", "timeout": 30, "gwtest-deploy-token": "s3cret"
+            }}),
+        )
+        .await;
+    assert_eq!(ok["result"]["ok"], true, "{ok}");
+    assert_eq!(ok["result"]["settings"]["values"]["region"], "us");
+    assert_eq!(
+        ok["result"]["settings"]["secrets"]["gwtest-deploy-token"],
+        true
+    );
+    assert!(
+        !ok.to_string().contains("s3cret"),
+        "密钥原值不能回到界面：{ok}"
+    );
+    let pushed = gui
+        .wait_notification("plugin/settings/changed", Duration::from_secs(5))
+        .await;
+    assert_eq!(pushed["params"]["pluginId"], "deploy");
+    // 留空不改；null 删掉。
+    let keep = gui
+        .call(
+            "plugin/settings/set",
+            json!({ "pluginId": "deploy", "values": { "gwtest-deploy-token": "" } }),
+        )
+        .await;
+    assert_eq!(
+        keep["result"]["settings"]["secrets"]["gwtest-deploy-token"],
+        true
+    );
+    let cleared = gui
+        .call(
+            "plugin/settings/set",
+            json!({ "pluginId": "deploy", "values": { "gwtest-deploy-token": null } }),
+        )
+        .await;
+    assert_eq!(
+        cleared["result"]["settings"]["secrets"]["gwtest-deploy-token"], false,
+        "{cleared}"
+    );
+}
+
+#[tokio::test]
+async fn paired_pages_cannot_touch_plugin_settings() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let listed = rpc.call("plugin/settings/list", json!({})).await;
+    assert_eq!(listed["error"]["details"]["code"], "forbidden", "{listed}");
+}

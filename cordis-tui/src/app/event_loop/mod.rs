@@ -543,17 +543,25 @@ pub async fn run(root: Context) -> Result<()> {
                                         .get::<Sessions>(SESSIONS)
                                         .map(|s| s.identity().to_string())
                                         .unwrap_or_else(|| "main".into());
-                                    let body = ctx
+                                    let mut body = ctx
                                         .get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
                                         .map(|runner| runner.overlay_listing(&sid))
                                         .unwrap_or_else(|| {
                                             "dynamicCordisRunner 未挂载。".into()
                                         });
+                                    if let Some(settings) = plugin_settings_listing(&ctx) {
+                                        body.push_str("\n\n");
+                                        body.push_str(&settings);
+                                    }
                                     overlay = Overlay::Notice {
                                         title: "Cordis 插件".into(),
                                         body,
                                         scroll: 0,
                                     };
+                                }
+                                Effect::SetPluginSetting { plugin, key, value } => {
+                                    let msg = set_plugin_setting(&ctx, &plugin, &key, &value);
+                                    flash(&ctx, msg);
                                 }
                                 Effect::ShowBrowser => {
                                     overlay = Overlay::Browser { scroll: 0 };
