@@ -84,6 +84,9 @@ pub fn views() -> Vec<Plugin> {
 
 /// Pager event loop. 只跑事件循环：视图件由组合根挂（见 [`views`]），这里
 /// inject 它们——换掉任何一颗都不用碰循环。
+///
+/// **必须先挂 [`views`]**。inject 的依赖没到齐时插件只是一直等着、不报错：忘了挂
+/// 视图件，`tui` 会停在等依赖的状态，终端上什么都不出现。
 pub fn tui() -> Plugin {
     plugin_async(
         "tui",

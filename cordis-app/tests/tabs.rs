@@ -90,7 +90,8 @@ async fn boot() -> Booted {
         .wait()
         .await
         .unwrap();
-    // 第一页（根）的视图在真实启动里由 `tui()` 挂；这里只补测试要用到的两个。
+    // 第一页（根）的视图在真实启动里由组合根（`main` 里的 `views()` 循环）挂；
+    // 这里只补测试要用到的两个。
     root.plugin(theme(), ()).unwrap().wait().await.unwrap();
     root.plugin(prompt(), ()).unwrap().wait().await.unwrap();
     root.plugin(tabs(), tab_mount())
@@ -209,6 +210,23 @@ async fn carry_back_fills_the_origin_prompt_without_sending() {
     assert!(text.contains("结论：改 config.rs 第 42 行"), "{text}");
     assert!(text.contains("（来自第"), "{text}");
     assert_eq!(main.events().len(), 1, "带回只填输入框，不动来源页的历史");
+}
+
+/// TUI 的视图按页各一份，靠组合根经 `TabsConfig::per_tab` 把它们加进隔离名单。
+/// 漏了这一步，第 2 页挂 `prompt()` 时撞上根上那份（「service `tui.prompt` has been
+/// registered」），开页直接失败；这里同时钉住开得出来、且不是同一个输入框。
+#[tokio::test]
+async fn each_page_gets_its_own_views() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    tabs.open().await.unwrap();
+    let page = tabs.active_ctx();
+    let root_prompt = root.get::<PromptWidget>(TUI_PROMPT).unwrap();
+    let page_prompt = page.get::<PromptWidget>(TUI_PROMPT).unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&root_prompt, &page_prompt),
+        "第 2 页的输入框不该是第 1 页那个"
+    );
 }
 
 #[tokio::test]

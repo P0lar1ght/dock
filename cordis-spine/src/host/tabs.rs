@@ -687,6 +687,10 @@ fn clip(text: &str) -> String {
 }
 
 /// Mount named `"tabs"`。config 是组合根给的建页工厂与宿主的每页名字。
+///
+/// config 的类型必须是 [`TabsConfig`]（不带视图用 [`TabsConfig::headless`]）。插件
+/// 配置在运行时才做类型检查：传裸的 [`TabMount`] 能编译，挂载时才报
+/// 「plugin config has the wrong type」。
 pub fn tabs() -> Plugin {
     plugin("tabs", Inject::new(), |ctx, config: &TabsConfig| {
         Ok(Some(
