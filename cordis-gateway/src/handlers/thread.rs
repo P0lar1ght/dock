@@ -10,7 +10,7 @@ use cordis_spine::{
     apply_restored_preset, session_cwd, AgentPresets, ApplyRestoredPreset, ArchivedSession, Roster,
     RosterEntry, Sessions, AGENT_PRESETS, ROSTER, SESSIONS,
 };
-use cordis_tui::{Tabs, TUI_TABS};
+use cordis_tui::{SessionRef, Tabs, SESSION_PORT, TUI_TABS};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError, LIVE_THREAD_ID};
@@ -391,6 +391,80 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         "messages": messages,
         "events": events
     }))
+}
+
+/// 撤回时等那一轮停下来的上限。取消是发信号，进程收尾、采样断流要一点时间。
+const REWIND_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `thread/rewind { threadId, turnId }`：撤回 `turnId` 那条用户消息——它和之后的对话全部
+/// 删掉（含落盘），正文和图片还回来，客户端放回输入框改了再发。
+///
+/// 正在跑就先停、等它停下。还有排队的消息时拒绝：停下之后排队的会接着发出去，撤回点
+/// 就对不上了。工具已经做过的事（写过的文件、跑过的命令）不会撤销。
+pub async fn rewind(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    open_on_demand(gateway, &params).await?;
+    let thread_id = threads::thread_param(&params);
+    let turn_id = text(&params, "turnId")?;
+    let page = threads::resolve(gateway, &thread_id)?;
+    let sessions = page
+        .ctx
+        .get::<Sessions>(SESSIONS)
+        .ok_or_else(|| RpcError::app("unavailable", "sessions is not mounted"))?;
+    let ordinal = gateway
+        .user_ordinal(&page.identity, &turn_id)
+        .ok_or_else(|| RpcError::app("not_found", format!("没有用户消息 {turn_id}")))?;
+    if let Some(port) = page.ctx.get::<SessionRef>(SESSION_PORT) {
+        if port.has_queued() {
+            return Err(RpcError::app(
+                "queued",
+                "还有排队的消息，先发出或删掉它们再撤回",
+            ));
+        }
+        if port.working() {
+            port.cancel();
+            let deadline = tokio::time::Instant::now() + REWIND_SETTLE;
+            while port.working() {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(RpcError::app("busy", "这一轮还没停下来，稍后再撤回"));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    let (message, images) = sessions
+        .rewind_to_user(ordinal)
+        .ok_or_else(|| RpcError::app("not_found", format!("没有用户消息 {turn_id}")))?;
+    gateway.reset_page(&page);
+    let images: Vec<Value> = images
+        .iter()
+        .map(|img| {
+            json!({
+                "mimeType": img.mime,
+                "width": img.width,
+                "height": img.height,
+                "dataBase64": base64::engine::general_purpose::STANDARD.encode(&img.data[..]),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "threadId": thread_id,
+        "message": strip_image_chips(&message, images.len()),
+        "images": images,
+    }))
+}
+
+/// 发送时在正文前面补的 `[Image #1] [Image #2]`（`turn::with_image_chips`）：图片会单独还回去，
+/// 正文里去掉，免得放回输入框后再发一遍又多一组。
+fn strip_image_chips(message: &str, count: usize) -> String {
+    let mut rest = message;
+    for i in 1..=count {
+        let chip = format!("[Image #{i}]");
+        match rest.strip_prefix(&chip) {
+            Some(after) => rest = after.trim_start_matches(' '),
+            None => break,
+        }
+    }
+    rest.to_string()
 }
 
 /// `item/image { threadId, itemId, index? }`：一条工具结果里第 `index` 张图的像素

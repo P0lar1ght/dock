@@ -84,6 +84,9 @@ struct Projector {
     seq: u64,
     turn_n: u64,
     turn_id: String,
+    /// 每条用户消息开的那一轮的 `turnId`，下标就是它在会话日志里是第几条用户消息。
+    /// `turnId` 不能直接换算：空闲时手动压缩也会开一轮（[`Transcript::ensure_turn`]）。
+    user_turns: Vec<String>,
     last_text: String,
     /// 同 `last_text`，给 `item/reasoning_delta`（模型的思考过程）用。
     last_reasoning: String,
@@ -170,6 +173,11 @@ impl Transcript {
         &self.page
     }
 
+    /// `turn_id` 那一轮是第几条用户消息（从 0 数）；不是用户消息开的轮回 `None`。
+    pub fn user_ordinal(&self, turn_id: &str) -> Option<usize> {
+        self.projector.user_turns.iter().position(|t| t == turn_id)
+    }
+
     pub fn latest_seq(&self) -> u64 {
         self.projector.seq
     }
@@ -238,6 +246,7 @@ impl Transcript {
                 self.projector.pending_tools.clear();
                 self.projector.turn_open = true;
                 let turn_id = self.projector.turn_id.clone();
+                self.projector.user_turns.push(turn_id.clone());
                 self.push("turn/started", json!({ "status": "running" }));
                 let mut payload = json!({ "content": text, "turnId": turn_id });
                 if !user_attachments.is_empty() {

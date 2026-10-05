@@ -10,6 +10,10 @@
 
 ### 新增
 
+- **撤回任意一条消息**：`dock.1` 新增 `thread/rewind`（能力 `threadRewind`）。
+  - 这条和它之后的对话全部删掉（含落盘），正文和图片还回来，改完再发。
+  - 正在跑先停下；撤回点早于压缩时压缩一并作废。
+  - 工具已经做过的事（改过的文件、跑过的命令）不会撤销。
 - **网关能列出项目的 GitHub PR**：`vcs/pr/list` / `vcs/pr/get`（能力 `pullRequests`），只读，经本机 `gh`。
   - 标出「我的」「请我 review」，汇总 CI 检查；详情含 review、改动量、逐项检查。
   - 没装 / 没登录 gh、不是 git 仓库、没有 GitHub 远端时回 `available: false` + 中文提示，不报错。

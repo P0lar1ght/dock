@@ -341,6 +341,11 @@ impl GatewayHandle {
         t.history_since(0)
     }
 
+    /// 这一页 `turn_id` 那一轮是第几条用户消息（`thread/rewind` 用）。
+    pub fn user_ordinal(&self, page: &str, turn_id: &str) -> Option<usize> {
+        self.with_transcript(page, |t| t.user_ordinal(turn_id))
+    }
+
     fn with_transcript<R>(&self, page: &str, f: impl FnOnce(&mut Transcript) -> R) -> R {
         with_transcript(&self.inner, page, None, f)
     }

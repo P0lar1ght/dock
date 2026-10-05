@@ -60,6 +60,8 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `vcs/pr/list` / `vcs/pr/get`：项目的 GitHub PR（只读，经本机 gh）。gh 用不了回
     // `available: false` + `reason` / `hint`，不是错误。
     ("pullRequests", true),
+    // `thread/rewind`：撤回任意一条用户消息——它和之后的对话全部删掉，正文和图片还回来。
+    ("threadRewind", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -100,6 +102,7 @@ pub const THREAD_ARCHIVE: &str = "thread/archive";
 pub const THREAD_RESTORE: &str = "thread/restore";
 pub const THREAD_DELETE: &str = "thread/delete";
 pub const THREAD_HISTORY: &str = "thread/history";
+pub const THREAD_REWIND: &str = "thread/rewind";
 /// 一条工具结果里的一张图的像素（`item/tool_completed` 的 `attachments` 只带元数据）。
 pub const ITEM_IMAGE: &str = "item/image";
 pub const THREAD_SUBSCRIBE: &str = "thread/subscribe";

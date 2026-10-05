@@ -81,7 +81,8 @@ pub async fn dispatch(
         | protocol::PLUGIN_PROMOTE
         | protocol::PLUGIN_DISCARD
         | protocol::VCS_PR_LIST
-        | protocol::VCS_PR_GET => dispatch_detached(gateway, method, params).await,
+        | protocol::VCS_PR_GET
+        | protocol::THREAD_REWIND => dispatch_detached(gateway, method, params).await,
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
@@ -188,6 +189,8 @@ pub fn is_detached(method: &str) -> bool {
             // 跑 gh（走网络，一次几秒）。
             | protocol::VCS_PR_LIST
             | protocol::VCS_PR_GET
+            // 在跑的话要先停、等它停下来（最多几秒）。
+            | protocol::THREAD_REWIND
     )
 }
 
@@ -200,6 +203,7 @@ pub async fn dispatch_detached(
     match method {
         protocol::VCS_PR_LIST => vcs::list(&gateway, params).await,
         protocol::VCS_PR_GET => vcs::get(&gateway, params).await,
+        protocol::THREAD_REWIND => thread::rewind(&gateway, params).await,
         protocol::PRESET_DRAFT => preset::draft(&gateway, params).await,
         protocol::PRESET_REWRITE => preset::rewrite(&gateway, params).await,
         protocol::PRESET_SUGGEST_TOOLS => preset::suggest_tools(&gateway, params).await,
