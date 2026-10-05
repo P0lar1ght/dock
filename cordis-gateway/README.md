@@ -499,10 +499,12 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 插件（Rhai `host.register_slot`）登记的面板，不分端：正文是文本，动作是按钮。
 
 - `surface/list {}` → `{ surfaces: [{ id, title, hud }] }`。
-- `surface/get { id }` → `{ surface: { id, title, body, actions: [{ id, label }] } }`：
+- `surface/get { id }` → `{ surface: { id, title, body, view, actions: [{ id, label }] } }`：
+  - `view`：插件给了视图树就是规范化的 dock.view.1（`docs/PLUGIN-VIEWS.md`），否则 `null`；
+  - 有视图时 `body` 是视图的纯文本降级，不再跑插件的 `render()`；
   画正文要跑插件脚本、正文可能带本机信息，只给受信 ticket。
 - `surface/action { id, action }` → `{ closed, surface }`：
-  - 只认面板声明过的动作，否则 `invalid_params`；
+  - 只认面板声明过的动作或视图里的按钮 / 列表行动作，否则 `invalid_params`；
   - 动作会跑插件脚本，只给受信 ticket（`forbidden`，同设置页）；
   - `closed` 为真表示插件要关面板；插件在动作里注销了面板时 `surface` 为 `null`。
 - 推送 `surface/changed { id }`：连接级。增删、被操作、插件 `host.slot_changed` 时到。

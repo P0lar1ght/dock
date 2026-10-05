@@ -313,7 +313,12 @@ pub(super) fn run_action(
                 let _ = dispatch_slot_key(ctx, overlay, key);
                 if let Overlay::Slot { id, scroll } = overlay {
                     if let Some(slots) = ctx.get::<TuiSlots>(TUI_SLOTS) {
-                        if let Some(body) = slots.render(id) {
+                        // 和画的时候同一个 key：有视图用视图的纯文本，否则用 `render()`。
+                        let body = slots
+                            .view(id)
+                            .map(|v| v.to_plain())
+                            .or_else(|| slots.render(id));
+                        if let Some(body) = body {
                             scroll_text(scroll, delta, &body);
                         }
                     }

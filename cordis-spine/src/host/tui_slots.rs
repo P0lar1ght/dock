@@ -12,6 +12,7 @@ use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use indexmap::IndexMap;
 
 use crate::names::{TUI_SLOTS, TUI_SLOTS_CHANGED};
+use cordis_base::view::ViewNode;
 
 pub enum SlotKeyResult {
     Keep,
@@ -35,6 +36,10 @@ pub trait SlotHandler: Send + Sync {
     /// 可点的动作。没声明就只有终端按键能操作它。
     fn actions(&self) -> Vec<SlotAction> {
         Vec::new()
+    }
+    /// 视图树（`docs/PLUGIN-VIEWS.md`）。有就按它画，没有就画 [`Self::render`] 的文本。
+    fn view(&self) -> Option<ViewNode> {
+        None
     }
 }
 
@@ -147,6 +152,26 @@ impl TuiSlots {
 
     pub fn actions(&self, id: &str) -> Vec<SlotAction> {
         self.get(id).map(|h| h.actions()).unwrap_or_default()
+    }
+
+    pub fn view(&self, id: &str) -> Option<ViewNode> {
+        self.get(id).and_then(|h| h.view())
+    }
+
+    /// 能点的全部动作 id：声明的 [`SlotAction`] 加上视图树里的按钮 / 列表行。
+    pub fn action_ids(&self, id: &str) -> Vec<String> {
+        let Some(h) = self.get(id) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<String> = h.actions().into_iter().map(|a| a.id).collect();
+        if let Some(view) = h.view() {
+            for a in view.actions() {
+                if !ids.contains(&a) {
+                    ids.push(a);
+                }
+            }
+        }
+        ids
     }
 
     pub fn hud_lines(&self) -> Vec<(String, String)> {

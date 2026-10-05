@@ -5006,6 +5006,72 @@ async fn plugin_surfaces_reach_the_gui() {
     assert_eq!(bye["result"]["closed"], true, "{bye}");
 }
 
+/// 面板带视图树时 `surface/get` 把规范化的视图投出去，视图里的按钮也能点。
+#[tokio::test]
+async fn surface_views_are_projected_and_clickable() {
+    use cordis_base::view::ViewNode;
+    use cordis_spine::{SlotHandler, SlotKeyResult, TuiSlots, TUI_SLOTS};
+
+    struct Viewed(std::sync::Mutex<Vec<String>>);
+    impl SlotHandler for Viewed {
+        fn title(&self) -> String {
+            "部署助手".into()
+        }
+        fn hud(&self) -> bool {
+            false
+        }
+        fn render(&self) -> String {
+            unreachable!("有视图时不该再跑 render()")
+        }
+        fn on_key(&self, key: &str) -> SlotKeyResult {
+            self.0.lock().unwrap().push(key.into());
+            SlotKeyResult::Keep
+        }
+        fn view(&self) -> Option<ViewNode> {
+            Some(ViewNode::parse(&json!({ "type": "stack", "children": [
+                { "type": "kv", "items": [{ "label": "环境", "value": "production" }] },
+                { "type": "button", "label": "部署", "action": "deploy", "style": "primary" },
+                { "type": "sparkline" }
+            ]})))
+        }
+    }
+
+    let root = harness_root().await;
+    root.plugin(cordis_spine::tui_slots(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let slots = root.require::<TuiSlots>(TUI_SLOTS).unwrap();
+    let probe = Arc::new(Viewed(Default::default()));
+    let _slot = slots.register("deploy".into(), probe.clone()).unwrap();
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+
+    let got = gui.call("surface/get", json!({ "id": "deploy" })).await;
+    let view = &got["result"]["surface"]["view"];
+    assert_eq!(view["type"], "stack", "{got}");
+    assert_eq!(view["children"][1]["action"], "deploy");
+    assert_eq!(
+        view["children"][2]["type"], "sparkline",
+        "不认识的节点原样带回"
+    );
+    assert!(got["result"]["surface"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("环境：production"));
+
+    let clicked = gui
+        .call(
+            "surface/action",
+            json!({ "id": "deploy", "action": "deploy" }),
+        )
+        .await;
+    assert!(clicked.get("error").is_none(), "{clicked}");
+    assert_eq!(*probe.0.lock().unwrap(), vec!["deploy"]);
+}
+
 /// 配对来的网页只看得到面板列表（id、标题）：取正文、点动作都要跑插件脚本，正文也可能
 /// 带本机信息，同设置页只认受信 ticket。
 #[tokio::test]

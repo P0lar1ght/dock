@@ -16,6 +16,7 @@ use cordis_base::types::{
     LogEvent, StepStart, ToolCall, ToolSpec, TurnEnd, ORDER_STEP_START_DYNAMIC,
     ORDER_TURN_END_DYNAMIC,
 };
+use cordis_base::view::ViewNode;
 
 /// Inline `source` ceiling (tool-call payload).
 pub const MAX_INLINE_SOURCE: usize = 128 * 1024;
@@ -67,8 +68,8 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.register_slot",
-        "Register a slot (terminal overlay, GUI panel): render() -> String, on_key(key) -> \"close\" | (). actions: buttons whose id is passed to on_key (GUI clicks, terminal keys).",
-        &["host.register_slot(#{ id, title, hud?, render, on_key, actions?: [#{ id, label }] })"],
+        "Register a slot (terminal overlay, GUI panel): render() -> String, on_key(key) -> \"close\" | (). actions: buttons whose id is passed to on_key (GUI clicks, terminal keys). view() -> a dock.view.1 tree (docs/PLUGIN-VIEWS.md); when present both clients draw it instead of render(), and its buttons call on_key(action) too (terminal: digit keys 1–9).",
+        &["host.register_slot(#{ id, title, hud?, render, on_key, actions?: [#{ id, label }], view?: || #{ type: \"stack\", children: [...] } })"],
     ),
     (
         "host.slot_changed",
@@ -470,10 +471,15 @@ impl Host {
             .cloned()
             .and_then(|d| d.try_cast::<FnPtr>());
         let actions = slot_actions(&spec)?;
+        let view = spec
+            .get("view")
+            .cloned()
+            .and_then(|d| d.try_cast::<FnPtr>());
         let handler = Arc::new(RhaiSlot {
             title,
             hud,
             actions,
+            view,
             engine: self.inner.engine.clone(),
             ast: self.inner.ast.clone(),
             render,
@@ -734,6 +740,8 @@ struct RhaiSlot {
     title: String,
     hud: bool,
     actions: Vec<SlotAction>,
+    /// `view()` → 视图树（map）。没有就只画 `render()` 的文本。
+    view: Option<FnPtr>,
     engine: Arc<Engine>,
     ast: AST,
     render: FnPtr,
@@ -770,6 +778,24 @@ impl SlotHandler for RhaiSlot {
         self.actions.clone()
     }
 
+    fn view(&self) -> Option<ViewNode> {
+        let view = self.view.as_ref()?;
+        let error = |e: String| {
+            Some(ViewNode::parse(&serde_json::json!({
+                "type": "text", "tone": "danger", "text": format!("（视图出错：{e}）")
+            })))
+        };
+        match call_fnptr_raw(&self.engine, &self.ast, view, Dynamic::UNIT) {
+            // 返回 `()` = 这次不给视图，回退到 `render()`：插件可以按条件给。
+            Ok(tree) if tree.is_unit() => None,
+            Ok(tree) => match dynamic_to_json(&tree) {
+                Ok(json) => Some(ViewNode::parse(&json)),
+                Err(e) => error(e),
+            },
+            Err(e) => error(e),
+        }
+    }
+
     fn hud(&self) -> bool {
         self.hud
     }
@@ -777,7 +803,7 @@ impl SlotHandler for RhaiSlot {
     fn render(&self) -> String {
         match call_fnptr(&self.engine, &self.ast, &self.render, Dynamic::UNIT) {
             Ok(text) => text,
-            Err(e) => format!("(render error: {e})"),
+            Err(e) => format!("（正文出错：{e}）"),
         }
     }
 

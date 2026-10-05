@@ -461,7 +461,17 @@ const RHAI_MEMO: &str = r#"#{
             title: "便签",
             hud: true,
             render: || { "hello slot" },
-            actions: [#{ id: "refresh", label: "刷新" }, #{ id: "clear" }]
+            actions: [#{ id: "refresh", label: "刷新" }, #{ id: "clear" }],
+            view: || #{ type: "stack", children: [
+                #{ type: "kv", items: [#{ label: "条数", value: 3 }] },
+                #{ type: "button", label: "归档", action: "archive" }
+            ] }
+        });
+        host.register_slot(#{
+            id: "later",
+            title: "稍后",
+            render: || { "还没准备好" },
+            view: || ()
         });
         host.slot_changed("memo");
         host.open_slot("memo");
@@ -899,6 +909,13 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
             ("clear".to_string(), "clear".to_string())
         ]
     );
+    // 视图树：脚本返回的 map 解析成节点；视图里的按钮也算能点的动作。
+    let view = tui.view("memo").expect("脚本声明了 view");
+    assert!(view.to_plain().contains("条数：3"), "{view:?}");
+    assert_eq!(tui.action_ids("memo"), vec!["refresh", "clear", "archive"]);
+    // `view` 返回 `()`：这次不给视图，回退到 `render()`。
+    assert!(tui.view("later").is_none());
+    assert_eq!(tui.render("later").as_deref(), Some("还没准备好"));
 
     exec(&root, "cordis_stop", r#"{"pluginId":"memo-1"}"#).await;
     assert!(root.get::<RhaiBag>("dynMemo").is_none());
