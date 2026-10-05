@@ -1489,6 +1489,72 @@ async fn thread_rewind_drops_that_message_and_everything_after() {
     );
 }
 
+/// 空闲时手动压缩也会开一轮（没有用户消息）：`turnId` 不能按 `tN` 换算成第几条用户
+/// 消息。压缩那一轮撤不了（`not_found`），它后面那条用户消息要撤对。
+#[tokio::test]
+async fn thread_rewind_maps_turns_past_an_idle_compaction() {
+    let root = harness_root_with(Some(Arc::new(EchoLastUser))).await;
+    root.plugin(compact(), ()).unwrap().wait().await.unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    let _ = rpc.call("turn/start", json!({ "message": "first" })).await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+    let _ = rpc
+        .call("thread/context/compact", json!({ "threadId": "live" }))
+        .await;
+    rpc.wait_notification("item/compaction", Duration::from_secs(5))
+        .await;
+    let _ = rpc.call("turn/start", json!({ "message": "second" })).await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+
+    let history = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    let compaction_turn = history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["method"] == "item/compaction")
+        .and_then(|e| e["turnId"].as_str())
+        .unwrap()
+        .to_string();
+    let turns = user_turns(&mut rpc).await;
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    assert_ne!(
+        turns[1].0, "t2",
+        "压缩占了一轮，第 2 条用户消息不在 t2：{turns:?}"
+    );
+
+    let missing = rpc
+        .call(
+            "thread/rewind",
+            json!({ "threadId": "live", "turnId": compaction_turn }),
+        )
+        .await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
+
+    let rewound = rpc
+        .call(
+            "thread/rewind",
+            json!({ "threadId": "live", "turnId": turns[1].0 }),
+        )
+        .await;
+    assert_eq!(rewound["result"]["message"], "second", "{rewound}");
+    let left = user_turns(&mut rpc).await;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].1.contains("first"), "{left:?}");
+}
+
 /// 一直不回的模型：一个字节都不出，直到这一轮被取消。和 HTTP 采样器一样认
 /// `TurnControl`（真采样器在每个 await 上都和取消赛跑）。
 struct Hang(Arc<std::sync::OnceLock<Context>>);

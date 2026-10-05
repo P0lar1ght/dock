@@ -326,6 +326,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   客户端放回输入框，改完照常 `turn/start`（图片重新 `imageInputs/put`）。
 - `turnId` 要是用户消息开的那一轮（`item/user_message` 的 `turnId`）；不是或已不存在回 `not_found`。
 - 正在跑就先停（同 `turn/cancel`），等它停下最多 5 秒，停不下回 `busy`。还有排队的消息回 `queued`。
+  等的期间别的连接又排进消息或开了新一轮，同样回 `queued` / `busy`，不撤。
+- 已经交给会话、还没随用户消息发出的图片（`queue_user_images`）一并清掉。
 - 撤回点早于最近一次压缩时，压缩作废，模型历史回到完整的显示日志。
 - **工具已经做过的事（写过的文件、跑过的命令）不会撤销**，日志只是不再记得它们。
 - 投影按截断后的会话重建，`seq` 重新编号：客户端整份重拉 `thread/history`。
