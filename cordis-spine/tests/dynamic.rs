@@ -460,8 +460,10 @@ const RHAI_MEMO: &str = r#"#{
             id: "memo",
             title: "便签",
             hud: true,
-            render: || { "hello slot" }
+            render: || { "hello slot" },
+            actions: [#{ id: "refresh", label: "刷新" }, #{ id: "clear" }]
         });
+        host.slot_changed("memo");
         host.open_slot("memo");
     }
 }"#;
@@ -884,6 +886,19 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
     let tui = root.require::<cordis_spine::TuiSlots>(TUI_SLOTS).unwrap();
     assert_eq!(tui.take_open_request().as_deref(), Some("memo"));
     assert!(tui.render("memo").unwrap().contains("hello slot"));
+    // 声明的动作原样交给 GUI；没写 label 的用 id。
+    let actions: Vec<(String, String)> = tui
+        .actions("memo")
+        .into_iter()
+        .map(|a| (a.id, a.label))
+        .collect();
+    assert_eq!(
+        actions,
+        vec![
+            ("refresh".to_string(), "刷新".to_string()),
+            ("clear".to_string(), "clear".to_string())
+        ]
+    );
 
     exec(&root, "cordis_stop", r#"{"pluginId":"memo-1"}"#).await;
     assert!(root.get::<RhaiBag>("dynMemo").is_none());

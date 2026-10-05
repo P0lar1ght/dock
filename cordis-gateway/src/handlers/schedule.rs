@@ -14,18 +14,19 @@ use serde_json::{json, Value};
 
 use cordis_spine::{
     interval_to_human, parse_interval, session_cwd, Cron, CronError, CronJob, CronOwner, CRON,
+    SCHEDULE_CHANGED,
 };
 
 use cordis::{plugin, Inject, Plugin};
 
 use crate::handle::GatewayHandle;
 use crate::handlers::thread::roster_entries;
-use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
+use crate::methods::{method, register_methods, GatewayMethods, MethodPolicy, GATEWAY_METHODS};
 use crate::protocol::{self, RpcError};
 use crate::threads;
 
-/// 定时任务这一块：把 `schedule/*` 登记进网关的方法表。推送 `schedule/changed` 由网关
-/// 本体转发（连接级通知），这里只管方法。
+/// 定时任务这一块：把 `schedule/*` 登记进网关的方法表，并把 `"cron"` 的变动转成连接级
+/// 推送 `schedule/changed`。
 pub fn gateway_schedule() -> Plugin {
     plugin(
         "gateway.schedule",
@@ -56,6 +57,17 @@ pub fn gateway_schedule() -> Plugin {
                     ),
                 ],
             )?;
+            // 方法表在推送时现取，不把它关进监听闭包。
+            let live = ctx.clone();
+            let listener = ctx.on(SCHEDULE_CHANGED, move |_: &()| {
+                if let Some(table) = live.get::<GatewayMethods>(GATEWAY_METHODS) {
+                    table.notify(protocol::SCHEDULE_CHANGED, json!({}));
+                }
+            })?;
+            ctx.effect("gateway.schedule.changed", |scope| {
+                scope.own(listener);
+                Ok(())
+            })?;
             Ok(None)
         },
     )

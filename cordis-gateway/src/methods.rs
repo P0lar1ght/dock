@@ -79,9 +79,25 @@ struct Entry {
 #[derive(Clone, Default)]
 pub struct GatewayMethods {
     entries: Arc<Mutex<HashMap<String, Entry>>>,
+    /// 连接级推送的出口（网关挂载时接上）；测试里裸建的没有。
+    notices: Option<tokio::sync::broadcast::Sender<Value>>,
 }
 
 impl GatewayMethods {
+    pub(crate) fn with_notices(notices: tokio::sync::broadcast::Sender<Value>) -> Self {
+        Self {
+            notices: Some(notices),
+            ..Self::default()
+        }
+    }
+
+    /// 推一条连接级通知给每条已初始化的连接（不用订阅线程），如 `schedule/changed`。
+    pub fn notify(&self, method: &str, params: Value) {
+        if let Some(tx) = &self.notices {
+            let _ = tx.send(serde_json::json!({ "method": method, "params": params }));
+        }
+    }
+
     /// 登记一个方法。同名已登记就失败。
     pub fn register(
         &self,

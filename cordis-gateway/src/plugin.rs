@@ -113,7 +113,10 @@ fn finish_mount(
         Ok(())
     })?;
     // 功能方法表：vcs、定时任务……各自的插件挂载时往里登记（见 [`features`]）。
-    ctx.provide(GATEWAY_METHODS, GatewayMethods::default())?;
+    ctx.provide(
+        GATEWAY_METHODS,
+        GatewayMethods::with_notices(handle.notices_sender()),
+    )?;
     let provided = ctx.provide(GATEWAY, handle.as_ref_service())?;
     Ok((handle, provided))
 }
@@ -128,5 +131,6 @@ pub fn features() -> Vec<Plugin> {
         crate::handlers::canvas::gateway_canvas(),
         crate::handlers::vcs::gateway_vcs(),
         crate::handlers::schedule::gateway_schedule(),
+        crate::handlers::surface::gateway_surfaces(),
     ]
 }

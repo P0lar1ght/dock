@@ -1,16 +1,28 @@
 //! Named `"tui.slots"` service. Dynamic packages register data+callback
 //! panes; the TUI live-looks this and paints one generic `Overlay::Slot`.
+//!
+//! 插槽本身不分端：正文是一段文本，[`SlotHandler::actions`] 声明可点的动作。终端按键、
+//! GUI 点按钮都落到 [`SlotHandler::on_key`]（动作 id 就是那个键）。名字里的 `tui` 是
+//! 历史原因——磁盘上的 Rhai 包 `inject: ["tui.slots"]`，改名会让它们挂不上。
+//! 插槽增删或被操作后发 [`TUI_SLOTS_CHANGED`]，网关据此推给 GUI。
 
 use std::sync::{Arc, Mutex};
 
-use cordis::{plugin, Disposable, Inject, Plugin};
+use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use indexmap::IndexMap;
 
-use crate::names::TUI_SLOTS;
+use crate::names::{TUI_SLOTS, TUI_SLOTS_CHANGED};
 
 pub enum SlotKeyResult {
     Keep,
     Close,
+}
+
+/// 插槽上一个可点的动作。`id` 就是交给 [`SlotHandler::on_key`] 的键。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlotAction {
+    pub id: String,
+    pub label: String,
 }
 
 /// Host/TUI-owned slot body. Rhai (or tests) implement this; the TUI does
@@ -20,6 +32,10 @@ pub trait SlotHandler: Send + Sync {
     fn hud(&self) -> bool;
     fn render(&self) -> String;
     fn on_key(&self, key: &str) -> SlotKeyResult;
+    /// 可点的动作。没声明就只有终端按键能操作它。
+    fn actions(&self) -> Vec<SlotAction> {
+        Vec::new()
+    }
 }
 
 pub struct SlotInfo {
@@ -37,6 +53,8 @@ struct SlotRec {
 pub struct TuiSlots {
     extra: Arc<Mutex<IndexMap<String, SlotRec>>>,
     open: Arc<Mutex<Option<String>>>,
+    /// 发 [`TUI_SLOTS_CHANGED`] 用；测试里裸建的没有。
+    ctx: Option<Context>,
 }
 
 impl TuiSlots {
@@ -44,6 +62,21 @@ impl TuiSlots {
         Self {
             extra: Arc::new(Mutex::new(IndexMap::new())),
             open: Arc::new(Mutex::new(None)),
+            ctx: None,
+        }
+    }
+
+    fn on(ctx: Context) -> Self {
+        Self {
+            ctx: Some(ctx),
+            ..Self::new()
+        }
+    }
+
+    /// 插槽 `id` 变了（增删、正文要重画）。载荷是插槽 id。
+    pub fn changed(&self, id: &str) {
+        if let Some(ctx) = &self.ctx {
+            ctx.emit(TUI_SLOTS_CHANGED, id.to_string());
         }
     }
 
@@ -60,9 +93,14 @@ impl TuiSlots {
             }
             extra.insert(id.clone(), SlotRec { handler });
         }
+        self.changed(&id);
         let extra = self.extra.clone();
+        let ctx = self.ctx.clone();
         Ok(Disposable::from_fn(move || {
             extra.lock().unwrap().shift_remove(&id);
+            if let Some(ctx) = &ctx {
+                ctx.emit(TUI_SLOTS_CHANGED, id.clone());
+            }
         }))
     }
 
@@ -97,9 +135,18 @@ impl TuiSlots {
 
     pub fn on_key(&self, id: &str, key: &str) -> SlotKeyResult {
         match self.get(id) {
-            Some(h) => h.on_key(key),
+            Some(h) => {
+                let result = h.on_key(key);
+                // 按键 / 点按钮多半改了正文：别的客户端（GUI）据此重拉。
+                self.changed(id);
+                result
+            }
             None => SlotKeyResult::Close,
         }
+    }
+
+    pub fn actions(&self, id: &str) -> Vec<SlotAction> {
+        self.get(id).map(|h| h.actions()).unwrap_or_default()
     }
 
     pub fn hud_lines(&self) -> Vec<(String, String)> {
@@ -167,7 +214,7 @@ pub fn normalize_slot_id(raw: &str) -> Result<String, String> {
 
 pub fn tui_slots() -> Plugin {
     plugin("tui-slots", Inject::new(), |ctx, _: &()| {
-        Ok(Some(ctx.provide(TUI_SLOTS, TuiSlots::new())?))
+        Ok(Some(ctx.provide(TUI_SLOTS, TuiSlots::on(ctx.clone()))?))
     })
 }
 
@@ -194,6 +241,52 @@ mod tests {
                 SlotKeyResult::Keep
             }
         }
+    }
+
+    struct ActionSlot;
+
+    impl SlotHandler for ActionSlot {
+        fn title(&self) -> String {
+            "计数".into()
+        }
+        fn hud(&self) -> bool {
+            false
+        }
+        fn render(&self) -> String {
+            "0".into()
+        }
+        fn on_key(&self, _key: &str) -> SlotKeyResult {
+            SlotKeyResult::Keep
+        }
+        fn actions(&self) -> Vec<SlotAction> {
+            vec![SlotAction {
+                id: "inc".into(),
+                label: "加一".into(),
+            }]
+        }
+    }
+
+    /// 插槽增删、被操作都发 `tui.slots/changed`（载荷是 id），GUI 据此重拉；
+    /// 声明的动作原样可取。
+    #[tokio::test]
+    async fn changes_are_announced_and_actions_are_listed() {
+        let root = Context::new();
+        root.plugin(tui_slots(), ()).unwrap().wait().await.unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let _l = root
+            .on(TUI_SLOTS_CHANGED, move |id: &String| {
+                log.lock().unwrap().push(id.clone())
+            })
+            .unwrap();
+        let slots = root.get::<TuiSlots>(TUI_SLOTS).unwrap();
+        let d = slots
+            .register("counter".into(), Arc::new(ActionSlot))
+            .unwrap();
+        assert_eq!(slots.actions("counter")[0].label, "加一");
+        let _ = slots.on_key("counter", "inc");
+        d.dispose_sync();
+        assert_eq!(*seen.lock().unwrap(), vec!["counter"; 3]);
     }
 
     #[test]

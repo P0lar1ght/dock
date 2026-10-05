@@ -121,3 +121,5 @@ pub const TABS_PAGE_OPENED: &str = "tabs/page-opened";
 pub const GATEWAY: &str = "gateway";
 /// 配对队列 / 绑定变了。载荷 `()`。
 pub const GATEWAY_PAIRING: &str = "gateway/pairing";
+/// 插槽（`"tui.slots"`）增删了、被操作了或正文要重画，载荷是插槽 id（`String`）。
+pub const TUI_SLOTS_CHANGED: &str = "tui.slots/changed";
