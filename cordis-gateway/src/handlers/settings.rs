@@ -863,6 +863,10 @@ pub fn gateway_settings() -> Plugin {
                 trusted_only: true,
                 opens_thread: false,
             };
+            const TRUSTED_DETACHED: MethodPolicy = MethodPolicy {
+                detached: true,
+                ..TRUSTED
+            };
             register_methods(
                 ctx,
                 vec![
@@ -998,74 +1002,42 @@ pub fn gateway_settings() -> Plugin {
                     ),
                     (
                         protocol::MODEL_TEST,
-                        MethodPolicy {
-                            detached: true,
-                            trusted_only: true,
-                            ..MethodPolicy::default()
-                        },
+                        TRUSTED_DETACHED,
                         method(|_, params| async move { model_test(params).await }),
                     ),
                     (
                         protocol::MCP_SAVE,
-                        MethodPolicy {
-                            detached: true,
-                            trusted_only: true,
-                            ..MethodPolicy::default()
-                        },
+                        TRUSTED_DETACHED,
                         method(|gw, params| async move { mcp_save(&gw, params).await }),
                     ),
                     (
                         protocol::MCP_DELETE,
-                        MethodPolicy {
-                            detached: true,
-                            trusted_only: true,
-                            ..MethodPolicy::default()
-                        },
+                        TRUSTED_DETACHED,
                         method(|gw, params| async move { mcp_delete(&gw, params).await }),
                     ),
                     (
                         protocol::MCP_ENABLE,
-                        MethodPolicy {
-                            detached: true,
-                            trusted_only: true,
-                            ..MethodPolicy::default()
-                        },
+                        TRUSTED_DETACHED,
                         method(|gw, params| async move { mcp_enable(&gw, params).await }),
                     ),
                     (
                         protocol::MCP_LOGIN,
-                        MethodPolicy {
-                            detached: true,
-                            trusted_only: true,
-                            ..MethodPolicy::default()
-                        },
+                        TRUSTED_DETACHED,
                         method(|gw, params| async move { mcp_login(&gw, params).await }),
                     ),
                     (
                         protocol::PLUGIN_ENABLE,
-                        MethodPolicy {
-                            detached: true,
-                            trusted_only: true,
-                            ..MethodPolicy::default()
-                        },
+                        TRUSTED_DETACHED,
                         method(|gw, params| async move { plugin_enable(&gw, params).await }),
                     ),
                     (
                         protocol::PLUGIN_PROMOTE,
-                        MethodPolicy {
-                            detached: true,
-                            trusted_only: true,
-                            ..MethodPolicy::default()
-                        },
+                        TRUSTED_DETACHED,
                         method(|gw, params| async move { plugin_promote(&gw, params).await }),
                     ),
                     (
                         protocol::PLUGIN_DISCARD,
-                        MethodPolicy {
-                            detached: true,
-                            trusted_only: true,
-                            ..MethodPolicy::default()
-                        },
+                        TRUSTED_DETACHED,
                         method(|gw, params| async move { plugin_discard(&gw, params).await }),
                     ),
                 ],

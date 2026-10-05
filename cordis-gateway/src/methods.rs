@@ -44,6 +44,18 @@ impl MethodPolicy {
     }
 }
 
+/// 设置页那几个命名空间（能写 MCP 启动命令 = 能在本机跑程序）。这里的方法不管哪颗插件
+/// 登记，都必须 `trusted_only`——设置插件被卸下后，别的插件（含动态插件）也不能用默认
+/// 策略把同名方法登记回来、绕过设置门。
+const TRUSTED_PREFIXES: &[&str] = &[
+    "config/", "secret/", "pairing/", "device/", "plugin/", "mcp/", "model/", "cua/",
+];
+const TRUSTED_NAMES: &[&str] = &["browser/status", "skill/list"];
+
+fn must_be_trusted(name: &str) -> bool {
+    TRUSTED_NAMES.contains(&name) || TRUSTED_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
 /// 方法体：拿网关句柄与参数，回 `result` 或错误。
 pub type MethodHandler =
     Arc<dyn Fn(GatewayHandle, Value) -> BoxFuture<'static, Result<Value, RpcError>> + Send + Sync>;
@@ -84,6 +96,11 @@ impl GatewayMethods {
         if crate::rpc::is_core_method(&name) {
             return Err(cordis::Error::plugin(format!(
                 "方法 {name} 是网关核心方法，插件不能登记"
+            )));
+        }
+        if must_be_trusted(&name) && !policy.trusted_only {
+            return Err(cordis::Error::plugin(format!(
+                "方法 {name} 能改本机配置，必须登记成 trusted_only"
             )));
         }
         {
@@ -176,6 +193,26 @@ mod tests {
         assert!(table
             .register("x/list", MethodPolicy::default(), noop)
             .is_ok());
+    }
+
+    /// 设置页命名空间里的方法不是 `trusted_only` 就登记不进来（设置插件卸下后也一样）。
+    #[test]
+    fn settings_namespaces_must_be_trusted() {
+        let table = GatewayMethods::default();
+        let noop = method(|_, _| async { Ok(Value::Null) });
+        for name in ["secret/peek", "mcp/save", "config/set", "skill/list"] {
+            assert!(
+                table
+                    .register(name, MethodPolicy::detached(), noop.clone())
+                    .is_err(),
+                "{name} 不该以非受信策略登记成功"
+            );
+        }
+        let trusted = MethodPolicy {
+            trusted_only: true,
+            ..MethodPolicy::default()
+        };
+        assert!(table.register("secret/peek", trusted, noop).is_ok());
     }
 
     /// 核心方法名登记不进来：否则 `detached()` 一登记，`turn/start` 就被送去跑插件的
