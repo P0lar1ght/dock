@@ -90,7 +90,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `gateway.presets`（`preset/*`、`tool/catalog`）
   - `gateway.fs`（`fs/*`）、`gateway.canvas`（`canvas/*`）
   - `gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`（`schedule/*`）
-  - `gateway.surfaces`（`surface/*`）
+  - `gateway.surfaces`（`surface/*`）、`gateway.status`（`status/list`）
 - 功能插件推连接级通知用 `GatewayMethods::notify(method, params)`：
   `schedule/changed`、`surface/changed` 都是这么推的。
 - 方法按域分在 `handlers/`：
@@ -508,6 +508,13 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 动作会跑插件脚本，只给受信 ticket（`forbidden`，同设置页）；
   - `closed` 为真表示插件要关面板；插件在动作里注销了面板时 `surface` 为 `null`。
 - 推送 `surface/changed { id }`：连接级。增删、被操作、插件 `host.slot_changed` 时到。
+
+### 插件状态项（能力 `statusItems`，`handlers/status.rs`）
+
+- `status/list {}` → `{ items: [{ id, text, tone, tooltip, surface }] }`：
+  - 含 `hud: true` 的插槽（文字是正文第一行，`surface` 指向它）；
+  - 文字是插件内容，只给受信 ticket；没挂状态项服务时回空表。
+- 推送 `status/changed { id }`：连接级。状态项增删改、或插槽变了时到。
 
 ### Pull Request（能力 `pullRequests`，`handlers/vcs.rs`）
 

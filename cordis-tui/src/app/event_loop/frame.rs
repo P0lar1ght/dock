@@ -3,8 +3,8 @@
 use cordis::Context;
 use cordis_spine::{
     AgentPresets, AppSettings, Ask, Browser, Goal, PermissionMode, Permissions, PlanMode, Sessions,
-    TuiSlots, AGENT_PRESETS, ASK, BROWSER, BROWSER_MCP_PREFIX, GOAL, PERMISSIONS, PLAN_MODE,
-    SESSIONS, SETTINGS, TUI_SLOTS,
+    StatusItems, TuiSlots, AGENT_PRESETS, ASK, BROWSER, BROWSER_MCP_PREFIX, GOAL, PERMISSIONS,
+    PLAN_MODE, SESSIONS, SETTINGS, STATUS_ITEMS, TUI_SLOTS,
 };
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::prelude::CrosstermBackend;
@@ -650,14 +650,34 @@ pub(super) fn draw(
                             .is_some_and(|s| !s.queued_prompts().is_empty()),
                     )
                 });
+            // 插件状态项（含 `hud` 插槽）画在这一行右侧，快捷键条让出那几列。
+            // 没挂状态项服务的装配（测试）退回老样子：`hud` 第一行进快捷键条。
+            let mut hints_area = shortcuts_area;
             if !overlay.is_open() {
-                if let Some(slots) = ctx.get::<TuiSlots>(TUI_SLOTS) {
-                    for (id, line) in slots.hud_lines() {
-                        hints.push(crate::grok::shortcuts::HintItem::new(id, line));
+                match ctx.get::<StatusItems>(STATUS_ITEMS) {
+                    Some(status) => {
+                        let items = status.list();
+                        let theme = Theme::current();
+                        let used = crate::views::status_items::render(
+                            frame.buffer_mut(),
+                            shortcuts_area,
+                            &items,
+                            &theme,
+                        );
+                        hints_area.width = hints_area
+                            .width
+                            .saturating_sub(used + 2 * u16::from(used > 0));
+                    }
+                    None => {
+                        if let Some(slots) = ctx.get::<TuiSlots>(TUI_SLOTS) {
+                            for (id, line) in slots.hud_lines() {
+                                hints.push(crate::grok::shortcuts::HintItem::new(id, line));
+                            }
+                        }
                     }
                 }
             }
-            frame.render_widget(ShortcutsBar::new(&hints), shortcuts_area);
+            frame.render_widget(ShortcutsBar::new(&hints), hints_area);
         })
         .map_err(|e| Error::Message(e.to_string()))?;
     Ok(())

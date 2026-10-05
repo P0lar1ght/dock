@@ -67,6 +67,7 @@ pub use host::slash::{
     register_commands, slash, slash_handler, tool_slash_arguments, ExtraSlashKind, Slash,
     SlashCommand, SlashEntry, SlashHandler, SlashHint, SlashOutcome, SlashResolved, SlashSurface,
 };
+pub use host::status_items::{status_items, StatusItem, StatusItems};
 pub use host::tabs::{
     tabs, CarryBack, TabInfo, TabKind, TabMount, Tabs, TabsConfig, MAX_TABS, PER_TAB_SERVICES,
 };
@@ -82,9 +83,9 @@ pub use names::{
     MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, PRE_STEP,
     PROMPT_ASSEMBLE, RHAI_BAGS, ROSTER, SCHEDULE_CHANGED, SESSION, SESSIONS, SESSION_CHILD_EVENT,
     SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_RESET,
-    SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STEP_START, SUBAGENTS, SUBAGENT_CHANGED,
-    SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE,
-    TUI_SLOTS, TUI_SLOTS_CHANGED, TURN, TURN_END, WORKFLOWS,
+    SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STATUS_CHANGED, STATUS_ITEMS, STEP_START, SUBAGENTS,
+    SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE,
+    TOOLS_PRE_EXECUTE, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN, TURN_END, WORKFLOWS,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};

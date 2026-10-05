@@ -107,13 +107,17 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 
 每个字段可选 `description`、`default`、`required`。
 
-## 状态项（规划中）
+## 状态项
 
-`{ id, text, tone?, tooltip?, surface? }`：
+`{ id, text, tone?, tooltip?, surface? }`，named service `"status.items"`：
 
-- `text` 尽量短（一个词或一个数）；
+- `text` 尽量短（一个词或一个数）；界面只截断，不改写；
 - `surface`：点它打开哪个插件面板；
-- 替代旧的 slot `hud: true`（`hud` 继续可用，内部转成状态项）。
+- Rhai：`host.set_status(#{ ... })` 第一次登记、之后同 id 改内容，`host.clear_status(id)` 去掉；
+  包停了自动消失；
+- 旧的 slot `hud: true` 也在列表里（文字是正文第一行，`surface` 指向它）；
+- 终端：快捷键条那一行右侧「● 文字」，放不下的折成「+N」；
+- GUI：`status/list` + 推送 `status/changed`（只认受信 ticket）。
 
 ## 以后可以加（还没做）
 

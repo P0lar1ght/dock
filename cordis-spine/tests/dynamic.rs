@@ -23,6 +23,11 @@ async fn boot() -> Context {
         .unwrap();
     root.plugin(slash(), ()).unwrap().wait().await.unwrap();
     root.plugin(tui_slots(), ()).unwrap().wait().await.unwrap();
+    root.plugin(cordis_spine::status_items(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
     root.plugin(dynamic_runner(), ())
         .unwrap()
         .wait()
@@ -474,6 +479,8 @@ const RHAI_MEMO: &str = r#"#{
             view: || ()
         });
         host.slot_changed("memo");
+        host.set_status(#{ id: "memo-count", text: "2 条", tone: "accent", surface: "memo" });
+        host.set_status(#{ id: "memo-count", text: "3 条", tone: "success", surface: "memo" });
         host.open_slot("memo");
     }
 }"#;
@@ -917,7 +924,24 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
     assert!(tui.view("later").is_none());
     assert_eq!(tui.render("later").as_deref(), Some("还没准备好"));
 
+    // 状态项：第一次登记、第二次改内容；包停了跟着消失。
+    let status = root
+        .require::<cordis_spine::StatusItems>(cordis_spine::STATUS_ITEMS)
+        .unwrap();
+    let item = status
+        .list()
+        .into_iter()
+        .find(|i| i.id == "memo-count")
+        .expect("set_status 登记了状态项");
+    assert_eq!(item.text, "3 条");
+    assert_eq!(item.tone, cordis_base::view::Tone::Success);
+    assert_eq!(item.surface.as_deref(), Some("memo"));
+
     exec(&root, "cordis_stop", r#"{"pluginId":"memo-1"}"#).await;
+    assert!(
+        status.list().iter().all(|i| i.id != "memo-count"),
+        "包停了状态项要跟着走"
+    );
     assert!(root.get::<RhaiBag>("dynMemo").is_none());
     let names: Vec<_> = tools_of(&root)
         .specs()

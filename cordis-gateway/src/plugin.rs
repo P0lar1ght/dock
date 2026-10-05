@@ -132,5 +132,6 @@ pub fn features() -> Vec<Plugin> {
         crate::handlers::vcs::gateway_vcs(),
         crate::handlers::schedule::gateway_schedule(),
         crate::handlers::surface::gateway_surfaces(),
+        crate::handlers::status::gateway_status(),
     ]
 }

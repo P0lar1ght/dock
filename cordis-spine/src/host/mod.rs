@@ -14,5 +14,6 @@ pub mod session_port;
 pub mod settings;
 pub mod settings_commands;
 pub mod slash;
+pub mod status_items;
 pub mod tabs;
 pub mod tui_slots;

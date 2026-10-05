@@ -5089,3 +5089,57 @@ async fn paired_pages_cannot_act_on_plugin_surfaces() {
         .await;
     assert_eq!(acted["error"]["details"]["code"], "forbidden", "{acted}");
 }
+
+/// 插件的状态项经 `status/list` 投给 GUI（只认受信 ticket），改了推 `status/changed`。
+#[tokio::test]
+async fn status_items_reach_the_gui() {
+    use cordis_base::view::Tone;
+    use cordis_spine::{StatusItem, StatusItems, STATUS_ITEMS};
+
+    let root = harness_root().await;
+    for p in [cordis_spine::tui_slots(), cordis_spine::status_items()] {
+        root.plugin(p, ()).unwrap().wait().await.unwrap();
+    }
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let status = root.require::<StatusItems>(STATUS_ITEMS).unwrap();
+    let (token, _item) = status
+        .register(StatusItem {
+            tone: Tone::Accent,
+            surface: Some("deploy".into()),
+            tooltip: Some("部署助手".into()),
+            ..StatusItem::new("deploy", "部署中 60%")
+        })
+        .unwrap();
+
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let listed = gui.call("status/list", json!({})).await;
+    assert_eq!(
+        listed["result"]["items"][0],
+        json!({ "id": "deploy", "text": "部署中 60%", "tone": "accent",
+                "tooltip": "部署助手", "surface": "deploy" }),
+        "{listed}"
+    );
+    status.update(
+        token,
+        StatusItem {
+            tone: Tone::Success,
+            ..StatusItem::new("deploy", "已部署")
+        },
+    );
+    let pushed = gui
+        .wait_notification("status/changed", Duration::from_secs(5))
+        .await;
+    assert_eq!(pushed["params"]["id"], "deploy", "{pushed}");
+}
+
+/// 配对网页拿不到状态项（文字是插件内容）。
+#[tokio::test]
+async fn paired_pages_cannot_list_status_items() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let listed = rpc.call("status/list", json!({})).await;
+    assert_eq!(listed["error"]["details"]["code"], "forbidden", "{listed}");
+}

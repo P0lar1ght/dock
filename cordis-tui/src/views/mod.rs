@@ -21,6 +21,7 @@ pub mod queue_pane;
 pub mod settings_modal;
 pub mod status;
 pub mod status_bar;
+pub mod status_items;
 pub mod tab_bar;
 pub mod task_dock;
 pub mod text_overlay;

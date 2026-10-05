@@ -26,6 +26,11 @@ pub enum Tone {
 }
 
 impl Tone {
+    /// 按名字认色调（`"success"` …），不认识的回默认。
+    pub fn from_name(name: &str) -> Self {
+        Self::parse(Some(&Value::String(name.trim().to_string())))
+    }
+
     fn parse(v: Option<&Value>) -> Self {
         match v.and_then(Value::as_str).unwrap_or("") {
             "muted" => Self::Muted,
