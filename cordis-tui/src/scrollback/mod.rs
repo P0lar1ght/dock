@@ -733,7 +733,7 @@ fn skip_first_user_event(events: &[LogEvent]) -> Vec<LogEvent> {
         .collect()
 }
 
-#[cfg(test)]
+/// 和助手消息同一套 markdown 渲染（插件视图的 `markdown` 节点也用它）。
 pub fn markdown_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     assistant::render(text, &Theme::current(), width).lines
 }

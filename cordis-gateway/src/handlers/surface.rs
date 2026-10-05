@@ -104,10 +104,17 @@ fn snapshot(slots: &TuiSlots, id: &str) -> Result<Value, RpcError> {
         .into_iter()
         .map(|a| json!({ "id": a.id, "label": a.label }))
         .collect();
+    let view = handler.view();
+    // 有视图就不再跑 `render()`：正文给视图的纯文本降级，少调一次插件脚本。
+    let body = match &view {
+        Some(v) => v.to_plain(),
+        None => handler.render(),
+    };
     Ok(json!({
         "id": id,
         "title": handler.title(),
-        "body": handler.render(),
+        "body": body,
+        "view": view.map(|v| v.to_value()),
         "actions": actions,
     }))
 }
@@ -125,7 +132,7 @@ fn action(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::invalid_params("action is required"))?;
     let slots = slots(gateway)?;
-    if !slots.actions(&id).iter().any(|a| a.id == action) {
+    if !slots.action_ids(&id).iter().any(|a| a == action) {
         if slots.get(&id).is_none() {
             return Err(RpcError::app("not_found", format!("没有面板 {id}")));
         }

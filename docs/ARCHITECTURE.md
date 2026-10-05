@@ -14,6 +14,7 @@ cordis-base/             spine 的底座：wire 类型、config.toml、纯引擎
   src/chat_chunk.rs      流式分片                       src/stream_acc.rs  流式累积
   src/grep.rs            进程内 ripgrep 引擎            src/tool_output.rs 工具输出预算
   src/cua.rs             cua-driver 发现与授权          src/acp.rs     ACP 权限选项种类
+  src/view.rs            插件视图 dock.view.1 的数据模型（契约见 docs/PLUGIN-VIEWS.md；TUI / GUI 各自画）
 cordis-spine/            Agent 循环、工具粒、MCP、会话、预设、权限；install_app
   src/*.rs               lib / names（ctx 键）/ error / bundle（组合根）
   src/agent/             runtime、loop_plugin、turn、agents、presets、capability（子会话委派档位）

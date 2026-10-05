@@ -14,6 +14,7 @@ pub mod overlay;
 pub mod pairing;
 pub mod permission_view;
 pub mod plan_approval_view;
+pub mod plugin_view;
 pub mod preset_overlay;
 pub mod prompt;
 pub mod queue_pane;

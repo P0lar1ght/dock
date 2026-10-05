@@ -44,9 +44,25 @@ enum Kind {
 }
 
 pub fn render(buf: &mut Buffer, area: Rect, title: &str, body: &str, scroll: usize) -> PickerHits {
+    render_styled(buf, area, title, body, scroll, &|theme, _| {
+        style_body(body, theme)
+    })
+}
+
+/// 同 [`render`]，但行由调用方画（插件视图）。`key` 是这份正文的标识，
+/// [`max_scroll`] 用同一个 key 查折行后的行数。
+pub fn render_styled(
+    buf: &mut Buffer,
+    area: Rect,
+    title: &str,
+    key: &str,
+    scroll: usize,
+    style: &dyn Fn(&Theme, u16) -> Vec<Line<'static>>,
+) -> PickerHits {
+    let body = key;
     let theme = Theme::current();
     let text_w = estimate_text_width(area);
-    let styled = style_body(body, &theme);
+    let styled = style(&theme, text_w);
     let wrapped = wrap_body(styled, text_w);
     let inner_rows = TITLE_ROWS
         .saturating_add(wrapped.len().max(MIN_BODY_ROWS as usize) as u16)
@@ -88,7 +104,7 @@ pub fn render(buf: &mut Buffer, area: Rect, title: &str, body: &str, scroll: usi
     let lines = if body_area.width == text_w {
         wrapped
     } else {
-        wrap_body(style_body(body, &theme), body_area.width)
+        wrap_body(style(&theme, body_area.width), body_area.width)
     };
     {
         let mut memo = LAYOUT.lock().unwrap();

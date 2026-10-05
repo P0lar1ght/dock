@@ -936,6 +936,18 @@ pub(super) fn paint_overlay(
                 .as_ref()
                 .and_then(|s| s.title(id))
                 .unwrap_or_else(|| id.clone());
+            // 有视图树就按视图画（按钮编号，数字键点），否则画 `render()` 的文本。
+            if let Some(view) = slots.as_ref().and_then(|s| s.view(id)) {
+                let key = view.to_plain();
+                return text_overlay::render_styled(
+                    buf,
+                    area,
+                    &title,
+                    &key,
+                    *scroll,
+                    &|theme, w| crate::views::plugin_view::lines(&view, theme, w as usize),
+                );
+            }
             let body = slots
                 .as_ref()
                 .and_then(|s| s.render(id))

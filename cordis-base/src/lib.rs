@@ -33,4 +33,5 @@ pub mod test_env;
 pub mod tool_output;
 pub mod types;
 pub mod usage;
+pub mod view;
 pub mod workspace_files;

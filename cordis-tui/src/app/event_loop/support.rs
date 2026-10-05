@@ -142,10 +142,19 @@ pub(super) fn dispatch_slot_key(ctx: &Context, overlay: &mut Overlay, key: &str)
         overlay.close();
         return true;
     };
-    if matches!(slots.on_key(&id, key), SlotKeyResult::Close) {
+    // 有视图树时数字键 1–9 是点第几个动作（按钮 / 带动作的列表行），交给插件的
+    // 是那个动作 id，和 GUI 点按钮同一条路。
+    let key = slot_view_action(&slots, &id, key).unwrap_or_else(|| key.to_string());
+    if matches!(slots.on_key(&id, &key), SlotKeyResult::Close) {
         overlay.close();
     }
     true
+}
+
+fn slot_view_action(slots: &TuiSlots, id: &str, key: &str) -> Option<String> {
+    let digit = key.strip_prefix("char:")?.parse::<usize>().ok()?;
+    let view = slots.view(id)?;
+    crate::views::plugin_view::action_for_digit(&view, digit)
 }
 
 pub(super) fn browser_cockpit_body(ctx: &Context) -> String {
@@ -1549,6 +1558,79 @@ pub(super) fn overlay_len(ctx: &Context, overlay: &Overlay) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 有视图树的插件面板：数字键点第几个动作，插件收到的是动作 id 而不是 `char:2`；
+    /// 没视图的面板照旧把原键交给插件。
+    #[tokio::test]
+    async fn digits_press_view_actions_in_slot_overlays() {
+        use cordis_spine::{tui_slots, SlotHandler, SlotKeyResult, TuiSlots, TUI_SLOTS};
+        use std::sync::{Arc, Mutex};
+
+        struct Probe {
+            got: Arc<Mutex<Vec<String>>>,
+            view: bool,
+        }
+        impl SlotHandler for Probe {
+            fn title(&self) -> String {
+                "探针".into()
+            }
+            fn hud(&self) -> bool {
+                false
+            }
+            fn render(&self) -> String {
+                String::new()
+            }
+            fn on_key(&self, key: &str) -> SlotKeyResult {
+                self.got.lock().unwrap().push(key.to_string());
+                SlotKeyResult::Keep
+            }
+            fn view(&self) -> Option<cordis_base::view::ViewNode> {
+                self.view.then(|| {
+                    cordis_base::view::ViewNode::parse(&serde_json::json!({
+                        "type": "row", "children": [
+                            { "type": "button", "label": "部署", "action": "deploy" },
+                            { "type": "button", "label": "回滚", "action": "rollback" }
+                        ]
+                    }))
+                })
+            }
+        }
+
+        let ctx = Context::new();
+        ctx.plugin(tui_slots(), ()).unwrap().wait().await.unwrap();
+        let slots = ctx.get::<TuiSlots>(TUI_SLOTS).unwrap();
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let _a = slots
+            .register(
+                "viewed".into(),
+                Arc::new(Probe {
+                    got: got.clone(),
+                    view: true,
+                }),
+            )
+            .unwrap();
+        let _b = slots
+            .register(
+                "plain".into(),
+                Arc::new(Probe {
+                    got: got.clone(),
+                    view: false,
+                }),
+            )
+            .unwrap();
+        let mut overlay = Overlay::Slot {
+            id: "viewed".into(),
+            scroll: 0,
+        };
+        dispatch_slot_key(&ctx, &mut overlay, "char:2");
+        dispatch_slot_key(&ctx, &mut overlay, "char:7");
+        let mut overlay = Overlay::Slot {
+            id: "plain".into(),
+            scroll: 0,
+        };
+        dispatch_slot_key(&ctx, &mut overlay, "char:2");
+        assert_eq!(*got.lock().unwrap(), vec!["rollback", "char:7", "char:2"]);
+    }
 
     /// 回到一道已经用「其他」答过的题：高亮停在「其他」行上，焦点就得跟着给，
     /// 否则打字 / 退格 / ←→ 全被 `draft_focused` 挡掉，而 ←→ 的问题切换又被
