@@ -121,6 +121,10 @@ mod tests {
 
     #[tokio::test]
     async fn unpinned_session_follows_the_process_cwd() {
+        // 这里几次读进程 cwd 要读到同一个：拿住进程环境锁，别的用例
+        // （`scoped().cwd(..)`）这时切不了目录。以前不拿，并发跑时偶发
+        // 「左边是 crate 目录、右边是别人的临时目录」。
+        let _env = cordis_base::test_env::scoped();
         let ctx = page(None);
         assert_eq!(session_cwd(&ctx), process_cwd());
         assert_eq!(
