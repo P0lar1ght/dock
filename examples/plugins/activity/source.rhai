@@ -94,6 +94,18 @@
                 if kind == "tool" { refresh.call(host, state); }
                 return;
             }
+            // 流式回复：每个分片都是到目前为止的全文，后一条以前一条开头——更新同一行，不新起一行。
+            if kind == "assistant" {
+                row.raw = text;
+                if state.recent.len() > 0 && state.recent[0].badge.text == "回复" {
+                    let prev = state.recent[0].raw;
+                    if prev != () && (text.starts_with(prev) || prev.starts_with(text)) {
+                        state.recent[0] = row;
+                        refresh.call(host, state);
+                        return;
+                    }
+                }
+            }
             // 同一句连着来两次（流式收尾时会重复一次）只记一条。
             if state.recent.len() > 0 && state.recent[0].title == row.title && state.recent[0].badge.text == row.badge.text { return; }
             state.recent.insert(0, row);

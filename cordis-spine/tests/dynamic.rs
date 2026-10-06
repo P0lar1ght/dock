@@ -3227,6 +3227,26 @@ async fn example_activity_plugin_runs() {
     assert!(body.contains("glob | 1"), "{body}");
     assert_eq!(item(&status).text, "空闲 · 工具 3 次");
 
+    // 流式回复：分片是到目前为止的全文，同一条回复只占一行（真模型会连发好几片）。
+    for text in ["This", "This folder", "This folder has a.txt"] {
+        root.emit(
+            cordis_spine::SESSION_EVENT,
+            LogEvent::LlmStream(cordis_spine::LlmOutput {
+                text: text.into(),
+                ..Default::default()
+            }),
+        );
+    }
+    for _ in 0..100 {
+        body = slots.view("activity").unwrap().to_plain();
+        if body.contains("This folder has a.txt") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(body.contains("• This folder has a.txt [回复]"), "{body}");
+    assert_eq!(body.matches("[回复]").count(), 1, "{body}");
+
     // 面板按钮：暂停 → 状态项跟着变；清零 → 计数归零。
     let _ = slots.on_key("activity", "toggle");
     assert_eq!(item(&status).text, "记录已暂停");
