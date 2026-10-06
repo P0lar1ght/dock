@@ -173,7 +173,10 @@
   // ---- 数据 ----
   async function loadThreads() {
     const r = await dock.call("threads.list");
-    const list = r.threads || r.data || [];
+    // 最近更新的在前；没用过的空白新页（独立窗自己那条连接也会有一个）不列，除非就是当前会话。
+    const list = (r.threads || r.data || [])
+      .filter((t) => t.updatedAt > 0 || t.id === dock.activeThread)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     const sel = $("thread");
     sel.innerHTML = list.map((t) => `<option value="${esc(t.id)}">${esc(t.title || t.preview || t.id)}</option>`).join("");
     return list;
