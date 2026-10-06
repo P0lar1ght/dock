@@ -41,6 +41,15 @@ pub trait SlotHandler: Send + Sync {
     fn view(&self) -> Option<ViewNode> {
         None
     }
+    /// 有没有 web 界面（`docs/PLUGIN-VIEWS.md` web 面板）：GUI 用沙箱 iframe 画它，
+    /// 终端照旧画 [`Self::view`] / [`Self::render`]。
+    fn has_web(&self) -> bool {
+        false
+    }
+    /// web 界面的 HTML 文档。每次现读（插件改了文件，GUI 重开面板就是新的）。
+    fn web(&self) -> Result<String, String> {
+        Err("这个面板没有 web 界面".into())
+    }
 }
 
 pub struct SlotInfo {
@@ -156,6 +165,18 @@ impl TuiSlots {
 
     pub fn view(&self, id: &str) -> Option<ViewNode> {
         self.get(id).and_then(|h| h.view())
+    }
+
+    pub fn has_web(&self, id: &str) -> bool {
+        self.get(id).is_some_and(|h| h.has_web())
+    }
+
+    /// 面板 `id` 的 web 界面 HTML；没有这个面板或没有 web 界面回 `Err`（中文原因）。
+    pub fn web(&self, id: &str) -> Result<String, String> {
+        match self.get(id) {
+            Some(h) => h.web(),
+            None => Err(format!("没有面板 {id}")),
+        }
     }
 
     /// 能点的全部动作 id：声明的 [`SlotAction`] 加上视图树里的按钮 / 列表行。

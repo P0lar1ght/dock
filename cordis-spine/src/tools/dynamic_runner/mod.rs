@@ -428,7 +428,13 @@ impl DynamicRunner {
             .ok_or_else(|| format!("factory {} is no longer registered", plan.factory))?;
         let built = if plan.factory == RHAI_FACTORY {
             let (source, limit) = resolve_plan_source(&plan)?;
-            rhai_host::build_rhai_limited(plugin_id, &source, limit)?
+            // 磁盘插件的目录：web 面板的 HTML 只能放在这里面。
+            let plugin_dir = plan
+                .source_path
+                .as_ref()
+                .and_then(|p| p.canonicalize().ok())
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+            rhai_host::build_rhai_limited(plugin_id, &source, limit, plugin_dir)?
         } else {
             info.build(plugin_id, plan.contrib.as_ref())
         };

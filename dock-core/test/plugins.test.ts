@@ -8,6 +8,7 @@ import {
   parseSurface,
   parseSurfaceAction,
   parseSurfaceList,
+  parseSurfaceWeb,
   parseToolView,
   parseToolViews,
   parseView,
@@ -108,9 +109,12 @@ test('面板底部按钮：根 stack 的最后一行全是按钮才固定到底�
 });
 
 test('插件面板：列表、单个面板、动作结果', () => {
-  assert.deepEqual(parseSurfaceList({ surfaces: [{ id: 'memo', title: '便签', hud: true }, { title: '没 id' }] }), [
-    { id: 'memo', title: '便签', hud: true },
+  assert.deepEqual(parseSurfaceList({ surfaces: [{ id: 'memo', title: '便签', hud: true }, { id: 'traj', title: '轨迹', web: true }, { title: '没 id' }] }), [
+    { id: 'memo', title: '便签', hud: true, web: false },
+    { id: 'traj', title: '轨迹', hud: false, web: true },
   ]);
+  assert.equal(parseSurfaceWeb({ html: '<p>x</p>' }), '<p>x</p>');
+  assert.equal(parseSurfaceWeb({}), null);
   const s = parseSurface({
     id: 'deploy',
     title: '部署助手',

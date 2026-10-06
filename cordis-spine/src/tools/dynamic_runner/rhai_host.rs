@@ -3,6 +3,7 @@
 //! max ops, disable eval) — not the workflow agent-host channel.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use cordis::{plugin, Context, Inject, Plugin};
@@ -76,8 +77,8 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.register_slot",
-        "Register a slot (terminal overlay, GUI panel): render() -> String, on_key(key) -> \"close\" | (). actions: buttons whose id is passed to on_key (GUI clicks, terminal keys). view() -> a dock.view.1 tree (docs/PLUGIN-VIEWS.md); when present both clients draw it instead of render(), and its buttons call on_key(action) too (terminal: digit keys 1–9).",
-        &["host.register_slot(#{ id, title, hud?, render, on_key, actions?: [#{ id, label }], view?: || #{ type: \"stack\", children: [...] } })"],
+        "Register a slot (terminal overlay, GUI panel): render() -> String, on_key(key) -> \"close\" | (). actions: buttons whose id is passed to on_key (GUI clicks, terminal keys). view() -> a dock.view.1 tree (docs/PLUGIN-VIEWS.md); when present both clients draw it instead of render(), and its buttons call on_key(action) too (terminal: digit keys 1–9). web: \"panel.html\" (disk plugins only, a file inside the plugin directory) gives the GUI a sandboxed HTML/JS panel instead; the terminal keeps drawing view() / render(). See docs/PLUGIN-VIEWS.md (web panels) for the bridge API.",
+        &["host.register_slot(#{ id, title, hud?, render, on_key, actions?: [#{ id, label }], view?: || #{ type: \"stack\", children: [...] }, web?: \"panel.html\" })"],
     ),
     (
         "host.slot_changed",
@@ -239,6 +240,7 @@ pub fn build_rhai_limited(
     fiber_name: &str,
     source: &str,
     max_bytes: usize,
+    plugin_dir: Option<PathBuf>,
 ) -> Result<Plugin, String> {
     let meta = preflight_limited(source, max_bytes)?;
     let name = fiber_name.to_string();
@@ -249,12 +251,17 @@ pub fn build_rhai_limited(
         Inject::from(meta.inject.clone())
     };
     Ok(plugin(name.clone(), inject, move |ctx, _: &()| {
-        apply_rhai(ctx, &name, &source).map_err(cordis::Error::plugin)?;
+        apply_rhai(ctx, &name, &source, plugin_dir.clone()).map_err(cordis::Error::plugin)?;
         Ok(None)
     }))
 }
 
-fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str) -> Result<(), String> {
+fn apply_rhai(
+    ctx: &Context,
+    plugin_id: &str,
+    source: &str,
+    plugin_dir: Option<PathBuf>,
+) -> Result<(), String> {
     let mut engine = sandboxed_engine(RUN_MAX_OPS);
     let tag = format!("[cordis:{plugin_id}]");
     engine.on_print(move |s| eprintln!("{tag} {s}"));
@@ -278,6 +285,7 @@ fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str) -> Result<(), String
     let inner = Arc::new(HostInner {
         ctx: ctx.clone(),
         plugin_id: plugin_id.to_string(),
+        plugin_dir,
         engine: engine.clone(),
         ast: ast.clone(),
         disposers: Mutex::new(Vec::new()),
@@ -358,6 +366,8 @@ struct Host {
 struct HostInner {
     ctx: Context,
     plugin_id: String,
+    /// 磁盘插件（`source_path`）所在目录：`register_slot` 的 `web` 文件只能在这里面。
+    plugin_dir: Option<PathBuf>,
     engine: Arc<Engine>,
     ast: AST,
     disposers: Mutex<Vec<cordis::Disposable>>,
@@ -631,11 +641,16 @@ impl Host {
             .get("view")
             .cloned()
             .and_then(|d| d.try_cast::<FnPtr>());
+        let web = match map_str(&spec, "web") {
+            Some(rel) => Some(self.web_file(&rel).map_err(eval_err)?),
+            None => None,
+        };
         let handler = Arc::new(RhaiSlot {
             title,
             hud,
             actions,
             view,
+            web,
             engine: self.inner.engine.clone(),
             ast: self.inner.ast.clone(),
             render,
@@ -646,6 +661,34 @@ impl Host {
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
         Ok(())
+    }
+
+    /// `register_slot` 的 `web: "panel.html"`：插件目录里的一个文件（不许绝对路径、`..`、
+    /// 也不许经软链跑出插件目录）。只有磁盘插件（`source_path`）有目录。
+    fn web_file(&self, rel: &str) -> Result<PathBuf, String> {
+        let dir = self
+            .inner
+            .plugin_dir
+            .as_ref()
+            .ok_or("web 面板只能用在磁盘插件里（用 source_path 定义，HTML 放在插件目录）")?;
+        let rel_path = Path::new(rel.trim());
+        if rel.trim().is_empty()
+            || rel_path.is_absolute()
+            || rel_path
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(format!("web 要写插件目录里的相对路径：{rel}"));
+        }
+        let path = dir
+            .join(rel_path)
+            .canonicalize()
+            .map_err(|e| format!("web 文件 {rel}：{e}"))?;
+        let dir = dir.canonicalize().map_err(|e| format!("插件目录：{e}"))?;
+        if !path.starts_with(&dir) || !path.is_file() {
+            return Err(format!("web 文件要在插件目录里：{rel}"));
+        }
+        Ok(path)
     }
 
     fn slot_changed(&mut self, id: ImmutableString) -> Result<(), Box<rhai::EvalAltResult>> {
@@ -896,11 +939,16 @@ struct RhaiSlot {
     actions: Vec<SlotAction>,
     /// `view()` → 视图树（map）。没有就只画 `render()` 的文本。
     view: Option<FnPtr>,
+    /// web 界面的 HTML 文件（已确认在插件目录里）。
+    web: Option<PathBuf>,
     engine: Arc<Engine>,
     ast: AST,
     render: FnPtr,
     on_key: Option<FnPtr>,
 }
+
+/// web 面板 HTML 的上限。
+const MAX_WEB_HTML: u64 = 2 * 1024 * 1024;
 
 /// `register_slot` 的 `actions: [#{ id, label }]`。`label` 省略就用 `id`。
 fn slot_actions(spec: &Map) -> Result<Vec<SlotAction>, Box<rhai::EvalAltResult>> {
@@ -948,6 +996,19 @@ impl SlotHandler for RhaiSlot {
 
     fn hud(&self) -> bool {
         self.hud
+    }
+
+    fn has_web(&self) -> bool {
+        self.web.is_some()
+    }
+
+    fn web(&self) -> Result<String, String> {
+        let path = self.web.as_ref().ok_or("这个面板没有 web 界面")?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("读 web 文件：{e}"))?;
+        if meta.len() > MAX_WEB_HTML {
+            return Err(format!("web 文件超过 {} MiB", MAX_WEB_HTML / 1024 / 1024));
+        }
+        std::fs::read_to_string(path).map_err(|e| format!("读 web 文件：{e}"))
     }
 
     fn render(&self) -> String {
@@ -1243,7 +1304,7 @@ mod tests {
     #[test]
     fn build_rhai_limited_honors_inline_ceiling() {
         let oversized = "x".repeat(MAX_INLINE_SOURCE + 1);
-        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE) {
+        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, None) {
             Err(err) => assert!(err.contains("128KiB"), "{err}"),
             Ok(_) => panic!("expected oversized inline source to fail"),
         }

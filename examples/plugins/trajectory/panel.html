@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>会话轨迹</title>
+<style>
+  /* 设计 token（--dock-*）由 Dock 注入，和 GUI 同一套。 */
+  * { box-sizing: border-box; }
+  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  button, select, input { font: inherit; color: inherit; }
+  .bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--dock-line-soft); flex-wrap: wrap; }
+  .bar select { max-width: 220px; height: 26px; border: 1px solid var(--dock-line); border-radius: 6px; background: var(--dock-surface); padding: 0 6px; font-size: 12px; }
+  .bar input[type=search] { flex: 1; min-width: 90px; height: 26px; border: 1px solid var(--dock-line); border-radius: 6px; padding: 0 8px; font-size: 12px; background: var(--dock-surface); outline: none; }
+  .bar input[type=search]:focus { border-color: var(--dock-accent); }
+  .btn { height: 26px; padding: 0 8px; border: 1px solid var(--dock-line); border-radius: 6px; background: var(--dock-surface); font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .btn:hover { background: var(--dock-hover); }
+  .btn.on { background: var(--dock-selected); }
+  .muted { color: var(--dock-ink-4); }
+  .mono { font-family: var(--dock-mono); }
+
+  /* 计时总览：三条轨道，拖动选时间段。 */
+  .overview { position: relative; height: 58px; margin: 8px 12px 0; border: 1px solid var(--dock-line-soft); border-radius: 8px; background: var(--dock-surface); cursor: crosshair; user-select: none; overflow: hidden; flex-shrink: 0; }
+  .lane { position: absolute; left: 0; right: 0; height: 12px; }
+  .lane-label { position: absolute; left: 6px; font-size: 9px; color: var(--dock-ink-5); line-height: 12px; pointer-events: none; z-index: 1; }
+  .track { position: absolute; left: 34px; right: 8px; top: 0; bottom: 0; }
+  .seg { position: absolute; height: 8px; top: 2px; border-radius: 2px; min-width: 2px; }
+  .seg.wait { background: #c7c7cc; }
+  .seg.out { background: #0a84ff99; }
+  .seg.think { background: #af52de88; }
+  .seg.tool { background: #ff9f0aaa; }
+  .seg.turn { background: #34c75955; }
+  .seg.err { background: #ff3b30aa; }
+  .sel { position: absolute; top: 0; bottom: 0; background: #0a84ff1f; border-left: 1px solid var(--dock-accent); border-right: 1px solid var(--dock-accent); pointer-events: none; }
+  .filter-note { margin: 4px 12px 0; font-size: 11px; color: var(--dock-ink-4); }
+  .filter-note a { color: var(--dock-accent); cursor: pointer; }
+
+  .main { flex: 1; min-height: 0; display: flex; }
+  .ledger { flex: 1; min-width: 0; overflow: auto; padding: 6px 0 24px; }
+  .turn { border-left: 2px solid var(--dock-line); margin: 6px 12px 0; }
+  .turn.running { border-left-color: var(--dock-accent); }
+  .turn.failed { border-left-color: var(--dock-danger); }
+  .turn-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px; cursor: pointer; font-size: 12px; }
+  .turn-head:hover { background: var(--dock-hover); }
+  .turn-head .tid { font-family: var(--dock-mono); color: var(--dock-ink-3); }
+  .turn-head .stat { margin-left: auto; color: var(--dock-ink-4); font-family: var(--dock-mono); font-size: 11px; }
+  .chev { width: 10px; color: var(--dock-ink-4); transition: transform 120ms; display: inline-block; }
+  .turn.closed .chev { transform: rotate(-90deg); }
+  .row { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; padding: 3px 8px; cursor: pointer; font-size: 12.5px; border-radius: 4px; margin: 0 4px; }
+  .row:hover { background: var(--dock-hover); }
+  .row.sel-row { background: #0a84ff14; }
+  .row.nested { padding-left: 22px; }
+  .kind { font-size: 10.5px; text-align: right; color: var(--dock-ink-4); }
+  .kind.user { color: var(--dock-ink-2); }
+  .kind.assistant { color: #2c7be5; }
+  .kind.reasoning { color: #8e44ad; }
+  .kind.tool { color: #b4690e; }
+  .kind.error, .row .err { color: var(--dock-danger); }
+  .text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tool-name { font-family: var(--dock-mono); }
+  .dur { font-family: var(--dock-mono); font-size: 11px; color: var(--dock-ink-4); }
+  .more { margin: 8px 12px; }
+  .empty { padding: 40px 16px; text-align: center; color: var(--dock-ink-4); }
+
+  /* 检查器：宽时在右，窄时盖在上面。 */
+  .inspector { width: 44%; min-width: 260px; border-left: 1px solid var(--dock-line-soft); display: flex; flex-direction: column; background: var(--dock-surface); }
+  .inspector[hidden] { display: none; }
+  @media (max-width: 620px) { .inspector { position: absolute; inset: 44px 0 0 0; width: auto; border-left: 0; z-index: 5; } }
+  .ins-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--dock-line-soft); }
+  .ins-title { font-weight: 600; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tabs { display: flex; gap: 2px; padding: 6px 10px 0; }
+  .tab { padding: 3px 8px; border-radius: 5px; font-size: 11.5px; cursor: pointer; color: var(--dock-ink-3); border: 0; background: none; }
+  .tab.on { background: var(--dock-fill); color: var(--dock-ink); }
+  .ins-body { flex: 1; overflow: auto; padding: 8px 10px 20px; }
+  .kv { display: grid; grid-template-columns: 84px 1fr; gap: 4px 8px; font-size: 12px; }
+  .kv dt { color: var(--dock-ink-4); }
+  .kv dd { margin: 0; font-family: var(--dock-mono); word-break: break-all; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 11.5px/1.5 var(--dock-mono); background: var(--dock-bg); border: 1px solid var(--dock-line-soft); border-radius: 6px; padding: 8px; }
+  .prose { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.6; }
+  .live { width: 6px; height: 6px; border-radius: 50%; background: var(--dock-ink-5); display: inline-block; }
+  .live.on { background: #34c759; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <select id="thread" title="看哪个会话"></select>
+  <button class="btn" id="follow" title="跟着 GUI 当前打开的会话走">跟随当前</button>
+  <input type="search" id="search" placeholder="搜索内容、工具名…">
+  <button class="btn" id="fold" title="折叠 / 展开全部轮次">全部折叠</button>
+  <span class="live" id="live" title="实时"></span>
+</div>
+<div class="overview" id="overview" title="拖动选时间段，只看这段里有活动的记录"></div>
+<div class="filter-note" id="filterNote" hidden></div>
+<div class="main">
+  <div class="ledger" id="ledger"></div>
+  <aside class="inspector" id="inspector" hidden>
+    <div class="ins-head"><span class="ins-title" id="insTitle"></span><span style="flex:1"></span><button class="btn" id="insClose">关闭</button></div>
+    <div class="tabs" id="tabs"></div>
+    <div class="ins-body" id="insBody"></div>
+  </aside>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const fmt = (ms) => (ms == null || !isFinite(ms) ? "—" : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`);
+  const clock = (ms) => (ms ? new Date(ms).toLocaleTimeString("zh-CN", { hour12: false }) + "." + String(ms % 1000).padStart(3, "0") : "—");
+  const MAX_TURNS = 40;
+
+  const state = {
+    threadId: null, follow: true, events: [], seen: new Set(), live: false,
+    turns: [], closed: new Set(), allClosed: false, selected: null, tab: null,
+    query: "", range: null, showAll: false, poll: null,
+  };
+
+  // ---- 事件 → 轨迹（轮次 → 记录） ----
+  function build(events) {
+    const turns = [];
+    let turn = null, step = 0, cur = null, boundary = null;
+    const tools = new Map();
+    const ensureTurn = (e) => {
+      if (turn && turn.id === e.turnId) return turn;
+      turn = { id: e.turnId || `t${turns.length + 1}`, start: e.at, end: null, status: "running", error: "", records: [], steps: 0, tools: 0 };
+      turns.push(turn); step = 0; cur = null; boundary = e.at;
+      return turn;
+    };
+    const push = (r) => { turn.records.push(r); return r; };
+    for (const e of events) {
+      const p = e.params;
+      if (!e.turnId && e.method !== "turn/started") continue;
+      const t = ensureTurn(e);
+      switch (e.method) {
+        case "turn/started": t.start = e.at; boundary = e.at; break;
+        case "item/user_message": push({ kind: "user", text: p.content || "", start: e.at, end: e.at }); boundary = e.at; break;
+        case "item/reasoning_delta":
+        case "item/message_delta": {
+          const kind = e.method === "item/reasoning_delta" ? "reasoning" : "assistant";
+          if (!cur || cur.kind !== kind) {
+            // 新的一次模型输出：前一个边界（轮次开始 / 用户消息 / 工具结束）到第一个 token 是等待。
+            if (!cur || cur.kind === "tool") { step += 1; t.steps = step; }
+            cur = push({ kind, text: "", step, start: e.at, end: e.at, wait: boundary != null ? e.at - boundary : null });
+          }
+          cur.text += p.delta || ""; cur.end = e.at; boundary = e.at;
+          break;
+        }
+        case "item/tool_started": {
+          // 同一步里并行的调用是连着开始的；上一个工具已经结束、中间又没有模型输出 = 模型又被调了一次。
+          const newStep = !cur || (cur.kind === "tool" && cur.end != null);
+          if (newStep) { step += 1; t.steps = step; }
+          // 模型没写字就直接调工具：上一个边界到调用开始也是模型在想（同 TTFT）。
+          const wait = newStep && boundary != null ? e.at - boundary : null;
+          const r = push({ kind: "tool", name: p.toolName, args: p.arguments, id: p.toolCallId, step, start: e.at, end: null, nested: true, wait });
+          tools.set(p.toolCallId, r); cur = r; t.tools += 1;
+          break;
+        }
+        case "item/tool_completed": {
+          const r = tools.get(p.toolCallId) || push({ kind: "tool", name: p.toolName, args: {}, id: p.toolCallId, step, start: e.at, nested: true });
+          r.output = p.output; r.status = p.status; r.end = e.at; boundary = e.at;
+          break;
+        }
+        case "permission/requested": push({ kind: "permission", text: `${p.toolName} ${p.summary || ""}`, start: e.at, end: null, id: p.requestId }); break;
+        case "permission/resolved": {
+          const r = turn.records.find((x) => x.kind === "permission" && x.id === p.requestId);
+          if (r) { r.end = e.at; r.decision = p.decision; }
+          boundary = e.at; break;
+        }
+        case "item/compaction": push({ kind: "compaction", text: "上下文压缩", start: e.at, end: e.at }); break;
+        case "turn/completed": t.end = e.at; t.status = p.status || "completed"; t.error = p.error || ""; cur = null; break;
+      }
+    }
+    return turns;
+  }
+
+  // ---- 数据 ----
+  async function loadThreads() {
+    const r = await dock.call("threads.list");
+    const list = r.threads || r.data || [];
+    const sel = $("thread");
+    sel.innerHTML = list.map((t) => `<option value="${esc(t.id)}">${esc(t.title || t.preview || t.id)}</option>`).join("");
+    return list;
+  }
+
+  async function open(threadId) {
+    if (!threadId) return;
+    state.threadId = threadId; state.selected = null; state.range = null; state.showAll = false;
+    $("thread").value = threadId;
+    const h = await dock.call("threads.history", { threadId });
+    state.events = []; state.seen = new Set();
+    for (const it of h.events || []) addEvent(it.method, { ...(it.payload || {}), seq: it.seq, timestamp: it.timestamp ?? (it.payload || {}).timestamp });
+    const w = await dock.call("threads.watch", { threadId });
+    state.live = !!(w && w.live);
+    $("live").className = "live" + (state.live ? " on" : "");
+    $("live").title = state.live ? "实时" : "没有实时推送：每 3 秒重拉一次";
+    clearInterval(state.poll);
+    if (!state.live) state.poll = setInterval(() => refresh(), 3000);
+    rebuild(true);
+  }
+
+  async function refresh() {
+    if (!state.threadId) return;
+    const h = await dock.call("threads.history", { threadId: state.threadId }).catch(() => null);
+    if (!h) return;
+    const before = state.events.length;
+    for (const it of h.events || []) addEvent(it.method, { ...(it.payload || {}), seq: it.seq, timestamp: it.timestamp ?? (it.payload || {}).timestamp });
+    if (state.events.length !== before) rebuild(false);
+  }
+
+  function addEvent(method, params) {
+    const seq = Number(params.seq ?? params.transcriptSeq ?? 0);
+    const key = seq ? `${params.turnId}|${seq}` : null;
+    if (key) { if (state.seen.has(key)) return; state.seen.add(key); }
+    state.events.push({ method, params, turnId: params.turnId || "", at: Number(params.timestamp) || Date.now() });
+  }
+
+  let frame = 0;
+  dock.on("event", (e) => {
+    if (e.threadId !== state.threadId) return;
+    addEvent(e.method, e.params);
+    if (!frame) frame = requestAnimationFrame(() => { frame = 0; rebuild(false); });
+  });
+  dock.on("activeThread", (id) => { if (state.follow && id && id !== state.threadId) open(id); });
+
+  // ---- 画 ----
+  function rebuild(scrollToEnd) {
+    const ledger = $("ledger");
+    const atEnd = ledger.scrollHeight - ledger.scrollTop - ledger.clientHeight < 24;
+    state.turns = build(state.events);
+    drawOverview();
+    drawLedger();
+    if (scrollToEnd || atEnd) ledger.scrollTop = ledger.scrollHeight;
+    if (state.selected) drawInspector();
+  }
+
+  function span() {
+    let lo = Infinity, hi = -Infinity;
+    for (const t of state.turns) { lo = Math.min(lo, t.start || Infinity); hi = Math.max(hi, t.end || t.records.reduce((m, r) => Math.max(m, r.end || r.start || 0), t.start || 0)); }
+    return lo < hi ? [lo, hi] : null;
+  }
+
+  function drawOverview() {
+    const ov = $("overview");
+    const s = span();
+    if (!s) { ov.innerHTML = '<div class="lane-label" style="top:22px">还没有可计时的记录</div>'; return; }
+    const [lo, hi] = s, w = hi - lo;
+    const x = (t) => ((t - lo) / w) * 100;
+    const seg = (cls, a, b, top) => (a == null ? "" : `<div class="seg ${cls}" style="left:${x(a)}%;width:${Math.max(0, x(b ?? a) - x(a))}%;top:${top}px"></div>`);
+    let html = '<div class="lane-label" style="top:3px">轮次</div><div class="lane-label" style="top:21px">模型</div><div class="lane-label" style="top:39px">工具</div><div class="track">';
+    for (const t of state.turns) {
+      html += seg(t.status === "failed" ? "err" : "turn", t.start, t.end || hi, 3);
+      for (const r of t.records) {
+        if (r.kind === "assistant" || r.kind === "reasoning") {
+          if (r.wait != null) html += seg("wait", r.start - r.wait, r.start, 21);
+          html += seg(r.kind === "reasoning" ? "think" : "out", r.start, r.end, 21);
+        } else if (r.kind === "tool") {
+          if (r.wait != null) html += seg("wait", r.start - r.wait, r.start, 21);
+          html += seg(r.status === "failed" ? "err" : "tool", r.start, r.end || hi, 39);
+        }
+      }
+    }
+    if (state.range) html += `<div class="sel" style="left:${x(state.range[0])}%;width:${x(state.range[1]) - x(state.range[0])}%"></div>`;
+    ov.innerHTML = html + "</div>";
+    ov.dataset.lo = lo; ov.dataset.hi = hi;
+    const note = $("filterNote");
+    note.hidden = !state.range;
+    if (state.range) note.innerHTML = `只看 ${clock(state.range[0])} – ${clock(state.range[1])} 之间有活动的记录 · <a id="clearRange">清除</a>`;
+    const clear = $("clearRange");
+    if (clear) clear.onclick = () => { state.range = null; rebuild(false); };
+  }
+
+  // 拖动选时间段（同 DevTools Network）：和区间有交集的记录留下。
+  (() => {
+    const ov = $("overview");
+    let from = null;
+    const at = (ev) => {
+      const r = (ov.querySelector(".track") || ov).getBoundingClientRect();
+      const lo = Number(ov.dataset.lo), hi = Number(ov.dataset.hi);
+      return lo + (Math.min(Math.max(ev.clientX - r.left, 0), r.width) / r.width) * (hi - lo);
+    };
+    ov.addEventListener("pointerdown", (ev) => { if (!ov.dataset.lo) return; from = at(ev); ov.setPointerCapture(ev.pointerId); });
+    ov.addEventListener("pointermove", (ev) => { if (from == null) return; const to = at(ev); state.range = [Math.min(from, to), Math.max(from, to)]; drawOverview(); });
+    ov.addEventListener("pointerup", (ev) => {
+      if (from == null) return;
+      const to = at(ev);
+      state.range = Math.abs(to - from) < (Number(ov.dataset.hi) - Number(ov.dataset.lo)) / 200 ? null : [Math.min(from, to), Math.max(from, to)];
+      from = null; rebuild(false);
+    });
+  })();
+
+  const LABEL = { user: "你", assistant: "回复", reasoning: "思考", tool: "工具", permission: "审批", compaction: "压缩" };
+
+  function visible(r) {
+    if (state.range) {
+      const a = r.start, b = r.end ?? r.start;
+      if (a == null || b < state.range[0] || a > state.range[1]) return false;
+    }
+    if (!state.query) return true;
+    const q = state.query.toLowerCase();
+    return [r.text, r.name, r.output, r.args && JSON.stringify(r.args)].some((s) => s && String(s).toLowerCase().includes(q));
+  }
+
+  function rowText(r) {
+    if (r.kind === "tool") return `<span class="tool-name">${esc(r.name)}</span> <span class="muted">${esc(argSummary(r.args))}</span>`;
+    if (r.kind === "permission") return `${esc(r.text)} <span class="muted">${r.decision ? (r.decision === "approve" ? "· 允许" : "· 拒绝") : "· 等待"}</span>`;
+    return esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）");
+  }
+
+  function argSummary(a) {
+    if (!a || typeof a !== "object") return "";
+    const v = Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" ");
+    return v.length > 80 ? v.slice(0, 80) + "…" : v;
+  }
+
+  function recDuration(r) {
+    if (r.kind === "assistant" || r.kind === "reasoning") return r.end != null ? r.end - r.start : null;
+    return r.end != null && r.start != null ? r.end - r.start : null;
+  }
+
+  function drawLedger() {
+    const ledger = $("ledger");
+    if (!state.threadId) { ledger.innerHTML = '<div class="empty">选一个会话</div>'; return; }
+    if (state.turns.length === 0) { ledger.innerHTML = '<div class="empty">这个会话还没有记录</div>'; return; }
+    const turns = state.showAll ? state.turns : state.turns.slice(-MAX_TURNS);
+    let html = "";
+    if (turns.length < state.turns.length) html += `<button class="btn more" id="showAll">显示更早的 ${state.turns.length - turns.length} 轮</button>`;
+    for (const t of turns) {
+      const rows = t.records.filter(visible);
+      if ((state.query || state.range) && rows.length === 0) continue;
+      const closed = state.closed.has(t.id) !== state.allClosed;
+      const dur = t.end ? fmt(t.end - t.start) : "进行中";
+      html += `<div class="turn ${t.status === "running" ? "running" : t.status === "failed" ? "failed" : ""} ${closed ? "closed" : ""}">`;
+      html += `<div class="turn-head" data-turn="${esc(t.id)}"><span class="chev">▾</span><span class="tid">${esc(t.id)}</span>`;
+      html += `<span class="muted">${t.steps} 步 · ${t.tools} 次工具${t.status === "cancelled" ? " · 已停止" : ""}${t.error ? ` · <span class="err">${esc(t.error)}</span>` : ""}</span><span class="stat">${dur}</span></div>`;
+      const shown = closed ? rows.slice(0, 1) : rows;
+      for (const r of shown) {
+        const i = t.records.indexOf(r);
+        const key = `${t.id}:${i}`;
+        const err = r.kind === "tool" && r.status && r.status !== "completed";
+        html += `<div class="row ${r.nested ? "nested" : ""} ${state.selected === key ? "sel-row" : ""}" data-rec="${esc(key)}">`;
+        html += `<span class="kind ${err ? "error" : r.kind}">${LABEL[r.kind] || r.kind}</span><span class="text">${rowText(r)}</span>`;
+        html += `<span class="dur">${r.wait != null ? `<span title="等第一个 token">⏳${fmt(r.wait)}</span> ` : ""}${fmt(recDuration(r))}</span></div>`;
+      }
+      if (closed && rows.length > 1) html += `<div class="row muted" data-turn="${esc(t.id)}"><span></span><span>… 还有 ${rows.length - 1} 条</span><span></span></div>`;
+      html += "</div>";
+    }
+    ledger.innerHTML = html || '<div class="empty">没有符合条件的记录</div>';
+    const all = $("showAll");
+    if (all) all.onclick = () => { state.showAll = true; drawLedger(); };
+  }
+
+  $("ledger").addEventListener("click", (ev) => {
+    const rec = ev.target.closest("[data-rec]");
+    const head = ev.target.closest("[data-turn]");
+    if (rec) { state.selected = rec.dataset.rec; state.tab = null; drawLedger(); drawInspector(); }
+    else if (head) {
+      const id = head.dataset.turn;
+      state.closed.has(id) ? state.closed.delete(id) : state.closed.add(id);
+      drawLedger();
+    }
+  });
+
+  function record(key) {
+    const [tid, i] = key.split(":");
+    const t = state.turns.find((x) => x.id === tid);
+    return t ? [t, t.records[Number(i)]] : [null, null];
+  }
+
+  function drawInspector() {
+    const [t, r] = record(state.selected || "");
+    const ins = $("inspector");
+    if (!r) { ins.hidden = true; return; }
+    ins.hidden = false;
+    $("insTitle").textContent = `${LABEL[r.kind] || r.kind}${r.name ? " · " + r.name : ""}`;
+    const tabs = r.kind === "tool" ? ["参数", "结果", "计时"] : ["内容", "计时"];
+    if (!tabs.includes(state.tab)) state.tab = tabs[0];
+    $("tabs").innerHTML = tabs.map((x) => `<button class="tab ${x === state.tab ? "on" : ""}" data-tab="${x}">${x}</button>`).join("");
+    let body = "";
+    if (state.tab === "内容") body = `<div class="prose">${esc(r.text || "（空）")}</div>`;
+    else if (state.tab === "参数") body = `<pre>${esc(JSON.stringify(r.args ?? {}, null, 2))}</pre>`;
+    else if (state.tab === "结果") body = r.output == null ? '<div class="muted">还没有结果</div>' : `<pre>${esc(prettyMaybe(r.output))}</pre>`;
+    else {
+      const rows = [
+        ["轮次", t.id], ["步", r.step ?? "—"], ["开始", clock(r.start)], ["结束", clock(r.end)], ["耗时", fmt(recDuration(r))],
+      ];
+      if (r.wait != null) rows.push(["等首个 token", fmt(r.wait)]);
+      if (r.kind === "tool") rows.push(["状态", r.status || "进行中"], ["调用 id", r.id]);
+      if (r.text) rows.push(["字数", String(r.text.length)]);
+      body = `<dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>`;
+    }
+    $("insBody").innerHTML = body;
+  }
+
+  function prettyMaybe(s) {
+    try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
+  }
+
+  $("tabs").addEventListener("click", (ev) => { const b = ev.target.closest("[data-tab]"); if (b) { state.tab = b.dataset.tab; drawInspector(); } });
+  $("insClose").onclick = () => { state.selected = null; $("inspector").hidden = true; drawLedger(); };
+  $("thread").onchange = (ev) => { state.follow = false; $("follow").classList.remove("on"); open(ev.target.value); };
+  $("follow").onclick = () => {
+    state.follow = !state.follow;
+    $("follow").classList.toggle("on", state.follow);
+    if (state.follow && dock.activeThread) open(dock.activeThread);
+  };
+  $("search").oninput = (ev) => { state.query = ev.target.value.trim(); drawLedger(); };
+  $("fold").onclick = () => {
+    state.allClosed = !state.allClosed; state.closed.clear();
+    $("fold").textContent = state.allClosed ? "全部展开" : "全部折叠";
+    drawLedger();
+  };
+
+  (async () => {
+    $("follow").classList.toggle("on", state.follow);
+    try {
+      const list = await loadThreads();
+      const first = dock.activeThread || (list[0] && list[0].id);
+      if (first) await open(first);
+      else drawLedger();
+    } catch (e) {
+      $("ledger").innerHTML = `<div class="empty">读不到会话：${esc(e.message)}</div>`;
+    }
+  })();
+})();
+</script>
+</body>
+</html>

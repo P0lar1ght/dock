@@ -499,8 +499,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 插件（Rhai `host.register_slot`）登记的面板，不分端：正文是文本，动作是按钮。
 
-- `surface/list {}` → `{ surfaces: [{ id, title, hud }] }`。
-- `surface/get { id }` → `{ surface: { id, title, body, view, actions: [{ id, label }] } }`：
+- `surface/list {}` → `{ surfaces: [{ id, title, hud, web }] }`。
+- `surface/get { id }` → `{ surface: { id, title, body, view, actions: [{ id, label }], web } }`：
   - `view`：插件给了视图树就是规范化的 dock.view.1（`docs/PLUGIN-VIEWS.md`），否则 `null`；
   - 有视图时 `body` 是视图的纯文本降级，不再跑插件的 `render()`；
   画正文要跑插件脚本、正文可能带本机信息，只给受信 ticket。
@@ -508,6 +508,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 只认面板声明过的动作或视图里的按钮 / 列表行动作，否则 `invalid_params`；
   - 动作会跑插件脚本，只给受信 ticket（`forbidden`，同设置页）；
   - `closed` 为真表示插件要关面板；插件在动作里注销了面板时 `surface` 为 `null`。
+- `surface/web { id }` → `{ html }`（能力 `surfaceWeb`）：`web: true` 的面板自带的 HTML。
+  - GUI 放进沙箱 iframe（不同源、不许联网），只经窄桥读会话数据（`docs/PLUGIN-VIEWS.md` web 面板）；
+  - 插件写的代码，只给受信 ticket；没有 web 界面的面板回 `unavailable`，没有这个面板回 `not_found`。
 - 推送 `surface/changed { id }`：连接级。增删、被操作、插件 `host.slot_changed` 时到。
 
 ### 插件状态项（能力 `statusItems`，`handlers/status.rs`）
