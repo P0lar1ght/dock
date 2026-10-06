@@ -137,6 +137,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 /// `fs/dirs` 的目标目录：空着是主目录，`~` / `~/x` 按主目录展开，其余必须是绝对路径。
+/// （Windows 上不认 `~\x`，`canonicalize` 也会回 `\\?\C:\…`；远程 GUI 目前只有 macOS。）
 fn dirs_target(raw: &str, home: Option<&Path>) -> Result<PathBuf, String> {
     let raw = raw.trim();
     let home_or = || {
@@ -179,10 +180,10 @@ fn list_dirs(params: &Value) -> Result<Value, RpcError> {
             dir.display()
         )));
     }
+    // 没权限读不是参数错：单给一个码，界面好分「路径填错了」和「读不了」。
     let read = std::fs::read_dir(&dir)
-        .map_err(|e| RpcError::invalid_params(format!("读不了 {}：{e}", dir.display())))?;
+        .map_err(|e| RpcError::app("read_failed", format!("读不了 {}：{e}", dir.display())))?;
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
-    let mut truncated = false;
     for entry in read.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !hidden && name.starts_with('.') {
@@ -192,13 +193,12 @@ fn list_dirs(params: &Value) -> Result<Value, RpcError> {
         if !entry.path().is_dir() {
             continue;
         }
-        if entries.len() >= DIRS_LIMIT {
-            truncated = true;
-            break;
-        }
         entries.push((name, entry.path()));
     }
+    // 先全收、排好再截：截出来的是按名字排的前 DIRS_LIMIT 个，而不是 read_dir 顺序里的随便哪些。
     entries.sort_by_key(|(name, _)| name.to_lowercase());
+    let truncated = entries.len() > DIRS_LIMIT;
+    entries.truncate(DIRS_LIMIT);
     let entries: Vec<Value> = entries
         .into_iter()
         .map(|(name, path)| json!({ "name": name, "path": path.display().to_string() }))

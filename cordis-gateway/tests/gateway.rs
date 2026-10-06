@@ -3630,7 +3630,9 @@ async fn fs_methods_browse_the_sessions_workspace_read_only() {
 }
 
 /// `fs/dirs`：选目录。受信连接能列任意绝对路径下的子目录（不限会话、不照 `.gitignore`，
-/// 只列目录、默认不列隐藏的、按名字排）；相对路径拒绝；配对来的网页 `forbidden`。
+/// 只列目录、默认不列隐藏的、按名字排、超过上限截断前先排序）；相对路径拒绝、读不了回
+/// `read_failed`；配对来的网页 `forbidden`。
+#[cfg(unix)] // 用到权限位
 #[tokio::test]
 async fn fs_dirs_lists_subdirectories_for_trusted_connections_only() {
     let root = harness_root().await;
@@ -3688,6 +3690,44 @@ async fn fs_dirs_lists_subdirectories_for_trusted_connections_only() {
         .call("fs/dirs", json!({ "path": dir.join("notes.md") }))
         .await;
     assert_eq!(file["error"]["details"]["code"], "invalid_params", "{file}");
+
+    // 超过上限：回的是按名字排的前 1000 个，不是 read_dir 顺序里随便哪 1000 个。
+    let many = project_dir("fs-dirs-many");
+    for i in (0..1001).rev() {
+        std::fs::create_dir(many.join(format!("d{i:04}"))).unwrap();
+    }
+    let capped = gui
+        .call("fs/dirs", json!({ "path": many.display().to_string() }))
+        .await;
+    assert_eq!(capped["result"]["truncated"], true, "{capped}");
+    let capped_names: Vec<&str> = capped["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    let expected: Vec<String> = (0..1000).map(|i| format!("d{i:04}")).collect();
+    assert_eq!(capped_names, expected, "截断前要先排序");
+
+    // 读不了（没权限）不是参数错：回 read_failed。root 读得了就不测这条。
+    let locked = project_dir("fs-dirs-locked");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if std::fs::read_dir(&locked).is_err() {
+        let unreadable = gui
+            .call("fs/dirs", json!({ "path": locked.display().to_string() }))
+            .await;
+        assert_eq!(
+            unreadable["error"]["details"]["code"], "read_failed",
+            "{unreadable}"
+        );
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     let h = Harness::boot().await;
     let page_ticket = h.pair_ticket().await;
@@ -4958,7 +4998,7 @@ async fn feature_plugins_register_methods_with_their_policy() {
     );
 }
 
-/// 插件面板经 `surface/*` 投给 GUI：列出、取正文与动作、点动作（只认受信 ticket、
+/// 插件面板经 `surface/*` 投给 GUI：列出、取正文与动作、点动作（只认受信连接、
 /// 只认声明过的动作）、操作后推 `surface/changed`。
 #[tokio::test]
 async fn plugin_surfaces_reach_the_gui() {
@@ -5160,7 +5200,7 @@ async fn surface_views_are_projected_and_clickable() {
 }
 
 /// 配对来的网页只看得到面板列表（id、标题）：取正文、点动作都要跑插件脚本，正文也可能
-/// 带本机信息，同设置页只认受信 ticket。
+/// 带本机信息，同设置页只认受信连接。
 #[tokio::test]
 async fn paired_pages_cannot_act_on_plugin_surfaces() {
     let h = Harness::boot().await;
@@ -5178,7 +5218,7 @@ async fn paired_pages_cannot_act_on_plugin_surfaces() {
     let web = rpc.call("surface/web", json!({ "id": "x" })).await;
     assert_eq!(
         web["error"]["details"]["code"], "forbidden",
-        "插件 HTML 只给受信 ticket：{web}"
+        "插件 HTML 只给受信连接：{web}"
     );
 }
 
@@ -5254,7 +5294,7 @@ async fn surface_web_serves_the_plugin_html() {
     );
 }
 
-/// 插件的状态项经 `status/list` 投给 GUI（只认受信 ticket），改了推 `status/changed`。
+/// 插件的状态项经 `status/list` 投给 GUI（只认受信连接），改了推 `status/changed`。
 #[tokio::test]
 async fn status_items_reach_the_gui() {
     use cordis_base::view::Tone;
