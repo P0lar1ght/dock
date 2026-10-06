@@ -5,12 +5,12 @@
 //!
 //! - `surface/list {}` → `{ surfaces: [{ id, title, hud, web }] }`：谁都能看（只有 id 和标题）。
 //! - `surface/get { id }` → `{ surface: { id, title, body, actions: [{ id, label }] } }`：
-//!   画正文要跑插件脚本，正文也可能带本机信息，只给受信 ticket（同设置页）。
+//!   画正文要跑插件脚本，正文也可能带本机信息，只给受信连接（同设置页）。
 //! - `surface/action { id, action }` → `{ closed, surface }`：只认面板声明过的动作，
-//!   只给受信 ticket。`closed` 为真表示插件要关面板；插件在动作里把面板注销了时
+//!   只给受信连接。`closed` 为真表示插件要关面板；插件在动作里把面板注销了时
 //!   `surface` 是 `null`（动作已经执行，不算错）。
 //! - `surface/web { id }` → `{ html }`：插件自带的 web 界面（`web: true` 的面板）。GUI 放进沙箱
-//!   iframe，只经窄桥读会话数据（`docs/PLUGIN-VIEWS.md` web 面板）；只给受信 ticket。
+//!   iframe，只经窄桥读会话数据（`docs/PLUGIN-VIEWS.md` web 面板）；只给受信连接。
 //! - 推送 `surface/changed { id }`（连接级，不用订阅）：增删、被操作或插件说正文变了。
 
 use serde_json::{json, Value};
@@ -131,7 +131,7 @@ fn snapshot(slots: &TuiSlots, id: &str) -> Result<Value, RpcError> {
 }
 
 /// `surface/web { id }` → `{ html }`：插件自带的 web 界面。插件写的 HTML / JS，GUI 只在沙箱 iframe 里跑
-/// （不同源、不许联网），只经桥拿数据；只给受信 ticket。
+/// （不同源、不许联网），只经桥拿数据；只给受信连接。
 fn web(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = surface_id(&params)?;
     let slots = gateway

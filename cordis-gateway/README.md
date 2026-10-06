@@ -68,6 +68,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `connection/authenticate { ticket }`：本机配对 / `dock serve`；远程模式回 `unauthenticated`。
 - 同一条连接鉴权失败 5 次：服务端关连接，关闭码 `4429`。
 - 连着的设备每 2 秒复查一次；被撤销就关连接，关闭码 `4401`。
+- 设备令牌是受信连接：`trusted_only` 的方法（设置页、插件面板、`fs/dirs`）都能调。
+  - 理由：令牌本来就能跑命令、读写工作区；远程 GUI 的设置页改的就是远端这台。
 - 令牌名单：`$DOCK_HOME/devices.json`（只存 sha256，unix 0600，只有 `dock device add|revoke` 写）。
 - 最后使用时间：`$DOCK_HOME/devices.seen.json`（只有网关写，和名单分开，不会覆盖新加的设备）。
 
@@ -83,7 +85,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   `cua/`、`browser/status`、`skill/list`）只能登记成 `trusted_only`。
 - 每个方法带 `MethodPolicy`：
   - `detached`：放到连接锁外跑；
-  - `trusted_only`：只认 `dock serve` 的受信 ticket；
+  - `trusted_only`：只认受信连接——`dock serve` 交给父进程的 ticket，或设备令牌；
+    配对来的网页 `forbidden`；
   - `opens_thread`：关着的线程先开页。
 - `features()` 是本 crate 自带的那几颗：
   - `gateway.settings`（设置页，全部 `trusted_only`）
@@ -373,6 +376,20 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 出了会话 cwd 就拒（`..`、绝对路径、指到外面的符号链接）：`invalid_params`。
 - 只认开着的会话（`thread_not_open`）；不占连接锁，读盘在阻塞线程里。
 - 没有写方法：改文件交给 agent（走权限门）。
+
+### 选目录（能力 `directoryPicker`，`handlers/fs.rs`）
+
+远程 GUI 新建会话时选远端的目录（本机 GUI 用系统对话框）。
+
+| 方法 | 作用 |
+|---|---|
+| `fs/dirs { path?, hidden? }` | 列一层子目录：`path`、`parent`、`home`、`entries[{ name, path }]`、`truncated` |
+
+- `path`：绝对路径，或 `~` / `~/…`（按主目录展开）；空着就是主目录。相对路径 `invalid_params`。
+- 回包里的路径都是规范化后的绝对路径；`parent` 到根是 `null`。
+- 只列目录（指向目录的符号链接也算），不照 `.gitignore`；默认不列点开头的，`hidden: true` 才列。
+- 按名字排（不分大小写），最多 1000 项。
+- 不限在会话 cwd 里，所以 `trusted_only`：配对来的网页 `forbidden`。
 
 ### 画布（能力 `canvas`，`handlers/canvas.rs`）
 

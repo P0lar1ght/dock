@@ -79,20 +79,28 @@ impl Auth {
         }
     }
 
-    /// 设置页方法只认 `dock serve` 交给父进程的 ticket。
+    /// 设置页方法只认受信连接：`dock serve` 交给父进程的 ticket，和设备令牌。
+    /// 设备令牌本来就能跑命令、读写工作区，让它改设置不多给能力；远程 GUI 的设置页
+    /// 改的就是远端这台 Dock。配对来的网页仍然不受信。
     fn trusted(&self) -> bool {
-        matches!(self, Self::Ticket(t) if t.trusted)
+        match self {
+            Self::Ticket(t) => t.trusted,
+            Self::Device(_) => true,
+        }
     }
 }
 
-/// 改配置的方法（能写 MCP 启动命令 = 能在本机跑程序）挡掉配对来的网页和远程设备。
+/// 改配置的方法（能写 MCP 启动命令 = 能在本机跑程序）挡掉配对来的网页。
 fn settings_gate(
     auth: Option<&Auth>,
     gateway: &GatewayHandle,
     method: &str,
 ) -> Result<(), RpcError> {
     if crate::methods::policy_of(gateway, method).trusted_only && !auth.is_some_and(Auth::trusted) {
-        return Err(RpcError::app("forbidden", "只有桌面 GUI 能改 Dock 设置"));
+        return Err(RpcError::app(
+            "forbidden",
+            "这个操作只对桌面 GUI 和设备令牌开放",
+        ));
     }
     Ok(())
 }

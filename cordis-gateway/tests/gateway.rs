@@ -3481,6 +3481,22 @@ async fn remote_gateway_accepts_only_device_tokens_and_drops_revoked() {
     );
     let listed = rpc.call("thread/list", json!({})).await;
     assert!(listed.get("result").is_some(), "{listed}");
+    // 设备令牌是受信连接：远程 GUI 的设置页、选目录都要用 `trusted_only` 的方法。
+    let status = rpc.call("config/status", json!({})).await;
+    assert!(
+        status.get("result").is_some(),
+        "设备令牌该能读设置：{status}"
+    );
+    let dirs = rpc
+        .call(
+            "fs/dirs",
+            json!({ "path": std::env::temp_dir().display().to_string() }),
+        )
+        .await;
+    assert!(
+        dirs["result"]["entries"].is_array(),
+        "设备令牌该能选目录：{dirs}"
+    );
 
     devices::revoke(&device.id).unwrap();
     let code = rpc.wait_closed(Duration::from_secs(8)).await;
@@ -3610,6 +3626,77 @@ async fn fs_methods_browse_the_sessions_workspace_read_only() {
     assert_eq!(
         closed["error"]["details"]["code"], "thread_not_open",
         "{closed}"
+    );
+}
+
+/// `fs/dirs`：选目录。受信连接能列任意绝对路径下的子目录（不限会话、不照 `.gitignore`，
+/// 只列目录、默认不列隐藏的、按名字排）；相对路径拒绝；配对来的网页 `forbidden`。
+#[tokio::test]
+async fn fs_dirs_lists_subdirectories_for_trusted_connections_only() {
+    let root = harness_root().await;
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let init = gui.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["directoryPicker"], true,
+        "{init}"
+    );
+
+    let dir = project_dir("fs-dirs");
+    for sub in ["beta", "Alpha", ".hidden", "target"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(dir.join("notes.md"), "x").unwrap();
+    let path = dir.display().to_string();
+
+    let listed = gui.call("fs/dirs", json!({ "path": path })).await;
+    let names: Vec<&str> = listed["result"]["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listed}"))
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Alpha", "beta", "target"], "{listed}");
+    assert_eq!(listed["result"]["path"], path, "{listed}");
+    assert_eq!(
+        listed["result"]["parent"],
+        dir.parent().unwrap().display().to_string(),
+        "{listed}"
+    );
+    assert_eq!(
+        listed["result"]["entries"][0]["path"],
+        dir.join("Alpha").display().to_string(),
+        "{listed}"
+    );
+
+    let with_hidden = gui
+        .call("fs/dirs", json!({ "path": path, "hidden": true }))
+        .await;
+    assert_eq!(
+        with_hidden["result"]["entries"].as_array().unwrap().len(),
+        4,
+        "{with_hidden}"
+    );
+
+    let relative = gui.call("fs/dirs", json!({ "path": "some/where" })).await;
+    assert_eq!(
+        relative["error"]["details"]["code"], "invalid_params",
+        "{relative}"
+    );
+    let file = gui
+        .call("fs/dirs", json!({ "path": dir.join("notes.md") }))
+        .await;
+    assert_eq!(file["error"]["details"]["code"], "invalid_params", "{file}");
+
+    let h = Harness::boot().await;
+    let page_ticket = h.pair_ticket().await;
+    let mut page = Rpc::connect(h.addr, &page_ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    let denied = page.call("fs/dirs", json!({ "path": path })).await;
+    assert_eq!(
+        denied["error"]["details"]["code"], "forbidden",
+        "配对网页不该能列任意目录：{denied}"
     );
 }
 

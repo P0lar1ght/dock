@@ -5,7 +5,7 @@
 //! fiber 一起注销。给 GUI 加一页 = 再挂一颗插件，不用改网关。
 //!
 //! 每个方法带一份 [`MethodPolicy`]：跑多久（要不要放到连接锁外）、谁能调（是否只认
-//! 桌面 GUI 的受信 ticket）、关着的线程要不要先开页。核心方法（`rpc::CORE_METHODS`）
+//! 受信连接：GUI 的 ticket、设备令牌）、关着的线程要不要先开页。核心方法（`rpc::CORE_METHODS`）
 //! 不能登记：表里的策略会套到核心方法上，detached 还会把核心实现顶掉。
 
 use std::collections::HashMap;
@@ -28,8 +28,8 @@ pub struct MethodPolicy {
     /// 一次要几秒（调模型、走网络、读大目录）：鉴权后放到连接锁外另起任务跑，
     /// 不卡这条连接的推送和其它请求。拿不到连接状态（订阅表）。
     pub detached: bool,
-    /// 能改本机配置（等于能在本机跑程序）：只认 `dock serve` 交给父进程的受信 ticket，
-    /// 配对来的网页和远程设备一律 `forbidden`。
+    /// 能改本机配置（等于能在本机跑程序）：只认受信连接——`dock serve` 交给父进程的
+    /// ticket 和设备令牌（令牌本来就等于这台 Dock 的全部能力）。配对来的网页一律 `forbidden`。
     pub trusted_only: bool,
     /// 线程级方法：`threadId` 指向关着的会话时先开页再做。
     pub opens_thread: bool,
@@ -50,7 +50,7 @@ impl MethodPolicy {
 const TRUSTED_PREFIXES: &[&str] = &[
     "config/", "secret/", "pairing/", "device/", "plugin/", "mcp/", "model/", "cua/",
 ];
-const TRUSTED_NAMES: &[&str] = &["browser/status", "skill/list"];
+const TRUSTED_NAMES: &[&str] = &["browser/status", "skill/list", "fs/dirs"];
 
 fn must_be_trusted(name: &str) -> bool {
     TRUSTED_NAMES.contains(&name) || TRUSTED_PREFIXES.iter().any(|p| name.starts_with(p))
