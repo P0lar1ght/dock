@@ -4927,7 +4927,7 @@ async fn plugin_surfaces_reach_the_gui() {
     let listed = gui.call("surface/list", json!({})).await;
     assert_eq!(
         listed["result"]["surfaces"][0],
-        json!({ "id": "counter", "title": "计数器", "hud": false }),
+        json!({ "id": "counter", "title": "计数器", "hud": false, "web": false }),
         "{listed}"
     );
     let got = gui.call("surface/get", json!({ "id": "counter" })).await;
@@ -5088,6 +5088,83 @@ async fn paired_pages_cannot_act_on_plugin_surfaces() {
         .call("surface/action", json!({ "id": "x", "action": "y" }))
         .await;
     assert_eq!(acted["error"]["details"]["code"], "forbidden", "{acted}");
+    let web = rpc.call("surface/web", json!({ "id": "x" })).await;
+    assert_eq!(
+        web["error"]["details"]["code"], "forbidden",
+        "插件 HTML 只给受信 ticket：{web}"
+    );
+}
+
+/// web 面板：`surface/list` / `get` 带 `web`，`surface/web` 回插件的 HTML；没有 web 界面的面板回错。
+#[tokio::test]
+async fn surface_web_serves_the_plugin_html() {
+    use cordis_spine::{SlotHandler, SlotKeyResult, TuiSlots, TUI_SLOTS};
+
+    struct Web(bool);
+    impl SlotHandler for Web {
+        fn title(&self) -> String {
+            "轨迹".into()
+        }
+        fn hud(&self) -> bool {
+            false
+        }
+        fn render(&self) -> String {
+            "在 GUI 里看".into()
+        }
+        fn on_key(&self, _key: &str) -> SlotKeyResult {
+            SlotKeyResult::Keep
+        }
+        fn has_web(&self) -> bool {
+            self.0
+        }
+        fn web(&self) -> Result<String, String> {
+            if self.0 {
+                Ok("<p>trajectory</p>".into())
+            } else {
+                Err("这个面板没有 web 界面".into())
+            }
+        }
+    }
+
+    let root = harness_root().await;
+    root.plugin(cordis_spine::tui_slots(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let slots = root.require::<TuiSlots>(TUI_SLOTS).unwrap();
+    let _a = slots.register("traj".into(), Arc::new(Web(true))).unwrap();
+    let _b = slots
+        .register("plain".into(), Arc::new(Web(false)))
+        .unwrap();
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let init = gui.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["surfaceWeb"], true, "{init}");
+
+    let listed = gui.call("surface/list", json!({})).await;
+    let surfaces = listed["result"]["surfaces"].as_array().unwrap();
+    let web_of = |id: &str| surfaces.iter().find(|s| s["id"] == id).unwrap()["web"].clone();
+    assert_eq!(web_of("traj"), true);
+    assert_eq!(web_of("plain"), false);
+    let got = gui.call("surface/get", json!({ "id": "traj" })).await;
+    assert_eq!(got["result"]["surface"]["web"], true, "{got}");
+
+    let html = gui.call("surface/web", json!({ "id": "traj" })).await;
+    assert_eq!(html["result"]["html"], "<p>trajectory</p>", "{html}");
+    let none = gui.call("surface/web", json!({ "id": "plain" })).await;
+    assert!(
+        none["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("web 界面"),
+        "{none}"
+    );
+    let missing = gui.call("surface/web", json!({ "id": "nope" })).await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
 }
 
 /// 插件的状态项经 `status/list` 投给 GUI（只认受信 ticket），改了推 `status/changed`。

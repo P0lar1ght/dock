@@ -65,6 +65,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `surface/list` / `get` / `action` + 连接级推送 `surface/changed { id }`：插件的面板
     // （`"tui.slots"`）。正文是文本，动作是按钮；`action` 只认受信 ticket。
     ("surfaces", true),
+    // `surface/web { id }` → `{ html }`：面板自带的 web 界面（`surface/list` / `get` 带 `web`）。
+    // GUI 放进沙箱 iframe，经窄桥读会话数据。只认受信 ticket。
+    ("surfaceWeb", true),
     // `status/list` + 连接级推送 `status/changed { id }`：插件的状态项（短文字 + 色调，
     // 点它开插件面板）；`hud` 插槽也在里面。只认受信 ticket。
     ("statusItems", true),
@@ -106,6 +109,7 @@ pub const SCHEDULE_CHANGED: &str = "schedule/changed";
 pub const SURFACE_LIST: &str = "surface/list";
 pub const SURFACE_GET: &str = "surface/get";
 pub const SURFACE_ACTION: &str = "surface/action";
+pub const SURFACE_WEB: &str = "surface/web";
 /// 连接级推送：插件面板增删了、被操作了或正文要重画（`{ id }`），重拉 `surface/get`。
 pub const SURFACE_CHANGED: &str = "surface/changed";
 pub const STATUS_LIST: &str = "status/list";

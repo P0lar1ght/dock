@@ -8,7 +8,8 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 解析：Rust 在 `cordis-base/src/view.rs`；dock.1 客户端用 `dock-core/src/plugins.ts`
 （同一套规范化，外加面板 / 状态项 / 工具卡的结果解析）。
 
-完整示例：`examples/plugins/activity/`（Agent 活动：面板 + 状态项 + 设置卡，Rhai 磁盘插件）。
+完整示例：`examples/plugins/activity/`（Agent 活动：面板 + 状态项 + 设置卡）、
+`examples/plugins/trajectory/`（会话轨迹：web 面板）。
 
 ## 用在哪
 
@@ -16,7 +17,7 @@ TUI 和 GUI 各自把它画出来；插件不写 ratatui，也不往 GUI 里塞�
 
 | 扩展点 | 插件交什么 | TUI | GUI |
 |---|---|---|---|
-| 插件面板 | 面板的视图树 | 注册浮层 `slot` | 右侧面板（分屏菜单「插件面板」组），可弹出成独立窗 |
+| 插件面板 | 面板的视图树（或 web 面板，见下） | 注册浮层 `slot` | 右侧面板（分屏菜单「插件面板」组），可弹出成独立窗 |
 | 工具卡 | 按工具名登记的渲染函数 | 卡片展开区 | 工具卡展开区 |
 | 设置卡 | 配置项 schema（见下） | `/cordis` 详情 | 设置 › 插件与技能，插件行「配置」就地展开 |
 | 状态项 | 一个小状态（文字 + 色调） | 底栏右侧 | 输入框工具栏右组最前 |
@@ -156,6 +157,42 @@ named service `"tool.views"`：按工具名登记渲染函数，拿这一次调�
 - GUI：`status/list` + 推送 `status/changed`（只认受信 ticket）。
   - 最多摆 3 个，按工具栏剩余宽度少摆，多的收进「+N」；连「+N」都放不下就先藏起来；
   - 图标由色调决定（success / warning / danger / accent），default / muted 不带图标。
+
+## web 面板
+
+视图树画不了的交互（时间轴拖选、虚拟滚动、搜索框、图表）走 web 面板：插件自带 HTML / JS，
+GUI 放进沙箱 iframe；终端照旧画 `view()` / `render()`。
+
+声明（只有磁盘插件，HTML 放在插件目录里）：
+
+```rhai
+host.register_slot(#{ id: "trajectory", title: "会话轨迹", render: || { "在 GUI 里看" }, web: "panel.html" });
+```
+
+- 路径相对插件目录；绝对路径、`..`、经软链跑出目录都会让 `apply` 失败。
+- 每次打开现读文件（改了 HTML 重开面板就是新的），上限 2 MiB。
+- 网关：`surface/list` / `get` 带 `web`；`surface/web { id }` → `{ html }`，只认受信 ticket。
+
+安全（GUI）：
+
+- iframe 只给 `allow-scripts`：不同源，碰不到 GUI 的 DOM、存储、Tauri IPC；
+- 文档里注入 CSP：不许联网（`fetch` / WebSocket / 外链资源都不行），脚本样式只能内联；
+- 和 Dock 只经 `postMessage` 桥说话，桥只放行下面几个方法。
+
+桥（页面里的 `window.dock`）：
+
+| 调用 | 回 |
+|---|---|
+| `dock.call("threads.list")` | `thread/list { scope: "all" }` 的结果 |
+| `dock.call("threads.history", { threadId })` | `thread/history` 的结果（完整事件流，`events[].timestamp` 毫秒） |
+| `dock.call("threads.watch", { threadId })` | `{ live }`；之后这个会话的实时事件经 `dock.on("event", fn)` 推来 |
+| `dock.call("panel.action", { action })` | 本面板的 `surface/action`，`{ closed }` |
+
+- `live: false`：主窗口只转发 GUI 已打开的会话，收不到就自己隔几秒重拉历史；弹出的独立窗自己订阅。
+- `dock.activeThread`：主窗口当前会话 id（独立窗里是 `null`），变了推 `dock.on("activeThread", fn)`。
+- 设计 token 以 CSS 变量注入（`--dock-ink`、`--dock-accent`、`--dock-font`、`--dock-mono`…），和 GUI 同一套。
+
+示例：`examples/plugins/trajectory/`（会话轨迹）。
 
 ## 以后可以加（还没做）
 

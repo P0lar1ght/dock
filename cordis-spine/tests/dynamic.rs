@@ -3265,3 +3265,172 @@ async fn example_activity_plugin_runs() {
         .to_plain()
         .contains("还没有工具调用"));
 }
+
+/// web 面板：磁盘插件的 `register_slot(#{ web: "panel.html" })` 指向插件目录里的文件，
+/// `TuiSlots::web` 现读给 GUI；内联插件、`..`、绝对路径都不许（HTML 不能跑出插件目录）。
+#[tokio::test]
+async fn rhai_slot_web_panel_reads_from_the_plugin_directory() {
+    // 插件放在用户级插件根（DOCK_HOME/plugins）下，用绝对 source_path，不切进程 cwd：
+    // 同一个测试二进制里有按 cwd 相对路径建文件的用例（上传那几条），切 cwd 会和它们抢。
+    let home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
+    let root = boot().await;
+    let plug = home.path().join("plugins/webdemo");
+    std::fs::create_dir_all(&plug).unwrap();
+    std::fs::write(plug.join("panel.html"), "<p>hello web</p>").unwrap();
+    let source = |web: &str| {
+        format!(
+            r#"#{{
+                inject: ["tui.slots"],
+                apply: |host| {{
+                    host.register_slot(#{{ id: "webdemo", title: "Web", render: || {{ "终端看这行" }}, web: "{web}" }});
+                }}
+            }}"#
+        )
+    };
+    let run = |prefix: &'static str, n: u32| {
+        let root = root.clone();
+        async move {
+            exec(
+                &root,
+                "cordis_run",
+                &format!(r#"{{"pluginId":"{prefix}-{n}","packageId":"pkg-1","mode":"run"}}"#),
+            )
+            .await
+        }
+    };
+
+    std::fs::write(plug.join("source.rhai"), source("panel.html")).unwrap();
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "webd"},
+            "name": "WebDemo",
+            "purpose": "web panel",
+            "factory": "rhai",
+            "source_path": plug.join("source.rhai").display().to_string()
+        }),
+    )
+    .await;
+    assert!(!defined.contains("Error"), "{defined}");
+    let ran = run("webd", 1).await;
+    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+    let slots = root.require::<cordis_spine::TuiSlots>(TUI_SLOTS).unwrap();
+    assert!(slots.has_web("webdemo"));
+    assert_eq!(slots.web("webdemo").unwrap(), "<p>hello web</p>");
+    // 现读：改了文件，下次拿到的就是新的。
+    std::fs::write(plug.join("panel.html"), "<p>v2</p>").unwrap();
+    assert_eq!(slots.web("webdemo").unwrap(), "<p>v2</p>");
+    assert_eq!(slots.render("webdemo").as_deref(), Some("终端看这行"));
+    exec(&root, "cordis_stop", r#"{"pluginId":"webd-1"}"#).await;
+    assert!(!slots.has_web("webdemo"));
+
+    // 跑出插件目录的路径：apply 失败，面板不登记。
+    for bad in ["../outside.html", "/etc/hosts"] {
+        std::fs::write(plug.join("source.rhai"), source(bad)).unwrap();
+        let defined = exec_json(
+            &root,
+            "cordis_define",
+            json!({
+                "plugin": {"kind": "existing", "pluginId": "webd-1"},
+                "name": "WebDemo",
+                "purpose": "web panel",
+                "factory": "rhai",
+                "source_path": plug.join("source.rhai").display().to_string()
+            }),
+        )
+        .await;
+        let pkg = defined
+            .split("webd-1/")
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_alphanumeric() && c != '-').next())
+            .unwrap_or("pkg-2")
+            .to_string();
+        let out = exec(
+            &root,
+            "cordis_run",
+            &format!(r#"{{"pluginId":"webd-1","packageId":"{pkg}","mode":"update"}}"#),
+        )
+        .await;
+        assert!(out.contains("插件目录"), "{bad}: {out}");
+        assert!(!slots.has_web("webdemo"), "{bad}");
+    }
+
+    // 内联插件没有目录：不许带 web。
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "webi"},
+            "name": "WebInline",
+            "purpose": "inline web",
+            "factory": "rhai",
+            "source": source("panel.html"),
+        }),
+    )
+    .await;
+    assert!(!defined.contains("Error"), "{defined}");
+    // 定义回执里带 `<插件 id>/<包 id>`。
+    let (id, pkg) = defined
+        .split(|c: char| c.is_whitespace() || c == '`' || c == '"' || c == '(' || c == ')')
+        .find_map(|w| {
+            let (id, pkg) = w.split_once("/pkg-")?;
+            let n: String = pkg.chars().take_while(char::is_ascii_digit).collect();
+            id.starts_with("webi-")
+                .then(|| (id.to_string(), format!("pkg-{n}")))
+        })
+        .expect("回执里有插件 id 和包 id");
+    let out = exec(
+        &root,
+        "cordis_run",
+        &format!(r#"{{"pluginId":"{id}","packageId":"{pkg}","mode":"run"}}"#),
+    )
+    .await;
+    assert!(out.contains("磁盘插件"), "{out}");
+    assert!(!slots.has_web("webdemo"));
+}
+
+/// 仓库里的示例 web 面板插件 `examples/plugins/trajectory` 照磁盘插件的真实路径装上：
+/// 面板有 web 界面，HTML 用的是桥（`dock.call("threads.history")`），终端有一行提示。
+#[tokio::test]
+async fn example_trajectory_plugin_serves_its_web_panel() {
+    // 插件放在用户级插件根（DOCK_HOME/plugins）下，用绝对 source_path，不切进程 cwd：
+    // 同一个测试二进制里有按 cwd 相对路径建文件的用例（上传那几条），切 cwd 会和它们抢。
+    let home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
+    let root = boot().await;
+    let example =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/trajectory");
+    let plug = home.path().join("plugins/trajectory");
+    std::fs::create_dir_all(&plug).unwrap();
+    for f in ["plugin.toml", "source.rhai", "panel.html"] {
+        std::fs::copy(example.join(f), plug.join(f)).unwrap();
+    }
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "traj"},
+            "name": "会话轨迹",
+            "purpose": "example",
+            "factory": "rhai",
+            "source_path": plug.join("source.rhai").display().to_string()
+        }),
+    )
+    .await;
+    assert!(!defined.contains("Error"), "{defined}");
+    let ran = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"traj-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+    let slots = root.require::<cordis_spine::TuiSlots>(TUI_SLOTS).unwrap();
+    assert!(slots.has_web("trajectory"));
+    let html = slots.web("trajectory").unwrap();
+    assert!(html.contains("<title>会话轨迹</title>"), "{}", &html[..200]);
+    assert!(html.contains("dock.call(\"threads.history\""));
+    assert!(slots.render("trajectory").unwrap().contains("GUI"));
+}

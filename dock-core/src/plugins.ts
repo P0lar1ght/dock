@@ -290,6 +290,8 @@ export interface SurfaceSummary {
   title: string;
   /** 也算一个状态项（旧插槽的 `hud: true`）。 */
   hud: boolean;
+  /** 自带 web 界面（`surface/web`）：GUI 用沙箱 iframe 画它。 */
+  web: boolean;
 }
 
 export interface SurfaceAction {
@@ -304,6 +306,8 @@ export interface Surface {
   body: string;
   view: ViewNode | null;
   actions: SurfaceAction[];
+  /** 自带 web 界面：GUI 画 `surface/web` 的 HTML，终端照旧画视图 / 正文。 */
+  web: boolean;
 }
 
 export function parseSurfaceList(result: unknown): SurfaceSummary[] {
@@ -312,7 +316,7 @@ export function parseSurfaceList(result: unknown): SurfaceSummary[] {
   return list
     .map(obj)
     .filter((s) => typeof s.id === 'string' && s.id)
-    .map((s) => ({ id: s.id as string, title: textOf(s.title) || (s.id as string), hud: s.hud === true }));
+    .map((s) => ({ id: s.id as string, title: textOf(s.title) || (s.id as string), hud: s.hud === true, web: s.web === true }));
 }
 
 /** `surface/get` 的 `surface`；不是对象（如 `null`）回 `null`。 */
@@ -330,7 +334,14 @@ export function parseSurface(value: unknown): Surface | null {
     body: typeof s.body === 'string' ? s.body : '',
     view: s.view == null ? null : parseView(s.view),
     actions: actions.filter((a) => a.id),
+    web: s.web === true,
   };
+}
+
+/** `surface/web` → 面板自带的 HTML；不是字符串回 `null`。 */
+export function parseSurfaceWeb(result: unknown): string | null {
+  const html = obj(result).html;
+  return typeof html === 'string' ? html : null;
 }
 
 /** `surface/action` 的结果：`closed` 为真时面板该收起（插件自己关了或注销了）。 */
