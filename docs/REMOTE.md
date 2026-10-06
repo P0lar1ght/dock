@@ -6,12 +6,14 @@
 ## 思路
 
 - Dock **只绑回环**（默认 `127.0.0.1:18990`），自己不对公网开端口。
-- TLS 与对外暴露交给前面的反向代理（Caddy / nginx），或者 Tailscale。
+- TLS 与对外暴露交给前面的反向代理（Caddy / nginx），或者 Tailscale；
+  能 SSH 到这台机器的话，桌面 GUI 也可以自己开 SSH 隧道，什么都不用对外开。
 - 客户端用**设备令牌**鉴权（`dock device add`），不走本机那套 Origin 配对。
 - 远程模式不挂配对与 ticket 的 HTTP 路由：公网上的人连配对申请都发不了。
 
 ```
 客户端（GUI / 浏览器 UI）──wss──▶ 反向代理（TLS）──ws──▶ 127.0.0.1:18990 dock serve --remote
+桌面 GUI ──ssh -L（本机 127.0.0.1:随机端口）──▶ 127.0.0.1:18990 dock serve --remote
 ```
 
 ## 1. 签设备令牌
@@ -39,8 +41,9 @@ dock serve --remote --bind 127.0.0.1:9000
 - 不看 stdin，跑到 SIGINT / SIGTERM 为止。
 - 工作目录就是默认项目目录；会话按目录落在 `$DOCK_HOME/sessions/`。
 
-systemd 示例（`/etc/systemd/system/dock.service`；`systemctl enable --now dock`，日志看
-`journalctl -u dock -f`）：
+systemd 示例（`/etc/systemd/system/dock.service`）：
+
+- 启用并启动：`systemctl enable --now dock`；看日志：`journalctl -u dock -f`。
 
 ```ini
 [Unit]
@@ -102,8 +105,12 @@ server {
 - 设置 → 网关与设备 → 连接 →「+ 添加远程 Dock」：填名字、连接方式、令牌，可以先「测试连接」。
 - 连接方式「SSH 隧道」（能 SSH 到这台机器就用它，不用挂代理）：
   - 填用户、主机、端口、私钥（空着用 ssh-agent / `~/.ssh/config`）、远端端口（默认 18990）。
-  - GUI 自己开 `ssh -N -L`，本机端口随机；断了下次连接时重开。只用 `BatchMode`，不弹密码框。
+  - GUI 自己开 `ssh -N -L`，本机端口随机、只绑 `127.0.0.1`，不会暴露到局域网。
+  - ssh 断了（网络抖动、进程被杀），GUI 自动重连时会重开隧道。只用 `BatchMode`，不弹密码框。
   - 远端 Dock 没在跑时，GUI 经 SSH 执行「启动命令」（默认 `systemctl start dock`），再等它起来。
+  - 启动命令要 SSH 用户有权限执行，而 `BatchMode` 下输不了 sudo 密码：
+    用 root 登录；或给 `sudo systemctl start dock` 配 NOPASSWD 并把启动命令改成它；
+    或改用 `systemctl --user` 单元。没权限时 GUI 会报「启动命令失败」并停止重连。
 - 连接方式「地址」：反向代理 / Tailscale 的 `https://` 地址，或自己开的隧道 `http://127.0.0.1:端口`。
 - 令牌只存进 macOS 钥匙串；点「使用」切过去，所有窗口重载。
 - 连着远程时本机不拉起 Dock；本机终端、「在访达中显示」不出现（路径在远端）。
