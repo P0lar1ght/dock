@@ -41,6 +41,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("desktopCursor", true),
     // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
     ("workspaceFiles", true),
+    // `fs/dirs { path?, hidden? }`：列任意绝对路径下的子目录（远程 GUI 选会话目录）。
+    // 只认受信连接（`trusted_only`）。
+    ("directoryPicker", true),
     // `item/tool_completed.attachments` + `item/image`：工具结果里的截图等。
     ("toolImages", true),
     // `canvas/list` / `get` / `setData` / `rollback`：模型写的画布（HTML 分版 + 数据）。
@@ -63,19 +66,19 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `thread/rewind`：撤回任意一条用户消息——它和之后的对话全部删掉，正文和图片还回来。
     ("threadRewind", true),
     // `surface/list` / `get` / `action` + 连接级推送 `surface/changed { id }`：插件的面板
-    // （`"tui.slots"`）。正文是文本，动作是按钮；`action` 只认受信 ticket。
+    // （`"tui.slots"`）。正文是文本，动作是按钮；`action` 只认受信连接。
     ("surfaces", true),
     // `surface/web { id }` → `{ html }`：面板自带的 web 界面（`surface/list` / `get` 带 `web`）。
-    // GUI 放进沙箱 iframe，经窄桥读会话数据。只认受信 ticket。
+    // GUI 放进沙箱 iframe，经窄桥读会话数据。只认受信连接。
     ("surfaceWeb", true),
     // `status/list` + 连接级推送 `status/changed { id }`：插件的状态项（短文字 + 色调，
-    // 点它开插件面板）；`hud` 插槽也在里面。只认受信 ticket。
+    // 点它开插件面板）；`hud` 插槽也在里面。只认受信连接。
     ("statusItems", true),
     // `tool/views` / `tool/view` + 推送 `tool/views/changed`：插件给工具登记的卡片视图，
-    // 展开工具卡时按需取（`tool/view` 只认受信 ticket）。
+    // 展开工具卡时按需取（`tool/view` 只认受信连接）。
     ("toolViews", true),
     // `plugin/settings/list|get|set` + 推送 `plugin/settings/changed`：插件声明的设置卡，
-    // 设置页按 schema 生成表单。只认受信 ticket。
+    // 设置页按 schema 生成表单。只认受信连接。
     ("pluginSettings", true),
 ];
 
@@ -254,6 +257,8 @@ pub const DESKTOP_VIEW_STATUS: &str = "desktop/view/status";
 pub const FS_LIST: &str = "fs/list";
 pub const FS_READ: &str = "fs/read";
 pub const FS_FIND: &str = "fs/find";
+/// 选目录：列这台机器上任意一个绝对路径下的子目录（远程 GUI 新建会话用）。只认受信连接。
+pub const FS_DIRS: &str = "fs/dirs";
 
 /// 会话的画布：列 / 读一版 / 改数据 / 回滚。
 pub const CANVAS_LIST: &str = "canvas/list";

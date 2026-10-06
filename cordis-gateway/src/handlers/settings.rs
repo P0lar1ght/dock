@@ -851,8 +851,8 @@ pub fn device_revoke(params: Value) -> Result<Value, RpcError> {
 }
 
 /// 设置页这一块：读写用户级配置、MCP、插件、密钥、配对、设备的方法。全部
-/// `trusted_only`——能写 MCP 启动命令就等于能在本机跑程序，只认 `dock serve` 交给
-/// 桌面 GUI 的受信 ticket。连服务器 / 跑插件 / 等浏览器登录的几条放到连接锁外跑。
+/// `trusted_only`——能写 MCP 启动命令就等于能在本机跑程序，只认受信连接（`dock serve`
+/// 交给桌面 GUI 的 ticket、设备令牌）。连服务器 / 跑插件 / 等浏览器登录的几条放到连接锁外跑。
 pub fn gateway_settings() -> Plugin {
     plugin(
         "gateway.settings",

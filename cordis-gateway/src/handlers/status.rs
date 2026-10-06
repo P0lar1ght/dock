@@ -1,7 +1,7 @@
 //! `status/*`：插件的状态项（`"status.items"`，含 `hud` 插槽）投给 GUI。
 //!
 //! - `status/list {}` → `{ items: [{ id, text, tone, tooltip, surface }] }`：
-//!   文字是插件给的内容，只给受信 ticket（同 `surface/get`）。
+//!   文字是插件给的内容，只给受信连接（同 `surface/get`）。
 //! - 推送 `status/changed { id }`（连接级）：状态项增删改了，或 `hud` 插槽变了。
 
 use serde_json::{json, Value};

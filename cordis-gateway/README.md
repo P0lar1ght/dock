@@ -68,6 +68,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `connection/authenticate { ticket }`：本机配对 / `dock serve`；远程模式回 `unauthenticated`。
 - 同一条连接鉴权失败 5 次：服务端关连接，关闭码 `4429`。
 - 连着的设备每 2 秒复查一次；被撤销就关连接，关闭码 `4401`。
+- 设备令牌是受信连接：`trusted_only` 的方法（设置页、插件面板、`fs/dirs`）都能调。
+  - 理由：令牌本来就能跑命令、读写工作区；远程 GUI 的设置页改的就是远端这台。
 - 令牌名单：`$DOCK_HOME/devices.json`（只存 sha256，unix 0600，只有 `dock device add|revoke` 写）。
 - 最后使用时间：`$DOCK_HOME/devices.seen.json`（只有网关写，和名单分开，不会覆盖新加的设备）。
 
@@ -83,7 +85,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   `cua/`、`browser/status`、`skill/list`）只能登记成 `trusted_only`。
 - 每个方法带 `MethodPolicy`：
   - `detached`：放到连接锁外跑；
-  - `trusted_only`：只认 `dock serve` 的受信 ticket；
+  - `trusted_only`：只认受信连接——`dock serve` 交给父进程的 ticket，或设备令牌；
+    配对来的网页 `forbidden`；
   - `opens_thread`：关着的线程先开页。
 - `features()` 是本 crate 自带的那几颗：
   - `gateway.settings`（设置页，全部 `trusted_only`）
@@ -374,6 +377,21 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 只认开着的会话（`thread_not_open`）；不占连接锁，读盘在阻塞线程里。
 - 没有写方法：改文件交给 agent（走权限门）。
 
+### 选目录（能力 `directoryPicker`，`handlers/fs.rs`）
+
+远程 GUI 新建会话时选远端的目录（本机 GUI 用系统对话框）。
+
+| 方法 | 作用 |
+|---|---|
+| `fs/dirs { path?, hidden? }` | 列一层子目录：`path`、`parent`、`home`、`entries[{ name, path }]`、`truncated` |
+
+- `path`：绝对路径，或 `~` / `~/…`（按主目录展开）；空着就是主目录。相对路径 `invalid_params`。
+- 回包里的路径都是规范化后的绝对路径；`parent` 到根是 `null`。
+- 只列目录（指向目录的符号链接也算），不照 `.gitignore`；默认不列点开头的，`hidden: true` 才列。
+- 按名字排（不分大小写），最多 1000 项（先排序再截，`truncated: true` 时是前 1000 个）。
+- 目录存在但读不了（没权限）回 `read_failed`；路径不对回 `invalid_params`。
+- 不限在会话 cwd 里，所以 `trusted_only`：配对来的网页 `forbidden`。
+
 ### 画布（能力 `canvas`，`handlers/canvas.rs`）
 
 模型用 `canvas_*` 工具写的 HTML（见 `docs/tools/canvas.md`），GUI 的画布面板读它。
@@ -503,21 +521,21 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `surface/get { id }` → `{ surface: { id, title, body, view, actions: [{ id, label }], web } }`：
   - `view`：插件给了视图树就是规范化的 dock.view.1（`docs/PLUGIN-VIEWS.md`），否则 `null`；
   - 有视图时 `body` 是视图的纯文本降级，不再跑插件的 `render()`；
-  画正文要跑插件脚本、正文可能带本机信息，只给受信 ticket。
+  画正文要跑插件脚本、正文可能带本机信息，只给受信连接。
 - `surface/action { id, action }` → `{ closed, surface }`：
   - 只认面板声明过的动作或视图里的按钮 / 列表行动作，否则 `invalid_params`；
-  - 动作会跑插件脚本，只给受信 ticket（`forbidden`，同设置页）；
+  - 动作会跑插件脚本，只给受信连接（`forbidden`，同设置页）；
   - `closed` 为真表示插件要关面板；插件在动作里注销了面板时 `surface` 为 `null`。
 - `surface/web { id }` → `{ html }`（能力 `surfaceWeb`）：`web: true` 的面板自带的 HTML。
   - GUI 放进沙箱 iframe（不同源、不许联网），只经窄桥读会话数据（`docs/PLUGIN-VIEWS.md` web 面板）；
-  - 插件写的代码，只给受信 ticket；没有 web 界面的面板回 `unavailable`，没有这个面板回 `not_found`。
+  - 插件写的代码，只给受信连接；没有 web 界面的面板回 `unavailable`，没有这个面板回 `not_found`。
 - 推送 `surface/changed { id }`：连接级。增删、被操作、插件 `host.slot_changed` 时到。
 
 ### 插件状态项（能力 `statusItems`，`handlers/status.rs`）
 
 - `status/list {}` → `{ items: [{ id, text, tone, tooltip, surface }] }`：
   - 含 `hud: true` 的插槽（文字是正文第一行，`surface` 指向它）；
-  - 文字是插件内容，只给受信 ticket；没挂状态项服务时回空表。
+  - 文字是插件内容，只给受信连接；没挂状态项服务时回空表。
 - 推送 `status/changed { id }`：连接级。状态项增删改、或插槽变了时到。
 
 ### 插件工具卡视图（能力 `toolViews`，`handlers/tool_view.rs`）
@@ -526,12 +544,12 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `tool/view { threadId?, itemId }` → `{ view }`：
   - 按需画：GUI 展开工具卡时才调，`itemId` 是工具调用 id；
   - 插件这次不给 / 没登记时 `view` 是 `null`；找不到那次调用回 `not_found`；
-  - 会跑插件脚本，只给受信 ticket。
+  - 会跑插件脚本，只给受信连接。
 - 推送 `tool/views/changed { name }`：连接级。有工具的视图登记或卸下时到。
 
 ### 插件设置卡（能力 `pluginSettings`，`handlers/plugin_settings.rs`）
 
-都在设置页命名空间，只认受信 ticket。
+都在设置页命名空间，只认受信连接。
 
 - `plugin/settings/list {}` → `{ plugins: [{ pluginId, title }] }`。
 - `plugin/settings/get { pluginId }` → `{ pluginId, schema, values, secrets }`：

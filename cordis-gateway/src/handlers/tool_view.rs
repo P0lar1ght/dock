@@ -4,7 +4,7 @@
 //!
 //! - `tool/views {}` → `{ tools: [name] }`：哪些工具有卡片视图（GUI 据此显示「视图 | 原始」）。
 //! - `tool/view { threadId?, itemId }` → `{ view }`：那次调用的视图树（规范化 JSON），
-//!   插件这次不给 / 没登记时 `view` 是 `null`。只给受信 ticket：会跑插件脚本。
+//!   插件这次不给 / 没登记时 `view` 是 `null`。只给受信连接：会跑插件脚本。
 //! - 推送 `tool/views/changed { name }`（连接级）：有工具的视图登记或卸下了。
 
 use serde_json::{json, Value};

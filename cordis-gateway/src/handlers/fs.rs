@@ -9,6 +9,12 @@
 //!
 //! 路径都相对会话的 cwd，出了这个目录就拒绝（见 [`cordis_base::workspace_files`]）。
 //! 只认开着的会话（要从页上拿 cwd）。读盘放到阻塞线程里，不占网关的异步线程。
+//!
+//! - `fs/dirs { path?, hidden? }` → `{ path, parent, home, entries: [{ name, path }], truncated }`：
+//!   选目录用（远程 GUI 新建会话）。`path` 是绝对路径或 `~` 开头，空着就是主目录；
+//!   只列子目录，不看会话、不限在工作区里，所以只认受信连接。
+
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use cordis_base::workspace_files::{self as files, Content};
@@ -24,6 +30,8 @@ use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
 
 const FIND_DEFAULT: usize = 50;
 const FIND_MAX: usize = 500;
+/// `fs/dirs` 一次最多列这么多个子目录。
+const DIRS_LIMIT: usize = 1000;
 
 pub async fn dispatch(
     gateway: &GatewayHandle,
@@ -121,7 +129,91 @@ fn find(root: &std::path::Path, params: &Value) -> Result<Value, RpcError> {
     Ok(json!({ "paths": paths }))
 }
 
-/// 工作区文件这一块：`fs/list|read|find`。读大仓库要走很多目录，放到连接锁外跑。
+fn home_dir() -> Option<PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// `fs/dirs` 的目标目录：空着是主目录，`~` / `~/x` 按主目录展开，其余必须是绝对路径。
+/// （Windows 上不认 `~\x`，`canonicalize` 也会回 `\\?\C:\…`；远程 GUI 目前只有 macOS。）
+fn dirs_target(raw: &str, home: Option<&Path>) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    let home_or = || {
+        home.map(Path::to_path_buf)
+            .ok_or("找不到主目录".to_string())
+    };
+    if raw.is_empty() || raw == "~" {
+        return home_or();
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return Ok(home_or()?.join(rest));
+    }
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err(format!("要绝对路径：{raw}"));
+    }
+    Ok(path)
+}
+
+async fn dirs(params: Value) -> Result<Value, RpcError> {
+    tokio::task::spawn_blocking(move || list_dirs(&params))
+        .await
+        .map_err(|e| RpcError::app("internal", format!("列目录的任务没跑完：{e}")))?
+}
+
+fn list_dirs(params: &Value) -> Result<Value, RpcError> {
+    let hidden = params
+        .get("hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let home = home_dir();
+    let target =
+        dirs_target(path_param(params), home.as_deref()).map_err(RpcError::invalid_params)?;
+    let dir = target
+        .canonicalize()
+        .map_err(|e| RpcError::invalid_params(format!("打不开 {}：{e}", target.display())))?;
+    if !dir.is_dir() {
+        return Err(RpcError::invalid_params(format!(
+            "不是目录：{}",
+            dir.display()
+        )));
+    }
+    // 没权限读不是参数错：单给一个码，界面好分「路径填错了」和「读不了」。
+    let read = std::fs::read_dir(&dir)
+        .map_err(|e| RpcError::app("read_failed", format!("读不了 {}：{e}", dir.display())))?;
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !hidden && name.starts_with('.') {
+            continue;
+        }
+        // 跟着符号链接走：指向目录的链接也能点进去。
+        if !entry.path().is_dir() {
+            continue;
+        }
+        entries.push((name, entry.path()));
+    }
+    // 先全收、排好再截：截出来的是按名字排的前 DIRS_LIMIT 个，而不是 read_dir 顺序里的随便哪些。
+    entries.sort_by_key(|(name, _)| name.to_lowercase());
+    let truncated = entries.len() > DIRS_LIMIT;
+    entries.truncate(DIRS_LIMIT);
+    let entries: Vec<Value> = entries
+        .into_iter()
+        .map(|(name, path)| json!({ "name": name, "path": path.display().to_string() }))
+        .collect();
+    Ok(json!({
+        "path": dir.display().to_string(),
+        "parent": dir.parent().map(|p| p.display().to_string()),
+        "home": home.map(|h| h.display().to_string()),
+        "entries": entries,
+        "truncated": truncated,
+    }))
+}
+
+/// 工作区文件这一块：`fs/list|read|find` 和选目录的 `fs/dirs`。读大仓库要走很多目录，
+/// 都放到连接锁外跑。
 pub fn gateway_fs() -> Plugin {
     plugin(
         "gateway.fs",
@@ -140,6 +232,14 @@ pub fn gateway_fs() -> Plugin {
                     entry(protocol::FS_LIST),
                     entry(protocol::FS_READ),
                     entry(protocol::FS_FIND),
+                    (
+                        protocol::FS_DIRS,
+                        MethodPolicy {
+                            trusted_only: true,
+                            ..MethodPolicy::detached()
+                        },
+                        method(|_, params| dirs(params)),
+                    ),
                 ],
             )?;
             Ok(None)

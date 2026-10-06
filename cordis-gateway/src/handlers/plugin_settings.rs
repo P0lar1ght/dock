@@ -1,6 +1,6 @@
 //! `plugin/settings/*`：插件的设置卡（`"plugin.settings"`）投给 GUI 设置页。
 //!
-//! 都在设置页命名空间里，只认受信 ticket（插件配置可能是部署目标、令牌）。
+//! 都在设置页命名空间里，只认受信连接（插件配置可能是部署目标、令牌）。
 //!
 //! - `plugin/settings/list {}` → `{ plugins: [{ pluginId, title }] }`。
 //! - `plugin/settings/get { pluginId }` → `{ pluginId, schema, values, secrets }`：

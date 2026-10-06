@@ -106,7 +106,7 @@ named service `"tool.views"`：按工具名登记渲染函数，拿这一次调�
 - 经 `use_tool` 调的按需工具也认：按里面那颗的名字和参数找视图；
 - 终端：展开工具卡时头照旧，正文换成视图（在会话日志的锁外画）；
 - GUI：`tool/views` 列出有视图的工具；展开时 `tool/view { threadId, itemId }` 按需取
-  （只认受信 ticket），右上角「视图 | 原始」切换；有视图的工具头部图标是拼图。
+  （只认受信连接），右上角「视图 | 原始」切换；有视图的工具头部图标是拼图。
 - 暂不覆盖：子代理转录里的工具卡（`tool/view` 只查线程自己的会话日志）。
 
 ## 设置卡的 schema
@@ -119,7 +119,7 @@ named service `"tool.views"`：按工具名登记渲染函数，拿这一次调�
 - Rhai：`host.register_settings(#{ title, fields })`；`default` 是 Rhai 关键字，写 `"default": 10`；
 - 写入按 schema 校验，有一个字段不合法整组不写；
 - 终端：`/cordis` 列出当前值，`/cordis set <插件> <key> <值>` 改一项；
-- GUI：设置 › 插件，`plugin/settings/list|get|set`（只认受信 ticket）。
+- GUI：设置 › 插件，`plugin/settings/list|get|set`（只认受信连接）。
 
 ```json
 {
@@ -154,7 +154,7 @@ named service `"tool.views"`：按工具名登记渲染函数，拿这一次调�
   包停了自动消失；
 - 旧的 slot `hud: true` 也在列表里（文字是正文第一行，`surface` 指向它）；
 - 终端：快捷键条那一行右侧「● 文字」，放不下的折成「+N」；
-- GUI：`status/list` + 推送 `status/changed`（只认受信 ticket）。
+- GUI：`status/list` + 推送 `status/changed`（只认受信连接）。
   - 最多摆 3 个，按工具栏剩余宽度少摆，多的收进「+N」；连「+N」都放不下就先藏起来；
   - 图标由色调决定（success / warning / danger / accent），default / muted 不带图标。
 
@@ -171,7 +171,7 @@ host.register_slot(#{ id: "trajectory", title: "会话轨迹", render: || { "在
 
 - 路径相对插件目录；绝对路径、`..`、经软链跑出目录都会让 `apply` 失败。
 - 每次打开现读文件（改了 HTML 重开面板就是新的），上限 2 MiB。
-- 网关：`surface/list` / `get` 带 `web`；`surface/web { id }` → `{ html }`，只认受信 ticket。
+- 网关：`surface/list` / `get` 带 `web`；`surface/web { id }` → `{ html }`，只认受信连接。
 
 安全（GUI）：
 
