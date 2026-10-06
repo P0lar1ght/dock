@@ -52,14 +52,20 @@ jobs:
           fi
 
       - name: Format
-        run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid"
+        run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser"
 
       - name: Clippy
-        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid --all-targets --no-deps -- -D warnings
+        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser --all-targets --no-deps -- -D warnings
 
-      - name: Test (gateway / tui / app)
-        run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app
+      # 默认回归集合里除 spine 之外的部分。
+      # 需要真实 Chrome 的浏览器冒烟（cordis-browser/tests/real_chrome.rs）已标 #[ignore]。
+      - name: Test (gateway / tui / app / browser)
+        run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app -p cordis-browser
 
+      - name: Test (dock-memory)
+        run: cargo test --locked -p dock-memory
+
+      # 进程级 DOCK_HOME / cwd 由 test_env::scoped() 串行化，可以并行跑。见 docs/DEVELOPMENT.md「CI」。
       - name: Test (spine)
         run: cargo test --locked -p cordis-spine
 
@@ -67,6 +73,28 @@ jobs:
       # 只编译不运行它的用例，不补这步就等于发版从没跑过 Context / inject / fiber 的测试。
       - name: Test (kernel)
         run: cargo test --locked -p cordis
+
+  # dock.1 协议核心（TS）：与 CI 同款。测试直接跑 .ts（Node 22.18+ 默认剥类型），
+  # 与上面的 Rust 门禁并行，几十秒跑完。
+  dock-core:
+    name: 协议核心 (dock-core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dock-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dock-core/package-lock.json
+      - run: npm ci
+      - name: Test
+        run: npm test
+      - name: Typecheck
+        run: npm run typecheck
 
   build:
     name: ${{ matrix.target }}
@@ -127,7 +155,7 @@ jobs:
 
   release:
     name: 发布
-    needs: [verify, build]
+    needs: [verify, build, dock-core]
     runs-on: ubuntu-latest
     permissions:
       contents: write

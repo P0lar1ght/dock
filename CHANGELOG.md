@@ -6,7 +6,38 @@
 0.x 期间不承诺 `config.toml` 的键与 `dock.1` 协议的向后兼容：破坏性变更会写进对应版本，
 并在升级说明里给出改法。
 
-## [Unreleased]
+## [0.2.0] - 2026-10-06
+
+### 新增（插件视图）
+
+- **插件视图 `dock.view.1`**：插件（含 Rhai 动态插件）交一棵**声明式视图树**（JSON），TUI 与 GUI 各自画出来，插件不写 ratatui、不往 GUI 塞代码。契约见 `docs/PLUGIN-VIEWS.md`，完整示例 `examples/plugins/activity/`。
+  - 节点：布局（`stack` / `row` / `section`）、文本（`text` / `markdown` / `code`）、数据（`kv` / `table` / `list`）、状态（`badge` / `progress`）、交互（`button` / `link`）、`divider` / `empty`。
+  - 不认识的 `type` 画灰字占位、不报错；深度 8 层、节点 500 个、单串 20 000 字符封顶。
+  - `link` 只放行 `http` / `https` / `mailto`，别的协议画成「已拦下不安全的链接」。
+  - 终端只给可见的动作编号（折叠段里的不编号），按数字键 1–9 点。
+- **插件面板 `surface/*`**（能力 `surfaces`）：面板不再只在终端里看得到。
+  - slot 声明动作（`actions: [#{ id, label }]`），网关经 `surface/list | get | action` 投给 GUI；动作只认面板声明过的、且只给受信 ticket（动作会跑插件脚本）。
+  - 推送 `surface/changed { id }`；Rhai `host.slot_changed(id)` 说「正文变了」。
+  - GUI 插件面板可弹出成独立窗：不跟会话（一个面板全局一扇，适合挂副屏看进度）、头栏可置顶、插件自关面板时窗口跟着关。
+- **状态项 `"status.items"`**：插件登记一个小状态（文字 + 色调）。
+  - 终端画在底栏右侧快捷键条那行，放不下的折成「+N」；GUI 摆输入框工具栏右组最前，最多 3 个，多的收进「+N」。
+  - `surface` 指向点击时要打开的面板；Rhai `host.set_status(#{ … })` 登记 / 改、`host.clear_status(id)` 去掉，包停了自动消失。
+  - 网关 `status/list` + 推送 `status/changed`（只认受信 ticket）。
+- **工具卡视图 `"tool.views"`**：按工具名登记渲染函数，拿这一次调用的参数、输出、成败，回一棵视图树。
+  - 只给人看，不进模型历史；同名只能登记一个；经 `use_tool` 调的按需工具也认（按里面那颗的名字和参数找视图）。
+  - 渲染函数要是纯函数（不调工具、不读会话），每次重画都可能再跑一遍。
+  - 终端展开工具卡时头照旧、正文换成视图；GUI `tool/views` 列出有视图的工具，展开时按需 `tool/view`（只认受信 ticket），右上角「视图 | 原始」切换。
+- **设置卡 `"plugin.settings"`**：插件声明配置项 schema（`string` / `text` / `number` / `boolean` / `select` / `secret`），界面按它生成表单。
+  - 普通值存 `$DOCK_HOME/plugin-settings.json`，`secret` 存密钥库（界面拿不到原值，插件用 `host.secret(key)` 读）；写入按 schema 校验，有一个不合法整组不写。
+  - 终端 `/cordis` 看当前值、`/cordis set <插件> <key> <值>` 改一项；GUI 设置 › 插件，`plugin/settings/list | get | set`（只认受信 ticket）。
+- **插件 web 面板**：视图树画不了的交互（时间轴拖选、虚拟滚动、搜索框、图表）走自带的 HTML / JS。
+  - 只有磁盘插件能用：`register_slot(#{ web: "panel.html" })`，文件必须在插件目录里（绝对路径、`..`、软链跑出去都让 `apply` 失败），每次现读、上限 2 MiB。
+  - GUI 放进沙箱 iframe：只给 `allow-scripts`，碰不到 GUI 的 DOM / 存储 / Tauri IPC；文档 CSP 不许联网，脚本样式只能内联；和 Dock 只经 `postMessage` 桥说话（`threads.list` / `threads.history` / `threads.watch` / `panel.action`，加 `activeThread` 与设计 token）。
+  - 网关 `surface/web { id }` → `{ html }`（只认受信 ticket，能力 `surfaceWeb`）；终端照旧画 `view()` / `render()`。
+  - 示例 `examples/plugins/trajectory/`（会话轨迹：按轮次的记录表、计时总览、检查器、搜索、折叠、实时追加，纯 HTML/JS 无构建）。
+- **示例插件「Agent 活动」**（`examples/plugins/activity/`）：面板 + 状态项 + 设置卡三件套的参考实现。
+- **上下文明细 `thread/context/get`**（能力 `contextBreakdown`）：和 TUI `/context` 同一份数，按 system / tools / messages / overhead / free 分片，互不重叠、加起来是整个窗口；技能·工作流、规约·记忆作为所在片的 includes，MCP / 本地按需单列 `onDemand`；明细每组最多 40 行。
+- **目标记下完成与用时**：`update_goal(completed)` 不再只是停跑——留着标题、把附的 message 记成最后一条进展，`environment.goal` 多 `status=completed` 与 `elapsedMs`（只算在跑的时段，暂停不计、完成停表）。
 
 ### 新增
 
@@ -35,6 +66,8 @@
 
 ### 修复
 
+- **Anthropic Messages 后端的 effort 档位实际上游**：以前只发 `thinking.adaptive`、不发 `output_config.effort`，`/effort` 设的档位对这条路径完全不起作用（Responses 后端一直发）。现在与 Responses 对齐：`Reasoning::On` 且 effort 非空且不是 `none` 时带 `output_config`；空 = 用上游默认，`none` = 两样都不发。
+- **Rhai 插件的 `session/event` 回调按发出顺序逐条跑**：以前每条事件各开一个 `spawn_blocking`，同一颗插件的回调并发乱序——脚本里攒的列表顺序会乱、并发的 push 互相盖掉（40 条只剩 25–36 条）、「先改计数再刷状态项」的两步被插进来。现在一个登记一条队列、一个干活的任务，卸下时连同发送端一起丢掉。
 - 上下文占用估算把工具调用的参数算了两遍（#176）：写大文件的会话估算虚高近一半，没有上游用量时会提前触发自动压缩。
 - 上下文明细与总量对不上（#176）：总量是上游真账、分项是估算，分项加起来会超过总量。
   - 现在分项按比例缩进总量里，百分比不再超过 100%，工具定义不再显示 0。
@@ -57,6 +90,10 @@
 
 ### 变更
 
+- **「一切皆插件」改造收口**：会话提交口、分页、网关配对契约从 TUI 搬进 spine，无头 `dock serve`、网关、定时任务驱动不再为此依赖终端 UI；`tui()` 只跑事件循环，视图件由 `cordis-app` 组合挂载。
+  - 斜杠命令进 `"slash"` 命令表（各功能插件登记，附加命令撞名直接失败）；网关 `slash/list | execute` 只做投影，不再自己实现一遍。终端专属命令由 TUI 的 `tui.commands` 登记，`dock serve` 不挂 TUI 时表里没有它们。
+  - `dock.1` 功能方法是 `"gateway.methods"` 方法表：`vcs`、定时任务、设置页、预设、工作区文件、画布都改成往表里登记的插件，网关只留协议骨架；`MethodPolicy` 标 `detached` / `trusted_only` / `opens_thread`。方法表 API 对外导出，仓外插件也能加方法。
+  - 分页的 inject 键由 `tui.tabs` 改为 `tabs`（仓内组合根与 `cordis-app` 测试已同步，磁盘插件配置不引用此键）。
 - **常驻 / 按需工具改成在预设 YAML 里声明**：`agent.yml` / `agents/<id>.yml` 新增 `on_demand_tools`（写法同 `resident_tools`，常驻优先），调整不用改代码。
   - 内置 `code` / `cordis` 把 `canvas_*`、`workflow`、`kill_task`、`list_agents`、`interrupt_agent` 也设成按需；`code` 预设工具定义从约 7.3K token 降到约 5.4K。
   - `search_tool` 的描述按这一页实际的按需集合列出名字，模型按精确名搜一次就拿到 schema。
@@ -128,6 +165,20 @@
   - 最后收到的留下；被顶掉的推 `closed { reason: "replaced" }`，开到一半就过时的回 `superseded`。
 - 网关浏览器画面：同一视图连发的 `browser/view/input` 按收到的顺序进页面（以前按下 / 抬起、连打的字会乱序）。
 - MCP 工具的 `isError: true` 现在会把结果标成失败；以前只有正文以 `Error:` 开头才算。
+
+### 破坏性变更（升级注意）
+
+- 浏览器工具改成内置 MCP 后改了名：`browser_*` → `mcp_browser__browser_*`。
+  - 写死旧名的提示词、预设、`resident_tools` 要改；常驻可写 `mcp_browser__*`。
+  - 权限门 `browser_evaluate` → `mcp_browser__browser_evaluate`；预设允许名单不再列 `browser_*`（MCP 工具本就不走允许名单）。
+  - 不想要内置浏览器：`DOCK_BROWSER_MCP=off`。
+- `dock.1`：「已压缩上下文。」与「自动压缩失败：…」不再作为助手消息推送，客户端改看 `context/compacted` / `item/compaction`。
+- `dock.1`：`dock serve` 不挂 TUI 时，`slash/list` 里没有终端专属命令。
+- 模型的 `scheduler_*` 只看得到、改得了本会话建的定时任务。
+- Rust 组合 API（只影响仓外自己组装插件树的人）：
+  - 分页的 inject 键 `tui.tabs` → `tabs`（事件 `tabs/page-opened`）；`SessionPort` / `GatewayPort` / `Tabs` 等搬到 `cordis_spine::host`。
+  - `tui()` 不再自挂视图件，要按 `cordis_tui::views()` 逐个挂（参照 `cordis-app`）。
+  - spine 去掉 `BrowserSession` / `BrowserTabInfo` / `BROWSER_TOOL_NAMES`，改用 `BrowserState` / `BROWSER_MCP_PREFIX`。
 
 ## [0.1.2] - 2026-09-29
 

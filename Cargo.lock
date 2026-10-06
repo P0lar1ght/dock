@@ -764,7 +764,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "cordis"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-app"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cordis",
  "cordis-browser",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-base"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "grep-matcher",
  "grep-regex",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-browser"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chromiumoxide",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-gateway"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-markdown"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anstyle",
  "anstyle-lossy",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-spine"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-lsp",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-tui"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anstyle",
  "blake3",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "dock-memory"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5795,7 +5795,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-mermaid"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "fontdb",
  "image",
