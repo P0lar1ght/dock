@@ -1,0 +1,4 @@
+name = "Agent 活动"
+purpose = "实时看 Agent 在做什么：当前状态、工具用量、最近活动；可暂停记录、清零"
+factory = "rhai"
+enabled = true

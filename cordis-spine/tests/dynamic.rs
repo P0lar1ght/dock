@@ -3150,3 +3150,118 @@ async fn session_event_handlers_run_in_order() {
     }
     assert_eq!(got, want, "回调要按发出的顺序跑");
 }
+
+/// 仓库里的示例插件 `examples/plugins/activity` 照真实路径（define → run）能装上：
+/// 面板、状态项、设置卡都登记；工具事件计数；面板按钮暂停 / 清零。示例跟着 Host API 一起变，坏了这里先红。
+#[tokio::test]
+async fn example_activity_plugin_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
+    let root = boot().await;
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "activ"},
+            "name": "Agent 活动",
+            "purpose": "example",
+            "factory": "rhai",
+            "source": include_str!("../../examples/plugins/activity/source.rhai"),
+        }),
+    )
+    .await;
+    assert!(!defined.contains("Error"), "{defined}");
+    let ran = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"activ-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(!ran.contains("Error"), "{ran}");
+
+    let status = root
+        .require::<cordis_spine::StatusItems>(cordis_spine::STATUS_ITEMS)
+        .unwrap();
+    let item = |s: &cordis_spine::StatusItems| {
+        s.list()
+            .into_iter()
+            .find(|i| i.id == "activity")
+            .expect("状态项 activity")
+    };
+    assert_eq!(item(&status).text, "空闲 · 工具 0 次");
+    assert_eq!(item(&status).surface.as_deref(), Some("activity"));
+    let settings = root
+        .require::<cordis_spine::PluginSettings>(cordis_spine::PLUGIN_SETTINGS)
+        .unwrap();
+    assert!(
+        settings.list().iter().any(|(id, _)| id == "activ-1"),
+        "{:?}",
+        settings.list()
+    );
+
+    // 工具事件：session/event 观察者在 emit 之后跑，轮询等它计数。
+    let slots = root.require::<cordis_spine::TuiSlots>(TUI_SLOTS).unwrap();
+    for name in ["list_dir", "glob", "list_dir"] {
+        root.emit(
+            cordis_spine::SESSION_EVENT,
+            LogEvent::ToolExecute {
+                id: format!("c-{name}"),
+                name: name.into(),
+                arguments: "{}".into(),
+                content: "ok".into(),
+                images: vec![],
+                is_error: false,
+            },
+        );
+    }
+    let mut body = String::new();
+    for _ in 0..100 {
+        body = slots.view("activity").expect("面板有视图").to_plain();
+        // 等第三条事件的回调整个跑完（先改计数、再刷状态项）。
+        if body.contains("list_dir | 2") && item(&status).text == "空闲 · 工具 3 次" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(body.contains("list_dir | 2"), "{body}");
+    assert!(body.contains("glob | 1"), "{body}");
+    assert_eq!(item(&status).text, "空闲 · 工具 3 次");
+
+    // 打开旧会话时回放的「本轮结束」（没有 agent/turn-end 钩子跟着）不记。
+    root.emit(
+        cordis_spine::SESSION_EVENT,
+        LogEvent::TurnEnd(cordis_spine::TurnEndStatus::Completed),
+    );
+    // 流式回复：分片是到目前为止的全文，同一条回复只占一行（真模型会连发好几片）。
+    for text in ["This", "This folder", "This folder has a.txt"] {
+        root.emit(
+            cordis_spine::SESSION_EVENT,
+            LogEvent::LlmStream(cordis_spine::LlmOutput {
+                text: text.into(),
+                ..Default::default()
+            }),
+        );
+    }
+    for _ in 0..100 {
+        body = slots.view("activity").unwrap().to_plain();
+        if body.contains("This folder has a.txt") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(body.contains("• This folder has a.txt [回复]"), "{body}");
+    assert!(!body.contains("本轮结束"), "{body}");
+    assert_eq!(body.matches("[回复]").count(), 1, "{body}");
+
+    // 面板按钮：暂停 → 状态项跟着变；清零 → 计数归零。
+    let _ = slots.on_key("activity", "toggle");
+    assert_eq!(item(&status).text, "记录已暂停");
+    let _ = slots.on_key("activity", "toggle");
+    let _ = slots.on_key("activity", "reset");
+    assert_eq!(item(&status).text, "空闲 · 工具 0 次");
+    assert!(slots
+        .view("activity")
+        .unwrap()
+        .to_plain()
+        .contains("还没有工具调用"));
+}
