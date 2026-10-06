@@ -3079,3 +3079,74 @@ async fn register_tool_with_a_taken_view_leaves_no_tool_behind() {
         .collect();
     assert!(!names.iter().any(|n| n == "dup_tool"), "{names:?}");
 }
+
+/// 回归：同一颗插件的 `session/event` 回调按发出的顺序、一条跑完再跑下一条。
+/// 以前每条事件各开一个 spawn_blocking，回调并发乱序：脚本里攒的列表顺序会乱，
+/// 「先改计数再刷状态项」的两步也会被别的回调插进来，状态项停在旧值。
+#[tokio::test]
+async fn session_event_handlers_run_in_order() {
+    let root = boot().await;
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "order"},
+            "name": "Order",
+            "purpose": "session/event order",
+            "factory": "rhai",
+            "source": r#"#{
+                inject: ["tools"],
+                apply: |host| {
+                    let seen = [];
+                    host.on("session/event", |line| {
+                        seen.push(line.split("\t")[1]);
+                        host.set_status(#{ id: "order", text: seen.reduce(|sum, v| if sum == () { v } else { sum + "," + v }) });
+                    });
+                }
+            }"#,
+        }),
+    )
+    .await;
+    assert!(!defined.contains("Error"), "{defined}");
+    let ran = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"order-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(!ran.contains("Error"), "{ran}");
+
+    let n = 40;
+    for i in 0..n {
+        root.emit(
+            cordis_spine::SESSION_EVENT,
+            LogEvent::ToolExecute {
+                id: format!("c{i}"),
+                name: format!("t{i}"),
+                arguments: "{}".into(),
+                content: String::new(),
+                images: vec![],
+                is_error: false,
+            },
+        );
+    }
+    let want: Vec<String> = (0..n).map(|i| format!("t{i}")).collect();
+    let want = want.join(",");
+    let status = root
+        .require::<cordis_spine::StatusItems>(cordis_spine::STATUS_ITEMS)
+        .unwrap();
+    let mut got = String::new();
+    for _ in 0..200 {
+        got = status
+            .list()
+            .into_iter()
+            .find(|i| i.id == "order")
+            .map(|i| i.text)
+            .unwrap_or_default();
+        if got.split(',').count() == n {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(got, want, "回调要按发出的顺序跑");
+}
