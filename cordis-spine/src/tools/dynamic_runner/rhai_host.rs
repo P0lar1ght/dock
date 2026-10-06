@@ -121,7 +121,7 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.on",
-        "Observe \"session/event\", or intercept the two scriptable waterfalls. session/event payload is a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…, handled after emit returns. \"agent/step-start\" (#{ step, identity, main }) runs before every sample and \"agent/turn-end\" (#{ text, rounds, ended_with_text, queued_followups, identity, main }) runs when the turn wants to end; return a <system-reminder> string to inject / keep working, or () for no opinion. Those two run inline and block the turn, bounded by max_operations; a throw is treated as no opinion. Built-in slots outrank a script. The other waterfalls are not scriptable. Stop unregisters the listener.",
+        "Observe \"session/event\", or intercept the two scriptable waterfalls. session/event payload is a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…, handled after emit returns, one at a time in emit order. \"agent/step-start\" (#{ step, identity, main }) runs before every sample and \"agent/turn-end\" (#{ text, rounds, ended_with_text, queued_followups, identity, main }) runs when the turn wants to end; return a <system-reminder> string to inject / keep working, or () for no opinion. Those two run inline and block the turn, bounded by max_operations; a throw is treated as no opinion. Built-in slots outrank a script. The other waterfalls are not scriptable. Stop unregisters the listener.",
         &[
             "host.on(\"session/event\", |line| { ... })",
             "host.on(\"agent/step-start\", |step| { ... })",
@@ -813,40 +813,38 @@ impl Host {
         let engine = self.inner.engine.clone();
         let ast = self.inner.ast.clone();
         let plugin_id = self.inner.plugin_id.clone();
-        let d = self
-            .inner
-            .ctx
-            .on(SESSION_EVENT, move |ev: &LogEvent| {
-                let Some(line) = event_line(ev) else {
-                    return;
-                };
-                let engine = engine.clone();
-                let ast = ast.clone();
-                let handler = handler.clone();
-                let plugin_id = plugin_id.clone();
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => {
-                        handle.spawn(async move {
-                            let result = tokio::task::spawn_blocking(move || {
-                                call_fnptr(&engine, &ast, &handler, Dynamic::from(line))
-                            })
-                            .await;
-                            if let Ok(Err(e)) = result {
-                                eprintln!("[cordis:{plugin_id}] host.on: {e}");
-                            } else if let Err(e) = result {
-                                eprintln!("[cordis:{plugin_id}] host.on: {e}");
-                            }
-                        });
+        let run = move |line: String| {
+            if let Err(e) = call_fnptr(&engine, &ast, &handler, Dynamic::from(line)) {
+                eprintln!("[cordis:{plugin_id}] host.on: {e}");
+            }
+        };
+        // 一个登记一条队列、一个干活的：回调按发出的顺序一条跑完再跑下一条（脚本里的共享状态
+        // 不会被并发的回调改乱）。卸下时监听连同发送端一起丢掉，干活的读到队尾就退出。
+        let listener = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let run = Arc::new(run);
+                handle.spawn(async move {
+                    while let Some(line) = rx.recv().await {
+                        let run = run.clone();
+                        let _ = tokio::task::spawn_blocking(move || run(line)).await;
                     }
-                    Err(_) => {
-                        if let Err(e) = call_fnptr(&engine, &ast, &handler, Dynamic::from(line)) {
-                            eprintln!("[cordis:{plugin_id}] host.on: {e}");
-                        }
+                });
+                self.inner.ctx.on(SESSION_EVENT, move |ev: &LogEvent| {
+                    if let Some(line) = event_line(ev) {
+                        let _ = tx.send(line);
                     }
+                })
+            }
+            // 没有 tokio 运行时（只在同步测试里）：就地跑。
+            Err(_) => self.inner.ctx.on(SESSION_EVENT, move |ev: &LogEvent| {
+                if let Some(line) = event_line(ev) {
+                    run(line);
                 }
-            })
-            .map_err(|e| eval_err(e.to_string()))?;
-        self.own(d)?;
+            }),
+        }
+        .map_err(|e| eval_err(e.to_string()))?;
+        self.own(listener)?;
         Ok(())
     }
 
