@@ -3270,13 +3270,12 @@ async fn example_activity_plugin_runs() {
 /// `TuiSlots::web` 现读给 GUI；内联插件、`..`、绝对路径都不许（HTML 不能跑出插件目录）。
 #[tokio::test]
 async fn rhai_slot_web_panel_reads_from_the_plugin_directory() {
-    let work = tempfile::tempdir().unwrap();
+    // 插件放在用户级插件根（DOCK_HOME/plugins）下，用绝对 source_path，不切进程 cwd：
+    // 同一个测试二进制里有按 cwd 相对路径建文件的用例（上传那几条），切 cwd 会和它们抢。
     let home = tempfile::tempdir().unwrap();
-    let _env = cordis_base::test_env::scoped()
-        .set("DOCK_HOME", home.path())
-        .cwd(work.path());
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
     let root = boot().await;
-    let plug = work.path().join(".dock/plugins/webdemo");
+    let plug = home.path().join("plugins/webdemo");
     std::fs::create_dir_all(&plug).unwrap();
     std::fs::write(plug.join("panel.html"), "<p>hello web</p>").unwrap();
     let source = |web: &str| {
@@ -3310,7 +3309,7 @@ async fn rhai_slot_web_panel_reads_from_the_plugin_directory() {
             "name": "WebDemo",
             "purpose": "web panel",
             "factory": "rhai",
-            "source_path": ".dock/plugins/webdemo/source.rhai"
+            "source_path": plug.join("source.rhai").display().to_string()
         }),
     )
     .await;
@@ -3338,7 +3337,7 @@ async fn rhai_slot_web_panel_reads_from_the_plugin_directory() {
                 "name": "WebDemo",
                 "purpose": "web panel",
                 "factory": "rhai",
-                "source_path": ".dock/plugins/webdemo/source.rhai"
+                "source_path": plug.join("source.rhai").display().to_string()
             }),
         )
         .await;
@@ -3396,15 +3395,14 @@ async fn rhai_slot_web_panel_reads_from_the_plugin_directory() {
 /// 面板有 web 界面，HTML 用的是桥（`dock.call("threads.history")`），终端有一行提示。
 #[tokio::test]
 async fn example_trajectory_plugin_serves_its_web_panel() {
-    let work = tempfile::tempdir().unwrap();
+    // 插件放在用户级插件根（DOCK_HOME/plugins）下，用绝对 source_path，不切进程 cwd：
+    // 同一个测试二进制里有按 cwd 相对路径建文件的用例（上传那几条），切 cwd 会和它们抢。
     let home = tempfile::tempdir().unwrap();
-    let _env = cordis_base::test_env::scoped()
-        .set("DOCK_HOME", home.path())
-        .cwd(work.path());
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
     let root = boot().await;
     let example =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/trajectory");
-    let plug = work.path().join(".dock/plugins/trajectory");
+    let plug = home.path().join("plugins/trajectory");
     std::fs::create_dir_all(&plug).unwrap();
     for f in ["plugin.toml", "source.rhai", "panel.html"] {
         std::fs::copy(example.join(f), plug.join(f)).unwrap();
@@ -3417,7 +3415,7 @@ async fn example_trajectory_plugin_serves_its_web_panel() {
             "name": "会话轨迹",
             "purpose": "example",
             "factory": "rhai",
-            "source_path": ".dock/plugins/trajectory/source.rhai"
+            "source_path": plug.join("source.rhai").display().to_string()
         }),
     )
     .await;
