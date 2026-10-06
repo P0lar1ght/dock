@@ -16,6 +16,9 @@
             tools: #{},
             recent: [],
             turn_started: (),
+            // agent/turn-end 钩子看到一轮真的结束了，session/event 才记「本轮结束」；
+            // 打开旧会话时回放的结束事件不算。
+            turn_ended: false,
             last_turn_secs: ()
         };
 
@@ -64,6 +67,7 @@
             if !state.recording || !e.main { return (); }
             state.running = false;
             state.turns += 1;
+            state.turn_ended = true;
             if state.turn_started != () {
                 state.last_turn_secs = state.turn_started.elapsed;
             }
@@ -83,7 +87,10 @@
                     #{ title: clip.call(text, 60), badge: #{ text: "回复", tone: "success" } }
                 },
                 "tool" => #{ title: text, badge: #{ text: "工具", tone: "accent" } },
-                "turn-end" => #{ title: "本轮结束", subtitle: `第 ${state.turns} 轮 · ${state.step} 步`, badge: #{ text: "完成", tone: "muted" } },
+                "turn-end" => if state.turn_ended {
+                    state.turn_ended = false;
+                    #{ title: "本轮结束", subtitle: `第 ${state.turns} 轮 · ${state.step} 步`, badge: #{ text: "完成", tone: "muted" } }
+                } else { () },
                 _ => ()
             };
             if kind == "tool" {

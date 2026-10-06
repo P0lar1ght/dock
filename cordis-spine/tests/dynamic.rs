@@ -3227,6 +3227,11 @@ async fn example_activity_plugin_runs() {
     assert!(body.contains("glob | 1"), "{body}");
     assert_eq!(item(&status).text, "空闲 · 工具 3 次");
 
+    // 打开旧会话时回放的「本轮结束」（没有 agent/turn-end 钩子跟着）不记。
+    root.emit(
+        cordis_spine::SESSION_EVENT,
+        LogEvent::TurnEnd(cordis_spine::TurnEndStatus::Completed),
+    );
     // 流式回复：分片是到目前为止的全文，同一条回复只占一行（真模型会连发好几片）。
     for text in ["This", "This folder", "This folder has a.txt"] {
         root.emit(
@@ -3245,6 +3250,7 @@ async fn example_activity_plugin_runs() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(body.contains("• This folder has a.txt [回复]"), "{body}");
+    assert!(!body.contains("本轮结束"), "{body}");
     assert_eq!(body.matches("[回复]").count(), 1, "{body}");
 
     // 面板按钮：暂停 → 状态项跟着变；清零 → 计数归零。
