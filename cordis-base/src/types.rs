@@ -5,6 +5,22 @@ use std::fmt;
 /// tool call" if a user message follows unmatched `tool_calls`.
 pub const INTERRUPTED_TOOL_RESULT: &str = "已中断。";
 
+/// 用户停止这一轮时还在跑的那次调用的结果：以 [`INTERRUPTED_TOOL_RESULT`] 开头
+/// （客户端、旧会话都按这个前缀认「被中断」），写明跑了多久、可能已经部分执行，
+/// 带上中止前已经产出的输出。
+pub fn interrupted_tool_result(elapsed: std::time::Duration, partial: &str) -> String {
+    let head = format!(
+        "{INTERRUPTED_TOOL_RESULT}用户停止了这一轮，这次调用运行 {:.1}s 后被中止，可能已经部分执行。",
+        elapsed.as_secs_f64()
+    );
+    let partial = partial.trim();
+    if partial.is_empty() || partial == "(no output)" {
+        head
+    } else {
+        format!("{head}\n中止前已产出的输出：\n{partial}")
+    }
+}
+
 /// 用户在权限门拒绝一次工具调用时，这次调用的结果（`is_error`）。客户端据此把它
 /// 和普通失败分开（网关报 `denied`）。
 pub const PERMISSION_DENIED_TOOL_RESULT: &str = "权限被拒绝";
@@ -13,6 +29,11 @@ pub const PERMISSION_DENIED_TOOL_RESULT: &str = "权限被拒绝";
 /// 进行中送达的，不是新的一轮。模型据此先回应、再接着做没做完的事；网关据此把
 /// 那条用户消息标成 `steered`。逐字比较，别改成带变量的文本。
 pub const STEER_REMINDER: &str = "<system-reminder>\n用户在你工作期间发来了下面这条消息（插话，不是新的一轮）。先回应它；它没有改变的部分，继续完成此前未完成的工作。\n</system-reminder>";
+
+/// 用户停止了一轮、而这一轮已经有模型输出或工具结果时，记在它末尾的提示：上面的
+/// 回复可能不完整、被中止的调用可能已经部分执行。不然模型只看到一段断在半截的
+/// 话，下一条消息来了会以为那一轮正常收尾了。
+pub const TURN_STOPPED_REMINDER: &str = "<system-reminder>\n用户有意停止了上一轮。上一轮的回复可能不完整；被中止的工具调用（结果以「已中断。」开头）可能已经部分执行，不要假设它们做完了。按用户接下来的消息行动。\n</system-reminder>";
 
 /// Visible compact marker. The pager keeps older bubbles; this assistant
 /// line is appended so the user sees that a compact ran. The model history
@@ -334,14 +355,14 @@ pub struct ToolResult {
 }
 
 /// 工具没显式表态时的**唯一**兜底规则：Dock 自己产出的失败格式——`Error` /
-/// `error` 开头、job 非零退出的首行 `exit …`、中断回填 [`INTERRUPTED_TOOL_RESULT`]。
+/// `error` 开头、job 非零退出的首行 `exit …`、以 [`INTERRUPTED_TOOL_RESULT`] 开头的中断结果。
 /// 读旧会话（落盘时还没有 `is_error`）也用它，新旧表现一致。
 pub fn tool_output_looks_failed(content: &str) -> bool {
     let t = content.trim_start();
     t.starts_with("Error")
         || t.starts_with("error")
         || t.starts_with("exit ")
-        || t.trim_end() == INTERRUPTED_TOOL_RESULT
+        || t.starts_with(INTERRUPTED_TOOL_RESULT)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

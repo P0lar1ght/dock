@@ -202,11 +202,9 @@ async fn grok_sample_loop(
             for call in output.tool_calls {
                 abort_if_cancelled(ctx, sessions)?;
                 let arguments = call.arguments.clone();
-                let Some(result) = execute_cancellable(ctx, tools, call).await else {
-                    // 工具跑到一半被 Stop：给未完成的 tool call 补上中断结果，
-                    // 否则下一次采样会因为缺 tool result 400。
-                    sessions.seal_incomplete_tool_calls();
-                    return Err(Error::Cancelled);
+                let (result, stopped) = match execute_cancellable(ctx, tools, call).await {
+                    Executed::Done(result) => (result, false),
+                    Executed::Stopped(result) => (result, true),
                 };
                 sessions.append(LogEvent::ToolExecute {
                     id: result.call_id,
@@ -216,6 +214,12 @@ async fn grok_sample_loop(
                     images: result.images,
                     is_error: result.is_error,
                 });
+                if stopped {
+                    // 这一批里还没轮到的调用补上中断结果，否则下一次采样会因为
+                    // 缺 tool result 400。
+                    sessions.seal_incomplete_tool_calls();
+                    return Err(Error::Cancelled);
+                }
             }
         }
         // 模型要收尾时还有插话没送达（这一步采样期间到的）：不收尾，送达后再采
@@ -338,7 +342,19 @@ fn abort_if_cancelled(ctx: &Context, sessions: &Sessions) -> Result<()> {
     }
 }
 
-/// 工具执行与取消赛跑。`None` = 工具还在跑的时候用户按了 Stop。
+/// 一次工具调用的结局：跑完了，或者跑的时候用户按了 Stop（结果照样要落进日志，
+/// 之后这一轮停下）。
+enum Executed {
+    Done(cordis_base::types::ToolResult),
+    Stopped(cordis_base::types::ToolResult),
+}
+
+/// Stop 之后给还在跑的工具收尾的时间：`bash` 要杀进程、把已产出的输出带回来
+/// （它自己每 20ms 看一次取消，收尾最多半秒）。过了就不等了，免得挂住的 MCP
+/// 调用把 Stop 拖住。
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 工具执行与取消赛跑。
 ///
 /// 裸 `await` 的话 `[stop]` 只是把 `TurnControl` 的 token 置位，没人监听，工具
 /// 一旦开始就只能等它自己返回。`bash` 显得能取消纯粹是因为它**自己**在循环里
@@ -347,19 +363,46 @@ fn abort_if_cancelled(ctx: &Context, sessions: &Sessions) -> Result<()> {
 ///
 /// 放在这里而不是让每个工具各自轮询：取消是循环的事，不该要求每个工具体都记得
 /// 自己实现一遍。
+///
+/// 被 Stop 时先给工具 [`STOP_GRACE`] 自己收尾（`bash` 回的是以「已中断。」开头、
+/// 带着已产出输出的结果；恰好在这一秒里跑完的就是真结果）；还不回就由这里写一条
+/// 中断结果，写明跑了多久、可能已经部分执行——以前只有一句「已中断。」，输出全丢。
 async fn execute_cancellable(
     ctx: &Context,
     tools: &Tools,
     call: cordis_base::types::ToolCall,
-) -> Option<cordis_base::types::ToolResult> {
+) -> Executed {
     let Some(token) = ctx.get::<TurnControl>(TURN).map(|t| t.token()) else {
-        return Some(tools.execute_on(ctx, call).await);
+        return Executed::Done(tools.execute_on(ctx, call).await);
     };
+    let (call_id, name) = (call.id.clone(), call.name.clone());
+    let started = std::time::Instant::now();
+    let run = tools.execute_on(ctx, call);
+    tokio::pin!(run);
     tokio::select! {
         // 两边同时就绪时优先收工具的结果，别把已经跑完的活丢掉。
         biased;
-        result = tools.execute_on(ctx, call) => Some(result),
-        _ = token.cancelled() => None,
+        result = &mut run => return Executed::Done(result),
+        _ = token.cancelled() => {}
+    }
+    match tokio::time::timeout(STOP_GRACE, &mut run).await {
+        Ok(mut result) => {
+            if result
+                .content
+                .trim_start()
+                .starts_with(cordis_base::types::INTERRUPTED_TOOL_RESULT)
+            {
+                result.is_error = true;
+            }
+            Executed::Stopped(result)
+        }
+        Err(_) => Executed::Stopped(cordis_base::types::ToolResult {
+            call_id,
+            name,
+            content: cordis_base::types::interrupted_tool_result(started.elapsed(), ""),
+            images: Vec::new(),
+            is_error: true,
+        }),
     }
 }
 
@@ -470,7 +513,77 @@ mod tests {
         )
         .await
         .expect("Stop 之后必须让出控制权，不能一直挂着");
-        assert!(outcome.is_none(), "被 Stop 打断时不该返回工具结果");
+        let Executed::Stopped(result) = outcome else {
+            panic!("被 Stop 打断要报成中断");
+        };
+        assert!(result.is_error);
+        assert!(
+            result
+                .content
+                .starts_with(cordis_base::types::INTERRUPTED_TOOL_RESULT),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("可能已经部分执行"),
+            "{}",
+            result.content
+        );
+    }
+
+    /// Stop 之后工具自己收尾（`bash` 杀进程、带回已产出的输出）：等它这一下，
+    /// 它的结果原样落进日志。以前这里直接丢掉工具的 future，输出全没了，只剩
+    /// 一句「已中断。」。
+    #[tokio::test]
+    async fn stop_keeps_what_a_tool_returns_while_wrapping_up() {
+        let root = Context::new();
+        let tools = Tools::echo(root.clone());
+        let _hold_tools = root.provide(TOOLS, tools).unwrap();
+        let _hold_turn = root.provide(TURN, TurnControl::new()).unwrap();
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+        let watch = root.clone();
+        let _reg = tools
+            .register(
+                ToolSpec {
+                    name: "wraps_up".into(),
+                    description: "被停时自己收尾".into(),
+                    parameters_json: r#"{"type":"object"}"#.into(),
+                },
+                std::sync::Arc::new(move |call| {
+                    let watch = watch.clone();
+                    Box::pin(async move {
+                        while !watch.require::<TurnControl>(TURN).unwrap().is_cancelled() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        cordis_base::types::ToolResult {
+                            call_id: call.id,
+                            name: call.name,
+                            content: cordis_base::types::interrupted_tool_result(
+                                Duration::from_millis(150),
+                                "half done",
+                            ),
+                            ..Default::default()
+                        }
+                    })
+                }),
+            )
+            .unwrap();
+        let stopper = root.require::<TurnControl>(TURN).unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stopper.cancel();
+        });
+        let call = cordis_base::types::ToolCall {
+            id: "1".into(),
+            name: "wraps_up".into(),
+            arguments: "{}".into(),
+        };
+        let Executed::Stopped(result) = execute_cancellable(&root, &tools, call).await else {
+            panic!("被 Stop 打断要报成中断");
+        };
+        assert!(result.content.contains("half done"), "{}", result.content);
+        assert!(result.is_error, "中断结果要标成错误");
     }
 
     /// 没挂 `TurnControl` 时退回原来的行为：直接等工具跑完。
@@ -485,6 +598,9 @@ mod tests {
             name: "echo".into(),
             arguments: "hi".into(),
         };
-        assert!(execute_cancellable(&root, &tools, call).await.is_some());
+        assert!(matches!(
+            execute_cancellable(&root, &tools, call).await,
+            Executed::Done(_)
+        ));
     }
 }

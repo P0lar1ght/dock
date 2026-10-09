@@ -435,7 +435,7 @@ async fn sample_http(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return acc.finish();
+                    return cut_short(acc.finish());
                 }
                 chunk = stream.next() => chunk,
             }
@@ -467,10 +467,18 @@ async fn sample_http(
             }
         }
         if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
-            return acc.finish();
+            return cut_short(acc.finish());
         }
     }
     acc.finish()
+}
+
+/// 流被 Stop 切在半截时收下的那部分：正文、思考照留（用户已经看到了），工具调用
+/// 一个不留。它们一个都没执行过，参数还可能截在半截（`{"command":"rm -`）；留下就会
+/// 被补上「已中断」结果，模型以为自己调过、而且可能执行了一半。
+fn cut_short(mut out: LlmOutput) -> LlmOutput {
+    out.tool_calls.clear();
+    out
 }
 
 fn apply_auth(
@@ -1105,6 +1113,96 @@ mod tests {
                 .as_deref(),
             Some("hi"),
             "提示词该能还回输入框"
+        );
+    }
+
+    /// Stop 落在流的中途：已经流出来的正文留下，参数截在半截的工具调用不能进
+    /// 历史。旧实现把 `acc.finish()` 原样交出去，这条调用（`{"command":"rm -`）
+    /// 落进日志，随后被补上「已中断」，模型以为自己执行过它。
+    #[tokio::test]
+    async fn a_stream_cut_by_stop_keeps_the_text_and_drops_the_tool_calls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            let _ = sock.read(&mut buf).await;
+            // Responses 线路（默认）：一段正文 + 一个参数截在半截的工具调用。
+            let events = [
+                r#"{"type":"response.output_text.delta","delta":"我先清理一下"}"#,
+                r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"c1","name":"bash"}}"#,
+                r#"{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"command\":\"rm -"}"#,
+            ];
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            sock.write_all(head.as_bytes()).await.unwrap();
+            for event in events {
+                sock.write_all(format!("data: {event}\n\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            sock.flush().await.unwrap();
+            // 流不结束：只能被 Stop 切断。
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(crate::agent::turn::turn(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::User("清理一下".into()));
+        let llm = crate::llm::sampler::Llm::from_sampler(
+            ctx.clone(),
+            std::sync::Arc::new(HttpSampler {
+                ctx: ctx.clone(),
+                api_key: "test-key".into(),
+                api_base: format!("http://{addr}/v1"),
+                fallback_model: "test-model".into(),
+            }),
+        );
+        let turn = ctx.require::<TurnControl>(TURN).unwrap();
+        let watcher = sessions.clone();
+        tokio::spawn(async move {
+            for _ in 0..500 {
+                let streamed = watcher
+                    .events()
+                    .iter()
+                    .any(|e| matches!(e, LogEvent::LlmStream(o) if o.text.contains("清理")));
+                if streamed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            // 同一块里跟着的工具调用增量也收进去了，再按 Stop。
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            turn.cancel();
+        });
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            llm.stream_on(&ctx, empty_request()),
+        )
+        .await
+        .expect("Stop 之后要立刻交回控制权");
+        server.abort();
+
+        assert!(out.tool_calls.is_empty(), "{out:?}");
+        let last = sessions
+            .events()
+            .into_iter()
+            .rev()
+            .find_map(|e| match e {
+                LogEvent::LlmStream(o) => Some(o),
+                _ => None,
+            })
+            .expect("半截正文要留下");
+        assert_eq!(last.text, "我先清理一下", "{last:?} / {out:?}");
+        assert!(
+            last.tool_calls.is_empty(),
+            "截断的工具调用不该进历史：{last:?}"
         );
     }
 

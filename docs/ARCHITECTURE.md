@@ -184,6 +184,8 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 
 **插话在步骤边界送达，不取消。** 一轮在跑时再发一条有三种意思：排队（actor 队列，轮后单独成一轮）、插话（`SessionCommand::Steer` → `Sessions::push_steer` + `TurnControl::request_yield`）、停止并发送（`send_now`：取消 + 排到最前）。插话进的是会话自己的收件箱，循环在每一步开头（和信箱同一处，绝不夹在 tool_calls 与结果之间）取走，落成 `STEER_REMINDER` + `User`；模型要收尾时收件箱还有东西就再采一步；这一轮已经收尾才到的，actor 转成排在最前的消息。`request_yield` 是软信号：前台 bash 宽限 2 秒后转后台让路，别的都照常跑完。子代理用同一个收件箱（用户发给在跑的子代理的话）。
 
+**停止不留半截东西给模型。** Stop 取消 `TurnControl`：流切在半截时 `cut_short` 丢掉这次采样的全部工具调用（一个都没执行过，参数可能截断），正文留下；在跑的工具给 `STOP_GRACE`（1 秒）自己收尾，还不回就由循环写中断结果——两种都以 `INTERRUPTED_TOOL_RESULT` 开头、写明运行时长与「可能已部分执行」；被停的一轮有模型输出或工具结果时，`Sessions::end_turn` 在 `TurnEnd` 前记一条 `TURN_STOPPED_REMINDER`。
+
 **开轮前的 handler 自己 append。** `agent/pre-step` 和后两条不一样：handler 直接往 `Sessions` 写（目标指令、技能正文、MCP 目录变更通告、计划提醒），而它能拿到的 `Sessions` 只有注册时捕获的那一份 —— 主会话。子代理开轮同样会跑这条链，所以凡是要写会话、消费一次性状态、或推进用户自己状态的 handler，都得先看载荷里的 `identity`（`PreStep::is_main_session()`）。六个内建 handler 都这么做。
 
 **中途盯梢也是插件说了算。** `agent/step-start` 每个采样步之前跑一次 —— `agent/pre-step` 是每轮一次、`agent/turn-end` 是收尾一次，都盯不住跑起来的一轮。载荷 `StepStart` 带 `step`（本轮已采样步数，续跑不清零）和 `identity`，handler 用 `remind(order, 正文)` 排队，循环按 order 顺序落成 `SystemReminder`。带 per-turn 状态的 handler 在 `step == 0` 自己重置，循环不替谁存状态。现有一个：

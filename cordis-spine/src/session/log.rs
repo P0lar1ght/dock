@@ -15,7 +15,7 @@ use crate::session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
 };
 pub use cordis_base::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
-use cordis_base::types::{LogEvent, COMPACT_NOTICE, STEER_REMINDER};
+use cordis_base::types::{LogEvent, COMPACT_NOTICE, STEER_REMINDER, TURN_STOPPED_REMINDER};
 use cordis_base::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -780,6 +780,9 @@ impl Sessions {
         if self.rewound.load(Ordering::Relaxed) {
             self.emit_session(event);
         } else {
+            if status == TurnEndStatus::Cancelled && self.turn_was_cut() {
+                self.append(LogEvent::SystemReminder(TURN_STOPPED_REMINDER.into()));
+            }
             self.append(event);
         }
         self.ctx.emit(
@@ -789,6 +792,23 @@ impl Sessions {
                 status,
             },
         );
+    }
+
+    /// 这一轮（最后一条用户消息之后）有没有模型说过的话或跑过的工具——被停止时
+    /// 才有东西可能被切断。只算模型和工具，不算循环自己落的提醒。
+    fn turn_was_cut(&self) -> bool {
+        let events = self.events.lock().unwrap();
+        let from = events
+            .iter()
+            .rposition(|e| matches!(e, LogEvent::User(_)))
+            .map_or(0, |i| i + 1);
+        events[from..].iter().any(|e| match e {
+            LogEvent::ToolExecute { .. } => true,
+            LogEvent::LlmStream(out) => {
+                !out.text.is_empty() || !out.reasoning.is_empty() || !out.tool_calls.is_empty()
+            }
+            _ => false,
+        })
     }
 
     /// 本轮（最后一条用户消息之后）最后一次采样的错误。
@@ -2545,6 +2565,48 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, LogEvent::TurnEnd(_))),
             "TurnEnd 进了模型历史"
+        );
+    }
+
+    /// 被停止、而且已经说了一半 / 跑过工具的一轮：末尾记一条停止提示（进模型
+    /// 历史），模型下一条消息时知道上一轮是被有意打断的，不是正常收尾。什么都
+    /// 还没产出的、正常结束的，都不记。
+    #[tokio::test]
+    async fn a_stopped_turn_with_output_tells_the_model_it_was_stopped() {
+        let sessions = Sessions::tab(Context::new().isolate("sessions"), 1);
+        let stops = |s: &Sessions| {
+            s.model_history()
+                .iter()
+                .filter(|e| matches!(e, LogEvent::SystemReminder(t) if t == TURN_STOPPED_REMINDER))
+                .count()
+        };
+        sessions.append(LogEvent::User("done".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "完整的回答".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        sessions.end_turn(TurnEndStatus::Completed);
+        assert_eq!(stops(&sessions), 0, "正常结束不记");
+
+        sessions.append(LogEvent::User("nothing yet".into()));
+        sessions.end_turn(TurnEndStatus::Cancelled);
+        assert_eq!(stops(&sessions), 0, "还没有输出就停：没有东西被切断");
+
+        sessions.append(LogEvent::User("cut".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "我先改一下配".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        sessions.end_turn(TurnEndStatus::Cancelled);
+        assert_eq!(stops(&sessions), 1);
+        let events = sessions.events();
+        assert!(
+            matches!(
+                &events[events.len() - 2..],
+                [LogEvent::SystemReminder(t), LogEvent::TurnEnd(TurnEndStatus::Cancelled)]
+                    if t == TURN_STOPPED_REMINDER
+            ),
+            "{events:?}"
         );
     }
 

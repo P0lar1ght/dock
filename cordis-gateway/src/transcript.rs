@@ -363,7 +363,7 @@ impl Transcript {
                 // 权限门拒绝的算 denied。
                 let status = if !is_error {
                     "completed"
-                } else if content.trim() == INTERRUPTED_TOOL_RESULT {
+                } else if content.trim_start().starts_with(INTERRUPTED_TOOL_RESULT) {
                     "cancelled"
                 } else if content.trim() == PERMISSION_DENIED_TOOL_RESULT {
                     "denied"
@@ -1488,13 +1488,22 @@ mod tests {
         t.ingest_log(tool("b", "exit status: 1\nboom", true));
         t.ingest_log(tool("c", cordis_spine::INTERRUPTED_TOOL_RESULT, true));
         t.ingest_log(tool("d", cordis_spine::PERMISSION_DENIED_TOOL_RESULT, true));
+        // 停止时还在跑的那次调用：写明跑了多久、带着已产出的输出，仍算 cancelled。
+        let stopped = cordis_base::types::interrupted_tool_result(
+            std::time::Duration::from_millis(1200),
+            "partial line",
+        );
+        t.ingest_log(tool("e", &stopped, true));
         let statuses: Vec<_> = t
             .history_since(0)
             .into_iter()
             .filter(|e| e.method == "item/tool_completed")
             .map(|e| e.payload["status"].as_str().unwrap_or("").to_string())
             .collect();
-        assert_eq!(statuses, ["completed", "failed", "cancelled", "denied"]);
+        assert_eq!(
+            statuses,
+            ["completed", "failed", "cancelled", "denied", "cancelled"]
+        );
     }
 
     /// 回归：从落盘事件重建投影（重开会话、看关着的会话）以前时间戳全是「现在」，

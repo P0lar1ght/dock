@@ -616,7 +616,11 @@ mod tests {
             Some(&jobs),
         )
         .await;
-        assert!(out.contains("cancelled"), "取消要说明自己是取消：{out}");
+        assert!(
+            out.starts_with(cordis_base::types::INTERRUPTED_TOOL_RESULT),
+            "取消要说明自己是被中断的：{out}"
+        );
+        assert!(out.contains("可能已经部分执行"), "{out}");
         assert!(out.contains("started"), "已产出的输出仍要带回：{out}");
         assert!(!out.contains("job_id"), "取消不该留下后台任务：{out}");
         assert!(jobs.list().is_empty(), "取消后任务要摘掉");
