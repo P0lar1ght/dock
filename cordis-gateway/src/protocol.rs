@@ -65,6 +65,10 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("pullRequests", true),
     // `thread/rewind`：撤回任意一条用户消息——它和之后的对话全部删掉，正文和图片还回来。
     ("threadRewind", true),
+    // `turn/steer` 是插话（下一个步骤边界并进正在跑的一轮，不打断）而不是停止并发送；
+    // 另有 `turn/queue/steer`，`turn/queue/list` 列出等着送达的插话（`kind: "steer"`），
+    // `item/user_message` / 被它收尾的 `turn/completed` 带 `steered`。
+    ("turnSteer", true),
     // `surface/list` / `get` / `action` + 连接级推送 `surface/changed { id }`：插件的面板
     // （`"tui.slots"`）。正文是文本，动作是按钮；`action` 只认受信连接。
     ("surfaces", true),
@@ -163,6 +167,7 @@ pub const TURN_STEER: &str = "turn/steer";
 pub const TURN_CANCEL: &str = "turn/cancel";
 pub const TURN_QUEUE_LIST: &str = "turn/queue/list";
 pub const TURN_QUEUE_REMOVE: &str = "turn/queue/remove";
+pub const TURN_QUEUE_STEER: &str = "turn/queue/steer";
 pub const PERMISSION_RESOLVE: &str = "permission/resolve";
 pub const INTERACTION_RESPOND: &str = "interaction/respond";
 pub const PLAN_RESOLVE: &str = "plan/resolve";

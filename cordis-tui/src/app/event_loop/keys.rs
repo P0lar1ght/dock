@@ -1984,6 +1984,8 @@ pub(super) fn to_action(
                 KeyCode::Enter if ctrl => {
                     if !prompt_can_send(ctx) && turn_running(ctx) && has_prompt_queue(ctx) {
                         Some(Action::PromoteQueued { id: None })
+                    } else if turn_running(ctx) {
+                        Some(take_steer(ctx))
                     } else {
                         Some(take_send(ctx, true))
                     }
@@ -2167,6 +2169,14 @@ pub(super) fn take_send(ctx: &Context, send_now: bool) -> Action {
         Action::SendPromptNow(send)
     } else {
         Action::SendPrompt(send)
+    }
+}
+
+/// 生成中 Ctrl+Enter：和发送同样收走输入框（图片进图片槽），只是走插话。
+pub(super) fn take_steer(ctx: &Context) -> Action {
+    match take_send(ctx, false) {
+        Action::SendPrompt(send) => Action::SteerPrompt(send),
+        other => other,
     }
 }
 
@@ -3003,6 +3013,28 @@ mod tests {
         let effects = run(&ctx, Action::OverlayChar('p'), &mut overlay);
         assert!(effects.is_empty(), "{effects:?}");
         assert!(matches!(overlay, Overlay::Computer { pending: None, .. }));
+    }
+
+    /// 生成中 Ctrl+Enter 走插话：收走输入框，变成 `Effect::SteerPrompt`，不是
+    /// 「停掉再发」的 `send_now`。
+    #[test]
+    fn take_steer_becomes_a_steer_effect() {
+        let ctx = Context::new();
+        let prompt = PromptWidget::default();
+        prompt.insert_str("改做 B");
+        let _p = ctx.provide(TUI_PROMPT, prompt).unwrap();
+        let prompt = ctx.get::<PromptWidget>(TUI_PROMPT).unwrap();
+        let action = take_steer(&ctx);
+        assert!(
+            matches!(&action, Action::SteerPrompt(p) if p.text == "改做 B"),
+            "{action:?}"
+        );
+        let effects = crate::app::dispatch::dispatch(action, &prompt);
+        assert!(
+            matches!(effects.as_slice(), [Effect::SteerPrompt { text, .. }] if text == "改做 B"),
+            "{effects:?}"
+        );
+        assert!(prompt.text().is_empty(), "输入框要清空");
     }
 
     /// A6 real-machine: bare `[Image #N]` Enter must flash after Effect::SendPrompt

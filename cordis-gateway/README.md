@@ -357,6 +357,28 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 投影按截断后的会话重建，`seq` 重新编号：客户端整份重拉 `thread/history`。
 - 关着的会话按需开页；不占连接锁（要等那一轮停下）。
 
+### 排队、插话、停止并发送（能力 `turnSteer`，`handlers/turn.rs`）
+
+一轮在跑时再发一条有三种意思：
+
+| 方法 | 意思 |
+|---|---|
+| `turn/enqueue` | 排队：这一轮结束后单独成一轮。回 `status: "queued"` |
+| `turn/steer` | 插话：交给正在跑的这一轮，在下一个步骤边界送达（采样、工具都不打断）。回 `status: "steering"`；空闲时等同 `turn/start`（`running`） |
+| `turn/start` | 停止并发送：停掉正在跑的这一轮，马上发这一条（空闲时就是发） |
+| `turn/queue/steer { queueId? }` | 把一条排队的消息改成插话（省略 = 最早那条）。回 `steered`；没有这条、或页没开着为 `false` |
+
+- 送达：一步开头、采样之前（和子代理信箱同一个位置），落成插话提示 + 用户消息。模型给出最终回复时
+  还有插话没送达，就不收尾、送达后再采一步。这一轮已经收尾才到的，转成排在最前的消息。
+- 让路：插话在等时，前台 `bash` 超过 2 秒还没跑完就转后台（不杀，回 job_id 和已有输出）。
+- 正在压缩时没有可并的采样：插话排到最前，压缩完就发。
+- `turn/queue/list` 先列等着送达的插话（`kind: "steer"`、`status: "pending"`），再列排队的
+  （`kind: "queue"`）；插话送达前可以 `turn/queue/remove` 撤回。
+- 投影：插话从它那条 `item/user_message { steered: true }` 开新的一轮（气泡排在它之前的工作后面），
+  被它截开的前一段以 `turn/completed { status: "completed", steered: true }` 收尾——不是真的结束，
+  客户端别据此提示「回复完成」。回放（`thread/history`、重开会话）一致。
+- 撤回插话（`thread/rewind`、取消时收回输入框）连带它前面的提示一起摘掉。
+
 ### 工作区文件（能力 `workspaceFiles`，`handlers/fs.rs`）
 
 只读看会话 cwd 里的文件（GUI 的文件面板）。路径都相对会话 cwd，用 `/` 分隔。

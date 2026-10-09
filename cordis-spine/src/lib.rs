@@ -26,7 +26,7 @@ pub use agent::presets::{
     WARDEN_PRESET_ID,
 };
 pub use agent::runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
-pub use agent::turn::{turn, TurnControl};
+pub use agent::turn::{steer, turn, TurnControl};
 pub use bundle::{
     install_app, install_core, install_fakes, install_foundation, install_spine,
     install_without_llm,
@@ -47,7 +47,7 @@ pub use cordis_base::types::{
     COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT, ORDER_STEP_START_DYNAMIC,
     ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MEMORY, ORDER_STEP_START_TODO,
     ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
-    PERMISSION_DENIED_TOOL_RESULT,
+    PERMISSION_DENIED_TOOL_RESULT, STEER_REMINDER,
 };
 pub use cordis_base::usage::{
     calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,
@@ -103,7 +103,7 @@ pub use session::compaction::{
 };
 pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
 pub use session::log::{
-    sessions, ArchivedSession, ChildLogEvent, PageLogEvent, PageTurnEnd, Sampling, Sessions,
+    sessions, ArchivedSession, ChildLogEvent, PageLogEvent, PageTurnEnd, Sampling, Sessions, Steer,
     TokenUsage, TurnEndStatus, ROOT_IDENTITY,
 };
 pub use session::persist::{sessions_cwd_dir, RosterEntry};

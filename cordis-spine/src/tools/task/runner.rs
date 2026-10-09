@@ -21,7 +21,6 @@ use super::coordinator::{
     ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, SendBoxFuture,
     StartedChild,
 };
-use super::interjection::format_interjection;
 use super::store::ChildStore;
 use super::types::{SubagentResult, SubagentValidateTypeOutcome};
 use super::{current_depth, DEPTH};
@@ -401,9 +400,6 @@ async fn drive_child(
             .as_ref()
             .is_some_and(|s| s.dispose.load(Ordering::Relaxed))
             || (first_tx.is_some() && coord_cancel.is_cancelled());
-        let send_now = slot
-            .as_ref()
-            .is_some_and(|s| s.send_now.swap(false, Ordering::Relaxed));
         let interrupt = slot
             .as_ref()
             .is_some_and(|s| s.interrupt.swap(false, Ordering::Relaxed));
@@ -419,13 +415,6 @@ async fn drive_child(
             }
             store.dispose(&id, msg, true);
             return;
-        }
-
-        if send_now {
-            if let Some(msg) = store.take_urgent(&id) {
-                prompt = format_interjection(&msg);
-                continue;
-            }
         }
 
         let duration_ms = wall.elapsed().as_millis() as u64;
@@ -489,8 +478,8 @@ async fn drive_child(
                 store.dispose(&id, output, false);
                 return;
             }
-            // Idle + urgent is a plain next turn. Envelope is only for send-now
-            // while a turn is running (the `send_now` branch above).
+            // 下一轮的开头就是这条消息本身：在跑时用户发来的已经作为插话并进
+            // 了那一轮（`push_urgent`），这里只剩 idle 时收到的、和掉队的插话。
             Some(NextMsg::Urgent(m)) => prompt = m,
             Some(NextMsg::Queued(m)) => prompt = m,
         }

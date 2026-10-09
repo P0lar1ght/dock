@@ -28,6 +28,17 @@ impl SessionHandle {
         });
     }
 
+    pub fn steer(&self, text: impl Into<String>, images: Vec<cordis_spine::UserImage>) {
+        let _ = self.cmd_tx.send(SessionCommand::Steer {
+            text: text.into(),
+            images,
+        });
+    }
+
+    pub fn steer_queued(&self, id: Option<String>) {
+        let _ = self.cmd_tx.send(SessionCommand::SteerQueued { id });
+    }
+
     pub async fn prompt(&self, text: impl Into<String>) -> PromptTurnResult {
         let (respond_to, rx) = oneshot::channel();
         self.cmd_tx
@@ -92,6 +103,14 @@ impl SessionHandle {
 impl cordis_spine::SessionPort for SessionHandle {
     fn submit(&self, text: String, send_now: bool) {
         SessionHandle::submit(self, text, send_now);
+    }
+
+    fn steer(&self, text: String, images: Vec<cordis_spine::UserImage>) {
+        SessionHandle::steer(self, text, images);
+    }
+
+    fn steer_queued(&self, id: Option<String>) {
+        SessionHandle::steer_queued(self, id);
     }
 
     fn working(&self) -> bool {

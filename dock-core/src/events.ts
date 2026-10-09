@@ -142,13 +142,21 @@ export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null
 export type DockEvent = EventBase &
   (
     | { method: 'turn/started' }
-    | { method: 'turn/completed'; status: TurnEndStatus; error?: string }
+    | {
+        method: 'turn/completed';
+        status: TurnEndStatus;
+        error?: string;
+        /** 被一条插话截开的那一段：这一轮其实还在跑，不是真的结束。 */
+        steered?: true;
+      }
     | {
         method: 'item/user_message';
         content: string;
         attachments: ImageAttachment[];
         /** 子代理的对话里：`parent` = 父级在它跑的时候发来的话。其余没有。 */
         origin?: 'parent';
+        /** 插话：一轮进行中送达、并进那一轮的用户消息。 */
+        steered?: true;
       }
     | { method: 'item/message_delta'; delta: string }
     /** 模型的思考过程（增量）。旧网关不推，就没有。 */
@@ -232,13 +240,15 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
     case 'turn/completed': {
       const status = oneOf(params.status, ['completed', 'cancelled', 'failed'] as const, 'completed');
       const error = str(params.error);
-      return error ? { ...base, method, status, error } : { ...base, method, status };
+      const steered = params.steered === true ? { steered: true as const } : {};
+      return error ? { ...base, method, status, error, ...steered } : { ...base, method, status, ...steered };
     }
     case 'item/user_message':
       return {
         ...base,
         method,
         ...(params.origin === 'parent' ? { origin: 'parent' as const } : {}),
+        ...(params.steered === true ? { steered: true as const } : {}),
         content: str(params.content),
         attachments: list(params.attachments)
           .map(obj)

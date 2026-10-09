@@ -258,3 +258,23 @@ test('压缩失败与停止：带原因，标记不动', () => {
   assert.equal(s.compaction, null, '下一轮开始，没压成的那次就交代完了');
   assert.equal(parseEvent('context/compacted', { status: 'weird' }), null);
 });
+
+test('插话：前一段带 steered 收尾，插话那条用户消息带 steered，新一段接着跑', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started', {}, 't1'),
+    note('item/user_message', { content: '先做 A' }, 't1'),
+    note('item/message_delta', { delta: '在做 A' }, 't1'),
+    note('turn/completed', { status: 'completed', steered: true }, 't1'),
+    note('turn/started', {}, 't2'),
+    note('item/user_message', { content: '改做 B', steered: true }, 't2'),
+  );
+  const [first, second] = s.turns;
+  assert.equal(first.steered, true);
+  assert.equal(first.status, 'completed');
+  const user = second.items[0];
+  assert.equal(user.kind === 'user' && user.steered, true);
+  assert.equal(isRunning(s), true, '插话之后这一轮还在跑');
+  const plain = run(note('turn/started', {}, 't3'), note('turn/completed', { status: 'completed' }, 't3'));
+  assert.equal(plain.turns[0].steered, undefined, '普通结束不带 steered');
+});

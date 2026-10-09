@@ -142,6 +142,7 @@ async fn grok_sample_loop(
         for _ in 0..MAX_STEPS {
             abort_if_cancelled(ctx, sessions)?;
             drain_parent_mailbox(ctx, sessions);
+            drain_steers(ctx, sessions);
             // `agent/step-start`: whoever wants to watch the turn as it runs
             // (todo staleness today) gets a look before each sample. The loop
             // counts steps and appends — the policy lives in the handlers.
@@ -216,6 +217,11 @@ async fn grok_sample_loop(
                     is_error: result.is_error,
                 });
             }
+        }
+        // 模型要收尾时还有插话没送达（这一步采样期间到的）：不收尾，送达后再采
+        // 一步——插话是给这一轮的，不该等到下一轮（Codex 的 pending input 同理）。
+        if ended_with_text && sessions.has_steers() {
+            continue;
         }
         // `agent/turn-end`: goal / todo / anything else gets a say before the
         // turn hands control back. The loop only counts rounds and appends the
@@ -295,6 +301,18 @@ fn drain_parent_mailbox(ctx: &Context, sessions: &Sessions) {
     };
     for text in texts {
         sessions.append(LogEvent::SystemReminder(text));
+    }
+}
+
+/// 插话在这里送达：和信箱同一个位置，一步开始、采样之前，绝不夹在 tool_calls
+/// 和它们的结果之间。顺带撤掉让路信号（[`TurnControl::request_yield`]）。
+fn drain_steers(ctx: &Context, sessions: &Sessions) {
+    // 先撤信号再取：取之后才到的那条会自己重新立起信号，不会被这里抹掉。
+    if let Some(turn) = ctx.get::<TurnControl>(TURN) {
+        turn.clear_yield();
+    }
+    for steer in sessions.take_steers() {
+        sessions.append_steer(steer);
     }
 }
 

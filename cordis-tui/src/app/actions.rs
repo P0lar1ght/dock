@@ -120,6 +120,8 @@ pub enum Action {
     /// `Effect::SendPrompt` clears the status line (see take_send).
     SendPrompt(PromptSend),
     SendPromptNow(PromptSend),
+    /// 生成中 Ctrl+Enter：插话，下一个步骤边界并进正在跑的这一轮。
+    SteerPrompt(PromptSend),
     PromoteQueued {
         id: Option<String>,
     },
@@ -228,6 +230,12 @@ pub enum Effect {
         text: String,
         send_now: bool,
         /// Captured before take_prompt; flashed after clear_notice.
+        unbound_image_notice: Option<String>,
+    },
+    /// 插话（`SessionRef::steer`）。图片在 take_send 时已放进图片槽，这里取回来
+    /// 跟着插话走。
+    SteerPrompt {
+        text: String,
         unbound_image_notice: Option<String>,
     },
     PromoteQueued {
