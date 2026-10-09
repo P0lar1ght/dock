@@ -25,6 +25,11 @@ pub enum SessionCommand {
     SteerQueued {
         id: Option<String>,
     },
+    /// 侧边聊天写进来的一段笔记：有任务在跑就交给循环在步骤边界落（收尾后还没
+    /// 落的由 actor 补）；闲着直接落进历史。不开始新的一轮。
+    SideNote {
+        note: String,
+    },
     /// Move a queued prompt to the front and cancel the in-flight turn.
     /// `None` = oldest prompt job.
     Promote {

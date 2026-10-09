@@ -22,5 +22,5 @@ pub use names::{
     THEME, TUI, TUI_PAIRING, TUI_PROMPT, TUI_SCROLLBACK, TUI_SHORTCUTS, TUI_STATUS, TUI_WELCOME,
 };
 pub use plugin::{pairing, prompt, scrollback, shortcuts, status_bar, theme, tui, views, welcome};
-pub use seam::tabs::{carry_back, PER_TAB_VIEWS};
+pub use seam::tabs::{carry_back, fill_merge_prompt, merge_note, merge_target, PER_TAB_VIEWS};
 pub use views::prompt::PromptWidget;

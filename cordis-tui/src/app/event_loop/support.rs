@@ -212,6 +212,29 @@ pub(super) fn spawn_cua_refresh(
     let _ = redraw.send(());
 }
 
+/// `/tab merge` 不带内容：让旁问页在后台起草一段结论（要调一次模型，别卡住
+/// 事件循环），好了填进它的输入框成 `/tab merge <笔记>`，用户改完回车才写。
+pub(super) fn spawn_merge_draft(aside: Context, redraw: tokio::sync::mpsc::UnboundedSender<()>) {
+    if aside
+        .get::<cordis_spine::SessionRef>(cordis_spine::SESSION_PORT)
+        .is_some_and(|port| port.working())
+    {
+        flash(&aside, "旁问还在回答，等它答完再 /tab merge");
+        return;
+    }
+    flash(&aside, "正在整理结论…");
+    let _ = redraw.send(());
+    tokio::spawn(async move {
+        let done = match cordis_spine::draft_side_note(&aside).await {
+            Ok(note) => crate::seam::tabs::fill_merge_prompt(&aside, &note)
+                .map(|()| "结论在输入框里：改好后回车写进来源页".to_string()),
+            Err(e) => Err(format!("没能整理出结论：{e}")),
+        };
+        flash(&aside, done.unwrap_or_else(|e| e));
+        let _ = redraw.send(());
+    });
+}
+
 /// 执行确认过的安装 / 授权。真正的下载、子进程、MCP 重载都在 `"computer"` 里，
 /// 这里只负责起头、给一条 flash，并让 UI 继续重绘。
 pub(super) fn spawn_cua_run(

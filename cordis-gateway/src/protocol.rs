@@ -69,6 +69,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // 另有 `turn/queue/steer`，`turn/queue/list` 列出等着送达的插话（`kind: "steer"`），
     // `item/user_message` / 被它收尾的 `turn/completed` 带 `steered`。
     ("turnSteer", true),
+    // `thread/aside/start` / `handback` / `merge`：侧边聊天（从一个会话分叉的只读旁问，
+    // 不落盘、不进 `thread/list`），主会话里写进来的笔记投成 `item/side_note`。
+    ("sideChat", true),
     // `surface/list` / `get` / `action` + 连接级推送 `surface/changed { id }`：插件的面板
     // （`"tui.slots"`）。正文是文本，动作是按钮；`action` 只认受信连接。
     ("surfaces", true),
@@ -143,6 +146,10 @@ pub const THREAD_RESTORE: &str = "thread/restore";
 pub const THREAD_DELETE: &str = "thread/delete";
 pub const THREAD_HISTORY: &str = "thread/history";
 pub const THREAD_REWIND: &str = "thread/rewind";
+/// 侧边聊天（只读旁问页）：开 / 起草写进主线的笔记 / 写进主线。见 `handlers/side_chat.rs`。
+pub const THREAD_ASIDE_START: &str = "thread/aside/start";
+pub const THREAD_ASIDE_HANDBACK: &str = "thread/aside/handback";
+pub const THREAD_ASIDE_MERGE: &str = "thread/aside/merge";
 /// 一条工具结果里的一张图的像素（`item/tool_completed` 的 `attachments` 只带元数据）。
 pub const ITEM_IMAGE: &str = "item/image";
 pub const THREAD_SUBSCRIBE: &str = "thread/subscribe";

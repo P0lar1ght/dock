@@ -94,9 +94,10 @@ fn tab(index: usize, kind: TabKind, views: bool) -> Plugin {
     })
 }
 
-/// 开这一页时正在看的那一页（新页从它继承设置、cwd、预设）。
+/// 新页从哪一页继承设置、cwd、预设：平时是正在看的那一页，网关给别的会话开侧边
+/// 聊天时是那个会话（[`Tabs::mount_source`]）。
 fn active_page(ctx: &cordis::Context) -> Option<cordis::Context> {
-    ctx.get::<Tabs>(TABS).map(|tabs| tabs.active_ctx())
+    ctx.get::<Tabs>(TABS).map(|tabs| tabs.mount_source())
 }
 
 /// 抄当前页的模型、协议、权限模式。开页之后两页各改各的。

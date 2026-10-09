@@ -188,6 +188,8 @@ export type DockEvent = EventBase &
     | { method: 'elicit/resolved'; elicitId: string }
     /** 压缩完成的标记（落在历史里；前后占用只在实时的 `context/compacted` 里）。 */
     | { method: 'item/compaction'; itemId: string }
+    /** 侧边聊天写进主线的笔记（能力 `sideChat`）。挂在它落下时的那一轮上。 */
+    | { method: 'item/side_note'; itemId: string; text: string }
     /** 压缩进展。只推不记（`seq` 为 0），不进 `thread/history`。 */
     | { method: 'context/compacted'; progress: CompactionProgress }
     /** 子代理出现了或状态变了。只推不记（`seq` 为 0）。 */
@@ -361,6 +363,8 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
       return { ...base, method, elicitId: str(params.elicitId) };
     case 'item/compaction':
       return { ...base, method, itemId: str(params.itemId) || `compaction-${base.seq}` };
+    case 'item/side_note':
+      return { ...base, method, itemId: str(params.itemId) || `side-note-${base.seq}`, text: str(params.text) };
     case 'context/compacted': {
       const progress = parseCompaction(params);
       return progress ? { ...base, method, progress } : null;

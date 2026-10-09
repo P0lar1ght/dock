@@ -199,6 +199,11 @@ pub enum Effect {
     },
     /// Async: 把当前的只读旁问页转正成全权常驻页。
     TabPromote,
+    /// `/tab merge`：旁问页的结论写进来源页的上下文。`None` = 先起草（后台跑，
+    /// 好了填进输入框成 `/tab merge <笔记>`，改完回车才写）；`Some` = 写这段。
+    TabMerge {
+        note: Option<String>,
+    },
     ResumePicker,
     PairingManage,
     Help,
@@ -340,6 +345,17 @@ fn tab_effect(args: &str) -> Effect {
         Some("fork") | Some("f") => Effect::TabFork,
         Some("back") | Some("b") => Effect::TabCarryBack,
         Some("promote") | Some("p") => Effect::TabPromote,
+        Some("merge") | Some("m") => {
+            // 笔记可以有多行：取子命令后面的原文，不按空白拆。
+            let rest = args
+                .trim_start()
+                .split_once(char::is_whitespace)
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or("");
+            Effect::TabMerge {
+                note: (!rest.is_empty()).then(|| rest.to_string()),
+            }
+        }
         Some("close") | Some("c") | Some("x") => Effect::TabClose {
             id: parts.next().and_then(|n| n.parse::<usize>().ok()),
         },
@@ -349,6 +365,7 @@ fn tab_effect(args: &str) -> Effect {
                 title: "分页".into(),
                 body: "用法：/tab（新开）、/tab fork（带上下文分叉）、\
                        /tab back（把本页结论带回来源页）、/tab promote（旁问页转正）、\
+                       /tab merge（旁问页的结论写进来源页的上下文）、\
                        /tab close [页号]、/tab <页号>\n\
                        快捷键：Ctrl+N 新开、Ctrl+F 分叉、Ctrl+B 带回、Alt+1..9 切换。\n"
                     .into(),
@@ -859,6 +876,15 @@ mod tests {
         assert!(matches!(tab_effect("2"), Effect::TabGo { id: 2 }));
         assert!(matches!(tab_effect("fork"), Effect::TabFork));
         assert!(matches!(tab_effect("back"), Effect::TabCarryBack));
+        assert!(matches!(
+            tab_effect("merge"),
+            Effect::TabMerge { note: None }
+        ));
+        // 笔记原样保留多行，不按空白拆。
+        assert!(matches!(
+            tab_effect("merge - 结论一\n- 结论二  "),
+            Effect::TabMerge { note: Some(n) } if n == "- 结论一\n- 结论二"
+        ));
         // 打错了给用法，不猜一个页号切过去。
         assert!(matches!(tab_effect("nope"), Effect::ShowNotice { .. }));
         assert!(matches!(tab_effect("0"), Effect::ShowNotice { .. }));

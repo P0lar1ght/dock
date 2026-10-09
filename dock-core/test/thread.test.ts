@@ -278,3 +278,22 @@ test('插话：前一段带 steered 收尾，插话那条用户消息带 steered
   const plain = run(note('turn/started', {}, 't3'), note('turn/completed', { status: 'completed' }, 't3'));
   assert.equal(plain.turns[0].steered, undefined, '普通结束不带 steered');
 });
+
+test('侧边聊天笔记：挂在它落下的那一轮上（已结束的轮不会被重新打开），重复推送不重复', () => {
+  seq = 0;
+  const before = [
+    note('turn/started', {}, 't1'),
+    note('item/user_message', { content: '先做 A' }, 't1'),
+    note('turn/completed', { status: 'completed' }, 't1'),
+  ];
+  const merged = note('item/side_note', { itemId: 'side-note-4', text: 'retry 要退避' }, 't1');
+  const s = run(...before, merged);
+  const [turn] = s.turns;
+  assert.equal(s.turns.length, 1, '不另开一轮');
+  assert.equal(turn.status, 'completed', '笔记不让这一轮重新跑起来');
+  const card = turn.items[1];
+  assert.equal(card.kind === 'sideNote' && card.text, 'retry 要退避');
+  assert.equal(isRunning(s), false);
+  const again = reduceThread(s, { ...merged, seq: merged.seq + 1 });
+  assert.equal(again.turns[0].items.length, 2, '同一张笔记不重复');
+});

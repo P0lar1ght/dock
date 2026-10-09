@@ -65,9 +65,14 @@ pub fn search(params: Value) -> Result<Value, RpcError> {
 fn list_all(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     let mut threads = Vec::new();
     let mut open_ids = std::collections::HashSet::new();
+    let tabs = gateway.ctx().get::<Tabs>(TABS);
     for page in threads::open_pages(gateway) {
         let sessions = page.sessions()?;
         let id = page.session_id();
+        // 侧边聊天不是会话列表里的一项（不落盘，跟着主会话走）。
+        if tabs.as_ref().is_some_and(|t| t.is_aside(&id)) {
+            continue;
+        }
         open_ids.insert(id.clone());
         let mut item = live_summary(&sessions, protocol::DEFAULT_WORKSPACE_ID);
         item["id"] = json!(id);
@@ -303,6 +308,13 @@ pub async fn close(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcE
         return Err(RpcError::app("invalid_params", "第 1 页（live）关不掉"));
     }
     let tabs = tabs(gateway)?;
+    // 它的侧边聊天跟着关：侧边聊天是从这一页分叉的旁问，主会话没了它也就结束了。
+    if let Some(aside) = tabs.aside_of(&page.session_id()).and_then(Page::of_ctx) {
+        tabs.close_session(&aside.session_id())
+            .await
+            .map_err(|e| RpcError::app("close_failed", e))?;
+        gateway.drop_page(&aside.identity);
+    }
     tabs.close_session(&page.session_id())
         .await
         .map_err(|e| RpcError::app("close_failed", e))?;
@@ -637,7 +649,7 @@ fn roster_summary(entry: &RosterEntry) -> Value {
     })
 }
 
-fn open_summary(page: &Page) -> Result<Value, RpcError> {
+pub(crate) fn open_summary(page: &Page) -> Result<Value, RpcError> {
     let sessions = page.sessions()?;
     let mut item = live_summary(&sessions, protocol::DEFAULT_WORKSPACE_ID);
     item["id"] = json!(page.thread_id());

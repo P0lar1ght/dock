@@ -35,6 +35,27 @@ pub const STEER_REMINDER: &str = "<system-reminder>\n用户在你工作期间发
 /// 话，下一条消息来了会以为那一轮正常收尾了。
 pub const TURN_STOPPED_REMINDER: &str = "<system-reminder>\n用户有意停止了上一轮。上一轮的回复可能不完整；被中止的工具调用（结果以「已中断。」开头）可能已经部分执行，不要假设它们做完了。按用户接下来的消息行动。\n</system-reminder>";
 
+/// 侧边聊天（只读旁问页）写进主线的笔记最多多少个字符（按 `char` 数）。
+pub const SIDE_NOTE_MAX_CHARS: usize = 2000;
+
+/// 侧边聊天写进主线的笔记落成一条 [`LogEvent::SystemReminder`]，正文以它开头、
+/// 以 [`SIDE_NOTE_TAIL`] 结尾。网关 / TUI 据此认出笔记（逐字比较，别改成带变量的
+/// 文本）；中间就是笔记原文。
+pub const SIDE_NOTE_HEAD: &str = "<system-reminder>\n用户从侧边聊天带回了下面这段笔记：是用户在一段只读旁问里得出、确认过的结论，供你参考。它本身不是新的任务，也不要求你回复。\n<side-note>\n";
+pub const SIDE_NOTE_TAIL: &str = "\n</side-note>\n</system-reminder>";
+
+/// 把笔记包成写进主线的那条提醒（见 [`SIDE_NOTE_HEAD`]）。
+pub fn side_note_reminder(note: &str) -> String {
+    format!("{SIDE_NOTE_HEAD}{}{SIDE_NOTE_TAIL}", note.trim())
+}
+
+/// [`side_note_reminder`] 的反向：这条提醒是侧边聊天笔记就取出原文。
+pub fn side_note_text(reminder: &str) -> Option<&str> {
+    reminder
+        .strip_prefix(SIDE_NOTE_HEAD)?
+        .strip_suffix(SIDE_NOTE_TAIL)
+}
+
 /// Visible compact marker. The pager keeps older bubbles; this assistant
 /// line is appended so the user sees that a compact ran. The model history
 /// carries the same bubble plus a hidden continuation summary.
@@ -100,6 +121,20 @@ impl NoticeKind {
             "workflow-done" => Self::WorkflowDone,
             _ => Self::Other,
         }
+    }
+}
+
+#[cfg(test)]
+mod side_note_tests {
+    use super::*;
+
+    /// 包进去的笔记原样认得回来；别的提醒（插话、停止）不算笔记。
+    #[test]
+    fn a_side_note_round_trips_and_other_reminders_are_not_notes() {
+        let wrapped = side_note_reminder("  结论：retry 要退避  ");
+        assert_eq!(side_note_text(&wrapped), Some("结论：retry 要退避"));
+        assert_eq!(side_note_text(STEER_REMINDER), None);
+        assert_eq!(side_note_text(TURN_STOPPED_REMINDER), None);
     }
 }
 

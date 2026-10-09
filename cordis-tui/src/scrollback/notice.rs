@@ -38,8 +38,45 @@ pub fn lines(
     width: usize,
     mode: ToolMode,
 ) -> Vec<Line<'static>> {
-    let accent = accent_of(kind, theme);
-    let label = label_of(kind);
+    render(
+        accent_of(kind, theme),
+        label_of(kind),
+        title,
+        body,
+        theme,
+        width,
+        mode,
+    )
+}
+
+/// 侧边聊天（`/btw` 旁问页）写进这一页的笔记：和通知卡同一个外形，默认收起。
+/// 它在模型历史里（一条 system-reminder），这里只是让用户看见模型多知道了什么。
+pub fn side_note_lines(
+    note: &str,
+    theme: &Theme,
+    width: usize,
+    mode: ToolMode,
+) -> Vec<Line<'static>> {
+    render(
+        theme.accent_running,
+        "笔记",
+        "来自侧边聊天",
+        note,
+        theme,
+        width,
+        mode,
+    )
+}
+
+fn render(
+    accent: Color,
+    label: &str,
+    title: &str,
+    body: &str,
+    theme: &Theme,
+    width: usize,
+    mode: ToolMode,
+) -> Vec<Line<'static>> {
     let open = mode != ToolMode::Collapsed;
 
     let mut header = Line::from(vec![
@@ -104,6 +141,28 @@ fn label_of(kind: NoticeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 侧边聊天的笔记：和通知卡同一个外形，抬头写清是笔记、来自侧边聊天；收起时
+    /// 正文只露前几行。
+    #[test]
+    fn a_side_note_card_names_itself_and_folds() {
+        let theme = Theme::current();
+        let note = (1..=10)
+            .map(|i| format!("结论 {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let folded = text_of(&side_note_lines(&note, &theme, 80, ToolMode::Collapsed));
+        assert!(
+            folded.contains("笔记") && folded.contains("来自侧边聊天"),
+            "{folded}"
+        );
+        assert!(
+            folded.contains("结论 1") && !folded.contains("结论 10"),
+            "{folded}"
+        );
+        let open = text_of(&side_note_lines(&note, &theme, 80, ToolMode::Expanded));
+        assert!(open.contains("结论 10"), "{open}");
+    }
 
     fn text_of(lines: &[Line<'static>]) -> String {
         lines

@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use cordis_spine::{
-    Ask, CompactProgress, CompactStatus, ElicitPrompt, LogEvent, PermissionOptionKind,
-    PermissionPrompt, PlanApprovalPrompt, PlanDecision, Sessions, TurnEndStatus, UserImage,
-    AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
+    side_note_text, Ask, CompactProgress, CompactStatus, ElicitPrompt, LogEvent,
+    PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt, PlanDecision, Sessions,
+    TurnEndStatus, UserImage, AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
     PERMISSION_DENIED_TOOL_RESULT, ROOT_IDENTITY, STEER_REMINDER,
 };
 
@@ -390,6 +390,21 @@ impl Transcript {
             // 这一种是对话的一部分，投成一条来自父级的消息。
             LogEvent::SystemReminder(text) if text == STEER_REMINDER => {
                 self.projector.steer_note = true;
+            }
+            // 侧边聊天写进来的笔记：投成一张笔记卡，挂在当前（或刚结束的）那一轮上——
+            // 闲着时写进来的不另开一轮，客户端不会把它当成一轮新的完成。一轮都还没有
+            // 时开一轮马上收掉（同压缩标记）。
+            LogEvent::SystemReminder(text) if side_note_text(&text).is_some() => {
+                let note = side_note_text(&text).unwrap_or_default().to_string();
+                let opened = self.projector.turn_n == 0;
+                if opened {
+                    self.ensure_turn();
+                }
+                let item_id = format!("side-note-{}", self.projector.seq + 1);
+                self.push("item/side_note", json!({ "itemId": item_id, "text": note }));
+                if opened {
+                    self.complete_turn_if_open();
+                }
             }
             LogEvent::SystemReminder(text) if self.agent.is_some() => {
                 for message in parent_messages(&text) {
@@ -955,6 +970,73 @@ mod tests {
         let mut replayed = Transcript::new();
         replayed.replay(&events, &times, &[]);
         assert_eq!(summary(&replayed), want, "回放：{:?}", methods(&replayed));
+    }
+
+    /// 侧边聊天写进来的笔记：投成 `item/side_note`，挂在那一轮（闲着写进来的挂在
+    /// 刚结束的那一轮上，不另开一轮）；别的 system-reminder 照旧不投。实时和回放一致。
+    #[test]
+    fn a_side_note_is_projected_on_its_turn_live_and_on_replay() {
+        let events = vec![
+            LogEvent::User("先做 A".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "做完了".into(),
+                ..Default::default()
+            }),
+            LogEvent::TurnEnd(TurnEndStatus::Completed),
+            LogEvent::SystemReminder(cordis_spine::side_note_reminder("retry 要退避")),
+            LogEvent::SystemReminder("<system-reminder>todo</system-reminder>".into()),
+        ];
+        let summary = |t: &Transcript| -> Vec<(String, String, Value)> {
+            t.history_since(0)
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.method,
+                        e.turn_id,
+                        e.payload.get("text").cloned().unwrap_or(Value::Null),
+                    )
+                })
+                .filter(|(m, ..)| m.starts_with("turn/") || m == "item/side_note")
+                .collect()
+        };
+        let want = vec![
+            ("turn/started".to_string(), "t1".to_string(), Value::Null),
+            ("turn/completed".to_string(), "t1".to_string(), Value::Null),
+            (
+                "item/side_note".to_string(),
+                "t1".to_string(),
+                Value::String("retry 要退避".into()),
+            ),
+        ];
+
+        let mut live = Transcript::new();
+        for event in &events {
+            match event {
+                LogEvent::TurnEnd(status) => live.turn_ended(status),
+                other => live.ingest_log(other.clone()),
+            }
+        }
+        assert_eq!(summary(&live), want, "实时：{:?}", methods(&live));
+
+        let times: Vec<_> = (0..events.len() as u64)
+            .map(|i| UNIX_EPOCH + std::time::Duration::from_secs(100 + i))
+            .collect();
+        let mut replayed = Transcript::new();
+        replayed.replay(&events, &times, &[]);
+        assert_eq!(summary(&replayed), want, "回放：{:?}", methods(&replayed));
+    }
+
+    /// 还没有任何一轮时写进来的笔记：开一轮马上收掉，不留一轮挂着「运行中」。
+    #[test]
+    fn a_side_note_before_any_turn_opens_and_closes_one() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::SystemReminder(cordis_spine::side_note_reminder(
+            "结论",
+        )));
+        assert_eq!(
+            methods(&t),
+            ["turn/started", "item/side_note", "turn/completed"]
+        );
     }
 
     /// 子代理发的权限请求带它的 agent id，主会话发的是 null（客户端据此标「来自子代理」）。
