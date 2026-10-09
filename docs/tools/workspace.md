@@ -105,7 +105,7 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 三处刻意的边界：
 
 - 返回文案**不以 `Error:` 开头**。模型看到 `Error:` 的第一反应是重试或换路子，而这次它什么都没做错，只是命令比预算长。
-- **取消（用户按 Esc）仍然是 kill**，不是转后台——那是明确要它停（`bash_cancel_still_kills`）。
+- **取消（用户按 Esc）仍然是 kill**，不是转后台——那是明确要它停（`bash_cancel_still_kills`）。返回以「已中断。」开头，写明运行了多久、可能已经部分执行，后面带中止前已产出的输出（`interrupted_tool_result`）；循环在 Stop 后等工具 1 秒收尾，正是为了收到这一份。
 - **没挂 `"jobs"` 服务时（单测、精简装配）退回 kill + 报错**：那时的任务表是本次调用临时起的本地表，随调用一起析构，发出去的 `job_id` 没人查得到。宁可诚实地失败，也不发空头支票（`bash_timeout_without_a_jobs_service_still_kills`）。
 
 **插话在等 = 同样转后台。** 用户在一轮进行中插话（`TurnControl::request_yield`）时，前台命令再给 2 秒（`STEER_GRACE`），还没跑完就走同一条转后台的路，抬头写「用户发来了新消息，已运行 …」，让插话尽快在下一个步骤边界送达。2 秒内跑完的照常返回；没有 `"jobs"` 服务时不转、等它跑完（`bash_yields_to_a_steer_by_backgrounding` / `bash_short_command_finishes_despite_a_steer`）。

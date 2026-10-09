@@ -152,7 +152,9 @@ pub(crate) async fn run_with_yield(
             Some(false) => {}
         }
         if is_cancelled() {
-            return finish_early(jobs, &id, "cancelled".into()).await;
+            // 用户停止了这一轮：杀掉（这是明确要它停），带回已产出的输出。
+            let partial = finish_early(jobs, &id, String::new()).await;
+            return cordis_base::types::interrupted_tool_result(start.elapsed(), &partial);
         }
         if collectable && should_yield() {
             let seen = *yield_seen.get_or_insert_with(std::time::Instant::now);
