@@ -43,7 +43,8 @@
 #   reasoning_efforts  /effort 菜单列哪几档。不写 = 列通用四档
 #                      (low/medium/high/xhigh)；写 [] = 会推理但不接受档位参数，
 #                      菜单空着、永不发 effort。
-#   supports_images    false = 纯文本模型，图片（含工具结果里的截图）不进请求体。
+#   supports_images    false = 纯文本模型，图片（用户发的、工具结果里的截图）都不进请求体，
+#                      模型会收到一句「图被拿掉了」的说明。
 #                      不写 = 当作支持。
 #   [model."<id>".pricing]  单价，USD / 百万 token。写了 /usage 才算得出金额。
 #                      input（未命中）/ cache_read / cache_write / output 四个价位，
@@ -114,7 +115,7 @@ context_window = 200000
 max_output_tokens = 16384
 prompt_cache = true
 
-# 纯文本模型的写法：明确关掉图片，否则截图类工具结果会被塞进请求体。
+# 纯文本模型的写法：明确关掉图片，否则用户发的图和截图类工具结果都会被塞进请求体。
 # [model."text-only-model"]
 # api_base_url = "https://<your-endpoint>/v1"
 # env_key = "YOUR_API_KEY_ENV"
