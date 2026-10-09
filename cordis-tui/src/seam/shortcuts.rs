@@ -383,7 +383,7 @@ pub fn idle_hints(can_send: bool, working: bool, queued: bool) -> Vec<HintItem> 
             if working { "queue" } else { "send" },
         ));
         if working {
-            hints.push(HintItem::new("Ctrl+Enter", "send now"));
+            hints.push(HintItem::new("Ctrl+Enter", "steer"));
         }
     } else if working && queued {
         hints.push(HintItem::new("Enter", "send now"));
@@ -429,7 +429,7 @@ mod tests {
         let hints = idle_hints(true, true, false);
         let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
         assert!(labels.contains(&"queue"), "{labels:?}");
-        assert!(labels.contains(&"send now"), "{labels:?}");
+        assert!(labels.contains(&"steer"), "{labels:?}");
         assert!(hints.iter().any(|h| h.key == "Shift+Tab"));
     }
 

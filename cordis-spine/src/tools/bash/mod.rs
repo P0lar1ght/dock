@@ -71,9 +71,25 @@ fn resolve_workdir(v: &Value) -> Result<Option<PathBuf>, String> {
     Ok(Some(path))
 }
 
+/// 有插话在等（[`crate::TurnControl::request_yield`]）之后，前台命令再给这么久：
+/// 一两秒就完的命令照常带回结果，真正的长命令转后台，让插话尽快送达。
+const STEER_GRACE: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
 pub(crate) async fn run(
     args: &str,
     is_cancelled: &(dyn Fn() -> bool + Send + Sync),
+    jobs: Option<&Jobs>,
+) -> String {
+    run_with_yield(args, is_cancelled, &|| false, jobs).await
+}
+
+/// `should_yield`：插话在等下一个步骤边界。不杀命令——过了 [`STEER_GRACE`] 还没
+/// 跑完就转后台（和前台预算到点同一条路），没有可查的任务表就照常等它跑完。
+pub(crate) async fn run_with_yield(
+    args: &str,
+    is_cancelled: &(dyn Fn() -> bool + Send + Sync),
+    should_yield: &(dyn Fn() -> bool + Send + Sync),
     jobs: Option<&Jobs>,
 ) -> String {
     let v = parse_args(args);
@@ -118,6 +134,7 @@ pub(crate) async fn run(
     let id = jobs.start_foreground_ex(&command, description, workdir);
     let budget = call_budget(&v);
     let start = std::time::Instant::now();
+    let mut yield_seen: Option<std::time::Instant> = None;
     loop {
         // 轮询只读完成位；输出只在真正要返回时取一次，避免每 20ms 白拼一个
         // 最大 20KB 的 String。
@@ -137,9 +154,23 @@ pub(crate) async fn run(
         if is_cancelled() {
             return finish_early(jobs, &id, "cancelled".into()).await;
         }
+        if collectable && should_yield() {
+            let seen = *yield_seen.get_or_insert_with(std::time::Instant::now);
+            if seen.elapsed() >= STEER_GRACE {
+                return detach_to_background(
+                    jobs,
+                    &id,
+                    format!("用户发来了新消息，已运行 {}", human_budget(start.elapsed())),
+                );
+            }
+        }
         if start.elapsed() >= budget {
             if collectable {
-                return detach_to_background(jobs, &id, budget);
+                return detach_to_background(
+                    jobs,
+                    &id,
+                    format!("前台等待 {} 到点", human_budget(budget)),
+                );
             }
             // 没有可查的任务表：转后台就成了「还在跑，但你永远拿不到」。退回旧的
             // kill + 说明，宁可诚实地失败。
@@ -167,7 +198,8 @@ fn human_budget(budget: Duration) -> String {
     }
 }
 
-/// 前台预算到点：**不杀命令**，把它转成后台任务，带回已产出的输出与 job_id。
+/// 前台预算到点、或插话在等：**不杀命令**，把它转成后台任务，带回已产出的
+/// 输出与 job_id。`why` 写进抬头的括号里。
 ///
 /// 杀掉再让模型重跑是双重浪费：那几分钟的工作扔了，重跑还要再花同样的时间，
 /// 而且大概率再超时一次——`cargo build` 不会因为重跑就变快。命令已经过了权限门、
@@ -177,7 +209,7 @@ fn human_budget(budget: Duration) -> String {
 /// 换路子，而这次它什么都没做错，只是命令比预算长。
 ///
 /// 取消（用户按 Esc）仍然走 [`finish_early`] 杀掉——那是明确要它停。
-fn detach_to_background(jobs: &Jobs, id: &str, budget: Duration) -> String {
+fn detach_to_background(jobs: &Jobs, id: &str, why: String) -> String {
     let out = jobs
         .model_snapshot(id)
         .map(|s| s.output)
@@ -187,9 +219,8 @@ fn detach_to_background(jobs: &Jobs, id: &str, budget: Duration) -> String {
         jobs.forget(id);
         return out;
     }
-    let waited = human_budget(budget);
     let head = format!(
-        "[命令仍在运行，已转入后台]（前台等待 {waited} 到点）\n\n\
+        "[命令仍在运行，已转入后台]（{why}）\n\n\
          job_id: {id}\n\n\
          进程没有被终止，还在继续跑。不要重跑这条命令——用 job 工具配 \
          job_ids=[\"{id}\"] 取后续输出，要停就用 kill_task。\n\

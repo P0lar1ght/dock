@@ -26,6 +26,8 @@ export type TurnItem =
       attachments: ImageAttachment[];
       /** 子代理的对话里父级在它跑的时候发来的话；其余没有。 */
       origin?: 'parent';
+      /** 插话：一轮进行中送达、并进那一轮。 */
+      steered?: true;
     }
   /** 助手文字。工具 / 交互之后的文字另起一条，保持出现顺序。 */
   | { kind: 'text'; id: string; text: string }
@@ -89,6 +91,8 @@ export interface Turn {
   startedAt: number;
   endedAt: number | null;
   items: TurnItem[];
+  /** 这一段被插话截开（`turn/completed { steered }`）：下一轮接着跑，不是真的结束。 */
+  steered?: true;
 }
 
 export interface ThreadState {
@@ -136,7 +140,13 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
   return withTurn({ ...state, seq }, event, (turn) => {
     switch (event.method) {
       case 'turn/completed':
-        return { ...turn, status: event.status, error: event.error ?? null, endedAt: event.at };
+        return {
+          ...turn,
+          status: event.status,
+          error: event.error ?? null,
+          endedAt: event.at,
+          ...(event.steered ? { steered: true as const } : {}),
+        };
 
       case 'item/user_message':
         return push(turn, {
@@ -146,6 +156,7 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
           at: event.at,
           attachments: event.attachments,
           ...(event.origin ? { origin: event.origin } : {}),
+          ...(event.steered ? { steered: event.steered } : {}),
         });
 
       case 'item/reasoning_delta': {

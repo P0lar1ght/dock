@@ -360,6 +360,27 @@ pub async fn run(root: Context) -> Result<()> {
                                         session.submit(text, send_now);
                                     }
                                 }
+                                Effect::SteerPrompt {
+                                    text,
+                                    unbound_image_notice,
+                                } => {
+                                    if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
+                                        status.clear_notice();
+                                    }
+                                    if let Some(notice) = unbound_image_notice {
+                                        flash(&ctx, notice);
+                                    }
+                                    if let Ok(session) = ctx.require::<SessionRef>(SESSION_PORT) {
+                                        if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
+                                            prompt.note_sent(&text);
+                                        }
+                                        let images = ctx
+                                            .get::<Sessions>(SESSIONS)
+                                            .map(|s| s.take_pending_images())
+                                            .unwrap_or_default();
+                                        session.steer(text, images);
+                                    }
+                                }
                                 Effect::FillPrompt { text } => {
                                     overlay.close();
                                     if text.contains("/goal") {

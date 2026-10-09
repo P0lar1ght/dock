@@ -42,12 +42,13 @@ pub fn handles(name: &str) -> bool {
 
 #[allow(dead_code)]
 pub async fn execute(call: ToolCall) -> ToolResult {
-    execute_with(call, || false, None).await
+    execute_with(call, || false, || false, None).await
 }
 
 pub async fn execute_with(
     call: ToolCall,
     is_cancelled: impl Fn() -> bool + Send + Sync,
+    should_yield: impl Fn() -> bool + Send + Sync,
     jobs: Option<&Jobs>,
 ) -> ToolResult {
     if call.name == "read_file" {
@@ -64,7 +65,9 @@ pub async fn execute_with(
         "list_dir" => list_dir::run(&call.arguments),
         "grep" => grep::run(&call.id, &call.arguments).await,
         "search_replace" => search_replace::run(&call.arguments),
-        "bash" | "run_terminal_cmd" => bash::run(&call.arguments, &is_cancelled, jobs).await,
+        "bash" | "run_terminal_cmd" => {
+            bash::run_with_yield(&call.arguments, &is_cancelled, &should_yield, jobs).await
+        }
         "glob" => glob::run(&call.arguments),
         "write_file" => write_file::run(&call.arguments),
         other => {
@@ -617,6 +620,63 @@ mod tests {
         assert!(out.contains("started"), "已产出的输出仍要带回：{out}");
         assert!(!out.contains("job_id"), "取消不该留下后台任务：{out}");
         assert!(jobs.list().is_empty(), "取消后任务要摘掉");
+    }
+
+    /// 插话在等：长命令过了宽限期转后台（不杀），让插话尽快送达。旧实现里插话
+    /// 等于取消，这条命令会被杀掉、已做的工作全丢。
+    #[tokio::test]
+    async fn bash_yields_to_a_steer_by_backgrounding() {
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
+        let jobs = Jobs::new();
+        let start = std::time::Instant::now();
+        let out = bash::run_with_yield(
+            r#"{"command":"echo started; sleep 4; echo after-yield"}"#,
+            &|| false,
+            &|| true,
+            Some(&jobs),
+        )
+        .await;
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "过了宽限期就该让路，实际 {:?}",
+            start.elapsed()
+        );
+        assert!(
+            out.contains("用户发来了新消息"),
+            "要说明为什么转后台：{out}"
+        );
+        assert!(out.contains("started"), "已产出的输出要带回：{out}");
+        let id = out
+            .lines()
+            .find_map(|l| l.strip_prefix("job_id: "))
+            .expect("要给出 job_id")
+            .trim()
+            .to_string();
+        let mut tail = String::new();
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tail = jobs.snapshot(&id).map(|s| s.output).unwrap_or_default();
+            if tail.contains("after-yield") {
+                break;
+            }
+        }
+        assert!(tail.contains("after-yield"), "命令要接着跑完：{tail}");
+    }
+
+    /// 宽限期内跑完的命令照常带回结果，不为插话转后台。
+    #[tokio::test]
+    async fn bash_short_command_finishes_despite_a_steer() {
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
+        let jobs = Jobs::new();
+        let out = bash::run_with_yield(
+            r#"{"command":"sleep 0.3; echo quick-done"}"#,
+            &|| false,
+            &|| true,
+            Some(&jobs),
+        )
+        .await;
+        assert!(out.contains("quick-done"), "{out}");
+        assert!(!out.contains("job_id"), "短命令不该转后台：{out}");
     }
 
     /// 没挂 `"jobs"` 服务时不能转后台：本地表随调用一起析构，那个 job_id 没人

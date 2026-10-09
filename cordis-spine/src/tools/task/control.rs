@@ -86,7 +86,8 @@ pub(super) async fn run_interrupt(sub: &Subagents, sender: String, call: ToolCal
 }
 
 impl Subagents {
-    /// 用户（TUI 框底输入）发给子代理：不走相邻授权，`urgent` 打断本轮插话。
+    /// 用户（TUI 框底输入）发给子代理：不走相邻授权。`urgent`：在跑就作为插话
+    /// 在下一个步骤边界并进这一轮（不打断），idle 就开下一轮。
     pub fn send_message(&self, id: &str, message: &str, urgent: bool) -> Result<String, String> {
         let was_running = if urgent {
             self.store.push_urgent(id, message.to_string())?
@@ -226,7 +227,7 @@ impl Subagents {
 fn send_ack(id: &str, urgent: bool, was_running: bool) -> String {
     match (urgent, was_running) {
         (true, true) => format!(
-            "urgent message delivered to running subagent {id}; it will steer on the current turn"
+            "urgent message delivered to running subagent {id}; it joins the current turn at the next step"
         ),
         (true, false) => {
             format!("urgent message delivered to idle subagent {id}; the next turn is starting now")

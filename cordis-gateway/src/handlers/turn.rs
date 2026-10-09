@@ -15,8 +15,60 @@ pub fn enqueue(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
     submit(gateway, params, false)
 }
 
+/// 插话：一轮在跑就在下一个步骤边界并进这一轮（不打断采样和工具）；空闲时
+/// 等同 `turn/start`。要「停掉这一轮马上发」用 `turn/start`。
 pub fn steer(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    submit(gateway, params, true)
+    let thread_id = threads::thread_param(&params);
+    let page = threads::resolve(gateway, &thread_id)?;
+    let mut message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let images = resolve_turn_images(gateway, &page, &params)?;
+    if !images.is_empty() {
+        message = with_image_chips(&message, images.len());
+    }
+    if message.trim().is_empty() {
+        return Err(RpcError::invalid_params("message is required"));
+    }
+    apply_turn_intent(&page, &params, &message)?;
+    let port = session_port(&page)?;
+    let working = port.working();
+    port.steer(message, images);
+    Ok(json!({
+        "threadId": thread_id,
+        "turnId": format!("t{}", gateway.latest_seq(&page.identity).saturating_add(1)),
+        "status": if working { "steering" } else { "running" }
+    }))
+}
+
+/// 把一条排队的消息改成插话（`queueId` 省略 = 最早那条）。只对开着的页有意义。
+pub fn queue_steer(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let id = params
+        .get("queueId")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let thread_id = threads::thread_param(&params);
+    let steered = match open_or_none(threads::resolve(gateway, &thread_id))? {
+        Some(page) => {
+            let port = session_port(&page)?;
+            let known = port
+                .queued_prompts()
+                .iter()
+                .any(|q| id.as_ref().is_none_or(|want| &q.id == want));
+            if known {
+                port.steer_queued(id.clone());
+            }
+            known
+        }
+        None => false,
+    };
+    Ok(json!({
+        "threadId": thread_id,
+        "queueId": id.unwrap_or_default(),
+        "steered": steered
+    }))
 }
 
 pub fn cancel(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
@@ -36,21 +88,37 @@ pub fn queue_list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
         return Ok(json!({ "active": Value::Null, "items": [] }));
     };
     let port = session_port(&page)?;
-    let items: Vec<Value> = port
-        .queued_prompts()
+    // 先列等着送达的插话（它们会比任何排队的消息先进模型），再列排队的。
+    let steers = page
+        .ctx
+        .get::<Sessions>(SESSIONS)
+        .map(|s| s.pending_steers())
+        .unwrap_or_default();
+    let mut items: Vec<Value> = steers
         .into_iter()
-        .map(|q| {
+        .map(|s| {
             json!({
-                "id": q.id,
+                "id": s.id,
                 "threadId": thread_id,
-                "message": q.text,
-                "kind": "queue",
-                "status": "queued",
+                "message": s.text,
+                "kind": "steer",
+                "status": "pending",
                 "createdAt": 0,
                 "updatedAt": 0
             })
         })
         .collect();
+    items.extend(port.queued_prompts().into_iter().map(|q| {
+        json!({
+            "id": q.id,
+            "threadId": thread_id,
+            "message": q.text,
+            "kind": "queue",
+            "status": "queued",
+            "createdAt": 0,
+            "updatedAt": 0
+        })
+    }));
     let active = if port.working() {
         json!({
             "threadId": thread_id,
@@ -70,7 +138,15 @@ pub fn queue_remove(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
         .map(|s| s.to_string());
     let thread_id = threads::thread_param(&params);
     let removed = match open_or_none(threads::resolve(gateway, &thread_id))? {
-        Some(page) => session_port(&page)?.take_queued(id.clone()).is_some(),
+        // 还没送达的插话也能撤（id 前缀 `steer-`）。
+        Some(page) => {
+            let steer = id.as_deref().and_then(|want| {
+                page.ctx
+                    .get::<Sessions>(SESSIONS)
+                    .and_then(|s| s.take_steer(want))
+            });
+            steer.is_some() || session_port(&page)?.take_queued(id.clone()).is_some()
+        }
         None => false,
     };
     Ok(json!({
@@ -89,6 +165,7 @@ fn open_or_none(page: Result<Page, RpcError>) -> Result<Option<Page>, RpcError> 
     }
 }
 
+/// `send_now`：一轮在跑时停掉它、马上发这一条（`turn/start`）；否则排队。
 fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Value, RpcError> {
     let thread_id = threads::thread_param(&params);
     let page = threads::resolve(gateway, &thread_id)?;

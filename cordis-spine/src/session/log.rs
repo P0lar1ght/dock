@@ -15,7 +15,7 @@ use crate::session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
 };
 pub use cordis_base::types::{is_main_identity, ROOT_IDENTITY, TAB_IDENTITY_PREFIX};
-use cordis_base::types::{LogEvent, COMPACT_NOTICE};
+use cordis_base::types::{LogEvent, COMPACT_NOTICE, STEER_REMINDER};
 use cordis_base::usage::{PromptUsage, TokenUsage as CallUsage, UsageLedger, UsageTotals};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +48,16 @@ pub(crate) struct ContextAnchor {
 
 /// 摘要流式计数的事件节流间隔。
 const COMPACTION_EMIT_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+static STEER_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 一条还没送达的插话（[`Sessions::push_steer`]）。
+#[derive(Clone, Debug)]
+pub struct Steer {
+    pub id: String,
+    pub text: String,
+    pub images: Vec<cordis_base::types::UserImage>,
+}
 
 /// A previous conversation, kept so `/resume` can restore it.
 #[derive(Clone, Debug)]
@@ -126,6 +136,9 @@ pub struct Sessions {
     display_title: Arc<Mutex<Option<String>>>,
     /// User follow-up prompts waiting in the session actor (not GoalSummary).
     queued_followups: Arc<AtomicUsize>,
+    /// 插话收件箱：一轮进行中送来的用户消息，循环在下一个步骤边界取走
+    /// （[`Self::take_steers`]），落成 [`STEER_REMINDER`] + `User`。
+    steers: Arc<Mutex<VecDeque<Steer>>>,
     /// One-shot wire addons paired with a specific next user bubble
     /// (display `/loop …` vs `loop_schedule_instruction`, or a scheduled-fire
     /// reminder). Hidden from the pager as [`LogEvent::SystemReminder`].
@@ -304,6 +317,7 @@ impl Sessions {
             compaction_emitted: Arc::new(Mutex::new(None)),
             display_title: Arc::new(Mutex::new(None)),
             queued_followups: Arc::new(AtomicUsize::new(0)),
+            steers: Arc::new(Mutex::new(VecDeque::new())),
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
             disk_cwd: Arc::new(Mutex::new(None)),
             plan_cwd: Arc::new(Mutex::new(None)),
@@ -526,6 +540,51 @@ impl Sessions {
 
     pub fn has_queued_followups(&self) -> bool {
         self.queued_followups.load(Ordering::Relaxed) > 0
+    }
+
+    /// 收一条插话，返回它的 id（排队面板里撤回 / 列出用）。只进收件箱，不碰
+    /// 日志：送达由循环在步骤边界做（[`Self::append_steer`]）。
+    pub fn push_steer(&self, text: String, images: Vec<cordis_base::types::UserImage>) -> String {
+        let id = format!("steer-{}", STEER_SEQ.fetch_add(1, Ordering::Relaxed));
+        self.steers.lock().unwrap().push_back(Steer {
+            id: id.clone(),
+            text,
+            images,
+        });
+        id
+    }
+
+    pub fn has_steers(&self) -> bool {
+        !self.steers.lock().unwrap().is_empty()
+    }
+
+    /// 还没送达的插话（按到达顺序），给排队面板列出来。
+    pub fn pending_steers(&self) -> Vec<Steer> {
+        self.steers.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// 全部取走：循环送达，或这一轮已经结束时由会话 actor 转成排队的消息。
+    pub fn take_steers(&self) -> Vec<Steer> {
+        self.steers.lock().unwrap().drain(..).collect()
+    }
+
+    /// 撤回一条还没送达的插话。
+    pub fn take_steer(&self, id: &str) -> Option<Steer> {
+        let mut steers = self.steers.lock().unwrap();
+        let at = steers.iter().position(|s| s.id == id)?;
+        steers.remove(at)
+    }
+
+    /// 把一条插话落进日志：[`STEER_REMINDER`] 紧跟着那条 `User`（带它自己的图）。
+    /// 只在步骤边界调——不能夹在 tool_calls 和它们的结果之间。
+    ///
+    /// 图片槽（[`Self::queue_user_images`]）可能正被一条排队的消息占着：借用完
+    /// 原样放回去，不让插话把别人的图带走。
+    pub fn append_steer(&self, steer: Steer) {
+        self.append(LogEvent::SystemReminder(STEER_REMINDER.into()));
+        let held = std::mem::replace(&mut *self.pending_images.lock().unwrap(), steer.images);
+        self.append(LogEvent::User(steer.text));
+        *self.pending_images.lock().unwrap() = held;
     }
 
     /// Monotonic generation for scrollback / layout cache invalidation.
@@ -1107,6 +1166,7 @@ impl Sessions {
             LogEvent::User(t) => t.clone(),
             _ => return None,
         };
+        let start = with_steer_note(&events, start);
         events.truncate(start);
         self.times.lock().unwrap().truncate(start);
         let leftover = events.last().cloned();
@@ -1156,6 +1216,7 @@ impl Sessions {
             LogEvent::User(t) => t.clone(),
             _ => return None,
         };
+        let start = with_steer_note(&events, start);
         let mut times = self.times.lock().unwrap();
         events.truncate(start);
         times.truncate(start);
@@ -1189,6 +1250,7 @@ impl Sessions {
     }
 
     pub fn clear(&self) {
+        self.steers.lock().unwrap().clear();
         self.events.lock().unwrap().clear();
         self.times.lock().unwrap().clear();
         *self.turn_started.lock().unwrap() = None;
@@ -1762,6 +1824,15 @@ impl Sessions {
             sampling: self.sampling_snapshot(),
         };
         let _ = crate::session::persist::save(&item, &cwd);
+    }
+}
+
+/// 撤回第 `start` 条（一条 `User`）时连带它前面那条插话提示：提示只为那条
+/// 消息而写，留着就成了一句没有下文的话。
+fn with_steer_note(events: &[LogEvent], start: usize) -> usize {
+    match start.checked_sub(1).map(|i| &events[i]) {
+        Some(LogEvent::SystemReminder(t)) if t == STEER_REMINDER => start - 1,
+        _ => start,
     }
 }
 

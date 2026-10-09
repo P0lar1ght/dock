@@ -102,6 +102,18 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
                 unbound_image_notice,
             }]
         }
+        Action::SteerPrompt(send) => {
+            let unbound_image_notice = send.unbound_image_notice;
+            let text = send.text.trim().to_string();
+            prompt.clear();
+            if text.is_empty() {
+                return Vec::new();
+            }
+            vec![Effect::SteerPrompt {
+                text,
+                unbound_image_notice,
+            }]
+        }
         Action::InsertChar(c) => {
             prompt.push(c);
             Vec::new()

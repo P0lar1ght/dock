@@ -223,7 +223,7 @@ fn verb_ok(name: &str, content: &str, pending: bool) -> (&'static str, Option<&'
             if content.contains("delivered to running agent") {
                 ("已送达", Some("运行中，下一步读到"))
             } else if content.contains("urgent message delivered to running") {
-                ("已插话", Some("运行中，本轮生效"))
+                ("已插话", Some("运行中，下一步并入本轮"))
             } else if content.contains("queued message accepted") {
                 ("已排队", Some("运行中，下一步读到"))
             } else if content.contains("delivered to idle") {
@@ -668,7 +668,7 @@ mod tests {
         let steer = lines(
             "send_message",
             r#"{"subagent_id":"kid-1","message":"改方向"}"#,
-            "urgent message delivered to running subagent kid-1; it will steer on the current turn",
+            "urgent message delivered to running subagent kid-1; it joins the current turn at the next step",
             &[snap("kid-1", "观察")],
             &[],
             &theme,
@@ -676,7 +676,7 @@ mod tests {
         );
         let text = flat(&steer);
         assert!(text.contains("已插话"), "{text}");
-        assert!(text.contains("运行中，本轮生效"), "{text}");
+        assert!(text.contains("运行中，下一步并入本轮"), "{text}");
 
         let start = lines(
             "send_message",

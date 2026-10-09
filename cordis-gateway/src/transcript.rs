@@ -10,7 +10,7 @@ use cordis_spine::{
     Ask, CompactProgress, CompactStatus, ElicitPrompt, LogEvent, PermissionOptionKind,
     PermissionPrompt, PlanApprovalPrompt, PlanDecision, Sessions, TurnEndStatus, UserImage,
     AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
-    PERMISSION_DENIED_TOOL_RESULT, ROOT_IDENTITY,
+    PERMISSION_DENIED_TOOL_RESULT, ROOT_IDENTITY, STEER_REMINDER,
 };
 
 use crate::protocol::LIVE_THREAD_ID;
@@ -93,6 +93,8 @@ struct Projector {
     seen_tools: HashSet<String>,
     pending_tools: HashSet<String>,
     turn_open: bool,
+    /// 刚见过插话提示（[`STEER_REMINDER`]）：下一条 `User` 是插话。
+    steer_note: bool,
     /// 这一轮最后一次采样的 `LlmOutput::error`。只给没有 `turn-end` 行的旧会话
     /// 回放用（[`Transcript::close_legacy_turn`]）；新记录里 Dock 已经把它算进
     /// `TurnEnd` 的状态了。
@@ -209,7 +211,10 @@ impl Transcript {
         let ms = |i: usize| times.get(i).map(|t| unix_ms(*t));
         let mut user_i = 0usize;
         for (i, event) in events.iter().enumerate() {
-            if matches!(event, LogEvent::User(_)) && i > 0 {
+            // 插话不是新的一轮开头：前一轮由它自己收（带 `steered`），和实时一致。
+            let steered = i > 0
+                && matches!(&events[i - 1], LogEvent::SystemReminder(t) if t == STEER_REMINDER);
+            if matches!(event, LogEvent::User(_)) && i > 0 && !steered {
                 self.clock = ms(i - 1);
                 self.close_legacy_turn();
             }
@@ -236,7 +241,18 @@ impl Transcript {
     pub fn ingest_log_with(&mut self, event: LogEvent, user_attachments: &[Value]) {
         match event {
             LogEvent::User(text) => {
-                self.complete_turn_if_open();
+                // 插话在一轮进行中送达：投影上仍从它开新的一轮（气泡排在它之前的
+                // 工作后面），前一段以 `steered` 收尾，客户端别把它当成真的结束。
+                let steered = std::mem::take(&mut self.projector.steer_note);
+                if steered && self.projector.turn_open {
+                    self.projector.turn_open = false;
+                    self.push(
+                        "turn/completed",
+                        json!({ "status": "completed", "steered": true }),
+                    );
+                } else {
+                    self.complete_turn_if_open();
+                }
                 self.projector.turn_n += 1;
                 self.projector.turn_id = format!("t{}", self.projector.turn_n);
                 self.projector.last_text.clear();
@@ -249,6 +265,9 @@ impl Transcript {
                 self.projector.user_turns.push(turn_id.clone());
                 self.push("turn/started", json!({ "status": "running" }));
                 let mut payload = json!({ "content": text, "turnId": turn_id });
+                if steered {
+                    payload["steered"] = Value::Bool(true);
+                }
                 if !user_attachments.is_empty() {
                     payload["attachments"] = Value::Array(user_attachments.to_vec());
                 }
@@ -369,6 +388,9 @@ impl Transcript {
             // 子代理在跑时，父级发来的话在下一步开头以 system-reminder 进它的会话
             // （`Agent <parent> sent a message:`）。主会话的 reminder 不投影；子代理的
             // 这一种是对话的一部分，投成一条来自父级的消息。
+            LogEvent::SystemReminder(text) if text == STEER_REMINDER => {
+                self.projector.steer_note = true;
+            }
             LogEvent::SystemReminder(text) if self.agent.is_some() => {
                 for message in parent_messages(&text) {
                     if !self.projector.turn_open {
@@ -881,6 +903,58 @@ mod tests {
 
     fn methods(t: &Transcript) -> Vec<String> {
         t.history_since(0).into_iter().map(|e| e.method).collect()
+    }
+
+    /// 插话：投影上从它开新的一轮，前一段以 `steered` 收尾（客户端别当成真的
+    /// 结束），用户消息带 `steered`。实时和回放（重开会话、关着的会话）一致。
+    #[test]
+    fn a_steered_user_message_is_flagged_live_and_on_replay() {
+        let events = vec![
+            LogEvent::User("先做 A".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "在做 A".into(),
+                ..Default::default()
+            }),
+            LogEvent::SystemReminder(STEER_REMINDER.into()),
+            LogEvent::User("改做 B".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "好，改做 B".into(),
+                ..Default::default()
+            }),
+            LogEvent::TurnEnd(TurnEndStatus::Completed),
+        ];
+        let summary = |t: &Transcript| -> Vec<(String, Value)> {
+            t.history_since(0)
+                .into_iter()
+                .filter(|e| e.method == "turn/completed" || e.method == "item/user_message")
+                .map(|e| {
+                    let flag = e.payload.get("steered").cloned().unwrap_or(Value::Null);
+                    (e.method, flag)
+                })
+                .collect()
+        };
+        let want = vec![
+            ("item/user_message".to_string(), Value::Null),
+            ("turn/completed".to_string(), Value::Bool(true)),
+            ("item/user_message".to_string(), Value::Bool(true)),
+            ("turn/completed".to_string(), Value::Null),
+        ];
+
+        let mut live = Transcript::new();
+        for event in &events {
+            match event {
+                LogEvent::TurnEnd(status) => live.turn_ended(status),
+                other => live.ingest_log(other.clone()),
+            }
+        }
+        assert_eq!(summary(&live), want, "实时：{:?}", methods(&live));
+
+        let times: Vec<_> = (0..events.len() as u64)
+            .map(|i| UNIX_EPOCH + std::time::Duration::from_secs(100 + i))
+            .collect();
+        let mut replayed = Transcript::new();
+        replayed.replay(&events, &times, &[]);
+        assert_eq!(summary(&replayed), want, "回放：{:?}", methods(&replayed));
     }
 
     /// 子代理发的权限请求带它的 agent id，主会话发的是 null（客户端据此标「来自子代理」）。

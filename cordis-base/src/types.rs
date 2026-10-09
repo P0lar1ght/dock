@@ -9,6 +9,11 @@ pub const INTERRUPTED_TOOL_RESULT: &str = "已中断。";
 /// 和普通失败分开（网关报 `denied`）。
 pub const PERMISSION_DENIED_TOOL_RESULT: &str = "权限被拒绝";
 
+/// 插话（steer）落进日志时，紧挨在那条 `User` 之前的提示：这条用户消息是在一轮
+/// 进行中送达的，不是新的一轮。模型据此先回应、再接着做没做完的事；网关据此把
+/// 那条用户消息标成 `steered`。逐字比较，别改成带变量的文本。
+pub const STEER_REMINDER: &str = "<system-reminder>\n用户在你工作期间发来了下面这条消息（插话，不是新的一轮）。先回应它；它没有改变的部分，继续完成此前未完成的工作。\n</system-reminder>";
+
 /// Visible compact marker. The pager keeps older bubbles; this assistant
 /// line is appended so the user sees that a compact ran. The model history
 /// carries the same bubble plus a hidden continuation summary.

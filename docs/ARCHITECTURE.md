@@ -167,7 +167,7 @@ elicitation 盖了来源页，也只在那一页上显示。同一台 MCP 服务
 
 ## 一轮怎么跑
 
-TUI 从不持有循环：按键映射成 `SessionCommand` 交给 `session_actor`，actor 管队列（提交 / 立即发送 / 提前 / GoalSummary 续跑 / 子代理 mailbox 续跑），每次取一条调 `agent-loop` 的 `LoopHandle`。默认 driver 是 `GrokStep`：
+TUI 从不持有循环：按键映射成 `SessionCommand` 交给 `session_actor`，actor 管队列（提交 / 立即发送 / 提前 / 插话 / GoalSummary 续跑 / 子代理 mailbox 续跑），每次取一条调 `agent-loop` 的 `LoopHandle`。默认 driver 是 `GrokStep`：
 
 ```
 agent/pre-step               每轮开始，一次
@@ -181,6 +181,8 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 ```
 
 安全上限 256 步。换 driver 只换 `agent-loop` 插件，不动 actor。
+
+**插话在步骤边界送达，不取消。** 一轮在跑时再发一条有三种意思：排队（actor 队列，轮后单独成一轮）、插话（`SessionCommand::Steer` → `Sessions::push_steer` + `TurnControl::request_yield`）、停止并发送（`send_now`：取消 + 排到最前）。插话进的是会话自己的收件箱，循环在每一步开头（和信箱同一处，绝不夹在 tool_calls 与结果之间）取走，落成 `STEER_REMINDER` + `User`；模型要收尾时收件箱还有东西就再采一步；这一轮已经收尾才到的，actor 转成排在最前的消息。`request_yield` 是软信号：前台 bash 宽限 2 秒后转后台让路，别的都照常跑完。子代理用同一个收件箱（用户发给在跑的子代理的话）。
 
 **开轮前的 handler 自己 append。** `agent/pre-step` 和后两条不一样：handler 直接往 `Sessions` 写（目标指令、技能正文、MCP 目录变更通告、计划提醒），而它能拿到的 `Sessions` 只有注册时捕获的那一份 —— 主会话。子代理开轮同样会跑这条链，所以凡是要写会话、消费一次性状态、或推进用户自己状态的 handler，都得先看载荷里的 `identity`（`PreStep::is_main_session()`）。六个内建 handler 都这么做。
 

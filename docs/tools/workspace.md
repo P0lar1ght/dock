@@ -108,6 +108,8 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 - **取消（用户按 Esc）仍然是 kill**，不是转后台——那是明确要它停（`bash_cancel_still_kills`）。
 - **没挂 `"jobs"` 服务时（单测、精简装配）退回 kill + 报错**：那时的任务表是本次调用临时起的本地表，随调用一起析构，发出去的 `job_id` 没人查得到。宁可诚实地失败，也不发空头支票（`bash_timeout_without_a_jobs_service_still_kills`）。
 
+**插话在等 = 同样转后台。** 用户在一轮进行中插话（`TurnControl::request_yield`）时，前台命令再给 2 秒（`STEER_GRACE`），还没跑完就走同一条转后台的路，抬头写「用户发来了新消息，已运行 …」，让插话尽快在下一个步骤边界送达。2 秒内跑完的照常返回；没有 `"jobs"` 服务时不转、等它跑完（`bash_yields_to_a_steer_by_backgrounding` / `bash_short_command_finishes_despite_a_steer`）。
+
 已知代价：命令不再被超时兜住，一条跑飞的命令会一直跑到会话结束（和 `is_background: true` 的任务同一处境，目前都没有后台兜底上限）。`kill_task` 是唯一的收口。
 
 「取消带回已产出输出」不变。

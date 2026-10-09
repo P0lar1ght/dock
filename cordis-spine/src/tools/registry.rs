@@ -606,6 +606,10 @@ impl Tools {
                     exec.get::<TurnControl>(TURN)
                         .is_some_and(|t| t.is_cancelled())
                 },
+                || {
+                    exec.get::<TurnControl>(TURN)
+                        .is_some_and(|t| t.yield_requested())
+                },
                 jobs.as_deref(),
             )
             .await;

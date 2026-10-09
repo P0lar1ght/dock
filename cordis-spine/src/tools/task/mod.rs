@@ -20,7 +20,6 @@ pub mod coordinator;
 mod coordinator_state;
 mod execute;
 mod format;
-mod interjection;
 mod runner;
 mod store;
 mod tool_error;

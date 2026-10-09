@@ -70,6 +70,7 @@ pub(super) async fn run_session(
                         &mut queue,
                         &queued,
                         &queued_prompts,
+                        true,
                     )
                     .await
                     {
@@ -78,6 +79,7 @@ pub(super) async fn run_session(
                             return;
                         }
                         Drive::Done(result) => {
+                            requeue_stranded_steers(&ctx, &mut queue, &queued, &queued_prompts);
                             maybe_queue_goal_summary(
                                 &ctx,
                                 &result,
@@ -101,6 +103,7 @@ pub(super) async fn run_session(
                         &mut queue,
                         &queued,
                         &queued_prompts,
+                        true,
                     )
                     .await
                     {
@@ -109,6 +112,7 @@ pub(super) async fn run_session(
                             return;
                         }
                         Drive::Done(result) => {
+                            requeue_stranded_steers(&ctx, &mut queue, &queued, &queued_prompts);
                             maybe_queue_goal_summary(
                                 &ctx,
                                 &result,
@@ -132,6 +136,7 @@ pub(super) async fn run_session(
                         &mut queue,
                         &queued,
                         &queued_prompts,
+                        false,
                     )
                     .await
                     {
@@ -140,6 +145,7 @@ pub(super) async fn run_session(
                             return;
                         }
                         Drive::Done(result) => {
+                            requeue_stranded_steers(&ctx, &mut queue, &queued, &queued_prompts);
                             let _ = pending.respond_to.send(result);
                         }
                     }
@@ -167,11 +173,13 @@ pub(super) async fn run_session(
                 &mut queue,
                 &queued,
                 &queued_prompts,
+                true,
             )
             .await
             {
                 Drive::Shutdown => return,
                 Drive::Done(result) => {
+                    requeue_stranded_steers(&ctx, &mut queue, &queued, &queued_prompts);
                     maybe_queue_goal_summary(&ctx, &result, &mut queue, &queued, &queued_prompts);
                     continue;
                 }
@@ -189,7 +197,7 @@ pub(super) async fn run_session(
         tokio::pin!(wait_wake);
         tokio::select! {
             cmd = cmd_rx.recv() => {
-                if apply_cmd(&ctx, cmd, &mut queue, &queued, &queued_prompts) {
+                if apply_cmd(&ctx, cmd, &mut queue, &queued, &queued_prompts, false) {
                     return;
                 }
             }
@@ -209,7 +217,8 @@ fn drain_cmds(
     loop {
         match cmd_rx.try_recv() {
             Ok(cmd) => {
-                if apply_cmd(ctx, Some(cmd), queue, queued, snaps) {
+                // 只在没有任务在跑时调：插话没有可并的采样。
+                if apply_cmd(ctx, Some(cmd), queue, queued, snaps, false) {
                     return true;
                 }
             }
@@ -247,14 +256,18 @@ fn is_prompt(pending: &Pending) -> bool {
     matches!(pending.job, Job::Prompt(_))
 }
 
-fn promote_in_queue(queue: &mut VecDeque<Pending>, id: Option<&str>) -> bool {
-    let idx = match id {
+/// 指定 id 的那条排队消息；`None` = 最早那条。
+fn queued_prompt_at(queue: &VecDeque<Pending>, id: Option<&str>) -> Option<usize> {
+    match id {
         Some(want) => queue
             .iter()
             .position(|p| is_prompt(p) && p.prompt_id == want),
         None => queue.iter().position(is_prompt),
-    };
-    let Some(idx) = idx else {
+    }
+}
+
+fn promote_in_queue(queue: &mut VecDeque<Pending>, id: Option<&str>) -> bool {
+    let Some(idx) = queued_prompt_at(queue, id) else {
         return false;
     };
     if let Some(item) = queue.remove(idx) {
@@ -273,6 +286,65 @@ fn take_from_queue(queue: &mut VecDeque<Pending>, id: Option<&str>) -> Option<Pe
         None => queue.iter().rposition(is_prompt),
     }?;
     queue.remove(idx)
+}
+
+/// 插话没有可并的采样：排到最前，作为下一条消息单独成一轮。图片放进图片槽，
+/// 由那一轮的 `User` 带走。
+fn queue_front_prompt(
+    ctx: &Context,
+    queue: &mut VecDeque<Pending>,
+    text: String,
+    images: Vec<cordis_spine::UserImage>,
+) {
+    if !images.is_empty() {
+        if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+            sessions.queue_user_images(images);
+        }
+    }
+    let (respond_to, _) = oneshot::channel();
+    queue.push_front(Pending {
+        prompt_id: format!(
+            "prompt-steer-{}",
+            STEER_FALLBACK_SEQ.fetch_add(1, Ordering::Relaxed)
+        ),
+        job: Job::Prompt(text),
+        respond_to,
+    });
+    open_subagent_admission(ctx);
+}
+
+static STEER_FALLBACK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 一轮已经收尾才到的插话（循环最后一次取收件箱之后）：转成排在最前的消息，
+/// 按到达顺序跑，不能丢。
+fn requeue_stranded_steers(
+    ctx: &Context,
+    queue: &mut VecDeque<Pending>,
+    queued: &AtomicUsize,
+    snaps: &Mutex<Vec<QueuedItem>>,
+) {
+    let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
+        return;
+    };
+    let stranded = sessions.take_steers();
+    if stranded.is_empty() {
+        return;
+    }
+    for steer in stranded.into_iter().rev() {
+        queue_front_prompt(ctx, queue, steer.text, steer.images);
+    }
+    sync_snaps(ctx, queue, queued, snaps);
+}
+
+/// 排队的消息改插话时带上它的图。排队时图片放在会话的图片槽里（只有一格），
+/// 正文里的 `[Image #N]` 标记说明这条消息带图。
+fn take_images_for(ctx: &Context, text: &str) -> Vec<cordis_spine::UserImage> {
+    if !text.contains("[Image #") {
+        return Vec::new();
+    }
+    ctx.get::<Sessions>(SESSIONS)
+        .map(|s| s.take_pending_images())
+        .unwrap_or_default()
 }
 
 fn request_cancel(ctx: &Context) {
@@ -302,13 +374,15 @@ fn open_subagent_admission(ctx: &Context) {
     }
 }
 
-/// Returns true on shutdown.
+/// Returns true on shutdown. `steerable`：正在跑一个会采样的任务（用户轮、
+/// 目标收尾、信箱续跑），插话可以交给它在步骤边界送达。
 fn apply_cmd(
     ctx: &Context,
     cmd: Option<SessionCommand>,
     queue: &mut VecDeque<Pending>,
     queued: &AtomicUsize,
     snaps: &Mutex<Vec<QueuedItem>>,
+    steerable: bool,
 ) -> bool {
     match cmd {
         Some(SessionCommand::Shutdown) | None => true,
@@ -349,6 +423,38 @@ fn apply_cmd(
             sync_snaps(ctx, queue, queued, snaps);
             false
         }
+        Some(SessionCommand::Steer { text, images }) => {
+            if steerable {
+                cordis_spine::steer(ctx, text, images);
+            } else {
+                queue_front_prompt(ctx, queue, text, images);
+                sync_snaps(ctx, queue, queued, snaps);
+            }
+            false
+        }
+        Some(SessionCommand::SteerQueued { id }) => {
+            if steerable {
+                // 不用 `take_from_queue`：它的 `None` 是「最后一条」（收回输入框用），
+                // 这里的 `None` 是最早那条。
+                let taken = queued_prompt_at(queue, id.as_deref()).and_then(|i| queue.remove(i));
+                if let Some(Pending {
+                    job: Job::Prompt(text),
+                    respond_to,
+                    ..
+                }) = taken
+                {
+                    let images = take_images_for(ctx, &text);
+                    cordis_spine::steer(ctx, text, images);
+                    // 这条不再单独成一轮：它的结果并在正在跑的那一轮里。
+                    let _ = respond_to.send(Ok(String::new()));
+                }
+            } else {
+                // 没有可并的采样：只挪到最前，不取消正在跑的压缩。
+                promote_in_queue(queue, id.as_deref());
+            }
+            sync_snaps(ctx, queue, queued, snaps);
+            false
+        }
         Some(SessionCommand::Promote { id }) => {
             promote_in_queue(queue, id.as_deref());
             sync_snaps(ctx, queue, queued, snaps);
@@ -375,6 +481,7 @@ async fn drive_job<F>(
     queue: &mut VecDeque<Pending>,
     queued: &AtomicUsize,
     snaps: &Mutex<Vec<QueuedItem>>,
+    steerable: bool,
 ) -> Drive
 where
     F: Future<Output = PromptTurnResult>,
@@ -396,7 +503,7 @@ where
                     request_cancel(ctx);
                 }
                 other => {
-                    apply_cmd(ctx, other, queue, queued, snaps);
+                    apply_cmd(ctx, other, queue, queued, snaps, steerable);
                 }
             }
         }
@@ -486,7 +593,8 @@ mod tests {
     use cordis_spine::{
         agent_loop, install_without_llm, tool_goal, tool_task, turn, AgentPresets, BoxFuture, Goal,
         Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions, StreamDelta, Subagents,
-        ToolCall, Tools, AGENT_PRESETS, GOAL, LLM, SESSIONS, SUBAGENTS, TOOLS,
+        ToolCall, Tools, TurnControl, TurnEndStatus, AGENT_PRESETS, GOAL, LLM, SESSIONS, SUBAGENTS,
+        TOOLS, TURN,
     };
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
@@ -523,6 +631,239 @@ mod tests {
                 }
             })
         }
+    }
+
+    /// 一页的会话 actor + 一个第一次采样会停住、等放行的模型。
+    async fn held_session() -> (Context, SessionHandle, Arc<Notify>, Arc<Notify>) {
+        let root = Context::new();
+        install_without_llm(&root).await.unwrap();
+        root.plugin(turn(), ()).unwrap().wait().await.unwrap();
+        root.plugin(tool_task(), cordis_spine::TaskConfig::default())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        root.provide(
+            LLM,
+            Llm::from_sampler(
+                root.clone(),
+                Arc::new(HoldThenText {
+                    started: started.clone(),
+                    release: release.clone(),
+                    holding: Arc::new(AtomicBool::new(true)),
+                }),
+            ),
+        )
+        .unwrap();
+        root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let current_prompt_id = Arc::new(Mutex::new(None));
+        let queued = Arc::new(AtomicUsize::new(0));
+        let queued_prompts = Arc::new(Mutex::new(Vec::new()));
+        let handle = SessionHandle {
+            cmd_tx,
+            current_prompt_id: current_prompt_id.clone(),
+            queued: queued.clone(),
+            queued_prompts: queued_prompts.clone(),
+        };
+        tokio::spawn(run_session(
+            root.clone(),
+            cmd_rx,
+            current_prompt_id,
+            queued,
+            queued_prompts,
+        ));
+        (root, handle, started, release)
+    }
+
+    async fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !f() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("等不到：{what}"));
+    }
+
+    fn turn_ends(events: &[LogEvent]) -> Vec<TurnEndStatus> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::TurnEnd(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 插话不取消正在跑的这一轮：采样照常收完，插话在下一个步骤边界并进这一轮，
+    /// 整个过程只有一轮、以完成收尾。旧实现（`turn/steer` = send_now）会把第一轮
+    /// 停掉（`TurnEnd(Cancelled)`），插话另起一轮。
+    #[tokio::test]
+    async fn steer_joins_the_running_turn_instead_of_cancelling_it() {
+        let (root, handle, started, release) = held_session().await;
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        handle.steer("改一下方向", Vec::new());
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        wait_until("插话进收件箱", || sessions.has_steers()).await;
+        assert!(handle.working(), "插话不该让这一轮停下");
+        release.notify_waiters();
+        wait_until("这一轮收尾", || {
+            !turn_ends(&sessions.events()).is_empty()
+        })
+        .await;
+        let events = sessions.events();
+        assert_eq!(
+            turn_ends(&events),
+            vec![TurnEndStatus::Completed],
+            "{events:?}"
+        );
+        let at = events
+            .iter()
+            .position(|e| matches!(e, LogEvent::User(t) if t == "改一下方向"))
+            .expect("插话要落进日志");
+        assert!(
+            matches!(&events[at - 1], LogEvent::SystemReminder(t) if t == cordis_spine::STEER_REMINDER),
+            "插话前要有提示：{events:?}"
+        );
+        assert!(
+            matches!(&events[at - 2], LogEvent::LlmStream(o) if o.text == "mailbox"),
+            "被插话的那次采样要完整保留：{events:?}"
+        );
+        assert!(
+            !events[at..].iter().any(|e| matches!(e, LogEvent::PreStep)),
+            "插话不是新的一轮：{events:?}"
+        );
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 排队的消息改插话：从队列里拿出来，并进正在跑的这一轮。
+    #[tokio::test]
+    async fn a_queued_prompt_can_become_a_steer() {
+        let (root, handle, started, release) = held_session().await;
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        handle.submit("later", false);
+        wait_until("排上队", || handle.queued_prompts().len() == 1).await;
+        let id = handle.queued_prompts()[0].id.clone();
+        handle.steer_queued(Some(id));
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        wait_until("改成插话", || sessions.has_steers()).await;
+        assert!(handle.queued_prompts().is_empty(), "改插话后不该还在队里");
+        release.notify_waiters();
+        wait_until("这一轮收尾", || {
+            !turn_ends(&sessions.events()).is_empty()
+        })
+        .await;
+        let events = sessions.events();
+        assert_eq!(
+            turn_ends(&events),
+            vec![TurnEndStatus::Completed],
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LogEvent::User(t) if t == "later")),
+            "{events:?}"
+        );
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 不指定 id 时改插话的是**最早**那条（`SteerQueued { id: None }` 的约定，
+    /// 和不能插话时挪到最前的那条一致）。以前借用了「收回最后一条」的
+    /// `take_from_queue`，拿到的是最新排进去的。
+    #[tokio::test]
+    async fn steering_the_queue_without_an_id_takes_the_oldest() {
+        let (root, handle, started, release) = held_session().await;
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        handle.submit("older", false);
+        handle.submit("newer", false);
+        wait_until("排上两条", || handle.queued_prompts().len() == 2).await;
+        handle.steer_queued(None);
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        wait_until("改成插话", || sessions.has_steers()).await;
+        let steered: Vec<String> = sessions
+            .pending_steers()
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        let left: Vec<String> = handle
+            .queued_prompts()
+            .into_iter()
+            .map(|q| q.text)
+            .collect();
+        release.notify_waiters();
+        assert_eq!(steered, ["older"]);
+        assert_eq!(left, ["newer"]);
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 空闲时插话没有可并的一轮：当一条普通消息发（不带插话提示）。
+    #[tokio::test]
+    async fn an_idle_steer_runs_as_a_plain_prompt() {
+        let (root, handle, _started, release) = held_session().await;
+        handle.steer("hello", Vec::new());
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        wait_until("开一轮", || {
+            sessions
+                .events()
+                .iter()
+                .any(|e| matches!(e, LogEvent::User(t) if t == "hello"))
+        })
+        .await;
+        release.notify_waiters();
+        assert!(
+            !sessions.events().iter().any(
+                |e| matches!(e, LogEvent::SystemReminder(t) if t == cordis_spine::STEER_REMINDER)
+            ),
+            "{:?}",
+            sessions.events()
+        );
+        assert!(!sessions.has_steers());
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 这一轮已经收尾、收件箱里却还有插话（循环最后一次取之后才到）：转成
+    /// 排在最前的消息，不能丢。
+    #[tokio::test]
+    async fn a_steer_stranded_after_the_turn_runs_next() {
+        let (root, handle, started, release) = held_session().await;
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        // 绕过 actor 直接放进收件箱，再让这一轮在循环取它之前收尾：模拟「循环
+        // 最后一次检查之后才到」的那个窗口。
+        let turn = root.require::<TurnControl>(TURN).unwrap();
+        turn.cancel();
+        release.notify_waiters();
+        wait_until("第一轮收尾", || {
+            !turn_ends(&sessions.events()).is_empty()
+        })
+        .await;
+        sessions.push_steer("掉队的".into(), Vec::new());
+        // actor 在下一个任务结束时兜底：再发一条让它走一遍收尾。
+        handle.submit("second", false);
+        wait_until("掉队的插话被发出", || {
+            sessions
+                .events()
+                .iter()
+                .any(|e| matches!(e, LogEvent::User(t) if t == "掉队的"))
+        })
+        .await;
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
     }
 
     #[tokio::test]

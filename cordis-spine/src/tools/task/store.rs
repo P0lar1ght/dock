@@ -22,7 +22,6 @@ pub(super) struct ChildSlot {
     pub subagent_type: String,
     pub life: Mutex<SubagentLife>,
     pub cancelled: AtomicBool,
-    pub send_now: AtomicBool,
     pub interrupt: AtomicBool,
     pub(crate) dispose: AtomicBool,
     pub output: Mutex<String>,
@@ -265,7 +264,6 @@ impl ChildStore {
             subagent_type,
             life: Mutex::new(SubagentLife::Running),
             cancelled: AtomicBool::new(false),
-            send_now: AtomicBool::new(false),
             interrupt: AtomicBool::new(false),
             dispose: AtomicBool::new(false),
             output: Mutex::new(String::new()),
@@ -459,8 +457,9 @@ impl ChildStore {
         Ok(running)
     }
 
-    /// Returns `true` if the child was already running (send-now). `false`
-    /// means it was idle: life flips to running and the next turn starts.
+    /// 用户发给子代理的消息。返回 `true` = 孩子在跑：作为插话进它自己会话的
+    /// 收件箱，下一个步骤边界并进这一轮（不取消，长命令转后台让路）。`false` =
+    /// 它在 idle：life 翻成 running，下一轮开跑。
     pub fn push_urgent(&self, id: &str, message: String) -> Result<bool, String> {
         let slot = self
             .get(id)
@@ -469,14 +468,20 @@ impl ChildStore {
             return Err(format!("subagent {id} is done; message was not delivered"));
         }
         let running = slot.life() == SubagentLife::Running;
-        *slot.urgent.lock().unwrap() = Some(message);
-        if running {
-            slot.send_now.store(true, Ordering::Relaxed);
-            if let Some(turn) = slot.turn.lock().unwrap().as_ref() {
-                turn.cancel();
+        let sessions = slot.sessions.lock().unwrap().clone();
+        match sessions {
+            Some(sessions) if running => {
+                sessions.push_steer(message, Vec::new());
+                if let Some(turn) = slot.turn.lock().unwrap().as_ref() {
+                    turn.request_yield();
+                }
             }
-        } else {
-            slot.set_life(SubagentLife::Running);
+            _ => {
+                *slot.urgent.lock().unwrap() = Some(message);
+                if !running {
+                    slot.set_life(SubagentLife::Running);
+                }
+            }
         }
         notify_inbox(&slot);
         if !running {
@@ -495,8 +500,16 @@ impl ChildStore {
         (queued, urgent)
     }
 
+    /// 下一轮的开头：先是 idle 时收到的那条，再是这一轮收尾后才到、没赶上并进去
+    /// 的插话（在孩子自己会话的收件箱里，按到达顺序合成一条）。
     pub fn take_urgent(&self, id: &str) -> Option<String> {
-        self.get(id).and_then(|s| s.urgent.lock().unwrap().take())
+        let slot = self.get(id)?;
+        if let Some(u) = slot.urgent.lock().unwrap().take() {
+            return Some(u);
+        }
+        let sessions = slot.sessions.lock().unwrap().clone()?;
+        let stranded: Vec<String> = sessions.take_steers().into_iter().map(|s| s.text).collect();
+        (!stranded.is_empty()).then(|| stranded.join("\n\n"))
     }
 
     pub fn take_queued(&self, id: &str) -> Option<String> {

@@ -49,6 +49,16 @@ impl SessionPort for TestSession {
         });
     }
 
+    fn steer(&self, text: String, images: Vec<cordis_spine::UserImage>) {
+        if self.working() {
+            cordis_spine::steer(&self.ctx, text, images);
+        } else {
+            self.submit(text, false);
+        }
+    }
+
+    fn steer_queued(&self, _id: Option<String>) {}
+
     fn working(&self) -> bool {
         self.working.load(Ordering::SeqCst)
     }
@@ -509,6 +519,45 @@ async fn handshake_initialize_is_dock1() {
     assert!(companion.starts_with("[::1]:"), "{companion}");
     let workspaces = rpc.call("workspace/list", json!({})).await;
     assert_eq!(workspaces["result"]["defaultWorkspaceId"], "default");
+}
+
+/// 等着送达的插话列在 `turn/queue/list` 里（`kind: "steer"`，排在排队的前面），
+/// 送达前能用 `turn/queue/remove` 撤回。
+#[tokio::test]
+async fn pending_steers_are_listed_and_removable() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    let id = sessions.push_steer("改做 B".into(), Vec::new());
+
+    let queue = rpc
+        .call("turn/queue/list", json!({ "threadId": "live" }))
+        .await;
+    let items = queue["result"]["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 1, "{queue}");
+    assert_eq!(items[0]["id"], json!(id));
+    assert_eq!(items[0]["kind"], "steer");
+    assert_eq!(items[0]["message"], "改做 B");
+
+    let removed = rpc
+        .call(
+            "turn/queue/remove",
+            json!({ "threadId": "live", "queueId": id }),
+        )
+        .await;
+    assert_eq!(removed["result"]["removed"], true, "{removed}");
+    assert!(!sessions.has_steers(), "撤回后收件箱要空");
+
+    // 没有这条排队的消息：改插话回 false，不报错。
+    let steered = rpc
+        .call(
+            "turn/queue/steer",
+            json!({ "threadId": "live", "queueId": "prompt-x" }),
+        )
+        .await;
+    assert_eq!(steered["result"]["steered"], false, "{steered}");
 }
 
 #[tokio::test]
@@ -1408,6 +1457,7 @@ async fn thread_rewind_drops_that_message_and_everything_after() {
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
     let init = rpc.call("initialize", json!({})).await;
     assert_eq!(init["result"]["capabilities"]["threadRewind"], true);
+    assert_eq!(init["result"]["capabilities"]["turnSteer"], true);
     let _ = rpc
         .call("thread/subscribe", json!({ "threadId": "live" }))
         .await;

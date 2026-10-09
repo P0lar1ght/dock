@@ -11,7 +11,8 @@ use cordis_spine::{
     agent_loop, blocked_tool_message, install_without_llm, tool_task, turn, AgentPresets,
     BoxFuture, ChildLogEvent, Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions,
     StreamDelta, SubagentChanged, Subagents, TaskConfig, ToolCall, Tools, AGENT_LOOP,
-    AGENT_PRESETS, LLM, SESSIONS, SESSION_CHILD_EVENT, SUBAGENTS, SUBAGENT_CHANGED, TOOLS,
+    AGENT_PRESETS, LLM, SESSIONS, SESSION_CHILD_EVENT, STEER_REMINDER, SUBAGENTS, SUBAGENT_CHANGED,
+    TOOLS,
 };
 use tokio::sync::Notify;
 
@@ -350,8 +351,11 @@ async fn queued_waits_until_current_turn_ends() {
     assert!(!out.contains("主代理在你工作期间发来消息"), "{out}");
 }
 
+/// 用户在子代理跑着时发话：作为插话在下一个步骤边界并进这一轮，不取消、不
+/// 另起一轮。旧实现取消这一轮、再用「主代理在你工作期间发来消息」的信封重开
+/// （话是用户说的，信封还说错了人）。
 #[tokio::test(flavor = "multi_thread")]
-async fn urgent_while_running_injects_envelope_without_interrupt() {
+async fn urgent_while_running_joins_the_turn_as_a_steer() {
     let gate = Arc::new(Gate {
         started: AtomicBool::new(false),
         release: Notify::new(),
@@ -368,13 +372,30 @@ async fn urgent_while_running_injects_envelope_without_interrupt() {
     wait_running(&sub, &id).await;
     let ack = sub.send_message(&id, "STEER_NOW", true).unwrap();
     assert!(
-        ack.contains("urgent") && ack.contains("running") && ack.contains("steer"),
+        ack.contains("urgent") && ack.contains("running") && ack.contains("next step"),
         "{ack}"
     );
+    assert!(sub.snapshot(&id).unwrap().running(), "插话不该让这一轮停下");
     gate.release.notify_waiters();
     let out = wait_output_contains(&sub, &id, "STEER_NOW").await;
-    assert!(out.contains("主代理在你工作期间发来消息"), "{out}");
-    assert!(out.contains("<user_query>"), "{out}");
+    assert!(!out.contains("主代理在你工作期间发来消息"), "{out}");
+    let events = sub.events(&id);
+    let at = events
+        .iter()
+        .position(|e| matches!(e, LogEvent::User(t) if t == "STEER_NOW"))
+        .expect("插话要落进孩子的日志");
+    assert!(
+        matches!(&events[at - 1], LogEvent::SystemReminder(t) if t == STEER_REMINDER),
+        "{events:?}"
+    );
+    assert!(
+        matches!(&events[at - 2], LogEvent::LlmStream(o) if o.text.contains("FIRST_TURN")),
+        "被插话的那次采样要完整保留：{events:?}"
+    );
+    assert!(
+        !events[at..].iter().any(|e| matches!(e, LogEvent::PreStep)),
+        "插话不是新的一轮：{events:?}"
+    );
 }
 
 #[tokio::test]
