@@ -256,14 +256,18 @@ fn is_prompt(pending: &Pending) -> bool {
     matches!(pending.job, Job::Prompt(_))
 }
 
-fn promote_in_queue(queue: &mut VecDeque<Pending>, id: Option<&str>) -> bool {
-    let idx = match id {
+/// 指定 id 的那条排队消息；`None` = 最早那条。
+fn queued_prompt_at(queue: &VecDeque<Pending>, id: Option<&str>) -> Option<usize> {
+    match id {
         Some(want) => queue
             .iter()
             .position(|p| is_prompt(p) && p.prompt_id == want),
         None => queue.iter().position(is_prompt),
-    };
-    let Some(idx) = idx else {
+    }
+}
+
+fn promote_in_queue(queue: &mut VecDeque<Pending>, id: Option<&str>) -> bool {
+    let Some(idx) = queued_prompt_at(queue, id) else {
         return false;
     };
     if let Some(item) = queue.remove(idx) {
@@ -430,11 +434,14 @@ fn apply_cmd(
         }
         Some(SessionCommand::SteerQueued { id }) => {
             if steerable {
+                // 不用 `take_from_queue`：它的 `None` 是「最后一条」（收回输入框用），
+                // 这里的 `None` 是最早那条。
+                let taken = queued_prompt_at(queue, id.as_deref()).and_then(|i| queue.remove(i));
                 if let Some(Pending {
                     job: Job::Prompt(text),
                     respond_to,
                     ..
-                }) = take_from_queue(queue, id.as_deref())
+                }) = taken
                 {
                     let images = take_images_for(ctx, &text);
                     cordis_spine::steer(ctx, text, images);
@@ -767,6 +774,38 @@ mod tests {
                 .any(|e| matches!(e, LogEvent::User(t) if t == "later")),
             "{events:?}"
         );
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 不指定 id 时改插话的是**最早**那条（`SteerQueued { id: None }` 的约定，
+    /// 和不能插话时挪到最前的那条一致）。以前借用了「收回最后一条」的
+    /// `take_from_queue`，拿到的是最新排进去的。
+    #[tokio::test]
+    async fn steering_the_queue_without_an_id_takes_the_oldest() {
+        let (root, handle, started, release) = held_session().await;
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        handle.submit("older", false);
+        handle.submit("newer", false);
+        wait_until("排上两条", || handle.queued_prompts().len() == 2).await;
+        handle.steer_queued(None);
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        wait_until("改成插话", || sessions.has_steers()).await;
+        let steered: Vec<String> = sessions
+            .pending_steers()
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        let left: Vec<String> = handle
+            .queued_prompts()
+            .into_iter()
+            .map(|q| q.text)
+            .collect();
+        release.notify_waiters();
+        assert_eq!(steered, ["older"]);
+        assert_eq!(left, ["newer"]);
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
     }
 
