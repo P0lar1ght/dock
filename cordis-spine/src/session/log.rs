@@ -115,6 +115,9 @@ pub struct Sessions {
     /// Set by [`Self::rewind_inflight_user`] so a dying turn cannot append
     /// onto the previous assistant bubble (Grok cancel-rewind fence).
     rewound: Arc<AtomicBool>,
+    /// 最近一次撤回撤掉的只是一条插话：它并进的那一轮还在记录里，
+    /// [`Self::end_turn`] 要照常给那一轮收尾（栅栏只拦被撤插话的残余输出）。
+    steer_rewound: Arc<AtomicBool>,
     /// Bumped on every log mutation so the TUI can invalidate layout caches
     /// without cloning the event vector.
     events_rev: Arc<AtomicU64>,
@@ -308,6 +311,7 @@ impl Sessions {
             pending_images: Arc::new(Mutex::new(Vec::new())),
             user_images: Arc::new(Mutex::new(Vec::new())),
             rewound: Arc::new(AtomicBool::new(false)),
+            steer_rewound: Arc::new(AtomicBool::new(false)),
             events_rev: Arc::new(AtomicU64::new(0)),
             emit,
             identity: Arc::from(identity.into()),
@@ -692,6 +696,7 @@ impl Sessions {
         let is_user = matches!(event, LogEvent::User(_));
         if is_user {
             self.rewound.store(false, Ordering::Relaxed);
+            self.steer_rewound.store(false, Ordering::Relaxed);
             let imgs = std::mem::take(&mut *self.pending_images.lock().unwrap());
             self.user_images.lock().unwrap().push(imgs);
         } else if self.rewound.load(Ordering::Relaxed) {
@@ -777,9 +782,13 @@ impl Sessions {
             other => other,
         };
         let event = LogEvent::TurnEnd(status.clone());
-        if self.rewound.load(Ordering::Relaxed) {
+        let steer_only = self.steer_rewound.swap(false, Ordering::Relaxed);
+        if self.rewound.load(Ordering::Relaxed) && !steer_only {
             self.emit_session(event);
         } else {
+            // 撤掉的只是插话：循环已经停下，没有残余输出要拦了，撤掉栅栏给它并进的
+            // 那一轮收尾。
+            self.rewound.store(false, Ordering::Relaxed);
             if status == TurnEndStatus::Cancelled && self.turn_was_cut() {
                 self.append(LogEvent::SystemReminder(TURN_STOPPED_REMINDER.into()));
             }
@@ -794,14 +803,12 @@ impl Sessions {
         );
     }
 
-    /// 这一轮（最后一条用户消息之后）有没有模型说过的话或跑过的工具——被停止时
-    /// 才有东西可能被切断。只算模型和工具，不算循环自己落的提醒。
+    /// 这一轮（开这一轮的那条用户消息之后，插话不算开新的一轮）有没有模型说过的
+    /// 话或跑过的工具——被停止时才有东西可能被切断。只算模型和工具，不算循环自己
+    /// 落的提醒。
     fn turn_was_cut(&self) -> bool {
         let events = self.events.lock().unwrap();
-        let from = events
-            .iter()
-            .rposition(|e| matches!(e, LogEvent::User(_)))
-            .map_or(0, |i| i + 1);
+        let from = turn_opener(&events).map_or(0, |i| i + 1);
         events[from..].iter().any(|e| match e {
             LogEvent::ToolExecute { .. } => true,
             LogEvent::LlmStream(out) => {
@@ -1210,6 +1217,7 @@ impl Sessions {
         *self.context_anchor.lock().unwrap() = None;
         // 栅栏：万一取消掉的那一轮还有尾巴在路上，下一条用户消息之前不让它写进来。
         self.rewound.store(true, Ordering::Relaxed);
+        self.steer_rewound.store(false, Ordering::Relaxed);
         self.bump_events_rev();
         self.emit_session(leftover.unwrap_or(LogEvent::PreStep));
         self.persist_live();
@@ -1225,6 +1233,7 @@ impl Sessions {
         let mut events = self.events.lock().unwrap();
         let Some(start) = events.iter().rposition(|e| matches!(e, LogEvent::User(_))) else {
             self.rewound.store(true, Ordering::Relaxed);
+            self.steer_rewound.store(false, Ordering::Relaxed);
             *self.pending_call.lock().unwrap() = None;
             *self.turn_started.lock().unwrap() = None;
             return None;
@@ -1236,7 +1245,9 @@ impl Sessions {
             LogEvent::User(t) => t.clone(),
             _ => return None,
         };
-        let start = with_steer_note(&events, start);
+        let at = with_steer_note(&events, start);
+        let steer_only = at != start;
+        let start = at;
         let mut times = self.times.lock().unwrap();
         events.truncate(start);
         times.truncate(start);
@@ -1248,6 +1259,7 @@ impl Sessions {
         *self.pending_call.lock().unwrap() = None;
         *self.turn_started.lock().unwrap() = None;
         self.rewound.store(true, Ordering::Relaxed);
+        self.steer_rewound.store(steer_only, Ordering::Relaxed);
         {
             let n = self.events.lock().unwrap().len();
             let mut from = self.compact_from.lock().unwrap();
@@ -1854,6 +1866,14 @@ fn with_steer_note(events: &[LogEvent], start: usize) -> usize {
         Some(LogEvent::SystemReminder(t)) if t == STEER_REMINDER => start - 1,
         _ => start,
     }
+}
+
+/// 开这一轮的那条用户消息：最后一条不是插话的 `User`（插话紧跟在
+/// [`STEER_REMINDER`] 后面，并进的是已经在跑的那一轮）。
+fn turn_opener(events: &[LogEvent]) -> Option<usize> {
+    (0..events.len())
+        .rev()
+        .find(|&i| matches!(events[i], LogEvent::User(_)) && with_steer_note(events, i) == i)
 }
 
 fn inflight_has_output(tail: &[LogEvent]) -> bool {
@@ -2605,6 +2625,70 @@ mod tests {
                 &events[events.len() - 2..],
                 [LogEvent::SystemReminder(t), LogEvent::TurnEnd(TurnEndStatus::Cancelled)]
                     if t == TURN_STOPPED_REMINDER
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// 先有输出、再来一条插话、插话之后还没输出就被停：前半轮照样可能断在半截，
+    /// 要记停止提示。以前从最后一条 `User`（就是那条插话）往后找输出，什么都
+    /// 找不到，提示就漏了。
+    #[tokio::test]
+    async fn a_turn_stopped_right_after_a_steer_still_gets_the_stop_note() {
+        let sessions = Sessions::tab(Context::new().isolate("sessions"), 1);
+        sessions.append(LogEvent::User("先做 A".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "在做 A".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        let id = sessions.push_steer("改做 B".into(), Vec::new());
+        sessions.append_steer(sessions.take_steer(&id).unwrap());
+        sessions.end_turn(TurnEndStatus::Cancelled);
+
+        let events = sessions.events();
+        assert!(
+            matches!(
+                &events[events.len() - 2..],
+                [LogEvent::SystemReminder(t), LogEvent::TurnEnd(TurnEndStatus::Cancelled)]
+                    if t == TURN_STOPPED_REMINDER
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// 同上，但 Esc 把那条还没输出的插话收回了输入框：撤掉的只是插话，它并进的
+    /// 那一轮还在记录里，停止提示和 `TurnEnd` 照记；被撤的插话的半截回复仍然
+    /// 挡在栅栏外。以前整轮都被栅栏挡住，前半轮的输出后面什么都没有。
+    #[tokio::test]
+    async fn rewinding_a_steer_on_stop_still_closes_the_turn_it_joined() {
+        let sessions = Sessions::tab(Context::new().isolate("sessions"), 1);
+        sessions.append(LogEvent::User("先做 A".into()));
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "在做 A".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        let id = sessions.push_steer("改做 B".into(), Vec::new());
+        sessions.append_steer(sessions.take_steer(&id).unwrap());
+
+        let (text, _) = sessions.rewind_inflight_user().expect("插话还没输出，能撤");
+        assert_eq!(text, "改做 B");
+        // 被切断的那次采样（回应的是被撤掉的插话）随后才到：不能落进来。
+        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+            text: "好，改做".into(),
+            ..cordis_base::types::LlmOutput::default()
+        }));
+        sessions.end_turn(TurnEndStatus::Cancelled);
+
+        let events = sessions.events();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    LogEvent::User(_),
+                    LogEvent::LlmStream(o),
+                    LogEvent::SystemReminder(t),
+                    LogEvent::TurnEnd(TurnEndStatus::Cancelled),
+                ] if o.text == "在做 A" && t == TURN_STOPPED_REMINDER
             ),
             "{events:?}"
         );
