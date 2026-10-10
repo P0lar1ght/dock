@@ -687,12 +687,12 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], vision: boo
                 flush_pending_tool_images(&mut out, &mut pending_images, vision);
                 let images = user_images.get(user_i).cloned().unwrap_or_default();
                 user_i += 1;
-                out.push(user_message(text, &images));
+                out.push(user_message(text, &images, vision));
             }
             LogEvent::SystemReminder(text) => {
                 flush_unmatched_tools(&mut out, &mut pending);
                 flush_pending_tool_images(&mut out, &mut pending_images, vision);
-                out.push(user_message(text, &[]));
+                out.push(user_message(text, &[], vision));
             }
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() => {
                 flush_unmatched_tools(&mut out, &mut pending);
@@ -743,7 +743,10 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], vision: boo
             } => {
                 if let Some(i) = pending.iter().position(|p| p == id) {
                     pending.remove(i);
-                    out.push(tool_images::chat_tool_message(id, content));
+                    out.push(tool_images::chat_tool_message(
+                        id,
+                        &tool_images::degrade_tool_text(content, images, vision),
+                    ));
                     pending_images.extend(images.iter().cloned());
                     if pending.is_empty() {
                         flush_pending_tool_images(&mut out, &mut pending_images, vision);
@@ -787,9 +790,16 @@ fn flush_pending_tool_images(
     }
 }
 
-fn user_message(text: &str, images: &[UserImage]) -> Value {
+/// 纯文本模型（`vision == false`）不带图：图片字节一个都不发，正文后面补一句说明。
+fn user_message(text: &str, images: &[UserImage], vision: bool) -> Value {
     if images.is_empty() {
         return json!({"role": "user", "content": text});
+    }
+    if !vision {
+        return json!({
+            "role": "user",
+            "content": tool_images::with_text_only_note(text, images.len()),
+        });
     }
     use base64::Engine;
     let mut parts = Vec::new();
@@ -1588,7 +1598,100 @@ mod tests {
             .iter()
             .find(|m| m["role"] == "tool")
             .expect("tool msg");
-        assert_eq!(tool["content"], "saved shot\nImage content included inline");
+        // 图没送过去，正文就不能再说「图已内联」：模型会照着编一段它没看见的画面。
+        let text = tool["content"].as_str().unwrap();
+        assert!(text.starts_with("saved shot"), "{text}");
+        assert!(!text.contains("Image content included inline"), "{text}");
+        assert!(text.contains("纯文本") && text.contains("看不到"), "{text}");
+
+        // Messages / Responses 两条线同样不能绕过说明。
+        let params = WireParams {
+            images: false,
+            ..WireParams::resolve(None, None, None)
+        };
+        for (wire, body) in [
+            (
+                "messages",
+                serde_json::to_string(&messages::body("m", &req, &[], &params, false)).unwrap(),
+            ),
+            (
+                "responses",
+                serde_json::to_string(&responses::body("m", &req, &[], &params)).unwrap(),
+            ),
+        ] {
+            assert!(body.contains("saved shot"), "{wire}：{body}");
+            assert!(
+                !body.contains("Image content included inline"),
+                "{wire}：图没送过去就不能说已内联：{body}"
+            );
+            assert!(body.contains("纯文本"), "{wire}：{body}");
+        }
+    }
+
+    /// 纯文本模型（`supports_images = false`）：用户自己发的图也不能上线，正文里
+    /// 补一句说明。以前三条 wire 只给工具结果的图把关，用户的图照发——上游不认
+    /// 图就直接丢掉，模型只看到「[Image #1] 这个图片呢？」，于是猜。
+    #[test]
+    fn user_images_are_withheld_from_text_only_models() {
+        use std::sync::Arc;
+        let img = UserImage {
+            mime: "image/png".into(),
+            data: Arc::from(vec![1u8, 2, 3].into_boxed_slice()),
+            width: 1,
+            height: 1,
+        };
+        let req = PromptRequest {
+            system: "s".into(),
+            history: vec![LogEvent::User("[Image #1] 这张图是什么".into())],
+            tools: vec![],
+        };
+        let rows = vec![vec![img]];
+        let params = |images: bool| WireParams {
+            images,
+            ..WireParams::resolve(None, None, None)
+        };
+        let bodies = |vision: bool| {
+            vec![
+                (
+                    "chat",
+                    serde_json::to_string(&messages(&req, &rows, vision)).unwrap(),
+                ),
+                (
+                    "messages",
+                    serde_json::to_string(&messages::body(
+                        "m",
+                        &req,
+                        &rows,
+                        &params(vision),
+                        false,
+                    ))
+                    .unwrap(),
+                ),
+                (
+                    "responses",
+                    serde_json::to_string(&responses::body("m", &req, &rows, &params(vision)))
+                        .unwrap(),
+                ),
+            ]
+        };
+        for (wire, body) in bodies(false) {
+            assert!(
+                !body.contains("AQID"),
+                "{wire}：纯文本模型不该收到图片字节：{body}"
+            );
+            assert!(body.contains("这张图是什么"), "{wire}：正文要留着：{body}");
+            assert!(
+                body.contains("纯文本"),
+                "{wire}：要告诉模型图被拿掉了：{body}"
+            );
+        }
+        for (wire, body) in bodies(true) {
+            assert!(
+                body.contains("AQID"),
+                "{wire}：看得见图的模型照常带图：{body}"
+            );
+            assert!(!body.contains("纯文本"), "{wire}：{body}");
+        }
     }
 
     fn tiny_png() -> UserImage {

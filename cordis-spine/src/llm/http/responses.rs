@@ -69,7 +69,7 @@ pub fn input_items(
 ) -> Vec<Value> {
     let mut out = Vec::new();
     if !request.system.is_empty() {
-        out.push(easy_message("system", &request.system, &[]));
+        out.push(easy_message("system", &request.system, &[], vision));
     }
     let mut user_i = 0usize;
     let mut pending: Vec<String> = Vec::new();
@@ -79,17 +79,17 @@ pub fn input_items(
                 flush_unmatched(&mut out, &mut pending);
                 let images = user_images.get(user_i).cloned().unwrap_or_default();
                 user_i += 1;
-                out.push(easy_message("user", text, &images));
+                out.push(easy_message("user", text, &images, vision));
             }
             LogEvent::SystemReminder(text) => {
                 flush_unmatched(&mut out, &mut pending);
-                out.push(easy_message("user", text, &[]));
+                out.push(easy_message("user", text, &[], vision));
             }
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() => {
                 flush_unmatched(&mut out, &mut pending);
                 out.extend(replayable_reasoning(llm));
                 if !llm.text.is_empty() {
-                    out.push(easy_message("assistant", &llm.text, &[]));
+                    out.push(easy_message("assistant", &llm.text, &[], vision));
                 }
                 for c in &llm.tool_calls {
                     out.push(json!({
@@ -104,7 +104,7 @@ pub fn input_items(
             LogEvent::LlmStream(llm) if !llm.text.is_empty() => {
                 flush_unmatched(&mut out, &mut pending);
                 out.extend(replayable_reasoning(llm));
-                out.push(easy_message("assistant", &llm.text, &[]));
+                out.push(easy_message("assistant", &llm.text, &[], vision));
             }
             LogEvent::ToolExecute {
                 id,
@@ -175,12 +175,20 @@ fn flush_unmatched(out: &mut Vec<Value>, pending: &mut Vec<String>) {
     }
 }
 
-fn easy_message(role: &str, text: &str, images: &[UserImage]) -> Value {
+/// 纯文本模型（`vision == false`）不带图：图片字节一个都不发，正文后面补一句说明。
+fn easy_message(role: &str, text: &str, images: &[UserImage], vision: bool) -> Value {
     if images.is_empty() {
         return json!({
             "type": "message",
             "role": role,
             "content": text,
+        });
+    }
+    if !vision {
+        return json!({
+            "type": "message",
+            "role": role,
+            "content": super::tool_images::with_text_only_note(text, images.len()),
         });
     }
     use base64::Engine;

@@ -165,12 +165,12 @@ pub fn transcript(
                 flush_tool_results(&mut messages, &mut pending_results);
                 let images = user_images.get(user_i).cloned().unwrap_or_default();
                 user_i += 1;
-                messages.push(user_message(text, &images));
+                messages.push(user_message(text, &images, vision));
             }
             LogEvent::SystemReminder(text) => {
                 flush_unmatched(&mut pending_results, &mut pending);
                 flush_tool_results(&mut messages, &mut pending_results);
-                messages.push(user_message(text, &[]));
+                messages.push(user_message(text, &[], vision));
             }
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() || !llm.text.is_empty() => {
                 flush_tool_results(&mut messages, &mut pending_results);
@@ -261,9 +261,16 @@ pub fn sanitize_tool_id(id: &str) -> String {
         .collect()
 }
 
-fn user_message(text: &str, images: &[UserImage]) -> Value {
+/// 纯文本模型（`vision == false`）不带图：图片字节一个都不发，正文后面补一句说明。
+fn user_message(text: &str, images: &[UserImage], vision: bool) -> Value {
     if images.is_empty() {
         return json!({"role": "user", "content": text});
+    }
+    if !vision {
+        return json!({
+            "role": "user",
+            "content": super::tool_images::with_text_only_note(text, images.len()),
+        });
     }
     use base64::Engine;
     let mut parts = Vec::new();
