@@ -823,6 +823,21 @@ async fn permission_dual_resolve_first_wins() {
     assert!(!perms.resolve(PermissionOptionKind::AllowOnce));
 }
 
+/// `live` 页没改过名时的标题和落盘会话同一套规则：不带 Markdown 记号、只取第一行。
+#[tokio::test]
+async fn live_thread_title_drops_markdown_markers() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("## 会话历史改成懒加载\n\n正文第二行".into()));
+    let listed = rpc.call("thread/list", json!({})).await;
+    let live = &listed["result"]["threads"][0];
+    assert_eq!(live["id"], "live", "{listed}");
+    assert_eq!(live["title"], "会话历史改成懒加载");
+}
+
 #[tokio::test]
 async fn thread_archive_rename_delete_use_sessions() {
     let h = Harness::boot().await;

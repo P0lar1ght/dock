@@ -680,16 +680,7 @@ fn live_sessions(gateway: &GatewayHandle) -> Result<std::sync::Arc<Sessions>, Rp
 
 fn live_summary(sessions: &Sessions, workspace_id: &str) -> Value {
     let title = sessions.live_title().unwrap_or_else(|| {
-        sessions
-            .events()
-            .iter()
-            .find_map(|e| match e {
-                cordis_spine::LogEvent::User(t) if !t.trim().is_empty() => {
-                    Some(t.chars().take(40).collect::<String>())
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| "当前会话".into())
+        cordis_spine::first_user_title(&sessions.events()).unwrap_or_else(|| "当前会话".into())
     });
     json!({
         "id": LIVE_THREAD_ID,
