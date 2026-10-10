@@ -69,6 +69,8 @@ export type TurnItem =
       decision: 'approve' | 'revise' | 'quit' | 'cancelled' | null;
     }
   | { kind: 'elicit'; id: string; server: string; message: string; heading: string; resolved: boolean }
+  /** 侧边聊天写进主线的笔记（主会话里画成一张可折叠的卡）。 */
+  | { kind: 'sideNote'; id: string; text: string; at: number }
   /**
    * 上下文在这里压缩过。谁发起的、前后占用、用时只有实时看着它压完才有
    * （`context/compacted` 带来的）；回放历史时是 `null`。
@@ -248,6 +250,10 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
         });
       case 'elicit/resolved':
         return update(turn, (i) => (i.kind === 'elicit' && i.id === event.elicitId ? { ...i, resolved: true } : i));
+
+      case 'item/side_note':
+        if (turn.items.some((i) => i.kind === 'sideNote' && i.id === event.itemId)) return turn;
+        return push(turn, { kind: 'sideNote', id: event.itemId, text: event.text, at: event.at });
 
       case 'item/compaction':
         if (turn.items.some((i) => i.kind === 'compaction' && i.id === event.itemId)) return turn;

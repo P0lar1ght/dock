@@ -42,12 +42,12 @@ pub use cordis_base::config::{
 };
 pub use cordis_base::stream_acc::StreamDelta;
 pub use cordis_base::types::{
-    LlmOutput, LogEvent, NoticeKind, PreExecute, PreStep, PromptRequest, StepStart, ToolCall,
-    ToolResult, ToolSpec, TurnEnd, TurnOutcome, UserImage, AUTO_COMPACT_FAILED_PREFIX,
-    COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT, ORDER_STEP_START_DYNAMIC,
+    side_note_reminder, side_note_text, LlmOutput, LogEvent, NoticeKind, PreExecute, PreStep,
+    PromptRequest, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd, TurnOutcome, UserImage,
+    AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT, ORDER_STEP_START_DYNAMIC,
     ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MEMORY, ORDER_STEP_START_TODO,
     ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
-    PERMISSION_DENIED_TOOL_RESULT, STEER_REMINDER, TURN_STOPPED_REMINDER,
+    PERMISSION_DENIED_TOOL_RESULT, SIDE_NOTE_MAX_CHARS, STEER_REMINDER, TURN_STOPPED_REMINDER,
 };
 pub use cordis_base::usage::{
     calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,
@@ -64,6 +64,7 @@ pub use host::plugin_settings::{plugin_settings, FieldErrors, PluginSettings};
 pub use host::session_port::{QueuedItem, SessionPort, SessionRef};
 pub use host::settings::{settings, AppSettings, MermaidEngineKind, ModelOverride, PermissionMode};
 pub use host::settings_commands::settings_commands;
+pub use host::side_note::draft_side_note;
 pub use host::slash::{
     register_commands, slash, slash_handler, tool_slash_arguments, ExtraSlashKind, Slash,
     SlashCommand, SlashEntry, SlashHandler, SlashHint, SlashOutcome, SlashResolved, SlashSurface,

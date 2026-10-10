@@ -79,6 +79,7 @@ pub(super) async fn run_session(
                             return;
                         }
                         Drive::Done(result) => {
+                            flush_side_notes(&ctx);
                             requeue_stranded_steers(&ctx, &mut queue, &queued, &queued_prompts);
                             maybe_queue_goal_summary(
                                 &ctx,
@@ -112,6 +113,7 @@ pub(super) async fn run_session(
                             return;
                         }
                         Drive::Done(result) => {
+                            flush_side_notes(&ctx);
                             requeue_stranded_steers(&ctx, &mut queue, &queued, &queued_prompts);
                             maybe_queue_goal_summary(
                                 &ctx,
@@ -145,6 +147,7 @@ pub(super) async fn run_session(
                             return;
                         }
                         Drive::Done(result) => {
+                            flush_side_notes(&ctx);
                             requeue_stranded_steers(&ctx, &mut queue, &queued, &queued_prompts);
                             let _ = pending.respond_to.send(result);
                         }
@@ -179,6 +182,7 @@ pub(super) async fn run_session(
             {
                 Drive::Shutdown => return,
                 Drive::Done(result) => {
+                    flush_side_notes(&ctx);
                     requeue_stranded_steers(&ctx, &mut queue, &queued, &queued_prompts);
                     maybe_queue_goal_summary(&ctx, &result, &mut queue, &queued, &queued_prompts);
                     continue;
@@ -197,7 +201,7 @@ pub(super) async fn run_session(
         tokio::pin!(wait_wake);
         tokio::select! {
             cmd = cmd_rx.recv() => {
-                if apply_cmd(&ctx, cmd, &mut queue, &queued, &queued_prompts, false) {
+                if apply_cmd(&ctx, cmd, &mut queue, &queued, &queued_prompts, false, false) {
                     return;
                 }
             }
@@ -218,7 +222,7 @@ fn drain_cmds(
         match cmd_rx.try_recv() {
             Ok(cmd) => {
                 // 只在没有任务在跑时调：插话没有可并的采样。
-                if apply_cmd(ctx, Some(cmd), queue, queued, snaps, false) {
+                if apply_cmd(ctx, Some(cmd), queue, queued, snaps, false, false) {
                     return true;
                 }
             }
@@ -315,6 +319,16 @@ fn queue_front_prompt(
 
 static STEER_FALLBACK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// 任务在跑时写进来、循环没等到下一个步骤边界就收尾了的侧边聊天笔记：收尾后
+/// 落进历史（跟在这一轮后面），不开新的一轮。
+fn flush_side_notes(ctx: &Context) {
+    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+        for note in sessions.take_side_notes() {
+            sessions.append_side_note(&note);
+        }
+    }
+}
+
 /// 一轮已经收尾才到的插话（循环最后一次取收件箱之后）：转成排在最前的消息，
 /// 按到达顺序跑，不能丢。
 fn requeue_stranded_steers(
@@ -375,7 +389,9 @@ fn open_subagent_admission(ctx: &Context) {
 }
 
 /// Returns true on shutdown. `steerable`：正在跑一个会采样的任务（用户轮、
-/// 目标收尾、信箱续跑），插话可以交给它在步骤边界送达。
+/// 目标收尾、信箱续跑），插话可以交给它在步骤边界送达。`busy`：有任务在跑
+/// （含压缩），往日志里写东西得等步骤边界或收尾。
+#[allow(clippy::too_many_arguments)]
 fn apply_cmd(
     ctx: &Context,
     cmd: Option<SessionCommand>,
@@ -383,6 +399,7 @@ fn apply_cmd(
     queued: &AtomicUsize,
     snaps: &Mutex<Vec<QueuedItem>>,
     steerable: bool,
+    busy: bool,
 ) -> bool {
     match cmd {
         Some(SessionCommand::Shutdown) | None => true,
@@ -429,6 +446,16 @@ fn apply_cmd(
             } else {
                 queue_front_prompt(ctx, queue, text, images);
                 sync_snaps(ctx, queue, queued, snaps);
+            }
+            false
+        }
+        Some(SessionCommand::SideNote { note }) => {
+            if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+                if busy {
+                    sessions.push_side_note(note);
+                } else {
+                    sessions.append_side_note(&note);
+                }
             }
             false
         }
@@ -503,7 +530,7 @@ where
                     request_cancel(ctx);
                 }
                 other => {
-                    apply_cmd(ctx, other, queue, queued, snaps, steerable);
+                    apply_cmd(ctx, other, queue, queued, snaps, steerable, true);
                 }
             }
         }
@@ -806,6 +833,86 @@ mod tests {
         release.notify_waiters();
         assert_eq!(steered, ["older"]);
         assert_eq!(left, ["newer"]);
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    fn side_note_at(events: &[LogEvent]) -> Option<usize> {
+        events.iter().position(
+            |e| matches!(e, LogEvent::SystemReminder(t) if cordis_spine::side_note_text(t).is_some()),
+        )
+    }
+
+    /// 闲着的页写进侧边聊天笔记：直接落进历史，不开新的一轮。
+    #[tokio::test]
+    async fn an_idle_side_note_lands_without_starting_a_turn() {
+        let (root, handle, started, release) = held_session().await;
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        handle.merge_side_note("旁问结论");
+        wait_until("笔记落进历史", || {
+            side_note_at(&sessions.events()).is_some()
+        })
+        .await;
+        // 不靠睡一会儿再看：actor 按顺序处理命令，笔记要是开了一轮，紧跟着的这条
+        // 就会排进队里，而不是自己开一轮。
+        let sampling = started.notified();
+        tokio::pin!(sampling);
+        sampling.as_mut().enable();
+        handle.submit("probe", false);
+        tokio::time::timeout(Duration::from_secs(2), sampling)
+            .await
+            .expect("probe 自己开一轮");
+        assert!(handle.queued_prompts().is_empty(), "probe 不该排队");
+        let events = sessions.events();
+        let probe = events
+            .iter()
+            .position(|e| matches!(e, LogEvent::User(t) if t == "probe"))
+            .expect("probe 进了历史");
+        assert!(side_note_at(&events).unwrap() < probe, "{events:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, LogEvent::PreStep))
+                .count(),
+            1,
+            "只有 probe 那一轮：{events:?}"
+        );
+        release.notify_waiters();
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 一轮在跑时写进笔记、循环没等到下一个步骤边界就收尾了：收尾后落进历史，
+    /// 跟在这一轮的 TurnEnd 后面；只有这一轮，没有为笔记再开一轮。
+    #[tokio::test]
+    async fn a_side_note_that_misses_the_step_lands_after_the_turn() {
+        let (root, handle, started, release) = held_session().await;
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        handle.merge_side_note("旁问结论");
+        wait_until("笔记进收件箱", || sessions.has_side_notes()).await;
+        assert!(
+            side_note_at(&sessions.events()).is_none(),
+            "在跑时不能直接落：{:?}",
+            sessions.events()
+        );
+        release.notify_waiters();
+        wait_until("笔记落进历史", || {
+            side_note_at(&sessions.events()).is_some()
+        })
+        .await;
+        let events = sessions.events();
+        let end = events
+            .iter()
+            .position(|e| matches!(e, LogEvent::TurnEnd(_)))
+            .expect("这一轮要收尾");
+        assert!(side_note_at(&events).unwrap() > end, "{events:?}");
+        assert_eq!(
+            turn_ends(&events),
+            vec![TurnEndStatus::Completed],
+            "{events:?}"
+        );
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
     }
 

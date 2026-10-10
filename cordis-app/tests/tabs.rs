@@ -920,3 +920,164 @@ async fn scheduled_prompts_reach_their_own_session_even_when_closed() {
     assert!(!said(&main, "关着时的定时提问"), "不该送进第一页");
     assert!(cron.list().iter().all(|j| j.last_error.is_none()));
 }
+
+/// 网关给**不是当前页**的会话开侧边聊天：只读旁问页从那个会话抄设置（模型）和
+/// 上下文，当前页不动；不是从正在看的那一页抄。
+#[tokio::test]
+async fn an_aside_for_another_page_inherits_that_page() {
+    let root = boot().await;
+    root.plugin(settings(), ()).unwrap().wait().await.unwrap();
+    root.plugin(permissions(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    tabs.open().await.unwrap();
+    let parent = tabs.active_ctx();
+    parent
+        .get::<AppSettings>(SETTINGS)
+        .unwrap()
+        .set_model("parent-model");
+    let parent_sessions = parent.get::<Sessions>(SESSIONS).unwrap();
+    parent_sessions.append(LogEvent::User("主线说的话".into()));
+    tabs.activate(0);
+    root.get::<AppSettings>(SETTINGS)
+        .unwrap()
+        .set_model("active-model");
+
+    let (aside, existing) = tabs
+        .open_aside_for(&parent_sessions.live_session_id())
+        .await
+        .unwrap();
+    assert!(!existing);
+    assert_eq!(tabs.active_index(), 0, "不切页");
+    assert_eq!(
+        aside.get::<AppSettings>(SETTINGS).unwrap().model(),
+        "parent-model",
+        "从来源页抄，不是从当前页"
+    );
+    let aside_sessions = aside.get::<Sessions>(SESSIONS).unwrap();
+    assert!(
+        aside_sessions
+            .events()
+            .iter()
+            .any(|e| matches!(e, LogEvent::User(t) if t == "主线说的话")),
+        "带着来源页的上下文"
+    );
+    let presets = aside.get::<AgentPresets>(AGENT_PRESETS).unwrap();
+    assert!(presets.current().read_only, "侧边聊天是只读的");
+}
+
+/// `/tab merge`：只在旁问页里用；写进来源页的上下文（来源页闲着就直接落进历史，
+/// 不开新的一轮），旁问页自己不多一条。
+#[tokio::test]
+async fn tab_merge_writes_the_note_into_the_origin() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    assert!(
+        cordis_tui::merge_note(&tabs, "x").is_err(),
+        "主线页里不能 merge"
+    );
+    // 来源页用一张按 `tab_mount` 装出来的页（有自己的会话 actor）。
+    tabs.open().await.unwrap();
+    let origin_id = tabs.active_id();
+    let main = tabs.active_ctx().get::<Sessions>(SESSIONS).unwrap();
+    main.append(LogEvent::User("主线".into()));
+    tabs.ask_aside("顺便问一句".into()).await.unwrap();
+    let aside = tabs.active_ctx().get::<Sessions>(SESSIONS).unwrap();
+
+    let origin = cordis_tui::merge_note(&tabs, "retry 要退避").unwrap();
+    assert_eq!(origin, origin_id);
+    eventually("笔记落进来源页", || {
+        main.events().iter().any(|e| {
+            matches!(e, LogEvent::SystemReminder(t)
+                if cordis_spine::side_note_text(t).as_deref() == Some("retry 要退避"))
+        })
+    })
+    .await;
+    assert!(
+        !main.events().iter().any(|e| matches!(e, LogEvent::PreStep)),
+        "不开新的一轮：{:?}",
+        main.events()
+    );
+    assert!(
+        !aside
+            .events()
+            .iter()
+            .any(|e| matches!(e, LogEvent::SystemReminder(t)
+            if cordis_spine::side_note_text(t).is_some())),
+        "笔记不写进旁问页"
+    );
+    let too_long = "字".repeat(cordis_spine::SIDE_NOTE_MAX_CHARS + 1);
+    assert!(cordis_tui::merge_note(&tabs, &too_long).is_err());
+}
+
+/// TUI `/tab close` 关掉来源页：它的侧边聊天（网关开的）和 `/btw` 旁问页一起关，
+/// 不留孤儿。以前只有网关 `thread/close` 级联，TUI 关页后侧边聊天还挂着。
+#[tokio::test]
+async fn closing_a_page_closes_its_asides() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    tabs.open().await.unwrap();
+    let parent_id = tabs.active_id();
+    let parent = tabs.active_ctx().get::<Sessions>(SESSIONS).unwrap();
+    parent.append(LogEvent::User("主线".into()));
+    let (side, _) = tabs
+        .open_aside_for(&parent.live_session_id())
+        .await
+        .unwrap();
+    let side_id = side.get::<Sessions>(SESSIONS).unwrap().live_session_id();
+    tabs.ask_aside("顺便问一句".into()).await.unwrap();
+    assert_eq!(tabs.len(), 4);
+
+    tabs.close_id(Some(parent_id)).await.unwrap();
+    assert_eq!(tabs.len(), 1, "来源页关了，旁问页一起关：{:?}", tabs.list());
+    assert!(!tabs.is_aside(&side_id));
+    assert_eq!(tabs.active_index(), 0);
+}
+
+/// 来源页 `/new`（`Ctrl+W`）换了会话：之前那张侧边聊天带的是旧会话的快照，
+/// 不再算这一页的侧边聊天——网关再开要开新的，`/tab merge` 不能把笔记写进新会话。
+#[tokio::test]
+async fn an_aside_does_not_follow_its_page_into_a_new_session() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    tabs.open().await.unwrap();
+    let parent = tabs.active_ctx().get::<Sessions>(SESSIONS).unwrap();
+    parent.append(LogEvent::User("旧会话".into()));
+    let old_id = parent.live_session_id();
+    let (old_side, _) = tabs.open_aside_for(&old_id).await.unwrap();
+    tabs.ask_aside("顺便问一句".into()).await.unwrap();
+    let btw = tabs.active_index();
+
+    // `/new` 的那两步。
+    parent.archive_current();
+    parent.clear();
+    parent.append(LogEvent::User("新会话".into()));
+    let new_id = parent.live_session_id();
+    assert_ne!(new_id, old_id);
+
+    assert!(tabs.aside_of(&new_id).is_none(), "旧的侧边聊天不归新会话");
+    let (new_side, existing) = tabs.open_aside_for(&new_id).await.unwrap();
+    assert!(!existing);
+    assert_ne!(
+        new_side
+            .get::<Sessions>(SESSIONS)
+            .unwrap()
+            .live_session_id(),
+        old_side
+            .get::<Sessions>(SESSIONS)
+            .unwrap()
+            .live_session_id()
+    );
+
+    tabs.activate(btw);
+    let err = cordis_tui::merge_note(&tabs, "旧结论").unwrap_err();
+    assert!(err.contains("换了会话"), "{err}");
+    assert!(
+        !parent.events().iter().any(|e| matches!(e,
+            LogEvent::SystemReminder(t) if cordis_spine::side_note_text(t).is_some())),
+        "笔记不该进新会话"
+    );
+}

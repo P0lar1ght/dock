@@ -142,6 +142,9 @@ pub struct Sessions {
     /// 插话收件箱：一轮进行中送来的用户消息，循环在下一个步骤边界取走
     /// （[`Self::take_steers`]），落成 [`STEER_REMINDER`] + `User`。
     steers: Arc<Mutex<VecDeque<Steer>>>,
+    /// 侧边聊天写进来、还没落进日志的笔记（这一页在跑时先放这，下一个步骤边界
+    /// 或这一轮收尾后落，见 [`Self::push_side_note`]）。
+    side_notes: Arc<Mutex<Vec<String>>>,
     /// One-shot wire addons paired with a specific next user bubble
     /// (display `/loop …` vs `loop_schedule_instruction`, or a scheduled-fire
     /// reminder). Hidden from the pager as [`LogEvent::SystemReminder`].
@@ -322,6 +325,7 @@ impl Sessions {
             display_title: Arc::new(Mutex::new(None)),
             queued_followups: Arc::new(AtomicUsize::new(0)),
             steers: Arc::new(Mutex::new(VecDeque::new())),
+            side_notes: Arc::new(Mutex::new(Vec::new())),
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
             disk_cwd: Arc::new(Mutex::new(None)),
             plan_cwd: Arc::new(Mutex::new(None)),
@@ -589,6 +593,35 @@ impl Sessions {
         let held = std::mem::replace(&mut *self.pending_images.lock().unwrap(), steer.images);
         self.append(LogEvent::User(steer.text));
         *self.pending_images.lock().unwrap() = held;
+    }
+
+    /// 侧边聊天的笔记，这一页正在跑：先收着，循环在下一个步骤边界落（和插话同一处，
+    /// 不会夹在 tool_calls 和结果之间）；这一轮没等到边界就收尾了，会话 actor
+    /// 收尾后落。闲着的页直接 [`Self::append_side_note`]。
+    pub fn push_side_note(&self, note: String) {
+        self.side_notes.lock().unwrap().push(note);
+    }
+
+    pub fn has_side_notes(&self) -> bool {
+        !self.side_notes.lock().unwrap().is_empty()
+    }
+
+    pub fn take_side_notes(&self) -> Vec<String> {
+        std::mem::take(&mut *self.side_notes.lock().unwrap())
+    }
+
+    /// 把一段侧边聊天笔记落进日志（[`cordis_base::types::side_note_reminder`]）。
+    /// 只在步骤边界或会话 actor 闲着时调。
+    ///
+    /// 不走撤回栅栏：栅栏挡的是一轮被撤之后还在路上的尾巴，而这里没有在跑的一轮；
+    /// 用户在 Esc 撤回之后写进来的笔记也要留下。
+    pub fn append_side_note(&self, note: &str) {
+        let event = LogEvent::SystemReminder(cordis_base::types::side_note_reminder(note));
+        self.events.lock().unwrap().push(event.clone());
+        self.times.lock().unwrap().push(SystemTime::now());
+        self.bump_events_rev();
+        self.emit_session(event);
+        self.persist_live();
     }
 
     /// Monotonic generation for scrollback / layout cache invalidation.
@@ -1283,6 +1316,7 @@ impl Sessions {
 
     pub fn clear(&self) {
         self.steers.lock().unwrap().clear();
+        self.side_notes.lock().unwrap().clear();
         self.events.lock().unwrap().clear();
         self.times.lock().unwrap().clear();
         *self.turn_started.lock().unwrap() = None;
@@ -1774,6 +1808,15 @@ impl Sessions {
     /// 里再出现一次。
     pub fn live_session_id(&self) -> String {
         self.live_id.lock().unwrap().clone()
+    }
+
+    /// 不落盘的页（侧边聊天的旁问页）也要一个 id，网关按它把这一页当线程寻址。
+    /// 只在还没有 id 时给，不挂盘、不建目录。
+    pub fn assign_ephemeral_id(&self) {
+        let mut live = self.live_id.lock().unwrap();
+        if live.is_empty() {
+            *live = format!("aside-{}", crate::session::persist::new_id());
+        }
     }
 
     /// `$DOCK_HOME/sessions/<cwd-key>/<id>/` for the live thread, when disk-backed.

@@ -832,6 +832,7 @@ pub fn tab_args() -> Vec<ArgItem> {
         ArgItem::new("fork", "带当前页上下文快照分叉一页（Ctrl+F）"),
         ArgItem::new("back", "把本页结论带回来源页的输入框（Ctrl+B）"),
         ArgItem::new("promote", "把当前的只读旁问页转正成全权页"),
+        ArgItem::new("merge", "旁问页整理一段结论，确认后写进来源页的上下文"),
         ArgItem::new("close", "关掉当前页；`close <页号>` 关那一页"),
     ]
 }

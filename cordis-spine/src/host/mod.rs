@@ -14,6 +14,7 @@ pub mod plugin_settings;
 pub mod session_port;
 pub mod settings;
 pub mod settings_commands;
+pub mod side_note;
 pub mod slash;
 pub mod status_items;
 pub mod tabs;

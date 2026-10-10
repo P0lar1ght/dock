@@ -21,6 +21,9 @@ pub trait SessionPort: Send + Sync {
     fn steer(&self, text: String, images: Vec<cordis_base::types::UserImage>);
     /// 把一条排队的消息改成插话。`None` = 最早那条。
     fn steer_queued(&self, id: Option<String>);
+    /// 侧边聊天写进来的一段笔记。在跑就在下一个步骤边界落（这一轮收尾前没等到
+    /// 边界就收尾后落）；闲着直接落进历史。**不**开始新的一轮。
+    fn merge_side_note(&self, note: String);
     fn working(&self) -> bool;
     fn cancel(&self);
     fn has_queued(&self) -> bool;
@@ -49,6 +52,10 @@ impl SessionRef {
 
     pub fn steer_queued(&self, id: Option<String>) {
         self.0.steer_queued(id);
+    }
+
+    pub fn merge_side_note(&self, note: String) {
+        self.0.merge_side_note(note);
     }
 
     pub fn working(&self) -> bool {

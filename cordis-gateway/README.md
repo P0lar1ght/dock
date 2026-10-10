@@ -379,6 +379,33 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   客户端别据此提示「回复完成」。回放（`thread/history`、重开会话）一致。
 - 撤回插话（`thread/rewind`、取消时收回输入框）连带它前面的提示一起摘掉。
 
+### 侧边聊天（能力 `sideChat`，`handlers/side_chat.rs`）
+
+从一个会话分叉出来的只读旁问（同 TUI `/btw`）。GUI 开在右侧面板里。
+
+| 方法 / 推送 | 作用 |
+|---|---|
+| `thread/aside/start { threadId }` | 给主会话开它的侧边聊天（已有就回那一个）。回 `{ thread, parentThreadId, existing }` |
+| `thread/aside/handback { threadId }` | 侧边聊天整理一段写进主线的笔记（调一次模型）。回 `{ note }`，只起草不写 |
+| `thread/aside/merge { threadId, note }` | 把笔记写进**主会话**。回 `{ delivery: "nextStep" \| "history" }` |
+| 推送 `item/side_note { itemId, text }` | 主会话里写进来的笔记，挂在它落下时的那一轮上，进 `thread/history` |
+
+- 侧边聊天就是一个线程：`turn/start`、`thread/subscribe`、`thread/close` 等照常用它的 `thread.id`。
+- 带着主会话到此为止的上下文（给模型参考），工具只读；会改东西的命令要用户批准。
+- 投影只从分叉那一刻往后：`thread/history` 的 `events` 不重放主线。
+  - 旧的 `messages` 字段按会话日志给，仍带着主线快照。
+- 不落盘、不进 `thread/list`、不占 9 页的名额；每个主会话最多一个。
+  - 同一会话并发 `start` 只开一个，后到的回 `existing: true`。
+- 主会话关页时它一起关（`thread/close`、TUI `/tab close` 都算）。
+- 主会话那一页换了会话（`Ctrl+W` / `/resume`）后，旧的侧边聊天不再属于它：
+  - 对新会话 `start` 会开一个新的；旧的那个关面板时照常 `thread/close`。
+- `handback`：侧边聊天还在回答回 `busy`；模型没写出正文回 `draft_failed`。
+- `merge`：笔记 ≤2000 字。主会话在跑就下一个步骤边界并入（`nextStep`），
+  闲着直接落进历史（`history`）。**不开新的一轮**。
+  - `delivery` 只是提示：按发命令前的状态给，这一轮恰好在那之间收尾时，
+    回的是 `nextStep`，笔记实际补在轮末。以 `item/side_note` 推送为准。
+  - 落盘是一条 system-reminder（前缀固定），旧客户端看不到它。
+
 ### 工作区文件（能力 `workspaceFiles`，`handlers/fs.rs`）
 
 只读看会话 cwd 里的文件（GUI 的文件面板）。路径都相对会话 cwd，用 `/` 分隔。

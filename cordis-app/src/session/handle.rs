@@ -39,6 +39,12 @@ impl SessionHandle {
         let _ = self.cmd_tx.send(SessionCommand::SteerQueued { id });
     }
 
+    pub fn merge_side_note(&self, note: impl Into<String>) {
+        let _ = self
+            .cmd_tx
+            .send(SessionCommand::SideNote { note: note.into() });
+    }
+
     pub async fn prompt(&self, text: impl Into<String>) -> PromptTurnResult {
         let (respond_to, rx) = oneshot::channel();
         self.cmd_tx
@@ -111,6 +117,10 @@ impl cordis_spine::SessionPort for SessionHandle {
 
     fn steer_queued(&self, id: Option<String>) {
         SessionHandle::steer_queued(self, id);
+    }
+
+    fn merge_side_note(&self, note: String) {
+        SessionHandle::merge_side_note(self, note);
     }
 
     fn working(&self) -> bool {

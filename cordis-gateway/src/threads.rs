@@ -27,6 +27,11 @@ impl Page {
         Some(Self { ctx, identity })
     }
 
+    /// 刚开出来的一页（没有会话服务的 ctx 是 `None`）。
+    pub fn of_ctx(ctx: Context) -> Option<Self> {
+        Self::of(ctx)
+    }
+
     pub fn is_root(&self) -> bool {
         self.identity == ROOT_IDENTITY
     }

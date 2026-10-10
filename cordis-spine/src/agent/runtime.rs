@@ -310,7 +310,13 @@ fn drain_parent_mailbox(ctx: &Context, sessions: &Sessions) {
 
 /// 插话在这里送达：和信箱同一个位置，一步开始、采样之前，绝不夹在 tool_calls
 /// 和它们的结果之间。顺带撤掉让路信号（[`TurnControl::request_yield`]）。
+///
+/// 侧边聊天写进来的笔记也在这里落（排在插话前面）。笔记不让模型多采一步：
+/// 它只是给之后的采样看的背景，这一轮收尾时还没落的由会话 actor 补上。
 fn drain_steers(ctx: &Context, sessions: &Sessions) {
+    for note in sessions.take_side_notes() {
+        sessions.append_side_note(&note);
+    }
     // 先撤信号再取：取之后才到的那条会自己重新立起信号，不会被这里抹掉。
     if let Some(turn) = ctx.get::<TurnControl>(TURN) {
         turn.clear_yield();

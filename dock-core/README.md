@@ -14,6 +14,8 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
   - 完成推送把发起方、前后占用、用时补到最近那个标记上；回放历史时它们是 `null`。
   - 连压两次只有一个标记（Dock 不重复追加），它跟着最新那次覆盖。
   - 没压成 / 被停掉的进展在下一轮 `turn/started` 时清掉。
+- 侧边聊天笔记：`item/side_note` 是轮里的 `sideNote` 项（`text` 是笔记原文）。
+  - 挂在它落下时的那一轮上；已经结束的轮不会因为它重新跑起来。
 - 权限项带 `agentId`：子代理发的请求是它的 id，主会话发的是 `null`（旧网关不带也是 `null`）。
 - 子代理（`src/subagents.ts`）：`subagent/updated` 是状态，`subagent/event` 是它自己的对话。
   - 每个子代理的对话用同一个 `reduceThread`；父线程的 `reduceThread` 忽略这两种事件。

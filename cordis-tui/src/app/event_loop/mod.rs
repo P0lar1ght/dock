@@ -819,6 +819,32 @@ pub async fn run(root: Context) -> Result<()> {
                                     ctx = active_ctx(&root);
                                     overlay.close();
                                 }
+                                Effect::TabMerge { note } => {
+                                    match (tabs_service(&root), note) {
+                                        (None, _) => flash(&root, "分页服务未挂载"),
+                                        (Some(tabs), Some(note)) => {
+                                            match crate::seam::tabs::merge_note(&tabs, &note) {
+                                                Ok(id) => flash(
+                                                    &root,
+                                                    format!(
+                                                        "已写进第 {id} 页：在跑就下一步并入，闲着下次对话时模型看得到"
+                                                    ),
+                                                ),
+                                                Err(e) => flash(&root, e),
+                                            }
+                                        }
+                                        (Some(tabs), None) => {
+                                            match crate::seam::tabs::merge_target(&tabs) {
+                                                Ok((aside, _, _)) => {
+                                                    spawn_merge_draft(aside, redraw_tx.clone())
+                                                }
+                                                Err(e) => flash(&root, e),
+                                            }
+                                        }
+                                    }
+                                    ctx = active_ctx(&root);
+                                    overlay.close();
+                                }
                                 Effect::TabPromote => {
                                     match tabs_service(&root) {
                                         Some(tabs) => match tabs.promote_active().await {

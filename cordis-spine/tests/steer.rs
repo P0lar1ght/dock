@@ -1,5 +1,5 @@
 //! 插话（steer）：一轮进行中送来的用户消息在下一个步骤边界并进这一轮，
-//! 不打断正在进行的采样和工具。
+//! 不打断正在进行的采样和工具。侧边聊天写进主线的笔记走同一个步骤边界。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,6 +30,8 @@ struct ToolThenSteer {
     n: Arc<AtomicUsize>,
     /// 第 0 次采样就回文本（插话赶上模型要收尾的那一步）。
     text_first: bool,
+    /// 第 0 次采样时送来的不是插话，是侧边聊天写进来的笔记。
+    side_note: bool,
     seen: Arc<Mutex<Vec<Vec<LogEvent>>>>,
 }
 
@@ -43,7 +45,14 @@ impl Sampler for ToolThenSteer {
             let i = self.n.fetch_add(1, Ordering::SeqCst);
             self.seen.lock().unwrap().push(request.history.clone());
             if i == 0 {
-                cordis_spine::steer(&self.ctx, "改用方案 B".into(), Vec::new()).unwrap();
+                if self.side_note {
+                    self.ctx
+                        .require::<Sessions>(SESSIONS)
+                        .unwrap()
+                        .push_side_note("旁问结论：retry 要退避".into());
+                } else {
+                    cordis_spine::steer(&self.ctx, "改用方案 B".into(), Vec::new()).unwrap();
+                }
                 if self.text_first {
                     return LlmOutput {
                         text: "方案 A 做完了".into(),
@@ -68,6 +77,13 @@ impl Sampler for ToolThenSteer {
 }
 
 async fn boot(text_first: bool) -> (Context, Arc<AtomicUsize>, Arc<Mutex<Vec<Vec<LogEvent>>>>) {
+    boot_with(text_first, false).await
+}
+
+async fn boot_with(
+    text_first: bool,
+    side_note: bool,
+) -> (Context, Arc<AtomicUsize>, Arc<Mutex<Vec<Vec<LogEvent>>>>) {
     isolated_home();
     let root = Context::new();
     install_without_llm(&root).await.unwrap();
@@ -86,6 +102,7 @@ async fn boot(text_first: bool) -> (Context, Arc<AtomicUsize>, Arc<Mutex<Vec<Vec
                 ctx: root.clone(),
                 n: n.clone(),
                 text_first,
+                side_note,
                 seen: seen.clone(),
             }),
         ),
@@ -182,4 +199,145 @@ async fn rewinding_a_steer_drops_its_note() {
         "插话提示要一起摘掉：{:?}",
         sessions.events()
     );
+}
+
+/// 侧边聊天的笔记在一轮进行中写进来：和插话一样在下一个步骤边界落（紧跟在工具
+/// 结果后面），模型下一次采样看得到；它不是插话，没有插话提示、也不是用户消息。
+#[tokio::test]
+async fn a_side_note_joins_at_the_next_step_boundary() {
+    let (root, n, seen) = boot_with(false, true).await;
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("用方案 A 做")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("reply-1".into()));
+    assert_eq!(n.load(Ordering::SeqCst), 2);
+
+    let second = seen.lock().unwrap()[1].clone();
+    let tool = second
+        .iter()
+        .position(|e| matches!(e, LogEvent::ToolExecute { id, .. } if id == "c0"))
+        .expect("工具结果要在");
+    let note = second
+        .iter()
+        .position(|e| {
+            matches!(e, LogEvent::SystemReminder(t)
+                if cordis_spine::side_note_text(t).as_deref() == Some("旁问结论：retry 要退避"))
+        })
+        .expect("第二次采样要看到笔记");
+    assert!(
+        note > tool,
+        "笔记不能夹在 tool_calls 和结果之间：{second:?}"
+    );
+    assert!(
+        !second
+            .iter()
+            .any(|e| matches!(e, LogEvent::SystemReminder(t) if t == STEER_REMINDER)),
+        "笔记不是插话：{second:?}"
+    );
+}
+
+/// 笔记赶上模型要收尾的那一步：不为它多采一步（插话会）。这一轮照常收尾，
+/// 笔记留在收件箱里，由会话 actor 收尾后落进历史。
+#[tokio::test]
+async fn a_side_note_does_not_keep_the_turn_going() {
+    let (root, n, _seen) = boot_with(true, true).await;
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("用方案 A 做")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("方案 A 做完了".into()));
+    assert_eq!(n.load(Ordering::SeqCst), 1, "笔记不该让模型多采一步");
+    let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+    assert_eq!(sessions.take_side_notes(), ["旁问结论：retry 要退避"]);
+}
+
+/// 只回一句固定文本、记下请求的模型。
+struct Recording {
+    reply: LlmOutput,
+    seen: Arc<Mutex<Vec<PromptRequest>>>,
+}
+
+impl Sampler for Recording {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        self.seen.lock().unwrap().push(request);
+        let reply = self.reply.clone();
+        Box::pin(async move { reply })
+    }
+}
+
+async fn draft_with(
+    reply: LlmOutput,
+) -> (Result<String, String>, Vec<PromptRequest>, usize, usize) {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(Recording {
+                reply,
+                seen: seen.clone(),
+            }),
+        ),
+    )
+    .unwrap();
+    let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("retry 为什么 sleep？".into()));
+    sessions.append(LogEvent::LlmStream(LlmOutput {
+        text: "为了等锁释放".into(),
+        ..LlmOutput::default()
+    }));
+    let before = sessions.events().len();
+    let out = cordis_spine::draft_side_note(&root).await;
+    let after = sessions.events().len();
+    let requests = seen.lock().unwrap().clone();
+    (out, requests, before, after)
+}
+
+/// 起草写进主线的笔记：模型看到的是旁问的历史 + 一条起草要求；这次采样不进
+/// 旁问页的日志。
+#[tokio::test]
+async fn drafting_a_side_note_reads_the_aside_and_leaves_its_log_alone() {
+    let (out, requests, before, after) = draft_with(LlmOutput {
+        text: "  - sleep 300ms 是在等锁释放  ".into(),
+        ..LlmOutput::default()
+    })
+    .await;
+    assert_eq!(out.unwrap(), "- sleep 300ms 是在等锁释放");
+    assert_eq!(before, after, "起草不该往旁问页写东西");
+    let history = &requests[0].history;
+    assert!(
+        history
+            .iter()
+            .any(|e| matches!(e, LogEvent::User(t) if t == "retry 为什么 sleep？")),
+        "{history:?}"
+    );
+    assert!(
+        matches!(history.last(), Some(LogEvent::User(t)) if t.contains("写进主线")),
+        "{history:?}"
+    );
+}
+
+/// 模型出错 / 没写出东西：照实报错，不交一段空笔记。
+#[tokio::test]
+async fn a_failed_draft_says_why() {
+    let (out, ..) = draft_with(LlmOutput {
+        error: Some("429".into()),
+        ..LlmOutput::default()
+    })
+    .await;
+    assert!(out.unwrap_err().contains("429"));
+    let (out, ..) = draft_with(LlmOutput::default()).await;
+    assert!(out.is_err());
 }

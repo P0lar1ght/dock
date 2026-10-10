@@ -59,6 +59,16 @@ impl SessionPort for TestSession {
 
     fn steer_queued(&self, _id: Option<String>) {}
 
+    fn merge_side_note(&self, note: String) {
+        if let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) {
+            if self.working() {
+                sessions.push_side_note(note);
+            } else {
+                sessions.append_side_note(&note);
+            }
+        }
+    }
+
     fn working(&self) -> bool {
         self.working.load(Ordering::SeqCst)
     }
@@ -126,17 +136,20 @@ fn project_dir(tag: &str) -> std::path::PathBuf {
 /// 测试用的建页工厂：每页自己的会话（落盘）、设置、权限队列、轮次、循环和
 /// session.port——和 `cordis-app` 的真分页一样按 `PER_TAB_SERVICES` 隔离。
 fn test_page_mount() -> cordis_spine::TabMount {
-    Arc::new(|index, _kind| {
+    Arc::new(|index, kind| {
         cordis::plugin_async(
             "test.page",
             cordis::Inject::new(),
             move |ctx, _: &()| async move {
                 let sessions = Sessions::tab(ctx.clone(), index);
-                sessions.attach_disk();
+                // 旁问页（侧边聊天）不落盘，同 `cordis-app` 的 `tab.sessions`。
+                if kind == cordis_spine::TabKind::Normal {
+                    sessions.attach_disk();
+                }
                 // 预设按页：和 `cordis-app` 的 `tab.presets` 一样从上层 fork 一份。
                 let presets = ctx
                     .get::<cordis_spine::Tabs>(cordis_spine::TABS)
-                    .and_then(|tabs| tabs.active_ctx().get::<AgentPresets>(AGENT_PRESETS))
+                    .and_then(|tabs| tabs.mount_source(index).get::<AgentPresets>(AGENT_PRESETS))
                     .map(|p| p.fork());
                 if let Some(presets) = &presets {
                     sessions.seed_preset_if_unset(&presets.current_id());
@@ -5584,4 +5597,160 @@ async fn paired_pages_cannot_touch_plugin_settings() {
     let _ = rpc.call("initialize", json!({})).await;
     let listed = rpc.call("plugin/settings/list", json!({})).await;
     assert_eq!(listed["error"]["details"]["code"], "forbidden", "{listed}");
+}
+
+/// 侧边聊天：从一个会话分叉一张只读旁问页（不进会话列表、面板里不重放主线），
+/// 在里面问答，起草笔记，写回主会话（主会话投出 `item/side_note`，不开新的一轮）；
+/// 主会话关掉时它一起关。
+#[tokio::test]
+async fn side_chat_forks_answers_and_merges_back() {
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["sideChat"], true, "{init}");
+
+    let dir = project_dir("side-chat");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let parent = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": parent }))
+        .await;
+    let _ = rpc
+        .call(
+            "turn/start",
+            json!({ "threadId": parent, "message": "主线的问题" }),
+        )
+        .await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+
+    let opened = rpc
+        .call("thread/aside/start", json!({ "threadId": parent }))
+        .await;
+    let aside = opened["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{opened}"))
+        .to_string();
+    assert_eq!(
+        opened["result"]["parentThreadId"],
+        json!(parent),
+        "{opened}"
+    );
+    assert_eq!(opened["result"]["existing"], false, "{opened}");
+    assert_ne!(aside, parent);
+    let again = rpc
+        .call("thread/aside/start", json!({ "threadId": parent }))
+        .await;
+    assert_eq!(
+        again["result"]["thread"]["id"],
+        json!(aside),
+        "每个会话一张"
+    );
+    assert_eq!(again["result"]["existing"], true, "{again}");
+
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let ids: Vec<&str> = listed["result"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["id"].as_str())
+        .collect();
+    assert!(ids.contains(&parent.as_str()), "{listed}");
+    assert!(
+        !ids.contains(&aside.as_str()),
+        "侧边聊天不进会话列表：{listed}"
+    );
+
+    let empty = rpc
+        .call("thread/history", json!({ "threadId": aside }))
+        .await;
+    assert_eq!(
+        empty["result"]["events"],
+        json!([]),
+        "面板里不重放主线：{empty}"
+    );
+
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": aside }))
+        .await;
+    let _ = rpc
+        .call(
+            "turn/start",
+            json!({ "threadId": aside, "message": "旁问" }),
+        )
+        .await;
+    rpc.wait_notification("turn/completed", Duration::from_secs(5))
+        .await;
+    let history = rpc
+        .call("thread/history", json!({ "threadId": aside }))
+        .await;
+    let users: Vec<Value> = history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["method"] == "item/user_message")
+        .map(|e| e["payload"]["content"].clone())
+        .collect();
+    assert_eq!(users, vec![json!("旁问")], "{history}");
+
+    // echo 假模型第一步总是调工具、不写正文：起草照实报 `draft_failed`，不交空笔记。
+    // 起草成功的路径见 cordis-spine `tests/steer.rs`。
+    let drafted = rpc
+        .call("thread/aside/handback", json!({ "threadId": aside }))
+        .await;
+    assert_eq!(
+        drafted["error"]["details"]["code"], "draft_failed",
+        "{drafted}"
+    );
+    let wrong = rpc
+        .call("thread/aside/handback", json!({ "threadId": parent }))
+        .await;
+    assert!(wrong["error"].is_object(), "主会话不能起草：{wrong}");
+
+    let merged = rpc
+        .call(
+            "thread/aside/merge",
+            json!({ "threadId": parent, "note": "retry 要退避" }),
+        )
+        .await;
+    assert_eq!(merged["result"]["delivery"], "history", "{merged}");
+    let note = rpc
+        .wait_notification("item/side_note", Duration::from_secs(5))
+        .await;
+    assert_eq!(note["params"]["threadId"], json!(parent), "{note}");
+    assert_eq!(note["params"]["text"], "retry 要退避", "{note}");
+    let wrong = rpc
+        .call(
+            "thread/aside/merge",
+            json!({ "threadId": aside, "note": "x" }),
+        )
+        .await;
+    assert!(wrong["error"].is_object(), "不能写进侧边聊天：{wrong}");
+    let empty_note = rpc
+        .call(
+            "thread/aside/merge",
+            json!({ "threadId": parent, "note": "  " }),
+        )
+        .await;
+    assert!(empty_note["error"].is_object(), "{empty_note}");
+
+    let _ = rpc
+        .call("thread/close", json!({ "threadId": parent }))
+        .await;
+    let gone = rpc
+        .call(
+            "turn/start",
+            json!({ "threadId": aside, "message": "还在吗" }),
+        )
+        .await;
+    assert!(
+        gone["error"].is_object(),
+        "主会话关了，侧边聊天也关：{gone}"
+    );
 }

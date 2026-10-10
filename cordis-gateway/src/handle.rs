@@ -318,6 +318,13 @@ impl GatewayHandle {
         });
     }
 
+    /// 新开的一页从空投影开始（不按它现有的历史重放）：侧边聊天带着主线的快照
+    /// 起步，那是给模型的参考，客户端只看分叉之后的对话。
+    pub fn begin_page(&self, page: &crate::threads::Page) {
+        let thread_id = page.thread_id();
+        self.with_transcript(&page.identity, |t| t.set_thread_id(thread_id));
+    }
+
     /// 关页后丢掉它的投影，连同它派出的子代理的投影。
     pub fn drop_page(&self, identity: &str) {
         self.inner.transcripts.lock().unwrap().remove(identity);
