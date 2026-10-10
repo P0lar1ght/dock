@@ -348,6 +348,11 @@ fn roster_entry(dir: &Path) -> Option<RosterEntry> {
         .as_ref()
         .map(|m| m.title.clone())
         .filter(|t| !t.trim().is_empty())
+        // 新规则下不变的标题（绝大多数）不用读 transcript。
+        .map(|t| match title_from_text(&t) {
+            Some(clean) if clean == t => t,
+            _ => upgrade_legacy_title(t, first_user_text_on_disk(&history).as_deref()),
+        })
         .unwrap_or_else(|| dir_id.clone());
     let cwd = meta
         .as_ref()
@@ -459,6 +464,7 @@ fn load_one(dir: &Path) -> Option<(u64, ArchivedSession)> {
         .as_ref()
         .map(|m| m.title.clone())
         .filter(|t| !t.trim().is_empty())
+        .map(|t| upgrade_legacy_title(t, first_user_text(&events)))
         .or_else(|| first_user_title(&events))
         .unwrap_or_else(|| id.clone());
     let updated = meta
@@ -517,14 +523,131 @@ fn load_compact(dir: &Path, event_len: usize) -> (Option<Vec<LogEvent>>, usize) 
     (Some(prefix), file.from.min(event_len))
 }
 
-fn first_user_title(events: &[LogEvent]) -> Option<String> {
+/// 没改过名的会话标题：第一条用户消息的第一行有字的内容，最多 40 字。
+pub(crate) fn first_user_title(events: &[LogEvent]) -> Option<String> {
     events.iter().find_map(|e| match e {
-        LogEvent::User(text) => {
-            let t = text.trim();
-            (!t.is_empty()).then(|| t.chars().take(40).collect())
-        }
+        LogEvent::User(text) => title_from_text(text),
         _ => None,
     })
+}
+
+/// 旧版本自动起的标题是第一条非空用户消息的前 40 个字（含 Markdown 记号和换行），
+/// 落进了 meta.json。和它一字不差就按新规则重算；对不上说明用户改过名，原样保留。
+fn upgrade_legacy_title(saved: String, first_user: Option<&str>) -> String {
+    let Some(text) = first_user else {
+        return saved;
+    };
+    let legacy: String = text.trim().chars().take(40).collect();
+    if legacy != saved {
+        return saved;
+    }
+    title_from_text(text).unwrap_or(saved)
+}
+
+/// 旧规则取标题的那条消息：第一条去掉空白后非空的用户消息。
+fn first_user_text(events: &[LogEvent]) -> Option<&str> {
+    events.iter().find_map(|e| match e {
+        LogEvent::User(text) if !text.trim().is_empty() => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+/// 同 [`first_user_text`]，直接从 transcript 文件读：会话列表不整份解析历史，
+/// 只在标题可能是旧规则起的时候才来读，读到第一条就停。
+fn first_user_text_on_disk(history: &Path) -> Option<String> {
+    let file = fs::File::open(history).ok()?;
+    std::io::BufRead::lines(std::io::BufReader::new(file))
+        .take(200)
+        .map_while(Result::ok)
+        .find_map(
+            |line| match serde_json::from_str::<HistoryLine>(line.trim()).ok()?.event {
+                WireEvent::User { text } if !text.trim().is_empty() => Some(text),
+                _ => None,
+            },
+        )
+}
+
+/// 消息常是 Markdown：标题、引用、列表记号、分隔线、代码围栏、成对的加粗、
+/// 行内代码记号不进标题。
+pub(crate) fn title_from_text(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") || is_thematic_break(t) {
+            return None;
+        }
+        loop {
+            let before = t;
+            if let Some(rest) = t.strip_prefix('>') {
+                t = rest.trim_start();
+            }
+            let hashes = t.len() - t.trim_start_matches('#').len();
+            if (1..=6).contains(&hashes) {
+                let rest = &t[hashes..];
+                if rest.is_empty() || rest.starts_with([' ', '\t']) {
+                    t = rest.trim_start();
+                }
+            }
+            for marker in ["- ", "* ", "+ "] {
+                if let Some(rest) = t.strip_prefix(marker) {
+                    t = rest.trim_start();
+                }
+            }
+            // 有序列表最多认三位数：「2026. 年度复盘」是年份不是列表。
+            let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if (1..=3).contains(&digits) {
+                if let Some(rest) = t[digits..]
+                    .strip_prefix(". ")
+                    .or_else(|| t[digits..].strip_prefix(") "))
+                {
+                    t = rest.trim_start();
+                }
+            }
+            for task in ["[ ] ", "[x] ", "[X] "] {
+                if let Some(rest) = t.strip_prefix(task) {
+                    t = rest.trim_start();
+                }
+            }
+            if t == before {
+                break;
+            }
+        }
+        // `__` 不剥：`__init__.py` 这种名字比下划线加粗常见得多。
+        let t = strip_bold_pairs(t).replace('`', "");
+        let t = t.trim();
+        (!t.is_empty()).then(|| t.chars().take(40).collect())
+    })
+}
+
+/// `---` / `***` / `___`（可带空格）这种分隔线。
+fn is_thematic_break(line: &str) -> bool {
+    let marks: Vec<char> = line.chars().filter(|c| !c.is_whitespace()).collect();
+    marks.len() >= 3 && ['-', '*', '_'].contains(&marks[0]) && marks.iter().all(|c| *c == marks[0])
+}
+
+/// 只剥成对、贴着字的 `**…**`；落单的（`src/**/*.rs`）不动。
+fn strip_bold_pairs(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(open) = rest.find("**") {
+        let after = &rest[open + 2..];
+        match after.find("**") {
+            Some(close)
+                if close > 0
+                    && !after.starts_with(char::is_whitespace)
+                    && !after[..close].ends_with(char::is_whitespace) =>
+            {
+                out.push_str(&rest[..open]);
+                out.push_str(&after[..close]);
+                rest = &after[close + 2..];
+            }
+            _ => {
+                out.push_str(&rest[..open + 2]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn tool_image_blob_dir() -> PathBuf {
@@ -739,6 +862,76 @@ mod tests {
     use super::*;
     use crate::session::log::ArchivedSession;
     use cordis_base::types::LogEvent;
+
+    #[test]
+    fn title_drops_markdown_markers_and_keeps_first_line() {
+        let title = |text: &str| first_user_title(&[LogEvent::User(text.into())]);
+        assert_eq!(
+            title("## 会话历史改成懒加载: 首屏 50 条\n\n正文第二行").as_deref(),
+            Some("会话历史改成懒加载: 首屏 50 条")
+        );
+        assert_eq!(
+            title("> **注意**：先看日志").as_deref(),
+            Some("注意：先看日志")
+        );
+        assert_eq!(title("- [ ] 写迁移脚本").as_deref(), Some("写迁移脚本"));
+        assert_eq!(title("1. 修 `load_page`").as_deref(), Some("修 load_page"));
+        assert_eq!(
+            title("```rust\nfn main() {}\n```").as_deref(),
+            Some("fn main() {}")
+        );
+        assert_eq!(
+            title("#hashtag 不是标题").as_deref(),
+            Some("#hashtag 不是标题")
+        );
+        assert_eq!(title("  \n###\n").as_deref(), None);
+        // 不是 Markdown 记号的别误剥。
+        assert_eq!(
+            title("__init__.py 报错").as_deref(),
+            Some("__init__.py 报错")
+        );
+        assert_eq!(title("2026. 年度复盘").as_deref(), Some("2026. 年度复盘"));
+        assert_eq!(title("改 src/**/*.rs").as_deref(), Some("改 src/**/*.rs"));
+        assert_eq!(title("---\n真正的第一行").as_deref(), Some("真正的第一行"));
+        assert_eq!(
+            title("* * *\n真正的第一行").as_deref(),
+            Some("真正的第一行")
+        );
+        assert_eq!(title(&"长".repeat(50)).map(|t| t.chars().count()), Some(40));
+    }
+
+    /// 旧规则（原文前 40 字）算出来、落进 meta.json 的标题，读盘时按新规则重算；
+    /// 用户改过的名对不上旧规则，原样保留。会话列表和整份读盘两条路都要。
+    #[test]
+    fn old_derived_titles_are_recomputed_but_renames_are_kept() {
+        let _home = cordis_base::test_env::scoped().home();
+        let cwd = Path::new("/tmp/dock-persist-title-upgrade");
+        let write = |id: &str, title: &str, user: &str| {
+            let dir = sessions_cwd_dir(cwd).join(id);
+            fs::create_dir_all(&dir).unwrap();
+            let meta = serde_json::json!({"id": id, "title": title, "cwd": cwd, "updated_unix": 1});
+            fs::write(dir.join(META), meta.to_string()).unwrap();
+            let row = serde_json::json!({"ts": 1, "kind": "user", "text": user});
+            fs::write(dir.join(HISTORY), format!("{row}\n")).unwrap();
+        };
+        let msg = "## 会话历史改成懒加载\n\n正文第二行";
+        let legacy: String = msg.trim().chars().take(40).collect();
+        write("auto", &legacy, msg);
+        write("renamed", "## 我自己起的名", msg);
+
+        let loaded = load_cwd(cwd);
+        let title = |id: &str| loaded.iter().find(|s| s.id == id).unwrap().title.clone();
+        assert_eq!(title("auto"), "会话历史改成懒加载");
+        assert_eq!(title("renamed"), "## 我自己起的名");
+
+        let roster = load_roster();
+        let title = |id: &str| roster.iter().find(|r| r.id == id).unwrap().title.clone();
+        assert_eq!(title("auto"), "会话历史改成懒加载");
+        assert_eq!(title("renamed"), "## 我自己起的名");
+
+        remove("auto", cwd).unwrap();
+        remove("renamed", cwd).unwrap();
+    }
 
     #[test]
     fn encode_collapses_path_separators() {
