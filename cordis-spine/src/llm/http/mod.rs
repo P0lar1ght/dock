@@ -1505,6 +1505,29 @@ mod tests {
         assert!(text.starts_with("saved shot"), "{text}");
         assert!(!text.contains("Image content included inline"), "{text}");
         assert!(text.contains("纯文本") && text.contains("看不到"), "{text}");
+
+        // Messages / Responses 两条线同样不能绕过说明。
+        let params = WireParams {
+            images: false,
+            ..WireParams::resolve(None, None, None)
+        };
+        for (wire, body) in [
+            (
+                "messages",
+                serde_json::to_string(&messages::body("m", &req, &[], &params, false)).unwrap(),
+            ),
+            (
+                "responses",
+                serde_json::to_string(&responses::body("m", &req, &[], &params)).unwrap(),
+            ),
+        ] {
+            assert!(body.contains("saved shot"), "{wire}：{body}");
+            assert!(
+                !body.contains("Image content included inline"),
+                "{wire}：图没送过去就不能说已内联：{body}"
+            );
+            assert!(body.contains("纯文本"), "{wire}：{body}");
+        }
     }
 
     /// 纯文本模型（`supports_images = false`）：用户自己发的图也不能上线，正文里

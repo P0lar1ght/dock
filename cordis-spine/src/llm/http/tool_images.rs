@@ -41,7 +41,12 @@ pub(crate) fn degrade_tool_text(content: &str, images: &[UserImage], vision: boo
         return content.to_string();
     }
     let note = text_only_note(images.len());
-    let stripped = content.replace(crate::tools::tool_images::IMAGE_INLINE_PLACEHOLDER, "");
+    // 只去掉工具自己追加的那一行；正文里恰好提到这串字的要留着。
+    let stripped = content
+        .lines()
+        .filter(|line| line.trim() != crate::tools::tool_images::IMAGE_INLINE_PLACEHOLDER)
+        .collect::<Vec<_>>()
+        .join("\n");
     let stripped = stripped.trim();
     if stripped.is_empty() {
         note
@@ -144,4 +149,36 @@ fn user_with_images(text: &str, images: &[UserImage]) -> Value {
         }));
     }
     json!({"role": "user", "content": parts})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::tool_images::IMAGE_INLINE_PLACEHOLDER;
+
+    fn img() -> UserImage {
+        UserImage {
+            mime: "image/png".into(),
+            data: std::sync::Arc::from(vec![1u8, 2, 3].into_boxed_slice()),
+            width: 1,
+            height: 1,
+        }
+    }
+
+    /// 只换掉工具自己追加的那一行占位符；正文里恰好提到这串字（比如
+    /// `read_file` 读到一个引用它的源码文件）要原样留着。
+    #[test]
+    fn degrade_only_replaces_the_placeholder_line() {
+        let body = format!("let s = \"{IMAGE_INLINE_PLACEHOLDER}\";\n{IMAGE_INLINE_PLACEHOLDER}");
+        let out = degrade_tool_text(&body, &[img()], false);
+        assert!(
+            out.starts_with(&format!("let s = \"{IMAGE_INLINE_PLACEHOLDER}\";\n")),
+            "{out}"
+        );
+        assert_eq!(out.matches(IMAGE_INLINE_PLACEHOLDER).count(), 1, "{out}");
+        assert!(out.contains("纯文本"), "{out}");
+
+        let only = degrade_tool_text(IMAGE_INLINE_PLACEHOLDER, &[img()], false);
+        assert_eq!(only, text_only_note(1));
+    }
 }
