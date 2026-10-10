@@ -517,13 +517,59 @@ fn load_compact(dir: &Path, event_len: usize) -> (Option<Vec<LogEvent>>, usize) 
     (Some(prefix), file.from.min(event_len))
 }
 
-fn first_user_title(events: &[LogEvent]) -> Option<String> {
+/// 没改过名的会话标题：第一条用户消息的第一行有字的内容，最多 40 字。
+pub(crate) fn first_user_title(events: &[LogEvent]) -> Option<String> {
     events.iter().find_map(|e| match e {
-        LogEvent::User(text) => {
-            let t = text.trim();
-            (!t.is_empty()).then(|| t.chars().take(40).collect())
-        }
+        LogEvent::User(text) => title_from_text(text),
         _ => None,
+    })
+}
+
+/// 消息常是 Markdown：标题、引用、列表记号、代码围栏、加粗 / 行内代码记号不进标题。
+pub(crate) fn title_from_text(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            return None;
+        }
+        loop {
+            let before = t;
+            if let Some(rest) = t.strip_prefix('>') {
+                t = rest.trim_start();
+            }
+            let hashes = t.len() - t.trim_start_matches('#').len();
+            if (1..=6).contains(&hashes) {
+                let rest = &t[hashes..];
+                if rest.is_empty() || rest.starts_with([' ', '\t']) {
+                    t = rest.trim_start();
+                }
+            }
+            for marker in ["- ", "* ", "+ "] {
+                if let Some(rest) = t.strip_prefix(marker) {
+                    t = rest.trim_start();
+                }
+            }
+            let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if digits > 0 {
+                if let Some(rest) = t[digits..]
+                    .strip_prefix(". ")
+                    .or_else(|| t[digits..].strip_prefix(") "))
+                {
+                    t = rest.trim_start();
+                }
+            }
+            for task in ["[ ] ", "[x] ", "[X] "] {
+                if let Some(rest) = t.strip_prefix(task) {
+                    t = rest.trim_start();
+                }
+            }
+            if t == before {
+                break;
+            }
+        }
+        let t = t.replace("**", "").replace("__", "").replace('`', "");
+        let t = t.trim();
+        (!t.is_empty()).then(|| t.chars().take(40).collect())
     })
 }
 
@@ -739,6 +785,31 @@ mod tests {
     use super::*;
     use crate::session::log::ArchivedSession;
     use cordis_base::types::LogEvent;
+
+    #[test]
+    fn title_drops_markdown_markers_and_keeps_first_line() {
+        let title = |text: &str| first_user_title(&[LogEvent::User(text.into())]);
+        assert_eq!(
+            title("## 会话历史改成懒加载: 首屏 50 条\n\n正文第二行").as_deref(),
+            Some("会话历史改成懒加载: 首屏 50 条")
+        );
+        assert_eq!(
+            title("> **注意**：先看日志").as_deref(),
+            Some("注意：先看日志")
+        );
+        assert_eq!(title("- [ ] 写迁移脚本").as_deref(), Some("写迁移脚本"));
+        assert_eq!(title("1. 修 `load_page`").as_deref(), Some("修 load_page"));
+        assert_eq!(
+            title("```rust\nfn main() {}\n```").as_deref(),
+            Some("fn main() {}")
+        );
+        assert_eq!(
+            title("#hashtag 不是标题").as_deref(),
+            Some("#hashtag 不是标题")
+        );
+        assert_eq!(title("  \n###\n").as_deref(), None);
+        assert_eq!(title(&"长".repeat(50)).map(|t| t.chars().count()), Some(40));
+    }
 
     #[test]
     fn encode_collapses_path_separators() {

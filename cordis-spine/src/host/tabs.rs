@@ -887,7 +887,9 @@ fn tab_title(ctx: &Context) -> String {
     sessions
         .with_log(|events, _| {
             events.iter().find_map(|event| match event {
-                LogEvent::User(text) => Some(clip(text)),
+                LogEvent::User(text) => {
+                    crate::session::persist::title_from_text(text).map(|t| clip(&t))
+                }
                 _ => None,
             })
         })

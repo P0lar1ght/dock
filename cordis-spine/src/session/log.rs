@@ -1672,15 +1672,7 @@ impl Sessions {
         let id = self.take_archive_id();
         let title = self
             .live_title()
-            .or_else(|| {
-                events.iter().find_map(|e| match e {
-                    LogEvent::User(text) => {
-                        let t = text.trim();
-                        (!t.is_empty()).then(|| t.chars().take(40).collect())
-                    }
-                    _ => None,
-                })
-            })
+            .or_else(|| crate::session::persist::first_user_title(&events))
             .unwrap_or_else(|| id.clone());
         let times = self.times();
         let (compact_prefix, compact_from) = self.compact_snapshot();
@@ -1877,15 +1869,7 @@ impl Sessions {
         }
         let title = self
             .live_title()
-            .or_else(|| {
-                events.iter().find_map(|e| match e {
-                    LogEvent::User(text) => {
-                        let t = text.trim();
-                        (!t.is_empty()).then(|| t.chars().take(40).collect())
-                    }
-                    _ => None,
-                })
-            })
+            .or_else(|| crate::session::persist::first_user_title(&events))
             .unwrap_or_else(|| id.clone());
         let (compact_prefix, compact_from) = self.compact_snapshot();
         let item = ArchivedSession {
