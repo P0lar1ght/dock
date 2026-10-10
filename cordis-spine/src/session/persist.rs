@@ -524,7 +524,8 @@ fn load_compact(dir: &Path, event_len: usize) -> (Option<Vec<LogEvent>>, usize) 
 }
 
 /// 没改过名的会话标题：第一条用户消息的第一行有字的内容，最多 40 字。
-pub(crate) fn first_user_title(events: &[LogEvent]) -> Option<String> {
+/// 落盘、TUI 分页、网关 `live` 页共用这一条规则。
+pub fn first_user_title(events: &[LogEvent]) -> Option<String> {
     events.iter().find_map(|e| match e {
         LogEvent::User(text) => title_from_text(text),
         _ => None,

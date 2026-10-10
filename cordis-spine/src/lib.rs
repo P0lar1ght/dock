@@ -107,7 +107,7 @@ pub use session::log::{
     sessions, ArchivedSession, ChildLogEvent, PageLogEvent, PageTurnEnd, Sampling, Sessions, Steer,
     TokenUsage, TurnEndStatus, ROOT_IDENTITY,
 };
-pub use session::persist::{sessions_cwd_dir, RosterEntry};
+pub use session::persist::{first_user_title, sessions_cwd_dir, RosterEntry};
 pub use session::resume_preset::{apply_restored_preset, ApplyRestoredPreset};
 pub use session::roster::{roster, Roster};
 pub use session::search::{
