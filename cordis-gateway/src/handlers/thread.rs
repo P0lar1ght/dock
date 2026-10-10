@@ -308,17 +308,21 @@ pub async fn close(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcE
         return Err(RpcError::app("invalid_params", "第 1 页（live）关不掉"));
     }
     let tabs = tabs(gateway)?;
-    // 它的侧边聊天跟着关：侧边聊天是从这一页分叉的旁问，主会话没了它也就结束了。
-    if let Some(aside) = tabs.aside_of(&page.session_id()).and_then(Page::of_ctx) {
-        tabs.close_session(&aside.session_id())
-            .await
-            .map_err(|e| RpcError::app("close_failed", e))?;
-        gateway.drop_page(&aside.identity);
-    }
+    let before: Vec<String> = threads::open_pages(gateway)
+        .into_iter()
+        .map(|p| p.identity)
+        .collect();
+    // 它的侧边聊天由 `Tabs::close` 一起关；这里把关掉的每一页的投影都丢掉。
     tabs.close_session(&page.session_id())
         .await
         .map_err(|e| RpcError::app("close_failed", e))?;
-    gateway.drop_page(&page.identity);
+    let after: std::collections::HashSet<String> = threads::open_pages(gateway)
+        .into_iter()
+        .map(|p| p.identity)
+        .collect();
+    for identity in before.iter().filter(|i| !after.contains(*i)) {
+        gateway.drop_page(identity);
+    }
     Ok(json!({ "ok": true, "threadId": id }))
 }
 

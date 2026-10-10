@@ -185,6 +185,8 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 **插话在步骤边界送达，不取消。** 一轮在跑时再发一条有三种意思：排队（actor 队列，轮后单独成一轮）、插话（`SessionCommand::Steer` → `Sessions::push_steer` + `TurnControl::request_yield`）、停止并发送（`send_now`：取消 + 排到最前）。插话进的是会话自己的收件箱，循环在每一步开头（和信箱同一处，绝不夹在 tool_calls 与结果之间）取走，落成 `STEER_REMINDER` + `User`；模型要收尾时收件箱还有东西就再采一步；这一轮已经收尾才到的，actor 转成排在最前的消息。`request_yield` 是软信号：前台 bash 宽限 2 秒后转后台让路，别的都照常跑完。子代理用同一个收件箱（用户发给在跑的子代理的话）。
 
 **侧边聊天的笔记走同一个步骤边界，但不续一步。** 侧边聊天是只读旁问页（`TabKind::Aside`，`Tabs::open_aside_for` 不切页、从来源页继承设置，不占 9 页名额）。
+- 继承来源按页记（`Tabs::mount_source(id)`），并发建页互不串。
+- 旁问页记下分叉时来源页的会话 id；来源页换了会话就不再算它的侧边聊天。来源页关掉时 `Tabs::close` 把它一起关。
 - 起草：`draft_side_note` 隔离掉 `"sessions"` 采样一次，旁问页的日志不多一条。
 - 写入：`SessionCommand::SideNote`。actor 有任务在跑就 `push_side_note`，循环在步骤开头落；闲着直接 `append_side_note`。
 - 笔记不像插话那样让模型多采一步；收尾前没落的，actor 在这一轮之后补上。不开新的一轮。

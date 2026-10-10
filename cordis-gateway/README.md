@@ -395,10 +395,15 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 投影只从分叉那一刻往后：`thread/history` 的 `events` 不重放主线。
   - 旧的 `messages` 字段按会话日志给，仍带着主线快照。
 - 不落盘、不进 `thread/list`、不占 9 页的名额；每个主会话最多一个。
-- 主会话 `thread/close` 时它一起关。
+  - 同一会话并发 `start` 只开一个，后到的回 `existing: true`。
+- 主会话关页时它一起关（`thread/close`、TUI `/tab close` 都算）。
+- 主会话那一页换了会话（`Ctrl+W` / `/resume`）后，旧的侧边聊天不再属于它：
+  - 对新会话 `start` 会开一个新的；旧的那个关面板时照常 `thread/close`。
 - `handback`：侧边聊天还在回答回 `busy`；模型没写出正文回 `draft_failed`。
 - `merge`：笔记 ≤2000 字。主会话在跑就下一个步骤边界并入（`nextStep`），
   闲着直接落进历史（`history`）。**不开新的一轮**。
+  - `delivery` 只是提示：按发命令前的状态给，这一轮恰好在那之间收尾时，
+    回的是 `nextStep`，笔记实际补在轮末。以 `item/side_note` 推送为准。
   - 落盘是一条 system-reminder（前缀固定），旧客户端看不到它。
 
 ### 工作区文件（能力 `workspaceFiles`，`handlers/fs.rs`）

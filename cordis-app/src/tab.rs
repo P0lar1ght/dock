@@ -67,7 +67,7 @@ fn tab(index: usize, kind: TabKind, views: bool) -> Plugin {
         if kind == TabKind::Aside {
             ctx.plugin(aside_presets(), ())?.wait().await?;
         } else {
-            ctx.plugin(tab_presets(), ())?.wait().await?;
+            ctx.plugin(tab_presets(index), ())?.wait().await?;
         }
         // `GOAL` / `TODOS` 按页隔离（PER_TAB_SERVICES）：每页有自己的目标
         // 与待办服务，第 2 页的 /goal / todo_write 不再写进第 1 页。
@@ -77,7 +77,7 @@ fn tab(index: usize, kind: TabKind, views: bool) -> Plugin {
         ctx.plugin(todo_service(), ())?.wait().await?;
         // `PLAN_MODE` 按页隔离：分页各有自己的计划模式状态与计划文件。
         ctx.plugin(plan_mode_service(), ())?.wait().await?;
-        ctx.plugin(tab_settings(), ())?.wait().await?;
+        ctx.plugin(tab_settings(index), ())?.wait().await?;
         ctx.plugin(tab_permissions(), ())?.wait().await?;
         ctx.plugin(tab_ask(), ())?.wait().await?;
         ctx.plugin(turn(), ())?.wait().await?;
@@ -94,16 +94,16 @@ fn tab(index: usize, kind: TabKind, views: bool) -> Plugin {
     })
 }
 
-/// 新页从哪一页继承设置、cwd、预设：平时是正在看的那一页，网关给别的会话开侧边
-/// 聊天时是那个会话（[`Tabs::mount_source`]）。
-fn active_page(ctx: &cordis::Context) -> Option<cordis::Context> {
-    ctx.get::<Tabs>(TABS).map(|tabs| tabs.mount_source())
+/// 第 `index` 页从哪一页继承设置、cwd、预设：平时是开它时正在看的那一页，网关给
+/// 别的会话开侧边聊天时是那个会话（[`Tabs::mount_source`]）。
+fn source_page(ctx: &cordis::Context, index: usize) -> Option<cordis::Context> {
+    ctx.get::<Tabs>(TABS).map(|tabs| tabs.mount_source(index))
 }
 
 /// 抄当前页的模型、协议、权限模式。开页之后两页各改各的。
-fn tab_settings() -> Plugin {
-    plugin("tab.settings", Inject::new(), |ctx, _: &()| {
-        let forked = active_page(ctx)
+fn tab_settings(index: usize) -> Plugin {
+    plugin("tab.settings", Inject::new(), move |ctx, _: &()| {
+        let forked = source_page(ctx, index)
             .and_then(|page| page.get::<AppSettings>(SETTINGS))
             .map(|settings| settings.fork())
             .unwrap_or_else(|| AppSettings::new(""));
@@ -130,9 +130,9 @@ fn tab_ask() -> Plugin {
 ///
 /// 来源页没挂预设（精简装配）时这页也不挂——和预设的 fail-open 一致：没有
 /// `agentPresets` 的会话不设允许名单，跟以前落回根时一样。
-fn tab_presets() -> Plugin {
-    plugin("tab.presets", Inject::new(), |ctx, _: &()| {
-        let presets = active_page(ctx)
+fn tab_presets(index: usize) -> Plugin {
+    plugin("tab.presets", Inject::new(), move |ctx, _: &()| {
+        let presets = source_page(ctx, index)
             .and_then(|page| page.get::<AgentPresets>(AGENT_PRESETS))
             .map(|presets| presets.fork());
         let Some(presets) = presets else {
@@ -167,7 +167,7 @@ fn tab_sessions(index: usize, kind: TabKind) -> Plugin {
         let sessions = Sessions::tab(ctx.clone(), index);
         // 新页在开它的那一页的目录里起步（那一页 `/cd` 过就跟过去）。没钉的页跟随
         // 进程 cwd，新页也不钉，保持原样。
-        if let Some(cwd) = active_page(ctx)
+        if let Some(cwd) = source_page(ctx, index)
             .and_then(|page| page.get::<Sessions>(SESSIONS))
             .and_then(|s| s.workspace_cwd())
         {

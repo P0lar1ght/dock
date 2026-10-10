@@ -13,6 +13,7 @@
 //! 把会话开成一页——所以住在 spine，不在任何一个宿主的 crate 里。宿主自己的
 //! 每页视图（TUI 的滚动区、输入框……）经 [`TabsConfig::per_tab`] 加进隔离名单。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -117,6 +118,10 @@ struct Tab {
     /// 第 1 页就是根，没有可以 dispose 的 fiber。
     fiber: Option<Fiber>,
     origin: Option<usize>,
+    /// 旁问页分叉时来源页写的那份会话（`live_session_id`）。来源页之后换了会话
+    /// （`Ctrl+W` / `/resume`），这张旁问页带的就是旧会话的快照，不再算它的侧边
+    /// 聊天。空串 = 来源页当时还没落过盘，不比。常驻页恒为 `None`。
+    origin_session: Option<String>,
     kind: TabKind,
 }
 
@@ -133,9 +138,28 @@ struct Inner {
     tabs: Mutex<Vec<Tab>>,
     active: AtomicUsize,
     next_id: AtomicUsize,
-    /// 建页时新页从哪一页继承（模型、权限模式、cwd、预设）。平时是当前页；
-    /// 网关给某个会话开侧边聊天时那个会话不一定是当前页，开页期间指向它。
-    mount_from: Mutex<Option<Context>>,
+    /// 正在建的页（按稳定编号）从哪一页继承模型、权限模式、cwd、预设。按页记，
+    /// 并发建页互不串；建完或建页的 future 被取消都由 [`SourceGuard`] 撤掉。
+    mount_sources: Mutex<HashMap<usize, Context>>,
+    /// 串行 [`Tabs::open_aside_for`]：「这一页有没有侧边聊天」和「挂上新的一张」
+    /// 中间隔着建页的 await，不串行的话两个请求会各挂一张。
+    aside_opening: tokio::sync::Mutex<()>,
+}
+
+/// 建页期间登记的来源页，drop 时撤掉。
+struct SourceGuard<'a> {
+    inner: &'a Inner,
+    id: usize,
+}
+
+impl Drop for SourceGuard<'_> {
+    fn drop(&mut self) {
+        self.inner
+            .mount_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
 }
 
 impl Tabs {
@@ -145,6 +169,7 @@ impl Tabs {
             ctx: root.clone(),
             fiber: None,
             origin: None,
+            origin_session: None,
             kind: TabKind::Normal,
         };
         Self {
@@ -155,7 +180,8 @@ impl Tabs {
                 tabs: Mutex::new(vec![first]),
                 active: AtomicUsize::new(0),
                 next_id: AtomicUsize::new(2),
-                mount_from: Mutex::new(None),
+                mount_sources: Mutex::new(HashMap::new()),
+                aside_opening: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -175,15 +201,12 @@ impl Tabs {
             .count()
     }
 
-    /// 正在建的那一页该从哪一页继承设置：平时是当前页，[`Self::open_aside_for`]
-    /// 期间是被分叉的那一页。建页工厂（组合根）在挂插件时调。
-    pub fn mount_source(&self) -> Context {
-        self.inner
-            .mount_from
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or_else(|| self.active_ctx())
+    /// 正在建的第 `id` 页（建页工厂拿到的那个编号）该从哪一页继承设置：平时是
+    /// 开它时的当前页，[`Self::open_aside_for`] 开的是被分叉的那一页。建页工厂
+    /// （组合根）在挂插件时调；不在建页期间问的落回当前页。
+    pub fn mount_source(&self, id: usize) -> Context {
+        let source = self.inner.mount_sources.lock().unwrap().get(&id).cloned();
+        source.unwrap_or_else(|| self.active_ctx())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -322,7 +345,9 @@ impl Tabs {
         if !Sessions::can_adopt_archived(session_id, &cwd) {
             return Err("这个会话开不了页（只认当前工作目录下的历史）".into());
         }
-        let (id, child, fiber) = self.mount_page(TabKind::Normal, None).await?;
+        let (id, child, fiber) = self
+            .mount_page(TabKind::Normal, None, self.active_ctx())
+            .await?;
         let adopted = child
             .get::<Sessions>(SESSIONS)
             .is_some_and(|sessions| sessions.adopt_archived(session_id));
@@ -337,6 +362,7 @@ impl Tabs {
                 ctx: child,
                 fiber: Some(fiber),
                 origin: None,
+                origin_session: None,
                 kind: TabKind::Normal,
             });
             tabs.len() - 1
@@ -373,13 +399,20 @@ impl Tabs {
         id
     }
 
-    /// 起一棵页子树并把快照种进去。旁问页与常驻页共用这条路。
+    /// 起一棵页子树并把快照种进去。旁问页与常驻页共用这条路。新页的设置、cwd、
+    /// 预设从 `source` 继承（建页工厂经 [`Self::mount_source`] 取）。
     async fn mount_page(
         &self,
         kind: TabKind,
         seed: Option<Vec<LogEvent>>,
+        source: Context,
     ) -> Result<(usize, Context, Fiber), String> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        self.inner.mount_sources.lock().unwrap().insert(id, source);
+        let _source = SourceGuard {
+            inner: &self.inner,
+            id,
+        };
         // 只把该隔离的名字拉进新 realm，其余照旧解析到根。
         let mut child = self.inner.root.clone();
         for name in PER_TAB_SERVICES.iter().chain(self.inner.per_tab) {
@@ -423,8 +456,15 @@ impl Tabs {
             return Err(format!("最多 {MAX_TABS} 页"));
         }
         let origin = seed.as_ref().map(|(origin, _)| *origin);
+        let source = self.active_ctx();
+        let origin_session = (kind == TabKind::Aside).then(|| {
+            source
+                .get::<Sessions>(SESSIONS)
+                .map(|s| s.live_session_id())
+                .unwrap_or_default()
+        });
         let (id, child, fiber) = self
-            .mount_page(kind, seed.map(|(_, events)| events))
+            .mount_page(kind, seed.map(|(_, events)| events), source)
             .await?;
         let index = {
             let mut tabs = self.inner.tabs.lock().unwrap();
@@ -433,6 +473,7 @@ impl Tabs {
                 ctx: child,
                 fiber: Some(fiber),
                 origin,
+                origin_session,
                 kind,
             });
             tabs.len() - 1
@@ -451,7 +492,9 @@ impl Tabs {
         if self.count(TabKind::Normal) >= MAX_TABS {
             return Err(format!("最多 {MAX_TABS} 页"));
         }
-        let (id, child, fiber) = self.mount_page(TabKind::Normal, None).await?;
+        let (id, child, fiber) = self
+            .mount_page(TabKind::Normal, None, self.active_ctx())
+            .await?;
         let opened = (|| {
             // 建页时继承的是当前页的 cwd；改钉到 `cwd`，再按新目录重新挂盘。
             crate::change_dir(&child, cwd)?;
@@ -475,6 +518,7 @@ impl Tabs {
             ctx: child.clone(),
             fiber: Some(fiber),
             origin: None,
+            origin_session: None,
             kind: TabKind::Normal,
         });
         Ok(child)
@@ -509,7 +553,11 @@ impl Tabs {
     ///
     /// 和 [`Self::ask_aside`] 一样带着来源页的上下文快照、只读预设、不落盘；不同
     /// 的是来源页不必是当前页（设置、cwd 从来源页继承），也不替用户发问题。
+    ///
+    /// 同一页的并发调用串行：后到的拿到先到的那张。TUI `/btw` 不走这条，同一页
+    /// 可以另有 `/btw` 开的旁问页；那样回的是最早开的那张。
     pub async fn open_aside_for(&self, parent_session_id: &str) -> Result<(Context, bool), String> {
+        let _opening = self.inner.aside_opening.lock().await;
         let (parent_id, parent_ctx) = {
             let index = self
                 .index_of_session(parent_session_id)
@@ -528,32 +576,30 @@ impl Tabs {
             .get::<Sessions>(SESSIONS)
             .map(|s| s.model_history())
             .unwrap_or_default();
-        *self.inner.mount_from.lock().unwrap() = Some(parent_ctx);
-        let mounted = if self.count(TabKind::Aside) >= MAX_TABS {
-            Err(format!("最多 {MAX_TABS} 个侧边聊天"))
-        } else {
-            self.mount_page(TabKind::Aside, Some(snapshot)).await
-        };
-        *self.inner.mount_from.lock().unwrap() = None;
-        let (id, child, fiber) = mounted?;
+        if self.count(TabKind::Aside) >= MAX_TABS {
+            return Err(format!("最多 {MAX_TABS} 个侧边聊天"));
+        }
+        let (id, child, fiber) = self
+            .mount_page(TabKind::Aside, Some(snapshot), parent_ctx)
+            .await?;
         self.inner.tabs.lock().unwrap().push(Tab {
             id,
             ctx: child.clone(),
             fiber: Some(fiber),
             origin: Some(parent_id),
+            origin_session: Some(parent_session_id.to_string()),
             kind: TabKind::Aside,
         });
         Ok((child, false))
     }
 
-    /// 稳定编号 `parent_id` 那一页的旁问页。
+    /// 稳定编号 `parent_id` 那一页的旁问页（来源页换过会话后留下的旧旁问页不算）。
     fn aside_of_id(&self, parent_id: usize) -> Option<Context> {
-        self.inner
-            .tabs
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|t| t.kind == TabKind::Aside && t.origin == Some(parent_id))
+        let tabs = self.inner.tabs.lock().unwrap();
+        tabs.iter()
+            .find(|t| {
+                t.kind == TabKind::Aside && t.origin == Some(parent_id) && aside_current(&tabs, t)
+            })
             .map(|t| t.ctx.clone())
     }
 
@@ -564,16 +610,40 @@ impl Tabs {
         self.aside_of_id(parent_id)
     }
 
-    /// `session_id` 是一张旁问页时，它的来源页（还开着的话）。不是旁问页是 `None`。
+    /// `session_id` 是一张旁问页时，它的来源页（还开着、没换会话的话）。不是旁问页
+    /// 是 `None`。
     pub fn aside_parent(&self, session_id: &str) -> Option<Context> {
         let index = self.index_of_session(session_id)?;
         let tabs = self.inner.tabs.lock().unwrap();
         let tab = &tabs[index];
-        if tab.kind != TabKind::Aside {
+        if tab.kind != TabKind::Aside || !aside_current(&tabs, tab) {
             return None;
         }
         let origin = tab.origin?;
         tabs.iter().find(|t| t.id == origin).map(|t| t.ctx.clone())
+    }
+
+    /// 当前页是旁问页时：`(旁问页, 来源页, 来源页的号)`，`/tab merge` 的两头。当前页
+    /// 不是旁问页回 `Ok(None)`。来源页关了、或者换过会话（笔记会写进另一份会话）
+    /// 报错。在一把锁里取，中间关页不会错位。
+    pub fn active_aside_origin(&self) -> Result<Option<(Context, Context, usize)>, String> {
+        let tabs = self.inner.tabs.lock().unwrap();
+        let index = self.active_index().min(tabs.len().saturating_sub(1));
+        let tab = tabs.get(index).ok_or_else(|| "没有当前页".to_string())?;
+        if tab.kind != TabKind::Aside {
+            return Ok(None);
+        }
+        let origin_id = tab.origin.ok_or_else(|| "这一页没有来源页".to_string())?;
+        let origin = tabs
+            .iter()
+            .find(|t| t.id == origin_id)
+            .ok_or_else(|| format!("来源页（第 {origin_id} 页）已经关掉了"))?;
+        if !aside_current(&tabs, tab) {
+            return Err(format!(
+                "第 {origin_id} 页已经换了会话，这段旁问是从之前那份会话分叉的，不写进去"
+            ));
+        }
+        Ok(Some((tab.ctx.clone(), origin.ctx.clone(), origin_id)))
     }
 
     /// `session_id` 那一页是不是旁问页。
@@ -681,10 +751,37 @@ impl Tabs {
     }
 
     /// 关掉第 `index` 页。第一页关不掉（它是根，关了就没有 dock 了）。
+    ///
+    /// 从这一页分叉的旁问页（`/btw`、GUI 的侧边聊天）跟着关：来源页没了，它们
+    /// 既带不回、也写不回。TUI `/tab close` 和网关 `thread/close` 都走这里。
     pub async fn close(&self, index: usize) -> Result<usize, String> {
         if index == 0 {
             return Err("第一页关不掉（它是主会话）".into());
         }
+        let id = {
+            let tabs = self.inner.tabs.lock().unwrap();
+            tabs.get(index)
+                .map(|t| t.id)
+                .ok_or_else(|| "没有这一页".to_string())?
+        };
+        loop {
+            let aside = self
+                .inner
+                .tabs
+                .lock()
+                .unwrap()
+                .iter()
+                .position(|t| t.kind == TabKind::Aside && t.origin == Some(id));
+            let Some(aside) = aside else { break };
+            self.close_one(aside).await?;
+        }
+        let index = self
+            .index_of_id(id)
+            .ok_or_else(|| "没有这一页".to_string())?;
+        self.close_one(index).await
+    }
+
+    async fn close_one(&self, index: usize) -> Result<usize, String> {
         let tab = {
             let mut tabs = self.inner.tabs.lock().unwrap();
             if index >= tabs.len() {
@@ -742,6 +839,20 @@ fn last_reply(sessions: &Sessions) -> Option<String> {
 fn carried_block(from: usize, text: &str) -> String {
     let quoted: String = text.lines().map(|line| format!("> {line}\n")).collect();
     format!("（来自第 {from} 页）\n{quoted}\n")
+}
+
+/// 旁问页还跟着它分叉时的那份会话：来源页还开着，并且没换会话。
+fn aside_current(tabs: &[Tab], aside: &Tab) -> bool {
+    let Some(origin) = aside.origin.and_then(|id| tabs.iter().find(|t| t.id == id)) else {
+        return false;
+    };
+    match aside.origin_session.as_deref() {
+        None | Some("") => true,
+        Some(forked_from) => origin
+            .ctx
+            .get::<Sessions>(SESSIONS)
+            .is_some_and(|s| s.live_session_id() == forked_from),
+    }
 }
 
 fn tab_working(ctx: &Context) -> bool {
@@ -990,7 +1101,7 @@ mod tests {
             plugin("tab-sessions", Inject::new(), move |ctx, _: &()| {
                 let from = ctx
                     .get::<Tabs>(TABS)
-                    .and_then(|t| t.mount_source().get::<Sessions>(SESSIONS))
+                    .and_then(|t| t.mount_source(id).get::<Sessions>(SESSIONS))
                     .map(|s| s.identity().to_string())
                     .unwrap_or_default();
                 seen.lock().unwrap().push(from);
@@ -1060,6 +1171,135 @@ mod tests {
             tabs.open().await.unwrap();
         }
         assert_eq!(tabs.len(), MAX_TABS + 1, "旁问页不占常驻页的名额");
+    }
+
+    /// 同 [`session_mount`]，但旁问页要等 `gate` 放行才挂好（`waiting` 记有几张在等）：
+    /// 好在它建到一半时插进别的操作。
+    fn gated_mount(
+        seen: Arc<Mutex<Vec<String>>>,
+        gate: Arc<tokio::sync::Semaphore>,
+        waiting: Arc<AtomicUsize>,
+    ) -> TabMount {
+        let inner = session_mount(seen);
+        Arc::new(move |id, kind| {
+            let page = inner(id, kind);
+            let gate = gate.clone();
+            let waiting = waiting.clone();
+            cordis::plugin_async("gated", Inject::new(), move |ctx, _: &()| {
+                let (page, gate, waiting) = (page.clone(), gate.clone(), waiting.clone());
+                async move {
+                    if kind == TabKind::Aside {
+                        waiting.fetch_add(1, Ordering::SeqCst);
+                        gate.acquire().await.unwrap().forget();
+                    }
+                    ctx.plugin(page, ())?.wait().await?;
+                    Ok(None)
+                }
+            })
+        })
+    }
+
+    struct Gated {
+        tabs: Tabs,
+        seen: Arc<Mutex<Vec<String>>>,
+        gate: Arc<tokio::sync::Semaphore>,
+        waiting: Arc<AtomicUsize>,
+    }
+
+    async fn gated_boot() -> Gated {
+        let root = Context::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let waiting = Arc::new(AtomicUsize::new(0));
+        root.plugin(
+            tabs(),
+            TabsConfig::headless(gated_mount(seen.clone(), gate.clone(), waiting.clone())),
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+        let tabs = (*root.get::<Tabs>(TABS).unwrap()).clone();
+        Gated {
+            tabs,
+            seen,
+            gate,
+            waiting,
+        }
+    }
+
+    fn identity_of(ctx: &Context) -> String {
+        ctx.get::<Sessions>(SESSIONS)
+            .unwrap()
+            .identity()
+            .to_string()
+    }
+
+    /// 侧边聊天建到一半时另开一页（TUI `Ctrl+N`），或者建侧边聊天的请求被取消：
+    /// 那一页都该从当前页继承，不能串到被分叉的那一页上。以前来源是一个全局槽，
+    /// 建页期间谁来都读到它；future 取消时也不复位。
+    #[tokio::test]
+    async fn pages_opened_while_an_aside_mounts_inherit_the_active_page() {
+        let Gated {
+            tabs,
+            seen,
+            gate,
+            waiting,
+        } = gated_boot().await;
+        tabs.open().await.unwrap();
+        let parent = session_id_of(&tabs.active_ctx());
+        tabs.open().await.unwrap();
+        let active_index = tabs.active_index();
+        let active = identity_of(&tabs.active_ctx());
+
+        let opening = tokio::spawn({
+            let tabs = tabs.clone();
+            let parent = parent.clone();
+            async move { tabs.open_aside_for(&parent).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while waiting.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("旁问页开始建");
+        tabs.open().await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap().last(),
+            Some(&active),
+            "建到一半另开的页"
+        );
+
+        opening.abort();
+        let _ = opening.await;
+        tabs.activate(active_index);
+        tabs.open().await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap().last(),
+            Some(&active),
+            "建侧边聊天被取消之后开的页"
+        );
+        gate.add_permits(1);
+    }
+
+    /// 同一页的侧边聊天并发开两次：只挂一张，后到的拿到同一张。
+    #[tokio::test]
+    async fn concurrent_asides_for_one_page_share_one() {
+        let Gated { tabs, gate, .. } = gated_boot().await;
+        tabs.open().await.unwrap();
+        let parent = session_id_of(&tabs.active_ctx());
+        let open = |tabs: Tabs, parent: String| {
+            tokio::spawn(async move { tabs.open_aside_for(&parent).await })
+        };
+        let a = open(tabs.clone(), parent.clone());
+        let b = open(tabs.clone(), parent.clone());
+        gate.add_permits(2);
+        let (a, a_existing) = a.await.unwrap().unwrap();
+        let (b, b_existing) = b.await.unwrap().unwrap();
+        assert_eq!(session_id_of(&a), session_id_of(&b));
+        assert!(a_existing != b_existing, "一个新开、一个回已有的");
+        assert_eq!(tabs.count(TabKind::Aside), 1);
     }
 
     #[tokio::test]

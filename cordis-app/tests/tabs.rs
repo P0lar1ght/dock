@@ -992,7 +992,7 @@ async fn tab_merge_writes_the_note_into_the_origin() {
     eventually("笔记落进来源页", || {
         main.events().iter().any(|e| {
             matches!(e, LogEvent::SystemReminder(t)
-                if cordis_spine::side_note_text(t) == Some("retry 要退避"))
+                if cordis_spine::side_note_text(t).as_deref() == Some("retry 要退避"))
         })
     })
     .await;
@@ -1011,4 +1011,73 @@ async fn tab_merge_writes_the_note_into_the_origin() {
     );
     let too_long = "字".repeat(cordis_spine::SIDE_NOTE_MAX_CHARS + 1);
     assert!(cordis_tui::merge_note(&tabs, &too_long).is_err());
+}
+
+/// TUI `/tab close` 关掉来源页：它的侧边聊天（网关开的）和 `/btw` 旁问页一起关，
+/// 不留孤儿。以前只有网关 `thread/close` 级联，TUI 关页后侧边聊天还挂着。
+#[tokio::test]
+async fn closing_a_page_closes_its_asides() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    tabs.open().await.unwrap();
+    let parent_id = tabs.active_id();
+    let parent = tabs.active_ctx().get::<Sessions>(SESSIONS).unwrap();
+    parent.append(LogEvent::User("主线".into()));
+    let (side, _) = tabs
+        .open_aside_for(&parent.live_session_id())
+        .await
+        .unwrap();
+    let side_id = side.get::<Sessions>(SESSIONS).unwrap().live_session_id();
+    tabs.ask_aside("顺便问一句".into()).await.unwrap();
+    assert_eq!(tabs.len(), 4);
+
+    tabs.close_id(Some(parent_id)).await.unwrap();
+    assert_eq!(tabs.len(), 1, "来源页关了，旁问页一起关：{:?}", tabs.list());
+    assert!(!tabs.is_aside(&side_id));
+    assert_eq!(tabs.active_index(), 0);
+}
+
+/// 来源页 `/new`（`Ctrl+W`）换了会话：之前那张侧边聊天带的是旧会话的快照，
+/// 不再算这一页的侧边聊天——网关再开要开新的，`/tab merge` 不能把笔记写进新会话。
+#[tokio::test]
+async fn an_aside_does_not_follow_its_page_into_a_new_session() {
+    let root = boot().await;
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    tabs.open().await.unwrap();
+    let parent = tabs.active_ctx().get::<Sessions>(SESSIONS).unwrap();
+    parent.append(LogEvent::User("旧会话".into()));
+    let old_id = parent.live_session_id();
+    let (old_side, _) = tabs.open_aside_for(&old_id).await.unwrap();
+    tabs.ask_aside("顺便问一句".into()).await.unwrap();
+    let btw = tabs.active_index();
+
+    // `/new` 的那两步。
+    parent.archive_current();
+    parent.clear();
+    parent.append(LogEvent::User("新会话".into()));
+    let new_id = parent.live_session_id();
+    assert_ne!(new_id, old_id);
+
+    assert!(tabs.aside_of(&new_id).is_none(), "旧的侧边聊天不归新会话");
+    let (new_side, existing) = tabs.open_aside_for(&new_id).await.unwrap();
+    assert!(!existing);
+    assert_ne!(
+        new_side
+            .get::<Sessions>(SESSIONS)
+            .unwrap()
+            .live_session_id(),
+        old_side
+            .get::<Sessions>(SESSIONS)
+            .unwrap()
+            .live_session_id()
+    );
+
+    tabs.activate(btw);
+    let err = cordis_tui::merge_note(&tabs, "旧结论").unwrap_err();
+    assert!(err.contains("换了会话"), "{err}");
+    assert!(
+        !parent.events().iter().any(|e| matches!(e,
+            LogEvent::SystemReminder(t) if cordis_spine::side_note_text(t).is_some())),
+        "笔记不该进新会话"
+    );
 }

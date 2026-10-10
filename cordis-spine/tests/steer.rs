@@ -224,7 +224,7 @@ async fn a_side_note_joins_at_the_next_step_boundary() {
         .iter()
         .position(|e| {
             matches!(e, LogEvent::SystemReminder(t)
-                if cordis_spine::side_note_text(t) == Some("旁问结论：retry 要退避"))
+                if cordis_spine::side_note_text(t).as_deref() == Some("旁问结论：retry 要退避"))
         })
         .expect("第二次采样要看到笔记");
     assert!(

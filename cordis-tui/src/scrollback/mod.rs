@@ -1065,6 +1065,7 @@ fn build_frame_with(
             // 侧边聊天写进来的笔记：模型看得到，用户也该看得到——画成一张默认收起的卡。
             LogEvent::SystemReminder(text) if cordis_spine::side_note_text(text).is_some() => {
                 let note = cordis_spine::side_note_text(text).unwrap_or_default();
+                let note = note.as_ref();
                 let id = notice::header_id(i, "side-note", note);
                 let mode = tool_fold
                     .get(&id)

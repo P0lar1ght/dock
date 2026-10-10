@@ -149,7 +149,7 @@ fn test_page_mount() -> cordis_spine::TabMount {
                 // 预设按页：和 `cordis-app` 的 `tab.presets` 一样从上层 fork 一份。
                 let presets = ctx
                     .get::<cordis_spine::Tabs>(cordis_spine::TABS)
-                    .and_then(|tabs| tabs.mount_source().get::<AgentPresets>(AGENT_PRESETS))
+                    .and_then(|tabs| tabs.mount_source(index).get::<AgentPresets>(AGENT_PRESETS))
                     .map(|p| p.fork());
                 if let Some(presets) = &presets {
                     sessions.seed_preset_if_unset(&presets.current_id());

@@ -845,22 +845,38 @@ mod tests {
     /// 闲着的页写进侧边聊天笔记：直接落进历史，不开新的一轮。
     #[tokio::test]
     async fn an_idle_side_note_lands_without_starting_a_turn() {
-        let (root, handle, _started, _release) = held_session().await;
+        let (root, handle, started, release) = held_session().await;
         let sessions = root.require::<Sessions>(SESSIONS).unwrap();
         handle.merge_side_note("旁问结论");
         wait_until("笔记落进历史", || {
             side_note_at(&sessions.events()).is_some()
         })
         .await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // 不靠睡一会儿再看：actor 按顺序处理命令，笔记要是开了一轮，紧跟着的这条
+        // 就会排进队里，而不是自己开一轮。
+        let sampling = started.notified();
+        tokio::pin!(sampling);
+        sampling.as_mut().enable();
+        handle.submit("probe", false);
+        tokio::time::timeout(Duration::from_secs(2), sampling)
+            .await
+            .expect("probe 自己开一轮");
+        assert!(handle.queued_prompts().is_empty(), "probe 不该排队");
         let events = sessions.events();
-        assert!(!handle.working(), "笔记不该开一轮");
-        assert!(
-            !events
+        let probe = events
+            .iter()
+            .position(|e| matches!(e, LogEvent::User(t) if t == "probe"))
+            .expect("probe 进了历史");
+        assert!(side_note_at(&events).unwrap() < probe, "{events:?}");
+        assert_eq!(
+            events
                 .iter()
-                .any(|e| matches!(e, LogEvent::User(_) | LogEvent::PreStep)),
-            "{events:?}"
+                .filter(|e| matches!(e, LogEvent::PreStep))
+                .count(),
+            1,
+            "只有 probe 那一轮：{events:?}"
         );
+        release.notify_waiters();
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
     }
 

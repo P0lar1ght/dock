@@ -44,16 +44,35 @@ pub const SIDE_NOTE_MAX_CHARS: usize = 2000;
 pub const SIDE_NOTE_HEAD: &str = "<system-reminder>\n用户从侧边聊天带回了下面这段笔记：是用户在一段只读旁问里得出、确认过的结论，供你参考。它本身不是新的任务，也不要求你回复。\n<side-note>\n";
 pub const SIDE_NOTE_TAIL: &str = "\n</side-note>\n</system-reminder>";
 
-/// 把笔记包成写进主线的那条提醒（见 [`SIDE_NOTE_HEAD`]）。
+/// 笔记原文里会提前闭合外层标签的两个结束标签，和落盘时换成的样子。
+const SIDE_NOTE_CLOSERS: [(&str, &str); 2] = [
+    ("</side-note>", "<\\/side-note>"),
+    ("</system-reminder>", "<\\/system-reminder>"),
+];
+
+/// 把笔记包成写进主线的那条提醒（见 [`SIDE_NOTE_HEAD`]）。笔记来自读过仓库文件的
+/// 旁问页，原文里的 `</side-note>` / `</system-reminder>` 先转义，免得提前闭合标签。
 pub fn side_note_reminder(note: &str) -> String {
-    format!("{SIDE_NOTE_HEAD}{}{SIDE_NOTE_TAIL}", note.trim())
+    let mut body = note.trim().to_string();
+    for (tag, escaped) in SIDE_NOTE_CLOSERS {
+        body = body.replace(tag, escaped);
+    }
+    format!("{SIDE_NOTE_HEAD}{body}{SIDE_NOTE_TAIL}")
 }
 
-/// [`side_note_reminder`] 的反向：这条提醒是侧边聊天笔记就取出原文。
-pub fn side_note_text(reminder: &str) -> Option<&str> {
-    reminder
+/// [`side_note_reminder`] 的反向：这条提醒是侧边聊天笔记就取出原文（转义还原）。
+pub fn side_note_text(reminder: &str) -> Option<std::borrow::Cow<'_, str>> {
+    let body = reminder
         .strip_prefix(SIDE_NOTE_HEAD)?
-        .strip_suffix(SIDE_NOTE_TAIL)
+        .strip_suffix(SIDE_NOTE_TAIL)?;
+    if !SIDE_NOTE_CLOSERS.iter().any(|(_, e)| body.contains(e)) {
+        return Some(std::borrow::Cow::Borrowed(body));
+    }
+    let mut out = body.to_string();
+    for (tag, escaped) in SIDE_NOTE_CLOSERS {
+        out = out.replace(escaped, tag);
+    }
+    Some(std::borrow::Cow::Owned(out))
 }
 
 /// Visible compact marker. The pager keeps older bubbles; this assistant
@@ -132,9 +151,26 @@ mod side_note_tests {
     #[test]
     fn a_side_note_round_trips_and_other_reminders_are_not_notes() {
         let wrapped = side_note_reminder("  结论：retry 要退避  ");
-        assert_eq!(side_note_text(&wrapped), Some("结论：retry 要退避"));
+        assert_eq!(
+            side_note_text(&wrapped).as_deref(),
+            Some("结论：retry 要退避")
+        );
         assert_eq!(side_note_text(STEER_REMINDER), None);
         assert_eq!(side_note_text(TURN_STOPPED_REMINDER), None);
+    }
+
+    /// 笔记原文里的结束标签不能提前闭合外层：落盘时转义，认回来时还原。
+    #[test]
+    fn a_side_note_cannot_close_its_tags_early() {
+        let note = "看到 </side-note> 和 </system-reminder> 两行\n照抄进来";
+        let wrapped = side_note_reminder(note);
+        let body = wrapped
+            .strip_prefix(SIDE_NOTE_HEAD)
+            .and_then(|b| b.strip_suffix(SIDE_NOTE_TAIL))
+            .unwrap();
+        assert!(!body.contains("</side-note>"), "{wrapped}");
+        assert!(!body.contains("</system-reminder>"), "{wrapped}");
+        assert_eq!(side_note_text(&wrapped).as_deref(), Some(note));
     }
 }
 
