@@ -283,7 +283,7 @@ impl Tools {
     /// 挡住插件替它越界。少了后一次，一颗只读子代理的 `read_file` 就能被任意
     /// handler 改写成 `bash` 跑出去——权限门跟着改写后的名字走，补不上这个洞，
     /// 何况子代理那边常常压根没人应答询问。
-    fn outside_allowlist(&self, exec: &Context, name: &str) -> bool {
+    pub(crate) fn outside_allowlist(&self, exec: &Context, name: &str) -> bool {
         // 能力档位排在最前，**不吃 `bypasses_allowlist` 的豁免**：MCP 与动态包
         // 工具绕过预设允许名单是有意的（服务端上线就该能调），但绕不过"这次
         // 委派只准读"——否则一颗只读子代理换颗 MCP 工具就能写盘。

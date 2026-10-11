@@ -24,6 +24,8 @@ struct Pending {
     /// 入队序号，见 [`Permissions::front_seq`]。
     seq: u64,
     prompt: PermissionPrompt,
+    /// 只读场景的请求（[`Permissions::request_strict`]）：「始终允许」不替它点头。
+    strict: bool,
     tx: oneshot::Sender<PermissionOptionKind>,
 }
 
@@ -67,26 +69,44 @@ impl Permissions {
     /// Resolve the front of the queue. Returns `false` when empty so a second
     /// resolver (TUI vs web) can fail closed instead of auto-allowing.
     pub fn resolve(&self, kind: PermissionOptionKind) -> bool {
-        let Some(pending) = self.queue.lock().unwrap().pop_front() else {
+        let mut queue = self.queue.lock().unwrap();
+        let Some(pending) = queue.pop_front() else {
             return false;
         };
+        let tool = pending.prompt.tool.clone();
+        // 「始终 / 永不」对队列里同一颗工具已经排着的请求同样生效（一批只读命令并发跑时
+        // 会一下排好几条），不然用户刚选了「始终允许」，后面几条还要一条条点。只读场景
+        // 的请求不吃「始终允许」，照旧留在队列里等人点头；「永不」它也认。
+        let mut also = Vec::new();
         match kind {
             PermissionOptionKind::AllowAlways => {
-                self.always
-                    .lock()
-                    .unwrap()
-                    .insert(pending.prompt.tool.clone());
+                self.always.lock().unwrap().insert(tool.clone());
+                queue.retain_mut(|p| {
+                    let same = p.prompt.tool == tool && !p.strict;
+                    if same {
+                        also.push(std::mem::replace(&mut p.tx, oneshot::channel().0));
+                    }
+                    !same
+                });
             }
             PermissionOptionKind::RejectAlways => {
-                self.never
-                    .lock()
-                    .unwrap()
-                    .insert(pending.prompt.tool.clone());
+                self.never.lock().unwrap().insert(tool.clone());
+                queue.retain_mut(|p| {
+                    let same = p.prompt.tool == tool;
+                    if same {
+                        also.push(std::mem::replace(&mut p.tx, oneshot::channel().0));
+                    }
+                    !same
+                });
             }
             _ => {}
         }
+        drop(queue);
         *self.last_resolve.lock().unwrap() = Some(kind);
         let _ = pending.tx.send(kind);
+        for tx in also {
+            let _ = tx.send(kind);
+        }
         self.ctx.emit(PERMISSION_EVENT, ());
         true
     }
@@ -132,6 +152,7 @@ impl Permissions {
             + 1;
         self.queue.lock().unwrap().push_back(Pending {
             seq,
+            strict,
             prompt: PermissionPrompt {
                 tool: tool.to_string(),
                 summary: summary.to_string(),
@@ -156,6 +177,48 @@ pub fn permissions() -> Plugin {
 mod tests {
     use super::*;
     use cordis::Context;
+
+    /// 回归：同一颗工具排着几条请求（一批只读 bash 并发跑时就是这样），用户对第一条选
+    /// 「始终允许」后，后面几条以前还要一条条再点。现在跟着一起放行；只读场景（严格）的不算。
+    #[tokio::test]
+    async fn allow_always_releases_the_rest_of_the_queue_for_that_tool() {
+        let ctx = Context::new();
+        let perms = std::sync::Arc::new(Permissions::new(ctx));
+        let ask = |tool: &'static str, strict: bool| {
+            let perms = perms.clone();
+            tokio::spawn(async move { perms.ask(tool, "s", None, strict).await })
+        };
+        let first = ask("bash", false);
+        let second = ask("bash", false);
+        let strict = ask("bash", true);
+        let other = ask("write_file", false);
+        while perms.queue.lock().unwrap().len() < 4 {
+            tokio::task::yield_now().await;
+        }
+        assert!(perms.resolve(PermissionOptionKind::AllowAlways));
+        let within = |h: tokio::task::JoinHandle<bool>| async move {
+            tokio::time::timeout(std::time::Duration::from_secs(2), h)
+                .await
+                .ok()
+                .and_then(Result::ok)
+        };
+        assert_eq!(within(first).await, Some(true));
+        assert_eq!(
+            within(second).await,
+            Some(true),
+            "同一颗工具排着的那条要跟着放行"
+        );
+        assert_eq!(
+            perms.front().map(|p| p.tool),
+            Some("bash".to_string()),
+            "只读场景的那条照旧要人点头"
+        );
+        assert!(perms.resolve(PermissionOptionKind::RejectOnce));
+        assert!(!strict.await.unwrap());
+        assert_eq!(perms.front().map(|p| p.tool), Some("write_file".into()));
+        assert!(perms.resolve(PermissionOptionKind::AllowOnce));
+        assert!(other.await.unwrap());
+    }
 
     #[test]
     fn resolve_returns_false_when_empty() {

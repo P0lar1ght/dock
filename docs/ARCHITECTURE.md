@@ -182,6 +182,8 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 
 安全上限 256 步。换 driver 只换 `agent-loop` 插件，不动 actor。
 
+**一次回复里的工具调用：只读的一起跑，别的一颗一颗跑。** 循环把 `tool_calls` 切成几批（`agent/runtime.rs` 的 `parallel_batches`）：连在一起的只读调用（读文件、搜索、看目录、查网页、读记忆、LSP、读技能、`search_tool`，以及只读的 bash 命令——判断同只读场景，`cordis_base::read_only_shell`）一批并发执行，别的每颗自成一批；批与批按顺序跑，结果按模型给的顺序落成 `ToolExecute`，所以「先改再读」的先后不变。分类在 `agent/capability.rs` 的 `parallel_safe`，认不出来的（MCP、动态包、浏览器）一律不并行。参考 Codex 的 `tools/parallel.rs`（能并行的拿读锁，别的拿写锁）。系统提示词同时要求彼此不依赖的调用放进同一次回复，少一来一回。
+
 **插话在步骤边界送达，不取消。** 一轮在跑时再发一条有三种意思：排队（actor 队列，轮后单独成一轮）、插话（`SessionCommand::Steer` → `Sessions::push_steer` + `TurnControl::request_yield`）、停止并发送（`send_now`：取消 + 排到最前）。插话进的是会话自己的收件箱，循环在每一步开头（和信箱同一处，绝不夹在 tool_calls 与结果之间）取走，落成 `STEER_REMINDER` + `User`；模型要收尾时收件箱还有东西就再采一步；这一轮已经收尾才到的，actor 转成排在最前的消息。`request_yield` 是软信号：前台 bash 宽限 2 秒后转后台让路，别的都照常跑完。子代理用同一个收件箱（用户发给在跑的子代理的话）。
 
 **侧边聊天的笔记走同一个步骤边界，但不续一步。** 侧边聊天是只读旁问页（`TabKind::Aside`，`Tabs::open_aside_for` 不切页、从来源页继承设置，不占 9 页名额）。

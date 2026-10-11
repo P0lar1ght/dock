@@ -35,6 +35,12 @@ fn gated_builtin(tool: &str) -> bool {
 /// 内置浏览器 MCP 里跑任意 JS 的那一颗：和 bash 同级。其余 `mcp_browser__*` 只动页面，
 /// 不过门（以前进程内的 `browser_*` 也是这个划分）。
 pub const BROWSER_EVALUATE_MCP: &str = "mcp_browser__browser_evaluate";
+/// `browser_js`：跑一段 Playwright 脚本，能力比 evaluate 还大，同样和 bash 同级。
+pub const BROWSER_JS_MCP: &str = "mcp_browser__browser_js";
+
+fn runs_browser_code(tool: &str) -> bool {
+    tool == BROWSER_EVALUATE_MCP || tool == BROWSER_JS_MCP
+}
 
 /// Computer-use via cua-driver MCP: same ask/plan gate as bash (C0).
 /// All `mcp_cua-driver__*` tools are gated — desktop control is sensitive even
@@ -44,12 +50,12 @@ pub fn is_cua_driver_mcp(tool: &str) -> bool {
 }
 
 pub fn needs_permission(tool: &str) -> bool {
-    gated_builtin(tool) || is_cua_driver_mcp(tool) || tool == BROWSER_EVALUATE_MCP
+    gated_builtin(tool) || is_cua_driver_mcp(tool) || runs_browser_code(tool)
 }
 
 /// File/shell/computer mutations blocked while `"settings"` plan mode is on.
 pub fn blocked_in_plan(tool: &str) -> bool {
-    gated_builtin(tool) || is_cua_driver_mcp(tool) || tool == BROWSER_EVALUATE_MCP
+    gated_builtin(tool) || is_cua_driver_mcp(tool) || runs_browser_code(tool)
 }
 
 impl PermissionOptionKind {
@@ -81,6 +87,9 @@ mod tests {
         assert!(!blocked_in_plan("cordis_inspect"));
         assert!(blocked_in_plan("mcp_browser__browser_evaluate"));
         assert!(!blocked_in_plan("mcp_browser__browser_console_messages"));
+        // browser_js 跑任意脚本：和 evaluate 一样过门、计划模式里挡。
+        assert!(needs_permission("mcp_browser__browser_js"));
+        assert!(blocked_in_plan("mcp_browser__browser_js"));
     }
 
     #[test]

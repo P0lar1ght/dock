@@ -41,7 +41,7 @@ pub(crate) fn on_demand_line(names: &[String]) -> String {
     format!("Built-in on-demand tools: {}.", names.join(", "))
 }
 
-const SEARCH_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Keywords to match against tool names, server/group names, and descriptions (e.g. \"linear create issue\", \"scheduler\", \"browser\", \"cordis define\")."},"limit":{"type":"integer","minimum":1,"maximum":255,"description":"Maximum number of results (default 5, max 255)."}},"required":["query"]}"#;
+const SEARCH_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Keywords to match against tool names, server/group names, and descriptions (e.g. \"linear create issue\", \"canvas\", \"browser\")."},"limit":{"type":"integer","minimum":1,"maximum":255,"description":"Maximum number of results (default 5, max 255)."}},"required":["query"]}"#;
 
 const USE_TOOL_DESC: &str = "Call an on-demand tool discovered via search_tool. \
 tool_name is the name search_tool returned (mcp_server__tool, a local name like scheduler_create, or a dynamic package tool). \
@@ -236,7 +236,7 @@ fn search_note(
         } else if ready {
             parts.push(format!(
                 "No tool matched. Tool names and descriptions are English — retry with the server \
-                 or capability name (e.g. \"linear issue\", \"scheduler\"); {total_hidden} \
+                 or capability name (e.g. \"linear issue\", \"canvas\"); {total_hidden} \
                  on-demand tools are registered."
             ));
         }
@@ -272,11 +272,12 @@ fn search_note(
 }
 
 /// 隐藏目录（MCP extras + 这一页的按需本地工具），检索与计数都以它为准。
+/// 名单外的不收：`use_tool` 执行时会挡掉，搜出来只会让模型白跑一轮。
 fn hidden_index(tools: &Tools, exec: &cordis::Context) -> Vec<IndexedTool> {
     tools
         .specs()
         .iter()
-        .filter(|s| tools.hidden_on(exec, &s.name))
+        .filter(|s| tools.hidden_on(exec, &s.name) && !tools.outside_allowlist(exec, &s.name))
         .map(|s| tool_index::index_tool(s, catalog_group(tools, &s.name)))
         .collect()
 }
@@ -380,12 +381,26 @@ pub(super) fn summaries_from_status(list: &[McpStatus]) -> Vec<ServerSummary> {
             tool_names.sort();
             ServerSummary {
                 name: s.name.clone(),
-                description: None,
+                description: builtin_description(&s.name).map(str::to_string),
                 tool_count: tool_names.len(),
                 tool_names,
             }
         })
         .collect()
+}
+
+/// 内置服务器写一句「什么时候用它」：模型只看得到「已连接 + 几个工具」时想不到去用
+/// （实测问实时库存，它只会搜网页、说查不了）。第三方服务器没有可靠的说明，不写。
+fn builtin_description(server: &str) -> Option<&'static str> {
+    match server {
+        cordis_base::config::BROWSER_MCP_SERVER => Some(
+            "Dock 自带的 Chromium 浏览器：打开网页、点选、填表、读动态页面、截图。网页搜索 / 抓取拿不到的内容（要点选、要登录、实时变化的，比如官网选好型号才显示的库存和价格）用它；mcp_browser__browser_js 一次跑一段 Playwright 脚本，做好几步",
+        ),
+        cordis_base::cua::CUA_DRIVER_SERVER => {
+            Some("本机桌面操作：应用、窗口、点击、输入、截图（会动用户的电脑，用户要求时才用）")
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn fingerprint_servers(
@@ -1014,6 +1029,56 @@ mod tests {
         assert_eq!(parse_limit(r#"{"query":"x","limit":999}"#), 255);
         assert_eq!(parse_limit(r#"{"query":"x"}"#), 5);
         assert_eq!(parse_limit(r#"{"query":"x","limit":0}"#), 5);
+    }
+
+    /// 按需名单里写了、允许名单里没有的工具：`use_tool` 叫不动，`search_tool` 也不该
+    /// 搜出来——不然模型搜到、调用、被拒，白跑一轮。MCP 照旧穿过允许名单。
+    #[test]
+    fn search_skips_on_demand_tools_outside_the_preset_allowlist() {
+        let ctx = cordis::Context::new();
+        let mut preset = crate::agent::presets::AgentPreset::new("probe");
+        preset.tools = Some(
+            ["canvas_create", SEARCH_TOOL_NAME, USE_TOOL_NAME]
+                .map(String::from)
+                .to_vec(),
+        );
+        preset.on_demand_tools = Some(["canvas_*", "scheduler_*"].map(String::from).to_vec());
+        let _p = ctx
+            .provide(crate::AGENT_PRESETS, crate::AgentPresets::overlay(preset))
+            .unwrap();
+        let tools = Tools::echo(ctx.clone());
+        let mut keep = Vec::new();
+        for name in [
+            "canvas_create",
+            "scheduler_create",
+            SEARCH_TOOL_NAME,
+            USE_TOOL_NAME,
+        ] {
+            keep.push(
+                tools
+                    .register(spec(name, "create a thing"), stub_body())
+                    .unwrap(),
+            );
+        }
+        keep.push(
+            tools
+                .register_mcp(
+                    spec("mcp_linear__create_issue", "create an issue"),
+                    stub_body(),
+                )
+                .unwrap(),
+        );
+        let found = run_search(
+            &tools,
+            &ctx,
+            None,
+            &seen(),
+            r#"{"query":"create","limit":10}"#,
+        );
+        assert!(found.contains("canvas_create"), "{found}");
+        assert!(found.contains("mcp_linear__create_issue"), "{found}");
+        assert!(!found.contains("scheduler_create"), "{found}");
+        assert!(found.contains("\"total_hidden_tools\": 2"), "{found}");
     }
 
     #[test]

@@ -26,14 +26,16 @@
 - 不写 / `[]` = 全部常驻（MCP 与动态包照旧藏着）。
 - 子代理角色不写就继承所属预设的（`task` 开子代理时补上）。
 - 用户 / 项目层覆盖内置预设而没写这一项：沿用内置的名单。要全部常驻写 `[]`。
-- 新建预设（GUI「新建」、TUI `n`）从 `code` 的名单抄一份写进自己的 YAML。
+- 新建预设（GUI「新建」、TUI `n`）从 `code` 的名单抄一份写进自己的 YAML，
+  另补 `code` 不准的 `scheduler_*` / `cordis_*`（新预设什么工具都准）。
+- 允许名单外的工具写进来也叫不动：不藏、不列、`search_tool` 也不搜出来。
 - `resident_tools` 优先：两边都命中时常驻。
 - 守卫（代码里，不可配）：
   - `search_tool` / `use_tool` 不能写进来（`search_*`、`use_*` 这种会盖住它们的前缀也不行）。
   - 这一页的工具表上没有 `use_tool`（只读档子代理、`minimal`、`/btw`）时名单不生效：藏起来就等于拿走。
   - 坏掉的预设不藏任何东西。
 - 内置：`code` / `cordis` 写了低频工具（canvas_* / workflow / kill_task / list_agents / interrupt_agent /
-  monitor / update_goal / lsp / scheduler_* / cordis_*）；`warden` 不写，它的调度工具全部常驻。
+  monitor / update_goal / lsp；`cordis` 另有 cordis_*）；`warden` 不写，它的调度工具全部常驻。
 - 判断标准：低频，而且不是只读子代理离不开的（`web_*`、`memory_*`、`send_message` 留常驻）。
 - 核对：`cargo test -p cordis-spine --test round -- search_tool_names_every_builtin_on_demand_tool`。
 

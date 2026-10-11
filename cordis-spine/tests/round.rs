@@ -552,6 +552,20 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
             "sampler must hide deferred {hidden}: {model:?}"
         );
     }
+    let canvas_search = tools
+        .execute(cordis_spine::ToolCall {
+            id: "st-canvas".into(),
+            name: "search_tool".into(),
+            arguments: r#"{"query":"canvas","limit":5}"#.into(),
+        })
+        .await;
+    // 已有的 `search_tool` 结果也要能搜到预设名单里的按需工具。
+    assert!(
+        canvas_search.content.contains("canvas_create"),
+        "search_tool should surface deferred locals: {}",
+        canvas_search.content
+    );
+    // 默认预设不准调度工具：藏着，但搜不出来——搜到了 `use_tool` 也会拒绝。
     let sched_search = tools
         .execute(cordis_spine::ToolCall {
             id: "st-sched".into(),
@@ -559,10 +573,9 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
             arguments: r#"{"query":"scheduler","limit":5}"#.into(),
         })
         .await;
-    // 已有的 `search_tool` 结果也要能搜到预设名单里的按需工具。
     assert!(
-        sched_search.content.contains("scheduler_create"),
-        "search_tool should surface deferred locals: {}",
+        !sched_search.content.contains("scheduler_create"),
+        "search_tool must not surface tools outside the preset: {}",
         sched_search.content
     );
     // 浏览器不再是进程内工具：它是内置 MCP `browser`（`dock mcp browser`），由 `dock`

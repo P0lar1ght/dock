@@ -77,6 +77,29 @@ impl CapabilityMode {
     }
 }
 
+/// 同一次回复里能和别的调用一起跑的工具调用：只读、只查（读文件、搜索、看目录、查网页、
+/// 读记忆、LSP、读技能、搜按需工具），以及只读的 bash 命令（`git status`、`rg`、`ls`…，
+/// 判断同只读场景，见 [`cordis_base::read_only_shell::is_read_only_command`]；每次调用
+/// 都是新起的 shell，互不影响）。参考 Codex 的 `supports_parallel_tool_calls`（它的 shell
+/// 命令也能并行）。
+/// 改动、别的命令、问用户、计划、子代理、浏览器都一颗一颗跑：前后有依赖（先改再读、同一个
+/// 标签页的先点再看），或者要人参与。认不出来的（MCP、动态包）按不能并行处理。
+pub fn parallel_safe(tool: &str, arguments: &str) -> bool {
+    if tool.starts_with(crate::tools::browser::BROWSER_MCP_PREFIX) || tool.starts_with("browser_") {
+        return false;
+    }
+    if tool == "bash" {
+        let background = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|v| v.get("is_background").and_then(|b| b.as_bool()))
+            .unwrap_or(false);
+        let command = crate::tools::read_only::bash_command(arguments);
+        return !background && cordis_base::read_only_shell::is_read_only_command(&command);
+    }
+    matches!(tool, "skill" | "search_tool")
+        || matches!(class_of(tool), Class::Read | Class::Search | Class::Inspect)
+}
+
 enum Class {
     Meta,
     Read,
@@ -141,6 +164,50 @@ fn class_of(tool: &str) -> Class {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_reading_tools_run_in_parallel() {
+        for yes in [
+            "read_file",
+            "grep",
+            "glob",
+            "list_dir",
+            "web_search",
+            "web_fetch",
+            "lsp",
+            "memory_search",
+            "memory_get",
+            "skill",
+            "search_tool",
+        ] {
+            assert!(parallel_safe(yes, "{}"), "{yes} 该能并行");
+        }
+        for no in [
+            "bash",
+            "search_replace",
+            "write_file",
+            "use_tool",
+            "task",
+            "ask_user_question",
+            "todo_write",
+            "enter_plan_mode",
+            "send_message",
+            "mcp_browser__browser_snapshot",
+            "mcp_other__read",
+            "cordis_run",
+        ] {
+            assert!(!parallel_safe(no, "{}"), "{no} 不该并行");
+        }
+        // bash 看命令：只读的能并行，改东西的、放后台的不行。
+        assert!(parallel_safe("bash", r#"{"command":"git status"}"#));
+        assert!(parallel_safe("bash", r#"{"command":"rg -n TODO src"}"#));
+        assert!(!parallel_safe("bash", r#"{"command":"cargo test"}"#));
+        assert!(!parallel_safe("bash", r#"{"command":"ls > out.txt"}"#));
+        assert!(!parallel_safe(
+            "bash",
+            r#"{"command":"git status","is_background":true}"#
+        ));
+    }
 
     #[test]
     fn parses_the_names_scripts_write() {

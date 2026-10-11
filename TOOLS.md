@@ -60,11 +60,11 @@
 | `compact` | `"compact"` | — | Grok 会话压缩，85% 自动 | [compact](docs/tools/compact.md) |
 
 浏览器工具：内置 MCP `browser`（`dock mcp browser`，crate `cordis-browser`）。
-公名 `mcp_browser__browser_*` 21 颗，按会话分标签页，详见 [browser](docs/tools/browser.md)。
+公名 `mcp_browser__browser_*` 22 颗（含跑 Playwright 脚本的 `browser_js`），按会话分标签页，详见 [browser](docs/tools/browser.md)。
 
 另见 [工具结果图](docs/tools/images.md)（多模态，`ToolResult.images`）。
 
-**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `mcp_browser__browser_evaluate`，以及全部 `mcp_cua-driver__*`。
+**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `mcp_browser__browser_evaluate` `mcp_browser__browser_js`，以及全部 `mcp_cua-driver__*`。
 
 **计划门**：同上（`enter_plan_mode` 之后返回 blocked，直到 `exit_plan_mode`）。例外：对**本页**计划文件的 `search_replace` / `write_file` 自动放行（对齐 grok）。
 

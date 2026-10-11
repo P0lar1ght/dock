@@ -6,18 +6,31 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use crate::js::{self, JsRunner};
 use crate::registry::{self, SessionTabs};
-use crate::session::{Chromium, ConnectedSession};
+use crate::session::{Chromium, ConnectedSession, DialogWatch, PendingDialog};
 use crate::tools::{
     arg_bool, arg_f64, arg_i64, arg_str, arg_u64, arg_usize, parse_fill_fields, parse_paths,
 };
 use crate::TabInfo;
 
 const NEED_OPEN: &str = "Error: this session has no browser tab yet. Call browser_open first.";
+
+/// 一次调用最多等这么久（`browser_wait_for` 另算：它自己的超时再加这一段余量）。
+/// 页面卡死（死循环脚本、渲染进程挂住）时报错说清楚，而不是让调用一直挂着。
+const CALL_LIMIT: Duration = Duration::from_secs(90);
+const WAIT_FOR_MARGIN: Duration = Duration::from_secs(15);
+/// `browser_js` 的默认 / 最长运行时间。
+const JS_DEFAULT_MS: u64 = 60_000;
+const JS_MAX_MS: u64 = 300_000;
+
+/// 对话框开着时还能调的：处理它本身。别的命令会排在被挡住的页后面一直等。
+const DIALOG_SAFE: &[&str] = &["browser_handle_dialog"];
 
 /// 一次调用的结果。`image` 是截图文件路径，服务端读成 MCP `image` 内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +75,8 @@ pub struct BrowserHub {
     index: std::sync::Mutex<BTreeMap<String, SessionTabs>>,
     /// 测试把名册写到临时目录；`None` 用 `$DOCK_HOME/browser/sessions`。
     registry_dir: Option<std::path::PathBuf>,
+    /// `browser_js` 的 Node 执行器，第一次用时才起。
+    js: Mutex<Option<Arc<JsRunner>>>,
 }
 
 impl BrowserHub {
@@ -141,11 +156,22 @@ impl BrowserHub {
                 self.close(session).await;
                 Ok("closed this session's tabs".into())
             }
+            "browser_js" => return self.run_js(session, args).await,
             _ if crate::tools::TOOLS.iter().any(|t| t.name == name) => {
                 match self.live_group(session).await {
                     Some(group) => {
                         let mut g = group.lock().await;
-                        let out = dispatch_connected(&mut g, name, args).await;
+                        let watch = g.dialog_watch();
+                        if let Some(blocked) = blocked_by_dialog(&watch, name) {
+                            return blocked;
+                        }
+                        let out = guarded(
+                            name,
+                            call_limit(name, args),
+                            watch,
+                            dispatch_connected(&mut g, name, args),
+                        )
+                        .await;
                         if name == "browser_tabs" {
                             self.record(session, &g);
                         }
@@ -171,9 +197,114 @@ impl BrowserHub {
                 g.into_inner().shutdown().await;
             }
         }
+        if let Some(runner) = self.js.lock().await.take() {
+            runner.shutdown().await;
+        }
         if let Some(chromium) = self.chromium.lock().await.take() {
             chromium.shutdown().await;
         }
+    }
+
+    /// `browser_js`：在本会话的活动标签页上跑一段 Playwright 脚本（见 [`crate::js`]）。
+    /// 本会话还没有页就先开一个空白页；和别的调用一样受对话框与时限的管。
+    async fn run_js(&self, session: &str, args: &Value) -> CallOutput {
+        let Some(code) = arg_str(args, "code").filter(|c| !c.trim().is_empty()) else {
+            return CallOutput::err("code is required".into());
+        };
+        let limit = Duration::from_millis(
+            arg_u64(args, "timeout_ms")
+                .unwrap_or(JS_DEFAULT_MS)
+                .clamp(1_000, JS_MAX_MS),
+        );
+        if self.live_group(session).await.is_none() {
+            if let Err(e) = self.open(session, "about:blank").await {
+                return CallOutput::err(e);
+            }
+        }
+        let Some(group) = self.live_group(session).await else {
+            return CallOutput::err(NEED_OPEN.into());
+        };
+        let runner = match self.js_runner().await {
+            Ok(r) => r,
+            Err(e) => return CallOutput::err(e),
+        };
+        let Some(ws) = self.chromium.lock().await.as_ref().map(Chromium::ws_url) else {
+            return CallOutput::err(NEED_OPEN.into());
+        };
+        let mut g = group.lock().await;
+        let watch = g.dialog_watch();
+        if let Some(blocked) = blocked_by_dialog(&watch, "browser_js") {
+            return blocked;
+        }
+        let Some(target) = g.active_target_id() else {
+            return CallOutput::err(NEED_OPEN.into());
+        };
+        let req = serde_json::json!({
+            "session": session,
+            "ws": ws,
+            "target": target,
+            "code": code,
+            "timeoutMs": limit.as_millis() as u64,
+            "shotDir": crate::session::browser_screenshot_dir(),
+        });
+        let _ = std::fs::create_dir_all(crate::session::browser_screenshot_dir());
+        let answered = std::sync::atomic::AtomicBool::new(false);
+        let dialogs = watch.clone();
+        let run = async {
+            // 执行器自己按 limit 收手；这里多等一会儿给它回话的时间。
+            match runner.call(req, limit + WAIT_FOR_MARGIN).await {
+                Ok(reply) => {
+                    answered.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let (ok, mut text, image) = js::render_reply(&reply);
+                    if let Some(d) = reply.get("dialog").filter(|d| !d.is_null()) {
+                        text.push_str(&format!(
+                            "\n\nThe script opened a JavaScript {} dialog: {}. The page is blocked until you call browser_handle_dialog (accept true/false).",
+                            d["type"].as_str().unwrap_or("?"),
+                            d["message"]
+                        ));
+                    }
+                    CallOutput {
+                        text,
+                        is_error: !ok,
+                        image,
+                    }
+                }
+                Err(e) => CallOutput::err(e),
+            }
+        };
+        let out = guarded("browser_js", limit + WAIT_FOR_MARGIN * 2, watch, run).await;
+        // 执行器没回话就返回了：要么是对话框（脚本卡在 CDP 上，对话框关掉后接着跑完，执行器
+        // 拦着同一会话的新脚本），要么是执行器自己都没在时限里回话——那就杀掉它，脚本才真的停。
+        if !answered.load(std::sync::atomic::Ordering::SeqCst) && dialogs.pending().is_none() {
+            self.reset_js().await;
+            return CallOutput::err(format!(
+                "{} The script runner was stopped and will restart on the next browser_js call; `state` was cleared.",
+                out.text.trim_start_matches("Error: ")
+            ));
+        }
+        // 脚本可能改了页面：旧快照的 refs 作废。
+        g.refs.clear();
+        out
+    }
+
+    /// 杀掉执行器（超时的脚本停不下来，只能连进程一起停）。
+    async fn reset_js(&self) {
+        if let Some(runner) = self.js.lock().await.take() {
+            runner.shutdown().await;
+        }
+    }
+
+    /// 活着的执行器；没有或死了就起一个。
+    async fn js_runner(&self) -> Result<Arc<JsRunner>, String> {
+        let mut slot = self.js.lock().await;
+        if let Some(r) = slot.as_ref() {
+            if r.is_alive().await {
+                return Ok(r.clone());
+            }
+        }
+        let runner = Arc::new(JsRunner::start().await?);
+        *slot = Some(runner.clone());
+        Ok(runner)
     }
 
     async fn group(&self, session: &str) -> Option<Group> {
@@ -233,8 +364,23 @@ impl BrowserHub {
     async fn open(&self, session: &str, url: &str) -> Result<String, String> {
         if let Some(group) = self.live_group(session).await {
             let mut g = group.lock().await;
-            let cur = g.navigate(url).await?;
-            return Ok(format!("navigated to {cur}"));
+            // 已经有页：等于 navigate，同样会被对话框挡住（含 beforeunload）。
+            let watch = g.dialog_watch();
+            if let Some(blocked) = blocked_by_dialog(&watch, "browser_open") {
+                return Err(blocked.text);
+            }
+            let nav = async {
+                match g.navigate(url).await {
+                    Ok(cur) => CallOutput::ok(format!("navigated to {cur}")),
+                    Err(e) => CallOutput::err(e),
+                }
+            };
+            let out = guarded("browser_open", CALL_LIMIT, watch, nav).await;
+            return if out.is_error {
+                Err(out.text)
+            } else {
+                Ok(out.text)
+            };
         }
         let fresh = {
             let mut chromium = self.chromium.lock().await;
@@ -335,8 +481,8 @@ async fn dispatch_text(
         "browser_snapshot" => {
             let interactive = arg_bool(args, "interactive").unwrap_or(true);
             let frame = arg_str(args, "frame").or_else(|| arg_str(args, "frame_selector"));
-            let snap = session.snapshot(interactive, frame.as_deref()).await?;
-            Ok(with_pending_dialog(session, snap.text))
+            // 对话框开着时走不到这里（[`blocked_by_dialog`] 先拦下）。
+            Ok(session.snapshot(interactive, frame.as_deref()).await?.text)
         }
         "browser_click" => {
             let r = arg_str(args, "ref").ok_or_else(|| "ref is required".to_string())?;
@@ -431,16 +577,73 @@ async fn dispatch_text(
     }
 }
 
-/// 页上挂着一个 JS 对话框时，快照里提醒模型先处理它（以前写在 `/browser` 驾驶舱上）。
-fn with_pending_dialog(session: &ConnectedSession, text: String) -> String {
-    match session.pending_dialog() {
-        Some(d) => format!(
-            "{text}\n\n[pending {} dialog: {} — call browser_handle_dialog]",
-            d.dialog_type,
-            d.message.replace('\n', " ")
-        ),
-        None => text,
+/// 这次调用最多等多久。
+fn call_limit(name: &str, args: &Value) -> Duration {
+    if name == "browser_wait_for" {
+        let wait = Duration::from_millis(arg_u64(args, "timeout_ms").unwrap_or(30_000).max(1));
+        return wait + WAIT_FOR_MARGIN;
     }
+    CALL_LIMIT
+}
+
+/// 本组有对话框开着、这次又不是去处理它：直接报错指路。开着对话框的页不响应别的
+/// CDP 命令，发过去只会一直等。
+fn blocked_by_dialog(watch: &DialogWatch, name: &str) -> Option<CallOutput> {
+    if DIALOG_SAFE.contains(&name) {
+        return None;
+    }
+    let d = watch.pending()?;
+    Some(CallOutput::err(format!(
+        "a JavaScript {} dialog is open on the page ({}). The page is blocked until it is closed — call browser_handle_dialog (accept true/false) first.",
+        d.dialog_type,
+        dialog_message(&d)
+    )))
+}
+
+/// 跑一次调用，同时盯着两件事：
+/// - 页上弹出 JS 对话框：点击 / 按键 / 跑脚本触发 `alert` / `confirm` / `prompt` 时，CDP 命令
+///   要等对话框关掉才返回。对话框一弹出就先返回（不算失败），告诉模型弹了什么、去处理；
+///   那条命令留在 Chrome 里，对话框关掉后自己结束。
+/// - 超过 `limit`：报错，说清是哪一步卡住，不让调用无限挂着。
+async fn guarded(
+    name: &str,
+    limit: Duration,
+    mut watch: DialogWatch,
+    call: impl std::future::Future<Output = CallOutput>,
+) -> CallOutput {
+    watch.seq.borrow_and_update();
+    let dialog = async {
+        // 发送端在本组里，组还在就不会关；关了就永远等不到，交给另外两支。
+        if watch.seq.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        out = call => out,
+        _ = dialog => match watch.pending() {
+            Some(d) => CallOutput::ok(format!(
+                "{name} opened a JavaScript {} dialog: {}. The page is blocked until you call browser_handle_dialog (accept true/false).",
+                d.dialog_type,
+                dialog_message(&d)
+            )),
+            // 对话框已经被关掉了（比如人在面板里点掉）：照常说明，不报错。
+            None => CallOutput::ok(format!(
+                "{name} opened a JavaScript dialog that was already closed."
+            )),
+        },
+        _ = tokio::time::sleep(limit) => CallOutput::err(format!(
+            "{name} did not finish within {}s — the page may be hung (busy script or blocked renderer). Take a browser_snapshot, or browser_close and browser_open again.",
+            limit.as_secs()
+        )),
+    }
+}
+
+fn dialog_message(d: &PendingDialog) -> String {
+    let mut out = format!("{:?}", d.message.replace('\n', " "));
+    if let Some(p) = d.default_prompt.as_ref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!(", default {p:?}"));
+    }
+    out
 }
 
 #[cfg(test)]

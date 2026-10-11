@@ -17,6 +17,12 @@ pub struct ToolDef {
 
 pub const TOOLS: &[ToolDef] = &[
     ToolDef {
+        name: "browser_js",
+        description: "Run a Playwright script against this session's active tab: several steps in one call (navigate, click by role/text, fill forms, wait, read the page). Prefer this over chains of browser_click/browser_type. The code is the body of an async function; a single expression is returned as-is, otherwise `return` a value (JSON-serialized). In scope: `page` (Playwright Page for this session's tab), `context`, `browser`, `state` (object kept across calls for this session: local variables do not persist, store handles and results on `state`), `log(...)` (collected into the output), `snapshot(selector = 'body')` (ARIA snapshot text, the cheap way to see what is on the page), `screenshot(opts)` (saves a PNG; the last one is attached to the result). Use locators: page.getByRole('button', { name: 'Buy' }), getByText, getByLabel, getByPlaceholder, page.locator(css); wait with page.waitForLoadState(), locator.waitFor(), page.waitForURL(). Opens a blank tab first if this session has none. If the script triggers a JS dialog (alert/confirm/prompt) the call returns early: handle it with browser_handle_dialog. Default timeout 60s (max 300s). The host gates this like a shell command.",
+        schema: r#"{"type":"object","properties":{"title":{"type":"string","description":"Short description of what the script does, 3-8 words (shown to the user)."},"code":{"type":"string","description":"JavaScript: the body of an async function with page/context/browser/state/log/snapshot/screenshot in scope."},"timeout_ms":{"type":"integer","description":"Max run time in ms (default 60000, max 300000)."}},"required":["code"]}"#,
+        read_only: false,
+    },
+    ToolDef {
         name: "browser_open",
         description: "Open a URL in this session's own tab in Dock's Chromium (chromiumoxide CDP). Lazily launches Chromium under $DOCK_HOME/browser/user-data, or attaches to the one already running. Logins/cookies are shared across sessions; tabs are not. Use browser_open for first connect; use browser_navigate to jump in an already-open session.",
         schema: r#"{"type":"object","properties":{"url":{"type":"string","description":"URL to open."}},"required":["url"]}"#,
@@ -272,7 +278,7 @@ mod tests {
             assert_eq!(schema["type"], "object", "{}", t.name);
             assert!(!t.description.contains("use_tool"), "{}", t.name);
         }
-        assert_eq!(TOOLS.len(), 21);
+        assert_eq!(TOOLS.len(), 22);
     }
 
     #[test]
