@@ -689,6 +689,20 @@ fn summarize_mcp_args(name: &str, arguments: &str) -> String {
                 parts.push(format!("{key}={short}"));
             }
         }
+        // 要发出去的本机文件（browser_file_upload）：弹窗里得看得到是哪些。
+        if let Some(paths) = obj.get("paths").and_then(|x| x.as_array()) {
+            let files: Vec<&str> = paths.iter().filter_map(|p| p.as_str()).collect();
+            if !files.is_empty() {
+                let shown: Vec<&str> = files.iter().take(3).copied().collect();
+                let more = files.len().saturating_sub(shown.len());
+                let tail = if more > 0 {
+                    format!(" 等 {} 个", files.len())
+                } else {
+                    String::new()
+                };
+                parts.push(format!("paths={}{tail}", shown.join(", ")));
+            }
+        }
         if cua {
             if let Some(tok) = obj.get("element_token").and_then(|x| x.as_str()) {
                 let head: String = tok.chars().take(12).collect();
@@ -805,6 +819,17 @@ pub fn workspace_tools() -> Plugin {
 
 #[cfg(test)]
 mod tests {
+    /// 上传本机文件要过权限门，弹窗得写清传哪些文件——以前只剩工具名，`paths` 是数组被跳过了。
+    #[test]
+    fn upload_permission_summary_lists_the_files() {
+        let summary = permission_summary(
+            "mcp_browser__browser_file_upload",
+            r#"{"ref":"@e3","paths":["/Users/me/Documents/合同.pdf","/tmp/a.png"]}"#,
+        );
+        assert!(summary.contains("合同.pdf"), "{summary}");
+        assert!(summary.contains("/tmp/a.png"), "{summary}");
+    }
+
     use super::*;
 
     fn stub_body() -> ToolBody {

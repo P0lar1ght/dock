@@ -107,7 +107,7 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 
 | 维度 | `browser_js` | 单步工具（click / type / hover / drag / select / press_key / fill_form / resize / navigate_back / wait_for…） |
 |---|---|---|
-| 权限门 | 和 bash 同级（默认「询问」模式下每次都问） | 不过门 |
+| 权限门 | 和 bash 同级（默认「询问」模式下每次都问） | 不过门（`file_upload` 除外：它把本机文件发给网站，过门） |
 | 计划模式 | 挡 | 不挡 |
 | 子代理能力档位 | 执行 | wait_for / snapshot / console 等是检索，档位低的子代理也能用 |
 | 没装 Node | 用不了 | 照样能用（chromiumoxide 直连） |
@@ -119,7 +119,8 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 
 ## 权限
 
-- `mcp_browser__browser_evaluate`、`mcp_browser__browser_js` 与 bash 同级：`needs_permission` + `blocked_in_plan`。
+- `mcp_browser__browser_evaluate`、`mcp_browser__browser_js`、`mcp_browser__browser_file_upload` 与 bash 同级：`needs_permission` + `blocked_in_plan`。
+  - 上传是把本机文件发给网站，弹窗摘要里列出要传的文件（`paths`，最多三个，多的写「等 N 个」）。
 - 其余 `mcp_browser__*` 不过门（和以前进程内的划分一致）。
 - 子代理能力档位按本名归类：看页面的算检索，动页面 / 跑 JS 的算执行。
 
