@@ -128,6 +128,9 @@ fn class_of(tool: &str) -> Class {
         // 发不了、打断不了。
         "send_message" => Class::Meta,
 
+        // 请用户在浏览器面板里接手：就是一道提问，和 ask_user_question 同类。
+        "handoff_to_user" => Class::Meta,
+
         "read_file" | "memory_get" | "memory_search" | "canvas_read" => Class::Read,
 
         "grep" | "glob" | "web_search" | "web_fetch" => Class::Search,

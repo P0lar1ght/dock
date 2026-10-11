@@ -454,6 +454,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "web_search",
         "todo_write",
         "ask_user_question",
+        "handoff_to_user",
         "enter_plan_mode",
         "exit_plan_mode",
         "job",

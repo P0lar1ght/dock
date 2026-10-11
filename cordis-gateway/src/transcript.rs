@@ -496,14 +496,21 @@ impl Transcript {
                 })
             })
             .collect();
-        self.push(
-            "interaction/requested",
-            json!({
-                "interactionId": id,
-                "kind": "user_input",
-                "questions": questions
-            }),
-        );
+        let mut payload = json!({
+            "interactionId": id,
+            "kind": "user_input",
+            "questions": questions
+        });
+        // 浏览器接手（`handoff_to_user`）：客户端据此打开这个会话的浏览器面板。`kind`
+        // 不变——嵌入 SDK 只渲染 user_input，换了它就看不到这道题。
+        if front
+            .questions
+            .iter()
+            .any(|q| q.id.as_deref() == Some(cordis_spine::HANDOFF_QUESTION_ID))
+        {
+            payload["browserHandoff"] = json!(true);
+        }
+        self.push("interaction/requested", payload);
     }
 
     pub fn interaction_resolved(&mut self) {
@@ -1224,6 +1231,50 @@ mod tests {
         assert_eq!(questions[1]["multiSelect"], false);
         ask.cancel();
         asked.await.unwrap();
+    }
+
+    /// 浏览器接手（`handoff_to_user`）的提问带 `browserHandoff: true`，GUI 据此打开这个
+    /// 会话的浏览器面板；普通提问不带这个键，`kind` 照旧是 user_input（嵌入 SDK 只认它）。
+    #[tokio::test]
+    async fn browser_handoff_questions_are_marked() {
+        let ask = std::sync::Arc::new(Ask::new(cordis::Context::new()));
+        let question = |id: Option<&str>| cordis_spine::Question {
+            question: "接手？".into(),
+            options: vec![cordis_spine::QuestionOption {
+                label: "已完成".into(),
+                description: String::new(),
+                preview: None,
+                id: None,
+            }],
+            multi_select: None,
+            id: id.map(str::to_string),
+        };
+        for (id, marked) in [
+            (Some(cordis_spine::HANDOFF_QUESTION_ID), true),
+            (None, false),
+        ] {
+            let waiting = ask.clone();
+            let asked = tokio::spawn(async move { waiting.ask(vec![question(id)]).await });
+            while ask.front_seq().is_none() {
+                tokio::task::yield_now().await;
+            }
+            let mut t = Transcript::new();
+            t.sync_interaction(ask.front_seq(), &ask);
+            let requested = t
+                .history_since(0)
+                .into_iter()
+                .find(|e| e.method == "interaction/requested")
+                .unwrap();
+            assert_eq!(requested.payload["kind"], "user_input");
+            assert_eq!(
+                requested.payload.get("browserHandoff").is_some(),
+                marked,
+                "{}",
+                requested.payload
+            );
+            ask.cancel();
+            asked.await.unwrap();
+        }
     }
 
     fn notice() -> LogEvent {

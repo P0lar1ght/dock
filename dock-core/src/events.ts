@@ -180,7 +180,13 @@ export type DockEvent = EventBase &
         agentId: string | null;
       }
     | { method: 'permission/resolved'; requestId: string; decision: 'approve' | 'deny'; always: boolean }
-    | { method: 'interaction/requested'; interactionId: string; questions: Question[] }
+    | {
+        method: 'interaction/requested';
+        interactionId: string;
+        questions: Question[];
+        /** 请用户在浏览器面板里接手（`handoff_to_user`）：客户端打开这个会话的浏览器。旧网关不带：`false`。 */
+        browserHandoff: boolean;
+      }
     | { method: 'interaction/resolved'; interactionId: string }
     | { method: 'plan/requested'; planId: string; path: string; body: string; empty: boolean }
     | { method: 'plan/resolved'; planId: string; decision: 'approve' | 'revise' | 'quit' }
@@ -316,6 +322,7 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
         ...base,
         method,
         interactionId: str(params.interactionId),
+        browserHandoff: bool(params.browserHandoff),
         questions: list(params.questions)
           .map(obj)
           .map((q) => ({

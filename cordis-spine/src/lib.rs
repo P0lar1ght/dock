@@ -114,6 +114,7 @@ pub use session::search::{
     self as session_search, ensure_index as ensure_session_search,
     rebuild_all as rebuild_session_search, SessionHit,
 };
+pub use tools::ask_user::handoff::HANDOFF_QUESTION_ID;
 pub use tools::ask_user::{tool_ask_user, Ask, AskPrompt, Question, QuestionOption};
 pub use tools::browser::{tool_browser, Browser, BrowserState, BROWSER_MCP_PREFIX};
 pub use tools::computer::{

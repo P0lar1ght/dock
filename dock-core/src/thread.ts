@@ -59,7 +59,7 @@ export type TurnItem =
       decision: 'approve' | 'deny' | 'cancelled' | null;
       always: boolean;
     }
-  | { kind: 'question'; id: string; questions: Question[]; resolved: boolean }
+  | { kind: 'question'; id: string; questions: Question[]; resolved: boolean; browserHandoff: boolean }
   | {
       kind: 'plan';
       id: string;
@@ -223,7 +223,13 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
         );
 
       case 'interaction/requested':
-        return push(turn, { kind: 'question', id: event.interactionId, questions: event.questions, resolved: false });
+        return push(turn, {
+          kind: 'question',
+          id: event.interactionId,
+          questions: event.questions,
+          resolved: false,
+          browserHandoff: event.browserHandoff,
+        });
       case 'interaction/resolved':
         return update(turn, (i) => (i.kind === 'question' && i.id === event.interactionId ? { ...i, resolved: true } : i));
 
