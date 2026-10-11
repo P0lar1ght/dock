@@ -1088,7 +1088,10 @@ async fn turn_intent_starts_goal_and_plan() {
         )
         .await;
     assert!(started.get("error").is_none(), "{started}");
-    assert!(h.ctx.require::<Goal>(GOAL).unwrap().active());
+    // 同 `slash_execute_dispatches_to_spine`：echo 假模型不调工具，目标可能已被空转检查暂停。
+    let goal = h.ctx.require::<Goal>(GOAL).unwrap();
+    assert!(goal.present(), "status={}", goal.status());
+    assert_eq!(goal.title(), "finish pairing");
 }
 
 #[tokio::test]
@@ -1309,7 +1312,11 @@ async fn slash_execute_dispatches_to_spine() {
         .call("slash/execute", json!({ "text": "/goal ship the gateway" }))
         .await;
     assert_eq!(goal["result"]["kind"], "submitted");
-    assert!(h.ctx.require::<Goal>(GOAL).unwrap().active());
+    // 目标已经开起来了。不断言还在 `active`：提交的那一轮由 echo 假模型跑，它从不调工具，
+    // 几次续跑后会被空转检查暂停——看时序，这可能发生在下面这行之前。
+    let goal = h.ctx.require::<Goal>(GOAL).unwrap();
+    assert!(goal.present(), "status={}", goal.status());
+    assert_eq!(goal.title(), "ship the gateway");
 }
 
 #[tokio::test]
