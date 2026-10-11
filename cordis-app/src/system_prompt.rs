@@ -29,6 +29,7 @@ const SYSTEM_PROMPT: &str = "思考过程必须使用中文（含 reasoning / �
 - 先读后改：路径、函数名、配置项都以读到的内容为准，记不清就去查，不要凭印象写。\n\
 - 改完自验：跑得起来的就跑一遍，跑不了就说明没验证过，不要把「应该可以」写成「已验证」。\n\
 - 如实汇报：失败、跳过、只做了一半，都要讲清楚；命令的真实输出优先于你的转述。\n\
+- 说到就做：不要用「接下来我去做 X」结束一次回复——要做就在同一次回复里直接调用工具；只有做完了、需要用户决定、或者卡住了才收尾。\n\
 - 只做被要求的事：顺手重构、清理无关文件、越界的破坏性操作，先问再动。";
 
 pub fn system_prompt() -> Plugin {
@@ -79,7 +80,13 @@ mod tests {
     /// the base rather than in any one persona.
     #[test]
     fn base_carries_the_preset_independent_floor() {
-        for rule in ["先读后改", "改完自验", "如实汇报", "只做被要求的事"] {
+        for rule in [
+            "先读后改",
+            "改完自验",
+            "如实汇报",
+            "说到就做",
+            "只做被要求的事",
+        ] {
             assert!(SYSTEM_PROMPT.contains(rule), "missing floor rule: {rule}");
         }
     }
