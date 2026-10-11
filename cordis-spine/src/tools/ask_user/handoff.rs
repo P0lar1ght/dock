@@ -8,13 +8,14 @@
 
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
-use super::{format, Ask, Question, QuestionOption};
+use super::{Ask, Question, QuestionOption};
 use crate::names::ASK;
 use crate::tools::registry::tool_result;
 
 /// 接手请求那道题的 id（网关和客户端靠它认出这是浏览器接手）。
 pub const HANDOFF_QUESTION_ID: &str = "browser_handoff";
 const DONE: &str = "已完成";
+const NO_OPERATOR_TEXT: &str = "没有用户可以接手（非交互会话）：不要自己尝试登录或绕过验证，在回复里说明这一步需要用户本人在浏览器里完成。";
 const CANNOT: &str = "做不到";
 
 pub fn spec() -> ToolSpec {
@@ -49,8 +50,12 @@ fn question(reason: &str) -> Question {
 }
 
 /// 回给模型的话：做完了就先确认页面再继续；没做完别再试这一步。
+///
+/// 回话是 `"题面"="选项"`（后面可能跟用户备注）。按整对「题面 = 已完成」判断：理由是模型写的、
+/// 嵌在题面里，备注是用户写的，都可能含「已完成」三个字。
 fn outcome(reason: &str, answer: &str) -> String {
-    if answer.contains(&format!("\"{DONE}\"")) {
+    let done = format!("\"{}\"=\"{DONE}\"", question(reason).question);
+    if answer.contains(&done) {
         format!(
             "用户说已经在浏览器面板里完成：{reason}。先看一眼页面（snapshot）确认状态，再继续。"
         )
@@ -71,8 +76,10 @@ pub async fn run(call: ToolCall) -> ToolResult {
         return tool_result(call, "Error: reason is required");
     };
     // 和 ask_user_question 一样：提问队列按页隔离，问执行期那一页。
+    // 没有人能接手（非交互会话）：不能沿用提问那句「按你的判断继续」——登录、验证码这类
+    // 场景下那等于叫模型自己去硬闯。
     let Some(ask) = crate::tools::registry::exec_ctx().and_then(|c| c.get::<Ask>(ASK)) else {
-        return tool_result(call, format::NO_OPERATOR_TEXT);
+        return tool_result(call, NO_OPERATOR_TEXT);
     };
     let answer = ask.ask(vec![question(&reason)]).await;
     tool_result(call, outcome(&reason, &answer))
@@ -80,6 +87,7 @@ pub async fn run(call: ToolCall) -> ToolResult {
 
 #[cfg(test)]
 mod tests {
+    use super::super::format;
     use super::*;
     use indexmap::IndexMap;
 
@@ -98,6 +106,27 @@ mod tests {
         assert!(cannot.contains("没有完成"), "{cannot}");
         let cancelled = outcome("登录", format::CANCEL_TEXT);
         assert!(cancelled.contains("没有完成"), "{cancelled}");
+    }
+
+    /// 审阅指出：以前在整段回话里找 `"已完成"`。理由是模型写的、会嵌进题面，用户备注也会拼
+    /// 进去——里面带着 `"已完成"` 时，选了「做不到」也会读成完成。
+    #[test]
+    fn done_is_read_from_the_choice_not_from_the_reason_or_notes() {
+        let reason = "登录后页面出现\"已完成\"字样";
+        let q = question(reason);
+        let mut answers = IndexMap::new();
+        answers.insert(q.question.clone(), vec![CANNOT.to_string()]);
+        let mut notes = std::collections::HashMap::new();
+        notes.insert(
+            q.question.clone(),
+            super::super::QuestionAnnotation {
+                preview: None,
+                notes: Some("我看到\"已完成\"但其实没登上".into()),
+            },
+        );
+        let answer = format::format_accepted_tool_result(&answers, &Some(notes));
+        let read = outcome(reason, &answer);
+        assert!(read.contains("没有完成"), "{read}");
     }
 
     #[test]

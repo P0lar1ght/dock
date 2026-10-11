@@ -260,13 +260,13 @@ pub fn tool_ask_user() -> Plugin {
             vec![
                 tools.register(handoff::spec(), handoff_body)?,
                 tools.register(
-                ToolSpec {
-                    name: "ask_user_question".into(),
-                    description: "Ask the user one or more multiple-choice questions.\n\n- Every question automatically gets an \"Other\" choice where the user can type their own answer.\n- Put your recommended option first and append \"(Recommended)\" to its label.".into(),
-                    parameters_json: r#"{"type":"object","properties":{"questions":{"type":"array","items":{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"description":{"type":"string"}},"required":["label"]}},"multi_select":{"type":"boolean"}},"required":["question","options"]}}},"required":["questions"]}"#.into(),
-                },
-                body,
-            )?,
+                    ToolSpec {
+                        name: "ask_user_question".into(),
+                        description: "Ask the user one or more multiple-choice questions.\n\n- Every question automatically gets an \"Other\" choice where the user can type their own answer.\n- Put your recommended option first and append \"(Recommended)\" to its label.".into(),
+                        parameters_json: r#"{"type":"object","properties":{"questions":{"type":"array","items":{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"description":{"type":"string"}},"required":["label"]}},"multi_select":{"type":"boolean"}},"required":["question","options"]}}},"required":["questions"]}"#.into(),
+                    },
+                    body,
+                )?,
             ],
         )?;
         Ok(None)
