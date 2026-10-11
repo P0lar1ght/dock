@@ -100,23 +100,39 @@ function hintsFor(code) {
  * 临时页共用登录态，不登记进会话（读完就关）；页上的对话框直接关掉，别让读取卡住。
  * 按输入顺序回 `{ url, title, text }`，打不开的那项回 `{ url, error }`。
  */
-async function readPagesIn(context, urls, opts = {}) {
+async function readPagesIn(context, urls, opts = {}, scriptDeadline = Infinity) {
   const { selector = "body", mode = "text", maxChars = 4000, concurrency = 4, timeoutMs = 20_000 } = opts;
-  const list = [...urls];
+  if (mode !== "text" && mode !== "snapshot") throw new Error(`readPages: mode must be 'text' or 'snapshot', got ${JSON.stringify(mode)}`);
+  // 单个网址也行；别的类型说清楚（`[...'https://a']` 会拆成一个个字符）。
+  if (typeof urls !== "string" && !Array.isArray(urls)) throw new Error("readPages: urls must be a URL string or an array of URLs");
+  const list = typeof urls === "string" ? [urls] : [...urls];
+  // 总截止时间：默认按脚本时限留余量，网址多、页又慢时到点收手，已读的照常返回——不然一路
+  // 读到脚本超时、执行器重启，结果全丢。
+  const deadline = Math.min(scriptDeadline, opts.deadlineMs ? Date.now() + opts.deadlineMs : Infinity);
   const out = new Array(list.length);
   let next = 0;
   const worker = async () => {
     while (next < list.length) {
       const i = next++;
       const url = list[i];
+      const left = deadline - Date.now();
+      if (left <= 500) {
+        out[i] = { url, error: "skipped: deadline reached (raise timeout_ms or read fewer URLs per call)" };
+        continue;
+      }
+      const budget = Math.min(timeoutMs, left);
       const p = await context.newPage();
       p.on("dialog", (d) => d.dismiss().catch(() => {}));
+      // 临时页里弹出来的新页没人管：也关掉，免得留下不归任何会话的页。
+      p.on("popup", (pp) => pp.close().catch(() => {}));
       try {
-        await p.goto(url, { timeout: timeoutMs, waitUntil: "domcontentloaded" });
-        await p.waitForLoadState("load", { timeout: Math.min(timeoutMs, 5000) }).catch(() => {});
+        await p.goto(url, { timeout: budget, waitUntil: "domcontentloaded" });
+        await p.waitForLoadState("load", { timeout: Math.min(budget, 5000) }).catch(() => {});
         const region = p.locator(selector).first();
-        const raw = mode === "snapshot" ? await region.ariaSnapshot({ timeout: timeoutMs }) : await region.innerText({ timeout: timeoutMs });
-        const text = raw.length > maxChars ? `${raw.slice(0, maxChars)}…(truncated, ${raw.length} chars)` : raw;
+        const raw = mode === "snapshot" ? await region.ariaSnapshot({ timeout: budget }) : await region.innerText({ timeout: budget });
+        // 按字符截（别把 emoji 这类代理对切成两半）。
+        const chars = Array.from(raw);
+        const text = chars.length > maxChars ? `${chars.slice(0, maxChars).join("")}…(truncated, ${chars.length} chars)` : raw;
         out[i] = { url, title: await p.title().catch(() => ""), text };
       } catch (e) {
         out[i] = { url, error: plain(String(e?.message ?? e)).split("\n")[0] };
@@ -297,7 +313,9 @@ async function run(req) {
     timer = setTimeout(() => reject(new ScriptTimeout(`script did not finish within ${Math.round(req.timeoutMs / 1000)}s`)), req.timeoutMs);
   });
   busy.add(req.session);
-  const readPages = (urls, opts) => readPagesIn(page.context(), urls, opts);
+  // 留 3 秒给脚本收尾、回话：readPages 到点收手，不拖到执行器超时重启。
+  const scriptDeadline = Date.now() + Math.max(1000, req.timeoutMs - 3000);
+  const readPages = (urls, opts) => readPagesIn(page.context(), urls, opts, scriptDeadline);
   const script = fn(page, page.context(), browser, state, log, snapshot, screenshot, docs, onDialog, tabs, readPages);
   script.then(
     () => busy.delete(req.session),

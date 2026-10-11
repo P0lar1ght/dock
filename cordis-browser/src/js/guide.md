@@ -77,9 +77,12 @@ coherent piece of work (open → act → check → read), not one click.
   opens them in temporary tabs at the same time, reads each and closes them — one call instead
   of navigating page by page. Returns `[{ url, title, text }]` in input order; a page that
   fails comes back as `{ url, error }` without stopping the others.
+  - `urls` is an array, or a single URL string.
   - `opts`: `selector` (default `'body'`; e.g. `'main'`, `'article'`), `mode` (`'text'` or
     `'snapshot'` for the ARIA tree), `maxChars` (default 4000 per page), `concurrency`
-    (default 4), `timeoutMs` (default 20000 per page).
+    (default 4), `timeoutMs` (default 20000 per page), `deadlineMs` (overall).
+  - It stops before the script's own timeout: URLs it did not get to come back as
+    `skipped: deadline reached`. For many slow pages, raise the call's `timeout_ms`.
   - Temporary tabs share the logged-in state, are not shown to the user, and dismiss dialogs.
   - Use `tabs.new` instead when you need to interact with a page, not just read it.
 
