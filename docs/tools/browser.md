@@ -80,6 +80,22 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - 权限：和 `browser_evaluate`、bash 同级（询问 + 计划模式里挡）。
 - 测试：`cargo test -p cordis-browser --test real_chrome -- --ignored browser_js`（要 Chrome、Node、npm）。
 
+## 请用户接手：`handoff_to_user`
+
+参考 Codex 的 `requestManualHandoff`。登录、验证码、二次验证、只该本人做的确认，模型不硬闯，请用户来。
+
+- spine 侧工具（`cordis-spine/src/tools/ask_user/handoff.rs`，挂在 `tool-ask-user` 上），不是浏览器 MCP 的工具：
+  它就是一道两选项的提问（「已完成」/「做不到」），走 `"ask"` 队列，TUI / GUI 都能答。
+  - 名字不带 `browser_` 前缀：进程内不许有 `browser_*` 工具（那是退役的旧浏览器工具名）。
+- 问题 id 是 `browser_handoff`：网关在 `interaction/requested` 上带 `browserHandoff: true`（`kind` 不变，嵌入 SDK 只认 `user_input`）。
+- GUI：正在看这个会话就打开浏览器面板（画面跟着这个会话的活动标签页，用户直接在同一页上操作）；
+  别的会话发来的不抢焦点，切过去时再打开。
+- 回话：做完了提醒模型先看一眼页面再继续；没做完让它别再试这一步、告诉用户卡在哪。
+  - 按整对「题面 = 已完成」判断（理由、用户备注里出现「已完成」不算）。
+  - 走提问的计时：默认 30 分钟没人答算「没完成」（`GROK_ASK_USER_QUESTION_TIMEOUT_SECS` 可改）；GUI 不会一直等。
+  - 没有用户能接手（非交互会话）：回「不要自己尝试登录或绕过验证」，不用提问那句「按你的判断继续」。
+- 不过权限门（只是问用户），计划模式里也能用；能力档位算元工具。`code` / `cordis` 预设里按需。
+
 ## 单步工具为什么留着（2026-10 审查）
 
 模型拿到 `browser_js` 后大多用它；审查过「单步工具是不是冗余」，结论是除 open / navigate 外都留着：

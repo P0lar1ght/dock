@@ -1,6 +1,7 @@
 //! `ask_user_question` over `"ask"` (DSH `ctx.userQuestions`). Format strings copied from Grok.
 
 mod format;
+pub mod handoff;
 mod questions;
 mod timeout;
 mod types;
@@ -252,16 +253,21 @@ pub fn tool_ask_user() -> Plugin {
         let tools = ctx.require::<Tools>(TOOLS)?;
         let body: ToolBody =
             std::sync::Arc::new(|call| Box::pin(async move { ask_user(call).await }));
+        let handoff_body: ToolBody =
+            std::sync::Arc::new(|call| Box::pin(async move { handoff::run(call).await }));
         own_registered(
             ctx,
-            vec![tools.register(
-                ToolSpec {
-                    name: "ask_user_question".into(),
-                    description: "Ask the user one or more multiple-choice questions.\n\n- Every question automatically gets an \"Other\" choice where the user can type their own answer.\n- Put your recommended option first and append \"(Recommended)\" to its label.".into(),
-                    parameters_json: r#"{"type":"object","properties":{"questions":{"type":"array","items":{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"description":{"type":"string"}},"required":["label"]}},"multi_select":{"type":"boolean"}},"required":["question","options"]}}},"required":["questions"]}"#.into(),
-                },
-                body,
-            )?],
+            vec![
+                tools.register(handoff::spec(), handoff_body)?,
+                tools.register(
+                    ToolSpec {
+                        name: "ask_user_question".into(),
+                        description: "Ask the user one or more multiple-choice questions.\n\n- Every question automatically gets an \"Other\" choice where the user can type their own answer.\n- Put your recommended option first and append \"(Recommended)\" to its label.".into(),
+                        parameters_json: r#"{"type":"object","properties":{"questions":{"type":"array","items":{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"description":{"type":"string"}},"required":["label"]}},"multi_select":{"type":"boolean"}},"required":["question","options"]}}},"required":["questions"]}"#.into(),
+                    },
+                    body,
+                )?,
+            ],
         )?;
         Ok(None)
     })

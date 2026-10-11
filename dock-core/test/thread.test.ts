@@ -107,6 +107,23 @@ test('提问：多选题带 multiSelect，旧网关没这个字段时算单选',
   );
 });
 
+test('浏览器接手的提问带 browserHandoff，普通提问和旧网关没有这个字段时是 false', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started'),
+    note('interaction/requested', {
+      interactionId: 'q1',
+      browserHandoff: true,
+      questions: [{ id: 'browser_handoff', question: '接手？', options: [] }],
+    }),
+    note('interaction/requested', { interactionId: 'q2', questions: [{ id: 'a', question: '选？', options: [] }] }),
+  );
+  assert.deepEqual(
+    pendingItems(s).map((i) => i.kind === 'question' && i.browserHandoff),
+    [true, false],
+  );
+});
+
 test('工具失败照网关的 status，不按输出猜', () => {
   seq = 0;
   const s = run(

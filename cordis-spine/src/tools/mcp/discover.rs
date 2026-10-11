@@ -394,7 +394,7 @@ pub(super) fn summaries_from_status(list: &[McpStatus]) -> Vec<ServerSummary> {
 fn builtin_description(server: &str) -> Option<&'static str> {
     match server {
         cordis_base::config::BROWSER_MCP_SERVER => Some(
-            "Dock 自带的 Chromium 浏览器：打开网页、点选、填表、读动态页面、截图。网页搜索 / 抓取拿不到的内容（要点选、要登录、实时变化的，比如官网选好型号才显示的库存和价格）用它；mcp_browser__browser_js 一次跑一段 Playwright 脚本，做好几步",
+            "Dock 自带的 Chromium 浏览器：打开网页、点选、填表、读动态页面、截图。网页搜索 / 抓取拿不到的内容（要点选、要登录、实时变化的，比如官网选好型号才显示的库存和价格）用它；mcp_browser__browser_js 一次跑一段 Playwright 脚本，做好几步；登录 / 验证码这类要用户本人做的，用 handoff_to_user 请用户在浏览器面板里接手",
         ),
         cordis_base::cua::CUA_DRIVER_SERVER => {
             Some("本机桌面操作：应用、窗口、点击、输入、截图（会动用户的电脑，用户要求时才用）")
