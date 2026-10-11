@@ -147,7 +147,12 @@ pub struct Cron {
     revision: AtomicU64,
     /// 把墙钟毫秒换回 `Instant` 的固定基准：同一个毫秒数永远换出同一个 `Instant`。
     base: (Instant, u64),
+    /// 墙钟（毫秒）。正式用 [`now_ms`]；测试换成手动拨的，免得「两次 `due()` 之间过了
+    /// 多久」取决于机器忙不忙。
+    clock: Clock,
 }
+
+type Clock = std::sync::Arc<dyn Fn() -> u64 + Send + Sync>;
 
 impl std::fmt::Debug for Cron {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -169,16 +174,22 @@ fn ms(d: Duration) -> u64 {
 impl Cron {
     /// 只在内存里的一份（测试、harness）。所有任务都算本进程持有。
     pub fn new() -> Self {
-        Self::build(None)
+        Self::build(None, std::sync::Arc::new(now_ms))
+    }
+
+    /// 内存版，墙钟由测试拨（见 [`Self::clock`] 字段）。
+    #[cfg(test)]
+    fn with_clock(clock: Clock) -> Self {
+        Self::build(None, clock)
     }
 
     /// 落在 `path`（一般是 `$DOCK_HOME/schedules.json`）的一份。
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self::build(Some(path.into()))
+        Self::build(Some(path.into()), std::sync::Arc::new(now_ms))
     }
 
-    fn build(path: Option<PathBuf>) -> Self {
-        let now = now_ms();
+    fn build(path: Option<PathBuf>, clock: Clock) -> Self {
+        let now = clock();
         Self {
             path,
             me: Holder {
@@ -189,7 +200,12 @@ impl Cron {
             seq: AtomicU64::new(1),
             revision: AtomicU64::new(0),
             base: (Instant::now(), now),
+            clock,
         }
+    }
+
+    fn now(&self) -> u64 {
+        (self.clock)()
     }
 
     /// 落盘路径；内存版为 `None`。
@@ -234,7 +250,7 @@ impl Cron {
             if tasks.len() >= MAX_SCHEDULED_TASKS {
                 return Err(CronError::LimitReached(MAX_SCHEDULED_TASKS));
             }
-            let now = now_ms();
+            let now = self.now();
             let id = loop {
                 let id = format!("cron-{:x}{:x}", now, seq.fetch_add(1, Ordering::Relaxed));
                 if !tasks.iter().any(|t| t.id == id) {
@@ -298,7 +314,7 @@ impl Cron {
                 if every_ms != task.every_ms {
                     let anchor = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
                     task.every_ms = every_ms;
-                    task.next_at_ms = anchor.saturating_add(every_ms).max(now_ms());
+                    task.next_at_ms = anchor.saturating_add(every_ms).max(self.now());
                 }
             }
             Ok(task.clone())
@@ -359,7 +375,7 @@ impl Cron {
         let me = self.me;
         let persistent = self.path.is_some();
         let tick = self.transact(|tasks| {
-            let now = now_ms();
+            let now = self.now();
             let mut fires = Vec::new();
             let mut expired = Vec::new();
             tasks.retain_mut(|task| {
@@ -611,18 +627,26 @@ pub fn cron() -> Plugin {
 mod tests {
     use super::*;
 
+    /// 以前用真墙钟、1ms 周期：两次 `due()` 之间只要过了 1ms（并行跑测试、机器忙时常见）
+    /// 第二次就又触发，偶发失败。现在手动拨钟：同一时刻再查不触发，拨过一个周期才再触发。
     #[test]
     fn due_reschedules() {
-        let cron = Cron::new();
+        let now = std::sync::Arc::new(AtomicU64::new(1_000_000));
+        let clock = now.clone();
+        let cron = Cron::with_clock(std::sync::Arc::new(move || clock.load(Ordering::SeqCst)));
         cron.add(Duration::from_millis(1), "tick").unwrap();
-        std::thread::sleep(Duration::from_millis(5));
+        // 周期按 clamp_every 规整过，按规整后的拨。
+        let every = ms(clamp_every(Duration::from_millis(1)));
+        now.fetch_add(every, Ordering::SeqCst);
         let first = cron.due().unwrap();
         assert_eq!(first.fires.len(), 1);
         assert_eq!(first.fires[0].prompt, "tick");
         assert!(first.expired.is_empty());
         let second = cron.due().unwrap();
-        assert!(second.fires.is_empty());
+        assert!(second.fires.is_empty(), "同一时刻不该再触发");
         assert!(second.expired.is_empty());
+        now.fetch_add(every, Ordering::SeqCst);
+        assert_eq!(cron.due().unwrap().fires.len(), 1, "过了一个周期再触发");
     }
 
     #[test]
