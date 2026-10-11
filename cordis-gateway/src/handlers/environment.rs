@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    snapshot_context, AppSettings, ContextBook, Goal, Mcp, PermissionMode, PlanMode, Sessions,
-    CONTEXT, GOAL, MCP, PLAN_MODE, SESSIONS, SETTINGS,
+    snapshot_context, AppSettings, ContextBook, Goal, GoalBudget, Mcp, PermissionMode, PlanMode,
+    Sessions, CONTEXT, GOAL, MCP, PLAN_MODE, SESSIONS, SETTINGS,
 };
 use cordis_spine::{SessionRef, SESSION_PORT};
 
@@ -194,7 +194,15 @@ fn goal_object(ctx: &Context) -> Value {
                 "progressSummary": goal.status(),
                 "revision": 1,
                 // 实际在跑的时长（暂停的时段不算）；客户端在 `active` 时自己往上走表。
-                "elapsedMs": goal.elapsed().as_millis() as u64
+                "elapsedMs": goal.elapsed().as_millis() as u64,
+                // 这个目标用掉的请求数（本页的采样次数）。
+                "requests": goal.requests(),
+                // 用户设的上限（`/goal budget`）；不限为 null。
+                "budget": match goal.budget() {
+                    Some(GoalBudget::Requests(n)) => json!({ "requests": n }),
+                    Some(GoalBudget::Time(d)) => json!({ "ms": d.as_millis() as u64 }),
+                    None => Value::Null,
+                }
             })
         }
         _ => json!({

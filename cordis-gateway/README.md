@@ -541,6 +541,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 - `status` 多了 `completed`：模型报了 `update_goal(completed)`，标题和最后一条进展留着，`start` / `clear` 后复位。
 - `elapsedMs`：目标实际在跑的时长，暂停的时段不算；`active` 时客户端自己往上走表。
+- `requests`：这个目标用掉的请求数（本页每次采样记一次，子代理的不算）。
+- `budget`：用户用 `/goal budget` 设的上限，`{ requests }` 或 `{ ms }`；不限为 `null`。
+  到了预算、或模型空转（连续几次续跑都没动手）时目标自动转 `paused`，原因在 `progressSummary`。
 
 ### 定时任务（能力 `schedules`，`handlers/schedule.rs`）
 

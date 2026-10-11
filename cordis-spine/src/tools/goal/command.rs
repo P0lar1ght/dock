@@ -2,6 +2,7 @@
 
 use cordis::{plugin, Context, Inject, Plugin};
 
+use super::pace::{duration_label, GoalBudget};
 use super::{goal_composer_fill, Goal, GOAL_RESERVED_SUBCOMMANDS};
 use crate::host::slash::{register_commands, slash_handler, SlashCommand, SlashOutcome};
 use crate::names::{GOAL, SLASH};
@@ -16,6 +17,11 @@ pub fn goal_command() -> Plugin {
                     .hint("goal pause", "暂停自动推进", false)
                     .hint("goal resume", "恢复当前目标", false)
                     .hint("goal clear", "清除当前目标", false)
+                    .hint(
+                        "goal budget",
+                        "给当前目标设上限（2h / 300 次），off 取消",
+                        true,
+                    )
                     .hint("goal edit", "在面板里修改当前目标", true),
             ],
         )?;
@@ -67,8 +73,46 @@ fn run(page: &Context, args: &str) -> SlashOutcome {
                 SlashOutcome::Applied("没有活动目标".into())
             }
         }
+        "budget" => {
+            let rest = args[first.len()..].trim();
+            budget(&goal, rest)
+        }
         _ if GOAL_RESERVED_SUBCOMMANDS.contains(&first) => SlashOutcome::Menu("goal".into()),
         _ => start_goal(page, args),
+    }
+}
+
+/// `/goal budget`：空参数看用量，`off` 取消，`2h` / `90m` / `300` 设上限。
+fn budget(goal: &Goal, rest: &str) -> SlashOutcome {
+    if !goal.present() {
+        return SlashOutcome::Applied("没有活动目标".into());
+    }
+    let used = format!(
+        "已用 {} 次请求、{}",
+        goal.requests(),
+        duration_label(goal.elapsed())
+    );
+    match rest {
+        "" => SlashOutcome::Applied(match goal.budget() {
+            Some(b) => format!("目标上限 {}，{used}", b.label()),
+            None => format!("目标不设上限，{used}"),
+        }),
+        "off" | "none" | "取消" | "不限" => {
+            goal.set_budget(None);
+            SlashOutcome::Applied(format!("已取消目标上限，{used}"))
+        }
+        raw => match GoalBudget::parse(raw) {
+            Some(b) => {
+                goal.set_budget(Some(b));
+                SlashOutcome::Applied(format!(
+                    "目标上限设为 {}，{used}；到了在当前这一轮做完后暂停",
+                    b.label()
+                ))
+            }
+            None => {
+                SlashOutcome::Applied("上限写成时长（2h、90m）或请求次数（300），off 取消".into())
+            }
+        },
     }
 }
 
@@ -103,5 +147,42 @@ mod tests {
         assert_eq!(out, Some(SlashOutcome::Fill(goal_composer_fill())));
         assert!(goal_composer_fill().contains("/goal"));
         assert!(goal.awaiting_composer(), "下一条消息该当目标");
+    }
+
+    /// `/goal budget`：设、看、取消；没有目标时不记。「budget 2h」不会被当成目标。
+    #[tokio::test]
+    async fn goal_budget_sets_shows_and_clears() {
+        let root = Context::new();
+        for p in [slash(), goal_service(), goal_command()] {
+            root.plugin(p, ()).unwrap().wait().await.unwrap();
+        }
+        let slash = root.get::<Slash>(SLASH).unwrap();
+        let goal = root.get::<Goal>(GOAL).unwrap();
+        let out = slash.run(&root, "goal", "budget 2h").await;
+        assert_eq!(out, Some(SlashOutcome::Applied("没有活动目标".into())));
+        assert!(!goal.present(), "budget 不是目标");
+
+        goal.start("重构浏览器");
+        let out = slash.run(&root, "goal", "budget 2h").await;
+        assert!(
+            matches!(&out, Some(SlashOutcome::Applied(t)) if t.contains("2 小时")),
+            "{out:?}"
+        );
+        assert_eq!(
+            goal.budget(),
+            Some(GoalBudget::Time(std::time::Duration::from_secs(7200)))
+        );
+        let out = slash.run(&root, "goal", "budget").await;
+        assert!(
+            matches!(&out, Some(SlashOutcome::Applied(t)) if t.contains("上限 2 小时") && t.contains("0 次请求")),
+            "{out:?}"
+        );
+        let out = slash.run(&root, "goal", "budget 两天").await;
+        assert!(
+            matches!(&out, Some(SlashOutcome::Applied(t)) if t.contains("off 取消")),
+            "{out:?}"
+        );
+        slash.run(&root, "goal", "budget off").await;
+        assert_eq!(goal.budget(), None);
     }
 }

@@ -1487,7 +1487,7 @@ async fn a_plugin_can_inject_a_reminder_before_every_step() {
         .collect();
     assert_eq!(injected.len(), 8, "both handlers land on all four steps");
     for (i, body) in injected.iter().enumerate() {
-        let want = if i % 2 == 0 { '早' } else { '晚' };
+        let want = if i.is_multiple_of(2) { '早' } else { '晚' };
         assert!(body.contains(want), "step {}: {body}", i / 2);
     }
 }
@@ -1649,4 +1649,229 @@ async fn main_session_listings_follow_the_preset_allowlist() {
             );
         }
     }
+}
+
+/// 目标模式按脚本走：`work(i)` 为真的那次采样调一个干活的工具（`list_dir`），否则只回文字。
+/// `done_at` 那次采样报完成，之后只回文字。
+struct GoalScript {
+    n: Arc<AtomicUsize>,
+    work: fn(usize) -> bool,
+    done_at: Option<usize>,
+}
+
+impl Sampler for GoalScript {
+    fn sample<'a>(
+        &'a self,
+        _request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let i = self.n.fetch_add(1, Ordering::SeqCst);
+        let (name, arguments) = if Some(i) == self.done_at {
+            ("update_goal", r#"{"completed":true,"message":"做完了"}"#)
+        } else if (self.work)(i) && self.done_at.is_none_or(|d| i < d) {
+            ("list_dir", "{}")
+        } else {
+            return Box::pin(async move {
+                LlmOutput {
+                    text: format!("round-{i}"),
+                    ..LlmOutput::default()
+                }
+            });
+        };
+        Box::pin(async move {
+            LlmOutput {
+                tool_calls: vec![ToolCall {
+                    id: format!("g{i}"),
+                    name: name.into(),
+                    arguments: arguments.into(),
+                }],
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+async fn boot_goal_script(
+    samples: Arc<AtomicUsize>,
+    work: fn(usize) -> bool,
+    done_at: Option<usize>,
+) -> Context {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(GoalScript {
+                n: samples,
+                work,
+                done_at,
+            }),
+        ),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root.require::<Goal>(GOAL).unwrap().start("把这件事做完");
+    root
+}
+
+fn reminders_containing(root: &Context, needle: &str) -> Vec<String> {
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            cordis_spine::LogEvent::SystemReminder(t) if t.contains(needle) => Some(t.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 只回文字、从不动手的目标是空转：催 `STALL_LIMIT - 1` 次还不动就暂停，并写明原因。
+/// 以前没有这道检查，这样的目标会一直续到 64 轮上限，整轮结束后再排下一轮，永不停。
+#[tokio::test]
+async fn an_idle_goal_pauses_after_a_few_nudges() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    let root = boot_goal_script(samples.clone(), |_| false, None).await;
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("开始")
+        .await
+        .unwrap();
+    let limit = cordis_spine::STALL_LIMIT as usize;
+    assert_eq!(out, TurnOutcome::Text(format!("round-{}", limit - 1)));
+    assert_eq!(
+        samples.load(Ordering::SeqCst),
+        limit,
+        "催了 {} 次",
+        limit - 1
+    );
+    let goal = root.require::<Goal>(GOAL).unwrap();
+    assert!(goal.paused() && !goal.active(), "空转该暂停，不是清掉");
+    assert!(goal.status().contains("空转"), "{}", goal.status());
+    // 恢复后从头数：又能催满一轮。
+    assert!(goal.resume());
+    root.require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("继续")
+        .await
+        .unwrap();
+    assert_eq!(samples.load(Ordering::SeqCst), 2 * limit);
+}
+
+/// 真在干活的目标不因空转检查停下，多少轮都行，直到它自己报完成。
+#[tokio::test]
+async fn a_working_goal_is_not_stopped_for_stalling() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    // 一次动手、一次回文字，交替 20 轮后报完成。
+    let root = boot_goal_script(samples.clone(), |i| i.is_multiple_of(2), Some(40)).await;
+    root.require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("开始")
+        .await
+        .unwrap();
+    let goal = root.require::<Goal>(GOAL).unwrap();
+    assert!(goal.completed(), "status={}", goal.status());
+    assert!(!goal.paused());
+    // 第 41 次（报完成那次）之后又采了一次收尾的文字，那次目标已经不在跑，不记。
+    assert_eq!(samples.load(Ordering::SeqCst), 42);
+    assert_eq!(goal.requests(), 41);
+}
+
+/// 只报进度（`update_goal(message)`）不算动手：光写进展的目标照样算空转。
+#[tokio::test]
+async fn progress_notes_alone_count_as_idle() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_goal(), ()).unwrap().wait().await.unwrap();
+    struct NotesOnly(Arc<AtomicUsize>);
+    impl Sampler for NotesOnly {
+        fn sample<'a>(
+            &'a self,
+            _request: PromptRequest,
+            _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        ) -> BoxFuture<'a, LlmOutput> {
+            let i = self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if i.is_multiple_of(2) {
+                    LlmOutput {
+                        tool_calls: vec![ToolCall {
+                            id: format!("n{i}"),
+                            name: "update_goal".into(),
+                            arguments: r#"{"message":"还在推进"}"#.into(),
+                        }],
+                        ..LlmOutput::default()
+                    }
+                } else {
+                    LlmOutput {
+                        text: format!("round-{i}"),
+                        ..LlmOutput::default()
+                    }
+                }
+            })
+        }
+    }
+    root.provide(
+        LLM,
+        Llm::from_sampler(root.clone(), Arc::new(NotesOnly(samples.clone()))),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root.require::<Goal>(GOAL).unwrap().start("把这件事做完");
+    root.require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("开始")
+        .await
+        .unwrap();
+    let goal = root.require::<Goal>(GOAL).unwrap();
+    assert!(goal.paused(), "status={}", goal.status());
+    assert_eq!(
+        samples.load(Ordering::SeqCst),
+        2 * cordis_spine::STALL_LIMIT as usize
+    );
+}
+
+/// 每用掉 `CHECKIN_EVERY` 次请求插一条自查提醒，让模型对照完成标准自己收尾。
+#[tokio::test]
+async fn a_long_goal_gets_a_checkin_every_batch_of_requests() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    let every = cordis_spine::CHECKIN_EVERY as usize;
+    let root = boot_goal_script(samples.clone(), |_| true, Some(2 * every + 5)).await;
+    root.require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("开始")
+        .await
+        .unwrap();
+    let checkins = reminders_containing(&root, "<goal-checkin>");
+    assert_eq!(checkins.len(), 2, "{checkins:?}");
+    assert!(
+        checkins[0].contains(&format!("{every} 次请求")),
+        "{}",
+        checkins[0]
+    );
+    assert!(checkins[0].contains("完成标准"), "{}", checkins[0]);
+    assert!(root.require::<Goal>(GOAL).unwrap().completed());
+}
+
+/// 用户设的预算：到了就暂停（在干活也停），预算清掉，恢复后不再限。
+#[tokio::test]
+async fn a_request_budget_pauses_a_busy_goal() {
+    let samples = Arc::new(AtomicUsize::new(0));
+    let root = boot_goal_script(samples.clone(), |i| i.is_multiple_of(2), None).await;
+    let goal = root.require::<Goal>(GOAL).unwrap();
+    assert!(goal.set_budget(Some(cordis_spine::GoalBudget::Requests(6))));
+    root.require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("开始")
+        .await
+        .unwrap();
+    assert_eq!(samples.load(Ordering::SeqCst), 6);
+    assert!(goal.paused(), "status={}", goal.status());
+    assert!(goal.status().contains("预算"), "{}", goal.status());
+    assert_eq!(goal.budget(), None, "到了就清掉，恢复后不再限");
 }

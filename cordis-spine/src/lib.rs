@@ -133,7 +133,7 @@ pub use tools::dynamic_runner::{
 pub use tools::goal::{
     goal_command, goal_composer_fill, goal_continuation_directive, goal_instruction,
     goal_offer_addon, goal_service, goal_tool_registration, goal_usage_message, start_goal,
-    tool_goal, Goal, GOAL_RESERVED_SUBCOMMANDS,
+    tool_goal, Goal, GoalBudget, CHECKIN_EVERY, GOAL_RESERVED_SUBCOMMANDS, STALL_LIMIT,
 };
 pub use tools::jobs::{jobs, tool_jobs, JobSnapshot, Jobs};
 pub use tools::lsp::{

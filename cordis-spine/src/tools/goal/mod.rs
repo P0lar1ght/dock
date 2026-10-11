@@ -3,17 +3,19 @@
 mod command;
 mod drain;
 mod grok_tool;
+mod pace;
 mod serde_lenient;
 
 use std::sync::Arc;
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::names::{GOAL, PRE_STEP, SESSIONS, TOOLS, TOOLS_EXECUTE, TURN_END};
+use crate::names::{GOAL, PRE_STEP, SESSIONS, STEP_START, TOOLS, TOOLS_EXECUTE, TURN_END};
 use crate::session::log::Sessions;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{
-    LogEvent, PreStep, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_TURN_END_GOAL,
+    LogEvent, PreStep, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_STEP_START_GOAL,
+    ORDER_TURN_END_GOAL,
 };
 
 /// Grok keeps `/goal` on an outer turn loop until `update_goal(completed)` (or
@@ -27,6 +29,7 @@ pub use grok_tool::{
     goal_usage_message, render_ack_into_output, GoalUpdateHandle, UpdateGoalInput,
     GOAL_RESERVED_SUBCOMMANDS, UPDATE_GOAL_TOOL_NAME,
 };
+pub use pace::{GoalBudget, CHECKIN_EVERY, STALL_LIMIT};
 
 /// Named `"goal"` service. TUI live-looks `active()`.
 pub struct Goal {
@@ -69,6 +72,25 @@ impl Goal {
 
     pub fn start(&self, title: impl Into<String>) {
         self.state.start(title);
+    }
+
+    /// 这个目标用掉的请求数（本页的采样次数）。
+    pub fn requests(&self) -> u64 {
+        self.state.requests()
+    }
+
+    /// 用户设的上限；`None` 不限。
+    pub fn budget(&self) -> Option<GoalBudget> {
+        self.state.budget()
+    }
+
+    /// 设 / 取消上限。没有目标时不记（下一次 `start` 也会复位）。
+    pub fn set_budget(&self, budget: Option<GoalBudget>) -> bool {
+        if !self.present() {
+            return false;
+        }
+        self.state.set_budget(budget);
+        true
     }
 
     /// One-shot standing contract for the current objective (slash or
@@ -213,6 +235,31 @@ fn wire_goal_waterfalls(ctx: &cordis::Context) {
         // user's own next turn on this page should see.
         if next.enter && Sessions::turn_is_this_page(&ctx_pre, &next.identity) {
             inject_goal_instruction(&ctx_pre);
+            // 人发了话：空转从头数。
+            if let Some(goal) = ctx_pre.get::<Goal>(GOAL) {
+                goal.state.fresh_input();
+            }
+        }
+        next
+    });
+    let ctx_step = ctx.clone();
+    let _ = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
+        let mut next = args.next::<StepStart>().unwrap_or(start);
+        if !Sessions::turn_is_this_page(&ctx_step, &next.identity) {
+            return next;
+        }
+        let Some(goal) = ctx_step.get::<Goal>(GOAL) else {
+            return next;
+        };
+        if !goal.active() {
+            return next;
+        }
+        let requests = goal.state.count_request();
+        if requests.is_multiple_of(CHECKIN_EVERY) {
+            next.remind(
+                ORDER_STEP_START_GOAL,
+                pace::checkin_reminder(&objective(&goal), requests, goal.elapsed()),
+            );
         }
         next
     });
@@ -226,11 +273,22 @@ fn wire_goal_waterfalls(ctx: &cordis::Context) {
         if next.queued_followups || next.rounds >= MAX_GOAL_ROUNDS {
             return next;
         }
+        let Some(goal) = ctx_end.get::<Goal>(GOAL) else {
+            return next;
+        };
+        // 不设总上限：只在空转或到了用户设的预算时停。
+        if !goal.active() || goal.state.stop_if_due() {
+            return next;
+        }
         // Both endings continue a goal: text without `update_goal(completed)`
         // is stopping short, and a blown step budget still leaves the goal open.
-        if let Some(body) = continuation_reminder(&ctx_end) {
-            next.keep_working(ORDER_TURN_END_GOAL, body);
-        }
+        let body = goal_continuation_directive(&objective(&goal));
+        let ctx_win = ctx_end.clone();
+        next.keep_working_with(ORDER_TURN_END_GOAL, body, move || {
+            if let Some(goal) = ctx_win.get::<Goal>(GOAL) {
+                goal.state.nudged();
+            }
+        });
         next
     });
     let ctx_exec = ctx.clone();
@@ -238,8 +296,16 @@ fn wire_goal_waterfalls(ctx: &cordis::Context) {
         let result = args.next::<ToolResult>().unwrap_or(result);
         // `tools/execute` carries no identity. The executing ctx is still set
         // around `finish`, so match the `Goal` arc the call would resolve.
-        if result.name == UPDATE_GOAL_TOOL_NAME && goal_call_is_this_page(&ctx_exec) {
+        if !goal_call_is_this_page(&ctx_exec) {
+            return result;
+        }
+        if result.name == UPDATE_GOAL_TOOL_NAME {
             inject_goal_instruction(&ctx_exec);
+        }
+        if pace::counts_as_work(&result.name) {
+            if let Some(goal) = ctx_exec.get::<Goal>(GOAL) {
+                goal.state.note_work();
+            }
         }
         result
     });
@@ -260,20 +326,26 @@ fn goal_call_is_this_page(page: &cordis::Context) -> bool {
 }
 
 /// `<system-reminder>` body that keeps an active goal going, or `None` when no
-/// goal is running. Shared by the `agent/turn-end` handler and the GoalSummary
-/// entry (`LoopHandle::continue_goal`), which injects it without a turn end.
+/// goal is running — or when it just stopped for stalling / its budget. For the
+/// GoalSummary entry (`LoopHandle::continue_goal`), which injects it without a
+/// turn end; the `agent/turn-end` handler applies the same checks itself.
 pub fn continuation_reminder(ctx: &cordis::Context) -> Option<String> {
     let goal = ctx.get::<Goal>(GOAL)?;
-    if !goal.active() {
+    if !goal.active() || goal.state.stop_if_due() {
         return None;
     }
+    goal.state.nudged();
+    Some(goal_continuation_directive(&objective(&goal)))
+}
+
+fn objective(goal: &Goal) -> String {
     let title = goal.title();
     let objective = title.trim();
-    Some(goal_continuation_directive(if objective.is_empty() {
-        "目标"
+    if objective.is_empty() {
+        "目标".into()
     } else {
-        objective
-    }))
+        objective.into()
+    }
 }
 
 fn inject_goal_instruction(ctx: &cordis::Context) {

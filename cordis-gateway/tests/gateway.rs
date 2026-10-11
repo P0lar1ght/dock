@@ -931,6 +931,21 @@ async fn goal_completion_projects_completed_with_elapsed_time() {
         .await;
     assert_eq!(started["result"]["goal"]["status"], "active");
     assert!(started["result"]["goal"]["elapsedMs"].is_u64(), "{started}");
+    assert_eq!(started["result"]["goal"]["requests"], 0, "{started}");
+    assert!(started["result"]["goal"]["budget"].is_null(), "{started}");
+    assert!(h
+        .ctx
+        .require::<Goal>(GOAL)
+        .unwrap()
+        .set_budget(Some(cordis_spine::GoalBudget::Requests(300))));
+    let env = rpc
+        .call("thread/environment/get", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(
+        env["result"]["goal"]["budget"],
+        json!({ "requests": 300 }),
+        "{env}"
+    );
     let tools = h.ctx.require::<Tools>(TOOLS).unwrap();
     let done = tools
         .execute(ToolCall {
@@ -1073,7 +1088,21 @@ async fn turn_intent_starts_goal_and_plan() {
         )
         .await;
     assert!(started.get("error").is_none(), "{started}");
-    assert!(h.ctx.require::<Goal>(GOAL).unwrap().active());
+    assert_goal_running_or_idle_paused(&h, "finish pairing");
+}
+
+/// 目标开起来了：要么还在跑，要么是被空转检查暂停的——提交的那一轮由 echo 假模型跑，
+/// 它从不调工具，几次续跑后就会暂停，早晚看调度。别的原因暂停照样算失败。
+fn assert_goal_running_or_idle_paused(h: &Harness, title: &str) {
+    let goal = h.ctx.require::<Goal>(GOAL).unwrap();
+    assert_eq!(goal.title(), title);
+    assert!(
+        goal.active() || (goal.paused() && goal.status().contains("空转")),
+        "active={} paused={} status={}",
+        goal.active(),
+        goal.paused(),
+        goal.status()
+    );
 }
 
 #[tokio::test]
@@ -1294,7 +1323,7 @@ async fn slash_execute_dispatches_to_spine() {
         .call("slash/execute", json!({ "text": "/goal ship the gateway" }))
         .await;
     assert_eq!(goal["result"]["kind"], "submitted");
-    assert!(h.ctx.require::<Goal>(GOAL).unwrap().active());
+    assert_goal_running_or_idle_paused(&h, "ship the gateway");
 }
 
 #[tokio::test]
