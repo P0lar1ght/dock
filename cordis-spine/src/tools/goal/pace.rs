@@ -123,7 +123,8 @@ pub fn stop_reason(
     };
     (idle >= STALL_LIMIT).then(|| {
         format!(
-            "连续 {idle} 次催它继续都没有动手（没调用干活的工具），像是在空转，目标已暂停。/goal resume 继续，或者发消息说下一步。"
+            "连续 {idle} 轮都没有动手（没调用干活的工具），中间催了 {} 次也没动，像是在空转，目标已暂停。/goal resume 继续，或者发消息说下一步。",
+            idle - 1
         )
     })
 }

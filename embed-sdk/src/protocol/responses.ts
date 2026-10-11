@@ -159,6 +159,10 @@ export interface ThreadEnvironmentResult {
     completedAt?: number;
     /** 目标实际在跑的时长（暂停的时段不算）。 */
     elapsedMs?: number;
+    /** 这个目标用掉的请求数（本页的采样次数）。 */
+    requests?: number;
+    /** 用户用 `/goal budget` 设的上限；不限为 `null`。 */
+    budget?: { requests: number } | { ms: number } | null;
   };
   plan: {
     enabled: boolean;

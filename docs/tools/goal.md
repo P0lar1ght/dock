@@ -22,11 +22,15 @@ Grok oneshot ack + drain。`objective` 可在无 `/goal` 时由模型自己开�
 整轮结束后会话 actor 还会再排一次 GoalSummary，所以 64 轮只是一轮的上限。
 只在三种情况下停：
 
-- **空转**：连续 `STALL_LIMIT`（3）次续跑，中间都没调干活的工具，就自动暂停。
+- **空转**：连续 `STALL_LIMIT`（3）轮都没调干活的工具（首轮加催了 2 次），就在第 3 次续跑前自动暂停。
   `update_goal` / `todo_write` 只算报进度，不算干活。
+  只看工具名：报错或被权限拒掉的调用也算干活（失败重试多半是真在调试）；
+  反复撞同一堵墙靠自查提醒里的 `blocked_reason` 收敛。
   原因写进进展（`status()`），`/goal resume` 或用户发消息后从头数。
   判断在续跑之前（turn-end 投票前、GoalSummary 注入前）。
   只有这一票真被采用时（`keep_working_with` 的 `on_win`）才结算这段有没有干活。
+  暂停本身在投票前：若同一轮别的 handler（order 更小）赢了这一票，目标也已停下。
+  只会提前停，不会多跑。
 - **自己收敛**：每 `CHECKIN_EVERY`（50）次请求，`agent/step-start` 插一条 `<goal-checkin>` 提醒
   （`ORDER_STEP_START_GOAL`）。让模型写出能检查的完成标准、逐条对照，满足就 `update_goal(completed)`，
   卡住就 `blocked_reason`，别为了更完美无限打磨。

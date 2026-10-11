@@ -104,7 +104,10 @@ fn budget(goal: &Goal, rest: &str) -> SlashOutcome {
         raw => match GoalBudget::parse(raw) {
             Some(b) => {
                 goal.set_budget(Some(b));
-                SlashOutcome::Applied(format!("目标上限设为 {}，{used}", b.label()))
+                SlashOutcome::Applied(format!(
+                    "目标上限设为 {}，{used}；到了在当前这一轮做完后暂停",
+                    b.label()
+                ))
             }
             None => {
                 SlashOutcome::Applied("上限写成时长（2h、90m）或请求次数（300），off 取消".into())

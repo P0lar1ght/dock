@@ -1088,10 +1088,21 @@ async fn turn_intent_starts_goal_and_plan() {
         )
         .await;
     assert!(started.get("error").is_none(), "{started}");
-    // 同 `slash_execute_dispatches_to_spine`：echo 假模型不调工具，目标可能已被空转检查暂停。
+    assert_goal_running_or_idle_paused(&h, "finish pairing");
+}
+
+/// 目标开起来了：要么还在跑，要么是被空转检查暂停的——提交的那一轮由 echo 假模型跑，
+/// 它从不调工具，几次续跑后就会暂停，早晚看调度。别的原因暂停照样算失败。
+fn assert_goal_running_or_idle_paused(h: &Harness, title: &str) {
     let goal = h.ctx.require::<Goal>(GOAL).unwrap();
-    assert!(goal.present(), "status={}", goal.status());
-    assert_eq!(goal.title(), "finish pairing");
+    assert_eq!(goal.title(), title);
+    assert!(
+        goal.active() || (goal.paused() && goal.status().contains("空转")),
+        "active={} paused={} status={}",
+        goal.active(),
+        goal.paused(),
+        goal.status()
+    );
 }
 
 #[tokio::test]
@@ -1312,11 +1323,7 @@ async fn slash_execute_dispatches_to_spine() {
         .call("slash/execute", json!({ "text": "/goal ship the gateway" }))
         .await;
     assert_eq!(goal["result"]["kind"], "submitted");
-    // 目标已经开起来了。不断言还在 `active`：提交的那一轮由 echo 假模型跑，它从不调工具，
-    // 几次续跑后会被空转检查暂停——看时序，这可能发生在下面这行之前。
-    let goal = h.ctx.require::<Goal>(GOAL).unwrap();
-    assert!(goal.present(), "status={}", goal.status());
-    assert_eq!(goal.title(), "ship the gateway");
+    assert_goal_running_or_idle_paused(&h, "ship the gateway");
 }
 
 #[tokio::test]
