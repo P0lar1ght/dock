@@ -169,10 +169,13 @@ async function run(req) {
   const order = [...(req.tabs ?? [req.target])];
   const opened = [];
   let activate = null;
+  // 本会话的页都要盯对话框（watch 在下面定义好 dialogListener 之后才可用）。
+  let watch = () => {};
   const pageAt = async (i) => {
     const id = order[i];
     const p = id ? await pageFor(browser, id) : null;
     if (!p) throw new Error(`no tab at index ${i} (this session has ${order.length})`);
+    watch(p);
     return p;
   };
   const tabs = {
@@ -188,16 +191,19 @@ async function run(req) {
     get: pageAt,
     async new(url) {
       const p = await page.context().newPage();
-      if (url) await p.goto(url);
+      // 先登记进本会话再打开网址：goto 失败也不会留下不归任何会话的页。
       const id = await targetIdOf(p);
       order.push(id);
       opened.push(id);
+      watch(p);
+      if (url) await p.goto(url);
       return p;
     },
     async select(which) {
       const p = typeof which === "number" ? await pageAt(which) : which;
       const id = await targetIdOf(p);
       if (!order.includes(id)) throw new Error("tabs.select: not one of this session's tabs (open it with tabs.new)");
+      watch(p);
       activate = id;
       await p.bringToFront().catch(() => {});
       return p;
@@ -216,7 +222,8 @@ async function run(req) {
   const dialog = new Promise((resolve) => {
     dialogListener = async (d) => {
       if (!policy) {
-        resolve({ type: d.type(), message: d.message() });
+        const target = await targetIdOf(d.page()).catch(() => null);
+        resolve({ type: d.type(), message: d.message(), target });
         return;
       }
       const what = `${d.type()} dialog ${JSON.stringify(d.message())}`;
@@ -236,8 +243,21 @@ async function run(req) {
         log(`${what}: could not handle it (${e?.message ?? e})`);
       }
     };
-    page.on("dialog", dialogListener);
   });
+  // 盯本会话的每一页：开始时的活动页、tabs.get / new / select 拿到的页、这些页点出来的弹出页。
+  // 以前只盯活动页：别的页上弹框时 onDialog 不生效、也不提前返回，脚本卡到超时。
+  const watched = new Set();
+  watch = (p) => {
+    if (watched.has(p)) return;
+    watched.add(p);
+    p.on("dialog", dialogListener);
+  };
+  watch(page);
+  const onPopup = async (p) => {
+    const opener = await p.opener().catch(() => null);
+    if (opener && watched.has(opener)) watch(p);
+  };
+  page.context().on("page", onPopup);
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new ScriptTimeout(`script did not finish within ${Math.round(req.timeoutMs / 1000)}s`)), req.timeoutMs);
@@ -272,7 +292,8 @@ async function run(req) {
     };
   } finally {
     clearTimeout(timer);
-    page.off("dialog", dialogListener);
+    for (const p of watched) p.off("dialog", dialogListener);
+    page.context().off("page", onPopup);
   }
 }
 

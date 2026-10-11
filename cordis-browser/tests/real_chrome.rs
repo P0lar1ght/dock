@@ -947,3 +947,66 @@ async fn browser_js_hints_at_fixed_sleeps_and_body_scraping() {
     assert!(!clean.text.contains("hint:"), "{}", clean.text);
     hub.shutdown().await;
 }
+
+/// 审阅指出：对话框监听以前只挂在脚本开始时的活动页上。tabs.new / tabs.get 拿到的页弹框时
+/// onDialog 不生效、也不提前返回，空监听让它一直开着——脚本卡到超时、执行器重启、所有会话
+/// 的 state 被清空。现在本会话的每一页都盯着；没声明 onDialog 时提前返回，并且能接着用
+/// browser_handle_dialog 处理那一页的对话框。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_handles_dialogs_on_other_tabs_too() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser_js dialogs on other tabs") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<p>A</p>"}),
+    )
+    .await;
+    let page_b = "data:text/html,<button onclick=\\\"document.getElementById('o').textContent = confirm('sure?') ? 'yes' : 'no'\\\">Ask</button><p id=o></p>";
+
+    // 声明了 onDialog：新开的页上弹框也就地处理，一次跑完。
+    let handled = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        hub.call(
+            "s",
+            "browser_js",
+            &json!({"code": format!("onDialog('accept');\nconst b = await tabs.new(\"{page_b}\");\nawait b.getByRole('button', {{ name: 'Ask' }}).click();\nreturn await b.locator('#o').textContent();"), "timeout_ms": 15000}),
+        ),
+    )
+    .await
+    .expect("a dialog on another tab must not stall the script");
+    assert!(!handled.is_error, "{}", handled.text);
+    assert!(handled.text.contains("yes"), "{}", handled.text);
+
+    // 没声明：提前返回；对话框在哪一页，browser_handle_dialog 就处理哪一页。
+    let early = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        hub.call(
+            "s",
+            "browser_js",
+            &json!({"code": "const b = await tabs.get(1);\nawait b.getByRole('button', { name: 'Ask' }).click();\nreturn 'never';", "timeout_ms": 15000}),
+        ),
+    )
+    .await
+    .expect("an unhandled dialog on another tab must return early");
+    assert!(!early.is_error, "{}", early.text);
+    assert!(early.text.contains("sure?"), "{}", early.text);
+    ok(&hub, "s", "browser_handle_dialog", json!({"accept": false})).await;
+    // 对话框关掉后，那段脚本要再跑一小会儿才结束（期间新脚本会被拦，报错里叫模型稍后再试）。
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let after = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "return await (await tabs.get(1)).locator('#o').textContent();"}),
+    )
+    .await;
+    assert!(after.text.contains("no"), "{}", after.text);
+    hub.shutdown().await;
+}

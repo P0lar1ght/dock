@@ -253,6 +253,7 @@ impl BrowserHub {
         let _ = std::fs::create_dir_all(crate::session::browser_screenshot_dir());
         let answered = std::sync::atomic::AtomicBool::new(false);
         let tab_moves: std::sync::Mutex<(Vec<String>, Option<String>)> = Default::default();
+        let dialog_seen: std::sync::Mutex<Option<(String, String, String)>> = Default::default();
         let dialogs = watch.clone();
         let run = async {
             // 执行器自己按 limit 收手；这里多等一会儿给它回话的时间。
@@ -272,6 +273,19 @@ impl BrowserHub {
                         ids(&reply["opened"]),
                         reply["activate"].as_str().map(str::to_string),
                     );
+                    if let Some(target) = reply["dialog"]["target"].as_str() {
+                        *dialog_seen.lock().unwrap() = Some((
+                            target.to_string(),
+                            reply["dialog"]["type"]
+                                .as_str()
+                                .unwrap_or("alert")
+                                .to_string(),
+                            reply["dialog"]["message"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string(),
+                        ));
+                    }
                     let (ok, mut text, image) = js::render_reply(&reply);
                     if let Some(d) = reply.get("dialog").filter(|d| !d.is_null()) {
                         text.push_str(&format!(
@@ -310,6 +324,9 @@ impl BrowserHub {
         }
         if let Some(id) = activate {
             g.activate(&id);
+        }
+        if let Some((target, kind, message)) = dialog_seen.lock().unwrap().take() {
+            g.note_dialog(&target, &kind, &message);
         }
         let _ = g.sync_targets().await;
         self.record(session, &g);

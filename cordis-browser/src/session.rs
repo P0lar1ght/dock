@@ -574,6 +574,25 @@ impl ConnectedSession {
         Ok(())
     }
 
+    /// 记下 `browser_js` 执行器看到、本组自己的监听没赶上的对话框（弹在这次脚本才开的页上：
+    /// 页登记进本组时对话框已经开着了）。之后的调用照常被挡、`browser_handle_dialog` 对准那一页。
+    /// 已经记着一个的不覆盖。
+    pub fn note_dialog(&mut self, target: &str, dialog_type: &str, message: &str) {
+        if !self.target_ids().iter().any(|t| t == target) {
+            return;
+        }
+        if let Ok(mut g) = self.pending_dialog.lock() {
+            if g.is_none() {
+                *g = Some(PendingDialog {
+                    message: message.to_string(),
+                    dialog_type: dialog_type.to_string(),
+                    default_prompt: None,
+                    target: target.to_string(),
+                });
+            }
+        }
+    }
+
     /// 把本组的某一页设成活动页（`browser_js` 的 `tabs.select`）。不是本组的页不动。
     pub fn activate(&mut self, target: &str) -> bool {
         match self.target_ids().iter().position(|t| t == target) {

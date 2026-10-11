@@ -72,6 +72,8 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - 对话框：Playwright 默认会自动关掉对话框，执行器给每页挂一个空监听让它留着。
   - 脚本先 `onDialog(…)`：就地处理，脚本接着跑。
   - 没声明：调用提前返回（由执行器判断，hub 不替 `browser_js` 盯对话框），交给 `browser_handle_dialog`。
+  - 盯的是本会话的每一页：开始时的活动页、`tabs.get` / `new` / `select` 拿到的页、它们点出来的弹出页。
+    对话框弹在这次脚本才开的页上时，执行器回报它在哪一页，hub 记成待处理（`ConnectedSession::note_dialog`），之后照常被挡、`browser_handle_dialog` 对准那一页。
   - 提前返回后脚本还卡在 CDP 上，对话框关掉后**接着跑完剩下的部分**；跑完之前同一会话的新脚本直接报错（「上一段脚本还在跑」），不让两段同时动一页。
 - 超时：脚本取消不了，执行器回完话整个退出，下一次调用重起；所有会话的 `state` 随之清空（报错里写明）。执行器连话都没回时，Rust 侧同样杀掉它。
 - 执行器起不来时，报错里带它 stderr 的最后几行；`npm install` 带 `--ignore-scripts`。
@@ -91,7 +93,7 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 
 - `browser_evaluate` 和 `browser_js` 同门同档，但不要 Node：没装 Node 时是唯一跑 JS 的路。
 - `console_messages` / `network_requests` 读的是开页以来 Rust 侧一直在收的记录，Playwright 中途连上看不到之前的。
-- 真正重叠的只有 `browser_open` / `browser_navigate`：现在是同一件事（没页先开页）。都不删：网关调 open，模型最常用 navigate（Playwright MCP 的名字）。
+- 真正重叠的只有 `browser_open` / `browser_navigate`：现在是同一件事（没页先开页，所以 `navigate` 也会懒启动 Chromium；以前它不启动、直接报错）。都不删：网关调 open，模型最常用 navigate（Playwright MCP 的名字）。
 - `press_key` 认常见别名（`Return` → `Enter`、`Esc`、`Del`、`Up/Down/Left/Right`、`PgUp/PgDn`）。
 
 ## 权限
