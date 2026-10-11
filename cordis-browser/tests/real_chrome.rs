@@ -1010,3 +1010,129 @@ async fn browser_js_handles_dialogs_on_other_tabs_too() {
     assert!(after.text.contains("no"), "{}", after.text);
     hub.shutdown().await;
 }
+
+/// readPages：在临时标签页里同时打开几个网址、读出内容、关掉（参考 Codex 的 tabs.content），
+/// 比一页一页 navigate + 读少很多来回。打不开的那项带 error，不影响别的；临时页不进会话。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_reads_several_pages_at_once() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("readPages") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<p>Home</p>"}),
+    )
+    .await;
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "const pages = await readPages(['data:text/html,<title>One</title><main>first page</main>', 'http://127.0.0.1:1/', 'data:text/html,<title>Three</title><main>third page<script>alert(1)</script></main>'], { selector: 'main' });\nreturn pages.map((p) => `${p.title}|${p.text ?? ''}|${p.error ? 'ERR' : ''}`);"}),
+    )
+    .await;
+    assert!(out.text.contains("One|first page|"), "{}", out.text);
+    assert!(
+        out.text.contains("|ERR"),
+        "打不开的那项要带 error：{}",
+        out.text
+    );
+    assert!(
+        out.text.contains("Three|third page|"),
+        "弹框的页也要读完：{}",
+        out.text
+    );
+    let tabs = ok(&hub, "s", "browser_tabs", json!({})).await;
+    assert!(
+        !tabs.text.contains("first page") && !tabs.text.contains("One"),
+        "临时页不进会话：{}",
+        tabs.text
+    );
+    assert_eq!(
+        tabs.text.lines().filter(|l| l.contains("data:")).count(),
+        1,
+        "{}",
+        tabs.text
+    );
+    hub.shutdown().await;
+}
+
+/// readPages 的总截止时间（#217 审阅）：网址多、页又慢时，以前会一路读到脚本超时、执行器
+/// 重启、已读到的结果全丢。现在按脚本时限留余量收手：没轮到的标 skipped，已读的照常返回。
+/// 另外：单个字符串当一个网址（以前被拆成一个个字符），mode 写错直接报错。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn read_pages_stops_at_a_deadline_and_validates_input() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("readPages deadline") {
+        return;
+    }
+    // 只接连接、永远不回话的服务：页一直在加载。
+    let stuck = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = stuck.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in stuck.incoming().flatten() {
+            held.push(conn);
+        }
+    });
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<p>Home</p>"}),
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let out = hub
+        .call(
+            "s",
+            "browser_js",
+            &json!({
+                "code": format!("const urls = Array.from({{ length: 4 }}, (_, i) => 'http://127.0.0.1:{port}/' + i);\nconst r = await readPages(urls, {{ concurrency: 1, timeoutMs: 3000 }});\nreturn r.map((p) => p.error ? p.error.slice(0, 20) : 'ok');"),
+                "timeout_ms": 10000
+            }),
+        )
+        .await;
+    assert!(
+        !out.is_error,
+        "到截止时间要返回已读部分，不该超时重启：{}",
+        out.text
+    );
+    assert!(out.text.contains("skipped"), "{}", out.text);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+
+    let solo = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "const r = await readPages('data:text/html,<main>solo</main>', { selector: 'main' });\nreturn r.length + ':' + r[0].text;"}),
+    )
+    .await;
+    assert!(
+        solo.text.contains("1:solo"),
+        "单个字符串是一个网址：{}",
+        solo.text
+    );
+
+    let bad = hub
+        .call(
+            "s",
+            "browser_js",
+            &json!({"code": "await readPages(['data:text/html,x'], { mode: 'aria' })"}),
+        )
+        .await;
+    assert!(bad.is_error && bad.text.contains("mode"), "{}", bad.text);
+    hub.shutdown().await;
+}
