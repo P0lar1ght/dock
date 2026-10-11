@@ -546,6 +546,65 @@ impl ConnectedSession {
         Ok(changed)
     }
 
+    /// 把 `browser_js` 脚本里新开的页（`tabs.new`）收进本组，放在最后。刚开出来的页
+    /// chromiumoxide 可能还没挂上，等一会儿（最多 3 秒）。已经在本组的不重复收。
+    pub async fn adopt(&mut self, target: &str) -> Result<(), String> {
+        if self.target_ids().iter().any(|t| t == target) {
+            return Ok(());
+        }
+        let mut page = None;
+        for _ in 0..30 {
+            if let Ok(p) = self
+                .browser
+                .get_page(TargetId::from(target.to_string()))
+                .await
+            {
+                page = Some(p);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let page =
+            page.ok_or_else(|| format!("tab {target} opened by the script is not reachable"))?;
+        self.dialog_tasks
+            .push(self.dialog_listener_for(&page).await?);
+        self.capture_tasks
+            .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+        self.pages.push(page);
+        Ok(())
+    }
+
+    /// 记下 `browser_js` 执行器看到、本组自己的监听没赶上的对话框（弹在这次脚本才开的页上：
+    /// 页登记进本组时对话框已经开着了）。之后的调用照常被挡、`browser_handle_dialog` 对准那一页。
+    /// 已经记着一个的不覆盖。
+    pub fn note_dialog(&mut self, target: &str, dialog_type: &str, message: &str) {
+        if !self.target_ids().iter().any(|t| t == target) {
+            return;
+        }
+        if let Ok(mut g) = self.pending_dialog.lock() {
+            if g.is_none() {
+                *g = Some(PendingDialog {
+                    message: message.to_string(),
+                    dialog_type: dialog_type.to_string(),
+                    default_prompt: None,
+                    target: target.to_string(),
+                });
+            }
+        }
+    }
+
+    /// 把本组的某一页设成活动页（`browser_js` 的 `tabs.select`）。不是本组的页不动。
+    pub fn activate(&mut self, target: &str) -> bool {
+        match self.target_ids().iter().position(|t| t == target) {
+            Some(i) => {
+                self.active = i;
+                self.refs.clear();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 一个标签页都不剩了（[`ConnectedSession::sync_targets`] 之后）。
     pub fn is_empty(&self) -> bool {
         self.pages.is_empty()
@@ -1850,7 +1909,7 @@ pub fn parse_key_chord(raw: &str) -> Result<(i64, String), String> {
             }
         }
     }
-    let main = parts[parts.len() - 1].to_string();
+    let main = key_alias(parts[parts.len() - 1]);
     // Allow bare modifier names only as the key itself (rare); otherwise require a main key.
     if parts.len() > 1
         && normalize_modifier(&main).is_some()
@@ -1859,6 +1918,26 @@ pub fn parse_key_chord(raw: &str) -> Result<(i64, String), String> {
         return Err(format!("chord `{raw}` is missing a main key"));
     }
     Ok((modifiers, main))
+}
+
+/// 键表不认、但模型常写的键名换成标准名（`Return` → `Enter`）。键表本来就认的原样留着。
+fn key_alias(raw: &str) -> String {
+    if keys::get_key_definition(raw).is_some() {
+        return raw.to_string();
+    }
+    let standard = match raw.to_ascii_lowercase().as_str() {
+        "return" => "Enter",
+        "esc" => "Escape",
+        "del" => "Delete",
+        "up" => "ArrowUp",
+        "down" => "ArrowDown",
+        "left" => "ArrowLeft",
+        "right" => "ArrowRight",
+        "pgup" => "PageUp",
+        "pgdn" | "pgdown" => "PageDown",
+        _ => return raw.to_string(),
+    };
+    standard.to_string()
 }
 
 fn normalize_modifier(p: &str) -> Option<i64> {
@@ -1923,6 +2002,21 @@ mod tests {
         let _env = cordis_base::test_env::scoped().set("CHROME_PATH", "/no/such/chrome-binary-xyz");
         let err = discover_chrome().unwrap_err();
         assert!(err.contains("CHROME_PATH"), "{err}");
+    }
+
+    #[test]
+    fn parse_key_chord_accepts_common_key_aliases() {
+        // 模型常写 Return / Esc（实测有一次 `unknown key Return`）：键表不认的常见别名换成标准名。
+        assert_eq!(parse_key_chord("Return").unwrap(), (0, "Enter".into()));
+        assert_eq!(parse_key_chord("Esc").unwrap(), (0, "Escape".into()));
+        assert_eq!(
+            parse_key_chord("Shift+Return").unwrap(),
+            (8, "Enter".into())
+        );
+        assert_eq!(parse_key_chord("Down").unwrap(), (0, "ArrowDown".into()));
+        assert_eq!(parse_key_chord("PgDn").unwrap(), (0, "PageDown".into()));
+        // 键表本来就认的不动。
+        assert_eq!(parse_key_chord("a").unwrap(), (0, "a".into()));
     }
 
     #[test]

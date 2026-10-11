@@ -136,14 +136,15 @@ async fn p0_navigate_press_wait() {
     assert!(shot.image.as_ref().is_some_and(|p| p.is_file()), "{shot:?}");
 
     ok(&hub, "s", "browser_close", json!({})).await;
-    let closed = hub
-        .call("s", "browser_navigate", &json!({"url": "about:blank"}))
-        .await;
+    // 关掉之后：看页面的工具报错指路；navigate 和 open 一样重新开一页。
+    let closed = hub.call("s", "browser_snapshot", &json!({})).await;
     assert!(
         closed.is_error && closed.text.contains("browser_open"),
         "{}",
         closed.text
     );
+    let reopened = ok(&hub, "s", "browser_navigate", json!({"url": "about:blank"})).await;
+    assert!(reopened.text.contains("about:blank"), "{}", reopened.text);
     hub.shutdown().await;
 }
 
@@ -749,5 +750,263 @@ async fn browser_js_runs_playwright_on_the_session_tab() {
     // 没开过页的会话：先开一个空白页再跑。
     let fresh = ok(&hub, "t", "browser_js", json!({"code": "page.url()"})).await;
     assert!(fresh.text.contains("about:blank"), "{}", fresh.text);
+    hub.shutdown().await;
+}
+
+/// 脚本里先声明怎么处理对话框（`onDialog`），再点会弹框的按钮：一次调用跑完，不用另调
+/// browser_handle_dialog；`docs()` 给出完整用法指南。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_handles_dialogs_in_the_script_and_serves_the_guide() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser_js dialogs") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<html><body><button onclick=\"alert('saved'); document.getElementById('o').textContent='after alert'\">Save</button><button onclick=\"document.getElementById('o').textContent = confirm('delete?') ? 'deleted' : 'kept'\">Delete</button><p id=o></p></body></html>"}),
+    )
+    .await;
+
+    let saved = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        hub.call(
+            "s",
+            "browser_js",
+            &json!({"code": "onDialog('accept');\nawait page.getByRole('button', { name: 'Save' }).click();\nreturn await page.locator('#o').textContent();"}),
+        ),
+    )
+    .await
+    .expect("a handled dialog must not stall the script");
+    assert!(!saved.is_error, "{}", saved.text);
+    assert!(
+        saved.text.contains("after alert"),
+        "脚本要跑完：{}",
+        saved.text
+    );
+    assert!(
+        saved.text.contains("saved"),
+        "处理过的对话框要记进 log：{}",
+        saved.text
+    );
+
+    let kept = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "onDialog('dismiss');\nawait page.getByRole('button', { name: 'Delete' }).click();\nreturn await page.locator('#o').textContent();"}),
+    )
+    .await;
+    assert!(kept.text.contains("kept"), "{}", kept.text);
+    // 处理完的对话框不该把本组挡住。
+    ok(&hub, "s", "browser_snapshot", json!({})).await;
+
+    let guide = ok(&hub, "s", "browser_js", json!({"code": "docs()"})).await;
+    assert!(
+        guide.text.contains("getByRole") && guide.text.contains("onDialog"),
+        "{}",
+        guide.text
+    );
+    hub.shutdown().await;
+}
+
+/// browser_navigate 和 browser_open 做的是同一件事：会话还没开页时 navigate 以前直接报错
+/// （实测模型先 navigate 被打回过），现在和 open 一样先开一页。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn navigate_opens_a_tab_when_the_session_has_none() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("navigate") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    let out = ok(
+        &hub,
+        "fresh",
+        "browser_navigate",
+        json!({"url": "data:text/html,<p>NavFirst</p>"}),
+    )
+    .await;
+    assert!(
+        out.text.contains("NavFirst") || out.text.contains("data:"),
+        "{}",
+        out.text
+    );
+    let body = ok(
+        &hub,
+        "fresh",
+        "browser_evaluate",
+        json!({"expression": "document.body.innerText"}),
+    )
+    .await;
+    assert!(body.text.contains("NavFirst"), "{}", body.text);
+    hub.shutdown().await;
+}
+
+/// 脚本里开新标签页（`tabs.new`）并切过去（`tabs.select`）：新页登记进本会话
+/// （browser_tabs 列得到、GUI 画面跟得过去），之后的 `page` 就是它；点链接弹出的新页
+/// 跑完就收进来，不用等下一次调用。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_opens_and_switches_tabs_in_the_session() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser_js tabs") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<p>TabA</p><a href=\"data:text/html,<p>TabC</p>\" target=_blank>pop</a>"}),
+    )
+    .await;
+    let listed = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "const b = await tabs.new('data:text/html,<p>TabB</p>');\nawait tabs.select(b);\nconst all = await tabs.list();\nreturn all.map((t) => `${t.index}:${t.active}`).join(',');"}),
+    )
+    .await;
+    assert!(listed.text.contains("0:false,1:true"), "{}", listed.text);
+
+    let tabs = ok(&hub, "s", "browser_tabs", json!({})).await;
+    assert!(
+        tabs.text.contains("TabB"),
+        "新页要登记进本会话：{}",
+        tabs.text
+    );
+    let now = ok(&hub, "s", "browser_js", json!({"code": "page.content()"})).await;
+    assert!(
+        now.text.contains("TabB"),
+        "切过去之后 page 是新页：{}",
+        now.text
+    );
+
+    // 回到第一页点弹出链接：跑完就收进来，并成为活动页。
+    ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "const a = await tabs.get(0);\nawait a.getByText('pop').click();\nawait a.waitForTimeout(500);"}),
+    )
+    .await;
+    let tabs = ok(&hub, "s", "browser_tabs", json!({})).await;
+    assert!(
+        tabs.text.contains("TabC"),
+        "弹出的页要收进来：{}",
+        tabs.text
+    );
+    hub.shutdown().await;
+}
+
+/// 脚本里有固定等待、整页抠文本时，结果里附一句提示（只提醒，不拦）：实测 intern 16 个
+/// 脚本里 11 个用 waitForTimeout，光写在工具描述里它不看。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_hints_at_fixed_sleeps_and_body_scraping() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser_js hints") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<p id=o>hello</p>"}),
+    )
+    .await;
+    let slept = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await page.waitForTimeout(50);\nconst t = await page.locator('body').innerText();\nreturn t.indexOf('hello');"}),
+    )
+    .await;
+    assert!(slept.text.contains("hint:"), "{}", slept.text);
+    assert!(slept.text.contains("waitForTimeout"), "{}", slept.text);
+    assert!(slept.text.contains("whole page"), "{}", slept.text);
+    // 结果照常回来。
+    assert!(slept.text.contains('0'), "{}", slept.text);
+
+    let clean = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await page.locator('#o').waitFor();\nreturn await page.locator('#o').innerText();"}),
+    )
+    .await;
+    assert!(!clean.text.contains("hint:"), "{}", clean.text);
+    hub.shutdown().await;
+}
+
+/// 审阅指出：对话框监听以前只挂在脚本开始时的活动页上。tabs.new / tabs.get 拿到的页弹框时
+/// onDialog 不生效、也不提前返回，空监听让它一直开着——脚本卡到超时、执行器重启、所有会话
+/// 的 state 被清空。现在本会话的每一页都盯着；没声明 onDialog 时提前返回，并且能接着用
+/// browser_handle_dialog 处理那一页的对话框。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_handles_dialogs_on_other_tabs_too() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser_js dialogs on other tabs") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<p>A</p>"}),
+    )
+    .await;
+    let page_b = "data:text/html,<button onclick=\\\"document.getElementById('o').textContent = confirm('sure?') ? 'yes' : 'no'\\\">Ask</button><p id=o></p>";
+
+    // 声明了 onDialog：新开的页上弹框也就地处理，一次跑完。
+    let handled = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        hub.call(
+            "s",
+            "browser_js",
+            &json!({"code": format!("onDialog('accept');\nconst b = await tabs.new(\"{page_b}\");\nawait b.getByRole('button', {{ name: 'Ask' }}).click();\nreturn await b.locator('#o').textContent();"), "timeout_ms": 15000}),
+        ),
+    )
+    .await
+    .expect("a dialog on another tab must not stall the script");
+    assert!(!handled.is_error, "{}", handled.text);
+    assert!(handled.text.contains("yes"), "{}", handled.text);
+
+    // 没声明：提前返回；对话框在哪一页，browser_handle_dialog 就处理哪一页。
+    let early = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        hub.call(
+            "s",
+            "browser_js",
+            &json!({"code": "const b = await tabs.get(1);\nawait b.getByRole('button', { name: 'Ask' }).click();\nreturn 'never';", "timeout_ms": 15000}),
+        ),
+    )
+    .await
+    .expect("an unhandled dialog on another tab must return early");
+    assert!(!early.is_error, "{}", early.text);
+    assert!(early.text.contains("sure?"), "{}", early.text);
+    ok(&hub, "s", "browser_handle_dialog", json!({"accept": false})).await;
+    // 对话框关掉后，那段脚本要再跑一小会儿才结束（期间新脚本会被拦，报错里叫模型稍后再试）。
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let after = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "return await (await tabs.get(1)).locator('#o').textContent();"}),
+    )
+    .await;
+    assert!(after.text.contains("no"), "{}", after.text);
     hub.shutdown().await;
 }

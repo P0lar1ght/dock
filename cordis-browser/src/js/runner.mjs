@@ -9,10 +9,13 @@
 // 参考 Codex 的 node_repl（`js(title, code)`）：一次调用跑一段脚本、做好几步。
 
 import { createInterface } from "node:readline";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const playwrightPath = process.argv[2];
+/** 用法指南（`docs()`），Rust 侧和执行器一起写到同一个目录。 */
+const guidePath = process.argv[3];
 const { chromium } = await import(pathToFileURL(playwrightPath).href);
 
 const RESULT_MAX = 12_000;
@@ -73,9 +76,28 @@ async function pageFor(browser, target) {
   return null;
 }
 
+/**
+ * 看一眼脚本写法，给几句提示（只附在结果里，不拦）：固定等待、整页抠文本。工具描述里
+ * 写过这两条，实测模型还是常这么写，在结果里就近提醒更管用。
+ */
+function hintsFor(code) {
+  const hints = [];
+  if (/waitForTimeout\s*\(|new Promise\s*\(\s*\(?\s*\w*\s*\)?\s*=>\s*setTimeout/.test(code)) {
+    hints.push(
+      "fixed sleep (waitForTimeout / setTimeout): wait for a condition instead — locator.waitFor(), page.waitForURL(), expect the element you need.",
+    );
+  }
+  if (/body['"`]?\s*\)?\s*\.\s*(innerText|textContent)|document\.body\.(innerText|textContent)|textContent\s*\(\s*['"`]body/.test(code)) {
+    hints.push(
+      "reading the whole page's text: locate the region you need (getByRole / a heading's container) and read inside it, or use snapshot(selector).",
+    );
+  }
+  return hints;
+}
+
 /** 只有一个表达式时当返回值（`page.title()`）；否则当函数体，用 return 给结果。 */
 function compile(code) {
-  const params = ["page", "context", "browser", "state", "log", "snapshot", "screenshot"];
+  const params = ["page", "context", "browser", "state", "log", "snapshot", "screenshot", "docs", "onDialog", "tabs"];
   try {
     return new AsyncFunction(...params, `return (${code}\n);`);
   } catch {
@@ -139,25 +161,116 @@ async function run(req) {
       images: [],
     };
   }
+  const docs = () => (guidePath ? readFileSync(guidePath, "utf8") : "(guide not available)");
+
+  // 本会话的标签页（Rust 侧按顺序给 target id）。脚本里新开的页记进 `opened`，
+  // `select` 记下跑完之后哪页是活动页；回给 Rust 去登记，GUI 画面才跟得过去。
+  // 只认 tabs.new 开的页：直接 context.newPage() 的页分不清是哪个会话的，不收。
+  const order = [...(req.tabs ?? [req.target])];
+  const opened = [];
+  let activate = null;
+  // 本会话的页都要盯对话框（watch 在下面定义好 dialogListener 之后才可用）。
+  let watch = () => {};
+  const pageAt = async (i) => {
+    const id = order[i];
+    const p = id ? await pageFor(browser, id) : null;
+    if (!p) throw new Error(`no tab at index ${i} (this session has ${order.length})`);
+    watch(p);
+    return p;
+  };
+  const tabs = {
+    async list() {
+      const current = activate ?? req.target;
+      const out = [];
+      for (const [index, id] of order.entries()) {
+        const p = await pageFor(browser, id);
+        out.push({ index, url: p?.url() ?? "", title: p ? await p.title().catch(() => "") : "", active: id === current });
+      }
+      return out;
+    },
+    get: pageAt,
+    async new(url) {
+      const p = await page.context().newPage();
+      // 先登记进本会话再打开网址：goto 失败也不会留下不归任何会话的页。
+      const id = await targetIdOf(p);
+      order.push(id);
+      opened.push(id);
+      watch(p);
+      if (url) await p.goto(url);
+      return p;
+    },
+    async select(which) {
+      const p = typeof which === "number" ? await pageAt(which) : which;
+      const id = await targetIdOf(p);
+      if (!order.includes(id)) throw new Error("tabs.select: not one of this session's tabs (open it with tabs.new)");
+      watch(p);
+      activate = id;
+      await p.bringToFront().catch(() => {});
+      return p;
+    },
+  };
+
+  // 脚本里先声明「接下来的对话框怎么处理」：'accept' / 'dismiss' / { accept, text } /
+  // async (dialog) => {…}。声明过的就地处理、记进 log，脚本接着跑；没声明的照旧让调用
+  // 提前返回，交给 browser_handle_dialog。
+  let policy = null;
+  const onDialog = (action = "accept") => {
+    policy = action;
+  };
   const fn = compile(req.code);
-  let onDialog;
+  let dialogListener;
   const dialog = new Promise((resolve) => {
-    onDialog = (d) => resolve({ type: d.type(), message: d.message() });
-    page.on("dialog", onDialog);
+    dialogListener = async (d) => {
+      if (!policy) {
+        const target = await targetIdOf(d.page()).catch(() => null);
+        resolve({ type: d.type(), message: d.message(), target });
+        return;
+      }
+      const what = `${d.type()} dialog ${JSON.stringify(d.message())}`;
+      try {
+        if (typeof policy === "function") {
+          await policy(d);
+          log(`${what}: handled by onDialog`);
+        } else if (policy === "dismiss" || (typeof policy === "object" && policy.accept === false)) {
+          await d.dismiss();
+          log(`${what}: dismissed`);
+        } else {
+          const text = typeof policy === "object" ? policy.text : undefined;
+          await d.accept(text);
+          log(`${what}: accepted${text !== undefined ? ` with ${JSON.stringify(text)}` : ""}`);
+        }
+      } catch (e) {
+        log(`${what}: could not handle it (${e?.message ?? e})`);
+      }
+    };
   });
+  // 盯本会话的每一页：开始时的活动页、tabs.get / new / select 拿到的页、这些页点出来的弹出页。
+  // 以前只盯活动页：别的页上弹框时 onDialog 不生效、也不提前返回，脚本卡到超时。
+  const watched = new Set();
+  watch = (p) => {
+    if (watched.has(p)) return;
+    watched.add(p);
+    p.on("dialog", dialogListener);
+  };
+  watch(page);
+  const onPopup = async (p) => {
+    const opener = await p.opener().catch(() => null);
+    if (opener && watched.has(opener)) watch(p);
+  };
+  page.context().on("page", onPopup);
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new ScriptTimeout(`script did not finish within ${Math.round(req.timeoutMs / 1000)}s`)), req.timeoutMs);
   });
   busy.add(req.session);
-  const script = fn(page, page.context(), browser, state, log, snapshot, screenshot);
+  const script = fn(page, page.context(), browser, state, log, snapshot, screenshot, docs, onDialog, tabs);
   script.then(
     () => busy.delete(req.session),
     () => busy.delete(req.session),
   );
   try {
     const out = await Promise.race([script.then((value) => ({ value })), dialog.then((d) => ({ dialog: d })), timeout]);
-    return { ok: true, result: clip(show(out.value)), logs, images, dialog: out.dialog };
+    return { ok: true, result: clip(show(out.value)), logs, images, dialog: out.dialog, opened, activate, hints: hintsFor(req.code) };
   } catch (e) {
     if (e instanceof ScriptTimeout) {
       return {
@@ -168,10 +281,19 @@ async function run(req) {
         fatal: true,
       };
     }
-    return { ok: false, error: clip(plain(e?.stack?.split("\n").slice(0, 6).join("\n") ?? String(e))), logs, images };
+    return {
+      ok: false,
+      error: clip(plain(e?.stack?.split("\n").slice(0, 6).join("\n") ?? String(e))),
+      logs,
+      images,
+      opened,
+      activate,
+      hints: hintsFor(req.code),
+    };
   } finally {
     clearTimeout(timer);
-    page.off("dialog", onDialog);
+    for (const p of watched) p.off("dialog", dialogListener);
+    page.context().off("page", onPopup);
   }
 }
 
