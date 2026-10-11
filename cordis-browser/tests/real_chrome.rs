@@ -541,3 +541,177 @@ async fn launched_chromium_does_not_announce_automation() {
     assert!(out.text.contains("Chrome/"), "{}", out.text);
     hub.shutdown().await;
 }
+
+/// 回归：点一个会弹 `alert` 的按钮，CDP 的鼠标事件要等对话框关掉才返回——以前这一下
+/// 就把调用挂住（实测 10 分钟没回），同组后面的调用全排在后面。现在对话框一弹出就先
+/// 返回、说清弹了什么；没处理之前别的调用立刻报错，处理完页面接着跑。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn clicking_a_button_that_opens_a_dialog_returns() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("dialog click") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<html><body><button onclick=\"alert('hi there'); document.getElementById('o').textContent='after'\">Alert</button><button onclick=\"document.getElementById('o').textContent = confirm('sure?') ? 'yes' : 'no'\">Confirm</button><p id=o>idle</p></body></html>"}),
+    )
+    .await;
+    let refs = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter_map(|l| {
+                let i = l.find("[ref=")?;
+                Some(l[i + 5..].split(']').next()?.to_string())
+            })
+            .collect()
+    };
+    let snap = ok(&hub, "s", "browser_snapshot", json!({})).await;
+    let r = refs(&snap.text);
+    assert_eq!(r.len(), 2, "{}", snap.text);
+
+    let click = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        hub.call("s", "browser_click", &json!({"ref": r[0]})),
+    )
+    .await
+    .expect("clicking a button that alerts must not hang");
+    assert!(!click.is_error, "{}", click.text);
+    assert!(
+        click.text.contains("alert") && click.text.contains("hi there"),
+        "{}",
+        click.text
+    );
+
+    // 没处理之前：别的调用立刻报错并指路，不去碰被挡住的页。
+    let blocked = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        hub.call("s", "browser_snapshot", &json!({})),
+    )
+    .await
+    .expect("calls while a dialog is open must fail fast");
+    assert!(blocked.is_error, "{}", blocked.text);
+    assert!(
+        blocked.text.contains("browser_handle_dialog"),
+        "{}",
+        blocked.text
+    );
+
+    ok(&hub, "s", "browser_handle_dialog", json!({"accept": true})).await;
+    let after = ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "document.getElementById('o').textContent"}),
+    )
+    .await;
+    assert!(after.text.contains("after"), "{}", after.text);
+
+    // confirm 选「取消」：页面拿到 false。
+    let snap = ok(&hub, "s", "browser_snapshot", json!({})).await;
+    let r = refs(&snap.text);
+    let click = ok(&hub, "s", "browser_click", json!({"ref": r[1]})).await;
+    assert!(click.text.contains("confirm"), "{}", click.text);
+    ok(&hub, "s", "browser_handle_dialog", json!({"accept": false})).await;
+    let after = ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "document.getElementById('o').textContent"}),
+    )
+    .await;
+    assert!(after.text.contains("no"), "{}", after.text);
+    hub.shutdown().await;
+}
+
+/// browser_js：一次调用跑一段 Playwright 脚本（参考 Codex 的 node_repl）。第一次用时
+/// 把 playwright-core 装进 `$DOCK_HOME/browser/js`（要联网 + npm），之后复用。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_runs_playwright_on_the_session_tab() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser_js") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<html><body><input placeholder=name><button onclick=\"document.getElementById('o').textContent='hi '+document.querySelector('input').value\">Greet</button><button onclick=\"alert('stop')\">Alert</button><p id=o></p></body></html>"}),
+    )
+    .await;
+
+    // 几步一次做完：按 placeholder 填、按角色点、读结果。
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await page.getByPlaceholder('name').fill('鹈鹕');\nawait page.getByRole('button', { name: 'Greet' }).click();\nlog('clicked');\nreturn await page.locator('#o').textContent();"}),
+    )
+    .await;
+    assert!(out.text.contains("hi 鹈鹕"), "{}", out.text);
+    assert!(out.text.contains("clicked"), "log 要带上：{}", out.text);
+
+    // 单个表达式直接当返回值；state 跨调用保留。
+    ok(&hub, "s", "browser_js", json!({"code": "state.n = 41"})).await;
+    let n = ok(&hub, "s", "browser_js", json!({"code": "state.n + 1"})).await;
+    assert!(n.text.contains("42"), "{}", n.text);
+
+    let snap = ok(&hub, "s", "browser_js", json!({"code": "snapshot()"})).await;
+    assert!(snap.text.contains("Greet"), "{}", snap.text);
+
+    let shot = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await screenshot(); return 'shot'"}),
+    )
+    .await;
+    assert!(shot.image.as_ref().is_some_and(|p| p.is_file()), "{shot:?}");
+
+    // 脚本里点出了对话框：提前返回，交给 browser_handle_dialog。
+    let dialog = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        hub.call(
+            "s",
+            "browser_js",
+            &json!({"code": "await page.getByRole('button', { name: 'Alert' }).click(); return 'never'"}),
+        ),
+    )
+    .await
+    .expect("a script that opens a dialog must not hang");
+    assert!(!dialog.is_error, "{}", dialog.text);
+    assert!(dialog.text.contains("stop"), "{}", dialog.text);
+    ok(&hub, "s", "browser_handle_dialog", json!({"accept": true})).await;
+
+    // 脚本抛错：标失败，带上错误。
+    let err = hub
+        .call(
+            "s",
+            "browser_js",
+            &json!({"code": "throw new Error('boom')"}),
+        )
+        .await;
+    assert!(err.is_error && err.text.contains("boom"), "{}", err.text);
+
+    // Playwright 的超时报错带 call log：不带终端颜色码。
+    let timeout = hub
+        .call(
+            "s",
+            "browser_js",
+            &json!({"code": "await page.getByRole('button', { name: 'Nope' }).click({ timeout: 500 })"}),
+        )
+        .await;
+    assert!(timeout.is_error, "{}", timeout.text);
+    assert!(!timeout.text.contains('\u{1b}'), "{:?}", timeout.text);
+
+    // 没开过页的会话：先开一个空白页再跑。
+    let fresh = ok(&hub, "t", "browser_js", json!({"code": "page.url()"})).await;
+    assert!(fresh.text.contains("about:blank"), "{}", fresh.text);
+    hub.shutdown().await;
+}

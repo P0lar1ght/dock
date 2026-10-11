@@ -24,8 +24,9 @@ use chromiumoxide::cdp::browser_protocol::network::{
     EventRequestWillBeSent, EventResponseReceived,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    EventJavascriptDialogOpening, FrameId, FrameTree, GetFrameTreeParams,
-    GetNavigationHistoryParams, HandleJavaScriptDialogParams, NavigateToHistoryEntryParams,
+    EventJavascriptDialogClosed, EventJavascriptDialogOpening, FrameId, FrameTree,
+    GetFrameTreeParams, GetNavigationHistoryParams, HandleJavaScriptDialogParams,
+    NavigateToHistoryEntryParams,
 };
 use chromiumoxide::cdp::browser_protocol::target::{
     ActivateTargetParams, CloseTargetParams, GetTargetsParams, TargetId,
@@ -58,6 +59,22 @@ pub struct PendingDialog {
     pub message: String,
     pub dialog_type: String,
     pub default_prompt: Option<String>,
+    /// 弹出它的那一页：开着对话框的页在关掉它之前不响应别的 CDP 命令。
+    pub target: String,
+}
+
+/// 盯着一组页的 JS 对话框：`seq` 每弹出一个加一（调用方等它变，就知道这次调用把对话框
+/// 弹出来了），`pending` 是还没关掉的那个。
+#[derive(Clone)]
+pub struct DialogWatch {
+    pub seq: tokio::sync::watch::Receiver<u64>,
+    pub pending: Arc<std::sync::Mutex<Option<PendingDialog>>>,
+}
+
+impl DialogWatch {
+    pub fn pending(&self) -> Option<PendingDialog> {
+        self.pending.lock().ok().and_then(|g| g.clone())
+    }
 }
 
 const CAPTURE_CAP: usize = 100;
@@ -249,6 +266,11 @@ impl Chromium {
         })
     }
 
+    /// 浏览器级 CDP 的 ws 地址（`browser_js` 的执行器用它另连一条）。
+    pub fn ws_url(&self) -> String {
+        self.browser.websocket_address().clone()
+    }
+
     /// CDP 连接还在吗。Chromium 被关掉（或别的进程拉起的那个退出了）时 handler 流结束。
     pub fn is_alive(&self) -> bool {
         !self.handler.is_finished()
@@ -403,6 +425,7 @@ pub struct ConnectedSession {
     dialog_tasks: Vec<JoinHandle<()>>,
     capture_tasks: Vec<JoinHandle<()>>,
     pending_dialog: Arc<std::sync::Mutex<Option<PendingDialog>>>,
+    dialog_seq: Arc<tokio::sync::watch::Sender<u64>>,
     capture: Arc<AsyncMutex<CaptureBuffers>>,
     pub refs: HashMap<String, RefEntry>,
 }
@@ -426,10 +449,13 @@ impl ConnectedSession {
         .map_err(|e| format!("new_page({start}): {e}"))?;
 
         let pending_dialog = Arc::new(std::sync::Mutex::new(None));
+        let dialog_seq = Arc::new(tokio::sync::watch::channel(0u64).0);
         let capture = Arc::new(AsyncMutex::new(CaptureBuffers::new()));
         let mut dialog_tasks = Vec::new();
         let mut capture_tasks = Vec::new();
-        dialog_tasks.push(Self::spawn_dialog_listener(&page, pending_dialog.clone()).await?);
+        dialog_tasks.push(
+            Self::spawn_dialog_listener(&page, pending_dialog.clone(), dialog_seq.clone()).await?,
+        );
         capture_tasks.extend(Self::attach_page_capture(&page, capture.clone()).await?);
 
         Ok(Self {
@@ -439,6 +465,7 @@ impl ConnectedSession {
             dialog_tasks,
             capture_tasks,
             pending_dialog,
+            dialog_seq,
             capture,
             refs: HashMap::new(),
         })
@@ -504,7 +531,7 @@ impl ConnectedSession {
                 continue;
             };
             self.dialog_tasks
-                .push(Self::spawn_dialog_listener(&page, self.pending_dialog.clone()).await?);
+                .push(self.dialog_listener_for(&page).await?);
             self.capture_tasks
                 .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
             self.pages.insert(at + 1, page);
@@ -522,26 +549,64 @@ impl ConnectedSession {
         self.pages.is_empty()
     }
 
+    async fn dialog_listener_for(&self, page: &Page) -> Result<JoinHandle<()>, String> {
+        Self::spawn_dialog_listener(page, self.pending_dialog.clone(), self.dialog_seq.clone())
+            .await
+    }
+
+    /// 记下页上弹出的对话框，并让 `seq` 加一（等着的调用据此先返回）；对话框关掉
+    /// （agent 处理了，或者人在面板里点掉了）就清掉。
     async fn spawn_dialog_listener(
         page: &Page,
         pending: Arc<std::sync::Mutex<Option<PendingDialog>>>,
+        seq: Arc<tokio::sync::watch::Sender<u64>>,
     ) -> Result<JoinHandle<()>, String> {
-        let mut events = page
+        let mut opened = page
             .event_listener::<EventJavascriptDialogOpening>()
             .await
             .map_err(|e| format!("dialog listener: {e}"))?;
+        let mut closed = page
+            .event_listener::<EventJavascriptDialogClosed>()
+            .await
+            .map_err(|e| format!("dialog listener: {e}"))?;
+        let target = page.target_id().as_ref().to_string();
         Ok(tokio::spawn(async move {
-            while let Some(ev) = events.next().await {
-                let info = PendingDialog {
-                    message: ev.message.clone(),
-                    dialog_type: ev.r#type.as_ref().to_string(),
-                    default_prompt: ev.default_prompt.clone(),
-                };
-                if let Ok(mut g) = pending.lock() {
-                    *g = Some(info);
+            loop {
+                tokio::select! {
+                    ev = opened.next() => {
+                        let Some(ev) = ev else { break };
+                        let info = PendingDialog {
+                            message: ev.message.clone(),
+                            dialog_type: ev.r#type.as_ref().to_string(),
+                            default_prompt: ev.default_prompt.clone(),
+                            target: target.clone(),
+                        };
+                        if let Ok(mut g) = pending.lock() {
+                            *g = Some(info);
+                        }
+                        seq.send_modify(|n| *n += 1);
+                    }
+                    ev = closed.next() => {
+                        if ev.is_none() {
+                            break;
+                        }
+                        if let Ok(mut g) = pending.lock() {
+                            if g.as_ref().is_some_and(|d| d.target == target) {
+                                *g = None;
+                            }
+                        }
+                    }
                 }
             }
         }))
+    }
+
+    /// 给调用方一份对话框的观察句柄（不借着本组，调用跑着时也能看）。
+    pub fn dialog_watch(&self) -> DialogWatch {
+        DialogWatch {
+            seq: self.dialog_seq.subscribe(),
+            pending: self.pending_dialog.clone(),
+        }
     }
 
     async fn attach_page_capture(
@@ -845,7 +910,7 @@ impl ConnectedSession {
                     .await
                     .map_err(|e| format!("new tab: {e}"))?;
                 self.dialog_tasks
-                    .push(Self::spawn_dialog_listener(&page, self.pending_dialog.clone()).await?);
+                    .push(self.dialog_listener_for(&page).await?);
                 self.capture_tasks
                     .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
                 self.pages.push(page);
@@ -1389,8 +1454,16 @@ impl ConnectedSession {
         accept: bool,
         prompt_text: Option<&str>,
     ) -> Result<String, String> {
-        let page = self.active_page()?.clone();
         let pending = self.pending_dialog();
+        // 对话框在哪一页就处理哪一页（不一定是活动页）。
+        let page = match pending.as_ref().and_then(|d| {
+            self.pages
+                .iter()
+                .find(|p| p.target_id().as_ref() == d.target.as_str())
+        }) {
+            Some(p) => p.clone(),
+            None => self.active_page()?.clone(),
+        };
         let mut params = HandleJavaScriptDialogParams::new(accept);
         if let Some(t) = prompt_text {
             params.prompt_text = Some(t.to_string());

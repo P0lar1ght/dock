@@ -19,7 +19,8 @@
 
 ## 工具
 
-- 公名 `mcp_browser__browser_*`，21 颗，本名与以前的进程内工具一致：
+- 公名 `mcp_browser__browser_*`，22 颗，本名与以前的进程内工具一致（`browser_js` 是新加的）：
+  - `browser_js`（一次跑一段 Playwright 脚本，见下）
   - `browser_open` `browser_navigate` `browser_navigate_back`
   - `browser_snapshot` `browser_click` `browser_hover` `browser_type`
   - `browser_press_key` `browser_select_option` `browser_fill_form`
@@ -34,9 +35,40 @@
 - 失败回 `isError: true`；Dock 客户端据此标 `ToolResult.is_error`，不靠猜文本。
 - `browser_screenshot` 存到 `$DOCK_HOME/browser/screenshots/`，同时回 MCP `image` 内容。
 
+## JS 对话框与卡住的页
+
+- 点击 / 按键 / 跑脚本弹出 `alert` / `confirm` / `prompt` / `beforeunload` 时，CDP 命令要等对话框关掉才返回。
+  - 对话框一弹出，这次调用就先返回（不算失败）：写明弹的是什么，叫模型调 `browser_handle_dialog`。
+  - 以前这一下会把调用一直挂着（实测 10 分钟没回），同组后面的调用全排在它后面。
+- 对话框没关之前，除了 `browser_handle_dialog`（和 `browser_close`），本组别的调用立刻报错指路，不去碰被挡住的页。
+- 人在面板里把对话框点掉也算关了（`Page.javascriptDialogClosed`）。
+- `browser_handle_dialog` 处理对话框所在的那一页，不一定是活动页。
+- 每次调用最多等 90 秒（`browser_wait_for` 是它自己的超时再加 15 秒），到点报错说清是哪一步卡住。
+
+## browser_js（Playwright 脚本）
+
+参考 Codex 的浏览器做法（`node_repl` 的 `js(title, code)`：模型写一段脚本、一次做好几步）。
+Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
+
+- 参数：`code`（async 函数体；只有一个表达式时直接当返回值）、`title`（给人看的一句话）、`timeout_ms`（默认 60 秒，最长 300 秒）。
+- 脚本里有：
+  - `page`：本会话活动标签页的 Playwright Page。`context` / `browser` 也在。
+  - `state`：本会话跨调用保留的对象（局部变量不保留）。
+  - `log(...)`：收进输出。`snapshot(selector)`：ARIA 快照文本。`screenshot(opts)`：存 PNG，最后一张随结果回传。
+- 实现（`cordis-browser/src/js.rs` + `src/js/runner.mjs`）：
+  - 每个 `dock mcp browser` 进程一个常驻 Node 执行器，stdin / stdout 一行一个 JSON；死了下一次调用重起。
+  - 执行器用 `chromium.connectOverCDP` 连同一个 Chromium（和 chromiumoxide 并存），按 target id 找本会话的活动页。
+  - 本会话还没有页就先开一个空白页。跑完旧快照的 refs 作废。
+- 依赖：Node 18+（`DOCK_NODE` 可指定）+ playwright-core。
+  - 第一次用时 `npm install playwright-core@1.64.0` 到 `$DOCK_HOME/browser/js/`（只是驱动，不下载浏览器）。
+  - 离线时用 `DOCK_PLAYWRIGHT_CORE` 指到已有的包目录。
+- 对话框：Playwright 默认会自动关掉对话框，执行器给每页挂一个空监听让它留着；脚本触发对话框时提前返回，交给 `browser_handle_dialog`。
+- 权限：和 `browser_evaluate`、bash 同级（询问 + 计划模式里挡）。
+- 测试：`cargo test -p cordis-browser --test real_chrome -- --ignored browser_js`（要 Chrome、Node、npm）。
+
 ## 权限
 
-- `mcp_browser__browser_evaluate` 与 bash 同级：`needs_permission` + `blocked_in_plan`。
+- `mcp_browser__browser_evaluate`、`mcp_browser__browser_js` 与 bash 同级：`needs_permission` + `blocked_in_plan`。
 - 其余 `mcp_browser__*` 不过门（和以前进程内的划分一致）。
 - 子代理能力档位按本名归类：看页面的算检索，动页面 / 跑 JS 的算执行。
 

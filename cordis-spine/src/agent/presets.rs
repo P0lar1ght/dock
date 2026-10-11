@@ -1310,10 +1310,21 @@ pub fn resident_matches(list: &[String], name: &str) -> bool {
     })
 }
 
-/// 从零新建的预设先抄一份默认预设（`code`）的按需名单，写进它自己的 YAML：
-/// 不抄的话 `tools` 省略 = 全部工具，低频的全挤在工具表上。
+/// 默认预设（`code`）不准、所以没列进它按需名单的低频工具。从零新建的预设
+/// `tools` 省略 = 全部工具，它们要补进按需名单，不然全挤在工具表上。
+const SEED_EXTRA_ON_DEMAND: [&str; 2] = ["scheduler_*", "cordis_*"];
+
+/// 从零新建的预设先抄一份默认预设（`code`）的按需名单（加上
+/// [`SEED_EXTRA_ON_DEMAND`]），写进它自己的 YAML：不抄的话 `tools` 省略 = 全部工具，
+/// 低频的全挤在工具表上。
 fn seed_on_demand() -> Option<Vec<String>> {
-    parse_shipped(DEFAULT_PRESET_ID).and_then(|p| p.on_demand_tools)
+    let mut list = parse_shipped(DEFAULT_PRESET_ID).and_then(|p| p.on_demand_tools)?;
+    for extra in SEED_EXTRA_ON_DEMAND {
+        if !list.iter().any(|e| e == extra) {
+            list.push(extra.to_string());
+        }
+    }
+    Some(list)
 }
 
 /// 按需工具的发现口自己永远常驻：藏起来就再也找不回别的工具。
@@ -3466,9 +3477,13 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
         assert!(presets.is_on_demand("canvas_create"));
-        assert!(presets.is_on_demand("cordis_run"));
         assert!(!presets.is_on_demand("web_search"));
         assert!(!presets.is_on_demand("search_tool"));
+        // `code` 不准调度 / cordis_*，按需名单也不列；`cordis` 准，列成按需。
+        assert!(!presets.is_on_demand("scheduler_create"));
+        assert!(!presets.is_on_demand("cordis_run"));
+        presets.pin(CORDIS_PRESET_ID).unwrap();
+        assert!(presets.is_on_demand("cordis_run"));
         presets.pin(WARDEN_PRESET_ID).unwrap();
         assert!(!presets.is_on_demand("list_agents"));
     }
@@ -3504,10 +3519,18 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let presets = AgentPresets::load_layers(home.path().to_path_buf(), None);
         let made = presets.create_custom("空白", None, "", None).unwrap();
-        assert_eq!(
-            made.on_demand_tools,
-            parse_shipped(DEFAULT_PRESET_ID).unwrap().on_demand_tools
-        );
+        let list = made.on_demand_tools.clone().unwrap();
+        for entry in parse_shipped(DEFAULT_PRESET_ID)
+            .unwrap()
+            .on_demand_tools
+            .unwrap()
+        {
+            assert!(list.contains(&entry), "{entry}: {list:?}");
+        }
+        // 新预设什么工具都准：默认预设不准、没列的低频工具也补成按需。
+        for extra in SEED_EXTRA_ON_DEMAND {
+            assert!(list.iter().any(|e| e == extra), "{extra}: {list:?}");
+        }
         let written = std::fs::read_to_string(presets.file_of(&made.id).unwrap()).unwrap();
         assert!(written.contains("on_demand_tools:"), "{written}");
     }

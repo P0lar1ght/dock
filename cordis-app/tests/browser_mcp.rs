@@ -47,7 +47,7 @@ async fn builtin_browser_mcp_connects_and_reports_errors() {
     wait_connected(&root).await;
 
     let browser = root.require::<Browser>(BROWSER).unwrap();
-    assert_eq!(browser.state(), BrowserState::Connected { tools: 21 });
+    assert_eq!(browser.state(), BrowserState::Connected { tools: 22 });
 
     let tools = root.require::<Tools>(TOOLS).unwrap();
     // 模型那边看不见（和别的 MCP 一样经 search_tool），搜得到。

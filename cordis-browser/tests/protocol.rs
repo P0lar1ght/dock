@@ -66,7 +66,7 @@ async fn modern_discover_then_list() {
         .await;
     let v = c.recv().await;
     let tools = v["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 21);
+    assert_eq!(tools.len(), 22);
     assert!(tools.iter().any(|t| t["name"] == "browser_open"));
     assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
     c.close().await;

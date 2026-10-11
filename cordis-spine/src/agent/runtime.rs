@@ -6,6 +6,7 @@ use std::sync::Arc;
 use cordis::Context;
 
 use crate::agent::agents::Agents;
+use crate::agent::capability::parallel_safe;
 use crate::agent::presets::AgentPresets;
 use crate::agent::turn::TurnControl;
 use crate::error::{Error, Result};
@@ -199,21 +200,32 @@ async fn grok_sample_loop(
                 ended_with_text = true;
                 break;
             }
-            for call in output.tool_calls {
+            // 连在一起的只读调用（读文件、搜索、看目录…）一起跑，别的一颗一颗跑，结果
+            // 按模型给的顺序记（参考 Codex：能并行的拿读锁，别的拿写锁）。
+            for batch in parallel_batches(output.tool_calls) {
                 abort_if_cancelled(ctx, sessions)?;
-                let arguments = call.arguments.clone();
-                let (result, stopped) = match execute_cancellable(ctx, tools, call).await {
-                    Executed::Done(result) => (result, false),
-                    Executed::Stopped(result) => (result, true),
-                };
-                sessions.append(LogEvent::ToolExecute {
-                    id: result.call_id,
-                    name: result.name,
-                    arguments,
-                    content: result.content,
-                    images: result.images,
-                    is_error: result.is_error,
+                let runs = batch.into_iter().map(|call| async move {
+                    let arguments = call.arguments.clone();
+                    (arguments, execute_cancellable(ctx, tools, call).await)
                 });
+                let mut stopped = false;
+                for (arguments, executed) in futures_util::future::join_all(runs).await {
+                    let result = match executed {
+                        Executed::Done(result) => result,
+                        Executed::Stopped(result) => {
+                            stopped = true;
+                            result
+                        }
+                    };
+                    sessions.append(LogEvent::ToolExecute {
+                        id: result.call_id,
+                        name: result.name,
+                        arguments,
+                        content: result.content,
+                        images: result.images,
+                        is_error: result.is_error,
+                    });
+                }
                 if stopped {
                     // 这一批里还没轮到的调用补上中断结果，否则下一次采样会因为
                     // 缺 tool result 400。
@@ -373,6 +385,26 @@ const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 /// 被 Stop 时先给工具 [`STOP_GRACE`] 自己收尾（`bash` 回的是以「已中断。」开头、
 /// 带着已产出输出的结果；恰好在这一秒里跑完的就是真结果）；还不回就由这里写一条
 /// 中断结果，写明跑了多久、可能已经部分执行——以前只有一句「已中断。」，输出全丢。
+/// 把一次回复里的工具调用切成几批：连在一起的只读调用（[`parallel_safe`]）一批，
+/// 别的每颗自成一批。批与批按顺序跑，所以「先改再读」「先读再改」的先后不变。
+fn parallel_batches(
+    calls: Vec<cordis_base::types::ToolCall>,
+) -> Vec<Vec<cordis_base::types::ToolCall>> {
+    let mut batches: Vec<Vec<cordis_base::types::ToolCall>> = Vec::new();
+    for call in calls {
+        let joins = parallel_safe(&call.name, &call.arguments)
+            && batches
+                .last()
+                .and_then(|b| b.last())
+                .is_some_and(|prev| parallel_safe(&prev.name, &prev.arguments));
+        match batches.last_mut() {
+            Some(batch) if joins => batch.push(call),
+            _ => batches.push(vec![call]),
+        }
+    }
+    batches
+}
+
 async fn execute_cancellable(
     ctx: &Context,
     tools: &Tools,

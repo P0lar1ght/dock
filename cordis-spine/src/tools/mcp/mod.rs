@@ -229,7 +229,9 @@ pub struct Mcp {
     elicit: Elicitation,
     changed_tx: tokio::sync::mpsc::UnboundedSender<String>,
     dirty: Arc<AtomicBool>,
-    announced: Arc<Mutex<HashMap<String, discover::ServerFingerprint>>>,
+    /// 每个会话（页号 + 落盘 id）已经知道的服务器。GUI 每个对话是另一页，页位还会
+    /// 换装别的对话，所以不能整个进程只记一份。
+    announced: Arc<Mutex<HashMap<String, HashMap<String, discover::ServerFingerprint>>>>,
     reloading: Arc<AtomicBool>,
 }
 
@@ -324,23 +326,50 @@ impl Mcp {
         self.dirty.store(true, Ordering::SeqCst);
     }
 
+    /// 目录变了（开关、重连、重载）：马上告诉第 1 页；别的页在它们下一轮开头补上
+    /// （[`Self::pre_step`]）。
     fn maybe_inject_reminder(&self) {
         if !self.dirty.swap(false, Ordering::SeqCst) {
             return;
         }
+        if let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) {
+            self.announce_to(&sessions);
+        }
+    }
+
+    /// 把这个会话还不知道的变化（新连上、更新、断开）写进它的历史。
+    fn announce_to(&self, sessions: &Sessions) {
         let summaries = discover::summaries_from_status(&self.list());
-        let mut announced = self.announced.lock().unwrap();
-        let Some(text) = discover::build_delta_reminder(&announced, &summaries) else {
+        let key = format!("{}|{}", sessions.identity(), sessions.live_session_id());
+        let mut all = self.announced.lock().unwrap();
+        let known = all.entry(key).or_default();
+        let Some(text) = discover::build_delta_reminder(known, &summaries) else {
             return;
         };
-        *announced = discover::fingerprint_servers(&summaries);
-        drop(announced);
-        let Some(sessions) = self.ctx.get::<Sessions>(SESSIONS) else {
-            return;
-        };
+        *known = discover::fingerprint_servers(&summaries);
+        drop(all);
         sessions.append(LogEvent::SystemReminder(format!(
             "<system-reminder>\n{text}\n</system-reminder>"
         )));
+    }
+
+    /// `agent/pre-step`：一轮开始前告诉模型有哪些 MCP 服务器。
+    pub(crate) fn pre_step(&self, step: &PreStep) {
+        // Main session only: the catalog notice is drained once. A
+        // child turn would spend it on the parent's transcript, and the
+        // user would never see why `/mcps` changed.
+        if !(step.enter && step.is_main_session()) {
+            return;
+        }
+        // 写进正在跑这一轮的那一页（waterfall 拿不到调用方 ctx，走 exec ctx）。
+        let sessions = crate::tools::registry::exec_ctx()
+            .and_then(|c| c.get::<Sessions>(SESSIONS))
+            .filter(|s| s.identity() == step.identity)
+            .or_else(|| self.ctx.get::<Sessions>(SESSIONS));
+        if let Some(sessions) = sessions {
+            self.dirty.store(false, Ordering::SeqCst);
+            self.announce_to(&sessions);
+        }
     }
 
     fn shutdown(&self) {
@@ -977,12 +1006,7 @@ pub fn mcp_client() -> Plugin {
             let mcp_pre = mcp.clone();
             let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
                 let next = args.next::<PreStep>().unwrap_or(step);
-                // Main session only: the catalog notice is drained once. A
-                // child turn would spend it on the parent's transcript, and the
-                // user would never see why `/mcps` changed.
-                if next.enter && next.is_main_session() {
-                    mcp_pre.maybe_inject_reminder();
-                }
+                mcp_pre.pre_step(&next);
                 next
             });
             let mcp_drop = mcp;
@@ -1137,6 +1161,50 @@ startup_timeout_sec = 1
             Elicitation::new(ctx.clone()),
         );
         (ctx, mcp, tools)
+    }
+
+    fn mcp_reminders(sessions: &Sessions) -> Vec<String> {
+        sessions
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::SystemReminder(t) if t.contains("MCP 服务器") => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 回归：「MCP 服务器已连接」以前整个进程只发一次、只写进第 1 页。GUI 的每个新对话
+    /// 都是另开的一页，模型在那里根本不知道有浏览器 / 桌面这些 MCP 工具（实测问「香港
+    /// 有没有 iPhone 现货」，它只会搜网页，说查不了实时库存）。现在每一页第一轮都告诉它，
+    /// 写进正在跑的那一页，之后有变化再补。
+    #[tokio::test]
+    async fn every_page_learns_the_mcp_servers_on_its_first_turn() {
+        let (ctx, mcp, _tools) = boot().await;
+        attach_fake(&mcp, "probe", &[("ping", "ping")]);
+        let main = ctx.require::<Sessions>(SESSIONS).unwrap();
+        crate::tools::registry::with_exec_ctx(&ctx, || {
+            mcp.pre_step(&PreStep::new("hi", true, main.identity()))
+        });
+        assert_eq!(mcp_reminders(&main).len(), 1, "第 1 页第一轮要知道");
+
+        // 第 2 页：自己的会话，身份不同。
+        let page = cordis::Context::new();
+        let tab = Sessions::tab(page.clone(), 2);
+        page.provide(SESSIONS, tab.clone()).unwrap();
+        crate::tools::registry::with_exec_ctx(&page, || {
+            mcp.pre_step(&PreStep::new("hi", true, tab.identity()))
+        });
+        let seen = mcp_reminders(&tab);
+        assert_eq!(seen.len(), 1, "第 2 页第一轮也要知道：{seen:?}");
+        assert!(seen[0].contains("probe"), "{seen:?}");
+        assert_eq!(mcp_reminders(&main).len(), 1, "别写进第 1 页");
+
+        // 同一页下一轮：没变化就不重复。
+        crate::tools::registry::with_exec_ctx(&page, || {
+            mcp.pre_step(&PreStep::new("again", true, tab.identity()))
+        });
+        assert_eq!(mcp_reminders(&tab).len(), 1, "没变化不重复");
     }
 
     #[tokio::test]
