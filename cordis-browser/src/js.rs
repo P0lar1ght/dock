@@ -53,12 +53,19 @@ impl JsRunner {
             .arg(playwright.join("index.mjs"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("start {node}: {e}"))?;
         let stdin = child.stdin.take().ok_or("runner stdin")?;
         let stdout = child.stdout.take().ok_or("runner stdout")?;
+        let stderr_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> = Arc::default();
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(keep_stderr_tail(
+                BufReader::new(stderr),
+                stderr_tail.clone(),
+            ));
+        }
         let pending: Pending = Arc::default();
         let (ready_tx, ready_rx) = oneshot::channel();
         tokio::spawn(read_replies(
@@ -70,8 +77,16 @@ impl JsRunner {
             Ok(Ok(())) => {}
             _ => {
                 let _ = child.kill().await;
+                // 给 stderr 一点时间把最后几行读完（ESM 加载错误、版本不对都在那里）。
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
+                let detail = if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nstderr:\n{}", tail.join("\n"))
+                };
                 return Err(format!(
-                    "the browser_js runner did not start ({node} {}). Node 18+ and playwright-core are required.",
+                    "the browser_js runner did not start ({node} {}). Node 18+ and playwright-core are required.{detail}",
                     script.display()
                 ));
             }
@@ -117,6 +132,23 @@ impl JsRunner {
     }
 }
 
+/// 执行器 stderr 的最后几行：启动失败时带进报错，平时不看。
+const STDERR_TAIL: usize = 20;
+
+async fn keep_stderr_tail(
+    stderr: BufReader<tokio::process::ChildStderr>,
+    tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+) {
+    let mut lines = stderr.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let mut tail = tail.lock().unwrap();
+        if tail.len() == STDERR_TAIL {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
 async fn read_replies(
     stdout: BufReader<tokio::process::ChildStdout>,
     pending: Pending,
@@ -150,21 +182,22 @@ pub fn runner_dir() -> PathBuf {
 }
 
 fn node_binary() -> Result<String, String> {
-    if let Ok(node) = std::env::var("DOCK_NODE") {
-        if !node.trim().is_empty() {
-            return Ok(node);
-        }
-    }
-    let ok = std::process::Command::new("node")
+    let node = std::env::var("DOCK_NODE")
+        .ok()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "node".into());
+    let ok = std::process::Command::new(&node)
         .arg("--version")
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     match ok {
-        Some(v) if node_major(&v).is_some_and(|m| m >= 18) => Ok("node".into()),
-        Some(v) => Err(format!("browser_js needs Node 18+, found {v}")),
-        None => Err("browser_js needs Node 18+ (`node` not found on PATH; set DOCK_NODE)".into()),
+        Some(v) if node_major(&v).is_some_and(|m| m >= 18) => Ok(node),
+        Some(v) => Err(format!("browser_js needs Node 18+, found {v} ({node})")),
+        None => Err(format!(
+            "browser_js needs Node 18+ (`{node}` not found; set DOCK_NODE)"
+        )),
     }
 }
 
@@ -204,6 +237,8 @@ async fn playwright_core(dir: &Path) -> Result<PathBuf, String> {
     let run = Command::new(&npm)
         .args([
             "install",
+            // playwright-core 不需要安装脚本；不跑任何包的脚本，纵深防御。
+            "--ignore-scripts",
             "--no-audit",
             "--no-fund",
             "--loglevel=error",

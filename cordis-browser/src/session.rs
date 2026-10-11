@@ -424,6 +424,8 @@ pub struct ConnectedSession {
     active: usize,
     dialog_tasks: Vec<JoinHandle<()>>,
     capture_tasks: Vec<JoinHandle<()>>,
+    /// 本组只记一个：两页先后弹对话框时后一个盖掉前一个，前一个关掉之前本组一直被
+    /// 挡着（报错里写的是后一个）。边缘情况，处理掉后一个再看快照就能发现前一个。
     pending_dialog: Arc<std::sync::Mutex<Option<PendingDialog>>>,
     dialog_seq: Arc<tokio::sync::watch::Sender<u64>>,
     capture: Arc<AsyncMutex<CaptureBuffers>>,

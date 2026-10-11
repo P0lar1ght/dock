@@ -680,7 +680,7 @@ async fn browser_js_runs_playwright_on_the_session_tab() {
         hub.call(
             "s",
             "browser_js",
-            &json!({"code": "await page.getByRole('button', { name: 'Alert' }).click(); return 'never'"}),
+            &json!({"code": "await page.getByRole('button', { name: 'Alert' }).click(); await new Promise((r) => setTimeout(r, 3000)); state.resumed = true; return 'never'"}),
         ),
     )
     .await
@@ -688,6 +688,42 @@ async fn browser_js_runs_playwright_on_the_session_tab() {
     assert!(!dialog.is_error, "{}", dialog.text);
     assert!(dialog.text.contains("stop"), "{}", dialog.text);
     ok(&hub, "s", "browser_handle_dialog", json!({"accept": true})).await;
+    // 对话框关掉后那段脚本接着跑：跑完之前同一会话的新脚本不许和它同时动这一页。
+    let overlap = hub
+        .call("s", "browser_js", &json!({"code": "page.url()"}))
+        .await;
+    assert!(
+        overlap.is_error && overlap.text.contains("still running"),
+        "{}",
+        overlap.text
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+    let resumed = ok(&hub, "s", "browser_js", json!({"code": "state.resumed"})).await;
+    assert!(resumed.text.contains("true"), "{}", resumed.text);
+
+    // 超时：脚本停不下来，执行器整个重起才算停了；state 跟着清空，晚到的结果不会再写。
+    let slow = hub
+        .call(
+            "s",
+            "browser_js",
+            &json!({"code": "state.keep = 1; await new Promise((r) => setTimeout(r, 4000)); state.late = true", "timeout_ms": 1500}),
+        )
+        .await;
+    assert!(slow.is_error, "{}", slow.text);
+    assert!(slow.text.contains("restarted"), "{}", slow.text);
+    tokio::time::sleep(std::time::Duration::from_millis(4000)).await;
+    let cleared = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "[state.keep, state.late, state.resumed].map(String).join(',')"}),
+    )
+    .await;
+    assert!(
+        cleared.text.contains("undefined,undefined,undefined"),
+        "{}",
+        cleared.text
+    );
 
     // 脚本抛错：标失败，带上错误。
     let err = hub

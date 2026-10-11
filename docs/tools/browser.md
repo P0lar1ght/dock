@@ -63,6 +63,9 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
   - 第一次用时 `npm install playwright-core@1.64.0` 到 `$DOCK_HOME/browser/js/`（只是驱动，不下载浏览器）。
   - 离线时用 `DOCK_PLAYWRIGHT_CORE` 指到已有的包目录。
 - 对话框：Playwright 默认会自动关掉对话框，执行器给每页挂一个空监听让它留着；脚本触发对话框时提前返回，交给 `browser_handle_dialog`。
+  - 提前返回后脚本还卡在 CDP 上，对话框关掉后**接着跑完剩下的部分**；跑完之前同一会话的新脚本直接报错（「上一段脚本还在跑」），不让两段同时动一页。
+- 超时：脚本取消不了，执行器回完话整个退出，下一次调用重起；所有会话的 `state` 随之清空（报错里写明）。执行器连话都没回时，Rust 侧同样杀掉它。
+- 执行器起不来时，报错里带它 stderr 的最后几行；`npm install` 带 `--ignore-scripts`。
 - 权限：和 `browser_evaluate`、bash 同级（询问 + 计划模式里挡）。
 - 测试：`cargo test -p cordis-browser --test real_chrome -- --ignored browser_js`（要 Chrome、Node、npm）。
 

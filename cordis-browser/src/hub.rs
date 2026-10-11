@@ -248,10 +248,13 @@ impl BrowserHub {
             "shotDir": crate::session::browser_screenshot_dir(),
         });
         let _ = std::fs::create_dir_all(crate::session::browser_screenshot_dir());
+        let answered = std::sync::atomic::AtomicBool::new(false);
+        let dialogs = watch.clone();
         let run = async {
             // 执行器自己按 limit 收手；这里多等一会儿给它回话的时间。
             match runner.call(req, limit + WAIT_FOR_MARGIN).await {
                 Ok(reply) => {
+                    answered.store(true, std::sync::atomic::Ordering::SeqCst);
                     let (ok, mut text, image) = js::render_reply(&reply);
                     if let Some(d) = reply.get("dialog").filter(|d| !d.is_null()) {
                         text.push_str(&format!(
@@ -270,9 +273,25 @@ impl BrowserHub {
             }
         };
         let out = guarded("browser_js", limit + WAIT_FOR_MARGIN * 2, watch, run).await;
+        // 执行器没回话就返回了：要么是对话框（脚本卡在 CDP 上，对话框关掉后接着跑完，执行器
+        // 拦着同一会话的新脚本），要么是执行器自己都没在时限里回话——那就杀掉它，脚本才真的停。
+        if !answered.load(std::sync::atomic::Ordering::SeqCst) && dialogs.pending().is_none() {
+            self.reset_js().await;
+            return CallOutput::err(format!(
+                "{} The script runner was stopped and will restart on the next browser_js call; `state` was cleared.",
+                out.text.trim_start_matches("Error: ")
+            ));
+        }
         // 脚本可能改了页面：旧快照的 refs 作废。
         g.refs.clear();
         out
+    }
+
+    /// 杀掉执行器（超时的脚本停不下来，只能连进程一起停）。
+    async fn reset_js(&self) {
+        if let Some(runner) = self.js.lock().await.take() {
+            runner.shutdown().await;
+        }
     }
 
     /// 活着的执行器；没有或死了就起一个。

@@ -88,6 +88,9 @@ pub struct McpToolStatus {
     pub enabled: bool,
 }
 
+/// [`Mcp::announce_to`] 最多记这么多个会话。
+const ANNOUNCED_MAX: usize = 512;
+
 #[derive(Clone, Debug)]
 pub struct McpStatus {
     pub name: String,
@@ -342,6 +345,11 @@ impl Mcp {
         let summaries = discover::summaries_from_status(&self.list());
         let key = format!("{}|{}", sessions.identity(), sessions.live_session_id());
         let mut all = self.announced.lock().unwrap();
+        // 关掉的页、换装掉的对话不会来清自己那条：长时间开着的 GUI 会慢慢攒。到上限就
+        // 整个清掉，代价只是各会话下一轮再收到一次完整清单。
+        if all.len() >= ANNOUNCED_MAX && !all.contains_key(&key) {
+            all.clear();
+        }
         let known = all.entry(key).or_default();
         let Some(text) = discover::build_delta_reminder(known, &summaries) else {
             return;

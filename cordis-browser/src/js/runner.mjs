@@ -21,6 +21,15 @@ const AsyncFunction = (async () => {}).constructor;
 /** 每个会话一份，跨调用保留（模型把句柄、中间结果放这里）。 */
 const states = new Map();
 
+/**
+ * 每个会话正在跑的脚本。调用因对话框提前返回后，脚本还卡在 CDP 上，对话框关掉后会接着
+ * 跑完剩下的部分；这期间同一会话的新脚本直接报错，不让两段同时动一个标签页。
+ */
+const busy = new Set();
+
+/** 超时：脚本取消不了，回完话整个执行器退出（Dock 下一次调用重起，`state` 随之清空）。 */
+class ScriptTimeout extends Error {}
+
 let connected = null; // { ws, browser }
 
 async function browserFor(ws) {
@@ -121,6 +130,15 @@ async function run(req) {
     return file;
   };
 
+  if (busy.has(req.session)) {
+    return {
+      ok: false,
+      error:
+        "the previous script on this tab is still running (it returned early because of a JS dialog; it resumes once the dialog is handled). Handle the dialog or wait, then retry.",
+      logs: [],
+      images: [],
+    };
+  }
   const fn = compile(req.code);
   let onDialog;
   const dialog = new Promise((resolve) => {
@@ -129,16 +147,27 @@ async function run(req) {
   });
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`script did not finish within ${Math.round(req.timeoutMs / 1000)}s`)), req.timeoutMs);
+    timer = setTimeout(() => reject(new ScriptTimeout(`script did not finish within ${Math.round(req.timeoutMs / 1000)}s`)), req.timeoutMs);
   });
+  busy.add(req.session);
+  const script = fn(page, page.context(), browser, state, log, snapshot, screenshot);
+  script.then(
+    () => busy.delete(req.session),
+    () => busy.delete(req.session),
+  );
   try {
-    const out = await Promise.race([
-      fn(page, page.context(), browser, state, log, snapshot, screenshot).then((value) => ({ value })),
-      dialog.then((d) => ({ dialog: d })),
-      timeout,
-    ]);
+    const out = await Promise.race([script.then((value) => ({ value })), dialog.then((d) => ({ dialog: d })), timeout]);
     return { ok: true, result: clip(show(out.value)), logs, images, dialog: out.dialog };
   } catch (e) {
+    if (e instanceof ScriptTimeout) {
+      return {
+        ok: false,
+        error: `${e.message}. The script runner was restarted to stop it; \`state\` was cleared for every session.`,
+        logs,
+        images,
+        fatal: true,
+      };
+    }
     return { ok: false, error: clip(plain(e?.stack?.split("\n").slice(0, 6).join("\n") ?? String(e))), logs, images };
   } finally {
     clearTimeout(timer);
@@ -160,7 +189,12 @@ rl.on("line", async (line) => {
   } catch (e) {
     reply = { ok: false, error: String(e?.message ?? e), logs: [], images: [] };
   }
-  process.stdout.write(`${JSON.stringify({ id: req.id, ...reply })}\n`);
+  const fatal = reply.fatal;
+  delete reply.fatal;
+  process.stdout.write(`${JSON.stringify({ id: req.id, ...reply })}\n`, () => {
+    // 超时的脚本停不下来：退出整个执行器才算真的停了。
+    if (fatal) process.exit(3);
+  });
 });
 rl.on("close", async () => {
   // Dock 那边关了：只断开自己的 CDP 连接，不关浏览器（它归 chromiumoxide 管）。
