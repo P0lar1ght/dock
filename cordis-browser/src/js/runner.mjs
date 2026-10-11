@@ -95,9 +95,43 @@ function hintsFor(code) {
   return hints;
 }
 
+/**
+ * 在临时标签页里同时打开几个网址、读出内容、关掉（参考 Codex 的 `tabs.content`）。
+ * 临时页共用登录态，不登记进会话（读完就关）；页上的对话框直接关掉，别让读取卡住。
+ * 按输入顺序回 `{ url, title, text }`，打不开的那项回 `{ url, error }`。
+ */
+async function readPagesIn(context, urls, opts = {}) {
+  const { selector = "body", mode = "text", maxChars = 4000, concurrency = 4, timeoutMs = 20_000 } = opts;
+  const list = [...urls];
+  const out = new Array(list.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < list.length) {
+      const i = next++;
+      const url = list[i];
+      const p = await context.newPage();
+      p.on("dialog", (d) => d.dismiss().catch(() => {}));
+      try {
+        await p.goto(url, { timeout: timeoutMs, waitUntil: "domcontentloaded" });
+        await p.waitForLoadState("load", { timeout: Math.min(timeoutMs, 5000) }).catch(() => {});
+        const region = p.locator(selector).first();
+        const raw = mode === "snapshot" ? await region.ariaSnapshot({ timeout: timeoutMs }) : await region.innerText({ timeout: timeoutMs });
+        const text = raw.length > maxChars ? `${raw.slice(0, maxChars)}…(truncated, ${raw.length} chars)` : raw;
+        out[i] = { url, title: await p.title().catch(() => ""), text };
+      } catch (e) {
+        out[i] = { url, error: plain(String(e?.message ?? e)).split("\n")[0] };
+      } finally {
+        await p.close().catch(() => {});
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, list.length)) }, worker));
+  return out;
+}
+
 /** 只有一个表达式时当返回值（`page.title()`）；否则当函数体，用 return 给结果。 */
 function compile(code) {
-  const params = ["page", "context", "browser", "state", "log", "snapshot", "screenshot", "docs", "onDialog", "tabs"];
+  const params = ["page", "context", "browser", "state", "log", "snapshot", "screenshot", "docs", "onDialog", "tabs", "readPages"];
   try {
     return new AsyncFunction(...params, `return (${code}\n);`);
   } catch {
@@ -263,7 +297,8 @@ async function run(req) {
     timer = setTimeout(() => reject(new ScriptTimeout(`script did not finish within ${Math.round(req.timeoutMs / 1000)}s`)), req.timeoutMs);
   });
   busy.add(req.session);
-  const script = fn(page, page.context(), browser, state, log, snapshot, screenshot, docs, onDialog, tabs);
+  const readPages = (urls, opts) => readPagesIn(page.context(), urls, opts);
+  const script = fn(page, page.context(), browser, state, log, snapshot, screenshot, docs, onDialog, tabs, readPages);
   script.then(
     () => busy.delete(req.session),
     () => busy.delete(req.session),

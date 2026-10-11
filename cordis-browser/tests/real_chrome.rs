@@ -1010,3 +1010,54 @@ async fn browser_js_handles_dialogs_on_other_tabs_too() {
     assert!(after.text.contains("no"), "{}", after.text);
     hub.shutdown().await;
 }
+
+/// readPages：在临时标签页里同时打开几个网址、读出内容、关掉（参考 Codex 的 tabs.content），
+/// 比一页一页 navigate + 读少很多来回。打不开的那项带 error，不影响别的；临时页不进会话。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_reads_several_pages_at_once() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("readPages") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<p>Home</p>"}),
+    )
+    .await;
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "const pages = await readPages(['data:text/html,<title>One</title><main>first page</main>', 'http://127.0.0.1:1/', 'data:text/html,<title>Three</title><main>third page<script>alert(1)</script></main>'], { selector: 'main' });\nreturn pages.map((p) => `${p.title}|${p.text ?? ''}|${p.error ? 'ERR' : ''}`);"}),
+    )
+    .await;
+    assert!(out.text.contains("One|first page|"), "{}", out.text);
+    assert!(
+        out.text.contains("|ERR"),
+        "打不开的那项要带 error：{}",
+        out.text
+    );
+    assert!(
+        out.text.contains("Three|third page|"),
+        "弹框的页也要读完：{}",
+        out.text
+    );
+    let tabs = ok(&hub, "s", "browser_tabs", json!({})).await;
+    assert!(
+        !tabs.text.contains("first page") && !tabs.text.contains("One"),
+        "临时页不进会话：{}",
+        tabs.text
+    );
+    assert_eq!(
+        tabs.text.lines().filter(|l| l.contains("data:")).count(),
+        1,
+        "{}",
+        tabs.text
+    );
+    hub.shutdown().await;
+}

@@ -73,7 +73,15 @@ coherent piece of work (open → act → check → read), not one click.
   `context.newPage()` do not belong to this session and are not shown to the user.
 - A link that opens a new tab is adopted automatically when the script ends; to work
   on it in the same script: `const [next] = await Promise.all([page.waitForEvent('popup'), link.click()]);`
-- Comparing several pages: open each with `tabs.new`, read what you need, return one summary.
+- Reading several pages (search results, product pages, docs): `await readPages(urls, opts)`
+  opens them in temporary tabs at the same time, reads each and closes them — one call instead
+  of navigating page by page. Returns `[{ url, title, text }]` in input order; a page that
+  fails comes back as `{ url, error }` without stopping the others.
+  - `opts`: `selector` (default `'body'`; e.g. `'main'`, `'article'`), `mode` (`'text'` or
+    `'snapshot'` for the ARIA tree), `maxChars` (default 4000 per page), `concurrency`
+    (default 4), `timeoutMs` (default 20000 per page).
+  - Temporary tabs share the logged-in state, are not shown to the user, and dismiss dialogs.
+  - Use `tabs.new` instead when you need to interact with a page, not just read it.
 
 ## Safety and the user
 

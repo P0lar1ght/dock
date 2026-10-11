@@ -58,6 +58,9 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
   - `onDialog('accept' | 'dismiss' | { accept, text } | fn)`：在会弹框的动作**之前**声明，脚本里就地处理、记进 log，一次调用跑完。
   - `tabs`：`list()` / `get(i)` / `new(url)` / `select(页或序号)`。`tabs.new` 开的页由 Rust 侧登记进本会话（`ConnectedSession::adopt`），
     `select` 指定跑完后的活动页；跑完再 `sync_targets` 收下点链接弹出的页、重写名册，GUI 画面跟着走。直接 `context.newPage()` 开的页不收（分不清是哪个会话的）。
+  - `readPages(urls, { selector, mode, maxChars, concurrency, timeoutMs })`：参考 Codex 的 `tabs.content`。
+    临时标签页里同时打开几个网址（默认并发 4、每页 20 秒）、读出 `selector` 区域的文字或 ARIA 快照（每页截到 4000 字）、关掉；
+    按输入顺序回 `{ url, title, text }`，打不开的那项回 `{ url, error }`。临时页共用登录态、不进会话、对话框直接关。
   - `docs()`：用法指南（`src/js/guide.md`，启动时和执行器写在同一目录）。工具描述里只放最关键的几条规则。
 - 指南参考 Codex 浏览器插件文档的主题（API 用法、截图、确认、安全），内容按实测问题自己写：
   先看（`snapshot()`）再动、语义定位、等条件不等时长、读要读的元素而不是 `body.innerText` + `indexOf`、
