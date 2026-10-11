@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -137,6 +138,9 @@ struct State {
 }
 
 /// Named `"cron"` service. Live-lookup from the ticker; do not capture the Arc.
+/// 墙钟（毫秒），见 [`Cron`] 的 `clock` 字段。
+type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
 pub struct Cron {
     /// `None` = 只在内存里（测试 / 没挂盘的 harness）。
     path: Option<PathBuf>,
@@ -151,8 +155,6 @@ pub struct Cron {
     /// 多久」取决于机器忙不忙。
     clock: Clock,
 }
-
-type Clock = std::sync::Arc<dyn Fn() -> u64 + Send + Sync>;
 
 impl std::fmt::Debug for Cron {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -174,7 +176,7 @@ fn ms(d: Duration) -> u64 {
 impl Cron {
     /// 只在内存里的一份（测试、harness）。所有任务都算本进程持有。
     pub fn new() -> Self {
-        Self::build(None, std::sync::Arc::new(now_ms))
+        Self::build(None, Arc::new(now_ms))
     }
 
     /// 内存版，墙钟由测试拨（见 [`Self::clock`] 字段）。
@@ -185,7 +187,7 @@ impl Cron {
 
     /// 落在 `path`（一般是 `$DOCK_HOME/schedules.json`）的一份。
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self::build(Some(path.into()), std::sync::Arc::new(now_ms))
+        Self::build(Some(path.into()), Arc::new(now_ms))
     }
 
     fn build(path: Option<PathBuf>, clock: Clock) -> Self {
@@ -631,9 +633,9 @@ mod tests {
     /// 第二次就又触发，偶发失败。现在手动拨钟：同一时刻再查不触发，拨过一个周期才再触发。
     #[test]
     fn due_reschedules() {
-        let now = std::sync::Arc::new(AtomicU64::new(1_000_000));
+        let now = Arc::new(AtomicU64::new(1_000_000));
         let clock = now.clone();
-        let cron = Cron::with_clock(std::sync::Arc::new(move || clock.load(Ordering::SeqCst)));
+        let cron = Cron::with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
         cron.add(Duration::from_millis(1), "tick").unwrap();
         // 周期按 clamp_every 规整过，按规整后的拨。
         let every = ms(clamp_every(Duration::from_millis(1)));
