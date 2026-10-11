@@ -528,6 +528,8 @@ pub const ORDER_STEP_START_INSTRUCTIONS: i32 = 5;
 /// 跨会话长期记忆（`MEMORY.md` 索引）。排在工程规约之后、待办之前。
 pub const ORDER_STEP_START_MEMORY: i32 = 7;
 pub const ORDER_STEP_START_TODO: i32 = 10;
+/// 目标模式的定期自查（每用掉一批请求提醒模型对照完成标准收尾）。
+pub const ORDER_STEP_START_GOAL: i32 = 20;
 /// Disk / dynamic Cordis plugins (`host.on("agent/step-start", ...)`). Behind
 /// the built-ins: a script may add to the turn's discipline, not outrank it.
 pub const ORDER_STEP_START_DYNAMIC: i32 = 50;

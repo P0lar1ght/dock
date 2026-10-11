@@ -931,6 +931,21 @@ async fn goal_completion_projects_completed_with_elapsed_time() {
         .await;
     assert_eq!(started["result"]["goal"]["status"], "active");
     assert!(started["result"]["goal"]["elapsedMs"].is_u64(), "{started}");
+    assert_eq!(started["result"]["goal"]["requests"], 0, "{started}");
+    assert!(started["result"]["goal"]["budget"].is_null(), "{started}");
+    assert!(h
+        .ctx
+        .require::<Goal>(GOAL)
+        .unwrap()
+        .set_budget(Some(cordis_spine::GoalBudget::Requests(300))));
+    let env = rpc
+        .call("thread/environment/get", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(
+        env["result"]["goal"]["budget"],
+        json!({ "requests": 300 }),
+        "{env}"
+    );
     let tools = h.ctx.require::<Tools>(TOOLS).unwrap();
     let done = tools
         .execute(ToolCall {

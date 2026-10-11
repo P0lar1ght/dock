@@ -10,7 +10,8 @@
 pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
 
 /// Copied from `xai-grok-tools-api::slash_commands`.
-pub const GOAL_RESERVED_SUBCOMMANDS: &[&str] = &["status", "pause", "resume", "clear", "edit"];
+pub const GOAL_RESERVED_SUBCOMMANDS: &[&str] =
+    &["status", "pause", "resume", "clear", "edit", "budget"];
 
 /// 斜杠 `/goal` 注入给模型的说明（工具名保持英文）。
 pub fn goal_usage_message() -> &'static str {

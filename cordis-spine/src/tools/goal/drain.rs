@@ -1,13 +1,14 @@
 //! Drain copied from Grok `SessionActor::drain_goal_updates_with_extra`.
 //! Classifier policy is disabled (dock has no classifier) → `CompletedWithoutClassifier`.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::grok_tool::{RejectReason, UpdateGoalAck, UpdateGoalEnvelope, UpdateGoalInput};
+use super::pace::{self, GoalBudget};
 
 pub struct GoalState {
     pub active: AtomicBool,
@@ -22,6 +23,14 @@ pub struct GoalState {
     /// 显示「已完成」，直到下一次 `start` / `clear`。
     completed: AtomicBool,
     timer: Mutex<GoalTimer>,
+    /// 这个目标用掉的请求数（本页每次采样记一次，子代理的不算）。
+    requests: AtomicU64,
+    /// 上一次续跑之后动过手没有（调过干活的工具，见 [`pace::counts_as_work`]）。
+    worked_since_nudge: AtomicBool,
+    /// 连着几次续跑之前都没动手。
+    idle_nudges: AtomicU32,
+    /// 用户设的上限；`None` 不限。
+    budget: Mutex<Option<GoalBudget>>,
 }
 
 /// 目标真正在跑的时长：暂停的那段不算。
@@ -59,6 +68,10 @@ impl GoalState {
             blocked_streak: AtomicU32::new(0),
             completed: AtomicBool::new(false),
             timer: Mutex::new(GoalTimer::default()),
+            requests: AtomicU64::new(0),
+            worked_since_nudge: AtomicBool::new(false),
+            idle_nudges: AtomicU32::new(0),
+            budget: Mutex::new(None),
         }
     }
 
@@ -76,6 +89,9 @@ impl GoalState {
         self.instruction_pending.store(true, Ordering::SeqCst);
         self.blocked_streak.store(0, Ordering::SeqCst);
         self.completed.store(false, Ordering::SeqCst);
+        self.requests.store(0, Ordering::SeqCst);
+        self.fresh_input();
+        *self.budget.lock().unwrap() = None;
         let mut timer = self.timer.lock().unwrap();
         *timer = GoalTimer::default();
         timer.run();
@@ -124,6 +140,7 @@ impl GoalState {
         self.paused.store(false, Ordering::SeqCst);
         self.active.store(true, Ordering::SeqCst);
         self.instruction_pending.store(true, Ordering::SeqCst);
+        self.fresh_input();
         self.timer.lock().unwrap().run();
         true
     }
@@ -138,6 +155,72 @@ impl GoalState {
         self.status.lock().unwrap().clear();
         self.completed.store(false, Ordering::SeqCst);
         *self.timer.lock().unwrap() = GoalTimer::default();
+        self.requests.store(0, Ordering::SeqCst);
+        self.fresh_input();
+        *self.budget.lock().unwrap() = None;
+    }
+
+    /// 记一次请求（目标在跑时本页每次采样调一次），返回累计数。
+    pub fn count_request(&self) -> u64 {
+        self.requests.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn requests(&self) -> u64 {
+        self.requests.load(Ordering::SeqCst)
+    }
+
+    /// 这次续跑之前动过手（调了干活的工具）。
+    pub fn note_work(&self) {
+        self.worked_since_nudge.store(true, Ordering::SeqCst);
+    }
+
+    /// 人发了话 / 恢复了：空转从头数。
+    pub fn fresh_input(&self) {
+        self.worked_since_nudge.store(false, Ordering::SeqCst);
+        self.idle_nudges.store(0, Ordering::SeqCst);
+    }
+
+    pub fn budget(&self) -> Option<GoalBudget> {
+        *self.budget.lock().unwrap()
+    }
+
+    pub fn set_budget(&self, budget: Option<GoalBudget>) {
+        *self.budget.lock().unwrap() = budget;
+    }
+
+    /// 续跑之前查一遍：空转或到了预算就暂停，并把原因写进进展。返回 true 表示停了。
+    pub fn stop_if_due(&self) -> bool {
+        if !self.active() {
+            return false;
+        }
+        let Some(reason) = pace::stop_reason(
+            self.idle_nudges.load(Ordering::SeqCst),
+            self.worked_since_nudge.load(Ordering::SeqCst),
+            self.budget(),
+            self.requests(),
+            self.elapsed(),
+        ) else {
+            return false;
+        };
+        // 预算是一次性的：到了就清掉，恢复后不再限（要限再设）。
+        if self
+            .budget()
+            .is_some_and(|b| b.reached(self.requests(), self.elapsed()))
+        {
+            self.set_budget(None);
+        }
+        self.pause();
+        self.record_status(reason);
+        true
+    }
+
+    /// 真的续跑了一次（这一票赢了）：结算这段有没有动手。
+    pub fn nudged(&self) {
+        if self.worked_since_nudge.swap(false, Ordering::SeqCst) {
+            self.idle_nudges.store(0, Ordering::SeqCst);
+        } else {
+            self.idle_nudges.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     /// 模型报完成：停表、停跑，标题留着（见 `completed` 字段）。
