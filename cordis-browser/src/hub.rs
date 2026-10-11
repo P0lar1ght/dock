@@ -148,7 +148,9 @@ impl BrowserHub {
 
     pub async fn call(&self, session: &str, name: &str, args: &Value) -> CallOutput {
         let result = match name {
-            "browser_open" => match arg_str(args, "url") {
+            // navigate 和 open 是同一件事：有页就在活动页跳转，没页就先开一页（以前
+            // navigate 在没页时直接报错，模型要再调一次 open）。
+            "browser_open" | "browser_navigate" => match arg_str(args, "url") {
                 Some(url) if !url.is_empty() => self.open(session, &url).await,
                 _ => Err("url is required".into()),
             },
@@ -168,7 +170,7 @@ impl BrowserHub {
                         let out = guarded(
                             name,
                             call_limit(name, args),
-                            watch,
+                            Some(watch),
                             dispatch_connected(&mut g, name, args),
                         )
                         .await;
@@ -208,8 +210,8 @@ impl BrowserHub {
     /// `browser_js`：在本会话的活动标签页上跑一段 Playwright 脚本（见 [`crate::js`]）。
     /// 本会话还没有页就先开一个空白页；和别的调用一样受对话框与时限的管。
     async fn run_js(&self, session: &str, args: &Value) -> CallOutput {
-        let Some(code) = arg_str(args, "code").filter(|c| !c.trim().is_empty()) else {
-            return CallOutput::err("code is required".into());
+        let Some(code) = js_code(args) else {
+            return CallOutput::err("code is required (the script goes in `code`)".into());
         };
         let limit = Duration::from_millis(
             arg_u64(args, "timeout_ms")
@@ -243,18 +245,33 @@ impl BrowserHub {
             "session": session,
             "ws": ws,
             "target": target,
+            "tabs": g.target_ids(),
             "code": code,
             "timeoutMs": limit.as_millis() as u64,
             "shotDir": crate::session::browser_screenshot_dir(),
         });
         let _ = std::fs::create_dir_all(crate::session::browser_screenshot_dir());
         let answered = std::sync::atomic::AtomicBool::new(false);
+        let tab_moves: std::sync::Mutex<(Vec<String>, Option<String>)> = Default::default();
         let dialogs = watch.clone();
         let run = async {
             // 执行器自己按 limit 收手；这里多等一会儿给它回话的时间。
             match runner.call(req, limit + WAIT_FOR_MARGIN).await {
                 Ok(reply) => {
                     answered.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let ids = |v: &Value| -> Vec<String> {
+                        v.as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    *tab_moves.lock().unwrap() = (
+                        ids(&reply["opened"]),
+                        reply["activate"].as_str().map(str::to_string),
+                    );
                     let (ok, mut text, image) = js::render_reply(&reply);
                     if let Some(d) = reply.get("dialog").filter(|d| !d.is_null()) {
                         text.push_str(&format!(
@@ -272,7 +289,7 @@ impl BrowserHub {
                 Err(e) => CallOutput::err(e),
             }
         };
-        let out = guarded("browser_js", limit + WAIT_FOR_MARGIN * 2, watch, run).await;
+        let out = guarded("browser_js", limit + WAIT_FOR_MARGIN * 2, None, run).await;
         // 执行器没回话就返回了：要么是对话框（脚本卡在 CDP 上，对话框关掉后接着跑完，执行器
         // 拦着同一会话的新脚本），要么是执行器自己都没在时限里回话——那就杀掉它，脚本才真的停。
         if !answered.load(std::sync::atomic::Ordering::SeqCst) && dialogs.pending().is_none() {
@@ -282,8 +299,26 @@ impl BrowserHub {
                 out.text.trim_start_matches("Error: ")
             ));
         }
+        // 脚本里新开的页登记进本组、切到它指定的活动页，再和 Chrome 对一遍（点链接弹出的
+        // 新页跑完就收进来），然后重写名册——GUI 画面按名册跟着活动页走。
+        let (opened, activate) = std::mem::take(&mut *tab_moves.lock().unwrap());
+        let mut notes = Vec::new();
+        for id in &opened {
+            if let Err(e) = g.adopt(id).await {
+                notes.push(e);
+            }
+        }
+        if let Some(id) = activate {
+            g.activate(&id);
+        }
+        let _ = g.sync_targets().await;
+        self.record(session, &g);
         // 脚本可能改了页面：旧快照的 refs 作废。
         g.refs.clear();
+        let mut out = out;
+        if !notes.is_empty() {
+            out.text.push_str(&format!("\n\n{}", notes.join("\n")));
+        }
         out
     }
 
@@ -375,7 +410,7 @@ impl BrowserHub {
                     Err(e) => CallOutput::err(e),
                 }
             };
-            let out = guarded("browser_open", CALL_LIMIT, watch, nav).await;
+            let out = guarded("browser_open", CALL_LIMIT, Some(watch), nav).await;
             return if out.is_error {
                 Err(out.text)
             } else {
@@ -470,13 +505,6 @@ async fn dispatch_text(
     args: &Value,
 ) -> Result<String, String> {
     match name {
-        "browser_navigate" => match arg_str(args, "url") {
-            Some(url) if !url.is_empty() => session
-                .navigate(&url)
-                .await
-                .map(|cur| format!("navigated to {cur}")),
-            _ => Err("url is required".into()),
-        },
         "browser_navigate_back" => session.navigate_back().await,
         "browser_snapshot" => {
             let interactive = arg_bool(args, "interactive").unwrap_or(true);
@@ -577,6 +605,13 @@ async fn dispatch_text(
     }
 }
 
+/// `browser_js` 的脚本。规范是 `code`；模型常写成别的键，常见的几个也认。
+fn js_code(args: &Value) -> Option<String> {
+    ["code", "script", "expression", "js", "source"]
+        .iter()
+        .find_map(|k| arg_str(args, k).filter(|c| !c.trim().is_empty()))
+}
+
 /// 这次调用最多等多久。
 fn call_limit(name: &str, args: &Value) -> Duration {
     if name == "browser_wait_for" {
@@ -608,19 +643,28 @@ fn blocked_by_dialog(watch: &DialogWatch, name: &str) -> Option<CallOutput> {
 async fn guarded(
     name: &str,
     limit: Duration,
-    mut watch: DialogWatch,
+    watch: Option<DialogWatch>,
     call: impl std::future::Future<Output = CallOutput>,
 ) -> CallOutput {
-    watch.seq.borrow_and_update();
+    let mut watch = watch;
+    if let Some(w) = watch.as_mut() {
+        w.seq.borrow_and_update();
+    }
     let dialog = async {
-        // 发送端在本组里，组还在就不会关；关了就永远等不到，交给另外两支。
-        if watch.seq.changed().await.is_err() {
-            std::future::pending::<()>().await;
+        match watch.as_mut() {
+            // 发送端在本组里，组还在就不会关；关了就永远等不到，交给另外两支。
+            Some(w) => {
+                if w.seq.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            // browser_js：对话框归执行器管（脚本可以先 onDialog 声明怎么处理）。
+            None => std::future::pending::<()>().await,
         }
     };
     tokio::select! {
         out = call => out,
-        _ = dialog => match watch.pending() {
+        _ = dialog => match watch.as_ref().and_then(DialogWatch::pending) {
             Some(d) => CallOutput::ok(format!(
                 "{name} opened a JavaScript {} dialog: {}. The page is blocked until you call browser_handle_dialog (accept true/false).",
                 d.dialog_type,
@@ -650,6 +694,20 @@ fn dialog_message(d: &PendingDialog) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 模型常把脚本放在别的键里（实测两次 `code is required`）：常见别名都认。
+    #[test]
+    fn browser_js_accepts_common_names_for_the_code() {
+        for key in ["code", "script", "expression", "js", "source"] {
+            assert_eq!(
+                js_code(&json!({ key: "page.url()" })).as_deref(),
+                Some("page.url()"),
+                "{key}"
+            );
+        }
+        assert_eq!(js_code(&json!({"code": "  "})), None);
+        assert_eq!(js_code(&json!({"title": "x"})), None);
+    }
 
     #[tokio::test]
     async fn tools_need_open_per_session() {

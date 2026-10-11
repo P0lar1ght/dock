@@ -23,6 +23,8 @@ use cordis_base::config::dock_home;
 
 /// 执行器源码，启动时写到 `$DOCK_HOME/browser/js/runner.mjs`。
 pub const RUNNER_SOURCE: &str = include_str!("js/runner.mjs");
+/// 用法指南（脚本里 `docs()` 读它），和执行器写在同一个目录。
+pub const GUIDE: &str = include_str!("js/guide.md");
 pub const PLAYWRIGHT_CORE_VERSION: &str = "1.64.0";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -47,10 +49,13 @@ impl JsRunner {
         let script = dir.join("runner.mjs");
         std::fs::write(&script, RUNNER_SOURCE)
             .map_err(|e| format!("write {}: {e}", script.display()))?;
+        let guide = dir.join("guide.md");
+        std::fs::write(&guide, GUIDE).map_err(|e| format!("write {}: {e}", guide.display()))?;
 
         let mut child = Command::new(&node)
             .arg(&script)
             .arg(playwright.join("index.mjs"))
+            .arg(&guide)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -302,6 +307,16 @@ pub fn render_reply(reply: &Value) -> (bool, String, Option<PathBuf>) {
     if let Some(img) = &image {
         parts.push(format!("screenshot: {}", img.display()));
     }
+    if let Some(hints) = reply.get("hints").and_then(Value::as_array) {
+        let hints: Vec<String> = hints
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|h| format!("hint: {h}"))
+            .collect();
+        if !hints.is_empty() {
+            parts.push(hints.join("\n"));
+        }
+    }
     (ok, parts.join("\n\n"), image)
 }
 
@@ -333,5 +348,9 @@ mod tests {
 
         let (_, text, _) = render_reply(&json!({"ok": true, "result": ""}));
         assert!(text.contains("no return value"), "{text}");
+
+        let (_, text, _) =
+            render_reply(&json!({"ok": true, "result": "1", "hints": ["sleep less"]}));
+        assert!(text.ends_with("hint: sleep less"), "{text}");
     }
 }

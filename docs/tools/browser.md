@@ -50,11 +50,18 @@
 参考 Codex 的浏览器做法（`node_repl` 的 `js(title, code)`：模型写一段脚本、一次做好几步）。
 Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 
-- 参数：`code`（async 函数体；只有一个表达式时直接当返回值）、`title`（给人看的一句话）、`timeout_ms`（默认 60 秒，最长 300 秒）。
+- 参数：`code`（async 函数体；只有一个表达式时直接当返回值；模型写成 `script` / `expression` / `js` / `source` 也认）、`title`（给人看的一句话）、`timeout_ms`（默认 60 秒，最长 300 秒）。
 - 脚本里有：
   - `page`：本会话活动标签页的 Playwright Page。`context` / `browser` 也在。
   - `state`：本会话跨调用保留的对象（局部变量不保留）。
   - `log(...)`：收进输出。`snapshot(selector)`：ARIA 快照文本。`screenshot(opts)`：存 PNG，最后一张随结果回传。
+  - `onDialog('accept' | 'dismiss' | { accept, text } | fn)`：在会弹框的动作**之前**声明，脚本里就地处理、记进 log，一次调用跑完。
+  - `tabs`：`list()` / `get(i)` / `new(url)` / `select(页或序号)`。`tabs.new` 开的页由 Rust 侧登记进本会话（`ConnectedSession::adopt`），
+    `select` 指定跑完后的活动页；跑完再 `sync_targets` 收下点链接弹出的页、重写名册，GUI 画面跟着走。直接 `context.newPage()` 开的页不收（分不清是哪个会话的）。
+  - `docs()`：用法指南（`src/js/guide.md`，启动时和执行器写在同一目录）。工具描述里只放最关键的几条规则。
+- 指南参考 Codex 浏览器插件文档的主题（API 用法、截图、确认、安全），内容按实测问题自己写：
+  先看（`snapshot()`）再动、语义定位、等条件不等时长、读要读的元素而不是 `body.innerText` + `indexOf`、
+  一个脚本做完一段流程、付款 / 发送 / 删除先问、登录和验证码请用户在浏览器面板里接手。
 - 实现（`cordis-browser/src/js.rs` + `src/js/runner.mjs`）：
   - 每个 `dock mcp browser` 进程一个常驻 Node 执行器，stdin / stdout 一行一个 JSON；死了下一次调用重起。
   - 执行器用 `chromium.connectOverCDP` 连同一个 Chromium（和 chromiumoxide 并存），按 target id 找本会话的活动页。
@@ -62,12 +69,30 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - 依赖：Node 18+（`DOCK_NODE` 可指定）+ playwright-core。
   - 第一次用时 `npm install playwright-core@1.64.0` 到 `$DOCK_HOME/browser/js/`（只是驱动，不下载浏览器）。
   - 离线时用 `DOCK_PLAYWRIGHT_CORE` 指到已有的包目录。
-- 对话框：Playwright 默认会自动关掉对话框，执行器给每页挂一个空监听让它留着；脚本触发对话框时提前返回，交给 `browser_handle_dialog`。
+- 对话框：Playwright 默认会自动关掉对话框，执行器给每页挂一个空监听让它留着。
+  - 脚本先 `onDialog(…)`：就地处理，脚本接着跑。
+  - 没声明：调用提前返回（由执行器判断，hub 不替 `browser_js` 盯对话框），交给 `browser_handle_dialog`。
   - 提前返回后脚本还卡在 CDP 上，对话框关掉后**接着跑完剩下的部分**；跑完之前同一会话的新脚本直接报错（「上一段脚本还在跑」），不让两段同时动一页。
 - 超时：脚本取消不了，执行器回完话整个退出，下一次调用重起；所有会话的 `state` 随之清空（报错里写明）。执行器连话都没回时，Rust 侧同样杀掉它。
 - 执行器起不来时，报错里带它 stderr 的最后几行；`npm install` 带 `--ignore-scripts`。
 - 权限：和 `browser_evaluate`、bash 同级（询问 + 计划模式里挡）。
 - 测试：`cargo test -p cordis-browser --test real_chrome -- --ignored browser_js`（要 Chrome、Node、npm）。
+
+## 单步工具为什么留着（2026-10 审查）
+
+模型拿到 `browser_js` 后大多用它；审查过「单步工具是不是冗余」，结论是除 open / navigate 外都留着：
+
+| 维度 | `browser_js` | 单步工具（click / type / hover / drag / select / press_key / fill_form / resize / navigate_back / wait_for…） |
+|---|---|---|
+| 权限门 | 和 bash 同级（默认「询问」模式下每次都问） | 不过门 |
+| 计划模式 | 挡 | 不挡 |
+| 子代理能力档位 | 执行 | wait_for / snapshot / console 等是检索，档位低的子代理也能用 |
+| 没装 Node | 用不了 | 照样能用（chromiumoxide 直连） |
+
+- `browser_evaluate` 和 `browser_js` 同门同档，但不要 Node：没装 Node 时是唯一跑 JS 的路。
+- `console_messages` / `network_requests` 读的是开页以来 Rust 侧一直在收的记录，Playwright 中途连上看不到之前的。
+- 真正重叠的只有 `browser_open` / `browser_navigate`：现在是同一件事（没页先开页）。都不删：网关调 open，模型最常用 navigate（Playwright MCP 的名字）。
+- `press_key` 认常见别名（`Return` → `Enter`、`Esc`、`Del`、`Up/Down/Left/Right`、`PgUp/PgDn`）。
 
 ## 权限
 

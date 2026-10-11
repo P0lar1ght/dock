@@ -178,7 +178,7 @@ impl Browser {
         );
         out.push_str("\n工具：\n");
         out.push_str(
-            "  search_tool / use_tool → mcp_browser__browser_open · navigate · snapshot · click · type · …（21 个）\n",
+            "  search_tool / use_tool → mcp_browser__browser_js · open · snapshot · click · type · …（22 个）\n",
         );
         out.push_str("\n配置：\n");
         out.push_str("  $DOCK_HOME/browser/user-data\n");
