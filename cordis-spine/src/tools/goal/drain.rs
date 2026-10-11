@@ -22,6 +22,21 @@ pub struct GoalState {
     /// 显示「已完成」，直到下一次 `start` / `clear`。
     completed: AtomicBool,
     timer: Mutex<GoalTimer>,
+    /// 这一次连续推进（用户上一条消息、或手动恢复以来）用了多少，见 [`Self::run_exceeded`]。
+    run: Mutex<RunUsage>,
+    /// 一次连续推进最多多少次采样、多长时间；测试会调小。
+    run_budget: Mutex<(usize, Duration)>,
+}
+
+/// 一次连续推进最多这么多次采样（模型请求）……
+pub const RUN_MAX_SAMPLES: usize = 200;
+/// ……或者这么长时间，先到先停。
+pub const RUN_MAX_TIME: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Default)]
+struct RunUsage {
+    since: Option<Instant>,
+    samples: usize,
 }
 
 /// 目标真正在跑的时长：暂停的那段不算。
@@ -59,7 +74,37 @@ impl GoalState {
             blocked_streak: AtomicU32::new(0),
             completed: AtomicBool::new(false),
             timer: Mutex::new(GoalTimer::default()),
+            run: Mutex::new(RunUsage::default()),
+            run_budget: Mutex::new((RUN_MAX_SAMPLES, RUN_MAX_TIME)),
         }
+    }
+
+    /// 新的一次连续推进：用户发了消息，或者手动恢复了目标。
+    pub fn reset_run(&self) {
+        *self.run.lock().unwrap() = RunUsage {
+            since: Some(Instant::now()),
+            samples: 0,
+        };
+    }
+
+    /// 这一页又采样了一次。
+    pub fn note_sample(&self) {
+        let mut run = self.run.lock().unwrap();
+        run.since.get_or_insert_with(Instant::now);
+        run.samples += 1;
+    }
+
+    /// 这一次连续推进超了预算：回 `(采样次数, 用时)`；没超回 `None`。
+    pub fn run_exceeded(&self) -> Option<(usize, Duration)> {
+        let run = self.run.lock().unwrap();
+        let elapsed = run.since.map_or(Duration::ZERO, |s| s.elapsed());
+        let (max_samples, max_time) = *self.run_budget.lock().unwrap();
+        (run.samples >= max_samples || elapsed >= max_time).then_some((run.samples, elapsed))
+    }
+
+    #[cfg(test)]
+    pub fn set_run_budget(&self, samples: usize, time: Duration) {
+        *self.run_budget.lock().unwrap() = (samples, time);
     }
 
     pub fn start(&self, title: impl Into<String>) {
@@ -125,6 +170,8 @@ impl GoalState {
         self.active.store(true, Ordering::SeqCst);
         self.instruction_pending.store(true, Ordering::SeqCst);
         self.timer.lock().unwrap().run();
+        // 手动恢复算新的一次连续推进：不然一恢复又立刻撞上预算。
+        self.reset_run();
         true
     }
 

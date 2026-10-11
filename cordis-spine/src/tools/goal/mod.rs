@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::names::{GOAL, PRE_STEP, SESSIONS, TOOLS, TOOLS_EXECUTE, TURN_END};
+use crate::names::{GOAL, PRE_STEP, SESSIONS, STEP_START, TOOLS, TOOLS_EXECUTE, TURN_END};
 use crate::session::log::Sessions;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{
-    LogEvent, PreStep, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_TURN_END_GOAL,
+    LogEvent, NoticeKind, PreStep, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd,
+    ORDER_TURN_END_GOAL,
 };
 
 /// Grok keeps `/goal` on an outer turn loop until `update_goal(completed)` (or
@@ -213,6 +214,20 @@ fn wire_goal_waterfalls(ctx: &cordis::Context) {
         // user's own next turn on this page should see.
         if next.enter && Sessions::turn_is_this_page(&ctx_pre, &next.identity) {
             inject_goal_instruction(&ctx_pre);
+            // 用户发了消息：新的一次连续推进。
+            if let Some(goal) = ctx_pre.get::<Goal>(GOAL) {
+                goal.state.reset_run();
+            }
+        }
+        next
+    });
+    let ctx_step = ctx.clone();
+    let _ = ctx.on_waterfall(STEP_START, move |step: StepStart, args| {
+        let next = args.next::<StepStart>().unwrap_or(step);
+        if Sessions::turn_is_this_page(&ctx_step, &next.identity) {
+            if let Some(goal) = ctx_step.get::<Goal>(GOAL) {
+                goal.state.note_sample();
+            }
         }
         next
     });
@@ -224,6 +239,11 @@ fn wire_goal_waterfalls(ctx: &cordis::Context) {
         }
         // The user queued the next message: they steer, not the goal loop.
         if next.queued_followups || next.rounds >= MAX_GOAL_ROUNDS {
+            return next;
+        }
+        // 一次连续推进的总预算：轮内 64 次上限每轮归零，会话层又会在每轮结束后再排一次
+        // 续跑，主观目标（模型永远不报完成）就会一直跑下去。超了就暂停、告诉用户。
+        if pause_if_over_budget(&ctx_end) {
             return next;
         }
         // Both endings continue a goal: text without `update_goal(completed)`
@@ -243,6 +263,43 @@ fn wire_goal_waterfalls(ctx: &cordis::Context) {
         }
         result
     });
+}
+
+/// 这一次连续推进超了预算：暂停目标（不清掉，标题和进展留着），给用户留一张提示卡。
+fn pause_if_over_budget(ctx: &cordis::Context) -> bool {
+    let Some(goal) = ctx.get::<Goal>(GOAL) else {
+        return false;
+    };
+    if !goal.active() {
+        return false;
+    }
+    let Some((samples, elapsed)) = goal.state.run_exceeded() else {
+        return false;
+    };
+    goal.pause();
+    // GUI 的 GoalBar 显示进展说明（Notice 卡只在 TUI 出现）：原因写在前面，模型上次的进展留着。
+    {
+        let mut status = goal.state.status.lock().unwrap();
+        let before = status.trim().to_string();
+        *status = format!(
+            "自动暂停：这次连续推进已 {samples} 次请求、{} 分钟。{before}",
+            elapsed.as_secs() / 60
+        );
+    }
+    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+        let title = goal.title();
+        sessions.append(LogEvent::Notice {
+            kind: NoticeKind::Other,
+            title: "目标已暂停".into(),
+            body: format!(
+                "这次连续推进已经 {samples} 次请求、{} 分钟，目标「{}」还没完成，先停下来等你决定。\n\
+                 想接着做：恢复目标（GoalBar「继续」或 /goal resume）；想换个做法：直接发消息说明；不做了：/goal clear。",
+                elapsed.as_secs() / 60,
+                title.trim()
+            ),
+        });
+    }
+    true
 }
 
 /// True when the in-flight tool call resolves to this page's `"goal"`.
@@ -327,5 +384,103 @@ async fn run_update_goal(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     match render_ack_into_output(ack) {
         Ok(out) => tool_result(call, serde_json::to_string(&out).unwrap_or(out.summary)),
         Err(e) => tool_result(call, format!("{}: {}", e.kind, e.detail)),
+    }
+}
+
+#[cfg(test)]
+mod run_budget_tests {
+    use super::*;
+    use crate::names::{STEP_START, TURN_END};
+    use cordis_base::types::{StepStart, TurnEnd};
+
+    async fn boot() -> (cordis::Context, Sessions) {
+        let ctx = cordis::Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(goal_service(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let sessions = (*ctx.require::<Sessions>(SESSIONS).unwrap()).clone();
+        (ctx, sessions)
+    }
+
+    fn sample(ctx: &cordis::Context, identity: &str, n: usize) {
+        for i in 0..n {
+            let step = StepStart::new(i, identity);
+            let seed = step.clone();
+            let _ = ctx.waterfall(STEP_START, step, move || seed);
+        }
+    }
+
+    fn turn_end(ctx: &cordis::Context, identity: &str) -> TurnEnd {
+        let end = TurnEnd::new("这一版做完了", 0, true, false, identity);
+        let seed = end.clone();
+        ctx.waterfall(TURN_END, end, move || seed)
+    }
+
+    /// 回归：目标模式以前没有总上限——每轮结束后只要目标没完成就再续，轮内 64 次的上限每次
+    /// 归零。主观目标（「达到 Awwwards 获奖品质」）模型永远不报完成，一条消息跑了 1234 次
+    /// 请求。现在一次连续推进超了预算就暂停目标、留一张提示卡给用户。
+    #[tokio::test]
+    async fn a_goal_pauses_when_one_run_uses_up_its_budget() {
+        let (ctx, sessions) = boot().await;
+        let identity = sessions.identity().to_string();
+        let goal = ctx.require::<Goal>(GOAL).unwrap();
+        goal.start("达到获奖品质");
+        goal.state
+            .set_run_budget(3, std::time::Duration::from_secs(3600));
+
+        sample(&ctx, &identity, 2);
+        assert!(
+            turn_end(&ctx, &identity).decision().is_some(),
+            "预算内照常续跑"
+        );
+        assert!(goal.active());
+
+        sample(&ctx, &identity, 1);
+        assert!(
+            turn_end(&ctx, &identity).decision().is_none(),
+            "超了预算不再续跑"
+        );
+        assert!(goal.paused(), "目标要暂停，不是清掉");
+        assert!(
+            goal.status().starts_with("自动暂停"),
+            "GoalBar 要看得到原因：{}",
+            goal.status()
+        );
+        let notice = sessions.events().into_iter().find_map(|e| match e {
+            LogEvent::Notice { title, body, .. } => Some(format!("{title} {body}")),
+            _ => None,
+        });
+        let notice = notice.expect("要给用户留一张提示卡");
+        assert!(notice.contains("3 次请求"), "{notice}");
+        assert!(notice.contains("/goal resume"), "{notice}");
+
+        // 恢复：重新算一次连续推进。
+        assert!(goal.resume());
+        sample(&ctx, &identity, 1);
+        assert!(
+            turn_end(&ctx, &identity).decision().is_some(),
+            "恢复后重新计"
+        );
+    }
+
+    /// 用户发了新消息：那是新的一次连续推进，计数清零。
+    #[tokio::test]
+    async fn a_user_message_starts_a_new_run() {
+        let (ctx, sessions) = boot().await;
+        let identity = sessions.identity().to_string();
+        let goal = ctx.require::<Goal>(GOAL).unwrap();
+        goal.start("目标");
+        goal.state
+            .set_run_budget(3, std::time::Duration::from_secs(3600));
+        sample(&ctx, &identity, 3);
+        let step = PreStep::new("接着做", true, identity.clone());
+        let seed = step.clone();
+        let _ = ctx.waterfall(PRE_STEP, step, move || seed);
+        sample(&ctx, &identity, 1);
+        assert!(turn_end(&ctx, &identity).decision().is_some());
+        assert!(goal.active());
     }
 }
