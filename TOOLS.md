@@ -64,7 +64,7 @@
 
 另见 [工具结果图](docs/tools/images.md)（多模态，`ToolResult.images`）。
 
-**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `mcp_browser__browser_evaluate` `mcp_browser__browser_js`，以及全部 `mcp_cua-driver__*`。
+**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `mcp_browser__browser_evaluate` `mcp_browser__browser_js` `mcp_browser__browser_file_upload`，以及全部 `mcp_cua-driver__*`。
 
 **计划门**：同上（`enter_plan_mode` 之后返回 blocked，直到 `exit_plan_mode`）。例外：对**本页**计划文件的 `search_replace` / `write_file` 自动放行（对齐 grok）。
 

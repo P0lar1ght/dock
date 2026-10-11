@@ -37,9 +37,12 @@ fn gated_builtin(tool: &str) -> bool {
 pub const BROWSER_EVALUATE_MCP: &str = "mcp_browser__browser_evaluate";
 /// `browser_js`：跑一段 Playwright 脚本，能力比 evaluate 还大，同样和 bash 同级。
 pub const BROWSER_JS_MCP: &str = "mcp_browser__browser_js";
+/// `browser_file_upload`：把本机文件交给网页，等于往外发文件，同样和 bash 同级。
+pub const BROWSER_FILE_UPLOAD_MCP: &str = "mcp_browser__browser_file_upload";
 
+/// 浏览器里要过门的：跑任意脚本的、把本机文件发出去的。
 fn runs_browser_code(tool: &str) -> bool {
-    tool == BROWSER_EVALUATE_MCP || tool == BROWSER_JS_MCP
+    tool == BROWSER_EVALUATE_MCP || tool == BROWSER_JS_MCP || tool == BROWSER_FILE_UPLOAD_MCP
 }
 
 /// Computer-use via cua-driver MCP: same ask/plan gate as bash (C0).
@@ -90,6 +93,9 @@ mod tests {
         // browser_js 跑任意脚本：和 evaluate 一样过门、计划模式里挡。
         assert!(needs_permission("mcp_browser__browser_js"));
         assert!(blocked_in_plan("mcp_browser__browser_js"));
+        // 上传是把本机文件发给网站：同样过门、计划模式里挡。
+        assert!(needs_permission("mcp_browser__browser_file_upload"));
+        assert!(blocked_in_plan("mcp_browser__browser_file_upload"));
     }
 
     #[test]
