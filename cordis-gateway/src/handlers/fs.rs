@@ -124,7 +124,8 @@ fn edit_blocking(root: &Path, method: &str, params: &Value) -> Result<(Value, St
         protocol::FS_RENAME => {
             let from = str_param(params, "from")?;
             let path = files::rename(root, from, str_param(params, "to")?).map_err(edit_error)?;
-            let note = format!("改名 / 移动 {} → {path}", from.trim_start_matches("./"));
+            let from = from.trim().trim_start_matches("./").trim_end_matches('/');
+            let note = format!("改名 / 移动 {from} → {path}");
             Ok((json!({ "path": path }), note))
         }
         protocol::FS_TRASH => {

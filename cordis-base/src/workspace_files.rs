@@ -182,7 +182,11 @@ fn saved(root: &Path, file: &Path) -> Result<Saved, EditError> {
 /// 改过，不写，回 [`EditError::Conflict`]（不给就不比对，等于覆盖）。
 ///
 /// 先写同目录的临时文件再改名换上：写到一半崩了不会留下半个文件。照原文件的权限；
-/// 符号链接写到它指向的文件，链接本身不动。
+/// 符号链接写到它指向的文件，链接本身不动。换的是文件本身：硬链接会断开、属主和扩展属性
+/// 不保留；只读的文件不换（回 [`EditError::Io`]）。
+///
+/// 比对和换上之间有一点空档，修改时间在有的文件系统上也只精确到秒：这是防手滑覆盖
+/// agent 的改动，不是锁（见模块头：这里不是安全边界）。
 pub fn save_text(
     root: &Path,
     rel: &str,
@@ -197,6 +201,9 @@ pub fn save_text(
     let meta = std::fs::metadata(&real).map_err(|e| EditError::Io(format!("读不了 {rel}：{e}")))?;
     if !meta.is_file() {
         return Err(EditError::Invalid(format!("不是文件：{rel}")));
+    }
+    if meta.permissions().readonly() {
+        return Err(EditError::Io(format!("{rel} 是只读的")));
     }
     if let Some(base) = base_modified_ms {
         let now = modified_ms(&meta);
@@ -254,9 +261,13 @@ pub fn rename(root: &Path, from: &str, to: &str) -> Result<String, EditError> {
     let dst = match confine_new(root, to) {
         Ok(dst) => dst,
         // 只改大小写（`a.md` → `A.md`）：不区分大小写的文件系统上目标「已经存在」，
-        // 其实就是它自己。
-        Err(_) if from.to_lowercase() == to.to_lowercase() && from != to => {
-            confine(root, to).map_err(EditError::Invalid)?
+        // 其实就是它自己。区分大小写的系统上那可能是另一个文件——不是同一个就照常拒绝。
+        Err(e) if from.to_lowercase() == to.to_lowercase() && from != to => {
+            let dst = confine(root, to).map_err(EditError::Invalid)?;
+            if !same_entry(&src, &dst) {
+                return Err(EditError::Invalid(e));
+            }
+            dst
         }
         Err(e) => return Err(EditError::Invalid(e)),
     };
@@ -271,6 +282,20 @@ pub fn rename(root: &Path, from: &str, to: &str) -> Result<String, EditError> {
         }
     })?;
     Ok(relative(&base, &dst))
+}
+
+/// 两个路径是不是磁盘上同一个条目（不跟符号链接）。
+fn same_entry(a: &Path, b: &Path) -> bool {
+    match (a.symlink_metadata(), b.symlink_metadata()) {
+        #[cfg(unix)]
+        (Ok(x), Ok(y)) => {
+            use std::os::unix::fs::MetadataExt;
+            (x.dev(), x.ino()) == (y.dev(), y.ino())
+        }
+        #[cfg(not(unix))]
+        (Ok(_), Ok(_)) => a.canonicalize().ok() == b.canonicalize().ok(),
+        _ => false,
+    }
 }
 
 /// 移到系统废纸篓（macOS 废纸篓 / Linux freedesktop 回收站 / Windows 回收站）。
@@ -684,6 +709,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn save_text_refuses_read_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tree();
+        let locked = dir.path().join("locked.md");
+        std::fs::write(&locked, "原样").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let err = save_text(dir.path(), "locked.md", "改了", None).unwrap_err();
+        assert!(
+            matches!(err, EditError::Io(ref m) if m.contains("只读")),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&locked).unwrap(), "原样");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn save_text_keeps_permissions_and_writes_through_symlinks() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tree();
@@ -779,6 +820,37 @@ mod tests {
             ));
             assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
         }
+    }
+
+    /// 区分大小写的文件系统上 `README.md` 和 `Readme.md` 是两个文件：「只改大小写」不能
+    /// 把另一个覆盖掉。不区分大小写的系统上建不出两个，这条不测（跑法：TMPDIR 指到
+    /// 区分大小写的卷上）。
+    #[test]
+    fn case_only_rename_never_overwrites_a_different_file() {
+        let dir = tree();
+        std::fs::write(dir.path().join("Readme.md"), "other").unwrap();
+        let count = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .eq_ignore_ascii_case("readme.md")
+            })
+            .count();
+        if count < 2 {
+            return; // 不区分大小写：上面那一写就是同一个文件
+        }
+        let err = rename(dir.path(), "README.md", "Readme.md").unwrap_err();
+        assert!(matches!(err, EditError::Invalid(_)), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("Readme.md")).unwrap(),
+            "other"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("README.md")).unwrap(),
+            "# 你好\n"
+        );
     }
 
     #[test]

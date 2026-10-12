@@ -435,6 +435,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 改文件的四个方法（能力 `workspaceEdit`）只认受信连接；配对来的网页 `forbidden`。
 - `fs/write` 回 `path`、`size`、`modifiedMs`；先写同目录临时文件再换上，照原文件权限。
 - `baseModifiedMs` 是打开时的修改时间：对不上（期间被 agent 改过）回 `conflict`，不写。
+- 不带 `baseModifiedMs` 就是强制覆盖；GUI 保存已有文件总是带上。
+- 保存换的是文件本身：硬链接断开、属主和扩展属性不保留；只读文件回 `write_failed`。
+- 修改时间在有的文件系统上只精确到秒：这是防手滑覆盖，不是锁。
 - `create: true` 新建；已存在、出了工作区回 `invalid_params`，从不覆盖。
 - `fs/rename` 目标已存在就拒；只改大小写可以；不能把文件夹移进它自己里面。
 - `fs/trash` 没有回收站可用回 `write_failed`，不硬删；macOS 走 NSFileManager，不弹授权框。
