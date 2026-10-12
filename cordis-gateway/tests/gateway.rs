@@ -3771,6 +3771,206 @@ async fn fs_methods_browse_the_sessions_workspace_read_only() {
     );
 }
 
+/// 回这一轮历史里所有 system-reminder（拼起来），看 agent 这一步被提醒了什么。
+struct EchoReminders;
+
+impl Sampler for EchoReminders {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let text = request
+            .history
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::SystemReminder(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Box::pin(async move {
+            on_delta(StreamDelta::Text(text.clone()));
+            LlmOutput {
+                text,
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+/// `fs/write|mkdir|rename|trash`：GUI（受信连接）在文件面板里改工作区——保存（打开后被改过
+/// 回 `conflict`）、新建、改名 / 移动、出不了工作区；改完下一轮 agent 收到一条提醒。配对来的
+/// 网页一律 `forbidden`。废纸篓只测拒绝的路径：真扔会往跑测试那台机器的废纸篓里塞东西。
+#[tokio::test]
+async fn fs_edit_methods_write_for_trusted_clients_and_tell_the_agent() {
+    let root = harness_root_with(Some(Arc::new(EchoReminders))).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    root.plugin(cordis_spine::user_edits(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let init = gui.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["workspaceEdit"], true,
+        "{init}"
+    );
+
+    let dir = project_dir("fs-edit");
+    std::fs::write(dir.join("notes.md"), "旧\n").unwrap();
+    let started = gui
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+
+    let read = gui
+        .call("fs/read", json!({ "threadId": id, "path": "notes.md" }))
+        .await;
+    let base = read["result"]["modifiedMs"].as_u64().unwrap();
+    let saved = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "notes.md", "text": "新\n", "baseModifiedMs": base }),
+        )
+        .await;
+    assert_eq!(saved["result"]["path"], "notes.md", "{saved}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.md")).unwrap(),
+        "新\n"
+    );
+    let stale = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "notes.md", "text": "覆盖", "baseModifiedMs": 1 }),
+        )
+        .await;
+    assert_eq!(stale["error"]["details"]["code"], "conflict", "{stale}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.md")).unwrap(),
+        "新\n"
+    );
+
+    let made = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "docs/plan.md", "text": "# 计划", "create": true }),
+        )
+        .await;
+    assert_eq!(made["result"]["path"], "docs/plan.md", "{made}");
+    let again = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "docs/plan.md", "text": "x", "create": true }),
+        )
+        .await;
+    assert_eq!(
+        again["error"]["details"]["code"], "invalid_params",
+        "{again}"
+    );
+    let mkdir = gui
+        .call("fs/mkdir", json!({ "threadId": id, "path": "archive" }))
+        .await;
+    assert_eq!(mkdir["result"]["path"], "archive", "{mkdir}");
+    let moved = gui
+        .call(
+            "fs/rename",
+            json!({ "threadId": id, "from": "docs/plan.md", "to": "archive/plan.md" }),
+        )
+        .await;
+    assert_eq!(moved["result"]["path"], "archive/plan.md", "{moved}");
+    assert!(dir.join("archive/plan.md").exists());
+    let escape = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "../out.md", "text": "x", "create": true }),
+        )
+        .await;
+    assert_eq!(
+        escape["error"]["details"]["code"], "invalid_params",
+        "{escape}"
+    );
+    let trash_root = gui
+        .call("fs/trash", json!({ "threadId": id, "path": "" }))
+        .await;
+    assert_eq!(
+        trash_root["error"]["details"]["code"], "invalid_params",
+        "{trash_root}"
+    );
+
+    // 下一轮：agent 这一步的历史里有一条列着这些改动的提醒（失败的不算）。
+    let _ = gui
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = gui
+        .call("turn/start", json!({ "threadId": id, "message": "继续" }))
+        .await;
+    let mut reply = String::new();
+    let start = tokio::time::Instant::now();
+    loop {
+        let left = Duration::from_secs(5).saturating_sub(start.elapsed());
+        let msg = tokio::time::timeout(left, gui.read.next())
+            .await
+            .unwrap_or_else(|_| panic!("等这一轮结束超时：{reply}"))
+            .unwrap()
+            .unwrap();
+        let note: Value = serde_json::from_str(&msg.into_text().unwrap()).unwrap();
+        if note["method"] == "item/message_delta" {
+            reply.push_str(note["params"]["delta"].as_str().unwrap_or(""));
+        }
+        if note["method"] == "turn/completed" {
+            break;
+        }
+    }
+    for want in [
+        "用户刚在文件面板里直接改了工作区文件",
+        "编辑 notes.md",
+        "新建 docs/plan.md",
+        "新建文件夹 archive/",
+        "改名 / 移动 docs/plan.md → archive/plan.md",
+    ] {
+        assert!(reply.contains(want), "缺「{want}」：{reply}");
+    }
+    assert!(!reply.contains("out.md"), "失败的改动不该提醒：{reply}");
+
+    let h = Harness::boot_with_pages().await;
+    let page_ticket = h.pair_ticket().await;
+    let mut page = Rpc::connect(h.addr, &page_ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    for (method, params) in [
+        (
+            "fs/write",
+            json!({ "path": "x.md", "text": "x", "create": true }),
+        ),
+        ("fs/mkdir", json!({ "path": "x" })),
+        ("fs/rename", json!({ "from": "a", "to": "b" })),
+        ("fs/trash", json!({ "path": "a" })),
+    ] {
+        let denied = page.call(method, params).await;
+        assert_eq!(
+            denied["error"]["details"]["code"], "forbidden",
+            "配对网页不该能改文件（{method}）：{denied}"
+        );
+    }
+}
+
 /// `fs/dirs`：选目录。受信连接能列任意绝对路径下的子目录（不限会话、不照 `.gitignore`，
 /// 只列目录、默认不列隐藏的、按名字排、超过上限截断前先排序）；相对路径拒绝、读不了回
 /// `read_failed`；配对来的网页 `forbidden`。

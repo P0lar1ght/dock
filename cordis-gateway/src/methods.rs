@@ -50,7 +50,16 @@ impl MethodPolicy {
 const TRUSTED_PREFIXES: &[&str] = &[
     "config/", "secret/", "pairing/", "device/", "plugin/", "mcp/", "model/", "cua/",
 ];
-const TRUSTED_NAMES: &[&str] = &["browser/status", "skill/list", "fs/dirs"];
+const TRUSTED_NAMES: &[&str] = &[
+    "browser/status",
+    "skill/list",
+    "fs/dirs",
+    // 改工作区文件：配对来的网页不能写盘。
+    "fs/write",
+    "fs/mkdir",
+    "fs/rename",
+    "fs/trash",
+];
 
 fn must_be_trusted(name: &str) -> bool {
     TRUSTED_NAMES.contains(&name) || TRUSTED_PREFIXES.iter().any(|p| name.starts_with(p))

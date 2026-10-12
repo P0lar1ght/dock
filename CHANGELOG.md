@@ -14,6 +14,9 @@
   - 只认受信连接；配对来的网页 `forbidden`。
 - 网关 `fs/read { raw: true, offset?, length? }`（能力 `workspaceFilesRaw`）：分块原样读字节。
   - GUI 文件面板拿它渐进加载大表格、解析 xlsx / docx。
+- 网关 `fs/write` / `fs/mkdir` / `fs/rename` / `fs/trash`（能力 `workspaceEdit`）：文件面板里直接改工作区。
+  - 只认受信连接；保存带 `baseModifiedMs` 防覆盖 agent 的改动，删除是移到系统废纸篓。
+  - 改完 agent 下一步会收到一条提醒（spine 插件 `user-edits`），不会拿旧内容覆盖。
 
 ### 变更
 

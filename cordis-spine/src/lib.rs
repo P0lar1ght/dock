@@ -46,7 +46,7 @@ pub use cordis_base::types::{
     PromptRequest, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd, TurnOutcome, UserImage,
     AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT, ORDER_STEP_START_DYNAMIC,
     ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MEMORY, ORDER_STEP_START_TODO,
-    ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
+    ORDER_STEP_START_USER_EDITS, ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
     PERMISSION_DENIED_TOOL_RESULT, SIDE_NOTE_MAX_CHARS, STEER_REMINDER, TURN_STOPPED_REMINDER,
 };
 pub use cordis_base::usage::{
@@ -75,6 +75,7 @@ pub use host::tabs::{
 };
 pub use host::tool_views::{effective_call, tool_views, ToolViewFn, ToolViewInput, ToolViews};
 pub use host::tui_slots::{tui_slots, SlotAction, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
+pub use host::user_edits::{record_user_edit, user_edits, UserEdits};
 pub use llm::compact::{
     compact, compact_command, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
 };
@@ -89,7 +90,7 @@ pub use names::{
     SESSION_PAGE_EVENT, SESSION_PORT, SESSION_RESET, SESSION_TURN_END, SETTINGS, SKILLS, SLASH,
     STATUS_CHANGED, STATUS_ITEMS, STEP_START, SUBAGENTS, SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS,
     TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TOOL_VIEWS,
-    TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN, TURN_END, WORKFLOWS,
+    TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN, TURN_END, USER_EDITS, WORKFLOWS,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};

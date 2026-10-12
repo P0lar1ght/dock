@@ -43,6 +43,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("workspaceFiles", true),
     // `fs/read { raw: true, offset?, length? }` → `kind:"bytes"`：分块原样读字节（表格 / 文档预览）。
     ("workspaceFilesRaw", true),
+    // `fs/write` / `fs/mkdir` / `fs/rename` / `fs/trash`：文件面板里直接改工作区（保存文本、
+    // 新建、改名 / 移动、移到废纸篓）。只认受信连接；改了的下一步提醒 agent。
+    ("workspaceEdit", true),
     // `fs/dirs { path?, hidden? }`：列任意绝对路径下的子目录（远程 GUI 选会话目录）。
     // 只认受信连接（`trusted_only`）。
     ("directoryPicker", true),
@@ -273,6 +276,10 @@ pub const FS_READ: &str = "fs/read";
 pub const FS_FIND: &str = "fs/find";
 /// 选目录：列这台机器上任意一个绝对路径下的子目录（远程 GUI 新建会话用）。只认受信连接。
 pub const FS_DIRS: &str = "fs/dirs";
+pub const FS_WRITE: &str = "fs/write";
+pub const FS_MKDIR: &str = "fs/mkdir";
+pub const FS_RENAME: &str = "fs/rename";
+pub const FS_TRASH: &str = "fs/trash";
 
 /// 会话的画布：列 / 读一版 / 改数据 / 回滚。
 pub const CANVAS_LIST: &str = "canvas/list";
