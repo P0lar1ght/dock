@@ -3734,6 +3734,16 @@ async fn fs_methods_browse_the_sessions_workspace_read_only() {
     assert_eq!(tail["result"]["offset"], 1, "{tail}");
     assert_eq!(tail["result"]["data"], "AQ==");
     assert_eq!(tail["result"]["eof"], true);
+    let raw_escape = rpc
+        .call(
+            "fs/read",
+            json!({ "threadId": id, "path": "../x", "raw": true }),
+        )
+        .await;
+    assert_eq!(
+        raw_escape["error"]["details"]["code"], "invalid_params",
+        "{raw_escape}"
+    );
 
     let found = rpc
         .call("fs/find", json!({ "threadId": id, "query": "lib" }))

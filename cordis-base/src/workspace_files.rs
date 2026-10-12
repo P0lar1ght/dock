@@ -230,7 +230,7 @@ pub fn read_range(root: &Path, rel: &str, offset: u64, len: usize) -> Result<Ran
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let path = relative(&root, &file.canonicalize().map_err(|e| e.to_string())?);
     let size = meta.len();
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(len.min(size.saturating_sub(offset) as usize));
     if offset < size {
         f.seek(SeekFrom::Start(offset))
             .map_err(|e| format!("读不了 {rel}：{e}"))?;
