@@ -59,6 +59,7 @@ const TRUSTED_NAMES: &[&str] = &[
     "fs/mkdir",
     "fs/rename",
     "fs/trash",
+    "fs/upload",
 ];
 
 fn must_be_trusted(name: &str) -> bool {

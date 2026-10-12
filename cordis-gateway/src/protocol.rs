@@ -46,6 +46,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `fs/write` / `fs/mkdir` / `fs/rename` / `fs/trash`：文件面板里直接改工作区（保存文本、
     // 新建、改名 / 移动、移到废纸篓）。只认受信连接；改了的下一步提醒 agent。
     ("workspaceEdit", true),
+    // `fs/write` 收 `data`（base64 字节）/ `uploadId`，`fs/upload` 分块暂存：表格之类的二进制
+    // 文件、超过一帧的大文件。
+    ("workspaceEditBytes", true),
     // `fs/dirs { path?, hidden? }`：列任意绝对路径下的子目录（远程 GUI 选会话目录）。
     // 只认受信连接（`trusted_only`）。
     ("directoryPicker", true),
@@ -280,6 +283,7 @@ pub const FS_WRITE: &str = "fs/write";
 pub const FS_MKDIR: &str = "fs/mkdir";
 pub const FS_RENAME: &str = "fs/rename";
 pub const FS_TRASH: &str = "fs/trash";
+pub const FS_UPLOAD: &str = "fs/upload";
 
 /// 会话的画布：列 / 读一版 / 改数据 / 回滚。
 pub const CANVAS_LIST: &str = "canvas/list";

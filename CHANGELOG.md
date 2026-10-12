@@ -17,6 +17,7 @@
 - 网关 `fs/write` / `fs/mkdir` / `fs/rename` / `fs/trash`（能力 `workspaceEdit`）：文件面板里直接改工作区。
   - 只认受信连接；保存带 `baseModifiedMs` 防覆盖 agent 的改动，删除是移到系统废纸篓。
   - 改完 agent 下一步会收到一条提醒（spine 插件 `user-edits`），不会拿旧内容覆盖。
+- `fs/write` 收字节（`data` / 分块上传的 `uploadId`）+ `fs/upload`（能力 `workspaceEditBytes`）：GUI 改表格文件。
 
 ### 变更
 
