@@ -209,18 +209,33 @@ pub fn save_bytes(
 
 /// 同 [`save_text`]，内容是分块传上来暂存着的那份（[`upload_chunk`]）。保存成功就删掉暂存；
 /// 被拦下（期间被改过）时留着，「覆盖保存」不用再传一遍。
+///
+/// `size` 是客户端说它一共传了多少：对不上（中间丢了块）就不写，免得把半份文件换上去。
 pub fn save_upload(
     root: &Path,
     rel: &str,
     upload_id: &str,
+    size: Option<u64>,
     base_modified_ms: Option<u64>,
 ) -> Result<Saved, EditError> {
     let staged = upload_path(upload_id)?;
     let mut src = std::fs::File::open(&staged)
-        .map_err(|e| EditError::Invalid(format!("没有这份上传（{upload_id}）：{e}")))?;
+        .map_err(|e| EditError::Invalid(format!("没有这份上传（{upload_id}），要重新传：{e}")))?;
+    if let Some(want) = size {
+        let have = src
+            .metadata()
+            .map_err(|e| EditError::Io(e.to_string()))?
+            .len();
+        if have != want {
+            return Err(EditError::Invalid(format!(
+                "上传不完整：收到 {have} 字节，应该是 {want}"
+            )));
+        }
+    }
     let saved = save_with(root, rel, base_modified_ms, |out| {
         std::io::copy(&mut src, out).map(|_| ())
     })?;
+    drop(src);
     let _ = std::fs::remove_file(&staged);
     Ok(saved)
 }
@@ -263,6 +278,8 @@ fn save_with(
 
 /// 分块上传一块最多这么大（base64 后约 5.3 MB 一帧，和读的一样）。
 pub const UPLOAD_CHUNK_MAX: usize = 4 * 1024 * 1024;
+/// 一份上传最多这么大（GUI 能打开改的表格远小于它）：写坏的客户端不至于把盘写满。
+pub const UPLOAD_MAX: u64 = 512 * 1024 * 1024;
 /// 暂存超过这么久没提交的上传，下次有新上传时清掉。
 const UPLOAD_STALE: std::time::Duration = std::time::Duration::from_secs(3600);
 
@@ -274,10 +291,11 @@ pub fn uploads_dir() -> PathBuf {
 }
 
 fn upload_path(id: &str) -> Result<PathBuf, EditError> {
+    // 只收小写：不区分大小写的文件系统上 `ABC` 和 `abc` 是同一个暂存文件。
     let ok = (8..=80).contains(&id.len())
         && id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
     if !ok {
         return Err(EditError::Invalid(format!("上传 id 不对：{id}")));
     }
@@ -290,11 +308,19 @@ pub fn upload_chunk(id: &str, offset: u64, bytes: &[u8]) -> Result<u64, EditErro
     use std::io::Write;
     let path = upload_path(id)?;
     let io = |e: std::io::Error| EditError::Io(format!("暂存上传失败：{e}"));
+    if offset + bytes.len() as u64 > UPLOAD_MAX {
+        return Err(EditError::Invalid("上传太大了（最多 512 MiB）".into()));
+    }
     let dir = uploads_dir();
     std::fs::create_dir_all(&dir).map_err(io)?;
     let mut file = if offset == 0 {
         gc_uploads(&dir);
-        std::fs::File::create(&path).map_err(io)?
+        // 只给自己读写：暂存的是用户的表格内容。
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        opts.open(&path).map_err(io)?
     } else {
         let f = std::fs::OpenOptions::new()
             .append(true)
@@ -871,10 +897,16 @@ mod tests {
         ));
         assert_eq!(upload_chunk("up-12345678", 2, b"cd").unwrap(), 4);
         // 期间被改过：不写，暂存留着（覆盖保存不用重传）。
-        let stale = save_upload(dir.path(), "README.md", "up-12345678", Some(1)).unwrap_err();
+        let stale =
+            save_upload(dir.path(), "README.md", "up-12345678", Some(4), Some(1)).unwrap_err();
         assert!(matches!(stale, EditError::Conflict { .. }), "{stale:?}");
         assert!(uploads_dir().join("up-12345678").exists());
-        let saved = save_upload(dir.path(), "README.md", "up-12345678", base).unwrap();
+        // 总大小对不上：不写。
+        assert!(matches!(
+            save_upload(dir.path(), "README.md", "up-12345678", Some(9), base),
+            Err(EditError::Invalid(_))
+        ));
+        let saved = save_upload(dir.path(), "README.md", "up-12345678", Some(4), base).unwrap();
         assert_eq!(saved.size, 4);
         assert_eq!(
             std::fs::read(dir.path().join("README.md")).unwrap(),
@@ -891,7 +923,25 @@ mod tests {
             Err(EditError::Invalid(_))
         ));
         assert!(matches!(
-            save_upload(dir.path(), "README.md", "no-such-upload", None),
+            upload_chunk("UP-12345678", 0, b"x"),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            upload_chunk("up-87654321", UPLOAD_MAX, b"x"),
+            Err(EditError::Invalid(_))
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            upload_chunk("up-perm-0001", 0, b"x").unwrap();
+            let mode = std::fs::metadata(uploads_dir().join("up-perm-0001"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(matches!(
+            save_upload(dir.path(), "README.md", "no-such-upload", None, None),
             Err(EditError::Invalid(_))
         ));
     }

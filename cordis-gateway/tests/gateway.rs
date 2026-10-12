@@ -3891,10 +3891,33 @@ async fn fs_edit_methods_write_for_trusted_clients_and_tell_the_agent() {
             .await;
         assert!(up["result"]["size"].as_u64().is_some(), "{up}");
     }
+    // 漏了 offset：不能当成 0 把已经传好的清掉（提交后文件只剩最后一块）。
+    let no_offset = gui
+        .call(
+            "fs/upload",
+            json!({ "threadId": id, "uploadId": "gui-upload-1", "data": "eg==" }),
+        )
+        .await;
+    assert_eq!(
+        no_offset["error"]["details"]["code"], "invalid_params",
+        "{no_offset}"
+    );
+    // 提交时带上总大小：对不上（少传了块）就不写。
+    let short = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "t.csv", "uploadId": "gui-upload-1", "size": 9 }),
+        )
+        .await;
+    assert_eq!(
+        short["error"]["details"]["code"], "invalid_params",
+        "{short}"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("t.csv")).unwrap(), "a,b\n");
     let committed = gui
         .call(
             "fs/write",
-            json!({ "threadId": id, "path": "t.csv", "uploadId": "gui-upload-1" }),
+            json!({ "threadId": id, "path": "t.csv", "uploadId": "gui-upload-1", "size": 4 }),
         )
         .await;
     assert_eq!(committed["result"]["size"], 4, "{committed}");
@@ -3906,6 +3929,28 @@ async fn fs_edit_methods_write_for_trusted_clients_and_tell_the_agent() {
         )
         .await;
     assert_eq!(both["error"]["details"]["code"], "invalid_params", "{both}");
+    let create_bytes = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "new.bin", "data": "eA==", "create": true }),
+        )
+        .await;
+    assert_eq!(
+        create_bytes["error"]["details"]["code"], "invalid_params",
+        "{create_bytes}"
+    );
+    use base64::Engine as _;
+    let too_big = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 4 * 1024 * 1024 + 1]);
+    let big_chunk = gui
+        .call(
+            "fs/upload",
+            json!({ "threadId": id, "uploadId": "gui-upload-2", "offset": 0, "data": too_big }),
+        )
+        .await;
+    assert_eq!(
+        big_chunk["error"]["details"]["code"], "invalid_params",
+        "一块最多 4 MiB"
+    );
 
     let made = gui
         .call(

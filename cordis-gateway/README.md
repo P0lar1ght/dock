@@ -438,7 +438,10 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `baseModifiedMs` 是打开时的修改时间：对不上（期间被 agent 改过）回 `conflict`，不写。
 - 不带 `baseModifiedMs` 就是强制覆盖；GUI 保存已有文件总是带上。
 - 内容三选一（能力 `workspaceEditBytes`）：`text`、`data`（base64 字节）、`uploadId`。
-- 大文件先 `fs/upload` 分块（按顺序，一块 ≤ 4 MiB）暂存到 `$DOCK_HOME/uploads/`，再 `fs/write { uploadId }`。
+- 大文件先 `fs/upload` 分块（按顺序，`offset` 必填，一块 ≤ 4 MiB，一份 ≤ 512 MiB）暂存到 `$DOCK_HOME/uploads/`。
+- 再 `fs/write { uploadId, size }` 提交：`size` 是总字节数，对不上（丢了块）就不写。
+- `uploadId` 只收小写字母、数字、`-`、`_`（8–80 个）；暂存文件只给自己读写（0600）。
+- 回「没有这份上传」（暂存过期被清了）：重新传一遍再提交。
 - 暂存不在工作区里；提交成功就删，被 `conflict` 拦下时留着（覆盖保存不用重传）；一小时没提交的会清掉。
 - `create: true` 只收 `text`；`fs/upload` 不算改动，提交那次才提醒 agent。
 - 保存换的是文件本身：硬链接断开、属主和扩展属性不保留；只读文件回 `write_failed`。

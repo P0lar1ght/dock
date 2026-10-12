@@ -18,7 +18,8 @@
 //!   `baseModifiedMs` 对不上回 `conflict`（期间被改过）；`create: true` 新建（只收 `text`），
 //!   已存在回 `invalid_params`。
 //! - `fs/upload { threadId?, uploadId, offset, data }` → `{ size }`：分块暂存要保存的字节
-//!   （`$DOCK_HOME/uploads/`，不在工作区里），按顺序传，一块最多 4 MiB。
+//!   （`$DOCK_HOME/uploads/`，不在工作区里），按顺序传（`offset` 必填），一块最多 4 MiB。
+//!   提交时带 `size`（总字节数）：对不上就不写。
 //! - `fs/mkdir { threadId?, path }` → `{ path }`：新建文件夹（中间缺的一并建）。
 //! - `fs/rename { threadId?, from, to }` → `{ path }`：改名 / 移动，目标已存在就拒绝。
 //! - `fs/trash { threadId?, path }` → `{}`：移到系统废纸篓；没有回收站回 `write_failed`，不硬删。
@@ -117,7 +118,11 @@ fn edit_blocking(root: &Path, method: &str, params: &Value) -> Result<Edited, Rp
     match method {
         protocol::FS_UPLOAD => {
             let id = str_param(params, "uploadId")?;
-            let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            // 必填：缺省当 0 会把已经传好的清掉，提交后文件只剩最后一块。
+            let offset = params
+                .get("offset")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| RpcError::invalid_params("offset is required"))?;
             let bytes = base64_param(params)?;
             if bytes.len() > files::UPLOAD_CHUNK_MAX {
                 return Err(RpcError::invalid_params("一块最多 4 MiB"));
@@ -145,7 +150,10 @@ fn edit_blocking(root: &Path, method: &str, params: &Value) -> Result<Edited, Rp
                 (Some(text), _) if create => files::create_file(root, path, text),
                 _ if create => return Err(RpcError::invalid_params("新建只收 text")),
                 (Some(text), _) => files::save_text(root, path, text, base),
-                (None, Some(id)) => files::save_upload(root, path, id, base),
+                (None, Some(id)) => {
+                    let size = params.get("size").and_then(Value::as_u64);
+                    files::save_upload(root, path, id, size, base)
+                }
                 (None, None) => files::save_bytes(root, path, &base64_param(params)?, base),
             }
             .map_err(edit_error)?;
