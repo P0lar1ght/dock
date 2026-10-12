@@ -20,6 +20,8 @@ toml = "0.8"
 toml_edit = "0.22"
 tempfile = "3"
 tracing = "0.1"
+# 文件面板「删除」= 移到系统废纸篓（Linux 走 freedesktop 回收站）。chrono 只给 Linux 写删除时间。
+trash = { version = "5.2", default-features = false, features = ["chrono"] }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]

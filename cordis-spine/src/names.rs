@@ -135,3 +135,5 @@ pub const TOOL_VIEWS_CHANGED: &str = "tool.views/changed";
 pub const PLUGIN_SETTINGS: &str = "plugin.settings";
 /// 设置卡登记 / 卸下了，或值改了，载荷是插件 id（`String`）。
 pub const PLUGIN_SETTINGS_CHANGED: &str = "plugin.settings/changed";
+/// 用户在文件面板里改的文件（[`crate::UserEdits`]）：按页攒着，下一步提醒 agent。
+pub const USER_EDITS: &str = "user.edits";

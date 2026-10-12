@@ -10,6 +10,15 @@
 //!   表格 / 文档。`length` 默认 1 MiB、最多 4 MiB。
 //! - `fs/find { threadId?, query, limit? }` → `{ paths }`：按名字找文件（快速打开）。
 //!
+//! 改（只认受信连接，写盘成功后记一条给这一页的 agent，见 [`cordis_spine::record_user_edit`]）：
+//!
+//! - `fs/write { threadId?, path, text, baseModifiedMs?, create? }` → `{ path, size, modifiedMs }`：
+//!   保存文本（同目录临时文件再换上）；`baseModifiedMs` 对不上回 `conflict`（期间被改过）；
+//!   `create: true` 新建，已存在回 `invalid_params`。
+//! - `fs/mkdir { threadId?, path }` → `{ path }`：新建文件夹（中间缺的一并建）。
+//! - `fs/rename { threadId?, from, to }` → `{ path }`：改名 / 移动，目标已存在就拒绝。
+//! - `fs/trash { threadId?, path }` → `{}`：移到系统废纸篓；没有回收站回 `write_failed`，不硬删。
+//!
 //! 路径都相对会话的 cwd，出了这个目录就拒绝（见 [`cordis_base::workspace_files`]）。
 //! 只认开着的会话（要从页上拿 cwd）。读盘放到阻塞线程里，不占网关的异步线程。
 //!
@@ -20,7 +29,7 @@
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use cordis_base::workspace_files::{self as files, Content};
+use cordis_base::workspace_files::{self as files, Content, EditError};
 use serde_json::{json, Value};
 
 use crate::handle::GatewayHandle;
@@ -55,6 +64,80 @@ pub async fn dispatch(
     })
     .await
     .map_err(|e| RpcError::app("internal", format!("读文件的任务没跑完：{e}")))?
+}
+
+/// 改工作区的方法：写盘在阻塞线程里，成功后给这一页记一条用户改动。
+pub async fn edit(gateway: &GatewayHandle, method: &str, params: Value) -> Result<Value, RpcError> {
+    let page = threads::resolve_param(gateway, &params)?;
+    let root = cordis_spine::session_cwd(&page.ctx);
+    let method = method.to_string();
+    let (out, note) = tokio::task::spawn_blocking(move || edit_blocking(&root, &method, &params))
+        .await
+        .map_err(|e| RpcError::app("internal", format!("写文件的任务没跑完：{e}")))??;
+    cordis_spine::record_user_edit(&page.ctx, note);
+    Ok(out)
+}
+
+fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| RpcError::invalid_params(format!("{key} is required")))
+}
+
+fn edit_error(e: EditError) -> RpcError {
+    match e {
+        EditError::Invalid(m) => RpcError::invalid_params(m),
+        conflict @ EditError::Conflict { .. } => RpcError::app("conflict", conflict.to_string()),
+        EditError::Io(m) => RpcError::app("write_failed", m),
+    }
+}
+
+fn edit_blocking(root: &Path, method: &str, params: &Value) -> Result<(Value, String), RpcError> {
+    match method {
+        protocol::FS_WRITE => {
+            let path = str_param(params, "path")?;
+            let text = params
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| RpcError::invalid_params("text is required"))?;
+            let create = params.get("create").and_then(Value::as_bool) == Some(true);
+            let saved = if create {
+                files::create_file(root, path, text)
+            } else {
+                let base = params.get("baseModifiedMs").and_then(Value::as_u64);
+                files::save_text(root, path, text, base)
+            }
+            .map_err(edit_error)?;
+            let note = format!("{} {}", if create { "新建" } else { "编辑" }, saved.path);
+            Ok((
+                json!({ "path": saved.path, "size": saved.size, "modifiedMs": saved.modified_ms }),
+                note,
+            ))
+        }
+        protocol::FS_MKDIR => {
+            let path = files::make_dir(root, str_param(params, "path")?).map_err(edit_error)?;
+            let note = format!("新建文件夹 {path}/");
+            Ok((json!({ "path": path }), note))
+        }
+        protocol::FS_RENAME => {
+            let from = str_param(params, "from")?;
+            let path = files::rename(root, from, str_param(params, "to")?).map_err(edit_error)?;
+            let from = from.trim().trim_start_matches("./").trim_end_matches('/');
+            let note = format!("改名 / 移动 {from} → {path}");
+            Ok((json!({ "path": path }), note))
+        }
+        protocol::FS_TRASH => {
+            let path = str_param(params, "path")?;
+            files::move_to_trash(root, path).map_err(edit_error)?;
+            Ok((
+                json!({}),
+                format!("移到废纸篓 {}", path.trim_start_matches("./")),
+            ))
+        }
+        other => Err(RpcError::method_not_found(other)),
+    }
 }
 
 fn path_param(params: &Value) -> &str {
@@ -241,8 +324,8 @@ fn list_dirs(params: &Value) -> Result<Value, RpcError> {
     }))
 }
 
-/// 工作区文件这一块：`fs/list|read|find` 和选目录的 `fs/dirs`。读大仓库要走很多目录，
-/// 都放到连接锁外跑。
+/// 工作区文件这一块：`fs/list|read|find`、改文件的 `fs/write|mkdir|rename|trash` 和选目录的
+/// `fs/dirs`。读大仓库要走很多目录、写盘也是阻塞的，都放到连接锁外跑。
 pub fn gateway_fs() -> Plugin {
     plugin(
         "gateway.fs",
@@ -255,12 +338,26 @@ pub fn gateway_fs() -> Plugin {
                     method(move |gw, params| async move { dispatch(&gw, name, params).await }),
                 )
             };
+            let edit_entry = |name: &'static str| {
+                (
+                    name,
+                    MethodPolicy {
+                        trusted_only: true,
+                        ..MethodPolicy::detached()
+                    },
+                    method(move |gw, params| async move { edit(&gw, name, params).await }),
+                )
+            };
             register_methods(
                 ctx,
                 vec![
                     entry(protocol::FS_LIST),
                     entry(protocol::FS_READ),
                     entry(protocol::FS_FIND),
+                    edit_entry(protocol::FS_WRITE),
+                    edit_entry(protocol::FS_MKDIR),
+                    edit_entry(protocol::FS_RENAME),
+                    edit_entry(protocol::FS_TRASH),
                     (
                         protocol::FS_DIRS,
                         MethodPolicy {

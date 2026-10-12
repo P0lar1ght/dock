@@ -408,7 +408,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 ### 工作区文件（能力 `workspaceFiles`，`handlers/fs.rs`）
 
-只读看会话 cwd 里的文件（GUI 的文件面板）。路径都相对会话 cwd，用 `/` 分隔。
+看和改会话 cwd 里的文件（GUI 的文件面板）。路径都相对会话 cwd，用 `/` 分隔。
 
 | 方法 | 作用 |
 |---|---|
@@ -416,6 +416,10 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `fs/read { threadId?, path, maxBytes? }` | 读一个文件，`kind` 见下 |
 | `fs/read { threadId?, path, raw: true, offset?, length? }` | 原样读一段字节，见下 |
 | `fs/find { threadId?, query, limit? }` | 按名字找文件（快速打开）：`paths` |
+| `fs/write { threadId?, path, text, baseModifiedMs?, create? }` | 保存 / 新建文本文件，见下 |
+| `fs/mkdir { threadId?, path }` | 新建文件夹（中间缺的一并建）：`path` |
+| `fs/rename { threadId?, from, to }` | 改名 / 移动：新的 `path` |
+| `fs/trash { threadId?, path }` | 移到系统废纸篓 |
 
 - `kind`：`dir` / `file` / `symlink`（列目录）；`text` / `image` / `binary`（读文件）。
 - `text` 带 `text`、`truncated`（默认上限 512 KB，`maxBytes` 可调小）；截在字符边界上。
@@ -428,7 +432,17 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 一层最多 5000 项；找文件最多走 10 万个文件，按文件名连续命中打分。
 - 出了会话 cwd 就拒（`..`、绝对路径、指到外面的符号链接）：`invalid_params`。
 - 只认开着的会话（`thread_not_open`）；不占连接锁，读盘在阻塞线程里。
-- 没有写方法：改文件交给 agent（走权限门）。
+- 改文件的四个方法（能力 `workspaceEdit`）只认受信连接；配对来的网页 `forbidden`。
+- `fs/write` 回 `path`、`size`、`modifiedMs`；先写同目录临时文件再换上，照原文件权限。
+- `baseModifiedMs` 是打开时的修改时间：对不上（期间被 agent 改过）回 `conflict`，不写。
+- 不带 `baseModifiedMs` 就是强制覆盖；GUI 保存已有文件总是带上。
+- 保存换的是文件本身：硬链接断开、属主和扩展属性不保留；只读文件回 `write_failed`。
+- 修改时间在有的文件系统上只精确到秒：这是防手滑覆盖，不是锁。
+- `create: true` 新建；已存在、出了工作区回 `invalid_params`，从不覆盖。
+- `fs/rename` 目标已存在就拒；只改大小写可以；不能把文件夹移进它自己里面。
+- `fs/trash` 没有回收站可用回 `write_failed`，不硬删；macOS 走 NSFileManager，不弹授权框。
+- 写盘失败（权限、磁盘满、跨磁盘移动）回 `write_failed`。
+- 改成功后记一条给这一页的 agent（spine 插件 `user-edits`），下一步采样前提醒一次。
 
 ### 选目录（能力 `directoryPicker`，`handlers/fs.rs`）
 

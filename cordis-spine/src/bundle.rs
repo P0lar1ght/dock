@@ -12,6 +12,7 @@ use crate::host::slash::slash;
 use crate::host::status_items::status_items;
 use crate::host::tool_views::tool_views;
 use crate::host::tui_slots::tui_slots;
+use crate::host::user_edits::user_edits;
 use crate::llm::compact::{compact, compact_command};
 use crate::llm::sampler::{llm, LlmConfig, LlmMode};
 use crate::names::DYNAMIC_CORDIS_RUNNER;
@@ -121,6 +122,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(settings_commands(), ())?.wait().await?;
     ctx.plugin(skills(), ())?.wait().await?;
     ctx.plugin(project_instructions(), ())?.wait().await?;
+    // 用户在文件面板里改的文件：下一步提醒 agent（网关写盘后记一条）。
+    ctx.plugin(user_edits(), ())?.wait().await?;
     ctx.plugin(tui_slots(), ())?.wait().await?;
     ctx.plugin(status_items(), ())?.wait().await?;
     ctx.plugin(tool_views(), ())?.wait().await?;
