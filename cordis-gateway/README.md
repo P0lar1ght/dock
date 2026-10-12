@@ -416,7 +416,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `fs/read { threadId?, path, maxBytes? }` | 读一个文件，`kind` 见下 |
 | `fs/read { threadId?, path, raw: true, offset?, length? }` | 原样读一段字节，见下 |
 | `fs/find { threadId?, query, limit? }` | 按名字找文件（快速打开）：`paths` |
-| `fs/write { threadId?, path, text, baseModifiedMs?, create? }` | 保存 / 新建文本文件，见下 |
+| `fs/write { threadId?, path, text \| data \| uploadId, baseModifiedMs?, create? }` | 保存 / 新建，见下 |
+| `fs/upload { threadId?, uploadId, offset, data }` | 分块暂存要保存的字节：`size` |
 | `fs/mkdir { threadId?, path }` | 新建文件夹（中间缺的一并建）：`path` |
 | `fs/rename { threadId?, from, to }` | 改名 / 移动：新的 `path` |
 | `fs/trash { threadId?, path }` | 移到系统废纸篓 |
@@ -436,6 +437,10 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `fs/write` 回 `path`、`size`、`modifiedMs`；先写同目录临时文件再换上，照原文件权限。
 - `baseModifiedMs` 是打开时的修改时间：对不上（期间被 agent 改过）回 `conflict`，不写。
 - 不带 `baseModifiedMs` 就是强制覆盖；GUI 保存已有文件总是带上。
+- 内容三选一（能力 `workspaceEditBytes`）：`text`、`data`（base64 字节）、`uploadId`。
+- 大文件先 `fs/upload` 分块（按顺序，一块 ≤ 4 MiB）暂存到 `$DOCK_HOME/uploads/`，再 `fs/write { uploadId }`。
+- 暂存不在工作区里；提交成功就删，被 `conflict` 拦下时留着（覆盖保存不用重传）；一小时没提交的会清掉。
+- `create: true` 只收 `text`；`fs/upload` 不算改动，提交那次才提醒 agent。
 - 保存换的是文件本身：硬链接断开、属主和扩展属性不保留；只读文件回 `write_failed`。
 - 修改时间在有的文件系统上只精确到秒：这是防手滑覆盖，不是锁。
 - `create: true` 新建；已存在、出了工作区回 `invalid_params`，从不覆盖。

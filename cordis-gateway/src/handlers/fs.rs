@@ -12,9 +12,13 @@
 //!
 //! 改（只认受信连接，写盘成功后记一条给这一页的 agent，见 [`cordis_spine::record_user_edit`]）：
 //!
-//! - `fs/write { threadId?, path, text, baseModifiedMs?, create? }` → `{ path, size, modifiedMs }`：
-//!   保存文本（同目录临时文件再换上）；`baseModifiedMs` 对不上回 `conflict`（期间被改过）；
-//!   `create: true` 新建，已存在回 `invalid_params`。
+//! - `fs/write { threadId?, path, text | data | uploadId, baseModifiedMs?, create? }` →
+//!   `{ path, size, modifiedMs }`：保存（同目录临时文件再换上）。内容三选一：`text` 文本、
+//!   `data` base64 字节、`uploadId` 先经 `fs/upload` 分块传好的那份（大文件）。
+//!   `baseModifiedMs` 对不上回 `conflict`（期间被改过）；`create: true` 新建（只收 `text`），
+//!   已存在回 `invalid_params`。
+//! - `fs/upload { threadId?, uploadId, offset, data }` → `{ size }`：分块暂存要保存的字节
+//!   （`$DOCK_HOME/uploads/`，不在工作区里），按顺序传，一块最多 4 MiB。
 //! - `fs/mkdir { threadId?, path }` → `{ path }`：新建文件夹（中间缺的一并建）。
 //! - `fs/rename { threadId?, from, to }` → `{ path }`：改名 / 移动，目标已存在就拒绝。
 //! - `fs/trash { threadId?, path }` → `{}`：移到系统废纸篓；没有回收站回 `write_failed`，不硬删。
@@ -74,7 +78,9 @@ pub async fn edit(gateway: &GatewayHandle, method: &str, params: Value) -> Resul
     let (out, note) = tokio::task::spawn_blocking(move || edit_blocking(&root, &method, &params))
         .await
         .map_err(|e| RpcError::app("internal", format!("写文件的任务没跑完：{e}")))??;
-    cordis_spine::record_user_edit(&page.ctx, note);
+    if let Some(note) = note {
+        cordis_spine::record_user_edit(&page.ctx, note);
+    }
     Ok(out)
 }
 
@@ -94,46 +100,79 @@ fn edit_error(e: EditError) -> RpcError {
     }
 }
 
-fn edit_blocking(root: &Path, method: &str, params: &Value) -> Result<(Value, String), RpcError> {
+fn base64_param(params: &Value) -> Result<Vec<u8>, RpcError> {
+    let data = params
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::invalid_params("data is required"))?;
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| RpcError::invalid_params(format!("data 不是 base64：{e}")))
+}
+
+/// 回包和给 agent 的提醒；提醒是 `None` = 不算改动（分块暂存）。
+type Edited = (Value, Option<String>);
+
+fn edit_blocking(root: &Path, method: &str, params: &Value) -> Result<Edited, RpcError> {
     match method {
+        protocol::FS_UPLOAD => {
+            let id = str_param(params, "uploadId")?;
+            let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let bytes = base64_param(params)?;
+            if bytes.len() > files::UPLOAD_CHUNK_MAX {
+                return Err(RpcError::invalid_params("一块最多 4 MiB"));
+            }
+            let size = files::upload_chunk(id, offset, &bytes).map_err(edit_error)?;
+            Ok((json!({ "size": size }), None))
+        }
         protocol::FS_WRITE => {
             let path = str_param(params, "path")?;
-            let text = params
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| RpcError::invalid_params("text is required"))?;
+            let text = params.get("text").and_then(Value::as_str);
+            let upload = params.get("uploadId").and_then(Value::as_str);
+            let given = [
+                text.is_some(),
+                params.get("data").is_some(),
+                upload.is_some(),
+            ];
+            if given.iter().filter(|g| **g).count() != 1 {
+                return Err(RpcError::invalid_params(
+                    "text、data、uploadId 要给且只给一个",
+                ));
+            }
             let create = params.get("create").and_then(Value::as_bool) == Some(true);
-            let saved = if create {
-                files::create_file(root, path, text)
-            } else {
-                let base = params.get("baseModifiedMs").and_then(Value::as_u64);
-                files::save_text(root, path, text, base)
+            let base = params.get("baseModifiedMs").and_then(Value::as_u64);
+            let saved = match (text, upload) {
+                (Some(text), _) if create => files::create_file(root, path, text),
+                _ if create => return Err(RpcError::invalid_params("新建只收 text")),
+                (Some(text), _) => files::save_text(root, path, text, base),
+                (None, Some(id)) => files::save_upload(root, path, id, base),
+                (None, None) => files::save_bytes(root, path, &base64_param(params)?, base),
             }
             .map_err(edit_error)?;
             let note = format!("{} {}", if create { "新建" } else { "编辑" }, saved.path);
             Ok((
                 json!({ "path": saved.path, "size": saved.size, "modifiedMs": saved.modified_ms }),
-                note,
+                Some(note),
             ))
         }
         protocol::FS_MKDIR => {
             let path = files::make_dir(root, str_param(params, "path")?).map_err(edit_error)?;
             let note = format!("新建文件夹 {path}/");
-            Ok((json!({ "path": path }), note))
+            Ok((json!({ "path": path }), Some(note)))
         }
         protocol::FS_RENAME => {
             let from = str_param(params, "from")?;
             let path = files::rename(root, from, str_param(params, "to")?).map_err(edit_error)?;
             let from = from.trim().trim_start_matches("./").trim_end_matches('/');
             let note = format!("改名 / 移动 {from} → {path}");
-            Ok((json!({ "path": path }), note))
+            Ok((json!({ "path": path }), Some(note)))
         }
         protocol::FS_TRASH => {
             let path = str_param(params, "path")?;
             files::move_to_trash(root, path).map_err(edit_error)?;
             Ok((
                 json!({}),
-                format!("移到废纸篓 {}", path.trim_start_matches("./")),
+                Some(format!("移到废纸篓 {}", path.trim_start_matches("./"))),
             ))
         }
         other => Err(RpcError::method_not_found(other)),
@@ -358,6 +397,7 @@ pub fn gateway_fs() -> Plugin {
                     edit_entry(protocol::FS_MKDIR),
                     edit_entry(protocol::FS_RENAME),
                     edit_entry(protocol::FS_TRASH),
+                    edit_entry(protocol::FS_UPLOAD),
                     (
                         protocol::FS_DIRS,
                         MethodPolicy {

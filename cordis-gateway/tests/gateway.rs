@@ -3868,6 +3868,45 @@ async fn fs_edit_methods_write_for_trusted_clients_and_tell_the_agent() {
         "新\n"
     );
 
+    // 字节（表格之类）：`data` 直接写；大的经 `fs/upload` 分块暂存再提交。
+    assert_eq!(
+        init["result"]["capabilities"]["workspaceEditBytes"], true,
+        "{init}"
+    );
+    std::fs::write(dir.join("t.csv"), "a\n").unwrap();
+    let bytes = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "t.csv", "data": "YSxiCg==" }),
+        )
+        .await;
+    assert_eq!(bytes["result"]["size"], 4, "{bytes}");
+    assert_eq!(std::fs::read_to_string(dir.join("t.csv")).unwrap(), "a,b\n");
+    for (offset, data) in [(0, "eCx5"), (3, "Cg==")] {
+        let up = gui
+            .call(
+                "fs/upload",
+                json!({ "threadId": id, "uploadId": "gui-upload-1", "offset": offset, "data": data }),
+            )
+            .await;
+        assert!(up["result"]["size"].as_u64().is_some(), "{up}");
+    }
+    let committed = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "t.csv", "uploadId": "gui-upload-1" }),
+        )
+        .await;
+    assert_eq!(committed["result"]["size"], 4, "{committed}");
+    assert_eq!(std::fs::read_to_string(dir.join("t.csv")).unwrap(), "x,y\n");
+    let both = gui
+        .call(
+            "fs/write",
+            json!({ "threadId": id, "path": "t.csv", "text": "x", "data": "eA==" }),
+        )
+        .await;
+    assert_eq!(both["error"]["details"]["code"], "invalid_params", "{both}");
+
     let made = gui
         .call(
             "fs/write",
@@ -3945,6 +3984,7 @@ async fn fs_edit_methods_write_for_trusted_clients_and_tell_the_agent() {
         "新建 docs/plan.md",
         "新建文件夹 archive/",
         "改名 / 移动 docs/plan.md → archive/plan.md",
+        "编辑 t.csv",
     ] {
         assert!(reply.contains(want), "缺「{want}」：{reply}");
     }
@@ -3962,6 +4002,10 @@ async fn fs_edit_methods_write_for_trusted_clients_and_tell_the_agent() {
         ("fs/mkdir", json!({ "path": "x" })),
         ("fs/rename", json!({ "from": "a", "to": "b" })),
         ("fs/trash", json!({ "path": "a" })),
+        (
+            "fs/upload",
+            json!({ "uploadId": "page-upload-1", "offset": 0, "data": "eA==" }),
+        ),
     ] {
         let denied = page.call(method, params).await;
         assert_eq!(

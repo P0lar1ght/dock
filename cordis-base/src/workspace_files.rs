@@ -193,7 +193,44 @@ pub fn save_text(
     text: &str,
     base_modified_ms: Option<u64>,
 ) -> Result<Saved, EditError> {
+    save_bytes(root, rel, text.as_bytes(), base_modified_ms)
+}
+
+/// 同 [`save_text`]，内容是任意字节（表格之类的二进制文件）。
+pub fn save_bytes(
+    root: &Path,
+    rel: &str,
+    bytes: &[u8],
+    base_modified_ms: Option<u64>,
+) -> Result<Saved, EditError> {
     use std::io::Write;
+    save_with(root, rel, base_modified_ms, |out| out.write_all(bytes))
+}
+
+/// 同 [`save_text`]，内容是分块传上来暂存着的那份（[`upload_chunk`]）。保存成功就删掉暂存；
+/// 被拦下（期间被改过）时留着，「覆盖保存」不用再传一遍。
+pub fn save_upload(
+    root: &Path,
+    rel: &str,
+    upload_id: &str,
+    base_modified_ms: Option<u64>,
+) -> Result<Saved, EditError> {
+    let staged = upload_path(upload_id)?;
+    let mut src = std::fs::File::open(&staged)
+        .map_err(|e| EditError::Invalid(format!("没有这份上传（{upload_id}）：{e}")))?;
+    let saved = save_with(root, rel, base_modified_ms, |out| {
+        std::io::copy(&mut src, out).map(|_| ())
+    })?;
+    let _ = std::fs::remove_file(&staged);
+    Ok(saved)
+}
+
+fn save_with(
+    root: &Path,
+    rel: &str,
+    base_modified_ms: Option<u64>,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<Saved, EditError> {
     let file = confine(root, rel).map_err(EditError::Invalid)?;
     let real = file
         .canonicalize()
@@ -217,11 +254,79 @@ pub fn save_text(
         .prefix(".dock-save-")
         .tempfile_in(dir)
         .map_err(io)?;
-    tmp.write_all(text.as_bytes()).map_err(io)?;
+    write(tmp.as_file_mut()).map_err(io)?;
     tmp.as_file().sync_all().map_err(io)?;
     std::fs::set_permissions(tmp.path(), meta.permissions()).map_err(io)?;
     tmp.persist(&real).map_err(|e| io(e.error))?;
     saved(root, &real)
+}
+
+/// 分块上传一块最多这么大（base64 后约 5.3 MB 一帧，和读的一样）。
+pub const UPLOAD_CHUNK_MAX: usize = 4 * 1024 * 1024;
+/// 暂存超过这么久没提交的上传，下次有新上传时清掉。
+const UPLOAD_STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// 分块上传的暂存目录：`$DOCK_HOME/uploads/`。不放在工作区里：传到一半断了也不会在
+/// 项目里留下垃圾文件。
+pub fn uploads_dir() -> PathBuf {
+    let dir = crate::config::dock_home().join("uploads");
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+fn upload_path(id: &str) -> Result<PathBuf, EditError> {
+    let ok = (8..=80).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !ok {
+        return Err(EditError::Invalid(format!("上传 id 不对：{id}")));
+    }
+    Ok(uploads_dir().join(id))
+}
+
+/// 往上传 `id` 里追加一块。块要按顺序来：`offset` 得等于已经传了多少（0 = 从头开始，
+/// 会清掉同名的旧暂存）。回现在一共多少字节。
+pub fn upload_chunk(id: &str, offset: u64, bytes: &[u8]) -> Result<u64, EditError> {
+    use std::io::Write;
+    let path = upload_path(id)?;
+    let io = |e: std::io::Error| EditError::Io(format!("暂存上传失败：{e}"));
+    let dir = uploads_dir();
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    let mut file = if offset == 0 {
+        gc_uploads(&dir);
+        std::fs::File::create(&path).map_err(io)?
+    } else {
+        let f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .map_err(|_| EditError::Invalid(format!("没有这份上传（{id}），要从 0 开始传")))?;
+        let have = f.metadata().map_err(io)?.len();
+        if have != offset {
+            return Err(EditError::Invalid(format!(
+                "分块顺序不对：已经有 {have} 字节，这块从 {offset} 开始"
+            )));
+        }
+        f
+    };
+    file.write_all(bytes).map_err(io)?;
+    Ok(offset + bytes.len() as u64)
+}
+
+fn gc_uploads(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > UPLOAD_STALE);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// 新建一个文件（中间缺的文件夹一并建）。已经存在就报错，不覆盖。
@@ -743,6 +848,52 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&script).unwrap(), "echo 2\n");
         let mode = std::fs::metadata(&script).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn save_bytes_and_chunked_uploads_replace_the_file_atomically() {
+        let dir = tree();
+        let _env = crate::test_env::scoped().home();
+        save_bytes(dir.path(), "blob.dat", &[9, 8, 7], None).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("blob.dat")).unwrap(),
+            [9, 8, 7]
+        );
+
+        let base = read(dir.path(), "README.md", TEXT_LIMIT)
+            .unwrap()
+            .modified_ms;
+        assert_eq!(upload_chunk("up-12345678", 0, b"ab").unwrap(), 2);
+        // 顺序不对：拒绝，已有的不动。
+        assert!(matches!(
+            upload_chunk("up-12345678", 5, b"x"),
+            Err(EditError::Invalid(_))
+        ));
+        assert_eq!(upload_chunk("up-12345678", 2, b"cd").unwrap(), 4);
+        // 期间被改过：不写，暂存留着（覆盖保存不用重传）。
+        let stale = save_upload(dir.path(), "README.md", "up-12345678", Some(1)).unwrap_err();
+        assert!(matches!(stale, EditError::Conflict { .. }), "{stale:?}");
+        assert!(uploads_dir().join("up-12345678").exists());
+        let saved = save_upload(dir.path(), "README.md", "up-12345678", base).unwrap();
+        assert_eq!(saved.size, 4);
+        assert_eq!(
+            std::fs::read(dir.path().join("README.md")).unwrap(),
+            b"abcd"
+        );
+        assert!(
+            !uploads_dir().join("up-12345678").exists(),
+            "提交后删掉暂存"
+        );
+        // 暂存不在工作区里。
+        assert!(!uploads_dir().starts_with(dir.path().canonicalize().unwrap()));
+        assert!(matches!(
+            upload_chunk("../evil", 0, b"x"),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            save_upload(dir.path(), "README.md", "no-such-upload", None),
+            Err(EditError::Invalid(_))
+        ));
     }
 
     #[test]
