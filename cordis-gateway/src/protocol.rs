@@ -41,6 +41,8 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("desktopCursor", true),
     // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
     ("workspaceFiles", true),
+    // `fs/read { raw: true, offset?, length? }` → `kind:"bytes"`：分块原样读字节（表格 / 文档预览）。
+    ("workspaceFilesRaw", true),
     // `fs/dirs { path?, hidden? }`：列任意绝对路径下的子目录（远程 GUI 选会话目录）。
     // 只认受信连接（`trusted_only`）。
     ("directoryPicker", true),

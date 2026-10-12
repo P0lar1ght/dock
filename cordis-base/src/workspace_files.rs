@@ -207,6 +207,46 @@ pub fn read(root: &Path, rel: &str, max_text: usize) -> Result<FileRead, String>
     })
 }
 
+/// 原样读一段字节（不认类型、不转码）：大文件分块拉、浏览器里自己解析（表格、文档）。
+/// `offset` 超过文件末尾回空；`len` 由调用方限住上限。
+#[derive(Debug)]
+pub struct RangeRead {
+    pub path: String,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+    pub offset: u64,
+    pub bytes: Vec<u8>,
+}
+
+pub fn read_range(root: &Path, rel: &str, offset: u64, len: usize) -> Result<RangeRead, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let file = confine(root, rel)?;
+    let mut f = std::fs::File::open(&file).map_err(|e| format!("读不了 {rel}：{e}"))?;
+    // 用打开后的句柄取元数据：和读到的字节是同一个文件。
+    let meta = f.metadata().map_err(|e| format!("读不了 {rel}：{e}"))?;
+    if !meta.is_file() {
+        return Err(format!("不是文件：{rel}"));
+    }
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let path = relative(&root, &file.canonicalize().map_err(|e| e.to_string())?);
+    let size = meta.len();
+    let mut bytes = Vec::new();
+    if offset < size {
+        f.seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("读不了 {rel}：{e}"))?;
+        f.take(len as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("读不了 {rel}：{e}"))?;
+    }
+    Ok(RangeRead {
+        path,
+        size,
+        modified_ms: modified_ms(&meta),
+        offset,
+        bytes,
+    })
+}
+
 fn read_text(file: &Path, max: usize) -> Result<Content, String> {
     use std::io::Read;
     let mut f = std::fs::File::open(file).map_err(|e| e.to_string())?;
@@ -383,6 +423,22 @@ mod tests {
         assert!(matches!(bin.content, Content::Binary));
         assert_eq!(bin.size, 4);
         assert!(read(dir.path(), "src", TEXT_LIMIT).is_err());
+    }
+
+    #[test]
+    fn read_range_returns_raw_bytes_in_slices() {
+        let dir = tree();
+        // 二进制也照读：不认类型。
+        let head = read_range(dir.path(), "blob.dat", 0, 2).unwrap();
+        assert_eq!(head.bytes, [0u8, 159]);
+        assert_eq!((head.size, head.offset), (4, 0));
+        let tail = read_range(dir.path(), "blob.dat", 2, 100).unwrap();
+        assert_eq!(tail.bytes, [146u8, 150]);
+        let past = read_range(dir.path(), "blob.dat", 9, 100).unwrap();
+        assert!(past.bytes.is_empty());
+        assert_eq!(past.size, 4);
+        assert!(read_range(dir.path(), "../x", 0, 1).is_err());
+        assert!(read_range(dir.path(), "src", 0, 1).is_err());
     }
 
     #[test]
