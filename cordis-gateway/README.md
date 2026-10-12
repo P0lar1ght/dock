@@ -414,12 +414,16 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 |---|---|
 | `fs/list { threadId?, path?, hidden? }` | 列一层：`entries[{ name, path, kind, size?, modifiedMs? }]`、`truncated` |
 | `fs/read { threadId?, path, maxBytes? }` | 读一个文件，`kind` 见下 |
+| `fs/read { threadId?, path, raw: true, offset?, length? }` | 原样读一段字节，见下 |
 | `fs/find { threadId?, query, limit? }` | 按名字找文件（快速打开）：`paths` |
 
 - `kind`：`dir` / `file` / `symlink`（列目录）；`text` / `image` / `binary`（读文件）。
 - `text` 带 `text`、`truncated`（默认上限 512 KB，`maxBytes` 可调小）；截在字符边界上。
 - `image`（png / jpg / gif / webp / bmp / ico，≤ 8 MB）带 `mime` 和 base64 `data`。
 - svg 按文本回，另带 `mime: image/svg+xml`；其它二进制只给大小。
+- `raw: true`（能力 `workspaceFilesRaw`）：回 `kind:"bytes"`、`offset`、base64 `data`、`eof`。
+- `raw` 不认类型、不转码：GUI 分块拉大文件，自己解析表格 / 文档。
+- `raw` 一块默认 1 MiB、最多 4 MiB（`length`）；`offset` 过了末尾回空块。
 - 照 `.gitignore`（不管是不是 git 仓库）；默认不列点开头的文件，`hidden: true` 才列。
 - 一层最多 5000 项；找文件最多走 10 万个文件，按文件名连续命中打分。
 - 出了会话 cwd 就拒（`..`、绝对路径、指到外面的符号链接）：`invalid_params`。

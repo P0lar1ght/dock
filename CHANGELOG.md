@@ -12,6 +12,8 @@
 
 - 网关 `fs/dirs`（能力 `directoryPicker`）：列任意绝对路径下的子目录，给远程 GUI 选会话目录。
   - 只认受信连接；配对来的网页 `forbidden`。
+- 网关 `fs/read { raw: true, offset?, length? }`（能力 `workspaceFilesRaw`）：分块原样读字节。
+  - GUI 文件面板拿它渐进加载大表格、解析 xlsx / docx。
 
 ### 变更
 

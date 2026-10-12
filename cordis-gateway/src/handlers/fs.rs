@@ -5,6 +5,9 @@
 //! - `fs/read { threadId?, path, maxBytes? }` → `{ path, size, modifiedMs?, kind, ... }`：
 //!   `kind:"text"` 带 `text` 与 `truncated`；`kind:"image"` 带 `mime` 与 base64 `data`；
 //!   `kind:"binary"` 只有大小。
+//! - `fs/read { threadId?, path, raw: true, offset?, length? }` → `{ path, size, modifiedMs?,
+//!   kind:"bytes", offset, data, eof }`：原样读一段字节（base64），大文件分块拉，GUI 自己解析
+//!   表格 / 文档。`length` 默认 1 MiB、最多 4 MiB。
 //! - `fs/find { threadId?, query, limit? }` → `{ paths }`：按名字找文件（快速打开）。
 //!
 //! 路径都相对会话的 cwd，出了这个目录就拒绝（见 [`cordis_base::workspace_files`]）。
@@ -32,6 +35,9 @@ const FIND_DEFAULT: usize = 50;
 const FIND_MAX: usize = 500;
 /// `fs/dirs` 一次最多列这么多个子目录。
 const DIRS_LIMIT: usize = 1000;
+/// `fs/read { raw }` 一块默认 / 最多多大：base64 后约 1.3 / 5.3 MB 一帧。
+const RAW_CHUNK_DEFAULT: usize = 1024 * 1024;
+const RAW_CHUNK_MAX: usize = 4 * 1024 * 1024;
 
 pub async fn dispatch(
     gateway: &GatewayHandle,
@@ -88,6 +94,9 @@ fn read(root: &std::path::Path, params: &Value) -> Result<Value, RpcError> {
     if path.is_empty() {
         return Err(RpcError::invalid_params("path is required"));
     }
+    if params.get("raw").and_then(Value::as_bool) == Some(true) {
+        return read_raw(root, path, params);
+    }
     let max = params
         .get("maxBytes")
         .and_then(Value::as_u64)
@@ -116,6 +125,26 @@ fn read(root: &std::path::Path, params: &Value) -> Result<Value, RpcError> {
         Content::Binary => out["kind"] = json!("binary"),
     }
     Ok(out)
+}
+
+fn read_raw(root: &Path, path: &str, params: &Value) -> Result<Value, RpcError> {
+    let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    let length = params
+        .get("length")
+        .and_then(Value::as_u64)
+        .map(|n| (n as usize).clamp(1, RAW_CHUNK_MAX))
+        .unwrap_or(RAW_CHUNK_DEFAULT);
+    let got = files::read_range(root, path, offset, length).map_err(RpcError::invalid_params)?;
+    let end = got.offset + got.bytes.len() as u64;
+    Ok(json!({
+        "path": got.path,
+        "size": got.size,
+        "modifiedMs": got.modified_ms,
+        "kind": "bytes",
+        "offset": got.offset,
+        "data": base64::engine::general_purpose::STANDARD.encode(&got.bytes),
+        "eof": end >= got.size,
+    }))
 }
 
 fn find(root: &std::path::Path, params: &Value) -> Result<Value, RpcError> {

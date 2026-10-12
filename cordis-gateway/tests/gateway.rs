@@ -3656,7 +3656,7 @@ async fn local_gateway_also_accepts_device_tokens() {
 }
 
 /// `fs/*`：只读看会话 cwd 里的文件。列目录照 `.gitignore`、目录在前；读文本 / 图片 /
-/// 二进制；按名字找；出了工作区、没开的会话、缺参数都拒绝。
+/// 二进制、`raw` 分块读字节；按名字找；出了工作区、没开的会话、缺参数都拒绝。
 #[tokio::test]
 async fn fs_methods_browse_the_sessions_workspace_read_only() {
     let h = Harness::boot_with_pages().await;
@@ -3709,6 +3709,41 @@ async fn fs_methods_browse_the_sessions_workspace_read_only() {
         .await;
     assert_eq!(image["result"]["kind"], "image", "{image}");
     assert_eq!(image["result"]["data"], "iVBORw==");
+
+    // `raw`：分块原样读，二进制也给字节；最后一块 `eof`。
+    assert_eq!(
+        init["result"]["capabilities"]["workspaceFilesRaw"], true,
+        "{init}"
+    );
+    let head = rpc
+        .call(
+            "fs/read",
+            json!({ "threadId": id, "path": "target/app", "raw": true, "length": 1 }),
+        )
+        .await;
+    assert_eq!(head["result"]["kind"], "bytes", "{head}");
+    assert_eq!(head["result"]["data"], "AA==");
+    assert_eq!(head["result"]["size"], 2);
+    assert_eq!(head["result"]["eof"], false);
+    let tail = rpc
+        .call(
+            "fs/read",
+            json!({ "threadId": id, "path": "target/app", "raw": true, "offset": 1 }),
+        )
+        .await;
+    assert_eq!(tail["result"]["offset"], 1, "{tail}");
+    assert_eq!(tail["result"]["data"], "AQ==");
+    assert_eq!(tail["result"]["eof"], true);
+    let raw_escape = rpc
+        .call(
+            "fs/read",
+            json!({ "threadId": id, "path": "../x", "raw": true }),
+        )
+        .await;
+    assert_eq!(
+        raw_escape["error"]["details"]["code"], "invalid_params",
+        "{raw_escape}"
+    );
 
     let found = rpc
         .call("fs/find", json!({ "threadId": id, "query": "lib" }))
