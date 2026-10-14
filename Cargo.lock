@@ -775,6 +775,7 @@ name = "cordis-app"
 version = "0.2.1"
 dependencies = [
  "cordis",
+ "cordis-base",
  "cordis-browser",
  "cordis-gateway",
  "cordis-spine",

@@ -20,13 +20,17 @@ enum ResumeArg {
 /// `dock` 起 TUI；`dock serve` 起无头网关给父进程（桌面 GUI）用；
 /// `dock serve --remote` 起给远程客户端用的常驻网关（设备令牌，前面挂反向代理）；
 /// `dock mcp browser` 是内置浏览器 MCP 服务（由 Dock 自己按内置行拉起）；
-/// `dock device …` 管设备令牌。
+/// `dock device …` 管设备令牌；
+/// `dock init` / `doctor` / `upgrade` 管安装初始化、诊断与原子升级。
 enum Mode {
     Tui,
     Serve(ServeArgs),
     Remote { bind: String },
     McpBrowser,
     Device(DeviceCmd),
+    Init,
+    Doctor,
+    Upgrade(cordis_app::UpgradeArgs),
 }
 
 enum DeviceCmd {
@@ -50,6 +54,49 @@ const REMOTE_DEFAULT_BIND: &str = "127.0.0.1:18990";
 fn parse_args() -> (Mode, ResumeArg) {
     let mut args = std::env::args().skip(1).peekable();
     let mut resume = ResumeArg::Off;
+    if args.peek().is_some_and(|a| a == "init") {
+        args.next();
+        if let Some(extra) = args.next() {
+            usage_error(&format!("dock init 不认识参数 {extra}"));
+        }
+        return (Mode::Init, resume);
+    }
+    if args.peek().is_some_and(|a| a == "doctor") {
+        args.next();
+        if let Some(extra) = args.next() {
+            usage_error(&format!("dock doctor 不认识参数 {extra}"));
+        }
+        return (Mode::Doctor, resume);
+    }
+    if args.peek().is_some_and(|a| a == "upgrade" || a == "update") {
+        let cmd = args.next().unwrap();
+        let mut check = false;
+        let mut force = false;
+        for arg in args.by_ref() {
+            match arg.as_str() {
+                "--check" => check = true,
+                "--force" => force = true,
+                "-h" | "--help" => {
+                    print_help();
+                    std::process::exit(0);
+                }
+                other => usage_error(&format!("dock {cmd} 不认识参数 {other}")),
+            }
+        }
+        // `dock update` 始终只检查；`dock upgrade` 默认安装，`--check` 只检查。
+        if cmd == "update" && force {
+            usage_error("dock update 只检查版本，不用 --force；要升级请用 dock upgrade [--force]");
+        }
+        let mode = if cmd == "update" || check {
+            cordis_app::UpgradeMode::Check
+        } else {
+            cordis_app::UpgradeMode::Install
+        };
+        return (
+            Mode::Upgrade(cordis_app::UpgradeArgs { mode, force }),
+            resume,
+        );
+    }
     if args.peek().is_some_and(|a| a == "mcp") {
         args.next();
         let service = args.next();
@@ -169,6 +216,10 @@ Dock — Grok-shaped TUI on a Cordis plugin tree.
 
 Usage:
   dock [options]
+  dock init
+  dock doctor
+  dock upgrade [--check] [--force]
+  dock update --check
   dock serve --origin <origin> [--application <id>] [--bind <addr>] [options]
   dock serve --remote [--bind <addr>] [options]
   dock device add <name> | list | revoke <name|id>
@@ -178,6 +229,21 @@ Options:
   -r, --resume [id]  Restore the latest session for this cwd, or a specific id
   -V, --version      Print version and exit
   -h, --help         Show this help
+
+init: create $DOCK_HOME (default ~/.dock) and a minimal config.toml skeleton only
+when missing. Never overwrites an existing config. Uses env_key placeholders only
+(no plaintext api_key). Prints next steps if models are not ready.
+
+doctor: check PATH/binary, config.toml, model catalog, macOS quarantine / Linux
+glibc hints, and --version. Exit 0 only when every check passes; problems → non-zero.
+
+upgrade: download the release binary (sha256 → staged .new → mv → --version), same
+atomic replace as install.sh. Refuses if another dock process or a lock under
+$DOCK_HOME is detected, unless --force. --check only reports versions.
+  DOCK_CHANNEL=stable|pre   release channel (pre uses GitHub prerelease when any)
+  DOCK_VERSION / DOCK_BASE_URL / DOCK_INSTALL_DIR   same knobs as install.sh
+
+update --check: alias for upgrade --check (never installs).
 
 serve: run headless for a parent process (the desktop GUI). The gateway listens
 on loopback right away; stdout carries one JSON line per event: first
@@ -237,6 +303,32 @@ fn resume_and_apply_preset(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mode, resume) = parse_args();
+    if let Mode::Init = mode {
+        match cordis_app::run_init() {
+            Ok(outcome) => {
+                cordis_app::print_init_report(&outcome);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("dock init 失败：{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Mode::Doctor = mode {
+        let report = cordis_app::run_doctor();
+        cordis_app::print_doctor_report(&report);
+        std::process::exit(report.exit_code());
+    }
+    if let Mode::Upgrade(args) = &mode {
+        match cordis_app::run_upgrade(args) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("dock: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Mode::McpBrowser = mode {
         // stdout 是协议通道：这里什么都不能往 stdout 打。
         cordis_browser::serve_stdio().await?;
@@ -325,7 +417,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             wait_for_shutdown().await;
         }
-        Mode::McpBrowser | Mode::Device(_) => unreachable!("handled before install_app"),
+        Mode::McpBrowser | Mode::Device(_) | Mode::Init | Mode::Doctor | Mode::Upgrade(_) => {
+            unreachable!("handled before install_app")
+        }
     }
     Ok(())
 }
