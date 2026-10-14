@@ -23,7 +23,7 @@ pub const OPTIONS: &[(PermissionOptionKind, &str)] = &[
 /// `source`：请求是子代理发的时，标题上方多一行「来自子代理 · 角色 · 任务」。
 pub fn chrome_height(prompt: &PermissionPrompt, source: Option<&str>, width: u16) -> u16 {
     let content_w = width.saturating_sub(5).max(8) as usize;
-    let summary_rows = wrap_line(&prompt.summary, content_w).len().min(3) as u16;
+    let summary_rows = summary_rows(&prompt.summary, content_w).len() as u16;
     let source_rows = u16::from(source.is_some());
     (2 + source_rows + summary_rows + 1 + OPTIONS.len() as u16 + 1).clamp(8, 17)
 }
@@ -80,17 +80,19 @@ pub fn render(
     y = y.saturating_add(1);
 
     let summary_style = Style::default().fg(theme.gray).bg(theme.bg_light);
-    for line in wrap_line(&prompt.summary, content_w as usize)
-        .into_iter()
-        .take(3)
-    {
+    let note_style = Style::default()
+        .fg(theme.gray)
+        .bg(theme.bg_light)
+        .add_modifier(Modifier::ITALIC);
+    for (line, note) in summary_rows(&prompt.summary, content_w as usize) {
         if y >= area.y + area.height {
             break;
         }
+        let style = if note { note_style } else { summary_style };
         buf.set_line(
             content_x,
             y,
-            &Line::from(Span::styled(line, summary_style)),
+            &Line::from(Span::styled(line, style)),
             content_w,
         );
         y = y.saturating_add(1);
@@ -175,6 +177,59 @@ fn fill_rect(buf: &mut Buffer, area: Rect, style: Style) {
             }
         }
     }
+}
+
+/// 摘要的显示行：`(文字, 是不是说明行)`。
+///
+/// 首行是要紧的那句（命令工具是 `$ 完整命令`），最多折 3 行，再长用 `…` 收尾，
+/// 看得出被截了。后面的行是说明（命令工具的 `description`），各占一行、斜体淡色，
+/// 只做补充，不挤占命令的行数。
+fn summary_rows(summary: &str, width: usize) -> Vec<(String, bool)> {
+    const MAIN_ROWS: usize = 3;
+    let mut parts = summary.split('\n');
+    let main = parts.next().unwrap_or("");
+    let mut wrapped = wrap_line(main, width);
+    let cut = wrapped.len() > MAIN_ROWS;
+    wrapped.truncate(MAIN_ROWS);
+    if cut {
+        if let Some(last) = wrapped.last_mut() {
+            *last = with_ellipsis(last, width);
+        }
+    }
+    let mut rows: Vec<(String, bool)> = wrapped.into_iter().map(|l| (l, false)).collect();
+    for note in parts.map(str::trim).filter(|l| !l.is_empty()) {
+        let mut wrapped = wrap_line(note, width);
+        let cut = wrapped.len() > 1;
+        wrapped.truncate(1);
+        if let Some(first) = wrapped.pop() {
+            rows.push((
+                if cut {
+                    with_ellipsis(&first, width)
+                } else {
+                    first
+                },
+                true,
+            ));
+        }
+    }
+    rows
+}
+
+/// 把 `…` 接在行尾，超宽就先从尾巴让出位置。
+fn with_ellipsis(line: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    let budget = width.saturating_sub(1);
+    for c in line.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.push('\u{2026}');
+    out
 }
 
 fn wrap_line(text: &str, width: usize) -> Vec<String> {
@@ -458,6 +513,32 @@ mod tests {
         let title = at("允许使用bash").expect("标题");
         assert!(src < title, "来源在标题上方：{rows:#?}");
         assert!(at("始终拒绝").is_some(), "选项要画全：{rows:#?}");
+    }
+
+    /// 命令工具的摘要：命令在前、描述单起一行；命令太长时截在 3 行并标 `…`，
+    /// 描述不挤占命令的行数。
+    #[test]
+    fn command_summary_puts_full_command_first_and_description_below() {
+        let width = 40;
+        let rows = summary_rows("$ cargo test -p cordis-tui\nRun the TUI tests", width);
+        assert_eq!(
+            rows,
+            vec![
+                ("$ cargo test -p cordis-tui".to_string(), false),
+                ("Run the TUI tests".to_string(), true),
+            ]
+        );
+
+        let long = format!("$ {}", "word ".repeat(40));
+        let rows = summary_rows(&format!("{long}\n描述"), width);
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert!(rows[2].0.ends_with('\u{2026}'), "{rows:?}");
+        assert_eq!(rows[3], ("描述".to_string(), true));
+
+        // 单行摘要（其它工具）照旧。
+        let rows = summary_rows("write_file {\"file_path\":\"a\"}", width);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].1);
     }
 
     #[test]
