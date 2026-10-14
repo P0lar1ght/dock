@@ -126,6 +126,7 @@ cd dock-core && npm ci && npm test && npm run typecheck   # 协议核心（Node 
 
 - Conventional Commits：`feat(tui): …`、`fix(mcp): …`、`docs(agents): …`。scope 用 crate 或产品面短名，与现有历史一致。
 - 只 stage 任务相关文件。提交前看一遍 `git diff --staged`。
+- 版本号与 tag 守 SemVer：正式版 `vX.Y.Z`，预发布 `vX.Y.Z-{alpha|beta|rc}.N`（点号分隔，`rc.1` 不是 `rc1`）；同一 `X.Y.Z` 下预发布比正式版旧。规则与 rc 流程见 `docs/DEVELOPMENT.md`「版本号」。
 - 不擅自 `git stash`、`git reset --hard`、切别人正在用的 checkout。
 - 不在 main 上直接提交；不 force push 覆盖别人已 review 的分支。
 - commit / PR 的完整流程见 `.agents/skills/git-commit/SKILL.md`、`.agents/skills/create-pr/SKILL.md`。
