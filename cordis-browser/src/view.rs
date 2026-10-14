@@ -754,8 +754,11 @@ const PROBE_SELECT_JS: &str = r#"(x, y) => {
 }"#;
 
 /// 把记下的 `<select>` 设成第 `i` 项，照用户亲手选那样发 `input` / `change`。
+/// 取出就清掉：一次点开只认一次选择，迟到的 `select` 不会打到旧控件上（导航后页面的
+/// `globalThis` 本来就换了）。
 const CHOOSE_SELECT_JS: &str = r#"(i) => {
   const s = globalThis.__dockPickedSelect;
+  globalThis.__dockPickedSelect = null;
   if (!s || !s.isConnected || i >= s.options.length) return false;
   s.focus();
   if (s.selectedIndex !== i) {
