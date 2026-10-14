@@ -165,12 +165,36 @@ found`」。同理，`cordis-spine` 的 reqwest 走 `default-tls`（Linux 上即
 `libssl.so.3` / `libcrypto.so.3`，OpenSSL 1.1 的发行版跑不起来。要放宽这两条下限得换静态方案
 （musl 目标，或 spine 改 `rustls-tls`），0.1.0 先按已知限制记在 `CHANGELOG.md`。
 
+### 版本号
+
+遵循[语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。tag 只有两种形状，`release.yml` 的
+verify 会拦掉其它写法：
+
+| 种类 | tag | 例子 |
+|---|---|---|
+| 正式版 | `vX.Y.Z` | `v0.3.0` |
+| 预发布 | `vX.Y.Z-{alpha\|beta\|rc}.N` | `v0.3.0-alpha.1`、`v0.3.0-rc.2` |
+
+- `X.Y.Z` 不带前导零；`Cargo.toml` 里的版本写同一串但不带 `v`（`0.3.0-rc.1`）。
+- 预发布标识只用小写 `alpha`（功能未齐）/ `beta`（功能齐、公开测试）/ `rc`（发布候选，
+  没问题就原样转正），后面**必须**带 `.N`：写成 `rc1` / `rc10` 会按字典序比，`rc10` 排在
+  `rc2` 前面。`N` 从 1 起；不用 `+build` 元数据。
+- 先后顺序：`0.3.0-alpha.1 < 0.3.0-beta.1 < 0.3.0-rc.1 < 0.3.0-rc.2 < 0.3.0-rc.10 < 0.3.0`。
+  **同一个 `X.Y.Z` 的预发布比正式版旧**；`dock upgrade` 按这个顺序判断要不要升。
+- 带 `-` 的 tag 由 workflow 自动标成 GitHub prerelease：不进 `latest`，stable 通道
+  （`install.sh`、`dock upgrade`）看不到它，只有 `DOCK_CHANNEL=pre` 会装。不要在 Release
+  页面手动取消这个勾，否则 rc 会推给所有用户。
+- rc 不在 `CHANGELOG.md` 单开一节：改动留在 `[Unreleased]`，正式版发布时统一归档。
+
 发版步骤：
 
 1. 改根 `Cargo.toml` 的 `[workspace.package].version` —— 第一方 crate 全是
-   `version.workspace = true`，一处生效；同步 `CHANGELOG.md`。
+   `version.workspace = true`，一处生效。正式版同步 `CHANGELOG.md`（把 `[Unreleased]` 归档
+   成新版本一节）。
 2. 本地跑默认回归集合与格式门禁。
 3. `git tag v0.x.y && git push origin v0.x.y`，剩下的交给 workflow。
+   预发布同理：`version = "0.3.0-rc.1"` + `git tag v0.3.0-rc.1`；转正时版本改成 `0.3.0`
+   再打 `v0.3.0`。
 
 本地校验与干跑：
 

@@ -36,6 +36,13 @@ jobs:
       - name: Tag 与 workspace 版本一致
         run: |
           set -eu
+          # tag 只认 SemVer：正式版 vX.Y.Z，预发布 vX.Y.Z-{alpha|beta|rc}.N（点号分隔，
+          # 否则 rc10 按字典序会排在 rc2 前面）。规范见 docs/DEVELOPMENT.md「版本号」。
+          if ! printf '%s\n' "$GITHUB_REF_NAME" |
+            grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'; then
+            echo "tag ${GITHUB_REF_NAME} 不合规范：要 vX.Y.Z 或 vX.Y.Z-{alpha|beta|rc}.N（如 v0.3.0-rc.1）" >&2
+            exit 1
+          fi
           want="${GITHUB_REF_NAME#v}"
           got=$(awk -F'"' '
             /^\[workspace\.package\]/ { in_sec = 1; next }
@@ -174,8 +181,16 @@ jobs:
           set -eu
           ls -lh dist
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # 带 `-` 的是预发布：必须标 prerelease。不标就会成为 latest，
+            # stable 通道（install.sh、dock upgrade）会把 rc 装给所有人，
+            # DOCK_CHANNEL=pre 反而找不到它。
+            case "$GITHUB_REF_NAME" in
+              *-*) prerelease="--prerelease" ;;
+              *) prerelease="" ;;
+            esac
+            # shellcheck disable=SC2086 # 空串时要消失，不能加引号
             gh release create "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" \
-              --generate-notes
+              --generate-notes $prerelease
           fi
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber
