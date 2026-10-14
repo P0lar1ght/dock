@@ -8,6 +8,7 @@
 //! 在帧真正写出去之后再 [`View::ack`]，慢客户端就不会攒出一长串帧。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -16,7 +17,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventType, InsertTextParams, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, CaptureScreenshotParams, EventScreencastFrame,
+    BringToFrontParams, CaptureScreenshotFormat, CaptureScreenshotParams, EventScreencastFrame,
     GetNavigationHistoryParams, NavigateParams, NavigateToHistoryEntryParams, ReloadParams,
     ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams, StopScreencastParams,
     Viewport,
@@ -27,7 +28,7 @@ use chromiumoxide::cdp::browser_protocol::target::{
 use chromiumoxide::listeners::EventStream;
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::task::JoinHandle;
 
 use crate::session::{browser_user_data_dir, devtools_ws_url, key_event, KeyPhase};
@@ -91,6 +92,9 @@ pub struct View {
     handler: JoinHandle<()>,
     page: Page,
     target_id: String,
+    /// 上一次按下落在 `<select>` 上、被换成了选项列表（见 [`View::input`]）：
+    /// 跟着的那次抬起也不发给页面。
+    swallow_up: AtomicBool,
 }
 
 impl View {
@@ -132,6 +136,7 @@ impl View {
                 handler,
                 page,
                 target_id: target_id.to_string(),
+                swallow_up: AtomicBool::new(false),
             }),
             Ok(Err(e)) => {
                 handler.abort();
@@ -194,7 +199,11 @@ impl View {
     ///
     /// 同一页同一时刻只截一张（[`still_lock`]）：两个 View 并发 `clip.scale` 截图时，Chrome
     /// 把对方的临时视口当成原尺寸恢复，页面视口每次翻倍、回不去。
-    pub async fn still(&self, quality: i64, scale: f64) -> Result<Frame, String> {
+    ///
+    /// `scale: None`：按页面原生像素截，不带 `clip`。有头浏览器用这个：它在 Retina 上本来就是
+    /// 2 倍，而 `clip.scale` 会让 Chrome 在用户看得见的真窗口里按那个倍数重新渲染一遍——
+    /// 每补一帧窗口就忽大忽小地闪一下。
+    pub async fn still(&self, quality: i64, scale: Option<f64>) -> Result<Frame, String> {
         let lock = still_lock(&self.target_id);
         let _turn = lock.lock().await;
         let view = self
@@ -203,21 +212,21 @@ impl View {
             .await
             .map_err(|e| format!("读视口失败：{e}"))?
             .css_visual_viewport;
+        let mut params = CaptureScreenshotParams::builder()
+            .format(CaptureScreenshotFormat::Jpeg)
+            .quality(quality.clamp(10, 100));
+        if let Some(scale) = scale {
+            params = params.clip(Viewport {
+                x: view.page_x,
+                y: view.page_y,
+                width: view.client_width,
+                height: view.client_height,
+                scale: scale.clamp(1.0, 3.0),
+            });
+        }
         let shot = self
             .page
-            .execute(
-                CaptureScreenshotParams::builder()
-                    .format(CaptureScreenshotFormat::Jpeg)
-                    .quality(quality.clamp(10, 100))
-                    .clip(Viewport {
-                        x: view.page_x,
-                        y: view.page_y,
-                        width: view.client_width,
-                        height: view.client_height,
-                        scale: scale.clamp(1.0, 3.0),
-                    })
-                    .build(),
-            )
+            .execute(params.build())
             .await
             .map_err(|e| format!("截静止画面失败：{e}"))?;
         Ok(Frame {
@@ -230,6 +239,15 @@ impl View {
             scroll_y: view.page_y,
             ack_id: 0,
         })
+    }
+
+    /// 把这页所在的窗口切到最前（有头浏览器：用户直接在真窗口里操作）。
+    pub async fn bring_to_front(&self) -> Result<(), String> {
+        self.page
+            .execute(BringToFrontParams::default())
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("切到浏览器窗口失败：{e}"))
     }
 
     /// 这一帧已经送出去了：让 Chrome 发下一帧。
@@ -281,24 +299,45 @@ impl View {
 
     /// 转发一次用户输入。坐标是页面视口的 CSS 像素（客户端按帧元数据换算）。
     ///
-    /// - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, clickCount?, modifiers?}`
+    /// - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, buttons?, clickCount?, modifiers?}`
+    ///   `buttons`：此刻按着的键（DOM `MouseEvent.buttons` 位：左 1、右 2、中 4）。拖动时的
+    ///   `move` 要带上，不然页面当成悬停，拖选文字、拖滑块都不动。
     /// - `{type:"wheel", x, y, deltaX, deltaY, modifiers?}`
     /// - `{type:"key", action:"down"|"up"|"press", key, modifiers?}`（`key` 用 DOM 键名：`Enter`、`a`）
     /// - `{type:"text", text}`：直接插入文字（输入法上屏、粘贴）
+    /// - `{type:"select", index}`：把上一次点开的 `<select>` 设成第 `index` 项（见下）
     ///
     /// `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
-    pub async fn input(&self, event: &Value) -> Result<(), String> {
+    ///
+    /// 回值平时是 `{}`，两种情况带东西：
+    /// - 按下落在单选 `<select>` 上：原生下拉弹层画在页面之外，screencast 和截图里都看不见，
+    ///   点开了只会隐形地吃掉后面的按键。所以不把这次按下发给页面，回
+    ///   `{select:{x,y,width,height,selectedIndex,options:[{label,disabled,group}]}}`，
+    ///   由客户端画菜单，选好了再发 `{type:"select", index}`。
+    /// - ⌘/Ctrl+C、⌘/Ctrl+X：回 `{copied: "选中的文字"}`，客户端写进自己那台机器的剪贴板
+    ///   （页面的剪贴板在浏览器那台机器上，用户拿不到）。
+    pub async fn input(&self, event: &Value) -> Result<Value, String> {
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
         let modifiers = modifier_bits(event.get("modifiers"));
         match kind {
             "mouse" => {
                 let (x, y) = point(event)?;
                 let button = mouse_button(event.get("button").and_then(Value::as_str))?;
+                let buttons = event.get("buttons").and_then(Value::as_i64);
                 let clicks = event.get("clickCount").and_then(Value::as_i64).unwrap_or(1);
                 let action = event
                     .get("action")
                     .and_then(Value::as_str)
                     .unwrap_or("click");
+                if matches!(action, "down" | "click") && button == MouseButton::Left {
+                    if let Some(select) = self.select_at(x, y).await {
+                        self.swallow_up.store(action == "down", Ordering::Relaxed);
+                        return Ok(json!({ "select": select }));
+                    }
+                }
+                if action == "up" && self.swallow_up.swap(false, Ordering::Relaxed) {
+                    return Ok(json!({}));
+                }
                 let phases: &[DispatchMouseEventType] = match action {
                     "move" => &[DispatchMouseEventType::MouseMoved],
                     "down" => &[DispatchMouseEventType::MousePressed],
@@ -312,22 +351,21 @@ impl View {
                 };
                 for phase in phases {
                     let moving = *phase == DispatchMouseEventType::MouseMoved;
-                    let params = DispatchMouseEventParams::builder()
+                    // 移动时的「哪个键」取按着的那个：拖动是「按着左键移动」，不是悬停。
+                    let held = buttons.map_or(MouseButton::None, held_button);
+                    let mut params = DispatchMouseEventParams::builder()
                         .r#type(phase.clone())
                         .x(x)
                         .y(y)
                         .modifiers(modifiers)
-                        .button(if moving {
-                            MouseButton::None
-                        } else {
-                            button.clone()
-                        })
+                        .button(if moving { held } else { button.clone() })
                         .click_count(if moving { 0 } else { clicks })
                         .build()
                         .map_err(|e| e.to_string())?;
+                    params.buttons = buttons;
                     self.dispatch(params).await?;
                 }
-                Ok(())
+                Ok(json!({}))
             }
             "wheel" => {
                 let (x, y) = point(event)?;
@@ -342,7 +380,8 @@ impl View {
                     .modifiers(modifiers)
                     .build()
                     .map_err(|e| e.to_string())?;
-                self.dispatch(params).await
+                self.dispatch(params).await?;
+                Ok(json!({}))
             }
             "key" => {
                 let key = event
@@ -360,25 +399,79 @@ impl View {
                     "press" => &[KeyPhase::Down, KeyPhase::Up],
                     other => return Err(format!("不认识的按键动作：{other}")),
                 };
+                // ⌘/Ctrl 编辑快捷键：macOS 上这些由系统菜单处理，光发按键页面不动，要带
+                // `commands` 让 Blink 直接执行。复制 / 剪切先把选中的文字取出来带回去。
+                let command = editing_command(key, modifiers);
+                let copied = match command {
+                    Some("copy" | "cut") => self.selected_text().await,
+                    _ => None,
+                };
                 for phase in phases {
-                    let params = key_event(key, modifiers, *phase)?;
+                    let mut params = key_event(key, modifiers, *phase)?;
+                    if *phase == KeyPhase::Down {
+                        if let Some(command) = command {
+                            params.commands = Some(vec![command.to_string()]);
+                        }
+                    }
                     self.page.execute(params).await.map_err(|e| e.to_string())?;
                 }
-                Ok(())
+                Ok(match copied {
+                    Some(text) if !text.is_empty() => json!({ "copied": text }),
+                    _ => json!({}),
+                })
             }
             "text" => {
                 let text = event.get("text").and_then(Value::as_str).unwrap_or("");
                 if text.is_empty() {
-                    return Ok(());
+                    return Ok(json!({}));
                 }
                 self.page
                     .execute(InsertTextParams::new(text))
                     .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({}))
+            }
+            "select" => {
+                let index = event
+                    .get("index")
+                    .and_then(Value::as_i64)
+                    .filter(|i| *i >= 0)
+                    .ok_or_else(|| "index 必须是非负整数".to_string())?;
+                let done = self.eval(&format!("({CHOOSE_SELECT_JS})({index})")).await?;
+                if done.as_bool() != Some(true) {
+                    return Err("下拉框已经不在页面上了".into());
+                }
+                Ok(json!({}))
             }
             other => Err(format!("不认识的输入类型：{other}")),
         }
+    }
+
+    /// `(x, y)` 处是不是一个能点开的单选 `<select>`：是就记下它、回选项列表。
+    async fn select_at(&self, x: f64, y: f64) -> Option<Value> {
+        let found = self
+            .eval(&format!("({PROBE_SELECT_JS})({x}, {y})"))
+            .await
+            .ok()?;
+        found.is_object().then_some(found)
+    }
+
+    /// 当前选中的文字：输入框里的选区优先，否则页面选区。
+    async fn selected_text(&self) -> Option<String> {
+        self.eval(SELECTED_TEXT_JS)
+            .await
+            .ok()?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    async fn eval(&self, expression: &str) -> Result<Value, String> {
+        let result = self
+            .page
+            .evaluate_expression(expression)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(result.value().cloned().unwrap_or(Value::Null))
     }
 
     async fn dispatch(&self, params: DispatchMouseEventParams) -> Result<(), String> {
@@ -641,6 +734,79 @@ pub fn address_bar_url(raw: &str) -> Result<String, String> {
     }
 }
 
+/// 点到的单选 `<select>`：记在页面上（下次 `select` 输入用），回位置与选项。多选、
+/// 列表样式（`size > 1`）、禁用的不拦：它们没有弹层，照常点。
+const PROBE_SELECT_JS: &str = r#"(x, y) => {
+  const hit = document.elementFromPoint(x, y);
+  const s = hit && hit.closest ? hit.closest('select') : null;
+  if (!s || s.multiple || s.size > 1 || s.disabled) return null;
+  s.focus();
+  globalThis.__dockPickedSelect = s;
+  const r = s.getBoundingClientRect();
+  return {
+    x: r.left, y: r.top, width: r.width, height: r.height,
+    selectedIndex: s.selectedIndex,
+    options: Array.from(s.options).map((o) => {
+      const g = o.parentElement && o.parentElement.tagName === 'OPTGROUP' ? o.parentElement : null;
+      return { label: o.label || o.text, disabled: o.disabled || !!(g && g.disabled), group: g ? g.label : null };
+    }),
+  };
+}"#;
+
+/// 把记下的 `<select>` 设成第 `i` 项，照用户亲手选那样发 `input` / `change`。
+const CHOOSE_SELECT_JS: &str = r#"(i) => {
+  const s = globalThis.__dockPickedSelect;
+  if (!s || !s.isConnected || i >= s.options.length) return false;
+  s.focus();
+  if (s.selectedIndex !== i) {
+    s.selectedIndex = i;
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+    s.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return true;
+}"#;
+
+const SELECTED_TEXT_JS: &str = r#"(() => {
+  const a = document.activeElement;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && typeof a.selectionStart === 'number') {
+    return a.value.slice(a.selectionStart, a.selectionEnd);
+  }
+  return String(getSelection());
+})()"#;
+
+/// ⌘ 或 Ctrl（不带 Alt）加字母的编辑快捷键 → Blink 编辑命令名。
+fn editing_command(key: &str, modifiers: i64) -> Option<&'static str> {
+    const ALT: i64 = 1;
+    const CTRL: i64 = 2;
+    const META: i64 = 4;
+    const SHIFT: i64 = 8;
+    if modifiers & (CTRL | META) == 0 || modifiers & ALT != 0 {
+        return None;
+    }
+    let shift = modifiers & SHIFT != 0;
+    match (key.to_ascii_lowercase().as_str(), shift) {
+        ("a", false) => Some("selectAll"),
+        ("c", false) => Some("copy"),
+        ("x", false) => Some("cut"),
+        ("z", false) => Some("undo"),
+        ("z", true) | ("y", false) => Some("redo"),
+        _ => None,
+    }
+}
+
+/// 按着的键（`buttons` 位）里挑一个当 `button`：左 > 右 > 中。
+fn held_button(buttons: i64) -> MouseButton {
+    if buttons & 1 != 0 {
+        MouseButton::Left
+    } else if buttons & 2 != 0 {
+        MouseButton::Right
+    } else if buttons & 4 != 0 {
+        MouseButton::Middle
+    } else {
+        MouseButton::None
+    }
+}
+
 fn point(event: &Value) -> Result<(f64, f64), String> {
     let x = event.get("x").and_then(Value::as_f64);
     let y = event.get("y").and_then(Value::as_f64);
@@ -680,6 +846,35 @@ pub fn modifier_bits(list: Option<&Value>) -> i64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn editing_shortcuts_map_to_blink_commands() {
+        let meta = modifier_bits(Some(&json!(["Meta"])));
+        let ctrl = modifier_bits(Some(&json!(["Control"])));
+        let meta_shift = modifier_bits(Some(&json!(["Meta", "Shift"])));
+        let ctrl_alt = modifier_bits(Some(&json!(["Control", "Alt"])));
+        assert_eq!(editing_command("a", meta), Some("selectAll"));
+        assert_eq!(editing_command("A", ctrl), Some("selectAll"));
+        assert_eq!(editing_command("c", meta), Some("copy"));
+        assert_eq!(editing_command("x", ctrl), Some("cut"));
+        assert_eq!(editing_command("z", meta), Some("undo"));
+        assert_eq!(editing_command("z", meta_shift), Some("redo"));
+        assert_eq!(editing_command("y", ctrl), Some("redo"));
+        // 没有 ⌘/Ctrl、带 Alt、或不是编辑键：照常发按键。
+        assert_eq!(editing_command("a", 0), None);
+        assert_eq!(editing_command("a", ctrl_alt), None);
+        assert_eq!(editing_command("v", meta), None);
+        assert_eq!(editing_command("Enter", meta), None);
+    }
+
+    #[test]
+    fn held_button_prefers_left() {
+        assert_eq!(held_button(0), MouseButton::None);
+        assert_eq!(held_button(1), MouseButton::Left);
+        assert_eq!(held_button(2), MouseButton::Right);
+        assert_eq!(held_button(4), MouseButton::Middle);
+        assert_eq!(held_button(3), MouseButton::Left);
+    }
 
     #[test]
     fn modifiers_fold_into_cdp_bits() {
