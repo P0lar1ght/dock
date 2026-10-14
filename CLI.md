@@ -38,7 +38,7 @@
 2. `DOCK_CHANNEL=pre` 且 GitHub 无可用 prerelease → **硬失败**，不回落 latest。
 3. `dock update` 无参只做 `--check`；升级只用 `dock upgrade`。
 
-一键安装脚本 `install.sh` 分三阶段输出进度（下载 / 安装 / 初始化）；TTY 下有阶段标题与 ✓/✗，管道非 TTY 降级为朴素行。装完默认调用 `dock init`。
+一键安装脚本 `install.sh` 分三阶段输出进度（下载 / 安装 / 初始化）；TTY 下有阶段标题与 ✓/✗，下载时显示进度条、速度与剩余时间（还没收到数据时显示「连接中… Ns」）；管道非 TTY 降级为朴素行，下载完只打一行大小与平均速度。装完默认调用 `dock init`。
 
 ---
 

@@ -14,7 +14,8 @@
 # 支持：macOS aarch64 / x86_64，Linux aarch64 / x86_64。
 # Windows 没有预编译产物（未做适配验证），脚本会明确拒绝而不是装个跑不起来的壳。
 #
-# 进度：TTY 下分「下载 / 安装 / 初始化」三阶段；管道或非 TTY 降级为朴素行输出。
+# 进度：TTY 下分「下载 / 安装 / 初始化」三阶段，下载带进度条 / 速度 / 剩余时间；
+#       管道或非 TTY 降级为朴素行输出。
 set -eu
 
 REPO="P0lar1ght/dock"
@@ -110,6 +111,119 @@ download() {
     fi
 }
 
+# —— 下载进度 ——————————————————————————————————————
+# TTY + curl：curl 放后台，前台每 0.2s 看一眼落盘字节数，画进度条 / 速度 / 剩余时间；
+# 还没收到字节时显示「连接中… Ns」，让人分得清是在等网络还是卡死。
+# 非 TTY 或只有 wget：不画动态行（免得刷屏日志），只在完成后打一行汇总。
+
+_human() {
+    # _human <字节数> → 12.3 MB / 456 KB / 789 B
+    awk -v b="$1" 'BEGIN {
+        if (b >= 1048576) printf "%.1f MB", b / 1048576
+        else if (b >= 1024) printf "%.0f KB", b / 1024
+        else printf "%d B", b
+    }'
+}
+
+_file_size() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+_content_length() {
+    # -D 头文件里有多段（302 → 200）：只认最后一段的 Content-Length；缺失 / 0 = 未知。
+    if [ -f "$1" ]; then
+        tr -d '\r' <"$1" | awk '
+            toupper(substr($1, 1, 5)) == "HTTP/" { v = 0 }
+            tolower($1) == "content-length:" { v = $2 }
+            END { print v + 0 }'
+    else
+        echo 0
+    fi
+}
+
+_progress_line() {
+    # _progress_line <已下载> <总大小，0=未知> <字节/秒，-1=还没测出> <已用秒> <条宽>
+    awk -v d="$1" -v t="$2" -v s="$3" -v e="$4" -v w="$5" '
+        function h(b) {
+            if (b >= 1048576) return sprintf("%.1f MB", b / 1048576)
+            if (b >= 1024) return sprintf("%.0f KB", b / 1024)
+            return sprintf("%d B", b)
+        }
+        BEGIN {
+            if (d == 0) { printf "  \033[2m连接中… %ds\033[0m", e; exit }
+            speed = s < 0 ? "测速中" : h(s) "/s"
+            if (t > 0) {
+                n = int(d * w / t); if (n > w) n = w
+                bar = ""; for (i = 0; i < n; i++) bar = bar "━"
+                rest = ""; for (i = n; i < w; i++) rest = rest "─"
+                line = sprintf("  \033[32m%s\033[2m%s\033[0m %3d%%  %s / %s  %s", \
+                    bar, rest, int(d * 100 / t), h(d), h(t), speed)
+                if (s > 0 && t > d) line = line sprintf("  剩余 %ds", int((t - d) / s) + 1)
+                printf "%s", line
+            } else {
+                printf "  已下载 %s  %s", h(d), speed
+            }
+        }'
+}
+
+download_progress() {
+    # download_progress <url> <输出文件>
+    _dl_start=$(date +%s)
+    if _is_tty && need curl; then
+        _cols=$(tput cols 2>/dev/null) || _cols=80
+        case $_cols in '' | *[!0-9]*) _cols=80 ;; esac
+        _width=$((_cols - 56))
+        [ "$_width" -le 30 ] || _width=30
+        [ "$_width" -ge 10 ] || _width=10
+        curl -fsSL -D "$2.headers" "$1" -o "$2" 2>"$2.err" &
+        _dl_pid=$!
+        _tick=$_dl_start
+        _tick_bytes=0
+        _speed=-1
+        while kill -0 "$_dl_pid" 2>/dev/null; do
+            _now=$(date +%s)
+            _done=$(_file_size "$2")
+            # 速度按整秒采样：date +%s 只到秒，0.2s 一刷的进度条照样顺滑。
+            # 收到第一个字节前不采样，否则连接耗时会被算成一个 0 B/s。
+            if [ "$_done" -eq 0 ]; then
+                _tick=$_now
+            elif [ "$_now" -gt "$_tick" ]; then
+                _speed=$(((_done - _tick_bytes) / (_now - _tick)))
+                _tick=$_now
+                _tick_bytes=$_done
+            fi
+            printf '\r\033[K%s' "$(_progress_line "$_done" "$(_content_length "$2.headers")" \
+                "$_speed" $((_now - _dl_start)) "$_width")"
+            sleep 0.2 2>/dev/null || sleep 1
+        done
+        printf '\r\033[K'
+        if ! wait "$_dl_pid"; then
+            _dl_pid=
+            cat "$2.err" >&2
+            die "下载失败：$1"
+        fi
+        _dl_pid=
+    else
+        download "$1" "$2"
+    fi
+    _bytes=$(_file_size "$2")
+    _secs=$(($(date +%s) - _dl_start))
+    [ "$_secs" -gt 0 ] || _secs=1
+    ok "已下载 $(_human "$_bytes")（平均 $(_human $((_bytes / _secs)))/s）"
+}
+
+cleanup() {
+    # 非交互 sh 里后台任务忽略 SIGINT：Ctrl-C 时得亲手停掉 curl，否则它还在后台下。
+    if [ -n "${_dl_pid:-}" ]; then
+        kill "$_dl_pid" 2>/dev/null || true
+    fi
+    rm -rf "$tmp"
+}
+
 sha256_of() {
     if need sha256sum; then
         sha256sum "$1" | awk '{print $1}'
@@ -177,13 +291,14 @@ main() {
     file="$ASSET-$target.tar.gz"
 
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/dock-install.XXXXXX") || die "无法创建临时目录"
-    trap 'rm -rf "$tmp"' EXIT INT TERM
+    trap cleanup EXIT
+    trap 'cleanup; exit 130' INT TERM
 
     # —— 1/3 下载 ————————————————————————————————
     phase 1 "下载"
     step "目标平台 $target"
     step "获取 $file"
-    download "$base/$file" "$tmp/$file"
+    download_progress "$base/$file" "$tmp/$file"
     step "获取校验和 $file.sha256"
     download "$base/$file.sha256" "$tmp/$file.sha256"
 
