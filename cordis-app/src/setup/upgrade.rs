@@ -1,11 +1,15 @@
 //! `dock upgrade` / `dock update --check`：复用 install.sh 的原子替换路径。
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::busy::{busy_reasons, BusyReason};
+use semver::Version;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+use super::busy::busy_reasons;
 
 const REPO: &str = "P0lar1ght/dock";
 const ASSET: &str = "dock";
@@ -82,7 +86,7 @@ pub fn run_upgrade(args: &UpgradeArgs) -> Result<(), UpgradeError> {
     println!("当前版本：{current}");
     println!("远端版本：{remote_pretty}");
 
-    let newer = is_remote_newer(current, remote_pretty);
+    let newer = is_remote_newer(current, remote_pretty)?;
     if args.mode == UpgradeMode::Check {
         if newer {
             println!("有新版本可用。运行 dock upgrade 安装（有进行中会话时需 --force）。");
@@ -132,20 +136,14 @@ pub fn run_upgrade(args: &UpgradeArgs) -> Result<(), UpgradeError> {
     Ok(())
 }
 
-fn is_remote_newer(current: &str, remote: &str) -> bool {
-    match (parse_semver(current), parse_semver(remote)) {
-        (Some(c), Some(r)) => r > c,
-        _ => current != remote,
-    }
-}
-
-fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
-    let s = s.trim().trim_start_matches('v');
-    let mut parts = s.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    Some((major, minor, patch))
+/// 按 semver 优先级比较（同一 X.Y.Z 下正式版高于预发布；build 元数据不参与）。
+/// 版本号解析不了就报错，不猜：猜错的代价是装上一个不该装的包。
+fn is_remote_newer(current: &str, remote: &str) -> Result<bool, UpgradeError> {
+    let parse = |v: &str| {
+        Version::parse(v.trim().trim_start_matches('v'))
+            .map_err(|e| UpgradeError::Message(format!("版本号无法解析：{v}（{e}）")))
+    };
+    Ok(parse(remote)?.cmp_precedence(&parse(current)?).is_gt())
 }
 
 /// 远端版本解析顺序：
@@ -178,15 +176,26 @@ fn normalize_tag(v: &str) -> String {
     }
 }
 
+/// GitHub release 里我们关心的字段。
+#[derive(Debug, Deserialize)]
+struct Release {
+    tag_name: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
+}
+
 fn fetch_github_version(channel: Channel) -> Result<String, UpgradeError> {
     match channel {
         Channel::Stable => {
             let body = http_get(&format!(
                 "https://api.github.com/repos/{REPO}/releases/latest"
             ))?;
-            json_tag_name(&body).ok_or_else(|| {
-                UpgradeError::Message("无法从 GitHub latest release 解析 tag_name".into())
-            })
+            let release: Release = serde_json::from_str(&body).map_err(|e| {
+                UpgradeError::Message(format!("无法解析 GitHub latest release：{e}"))
+            })?;
+            Ok(release.tag_name)
         }
         Channel::Pre => {
             let body = releases_list_body()?;
@@ -195,14 +204,25 @@ fn fetch_github_version(channel: Channel) -> Result<String, UpgradeError> {
     }
 }
 
-/// `DOCK_CHANNEL=pre`：必须从 releases 列表里挑出 prerelease；没有则硬失败，禁止回落正式版。
+/// `DOCK_CHANNEL=pre`：从 releases 列表里挑 semver 最高的 prerelease（列表按创建时间排，
+/// 不按版本）；没有则硬失败，禁止回落正式版。
 fn pick_prerelease_tag(body: &str) -> Result<String, UpgradeError> {
-    if let Some(tag) = first_release_tag(body, true) {
-        return Ok(tag);
-    }
-    Err(UpgradeError::Message(
-        "DOCK_CHANNEL=pre，但 GitHub 上没有可用的 prerelease；拒绝回落正式版。请改用 DOCK_CHANNEL=stable，或发布一个 prerelease 后再试。".into(),
-    ))
+    let releases: Vec<Release> = serde_json::from_str(body)
+        .map_err(|e| UpgradeError::Message(format!("无法解析 GitHub releases 列表：{e}")))?;
+    releases
+        .into_iter()
+        .filter(|r| r.prerelease && !r.draft)
+        .filter_map(|r| {
+            let version = Version::parse(r.tag_name.trim_start_matches('v')).ok()?;
+            Some((version, r.tag_name))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp_precedence(b))
+        .map(|(_, tag)| tag)
+        .ok_or_else(|| {
+            UpgradeError::Message(
+                "DOCK_CHANNEL=pre，但 GitHub 上没有可用的 prerelease；拒绝回落正式版。请改用 DOCK_CHANNEL=stable，或发布一个 prerelease 后再试。".into(),
+            )
+        })
 }
 
 fn releases_list_body() -> Result<String, UpgradeError> {
@@ -218,7 +238,7 @@ fn releases_list_body() -> Result<String, UpgradeError> {
 }
 
 fn http_get(url: &str) -> Result<String, UpgradeError> {
-    // 与 install.sh 一致：优先 curl，避免给 cordis-app 加 HTTP 依赖。
+    // 与 install.sh 一致：走 curl，不给 cordis-app 再挂一套 HTTP 客户端。
     let output = Command::new("curl")
         .args([
             "-fsSL",
@@ -237,77 +257,6 @@ fn http_get(url: &str) -> Result<String, UpgradeError> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn json_tag_name(body: &str) -> Option<String> {
-    // 轻量解析，避免 serde_json 强依赖（dev 已有；正式依赖尽量不加）。
-    // 找 "tag_name": "vX.Y.Z"
-    let key = "\"tag_name\"";
-    let idx = body.find(key)?;
-    let after = &body[idx + key.len()..];
-    let colon = after.find(':')?;
-    let rest = after[colon + 1..].trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-fn first_release_tag(body: &str, want_prerelease: bool) -> Option<String> {
-    // 粗拆 release 对象：按 "prerelease": true/false 与邻近 tag_name。
-    // 足够覆盖 GitHub 列表 API 的常规 JSON。
-    let mut search = body;
-    while let Some(obj_start) = search.find('{') {
-        let fragment = &search[obj_start..];
-        let Some(obj_end_rel) = find_matching_brace(fragment) else {
-            break;
-        };
-        let obj = &fragment[..=obj_end_rel];
-        let is_pre = obj.contains("\"prerelease\":true") || obj.contains("\"prerelease\": true");
-        if is_pre == want_prerelease {
-            if let Some(tag) = json_tag_name(obj) {
-                return Some(tag);
-            }
-        }
-        if want_prerelease {
-            // 继续找下一个
-        } else if !is_pre {
-            if let Some(tag) = json_tag_name(obj) {
-                return Some(tag);
-            }
-        }
-        search = &fragment[obj_end_rel + 1..];
-    }
-    None
-}
-
-fn find_matching_brace(s: &str) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut escape = false;
-    for (i, c) in s.char_indices() {
-        if in_str {
-            if escape {
-                escape = false;
-            } else if c == '\\' {
-                escape = true;
-            } else if c == '"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => in_str = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn detect_target() -> Result<String, UpgradeError> {
@@ -357,7 +306,10 @@ fn release_base(tag: &str) -> String {
 fn atomic_install(tag: &str, target: &str, install_dir: &Path) -> Result<(), UpgradeError> {
     let file = format!("{ASSET}-{target}.tar.gz");
     let base = release_base(tag);
-    let tmp = tempfile_dir()?;
+    // 私有临时目录（随机名、0700、drop 即清理）：共享 /tmp 里没人能抢先占位，
+    // 再在校验与解包之间换包；出错路径也不留残留。
+    let tmp = tempfile::Builder::new().prefix("dock-upgrade-").tempdir()?;
+    let tmp = tmp.path();
     let archive = tmp.join(&file);
     let checksum = tmp.join(format!("{file}.sha256"));
 
@@ -370,7 +322,7 @@ fn atomic_install(tag: &str, target: &str, install_dir: &Path) -> Result<(), Upg
         .split_whitespace()
         .next()
         .unwrap_or("")
-        .to_string();
+        .to_ascii_lowercase();
     if expected.is_empty() {
         return Err(UpgradeError::Message(
             "sha256 文件为空，拒绝安装未校验的产物".into(),
@@ -383,26 +335,29 @@ fn atomic_install(tag: &str, target: &str, install_dir: &Path) -> Result<(), Upg
         )));
     }
 
-    extract_tar_gz(&archive, &tmp)?;
+    extract_tar_gz(&archive, tmp)?;
     let bin = tmp.join(ASSET);
     if !bin.is_file() {
         return Err(UpgradeError::Message(format!("产物里没有 {ASSET} 二进制")));
     }
 
+    // 先写同目录的随机临时名再 rename 覆盖：旧 dock 可能正在跑，直接写会被 Linux 拒成
+    // ETXTBSY；rename(2) 只换目录项。任何一步失败，临时文件随 drop 删掉。
     fs::create_dir_all(install_dir)?;
-    let staged = install_dir.join(format!(".{ASSET}.new.{}", std::process::id()));
-    fs::copy(&bin, &staged)?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(&format!(".{ASSET}.new."))
+        .tempfile_in(install_dir)?;
+    io::copy(&mut fs::File::open(&bin)?, staged.as_file_mut())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&staged)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&staged, perms)?;
+        staged
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o755))?;
     }
     let final_path = install_dir.join(ASSET);
-    fs::rename(&staged, &final_path).map_err(|e| {
-        let _ = fs::remove_file(&staged);
-        UpgradeError::Message(format!("无法替换 {}：{e}", final_path.display()))
+    staged.persist(&final_path).map_err(|e| {
+        UpgradeError::Message(format!("无法替换 {}：{}", final_path.display(), e.error))
     })?;
 
     let ver = Command::new(&final_path)
@@ -418,16 +373,26 @@ fn atomic_install(tag: &str, target: &str, install_dir: &Path) -> Result<(), Upg
     }
     let text = String::from_utf8_lossy(&ver.stdout).trim().to_string();
     println!("已安装 {text} → {}", final_path.display());
-    let _ = fs::remove_dir_all(&tmp);
+    warn_if_not_running_binary(&final_path);
     Ok(())
 }
 
-fn tempfile_dir() -> Result<PathBuf, UpgradeError> {
-    let base = std::env::temp_dir();
-    let dir = base.join(format!("dock-upgrade-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
+/// 装到的不是当前在跑的这份（比如 cargo install 到 ~/.cargo/bin）：「升级完成」之后
+/// 用户敲 dock 仍是旧版，必须说清楚。
+fn warn_if_not_running_binary(installed: &Path) {
+    let Ok(current) = std::env::current_exe().and_then(fs::canonicalize) else {
+        return;
+    };
+    let Ok(installed) = fs::canonicalize(installed) else {
+        return;
+    };
+    if current != installed {
+        eprintln!(
+            "注意：当前运行的是 {}，新版装到了 {}。用 DOCK_INSTALL_DIR 指向前者所在目录，或调整 PATH 让后者先命中。",
+            current.display(),
+            installed.display()
+        );
+    }
 }
 
 fn download(url: &str, dest: &Path) -> Result<(), UpgradeError> {
@@ -448,26 +413,9 @@ fn download(url: &str, dest: &Path) -> Result<(), UpgradeError> {
 }
 
 fn sha256_of(path: &Path) -> Result<String, UpgradeError> {
-    // macOS: shasum -a 256；Linux: sha256sum
-    let shasum = Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(path)
-        .output();
-    if let Ok(out) = shasum {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            return Ok(s.split_whitespace().next().unwrap_or("").to_string());
-        }
-    }
-    let out = Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .map_err(|_| UpgradeError::Message("需要 sha256sum 或 shasum".into()))?;
-    if !out.status.success() {
-        return Err(UpgradeError::Message("校验命令失败".into()));
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
-    Ok(s.split_whitespace().next().unwrap_or("").to_string())
+    let mut hasher = Sha256::new();
+    io::copy(&mut fs::File::open(path)?, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), UpgradeError> {
@@ -484,36 +432,137 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), UpgradeError> {
     Ok(())
 }
 
-#[allow(dead_code)]
-fn write_stderr(msg: &str) {
-    let _ = writeln!(io::stderr(), "{msg}");
-}
-
-#[allow(dead_code)]
-fn _busy_hint(reasons: &[BusyReason]) -> String {
-    reasons
-        .iter()
-        .map(|r| r.message())
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn semver_compare() {
-        assert!(is_remote_newer("0.2.1", "0.2.2"));
-        assert!(!is_remote_newer("0.2.1", "0.2.1"));
-        assert!(!is_remote_newer("0.2.1", "0.1.9"));
-        assert!(is_remote_newer("0.2.1", "v0.3.0"));
+        let newer = |c, r| is_remote_newer(c, r).unwrap();
+        assert!(newer("0.2.1", "0.2.2"));
+        assert!(!newer("0.2.1", "0.2.1"));
+        assert!(!newer("0.2.1", "0.1.9"));
+        assert!(newer("0.2.1", "v0.3.0"));
+        assert!(newer("0.9.0", "0.10.0"));
     }
 
     #[test]
-    fn parse_tag_name_json() {
-        let body = r#"{"url":"x","tag_name":"v0.2.1","prerelease":false}"#;
-        assert_eq!(json_tag_name(body).as_deref(), Some("v0.2.1"));
+    fn semver_compare_prerelease() {
+        let newer = |c, r| is_remote_newer(c, r).unwrap();
+        // 同一 X.Y.Z 的预发布比正式版旧：不能把 0.3.0 「升」成 0.3.0-rc.1。
+        assert!(!newer("0.3.0", "v0.3.0-rc.1"));
+        assert!(newer("0.3.0-rc.1", "v0.3.0"));
+        assert!(newer("0.2.1", "v0.3.0-rc.1"));
+        assert!(!newer("0.3.1", "v0.3.0-rc.1"));
+        assert!(newer("0.3.0-rc.2", "v0.3.0-rc.10"));
+        assert!(newer("0.3.0-alpha", "v0.3.0-beta"));
+        assert!(!newer("0.3.0-rc.1", "v0.3.0-rc.1"));
+    }
+
+    #[test]
+    fn unparsable_remote_version_is_an_error() {
+        // 原先解析不了就按「字符串不同 = 更新」去装。
+        let err = is_remote_newer("0.2.1", "v0.3").unwrap_err();
+        assert!(err.to_string().contains("版本号无法解析"), "{err}");
+    }
+
+    #[test]
+    fn latest_release_parses_pretty_json_with_nested_objects() {
+        // GitHub 的真实响应是带缩进的，author / assets 里还嵌套对象。
+        let body = r#"{
+          "url": "x",
+          "author": { "login": "P0lar1ght", "tag_name": "not-this" },
+          "tag_name": "v0.2.1",
+          "prerelease": false
+        }"#;
+        let release: Release = serde_json::from_str(body).unwrap();
+        assert_eq!(release.tag_name, "v0.2.1");
+    }
+
+    #[test]
+    fn sha256_matches_known_vector() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abc");
+        fs::write(&path, "abc").unwrap();
+        assert_eq!(
+            sha256_of(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// 造一个 file:// 发布目录：tar.gz 里是会回 `--version` 的假 dock，外加 sha256。
+    #[cfg(unix)]
+    fn fake_release(dir: &Path, target: &str, version_line: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let stage = dir.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let bin = stage.join(ASSET);
+        fs::write(&bin, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let file = format!("{ASSET}-{target}.tar.gz");
+        let status = Command::new("tar")
+            .arg("-czf")
+            .arg(dir.join(&file))
+            .arg("-C")
+            .arg(&stage)
+            .arg(ASSET)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let sum = sha256_of(&dir.join(&file)).unwrap();
+        fs::write(
+            dir.join(format!("{file}.sha256")),
+            format!("{sum}  {file}\n"),
+        )
+        .unwrap();
+        format!("file://{}", dir.display())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_install_replaces_binary_and_leaves_no_staging_file() {
+        let release = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let base = fake_release(release.path(), "t", "dock 9.9.9");
+        fs::write(install.path().join(ASSET), "old").unwrap();
+        let _env = cordis_base::test_env::scoped().set("DOCK_BASE_URL", &base);
+
+        atomic_install("v9.9.9", "t", install.path()).unwrap();
+
+        let out = Command::new(install.path().join(ASSET))
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "dock 9.9.9");
+        let names: Vec<_> = fs::read_dir(install.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from(ASSET)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_install_refuses_bad_checksum_and_keeps_old_binary() {
+        let release = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let base = fake_release(release.path(), "t", "dock 9.9.9");
+        fs::write(
+            release.path().join(format!("{ASSET}-t.tar.gz.sha256")),
+            "00",
+        )
+        .unwrap();
+        fs::write(install.path().join(ASSET), "old").unwrap();
+        let _env = cordis_base::test_env::scoped().set("DOCK_BASE_URL", &base);
+
+        let err = atomic_install("v9.9.9", "t", install.path()).unwrap_err();
+
+        assert!(err.to_string().contains("校验失败"), "{err}");
+        assert_eq!(
+            fs::read_to_string(install.path().join(ASSET)).unwrap(),
+            "old"
+        );
+        assert_eq!(fs::read_dir(install.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -548,6 +597,18 @@ mod tests {
             {"tag_name":"v0.2.1","prerelease":false}
         ]"#;
         assert_eq!(pick_prerelease_tag(mixed).unwrap().as_str(), "v0.3.0-rc.1");
+    }
+
+    #[test]
+    fn pre_picks_highest_prerelease_not_first_listed_and_skips_drafts() {
+        // 列表按创建时间排：补发的旧 rc 可能排在前面。
+        let list = r#"[
+            {"tag_name":"v0.3.0-rc.1","prerelease":true},
+            {"tag_name":"v0.4.0-rc.1","prerelease":true,"draft":true},
+            {"tag_name":"v0.3.0-rc.10","prerelease":true},
+            {"tag_name":"v0.3.0-rc.2","prerelease":true}
+        ]"#;
+        assert_eq!(pick_prerelease_tag(list).unwrap().as_str(), "v0.3.0-rc.10");
     }
 
     #[test]

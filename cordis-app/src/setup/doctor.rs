@@ -1,6 +1,6 @@
 //! `dock doctor`：中文汇报本机安装与配置健康状况。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use cordis_base::config::{dock_home, load_catalog, ModelChoice};
@@ -273,11 +273,6 @@ fn check_glibc_hint() -> CheckItem {
                     .into(),
         },
     }
-}
-
-#[allow(dead_code)]
-fn path_exists(p: &Path) -> bool {
-    p.exists()
 }
 
 #[cfg(test)]
