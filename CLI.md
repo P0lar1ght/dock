@@ -6,6 +6,40 @@
 
 进程入口（`cargo run -p cordis-app -- …`）：`--resume` 恢复本 cwd 最近一次落盘会话，`--resume <id>` 指定 id，`--help` 看用法。`dock serve --origin <origin> [--application <id>] [--bind <addr>]` 是给父进程（桌面 GUI）用的**无头**入口：不挂 TUI，网关挂载即在回环上监听（默认 `127.0.0.1:0` 由 OS 分配端口）；stdout 一行一个 JSON——先 `{"event":"ready","ws":…,"ticket":…}`，之后 stdin 每写一行 `{"cmd":"ticket"}` 回一张新 ticket；stdin 关闭即退出。ticket 只经这条管道交给父进程，不开放 HTTP 领取，也不留下 Origin 绑定。对话在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。
 
+装机与维护子命令（不起 TUI）：`dock init`、`dock doctor`、`dock upgrade` / `dock update --check`，见下节。
+
+---
+
+## 装机 / 诊断 / 升级
+
+| 命令 | 行为 |
+|---|---|
+| `dock init` | 幂等创建 `$DOCK_HOME`（默认 `~/.dock`，尊重 `DOCK_HOME`）。**仅当** `config.toml` 不存在时写入最小骨架；已存在则跳过、绝不覆盖。骨架只用 `env_key` 占位，不写明文 `api_key`。模型未配齐时打印下一步（编辑 config、设环境变量、参考 `config.toml.example`、再跑 `dock doctor`） |
+| `dock doctor` | 中文汇报：PATH / 当前二进制、`$DOCK_HOME/config.toml` 是否存在、模型目录是否可用、macOS quarantine、Linux glibc 提示、`--version` 自检。全部通过 exit 0，有问题非 0 |
+| `dock upgrade` | 从 GitHub Release 拉预编译包：下载 → sha256 → 同目录随机名 `.dock.new.*` → `rename` → `--version`（与 `install.sh` 同原子路径）。若检测到其它 `dock` 进程或 `$DOCK_HOME` 下**正被持有**的锁（如 `schedules.json.lock`、sessions 下 `*.lock`；锁文件用完不删，只看锁不看文件在不在），拒绝升级并要求 `--force` |
+| `dock upgrade --check` / `dock update --check` | 只对比当前与远端版本，**不改二进制**。`dock update`（无参或带 `--check`）**只检查、不安装**；真正升级只用 `dock upgrade` |
+
+环境变量（与 `install.sh` 对齐）：
+
+| 变量 | 作用 |
+|---|---|
+| `DOCK_HOME` | 数据目录（config / sessions / secrets） |
+| `DOCK_INSTALL_DIR` | 二进制安装目录（默认 `~/.local/bin`） |
+| `DOCK_VERSION` | 指定要装的版本 tag |
+| `DOCK_BASE_URL` | 覆盖下载基址（本地干跑 / 调试） |
+| `DOCK_CHANNEL` | `stable`（默认）走 latest；`pre` **必须**有 GitHub prerelease，否则硬失败（exit ≠ 0），**禁止**回落正式版 |
+| `DOCK_UPGRADE_REMOTE_VERSION` | 调试用：短路远端版本（测试 `--check`） |
+| `DOCK_UPGRADE_RELEASES_JSON` | 调试用：代替 GitHub releases 列表 JSON（测 `DOCK_CHANNEL=pre`） |
+| `DOCK_SKIP_INIT` | `install.sh` 设为 `1` 时跳过装完后的 `dock init` |
+
+**架构师拍板（进行中 / 通道 / update）：**
+
+1. 「进行中会话」= 其它 `dock` 进程 + `$DOCK_HOME` 下正被持有的 `*.lock`（含 `schedules.json.lock`）；**不加** sessions 最近写入启发式。
+2. `DOCK_CHANNEL=pre` 且 GitHub 无可用 prerelease → **硬失败**，不回落 latest。
+3. `dock update` 无参只做 `--check`；升级只用 `dock upgrade`。
+
+一键安装脚本 `install.sh` 分三阶段输出进度（下载 / 安装 / 初始化）；TTY 下有阶段标题与 ✓/✗，下载时显示进度条、速度与剩余时间（还没收到数据时显示「连接中… Ns」）；管道非 TTY 降级为朴素行，下载完只打一行大小与平均速度。装完默认调用 `dock init`。
+
 ---
 
 ## 斜杠

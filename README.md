@@ -191,9 +191,19 @@ curl -fsSL https://raw.githubusercontent.com/P0lar1ght/dock/main/install.sh | sh
 curl -fsSL https://raw.githubusercontent.com/P0lar1ght/dock/main/install.sh | DOCK_VERSION=v0.1.0 sh
 ```
 
-装完脚本会跑一次 `dock --version` 自检，跑不起来直接报错退出。macOS 产物未做代码签名 / 公证，
+装完脚本会跑一次 `dock --version` 自检，跑不起来直接报错退出；随后默认执行 `dock init`
+（幂等，不覆盖已有 `config.toml`；可用 `DOCK_SKIP_INIT=1` 跳过）。TTY 下分「下载 /
+安装 / 初始化」三阶段进度，管道非 TTY 降级为朴素输出。macOS 产物未做代码签名 / 公证，
 首次运行若被 Gatekeeper 拦下，按脚本提示执行一次
 `xattr -d com.apple.quarantine "$(command -v dock)"` 即可。
+
+装好后建议：
+
+```bash
+dock doctor          # PATH / 配置 / 模型目录 / quarantine·glibc
+dock upgrade --check # 是否有新版本（不安装）
+# dock upgrade       # 原子升级；有进行中会话需 --force
+```
 
 Linux 产物动态链系统库，要求 **glibc ≥ 2.39** 与 **OpenSSL 3**（约等于 Ubuntu 24.04+ /
 Debian 13+ / Fedora 40+）；更老的发行版与 Windows 暂无可用产物，请见下方「快速开始」从源码构建。

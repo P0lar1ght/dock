@@ -182,8 +182,21 @@ shellcheck install.sh
 mkdir -p /tmp/rel
 tar -czf /tmp/rel/dock-aarch64-apple-darwin.tar.gz -C target/release dock
 (cd /tmp/rel && shasum -a 256 dock-aarch64-apple-darwin.tar.gz > dock-aarch64-apple-darwin.tar.gz.sha256)
-DOCK_BASE_URL=file:///tmp/rel DOCK_INSTALL_DIR=/tmp/dockbin sh install.sh
+DOCK_BASE_URL=file:///tmp/rel DOCK_INSTALL_DIR=/tmp/dockbin DOCK_HOME=/tmp/dockhome sh install.sh
+# 跳过 init：DOCK_SKIP_INIT=1 …
+
+# 子命令自测（临时 DOCK_HOME，勿碰真实 ~/.dock）
+DOCK_HOME=/tmp/dockhome cargo run -p cordis-app -- init
+DOCK_HOME=/tmp/dockhome cargo run -p cordis-app -- doctor
+DOCK_UPGRADE_REMOTE_VERSION=v9.9.9 cargo run -p cordis-app -- upgrade --check
+
+# pre 无 prerelease → 必须非 0（用假 releases JSON，不触网）
+DOCK_CHANNEL=pre DOCK_UPGRADE_RELEASES_JSON='[{"tag_name":"v0.2.1","prerelease":false}]' \
+  cargo run -p cordis-app -- upgrade --check
 ```
+
+`dock upgrade` 与 `install.sh` 共用原子替换语义；有其它 dock 进程或 `$DOCK_HOME` 下有被持有的锁时需 `--force`。
+`DOCK_CHANNEL=pre` 时必须有 GitHub prerelease，否则硬失败（不回落正式版）。「进行中」= 其它 dock 进程 + `$DOCK_HOME` 下正被持有的 `*.lock`（只看锁、不看文件在不在）；`dock update` 只检查，升级用 `dock upgrade`。
 
 macOS 产物未签名 / 未公证，Gatekeeper 会拦首次运行；`install.sh` 检测到 quarantine 标记时打印
 一次 `xattr -d com.apple.quarantine`，不替用户改（要彻底解决得上 Apple 开发者账号做签名 + 公证）。
