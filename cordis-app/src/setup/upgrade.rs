@@ -151,7 +151,9 @@ fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
 /// 远端版本解析顺序：
 /// 1. `DOCK_UPGRADE_REMOTE_VERSION`（测试 / 调试）
 /// 2. `DOCK_VERSION`（与 install.sh 一致，指定要装的版本）
-/// 3. GitHub API（stable=latest release；pre=含 prerelease 的最新，没有则回落 latest）
+/// 3. GitHub API（stable=latest；pre=必须有 prerelease，否则硬失败，不回落正式版）
+///
+/// 测试可设 `DOCK_UPGRADE_RELEASES_JSON` 代替 releases 列表响应（仅 `pre` 通道）。
 fn resolve_remote_version(channel: Channel) -> Result<String, UpgradeError> {
     if let Ok(v) = std::env::var("DOCK_UPGRADE_REMOTE_VERSION") {
         let v = v.trim();
@@ -187,24 +189,32 @@ fn fetch_github_version(channel: Channel) -> Result<String, UpgradeError> {
             })
         }
         Channel::Pre => {
-            let body = http_get(&format!(
-                "https://api.github.com/repos/{REPO}/releases?per_page=20"
-            ))?;
-            if let Some(tag) = first_release_tag(&body, true) {
-                return Ok(tag);
-            }
-            eprintln!("提示：DOCK_CHANNEL=pre，但 GitHub 上暂无 prerelease；回落为最新正式版。");
-            if let Some(tag) = first_release_tag(&body, false) {
-                return Ok(tag);
-            }
-            // 再试 latest
-            let body = http_get(&format!(
-                "https://api.github.com/repos/{REPO}/releases/latest"
-            ))?;
-            json_tag_name(&body)
-                .ok_or_else(|| UpgradeError::Message("无法解析 GitHub releases".into()))
+            let body = releases_list_body()?;
+            pick_prerelease_tag(&body)
         }
     }
+}
+
+/// `DOCK_CHANNEL=pre`：必须从 releases 列表里挑出 prerelease；没有则硬失败，禁止回落正式版。
+fn pick_prerelease_tag(body: &str) -> Result<String, UpgradeError> {
+    if let Some(tag) = first_release_tag(body, true) {
+        return Ok(tag);
+    }
+    Err(UpgradeError::Message(
+        "DOCK_CHANNEL=pre，但 GitHub 上没有可用的 prerelease；拒绝回落正式版。请改用 DOCK_CHANNEL=stable，或发布一个 prerelease 后再试。".into(),
+    ))
+}
+
+fn releases_list_body() -> Result<String, UpgradeError> {
+    if let Ok(json) = std::env::var("DOCK_UPGRADE_RELEASES_JSON") {
+        let json = json.trim();
+        if !json.is_empty() {
+            return Ok(json.to_string());
+        }
+    }
+    http_get(&format!(
+        "https://api.github.com/repos/{REPO}/releases?per_page=20"
+    ))
 }
 
 fn http_get(url: &str) -> Result<String, UpgradeError> {
@@ -515,5 +525,45 @@ mod tests {
             force: false,
         };
         run_upgrade(&args).unwrap();
+    }
+
+    #[test]
+    fn pre_without_prerelease_hard_fails() {
+        let only_stable = r#"[
+            {"tag_name":"v0.2.1","prerelease":false},
+            {"tag_name":"v0.2.0","prerelease":false}
+        ]"#;
+        let err = pick_prerelease_tag(only_stable).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("prerelease"), "{msg}");
+        assert!(msg.contains("拒绝回落"), "{msg}");
+        assert!(msg.contains("DOCK_CHANNEL=pre"), "{msg}");
+    }
+
+    #[test]
+    fn pre_picks_prerelease_tag() {
+        let mixed = r#"[
+            {"tag_name":"v0.3.0","prerelease":false},
+            {"tag_name":"v0.3.0-rc.1","prerelease":true},
+            {"tag_name":"v0.2.1","prerelease":false}
+        ]"#;
+        assert_eq!(pick_prerelease_tag(mixed).unwrap().as_str(), "v0.3.0-rc.1");
+    }
+
+    #[test]
+    fn pre_channel_run_upgrade_fails_without_prerelease() {
+        let only_stable = r#"[{"tag_name":"v0.2.1","prerelease":false}]"#;
+        let _env = cordis_base::test_env::scoped()
+            .set("DOCK_CHANNEL", "pre")
+            .set("DOCK_UPGRADE_RELEASES_JSON", only_stable)
+            .remove("DOCK_UPGRADE_REMOTE_VERSION")
+            .remove("DOCK_VERSION");
+        let err = run_upgrade(&UpgradeArgs {
+            mode: UpgradeMode::Check,
+            force: false,
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("拒绝回落"), "{msg}");
     }
 }

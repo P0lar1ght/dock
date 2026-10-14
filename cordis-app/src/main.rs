@@ -238,12 +238,13 @@ doctor: check PATH/binary, config.toml, model catalog, macOS quarantine / Linux
 glibc hints, and --version. Exit 0 only when every check passes; problems → non-zero.
 
 upgrade: download the release binary (sha256 → staged .new → mv → --version), same
-atomic replace as install.sh. Refuses if another dock process or a lock under
-$DOCK_HOME is detected, unless --force. --check only reports versions.
-  DOCK_CHANNEL=stable|pre   release channel (pre uses GitHub prerelease when any)
+atomic replace as install.sh. Refuses if another dock process or a *.lock under
+$DOCK_HOME is detected (no session mtime heuristic), unless --force. --check only
+reports versions.
+  DOCK_CHANNEL=stable|pre   stable=latest; pre requires a GitHub prerelease (no fallback)
   DOCK_VERSION / DOCK_BASE_URL / DOCK_INSTALL_DIR   same knobs as install.sh
 
-update --check: alias for upgrade --check (never installs).
+update: always --check only (never installs). Use dock upgrade to install.
 
 serve: run headless for a parent process (the desktop GUI). The gateway listens
 on loopback right away; stdout carries one JSON line per event: first

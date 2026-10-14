@@ -164,3 +164,27 @@ fn update_check_alias_works() {
         "{out}"
     );
 }
+
+#[test]
+fn pre_channel_without_prerelease_exits_nonzero() {
+    let home = tempfile::tempdir().unwrap();
+    // 仅正式版的 releases 列表：pre 必须硬失败，禁止回落。
+    let only_stable = r#"[{"tag_name":"v0.2.1","prerelease":false}]"#;
+    let out = dock(home.path())
+        .args(["upgrade", "--check"])
+        .env("DOCK_CHANNEL", "pre")
+        .env("DOCK_UPGRADE_RELEASES_JSON", only_stable)
+        .env_remove("DOCK_UPGRADE_REMOTE_VERSION")
+        .env_remove("DOCK_VERSION")
+        .output()
+        .unwrap();
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(code, 0, "pre 无 prerelease 应为非 0：{stdout}\n{stderr}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("拒绝回落") || combined.contains("prerelease"),
+        "{combined}"
+    );
+}
