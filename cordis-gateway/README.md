@@ -299,6 +299,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 按下（左键）落在单选 `<select>` 上：不发给页面，回 `select`，跟着的抬起也吞掉。
   - `select`：`{x, y, width, height, selectedIndex, options:[{label, disabled, group}]}`（页面 CSS 像素）。
   - 客户端画菜单，选好发 `{type:"select", index}`；多选、列表样式、禁用的照常点。
+  - 一次点开只认一次 `select`（选完就清掉记下的控件），迟到的不会改到旧控件。
+  - 已知边界：closed shadow DOM 里的 `<select>` 探不到（`elementFromPoint` 停在宿主上），照常发点击。
+    网站自绘的下拉菜单本来就画在页面里，直接点即可。
 - 编辑快捷键：⌘ 或 Ctrl 加 A / C / X / Z（Shift+Z）/ Y 带 CDP `commands` 执行。
   - macOS 上这些由系统菜单处理，光发按键页面不动。
   - C / X 回 `copied`（选中的文字）：页面的剪贴板在 Dock 那台机器上，客户端写进自己这边。

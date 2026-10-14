@@ -280,7 +280,7 @@ pub(crate) async fn dispatch(
                 .ok_or_else(|| RpcError::invalid_params("width and height are required"))?;
             let (page, wanted, kick, headed) = views.entry_parts(id)?;
             *wanted.lock().unwrap() = Some(viewport);
-            // 有头：页面跟着真窗口，面板的尺寸只用来定静止帧的倍数。
+            // 有头：页面跟着真窗口，不按面板改视口（静止帧也按原生像素截，见 `Pump::pump`）。
             if !headed {
                 apply_viewport(&page, viewport)
                     .await

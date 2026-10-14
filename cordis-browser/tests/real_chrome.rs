@@ -400,6 +400,14 @@ async fn view_input_behaves_like_a_real_browser() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(changed, "change event reached the page");
+    // 一次点开只认一次选择：迟到的第二个 select 回错，不会再改值。
+    assert!(
+        view.input(&json!({"type":"select","index":0}))
+            .await
+            .is_err(),
+        "picked select is cleared after use"
+    );
+    assert_eq!(view.info().await.title, "Banana");
 
     // 拖选：按下 → 带 buttons 的移动 → 抬起，再 ⌘C 带回选中的字。
     input(json!({"type":"mouse","action":"down","x":12,"y":120,"button":"left","buttons":1})).await;
