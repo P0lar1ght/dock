@@ -97,6 +97,9 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 - `timeout_ms`——**只能收紧不能放宽**，上限仍是 `DOCK_BASH_FOREGROUND_MS` 的 5 分钟
 - `workdir`——不存在直接报错，不让命令在意外目录里跑掉。注意命令内的相对路径此后相对 `workdir` 解析
 - `description`——5–10 词，进 `JobSnapshot`
+  - TUI / GUI 的 bash 卡：有描述时标题是描述，旁边只挂主程序名（`find`、`cargo test`），展开看完整命令。
+  - 权限弹窗：首行 `$ 完整命令`，描述另起一行（`permission_summary`）。
+  - 描述是模型写的：只作补充，不替代命令；命令永远完整显示在前。
 
 **前台预算到点 = 转后台，不是 kill。** `Jobs::detach` 把 `foreground` 翻成 `false`，进程一点不动，返回已产出的输出 + `job_id`，模型用 `job` 工具接着收。
 

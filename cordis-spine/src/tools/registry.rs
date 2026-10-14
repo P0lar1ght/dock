@@ -648,7 +648,34 @@ fn permission_summary(name: &str, arguments: &str) -> String {
     if looks_like_mcp_name(name) {
         return format!("{name} {}", summarize_mcp_args(name, arguments));
     }
+    if let Some(summary) = command_summary(arguments) {
+        return summary;
+    }
     format!("{name} {}", arguments.chars().take(120).collect::<String>())
+}
+
+/// 跑命令的工具（`bash`、`monitor`）：首行 `$ 完整命令`，有 `description` 再起一行。
+///
+/// 命令必须完整、排第一：放行的是命令本身，描述是模型自己写的，不能拿它替代命令。
+/// 原先是原始 JSON 截 120 字，长命令后半截（往往是要紧的部分）看不到。
+/// 弹窗按「首行是命令、后面是说明」排版（TUI permission_view、GUI Pending）。
+fn command_summary(arguments: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let command = v.get("command")?.as_str()?.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let mut out = format!("$ {}", command.replace('\n', " "));
+    if let Some(desc) = v
+        .get("description")
+        .and_then(|d| d.as_str())
+        .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|d| !d.is_empty())
+    {
+        out.push('\n');
+        out.push_str(&desc);
+    }
+    Some(out)
 }
 
 fn summarize_mcp_args(name: &str, arguments: &str) -> String {
@@ -854,6 +881,37 @@ mod tests {
         );
         assert!(many.contains("等 5 个"), "{many}");
         assert!(!many.contains("/d"), "{many}");
+    }
+
+    /// 命令工具：首行完整命令（原先是原始 JSON 截 120 字，长命令尾巴看不到），
+    /// 描述单起一行；没描述就只有命令。
+    #[test]
+    fn command_permission_summary_shows_full_command_then_description() {
+        let long = format!(
+            "cd dock-gui && find src -type f {} | wc -l",
+            "! -path '*/x/*' ".repeat(12)
+        );
+        let args = serde_json::json!({
+            "command": long,
+            "description": "Count source files\n excluding build output",
+        })
+        .to_string();
+        let summary = permission_summary("bash", &args);
+        assert_eq!(
+            summary,
+            format!("$ {long}\nCount source files excluding build output")
+        );
+        assert!(
+            summary.lines().next().unwrap().ends_with("| wc -l"),
+            "{summary}"
+        );
+
+        let bare = permission_summary("monitor", r#"{"command":"tail -f a.log"}"#);
+        assert_eq!(bare, "$ tail -f a.log");
+
+        // 不是命令工具的照旧。
+        let other = permission_summary("write_file", r#"{"file_path":"a.txt"}"#);
+        assert!(other.starts_with("write_file {"), "{other}");
     }
 
     fn spec(name: &str) -> ToolSpec {

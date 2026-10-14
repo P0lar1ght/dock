@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+### 改进
+
+- bash 卡片显示命令的描述（模型给的 `description`）：TUI 与 GUI 标题是描述 + 主程序名（`find`、`cargo test`），完整命令展开看。
+- 权限弹窗里 bash / monitor 显示完整命令，描述另起一行；原先是截到 120 字的原始 JSON。
+
 ## [0.2.1] - 2026-10-13
 
 ### 新增
