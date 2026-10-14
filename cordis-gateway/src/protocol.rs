@@ -252,6 +252,8 @@ pub const BROWSER_VIEW_CLOSE: &str = "browser/view/close";
 pub const BROWSER_VIEW_RESIZE: &str = "browser/view/resize";
 /// 面板的标签栏：切到 / 新开 / 关掉会话的一个标签页（经浏览器 MCP，agent 也跟着切）。
 pub const BROWSER_VIEW_TAB: &str = "browser/view/tab";
+/// 有头浏览器（`[browser] headed`）：把它的窗口切到最前，用户直接在真窗口里操作。
+pub const BROWSER_VIEW_FOCUS: &str = "browser/view/focus";
 /// 推送：一帧画面（base64 JPEG + 视口元数据）。
 pub const BROWSER_VIEW_FRAME: &str = "browser/view/frame";
 /// 推送：视图换了标签页，或页面地址 / 标题变了。
