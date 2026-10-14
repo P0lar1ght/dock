@@ -8,7 +8,7 @@ use cordis_base::config::dock_home;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BusyReason {
     OtherDockProcess { pid: u32, detail: String },
-    LockFile { path: PathBuf },
+    HeldLock { path: PathBuf },
 }
 
 impl BusyReason {
@@ -17,18 +17,18 @@ impl BusyReason {
             Self::OtherDockProcess { pid, detail } => {
                 format!("检测到其它 dock 进程（pid {pid}：{detail}）")
             }
-            Self::LockFile { path } => {
-                format!("检测到锁文件，可能有进行中的任务：{}", path.display())
+            Self::HeldLock { path } => {
+                format!("锁正被持有，有进行中的任务：{}", path.display())
             }
         }
     }
 }
 
-/// 收集所有忙原因（进程 + 锁）。空 = 可以安静升级。
+/// 收集所有忙原因（进程 + 被持有的锁）。空 = 可以安静升级。
 pub fn busy_reasons() -> Vec<BusyReason> {
     let mut out = Vec::new();
     out.extend(other_dock_processes());
-    out.extend(lock_files_under_home(&dock_home()));
+    out.extend(held_locks_under_home(&dock_home()));
     out
 }
 
@@ -90,27 +90,30 @@ fn looks_like_dock_process(cmd: &str) -> bool {
     base == "dock"
 }
 
-fn lock_files_under_home(home: &Path) -> Vec<BusyReason> {
-    let mut out = Vec::new();
+fn held_locks_under_home(home: &Path) -> Vec<BusyReason> {
     if !home.exists() {
-        return out;
+        return Vec::new();
     }
     // 已知产品锁：schedules；sessions 下若出现 *.lock 也算。
-    let schedule_lock = home.join("schedules.json.lock");
-    if schedule_lock.exists() {
-        out.push(BusyReason::LockFile {
-            path: schedule_lock,
-        });
-    }
+    let mut candidates = vec![home.join("schedules.json.lock")];
     let sessions = home.join("sessions");
     if sessions.is_dir() {
-        if let Ok(walk) = collect_lock_files(&sessions, 4) {
-            for path in walk {
-                out.push(BusyReason::LockFile { path });
-            }
-        }
+        candidates.extend(collect_lock_files(&sessions, 4).unwrap_or_default());
     }
-    out
+    candidates
+        .into_iter()
+        .filter(|path| lock_is_held(path))
+        .map(|path| BusyReason::HeldLock { path })
+        .collect()
+}
+
+/// 锁文件用完不删（cron 的 `schedules.json.lock` 一直留着），所以「文件在」不等于
+/// 「有人在用」：试拿一次非阻塞排他锁，拿不到才算被持有。
+fn lock_is_held(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock))
 }
 
 fn collect_lock_files(root: &Path, max_depth: u32) -> std::io::Result<Vec<PathBuf>> {
@@ -150,28 +153,42 @@ mod tests {
     use super::*;
     use cordis_base::test_env;
 
+    fn held_locks() -> Vec<BusyReason> {
+        busy_reasons()
+            .into_iter()
+            .filter(|r| matches!(r, BusyReason::HeldLock { .. }))
+            .collect()
+    }
+
     #[test]
-    fn schedule_lock_is_busy() {
+    fn held_schedule_lock_is_busy() {
         let _env = test_env::scoped().home();
         let home = dock_home();
         fs::create_dir_all(&home).unwrap();
-        fs::write(home.join("schedules.json.lock"), "x").unwrap();
-        let reasons = busy_reasons();
-        assert!(
-            reasons
-                .iter()
-                .any(|r| matches!(r, BusyReason::LockFile { .. })),
-            "{reasons:?}"
-        );
+        let path = home.join("schedules.json.lock");
+        fs::write(&path, "").unwrap();
+        let holder = fs::File::open(&path).unwrap();
+        holder.lock().unwrap();
+        let reasons = held_locks();
+        assert_eq!(reasons, vec![BusyReason::HeldLock { path }]);
+    }
+
+    #[test]
+    fn leftover_unheld_lock_file_is_not_busy() {
+        // cron 用完从不删锁文件：只要用过一次定时任务，它就一直在。
+        let _env = test_env::scoped().home();
+        let home = dock_home();
+        fs::create_dir_all(home.join("sessions/k/s")).unwrap();
+        fs::write(home.join("schedules.json.lock"), "").unwrap();
+        fs::write(home.join("sessions/k/s/turn.lock"), "").unwrap();
+        let reasons = held_locks();
+        assert!(reasons.is_empty(), "{reasons:?}");
     }
 
     #[test]
     fn empty_home_not_busy_for_locks() {
         let _env = test_env::scoped().home();
-        let locks: Vec<_> = busy_reasons()
-            .into_iter()
-            .filter(|r| matches!(r, BusyReason::LockFile { .. }))
-            .collect();
+        let locks = held_locks();
         assert!(locks.is_empty(), "{locks:?}");
     }
 
