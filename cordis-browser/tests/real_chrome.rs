@@ -338,6 +338,100 @@ async fn view_streams_frames_and_forwards_input() {
     hub.shutdown().await;
 }
 
+/// 面板里像真浏览器一样操作：原生下拉弹层画不进画面，按下 `<select>` 改回选项列表、
+/// 选好再设回去；拖动带 `buttons` 才选得中字；⌘A / ⌘C 走编辑命令，复制带回文字。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn view_input_behaves_like_a_real_browser() {
+    use cordis_browser::view::View;
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("view input") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    let page = "<title>t</title><body style='margin:0;font:16px sans-serif'>\
+        <select id=s onchange='document.title=this.value' style='position:fixed;left:10px;top:10px;width:200px'>\
+        <option>Apple</option><optgroup label=Fruit><option>Banana</option><option disabled>Cherry</option></optgroup></select>\
+        <input id=i value='hello world' style='position:fixed;left:10px;top:60px;width:300px'>\
+        <p style='position:fixed;left:10px;top:110px;margin:0;width:600px'>The quick brown fox jumps over the lazy dog</p>";
+    ok(
+        &hub,
+        "gui-input",
+        "browser_open",
+        json!({ "url": format!("data:text/html,{page}") }),
+    )
+    .await;
+    let target = cordis_browser::registry::lookup("gui-input")
+        .and_then(|t| t.active)
+        .expect("active target");
+    let view = View::attach(&target).await.unwrap();
+    let input = |event: Value| {
+        let view = &view;
+        async move { view.input(&event).await.unwrap() }
+    };
+
+    // 下拉框：按下回选项，不发给页面；抬起也吞掉；选第 1 项（Banana）触发 change。
+    let picked =
+        input(json!({"type":"mouse","action":"down","x":50,"y":20,"button":"left","buttons":1}))
+            .await;
+    let select = &picked["select"];
+    assert_eq!(select["selectedIndex"], 0, "{picked}");
+    let labels: Vec<&str> = select["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["Apple", "Banana", "Cherry"]);
+    assert_eq!(select["options"][1]["group"], "Fruit");
+    assert_eq!(select["options"][2]["disabled"], true);
+    assert_eq!(
+        input(json!({"type":"mouse","action":"up","x":50,"y":20,"button":"left"})).await,
+        json!({})
+    );
+    input(json!({"type":"select","index":1})).await;
+    let mut changed = false;
+    for _ in 0..40 {
+        if view.info().await.title == "Banana" {
+            changed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(changed, "change event reached the page");
+
+    // 拖选：按下 → 带 buttons 的移动 → 抬起，再 ⌘C 带回选中的字。
+    input(json!({"type":"mouse","action":"down","x":12,"y":120,"button":"left","buttons":1})).await;
+    for x in [80, 160, 240] {
+        input(json!({"type":"mouse","action":"move","x":x,"y":120,"buttons":1})).await;
+    }
+    input(json!({"type":"mouse","action":"up","x":240,"y":120,"button":"left"})).await;
+    let copied = input(json!({"type":"key","action":"press","key":"c","modifiers":["Meta"]})).await;
+    let text = copied["copied"].as_str().unwrap_or_default();
+    assert!(
+        text.starts_with("The quick"),
+        "drag selected text: {copied}"
+    );
+
+    // 输入框里 ⌘A 全选、⌘C 拿到整段。
+    input(json!({"type":"mouse","action":"click","x":100,"y":70,"button":"left"})).await;
+    input(json!({"type":"key","action":"press","key":"a","modifiers":["Meta"]})).await;
+    let copied = input(json!({"type":"key","action":"press","key":"c","modifiers":["Meta"]})).await;
+    assert_eq!(copied["copied"], "hello world");
+
+    // 不给倍数 = 按原生像素截、不带 clip.scale（有头浏览器用：clip.scale 会让真窗口跟着闪）。
+    // 无头 DPR 是 1：图宽正好是视口 CSS 宽。
+    let still = view.still(80, None).await.unwrap();
+    let jpeg =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &still.data).unwrap();
+    assert_eq!(jpeg_width(&jpeg), Some(still.device_width as u32));
+
+    view.close().await;
+    ok(&hub, "gui-input", "browser_close", json!({})).await;
+    hub.shutdown().await;
+}
+
 /// 两个画面（主窗口和拖出去的面板窗各开一个）同时补放大静止帧：Chrome 并发的
 /// `clip.scale` 截图互相把对方的临时视口当成原尺寸恢复，视口每次翻倍（900 → 1800 →
 /// 3600…，最后渲染进程崩掉），画面一会儿全一会儿不全。同一页的静止帧要排队截。
@@ -372,7 +466,7 @@ async fn concurrent_stills_keep_the_viewport() {
     let second = View::attach(&target).await.unwrap();
     let size = json!({"expression": "`${innerWidth}x${innerHeight}`"});
     for _ in 0..3 {
-        let (a, b) = tokio::join!(first.still(85, 2.0), second.still(85, 2.0));
+        let (a, b) = tokio::join!(first.still(85, Some(2.0)), second.still(85, Some(2.0)));
         assert_eq!(a.unwrap().device_width, 900.0);
         assert_eq!(b.unwrap().device_width, 900.0);
         let now = ok(&hub, "a", "browser_evaluate", size.clone()).await;
@@ -1135,4 +1229,21 @@ async fn read_pages_stops_at_a_deadline_and_validates_input() {
         .await;
     assert!(bad.is_error && bad.text.contains("mode"), "{}", bad.text);
     hub.shutdown().await;
+}
+
+/// JPEG 的像素宽（SOF0–SOF2 段）。
+fn jpeg_width(bytes: &[u8]) -> Option<u32> {
+    let mut i = 2;
+    while i + 9 < bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        let marker = bytes[i + 1];
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        if (0xC0..=0xC2).contains(&marker) {
+            return Some(u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32);
+        }
+        i += 2 + len;
+    }
+    None
 }

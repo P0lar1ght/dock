@@ -164,6 +164,9 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - `[browser].headed`，默认无头；`DOCK_BROWSER_HEADED`（任意非空）覆盖为有头。
 - 服务拉起 Chromium 时读；已开的 Chromium 不重启。
 - 连上已有的 Chromium 时沿用它原来的模式。
+- GUI 浏览器面板跟着这个配置走：
+  - 无头：面板就是浏览器（网关推画面、转发输入），见 `cordis-gateway/README.md`「浏览器画面」。
+  - 有头：页面跟着真窗口走，面板仍有画面，另有「在窗口中打开」把真窗口切到最前直接操作。
 
 ## `/browser` 驾驶舱（`tool-browser`）
 

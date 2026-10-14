@@ -1,13 +1,15 @@
 //! `browser/view/*`：看某个会话正在用的浏览器标签页，并能接手操作。
 //!
-//! - `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight? }` →
-//!   `{ viewId, threadId, targetId, url, title, tabs }`。之后这条连接收 `browser/view/frame` /
+//! - `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight?, crisp? }` →
+//!   `{ viewId, threadId, targetId, url, title, tabs, headed, crisp }`。之后这条连接收 `browser/view/frame` /
 //!   `status` / `closed` 推送。会话还没有标签页时带 `url` 就替它开一页（经浏览器 MCP，
 //!   记在这个会话名下，agent 接着能用）；`viewport { width, height, deviceScaleFactor? }`
 //!   让页面视口跟着面板走。
 //! - `browser/view/resize { viewId, width, height, deviceScaleFactor? }`：面板大小变了。
-//! - `browser/view/input { viewId, event }`：用户的鼠标、滚轮、按键、文字（见
-//!   [`cordis_browser::view::View::input`]）。
+//! - `browser/view/input { viewId, event }`：用户的鼠标、滚轮、按键、文字、下拉选择（见
+//!   [`cordis_browser::view::View::input`]）→ `{ ok, select?, copied? }`：按下落在 `<select>`
+//!   上回选项列表（原生弹层画不进画面，客户端自己画菜单），⌘/Ctrl+C / X 回复制的文字。
+//! - `browser/view/focus { viewId }`：有头浏览器把窗口切到最前。
 //! - `browser/view/navigate { viewId, url? | action? }`：地址栏 / back / forward / reload。
 //! - `browser/view/tab { viewId, action: "switch"|"close"|"new", targetId?, url? }`：标签栏。
 //!   经浏览器 MCP 的 `browser_tabs`（以这页的身份）：用户和 agent 共用一个浏览器，面板切到
@@ -27,6 +29,17 @@
 //! 自己那条 CDP 连接上：agent 和面板看到的始终是同一页、同一尺寸，面板关了也不回弹。
 //! agent 整页截图会清掉视口覆盖，换标签页时新页也没有：画面尺寸和期望对不上就再设一次。
 //! 设备像素比不改页面（agent 的截图不变）：只在补静止帧时按它的倍数截（[`View::still`]）。
+//!
+//! 两种画面（`crisp`）：
+//! - 清晰：流里的帧只当「画面变了」的信号，推的是按设备像素比截的静止帧（节流，一次只截
+//!   一张）。带 `viewport` 的客户端连本机网关时默认（带宽不成问题，Retina 上滚动、打字时
+//!   也清楚）。
+//! - 省流：推流里的 CSS 像素帧，停下来 [`SETTLE`] 再补一张清晰的。远程网关默认。
+//!
+//! 有头浏览器（`[browser] headed`，和浏览器 MCP 启动 Chromium 用的是同一个配置）：页面
+//! 跟着真窗口走，不按面板改视口；`open` 回 `headed: true`，客户端可以用
+//! `browser/view/focus` 把窗口叫到前面。有头的流本来就是设备像素，所以不开清晰画面；
+//! 补的静止帧也按原生像素截、不带 `clip.scale`——那会让真窗口按倍数重渲染、一直闪。
 //!
 //! 视图是**连接级**的：不进会话、不落盘，只活在这条 WebSocket 上。
 //!
@@ -65,7 +78,9 @@ const REGISTRY_WAIT: Duration = Duration::from_secs(3);
 const NATIVE_MAX: i64 = 4096;
 /// 画面停下来多久补一张静止帧（[`View::still`]）：无头 screencast 只出 CSS 像素、页面不动时
 /// 一帧不推（刚挂上也不推），补这一张静止页面才有画面、Retina 上才清楚。
-const SETTLE: Duration = Duration::from_millis(300);
+const SETTLE: Duration = Duration::from_millis(150);
+/// 清晰画面：画面变了之后最多等这么久截下一张（节流，不是防抖：连续滚动时照样出帧）。
+const CRISP_DELAY: Duration = Duration::from_millis(30);
 /// 浏览器 MCP 对没开过页的会话回的错（`cordis_browser` 的 `NEED_OPEN`）。
 const NO_SESSION_TAB: &str = "has no browser tab yet";
 /// 看到页面自己开的新页还没进名册时，最多隔这么久催一次浏览器 MCP 收下。
@@ -106,6 +121,8 @@ struct ViewEntry {
     wanted: Wanted,
     /// 改完视口叫推送任务补一张静止帧：从别的连接改视口，screencast 不一定出新帧。
     kick: Arc<Notify>,
+    /// 有头浏览器：页面跟着真窗口走，不按面板改视口。
+    headed: bool,
 }
 
 type Current = Arc<Mutex<Option<Arc<View>>>>;
@@ -142,12 +159,12 @@ impl BrowserViews {
         view.ok_or_else(|| RpcError::app("browser_unavailable", "画面正在切换标签页，稍后再试"))
     }
 
-    fn entry_parts(&self, id: &str) -> Result<(Context, Wanted, Arc<Notify>), RpcError> {
+    fn entry_parts(&self, id: &str) -> Result<(Context, Wanted, Arc<Notify>, bool), RpcError> {
         self.open
             .lock()
             .unwrap()
             .get(id)
-            .map(|e| (e.page.clone(), e.wanted.clone(), e.kick.clone()))
+            .map(|e| (e.page.clone(), e.wanted.clone(), e.kick.clone(), e.headed))
             .ok_or_else(|| RpcError::app("not_found", format!("没有视图 {id}")))
     }
 
@@ -194,6 +211,7 @@ pub(crate) fn is_browser_view(method: &str) -> bool {
             | protocol::BROWSER_VIEW_CLOSE
             | protocol::BROWSER_VIEW_RESIZE
             | protocol::BROWSER_VIEW_TAB
+            | protocol::BROWSER_VIEW_FOCUS
     )
 }
 
@@ -228,11 +246,23 @@ pub(crate) async fn dispatch(
                 .get("event")
                 .filter(|e| e.is_object())
                 .ok_or_else(|| RpcError::invalid_params("event is required"))?;
-            views
+            let extra = views
                 .view(&params)?
                 .input(event)
                 .await
                 .map_err(RpcError::invalid_params)?;
+            let mut result = json!({ "ok": true });
+            if let (Some(out), Some(extra)) = (result.as_object_mut(), extra.as_object()) {
+                out.extend(extra.clone());
+            }
+            Ok(result)
+        }
+        protocol::BROWSER_VIEW_FOCUS => {
+            views
+                .view(&params)?
+                .bring_to_front()
+                .await
+                .map_err(|e| RpcError::app("browser_unavailable", e))?;
             Ok(json!({ "ok": true }))
         }
         protocol::BROWSER_VIEW_RESIZE => {
@@ -248,11 +278,14 @@ pub(crate) async fn dispatch(
             let id = view_id(&params)?;
             let viewport = parse_viewport(&params)?
                 .ok_or_else(|| RpcError::invalid_params("width and height are required"))?;
-            let (page, wanted, kick) = views.entry_parts(id)?;
+            let (page, wanted, kick, headed) = views.entry_parts(id)?;
             *wanted.lock().unwrap() = Some(viewport);
-            apply_viewport(&page, viewport)
-                .await
-                .map_err(|e| RpcError::app("browser_unavailable", e))?;
+            // 有头：页面跟着真窗口，面板的尺寸只用来定静止帧的倍数。
+            if !headed {
+                apply_viewport(&page, viewport)
+                    .await
+                    .map_err(|e| RpcError::app("browser_unavailable", e))?;
+            }
             kick.notify_one();
             Ok(json!({ "ok": true }))
         }
@@ -309,8 +342,18 @@ async fn open(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let (target, view) = attach_session_tab(&page.ctx, &key, url).await?;
+    let headed = cordis_base::config::effective_browser_headed();
+    // 清晰画面只给跟着面板定视口的客户端（老客户端带 `maxWidth` 要的是限宽小帧），
+    // 且默认只在本机网关开：远程按 1 倍帧省流。
+    let crisp = params
+        .get("crisp")
+        .and_then(Value::as_bool)
+        .unwrap_or(viewport.is_some() && !gateway.is_remote())
+        // 有头浏览器的流本来就是设备像素（Retina 上 2 倍），不用再截静止帧顶替。
+        && !headed;
     // 挂上了先改视口再开推流：第一帧就是面板的尺寸。改不成（MCP 没连上）照样出画面。
-    if let Some(viewport) = viewport {
+    // 有头浏览器不改：页面跟着真窗口走。
+    if let (Some(viewport), false) = (viewport, headed) {
         let _ = apply_viewport(&page.ctx, viewport).await;
     }
     let mut opts = options(&params);
@@ -352,6 +395,8 @@ async fn open(
         kick: kick.clone(),
         tabs: tabs.clone(),
         adopt_at: None,
+        crisp,
+        headed,
     };
     // 同一条连接对同一个会话只留一个视图，留最后收到的那次 open。查和装在同一把锁里，
     // 两个 open 不会都以为自己是最新的。
@@ -381,6 +426,7 @@ async fn open(
                     page: page.ctx.clone(),
                     wanted,
                     kick,
+                    headed,
                 },
             );
             Ok(stale)
@@ -419,6 +465,8 @@ async fn open(
         "url": info.url,
         "title": info.title,
         "tabs": tabs,
+        "headed": headed,
+        "crisp": crisp,
     }))
 }
 
@@ -700,6 +748,10 @@ struct Pump {
     tabs: Vec<Value>,
     /// 上次催浏览器 MCP 收下页面自己开的新页的时间。
     adopt_at: Option<Instant>,
+    /// 清晰画面：推按设备像素比截的静止帧，流里的帧只当「变了」的信号（见模块文档）。
+    crisp: bool,
+    /// 有头浏览器：不按面板改视口（[`Pump::heal`] 也不管）。
+    headed: bool,
 }
 
 enum Step {
@@ -734,6 +786,8 @@ impl Pump {
         let mut settle_at = Some(Instant::now() + SETTLE);
         // 上一帧流里的画面（判断「补帧引出的同一帧」）。
         let mut last_stream = String::new();
+        // 清晰画面下还没推出去的流帧：截静止帧失败时退回推它，画面不至于停在旧的上。
+        let mut pending: Option<cordis_browser::view::Frame> = None;
         loop {
             let settle = async {
                 match settle_at {
@@ -762,11 +816,17 @@ impl Pump {
                     // 画面没变（重复帧）就不推、也不再排补帧：静止页面不会「补帧 → 新帧 → 再补帧」。
                     let changed = frame.data != last_stream;
                     if changed {
-                        seq += 1;
                         self.heal(frame.device_width, frame.device_height);
                         last_stream = frame.data.clone();
-                        self.push(seq, frame, false).await?;
-                        settle_at = Some(Instant::now() + SETTLE);
+                        if self.crisp {
+                            // 节流：已经排着就不往后推，连续滚动时每 CRISP_DELAY 出一张。
+                            settle_at.get_or_insert_with(|| Instant::now() + CRISP_DELAY);
+                            pending = Some(frame);
+                        } else {
+                            seq += 1;
+                            self.push(seq, frame, false).await?;
+                            settle_at = Some(Instant::now() + SETTLE);
+                        }
                     }
                     let view = self.current.lock().unwrap().clone();
                     if let Some(view) = view {
@@ -776,7 +836,12 @@ impl Pump {
                 Step::Settle => {
                     settle_at = None;
                     let view = self.current.lock().unwrap().clone();
-                    let scale = self.wanted.lock().unwrap().map_or(1.0, |v| v.scale);
+                    // 有头：按原生像素截，`clip.scale` 会让真窗口跟着闪（见 [`View::still`]）。
+                    let scale = if self.headed {
+                        None
+                    } else {
+                        Some(self.wanted.lock().unwrap().map_or(1.0, |v| v.scale))
+                    };
                     // 截的时候先停流：放大栅格化的过渡帧不推；截完接着推。
                     let still = match view {
                         Some(view) => {
@@ -787,9 +852,13 @@ impl Pump {
                         }
                         None => None,
                     };
+                    let fallback = pending.take();
                     if let Some(frame) = still {
                         seq += 1;
                         self.push(seq, frame, true).await?;
+                    } else if let Some(frame) = fallback {
+                        seq += 1;
+                        self.push(seq, frame, false).await?;
                     }
                 }
                 Step::Kick => settle_at = Some(Instant::now() + SETTLE),
@@ -867,6 +936,9 @@ impl Pump {
     /// 画面不是面板要的尺寸（agent 整页截图清掉了覆盖、或别人改过）：隔一会儿重设一次。
     /// 在后台跑，不卡推帧。
     fn heal(&mut self, width: f64, height: f64) {
+        if self.headed {
+            return;
+        }
         let Some(wanted) = *self.wanted.lock().unwrap() else {
             return;
         };

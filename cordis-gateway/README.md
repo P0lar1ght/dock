@@ -233,9 +233,10 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 | 方法 / 推送 | 作用 |
 |---|---|
-| `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` / `tabs`；见下 |
+| `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight?, crisp? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` / `tabs` / `headed` / `crisp`；见下 |
 | `browser/view/resize { viewId, width, height, deviceScaleFactor? }` | 面板大小变了：改页面视口（能力 `browserViewport`） |
-| `browser/view/input { viewId, event }` | 用户输入，见下 |
+| `browser/view/input { viewId, event }` | 用户输入，回 `{ ok, select?, copied? }`；见下 |
+| `browser/view/focus { viewId }` | 有头浏览器：把它的窗口切到最前 |
 | `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` |
 | `browser/view/tab { viewId, action, targetId?, url? }` | 标签栏：`switch` / `close`（带 `targetId`）/ `new`（`url` 可省，默认空白页）；能力 `browserTabs` |
 | `browser/view/close { viewId }` | 关视图（不关页）；连接断开时自动全关 |
@@ -262,7 +263,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - agent 整页截图会清掉覆盖、换标签页新页也没有：帧尺寸对不上就重设（至多 1.5s 一次）。
   - `resize` 和 `input` 排同一条队，连发时最后那次最后生效；改完补一张静止帧。
 - 静止帧（帧里 `still: true`）：无头 screencast 只出 CSS 像素，页面不动时一帧不推（刚挂上也不推）。
-  - 画面停下 300ms、刚挂上、换了标签页、改了视口：补一张 `captureScreenshot`（`clip.scale` 按 DPR）。
+  - 画面停下 150ms、刚挂上、换了标签页、改了视口：补一张 `captureScreenshot`（`clip.scale` 按 DPR）。
   - 截的时候先停流再接着推：放大栅格化的过渡帧不推；内容没变的重复帧也不推，不会来回补帧。
 - agent 换了活动标签页，画面跟着换（每 400ms 看一次名册），推 `status`。
 - 标签栏（能力 `browserTabs`）：`tabs` 按名册顺序（和 `browser_tabs` 的序号一致），地址标题现查 Chrome。
@@ -274,13 +275,33 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 和 `input` / `resize` 排同一条队：点了新标签页紧接着敲的字落在新页上。
   - 页面自己开的新页（`target=_blank`、`window.open`）要浏览器 MCP 收进会话才进名册：
     看到 opener 是本会话的页、还没进名册的，就（至多每秒一次）在后台调一次 `browser_tabs` 催它收。
+- 清晰画面（`crisp`）：流里的帧只当「变了」的信号，推的全是按 DPR 截的静止帧。
+  - 画面变了至多 30ms 截一张（节流不是防抖：连续滚动照样出帧），一次只截一张。
+  - 默认：带了 `viewport` 且是本机网关时开；远程网关推 CSS 像素帧省流，停下再补清晰帧。
+  - `open` 带 `crisp: true / false` 覆盖默认；回包里的 `crisp` 是实际用的。
+  - 截图失败时退回推那一帧流里的画面。
+- 有头浏览器（`[browser].headed` / `DOCK_BROWSER_HEADED`，和 MCP 拉起 Chromium 读的同一个配置）：
+  - `open` 回 `headed: true`；页面跟着真窗口走，`viewport` / `resize` 不改页面视口。
+  - 不开清晰画面（`crisp` 恒为 false）：有头的流本来就是设备像素，Retina 上 2 倍。
+  - 静止帧按原生像素截、不带 `clip.scale`：那会让 Chrome 在真窗口里按倍数重渲染，窗口一直闪。
+  - `browser/view/focus` 把窗口切到最前（CDP `Page.bringToFront`），用户直接在真窗口里操作。
+  - 连上的是先前以另一模式启动的 Chromium 时，以配置为准（见 docs/tools/browser.md）。
 - 流控：帧写到 WebSocket 之后才回 CDP `screencastFrameAck`，慢客户端不会攒帧。
 - `event` 的形状（坐标是页面视口 CSS 像素，客户端按帧的 `width` / `height` 换算）：
-  - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, clickCount?, modifiers?}`
+  - `{type:"mouse", action:"move"|"down"|"up"|"click", x, y, button?, buttons?, clickCount?, modifiers?}`
+    - `buttons`：此刻按着的键（DOM `MouseEvent.buttons`）；拖动时的 `move` 不带，页面当成悬停。
   - `{type:"wheel", x, y, deltaX, deltaY, modifiers?}`
   - `{type:"key", action:"down"|"up"|"press", key, modifiers?}`（DOM 键名：`Enter`、`a`）
   - `{type:"text", text}`（输入法上屏、粘贴）
+  - `{type:"select", index}`：把上次点开的 `<select>` 设成第 `index` 项，发 `input` / `change`。
   - `modifiers`：`["Alt","Control","Meta","Shift"]` 的子集。
+- 下拉框：原生 `<select>` 弹层画在页面之外，画面里看不见，点开了还会隐形吃键。
+  - 按下（左键）落在单选 `<select>` 上：不发给页面，回 `select`，跟着的抬起也吞掉。
+  - `select`：`{x, y, width, height, selectedIndex, options:[{label, disabled, group}]}`（页面 CSS 像素）。
+  - 客户端画菜单，选好发 `{type:"select", index}`；多选、列表样式、禁用的照常点。
+- 编辑快捷键：⌘ 或 Ctrl 加 A / C / X / Z（Shift+Z）/ Y 带 CDP `commands` 执行。
+  - macOS 上这些由系统菜单处理，光发按键页面不动。
+  - C / X 回 `copied`（选中的文字）：页面的剪贴板在 Dock 那台机器上，客户端写进自己这边。
 - 地址栏：没写协议补 `https://`，本机和内网地址（`localhost`、`127.0.0.1`、`192.168.x.x`…）补 `http://`；
   只放行 http / https / about / data / file（`javascript:` 拒）。
   - 不像网址的拿去 Google 搜索（`抖音`、带空格的词）；`?` 开头强制搜索。
