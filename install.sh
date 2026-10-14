@@ -200,12 +200,12 @@ main() {
     tar -xzf "$tmp/$file" -C "$tmp" || die "解包失败"
     [ -f "$tmp/$ASSET" ] || die "产物里没有 $ASSET 二进制"
 
-    step "写入 $install_dir（原子替换）"
+    step "写入 ${install_dir}（原子替换）"
     mkdir -p "$install_dir" || die "无法创建 $install_dir"
     # 先写同目录的临时名再 mv 覆盖：升级时旧 dock 可能正在跑，直接写会被 Linux
     # 拒成 ETXTBSY（Text file busy）；rename(2) 只换目录项，对已映射的旧进程无影响。
     staged="$install_dir/.$ASSET.new.$$"
-    cp "$tmp/$ASSET" "$staged" || die "无法写入 $install_dir（目录不可写？）"
+    cp "$tmp/$ASSET" "$staged" || die "无法写入 ${install_dir}（目录不可写？）"
     chmod 0755 "$staged" || die "无法给 $staged 加执行位"
     mv -f "$staged" "$install_dir/$ASSET" || {
         rm -f "$staged"
