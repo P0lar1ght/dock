@@ -1,0 +1,28 @@
+{
+  "name": "dock-whiteboard-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Dock 内置白板 MCP App 的界面（Excalidraw）。构建成单文件 HTML，进 cordis-apps/assets/whiteboard.html。",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build && node scripts/copy.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "0.18.1",
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@modelcontextprotocol/core": "^2.3.1",
+    "@modelcontextprotocol/ext-apps": "2.0.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.0.0",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.0",
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}

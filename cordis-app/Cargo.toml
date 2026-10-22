@@ -17,6 +17,7 @@ cordis-spine = { path = "../cordis-spine" }
 cordis-tui = { path = "../cordis-tui" }
 cordis-gateway = { path = "../cordis-gateway" }
 cordis-browser = { path = "../cordis-browser" }
+cordis-apps = { path = "../cordis-apps" }
 cordis-base = { path = "../cordis-base" }
 semver = "1"
 serde = { version = "1", features = ["derive"] }

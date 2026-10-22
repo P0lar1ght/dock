@@ -19,7 +19,7 @@ enum ResumeArg {
 
 /// `dock` 起 TUI；`dock serve` 起无头网关给父进程（桌面 GUI）用；
 /// `dock serve --remote` 起给远程客户端用的常驻网关（设备令牌，前面挂反向代理）；
-/// `dock mcp browser` 是内置浏览器 MCP 服务（由 Dock 自己按内置行拉起）；
+/// `dock mcp browser` / `dock mcp whiteboard` 是内置 MCP 服务（由 Dock 自己按内置行拉起）；
 /// `dock device …` 管设备令牌；
 /// `dock init` / `doctor` / `upgrade` 管安装初始化、诊断与原子升级。
 enum Mode {
@@ -27,6 +27,7 @@ enum Mode {
     Serve(ServeArgs),
     Remote { bind: String },
     McpBrowser,
+    McpWhiteboard,
     Device(DeviceCmd),
     Init,
     Doctor,
@@ -106,10 +107,14 @@ fn parse_args() -> (Mode, ResumeArg) {
             (Some(cordis_browser::SERVER_NAME), Some(extra)) => {
                 usage_error(&format!("dock mcp browser 不认识参数 {extra}"))
             }
-            (Some(other), _) => {
-                usage_error(&format!("dock mcp 不认识服务 {other}（目前只有 browser）"))
+            (Some(cordis_apps::whiteboard::SERVER_NAME), None) => (Mode::McpWhiteboard, resume),
+            (Some(cordis_apps::whiteboard::SERVER_NAME), Some(extra)) => {
+                usage_error(&format!("dock mcp whiteboard 不认识参数 {extra}"))
             }
-            (None, _) => usage_error("dock mcp 需要服务名（目前只有 browser）"),
+            (Some(other), _) => usage_error(&format!(
+                "dock mcp 不认识服务 {other}（有 browser、whiteboard）"
+            )),
+            (None, _) => usage_error("dock mcp 需要服务名（browser 或 whiteboard）"),
         };
     }
     if args.peek().is_some_and(|a| a == "device") {
@@ -224,6 +229,7 @@ Usage:
   dock serve --remote [--bind <addr>] [options]
   dock device add <name> | list | revoke <name|id>
   dock mcp browser
+  dock mcp whiteboard
 
 Options:
   -r, --resume [id]  Restore the latest session for this cwd, or a specific id
@@ -266,6 +272,10 @@ and drops that device's open connections.
 
 mcp browser: Dock's browser MCP server on stdio (NDJSON JSON-RPC). Dock starts it
 itself as the built-in [mcp_servers.browser] row; DOCK_BROWSER_MCP=off disables it.
+
+mcp whiteboard: Dock's whiteboard MCP App (Excalidraw UI over MCP Apps) on stdio.
+Built-in [mcp_servers.whiteboard] row; scenes are per project under
+$DOCK_HOME/apps/whiteboard/<cwd>/; DOCK_WHITEBOARD_MCP=off disables it.
 
 Sessions are stored in $DOCK_HOME/sessions/<cwd>/ (default ~/.dock/sessions/).
 "
@@ -333,6 +343,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Mode::McpBrowser = mode {
         // stdout 是协议通道：这里什么都不能往 stdout 打。
         cordis_browser::serve_stdio().await?;
+        return Ok(());
+    }
+    if let Mode::McpWhiteboard = mode {
+        // 同上：stdout 是协议通道。
+        cordis_apps::whiteboard::serve_stdio().await?;
         return Ok(());
     }
     if let Mode::Device(cmd) = &mode {
@@ -418,7 +433,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             wait_for_shutdown().await;
         }
-        Mode::McpBrowser | Mode::Device(_) | Mode::Init | Mode::Doctor | Mode::Upgrade(_) => {
+        Mode::McpBrowser
+        | Mode::McpWhiteboard
+        | Mode::Device(_)
+        | Mode::Init
+        | Mode::Doctor
+        | Mode::Upgrade(_) => {
             unreachable!("handled before install_app")
         }
     }

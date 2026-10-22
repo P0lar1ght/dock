@@ -775,6 +775,7 @@ name = "cordis-app"
 version = "0.2.1"
 dependencies = [
  "cordis",
+ "cordis-apps",
  "cordis-base",
  "cordis-browser",
  "cordis-gateway",
@@ -786,6 +787,16 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "cordis-apps"
+version = "0.2.1"
+dependencies = [
+ "cordis-base",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
