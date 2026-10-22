@@ -98,6 +98,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `mcp/app/tools|resource|read|call|result|context`：MCP Apps 宿主接口（`ui://` 界面、界面发起
     // 的调用、模型那次调用的原始结果、界面交给模型的上下文）。只认受信连接。
     ("mcpApps", true),
+    // `mcp/app/view/expose|result` + 推送 `mcp/app/view/call`（只推受信连接）：界面自己登记的
+    // 工具（规范 `appCapabilities.tools`）交给模型，模型调用时由桌面端交给界面跑。
+    ("mcpAppViewTools", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -304,6 +307,10 @@ pub const MCP_APP_READ: &str = "mcp/app/read";
 pub const MCP_APP_CALL: &str = "mcp/app/call";
 pub const MCP_APP_RESULT: &str = "mcp/app/result";
 pub const MCP_APP_CONTEXT: &str = "mcp/app/context";
+/// 界面自己的工具：桌面端报上来（`expose`）、送回调用结果（`result`）；Dock 推调用（`call`）。
+pub const MCP_APP_VIEW_EXPOSE: &str = "mcp/app/view/expose";
+pub const MCP_APP_VIEW_RESULT: &str = "mcp/app/view/result";
+pub const MCP_APP_VIEW_CALL: &str = "mcp/app/view/call";
 pub const IMAGE_INPUTS_LIMITS_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]

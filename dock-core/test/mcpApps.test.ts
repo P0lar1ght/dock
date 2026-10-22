@@ -12,6 +12,8 @@ import {
   parseMcpAppCallRecord,
   parseMcpAppResource,
   parseMcpAppTools,
+  parseViewCall,
+  viewToolsForExpose,
 } from '../src/index.ts';
 
 const tools = parseMcpAppTools({
@@ -98,4 +100,34 @@ test('交给界面的工具输入：use_tool 拆出里面那颗的参数（对�
   assert.deepEqual(appToolArgs('use_tool', { tool_name: 'mcp_board__draw', tool_input: '{"a":2}' }), { a: 2 });
   assert.deepEqual(appToolArgs('use_tool', { tool_name: 'x', tool_input: 'not json' }), {});
   assert.deepEqual(appToolArgs('use_tool', { tool_name: 'x' }), {});
+});
+
+test('viewToolsForExpose keeps named tools once, with string descriptions and object schemas', () => {
+  const tools = viewToolsForExpose({
+    tools: [
+      { name: 'get_selection', description: '选中的元素', inputSchema: { type: 'object' }, _meta: { x: 1 } },
+      { name: 'get_selection', description: '重复的' },
+      { name: '', description: '没名字' },
+      { name: 'focus', description: 3, inputSchema: [1] },
+      'junk',
+    ],
+  });
+  assert.deepEqual(tools, [
+    { name: 'get_selection', description: '选中的元素', inputSchema: { type: 'object' } },
+    { name: 'focus' },
+  ]);
+  assert.deepEqual(viewToolsForExpose(null), []);
+  assert.deepEqual(viewToolsForExpose({ tools: 'no' }), []);
+});
+
+test('parseViewCall needs view, call and tool name; arguments default to {}', () => {
+  assert.deepEqual(parseViewCall({ viewId: 'v1', callId: 'c1', name: 'focus', arguments: { ids: ['a'] } }), {
+    viewId: 'v1',
+    callId: 'c1',
+    name: 'focus',
+    arguments: { ids: ['a'] },
+  });
+  assert.deepEqual(parseViewCall({ viewId: 'v1', callId: 'c1', name: 'focus', arguments: [1] })?.arguments, {});
+  assert.equal(parseViewCall({ viewId: 'v1', name: 'focus' }), null);
+  assert.equal(parseViewCall('x'), null);
 });

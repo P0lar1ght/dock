@@ -7,6 +7,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::Response;
+use cordis_spine::{McpAppViews, MCP_APP_VIEWS};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -171,10 +172,19 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
                 let received = tokio::select! {
                     event = events_rx.recv() => event,
                     notice = notices_rx.recv() => {
-                        // 连接级推送：初始化过就发，不看订阅。
+                        // 连接级推送：初始化过就发，不看订阅。只推受信连接的，配对网页收不到。
                         match notice {
-                            Ok(notice) => {
-                                if conn.lock().await.initialized {
+                            Ok(mut notice) => {
+                                let trusted_only = notice
+                                    .as_object_mut()
+                                    .and_then(|o| o.remove(crate::methods::TRUSTED_ONLY_MARK))
+                                    .is_some();
+                                let send = {
+                                    let c = conn.lock().await;
+                                    c.initialized
+                                        && (!trusted_only || c.auth.as_ref().is_some_and(Auth::trusted))
+                                };
+                                if send {
                                     let _ = out_tx.send(Outgoing::Text(notice.to_string()));
                                 }
                             }
@@ -237,6 +247,12 @@ async fn handle_socket(socket: WebSocket, gateway: GatewayHandle, origin: String
         }
     }
     fanout.abort();
+    // 这条连接报上来的 MCP App 界面工具一并收回（在等它回结果的调用马上报错）。
+    if let Some(lease) = conn.lock().await.connection_lease_id.clone() {
+        if let Some(views) = gateway.ctx().get::<McpAppViews>(MCP_APP_VIEWS) {
+            views.drop_lease(&lease);
+        }
+    }
     drop(views);
     drop(desktops);
     drop(out_tx);
@@ -333,7 +349,15 @@ async fn dispatch_text(conn: &Arc<Mutex<Conn>>, text: &str) -> Option<String> {
     }
 }
 
-async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result<Value, RpcError> {
+/// 绑在这条连接上的插件方法（如界面工具：断开时收回）：`connectionLeaseId` 由网关按连接填，
+/// 不信客户端给的。方法体还是插件的，这里只改参数；它们不能登记成 detached——那条路拿不到连接。
+const CONNECTION_BOUND: &[&str] = &[protocol::MCP_APP_VIEW_EXPOSE];
+
+async fn dispatch_locked(
+    conn: &mut Conn,
+    method: &str,
+    mut params: Value,
+) -> Result<Value, RpcError> {
     if method == protocol::CONNECTION_AUTHENTICATE {
         return authenticate(conn, &params);
     }
@@ -386,6 +410,14 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
         ));
     }
     settings_gate(conn.auth.as_ref(), &conn.gateway, method)?;
+    if CONNECTION_BOUND.contains(&method) {
+        if let Some(obj) = params.as_object_mut() {
+            match &conn.connection_lease_id {
+                Some(lease) => obj.insert("connectionLeaseId".into(), json!(lease)),
+                None => obj.remove("connectionLeaseId"),
+            };
+        }
+    }
     rpc::dispatch(conn.gateway.clone(), method, params, &mut conn.subscribed).await
 }
 

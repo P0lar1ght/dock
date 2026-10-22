@@ -113,7 +113,7 @@ pub fn session_key(sessions: &Sessions) -> String {
 }
 
 /// `tools/call` 的 JSON-RPC 结果 → [`ToolResult`]：文本 + 图片，外加服务器的 `isError`。
-pub(super) fn call_result(call: ToolCall, v: &serde_json::Value) -> ToolResult {
+pub(crate) fn call_result(call: ToolCall, v: &serde_json::Value) -> ToolResult {
     let (text, images) = protocol::format_call_result_parts(v);
     let mut result = if images.is_empty() {
         tool_result(call, text)
