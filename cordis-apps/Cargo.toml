@@ -1,0 +1,16 @@
+[package]
+name = "cordis-apps"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+description = "Dock 内置 MCP Apps 服务（白板……）：stdio MCP，工具挂 ui:// 界面；`dock mcp whiteboard`"
+license = "Apache-2.0"
+
+[dependencies]
+cordis-base = { path = "../cordis-base" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "io-std", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }

@@ -141,25 +141,9 @@ pub fn new_id() -> String {
 }
 
 /// Grok `encode_cwd_dirname`: one path segment, reversible enough via `meta.cwd`.
+/// 规则在 [`cordis_base::config::cwd_dirname`]（内置 MCP App 按项目存数据也用它）。
 pub fn encode_cwd_dirname(cwd: &Path) -> String {
-    let raw = cwd.to_string_lossy();
-    let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        match c {
-            '/' | '\\' | ':' => out.push('-'),
-            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' => out.push(c),
-            _ => out.push('-'),
-        }
-    }
-    while out.contains("--") {
-        out = out.replace("--", "-");
-    }
-    let out = out.trim_matches('-').to_string();
-    if out.is_empty() {
-        "workspace".into()
-    } else {
-        out
-    }
+    cordis_base::config::cwd_dirname(cwd)
 }
 
 pub fn sessions_cwd_dir(cwd: &Path) -> PathBuf {

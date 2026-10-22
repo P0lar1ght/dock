@@ -59,15 +59,15 @@ jobs:
           fi
 
       - name: Format
-        run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser"
+        run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser -p cordis-apps"
 
       - name: Clippy
-        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser --all-targets --no-deps -- -D warnings
+        run: cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser -p cordis-apps --all-targets --no-deps -- -D warnings
 
       # 默认回归集合里除 spine 之外的部分。
       # 需要真实 Chrome 的浏览器冒烟（cordis-browser/tests/real_chrome.rs）已标 #[ignore]。
       - name: Test (gateway / tui / app / browser)
-        run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app -p cordis-browser
+        run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app -p cordis-browser -p cordis-apps
 
       - name: Test (dock-memory)
         run: cargo test --locked -p dock-memory

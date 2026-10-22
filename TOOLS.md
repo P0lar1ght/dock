@@ -62,6 +62,9 @@
 浏览器工具：内置 MCP `browser`（`dock mcp browser`，crate `cordis-browser`）。
 公名 `mcp_browser__browser_*` 22 颗（含跑 Playwright 脚本的 `browser_js`），按会话分标签页，详见 [browser](docs/tools/browser.md)。
 
+白板：内置 MCP App `whiteboard`（`dock mcp whiteboard`，crate `cordis-apps`）。
+公名 `mcp_whiteboard__whiteboard_read` / `whiteboard_edit`，按项目一份，桌面端 Excalidraw 界面里用户和 Agent 一起改，详见 [whiteboard](docs/tools/whiteboard.md)。
+
 另见 [工具结果图](docs/tools/images.md)（多模态，`ToolResult.images`）。
 
 **权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `mcp_browser__browser_evaluate` `mcp_browser__browser_js` `mcp_browser__browser_file_upload`，以及全部 `mcp_cua-driver__*`。

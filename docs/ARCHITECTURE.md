@@ -245,3 +245,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 - 浏览器（BUA）是内置 MCP `browser`：`dock mcp browser`（crate `cordis-browser`），不在进程内注册工具。
   `tool-browser` 只剩 `/browser` 驾驶舱。按会话分标签页，会话身份走 `tools/call` 的 `_meta`。
   网关 `browser/view/*` 按 MCP 写的运行时名册找到会话的标签页，另开 CDP 连接推画面；客户端不碰 CDP 端口。
+- MCP Apps（`io.modelcontextprotocol/ui`）：MCP 客户端认工具 `_meta.ui`，网关 `mcp/app/*` 给桌面端读界面、转发界面的调用、
+  交界面上下文（spine 插件 `mcp-app-context` 经 `agent/step-start` 交给模型）。内联（Gen UI）还是常驻面板（UI Plugin）由桌面端按
+  标准信号（`ui/request-display-mode`）和用户动作定，不要服务器声明。内置白板是 `dock mcp whiteboard`（crate `cordis-apps`），
+  场景按项目存在 `$DOCK_HOME/apps/whiteboard/`。

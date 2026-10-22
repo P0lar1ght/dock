@@ -772,6 +772,7 @@ pub fn load_mcp_servers() -> Vec<McpServer> {
 ///
 /// - `browser`：Dock 自己的浏览器 MCP（`<dock> mcp browser`），**只有 `dock` 二进制
 ///   登记过自己**（[`register_builtin_browser_mcp`]）才注入。
+/// - `whiteboard`：Dock 自己的白板 MCP App（`<dock> mcp whiteboard`），同浏览器只在登记过时注入。
 /// - `cua-driver`：**发现得到二进制才注入** —— 没装就当没有这条，`/mcps` 不会多出
 ///   一条永远连不上的死行（computer 驾驶舱自己会说「未安装」）。
 pub fn builtin_mcp_servers() -> Vec<McpServer> {
@@ -792,7 +793,37 @@ pub fn builtin_mcp_servers() -> Vec<McpServer> {
         enabled: true,
         oauth: McpOAuthConfig::default(),
     });
-    browser.into_iter().chain(cua).collect()
+    let whiteboard = builtin_whiteboard_mcp_with(
+        BROWSER_MCP_COMMAND.get().map(PathBuf::as_path),
+        std::env::var(WHITEBOARD_MCP_ENV).ok().as_deref(),
+    );
+    browser.into_iter().chain(whiteboard).chain(cua).collect()
+}
+
+/// 内置白板 MCP App 的服务器键名：公名前缀 `mcp_whiteboard__`，必须与 TOOLS.md 一致。
+pub const WHITEBOARD_MCP_SERVER: &str = "whiteboard";
+/// 设成 `off` / `0` / `false` / `none` 则不注入内置白板行。
+pub const WHITEBOARD_MCP_ENV: &str = "DOCK_WHITEBOARD_MCP";
+
+/// [`builtin_mcp_servers`] 里白板那条：同浏览器，`dock` 二进制登记过自己才有
+/// （`<dock> mcp whiteboard`）。
+pub fn builtin_whiteboard_mcp_with(command: Option<&Path>, env: Option<&str>) -> Option<McpServer> {
+    if env.is_some_and(crate::cua::is_off) {
+        return None;
+    }
+    let command = command?;
+    Some(McpServer {
+        name: WHITEBOARD_MCP_SERVER.to_string(),
+        transport: McpTransport::Stdio {
+            command: command.to_string_lossy().into_owned(),
+            args: vec!["mcp".to_string(), "whiteboard".to_string()],
+            env: BTreeMap::new(),
+            framing: McpStdioFraming::Ndjson,
+        },
+        startup_timeout_sec: DEFAULT_MCP_STARTUP_TIMEOUT_SECS,
+        enabled: true,
+        oauth: McpOAuthConfig::default(),
+    })
 }
 
 /// 内置浏览器 MCP 的服务器键名：公名前缀 `mcp_browser__`，必须与 TOOLS.md 一致。
@@ -802,7 +833,8 @@ pub const BROWSER_MCP_ENV: &str = "DOCK_BROWSER_MCP";
 
 static BROWSER_MCP_COMMAND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// `dock` 二进制启动时登记自己的路径：内置浏览器行 = `<dock> mcp browser`。
+/// `dock` 二进制启动时登记自己的路径：内置浏览器行 = `<dock> mcp browser`，白板行 =
+/// `<dock> mcp whiteboard`。
 ///
 /// 只有登记过才注入 —— 测试进程、把 spine 嵌进别的宿主时不会凭空拉起一个子进程
 /// （`current_exe` 在测试里是测试二进制，拿它跑 `mcp browser` 只会跑一遍测试）。
@@ -1481,6 +1513,29 @@ pub fn dock_home() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".dock")
+}
+
+/// 一个工作目录（项目）在 `$DOCK_HOME` 下的目录名：一个路径段（Grok `encode_cwd_dirname`）。
+/// 会话目录 `sessions/<名>/`、内置 MCP App 的项目数据 `apps/<app>/<名>/` 共用这一条。
+pub fn cwd_dirname(cwd: &Path) -> String {
+    let raw = cwd.to_string_lossy();
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '/' | '\\' | ':' => out.push('-'),
+            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' => out.push(c),
+            _ => out.push('-'),
+        }
+    }
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "workspace".into()
+    } else {
+        out
+    }
 }
 
 pub fn catalog_paths() -> Vec<PathBuf> {
@@ -2374,6 +2429,30 @@ command = "npx"
         assert_eq!(*framing, McpStdioFraming::Ndjson);
         assert!(builtin_browser_mcp_with(Some(dock), Some("off")).is_none());
         assert!(builtin_browser_mcp_with(Some(dock), Some("")).is_some());
+    }
+
+    /// 白板行同浏览器：登记过 `dock` 才有，`DOCK_WHITEBOARD_MCP=off` 关掉；跑的是 `dock mcp whiteboard`。
+    #[test]
+    fn builtin_whiteboard_row_needs_registration_and_respects_off() {
+        assert!(builtin_whiteboard_mcp_with(None, None).is_none());
+        let dock = Path::new("/opt/dock/bin/dock");
+        let row = builtin_whiteboard_mcp_with(Some(dock), None).unwrap();
+        assert_eq!(row.name, WHITEBOARD_MCP_SERVER);
+        let McpTransport::Stdio { args, .. } = &row.transport else {
+            panic!("stdio");
+        };
+        assert_eq!(args, &["mcp", "whiteboard"]);
+        assert!(builtin_whiteboard_mcp_with(Some(dock), Some("off")).is_none());
+    }
+
+    #[test]
+    fn cwd_dirname_is_one_segment() {
+        assert_eq!(
+            cwd_dirname(Path::new("/Users/me/my proj")),
+            "Users-me-my-proj"
+        );
+        assert_eq!(cwd_dirname(Path::new("C:\\work\\a")), "C-work-a");
+        assert_eq!(cwd_dirname(Path::new("/")), "workspace");
     }
 
     /// `/mcps` 里给内置行按 Space：文件里没有实体行，要落一条完整的，
