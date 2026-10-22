@@ -7,6 +7,7 @@
 //! omitted from `specs_for_model` and occupancy. Enabled MCP tools bypass Agent
 //! preset allowlists on execute.
 
+mod apps;
 mod credentials;
 mod discover;
 mod elicitation;
@@ -37,6 +38,17 @@ pub(super) type CallFn = std::sync::Arc<
     dyn Fn(String, ToolCall) -> crate::agent::runtime::BoxFuture<'static, ToolResult> + Send + Sync,
 >;
 
+/// 一条连接上的原始 JSON-RPC：`(method, params)` → 整条回复（含 `result` / `error`）。
+/// 传输层负责协议版本的 `_meta`；调用方会话、工作目录由上层（[`call_params`]）放。
+pub(super) type RpcFn = std::sync::Arc<
+    dyn Fn(
+            String,
+            serde_json::Value,
+        ) -> crate::agent::runtime::BoxFuture<'static, Result<serde_json::Value, String>>
+        + Send
+        + Sync,
+>;
+
 /// 调用方会话的持久 id（落盘会话 id，即 GUI 的 threadId）；还没落过盘的用页身份
 /// （`main` / `main#2` / 子代理身份）。在工具执行的 [`crate::tools::registry::exec_ctx`]
 /// 里读，所以是**发起这次调用的那一页 / 那个子代理**，不是当前焦点页。
@@ -44,6 +56,49 @@ pub(super) fn calling_session() -> Option<String> {
     let exec = crate::tools::registry::exec_ctx()?;
     let sessions = exec.get::<Sessions>(SESSIONS)?;
     Some(session_key(&sessions))
+}
+
+/// 调用方会话的工作目录（项目）。同 [`calling_session`]，在 exec ctx 里读。
+pub(super) fn calling_cwd() -> Option<String> {
+    let exec = crate::tools::registry::exec_ctx()?;
+    let sessions = exec.get::<Sessions>(SESSIONS)?;
+    sessions
+        .workspace_cwd()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// `tools/call` 的参数：服务器上的原名 + 实参；`_meta` 带调用方会话。`local`（本机 stdio
+/// 服务器）再带工作目录——那是本机绝对路径，不发给远程 HTTP 服务器。
+pub(super) fn call_params(public: &str, arguments: &str, local: bool) -> serde_json::Value {
+    let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or(serde_json::json!({}));
+    let params = protocol::with_session(
+        serde_json::json!({ "name": raw_tool_name(public), "arguments": args }),
+        calling_session().as_deref(),
+    );
+    if local {
+        protocol::with_cwd(params, calling_cwd().as_deref())
+    } else {
+        params
+    }
+}
+
+/// 本机子进程（stdio）服务器：本来就看得到本机文件，可以告诉它工作目录。
+pub(super) fn is_local(server: &McpServer) -> bool {
+    matches!(server.transport, McpTransport::Stdio { .. })
+}
+
+/// 在一条连接上跑 `tools/call`，结果收成 [`ToolResult`]。`local` 见 [`call_params`]。
+pub(super) fn call_via(rpc: RpcFn, local: bool) -> CallFn {
+    std::sync::Arc::new(move |public: String, c: ToolCall| {
+        let rpc = rpc.clone();
+        Box::pin(async move {
+            let params = call_params(&public, &c.arguments, local);
+            match rpc("tools/call".into(), params).await {
+                Ok(v) => call_result(c, &v),
+                Err(e) => tool_result(c, e),
+            }
+        })
+    })
 }
 
 /// 一页在 MCP 服务眼里的会话身份：落盘会话 id，还没落盘就用页身份。
@@ -75,6 +130,7 @@ pub(super) type RelistFn = std::sync::Arc<
         + Sync,
 >;
 
+pub use apps::{read_record as read_app_record, McpAppTool, RECORD_DIR as APP_RECORD_DIR};
 pub(crate) use discover::on_demand_line;
 pub use discover::{SEARCH_TOOL_NAME, USE_TOOL_NAME};
 pub use elicitation::{ElicitPrompt, Elicitation};
@@ -211,7 +267,7 @@ pub(super) fn plan_for(
 
 struct Slot {
     config: McpServer,
-    call: Option<CallFn>,
+    rpc: Option<RpcFn>,
     relist: Option<RelistFn>,
     stop: Option<tokio::sync::watch::Sender<bool>>,
     listed: Vec<protocol::ListedTool>,
@@ -300,8 +356,10 @@ impl Mcp {
                 .iter()
                 .find(|s| s.config.name == server)
                 .ok_or_else(|| format!("没有配置 MCP 服务 {server}"))?;
-            slot.call
+            let local = is_local(&slot.config);
+            slot.rpc
                 .clone()
+                .map(|rpc| call_via(rpc, local))
                 .ok_or_else(|| format!("MCP 服务 {server} 没有连上"))?
         };
         let public = public_tool_name(server, tool);
@@ -322,7 +380,7 @@ impl Mcp {
             .unwrap()
             .slots
             .iter()
-            .all(|s| !s.config.enabled || s.call.is_some() || s.last_error.is_some())
+            .all(|s| !s.config.enabled || s.rpc.is_some() || s.last_error.is_some())
     }
 
     fn mark_dirty(&self) {
@@ -385,7 +443,7 @@ impl Mcp {
         for slot in &mut inner.slots {
             stop_slot(slot);
             drop_registered(slot);
-            slot.call = None;
+            slot.rpc = None;
             slot.relist = None;
         }
     }
@@ -476,7 +534,7 @@ impl Mcp {
 
             inner.slots.retain_mut(|slot| {
                 let want = by_name.get(slot.config.name.as_str()).copied();
-                let plan = plan_for(Some((&slot.config, slot.call.is_some())), want);
+                let plan = plan_for(Some((&slot.config, slot.rpc.is_some())), want);
                 let Some(want) = want else {
                     // Remove：配置里整条没了。
                     drop_registered(slot);
@@ -499,7 +557,7 @@ impl Mcp {
                     SlotPlan::Unplug => {
                         drop_registered(slot);
                         stop_slot(slot);
-                        slot.call = None;
+                        slot.rpc = None;
                         slot.relist = None;
                         slot.last_error = None;
                         report.disabled.push(name);
@@ -539,7 +597,7 @@ impl Mcp {
                     .collect();
                 inner.slots.push(Slot {
                     config: server.clone(),
-                    call: None,
+                    rpc: None,
                     relist: None,
                     stop: None,
                     listed: Vec::new(),
@@ -645,7 +703,7 @@ impl Mcp {
         };
         drop_registered(slot);
         stop_slot(slot);
-        slot.call = None;
+        slot.rpc = None;
         slot.relist = None;
         slot.config.enabled = false;
         slot.last_error = None;
@@ -713,9 +771,9 @@ impl Mcp {
             return Ok(());
         };
         match result {
-            Ok((listed, call, relist)) => {
+            Ok((listed, rpc, relist)) => {
                 slot.listed = listed;
-                slot.call = Some(call);
+                slot.rpc = Some(rpc);
                 slot.relist = Some(relist);
                 slot.stop = Some(stop_tx);
                 slot.last_error = None;
@@ -729,7 +787,7 @@ impl Mcp {
             Err(e) => {
                 drop_registered(slot);
                 stop_slot(slot);
-                slot.call = None;
+                slot.rpc = None;
                 slot.relist = None;
                 slot.last_error = Some(e.clone());
                 let _ = stop_tx.send(true);
@@ -766,7 +824,7 @@ impl Mcp {
                 return;
             };
             slot.listed = listed;
-            if let (Some(tools), Some(_)) = (tools, slot.call.as_ref()) {
+            if let (Some(tools), Some(_)) = (tools, slot.rpc.as_ref()) {
                 if slot.config.enabled {
                     sync_listed(slot, &tools);
                 } else {
@@ -810,15 +868,17 @@ fn spawn_changed_refresh(mcp: Mcp, mut rx: tokio::sync::mpsc::UnboundedReceiver<
 }
 
 fn sync_listed(slot: &mut Slot, tools: &Tools) {
-    if slot.call.is_none() {
+    if slot.rpc.is_none() {
         drop_registered(slot);
         return;
     }
+    // 只给界面用的工具（`visibility: ["app"]`）不进工具表：模型看不见也调不到。
     let want: HashSet<String> = slot
         .listed
         .iter()
-        .filter(|(public, ..)| !slot.disabled_tools.contains(&raw_tool_name(public)))
-        .map(|(public, ..)| public.clone())
+        .filter(|t| t.ui.model_visible())
+        .filter(|t| !slot.disabled_tools.contains(&raw_tool_name(&t.public)))
+        .map(|t| t.public.clone())
         .collect();
     let stale: Vec<String> = slot
         .registered
@@ -831,35 +891,52 @@ fn sync_listed(slot: &mut Slot, tools: &Tools) {
             d.dispose_sync();
         }
     }
-    for (public, _, _) in slot.listed.clone() {
-        if want.contains(&public) {
-            upsert_one(slot, tools, &public);
+    for tool in slot.listed.clone() {
+        if want.contains(&tool.public) {
+            upsert_one(slot, tools, &tool.public);
         }
     }
 }
 
 fn upsert_one(slot: &mut Slot, tools: &Tools, public: &str) {
-    let Some(call) = slot.call.clone() else {
+    let Some(rpc) = slot.rpc.clone() else {
         return;
     };
-    let Some((_, description, parameters_json)) =
-        slot.listed.iter().find(|(name, ..)| name == public)
-    else {
+    let Some(listed) = slot.listed.iter().find(|t| t.public == public) else {
         return;
     };
-    if slot.disabled_tools.contains(&raw_tool_name(public)) {
+    if !listed.ui.model_visible() || slot.disabled_tools.contains(&raw_tool_name(public)) {
         return;
     }
     let pname = public.to_string();
+    let local = is_local(&slot.config);
+    // 挂了界面的工具：原始结果另存一份给界面（文本结果装不下 `structuredContent`）。
+    let app = listed
+        .ui
+        .resource_uri
+        .clone()
+        .map(|uri| apps::Binding::new(&slot.config.name, public, uri));
     let body: ToolBody = std::sync::Arc::new(move |c| {
-        let call = call.clone();
+        let rpc = rpc.clone();
         let pname = pname.clone();
-        Box::pin(async move { call(pname, c).await })
+        let app = app.clone();
+        Box::pin(async move {
+            let params = call_params(&pname, &c.arguments, local);
+            match rpc("tools/call".into(), params).await {
+                Ok(v) => {
+                    if let Some(app) = &app {
+                        apps::record(app, &c, &v).await;
+                    }
+                    call_result(c, &v)
+                }
+                Err(e) => tool_result(c, e),
+            }
+        })
     });
     let spec = ToolSpec {
         name: public.to_string(),
-        description: description.clone(),
-        parameters_json: parameters_json.clone(),
+        description: listed.description.clone(),
+        parameters_json: listed.schema.clone(),
     };
     if let Some(d) = tools.patch_mcp(spec.clone(), body.clone()) {
         let _ = slot.registered.insert(public.to_string(), d);
@@ -879,12 +956,13 @@ fn slot_status(slot: &Slot) -> McpStatus {
     let tools: Vec<McpToolStatus> = slot
         .listed
         .iter()
-        .map(|(public, desc, _)| {
-            let raw = raw_tool_name(public);
+        .filter(|t| t.ui.model_visible())
+        .map(|t| {
+            let raw = raw_tool_name(&t.public);
             McpToolStatus {
                 name: raw.clone(),
-                public_name: public.clone(),
-                description: desc.clone(),
+                public_name: t.public.clone(),
+                description: t.description.clone(),
                 enabled: !slot.disabled_tools.contains(&raw),
             }
         })
@@ -913,7 +991,7 @@ fn slot_status(slot: &Slot) -> McpStatus {
     McpStatus {
         name: slot.config.name.clone(),
         command: slot.config.endpoint().to_string(),
-        ok: slot.config.enabled && slot.call.is_some(),
+        ok: slot.config.enabled && slot.rpc.is_some(),
         enabled: slot.config.enabled,
         needs_auth: slot.last_error.as_deref().is_some_and(oauth::is_auth_error),
         detail,
@@ -988,7 +1066,7 @@ pub fn mcp_client() -> Plugin {
                         .collect();
                     inner.slots.push(Slot {
                         config: server,
-                        call: None,
+                        rpc: None,
                         relist: None,
                         stop: None,
                         listed: Vec::new(),
@@ -1031,7 +1109,7 @@ async fn connect_and_list(
     server: &McpServer,
     hooks: LiveHooks,
     stop: tokio::sync::watch::Receiver<bool>,
-) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
+) -> Result<(Vec<protocol::ListedTool>, RpcFn, RelistFn), String> {
     match &server.transport {
         McpTransport::Stdio { .. } => stdio::connect(server, hooks, stop).await,
         McpTransport::Http { .. } => http::connect(server, hooks, stop).await,
@@ -1058,8 +1136,15 @@ mod tests {
     use cordis_base::types::ToolCall;
     use std::sync::Arc;
 
-    fn stub_call() -> CallFn {
-        Arc::new(|_, c| Box::pin(async move { tool_result(c, "ok") }))
+    /// `tools/call` 一律回 `ok`。
+    fn stub_rpc() -> RpcFn {
+        Arc::new(|_, _| {
+            Box::pin(async move {
+                Ok(
+                    serde_json::json!({ "result": { "content": [{ "type": "text", "text": "ok" }] } }),
+                )
+            })
+        })
     }
 
     fn fake_config(name: &str) -> McpServer {
@@ -1085,19 +1170,18 @@ mod tests {
     fn attach_fake(mcp: &Mcp, name: &str, raw_tools: &[(&str, &str)]) {
         let listed: Vec<protocol::ListedTool> = raw_tools
             .iter()
-            .map(|(raw, desc)| {
-                (
-                    public_tool_name(name, raw),
-                    (*desc).to_string(),
-                    r#"{"type":"object"}"#.into(),
-                )
+            .map(|(raw, desc)| protocol::ListedTool {
+                public: public_tool_name(name, raw),
+                description: (*desc).to_string(),
+                schema: r#"{"type":"object"}"#.into(),
+                ui: protocol::ToolUi::default(),
             })
             .collect();
         let mut inner = mcp.inner.lock().unwrap();
         if !inner.slots.iter().any(|s| s.config.name == name) {
             inner.slots.push(Slot {
                 config: fake_config(name),
-                call: None,
+                rpc: None,
                 relist: None,
                 stop: None,
                 listed: Vec::new(),
@@ -1113,7 +1197,7 @@ mod tests {
             .find(|s| s.config.name == name)
             .unwrap();
         slot.listed = listed;
-        slot.call = Some(stub_call());
+        slot.rpc = Some(stub_rpc());
         slot.config.enabled = true;
         if let Some(tools) = tools {
             sync_listed(slot, &tools);
@@ -1149,14 +1233,14 @@ framing = "auto"
 startup_timeout_sec = 1
 "#;
 
-    fn slot_call(mcp: &Mcp, name: &str) -> Option<CallFn> {
+    fn slot_rpc(mcp: &Mcp, name: &str) -> Option<RpcFn> {
         mcp.inner
             .lock()
             .unwrap()
             .slots
             .iter()
             .find(|s| s.config.name == name)
-            .and_then(|s| s.call.clone())
+            .and_then(|s| s.rpc.clone())
     }
 
     async fn boot() -> (cordis::Context, Mcp, Tools) {
@@ -1350,10 +1434,14 @@ startup_timeout_sec = 1
                 .iter_mut()
                 .find(|s| s.config.name == "probe")
                 .unwrap();
-            slot.call = Some(Arc::new(|public, c| {
+            slot.rpc = Some(Arc::new(|method, params| {
                 Box::pin(async move {
                     let who = calling_session().unwrap_or_default();
-                    tool_result(c, format!("{public} {who}"))
+                    let name = params["name"].as_str().unwrap_or_default().to_string();
+                    let text = format!("{method} {name} {who}");
+                    Ok(
+                        serde_json::json!({ "result": { "content": [{ "type": "text", "text": text }] } }),
+                    )
                 })
             }));
         }
@@ -1364,13 +1452,230 @@ startup_timeout_sec = 1
         let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
         assert_eq!(
             result.content,
-            format!("mcp_probe__ping {}", session_key(&sessions))
+            format!("tools/call ping {}", session_key(&sessions))
         );
 
         let missing = mcp
             .call_as(&ctx, "nope", "ping", serde_json::json!({}))
             .await;
         assert!(missing.unwrap_err().contains("nope"));
+    }
+
+    /// 装一台带 MCP Apps 工具的假服务器：`draw` 挂界面、`save` 只给界面、`plain` 普通。
+    /// rpc 把收到的 `(method, params)` 原样记下，`tools/call` 回带 `structuredContent` 的结果。
+    fn attach_app_fake(mcp: &Mcp, seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>) {
+        let ui = |uri: Option<&str>, vis: Option<&[&str]>| protocol::ToolUi {
+            resource_uri: uri.map(str::to_string),
+            visibility: vis.map(|v| v.iter().map(|s| s.to_string()).collect()),
+        };
+        let tool = |raw: &str, ui| protocol::ListedTool {
+            public: public_tool_name("board", raw),
+            description: raw.into(),
+            schema: r#"{"type":"object"}"#.into(),
+            ui,
+        };
+        attach_fake(mcp, "board", &[]);
+        let mut inner = mcp.inner.lock().unwrap();
+        let tools = inner.tools.clone();
+        let slot = inner
+            .slots
+            .iter_mut()
+            .find(|s| s.config.name == "board")
+            .unwrap();
+        slot.listed = vec![
+            tool("draw", ui(Some("ui://board/app.html"), None)),
+            tool("save", ui(Some("ui://board/app.html"), Some(&["app"]))),
+            tool("plain", ui(None, None)),
+        ];
+        slot.rpc = Some(Arc::new(move |method, params| {
+            seen.lock().unwrap().push((method.clone(), params.clone()));
+            Box::pin(async move {
+                Ok(match method.as_str() {
+                    "resources/read" => serde_json::json!({ "result": { "contents": [
+                        { "uri": params["uri"], "mimeType": protocol::UI_MIME, "text": "<p>hi</p>" }
+                    ] } }),
+                    _ => serde_json::json!({ "result": {
+                        "content": [{ "type": "text", "text": "drawn" }],
+                        "structuredContent": { "shapes": 3 }
+                    } }),
+                })
+            })
+        }));
+        if let Some(tools) = tools {
+            sync_listed(slot, &tools);
+        }
+    }
+
+    /// `visibility: ["app"]` 的工具模型看不见：不进工具表、不在 `/mcps` 里；
+    /// 带界面的那些由 `app_tools` 列给客户端。
+    #[tokio::test]
+    async fn app_only_tools_stay_out_of_the_model_tool_table() {
+        let (_ctx, mcp, tools) = boot().await;
+        attach_app_fake(&mcp, Arc::default());
+        assert!(tools.is_mcp("mcp_board__draw"));
+        assert!(tools.is_mcp("mcp_board__plain"));
+        assert!(
+            !tools.is_mcp("mcp_board__save"),
+            "只给界面的工具不能进工具表"
+        );
+        let listed: Vec<String> = mcp.list()[0].tools.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(listed, ["draw", "plain"]);
+
+        let apps = mcp.app_tools();
+        let names: Vec<(&str, bool, bool)> = apps
+            .iter()
+            .map(|t| (t.name.as_str(), t.model_visible, t.app_visible))
+            .collect();
+        assert_eq!(names, [("draw", true, true), ("save", false, true)]);
+        assert_eq!(apps[0].resource_uri.as_deref(), Some("ui://board/app.html"));
+    }
+
+    /// 模型调挂界面的工具：文本照常进对话，原始 `CallToolResult`（含
+    /// `structuredContent`）另存进调用页的会话目录，界面按调用 id 读回。
+    #[tokio::test]
+    async fn app_tool_call_records_the_raw_result_in_the_session_dir() {
+        let (_env, _cwd) = isolated_config("");
+        let (ctx, mcp, tools) = boot().await;
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        sessions.attach_disk();
+        sessions.pin_workspace_cwd("/work/proj");
+        let seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+        attach_app_fake(&mcp, seen.clone());
+
+        let call = ToolCall {
+            id: "call/1".into(),
+            name: "mcp_board__draw".into(),
+            arguments: r#"{"shape":"box"}"#.into(),
+        };
+        let result =
+            crate::tools::registry::with_exec_ctx_async(ctx.clone(), tools.execute(call)).await;
+        assert!(result.content.starts_with("drawn"), "{}", result.content);
+
+        let dir = sessions.disk_session_dir().unwrap();
+        let record = read_app_record(&dir, "call/1").expect("挂界面的调用要留原始结果");
+        assert_eq!(record["server"], "board");
+        assert_eq!(record["tool"], "draw");
+        assert_eq!(record["resourceUri"], "ui://board/app.html");
+        assert_eq!(record["arguments"]["shape"], "box");
+        assert_eq!(record["result"]["structuredContent"]["shapes"], 3);
+
+        // 普通工具不存。
+        let plain = ToolCall {
+            id: "call-2".into(),
+            name: "mcp_board__plain".into(),
+            arguments: "{}".into(),
+        };
+        crate::tools::registry::with_exec_ctx_async(ctx.clone(), tools.execute(plain)).await;
+        assert!(read_app_record(&dir, "call-2").is_none());
+
+        // `_meta` 带调用方会话与工作目录（本机 stdio 服务器）。
+        let calls = seen.lock().unwrap();
+        let meta = &calls[0].1["_meta"];
+        assert_eq!(meta[protocol::META_SESSION], session_key(&sessions));
+        assert_eq!(meta[protocol::META_CWD], "/work/proj");
+    }
+
+    /// `dock/cwd` 是本机绝对路径：只告诉本机 stdio 服务器，远程 HTTP 服务器（模型调、界面调
+    /// 都一样）收不到。会话身份照带。
+    #[tokio::test]
+    async fn working_dir_meta_stays_off_remote_servers() {
+        let (ctx, mcp, tools) = boot().await;
+        ctx.require::<Sessions>(SESSIONS)
+            .unwrap()
+            .pin_workspace_cwd("/work/proj");
+        let seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+        attach_app_fake(&mcp, seen.clone());
+        {
+            let mut inner = mcp.inner.lock().unwrap();
+            let slot = inner
+                .slots
+                .iter_mut()
+                .find(|s| s.config.name == "board")
+                .unwrap();
+            slot.config.transport = McpTransport::Http {
+                url: "https://mcp.example.com/mcp".into(),
+                headers: Default::default(),
+            };
+            let tools = inner.tools.clone().unwrap();
+            let slot = inner
+                .slots
+                .iter_mut()
+                .find(|s| s.config.name == "board")
+                .unwrap();
+            sync_listed(slot, &tools);
+        }
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "mcp_board__plain".into(),
+            arguments: "{}".into(),
+        };
+        crate::tools::registry::with_exec_ctx_async(ctx.clone(), tools.execute(call)).await;
+        mcp.call_from_app(&ctx, "board", "save", serde_json::json!({}))
+            .await
+            .unwrap();
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        for (_, params) in calls.iter() {
+            assert!(
+                params["_meta"].get(protocol::META_CWD).is_none(),
+                "{params}"
+            );
+            assert!(
+                params["_meta"].get(protocol::META_SESSION).is_some(),
+                "{params}"
+            );
+        }
+    }
+
+    /// 界面发起的调用只认 `visibility` 含 `app` 的工具，回原样的 `CallToolResult`；
+    /// 读界面资源走 `resources/read`。
+    #[tokio::test]
+    async fn app_can_call_its_own_tools_and_read_its_resource() {
+        let (ctx, mcp, _tools) = boot().await;
+        let seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+        attach_app_fake(&mcp, seen.clone());
+
+        let saved = mcp
+            .call_from_app(&ctx, "board", "save", serde_json::json!({ "x": 1 }))
+            .await
+            .unwrap();
+        assert_eq!(saved["structuredContent"]["shapes"], 3);
+        {
+            let calls = seen.lock().unwrap();
+            assert_eq!(calls[0].0, "tools/call");
+            assert_eq!(calls[0].1["name"], "save");
+            assert_eq!(calls[0].1["arguments"]["x"], 1);
+            let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+            assert_eq!(
+                calls[0].1["_meta"][protocol::META_SESSION],
+                session_key(&sessions)
+            );
+        }
+
+        assert!(mcp
+            .call_from_app(&ctx, "board", "nope", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .contains("nope"));
+        assert!(mcp
+            .call_from_app(&ctx, "other", "save", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .contains("other"));
+
+        mcp.apply_tool_enabled("board", "draw", false).unwrap();
+        assert!(mcp
+            .call_from_app(&ctx, "board", "draw", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .contains("停用"));
+
+        let read = mcp
+            .read_resource("board", "ui://board/app.html")
+            .await
+            .unwrap();
+        assert_eq!(read["contents"][0]["text"], "<p>hi</p>");
+        assert_eq!(read["contents"][0]["mimeType"], protocol::UI_MIME);
     }
 
     #[tokio::test]
@@ -1491,12 +1796,12 @@ enabled = false
         let (_env, _cwd) = isolated_config(PROBE_TOML);
         let (_ctx, mcp, _tools) = boot().await;
         attach_fake(&mcp, "probe", &[("ping", "ping")]);
-        let before = slot_call(&mcp, "probe").expect("attach_fake 应当装上 call");
+        let before = slot_rpc(&mcp, "probe").expect("attach_fake 应当装上连接");
 
         let report = mcp.reload().await.unwrap();
         assert_eq!(report.unchanged, 1, "{report:?}");
         assert!(report.is_noop(), "配置一致时重载应当什么都不做：{report:?}");
-        let after = slot_call(&mcp, "probe").expect("连接不该被拆掉");
+        let after = slot_rpc(&mcp, "probe").expect("连接不该被拆掉");
         assert!(
             Arc::ptr_eq(&before, &after),
             "健康且配置没变的服务器不能重连 —— 重连 stdio 会杀掉它的子进程状态"

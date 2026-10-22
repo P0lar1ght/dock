@@ -24,17 +24,15 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::tools::mcp::protocol::{
     self, client_capabilities, client_info, encode_header_value, id_matches, pick_version,
-    raw_tool_name, unsupported_versions, with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
+    unsupported_versions, with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
-use crate::tools::registry::tool_result;
 use cordis_base::config::{McpServer, McpTransport};
-use cordis_base::types::ToolCall;
 
 use super::elicitation::Elicitation;
 use super::incoming::{self, LiveHooks};
 use super::sse::{self, SseParser};
 use super::tools_list;
-use super::{CallFn, RelistFn};
+use super::{RelistFn, RpcFn};
 
 const JSON_MIME: &str = "application/json";
 const EVENT_STREAM_MIME: &str = "text/event-stream";
@@ -49,7 +47,7 @@ pub(super) async fn connect(
     server: &McpServer,
     hooks: LiveHooks,
     stop: watch::Receiver<bool>,
-) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
+) -> Result<(Vec<protocol::ListedTool>, RpcFn, RelistFn), String> {
     let McpTransport::Http { url, headers } = &server.transport else {
         return Err("not an HTTP MCP server".into());
     };
@@ -102,21 +100,10 @@ pub(super) async fn connect(
         }
     });
 
-    let session_call = shared.clone();
-    let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
-        let session = session_call.clone();
-        Box::pin(async move {
-            let raw_name = raw_tool_name(&public);
-            let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
-            let params = protocol::with_session(
-                json!({ "name": raw_name, "arguments": args }),
-                super::calling_session().as_deref(),
-            );
-            match rpc(&session, "tools/call", params).await {
-                Ok(v) => super::call_result(c, &v),
-                Err(e) => tool_result(c, e),
-            }
-        })
+    let session_rpc = shared.clone();
+    let call: RpcFn = std::sync::Arc::new(move |method: String, params: Value| {
+        let session = session_rpc.clone();
+        Box::pin(async move { rpc(&session, &method, params).await })
     });
     let session_list = shared.clone();
     let name = server.name.clone();
@@ -587,6 +574,7 @@ async fn post(
 mod tests {
     use super::*;
     use cordis_base::config::{McpOAuthConfig, McpServer};
+    use cordis_base::types::ToolCall;
     use serde_json::json;
     use std::io;
     use std::sync::atomic::AtomicU32;
@@ -610,16 +598,16 @@ mod tests {
     async fn connect_with(
         server: &McpServer,
         hooks: LiveHooks,
-    ) -> Result<(Vec<protocol::ListedTool>, CallFn), String> {
+    ) -> Result<(Vec<protocol::ListedTool>, super::super::CallFn), String> {
         let (stop_tx, stop_rx) = watch::channel(false);
-        let (listed, call, _) = connect(server, hooks, stop_rx).await?;
+        let (listed, rpc, _) = connect(server, hooks, stop_rx).await?;
         std::mem::forget(stop_tx);
-        Ok((listed, call))
+        Ok((listed, super::super::call_via(rpc, false)))
     }
 
     async fn connect_test(
         server: &McpServer,
-    ) -> Result<(Vec<protocol::ListedTool>, CallFn), String> {
+    ) -> Result<(Vec<protocol::ListedTool>, super::super::CallFn), String> {
         connect_with(server, incoming::dummy_hooks(&server.name)).await
     }
 
@@ -974,8 +962,8 @@ mod tests {
     async fn modern_list_and_call() {
         let (url, handle) = spawn_server(Mode::Modern).await;
         let (listed, call) = connect_test(&http_server(url)).await.expect("connect");
-        assert_eq!(listed[0].0, "mcp_local__echo");
-        assert!(listed[0].2.contains("text"));
+        assert_eq!(listed[0].public, "mcp_local__echo");
+        assert!(listed[0].schema.contains("text"));
         let result = call(
             "mcp_local__echo".into(),
             ToolCall {
@@ -1022,7 +1010,7 @@ mod tests {
         let (listed, call) = connect_test(&http_server(url))
             .await
             .expect("legacy connect");
-        assert_eq!(listed[0].0, "mcp_local__ping");
+        assert_eq!(listed[0].public, "mcp_local__ping");
         let result = call(
             "mcp_local__ping".into(),
             ToolCall {
@@ -1040,7 +1028,7 @@ mod tests {
     async fn unsupported_version_negotiates_legacy() {
         let (url, handle) = spawn_server(Mode::UnsupportedThenLegacy).await;
         let (listed, _) = connect_test(&http_server(url)).await.expect("negotiate");
-        assert_eq!(listed[0].0, "mcp_local__ping");
+        assert_eq!(listed[0].public, "mcp_local__ping");
         handle.abort();
     }
 
@@ -1049,8 +1037,8 @@ mod tests {
         let (url, handle) = spawn_server(Mode::Paged).await;
         let (listed, _) = connect_test(&http_server(url)).await.expect("paged");
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].0, "mcp_local__a");
-        assert_eq!(listed[1].0, "mcp_local__b");
+        assert_eq!(listed[0].public, "mcp_local__a");
+        assert_eq!(listed[1].public, "mcp_local__b");
         handle.abort();
     }
 
@@ -1058,7 +1046,7 @@ mod tests {
     async fn session_404_rehandshakes_and_retries() {
         let (url, handle) = spawn_server(Mode::SessionDrop).await;
         let (listed, call) = connect_test(&http_server(url)).await.expect("drop");
-        assert_eq!(listed[0].0, "mcp_local__ping");
+        assert_eq!(listed[0].public, "mcp_local__ping");
         let result = call(
             "mcp_local__ping".into(),
             ToolCall {

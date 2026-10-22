@@ -131,7 +131,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(calls, 2);
-        assert_eq!(listed[0].0, "mcp_local__a");
-        assert_eq!(listed[1].0, "mcp_local__b");
+        assert_eq!(listed[0].public, "mcp_local__a");
+        assert_eq!(listed[1].public, "mcp_local__b");
     }
 }

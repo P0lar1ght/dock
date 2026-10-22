@@ -54,7 +54,7 @@
 | `tool-goal` | `"goal"` + `"tools"` | `update_goal`（按需） | Grok oneshot ack + drain，带续跑 waterfall | [goal](docs/tools/goal.md) |
 | `tool-lsp` | `"lsp"` + `"tools"` | `lsp`（按需） | Grok `LspManager`/`dispatch`，没服务器时 fail-open | [lsp](docs/tools/lsp.md) |
 | `tool-workflow` | `"workflows"` + `"tools"` | `workflow`（按需） | Grok Rhai 引擎 + listing 段 | [workflow](docs/tools/workflow.md) |
-| `mcp-client` | `"mcp"` + `"tools"` | `search_tool` `use_tool` | stdio + Streamable HTTP；BM25 检索、schema 去重、20KB 预算 | [mcp](docs/tools/mcp.md) |
+| `mcp-client` | `"mcp"` + `"tools"` | `search_tool` `use_tool` | stdio + Streamable HTTP；BM25 检索、schema 去重、20KB 预算；MCP Apps 界面 | [mcp](docs/tools/mcp.md) |
 | `dynamic-runner` | `"dynamicCordisRunner"` | — | 会话注册表 + 磁盘永久插件 | [cordis](docs/tools/cordis.md) |
 | `tool-cordis` | → `"tools"` | `cordis_*`（按需） | 预置工厂 + Rhai；热挂插件 | [cordis](docs/tools/cordis.md) |
 | `compact` | `"compact"` | — | Grok 会话压缩，85% 自动 | [compact](docs/tools/compact.md) |
