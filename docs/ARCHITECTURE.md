@@ -202,6 +202,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 
 - `user-edits`（`ORDER_STEP_START_USER_EDITS = 8`）：用户在 GUI 文件面板里改了文件（网关 `fs/write|mkdir|rename|trash` 记一条），这一页下一步提醒一次「文件变了、先重读」。按载荷 `identity` 取，子代理和别的页取不到。
 - `mcp-app-context`（`ORDER_STEP_START_MCP_APPS = 9`）：MCP App 界面经网关 `mcp/app/context` 交来的状态（`ui/update-model-context`），按页身份 + 会话 id、按界面只留最新一份，下一步提醒一次；界面交来的 `</system-reminder>` 先转义。
+- `mcp-app-views`（同一槽位）：界面自己登记的工具（网关 `mcp/app/view/expose`）在 `"tools"` 表里登记成动态工具 `app_<server>__<name>`；这一页能用的界面工具变了，下一步提醒一次（名字、说明、参数）。调用时找调用方这一页的界面，发 `mcp.appViews/call` 事件，网关只推给受信连接。
 - `tool-todo`（`ORDER_STEP_START_TODO = 10`）：待办列表连续 6 步没动且仍有未完成项时提醒勾选 / 调整，每轮最多 3 次（`Todos::revision()` 计数）。只在主会话生效 —— 子代理不 isolate `"todos"`，靠载荷里的 `identity` 判断；分页则**各有**一份 `"todos"`（`PER_TAB_SERVICES`），各提醒各的。
 
 **收不收尾是插件说了算。** 循环只跑 `agent/turn-end` 链、数轮数（硬止损 64 轮）、把胜出的正文落成 `SystemReminder`；`append` 不交给 handler，免得 reminder 插进 `tool_calls` 和它的 `ToolExecute` 之间。载荷 `TurnEnd` 带 `text` / `rounds` / `ended_with_text` / `queued_followups` / `identity`，handler 用 `keep_working(order, 正文)` 表态，order 小的赢。没有 handler 就正常收尾（fail-open）。handler **看不到链外的表态**，也就不知道自己赢没赢，所以自限配额这类账要用 `keep_working_with(order, 正文, on_win)` —— 循环选出胜者后只跑胜者的 `on_win`，输掉的那轮不扣（`settle` 取走所有权，扣两次这种事写不出来）。现有两个：
@@ -247,6 +248,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
   `tool-browser` 只剩 `/browser` 驾驶舱。按会话分标签页，会话身份走 `tools/call` 的 `_meta`。
   网关 `browser/view/*` 按 MCP 写的运行时名册找到会话的标签页，另开 CDP 连接推画面；客户端不碰 CDP 端口。
 - MCP Apps（`io.modelcontextprotocol/ui`）：MCP 客户端认工具 `_meta.ui`，网关 `mcp/app/*` 给桌面端读界面、转发界面的调用、
-  交界面上下文（spine 插件 `mcp-app-context` 经 `agent/step-start` 交给模型）。内联（Gen UI）还是常驻面板（UI Plugin）由桌面端按
+  交界面上下文（spine 插件 `mcp-app-context` 经 `agent/step-start` 交给模型）；界面自己的工具经 `mcp-app-views` 交给模型、
+  调用推回桌面端。内联（Gen UI）还是常驻面板（UI Plugin）由桌面端按
   标准信号（`ui/request-display-mode`）和用户动作定，不要服务器声明。内置白板是 `dock mcp whiteboard`（crate `cordis-apps`），
   场景按项目存在 `$DOCK_HOME/apps/whiteboard/`。

@@ -5,6 +5,7 @@ use crate::agent::loop_plugin::agent_loop;
 use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
 use crate::host::mcp_app_context::mcp_app_context;
+use crate::host::mcp_app_views::mcp_app_views;
 use crate::host::permissions::permissions;
 use crate::host::plugin_settings::plugin_settings;
 use crate::host::settings::settings;
@@ -127,6 +128,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(user_edits(), ())?.wait().await?;
     // MCP App 界面交来的状态（网关 `mcp/app/context`）：下一步提醒 agent。
     ctx.plugin(mcp_app_context(), ())?.wait().await?;
+    // MCP App 界面自己的工具（网关 `mcp/app/view/expose`）：界面开着时经 use_tool 交给模型。
+    ctx.plugin(mcp_app_views(), ())?.wait().await?;
     ctx.plugin(tui_slots(), ())?.wait().await?;
     ctx.plugin(status_items(), ())?.wait().await?;
     ctx.plugin(tool_views(), ())?.wait().await?;

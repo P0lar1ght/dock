@@ -3974,6 +3974,210 @@ async fn mcp_app_methods_are_trusted_and_feed_context_to_the_agent() {
     }
 }
 
+/// `mcp/app/view/*`：界面自己登记的工具。GUI 报上来后，下一轮模型的提醒里有它；模型调用
+/// 时 Dock 只往受信连接推 `mcp/app/view/call`（配对网页收不到、也调不了这几个方法），GUI 用
+/// `mcp/app/view/result` 送回结果；GUI 的连接断了，它报的工具一并收回，在等的调用马上报错。
+#[tokio::test]
+async fn mcp_app_view_tools_round_trip_through_the_trusted_gui_only() {
+    let root = harness_root_with(Some(Arc::new(EchoReminders))).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    root.plugin(cordis_spine::mcp_app_views(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let init = gui.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["mcpAppViewTools"], true,
+        "{init}"
+    );
+    let lease = init["result"]["connection"]["connectionLeaseId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let dir = project_dir("mcp-app-view");
+    let started = gui
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+
+    let exposed = gui
+        .call(
+            "mcp/app/view/expose",
+            json!({
+                "threadId": id,
+                "viewId": "view-1",
+                "connectionLeaseId": lease,
+                "server": "board",
+                "resourceUri": "ui://board/app.html",
+                "tools": [{
+                    "name": "get_selection",
+                    "description": "用户在白板上选中的元素",
+                    "inputSchema": { "type": "object", "properties": {} }
+                }]
+            }),
+        )
+        .await;
+    assert_eq!(
+        exposed["result"]["tools"],
+        json!(["app_board__get_selection"]),
+        "{exposed}"
+    );
+
+    // 下一轮：模型的提醒里有这颗工具和怎么调。
+    let _ = gui
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = gui
+        .call("turn/start", json!({ "threadId": id, "message": "继续" }))
+        .await;
+    let mut reply = String::new();
+    let start = tokio::time::Instant::now();
+    loop {
+        let left = Duration::from_secs(5).saturating_sub(start.elapsed());
+        let msg = tokio::time::timeout(left, gui.read.next())
+            .await
+            .unwrap_or_else(|_| panic!("等这一轮结束超时：{reply}"))
+            .unwrap()
+            .unwrap();
+        let note: Value = serde_json::from_str(&msg.into_text().unwrap()).unwrap();
+        if note["method"] == "item/message_delta" {
+            reply.push_str(note["params"]["delta"].as_str().unwrap_or(""));
+        }
+        if note["method"] == "turn/completed" {
+            break;
+        }
+    }
+    assert!(reply.contains("app_board__get_selection"), "{reply}");
+    assert!(reply.contains("用户在白板上选中的元素"), "{reply}");
+
+    // 同一网关上配对来的网页：调不了这几个方法，也收不到调用推送。
+    let h = Harness {
+        ctx: root.clone(),
+        addr,
+        http: reqwest::Client::new(),
+    };
+    let page_ticket = h.pair_ticket().await;
+    let mut page = Rpc::connect(addr, &page_ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    for (method, params) in [
+        (
+            "mcp/app/view/expose",
+            json!({ "viewId": "x", "server": "board", "resourceUri": "ui://board/app.html" }),
+        ),
+        (
+            "mcp/app/view/result",
+            json!({ "callId": "x", "error": "no" }),
+        ),
+    ] {
+        let denied = page.call(method, params).await;
+        assert_eq!(
+            denied["error"]["details"]["code"], "forbidden",
+            "配对网页不该能用 {method}：{denied}"
+        );
+    }
+
+    // 模型调这颗工具（直接走登记处，页键取 GUI 那个线程的页）：推给 GUI，GUI 回结果。
+    let views = root
+        .require::<cordis_spine::McpAppViews>(cordis_spine::MCP_APP_VIEWS)
+        .unwrap();
+    let page_key = views.page_of("view-1").expect("view-1 记在线程那一页上");
+    let running = {
+        let views = (*views).clone();
+        let page_key = page_key.clone();
+        tokio::spawn(async move {
+            views
+                .call(
+                    &page_key,
+                    cordis_base::types::ToolCall {
+                        id: "c1".into(),
+                        name: "app_board__get_selection".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+                .await
+        })
+    };
+    let pushed = gui
+        .wait_notification("mcp/app/view/call", Duration::from_secs(5))
+        .await;
+    assert_eq!(pushed["params"]["viewId"], "view-1", "{pushed}");
+    assert_eq!(pushed["params"]["name"], "get_selection", "{pushed}");
+    assert!(
+        pushed.get("__dockTrustedOnly").is_none(),
+        "内部记号不上线：{pushed}"
+    );
+    let call_id = pushed["params"]["callId"].as_str().unwrap().to_string();
+    let sent = gui
+        .call(
+            "mcp/app/view/result",
+            json!({
+                "callId": call_id,
+                "result": { "content": [{ "type": "text", "text": "选中了「登录」" }] }
+            }),
+        )
+        .await;
+    assert_eq!(sent["result"]["delivered"], true, "{sent}");
+    let out = running.await.unwrap();
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("选中了「登录」"), "{}", out.content);
+    // 配对网页那条连接上没有调用推送（它之后再问一个方法，收到的回包之前不该夹着推送）。
+    let probe = page.send("mcp/app/tools", json!({})).await;
+    let (_, notes) = page.collect(&[probe], Duration::from_secs(2)).await;
+    assert!(
+        notes.iter().all(|n| n["method"] != "mcp/app/view/call"),
+        "配对网页收到了界面工具调用：{notes:?}"
+    );
+
+    // GUI 断开：在等的调用马上报错，工具收回。
+    let running = {
+        let views = (*views).clone();
+        tokio::spawn(async move {
+            views
+                .call(
+                    &page_key,
+                    cordis_base::types::ToolCall {
+                        id: "c2".into(),
+                        name: "app_board__get_selection".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+                .await
+        })
+    };
+    let _ = gui
+        .wait_notification("mcp/app/view/call", Duration::from_secs(5))
+        .await;
+    drop(gui);
+    let out = tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("断开后在等的调用要马上结束")
+        .unwrap();
+    assert!(
+        out.is_error && out.content.contains("断开"),
+        "{}",
+        out.content
+    );
+    assert!(views.page_of("view-1").is_none(), "断开后收回");
+}
+
 /// `fs/write|mkdir|rename|trash`：GUI（受信连接）在文件面板里改工作区——保存（打开后被改过
 /// 回 `conflict`）、新建、改名 / 移动、出不了工作区；改完下一轮 agent 收到一条提醒。配对来的
 /// 网页一律 `forbidden`。废纸篓只测拒绝的路径：真扔会往跑测试那台机器的废纸篓里塞东西。

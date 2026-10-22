@@ -139,3 +139,7 @@ pub const PLUGIN_SETTINGS_CHANGED: &str = "plugin.settings/changed";
 pub const USER_EDITS: &str = "user.edits";
 /// MCP App 界面交来的上下文（[`crate::McpAppContext`]）：按页、按界面留最新一份，下一步提醒 agent。
 pub const MCP_APP_CONTEXT_STORE: &str = "mcp.appContext";
+/// MCP App 界面自己的工具（[`crate::McpAppViews`]）：界面开着时交给模型调。
+pub const MCP_APP_VIEWS: &str = "mcp.appViews";
+/// 模型调了一颗界面工具，要桌面端交给界面跑；载荷 [`crate::ViewCall`]。
+pub const MCP_APP_VIEW_CALL: &str = "mcp.appViews/call";

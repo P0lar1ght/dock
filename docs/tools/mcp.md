@@ -30,4 +30,8 @@ Dock 按 [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview)（
   - `app_tools()`：带界面或只给界面用的工具；
   - `read_resource(server, uri)`：`resources/read`；
   - `call_from_app(page, server, tool, args)`：界面发起的调用，只认 `visibility` 含 `app`、没在 `/mcps` 停用、不过权限门的工具，不进对话流。
+- 界面自己登记的工具（`appCapabilities.tools`）：桌面端经网关 `mcp/app/view/*` 报上来，spine 插件
+  `mcp-app-views` 按 `app_<server>__<name>` 登记成动态工具（经 `use_tool` 调），调用时推回桌面端交给
+  那个界面跑；只有打开界面的那个会话调得到，界面关了 / 连接断了就收回。细节见
+  `cordis-gateway/README.md`「界面自己的工具」。
 - TUI 不渲染界面：同一个工具在终端里只是普通 MCP 工具。

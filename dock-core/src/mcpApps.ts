@@ -149,6 +149,55 @@ export function appToolArgs(toolName: string, args: unknown): Record<string, unk
   return obj(input);
 }
 
+/** 界面自己登记的一颗工具（规范 `appCapabilities.tools`），报给 `mcp/app/view/expose` 的样子。 */
+export interface McpAppViewTool {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+/** Dock 推来的 `mcp/app/view/call`：模型调了 `viewId` 那个界面的一颗工具。 */
+export interface McpAppViewCall {
+  viewId: string;
+  callId: string;
+  /** 界面里登记的原名（`tools/call` 用它）。 */
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+/**
+ * 界面 `tools/list` 的结果整理成要报给 Dock 的工具：没名字的丢掉、同名只留第一颗，
+ * 说明只认字符串、参数 schema 只认对象。界面是第三方代码，别的字段不转。
+ */
+export function viewToolsForExpose(listed: unknown): McpAppViewTool[] {
+  const raw = obj(listed).tools;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: McpAppViewTool[] = [];
+  for (const item of raw) {
+    const t = obj(item);
+    const name = str(t.name);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const tool: McpAppViewTool = { name };
+    if (typeof t.description === 'string' && t.description) tool.description = t.description;
+    const schema = t.inputSchema;
+    if (schema !== null && typeof schema === 'object' && !Array.isArray(schema)) tool.inputSchema = obj(schema);
+    out.push(tool);
+  }
+  return out;
+}
+
+/** `mcp/app/view/call` 的参数；缺 `viewId` / `callId` / `name` 回 `null`。 */
+export function parseViewCall(params: unknown): McpAppViewCall | null {
+  const p = obj(params);
+  const viewId = str(p.viewId);
+  const callId = str(p.callId);
+  const name = str(p.name);
+  if (!viewId || !callId || !name) return null;
+  return { viewId, callId, name, arguments: obj(p.arguments) };
+}
+
 /** 名字像 MCP 工具（`mcp_{server}__{tool}`）：`mcp/app/tools` 里没有时值得重拉一次。 */
 export function looksLikeMcpTool(toolName: string, args: unknown): boolean {
   const name = viewToolName(toolName, args);

@@ -22,6 +22,9 @@ use crate::protocol::RpcError;
 /// Named service key.
 pub const GATEWAY_METHODS: &str = "gateway.methods";
 
+/// [`GatewayMethods::notify_trusted`] 在信封上打的记号；连接推送前摘掉，不上线。
+pub(crate) const TRUSTED_ONLY_MARK: &str = "__dockTrustedOnly";
+
 /// 一个方法怎么跑、谁能调。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MethodPolicy {
@@ -105,6 +108,18 @@ impl GatewayMethods {
     pub fn notify(&self, method: &str, params: Value) {
         if let Some(tx) = &self.notices {
             let _ = tx.send(serde_json::json!({ "method": method, "params": params }));
+        }
+    }
+
+    /// 同 [`Self::notify`]，但只推受信连接（桌面 GUI 的 ticket、设备令牌）：载荷带着不该
+    /// 给配对网页看的东西（如模型交给界面工具的参数）。
+    pub fn notify_trusted(&self, method: &str, params: Value) {
+        if let Some(tx) = &self.notices {
+            let _ = tx.send(serde_json::json!({
+                "method": method,
+                "params": params,
+                TRUSTED_ONLY_MARK: true,
+            }));
         }
     }
 
