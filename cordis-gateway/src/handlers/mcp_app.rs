@@ -92,7 +92,7 @@ fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {
         .get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| RpcError::invalid_params(format!("{key} is required")))
+        .ok_or_else(|| RpcError::invalid_params(format!("缺少参数 {key}")))
 }
 
 fn tool_value(t: &McpAppTool) -> Value {
@@ -126,7 +126,8 @@ async fn resource(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
     ui_resource(uri, &read)
 }
 
-/// `ReadResourceResult` → 界面资源。优先同 uri 的那一项，再退到第一项。
+/// `ReadResourceResult` → 界面资源。规范要求：同 uri 的那一项，MIME 是
+/// `text/html;profile=mcp-app`（也认没带 profile 的 `text/html`）。对不上就报错，不拿别的资源顶。
 fn ui_resource(uri: &str, read: &Value) -> Result<Value, RpcError> {
     let contents = read
         .get("contents")
@@ -136,8 +137,18 @@ fn ui_resource(uri: &str, read: &Value) -> Result<Value, RpcError> {
     let item = contents
         .iter()
         .find(|c| c.get("uri").and_then(Value::as_str) == Some(uri))
-        .or_else(|| contents.first())
         .ok_or_else(|| RpcError::app("not_found", format!("MCP 服务没有返回 {uri} 的内容")))?;
+    let mime = item.get("mimeType").and_then(Value::as_str).unwrap_or("");
+    if !mime
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("text/html")
+    {
+        return Err(RpcError::app(
+            "invalid",
+            format!("{uri} 不是界面资源（MIME 是「{mime}」，要 text/html;profile=mcp-app）"),
+        ));
+    }
     let html = if let Some(text) = item.get("text").and_then(Value::as_str) {
         text.to_string()
     } else if let Some(blob) = item.get("blob").and_then(Value::as_str) {
@@ -166,7 +177,7 @@ async fn call(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
     let tool = str_param(&params, "tool")?.to_string();
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
     if !arguments.is_object() {
-        return Err(RpcError::invalid_params("arguments must be an object"));
+        return Err(RpcError::invalid_params("arguments 要是对象"));
     }
     let page = open_page(gateway, &params)?;
     mcp(gateway)?
@@ -192,23 +203,19 @@ fn context(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let content = match params.get("content") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(blocks)) => blocks.clone(),
-        Some(_) => return Err(RpcError::invalid_params("content must be an array")),
+        Some(_) => return Err(RpcError::invalid_params("content 要是数组")),
     };
     let structured = match params.get("structuredContent") {
         None | Some(Value::Null) => None,
         Some(v @ Value::Object(_)) => Some(v.clone()),
-        Some(_) => {
-            return Err(RpcError::invalid_params(
-                "structuredContent must be an object",
-            ))
-        }
+        Some(_) => return Err(RpcError::invalid_params("structuredContent 要是对象")),
     };
     let page = open_page(gateway, &params)?;
     record_app_context(
         &page.ctx,
         &format!("{server} {uri}"),
         AppContextUpdate {
-            label: server.to_string(),
+            label: format!("{server} {uri}"),
             content,
             structured,
         },
@@ -246,11 +253,21 @@ mod tests {
         let blob = base64::engine::general_purpose::STANDARD.encode("<b>hi</b>");
         let got = ui_resource(
             "ui://a",
-            &json!({ "contents": [{ "uri": "ui://a", "blob": blob }] }),
+            &json!({ "contents": [{ "uri": "ui://a", "mimeType": "text/html;profile=mcp-app", "blob": blob }] }),
         )
         .unwrap();
         assert_eq!(got["html"], "<b>hi</b>");
         assert!(ui_resource("ui://a", &json!({ "contents": [] })).is_err());
-        assert!(ui_resource("ui://a", &json!({ "contents": [{ "uri": "ui://a" }] })).is_err());
+        assert!(ui_resource(
+            "ui://a",
+            &json!({ "contents": [{ "uri": "ui://a", "mimeType": "text/html" }] })
+        )
+        .is_err());
+        // 没有同 uri 的那一项、MIME 不是 HTML：报错，不拿别的顶。
+        let other =
+            json!({ "contents": [{ "uri": "ui://other", "mimeType": "text/html", "text": "x" }] });
+        assert!(ui_resource("ui://a", &other).is_err());
+        let json_item = json!({ "contents": [{ "uri": "ui://a", "mimeType": "application/json", "text": "{}" }] });
+        assert!(ui_resource("ui://a", &json_item).is_err());
     }
 }

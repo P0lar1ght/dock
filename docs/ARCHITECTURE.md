@@ -72,7 +72,7 @@ config.toml.example      用户 / 项目模型目录样例
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
 | 宿主契约 | `session_actor` 提供 `session` / `session.port`（`SessionRef`）；`tabs` 提供 `Tabs` | 同名 |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing`；`tui` 只跑事件循环，视图件由组合根挂（`cordis_tui::views()`） | 同名 |
-| 回环网关 | `gateway`；功能插件 `gateway.settings` `gateway.presets` `gateway.fs` `gateway.canvas` `gateway.vcs` `gateway.schedule` `gateway.surfaces` `gateway.status` `gateway.toolViews` `gateway.pluginSettings`（`cordis_gateway::features()`，往 `"gateway.methods"` 登记 dock.1 方法） | `"gateway"`（`GatewayRef`）、`"gateway.methods"`，事件 `gateway/pairing` |
+| 回环网关 | `gateway`；功能插件 `gateway.settings` `gateway.presets` `gateway.fs` `gateway.canvas` `gateway.mcpApps` `gateway.vcs` `gateway.schedule` `gateway.surfaces` `gateway.status` `gateway.toolViews` `gateway.pluginSettings`（`cordis_gateway::features()`，往 `"gateway.methods"` 登记 dock.1 方法） | `"gateway"`（`GatewayRef`）、`"gateway.methods"`，事件 `gateway/pairing` |
 
 `settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。`meta.json` 记着这个会话的预设、模型、推理强度；恢复（`/resume`、`--resume`、开页）时 `Sessions::restore` live-lookup 这一页的 `settings` 把模型和强度切回去，模型已不在目录里就留着当前的。
 
@@ -201,6 +201,7 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 **中途盯梢也是插件说了算。** `agent/step-start` 每个采样步之前跑一次 —— `agent/pre-step` 是每轮一次、`agent/turn-end` 是收尾一次，都盯不住跑起来的一轮。载荷 `StepStart` 带 `step`（本轮已采样步数，续跑不清零）和 `identity`，handler 用 `remind(order, 正文)` 排队，循环按 order 顺序落成 `SystemReminder`。带 per-turn 状态的 handler 在 `step == 0` 自己重置，循环不替谁存状态。例如：
 
 - `user-edits`（`ORDER_STEP_START_USER_EDITS = 8`）：用户在 GUI 文件面板里改了文件（网关 `fs/write|mkdir|rename|trash` 记一条），这一页下一步提醒一次「文件变了、先重读」。按载荷 `identity` 取，子代理和别的页取不到。
+- `mcp-app-context`（`ORDER_STEP_START_MCP_APPS = 9`）：MCP App 界面经网关 `mcp/app/context` 交来的状态（`ui/update-model-context`），按页身份 + 会话 id、按界面只留最新一份，下一步提醒一次；界面交来的 `</system-reminder>` 先转义。
 - `tool-todo`（`ORDER_STEP_START_TODO = 10`）：待办列表连续 6 步没动且仍有未完成项时提醒勾选 / 调整，每轮最多 3 次（`Todos::revision()` 计数）。只在主会话生效 —— 子代理不 isolate `"todos"`，靠载荷里的 `identity` 判断；分页则**各有**一份 `"todos"`（`PER_TAB_SERVICES`），各提醒各的。
 
 **收不收尾是插件说了算。** 循环只跑 `agent/turn-end` 链、数轮数（硬止损 64 轮）、把胜出的正文落成 `SystemReminder`；`append` 不交给 handler，免得 reminder 插进 `tool_calls` 和它的 `ToolExecute` 之间。载荷 `TurnEnd` 带 `text` / `rounds` / `ended_with_text` / `queued_followups` / `identity`，handler 用 `keep_working(order, 正文)` 表态，order 小的赢。没有 handler 就正常收尾（fail-open）。handler **看不到链外的表态**，也就不知道自己赢没赢，所以自限配额这类账要用 `keep_working_with(order, 正文, on_win)` —— 循环选出胜者后只跑胜者的 `on_win`，输掉的那轮不扣（`settle` 取走所有权，扣两次这种事写不出来）。现有两个：
