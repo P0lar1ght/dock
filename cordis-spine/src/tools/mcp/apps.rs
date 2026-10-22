@@ -177,10 +177,13 @@ impl Mcp {
             .flat_map(|slot| {
                 slot.listed
                     .iter()
+                    // 模型看得见的：挂了界面才列；模型看不见的：界面能用才列（两边都不可见的不列）。
                     .filter(|t| {
-                        let (model, app) = (t.ui.model_visible(), t.ui.app_visible());
-                        // 带界面且有人能用的，或只给界面用的；两边都不可见的不列。
-                        (t.ui.resource_uri.is_some() && (model || app)) || (app && !model)
+                        if t.ui.model_visible() {
+                            t.ui.resource_uri.is_some()
+                        } else {
+                            t.ui.app_visible()
+                        }
                     })
                     .map(|t| app_tool(&slot.config.name, t))
             })
