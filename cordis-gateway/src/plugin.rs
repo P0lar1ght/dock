@@ -129,6 +129,7 @@ pub fn features() -> Vec<Plugin> {
         crate::handlers::preset::gateway_presets(),
         crate::handlers::fs::gateway_fs(),
         crate::handlers::canvas::gateway_canvas(),
+        crate::handlers::mcp_app::gateway_mcp_apps(),
         crate::handlers::vcs::gateway_vcs(),
         crate::handlers::schedule::gateway_schedule(),
         crate::handlers::side_chat::gateway_side_chat(),

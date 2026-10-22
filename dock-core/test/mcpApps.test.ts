@@ -1,0 +1,89 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import {
+  appAllow,
+  appCsp,
+  appKey,
+  appToolFor,
+  cleanSources,
+  looksLikeMcpTool,
+  parseMcpAppCallRecord,
+  parseMcpAppResource,
+  parseMcpAppTools,
+} from '../src/index.ts';
+
+const tools = parseMcpAppTools({
+  tools: [
+    { server: 'board', name: 'draw', publicName: 'mcp_board__draw', resourceUri: 'ui://board/app.html', modelVisible: true, appVisible: true },
+    { server: 'board', name: 'save', publicName: 'mcp_board__save', resourceUri: 'ui://board/app.html', modelVisible: false },
+    { server: 'board', name: 'load', resourceUri: null, modelVisible: false },
+    { server: 'x', name: 'bad', resourceUri: 'https://evil/app' },
+    { name: 'no-server' },
+  ],
+});
+
+test('mcp/app/tools：缺省补齐，不是 ui:// 的资源不认，缺 server / name 的丢掉', () => {
+  assert.equal(tools.length, 4);
+  assert.equal(tools[1].modelVisible, false);
+  assert.equal(tools[1].appVisible, true);
+  assert.equal(tools[2].publicName, 'mcp_board__load');
+  assert.equal(tools[3].resourceUri, null);
+  assert.deepEqual(parseMcpAppTools(null), []);
+});
+
+test('工具卡认界面：直调和经 use_tool 都认，没有资源的不算', () => {
+  assert.equal(appToolFor(tools, 'mcp_board__draw', {})?.name, 'draw');
+  assert.equal(appToolFor(tools, 'use_tool', { tool_name: 'mcp_board__draw', tool_input: {} })?.name, 'draw');
+  assert.equal(appToolFor(tools, 'mcp_board__load', {}), null);
+  assert.equal(appToolFor(tools, 'bash', {}), null);
+  assert.equal(looksLikeMcpTool('use_tool', { tool_name: 'mcp_new__x' }), true);
+  assert.equal(looksLikeMcpTool('bash', {}), false);
+  assert.equal(appKey('board', 'ui://board/app.html'), 'board ui://board/app.html');
+});
+
+test('mcp/app/resource 与 mcp/app/result 的外形', () => {
+  const r = parseMcpAppResource({
+    uri: 'ui://board/app.html',
+    mimeType: 'text/html;profile=mcp-app',
+    html: '<p>hi</p>',
+    csp: { connectDomains: ['https://api.x'] },
+    permissions: { clipboardWrite: {} },
+    domain: null,
+    prefersBorder: false,
+  });
+  assert.equal(r?.html, '<p>hi</p>');
+  assert.deepEqual(r?.csp?.resourceDomains, []);
+  assert.equal(r?.prefersBorder, false);
+  assert.equal(parseMcpAppResource({ uri: 'ui://a' }), null);
+
+  const call = parseMcpAppCallRecord({
+    call: { server: 'board', tool: 'draw', resourceUri: 'ui://board/app.html', arguments: { a: 1 }, result: { content: [] } },
+  });
+  assert.equal(call?.arguments.a, 1);
+  assert.equal(parseMcpAppCallRecord({ call: null }), null);
+});
+
+test('CSP：默认不联网；来源只认干净的 scheme://host，塞不进别的指令', () => {
+  const none = appCsp(null);
+  assert.match(none, /connect-src 'none'/);
+  assert.match(none, /frame-src 'none'/);
+  assert.match(none, /default-src 'none'/);
+
+  const csp = appCsp({
+    connectDomains: ['https://api.x.com', "https://a.com; script-src *", 'http://evil.com', 'http://localhost:5173'],
+    resourceDomains: ['https://*.cdn.com/', "'unsafe-hashes'", '*', 'data:'],
+    frameDomains: ['https://www.youtube.com'],
+    baseUriDomains: [],
+  });
+  assert.match(csp, /connect-src https:\/\/api\.x\.com http:\/\/localhost:5173;/);
+  assert.match(csp, /script-src [^;]*https:\/\/\*\.cdn\.com/);
+  assert.match(csp, /frame-src https:\/\/www\.youtube\.com;/);
+  assert.doesNotMatch(csp, /evil|a\.com;|unsafe-hashes| \*[ ;]/);
+  assert.deepEqual(cleanSources(['https://a.com', 'https://a.com/']), ['https://a.com']);
+});
+
+test('权限 → iframe allow：只照给写剪贴板，摄像头 / 麦克风 / 定位不给', () => {
+  assert.equal(appAllow({ clipboardWrite: {}, camera: {}, microphone: {}, geolocation: {} }), 'clipboard-write');
+  assert.equal(appAllow(null), '');
+});
