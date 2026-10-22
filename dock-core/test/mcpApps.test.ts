@@ -83,7 +83,7 @@ test('CSP：默认不联网；来源只认干净的 scheme://host，塞不进别
   assert.deepEqual(cleanSources(['https://a.com', 'https://a.com/']), ['https://a.com']);
 });
 
-test('权限 → iframe allow', () => {
-  assert.equal(appAllow({ clipboardWrite: {}, camera: {} }), 'camera; clipboard-write');
+test('权限 → iframe allow：只照给写剪贴板，摄像头 / 麦克风 / 定位不给', () => {
+  assert.equal(appAllow({ clipboardWrite: {}, camera: {}, microphone: {}, geolocation: {} }), 'clipboard-write');
   assert.equal(appAllow(null), '');
 });

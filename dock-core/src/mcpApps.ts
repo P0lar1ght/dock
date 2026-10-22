@@ -172,6 +172,8 @@ export function appCsp(csp: McpAppCsp | null): string {
   const base = cleanSources(csp?.baseUriDomains ?? []);
   const join = (...parts: string[]) => parts.filter(Boolean).join(' ');
   const r = res.join(' ');
+  // 'unsafe-eval'：单文件打包的界面（Excalidraw 之类）里常有 new Function。界面跑在只给
+  // allow-scripts 的沙箱 iframe 里（不同源），碰不到宿主，所以放开它不扩大能拿到的东西。
   return [
     "default-src 'none'",
     `script-src ${join("'unsafe-inline'", "'unsafe-eval'", 'data:', 'blob:', r)}`,
@@ -188,15 +190,13 @@ export function appCsp(csp: McpAppCsp | null): string {
   ].join('; ');
 }
 
-/** 资源 `_meta.ui.permissions` → iframe `allow`（规范：宿主可以照给，界面不该假定拿到）。 */
+/**
+ * 资源 `_meta.ui.permissions` → iframe `allow`（规范：宿主可以照给，界面不该假定拿到）。
+ * 只照给写剪贴板；摄像头、麦克风、定位要宿主先问过用户，现在一律不给。
+ */
 export function appAllow(permissions: Record<string, unknown> | null): string {
   if (!permissions) return '';
-  const map: [string, string][] = [
-    ['camera', 'camera'],
-    ['microphone', 'microphone'],
-    ['geolocation', 'geolocation'],
-    ['clipboardWrite', 'clipboard-write'],
-  ];
+  const map: [string, string][] = [['clipboardWrite', 'clipboard-write']];
   return map
     .filter(([key]) => permissions[key] !== undefined && permissions[key] !== null && permissions[key] !== false)
     .map(([, feature]) => feature)
