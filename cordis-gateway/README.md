@@ -524,7 +524,8 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 | `mcp/app/context { threadId?, server, resourceUri, content?, structuredContent? }` | `ui/update-model-context`：按线程、按界面只留最新一份，下一步交给模型 |
 
 - `resource` 只读 `ui://`（别的 `invalid_params`）；后四项来自资源内容的 `_meta.ui`，没有是 `null`。
-- `read` 不限 `ui://`（宿主声明了 `serverResources`），整份回复上限 48 MB（`too_large`）。
+- `read` 不限 `ui://`（宿主声明了 `serverResources`），整份回复上限 48 MB（`too_large`）：
+  只防一帧太大占住连接；`blob` 是 base64，约合 36 MB 原始数据。
 - `call` 只认 `visibility` 含 `app`、没在 `/mcps` 停用、不过权限门的工具，不进对话流。
 - 交给界面的工具输入（`tool-input`）是那颗工具自己的参数：经 `use_tool` 调的要拆掉外层
   （dock-core `appToolArgs`）。
