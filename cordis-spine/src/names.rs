@@ -137,3 +137,5 @@ pub const PLUGIN_SETTINGS: &str = "plugin.settings";
 pub const PLUGIN_SETTINGS_CHANGED: &str = "plugin.settings/changed";
 /// 用户在文件面板里改的文件（[`crate::UserEdits`]）：按页攒着，下一步提醒 agent。
 pub const USER_EDITS: &str = "user.edits";
+/// MCP App 界面交来的上下文（[`crate::McpAppContext`]）：按页、按界面留最新一份，下一步提醒 agent。
+pub const MCP_APP_CONTEXT: &str = "mcp.appContext";

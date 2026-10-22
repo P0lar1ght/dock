@@ -91,7 +91,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `features()` 是本 crate 自带的那几颗：
   - `gateway.settings`（设置页，全部 `trusted_only`）
   - `gateway.presets`（`preset/*`、`tool/catalog`）
-  - `gateway.fs`（`fs/*`）、`gateway.canvas`（`canvas/*`）
+  - `gateway.fs`（`fs/*`）、`gateway.canvas`（`canvas/*`）、`gateway.mcpApps`（`mcp/app/*`）
   - `gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`（`schedule/*`）
   - `gateway.surfaces`（`surface/*`）、`gateway.status`（`status/list`）
   - `gateway.toolViews`（`tool/views`、`tool/view`）、`gateway.pluginSettings`（`plugin/settings/*`）
@@ -507,6 +507,27 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 关着的会话从名册找目录，历史会话的画布也读得到；还没落过盘的新会话回空列表。
 - `canvasId` 只认 `canvas-<n>`（`invalid`）；没有这个画布 / 这一版回 `not_found`。
 - 不推通知：客户端看 `canvas_*` 的工具项刷新。不占连接锁，读盘在阻塞线程里。
+
+### MCP Apps（能力 `mcpApps`，`handlers/mcp_app.rs`）
+
+MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps」）。
+桌面端把界面放进沙箱 iframe，界面经 postMessage 跟桌面端说话，桌面端再走下面这些方法。
+全部只认受信连接（`mcp/` 前缀强制），配对来的网页 `forbidden`。
+
+| 方法 | 作用 |
+|---|---|
+| `mcp/app/tools {}` | 带界面或只给界面用的工具：`tools[{ server, name, publicName, description, inputSchema, resourceUri, modelVisible, appVisible }]` |
+| `mcp/app/resource { server, uri }` | 读界面资源：`{ uri, mimeType, html, csp, permissions, domain, prefersBorder }` |
+| `mcp/app/call { threadId?, server, tool, arguments? }` | 界面发起的 `tools/call`，回规范的 `CallToolResult` |
+| `mcp/app/result { threadId?, toolCallId }` | 模型那次调用的原始结果：`{ call: { server, tool, resourceUri, arguments, result } \| null }` |
+| `mcp/app/context { threadId?, server, resourceUri, content?, structuredContent? }` | `ui/update-model-context`：按线程、按界面只留最新一份，下一步交给模型 |
+
+- `resource` 只读 `ui://`（别的 `invalid_params`）；后四项来自资源内容的 `_meta.ui`，没有是 `null`。
+- `call` 只认 `visibility` 含 `app`、没在 `/mcps` 停用、不过权限门的工具，不进对话流。
+- `call` / `context` 要线程开着（`not_open`）；`result` 关着的会话也能读（从名册找目录）。
+- MCP 服务那边出错一律 `mcp`，消息是服务给的原文。
+- 不推通知：带界面的工具变了（服务器重连、`tools/list_changed`），客户端遇到不认识的
+  `mcp_*` 工具时重拉 `mcp/app/tools`。
 
 ### 压缩进展（能力 `compactionProgress`）
 

@@ -529,6 +529,9 @@ pub const ORDER_STEP_START_INSTRUCTIONS: i32 = 5;
 pub const ORDER_STEP_START_MEMORY: i32 = 7;
 /// 用户在文件面板里直接改了文件（GUI）：排在待办之前，先知道文件变了再催办。
 pub const ORDER_STEP_START_USER_EDITS: i32 = 8;
+/// MCP App 界面交来的最新状态（`ui/update-model-context`）：同属「外面变了」，排在用户
+/// 改文件之后、待办之前。
+pub const ORDER_STEP_START_MCP_APPS: i32 = 9;
 pub const ORDER_STEP_START_TODO: i32 = 10;
 /// 目标模式的定期自查（每用掉一批请求提醒模型对照完成标准收尾）。
 pub const ORDER_STEP_START_GOAL: i32 = 20;

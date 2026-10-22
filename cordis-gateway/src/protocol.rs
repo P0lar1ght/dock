@@ -95,6 +95,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `plugin/settings/list|get|set` + 推送 `plugin/settings/changed`：插件声明的设置卡，
     // 设置页按 schema 生成表单。只认受信连接。
     ("pluginSettings", true),
+    // `mcp/app/tools|resource|call|result|context`：MCP Apps 宿主接口（`ui://` 界面、界面发起
+    // 的调用、模型那次调用的原始结果、界面交给模型的上下文）。只认受信连接。
+    ("mcpApps", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -292,6 +295,14 @@ pub const CANVAS_LIST: &str = "canvas/list";
 pub const CANVAS_GET: &str = "canvas/get";
 pub const CANVAS_SET_DATA: &str = "canvas/setData";
 pub const CANVAS_ROLLBACK: &str = "canvas/rollback";
+
+/// MCP Apps 宿主接口：带界面的工具 / 读界面资源 / 界面发起的调用 / 模型调用的原始结果 /
+/// 界面交给模型的上下文。
+pub const MCP_APP_TOOLS: &str = "mcp/app/tools";
+pub const MCP_APP_RESOURCE: &str = "mcp/app/resource";
+pub const MCP_APP_CALL: &str = "mcp/app/call";
+pub const MCP_APP_RESULT: &str = "mcp/app/result";
+pub const MCP_APP_CONTEXT: &str = "mcp/app/context";
 pub const IMAGE_INPUTS_LIMITS_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]

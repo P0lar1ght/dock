@@ -73,7 +73,10 @@ pub async fn dispatch(
 }
 
 /// 会话目录。开着但还没落过盘的页是 `None`（不替它新建目录）。
-fn session_dir(gateway: &GatewayHandle, params: &Value) -> Result<Option<PathBuf>, RpcError> {
+pub(crate) fn session_dir(
+    gateway: &GatewayHandle,
+    params: &Value,
+) -> Result<Option<PathBuf>, RpcError> {
     let id = threads::thread_param(params);
     if let Ok(page) = threads::resolve(gateway, &id) {
         let sessions = page.sessions()?;

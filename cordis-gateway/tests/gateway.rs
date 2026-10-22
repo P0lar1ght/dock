@@ -3799,6 +3799,167 @@ impl Sampler for EchoReminders {
     }
 }
 
+/// `mcp/app/*`：MCP Apps 的宿主接口，只认受信连接。界面经 `mcp/app/context` 交来的状态，
+/// 下一轮在 agent 的提醒里（同一界面只留最新一份）；`mcp/app/result` 读模型那次调用存在
+/// 会话目录里的原始结果；没有那台服务器时 `tools` 为空、`resource` / `call` 回 `mcp` 错误。
+#[tokio::test]
+async fn mcp_app_methods_are_trusted_and_feed_context_to_the_agent() {
+    let root = harness_root_with(Some(Arc::new(EchoReminders))).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    root.plugin(cordis_spine::mcp_app_context(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let dir = project_dir("mcp-app");
+    let started = gui
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+
+    let tools = gui.call("mcp/app/tools", json!({})).await;
+    assert_eq!(tools["result"]["tools"], json!([]), "{tools}");
+    let read = gui
+        .call(
+            "mcp/app/resource",
+            json!({ "server": "board", "uri": "ui://board/app.html" }),
+        )
+        .await;
+    assert_eq!(read["error"]["details"]["code"], "mcp", "{read}");
+    let not_ui = gui
+        .call(
+            "mcp/app/resource",
+            json!({ "server": "board", "uri": "file:///etc/passwd" }),
+        )
+        .await;
+    assert_eq!(
+        not_ui["error"]["details"]["code"], "invalid_params",
+        "{not_ui}"
+    );
+    let called = gui
+        .call(
+            "mcp/app/call",
+            json!({ "threadId": id, "server": "board", "tool": "save" }),
+        )
+        .await;
+    assert_eq!(called["error"]["details"]["code"], "mcp", "{called}");
+
+    for text in ["3 个方框", "5 个方框，选中了「登录」"] {
+        let set = gui
+            .call(
+                "mcp/app/context",
+                json!({
+                    "threadId": id,
+                    "server": "board",
+                    "resourceUri": "ui://board/app.html",
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": { "shapes": 5 }
+                }),
+            )
+            .await;
+        assert_eq!(set["result"], json!({}), "{set}");
+    }
+    let _ = gui
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = gui
+        .call("turn/start", json!({ "threadId": id, "message": "继续" }))
+        .await;
+    let mut reply = String::new();
+    let start = tokio::time::Instant::now();
+    loop {
+        let left = Duration::from_secs(5).saturating_sub(start.elapsed());
+        let msg = tokio::time::timeout(left, gui.read.next())
+            .await
+            .unwrap_or_else(|_| panic!("等这一轮结束超时：{reply}"))
+            .unwrap()
+            .unwrap();
+        let note: Value = serde_json::from_str(&msg.into_text().unwrap()).unwrap();
+        if note["method"] == "item/message_delta" {
+            reply.push_str(note["params"]["delta"].as_str().unwrap_or(""));
+        }
+        if note["method"] == "turn/completed" {
+            break;
+        }
+    }
+    assert!(reply.contains("MCP App 界面更新了它的状态"), "{reply}");
+    assert!(reply.contains("选中了「登录」"), "{reply}");
+    assert!(reply.contains(r#"{"shapes":5}"#), "{reply}");
+    assert!(!reply.contains("3 个方框"), "同一界面只留最新一份：{reply}");
+
+    // 模型那次调用的原始结果（spine 存在会话目录的 `mcp-apps/` 里）。
+    let missing = gui
+        .call(
+            "mcp/app/result",
+            json!({ "threadId": id, "toolCallId": "call-1" }),
+        )
+        .await;
+    assert_eq!(missing["result"]["call"], Value::Null, "{missing}");
+    let records = cordis_spine::sessions_cwd_dir(&dir)
+        .join(&id)
+        .join(cordis_spine::APP_RECORD_DIR);
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(
+        records.join("call-1.json"),
+        json!({ "server": "board", "tool": "draw", "resourceUri": "ui://board/app.html",
+                "arguments": {}, "result": { "content": [], "structuredContent": { "shapes": 5 } } })
+        .to_string(),
+    )
+    .unwrap();
+    let got = gui
+        .call(
+            "mcp/app/result",
+            json!({ "threadId": id, "toolCallId": "call-1" }),
+        )
+        .await;
+    assert_eq!(
+        got["result"]["call"]["result"]["structuredContent"]["shapes"], 5,
+        "{got}"
+    );
+
+    let h = Harness::boot().await;
+    let page_ticket = h.pair_ticket().await;
+    let mut page = Rpc::connect(h.addr, &page_ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    for (method, params) in [
+        ("mcp/app/tools", json!({})),
+        (
+            "mcp/app/resource",
+            json!({ "server": "board", "uri": "ui://board/app.html" }),
+        ),
+        ("mcp/app/call", json!({ "server": "board", "tool": "save" })),
+        ("mcp/app/result", json!({ "toolCallId": "call-1" })),
+        (
+            "mcp/app/context",
+            json!({ "server": "board", "resourceUri": "ui://board/app.html" }),
+        ),
+    ] {
+        let denied = page.call(method, params).await;
+        assert_eq!(
+            denied["error"]["details"]["code"], "forbidden",
+            "配对网页不该能用 {method}：{denied}"
+        );
+    }
+}
+
 /// `fs/write|mkdir|rename|trash`：GUI（受信连接）在文件面板里改工作区——保存（打开后被改过
 /// 回 `conflict`）、新建、改名 / 移动、出不了工作区；改完下一轮 agent 收到一条提醒。配对来的
 /// 网页一律 `forbidden`。废纸篓只测拒绝的路径：真扔会往跑测试那台机器的废纸篓里塞东西。

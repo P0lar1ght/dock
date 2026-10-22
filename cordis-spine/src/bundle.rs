@@ -4,6 +4,7 @@ use crate::agent::agents::agents;
 use crate::agent::loop_plugin::agent_loop;
 use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
+use crate::host::mcp_app_context::mcp_app_context;
 use crate::host::permissions::permissions;
 use crate::host::plugin_settings::plugin_settings;
 use crate::host::settings::settings;
@@ -124,6 +125,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(project_instructions(), ())?.wait().await?;
     // 用户在文件面板里改的文件：下一步提醒 agent（网关写盘后记一条）。
     ctx.plugin(user_edits(), ())?.wait().await?;
+    // MCP App 界面交来的状态（网关 `mcp/app/context`）：下一步提醒 agent。
+    ctx.plugin(mcp_app_context(), ())?.wait().await?;
     ctx.plugin(tui_slots(), ())?.wait().await?;
     ctx.plugin(status_items(), ())?.wait().await?;
     ctx.plugin(tool_views(), ())?.wait().await?;

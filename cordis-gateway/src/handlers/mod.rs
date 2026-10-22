@@ -7,6 +7,7 @@ pub mod environment;
 pub mod fs;
 pub mod image_inputs;
 pub mod interaction;
+pub mod mcp_app;
 pub mod permission;
 pub mod plugin_settings;
 pub mod preset;
