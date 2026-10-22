@@ -30,7 +30,69 @@ pub const SPOKEN: &[&str] = &[
     "2024-11-05",
 ];
 
-pub type ListedTool = (String, String, String);
+/// `tools/list` 里的一颗工具，名字已换成公名 `mcp_{server}__{tool}`。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListedTool {
+    pub public: String,
+    pub description: String,
+    /// `inputSchema` 的 JSON 文本。
+    pub schema: String,
+    pub ui: ToolUi,
+}
+
+/// MCP Apps（`io.modelcontextprotocol/ui`）挂在工具 `_meta.ui` 上的那部分。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolUi {
+    /// `ui://…` 界面资源；不是 `ui://` 开头的不认。
+    pub resource_uri: Option<String>,
+    /// `visibility`：`model` / `app`。没写 = 两边都能用。
+    pub visibility: Option<Vec<String>>,
+}
+
+impl ToolUi {
+    /// 模型能不能看见、调用（进不进工具表）。
+    pub fn model_visible(&self) -> bool {
+        self.visibility
+            .as_ref()
+            .is_none_or(|v| v.iter().any(|s| s == "model"))
+    }
+
+    /// 界面（同一服务器的 app）能不能调。
+    pub fn app_visible(&self) -> bool {
+        self.visibility
+            .as_ref()
+            .is_none_or(|v| v.iter().any(|s| s == "app"))
+    }
+}
+
+/// MCP Apps 扩展的能力键与界面资源的 MIME。
+pub const UI_EXTENSION: &str = "io.modelcontextprotocol/ui";
+pub const UI_MIME: &str = "text/html;profile=mcp-app";
+/// 旧写法：`_meta["ui/resourceUri"]`（规范已弃用，宿主仍要认）。
+const LEGACY_UI_RESOURCE_KEY: &str = "ui/resourceUri";
+
+fn tool_ui(tool: &Value) -> ToolUi {
+    let meta = tool.get("_meta");
+    let ui = meta.and_then(|m| m.get("ui"));
+    let resource_uri = ui
+        .and_then(|u| u.get("resourceUri"))
+        .or_else(|| meta.and_then(|m| m.get(LEGACY_UI_RESOURCE_KEY)))
+        .and_then(Value::as_str)
+        .filter(|uri| uri.starts_with("ui://"))
+        .map(str::to_string);
+    let visibility = ui
+        .and_then(|u| u.get("visibility"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect()
+        });
+    ToolUi {
+        resource_uri,
+        visibility,
+    }
+}
 
 /// Model-facing MCP name: `mcp_{server}__{tool}`.
 pub const MCP_NAME_PREFIX: &str = "mcp_";
@@ -59,11 +121,16 @@ pub fn client_info() -> Value {
 }
 
 /// Host capabilities advertised on `initialize` and in `_meta`.
+///
+/// `extensions` 里声明 MCP Apps：服务器据此决定给不给工具挂界面。
 pub fn client_capabilities() -> Value {
     json!({
         "elicitation": {
             "form": {},
             "url": {}
+        },
+        "extensions": {
+            UI_EXTENSION: { "mimeTypes": [UI_MIME] }
         }
     })
 }
@@ -142,6 +209,29 @@ pub fn with_session(mut params: Value, session: Option<&str>) -> Value {
         *meta = json!({});
     }
     meta[META_SESSION] = json!(session);
+    params
+}
+
+/// 调用方会话的工作目录（项目）。按项目存数据的服务（内置白板）按它分；
+/// 其它服务器照规范忽略。
+pub const META_CWD: &str = "dock/cwd";
+
+pub fn with_cwd(mut params: Value, cwd: Option<&str>) -> Value {
+    let Some(cwd) = cwd.filter(|s| !s.is_empty()) else {
+        return params;
+    };
+    if !params.is_object() {
+        params = json!({});
+    }
+    let meta = params
+        .as_object_mut()
+        .expect("just ensured object")
+        .entry("_meta")
+        .or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    meta[META_CWD] = json!(cwd);
     params
 }
 
@@ -270,11 +360,12 @@ pub fn tools_from_list(server_name: &str, listed: &Value) -> Vec<ListedTool> {
             .get("inputSchema")
             .cloned()
             .unwrap_or_else(|| json!({"type": "object"}));
-        out.push((
-            public_tool_name(server_name, name),
-            desc.to_string(),
-            schema.to_string(),
-        ));
+        out.push(ListedTool {
+            public: public_tool_name(server_name, name),
+            description: desc.to_string(),
+            schema: schema.to_string(),
+            ui: tool_ui(&tool),
+        });
     }
     out
 }
@@ -661,6 +752,53 @@ mod tests {
         let vals = parse_sse_json_values(body);
         assert_eq!(vals.len(), 1);
         assert_eq!(vals[0]["id"], 1);
+    }
+
+    /// MCP Apps：新旧两种 `resourceUri` 写法都认，不是 `ui://` 的不认；
+    /// `visibility` 没写 = 模型和界面都能用。
+    #[test]
+    fn tools_list_reads_mcp_apps_ui_meta() {
+        let listed = json!({ "result": { "tools": [
+            { "name": "draw", "_meta": { "ui": { "resourceUri": "ui://board/app.html" } } },
+            { "name": "save", "_meta": { "ui": { "resourceUri": "ui://board/app.html", "visibility": ["app"] } } },
+            { "name": "old", "_meta": { "ui/resourceUri": "ui://old/view" } },
+            { "name": "web", "_meta": { "ui": { "resourceUri": "https://evil/x" } } },
+            { "name": "plain" }
+        ] } });
+        let tools = tools_from_list("s", &listed);
+        let uris: Vec<Option<&str>> = tools.iter().map(|t| t.ui.resource_uri.as_deref()).collect();
+        assert_eq!(
+            uris,
+            [
+                Some("ui://board/app.html"),
+                Some("ui://board/app.html"),
+                Some("ui://old/view"),
+                None,
+                None
+            ]
+        );
+        assert!(tools[0].ui.model_visible() && tools[0].ui.app_visible());
+        assert!(!tools[1].ui.model_visible() && tools[1].ui.app_visible());
+        assert!(tools[4].ui.model_visible() && tools[4].ui.app_visible());
+        assert_eq!(tools[1].public, "mcp_s__save");
+    }
+
+    #[test]
+    fn client_capabilities_declare_mcp_apps() {
+        let caps = client_capabilities();
+        assert_eq!(
+            caps["extensions"][UI_EXTENSION]["mimeTypes"],
+            json!([UI_MIME])
+        );
+        assert_eq!(request_meta(PROTOCOL_LATEST)[META_CLIENT_CAPS], caps);
+    }
+
+    #[test]
+    fn with_cwd_merges_into_existing_meta() {
+        let params = with_cwd(with_session(json!({ "name": "t" }), Some("s1")), Some("/p"));
+        assert_eq!(params["_meta"][META_SESSION], "s1");
+        assert_eq!(params["_meta"][META_CWD], "/p");
+        assert!(with_cwd(json!({}), None).get("_meta").is_none());
     }
 
     #[test]

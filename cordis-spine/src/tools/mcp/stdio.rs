@@ -21,16 +21,14 @@ use tokio::process::ChildStdin;
 use tokio::sync::{oneshot, watch};
 
 use crate::tools::mcp::protocol::{
-    self, client_capabilities, client_info, discover_versions, pick_version, raw_tool_name,
-    with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
+    self, client_capabilities, client_info, discover_versions, pick_version, with_meta, Incoming,
+    PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
-use crate::tools::registry::tool_result;
 use cordis_base::config::{McpServer, McpStdioFraming, McpTransport};
-use cordis_base::types::ToolCall;
 
 use super::incoming::{self, LiveHooks};
 use super::tools_list;
-use super::{CallFn, RelistFn};
+use super::{RelistFn, RpcFn};
 
 /// Fixed on-the-wire framing for one child process (never flipped mid-connection).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +41,7 @@ pub(super) async fn connect(
     server: &McpServer,
     hooks: LiveHooks,
     stop: watch::Receiver<bool>,
-) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
+) -> Result<(Vec<protocol::ListedTool>, RpcFn, RelistFn), String> {
     let McpTransport::Stdio { framing, .. } = &server.transport else {
         return Err("not a stdio MCP server".into());
     };
@@ -84,7 +82,7 @@ async fn connect_once(
     stop: watch::Receiver<bool>,
     wire: WireFraming,
     timeout: Duration,
-) -> Result<(Vec<protocol::ListedTool>, CallFn, RelistFn), String> {
+) -> Result<(Vec<protocol::ListedTool>, RpcFn, RelistFn), String> {
     let McpTransport::Stdio {
         command, args, env, ..
     } = &server.transport
@@ -134,25 +132,16 @@ async fn connect_once(
             return Err("tools/list timeout".to_string());
         }
     };
-    let session_call = shared.clone();
-    let call: CallFn = std::sync::Arc::new(move |public: String, c: ToolCall| {
-        let session = session_call.clone();
+    let session_rpc = shared.clone();
+    let call: RpcFn = std::sync::Arc::new(move |method: String, params: Value| {
+        let session = session_rpc.clone();
         Box::pin(async move {
-            let raw_name = raw_tool_name(&public);
-            let args: Value = serde_json::from_str(&c.arguments).unwrap_or(json!({}));
-            let body = protocol::with_session(
-                json!({ "name": raw_name, "arguments": args }),
-                super::calling_session().as_deref(),
-            );
             let params = if session.modern.load(Ordering::Relaxed) {
-                with_meta(body, &session.protocol.lock().unwrap())
+                with_meta(params, &session.protocol.lock().unwrap())
             } else {
-                body
+                params
             };
-            match rpc(&session, "tools/call", params).await {
-                Ok(v) => super::call_result(c, &v),
-                Err(e) => tool_result(c, e),
-            }
+            rpc(&session, &method, params).await
         })
     });
     let session_list = shared.clone();
