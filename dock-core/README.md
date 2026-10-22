@@ -35,6 +35,7 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
   界面先标错、禁用保存，最终以 Dock 回的 `errors` 为准。
 - MCP Apps（`src/mcpApps.ts`，契约见 `cordis-gateway/README.md`「MCP Apps」）：
   - `mcp/app/tools|resource|result` 的结果解析；`appToolFor` 认工具卡挂哪个界面（透过 `use_tool`）；
+  - `appToolArgs`：交给界面的工具输入，经 `use_tool` 调的拆出里面那颗的 `tool_input`；
   - `appCsp` / `appAllow`：按资源 `_meta.ui` 生成沙箱 iframe 的 CSP 与 `allow`，默认不联网，
     来源只认干净的 `scheme://host`（服务器给的值塞不进别的指令）。
 - **不猜**：一轮的结果看 `turn/completed.status`，工具的结果看 `item/tool_completed.status`，都由 Dock 给出。
