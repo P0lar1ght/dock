@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::protocol::{self, raw_tool_name};
-use super::{call_params, Mcp};
+use super::{call_params, is_local, Mcp};
 use crate::names::{PLAN_MODE, SESSIONS};
 use crate::session::log::Sessions;
 use crate::tools::plan_mode::PlanMode;
@@ -126,7 +126,8 @@ fn write_record(dir: &Path, call_id: &str, mut body: Value) {
     let _ = std::fs::write(path, text);
 }
 
-/// 调用 id 来自模型，只留安全字符当文件名；空的、太长的不存。
+/// 调用 id 来自模型，只留安全字符当文件名；换过字符的再接原 id 的哈希，`call/1` 和
+/// `call_1` 不会落到同一个文件。空的、太长的不存。
 fn record_path(dir: &Path, call_id: &str) -> Option<PathBuf> {
     let safe: String = call_id
         .chars()
@@ -141,7 +142,19 @@ fn record_path(dir: &Path, call_id: &str) -> Option<PathBuf> {
     if safe.is_empty() || safe.len() > 128 {
         return None;
     }
-    Some(dir.join(RECORD_DIR).join(format!("{safe}.json")))
+    let name = if safe == call_id {
+        safe
+    } else {
+        format!("{safe}.{:016x}", fnv1a(call_id.as_bytes()))
+    };
+    Some(dir.join(RECORD_DIR).join(format!("{name}.json")))
+}
+
+/// 64 位 FNV-1a：只用来区分文件名，跨版本稳定（不用 `DefaultHasher`）。
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// 调用者那一页的会话目录。子代理经 `"planMode"` 找到父页（同画布）。
@@ -164,7 +177,11 @@ impl Mcp {
             .flat_map(|slot| {
                 slot.listed
                     .iter()
-                    .filter(|t| t.ui.resource_uri.is_some() || !t.ui.model_visible())
+                    .filter(|t| {
+                        let (model, app) = (t.ui.model_visible(), t.ui.app_visible());
+                        // 带界面且有人能用的，或只给界面用的；两边都不可见的不列。
+                        (t.ui.resource_uri.is_some() && (model || app)) || (app && !model)
+                    })
                     .map(|t| app_tool(&slot.config.name, t))
             })
             .collect()
@@ -189,7 +206,7 @@ impl Mcp {
         arguments: Value,
     ) -> Result<Value, String> {
         let public = protocol::public_tool_name(server, tool);
-        let rpc = {
+        let (rpc, local) = {
             let inner = self.inner.lock().unwrap();
             let slot = inner
                 .slots
@@ -210,13 +227,15 @@ impl Mcp {
             if cordis_base::acp::needs_permission(&public) {
                 return Err(format!("{tool} 要过权限确认，界面不能直接调"));
             }
-            slot.rpc
+            let rpc = slot
+                .rpc
                 .clone()
-                .ok_or_else(|| format!("MCP 服务 {server} 没有连上"))?
+                .ok_or_else(|| format!("MCP 服务 {server} 没有连上"))?;
+            (rpc, is_local(&slot.config))
         };
         let arguments = arguments.to_string();
         let reply = crate::tools::registry::with_exec_ctx_async(page.clone(), async move {
-            let params = call_params(&public, &arguments);
+            let params = call_params(&public, &arguments, local);
             rpc("tools/call".into(), params).await
         })
         .await?;
@@ -270,4 +289,27 @@ fn error_text(err: &Value) -> String {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 换过字符的调用 id 带哈希：`call/1`、`call?1`、`call_1` 各是各的文件。
+    #[test]
+    fn record_paths_do_not_collide() {
+        let dir = Path::new("/s");
+        let plain = record_path(dir, "call_1").unwrap();
+        let slash = record_path(dir, "call/1").unwrap();
+        let query = record_path(dir, "call?1").unwrap();
+        assert_eq!(plain, dir.join(RECORD_DIR).join("call_1.json"));
+        assert_ne!(plain, slash);
+        assert_ne!(slash, query);
+        assert!(
+            slash.starts_with(dir.join(RECORD_DIR)),
+            "不能跑出目录：{slash:?}"
+        );
+        assert!(record_path(dir, "").is_none());
+        assert!(record_path(dir, &"x".repeat(200)).is_none());
+    }
 }

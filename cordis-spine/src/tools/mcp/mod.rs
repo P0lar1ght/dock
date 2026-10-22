@@ -67,22 +67,32 @@ pub(super) fn calling_cwd() -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// `tools/call` 的参数：服务器上的原名 + 实参；`_meta` 带调用方会话与工作目录。
-pub(super) fn call_params(public: &str, arguments: &str) -> serde_json::Value {
+/// `tools/call` 的参数：服务器上的原名 + 实参；`_meta` 带调用方会话。`local`（本机 stdio
+/// 服务器）再带工作目录——那是本机绝对路径，不发给远程 HTTP 服务器。
+pub(super) fn call_params(public: &str, arguments: &str, local: bool) -> serde_json::Value {
     let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or(serde_json::json!({}));
     let params = protocol::with_session(
         serde_json::json!({ "name": raw_tool_name(public), "arguments": args }),
         calling_session().as_deref(),
     );
-    protocol::with_cwd(params, calling_cwd().as_deref())
+    if local {
+        protocol::with_cwd(params, calling_cwd().as_deref())
+    } else {
+        params
+    }
 }
 
-/// 在一条连接上跑 `tools/call`，结果收成 [`ToolResult`]。
-pub(super) fn call_via(rpc: RpcFn) -> CallFn {
+/// 本机子进程（stdio）服务器：本来就看得到本机文件，可以告诉它工作目录。
+pub(super) fn is_local(server: &McpServer) -> bool {
+    matches!(server.transport, McpTransport::Stdio { .. })
+}
+
+/// 在一条连接上跑 `tools/call`，结果收成 [`ToolResult`]。`local` 见 [`call_params`]。
+pub(super) fn call_via(rpc: RpcFn, local: bool) -> CallFn {
     std::sync::Arc::new(move |public: String, c: ToolCall| {
         let rpc = rpc.clone();
         Box::pin(async move {
-            let params = call_params(&public, &c.arguments);
+            let params = call_params(&public, &c.arguments, local);
             match rpc("tools/call".into(), params).await {
                 Ok(v) => call_result(c, &v),
                 Err(e) => tool_result(c, e),
@@ -346,9 +356,10 @@ impl Mcp {
                 .iter()
                 .find(|s| s.config.name == server)
                 .ok_or_else(|| format!("没有配置 MCP 服务 {server}"))?;
+            let local = is_local(&slot.config);
             slot.rpc
                 .clone()
-                .map(call_via)
+                .map(|rpc| call_via(rpc, local))
                 .ok_or_else(|| format!("MCP 服务 {server} 没有连上"))?
         };
         let public = public_tool_name(server, tool);
@@ -898,6 +909,7 @@ fn upsert_one(slot: &mut Slot, tools: &Tools, public: &str) {
         return;
     }
     let pname = public.to_string();
+    let local = is_local(&slot.config);
     // 挂了界面的工具：原始结果另存一份给界面（文本结果装不下 `structuredContent`）。
     let app = listed
         .ui
@@ -909,7 +921,7 @@ fn upsert_one(slot: &mut Slot, tools: &Tools, public: &str) {
         let pname = pname.clone();
         let app = app.clone();
         Box::pin(async move {
-            let params = call_params(&pname, &c.arguments);
+            let params = call_params(&pname, &c.arguments, local);
             match rpc("tools/call".into(), params).await {
                 Ok(v) => {
                     if let Some(app) = &app {
@@ -1526,6 +1538,7 @@ startup_timeout_sec = 1
         let (ctx, mcp, tools) = boot().await;
         let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
         sessions.attach_disk();
+        sessions.pin_workspace_cwd("/work/proj");
         let seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
         attach_app_fake(&mcp, seen.clone());
 
@@ -1555,14 +1568,63 @@ startup_timeout_sec = 1
         crate::tools::registry::with_exec_ctx_async(ctx.clone(), tools.execute(plain)).await;
         assert!(read_app_record(&dir, "call-2").is_none());
 
-        // `_meta` 带调用方会话与工作目录。
+        // `_meta` 带调用方会话与工作目录（本机 stdio 服务器）。
         let calls = seen.lock().unwrap();
         let meta = &calls[0].1["_meta"];
         assert_eq!(meta[protocol::META_SESSION], session_key(&sessions));
-        let cwd = sessions
-            .workspace_cwd()
-            .map(|p| p.to_string_lossy().into_owned());
-        assert_eq!(meta[protocol::META_CWD].as_str(), cwd.as_deref());
+        assert_eq!(meta[protocol::META_CWD], "/work/proj");
+    }
+
+    /// `dock/cwd` 是本机绝对路径：只告诉本机 stdio 服务器，远程 HTTP 服务器（模型调、界面调
+    /// 都一样）收不到。会话身份照带。
+    #[tokio::test]
+    async fn working_dir_meta_stays_off_remote_servers() {
+        let (ctx, mcp, tools) = boot().await;
+        ctx.require::<Sessions>(SESSIONS)
+            .unwrap()
+            .pin_workspace_cwd("/work/proj");
+        let seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+        attach_app_fake(&mcp, seen.clone());
+        {
+            let mut inner = mcp.inner.lock().unwrap();
+            let slot = inner
+                .slots
+                .iter_mut()
+                .find(|s| s.config.name == "board")
+                .unwrap();
+            slot.config.transport = McpTransport::Http {
+                url: "https://mcp.example.com/mcp".into(),
+                headers: Default::default(),
+            };
+            let tools = inner.tools.clone().unwrap();
+            let slot = inner
+                .slots
+                .iter_mut()
+                .find(|s| s.config.name == "board")
+                .unwrap();
+            sync_listed(slot, &tools);
+        }
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "mcp_board__plain".into(),
+            arguments: "{}".into(),
+        };
+        crate::tools::registry::with_exec_ctx_async(ctx.clone(), tools.execute(call)).await;
+        mcp.call_from_app(&ctx, "board", "save", serde_json::json!({}))
+            .await
+            .unwrap();
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        for (_, params) in calls.iter() {
+            assert!(
+                params["_meta"].get(protocol::META_CWD).is_none(),
+                "{params}"
+            );
+            assert!(
+                params["_meta"].get(protocol::META_SESSION).is_some(),
+                "{params}"
+            );
+        }
     }
 
     /// 界面发起的调用只认 `visibility` 含 `app` 的工具，回原样的 `CallToolResult`；
