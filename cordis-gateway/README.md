@@ -542,16 +542,17 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 
 | 方法 / 推送 | 作用 |
 |---|---|
-| `mcp/app/view/expose { threadId?, viewId, connectionLeaseId?, server, resourceUri, tools }` | 报（替换）一个界面实例的工具：`tools[{ name, description?, inputSchema? }]`，回 `{ tools: [公开名] }`；`tools` 空 = 收回 |
+| `mcp/app/view/expose { threadId?, viewId, server, resourceUri, tools }` | 报（替换）一个界面实例的工具：`tools[{ name, description?, inputSchema? }]`，回 `{ tools: [公开名] }`；`tools` 空 = 收回 |
 | 推送 `mcp/app/view/call { viewId, callId, name, arguments }` | 模型调了 `viewId` 那个界面的工具，桌面端交给界面跑（`tools/call`）。**只推受信连接** |
 | `mcp/app/view/result { callId, result?, error? }` | 送回结果：`result` 是规范的 `CallToolResult`，`error` 是一句原因；回 `{ delivered }` |
 
 - 公开名 `app_<server>__<name>`（只留 `[A-Za-z0-9_-]`，≤ 64 字符）；登记成动态那类：不进采样工具表，
-  经 `search_tool` / `use_tool` 调。几个界面报同名的共用一份，最后一个收回才撤掉。
+  经 `search_tool` / `use_tool` 调。几个界面报同一颗（同服务器、同原名）共用一份，最后一个收回才撤掉；
+  换字符 / 截断后撞上别的工具的公开名，整份 `invalid_params`。
 - 只有报它的那个线程（页身份 + 会话 id）调得到；同一线程几个界面都报了，最近报的那个接。
 - `viewId` 由桌面端生成；推送是连接级的，各窗口只接自己的 `viewId`。
-- 绑在连接上：`connectionLeaseId` 是 `initialize` 回的，连接断了它报的一并收回，在等的调用马上报错。
-  重连后租约换了，桌面端要重报。
+- 绑在报它的那条连接上（网关按连接定，不看参数）：连接断了它报的一并收回，在等的调用马上报错。
+  重连后桌面端要重报。
 - 界面 60 秒没回，这次调用按超时报给模型；`result` 晚到回 `delivered: false`。
 - 模型怎么知道：这一页能用的界面工具变了，下一步一条 system-reminder（名字、说明、参数 schema）；
   界面交来的文字先转义 `</system-reminder>`。一个界面最多 32 颗，说明截到 2KB，schema 超 8KB 整份拒掉。

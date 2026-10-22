@@ -4005,10 +4005,6 @@ async fn mcp_app_view_tools_round_trip_through_the_trusted_gui_only() {
         init["result"]["capabilities"]["mcpAppViewTools"], true,
         "{init}"
     );
-    let lease = init["result"]["connection"]["connectionLeaseId"]
-        .as_str()
-        .unwrap()
-        .to_string();
     let dir = project_dir("mcp-app-view");
     let started = gui
         .call("thread/start", json!({ "cwd": dir.display().to_string() }))
@@ -4024,7 +4020,8 @@ async fn mcp_app_view_tools_round_trip_through_the_trusted_gui_only() {
             json!({
                 "threadId": id,
                 "viewId": "view-1",
-                "connectionLeaseId": lease,
+                // 租约由网关按这条连接定：客户端给个假的也不能让断开收不回。
+                "connectionLeaseId": "not-my-lease",
                 "server": "board",
                 "resourceUri": "ui://board/app.html",
                 "tools": [{

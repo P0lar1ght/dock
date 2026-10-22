@@ -349,7 +349,15 @@ async fn dispatch_text(conn: &Arc<Mutex<Conn>>, text: &str) -> Option<String> {
     }
 }
 
-async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result<Value, RpcError> {
+/// 绑在这条连接上的插件方法（如界面工具：断开时收回）：`connectionLeaseId` 由网关按连接填，
+/// 不信客户端给的。方法体还是插件的，这里只改参数；它们不能登记成 detached——那条路拿不到连接。
+const CONNECTION_BOUND: &[&str] = &[protocol::MCP_APP_VIEW_EXPOSE];
+
+async fn dispatch_locked(
+    conn: &mut Conn,
+    method: &str,
+    mut params: Value,
+) -> Result<Value, RpcError> {
     if method == protocol::CONNECTION_AUTHENTICATE {
         return authenticate(conn, &params);
     }
@@ -402,6 +410,14 @@ async fn dispatch_locked(conn: &mut Conn, method: &str, params: Value) -> Result
         ));
     }
     settings_gate(conn.auth.as_ref(), &conn.gateway, method)?;
+    if CONNECTION_BOUND.contains(&method) {
+        if let Some(obj) = params.as_object_mut() {
+            match &conn.connection_lease_id {
+                Some(lease) => obj.insert("connectionLeaseId".into(), json!(lease)),
+                None => obj.remove("connectionLeaseId"),
+            };
+        }
+    }
     rpc::dispatch(conn.gateway.clone(), method, params, &mut conn.subscribed).await
 }
 

@@ -140,6 +140,33 @@ impl McpAppViews {
             .map(|t| public_name(&view.server, &t.name))
             .collect();
         let mut state = self.state.lock().unwrap();
+        // 换字符、截断后撞名（`a.b` / `a_b`、前 64 个字符相同）：表里只有一份，后一颗永远调不到。
+        let mut mine: HashMap<&str, &str> = HashMap::new();
+        for (tool, public) in view.tools.iter().zip(&names) {
+            if mine
+                .insert(public, &tool.name)
+                .is_some_and(|other| other != tool.name)
+            {
+                return Err(format!(
+                    "界面工具 {} 换成公开名后撞名（{public}）",
+                    tool.name
+                ));
+            }
+            let taken = state
+                .views
+                .values()
+                .filter(|v| v.view_id != view.view_id)
+                .flat_map(|v| v.tools.iter().map(move |t| (v, t)))
+                .find(|(v, t)| public_name(&v.server, &t.name) == *public);
+            if let Some((v, t)) = taken {
+                if v.server != view.server || t.name != tool.name {
+                    return Err(format!(
+                        "界面工具 {} 的公开名 {public} 已被 {} 的 {} 占用",
+                        tool.name, v.server, t.name
+                    ));
+                }
+            }
+        }
         let old = state.views.shift_remove(&view.view_id);
         if let Some(old) = &old {
             self.release(&mut state, old);
@@ -151,6 +178,11 @@ impl McpAppViews {
         if state.views.len() >= MAX_VIEWS {
             if let Some((_, oldest)) = state.views.shift_remove_index(0) {
                 self.release(&mut state, &oldest);
+                self.fail_pending(
+                    &mut state,
+                    |p| p.view_id == oldest.view_id,
+                    "界面太多，这个界面的工具被收回了",
+                );
             }
         }
         for (tool, public) in view.tools.iter().zip(&names) {
@@ -652,6 +684,66 @@ mod tests {
             "{gone}"
         );
         assert!(views.take_reminder("main|s1").is_none());
+    }
+
+    /// 换字符后撞名的拒掉：同一界面里两颗、别的服务器 / 别的原名占了同一个公开名。
+    /// 同一颗（同服务器同原名）别的界面再报照常共用。
+    #[tokio::test]
+    async fn sanitized_name_collisions_are_rejected() {
+        let (_ctx, views, _tools) = setup();
+        assert!(views
+            .expose(view("v1", "p", "L1", &["a.b", "a_b"]))
+            .is_err());
+        views.expose(view("v1", "p", "L1", &["a.b"])).unwrap();
+        let err = views.expose(view("v2", "p", "L1", &["a_b"])).unwrap_err();
+        assert!(err.contains("已被"), "{err}");
+        let mut first = view("v5", "q", "L1", &["t"]);
+        first.server = "my.b".into();
+        views.expose(first).unwrap();
+        let mut other = view("v3", "q", "L1", &["t"]);
+        other.server = "my_b".into();
+        assert!(views.expose(other).is_err(), "别的服务器换字符后同名");
+        views.expose(view("v4", "q", "L1", &["a.b"])).unwrap();
+        // 同一界面重报自己的工具不算撞。
+        views.expose(view("v1", "p", "L1", &["a.b"])).unwrap();
+    }
+
+    /// 界面数到上限挤掉最老的：它上面在等的调用马上报错，不等 60 秒。
+    #[tokio::test]
+    async fn evicting_the_oldest_view_fails_its_pending_calls() {
+        let (ctx, views, _tools) = setup();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _l = ctx
+            .on(MCP_APP_VIEW_CALL, move |c: &ViewCall| {
+                let _ = tx.send(c.clone());
+            })
+            .unwrap();
+        views.expose(view("old", "p0", "L1", &["focus"])).unwrap();
+        let running = {
+            let views = views.clone();
+            tokio::spawn(async move { views.call("p0", call("app_board__focus", "{}")).await })
+        };
+        rx.recv().await.unwrap();
+        for i in 0..MAX_VIEWS {
+            views
+                .expose(view(
+                    &format!("v{i}"),
+                    &format!("p{}", i + 1),
+                    "L1",
+                    &["focus"],
+                ))
+                .unwrap();
+        }
+        assert!(views.page_of("old").is_none());
+        let out = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("挤掉后要马上结束")
+            .unwrap();
+        assert!(
+            out.is_error && out.content.contains("收回"),
+            "{}",
+            out.content
+        );
     }
 
     /// 界面交来的说明不能闭合外层提醒标签；超过数量上限的整份拒掉。

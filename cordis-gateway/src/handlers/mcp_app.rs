@@ -17,11 +17,12 @@
 //! - `mcp/app/context { threadId?, server, resourceUri, content?, structuredContent? }` → `{}`：
 //!   `ui/update-model-context`。按线程、按界面只留最新一份，下一步交给模型。
 //!
-//! - `mcp/app/view/expose { threadId?, viewId, connectionLeaseId?, server, resourceUri, tools }`
+//! - `mcp/app/view/expose { threadId?, viewId, server, resourceUri, tools }`
 //!   → `{ tools: [publicName] }`：界面自己登记的工具（规范 `appCapabilities.tools`，桌面端
 //!   `tools/list` 拿到的 `[{ name, description?, inputSchema? }]`）交给这个线程的模型，名字是
 //!   `app_<server>__<name>`，经 `use_tool` 调。`viewId` 是桌面端给界面实例的 id；`tools` 空 =
-//!   收回（界面关了）。连接断开时它报的一并收回（`connectionLeaseId` 是 `initialize` 回的）。
+//!   收回（界面关了）。连接断开时它报的一并收回（租约由 `ws.rs` 按这条连接填进
+//!   `connectionLeaseId`，客户端给的不算）。
 //! - 推送 `mcp/app/view/call { viewId, callId, name, arguments }`（只推受信连接）：模型调了
 //!   一颗界面工具，桌面端交给 `viewId` 那个界面跑（`tools/call`），再用
 //! - `mcp/app/view/result { callId, result?, error? }` → `{ delivered }` 送回：`result` 是规范的
