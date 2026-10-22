@@ -602,7 +602,7 @@ mod tests {
         let (stop_tx, stop_rx) = watch::channel(false);
         let (listed, rpc, _) = connect(server, hooks, stop_rx).await?;
         std::mem::forget(stop_tx);
-        Ok((listed, super::super::call_via(rpc)))
+        Ok((listed, super::super::call_via(rpc, false)))
     }
 
     async fn connect_test(

@@ -17,11 +17,15 @@ Dock 按 [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview)（
 - 工具 `_meta.ui.resourceUri`（旧写法 `_meta["ui/resourceUri"]` 也认）指向 `ui://` 界面资源；不是 `ui://` 的不认。
 - `_meta.ui.visibility`：
   - 没写 = 模型和界面都能用；
-  - 不含 `model` 的不进工具表、不在 `/mcps` 里，只有同一服务器的界面能调。
-- 每次 `tools/call` 的 `_meta` 带 `dock/sessionId`（调用方会话）和 `dock/cwd`（它的工作目录，按项目存数据的服务用）。
+  - 不含 `model` 的不进工具表、不在 `/mcps` 里，只有同一服务器的界面能调；
+    要停掉它们只能停整台服务器。
+- 每次 `tools/call` 的 `_meta` 带 `dock/sessionId`（调用方会话）。
+- 本机 stdio 服务器另带 `dock/cwd`（调用方的工作目录，按项目存数据的服务用）；
+  那是本机绝对路径，远程 HTTP 服务器收不到。
 - 模型调挂了界面的工具：文本照常进对话；原始 `CallToolResult`（含 `structuredContent`）另存
   `<会话目录>/mcp-apps/<调用 id>.json`（`{ server, tool, resourceUri, arguments, result }`），给界面原样回放。
   - 单条上限 4 MB，超了只留文本块；不落盘的页不存。
+  - 文件名是调用 id 的安全字符，换过字符的再接原 id 的哈希；随会话目录一起删。
 - `Mcp` 给客户端用的入口：
   - `app_tools()`：带界面或只给界面用的工具；
   - `read_resource(server, uri)`：`resources/read`；
