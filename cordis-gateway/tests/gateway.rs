@@ -3854,6 +3854,16 @@ async fn mcp_app_methods_are_trusted_and_feed_context_to_the_agent() {
         not_ui["error"]["details"]["code"], "invalid_params",
         "{not_ui}"
     );
+    let read_any = gui
+        .call(
+            "mcp/app/read",
+            json!({ "server": "board", "uri": "videos://clip" }),
+        )
+        .await;
+    assert_eq!(
+        read_any["error"]["details"]["code"], "mcp",
+        "不限 ui://，到了 MCP 那层才报没有服务器：{read_any}"
+    );
     let called = gui
         .call(
             "mcp/app/call",
@@ -3946,6 +3956,10 @@ async fn mcp_app_methods_are_trusted_and_feed_context_to_the_agent() {
             json!({ "server": "board", "uri": "ui://board/app.html" }),
         ),
         ("mcp/app/call", json!({ "server": "board", "tool": "save" })),
+        (
+            "mcp/app/read",
+            json!({ "server": "board", "uri": "videos://clip" }),
+        ),
         ("mcp/app/result", json!({ "toolCallId": "call-1" })),
         (
             "mcp/app/context",

@@ -518,12 +518,18 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 |---|---|
 | `mcp/app/tools {}` | 带界面或只给界面用的工具：`tools[{ server, name, publicName, description, inputSchema, resourceUri, modelVisible, appVisible }]` |
 | `mcp/app/resource { server, uri }` | 读界面资源：`{ uri, mimeType, html, csp, permissions, domain, prefersBorder }` |
+| `mcp/app/read { server, uri }` | 界面读自己服务器的任意资源（视频、数据……），回规范的 `ReadResourceResult` |
 | `mcp/app/call { threadId?, server, tool, arguments? }` | 界面发起的 `tools/call`，回规范的 `CallToolResult` |
 | `mcp/app/result { threadId?, toolCallId }` | 模型那次调用的原始结果：`{ call: { server, tool, resourceUri, arguments, result } \| null }` |
 | `mcp/app/context { threadId?, server, resourceUri, content?, structuredContent? }` | `ui/update-model-context`：按线程、按界面只留最新一份，下一步交给模型 |
 
 - `resource` 只读 `ui://`（别的 `invalid_params`）；后四项来自资源内容的 `_meta.ui`，没有是 `null`。
+- `read` 不限 `ui://`（宿主声明了 `serverResources`），整份回复上限 48 MB（`too_large`）：
+  只防一帧太大占住连接；`blob` 是 base64，约合 36 MB 原始数据。
 - `call` 只认 `visibility` 含 `app`、没在 `/mcps` 停用、不过权限门的工具，不进对话流。
+- 交给界面的工具输入（`tool-input`）是那颗工具自己的参数：经 `use_tool` 调的要拆掉外层
+  （dock-core `appToolArgs`）。
+- 宿主要按界面实例定死 `server`，不能用 iframe 传来的。
 - `call` / `context` 要线程开着（`not_open`）；`result` 关着的会话也能读（从名册找目录）。
 - MCP 服务那边出错一律 `mcp`，消息是服务给的原文。
 - 不推通知：带界面的工具变了（服务器重连、`tools/list_changed`），客户端遇到不认识的

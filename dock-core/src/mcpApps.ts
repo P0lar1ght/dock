@@ -132,6 +132,8 @@ export function appToolFor(tools: readonly McpAppTool[], toolName: string, args:
 /**
  * 交给界面的工具输入（`ui/notifications/tool-input` 的 `arguments`）：经 `use_tool` 调的按需工具，
  * 是里面那颗的 `tool_input`（对象，或 Dock 也认的 JSON 字符串），不是 `use_tool` 自己那层。
+ * `tool_input` 是数组、数字这类时回 `{}`：spine 会原样转给工具，但界面规范要的是参数对象，
+ * 别为了「对齐」改成透传。
  */
 export function appToolArgs(toolName: string, args: unknown): Record<string, unknown> {
   const a = obj(args);

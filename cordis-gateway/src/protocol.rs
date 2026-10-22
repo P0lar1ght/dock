@@ -95,7 +95,7 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `plugin/settings/list|get|set` + 推送 `plugin/settings/changed`：插件声明的设置卡，
     // 设置页按 schema 生成表单。只认受信连接。
     ("pluginSettings", true),
-    // `mcp/app/tools|resource|call|result|context`：MCP Apps 宿主接口（`ui://` 界面、界面发起
+    // `mcp/app/tools|resource|read|call|result|context`：MCP Apps 宿主接口（`ui://` 界面、界面发起
     // 的调用、模型那次调用的原始结果、界面交给模型的上下文）。只认受信连接。
     ("mcpApps", true),
 ];
@@ -300,6 +300,7 @@ pub const CANVAS_ROLLBACK: &str = "canvas/rollback";
 /// 界面交给模型的上下文。
 pub const MCP_APP_TOOLS: &str = "mcp/app/tools";
 pub const MCP_APP_RESOURCE: &str = "mcp/app/resource";
+pub const MCP_APP_READ: &str = "mcp/app/read";
 pub const MCP_APP_CALL: &str = "mcp/app/call";
 pub const MCP_APP_RESULT: &str = "mcp/app/result";
 pub const MCP_APP_CONTEXT: &str = "mcp/app/context";

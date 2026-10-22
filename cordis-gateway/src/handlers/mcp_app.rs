@@ -8,6 +8,8 @@
 //! - `mcp/app/resource { server, uri }` → `{ uri, mimeType, html, csp, permissions, domain,
 //!   prefersBorder }`：读界面资源（`resources/read`）。后四项来自资源内容的 `_meta.ui`，
 //!   没有就是 `null`。
+//! - `mcp/app/read { server, uri }` → 规范的 `ReadResourceResult`（`{ contents }`）：界面读自己
+//!   那台服务器的资源（视频、数据……，宿主声明了 `serverResources`）。不限 `ui://`，原样转回。
 //! - `mcp/app/call { threadId?, server, tool, arguments? }` → `CallToolResult`：界面发起的
 //!   `tools/call`。只认 `visibility` 含 `app` 的工具，不进对话流；会话身份是这个线程。
 //! - `mcp/app/result { threadId?, toolCallId }` → `{ call }`：模型那次调用的原始结果
@@ -57,6 +59,11 @@ pub fn gateway_mcp_apps() -> Plugin {
                         protocol::MCP_APP_RESOURCE,
                         slow,
                         method(|gw, params| async move { resource(&gw, params).await }),
+                    ),
+                    (
+                        protocol::MCP_APP_READ,
+                        slow,
+                        method(|gw, params| async move { read(&gw, params).await }),
                     ),
                     (
                         protocol::MCP_APP_CALL,
@@ -124,6 +131,35 @@ async fn resource(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
         .await
         .map_err(|e| RpcError::app("mcp", e))?;
     ui_resource(uri, &read)
+}
+
+/// 整份回复的上限（JSON 文本长度）。只防一帧太大占住这条 WebSocket（同连接的线程事件会排在
+/// 它后面），不防 MCP 那边的内存：到这里时整份已经在内存里了。`blob` 是 base64，48 MB
+/// 约合 36 MB 原始数据；更大的媒体以后走 HTTP 端点或分块。
+const MAX_READ_BYTES: usize = 48 * 1024 * 1024;
+
+/// 界面读自己那台服务器的资源。服务器由桌面端按界面实例定死（不信 iframe 传来的），
+/// 网关只认受信连接；资源本来就是这台服务器对外给的，不再限 `ui://`。
+async fn read(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let server = str_param(&params, "server")?;
+    let uri = str_param(&params, "uri")?;
+    let read = mcp(gateway)?
+        .read_resource(server, uri)
+        .await
+        .map_err(|e| RpcError::app("mcp", e))?;
+    capped(uri, read, MAX_READ_BYTES)
+}
+
+/// 原样转回，超过 `limit` 报 `too_large`。
+fn capped(uri: &str, read: Value, limit: usize) -> Result<Value, RpcError> {
+    let size = read.to_string().len();
+    if size > limit {
+        return Err(RpcError::app(
+            "too_large",
+            format!("资源 {uri} 有 {} KB，超过 {} KB", size / 1024, limit / 1024),
+        ));
+    }
+    Ok(read)
 }
 
 /// `ReadResourceResult` → 界面资源。规范要求：同 uri 的那一项，MIME 是
@@ -246,6 +282,18 @@ mod tests {
         assert_eq!(got["prefersBorder"], false);
         assert_eq!(got["permissions"], Value::Null);
         assert_eq!(got["mimeType"], "text/html;profile=mcp-app");
+    }
+
+    /// 界面读非 ui:// 资源（官方 video-resource 的 videos://…）：base64 blob 原样转回；
+    /// 超过上限报 too_large。
+    #[test]
+    fn read_passes_blobs_through_and_caps_size() {
+        let read = json!({ "contents": [
+            { "uri": "videos://clip", "mimeType": "video/mp4", "blob": "AAAAIGZ0eXBpc29t" }
+        ] });
+        assert_eq!(capped("videos://clip", read.clone(), 1024).unwrap(), read);
+        let err = capped("videos://clip", read, 16).unwrap_err();
+        assert_eq!(err.details_code, "too_large");
     }
 
     #[test]
