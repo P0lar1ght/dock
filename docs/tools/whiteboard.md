@@ -26,6 +26,18 @@
 - 删掉的图形留墓碑；清空后可以用同样的 id 重画。
 - 挪了位置的图形：连在上面的箭头换成新 id 重新连（`whiteboard_read` 看新 id）。
 
+### 界面工具（面板开着时）
+
+白板界面自己登记的工具（规范 `appCapabilities.tools`），只在右侧面板那份里给（内联那份是只读快照）。
+面板开着时打开它的会话经 `use_tool` 调；面板关了就没了。源码 `cordis-apps/web/whiteboard/src/viewTools.ts`。
+
+| 工具 | 作用 |
+|---|---|
+| `app_whiteboard__get_selection {}` | 用户当前选中的图形：id、类型、标签、位置尺寸 |
+| `app_whiteboard__get_viewport {}` | 用户看着的画布区域、缩放，和视野里的图形 |
+| `app_whiteboard__focus { ids, select? }` | 把用户的视图移到这些图形（可顺带选中）；只动视图，不改内容 |
+| `app_whiteboard__snapshot { ids? }` | 截 PNG（长边最多 1600），不给 `ids` 截全部 |
+
 ### 只给界面用的工具
 
 `whiteboard_load { sinceRev? }`、`whiteboard_save { elements, consumed, appState, files }`（`visibility: ["app"]`，不进工具表）。

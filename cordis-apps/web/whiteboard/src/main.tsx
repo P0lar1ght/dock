@@ -6,6 +6,7 @@
 // - 用户改的：按元素 `version` 只存变了的，同时把「改了什么、选中了什么」交给模型（updateModelContext）；
 // - Agent 改的：收到 tool-result（或轮询发现 `rev` 变了）就重载，用 `reconcileElements` 合并；
 // - 内联（Gen UI）只看不改，点「在面板中编辑」请求 fullscreen，宿主把它放进常驻面板。
+// - 面板里那份还给宿主几颗界面工具（viewTools.ts：选中、视野、挪视图、截图），模型经宿主调。
 
 import "./shim";
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
@@ -19,6 +20,7 @@ import {
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { App, applyHostStyleVariables, type McpUiHostContext } from "@modelcontextprotocol/ext-apps";
+import { installViewTools, type ViewApi } from "./viewTools";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type El = Record<string, any> & { id: string; type: string; version: number; isDeleted?: boolean };
@@ -42,7 +44,14 @@ const INLINE_HEIGHT = 420;
 const SAVE_DELAY = 700;
 const POLL_MS = 2500;
 
-const app = new App({ name: "dock-whiteboard", version: "0.1.0" }, {}, { autoResize: false });
+const app = new App({ name: "dock-whiteboard", version: "0.1.0" }, { tools: { listChanged: true } }, { autoResize: false });
+/** 当前画布（界面工具用）。 */
+let currentApi: ViewApi | null = null;
+const toolsChanged = installViewTools(
+  app,
+  () => currentApi,
+  () => (app.getHostContext()?.displayMode ?? "inline") === "fullscreen",
+);
 /** 只连一次（开发时 StrictMode 会把 effect 跑两遍）。 */
 let connecting: Promise<void> | null = null;
 /** 第一次载入也只做一次（同上）：两遍各画一份骨架会多出元素。 */
@@ -237,6 +246,8 @@ function Board() {
   useEffect(() => {
     app.onhostcontextchanged = (p) => {
       setCtx((c) => ({ ...c, ...p }));
+      // 进 / 出面板：界面工具只在面板里给。
+      if (p.displayMode) toolsChanged();
       if (p.styles?.variables) applyHostStyleVariables(p.styles.variables);
     };
     app.ontoolinput = () => setBusy("Agent 正在改白板…");
@@ -306,6 +317,7 @@ function Board() {
       <Excalidraw
         excalidrawAPI={(a) => {
           api.current = a as unknown as Api;
+          currentApi = a as unknown as ViewApi;
           // 载入后缩放到能看全所有图形。
           window.setTimeout(() => api.current?.scrollToContent(undefined, { fitToContent: true }), 50);
         }}
