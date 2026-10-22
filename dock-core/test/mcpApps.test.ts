@@ -80,6 +80,9 @@ test('CSP：默认不联网；来源只认干净的 scheme://host，塞不进别
   assert.match(csp, /connect-src https:\/\/api\.x\.com http:\/\/localhost:5173;/);
   assert.match(csp, /script-src [^;]*https:\/\/\*\.cdn\.com/);
   assert.match(csp, /frame-src https:\/\/www\.youtube\.com;/);
+  // Worker 也是脚本：资源域名要放开（Cesium 从 CDN 起 Worker）。
+  assert.match(csp, /worker-src blob: https:\/\/\*\.cdn\.com;/);
+  assert.match(appCsp(null), /worker-src blob:;/);
   assert.doesNotMatch(csp, /evil|a\.com;|unsafe-hashes| \*[ ;]/);
   assert.deepEqual(cleanSources(['https://a.com', 'https://a.com/']), ['https://a.com']);
 });

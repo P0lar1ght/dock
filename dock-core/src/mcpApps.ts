@@ -178,7 +178,7 @@ export function cleanSources(list: readonly string[]): string[] {
 }
 
 /**
- * 界面文档的 CSP（规范「Security」）：默认不联网；`resourceDomains` 放开脚本 / 样式 /
+ * 界面文档的 CSP（规范「Security」）：默认不联网；`resourceDomains` 放开脚本 / Worker / 样式 /
  * 图片 / 字体 / 媒体，`connectDomains` 放开 fetch / WebSocket，`frameDomains` 放开内嵌页，
  * `baseUriDomains` 放开 `<base>`。内联脚本样式、`data:` / `blob:` 资源总是允许（单文件界面
  * 都这么打包）。
@@ -200,7 +200,9 @@ export function appCsp(csp: McpAppCsp | null): string {
     `font-src ${join('data:', 'blob:', r)}`,
     `media-src ${join('data:', 'blob:', r)}`,
     `connect-src ${connect.length ? connect.join(' ') : "'none'"}`,
-    "worker-src blob:",
+    // Worker 也是脚本：声明的资源域名照样放开（官方 map 示例的 Cesium 从自家 CDN 起 Worker，
+    // 只给 blob: 时一个 Worker 都起不来，地球是黑的）。
+    `worker-src ${join('blob:', r)}`,
     `frame-src ${frames.length ? frames.join(' ') : "'none'"}`,
     "object-src 'none'",
     `base-uri ${base.length ? base.join(' ') : "'none'"}`,
