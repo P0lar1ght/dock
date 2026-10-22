@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build && node scripts/copy.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "0.18.1",
