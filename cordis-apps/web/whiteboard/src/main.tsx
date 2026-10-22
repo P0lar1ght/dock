@@ -89,10 +89,13 @@ function materialize(pending: Record<string, any>[], existing: readonly El[]): {
   });
   const converted = convertToExcalidrawElements(skeletons as never, { regenerateIds: false }) as unknown as El[];
   // 重用了删掉的 id：版本要压过墓碑，不然合并时墓碑赢（服务器在 customData 里记了下限）。
+  // 框里的标签是 convert 另生的文字元素，不带 customData：用它那个框的下限（服务器已把标签墓碑算进去）。
+  const mins = new Map<string, number>();
+  for (const e of converted) if (typeof e.customData?.dockMinVersion === "number") mins.set(e.id, e.customData.dockMinVersion);
   const made = converted.map((e) => {
-    const min = e.customData?.dockMinVersion;
+    const min = e.customData?.dockMinVersion ?? (e.containerId ? mins.get(e.containerId) : undefined);
     if (typeof min !== "number") return e;
-    const { dockMinVersion: _, ...rest } = e.customData;
+    const { dockMinVersion: _, ...rest } = e.customData ?? {};
     return { ...e, version: Math.max(e.version, min), customData: Object.keys(rest).length ? rest : undefined };
   });
   // 标签文字的 id 定死成「<容器>-label」：两个界面各画一遍也合并成同一个元素，不会多出一份标签。

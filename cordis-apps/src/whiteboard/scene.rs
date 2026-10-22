@@ -290,16 +290,24 @@ fn add_one(
     }
     // 删掉的图形只剩墓碑：同一个 id 可以再用（清空后重画很常见）。新元素的版本要比墓碑高，
     // 不然按版本合并时墓碑会赢、新画的又被删掉——记在 customData 里，界面画出来时照办。
+    // 框里的标签（界面定死成 `<id>-label`，containerId 指向这个 id）也留着墓碑：一并让位，
+    // 下限取两者里高的那个，界面给标签用同一个下限（不然重画后框在、字没了）。
     let mut min_version = None;
     let id = match shape.get("id").and_then(Value::as_str).map(str::trim) {
         Some(id) if !id.is_empty() => {
             if scene.shape(id).is_some() {
                 return Err(format!("id「{id}」已经有了：换一个，或用 update 改它"));
             }
-            if let Some(i) = scene.index_of(id) {
-                min_version = Some(num(&scene.elements[i], "version") as u64 + 1);
-                scene.elements.remove(i);
-            }
+            let mut top: Option<u64> = None;
+            scene.elements.retain(|e| {
+                let mine = id_of(e) == Some(id)
+                    || e.get("containerId").and_then(Value::as_str) == Some(id);
+                if mine {
+                    top = top.max(Some(num(e, "version") as u64));
+                }
+                !mine
+            });
+            min_version = top.map(|v| v + 1);
             id.to_string()
         }
         _ => fresh_id(scene),
@@ -970,6 +978,40 @@ mod tests {
         assert_eq!(e["y"], 25.0, "在中线上");
         assert_eq!(e["points"], json!([[0.0, 0.0], [184.0, 0.0]]));
         assert_eq!(e["start"]["id"], "a");
+    }
+
+    /// 清空后重画带标签的框：框里那段字的墓碑一并让位，下限也要压过它（标签墓碑版本更高时）。
+    /// 回归：只看框自己的墓碑时，界面新画的 `<id>-label` 版本低，合并时被墓碑删掉。
+    #[test]
+    fn reusing_an_id_also_clears_its_label_tombstone() {
+        let mut label = full("a-label", "text", 0.0, 12);
+        label["containerId"] = json!("a");
+        let mut s = Scene {
+            elements: vec![
+                full("a", "rectangle", 0.0, 7),
+                label,
+                full("b", "rectangle", 300.0, 3),
+            ],
+            ..Default::default()
+        };
+        apply_edit(
+            &mut s,
+            &json!({ "clear": true, "add": [{ "type": "rectangle", "id": "a", "text": "又是 a" }] }),
+        )
+        .unwrap();
+        assert!(
+            s.elements.iter().all(|e| id_of(e) != Some("a-label")),
+            "标签墓碑让位：{:?}",
+            s.elements
+        );
+        assert!(
+            s.elements.iter().any(|e| id_of(e) == Some("b")),
+            "别的墓碑不动"
+        );
+        assert_eq!(
+            s.pending[0]["customData"]["dockMinVersion"], 14,
+            "清空时标签出了一版（13），再高一版"
+        );
     }
 
     /// 清空后用同样的 id 重画：墓碑让位，新元素记下要比墓碑高的版本。
