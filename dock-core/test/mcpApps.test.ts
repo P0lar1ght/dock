@@ -5,6 +5,7 @@ import {
   appAllow,
   appCsp,
   appKey,
+  appToolArgs,
   appToolFor,
   cleanSources,
   looksLikeMcpTool,
@@ -86,4 +87,12 @@ test('CSP：默认不联网；来源只认干净的 scheme://host，塞不进别
 test('权限 → iframe allow：只照给写剪贴板，摄像头 / 麦克风 / 定位不给', () => {
   assert.equal(appAllow({ clipboardWrite: {}, camera: {}, microphone: {}, geolocation: {} }), 'clipboard-write');
   assert.equal(appAllow(null), '');
+});
+
+test('交给界面的工具输入：use_tool 拆出里面那颗的参数（对象或 JSON 字符串都认）', () => {
+  assert.deepEqual(appToolArgs('mcp_board__draw', { a: 1 }), { a: 1 });
+  assert.deepEqual(appToolArgs('use_tool', { tool_name: 'mcp_board__draw', tool_input: { a: 1 } }), { a: 1 });
+  assert.deepEqual(appToolArgs('use_tool', { tool_name: 'mcp_board__draw', tool_input: '{"a":2}' }), { a: 2 });
+  assert.deepEqual(appToolArgs('use_tool', { tool_name: 'x', tool_input: 'not json' }), {});
+  assert.deepEqual(appToolArgs('use_tool', { tool_name: 'x' }), {});
 });

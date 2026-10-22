@@ -129,6 +129,24 @@ export function appToolFor(tools: readonly McpAppTool[], toolName: string, args:
   return tools.find((t) => t.publicName === name && t.resourceUri !== null) ?? null;
 }
 
+/**
+ * 交给界面的工具输入（`ui/notifications/tool-input` 的 `arguments`）：经 `use_tool` 调的按需工具，
+ * 是里面那颗的 `tool_input`（对象，或 Dock 也认的 JSON 字符串），不是 `use_tool` 自己那层。
+ */
+export function appToolArgs(toolName: string, args: unknown): Record<string, unknown> {
+  const a = obj(args);
+  if (toolName !== 'use_tool') return a;
+  const input = a.tool_input;
+  if (typeof input === 'string') {
+    try {
+      return obj(JSON.parse(input));
+    } catch {
+      return {};
+    }
+  }
+  return obj(input);
+}
+
 /** 名字像 MCP 工具（`mcp_{server}__{tool}`）：`mcp/app/tools` 里没有时值得重拉一次。 */
 export function looksLikeMcpTool(toolName: string, args: unknown): boolean {
   const name = viewToolName(toolName, args);
