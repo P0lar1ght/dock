@@ -126,9 +126,11 @@ function label(e: El, all: readonly El[]): string {
   return t?.text ?? "";
 }
 
+/** 给模型看的一句：类型、id、标签，外加位置尺寸（模型据此知道用户画在哪、多大）。 */
 function describe(e: El, all: readonly El[]): string {
   const l = label(e, all);
-  return `${e.type} ${e.id}${l ? `「${l.slice(0, 40)}」` : ""}`;
+  const r = Math.round;
+  return `${e.type} ${e.id}${l ? `「${l.slice(0, 40)}」` : ""} (${r(e.x)},${r(e.y)}) ${r(Math.abs(e.width))}×${r(Math.abs(e.height))}`;
 }
 
 function Board() {
