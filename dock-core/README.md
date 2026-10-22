@@ -38,6 +38,8 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
   - `appToolArgs`：交给界面的工具输入，经 `use_tool` 调的拆出里面那颗的 `tool_input`；
   - `appCsp` / `appAllow`：按资源 `_meta.ui` 生成沙箱 iframe 的 CSP 与 `allow`，默认不联网，
     来源只认干净的 `scheme://host`（服务器给的值塞不进别的指令）。
+    `resourceDomains` 比规范多放开 `worker-src`（规范只列 img / script / style / font / media）：
+    Worker 也是脚本，官方 map 示例的 Cesium 从 CDN 起 Worker，不放开地球是黑的。
 - **不猜**：一轮的结果看 `turn/completed.status`，工具的结果看 `item/tool_completed.status`，都由 Dock 给出。
 
 ## 用法
