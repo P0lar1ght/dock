@@ -51,13 +51,34 @@ impl Default for Scene {
 }
 
 impl Scene {
-    pub fn load(path: &Path) -> Scene {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Scene::default();
+    /// 读场景。没有文件 = 空白板；读不了（权限、IO）报错，不能当空的再写回去；
+    /// 内容坏了：原文件改名留着（`scene.json.corrupt-<毫秒>`），从空白板开始，回一句说明。
+    pub fn load(path: &Path) -> Result<(Scene, Option<String>), String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Scene::default(), None))
+            }
+            Err(e) => return Err(format!("读白板失败：{e}")),
         };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else {
-            return Scene::default();
-        };
+        match serde_json::from_str::<Value>(&text) {
+            Ok(v) if v.is_object() => Ok((Scene::from_value(&v), None)),
+            _ => {
+                let aside = path.with_file_name(format!("scene.json.corrupt-{}", now_ms()));
+                std::fs::rename(path, &aside)
+                    .map_err(|e| format!("白板文件坏了，挪开也失败：{e}"))?;
+                Ok((
+                    Scene::default(),
+                    Some(format!(
+                        "原来的白板文件读不了，已另存为 {}，从空白板开始。",
+                        aside.display()
+                    )),
+                ))
+            }
+        }
+    }
+
+    fn from_value(v: &Value) -> Scene {
         let list = |key: &str| {
             v.get(key)
                 .and_then(Value::as_array)
@@ -97,13 +118,30 @@ impl Scene {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("建白板目录失败：{e}"))?;
         }
-        let tmp = path.with_extension("json.tmp");
+        // 临时文件带进程号：终端和桌面端各拉起一个白板服务时不会互踩（读改写本身由文件锁串起来）。
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, text).map_err(|e| format!("写白板失败：{e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("写白板失败：{e}"))
     }
 
     fn live(&self) -> impl Iterator<Item = &Value> {
         self.elements.iter().filter(|e| !is_deleted(e))
+    }
+
+    /// 丢掉没人用的图片：只留还在的图片元素引用的，和一天内删掉的（界面里撤销还要用）。
+    /// 不然粘贴过又删掉的图片一直攒着，攒到上限连 Agent 的编辑都存不进去。
+    pub fn gc_files(&mut self) {
+        let Some(files) = self.files.as_object_mut() else {
+            return;
+        };
+        let recent = now_ms().saturating_sub(24 * 60 * 60 * 1000);
+        let used: std::collections::HashSet<&str> = self
+            .elements
+            .iter()
+            .filter(|e| !is_deleted(e) || num(e, "updated") as u64 >= recent)
+            .filter_map(|e| e.get("fileId").and_then(Value::as_str))
+            .collect();
+        files.retain(|id, _| used.contains(id.as_str()));
     }
 
     fn index_of(&self, id: &str) -> Option<usize> {
@@ -143,12 +181,27 @@ impl Scene {
 // ---- 存放位置 ----
 
 /// 项目的场景文件。`cwd` 来自 Dock 的 `_meta["dock/cwd"]`；别的客户端没带就归 `default`。
+///
+/// 目录名 = 会话目录那套名字 + 完整路径的短哈希：那套名字把非 ASCII 字符、`/` 都折成 `-`，
+/// `…/SunGods-中台` 和 `…/SunGods`、`/a/b-c` 和 `/a/b/c` 会撞成一个；会话目录靠 `meta.cwd`
+/// 还分得开，白板没有，所以带上哈希。
 pub fn scene_path(root: &Path, cwd: Option<&str>) -> PathBuf {
     let key = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
-        Some(cwd) => cordis_base::config::cwd_dirname(Path::new(cwd)),
+        Some(cwd) => format!(
+            "{}-{:08x}",
+            cordis_base::config::cwd_dirname(Path::new(cwd)),
+            fnv1a(cwd.as_bytes()) as u32
+        ),
         None => "default".into(),
     };
     root.join(key).join("scene.json")
+}
+
+/// FNV-1a：跨版本稳定（不用 `DefaultHasher`），只用来区分目录名。
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 // ---- Agent 的编辑 ----
@@ -632,7 +685,10 @@ pub fn merge_save(scene: &mut Scene, args: &Value) -> Result<bool, String> {
     let mut changed = false;
     if let Some(list) = args.get("elements").and_then(Value::as_array) {
         for incoming in list {
-            let Some(id) = id_of(incoming).map(str::to_string) else {
+            // 最低限度的形状：有 id、type、数字版本。别的不认（缺字段会被当成版本 0 乱赢乱输）。
+            let valid = incoming.get("type").and_then(Value::as_str).is_some()
+                && incoming.get("version").and_then(Value::as_f64).is_some();
+            let Some(id) = id_of(incoming).filter(|_| valid).map(str::to_string) else {
                 continue;
             };
             match scene.index_of(&id) {
@@ -943,6 +999,63 @@ mod tests {
         );
     }
 
+    /// 文件坏了：原文件改名留着，从空白板开始并说一句；不能当空的直接写回去。
+    #[test]
+    fn corrupt_scene_is_set_aside_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scene.json");
+        std::fs::write(&path, "{ 写了一半").unwrap();
+        let (scene, note) = Scene::load(&path).unwrap();
+        assert_eq!(scene, Scene::default());
+        assert!(note.unwrap().contains("另存为"));
+        assert!(!path.exists());
+        let kept: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("scene.json.corrupt-")
+            })
+            .collect();
+        assert_eq!(kept.len(), 1, "坏文件要留着");
+        assert_eq!(
+            std::fs::read_to_string(kept[0].path()).unwrap(),
+            "{ 写了一半"
+        );
+    }
+
+    /// 没人用的图片要回收：只留还在的图片元素、一天内删掉的图片元素引用的。
+    #[test]
+    fn unused_files_are_collected() {
+        let mut s = Scene::default();
+        let mut live = full("img1", "image", 0.0, 1);
+        live["fileId"] = json!("f-live");
+        let mut old = full("img2", "image", 0.0, 2);
+        old["fileId"] = json!("f-old");
+        old["isDeleted"] = json!(true);
+        old["updated"] = json!(1);
+        s.elements = vec![live, old];
+        s.files = json!({ "f-live": {}, "f-old": {}, "f-orphan": {} });
+        s.gc_files();
+        let kept: Vec<&String> = s.files.as_object().unwrap().keys().collect();
+        assert_eq!(kept, ["f-live"]);
+    }
+
+    /// 界面存回来的元素至少要有 id、type、数字版本，缺了的不收。
+    #[test]
+    fn saves_skip_malformed_elements() {
+        let mut s = Scene::default();
+        let changed = merge_save(
+            &mut s,
+            &json!({ "elements": [{ "id": "a" }, { "id": "b", "type": "rectangle" }, full("c", "rectangle", 0.0, 1)] }),
+        )
+        .unwrap();
+        assert!(changed);
+        let ids: Vec<&str> = s.elements.iter().filter_map(id_of).collect();
+        assert_eq!(ids, ["c"]);
+    }
+
     #[test]
     fn bad_edits_change_nothing() {
         let mut s = Scene::default();
@@ -1075,7 +1188,25 @@ mod tests {
     fn scene_round_trips_and_paths_follow_the_project() {
         let dir = tempfile::tempdir().unwrap();
         let path = scene_path(dir.path(), Some("/Users/me/proj"));
-        assert!(path.ends_with("Users-me-proj/scene.json"), "{path:?}");
+        let name = path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("Users-me-proj-") && name.len() == "Users-me-proj-".len() + 8,
+            "{name}"
+        );
+        // 会话目录那套名字会撞的几对，带上哈希就分开了。
+        for (a, b) in [("/p/SunGods-中台", "/p/SunGods"), ("/a/b-c", "/a/b/c")] {
+            assert_ne!(
+                scene_path(dir.path(), Some(a)),
+                scene_path(dir.path(), Some(b)),
+                "{a} vs {b}"
+            );
+        }
         assert!(scene_path(dir.path(), None).ends_with("default/scene.json"));
         let mut s = Scene::default();
         apply_edit(
@@ -1084,9 +1215,9 @@ mod tests {
         )
         .unwrap();
         s.save(&path).unwrap();
-        assert_eq!(Scene::load(&path), s);
+        assert_eq!(Scene::load(&path).unwrap().0, s);
         assert_eq!(
-            Scene::load(&dir.path().join("missing.json")),
+            Scene::load(&dir.path().join("missing.json")).unwrap().0,
             Scene::default()
         );
     }

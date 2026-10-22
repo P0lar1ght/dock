@@ -141,5 +141,50 @@ async fn whiteboard_speaks_mcp_apps_and_keeps_one_scene_per_project() {
         .tool("whiteboard_edit", json!({ "delete": ["ghost"] }), "/work/a")
         .await;
     assert_eq!(bad["isError"], true);
-    assert!(dir.path().join("work-a/scene.json").exists());
+    assert!(std::fs::read_dir(dir.path()).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with("work-a-")));
+}
+
+/// 终端和桌面端各拉起一个白板服务，同时往同一个项目写：读改写由文件锁串起来，谁的都不丢。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_servers_writing_the_same_project_do_not_lose_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = start(dir.path().to_path_buf());
+    let mut b = start(dir.path().to_path_buf());
+    let edits = |c: &'static str| {
+        (0..15)
+            .map(move |i| json!({ "add": [{ "type": "rectangle", "id": format!("{c}{i}"), "x": 0, "y": 0 }] }))
+            .collect::<Vec<_>>()
+    };
+    let run_a = async {
+        for e in edits("a") {
+            let r = a.tool("whiteboard_edit", e, "/work/shared").await;
+            assert_eq!(r["isError"], false, "{r}");
+        }
+        a
+    };
+    let run_b = async {
+        for e in edits("b") {
+            let r = b.tool("whiteboard_edit", e, "/work/shared").await;
+            assert_eq!(r["isError"], false, "{r}");
+        }
+        b
+    };
+    let (mut a, _b) = tokio::join!(run_a, run_b);
+    let read = a.tool("whiteboard_read", json!({}), "/work/shared").await;
+    assert_eq!(
+        read["structuredContent"]["shapes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        30,
+        "两边的 30 个都在"
+    );
+    assert_eq!(
+        read["structuredContent"]["rev"], 30,
+        "每次编辑一版，不会重号"
+    );
 }

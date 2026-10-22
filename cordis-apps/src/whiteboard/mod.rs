@@ -77,68 +77,103 @@ impl Whiteboard {
     fn run(&self, name: &str, args: &Value, cwd: Option<&str>) -> Value {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = scene::scene_path(&self.root, cwd);
-        let mut scene = Scene::load(&path);
-        match name {
-            "whiteboard_read" => {
-                let (text, data) = scene::summary(&scene);
-                tool_result(text, Some(data), false)
+        // 读改写整段拿文件锁：终端和桌面端各拉起一个白板服务，会同时写同一个项目的场景。
+        let _file = match lock_scene(&path) {
+            Ok(f) => f,
+            Err(e) => return tool_result(e, None, true),
+        };
+        let (scene, note) = match Scene::load(&path) {
+            Ok(loaded) => loaded,
+            Err(e) => return tool_result(e, None, true),
+        };
+        let mut out = apply(name, args, &path, scene);
+        if let Some(note) = note {
+            if let Some(text) = out.pointer_mut("/content/0/text") {
+                *text = json!(format!("{note}\n{}", text.as_str().unwrap_or_default()));
             }
-            "whiteboard_edit" => match scene::apply_edit(&mut scene, args) {
-                Ok(report) => {
-                    if let Err(e) = scene.save(&path) {
+        }
+        out
+    }
+}
+
+/// 一次工具调用：读 / 改 / 存都在调用方拿着锁的时候做。
+fn apply(name: &str, args: &Value, path: &std::path::Path, mut scene: Scene) -> Value {
+    match name {
+        "whiteboard_read" => {
+            let (text, data) = scene::summary(&scene);
+            tool_result(text, Some(data), false)
+        }
+        "whiteboard_edit" => match scene::apply_edit(&mut scene, args) {
+            Ok(report) => {
+                scene.gc_files();
+                if let Err(e) = scene.save(path) {
+                    return tool_result(e, None, true);
+                }
+                let (summary, data) = scene::summary(&scene);
+                let mut head = format!(
+                    "已改白板：新增 {}、修改 {}、删除 {}",
+                    report.added.len(),
+                    report.updated.len(),
+                    report.deleted.len()
+                );
+                if report.cleared {
+                    head.push_str("（先清空了）");
+                }
+                tool_result(
+                    format!("{head}。\n{summary}"),
+                    Some(json!({
+                        "rev": scene.rev,
+                        "added": report.added, "updated": report.updated, "deleted": report.deleted,
+                        "shapes": data["shapes"],
+                    })),
+                    false,
+                )
+            }
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_load" => {
+            let since = args.get("sinceRev").and_then(Value::as_u64);
+            if since == Some(scene.rev) {
+                return tool_result(
+                    "没有变化",
+                    Some(json!({ "rev": scene.rev, "unchanged": true })),
+                    false,
+                );
+            }
+            tool_result(format!("第 {} 版", scene.rev), Some(scene.to_json()), false)
+        }
+        "whiteboard_save" => match scene::merge_save(&mut scene, args) {
+            Ok(changed) => {
+                if changed {
+                    scene.gc_files();
+                    if let Err(e) = scene.save(path) {
                         return tool_result(e, None, true);
                     }
-                    let (summary, data) = scene::summary(&scene);
-                    let mut head = format!(
-                        "已改白板：新增 {}、修改 {}、删除 {}",
-                        report.added.len(),
-                        report.updated.len(),
-                        report.deleted.len()
-                    );
-                    if report.cleared {
-                        head.push_str("（先清空了）");
-                    }
-                    tool_result(
-                        format!("{head}。\n{summary}"),
-                        Some(json!({
-                            "rev": scene.rev,
-                            "added": report.added, "updated": report.updated, "deleted": report.deleted,
-                            "shapes": data["shapes"],
-                        })),
-                        false,
-                    )
                 }
-                Err(e) => tool_result(format!("白板没改：{e}"), None, true),
-            },
-            "whiteboard_load" => {
-                let since = args.get("sinceRev").and_then(Value::as_u64);
-                if since == Some(scene.rev) {
-                    return tool_result(
-                        "没有变化",
-                        Some(json!({ "rev": scene.rev, "unchanged": true })),
-                        false,
-                    );
-                }
-                tool_result(format!("第 {} 版", scene.rev), Some(scene.to_json()), false)
+                tool_result(
+                    format!("第 {} 版", scene.rev),
+                    Some(json!({ "rev": scene.rev, "changed": changed })),
+                    false,
+                )
             }
-            "whiteboard_save" => match scene::merge_save(&mut scene, args) {
-                Ok(changed) => {
-                    if changed {
-                        if let Err(e) = scene.save(&path) {
-                            return tool_result(e, None, true);
-                        }
-                    }
-                    tool_result(
-                        format!("第 {} 版", scene.rev),
-                        Some(json!({ "rev": scene.rev, "changed": changed })),
-                        false,
-                    )
-                }
-                Err(e) => tool_result(e, None, true),
-            },
-            other => tool_result(format!("没有工具 {other}"), None, true),
-        }
+            Err(e) => tool_result(e, None, true),
+        },
+        other => tool_result(format!("没有工具 {other}"), None, true),
     }
+}
+
+/// 场景目录里的 `scene.lock`：拿到排他锁才读改写，放手（drop）就解锁。
+fn lock_scene(path: &std::path::Path) -> Result<std::fs::File, String> {
+    let dir = path.parent().ok_or("白板路径不对")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("建白板目录失败：{e}"))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("scene.lock"))
+        .map_err(|e| format!("打开白板锁失败：{e}"))?;
+    file.lock().map_err(|e| format!("锁白板失败：{e}"))?;
+    Ok(file)
 }
 
 impl App for Whiteboard {
@@ -208,7 +243,8 @@ impl App for Whiteboard {
                 "mimeType": MIME,
                 "text": BOARD_HTML,
                 "_meta": { "ui": {
-                    "csp": { "resourceDomains": [FONT_CDN], "connectDomains": [FONT_CDN] },
+                    // 字体走 @font-face（font-src），不用放开 connect-src。
+                    "csp": { "resourceDomains": [FONT_CDN] },
                     "permissions": { "clipboardWrite": {} },
                     "prefersBorder": true,
                 } },
