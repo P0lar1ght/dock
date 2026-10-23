@@ -438,13 +438,13 @@ impl Mcp {
         }
     }
 
+    /// 收掉全部服务器并清空名册：还在路上的连接回来时找不到自己的位置，直接停掉，
+    /// 不会在插件卸下之后再往工具表里登记。
     fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
-        for slot in &mut inner.slots {
-            stop_slot(slot);
-            drop_registered(slot);
-            slot.rpc = None;
-            slot.relist = None;
+        for mut slot in inner.slots.drain(..) {
+            stop_slot(&mut slot);
+            drop_registered(&mut slot);
         }
     }
 
@@ -775,6 +775,9 @@ impl Mcp {
                 slot.listed = listed;
                 slot.rpc = Some(rpc);
                 slot.relist = Some(relist);
+                // 同一台服务器有两次连接在路上（启动时的后台连接撞上重连 / 重载）：
+                // 后回来的接手，先回来的那条停掉，别留着没人管。
+                stop_slot(slot);
                 slot.stop = Some(stop_tx);
                 slot.last_error = None;
                 if let Some(tools) = tools {
@@ -982,6 +985,9 @@ fn slot_status(slot: &Slot) -> McpStatus {
     let detail = if slot.config.enabled {
         if let Some(err) = &slot.last_error {
             err.clone()
+        } else if slot.rpc.is_none() && slot.listed.is_empty() {
+            // 启动时在后台连，握手还没回来。
+            "连接中…".into()
         } else {
             tools_detail
         }
@@ -1085,9 +1091,18 @@ pub fn mcp_client() -> Plugin {
                 .filter(|s| s.config.enabled)
                 .map(|s| s.config.clone())
                 .collect();
-            for server in to_connect {
-                let _ = mcp.connect_slot(&server).await;
-            }
+            // 后台并发连：握手慢的服务器（远程 HTTP 常要好几秒）不拖住整棵树挂载，
+            // `dock serve` / TUI 马上就绪。连上的工具随到随登记，目录变化在下一轮开头
+            // 通告（`pre_step`），没连完时 `search_tool` 报 `partial`。
+            let connecting = {
+                let mcp = mcp.clone();
+                tokio::spawn(async move {
+                    futures_util::future::join_all(
+                        to_connect.iter().map(|server| mcp.connect_slot(server)),
+                    )
+                    .await;
+                })
+            };
             ctx.provide(MCP, mcp.clone())?;
             let mcp_pre = mcp.clone();
             let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
@@ -1097,7 +1112,10 @@ pub fn mcp_client() -> Plugin {
             });
             let mcp_drop = mcp;
             ctx.effect("mcp.servers", move |scope| {
-                scope.own(Disposable::from_fn(move || mcp_drop.shutdown()));
+                scope.own(Disposable::from_fn(move || {
+                    connecting.abort();
+                    mcp_drop.shutdown();
+                }));
                 Ok(())
             })?;
             Ok(None)
@@ -1264,6 +1282,36 @@ startup_timeout_sec = 1
                 _ => None,
             })
             .collect()
+    }
+
+    /// 回归：`mcp-client` 以前挨个等每台服务器握手完才算挂载完，`dock serve` 要等全部
+    /// 握手结束才报 ready（实测远程 HTTP 服务器 8.6s + 1.8s，GUI 卡在「连接 Dock」10 秒）。
+    /// 现在挂载立刻返回，握手在后台跑，结果回来再落进状态。
+    #[tokio::test]
+    async fn mount_does_not_wait_for_server_handshakes() {
+        let (_env, _cwd) = isolated_config(
+            r#"
+[mcp_servers.slow]
+command = "sleep"
+args = ["30"]
+framing = "ndjson"
+startup_timeout_sec = 1
+"#,
+        );
+        let ctx = cordis::Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(mcp_client(), ()).unwrap().wait().await.unwrap();
+        let mcp = ctx.require::<Mcp>(MCP).unwrap();
+        let row = mcp.list().into_iter().find(|s| s.name == "slow").unwrap();
+        assert!(!mcp.catalog_ready(), "挂载等完了握手：{}", row.detail);
+        assert_eq!(row.detail, "连接中…");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !mcp.catalog_ready() {
+            assert!(std::time::Instant::now() < deadline, "握手超时没落进状态");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let row = mcp.list().into_iter().find(|s| s.name == "slow").unwrap();
+        assert!(!row.ok && row.detail != "连接中…", "{row:?}");
     }
 
     /// 回归：「MCP 服务器已连接」以前整个进程只发一次、只写进第 1 页。GUI 的每个新对话
