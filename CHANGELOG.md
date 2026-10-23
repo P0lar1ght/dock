@@ -8,7 +8,33 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **MCP Apps**（`io.modelcontextprotocol/ui`）：MCP 工具可以带交互界面。
+  - 客户端握手声明 MCP Apps 能力；认工具 `_meta.ui`，只给界面用的工具不进模型工具表。
+  - 模型调挂界面的工具时，原始结果存进会话目录 `mcp-apps/`，界面要原样那份。
+  - 本机 stdio 服务器的调用 `_meta` 带 `dock/cwd`（按项目存数据用）。
+  - 网关 `mcp/app/tools | resource | read | call | result | context`（能力 `mcpApps`，只认受信连接）。
+  - 界面状态（`ui/update-model-context`）下一步交给模型（spine 插件 `mcp-app-context`）。
+  - 界面自己登记的工具在界面开着时交给模型：`app_<server>__<name>`，经 `use_tool` 调。
+    网关 `mcp/app/view/expose | result`、推送 `mcp/app/view/call`（能力 `mcpAppViewTools`）。
+- **内置白板**：`dock mcp whiteboard`（新 crate `cordis-apps`，Excalidraw），内置行 `[mcp_servers.whiteboard]`。
+  - 模型工具 `whiteboard_read` / `whiteboard_edit`；场景按项目存在 `$DOCK_HOME/apps/whiteboard/`。
+  - Agent 与用户同时改，按元素版本合并。
+  - 默认开启：升级后多一台 MCP 服务器和两颗工具。
+    不要的话在 `/mcps`（或 GUI 设置 › MCP）里停用，会写进 `config.toml`；或设 `DOCK_WHITEBOARD_MCP=off`。
+  - 面板里的界面工具：`get_selection` / `get_viewport` / `focus` / `snapshot`。
+- **`dock init` / `dock doctor` / `dock upgrade`**：
+  - `init` 初始化 `~/.dock`；`doctor` 健康诊断；`upgrade` 原子升级，`dock update` / `--check` 只检查。
+  - `DOCK_CHANNEL=pre` 走预发布通道，没有可用预发布时直接报错，不回落 latest。
+  - 版本 tag 只认 `vX.Y.Z` / `vX.Y.Z-{alpha|beta|rc}.N`；预发布标成 prerelease，stable 通道看不到。
+  - `install.sh` 显示三阶段进度。
+
 ### 改进
+
+- 启动不再等 MCP 握手：后台并发连，`dock serve` / TUI 马上就绪。
+  - 实测带两台远程 HTTP 服务器的配置：GUI「连接 Dock」约 10 秒 → 0.1 秒内。
+  - 没连完时 `/mcps` 显示「连接中…」，`search_tool` 报 `partial`；工具连上即登记。
 
 - GUI 浏览器面板更像真浏览器：
   - 下拉框能点开（GUI 自己画菜单）；拖选文字、⌘A / ⌘C / ⌘X / ⌘Z 可用，复制进本机剪贴板。
@@ -18,6 +44,12 @@
 
 - bash 卡片显示命令的描述（模型给的 `description`）：TUI 与 GUI 标题是描述 + 主程序名（`find`、`cargo test`），完整命令展开看。
 - 权限弹窗里 bash / monitor 显示完整命令，描述另起一行；原先是截到 120 字的原始 JSON。
+
+### 修复
+
+- MCP App：交给界面的工具输入拆掉 `use_tool` 那层；CSP 让 Worker 也认资源域名（CesiumJS 等地图能出图）。
+- 白板清空后用同样的 id 重画，框里的标签不再丢。
+- 握手途中停用 / 重连 / 改配置的 MCP 服务器，晚到的握手结果不再写回。
 
 ## [0.2.1] - 2026-10-13
 
