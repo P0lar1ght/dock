@@ -20,11 +20,14 @@
     网关 `mcp/app/view/expose | result`、推送 `mcp/app/view/call`（能力 `mcpAppViewTools`）。
 - **内置白板**：`dock mcp whiteboard`（新 crate `cordis-apps`，Excalidraw），内置行 `[mcp_servers.whiteboard]`。
   - 模型工具 `whiteboard_read` / `whiteboard_edit`；场景按项目存在 `$DOCK_HOME/apps/whiteboard/`。
-  - Agent 与用户同时改，按元素版本合并；`DOCK_WHITEBOARD_MCP=off` 关掉。
+  - Agent 与用户同时改，按元素版本合并。
+  - 默认开启：升级后多一台 MCP 服务器和两颗工具。
+    不要的话在 `/mcps`（或 GUI 设置 › MCP）里停用，会写进 `config.toml`；或设 `DOCK_WHITEBOARD_MCP=off`。
   - 面板里的界面工具：`get_selection` / `get_viewport` / `focus` / `snapshot`。
 - **`dock init` / `dock doctor` / `dock upgrade`**：
   - `init` 初始化 `~/.dock`；`doctor` 健康诊断；`upgrade` 原子升级，`dock update` / `--check` 只检查。
   - `DOCK_CHANNEL=pre` 走预发布通道，没有可用预发布时直接报错，不回落 latest。
+  - 版本 tag 只认 `vX.Y.Z` / `vX.Y.Z-{alpha|beta|rc}.N`；预发布标成 prerelease，stable 通道看不到。
   - `install.sh` 显示三阶段进度。
 
 ### 改进
@@ -47,10 +50,6 @@
 - MCP App：交给界面的工具输入拆掉 `use_tool` 那层；CSP 让 Worker 也认资源域名（CesiumJS 等地图能出图）。
 - 白板清空后用同样的 id 重画，框里的标签不再丢。
 - 握手途中停用 / 重连 / 改配置的 MCP 服务器，晚到的握手结果不再写回。
-
-### 发布
-
-- tag 只认 SemVer：`vX.Y.Z` 或 `vX.Y.Z-{alpha|beta|rc}.N`；预发布自动标成 GitHub prerelease。
 
 ## [0.2.1] - 2026-10-13
 
