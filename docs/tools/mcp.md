@@ -13,6 +13,9 @@ stdio + Streamable HTTP。先走 MCP `2026-07-28`（无 initialize / 无 session
 - `mcp-client` 挂载时只登记服务器，握手在后台**并发**跑，`dock serve` / TUI 马上就绪。
 - 连上的工具随到随登记；没连完时 `/mcps` 显示「连接中…」，`search_tool` 报 `status: "partial"`。
 - 目录变化照常在下一轮开头用 `<system-reminder>` 通告。
+- 代价：启动后马上发的第一轮可能还看不到慢服务器的工具，下一轮补上（不是 bug）。
+- 重连 / 重载期间同样显示「连接中…」、`search_tool` 报 `partial`。
+- 握手途中被停用、重连或换了配置：晚到的结果按 `attempt` 认出过期，成败都不写回。
 
 ### MCP Apps（界面）
 

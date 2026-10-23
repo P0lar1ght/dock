@@ -274,6 +274,9 @@ struct Slot {
     disabled_tools: HashSet<String>,
     registered: HashMap<String, Disposable>,
     last_error: Option<String>,
+    /// 第几次连接。每次 `connect_slot` 开始、每次停用都加一；握手回来时对不上（期间被
+    /// 停用、重连、重载换了配置）就是过期结果，不写回。
+    attempt: u64,
 }
 
 struct Inner {
@@ -604,6 +607,7 @@ impl Mcp {
                     disabled_tools,
                     registered: HashMap::new(),
                     last_error: None,
+                    attempt: 0,
                 });
                 report.added.push(server.name.clone());
                 if server.enabled {
@@ -707,6 +711,7 @@ impl Mcp {
         slot.relist = None;
         slot.config.enabled = false;
         slot.last_error = None;
+        slot.attempt += 1;
         drop(inner);
         self.mark_dirty();
         Ok(())
@@ -743,16 +748,18 @@ impl Mcp {
     }
 
     async fn connect_slot(&self, config: &McpServer) -> Result<(), String> {
-        {
+        let attempt = {
             let mut inner = self.inner.lock().unwrap();
-            if let Some(slot) = inner
+            inner
                 .slots
                 .iter_mut()
                 .find(|s| s.config.name == config.name)
-            {
-                stop_slot(slot);
-            }
-        }
+                .map(|slot| {
+                    stop_slot(slot);
+                    slot.attempt += 1;
+                    slot.attempt
+                })
+        };
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let hooks = LiveHooks {
             server: config.name.clone(),
@@ -770,14 +777,17 @@ impl Mcp {
             let _ = stop_tx.send(true);
             return Ok(());
         };
+        // 握手期间这台被停用、重连或换了配置（启动时后台连接可以和 `/mcps`、重载并发）：
+        // 结果已经过期，成败都不写回，免得停用的服务器又登记上工具、或拆掉更新的那条连接。
+        if Some(slot.attempt) != attempt || !slot.config.enabled || slot.config != *config {
+            let _ = stop_tx.send(true);
+            return Ok(());
+        }
         match result {
             Ok((listed, rpc, relist)) => {
                 slot.listed = listed;
                 slot.rpc = Some(rpc);
                 slot.relist = Some(relist);
-                // 同一台服务器有两次连接在路上（启动时的后台连接撞上重连 / 重载）：
-                // 后回来的接手，先回来的那条停掉，别留着没人管。
-                stop_slot(slot);
                 slot.stop = Some(stop_tx);
                 slot.last_error = None;
                 if let Some(tools) = tools {
@@ -1079,6 +1089,7 @@ pub fn mcp_client() -> Plugin {
                         disabled_tools,
                         registered: HashMap::new(),
                         last_error: None,
+                        attempt: 0,
                     });
                 }
             }
@@ -1206,6 +1217,7 @@ mod tests {
                 disabled_tools: HashSet::new(),
                 registered: HashMap::new(),
                 last_error: None,
+                attempt: 0,
             });
         }
         let tools = inner.tools.clone();
@@ -1312,6 +1324,37 @@ startup_timeout_sec = 1
         }
         let row = mcp.list().into_iter().find(|s| s.name == "slow").unwrap();
         assert!(!row.ok && row.detail != "连接中…", "{row:?}");
+    }
+
+    /// 回归（#241 审阅）：启动握手改到后台后，`/mcps` 能在握手途中停用这台服务器。
+    /// 晚到的结果不能再写回：停用的服务器不该带上连接错误、传输或工具。
+    #[tokio::test]
+    async fn late_handshake_after_disable_is_dropped() {
+        let (_env, _cwd) = isolated_config(
+            r#"
+[mcp_servers.slow]
+command = "sleep"
+args = ["30"]
+framing = "ndjson"
+startup_timeout_sec = 1
+"#,
+        );
+        let ctx = cordis::Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        ctx.plugin(mcp_client(), ()).unwrap().wait().await.unwrap();
+        let mcp = ctx.require::<Mcp>(MCP).unwrap();
+        mcp.set_server_enabled("slow", false).await.unwrap();
+        // `startup_timeout_sec = 1` 的握手约 2s 才报超时（实测 2.0s）：留够余量等它回来。
+        tokio::time::sleep(std::time::Duration::from_millis(4000)).await;
+        let inner = mcp.inner.lock().unwrap();
+        let slot = inner
+            .slots
+            .iter()
+            .find(|s| s.config.name == "slow")
+            .unwrap();
+        assert!(!slot.config.enabled);
+        assert_eq!(slot.last_error, None, "过期的握手结果写回了停用的服务器");
+        assert!(slot.rpc.is_none() && slot.stop.is_none());
     }
 
     /// 回归：「MCP 服务器已连接」以前整个进程只发一次、只写进第 1 页。GUI 的每个新对话
