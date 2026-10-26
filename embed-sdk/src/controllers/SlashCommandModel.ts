@@ -135,7 +135,7 @@ function unavailable(
   const goalAction = goalActionFor(entry.name);
   if (goalAction) return goalUnavailable(goalAction, options);
   if (entry.name === 'plan' && options.activeTurn) {
-    return '计划模式请在空闲 Thread 中启动带说明的 /plan';
+    return '计划模式请在空闲会话中启动带说明的 /plan';
   }
   return undefined;
 }
@@ -159,7 +159,7 @@ function goalUnavailable(
   if (!options.goalSupported) return '当前会话未挂载目标服务';
   const status = options.goalStatus || 'none';
   if (action === 'start') return undefined;
-  if (status === 'none') return '当前 Thread 尚未设置 Goal';
+  if (status === 'none') return '当前会话尚未设置目标';
   if (action === 'pause' && status !== 'active') return '只有 active Goal 可以暂停';
   if (action === 'resume' && status !== 'paused' && status !== 'blocked') {
     return '只有 paused 或 blocked Goal 可以恢复';

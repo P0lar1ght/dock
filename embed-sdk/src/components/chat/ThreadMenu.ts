@@ -22,7 +22,7 @@ export interface ThreadMenuActions {
 export function threadMenu(model: ThreadWorkspaceView, actions: ThreadMenuActions) {
   return html`
     <details class="thread-menu" data-testid="thread-menu">
-      <summary class="icon-button thread-menu-toggle" aria-label="Threads">
+      <summary class="icon-button thread-menu-toggle" aria-label="会话">
         <span aria-hidden="true">#</span>
         ${model.attentionCount
           ? html`<span class="thread-menu-count" data-testid="thread-attention-count">${model.attentionCount}</span>`
@@ -30,7 +30,7 @@ export function threadMenu(model: ThreadWorkspaceView, actions: ThreadMenuAction
       </summary>
       <div class="thread-menu-popover">
         <div class="thread-menu-heading">
-          <strong>Threads</strong>
+          <strong>会话</strong>
           <button
             class="thread-new-button"
             data-testid="thread-new"
@@ -40,12 +40,12 @@ export function threadMenu(model: ThreadWorkspaceView, actions: ThreadMenuAction
               closeMenu(event);
               actions.createThread();
             }}
-          >＋ New</button>
+          >＋ 新会话</button>
         </div>
         <div class="thread-list" role="list" aria-busy=${String(model.loading)}>
           ${model.threads.length
             ? model.threads.map((thread) => threadRow(thread, model, actions))
-            : html`<p class="thread-empty">${model.loading ? 'Loading…' : 'No Threads yet'}</p>`}
+            : html`<p class="thread-empty">${model.loading ? '加载中…' : '还没有会话'}</p>`}
           ${archivedThreads(model, actions)}
         </div>
         ${model.error ? html`<p class="thread-menu-error" role="alert">${model.error}</p>` : nothing}
@@ -61,7 +61,7 @@ function archivedThreads(model: ThreadWorkspaceView, actions: ThreadMenuActions)
       <div class="thread-archived-list" role="list">
         ${model.archivedThreads.length
           ? model.archivedThreads.map((thread) => archivedThreadRow(thread, model, actions))
-          : html`<p class="thread-empty">没有已归档的 Thread</p>`}
+          : html`<p class="thread-empty">没有已归档的会话</p>`}
       </div>
     </details>
   `;
@@ -90,7 +90,7 @@ function archivedThreadRow(
             class="thread-action thread-delete-confirm"
             data-testid="thread-delete-confirm"
             type="button"
-            aria-label=${`Permanently delete ${thread.title}`}
+            aria-label=${`确认永久删除 ${thread.title}`}
             ?disabled=${Boolean(model.operation)}
             @click=${() => actions.confirmDeleteThread(thread.id)}
           >确认删除</button>
@@ -104,6 +104,14 @@ function archivedThreadRow(
               actions.restoreArchivedThread(thread.id);
             }}
           >恢复</button>
+          <button
+            class="thread-action thread-delete"
+            data-testid="thread-delete"
+            type="button"
+            aria-label=${`永久删除 ${thread.title}`}
+            ?disabled=${Boolean(model.operation)}
+            @click=${() => actions.requestDeleteThread(thread.id)}
+          >删除</button>
         `}
       </span>
     </div>
@@ -140,6 +148,26 @@ function threadRow(
             <span class="thread-meta">${threadStatus(thread)}</span>
           </span>
         </button>
+        <span class="thread-row-actions">
+          <button
+            class="thread-rename"
+            data-testid="thread-rename"
+            type="button"
+            title="重命名"
+            aria-label=${`重命名 ${thread.title}`}
+            ?disabled=${Boolean(model.operation)}
+            @click=${() => actions.beginRenameThread(thread.id)}
+          >✎</button>
+          <button
+            class="thread-action"
+            data-testid="thread-archive"
+            type="button"
+            title=${thread.canArchive ? '归档' : '还在回复或有排队消息，先停下再归档'}
+            aria-label=${`归档 ${thread.title}`}
+            ?disabled=${Boolean(model.operation) || !thread.canArchive}
+            @click=${() => actions.archiveThread(thread.id)}
+          >归档</button>
+        </span>
       `}
     </div>
   `;
@@ -154,7 +182,7 @@ function renameEditor(
     <div class="thread-rename-editor">
       <input
         data-testid="thread-rename-input"
-        aria-label=${`Rename ${thread.title}`}
+        aria-label=${`重命名 ${thread.title}`}
         .value=${model.renameDraft}
         maxlength="160"
         autofocus
@@ -198,8 +226,9 @@ function threadStatus(thread: ThreadWorkspaceItem) {
     working: '工具运行中',
     approval: '等待审批',
     input: '等待选择',
-    subagent: 'SubAgent 运行中',
-    success: '已完成',
+    subagent: '子代理运行中',
+    // 后台跑完的会话由上面的 attention「已完成」标出来；会话里 success 会一直留着，不能一直显示。
+    success: thread.active ? '当前' : '就绪',
     error: '失败'
   };
   return labels[thread.activity];

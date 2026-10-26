@@ -31,7 +31,7 @@ export function approvalModePopover(
     <aside class="context-popover policy-popover" data-testid="approval-popover" aria-label="审批模式">
       <div class="context-popover-heading">
         <strong>审批模式</strong>
-        <span>${confirmationPending ? '等待本机确认' : activeTurn ? '下个回复生效' : '当前 Thread'}</span>
+        <span>${confirmationPending ? '等待本机确认' : activeTurn ? '下个回复生效' : '当前会话'}</span>
       </div>
       <div class="model-options" role="radiogroup" aria-label="审批模式">
         ${modes.map((mode) => html`

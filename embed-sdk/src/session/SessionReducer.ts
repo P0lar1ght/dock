@@ -61,6 +61,12 @@ import {
   withUserInputRequested,
   withUserInputResolved
 } from './UserInputModel.js';
+import { settlePlansForTurn, withPlanRequested, withPlanResolved } from './PlanApprovalModel.js';
+import {
+  settleElicitationsForTurn,
+  withElicitationRequested,
+  withElicitationResolved
+} from './ElicitationModel.js';
 
 export function restoreSession(history: ThreadHistoryResult): SessionState {
   let state = initialSessionState(history.thread);
@@ -133,6 +139,33 @@ export function reduceSession(state: SessionState, notification: RuntimeNotifica
     case 'interaction/resolved':
       next = withActivity(withUserInputResolved(state, params), 'working');
       break;
+    case 'plan/requested':
+      if (turnId) {
+        const segmented = closeAssistantSegment(state, turnId);
+        next = withActivity(
+          withTurn(withPlanRequested(segmented, turnId, params, seq), turnId, 'waiting_input'),
+          'approval'
+        );
+      }
+      break;
+    case 'elicit/requested':
+      if (turnId) {
+        const segmented = closeAssistantSegment(state, turnId);
+        next = withActivity(
+          withTurn(withElicitationRequested(segmented, turnId, params, seq), turnId, 'waiting_input'),
+          'approval'
+        );
+      }
+      break;
+    case 'elicit/resolved':
+      next = withActivity(withElicitationResolved(state, params), 'working');
+      break;
+    case 'plan/resolved':
+      next = withActivity(
+        withPlanResolved(state, params),
+        text(params.decision) === 'approve' ? 'working' : 'thinking'
+      );
+      break;
     case 'subagent/waiting_permission':
       if (turnId) {
         const segmented = closeAssistantSegment(state, turnId);
@@ -185,7 +218,10 @@ export function reduceSession(state: SessionState, notification: RuntimeNotifica
             ? withActivity(withTurn(state, turnId, status), 'input')
           : activityAfterTurn(completeTurn(state, turnId, status, seq), status);
         next = projectTurnFailureIssue(
-          settleUserInputForTurn(completed, turnId, status),
+          settleElicitationsForTurn(
+            settlePlansForTurn(settleUserInputForTurn(completed, turnId, status), turnId),
+            turnId
+          ),
           turnId,
           text(params.status),
           seq

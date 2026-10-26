@@ -69,6 +69,7 @@ export class ThreadController {
   private renameDraft = '';
   private confirmDeleteThreadId = '';
   private loadGeneration = 0;
+  private titleRefresh?: Promise<void>;
 
   constructor(
     private readonly onChange: () => void,
@@ -82,6 +83,8 @@ export class ThreadController {
       const state = this.client?.getSession(thread.id)?.state;
       return {
         ...thread,
+        // 还没说过话的会话：网关给的是占位标题「当前会话」，显示成「新对话」（同桌面端）。
+        title: isPlaceholderTitle(thread.title) ? '新对话' : thread.title,
         active: thread.id === activeThreadId,
         activity: state?.activity || 'idle',
         attention: this.attention.get(thread.id),
@@ -139,7 +142,7 @@ export class ThreadController {
         this.onActiveSession(active);
       }
     } catch {
-      if (generation === this.loadGeneration) this.error = 'Thread 列表未能加载，请检查连接后重试';
+      if (generation === this.loadGeneration) this.error = '会话列表未能加载，请检查连接后重试';
     } finally {
       if (generation === this.loadGeneration) {
         this.loading = false;
@@ -168,6 +171,9 @@ export class ThreadController {
       const session = await client.createThread({
         workspaceId: client.activeWorkspaceId
       });
+      // 新会话可能沿用旧 id（网关的 `live`）：旧会话对象上的监听摘掉，改听新的。
+      this.detachThread(session.id);
+      this.watch(session);
       this.onActiveSession(session);
       await this.load();
       this.markActive(session);
@@ -194,7 +200,7 @@ export class ThreadController {
     const client = this.requireClient();
     const session = client.getSession(threadId);
     if (session && hasPendingWork(session.state)) {
-      this.error = '活动中或有排队消息的 Thread 不能归档';
+      this.error = '活动中或有排队消息的会话不能归档';
       this.onChange();
       return false;
     }
@@ -237,7 +243,7 @@ export class ThreadController {
     if (this.renameThreadId !== threadId) return false;
     const title = this.renameDraft.trim();
     if (!title) {
-      this.error = 'Thread 标题不能为空';
+      this.error = '会话标题不能为空';
       this.onChange();
       return false;
     }
@@ -255,8 +261,19 @@ export class ThreadController {
     const client = this.requireClient();
     return this.run(`restore:${threadId}`, async () => {
       const restored = await client.restoreArchivedThread(threadId, client.activeWorkspaceId);
-      this.replaceSummary(restored);
       this.confirmDeleteThreadId = '';
+      if (restored.id === threadId) {
+        this.replaceSummary(restored);
+        this.onChange();
+        return restored;
+      }
+      // 网关把它换回了第 1 页（`live`），原来的第 1 页归档成了新 id：重拉列表，切到换上来的那份。
+      this.detachThread(restored.id);
+      await this.load();
+      const session = await client.switchThread(restored.id, client.activeWorkspaceId);
+      this.watch(session);
+      this.markActive(session);
+      this.onActiveSession(session);
       this.onChange();
       return restored;
     });
@@ -278,7 +295,7 @@ export class ThreadController {
   async deletePermanently(threadId: string) {
     const client = this.requireClient();
     if (this.confirmDeleteThreadId !== threadId) {
-      this.error = '请先确认永久删除这个 Thread';
+      this.error = '请先确认永久删除这个会话';
       this.onChange();
       return false;
     }
@@ -332,10 +349,11 @@ export class ThreadController {
     this.summaries = this.summaries
       .map((thread) => thread.id === state.thread.id ? {
         ...thread,
-        title: state.thread.title,
+        title: keptTitle(state, thread.title),
         updatedAt: state.thread.updatedAt
       } : thread)
       .sort((left, right) => right.updatedAt - left.updatedAt);
+    if (this.client?.activeSession?.id === state.thread.id) this.refreshTitleAfterTurn(state);
     if (this.client?.activeSession?.id === state.thread.id) {
       this.attentionStore?.markSeen(state.thread.id, state.lastSeq);
       this.attention.delete(state.thread.id);
@@ -344,6 +362,36 @@ export class ThreadController {
       if (seenSeq !== undefined) this.updateAttention(state, seenSeq);
     }
     this.onChange();
+  }
+
+  /**
+   * 网关的 `live` 会话标题取自第一条用户消息，只在列表里现算，不推送改名：
+   * 这一轮说完了、标题还是占位的，就重拉一次列表，只更新标题。
+   */
+  private refreshTitleAfterTurn(state: Readonly<SessionState>) {
+    const summary = this.summaries.find((thread) => thread.id === state.thread.id);
+    if (!summary || !isPlaceholderTitle(summary.title)) return;
+    if (!state.messages.some((message) => message.role === 'user')) return;
+    if (hasPendingWork(state) || this.titleRefresh) return;
+    const client = this.client;
+    const workspaceId = client?.activeWorkspaceId;
+    if (!client || !workspaceId) return;
+    this.titleRefresh = client.listThreads(workspaceId, { includeArchived: false })
+      .then((listed) => {
+        const titles = new Map(listed.map((thread) => [thread.id, thread.title]));
+        let changed = false;
+        this.summaries = this.summaries.map((thread) => {
+          const title = titles.get(thread.id);
+          if (!title || isPlaceholderTitle(title) || title === thread.title) return thread;
+          changed = true;
+          return { ...thread, title };
+        });
+        if (changed) this.onChange();
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.titleRefresh = undefined;
+      });
   }
 
   private lifecycleChanged(event: Readonly<ThreadLifecycleEvent>) {
@@ -359,7 +407,7 @@ export class ThreadController {
       event.method === 'thread/archived' || event.method === 'thread/deleted'
     )) {
       void this.activateFallback().catch(() => {
-        this.error = '归档或删除已同步，但没有可用的活动 Thread';
+        this.error = '归档或删除已同步，但没有可用的活动会话';
         this.onActiveSession(undefined);
         this.onChange();
       });
@@ -438,7 +486,7 @@ export class ThreadController {
       try {
         return await action();
       } catch (error) {
-        this.error = 'Thread 操作未完成，请检查连接后重试';
+        this.error = '会话操作未完成，请检查连接后重试';
         throw error;
       } finally {
         this.operation = '';
@@ -461,6 +509,22 @@ export function attentionFromState(state: Readonly<SessionState>): ThreadAttenti
     return 'approval';
   }
   return state.activity === 'success' ? 'completed' : undefined;
+}
+
+/**
+ * 会话里还是占位标题、但已经说过话：留着列表里拿到的真标题（网关只在列表里现算）。
+ * 没说过话的占位标题就是真的（开了新会话、网关重启后的空会话），不能留着旧标题。
+ */
+function keptTitle(state: Readonly<SessionState>, listed: string) {
+  if (!isPlaceholderTitle(state.thread.title)) return state.thread.title;
+  return state.messages.some((message) => message.role === 'user') ? listed : state.thread.title;
+}
+
+/** 网关给还没说过话的会话的占位标题。 */
+const PLACEHOLDER_TITLE = '当前会话';
+
+function isPlaceholderTitle(title: string | undefined) {
+  return !title || title === PLACEHOLDER_TITLE;
 }
 
 export function hasPendingWork(state: Readonly<SessionState>) {

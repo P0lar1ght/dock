@@ -60,7 +60,7 @@ cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings   # lint（�
 
 ```bash
 cd embed-sdk && npm ci && npm run build      # 构建 dock-embed.js
-cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080
+cd embed-sdk && npm run dev:host             # 宿主页调试，127.0.0.1:19080/examples/inject/
 cd dock-core && npm ci && npm test && npm run typecheck   # 协议核心（Node 22.18+ 直接跑 .ts 测试）
 ```
 

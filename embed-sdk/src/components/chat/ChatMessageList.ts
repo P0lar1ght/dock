@@ -22,6 +22,12 @@ import type { UserInputInteractionState } from '../../controllers/UserInputContr
 import { userInputPrompt, type UserInputPromptActions } from '../UserInputPrompt.js';
 import type { SessionGoalActivity } from '../../session/GoalActivityModel.js';
 import { goalProgressRow } from './GoalProgressRow.js';
+import { planApprovalCard } from '../PlanApprovalCard.js';
+import { elicitationCard } from '../ElicitationCard.js';
+import type { ElicitationInteractionState } from '../../controllers/ElicitationController.js';
+import type { ElicitAction, SessionElicitation } from '../../session/ElicitationModel.js';
+import type { PlanApprovalInteractionState } from '../../controllers/PlanApprovalController.js';
+import type { PlanDecision, SessionPlanApproval } from '../../session/PlanApprovalModel.js';
 
 export interface ChatMessageListModel {
   messages: readonly SessionMessage[];
@@ -35,6 +41,10 @@ export interface ChatMessageListModel {
   runtimeIssueInteractions: Readonly<Record<string, RuntimeIssueInteraction>>;
   permissionInteractions: Readonly<Record<string, PermissionInteractionState>>;
   userInputInteractions: Readonly<Record<string, UserInputInteractionState>>;
+  planApprovals: readonly SessionPlanApproval[];
+  planInteractions: Readonly<Record<string, PlanApprovalInteractionState>>;
+  elicitations: readonly SessionElicitation[];
+  elicitationInteractions: Readonly<Record<string, ElicitationInteractionState>>;
   activity: SessionActivityState;
   sessionReady: boolean;
 }
@@ -43,7 +53,9 @@ export function chatMessageList(
   model: ChatMessageListModel,
   resolvePermission: (requestId: string, decision: PermissionDecision) => void,
   userInputActions: UserInputPromptActions,
-  issueActions: RuntimeIssueActions
+  issueActions: RuntimeIssueActions,
+  resolvePlan: (planId: string, decision: PlanDecision) => void,
+  resolveElicitation: (elicitId: string, action: ElicitAction) => void
 ) {
   const timeline = buildChatTimeline(
     model.messages,
@@ -53,7 +65,9 @@ export function chatMessageList(
     model.subagentActivities,
     model.runtimeIssues,
     model.userInputRequests,
-    model.goalActivities
+    model.goalActivities,
+    model.planApprovals,
+    model.elicitations
   );
   const empty = timeline.length === 0;
   const hasRunningTool = model.toolActivities.some((tool) => tool.status === 'running');
@@ -64,7 +78,7 @@ export function chatMessageList(
       data-testid="message-list"
       role="log"
       aria-live="polite"
-      aria-label="Agent messages"
+      aria-label="对话消息"
     >
       ${empty ? html`
         <div class="empty-chat" data-testid="empty-chat">
@@ -83,6 +97,10 @@ export function chatMessageList(
           )
           : item.kind === 'plan'
             ? planCard(item.plan)
+            : item.kind === 'plan_approval'
+              ? planApprovalCard(item.plan, model.planInteractions[item.plan.id], resolvePlan)
+            : item.kind === 'elicitation'
+              ? elicitationCard(item.request, model.elicitationInteractions[item.request.id], resolveElicitation)
             : item.kind === 'goal'
               ? goalProgressRow(item.goal)
             : item.kind === 'user_input'
@@ -126,12 +144,16 @@ function timelineKey(item: ChatTimelineItem) {
       return `issue:${item.issue.id}`;
     case 'permission':
       return `permission:${item.permission.id}`;
+    case 'plan_approval':
+      return `plan-approval:${item.plan.id}`;
+    case 'elicitation':
+      return `elicit:${item.request.id}`;
   }
 }
 
 function messageBubble(message: SessionMessage) {
   const assistant = message.role === 'assistant';
-  const label = assistant ? 'Agent' : 'You';
+  const label = assistant ? 'Dock' : '你';
   return html`
     <article
       class="message-row ${message.role}"
@@ -201,8 +223,8 @@ function activityIndicator(
   const labels: Partial<Record<SessionActivityState, string>> = {
     thinking: '嘟嘟正在思考',
     working: '嘟嘟正在使用本地能力',
-    approval: '等待本地授权确认',
-    input: '等待你选择规划方向',
+    approval: '等你确认',
+    input: '等你回答',
     subagent: '协作 Agent 正在处理'
   };
   return html`

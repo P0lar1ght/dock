@@ -35,7 +35,7 @@ export function planModePopover(
         <strong>计划模式</strong>
         <span>${activeTurn ? '进行中不可切换' : changing ? '正在同步' : '仅下一次发送'}</span>
       </div>
-      <div class="model-options" role="radiogroup" aria-label="Thread 工作模式">
+      <div class="model-options" role="radiogroup" aria-label="会话工作模式">
         ${OPTIONS.map((option) => html`
           <button
             class="model-option approval-option"

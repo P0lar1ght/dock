@@ -56,6 +56,33 @@ test('unclaimed preview is not applied to a newer image with different bytes', (
   assert.equal(later.messages[0]?.attachments?.[0]?.previewUrl, undefined);
 });
 
+test('unclaimed preview does not jump onto an earlier text-only message', () => {
+  mockBlobUrls();
+  const store = new TransientScreenshotPreviewStore();
+  store.add('t2', preview('shot', 12, 8, 64));
+  // 截图那条用户消息还没推过来，最新的用户消息是上一轮的纯文字。
+  const before = store.project(state([text('t1', '先说一句你好')]));
+  assert.equal(before.messages[0]?.attachments?.length ?? 0, 0, '纯文字消息不能挂上截图预览');
+
+  const arrived = store.project(state([
+    before.messages[0]!,
+    user('t2', { width: 12, height: 8, byteLength: 64 })
+  ]));
+  assert.equal(arrived.messages[1]?.attachments?.[0]?.previewUrl, 'blob:1');
+});
+
+function text(turnId: string, content: string): SessionMessage {
+  return {
+    id: `${turnId}:user`,
+    turnId,
+    role: 'user',
+    content,
+    status: 'completed',
+    startedSeq: Number(turnId.slice(1)) || 1,
+    updatedSeq: Number(turnId.slice(1)) || 1
+  };
+}
+
 function mockBlobUrls() {
   let n = 0;
   globalThis.URL.createObjectURL = () => `blob:${++n}`;

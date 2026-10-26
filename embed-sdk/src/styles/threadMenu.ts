@@ -226,7 +226,7 @@ export const threadMenuStyles = css`
     padding: 5px 4px;
     border-radius: 6px;
     color: var(--pv-muted);
-    font-size: 8px;
+    font-size: 10px;
     white-space: nowrap;
   }
 

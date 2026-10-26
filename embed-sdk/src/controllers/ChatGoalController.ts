@@ -38,7 +38,7 @@ export class ChatGoalController {
     return this.mutate(
       session,
       () => session!.pauseGoal(revision),
-      '目标未能暂停，请刷新 Thread 状态后重试'
+      '目标未能暂停，请刷新会话状态后重试'
     );
   }
 
@@ -47,7 +47,7 @@ export class ChatGoalController {
     return this.mutate(
       session,
       () => session!.resumeGoal(revision),
-      '目标未能恢复，请确认 Thread 空闲后重试'
+      '目标未能恢复，请确认会话空闲后重试'
     );
   }
 
@@ -55,7 +55,7 @@ export class ChatGoalController {
     return this.mutate(
       session,
       () => session!.clearGoal(),
-      '目标未能清除，请刷新 Thread 状态后重试',
+      '目标未能清除，请刷新会话状态后重试',
       true
     );
   }
@@ -67,10 +67,10 @@ export class ChatGoalController {
     const goal = session.state.environment?.goal;
     const revision = goal?.revision || 0;
     if (command.action === 'start') {
-      if (cancellableTurn(session.state.turns)) throw new Error('新 Goal 只能在空闲 Thread 中启动');
+      if (cancellableTurn(session.state.turns)) throw new Error('新目标只能在空闲会话中启动');
       await session.startGoal(command.content);
     } else if (command.action === 'edit') {
-      if (!goal || goal.status === 'none') throw new Error('当前 Thread 尚未设置 Goal');
+      if (!goal || goal.status === 'none') throw new Error('当前会话尚未设置目标');
       await session.editGoal(command.content, revision);
     } else if (command.action === 'pause') {
       if (goal?.status !== 'active') throw new Error('只有 active Goal 可以暂停');
@@ -79,10 +79,10 @@ export class ChatGoalController {
       if (goal?.status !== 'paused' && goal?.status !== 'blocked') {
         throw new Error('只有 paused 或 blocked Goal 可以恢复');
       }
-      if (cancellableTurn(session.state.turns)) throw new Error('恢复 Goal 需要空闲 Thread');
+      if (cancellableTurn(session.state.turns)) throw new Error('恢复目标需要空闲会话');
       await session.resumeGoal(revision);
     } else {
-      if (!goal || goal.status === 'none') throw new Error('当前 Thread 尚未设置 Goal');
+      if (!goal || goal.status === 'none') throw new Error('当前会话尚未设置目标');
       await session.clearGoal();
     }
     await session.refreshEnvironment().catch(() => undefined);

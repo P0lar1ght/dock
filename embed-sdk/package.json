@@ -47,7 +47,8 @@
     "build:bundle": "vite build && node scripts/build-standalone.mjs",
     "build": "npm run clean && npm run build:types && npm run build:bundle",
     "pack:skin": "node scripts/package-dockskin.mjs",
-    "dev:host": "vite --host 127.0.0.1 --port 19080 --strictPort examples/inject"
+    "test": "node scripts/run-tests.mjs",
+    "dev:host": "vite --host 127.0.0.1 --port 19080 --strictPort"
   },
   "dependencies": {
     "@fortawesome/free-solid-svg-icons": "7.3.1",

@@ -131,7 +131,7 @@ CI 不跑的：
   cargo test -p cordis-browser --test real_chrome -- p1_ --ignored                # 单个
   ```
 
-- `embed-sdk` 的 js 检查：目前没有 lint / test 脚本，类型检查就是 `npm run build:types`。
+- `embed-sdk` 的 js 检查：类型检查 `npm run build:types`，单测 `npm test`（`node:test`）；没有 lint。
 
 spine 测试怎么隔离进程级 env：多个模块会临时改 `DOCK_HOME` 与当前目录做隔离，而这两个都是进程级全局。模块各持一把私有锁时锁与锁之间不互斥，表现为 `session_persist::tests` 与 `skills::tests` 随机红。仓库统一用 `cordis-spine/src/test_env.rs` 的 `scoped()`：
 
@@ -231,7 +231,7 @@ macOS 产物未签名 / 未公证，Gatekeeper 会拦首次运行；`install.sh`
 cd embed-sdk
 npm ci                 # 有 package-lock.json，用 ci 而不是 install
 npm run build          # clean + tsc -b + vite build + standalone bundle
-npm run dev:host       # 宿主页调试，127.0.0.1:19080
+npm run dev:host       # 宿主页调试，127.0.0.1:19080/examples/inject/
 npm run build:types    # 只出 .d.ts
 npm run build:bundle   # 只出 bundle
 npm run pack:skin      # 打包 pet skin

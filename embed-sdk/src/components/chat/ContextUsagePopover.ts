@@ -29,7 +29,7 @@ export function contextUsagePopover(
           <strong>上下文用量</strong>
           <span>正在同步</span>
         </div>
-        <p class="context-empty">等待 Gateway 返回当前 Thread 的安全状态。</p>
+        <p class="context-empty">等待 Gateway 返回当前会话的安全状态。</p>
       </aside>
     `;
   }
@@ -150,7 +150,7 @@ function goalSummary(goal: SessionEnvironment['goal']) {
 function compactionSummary(value: SessionEnvironment['context']['lastCompaction']) {
   if (!value) return nothing;
   if (value.status === 'running') {
-    return html`<p class="context-compaction" data-status="running">正在压缩当前 Thread…</p>`;
+    return html`<p class="context-compaction" data-status="running">正在压缩当前会话…</p>`;
   }
   if (value.status === 'completed') {
     return html`
@@ -174,7 +174,7 @@ function compactionSummary(value: SessionEnvironment['context']['lastCompaction'
 function compactActionSummary(canCompact: boolean, activeTurn: boolean) {
   if (!canCompact) return '当前 Gateway 未启用';
   if (activeTurn) return '当前回复完成后可用';
-  return '立即压缩当前 Thread 历史';
+  return '立即压缩当前会话历史';
 }
 
 function clampedPercent(value: number) {

@@ -25,7 +25,7 @@ export function goalPopover(
     <aside class="context-popover goal-popover" data-testid="goal-popover" aria-label="持续目标">
       <div class="context-popover-heading">
         <strong>持续目标</strong>
-        <span>${changing ? '正在同步' : active ? '正在推进' : resumable ? '已停止' : completed ? '已完成' : '当前 Thread'}</span>
+        <span>${changing ? '正在同步' : active ? '正在推进' : resumable ? '已停止' : completed ? '已完成' : '当前会话'}</span>
       </div>
       ${goal?.summary ? html`
         <p class="goal-summary" data-status=${goal.status}>

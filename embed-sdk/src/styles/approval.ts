@@ -57,4 +57,24 @@ export const approvalStyles = css`
     outline: 1px solid var(--pv-accent);
     outline-offset: 1px;
   }
+
+  /* 计划审批卡：正文是 markdown，长计划在卡里自己滚，按钮留在下面。 */
+  .plan-approval-markdown {
+    max-height: 320px;
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding: 8px 10px;
+    border: 1px solid var(--pv-border);
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--pv-text) 3%, transparent);
+  }
+
+  .plan-approval-empty {
+    margin: 0;
+    color: var(--pv-muted);
+  }
+
+  .plan-approval-actions {
+    gap: 6px;
+  }
 `;

@@ -511,6 +511,18 @@ export class DockClient {
         turnId,
         workspaceId: selectedWorkspace,
         answers
+      }),
+      resolvePlan: (id, selectedWorkspace, planId, decision) => this.interactionApi.resolvePlan({
+        threadId: id,
+        workspaceId: selectedWorkspace,
+        planId,
+        decision
+      }),
+      resolveElicitation: (id, selectedWorkspace, elicitId, action) => this.interactionApi.resolveElicitation({
+        threadId: id,
+        workspaceId: selectedWorkspace,
+        elicitId,
+        action
       })
     };
   }

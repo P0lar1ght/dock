@@ -56,7 +56,23 @@ export class SessionCoordinator {
   async create(workspaceId = this.requireActiveWorkspace(), title?: string) {
     this.options.requireWorkspace(workspaceId);
     const thread = await this.options.threadApi.create(workspaceId, title);
+    // 网关第 1 页的新会话 id 还是 `live`（旧会话归档成了别的 id）：手里那份是旧会话的
+    // 消息和 seq，丢掉按新会话重开；不然新会话的事件 seq 从头数，会被当成重复丢掉。
+    this.discard(thread.id);
     return this.open(thread.id, workspaceId, thread, true);
+  }
+
+  /**
+   * 丢掉手里某个 id 的会话（下次打开从网关重拉历史、重新订阅）。网关第 1 页的 id 一直是
+   * `live`，但开新会话、归档、恢复都会把它换成另一份对话：这时手里那份就旧了。
+   */
+  private discard(threadId: string) {
+    const stale = this.sessions.get(threadId);
+    if (!stale) return;
+    stale.releaseScreenshotPreviews();
+    this.sessions.delete(threadId);
+    this.subscribedThreads.delete(threadId);
+    if (this.activeSessionValue === stale) this.activeSessionValue = undefined;
   }
 
   restore(threadId: string, workspaceId = this.requireActiveWorkspace()) {
@@ -72,6 +88,8 @@ export class SessionCoordinator {
     this.options.requireWorkspace(workspaceId);
     const thread = await this.options.threadApi.archive(threadId, workspaceId);
     this.applyLifecycle('thread/archived', thread, 'local');
+    // 归档的是第 1 页：归档的那份拿到了别的 id，`live` 换成了新的空会话。
+    if (thread.id !== threadId) this.discard(threadId);
     return thread;
   }
 
@@ -91,6 +109,8 @@ export class SessionCoordinator {
     const threadId = requiredText(threadIdValue, 'threadId');
     this.options.requireWorkspace(workspaceId);
     const thread = await this.options.threadApi.restore(threadId, workspaceId);
+    // 恢复是把归档的那份换回第 1 页（回来的 id 是 `live`）：手里的 `live` 是换下去的那份。
+    if (thread.id !== threadId) this.discard(thread.id);
     this.applyLifecycle('thread/restored', thread, 'local');
     return thread;
   }

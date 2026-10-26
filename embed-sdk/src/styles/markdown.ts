@@ -163,7 +163,8 @@ export const markdownStyles = css`
   .markdown-inline-code,
   .markdown-code-block {
     border: 1px solid var(--pv-border);
-    background: rgba(4, 13, 22, 0.48);
+    /* 跟着主题走：浅色主题是一层淡灰，深色主题是一层淡白（写死深色在浅色主题上是灰底黑字）。 */
+    background: color-mix(in srgb, var(--pv-text) 7%, transparent);
     color: var(--pv-text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 0.9em;
