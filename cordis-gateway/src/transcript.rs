@@ -933,6 +933,36 @@ mod tests {
         t.history_since(0).into_iter().map(|e| e.method).collect()
     }
 
+    /// `turn/start` / `turn/enqueue` 回的 `turnId` 靠它：提交前取，`ahead` 是要等的轮数
+    /// （在跑的那一轮之后还排着几条）。取出来的要和那条消息真跑起来时投影的轮次一致。
+    #[test]
+    fn next_turn_id_matches_the_turn_the_message_runs_as() {
+        let user_turn = |t: &Transcript| {
+            t.history_since(0)
+                .into_iter()
+                .rev()
+                .find(|e| e.method == "item/user_message")
+                .and_then(|e| e.payload.get("turnId").cloned())
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap()
+        };
+        let mut t = Transcript::new();
+        let first = t.next_turn_id(0);
+        t.ingest_log(LogEvent::User("first".into()));
+        assert_eq!(user_turn(&t), first);
+
+        // 第一轮还在跑：排第一条的等它跑完，排第二条的再等一轮。
+        let second = t.next_turn_id(0);
+        let third = t.next_turn_id(1);
+        t.turn_ended(&TurnEndStatus::Completed);
+        t.ingest_log(LogEvent::User("second".into()));
+        assert_eq!(user_turn(&t), second);
+        t.turn_ended(&TurnEndStatus::Completed);
+        t.ingest_log(LogEvent::User("third".into()));
+        assert_eq!(user_turn(&t), third);
+        assert_eq!([first, second, third], ["t1", "t2", "t3"]);
+    }
+
     /// 插话：投影上从它开新的一轮，前一段以 `steered` 收尾（客户端别当成真的
     /// 结束），用户消息带 `steered`。实时和回放（重开会话、关着的会话）一致。
     #[test]

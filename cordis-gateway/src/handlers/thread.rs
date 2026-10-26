@@ -93,9 +93,8 @@ fn list_all(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     Ok(json!({ "threads": threads }))
 }
 
-/// `thread/start` 不带 `cwd`：老语义，第 1 页换成一个新会话。带 `cwd` 的走
-/// [`start_at`]。
-/// `thread/start`（不带 `cwd`）：第 1 页开新会话（嵌入页的「新会话」）。
+/// `thread/start`（不带 `cwd`）：老语义，第 1 页开新会话（嵌入页的「新会话」）。带 `cwd`
+/// 的走 [`start_at`]。
 ///
 /// 还在跑就先停、等它停下再归档（同 `thread/rewind`）：不然这一轮接着跑进新会话，收尾的
 /// 事件也落进新会话的记录。归档、清空走 `"slash"` 表里的 `/new`——旧会话的子代理、目标
