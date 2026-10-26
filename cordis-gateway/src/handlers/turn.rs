@@ -35,10 +35,12 @@ pub fn steer(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> 
     apply_turn_intent(&page, &params, &message)?;
     let port = session_port(&page)?;
     let working = port.working();
+    // 插话在投影里开一轮新的（上一轮报 steered 收尾）；空闲时就是马上开的那一轮。提交前取。
+    let turn_id = gateway.next_turn_id(&page.identity, 0);
     port.steer(message, images);
     Ok(json!({
         "threadId": thread_id,
-        "turnId": format!("t{}", gateway.latest_seq(&page.identity).saturating_add(1)),
+        "turnId": turn_id,
         "status": if working { "steering" } else { "running" }
     }))
 }
@@ -187,15 +189,20 @@ fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Valu
     apply_turn_intent(&page, &params, &message)?;
     let port = session_port(&page)?;
     let working = port.working();
-    port.submit(message, send_now);
-    let status = if working && !send_now {
-        "queued"
+    let queued = working && !send_now;
+    // 提交前取这一条会落在哪一轮：空闲 / 停止并发送是下一轮；排队要等在跑的这一轮和
+    // 排在前面的都跑完。提交之后再取，这一轮可能已经开出来，就差一位了。
+    let ahead = if queued {
+        port.queued_prompts().len() as u64
     } else {
-        "running"
+        0
     };
+    let turn_id = gateway.next_turn_id(&page.identity, ahead);
+    port.submit(message, send_now);
+    let status = if queued { "queued" } else { "running" };
     Ok(json!({
         "threadId": thread_id,
-        "turnId": format!("t{}", gateway.latest_seq(&page.identity).saturating_add(1)),
+        "turnId": turn_id,
         "status": status
     }))
 }

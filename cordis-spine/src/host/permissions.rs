@@ -161,7 +161,36 @@ impl Permissions {
             tx,
         });
         self.ctx.emit(PERMISSION_EVENT, ());
+        // 等的一方可能被丢掉（这一轮被停掉，工具的 future 跟着没了）：请求要跟着撤出队列，
+        // 不然它一直挂在队首，后面的真请求被它挡着，各端显示的还是它的摘要。
+        let _withdraw = Withdraw { perms: self, seq };
         rx.await.ok().is_some_and(PermissionOptionKind::is_allow)
+    }
+
+    /// 撤掉一条还在队列里的请求（等它的一方已经不在了）。已经被处理掉的什么也不做。
+    fn withdraw(&self, seq: u64) {
+        let mut queue = self.queue.lock().unwrap();
+        let before = queue.len();
+        queue.retain(|p| p.seq != seq);
+        if queue.len() == before {
+            return;
+        }
+        drop(queue);
+        // 投影方在队首换了时按 `last_resolve` 报上一条的结局：撤掉的就是没批准。
+        *self.last_resolve.lock().unwrap() = Some(PermissionOptionKind::RejectOnce);
+        self.ctx.emit(PERMISSION_EVENT, ());
+    }
+}
+
+/// [`Permissions::ask`] 的守卫：future 被丢掉时把自己那条请求撤出队列。
+struct Withdraw<'a> {
+    perms: &'a Permissions,
+    seq: u64,
+}
+
+impl Drop for Withdraw<'_> {
+    fn drop(&mut self) {
+        self.perms.withdraw(self.seq);
     }
 }
 
@@ -218,6 +247,41 @@ mod tests {
         assert_eq!(perms.front().map(|p| p.tool), Some("write_file".into()));
         assert!(perms.resolve(PermissionOptionKind::AllowOnce));
         assert!(other.await.unwrap());
+    }
+
+    /// 回归：这一轮在等权限时被停掉（工具的 future 被丢掉），那条请求以前一直挂在队首：
+    /// 下一条真请求排在它后面，各端显示的还是旧那条的摘要（批准的不是眼前这条命令），
+    /// 点「允许」也只是放掉那条死请求。现在等的一方没了，请求跟着撤出队列。
+    #[tokio::test]
+    async fn abandoned_request_leaves_the_queue() {
+        let ctx = Context::new();
+        let perms = std::sync::Arc::new(Permissions::new(ctx));
+        let stale = {
+            let perms = perms.clone();
+            tokio::spawn(async move { perms.ask("bash", "$ echo hello", None, false).await })
+        };
+        while perms.front().is_none() {
+            tokio::task::yield_now().await;
+        }
+        stale.abort();
+        let _ = stale.await;
+        assert!(perms.front().is_none(), "停掉的那一轮的请求要撤掉");
+        assert_eq!(
+            perms.last_resolve(),
+            Some(PermissionOptionKind::RejectOnce),
+            "撤掉的请求按「没批准」报，不沿用上一次的决定"
+        );
+
+        let real = {
+            let perms = perms.clone();
+            tokio::spawn(async move { perms.ask("bash", "$ rm -rf build", None, false).await })
+        };
+        while perms.front().is_none() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(perms.front().unwrap().summary, "$ rm -rf build");
+        assert!(perms.resolve(PermissionOptionKind::AllowOnce));
+        assert!(real.await.unwrap(), "点的「允许」给的是眼前这条");
     }
 
     #[test]

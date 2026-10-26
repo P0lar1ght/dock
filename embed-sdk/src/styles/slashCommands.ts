@@ -15,6 +15,13 @@ export const slashCommandStyles = css`
     box-shadow: var(--pv-shadow);
   }
 
+  /* 命令多（二十几条）时只露一截、自己滚：不要顶出面板、盖住会话头。 */
+  .slash-command-options {
+    max-height: min(300px, 46vh);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
   .slash-command-menu button {
     display: grid;
     width: 100%;
@@ -41,10 +48,10 @@ export const slashCommandStyles = css`
   }
 
   .slash-command-menu span { display: grid; gap: 2px; }
-  .slash-command-menu strong { color: var(--pv-accent); font-size: 11px; }
+  .slash-command-menu strong { color: var(--pv-accent); font-size: 11.5px; }
   .slash-command-menu small,
   .slash-command-menu em,
-  .slash-command-menu p { color: var(--pv-muted); font-size: 9px; }
+  .slash-command-menu p { color: var(--pv-muted); font-size: 10.5px; }
   .slash-command-menu em {
     overflow: hidden;
     font-style: normal;

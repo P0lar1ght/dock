@@ -18,6 +18,13 @@ export function connectionStatus(
   gateway: GatewayConnectionView | undefined,
   actions: ConnectionStatusActions
 ) {
+  // 配对卡片自己讲清楚了（等批准 / 被拒 / 过期，带「重新生成」）：不再叠一条红色的「授权已失效 · 重试」。
+  if (pairing?.visible) {
+    return html`
+      ${pairingGuide(pairing, actions)}
+      ${gateway?.editing ? gatewayEditor(gateway, actions) : nothing}
+    `;
+  }
   if (!model.visible) return nothing;
   const urgent = model.phase === 'error' || model.phase === 'offline';
   return html`
@@ -52,7 +59,6 @@ export function connectionStatus(
         </span>
       ` : nothing}
     </div>
-    ${pairing?.visible ? pairingGuide(pairing, actions) : nothing}
     ${gateway?.editing ? gatewayEditor(gateway, actions) : nothing}
   `;
 }
@@ -69,7 +75,7 @@ function pairingGuide(model: PairingView, actions: ConnectionStatusActions) {
     >
       <span class="pairing-guide-heading">
         <strong>首次配对</strong>
-        <span>${model.phase === 'requesting' ? '正在创建本机请求…' : '请在 Dock 终端确认后会自动连接'}</span>
+        <span>${model.phase === 'requesting' ? '正在创建配对请求…' : model.phase === 'error' ? '这次没有连上' : '批准后会自动连接'}</span>
       </span>
       ${model.hint ? html`
         <code data-testid="pairing-command">${model.hint}</code>

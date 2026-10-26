@@ -36,9 +36,9 @@ export function memoryControlPopover(
     <aside class="context-popover policy-popover" data-testid="memory-control-popover" aria-label="记忆">
       <div class="context-popover-heading">
         <strong>记忆</strong>
-        <span>${activeTurn ? '下个回复生效' : changing ? '正在同步' : '当前 Thread'}</span>
+        <span>${activeTurn ? '下个回复生效' : changing ? '正在同步' : '当前会话'}</span>
       </div>
-      <div class="model-options" role="group" aria-label="Thread 记忆权限">
+      <div class="model-options" role="group" aria-label="会话记忆权限">
         ${options.map((option) => html`
           <button
             class="model-option approval-option"

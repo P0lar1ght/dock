@@ -121,9 +121,13 @@ function synthesize(previews: readonly StoredPreview[]): SessionImageAttachment[
   }));
 }
 
+/**
+ * 认领用（turnId 对不上时的兜底）：这条用户消息带着和预览一样的图（类型、尺寸、字节数）。
+ * 没带图的消息不是那一轮——截图那条还没推过来时，最新的用户消息可能是上一轮的纯文字。
+ */
 function fitsMessage(previews: readonly StoredPreview[], message: SessionMessage) {
   const attachments = message.attachments || [];
-  if (!attachments.length) return true;
+  if (!attachments.length) return false;
   if (attachments.length !== previews.length) return false;
   return attachments.every((attachment, index) => fittingPreview(previews[index], attachment));
 }

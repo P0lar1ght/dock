@@ -9,6 +9,8 @@ import type { SessionTurnQueueItem } from './TurnQueueModel.js';
 import type { SessionRuntimeIssue } from './RuntimeIssueModel.js';
 import type { SessionEnvironment } from './ContextUsageModel.js';
 import type { SessionUserInputRequest } from './UserInputModel.js';
+import type { SessionPlanApproval } from './PlanApprovalModel.js';
+import type { SessionElicitation } from './ElicitationModel.js';
 
 export type SessionConnectionState = 'recovering' | 'live' | 'disconnected';
 export type SessionTurnStatus =
@@ -45,6 +47,10 @@ export interface SessionState {
   subagentActivities: SessionSubagentActivity[];
   permissionRequests: SessionPermissionRequest[];
   userInputRequests: SessionUserInputRequest[];
+  /** 计划模式里等批准的计划（`plan/requested`）。 */
+  planApprovals: SessionPlanApproval[];
+  /** MCP 服务要用户确认的事（`elicit/requested`）。 */
+  elicitations: SessionElicitation[];
   turnQueue: SessionTurnQueueItem[];
   runtimeIssues: SessionRuntimeIssue[];
   turns: Record<string, SessionTurn>;
@@ -65,6 +71,8 @@ export function initialSessionState(thread: ThreadSummary): SessionState {
     subagentActivities: [],
     permissionRequests: [],
     userInputRequests: [],
+    planApprovals: [],
+    elicitations: [],
     turnQueue: [],
     runtimeIssues: [],
     turns: {},

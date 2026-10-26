@@ -58,7 +58,7 @@ function rulesDetails(rules: SessionEnvironment['rules']) {
             </div>
           `)}
           <p class="environment-detail-note">从上到下应用，靠后的 Workspace 规则优先。</p>
-        ` : html`<p class="context-empty">当前 Thread 没有实际应用 AGENTS.md。</p>`}
+        ` : html`<p class="context-empty">当前会话没有实际应用 AGENTS.md。</p>`}
       </div>
     </details>
   `;

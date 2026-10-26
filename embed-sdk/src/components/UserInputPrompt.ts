@@ -20,6 +20,9 @@ export function userInputPrompt(
   const pending = request.status === 'pending';
   const count = Math.max(1, request.questions.length);
   const title = request.questions[0]?.header || request.questions[0]?.question || '需要你选择';
+  const name = count > 1 ? `提问 · ${count} 题` : '提问';
+  // 开着的时候题目就在下面，标题行只说状态；答完收起后才把题目放上来。
+  const summary = pending ? '等你回答' : title;
   return html`
     <details
       class="tool-card user-input-card"
@@ -27,15 +30,17 @@ export function userInputPrompt(
       data-status=${request.status}
       ?open=${pending}
     >
-      <summary aria-label=${`Ask · ${count}，${title}`}>
+      <summary aria-label=${`${name}，${title}`}>
         <span class="tool-card-diamond" aria-hidden="true">${TOOL_DIAMOND}</span>
-        <span class="tool-card-name">Ask · ${count}</span>
-        <span class="tool-card-summary">${title}</span>
+        <span class="tool-card-name">${name}</span>
+        <span class="tool-card-summary">${summary}</span>
       </summary>
       <div class="tool-card-body">
         ${request.questions.map((question) => html`
           <fieldset ?disabled=${!pending || state.submitting}>
-            <legend><small>${question.header}</small>${question.question}</legend>
+            <legend>
+              ${question.header && question.header !== question.question ? html`<small>${question.header}</small>` : nothing}${question.question}
+            </legend>
             ${question.options.map((option) => html`
               <label>
                 <input
@@ -84,7 +89,7 @@ export function userInputPrompt(
             type="button"
             ?disabled=${state.submitting}
             @click=${() => actions.submit(request)}
-          >${state.submitting ? '正在提交…' : '确认并继续规划'}</button>
+          >${state.submitting ? '正在提交…' : '提交回答'}</button>
         ` : nothing}
       </div>
     </details>

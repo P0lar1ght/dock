@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { argumentSummary, isShellTool, truncatedOutput } from './toolCard.js';
+import { argumentSummary, isShellTool, prettyArgs, truncatedOutput } from './toolCard.js';
 
 test('shell summary prefers command', () => {
   assert.equal(isShellTool('bash'), true);
@@ -21,4 +21,18 @@ test('truncated output keeps head and tail', () => {
   assert.match(out.text, /L11/);
   assert.match(out.text, /L12/);
   assert.equal(out.text.includes('L05'), false);
+});
+
+test('empty arguments render nothing instead of {}', () => {
+  assert.equal(prettyArgs('{}'), '');
+  assert.equal(prettyArgs(' [] '), '');
+  assert.equal(prettyArgs('{"command":"ls"}'), '{\n  "command": "ls"\n}');
+  assert.equal(argumentSummary('exit_plan_mode', '{}'), '');
+});
+
+test('ask_user_question summary is the first question, not JSON', () => {
+  assert.equal(
+    argumentSummary('ask_user_question', '{"questions":[{"options":"[3 items]","question":"你喜欢哪种颜色？"}]}'),
+    '你喜欢哪种颜色？'
+  );
 });

@@ -19,7 +19,7 @@ export function modelSelectionPopover(
     <aside class="context-popover model-popover" data-testid="model-popover" aria-label="选择模型">
       <div class="context-popover-heading">
         <strong>模型</strong>
-        <span>${activeTurn ? '下个回复生效' : '当前 Thread'}</span>
+        <span>${activeTurn ? '下个回复生效' : '当前会话'}</span>
       </div>
       <div class="model-options" role="radiogroup" aria-label="可用模型">
         ${options.map((model) => html`

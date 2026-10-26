@@ -32,12 +32,12 @@ pub async fn dispatch(
         protocol::THREAD_START if params.get("cwd").is_some() => {
             thread::start_at(&gateway, params).await
         }
-        protocol::THREAD_START => thread::start(&gateway, params),
+        protocol::THREAD_START => thread::start(&gateway, params).await,
         protocol::THREAD_OPEN => thread::open(&gateway, params).await,
         protocol::THREAD_CLOSE => thread::close(&gateway, params).await,
         protocol::THREAD_RENAME => thread::rename(&gateway, params),
-        protocol::THREAD_ARCHIVE => thread::archive(&gateway, params),
-        protocol::THREAD_RESTORE => thread::restore(&gateway, params),
+        protocol::THREAD_ARCHIVE => thread::archive(&gateway, params).await,
+        protocol::THREAD_RESTORE => thread::restore(&gateway, params).await,
         protocol::THREAD_DELETE => thread::delete(&gateway, params),
         protocol::THREAD_HISTORY => thread::history(&gateway, params),
         protocol::ITEM_IMAGE => thread::item_image(&gateway, params),

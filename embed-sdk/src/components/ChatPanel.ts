@@ -1,4 +1,6 @@
 import { html, nothing } from 'lit';
+import type { PlanDecision } from '../session/PlanApprovalModel.js';
+import type { ElicitAction } from '../session/ElicitationModel.js';
 import type { PetSkinSummary } from '../pet/types.js';
 import type { ChatViewState } from '../controllers/ChatController.js';
 import { chatComposer } from './chat/ChatComposer.js';
@@ -77,6 +79,8 @@ export interface ChatPanelActions {
   importSkin: () => void;
   skinFile: (file: File) => void;
   resolvePermission: (requestId: string, decision: PermissionDecision) => void;
+  resolvePlan: (planId: string, decision: PlanDecision) => void;
+  resolveElicitation: (elicitId: string, action: ElicitAction) => void;
   selectUserInput: (interactionId: string, questionId: string, value: string) => void;
   setUserInputOther: (interactionId: string, questionId: string, value: string) => void;
   submitUserInput: (request: SessionUserInputRequest) => void;
@@ -123,7 +127,7 @@ export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
           </div>
           ${threadMenu(model.threadWorkspace, actions)}
           ${skinMenu(model, actions)}
-          <button class="icon-button" type="button" aria-label="Close Chat" @click=${actions.close}>×</button>
+          <button class="icon-button" type="button" aria-label="关闭对话" @click=${actions.close}>×</button>
         </header>
 
         ${chatMessageList({
@@ -138,6 +142,10 @@ export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
           runtimeIssueInteractions: model.runtimeIssueInteractions,
           permissionInteractions: model.permissionInteractions,
           userInputInteractions: model.userInputInteractions,
+          planApprovals: model.planApprovals,
+          planInteractions: model.planInteractions,
+          elicitations: model.elicitations,
+          elicitationInteractions: model.elicitationInteractions,
           activity: model.activity,
           sessionReady: model.sessionReady
         }, actions.resolvePermission, {
@@ -148,7 +156,7 @@ export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
           retryIssue: actions.retryIssue,
           editIssue: actions.editIssue,
           dismissIssue: actions.dismissIssue
-        })}
+        }, actions.resolvePlan, actions.resolveElicitation)}
 
         <div class="chat-footer">
           ${commandOutputCard(model.commandOutput, actions.dismissCommandOutput)}
@@ -229,7 +237,7 @@ function operationIssue(model: ChatPanelModel): OperationIssueView | undefined {
   if (model.threadWorkspace.error) {
     return {
       source: 'thread',
-      title: 'Thread 操作失败',
+      title: '会话操作失败',
       detail: safeRuntimeIssueText(model.threadWorkspace.error, 220),
       retryable: false
     };
@@ -240,12 +248,12 @@ function operationIssue(model: ChatPanelModel): OperationIssueView | undefined {
 function skinMenu(model: ChatPanelModel, actions: ChatPanelActions) {
   return html`
     <details class="skin-menu">
-      <summary class="icon-button" aria-label="Pet appearance">⋯</summary>
+      <summary class="icon-button" aria-label="宠物外观">⋯</summary>
       <div class="skin-menu-popover">
         <label for="dock-skin-select">宠物外观</label>
         <select
           id="dock-skin-select"
-          aria-label="Pet skin"
+          aria-label="宠物皮肤"
           @change=${(event: Event) => actions.selectSkin((event.currentTarget as HTMLSelectElement).value)}
         >
           ${model.skins.map((skin) => html`

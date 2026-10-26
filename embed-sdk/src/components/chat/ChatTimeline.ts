@@ -6,6 +6,8 @@ import type { SessionSubagentActivity } from '../../session/SubagentActivityMode
 import type { SessionRuntimeIssue } from '../../session/RuntimeIssueModel.js';
 import type { SessionUserInputRequest } from '../../session/UserInputModel.js';
 import type { SessionGoalActivity } from '../../session/GoalActivityModel.js';
+import type { SessionPlanApproval } from '../../session/PlanApprovalModel.js';
+import type { SessionElicitation } from '../../session/ElicitationModel.js';
 
 export type ChatTimelineItem =
   | { kind: 'message'; message: SessionMessage }
@@ -15,7 +17,9 @@ export type ChatTimelineItem =
   | { kind: 'plan'; plan: SessionPlanActivity }
   | { kind: 'goal'; goal: SessionGoalActivity }
   | { kind: 'subagent'; subagent: SessionSubagentActivity }
-  | { kind: 'issue'; issue: SessionRuntimeIssue };
+  | { kind: 'issue'; issue: SessionRuntimeIssue }
+  | { kind: 'plan_approval'; plan: SessionPlanApproval }
+  | { kind: 'elicitation'; request: SessionElicitation };
 
 interface SequencedTimelineItem {
   seq: number;
@@ -31,7 +35,9 @@ export function buildChatTimeline(
   subagents: readonly SessionSubagentActivity[] = [],
   issues: readonly SessionRuntimeIssue[] = [],
   userInputs: readonly SessionUserInputRequest[] = [],
-  goals: readonly SessionGoalActivity[] = []
+  goals: readonly SessionGoalActivity[] = [],
+  planApprovals: readonly SessionPlanApproval[] = [],
+  elicitations: readonly SessionElicitation[] = []
 ): ChatTimelineItem[] {
   const subagentTurns = new Set(subagents.map((subagent) => subagent.turnId));
   let order = 0;
@@ -53,6 +59,8 @@ export function buildChatTimeline(
   for (const request of userInputs) append(request.seq, { kind: 'user_input', request });
   for (const plan of plans) append(plan.startedSeq, { kind: 'plan', plan });
   for (const goal of goals) append(goal.startedSeq, { kind: 'goal', goal });
+  for (const plan of planApprovals) append(plan.seq, { kind: 'plan_approval', plan });
+  for (const request of elicitations) append(request.seq, { kind: 'elicitation', request });
   for (const subagent of subagents) append(subagent.startedSeq, { kind: 'subagent', subagent });
   for (const issue of issues) {
     if (issue.relatedToolId || issue.relatedPermissionId) continue;

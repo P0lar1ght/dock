@@ -20,7 +20,7 @@ npm ci
 npm run build
 ```
 
-本地预览注入页：打开 `examples/inject/index.html`（先 `npm run build`）。
+本地预览注入页：先 `npm run build`，再 `npm run dev:host`，打开 `http://127.0.0.1:19080/examples/inject/`。
 
 | 属性 | 含义 |
 | --- | --- |
@@ -31,7 +31,12 @@ npm run build
 | `data-theme` | `auto` / `light` / `dark` |
 | `data-auto-connect` | `false` 时由宿主调用 `connect()` |
 
-公开事件：`dock:ready`、`dock:state`、`dock:toggle`、`dock:error`。`connect()` 在 Origin 未绑定时**不会当终态失败**：它创建配对请求并等到 Dock 终端批准（`/pair` 或弹出 overlay），再 `POST /v1/pairing/exchanges` 拿 ticket、挂上 live thread，然后才 `dock:ready`。没有 `dock pair` CLI。`openChat()` 会等同一条连接路径，所以 composer 在 ready 之后可以发消息。
+公开事件：`dock:ready`、`dock:state`、`dock:toggle`、`dock:error`。`connect()` 在 Origin 未绑定时**不会当终态失败**：它创建配对请求并等到 Dock 批准（终端 `/pair`，或桌面端 设置 › 网关与设备），再 `POST /v1/pairing/exchanges` 拿 ticket、挂上 live thread，然后才 `dock:ready`。等批准时宠物是 `connecting`，不是 `error`。没有 `dock pair` CLI。`openChat()` 会等同一条连接路径，所以 composer 在 ready 之后可以发消息。
+
+- `dock:ready`：每次连上报一次（已连上时再 `connect()` / `openChat()` 不重复报）。
+- `dock:state`：`{ visual, label, live }`，只在变了时报。宿主按 `visual`（`sleeping` / `connecting` / `idle` / `thinking` / `talking` / `working` / `approval` / `subagent` / `success` / `error`）判断；`label` 是给人看的中文文案（如「已连接」「等你批准」），会改，别拿来做判断。`success` 只亮几秒就回到 `idle`。
+
+对话里要用户拍板的都在聊天面板里处理：工具权限（允许 / 拒绝）、模型的提问（`ask_user_question`）、计划模式提交的计划（批准并执行 / 要求修改 / 退出计划）、MCP 服务的确认（接受 / 拒绝 / 取消；网关不给表单 schema，填不了字段）。
 
 斜杠补全来自 Gateway `slash/list`，发送走 `slash/execute`（接到同一套 spine / agent harness）。嵌入脚本只做前缀过滤和结果渲染；`/screenshot` 仍在浏览器里截图，再作为 Turn 交给 Gateway。
 

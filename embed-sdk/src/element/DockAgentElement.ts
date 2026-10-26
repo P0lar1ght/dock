@@ -60,6 +60,10 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
     (session) => this.chatController.bind(session)
   );
   private petState: PetStateSnapshot = mapPetState({ connection: 'idle' });
+  private petStateSent = false;
+  private readyDispatched = false;
+  private successTimer?: ReturnType<typeof setTimeout>;
+  private successSettled = false;
   private animator?: PetAnimator;
   private launcher?: PetLauncher;
   private skinLoader?: PetSkinLoader;
@@ -140,6 +144,9 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
     this.initializing = undefined;
     this.connecting = undefined;
     this.connection = { state: 'idle' };
+    this.readyDispatched = false;
+    clearTimeout(this.successTimer);
+    this.successTimer = undefined;
   }
 
   async connect() {
@@ -204,7 +211,7 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
     const chat = this.chatController.view;
     const threadWorkspace = this.threadController.view;
     const attentionLabel = threadWorkspace.attentionCount
-      ? `. ${threadWorkspace.attentionCount} background Threads need attention`
+      ? `，${threadWorkspace.attentionCount} 个后台会话等你处理`
       : '';
     return html`
       <div class="pet-shell" data-testid="pet-shell">
@@ -213,7 +220,7 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
           data-testid="pet-button"
           type="button"
           data-live=${String(this.petState.live)}
-          aria-label=${`${status}${attentionLabel}. ${this.openValue ? 'Close' : 'Open'} Dock Chat`}
+          aria-label=${`${status}${attentionLabel}。${this.openValue ? '关闭' : '打开'} Dock 对话`}
           aria-expanded=${String(this.openValue)}
           aria-controls="dock-chat-panel"
         >
@@ -282,6 +289,8 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
         importSkin: () => this.renderRoot.querySelector<HTMLInputElement>('[data-testid="skin-file"]')?.click(),
         skinFile: (file) => void this.importSkin(file).catch((error) => this.fail(error)),
         resolvePermission: (requestId, decision) => void this.chatController.resolvePermission(requestId, decision),
+        resolvePlan: (planId, decision) => void this.chatController.resolvePlan(planId, decision),
+        resolveElicitation: (elicitId, action) => void this.chatController.resolveElicitation(elicitId, action),
         selectUserInput: (interactionId, questionId, value) =>
           this.chatController.selectUserInput(interactionId, questionId, value),
         setUserInputOther: (interactionId, questionId, value) =>
@@ -348,16 +357,22 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
     this.clientValue = new DockClient({ application: this.application, gatewayUrl });
     this.pairingController = new PairingController({
       gatewayUrl: this.clientValue.gatewayUrl,
+      origin: globalThis.location?.origin,
       request: () => this.requireClient().requestPairing(),
       waitForTicket: (id) => this.requireClient().waitForPairingTicket(id),
       onTicket: async (ticket) => {
         await this.requireClient().connectWithIssuedTicket(ticket);
       }
-    }, () => this.requestUpdate());
+    }, () => {
+      this.refreshPetState();
+      this.requestUpdate();
+    });
     this.gatewayUrl = this.clientValue.gatewayUrl;
     this.threadController.bind(this.clientValue);
     this.removeConnectionListener = this.clientValue.onConnectionChange((event) => {
       this.connection = event;
+      // 掉线了：下次连上（含自动重连后的 connect）要重新报 ready。
+      if (event.state !== 'connected') this.readyDispatched = false;
       this.recoveryController.updateConnection(event);
       if (event.state === 'connected') this.pairingController?.clear();
       else if (event.state === 'error' && needsPairing(event.code)) {
@@ -402,6 +417,8 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
 
   private async connectOnce() {
     const client = this.requireClient();
+    // 已经连上、也报过 ready（openChat 每次都会走一遍 connect）：不再重拉会话列表、不再重复发 dock:ready。
+    if (client.connectionState.state === 'connected' && this.readyDispatched) return;
     try {
       if (client.connectionState.state !== 'connected') {
         try {
@@ -416,6 +433,7 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
         }
       }
       await this.afterConnected();
+      this.readyDispatched = true;
       this.dispatchEvent(new CustomEvent(DOCK_AGENT_READY, {
         detail: { application: this.application, gatewayUrl: client.gatewayUrl }
       }));
@@ -436,9 +454,32 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
   }
 
   private refreshPetState() {
-    this.petState = mapPetState({ connection: this.connection.state, session: this.chatController.state });
-    this.animator?.setState(this.petState.visual);
-    this.dispatchEvent(new CustomEvent(DOCK_AGENT_STATE, { detail: this.petState }));
+    const pairing = this.pairingController?.view;
+    let next = mapPetState({
+      connection: this.connection.state,
+      session: this.chatController.state,
+      pairing: Boolean(pairing?.visible && pairing.phase !== 'error')
+    });
+    // 「已完成」只亮一会儿：会话状态里 success 会一直留着（刷新页面后也是），宠物和会话头不能一直说 done。
+    if (next.visual === 'success') {
+      if (this.successSettled) next = { visual: 'idle', label: '已连接', live: next.live };
+      else this.successTimer ??= setTimeout(() => {
+        this.successTimer = undefined;
+        this.successSettled = true;
+        this.refreshPetState();
+        this.requestUpdate();
+      }, SUCCESS_SHOWN_MS);
+    } else {
+      clearTimeout(this.successTimer);
+      this.successTimer = undefined;
+      this.successSettled = false;
+    }
+    // 会话每个增量都会走到这里：状态真变了才通知宿主，不然 dock:state 一次连上就刷十几条一样的。
+    if (samePetState(this.petState, next) && this.petStateSent) return;
+    this.petState = next;
+    this.petStateSent = true;
+    this.animator?.setState(next.visual);
+    this.dispatchEvent(new CustomEvent(DOCK_AGENT_STATE, { detail: { ...next } }));
   }
 
   private positionPanel() {
@@ -508,6 +549,13 @@ function shortStatus(state: string) {
     success: 'done', error: 'error', 'drag-left': 'moving', 'drag-right': 'moving'
   };
   return labels[state] || state;
+}
+
+/** 一轮完成后「已完成」亮多久，再回到「已连接」。 */
+const SUCCESS_SHOWN_MS = 4_000;
+
+function samePetState(left: PetStateSnapshot, right: PetStateSnapshot) {
+  return left.visual === right.visual && left.label === right.label && left.live === right.live;
 }
 
 function needsPairing(code: string | undefined) {

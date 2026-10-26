@@ -47,7 +47,7 @@ export class ThreadExecutionControlController {
   selectPlanMode(enabled: boolean) {
     return this.mutate(
       (session) => session.setPlanMode(enabled),
-      '计划模式未能切换，请刷新 Thread 状态后重试'
+      '计划模式未能切换，请刷新会话状态后重试'
     );
   }
 

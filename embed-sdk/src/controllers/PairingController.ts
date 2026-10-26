@@ -14,6 +14,8 @@ export interface PairingView {
 
 export interface PairingControllerOptions {
   gatewayUrl: string;
+  /** 宿主页的 Origin：Dock 那边批准时看到的就是它（不是 Gateway 地址）。 */
+  origin?: string;
   request: () => Promise<PairingRequestResult>;
   waitForTicket?: (pairingRequestId: string) => Promise<TicketResult>;
   onTicket?: (ticket: string) => Promise<void> | void;
@@ -88,7 +90,7 @@ export class PairingController {
         phase: 'ready',
         visible: true,
         pairingRequestId,
-        hint: `请在 Dock 终端确认来自 ${this.gatewayUrl} 的连接请求`,
+        hint: pairingHint(this.options.origin),
         expiresAt: result.expiresAt
       };
       this.onChange();
@@ -122,12 +124,18 @@ export class PairingController {
       this.state = {
         phase: 'error',
         visible: true,
-        error: '配对被拒绝或已过期，请重新生成后在 Dock 终端确认。'
+        error: '配对被拒绝或已过期，请重新生成后在 Dock 里批准。'
       };
       this.onChange();
       throw error;
     }
   }
+}
+
+/** 批准的地方：TUI 的 /pair，或桌面端 设置 › 网关与设备。 */
+export function pairingHint(origin: string | undefined) {
+  const from = origin && origin !== 'null' ? `来自 ${origin} 的` : '这个网页的';
+  return `请在 Dock 里批准${from}连接（终端 /pair，或桌面端 设置 › 网关与设备）`;
 }
 
 function hidden(): PairingView {

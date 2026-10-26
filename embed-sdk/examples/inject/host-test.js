@@ -22,7 +22,10 @@ function refreshMountStatus() {
     return el;
   }
   statusEl.className = 'warn';
-  statusEl.textContent = 'dock-embed.js 已执行，但还没有 <dock-agent>';
+  // 独立包是 IIFE，执行完挂 window.Dock；没有说明脚本根本没加载（没 build，或路径不对）。
+  statusEl.textContent = window.Dock
+    ? 'dock-embed.js 已执行，但还没有 <dock-agent>'
+    : 'dock-embed.js 没有加载：先 npm run build，再用 npm run dev:host 打开 /examples/inject/';
   return null;
 }
 

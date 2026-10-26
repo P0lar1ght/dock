@@ -14,7 +14,7 @@ export function goalProgressRow(goal: SessionGoalActivity) {
     >
       <summary aria-label=${`Goal，${statusLabel(goal.status)}，${goal.summary}`}>
         <span class="tool-card-diamond" aria-hidden="true">${TOOL_DIAMOND}</span>
-        <span class="tool-card-name">Goal</span>
+        <span class="tool-card-name">目标</span>
         <span class="tool-card-summary">${goal.summary}${steps ? `  ${steps}` : ''}</span>
       </summary>
       <div class="tool-card-body">

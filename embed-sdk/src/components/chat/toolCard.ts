@@ -7,6 +7,8 @@ const LAST_LINES = 3;
 export function argumentSummary(toolName: string, raw?: string) {
   if (!raw) return '';
   const value = parseJson(raw);
+  // 没有参数的工具（enter_plan_mode 之类）：别把 `{}` 当摘要画出来。
+  if (value && typeof value === 'object' && Object.keys(value).length === 0) return '';
   const picked = pickArg(toolName, value);
   if (picked) return oneLine(picked, 72);
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -20,6 +22,8 @@ export function prettyArgs(raw?: string) {
   if (!raw) return '';
   const value = parseJson(raw);
   if (value === undefined) return raw;
+  // 没有参数（`{}` / `[]`）就不画「输入」那一栏：权限请求只带摘要，没有原始参数。
+  if (value && typeof value === 'object' && Object.keys(value).length === 0) return '';
   try {
     return JSON.stringify(value, null, 2);
   } catch {
@@ -45,6 +49,11 @@ export function isShellTool(name: string) {
 function pickArg(toolName: string, value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
   const record = value as Record<string, unknown>;
+  // ask_user_question：参数是一组题，摘要用第一题的题干（不是整段 JSON）。
+  if (Array.isArray(record.questions)) {
+    const first = record.questions[0] as Record<string, unknown> | undefined;
+    if (typeof first?.question === 'string' && first.question.trim()) return first.question;
+  }
   const keys = keysFor(toolName);
   for (const key of keys) {
     const item = record[key];

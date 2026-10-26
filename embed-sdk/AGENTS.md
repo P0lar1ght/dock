@@ -9,7 +9,8 @@ npm ci                 # 有 package-lock.json，用 ci 而不是 install
 npm run build          # clean + build:types + build:bundle
 npm run build:types    # tsc -b，只出 .d.ts
 npm run build:bundle   # vite build + scripts/build-standalone.mjs
-npm run dev:host       # 宿主页调试：127.0.0.1:19080（--strictPort）
+npm run dev:host       # 宿主页调试：http://127.0.0.1:19080/examples/inject/（先 build；--strictPort）
+npm test               # tsconfig.test.json 把 src（含 *.test.ts）编进 .test-dist/，node --test 跑
 npm run pack:skin      # scripts/package-dockskin.mjs 打包 pet skin
 ```
 
@@ -23,7 +24,7 @@ Node **>= 18**（`package.json` 的 `engines.node`）。
 - SDK 只解析、采集（截图）、把 `{ kind }` 画出来。不要在这里另起 harness，也不要直连 TUI。
 - 斜杠目录来自 spine `"slash"` 命令表 + extras + `/screenshot*`，不要手抄命令表。
 - 运行时依赖版本在 `package.json` 里写死（`lit`、`remark-*`、`vite` 等）；改版本属于「新依赖」，先问。
-- 没有 lint / typecheck 脚本以外的检查：类型检查就是 `npm run build:types`。
+- 检查：类型检查 `npm run build:types`，单测 `npm test`（`node:test`，不加测试框架依赖）。
 
 ## 边界
 

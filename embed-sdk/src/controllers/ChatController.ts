@@ -1,6 +1,10 @@
 import type { AgentSession } from '../session/AgentSession.js';
 import type { SessionActivityState, SessionState } from '../session/SessionState.js';
 import { PermissionController } from './PermissionController.js';
+import { PlanApprovalController } from './PlanApprovalController.js';
+import { ElicitationController } from './ElicitationController.js';
+import type { ElicitAction } from '../session/ElicitationModel.js';
+import type { PlanDecision } from '../session/PlanApprovalModel.js';
 import type { PermissionDecision } from '../protocol/permissions.js';
 import { cancellableTurn, TurnController } from './TurnController.js';
 import type { SessionRuntimeIssue } from '../session/RuntimeIssueModel.js';
@@ -62,6 +66,8 @@ export class ChatController {
   private submitting = false;
   private capturingScreenshot = false;
   private slashCommandIndex = 0;
+  private lastSlashIndex = -1;
+  private slashCatalogLoading?: { session: AgentSession; promise: Promise<void> };
   private readonly imageInputs = new ChatImageInputController();
   private readonly removingQueueIds = new Set<string>();
   private removeSessionListener?: () => void;
@@ -71,6 +77,8 @@ export class ChatController {
   private scrollRoot?: HTMLElement;
   private unbindScroll?: () => void;
   private readonly permissionController: PermissionController;
+  private readonly planApprovalController: PlanApprovalController;
+  private readonly elicitationController: ElicitationController;
   private readonly turnController: TurnController;
   private readonly runtimeIssueController: RuntimeIssueController;
   private readonly executionControl: ThreadExecutionControlController;
@@ -81,6 +89,8 @@ export class ChatController {
 
   constructor(private readonly onChange: () => void) {
     this.permissionController = new PermissionController(onChange);
+    this.planApprovalController = new PlanApprovalController(onChange);
+    this.elicitationController = new ElicitationController(onChange);
     this.turnController = new TurnController(onChange);
     this.runtimeIssueController = new RuntimeIssueController(onChange, (value) => this.setDraft(value));
     this.executionControl = new ThreadExecutionControlController(onChange);
@@ -133,6 +143,10 @@ export class ChatController {
       runtimeIssueInteractions: this.runtimeIssueController.interactions(runtimeIssues),
       turnQueue: this.stateValue?.turnQueue || [],
       permissionInteractions: this.permissionController.interactions,
+      planApprovals: this.stateValue?.planApprovals || [],
+      planInteractions: this.planApprovalController.interactions,
+      elicitations: this.stateValue?.elicitations || [],
+      elicitationInteractions: this.elicitationController.interactions,
       userInputInteractions: this.userInputController.interactions(
         this.stateValue?.userInputRequests || []
       ),
@@ -172,6 +186,8 @@ export class ChatController {
     this.composerMenu = undefined;
     this.goalControl.reset();
     this.permissionController.bind(session);
+    this.planApprovalController.bind(session);
+    this.elicitationController.bind(session);
     this.turnController.bind(session);
     this.runtimeIssueController.bind(session);
     this.executionControl.bind(session);
@@ -344,7 +360,7 @@ export class ChatController {
       this.composerMenu = undefined;
       return true;
     } catch {
-      this.localError = '模型未能切换，请刷新 Thread 状态后重试';
+      this.localError = '模型未能切换，请刷新会话状态后重试';
       return false;
     } finally {
       this.modelChanging = false;
@@ -397,7 +413,7 @@ export class ChatController {
       this.composerMenu = undefined;
       return true;
     } catch {
-      this.localError = '审批模式未能切换，请刷新 Thread 状态后重试';
+      this.localError = '审批模式未能切换，请刷新会话状态后重试';
       return false;
     } finally {
       this.approvalChanging = false;
@@ -512,7 +528,7 @@ export class ChatController {
         }
       }
       if (this.turnIntentValue === 'plan' && cancellableTurn(session.state.turns)) {
-        throw new Error('计划模式请在空闲 Thread 中启动');
+        throw new Error('计划模式请在空闲会话中启动');
       }
       await this.submitTurn(session, message);
       return true;
@@ -576,25 +592,41 @@ export class ChatController {
     if (id === 'goal') this.goalControl.reset();
   }
 
-  private async refreshSlashCatalog() {
+  private refreshSlashCatalog() {
     const session = this.sessionValue;
     if (!session || session.state.connection !== 'live') {
       this.slashCatalog = mergeSlashCatalog(undefined);
       this.slashCatalogLoaded = false;
-      return;
+      return Promise.resolve();
     }
-    try {
-      const listed = await session.listSlashCommands();
-      this.slashCatalog = mergeSlashCatalog(listed.commands);
-      this.slashCatalogLoaded = true;
-    } catch {
-      this.slashCatalog = mergeSlashCatalog(this.slashCatalog);
-    }
-    this.onChange();
+    // 绑定时和会话变成 live 时都会来要一次：同一个会话正在拉就等那一次，不重复发 slash/list。
+    if (this.slashCatalogLoading?.session === session) return this.slashCatalogLoading.promise;
+    const promise = session.listSlashCommands()
+      .then((listed) => {
+        this.slashCatalog = mergeSlashCatalog(listed.commands);
+        this.slashCatalogLoaded = true;
+      })
+      .catch(() => {
+        this.slashCatalog = mergeSlashCatalog(this.slashCatalog);
+      })
+      .finally(() => {
+        if (this.slashCatalogLoading?.promise === promise) this.slashCatalogLoading = undefined;
+        this.onChange();
+      });
+    this.slashCatalogLoading = { session, promise };
+    return promise;
   }
 
   resolvePermission(requestId: string, decision: PermissionDecision) {
     return this.permissionController.resolve(requestId, decision);
+  }
+
+  resolvePlan(planId: string, decision: PlanDecision) {
+    return this.planApprovalController.resolve(planId, decision);
+  }
+
+  resolveElicitation(elicitId: string, action: ElicitAction) {
+    return this.elicitationController.resolve(elicitId, action);
   }
 
   selectUserInput(interactionId: string, questionId: string, value: string) {
@@ -651,6 +683,11 @@ export class ChatController {
       this.lastComposerValue = composerValue;
       resizeComposer(input);
     }
+    // ↑↓ 选到菜单外面那截时跟着滚过去。
+    if (this.slashCommandIndex !== this.lastSlashIndex) {
+      this.lastSlashIndex = this.slashCommandIndex;
+      root.querySelector<HTMLElement>('.slash-command-options [aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest' });
+    }
     const list = root.querySelector<HTMLElement>('[data-testid="message-list"]');
     if (!list) {
       this.lastScrolledRevision = '';
@@ -671,6 +708,8 @@ export class ChatController {
     this.removeSessionListener?.();
     this.removeSessionListener = undefined;
     this.permissionController.destroy();
+    this.planApprovalController.destroy();
+    this.elicitationController.destroy();
     this.runtimeIssueController.destroy();
     this.executionControl.bind(undefined);
     this.turnController.bind(undefined);

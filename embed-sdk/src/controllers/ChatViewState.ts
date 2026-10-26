@@ -16,6 +16,10 @@ import type { SessionUserInputRequest } from '../session/UserInputModel.js';
 import type { SessionGoalActivity } from '../session/GoalActivityModel.js';
 import type { UserInputInteractionState } from './UserInputController.js';
 import type { CommandOutputView } from './CommandOutput.js';
+import type { SessionPlanApproval } from '../session/PlanApprovalModel.js';
+import type { PlanApprovalInteractionState } from './PlanApprovalController.js';
+import type { SessionElicitation } from '../session/ElicitationModel.js';
+import type { ElicitationInteractionState } from './ElicitationController.js';
 
 export type ComposerMenu =
   'context' | 'model' | 'reasoning' | 'approval' | 'goal' | 'plan' | 'memory';
@@ -36,6 +40,10 @@ export interface ChatViewState {
   runtimeIssueInteractions: Readonly<Record<string, RuntimeIssueInteraction>>;
   turnQueue: readonly SessionTurnQueueItem[];
   permissionInteractions: Readonly<Record<string, PermissionInteractionState>>;
+  planApprovals: readonly SessionPlanApproval[];
+  planInteractions: Readonly<Record<string, PlanApprovalInteractionState>>;
+  elicitations: readonly SessionElicitation[];
+  elicitationInteractions: Readonly<Record<string, ElicitationInteractionState>>;
   userInputInteractions: Readonly<Record<string, UserInputInteractionState>>;
   draft: string;
   pendingImages: readonly PendingImageInput[];

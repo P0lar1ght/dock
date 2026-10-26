@@ -181,7 +181,7 @@ export function chatComposer(model: ChatComposerModel, actions: ChatComposerActi
         ${model.pendingImages.length ? pendingImageStrip(model.pendingImages, actions) : nothing}
         <textarea
           data-testid="chat-input"
-          aria-label="Message"
+          aria-label="消息"
           rows="1"
           maxlength="12000"
           .value=${model.draft}
@@ -338,7 +338,8 @@ export function droppedImageFiles(files: ArrayLike<File> | Iterable<File>): File
 
 function slashCommandMenu(model: ChatComposerModel, actions: ChatComposerActions) {
   return html`
-    <div class="slash-command-menu" data-testid="slash-command-menu" role="listbox" aria-label="斜杠命令">
+    <div class="slash-command-menu" data-testid="slash-command-menu">
+      <div class="slash-command-options" role="listbox" aria-label="斜杠命令">
       ${model.slashCommands.map((command, index) => html`
         <button
           type="button"
@@ -350,12 +351,13 @@ function slashCommandMenu(model: ChatComposerModel, actions: ChatComposerActions
         >
           <span>
             <strong>${command.name}</strong>
-            <small>${command.title}</small>
+            ${command.title && command.title !== command.name ? html`<small>${command.title}</small>` : nothing}
           </span>
           <em>${command.unavailableReason || command.description}</em>
         </button>
       `)}
-      <p>↑↓ 选择 · Tab / Enter 补全</p>
+      </div>
+      <p>↑↓ 选择 · Tab 补全 · Enter 补全或发送</p>
     </div>
   `;
 }
@@ -386,12 +388,21 @@ function activeSendModes(mode: ActiveTurnSendMode, actions: ChatComposerActions)
 
 function submit(event: SubmitEvent, model: ChatComposerModel, actions: ChatComposerActions) {
   event.preventDefault();
-  const command = model.slashCommands[model.slashCommandIndex];
-  if (command?.available) {
+  if (shouldComplete(model)) {
     actions.completeSlashCommand();
     return;
   }
   if (model.canSend) actions.send();
+}
+
+/**
+ * 斜杠菜单开着时 Enter 是补全；但输入已经就是高亮的那条命令（`/help`），补全什么也不变，
+ * 再按一次才发出去。这种情况 Enter 直接发送，Tab 仍然只补全。
+ */
+export function shouldComplete(model: Pick<ChatComposerModel, 'draft' | 'slashCommands' | 'slashCommandIndex'>) {
+  const command = model.slashCommands[model.slashCommandIndex];
+  if (!command?.available) return false;
+  return model.draft.trim() !== command.name;
 }
 
 function keyDown(event: KeyboardEvent, model: ChatComposerModel, actions: ChatComposerActions) {
@@ -401,9 +412,14 @@ function keyDown(event: KeyboardEvent, model: ChatComposerModel, actions: ChatCo
     actions.moveSlashCommand(event.key === 'ArrowDown' ? 1 : -1);
     return;
   }
-  if (model.slashCommands.length && (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey))) {
+  if (model.slashCommands.length && event.key === 'Tab') {
     event.preventDefault();
     if (model.slashCommands[model.slashCommandIndex]?.available) actions.completeSlashCommand();
+    return;
+  }
+  if (model.slashCommands.length && event.key === 'Enter' && !event.shiftKey && shouldComplete(model)) {
+    event.preventDefault();
+    actions.completeSlashCommand();
     return;
   }
   if (event.key !== 'Enter' || event.shiftKey) return;

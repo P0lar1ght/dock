@@ -1,4 +1,6 @@
 import type { RuntimeNotification } from '../protocol/notifications.js';
+import type { PlanDecision } from './PlanApprovalModel.js';
+import type { ElicitAction } from './ElicitationModel.js';
 import type { PermissionDecision, PermissionResolutionResult } from '../protocol/permissions.js';
 import type {
   ThreadHistoryResult,
@@ -108,6 +110,18 @@ export interface AgentSessionOperations {
     turnId: string,
     answers: RuntimeUserInputAnswer[]
   ): Promise<RuntimeInteractionResolutionResult>;
+  resolvePlan(
+    threadId: string,
+    workspaceId: string,
+    planId: string,
+    decision: PlanDecision
+  ): Promise<{ ok: boolean }>;
+  resolveElicitation(
+    threadId: string,
+    workspaceId: string,
+    elicitId: string,
+    action: ElicitAction
+  ): Promise<{ ok: boolean }>;
 }
 
 export class AgentSession {
@@ -419,6 +433,20 @@ export class AgentSession {
     const request = this.stateValue.permissionRequests.find((item) => item.id === requestId);
     if (!request || request.status !== 'pending') throw new Error('Pending permission request was not found');
     return this.operations.resolvePermission(this.id, this.workspaceId, requestId, request.turnId, decision);
+  }
+
+  resolvePlan(planIdValue: string, decision: PlanDecision) {
+    const planId = text(planIdValue);
+    const plan = this.stateValue.planApprovals.find((item) => item.id === planId);
+    if (!plan || plan.status !== 'pending') throw new Error('Pending plan approval was not found');
+    return this.operations.resolvePlan(this.id, this.workspaceId, planId, decision);
+  }
+
+  resolveElicitation(elicitIdValue: string, action: ElicitAction) {
+    const elicitId = text(elicitIdValue);
+    const request = this.stateValue.elicitations.find((item) => item.id === elicitId);
+    if (!request || request.status !== 'pending') throw new Error('Pending elicitation was not found');
+    return this.operations.resolveElicitation(this.id, this.workspaceId, elicitId, action);
   }
 
   respondToInteraction(interactionIdValue: string, answers: RuntimeUserInputAnswer[]) {
