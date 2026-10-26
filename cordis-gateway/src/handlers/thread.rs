@@ -10,7 +10,7 @@ use cordis_spine::{
     apply_restored_preset, session_cwd, AgentPresets, ApplyRestoredPreset, ArchivedSession, Roster,
     RosterEntry, Sessions, AGENT_PRESETS, ROSTER, SESSIONS,
 };
-use cordis_spine::{SessionRef, Tabs, SESSION_PORT, TABS};
+use cordis_spine::{SessionRef, Slash, Tabs, SESSION_PORT, SLASH, TABS};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError, LIVE_THREAD_ID};
@@ -95,11 +95,25 @@ fn list_all(gateway: &GatewayHandle) -> Result<Value, RpcError> {
 
 /// `thread/start` 不带 `cwd`：老语义，第 1 页换成一个新会话。带 `cwd` 的走
 /// [`start_at`]。
-pub fn start(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+/// `thread/start`（不带 `cwd`）：第 1 页开新会话（嵌入页的「新会话」）。
+///
+/// 还在跑就先停、等它停下再归档（同 `thread/rewind`）：不然这一轮接着跑进新会话，收尾的
+/// 事件也落进新会话的记录。归档、清空走 `"slash"` 表里的 `/new`——旧会话的子代理、目标
+/// 一起收掉，和终端里敲 `/new` 一样；表里没有 `/new` 时退回只归档清空。
+pub async fn start(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let sessions = live_sessions(gateway)?;
-    sessions.archive_current();
-    sessions.clear();
-    cordis_spine::clear_plan_for_session_switch(gateway.ctx());
+    if let Some(port) = gateway.ctx().get::<SessionRef>(SESSION_PORT) {
+        settle(&port, "再开新会话").await?;
+    }
+    let ran_new = match gateway.ctx().get::<Slash>(SLASH) {
+        Some(slash) => slash.run(gateway.ctx(), "new", "").await.is_some(),
+        None => false,
+    };
+    if !ran_new {
+        sessions.archive_current();
+        sessions.clear();
+        cordis_spine::clear_plan_for_session_switch(gateway.ctx());
+    }
     if let Some(title) = params.get("title").and_then(Value::as_str) {
         sessions.set_live_title(title);
     }
@@ -143,7 +157,8 @@ pub fn rename(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
     Ok(json!({ "ok": true, "thread": roster_summary(&entry) }))
 }
 
-pub fn archive(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+/// `thread/archive`。归档第 1 页（`live`）时还在跑就先停、等它停下（同 `thread/start`）。
+pub async fn archive(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = canonical(
         gateway,
         text(&params, "threadId").unwrap_or_else(|_| LIVE_THREAD_ID.into()),
@@ -157,6 +172,9 @@ pub fn archive(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
             .find(|s| s.id == id)
             .ok_or_else(|| RpcError::app("not_found", format!("thread {id} not found")))?;
         return Ok(json!({ "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID) }));
+    }
+    if let Some(port) = gateway.ctx().get::<SessionRef>(SESSION_PORT) {
+        settle(&port, "再归档").await?;
     }
     match sessions.archive_current() {
         Some(item) => {
@@ -195,7 +213,8 @@ pub fn delete(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
     Ok(json!({ "ok": true, "thread": roster_summary(&entry) }))
 }
 
-pub fn restore(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+/// `thread/restore`：把归档的会话换回第 1 页（当前的那份归档）。还在跑就先停、等它停下。
+pub async fn restore(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = text(&params, "threadId")?;
     if id == LIVE_THREAD_ID {
         let sessions = live_sessions(gateway)?;
@@ -204,6 +223,13 @@ pub fn restore(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         }));
     }
     let sessions = live_sessions(gateway)?;
+    // 先认出要恢复的那份再停：认不出的 id 别白白停掉正在跑的一轮。
+    if !sessions.archived().iter().any(|s| s.id == id) {
+        return Err(RpcError::app("not_found", format!("thread {id} not found")));
+    }
+    if let Some(port) = gateway.ctx().get::<SessionRef>(SESSION_PORT) {
+        settle(&port, "再恢复").await?;
+    }
     let stamped = sessions.archived_preset_id(&id);
     sessions.archive_current();
     if !sessions.restore(&id) {
@@ -409,8 +435,44 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
     }))
 }
 
-/// 撤回时等那一轮停下来的上限。取消是发信号，进程收尾、采样断流要一点时间。
-const REWIND_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+/// 撤回 / 开新会话时等那一轮停下来的上限。取消是发信号，进程收尾、采样断流要一点时间。
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 停下正在跑的一轮、等它停住（`thread/rewind`、`thread/start` 共用）。`then` 是报错里
+/// 「先……」之后要做的事（「再撤回」「再开新会话」）。
+///
+/// 还有排队的消息时拒绝：停下之后排队的会接着发出去，接着跑的东西就对不上了。
+async fn settle(port: &SessionRef, then: &str) -> Result<(), RpcError> {
+    let queued = || RpcError::app("queued", format!("还有排队的消息，先发出或删掉它们{then}"));
+    if port.has_queued() {
+        return Err(queued());
+    }
+    if !port.working() {
+        return Ok(());
+    }
+    port.cancel();
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    while port.working() {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RpcError::app(
+                "busy",
+                format!("这一轮还没停下来，稍后{then}"),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // 等的这几秒不占连接锁：别的连接可能又排进一条、或者开了新的一轮。
+    if port.has_queued() {
+        return Err(queued());
+    }
+    if port.working() {
+        return Err(RpcError::app(
+            "busy",
+            format!("又开始了新的一轮，稍后{then}"),
+        ));
+    }
+    Ok(())
+}
 
 /// `thread/rewind { threadId, turnId }`：撤回 `turnId` 那条用户消息——它和之后的对话全部
 /// 删掉（含落盘），正文和图片还回来，客户端放回输入框改了再发。
@@ -430,33 +492,7 @@ pub async fn rewind(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
         .user_ordinal(&page.identity, &turn_id)
         .ok_or_else(|| RpcError::app("not_found", format!("没有用户消息 {turn_id}")))?;
     if let Some(port) = page.ctx.get::<SessionRef>(SESSION_PORT) {
-        if port.has_queued() {
-            return Err(RpcError::app(
-                "queued",
-                "还有排队的消息，先发出或删掉它们再撤回",
-            ));
-        }
-        if port.working() {
-            port.cancel();
-            let deadline = tokio::time::Instant::now() + REWIND_SETTLE;
-            while port.working() {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(RpcError::app("busy", "这一轮还没停下来，稍后再撤回"));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            // 等的这几秒不占连接锁：别的连接可能又排进一条、或者开了新的一轮。
-            // 那时撤回点之后又有了要跑的东西，撤了会把它一起删掉。
-            if port.has_queued() {
-                return Err(RpcError::app(
-                    "queued",
-                    "还有排队的消息，先发出或删掉它们再撤回",
-                ));
-            }
-            if port.working() {
-                return Err(RpcError::app("busy", "又开始了新的一轮，稍后再撤回"));
-            }
-        }
+        settle(&port, "再撤回").await?;
     }
     let (message, images) = sessions
         .rewind_to_user(ordinal)

@@ -280,6 +280,11 @@ impl GatewayHandle {
         self.with_transcript(page, |t| t.latest_seq())
     }
 
+    /// 见 [`Transcript::next_turn_id`]。
+    pub fn next_turn_id(&self, page: &str, ahead: u64) -> String {
+        self.with_transcript(page, |t| t.next_turn_id(ahead))
+    }
+
     /// 所有页的投影事件（带页身份）。
     pub fn subscribe_transcript(&self) -> tokio::sync::broadcast::Receiver<ProjectedEvent> {
         self.inner.events_tx.subscribe()

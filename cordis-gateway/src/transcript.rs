@@ -184,6 +184,12 @@ impl Transcript {
         self.projector.seq
     }
 
+    /// 接下来第 `ahead + 1` 个开出来的轮次的 id（投影按轮次数：`t1`、`t2`…）。
+    /// `turn/start` 等在提交**之前**取，回给客户端的 `turnId` 才和投影对得上。
+    pub fn next_turn_id(&self, ahead: u64) -> String {
+        format!("t{}", self.projector.turn_n + 1 + ahead)
+    }
+
     pub fn history_since(&self, since_seq: u64) -> Vec<ProjectedEvent> {
         self.events
             .iter()

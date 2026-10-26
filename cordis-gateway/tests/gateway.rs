@@ -691,6 +691,34 @@ async fn turn_start_projects_echo() {
     assert!(saw_echo, "expected projected echo text");
 }
 
+/// `turn/start` 回的 `turnId` 就是这一轮投影里的 turnId：客户端按它把截图预览、图片
+/// 对到消息上。以前按 seq 猜（`t{latest_seq+1}`），投影按轮次数（`t1`、`t2`…），第二轮起就对不上，
+/// 预览会挂到别的消息上。
+#[tokio::test]
+async fn turn_start_returns_the_projected_turn_id() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    for message in ["first", "second"] {
+        let started = rpc.call("turn/start", json!({ "message": message })).await;
+        let returned = started["result"]["turnId"].as_str().unwrap().to_string();
+        let user = rpc
+            .wait_notification("item/user_message", Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            user["params"]["turnId"], returned,
+            "{message}: turn/start 回 {returned}，投影是 {}",
+            user["params"]["turnId"]
+        );
+        rpc.wait_notification("turn/completed", Duration::from_secs(5))
+            .await;
+    }
+}
+
 struct EchoLastUser;
 
 impl Sampler for EchoLastUser {
@@ -1683,6 +1711,131 @@ impl Sampler for Hang {
             }
         })
     }
+}
+
+/// 第 1 页开新会话（嵌入页的「新会话」）时还在跑一轮：先停下、等它停住再归档。
+/// 不停的话这一轮会接着跑进新会话（新会话一开始就「在跑」，新消息只能排队），
+/// 收尾的事件也会落进新会话的记录。和 `/new` 一样把旧会话的目标一起清掉。
+#[tokio::test]
+async fn thread_start_stops_a_running_turn_first() {
+    let slot = Arc::new(std::sync::OnceLock::new());
+    let root = harness_root_with(Some(Arc::new(Hang(slot.clone())))).await;
+    slot.set(root.clone()).unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    let goal = rpc
+        .call(
+            "thread/goal/set",
+            json!({ "threadId": "live", "content": "old goal" }),
+        )
+        .await;
+    assert_eq!(goal["result"]["goal"]["status"], "active", "{goal}");
+    let _ = rpc.call("turn/start", json!({ "message": "stuck" })).await;
+    rpc.wait_notification("item/user_message", Duration::from_secs(5))
+        .await;
+    let port = h.ctx.require::<SessionRef>(SESSION_PORT).unwrap();
+    assert!(port.working());
+
+    let started = rpc.call("thread/start", json!({})).await;
+    assert!(started.get("error").is_none(), "{started}");
+    assert_eq!(started["result"]["thread"]["id"], "live", "{started}");
+    assert!(!port.working(), "旧会话那一轮要先停下");
+    assert!(user_turns(&mut rpc).await.is_empty(), "新会话是空的");
+    let queue = rpc
+        .call("turn/queue/list", json!({ "threadId": "live" }))
+        .await;
+    assert!(queue["result"]["active"].is_null(), "{queue}");
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    assert!(
+        sessions
+            .archived()
+            .iter()
+            .any(|a| a.title.contains("stuck")),
+        "旧会话归档了"
+    );
+    assert!(
+        !h.ctx.require::<Goal>(GOAL).unwrap().present(),
+        "目标跟着旧会话清掉"
+    );
+}
+
+/// 第 1 页归档时还在跑一轮：同 `thread/start`，先停下、等它停住再归档，
+/// 不然这一轮接着跑进新的空会话。
+#[tokio::test]
+async fn thread_archive_stops_a_running_turn_first() {
+    let slot = Arc::new(std::sync::OnceLock::new());
+    let root = harness_root_with(Some(Arc::new(Hang(slot.clone())))).await;
+    slot.set(root.clone()).unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    let port = h.ctx.require::<SessionRef>(SESSION_PORT).unwrap();
+    let _ = rpc.call("turn/start", json!({ "message": "stuck" })).await;
+    rpc.wait_notification("item/user_message", Duration::from_secs(5))
+        .await;
+    assert!(port.working());
+
+    let archived = rpc
+        .call("thread/archive", json!({ "threadId": "live" }))
+        .await;
+    assert!(archived.get("error").is_none(), "{archived}");
+    assert!(!port.working(), "归档前要先停下");
+    assert_eq!(archived["result"]["thread"]["title"], "stuck", "{archived}");
+    assert!(user_turns(&mut rpc).await.is_empty(), "第 1 页换成了空会话");
+}
+
+/// 恢复归档的会话时第 1 页还在跑一轮：先停下、等它停住再换上来。
+#[tokio::test]
+async fn thread_restore_stops_a_running_turn_first() {
+    let slot = Arc::new(std::sync::OnceLock::new());
+    let root = harness_root_with(Some(Arc::new(Hang(slot.clone())))).await;
+    slot.set(root.clone()).unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("earlier".into()));
+    let earlier = sessions.archive_current().unwrap().id;
+    sessions.clear();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+    let port = h.ctx.require::<SessionRef>(SESSION_PORT).unwrap();
+    let _ = rpc.call("turn/start", json!({ "message": "stuck" })).await;
+    rpc.wait_notification("item/user_message", Duration::from_secs(5))
+        .await;
+    assert!(port.working());
+
+    let missing = rpc
+        .call("thread/restore", json!({ "threadId": "s-nope" }))
+        .await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
+    assert!(port.working(), "认不出的 id 不该停掉正在跑的一轮");
+
+    let restored = rpc
+        .call("thread/restore", json!({ "threadId": earlier }))
+        .await;
+    assert!(restored.get("error").is_none(), "{restored}");
+    assert!(!port.working(), "恢复前要先停下");
+    let turns = user_turns(&mut rpc).await;
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert!(
+        turns[0].1.contains("earlier"),
+        "换上来的是归档的那份：{turns:?}"
+    );
 }
 
 /// 正在跑的那一条也能撤：先停下这一轮，等它停住再删。
