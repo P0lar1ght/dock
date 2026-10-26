@@ -22,6 +22,17 @@ test('plan/requested waits for approval, plan/resolved records the decision', ()
   assert.equal(approved.activity, 'working');
 });
 
+test('an unknown plan/resolved decision is not shown as quitting plan mode', () => {
+  const asked = play([
+    note('turn/started', { turnId: 't1', status: 'running', seq: 1 }),
+    note('plan/requested', { turnId: 't1', planId: 'plan-2', body: 'x', seq: 2 })
+  ]);
+  const quit = reduceSession(asked, note('plan/resolved', { turnId: 't1', planId: 'plan-2', decision: 'quit', seq: 3 }));
+  assert.equal(quit.planApprovals[0]?.status, 'quit');
+  const odd = reduceSession(asked, note('plan/resolved', { turnId: 't1', planId: 'plan-2', decision: 'later', seq: 3 }));
+  assert.equal(odd.planApprovals[0]?.status, 'cancelled');
+});
+
 test('a turn that ends without a decision closes its pending plan', () => {
   const ended = play([
     note('turn/started', { turnId: 't1', status: 'running', seq: 1 }),

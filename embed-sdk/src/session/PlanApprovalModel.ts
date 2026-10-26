@@ -65,10 +65,12 @@ export function settlePlansForTurn(state: SessionState, turnId: string): Session
   };
 }
 
+/** 网关只发这三种；认不出的不当成「已退出计划」，按没批收起来。 */
 function resolvedStatus(decision: string): SessionPlanApprovalStatus {
   if (decision === 'approve') return 'approved';
   if (decision === 'revise') return 'revised';
-  return 'quit';
+  if (decision === 'quit') return 'quit';
+  return 'cancelled';
 }
 
 function text(value: unknown, max: number) {

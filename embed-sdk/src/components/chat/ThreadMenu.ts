@@ -162,7 +162,7 @@ function threadRow(
             class="thread-action"
             data-testid="thread-archive"
             type="button"
-            title=${thread.canArchive ? '归档' : '还在回复或有排队消息，先停下再归档'}
+            title=${thread.canArchive ? '归档' : '还有排队的消息，先发出或删掉再归档'}
             aria-label=${`归档 ${thread.title}`}
             ?disabled=${Boolean(model.operation) || !thread.canArchive}
             @click=${() => actions.archiveThread(thread.id)}

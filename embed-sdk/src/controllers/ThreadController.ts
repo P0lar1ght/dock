@@ -88,7 +88,7 @@ export class ThreadController {
         active: thread.id === activeThreadId,
         activity: state?.activity || 'idle',
         attention: this.attention.get(thread.id),
-        canArchive: state ? !hasPendingWork(state) : true
+        canArchive: state ? !hasQueuedTurns(state) : true
       };
     });
     return {
@@ -199,8 +199,9 @@ export class ThreadController {
   async archive(threadId: string) {
     const client = this.requireClient();
     const session = client.getSession(threadId);
-    if (session && hasPendingWork(session.state)) {
-      this.error = '活动中或有排队消息的会话不能归档';
+    // 在跑的那一轮由网关先停下再归档（同开新会话）；排着的消息停了会接着发，先拦下。
+    if (session && hasQueuedTurns(session.state)) {
+      this.error = '还有排队的消息，先发出或删掉它们再归档';
       this.onChange();
       return false;
     }
@@ -525,6 +526,10 @@ const PLACEHOLDER_TITLE = '当前会话';
 
 function isPlaceholderTitle(title: string | undefined) {
   return !title || title === PLACEHOLDER_TITLE;
+}
+
+function hasQueuedTurns(state: Readonly<SessionState>) {
+  return state.turnQueue.length > 0;
 }
 
 export function hasPendingWork(state: Readonly<SessionState>) {
