@@ -10,7 +10,9 @@ use cordis_spine::{
     apply_restored_preset, session_cwd, AgentPresets, ApplyRestoredPreset, ArchivedSession, Roster,
     RosterEntry, Sessions, AGENT_PRESETS, ROSTER, SESSIONS,
 };
-use cordis_spine::{SessionRef, Slash, Tabs, SESSION_PORT, SLASH, TABS};
+use cordis_spine::{
+    Goal, SessionRef, Slash, Subagents, Tabs, GOAL, SESSION_PORT, SLASH, SUBAGENTS, TABS,
+};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError, LIVE_THREAD_ID};
@@ -156,7 +158,8 @@ pub fn rename(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
     Ok(json!({ "ok": true, "thread": roster_summary(&entry) }))
 }
 
-/// `thread/archive`。归档第 1 页（`live`）时还在跑就先停、等它停下（同 `thread/start`）。
+/// `thread/archive`。归档第 1 页（`live`）时还在跑就先停、等它停下（同 `thread/start`）；
+/// 和 `/new` 一样把旧会话的子代理、目标、计划一起收掉。
 pub async fn archive(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = canonical(
         gateway,
@@ -177,7 +180,16 @@ pub async fn archive(gateway: &GatewayHandle, params: Value) -> Result<Value, Rp
     }
     match sessions.archive_current() {
         Some(item) => {
+            // 只收这一页的子代理：`"subagents"` 是全局一份、按父会话分账。
+            if let Some(sub) = gateway.ctx().get::<Subagents>(SUBAGENTS) {
+                sub.cancel_session(sessions.identity());
+                sub.open_admission_for(sessions.identity());
+            }
             sessions.clear();
+            cordis_spine::clear_plan_for_session_switch(gateway.ctx());
+            if let Some(goal) = gateway.ctx().get::<Goal>(GOAL) {
+                goal.clear();
+            }
             gateway.reset_transcript();
             Ok(json!({
                 "thread": archived_summary(&item, protocol::DEFAULT_WORKSPACE_ID)

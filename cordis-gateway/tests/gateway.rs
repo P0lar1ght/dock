@@ -1765,7 +1765,7 @@ async fn thread_start_stops_a_running_turn_first() {
 }
 
 /// 第 1 页归档时还在跑一轮：同 `thread/start`，先停下、等它停住再归档，
-/// 不然这一轮接着跑进新的空会话。
+/// 不然这一轮接着跑进新的空会话。目标也和 `/new` 一样跟着旧会话清掉。
 #[tokio::test]
 async fn thread_archive_stops_a_running_turn_first() {
     let slot = Arc::new(std::sync::OnceLock::new());
@@ -1778,6 +1778,13 @@ async fn thread_archive_stops_a_running_turn_first() {
     let _ = rpc
         .call("thread/subscribe", json!({ "threadId": "live" }))
         .await;
+    let goal = rpc
+        .call(
+            "thread/goal/set",
+            json!({ "threadId": "live", "content": "old goal" }),
+        )
+        .await;
+    assert_eq!(goal["result"]["goal"]["status"], "active", "{goal}");
     let port = h.ctx.require::<SessionRef>(SESSION_PORT).unwrap();
     let _ = rpc.call("turn/start", json!({ "message": "stuck" })).await;
     rpc.wait_notification("item/user_message", Duration::from_secs(5))
@@ -1791,6 +1798,10 @@ async fn thread_archive_stops_a_running_turn_first() {
     assert!(!port.working(), "归档前要先停下");
     assert_eq!(archived["result"]["thread"]["title"], "stuck", "{archived}");
     assert!(user_turns(&mut rpc).await.is_empty(), "第 1 页换成了空会话");
+    assert!(
+        !h.ctx.require::<Goal>(GOAL).unwrap().present(),
+        "和 /new 一样，目标跟着旧会话清掉"
+    );
 }
 
 /// 恢复归档的会话时第 1 页还在跑一轮：先停下、等它停住再换上来。
