@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    dock_home, merge_overrides, patch_toml, ApiBackend, FileConfig, McpServer, ModelChoice,
+    catalog_paths, dock_home, load_providers_from, merge_overrides, patch_toml, ApiBackend,
+    FileConfig, McpServer, ModelChoice,
 };
 
 /// 设置页写的那一份配置。
@@ -129,6 +130,9 @@ pub struct ModelEntry {
     pub pricing: Option<PricingEntry>,
     /// 协议块 `[model."<id>".<协议>]`，键是协议名。
     pub overrides: BTreeMap<String, BackendEntry>,
+    /// `provider = "<id>"`：连接继承自 `[provider.<id>]`。设了它，地址、协议、密钥
+    /// 都可以不写（写了的覆盖供应商的）。
+    pub provider: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -237,7 +241,9 @@ pub fn read_model_in(path: &Path, id: &str) -> Option<ModelEntry> {
     for raw in strs_of(table, "api_backends").unwrap_or_default() {
         push(&raw);
     }
-    if backends.is_empty() {
+    let provider = str_of(table, "provider");
+    // 挂在供应商下的模型没写协议 = 跟供应商走，表单里保持空。
+    if backends.is_empty() && provider.is_none() {
         backends.push(ApiBackend::default().name().to_string());
     }
     let pricing = table
@@ -289,6 +295,7 @@ pub fn read_model_in(path: &Path, id: &str) -> Option<ModelEntry> {
         prompt_cache: bool_of(table, "prompt_cache"),
         pricing,
         overrides,
+        provider,
     })
 }
 
@@ -309,12 +316,14 @@ pub fn validate_model(entry: &ModelEntry) -> Result<(), String> {
     if id.chars().any(|c| c.is_control() || c == '"') {
         return Err("模型 id 里不能有引号或控制字符".into());
     }
+    let inherits = trimmed(&entry.provider).is_some();
     match trimmed(&entry.api_base_url) {
+        None if inherits => {}
         None => return Err("接口地址不能为空".into()),
         Some(url) if !is_http_url(url) => return Err(format!("接口地址不是合法 URL：{url}")),
         _ => {}
     }
-    if entry.api_backends.is_empty() {
+    if entry.api_backends.is_empty() && !inherits {
         return Err("至少勾选一个协议".into());
     }
     for name in &entry.api_backends {
@@ -382,6 +391,7 @@ fn str_array(items: &[String]) -> toml_edit::Value {
 
 /// 把表单写进一张 `[model."<id>"]` 表。就地改：表里这里不管的键原样留着。
 fn write_model_table(table: &mut toml_edit::Table, entry: &ModelEntry) {
+    set_or_remove(table, "provider", str_value(&entry.provider));
     set_or_remove(table, "name", str_value(&entry.name));
     set_or_remove(table, "description", str_value(&entry.description));
     table.remove("api_base");
@@ -395,7 +405,12 @@ fn write_model_table(table: &mut toml_edit::Table, entry: &ModelEntry) {
         .filter_map(|b| ApiBackend::from_name(b))
         .map(|b| b.name().to_string())
         .collect();
-    set_or_remove(table, "api_backends", Some(str_array(&backends)));
+    // 空列表只在挂了供应商时出现（校验挡住了别的情况）：不写 = 跟供应商走。
+    set_or_remove(
+        table,
+        "api_backends",
+        (!backends.is_empty()).then(|| str_array(&backends)),
+    );
     set_or_remove(table, "auth_scheme", str_value(&entry.auth_scheme));
     if entry.key_mode == "inline" {
         table.remove("env_key");
@@ -617,8 +632,9 @@ pub fn choice_from_entry(
     write_model_table(&mut table, &entry);
     doc["model"][entry.id.trim()] = toml_edit::Item::Table(table);
     let file: FileConfig = toml::from_str(&doc.to_string()).map_err(|e| e.to_string())?;
+    let providers = load_providers_from(&catalog_paths());
     let mut list = Vec::new();
-    merge_overrides(&mut list, &file.model);
+    merge_overrides(&mut list, &file.model, &providers);
     list.into_iter()
         .next()
         .ok_or_else(|| "表单没生成模型".into())
@@ -629,6 +645,341 @@ pub fn inline_key(id: &str) -> Option<String> {
     let doc = read_doc(&user_config_path());
     let table = doc.get("model")?.get(id)?.as_table_like()?;
     str_of(table, "api_key")
+}
+
+// ---------------------------------------------------------------------------
+// 供应商
+// ---------------------------------------------------------------------------
+
+/// 设置页编辑的一条 `[provider."<id>"]`。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProviderEntry {
+    pub id: String,
+    /// 给人看的名字（只给界面用，Dock 不读）。
+    pub name: Option<String>,
+    /// 来自哪个目录条目（models.dev 的供应商 id；只给界面用，Dock 不读）。
+    pub catalog: Option<String>,
+    pub api_base_url: Option<String>,
+    /// 第一条 = 默认协议。
+    pub api_backends: Vec<String>,
+    pub auth_scheme: Option<String>,
+    /// 密钥的名字：先找同名环境变量，再找 `secrets.json` 里同名的那项。
+    pub env_key: Option<String>,
+    /// 只出不进：文件里写了行内 `api_key`（老写法；设置页不再写它）。
+    pub has_api_key: bool,
+    /// 协议块 `[provider."<id>".<协议>]`，键是协议名。
+    pub overrides: BTreeMap<String, BackendEntry>,
+}
+
+/// 供应商 id 的形状：同密钥名的规则（字母开头，字母数字 `_` `-`），
+/// 这样 `<id>/<model>` 这种模型 id 和默认的密钥名都不用转义。
+pub fn valid_provider_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && id.len() <= 64
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn read_provider_table(id: &str, table: &dyn toml_edit::TableLike) -> ProviderEntry {
+    let mut backends: Vec<String> = Vec::new();
+    let raw = str_of(table, "api_backend")
+        .into_iter()
+        .chain(strs_of(table, "api_backends").unwrap_or_default());
+    for raw in raw {
+        if let Some(b) = ApiBackend::from_name(&raw) {
+            let name = b.name().to_string();
+            if !backends.contains(&name) {
+                backends.push(name);
+            }
+        }
+    }
+    if backends.is_empty() {
+        backends.push(ApiBackend::default().name().to_string());
+    }
+    let mut overrides = BTreeMap::new();
+    for (backend, keys) in BACKEND_KEYS {
+        let Some(row) = keys
+            .iter()
+            .find_map(|k| table.get(k).and_then(|t| t.as_table_like()))
+        else {
+            continue;
+        };
+        let entry = BackendEntry {
+            api_base_url: str_of(row, "api_base_url").or_else(|| str_of(row, "api_base")),
+            auth_scheme: str_of(row, "auth_scheme"),
+            api_model: None,
+        };
+        if !entry.is_empty() {
+            overrides.insert(backend.name().to_string(), entry);
+        }
+    }
+    ProviderEntry {
+        id: id.to_string(),
+        name: str_of(table, "name"),
+        catalog: str_of(table, "catalog"),
+        api_base_url: str_of(table, "api_base_url").or_else(|| str_of(table, "api_base")),
+        api_backends: backends,
+        auth_scheme: str_of(table, "auth_scheme"),
+        env_key: str_of(table, "env_key"),
+        has_api_key: str_of(table, "api_key").is_some(),
+        overrides,
+    }
+}
+
+/// 用户配置里的全部供应商（按文件里的顺序）。
+pub fn read_providers_in(path: &Path) -> Vec<ProviderEntry> {
+    let doc = read_doc(path);
+    let Some(table) = doc.get("provider").and_then(|t| t.as_table_like()) else {
+        return Vec::new();
+    };
+    table
+        .iter()
+        .filter_map(|(id, item)| Some(read_provider_table(id, item.as_table_like()?)))
+        .collect()
+}
+
+pub fn read_providers() -> Vec<ProviderEntry> {
+    read_providers_in(&user_config_path())
+}
+
+pub fn validate_provider(entry: &ProviderEntry) -> Result<(), String> {
+    let id = entry.id.trim();
+    if !valid_provider_id(id) {
+        return Err(format!(
+            "供应商 id 只能用字母开头，后面跟字母、数字、_ 或 -：{id:?}"
+        ));
+    }
+    match trimmed(&entry.api_base_url) {
+        None => return Err("接口地址不能为空".into()),
+        Some(url) if !is_http_url(url) => return Err(format!("接口地址不是合法 URL：{url}")),
+        _ => {}
+    }
+    if entry.api_backends.is_empty() {
+        return Err("至少选一个协议".into());
+    }
+    for name in entry.api_backends.iter().chain(entry.overrides.keys()) {
+        if ApiBackend::from_name(name).is_none() {
+            return Err(format!("不认识的协议：{name}"));
+        }
+    }
+    for scheme in
+        std::iter::once(&entry.auth_scheme).chain(entry.overrides.values().map(|o| &o.auth_scheme))
+    {
+        if let Some(scheme) = trimmed(scheme) {
+            if super::AuthScheme::parse(Some(scheme)).is_none() {
+                return Err(format!("鉴权方式只能是 bearer / x_api_key：{scheme}"));
+            }
+        }
+    }
+    for (backend, row) in &entry.overrides {
+        if let Some(url) = trimmed(&row.api_base_url) {
+            if !is_http_url(url) {
+                return Err(format!("{backend} 的地址不是合法 URL：{url}"));
+            }
+        }
+    }
+    if let Some(name) = trimmed(&entry.env_key) {
+        if !valid_provider_id(name) {
+            return Err(format!(
+                "密钥名只能用字母开头，后面跟字母、数字、_ 或 -：{name}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_provider_table(table: &mut toml_edit::Table, entry: &ProviderEntry) {
+    set_or_remove(table, "name", str_value(&entry.name));
+    set_or_remove(table, "catalog", str_value(&entry.catalog));
+    table.remove("api_base");
+    set_or_remove(table, "api_base_url", str_value(&entry.api_base_url));
+    table.remove("api_backend");
+    let backends: Vec<String> = entry
+        .api_backends
+        .iter()
+        .filter_map(|b| ApiBackend::from_name(b))
+        .map(|b| b.name().to_string())
+        .collect();
+    set_or_remove(table, "api_backends", Some(str_array(&backends)));
+    set_or_remove(table, "auth_scheme", str_value(&entry.auth_scheme));
+    set_or_remove(table, "env_key", str_value(&entry.env_key));
+    for (backend, keys) in BACKEND_KEYS {
+        let mut sub = keys
+            .iter()
+            .find_map(|k| match table.remove(k) {
+                Some(toml_edit::Item::Table(t)) => Some(t),
+                _ => None,
+            })
+            .unwrap_or_default();
+        for k in keys.iter() {
+            table.remove(k);
+        }
+        let Some(row) = entry
+            .overrides
+            .get(backend.name())
+            .filter(|r| trimmed(&r.api_base_url).is_some() || trimmed(&r.auth_scheme).is_some())
+            .filter(|_| backends.iter().any(|b| b == backend.name()))
+        else {
+            continue;
+        };
+        sub.remove("api_base");
+        set_or_remove(&mut sub, "api_base_url", str_value(&row.api_base_url));
+        set_or_remove(&mut sub, "auth_scheme", str_value(&row.auth_scheme));
+        table[backend.name()] = toml_edit::Item::Table(sub);
+    }
+}
+
+/// 新建或保存一个供应商。`original_id` 是编辑前的 id：改名时挂在它下面的模型跟着改
+/// `provider = ...`（模型 id 不动，旧会话记着它）。
+pub fn save_provider_in(
+    path: &Path,
+    entry: &ProviderEntry,
+    original_id: Option<&str>,
+) -> Result<(), String> {
+    validate_provider(entry)?;
+    let id = entry.id.trim().to_string();
+    edit(path, |doc| {
+        implicit_table(doc, "provider")?;
+        let providers = doc["provider"]
+            .as_table_mut()
+            .ok_or("config.toml 里的 provider 不是表")?;
+        let renaming = original_id.is_some_and(|o| o != id);
+        if (original_id.is_none() || renaming) && providers.contains_key(&id) {
+            return Err(format!("已存在同名供应商：{id}"));
+        }
+        let mut table = match original_id.and_then(|o| providers.remove(o)) {
+            Some(toml_edit::Item::Table(t)) => t,
+            _ => toml_edit::Table::new(),
+        };
+        write_provider_table(&mut table, entry);
+        providers.insert(&id, toml_edit::Item::Table(table));
+        if let (true, Some(old)) = (renaming, original_id) {
+            for (_, model) in doc
+                .get_mut("model")
+                .and_then(|t| t.as_table_like_mut())
+                .into_iter()
+                .flat_map(|t| t.iter_mut())
+            {
+                if let Some(t) = model.as_table_like_mut() {
+                    if t.get("provider").and_then(|v| v.as_str()) == Some(old) {
+                        t.insert("provider", toml_edit::value(id.as_str()));
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+pub fn save_provider(entry: &ProviderEntry, original_id: Option<&str>) -> Result<(), String> {
+    save_provider_in(&user_config_path(), entry, original_id)
+}
+
+/// 删一个供应商和挂在它下面的模型。删掉的模型里有默认模型时，默认改成剩下的
+/// 第一条（`other_ids` 里第一个没被删的；没有就去掉默认）。返回删掉的模型 id。
+pub fn delete_provider_in(
+    path: &Path,
+    id: &str,
+    other_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let mut removed = Vec::new();
+    edit(path, |doc| {
+        let gone = doc
+            .get_mut("provider")
+            .and_then(|t| t.as_table_like_mut())
+            .and_then(|t| t.remove(id));
+        if gone.is_none() {
+            return Err(format!("用户配置里没有供应商 {id}"));
+        }
+        if let Some(models) = doc.get_mut("model").and_then(|t| t.as_table_like_mut()) {
+            let ids: Vec<String> = models
+                .iter()
+                .filter(|(_, m)| m.get("provider").and_then(|v| v.as_str()) == Some(id))
+                .map(|(k, _)| k.to_string())
+                .collect();
+            for m in &ids {
+                models.remove(m);
+            }
+            removed = ids;
+        }
+        if let Some(default) = default_of(doc).filter(|d| removed.contains(d)) {
+            let next = other_ids
+                .iter()
+                .find(|m| !removed.contains(m) && **m != default);
+            match next {
+                Some(next) => set_default(doc, next)?,
+                None => {
+                    if let Some(models) = doc.get_mut("models").and_then(|t| t.as_table_like_mut())
+                    {
+                        models.remove("default");
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(removed)
+}
+
+pub fn delete_provider(id: &str, other_ids: &[String]) -> Result<Vec<String>, String> {
+    delete_provider_in(&user_config_path(), id, other_ids)
+}
+
+/// 供应商表单 → 运行时的 [`ModelChoice`]（列模型、测连接用，不落盘）：挂一条临时
+/// 模型到这个供应商上，走和读配置文件同一条继承路径。`api_key` 是表单里刚填、还没存的
+/// 密钥；`None` = 按 `env_key`（环境变量 → secrets.json）或文件里的行内密钥取。
+pub fn choice_from_provider(
+    entry: &ProviderEntry,
+    api_key: Option<String>,
+) -> Result<ModelChoice, String> {
+    validate_provider(entry)?;
+    let id = entry.id.trim();
+    let mut doc = toml_edit::DocumentMut::new();
+    implicit_table(&mut doc, "provider")?;
+    let mut table = toml_edit::Table::new();
+    write_provider_table(&mut table, entry);
+    let inline = api_key
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| provider_inline_key(id));
+    if let Some(key) = inline {
+        table["api_key"] = toml_edit::value(key.trim());
+    }
+    doc["provider"][id] = toml_edit::Item::Table(table);
+    let file: FileConfig = toml::from_str(&doc.to_string()).map_err(|e| e.to_string())?;
+    let mut probe = BTreeMap::new();
+    probe.insert(
+        "__provider_probe".to_string(),
+        super::ModelOverride {
+            provider: Some(id.to_string()),
+            ..Default::default()
+        },
+    );
+    let mut list = Vec::new();
+    merge_overrides(&mut list, &probe, &file.provider);
+    list.into_iter()
+        .next()
+        .ok_or_else(|| "表单没生成供应商".into())
+}
+
+/// 文件里某个供应商的行内密钥（老写法；设置页不写它，但手写的照认）。
+pub fn provider_inline_key(id: &str) -> Option<String> {
+    let doc = read_doc(&user_config_path());
+    let table = doc.get("provider")?.get(id)?.as_table_like()?;
+    str_of(table, "api_key")
+}
+
+/// 用户配置里还有没有别的供应商 / 模型用着这个密钥名（删供应商时决定要不要连密钥一起删）。
+pub fn key_name_in_use(name: &str) -> bool {
+    let doc = read_doc(&user_config_path());
+    ["provider", "model"].iter().any(|section| {
+        doc.get(section)
+            .and_then(|t| t.as_table_like())
+            .is_some_and(|t| {
+                t.iter()
+                    .any(|(_, row)| row.get("env_key").and_then(|v| v.as_str()) == Some(name))
+            })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1417,127 @@ mod tests {
             env_key: Some("EXAMPLE_KEY".into()),
             ..ModelEntry::default()
         }
+    }
+
+    fn provider(id: &str) -> ProviderEntry {
+        ProviderEntry {
+            id: id.into(),
+            name: Some("DeepSeek".into()),
+            catalog: Some("deepseek".into()),
+            api_base_url: Some("https://api.deepseek.com".into()),
+            api_backends: vec!["chat_completions".into()],
+            env_key: Some("DEEPSEEK_API_KEY".into()),
+            ..ProviderEntry::default()
+        }
+    }
+
+    #[test]
+    fn provider_round_trip_and_models_without_their_own_connection() {
+        let (_d, path) = tmp("# 我的配置\n[models]\ndefault = \"a\"\n\n[model.a]\napi_base_url = \"https://a.example/v1\"\n");
+        save_provider_in(&path, &provider("deepseek"), None).unwrap();
+        let read = read_providers_in(&path);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0], provider("deepseek"));
+        // 同名再建要挡住。
+        assert!(save_provider_in(&path, &provider("deepseek"), None).is_err());
+
+        // 挂在供应商下的模型：不写地址、协议、密钥也能存，读回来协议仍是空（跟供应商走）。
+        let model = ModelEntry {
+            id: "deepseek/deepseek-chat".into(),
+            provider: Some("deepseek".into()),
+            api_model: Some("deepseek-chat".into()),
+            key_mode: "env".into(),
+            context_window: Some(128000),
+            ..ModelEntry::default()
+        };
+        save_model_in(&path, &model, None, false, &["a".into()]).unwrap();
+        let back = read_model_in(&path, "deepseek/deepseek-chat").unwrap();
+        assert_eq!(back.provider.as_deref(), Some("deepseek"));
+        assert!(back.api_backends.is_empty());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# 我的配置"), "{text}");
+        assert!(!text.contains("api_backends = []"), "{text}");
+        let choice = super::super::load_catalog_from(std::slice::from_ref(&path))
+            .into_iter()
+            .find(|m| m.id == "deepseek/deepseek-chat")
+            .unwrap();
+        assert_eq!(
+            choice.api_base_url.as_deref(),
+            Some("https://api.deepseek.com")
+        );
+        assert_eq!(choice.env_key.as_deref(), Some("DEEPSEEK_API_KEY"));
+
+        // 不挂供应商的模型照旧要求地址。
+        let bare = ModelEntry {
+            provider: None,
+            ..model.clone()
+        };
+        assert!(validate_model(&bare).is_err());
+    }
+
+    #[test]
+    fn renaming_a_provider_moves_its_models_and_delete_takes_them_along() {
+        let (_d, path) = tmp(
+            "[models]\ndefault = \"p/x\"\n\n[model.a]\napi_base_url = \"https://a.example/v1\"\n",
+        );
+        save_provider_in(&path, &provider("p"), None).unwrap();
+        for id in ["p/x", "p/y"] {
+            let m = ModelEntry {
+                id: id.into(),
+                provider: Some("p".into()),
+                key_mode: "env".into(),
+                ..ModelEntry::default()
+            };
+            save_model_in(&path, &m, None, false, &[]).unwrap();
+        }
+        save_provider_in(&path, &provider("q"), Some("p")).unwrap();
+        assert_eq!(
+            read_model_in(&path, "p/x").unwrap().provider.as_deref(),
+            Some("q")
+        );
+        assert!(read_providers_in(&path).iter().all(|p| p.id == "q"));
+
+        let removed =
+            delete_provider_in(&path, "q", &["p/x".into(), "p/y".into(), "a".into()]).unwrap();
+        assert_eq!(removed, vec!["p/x".to_string(), "p/y".to_string()]);
+        assert!(read_model_in(&path, "p/x").is_none());
+        assert!(read_model_in(&path, "a").is_some());
+        // 默认模型被删了：改成剩下的那条。
+        assert_eq!(default_of(&read_doc(&path)).as_deref(), Some("a"));
+        assert!(delete_provider_in(&path, "q", &[]).is_err());
+    }
+
+    #[test]
+    fn provider_ids_and_key_names_are_checked() {
+        assert!(valid_provider_id("moonshot-cn"));
+        assert!(!valid_provider_id("1abc"));
+        assert!(!valid_provider_id("a.b"));
+        assert!(!valid_provider_id(""));
+        let mut p = provider("ok");
+        p.env_key = Some("BAD NAME".into());
+        assert!(validate_provider(&p).is_err());
+        p.env_key = None;
+        p.api_backends.clear();
+        assert!(validate_provider(&p).is_err());
+    }
+
+    #[test]
+    fn choice_from_provider_uses_the_form_key() {
+        let mut p = provider("form");
+        p.overrides.insert(
+            "messages".into(),
+            BackendEntry {
+                api_base_url: Some("https://api.deepseek.com/anthropic".into()),
+                ..Default::default()
+            },
+        );
+        p.api_backends.push("messages".into());
+        let choice = choice_from_provider(&p, Some("sk-form".into())).unwrap();
+        assert_eq!(choice.resolved_api_key().as_deref(), Some("sk-form"));
+        assert_eq!(
+            choice.base_url_for(ApiBackend::Messages),
+            Some("https://api.deepseek.com/anthropic")
+        );
     }
 
     #[test]

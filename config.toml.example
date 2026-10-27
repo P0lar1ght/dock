@@ -17,6 +17,8 @@
 #                 不会换掉原来的默认协议）。
 #   api_model     发给上游的 slug；省略则用目录 id（`[model."<id>"]` 里的 id）。
 #   env_key       读哪个环境变量取密钥。**首选这个**，别把密钥写进文件。
+#                 环境变量没设时再找 $DOCK_HOME/secrets.json 里同名的那项。
+#   provider      连接继承自哪个 [provider."<id>"]（见下）。
 #   api_key       行内密钥；写了就优先于 env_key。仅用于本地临时测试。
 #   auth_scheme   bearer | x_api_key。不写就跟着**当前协议**走：messages 用
 #                 x-api-key，另两条用 bearer。走第三方网关的 /messages 通常仍是
@@ -58,6 +60,29 @@
 #                      cache_control 断点，长会话每轮省掉重复前缀的计费。自建
 #                      /v1/messages 代理不认这个字段时置 false。另两条 wire 的
 #                      前缀缓存由上游自动做，这个键对它们无效。
+
+# 供应商 [provider."<id>"]——同一家的模型共用一份连接，模型写 provider = "<id>" 继承。
+# 只收连接键：api_base_url / api_backends（api_backend）/ auth_scheme / env_key / api_key，
+# 外加协议块 [provider."<id>".<协议>]（同模型的协议块，模型自己没写时整组继承）。
+# 模型自己写了的连接键盖过供应商的；密钥整对继承（模型写了 api_key 或 env_key 就不拿供应商的）。
+# name / catalog 只给设置页显示用（catalog = models.dev 的供应商 id），Dock 不读。
+#
+# 密钥：env_key 先找同名环境变量，没有再找 $DOCK_HOME/secrets.json 里同名的那项。
+# 桌面 GUI 设置页填的 API Key 存在 secrets.json（0600），config 里只有名字。
+#
+# [provider.deepseek]
+# name = "DeepSeek"
+# api_base_url = "https://api.deepseek.com"
+# api_backends = ["chat_completions", "messages"]
+# env_key = "DEEPSEEK_API_KEY"
+#
+# [provider.deepseek.messages]
+# api_base_url = "https://api.deepseek.com/anthropic"
+#
+# [model."deepseek/deepseek-chat"]
+# provider = "deepseek"
+# api_model = "deepseek-chat"
+# context_window = 128000
 
 [models]
 default = "dual-model"

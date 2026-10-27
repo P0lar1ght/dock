@@ -124,6 +124,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 - `mcp/list` 每台多出 `tools[]`（`name` / `description` / `enabled`）、`editable`、`builtin`。
 - `model/list` 每条多出 `keyEnv` / `keyEnvSet`（读哪个环境变量、本进程里有没有）、`editable`。
+  - `keyEnvSet` 也认 secrets.json 里同名的那项。
+- `model/list` 每条多出 `provider`（连接继承自哪个 `[provider.<id>]`，没有就是 null）。
 - `model/list` 顶层多出 `configDefault`（配置文件写的默认；`default` 是根页正在用的）。
 
 ### 设置页写配置（只给受信连接，`handlers/settings.rs`）
@@ -146,6 +148,11 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `model/delete { id }` | 删的是默认模型时默认改成目录里下一条 |
 | `model/default { id }` | 写 `[models].default`，根页跟着换（新页从根页抄） |
 | `model/test { model? \| id }` | 发一次最小请求；表单可以没保存。回 `ok` + `ms` 或 `error` |
+| `provider/list` | 用户配置里的 `[provider.*]`，每条带 `keySource`（见下），不回密钥 |
+| `provider/save { provider, apiKey?, originalId? }` | 写 `[provider.<id>]`；见下 |
+| `provider/delete { id }` | 连挂在下面的模型一起删；见下 |
+| `provider/models { id } \| { provider, apiKey? }` | 上游 `GET {base}/models`。回 `ok` + `models[]` 或 `error` |
+| `provider/catalog` | 拉 models.dev 供应商目录（精简过），只在设置页点「更新目录」时调 |
 | `mcp/get` / `mcp/save` / `mcp/delete` | 编辑 `[mcp_servers.<name>]`，写完当场对账 |
 | `mcp/enable` / `mcp/tool/enable` | 服务器 / 单个工具开关（同 `/mcps` 的 Space） |
 | `mcp/login { name }` | HTTP 服务器的浏览器 OAuth，等授权完才回 |
@@ -160,7 +167,15 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `pairing/list` / `pairing/resolve` / `pairing/revoke` / `pairing/accept` | `dock serve` 没有 TUI：网页配对在 GUI 里批；`accept` 不落盘 |
 | `device/list` / `device/add` / `device/revoke` | 同 `dock device`；令牌只在 `add` 的回包里出现一次 |
 
-会等外部的（`model/test`、`mcp/save|delete|enable|login`、`plugin/enable|promote|discard`）不占连接锁。
+供应商（`[provider.<id>]`）：
+
+- `apiKey` 存进 secrets.json，名字 = `envKey`；没写 `envKey` 就按 id 起（`moonshot-cn` → `MOONSHOT_CN_API_KEY`）。
+- config.toml 只记名字，不写密钥。
+- 改名（带 `originalId`）时，挂在下面的模型跟着改 `provider = ...`，模型 id 不动。
+- `delete` 时没别的供应商 / 模型用着的密钥，从 secrets.json 一起删；删到默认模型，默认改成剩下的第一条。
+- `keySource`：`secret` / `env`（环境变量，盖过 secrets.json）/ `inline` / `missing` / `none`。
+
+会等外部的（`model/test`、`provider/models`、`provider/catalog`、`mcp/save|delete|enable|login`、`plugin/enable|promote|discard`）不占连接锁。
 
 开页（`thread/open` / `thread/start {cwd}`）时在后台加载那个项目的 `.dock/plugins`。
 

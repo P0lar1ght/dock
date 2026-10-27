@@ -87,7 +87,8 @@ pub use host::user_edits::{record_user_edit, user_edits, UserEdits};
 pub use llm::compact::{
     compact, compact_command, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
 };
-pub use llm::http::probe::probe_model;
+pub use llm::http::catalog::{fetch_models_dev, MODELS_DEV_URL};
+pub use llm::http::probe::{list_upstream_models, probe_model, UpstreamModel};
 pub use llm::sampler::{llm, Llm, LlmConfig, LlmMode, Sampler};
 pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
