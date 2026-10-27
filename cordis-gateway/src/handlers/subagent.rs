@@ -143,7 +143,8 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
 }
 
 /// `subagent/send { threadId, agentId, message }`：用户对子代理说一句（TUI 子代理
-/// 浮层的输入框同款）。在跑就在下一步读到，空闲就开下一轮；已经收掉的报错。
+/// 浮层的输入框同款）。在跑就在下一步读到，空闲就开下一轮；已经收掉的、只在盘上的
+/// 同一个 id 复活接着聊（回 `revived: true`）。用户开的一轮结果送达父级但不叫醒它。
 pub fn send(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let message = params
         .get("message")
@@ -153,12 +154,22 @@ pub fn send(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     if message.is_empty() {
         return Err(RpcError::invalid_params("消息不能为空"));
     }
-    let (_, snap) = resolve(gateway, &params)?;
-    let was_running = snap.running();
-    service(gateway)?
-        .send_message(&snap.id, message, true)
-        .map_err(|e| RpcError::app("subagent_closed", e))?;
-    Ok(json!({ "ok": true, "wasRunning": was_running }))
+    let sub = service(gateway)?;
+    match resolve(gateway, &params) {
+        Ok((_, snap)) if !snap.done => {
+            let was_running = snap.running();
+            sub.send_message(&snap.id, message, true)
+                .map_err(|e| RpcError::app("subagent_closed", e))?;
+            Ok(json!({ "ok": true, "wasRunning": was_running }))
+        }
+        // 收掉了 / 只在盘上：同一个 id 接着聊（线程得开着，复活要挂到那一页）。
+        _ => {
+            let page = threads::resolve_param(gateway, &params)?;
+            sub.revive(&page.ctx, agent_param(&params)?, message)
+                .map_err(|e| RpcError::app("subagent_closed", e))?;
+            Ok(json!({ "ok": true, "wasRunning": false, "revived": true }))
+        }
+    }
 }
 
 /// `subagent/interrupt { threadId, agentId }`：停下这一轮，子代理留着能接着聊。

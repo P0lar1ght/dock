@@ -154,7 +154,12 @@ async fn run_dock_child(
         .as_deref()
         .map(|src| store.events(src))
         .unwrap_or_default();
-    let mut prompt = child_prompt(&typ, &desc, &run.request.prompt);
+    // 复活是用户在界面上接着聊：原话就是这一轮的开头，不再加 `[type] 描述`。
+    let mut prompt = if run.request.revive {
+        run.request.prompt.clone()
+    } else {
+        child_prompt(&typ, &desc, &run.request.prompt)
+    };
 
     let parent_presets = parent.get::<AgentPresets>(AGENT_PRESETS);
     let def = parent_presets.as_ref().and_then(|p| p.subagent(&typ));
@@ -271,10 +276,11 @@ async fn run_dock_child(
     }
     // 「做完要回报」写进初始任务，不进人设或工具描述：那两处排在请求头里，
     // 子代理专属的一段会让它的头和父级分叉。角色拿不到 `send_message` 就不写，
-    // 别让它去调一颗看不见的工具。
-    if child
-        .get::<AgentPresets>(AGENT_PRESETS)
-        .is_some_and(|p| p.allows(super::control::SEND_TOOL_NAME))
+    // 别让它去调一颗看不见的工具。复活接着聊的不再写：对话里第一条任务已经带着。
+    if !run.request.revive
+        && child
+            .get::<AgentPresets>(AGENT_PRESETS)
+            .is_some_and(|p| p.allows(super::control::SEND_TOOL_NAME))
     {
         super::format::append_reply_instruction(&mut prompt, &parent_id);
     }

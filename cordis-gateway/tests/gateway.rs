@@ -4934,6 +4934,21 @@ async fn notes_until(
     }
 }
 
+/// 收掉眼下已经到了的推送（一条都没有就马上回）。
+async fn drain_notes(rpc: &mut Rpc) -> Vec<Value> {
+    let mut seen = Vec::new();
+    while let Ok(Some(Ok(msg))) =
+        tokio::time::timeout(Duration::from_millis(50), rpc.read.next()).await
+    {
+        if let Ok(text) = msg.into_text() {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                seen.push(value);
+            }
+        }
+    }
+    seen
+}
+
 fn agent_status_is(note: &Value, status: &str) -> bool {
     note["method"] == "subagent/updated" && note["params"]["agent"]["status"] == status
 }
@@ -5066,16 +5081,63 @@ async fn subagents_project_onto_the_thread_that_started_them() {
             )
     })
     .await;
+    let started_before = rpc
+        .call("subagent/list", json!({ "threadId": "live" }))
+        .await["result"]["agents"][0]["startedAt"]
+        .clone();
+    // 收掉的子代理：同一个 id 复活接着聊；用户开的这一轮结果不叫醒父级。
     let after = rpc
         .call(
             "subagent/send",
-            json!({ "threadId": "live", "agentId": agent_id, "message": "x" }),
+            json!({ "threadId": "live", "agentId": agent_id, "message": "revived" }),
         )
         .await;
+    assert_eq!(after["result"]["revived"], true, "{after}");
+    let notes = notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        agent_status_is(n, "idle") && n["params"]["agent"]["agentId"] == agent_id.as_str()
+    })
+    .await;
     assert!(
-        after.get("error").is_some(),
-        "收掉的子代理不能再发：{after}"
+        notes.iter().any(|n| n["method"] == "subagent/event"
+            && n["params"]["event"]["method"] == "item/user_message"
+            && n["params"]["event"]["payload"]["content"] == "revived"),
+        "复活的这一轮以用户原话开头：{notes:#?}"
     );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let quiet = drain_notes(&mut rpc).await;
+    assert!(
+        !notes
+            .iter()
+            .chain(quiet.iter())
+            .any(|n| n["method"] == "turn/started"),
+        "用户开的一轮不叫醒父级：{notes:#?} {quiet:#?}"
+    );
+    let listed = rpc
+        .call("subagent/list", json!({ "threadId": "live" }))
+        .await;
+    let agents = listed["result"]["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1, "复活不多出一个：{listed}");
+    assert_eq!(agents[0]["agentId"], agent_id.as_str());
+    assert_eq!(
+        agents[0]["startedAt"], started_before,
+        "启动时刻沿用第一次的"
+    );
+    assert_eq!(agents[0]["toolCallId"], "call-1");
+    // 再停掉，后面的历史回放照旧。
+    let _ = rpc
+        .call(
+            "subagent/stop",
+            json!({ "threadId": "live", "agentId": agent_id }),
+        )
+        .await;
+    notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        n["method"] == "subagent/updated"
+            && matches!(
+                n["params"]["agent"]["status"].as_str(),
+                Some("completed" | "cancelled")
+            )
+    })
+    .await;
     // 收掉后网关丢了它的实时投影，历史改按它的会话回放：还得看得到整段过程。
     let replayed = rpc
         .call(
@@ -5084,7 +5146,7 @@ async fn subagents_project_onto_the_thread_that_started_them() {
         )
         .await;
     let replayed = replayed["result"]["events"].as_array().unwrap();
-    for needle in ["hi kid", "again"] {
+    for needle in ["hi kid", "again", "revived"] {
         assert!(
             replayed.iter().any(|e| e["method"] == "item/user_message"
                 && e["payload"]["content"].as_str().unwrap().contains(needle)),

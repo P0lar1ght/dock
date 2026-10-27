@@ -51,8 +51,11 @@ pub(super) struct ChildSlot {
     pub tool_call_id: Mutex<Option<String>>,
     /// 落盘目录（`<父会话>/subagents/<id>/`）；父会话不落盘时没有。
     pub transcript_dir: Mutex<Option<std::path::PathBuf>>,
-    /// 启动时刻（墙钟），写进落盘抬头。
-    pub started_wall: std::time::SystemTime,
+    /// 第一次启动的时刻（墙钟），写进落盘抬头；同 id 复活时沿用原来的。
+    pub started_wall: Mutex<std::time::SystemTime>,
+    /// 这一轮是用户（界面 / TUI）发话开的：结束通知送进父信箱但不叫醒父级。
+    /// 父级发来话就清掉。
+    pub user_turn: AtomicBool,
 }
 
 impl ChildSlot {
@@ -177,6 +180,54 @@ impl ChildStore {
         }
     }
 
+    /// 标记 / 清掉「这一轮是用户开的」。
+    pub fn set_user_turn(&self, id: &str, on: bool) {
+        if let Some(slot) = self.get(id) {
+            slot.user_turn.store(on, Ordering::Relaxed);
+        }
+    }
+
+    /// 同 id 复活前：拿走已经收掉的那份槽位（返回它的对话和抬头信息），让新的一份从头建。
+    /// 还活着（在跑 / 空闲）的不动，返回 `None`。
+    pub fn take_settled(&self, id: &str) -> Option<SettledChild> {
+        let mut map = self.inner.lock().unwrap();
+        if map.get(id)?.life() != SubagentLife::Done {
+            return None;
+        }
+        let slot = map.remove(id)?;
+        drop(map);
+        let events = match slot.sessions.lock().unwrap().as_ref() {
+            Some(s) => s.events(),
+            None => slot.events.lock().unwrap().clone(),
+        };
+        let started_wall = *slot.started_wall.lock().unwrap();
+        let tool_call_id = slot.tool_call_id.lock().unwrap().clone();
+        Some(SettledChild {
+            description: slot.description.clone(),
+            subagent_type: slot.subagent_type.clone(),
+            workflow: matches!(slot.owner, SubagentOwner::Workflow { .. }),
+            events,
+            started_wall,
+            tool_call_id,
+        })
+    }
+
+    /// 复活出来的新槽位接上原来的启动时刻和派它的 `task` 调用（列表里不挪位置、卡片还对得上）。
+    pub fn restore_identity(
+        &self,
+        id: &str,
+        started_wall: std::time::SystemTime,
+        tool_call_id: Option<String>,
+        events: Vec<LogEvent>,
+    ) {
+        let Some(slot) = self.get(id) else {
+            return;
+        };
+        *slot.started_wall.lock().unwrap() = started_wall;
+        *slot.tool_call_id.lock().unwrap() = tool_call_id;
+        *slot.events.lock().unwrap() = events;
+    }
+
     /// 这个子代理落盘到 `dir`，马上写一份抬头。
     pub fn set_transcript_dir(&self, id: &str, dir: std::path::PathBuf) {
         let Some(slot) = self.get(id) else {
@@ -195,8 +246,11 @@ impl ChildStore {
         };
         let snap = snap(id, &slot);
         let settled_ms = snap.settled_at.map(|at| {
-            unix_ms(slot.started_wall)
-                + at.saturating_duration_since(snap.started_at).as_millis() as u64
+            unix_ms(
+                std::time::SystemTime::now()
+                    .checked_sub(at.elapsed())
+                    .unwrap_or(std::time::UNIX_EPOCH),
+            )
         });
         let meta = crate::session::persist::SubagentMeta {
             id: id.to_string(),
@@ -205,7 +259,7 @@ impl ChildStore {
             tool_call_id: snap.tool_call_id.clone(),
             workflow: matches!(slot.owner, SubagentOwner::Workflow { .. }),
             status: snap.status().to_string(),
-            started_ms: unix_ms(slot.started_wall),
+            started_ms: unix_ms(snap.started_wall),
             settled_ms,
             tool_calls: self
                 .events(id)
@@ -331,7 +385,8 @@ impl ChildStore {
             settled_at: Mutex::new(None),
             tool_call_id: Mutex::new(None),
             transcript_dir: Mutex::new(None),
-            started_wall: std::time::SystemTime::now(),
+            started_wall: Mutex::new(std::time::SystemTime::now()),
+            user_turn: AtomicBool::new(false),
         });
         map.insert(id.to_owned(), slot.clone());
         drop(map);
@@ -679,9 +734,11 @@ impl ChildStore {
             cancelled,
             output,
         };
-        let quiet = slot.reported_this_turn.load(Ordering::Relaxed)
-            && !cancelled
-            && !slot.failed.load(Ordering::Relaxed);
+        // 用户自己开的一轮（界面上跟子代理聊）：结果照样送达，但不替用户叫醒父级。
+        let quiet = slot.user_turn.load(Ordering::Relaxed)
+            || (slot.reported_this_turn.load(Ordering::Relaxed)
+                && !cancelled
+                && !slot.failed.load(Ordering::Relaxed));
         let parent = slot.parent.clone();
         self.enqueue(&parent, notice, !quiet);
     }
@@ -781,7 +838,18 @@ pub(super) fn snap(id: &str, s: &ChildSlot) -> SubagentSnap {
         tool_call_id: s.tool_call_id.lock().unwrap().clone(),
         failed: s.failed.load(Ordering::Relaxed),
         settled_at: *s.settled_at.lock().unwrap(),
+        started_wall: *s.started_wall.lock().unwrap(),
     }
+}
+
+/// [`ChildStore::take_settled`] 拿走的、已经收掉的子代理。
+pub struct SettledChild {
+    pub description: String,
+    pub subagent_type: String,
+    pub workflow: bool,
+    pub events: Vec<LogEvent>,
+    pub started_wall: std::time::SystemTime,
+    pub tool_call_id: Option<String>,
 }
 
 /// 落盘抬头里的回报最多这么多字（完整对话在 `chat_history.jsonl`）。

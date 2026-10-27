@@ -596,14 +596,22 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 - 子代理的对话写在 `<会话目录>/subagents/<agentId>/`：`chat_history.jsonl` + `subagent.json`（抬头）。
 - `list` / `history` 内存里没有就读盘：线程关着、Dock 重启过、早就收掉的都看得到。
 - 只在盘上的 `Agent` 多一个 `persisted: true`；盘上停在 `running` 的报 `cancelled`，停在 `idle` 的报 `completed`。
-- `send` / `interrupt` / `stop` 只认内存里活着的。
+- `interrupt` / `stop` 只认内存里活着的。
+
+接着聊（复活）：
+
+- `subagent/send` 发给收掉的、或只在盘上的子代理：同一个 `agentId` 从它的对话接着起一轮，回 `revived: true`。
+- 线程得开着（复活挂到那一页）；关着的先 `thread/open`。
+- 原话就是这一轮的开头（不加 `[type] 描述` 和回报说明）；启动时刻、`toolCallId` 沿用原来的，列表里不多出一个。
+- workflow 派的、角色已不在当前预设里的不能复活（报 `subagent_closed`，原因写在 message 里）。
+- 用户开的一轮（发给闲着的、复活的）结束时，结果送进父信箱但**不叫醒**父级；父级下一轮自然读到。
 - 老会话（这之前跑的）没有子代理目录，只剩父会话里的任务卡。
 
 | 方法 / 推送 | 作用 |
 |---|---|
 | `subagent/list { threadId? }` | 这个线程启动的子代理 `{ agents: [Agent] }`，先启动的在前 |
 | `subagent/history { threadId?, agentId }` | `{ agent, events }`：子代理自己的对话，和 `thread/history` 的 `events` 同形 |
-| `subagent/send { threadId?, agentId, message }` | 用户对子代理说一句：在跑就在下一步读到，空闲就开下一轮 |
+| `subagent/send { threadId?, agentId, message }` | 用户对子代理说一句：在跑就在下一步读到，空闲就开下一轮；收掉的 / 只在盘上的同一个 id 复活（见下） |
 | `subagent/interrupt { threadId?, agentId }` | 停下这一轮，子代理留着能接着聊；没在跑回 `interrupted: false` |
 | `subagent/stop { threadId?, agentId }` | 收掉子代理；已经收掉的回 `stopped: false` |
 | 推送 `subagent/updated { agent }` | 子代理出现了或状态变了 |

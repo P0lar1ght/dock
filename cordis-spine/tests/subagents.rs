@@ -1161,3 +1161,69 @@ async fn a_tabs_child_reports_to_that_tab_not_page_one() {
     assert!(reminded(&page), "回合结束通知要进派活那一页的历史");
     assert!(!reminded(&h.root), "第 1 页的历史里不该有别页孩子的通知");
 }
+
+/// 重启后接着聊：父会话落盘时子代理的对话也落盘；换一个进程（另一棵树、同一个
+/// `DOCK_HOME`）把父会话恢复出来，同一个 id 从盘上的对话接着起一轮。
+#[tokio::test]
+async fn a_settled_child_revives_from_disk_under_the_same_id() {
+    let home = tempfile::tempdir().unwrap();
+    let dock_home = home.path().join("dock-home");
+    std::fs::create_dir_all(&dock_home).unwrap();
+    let _env = cordis_base::test_env::scoped()
+        .set("DOCK_HOME", &dock_home)
+        .cwd(home.path());
+
+    // 第一个进程：父会话落盘，派一个孩子，跑完停在 idle。
+    let first = boot(Arc::new(LastUser)).await;
+    let sessions = first.root.require::<Sessions>(SESSIONS).unwrap();
+    sessions.attach_disk();
+    sessions.append(LogEvent::User("派个孩子".into()));
+    let parent_id = sessions.live_session_id();
+    let tools = first.root.require::<Tools>(TOOLS).unwrap();
+    let id = spawn_bg(&tools, "第一次的任务", "explore").await;
+    let sub = first.root.require::<Subagents>(SUBAGENTS).unwrap();
+    wait_idle(&sub, &id).await;
+    // 活着（idle）的不走复活。
+    assert!(sub.revive(&first.root, &id, "x").is_err());
+    let dir = sessions.existing_session_dir().unwrap();
+    let saved = cordis_spine::load_subagents(&dir);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].id, id);
+    let started_ms = saved[0].started_ms;
+    drop(first);
+
+    // 第二个进程：内存里没有这个孩子，恢复父会话后从盘上接着聊。
+    let second = boot(Arc::new(LastUser)).await;
+    let sessions = second.root.require::<Sessions>(SESSIONS).unwrap();
+    sessions.attach_disk();
+    assert!(sessions.resume_id(&parent_id), "parent session restores");
+    let sub = second.root.require::<Subagents>(SUBAGENTS).unwrap();
+    assert!(
+        sub.snapshot(&id).is_none(),
+        "fresh process has no child in memory"
+    );
+    assert!(sub.revive(&second.root, "nope", "x").is_err());
+    sub.revive(&second.root, &id, "接着说").unwrap();
+    wait_output_contains(&sub, &id, "接着说").await;
+    let events = sub.events(&id);
+    let users: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::User(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        users.first().is_some_and(|t| t.contains("第一次的任务")),
+        "对话从盘上接着：{users:?}"
+    );
+    assert_eq!(users.last().copied(), Some("接着说"), "{users:?}");
+    // 还是同一份落盘：一个子代理、启动时刻不变、对话接在后面。
+    let saved = cordis_spine::load_subagents(&dir);
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(saved[0].started_ms, started_ms);
+    let (_, disk_events, _) = cordis_spine::load_subagent(&dir, &id).unwrap();
+    assert!(disk_events
+        .iter()
+        .any(|e| matches!(e, LogEvent::User(t) if t == "接着说")));
+}

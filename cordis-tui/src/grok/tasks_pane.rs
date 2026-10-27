@@ -877,6 +877,7 @@ mod tests {
             tool_call_id: None,
             failed: false,
             settled_at: None,
+            started_wall: std::time::SystemTime::now(),
         };
         let entry = TaskEntry::from_subagent(&snap, Some("岑"));
         match entry {

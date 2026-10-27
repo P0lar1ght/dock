@@ -32,9 +32,8 @@ pub fn turn_status(snap: &SubagentSnap, events: &[LogEvent]) -> TurnEndStatus {
 
 /// 一个子代理：`subagent/updated` 的 `agent`、`subagent/list` 的一项。
 pub fn info(snap: &SubagentSnap, events: &[LogEvent], role: Option<String>) -> Value {
-    let started_at = SystemTime::now()
-        .checked_sub(snap.started_at.elapsed())
-        .unwrap_or(UNIX_EPOCH);
+    // 墙钟启动时刻：同 id 复活后沿用第一次的，列表里不挪位置。
+    let started_at = snap.started_wall;
     let mut v = json!({
         "agentId": snap.id,
         "toolCallId": snap.tool_call_id,

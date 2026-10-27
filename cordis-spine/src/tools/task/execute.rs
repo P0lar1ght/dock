@@ -244,6 +244,7 @@ async fn spawn_child(
         await_to_completion: false,
         owner: SubagentOwner::Task,
         cancel_token: tokio_util::sync::CancellationToken::new(),
+        revive: false,
     };
 
     if run_in_background {

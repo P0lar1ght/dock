@@ -90,6 +90,8 @@ pub struct SubagentSnap {
     pub failed: bool,
     /// 停下（空闲或结束）的时刻；在跑时是 `None`。
     pub settled_at: Option<Instant>,
+    /// 第一次启动的墙钟时刻（同 id 复活后沿用原来的）。
+    pub started_wall: std::time::SystemTime,
 }
 
 impl SubagentSnap {
@@ -222,6 +224,7 @@ impl Subagents {
                             tool_call_id: None,
                             failed: false,
                             settled_at: None,
+                            started_wall: std::time::SystemTime::now(),
                         })
                         .collect()
                 } else {
@@ -405,6 +408,7 @@ impl Subagents {
             await_to_completion: true,
             owner,
             cancel_token: spawn.cancel_token,
+            revive: false,
         };
         match self.backend.spawn(request).await {
             Ok(result) => (id, Ok(result)),
@@ -651,6 +655,7 @@ mod coordinator_spawn_tests {
                 await_to_completion: true,
                 owner: SubagentOwner::Task,
                 cancel_token: tokio_util::sync::CancellationToken::new(),
+                revive: false,
             })
             .await
             .expect("spawn");
@@ -725,6 +730,7 @@ mod coordinator_spawn_tests {
             await_to_completion: true,
             owner: SubagentOwner::workflow(run_id),
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            revive: false,
         }
     }
 
