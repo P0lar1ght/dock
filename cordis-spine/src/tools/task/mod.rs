@@ -97,6 +97,24 @@ impl SubagentSnap {
         !self.done && !self.idle
     }
 
+    /// running / idle / completed / failed / cancelled（网关 `subagent/*` 和落盘抬头共用）。
+    ///
+    /// 子代理每轮做完都停在 idle（还能接着聊）；只有被收掉（结束、空闲太久、会话停止）
+    /// 才是 completed。失败和取消优先：最近一轮怎么收的尾就报什么。
+    pub fn status(&self) -> &'static str {
+        if self.running() {
+            "running"
+        } else if self.failed {
+            "failed"
+        } else if self.cancelled {
+            "cancelled"
+        } else if self.idle {
+            "idle"
+        } else {
+            "completed"
+        }
+    }
+
     /// 从启动到现在（在跑）或到停下为止。
     pub fn elapsed(&self) -> std::time::Duration {
         match self.settled_at {

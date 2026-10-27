@@ -74,7 +74,7 @@ config.toml.example      用户 / 项目模型目录样例
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing`；`tui` 只跑事件循环，视图件由组合根挂（`cordis_tui::views()`） | 同名 |
 | 回环网关 | `gateway`；功能插件 `gateway.settings` `gateway.presets` `gateway.fs` `gateway.canvas` `gateway.mcpApps` `gateway.vcs` `gateway.schedule` `gateway.surfaces` `gateway.status` `gateway.toolViews` `gateway.pluginSettings`（`cordis_gateway::features()`，往 `"gateway.methods"` 登记 dock.1 方法） | `"gateway"`（`GatewayRef`）、`"gateway.methods"`，事件 `gateway/pairing` |
 
-`settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。`meta.json` 记着这个会话的预设、模型、推理强度；恢复（`/resume`、`--resume`、开页）时 `Sessions::restore` live-lookup 这一页的 `settings` 把模型和强度切回去，模型已不在目录里就留着当前的。
+`settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。子代理的对话落在父会话目录下 `subagents/<agent-id>/`（`chat_history.jsonl` + `subagent.json`），不是会话，不进名册和搜索。`meta.json` 记着这个会话的预设、模型、推理强度；恢复（`/resume`、`--resume`、开页）时 `Sessions::restore` live-lookup 这一页的 `settings` 把模型和强度切回去，模型已不在目录里就留着当前的。
 
 新东西往 `cordis-base` 还是 `cordis-spine` 放，判据是**有没有插件**：base 不 `provide` 任何 named service、不认识 ctx 键（所以 `names` 不在那儿）、也不依赖内核 crate `cordis`；它只有 wire 类型、`config.toml` 解析和纯引擎（ripgrep、cua 发现）。反过来，`settings` / `permissions` / `slash` / `cron` 虽然也不成环，但它们 provide 服务，留在 spine。这条线由编译器守着——base 反向依赖 spine 会直接编译失败，以前只能靠约定。
 

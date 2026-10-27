@@ -16,22 +16,9 @@ use serde_json::{json, Value};
 /// `output` 最多带这么多字（卡片只显示两行摘要，面板显示最后的回报）。
 const OUTPUT_CHARS: usize = 4000;
 
-/// running / idle / completed / failed / cancelled。
-///
-/// 子代理每轮做完都停在 idle（还能接着聊）；只有被收掉（结束、空闲太久、会话停止）
-/// 才是 completed。失败和取消优先：最近一轮怎么收的尾就报什么。
+/// running / idle / completed / failed / cancelled（规则在 [`SubagentSnap::status`]）。
 pub fn status(snap: &SubagentSnap) -> &'static str {
-    if snap.running() {
-        "running"
-    } else if snap.failed {
-        "failed"
-    } else if snap.cancelled {
-        "cancelled"
-    } else if snap.idle {
-        "idle"
-    } else {
-        "completed"
-    }
+    snap.status()
 }
 
 /// 子代理停下时它那一轮的收尾状态（子代理的会话不记 `TurnEnd`）。
@@ -70,6 +57,36 @@ pub fn info(snap: &SubagentSnap, events: &[LogEvent], role: Option<String>) -> V
         .flatten()
     {
         v["error"] = json!(error);
+    }
+    v
+}
+
+/// 只在盘上的子代理（不在内存里）：和 [`info`] 同形，多一个 `persisted: true`。
+///
+/// 盘上记的是最后一次变化时的状态。人已经不在内存里了，还写着 running 的是进程中途
+/// 没了（算 cancelled），idle 的是停在那等下一句、后来被回收或 Dock 重启了（算 completed）。
+pub fn persisted_info(meta: &cordis_spine::SubagentMeta, role: Option<String>) -> Value {
+    let status = match meta.status.as_str() {
+        "running" => "cancelled",
+        "idle" => "completed",
+        other => other,
+    };
+    let output = meta.output.trim();
+    let mut v = json!({
+        "agentId": meta.id,
+        "toolCallId": meta.tool_call_id,
+        "subagentType": meta.subagent_type,
+        "role": role.unwrap_or_else(|| meta.subagent_type.clone()),
+        "description": meta.description,
+        "status": status,
+        "startedAt": meta.started_ms,
+        "durationMs": meta.settled_ms.map(|s| s.saturating_sub(meta.started_ms)).unwrap_or(0),
+        "toolCalls": meta.tool_calls,
+        "output": cap(output, OUTPUT_CHARS),
+        "persisted": true,
+    });
+    if status == "failed" && !output.is_empty() {
+        v["error"] = json!(output.strip_prefix("failed: ").unwrap_or(output));
     }
     v
 }

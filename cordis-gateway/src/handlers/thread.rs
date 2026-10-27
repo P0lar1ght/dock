@@ -84,13 +84,18 @@ fn list_all(gateway: &GatewayHandle) -> Result<Value, RpcError> {
         if page.is_root() {
             item["alias"] = json!(LIVE_THREAD_ID);
         }
+        let dir = sessions.existing_session_dir();
+        crate::handlers::subagent::stamp_counts(gateway, &mut item, Some(&page), dir);
         threads.push(item);
     }
     for entry in roster_entries(gateway) {
         if open_ids.contains(&entry.id) {
             continue;
         }
-        threads.push(roster_summary(&entry));
+        let mut item = roster_summary(&entry);
+        let dir = cordis_spine::sessions_cwd_dir(&entry.cwd).join(&entry.id);
+        crate::handlers::subagent::stamp_counts(gateway, &mut item, None, Some(dir));
+        threads.push(item);
     }
     Ok(json!({ "threads": threads }))
 }

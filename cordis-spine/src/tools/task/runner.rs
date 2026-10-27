@@ -199,6 +199,16 @@ async fn run_dock_child(
     if !resume.is_empty() {
         sessions.seed(resume);
     }
+    // 落盘到父会话目录下（`subagents/<id>/`）：关掉会话、重启 Dock 后还能看。父会话
+    // 不落盘（侧边聊天的旁问页、测试）就只在内存里。
+    if let Some(dir) = parent
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| s.disk_session_dir())
+        .map(|d| crate::session::persist::subagent_dir(&d, &id))
+    {
+        store.set_transcript_dir(&id, dir.clone());
+        sessions.attach_child_dir(dir);
+    }
     let mut hold = Vec::new();
     match child.provide(SESSIONS, sessions.clone()) {
         Ok(d) => hold.push(d),

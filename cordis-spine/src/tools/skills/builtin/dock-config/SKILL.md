@@ -106,6 +106,7 @@ headed = true   # 缺省 false（无头）
 $DOCK_HOME/
   config.toml               用户配置
   sessions/<cwd-key>/<id>/  会话存档（meta.json + chat_history.jsonl）
+    subagents/<agent-id>/   子代理的对话（subagent.json + chat_history.jsonl）
   skills/                   用户技能
   bundled/skills/           内置技能缓存（应用自带，可改；同名被更高层覆盖）
   workflows/                用户 workflow 脚本

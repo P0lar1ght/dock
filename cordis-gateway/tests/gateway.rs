@@ -5101,6 +5101,130 @@ async fn subagents_project_onto_the_thread_that_started_them() {
     assert!(missing.get("error").is_some(), "{missing}");
 }
 
+/// 父会话落盘时，子代理的对话落在 `<会话>/subagents/<id>/`：会话关掉（这里用归档，
+/// 和 `/new` 一样）后 `thread/list` 带子代理计数，`subagent/list` / `history` 从盘上读。
+#[tokio::test]
+async fn subagents_of_a_closed_thread_are_read_from_disk() {
+    let root = harness_root_with(Some(Arc::new(EchoLastUser))).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(tool_task(), TaskConfig::default())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let h = Harness::boot_on(root).await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    sessions.attach_disk();
+    sessions.append(LogEvent::User("派个子代理看看".into()));
+    let parent_id = sessions.live_session_id();
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+
+    let tools = h.ctx.require::<Tools>(TOOLS).unwrap();
+    let started = tools
+        .execute(ToolCall {
+            id: "call-disk".into(),
+            name: "task".into(),
+            arguments: json!({
+                "prompt": "落盘的孩子",
+                "description": "落盘测试",
+                "subagent_type": "explore",
+                "run_in_background": true,
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(started.content.contains("agent_id:"), "{}", started.content);
+    let notes = notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        agent_status_is(n, "idle")
+    })
+    .await;
+    let agent_id = notes.last().unwrap()["params"]["agent"]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let dir = sessions
+        .existing_session_dir()
+        .expect("parent is on disk")
+        .join("subagents")
+        .join(&agent_id);
+    let meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("subagent.json")).unwrap()).unwrap();
+    assert_eq!(meta["status"], "idle", "{meta}");
+    assert_eq!(meta["toolCallId"], "call-disk", "{meta}");
+    assert_eq!(meta["description"], "落盘测试", "{meta}");
+    let history = std::fs::read_to_string(dir.join("chat_history.jsonl")).unwrap();
+    assert!(history.contains("落盘的孩子"), "{history}");
+
+    // 归档：父会话不再是开着的页，只在名册里。
+    sessions.archive_current();
+    assert_ne!(sessions.live_session_id(), parent_id);
+
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let row = listed["result"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(parent_id))
+        .cloned()
+        .unwrap_or_else(|| panic!("closed parent missing: {listed}"));
+    assert_eq!(row["open"], false, "{row}");
+    assert_eq!(row["subagentCount"], 1, "{row}");
+
+    let agents = rpc
+        .call("subagent/list", json!({ "threadId": parent_id }))
+        .await;
+    let agents = agents["result"]["agents"].as_array().unwrap().clone();
+    assert_eq!(agents.len(), 1, "{agents:?}");
+    assert_eq!(agents[0]["agentId"], agent_id.as_str());
+    assert_eq!(agents[0]["persisted"], true);
+    // 盘上停在 idle、人已不在这一页：报 completed。
+    assert_eq!(agents[0]["status"], "completed");
+    assert_eq!(agents[0]["role"], "探索");
+
+    let replayed = rpc
+        .call(
+            "subagent/history",
+            json!({ "threadId": parent_id, "agentId": agent_id }),
+        )
+        .await;
+    let events = replayed["result"]["events"].as_array().unwrap();
+    assert!(
+        events.iter().any(|e| e["method"] == "item/user_message"
+            && e["payload"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("落盘的孩子")),
+        "{replayed}"
+    );
+    assert_eq!(replayed["result"]["agent"]["persisted"], true);
+    // 盘上的不能发消息（复活是另一件事）。
+    let sent = rpc
+        .call(
+            "subagent/send",
+            json!({ "threadId": parent_id, "agentId": agent_id, "message": "x" }),
+        )
+        .await;
+    assert!(sent.get("error").is_some(), "{sent}");
+    // 别的会话拿这个 id 查不到。
+    let other = rpc
+        .call(
+            "subagent/history",
+            json!({ "threadId": "live", "agentId": "../../etc" }),
+        )
+        .await;
+    assert!(other.get("error").is_some(), "{other}");
+}
+
 /// 设置页方法只认 `dock serve` 交给父进程的 ticket：配对来的网页改不了配置
 /// （能写 MCP 启动命令 = 能在本机跑程序），受信连接能读写模型目录和白名单键。
 #[tokio::test]

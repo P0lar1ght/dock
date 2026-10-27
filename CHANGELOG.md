@@ -10,6 +10,9 @@
 
 ### 新增
 
+- **子代理对话落盘**：父会话落盘时，子代理的对话写在 `<会话>/subagents/<agent-id>/`。
+  - `subagent/list` / `history` 内存里没有就读盘：关掉的会话、Dock 重启后都看得到（`persisted: true`）。
+  - `thread/list { scope: "all" }` 每项多出 `subagentCount` / `subagentsRunning`。
 - **MCP Apps**（`io.modelcontextprotocol/ui`）：MCP 工具可以带交互界面。
   - 客户端握手声明 MCP Apps 能力；认工具 `_meta.ui`，只给界面用的工具不进模型工具表。
   - 模型调挂界面的工具时，原始结果存进会话目录 `mcp-apps/`，界面要原样那份。

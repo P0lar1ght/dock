@@ -173,7 +173,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 | 方法 | 作用 |
 |---|---|
-| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open` / `presetId`（开着的页是它当前的预设，落盘的是 `meta.json` 记的，老会话为 `null`），第 1 页另带 `alias: "live"` |
+| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open` / `presetId`（开着的页是它当前的预设，落盘的是 `meta.json` 记的，老会话为 `null`），第 1 页另带 `alias: "live"`；子代理计数见下 |
 | `thread/search { query, cwd?, limit? }` | 按标题和用户消息搜所有目录的落盘会话，回 `hits[]`：`threadId` / `title` / `cwd` / `snippet`（命中处前后一小段纯文本，只命中标题时为 `null`）/ `updatedAt`。空格分开的词都要命中；含中日韩文的查询按子串匹配，其余走 FTS 前缀匹配。还没落盘的内容搜不到 |
 | `workspace/list { scope: "all" }` | 有会话的所有目录（`id` = 路径，`hasOpenThreads`） |
 | `thread/start { cwd, title?, presetId? }` | 在 `cwd` 另开一页（不动第 1 页），回它的会话 id；预设在创建时定下：`presetId` 只切这一页并记进会话，不改全局默认；预设不存在就报 `invalid_params`、不开页；不带 `cwd` 是老语义 |
@@ -581,10 +581,23 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
   - 空闲时手动压缩没有一轮包着：开一轮、推标记、马上 `turn/completed`。
 - 重开会话 / 回放历史只有 `item/compaction`，没有前后占用。
 
+`thread/list { scope: "all" }` 的子代理计数（没有子代理就不带）：
+
+- `subagentCount`：内存里的 + 只在盘上的（关着的会话只数目录）。
+- `subagentsRunning`：正在跑的，只有开着的页才可能不为 0。
+
 ### 子代理（能力 `subagents`）
 
 模型用 `task` 派的子代理，挂在启动它的那一页：只有那一页的订阅者收到推送，
-`subagent/*` 也只认那一页的 `threadId`。子代理只活在内存里，Dock 重启后就没了。
+`subagent/*` 也只认那一页的 `threadId`。
+
+落盘（父会话落盘时）：
+
+- 子代理的对话写在 `<会话目录>/subagents/<agentId>/`：`chat_history.jsonl` + `subagent.json`（抬头）。
+- `list` / `history` 内存里没有就读盘：线程关着、Dock 重启过、早就收掉的都看得到。
+- 只在盘上的 `Agent` 多一个 `persisted: true`；盘上停在 `running` 的报 `cancelled`，停在 `idle` 的报 `completed`。
+- `send` / `interrupt` / `stop` 只认内存里活着的。
+- 老会话（这之前跑的）没有子代理目录，只剩父会话里的任务卡。
 
 | 方法 / 推送 | 作用 |
 |---|---|

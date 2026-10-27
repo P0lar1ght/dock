@@ -49,6 +49,10 @@ pub(super) struct ChildSlot {
     pub settled_at: Mutex<Option<Instant>>,
     /// 派出它的那次 `task` 调用（工具调用 id）。客户端靠它把卡片和子代理对上。
     pub tool_call_id: Mutex<Option<String>>,
+    /// 落盘目录（`<父会话>/subagents/<id>/`）；父会话不落盘时没有。
+    pub transcript_dir: Mutex<Option<std::path::PathBuf>>,
+    /// 启动时刻（墙钟），写进落盘抬头。
+    pub started_wall: std::time::SystemTime,
 }
 
 impl ChildSlot {
@@ -165,9 +169,53 @@ impl ChildStore {
     }
 
     /// 报一次 `id` 变了。调用时不能拿着 `inner` 锁：监听者会回头取快照。
+    /// 落盘的子代理顺手把抬头（状态、用时、回报）重写一份。
     fn changed(&self, id: &str) {
+        self.write_meta(id);
         if let Some(hook) = self.on_change.get() {
             hook(id);
+        }
+    }
+
+    /// 这个子代理落盘到 `dir`，马上写一份抬头。
+    pub fn set_transcript_dir(&self, id: &str, dir: std::path::PathBuf) {
+        let Some(slot) = self.get(id) else {
+            return;
+        };
+        *slot.transcript_dir.lock().unwrap() = Some(dir);
+        self.write_meta(id);
+    }
+
+    fn write_meta(&self, id: &str) {
+        let Some(slot) = self.get(id) else {
+            return;
+        };
+        let Some(dir) = slot.transcript_dir.lock().unwrap().clone() else {
+            return;
+        };
+        let snap = snap(id, &slot);
+        let settled_ms = snap.settled_at.map(|at| {
+            unix_ms(slot.started_wall)
+                + at.saturating_duration_since(snap.started_at).as_millis() as u64
+        });
+        let meta = crate::session::persist::SubagentMeta {
+            id: id.to_string(),
+            description: snap.description.clone(),
+            subagent_type: snap.subagent_type.clone(),
+            tool_call_id: snap.tool_call_id.clone(),
+            workflow: matches!(slot.owner, SubagentOwner::Workflow { .. }),
+            status: snap.status().to_string(),
+            started_ms: unix_ms(slot.started_wall),
+            settled_ms,
+            tool_calls: self
+                .events(id)
+                .iter()
+                .filter(|e| matches!(e, LogEvent::ToolExecute { .. }))
+                .count() as u64,
+            output: cap_chars(snap.output.trim(), META_OUTPUT_CHARS),
+        };
+        if let Err(e) = crate::session::persist::save_subagent_meta(&dir, &meta) {
+            tracing::warn!(agent = id, error = %e, "subagent: failed to write subagent.json");
         }
     }
 
@@ -282,6 +330,8 @@ impl ChildStore {
             failed: AtomicBool::new(false),
             settled_at: Mutex::new(None),
             tool_call_id: Mutex::new(None),
+            transcript_dir: Mutex::new(None),
+            started_wall: std::time::SystemTime::now(),
         });
         map.insert(id.to_owned(), slot.clone());
         drop(map);
@@ -731,5 +781,21 @@ pub(super) fn snap(id: &str, s: &ChildSlot) -> SubagentSnap {
         tool_call_id: s.tool_call_id.lock().unwrap().clone(),
         failed: s.failed.load(Ordering::Relaxed),
         settled_at: *s.settled_at.lock().unwrap(),
+    }
+}
+
+/// 落盘抬头里的回报最多这么多字（完整对话在 `chat_history.jsonl`）。
+const META_OUTPUT_CHARS: usize = 4000;
+
+fn unix_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn cap_chars(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &s[..at]),
+        None => s.to_string(),
     }
 }

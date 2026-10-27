@@ -1,33 +1,133 @@
 //! `subagent/*`：一个线程启动的子代理。只认启动它的那一页（`threadId`），别的线程
-//! 拿着 agent id 也查不到、发不了。子代理只活在内存里，线程得开着。
+//! 拿着 agent id 也查不到、发不了。
+//!
+//! 活着的子代理在内存里；父会话落盘的，子代理的对话也落在 `<会话>/subagents/<id>/`。
+//! `list` / `history` 内存里没有就读盘（线程关着、Dock 重启过都行）；`send` /
+//! `interrupt` / `stop` 只认活着的。
+
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use cordis_spine::{SubagentSnap, Subagents, SUBAGENTS};
+use cordis_spine::{Sessions, SubagentMeta, SubagentSnap, Subagents, SESSIONS, SUBAGENTS};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;
 use crate::subagents;
 use crate::threads::{self, Page};
 
-/// `subagent/list { threadId }` → `{ agents }`，先启动的在前。
+/// `subagent/list { threadId }` → `{ agents }`，先启动的在前。活着的照内存报，
+/// 只在盘上的（关掉的线程、Dock 重启前的）带 `persisted: true`。
 pub fn list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let page = threads::resolve_param(gateway, &params)?;
-    let sub = service(gateway)?;
-    let agents: Vec<Value> = subagents::children_of(gateway.ctx(), &page.identity)
-        .iter()
-        .map(|snap| {
+    let thread_id = threads::thread_param(&params);
+    let page = threads::resolve(gateway, &thread_id).ok();
+    let dir = session_dir(gateway, &thread_id);
+    if page.is_none() && dir.is_none() {
+        return Err(RpcError::app(
+            "not_found",
+            format!("thread {thread_id} not found"),
+        ));
+    }
+    let mut agents: Vec<Value> = Vec::new();
+    let mut live: HashSet<String> = HashSet::new();
+    if let Some(page) = &page {
+        let sub = service(gateway)?;
+        for snap in subagents::children_of(gateway.ctx(), &page.identity) {
             let role = subagents::role_label(&page.ctx, &snap.subagent_type);
-            subagents::info(snap, &sub.events(&snap.id), role)
-        })
-        .collect();
+            agents.push(subagents::info(&snap, &sub.events(&snap.id), role));
+            live.insert(snap.id.clone());
+        }
+    }
+    let role_ctx = page
+        .as_ref()
+        .map(|p| p.ctx.clone())
+        .unwrap_or_else(|| gateway.ctx().clone());
+    for meta in dir.iter().flat_map(|d| cordis_spine::load_subagents(d)) {
+        if !live.contains(&meta.id) {
+            let role = subagents::role_label(&role_ctx, &meta.subagent_type);
+            agents.push(subagents::persisted_info(&meta, role));
+        }
+    }
+    agents.sort_by_key(|a| a["startedAt"].as_u64().unwrap_or(0));
     Ok(json!({ "agents": agents }))
+}
+
+/// `thread/list` 一项上的子代理计数：`subagentCount`（内存里的 + 只在盘上的）、
+/// `subagentsRunning`（正在跑的，只有开着的页才有）。没有子代理就不加这两个键。
+pub fn stamp_counts(
+    gateway: &GatewayHandle,
+    item: &mut Value,
+    page: Option<&Page>,
+    dir: Option<PathBuf>,
+) {
+    // 关着的：只数目录（名册一次要列全部会话，别逐个读抬头）。
+    let Some(page) = page else {
+        let n = dir.map(|d| cordis_spine::count_subagents(&d)).unwrap_or(0);
+        if n > 0 {
+            item["subagentCount"] = json!(n);
+            item["subagentsRunning"] = json!(0);
+        }
+        return;
+    };
+    let mut ids: HashSet<String> = HashSet::new();
+    let mut running = 0usize;
+    {
+        for snap in subagents::children_of(gateway.ctx(), &page.identity) {
+            running += usize::from(snap.running());
+            ids.insert(snap.id);
+        }
+    }
+    if let Some(dir) = dir {
+        ids.extend(cordis_spine::load_subagents(&dir).into_iter().map(|m| m.id));
+    }
+    if !ids.is_empty() {
+        item["subagentCount"] = json!(ids.len());
+        item["subagentsRunning"] = json!(running);
+    }
+}
+
+/// 线程的落盘会话目录：开着的页问它的会话；关着的按名册找。
+fn session_dir(gateway: &GatewayHandle, thread_id: &str) -> Option<PathBuf> {
+    if let Ok(page) = threads::resolve(gateway, thread_id) {
+        return page.ctx.get::<Sessions>(SESSIONS)?.existing_session_dir();
+    }
+    crate::handlers::thread::roster_entries(gateway)
+        .into_iter()
+        .find(|e| e.id == thread_id)
+        .map(|e| cordis_spine::sessions_cwd_dir(&e.cwd).join(&e.id))
+}
+
+/// 盘上的一个子代理：抬头 + 回放好的事件。
+fn persisted(
+    gateway: &GatewayHandle,
+    params: &Value,
+) -> Result<(SubagentMeta, Vec<Value>), RpcError> {
+    let thread_id = threads::thread_param(params);
+    let agent_id = agent_param(params)?;
+    let (meta, events, times) = session_dir(gateway, &thread_id)
+        .and_then(|dir| cordis_spine::load_subagent(&dir, agent_id))
+        .ok_or_else(|| RpcError::app("not_found", format!("这个线程没有子代理 {agent_id}")))?;
+    let (tx, _) = tokio::sync::broadcast::channel(1);
+    let mut t = crate::transcript::Transcript::for_child("", "", agent_id, tx);
+    t.replay(&events, &times, &[]);
+    let events = t
+        .history_since(0)
+        .into_iter()
+        .map(|e| e.as_history_item_as(&thread_id))
+        .collect();
+    Ok((meta, events))
 }
 
 /// `subagent/history { threadId, agentId }` → `{ agent, events }`。`events` 和
 /// `thread/history` 的同形，之后的推送（`subagent/event`）接着它的 `seq`。
 pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let (page, snap) = resolve(gateway, &params)?;
+    let Ok((page, snap)) = resolve(gateway, &params) else {
+        // 不在内存里：读盘（线程关着、Dock 重启过、早就收掉的）。
+        let (meta, events) = persisted(gateway, &params)?;
+        let role = subagents::role_label(gateway.ctx(), &meta.subagent_type);
+        return Ok(json!({ "agent": subagents::persisted_info(&meta, role), "events": events }));
+    };
     let sub = service(gateway)?;
     let thread_id = threads::thread_param(&params);
     let events: Vec<Value> = gateway
@@ -93,14 +193,18 @@ fn service(gateway: &GatewayHandle) -> Result<std::sync::Arc<Subagents>, RpcErro
 /// 参数里的线程和 `agentId`：子代理得是这一页启动的。
 fn resolve(gateway: &GatewayHandle, params: &Value) -> Result<(Page, SubagentSnap), RpcError> {
     let page = threads::resolve_param(gateway, params)?;
-    let agent_id = params
-        .get("agentId")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| RpcError::invalid_params("agentId 不能为空"))?;
+    let agent_id = agent_param(params)?;
     let snap = service(gateway)?
         .snapshot(agent_id)
         .filter(|snap| snap.parent == page.identity)
         .ok_or_else(|| RpcError::app("not_found", format!("这个线程没有子代理 {agent_id}")))?;
     Ok((page, snap))
+}
+
+fn agent_param(params: &Value) -> Result<&str, RpcError> {
+    params
+        .get("agentId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::invalid_params("agentId 不能为空"))
 }
