@@ -87,7 +87,8 @@ pub use host::user_edits::{record_user_edit, user_edits, UserEdits};
 pub use llm::compact::{
     compact, compact_command, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
 };
-pub use llm::http::probe::probe_model;
+pub use llm::http::catalog::{fetch_models_dev, MODELS_DEV_URL};
+pub use llm::http::probe::{list_upstream_models, probe_model, UpstreamModel};
 pub use llm::sampler::{llm, Llm, LlmConfig, LlmMode, Sampler};
 pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, BROWSER, COMPACT, COMPUTER, CONTEXT, CRON,
@@ -107,7 +108,7 @@ pub use prompt::context_usage::{
     occupancy_detail, skill_item_detail, snapshot_context, workflow_item_detail, ContextCategory,
     ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
-pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
+pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE, USER_FILE};
 pub use session::commands::session_commands;
 pub use session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,

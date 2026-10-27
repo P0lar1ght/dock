@@ -5165,6 +5165,14 @@ async fn settings_methods_only_answer_the_trusted_gui_ticket() {
             json!({ "server": { "name": "x", "transport": "stdio", "command": "sh" } }),
         ),
         ("model/test", json!({ "id": "anything" })),
+        ("provider/list", json!({})),
+        (
+            "provider/save",
+            json!({ "provider": { "id": "evil", "apiBaseUrl": "https://x.example", "apiBackends": ["chat_completions"] }, "apiKey": "k" }),
+        ),
+        ("provider/catalog", json!({})),
+        ("profile/get", json!({})),
+        ("profile/set", json!({ "kind": "about", "text": "evil" })),
         ("device/add", json!({ "name": "evil" })),
     ] {
         let denied = page.call(method, params).await;
@@ -5230,6 +5238,76 @@ async fn settings_methods_only_answer_the_trusted_gui_ticket() {
             .any(|m| m["id"] == json!(id)),
         "{deleted}"
     );
+
+    // 供应商：密钥进 secrets.json、config 只记名字；挂在下面的模型继承连接；删供应商连模型带密钥一起删。
+    let pid = format!("gwprov{}", std::process::id());
+    let saved = gui
+        .call(
+            "provider/save",
+            json!({
+                "provider": {
+                    "id": pid,
+                    "name": "测试供应商",
+                    "apiBaseUrl": "https://api.example.com/v1",
+                    "apiBackends": ["chat_completions"]
+                },
+                "apiKey": "sk-provider-secret"
+            }),
+        )
+        .await;
+    let row = saved["result"]["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(pid))
+        .cloned()
+        .unwrap_or_else(|| panic!("saved provider missing: {saved}"));
+    let key_name = format!("{}_API_KEY", pid.to_uppercase());
+    assert_eq!(row["envKey"], json!(key_name), "{row}");
+    assert_eq!(row["keySource"], "secret", "{row}");
+    assert!(
+        !saved.to_string().contains("sk-provider-secret"),
+        "密钥不能回给界面：{saved}"
+    );
+    let home = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap());
+    let config_text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(!config_text.contains("sk-provider-secret"), "{config_text}");
+    let mid = format!("{pid}/m1");
+    let listed = gui
+        .call(
+            "model/save",
+            json!({ "model": { "id": mid, "provider": pid, "apiModel": "m1", "apiBackends": [], "keyMode": "env" } }),
+        )
+        .await;
+    let model = listed["result"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == json!(mid))
+        .cloned()
+        .unwrap_or_else(|| panic!("provider model missing: {listed}"));
+    assert_eq!(model["provider"], json!(pid), "{model}");
+    assert_eq!(model["apiBase"], "https://api.example.com/v1", "{model}");
+    assert_eq!(model["keyEnvSet"], true, "{model}");
+    let deleted = gui.call("provider/delete", json!({ "id": pid })).await;
+    assert!(
+        !deleted["result"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == json!(pid)),
+        "{deleted}"
+    );
+    let models = gui.call("model/list", json!({})).await;
+    assert!(
+        !models["result"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == json!(mid)),
+        "{models}"
+    );
+    assert_eq!(cordis_base::config::stored_secret(&key_name), None);
 
     // 关掉新配对：网页再来请求直接 403。
     let closed = gui

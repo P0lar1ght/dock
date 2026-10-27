@@ -4,6 +4,7 @@
 //! chat/completions, or Anthropic Messages. All three emit [`StreamDelta`].
 
 mod cache_debug;
+pub mod catalog;
 mod messages;
 pub mod probe;
 mod responses;
@@ -1056,6 +1057,7 @@ mod tests {
             api_backends: vec![ApiBackend::ChatCompletions],
             backend_overrides: Default::default(),
             pricing: None,
+            provider: None,
             auth_scheme: None,
             api_model: None,
             prompt_cache: None,

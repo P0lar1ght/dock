@@ -10,6 +10,15 @@
 
 ### 新增
 
+- **关于用户**：`~/.dock/USER.md` 和用户级 `AGENTS.md` 同一个规约提醒块注入，排在它后面。
+  - 网关 `profile/get | set` 读写这两份（只认受信连接）；GUI 设置 › 个性化编辑。
+- **模型供应商**：`config.toml` 新增 `[provider."<id>"]`，同一家的模型共用一份连接。
+  - 模型写 `provider = "<id>"` 继承地址、协议、鉴权、密钥；自己写了的键优先。
+  - `env_key` 没有对应环境变量时，再找 `$DOCK_HOME/secrets.json` 里同名的那项。
+  - 网关 `provider/list | save | delete | models | catalog`（只认受信连接）。
+  - `provider/models` 用这把密钥问上游 `GET /models`；`provider/catalog` 拉 models.dev 目录。
+  - `model/list` 每条多出 `provider`；`keyEnvSet` 也认 secrets.json。
+
 - **MCP Apps**（`io.modelcontextprotocol/ui`）：MCP 工具可以带交互界面。
   - 客户端握手声明 MCP Apps 能力；认工具 `_meta.ui`，只给界面用的工具不进模型工具表。
   - 模型调挂界面的工具时，原始结果存进会话目录 `mcp-apps/`，界面要原样那份。

@@ -51,7 +51,16 @@ impl MethodPolicy {
 /// 登记，都必须 `trusted_only`——设置插件被卸下后，别的插件（含动态插件）也不能用默认
 /// 策略把同名方法登记回来、绕过设置门。
 const TRUSTED_PREFIXES: &[&str] = &[
-    "config/", "secret/", "pairing/", "device/", "plugin/", "mcp/", "model/", "cua/",
+    "config/",
+    "secret/",
+    "pairing/",
+    "device/",
+    "plugin/",
+    "mcp/",
+    "model/",
+    "provider/",
+    "profile/",
+    "cua/",
 ];
 const TRUSTED_NAMES: &[&str] = &[
     "browser/status",

@@ -236,6 +236,9 @@ pub struct ModelChoice {
     pub supports_images: Option<bool>,
     /// `[model.<id>.pricing]`。`None` = 没配单价，`/usage` 显示"未上报"而不是 $0。
     pub pricing: Option<ModelPricing>,
+    /// `[model.<id>].provider`：连接（基址 / 协议 / 鉴权 / 密钥）继承自哪个
+    /// `[provider.<id>]`。模型自己写了的键优先；继承已在读配置时展开到上面各字段。
+    pub provider: Option<String>,
 }
 
 /// `id` 在目录里给人看的名字（见 [`ModelChoice::display_label`]）；不在目录里就是 id。
@@ -281,13 +284,24 @@ impl ModelChoice {
                 .is_some_and(|s| !s.trim().is_empty())
     }
 
+    /// 行内 `api_key` → 环境变量 `env_key` → `$DOCK_HOME/secrets.json` 里同名的那项
+    /// （设置页填的密钥存在那里，config 里只记名字）。
     pub fn resolved_api_key(&self) -> Option<String> {
+        self.resolved_api_key_in(&dock_home().join("secrets.json"))
+    }
+
+    /// [`Self::resolved_api_key`]，密钥库路径由调用方给（测试用）。
+    pub fn resolved_api_key_in(&self, secrets: &Path) -> Option<String> {
         nonempty(self.api_key.clone()).or_else(|| {
-            self.env_key
+            let name = self
+                .env_key
                 .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .and_then(|name| std::env::var(name).ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            std::env::var(name)
+                .ok()
                 .and_then(|s| nonempty(Some(s)))
+                .or_else(|| stored_secret_in(secrets, name))
         })
     }
 
@@ -404,6 +418,9 @@ struct FileConfig {
     models: ModelsSection,
     #[serde(default)]
     model: BTreeMap<String, ModelOverride>,
+    /// `[provider.<id>]`：一家供应商的连接，模型用 `provider = "<id>"` 继承。
+    #[serde(default)]
+    provider: BTreeMap<String, ProviderRow>,
     #[serde(default)]
     mcp: McpSection,
     #[serde(default)]
@@ -1412,7 +1429,7 @@ struct CatalogRow {
 ///
 /// 用固定字段而不是 `BTreeMap<String, _>`：协议名写错时 serde 会当未知键丢掉，
 /// 而 map 会悄悄收下一个永远匹配不上的条目。别名跟 `ApiBackend::from_name` 对齐。
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct BackendTables {
     #[serde(default, alias = "resp")]
     responses: Option<BackendRow>,
@@ -1422,7 +1439,7 @@ struct BackendTables {
     messages: Option<BackendRow>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct BackendRow {
     #[serde(default, alias = "api_base")]
     api_base_url: Option<String>,
@@ -1433,9 +1450,11 @@ struct BackendRow {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct ModelOverride {
+pub(crate) struct ModelOverride {
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -1472,6 +1491,27 @@ struct ModelOverride {
     supports_images: Option<bool>,
     #[serde(default)]
     pricing: Option<PricingRow>,
+}
+
+/// `[provider.<id>]`：同一家供应商的模型共用的连接。只收连接键；能力和单价是
+/// 模型的属性，写在各自的 `[model.<id>]` 里。协议块 `[provider.<id>.<协议>]`
+/// 和模型的一样，模型自己没写协议块时整组继承。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct ProviderRow {
+    #[serde(default, alias = "api_base")]
+    api_base_url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    env_key: Option<String>,
+    #[serde(default)]
+    api_backend: Option<String>,
+    #[serde(default)]
+    api_backends: Option<Vec<String>>,
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    #[serde(flatten)]
+    backends: BackendTables,
 }
 
 /// `[model.<id>.pricing]`，单位 USD / 百万 token。
@@ -1569,17 +1609,41 @@ pub fn catalog_has_http() -> bool {
 /// 以前这里塞过五条没有 api_base 也没有 key 的内置条目（grok-4 / gpt-4.1 / …），
 /// 选中它们只会得到一个连不上的模型——宁可空着，让 `/model` 直说去写 config。
 pub fn load_catalog_from(paths: &[PathBuf]) -> Vec<ModelChoice> {
+    let files: Vec<FileConfig> = paths.iter().filter_map(|p| read_file(p)).collect();
+    // 供应商先合完：项目配置里的模型也能挂用户级的供应商（同名时后读的整条覆盖）。
+    let mut providers = BTreeMap::new();
+    for file in &files {
+        providers.extend(file.provider.clone());
+    }
     let mut list: Vec<ModelChoice> = Vec::new();
-    for path in paths {
-        let Some(file) = read_file(path) else {
-            continue;
-        };
+    for file in &files {
         if !file.models.catalog.is_empty() {
             list = file.models.catalog.iter().map(choice_from_row).collect();
         }
-        merge_overrides(&mut list, &file.model);
+        merge_overrides(&mut list, &file.model, &providers);
     }
     list
+}
+
+/// 各配置文件里的 `[provider.<id>]`（同名时后读的整条覆盖）。
+pub(crate) fn load_providers_from(paths: &[PathBuf]) -> BTreeMap<String, ProviderRow> {
+    let mut out = BTreeMap::new();
+    for file in paths.iter().filter_map(|p| read_file(p)) {
+        out.extend(file.provider);
+    }
+    out
+}
+
+/// `$DOCK_HOME/secrets.json`（扁平 `name → string`）里的一项。设置页填的模型密钥存在这里，
+/// 和插件密钥同一个文件；写入与权限收紧在 spine（`set_secret`）。
+pub fn stored_secret(name: &str) -> Option<String> {
+    stored_secret_in(&dock_home().join("secrets.json"), name)
+}
+
+pub fn stored_secret_in(path: &Path, name: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    nonempty(value.get(name)?.as_str().map(String::from))
 }
 
 pub fn load_default_model_from(paths: &[PathBuf]) -> Option<String> {
@@ -1688,12 +1752,29 @@ fn choice_from_row(row: &CatalogRow) -> ModelChoice {
         reasoning_efforts: row.reasoning_efforts.clone(),
         supports_images: row.supports_images,
         pricing: row.pricing.as_ref().and_then(PricingRow::parse),
+        provider: None,
     }
 }
 
-fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, ModelOverride>) {
+fn merge_overrides(
+    list: &mut Vec<ModelChoice>,
+    overrides: &BTreeMap<String, ModelOverride>,
+    providers: &BTreeMap<String, ProviderRow>,
+) {
     for (key, ov) in overrides {
         let id = ov.model.clone().unwrap_or_else(|| key.clone());
+        let provider = nonempty(ov.provider.clone());
+        let row = provider.as_deref().and_then(|p| {
+            let row = providers.get(p);
+            if row.is_none() {
+                tracing::warn!(
+                    model = id.as_str(),
+                    provider = p,
+                    "model refers to an unknown [provider]; skipped inheritance"
+                );
+            }
+            row
+        });
         if let Some(existing) = list.iter_mut().find(|m| m.id == id || m.id == *key) {
             if let Some(name) = &ov.name {
                 existing.name = name.clone();
@@ -1731,6 +1812,12 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
             if ov.pricing.is_some() {
                 existing.pricing = ov.pricing.as_ref().and_then(PricingRow::parse);
             }
+            if provider.is_some() {
+                existing.provider = provider.clone();
+            }
+            if let Some(row) = row {
+                inherit_provider(existing, ov, row);
+            }
             existing.id = id;
         } else {
             list.push(ModelChoice {
@@ -1751,15 +1838,176 @@ fn merge_overrides(list: &mut Vec<ModelChoice>, overrides: &BTreeMap<String, Mod
                 reasoning_efforts: ov.reasoning_efforts.clone(),
                 supports_images: ov.supports_images,
                 pricing: ov.pricing.as_ref().and_then(PricingRow::parse),
+                provider: provider.clone(),
                 id,
             });
+            if let (Some(row), Some(choice)) = (row, list.last_mut()) {
+                inherit_provider(choice, ov, row);
+            }
         }
+    }
+}
+
+/// 模型没写的连接键从供应商拿：基址、密钥、协议列表、鉴权、协议块。
+/// 只看这条 `[model]` 自己写没写（`ov`），不看合并前目录行里的值。
+fn inherit_provider(choice: &mut ModelChoice, ov: &ModelOverride, row: &ProviderRow) {
+    if ov.api_base_url.is_none() {
+        choice.api_base_url = nonempty(row.api_base_url.clone());
+    }
+    // 密钥整对继承：模型写了任一个，就不再拿供应商的另一个（免得行内 key 配上别家的变量名）。
+    if ov.api_key.is_none() && ov.env_key.is_none() {
+        choice.api_key = nonempty(row.api_key.clone());
+        choice.env_key = nonempty(row.env_key.clone());
+    }
+    if ov.api_backend.is_none() && ov.api_backends.is_none() {
+        choice.api_backends = parse_backends(row.api_backends.as_ref(), row.api_backend.as_deref());
+    }
+    if ov.auth_scheme.is_none() {
+        choice.auth_scheme = AuthScheme::parse(row.auth_scheme.as_deref());
+    }
+    if ov.backends.is_empty() {
+        choice.backend_overrides = row.backends.parse();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_inherit_connection_from_their_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[provider.deepseek]
+name = "DeepSeek"
+catalog = "deepseek"
+api_base_url = "https://api.deepseek.com"
+api_backends = ["chat_completions", "messages"]
+env_key = "DOCK_TEST_PROVIDER_KEY_NOT_SET"
+
+[provider.deepseek.messages]
+api_base_url = "https://api.deepseek.com/anthropic"
+auth_scheme = "bearer"
+
+[model."deepseek/deepseek-chat"]
+provider = "deepseek"
+api_model = "deepseek-chat"
+context_window = 128000
+
+[model."deepseek/own"]
+provider = "deepseek"
+api_base_url = "https://proxy.example/v1"
+api_backends = ["responses"]
+api_key = "sk-inline"
+
+[model.orphan]
+provider = "nope"
+"#,
+        )
+        .unwrap();
+        let list = load_catalog_from(std::slice::from_ref(&path));
+        let chat = list
+            .iter()
+            .find(|m| m.id == "deepseek/deepseek-chat")
+            .unwrap();
+        assert_eq!(chat.provider.as_deref(), Some("deepseek"));
+        assert_eq!(
+            chat.api_base_url.as_deref(),
+            Some("https://api.deepseek.com")
+        );
+        assert_eq!(
+            chat.api_backends,
+            vec![ApiBackend::ChatCompletions, ApiBackend::Messages]
+        );
+        assert_eq!(
+            chat.env_key.as_deref(),
+            Some("DOCK_TEST_PROVIDER_KEY_NOT_SET")
+        );
+        assert_eq!(
+            chat.base_url_for(ApiBackend::Messages),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(chat.resolved_auth(ApiBackend::Messages), AuthScheme::Bearer);
+        assert_eq!(
+            chat.wire_model_for(ApiBackend::ChatCompletions),
+            "deepseek-chat"
+        );
+        assert_eq!(chat.context_window, Some(128000));
+
+        // 模型自己写的连接键盖过供应商；密钥整对继承，写了行内 key 就不再带供应商的变量名。
+        let own = list.iter().find(|m| m.id == "deepseek/own").unwrap();
+        assert_eq!(
+            own.api_base_url.as_deref(),
+            Some("https://proxy.example/v1")
+        );
+        assert_eq!(own.api_backends, vec![ApiBackend::Responses]);
+        assert_eq!(own.api_key.as_deref(), Some("sk-inline"));
+        assert_eq!(own.env_key, None);
+
+        // 指向不存在的供应商：照样列出，只是没有连接。
+        let orphan = list.iter().find(|m| m.id == "orphan").unwrap();
+        assert_eq!(orphan.api_base_url, None);
+        assert!(!orphan.has_http());
+    }
+
+    #[test]
+    fn project_models_can_use_a_user_level_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(
+            &user,
+            "[provider.p]\napi_base_url = \"https://u.example/v1\"\napi_backends = [\"chat_completions\"]\n",
+        )
+        .unwrap();
+        std::fs::write(&project, "[model.m]\nprovider = \"p\"\n").unwrap();
+        let list = load_catalog_from(&[user, project]);
+        assert_eq!(
+            list[0].api_base_url.as_deref(),
+            Some("https://u.example/v1")
+        );
+    }
+
+    #[test]
+    fn api_key_falls_back_to_the_secret_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join("secrets.json");
+        std::fs::write(
+            &secrets,
+            r#"{"DOCK_TEST_SECRET_ONLY_KEY": "sk-stored", "other": 1}"#,
+        )
+        .unwrap();
+        let mut choice = ModelChoice {
+            env_key: Some("DOCK_TEST_SECRET_ONLY_KEY".into()),
+            ..model_choice_for_tests("m")
+        };
+        assert_eq!(
+            choice.resolved_api_key_in(&secrets).as_deref(),
+            Some("sk-stored")
+        );
+        // 行内密钥仍然优先。
+        choice.api_key = Some("sk-inline".into());
+        assert_eq!(
+            choice.resolved_api_key_in(&secrets).as_deref(),
+            Some("sk-inline")
+        );
+        // 名字不在库里、也没有环境变量：没有密钥。
+        choice.api_key = None;
+        choice.env_key = Some("DOCK_TEST_SECRET_MISSING".into());
+        assert_eq!(choice.resolved_api_key_in(&secrets), None);
+        assert_eq!(stored_secret_in(&secrets, "other"), None);
+    }
+
+    fn model_choice_for_tests(id: &str) -> ModelChoice {
+        let mut list = Vec::new();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(id.to_string(), ModelOverride::default());
+        merge_overrides(&mut list, &overrides, &BTreeMap::new());
+        list.remove(0)
+    }
 
     #[test]
     fn catalog_array_replaces_defaults() {
