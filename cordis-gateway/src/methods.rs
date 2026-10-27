@@ -59,6 +59,7 @@ const TRUSTED_PREFIXES: &[&str] = &[
     "mcp/",
     "model/",
     "provider/",
+    "profile/",
     "cua/",
 ];
 const TRUSTED_NAMES: &[&str] = &[

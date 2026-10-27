@@ -378,6 +378,71 @@ pub async fn provider_catalog() -> Result<Value, RpcError> {
     Ok(json!({ "catalog": catalog, "source": cordis_spine::MODELS_DEV_URL }))
 }
 
+// ---- 个性化（~/.dock/AGENTS.md 与 ~/.dock/USER.md） ----
+
+/// 单份上限：注入时还会按上下文窗口 5% 截断，这里只挡误贴的大文件。
+const PROFILE_MAX_BYTES: usize = 64 * 1024;
+
+/// `instructions` = 每个工作区都带的自定义指令（`AGENTS.md`），`about` = 关于用户（`USER.md`）。
+fn profile_file(kind: &str) -> Result<&'static str, RpcError> {
+    match kind {
+        "instructions" => Ok(cordis_spine::INSTRUCTIONS_FILE),
+        "about" => Ok(cordis_spine::USER_FILE),
+        other => Err(RpcError::invalid_params(format!(
+            "kind 只能是 instructions / about：{other}"
+        ))),
+    }
+}
+
+fn profile_get_in(home: &std::path::Path) -> Value {
+    let read = |file: &str| {
+        let path = home.join(file);
+        json!({
+            "path": path.display().to_string(),
+            "text": std::fs::read_to_string(&path).unwrap_or_default()
+        })
+    };
+    json!({
+        "instructions": read(cordis_spine::INSTRUCTIONS_FILE),
+        "about": read(cordis_spine::USER_FILE)
+    })
+}
+
+fn profile_set_in(home: &std::path::Path, kind: &str, text: &str) -> Result<Value, RpcError> {
+    let file = profile_file(kind)?;
+    if text.len() > PROFILE_MAX_BYTES {
+        return Err(RpcError::invalid_params(format!(
+            "内容太长（{} KB），最多 {} KB",
+            text.len() / 1024,
+            PROFILE_MAX_BYTES / 1024
+        )));
+    }
+    std::fs::create_dir_all(home).map_err(|e| write_failed(e.to_string()))?;
+    // 清空也写空文件，不删：手写过的文件被清空，至少还留着位置。
+    let body = if text.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", text.trim_end())
+    };
+    std::fs::write(home.join(file), body).map_err(|e| write_failed(e.to_string()))?;
+    Ok(profile_get_in(home))
+}
+
+/// `profile/get`：两份文件的路径和全文。下一步起新会话 / 当前会话下一步按新内容注入。
+pub fn profile_get() -> Result<Value, RpcError> {
+    Ok(profile_get_in(&config::dock_home()))
+}
+
+/// `profile/set { kind, text }`：整份写回。
+pub fn profile_set(params: Value) -> Result<Value, RpcError> {
+    let kind = text(&params, "kind")?;
+    let body = params
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::invalid_params("缺少 text"))?;
+    profile_set_in(&config::dock_home(), kind, body)
+}
+
 // ---- MCP ----
 
 fn mcp(gateway: &GatewayHandle) -> Result<std::sync::Arc<Mcp>, RpcError> {
@@ -1138,6 +1203,16 @@ pub fn gateway_settings() -> Plugin {
                         method(|_, params| async move { model_test(params).await }),
                     ),
                     (
+                        protocol::PROFILE_GET,
+                        TRUSTED,
+                        method(|_, _| async move { profile_get() }),
+                    ),
+                    (
+                        protocol::PROFILE_SET,
+                        TRUSTED,
+                        method(|_, params| async move { profile_set(params) }),
+                    ),
+                    (
                         protocol::PROVIDER_LIST,
                         TRUSTED,
                         method(|_, _| async move { provider_list() }),
@@ -1202,4 +1277,34 @@ pub fn gateway_settings() -> Plugin {
             Ok(None)
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_round_trips_both_files_and_rejects_unknown_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("dock-home");
+        let empty = profile_get_in(&home);
+        assert_eq!(empty["about"]["text"], "");
+        let saved = profile_set_in(&home, "about", "我是后端工程师。\n\n\n").unwrap();
+        assert_eq!(saved["about"]["text"], "我是后端工程师。\n");
+        assert_eq!(
+            std::fs::read_to_string(home.join("USER.md")).unwrap(),
+            "我是后端工程师。\n"
+        );
+        profile_set_in(&home, "instructions", "回答用中文").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
+            "回答用中文\n"
+        );
+        // 清空 = 空文件（注入时整层跳过）。
+        profile_set_in(&home, "about", "  \n").unwrap();
+        assert_eq!(std::fs::read_to_string(home.join("USER.md")).unwrap(), "");
+        assert!(profile_set_in(&home, "nope", "x").is_err());
+        let huge = "x".repeat(PROFILE_MAX_BYTES + 1);
+        assert!(profile_set_in(&home, "about", &huge).is_err());
+    }
 }

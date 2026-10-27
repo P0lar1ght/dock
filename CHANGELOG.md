@@ -28,6 +28,8 @@
   - `thread/list { scope: "all" }` 每项多出 `subagentCount` / `subagentsRunning`。
 - **子代理接着聊**：`subagent/send` 发给已经收掉的、或只在盘上的子代理，同一个 id 从它的对话接着起一轮。
   - 用户开的一轮（发给闲着的、复活的）结果送进父信箱但不叫醒父级。
+- **关于用户**：`~/.dock/USER.md` 和用户级 `AGENTS.md` 同一个规约提醒块注入，排在它后面。
+  - 网关 `profile/get | set` 读写这两份（只认受信连接）；GUI 设置 › 个性化编辑。
 - **模型供应商**：`config.toml` 新增 `[provider."<id>"]`，同一家的模型共用一份连接。
   - 模型写 `provider = "<id>"` 继承地址、协议、鉴权、密钥；自己写了的键优先。
   - `env_key` 没有对应环境变量时，再找 `$DOCK_HOME/secrets.json` 里同名的那项。

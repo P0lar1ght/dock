@@ -5,6 +5,8 @@
 //! file adds to the user file, it does not shadow it):
 //!
 //! - `~/.dock/AGENTS.md` — conventions the user wants in every workspace
+//! - `~/.dock/USER.md` — who the user is: background and long-term preferences
+//!   (GUI 设置 › 个性化 › 关于你)
 //! - `{cwd}/AGENTS.md` — this repository's own contract
 //!
 //! Only the workspace root is read. Nested `AGENTS.md` under subdirectories is
@@ -59,6 +61,8 @@ use cordis_base::config::dock_home;
 use cordis_base::types::{LogEvent, StepStart, ORDER_STEP_START_INSTRUCTIONS};
 
 pub const INSTRUCTIONS_FILE: &str = "AGENTS.md";
+/// `~/.dock/USER.md`：关于用户（背景、长期偏好）。和用户级规约同一个注入块，排在它后面。
+pub const USER_FILE: &str = "USER.md";
 
 /// Fraction of the context window (chars ≈ tokens×4) the conventions may take.
 /// Larger than a catalog listing — this is prose the user wrote on purpose —
@@ -109,6 +113,7 @@ pub fn instruction_paths() -> Vec<(&'static str, PathBuf)> {
     let cwd = crate::session::cwd::current_cwd();
     vec![
         ("~/.dock/AGENTS.md", dock_home().join(INSTRUCTIONS_FILE)),
+        ("~/.dock/USER.md（关于用户）", dock_home().join(USER_FILE)),
         ("AGENTS.md", cwd.join(INSTRUCTIONS_FILE)),
     ]
 }
@@ -264,6 +269,29 @@ mod tests {
         let user = body.find("USER-LAYER").expect("user layer present");
         let project = body.find("PROJECT-LAYER").expect("project layer present");
         assert!(user < project, "project layer appends after user: {body}");
+    }
+
+    #[test]
+    fn user_profile_sits_between_user_and_project_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _env = cordis_base::test_env::scoped()
+            .set("DOCK_HOME", &home)
+            .cwd(dir.path());
+        std::fs::write(home.join(USER_FILE), "我是后端工程师，回答用中文。").unwrap();
+        let (ctx, _s) = ctx_with_session();
+        // 只有 USER.md 也成块。
+        let body = render(&ctx).expect("profile layer");
+        assert!(body.contains("## ~/.dock/USER.md（关于用户）"), "{body}");
+        assert!(body.contains("我是后端工程师"), "{body}");
+        std::fs::write(home.join("AGENTS.md"), "USER-LAYER").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "PROJECT-LAYER").unwrap();
+        let body = render(&ctx).expect("three layers");
+        let user = body.find("USER-LAYER").unwrap();
+        let profile = body.find("我是后端工程师").unwrap();
+        let project = body.find("PROJECT-LAYER").unwrap();
+        assert!(user < profile && profile < project, "{body}");
     }
 
     #[test]
