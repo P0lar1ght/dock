@@ -148,6 +148,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `model/delete { id }` | 删的是默认模型时默认改成目录里下一条 |
 | `model/default { id }` | 写 `[models].default`，根页跟着换（新页从根页抄） |
 | `model/test { model? \| id }` | 发一次最小请求；表单可以没保存。回 `ok` + `ms` 或 `error` |
+| `profile/get` | `~/.dock/AGENTS.md`（自定义指令）与 `~/.dock/USER.md`（关于你）的路径和全文 |
+| `profile/set { kind, text }` | `kind` = `instructions` / `about`，整份写回（上限 64 KB；清空写空文件） |
 | `provider/list` | 用户配置里的 `[provider.*]`，每条带 `keySource`（见下），不回密钥 |
 | `provider/save { provider, apiKey?, originalId? }` | 写 `[provider.<id>]`；见下 |
 | `provider/delete { id }` | 连挂在下面的模型一起删；见下 |

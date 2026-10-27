@@ -5171,6 +5171,8 @@ async fn settings_methods_only_answer_the_trusted_gui_ticket() {
             json!({ "provider": { "id": "evil", "apiBaseUrl": "https://x.example", "apiBackends": ["chat_completions"] }, "apiKey": "k" }),
         ),
         ("provider/catalog", json!({})),
+        ("profile/get", json!({})),
+        ("profile/set", json!({ "kind": "about", "text": "evil" })),
         ("device/add", json!({ "name": "evil" })),
     ] {
         let denied = page.call(method, params).await;

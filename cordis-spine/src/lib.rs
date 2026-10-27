@@ -108,7 +108,7 @@ pub use prompt::context_usage::{
     occupancy_detail, skill_item_detail, snapshot_context, workflow_item_detail, ContextCategory,
     ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
-pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE};
+pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE, USER_FILE};
 pub use session::commands::session_commands;
 pub use session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
