@@ -148,6 +148,7 @@ function placeholder(agentId: string): SubagentInfo {
     output: '',
     error: null,
     activity: null,
+    persisted: false,
   };
 }
 

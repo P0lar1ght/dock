@@ -109,6 +109,8 @@ export interface SubagentInfo {
   output: string;
   error: string | null;
   activity: SubagentActivity | null;
+  /** 只在盘上（不在 Dock 内存里）：会话关过、Dock 重启过、早就收掉的。发消息会同一个 id 接着聊。 */
+  persisted: boolean;
 }
 
 /** `subagent/updated` 的 `agent`（或 `subagent/list` 的一项）→ 子代理。没有 id 返回 `null`。 */
@@ -136,6 +138,7 @@ export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null
     output: str(raw.output),
     error: str(raw.error) || null,
     activity,
+    persisted: raw.persisted === true,
   };
 }
 
