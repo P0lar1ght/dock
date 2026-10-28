@@ -45,6 +45,8 @@ pub fn info(snap: &SubagentSnap, events: &[LogEvent], role: Option<String>) -> V
         "durationMs": duration_ms(snap.elapsed()),
         "toolCalls": tool_calls(events),
         "output": cap(snap.output.trim(), OUTPUT_CHARS),
+        // 显式带上：和只在盘上的 `persisted: true` 对称，客户端不用靠「缺省即 false」。
+        "persisted": false,
     });
     if snap.running() {
         if let Some(activity) = activity(events) {
@@ -94,6 +96,30 @@ pub fn persisted_info(meta: &cordis_spine::SubagentMeta, role: Option<String>) -
 pub fn role_label(ctx: &Context, subagent_type: &str) -> Option<String> {
     ctx.get::<AgentPresets>(AGENT_PRESETS)
         .and_then(|p| p.role_label(subagent_type))
+}
+
+/// 关着的线程用它自己落盘时的预设（`meta.json` 的 `preset_id`，按它的项目目录读）找角色
+/// 显示名；老会话没记预设、或预设已经不在了，退回根上的。
+pub fn role_label_at(
+    ctx: &Context,
+    cwd: &std::path::Path,
+    preset_id: Option<&str>,
+    subagent_type: &str,
+) -> Option<String> {
+    let presets = ctx.get::<AgentPresets>(AGENT_PRESETS)?;
+    let from_session = preset_id
+        .and_then(|id| presets.get_at(cwd, id))
+        .and_then(|preset| {
+            preset.agents.get(subagent_type).map(|def| {
+                let name = def.name.trim();
+                if name.is_empty() {
+                    subagent_type.to_string()
+                } else {
+                    name.to_string()
+                }
+            })
+        });
+    from_session.or_else(|| presets.role_label(subagent_type))
 }
 
 /// `identity` 那一页启动的子代理，先启动的在前。

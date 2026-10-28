@@ -650,9 +650,20 @@ impl Sessions {
     }
 
     pub fn seed(&self, events: Vec<LogEvent>) {
+        self.seed_with_times(events, Vec::new());
+    }
+
+    /// 同 [`Self::seed`]，带上每条事件原来的时刻（复活子代理时从盘上读回来的）；条数对不上就
+    /// 都算现在。
+    pub fn seed_with_times(&self, events: Vec<LogEvent>, times: Vec<SystemTime>) {
         let n = events.len();
+        let times = if times.len() == n {
+            times
+        } else {
+            vec![SystemTime::now(); n]
+        };
         *self.events.lock().unwrap() = events;
-        *self.times.lock().unwrap() = vec![SystemTime::now(); n];
+        *self.times.lock().unwrap() = times;
         self.reset_compact();
         *self.context_anchor.lock().unwrap() = None;
         *self.compaction.lock().unwrap() = None;

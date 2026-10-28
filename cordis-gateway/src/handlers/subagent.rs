@@ -39,13 +39,9 @@ pub fn list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
             live.insert(snap.id.clone());
         }
     }
-    let role_ctx = page
-        .as_ref()
-        .map(|p| p.ctx.clone())
-        .unwrap_or_else(|| gateway.ctx().clone());
     for meta in dir.iter().flat_map(|d| cordis_spine::load_subagents(d)) {
         if !live.contains(&meta.id) {
-            let role = subagents::role_label(&role_ctx, &meta.subagent_type);
+            let role = role_for(gateway, page.as_ref(), &thread_id, &meta.subagent_type);
             agents.push(subagents::persisted_info(&meta, role));
         }
     }
@@ -87,6 +83,31 @@ pub fn stamp_counts(
     }
 }
 
+/// 角色显示名：开着的页看它现在的预设；关着的看它落盘时的预设（不是根上那份——按页预设时
+/// 两者可能不同，同一个子代理开着和关着时叫法会不一样）。
+fn role_for(
+    gateway: &GatewayHandle,
+    page: Option<&Page>,
+    thread_id: &str,
+    subagent_type: &str,
+) -> Option<String> {
+    if let Some(page) = page {
+        return subagents::role_label(&page.ctx, subagent_type);
+    }
+    match crate::handlers::thread::roster_entries(gateway)
+        .into_iter()
+        .find(|e| e.id == thread_id)
+    {
+        Some(entry) => subagents::role_label_at(
+            gateway.ctx(),
+            &entry.cwd,
+            entry.preset_id.as_deref(),
+            subagent_type,
+        ),
+        None => subagents::role_label(gateway.ctx(), subagent_type),
+    }
+}
+
 /// 线程的落盘会话目录：开着的页问它的会话；关着的按名册找。
 fn session_dir(gateway: &GatewayHandle, thread_id: &str) -> Option<PathBuf> {
     if let Ok(page) = threads::resolve(gateway, thread_id) {
@@ -125,7 +146,9 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
     let Ok((page, snap)) = resolve(gateway, &params) else {
         // 不在内存里：读盘（线程关着、Dock 重启过、早就收掉的）。
         let (meta, events) = persisted(gateway, &params)?;
-        let role = subagents::role_label(gateway.ctx(), &meta.subagent_type);
+        let thread_id = threads::thread_param(&params);
+        let page = threads::resolve(gateway, &thread_id).ok();
+        let role = role_for(gateway, page.as_ref(), &thread_id, &meta.subagent_type);
         return Ok(json!({ "agent": subagents::persisted_info(&meta, role), "events": events }));
     };
     let sub = service(gateway)?;

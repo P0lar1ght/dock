@@ -207,7 +207,14 @@ async fn run_dock_child(
         sessions.pin_workspace_cwd(cwd);
     }
     if !resume.is_empty() {
-        sessions.seed(resume);
+        // 复活接着聊：带上原来的时刻，回看历史时不会全变成「现在」。
+        let times = run
+            .request
+            .resume_from
+            .as_deref()
+            .map(|src| store.event_times(src))
+            .unwrap_or_default();
+        sessions.seed_with_times(resume, times);
     }
     // 落盘到父会话目录下（`subagents/<id>/`）：关掉会话、重启 Dock 后还能看。父会话
     // 不落盘（侧边聊天的旁问页、测试）就只在内存里。

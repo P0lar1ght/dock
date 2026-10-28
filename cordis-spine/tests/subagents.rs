@@ -1227,3 +1227,131 @@ async fn a_settled_child_revives_from_disk_under_the_same_id() {
         .iter()
         .any(|e| matches!(e, LogEvent::User(t) if t == "接着说")));
 }
+
+/// 等到这个子代理收掉（`done`），回快照。
+async fn wait_done(sub: &Subagents, id: &str) -> cordis_spine::SubagentSnap {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(s) = sub.snapshot(id).filter(|s| s.done) {
+            return s;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{id} never settled: {:?}",
+            sub.snapshot(id)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// 回归：复活被拒（角色不在当前预设里了）时子代理还在原处。以前先 `take_settled` 把槽位
+/// 删了才校验，一被拒子代理就从内存里消失——没落盘的会话里就再也找不回来。
+#[tokio::test]
+async fn a_refused_revive_leaves_the_child_where_it_was() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "x", "explore").await;
+    wait_idle(&sub, &id).await;
+    sub.kill(&id);
+    wait_done(&sub, &id).await;
+    // 换到没有 explore 角色的预设。
+    h.root
+        .require::<AgentPresets>(AGENT_PRESETS)
+        .unwrap()
+        .pin("warden")
+        .unwrap();
+    let refused = sub.revive(&h.root, &id, "接着说").unwrap_err();
+    assert!(refused.contains("explore"), "{refused}");
+    assert!(sub.snapshot(&id).is_some(), "被拒之后子代理还得在内存里");
+}
+
+/// 回归：协调器在起跑前回绝复活（会话停了）时，这个槽位要收掉并写明原因。以前只打一条
+/// 日志，槽位一直挂着 running，界面上是个半活的子代理。
+#[tokio::test]
+async fn a_revive_the_coordinator_rejects_is_settled_with_the_reason() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "x", "explore").await;
+    wait_idle(&sub, &id).await;
+    sub.kill(&id);
+    wait_done(&sub, &id).await;
+    // 这一页停了：协调器不再让它派的孩子起跑。
+    sub.cancel_session("main");
+    sub.revive(&h.root, &id, "接着说").unwrap();
+    let snap = wait_done(&sub, &id).await;
+    assert!(
+        snap.output.contains("接着聊没起来"),
+        "要写明为什么没接着聊：{snap:?}"
+    );
+}
+
+/// 回归：从盘上复活时接上原来的时刻。以前事件时刻全变成「现在」，用时从复活那一刻算，
+/// 界面上是「很久以前启动、用时只有几秒」。
+#[tokio::test]
+async fn a_revived_child_keeps_its_original_times() {
+    let home = tempfile::tempdir().unwrap();
+    let dock_home = home.path().join("dock-home");
+    std::fs::create_dir_all(&dock_home).unwrap();
+    let _env = cordis_base::test_env::scoped()
+        .set("DOCK_HOME", &dock_home)
+        .cwd(home.path());
+
+    let first = boot(Arc::new(LastUser)).await;
+    let sessions = first.root.require::<Sessions>(SESSIONS).unwrap();
+    sessions.attach_disk();
+    sessions.append(LogEvent::User("派个孩子".into()));
+    let parent_id = sessions.live_session_id();
+    let tools = first.root.require::<Tools>(TOOLS).unwrap();
+    let id = spawn_bg(&tools, "第一次的任务", "explore").await;
+    let sub = first.root.require::<Subagents>(SUBAGENTS).unwrap();
+    wait_idle(&sub, &id).await;
+    let dir = sessions.existing_session_dir().unwrap();
+    drop(first);
+
+    // 把盘上这段对话「做旧」一小时：抬头的启动时刻和每条事件的时刻都往前拨。
+    let hour_ms: u64 = 3_600_000;
+    let child = dir.join("subagents").join(&id);
+    let meta_path = child.join("subagent.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+    let started_ms = meta["startedMs"].as_u64().unwrap() - hour_ms;
+    meta["startedMs"] = serde_json::json!(started_ms);
+    std::fs::write(&meta_path, meta.to_string()).unwrap();
+    let log_path = child.join("chat_history.jsonl");
+    let aged: Vec<String> = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some(ts) = v["ts"].as_u64() {
+                v["ts"] = serde_json::json!(ts - 3600);
+            }
+            v.to_string()
+        })
+        .collect();
+    std::fs::write(&log_path, aged.join("\n") + "\n").unwrap();
+    let (_, _, before) = cordis_spine::load_subagent(&dir, &id).unwrap();
+
+    let second = boot(Arc::new(LastUser)).await;
+    let sessions = second.root.require::<Sessions>(SESSIONS).unwrap();
+    sessions.attach_disk();
+    assert!(sessions.resume_id(&parent_id));
+    let sub = second.root.require::<Subagents>(SUBAGENTS).unwrap();
+    sub.revive(&second.root, &id, "接着说").unwrap();
+    wait_output_contains(&sub, &id, "接着说").await;
+
+    let snap = sub.snapshot(&id).unwrap();
+    assert!(
+        snap.elapsed() >= Duration::from_secs(3590),
+        "用时要从第一次启动算：{:?}",
+        snap.elapsed()
+    );
+    let (_, _, after) = cordis_spine::load_subagent(&dir, &id).unwrap();
+    assert_eq!(
+        after[..before.len()],
+        before[..],
+        "原来那几条的时刻要原样保留"
+    );
+}

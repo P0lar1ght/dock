@@ -1,8 +1,9 @@
 // 一个线程派出的子代理：每个的状态（`subagent/updated`）+ 它自己的对话
 // （`subagent/event`，用同一个 `reduceThread` 按轮组织）。纯函数、不可变更新。
 //
-// 子代理只活在 Dock 的内存里：中途接入（或 Dock 重启过）时它的对话可能不全，
-// `complete` 为假；客户端要看完整过程时取一次 `subagent/history` 交给 `withHistory`。
+// 活着的子代理在 Dock 内存里；父会话落盘的，它的对话也落在会话目录（`persisted: true` 的是只在盘上的，
+// 发消息会同一个 id 接着聊）。中途接入时实时推送拼出来的对话可能不全（`complete` 为假）：
+// 要看完整过程就取一次 `subagent/history`（内存里没有网关会读盘）交给 `withHistory`。
 
 import type { DockEvent, SubagentActivity, SubagentInfo } from './events.ts';
 import { parseSubagent } from './events.ts';

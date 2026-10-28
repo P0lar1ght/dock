@@ -26,6 +26,8 @@ pub(super) struct ChildSlot {
     pub(crate) dispose: AtomicBool,
     pub output: Mutex<String>,
     pub events: Mutex<Vec<LogEvent>>,
+    /// `events` 每条的时刻（复活时接上原来的，见 [`ChildStore::restore_identity`]）。
+    pub event_times: Mutex<Vec<std::time::SystemTime>>,
     /// Live child log so the parent TUI can inspect a running turn.
     pub sessions: Mutex<Option<Sessions>>,
     pub turn: Mutex<Option<Arc<TurnControl>>>,
@@ -33,7 +35,8 @@ pub(super) struct ChildSlot {
     pub queued: Mutex<VecDeque<String>>,
     pub urgent: Mutex<Option<String>>,
     pub(crate) wake: Notify,
-    pub started_at: Instant,
+    /// 复活时往回拨到第一次启动的时刻（[`ChildStore::restore_identity`]），所以要能改。
+    pub started_at: Mutex<Instant>,
     /// When the child last parked idle; `None` while it is running. Drives the
     /// idle sweep.
     pub parked_at: Mutex<Option<Instant>>,
@@ -95,6 +98,9 @@ pub(super) struct ChildStore {
     /// 每个会话（`main` / `main#N`）一个唤醒：信箱按会话分账，只叫醒收件的那一页。
     /// 共用一个 `Notify` 时，`notify_one` 存下的许可可能被别的页吃掉，收件页就漏了这次唤醒。
     parent_wakes: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    /// 复活（`Subagents::revive`）的临界区：「同 id 没有活着的槽位」到「放回槽位」之间不能
+    /// 插进第二次复活——两次都从盘上读到同一份、各自 spawn 一次。
+    pub(super) revive_lock: Arc<Mutex<()>>,
     on_change: Arc<OnceLock<ChangeHook>>,
 }
 
@@ -162,6 +168,7 @@ impl ChildStore {
             })),
             workflow_inbox: Arc::new(Mutex::new(HashMap::new())),
             parent_wakes: Arc::new(Mutex::new(HashMap::new())),
+            revive_lock: Arc::new(Mutex::new(())),
             on_change: Arc::new(OnceLock::new()),
         }
     }
@@ -196,9 +203,12 @@ impl ChildStore {
         }
         let slot = map.remove(id)?;
         drop(map);
-        let events = match slot.sessions.lock().unwrap().as_ref() {
-            Some(s) => s.events(),
-            None => slot.events.lock().unwrap().clone(),
+        let (events, times) = match slot.sessions.lock().unwrap().as_ref() {
+            Some(s) => (s.events(), s.times()),
+            None => (
+                slot.events.lock().unwrap().clone(),
+                slot.event_times.lock().unwrap().clone(),
+            ),
         };
         let started_wall = *slot.started_wall.lock().unwrap();
         let tool_call_id = slot.tool_call_id.lock().unwrap().clone();
@@ -207,6 +217,7 @@ impl ChildStore {
             subagent_type: slot.subagent_type.clone(),
             workflow: matches!(slot.owner, SubagentOwner::Workflow { .. }),
             events,
+            times,
             started_wall,
             tool_call_id,
         })
@@ -219,13 +230,25 @@ impl ChildStore {
         started_wall: std::time::SystemTime,
         tool_call_id: Option<String>,
         events: Vec<LogEvent>,
+        times: Vec<std::time::SystemTime>,
     ) {
         let Some(slot) = self.get(id) else {
             return;
         };
         *slot.started_wall.lock().unwrap() = started_wall;
+        // 用时也从第一次启动算（和盘上的 `settled_ms - started_ms` 一致）：只拨墙钟的话，
+        // 界面上是「很久以前启动、用时只有几秒」。
+        let since = std::time::SystemTime::now()
+            .duration_since(started_wall)
+            .unwrap_or_default();
+        if let Some(at) = Instant::now().checked_sub(since) {
+            *slot.started_at.lock().unwrap() = at;
+        }
         *slot.tool_call_id.lock().unwrap() = tool_call_id;
         *slot.events.lock().unwrap() = events;
+        *slot.event_times.lock().unwrap() = times;
+        // 启动时刻、toolCallId 变了：客户端要拿到新身份，不然整轮看到的都是新槽位的。
+        self.changed(id);
     }
 
     /// 这个子代理落盘到 `dir`，马上写一份抬头。
@@ -370,13 +393,14 @@ impl ChildStore {
             dispose: AtomicBool::new(false),
             output: Mutex::new(String::new()),
             events: Mutex::new(Vec::new()),
+            event_times: Mutex::new(Vec::new()),
             sessions: Mutex::new(None),
             turn: Mutex::new(None),
             hold: Mutex::new(Vec::new()),
             queued: Mutex::new(VecDeque::new()),
             urgent: Mutex::new(None),
             wake: Notify::new(),
-            started_at: now,
+            started_at: Mutex::new(now),
             parked_at: Mutex::new(None),
             owner,
             parent: parent.to_owned(),
@@ -430,6 +454,18 @@ impl ChildStore {
             return sessions.events();
         }
         let cloned = slot.events.lock().unwrap().clone();
+        cloned
+    }
+
+    /// [`Self::events`] 每条的时刻（条数对不上时调用方当「现在」）。
+    pub fn event_times(&self, id: &str) -> Vec<std::time::SystemTime> {
+        let Some(slot) = self.get(id) else {
+            return Vec::new();
+        };
+        if let Some(sessions) = slot.sessions.lock().unwrap().as_ref() {
+            return sessions.times();
+        }
+        let cloned = slot.event_times.lock().unwrap().clone();
         cloned
     }
 
@@ -730,7 +766,7 @@ impl ChildStore {
             id: id.to_string(),
             subagent_type: slot.subagent_type.clone(),
             description: slot.description.clone(),
-            duration_ms: slot.started_at.elapsed().as_millis() as u64,
+            duration_ms: slot.started_at.lock().unwrap().elapsed().as_millis() as u64,
             cancelled,
             output,
         };
@@ -833,7 +869,7 @@ pub(super) fn snap(id: &str, s: &ChildSlot) -> SubagentSnap {
         idle: life == SubagentLife::Idle,
         cancelled: s.cancelled.load(Ordering::Relaxed),
         output: s.output.lock().unwrap().clone(),
-        started_at: s.started_at,
+        started_at: *s.started_at.lock().unwrap(),
         parent: s.parent.clone(),
         tool_call_id: s.tool_call_id.lock().unwrap().clone(),
         failed: s.failed.load(Ordering::Relaxed),
@@ -848,6 +884,7 @@ pub struct SettledChild {
     pub subagent_type: String,
     pub workflow: bool,
     pub events: Vec<LogEvent>,
+    pub times: Vec<std::time::SystemTime>,
     pub started_wall: std::time::SystemTime,
     pub tool_call_id: Option<String>,
 }

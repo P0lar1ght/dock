@@ -5540,6 +5540,8 @@ async fn subagents_of_a_closed_thread_are_read_from_disk() {
         .unwrap();
     let h = Harness::boot_on(root).await;
     let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    // 和真会话一样记下落盘时的预设（`meta.json` 的 `preset_id`）。
+    sessions.seed_preset_if_unset("code");
     sessions.attach_disk();
     sessions.append(LogEvent::User("派个子代理看看".into()));
     let parent_id = sessions.live_session_id();
@@ -5590,6 +5592,14 @@ async fn subagents_of_a_closed_thread_are_read_from_disk() {
     // 归档：父会话不再是开着的页，只在名册里。
     sessions.archive_current();
     assert_ne!(sessions.live_session_id(), parent_id);
+    // 根上换成没有 explore 角色的预设：关着的线程要按它自己落盘时的预设叫角色（「探索」），
+    // 不是跟着根上现在的预设走（那样会退成原始的 `explore`）。用 `pin` 不用 `apply`：
+    // `apply` 会写共用 `$DOCK_HOME` 的 roster.yml，并行的别的用例会读到 warden。
+    h.ctx
+        .require::<AgentPresets>(AGENT_PRESETS)
+        .unwrap()
+        .pin("warden")
+        .unwrap();
 
     let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
     let row = listed["result"]["threads"]
@@ -5607,6 +5617,7 @@ async fn subagents_of_a_closed_thread_are_read_from_disk() {
         .await;
     let agents = agents["result"]["agents"].as_array().unwrap().clone();
     assert_eq!(agents.len(), 1, "{agents:?}");
+    assert_eq!(agents[0]["role"], "探索", "{agents:?}");
     assert_eq!(agents[0]["agentId"], agent_id.as_str());
     assert_eq!(agents[0]["persisted"], true);
     // 盘上停在 idle、人已不在这一页：报 completed。
