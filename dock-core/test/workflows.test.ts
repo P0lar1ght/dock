@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  EMPTY_THREAD,
   EMPTY_WORKFLOWS,
   parseEvent,
+  reduceThread,
   reduceWorkflows,
   seedWorkflows,
   workflowElapsedMs,
@@ -97,4 +99,9 @@ test('按声明的阶段分组：空阶段留着，阶段外的归最后', () =>
       [null, ['b']],
     ],
   );
+});
+
+test('workflow/updated 不进线程自己的时间线', () => {
+  const e = updated('running');
+  assert.equal(reduceThread(EMPTY_THREAD, e), EMPTY_THREAD);
 });

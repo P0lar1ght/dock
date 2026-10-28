@@ -635,7 +635,7 @@ mod tests {
             let path = entry.path();
             if path.is_dir() {
                 collect_files(root, &path, out);
-            } else if !path.file_name().is_some_and(|n| n == ".DS_Store") {
+            } else if path.file_name().is_none_or(|n| n != ".DS_Store") {
                 let rel = path.strip_prefix(root).unwrap();
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }

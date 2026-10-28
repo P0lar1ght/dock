@@ -118,8 +118,8 @@ export function replayHistory(events: readonly Record<string, unknown>[]): Threa
 }
 
 export function reduceThread(state: ThreadState, event: DockEvent): ThreadState {
-  // 子代理的事件不属于这个线程的时间线（见 `subagents.ts`）。
-  if (event.method === 'subagent/updated' || event.method === 'subagent/event') return state;
+  // 子代理、工作流 run 的推送不属于这个线程自己的时间线（各有自己的 reducer）。
+  if (event.method === 'subagent/updated' || event.method === 'subagent/event' || event.method === 'workflow/updated') return state;
   if (event.seq && event.seq <= state.seq) return state;
   const seq = event.seq || state.seq;
 
