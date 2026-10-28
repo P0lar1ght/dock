@@ -179,7 +179,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `thread/start { cwd, title?, presetId? }` | 在 `cwd` 另开一页（不动第 1 页），回它的会话 id；预设在创建时定下：`presetId` 只切这一页并记进会话，不改全局默认；预设不存在就报 `invalid_params`、不开页；不带 `cwd` 是老语义 |
 | `thread/open { threadId }` | 把落盘会话开成一页（在它自己的 cwd 下），预设、模型、推理强度切回会话记的那一份（`meta.json`；不改全局默认，模型已不在目录里就不切）；已开着就回那一页。`thread/model/set` / `thread/reasoning/set` 切完立刻写回 `meta.json` |
 | `thread/close { threadId }` | 关页，会话留在磁盘上；第 1 页关不掉 |
-| `preset/list`（能力 `presets`） | 可选的 Agent 预设（顺序同 TUI `/preset`）：`id` / `label` / `description` / `icon`（客户端图标名，没写为 `null`）/ `builtin`（内置预设的 id；`origin` 为 user/project 时是改过的覆盖层，删掉即恢复内置）/ `origin`（`shipped`/`user`/`project`）/ `available`（坏掉的为 `false` 并带 `error`），外加 `defaultId`。只读：预设在 `thread/start` 时定下，没有中途切换的方法。每次现读盘（会话里写的预设下次列就在）。可选 `cwd`：列那个项目能选的（内置 + 用户层 + `cwd/.dock/presets`）；不给是进程 cwd 的项目层。`thread/start` 按目标 `cwd` 的项目层校验 |
+| `preset/list`（能力 `presets`） | 可选的 Agent 预设（顺序同 TUI `/preset`）：`id` / `label` / `description` / `icon`（客户端图标名，没写为 `null`）/ `builtin`（内置预设的 id；`origin` 为 user/project 时是改过的覆盖层，删掉即恢复内置）/ `origin`（`shipped`/`user`/`project`）/ `available`（坏掉的为 `false` 并带 `error`），外加 `defaultId`。只读：预设在 `thread/start` 时定下，没有中途切换的方法。每次现读盘（会话里写的预设下次列就在）。可选 `cwd`：列那个项目能选的（内置 + 用户层 + `cwd/.dock/presets`）；不给是进程 cwd 的项目层。`cwd` 不限定在已知项目里（任意路径的 `.dock/presets` 都会读；网关只听回环、要配对）。`thread/start` 按目标 `cwd` 的项目层校验 |
 | `preset/create { name, icon?, description?, basedOn? }` | 新建用户层预设（`~/.dock/presets/<id>/`），**不改**默认预设；`basedOn` 照它复制人设、工具名单和子代理。`icon` 只收小写字母、数字、`-`。回 `preset`（同列表的一项） |
 | `preset/get { id }` | 整份定义，编辑器用（见下） |
 | `preset/update { id, preset }` | 整份写回（见下） |

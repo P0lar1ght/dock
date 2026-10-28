@@ -341,8 +341,13 @@ fn git_is_read_only(args: &[String]) -> bool {
     let only_flags = |allowed: &[&str]| rest.iter().all(|a| allowed.contains(&a.as_str()));
     match sub {
         s if GIT_READ.contains(&s) => {
-            // `git diff --output=file` 会写文件。
-            !rest.iter().any(|a| a.starts_with("--output"))
+            // `git diff --output=file` 会写文件；`--ext-diff` / `--textconv` 会跑 git 配置里
+            // 的外部程序（diff 驱动、textconv 过滤器）。
+            !rest.iter().any(|a| {
+                a.starts_with("--output")
+                    || a.starts_with("--ext-diff")
+                    || a.starts_with("--textconv")
+            })
         }
         "branch" => only_flags(&[
             "-a",
@@ -460,6 +465,8 @@ mod tests {
             "gh issue create",
             "gh pr diff 42 > patch.diff",
             "gh auth token",
+            "git diff --ext-diff HEAD",
+            "git show --textconv HEAD:a.png",
         ] {
             assert!(!is_read_only_command(cmd), "{cmd}");
         }

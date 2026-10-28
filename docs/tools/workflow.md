@@ -59,7 +59,7 @@ run 归**起它的那一页**（工具调用时的 `exec_ctx`；桌面端每个�
 
 ### 启动与冒烟（对照 grok）
 
-- 一页最多 4 条在跑的 run（`WORKFLOW_MAX_ACTIVE_RUNS_PER_PAGE`），第 5 条回 `workflow_too_many_runs`。
+- 一页最多 4 条在跑的 run（`WORKFLOW_MAX_ACTIVE_RUNS_PER_PAGE`），第 5 条回 `workflow_too_many_runs`。只按页数：多页同时跑时进程整体没有上限（每条 run 各有并发池与 `agent_budget`）。
 - `validate_only` 在阻塞线程上跑，带这次的 `agent_budget`：引擎的 host 函数用 `blocking_recv`，放在 tokio 工作线程上会 panic 并 abort 整个进程。
 - 名字不认识时错误里带上可用的工作流名。
 - 输入宽松读（我们接的模型常这样传）：`source` 漏了 `type` 按唯一出现的键推，给字符串当名字；`args` 是字符串时，里面是 JSON 对象就解开，普通文字当 `{ query, objective }`（同斜杠命令）。

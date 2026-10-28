@@ -174,8 +174,10 @@ pub async fn ask_preset(
         }
         _ => "（还没填）".into(),
     };
+    // 围栏比草稿里最长的一串反引号还长一个：persona 里写了 ``` 也闭合不了这个代码块。
+    let fence = fence_for(&draft);
     let system = format!(
-        "{ASK_SYSTEM}\n\n用户现在在「{step}」这一步。\n\n当前草稿（用户正在编辑，未保存）：\n```json\n{draft}\n```\n\n工具目录：\n{}",
+        "{ASK_SYSTEM}\n\n用户现在在「{step}」这一步。\n\n当前草稿（用户正在编辑，未保存）：\n{fence}json\n{draft}\n{fence}\n\n工具目录：\n{}",
         catalog_lines(catalog)
     );
     let skip = history.len().saturating_sub(MAX_TURNS);
@@ -458,9 +460,32 @@ fn clip(s: &str, max_chars: usize) -> String {
     s.trim().chars().take(max_chars).collect()
 }
 
+/// 包住 `text` 用的代码围栏：至少三个反引号，比正文里最长的一串反引号多一个。
+fn fence_for(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in text.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat((longest + 1).max(3))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 草稿里带 ``` 也闭合不了包它的围栏。
+    #[test]
+    fn the_draft_fence_outlasts_backticks_in_the_draft() {
+        assert_eq!(fence_for("{}"), "```");
+        assert_eq!(fence_for("persona: 用 ``` 包代码"), "````");
+        assert_eq!(fence_for("`````"), "``````");
+    }
     use crate::agent::runtime::BoxFuture;
     use crate::llm::sampler::Sampler;
     use std::sync::{Arc, Mutex};

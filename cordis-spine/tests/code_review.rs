@@ -27,6 +27,8 @@ enum Scope {
     Empty,
     /// 给一条带管道的命令（不是只读的单条 git diff）。
     Unsafe,
+    /// 给一条会跑外部程序的 `git diff --ext-diff`。
+    ExtDiff,
     /// 审 GitHub PR #42，PR 的提交在本地。
     Pr,
     /// 审 GitHub PR #42，PR 的提交不在本地。
@@ -95,6 +97,9 @@ impl Scripted {
                 Scope::Empty => {
                     fenced(serde_json::json!({ "empty": true, "diff_command": "", "files": [] }))
                 }
+                Scope::ExtDiff => fenced(serde_json::json!({
+                    "empty": false, "diff_command": "git diff --ext-diff HEAD", "files": [{ "path": "a.rs" }],
+                })),
                 Scope::Unsafe => fenced(serde_json::json!({
                     "empty": false, "diff_command": "git diff HEAD | tee /tmp/x", "files": [{ "path": "a.rs" }],
                 })),
@@ -525,4 +530,17 @@ async fn a_remote_pull_request_is_judged_from_the_diff() {
     let r = review(team, serde_json::json!({ "pr": 42 })).await;
     assert_eq!(r.git_show_hinted, 0);
     assert_eq!(r.diff_only_hinted, 6);
+}
+
+/// `--ext-diff` / `--textconv` 会跑 git 配置里的外部程序，`--no-index` 能比任意路径：审查员
+/// 会不经批准跑这条命令，所以这类参数也拒。
+#[tokio::test]
+async fn a_diff_command_that_runs_external_programs_is_refused() {
+    let team = Team {
+        scope: Scope::ExtDiff,
+        ..Team::default()
+    };
+    let r = review(team, serde_json::json!({})).await;
+    assert_eq!(r.field("status"), "failed", "{}", r.report);
+    assert_eq!(r.agents, 1);
 }

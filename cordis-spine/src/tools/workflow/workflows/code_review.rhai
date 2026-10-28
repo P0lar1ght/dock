@@ -99,7 +99,8 @@ fn safe_diff_command(cmd) {
     if !(c.starts_with("git diff") || c.starts_with("git show") || c.starts_with("gh pr diff ")) {
         return "";
     }
-    for bad in [";", "|", "&", ">", "<", "`", "$(", "\n", "--output", "--web"] {
+    // `--ext-diff` / `--textconv` 会跑 git 配置里的外部程序；`--no-index` 能拿任意路径来比。
+    for bad in [";", "|", "&", ">", "<", "`", "$(", "\n", "--output", "--web", "--ext-diff", "--textconv", "--no-index"] {
         if c.contains(bad) {
             return "";
         }
