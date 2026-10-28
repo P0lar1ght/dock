@@ -398,6 +398,29 @@ impl AgentPresets {
         *inner = loaded;
     }
 
+    /// 在 `cwd` 这个项目里能用的那个预设：现读内置 + 用户层 + `cwd/.dock/presets`，
+    /// 不碰本份的项目层和当前预设。网关一个进程服务多个项目，开新页前拿它校验——
+    /// 根上那份的项目层是进程 cwd，GUI 下是应用数据目录，不是用户的项目。
+    pub fn get_at(&self, cwd: &Path, id: &str) -> Option<AgentPreset> {
+        self.layers_at(cwd).swap_remove(id)
+    }
+
+    /// 在 `cwd` 这个项目里能选的全部预设（顺序同 [`Self::list`]），现读盘。
+    pub fn list_at(&self, cwd: &Path) -> Vec<AgentPreset> {
+        self.layers_at(cwd).into_values().collect()
+    }
+
+    fn layers_at(&self, cwd: &Path) -> IndexMap<String, AgentPreset> {
+        let user = {
+            let inner = self.inner.lock().unwrap();
+            if !inner.persist {
+                return inner.presets.clone();
+            }
+            inner.user_dir.clone()
+        };
+        load_inner(user, Some(cwd.join(".dock").join("presets"))).presets
+    }
+
     pub fn current_id(&self) -> String {
         self.inner.lock().unwrap().current.clone()
     }
@@ -1088,7 +1111,7 @@ impl AgentPresets {
         let roster = self.current_roster();
         if roster.is_empty() {
             return format!(
-                " This Agent mode has no agents/ roles; add agents/<id>.yml under {}, then call with reload_roster true. To add a new Agent mode (not a role), write {}/<id>/agent.yml with id matching [a-z0-9][a-z0-9-]* then apply that id with /preset. Do not write ~/.dock/presets/ unless the user asks to save globally.",
+                " This Agent mode has no agents/ roles; add agents/<id>.yml under {}, then call with reload_roster true. To add a new Agent mode (not a role) for the user, draft it with propose_preset so they review and save it in the preset editor; only if it reports no reviewer, write {}/<id>/agent.yml with id matching [a-z0-9][a-z0-9-]* then apply that id with /preset. Do not write ~/.dock/presets/ unless the user asks to save globally.",
                 self.workspace_agents_dir(),
                 self.workspace_presets_dir()
             );
@@ -1111,7 +1134,7 @@ impl AgentPresets {
             })
             .collect();
         format!(
-            " subagent_type is a role id from this mode's agents/: {}. After writing a new agents/<id>.yml, call with reload_roster true (no spawn) to refresh this enum. Write new roles under {}/. New Agent modes go in {}/<id>/agent.yml (id [a-z0-9][a-z0-9-]*), then /preset apply; Han display-name dirs overlay a shipped mode and do not create one. Only ~/.dock/presets/ if the user asks to save globally.",
+            " subagent_type is a role id from this mode's agents/: {}. After writing a new agents/<id>.yml, call with reload_roster true (no spawn) to refresh this enum. Write new roles under {}/. New Agent modes for the user: draft with propose_preset (they review and save it); only if it reports no reviewer, write {}/<id>/agent.yml (id [a-z0-9][a-z0-9-]*), then /preset apply; Han display-name dirs overlay a shipped mode and do not create one. Only ~/.dock/presets/ if the user asks to save globally.",
             parts.join("; "),
             self.workspace_agents_dir(),
             self.workspace_presets_dir()

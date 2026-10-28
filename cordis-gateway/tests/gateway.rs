@@ -122,6 +122,13 @@ fn isolated_home() {
     });
 }
 
+/// 用户层预设在共用的 `$DOCK_HOME/presets` 里，`preset/list` 每次现读盘：写它或拿整张
+/// 列表做前后对比的用例互斥，否则会看到别的用例刚写的预设。
+async fn presets_disk() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
 /// 一个存在的、这次独有的项目目录。
 fn project_dir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -2116,6 +2123,7 @@ async fn thread_search_finds_saved_sessions_by_their_messages() {
 /// GUI 的自定义预设：新建（带图标）→ 列表里有 → 能用它开会话 → 删掉。
 #[tokio::test]
 async fn custom_presets_can_be_created_used_and_deleted() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -2179,11 +2187,93 @@ async fn custom_presets_can_be_created_used_and_deleted() {
     );
 }
 
+/// 会话里让模型写的预设（不是 GUI 的「新建预设」）：文件落盘之后 GUI 就要看得到、
+/// 能拿它开会话。以前 `preset/list` 回的是启动时读的那份，`thread/start` 也拿它校验；
+/// 而 GUI 的 `dock serve` 跑在应用数据目录，根上的项目层根本不是任何真实项目。
+#[tokio::test]
+async fn presets_written_to_disk_mid_session_are_listed_and_usable() {
+    let _presets = presets_disk().await;
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc.call("preset/list", json!({})).await;
+    let tag = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    // 用户层：写 `$DOCK_HOME/presets/<id>/agent.yml`，像模型用 write_file 那样。
+    let user_id = format!("disk-user-{tag}");
+    let user_dir = cordis_base::config::dock_home()
+        .join("presets")
+        .join(&user_id);
+    std::fs::create_dir_all(&user_dir).unwrap();
+    std::fs::write(
+        user_dir.join("agent.yml"),
+        "name: 落盘用户预设\npersona: 你是测试预设。\n",
+    )
+    .unwrap();
+    let listed = rpc.call("preset/list", json!({})).await;
+    assert!(
+        listed.to_string().contains(&user_id),
+        "写进用户层的预设不在列表里：{listed}"
+    );
+
+    // 项目层：写进那个项目的 `.dock/presets/<id>/`（模型新建预设的默认落点）。
+    let project = project_dir("disk-project-preset");
+    let project_id = format!("disk-proj-{tag}");
+    let preset_dir = project.join(".dock").join("presets").join(&project_id);
+    std::fs::create_dir_all(&preset_dir).unwrap();
+    std::fs::write(
+        preset_dir.join("agent.yml"),
+        "name: 落盘项目预设\npersona: 你是项目预设。\n",
+    )
+    .unwrap();
+    let started = rpc
+        .call(
+            "thread/start",
+            json!({ "cwd": project.display().to_string(), "presetId": project_id }),
+        )
+        .await;
+    assert!(
+        started.get("error").is_none(),
+        "项目层预设开不了会话：{started}"
+    );
+    assert_eq!(
+        started["result"]["thread"]["presetId"],
+        json!(project_id),
+        "{started}"
+    );
+    // 列表按项目：带 cwd 才列得出项目层的，不带（进程 cwd）列不出。
+    let scoped = rpc
+        .call(
+            "preset/list",
+            json!({ "cwd": project.display().to_string() }),
+        )
+        .await;
+    let item = scoped["result"]["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(project_id))
+        .cloned()
+        .unwrap_or_else(|| panic!("带 cwd 的列表里没有项目层预设：{scoped}"));
+    assert_eq!(item["origin"], "project", "{item}");
+    assert!(
+        scoped.to_string().contains(&user_id),
+        "用户层也要在：{scoped}"
+    );
+    let global = rpc.call("preset/list", json!({})).await;
+    assert!(!global.to_string().contains(&project_id), "{global}");
+}
+
 /// 预设编辑器：`tool/catalog` 列可选工具（不含 MCP），`preset/get` 给整份定义，
 /// `preset/update` 整份写回（名册增删、工具名单、人设），校验错误回 `invalid_params`；
 /// 内置预设改完成覆盖层（`origin: user`、带文件路径），内置子代理删不掉。
 #[tokio::test]
 async fn preset_editor_reads_and_writes_the_whole_definition() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -2282,6 +2372,7 @@ async fn preset_editor_reads_and_writes_the_whole_definition() {
 /// {includeMcp:true}` 才带 MCP 行。
 #[tokio::test]
 async fn preset_resident_tools_round_trip_and_survive_old_clients() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -2367,6 +2458,7 @@ async fn preset_resident_tools_round_trip_and_survive_old_clients() {
 /// `invalid_params`；另起任务回帧之后连接照常可用。
 #[tokio::test]
 async fn preset_assist_calls_the_model_and_never_writes() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -2415,6 +2507,29 @@ async fn preset_assist_calls_the_model_and_never_writes() {
         "{bad_mode}"
     );
 
+    let asked = rpc
+        .call(
+            "preset/ask",
+            json!({
+                "question": "代码审查员要哪些工具？",
+                "history": [
+                    { "role": "user", "text": "我在做代码审查员" },
+                    { "role": "assistant", "text": "好的" }
+                ],
+                "draft": { "name": "审查员", "persona": "你审代码", "tools": ["read_file"] },
+                "step": "tools"
+            }),
+        )
+        .await;
+    // 测试的假模型不回话：走到采样、再按「没回答」回错（成功路径见 spine 单测）。
+    assert_eq!(asked["error"]["details"]["code"], "draft_failed", "{asked}");
+    let bad_role = rpc
+        .call(
+            "preset/ask",
+            json!({ "question": "x", "history": [{ "role": "system", "text": "x" }] }),
+        )
+        .await;
+    assert_eq!(bad_role["error"]["code"], -32602, "{bad_role}");
     let tools = rpc
         .call("preset/suggestTools", json!({ "description": "搜代码" }))
         .await;
@@ -2852,6 +2967,7 @@ async fn thread_start_with_preset_is_per_page_and_listed() {
 /// `defaultId` 是不带 `presetId` 开新会话时用的那个；列出来的 id 能直接拿去开会话。
 #[tokio::test]
 async fn preset_list_feeds_thread_start() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -5197,7 +5313,6 @@ async fn vcs_diff_runs_only_read_only_diff_commands_for_trusted_clients() {
     assert_eq!(denied["error"]["details"]["code"], "forbidden", "{denied}");
 }
 
-
 /// 子代理在 dock.1 上看得见：状态推 `subagent/updated`，它自己的对话包成父线程上的
 /// `subagent/event`，`subagent/list` / `history` 补中途接入，`send` / `stop` 能用。
 #[tokio::test]
@@ -7092,4 +7207,39 @@ async fn side_chat_forks_answers_and_merges_back() {
         gone["error"].is_object(),
         "主会话关了，侧边聊天也关：{gone}"
     );
+}
+
+/// 有图形界面在听（网关在监听）时，`propose_preset` 只回草稿等用户审，不写盘；
+/// 桌面端按这次调用画草稿卡（终端那一支见 spine 单测）。
+#[tokio::test]
+async fn propose_preset_waits_for_review_when_a_gui_is_attached() {
+    let _presets = presets_disk().await;
+    let h = Harness::boot_with_pages().await;
+    h.ctx
+        .plugin(cordis_spine::tool_propose_preset(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let before = std::fs::read_dir(cordis_base::config::dock_home().join("presets"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    let out = h
+        .ctx
+        .require::<cordis_spine::Tools>(cordis_spine::TOOLS)
+        .unwrap()
+        .execute(cordis_spine::ToolCall {
+            id: "p".into(),
+            name: cordis_spine::PROPOSE_PRESET_TOOL.into(),
+            arguments: json!({ "name": "审查员", "persona": "你审代码。" }).to_string(),
+        })
+        .await
+        .content;
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|_| panic!("{out}"));
+    assert_eq!(v["status"], "awaiting_review", "{out}");
+    assert_eq!(v["draft"]["name"], "审查员", "{out}");
+    let after = std::fs::read_dir(cordis_base::config::dock_home().join("presets"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(before, after, "起草不写盘");
 }

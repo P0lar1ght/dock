@@ -7,6 +7,7 @@ pub mod agents;
 pub mod capability;
 pub mod loop_plugin;
 pub mod preset_assist;
+pub mod preset_propose;
 pub mod presets;
 pub mod runtime;
 pub mod turn;

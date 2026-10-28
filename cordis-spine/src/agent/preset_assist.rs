@@ -7,7 +7,7 @@
 
 use cordis::Context;
 use cordis_base::stream_acc::StreamDelta;
-use cordis_base::types::{LogEvent, PromptRequest};
+use cordis_base::types::{LlmOutput, LogEvent, PromptRequest};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -114,6 +114,90 @@ pub async fn draft_preset(
     parse_draft(&raw, catalog, icons)
 }
 
+const MAX_QUESTION: usize = 4_000;
+/// 侧聊带回去的轮数上限（问 + 答各算一条）：更早的丢掉，草稿每次都现带。
+const MAX_TURNS: usize = 20;
+const MAX_DRAFT_JSON: usize = 32 * 1024;
+
+const ASK_SYSTEM: &str = r#"你是 Dock 的预设顾问，用户正在自己动手配一个 Agent 预设，边配边问你。
+Dock 是本地编码 / 研究 Agent；预设 = 基本信息（名称、说明、图标）+ 角色提示词 + 工具允许名单 + 可选的子代理名册。
+你只回答问题、给参考，不替用户做决定，也改不了任何字段——用户看完自己去填。
+- 回答围绕用户当前所在的那一步，短而具体；必要时说清取舍。
+- 要给可以直接抄的内容（提示词段落、工具名单、子代理设定）时放进代码块，方便复制。
+- 提到工具只用下面目录里有的名字；目录里没有的就说没有，不要编。
+- 不确定的地方直说不确定。用中文回答。"#;
+
+/// 侧聊里的一条历史。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskTurn {
+    User(String),
+    Assistant(String),
+}
+
+/// 预设编辑器旁的侧聊：用户边配边问，只回参考答案，**不写盘、不改草稿**。
+/// 无状态：客户端每次带上之前的问答（`history`）、当前草稿（`draft`，编辑器里那份
+/// JSON）和所在步骤（`step`：basic / prompt / tools / agents）。
+pub async fn ask_preset(
+    ctx: &Context,
+    question: &str,
+    history: &[AskTurn],
+    draft: Option<&Value>,
+    step: Option<&str>,
+    catalog: &[ToolChoice],
+) -> Result<String, String> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err("问题是空的".into());
+    }
+    if question.chars().count() > MAX_QUESTION {
+        return Err("问题太长了（超过 4000 字）".into());
+    }
+    let step = match step.map(str::trim).filter(|s| !s.is_empty()) {
+        None => "（未指明）",
+        Some("basic") => "基本信息",
+        Some("prompt") => "角色提示词",
+        Some("tools") => "工具配置",
+        Some("agents") => "子代理名册",
+        Some(other) => {
+            return Err(format!(
+                "step 只能是 basic / prompt / tools / agents：{other}"
+            ))
+        }
+    };
+    let draft = match draft {
+        Some(v) if !v.is_null() => {
+            let text = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
+            if text.len() > MAX_DRAFT_JSON {
+                return Err("草稿太大了（超过 32KB）".into());
+            }
+            text
+        }
+        _ => "（还没填）".into(),
+    };
+    let system = format!(
+        "{ASK_SYSTEM}\n\n用户现在在「{step}」这一步。\n\n当前草稿（用户正在编辑，未保存）：\n```json\n{draft}\n```\n\n工具目录：\n{}",
+        catalog_lines(catalog)
+    );
+    let skip = history.len().saturating_sub(MAX_TURNS);
+    let mut events: Vec<LogEvent> = history[skip..]
+        .iter()
+        .filter_map(|turn| match turn {
+            AskTurn::User(t) if !t.trim().is_empty() => Some(LogEvent::User(clip(t, MAX_QUESTION))),
+            AskTurn::Assistant(t) if !t.trim().is_empty() => Some(LogEvent::LlmStream(LlmOutput {
+                text: clip(t, MAX_PERSONA),
+                ..LlmOutput::default()
+            })),
+            _ => None,
+        })
+        .collect();
+    events.push(LogEvent::User(question.to_string()));
+    let out = ask_history(ctx, &system, events).await?;
+    if out.trim().is_empty() {
+        return Err("模型没回答，再问一次".into());
+    }
+    Ok(out.trim().to_string())
+}
+
 /// 按描述（和已写的提示词）推荐工具。
 pub async fn suggest_tools(
     ctx: &Context,
@@ -173,6 +257,14 @@ pub async fn rewrite_persona(
 }
 
 async fn ask(ctx: &Context, system: &str, user: String) -> Result<String, String> {
+    ask_history(ctx, system, vec![LogEvent::User(user)]).await
+}
+
+async fn ask_history(
+    ctx: &Context,
+    system: &str,
+    history: Vec<LogEvent>,
+) -> Result<String, String> {
     let llm = ctx
         .get::<Llm>(LLM)
         .ok_or_else(|| "模型服务没有挂载".to_string())?;
@@ -183,7 +275,7 @@ async fn ask(ctx: &Context, system: &str, user: String) -> Result<String, String
             &iso,
             PromptRequest {
                 system: system.to_string(),
-                history: vec![LogEvent::User(user)],
+                history,
                 tools: Vec::new(),
             },
             |_delta: &StreamDelta| {},
@@ -369,6 +461,73 @@ fn clip(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::runtime::BoxFuture;
+    use crate::llm::sampler::Sampler;
+    use std::sync::{Arc, Mutex};
+
+    /// 记下发出去的请求，回一句固定答案。
+    struct Recording {
+        seen: Arc<Mutex<Option<PromptRequest>>>,
+    }
+
+    impl Sampler for Recording {
+        fn sample<'a>(
+            &'a self,
+            request: PromptRequest,
+            _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        ) -> BoxFuture<'a, LlmOutput> {
+            *self.seen.lock().unwrap() = Some(request);
+            Box::pin(async {
+                LlmOutput {
+                    text: "  只读审查要 read_file 和 grep。  ".into(),
+                    ..LlmOutput::default()
+                }
+            })
+        }
+    }
+
+    /// 侧聊：之前的问答按角色回放、草稿和所在步骤进系统提示、不带工具，答案原样回。
+    #[tokio::test]
+    async fn ask_preset_replays_history_and_carries_draft_and_step() {
+        let root = Context::new();
+        let seen = Arc::new(Mutex::new(None));
+        root.provide(
+            LLM,
+            Llm::from_sampler(root.clone(), Arc::new(Recording { seen: seen.clone() })),
+        )
+        .unwrap();
+        let history = [
+            AskTurn::User("我在做代码审查员".into()),
+            AskTurn::Assistant("好的".into()),
+        ];
+        let draft = serde_json::json!({ "name": "审查员", "tools": ["read_file"] });
+        let answer = ask_preset(
+            &root,
+            "要哪些工具？",
+            &history,
+            Some(&draft),
+            Some("tools"),
+            &catalog(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer, "只读审查要 read_file 和 grep。");
+
+        let req = seen.lock().unwrap().take().unwrap();
+        assert!(req.tools.is_empty(), "侧聊不给工具");
+        assert!(req.system.contains("「工具配置」"), "{}", req.system);
+        assert!(req.system.contains("\"审查员\""), "{}", req.system);
+        assert!(req.system.contains("grep"), "工具目录要在：{}", req.system);
+        assert_eq!(req.history.len(), 3, "{:?}", req.history);
+        assert!(matches!(&req.history[0], LogEvent::User(t) if t == "我在做代码审查员"));
+        assert!(matches!(&req.history[1], LogEvent::LlmStream(o) if o.text == "好的"));
+        assert!(matches!(&req.history[2], LogEvent::User(t) if t == "要哪些工具？"));
+
+        let bad = ask_preset(&root, "x", &[], None, Some("deploy"), &catalog()).await;
+        assert!(bad.unwrap_err().contains("step"));
+        let empty = ask_preset(&root, "  ", &[], None, None, &catalog()).await;
+        assert!(empty.is_err());
+    }
 
     fn catalog() -> Vec<ToolChoice> {
         [

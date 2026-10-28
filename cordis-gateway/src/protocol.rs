@@ -159,6 +159,7 @@ pub const PLUGIN_SETTINGS_CHANGED: &str = "plugin/settings/changed";
 pub const PRESET_DRAFT: &str = "preset/draft";
 pub const PRESET_REWRITE: &str = "preset/rewrite";
 pub const PRESET_SUGGEST_TOOLS: &str = "preset/suggestTools";
+pub const PRESET_ASK: &str = "preset/ask";
 pub const THREAD_START: &str = "thread/start";
 pub const THREAD_OPEN: &str = "thread/open";
 pub const THREAD_CLOSE: &str = "thread/close";

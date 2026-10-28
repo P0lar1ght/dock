@@ -481,6 +481,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "cordis_call",
         "cordis_stop",
         "cordis_promote",
+        "propose_preset",
     ] {
         assert!(
             names.iter().any(|n| n == need),
@@ -534,6 +535,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         );
     }
     for hidden in [
+        "propose_preset",
         "scheduler_create",
         "monitor",
         "update_goal",

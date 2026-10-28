@@ -281,7 +281,9 @@ pub async fn start_at(gateway: &GatewayHandle, params: Value) -> Result<Value, R
             .ctx()
             .get::<AgentPresets>(AGENT_PRESETS)
             .ok_or_else(|| RpcError::app("unavailable", "预设服务没有挂载"))?;
-        if presets.get(id).is_none() {
+        // 按这一页的项目找（现读盘）：项目层的预设只在它自己的项目里有，
+        // 根上那份看不到；新页 fork 时同样会读到它。
+        if presets.get_at(&cwd, id).is_none() {
             return Err(RpcError::invalid_params(format!("没有预设 {id}")));
         }
     }

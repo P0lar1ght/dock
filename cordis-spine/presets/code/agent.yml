@@ -39,6 +39,7 @@ tools:
   - interrupt_agent
   - workflow
   - handoff_to_user
+  - propose_preset
   - search_tool
   - use_tool
 # 按需工具：不进模型工具表，模型只在 search_tool 的描述里看到名字，用时经
@@ -56,3 +57,4 @@ on_demand_tools:
   - interrupt_agent
   - workflow
   - handoff_to_user
+  - propose_preset
