@@ -3434,3 +3434,35 @@ async fn example_trajectory_plugin_serves_its_web_panel() {
     assert!(html.contains("dock.call(\"threads.history\""));
     assert!(slots.render("trajectory").unwrap().contains("GUI"));
 }
+
+/// `cordis-plugin-development` 技能里的例子是模型照抄的起点：每一份都要真能
+/// define + run，注册的工具按例子里写的那样工作。
+#[tokio::test]
+async fn bundled_skill_examples_define_run_and_work() {
+    const DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/tools/skills/builtin/cordis-plugin-development/examples/"
+    );
+    let read = |name: &str| std::fs::read_to_string(format!("{DIR}{name}")).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped()
+        .set("DOCK_HOME", home.path())
+        .remove("DOCK_SECRET_GITHUB");
+    // 发号器全进程单调，`define_and_run` 认 `-1`，所以每份例子单独起一棵树。
+    let root = boot().await;
+    define_and_run(&root, "ping", &read("ping.rhai")).await;
+    assert_eq!(exec(&root, "demo_ping", "{}").await, "pong");
+
+    let root = boot().await;
+    define_and_run(&root, "memo", &read("memo.rhai")).await;
+    assert_eq!(exec(&root, "memo_get", "{}").await, "（空）");
+    let set = exec(&root, "memo_set", r#"{"text":"买牛奶"}"#).await;
+    assert!(set.contains("已保存 3 字"), "{set}");
+    assert_eq!(exec(&root, "memo_get", "{}").await, "买牛奶");
+
+    // 缺密钥要回一句告诉用户去哪填，而不是抛错让模型反复重试。
+    let root = boot().await;
+    define_and_run(&root, "ghapi", &read("api-tool.rhai")).await;
+    let out = exec(&root, "gh_issue", r#"{"repo":"o/r","n":1}"#).await;
+    assert!(out.starts_with("未配置 GitHub Token"), "{out}");
+}

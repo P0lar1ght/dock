@@ -1,0 +1,5 @@
+# .dock/plugins/<id>/plugin.toml —— 目录名就是 pluginId
+name = "Demo"
+purpose = "File-backed rhai sample"
+factory = "rhai"
+enabled = true

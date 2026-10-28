@@ -36,5 +36,5 @@ cp -R examples/plugins/activity ~/.dock/plugins/activity
 ## 改它
 
 `source.rhai` 里每个回调都有注释。Rhai 的闭包捕获变量是共享的：
-`state` 被所有回调改的是同一份。Host API 见 `skills/cordis-plugin-development/SKILL.md`。
+`state` 被所有回调改的是同一份。Host API 见内置技能 `cordis-plugin-development` 的 `references/host-api.md`。
 回归：`cargo test -p cordis-spine --test dynamic -- example_activity_plugin`。
