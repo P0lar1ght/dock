@@ -5,8 +5,14 @@ use serde::Deserialize;
 use crate::tools::registry::tool_result;
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
+use cordis::Context;
+
+use super::backend::SubagentBackend;
 use super::store::InterruptOutcome;
-use super::Subagents;
+use super::types::{SubagentOwner, SubagentRequest, SubagentRuntimeOverrides};
+use super::{SubagentLife, Subagents};
+use crate::names::SESSIONS;
+use crate::session::log::Sessions;
 
 pub(super) const SEND_TOOL_NAME: &str = "send_message";
 
@@ -94,6 +100,11 @@ impl Subagents {
         } else {
             self.store.enqueue_queued(id, message.to_string())?
         };
+        // 闲着时用户这一句开了新的一轮：结果送达父级但不叫醒它（在跑时并进的是父级
+        // 开的那一轮，照旧）。
+        if !was_running {
+            self.store.set_user_turn(id, true);
+        }
         Ok(send_ack(id, urgent, was_running))
     }
 
@@ -117,6 +128,8 @@ impl Subagents {
         }
         if self.store.get(target).is_some() {
             self.ensure_child_of(sender, target)?;
+            // 父级发话：这一轮（或下一轮）是父级要的结果，结束时照常叫醒它。
+            self.store.set_user_turn(target, false);
             let was_running = self.store.enqueue_queued(target, message.to_string())?;
             return Ok(if was_running {
                 format!("message delivered to running agent {target}; it reads it at its next step")
@@ -238,6 +251,145 @@ fn send_ack(id: &str, urgent: bool, was_running: bool) -> String {
         (false, false) => {
             format!("queued message delivered to idle subagent {id}; the next turn is starting now")
         }
+    }
+}
+
+impl Subagents {
+    /// 用户在界面上接着跟一个已经收掉的子代理聊（会话关过、Dock 重启过、空闲太久被回收、
+    /// 被停掉的都算）：**同一个 id** 从它的对话接着起一轮，原话就是这一轮的开头。
+    ///
+    /// - `parent`：启动它的那一页（得开着）；对话先从内存里拿，没有就读那一页落盘目录下的
+    ///   `subagents/<id>/`。
+    /// - 还活着（在跑 / 空闲）的不走这里，直接 [`Self::send_message`]。
+    /// - workflow 派的不能复活（它属于那次 run，不是这个会话）；角色已经不在预设里的也不行。
+    /// - 这一轮是用户开的：结果送进父信箱但不叫醒父级。
+    pub fn revive(&self, parent: &Context, agent_id: &str, message: &str) -> Result<(), String> {
+        let message = message.trim();
+        if message.is_empty() {
+            return Err("消息不能为空".into());
+        }
+        let sessions = parent
+            .get::<Sessions>(SESSIONS)
+            .ok_or("这一页没有会话服务")?;
+        let parent_identity = sessions.identity().to_string();
+        // 「同 id 没有活着的槽位」到「放回槽位」之间不让第二次复活插进来：两次都从盘上
+        // 读到同一份、各自 spawn 一次，协调器不一定拦得住。
+        let revive_lock = self.store.revive_lock.clone();
+        let _one_at_a_time = revive_lock.lock().unwrap();
+        let live = self.store.get(agent_id);
+        if live
+            .as_ref()
+            .is_some_and(|s| s.life() != SubagentLife::Done)
+        {
+            return Err(format!("子代理 {agent_id} 还在，直接发消息就行"));
+        }
+        // 先看清是谁、能不能接着聊，再动内存里的槽位：以前先 `take_settled` 删了槽位才校验，
+        // 被拒（workflow 派的、角色不在了）时子代理就从内存里消失了。
+        let mut from_disk = None;
+        let (subagent_type, workflow) = match &live {
+            Some(slot) => {
+                if slot.parent != parent_identity {
+                    return Err(format!("子代理 {agent_id} 不是这个会话派的"));
+                }
+                (
+                    slot.subagent_type.clone(),
+                    matches!(slot.owner, SubagentOwner::Workflow { .. }),
+                )
+            }
+            None => {
+                let dir = sessions
+                    .existing_session_dir()
+                    .ok_or("这个会话没有落盘，找不到子代理的对话")?;
+                let loaded = crate::session::persist::load_subagent(&dir, agent_id)
+                    .ok_or_else(|| format!("这个会话没有子代理 {agent_id}"))?;
+                let picked = (loaded.0.subagent_type.clone(), loaded.0.workflow);
+                from_disk = Some(loaded);
+                picked
+            }
+        };
+        if workflow {
+            return Err("workflow 派的子代理不能接着聊".into());
+        }
+        let has_role = parent
+            .get::<crate::agent::presets::AgentPresets>(crate::names::AGENT_PRESETS)
+            .is_some_and(|p| p.subagent(&subagent_type).is_some());
+        if !has_role {
+            return Err(format!(
+                "角色「{subagent_type}」已经不在当前预设里，没法接着聊"
+            ));
+        }
+        let (description, events, times, started_wall, tool_call_id) = match from_disk {
+            Some((meta, events, times)) => (
+                meta.description,
+                events,
+                times,
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(meta.started_ms),
+                meta.tool_call_id,
+            ),
+            None => {
+                let s = self
+                    .store
+                    .take_settled(agent_id)
+                    .ok_or_else(|| format!("子代理 {agent_id} 还在，直接发消息就行"))?;
+                (
+                    s.description,
+                    s.events,
+                    s.times,
+                    s.started_wall,
+                    s.tool_call_id,
+                )
+            }
+        };
+
+        self.note_spawn_parent(agent_id, parent.clone());
+        self.remember(
+            agent_id,
+            description.clone(),
+            subagent_type.clone(),
+            SubagentOwner::Task,
+            &parent_identity,
+        );
+        self.store
+            .restore_identity(agent_id, started_wall, tool_call_id, events, times);
+        self.store.set_user_turn(agent_id, true);
+
+        let request = SubagentRequest {
+            id: agent_id.to_string(),
+            prompt: message.to_string(),
+            description,
+            subagent_type,
+            parent_session_id: parent_identity,
+            // 从内存槽位里接（上面刚放回去的那份对话）。
+            resume_from: Some(agent_id.to_string()),
+            runtime_overrides: SubagentRuntimeOverrides::default(),
+            run_in_background: true,
+            surface_completion: true,
+            await_to_completion: false,
+            owner: SubagentOwner::Task,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            revive: true,
+        };
+        let backend = self.backend().clone();
+        let store = self.store.clone();
+        let id = agent_id.to_string();
+        tokio::spawn(async move {
+            // 起不来（通道断了、协调器拒了）就把这个槽位收掉并写明原因：以前只打一条日志，
+            // 槽位一直挂着 running，界面上是个半活的子代理。
+            let failure = match backend.spawn(request).await {
+                Err(e) => Some(e.to_string()),
+                // 协调器在孩子起跑前回绝（会话停了、准入关着……）：没跑过一轮、用时为 0。
+                // 跑过一轮再失败的照常走子代理自己的收尾，不在这儿收。
+                Ok(r) if !r.success && r.turns == 0 && r.duration_ms == 0 => {
+                    Some(r.error.unwrap_or_else(|| "协调器没让它起跑".into()))
+                }
+                Ok(_) => None,
+            };
+            if let Some(why) = failure {
+                tracing::error!(subagent_id = %id, "revive spawn failed: {why}");
+                store.finish(&id, format!("接着聊没起来：{why}"), false);
+            }
+        });
+        Ok(())
     }
 }
 

@@ -47,6 +47,7 @@ tools:
   - interrupt_agent
   - workflow
   - handoff_to_user
+  - propose_preset
   - search_tool
   - use_tool
   - cordis_inspect
@@ -68,4 +69,5 @@ on_demand_tools:
   - interrupt_agent
   - workflow
   - handoff_to_user
+  - propose_preset
   - cordis_*

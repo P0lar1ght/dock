@@ -133,3 +133,13 @@ test('权限请求带发起它的子代理；旧网关不带时是 null', () => 
   const old = ask({});
   assert.equal(old.kind === 'permission' && old.agentId, null);
 });
+
+test('盘上的子代理（不在 Dock 内存里）带 persisted，铺底后照样能按派它的调用找到', () => {
+  const state = seedSubagents(EMPTY_SUBAGENTS, [
+    { agentId: 'a1', toolCallId: 'call-1', subagentType: 'explore', role: '探索', description: '看一眼', status: 'completed', persisted: true },
+    { agentId: 'a2', status: 'idle' },
+  ]);
+  assert.equal(state.byId.a1.info.persisted, true);
+  assert.equal(state.byId.a2.info.persisted, false);
+  assert.equal(subagentForToolCall(state, 'call-1')?.info.agentId, 'a1');
+});

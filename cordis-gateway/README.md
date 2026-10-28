@@ -173,13 +173,13 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 
 | 方法 | 作用 |
 |---|---|
-| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open` / `presetId`（开着的页是它当前的预设，落盘的是 `meta.json` 记的，老会话为 `null`），第 1 页另带 `alias: "live"` |
+| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open` / `presetId`（开着的页是它当前的预设，落盘的是 `meta.json` 记的，老会话为 `null`），第 1 页另带 `alias: "live"`；子代理计数见下 |
 | `thread/search { query, cwd?, limit? }` | 按标题和用户消息搜所有目录的落盘会话，回 `hits[]`：`threadId` / `title` / `cwd` / `snippet`（命中处前后一小段纯文本，只命中标题时为 `null`）/ `updatedAt`。空格分开的词都要命中；含中日韩文的查询按子串匹配，其余走 FTS 前缀匹配。还没落盘的内容搜不到 |
 | `workspace/list { scope: "all" }` | 有会话的所有目录（`id` = 路径，`hasOpenThreads`） |
 | `thread/start { cwd, title?, presetId? }` | 在 `cwd` 另开一页（不动第 1 页），回它的会话 id；预设在创建时定下：`presetId` 只切这一页并记进会话，不改全局默认；预设不存在就报 `invalid_params`、不开页；不带 `cwd` 是老语义 |
 | `thread/open { threadId }` | 把落盘会话开成一页（在它自己的 cwd 下），预设、模型、推理强度切回会话记的那一份（`meta.json`；不改全局默认，模型已不在目录里就不切）；已开着就回那一页。`thread/model/set` / `thread/reasoning/set` 切完立刻写回 `meta.json` |
 | `thread/close { threadId }` | 关页，会话留在磁盘上；第 1 页关不掉 |
-| `preset/list`（能力 `presets`） | 可选的 Agent 预设（顺序同 TUI `/preset`）：`id` / `label` / `description` / `icon`（客户端图标名，没写为 `null`）/ `builtin`（内置预设的 id；`origin` 为 user/project 时是改过的覆盖层，删掉即恢复内置）/ `origin`（`shipped`/`user`/`project`）/ `available`（坏掉的为 `false` 并带 `error`），外加 `defaultId`。只读：预设在 `thread/start` 时定下，没有中途切换的方法 |
+| `preset/list`（能力 `presets`） | 可选的 Agent 预设（顺序同 TUI `/preset`）：`id` / `label` / `description` / `icon`（客户端图标名，没写为 `null`）/ `builtin`（内置预设的 id；`origin` 为 user/project 时是改过的覆盖层，删掉即恢复内置）/ `origin`（`shipped`/`user`/`project`）/ `available`（坏掉的为 `false` 并带 `error`），外加 `defaultId`。只读：预设在 `thread/start` 时定下，没有中途切换的方法。每次现读盘（会话里写的预设下次列就在）。可选 `cwd`：列那个项目能选的（内置 + 用户层 + `cwd/.dock/presets`）；不给是进程 cwd 的项目层。`cwd` 不限定在已知项目里（任意路径的 `.dock/presets` 都会读；网关只听回环、要配对）。`thread/start` 按目标 `cwd` 的项目层校验 |
 | `preset/create { name, icon?, description?, basedOn? }` | 新建用户层预设（`~/.dock/presets/<id>/`），**不改**默认预设；`basedOn` 照它复制人设、工具名单和子代理。`icon` 只收小写字母、数字、`-`。回 `preset`（同列表的一项） |
 | `preset/get { id }` | 整份定义，编辑器用（见下） |
 | `preset/update { id, preset }` | 整份写回（见下） |
@@ -212,7 +212,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 每项 `name` / `summary`（描述第一句）/ `kind`。
 - `kind`：`resident` 常驻、`deferred` 按需（按这一页当前预设的 `on_demand_tools` 与登记方式）、`dynamic` 运行中的动态包（不受允许名单限制）。
 
-#### AI 辅助起草（`preset/draft` / `preset/rewrite` / `preset/suggestTools`）
+#### AI 辅助起草（`preset/draft` / `preset/rewrite` / `preset/suggestTools` / `preset/ask`）
 
 - 用默认模型采样一次；不开会话、不进会话历史、**不写盘**，只回草稿。
 - `preset/draft { description, icons? }` → `draft`：字段同 `preset/get`，另带 `toolReasons[]`。
@@ -221,7 +221,11 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `preset/rewrite { persona, mode: "polish" | "expand", description? }` → `persona`。
 - `preset/suggestTools { description, persona? }` → `tools[]`（`name` / `reason`）。
 - 模型没配好、调用失败、回得不能用：`draft_failed`，`message` 是中文原因。
-- 这三个方法不占连接锁：鉴权后另起任务，跑完再回帧，期间推送和其它请求照常。
+- `preset/ask { question, history?, draft?, step? }` → `answer`（Markdown）：编辑器旁的侧聊。
+  - 无状态：`history` 是之前的 `[{ role: "user" | "assistant", text }]`，只带最近 20 条。
+  - `draft` 是编辑器里那份（未保存，≤32KB）；`step` 是 `basic` / `prompt` / `tools` / `agents`。
+  - 只给参考，不改草稿、不写盘；`role` 不对回 `invalid_params`。
+- 这几个方法不占连接锁：鉴权后另起任务，跑完再回帧，期间推送和其它请求照常。
 
 其它线程级方法（`turn/*`、`thread/environment/*` 与各种 `set`、`thread/subscribe`、`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve`、`slash/execute`）接受任意线程的 id。关着的会话**按需开页**（同 `thread/open`，客户端不用先 open；同时来的请求只开一页）：`turn/start` / `enqueue` / `steer`、`thread/subscribe`、`thread/environment/*` 与各种 `set`、`slash/execute`。`turn/cancel` 与 `turn/queue/*` 对关着的会话回空结果（`cancelled: false`、空队列、`removed: false`），不开页；`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve` 只对开着的页有意义，仍回 `thread_not_open`；认不得的 id 回 `not_found`。`thread/history` 例外：关着的会话也给，`events` 由落盘事件按真实时间回放（`Transcript::replay`，和重开会话重建投影同一条路），每轮都以 `turn/completed` 收尾（结果照落盘的 `turn-end` 行报，停止、出错也看得出；更早的会话没有这一行，一律补成完成，最后一次采样带错误的补成失败），客户端开着关着只要一条路径。开页走 `"tabs"` 的 `Tabs::open_at`（不切终端里正在看的页）；没挂分页服务时只有第 1 页。
 
@@ -581,16 +585,37 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
   - 空闲时手动压缩没有一轮包着：开一轮、推标记、马上 `turn/completed`。
 - 重开会话 / 回放历史只有 `item/compaction`，没有前后占用。
 
+`thread/list { scope: "all" }` 的子代理计数（没有子代理就不带）：
+
+- `subagentCount`：内存里的 + 只在盘上的（关着的会话只数目录）。
+- `subagentsRunning`：正在跑的，只有开着的页才可能不为 0。
+
 ### 子代理（能力 `subagents`）
 
 模型用 `task` 派的子代理，挂在启动它的那一页：只有那一页的订阅者收到推送，
-`subagent/*` 也只认那一页的 `threadId`。子代理只活在内存里，Dock 重启后就没了。
+`subagent/*` 也只认那一页的 `threadId`。
+
+落盘（父会话落盘时）：
+
+- 子代理的对话写在 `<会话目录>/subagents/<agentId>/`：`chat_history.jsonl` + `subagent.json`（抬头）。
+- `list` / `history` 内存里没有就读盘：线程关着、Dock 重启过、早就收掉的都看得到。
+- 只在盘上的 `Agent` 多一个 `persisted: true`；盘上停在 `running` 的报 `cancelled`，停在 `idle` 的报 `completed`。
+- `interrupt` / `stop` 只认内存里活着的。
+
+接着聊（复活）：
+
+- `subagent/send` 发给收掉的、或只在盘上的子代理：同一个 `agentId` 从它的对话接着起一轮，回 `revived: true`。
+- 线程得开着（复活挂到那一页）；关着的先 `thread/open`。
+- 原话就是这一轮的开头（不加 `[type] 描述` 和回报说明）；启动时刻、`toolCallId` 沿用原来的，列表里不多出一个。
+- workflow 派的、角色已不在当前预设里的不能复活（报 `subagent_closed`，原因写在 message 里）。
+- 用户开的一轮（发给闲着的、复活的）结束时，结果送进父信箱但**不叫醒**父级；父级下一轮自然读到。
+- 老会话（这之前跑的）没有子代理目录，只剩父会话里的任务卡。
 
 | 方法 / 推送 | 作用 |
 |---|---|
 | `subagent/list { threadId? }` | 这个线程启动的子代理 `{ agents: [Agent] }`，先启动的在前 |
 | `subagent/history { threadId?, agentId }` | `{ agent, events }`：子代理自己的对话，和 `thread/history` 的 `events` 同形 |
-| `subagent/send { threadId?, agentId, message }` | 用户对子代理说一句：在跑就在下一步读到，空闲就开下一轮 |
+| `subagent/send { threadId?, agentId, message }` | 用户对子代理说一句：在跑就在下一步读到，空闲就开下一轮；收掉的 / 只在盘上的同一个 id 复活（见下） |
 | `subagent/interrupt { threadId?, agentId }` | 停下这一轮，子代理留着能接着聊；没在跑回 `interrupted: false` |
 | `subagent/stop { threadId?, agentId }` | 收掉子代理；已经收掉的回 `stopped: false` |
 | 推送 `subagent/updated { agent }` | 子代理出现了或状态变了 |
@@ -618,6 +643,31 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 - 子代理和派它的页共用这一页的权限队列与「始终允许」：
   - 子代理发的 `permission/requested` 带 `agentId`（它的 id），主会话发的是 `null`；
   - `permission/resolve { always: true }` 记在这一页上，之后这页和它的子代理调同一颗工具都不再问。
+
+### 工作流（能力 `workflows`）
+
+模型用 `workflow` 起的 run，挂在起它的那一页：只有那一页的订阅者收到推送，`workflow/*` 也只认那一页的 `threadId`。
+run 只在 Dock 内存里（不落盘），Dock 重启后 `workflow/list` 是空的。它派的子代理照常走「子代理」一节（`toolCallId` 为 `null`）。
+
+| 方法 / 推送 | 作用 |
+|---|---|
+| `workflow/list { threadId? }` | 这个线程起的 run `{ runs: [Run] }`，先起的在前 |
+| `workflow/stop { threadId?, runId }` | 停下在跑的 run（连同它派的子代理）；已结束的回 `stopped: false` |
+| 推送 `workflow/updated { run }` | run 出现了或变了（阶段、子代理行、日志、收尾）；只推不记，`seq` 为 0 |
+
+- `Run` 的字段：
+  - `runId`、`toolCallId`（起它的那次 `workflow` 调用）、`name`（显示名）、`builtin`；
+  - `description`：这次要做什么（`args.objective` / `args.query`，没有就是脚本描述）；
+  - `revision`：每变一次加一，不会倒退；拉列表和推送交错到达时，客户端丢掉比手上旧的；
+  - `status`：`running` / `completed` / `failed` / `cancelled` / `paused`；
+  - `phases: [{ title, detail }]`（脚本声明的）、`currentPhase`；
+  - `startedAt`（毫秒）、`durationMs`（在跑时算到那次推送，结束就定住）、`agentBudget`、`agentsUsed`；
+  - `agents: [{ agentId, label, phase, status, durationMs, tokensUsed, latestReport }]`，`status` 同子代理行的
+    `running` / `completed` / `failed` / `cancelled`，`latestReport` 截到 2000 字（失败时是原因）；
+  - `logs`：脚本 `log()` 最近 8 条（每条截到 500 字）；
+  - `result?`（完成才有）/ `error?`（失败、暂停才有），截到 8000 字；
+  - `resultData?`：脚本 `complete(#{ …, data })` 的 `data`，给界面的结构化结果（code-review 的批注见 `docs/tools/workflow.md`），不进 `result`；序列化超过 512KB 不带，改标 `resultDataOmitted: true`。
+- 找不到、或不是这个线程起的 run 回 `not_found`。
 
 ### 上下文明细（能力 `contextBreakdown`，`handlers/context.rs`）
 
@@ -732,6 +782,10 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
   - `mine`（作者是我）/ `reviewRequested`（请我 review）。
 - `vcs/pr/get { threadId | cwd, number }` → `{ available, pr }`：上面那些，加 `body` / `state` / `mergeStateStatus` /
   `additions` / `deletions` / `changedFiles` / `comments`（条数）/ `reviews[]`（每人最近一次）/ `checks[]`（`name` / `state` / `url`）。
+- `vcs/pr/diff { threadId | cwd, number }` → `{ available, diff, truncated }`：`gh pr diff` 的统一 diff，超过 4MB 截断。
+- `vcs/diff { threadId | cwd, command }`（只认受信连接）→ 同上：在项目目录里跑一条只读 diff 命令（code-review 结果里的
+  `diff_command`）。只认 `git diff …` / `git show …` / `gh pr diff …`，按空白拆参数直接起进程（不经 shell），
+  `--output` / `--ext-diff` / `--textconv` / `--web` / `-c` 之类回 `invalid_params`。本地改动是**现在**的工作区，审完又改过的话批注可能对不上行。
 - **gh 用不了不是错误**：回 `{ available: false, reason, hint }`，客户端画空状态。
   - `gh_missing`：没找到 gh（提示 `brew install gh` + `gh auth login`）；
   - `gh_unauthenticated`：gh 没登录；

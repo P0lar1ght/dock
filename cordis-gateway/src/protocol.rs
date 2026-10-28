@@ -62,6 +62,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `subagent/list` / `history` / `send` / `interrupt` / `stop` + 推送 `subagent/updated`
     // （状态）与 `subagent/event`（子代理自己的对话事件，包在父线程上）。
     ("subagents", true),
+    // `workflow/list` / `stop` + 推送 `workflow/updated`：工作流 run 的阶段、子代理行、
+    // 日志与结果（挂在起它的那一页；它派的子代理照常走 `subagents`）。
+    ("workflows", true),
     // `thread/context/get`：上下文窗口按类别拆开（系统提示 / 工具定义 / 消息 / 其余 / 空闲，
     // 各带明细）+ 按需加载、不占窗口的 MCP / 本地工具。
     ("contextBreakdown", true),
@@ -124,6 +127,11 @@ pub const PRESET_UPDATE: &str = "preset/update";
 pub const TOOL_CATALOG: &str = "tool/catalog";
 pub const VCS_PR_LIST: &str = "vcs/pr/list";
 pub const VCS_PR_GET: &str = "vcs/pr/get";
+/// 一个 PR 的统一 diff（`gh pr diff`）。
+pub const VCS_PR_DIFF: &str = "vcs/pr/diff";
+/// 在线程目录里跑一条只读的 diff 命令（code-review 记下的那条）：只认 `git diff` /
+/// `git show` / `gh pr diff`，不经 shell。
+pub const VCS_DIFF: &str = "vcs/diff";
 pub const SCHEDULE_LIST: &str = "schedule/list";
 pub const SCHEDULE_CREATE: &str = "schedule/create";
 pub const SCHEDULE_UPDATE: &str = "schedule/update";
@@ -151,6 +159,7 @@ pub const PLUGIN_SETTINGS_CHANGED: &str = "plugin/settings/changed";
 pub const PRESET_DRAFT: &str = "preset/draft";
 pub const PRESET_REWRITE: &str = "preset/rewrite";
 pub const PRESET_SUGGEST_TOOLS: &str = "preset/suggestTools";
+pub const PRESET_ASK: &str = "preset/ask";
 pub const THREAD_START: &str = "thread/start";
 pub const THREAD_OPEN: &str = "thread/open";
 pub const THREAD_CLOSE: &str = "thread/close";
@@ -249,6 +258,11 @@ pub const SUBAGENT_SEND: &str = "subagent/send";
 pub const SUBAGENT_INTERRUPT: &str = "subagent/interrupt";
 /// 收掉子代理（不能再接着聊）。
 pub const SUBAGENT_STOP: &str = "subagent/stop";
+
+/// 一个线程起的工作流 run（当前状态，和推送 `workflow/updated` 的 `run` 同形）。
+pub const WORKFLOW_LIST: &str = "workflow/list";
+/// 停下一条在跑的 run（连同它派的子代理）。
+pub const WORKFLOW_STOP: &str = "workflow/stop";
 
 pub const BROWSER_VIEW_OPEN: &str = "browser/view/open";
 pub const BROWSER_VIEW_INPUT: &str = "browser/view/input";

@@ -117,9 +117,12 @@ fn materialize_bundled() -> PathBuf {
     let root = cordis_base::config::dock_home()
         .join("bundled")
         .join("skills");
-    for (rel, content) in crate::tools::skills::builtin::BUILTIN_FILES {
+    let files = crate::tools::skills::builtin::BUILTIN_FILES;
+    for (rel, content) in files {
         let path = root.join(rel);
-        if path.is_file() {
+        // 缓存跟着二进制走：升级后内容变了就重写，不能「有就跳过」——那样旧版
+        // 正文会一直盖在新二进制上。
+        if std::fs::read(&path).is_ok_and(|old| old == content.as_bytes()) {
             continue;
         }
         if let Some(parent) = path.parent() {
@@ -127,7 +130,30 @@ fn materialize_bundled() -> PathBuf {
         }
         let _ = std::fs::write(&path, content);
     }
+    // 表里没有的是旧版留下的（改名、拆分、下线的技能），删掉以免还被发现 / 列出。
+    prune_bundled(&root, &root, files);
     root
+}
+
+fn prune_bundled(root: &Path, dir: &Path, files: &[(&str, &str)]) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            prune_bundled(root, &path, files);
+            let _ = std::fs::remove_dir(&path); // 只删空目录
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if !files.iter().any(|(r, _)| *r == rel) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 fn merge_scope(map: &mut IndexMap<String, SkillInfo>, skills: Vec<SkillInfo>) {
@@ -562,6 +588,21 @@ mod tests {
             );
         }
 
+        // 加了附属文件（references/、examples/）却忘了登记进表，物化后就缺一块，
+        // SKILL.md 指过去的路径读不到。
+        let builtin_src =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tools/skills/builtin");
+        let mut on_disk = Vec::new();
+        collect_files(&builtin_src, &builtin_src, &mut on_disk);
+        for rel in on_disk {
+            assert!(
+                crate::tools::skills::builtin::BUILTIN_FILES
+                    .iter()
+                    .any(|(r, _)| *r == rel),
+                "builtin/{rel} is not listed in BUILTIN_FILES"
+            );
+        }
+
         let repo_skills = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("workspace root")
@@ -582,10 +623,23 @@ mod tests {
             assert_conforms(&dir_name, &dir_name, &raw);
             repo_checked += 1;
         }
+        // cordis-plugin-development 已挪进内置，仓库里剩三份。
         assert!(
-            repo_checked >= 4,
-            "expected the four repo skills, got {repo_checked}"
+            repo_checked >= 3,
+            "expected the three repo skills, got {repo_checked}"
         );
+    }
+
+    fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_files(root, &path, out);
+            } else if path.file_name().is_none_or(|n| n != ".DS_Store") {
+                let rel = path.strip_prefix(root).unwrap();
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
     }
 
     /// name 必须合法且与目录同名；description 必填且不超 1024 字符。
@@ -660,8 +714,30 @@ mod tests {
         for name in crate::tools::skills::builtin::builtin_skill_dirs() {
             assert!(root.join(name).join("SKILL.md").is_file(), "{name}");
         }
-        // 幂等：再次物化不覆盖、不报错。
+        // 幂等：再次物化不报错。
         let _ = materialize_bundled();
+        // 升级：缓存里是旧版正文 / 旧版留下的文件，物化后要换成二进制里的这份。
+        let stale = root.join("dock-guide").join("SKILL.md");
+        std::fs::write(
+            &stale,
+            "---\nname: dock-guide\ndescription: old\n---\nold\n",
+        )
+        .unwrap();
+        let leftover = root.join("dock-guide").join("references").join("gone.md");
+        std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+        std::fs::write(&leftover, "old").unwrap();
+        let retired = root.join("retired-skill").join("SKILL.md");
+        std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
+        std::fs::write(&retired, "---\nname: retired-skill\ndescription: x\n---\n").unwrap();
+        let _ = materialize_bundled();
+        let shipped = crate::tools::skills::builtin::BUILTIN_FILES
+            .iter()
+            .find(|(rel, _)| *rel == "dock-guide/SKILL.md")
+            .unwrap()
+            .1;
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), shipped);
+        assert!(!leftover.exists() && !leftover.parent().unwrap().exists());
+        assert!(!retired.exists() && !retired.parent().unwrap().exists());
         let skills = scan_all_at(&std::env::current_dir().unwrap());
         let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"dock-guide"), "{names:?}");

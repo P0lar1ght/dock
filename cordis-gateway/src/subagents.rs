@@ -16,22 +16,9 @@ use serde_json::{json, Value};
 /// `output` 最多带这么多字（卡片只显示两行摘要，面板显示最后的回报）。
 const OUTPUT_CHARS: usize = 4000;
 
-/// running / idle / completed / failed / cancelled。
-///
-/// 子代理每轮做完都停在 idle（还能接着聊）；只有被收掉（结束、空闲太久、会话停止）
-/// 才是 completed。失败和取消优先：最近一轮怎么收的尾就报什么。
+/// running / idle / completed / failed / cancelled（规则在 [`SubagentSnap::status`]）。
 pub fn status(snap: &SubagentSnap) -> &'static str {
-    if snap.running() {
-        "running"
-    } else if snap.failed {
-        "failed"
-    } else if snap.cancelled {
-        "cancelled"
-    } else if snap.idle {
-        "idle"
-    } else {
-        "completed"
-    }
+    snap.status()
 }
 
 /// 子代理停下时它那一轮的收尾状态（子代理的会话不记 `TurnEnd`）。
@@ -45,9 +32,8 @@ pub fn turn_status(snap: &SubagentSnap, events: &[LogEvent]) -> TurnEndStatus {
 
 /// 一个子代理：`subagent/updated` 的 `agent`、`subagent/list` 的一项。
 pub fn info(snap: &SubagentSnap, events: &[LogEvent], role: Option<String>) -> Value {
-    let started_at = SystemTime::now()
-        .checked_sub(snap.started_at.elapsed())
-        .unwrap_or(UNIX_EPOCH);
+    // 墙钟启动时刻：同 id 复活后沿用第一次的，列表里不挪位置。
+    let started_at = snap.started_wall;
     let mut v = json!({
         "agentId": snap.id,
         "toolCallId": snap.tool_call_id,
@@ -59,6 +45,8 @@ pub fn info(snap: &SubagentSnap, events: &[LogEvent], role: Option<String>) -> V
         "durationMs": duration_ms(snap.elapsed()),
         "toolCalls": tool_calls(events),
         "output": cap(snap.output.trim(), OUTPUT_CHARS),
+        // 显式带上：和只在盘上的 `persisted: true` 对称，客户端不用靠「缺省即 false」。
+        "persisted": false,
     });
     if snap.running() {
         if let Some(activity) = activity(events) {
@@ -74,10 +62,64 @@ pub fn info(snap: &SubagentSnap, events: &[LogEvent], role: Option<String>) -> V
     v
 }
 
+/// 只在盘上的子代理（不在内存里）：和 [`info`] 同形，多一个 `persisted: true`。
+///
+/// 盘上记的是最后一次变化时的状态。人已经不在内存里了，还写着 running 的是进程中途
+/// 没了（算 cancelled），idle 的是停在那等下一句、后来被回收或 Dock 重启了（算 completed）。
+pub fn persisted_info(meta: &cordis_spine::SubagentMeta, role: Option<String>) -> Value {
+    let status = match meta.status.as_str() {
+        "running" => "cancelled",
+        "idle" => "completed",
+        other => other,
+    };
+    let output = meta.output.trim();
+    let mut v = json!({
+        "agentId": meta.id,
+        "toolCallId": meta.tool_call_id,
+        "subagentType": meta.subagent_type,
+        "role": role.unwrap_or_else(|| meta.subagent_type.clone()),
+        "description": meta.description,
+        "status": status,
+        "startedAt": meta.started_ms,
+        "durationMs": meta.settled_ms.map(|s| s.saturating_sub(meta.started_ms)).unwrap_or(0),
+        "toolCalls": meta.tool_calls,
+        "output": cap(output, OUTPUT_CHARS),
+        "persisted": true,
+    });
+    if status == "failed" && !output.is_empty() {
+        v["error"] = json!(output.strip_prefix("failed: ").unwrap_or(output));
+    }
+    v
+}
+
 /// `ctx` 那一页预设里角色的显示名（如「探索」「岑」）。
 pub fn role_label(ctx: &Context, subagent_type: &str) -> Option<String> {
     ctx.get::<AgentPresets>(AGENT_PRESETS)
         .and_then(|p| p.role_label(subagent_type))
+}
+
+/// 关着的线程用它自己落盘时的预设（`meta.json` 的 `preset_id`，按它的项目目录读）找角色
+/// 显示名；老会话没记预设、或预设已经不在了，退回根上的。
+pub fn role_label_at(
+    ctx: &Context,
+    cwd: &std::path::Path,
+    preset_id: Option<&str>,
+    subagent_type: &str,
+) -> Option<String> {
+    let presets = ctx.get::<AgentPresets>(AGENT_PRESETS)?;
+    let from_session = preset_id
+        .and_then(|id| presets.get_at(cwd, id))
+        .and_then(|preset| {
+            preset.agents.get(subagent_type).map(|def| {
+                let name = def.name.trim();
+                if name.is_empty() {
+                    subagent_type.to_string()
+                } else {
+                    name.to_string()
+                }
+            })
+        });
+    from_session.or_else(|| presets.role_label(subagent_type))
 }
 
 /// `identity` 那一页启动的子代理，先启动的在前。

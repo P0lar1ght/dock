@@ -3,12 +3,14 @@
 //! `preset/create` / `preset/delete`：GUI 的自定义预设（写用户层 `~/.dock/presets`）。
 //! `preset/get` / `preset/update` / `tool/catalog`：GUI 预设编辑器（同 TUI `/preset` 画布）。
 //! `preset/draft` / `preset/rewrite` / `preset/suggestTools`：AI 辅助起草，只回草稿、不写盘。
+//! `preset/ask`：编辑器旁的侧聊，只回参考答案、不写盘。
 
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    draft_preset, is_shipped, rewrite_persona, shipped_roles, AgentPreset, AgentPresets,
-    PresetEdit, PresetOrigin, Rewrite, SubagentDef, ToolChoice, Tools, AGENT_PRESETS, TOOLS,
+    ask_preset, draft_preset, is_shipped, rewrite_persona, shipped_roles, AgentPreset,
+    AgentPresets, AskTurn, PresetEdit, PresetOrigin, Rewrite, SubagentDef, ToolChoice, Tools,
+    AGENT_PRESETS, TOOLS,
 };
 
 use crate::handle::GatewayHandle;
@@ -20,12 +22,26 @@ use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
 
 /// 顺序和 TUI `/preset` 一样。`defaultId` 是不带 `presetId` 开新会话时用的那个。
 /// 坏掉的预设也列出来（`available: false` + `error`），但 `thread/start` 会拒。
-pub fn list(gateway: &GatewayHandle, _params: Value) -> Result<Value, RpcError> {
+/// 每次现读盘（`resync`），所以别处写进用户层的预设下次列就在。
+/// 给了 `cwd` 就列那个项目能选的（内置 + 用户层 + `cwd/.dock/presets`）；不给是进程
+/// cwd 的项目层，GUI 下那是应用数据目录，不是用户的项目。
+pub fn list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let presets = gateway
         .ctx()
         .get::<AgentPresets>(AGENT_PRESETS)
         .ok_or_else(|| RpcError::app("unavailable", "预设服务没有挂载"))?;
-    let items: Vec<Value> = presets.list().into_iter().map(summary).collect();
+    let cwd = params
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    // 预设可能是会话里模型用 write_file 写的：每次列都现读一遍盘。
+    presets.resync();
+    let listed = match cwd {
+        Some(cwd) => presets.list_at(std::path::Path::new(cwd)),
+        None => presets.list(),
+    };
+    let items: Vec<Value> = listed.into_iter().map(summary).collect();
     Ok(json!({ "presets": items, "defaultId": presets.current_id() }))
 }
 
@@ -398,6 +414,45 @@ fn summary(p: AgentPreset) -> Value {
     })
 }
 
+/// `preset/ask { question, history?, draft?, step? }`：预设编辑器旁的侧聊，回 `answer`
+/// （Markdown）。无状态：`history` 是之前的 `[{ role: "user" | "assistant", text }]`，
+/// `draft` 是编辑器里当前那份（未保存），`step` 是 basic / prompt / tools / agents。
+/// 只给参考：**不写盘、不改草稿**。模型没配好是 `draft_failed`。
+pub async fn ask(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let question = params.get("question").and_then(Value::as_str).unwrap_or("");
+    let mut history = Vec::new();
+    for turn in params
+        .get("history")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let text = turn.get("text").and_then(Value::as_str).unwrap_or("");
+        history.push(match turn.get("role").and_then(Value::as_str) {
+            Some("user") => AskTurn::User(text.to_string()),
+            Some("assistant") => AskTurn::Assistant(text.to_string()),
+            other => {
+                return Err(RpcError::invalid_params(format!(
+                    "history 的 role 只能是 user / assistant：{other:?}"
+                )))
+            }
+        });
+    }
+    let step = params.get("step").and_then(Value::as_str);
+    let catalog = choices(gateway)?;
+    let answer = ask_preset(
+        gateway.ctx(),
+        question,
+        &history,
+        params.get("draft"),
+        step,
+        &catalog,
+    )
+    .await
+    .map_err(|e| RpcError::app("draft_failed", e))?;
+    Ok(json!({ "answer": answer }))
+}
+
 /// 预设编辑器这一块：`preset/*` 与 `tool/catalog`。AI 起草 / 改写 / 推荐工具要调模型
 /// （一次几秒），放到连接锁外跑。
 pub fn gateway_presets() -> Plugin {
@@ -452,6 +507,11 @@ pub fn gateway_presets() -> Plugin {
                         protocol::PRESET_SUGGEST_TOOLS,
                         MethodPolicy::detached(),
                         method(|gw, params| async move { suggest_tools(&gw, params).await }),
+                    ),
+                    (
+                        protocol::PRESET_ASK,
+                        MethodPolicy::detached(),
+                        method(|gw, params| async move { ask(&gw, params).await }),
                     ),
                 ],
             )?;

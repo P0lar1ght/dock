@@ -151,6 +151,9 @@ pub struct Sessions {
     pending_user_addons: Arc<Mutex<VecDeque<(String, String)>>>,
     /// When set, archive / live snapshots write Grok-style folders under
     /// `$DOCK_HOME/sessions/<cwd-key>/`. Isolated child logs stay memory-only.
+    /// 子代理的落盘目录（`<父会话>/subagents/<id>/`）：设了就把这份日志写到那里，
+    /// 不写会话抬头、不进搜索索引。见 [`Self::attach_child_dir`]。
+    child_dir: Arc<Mutex<Option<PathBuf>>>,
     disk_cwd: Arc<Mutex<Option<PathBuf>>>,
     /// Cwd captured when a non-disk tab opens. Its plan file stays under this
     /// cwd after a later process-wide `cd`. This does not turn persistence on;
@@ -328,6 +331,7 @@ impl Sessions {
             side_notes: Arc::new(Mutex::new(Vec::new())),
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
             disk_cwd: Arc::new(Mutex::new(None)),
+            child_dir: Arc::new(Mutex::new(None)),
             plan_cwd: Arc::new(Mutex::new(None)),
             workspace_cwd: Arc::new(Mutex::new(None)),
             live_id: Arc::new(Mutex::new(String::new())),
@@ -646,9 +650,20 @@ impl Sessions {
     }
 
     pub fn seed(&self, events: Vec<LogEvent>) {
+        self.seed_with_times(events, Vec::new());
+    }
+
+    /// 同 [`Self::seed`]，带上每条事件原来的时刻（复活子代理时从盘上读回来的）；条数对不上就
+    /// 都算现在。
+    pub fn seed_with_times(&self, events: Vec<LogEvent>, times: Vec<SystemTime>) {
         let n = events.len();
+        let times = if times.len() == n {
+            times
+        } else {
+            vec![SystemTime::now(); n]
+        };
         *self.events.lock().unwrap() = events;
-        *self.times.lock().unwrap() = vec![SystemTime::now(); n];
+        *self.times.lock().unwrap() = times;
         self.reset_compact();
         *self.context_anchor.lock().unwrap() = None;
         *self.compaction.lock().unwrap() = None;
@@ -1811,6 +1826,13 @@ impl Sessions {
         }
     }
 
+    /// 已经有的落盘目录（不新建、不分配 id）：读这一页落过盘的东西（子代理）用。
+    pub fn existing_session_dir(&self) -> Option<std::path::PathBuf> {
+        let cwd = self.disk_cwd.lock().unwrap().clone()?;
+        let live = self.live_id.lock().unwrap().clone();
+        (!live.is_empty()).then(|| crate::session::persist::sessions_cwd_dir(&cwd).join(live))
+    }
+
     /// `$DOCK_HOME/sessions/<cwd-key>/<id>/` for the live thread, when disk-backed.
     pub fn disk_session_dir(&self) -> Option<std::path::PathBuf> {
         let cwd = self.disk_cwd.lock().unwrap().clone()?;
@@ -1847,7 +1869,33 @@ impl Sessions {
         let _ = crate::session::persist::save(item, &cwd);
     }
 
+    /// 子代理日志写到 `dir`（父会话目录下的 `subagents/<id>/`）。之后每次变化整份重写，
+    /// 和会话落盘同一个时机；种进来的历史（`resume_from`）也马上写一份。
+    pub fn attach_child_dir(&self, dir: PathBuf) {
+        *self.child_dir.lock().unwrap() = Some(dir);
+        self.persist_live();
+    }
+
+    fn persist_child(&self, dir: &std::path::Path) {
+        let events = self.events();
+        if events.is_empty() {
+            return;
+        }
+        let (compact_prefix, compact_from) = self.compact_snapshot();
+        let _ = crate::session::persist::save_child(
+            dir,
+            &events,
+            &self.times(),
+            compact_prefix,
+            compact_from,
+        );
+    }
+
     fn persist_live(&self) {
+        if let Some(dir) = self.child_dir.lock().unwrap().clone() {
+            self.persist_child(&dir);
+            return;
+        }
         let Some(cwd) = self.disk_cwd.lock().unwrap().clone() else {
             return;
         };

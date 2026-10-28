@@ -74,6 +74,9 @@ pub struct SubagentRequest {
     pub await_to_completion: bool,
     pub owner: SubagentOwner,
     pub cancel_token: CancellationToken,
+    /// 用户在界面上接着跟一个已经收掉的子代理聊：**同一个 id** 重新起。协调器放行
+    /// 已结束的同名 id（排队 / 在跑的照旧拒绝），任务原文不加 `[type] 描述` 开头。
+    pub revive: bool,
 }
 
 impl SubagentRequest {

@@ -122,6 +122,13 @@ fn isolated_home() {
     });
 }
 
+/// 用户层预设在共用的 `$DOCK_HOME/presets` 里，`preset/list` 每次现读盘：写它或拿整张
+/// 列表做前后对比的用例互斥，否则会看到别的用例刚写的预设。
+async fn presets_disk() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
 /// 一个存在的、这次独有的项目目录。
 fn project_dir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -2116,6 +2123,7 @@ async fn thread_search_finds_saved_sessions_by_their_messages() {
 /// GUI 的自定义预设：新建（带图标）→ 列表里有 → 能用它开会话 → 删掉。
 #[tokio::test]
 async fn custom_presets_can_be_created_used_and_deleted() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -2179,11 +2187,93 @@ async fn custom_presets_can_be_created_used_and_deleted() {
     );
 }
 
+/// 会话里让模型写的预设（不是 GUI 的「新建预设」）：文件落盘之后 GUI 就要看得到、
+/// 能拿它开会话。以前 `preset/list` 回的是启动时读的那份，`thread/start` 也拿它校验；
+/// 而 GUI 的 `dock serve` 跑在应用数据目录，根上的项目层根本不是任何真实项目。
+#[tokio::test]
+async fn presets_written_to_disk_mid_session_are_listed_and_usable() {
+    let _presets = presets_disk().await;
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc.call("preset/list", json!({})).await;
+    let tag = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    // 用户层：写 `$DOCK_HOME/presets/<id>/agent.yml`，像模型用 write_file 那样。
+    let user_id = format!("disk-user-{tag}");
+    let user_dir = cordis_base::config::dock_home()
+        .join("presets")
+        .join(&user_id);
+    std::fs::create_dir_all(&user_dir).unwrap();
+    std::fs::write(
+        user_dir.join("agent.yml"),
+        "name: 落盘用户预设\npersona: 你是测试预设。\n",
+    )
+    .unwrap();
+    let listed = rpc.call("preset/list", json!({})).await;
+    assert!(
+        listed.to_string().contains(&user_id),
+        "写进用户层的预设不在列表里：{listed}"
+    );
+
+    // 项目层：写进那个项目的 `.dock/presets/<id>/`（模型新建预设的默认落点）。
+    let project = project_dir("disk-project-preset");
+    let project_id = format!("disk-proj-{tag}");
+    let preset_dir = project.join(".dock").join("presets").join(&project_id);
+    std::fs::create_dir_all(&preset_dir).unwrap();
+    std::fs::write(
+        preset_dir.join("agent.yml"),
+        "name: 落盘项目预设\npersona: 你是项目预设。\n",
+    )
+    .unwrap();
+    let started = rpc
+        .call(
+            "thread/start",
+            json!({ "cwd": project.display().to_string(), "presetId": project_id }),
+        )
+        .await;
+    assert!(
+        started.get("error").is_none(),
+        "项目层预设开不了会话：{started}"
+    );
+    assert_eq!(
+        started["result"]["thread"]["presetId"],
+        json!(project_id),
+        "{started}"
+    );
+    // 列表按项目：带 cwd 才列得出项目层的，不带（进程 cwd）列不出。
+    let scoped = rpc
+        .call(
+            "preset/list",
+            json!({ "cwd": project.display().to_string() }),
+        )
+        .await;
+    let item = scoped["result"]["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(project_id))
+        .cloned()
+        .unwrap_or_else(|| panic!("带 cwd 的列表里没有项目层预设：{scoped}"));
+    assert_eq!(item["origin"], "project", "{item}");
+    assert!(
+        scoped.to_string().contains(&user_id),
+        "用户层也要在：{scoped}"
+    );
+    let global = rpc.call("preset/list", json!({})).await;
+    assert!(!global.to_string().contains(&project_id), "{global}");
+}
+
 /// 预设编辑器：`tool/catalog` 列可选工具（不含 MCP），`preset/get` 给整份定义，
 /// `preset/update` 整份写回（名册增删、工具名单、人设），校验错误回 `invalid_params`；
 /// 内置预设改完成覆盖层（`origin: user`、带文件路径），内置子代理删不掉。
 #[tokio::test]
 async fn preset_editor_reads_and_writes_the_whole_definition() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -2282,6 +2372,7 @@ async fn preset_editor_reads_and_writes_the_whole_definition() {
 /// {includeMcp:true}` 才带 MCP 行。
 #[tokio::test]
 async fn preset_resident_tools_round_trip_and_survive_old_clients() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -2367,6 +2458,7 @@ async fn preset_resident_tools_round_trip_and_survive_old_clients() {
 /// `invalid_params`；另起任务回帧之后连接照常可用。
 #[tokio::test]
 async fn preset_assist_calls_the_model_and_never_writes() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -2415,6 +2507,29 @@ async fn preset_assist_calls_the_model_and_never_writes() {
         "{bad_mode}"
     );
 
+    let asked = rpc
+        .call(
+            "preset/ask",
+            json!({
+                "question": "代码审查员要哪些工具？",
+                "history": [
+                    { "role": "user", "text": "我在做代码审查员" },
+                    { "role": "assistant", "text": "好的" }
+                ],
+                "draft": { "name": "审查员", "persona": "你审代码", "tools": ["read_file"] },
+                "step": "tools"
+            }),
+        )
+        .await;
+    // 测试的假模型不回话：走到采样、再按「没回答」回错（成功路径见 spine 单测）。
+    assert_eq!(asked["error"]["details"]["code"], "draft_failed", "{asked}");
+    let bad_role = rpc
+        .call(
+            "preset/ask",
+            json!({ "question": "x", "history": [{ "role": "system", "text": "x" }] }),
+        )
+        .await;
+    assert_eq!(bad_role["error"]["code"], -32602, "{bad_role}");
     let tools = rpc
         .call("preset/suggestTools", json!({ "description": "搜代码" }))
         .await;
@@ -2852,6 +2967,7 @@ async fn thread_start_with_preset_is_per_page_and_listed() {
 /// `defaultId` 是不带 `presetId` 开新会话时用的那个；列出来的 id 能直接拿去开会话。
 #[tokio::test]
 async fn preset_list_feeds_thread_start() {
+    let _presets = presets_disk().await;
     let h = Harness::boot_with_pages().await;
     let ticket = h.pair_ticket().await;
     let mut rpc = Rpc::connect(h.addr, &ticket).await;
@@ -4934,8 +5050,267 @@ async fn notes_until(
     }
 }
 
+/// 收掉眼下已经到了的推送（一条都没有就马上回）。
+async fn drain_notes(rpc: &mut Rpc) -> Vec<Value> {
+    let mut seen = Vec::new();
+    while let Ok(Some(Ok(msg))) =
+        tokio::time::timeout(Duration::from_millis(50), rpc.read.next()).await
+    {
+        if let Ok(text) = msg.into_text() {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                seen.push(value);
+            }
+        }
+    }
+    seen
+}
+
 fn agent_status_is(note: &Value, status: &str) -> bool {
     note["method"] == "subagent/updated" && note["params"]["agent"]["status"] == status
+}
+
+fn run_status_is(note: &Value, status: &str) -> bool {
+    note["method"] == "workflow/updated" && note["params"]["run"]["status"] == status
+}
+
+/// 工作流在 dock.1 上看得见，而且归起它的那个线程：桌面端每个会话都是一页（`main#N`），
+/// 以前 run 一律按第 1 页走，起工作流的会话什么都收不到。run 的变化推 `workflow/updated`，
+/// 它派的子代理照常推 `subagent/updated`（`toolCallId` 为 `null`）；`workflow/list` 补中途
+/// 接入，别的线程查不到、停不了。
+#[tokio::test]
+async fn workflows_project_onto_the_thread_that_started_them() {
+    let root = harness_root_with(Some(Arc::new(EchoLastUser))).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(tool_task(), TaskConfig::default())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(cordis_spine::tool_workflow(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["workflows"], true, "{init}");
+    let dir = project_dir("workflow-page");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let page = h
+        .ctx
+        .require::<cordis_spine::Tabs>(cordis_spine::TABS)
+        .unwrap()
+        .contexts()
+        .into_iter()
+        .find(|c| {
+            c.get::<Sessions>(SESSIONS)
+                .is_some_and(|s| s.identity() != "main")
+        })
+        .expect("thread/start 开出的那一页");
+
+    let script = r#"
+let meta = #{ name: "page-probe", description: "两个子代理", phases: [#{ title: "Look" }] };
+phase("Look");
+let a = agent("first", #{ label: "a" });
+let b = agent("second", #{ label: "b" });
+complete(#{ report: "done", data: #{ kind: "probe", n: 2 } });
+"#;
+    let tools = h.ctx.require::<Tools>(TOOLS).unwrap();
+    let launched = tools
+        .execute_on(
+            &page,
+            ToolCall {
+                id: "call-wf".into(),
+                name: "workflow".into(),
+                arguments: json!({ "source": { "type": "script", "script": script } }).to_string(),
+            },
+        )
+        .await;
+    assert!(launched.content.contains("run_id"), "{}", launched.content);
+
+    let notes = notes_until(&mut rpc, Duration::from_secs(10), |n| {
+        run_status_is(n, "completed")
+    })
+    .await;
+    let done = &notes.last().unwrap()["params"];
+    assert_eq!(done["threadId"], id.as_str(), "推给起它的那个线程");
+    let run = &done["run"];
+    assert_eq!(run["toolCallId"], "call-wf");
+    let revisions: Vec<u64> = notes
+        .iter()
+        .filter(|n| n["method"] == "workflow/updated")
+        .map(|n| n["params"]["run"]["revision"].as_u64().unwrap())
+        .collect();
+    // 两个孩子几乎同时变时，两次推送可能都读到最新那份：不减即可，最后一份最新。
+    assert!(
+        revisions.windows(2).all(|w| w[0] <= w[1]) && revisions.first() < revisions.last(),
+        "revision 不能倒退：{revisions:?}"
+    );
+    assert_eq!(run["name"], "page-probe");
+    assert_eq!(run["phases"][0]["title"], "Look");
+    assert_eq!(run["result"], "report: done", "data 不进给人看的结果");
+    assert_eq!(run["resultData"], json!({ "kind": "probe", "n": 2 }));
+    let agents = run["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 2, "{run}");
+    for (agent, label) in agents.iter().zip(["a", "b"]) {
+        assert_eq!(agent["label"], label);
+        assert_eq!(agent["status"], "completed", "{agent}");
+        assert_eq!(agent["phase"], "Look");
+        let agent_id = agent["agentId"].as_str().unwrap();
+        assert!(
+            notes.iter().any(|n| n["method"] == "subagent/updated"
+                && n["params"]["agent"]["agentId"] == agent_id
+                && n["params"]["agent"]["toolCallId"].is_null()),
+            "run 派的子代理也要推到这个线程：{agent_id}"
+        );
+    }
+    assert!(
+        notes.iter().any(|n| run_status_is(n, "running")),
+        "跑的过程中也要推：{notes:#?}"
+    );
+
+    let listed = rpc.call("workflow/list", json!({ "threadId": id })).await;
+    let runs = listed["result"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1, "{listed}");
+    let run_id = runs[0]["runId"].as_str().unwrap().to_string();
+    let other = rpc
+        .call("workflow/list", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(
+        other["result"]["runs"],
+        json!([]),
+        "第 1 页不该看到别的线程的 run"
+    );
+
+    let stopped = rpc
+        .call("workflow/stop", json!({ "threadId": id, "runId": run_id }))
+        .await;
+    assert_eq!(
+        stopped["result"]["stopped"], false,
+        "已经结束的停不了：{stopped}"
+    );
+    let foreign = rpc
+        .call(
+            "workflow/stop",
+            json!({ "threadId": "live", "runId": run_id }),
+        )
+        .await;
+    assert_eq!(
+        foreign["error"]["details"]["code"], "not_found",
+        "{foreign}"
+    );
+}
+
+/// `vcs/diff`：受信连接在项目目录里拿到一条只读 diff 命令的输出（code-review 的批注靠它画到
+/// 差异视图上）；不是只读 diff 形状的命令拒掉；配对来的网页连接不能用。
+#[tokio::test]
+async fn vcs_diff_runs_only_read_only_diff_commands_for_trusted_clients() {
+    let root = harness_root().await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let dir = project_dir("vcs-diff");
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+    let started = gui
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let got = gui
+        .call(
+            "vcs/diff",
+            json!({ "threadId": id, "command": "git diff HEAD" }),
+        )
+        .await;
+    assert_eq!(got["result"]["available"], true, "{got}");
+    assert!(
+        got["result"]["diff"].as_str().unwrap().contains("+two"),
+        "{got}"
+    );
+
+    for bad in [
+        "rm -rf .",
+        "git diff --output=x",
+        "git push",
+        "gh api repos/o/r",
+    ] {
+        let refused = gui
+            .call("vcs/diff", json!({ "threadId": id, "command": bad }))
+            .await;
+        assert_eq!(
+            refused["error"]["details"]["code"], "invalid_params",
+            "{bad}: {refused}"
+        );
+    }
+    assert!(!dir.join("x").exists(), "--output 不能真的写出文件");
+
+    // 配对来的网页（不受信）不能用。
+    let h = Harness::boot().await;
+    let page_ticket = h.pair_ticket().await;
+    let mut page = Rpc::connect(h.addr, &page_ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    let denied = page
+        .call(
+            "vcs/diff",
+            json!({ "threadId": "live", "command": "git diff HEAD" }),
+        )
+        .await;
+    assert_eq!(denied["error"]["details"]["code"], "forbidden", "{denied}");
 }
 
 /// 子代理在 dock.1 上看得见：状态推 `subagent/updated`，它自己的对话包成父线程上的
@@ -5066,16 +5441,63 @@ async fn subagents_project_onto_the_thread_that_started_them() {
             )
     })
     .await;
+    let started_before = rpc
+        .call("subagent/list", json!({ "threadId": "live" }))
+        .await["result"]["agents"][0]["startedAt"]
+        .clone();
+    // 收掉的子代理：同一个 id 复活接着聊；用户开的这一轮结果不叫醒父级。
     let after = rpc
         .call(
             "subagent/send",
-            json!({ "threadId": "live", "agentId": agent_id, "message": "x" }),
+            json!({ "threadId": "live", "agentId": agent_id, "message": "revived" }),
         )
         .await;
+    assert_eq!(after["result"]["revived"], true, "{after}");
+    let notes = notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        agent_status_is(n, "idle") && n["params"]["agent"]["agentId"] == agent_id.as_str()
+    })
+    .await;
     assert!(
-        after.get("error").is_some(),
-        "收掉的子代理不能再发：{after}"
+        notes.iter().any(|n| n["method"] == "subagent/event"
+            && n["params"]["event"]["method"] == "item/user_message"
+            && n["params"]["event"]["payload"]["content"] == "revived"),
+        "复活的这一轮以用户原话开头：{notes:#?}"
     );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let quiet = drain_notes(&mut rpc).await;
+    assert!(
+        !notes
+            .iter()
+            .chain(quiet.iter())
+            .any(|n| n["method"] == "turn/started"),
+        "用户开的一轮不叫醒父级：{notes:#?} {quiet:#?}"
+    );
+    let listed = rpc
+        .call("subagent/list", json!({ "threadId": "live" }))
+        .await;
+    let agents = listed["result"]["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1, "复活不多出一个：{listed}");
+    assert_eq!(agents[0]["agentId"], agent_id.as_str());
+    assert_eq!(
+        agents[0]["startedAt"], started_before,
+        "启动时刻沿用第一次的"
+    );
+    assert_eq!(agents[0]["toolCallId"], "call-1");
+    // 再停掉，后面的历史回放照旧。
+    let _ = rpc
+        .call(
+            "subagent/stop",
+            json!({ "threadId": "live", "agentId": agent_id }),
+        )
+        .await;
+    notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        n["method"] == "subagent/updated"
+            && matches!(
+                n["params"]["agent"]["status"].as_str(),
+                Some("completed" | "cancelled")
+            )
+    })
+    .await;
     // 收掉后网关丢了它的实时投影，历史改按它的会话回放：还得看得到整段过程。
     let replayed = rpc
         .call(
@@ -5084,7 +5506,7 @@ async fn subagents_project_onto_the_thread_that_started_them() {
         )
         .await;
     let replayed = replayed["result"]["events"].as_array().unwrap();
-    for needle in ["hi kid", "again"] {
+    for needle in ["hi kid", "again", "revived"] {
         assert!(
             replayed.iter().any(|e| e["method"] == "item/user_message"
                 && e["payload"]["content"].as_str().unwrap().contains(needle)),
@@ -5099,6 +5521,141 @@ async fn subagents_project_onto_the_thread_that_started_them() {
         )
         .await;
     assert!(missing.get("error").is_some(), "{missing}");
+}
+
+/// 父会话落盘时，子代理的对话落在 `<会话>/subagents/<id>/`：会话关掉（这里用归档，
+/// 和 `/new` 一样）后 `thread/list` 带子代理计数，`subagent/list` / `history` 从盘上读。
+#[tokio::test]
+async fn subagents_of_a_closed_thread_are_read_from_disk() {
+    let root = harness_root_with(Some(Arc::new(EchoLastUser))).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(tool_task(), TaskConfig::default())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let h = Harness::boot_on(root).await;
+    let sessions = h.ctx.require::<Sessions>(SESSIONS).unwrap();
+    // 和真会话一样记下落盘时的预设（`meta.json` 的 `preset_id`）。
+    sessions.seed_preset_if_unset("code");
+    sessions.attach_disk();
+    sessions.append(LogEvent::User("派个子代理看看".into()));
+    let parent_id = sessions.live_session_id();
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": "live" }))
+        .await;
+
+    let tools = h.ctx.require::<Tools>(TOOLS).unwrap();
+    let started = tools
+        .execute(ToolCall {
+            id: "call-disk".into(),
+            name: "task".into(),
+            arguments: json!({
+                "prompt": "落盘的孩子",
+                "description": "落盘测试",
+                "subagent_type": "explore",
+                "run_in_background": true,
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(started.content.contains("agent_id:"), "{}", started.content);
+    let notes = notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        agent_status_is(n, "idle")
+    })
+    .await;
+    let agent_id = notes.last().unwrap()["params"]["agent"]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let dir = sessions
+        .existing_session_dir()
+        .expect("parent is on disk")
+        .join("subagents")
+        .join(&agent_id);
+    let meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("subagent.json")).unwrap()).unwrap();
+    assert_eq!(meta["status"], "idle", "{meta}");
+    assert_eq!(meta["toolCallId"], "call-disk", "{meta}");
+    assert_eq!(meta["description"], "落盘测试", "{meta}");
+    let history = std::fs::read_to_string(dir.join("chat_history.jsonl")).unwrap();
+    assert!(history.contains("落盘的孩子"), "{history}");
+
+    // 归档：父会话不再是开着的页，只在名册里。
+    sessions.archive_current();
+    assert_ne!(sessions.live_session_id(), parent_id);
+    // 根上换成没有 explore 角色的预设：关着的线程要按它自己落盘时的预设叫角色（「探索」），
+    // 不是跟着根上现在的预设走（那样会退成原始的 `explore`）。用 `pin` 不用 `apply`：
+    // `apply` 会写共用 `$DOCK_HOME` 的 roster.yml，并行的别的用例会读到 warden。
+    h.ctx
+        .require::<AgentPresets>(AGENT_PRESETS)
+        .unwrap()
+        .pin("warden")
+        .unwrap();
+
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let row = listed["result"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(parent_id))
+        .cloned()
+        .unwrap_or_else(|| panic!("closed parent missing: {listed}"));
+    assert_eq!(row["open"], false, "{row}");
+    assert_eq!(row["subagentCount"], 1, "{row}");
+
+    let agents = rpc
+        .call("subagent/list", json!({ "threadId": parent_id }))
+        .await;
+    let agents = agents["result"]["agents"].as_array().unwrap().clone();
+    assert_eq!(agents.len(), 1, "{agents:?}");
+    assert_eq!(agents[0]["role"], "探索", "{agents:?}");
+    assert_eq!(agents[0]["agentId"], agent_id.as_str());
+    assert_eq!(agents[0]["persisted"], true);
+    // 盘上停在 idle、人已不在这一页：报 completed。
+    assert_eq!(agents[0]["status"], "completed");
+    assert_eq!(agents[0]["role"], "探索");
+
+    let replayed = rpc
+        .call(
+            "subagent/history",
+            json!({ "threadId": parent_id, "agentId": agent_id }),
+        )
+        .await;
+    let events = replayed["result"]["events"].as_array().unwrap();
+    assert!(
+        events.iter().any(|e| e["method"] == "item/user_message"
+            && e["payload"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("落盘的孩子")),
+        "{replayed}"
+    );
+    assert_eq!(replayed["result"]["agent"]["persisted"], true);
+    // 盘上的不能发消息（复活是另一件事）。
+    let sent = rpc
+        .call(
+            "subagent/send",
+            json!({ "threadId": parent_id, "agentId": agent_id, "message": "x" }),
+        )
+        .await;
+    assert!(sent.get("error").is_some(), "{sent}");
+    // 别的会话拿这个 id 查不到。
+    let other = rpc
+        .call(
+            "subagent/history",
+            json!({ "threadId": "live", "agentId": "../../etc" }),
+        )
+        .await;
+    assert!(other.get("error").is_some(), "{other}");
 }
 
 /// 设置页方法只认 `dock serve` 交给父进程的 ticket：配对来的网页改不了配置
@@ -6661,4 +7218,39 @@ async fn side_chat_forks_answers_and_merges_back() {
         gone["error"].is_object(),
         "主会话关了，侧边聊天也关：{gone}"
     );
+}
+
+/// 有图形界面在听（网关在监听）时，`propose_preset` 只回草稿等用户审，不写盘；
+/// 桌面端按这次调用画草稿卡（终端那一支见 spine 单测）。
+#[tokio::test]
+async fn propose_preset_waits_for_review_when_a_gui_is_attached() {
+    let _presets = presets_disk().await;
+    let h = Harness::boot_with_pages().await;
+    h.ctx
+        .plugin(cordis_spine::tool_propose_preset(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let before = std::fs::read_dir(cordis_base::config::dock_home().join("presets"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    let out = h
+        .ctx
+        .require::<cordis_spine::Tools>(cordis_spine::TOOLS)
+        .unwrap()
+        .execute(cordis_spine::ToolCall {
+            id: "p".into(),
+            name: cordis_spine::PROPOSE_PRESET_TOOL.into(),
+            arguments: json!({ "name": "审查员", "persona": "你审代码。" }).to_string(),
+        })
+        .await
+        .content;
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|_| panic!("{out}"));
+    assert_eq!(v["status"], "awaiting_review", "{out}");
+    assert_eq!(v["draft"]["name"], "审查员", "{out}");
+    let after = std::fs::read_dir(cordis_base::config::dock_home().join("presets"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(before, after, "起草不写盘");
 }

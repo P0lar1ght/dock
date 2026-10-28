@@ -1,6 +1,6 @@
 //! Named `"skills"` catalog + `skill` model tool. Fail-open.
 
-mod builtin;
+pub(crate) mod builtin;
 mod discover;
 mod listing;
 
@@ -490,23 +490,37 @@ fn skill_md_near(path: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
+/// 附属文件最多列几个。分层技能（`references/` + `examples/`）一般十来个。
+const MAX_SIBLINGS: usize = 20;
+
+/// 技能目录下除 `SKILL.md` 外的文件，相对路径（`references/api.md`），往下两层。
+/// 只列目录名的话模型拿不到能读的路径，分层就白做了。
 fn sibling_files(dir: &std::path::Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, depth: usize, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
-            if name == "SKILL.md" {
-                None
-            } else {
-                Some(name)
+            if name.starts_with('.') {
+                continue;
             }
-        })
-        .collect();
+            if path.is_dir() {
+                if depth < 2 {
+                    walk(root, &path, depth + 1, out);
+                }
+            } else if !(depth == 0 && name == "SKILL.md") {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+    let mut names = Vec::new();
+    walk(dir, dir, 0, &mut names);
     names.sort();
-    names.truncate(10);
+    names.truncate(MAX_SIBLINGS);
     names
 }
 
@@ -656,7 +670,10 @@ fn run_skill_tool(ctx: &Context, call: ToolCall) -> ToolResult {
             let siblings = sibling_files(&skill.dir);
             let mut out = format_skill_block(&skill, &args, &body);
             if !siblings.is_empty() {
-                out.push_str("\n\nFiles in skill dir:\n");
+                out.push_str(&format!(
+                    "\n\nFiles in skill dir ({}); read the ones you need:\n",
+                    skill.dir.display()
+                ));
                 for name in siblings {
                     out.push_str("- ");
                     out.push_str(&name);
@@ -938,6 +955,9 @@ mod tests {
             "x",
         )
         .unwrap();
+        let refs = dir.path().join("skills/demo-skill/references");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("api.md"), "x").unwrap();
         write_skill(
             dir.path(),
             "hidden-one",
@@ -961,6 +981,13 @@ mod tests {
         );
         assert!(out.content.contains("Loaded zz."), "{}", out.content);
         assert!(out.content.contains("notes.md"), "{}", out.content);
+        // 分层技能：子目录里的文件要给出能直接读的相对路径，不能只露一个目录名。
+        assert!(
+            out.content.contains("- references/api.md"),
+            "{}",
+            out.content
+        );
+        assert!(!out.content.contains("- references\n"), "{}", out.content);
         let hidden = tools
             .execute(cordis_base::types::ToolCall {
                 id: "s2".into(),

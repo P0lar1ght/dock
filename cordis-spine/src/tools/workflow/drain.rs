@@ -9,7 +9,9 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use xai_workflow::{run_workflow, validate_script, Journal, WorkflowOutcome, WorkflowRunParams};
+use xai_workflow::{
+    run_workflow, validate_script_with_agent_budget, Journal, WorkflowOutcome, WorkflowRunParams,
+};
 
 use super::grok_tool::{
     WorkflowLaunchAck, WorkflowLaunchEnvelope, WorkflowSource, WorkflowToolInput,
@@ -24,15 +26,26 @@ use cordis_base::types::{LogEvent, NoticeKind};
 #[derive(Clone, Debug)]
 pub struct WorkflowRunSnap {
     pub run_id: String,
+    /// 起这条 run 的那一页（`main` / `main#2`…）。网关按它把 run 推给那一页。
+    pub page: String,
+    /// 起它的那次 `workflow` 调用；斜杠命令起的也有（斜杠走的是同一颗工具）。
+    pub tool_call_id: Option<String>,
+    /// 每变一次加一（同 grok）。客户端拿它丢掉比手上旧的快照——拉列表和推送会交错到达。
+    pub revision: u64,
     pub name: String,
     pub objective: String,
     pub status: String,
     pub current_phase: Option<String>,
     pub elapsed_ms: u64,
     pub received_at: Instant,
+    /// 墙钟启动时刻（界面显示「几点起的」、按它排序）。
+    pub started_wall: std::time::SystemTime,
     pub builtin: bool,
     pub pause_message: Option<String>,
     pub result_summary: Option<String>,
+    /// `complete(#{ …, data: … })` 里的 `data`：给界面的结构化结果（比如 code-review 的批注），
+    /// 不摊进 `result_summary`——那份要进模型上下文。
+    pub result_data: Option<Arc<serde_json::Value>>,
     pub agents_running: u32,
     /// 本次 run 的子代理调用上限（`workflow` 工具的 `agent_budget`）。
     pub agent_budget: u64,
@@ -103,9 +116,19 @@ const WORKFLOW_MAX_DONE_REPORTS: usize = 64;
 /// 上报与日志都攒着。活跃的 run 一条不动。
 const WORKFLOW_MAX_FINISHED_RUNS: usize = 32;
 
+/// 一页同时最多几条在跑的 run（同 grok 的 `WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION`）。
+///
+/// run 各占一个任务、互不排队之后，模型连发几次 `workflow` 就是几条并行的 run，每条都有
+/// 自己的并发池和 `agent_budget`——不设上限的话一页就能把整台机器的子代理占满。
+pub(super) const WORKFLOW_MAX_ACTIVE_RUNS_PER_PAGE: usize = 4;
+
+/// run 变了的钩子，参数是 run id。见 [`crate::WORKFLOW_CHANGED`]。
+pub(super) type ChangeHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct WorkflowState {
     inner: Mutex<HashMap<String, RunSlot>>,
     seq: Mutex<u64>,
+    on_change: std::sync::OnceLock<ChangeHook>,
 }
 
 impl WorkflowState {
@@ -113,6 +136,19 @@ impl WorkflowState {
         Self {
             inner: Mutex::new(HashMap::new()),
             seq: Mutex::new(1),
+            on_change: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// 设变化钩子（只认第一次）。
+    pub(super) fn set_on_change(&self, hook: ChangeHook) {
+        let _ = self.on_change.set(hook);
+    }
+
+    /// 报一次 `run_id` 变了。调用时不能拿着 `inner` 锁：监听者会回头取快照。
+    fn changed(&self, run_id: &str) {
+        if let Some(hook) = self.on_change.get() {
+            hook(run_id);
         }
     }
 
@@ -160,9 +196,37 @@ impl WorkflowState {
         format!("{base}-x")
     }
 
+    /// 那一页还没到在跑上限才登记。查和插在同一把锁里：两条启动同时到也不会一起越线。
+    fn try_insert(&self, snap: WorkflowRunSnap, cancel: CancellationToken) -> bool {
+        let run_id = snap.run_id.clone();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let active = inner
+                .values()
+                .filter(|s| s.snap.page == snap.page && s.snap.status == "active")
+                .count();
+            if active >= WORKFLOW_MAX_ACTIVE_RUNS_PER_PAGE {
+                return false;
+            }
+            Self::insert_locked(&mut inner, snap, cancel);
+        }
+        self.changed(&run_id);
+        true
+    }
+
+    #[cfg(test)]
     fn insert(&self, snap: WorkflowRunSnap, cancel: CancellationToken) {
-        let mut inner = self.inner.lock().unwrap();
-        prune_finished(&mut inner);
+        let run_id = snap.run_id.clone();
+        Self::insert_locked(&mut self.inner.lock().unwrap(), snap, cancel);
+        self.changed(&run_id);
+    }
+
+    fn insert_locked(
+        inner: &mut HashMap<String, RunSlot>,
+        snap: WorkflowRunSnap,
+        cancel: CancellationToken,
+    ) {
+        prune_finished(inner);
         inner.insert(
             snap.run_id.clone(),
             RunSlot {
@@ -207,8 +271,16 @@ impl WorkflowState {
     }
 
     pub(super) fn patch(&self, run_id: &str, f: impl FnOnce(&mut WorkflowRunSnap)) {
-        if let Some(slot) = self.inner.lock().unwrap().get_mut(run_id) {
-            f(&mut slot.snap);
+        let found = match self.inner.lock().unwrap().get_mut(run_id) {
+            Some(slot) => {
+                f(&mut slot.snap);
+                slot.snap.revision += 1;
+                true
+            }
+            None => false,
+        };
+        if found {
+            self.changed(run_id);
         }
     }
 
@@ -302,15 +374,29 @@ pub async fn drain_loop_with_ctx(
     mut rx: mpsc::UnboundedReceiver<WorkflowLaunchEnvelope>,
 ) {
     while let Some((req, ack)) = rx.recv().await {
-        handle_launch(state.clone(), ctx.clone(), req.input, req.cwd, ack).await;
+        // 每条 run 各占一个任务：`handle_launch` 要一直等到脚本跑完，排在这条循环里
+        // 的话，第二次启动（别的会话、或同一页再起一条）会卡到前一条收尾才拿到回执。
+        // run 归发起调用的那一页；不在调用链上时退回根（第 1 页）。
+        let ctx = req.page.unwrap_or_else(|| ctx.clone());
+        tokio::spawn(handle_launch(
+            state.clone(),
+            ctx,
+            req.input,
+            req.cwd,
+            req.tool_call_id,
+            ack,
+        ));
     }
 }
 
+/// `ctx` 是起这条 run 的那一页：host 从它派子代理、往它的滚动区写上报卡，收尾卡和
+/// 收尾通知也交给它。
 async fn handle_launch(
     state: Arc<WorkflowState>,
     ctx: cordis::Context,
     mut input: WorkflowToolInput,
     cwd: std::path::PathBuf,
+    tool_call_id: Option<String>,
     ack: tokio::sync::oneshot::Sender<WorkflowLaunchAck>,
 ) {
     input.normalize();
@@ -323,7 +409,9 @@ async fn handle_launch(
     }
 
     let resolved = match &input.source {
-        WorkflowSource::Name { name } => resolve_by_name(name, Some(&cwd)).map_err(resolve_detail),
+        WorkflowSource::Name { name } => {
+            resolve_by_name(name, Some(&cwd)).map_err(|e| unknown_name_detail(e, &cwd))
+        }
         WorkflowSource::Script { script } => resolve_inline(script.clone()).map_err(resolve_detail),
         WorkflowSource::ScriptPath { script_path } => {
             resolve_by_path(std::path::Path::new(script_path), &cwd, None).map_err(resolve_detail)
@@ -350,7 +438,22 @@ async fn handle_launch(
     };
 
     if input.validate_only {
-        match validate_script(&resolved.script, input.args.clone()) {
+        // 冒烟同样要真跑脚本：引擎的 host 函数用 `blocking_recv` 等回执，在 tokio 工作线程上
+        // 一调就 panic，清理时再 panic 一次就是整个进程 abort。和正式运行一样放到阻塞线程。
+        // 带上这次要用的 `agent_budget`（同 grok）：预算不够的脚本冒烟时就该报出来。
+        let script = resolved.script.clone();
+        let args = input.args.clone();
+        let budget = input.agent_budget.unwrap_or(DEFAULT_AGENT_BUDGET);
+        let validated = tokio::task::spawn_blocking(move || {
+            validate_script_with_agent_budget(&script, args, budget)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(xai_workflow::ValidationError::Run(format!(
+                "workflow validate join: {e}"
+            )))
+        });
+        match validated {
             Ok(report) => {
                 let _ = ack.send(WorkflowLaunchAck::Validated {
                     name: report.name,
@@ -380,15 +483,23 @@ async fn handle_launch(
     let agent_budget = input.agent_budget.unwrap_or(DEFAULT_AGENT_BUDGET);
     let snap = WorkflowRunSnap {
         run_id: run_id.clone(),
+        page: Sessions::page_of(&ctx).unwrap_or_else(|| crate::session::log::ROOT_IDENTITY.into()),
+        tool_call_id,
+        revision: 0,
         name: display.clone(),
-        objective: resolved.meta.description.clone(),
+        // 这次要做什么（同 grok 取 `args.objective`；deep-research 的入参叫 `query`），
+        // 没有才退回脚本自己的描述。界面上 run 的那一行显示的就是它。
+        objective: objective_of(input.args.as_ref())
+            .unwrap_or_else(|| resolved.meta.description.clone()),
         status: "active".into(),
         current_phase: None,
         elapsed_ms: 0,
         received_at: Instant::now(),
+        started_wall: std::time::SystemTime::now(),
         builtin: matches!(resolved.source, super::registry::WorkflowSource::Builtin),
         pause_message: None,
         result_summary: None,
+        result_data: None,
         agents_running: 0,
         agent_budget,
         agents_used: 0,
@@ -403,7 +514,16 @@ async fn handle_launch(
         ),
         agents: Arc::new(Vec::new()),
     };
-    state.insert(snap, cancel.clone());
+    let started = Instant::now();
+    if !state.try_insert(snap, cancel.clone()) {
+        let _ = ack.send(WorkflowLaunchAck::Rejected {
+            code: "workflow_too_many_runs",
+            detail: format!(
+                "这个会话已经有 {WORKFLOW_MAX_ACTIVE_RUNS_PER_PAGE} 条工作流在跑；等其中一条结束，或让用户 /workflow stop 停掉一条再起"
+            ),
+        });
+        return;
+    }
     let _ = ack.send(WorkflowLaunchAck::Started {
         run_id: run_id.clone(),
         task_id: run_id.clone(),
@@ -449,10 +569,36 @@ async fn handle_launch(
         error: format!("workflow engine join: {e}"),
     });
 
-    state.patch(&run_id, |snap| match &outcome {
+    state.patch(&run_id, |snap| {
+        // 只有在跑时 `list()` 才现算用时；收尾这一刻定住，否则结束的 run 一直报 0。
+        snap.elapsed_ms = started.elapsed().as_millis() as u64;
+        settle(snap, &outcome);
+    });
+    notify_done(&ctx, &state, &run_id);
+}
+
+/// `args.objective`，没有就 `args.query`（去掉首尾空白，空的不算）。
+fn objective_of(args: Option<&serde_json::Value>) -> Option<String> {
+    let args = args?;
+    ["objective", "query"].iter().find_map(|key| {
+        args.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// 引擎的结局落到快照上。
+fn settle(snap: &mut WorkflowRunSnap, outcome: &WorkflowOutcome) {
+    match outcome {
         WorkflowOutcome::Completed { result } => {
             snap.status = "complete".into();
-            snap.result_summary = Some(readable_result(result));
+            let mut shown = result.clone();
+            if let Some(data) = shown.as_object_mut().and_then(|map| map.remove("data")) {
+                snap.result_data = Some(Arc::new(data));
+            }
+            snap.result_summary = Some(readable_result(&shown));
         }
         WorkflowOutcome::Paused { kind, message } => {
             snap.status = format!("{}_paused", kind.as_str());
@@ -469,8 +615,7 @@ async fn handle_launch(
             snap.status = "failed".into();
             snap.pause_message = Some(error.clone());
         }
-    });
-    notify_done(&ctx, &state, &run_id);
+    }
 }
 
 /// run 收尾：把结果与过程交给主线程，并叫醒它一次。
@@ -509,7 +654,7 @@ fn notify_done(ctx: &cordis::Context, state: &Arc<WorkflowState>, run_id: &str) 
             body: summary.clone(),
         });
     }
-    // 收尾通知交给 `ctx` 那一页（drain 循环挂在根上，就是第 1 页，和上面的收尾卡同一页）。
+    // 收尾通知交给 `ctx` 那一页（起 run 的那一页，和上面的收尾卡同一页）。
     let page = Sessions::page_of(ctx).unwrap_or_else(|| crate::session::log::ROOT_IDENTITY.into());
     sub.notify_workflow_done(
         &page,
@@ -581,6 +726,22 @@ fn resolve_detail(err: ResolveError) -> String {
     err.to_string()
 }
 
+/// 名字不认识时把可用的名字一起报回去：模型拿不到名单就只能猜（`__list__`、别家的名字）。
+fn unknown_name_detail(err: ResolveError, cwd: &std::path::Path) -> String {
+    let detail = err.to_string();
+    if !matches!(err, ResolveError::UnknownName(_)) {
+        return detail;
+    }
+    let names: Vec<String> = super::registry::list_workflows(Some(cwd))
+        .into_iter()
+        .map(|w| w.name)
+        .collect();
+    if names.is_empty() {
+        return detail;
+    }
+    format!("{detail}。可用的工作流：{}", names.join("、"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,15 +749,20 @@ mod tests {
     fn snap(run_id: &str, status: &str, at: Instant) -> WorkflowRunSnap {
         WorkflowRunSnap {
             run_id: run_id.into(),
+            page: "main".into(),
+            tool_call_id: None,
+            revision: 0,
             name: run_id.into(),
             objective: String::new(),
             status: status.into(),
             current_phase: None,
             elapsed_ms: 0,
             received_at: at,
+            started_wall: std::time::SystemTime::now(),
             builtin: false,
             pause_message: None,
             result_summary: None,
+            result_data: None,
             agents_running: 0,
             agent_budget: 1,
             agents_used: 0,

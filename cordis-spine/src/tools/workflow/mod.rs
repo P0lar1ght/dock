@@ -17,7 +17,9 @@ use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
 use crate::host::settings::AppSettings;
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
-use crate::names::{CONTEXT, SESSIONS, SETTINGS, SLASH, TOOLS, TOOLS_EXECUTE, WORKFLOWS};
+use crate::names::{
+    CONTEXT, SESSIONS, SETTINGS, SLASH, TOOLS, TOOLS_EXECUTE, WORKFLOWS, WORKFLOW_CHANGED,
+};
 use crate::prompt::assemble::ORDER_WORKFLOWS;
 use crate::prompt::context_book::{own_sections, ContextBook};
 use crate::prompt::listing::wants_listing;
@@ -27,7 +29,13 @@ use cordis_base::types::{LogEvent, ToolCall, ToolResult, ToolSpec};
 
 pub use args::{workflow_command_arguments, workflow_slash_arguments};
 pub use command::workflow_command;
-pub use drain::WorkflowRunSnap;
+pub use drain::{WorkflowAgentRow, WorkflowRunSnap};
+
+/// [`crate::WORKFLOW_CHANGED`] 的载荷。
+#[derive(Clone, Debug)]
+pub struct WorkflowChanged {
+    pub run_id: Arc<str>,
+}
 pub use grok_tool::{render_ack, WorkflowLaunchHandle, WorkflowToolInput, WORKFLOW_TOOL_NAME};
 pub use host::DEFAULT_MAX_CONCURRENT_AGENTS;
 
@@ -304,6 +312,17 @@ pub fn tool_workflow() -> Plugin {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let state = Arc::new(drain::WorkflowState::new());
             {
+                let ctx = ctx.clone();
+                state.set_on_change(Arc::new(move |run_id: &str| {
+                    ctx.emit(
+                        WORKFLOW_CHANGED,
+                        WorkflowChanged {
+                            run_id: run_id.into(),
+                        },
+                    );
+                }));
+            }
+            {
                 let state = state.clone();
                 let ctx = ctx.clone();
                 tokio::spawn(drain::drain_loop_with_ctx(state, ctx, rx));
@@ -409,6 +428,8 @@ async fn run_workflow_tool(ctx: &cordis::Context, call: ToolCall) -> ToolResult 
             grok_tool::WorkflowLaunchRequest {
                 input,
                 cwd: crate::session::cwd::current_cwd(),
+                page: crate::tools::registry::exec_ctx(),
+                tool_call_id: Some(call.id.clone()),
             },
             ack_tx,
         ))

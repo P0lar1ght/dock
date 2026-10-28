@@ -139,14 +139,19 @@ async fn run_dock_child(
     let id = run.request.id.clone();
     let typ = run.request.subagent_type.clone();
     let desc = run.request.description.clone();
-    let parent_id = run.request.parent_session_id.clone();
-    store.ensure_owned(
-        &id,
-        desc.clone(),
-        typ.clone(),
-        run.request.owner.clone(),
-        &parent_id,
-    );
+    // 回报指令要写**记在册上的**父级（发起调用的那一页，如 `main#2`）：请求上的
+    // `parent_session_id` 被后端统一绑成了 `main`，照它写的话分页的孩子回话会被
+    // `send_message` 以「不是启动你的代理」挡回去。
+    let parent_id = store
+        .ensure_owned(
+            &id,
+            desc.clone(),
+            typ.clone(),
+            run.request.owner.clone(),
+            &run.request.parent_session_id,
+        )
+        .parent
+        .clone();
 
     let resume = run
         .request
@@ -154,7 +159,12 @@ async fn run_dock_child(
         .as_deref()
         .map(|src| store.events(src))
         .unwrap_or_default();
-    let mut prompt = child_prompt(&typ, &desc, &run.request.prompt);
+    // 复活是用户在界面上接着聊：原话就是这一轮的开头，不再加 `[type] 描述`。
+    let mut prompt = if run.request.revive {
+        run.request.prompt.clone()
+    } else {
+        child_prompt(&typ, &desc, &run.request.prompt)
+    };
 
     let parent_presets = parent.get::<AgentPresets>(AGENT_PRESETS);
     let def = parent_presets.as_ref().and_then(|p| p.subagent(&typ));
@@ -197,7 +207,24 @@ async fn run_dock_child(
         sessions.pin_workspace_cwd(cwd);
     }
     if !resume.is_empty() {
-        sessions.seed(resume);
+        // 复活接着聊：带上原来的时刻，回看历史时不会全变成「现在」。
+        let times = run
+            .request
+            .resume_from
+            .as_deref()
+            .map(|src| store.event_times(src))
+            .unwrap_or_default();
+        sessions.seed_with_times(resume, times);
+    }
+    // 落盘到父会话目录下（`subagents/<id>/`）：关掉会话、重启 Dock 后还能看。父会话
+    // 不落盘（侧边聊天的旁问页、测试）就只在内存里。
+    if let Some(dir) = parent
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| s.disk_session_dir())
+        .map(|d| crate::session::persist::subagent_dir(&d, &id))
+    {
+        store.set_transcript_dir(&id, dir.clone());
+        sessions.attach_child_dir(dir);
     }
     let mut hold = Vec::new();
     match child.provide(SESSIONS, sessions.clone()) {
@@ -261,10 +288,11 @@ async fn run_dock_child(
     }
     // 「做完要回报」写进初始任务，不进人设或工具描述：那两处排在请求头里，
     // 子代理专属的一段会让它的头和父级分叉。角色拿不到 `send_message` 就不写，
-    // 别让它去调一颗看不见的工具。
-    if child
-        .get::<AgentPresets>(AGENT_PRESETS)
-        .is_some_and(|p| p.allows(super::control::SEND_TOOL_NAME))
+    // 别让它去调一颗看不见的工具。复活接着聊的不再写：对话里第一条任务已经带着。
+    if !run.request.revive
+        && child
+            .get::<AgentPresets>(AGENT_PRESETS)
+            .is_some_and(|p| p.allows(super::control::SEND_TOOL_NAME))
     {
         super::format::append_reply_instruction(&mut prompt, &parent_id);
     }

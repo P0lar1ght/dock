@@ -58,6 +58,21 @@ pub fn gateway_vcs() -> Plugin {
                         MethodPolicy::detached(),
                         method(|gw, params| async move { get(&gw, params).await }),
                     ),
+                    (
+                        protocol::VCS_PR_DIFF,
+                        MethodPolicy::detached(),
+                        method(|gw, params| async move { pr_diff(&gw, params).await }),
+                    ),
+                    (
+                        protocol::VCS_DIFF,
+                        // 命令是客户端给的（虽然只认几种只读形状）：只给受信连接。
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { diff(&gw, params).await }),
+                    ),
                 ],
             )?;
             Ok(None)
@@ -282,6 +297,123 @@ fn list_in(cwd: &Path) -> Value {
         "viewer": viewer,
         "prs": prs,
     })
+}
+
+/// 一份 diff 最多回这么多字节（再大的 PR 界面也画不动）。
+const DIFF_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// `vcs/pr/diff { cwd | threadId, number }` → `{ available: true, diff, truncated }`；gh 用不了
+/// 同 `vcs/pr/get` 回 `available: false`。
+pub async fn pr_diff(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let cwd = project_cwd(gateway, &params)?;
+    let number = params
+        .get("number")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| RpcError::invalid_params("number 是 PR 编号（正整数）"))?;
+    run_blocking(move || {
+        let gh = match ready(&cwd) {
+            Ok(gh) => gh,
+            Err(unavailable) => return unavailable,
+        };
+        match run(&gh, &cwd, &["pr", "diff", &number.to_string()]) {
+            Ok((Some(0), out, _)) => diff_value(out),
+            Ok((code, _, err)) => classify_failure(code, &err).into_json(),
+            Err(e) => e.into_json(),
+        }
+    })
+    .await
+}
+
+/// `vcs/diff { threadId, command }`：在线程的目录里跑一条只读 diff 命令，回
+/// `{ available: true, diff, truncated }`。命令只认 `git diff …` / `git show …` / `gh pr diff …`，
+/// 按空白拆成参数直接起进程（不经 shell，管道、`$( )` 之类不起作用），带写文件 / 外部程序 /
+/// 开浏览器的参数一律拒。
+pub async fn diff(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let cwd = project_cwd(gateway, &params)?;
+    let command = params
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let argv = diff_argv(command).map_err(RpcError::invalid_params)?;
+    run_blocking(move || {
+        if argv[0] == "gh" {
+            let gh = match ready(&cwd) {
+                Ok(gh) => gh,
+                Err(unavailable) => return unavailable,
+            };
+            let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+            return match run(&gh, &cwd, &args) {
+                Ok((Some(0), out, _)) => diff_value(out),
+                Ok((code, _, err)) => classify_failure(code, &err).into_json(),
+                Err(e) => e.into_json(),
+            };
+        }
+        let out = Command::new("git")
+            .args(&argv[1..])
+            .current_dir(&cwd)
+            .env("GIT_PAGER", "cat")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output();
+        match out {
+            Ok(out) if out.status.success() => diff_value(String::from_utf8_lossy(&out.stdout).into_owned()),
+            Ok(out) => json!({
+                "available": false,
+                "reason": "git_failed",
+                "hint": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            }),
+            Err(e) => json!({ "available": false, "reason": "git_failed", "hint": format!("git 起不来：{e}") }),
+        }
+    })
+    .await
+}
+
+/// 只读 diff 命令 → 参数表；不是这几种形状回中文原因。
+fn diff_argv(command: &str) -> Result<Vec<String>, String> {
+    let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+    let shape_ok = matches!(
+        argv.iter()
+            .map(String::as_str)
+            .take(3)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["git", "diff", ..] | ["git", "show", ..] | ["gh", "pr", "diff"]
+    );
+    if !shape_ok {
+        return Err("只认 `git diff …`、`git show …` 或 `gh pr diff …`".into());
+    }
+    let bad = [
+        "--output",
+        "--ext-diff",
+        "--textconv",
+        "--no-index",
+        "--web",
+        "-w",
+        "-c",
+        "--exec",
+        "-C",
+    ];
+    if let Some(arg) = argv[1..].iter().find(|a| {
+        bad.iter()
+            .any(|b| a.as_str() == *b || a.starts_with(&format!("{b}=")))
+    }) {
+        return Err(format!("diff 命令里不能带 {arg}"));
+    }
+    Ok(argv)
+}
+
+fn diff_value(mut out: String) -> Value {
+    let truncated = out.len() > DIFF_MAX_BYTES;
+    if truncated {
+        let mut cut = DIFF_MAX_BYTES;
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+    }
+    json!({ "available": true, "diff": out, "truncated": truncated })
 }
 
 fn get_in(cwd: &Path, number: u64) -> Value {
@@ -677,6 +809,33 @@ fn canonical(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_read_only_diff_commands_are_accepted() {
+        for ok in [
+            "git diff HEAD",
+            "git diff abc123...HEAD -- src/a.rs",
+            "git show HEAD~1",
+            "gh pr diff 42",
+            "gh pr diff 42 --repo o/r",
+        ] {
+            assert!(diff_argv(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "rm -rf /",
+            "git push",
+            "git diff --output=/tmp/x",
+            "git diff --ext-diff",
+            "git diff --no-index /etc/passwd /dev/null",
+            "git -c core.pager=sh diff",
+            "gh pr view 42",
+            "gh pr diff 42 --web",
+            "gh api repos/o/r",
+        ] {
+            assert!(diff_argv(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn explicit_gh_path_is_the_only_one_tried() {

@@ -90,11 +90,31 @@ pub struct SubagentSnap {
     pub failed: bool,
     /// 停下（空闲或结束）的时刻；在跑时是 `None`。
     pub settled_at: Option<Instant>,
+    /// 第一次启动的墙钟时刻（同 id 复活后沿用原来的）。
+    pub started_wall: std::time::SystemTime,
 }
 
 impl SubagentSnap {
     pub fn running(&self) -> bool {
         !self.done && !self.idle
+    }
+
+    /// running / idle / completed / failed / cancelled（网关 `subagent/*` 和落盘抬头共用）。
+    ///
+    /// 子代理每轮做完都停在 idle（还能接着聊）；只有被收掉（结束、空闲太久、会话停止）
+    /// 才是 completed。失败和取消优先：最近一轮怎么收的尾就报什么。
+    pub fn status(&self) -> &'static str {
+        if self.running() {
+            "running"
+        } else if self.failed {
+            "failed"
+        } else if self.cancelled {
+            "cancelled"
+        } else if self.idle {
+            "idle"
+        } else {
+            "completed"
+        }
     }
 
     /// 从启动到现在（在跑）或到停下为止。
@@ -157,6 +177,9 @@ pub struct WorkflowSpawn {
     /// 本次 run 的取消令牌。由 host 传进来，这样 run 一取消孩子立刻收到。
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub runtime_overrides: SubagentRuntimeOverrides,
+    /// 起这条 run 的那一页。子代理从它切 isolate、记在它名下——host 跑在后台任务里，
+    /// 那里没有 `exec_ctx`，不带的话孩子全挂到第 1 页。
+    pub page: cordis::Context,
 }
 
 /// Named `"subagents"` service. Live-lookup; do not capture the Arc.
@@ -204,6 +227,7 @@ impl Subagents {
                             tool_call_id: None,
                             failed: false,
                             settled_at: None,
+                            started_wall: std::time::SystemTime::now(),
                         })
                         .collect()
                 } else {
@@ -364,15 +388,19 @@ impl Subagents {
     ) -> (String, Result<SubagentResult, String>) {
         let id = spawn.id;
         let owner = SubagentOwner::workflow(&spawn.run_id);
-        if let Some(parent) = crate::tools::registry::exec_ctx() {
-            self.note_spawn_parent(&id, parent);
-        }
+        let parent = spawn
+            .page
+            .get::<crate::session::log::Sessions>(crate::names::SESSIONS)
+            .map(|s| s.identity().to_string())
+            .filter(|id| crate::session::log::is_main_identity(id))
+            .unwrap_or_else(|| ROOT_IDENTITY.to_string());
+        self.note_spawn_parent(&id, spawn.page);
         self.remember(
             &id,
             spawn.description.clone(),
             spawn.subagent_type.clone(),
             owner.clone(),
-            ROOT_IDENTITY,
+            &parent,
         );
         let request = SubagentRequest {
             id: id.clone(),
@@ -387,6 +415,7 @@ impl Subagents {
             await_to_completion: true,
             owner,
             cancel_token: spawn.cancel_token,
+            revive: false,
         };
         match self.backend.spawn(request).await {
             Ok(result) => (id, Ok(result)),
@@ -633,6 +662,7 @@ mod coordinator_spawn_tests {
                 await_to_completion: true,
                 owner: SubagentOwner::Task,
                 cancel_token: tokio_util::sync::CancellationToken::new(),
+                revive: false,
             })
             .await
             .expect("spawn");
@@ -707,6 +737,7 @@ mod coordinator_spawn_tests {
             await_to_completion: true,
             owner: SubagentOwner::workflow(run_id),
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            revive: false,
         }
     }
 

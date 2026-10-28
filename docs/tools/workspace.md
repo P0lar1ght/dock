@@ -35,7 +35,7 @@ codex 的模型侧文件面只有 `exec_command` + `apply_patch` + `view_image`�
 
 dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`acp.rs` 的 `gated_builtin` 里有 `bash`、没有 `grep`；`presets/code/agents/explore.yml` 与 `plan.yml` 明确列 `grep`。搜索一旦归进 `bash`，只读场景里每搜一次都得先过只读命令判定（见下节），工具还是更顺。
 
-**只读场景里的 bash。** 计划模式开着、子会话能力档位是 `read-only`、或当前角色预设标了 `read_only: true`（内置 `explore` / `plan`、`/btw` 旁问页）——这些都给 `bash`，但不走普通的计划门 / 权限门，走 `tools::read_only`：`cordis_base::read_only_shell::is_read_only_command` 判为只读的（白名单程序、无写盘重定向、无命令替换 / 后台、无 `find -delete` `git commit` `sed -i` 这类改动参数）直接跑、不问；其余一律 `Permissions::request_strict` 问用户——**自动批准和「以后都允许」都不算数**，「以后都拒绝」照旧生效。用户拒了，模型收到一句说明哪些能直接跑。判定宁小勿大：误判成要问只是多弹一次框。
+**只读场景里的 bash。** 计划模式开着、子会话能力档位是 `read-only`、或当前角色预设标了 `read_only: true`（内置 `explore` / `plan`、`/btw` 旁问页）——这些都给 `bash`，但不走普通的计划门 / 权限门，走 `tools::read_only`：`cordis_base::read_only_shell::is_read_only_command` 判为只读的（白名单程序、无写盘重定向、无命令替换 / 后台、无 `find -delete` `git commit` `sed -i` 这类改动参数）直接跑、不问；其余一律 `Permissions::request_strict` 问用户——**自动批准和「以后都允许」都不算数**，「以后都拒绝」照旧生效。用户拒了，模型收到一句说明哪些能直接跑。判定宁小勿大：误判成要问只是多弹一次框。切段和找重定向按 shell 的引号与反斜杠转义规则来：引号里、转义过的 `|` `;` `>` `&` 只是字面字符（`grep -n "=>"` 算只读），转义过的引号不开引号（`echo \"a | rm -rf x \"` 里的 `rm` 照样是一段，要问）；引号没闭合按不是只读；`$(` 和反引号在哪儿都算。`gh` 只认 `pr view|diff|list|checks|status`、`repo view`、`issue view|list`（不带 `--web`）。
 
 ## 各颗的行为
 

@@ -59,7 +59,7 @@ Dock 是跑在终端里的编码 agent。底部输入框发消息，`/` 唤出�
 - 想装新技能：把「目录 + SKILL.md」放进 `{cwd}/.dock/skills/`（项目）、
   `~/.dock/skills/`（全局）或 `{cwd}/skills/`。
 - `/<工作流名> [参数]` 运行 workflow 脚本（放 `.dock/workflows/` 或
-  `~/.dock/workflows/`）；`/deep-research <查询>` 是内置的深度调研。
+  `~/.dock/workflows/`）；`/deep-research <查询>` 是内置的深度调研，`/code-review [范围或关注点]` 是内置的代码审查。
 
 ## 浏览器与桌面控制
 

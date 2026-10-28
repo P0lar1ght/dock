@@ -311,7 +311,7 @@ dock/
 | [SECURITY.md](SECURITY.md) | 漏洞上报与安全边界 |
 | [CHANGELOG.md](CHANGELOG.md) | 用户可见变更（Keep a Changelog 格式） |
 | [embed-sdk/README.md](embed-sdk/README.md) | 浏览器 SDK 属性、事件、配对 |
-| [skills/cordis-plugin-development/SKILL.md](skills/cordis-plugin-development/SKILL.md) | 动态 Cordis 插件工作流 |
+| [cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md](cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md) | 动态 Cordis 插件工作流（内置技能，references/ 按需读） |
 | [.agents/skills/](.agents/skills/) | 仓库流程 skills：git-commit、create-pr |
 
 Crate README 管该包的 API。产品面的权威清单：`TOOLS.md`（模型工具）、`CLI.md`（斜杠 / 快捷键 / overlay）；插件树与不变式见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。

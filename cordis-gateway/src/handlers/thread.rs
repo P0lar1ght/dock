@@ -84,13 +84,18 @@ fn list_all(gateway: &GatewayHandle) -> Result<Value, RpcError> {
         if page.is_root() {
             item["alias"] = json!(LIVE_THREAD_ID);
         }
+        let dir = sessions.existing_session_dir();
+        crate::handlers::subagent::stamp_counts(gateway, &mut item, Some(&page), dir);
         threads.push(item);
     }
     for entry in roster_entries(gateway) {
         if open_ids.contains(&entry.id) {
             continue;
         }
-        threads.push(roster_summary(&entry));
+        let mut item = roster_summary(&entry);
+        let dir = cordis_spine::sessions_cwd_dir(&entry.cwd).join(&entry.id);
+        crate::handlers::subagent::stamp_counts(gateway, &mut item, None, Some(dir));
+        threads.push(item);
     }
     Ok(json!({ "threads": threads }))
 }
@@ -276,7 +281,9 @@ pub async fn start_at(gateway: &GatewayHandle, params: Value) -> Result<Value, R
             .ctx()
             .get::<AgentPresets>(AGENT_PRESETS)
             .ok_or_else(|| RpcError::app("unavailable", "预设服务没有挂载"))?;
-        if presets.get(id).is_none() {
+        // 按这一页的项目找（现读盘）：项目层的预设只在它自己的项目里有，
+        // 根上那份看不到；新页 fork 时同样会读到它。
+        if presets.get_at(&cwd, id).is_none() {
             return Err(RpcError::invalid_params(format!("没有预设 {id}")));
         }
     }

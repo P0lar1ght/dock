@@ -18,6 +18,10 @@ use cordis_base::types::{LlmOutput, LogEvent, ToolCall, TurnEndStatus};
 const HISTORY: &str = "chat_history.jsonl";
 const META: &str = "meta.json";
 const COMPACT: &str = "compact.json";
+/// 会话目录下放子代理的子目录：`<会话>/subagents/<agent-id>/`。
+const SUBAGENTS: &str = "subagents";
+/// 子代理目录里的抬头（角色、任务、状态…）；对话还是 `chat_history.jsonl`。
+const SUBAGENT_META: &str = "subagent.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct MetaFile {
@@ -170,19 +174,7 @@ pub fn save(item: &ArchivedSession, cwd: &Path) -> std::io::Result<()> {
         &dir.join(META),
         serde_json::to_vec_pretty(&meta).unwrap_or_default(),
     )?;
-    let mut body = String::new();
-    let now = SystemTime::now();
-    for (i, event) in item.events.iter().enumerate() {
-        let ts = unix(item.times.get(i).copied().unwrap_or(now));
-        if let Some(wire) = to_wire(event) {
-            let line = HistoryLine { ts, event: wire };
-            if let Ok(json) = serde_json::to_string(&line) {
-                body.push_str(&json);
-                body.push('\n');
-            }
-        }
-    }
-    atomic_write(&dir.join(HISTORY), body.into_bytes())?;
+    write_history(&dir, &item.events, &item.times)?;
     save_compact(&dir, item);
     crate::session::search::index_session(&crate::session::search::SessionDoc::from_session(
         &item.id,
@@ -192,6 +184,151 @@ pub fn save(item: &ArchivedSession, cwd: &Path) -> std::io::Result<()> {
         &item.events,
     ));
     Ok(())
+}
+
+fn write_history(dir: &Path, events: &[LogEvent], times: &[SystemTime]) -> std::io::Result<()> {
+    let mut body = String::new();
+    let now = SystemTime::now();
+    for (i, event) in events.iter().enumerate() {
+        let ts = unix(times.get(i).copied().unwrap_or(now));
+        if let Some(wire) = to_wire(event) {
+            let line = HistoryLine { ts, event: wire };
+            if let Ok(json) = serde_json::to_string(&line) {
+                body.push_str(&json);
+                body.push('\n');
+            }
+        }
+    }
+    atomic_write(&dir.join(HISTORY), body.into_bytes())
+}
+
+fn read_history(dir: &Path) -> (Vec<LogEvent>, Vec<SystemTime>) {
+    let history = fs::read_to_string(dir.join(HISTORY)).unwrap_or_default();
+    let mut events = Vec::new();
+    let mut times = Vec::new();
+    for line in history.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<HistoryLine>(line) else {
+            continue;
+        };
+        events.push(from_wire(row.event));
+        times.push(from_unix(row.ts));
+    }
+    (events, times)
+}
+
+// ---------------------------------------------------------------------------
+// 子代理：父会话目录下 `subagents/<agent-id>/`
+// ---------------------------------------------------------------------------
+
+/// 子代理目录里的抬头。状态取值同网关 `subagent/*`：running / idle / completed /
+/// failed / cancelled；写的是**最后一次变化时**的状态——进程中途没了，盘上可能还是
+/// running，读的人要自己判断它还活不活着。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SubagentMeta {
+    pub id: String,
+    pub description: String,
+    pub subagent_type: String,
+    /// 派出它的那次 `task` 调用；workflow 派的没有。
+    pub tool_call_id: Option<String>,
+    /// workflow 派的（不是父会话的 `task`）。
+    pub workflow: bool,
+    pub status: String,
+    pub started_ms: u64,
+    /// 停下（空闲或结束）的时刻；在跑时没有。
+    pub settled_ms: Option<u64>,
+    pub tool_calls: u64,
+    /// 最后的回报（截短）。
+    pub output: String,
+}
+
+/// `<会话目录>/subagents/<agent-id>/`。
+pub fn subagent_dir(session_dir: &Path, agent_id: &str) -> PathBuf {
+    session_dir.join(SUBAGENTS).join(agent_id)
+}
+
+/// 子代理对话：只写 `chat_history.jsonl`（+ 压缩前缀），不写会话抬头、不进搜索索引。
+pub fn save_child(
+    dir: &Path,
+    events: &[LogEvent],
+    times: &[SystemTime],
+    compact_prefix: Option<Vec<LogEvent>>,
+    compact_from: usize,
+) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    write_history(dir, events, times)?;
+    let item = ArchivedSession {
+        id: String::new(),
+        title: String::new(),
+        events: Vec::new(),
+        times: Vec::new(),
+        compact_prefix,
+        compact_from,
+        preset_id: None,
+        sampling: None,
+    };
+    save_compact(dir, &item);
+    Ok(())
+}
+
+pub fn save_subagent_meta(dir: &Path, meta: &SubagentMeta) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    atomic_write(
+        &dir.join(SUBAGENT_META),
+        serde_json::to_vec_pretty(meta).unwrap_or_default(),
+    )
+}
+
+/// 一个会话落过盘的子代理，先启动的在前。抬头坏了的跳过。
+pub fn load_subagents(session_dir: &Path) -> Vec<SubagentMeta> {
+    let Ok(entries) = fs::read_dir(session_dir.join(SUBAGENTS)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<SubagentMeta> = entries
+        .flatten()
+        .filter_map(|e| {
+            let raw = fs::read_to_string(e.path().join(SUBAGENT_META)).ok()?;
+            serde_json::from_str::<SubagentMeta>(&raw)
+                .ok()
+                .filter(|m| !m.id.is_empty())
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.started_ms
+            .cmp(&b.started_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out
+}
+
+/// 一个会话落过盘的子代理有几个（名册用，只数目录不读文件）。
+pub fn count_subagents(session_dir: &Path) -> usize {
+    fs::read_dir(session_dir.join(SUBAGENTS))
+        .map(|it| {
+            it.flatten()
+                .filter(|e| e.path().join(SUBAGENT_META).is_file())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// 一个子代理落盘的对话（事件 + 时间）。没有这个子代理返回 `None`。
+pub fn load_subagent(
+    session_dir: &Path,
+    agent_id: &str,
+) -> Option<(SubagentMeta, Vec<LogEvent>, Vec<SystemTime>)> {
+    if agent_id.is_empty() || agent_id.contains(['/', '\\']) || agent_id.starts_with('.') {
+        return None;
+    }
+    let dir = subagent_dir(session_dir, agent_id);
+    let meta: SubagentMeta =
+        serde_json::from_str(&fs::read_to_string(dir.join(SUBAGENT_META)).ok()?).ok()?;
+    let (events, times) = read_history(&dir);
+    Some((meta, events, times))
 }
 
 pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
@@ -426,20 +563,7 @@ fn load_one(dir: &Path) -> Option<(u64, ArchivedSession)> {
     let meta: Option<MetaFile> = meta_raw
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
-    let history = fs::read_to_string(dir.join(HISTORY)).unwrap_or_default();
-    let mut events = Vec::new();
-    let mut times = Vec::new();
-    for line in history.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<HistoryLine>(line) else {
-            continue;
-        };
-        events.push(from_wire(row.event));
-        times.push(from_unix(row.ts));
-    }
+    let (events, times) = read_history(dir);
     if events.is_empty() {
         return None;
     }
@@ -850,6 +974,48 @@ mod tests {
     use super::*;
     use crate::session::log::ArchivedSession;
     use cordis_base::types::LogEvent;
+
+    #[test]
+    fn subagent_transcripts_round_trip_under_the_session_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("sess");
+        let a = subagent_dir(&session, "agent-a");
+        let b = subagent_dir(&session, "agent-b");
+        let events = vec![LogEvent::User("看一眼 store".into())];
+        save_child(&a, &events, &[SystemTime::now()], None, 0).unwrap();
+        let meta = |id: &str, started: u64| SubagentMeta {
+            id: id.into(),
+            description: "看一眼".into(),
+            subagent_type: "explore".into(),
+            tool_call_id: Some("call-1".into()),
+            status: "idle".into(),
+            started_ms: started,
+            ..SubagentMeta::default()
+        };
+        save_subagent_meta(&a, &meta("agent-a", 20)).unwrap();
+        save_subagent_meta(&b, &meta("agent-b", 10)).unwrap();
+        // 只有对话、没有抬头的目录不算。
+        std::fs::create_dir_all(subagent_dir(&session, "half")).unwrap();
+
+        let listed = load_subagents(&session);
+        assert_eq!(
+            listed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["agent-b", "agent-a"],
+            "先启动的在前"
+        );
+        assert_eq!(count_subagents(&session), 2);
+        let (m, back, times) = load_subagent(&session, "agent-a").unwrap();
+        assert_eq!(m, meta("agent-a", 20));
+        assert_eq!(back.len(), 1);
+        assert_eq!(times.len(), 1);
+        assert!(matches!(&back[0], LogEvent::User(t) if t == "看一眼 store"));
+        // 子代理的对话不写会话抬头：不会被当成一条会话列出来。
+        assert!(!a.join(META).exists());
+        // 路径穿越、不存在的都读不到。
+        assert!(load_subagent(&session, "../sess").is_none());
+        assert!(load_subagent(&session, "nope").is_none());
+        assert_eq!(count_subagents(&dir.path().join("none")), 0);
+    }
 
     #[test]
     fn title_drops_markdown_markers_and_keeps_first_line() {

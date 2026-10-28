@@ -10,6 +10,24 @@
 
 ### 新增
 
+- 内置工作流 `code-review`（`/code-review [范围或关注点]`，`/code-review #42` 审 GitHub PR）：定范围 → 正确性 / 安全 / 性能 / 可维护性 / 测试五个角度并行审查 → 合并重复发现 → 逐条对照代码核实 → 按严重程度出报告。全程只读，不用等批准。
+  - GUI：工作流卡「在改动上看批注」打开差异视图，批注落在行上；PR 页抽屉「查看改动」看 PR 的 diff 和 Agent 批注，「让 Agent review」改为跑 code-review。
+  - `gh pr view|diff|list|checks|status`、`gh repo view`、`gh issue view|list` 算只读命令（不用等批准；`gh api`、`--web` 不算）。
+  - 网关：`vcs/pr/diff`、`vcs/diff`（受信连接，只认只读 diff 命令、不经 shell）；`workflow/updated` 带 `resultData`（脚本 `complete` 的 `data`）。
+
+- GUI 对话流里的工作流卡：阶段、各阶段派的子代理（点开看过程）、在跑几个、用时、停止，结束后给结果或失败原因。
+  - 对照 grok：一页最多 4 条在跑的工作流；`validate_only` 按这次的 `agent_budget` 冒烟；名字不认识时列出可用的工作流；run 显示这次的查询而不是脚本描述。
+  - 网关新增能力 `workflows`：`workflow/list` / `workflow/stop` + 推送 `workflow/updated`；dock-core 加 `workflows.ts`。
+
+- **会话里起草预设交给用户审**：新模型工具 `propose_preset`（按需）只起草、不写盘；桌面端出草稿卡，点开进预设编辑器逐项审、自己保存。终端照旧写文件。
+- **预设编辑器「问 AI」**（桌面端）：右侧侧聊，带当前草稿和所在步骤，只给参考，不改任何字段。新建预设默认手动分步，AI 起草收成次要入口。
+- 网关 `preset/ask`：上面那个侧聊的后端，无状态，只回参考答案、不写盘。
+- `preset/list` 可带 `cwd`：列出那个项目的 `.dock/presets` 里的预设。
+- **子代理对话落盘**：父会话落盘时，子代理的对话写在 `<会话>/subagents/<agent-id>/`。
+  - `subagent/list` / `history` 内存里没有就读盘：关掉的会话、Dock 重启后都看得到（`persisted: true`）。
+  - `thread/list { scope: "all" }` 每项多出 `subagentCount` / `subagentsRunning`。
+- **子代理接着聊**：`subagent/send` 发给已经收掉的、或只在盘上的子代理，同一个 id 从它的对话接着起一轮。
+  - 用户开的一轮（发给闲着的、复活的）结果送进父信箱但不叫醒父级。
 - **MCP Apps**（`io.modelcontextprotocol/ui`）：MCP 工具可以带交互界面。
   - 客户端握手声明 MCP Apps 能力；认工具 `_meta.ui`，只给界面用的工具不进模型工具表。
   - 模型调挂界面的工具时，原始结果存进会话目录 `mcp-apps/`，界面要原样那份。
@@ -35,6 +53,10 @@
 
 ### 改进
 
+- **插件开发技能改成内置、分层按需读**：`cordis-plugin-development` 随二进制发，任何项目都能加载（以前只在 dock 仓库里才找得到）。
+  - `SKILL.md` 只放流程与路由；细节拆进 `references/`（host API、界面、钩子、HTTP、版本、Rhai 坑位、报错对照），例子在 `examples/`。
+  - `skill` 工具列出附属文件的绝对目录和子目录里的相对路径。
+
 - 嵌入页首次配对不再显示「连接出错」/「授权已失效」：宠物是「等待在 Dock 里批准连接」，卡片写的是本页的 Origin。
   - `dock:state` 只在变了时报（以前连上一次刷十几条一样的），`label` 改中文；宿主按 `visual` 判断。`dock:ready` 每次连上只报一次。
   - 斜杠菜单：输入就是那条命令时 Enter 直接发；菜单太长自己滚，不再顶出面板。
@@ -53,6 +75,26 @@
 - 权限弹窗里 bash / monitor 显示完整命令，描述另起一行；原先是截到 120 字的原始 JSON。
 
 ### 修复
+
+- 写进主线的子代理通知 / 工作流收尾在 `<system-reminder>` 里，正文中的 `</system-reminder>` 现在先转义（审外部 PR 时 PR 原文可能带它，能提前闭合提醒块）。code-review 的 diff 命令和 `vcs/diff`、只读命令判定都拒 `--ext-diff` / `--textconv`（会跑 git 配置里的外部程序），前两者也拒 `--no-index`。
+- 子代理接着聊（复活）：被拒（角色不在了、workflow 派的）不再把子代理从内存里删掉；协调器回绝时收掉槽位并写明原因，不再挂着半活的 running；同一个 id 并发复活只起一次；用时和对话时刻接上第一次启动的；关着的线程按它自己的预设叫角色名。
+- 只读场景（只读子代理、计划模式、explore / plan 角色）的命令判定没认反斜杠转义：`echo \"a | rm -rf x \"` 这类命令被判成只读，不问用户就会跑后面的命令。现在按 shell 的引号与转义规则切段；顺带引号里的 `>`（如 `grep -n "=>"`）不再被当成重定向。
+- code-review 审 PR 时子代理为看 PR 版本的文件把仓库拷到磁盘上、一次审查弹几十次批准：PR 的提交在本地就用只读的 `git show <sha>:<路径>`，否则只看 diff，提示里写明只用只读命令。
+- 在第 1 页以外的会话（GUI 的每个会话）起工作流，子代理、上报、收尾卡和收尾通知全落到第 1 页：GUI 什么都看不到，起它的会话也等不到结果。现在 run 归起它的那一页。
+- `workflow` 的 `validate_only` 冒烟会调 host 函数的脚本（如内置 deep-research）时整个 Dock 崩溃（SIGABRT）：冒烟改到阻塞线程上跑，同正式运行。
+- deep-research 几乎总报 Partial：研究员写的任何一条「不确定」都会让整份报告变 Partial（12 条结论全过核验也一样）。现在按问题覆盖评分，不确定之处只进覆盖说明。
+  - 研究员和 verifier 只按来源核对，不再写文件、编译跑程序（每条都要停下等用户批准，实验也不是可引用的来源）。
+  - verifier 多交 / 漏交一条 verdict 不再让它那一片结论全部作废；候选结论上限在问题间轮流分，后面的问题不再被挤掉；没覆盖的问题会点名。
+- 自建预设（没有 `general-purpose` 角色）里工作流的每个 `agent()` 都以 `unknown subagent type general-purpose` 失败：没写角色时同 `task` 用预设的第一个角色；没有角色时说清怎么补。
+- `workflow` 的 `args` 被模型序列化成字符串时脚本拿不到参数；`source` 漏写 `type` 被拒。现在都按意图读。
+- GUI 里工作流卡在一轮跑着时一直挤在最下面，不在调用发生的位置。
+- 一条工作流在跑时，再起第二条（别的会话或同一页）要等前一条跑完才拿到回执。
+- 分页（`main#N`）派的子代理回报指令写的是 `main`，第一次 `send_message` 回话会被拒。
+- 结束的工作流用时一直是 0（收尾通知里也是）。
+- GUI 看不到会话里新写的预设：`preset/list` 以前只回启动时读的那份，现在每次现读盘，GUI 每轮结束后重拉。
+  - `thread/start { presetId }` 按目标项目的 `.dock/presets` 校验，项目层预设能开会话了。
+
+- 内置技能升级后不刷新：`$DOCK_HOME/bundled/skills/` 里已有的文件以前不会被新版覆盖，现在按内容比对重写，并删掉旧版留下的文件。
 
 - 一轮在等权限时被停掉，那条请求会一直挂在队首：之后的权限弹窗（TUI、GUI、嵌入页）显示的是旧命令的摘要，
   点「允许」放掉的也是那条死请求。现在等的一方没了请求就撤出队列。

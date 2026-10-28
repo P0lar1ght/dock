@@ -32,10 +32,10 @@ type ExecFut = Pin<Box<dyn Future<Output = ToolResult> + Send + 'static>>;
 /// and `cordis_inspect_self`; both are ungated reads over the same registry, and
 /// splitting them cost a whole extra row in `search_tool`'s window — which is
 /// how `cordis_define` / `cordis_run` fell out of the default five hits.
-const INSPECT_DESC: &str = "Read-only Cordis directory. With `what`: services (reachable from Rhai vs merely mounted), fibers, tools, factories, builtins (Rhai host API), events, slots, temporary (session Plugins), permanent (disk plugins); omit `what` for all of it. With `pluginId`: that Plugin's version pointers, latest Run and Packages; add `packageId` for one Package's factory, source_path or inline source, and runtime diagnostics. Never executes apply or moves version pointers. Read skills/cordis-plugin-development/SKILL.md before writing a Plugin.";
+const INSPECT_DESC: &str = "Read-only Cordis directory. With `what`: services (reachable from Rhai vs merely mounted), fibers, tools, factories, builtins (Rhai host API), events, slots, temporary (session Plugins), permanent (disk plugins); omit `what` for all of it. With `pluginId`: that Plugin's version pointers, latest Run and Packages; add `packageId` for one Package's factory, source_path or inline source, and runtime diagnostics. Never executes apply or moves version pointers. Load the cordis-plugin-development skill before writing a Plugin.";
 const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"what":{"type":"string","enum":["services","fibers","tools","temporary","permanent","factories","builtins","events","slots"],"description":"Live directory section. Omit for all sections. Ignored when pluginId is given."},"pluginId":{"type":"string","description":"Inspect this Plugin instead of the directory."},"packageId":{"type":"string","description":"One Package of pluginId; requires pluginId."}}}"#;
 
-const DEFINE_DESC: &str = "Record an immutable Package. New Plugin: plugin.kind \"new\" + idPrefix (3–6 lowercase letters). Change an existing one: plugin.kind \"existing\" + its pluginId, which appends a Package and never overwrites an older one. factory is echo, note, hold, slash, or rhai (cordis_inspect what:\"factories\"). Custom behaviour is factory rhai: write the script to .dock/plugins/<id>/source.rhai and pass source_path; inline source is for tiny samples only. source XOR source_path. Define compiles the source and stops there — no approval, no apply, currentPackageId unchanged; call cordis_run next. Load skills/cordis-plugin-development/SKILL.md before authoring: it has the Rhai contract, the host API and the slash fields.";
+const DEFINE_DESC: &str = "Record an immutable Package. New Plugin: plugin.kind \"new\" + idPrefix (3–6 lowercase letters). Change an existing one: plugin.kind \"existing\" + its pluginId, which appends a Package and never overwrites an older one. factory is echo, note, hold, slash, or rhai (cordis_inspect what:\"factories\"). Custom behaviour is factory rhai: write the script to .dock/plugins/<id>/source.rhai and pass source_path; inline source is for tiny samples only. source XOR source_path. Define compiles the source and stops there — no approval, no apply, currentPackageId unchanged; call cordis_run next. Load the cordis-plugin-development skill before authoring: it routes to the Rhai contract, the host API, UI surfaces and pitfalls.";
 const DEFINE_PARAMS: &str = r#"{"type":"object","required":["plugin","name","purpose","factory"],"properties":{"plugin":{"type":"object","description":"kind:\"new\" + idPrefix, or kind:\"existing\" + pluginId."},"name":{"type":"string"},"purpose":{"type":"string"},"factory":{"type":"string","description":"echo, note, hold, slash, or rhai."},"source":{"type":"string","description":"rhai, inline (≤128KiB, tiny samples): #{ inject: [...], apply: |host| { ... } }. XOR source_path."},"source_path":{"type":"string","description":"rhai, preferred: path under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/ (≤1MiB, re-read on run). XOR source. No .. escape."},"command":{"type":"string","description":"slash: extra /command token; cannot collide with builtins."},"kind":{"type":"string","enum":["prompt","overlay","slot","tool"],"description":"slash: what /command does. prompt = template, overlay = read-only pane, slot = open a tui.slots id, tool = run a live tool."},"text":{"type":"string","description":"slash: prompt template, overlay body, slot id, or tool name. {args} takes the typed arguments."},"title":{"type":"string","description":"slash overlay/tool Notice title."},"send":{"type":"boolean","description":"slash prompt: send immediately (default) or fill the composer."},"description":{"type":"string","description":"slash /help label; defaults to purpose."}}}"#;
 
 const RUN_DESC: &str = "Activate one exact Package. mode \"run\" = first start, restart of current, or rollback to it; mode \"update\" = switch to a different Package, which disposes the previous Run's fiber entirely (every provide / register_* it made) and starts clean — it does not overlay. Asks the same permission overlay as bash. currentPackageId moves only on success; a throwing apply rolls its registrations back first. Do not re-request approval the user rejected.";
@@ -659,18 +659,30 @@ mod tests {
             }
         }
         // The Skill is what the system prompt tells the model to load before
-        // authoring. Same leftover-verb class as the tool consts; names like
-        // `cordis_inspect_list` in a "do not invent" row are not live tools,
-        // so this surface only gets the retired-verb check.
-        const SKILL: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../skills/cordis-plugin-development/SKILL.md"
-        ));
-        for (gone, now) in RETIRED {
-            assert!(
-                !SKILL.contains(gone),
-                "SKILL.md still says {gone:?}; that surface is now {now}"
-            );
+        // authoring, references and examples included: same two checks.
+        let skill_files: Vec<_> = crate::tools::skills::builtin::BUILTIN_FILES
+            .iter()
+            .filter(|(rel, _)| rel.starts_with("cordis-plugin-development/"))
+            .collect();
+        assert!(
+            skill_files
+                .iter()
+                .any(|(rel, _)| rel.ends_with("/SKILL.md")),
+            "cordis-plugin-development is not a bundled skill"
+        );
+        for (rel, text) in skill_files {
+            for name in cordis_names(text) {
+                assert!(
+                    TOOL_NAMES.contains(&name.as_str()),
+                    "{rel} names {name:?}, which is not a registered tool: {TOOL_NAMES:?}"
+                );
+            }
+            for (gone, now) in RETIRED {
+                assert!(
+                    !text.contains(gone),
+                    "{rel} still says {gone:?}; that surface is now {now}"
+                );
+            }
         }
     }
 

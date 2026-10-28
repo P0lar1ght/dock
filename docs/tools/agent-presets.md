@@ -67,3 +67,15 @@
 - 损坏的预设整份重写。
 - AI 起草：`agent::preset_assist`（`draft_preset` / `rewrite_persona` / `suggest_tools`）。
 - 起草只采样一次、不写盘；模型输出按工具目录和 id 规矩过滤后才回。
+- 侧聊：`ask_preset`（网关 `preset/ask`）。无状态，客户端带之前的问答、当前草稿和所在步骤。
+  - 只回参考答案（Markdown），不改草稿、不写盘、不给工具。
+  - 历史只带最近 20 条；草稿 ≤32KB；`step` 是 basic / prompt / tools / agents。
+
+### `propose_preset`（会话里起草预设）
+
+- 用户说「帮我做个 xx agent」时模型调它：只起草，用户在编辑器里逐项审、自己保存。
+- 参数同 `preset/draft` 的模型输出（`name` `description` `persona` `tools[]` `subagents[]`），走同一个 `parse_draft` 校验。
+- 不写盘。回 JSON：`status` + `note` + `draft`。
+  - 网关在监听（有图形界面）：`awaiting_review`，桌面端把这次调用画成草稿卡。
+  - 否则（终端）：`no_reviewer`，`note` 让模型照旧写 `.dock/presets/<id>/agent.yml`。
+- 低频：`code` / `cordis` 都写在 `on_demand_tools`；`task` 的名册提示点了它的名字。

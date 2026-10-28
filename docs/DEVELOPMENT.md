@@ -249,7 +249,7 @@ npm run pack:skin      # 打包 pet skin
 | 动挂载顺序 | `install_app`（`cordis-spine`）或 `cordis-app` 的 `main` |
 | 回环网关 / `dock.1` | `cordis-gateway/` |
 | 宿主页注入 | `embed-sdk/` |
-| 动态插件（会话内起一颗 Cordis 包） | skill `skills/cordis-plugin-development/SKILL.md` |
+| 动态插件（会话内起一颗 Cordis 包） | 内置 skill `cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md` |
 | Agent 预设 YAML | 内置在 `cordis-spine/presets/`；用户 / 项目覆盖在 `~/.dock/presets/`、`.dock/presets/` |
 
 `.agents/skills/` 与 `skills/` 都会被运行时扫描（前者 Agents scope，后者 Bundled）。同名时项目 `.dock/skills` > `.agents/skills` > `~/.dock/skills` > `skills/` > 内置 `$DOCK_HOME/bundled/skills/`（编译期嵌入，启动物化到缓存）。
@@ -260,6 +260,7 @@ npm run pack:skin      # 打包 pet skin
 - `/mcps` 里 Space 立即 dispose / 重连，用于验证 MCP fail-open 与隐藏工具注册。
 - `/pair` 看回环网关状态与实际端口；`[::1]` 绑失败会打 stderr 并出现在 `/pair` 与 `initialize.connection.companion`，不是静默失败。
 - 会话问题先看 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` / `chat_history.jsonl`）。
+- 子代理在那个会话目录的 `subagents/<agent-id>/` 下（`subagent.json` 是抬头）。
 - 命中率掉下去时开 `DOCK_CACHE_DEBUG=1`（见上面的环境变量表），看 `$DOCK_HOME/scratch/cache-debug.log`：它把每次请求与同一会话上一次逐条比对，第一处不同报下标与字节偏移，并把上游的 read / write / miss 贴在同一条记录下，用来分辨「前缀真被改写了」还是「上游计数问题」。
 - 改工具表后用 `cargo test -p cordis-spine --test round -- install_app_registers` 核对。
 - `cordis-gateway` 的测试全程打 loopback HTTP（`127.0.0.1` 与 `[::1]`）。环境里设了 HTTP 代理时，必须把回环地址放进 `no_proxy` / `NO_PROXY`，否则请求会被代理接管，症状是成片 502 与无响应体。
@@ -268,6 +269,6 @@ npm run pack:skin      # 打包 pet skin
 
 - `.agents/skills/git-commit/SKILL.md` — 提交（Conventional Commits、只 stage 任务相关文件）
 - `.agents/skills/create-pr/SKILL.md` — 开 PR
-- `skills/cordis-plugin-development/SKILL.md` — 动态 Cordis 插件工作流
+- `cordis-spine/src/tools/skills/builtin/cordis-plugin-development/` — 动态 Cordis 插件工作流（内置技能）
 
 贡献流程见 [CONTRIBUTING.md](../CONTRIBUTING.md)；安全上报见 [SECURITY.md](../SECURITY.md)。

@@ -60,8 +60,9 @@ pub struct WorkflowToolInput {
 
 #[derive(serde::Deserialize)]
 struct WorkflowToolInputWire {
+    /// 先按原样收：不少模型漏写 `type`，或干脆给一个名字字符串，见 [`source_from_value`]。
     #[serde(default)]
-    source: Option<WorkflowSource>,
+    source: Option<serde_json::Value>,
     #[serde(default)]
     agent_budget: Option<u64>,
     #[serde(default)]
@@ -111,6 +112,9 @@ impl<'de> serde::Deserialize<'de> for WorkflowToolInput {
         }
         let source = wire
             .source
+            .map(source_from_value)
+            .transpose()
+            .map_err(D::Error::custom)?
             .or_else(|| wire.name.map(|name| WorkflowSource::Name { name }))
             .or_else(|| wire.script.map(|script| WorkflowSource::Script { script }))
             .or_else(|| {
@@ -129,10 +133,53 @@ impl<'de> serde::Deserialize<'de> for WorkflowToolInput {
         Ok(Self {
             source,
             agent_budget: wire.agent_budget,
-            args: wire.args,
+            args: wire.args.and_then(args_from_value),
             validate_only: wire.validate_only,
         })
     }
+}
+
+/// `source` 的宽松读法（grok 自己的模型不会写错，我们接的模型会）：
+/// - 漏了 `type`：按唯一出现的那个键推（`{"script_path": …}` → `script_path`）；
+/// - 直接给字符串：当已注册的名字。
+fn source_from_value(value: serde_json::Value) -> Result<WorkflowSource, String> {
+    let value = match value {
+        serde_json::Value::String(name) if !name.trim().is_empty() => {
+            serde_json::json!({ "type": "name", "name": name })
+        }
+        serde_json::Value::Object(mut map) if !map.contains_key("type") => {
+            let keys = ["name", "script", "script_path", "resume_from_run_id"];
+            let present: Vec<&str> = keys.into_iter().filter(|k| map.contains_key(*k)).collect();
+            if let [only] = present.as_slice() {
+                let tag = if *only == "resume_from_run_id" {
+                    "resume"
+                } else {
+                    only
+                };
+                map.insert("type".into(), serde_json::json!(tag));
+            }
+            serde_json::Value::Object(map)
+        }
+        other => other,
+    };
+    serde_json::from_value(value).map_err(|e| format!("invalid `source`: {e}"))
+}
+
+/// `args` 的宽松读法：不少模型把对象序列化成字符串再传（`"{\"query\": …}"`），脚本拿到
+/// 的就是字符串，`args.query` 全是空。字符串里是 JSON 对象就解开；是普通文字就同斜杠
+/// 命令那样当成 `{ query, objective }`；空的当没给。
+fn args_from_value(value: serde_json::Value) -> Option<serde_json::Value> {
+    let serde_json::Value::String(text) = value else {
+        return Some(value);
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(object @ serde_json::Value::Object(_)) = serde_json::from_str(text) {
+        return Some(object);
+    }
+    Some(serde_json::json!({ "query": text, "objective": text }))
 }
 
 fn nonblank(value: Option<String>) -> Option<String> {
@@ -201,6 +248,11 @@ pub struct WorkflowLaunchRequest {
     /// 发起调用的会话的工作目录。启动在后台 drain 任务里做，那里拿不到调用方
     /// 的 exec ctx，所以在工具调用时取好、随请求带过去。
     pub cwd: std::path::PathBuf,
+    /// 发起调用的那一页（`exec_ctx`）。run 的子代理、上报卡、收尾卡和收尾通知都归它；
+    /// `None`（不在调用链上）时退回 drain 循环挂的根，也就是第 1 页。
+    pub page: Option<cordis::Context>,
+    /// 起它的那次 `workflow` 调用。界面按它把 run 对到对话流里那张卡上。
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug)]

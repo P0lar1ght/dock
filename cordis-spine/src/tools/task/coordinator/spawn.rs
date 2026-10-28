@@ -32,6 +32,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         }
         let id = request.id.clone();
+        // 同 id 复活：已经结束的那份让位（排队 / 在跑的照旧算重复）。
+        if request.revive
+            && !self.pending.contains_key(&id)
+            && !self.active.contains_key(&id)
+            && !self.queued.contains_id(&id)
+        {
+            self.completed.remove(&id);
+            self.completed_order.retain(|done| *done != id);
+        }
         if self.pending.contains_key(&id)
             || self.active.contains_key(&id)
             || self.completed.contains_key(&id)

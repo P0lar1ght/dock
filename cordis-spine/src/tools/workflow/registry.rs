@@ -15,16 +15,26 @@ pub(crate) struct BuiltinWorkflow {
     pub path: &'static str,
 }
 
-pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[BuiltinWorkflow {
-    name: "deep-research",
-    script: include_str!("workflows/deep_research.rhai"),
-    // 展示给用户和模型的路径，必须与上面 `include_str!` 真正编进去的那份一致
-    // ——它是相对本文件解析的，所以真实位置带 `tools/`。
-    path: concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/tools/workflow/workflows/deep_research.rhai"
-    ),
-}];
+pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[
+    BuiltinWorkflow {
+        name: "deep-research",
+        script: include_str!("workflows/deep_research.rhai"),
+        // 展示给用户和模型的路径，必须与上面 `include_str!` 真正编进去的那份一致
+        // ——它是相对本文件解析的，所以真实位置带 `tools/`。
+        path: concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/tools/workflow/workflows/deep_research.rhai"
+        ),
+    },
+    BuiltinWorkflow {
+        name: "code-review",
+        script: include_str!("workflows/code_review.rhai"),
+        path: concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/tools/workflow/workflows/code_review.rhai"
+        ),
+    },
+];
 
 pub(crate) struct ResolvedWorkflow {
     pub meta: WorkflowMeta,

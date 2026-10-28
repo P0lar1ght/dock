@@ -684,6 +684,23 @@ impl Transcript {
         });
     }
 
+    /// 一条工作流 run 出现了或变了（`workflow/updated`，载荷 `{ run }`）。只推不记。
+    pub fn workflow_updated(&mut self, run: Value) {
+        let _ = self.tx.send(ProjectedEvent {
+            seq: 0,
+            method: "workflow/updated".into(),
+            page: self.page.clone(),
+            thread_id: self.thread_id.clone(),
+            turn_id: self.projector.turn_id.clone(),
+            timestamp: iso_now(),
+            payload: json!({
+                "run": run,
+                "threadId": self.thread_id,
+                "turnId": self.projector.turn_id,
+            }),
+        });
+    }
+
     /// 子代理停下（空闲或结束）：收掉它开着的一轮。子代理的会话不记 `TurnEnd`。
     pub fn close_child_turn(&mut self, status: &TurnEndStatus) {
         self.turn_ended(status);

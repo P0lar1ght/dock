@@ -106,6 +106,7 @@ headed = true   # 缺省 false（无头）
 $DOCK_HOME/
   config.toml               用户配置
   sessions/<cwd-key>/<id>/  会话存档（meta.json + chat_history.jsonl）
+    subagents/<agent-id>/   子代理的对话（subagent.json + chat_history.jsonl）
   skills/                   用户技能
   bundled/skills/           内置技能缓存（应用自带，可改；同名被更高层覆盖）
   workflows/                用户 workflow 脚本
@@ -139,3 +140,6 @@ Rhai 脚本目录（同名不覆盖已有）：内置 → `{cwd}/.dock/workflows
 `.dock/presets/<id>/agent.yml`。`/preset` 打开名册：`n` 新建、`d` 复制、
 `a` 应用、`x` 删除。子代理写在预设的 `agents/<type>.yml`（人设 + 工具
 允许名单），写完在会话里即刻生效。
+用户在对话里要你「做一个 xx agent」时，先用 `propose_preset` 起草：
+桌面端会出一张草稿卡，用户在预设编辑器里审完自己保存；
+它回 `no_reviewer`（终端）时，再照上面的目录直接写文件。

@@ -10,7 +10,7 @@ use cordis_spine::{
     Ask, ChildLogEvent, LogEvent, Mcp, PageCompaction, PageLogEvent, Permissions, PlanMode,
     Sessions, SubagentChanged, Subagents, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS,
     PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, ROOT_IDENTITY, SESSIONS, SESSION_CHILD_EVENT,
-    SESSION_COMPACTION, SESSION_PAGE_EVENT, SUBAGENTS, SUBAGENT_CHANGED,
+    SESSION_COMPACTION, SESSION_PAGE_EVENT, SUBAGENTS, SUBAGENT_CHANGED, WORKFLOW_CHANGED,
 };
 use cordis_spine::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
@@ -488,6 +488,7 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             });
         });
     listen_subagents(inner);
+    listen_workflows(inner);
     // 某一页的实时日志被整份换掉（终端 `/new` / 恢复会话，或网关自己的
     // `thread/start`）：按它现在的会话重建投影，`threadId` 也跟着换。
     let for_reset = inner.clone();
@@ -658,6 +659,29 @@ fn listen_subagents(inner: &Arc<GatewayInner>) {
                 t.subagent_updated(agent)
             });
         });
+}
+
+/// 工作流 run 的变化推成起它那一页上的 `workflow/updated`；那一页关了就不推。
+fn listen_workflows(inner: &Arc<GatewayInner>) {
+    let for_changes = inner.clone();
+    let _ = inner.ctx.on(
+        WORKFLOW_CHANGED,
+        move |changed: &cordis_spine::WorkflowChanged| {
+            let Some(run) = crate::workflows::run(&for_changes.ctx, &changed.run_id) else {
+                return;
+            };
+            let Some(page) = pages(&for_changes)
+                .into_iter()
+                .find(|p| p.identity == run.page)
+            else {
+                return;
+            };
+            let info = crate::workflows::info(&run);
+            with_transcript(&for_changes, &page.identity, Some(page.thread_id()), |t| {
+                t.workflow_updated(info)
+            });
+        },
+    );
 }
 
 fn last_user_attachments(ctx: &Context) -> Vec<serde_json::Value> {

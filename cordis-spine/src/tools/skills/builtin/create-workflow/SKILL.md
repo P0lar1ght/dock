@@ -17,7 +17,7 @@ metadata:
 2. **定名字和落点**（和技能同一套约定）：
    - 项目级：`<仓库根>/.dock/workflows/<name>.rhai` —— 跟着这个仓库走，可以和同事共享（在 git 仓库里默认选它）。
    - 用户级：`~/.dock/workflows/<name>.rhai` —— 所有项目都能用。
-   - 名字用小写字母、数字、连字符（如 `review-changes`）。不能盖掉内置的 `deep-research`。
+   - 名字用小写字母、数字、连字符（如 `review-changes`）。不能盖掉内置的 `deep-research` / `code-review`。
 3. **写脚本**。从下面的例子起手，照着后面的参考章节写。形状是：`let meta` 头（纯字面量）→ schema 常量 → 一个阶段一段。子代理 prompt 要写成祈使句且自足（见「踩过的坑」）。
 4. **冒烟一条路径**。用 `workflow` 工具发 `{ source: { type: "script", script: "<rhai>" }, validate_only: true }` 加有代表性的 `args`，改到元数据、编译、那一条 canned-host 路径都过。**这不等于每个分支和真实工具都验过**——见「迭代」。
 5. **存盘**到选好的路径，目录不存在就建。存完它就能用 `/<name>` 或 `/workflow <name> ...` 启动。注意 `/workflow` 是**运行看板**，不是已存脚本的目录；名字要等第一次运行起来才会出现在那儿。
@@ -152,7 +152,7 @@ if r.success { complete(r.output); }
 - `parallel([#{ prompt: "...", label: "..." }, ...])` → 按输入顺序返回结果，失败的槽位是 `()`，用之前先过滤。整个面板对 `agent_budget` 是**一次性**记账：会超预算就在任何一个孩子起跑前整批失败。
 - `phase(title)` 把后面的子代理归到一组（详情页左栏）。标题超过 256 字节会被截断。
 - `log(message)` 给用户发一行进度。快照只留最近 50 条、单条 4KB；任务条和 `/workflow` 显示最新一条。**不进模型上下文**。
-- `complete(value)` 以成功收尾，`value` 成为运行结果（如 `complete(#{ path: p, report: text })`）。结果会摊成可读文本再交给用户和主线程，不用自己 JSON 编码。
+- `complete(value)` 以成功收尾，`value` 成为运行结果（如 `complete(#{ path: p, report: text })`）。结果会摊成可读文本再交给用户和主线程，不用自己 JSON 编码。顶层的 `data` 键例外：它原样交给界面（结构化结果，比如批注列表），**不**摊进给主线程的文本——大块结构化数据放 `data`，别让它挤占模型上下文。
 - `budget()` → `#{ total, spent, reserved, remaining }`。`total` 是逻辑子代理调用的绝对上限（默认 128，可显式设 1–1024）。每个 `agent()` 和 `parallel()` 的每一项在起跑前都会 `spent += 1`；schema 纠错重试不算。`reserved` 恒为 0。
 - `write_scratch_file(name, content)` → 返回**绝对路径**；`read_scratch_file(name)` 按同一个名字读回来。`name` 必须是单个相对路径组件（不能有 `/`、`.`、`..`），拒符号链接，配额是 64 个文件 / 单文件 10MB / 总量 64MB。报告写这儿，然后 `complete(#{ path: p, report: text })`，用户就能拿到文件路径。
 - `fingerprint(text)` → 稳定哈希（做停滞检测用）。`json_encode(value)` → 确定性 JSON 文本，用来引用不可信的 prompt 数据。

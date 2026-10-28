@@ -2,6 +2,7 @@ use cordis::{Context, Fiber, Result};
 
 use crate::agent::agents::agents;
 use crate::agent::loop_plugin::agent_loop;
+use crate::agent::preset_propose::tool_propose_preset;
 use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
 use crate::host::mcp_app_context::mcp_app_context;
@@ -135,6 +136,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tool_views(), ())?.wait().await?;
     ctx.plugin(plugin_settings(), ())?.wait().await?;
     ctx.plugin(agent_presets(), ())?.wait().await?;
+    // 会话里起草预设，交给桌面端编辑器审（不写盘）；终端照旧写文件。
+    ctx.plugin(tool_propose_preset(), ())?.wait().await?;
     ctx.plugin(workspace_tools(), ())?.wait().await?;
     ctx.plugin(tool_web(), web_fetch_params())?.wait().await?;
     // 根会话的 todos 服务（`TODOS` 按页隔离：分页各自挂 todo_service）。
