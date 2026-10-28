@@ -139,14 +139,19 @@ async fn run_dock_child(
     let id = run.request.id.clone();
     let typ = run.request.subagent_type.clone();
     let desc = run.request.description.clone();
-    let parent_id = run.request.parent_session_id.clone();
-    store.ensure_owned(
-        &id,
-        desc.clone(),
-        typ.clone(),
-        run.request.owner.clone(),
-        &parent_id,
-    );
+    // 回报指令要写**记在册上的**父级（发起调用的那一页，如 `main#2`）：请求上的
+    // `parent_session_id` 被后端统一绑成了 `main`，照它写的话分页的孩子回话会被
+    // `send_message` 以「不是启动你的代理」挡回去。
+    let parent_id = store
+        .ensure_owned(
+            &id,
+            desc.clone(),
+            typ.clone(),
+            run.request.owner.clone(),
+            &run.request.parent_session_id,
+        )
+        .parent
+        .clone();
 
     let resume = run
         .request

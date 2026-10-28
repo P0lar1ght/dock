@@ -142,6 +142,99 @@ export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null
   };
 }
 
+export type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+export type WorkflowAgentStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+/** run 里的一个子代理（一次 `agent()`）。它的对话按 `agentId` 去 `subagent/*` 取。 */
+export interface WorkflowAgentRow {
+  agentId: string;
+  /** `agent(label:)`，没给就是角色名。 */
+  label: string;
+  /** 属于哪个阶段；脚本没声明阶段时为 `null`。 */
+  phase: string | null;
+  status: WorkflowAgentStatus;
+  durationMs: number;
+  tokensUsed: number;
+  /** 它最后一次回报（网关截到 2000 字）；失败时是错误原因。 */
+  latestReport: string | null;
+}
+
+/** 一条工作流 run：`workflow/updated` 的 `run`、`workflow/list` 的一项。 */
+export interface WorkflowRun {
+  runId: string;
+  /** 起它的那次 `workflow` 调用。 */
+  toolCallId: string | null;
+  /** 每变一次加一：拉列表和推送交错到达时，旧的不盖新的。 */
+  revision: number;
+  /** 显示名（如 `deep-research`，重名会带 `-2`）。 */
+  name: string;
+  description: string;
+  builtin: boolean;
+  status: WorkflowStatus;
+  /** 脚本声明的阶段，整条 run 不变。 */
+  phases: { title: string; detail: string }[];
+  currentPhase: string | null;
+  startedAt: number;
+  /** 在跑时是到那次推送为止；结束就定住。 */
+  durationMs: number;
+  agentBudget: number;
+  agentsUsed: number;
+  agents: WorkflowAgentRow[];
+  /** 脚本 `log()` 的最近几条，新的在后。 */
+  logs: string[];
+  /** 完成时的结果（网关截到 8000 字）。 */
+  result: string | null;
+  /** 失败 / 暂停的原因。 */
+  error: string | null;
+  /** 脚本 `complete(#{ …, data })` 的 `data`：给界面的结构化结果（code-review 的批注见 `diff.ts`）。 */
+  resultData: Record<string, unknown> | null;
+}
+
+/** `workflow/updated` 的 `run`（或 `workflow/list` 的一项）→ run。没有 id 返回 `null`。 */
+export function parseWorkflowRun(raw: Record<string, unknown>): WorkflowRun | null {
+  const runId = str(raw.runId);
+  if (!runId) return null;
+  const agents = (Array.isArray(raw.agents) ? raw.agents : []).flatMap((a): WorkflowAgentRow[] => {
+    const row = obj(a);
+    const agentId = str(row.agentId);
+    if (!agentId) return [];
+    return [
+      {
+        agentId,
+        label: str(row.label),
+        phase: str(row.phase) || null,
+        status: oneOf(row.status, ['running', 'completed', 'failed', 'cancelled'] as const, 'running'),
+        durationMs: num(row.durationMs),
+        tokensUsed: num(row.tokensUsed),
+        latestReport: str(row.latestReport) || null,
+      },
+    ];
+  });
+  const phases = (Array.isArray(raw.phases) ? raw.phases : [])
+    .map((p) => ({ title: str(obj(p).title), detail: str(obj(p).detail) }))
+    .filter((p) => p.title);
+  return {
+    runId,
+    toolCallId: str(raw.toolCallId) || null,
+    revision: num(raw.revision),
+    name: str(raw.name) || runId,
+    description: str(raw.description),
+    builtin: raw.builtin === true,
+    status: oneOf(raw.status, ['running', 'completed', 'failed', 'cancelled', 'paused'] as const, 'running'),
+    phases,
+    currentPhase: str(raw.currentPhase) || null,
+    startedAt: num(raw.startedAt),
+    durationMs: num(raw.durationMs),
+    agentBudget: num(raw.agentBudget),
+    agentsUsed: num(raw.agentsUsed),
+    agents,
+    logs: (Array.isArray(raw.logs) ? raw.logs : []).map(str),
+    result: str(raw.result) || null,
+    error: str(raw.error) || null,
+    resultData: raw.resultData && typeof raw.resultData === 'object' && !Array.isArray(raw.resultData) ? (raw.resultData as Record<string, unknown>) : null,
+  };
+}
+
 export type DockEvent = EventBase &
   (
     | { method: 'turn/started' }
@@ -205,6 +298,8 @@ export type DockEvent = EventBase &
     | { method: 'subagent/updated'; agent: SubagentInfo }
     /** 子代理对话里的一条事件（包在父线程上，`seq` 为 0；`event.seq` 是子代理自己的）。 */
     | { method: 'subagent/event'; agentId: string; event: DockEvent }
+    /** 工作流 run 出现了或变了。只推不记（`seq` 为 0）。 */
+    | { method: 'workflow/updated'; run: WorkflowRun }
   );
 
 export type DockEventMethod = DockEvent['method'];
@@ -382,6 +477,10 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
     case 'subagent/updated': {
       const agent = parseSubagent(obj(params.agent));
       return agent ? { ...base, method, agent } : null;
+    }
+    case 'workflow/updated': {
+      const run = parseWorkflowRun(obj(params.run));
+      return run ? { ...base, method, run } : null;
     }
     case 'subagent/event': {
       const agentId = str(params.agentId);

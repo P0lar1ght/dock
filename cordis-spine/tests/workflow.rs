@@ -617,13 +617,15 @@ impl Sampler for Reporting {
     ) -> BoxFuture<'a, LlmOutput> {
         let text = last_user(&request.history);
         let first = self.pending.lock().unwrap().insert(text.clone());
+        // 照初始任务末尾的回报指令填收件人，和真模型一样。
+        let parent = reply_target(&text);
         Box::pin(async move {
             on_delta(StreamDelta::Text(text.clone()));
             let tool_calls = if first {
                 vec![ToolCall {
                     id: "r1".into(),
                     name: "send_message".into(),
-                    arguments: serde_json::json!({ "agent_id": "main", "message": "阶段性结论" })
+                    arguments: serde_json::json!({ "agent_id": parent, "message": "阶段性结论" })
                         .to_string(),
                 }]
             } else {
@@ -636,6 +638,15 @@ impl Sampler for Reporting {
             }
         })
     }
+}
+
+/// 回报指令里写的父级 id（`agent_id 为 "main#2"`）；没有指令时是 `main`。
+fn reply_target(prompt: &str) -> String {
+    prompt
+        .split_once("agent_id 为 \"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(id, _)| id.to_string())
+        .unwrap_or_else(|| "main".into())
 }
 
 fn reporting() -> Arc<dyn Sampler> {
@@ -752,6 +763,464 @@ async fn agent_reports_land_on_the_run_progress() {
     );
 }
 
+/// 回归：分页（`main#2`）起的工作流，子代理、上报卡、收尾卡和收尾通知都归**那一页**。
+///
+/// drain 循环挂在根上，以前整条 run 都按第 1 页走：子代理记在 `main` 名下，网关按页
+/// 过滤子代理时那一页一个都看不到；上报卡和收尾卡写进第 1 页的滚动区；收尾通知进第 1 页
+/// 的信箱——起工作流的那一页（桌面端每个会话都是一页）什么也看不见，也永远等不到结果。
+#[tokio::test]
+async fn a_tabs_workflow_belongs_to_that_tab_not_page_one() {
+    let h = boot(reporting(), TaskConfig::default()).await;
+    let sub = h
+        .root
+        .require::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
+        .unwrap();
+    let page = h.root.isolate(SESSIONS).isolate("turn").isolate(AGENT_LOOP);
+    page.provide(SESSIONS, Sessions::tab(page.clone(), 2))
+        .unwrap();
+    page.plugin(turn(), ()).unwrap().wait().await.unwrap();
+    page.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let out = tools
+        .execute_on(
+            &page,
+            ToolCall {
+                id: "wf".into(),
+                name: WORKFLOW_TOOL_NAME.into(),
+                arguments: serde_json::json!({
+                    "source": { "type": "script", "script": TWO_AGENTS },
+                    "agent_budget": 4,
+                })
+                .to_string(),
+            },
+        )
+        .await;
+    let value: serde_json::Value = serde_json::from_str(&out.content)
+        .unwrap_or_else(|_| panic!("launch was rejected: {}", out.content));
+    let run_id = value["run_id"].as_str().expect("run_id").to_string();
+    let run = wait_terminal(&h, &run_id).await;
+    assert_eq!(run.status, "complete", "{run:?}");
+    assert_eq!(run.page, "main#2", "run 要记下起它的那一页");
+    assert_eq!(run.tool_call_id.as_deref(), Some("wf"));
+
+    assert_eq!(run.agents.len(), 2, "{:?}", run.agents);
+    for row in run.agents.iter() {
+        let snap = sub.snapshot(&row.agent_id).expect("子代理快照");
+        assert_eq!(
+            snap.parent, "main#2",
+            "{} 没挂在起工作流的那一页",
+            row.label
+        );
+    }
+
+    // 收尾在 run 定状态之后才发，等那张收尾卡落地。
+    let page_sessions = page.require::<Sessions>(SESSIONS).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !page_sessions
+        .events()
+        .iter()
+        .any(|e| matches!(e, LogEvent::Notice { title, .. } if title.contains("完成")))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "收尾卡没进起工作流的那一页：{:?}",
+            page_sessions.events()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let cards = page_sessions
+        .events()
+        .iter()
+        .filter(|e| matches!(e, LogEvent::Notice { title, .. } if title.contains("上报")))
+        .count();
+    assert_eq!(cards, 2, "两次 agent() 的上报卡都该在那一页");
+    assert!(
+        !h.root
+            .require::<Sessions>(SESSIONS)
+            .unwrap()
+            .events()
+            .iter()
+            .any(|e| matches!(e, LogEvent::Notice { .. })),
+        "第 1 页不该收到别人的工作流卡片"
+    );
+
+    assert!(sub.has_parent_notices("main#2"), "收尾通知没进那一页的信箱");
+    assert!(!sub.has_parent_notices("main"), "收尾通知不该落到第 1 页");
+    let notices = sub.drain_parent_notices("main#2");
+    assert!(
+        notices.iter().any(|t| t.contains("阶段性结论")),
+        "过程上报要随结果交给那一页：{notices:?}"
+    );
+}
+
+/// 回归：一条 run 还在跑，第二次启动也要立刻拿到回执。
+///
+/// 以前 drain 循环逐条 `await` 整条 run，第二次启动（桌面端另一个会话、或同一页再起一条）
+/// 要等前一条收尾才被处理，工具调用就一直挂着。
+#[tokio::test]
+async fn a_second_launch_does_not_wait_for_the_first_run() {
+    let (sampler, _peak, gate) = counting(true);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let first = launch(&h, TWO_AGENTS, 4).await;
+    let second = tokio::time::timeout(Duration::from_secs(5), launch(&h, TWO_AGENTS, 4))
+        .await
+        .expect("第一条 run 没跑完，第二次启动就拿不到回执");
+    assert_ne!(first, second);
+    assert_eq!(wf_run(&h, &first).unwrap().status, "active");
+    for run_id in [&first, &second] {
+        let wf = h.root.require::<Workflows>(WORKFLOWS).unwrap();
+        assert!(wf.stop(run_id).is_some());
+    }
+    gate.notify_waiters();
+}
+
+/// 回归：`validate_only` 冒烟会调 host 函数的脚本（这里是内置 deep-research），不能把
+/// 整个进程带崩。
+///
+/// 引擎的 host 函数用 `blocking_recv` 等回执；冒烟以前直接在 tokio 工作线程上跑，第一个
+/// host 调用就 panic（不许在运行时里阻塞），rhai 的清理守卫里又 panic 一次（panic in a
+/// destructor during cleanup），进程 SIGABRT——桌面端整个 Dock 跟着没了。多线程运行时：
+/// 和 Dock 一样，崩溃报告就是在工作线程上 abort 的。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn validate_only_with_host_calls_does_not_abort_the_process() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let out = tools
+        .execute(ToolCall {
+            id: "wf".into(),
+            name: WORKFLOW_TOOL_NAME.into(),
+            arguments: serde_json::json!({
+                "source": { "type": "name", "name": "deep-research" },
+                "args": { "query": "x" },
+                "validate_only": true,
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(!out.content.starts_with("Error"), "{}", out.content);
+    assert!(out.content.contains("deep-research"), "{}", out.content);
+    assert!(
+        h.root
+            .require::<Workflows>(WORKFLOWS)
+            .unwrap()
+            .list()
+            .is_empty(),
+        "冒烟不该真起 run"
+    );
+}
+
+/// 冒烟要按这次给的 `agent_budget` 跑（同 grok）：预算装不下的脚本冒烟时就报出来，
+/// 而不是冒烟按默认 128 通过、正式跑到一半才撞预算。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn validate_only_uses_the_requested_agent_budget() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let out = tools
+        .execute(ToolCall {
+            id: "wf".into(),
+            name: WORKFLOW_TOOL_NAME.into(),
+            arguments: serde_json::json!({
+                "source": { "type": "script", "script": TWO_AGENTS },
+                "agent_budget": 1,
+                "validate_only": true,
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(
+        out.content.contains("workflow_validate_failed"),
+        "两个 agent() 装不进预算 1：{}",
+        out.content
+    );
+}
+
+/// 一页同时最多 4 条在跑的 run（同 grok）。run 互不排队之后，不设上限一页就能起任意多条，
+/// 每条各带一个并发池和一份预算。
+#[tokio::test]
+async fn a_page_runs_at_most_four_workflows_at_once() {
+    let (sampler, _peak, gate) = counting(true);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let mut runs = Vec::new();
+    for _ in 0..4 {
+        runs.push(launch(&h, TWO_AGENTS, 4).await);
+    }
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let fifth = tools
+        .execute(ToolCall {
+            id: "wf5".into(),
+            name: WORKFLOW_TOOL_NAME.into(),
+            arguments: serde_json::json!({
+                "source": { "type": "script", "script": TWO_AGENTS },
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(
+        fifth.content.contains("workflow_too_many_runs"),
+        "{}",
+        fifth.content
+    );
+    // 停掉一条就又能起了。
+    let wf = h.root.require::<Workflows>(WORKFLOWS).unwrap();
+    assert!(wf.stop(&runs[0]).is_some());
+    let _ = wait_terminal(&h, &runs[0]).await;
+    runs.push(launch(&h, TWO_AGENTS, 4).await);
+    for run_id in &runs[1..] {
+        wf.stop(run_id);
+    }
+    gate.notify_waiters();
+}
+
+/// 界面上 run 那一行显示这次要做什么（`args.objective` / `args.query`），不是脚本的通用描述。
+#[tokio::test]
+async fn the_run_objective_comes_from_the_arguments() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let out = tools
+        .execute(ToolCall {
+            id: "wf".into(),
+            name: WORKFLOW_TOOL_NAME.into(),
+            arguments: serde_json::json!({
+                "source": { "type": "script", "script": TWO_AGENTS },
+                "args": { "query": "  韩国旅游攻略  " },
+            })
+            .to_string(),
+        })
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+    let run = wait_terminal(&h, v["run_id"].as_str().unwrap()).await;
+    assert_eq!(run.objective, "韩国旅游攻略");
+}
+
+/// 名字不认识时回报可用的名字，模型不用再猜。
+#[tokio::test]
+async fn an_unknown_workflow_name_lists_the_available_ones() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let out = tools
+        .execute(ToolCall {
+            id: "wf".into(),
+            name: WORKFLOW_TOOL_NAME.into(),
+            arguments: serde_json::json!({ "source": { "type": "name", "name": "learn-traces" } })
+                .to_string(),
+        })
+        .await;
+    assert!(
+        out.content.contains("unknown workflow: learn-traces"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("deep-research"), "{}", out.content);
+}
+
+/// 回归：run 的子代理按**起它那一页**的预设找角色。第 1 页的预设没有 `general-purpose`
+/// 而这一页有时，以前报 `unknown subagent type general-purpose`。
+#[tokio::test]
+async fn workflow_agents_use_the_launching_pages_roster() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let root_presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap();
+    let page_presets = root_presets.fork();
+    root_presets.apply("warden").unwrap();
+    assert!(root_presets.subagent("general-purpose").is_none());
+    page_presets.apply("code").unwrap();
+    let page = h
+        .root
+        .isolate(SESSIONS)
+        .isolate("turn")
+        .isolate(AGENT_LOOP)
+        .isolate(AGENT_PRESETS);
+    page.provide(SESSIONS, Sessions::tab(page.clone(), 2))
+        .unwrap();
+    page.provide(AGENT_PRESETS, page_presets).unwrap();
+    page.plugin(turn(), ()).unwrap().wait().await.unwrap();
+    page.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let out = tools
+        .execute_on(
+            &page,
+            ToolCall {
+                id: "wf".into(),
+                name: WORKFLOW_TOOL_NAME.into(),
+                arguments: serde_json::json!({
+                    "source": { "type": "script", "script": TWO_AGENTS },
+                })
+                .to_string(),
+            },
+        )
+        .await;
+    let v: serde_json::Value =
+        serde_json::from_str(&out.content).unwrap_or_else(|_| panic!("{}", out.content));
+    let run = wait_terminal(&h, v["run_id"].as_str().unwrap()).await;
+    for row in run.agents.iter() {
+        assert_eq!(row.state, "done", "{row:?}");
+    }
+    assert_eq!(run.status, "complete", "{run:?}");
+}
+
+/// 在测试的用户层写一个预设（不写 `tools` = 全部工具都允许，含 `workflow`），带这些子代理
+/// 角色，并切过去。
+fn use_custom_preset(h: &Harness, id: &str, roles: &[&str]) {
+    let dir = h._home.path().join(id);
+    std::fs::create_dir_all(dir.join("agents")).unwrap();
+    std::fs::write(
+        dir.join("agent.yml"),
+        format!("id: {id}\nname: {id}\ndescription: 测试预设\npersona: 测试\n"),
+    )
+    .unwrap();
+    for role in roles {
+        std::fs::write(
+            dir.join("agents").join(format!("{role}.yml")),
+            format!("name: {role}\ndescription: 测试角色\npersona: 测试\n"),
+        )
+        .unwrap();
+    }
+    let presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap();
+    presets.resync();
+    presets.apply(id).unwrap();
+    assert!(presets.subagent("general-purpose").is_none());
+}
+
+/// 回归：预设里没有 `general-purpose` 时，`agent()` 没写角色就用这个预设的第一个角色
+/// （同 `task`）。以前写死 `general-purpose`，这样的预设里每个 `agent()` 都失败。
+#[tokio::test]
+async fn workflow_agents_fall_back_to_the_presets_first_role() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    use_custom_preset(&h, "researcher-mode", &["scout"]);
+    let run_id = launch(&h, TWO_AGENTS, 4).await;
+    let run = wait_terminal(&h, &run_id).await;
+    assert_eq!(run.status, "complete", "{run:?}");
+    for row in run.agents.iter() {
+        assert_eq!(row.state, "done", "{row:?}");
+    }
+}
+
+/// 回归：预设一个子代理角色都没有（用户自建的预设常这样）：`agent()` 失败时要说清为什么、
+/// 怎么办，别只报 `unknown subagent type general-purpose`。写了预设里没有的角色，列出有哪些。
+#[tokio::test]
+async fn workflow_agents_explain_a_missing_role() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    use_custom_preset(&h, "no-roles", &[]);
+    let script = r#"
+let meta = #{ name: "no-roles", description: "d" };
+let r = agent("x");
+complete(r.output);
+"#;
+    let run = wait_terminal(&h, &launch(&h, script, 4).await).await;
+    let row = &run.agents[0];
+    assert_eq!(row.state, "failed", "{row:?}");
+    let why = row.latest_report.clone().unwrap_or_default();
+    assert!(why.contains("没有子代理角色"), "{why}");
+
+    use_custom_preset(&h, "one-role", &["scout"]);
+    let script = r#"
+let meta = #{ name: "bad-role", description: "d" };
+let r = agent("x", #{ agent_type: "research" });
+complete(r.output);
+"#;
+    let run = wait_terminal(&h, &launch(&h, script, 4).await).await;
+    let why = run.agents[0].latest_report.clone().unwrap_or_default();
+    assert!(
+        why.contains("research") && why.contains("scout"),
+        "要列出可用角色：{why}"
+    );
+}
+
+/// 回归：模型常把 `args` 序列化成字符串再传（用户会话里 atria 就是这么传的），脚本拿到
+/// 字符串、`args.query` 为空，只能自己写垫片去 parse。字符串里是 JSON 对象就解开，
+/// 普通文字同斜杠命令当 `{ query, objective }`。
+#[tokio::test]
+async fn stringified_args_reach_the_script_as_an_object() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let script = r#"
+let meta = #{ name: "args-probe", description: "d" };
+complete(#{ t: type_of(args), q: args.query });
+"#;
+    for (args, want) in [
+        (serde_json::json!("{\"query\": \"Rust 1.85\"}"), "Rust 1.85"),
+        (serde_json::json!("韩国旅游攻略"), "韩国旅游攻略"),
+    ] {
+        let out = tools
+            .execute(ToolCall {
+                id: "wf".into(),
+                name: WORKFLOW_TOOL_NAME.into(),
+                arguments: serde_json::json!({
+                    "source": { "type": "script", "script": script },
+                    "args": args,
+                })
+                .to_string(),
+            })
+            .await;
+        let v: serde_json::Value =
+            serde_json::from_str(&out.content).unwrap_or_else(|_| panic!("{}", out.content));
+        let run = wait_terminal(&h, v["run_id"].as_str().unwrap()).await;
+        let summary = run.result_summary.unwrap_or_default();
+        assert!(summary.contains("t: map"), "{summary}");
+        assert!(summary.contains(&format!("q: {want}")), "{summary}");
+    }
+}
+
+/// 回归：`source` 漏了 `type`（`{"script_path": …}`）以前回 `missing field type`，模型要
+/// 再试一轮。按唯一出现的键推出来；直接给字符串当名字。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_source_without_type_is_inferred() {
+    let (sampler, _peak, _gate) = counting(false);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    for source in [
+        serde_json::json!({ "script": TWO_AGENTS }),
+        serde_json::json!({ "name": "deep-research" }),
+        serde_json::json!("deep-research"),
+    ] {
+        let out = tools
+            .execute(ToolCall {
+                id: "wf".into(),
+                name: WORKFLOW_TOOL_NAME.into(),
+                arguments: serde_json::json!({
+                    "source": source,
+                    "args": { "query": "x" },
+                    "validate_only": true,
+                })
+                .to_string(),
+            })
+            .await;
+        assert!(
+            !out.content.starts_with("Error"),
+            "{source}: {}",
+            out.content
+        );
+    }
+}
+
+/// 回归：结束的 run 要报它真跑了多久。以前用时只在 `list()` 里给活跃的 run 现算，
+/// 收尾后定在 0，收尾通知和界面上都是「0 秒」。
+#[tokio::test]
+async fn a_finished_run_keeps_its_elapsed_time() {
+    let (sampler, _peak, gate) = counting(true);
+    let h = boot(sampler, TaskConfig::default()).await;
+    let script = r#"
+let meta = #{ name: "elapsed-probe", description: "one agent" };
+let r = agent("等一下");
+complete("done");
+"#;
+    let run_id = launch(&h, script, 4).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    gate.notify_waiters();
+    let run = wait_terminal(&h, &run_id).await;
+    assert_eq!(run.status, "complete", "{run:?}");
+    assert!(run.elapsed_ms >= 60, "用时定在了 {} ms", run.elapsed_ms);
+}
+
 /// 脚本声明的阶段要进快照，详情页左栏按它渲染。
 #[tokio::test]
 async fn declared_phases_reach_the_snapshot() {
@@ -847,7 +1316,7 @@ complete("done");
     assert_eq!(row.state, "failed", "{row:?}");
     let reason = row.latest_report.as_deref().unwrap_or("");
     assert!(
-        reason.contains("unknown subagent type") && reason.contains("no-such-role"),
+        reason.contains("没有子代理角色") && reason.contains("no-such-role"),
         "失败原因要在行上：{reason:?}"
     );
 }

@@ -22,3 +22,4 @@ pub mod thread;
 pub mod tool_view;
 pub mod turn;
 pub mod vcs;
+pub mod workflow;

@@ -144,7 +144,7 @@ cd dock-core && npm ci && npm test && npm run typecheck   # 协议核心（Node 
 | 斜杠 / 快捷键 / overlay | `CLI.md` |
 | 产品介绍 | `README.md` |
 | 提交与 PR 流程 skill | `.agents/skills/git-commit/SKILL.md`、`.agents/skills/create-pr/SKILL.md` |
-| 动态 Cordis 插件 skill | `skills/cordis-plugin-development/SKILL.md` |
+| 动态 Cordis 插件 skill | `cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md`（内置） |
 | 浏览器 SDK | `embed-sdk/README.md` |
 | 冻结副本规则 | `vendor/README.md`、`vendor/AGENTS.md` |
 

@@ -7,7 +7,7 @@
 - **ctx**：`"workflows"` + `"tools"`
 - **模型工具**：`workflow`（按需；系统提示的工作流 listing 只要 `use_tool` 可达就照常列出）
 
-Grok Rhai 引擎（`vendor/xai/workflow`）+ 同款 oneshot ack。内置 `deep-research` 脚本在 `cordis-spine/src/tools/workflow/workflows/deep_research.rhai`；磁盘扫描 bundled → 内置 → `{cwd}/.dock/workflows/<name>.rhai` → `~/.dock/workflows/`（同名不覆盖已有）。向 `"context"` 登记 listing 段（窗口 token ×4 ×**3%**，与技能共用 `src/listing.rs`）。同样两道门：**只有主会话拿这一段**（同 `listings: true` 开关），且 `workflow` 工具必须本会话叫得动才发：在工具表上，或按需且经 `use_tool` 可达（`Tools::reachable_on`）。每个目录项登记 slash extra（`kind: tool`，`text=workflow`；不可盖 `RESERVED_SLASH` / `/skills`）。`/name` 与 `/workflow <name>` 直接 `Tools::execute`，不经模型。`tools/execute` 路径靠近 workflows 目录时中途发现。`code` / `cordis` 允许名单含 `workflow`。普通 `register`；`code` / `cordis` 的 `on_demand_tools` 把它设成按需（不进 sampler），listing 点了名，模型按精确名 `search_tool` 一次拿 schema 再经 `use_tool` 启动。
+Grok Rhai 引擎（`vendor/xai/workflow`）+ 同款 oneshot ack。内置 `deep-research` / `code-review` 脚本在 `cordis-spine/src/tools/workflow/workflows/`；磁盘扫描 bundled → 内置 → `{cwd}/.dock/workflows/<name>.rhai` → `~/.dock/workflows/`（同名不覆盖已有）。向 `"context"` 登记 listing 段（窗口 token ×4 ×**3%**，与技能共用 `src/listing.rs`）。同样两道门：**只有主会话拿这一段**（同 `listings: true` 开关），且 `workflow` 工具必须本会话叫得动才发：在工具表上，或按需且经 `use_tool` 可达（`Tools::reachable_on`）。每个目录项登记 slash extra（`kind: tool`，`text=workflow`；不可盖 `RESERVED_SLASH` / `/skills`）。`/name` 与 `/workflow <name>` 直接 `Tools::execute`，不经模型。`tools/execute` 路径靠近 workflows 目录时中途发现。`code` / `cordis` 允许名单含 `workflow`。普通 `register`；`code` / `cordis` 的 `on_demand_tools` 把它设成按需（不进 sampler），listing 点了名，模型按精确名 `search_tool` 一次拿 schema 再经 `use_tool` 启动。
 
 创作手册是内置技能 **`create-workflow`**（`src/tools/skills/builtin/create-workflow/SKILL.md`，编译期嵌入、启动物化到 `$DOCK_HOME/bundled/skills/`）：脚本形状、方言、host API、dock 与 grok 的差异、踩过的坑都在那一份，`workflow` 工具的描述直接指着它。改了这里的行为就同步改它——工具描述让模型「动手前先读」，那份读物过期就是在教错。用户敲 `/create-workflow` 走同一份。
 
@@ -45,6 +45,47 @@ scratch 在 `~/.dock/scratch/<run_id>-<进程标记>/`：run id 是**会话内**
 ### 停止
 
 `Workflows::stop(name|run_id)` 取消一次在跑的 run。入口：`/workflow stop <name>`、`/tasks` 或 Workflow Runs 里选中行按 `x`、任务行的 `[✗]`。已收尾的 run 不能再停。
+
+### 归属哪一页
+
+run 归**起它的那一页**（工具调用时的 `exec_ctx`；桌面端每个会话是一页 `main#N`），不是 drain 循环挂的根：
+
+- 子代理从那一页切 isolate、记在那一页名下（`SubagentSnap::parent`），回报指令里写的也是那一页的 id；
+- 上报卡、收尾卡写进那一页的滚动区，收尾通知进那一页的信箱；
+- 每条 run 各占一个任务：一条在跑不挡下一次启动（别的会话、同一页再起一条）。
+
+快照带 `page` / `tool_call_id` / `started_wall`；变化发 `WORKFLOW_CHANGED`（载荷 `WorkflowChanged { run_id }`）。
+网关据此推 `workflow/updated`、给 `workflow/list` / `workflow/stop`（见 `cordis-gateway/README.md`「工作流」）。
+
+### 启动与冒烟（对照 grok）
+
+- 一页最多 4 条在跑的 run（`WORKFLOW_MAX_ACTIVE_RUNS_PER_PAGE`），第 5 条回 `workflow_too_many_runs`。
+- `validate_only` 在阻塞线程上跑，带这次的 `agent_budget`：引擎的 host 函数用 `blocking_recv`，放在 tokio 工作线程上会 panic 并 abort 整个进程。
+- 名字不认识时错误里带上可用的工作流名。
+- 输入宽松读（我们接的模型常这样传）：`source` 漏了 `type` 按唯一出现的键推，给字符串当名字；`args` 是字符串时，里面是 JSON 对象就解开，普通文字当 `{ query, objective }`（同斜杠命令）。
+- `agent()` 没写 `agent_type` 时同 `task`：起 run 那一页的预设有 `general-purpose` 用它，否则用第一个角色；预设没有角色、或写了不存在的角色，那一行直接失败并说清可用的角色 / 怎么补。
+- run 的 `objective` 取 `args.objective` / `args.query`，没有才用脚本描述。
+
+### code-review
+
+内置脚本 `workflows/code_review.rhai`，`/code-review [范围或关注点]`（如 `/code-review #42`）或 `source.name=code-review`（args：`target` / `pr` / `focus` / `angles`）。
+
+- Scope：一个只读子代理定范围，交回一条**单条只读**的 `git diff …` / `git show …` / `gh pr diff <n>`（带管道、重定向、拼接的拒掉，审查员要自己跑它，只读命令不用等批准；`gh pr view|diff|list|checks|status`、`gh repo view`、`gh issue view|list` 算只读）。点名了 PR 就审 PR，否则默认审未提交改动，再否则当前分支相对默认分支；没改动就收尾。审 PR 时审查员 / 核实员被告知本地检出不一定是 PR 分支、以 diff 为准；scope 用 `gh pr view --json headRefOid` + `git cat-file -e` 查 PR 的提交在不在本地，在就让它们用只读的 `git show <sha>:<路径>` 看 PR 版本的文件，不在就只看 diff。每个子代理的提示都带「只用只读命令（不写文件、不建目录、不重定向、不用 awk）」——之前审一个大 PR 时子代理把仓库拷到磁盘上看，弹了 75 次批准。
+- Review：每个角度一个只读审查员并行（默认正确性 / 安全 / 性能 / 可维护性 / 测试——测试角度找改了行为却没有测试覆盖、或被削弱的测试；`angles` 可选，不认识的当自定义要求），只报这次改动引入的问题，每条带文件行号、引用代码、具体后果。
+- 同一 `file:line` 先精确合并；再由一个子代理按意思把「同一个问题、行号差几行 / 措辞不同」的分组，脚本按组合并（取更严重的，角度都记上；它失败就只留精确合并）。按严重程度排，最多核实 24 条。
+- Verify：每个核实员最多 6 条，逐条对照代码，否掉误读 / 已处理 / 只在旧代码里 / 推测；只能调低严重程度，可以改正引错的行号。verdict 逐条认，同 deep-research。
+- Report：确定性 markdown（不再过模型），`complete` 交回 `status`（`clean` / `issues` / `partial` / `failed`）、`findings` 数、报告路径与短摘要。
+- 结构化结果放在 `complete` 的 `data`：`{ kind: "code-review", diff_command, pr, findings: [{ file, line, severity, title, detail, suggestion, angles, note }] }`。`data` 不摊进给模型的摘要（`WorkflowRunSnap::result_data`，网关 `resultData`）；GUI 据此把批注画到差异视图上（工作流卡「在改动上看批注」→ 面板，diff 经 `vcs/diff` 现取；PR 页抽屉「查看改动」，diff 经 `vcs/pr/diff`，审完的 PR 批注存在本机）。
+- 行为由 `tests/code_review.rs` 用扮演各角色的假模型跑真脚本覆盖。
+
+### deep-research 的评分
+
+报告 Verified 当且仅当**每个计划的问题都至少留下一条通过核验的结论**；否则 Partial，并点名没覆盖的问题。
+
+- 研究员写的不确定之处、被否掉的个别结论、超额截掉的结论只进「Coverage and uncertainty」，不单独把报告打成 Partial。
+- 候选上限 24 条在问题之间轮流分，不先到先得。
+- verifier 每个最多核 6 条（最多 4 个）；verdict 逐条认：片外 ID 忽略，漏掉 / 重复的那一条算没核验，别的照收。
+- 评分行为由 `tests/deep_research.rs` 用扮演各角色的假模型跑真脚本覆盖。上游 grok 的脚本是同一份逻辑（没有这些修正）。
 
 ### Workflow Runs 详情页
 

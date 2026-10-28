@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::handle::GatewayHandle;
 use crate::handlers::{
     connection, context, environment, image_inputs, interaction, permission, slash, subagent,
-    thread, turn,
+    thread, turn, workflow,
 };
 use crate::methods;
 use crate::protocol::{self, RpcError};
@@ -77,6 +77,8 @@ pub async fn dispatch(
         protocol::SUBAGENT_SEND => subagent::send(&gateway, params),
         protocol::SUBAGENT_INTERRUPT => subagent::interrupt(&gateway, params),
         protocol::SUBAGENT_STOP => subagent::stop(&gateway, params),
+        protocol::WORKFLOW_LIST => workflow::list(&gateway, params),
+        protocol::WORKFLOW_STOP => workflow::stop(&gateway, params),
         // 功能插件登记的方法（`"gateway.methods"`）。
         _ => methods::call(gateway, method, params).await,
     }
@@ -190,6 +192,8 @@ pub const CORE_METHODS: &[&str] = &[
     protocol::SUBAGENT_SEND,
     protocol::SUBAGENT_INTERRUPT,
     protocol::SUBAGENT_STOP,
+    protocol::WORKFLOW_LIST,
+    protocol::WORKFLOW_STOP,
     protocol::CONNECTION_AUTHENTICATE,
     protocol::INITIALIZE,
     protocol::IMAGE_INPUTS_SYNC,

@@ -22,6 +22,7 @@ mod serve;
 mod subagents;
 mod threads;
 mod transcript;
+mod workflows;
 mod ws;
 
 pub mod handlers;

@@ -17,8 +17,8 @@ mod tools;
 pub use agent::agents::{agents, Agent, Agents};
 pub use agent::loop_plugin::agent_loop;
 pub use agent::preset_assist::{
-    draft_preset, rewrite_persona, suggest_tools, DraftAgent, PresetDraft, Rewrite, ToolChoice,
-    ToolPick,
+    draft_preset, rewrite_persona, suggest_tools, AskTurn, DraftAgent, PresetDraft,
+    Rewrite, ToolChoice, ToolPick,
 };
 pub use agent::presets::{
     agent_presets, blocked_tool_message, is_shipped, shipped_roles, AgentPreset, AgentPresets,
@@ -99,7 +99,7 @@ pub use names::{
     SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STATUS_CHANGED, STATUS_ITEMS, STEP_START, SUBAGENTS,
     SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE,
     TOOLS_PRE_EXECUTE, TOOL_VIEWS, TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN,
-    TURN_END, USER_EDITS, WORKFLOWS,
+    TURN_END, USER_EDITS, WORKFLOWS, WORKFLOW_CHANGED,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
@@ -192,5 +192,6 @@ pub use tools::tool_images::{
 pub use tools::web_fetch::{tool_web, web_fetch_params, WebFetchParams};
 pub use tools::workflow::{
     extra_tool_slash_arguments, tool_workflow, workflow_command, workflow_command_arguments,
-    workflow_slash_arguments, WorkflowInfo, WorkflowRunSnap, Workflows, WORKFLOW_TOOL_NAME,
+    workflow_slash_arguments, WorkflowAgentRow, WorkflowChanged, WorkflowInfo, WorkflowRunSnap,
+    Workflows, WORKFLOW_TOOL_NAME,
 };

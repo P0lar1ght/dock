@@ -23,8 +23,9 @@ use super::schema_contract::{
     SCHEMA_CONTRACT_RETRIES,
 };
 use crate::agent::capability::CapabilityMode;
+use crate::agent::presets::AgentPresets;
 use crate::host::settings::ModelOverride;
-use crate::names::{SESSIONS, SUBAGENTS};
+use crate::names::{AGENT_PRESETS, SESSIONS, SUBAGENTS};
 use crate::session::log::Sessions;
 use crate::tools::task::types::SubagentRuntimeOverrides;
 use crate::tools::task::{Subagents, WorkflowSpawn};
@@ -434,11 +435,8 @@ impl WorkflowHost {
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "workflow-agent".into());
-        let subagent_type = opts
-            .agent_type
-            .as_deref()
-            .unwrap_or("general-purpose")
-            .to_string();
+        // 找不到角色也先记一行再失败：界面上那一行要写着原因，不能一声不响少一个孩子。
+        let subagent_type = self.subagent_type_for(opts.agent_type.as_deref());
         // 脚本要只读就得真的只读：`deep_research.rhai` 四处 `capability_mode:
         // "read-only"` 都是在明说"这个孩子要啃不可信的网页内容"。写错档位名
         // 现在就报错，而不是悄悄按不设限跑。
@@ -466,28 +464,31 @@ impl WorkflowHost {
         let first_id = uuid::Uuid::now_v7().to_string();
         let row = self.agent_started(&first_id, &description, opts.phase.clone());
         self.patch(|snap| snap.agents_running = snap.agents_running.saturating_add(1));
-        let outcome = {
-            let work = self.run_contract_loop(
-                &sub,
-                ContractRun {
-                    first_id,
-                    row,
-                    prompt,
-                    description,
-                    subagent_type,
-                    capability_mode,
-                    llm,
-                },
-                validator.as_ref(),
-            );
-            tokio::pin!(work);
-            let mut ticks = tokio::time::interval(std::time::Duration::from_millis(80));
-            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    outcome = &mut work => break outcome,
-                    // 长跑时上报要马上进 overlay / 滚动区卡片，不能等孩子收尾。
-                    _ = ticks.tick() => self.drain_reports(&sub),
+        let outcome = match subagent_type {
+            Err(err) => Err(err),
+            Ok(subagent_type) => {
+                let work = self.run_contract_loop(
+                    &sub,
+                    ContractRun {
+                        first_id,
+                        row,
+                        prompt,
+                        description,
+                        subagent_type,
+                        capability_mode,
+                        llm,
+                    },
+                    validator.as_ref(),
+                );
+                tokio::pin!(work);
+                let mut ticks = tokio::time::interval(std::time::Duration::from_millis(80));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        outcome = &mut work => break outcome,
+                        // 长跑时上报要马上进 overlay / 滚动区卡片，不能等孩子收尾。
+                        _ = ticks.tick() => self.drain_reports(&sub),
+                    }
                 }
             }
         };
@@ -495,6 +496,41 @@ impl WorkflowHost {
         self.drain_reports(&sub);
         self.agent_finished(row, &outcome);
         outcome
+    }
+
+    /// `agent(agent_type:)` → 起它那一页预设里的子代理角色。
+    ///
+    /// 没写就同 `task`：有 `general-purpose` 用它，否则用这个预设的第一个角色——写死
+    /// `general-purpose` 的话，没有这个角色的预设（用户自建的常这样）里每个 `agent()` 都以
+    /// `unknown subagent type` 失败。找不到角色现在就报，说清有哪些、怎么办。
+    fn subagent_type_for(&self, requested: Option<&str>) -> Result<String, HostError> {
+        let requested = requested.map(str::trim).filter(|s| !s.is_empty());
+        let Some(presets) = self.params.ctx.get::<AgentPresets>(AGENT_PRESETS) else {
+            // 没挂预设服务：照旧交给子代理那边去认。
+            return Ok(requested.unwrap_or("general-purpose").to_string());
+        };
+        let roster: Vec<String> = presets.current_roster().keys().cloned().collect();
+        if roster.is_empty() {
+            return Err(HostError::Failed(format!(
+                "当前 Agent 预设「{}」没有子代理角色，工作流的 agent() 派不了活。\
+                 给它加一个角色（{}/<角色>.yml，比如 general-purpose），或换一个有子代理的预设。",
+                presets.current_id(),
+                presets.workspace_agents_dir()
+            )));
+        }
+        let chosen = match requested {
+            Some(t) => t.to_string(),
+            None if roster.iter().any(|r| r == "general-purpose") => "general-purpose".into(),
+            None => roster[0].clone(),
+        };
+        if !roster.contains(&chosen) {
+            return Err(HostError::Failed(format!(
+                "当前 Agent 预设「{}」没有子代理角色 {chosen}；可用：{}",
+                presets.current_id(),
+                roster.join("、")
+            )));
+        }
+        Ok(chosen)
     }
 
     /// `agent(model:/effort:/max_output_tokens:)` → 子会话的采样覆写。
@@ -707,6 +743,7 @@ impl WorkflowHost {
                         llm: llm.clone(),
                         ..Default::default()
                     },
+                    page: self.params.ctx.clone(),
                 })
                 .await;
             total_tokens = total_tokens.saturating_add(result.total_tokens_used);

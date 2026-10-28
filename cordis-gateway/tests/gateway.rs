@@ -4953,6 +4953,251 @@ fn agent_status_is(note: &Value, status: &str) -> bool {
     note["method"] == "subagent/updated" && note["params"]["agent"]["status"] == status
 }
 
+fn run_status_is(note: &Value, status: &str) -> bool {
+    note["method"] == "workflow/updated" && note["params"]["run"]["status"] == status
+}
+
+/// 工作流在 dock.1 上看得见，而且归起它的那个线程：桌面端每个会话都是一页（`main#N`），
+/// 以前 run 一律按第 1 页走，起工作流的会话什么都收不到。run 的变化推 `workflow/updated`，
+/// 它派的子代理照常推 `subagent/updated`（`toolCallId` 为 `null`）；`workflow/list` 补中途
+/// 接入，别的线程查不到、停不了。
+#[tokio::test]
+async fn workflows_project_onto_the_thread_that_started_them() {
+    let root = harness_root_with(Some(Arc::new(EchoLastUser))).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(tool_task(), TaskConfig::default())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(cordis_spine::tool_workflow(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    let h = Harness::boot_on(root).await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let init = rpc.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["workflows"], true, "{init}");
+    let dir = project_dir("workflow-page");
+    let started = rpc
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+    let _ = rpc
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let page = h
+        .ctx
+        .require::<cordis_spine::Tabs>(cordis_spine::TABS)
+        .unwrap()
+        .contexts()
+        .into_iter()
+        .find(|c| {
+            c.get::<Sessions>(SESSIONS)
+                .is_some_and(|s| s.identity() != "main")
+        })
+        .expect("thread/start 开出的那一页");
+
+    let script = r#"
+let meta = #{ name: "page-probe", description: "两个子代理", phases: [#{ title: "Look" }] };
+phase("Look");
+let a = agent("first", #{ label: "a" });
+let b = agent("second", #{ label: "b" });
+complete(#{ report: "done", data: #{ kind: "probe", n: 2 } });
+"#;
+    let tools = h.ctx.require::<Tools>(TOOLS).unwrap();
+    let launched = tools
+        .execute_on(
+            &page,
+            ToolCall {
+                id: "call-wf".into(),
+                name: "workflow".into(),
+                arguments: json!({ "source": { "type": "script", "script": script } }).to_string(),
+            },
+        )
+        .await;
+    assert!(launched.content.contains("run_id"), "{}", launched.content);
+
+    let notes = notes_until(&mut rpc, Duration::from_secs(10), |n| {
+        run_status_is(n, "completed")
+    })
+    .await;
+    let done = &notes.last().unwrap()["params"];
+    assert_eq!(done["threadId"], id.as_str(), "推给起它的那个线程");
+    let run = &done["run"];
+    assert_eq!(run["toolCallId"], "call-wf");
+    let revisions: Vec<u64> = notes
+        .iter()
+        .filter(|n| n["method"] == "workflow/updated")
+        .map(|n| n["params"]["run"]["revision"].as_u64().unwrap())
+        .collect();
+    // 两个孩子几乎同时变时，两次推送可能都读到最新那份：不减即可，最后一份最新。
+    assert!(
+        revisions.windows(2).all(|w| w[0] <= w[1]) && revisions.first() < revisions.last(),
+        "revision 不能倒退：{revisions:?}"
+    );
+    assert_eq!(run["name"], "page-probe");
+    assert_eq!(run["phases"][0]["title"], "Look");
+    assert_eq!(run["result"], "report: done", "data 不进给人看的结果");
+    assert_eq!(run["resultData"], json!({ "kind": "probe", "n": 2 }));
+    let agents = run["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 2, "{run}");
+    for (agent, label) in agents.iter().zip(["a", "b"]) {
+        assert_eq!(agent["label"], label);
+        assert_eq!(agent["status"], "completed", "{agent}");
+        assert_eq!(agent["phase"], "Look");
+        let agent_id = agent["agentId"].as_str().unwrap();
+        assert!(
+            notes.iter().any(|n| n["method"] == "subagent/updated"
+                && n["params"]["agent"]["agentId"] == agent_id
+                && n["params"]["agent"]["toolCallId"].is_null()),
+            "run 派的子代理也要推到这个线程：{agent_id}"
+        );
+    }
+    assert!(
+        notes.iter().any(|n| run_status_is(n, "running")),
+        "跑的过程中也要推：{notes:#?}"
+    );
+
+    let listed = rpc.call("workflow/list", json!({ "threadId": id })).await;
+    let runs = listed["result"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1, "{listed}");
+    let run_id = runs[0]["runId"].as_str().unwrap().to_string();
+    let other = rpc
+        .call("workflow/list", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(
+        other["result"]["runs"],
+        json!([]),
+        "第 1 页不该看到别的线程的 run"
+    );
+
+    let stopped = rpc
+        .call("workflow/stop", json!({ "threadId": id, "runId": run_id }))
+        .await;
+    assert_eq!(
+        stopped["result"]["stopped"], false,
+        "已经结束的停不了：{stopped}"
+    );
+    let foreign = rpc
+        .call(
+            "workflow/stop",
+            json!({ "threadId": "live", "runId": run_id }),
+        )
+        .await;
+    assert_eq!(
+        foreign["error"]["details"]["code"], "not_found",
+        "{foreign}"
+    );
+}
+
+/// `vcs/diff`：受信连接在项目目录里拿到一条只读 diff 命令的输出（code-review 的批注靠它画到
+/// 差异视图上）；不是只读 diff 形状的命令拒掉；配对来的网页连接不能用。
+#[tokio::test]
+async fn vcs_diff_runs_only_read_only_diff_commands_for_trusted_clients() {
+    let root = harness_root().await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let dir = project_dir("vcs-diff");
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+    let started = gui
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let got = gui
+        .call(
+            "vcs/diff",
+            json!({ "threadId": id, "command": "git diff HEAD" }),
+        )
+        .await;
+    assert_eq!(got["result"]["available"], true, "{got}");
+    assert!(
+        got["result"]["diff"].as_str().unwrap().contains("+two"),
+        "{got}"
+    );
+
+    for bad in [
+        "rm -rf .",
+        "git diff --output=x",
+        "git push",
+        "gh api repos/o/r",
+    ] {
+        let refused = gui
+            .call("vcs/diff", json!({ "threadId": id, "command": bad }))
+            .await;
+        assert_eq!(
+            refused["error"]["details"]["code"], "invalid_params",
+            "{bad}: {refused}"
+        );
+    }
+    assert!(!dir.join("x").exists(), "--output 不能真的写出文件");
+
+    // 配对来的网页（不受信）不能用。
+    let h = Harness::boot().await;
+    let page_ticket = h.pair_ticket().await;
+    let mut page = Rpc::connect(h.addr, &page_ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    let denied = page
+        .call(
+            "vcs/diff",
+            json!({ "threadId": "live", "command": "git diff HEAD" }),
+        )
+        .await;
+    assert_eq!(denied["error"]["details"]["code"], "forbidden", "{denied}");
+}
+
+
 /// 子代理在 dock.1 上看得见：状态推 `subagent/updated`，它自己的对话包成父线程上的
 /// `subagent/event`，`subagent/list` / `history` 补中途接入，`send` / `stop` 能用。
 #[tokio::test]

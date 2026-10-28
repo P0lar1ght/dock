@@ -249,7 +249,7 @@ npm run pack:skin      # 打包 pet skin
 | 动挂载顺序 | `install_app`（`cordis-spine`）或 `cordis-app` 的 `main` |
 | 回环网关 / `dock.1` | `cordis-gateway/` |
 | 宿主页注入 | `embed-sdk/` |
-| 动态插件（会话内起一颗 Cordis 包） | skill `skills/cordis-plugin-development/SKILL.md` |
+| 动态插件（会话内起一颗 Cordis 包） | 内置 skill `cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md` |
 | Agent 预设 YAML | 内置在 `cordis-spine/presets/`；用户 / 项目覆盖在 `~/.dock/presets/`、`.dock/presets/` |
 
 `.agents/skills/` 与 `skills/` 都会被运行时扫描（前者 Agents scope，后者 Bundled）。同名时项目 `.dock/skills` > `.agents/skills` > `~/.dock/skills` > `skills/` > 内置 `$DOCK_HOME/bundled/skills/`（编译期嵌入，启动物化到缓存）。
@@ -269,6 +269,6 @@ npm run pack:skin      # 打包 pet skin
 
 - `.agents/skills/git-commit/SKILL.md` — 提交（Conventional Commits、只 stage 任务相关文件）
 - `.agents/skills/create-pr/SKILL.md` — 开 PR
-- `skills/cordis-plugin-development/SKILL.md` — 动态 Cordis 插件工作流
+- `cordis-spine/src/tools/skills/builtin/cordis-plugin-development/` — 动态 Cordis 插件工作流（内置技能）
 
 贡献流程见 [CONTRIBUTING.md](../CONTRIBUTING.md)；安全上报见 [SECURITY.md](../SECURITY.md)。

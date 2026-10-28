@@ -41,6 +41,7 @@
 | `tool-skills` | → `"tools"`（live `"skills"`） | `skill` | 按需读 `SKILL.md` 正文 | [skills](docs/tools/skills.md) |
 | `project-instructions` | → `agent/step-start` | — | `AGENTS.md` 进历史 reminder（新会话排在首条用户消息前），**不进系统提示** | [project-instructions](docs/tools/project-instructions.md) |
 | `agent-presets` | `"agentPresets"` | — | YAML 人设 + 工具允许名单；`task` 的 `subagent_type` enum 来源 | [agent-presets](docs/tools/agent-presets.md) |
+| `tool-propose-preset` | → `"tools"` | `propose_preset`（按需） | 会话里起草预设交给桌面端编辑器审，不写盘；终端照旧写文件 | [agent-presets](docs/tools/agent-presets.md) |
 | `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 | [web_fetch](docs/tools/web_fetch.md) |
 | `tool-browser` | `"browser"` | —（工具在内置 MCP `browser`，见下） | `/browser` 薄驾驶舱 | [browser](docs/tools/browser.md) |
 | `tool-computer` | `"computer"` | — | CUA C0 薄驾驶舱；桌面键鼠经 `cua-driver` MCP | [computer](docs/tools/computer.md) |
