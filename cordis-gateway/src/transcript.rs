@@ -180,6 +180,11 @@ impl Transcript {
         self.projector.user_turns.iter().position(|t| t == turn_id)
     }
 
+    /// 第 `ordinal` 条用户消息开的那一轮的 `turnId`（[`Self::user_ordinal`] 反过来）。
+    pub fn turn_id_at(&self, ordinal: usize) -> Option<String> {
+        self.projector.user_turns.get(ordinal).cloned()
+    }
+
     pub fn latest_seq(&self) -> u64 {
         self.projector.seq
     }
@@ -697,6 +702,23 @@ impl Transcript {
                 "run": run,
                 "threadId": self.thread_id,
                 "turnId": self.projector.turn_id,
+            }),
+        });
+    }
+
+    /// 一轮的文件改动变了（`turn/changes/updated`，载荷 `{ turnId, changes }`）。只推不记。
+    pub fn turn_changes_updated(&mut self, turn_id: &str, changes: Value) {
+        let _ = self.tx.send(ProjectedEvent {
+            seq: 0,
+            method: "turn/changes/updated".into(),
+            page: self.page.clone(),
+            thread_id: self.thread_id.clone(),
+            turn_id: turn_id.to_string(),
+            timestamp: iso_now(),
+            payload: json!({
+                "changes": changes,
+                "threadId": self.thread_id,
+                "turnId": turn_id,
             }),
         });
     }

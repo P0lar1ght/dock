@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use cordis_spine::{Sessions, SubagentMeta, SubagentSnap, Subagents, SESSIONS, SUBAGENTS};
+use cordis_spine::{
+    PermissionMode, Permissions, Sessions, SubagentMeta, SubagentSnap, Subagents, PERMISSIONS,
+    SESSIONS, SUBAGENTS,
+};
 
 use crate::handle::GatewayHandle;
 use crate::protocol::RpcError;
@@ -35,14 +38,20 @@ pub fn list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
         let sub = service(gateway)?;
         for snap in subagents::children_of(gateway.ctx(), &page.identity) {
             let role = subagents::role_label(&page.ctx, &snap.subagent_type);
-            agents.push(subagents::info(&snap, &sub.events(&snap.id), role));
+            agents.push(subagents::with_approval(
+                subagents::info(&snap, &sub.events(&snap.id), role),
+                Some(&page.ctx),
+            ));
             live.insert(snap.id.clone());
         }
     }
     for meta in dir.iter().flat_map(|d| cordis_spine::load_subagents(d)) {
         if !live.contains(&meta.id) {
             let role = role_for(gateway, page.as_ref(), &thread_id, &meta.subagent_type);
-            agents.push(subagents::persisted_info(&meta, role));
+            agents.push(subagents::with_approval(
+                subagents::persisted_info(&meta, role),
+                page.as_ref().map(|p| &p.ctx),
+            ));
         }
     }
     agents.sort_by_key(|a| a["startedAt"].as_u64().unwrap_or(0));
@@ -149,7 +158,11 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         let thread_id = threads::thread_param(&params);
         let page = threads::resolve(gateway, &thread_id).ok();
         let role = role_for(gateway, page.as_ref(), &thread_id, &meta.subagent_type);
-        return Ok(json!({ "agent": subagents::persisted_info(&meta, role), "events": events }));
+        let agent = subagents::with_approval(
+            subagents::persisted_info(&meta, role),
+            page.as_ref().map(|p| &p.ctx),
+        );
+        return Ok(json!({ "agent": agent, "events": events }));
     };
     let sub = service(gateway)?;
     let thread_id = threads::thread_param(&params);
@@ -160,7 +173,10 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
         .collect();
     let role = subagents::role_label(&page.ctx, &snap.subagent_type);
     Ok(json!({
-        "agent": subagents::info(&snap, &sub.events(&snap.id), role),
+        "agent": subagents::with_approval(
+            subagents::info(&snap, &sub.events(&snap.id), role),
+            Some(&page.ctx),
+        ),
         "events": events
     }))
 }
@@ -215,6 +231,35 @@ pub fn stop(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     }
     service(gateway)?.kill(&snap.id);
     Ok(json!({ "ok": true, "stopped": true }))
+}
+
+/// `subagent/approval/set { threadId, agentId, mode }`：单独给这个子代理设审批档位，
+/// `mode` 是 `inherit`（跟这一页）/ `ask`（请求批准）/ `auto`（自动批准）。只读子代理在
+/// 自动批准下碰到会改东西的命令直接拒、不弹。线程得开着；只在盘上的子代理也能设，同 id
+/// 接着聊时生效。回 `{ approval }`；活着的另推一条 `subagent/updated`。
+pub fn set_approval(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let mode = match params.get("mode").and_then(Value::as_str).unwrap_or("") {
+        "inherit" => None,
+        "ask" => Some(PermissionMode::Ask),
+        "auto" => Some(PermissionMode::Allow),
+        _ => return Err(RpcError::invalid_params("mode 只能是 inherit、ask 或 auto")),
+    };
+    let page = threads::resolve_param(gateway, &params)?;
+    let agent_id = agent_param(&params)?;
+    let live = resolve(gateway, &params).is_ok();
+    if !live && persisted(gateway, &params).is_err() {
+        return Err(RpcError::app(
+            "not_found",
+            format!("这个线程没有子代理 {agent_id}"),
+        ));
+    }
+    let perms = page
+        .ctx
+        .get::<Permissions>(PERMISSIONS)
+        .ok_or_else(|| RpcError::app("unavailable", "permissions service is not mounted"))?;
+    perms.set_agent_mode(agent_id, mode);
+    let agent = subagents::with_approval(json!({ "agentId": agent_id }), Some(&page.ctx));
+    Ok(json!({ "approval": agent["approval"] }))
 }
 
 fn service(gateway: &GatewayHandle) -> Result<std::sync::Arc<Subagents>, RpcError> {

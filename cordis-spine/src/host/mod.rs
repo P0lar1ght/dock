@@ -24,4 +24,5 @@ pub mod status_items;
 pub mod tabs;
 pub mod tool_views;
 pub mod tui_slots;
+pub mod turn_changes;
 pub mod user_edits;

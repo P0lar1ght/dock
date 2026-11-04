@@ -101,6 +101,10 @@ pub const SUBAGENT_CHANGED: &str = "subagent/changed";
 /// 一条工作流 run 出现了或变了（阶段、子代理行、上报、收尾），载荷
 /// [`crate::WorkflowChanged`]。只带 run id；当前状态在监听里 `Workflows::list` 现取。
 pub const WORKFLOW_CHANGED: &str = "workflow/changed";
+/// 每轮改动（`search_replace` / `write_file` 改了哪些文件），见 [`crate::TurnChanges`]。
+pub const TURN_CHANGES: &str = "turn-changes";
+/// 一页某一轮的文件改动变了（又改了、撤销了），载荷 [`crate::TurnChangesChanged`]。
+pub const TURN_CHANGES_CHANGED: &str = "turn-changes/changed";
 /// 定时任务（`"cron"`）变了：增删改、触发、或读到别的 Dock 进程的改动。载荷 `()`；
 /// 现状在监听里 `Cron::list` 现取。`cordis-app` 的定时任务驱动每秒对一次账再发。
 pub const SCHEDULE_CHANGED: &str = "schedule/changed";

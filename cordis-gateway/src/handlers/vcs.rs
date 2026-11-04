@@ -73,6 +73,16 @@ pub fn gateway_vcs() -> Plugin {
                         },
                         method(|gw, params| async move { diff(&gw, params).await }),
                     ),
+                    (
+                        protocol::VCS_WORKTREE_DIFF,
+                        // 读工作区里任意未跟踪文件的内容：只给受信连接。
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
+                        method(|gw, params| async move { worktree_diff(&gw, params).await }),
+                    ),
                 ],
             )?;
             Ok(None)
@@ -368,6 +378,87 @@ pub async fn diff(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
         }
     })
     .await
+}
+
+/// 工作区 diff 里最多带几个未跟踪的新文件。
+const UNTRACKED_MAX: usize = 100;
+
+/// `vcs/worktree/diff { threadId | cwd }` → `{ available: true, diff, truncated, root }`：线程项目
+/// 所在 git 仓库相对 HEAD 的全部改动（含暂存的），加上未跟踪的新文件（按 `.gitignore`
+/// 过滤，最多 [`UNTRACKED_MAX`] 个，超过 1MB / 不是文本的只列文件头）。路径相对仓库根
+/// （`root`）。不是 git 仓库回 `{ available: false, reason: "not_git" }`。
+pub async fn worktree_diff(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let cwd = project_cwd(gateway, &params)?;
+    run_blocking(move || worktree_diff_in(&cwd)).await
+}
+
+fn worktree_diff_in(cwd: &Path) -> Value {
+    let git = |dir: &Path, args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_PAGER", "cat")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+    };
+    let root = match git(cwd, &["rev-parse", "--show-toplevel"]) {
+        Ok(out) if out.status.success() => {
+            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+        Ok(_) => {
+            return json!({ "available": false, "reason": "not_git", "hint": "这个项目不是 git 仓库" })
+        }
+        Err(e) => {
+            return json!({ "available": false, "reason": "git_failed", "hint": format!("git 起不来：{e}") })
+        }
+    };
+    // 还没有提交过：没有 HEAD，和空树比。
+    let has_head =
+        git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok_and(|o| o.status.success());
+    let base = if has_head {
+        "HEAD"
+    } else {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    };
+    let mut out = match git(&root, &["diff", "--no-color", "--no-ext-diff", base]) {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Ok(o) => {
+            return json!({
+                "available": false,
+                "reason": "git_failed",
+                "hint": String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            })
+        }
+        Err(e) => {
+            return json!({ "available": false, "reason": "git_failed", "hint": format!("git 起不来：{e}") })
+        }
+    };
+    let untracked = git(&root, &["ls-files", "--others", "--exclude-standard", "-z"])
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let mut more = 0usize;
+    for (i, rel) in untracked.split('\0').filter(|p| !p.is_empty()).enumerate() {
+        if i >= UNTRACKED_MAX || out.len() > DIFF_MAX_BYTES {
+            more += 1;
+            continue;
+        }
+        match cordis_spine::Snapshot::read(&root.join(rel)) {
+            cordis_spine::Snapshot::Text { text } => {
+                out.push_str(&cordis_spine::unified_diff(rel, None, Some(&text)).0)
+            }
+            cordis_spine::Snapshot::Skipped { .. } => out.push_str(&format!(
+                "diff --git a/{rel} b/{rel}\nnew file mode 100644\nBinary files /dev/null and b/{rel} differ\n"
+            )),
+            cordis_spine::Snapshot::Missing => {}
+        }
+    }
+    let mut value = diff_value(out);
+    value["root"] = json!(root.display().to_string());
+    if more > 0 {
+        value["untrackedOmitted"] = json!(more);
+    }
+    value
 }
 
 /// 只读 diff 命令 → 参数表；不是这几种形状回中文原因。

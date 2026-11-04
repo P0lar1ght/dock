@@ -35,7 +35,7 @@ codex 的模型侧文件面只有 `exec_command` + `apply_patch` + `view_image`�
 
 dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`acp.rs` 的 `gated_builtin` 里有 `bash`、没有 `grep`；`presets/code/agents/explore.yml` 与 `plan.yml` 明确列 `grep`。搜索一旦归进 `bash`，只读场景里每搜一次都得先过只读命令判定（见下节），工具还是更顺。
 
-**只读场景里的 bash。** 计划模式开着、子会话能力档位是 `read-only`、或当前角色预设标了 `read_only: true`（内置 `explore` / `plan`、`/btw` 旁问页）——这些都给 `bash`，但不走普通的计划门 / 权限门，走 `tools::read_only`：`cordis_base::read_only_shell::is_read_only_command` 判为只读的（白名单程序、无写盘重定向、无命令替换 / 后台、无 `find -delete` `git commit` `sed -i` 这类改动参数）直接跑、不问；其余一律 `Permissions::request_strict` 问用户——**自动批准和「以后都允许」都不算数**，「以后都拒绝」照旧生效。用户拒了，模型收到一句说明哪些能直接跑。判定宁小勿大：误判成要问只是多弹一次框。切段和找重定向按 shell 的引号与反斜杠转义规则来：引号里、转义过的 `|` `;` `>` `&` 只是字面字符（`grep -n "=>"` 算只读），转义过的引号不开引号（`echo \"a | rm -rf x \"` 里的 `rm` 照样是一段，要问）；引号没闭合按不是只读；`$(` 和反引号在哪儿都算。`gh` 只认 `pr view|diff|list|checks|status`、`repo view`、`issue view|list`（不带 `--web`）。
+**只读场景里的 bash。** 计划模式开着、子会话能力档位是 `read-only`、或当前角色预设标了 `read_only: true`（内置 `explore` / `plan`、`/btw` 旁问页）——这些都给 `bash`，但不走普通的计划门 / 权限门，走 `tools::read_only`：`cordis_base::read_only_shell::is_read_only_command` 判为只读的（白名单程序、无写盘重定向、无命令替换 / 后台、无 `find -delete` `git commit` `sed -i` 这类改动参数）直接跑、不问；其余一律 `Permissions::request_strict` 问用户——**自动批准和「以后都允许」都不算数**，「以后都拒绝」照旧生效；例外是子代理落在自动批准上（单独设的或跟这一页的，见 `docs/tools/task.md`「权限」）时直接拒、不弹。用户拒了，模型收到一句说明哪些能直接跑。判定宁小勿大：误判成要问只是多弹一次框。切段和找重定向按 shell 的引号与反斜杠转义规则来：引号里、转义过的 `|` `;` `>` `&` 只是字面字符（`grep -n "=>"` 算只读），转义过的引号不开引号（`echo \"a | rm -rf x \"` 里的 `rm` 照样是一段，要问）；引号没闭合按不是只读；`$(` 和反引号在哪儿都算。`gh` 只认 `pr view|diff|list|checks|status`、`repo view`、`issue view|list`（不带 `--web`）。
 
 ## 各颗的行为
 
@@ -89,6 +89,21 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 ### `search_replace`
 
 `replace_all: false` 且多处命中时**报错并回报命中数，文件一个字节不写**。旧实现 `replacen(..., 1)` 静默改第一处——模型以为改的是自己瞄准的那处，实际可能是另一处同名代码。对齐 Grok / DSH。
+
+### 每轮改动
+
+`host::turn_changes`（插件 `turn-changes`，服务 `"turn-changes"`）记 agent 每轮用 `search_replace` / `write_file` 改了哪些文件，
+照 Codex 的 `turn_diff_tracker` 和 Claude Code 的做法：
+
+- `tools/pre-execute`：编辑工具第一次碰一个文件前存原文；`tools/execute`：每次改完把这一轮记过的文件重新看一眼。
+- 轮次 = 这一页日志里第几条用户消息（和网关投影的 `user_turns` 同序）；记录里另存那条消息的时刻，撤回后作废。
+- 子代理（含 workflow 派的）改的顺着 `Subagents` 的父级找到页，算进那一页当前这一轮。
+- 落盘在会话目录 `turn_changes/<序号>.json`（原文 + 改后全文）；会话没落盘只在内存。超过 1MB 或不是 UTF-8 的不存原文。
+- 撤销只恢复现在还是那一轮改完样子的文件，别的报冲突。
+- bash 里改的（`sed -i`、脚本生成）不算——要看全部改动用网关的 `vcs/worktree/diff`。
+- 统一 diff 在 `turn_changes::diff`（先去掉首尾相同的行再做 LCS，中间段太大就整段算替换）。
+
+网关投影见 `cordis-gateway/README.md`「每轮改动」；GUI 是一轮结束后的改动卡和右侧「审查」面板。
 
 ### `bash`
 

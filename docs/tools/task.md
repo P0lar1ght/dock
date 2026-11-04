@@ -33,8 +33,12 @@ Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"session
 - `failed`（最近一轮以失败收尾，含模型请求出错）、`settled_at`（停下的时刻，`elapsed()` 算到这里）。
 网关据此投影 `subagent/*`（见 `cordis-gateway/README.md`「子代理」）。
 
-**权限**：子代理不另起权限队列，用派它那一页的 `"permissions"` 与审批模式（自动批准、「始终允许」都共用）。
-- `PermissionPrompt::agent_id` 记是哪个子代理发的，只用来展示，不参与放行。
-- 只读角色（explore / plan）的非只读 bash 照旧一定要人点头，自动批准和「始终允许」都不算。
+**权限**：子代理不另起权限队列，用派它那一页的 `"permissions"`（「始终允许」共用）。
+- 审批档位默认跟这一页走；`Permissions::set_agent_mode(agent_id, Some(mode))` 可以单独设，盖过页的
+  （网关 `subagent/approval/set`，GUI 子代理面板输入框上的「审批」胶囊）。只在内存里。
+- `PermissionPrompt::agent_id` 记是哪个子代理发的：展示用，也用来查它单独设的档位。
+- 只读角色（explore / plan）的非只读 bash：「始终允许」不算；落在自动批准上（单独设的或跟页的）
+  直接拒、不弹，别的情况一定要人点头。
+- 把一个子代理切到自动批准时，它已经排着的请求一并处理掉（普通的放行、只读的拒绝）。
 
 id 参数一族一个名字：子代理这族（`send_message` / `interrupt_agent`，以及 `task` 返回的 `agent_id:`）叫 `agent_id`，作业那族叫 `job_id` / `job_ids`。parent session id = `session::ROOT_IDENTITY`，所以用户 Stop / 新会话会取消本会话子代理，下一次 prompt 重新开放准入

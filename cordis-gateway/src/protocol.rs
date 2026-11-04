@@ -65,6 +65,11 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `workflow/list` / `stop` + 推送 `workflow/updated`：工作流 run 的阶段、子代理行、
     // 日志与结果（挂在起它的那一页；它派的子代理照常走 `subagents`）。
     ("workflows", true),
+    // `turn/changes/list` / `diff` / `revert` + 推送 `turn/changes/updated`：每轮 agent 用
+    // `search_replace` / `write_file` 改了哪些文件（行数、diff、撤销）。
+    ("turnChanges", true),
+    // `vcs/worktree/diff`：项目 git 仓库相对 HEAD 的改动 + 未跟踪的新文件（受信连接）。
+    ("worktreeDiff", true),
     // `thread/context/get`：上下文窗口按类别拆开（系统提示 / 工具定义 / 消息 / 其余 / 空闲，
     // 各带明细）+ 按需加载、不占窗口的 MCP / 本地工具。
     ("contextBreakdown", true),
@@ -132,6 +137,14 @@ pub const VCS_PR_DIFF: &str = "vcs/pr/diff";
 /// 在线程目录里跑一条只读的 diff 命令（code-review 记下的那条）：只认 `git diff` /
 /// `git show` / `gh pr diff`，不经 shell。
 pub const VCS_DIFF: &str = "vcs/diff";
+/// 线程项目所在 git 仓库相对 HEAD 的全部改动 + 未跟踪的新文件（受信连接）。
+pub const VCS_WORKTREE_DIFF: &str = "vcs/worktree/diff";
+/// 线程每轮改了哪些文件（`search_replace` / `write_file`）；推送 `turn/changes/updated`。
+pub const TURN_CHANGES_LIST: &str = "turn/changes/list";
+/// 一轮改动的统一 diff。
+pub const TURN_CHANGES_DIFF: &str = "turn/changes/diff";
+/// 撤销一轮改动（受信连接）：还是那一轮改完样子的文件恢复成原文。
+pub const TURN_CHANGES_REVERT: &str = "turn/changes/revert";
 pub const SCHEDULE_LIST: &str = "schedule/list";
 pub const SCHEDULE_CREATE: &str = "schedule/create";
 pub const SCHEDULE_UPDATE: &str = "schedule/update";
@@ -265,6 +278,8 @@ pub const SUBAGENT_SEND: &str = "subagent/send";
 pub const SUBAGENT_INTERRUPT: &str = "subagent/interrupt";
 /// 收掉子代理（不能再接着聊）。
 pub const SUBAGENT_STOP: &str = "subagent/stop";
+/// 单独给一个子代理设审批档位（inherit / ask / auto）。
+pub const SUBAGENT_APPROVAL_SET: &str = "subagent/approval/set";
 
 /// 一个线程起的工作流 run（当前状态，和推送 `workflow/updated` 的 `run` 同形）。
 pub const WORKFLOW_LIST: &str = "workflow/list";
