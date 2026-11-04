@@ -246,6 +246,203 @@ pub async fn model_test(params: Value) -> Result<Value, RpcError> {
     })
 }
 
+// ---- 供应商 ----
+
+/// 密钥从哪来：`inline`（文件里行内写的）/ `env`（环境变量，盖过 secrets.json）/
+/// `secret`（secrets.json）/ `missing`（写了名字但哪都没有）/ `none`（不要密钥，如本地 ollama）。
+fn key_source(p: &edit::ProviderEntry) -> &'static str {
+    if p.has_api_key {
+        return "inline";
+    }
+    match p.env_key.as_deref() {
+        None => "none",
+        Some(name) if std::env::var(name).is_ok_and(|v| !v.trim().is_empty()) => "env",
+        Some(name) if config::stored_secret(name).is_some() => "secret",
+        Some(_) => "missing",
+    }
+}
+
+/// `provider/list`：用户配置里的 `[provider.*]`，带密钥来源（不回密钥）。
+pub fn provider_list() -> Result<Value, RpcError> {
+    let providers: Vec<Value> = edit::read_providers()
+        .into_iter()
+        .map(|p| {
+            let mut row = serde_json::to_value(&p).unwrap_or(Value::Null);
+            row["keySource"] = Value::from(key_source(&p));
+            row
+        })
+        .collect();
+    Ok(json!({ "providers": providers }))
+}
+
+/// 没给密钥名时按供应商 id 起一个：`moonshot-cn` → `MOONSHOT_CN_API_KEY`。
+fn default_key_name(id: &str) -> String {
+    let upper: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{upper}_API_KEY")
+}
+
+fn provider_param(params: &Value) -> Result<edit::ProviderEntry, RpcError> {
+    serde_json::from_value(
+        params
+            .get("provider")
+            .cloned()
+            .ok_or_else(|| RpcError::invalid_params("缺少 provider"))?,
+    )
+    .map_err(|e| RpcError::invalid_params(format!("provider 字段不对：{e}")))
+}
+
+fn api_key_param(params: &Value) -> Option<String> {
+    params
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// `provider/save { provider, apiKey?, originalId? }`：写 `[provider.<id>]`。带了 `apiKey`
+/// 就存进 secrets.json（名字 = `envKey`，没写就按 id 起一个），config 里只记名字。
+pub fn provider_save(params: Value) -> Result<Value, RpcError> {
+    let mut entry = provider_param(&params)?;
+    let original = params
+        .get("originalId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let key = api_key_param(&params);
+    if key.is_some() && entry.env_key.as_deref().is_none_or(|k| k.trim().is_empty()) {
+        entry.env_key = Some(default_key_name(entry.id.trim()));
+    }
+    edit::save_provider(&entry, original).map_err(|e| RpcError::app("invalid_provider", e))?;
+    if let (Some(key), Some(name)) = (key, entry.env_key.as_deref()) {
+        cordis_spine::set_secret(name.trim(), &key).map_err(write_failed)?;
+    }
+    provider_list()
+}
+
+/// `provider/delete { id }`：删供应商和挂在它下面的模型；没别人用的密钥一起从
+/// secrets.json 删掉。删到默认模型时默认改成剩下的第一条。
+pub fn provider_delete(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let id = text(&params, "id")?;
+    let key_name = edit::read_providers()
+        .into_iter()
+        .find(|p| p.id == id)
+        .and_then(|p| p.env_key);
+    let others: Vec<String> = config::load_catalog().into_iter().map(|m| m.id).collect();
+    edit::delete_provider(id, &others).map_err(write_failed)?;
+    if let Some(name) = key_name.filter(|n| !edit::key_name_in_use(n)) {
+        if config::stored_secret(&name).is_some() {
+            let _ = cordis_spine::delete_secret(&name);
+        }
+    }
+    if let Some(default) = config::load_default_model() {
+        apply_default(gateway, &default);
+    }
+    provider_list()
+}
+
+/// `provider/models { id } | { provider, apiKey? }`：这个密钥在上游 `GET /models` 能列出
+/// 哪些模型。表单（可以没保存）或配置里那个供应商。
+pub async fn provider_models(params: Value) -> Result<Value, RpcError> {
+    let choice = match params.get("provider") {
+        Some(_) => edit::choice_from_provider(&provider_param(&params)?, api_key_param(&params)),
+        None => {
+            let id = text(&params, "id")?;
+            let entry = edit::read_providers()
+                .into_iter()
+                .find(|p| p.id == id)
+                .ok_or_else(|| RpcError::invalid_params(format!("没有供应商 {id}")))?;
+            edit::choice_from_provider(&entry, None)
+        }
+    }
+    .map_err(|e| RpcError::app("invalid_provider", e))?;
+    Ok(match cordis_spine::list_upstream_models(&choice).await {
+        Ok(models) => json!({ "ok": true, "models": models }),
+        Err(error) => json!({ "ok": false, "error": error }),
+    })
+}
+
+/// `provider/catalog`：拉 models.dev 的供应商目录（精简过）。只在设置页点「更新」时调。
+pub async fn provider_catalog() -> Result<Value, RpcError> {
+    let catalog = cordis_spine::fetch_models_dev()
+        .await
+        .map_err(|e| RpcError::app("fetch_failed", e))?;
+    Ok(json!({ "catalog": catalog, "source": cordis_spine::MODELS_DEV_URL }))
+}
+
+// ---- 个性化（~/.dock/AGENTS.md 与 ~/.dock/USER.md） ----
+
+/// 单份上限：注入时还会按上下文窗口 5% 截断，这里只挡误贴的大文件。
+const PROFILE_MAX_BYTES: usize = 64 * 1024;
+
+/// `instructions` = 每个工作区都带的自定义指令（`AGENTS.md`），`about` = 关于用户（`USER.md`）。
+fn profile_file(kind: &str) -> Result<&'static str, RpcError> {
+    match kind {
+        "instructions" => Ok(cordis_spine::INSTRUCTIONS_FILE),
+        "about" => Ok(cordis_spine::USER_FILE),
+        other => Err(RpcError::invalid_params(format!(
+            "kind 只能是 instructions / about：{other}"
+        ))),
+    }
+}
+
+fn profile_get_in(home: &std::path::Path) -> Value {
+    let read = |file: &str| {
+        let path = home.join(file);
+        json!({
+            "path": path.display().to_string(),
+            "text": std::fs::read_to_string(&path).unwrap_or_default()
+        })
+    };
+    json!({
+        "instructions": read(cordis_spine::INSTRUCTIONS_FILE),
+        "about": read(cordis_spine::USER_FILE)
+    })
+}
+
+fn profile_set_in(home: &std::path::Path, kind: &str, text: &str) -> Result<Value, RpcError> {
+    let file = profile_file(kind)?;
+    if text.len() > PROFILE_MAX_BYTES {
+        return Err(RpcError::invalid_params(format!(
+            "内容太长（{} KB），最多 {} KB",
+            text.len() / 1024,
+            PROFILE_MAX_BYTES / 1024
+        )));
+    }
+    std::fs::create_dir_all(home).map_err(|e| write_failed(e.to_string()))?;
+    // 清空也写空文件，不删：手写过的文件被清空，至少还留着位置。
+    let body = if text.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", text.trim_end())
+    };
+    std::fs::write(home.join(file), body).map_err(|e| write_failed(e.to_string()))?;
+    Ok(profile_get_in(home))
+}
+
+/// `profile/get`：两份文件的路径和全文。下一步起新会话 / 当前会话下一步按新内容注入。
+pub fn profile_get() -> Result<Value, RpcError> {
+    Ok(profile_get_in(&config::dock_home()))
+}
+
+/// `profile/set { kind, text }`：整份写回。
+pub fn profile_set(params: Value) -> Result<Value, RpcError> {
+    let kind = text(&params, "kind")?;
+    let body = params
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::invalid_params("缺少 text"))?;
+    profile_set_in(&config::dock_home(), kind, body)
+}
+
 // ---- MCP ----
 
 fn mcp(gateway: &GatewayHandle) -> Result<std::sync::Arc<Mcp>, RpcError> {
@@ -1006,6 +1203,41 @@ pub fn gateway_settings() -> Plugin {
                         method(|_, params| async move { model_test(params).await }),
                     ),
                     (
+                        protocol::PROFILE_GET,
+                        TRUSTED,
+                        method(|_, _| async move { profile_get() }),
+                    ),
+                    (
+                        protocol::PROFILE_SET,
+                        TRUSTED,
+                        method(|_, params| async move { profile_set(params) }),
+                    ),
+                    (
+                        protocol::PROVIDER_LIST,
+                        TRUSTED,
+                        method(|_, _| async move { provider_list() }),
+                    ),
+                    (
+                        protocol::PROVIDER_SAVE,
+                        TRUSTED,
+                        method(|_, params| async move { provider_save(params) }),
+                    ),
+                    (
+                        protocol::PROVIDER_DELETE,
+                        TRUSTED,
+                        method(|gw, params| async move { provider_delete(&gw, params) }),
+                    ),
+                    (
+                        protocol::PROVIDER_MODELS,
+                        TRUSTED_DETACHED,
+                        method(|_, params| async move { provider_models(params).await }),
+                    ),
+                    (
+                        protocol::PROVIDER_CATALOG,
+                        TRUSTED_DETACHED,
+                        method(|_, _| async move { provider_catalog().await }),
+                    ),
+                    (
                         protocol::MCP_SAVE,
                         TRUSTED_DETACHED,
                         method(|gw, params| async move { mcp_save(&gw, params).await }),
@@ -1045,4 +1277,34 @@ pub fn gateway_settings() -> Plugin {
             Ok(None)
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_round_trips_both_files_and_rejects_unknown_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("dock-home");
+        let empty = profile_get_in(&home);
+        assert_eq!(empty["about"]["text"], "");
+        let saved = profile_set_in(&home, "about", "我是后端工程师。\n\n\n").unwrap();
+        assert_eq!(saved["about"]["text"], "我是后端工程师。\n");
+        assert_eq!(
+            std::fs::read_to_string(home.join("USER.md")).unwrap(),
+            "我是后端工程师。\n"
+        );
+        profile_set_in(&home, "instructions", "回答用中文").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
+            "回答用中文\n"
+        );
+        // 清空 = 空文件（注入时整层跳过）。
+        profile_set_in(&home, "about", "  \n").unwrap();
+        assert_eq!(std::fs::read_to_string(home.join("USER.md")).unwrap(), "");
+        assert!(profile_set_in(&home, "nope", "x").is_err());
+        let huge = "x".repeat(PROFILE_MAX_BYTES + 1);
+        assert!(profile_set_in(&home, "about", &huge).is_err());
+    }
 }

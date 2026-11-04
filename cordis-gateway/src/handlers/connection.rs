@@ -157,9 +157,12 @@ pub fn model_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
                 "backends": m.api_backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
                 "auth": auth,
                 "keyEnv": m.env_key,
+                // 环境变量或 secrets.json 里有这个名字（设置页填的密钥存在后者）。
                 "keyEnvSet": m.env_key.as_deref().is_some_and(|k| {
                     std::env::var(k).is_ok_and(|v| !v.trim().is_empty())
+                        || cordis_base::config::stored_secret(k).is_some()
                 }),
+                "provider": m.provider,
                 "editable": editable.contains(&m.id),
                 "default": m.id == current
             })
