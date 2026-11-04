@@ -15,8 +15,11 @@ use cordis_spine::{
     SESSIONS, SUBAGENTS,
 };
 
+use cordis::{plugin, Inject, Plugin};
+
 use crate::handle::GatewayHandle;
-use crate::protocol::RpcError;
+use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
+use crate::protocol::{self, RpcError};
 use crate::subagents;
 use crate::threads::{self, Page};
 
@@ -233,7 +236,30 @@ pub fn stop(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     Ok(json!({ "ok": true, "stopped": true }))
 }
 
-/// `subagent/approval/set { threadId, agentId, mode }`：单独给这个子代理设审批档位，
+/// 登记 [`set_approval`]：设成 `auto` 等于让这个子代理改东西不再问人，是在放宽权限门，
+/// 只认受信连接（`trusted_only`），配对来的网页 `forbidden`。
+pub fn gateway_subagent_approval() -> Plugin {
+    plugin(
+        "gateway.subagent-approval",
+        Inject::from([GATEWAY_METHODS]),
+        |ctx, _: &()| {
+            register_methods(
+                ctx,
+                vec![(
+                    protocol::SUBAGENT_APPROVAL_SET,
+                    MethodPolicy {
+                        trusted_only: true,
+                        ..MethodPolicy::default()
+                    },
+                    method(|gw, params| async move { set_approval(&gw, params) }),
+                )],
+            )?;
+            Ok(None)
+        },
+    )
+}
+
+/// `subagent/approval/set { threadId, agentId, mode }`（受信连接）：单独给这个子代理设审批档位，
 /// `mode` 是 `inherit`（跟这一页）/ `ask`（请求批准）/ `auto`（自动批准）。只读子代理在
 /// 自动批准下碰到会改东西的命令直接拒、不弹。线程得开着；只在盘上的子代理也能设，同 id
 /// 接着聊时生效。回 `{ approval }`；活着的另推一条 `subagent/updated`。

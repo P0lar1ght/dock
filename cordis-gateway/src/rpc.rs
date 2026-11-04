@@ -77,7 +77,6 @@ pub async fn dispatch(
         protocol::SUBAGENT_SEND => subagent::send(&gateway, params),
         protocol::SUBAGENT_INTERRUPT => subagent::interrupt(&gateway, params),
         protocol::SUBAGENT_STOP => subagent::stop(&gateway, params),
-        protocol::SUBAGENT_APPROVAL_SET => subagent::set_approval(&gateway, params),
         protocol::WORKFLOW_LIST => workflow::list(&gateway, params),
         protocol::WORKFLOW_STOP => workflow::stop(&gateway, params),
         // 功能插件登记的方法（`"gateway.methods"`）。
@@ -193,7 +192,6 @@ pub const CORE_METHODS: &[&str] = &[
     protocol::SUBAGENT_SEND,
     protocol::SUBAGENT_INTERRUPT,
     protocol::SUBAGENT_STOP,
-    protocol::SUBAGENT_APPROVAL_SET,
     protocol::WORKFLOW_LIST,
     protocol::WORKFLOW_STOP,
     protocol::CONNECTION_AUTHENTICATE,

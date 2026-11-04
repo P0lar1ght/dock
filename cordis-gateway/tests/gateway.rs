@@ -5418,8 +5418,32 @@ async fn subagents_project_onto_the_thread_that_started_them() {
     assert_eq!(agents[0]["approval"], "inherit", "没单独设过就跟这一页");
     assert_eq!(agents[0]["readOnly"], true, "探索是只读角色");
 
+    // 放宽权限门：配对来的网页（不受信）不能设。
+    let denied = rpc
+        .call(
+            "subagent/approval/set",
+            json!({ "threadId": "live", "agentId": agent_id, "mode": "auto" }),
+        )
+        .await;
+    assert_eq!(denied["error"]["details"]["code"], "forbidden", "{denied}");
+    let listed = rpc
+        .call("subagent/list", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(
+        listed["result"]["agents"][0]["approval"], "inherit",
+        "被拒的不能生效：{listed}"
+    );
+    // 受信连接（设备令牌）才能设。
+    let (_device, token) = devices::add("subagent-approval-test").unwrap();
+    let mut gui = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    let auth = gui
+        .call("connection/authenticate", json!({ "token": token }))
+        .await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let _ = gui.call("initialize", json!({})).await;
+
     // 单独给它设档位：回新档位，活着的另推一条 subagent/updated，列表跟着变。
-    let set = rpc
+    let set = gui
         .call(
             "subagent/approval/set",
             json!({ "threadId": "live", "agentId": agent_id, "mode": "auto" }),
@@ -5437,27 +5461,28 @@ async fn subagents_project_onto_the_thread_that_started_them() {
         listed["result"]["agents"][0]["approval"], "auto",
         "{listed}"
     );
-    let bad = rpc
+    let bad = gui
         .call(
             "subagent/approval/set",
             json!({ "threadId": "live", "agentId": agent_id, "mode": "yolo" }),
         )
         .await;
     assert!(bad["error"].is_object(), "{bad}");
-    let nobody = rpc
+    let nobody = gui
         .call(
             "subagent/approval/set",
             json!({ "threadId": "live", "agentId": "nobody", "mode": "ask" }),
         )
         .await;
     assert_eq!(nobody["error"]["details"]["code"], "not_found", "{nobody}");
-    let back = rpc
+    let back = gui
         .call(
             "subagent/approval/set",
             json!({ "threadId": "live", "agentId": agent_id, "mode": "inherit" }),
         )
         .await;
     assert_eq!(back["result"]["approval"], "inherit", "{back}");
+    devices::revoke("subagent-approval-test").unwrap();
 
     let history = rpc
         .call(

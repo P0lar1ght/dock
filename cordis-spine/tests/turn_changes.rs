@@ -234,3 +234,75 @@ async fn rewind_drops_the_turns_it_cuts() {
     let paths: Vec<&str> = turns[1].files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(paths, vec!["a.txt"], "旧的第二轮（b.txt）不该混进来");
 }
+
+/// 编辑跑到一半用户又发了一条消息（后台子代理、慢的编辑）：改动还归 pre 那一轮，不丢。
+#[tokio::test]
+async fn an_edit_spanning_a_new_user_message_stays_in_its_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let _env = cordis_base::test_env::scoped()
+        .set("DOCK_HOME", home.path().join("dock-home"))
+        .set("DOCK_CUA_DRIVER", "off")
+        .cwd(&project);
+    let a = project.join("a.txt");
+    std::fs::write(&a, "a\n").unwrap();
+
+    let script = Arc::new(Script::default());
+    let root = boot(script.clone()).await;
+    run(&root, "一").await;
+    let changes = root.require::<TurnChanges>(TURN_CHANGES).unwrap();
+    let args = json!({ "file_path": &a }).to_string();
+    changes.before_edit(&root, "search_replace", &args);
+    run(&root, "二").await;
+    std::fs::write(&a, "A\n").unwrap();
+    changes.after_edit(&root, "search_replace");
+
+    let turns = changes.list(&root);
+    assert_eq!(
+        turns.iter().map(|t| t.ordinal).collect::<Vec<_>>(),
+        vec![0],
+        "{turns:#?}"
+    );
+    assert_eq!((turns[0].added, turns[0].removed), (1, 1));
+}
+
+/// 一次编辑只重新看它自己改的那个文件：这一轮记过的别的文件不跟着重读。
+#[tokio::test]
+async fn after_edit_only_refreshes_the_file_it_edited() {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let _env = cordis_base::test_env::scoped()
+        .set("DOCK_HOME", home.path().join("dock-home"))
+        .set("DOCK_CUA_DRIVER", "off")
+        .cwd(&project);
+    let a = project.join("a.txt");
+    let b = project.join("b.txt");
+    std::fs::write(&a, "a\n").unwrap();
+    std::fs::write(&b, "b\n").unwrap();
+
+    let script = Arc::new(Script::default());
+    let root = boot(script.clone()).await;
+    run(&root, "一").await;
+    let changes = root.require::<TurnChanges>(TURN_CHANGES).unwrap();
+    changes.before_edit(
+        &root,
+        "write_file",
+        &json!({ "target_file": &b }).to_string(),
+    );
+    changes.after_edit(&root, "write_file");
+    // b.txt 在编辑之外被改了；接下来这次只改 a.txt，不该顺手把 b.txt 的新样子记进来。
+    std::fs::write(&b, "B\n").unwrap();
+    changes.before_edit(
+        &root,
+        "search_replace",
+        &json!({ "file_path": &a }).to_string(),
+    );
+    std::fs::write(&a, "A\n").unwrap();
+    changes.after_edit(&root, "search_replace");
+
+    let turns = changes.list(&root);
+    let paths: Vec<&str> = turns[0].files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, vec!["a.txt"], "{turns:#?}");
+}

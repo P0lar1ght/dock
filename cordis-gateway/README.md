@@ -635,7 +635,7 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 | `subagent/send { threadId?, agentId, message }` | 用户对子代理说一句：在跑就在下一步读到，空闲就开下一轮；收掉的 / 只在盘上的同一个 id 复活（见下） |
 | `subagent/interrupt { threadId?, agentId }` | 停下这一轮，子代理留着能接着聊；没在跑回 `interrupted: false` |
 | `subagent/stop { threadId?, agentId }` | 收掉子代理；已经收掉的回 `stopped: false` |
-| `subagent/approval/set { threadId?, agentId, mode }` | 单独设它的审批档位（见下），回 `{ approval }` |
+| `subagent/approval/set { threadId?, agentId, mode }` | 单独设它的审批档位（见下），回 `{ approval }`；只认受信连接（`trusted_only`） |
 | 推送 `subagent/updated { agent }` | 子代理出现了或状态变了 |
 | 推送 `subagent/event { agentId, event }` | 子代理对话里的一条事件，`event` 同 `subagent/history` 的条目 |
 
@@ -668,7 +668,8 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
   - 单独设的盖过这一页的：页是自动批准、它设成 `ask` 照样问，反过来也一样；
   - 落在自动批准上（单独设的或跟页的）的只读子代理，碰到会改东西的命令直接拒、不弹（只读的保证还在）；
   - 切到自动批准时，它已经排着的请求一并处理掉（普通的放行、只读的拒绝）；
-  - 只在内存里：同一页里同 id 接着聊还认，Dock 重启后回到 `inherit`；只在盘上的子代理也能设（线程得开着）。
+  - 只在内存里：同一页里同 id 接着聊还认，Dock 重启后回到 `inherit`；只在盘上的子代理也能设（线程得开着）；
+  - 设成 `auto` 是在放宽权限门，所以只认受信连接，配对来的网页回 `forbidden`。
 
 ### 工作流（能力 `workflows`）
 

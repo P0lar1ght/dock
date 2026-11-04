@@ -17,7 +17,7 @@
 
 pub mod diff;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -163,10 +163,20 @@ struct Store {
     turns: BTreeMap<usize, TurnRecord>,
 }
 
+/// `before_edit` 记下、等 `after_edit` 认领的一次编辑：归到哪一轮、改哪个文件。
+struct Pending {
+    ordinal: usize,
+    user_us: u64,
+    path: PathBuf,
+}
+
 /// 各会话的每轮改动。挂在根上一份，按会话（会话目录 / 页身份）分开。
 pub struct TurnChanges {
     ctx: Context,
     stores: Mutex<HashMap<String, Store>>,
+    /// 跑到一半的编辑，按（调用方身份，工具名）排队。`after_edit` 用 pre 时定下的轮次和文件，
+    /// 不再重算：pre 和 post 之间用户又发了一条消息，改动也还归 pre 那一轮。
+    pending: Mutex<HashMap<(String, String), VecDeque<Pending>>>,
 }
 
 impl TurnChanges {
@@ -174,11 +184,13 @@ impl TurnChanges {
         Self {
             ctx,
             stores: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
         }
     }
 
     /// 一颗编辑工具要跑了（`exec` 是调用方，可能是子代理）：它要改的文件这一轮还没记过就存原文。
-    pub fn before_edit(&self, exec: &Context, arguments: &str) {
+    /// `tool` 是这颗编辑工具的名字，跑完由 [`Self::after_edit`] 按同一个名字认领。
+    pub fn before_edit(&self, exec: &Context, tool: &str, arguments: &str) {
         let Some(path) = edit_target(arguments) else {
             return;
         };
@@ -189,6 +201,16 @@ impl TurnChanges {
         let Some((&user_us, ordinal)) = users.last().map(|t| (t, users.len() - 1)) else {
             return;
         };
+        self.pending
+            .lock()
+            .unwrap()
+            .entry(pending_key(exec, tool))
+            .or_default()
+            .push_back(Pending {
+                ordinal,
+                user_us,
+                path: path.clone(),
+            });
         self.with_store(&page, &users, |store, dir| {
             let record = store.turns.entry(ordinal).or_insert_with(|| TurnRecord {
                 version: RECORD_VERSION,
@@ -210,32 +232,49 @@ impl TurnChanges {
         });
     }
 
-    /// 一颗编辑工具跑完了：这一轮记过的文件都重新看一眼现在的样子。
-    pub fn after_edit(&self, exec: &Context) {
+    /// 一颗编辑工具跑完了：只重新看它 pre 时登记的那一个文件，记进 pre 定下的那一轮。
+    pub fn after_edit(&self, exec: &Context, tool: &str) {
+        let pending = {
+            let mut all = self.pending.lock().unwrap();
+            let key = pending_key(exec, tool);
+            let next = all.get_mut(&key).and_then(VecDeque::pop_front);
+            if all.get(&key).is_some_and(VecDeque::is_empty) {
+                all.remove(&key);
+            }
+            next
+        };
+        let Some(Pending {
+            ordinal,
+            user_us,
+            path,
+        }) = pending
+        else {
+            return;
+        };
         let Some(page) = self.page_of(exec) else {
             return;
         };
         let users = user_times(&page);
-        let Some(ordinal) = users.len().checked_sub(1) else {
-            return;
-        };
         let changed = self.with_store(&page, &users, |store, dir| {
-            let Some(record) = store.turns.get_mut(&ordinal) else {
+            // 撤回过：那一轮已经作废（`with_store` 删掉了）或换了人，不记。
+            let Some(record) = store
+                .turns
+                .get_mut(&ordinal)
+                .filter(|r| r.user_us == user_us)
+            else {
                 return false;
             };
-            let mut changed = false;
-            for file in &mut record.files {
-                let now = Snapshot::read(&file.path);
-                if now != file.after {
-                    file.after = now;
-                    changed = true;
-                }
+            let Some(file) = record.files.iter_mut().find(|f| f.path == path) else {
+                return false;
+            };
+            let now = Snapshot::read(&file.path);
+            if now == file.after {
+                return false;
             }
-            if changed {
-                record.reverted = false;
-                persist(dir, record);
-            }
-            changed
+            file.after = now;
+            record.reverted = false;
+            persist(dir, record);
+            true
         });
         if changed {
             self.notify(&page, ordinal);
@@ -422,6 +461,14 @@ impl TurnChanges {
     }
 }
 
+fn pending_key(exec: &Context, tool: &str) -> (String, String) {
+    let identity = exec
+        .get::<Sessions>(SESSIONS)
+        .map(|s| s.identity().to_string())
+        .unwrap_or_default();
+    (identity, tool.to_string())
+}
+
 /// 编辑工具参数里的目标文件（相对路径按调用方的工作目录展开）。
 fn edit_target(arguments: &str) -> Option<PathBuf> {
     let v = crate::tools::fs_common::parse_args(arguments);
@@ -557,7 +604,7 @@ pub fn turn_changes() -> Plugin {
                             crate::tools::registry::exec_ctx(),
                             ctx.get::<TurnChanges>(TURN_CHANGES),
                         ) {
-                            changes.before_edit(&exec, next.arguments());
+                            changes.before_edit(&exec, next.name(), next.arguments());
                         }
                     }
                     next
@@ -573,7 +620,7 @@ pub fn turn_changes() -> Plugin {
                             crate::tools::registry::exec_ctx(),
                             ctx.get::<TurnChanges>(TURN_CHANGES),
                         ) {
-                            changes.after_edit(&exec);
+                            changes.after_edit(&exec, &next.name);
                         }
                     }
                     next
