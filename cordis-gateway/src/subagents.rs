@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cordis::Context;
 use cordis_spine::{
-    AgentPresets, LogEvent, SubagentSnap, Subagents, TurnEndStatus, AGENT_PRESETS, SUBAGENTS,
+    AgentPresets, LogEvent, PermissionMode, Permissions, SubagentSnap, Subagents, TurnEndStatus,
+    AGENT_PRESETS, PERMISSIONS, SUBAGENTS,
 };
 use serde_json::{json, Value};
 
@@ -90,6 +91,28 @@ pub fn persisted_info(meta: &cordis_spine::SubagentMeta, role: Option<String>) -
         v["error"] = json!(output.strip_prefix("failed: ").unwrap_or(output));
     }
     v
+}
+
+/// 子代理的审批档位：`approval` 是 `inherit`（跟这一页）/ `ask` / `auto`；`readOnly` 是它的
+/// 角色在这一页预设里是不是只读（只读的落在自动批准上，会改东西的命令直接拒）。
+/// `page` 是启动它的那一页（关着就是 `None`：一律 `inherit`、`readOnly: false`）。
+pub fn with_approval(mut agent: Value, page: Option<&Context>) -> Value {
+    let mode = page
+        .and_then(|ctx| ctx.get::<Permissions>(PERMISSIONS))
+        .zip(agent["agentId"].as_str())
+        .and_then(|(perms, id)| perms.agent_mode(id));
+    agent["approval"] = json!(match mode {
+        None => "inherit",
+        Some(PermissionMode::Ask) => "ask",
+        Some(PermissionMode::Allow) => "auto",
+    });
+    let read_only = page
+        .and_then(|ctx| ctx.get::<AgentPresets>(AGENT_PRESETS))
+        .zip(agent["subagentType"].as_str())
+        .and_then(|(presets, role)| presets.subagent(role))
+        .is_some_and(|def| def.read_only);
+    agent["readOnly"] = json!(read_only);
+    agent
 }
 
 /// `ctx` 那一页预设里角色的显示名（如「探索」「岑」）。

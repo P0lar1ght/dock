@@ -10,6 +10,16 @@
 
 ### 新增
 
+- 每轮改动：agent 一轮里用 `search_replace` / `write_file` 改过的文件按轮记下（落盘在会话目录，重开还在）。
+  - GUI：一轮结束后出改动卡「已编辑 N 个文件 +x -y」，查看文件、撤销（还是那一轮改完样子的文件才恢复）、审查。
+  - GUI 右侧工具面板加回「审查」：看工作区的 git diff（含未跟踪的新文件）或某一轮的改动，code-review 的批注落在行上，「让 Agent 审查」直接跑 code-review。
+  - 网关：能力 `turnChanges`（`turn/changes/list|diff|revert` + 推送 `turn/changes/updated`）、`worktreeDiff`（`vcs/worktree/diff`）。
+  - bash 里改的文件不算进每轮改动。
+
+- 子代理可以单独设审批档位：GUI 子代理面板的输入框换成和主会话一样的样式，底栏「审批」胶囊选跟随会话 / 请求批准 / 自动批准；它自己的权限请求也在面板里批。
+  - 落在自动批准上（单独设的或跟会话的）的只读子代理（探索、code-review 审查员等），会改东西的命令直接拒绝，不再弹窗。以前主会话开着自动批准也照样弹。
+  - 网关：`subagent/approval/set`；子代理投影多出 `approval`、`readOnly`。
+
 - 内置工作流 `code-review`（`/code-review [范围或关注点]`，`/code-review #42` 审 GitHub PR）：定范围 → 正确性 / 安全 / 性能 / 可维护性 / 测试五个角度并行审查 → 合并重复发现 → 逐条对照代码核实 → 按严重程度出报告。全程只读，不用等批准。
   - GUI：工作流卡「在改动上看批注」打开差异视图，批注落在行上；PR 页抽屉「查看改动」看 PR 的 diff 和 Agent 批注，「让 Agent review」改为跑 code-review。
   - `gh pr view|diff|list|checks|status`、`gh repo view`、`gh issue view|list` 算只读命令（不用等批准；`gh api`、`--web` 不算）。

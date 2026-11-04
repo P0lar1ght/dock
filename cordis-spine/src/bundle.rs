@@ -15,6 +15,7 @@ use crate::host::slash::slash;
 use crate::host::status_items::status_items;
 use crate::host::tool_views::tool_views;
 use crate::host::tui_slots::tui_slots;
+use crate::host::turn_changes::turn_changes;
 use crate::host::user_edits::user_edits;
 use crate::llm::compact::{compact, compact_command};
 use crate::llm::sampler::{llm, LlmConfig, LlmMode};
@@ -127,6 +128,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(project_instructions(), ())?.wait().await?;
     // 用户在文件面板里改的文件：下一步提醒 agent（网关写盘后记一条）。
     ctx.plugin(user_edits(), ())?.wait().await?;
+    // 每轮改了哪些文件（编辑工具前存原文）：对话流里的改动卡、审查、撤销。
+    ctx.plugin(turn_changes(), ())?.wait().await?;
     // MCP App 界面交来的状态（网关 `mcp/app/context`）：下一步提醒 agent。
     ctx.plugin(mcp_app_context(), ())?.wait().await?;
     // MCP App 界面自己的工具（网关 `mcp/app/view/expose`）：界面开着时经 use_tool 交给模型。

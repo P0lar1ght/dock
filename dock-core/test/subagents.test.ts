@@ -143,3 +143,16 @@ test('盘上的子代理（不在 Dock 内存里）带 persisted，铺底后照�
   assert.equal(state.byId.a2.info.persisted, false);
   assert.equal(subagentForToolCall(state, 'call-1')?.info.agentId, 'a1');
 });
+
+test('子代理的审批档位：没给或认不出的都当跟这一页走', () => {
+  const state = seedSubagents(EMPTY_SUBAGENTS, [
+    { agentId: 'a1', approval: 'auto' },
+    { agentId: 'a2', approval: 'ask' },
+    { agentId: 'a3' },
+    { agentId: 'a4', approval: 'yolo' },
+  ]);
+  assert.deepEqual(
+    ['a1', 'a2', 'a3', 'a4'].map((id) => state.byId[id].info.approval),
+    ['auto', 'ask', 'inherit', 'inherit'],
+  );
+});

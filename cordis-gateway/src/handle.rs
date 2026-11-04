@@ -363,6 +363,10 @@ impl GatewayHandle {
         self.with_transcript(page, |t| t.user_ordinal(turn_id))
     }
 
+    pub fn turn_id_at(&self, page: &str, ordinal: usize) -> Option<String> {
+        self.with_transcript(page, |t| t.turn_id_at(ordinal))
+    }
+
     fn with_transcript<R>(&self, page: &str, f: impl FnOnce(&mut Transcript) -> R) -> R {
         with_transcript(&self.inner, page, None, f)
     }
@@ -489,6 +493,7 @@ fn listen_events(inner: &Arc<GatewayInner>) {
         });
     listen_subagents(inner);
     listen_workflows(inner);
+    listen_turn_changes(inner);
     // 某一页的实时日志被整份换掉（终端 `/new` / 恢复会话，或网关自己的
     // `thread/start`）：按它现在的会话重建投影，`threadId` 也跟着换。
     let for_reset = inner.clone();
@@ -654,11 +659,44 @@ fn listen_subagents(inner: &Arc<GatewayInner>) {
                 }
             }
             let role = crate::subagents::role_label(&page.ctx, &snap.subagent_type);
-            let agent = crate::subagents::info(&snap, &events, role);
+            let agent = crate::subagents::with_approval(
+                crate::subagents::info(&snap, &events, role),
+                Some(&page.ctx),
+            );
             with_transcript(&for_changes, &page.identity, Some(page.thread_id()), |t| {
                 t.subagent_updated(agent)
             });
         });
+}
+
+/// 一轮文件改动的变化推成那一页上的 `turn/changes/updated`；那一页关了就不推。
+fn listen_turn_changes(inner: &Arc<GatewayInner>) {
+    let for_changes = inner.clone();
+    let _ = inner.ctx.on(
+        cordis_spine::TURN_CHANGES_CHANGED,
+        move |changed: &cordis_spine::TurnChangesChanged| {
+            let Some(page) = pages(&for_changes)
+                .into_iter()
+                .find(|p| p.identity == *changed.page)
+            else {
+                return;
+            };
+            let Some(service) = page
+                .ctx
+                .get::<cordis_spine::TurnChanges>(cordis_spine::TURN_CHANGES)
+            else {
+                return;
+            };
+            let summary = service.summary(&page.ctx, changed.ordinal);
+            with_transcript(&for_changes, &page.identity, Some(page.thread_id()), |t| {
+                if let Some(turn_id) = t.turn_id_at(changed.ordinal) {
+                    let changes =
+                        crate::handlers::turn_changes::changes_json(&turn_id, summary.as_ref());
+                    t.turn_changes_updated(&turn_id, changes);
+                }
+            });
+        },
+    );
 }
 
 /// 工作流 run 的变化推成起它那一页上的 `workflow/updated`；那一页关了就不推。

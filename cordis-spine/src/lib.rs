@@ -84,6 +84,10 @@ pub use host::tabs::{
 };
 pub use host::tool_views::{effective_call, tool_views, ToolViewFn, ToolViewInput, ToolViews};
 pub use host::tui_slots::{tui_slots, SlotAction, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
+pub use host::turn_changes::{
+    turn_changes, unified_diff, FileChange, RevertOutcome, Snapshot, TurnChanges,
+    TurnChangesChanged, TurnSummary,
+};
 pub use host::user_edits::{record_user_edit, user_edits, UserEdits};
 pub use llm::compact::{
     compact, compact_command, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
@@ -101,7 +105,7 @@ pub use names::{
     SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STATUS_CHANGED, STATUS_ITEMS, STEP_START, SUBAGENTS,
     SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE,
     TOOLS_PRE_EXECUTE, TOOL_VIEWS, TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN,
-    TURN_END, USER_EDITS, WORKFLOWS, WORKFLOW_CHANGED,
+    TURN_CHANGES, TURN_CHANGES_CHANGED, TURN_END, USER_EDITS, WORKFLOWS, WORKFLOW_CHANGED,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};

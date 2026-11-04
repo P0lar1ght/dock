@@ -635,6 +635,7 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 | `subagent/send { threadId?, agentId, message }` | 用户对子代理说一句：在跑就在下一步读到，空闲就开下一轮；收掉的 / 只在盘上的同一个 id 复活（见下） |
 | `subagent/interrupt { threadId?, agentId }` | 停下这一轮，子代理留着能接着聊；没在跑回 `interrupted: false` |
 | `subagent/stop { threadId?, agentId }` | 收掉子代理；已经收掉的回 `stopped: false` |
+| `subagent/approval/set { threadId?, agentId, mode }` | 单独设它的审批档位（见下），回 `{ approval }`；只认受信连接（`trusted_only`） |
 | 推送 `subagent/updated { agent }` | 子代理出现了或状态变了 |
 | 推送 `subagent/event { agentId, event }` | 子代理对话里的一条事件，`event` 同 `subagent/history` 的条目 |
 
@@ -646,7 +647,9 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
   - `startedAt`（毫秒）、`durationMs`（在跑时算到现在，停下就定住）、`toolCalls`；
   - `output`（最近一轮的回复，最多 4000 字）、`error?`（失败才有）；
   - `activity?`（在跑才有）：`{ kind: "tool", toolName, arguments }` / `{ kind: "replying" }` /
-    `{ kind: "thinking" }`。
+    `{ kind: "thinking" }`；
+  - `approval`：`inherit`（跟这一页的档位）/ `ask` / `auto`，见下；
+  - `readOnly`：它的角色在这一页预设里是不是只读（关着的线程一律 `false`）。
 - 子代理的事件：
   - 第一条 `item/user_message` 是父级派的任务（原文，含 `[type] 描述` 开头和回报说明）；
   - 父级在它跑的时候发来的话是 `item/user_message { origin: "parent" }`；
@@ -660,6 +663,13 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 - 子代理和派它的页共用这一页的权限队列与「始终允许」：
   - 子代理发的 `permission/requested` 带 `agentId`（它的 id），主会话发的是 `null`；
   - `permission/resolve { always: true }` 记在这一页上，之后这页和它的子代理调同一颗工具都不再问。
+- 每个子代理可以单独设审批档位（`subagent/approval/set`）：
+  - `mode`：`inherit`（默认，跟 `thread/approval/set` 设的那一页走）/ `ask`（请求批准）/ `auto`（自动批准）；
+  - 单独设的盖过这一页的：页是自动批准、它设成 `ask` 照样问，反过来也一样；
+  - 落在自动批准上（单独设的或跟页的）的只读子代理，碰到会改东西的命令直接拒、不弹（只读的保证还在）；
+  - 切到自动批准时，它已经排着的请求一并处理掉（普通的放行、只读的拒绝）；
+  - 只在内存里：同一页里同 id 接着聊还认，Dock 重启后回到 `inherit`；只在盘上的子代理也能设（线程得开着）；
+  - 设成 `auto` 是在放宽权限门，所以只认受信连接，配对来的网页回 `forbidden`。
 
 ### 工作流（能力 `workflows`）
 
@@ -685,6 +695,26 @@ run 只在 Dock 内存里（不落盘），Dock 重启后 `workflow/list` 是空
   - `result?`（完成才有）/ `error?`（失败、暂停才有），截到 8000 字；
   - `resultData?`：脚本 `complete(#{ …, data })` 的 `data`，给界面的结构化结果（code-review 的批注见 `docs/tools/workflow.md`），不进 `result`；序列化超过 512KB 不带，改标 `resultDataOmitted: true`。
 - 找不到、或不是这个线程起的 run 回 `not_found`。
+
+### 每轮改动（能力 `turnChanges`，`handlers/turn_changes.rs`）
+
+agent 一轮里用 `search_replace` / `write_file` 改了哪些文件（Dock 的 `TurnChanges`，见 `docs/tools/workspace.md`「每轮改动」）。
+bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 的同一个）；落盘在会话目录，重开会话还在。
+
+| 方法 / 推送 | 作用 |
+|---|---|
+| `turn/changes/list { threadId }` | 有改动的轮次 `{ turns: [Changes] }`，先发生的在前 |
+| `turn/changes/diff { threadId, turnId }` | 这一轮的统一 diff `{ diff }`（路径相对会话目录） |
+| `turn/changes/revert { threadId, turnId }` | 只认受信连接。撤销这一轮：`{ restored, conflicts: [{ path, reason }], changes }` |
+| 推送 `turn/changes/updated { turnId, changes }` | 这一轮又改了 / 撤销了；只推不记，`seq` 为 0 |
+
+- `Changes`：`turnId`、`files: [{ path, absPath, status, added, removed, skipped? }]`、`added`、`removed`、`reverted`。
+  - `status`：`added` / `modified` / `deleted`；`skipped`：没存原文的原因（超过 1MB、不是文本），行数不算、撤销不了；
+  - 改了又改回原样的文件不列；`files` 为空就是这一轮没有要看的改动。
+- 撤销只动「现在还是这一轮改完样子」的文件；之后又被改过的（用户、后面的轮次）列进 `conflicts`。
+  恢复了的文件下一步提醒 agent（同文件面板里的用户改动）。撤过的再撤回 `revert_failed`。
+- 子代理改的算进派它那一页当时这一轮。撤回（`thread/rewind`）切掉的轮次作废。
+- 关着的会话先开页再做；没有这一轮回 `not_found`。
 
 ### 上下文明细（能力 `contextBreakdown`，`handlers/context.rs`）
 
@@ -803,6 +833,10 @@ run 只在 Dock 内存里（不落盘），Dock 重启后 `workflow/list` 是空
 - `vcs/diff { threadId | cwd, command }`（只认受信连接）→ 同上：在项目目录里跑一条只读 diff 命令（code-review 结果里的
   `diff_command`）。只认 `git diff …` / `git show …` / `gh pr diff …`，按空白拆参数直接起进程（不经 shell），
   `--output` / `--ext-diff` / `--textconv` / `--web` / `-c` 之类回 `invalid_params`。本地改动是**现在**的工作区，审完又改过的话批注可能对不上行。
+- `vcs/worktree/diff { threadId | cwd }`（只认受信连接，能力 `worktreeDiff`）→ `{ available, diff, truncated, root, untrackedOmitted? }`：
+  项目所在 git 仓库相对 HEAD 的全部改动（含暂存的；还没提交过就和空树比），加上未跟踪的新文件
+  （按 `.gitignore`，最多 100 个，超过 1MB / 不是文本的只给文件头）。路径相对仓库根 `root`。
+  不是 git 仓库回 `{ available: false, reason: "not_git" }`。
 - **gh 用不了不是错误**：回 `{ available: false, reason, hint }`，客户端画空状态。
   - `gh_missing`：没找到 gh（提示 `brew install gh` + `gh auth login`）；
   - `gh_unauthenticated`：gh 没登录；

@@ -189,9 +189,24 @@ async fn harness_root() -> Context {
 
 /// 同 [`harness_root`]；给了 `sampler` 就用它当模型，不用 echo 假模型。
 async fn harness_root_with(sampler: Option<Arc<dyn Sampler>>) -> Context {
+    harness_root_tools(sampler, false).await
+}
+
+/// 同 [`harness_root_with`]；`workspace` 时工具表是真的工作区工具（`search_replace` 真改文件）。
+async fn harness_root_tools(sampler: Option<Arc<dyn Sampler>>, workspace: bool) -> Context {
     isolated_home();
     let root = Context::new();
     match sampler {
+        Some(sampler) if workspace => {
+            cordis_spine::install_core(&root).await.unwrap();
+            root.plugin(cordis_spine::workspace_tools(), ())
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+            root.provide(LLM, Llm::from_sampler(root.clone(), sampler))
+                .unwrap();
+        }
         Some(sampler) => {
             install_without_llm(&root).await.unwrap();
             root.provide(LLM, Llm::from_sampler(root.clone(), sampler))
@@ -5400,6 +5415,74 @@ async fn subagents_project_onto_the_thread_that_started_them() {
     assert_eq!(agents[0]["agentId"], agent_id.as_str());
     assert_eq!(agents[0]["status"], "idle");
     assert_eq!(agents[0]["toolCalls"], 0);
+    assert_eq!(agents[0]["approval"], "inherit", "没单独设过就跟这一页");
+    assert_eq!(agents[0]["readOnly"], true, "探索是只读角色");
+
+    // 放宽权限门：配对来的网页（不受信）不能设。
+    let denied = rpc
+        .call(
+            "subagent/approval/set",
+            json!({ "threadId": "live", "agentId": agent_id, "mode": "auto" }),
+        )
+        .await;
+    assert_eq!(denied["error"]["details"]["code"], "forbidden", "{denied}");
+    let listed = rpc
+        .call("subagent/list", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(
+        listed["result"]["agents"][0]["approval"], "inherit",
+        "被拒的不能生效：{listed}"
+    );
+    // 受信连接（设备令牌）才能设。
+    let (_device, token) = devices::add("subagent-approval-test").unwrap();
+    let mut gui = Rpc::open(h.addr, PAGE_ORIGIN).await;
+    let auth = gui
+        .call("connection/authenticate", json!({ "token": token }))
+        .await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let _ = gui.call("initialize", json!({})).await;
+
+    // 单独给它设档位：回新档位，活着的另推一条 subagent/updated，列表跟着变。
+    let set = gui
+        .call(
+            "subagent/approval/set",
+            json!({ "threadId": "live", "agentId": agent_id, "mode": "auto" }),
+        )
+        .await;
+    assert_eq!(set["result"]["approval"], "auto", "{set}");
+    notes_until(&mut rpc, Duration::from_secs(5), |n| {
+        n["method"] == "subagent/updated" && n["params"]["agent"]["approval"] == "auto"
+    })
+    .await;
+    let listed = rpc
+        .call("subagent/list", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(
+        listed["result"]["agents"][0]["approval"], "auto",
+        "{listed}"
+    );
+    let bad = gui
+        .call(
+            "subagent/approval/set",
+            json!({ "threadId": "live", "agentId": agent_id, "mode": "yolo" }),
+        )
+        .await;
+    assert!(bad["error"].is_object(), "{bad}");
+    let nobody = gui
+        .call(
+            "subagent/approval/set",
+            json!({ "threadId": "live", "agentId": "nobody", "mode": "ask" }),
+        )
+        .await;
+    assert_eq!(nobody["error"]["details"]["code"], "not_found", "{nobody}");
+    let back = gui
+        .call(
+            "subagent/approval/set",
+            json!({ "threadId": "live", "agentId": agent_id, "mode": "inherit" }),
+        )
+        .await;
+    assert_eq!(back["result"]["approval"], "inherit", "{back}");
+    devices::revoke("subagent-approval-test").unwrap();
 
     let history = rpc
         .call(
@@ -7331,4 +7414,215 @@ async fn propose_preset_waits_for_review_when_a_gui_is_attached() {
         .map(|d| d.count())
         .unwrap_or(0);
     assert_eq!(before, after, "起草不写盘");
+}
+
+/// 用户说「改」：先 `search_replace` 把 a.txt 里的 hello 改成 HELLO（相对路径，按线程目录展开），
+/// 工具结果回来后收尾。
+struct EditHello;
+
+impl Sampler for EditHello {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        // 最近一条用户消息说了「改」，而且它后面还没有工具结果（提醒可能排在它后面）。
+        let asked = request
+            .history
+            .iter()
+            .rev()
+            .take_while(|e| !matches!(e, LogEvent::ToolExecute { .. }))
+            .any(|e| matches!(e, LogEvent::User(t) if t.contains("改")));
+        Box::pin(async move {
+            if asked {
+                return LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: "edit-1".into(),
+                        name: "search_replace".into(),
+                        arguments: json!({
+                            "file_path": "a.txt",
+                            "old_string": "hello",
+                            "new_string": "HELLO",
+                        })
+                        .to_string(),
+                    }],
+                    ..LlmOutput::default()
+                };
+            }
+            LlmOutput {
+                text: "改好了".into(),
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+/// 每轮改动：agent 用编辑工具改了文件，这一轮推 `turn/changes/updated`（`turnId` 同
+/// `turn/start` 回的），`list` / `diff` 查得到，`revert` 恢复原文并再推一条；`vcs/worktree/diff`
+/// 带上未跟踪的新文件。
+#[tokio::test]
+async fn turn_changes_project_list_diff_and_revert() {
+    let root = harness_root_tools(Some(Arc::new(EditHello)), true).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    root.plugin(cordis_spine::turn_changes(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let init = gui.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["turnChanges"], true,
+        "{init}"
+    );
+    let dir = project_dir("turn-changes");
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    std::fs::write(dir.join("a.txt"), "hello\nworld\n").unwrap();
+    git(&["init", "-q"]);
+    git(&["add", "a.txt"]);
+    git(&["commit", "-qm", "init"]);
+    let started = gui
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+    let _ = gui
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = gui
+        .call(
+            "thread/approval/set",
+            json!({ "threadId": id, "mode": "auto" }),
+        )
+        .await;
+
+    let turn = gui
+        .call("turn/start", json!({ "threadId": id, "message": "改一下" }))
+        .await;
+    let turn_id = turn["result"]["turnId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{turn}"))
+        .to_string();
+    let notes = notes_until(&mut gui, Duration::from_secs(10), |n| {
+        n["method"] == "turn/completed"
+    })
+    .await;
+    let pushed = notes
+        .iter()
+        .rfind(|n| n["method"] == "turn/changes/updated")
+        .unwrap_or_else(|| panic!("改了文件要推改动：{notes:#?}"));
+    assert_eq!(pushed["params"]["turnId"], turn_id.as_str());
+    let changes = &pushed["params"]["changes"];
+    assert_eq!(changes["files"][0]["path"], "a.txt", "{changes}");
+    assert_eq!(changes["files"][0]["status"], "modified");
+    assert_eq!(
+        (changes["added"].as_u64(), changes["removed"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "HELLO\nworld\n"
+    );
+
+    let listed = gui
+        .call("turn/changes/list", json!({ "threadId": id }))
+        .await;
+    assert_eq!(
+        listed["result"]["turns"][0]["turnId"],
+        turn_id.as_str(),
+        "{listed}"
+    );
+    let diff = gui
+        .call(
+            "turn/changes/diff",
+            json!({ "threadId": id, "turnId": turn_id }),
+        )
+        .await;
+    let text = diff["result"]["diff"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{diff}"));
+    assert!(text.contains("-hello\n+HELLO\n"), "{text}");
+
+    // 工作区 diff：改过的 a.txt + 未跟踪的新文件。
+    std::fs::write(dir.join("fresh.md"), "new\n").unwrap();
+    let worktree = gui
+        .call("vcs/worktree/diff", json!({ "threadId": id }))
+        .await;
+    let text = worktree["result"]["diff"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{worktree}"));
+    assert!(text.contains("+HELLO"), "{text}");
+    assert!(
+        text.contains("+++ b/fresh.md\n@@ -0,0 +1,1 @@\n+new"),
+        "{text}"
+    );
+
+    let reverted = gui
+        .call(
+            "turn/changes/revert",
+            json!({ "threadId": id, "turnId": turn_id }),
+        )
+        .await;
+    assert_eq!(
+        reverted["result"]["restored"],
+        json!(["a.txt"]),
+        "{reverted}"
+    );
+    assert_eq!(
+        reverted["result"]["changes"]["reverted"], true,
+        "{reverted}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "hello\nworld\n"
+    );
+    notes_until(&mut gui, Duration::from_secs(5), |n| {
+        n["method"] == "turn/changes/updated" && n["params"]["changes"]["reverted"] == true
+    })
+    .await;
+    let again = gui
+        .call(
+            "turn/changes/revert",
+            json!({ "threadId": id, "turnId": turn_id }),
+        )
+        .await;
+    assert_eq!(
+        again["error"]["details"]["code"], "revert_failed",
+        "{again}"
+    );
+    let missing = gui
+        .call(
+            "turn/changes/diff",
+            json!({ "threadId": id, "turnId": "t99" }),
+        )
+        .await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
 }

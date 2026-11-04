@@ -111,7 +111,13 @@ export interface SubagentInfo {
   activity: SubagentActivity | null;
   /** 只在盘上（不在 Dock 内存里）：会话关过、Dock 重启过、早就收掉的。发消息会同一个 id 接着聊。 */
   persisted: boolean;
+  /** 审批档位：`inherit` 跟这一页走（默认）/ `ask` / `auto`（`subagent/approval/set` 单独设的）。 */
+  approval: SubagentApproval;
+  /** 它的角色是只读的（落在自动批准上时，会改东西的命令直接拒）。关着的线程一律 `false`。 */
+  readOnly: boolean;
 }
+
+export type SubagentApproval = 'inherit' | 'ask' | 'auto';
 
 /** `subagent/updated` 的 `agent`（或 `subagent/list` 的一项）→ 子代理。没有 id 返回 `null`。 */
 export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null {
@@ -139,6 +145,54 @@ export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null
     error: str(raw.error) || null,
     activity,
     persisted: raw.persisted === true,
+    approval: oneOf(raw.approval, ['inherit', 'ask', 'auto'] as const, 'inherit'),
+    readOnly: raw.readOnly === true,
+  };
+}
+
+/** 一轮里 agent 用编辑工具（`search_replace` / `write_file`）改过的一个文件。 */
+export interface TurnFileChange {
+  /** 在会话目录里的是相对路径。 */
+  path: string;
+  absPath: string;
+  status: 'added' | 'modified' | 'deleted';
+  added: number;
+  removed: number;
+  /** 没存原文（太大、不是文本）：行数不算、撤销不了。 */
+  skipped: string | null;
+}
+
+/** 一轮的文件改动：`turn/changes/updated` 的 `changes`、`turn/changes/list` 的一项。 */
+export interface TurnChanges {
+  turnId: string;
+  /** 空 = 改了又改回去了（或全撤销成原样）。 */
+  files: TurnFileChange[];
+  added: number;
+  removed: number;
+  reverted: boolean;
+}
+
+/** `turn/changes/updated` 的 `changes`（或 `turn/changes/list` 的一项）→ 改动。没有 turnId 返回 `null`。 */
+export function parseTurnChanges(raw: Record<string, unknown>): TurnChanges | null {
+  const turnId = str(raw.turnId);
+  if (!turnId) return null;
+  const files = Array.isArray(raw.files) ? raw.files : [];
+  return {
+    turnId,
+    files: files.map((f) => {
+      const o = obj(f);
+      return {
+        path: str(o.path),
+        absPath: str(o.absPath) || str(o.path),
+        status: oneOf(o.status, ['added', 'modified', 'deleted'] as const, 'modified'),
+        added: num(o.added),
+        removed: num(o.removed),
+        skipped: str(o.skipped) || null,
+      };
+    }),
+    added: num(raw.added),
+    removed: num(raw.removed),
+    reverted: raw.reverted === true,
   };
 }
 
@@ -300,6 +354,8 @@ export type DockEvent = EventBase &
     | { method: 'subagent/event'; agentId: string; event: DockEvent }
     /** 工作流 run 出现了或变了。只推不记（`seq` 为 0）。 */
     | { method: 'workflow/updated'; run: WorkflowRun }
+    /** 一轮的文件改动变了（又改了、撤销了）。只推不记（`seq` 为 0）。 */
+    | { method: 'turn/changes/updated'; changes: TurnChanges }
   );
 
 export type DockEventMethod = DockEvent['method'];
@@ -481,6 +537,10 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
     case 'workflow/updated': {
       const run = parseWorkflowRun(obj(params.run));
       return run ? { ...base, method, run } : null;
+    }
+    case 'turn/changes/updated': {
+      const changes = parseTurnChanges(obj(params.changes));
+      return changes ? { ...base, method, changes } : null;
     }
     case 'subagent/event': {
       const agentId = str(params.agentId);
