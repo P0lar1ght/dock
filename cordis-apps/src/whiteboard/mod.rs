@@ -1,7 +1,7 @@
 //! 内置白板（`dock mcp whiteboard`）：Excalidraw 界面 + 按项目存的场景。
 //!
 //! - 模型用 `whiteboard_read`（读，不挂界面）、`whiteboard_edit`（改，挂界面 `ui://whiteboard/board.html`），
-//!   以及 `whiteboard_group` / `align` / `style` / `layer` / `fit_text`（布局与样式，避免塞进 edit 撑爆 schema）；
+//!   以及 group/align/style/layer/fit_text/distribute/layout/place/graph（布局与样式，避免塞进 edit 撑爆 schema）；
 //! - 界面用只给界面的 `whiteboard_load` / `whiteboard_save` 读写同一份场景；
 //! - 场景按 Dock 带来的 `_meta["dock/cwd"]` 分项目：`$DOCK_HOME/apps/whiteboard/<项目目录名>/scene.json`。
 
@@ -41,7 +41,7 @@ const EDIT_DESC: &str = concat!(
     "`from`/`to`? (arrow/line endpoint shape ids); `fontSize`? (text shapes). ",
     "Omit x/y to stack new shapes in a column to the right of existing content. ",
     "Give short ids to shapes you will connect or update later.\n\n",
-    "For group/align/batch-style/layer/fit-text use the dedicated whiteboard_* tools — do not stuff them into this schema."
+    "For layout (group/align/distribute/layout/place/graph/style/layer/fit-text) use the dedicated whiteboard_* tools — do not stuff them into this schema."
 );
 
 /// 故意不列 properties：嵌套一长串会触发部分模型把数组包成 `{item: ...}`。
@@ -178,6 +178,35 @@ fn apply(name: &str, args: &Value, path: &std::path::Path, mut scene: Scene) -> 
         },
         "whiteboard_fit_text" => match scene::apply_fit_text(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_distribute" => match scene::apply_distribute(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_layout" => match scene::apply_layout(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_place" => match scene::apply_place(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_graph" => match scene::apply_graph(&mut scene, args) {
+            Ok(report) => {
+                let mut head = format!("已改白板：{}。", report.detail);
+                if report.unwrapped_item {
+                    head.push_str("已自动去掉 item 包装层。");
+                }
+                let mut out = save_ok(&mut scene, path, head);
+                if let Some(sc) = out.get_mut("structuredContent") {
+                    sc["added"] = json!(report.added);
+                    if report.unwrapped_item {
+                        sc["unwrappedItem"] = json!(true);
+                    }
+                }
+                out
+            }
             Err(e) => tool_result(format!("白板没改：{e}"), None, true),
         },
         "whiteboard_load" => {
@@ -317,6 +346,66 @@ impl App for Whiteboard {
                         "ids": ids_schema()
                     },
                     "required": ["ids"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_distribute",
+                "description": "Evenly distribute ≥3 shapes. `direction` ∈ horizontal|vertical: keep outermost positions, space the middle ones evenly. `ids` flat string array (order ignored; sorted by current position).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": ids_schema(),
+                        "direction": { "type": "string" }
+                    },
+                    "required": ["ids", "direction"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_layout",
+                "description": "Arrange existing shapes into a grid. `columns` (required), optional `gap_x`/`gap_y` (defaults 60/80). Starts at the selection's top-left; keeps each shape's size. `ids` flat string array.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": ids_schema(),
+                        "columns": { "type": "integer" },
+                        "gap_x": { "type": "number" },
+                        "gap_y": { "type": "number" }
+                    },
+                    "required": ["ids", "columns"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_place",
+                "description": "Place one existing shape next to another. Args: `id` (move), `ref` (anchor), `where` ∈ left|right|above|below, optional `gap` (default 40). Works for pending and completed shapes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "ref": { "type": "string" },
+                        "where": { "type": "string" },
+                        "gap": { "type": "number" }
+                    },
+                    "required": ["id", "ref", "where"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_graph",
+                "description": "Draw a flowchart from nodes+edges without guessing coordinates. Args: `nodes` [{id, text?, type?}] (type default rectangle; also ellipse|diamond|text), `edges`? [{from, to, text?, id?}], `layout`? ∈ layered|row|column|grid (default layered = BFS levels), `columns`? (grid default 3), `gap_x`?/`gap_y`? (default 60/80). Boxes default 200×80. Atomic; unwraps exactly-one-key {item:[...]}. NOT {\"item\":...} wrappers for nodes/edges arrays.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "nodes": { "type": "array", "items": shape_item_schema() },
+                        "edges": { "type": "array", "items": shape_item_schema() },
+                        "layout": { "type": "string" },
+                        "columns": { "type": "integer" },
+                        "gap_x": { "type": "number" },
+                        "gap_y": { "type": "number" }
+                    },
+                    "required": ["nodes"]
                 },
                 "_meta": ui(),
             }),

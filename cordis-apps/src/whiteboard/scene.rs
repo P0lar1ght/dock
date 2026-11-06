@@ -655,7 +655,7 @@ fn delete_one(scene: &mut Scene, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 绑在 `id` 上的完整箭头：留墓碑，换成一个新 id 的骨架（同颜色、同标签、同两端）。
+/// 绑在 `id` 上的完整箭头：退回骨架重新连线，**复用原来的箭头 id**（同颜色、同标签、同两端）。
 fn reroute_arrows(scene: &mut Scene, id: &str) {
     let ends = |e: &Value, key: &str| {
         e.pointer(&format!("/{key}/elementId"))
@@ -685,18 +685,23 @@ fn reroute_arrows(scene: &mut Scene, id: &str) {
                     && t.get("containerId").and_then(Value::as_str) == Some(old_id.as_str())
             })
             .and_then(|t| t.get("text").and_then(Value::as_str).map(str::to_string));
+        let from = ends(&old, "startBinding");
+        let to = ends(&old, "endBinding");
         let _ = delete_one(scene, &old_id);
-        let new_id = {
-            let base = format!("{old_id}~{}", scene.rev + 1);
-            if scene.id_taken(&base) {
-                fresh_id(scene)
-            } else {
-                base
+        // 清掉箭头与标签墓碑，复用原 id 进 pending（模型不丢箭头引用）。
+        let mut top: Option<u64> = None;
+        scene.elements.retain(|e| {
+            let mine = id_of(e) == Some(old_id.as_str())
+                || (is_deleted(e)
+                    && e.get("containerId").and_then(Value::as_str) == Some(old_id.as_str()));
+            if mine {
+                top = top.max(Some(num(e, "version") as u64));
             }
-        };
+            !mine
+        });
         let mut s = Map::new();
         s.insert("type".into(), json!("arrow"));
-        s.insert("id".into(), json!(new_id));
+        s.insert("id".into(), json!(old_id));
         s.insert("x".into(), json!(num(&old, "x")));
         s.insert("y".into(), json!(num(&old, "y")));
         for key in ["strokeColor", "strokeStyle", "strokeWidth"] {
@@ -704,17 +709,18 @@ fn reroute_arrows(scene: &mut Scene, id: &str) {
                 s.insert(key.into(), v.clone());
             }
         }
-        if let Some(from) = ends(&old, "startBinding") {
+        if let Some(ref from) = from {
             s.insert("start".into(), json!({ "id": from }));
         }
-        if let Some(to) = ends(&old, "endBinding") {
+        if let Some(ref to) = to {
             s.insert("end".into(), json!({ "id": to }));
         }
         if let Some(text) = label {
             s.insert("label".into(), json!({ "text": text }));
         }
-        let from = ends(&old, "startBinding");
-        let to = ends(&old, "endBinding");
+        if let Some(v) = top.map(|v| v + 1) {
+            s.insert("customData".into(), json!({ "dockMinVersion": v }));
+        }
         if let (Some(a), Some(b)) = (
             from.as_deref().and_then(|t| scene.shape(t)),
             to.as_deref().and_then(|t| scene.shape(t)),
@@ -1173,6 +1179,432 @@ pub fn apply_fit_text(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, 
     })
 }
 
+const PLACE_WHERE: &[&str] = &["left", "right", "above", "below"];
+const DEFAULT_PLACE_GAP: f64 = 40.0;
+const GRAPH_W: f64 = 200.0;
+const GRAPH_H: f64 = 80.0;
+const GRAPH_GAP_X: f64 = 60.0;
+const GRAPH_GAP_Y: f64 = 80.0;
+
+fn frame_xywh(e: &Value) -> (f64, f64, f64, f64) {
+    (num(e, "x"), num(e, "y"), num(e, "width"), num(e, "height"))
+}
+
+fn place_beside(ref_e: &Value, where_: &str, gap: f64, w: f64, h: f64) -> (f64, f64) {
+    let (rx, ry, rw, rh) = frame_xywh(ref_e);
+    match where_ {
+        "right" => (rx + rw + gap, ry + (rh - h) / 2.0),
+        "left" => (rx - gap - w, ry + (rh - h) / 2.0),
+        "below" => (rx + (rw - w) / 2.0, ry + rh + gap),
+        "above" => (rx + (rw - w) / 2.0, ry - gap - h),
+        _ => (rx + rw + gap, ry),
+    }
+}
+
+/// `whiteboard_distribute`：`{ ids, direction: horizontal|vertical }`。≥3 个；两端不动，中间均分。
+pub fn apply_distribute(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
+    let ids = require_ids(args)?;
+    if ids.len() < 3 {
+        return Err("distribute 至少要 3 个 id（两端固定，中间均分）".into());
+    }
+    let dir = args
+        .get("direction")
+        .and_then(Value::as_str)
+        .ok_or("缺 direction（horizontal|vertical）")?;
+    if dir != "horizontal" && dir != "vertical" {
+        return Err(format!("direction「{dir}」不认识（horizontal|vertical）"));
+    }
+    let mut frames = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let e = live_ref(scene, id)?;
+        frames.push((id.clone(), frame_xywh(e)));
+    }
+    if dir == "horizontal" {
+        frames.sort_by(|a, b| {
+            a.1 .0
+                .partial_cmp(&b.1 .0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    } else {
+        frames.sort_by(|a, b| {
+            a.1 .1
+                .partial_cmp(&b.1 .1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    let n = frames.len();
+    let first = frames[0].1;
+    let last = frames[n - 1].1;
+    let mut next = scene.clone();
+    if dir == "horizontal" {
+        let span = (last.0 + last.2) - first.0;
+        let sizes: f64 = frames.iter().map(|f| f.1 .2).sum();
+        let gap = (span - sizes) / (n as f64 - 1.0);
+        let mut cursor = first.0;
+        for (i, (id, (_, y, w, _))) in frames.iter().enumerate() {
+            if i == 0 {
+                cursor = first.0 + w;
+                continue;
+            }
+            if i + 1 == n {
+                break;
+            }
+            let nx = cursor + gap;
+            update_one(&mut next, id, &json!({ "x": nx, "y": *y }))?;
+            cursor = nx + w;
+        }
+    } else {
+        let span = (last.1 + last.3) - first.1;
+        let sizes: f64 = frames.iter().map(|f| f.1 .3).sum();
+        let gap = (span - sizes) / (n as f64 - 1.0);
+        let mut cursor = first.1;
+        for (i, (id, (x, _, _, h))) in frames.iter().enumerate() {
+            if i == 0 {
+                cursor = first.1 + h;
+                continue;
+            }
+            if i + 1 == n {
+                break;
+            }
+            let ny = cursor + gap;
+            update_one(&mut next, id, &json!({ "x": *x, "y": ny }))?;
+            cursor = ny + h;
+        }
+    }
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(ArrangeReport {
+        detail: format!("已沿 {dir} 均分 {} 个图形", ids.len()),
+        touched: ids,
+    })
+}
+
+/// `whiteboard_layout`：`{ ids, columns, gap_x?, gap_y? }`。按网格重排（保留各自身高宽）。
+pub fn apply_layout(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
+    let ids = require_ids(args)?;
+    let columns = args
+        .get("columns")
+        .and_then(Value::as_u64)
+        .ok_or("缺 columns（正整数）")? as usize;
+    if columns == 0 {
+        return Err("columns 至少是 1".into());
+    }
+    let gap_x = opt_num(args, "gap_x").unwrap_or(GRAPH_GAP_X);
+    let gap_y = opt_num(args, "gap_y").unwrap_or(GRAPH_GAP_Y);
+    let mut origin_x = f64::INFINITY;
+    let mut origin_y = f64::INFINITY;
+    let mut sizes = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let e = live_ref(scene, id)?;
+        let (x, y, w, h) = frame_xywh(e);
+        origin_x = origin_x.min(x);
+        origin_y = origin_y.min(y);
+        sizes.push((id.clone(), w, h));
+    }
+    let rows = ids.len().div_ceil(columns);
+    let mut col_w = vec![0.0; columns];
+    let mut row_h = vec![0.0; rows];
+    for (i, (_, w, h)) in sizes.iter().enumerate() {
+        let c = i % columns;
+        let r = i / columns;
+        col_w[c] = f64::max(col_w[c], *w);
+        row_h[r] = f64::max(row_h[r], *h);
+    }
+    let mut next = scene.clone();
+    for (i, (id, w, h)) in sizes.iter().enumerate() {
+        let c = i % columns;
+        let r = i / columns;
+        let x =
+            origin_x + col_w.iter().take(c).sum::<f64>() + gap_x * c as f64 + (col_w[c] - w) / 2.0;
+        let y =
+            origin_y + row_h.iter().take(r).sum::<f64>() + gap_y * r as f64 + (row_h[r] - h) / 2.0;
+        update_one(&mut next, id, &json!({ "x": x, "y": y }))?;
+    }
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(ArrangeReport {
+        detail: format!("已按 {columns} 列网格排布 {} 个图形", ids.len()),
+        touched: ids,
+    })
+}
+
+/// `whiteboard_place`：`{ id, ref, where: left|right|above|below, gap? }`。把已有图形放到参照旁。
+pub fn apply_place(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
+    let id = args
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or("缺 id（要挪的图形）")?;
+    let ref_id = args
+        .get("ref")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or("缺 ref（参照图形 id）")?;
+    if id == ref_id {
+        return Err("id 和 ref 不能相同".into());
+    }
+    let where_ = args
+        .get("where")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("缺 where（∈ {}）", PLACE_WHERE.join("|")))?;
+    if !PLACE_WHERE.contains(&where_) {
+        return Err(format!(
+            "where「{where_}」不认识（∈ {}）",
+            PLACE_WHERE.join("|")
+        ));
+    }
+    let gap = opt_num(args, "gap").unwrap_or(DEFAULT_PLACE_GAP);
+    let target = live_ref(scene, id)?.clone();
+    let refer = live_ref(scene, ref_id)?.clone();
+    let (_, _, w, h) = frame_xywh(&target);
+    let (nx, ny) = place_beside(&refer, where_, gap, w, h);
+    let mut next = scene.clone();
+    update_one(&mut next, id, &json!({ "x": nx, "y": ny }))?;
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(ArrangeReport {
+        detail: format!("已把 {id} 放到 {ref_id} 的 {where_}"),
+        touched: vec![id.to_string()],
+    })
+}
+
+/// `whiteboard_graph` 的结果。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphReport {
+    pub added: Vec<String>,
+    pub detail: String,
+    pub unwrapped_item: bool,
+}
+
+/// `whiteboard_graph`：`{ nodes, edges?, layout?, columns?, gap_x?, gap_y? }`。
+/// layout ∈ row|column|grid|layered；默认 layered。节点默认 200×80，间距 60/80。
+pub fn apply_graph(scene: &mut Scene, args: &Value) -> Result<GraphReport, String> {
+    let (nodes, u_n) = take_array_field(args, "nodes")?;
+    let (edges, u_e) = match args.get("edges") {
+        None | Some(Value::Null) => (Vec::new(), false),
+        Some(_) => take_array_field(args, "edges")?,
+    };
+    if nodes.is_empty() {
+        return Err("nodes 不能为空".into());
+    }
+    if nodes.len() + edges.len() > MAX_OPS {
+        return Err(format!("一次最多改 {MAX_OPS} 个，分几次做"));
+    }
+    let layout = args
+        .get("layout")
+        .and_then(Value::as_str)
+        .unwrap_or("layered");
+    if !["row", "column", "grid", "layered"].contains(&layout) {
+        return Err(format!(
+            "layout「{layout}」不认识（row|column|grid|layered）"
+        ));
+    }
+    let columns = args
+        .get("columns")
+        .and_then(Value::as_u64)
+        .unwrap_or(if layout == "grid" { 3 } else { 1 }) as usize;
+    if columns == 0 {
+        return Err("columns 至少是 1".into());
+    }
+    let gap_x = opt_num(args, "gap_x").unwrap_or(GRAPH_GAP_X);
+    let gap_y = opt_num(args, "gap_y").unwrap_or(GRAPH_GAP_Y);
+
+    let mut parsed: Vec<(String, String, String)> = Vec::with_capacity(nodes.len());
+    for (i, n) in nodes.iter().enumerate() {
+        let id = n
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("第 {} 个节点缺 id（nodes[{i}]）", i + 1))?
+            .to_string();
+        let kind = n.get("type").and_then(Value::as_str).unwrap_or("rectangle");
+        if !["rectangle", "ellipse", "diamond", "text"].contains(&kind) {
+            return Err(format!(
+                "第 {} 个节点 type「{kind}」不支持（nodes[{i}]：rectangle|ellipse|diamond|text）",
+                i + 1
+            ));
+        }
+        let text = n
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if parsed.iter().any(|(p, _, _)| p == &id) {
+            return Err(format!("第 {} 个节点 id「{id}」重复（nodes[{i}]）", i + 1));
+        }
+        if scene.shape(&id).is_some() {
+            return Err(format!(
+                "第 {} 个节点 id「{id}」已经有了（nodes[{i}]：换一个或先 delete）",
+                i + 1
+            ));
+        }
+        parsed.push((id, kind.to_string(), text));
+    }
+    let id_set: std::collections::HashSet<&str> =
+        parsed.iter().map(|(i, _, _)| i.as_str()).collect();
+
+    let mut parsed_edges: Vec<(String, String, String, Option<String>)> = Vec::new();
+    for (i, e) in edges.iter().enumerate() {
+        let from = e
+            .get("from")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("第 {} 条边缺 from（edges[{i}]）", i + 1))?;
+        let to = e
+            .get("to")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("第 {} 条边缺 to（edges[{i}]）", i + 1))?;
+        if !id_set.contains(from) && scene.shape(from).is_none() {
+            return Err(format!(
+                "第 {} 条边 from「{from}」不存在（edges[{i}]）",
+                i + 1
+            ));
+        }
+        if !id_set.contains(to) && scene.shape(to).is_none() {
+            return Err(format!("第 {} 条边 to「{to}」不存在（edges[{i}]）", i + 1));
+        }
+        let text = e.get("text").and_then(Value::as_str).map(str::to_string);
+        let eid = e
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("e-{from}-{to}"));
+        parsed_edges.push((eid, from.to_string(), to.to_string(), text));
+    }
+
+    let positions = graph_positions(&parsed, &parsed_edges, layout, columns, gap_x, gap_y);
+    let mut next = scene.clone();
+    let mut added = Vec::new();
+    let origin = next.bounds();
+    for (i, (id, kind, text)) in parsed.iter().enumerate() {
+        let (x, y) = positions[i];
+        let mut shape = json!({
+            "type": kind, "id": id, "x": x, "y": y,
+            "width": GRAPH_W, "height": GRAPH_H,
+        });
+        if !text.is_empty() {
+            shape["text"] = json!(text);
+        }
+        let aid = add_one(&mut next, &shape, origin, i)?;
+        added.push(aid);
+    }
+    for (i, (eid, from, to, text)) in parsed_edges.iter().enumerate() {
+        if next.shape(eid).is_some() {
+            return Err(format!(
+                "第 {} 条边 id「{eid}」已经有了（edges[{i}]）",
+                i + 1
+            ));
+        }
+        let mut shape = json!({
+            "type": "arrow", "id": eid, "from": from, "to": to,
+        });
+        if let Some(t) = text {
+            shape["text"] = json!(t);
+        }
+        let aid = add_one(&mut next, &shape, None, i)?;
+        added.push(aid);
+    }
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(GraphReport {
+        detail: format!(
+            "已画图：{} 个节点、{} 条边（layout={layout}）",
+            parsed.len(),
+            parsed_edges.len()
+        ),
+        added,
+        unwrapped_item: u_n || u_e,
+    })
+}
+
+fn graph_positions(
+    nodes: &[(String, String, String)],
+    edges: &[(String, String, String, Option<String>)],
+    layout: &str,
+    columns: usize,
+    gap_x: f64,
+    gap_y: f64,
+) -> Vec<(f64, f64)> {
+    let n = nodes.len();
+    let mut pos = vec![(100.0, 100.0); n];
+    let idx: std::collections::HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _, _))| (id.as_str(), i))
+        .collect();
+    match layout {
+        "row" => {
+            for (i, slot) in pos.iter_mut().enumerate() {
+                *slot = (100.0 + i as f64 * (GRAPH_W + gap_x), 100.0);
+            }
+        }
+        "column" => {
+            for (i, slot) in pos.iter_mut().enumerate() {
+                *slot = (100.0, 100.0 + i as f64 * (GRAPH_H + gap_y));
+            }
+        }
+        "grid" => {
+            let cols = columns.max(1);
+            for (i, slot) in pos.iter_mut().enumerate() {
+                let c = i % cols;
+                let r = i / cols;
+                *slot = (
+                    100.0 + c as f64 * (GRAPH_W + gap_x),
+                    100.0 + r as f64 * (GRAPH_H + gap_y),
+                );
+            }
+        }
+        _ => {
+            let mut indeg = vec![0usize; n];
+            let mut adj = vec![Vec::new(); n];
+            for (_, from, to, _) in edges {
+                if let (Some(&a), Some(&b)) = (idx.get(from.as_str()), idx.get(to.as_str())) {
+                    adj[a].push(b);
+                    indeg[b] += 1;
+                }
+            }
+            let mut level = vec![0usize; n];
+            let mut queue: std::collections::VecDeque<usize> = indeg
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| **d == 0)
+                .map(|(i, _)| i)
+                .collect();
+            if queue.is_empty() {
+                queue.extend(0..n);
+            }
+            let mut seen = vec![false; n];
+            while let Some(u) = queue.pop_front() {
+                if seen[u] {
+                    continue;
+                }
+                seen[u] = true;
+                for &v in &adj[u] {
+                    level[v] = level[v].max(level[u] + 1);
+                    indeg[v] = indeg[v].saturating_sub(1);
+                    if indeg[v] == 0 {
+                        queue.push_back(v);
+                    }
+                }
+            }
+            let max_lvl = level.iter().copied().max().unwrap_or(0);
+            let mut per_level: Vec<Vec<usize>> = vec![Vec::new(); max_lvl + 1];
+            for (i, &l) in level.iter().enumerate() {
+                per_level[l].push(i);
+            }
+            for (l, row) in per_level.iter().enumerate() {
+                for (c, &i) in row.iter().enumerate() {
+                    pos[i] = (
+                        100.0 + c as f64 * (GRAPH_W + gap_x),
+                        100.0 + l as f64 * (GRAPH_H + gap_y),
+                    );
+                }
+            }
+        }
+    }
+    pos
+}
+
 // ---- 给模型看的 ----
 
 /// 一行一个图形；容器里的文字并进容器的标签，箭头写两端。
@@ -1585,8 +2017,14 @@ mod tests {
         assert_eq!(a["backgroundColor"], "#ffc9c9");
         assert_eq!(s.elements[1]["text"], "新");
         assert_eq!(s.elements[1]["version"], 2, "标签跟着出新版");
-        assert_eq!(s.elements[3]["isDeleted"], true, "旧箭头留墓碑");
+        assert!(
+            s.elements
+                .iter()
+                .all(|e| e["id"] != "e" || e.get("isDeleted") == Some(&json!(true))),
+            "原箭头元素已让位给同 id 骨架"
+        );
         assert_eq!(s.pending.len(), 1, "箭头退回骨架重新连");
+        assert_eq!(s.pending[0]["id"], "e", "箭头 id 保持不变");
         assert_eq!(s.pending[0]["start"]["id"], "a");
         assert_eq!(s.pending[0]["end"]["id"], "b");
 
@@ -1829,5 +2267,145 @@ mod tests {
         assert!(ft.detail.contains("适配"));
         let new_w = num(s.elements.iter().find(|e| e["id"] == "b").unwrap(), "width");
         assert!(new_w > old_w, "width {old_w} -> {new_w}");
+    }
+
+    #[test]
+    fn moving_a_node_keeps_connected_arrow_id() {
+        let mut s = Scene::default();
+        let mut arrow = full("edge", "arrow", 100.0, 1);
+        arrow["startBinding"] = json!({ "elementId": "a" });
+        arrow["endBinding"] = json!({ "elementId": "b" });
+        s.elements = vec![
+            full("a", "rectangle", 0.0, 1),
+            full("b", "ellipse", 300.0, 1),
+            arrow,
+        ];
+        apply_edit(&mut s, &json!({ "update": [{ "id": "a", "x": 40 }] })).unwrap();
+        assert_eq!(s.pending.len(), 1);
+        assert_eq!(s.pending[0]["id"], "edge", "箭头 id 不能变成 edge~N");
+        assert_eq!(s.pending[0]["start"]["id"], "a");
+        assert_eq!(s.pending[0]["end"]["id"], "b");
+        let (_, data) = summary(&s);
+        let ids: Vec<_> = data["shapes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(ids.contains(&"edge"), "{ids:?}");
+    }
+
+    #[test]
+    fn distribute_horizontal_spaces_middle_evenly() {
+        let mut s = Scene {
+            elements: vec![
+                full("a", "rectangle", 0.0, 1),
+                full("b", "rectangle", 50.0, 1),
+                full("c", "rectangle", 400.0, 1),
+            ],
+            ..Default::default()
+        };
+        // widths are 100; span from 0 to 500; one gap → middle at 200
+        apply_distribute(
+            &mut s,
+            &json!({ "ids": ["a", "b", "c"], "direction": "horizontal" }),
+        )
+        .unwrap();
+        let bx = num(s.elements.iter().find(|e| e["id"] == "b").unwrap(), "x");
+        assert!((bx - 200.0).abs() < 1e-6, "middle x={bx}");
+        assert_eq!(
+            s.elements.iter().find(|e| e["id"] == "a").unwrap()["x"],
+            0.0
+        );
+        assert_eq!(
+            s.elements.iter().find(|e| e["id"] == "c").unwrap()["x"],
+            400.0
+        );
+    }
+
+    #[test]
+    fn layout_grid_arranges_into_columns() {
+        let mut s = Scene {
+            elements: vec![
+                full("a", "rectangle", 10.0, 1),
+                full("b", "rectangle", 20.0, 1),
+                full("c", "rectangle", 30.0, 1),
+                full("d", "rectangle", 40.0, 1),
+            ],
+            ..Default::default()
+        };
+        for e in &mut s.elements {
+            e["y"] = json!(5.0);
+        }
+        apply_layout(
+            &mut s,
+            &json!({ "ids": ["a", "b", "c", "d"], "columns": 2, "gap_x": 20.0, "gap_y": 30.0 }),
+        )
+        .unwrap();
+        let pos = |id: &str| {
+            let e = s.elements.iter().find(|e| e["id"] == id).unwrap();
+            (num(e, "x"), num(e, "y"))
+        };
+        let (ax, ay) = pos("a");
+        let (bx, by) = pos("b");
+        let (cx, cy) = pos("c");
+        assert!((bx - ax).abs() > 50.0, "b to the right of a: {ax},{bx}");
+        assert!((by - ay).abs() < 1e-6, "same row");
+        assert!((cx - ax).abs() < 1e-6, "c under a");
+        assert!(cy > ay + 40.0, "c lower");
+    }
+
+    #[test]
+    fn place_puts_shape_to_the_right_of_ref() {
+        let mut s = Scene {
+            elements: vec![
+                full("a", "rectangle", 0.0, 1),
+                full("b", "rectangle", 500.0, 1),
+            ],
+            ..Default::default()
+        };
+        apply_place(
+            &mut s,
+            &json!({ "id": "b", "ref": "a", "where": "right", "gap": 40.0 }),
+        )
+        .unwrap();
+        let a = s.elements.iter().find(|e| e["id"] == "a").unwrap();
+        let b = s.elements.iter().find(|e| e["id"] == "b").unwrap();
+        let expected = num(a, "x") + num(a, "width") + 40.0;
+        assert!((num(b, "x") - expected).abs() < 1e-6, "b.x={}", num(b, "x"));
+    }
+
+    #[test]
+    fn graph_layered_creates_nodes_and_arrows_at_distinct_positions() {
+        let mut s = Scene::default();
+        let r = apply_graph(
+            &mut s,
+            &json!({
+                "nodes": [
+                    { "id": "start", "text": "开始" },
+                    { "id": "mid", "text": "处理" },
+                    { "id": "end", "text": "结束" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "mid", "text": "下一步" },
+                    { "from": "mid", "to": "end" }
+                ],
+                "layout": "layered"
+            }),
+        )
+        .unwrap();
+        assert_eq!(r.added.len(), 5);
+        assert!(s.pending.iter().any(|p| p["id"] == "start"));
+        assert!(s.pending.iter().any(|p| p["id"] == "e-start-mid"));
+        let ys: Vec<f64> = ["start", "mid", "end"]
+            .iter()
+            .map(|id| num(s.pending.iter().find(|p| p["id"] == *id).unwrap(), "y"))
+            .collect();
+        assert!(
+            ys[0] < ys[1] && ys[1] < ys[2],
+            "layered top-to-bottom: {ys:?}"
+        );
+        let (_, data) = summary(&s);
+        assert!(data["patches"].as_array().unwrap().len() >= 5);
     }
 }

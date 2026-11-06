@@ -91,9 +91,16 @@ async fn whiteboard_speaks_mcp_apps_and_keeps_one_scene_per_project() {
         "whiteboard_style",
         "whiteboard_layer",
         "whiteboard_fit_text",
+        "whiteboard_distribute",
+        "whiteboard_layout",
+        "whiteboard_place",
+        "whiteboard_graph",
     ] {
         assert!(tools.iter().any(|t| t["name"] == name), "缺工具 {name}");
     }
+    let nodes_items = &by("whiteboard_graph")["inputSchema"]["properties"]["nodes"]["items"];
+    assert_eq!(nodes_items["additionalProperties"], true);
+    assert!(nodes_items.get("properties").is_none(), "{nodes_items}");
 
     let res = c
         .call("resources/read", json!({ "uri": RESOURCE_URI }))
