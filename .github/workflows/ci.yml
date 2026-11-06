@@ -16,23 +16,42 @@ env:
   NO_PROXY: "127.0.0.1,localhost,[::1]"
 
 jobs:
+  # job 名保持 test / dock-core：required checks 认名字；不要用 job-level `if:`
+  # 整 job skip（会被标成 skipped，卡死合并）。无相关改动时仍跑到 success，只跳过重步骤。
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - '.cargo/**'
+              - 'install.sh'
+              - '.github/workflows/ci.yml'
+
+      - if: steps.filter.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.0"
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - if: steps.filter.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@v2
 
       # 格式门禁：只覆盖第一方 crate，vendor/ 是冻结副本，不要格式化。
       - name: Format
+        if: steps.filter.outputs.rust == 'true'
         run: "cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser -p cordis-apps"
 
       # lint 门禁：第一方 crate 已清零，这里挡住新增。vendor/ 冻结副本不参与。
       - name: Clippy
+        if: steps.filter.outputs.rust == 'true'
         # `--no-deps` 必须有：--locked 下的 workspace 成员含 vendor/ 冻结副本，
         # 不排除的话它们会一起被 lint，`-D warnings` 会被上游的既有 warning 打红
         # （2026-09 那次就是在 vendor/xai/workflow 上挂的）。
@@ -41,14 +60,21 @@ jobs:
       # 默认回归集合里除 spine 之外的部分。
       # 需要真实 Chrome 的浏览器冒烟（cordis-browser/tests/real_chrome.rs）已标 #[ignore]。
       - name: Test (gateway / tui / app / browser)
+        if: steps.filter.outputs.rust == 'true'
         run: cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app -p cordis-browser -p cordis-apps
 
       - name: Test (dock-memory)
+        if: steps.filter.outputs.rust == 'true'
         run: cargo test --locked -p dock-memory
 
       # 进程级 DOCK_HOME / cwd 由 test_env::scoped() 串行化，可以并行跑。见 docs/DEVELOPMENT.md「CI」。
       - name: Test (spine)
+        if: steps.filter.outputs.rust == 'true'
         run: cargo test --locked -p cordis-spine
+
+      - name: Skip Rust gates (no relevant changes)
+        if: steps.filter.outputs.rust != 'true'
+        run: echo "跳过 Rust 门禁：本次改动不含 .rs / Cargo / install.sh / ci.yml"
 
   # dock.1 协议核心（TS）：线程事件契约 + reducer。与 Rust 那一组并行，几十秒跑完。
   # 测试直接跑 .ts（Node 22.18+ 默认剥类型），所以 Node 不能低于 22.18。
@@ -60,13 +86,26 @@ jobs:
         working-directory: dock-core
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            dock_core:
+              - 'dock-core/**'
+      - if: steps.filter.outputs.dock_core == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: dock-core/package-lock.json
-      - run: npm ci
+      - if: steps.filter.outputs.dock_core == 'true'
+        run: npm ci
       - name: Test
+        if: steps.filter.outputs.dock_core == 'true'
         run: npm test
       - name: Typecheck
+        if: steps.filter.outputs.dock_core == 'true'
         run: npm run typecheck
+      - name: Skip dock-core gates (no relevant changes)
+        if: steps.filter.outputs.dock_core != 'true'
+        run: echo "跳过 dock-core 门禁：本次改动不含 dock-core/**"
