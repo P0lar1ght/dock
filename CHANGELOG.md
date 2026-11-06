@@ -10,6 +10,8 @@
 
 ### 新增
 
+- **白板布局工具**：`whiteboard_group` / `align` / `style` / `layer` / `fit_text`（独立工具，避免塞进 edit 撑爆 schema）；`whiteboard_read` 多返回可复用的 `patches`。
+
 - **MCP elicitation 支持 MRTR**（MCP `2026-07-28`）：服务器在 `tools/call` 的结果里回 `resultType: "input_required"` + `inputRequests` 时，Dock 把提问弹给用户，收齐答复后**用新 id 重发**原请求（params 带 `inputResponses` 与原样回传的 `requestState`）。
   - 以前这种结果被当成普通工具输出（找不到 `content` 字段，整段 JSON 塞进工具文本）：用户看不到表单，服务器永远等不到答复。
   - 提问归**发起这次调用的那一页**，别的页看不到也抢不走。
@@ -109,6 +111,8 @@
 - 权限弹窗里 bash / monitor 显示完整命令，描述另起一行；原先是截到 120 字的原始 JSON。
 
 ### 修复
+
+- **白板 MCP**：`add`/`update` 的 schema `items` 改为 `additionalProperties: true`（字段说明进 description）；自动剥恰好单键 `{"item":[...]}` 包装并提示「已自动去掉 item 包装层」；错误信息带例子与下标。
 
 - **回放加密 thinking 的 signature**：Anthropic Messages / 兼容 chat 路径落盘 `thinking_blocks`，下一轮原样回传签名，工具循环里思维链不断。
 - **思考卡片不再画密文或 signature 残片**：展示优先用 `thinking_blocks` 里的摘要；旧会话里缺开标签的 `{signature}</signature>\n摘要` 也会剥干净，只留可读正文。

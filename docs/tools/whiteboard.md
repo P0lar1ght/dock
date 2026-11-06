@@ -16,12 +16,19 @@
 
 | 工具 | 作用 |
 |---|---|
-| `whiteboard_read {}` | 每个图形一行：id、类型、标签、位置、尺寸、颜色、箭头两端；另给 `structuredContent.shapes` |
+| `whiteboard_read {}` | 每个图形一行：id、类型、标签、位置、尺寸、颜色、箭头两端；另给 `structuredContent.shapes` 与可复用的 `patches`（可直接拷进 edit 的 update/add） |
 | `whiteboard_edit { clear?, delete?, update?, add? }` | 先清空，再删、改、加；任何一条不合法整次不改 |
+| `whiteboard_group { ids, ungroup? }` | 把 ≥2 个图形合成一组，或 `ungroup: true` 取消分组 |
+| `whiteboard_align { ids, align }` | 对齐：`left` / `right` / `top` / `bottom` / `center_x` / `center_y` |
+| `whiteboard_style { ids, stroke?, fill?, strokeStyle? }` | 批量改描边/填充/线型 |
+| `whiteboard_layer { ids, to }` | 调 z 序：`front` / `back` / `forward` / `backward`（只对已画成的完整元素） |
+| `whiteboard_fit_text { ids }` | 按文字估算把框调到够用的大小（菱形 height 只抬下限） |
 
 - 图形 `type`：`rectangle` `ellipse` `diamond` `text` `arrow` `line`。
-- 字段：`id?` `x?` `y?` `width?` `height?` `text?`（框里的标签 / 箭头上的字 / 文字内容）`stroke?` `fill?`（`#rrggbb`）
+- 字段（写在工具 description 里；schema 的 `items` 只声明 `object` + `additionalProperties: true`，避免嵌套 properties 触发模型把数组包成 `{"item":...}`）：
+  `id?` `x?` `y?` `width?` `height?` `text?`（框里的标签 / 箭头上的字 / 文字内容）`stroke?` `fill?`（`#rrggbb`）
   `strokeStyle?`（solid / dashed / dotted）`from?` `to?`（箭头两端的图形 id）`fontSize?`。
+- `add` / `update` / `delete` / `ids` 必须是扁平数组。若误传恰好单键 `{"item": [...]}`，服务端会自动剥掉并在结果里写「已自动去掉 item 包装层」；带其它键的对象不会剥，错误信息带例子。
 - 没给位置：排在现有内容右边一列。箭头给了两端、没给位置：从一端的边连到另一端的边。
 - 删掉的图形留墓碑；清空后可以用同样的 id 重画。
 - 挪了位置的图形：连在上面的箭头换成新 id 重新连（`whiteboard_read` 看新 id）。
