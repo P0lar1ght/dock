@@ -10,6 +10,10 @@
 
 ### 新增
 
+- **白板布局工具**：`whiteboard_group` / `align` / `style` / `layer` / `fit_text` / `distribute` / `layout` / `place` / `graph`（独立工具，避免塞进 edit 撑爆 schema）；`whiteboard_read` 多返回可复用的 `patches`。
+  - `distribute`：≥3 个图形两端固定中间均分；`layout`：网格重排；`place`：相对参照放置；`graph`：nodes+edges 自动排版（layered/row/column/grid）。
+  - 挪动连线端点时箭头 **复用原 id**，不再改成 `id~rev`。
+
 - **MCP elicitation 支持 MRTR**（MCP `2026-07-28`）：服务器在 `tools/call` 的结果里回 `resultType: "input_required"` + `inputRequests` 时，Dock 把提问弹给用户，收齐答复后**用新 id 重发**原请求（params 带 `inputResponses` 与原样回传的 `requestState`）。
   - 以前这种结果被当成普通工具输出（找不到 `content` 字段，整段 JSON 塞进工具文本）：用户看不到表单，服务器永远等不到答复。
   - 提问归**发起这次调用的那一页**，别的页看不到也抢不走。
@@ -109,6 +113,27 @@
 - 权限弹窗里 bash / monitor 显示完整命令，描述另起一行；原先是截到 120 字的原始 JSON。
 
 ### 修复
+
+- **白板箭头 id**：移动连线端点后重连仍复用原箭头 id（不再生成 `id~rev`）。
+
+- **白板 MCP**：重连的箭头留墓碑而不是删掉，界面把旧版本存回来时按版本比较，不会出现两个同 id 的箭头；
+  `whiteboard_fit_text` 只改尺寸时不再重连箭头；`whiteboard_graph` 画的新图排到现有内容右边（不再压住已有图形），
+  两端太近时边也有几何；间距参数（`gap` / `gap_x` / `gap_y`）不再接受负数。
+- **白板 MCP 更扛得住模型的参数写法**：数组被拍平成对象、套多层 `{"item": ...}`、单个 id 写成字符串，都当数组收下；
+  坐标写成数字字符串也认，写成别的会报错（不再默默挪到默认位置）；图形对象里写了不认识的字段会回一句提示；
+  工具结果不再回全量场景，只讲这次改了什么（全量清单用 `whiteboard_read`）。
+- **白板 MCP 学了 wonder 的几招**：新增 `whiteboard_find`（按文字 / 类型 / 颜色 / 「在谁附近」找图形，不用背 id）与
+  `whiteboard_duplicate`（复制整棵：标签、组、箭头绑定一起复制，可改文案、可相对原件放置，回新 id）；
+  `whiteboard_read` 支持分层读（`overview` 总览 / `ids` 只看这几个 / `related` 连容器、标签、箭头两端、同组一起给）；
+  `add` 不给坐标时自动找空位，不再都叠成一列；界面工具 `snapshot` 加 `mode`（`thumbnail` / `full`）。
+- **白板界面工具的参数也认模型端的写法**：`snapshot` / `focus` 的 `ids` 现在认 `{"item": [...]}` 包装、单元素裸值、
+  嵌套数组（之前会退化成「截全部」），`select` 认 `"true"`。
+- **白板 MCP 删得干净**：删掉的元素留的墓碑版本现在远高于界面手里那份 —— 版本一样时 Excalidraw 合并会保留
+  本地的，已删的图形会留在画布上又冒出来；副本 id 也统一成一族（`<id>-copy` / `<id>-copy2` / `<id>-copy3`）。
+- **白板 MCP 的界面改走右侧面板**：调用发生就自动在右侧打开 / 更新面板，消息流里不再摊开内联界面（原来 420 高的 iframe
+  会被后面的消息顶下去）；工具卡也留在真实调用的位置，不再被挪到这一轮末尾堆成一堆。
+
+- **白板 MCP**：`add`/`update` 的 schema `items` 改为 `additionalProperties: true`（字段说明进 description）；自动剥恰好单键 `{"item":[...]}` 包装并提示「已自动去掉 item 包装层」；错误信息带例子与下标。
 
 - **回放加密 thinking 的 signature**：Anthropic Messages / 兼容 chat 路径落盘 `thinking_blocks`，下一轮原样回传签名，工具循环里思维链不断。
 - **思考卡片不再画密文或 signature 残片**：展示优先用 `thinking_blocks` 里的摘要；旧会话里缺开标签的 `{signature}</signature>\n摘要` 也会剥干净，只留可读正文。

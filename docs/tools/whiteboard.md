@@ -16,15 +16,37 @@
 
 | 工具 | 作用 |
 |---|---|
-| `whiteboard_read {}` | 每个图形一行：id、类型、标签、位置、尺寸、颜色、箭头两端；另给 `structuredContent.shapes` |
+| `whiteboard_read {}` | 每个图形一行：id、类型、标签、位置、尺寸、颜色、箭头两端；另给 `structuredContent.shapes` 与可复用的 `patches`（可直接拷进 edit 的 update/add）。`overview` 只给总数与画板范围，`ids` 只给这几个，`related` 给某个图形和它的容器/标签/箭头两端/同组 |
 | `whiteboard_edit { clear?, delete?, update?, add? }` | 先清空，再删、改、加；任何一条不合法整次不改 |
+| `whiteboard_group { ids, ungroup? }` | 把 ≥2 个图形合成一组，或 `ungroup: true` 取消分组 |
+| `whiteboard_align { ids, align }` | 对齐：`left` / `right` / `top` / `bottom` / `center_x` / `center_y` |
+| `whiteboard_style { ids, stroke?, fill?, strokeStyle? }` | 批量改描边/填充/线型 |
+| `whiteboard_layer { ids, to }` | 调 z 序：`front` / `back` / `forward` / `backward`（只对已画成的完整元素） |
+| `whiteboard_fit_text { ids }` | 按文字估算把框调到够用的大小（菱形 height 只抬下限） |
+| `whiteboard_distribute { ids, direction }` | ≥3 个图形两端固定、中间均分；`direction` ∈ `horizontal` / `vertical` |
+| `whiteboard_layout { ids, columns, gap_x?, gap_y? }` | 按网格重排现有图形（保留各自身高宽；默认间距 60/80） |
+| `whiteboard_place { id, ref, where, gap? }` | 把已有图形放到参照旁；`where` ∈ `left` / `right` / `above` / `below`（默认 gap 40） |
+| `whiteboard_find { queries, limit? }` | 按语义找图形：`queries` 一批（`text` / `type` / `stroke` / `fill` / `near` / `radius`），各自独立排序；不用背 id |
+| `whiteboard_duplicate { ids, count?, texts?, place?, dx?, dy? }` | 复制整棵（标签、组、箭头绑定一起复制）；`count` 复制几份，`texts` 每份一份新文案，`place` 相对原件放置；回新 id（按副本顺序） |
+| `whiteboard_graph { nodes, edges?, layout?, … }` | 用 nodes+edges 画流程图，自动算坐标；`layout` ∈ `layered` / `row` / `column` / `grid`（默认 layered）；新图排在现有内容右边 |
 
 - 图形 `type`：`rectangle` `ellipse` `diamond` `text` `arrow` `line`。
-- 字段：`id?` `x?` `y?` `width?` `height?` `text?`（框里的标签 / 箭头上的字 / 文字内容）`stroke?` `fill?`（`#rrggbb`）
+- 字段（写在工具 description 里；schema 的 `items` 只声明 `object` + `additionalProperties: true`，避免嵌套 properties 触发模型把数组包成 `{"item":...}`）：
+  `id?` `x?` `y?` `width?` `height?` `text?`（框里的标签 / 箭头上的字 / 文字内容）`stroke?` `fill?`（`#rrggbb`）
   `strokeStyle?`（solid / dashed / dotted）`from?` `to?`（箭头两端的图形 id）`fontSize?`。
-- 没给位置：排在现有内容右边一列。箭头给了两端、没给位置：从一端的边连到另一端的边。
+- `add` / `update` / `delete` / `ids` 必须是扁平数组。若误传恰好单键 `{"item": [...]}`（甚至套多层），服务端会自动剥掉并在结果里写「已自动去掉 item 包装层」；
+  单个元素被拍平成对象（`"add": {"type": "rectangle", ...}`）、单个 id 写成字符串，服务端也当数组收下。
+- 坐标（`x` / `y` / `width` / `height`）写数字或数字字符串都行；写成别的会直接报错，不会默默挪到默认位置。
+- 数量与开关（`columns` / `count` / `limit` / `gap` / `dx` / `dy` / `clear` / `overview` …）数字和布尔写成字符串也认（`"2"`、`"true"`）。
+- 工具失败时结果里带一句「这次收到：xxx=number ids=array」：一眼看出哪个参数没到服务端。
+- 图形对象里写了不认识的字段（比如把 `text` 写成 `label`），结果里会回一句「忽略了不认识的字段：…」，并列出可用字段名。
+- 工具结果只讲这次改了什么（新增 / 修改 / 删除的 id 与新坐标）；全量清单用 `whiteboard_read` 拿。
+- 没给位置：自动找一块空地（现有内容右边，横着排开，不叠在一起）。箭头给了两端、没给位置：从一端的边连到另一端的边。
 - 删掉的图形留墓碑；清空后可以用同样的 id 重画。
-- 挪了位置的图形：连在上面的箭头换成新 id 重新连（`whiteboard_read` 看新 id）。
+- 挪了位置的图形：连在上面的箭头退回骨架重新连，**箭头 id 保持不变**（旧箭头留墓碑：界面把旧版本存回来时按版本比较，旧的赢不了，不会出现两个同 id 的箭头）。
+- 只改了尺寸（`fit_text`）不重连箭头；只有位置变了才重连。
+- `graph` 的节点默认 200×80（可给 `width`/`height`）；边的默认 id 是 `e-<from>-<to>`，同 from/to 的第二条边自动加序号。
+- 间距类参数（`gap` / `gap_x` / `gap_y`）不能为负。
 
 ### 界面工具（面板开着时）
 
@@ -36,7 +58,7 @@
 | `app_whiteboard__get_selection {}` | 用户当前选中的图形：id、类型、标签、位置尺寸 |
 | `app_whiteboard__get_viewport {}` | 用户看着的画布区域、缩放，和视野里的图形 |
 | `app_whiteboard__focus { ids, select? }` | 把用户的视图移到这些图形（可顺带选中）；只动视图，不改内容 |
-| `app_whiteboard__snapshot { ids? }` | 截 PNG（长边最多 1600），不给 `ids` 截全部 |
+| `app_whiteboard__snapshot { ids?, mode? }` | 截 PNG 看实际效果：`mode` = `thumbnail`（默认，长边最多 1600）/ `full`（原尺寸，看细节）；不给 `ids` 截全部 |
 
 ### 只给界面用的工具
 

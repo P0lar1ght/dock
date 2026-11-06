@@ -48,8 +48,29 @@ export const shapes = (all: readonly El[]) => all.filter((e) => !e.isDeleted && 
 
 /** 参数里的 `ids`：只留非空字符串。 */
 export function idsOf(args: Record<string, unknown> | undefined): string[] {
-  const v = args?.ids;
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === "string") {
+      if (v.length > 0) out.push(v);
+      return;
+    }
+    if (Array.isArray(v)) {
+      v.forEach(walk);
+      return;
+    }
+    if (v && typeof v === "object") {
+      const item = (v as Record<string, unknown>).item;
+      if (item !== undefined) walk(item);
+    }
+  };
+  walk(args?.ids);
+  return out;
+}
+
+/** 参数里的开关：模型端可能写成 "true"。 */
+export function flagOf(args: Record<string, unknown> | undefined, key: string): boolean {
+  const v = args?.[key];
+  return v === true || v === "true" || v === 1;
 }
 
 /** Excalidraw 的 appState → 用户看着的画布区域（画布坐标）。 */
@@ -83,4 +104,14 @@ export function snapshotElements(all: readonly El[], ids: readonly string[]): El
   );
   // 框里的文字、箭头上的字跟着容器走。
   return live.filter((e) => picked.has(e.id) || (e.containerId && picked.has(e.containerId)));
+}
+
+/**
+ * 按服务端的元素顺序排（z 序 = 数组顺序）：服务端说了算，
+ * 不在远端里的接在后面，保持相对顺序。
+ */
+export function sortByRemoteOrder<T extends { id: string }>(merged: readonly T[], remoteIds: readonly string[]): T[] {
+  const rank = new Map<string, number>();
+  remoteIds.forEach((id, i) => rank.set(id, i));
+  return [...merged].sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
 }

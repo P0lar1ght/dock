@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { brief, idsOf, intersects, line, shapes, snapshotElements, viewportOf, type El } from "../src/geometry.ts";
+import { brief, idsOf, intersects, line, shapes, snapshotElements, sortByRemoteOrder, viewportOf, type El } from "../src/geometry.ts";
 
 const el = (o: Partial<El> & { id: string; type: string }): El => ({ x: 0, y: 0, width: 100, height: 50, ...o }) as El;
 
@@ -27,7 +27,7 @@ test("shapes drops container texts and deleted elements", () => {
 
 test("idsOf keeps non-empty strings only", () => {
   assert.deepEqual(idsOf({ ids: ["a", "", 3, "b"] }), ["a", "b"]);
-  assert.deepEqual(idsOf({ ids: "a" }), []);
+  assert.deepEqual(idsOf({ ids: "a" }), ["a"]);
   assert.deepEqual(idsOf(undefined), []);
 });
 
@@ -46,4 +46,20 @@ test("snapshotElements takes picked shapes, their labels, and arrows with both e
   assert.deepEqual(snapshotElements(all, ["a", "b"]).map((e) => e.id), ["a", "a-label", "b", "e1", "e1-label"]);
   assert.deepEqual(snapshotElements(all, ["a-label"]).map((e) => e.id), [], "标签文字本身不算选中的图形");
   assert.deepEqual(snapshotElements(all, ["d"]), [], "删掉的不截");
+});
+
+test("idsOf 认模型端的各种写法（数组 / item 包装 / 裸值）", () => {
+  assert.deepEqual(idsOf({ ids: ["a", "b"] }), ["a", "b"]);
+  assert.deepEqual(idsOf({ ids: { item: ["a", "b"] } }), ["a", "b"]);
+  assert.deepEqual(idsOf({ ids: "a" }), ["a"]);
+  assert.deepEqual(idsOf({ ids: { item: "a" } }), ["a"]);
+  assert.deepEqual(idsOf({ ids: [["a"], ["b"]] }), ["a", "b"]);
+  assert.deepEqual(idsOf({}), []);
+});
+
+test("按服务端顺序排 z 序：不在远端里的接在后面", () => {
+  const merged = [{ id: "b" }, { id: "x" }, { id: "a" }];
+  assert.deepEqual(sortByRemoteOrder(merged, ["a", "b"]).map((e) => e.id), ["a", "b", "x"]);
+  assert.deepEqual(sortByRemoteOrder(merged, ["b", "a"]).map((e) => e.id), ["b", "a", "x"]);
+  assert.deepEqual(sortByRemoteOrder(merged, []).map((e) => e.id), ["b", "x", "a"]);
 });

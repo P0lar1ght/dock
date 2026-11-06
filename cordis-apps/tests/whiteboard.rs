@@ -80,6 +80,27 @@ async fn whiteboard_speaks_mcp_apps_and_keeps_one_scene_per_project() {
         by("whiteboard_save")["_meta"]["ui"]["visibility"],
         json!(["app"])
     );
+    // items 不再塞 13 个 properties，避免模型把数组包成 {item:...}
+    let add_items = &by("whiteboard_edit")["inputSchema"]["properties"]["add"]["items"];
+    assert_eq!(add_items["type"], "object");
+    assert_eq!(add_items["additionalProperties"], true);
+    assert!(add_items.get("properties").is_none(), "{add_items}");
+    for name in [
+        "whiteboard_group",
+        "whiteboard_align",
+        "whiteboard_style",
+        "whiteboard_layer",
+        "whiteboard_fit_text",
+        "whiteboard_distribute",
+        "whiteboard_layout",
+        "whiteboard_place",
+        "whiteboard_graph",
+    ] {
+        assert!(tools.iter().any(|t| t["name"] == name), "缺工具 {name}");
+    }
+    let nodes_items = &by("whiteboard_graph")["inputSchema"]["properties"]["nodes"]["items"];
+    assert_eq!(nodes_items["additionalProperties"], true);
+    assert!(nodes_items.get("properties").is_none(), "{nodes_items}");
 
     let res = c
         .call("resources/read", json!({ "uri": RESOURCE_URI }))
@@ -137,6 +158,39 @@ async fn whiteboard_speaks_mcp_apps_and_keeps_one_scene_per_project() {
         "{text}"
     );
 
+    // 恰好 {item:[...]} 的包装会被剥掉
+    let wrapped = c
+        .tool(
+            "whiteboard_edit",
+            json!({ "add": { "item": [{ "type": "ellipse", "id": "e1", "text": "圆" }] } }),
+            "/work/a",
+        )
+        .await;
+    assert_eq!(wrapped["isError"], false, "{wrapped}");
+    let wtext = wrapped["content"][0]["text"].as_str().unwrap();
+    assert!(wtext.contains("已自动去掉 item 包装层"), "{wtext}");
+    assert_eq!(wrapped["structuredContent"]["unwrappedItem"], true);
+    // 工具结果只讲这次改了什么（全量场景交给 whiteboard_read）。
+    assert_eq!(wrapped["structuredContent"]["added"], json!(["e1"]));
+    assert!(
+        wtext.contains("ellipse id=e1"),
+        "结果里要说清新图形：{wtext}"
+    );
+    assert!(
+        !wrapped["structuredContent"]["shapes"].is_array(),
+        "不再回全量场景：{wrapped}"
+    );
+
+    let read2 = c.tool("whiteboard_read", json!({}), "/work/a").await;
+    assert!(
+        read2["structuredContent"]["patches"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 2,
+        "{read2}"
+    );
+
     let bad = c
         .tool("whiteboard_edit", json!({ "delete": ["ghost"] }), "/work/a")
         .await;
@@ -187,4 +241,115 @@ async fn two_servers_writing_the_same_project_do_not_lose_edits() {
         read["structuredContent"]["rev"], 30,
         "每次编辑一版，不会重号"
     );
+}
+
+/// 界面工具：画好的完整元素（版本压过服务端，模拟界面存回来的）。
+fn ui_el(id: &str) -> Value {
+    json!({ "id": id, "type": "rectangle", "x": 0, "y": 0, "width": 100, "height": 50,
+            "version": 2, "versionNonce": 1, "isDeleted": false })
+}
+
+async fn three_shapes(c: &mut Client, cwd: &str) {
+    let added = c
+        .tool(
+            "whiteboard_edit",
+            json!({ "add": [
+                { "type": "rectangle", "id": "a" },
+                { "type": "rectangle", "id": "b" },
+                { "type": "rectangle", "id": "c" },
+            ] }),
+            cwd,
+        )
+        .await;
+    assert_eq!(added["isError"], false, "{added}");
+    let els: Vec<Value> = ["a", "b", "c"].iter().map(|id| ui_el(id)).collect();
+    let saved = c
+        .tool(
+            "whiteboard_save",
+            json!({ "elements": els, "consumed": ["a", "b", "c"] }),
+            cwd,
+        )
+        .await;
+    assert_eq!(saved["isError"], false, "{saved}");
+}
+
+async fn load_ids(c: &mut Client, cwd: &str) -> Vec<String> {
+    let loaded = c.tool("whiteboard_load", json!({}), cwd).await;
+    loaded["structuredContent"]["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// 回归：layer 要真改「渲染顺序」（Excalidraw 按数组顺序画，index 只是持久化的 z 序键）。
+#[tokio::test]
+async fn whiteboard_layer_moves_array_order_and_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = start(dir.path().to_path_buf());
+    let cwd = "/work/layer";
+    three_shapes(&mut c, cwd).await;
+
+    let layered = c
+        .tool(
+            "whiteboard_layer",
+            json!({ "ids": ["a"], "to": "front" }),
+            cwd,
+        )
+        .await;
+    assert_eq!(layered["isError"], false, "{layered}");
+
+    let ids = load_ids(&mut c, cwd).await;
+    assert_eq!(
+        ids,
+        vec!["b", "c", "a"],
+        "front 之后 a 要排在最后（数组顺序=渲染顺序）"
+    );
+
+    let loaded = c.tool("whiteboard_load", json!({}), cwd).await;
+    let elements = loaded["structuredContent"]["elements"].as_array().unwrap();
+    let idx = |id: &str| {
+        elements.iter().find(|e| e["id"] == json!(id)).unwrap()["index"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(
+        idx("a") > idx("b") && idx("a") > idx("c"),
+        "a 的 index 要最大：a={} b={} c={}",
+        idx("a"),
+        idx("b"),
+        idx("c")
+    );
+
+    // back 回到最前。
+    let back = c
+        .tool(
+            "whiteboard_layer",
+            json!({ "ids": ["a"], "to": "back" }),
+            cwd,
+        )
+        .await;
+    assert_eq!(back["isError"], false, "{back}");
+    assert_eq!(load_ids(&mut c, cwd).await, vec!["a", "b", "c"]);
+}
+
+/// 回归：界面的数组顺序（= z 序）要能被服务端采纳，用户拖的层序才留得住。
+#[tokio::test]
+async fn whiteboard_save_keeps_ui_array_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = start(dir.path().to_path_buf());
+    let cwd = "/work/order";
+    three_shapes(&mut c, cwd).await;
+
+    let saved = c
+        .tool(
+            "whiteboard_save",
+            json!({ "elements": [ui_el("a"), ui_el("b"), ui_el("c")], "order": ["c", "a", "b"] }),
+            cwd,
+        )
+        .await;
+    assert_eq!(saved["isError"], false, "{saved}");
+    assert_eq!(load_ids(&mut c, cwd).await, vec!["c", "a", "b"]);
 }
