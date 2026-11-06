@@ -238,7 +238,7 @@ fn activity_label(events: &[LogEvent]) -> Option<String> {
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() => {
                 return llm.tool_calls.last().map(|c| c.name.clone());
             }
-            LogEvent::LlmStream(llm) if !llm.reasoning.trim().is_empty() => {
+            LogEvent::LlmStream(llm) if !llm.display_reasoning().trim().is_empty() => {
                 return Some("思考中".to_string());
             }
             LogEvent::LlmStream(llm) if !llm.text.trim().is_empty() => {

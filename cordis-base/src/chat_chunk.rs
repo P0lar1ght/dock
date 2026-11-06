@@ -150,12 +150,16 @@ pub struct ReasoningDetail {
 }
 
 impl ReasoningDetail {
-    /// Plaintext for the thinking card; skips encrypted / redacted blobs.
-    pub fn visible_text(&self) -> Option<&str> {
-        self.text
+    /// Plaintext for the thinking card; skips encrypted / redacted blobs
+    /// and compat-proxy `<signature>…</signature>` wrappers.
+    pub fn visible_text(&self) -> Option<String> {
+        let raw = self
+            .text
             .as_deref()
-            .filter(|s| !s.is_empty() && *s != "[REDACTED]")
-            .or_else(|| self.summary.as_deref().filter(|s| !s.is_empty()))
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.summary.as_deref().filter(|s| !s.is_empty()))?;
+        let vis = crate::types::visible_reasoning_text(raw);
+        (!vis.is_empty()).then_some(vis)
     }
 }
 
@@ -181,16 +185,19 @@ pub struct ChatChunkDelta {
 impl ChatChunkDelta {
     /// Prefer string fields, then concatenate visible `reasoning_details`.
     pub fn reasoning_text(&self) -> Option<String> {
+        // 流式展示用：剥掉 signature 标签。落盘 / 回放时 Acc::finish 会再拆一次。
         if let Some(s) = self.reasoning_content.as_deref().filter(|s| !s.is_empty()) {
-            return Some(s.to_string());
+            let vis = crate::types::visible_reasoning_text(s);
+            return (!vis.is_empty()).then_some(vis);
         }
         if let Some(s) = self.reasoning.as_deref().filter(|s| !s.is_empty()) {
-            return Some(s.to_string());
+            let vis = crate::types::visible_reasoning_text(s);
+            return (!vis.is_empty()).then_some(vis);
         }
         let mut buf = String::new();
         for detail in &self.reasoning_details {
             if let Some(t) = detail.visible_text() {
-                buf.push_str(t);
+                buf.push_str(&t);
             }
         }
         (!buf.is_empty()).then_some(buf)
@@ -258,5 +265,17 @@ mod tests {
         let delta = &chunk.choices[0].delta;
         assert_eq!(delta.reasoning.as_deref(), Some("a"));
         assert_eq!(delta.reasoning_text().as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn strips_signature_from_reasoning_text() {
+        let raw = r#"{"choices":[{"delta":{
+            "reasoning_content":"plan <signature>deadbeef</signature>"
+        }}]}"#;
+        let chunk: ChatCompletionChunk = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            chunk.choices[0].delta.reasoning_text().as_deref(),
+            Some("plan ")
+        );
     }
 }

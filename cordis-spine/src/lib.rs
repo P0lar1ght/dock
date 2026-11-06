@@ -44,12 +44,12 @@ pub use cordis_base::config::{
 pub use cordis_base::stream_acc::StreamDelta;
 pub use cordis_base::types::{
     side_note_reminder, side_note_text, LlmOutput, LogEvent, NoticeKind, PreExecute, PreStep,
-    PromptRequest, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd, TurnOutcome, UserImage,
-    AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT, ORDER_STEP_START_DYNAMIC,
-    ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MCP_APPS, ORDER_STEP_START_MEMORY,
-    ORDER_STEP_START_TODO, ORDER_STEP_START_USER_EDITS, ORDER_TURN_END_DYNAMIC,
-    ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO, PERMISSION_DENIED_TOOL_RESULT, SIDE_NOTE_MAX_CHARS,
-    STEER_REMINDER, TURN_STOPPED_REMINDER,
+    PromptRequest, StepStart, ThinkingBlock, ToolCall, ToolResult, ToolSpec, TurnEnd, TurnOutcome,
+    UserImage, AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
+    ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MCP_APPS,
+    ORDER_STEP_START_MEMORY, ORDER_STEP_START_TODO, ORDER_STEP_START_USER_EDITS,
+    ORDER_TURN_END_DYNAMIC, ORDER_TURN_END_GOAL, ORDER_TURN_END_TODO,
+    PERMISSION_DENIED_TOOL_RESULT, SIDE_NOTE_MAX_CHARS, STEER_REMINDER, TURN_STOPPED_REMINDER,
 };
 pub use cordis_base::usage::{
     calls_breakdown, format_cost, format_duration, group_thousands, hit_rate_spark, hit_rate_trend,

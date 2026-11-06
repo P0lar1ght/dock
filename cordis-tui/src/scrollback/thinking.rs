@@ -19,6 +19,9 @@ pub fn lines(
     width: usize,
     expanded: bool,
 ) -> Vec<Line<'static>> {
+    // 兼容中转偶发把 `<signature>…</signature>` 拼进 reasoning：卡片只画可读摘要。
+    let text = cordis_base::types::visible_reasoning_text(text);
+    let text = text.as_str();
     if text.trim().is_empty() {
         return Vec::new();
     }
@@ -160,5 +163,32 @@ mod tests {
         let text = plain(&lines("step one\nstep two", None, true, &theme, 80, false));
         assert!(text.contains("思考中"), "{text}");
         assert!(text.contains("step two"), "{text}");
+    }
+
+    #[test]
+    fn hides_signature_blob_from_card_body() {
+        let theme = Theme::current();
+        let raw = "可读摘要 <signature>encrypted-blob-xyz</signature>";
+        let text = plain(&lines(raw, None, false, &theme, 80, true));
+        assert!(text.contains("可读摘要"), "{text}");
+        assert!(!text.contains("signature"), "{text}");
+        assert!(!text.contains("encrypted-blob"), "{text}");
+    }
+
+    #[test]
+    fn hides_orphan_close_screenshot_leak() {
+        let theme = Theme::current();
+        let raw = "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc-</signature>\n用户问有哪些未提交的改动。";
+        let text = plain(&lines(raw, Some(0), false, &theme, 80, true));
+        assert!(text.contains("用户问有哪些未提交的改动"), "{text}");
+        assert!(!text.contains("AQEA"), "{text}");
+        assert!(!text.contains("signature"), "{text}");
+    }
+
+    #[test]
+    fn bare_ciphertext_yields_no_card() {
+        let theme = Theme::current();
+        let raw = "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc_JDMPVT78QAPrltzmOdjrXDkEdQgh5Grt";
+        assert!(lines(raw, None, false, &theme, 80, true).is_empty());
     }
 }

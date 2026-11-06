@@ -7,3 +7,4 @@ export * from './mcpApps.ts';
 export * from './workflows.ts';
 export * from './turnChanges.ts';
 export * from './diff.ts';
+export * from './reasoning.ts';

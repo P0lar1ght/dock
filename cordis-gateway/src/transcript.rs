@@ -313,12 +313,12 @@ impl Transcript {
                     self.ensure_turn();
                 }
                 // 思考先于正文：一次采样里模型先想再答，推送顺序跟着走。
-                if let Some(delta) =
-                    stream_text_delta(&self.projector.last_reasoning, &out.reasoning)
-                {
+                // 优先 thinking_blocks 摘要，并对旧会话缺开标签的 reasoning 残片再剥一次。
+                let reasoning = out.display_reasoning();
+                if let Some(delta) = stream_text_delta(&self.projector.last_reasoning, &reasoning) {
                     self.push("item/reasoning_delta", json!({ "delta": delta }));
                 }
-                self.projector.last_reasoning.clone_from(&out.reasoning);
+                self.projector.last_reasoning = reasoning;
                 if let Some(delta) = stream_text_delta(&self.projector.last_text, &out.text) {
                     self.push("item/message_delta", json!({ "delta": delta }));
                 }
@@ -1536,6 +1536,42 @@ mod tests {
             got,
             want.map(|(m, d)| (m.to_string(), d.to_string())).to_vec()
         );
+    }
+
+    /// 旧会话落盘的 reasoning 缺开标签：投影只推 thinking_blocks 摘要，不推 AQEA 密文。
+    #[test]
+    fn leaky_reasoning_with_thinking_blocks_projects_summary_only() {
+        use cordis_base::types::ThinkingBlock;
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            reasoning:
+                "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-</signature>\n\n用户问有哪些未提交的改动。"
+                    .into(),
+            thinking_blocks: vec![ThinkingBlock::Thinking {
+                thinking: "用户问有哪些未提交的改动。".into(),
+                signature: "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-".into(),
+            }],
+            ..Default::default()
+        }));
+        let got: Vec<(String, String)> = t
+            .history_since(0)
+            .into_iter()
+            .filter_map(|e| {
+                if e.method == "item/reasoning_delta" {
+                    Some((
+                        e.method.clone(),
+                        e.payload["delta"].as_str().unwrap_or("").to_string(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1, "用户问有哪些未提交的改动。");
+        assert!(!got[0].1.contains("AQEA"), "{got:?}");
+        assert!(!got[0].1.contains("signature"), "{got:?}");
     }
 
     #[test]

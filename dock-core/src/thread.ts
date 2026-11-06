@@ -13,6 +13,7 @@ import type {
   TurnEndStatus,
 } from './events.ts';
 import { parseHistoryItem } from './events.ts';
+import { visibleReasoningText } from './reasoning.ts';
 
 export type TurnStatus = 'running' | TurnEndStatus;
 export type ToolStatus = 'running' | ToolEndStatus;
@@ -178,9 +179,14 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
         if (!event.delta) return turn;
         const last = turn.items[turn.items.length - 1];
         if (last?.kind === 'reasoning' && last.endedAt === null) {
-          return replaceLast(turn, { ...last, text: last.text + event.delta });
+          // Re-strip the cumulative card text so orphan `AQEA…</signature>` leftovers
+          // from a prior chunk (or a leaky server payload) never stick on the card.
+          const text = visibleReasoningText(last.text + event.delta);
+          return replaceLast(turn, { ...last, text });
         }
-        return push(turn, { kind: 'reasoning', id: `r${event.seq}`, text: event.delta, startedAt: event.at, endedAt: null });
+        const text = visibleReasoningText(event.delta);
+        if (!text) return turn;
+        return push(turn, { kind: 'reasoning', id: `r${event.seq}`, text, startedAt: event.at, endedAt: null });
       }
 
       case 'item/message_delta': {
