@@ -64,7 +64,7 @@
 公名 `mcp_browser__browser_*` 22 颗（含跑 Playwright 脚本的 `browser_js`），按会话分标签页，详见 [browser](docs/tools/browser.md)。
 
 白板：内置 MCP App `whiteboard`（`dock mcp whiteboard`，crate `cordis-apps`）。
-公名 `mcp_whiteboard__whiteboard_read` / `whiteboard_edit`，以及 `whiteboard_group` / `align` / `style` / `layer` / `fit_text` / `distribute` / `layout` / `place` / `graph`，按项目一份，桌面端 Excalidraw 界面里用户和 Agent 一起改，详见 [whiteboard](docs/tools/whiteboard.md)。
+公名 `mcp_whiteboard__whiteboard_read` / `whiteboard_edit`，以及 `whiteboard_find` / `whiteboard_duplicate` / `whiteboard_group` / `align` / `style` / `layer` / `fit_text` / `distribute` / `layout` / `place` / `graph`，按项目一份，桌面端 Excalidraw 界面里用户和 Agent 一起改，详见 [whiteboard](docs/tools/whiteboard.md)。
 
 另见 [工具结果图](docs/tools/images.md)（多模态，`ToolResult.images`）。
 
