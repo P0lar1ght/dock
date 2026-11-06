@@ -241,7 +241,7 @@ detect_target() {
         Darwin)
             case "$arch" in
                 arm64 | aarch64) echo "aarch64-apple-darwin" ;;
-                x86_64) echo "x86_64-apple-darwin" ;;
+                x86_64) die "macOS 预编译产物只提供 Apple Silicon（arm64）；Intel Mac 请从源码 cargo build --release -p cordis-app 自行构建" ;;
                 *) die "不支持的 macOS 架构：$arch" ;;
             esac
             ;;

@@ -63,10 +63,9 @@ fn fake_release(dir: &Path) {
     )
     .unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-    // install.sh 按 uname 选 target：四个平台各放一份，同内容。
+    // install.sh 按 uname 选 target：三个平台各放一份，同内容（不再发 Intel Mac）。
     for target in [
         "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
         "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu",
     ] {

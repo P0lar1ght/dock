@@ -1,7 +1,7 @@
 name: Release
 
 # tag 即发布点：v0.1.0 → Release v0.1.0。
-# 先跑与 CI 同款的门禁 + tag/版本一致性，再矩阵构建四个平台的产物，
+# 先跑与 CI 同款的门禁 + tag/版本一致性，再矩阵构建三个平台的产物（macOS Apple Silicon + Linux x86_64/aarch64），
 # 最后把 tar.gz + sha256 传上去（install.sh 从这里取）。
 on:
   push:
@@ -112,11 +112,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS 构建机都是 arm64，x86_64 产物走交叉编译。
-          - os: macos-14
+          # macOS 只发 Apple Silicon。钉 macos-15（不要 macos-latest/macos-26，
+          # 避免更高 builder OS 抬高部署底线；macos-14 已于 2026-11-02 退役）。
+          # 不再发 x86_64-apple-darwin（Intel Mac）。
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-14
-            target: x86_64-apple-darwin
           # 两个 Linux 架构必须同一档 Ubuntu，否则 glibc 底线会一高一低（24.04 是
           # 2.39、22.04 是 2.35），同一台发行版上 x86_64 能跑、arm64 报 GLIBC_2.38
           # not found。22.04 系列 2026-09-17 起 deprecation（brownout 会直接让 job
