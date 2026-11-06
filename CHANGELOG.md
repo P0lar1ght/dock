@@ -83,6 +83,8 @@
 
 ### 改进
 
+- **CI 按路径跳过无关门禁**：只改文档 / 纯配置时不再跑完整 Rust 测试；`dock-core` 仅在 `dock-core/**` 有改动时跑。job 名仍是 `test` / `dock-core`（required checks），无相关改动时 echo 跳过仍报 success。Release 的 tag 门禁保持全量。
+
 - **发布产物不再包含 Intel Mac**（`x86_64-apple-darwin`）：只发 Apple Silicon（`aarch64-apple-darwin`，构建机 `macos-15`）与 Linux x86_64 / aarch64。`install.sh` / `dock upgrade` 在 Intel Mac 上会说明请自行从源码构建。
 
 - **插件开发技能改成内置、分层按需读**：`cordis-plugin-development` 随二进制发，任何项目都能加载（以前只在 dock 仓库里才找得到）。

@@ -94,7 +94,17 @@ cargo test -p cordis-spine --test instructions          # 只链这一个集成�
 
 ## CI
 
-`.github/workflows/ci.yml` 在 `main` 的 push 与所有 PR 上跑四步：
+`.github/workflows/ci.yml` 在 `main` 的 push 与所有 PR 上跑两个 job（名字固定为 `test` /
+`dock-core`，required checks 认名字）。用 `dorny/paths-filter` 按改动跳过重步骤，**job 本身
+始终跑到 success**（不用 job-level `if:` 整 job skip，以免 required checks 卡在 skipped）。
+
+- **`test`（Rust）** 在这些路径有改动时跑 fmt / clippy / 默认回归：`**/*.rs`、
+  `**/Cargo.toml`、`Cargo.lock`、`rust-toolchain*`、`.cargo/**`、`install.sh`、
+  `.github/workflows/ci.yml`。没有这些改动时 checkout + 过滤后 echo 跳过。
+- **`dock-core`** 在 `dock-core/**` 有改动时跑 npm test / typecheck；否则同样 echo 跳过。
+- 不按单个 crate 再切（workspace 耦合高）。Release 的 tag 门禁仍是全量，不受这里影响。
+
+有 Rust 改动时本地等价于：
 
 ```bash
 cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory
@@ -104,7 +114,7 @@ cargo test --locked -p dock-memory
 cargo test --locked -p cordis-spine
 ```
 
-另有一个并行的 `dock-core` job（Node 22，测试直接跑 `.ts`，需要 22.18+）：
+有 dock-core 改动时：
 
 ```bash
 cd dock-core && npm ci && npm test && npm run typecheck
