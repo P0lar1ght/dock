@@ -176,7 +176,12 @@ pub fn transcript(
                 flush_tool_results(&mut messages, &mut pending_results);
                 messages.push(user_message(text, &[], vision));
             }
-            LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() || !llm.text.is_empty() => {
+            // 对齐 chat：thinking_blocks 非空也要编码（thinking-only 轮不能丢签名回放）。
+            LogEvent::LlmStream(llm)
+                if !llm.tool_calls.is_empty()
+                    || !llm.text.is_empty()
+                    || !llm.thinking_blocks.is_empty() =>
+            {
                 flush_tool_results(&mut messages, &mut pending_results);
                 let mut blocks = Vec::new();
                 blocks.extend(replay_thinking_blocks(llm));
@@ -1205,6 +1210,31 @@ mod tests {
             .iter()
             .all(|b| b["type"].as_str() != Some("thinking")));
         assert_eq!(blocks[0]["type"], "text");
+    }
+
+    /// 只有 thinking_blocks、无 text / tool_calls：仍要编码进 transcript（对齐 chat）。
+    #[test]
+    fn thinking_blocks_only_turn_is_encoded_in_transcript() {
+        let request = req(vec![
+            LogEvent::User("hi".into()),
+            LogEvent::LlmStream(LlmOutput {
+                thinking_blocks: vec![ThinkingBlock::Thinking {
+                    thinking: "先看工作区".into(),
+                    signature: "AQEAsig-only".into(),
+                }],
+                ..LlmOutput::default()
+            }),
+            LogEvent::User("继续".into()),
+        ]);
+        let (_, msgs) = transcript(&request, &[], true);
+        assert_eq!(msgs.len(), 3, "{msgs:?}");
+        assert_eq!(msgs[1]["role"], "assistant");
+        let blocks = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "先看工作区");
+        assert_eq!(blocks[0]["signature"], "AQEAsig-only");
+        assert_eq!(msgs[2]["role"], "user");
     }
 
     /// SSE `signature_delta` 落进 thinking_blocks；thinking 正文进 reasoning，不含签名。

@@ -110,6 +110,9 @@
 
 ### 修复
 
+- **回放加密 thinking 的 signature**：Anthropic Messages / 兼容 chat 路径落盘 `thinking_blocks`，下一轮原样回传签名，工具循环里思维链不断。
+- **思考卡片不再画密文或 signature 残片**：展示优先用 `thinking_blocks` 里的摘要；旧会话里缺开标签的 `{signature}</signature>\n摘要` 也会剥干净，只留可读正文。
+
 - **MCP elicitation 的表单认不全规范的 schema**：带标题的单选（`oneOf: [{const, title}]`）之前退化成自由文本框，带标题的多选（`items.anyOf`）直接把整个表单判死（用户看到的是「服务器拒绝了」，不是一个选择框）。两种写法现在都认。
 - **MCP elicitation 不按 schema 校验用户的回答**：现在按 `minLength` / `maxLength` / `minimum` / `maximum` / `format`（`email` / `uri` / `date` / `date-time`）/ `minItems` / `maxItems` 校验，不合就说明原因让用户改。
 - **MCP elicitation 的可选数字字段不能留空**：留空必报「请输入数字」，表单永远走不完（工具调用和整轮对话一起卡死）。不在 `required` 里的字段现在可以留空 —— 数字类整个键不出现，让服务器用它自己的默认值。
