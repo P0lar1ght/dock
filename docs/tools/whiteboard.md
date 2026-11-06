@@ -23,6 +23,10 @@
 | `whiteboard_style { ids, stroke?, fill?, strokeStyle? }` | 批量改描边/填充/线型 |
 | `whiteboard_layer { ids, to }` | 调 z 序：`front` / `back` / `forward` / `backward`（只对已画成的完整元素） |
 | `whiteboard_fit_text { ids }` | 按文字估算把框调到够用的大小（菱形 height 只抬下限） |
+| `whiteboard_distribute { ids, direction }` | ≥3 个图形两端固定、中间均分；`direction` ∈ horizontal|vertical |
+| `whiteboard_layout { ids, columns, gap_x?, gap_y? }` | 按网格重排现有图形（保留各自身高宽；默认间距 60/80） |
+| `whiteboard_place { id, ref, where, gap? }` | 把已有图形放到参照旁；`where` ∈ left|right|above|below（默认 gap 40） |
+| `whiteboard_graph { nodes, edges?, layout?, … }` | 用 nodes+edges 画流程图，自动算坐标；`layout` ∈ layered|row|column|grid（默认 layered） |
 
 - 图形 `type`：`rectangle` `ellipse` `diamond` `text` `arrow` `line`。
 - 字段（写在工具 description 里；schema 的 `items` 只声明 `object` + `additionalProperties: true`，避免嵌套 properties 触发模型把数组包成 `{"item":...}`）：
@@ -31,7 +35,7 @@
 - `add` / `update` / `delete` / `ids` 必须是扁平数组。若误传恰好单键 `{"item": [...]}`，服务端会自动剥掉并在结果里写「已自动去掉 item 包装层」；带其它键的对象不会剥，错误信息带例子。
 - 没给位置：排在现有内容右边一列。箭头给了两端、没给位置：从一端的边连到另一端的边。
 - 删掉的图形留墓碑；清空后可以用同样的 id 重画。
-- 挪了位置的图形：连在上面的箭头换成新 id 重新连（`whiteboard_read` 看新 id）。
+- 挪了位置的图形：连在上面的箭头退回骨架重新连，**箭头 id 保持不变**。
 
 ### 界面工具（面板开着时）
 

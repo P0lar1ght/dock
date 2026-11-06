@@ -10,7 +10,9 @@
 
 ### 新增
 
-- **白板布局工具**：`whiteboard_group` / `align` / `style` / `layer` / `fit_text`（独立工具，避免塞进 edit 撑爆 schema）；`whiteboard_read` 多返回可复用的 `patches`。
+- **白板布局工具**：`whiteboard_group` / `align` / `style` / `layer` / `fit_text` / `distribute` / `layout` / `place` / `graph`（独立工具，避免塞进 edit 撑爆 schema）；`whiteboard_read` 多返回可复用的 `patches`。
+  - `distribute`：≥3 个图形两端固定中间均分；`layout`：网格重排；`place`：相对参照放置；`graph`：nodes+edges 自动排版（layered/row/column/grid）。
+  - 挪动连线端点时箭头 **复用原 id**，不再改成 `id~rev`。
 
 - **MCP elicitation 支持 MRTR**（MCP `2026-07-28`）：服务器在 `tools/call` 的结果里回 `resultType: "input_required"` + `inputRequests` 时，Dock 把提问弹给用户，收齐答复后**用新 id 重发**原请求（params 带 `inputResponses` 与原样回传的 `requestState`）。
   - 以前这种结果被当成普通工具输出（找不到 `content` 字段，整段 JSON 塞进工具文本）：用户看不到表单，服务器永远等不到答复。
@@ -111,6 +113,8 @@
 - 权限弹窗里 bash / monitor 显示完整命令，描述另起一行；原先是截到 120 字的原始 JSON。
 
 ### 修复
+
+- **白板箭头 id**：移动连线端点后重连仍复用原箭头 id（不再生成 `id~rev`）。
 
 - **白板 MCP**：`add`/`update` 的 schema `items` 改为 `additionalProperties: true`（字段说明进 description）；自动剥恰好单键 `{"item":[...]}` 包装并提示「已自动去掉 item 包装层」；错误信息带例子与下标。
 
