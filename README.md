@@ -172,7 +172,7 @@ flowchart LR
 
 ## 安装
 
-macOS（Apple Silicon / Intel）与 Linux（x86_64 / aarch64）有预编译二进制，不需要 Rust 工具链：
+macOS（Apple Silicon）与 Linux（x86_64 / aarch64）有预编译二进制，不需要 Rust 工具链（Intel Mac 请自行从源码构建）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/P0lar1ght/dock/main/install.sh | sh

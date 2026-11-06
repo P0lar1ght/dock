@@ -83,6 +83,8 @@
 
 ### 改进
 
+- **发布产物不再包含 Intel Mac**（`x86_64-apple-darwin`）：只发 Apple Silicon（`aarch64-apple-darwin`，构建机 `macos-15`）与 Linux x86_64 / aarch64。`install.sh` / `dock upgrade` 在 Intel Mac 上会说明请自行从源码构建。
+
 - **插件开发技能改成内置、分层按需读**：`cordis-plugin-development` 随二进制发，任何项目都能加载（以前只在 dock 仓库里才找得到）。
   - `SKILL.md` 只放流程与路由；细节拆进 `references/`（host API、界面、钩子、HTTP、版本、Rhai 坑位、报错对照），例子在 `examples/`。
   - `skill` 工具列出附属文件的绝对目录和子目录里的相对路径。

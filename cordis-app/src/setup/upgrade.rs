@@ -272,7 +272,12 @@ fn detect_target() -> Result<String, UpgradeError> {
     let arch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let target = match (os.as_str(), arch.as_str()) {
         ("Darwin", "arm64" | "aarch64") => "aarch64-apple-darwin",
-        ("Darwin", "x86_64") => "x86_64-apple-darwin",
+        ("Darwin", "x86_64") => {
+            return Err(UpgradeError::Message(
+                "macOS 预编译产物只提供 Apple Silicon（arm64）；Intel Mac 请从源码 cargo build --release -p cordis-app 自行构建"
+                    .into(),
+            ));
+        }
         ("Linux", "x86_64" | "amd64") => "x86_64-unknown-linux-gnu",
         ("Linux", "aarch64" | "arm64") => "aarch64-unknown-linux-gnu",
         _ => {
