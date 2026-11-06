@@ -540,7 +540,12 @@ impl App for Whiteboard {
                         "elements": { "type": "array" },
                         "consumed": { "type": "array", "items": { "type": "string" } },
                         "appState": { "type": "object" },
-                        "files": { "type": "object" }
+                        "files": { "type": "object" },
+                        "order": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Current array order of the UI (= z-order). Send it only when the order changed.",
+                        }
                     }
                 },
                 "_meta": app_only,

@@ -105,3 +105,13 @@ export function snapshotElements(all: readonly El[], ids: readonly string[]): El
   // 框里的文字、箭头上的字跟着容器走。
   return live.filter((e) => picked.has(e.id) || (e.containerId && picked.has(e.containerId)));
 }
+
+/**
+ * 按服务端的元素顺序排（z 序 = 数组顺序）：服务端说了算，
+ * 不在远端里的接在后面，保持相对顺序。
+ */
+export function sortByRemoteOrder<T extends { id: string }>(merged: readonly T[], remoteIds: readonly string[]): T[] {
+  const rank = new Map<string, number>();
+  remoteIds.forEach((id, i) => rank.set(id, i));
+  return [...merged].sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+}

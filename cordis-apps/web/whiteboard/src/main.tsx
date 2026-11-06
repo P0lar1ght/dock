@@ -20,6 +20,7 @@ import {
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { App, applyHostStyleVariables, type McpUiHostContext } from "@modelcontextprotocol/ext-apps";
+import { sortByRemoteOrder } from "./geometry";
 import { installViewTools, type ViewApi } from "./viewTools";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -155,6 +156,8 @@ function Board() {
   const rev = useRef(0);
   const synced = useRef(new Map<string, number>());
   const syncedFiles = useRef(new Set<string>());
+  /** 上次存回去的数组顺序（= 渲染顺序 = z 序）。变了才把 order 传给服务端。 */
+  const syncedOrder = useRef<string[]>([]);
   const applying = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const contextTimer = useRef<number | null>(null);
@@ -175,15 +178,20 @@ function Board() {
     if (!a || isInline()) return;
     const all = a.getSceneElementsIncludingDeleted();
     const changed = [...all.filter((e) => synced.current.get(e.id) !== e.version), ...extra];
+    // 顺序变了才带 order：服务端按它重排数组（z 序）。没变就别带，免得盖掉服务端刚排好的。
+    const order = all.filter((e) => !e.isDeleted).map((e) => e.id);
+    const orderChanged = order.join(",") !== syncedOrder.current.join(",");
     const files = a.getFiles();
     const newFiles = Object.fromEntries(Object.entries(files).filter(([id]) => !syncedFiles.current.has(id)));
-    if (changed.length === 0 && consumed.length === 0 && Object.keys(newFiles).length === 0) return;
+    if (changed.length === 0 && consumed.length === 0 && Object.keys(newFiles).length === 0 && !orderChanged) return;
     const r = await tool("whiteboard_save", {
       elements: changed,
       consumed,
       appState: { viewBackgroundColor: a.getAppState().viewBackgroundColor },
       files: newFiles,
+      ...(orderChanged ? { order } : {}),
     });
+    if (orderChanged) syncedOrder.current = order;
     remember(changed);
     for (const id of Object.keys(newFiles)) syncedFiles.current.add(id);
     if (typeof r.rev === "number") rev.current = r.rev;
@@ -232,6 +240,8 @@ function Board() {
     const { made, touched } = materialize(r.pending ?? [], [...local, ...remote]);
     const incoming = restoreElements(byIdLast(remote, touched, made) as never, null, { refreshDimensions: true, repairBindings: true }) as unknown as El[];
     const merged = reconcileElements(local as never, incoming as never, a.getAppState() as never) as unknown as El[];
+    // z 序 = 数组顺序（服务端说了算）：按服务端的顺序排，本地多出来的接在后面。
+    merged.splice(0, merged.length, ...sortByRemoteOrder(merged, (r.elements ?? []).map((e: El) => e.id)));
     applying.current = true;
     a.updateScene({ elements: merged, captureUpdate: CaptureUpdateAction.NEVER });
     if (r.files) a.addFiles(Object.values(r.files));
@@ -275,6 +285,7 @@ function Board() {
         const scene = loaded as Scene;
         rev.current = scene.rev;
         remember(scene.elements);
+        syncedOrder.current = scene.elements.filter((e) => !e.isDeleted).map((e) => e.id);
         for (const id of Object.keys(scene.files ?? {})) syncedFiles.current.add(id);
         const { made, touched } = materialize(scene.pending ?? [], scene.elements);
         const elements = restoreElements(byIdLast(scene.elements, touched, made) as never, null, {
@@ -302,7 +313,9 @@ function Board() {
 
   const onChange = (elements: readonly El[], appState: Record<string, any>) => {
     if (applying.current || inline) return;
-    if (elements.some((e) => synced.current.get(e.id) !== e.version)) {
+    const order = elements.filter((e) => !e.isDeleted).map((e) => e.id);
+    const orderChanged = order.join(",") !== syncedOrder.current.join(",");
+    if (orderChanged || elements.some((e) => synced.current.get(e.id) !== e.version)) {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => void save().catch((e) => setError(String(e?.message ?? e))), SAVE_DELAY);
     }

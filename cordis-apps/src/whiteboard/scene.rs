@@ -886,6 +886,16 @@ pub fn merge_save(scene: &mut Scene, args: &Value) -> Result<bool, String> {
             }
         }
     }
+    // 界面给的数组顺序 = 渲染顺序（z 序）。只在界面顺序真的变了的时候才带过来。
+    if let Some(list) = args.get("order").and_then(Value::as_array) {
+        let ids: Vec<String> = list
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if !ids.is_empty() && reorder_by_ids(scene, &ids) {
+            changed = true;
+        }
+    }
     if let Some(ids) = args.get("consumed").and_then(Value::as_array) {
         let before = scene.pending.len();
         scene
@@ -915,6 +925,45 @@ pub fn merge_save(scene: &mut Scene, args: &Value) -> Result<bool, String> {
         scene.rev += 1;
     }
     Ok(changed)
+}
+
+/// 按界面给的 id 顺序重排未删元素（其余保持相对位置，排在后面）；返回有没有变。
+fn reorder_by_ids(scene: &mut Scene, ids: &[String]) -> bool {
+    let mut used = vec![false; scene.elements.len()];
+    let mut picked: Vec<Value> = Vec::new();
+    for id in ids {
+        if let Some(i) = scene
+            .elements
+            .iter()
+            .position(|e| id_of(e) == Some(id.as_str()))
+        {
+            if used[i] {
+                continue;
+            }
+            used[i] = true;
+            picked.push(scene.elements[i].clone());
+        }
+    }
+    let mut rest_live: Vec<Value> = Vec::new();
+    let mut tombs: Vec<Value> = Vec::new();
+    for (i, e) in scene.elements.iter().enumerate() {
+        if used[i] {
+            continue;
+        }
+        if is_deleted(e) {
+            tombs.push(e.clone());
+        } else {
+            rest_live.push(e.clone());
+        }
+    }
+    let mut new_order: Vec<Value> = picked;
+    new_order.extend(rest_live);
+    new_order.extend(tombs);
+    if new_order == scene.elements {
+        return false;
+    }
+    scene.elements = new_order;
+    true
 }
 
 /// Excalidraw 的合并规则：版本大的赢；同版本 `versionNonce` 小的赢（两边算出同一个结果）。
@@ -1277,24 +1326,88 @@ pub fn apply_layer(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, Str
         }
         _ => unreachable!(),
     }
-    // 按新顺序重新分配 index（严格递增）：只改动了的才 bump（界面才会接受）。
-    let mut prev: Option<String> = None;
-    for &i in &order {
-        let Some(k) = key_between(prev.as_deref(), None) else {
-            return Err("这一板的图形太多了，排不出顺序了".into());
-        };
-        prev = Some(k.clone());
-        if next.elements[i]["index"] != json!(k) {
-            next.elements[i]["index"] = json!(k);
-            bump(&mut next.elements[i]);
-        }
-    }
+    // index 只给选中的元素重排（其他元素版本不动，界面才认这次改动）；
+    // 数组顺序才是渲染顺序（Excalidraw 按数组顺序画，index 只是持久化的 z 序键）。
+    assign_indices(&mut next, &order, &selected)?;
+    reorder_elements(&mut next, &order);
     next.rev = scene.rev + 1;
     *scene = next;
     Ok(ArrangeReport {
         detail: format!("已把 {} 个图形移到 {to}", ids.len()),
         touched: ids,
     })
+}
+
+/// 按新的 z 序给选中的元素分配 `index`：夹在前后的未选中元素之间。
+/// 只动选中的（其他元素版本不变，界面才认这次改动）。
+fn assign_indices(
+    next: &mut Scene,
+    order: &[usize],
+    selected: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    // 未选中元素的（位置, index）：位置和 index 都不动，它们是选中元素的前后邻居。
+    let mut fixed: Vec<(usize, String)> = Vec::new();
+    for (pos, &i) in order.iter().enumerate() {
+        let id = id_of(&next.elements[i]).unwrap_or("").to_string();
+        if selected.contains(&id) {
+            continue;
+        }
+        let k = next.elements[i]
+            .get("index")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| "a0".into());
+        fixed.push((pos, k));
+    }
+    let mut last_in_group: Option<String> = None;
+    let mut last_pos: Option<usize> = None;
+    for (pos, &i) in order.iter().enumerate() {
+        let id = id_of(&next.elements[i]).unwrap_or("").to_string();
+        if !selected.contains(&id) {
+            continue;
+        }
+        // 连续选中算一组：组内沿用上一个分到的 key 当下界。
+        if last_pos.map(|p| p + 1 != pos).unwrap_or(true) {
+            last_in_group = None;
+        }
+        let lower = match &last_in_group {
+            Some(k) => Some(k.clone()),
+            None => fixed
+                .iter()
+                .rev()
+                .find(|(p, _)| *p < pos)
+                .map(|(_, k)| k.clone()),
+        };
+        let upper = fixed.iter().find(|(p, _)| *p > pos).map(|(_, k)| k.clone());
+        let key = key_between(lower.as_deref(), upper.as_deref())
+            .ok_or_else(|| "这一板的图形太多了，排不出顺序了".to_string())?;
+        if next.elements[i]["index"] != json!(key) {
+            next.elements[i]["index"] = json!(key);
+            bump(&mut next.elements[i]);
+        }
+        last_in_group = Some(key);
+        last_pos = Some(pos);
+    }
+    Ok(())
+}
+
+/// 数组顺序 = 渲染顺序：按新 z 序重排未删的元素；墓碑留在后面，相对顺序不变。
+fn reorder_elements(next: &mut Scene, order: &[usize]) {
+    let mut in_order = vec![false; next.elements.len()];
+    for &i in order {
+        in_order[i] = true;
+    }
+    let mut live: Vec<Value> = Vec::with_capacity(order.len());
+    for &i in order {
+        live.push(next.elements[i].clone());
+    }
+    let mut tombs: Vec<Value> = Vec::new();
+    for (i, e) in next.elements.iter().enumerate() {
+        if !in_order[i] {
+            tombs.push(e.clone());
+        }
+    }
+    next.elements = live.into_iter().chain(tombs).collect();
 }
 
 /// 估算文字占位：中文约 1em 宽；padding 左右各 16、上下各 12。
