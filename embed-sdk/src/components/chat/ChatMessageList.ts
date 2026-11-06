@@ -55,7 +55,8 @@ export function chatMessageList(
   userInputActions: UserInputPromptActions,
   issueActions: RuntimeIssueActions,
   resolvePlan: (planId: string, decision: PlanDecision) => void,
-  resolveElicitation: (elicitId: string, action: ElicitAction) => void
+  resolveElicitation: (elicitId: string, action: ElicitAction) => void,
+  openElicitation: (elicitId: string) => void
 ) {
   const timeline = buildChatTimeline(
     model.messages,
@@ -100,7 +101,12 @@ export function chatMessageList(
             : item.kind === 'plan_approval'
               ? planApprovalCard(item.plan, model.planInteractions[item.plan.id], resolvePlan)
             : item.kind === 'elicitation'
-              ? elicitationCard(item.request, model.elicitationInteractions[item.request.id], resolveElicitation)
+              ? elicitationCard(
+                  item.request,
+                  model.elicitationInteractions[item.request.id],
+                  resolveElicitation,
+                  openElicitation
+                )
             : item.kind === 'goal'
               ? goalProgressRow(item.goal)
             : item.kind === 'user_input'

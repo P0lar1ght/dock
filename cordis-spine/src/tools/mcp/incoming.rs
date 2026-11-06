@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use super::elicitation::Elicitation;
+use super::elicitation::{self, Elicitation};
 use super::protocol::{self, Incoming};
 use super::tools_list;
 
@@ -60,11 +60,22 @@ pub async fn request(
     }
     if Elicitation::is_create(&method) {
         let related = related.or_else(|| related_request_id(&params));
-        let result = hooks
+        return match hooks
             .elicit
-            .create_for(&hooks.server, params, related)
-            .await;
-        return protocol::jsonrpc_result(id, result);
+            .create_for(&hooks.server, params, related, None)
+            .await
+        {
+            Ok(result) => protocol::jsonrpc_result(id, result),
+            // 规范（2025-11-25 Error Handling）：服务器发了客户端没声明的 mode，
+            // 客户端 MUST 回 -32602（Invalid params）。
+            Err(elicitation::ElicitError::InvalidParams(message)) => {
+                protocol::jsonrpc_error(id, protocol::ERR_INVALID_PARAMS, &message)
+            }
+            Err(elicitation::ElicitError::Decline(message)) => {
+                tracing::warn!(server = %hooks.server, "elicitation declined: {message}");
+                protocol::jsonrpc_result(id, elicitation::decline_value())
+            }
+        };
     }
     protocol::jsonrpc_method_not_found(id, &method)
 }

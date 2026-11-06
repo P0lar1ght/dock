@@ -49,6 +49,27 @@ export class ElicitationController {
     }
   }
 
+  /** URL 模式：开浏览器。网关按提问自己的 `reply_on_consent` 决定要不要回「同意」。 */
+  async open(elicitId: string) {
+    const session = this.session;
+    const pending = () => session?.state.elicitations.find((item) => item.id === elicitId)?.status === 'pending';
+    if (!session || !pending() || this.resolving.has(elicitId)) return false;
+    this.resolving.add(elicitId);
+    this.errors.delete(elicitId);
+    this.onChange();
+    try {
+      const result = await session.openElicitation(elicitId);
+      if (!result.ok && pending()) this.errors.set(elicitId, 'Gateway 未能打开这个链接');
+      return result.ok;
+    } catch (error) {
+      if (pending()) this.errors.set(elicitId, error instanceof Error ? error.message : '打开失败，请重试');
+      return false;
+    } finally {
+      this.resolving.delete(elicitId);
+      this.onChange();
+    }
+  }
+
   destroy() {
     this.bind(undefined);
   }

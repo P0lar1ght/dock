@@ -81,6 +81,8 @@ export interface ChatPanelActions {
   resolvePermission: (requestId: string, decision: PermissionDecision) => void;
   resolvePlan: (planId: string, decision: PlanDecision) => void;
   resolveElicitation: (elicitId: string, action: ElicitAction) => void;
+  /** URL 模式：开浏览器。 */
+  openElicitation: (elicitId: string) => void;
   selectUserInput: (interactionId: string, questionId: string, value: string) => void;
   setUserInputOther: (interactionId: string, questionId: string, value: string) => void;
   submitUserInput: (request: SessionUserInputRequest) => void;
@@ -156,7 +158,7 @@ export function chatPanel(model: ChatPanelModel, actions: ChatPanelActions) {
           retryIssue: actions.retryIssue,
           editIssue: actions.editIssue,
           dismissIssue: actions.dismissIssue
-        }, actions.resolvePlan, actions.resolveElicitation)}
+        }, actions.resolvePlan, actions.resolveElicitation, actions.openElicitation)}
 
         <div class="chat-footer">
           ${commandOutputCard(model.commandOutput, actions.dismissCommandOutput)}

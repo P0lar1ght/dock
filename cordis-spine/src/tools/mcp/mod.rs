@@ -88,17 +88,131 @@ pub(super) fn is_local(server: &McpServer) -> bool {
 }
 
 /// 在一条连接上跑 `tools/call`，结果收成 [`ToolResult`]。`local` 见 [`call_params`]。
-pub(super) fn call_via(rpc: RpcFn, local: bool) -> CallFn {
+/// 在一条连接上跑 `tools/call`，结果收成 [`ToolResult]`。`local` 见 [`call_params`]。
+///
+/// 带 MRTR 重试：服务器回 `resultType: "input_required"` 时（规范 2026-07-28），
+/// 客户端把 `inputRequests` 里的提问收齐，**用新 id 重发**原请求（带上
+/// `inputResponses` + `requestState`），直到拿到最终结果。
+pub(super) fn call_via(rpc: RpcFn, local: bool, elicit: Elicitation, server: String) -> CallFn {
     std::sync::Arc::new(move |public: String, c: ToolCall| {
         let rpc = rpc.clone();
+        let server = server.clone();
+        let elicit = elicit.clone();
         Box::pin(async move {
             let params = call_params(&public, &c.arguments, local);
-            match rpc("tools/call".into(), params).await {
+            match call_with_input(rpc, server, params, elicit).await {
                 Ok(v) => call_result(c, &v),
                 Err(e) => tool_result(c, e),
             }
         })
     })
+}
+
+/// MRTR 重试循环。
+///
+/// 规范（2026-07-28 MRTR）：客户端收到 `resultType: "input_required"` 时
+/// **MUST**构造出 `inputRequests` 要求的输入再重试原请求；重试的 JSON-RPC `id`
+/// **MUST**与初次不同（是两次独立请求）；`requestState` **MUST**原样回传、
+/// **MUST NOT**解析或修改。
+///
+/// 服务器可以反复要输入（规范允许），但每次都弹框会烦人 —— 限制轮数，
+/// 超过就报错，别把整轮对话挂死。
+const MAX_INPUT_ROUNDS: usize = 8;
+
+async fn call_with_input(
+    rpc: RpcFn,
+    server: String,
+    params: serde_json::Value,
+    elicit: Elicitation,
+) -> Result<serde_json::Value, String> {
+    let mut params = params;
+    // 这次调用归属哪一页：**进循环前**就定下来。
+    //
+    // MRTR / `-32042` 的提问是 `tools/call` **返回之后**才弹的 —— 那时
+    // `inflight` 里已经没有这次调用了（`RequestGuard` 已 drop），靠 `pick_origin`
+    // 猜会落到别的页上：别的页会看到这题，或者把它抢去回答。
+    //
+    // `exec_ctx` 是 task-local，工具执行期间一直挂着（`Tools::execute_on` 的
+    // scope），所以在这里读得到。
+    let page = crate::tools::registry::exec_ctx()
+        .as_ref()
+        .and_then(crate::session::log::Sessions::page_of);
+    for _ in 0..MAX_INPUT_ROUNDS {
+        let v = rpc("tools/call".into(), params.clone()).await?;
+        // `-32042`（2025-11-25）：服务器说「这个请求要先做一次 URL 交互」。
+        // 2026-07-28 不用这个码了（改走 MRTR），但老服务器还会发。
+        if protocol::is_url_elicitation_required(&v) {
+            let elicitations = protocol::url_elicitations(&v);
+            if elicitations.is_empty() {
+                return Err("服务器要 URL 交互，但没说要哪个 URL".into());
+            }
+            for e in &elicitations {
+                let url = e
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let message = e
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("请在浏览器里完成这次交互")
+                    .to_string();
+                let id = e
+                    .get("elicitationId")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                // `reply_on_consent = false`：这里没有挂着的 JSON-RPC 请求要回，
+                // 等 `notifications/elicitation/complete` 到了再重试原请求。
+                elicit
+                    .require_url(&server, &url, &message, &id, page.clone())
+                    .await
+                    .map_err(|e| format!("URL 交互没完成：{e}"))?;
+            }
+            // 用户同意过了：重试原请求（服务器自己看 `requestState` 判断做完没有）。
+            continue;
+        }
+        if !protocol::needs_input(&v) {
+            return Ok(v);
+        }
+        let state = protocol::request_state(&v);
+        let requests = protocol::input_requests(&v);
+        let responses = match requests {
+            Some(requests) => {
+                let answers = elicit
+                    .answer_requests(&server, requests, page.clone())
+                    .await
+                    .map_err(|e| format!("MCP 服务器要的信息没答成：{e}"))?;
+                // 用户拒了或取消了：不该重试。
+                //
+                // 规范（MRTR）：「Servers **MUST NOT** assume that clients will
+                // fulfill the `inputRequests` or retry the original request.」
+                // 用户不答，重试也没意义；硬重试还会让服务器再弹一次框，没人答，
+                // 就挂死了。
+                if answers
+                    .values()
+                    .any(|r| r.get("action").and_then(serde_json::Value::as_str) != Some("accept"))
+                {
+                    return Err("MCP 服务器要的信息没答成：用户没有回答".into());
+                }
+                Some(answers)
+            }
+            None => {
+                // `input_required` 但没给 `inputRequests`：规范说服务器**MUST**至少给
+                // `inputRequests` 或 `requestState` 一个。只有 `requestState` 时客户端
+                // **MAY**直接重试（规范：「If the InputRequiredResult does not contain
+                // the `inputRequests` field, the client **MAY** retry the original
+                // request immediately.」）。
+                if state.is_none() {
+                    return Err("服务器说需要更多输入，但没说要什么".into());
+                }
+                None
+            }
+        };
+        params = protocol::with_input_responses(params, responses, state);
+    }
+
+    Err("MCP 服务器反复要输入，已放弃".into())
 }
 
 /// 一页在 MCP 服务眼里的会话身份：落盘会话 id，还没落盘就用页身份。
@@ -267,6 +381,8 @@ pub(super) fn plan_for(
 
 struct Slot {
     config: McpServer,
+    /// MRTR 重试要用的提问队列（全局一份，Slot 只存个引用）。
+    elicit: Elicitation,
     rpc: Option<RpcFn>,
     relist: Option<RelistFn>,
     stop: Option<tokio::sync::watch::Sender<bool>>,
@@ -362,7 +478,7 @@ impl Mcp {
             let local = is_local(&slot.config);
             slot.rpc
                 .clone()
-                .map(|rpc| call_via(rpc, local))
+                .map(|rpc| call_via(rpc, local, self.elicit.clone(), server.to_string()))
                 .ok_or_else(|| format!("MCP 服务 {server} 没有连上"))?
         };
         let public = public_tool_name(server, tool);
@@ -600,6 +716,7 @@ impl Mcp {
                     .collect();
                 inner.slots.push(Slot {
                     config: server.clone(),
+                    elicit: self.elicit.clone(),
                     rpc: None,
                     relist: None,
                     stop: None,
@@ -923,6 +1040,8 @@ fn upsert_one(slot: &mut Slot, tools: &Tools, public: &str) {
     }
     let pname = public.to_string();
     let local = is_local(&slot.config);
+    let server = slot.config.name.clone();
+    let elicit = slot.elicit.clone();
     // 挂了界面的工具：原始结果另存一份给界面（文本结果装不下 `structuredContent`）。
     let app = listed
         .ui
@@ -933,9 +1052,11 @@ fn upsert_one(slot: &mut Slot, tools: &Tools, public: &str) {
         let rpc = rpc.clone();
         let pname = pname.clone();
         let app = app.clone();
+        let elicit = elicit.clone();
+        let server = server.clone();
         Box::pin(async move {
             let params = call_params(&pname, &c.arguments, local);
-            match rpc("tools/call".into(), params).await {
+            match call_with_input(rpc, server, params, elicit).await {
                 Ok(v) => {
                     if let Some(app) = &app {
                         apps::record(app, &c, &v).await;
@@ -1082,6 +1203,7 @@ pub fn mcp_client() -> Plugin {
                         .collect();
                     inner.slots.push(Slot {
                         config: server,
+                        elicit: mcp.elicit.clone(),
                         rpc: None,
                         relist: None,
                         stop: None,
@@ -1176,6 +1298,257 @@ mod tests {
         })
     }
 
+    /// 回归：MRTR（规范 2026-07-28）。服务器回 `resultType: "input_required"` +
+    /// `inputRequests` 时，客户端必须把提问收齐、**用新 id 重发**原请求（带上
+    /// `inputResponses` + `requestState`），而不是把整个 result JSON 当工具输出。
+    ///
+    /// 修之前：`format_call_result_parts` 找不到 `content` 字段，把 result JSON
+    /// 塞进工具文本，用户根本看不到表单，服务器永远等不到答复。
+    #[tokio::test]
+    async fn mrtr_input_required_is_answered_and_retried() {
+        let ctx = cordis::Context::new();
+        let elicit = Elicitation::new(ctx.clone());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let seen2 = seen.clone();
+        let rpc: RpcFn = Arc::new(move |_method, params| {
+            let seen = seen2.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(params.clone());
+                let n = seen.lock().unwrap().len();
+                if n == 1 {
+                    // 第一次：要更多信息。
+                    Ok(serde_json::json!({
+                        "result": {
+                            "resultType": "input_required",
+                            "inputRequests": {
+                                "github_login": {
+                                    "method": "elicitation/create",
+                                    "params": {
+                                        "mode": "form",
+                                        "message": "你的 GitHub 用户名？",
+                                        "requestedSchema": {
+                                            "type": "object",
+                                            "properties": { "name": { "type": "string", "title": "用户名" } },
+                                            "required": ["name"]
+                                        }
+                                    }
+                                }
+                            },
+                            "requestState": "opaque-blob"
+                        }
+                    }))
+                } else {
+                    // 第二次：最终结果。
+                    Ok(serde_json::json!({
+                        "result": {
+                            "resultType": "complete",
+                            "content": [{ "type": "text", "text": "你好 octocat" }]
+                        }
+                    }))
+                }
+            })
+        });
+
+        // 有人回答表单。
+        let answerer = tokio::spawn({
+            let elicit = elicit.clone();
+            async move {
+                for _ in 0..100 {
+                    if elicit.front().is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let front = elicit.front().expect("表单已挂起");
+                assert_eq!(front.message, "你的 GitHub 用户名？");
+                elicit.accept_text("octocat").unwrap();
+            }
+        });
+
+        let v = call_with_input(
+            rpc,
+            "srv".into(),
+            serde_json::json!({ "name": "t", "arguments": {} }),
+            elicit,
+        )
+        .await
+        .expect("MRTR 重试后拿到结果");
+        answerer.await.unwrap();
+
+        // 结果是最终内容，不是 input_required 的 JSON。
+        assert_eq!(v["result"]["content"][0]["text"], "你好 octocat");
+        assert_eq!(v["result"]["resultType"], "complete");
+
+        // 重试确实发出去了，而且带上了 inputResponses + requestState。
+        let calls = seen.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "应该重试一次：{calls:?}");
+        let retry = &calls[1];
+        assert_eq!(retry["inputResponses"]["github_login"]["action"], "accept");
+        assert_eq!(
+            retry["inputResponses"]["github_login"]["content"]["name"],
+            "octocat"
+        );
+        assert_eq!(
+            retry["requestState"], "opaque-blob",
+            "requestState 必须原样回传"
+        );
+    }
+
+    /// 回归：MRTR 的提问要归**发起这次调用的那一页**。
+    ///
+    /// MRTR 的提问是 `tools/call` **返回之后**才弹的 —— 那时 `inflight` 里已经没有
+    /// 这次调用了（`RequestGuard` 已 drop），靠 `pick_origin` 猜会落到别的页上：
+    /// 别的页会看到这题，或者把它抢去回答。
+    ///
+    /// 修之前：`answer_requests` 的 origin 是 `None`，页 B 能看到页 A 的 MRTR 表单。
+    #[tokio::test]
+    async fn mrtr_prompt_stays_on_the_page_that_called() {
+        let ctx = cordis::Context::new();
+        let elicit = Elicitation::new(ctx.clone());
+        // 两页：第 2 页（`main#2`）和第 3 页（`main#3`）。每页一个自己的 ctx，
+        // `Sessions` 挂在自己的 ctx 上 —— 页身份就是从那儿读的。
+        let ctx2 = cordis::Context::new();
+        let ctx3 = cordis::Context::new();
+        let _ = ctx2.provide(
+            SESSIONS,
+            crate::session::log::Sessions::tab(ctx2.clone(), 2),
+        );
+        let _ = ctx3.provide(
+            SESSIONS,
+            crate::session::log::Sessions::tab(ctx3.clone(), 3),
+        );
+
+        let rpc: RpcFn = Arc::new(|_, _| {
+            Box::pin(async move {
+                Ok(serde_json::json!({
+                    "result": {
+                        "resultType": "input_required",
+                        "inputRequests": {
+                            "q": {
+                                "method": "elicitation/create",
+                                "params": {
+                                    "mode": "form",
+                                    "message": "第 2 页的问题？",
+                                    "requestedSchema": {
+                                        "type": "object",
+                                        "properties": { "ok": { "type": "boolean" } },
+                                        "required": ["ok"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }))
+            })
+        });
+
+        // 在第 2 页的 exec ctx 里发起这次调用。
+        let call = tokio::spawn({
+            let elicit = elicit.clone();
+            let ctx2 = ctx2.clone();
+            async move {
+                crate::tools::registry::with_exec_ctx_async(ctx2, async move {
+                    call_with_input(
+                        rpc,
+                        "srv".into(),
+                        serde_json::json!({ "name": "t", "arguments": {} }),
+                        elicit,
+                    )
+                    .await
+                })
+                .await
+            }
+        });
+
+        // 等表单挂起。
+        for _ in 0..200 {
+            if elicit.front_for(Some("main#2")).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // 归属第 2 页：第 3 页看不到它。
+        assert!(
+            elicit.front_for(Some("main#2")).is_some(),
+            "MRTR 表单该在发起调用的那一页（main#2）"
+        );
+        assert!(
+            elicit.front_for(Some("main#3")).is_none(),
+            "别的页不该看到这题：{:?}",
+            elicit.front_for(Some("main#3"))
+        );
+        // 第 3 页也不能抢答它。
+        elicit.decline_for(Some("main#3"));
+        assert!(
+            elicit.front_for(Some("main#2")).is_some(),
+            "别的页不该能抢答这题"
+        );
+        // 第 2 页回答它。
+        elicit.accept_option_on(Some("main#2"), 0, &[], "").unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), call).await;
+    }
+
+    /// 回归：MRTR 里用户拒了表单 —— 不该重发请求，直接报错。
+    #[tokio::test]
+    async fn mrtr_declined_input_is_not_retried() {
+        let ctx = cordis::Context::new();
+        let elicit = Elicitation::new(ctx.clone());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let rpc: RpcFn = Arc::new(move |_method, _params| {
+            let calls = calls2.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(serde_json::json!({
+                    "result": {
+                        "resultType": "input_required",
+                        "inputRequests": {
+                            "q": {
+                                "method": "elicitation/create",
+                                "params": {
+                                    "mode": "form",
+                                    "message": "继续？",
+                                    "requestedSchema": {
+                                        "type": "object",
+                                        "properties": { "ok": { "type": "boolean" } },
+                                        "required": ["ok"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }))
+            })
+        });
+        let answerer = tokio::spawn({
+            let elicit = elicit.clone();
+            async move {
+                for _ in 0..100 {
+                    if elicit.front().is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                elicit.decline();
+            }
+        });
+        let err = call_with_input(
+            rpc,
+            "srv".into(),
+            serde_json::json!({ "name": "t", "arguments": {} }),
+            elicit,
+        )
+        .await
+        .expect_err("拒了就不该拿到结果");
+        answerer.await.unwrap();
+        assert!(err.contains("没答成"), "{err}");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "拒了就不该重试"
+        );
+    }
+
     fn fake_config(name: &str) -> McpServer {
         McpServer {
             name: name.into(),
@@ -1210,6 +1583,7 @@ mod tests {
         if !inner.slots.iter().any(|s| s.config.name == name) {
             inner.slots.push(Slot {
                 config: fake_config(name),
+                elicit: mcp.elicit.clone(),
                 rpc: None,
                 relist: None,
                 stop: None,

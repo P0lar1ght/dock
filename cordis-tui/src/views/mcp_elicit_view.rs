@@ -34,7 +34,9 @@ pub fn chrome_height(prompt: &ElicitPrompt, width: u16, selected: usize, picked:
     } else {
         0
     };
-    (2 + msg_rows + 1 + 1 + n + 1 + extra).clamp(8, 20)
+    // URL 模式多两行：域名 + 可疑警告（警告不一定有）。
+    let url_rows = if prompt.url.is_some() { 2 } else { 0 };
+    (2 + msg_rows + 1 + 1 + n + 1 + extra + url_rows).clamp(8, 20)
 }
 
 pub fn render(
@@ -106,6 +108,36 @@ pub fn render(
             content_w,
         );
         y = y.saturating_add(1);
+    }
+    // URL 模式：域名单独一行（规范要求 **SHOULD** highlight the domain，防子域仿冒），
+    // 可疑地址再补一行警告（Punycode / 明文 http）。
+    if let Some(domain) = &prompt.url_domain {
+        if y < area.y + area.height {
+            buf.set_line(
+                content_x,
+                y,
+                &Line::from(Span::styled(
+                    format!("域名 {domain}"),
+                    Style::default().fg(theme.accent_user).bg(theme.bg_light),
+                )),
+                content_w,
+            );
+            y = y.saturating_add(1);
+        }
+    }
+    if let Some(warning) = &prompt.url_warning {
+        if y < area.y + area.height {
+            buf.set_line(
+                content_x,
+                y,
+                &Line::from(Span::styled(
+                    format!("⚠ {warning}"),
+                    Style::default().fg(theme.warning).bg(theme.bg_light),
+                )),
+                content_w,
+            );
+            y = y.saturating_add(1);
+        }
     }
     y = y.saturating_add(1);
 
@@ -253,6 +285,9 @@ mod tests {
             other_index: Some(1),
             selected: 0,
             picked: Vec::new(),
+            url: None,
+            url_domain: None,
+            url_warning: None,
         }
     }
 

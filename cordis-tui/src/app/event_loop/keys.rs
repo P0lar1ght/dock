@@ -634,6 +634,16 @@ pub(super) fn run_action(
                     ask_view::push_draft_char(draft, &mut cur, c);
                     return Vec::new();
                 }
+                // `d` = 明确拒绝（decline）。规范要三动作：accept / decline / cancel。
+                // Esc 是「关掉」（cancel），没有 decline 入口的话服务器分不清
+                // 「用户不想要」和「用户走开了」。
+                if c == 'd' || c == 'D' {
+                    if let Some(mcp) = ctx.get::<Mcp>(MCP) {
+                        mcp.elicitation().decline_for(page_name(ctx).as_deref());
+                    }
+                    overlay.close();
+                    return Vec::new();
+                }
                 if let Some(i) = c.to_digit(10) {
                     let i = i as usize;
                     if (1..=picked.len().max(9)).contains(&i) {

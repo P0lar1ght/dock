@@ -17,6 +17,49 @@ stdio + Streamable HTTP。先走 MCP `2026-07-28`（无 initialize / 无 session
 - 重连 / 重载期间同样显示「连接中…」、`search_tool` 报 `partial`。
 - 握手途中被停用、重连或换了配置：晚到的结果按 `attempt` 认出过期，成败都不写回。
 
+### MCP Elicitation（向用户要信息）
+
+Dock 按规范当 elicitation 的客户端。两种问答路径都在：
+
+**MRTR（`2026-07-28`，现代协议的主路）**：服务器在 `tools/call` 的结果里回
+`resultType: "input_required"` + `inputRequests`（+ 可选的 `requestState`）。
+Dock 把 `inputRequests` 里的提问逐个弹给用户，收齐答复后**用新 id 重发**原请求，
+params 带上 `inputResponses` + 原样回传的 `requestState`。服务器可以反复要输入，
+最多 8 轮（超过就报错，不把整轮对话挂死）。没有 `inputRequests` 只有
+`requestState` 时直接重试（规范允许）。
+
+**server-initiated（`2025-11-25` 兼容）**：服务器直接发 `elicitation/create`
+JSON-RPC 请求。Dock 照旧处理（回答走 JSON-RPC result）。
+
+问答内容：
+
+- **form 模式**：`requestedSchema` 是「扁平对象 + 基本类型」的受限 JSON Schema。
+  支持 `string` / `number` / `integer` / `boolean` / 单选 / 多选。枚举的两种写法
+  都认：`enum` + `enumNames`（legacy）与 `oneOf: [{const, title}]`（规范写法）；
+  多选同理认 `items.enum` 与 `items.anyOf: [{const, title}]`。
+- **校验**：填好的值按 schema 校验（`minLength` / `maxLength` / `minimum` /
+  `maximum` / `format`（`email` / `uri` / `date` / `date-time`）/ `minItems` /
+  `maxItems`），不合就闪原因让用户改。
+- **可选字段留空**：不在 `required` 里的字段留空不报错 —— 数字类字段整个键不
+  出现（让服务器用它自己的默认值），字符串给空串。
+- **三动作**：`accept` / `decline` / `cancel`。TUI：`Enter` 接受、`d` 明确拒绝、
+  `Esc` 取消（取消草稿 → 退出「其他」 → 拒掉整题）。GUI 与浏览器 UI 三个按钮
+  都有。
+- **url 模式**：显示完整 URL + 域名（高亮，防子域仿冒）+ 可疑警告（Punycode、
+  明文 http）。用户点「打开链接」就是同意，**立刻**回 `{"action":"accept"}` ——
+  这个答复只表示同意，不表示交互已完成（交互在带外发生，客户端看不到结果）。
+  不等 `notifications/elicitation/complete`（规范说那是 MAY，服务器不发就永远挂）。
+- **`-32042`**（`URLElicitationRequiredError`，2025-11-25）：服务器用错误码说
+  「这个请求要先做一次 URL 交互」。Dock 把 URL 呈现给用户，等
+  `notifications/elicitation/complete` 到了再重试原请求。
+- **未知 mode**：服务器发了客户端没声明的 mode，Dock 回 `-32602`（Invalid params），
+  不是默默当 form 处理。
+
+其它：提问按页归属（两页可以同时打同一台服务器，各弹各的框）；MRTR 与 `-32042` 的提问
+也归**发起这次调用**的那一页（不是在飞的调用里猜 —— 那时 `tools/call` 已经返回，
+别的页会看到这题或抢去回答）；读侧不被提问阻塞（服务器请求交给单独任务处理）；
+关页时该页未答的 elicitation 会被 cancel。
+
 ### MCP Apps（界面）
 
 Dock 按 [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview)（`2026-01-26`）当客户端：

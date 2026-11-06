@@ -95,6 +95,29 @@ pub fn elicit_resolve(gateway: &GatewayHandle, params: Value) -> Result<Value, R
     Ok(json!({ "ok": true, "resumed": true }))
 }
 
+/// URL 模式：开浏览器。
+///
+/// 要不要顺手把「用户同意」回给服务器，由提问自己的 `reply_on_consent` 决定
+/// （见 [`Elicitation::open_url_and_consent`]）：
+/// - server-initiated（服务器发 `elicitation/create`）：回 —— 规范要求用户同意后
+///   客户端 **MUST** 立刻回 `{"action":"accept"}`，不等 `complete` 通知（那是 MAY）。
+/// - `-32042`（服务器用错误码要 URL 交互）：**不回** —— 那里没有挂着的 JSON-RPC
+///   请求要回，等 `notifications/elicitation/complete` 到了才该重试原请求。
+///   提前 accept 会让服务器那边的交互还没做完就被重试。
+pub fn elicit_open(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let mcp = gateway
+        .ctx()
+        .get::<Mcp>(MCP)
+        .ok_or_else(|| RpcError::app("unavailable", "mcp service is not mounted"))?;
+    let page = threads::resolve_param(gateway, &params)?;
+    let who = Some(page.identity.as_str());
+    let consented = mcp
+        .elicitation()
+        .open_url_and_consent(who)
+        .map_err(|e| RpcError::app("empty_queue", e))?;
+    Ok(json!({ "ok": true, "consented": consented }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

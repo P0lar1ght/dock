@@ -291,6 +291,7 @@ export class DockAgentElement extends LitElement implements DockAgentPublicApi {
         resolvePermission: (requestId, decision) => void this.chatController.resolvePermission(requestId, decision),
         resolvePlan: (planId, decision) => void this.chatController.resolvePlan(planId, decision),
         resolveElicitation: (elicitId, action) => void this.chatController.resolveElicitation(elicitId, action),
+        openElicitation: (elicitId) => void this.chatController.openElicitation(elicitId),
         selectUserInput: (interactionId, questionId, value) =>
           this.chatController.selectUserInput(interactionId, questionId, value),
         setUserInputOther: (interactionId, questionId, value) =>

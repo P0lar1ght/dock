@@ -20,6 +20,12 @@ const META_CLIENT_CAPS: &str = "io.modelcontextprotocol/clientCapabilities";
 
 pub const ERR_UNSUPPORTED_PROTOCOL: i64 = -32022;
 pub const ERR_METHOD_NOT_FOUND: i64 = -32601;
+/// JSON-RPC 标准错误码：参数无效。规范要求客户端收到没声明的 elicitation mode
+/// 时回这个码（`-32602` Invalid params）。
+pub const ERR_INVALID_PARAMS: i64 = -32602;
+/// `URLElicitationRequiredError`（2025-11-25 定义）：服务器说「这个请求要先完成一次
+/// URL 交互」。2026-07-28 不用它了（改走 MRTR），但老服务器还会发。
+pub const ERR_URL_ELICITATION_REQUIRED: i64 = -32042;
 
 /// Newest first. Dock speaks modern `2026-07-28` plus initialize-era fallbacks.
 pub const SPOKEN: &[&str] = &[
@@ -235,11 +241,79 @@ pub fn with_cwd(mut params: Value, cwd: Option<&str>) -> Value {
     params
 }
 
+/// MRTR：把重试请求的 `params` 补上 `inputResponses` + `requestState`。
+///
+/// 规范（2026-07-28 MRTR）：
+/// - `inputResponses` 的键与服务器给的 `inputRequests` **一一对应**。
+/// - `requestState` **MUST**原样回传，**MUST NOT**解析或修改。
+/// - 服务器没给 `requestState` 时，客户端 **MUST NOT**自己造一个。
+pub fn with_input_responses(
+    mut params: Value,
+    responses: Option<serde_json::Map<String, Value>>,
+    state: Option<&str>,
+) -> Value {
+    if !params.is_object() {
+        params = json!({});
+    }
+    if let Some(responses) = responses {
+        params["inputResponses"] = Value::Object(responses);
+    }
+    if let Some(state) = state.filter(|s| !s.is_empty()) {
+        params["requestState"] = json!(state);
+    }
+    params
+}
+
 /// `tools/call` 结果的 `isError`：服务器明说失败的，结果就标失败，不靠猜文本。
 pub fn call_is_error(v: &Value) -> bool {
     v.pointer("/result/isError")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// `result.resultType`：`Some("input_required")` 表示服务器要更多输入（MRTR）。
+///
+/// 规范（2026-07-28）：服务器**不得**再发 server→client 的 JSON-RPC 请求，
+/// elicitation 只能走 MRTR —— 服务器在 `tools/call` 的结果里回
+/// `resultType: "input_required"` + `inputRequests`，客户端收齐答复后**用新 id 重发**
+/// 原请求。老服务器（2025-11-25）没有 `resultType`，按规范当成 `"complete"`。
+pub fn result_type(v: &Value) -> &str {
+    v.pointer("/result/resultType")
+        .and_then(Value::as_str)
+        .unwrap_or("complete")
+}
+
+/// 这个结果是不是「服务器还要更多信息」。
+pub fn needs_input(v: &Value) -> bool {
+    result_type(v) == "input_required"
+}
+
+/// MRTR：`result.inputRequests` —— 服务器要客户端代答的一堆请求。
+/// 键是服务器自己定的标识，值是 `elicitation/create` 之类的请求对象。
+pub fn input_requests(v: &Value) -> Option<&serde_json::Map<String, Value>> {
+    v.pointer("/result/inputRequests")
+        .and_then(Value::as_object)
+}
+
+/// MRTR：`result.requestState` —— 服务器给的**不透明**状态串。
+///
+/// 规范：客户端**MUST**原样回传，**MUST NOT**解析、修改或猜测它的内容。
+pub fn request_state(v: &Value) -> Option<&str> {
+    v.pointer("/result/requestState").and_then(Value::as_str)
+}
+
+/// `-32042`（`URLElicitationRequiredError`）：服务器说「这个请求要先做一次 URL 交互」。
+/// `data.elicitations` 里是待办的 URL 交互。
+pub fn url_elicitations(v: &Value) -> Vec<Value> {
+    v.pointer("/error/data/elicitations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 这个错误是不是 `-32042`。
+pub fn is_url_elicitation_required(v: &Value) -> bool {
+    jsonrpc_error_code(v) == Some(ERR_URL_ELICITATION_REQUIRED)
 }
 
 pub fn is_modern(protocol: &str) -> bool {
@@ -334,6 +408,16 @@ pub fn jsonrpc_method_not_found(id: Value, method: &str) -> Value {
         "jsonrpc": "2.0",
         "id": id,
         "error": { "code": ERR_METHOD_NOT_FOUND, "message": method }
+    })
+}
+
+/// JSON-RPC 错误回复。`data` 可选（规范里 `-32042` 会在 `data.elicitations` 里
+/// 带要开的 URL）。
+pub fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
     })
 }
 
