@@ -7,7 +7,8 @@ import { TOOL_DIAMOND } from './chat/toolCard.js';
 export function elicitationCard(
   request: SessionElicitation,
   interaction: ElicitationInteractionState | undefined,
-  resolve: (elicitId: string, action: ElicitAction) => void
+  resolve: (elicitId: string, action: ElicitAction) => void,
+  open: (elicitId: string) => void
 ) {
   const pending = request.status === 'pending';
   const resolving = Boolean(interaction?.resolving);
@@ -28,6 +29,17 @@ export function elicitationCard(
       <div class="tool-card-body permission-details">
         ${request.heading ? html`<strong class="elicitation-heading">${request.heading}</strong>` : nothing}
         ${request.message ? html`<p class="permission-reason elicitation-message">${request.message}</p>` : nothing}
+        ${request.url
+          ? html`<div class="elicitation-url">
+              <code class="elicitation-url-full">${request.url}</code>
+              ${request.urlDomain
+                ? html`<span class="elicitation-url-domain">域名 ${request.urlDomain}</span>`
+                : nothing}
+              ${request.urlWarning
+                ? html`<span class="elicitation-url-warning">⚠ ${request.urlWarning}</span>`
+                : nothing}
+            </div>`
+          : nothing}
         ${interaction?.error ? html`<p class="permission-error" role="alert">${interaction.error}</p>` : nothing}
         ${pending ? html`
           <div class="permission-actions" aria-label="回应 MCP 请求">
@@ -45,13 +57,21 @@ export function elicitationCard(
               ?disabled=${resolving}
               @click=${() => resolve(request.id, 'decline')}
             >拒绝</button>
-            <button
-              class="permission-approve"
-              type="button"
-              data-testid="elicit-accept"
-              ?disabled=${resolving}
-              @click=${() => resolve(request.id, 'accept')}
-            >${resolving ? '等待 Gateway…' : '接受'}</button>
+            ${request.url
+              ? html`<button
+                  class="permission-approve"
+                  type="button"
+                  data-testid="elicit-open"
+                  ?disabled=${resolving}
+                  @click=${() => open(request.id)}
+                >${resolving ? '等待 Gateway…' : '打开链接'}</button>`
+              : html`<button
+                  class="permission-approve"
+                  type="button"
+                  data-testid="elicit-accept"
+                  ?disabled=${resolving}
+                  @click=${() => resolve(request.id, 'accept')}
+                >${resolving ? '等待 Gateway…' : '接受'}</button>`}
           </div>
         ` : nothing}
       </div>

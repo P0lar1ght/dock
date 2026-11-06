@@ -17,6 +17,12 @@ export interface SessionElicitation {
   message: string;
   status: SessionElicitationStatus;
   seq: number;
+  /** URL 模式：完整地址（老网关不带：`null`）。 */
+  url: string | null;
+  /** URL 模式：域名（老网关不带：`null`）。 */
+  urlDomain: string | null;
+  /** URL 模式：可疑警告（老网关不带：`null`）。 */
+  urlWarning: string | null;
 }
 
 export function withElicitationRequested(
@@ -34,7 +40,10 @@ export function withElicitationRequested(
     heading: text(params.heading, 300),
     message: text(params.message, 8_000),
     status: 'pending',
-    seq
+    seq,
+    url: text(params.url, 2_048) || null,
+    urlDomain: text(params.urlDomain, 300) || null,
+    urlWarning: text(params.urlWarning, 300) || null
   };
   return {
     ...state,

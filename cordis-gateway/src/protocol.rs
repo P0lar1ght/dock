@@ -215,6 +215,7 @@ pub const PERMISSION_RESOLVE: &str = "permission/resolve";
 pub const INTERACTION_RESPOND: &str = "interaction/respond";
 pub const PLAN_RESOLVE: &str = "plan/resolve";
 pub const ELICIT_RESOLVE: &str = "elicit/resolve";
+pub const ELICIT_OPEN: &str = "elicit/open";
 pub const MCP_RELOAD: &str = "mcp/reload";
 pub const MCP_LIST: &str = "mcp/list";
 pub const MCP_RECONNECT: &str = "mcp/reconnect";

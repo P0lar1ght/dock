@@ -523,6 +523,11 @@ export class DockClient {
         workspaceId: selectedWorkspace,
         elicitId,
         action
+      }),
+      openElicitation: (id, selectedWorkspace, elicitId) => this.interactionApi.openElicitation({
+        threadId: id,
+        workspaceId: selectedWorkspace,
+        elicitId
       })
     };
   }

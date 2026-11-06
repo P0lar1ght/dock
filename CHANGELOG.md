@@ -10,6 +10,17 @@
 
 ### 新增
 
+- **MCP elicitation 支持 MRTR**（MCP `2026-07-28`）：服务器在 `tools/call` 的结果里回 `resultType: "input_required"` + `inputRequests` 时，Dock 把提问弹给用户，收齐答复后**用新 id 重发**原请求（params 带 `inputResponses` 与原样回传的 `requestState`）。
+  - 以前这种结果被当成普通工具输出（找不到 `content` 字段，整段 JSON 塞进工具文本）：用户看不到表单，服务器永远等不到答复。
+  - 提问归**发起这次调用的那一页**，别的页看不到也抢不走。
+  - 服务器反复要输入最多 8 轮；用户拒了或取消就不再重试（服务器不该假设客户端一定会答）。
+  - 仍兼容老服务器的 server-initiated `elicitation/create`。
+
+- **MCP elicitation 的 URL 模式**：`elicit/open` 网关方法（桌面端与浏览器 UI 的「打开链接」按钮），在服务器那台机器上开浏览器。
+  - server-initiated 模式：用户点「打开链接」就**立刻**回 MCP 服务器「同意」（规范要求不等 `notifications/elicitation/complete` —— 那是 MAY，服务器不发就一直挂）。
+  - `-32042`（服务器用错误码要 URL 交互）：等 `complete` 通知到了才重试原请求，不提前回。
+  - 界面显示完整地址 + 域名（高亮，防子域仿冒）+ 可疑警告（Punycode / 明文 http）。
+
 - 每轮改动：agent 一轮里用 `search_replace` / `write_file` 改过的文件按轮记下（落盘在会话目录，重开还在）。
   - GUI：一轮结束后出改动卡「已编辑 N 个文件 +x -y」，查看文件、撤销（还是那一轮改完样子的文件才恢复）、审查。
   - GUI 右侧工具面板加回「审查」：看工作区的 git diff（含未跟踪的新文件）或某一轮的改动，code-review 的批注落在行上，「让 Agent 审查」直接跑 code-review。
@@ -95,6 +106,11 @@
 
 ### 修复
 
+- **MCP elicitation 的表单认不全规范的 schema**：带标题的单选（`oneOf: [{const, title}]`）之前退化成自由文本框，带标题的多选（`items.anyOf`）直接把整个表单判死（用户看到的是「服务器拒绝了」，不是一个选择框）。两种写法现在都认。
+- **MCP elicitation 不按 schema 校验用户的回答**：现在按 `minLength` / `maxLength` / `minimum` / `maximum` / `format`（`email` / `uri` / `date` / `date-time`）/ `minItems` / `maxItems` 校验，不合就说明原因让用户改。
+- **MCP elicitation 的可选数字字段不能留空**：留空必报「请输入数字」，表单永远走不完（工具调用和整轮对话一起卡死）。不在 `required` 里的字段现在可以留空 —— 数字类整个键不出现，让服务器用它自己的默认值。
+- **MCP elicitation 缺「明确拒绝」的入口**：终端里只有「取消」（关掉），没有「拒绝」—— 服务器分不清「用户不想要」和「用户走开了」。现在 `d` 键是拒绝。
+- MCP 服务器发客户端没声明的 elicitation mode 时，之前默默当成表单处理；现在按规范回 `-32602`（Invalid params）。
 - 写进主线的子代理通知 / 工作流收尾在 `<system-reminder>` 里，正文中的 `</system-reminder>` 现在先转义（审外部 PR 时 PR 原文可能带它，能提前闭合提醒块）。code-review 的 diff 命令和 `vcs/diff`、只读命令判定都拒 `--ext-diff` / `--textconv`（会跑 git 配置里的外部程序），前两者也拒 `--no-index`。
 - 子代理接着聊（复活）：被拒（角色不在了、workflow 派的）不再把子代理从内存里删掉；协调器回绝时收掉槽位并写明原因，不再挂着半活的 running；同一个 id 并发复活只起一次；用时和对话时刻接上第一次启动的；关着的线程按它自己的预设叫角色名。
 - 只读场景（只读子代理、计划模式、explore / plan 角色）的命令判定没认反斜杠转义：`echo \"a | rm -rf x \"` 这类命令被判成只读，不问用户就会跑后面的命令。现在按 shell 的引号与转义规则切段；顺带引号里的 `>`（如 `grep -n "=>"`）不再被当成重定向。

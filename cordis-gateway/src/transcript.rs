@@ -578,7 +578,11 @@ impl Transcript {
                 "elicitId": id,
                 "server": prompt.server,
                 "message": prompt.message,
-                "heading": prompt.heading
+                "heading": prompt.heading,
+                // URL 模式：完整地址 + 域名 + 可疑警告（规范要求客户端展示目标域名）。
+                "url": prompt.url,
+                "urlDomain": prompt.url_domain,
+                "urlWarning": prompt.url_warning
             }),
         );
     }

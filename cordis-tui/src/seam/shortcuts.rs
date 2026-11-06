@@ -88,6 +88,7 @@ impl Shortcuts {
             }
             return vec![
                 HintItem::new("Enter", "select"),
+                HintItem::new("d", "decline"),
                 HintItem::new("Esc", "cancel"),
                 HintItem::new("1–9", "option"),
             ];

@@ -340,7 +340,19 @@ export type DockEvent = EventBase &
     | { method: 'interaction/resolved'; interactionId: string }
     | { method: 'plan/requested'; planId: string; path: string; body: string; empty: boolean }
     | { method: 'plan/resolved'; planId: string; decision: 'approve' | 'revise' | 'quit' }
-    | { method: 'elicit/requested'; elicitId: string; server: string; message: string; heading: string }
+    | {
+        method: 'elicit/requested';
+        elicitId: string;
+        server: string;
+        message: string;
+        heading: string;
+        /** URL 模式：完整地址（老网关不带：`null`）。 */
+        url: string | null;
+        /** URL 模式：域名（老网关不带：`null`）。 */
+        urlDomain: string | null;
+        /** URL 模式：可疑警告（老网关不带：`null`）。 */
+        urlWarning: string | null;
+      }
     | { method: 'elicit/resolved'; elicitId: string }
     /** 压缩完成的标记（落在历史里；前后占用只在实时的 `context/compacted` 里）。 */
     | { method: 'item/compaction'; itemId: string }
@@ -519,6 +531,9 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
         server: str(params.server),
         message: str(params.message),
         heading: str(params.heading),
+        url: str(params.url) || null,
+        urlDomain: str(params.urlDomain) || null,
+        urlWarning: str(params.urlWarning) || null,
       };
     case 'elicit/resolved':
       return { ...base, method, elicitId: str(params.elicitId) };

@@ -184,6 +184,25 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - `transcript.rs`：把会话事件流转成 `dock.1` 的增量报文
 - `LIVE_THREAD_ID` = `"live"` 指代第 1 页（根）的会话；老客户端只用它
 
+### MCP elicitation（`handlers/interaction.rs`）
+
+MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `elicit/requested` 事件，
+客户端回 `elicit/resolve`；URL 模式另有 `elicit/open` 开浏览器。
+
+| 方法 / 推送 | 作用 |
+|---|---|
+| `elicit/requested { elicitId, server, message, heading, url?, urlDomain?, urlWarning? }` | 服务器要用户答一件事。`url` / `urlDomain` / `urlWarning` 只有 URL 模式才有（老网关不带，客户端按 `null` 兜）：`urlDomain` 供客户端高亮防子域仿冒，`urlWarning` 是可疑地址的警告（Punycode / 明文 http） |
+| `elicit/resolve { elicitId, action, content? }` | 回应。`action` 是 `accept` / `decline` / `cancel`；`content` 只有 accept 时的表单数据。解的是**这个线程那一页**队首的那条 |
+| `elicit/open { elicitId }` | URL 模式：在**服务器那台机器**上开浏览器。回 `{ ok, consented }` —— `consented` 是网关有没有顺手把「用户同意」回给 MCP 服务器 |
+
+`elicit/open` 里的 `consented` 由提问自己的 `reply_on_consent` 决定，不是客户端能选的：
+
+- **server-initiated**（服务器发 `elicitation/create`）：回 —— 规范要求用户同意后客户端
+  **MUST** 立刻回 `{"action":"accept"}`，不等 `notifications/elicitation/complete`（那是 MAY，
+  服务器不发就一直挂）。
+- **`-32042`**（服务器用错误码要 URL 交互）：**不回** —— 那里没有挂着的 JSON-RPC 请求要回，
+  等 `complete` 通知到了才该重试原请求；提前 accept 会让服务器那边的交互还没做完就被重试。
+
 ### 多线程（能力 `openThreads`）
 
 一个线程 = 一页（`threads.rs`）。`threadId` 是**落盘会话 id**，`live` 仍是第 1 页的别名；分页身份 `main#N` 只在网关内部用来路由事件。
@@ -244,9 +263,9 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - 只给参考，不改草稿、不写盘；`role` 不对回 `invalid_params`。
 - 这几个方法不占连接锁：鉴权后另起任务，跑完再回帧，期间推送和其它请求照常。
 
-其它线程级方法（`turn/*`、`thread/environment/*` 与各种 `set`、`thread/subscribe`、`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve`、`slash/execute`）接受任意线程的 id。关着的会话**按需开页**（同 `thread/open`，客户端不用先 open；同时来的请求只开一页）：`turn/start` / `enqueue` / `steer`、`thread/subscribe`、`thread/environment/*` 与各种 `set`、`slash/execute`。`turn/cancel` 与 `turn/queue/*` 对关着的会话回空结果（`cancelled: false`、空队列、`removed: false`），不开页；`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve` 只对开着的页有意义，仍回 `thread_not_open`；认不得的 id 回 `not_found`。`thread/history` 例外：关着的会话也给，`events` 由落盘事件按真实时间回放（`Transcript::replay`，和重开会话重建投影同一条路），每轮都以 `turn/completed` 收尾（结果照落盘的 `turn-end` 行报，停止、出错也看得出；更早的会话没有这一行，一律补成完成，最后一次采样带错误的补成失败），客户端开着关着只要一条路径。开页走 `"tabs"` 的 `Tabs::open_at`（不切终端里正在看的页）；没挂分页服务时只有第 1 页。
+其它线程级方法（`turn/*`、`thread/environment/*` 与各种 `set`、`thread/subscribe`、`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve`、`elicit/open`、`slash/execute`）接受任意线程的 id。关着的会话**按需开页**（同 `thread/open`，客户端不用先 open；同时来的请求只开一页）：`turn/start` / `enqueue` / `steer`、`thread/subscribe`、`thread/environment/*` 与各种 `set`、`slash/execute`。`turn/cancel` 与 `turn/queue/*` 对关着的会话回空结果（`cancelled: false`、空队列、`removed: false`），不开页；`permission/resolve`、`interaction/respond`、`plan/resolve`、`elicit/resolve`、`elicit/open` 只对开着的页有意义，仍回 `thread_not_open`；认不得的 id 回 `not_found`。`thread/history` 例外：关着的会话也给，`events` 由落盘事件按真实时间回放（`Transcript::replay`，和重开会话重建投影同一条路），每轮都以 `turn/completed` 收尾（结果照落盘的 `turn-end` 行报，停止、出错也看得出；更早的会话没有这一行，一律补成完成，最后一次采样带错误的补成失败），客户端开着关着只要一条路径。开页走 `"tabs"` 的 `Tabs::open_at`（不切终端里正在看的页）；没挂分页服务时只有第 1 页。
 
-投影每页一份（`handle.rs` 的 `transcripts`，共用一条 broadcast，事件带页身份）；订阅是「页 → 客户端订阅时用的 `threadId`」，推送时用那个 id。会话事件按 `session/page-event` 路由，`turn/completed` 只在那一页记下 `LogEvent::TurnEnd` 时发（一轮一次，流式中途不发；和其它会话事件一样按 `session/page-event` 路由），`status` 是 `completed` / `cancelled` / `failed`，失败带 `error`（错误文本，以前只回给 TUI）；`item/tool_completed` 的 `status` 照 Dock 落下的 `is_error` 报：`completed` / `failed`，停止时的中断结果（以「已中断。」开头，可能带运行时长和已产出的输出）为 `cancelled`，权限门拒绝的为 `denied`；权限 / 提问 / 计划 / elicitation 的事件载荷是 `()`，挨页按队首序号（`front_seq`）对账——同一条不重报，换了一条先报旧的 resolved。提问（`interaction/requested`）每题带 `multiSelect`（多选题可以选多个）；`handoff_to_user` 的提问另带 `browserHandoff: true`（`kind` 仍是 `user_input`），客户端据此打开这个会话的浏览器面板；`interaction/respond` 的 `answers[]` 每题 `{questionId, values: [选项标签…], other?}`，`other` 是自己写的回答，既算答案也作为备注交给模型；旧形状 `{questionId, value, kind: option|other}` 仍收。线程级的斜杠命令用 `GatewayHandle::scoped(page)`，下面一串 `cmd_*` 读的 `gateway.ctx()` 就是那一页。
+投影每页一份（`handle.rs` 的 `transcripts`，共用一条 broadcast，事件带页身份）；订阅是「页 → 客户端订阅时用的 `threadId`」，推送时用那个 id。会话事件按 `session/page-event` 路由，`turn/completed` 只在那一页记下 `LogEvent::TurnEnd` 时发（一轮一次，流式中途不发；和其它会话事件一样按 `session/page-event` 路由），`status` 是 `completed` / `cancelled` / `failed`，失败带 `error`（错误文本，以前只回给 TUI）；`item/tool_completed` 的 `status` 照 Dock 落下的 `is_error` 报：`completed` / `failed`，停止时的中断结果（以「已中断。」开头，可能带运行时长和已产出的输出）为 `cancelled`，权限门拒绝的为 `denied`；权限 / 提问 / 计划 / elicitation 的事件载荷是 `()`，挨页按队首序号（`front_seq`）对账——同一条不重报，换了一条先报旧的 resolved。elicitation 的 `elicit/requested` 另带 `server` / `message` / `heading`；URL 模式再带 `url`（完整地址）、`urlDomain`（域名，给客户端高亮）、`urlWarning`（可疑地址的警告：Punycode / 明文 http）——这三个字段老网关不带，客户端按 `null` 兜。提问（`interaction/requested`）每题带 `multiSelect`（多选题可以选多个）；`handoff_to_user` 的提问另带 `browserHandoff: true`（`kind` 仍是 `user_input`），客户端据此打开这个会话的浏览器面板；`interaction/respond` 的 `answers[]` 每题 `{questionId, values: [选项标签…], other?}`，`other` 是自己写的回答，既算答案也作为备注交给模型；旧形状 `{questionId, value, kind: option|other}` 仍收。线程级的斜杠命令用 `GatewayHandle::scoped(page)`，下面一串 `cmd_*` 读的 `gateway.ctx()` 就是那一页。
 
 ### 浏览器画面（能力 `browserView`，`handlers/browser_view.rs`）
 

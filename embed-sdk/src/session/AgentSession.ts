@@ -122,6 +122,12 @@ export interface AgentSessionOperations {
     elicitId: string,
     action: ElicitAction
   ): Promise<{ ok: boolean }>;
+  /** URL 模式：开浏览器。网关按提问自己的 `reply_on_consent` 决定要不要回「同意」。 */
+  openElicitation(
+    threadId: string,
+    workspaceId: string,
+    elicitId: string
+  ): Promise<{ ok: boolean; consented: boolean }>;
 }
 
 export class AgentSession {
@@ -447,6 +453,14 @@ export class AgentSession {
     const request = this.stateValue.elicitations.find((item) => item.id === elicitId);
     if (!request || request.status !== 'pending') throw new Error('Pending elicitation was not found');
     return this.operations.resolveElicitation(this.id, this.workspaceId, elicitId, action);
+  }
+
+  /** URL 模式：开浏览器（并按网关的判定决定要不要回「用户同意」）。 */
+  openElicitation(elicitIdValue: string) {
+    const elicitId = text(elicitIdValue);
+    const request = this.stateValue.elicitations.find((item) => item.id === elicitId);
+    if (!request || request.status !== 'pending') throw new Error('Pending elicitation was not found');
+    return this.operations.openElicitation(this.id, this.workspaceId, elicitId);
   }
 
   respondToInteraction(interactionIdValue: string, answers: RuntimeUserInputAnswer[]) {

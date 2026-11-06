@@ -32,6 +32,7 @@ export const TURN_CANCEL = 'turn/cancel' as const;
 export const INTERACTION_RESPOND = 'interaction/respond' as const;
 export const PLAN_RESOLVE = 'plan/resolve' as const;
 export const ELICIT_RESOLVE = 'elicit/resolve' as const;
+export const ELICIT_OPEN = 'elicit/open' as const;
 export const CONTEXT_UPDATE = 'context/update' as const;
 export const HOST_TOOLS_SYNC = 'hostTools/sync' as const;
 export const HOST_TOOLS_INVOKE = 'hostTools/invoke' as const;

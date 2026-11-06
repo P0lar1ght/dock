@@ -600,9 +600,12 @@ mod tests {
         hooks: LiveHooks,
     ) -> Result<(Vec<protocol::ListedTool>, super::super::CallFn), String> {
         let (stop_tx, stop_rx) = watch::channel(false);
-        let (listed, rpc, _) = connect(server, hooks, stop_rx).await?;
+        let (listed, rpc, _) = connect(server, hooks.clone(), stop_rx).await?;
         std::mem::forget(stop_tx);
-        Ok((listed, super::super::call_via(rpc, false)))
+        Ok((
+            listed,
+            super::super::call_via(rpc, false, hooks.elicit.clone(), server.name.clone()),
+        ))
     }
 
     async fn connect_test(

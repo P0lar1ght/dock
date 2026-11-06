@@ -507,7 +507,8 @@ async fn closing_a_tab_cancels_its_pending_elicitation() {
     let value = tokio::time::timeout(std::time::Duration::from_secs(3), created)
         .await
         .expect("关页该给那条调用一个答复")
-        .unwrap();
+        .unwrap()
+        .expect("提问该有答复");
     assert!(
         value
             .get("action")

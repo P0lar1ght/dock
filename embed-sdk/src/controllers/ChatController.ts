@@ -629,6 +629,11 @@ export class ChatController {
     return this.elicitationController.resolve(elicitId, action);
   }
 
+  /** URL 模式：开浏览器。 */
+  openElicitation(elicitId: string) {
+    return this.elicitationController.open(elicitId);
+  }
+
   selectUserInput(interactionId: string, questionId: string, value: string) {
     this.userInputController.select(interactionId, questionId, value);
   }

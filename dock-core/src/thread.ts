@@ -68,7 +68,20 @@ export type TurnItem =
       empty: boolean;
       decision: 'approve' | 'revise' | 'quit' | 'cancelled' | null;
     }
-  | { kind: 'elicit'; id: string; server: string; message: string; heading: string; resolved: boolean }
+  | {
+      kind: 'elicit';
+      id: string;
+      server: string;
+      message: string;
+      heading: string;
+      resolved: boolean;
+      /** URL 模式：完整地址（老网关不带：`null`）。 */
+      url: string | null;
+      /** URL 模式：域名（老网关不带：`null`）。 */
+      urlDomain: string | null;
+      /** URL 模式：可疑警告（老网关不带：`null`）。 */
+      urlWarning: string | null;
+    }
   /** 侧边聊天写进主线的笔记（主会话里画成一张可折叠的卡）。 */
   | { kind: 'sideNote'; id: string; text: string; at: number }
   /**
@@ -253,6 +266,9 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
           message: event.message,
           heading: event.heading,
           resolved: false,
+          url: event.url,
+          urlDomain: event.urlDomain,
+          urlWarning: event.urlWarning,
         });
       case 'elicit/resolved':
         return update(turn, (i) => (i.kind === 'elicit' && i.id === event.elicitId ? { ...i, resolved: true } : i));
