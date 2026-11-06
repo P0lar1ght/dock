@@ -28,7 +28,7 @@ const BOARD_HTML: &str = include_str!("../../assets/whiteboard.html");
 /// 中文手写字体（Xiaolai，12 MB）不打进界面：联网时从这里取，离线退回系统字体。
 const FONT_CDN: &str = "https://esm.sh";
 
-const READ_DESC: &str = "Read the project's whiteboard: every shape with id/type/label/position/size/colors/arrow endpoints, plus reusable `patches` you can copy into whiteboard_edit update/add. The board is shared with the user — read before editing.";
+const READ_DESC: &str = "Read the project's whiteboard: every shape with id/type/label/position/size/colors/arrow endpoints, plus reusable `patches` you can copy into whiteboard_edit update/add. The board is shared with the user — read before editing.\n\nScope it on a big board: `overview` (just the totals and the board bounds), `ids` (only these shapes), `related` (this shape plus its container, label, arrow ends and group). Find shapes by meaning with whiteboard_find instead of guessing ids.\n\nTo SEE what the board actually looks like (the real rendering, not coordinates), use the app tool `app_whiteboard__snapshot` — calling any whiteboard tool opens the board panel, after which the snapshot tool is available.";
 
 const EDIT_DESC: &str = concat!(
     "Edit the project's whiteboard (Excalidraw; user sees it too). One call: `clear`?, `delete`? (id strings), ",
@@ -41,7 +41,7 @@ const EDIT_DESC: &str = concat!(
     "`from`/`to`? (arrow/line endpoint shape ids); `fontSize`? (text shapes). ",
     "Omit x/y to stack new shapes in a column to the right of existing content. ",
     "Give short ids to shapes you will connect or update later.\n\n",
-    "For layout (group/align/distribute/layout/place/graph/style/layer/fit-text) use the dedicated whiteboard_* tools — do not stuff them into this schema."
+    "For layout (group/align/distribute/layout/place/graph/style/layer/fit-text) use the dedicated whiteboard_* tools — do not stuff them into this schema.\n\nTo find shapes by meaning use whiteboard_find; to copy a shape (with its label/group) use whiteboard_duplicate."
 );
 
 /// 故意不列 properties：嵌套一长串会触发部分模型把数组包成 `{item: ...}`。
@@ -99,37 +99,106 @@ impl Whiteboard {
     }
 }
 
-fn save_ok(scene: &mut Scene, path: &std::path::Path, head: String) -> Value {
+/// 存盘 + 回结果。正文只讲这次改了什么：全量场景（几十行 + shapes + patches）交给
+/// `whiteboard_read` —— 每次工具都回全量，几轮就把上下文吃满了。
+fn save_ok(
+    scene: &mut Scene,
+    path: &std::path::Path,
+    head: String,
+    detail: String,
+    extra: Option<Value>,
+) -> Value {
     scene.gc_files();
     if let Err(e) = scene.save(path) {
         return tool_result(e, None, true);
     }
-    let (summary, data) = scene::summary(scene);
-    tool_result(
-        format!("{head}\n{summary}"),
-        Some(json!({
-            "rev": scene.rev,
-            "shapes": data["shapes"],
-            "patches": data["patches"],
-        })),
-        false,
-    )
+    let mut sc = json!({ "rev": scene.rev });
+    if let Some(Value::Object(m)) = extra {
+        for (k, v) in m {
+            sc[k] = v;
+        }
+    }
+    let text = if detail.is_empty() {
+        head
+    } else {
+        format!("{head}\n{detail}")
+    };
+    tool_result(text, Some(sc), false)
 }
 
 fn arrange_ok(scene: &mut Scene, path: &std::path::Path, report: scene::ArrangeReport) -> Value {
     let head = format!("已改白板：{}。", report.detail);
-    let mut out = save_ok(scene, path, head);
-    if let Some(sc) = out.get_mut("structuredContent") {
-        sc["touched"] = json!(report.touched);
-    }
-    out
+    let detail = scene::lines_for(scene, &report.touched);
+    save_ok(
+        scene,
+        path,
+        head,
+        detail,
+        Some(json!({ "touched": report.touched })),
+    )
+}
+
+/// 这次调用实际收到的参数（键 + 类型）：模型能一眼看出哪个参数没到服务端。
+fn args_hint(args: &Value) -> String {
+    let Some(m) = args.as_object() else {
+        return String::new();
+    };
+    m.iter()
+        .map(|(k, v)| {
+            let t = match v {
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+                Value::String(_) => "string",
+                Value::Number(_) => "number",
+                Value::Bool(_) => "bool",
+                Value::Null => "null",
+            };
+            format!("{k}={t}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 工具没改成的结果：带上「实际收到什么」。
+fn not_changed(e: String, args: &Value) -> Value {
+    let hint = args_hint(args);
+    let text = if hint.is_empty() {
+        format!("白板没改：{e}")
+    } else {
+        format!("白板没改：{e}（这次收到：{hint}）")
+    };
+    tool_result(text, None, true)
+}
+
+/// 工具没读成的结果（find / read）。
+fn not_found(e: String, args: &Value) -> Value {
+    let hint = args_hint(args);
+    let text = if hint.is_empty() {
+        format!("没找到：{e}")
+    } else {
+        format!("没找到：{e}（这次收到：{hint}）")
+    };
+    tool_result(text, None, true)
 }
 
 /// 一次工具调用：读 / 改 / 存都在调用方拿着锁的时候做。
 fn apply(name: &str, args: &Value, path: &std::path::Path, mut scene: Scene) -> Value {
     match name {
         "whiteboard_read" => {
-            let (text, data) = scene::summary(&scene);
+            // 分层读：整板 / 总览 / 只看这几个 / 某个图形的相关。
+            let scope = match scene::read_scope(args) {
+                Ok(s) => s,
+                Err(e) => return not_found(format!("白板没读：{e}"), args),
+            };
+            let (text, data) = match scope {
+                scene::ReadScope::All => scene::summary(&scene),
+                scene::ReadScope::Overview => scene::summary_with(&scene, None, false),
+                scene::ReadScope::Ids(ids) => scene::summary_with(&scene, Some(&ids), true),
+                scene::ReadScope::Related(id) => {
+                    let ids = scene::related_ids(&scene, &id);
+                    scene::summary_with(&scene, Some(&ids), true)
+                }
+            };
             tool_result(text, Some(data), false)
         }
         "whiteboard_edit" => match scene::apply_edit(&mut scene, args) {
@@ -147,67 +216,85 @@ fn apply(name: &str, args: &Value, path: &std::path::Path, mut scene: Scene) -> 
                     head.push_str("。已自动去掉 item 包装层");
                 }
                 head.push('。');
-                let mut out = save_ok(&mut scene, path, head);
-                if let Some(sc) = out.get_mut("structuredContent") {
-                    sc["added"] = json!(report.added);
-                    sc["updated"] = json!(report.updated);
-                    sc["deleted"] = json!(report.deleted);
-                    if report.unwrapped_item {
-                        sc["unwrappedItem"] = json!(true);
-                    }
+                if !report.ignored.is_empty() {
+                    head.push_str(&format!(
+                        "忽略了不认识的字段：{}（可用：type/id/x/y/width/height/text/stroke/fill/strokeStyle/from/to/fontSize）",
+                        report.ignored.join("、")
+                    ));
                 }
-                out
+                let mut ids = report.added.clone();
+                ids.extend(report.updated.clone());
+                let detail = scene::lines_for(&scene, &ids);
+                let mut extra = json!({
+                    "added": report.added,
+                    "updated": report.updated,
+                    "deleted": report.deleted,
+                    "unwrappedItem": report.unwrapped_item,
+                });
+                if !report.ignored.is_empty() {
+                    extra["ignored"] = json!(report.ignored);
+                }
+                save_ok(&mut scene, path, head, detail, Some(extra))
             }
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_group" => match scene::apply_group(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_align" => match scene::apply_align(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_style" => match scene::apply_style(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_layer" => match scene::apply_layer(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
+        },
+        "whiteboard_find" => match scene::apply_find(&mut scene, args) {
+            Ok(r) => tool_result(r.detail, Some(json!({ "found": r.found })), false),
+            Err(e) => not_found(e, args),
+        },
+        "whiteboard_duplicate" => match scene::apply_duplicate(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_fit_text" => match scene::apply_fit_text(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_distribute" => match scene::apply_distribute(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_layout" => match scene::apply_layout(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_place" => match scene::apply_place(&mut scene, args) {
             Ok(r) => arrange_ok(&mut scene, path, r),
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_graph" => match scene::apply_graph(&mut scene, args) {
             Ok(report) => {
-                let mut head = format!("已改白板：{}。", report.detail);
+                let mut head = format!("已改白板：{}", report.detail);
                 if report.unwrapped_item {
-                    head.push_str("已自动去掉 item 包装层。");
+                    head.push_str("。已自动去掉 item 包装层");
                 }
-                let mut out = save_ok(&mut scene, path, head);
-                if let Some(sc) = out.get_mut("structuredContent") {
-                    sc["added"] = json!(report.added);
-                    if report.unwrapped_item {
-                        sc["unwrappedItem"] = json!(true);
-                    }
-                }
-                out
+                head.push('。');
+                let detail = scene::lines_for(&scene, &report.added);
+                save_ok(
+                    &mut scene,
+                    path,
+                    head,
+                    detail,
+                    Some(json!({ "added": report.added })),
+                )
             }
-            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+            Err(e) => not_changed(e, args),
         },
         "whiteboard_load" => {
             let since = args.get("sinceRev").and_then(Value::as_u64);
@@ -406,6 +493,35 @@ impl App for Whiteboard {
                         "gap_y": { "type": "number" }
                     },
                     "required": ["nodes"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_find",
+                "description": "Find shapes by what they say or look like, not by id: `queries` [{text?, type?, stroke?, fill?, near?, radius?}] — several per call, each ranked on its own. text matches the label/text (case-insensitive), type ∈ rectangle|ellipse|diamond|text|arrow|line, stroke/fill are colors (#1e1e1e), near = id of a shape to search around (radius default 300). Returns id/type/label/position plus what each shape is related to (container, group, arrow ends).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "queries": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                        "limit": { "type": "integer" }
+                    },
+                    "required": ["queries"]
+                },
+            }),
+            json!({
+                "name": "whiteboard_duplicate",
+                "description": "Copy shapes with their whole subtree (labels, group, arrow bindings). `ids` flat string array — the shapes to copy, copied together keeping their relative positions; `count`? copies (default 1, max 20); `texts`? one new label per copy (array, length = count or 1); `place`? ∈ right|left|above|below (beside the original) or `dx`/`dy` offset (default 40). Returns the new ids in copy order — use them directly, no re-read needed.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": ids_schema(),
+                        "count": { "type": "integer" },
+                        "texts": { "type": "array", "items": { "type": "string" } },
+                        "place": { "type": "string" },
+                        "dx": { "type": "number" },
+                        "dy": { "type": "number" }
+                    },
+                    "required": ["ids"]
                 },
                 "_meta": ui(),
             }),

@@ -170,7 +170,16 @@ async fn whiteboard_speaks_mcp_apps_and_keeps_one_scene_per_project() {
     let wtext = wrapped["content"][0]["text"].as_str().unwrap();
     assert!(wtext.contains("已自动去掉 item 包装层"), "{wtext}");
     assert_eq!(wrapped["structuredContent"]["unwrappedItem"], true);
-    assert!(wrapped["structuredContent"]["patches"].is_array());
+    // 工具结果只讲这次改了什么（全量场景交给 whiteboard_read）。
+    assert_eq!(wrapped["structuredContent"]["added"], json!(["e1"]));
+    assert!(
+        wtext.contains("ellipse id=e1"),
+        "结果里要说清新图形：{wtext}"
+    );
+    assert!(
+        !wrapped["structuredContent"]["shapes"].is_array(),
+        "不再回全量场景：{wrapped}"
+    );
 
     let read2 = c.tool("whiteboard_read", json!({}), "/work/a").await;
     assert!(

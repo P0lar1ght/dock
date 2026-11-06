@@ -48,8 +48,29 @@ export const shapes = (all: readonly El[]) => all.filter((e) => !e.isDeleted && 
 
 /** 参数里的 `ids`：只留非空字符串。 */
 export function idsOf(args: Record<string, unknown> | undefined): string[] {
-  const v = args?.ids;
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === "string") {
+      if (v.length > 0) out.push(v);
+      return;
+    }
+    if (Array.isArray(v)) {
+      v.forEach(walk);
+      return;
+    }
+    if (v && typeof v === "object") {
+      const item = (v as Record<string, unknown>).item;
+      if (item !== undefined) walk(item);
+    }
+  };
+  walk(args?.ids);
+  return out;
+}
+
+/** 参数里的开关：模型端可能写成 "true"。 */
+export function flagOf(args: Record<string, unknown> | undefined, key: string): boolean {
+  const v = args?.[key];
+  return v === true || v === "true" || v === 1;
 }
 
 /** Excalidraw 的 appState → 用户看着的画布区域（画布坐标）。 */

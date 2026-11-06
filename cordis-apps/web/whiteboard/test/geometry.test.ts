@@ -27,7 +27,7 @@ test("shapes drops container texts and deleted elements", () => {
 
 test("idsOf keeps non-empty strings only", () => {
   assert.deepEqual(idsOf({ ids: ["a", "", 3, "b"] }), ["a", "b"]);
-  assert.deepEqual(idsOf({ ids: "a" }), []);
+  assert.deepEqual(idsOf({ ids: "a" }), ["a"]);
   assert.deepEqual(idsOf(undefined), []);
 });
 
@@ -46,4 +46,13 @@ test("snapshotElements takes picked shapes, their labels, and arrows with both e
   assert.deepEqual(snapshotElements(all, ["a", "b"]).map((e) => e.id), ["a", "a-label", "b", "e1", "e1-label"]);
   assert.deepEqual(snapshotElements(all, ["a-label"]).map((e) => e.id), [], "标签文字本身不算选中的图形");
   assert.deepEqual(snapshotElements(all, ["d"]), [], "删掉的不截");
+});
+
+test("idsOf 认模型端的各种写法（数组 / item 包装 / 裸值）", () => {
+  assert.deepEqual(idsOf({ ids: ["a", "b"] }), ["a", "b"]);
+  assert.deepEqual(idsOf({ ids: { item: ["a", "b"] } }), ["a", "b"]);
+  assert.deepEqual(idsOf({ ids: "a" }), ["a"]);
+  assert.deepEqual(idsOf({ ids: { item: "a" } }), ["a"]);
+  assert.deepEqual(idsOf({ ids: [["a"], ["b"]] }), ["a", "b"]);
+  assert.deepEqual(idsOf({}), []);
 });

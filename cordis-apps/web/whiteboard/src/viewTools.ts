@@ -6,7 +6,7 @@
 import { exportToBlob } from "@excalidraw/excalidraw";
 import type { App } from "@modelcontextprotocol/ext-apps";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/client";
-import { brief, idsOf, intersects, line, shapes, snapshotElements, viewportOf, type El } from "./geometry";
+import { brief, flagOf, idsOf, intersects, line, shapes, snapshotElements, viewportOf, type El } from "./geometry";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export interface ViewApi {
@@ -45,11 +45,17 @@ const TOOLS: Tool[] = [
   },
   {
     name: "snapshot",
-    description: "把白板截成 PNG 图片，看用户画的草图、排版用。给了 ids 只截这些图形（连同框里的字、两端都在其中的箭头）。",
+    description:
+      "把白板截成 PNG 图片看实际效果：白板改完截一次（别反复截）；mode=thumbnail（默认，先看全貌）不够清楚再 mode=full 看细节。给了 ids 只截这些图形（连同框里的字、两端都在其中的箭头）。",
     inputSchema: {
       type: "object",
       properties: {
         ids: { type: "array", items: { type: "string" }, description: "只截这些图形；不给截全部" },
+        mode: {
+          type: "string",
+          enum: ["thumbnail", "full"],
+          description: "thumbnail（默认，缩略图，省流量）/ full（原尺寸，看细节）",
+        },
       },
     },
   },
@@ -101,12 +107,13 @@ async function run(a: ViewApi, name: string, args: Record<string, unknown>): Pro
       const found = shapes(all).filter((e) => want.includes(e.id));
       if (found.length === 0) return fail(`白板上没有这些图形：${want.join("、") || "（没给 ids）"}`);
       a.scrollToContent(found, { fitToContent: true, animate: true });
-      if (args.select === true) {
+      const select = flagOf(args, "select");
+      if (select) {
         a.updateScene({ appState: { selectedElementIds: Object.fromEntries(found.map((e) => [e.id, true])) } });
       }
       const missing = want.filter((id) => !found.some((e) => e.id === id));
       return text(
-        `已把视图移到 ${found.length} 个图形${args.select === true ? "并选中" : ""}。` + (missing.length ? `没找到：${missing.join("、")}。` : ""),
+        `已把视图移到 ${found.length} 个图形${select ? "并选中" : ""}。` + (missing.length ? `没找到：${missing.join("、")}。` : ""),
       );
     }
     case "snapshot": {
@@ -119,6 +126,11 @@ async function run(a: ViewApi, name: string, args: Record<string, unknown>): Pro
         files: a.getFiles() as never,
         mimeType: "image/png",
         getDimensions: (w: number, h: number) => {
+          if (args.mode === "full") {
+            // 原尺寸看细节，但别出一张几千万像素的图。
+            const scale = Math.min(1, 4000 / Math.max(w, h, 1));
+            return { width: Math.round(w * scale), height: Math.round(h * scale), scale };
+          }
           // 小图最多放大 2 倍（看得清），大图缩到长边 SNAPSHOT_MAX。
           const scale = Math.min(2, SNAPSHOT_MAX / Math.max(w, h, 1));
           return { width: Math.round(w * scale), height: Math.round(h * scale), scale };
