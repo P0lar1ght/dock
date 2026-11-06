@@ -4,7 +4,7 @@
 //! + `build_compacted_history`, mapped onto Dock `LogEvent` (no `ConversationItem`).
 
 use super::summary::{format_compact_summary_content, wrap_user_query};
-use cordis_base::types::{LlmOutput, LogEvent};
+use cordis_base::types::{LlmOutput, LogEvent, ThinkingBlock};
 
 /// TUI hides [`LogEvent::SystemReminder`]; this assistant bubble is the
 /// visible compact notice (also appended to the display log). Dock-only
@@ -35,6 +35,7 @@ pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEv
                     reasoning_ms: None,
                     tool_calls: Vec::new(),
                     reasoning_items: Vec::new(),
+                    thinking_blocks: Vec::new(),
                     // 压缩摘要是发给模型的，失败详情本来就不进模型历史，
                     // 更不该被摘进去。
                     error: None,
@@ -163,30 +164,48 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
 /// 一轮输出里**会回放给上游**的推理占多少 token。
 ///
 /// 推理是原样回传的（见 [`extract_messages_since_last_user`]）：Responses 回放
-/// `reasoning_items` 原件，chat/completions 回放 `reasoning` 文本。有原件就按原件算，
-/// 没有才退到文本——`reasoning` 本身就是从原件里拼出来的，两者相加会算两遍。
+/// `reasoning_items` 原件，Messages 回放 `thinking_blocks`，chat/completions 回放
+/// `reasoning` 文本（有签名时还会把 signature 包回）。有原件就按原件算，没有才退到
+/// 文本——`reasoning` 本身就是从原件里拼出来的，两者相加会算两遍。
 ///
-/// 每个原件里明文与 `encrypted_content` 是同一段推理的两种形态，取大的那个，不相加；
-/// 密文是 base64，比原始字节大约 4/3（Grok `estimate_item_tokens` 的 Reasoning 臂）。
+/// 每个 Responses 原件里明文与 `encrypted_content` 是同一段推理的两种形态，取大的那个，
+/// 不相加；密文是 base64，比原始字节大约 4/3（Grok `estimate_item_tokens` 的 Reasoning 臂）。
 pub fn estimate_reasoning(out: &LlmOutput) -> u64 {
-    if out.reasoning_items.is_empty() {
-        return estimate_text(&out.reasoning);
-    }
-    out.reasoning_items
-        .iter()
-        .map(|item| {
-            let mut text = String::new();
-            for key in ["content", "summary"] {
-                for part in item[key].as_array().into_iter().flatten() {
-                    if let Some(t) = part["text"].as_str() {
-                        text.push_str(t);
+    if !out.reasoning_items.is_empty() {
+        return out
+            .reasoning_items
+            .iter()
+            .map(|item| {
+                let mut text = String::new();
+                for key in ["content", "summary"] {
+                    for part in item[key].as_array().into_iter().flatten() {
+                        if let Some(t) = part["text"].as_str() {
+                            text.push_str(t);
+                        }
                     }
                 }
-            }
-            let encrypted = item["encrypted_content"].as_str().map_or(0, str::len) as u64;
-            estimate_text(&text).max(encrypted * 3 / 4 / 4)
-        })
-        .sum()
+                let encrypted = item["encrypted_content"].as_str().map_or(0, str::len) as u64;
+                estimate_text(&text).max(encrypted * 3 / 4 / 4)
+            })
+            .sum();
+    }
+    if !out.thinking_blocks.is_empty() {
+        return out
+            .thinking_blocks
+            .iter()
+            .map(|b| match b {
+                ThinkingBlock::Thinking {
+                    thinking,
+                    signature,
+                } => estimate_text(thinking) + estimate_text(signature),
+                ThinkingBlock::RedactedThinking { data } => {
+                    // opaque / 近似 base64：同 Responses encrypted_content 口径。
+                    (data.len() as u64) * 3 / 4 / 4
+                }
+            })
+            .sum();
+    }
+    estimate_text(&out.reasoning)
 }
 
 fn estimate_text(text: &str) -> u64 {
@@ -468,5 +487,20 @@ mod tests {
             ..LlmOutput::default()
         };
         assert_eq!(estimate_reasoning(&out), 1_000 + 3_000);
+    }
+
+    /// #251：Messages thinking + signature 回放后要计入上下文估算。
+    #[test]
+    fn estimate_counts_thinking_blocks_with_signature() {
+        let out = LlmOutput {
+            reasoning: "short".into(),
+            thinking_blocks: vec![ThinkingBlock::Thinking {
+                thinking: "t".repeat(4_000),
+                signature: "s".repeat(4_000),
+            }],
+            ..LlmOutput::default()
+        };
+        // 有 thinking_blocks 就按块算，不再用短 reasoning 文本。
+        assert_eq!(estimate_reasoning(&out), 1_000 + 1_000);
     }
 }

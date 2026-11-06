@@ -1129,6 +1129,9 @@ impl Sessions {
         if out.reasoning_items.is_empty() {
             out.reasoning_items = output.reasoning_items.clone();
         }
+        if out.thinking_blocks.is_empty() {
+            out.thinking_blocks = output.thinking_blocks.clone();
+        }
         if out.reasoning_ms.is_none() && !out.reasoning.is_empty() {
             out.reasoning_ms = self
                 .turn_started

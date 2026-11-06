@@ -1,6 +1,10 @@
 //! Anthropic Messages API (`POST /v1/messages`). Wire mapping copied from
-//! Grok `conversation/messages.rs` + L2 `stream/messages.rs`. Thinking from
-//! prior turns is omitted: Dock has no encrypted `signature` to replay.
+//! Grok `conversation/messages.rs` + L2 `stream/messages.rs`。
+//!
+//! 加密 thinking：收流时把 `signature` / `redacted_thinking` 存进
+//! [`LlmOutput::thinking_blocks`]；下一轮按收到的原样回放（thinking 块在
+//! text / tool_use 之前）。没有有效 signature 就整块不发——只发正文会被上游
+//! 400，中转常再剥 thinking 重试。
 //!
 //! 前缀缓存要显式 `cache_control` 断点（不像 chat/completions 与 Responses 由
 //! 上游自动做），断点布局照抄 Grok `apply_cache_breakpoints`。
@@ -11,7 +15,7 @@ use serde_json::{json, Value};
 
 use cordis_base::stream_acc::StreamDelta;
 use cordis_base::types::{
-    LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
+    LlmOutput, LogEvent, PromptRequest, ThinkingBlock, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
 };
 use cordis_base::usage::TokenUsage;
 
@@ -175,6 +179,7 @@ pub fn transcript(
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() || !llm.text.is_empty() => {
                 flush_tool_results(&mut messages, &mut pending_results);
                 let mut blocks = Vec::new();
+                blocks.extend(replay_thinking_blocks(llm));
                 if !llm.text.is_empty() {
                     blocks.push(json!({"type": "text", "text": llm.text}));
                 }
@@ -249,6 +254,29 @@ fn tool_result_block(id: &str, content: &str) -> Value {
     })
 }
 
+/// 有有效 signature 的 thinking / 任意非空 redacted_thinking，按收到顺序回放。
+/// 缺签名的 thinking **整块跳过**（不要只发正文）。
+fn replay_thinking_blocks(llm: &LlmOutput) -> Vec<Value> {
+    llm.thinking_blocks
+        .iter()
+        .filter(|b| b.is_replayable())
+        .map(|b| match b {
+            ThinkingBlock::Thinking {
+                thinking,
+                signature,
+            } => json!({
+                "type": "thinking",
+                "thinking": thinking,
+                "signature": signature,
+            }),
+            ThinkingBlock::RedactedThinking { data } => json!({
+                "type": "redacted_thinking",
+                "data": data,
+            }),
+        })
+        .collect()
+}
+
 pub fn sanitize_tool_id(id: &str) -> String {
     id.chars()
         .map(|c| {
@@ -300,6 +328,7 @@ enum BlockType {
     Text,
     ToolUse,
     Thinking,
+    RedactedThinking,
 }
 
 #[derive(Debug)]
@@ -310,6 +339,10 @@ struct BlockState {
     tool_id: String,
     args: String,
     thinking: String,
+    /// `signature_delta` 累积；也可在 block_start 里已有。
+    signature: String,
+    /// `redacted_thinking` 的 opaque `data`。
+    redacted_data: String,
 }
 
 /// Per-block Messages SSE accumulator (Grok `BlockState`).
@@ -319,6 +352,8 @@ pub struct Acc {
     blocks: BTreeMap<u32, BlockState>,
     content: String,
     reasoning: String,
+    /// 按 content block 顺序收齐的可回放 thinking 块。
+    thinking_blocks: Vec<ThinkingBlock>,
     tool_calls: Vec<ToolCall>,
     next_tool: u32,
     block_to_tool: BTreeMap<u32, u32>,
@@ -391,6 +426,23 @@ impl Acc {
                         tool_id: String::new(),
                         args: String::new(),
                         thinking: block["thinking"].as_str().unwrap_or("").to_string(),
+                        signature: block["signature"].as_str().unwrap_or("").to_string(),
+                        redacted_data: String::new(),
+                    },
+                );
+            }
+            Some("redacted_thinking") => {
+                self.blocks.insert(
+                    index,
+                    BlockState {
+                        kind: BlockType::RedactedThinking,
+                        text: String::new(),
+                        tool_name: String::new(),
+                        tool_id: String::new(),
+                        args: String::new(),
+                        thinking: String::new(),
+                        signature: String::new(),
+                        redacted_data: block["data"].as_str().unwrap_or("").to_string(),
                     },
                 );
             }
@@ -404,6 +456,8 @@ impl Acc {
                         tool_id: String::new(),
                         args: String::new(),
                         thinking: String::new(),
+                        signature: String::new(),
+                        redacted_data: String::new(),
                     },
                 );
             }
@@ -420,6 +474,8 @@ impl Acc {
                         tool_id: block["id"].as_str().unwrap_or("").to_string(),
                         args: String::new(),
                         thinking: String::new(),
+                        signature: String::new(),
+                        redacted_data: String::new(),
                     },
                 );
             }
@@ -442,6 +498,12 @@ impl Acc {
                 }
                 state.thinking.push_str(piece);
                 vec![StreamDelta::Reasoning(piece.to_string())]
+            }
+            Some("signature_delta") => {
+                // 签名是密文，不进 StreamDelta、不进 reasoning 展示文本。
+                let piece = delta["signature"].as_str().unwrap_or("");
+                state.signature.push_str(piece);
+                Vec::new()
             }
             Some("text_delta") => {
                 let piece = delta["text"].as_str().unwrap_or("");
@@ -475,6 +537,17 @@ impl Acc {
             }
             BlockType::Thinking => {
                 self.reasoning.push_str(&state.thinking);
+                self.thinking_blocks.push(ThinkingBlock::Thinking {
+                    thinking: state.thinking,
+                    signature: state.signature,
+                });
+            }
+            BlockType::RedactedThinking => {
+                if !state.redacted_data.is_empty() {
+                    self.thinking_blocks.push(ThinkingBlock::RedactedThinking {
+                        data: state.redacted_data,
+                    });
+                }
             }
             BlockType::ToolUse => {
                 if !state.tool_name.is_empty() {
@@ -547,6 +620,7 @@ impl Acc {
             text: self.content,
             reasoning: self.reasoning,
             tool_calls: self.tool_calls,
+            thinking_blocks: self.thinking_blocks,
             ..LlmOutput::default()
         }
     }
@@ -561,6 +635,7 @@ pub fn parse_json(body: &str) -> LlmOutput {
     };
     let mut text = String::new();
     let mut reasoning = String::new();
+    let mut thinking_blocks = Vec::new();
     let mut tool_calls = Vec::new();
     let Some(blocks) = v["content"].as_array() else {
         return LlmOutput {
@@ -579,8 +654,18 @@ pub fn parse_json(body: &str) -> LlmOutput {
                 }
             }
             Some("thinking") => {
-                if let Some(s) = block["thinking"].as_str() {
-                    reasoning.push_str(s);
+                let thinking = block["thinking"].as_str().unwrap_or("").to_string();
+                let signature = block["signature"].as_str().unwrap_or("").to_string();
+                reasoning.push_str(&thinking);
+                thinking_blocks.push(ThinkingBlock::Thinking {
+                    thinking,
+                    signature,
+                });
+            }
+            Some("redacted_thinking") => {
+                let data = block["data"].as_str().unwrap_or("").to_string();
+                if !data.is_empty() {
+                    thinking_blocks.push(ThinkingBlock::RedactedThinking { data });
                 }
             }
             Some("tool_use") => {
@@ -608,6 +693,7 @@ pub fn parse_json(body: &str) -> LlmOutput {
         text,
         reasoning,
         tool_calls,
+        thinking_blocks,
         ..LlmOutput::default()
     }
 }
@@ -667,6 +753,7 @@ mod tests {
         );
     }
 
+    /// 没有有效 signature 时仍整块不发 thinking（只存了 `reasoning` 文本不够）。
     #[test]
     fn omits_prior_reasoning_and_groups_tool_results() {
         let request = req(vec![
@@ -1040,7 +1127,7 @@ mod tests {
         let out = parse_json(
             r#"{
                 "content":[
-                    {"type":"thinking","thinking":"plan"},
+                    {"type":"thinking","thinking":"plan","signature":"sig-1"},
                     {"type":"text","text":"answer"},
                     {"type":"tool_use","id":"1","name":"grep","input":{"p":"x"}}
                 ]
@@ -1048,7 +1135,171 @@ mod tests {
         );
         assert_eq!(out.text, "answer");
         assert_eq!(out.reasoning, "plan");
+        assert_eq!(out.thinking_blocks.len(), 1);
+        assert_eq!(
+            out.thinking_blocks[0],
+            ThinkingBlock::Thinking {
+                thinking: "plan".into(),
+                signature: "sig-1".into(),
+            }
+        );
         assert_eq!(out.tool_calls[0].name, "grep");
         assert!(out.tool_calls[0].arguments.contains("p"));
+    }
+
+    /// 有 thinking + signature 时，transcript 把 thinking 块插在 text / tool_use 之前。
+    #[test]
+    fn replays_signed_thinking_before_text_and_tools() {
+        let request = req(vec![
+            LogEvent::User("hi".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "ok".into(),
+                reasoning: "secret plan".into(),
+                thinking_blocks: vec![ThinkingBlock::Thinking {
+                    thinking: "secret plan".into(),
+                    signature: "sig-abc".into(),
+                }],
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }],
+                ..LlmOutput::default()
+            }),
+            LogEvent::ToolExecute {
+                id: "c1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+                content: "done".into(),
+                images: Vec::new(),
+                is_error: false,
+            },
+        ]);
+        let (_, msgs) = transcript(&request, &[], true);
+        let blocks = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "secret plan");
+        assert_eq!(blocks[0]["signature"], "sig-abc");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "ok");
+        assert_eq!(blocks[2]["type"], "tool_use");
+    }
+
+    /// 缺 / 空 signature → 线上不出 thinking 块（即便 thinking_blocks 里有正文）。
+    #[test]
+    fn empty_signature_omits_thinking_block_on_the_wire() {
+        let request = req(vec![
+            LogEvent::User("hi".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "ok".into(),
+                thinking_blocks: vec![ThinkingBlock::Thinking {
+                    thinking: "plan".into(),
+                    signature: String::new(),
+                }],
+                ..LlmOutput::default()
+            }),
+        ]);
+        let (_, msgs) = transcript(&request, &[], true);
+        let blocks = msgs[1]["content"].as_array().unwrap();
+        assert!(blocks
+            .iter()
+            .all(|b| b["type"].as_str() != Some("thinking")));
+        assert_eq!(blocks[0]["type"], "text");
+    }
+
+    /// SSE `signature_delta` 落进 thinking_blocks；thinking 正文进 reasoning，不含签名。
+    #[test]
+    fn sse_signature_delta_lands_in_thinking_blocks() {
+        let mut acc = Acc::new("claude");
+        acc.ingest_json(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+        );
+        acc.ingest_json(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}"#,
+        );
+        let silent = acc.ingest_json(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG"}}"#,
+        );
+        assert!(silent.is_empty(), "signature 不该冒泡成 Reasoning delta");
+        acc.ingest_json(r#"{"type":"content_block_stop","index":0}"#);
+        acc.ingest_json(
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"hi"}}"#,
+        );
+        acc.ingest_json(r#"{"type":"content_block_stop","index":1}"#);
+        let out = acc.finish();
+        assert_eq!(out.reasoning, "plan");
+        assert!(!out.reasoning.contains("SIG"));
+        assert_eq!(
+            out.thinking_blocks,
+            vec![ThinkingBlock::Thinking {
+                thinking: "plan".into(),
+                signature: "SIG".into(),
+            }]
+        );
+        assert_eq!(out.text, "hi");
+    }
+
+    /// block_start 自带 signature 也要收下。
+    #[test]
+    fn sse_block_start_signature_is_kept() {
+        let mut acc = Acc::new("claude");
+        acc.ingest_json(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"x","signature":"from-start"}}"#,
+        );
+        acc.ingest_json(r#"{"type":"content_block_stop","index":0}"#);
+        let out = acc.finish();
+        assert_eq!(
+            out.thinking_blocks[0],
+            ThinkingBlock::Thinking {
+                thinking: "x".into(),
+                signature: "from-start".into(),
+            }
+        );
+    }
+
+    /// redacted_thinking 原样存、原样回放。
+    #[test]
+    fn redacted_thinking_is_stored_and_replayed() {
+        let mut acc = Acc::new("claude");
+        acc.ingest_json(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque-blob"}}"#,
+        );
+        acc.ingest_json(r#"{"type":"content_block_stop","index":0}"#);
+        acc.ingest_json(
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"hi"}}"#,
+        );
+        acc.ingest_json(r#"{"type":"content_block_stop","index":1}"#);
+        let out = acc.finish();
+        assert_eq!(
+            out.thinking_blocks,
+            vec![ThinkingBlock::RedactedThinking {
+                data: "opaque-blob".into(),
+            }]
+        );
+        assert!(out.reasoning.is_empty());
+
+        let request = req(vec![LogEvent::User("hi".into()), LogEvent::LlmStream(out)]);
+        let (_, msgs) = transcript(&request, &[], true);
+        let blocks = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "redacted_thinking");
+        assert_eq!(blocks[0]["data"], "opaque-blob");
+        assert_eq!(blocks[1]["type"], "text");
+    }
+
+    #[test]
+    fn parse_json_keeps_redacted_thinking() {
+        let out = parse_json(
+            r#"{"content":[
+                {"type":"redacted_thinking","data":"blob"},
+                {"type":"text","text":"hi"}
+            ]}"#,
+        );
+        assert_eq!(
+            out.thinking_blocks,
+            vec![ThinkingBlock::RedactedThinking {
+                data: "blob".into(),
+            }]
+        );
+        assert_eq!(out.text, "hi");
     }
 }

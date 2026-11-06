@@ -19,6 +19,9 @@ pub fn lines(
     width: usize,
     expanded: bool,
 ) -> Vec<Line<'static>> {
+    // 兼容中转偶发把 `<signature>…</signature>` 拼进 reasoning：卡片只画可读摘要。
+    let text = cordis_base::types::visible_reasoning_text(text);
+    let text = text.as_str();
     if text.trim().is_empty() {
         return Vec::new();
     }
@@ -160,5 +163,15 @@ mod tests {
         let text = plain(&lines("step one\nstep two", None, true, &theme, 80, false));
         assert!(text.contains("思考中"), "{text}");
         assert!(text.contains("step two"), "{text}");
+    }
+
+    #[test]
+    fn hides_signature_blob_from_card_body() {
+        let theme = Theme::current();
+        let raw = "可读摘要 <signature>encrypted-blob-xyz</signature>";
+        let text = plain(&lines(raw, None, false, &theme, 80, true));
+        assert!(text.contains("可读摘要"), "{text}");
+        assert!(!text.contains("signature"), "{text}");
+        assert!(!text.contains("encrypted-blob"), "{text}");
     }
 }

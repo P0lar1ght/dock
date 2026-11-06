@@ -46,9 +46,32 @@ impl ChatStreamAcc {
                     out.push(StreamDelta::Text(text.clone()));
                 }
             }
-            if let Some(thought) = delta.reasoning_text() {
-                self.reasoning.push_str(&thought);
-                out.push(StreamDelta::Reasoning(thought));
+            // 原始文本进累加器（含可能的 <signature>），展示用剥干净的。
+            let raw = delta
+                .reasoning_content
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or_else(|| delta.reasoning.as_deref().filter(|s| !s.is_empty()))
+                .map(str::to_string)
+                .or_else(|| {
+                    // structured details：拼原文，finish 时再拆 signature。
+                    let mut buf = String::new();
+                    for detail in &delta.reasoning_details {
+                        if let Some(t) = detail.text.as_deref().filter(|s| !s.is_empty()) {
+                            buf.push_str(t);
+                        } else if let Some(t) = detail.summary.as_deref().filter(|s| !s.is_empty())
+                        {
+                            buf.push_str(t);
+                        }
+                    }
+                    (!buf.is_empty()).then_some(buf)
+                });
+            if let Some(raw) = raw {
+                self.reasoning.push_str(&raw);
+                let vis = crate::types::visible_reasoning_text(&raw);
+                if !vis.is_empty() {
+                    out.push(StreamDelta::Reasoning(vis));
+                }
             }
             for tc_delta in delta.tool_calls {
                 let entry = self
@@ -99,10 +122,13 @@ impl ChatStreamAcc {
                 arguments,
             })
             .collect();
+        let (reasoning, thinking_blocks) =
+            crate::types::reasoning_with_thinking_blocks(&self.reasoning);
         LlmOutput {
             text: self.content,
-            reasoning: self.reasoning,
+            reasoning,
             tool_calls,
+            thinking_blocks,
             ..LlmOutput::default()
         }
     }
@@ -366,5 +392,25 @@ mod tests {
         assert!(chat_stream_error(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).is_none());
         assert!(chat_stream_error("[DONE]").is_none());
         assert!(chat_stream_error("not json").is_none());
+    }
+
+    #[test]
+    fn finish_splits_signature_from_reasoning() {
+        let mut acc = ChatStreamAcc::default();
+        let chunk: crate::chat_chunk::ChatCompletionChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"reasoning_content":"plan <signature>abc</signature>"}}]}"#,
+        )
+        .unwrap();
+        let deltas = acc.ingest(chunk);
+        assert_eq!(deltas, vec![StreamDelta::Reasoning("plan ".into())]);
+        let out = acc.finish();
+        assert_eq!(out.reasoning, "plan ");
+        assert_eq!(
+            out.thinking_blocks,
+            vec![crate::types::ThinkingBlock::Thinking {
+                thinking: "plan ".into(),
+                signature: "abc".into(),
+            }]
+        );
     }
 }

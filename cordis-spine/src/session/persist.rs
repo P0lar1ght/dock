@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::log::{ArchivedSession, Sampling};
 use cordis_base::config::dock_home;
-use cordis_base::types::{LlmOutput, LogEvent, ToolCall, TurnEndStatus};
+use cordis_base::types::{LlmOutput, LogEvent, ThinkingBlock, ToolCall, TurnEndStatus};
 
 const HISTORY: &str = "chat_history.jsonl";
 const META: &str = "meta.json";
@@ -102,6 +102,10 @@ enum WireEvent {
         /// 字段，`default` 让它们照常读出来（只是不再有推理链可回放）。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         reasoning_items: Vec<serde_json::Value>,
+        /// Anthropic Messages 的 thinking / redacted_thinking（含 signature）。
+        /// 旧文件没有这个字段，`default` 让它们照常读出来。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        thinking_blocks: Vec<ThinkingBlock>,
         /// 本轮采样的失败详情。旧文件没有这个字段，`default` 让它们照常读出来。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -834,6 +838,7 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
             reasoning: out.reasoning.clone(),
             reasoning_ms: out.reasoning_ms,
             reasoning_items: out.reasoning_items.clone(),
+            thinking_blocks: out.thinking_blocks.clone(),
             error: out.error.clone(),
             tool_calls: out
                 .tool_calls
@@ -891,12 +896,14 @@ fn from_wire(event: WireEvent) -> LogEvent {
             reasoning_ms,
             tool_calls,
             reasoning_items,
+            thinking_blocks,
             error,
         } => LogEvent::LlmStream(LlmOutput {
             text,
             reasoning,
             reasoning_ms,
             reasoning_items,
+            thinking_blocks,
             error,
             tool_calls: tool_calls
                 .into_iter()
@@ -1307,6 +1314,35 @@ mod tests {
         };
         assert_eq!(out.text, "hi");
         assert!(out.reasoning_items.is_empty());
+        assert!(out.thinking_blocks.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_thinking_blocks_and_reads_old_rows() {
+        let _home = cordis_base::test_env::scoped().home();
+        let cwd = Path::new("/tmp/dock-persist-thinking-test");
+        let item = ArchivedSession {
+            id: "tb1".into(),
+            title: "thinking".into(),
+            events: vec![LogEvent::LlmStream(LlmOutput {
+                text: "answer".into(),
+                reasoning: "plan".into(),
+                thinking_blocks: vec![ThinkingBlock::Thinking {
+                    thinking: "plan".into(),
+                    signature: "sig".into(),
+                }],
+                ..LlmOutput::default()
+            })],
+            times: vec![SystemTime::now()],
+            compact_prefix: None,
+            compact_from: 0,
+            preset_id: None,
+            sampling: None,
+        };
+        save(&item, cwd).unwrap();
+        let loaded = load_cwd(cwd);
+        assert_eq!(loaded[0].events, item.events);
+        remove("tb1", cwd).unwrap();
     }
 
     #[test]

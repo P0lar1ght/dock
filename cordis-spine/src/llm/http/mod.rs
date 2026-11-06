@@ -719,20 +719,24 @@ fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], vision: boo
                 if !llm.text.is_empty() {
                     msg["content"] = json!(llm.text);
                 }
-                if !llm.reasoning.is_empty() {
-                    msg["reasoning"] = json!(llm.reasoning);
-                    msg["reasoning_content"] = json!(llm.reasoning);
+                if let Some(reasoning) = cordis_base::types::chat_reasoning_wire(llm) {
+                    msg["reasoning"] = json!(reasoning);
+                    msg["reasoning_content"] = json!(reasoning);
                 }
                 out.push(msg);
                 pending = llm.tool_calls.iter().map(|c| c.id.clone()).collect();
             }
-            LogEvent::LlmStream(llm) if !llm.text.is_empty() || !llm.reasoning.is_empty() => {
+            LogEvent::LlmStream(llm)
+                if !llm.text.is_empty()
+                    || !llm.reasoning.is_empty()
+                    || !llm.thinking_blocks.is_empty() =>
+            {
                 flush_unmatched_tools(&mut out, &mut pending);
                 flush_pending_tool_images(&mut out, &mut pending_images, vision);
                 let mut msg = json!({"role":"assistant","content": llm.text});
-                if !llm.reasoning.is_empty() {
-                    msg["reasoning"] = json!(llm.reasoning);
-                    msg["reasoning_content"] = json!(llm.reasoning);
+                if let Some(reasoning) = cordis_base::types::chat_reasoning_wire(llm) {
+                    msg["reasoning"] = json!(reasoning);
+                    msg["reasoning_content"] = json!(reasoning);
                 }
                 out.push(msg);
             }
@@ -832,13 +836,15 @@ fn parse_chat_completion(body: &str) -> LlmOutput {
     };
     let message = &v["choices"][0]["message"];
     let text = message["content"].as_str().unwrap_or("").to_string();
-    let reasoning = message["reasoning_content"]
+    let raw_reasoning = message["reasoning_content"]
         .as_str()
         .or_else(|| message["reasoning"].as_str())
         .map(str::to_string)
         .filter(|s| !s.is_empty())
         .or_else(|| reasoning_details_text(&message["reasoning_details"]))
         .unwrap_or_default();
+    let (reasoning, thinking_blocks) =
+        cordis_base::types::reasoning_with_thinking_blocks(&raw_reasoning);
     let mut tool_calls = Vec::new();
     if let Some(calls) = message["tool_calls"].as_array() {
         for (i, call) in calls.iter().enumerate() {
@@ -864,6 +870,7 @@ fn parse_chat_completion(body: &str) -> LlmOutput {
         text,
         reasoning,
         tool_calls,
+        thinking_blocks,
         ..LlmOutput::default()
     }
 }
@@ -1430,6 +1437,43 @@ mod tests {
         let out = parse_chat_completion(body);
         assert_eq!(out.text, "answer");
         assert_eq!(out.reasoning, "think hard");
+    }
+
+    /// 兼容层把 signature 塞进 reasoning_content：拆出来存 thinking_blocks，
+    /// 下一轮 chat 回放再包回去。
+    #[test]
+    fn chat_parses_and_replays_signature_in_reasoning_content() {
+        let body = r#"{
+            "choices":[{
+                "message":{
+                    "content":"ok",
+                    "reasoning_content":"plan <signature>SIG123</signature>"
+                }
+            }]
+        }"#;
+        let out = parse_chat_completion(body);
+        assert_eq!(out.reasoning, "plan ");
+        assert_eq!(
+            out.thinking_blocks,
+            vec![cordis_base::types::ThinkingBlock::Thinking {
+                thinking: "plan ".into(),
+                signature: "SIG123".into(),
+            }]
+        );
+        let req = PromptRequest {
+            system: String::new(),
+            history: vec![LogEvent::User("hi".into()), LogEvent::LlmStream(out)],
+            tools: vec![],
+        };
+        let msgs = messages(&req, &[], true);
+        // [0]=system [1]=user [2]=assistant
+        let reasoning = msgs[2]["reasoning_content"].as_str().unwrap();
+        assert!(reasoning.contains("plan "), "{reasoning}");
+        assert!(
+            reasoning.contains("<signature>SIG123</signature>"),
+            "{reasoning}"
+        );
+        assert!(!msgs[2]["reasoning"].as_str().unwrap().is_empty());
     }
 
     #[test]
