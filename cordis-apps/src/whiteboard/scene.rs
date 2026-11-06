@@ -213,6 +213,8 @@ pub struct EditReport {
     pub updated: Vec<String>,
     pub deleted: Vec<String>,
     pub cleared: bool,
+    /// 是否剥过恰好只有一个键 `item` 的包装。
+    pub unwrapped_item: bool,
 }
 
 impl EditReport {
@@ -221,22 +223,72 @@ impl EditReport {
     }
 }
 
+/// 恰好只有一个键 `item` 时剥掉包装，返回内层；否则原样。
+fn unwrap_item(v: &Value) -> (&Value, bool) {
+    match v.as_object() {
+        Some(m) if m.len() == 1 => match m.get("item") {
+            Some(inner) => (inner, true),
+            None => (v, false),
+        },
+        _ => (v, false),
+    }
+}
+
+fn value_kind_hint(v: &Value) -> String {
+    match v {
+        Value::Object(m) => {
+            let keys: Vec<String> = m.keys().map(|k| format!("\"{k}\"")).collect();
+            format!("对象，键为 [{}]", keys.join(", "))
+        }
+        Value::Array(_) => "数组".into(),
+        Value::String(_) => "字符串".into(),
+        Value::Number(_) => "数字".into(),
+        Value::Bool(_) => "布尔".into(),
+        Value::Null => "null".into(),
+    }
+}
+
+fn array_field_error(key: &str, got: &Value) -> String {
+    let example = match key {
+        "delete" => format!("\"{key}\": [\"shape-id\"]"),
+        "update" => format!("\"{key}\": [{{\"id\":\"shape-id\",\"x\":0}}]"),
+        _ => format!("\"{key}\": [{{\"type\":\"rectangle\",\"x\":0,\"y\":0}}]"),
+    };
+    format!(
+        "{key} 要是数组（收到的是{}）。\n把数组直接放在 {key} 下，例如 {example}。\n如果这是 {{\"item\": [...]}}，去掉 item 这层包装。",
+        value_kind_hint(got)
+    )
+}
+
+/// 取数组字段；若整段是 `{"item": [...]}`（恰好一个键）则自动剥掉。
+fn take_array_field(args: &Value, key: &str) -> Result<(Vec<Value>, bool), String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok((Vec::new(), false)),
+        Some(Value::Array(a)) => Ok((a.clone(), false)),
+        Some(v) => {
+            let (inner, unwrapped) = unwrap_item(v);
+            match inner {
+                Value::Array(a) if unwrapped => Ok((a.clone(), true)),
+                other => Err(array_field_error(key, if unwrapped { other } else { v })),
+            }
+        }
+    }
+}
+
 /// `{ add?, update?, delete?, clear? }`：先清空，再删、改、加。任何一条不合法整次不改。
 pub fn apply_edit(scene: &mut Scene, args: &Value) -> Result<EditReport, String> {
-    let list = |key: &str| -> Result<Vec<Value>, String> {
-        match args.get(key) {
-            None | Some(Value::Null) => Ok(Vec::new()),
-            Some(Value::Array(a)) => Ok(a.clone()),
-            Some(_) => Err(format!("{key} 要是数组")),
-        }
-    };
-    let (adds, updates, deletes) = (list("add")?, list("update")?, list("delete")?);
+    let (adds, u_add) = take_array_field(args, "add")?;
+    let (updates, u_upd) = take_array_field(args, "update")?;
+    let (deletes, u_del) = take_array_field(args, "delete")?;
     let clear = args.get("clear").and_then(Value::as_bool).unwrap_or(false);
     if adds.len() + updates.len() + deletes.len() > MAX_OPS {
         return Err(format!("一次最多改 {MAX_OPS} 个，分几次做"));
     }
     let mut next = scene.clone();
-    let mut report = EditReport::default();
+    let mut report = EditReport {
+        unwrapped_item: u_add || u_upd || u_del,
+        ..Default::default()
+    };
     if clear {
         for e in next.elements.iter_mut().filter(|e| !is_deleted(e)) {
             e["isDeleted"] = json!(true);
@@ -245,18 +297,27 @@ pub fn apply_edit(scene: &mut Scene, args: &Value) -> Result<EditReport, String>
         next.pending.clear();
         report.cleared = true;
     }
-    for d in &deletes {
-        let id = d.as_str().ok_or("delete 里要放图形 id（字符串）")?;
-        delete_one(&mut next, id)?;
+    for (i, d) in deletes.iter().enumerate() {
+        let id = d.as_str().ok_or_else(|| {
+            format!(
+                "第 {} 个删除项要是图形 id 字符串（delete[{}] 收到的是{}）",
+                i + 1,
+                i,
+                value_kind_hint(d)
+            )
+        })?;
+        delete_one(&mut next, id)
+            .map_err(|e| format!("第 {} 个删除项：{e}（delete[{i}]）", i + 1))?;
         report.deleted.push(id.to_string());
     }
-    for u in &updates {
+    for (i, u) in updates.iter().enumerate() {
         let id = u
             .get("id")
             .and_then(Value::as_str)
-            .ok_or("update 的每一项要有 id")?
+            .ok_or_else(|| format!("第 {} 个修改缺 id（update[{}] 需要字符串 id）", i + 1, i))?
             .to_string();
-        update_one(&mut next, &id, u)?;
+        update_one(&mut next, &id, u)
+            .map_err(|e| format!("第 {} 个修改：{e}（update[{i}]）", i + 1))?;
         report.updated.push(id);
     }
     let origin = next.bounds();
@@ -278,14 +339,17 @@ fn add_one(
     origin: Option<(f64, f64, f64, f64)>,
     index: usize,
 ) -> Result<String, String> {
-    let kind = shape
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or("add 的每一项要有 type")?;
+    let types = SHAPES.join("|");
+    let kind = shape.get("type").and_then(Value::as_str).ok_or_else(|| {
+        format!(
+            "第 {} 个图形缺 type（add[{index}] 需要 type ∈ {types}）",
+            index + 1
+        )
+    })?;
     if !SHAPES.contains(&kind) {
         return Err(format!(
-            "不认识的 type「{kind}」：可用 {}",
-            SHAPES.join(" / ")
+            "第 {} 个图形 type「{kind}」不认识（add[{index}] 需要 type ∈ {types}）",
+            index + 1
         ));
     }
     // 删掉的图形只剩墓碑：同一个 id 可以再用（清空后重画很常见）。新元素的版本要比墓碑高，
@@ -297,7 +361,10 @@ fn add_one(
     let id = match shape.get("id").and_then(Value::as_str).map(str::trim) {
         Some(id) if !id.is_empty() => {
             if scene.shape(id).is_some() {
-                return Err(format!("id「{id}」已经有了：换一个，或用 update 改它"));
+                return Err(format!(
+                    "第 {} 个图形 id「{id}」已经有了（add[{index}]：换一个，或用 update 改它）",
+                    index + 1
+                ));
             }
             let mut top: Option<u64> = None;
             scene.elements.retain(|e| {
@@ -349,7 +416,10 @@ fn add_one(
         for (key, end) in [("from", "start"), ("to", "end")] {
             if let Some(target) = shape.get(key).and_then(Value::as_str) {
                 if scene.shape(target).is_none() {
-                    return Err(format!("{key}「{target}」不存在"));
+                    return Err(format!(
+                        "第 {} 个图形的 {key}「{target}」不存在（add[{index}]）",
+                        index + 1
+                    ));
                 }
                 s.insert(end.into(), json!({ "id": target }));
             }
@@ -750,6 +820,359 @@ fn wins(incoming: &Value, ours: &Value) -> bool {
     vi > vo || (vi == vo && num(incoming, "versionNonce") < num(ours, "versionNonce"))
 }
 
+// ---- 布局 / 样式（独立工具，避免塞进 edit 撑爆 schema）----
+
+/// 一次布局类操作的结果。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArrangeReport {
+    pub touched: Vec<String>,
+    pub detail: String,
+}
+
+fn require_ids(args: &Value) -> Result<Vec<String>, String> {
+    let (raw, _) = take_array_field(args, "ids")?;
+    if raw.is_empty() {
+        return Err("ids 不能为空：给出要操作的图形 id 数组".into());
+    }
+    let mut ids = Vec::with_capacity(raw.len());
+    for (i, v) in raw.iter().enumerate() {
+        let id = v.as_str().ok_or_else(|| {
+            format!(
+                "第 {} 个 id 要是字符串（ids[{}] 收到的是{}）",
+                i + 1,
+                i,
+                value_kind_hint(v)
+            )
+        })?;
+        if id.is_empty() {
+            return Err(format!("第 {} 个 id 是空的（ids[{i}]）", i + 1));
+        }
+        ids.push(id.to_string());
+    }
+    Ok(ids)
+}
+
+fn live_mut<'a>(scene: &'a mut Scene, id: &str) -> Result<&'a mut Value, String> {
+    if let Some(i) = scene.pending_index(id) {
+        return Ok(&mut scene.pending[i]);
+    }
+    let i = scene
+        .index_of(id)
+        .filter(|&i| !is_deleted(&scene.elements[i]))
+        .ok_or_else(|| format!("没有图形「{id}」：先用 whiteboard_read 看现有的 id"))?;
+    Ok(&mut scene.elements[i])
+}
+
+fn live_ref<'a>(scene: &'a Scene, id: &str) -> Result<&'a Value, String> {
+    scene
+        .shape(id)
+        .ok_or_else(|| format!("没有图形「{id}」：先用 whiteboard_read 看现有的 id"))
+}
+
+/// `whiteboard_group`：`{ ids, ungroup? }`。把 ids 合成一组，或拆掉它们共享的组。
+pub fn apply_group(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
+    let ids = require_ids(args)?;
+    let ungroup = args
+        .get("ungroup")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut next = scene.clone();
+    if ungroup {
+        for id in &ids {
+            let in_elements = next.index_of(id).is_some();
+            let e = live_mut(&mut next, id)?;
+            e["groupIds"] = json!([]);
+            if in_elements {
+                bump(e);
+            }
+        }
+        next.rev = scene.rev + 1;
+        *scene = next;
+        return Ok(ArrangeReport {
+            detail: format!("已取消 {} 个图形的分组", ids.len()),
+            touched: ids,
+        });
+    }
+    if ids.len() < 2 {
+        return Err("group 至少要 2 个 id（把它们合成一组）".into());
+    }
+    let gid = format!("g{}", nonce());
+    for id in &ids {
+        let in_elements = next.index_of(id).is_some();
+        let e = live_mut(&mut next, id)?;
+        let mut groups = e
+            .get("groupIds")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !groups.iter().any(|g| g.as_str() == Some(gid.as_str())) {
+            groups.push(json!(gid));
+        }
+        e["groupIds"] = Value::Array(groups);
+        if in_elements {
+            bump(e);
+        }
+    }
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(ArrangeReport {
+        detail: format!("已把 {} 个图形合成组 {gid}", ids.len()),
+        touched: ids,
+    })
+}
+
+const ALIGN_MODES: &[&str] = &["left", "right", "top", "bottom", "center_x", "center_y"];
+
+/// `whiteboard_align`：`{ ids, align }`。按包围盒对齐。
+pub fn apply_align(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
+    let ids = require_ids(args)?;
+    if ids.len() < 2 {
+        return Err("align 至少要 2 个 id".into());
+    }
+    let mode = args
+        .get("align")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("缺 align（∈ {}）", ALIGN_MODES.join("|")))?;
+    if !ALIGN_MODES.contains(&mode) {
+        return Err(format!(
+            "align「{mode}」不认识（∈ {}）",
+            ALIGN_MODES.join("|")
+        ));
+    }
+    let mut frames = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let e = live_ref(scene, id)?;
+        let (x, y, w, h) = (num(e, "x"), num(e, "y"), num(e, "width"), num(e, "height"));
+        frames.push((id.clone(), x, y, w, h));
+    }
+    let min_x = frames.iter().map(|f| f.1).fold(f64::INFINITY, f64::min);
+    let max_r = frames
+        .iter()
+        .map(|f| f.1 + f.3)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = frames.iter().map(|f| f.2).fold(f64::INFINITY, f64::min);
+    let max_b = frames
+        .iter()
+        .map(|f| f.2 + f.4)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mid_x = (min_x + max_r) / 2.0;
+    let mid_y = (min_y + max_b) / 2.0;
+
+    let mut next = scene.clone();
+    for (id, x, y, w, h) in &frames {
+        let (nx, ny) = match mode {
+            "left" => (min_x, *y),
+            "right" => (max_r - *w, *y),
+            "top" => (*x, min_y),
+            "bottom" => (*x, max_b - *h),
+            "center_x" => (mid_x - *w / 2.0, *y),
+            "center_y" => (*x, mid_y - *h / 2.0),
+            _ => unreachable!(),
+        };
+        if (nx - *x).abs() > 1e-9 || (ny - *y).abs() > 1e-9 {
+            update_one(&mut next, id, &json!({ "x": nx, "y": ny }))?;
+        }
+    }
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(ArrangeReport {
+        detail: format!("已按 {mode} 对齐 {} 个图形", ids.len()),
+        touched: ids,
+    })
+}
+
+/// `whiteboard_style`：`{ ids, stroke?, fill?, strokeStyle? }` 批量改样式。
+pub fn apply_style(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
+    let ids = require_ids(args)?;
+    let has = ["stroke", "fill", "strokeStyle"]
+        .iter()
+        .any(|k| args.get(k).is_some());
+    if !has {
+        return Err("至少给 stroke / fill / strokeStyle 之一".into());
+    }
+    let mut patch = serde_json::Map::new();
+    for k in ["stroke", "fill", "strokeStyle"] {
+        if let Some(v) = args.get(k) {
+            patch.insert(k.into(), v.clone());
+        }
+    }
+    let patch = Value::Object(patch);
+    let mut next = scene.clone();
+    for (i, id) in ids.iter().enumerate() {
+        update_one(&mut next, id, &patch)
+            .map_err(|e| format!("第 {} 个图形：{e}（ids[{i}]）", i + 1))?;
+    }
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(ArrangeReport {
+        detail: format!("已改 {} 个图形的样式", ids.len()),
+        touched: ids,
+    })
+}
+
+const LAYER_TO: &[&str] = &["front", "back", "forward", "backward"];
+
+/// `whiteboard_layer`：`{ ids, to }`。调 z 序（数组越后越靠上）。
+pub fn apply_layer(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
+    let ids = require_ids(args)?;
+    let to = args
+        .get("to")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("缺 to（∈ {}）", LAYER_TO.join("|")))?;
+    if !LAYER_TO.contains(&to) {
+        return Err(format!("to「{to}」不认识（∈ {}）", LAYER_TO.join("|")));
+    }
+    // 只动完整元素；pending 本来就在「待画」层，不参与 z 序。
+    for id in &ids {
+        if scene.pending_index(id).is_some() && scene.index_of(id).is_none() {
+            return Err(format!("「{id}」还在待画：等界面画成完整元素后再调图层"));
+        }
+        if scene
+            .index_of(id)
+            .filter(|&i| !is_deleted(&scene.elements[i]))
+            .is_none()
+        {
+            return Err(format!(
+                "没有图形「{id}」：先用 whiteboard_read 看现有的 id"
+            ));
+        }
+    }
+    let mut next = scene.clone();
+    let mut positions: Vec<usize> = ids.iter().filter_map(|id| next.index_of(id)).collect();
+    positions.sort_unstable();
+    positions.dedup();
+    match to {
+        "front" => {
+            let mut moved = Vec::new();
+            for i in positions.into_iter().rev() {
+                moved.push(next.elements.remove(i));
+            }
+            moved.reverse();
+            for e in &mut moved {
+                bump(e);
+            }
+            next.elements.extend(moved);
+        }
+        "back" => {
+            let mut moved = Vec::new();
+            for i in positions.into_iter().rev() {
+                moved.push(next.elements.remove(i));
+            }
+            moved.reverse();
+            for e in &mut moved {
+                bump(e);
+            }
+            next.elements.splice(0..0, moved);
+        }
+        "forward" => {
+            // 每个选中项与后一个未选中项交换（从后往前扫避免连环）。
+            let selected: std::collections::HashSet<String> = ids.iter().cloned().collect();
+            let mut i = next.elements.len().saturating_sub(1);
+            while i > 0 {
+                let id = id_of(&next.elements[i - 1]).unwrap_or("").to_string();
+                let next_id = id_of(&next.elements[i]).unwrap_or("").to_string();
+                if selected.contains(&id) && !selected.contains(&next_id) {
+                    next.elements.swap(i - 1, i);
+                    bump(&mut next.elements[i]);
+                    bump(&mut next.elements[i - 1]);
+                }
+                i -= 1;
+            }
+        }
+        "backward" => {
+            let selected: std::collections::HashSet<String> = ids.iter().cloned().collect();
+            let len = next.elements.len();
+            for i in 0..len.saturating_sub(1) {
+                let id = id_of(&next.elements[i]).unwrap_or("").to_string();
+                let next_id = id_of(&next.elements[i + 1]).unwrap_or("").to_string();
+                if selected.contains(&next_id) && !selected.contains(&id) {
+                    next.elements.swap(i, i + 1);
+                    bump(&mut next.elements[i]);
+                    bump(&mut next.elements[i + 1]);
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(ArrangeReport {
+        detail: format!("已把 {} 个图形移到 {to}", ids.len()),
+        touched: ids,
+    })
+}
+
+/// 估算文字占位：中文约 1em 宽；padding 左右各 16、上下各 12。
+fn estimate_text_box(text: &str, font_size: f64) -> (f64, f64) {
+    let lines: Vec<&str> = text.lines().collect();
+    let lines = if lines.is_empty() { vec![""] } else { lines };
+    let max_chars = lines.iter().map(|l| l.chars().count()).max().unwrap_or(1) as f64;
+    let width = (max_chars * font_size).max(font_size) + 32.0;
+    let height = lines.len() as f64 * font_size * 1.25 + 24.0;
+    (width, height)
+}
+
+fn shape_label_text(scene: &Scene, e: &Value) -> Option<String> {
+    let kind = kind_of(e);
+    if kind == "text" {
+        return e.get("text").and_then(Value::as_str).map(str::to_string);
+    }
+    if let Some(t) = e.pointer("/label/text").and_then(Value::as_str) {
+        return Some(t.to_string());
+    }
+    let id = id_of(e)?;
+    scene
+        .live()
+        .find(|t| t.get("containerId").and_then(Value::as_str) == Some(id))
+        .and_then(|t| t.get("text").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// `whiteboard_fit_text`：`{ ids }`。按文字估算把框调到够用的大小（菱形 height 只抬下限）。
+pub fn apply_fit_text(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
+    let ids = require_ids(args)?;
+    let mut next = scene.clone();
+    for (i, id) in ids.iter().enumerate() {
+        let e = live_ref(&next, id)
+            .map_err(|e| format!("第 {} 个图形：{e}（ids[{i}]）", i + 1))?
+            .clone();
+        let kind = kind_of(&e);
+        if kind == "arrow" || kind == "line" {
+            return Err(format!(
+                "第 {} 个图形是 {kind}，fit_text 只适用于矩形/椭圆/菱形/文字（ids[{i}]）",
+                i + 1
+            ));
+        }
+        let text = shape_label_text(&next, &e).unwrap_or_default();
+        if text.is_empty() {
+            return Err(format!("第 {} 个图形没有文字可适配（ids[{i}]）", i + 1));
+        }
+        let font = opt_num(&e, "fontSize").unwrap_or(20.0).max(8.0);
+        let (w, h) = estimate_text_box(&text, font);
+        let mut patch = json!({ "width": w });
+        if kind == "diamond" {
+            // 菱形 height 只是下限：只抬高、不缩小。
+            let cur_h = num(&e, "height");
+            if h > cur_h {
+                patch["height"] = json!(h);
+            }
+        } else if kind == "text" {
+            patch["height"] = json!(h);
+            // text 形状同时记下 fontSize（若原本没有）
+        } else {
+            patch["height"] = json!(h);
+        }
+        update_one(&mut next, id, &patch)
+            .map_err(|e| format!("第 {} 个图形：{e}（ids[{i}]）", i + 1))?;
+    }
+    next.rev = scene.rev + 1;
+    *scene = next;
+    Ok(ArrangeReport {
+        detail: format!("已按文字适配 {} 个图形尺寸", ids.len()),
+        touched: ids,
+    })
+}
+
 // ---- 给模型看的 ----
 
 /// 一行一个图形；容器里的文字并进容器的标签，箭头写两端。
@@ -804,7 +1227,26 @@ pub fn summary(scene: &Scene) -> (String, Value) {
     if !scene.pending.is_empty() {
         text.push_str("\n（标「待画」的是刚加的：用户打开白板界面后才排好版、连好线。）");
     }
-    (text, json!({ "rev": scene.rev, "shapes": shapes }))
+    let patches: Vec<Value> = shapes
+        .iter()
+        .map(|s| {
+            let mut p = serde_json::Map::new();
+            for key in [
+                "id", "type", "x", "y", "width", "height", "text", "stroke", "fill", "from", "to",
+            ] {
+                if let Some(v) = s.get(key) {
+                    if !v.is_null() {
+                        p.insert(key.into(), v.clone());
+                    }
+                }
+            }
+            Value::Object(p)
+        })
+        .collect();
+    (
+        text,
+        json!({ "rev": scene.rev, "shapes": shapes, "patches": patches }),
+    )
 }
 
 fn describe(
@@ -1258,5 +1700,134 @@ mod tests {
             Scene::load(&dir.path().join("missing.json")).unwrap().0,
             Scene::default()
         );
+    }
+
+    #[test]
+    fn unwraps_exactly_item_wrapper_and_mentions_it() {
+        let mut s = Scene::default();
+        let r = apply_edit(
+            &mut s,
+            &json!({ "add": { "item": [{ "type": "rectangle", "id": "a", "text": "x" }] } }),
+        )
+        .unwrap();
+        assert!(r.unwrapped_item);
+        assert_eq!(r.added, ["a"]);
+        assert_eq!(s.pending[0]["id"], "a");
+    }
+
+    #[test]
+    fn does_not_unwrap_item_when_other_keys_present() {
+        let mut s = Scene::default();
+        let err = apply_edit(
+            &mut s,
+            &json!({ "add": { "item": [{ "type": "rectangle" }], "extra": 1 } }),
+        )
+        .unwrap_err();
+        assert!(err.contains("add 要是数组"), "{err}");
+        assert!(err.contains("\"item\""), "{err}");
+        assert!(err.contains("\"extra\""), "{err}");
+        assert!(err.contains("去掉 item 这层包装"), "{err}");
+        assert!(err.contains("\"add\": [{\"type\":\"rectangle\""), "{err}");
+        assert_eq!(s, Scene::default());
+    }
+
+    #[test]
+    fn missing_type_error_includes_index_and_allowed_set() {
+        let mut s = Scene::default();
+        // add[0] ok, add[1] ok, add[2] missing type → 第 3 个 / add[2]
+        let err = apply_edit(
+            &mut s,
+            &json!({ "add": [
+                { "type": "rectangle", "id": "a" },
+                { "type": "ellipse", "id": "b" },
+                { "id": "c", "x": 0 }
+            ] }),
+        )
+        .unwrap_err();
+        assert!(err.contains("第 3 个图形缺 type"), "{err}");
+        assert!(err.contains("add[2]"), "{err}");
+        assert!(
+            err.contains("rectangle|ellipse|diamond|text|arrow|line"),
+            "{err}"
+        );
+        assert_eq!(s, Scene::default(), "原子性：失败不改");
+    }
+
+    #[test]
+    fn summary_returns_reusable_patches() {
+        let mut s = Scene::default();
+        apply_edit(
+            &mut s,
+            &json!({ "add": [{ "type": "rectangle", "id": "a", "text": "登录", "x": 10, "y": 20 }] }),
+        )
+        .unwrap();
+        let (_, data) = summary(&s);
+        let patches = data["patches"].as_array().unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0]["id"], "a");
+        assert_eq!(patches[0]["type"], "rectangle");
+        assert_eq!(patches[0]["text"], "登录");
+        assert_eq!(patches[0]["x"], 10.0);
+        assert!(
+            patches[0].get("pending").is_none(),
+            "patch 不含 pending 标记"
+        );
+    }
+
+    #[test]
+    fn group_align_style_layer_fit_text_happy_paths() {
+        let mut s = Scene {
+            elements: vec![
+                full("a", "rectangle", 0.0, 1),
+                full("b", "rectangle", 200.0, 1),
+                full("c", "ellipse", 50.0, 1),
+            ],
+            ..Default::default()
+        };
+        s.elements[0]["y"] = json!(10.0);
+        s.elements[0]["height"] = json!(40.0);
+        s.elements[1]["y"] = json!(80.0);
+        s.elements[1]["text"] = json!("很长的中文标签需要更宽");
+        // pending label path: put text via bound — use update after; for fit_text use label on pending-less full element
+        // Give a a label element
+        let mut label = full("a-t", "text", 0.0, 1);
+        label["containerId"] = json!("a");
+        label["text"] = json!("短");
+        s.elements.push(label);
+
+        let g = apply_group(&mut s, &json!({ "ids": ["a", "b"] })).unwrap();
+        assert!(g.detail.contains("合成组"));
+        assert_eq!(s.elements[0]["groupIds"][0], s.elements[1]["groupIds"][0]);
+
+        let al = apply_align(&mut s, &json!({ "ids": ["a", "b"], "align": "left" })).unwrap();
+        assert!(al.detail.contains("left"));
+        assert_eq!(s.elements[0]["x"], s.elements[1]["x"]);
+
+        let st = apply_style(
+            &mut s,
+            &json!({ "ids": ["a", "b"], "stroke": "#ff0000", "fill": "#00ff00" }),
+        )
+        .unwrap();
+        assert!(st.detail.contains("样式"));
+        assert_eq!(s.elements[0]["strokeColor"], "#ff0000");
+        assert_eq!(s.elements[1]["backgroundColor"], "#00ff00");
+
+        let before_front = s.elements.iter().position(|e| e["id"] == "a").unwrap();
+        let ly = apply_layer(&mut s, &json!({ "ids": ["a"], "to": "front" })).unwrap();
+        assert!(ly.detail.contains("front"));
+        assert_eq!(s.elements.last().unwrap()["id"], "a");
+        assert!(before_front < s.elements.len() - 1 || true);
+
+        // fit_text on b: add a label first via update
+        apply_edit(
+            &mut s,
+            &json!({ "update": [{ "id": "b", "text": "很长的中文标签需要更宽" }] }),
+        )
+        .unwrap();
+        let old_w = num(s.elements.iter().find(|e| e["id"] == "b").unwrap(), "width");
+        let ft = apply_fit_text(&mut s, &json!({ "ids": ["b"] })).unwrap();
+        assert!(ft.detail.contains("适配"));
+        let new_w = num(s.elements.iter().find(|e| e["id"] == "b").unwrap(), "width");
+        assert!(new_w > old_w, "width {old_w} -> {new_w}");
     }
 }

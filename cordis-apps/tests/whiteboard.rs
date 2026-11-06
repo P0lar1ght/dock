@@ -80,6 +80,20 @@ async fn whiteboard_speaks_mcp_apps_and_keeps_one_scene_per_project() {
         by("whiteboard_save")["_meta"]["ui"]["visibility"],
         json!(["app"])
     );
+    // items 不再塞 13 个 properties，避免模型把数组包成 {item:...}
+    let add_items = &by("whiteboard_edit")["inputSchema"]["properties"]["add"]["items"];
+    assert_eq!(add_items["type"], "object");
+    assert_eq!(add_items["additionalProperties"], true);
+    assert!(add_items.get("properties").is_none(), "{add_items}");
+    for name in [
+        "whiteboard_group",
+        "whiteboard_align",
+        "whiteboard_style",
+        "whiteboard_layer",
+        "whiteboard_fit_text",
+    ] {
+        assert!(tools.iter().any(|t| t["name"] == name), "缺工具 {name}");
+    }
 
     let res = c
         .call("resources/read", json!({ "uri": RESOURCE_URI }))
@@ -135,6 +149,30 @@ async fn whiteboard_speaks_mcp_apps_and_keeps_one_scene_per_project() {
     assert!(
         text.contains("rectangle id=a") && !text.contains("待画"),
         "{text}"
+    );
+
+    // 恰好 {item:[...]} 的包装会被剥掉
+    let wrapped = c
+        .tool(
+            "whiteboard_edit",
+            json!({ "add": { "item": [{ "type": "ellipse", "id": "e1", "text": "圆" }] } }),
+            "/work/a",
+        )
+        .await;
+    assert_eq!(wrapped["isError"], false, "{wrapped}");
+    let wtext = wrapped["content"][0]["text"].as_str().unwrap();
+    assert!(wtext.contains("已自动去掉 item 包装层"), "{wtext}");
+    assert_eq!(wrapped["structuredContent"]["unwrappedItem"], true);
+    assert!(wrapped["structuredContent"]["patches"].is_array());
+
+    let read2 = c.tool("whiteboard_read", json!({}), "/work/a").await;
+    assert!(
+        read2["structuredContent"]["patches"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 2,
+        "{read2}"
     );
 
     let bad = c

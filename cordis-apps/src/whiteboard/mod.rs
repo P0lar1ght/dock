@@ -1,6 +1,7 @@
 //! 内置白板（`dock mcp whiteboard`）：Excalidraw 界面 + 按项目存的场景。
 //!
-//! - 模型用 `whiteboard_read`（读，不挂界面）、`whiteboard_edit`（改，挂界面 `ui://whiteboard/board.html`）；
+//! - 模型用 `whiteboard_read`（读，不挂界面）、`whiteboard_edit`（改，挂界面 `ui://whiteboard/board.html`），
+//!   以及 `whiteboard_group` / `align` / `style` / `layer` / `fit_text`（布局与样式，避免塞进 edit 撑爆 schema）；
 //! - 界面用只给界面的 `whiteboard_load` / `whiteboard_save` 读写同一份场景；
 //! - 场景按 Dock 带来的 `_meta["dock/cwd"]` 分项目：`$DOCK_HOME/apps/whiteboard/<项目目录名>/scene.json`。
 
@@ -27,27 +28,29 @@ const BOARD_HTML: &str = include_str!("../../assets/whiteboard.html");
 /// 中文手写字体（Xiaolai，12 MB）不打进界面：联网时从这里取，离线退回系统字体。
 const FONT_CDN: &str = "https://esm.sh";
 
-const READ_DESC: &str = "Read the project's whiteboard: every shape with its id, type, label, position, size, colors, and arrow endpoints. The whiteboard is shared with the user, who may have edited it since you last looked — read before editing.";
+const READ_DESC: &str = "Read the project's whiteboard: every shape with id/type/label/position/size/colors/arrow endpoints, plus reusable `patches` you can copy into whiteboard_edit update/add. The board is shared with the user — read before editing.";
 
-const EDIT_DESC: &str = "Edit the project's whiteboard (an Excalidraw canvas the user sees and edits too). In one call: `clear` everything, `delete` shapes by id, `update` shapes ({id, x?, y?, width?, height?, text?, stroke?, fill?, strokeStyle?}), and `add` shapes ({type: rectangle|ellipse|diamond|text|arrow|line, id?, x?, y?, width?, height?, text?, stroke?, fill?, strokeStyle?, from?, to?, fontSize?}). `text` is the label inside a shape or on an arrow, or the content of a text shape. Arrows connect shapes with `from`/`to` ids. Omit x/y to lay new shapes out in a column next to the existing content. Colors are #rrggbb. Give your own short ids to shapes you will connect or update later. The whole edit is rejected if any part is invalid.";
+const EDIT_DESC: &str = concat!(
+    "Edit the project's whiteboard (Excalidraw; user sees it too). One call: `clear`?, `delete`? (id strings), ",
+    "`update`? (objects), `add`? (objects). Whole edit is atomic.\n\n",
+    "`add`/`update` MUST be flat arrays of objects — NOT {\"item\": [...]}. ",
+    "Example: \"add\": [{\"type\":\"rectangle\",\"x\":0,\"y\":0}].\n\n",
+    "Shape fields (validated server-side): `type` ∈ rectangle|ellipse|diamond|text|arrow|line; `id`?; ",
+    "`x`/`y`/`width`/`height`?; `text`? (label inside shape / on arrow / text content); ",
+    "`stroke`? / `fill`? (#rrggbb or transparent); `strokeStyle`? ∈ solid|dashed|dotted; ",
+    "`from`/`to`? (arrow/line endpoint shape ids); `fontSize`? (text shapes). ",
+    "Omit x/y to stack new shapes in a column to the right of existing content. ",
+    "Give short ids to shapes you will connect or update later.\n\n",
+    "For group/align/batch-style/layer/fit-text use the dedicated whiteboard_* tools — do not stuff them into this schema."
+);
 
-fn shape_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "id": { "type": "string" },
-            "type": { "type": "string", "enum": ["rectangle", "ellipse", "diamond", "text", "arrow", "line"] },
-            "x": { "type": "number" }, "y": { "type": "number" },
-            "width": { "type": "number" }, "height": { "type": "number" },
-            "text": { "type": "string" },
-            "stroke": { "type": "string", "description": "Line / text color, #rrggbb." },
-            "fill": { "type": "string", "description": "Fill color, #rrggbb or transparent." },
-            "strokeStyle": { "type": "string", "enum": ["solid", "dashed", "dotted"] },
-            "from": { "type": "string", "description": "Arrow / line start shape id." },
-            "to": { "type": "string", "description": "Arrow / line end shape id." },
-            "fontSize": { "type": "number" }
-        }
-    })
+/// 故意不列 properties：嵌套一长串会触发部分模型把数组包成 `{item: ...}`。
+fn shape_item_schema() -> Value {
+    json!({ "type": "object", "additionalProperties": true })
+}
+
+fn ids_schema() -> Value {
+    json!({ "type": "array", "items": { "type": "string" } })
 }
 
 pub struct Whiteboard {
@@ -96,6 +99,32 @@ impl Whiteboard {
     }
 }
 
+fn save_ok(scene: &mut Scene, path: &std::path::Path, head: String) -> Value {
+    scene.gc_files();
+    if let Err(e) = scene.save(path) {
+        return tool_result(e, None, true);
+    }
+    let (summary, data) = scene::summary(scene);
+    tool_result(
+        format!("{head}\n{summary}"),
+        Some(json!({
+            "rev": scene.rev,
+            "shapes": data["shapes"],
+            "patches": data["patches"],
+        })),
+        false,
+    )
+}
+
+fn arrange_ok(scene: &mut Scene, path: &std::path::Path, report: scene::ArrangeReport) -> Value {
+    let head = format!("已改白板：{}。", report.detail);
+    let mut out = save_ok(scene, path, head);
+    if let Some(sc) = out.get_mut("structuredContent") {
+        sc["touched"] = json!(report.touched);
+    }
+    out
+}
+
 /// 一次工具调用：读 / 改 / 存都在调用方拿着锁的时候做。
 fn apply(name: &str, args: &Value, path: &std::path::Path, mut scene: Scene) -> Value {
     match name {
@@ -105,11 +134,6 @@ fn apply(name: &str, args: &Value, path: &std::path::Path, mut scene: Scene) -> 
         }
         "whiteboard_edit" => match scene::apply_edit(&mut scene, args) {
             Ok(report) => {
-                scene.gc_files();
-                if let Err(e) = scene.save(path) {
-                    return tool_result(e, None, true);
-                }
-                let (summary, data) = scene::summary(&scene);
                 let mut head = format!(
                     "已改白板：新增 {}、修改 {}、删除 {}",
                     report.added.len(),
@@ -119,16 +143,41 @@ fn apply(name: &str, args: &Value, path: &std::path::Path, mut scene: Scene) -> 
                 if report.cleared {
                     head.push_str("（先清空了）");
                 }
-                tool_result(
-                    format!("{head}。\n{summary}"),
-                    Some(json!({
-                        "rev": scene.rev,
-                        "added": report.added, "updated": report.updated, "deleted": report.deleted,
-                        "shapes": data["shapes"],
-                    })),
-                    false,
-                )
+                if report.unwrapped_item {
+                    head.push_str("。已自动去掉 item 包装层");
+                }
+                head.push('。');
+                let mut out = save_ok(&mut scene, path, head);
+                if let Some(sc) = out.get_mut("structuredContent") {
+                    sc["added"] = json!(report.added);
+                    sc["updated"] = json!(report.updated);
+                    sc["deleted"] = json!(report.deleted);
+                    if report.unwrapped_item {
+                        sc["unwrappedItem"] = json!(true);
+                    }
+                }
+                out
             }
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_group" => match scene::apply_group(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_align" => match scene::apply_align(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_style" => match scene::apply_style(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_layer" => match scene::apply_layer(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
+            Err(e) => tool_result(format!("白板没改：{e}"), None, true),
+        },
+        "whiteboard_fit_text" => match scene::apply_fit_text(&mut scene, args) {
+            Ok(r) => arrange_ok(&mut scene, path, r),
             Err(e) => tool_result(format!("白板没改：{e}"), None, true),
         },
         "whiteboard_load" => {
@@ -183,6 +232,7 @@ impl App for Whiteboard {
 
     fn tools(&self) -> Vec<Value> {
         let app_only = json!({ "ui": { "resourceUri": RESOURCE_URI, "visibility": ["app"] } });
+        let ui = || json!({ "ui": { "resourceUri": RESOURCE_URI } });
         vec![
             json!({
                 "name": "whiteboard_read",
@@ -196,13 +246,79 @@ impl App for Whiteboard {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "add": { "type": "array", "items": shape_schema() },
-                        "update": { "type": "array", "items": shape_schema() },
+                        "add": { "type": "array", "items": shape_item_schema() },
+                        "update": { "type": "array", "items": shape_item_schema() },
                         "delete": { "type": "array", "items": { "type": "string" } },
                         "clear": { "type": "boolean" }
                     }
                 },
-                "_meta": { "ui": { "resourceUri": RESOURCE_URI } },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_group",
+                "description": "Group shapes together or ungroup them. Pass flat `ids` string array (NOT {\"item\":...}). `ungroup: true` clears groupIds; otherwise needs ≥2 ids.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": ids_schema(),
+                        "ungroup": { "type": "boolean" }
+                    },
+                    "required": ["ids"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_align",
+                "description": "Align ≥2 shapes. `align` ∈ left|right|top|bottom|center_x|center_y. `ids` must be a flat string array.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": ids_schema(),
+                        "align": { "type": "string" }
+                    },
+                    "required": ["ids", "align"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_style",
+                "description": "Batch-set stroke/fill/strokeStyle on many shapes. Flat args: `ids` plus optional `stroke` (#rrggbb), `fill` (#rrggbb|transparent), `strokeStyle` (solid|dashed|dotted).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": ids_schema(),
+                        "stroke": { "type": "string" },
+                        "fill": { "type": "string" },
+                        "strokeStyle": { "type": "string" }
+                    },
+                    "required": ["ids"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_layer",
+                "description": "Change z-order of shapes already drawn (not pending). `to` ∈ front|back|forward|backward. `ids` flat string array.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": ids_schema(),
+                        "to": { "type": "string" }
+                    },
+                    "required": ["ids", "to"]
+                },
+                "_meta": ui(),
+            }),
+            json!({
+                "name": "whiteboard_fit_text",
+                "description": "Resize rectangle/ellipse/diamond/text boxes to fit their label/text. Diamond height is raised only (lower bound). `ids` flat string array.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": ids_schema()
+                    },
+                    "required": ["ids"]
+                },
+                "_meta": ui(),
             }),
             json!({
                 "name": "whiteboard_load",
