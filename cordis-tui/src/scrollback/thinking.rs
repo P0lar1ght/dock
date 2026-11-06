@@ -174,4 +174,21 @@ mod tests {
         assert!(!text.contains("signature"), "{text}");
         assert!(!text.contains("encrypted-blob"), "{text}");
     }
+
+    #[test]
+    fn hides_orphan_close_screenshot_leak() {
+        let theme = Theme::current();
+        let raw = "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc-</signature>\n用户问有哪些未提交的改动。";
+        let text = plain(&lines(raw, Some(0), false, &theme, 80, true));
+        assert!(text.contains("用户问有哪些未提交的改动"), "{text}");
+        assert!(!text.contains("AQEA"), "{text}");
+        assert!(!text.contains("signature"), "{text}");
+    }
+
+    #[test]
+    fn bare_ciphertext_yields_no_card() {
+        let theme = Theme::current();
+        let raw = "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc_JDMPVT78QAPrltzmOdjrXDkEdQgh5Grt";
+        assert!(lines(raw, None, false, &theme, 80, true).is_empty());
+    }
 }

@@ -898,8 +898,10 @@ fn build_frame_with(
                 let think_id = format!("think:{i}");
                 let think_open = expanded.contains(&think_id);
                 let streaming_think = working && i + 1 == events.len() && llm.tool_calls.is_empty();
+                // 优先 thinking_blocks 里的摘要；旧会话 reasoning 可能是缺开标签的密文残片。
+                let think_text = llm.display_reasoning();
                 let think = thinking::lines(
-                    &llm.reasoning,
+                    &think_text,
                     llm.reasoning_ms,
                     streaming_think,
                     &theme,

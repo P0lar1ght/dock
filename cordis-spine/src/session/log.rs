@@ -1114,8 +1114,12 @@ impl Sessions {
         if out.text.is_empty() {
             out.text = output.text.clone();
         }
-        if out.reasoning.is_empty() {
+        // 流式 delta 可能在签名跨 chunk 时短暂拼进过密文残片；finish 时的
+        // reasoning 已剥干净，始终以它为准（不只在 empty 时才写）。
+        if !output.reasoning.is_empty() {
             out.reasoning = output.reasoning.clone();
+        } else if !out.reasoning.is_empty() {
+            out.reasoning = cordis_base::types::visible_reasoning_text(&out.reasoning);
         }
         // 失败详情只落事件、不进 `text`：三条 wire builder 都以 `text` 非空或
         // 有 tool_call 为门槛，所以它天然不会被回放给模型。

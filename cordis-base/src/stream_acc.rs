@@ -27,6 +27,9 @@ pub enum StreamDelta {
 pub struct ChatStreamAcc {
     content: String,
     reasoning: String,
+    /// 已作为 [`StreamDelta::Reasoning`] 推出去的可见正文，用来对累加结果算增量。
+    /// 必须按「整段 raw 再剥签名」来算，否则 `<signature>` 跨 chunk 时后半截密文会漏出去。
+    reasoning_visible_emitted: String,
     /// index → (id, name, arguments)
     tool_calls: BTreeMap<u32, (String, String, String)>,
     /// provider 在流中途发的错误。与 messages / responses 两条 wire 同构：
@@ -68,9 +71,20 @@ impl ChatStreamAcc {
                 });
             if let Some(raw) = raw {
                 self.reasoning.push_str(&raw);
-                let vis = crate::types::visible_reasoning_text(&raw);
-                if !vis.is_empty() {
-                    out.push(StreamDelta::Reasoning(vis));
+                // 对整段累加结果剥签名，再推「相对上次已推可见正文」的增量。
+                // 单 chunk 剥会在开标签落在前一片、本片只剩 `密文</signature>摘要` 时漏密文。
+                let vis_full = crate::types::visible_reasoning_text(&self.reasoning);
+                if let Some(delta) = vis_full.strip_prefix(self.reasoning_visible_emitted.as_str()) {
+                    if !delta.is_empty() {
+                        out.push(StreamDelta::Reasoning(delta.to_string()));
+                    }
+                    self.reasoning_visible_emitted = vis_full;
+                } else {
+                    // 可见正文相对已推前缀收缩/改写（少见）；同步基准，避免后续增量错位。
+                    self.reasoning_visible_emitted = vis_full.clone();
+                    if !vis_full.is_empty() {
+                        out.push(StreamDelta::Reasoning(vis_full));
+                    }
                 }
             }
             for tc_delta in delta.tool_calls {
@@ -412,5 +426,62 @@ mod tests {
                 signature: "abc".into(),
             }]
         );
+    }
+
+    /// 开标签与闭标签落在不同 chunk：中间密文绝不能进 Reasoning delta。
+    #[test]
+    fn cross_chunk_signature_does_not_leak_ciphertext() {
+        let mut acc = ChatStreamAcc::default();
+        let open: crate::chat_chunk::ChatCompletionChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"reasoning_content":"<signature>AQEAxY98byFUH9pW8-HCEzli3wAAAAA"}}]}"#,
+        )
+        .unwrap();
+        assert!(
+            acc.ingest(open).is_empty(),
+            "unclosed signature chunk must emit nothing"
+        );
+
+        let close: crate::chat_chunk::ChatCompletionChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"reasoning_content":"a3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc-</signature>\n用户问有哪些未提交的改动。"}}]}"#,
+        )
+        .unwrap();
+        let deltas = acc.ingest(close);
+        assert_eq!(
+            deltas,
+            vec![StreamDelta::Reasoning("\n用户问有哪些未提交的改动。".into())]
+        );
+        for d in &deltas {
+            if let StreamDelta::Reasoning(t) = d {
+                assert!(!t.contains("AQEA"), "{t}");
+                assert!(!t.contains("signature"), "{t}");
+            }
+        }
+        let out = acc.finish();
+        assert!(out.reasoning.contains("用户问有哪些未提交的改动"), "{out:?}");
+        assert!(!out.reasoning.contains("AQEA"), "{out:?}");
+        assert_eq!(out.thinking_blocks.len(), 1, "{out:?}");
+    }
+
+    /// 截图同款：单 chunk 就只有 `密文</signature>摘要`（开标签已在别处丢掉）。
+    #[test]
+    fn orphan_close_chunk_emits_only_summary() {
+        let mut acc = ChatStreamAcc::default();
+        let chunk: crate::chat_chunk::ChatCompletionChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"reasoning_content":"AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc-</signature>\n用户问有哪些未提交的改动。"}}]}"#,
+        )
+        .unwrap();
+        let deltas = acc.ingest(chunk);
+        assert_eq!(
+            deltas,
+            vec![StreamDelta::Reasoning("\n用户问有哪些未提交的改动。".into())]
+        );
+        let out = acc.finish();
+        assert!(out.thinking_blocks[0].is_replayable());
+        match &out.thinking_blocks[0] {
+            crate::types::ThinkingBlock::Thinking { signature, .. } => {
+                assert!(signature.starts_with("AQEA"), "{signature}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

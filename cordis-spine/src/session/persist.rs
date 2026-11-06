@@ -835,7 +835,9 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
         },
         LogEvent::LlmStream(out) => WireEvent::Llm {
             text: out.text.clone(),
-            reasoning: out.reasoning.clone(),
+            // 只落展示摘要：旧路径会把 `AQEA…</signature>\n摘要` 写进 reasoning；
+            // 签名回放靠 thinking_blocks，不依赖 reasoning 里的标签。
+            reasoning: out.display_reasoning(),
             reasoning_ms: out.reasoning_ms,
             reasoning_items: out.reasoning_items.clone(),
             thinking_blocks: out.thinking_blocks.clone(),

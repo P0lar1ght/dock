@@ -470,10 +470,10 @@ const SIGNATURE_CLOSE: &str = "</signature>";
 
 /// 从推理文本里拆出 `<signature>…</signature>`：返回（可读正文, 最后一个签名）。
 /// 多个标签时正文全部剥掉；签名取最后一个非空的（中转通常只塞一个）。
+///
+/// 也处理流式跨 chunk 常见的残片：开标签已在上一片被消费，本片只剩
+/// `AQEA…</signature>摘要`——仍然抽出签名、只留摘要。纯密文（无摘要）不进正文。
 pub fn split_reasoning_signature(text: &str) -> (String, Option<String>) {
-    if !text.contains(SIGNATURE_OPEN) {
-        return (text.to_string(), None);
-    }
     let mut display = String::with_capacity(text.len());
     let mut signature = None::<String>;
     let mut rest = text;
@@ -489,14 +489,49 @@ pub fn split_reasoning_signature(text: &str) -> (String, Option<String>) {
                 rest = &after_open[end + SIGNATURE_CLOSE.len()..];
             }
             None => {
-                // 未闭合标签：整段丢掉，避免把密文画到思维卡片上。
+                // 未闭合标签：从开标签起整段丢掉，避免把密文画到思维卡片上。
                 rest = "";
                 break;
             }
         }
     }
+    // 残片：没有开标签、却有闭标签（上一 chunk 吃掉了 `<signature>`）。
+    // `AQEA…</signature>\n摘要` → 签名=AQEA…，正文=摘要。
+    if let Some(end) = rest.find(SIGNATURE_CLOSE) {
+        let sig = rest[..end].trim();
+        if !sig.is_empty() {
+            signature = Some(sig.to_string());
+        }
+        rest = &rest[end + SIGNATURE_CLOSE.len()..];
+    }
     display.push_str(rest);
+
+    // 整段都是密文、没有任何标签时：当签名留下，正文清空（不把 AQEA… 画上卡片）。
+    let trimmed = display.trim();
+    if signature.is_none() && looks_like_encrypted_signature(trimmed) {
+        signature = Some(trimmed.to_string());
+        display.clear();
+    }
+
     (display, signature)
+}
+
+/// Anthropic / 兼容中转的加密 thinking signature：常见以 `AQEA` 起头的 base64url。
+fn looks_like_encrypted_signature(text: &str) -> bool {
+    if text.len() < 16 {
+        return false;
+    }
+    if text.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    if text.starts_with("AQEA") {
+        return true;
+    }
+    // 长串且几乎全是 base64url 字符 → 当密文，不进思维卡片。
+    text.len() >= 32
+        && text
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'-' | b'_' | b'='))
 }
 
 /// 思维卡片 / 流式展示用：剥掉 signature 标签与 `[REDACTED]` 占位。
@@ -586,6 +621,28 @@ impl LlmOutput {
             .map(|c| format!("{}({})", c.name, c.arguments))
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    /// 思维卡片展示用正文：优先 `thinking_blocks[].thinking`（落盘已拆好的摘要），
+    /// 否则再对 `reasoning` 跑 [`visible_reasoning_text`]（兼容旧会话里
+    /// `AQEA…</signature>\n摘要` 这种缺开标签的残片）。
+    pub fn display_reasoning(&self) -> String {
+        let from_blocks: String = self
+            .thinking_blocks
+            .iter()
+            .filter_map(|b| match b {
+                ThinkingBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                    Some(thinking.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("
+");
+        if !from_blocks.trim().is_empty() {
+            return from_blocks;
+        }
+        visible_reasoning_text(&self.reasoning)
     }
 }
 
@@ -906,6 +963,68 @@ mod thinking_signature_tests {
         assert!(visible_reasoning_text("[REDACTED]").is_empty());
         assert!(visible_reasoning_text("  <signature>x</signature>  ").is_empty());
         assert_eq!(visible_reasoning_text("hello"), "hello");
+    }
+
+    /// 截图泄露形态：开标签已在上流被吃掉，卡片正文以 `AQEA…</signature>` 开头。
+    #[test]
+    fn orphan_close_tag_keeps_only_summary() {
+        let raw = "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc_JDMPVT78QAPrltzmOdjrXDkEdQgh5GrtXfMTI1Ub-f8tjh9j19Ixgumhhy-RGzb7x8-GNlii_jxbue8sLVH_7cyo0QJo-</signature>\n用户问有哪些未提交的改动。运行 git status / git diff --stat。";
+        let (vis, sig) = split_reasoning_signature(raw);
+        assert!(
+            vis.contains("用户问有哪些未提交的改动"),
+            "summary must remain: {vis:?}"
+        );
+        assert!(!vis.contains("AQEA"), "ciphertext must not stay in display: {vis:?}");
+        assert!(!vis.contains("signature"), "{vis:?}");
+        assert!(sig.as_deref().unwrap_or("").starts_with("AQEA"), "{sig:?}");
+        assert_eq!(visible_reasoning_text(raw).trim(), vis.trim());
+    }
+
+    #[test]
+    fn complete_signature_block_before_summary() {
+        let raw = "<signature>AQEA2beLGUvG15nxB7aU1yzeSAAAAAD_8I2L0_eT47qUHUfgrdh75HVzX6Plt1zzvm-p8t0w55muUPAs4o_03bOuwP_gkvkxlWbV9fzekYsaGtwWTMhex73N13a2Ju5Ft8hnxSz9Yo0EFWTFBQh07hqdSJ-lsn5kleBp3CZwGyCqci5tQ8WkEMAdrfgH41ds6ugH1KgOCcWWGCbwVZ8RD2YpHSU-</signature>\n输出是空的？git status --porcelain 无输出说明没有未提交改动。";
+        assert_eq!(
+            visible_reasoning_text(raw).trim(),
+            "输出是空的？git status --porcelain 无输出说明没有未提交改动。"
+        );
+        let (_, sig) = split_reasoning_signature(raw);
+        assert!(sig.as_deref().unwrap_or("").starts_with("AQEA"), "{sig:?}");
+    }
+
+    #[test]
+    fn bare_signature_blob_hides_ciphertext() {
+        let raw = "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc_JDMPVT78QAPrltzmOdjrXDkEdQgh5GrtXfMTI1Ub-f8tjh9j19Ixgumhhy-RGzb7x8-GNlii_jxbue8sLVH_7cyo0QJo-";
+        assert!(visible_reasoning_text(raw).is_empty(), "bare ciphertext must not paint");
+        let (vis, sig) = split_reasoning_signature(raw);
+        assert!(vis.is_empty(), "{vis:?}");
+        assert_eq!(sig.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn display_reasoning_prefers_thinking_blocks_over_leaky_reasoning() {
+        let out = LlmOutput {
+            reasoning: "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-</signature>\n\n用户问有哪些未提交的改动。".into(),
+            thinking_blocks: vec![ThinkingBlock::Thinking {
+                thinking: "用户问有哪些未提交的改动。".into(),
+                signature: "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-".into(),
+            }],
+            ..LlmOutput::default()
+        };
+        assert_eq!(out.display_reasoning(), "用户问有哪些未提交的改动。");
+        assert!(!out.display_reasoning().contains("AQEA"));
+        assert!(!out.display_reasoning().contains("signature"));
+    }
+
+    #[test]
+    fn display_reasoning_falls_back_to_stripping_leaky_reasoning() {
+        let out = LlmOutput {
+            reasoning: "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-</signature>\n\n确认一下是不是仓库、分支状态。".into(),
+            ..LlmOutput::default()
+        };
+        assert_eq!(
+            out.display_reasoning().trim(),
+            "确认一下是不是仓库、分支状态。"
+        );
     }
 
     #[test]
