@@ -637,8 +637,10 @@ impl LlmOutput {
                 _ => None,
             })
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         if !from_blocks.trim().is_empty() {
             return from_blocks;
         }
@@ -974,7 +976,10 @@ mod thinking_signature_tests {
             vis.contains("用户问有哪些未提交的改动"),
             "summary must remain: {vis:?}"
         );
-        assert!(!vis.contains("AQEA"), "ciphertext must not stay in display: {vis:?}");
+        assert!(
+            !vis.contains("AQEA"),
+            "ciphertext must not stay in display: {vis:?}"
+        );
         assert!(!vis.contains("signature"), "{vis:?}");
         assert!(sig.as_deref().unwrap_or("").starts_with("AQEA"), "{sig:?}");
         assert_eq!(visible_reasoning_text(raw).trim(), vis.trim());
@@ -994,7 +999,10 @@ mod thinking_signature_tests {
     #[test]
     fn bare_signature_blob_hides_ciphertext() {
         let raw = "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDxKPiNBnLBNry-_0wFAUfhbZ8akGc_JDMPVT78QAPrltzmOdjrXDkEdQgh5GrtXfMTI1Ub-f8tjh9j19Ixgumhhy-RGzb7x8-GNlii_jxbue8sLVH_7cyo0QJo-";
-        assert!(visible_reasoning_text(raw).is_empty(), "bare ciphertext must not paint");
+        assert!(
+            visible_reasoning_text(raw).is_empty(),
+            "bare ciphertext must not paint"
+        );
         let (vis, sig) = split_reasoning_signature(raw);
         assert!(vis.is_empty(), "{vis:?}");
         assert_eq!(sig.as_deref(), Some(raw));
@@ -1003,7 +1011,9 @@ mod thinking_signature_tests {
     #[test]
     fn display_reasoning_prefers_thinking_blocks_over_leaky_reasoning() {
         let out = LlmOutput {
-            reasoning: "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-</signature>\n\n用户问有哪些未提交的改动。".into(),
+            reasoning:
+                "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-</signature>\n\n用户问有哪些未提交的改动。"
+                    .into(),
             thinking_blocks: vec![ThinkingBlock::Thinking {
                 thinking: "用户问有哪些未提交的改动。".into(),
                 signature: "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-".into(),

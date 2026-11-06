@@ -74,7 +74,8 @@ impl ChatStreamAcc {
                 // 对整段累加结果剥签名，再推「相对上次已推可见正文」的增量。
                 // 单 chunk 剥会在开标签落在前一片、本片只剩 `密文</signature>摘要` 时漏密文。
                 let vis_full = crate::types::visible_reasoning_text(&self.reasoning);
-                if let Some(delta) = vis_full.strip_prefix(self.reasoning_visible_emitted.as_str()) {
+                if let Some(delta) = vis_full.strip_prefix(self.reasoning_visible_emitted.as_str())
+                {
                     if !delta.is_empty() {
                         out.push(StreamDelta::Reasoning(delta.to_string()));
                     }
@@ -448,7 +449,9 @@ mod tests {
         let deltas = acc.ingest(close);
         assert_eq!(
             deltas,
-            vec![StreamDelta::Reasoning("\n用户问有哪些未提交的改动。".into())]
+            vec![StreamDelta::Reasoning(
+                "\n用户问有哪些未提交的改动。".into()
+            )]
         );
         for d in &deltas {
             if let StreamDelta::Reasoning(t) = d {
@@ -457,7 +460,10 @@ mod tests {
             }
         }
         let out = acc.finish();
-        assert!(out.reasoning.contains("用户问有哪些未提交的改动"), "{out:?}");
+        assert!(
+            out.reasoning.contains("用户问有哪些未提交的改动"),
+            "{out:?}"
+        );
         assert!(!out.reasoning.contains("AQEA"), "{out:?}");
         assert_eq!(out.thinking_blocks.len(), 1, "{out:?}");
     }
@@ -473,7 +479,9 @@ mod tests {
         let deltas = acc.ingest(chunk);
         assert_eq!(
             deltas,
-            vec![StreamDelta::Reasoning("\n用户问有哪些未提交的改动。".into())]
+            vec![StreamDelta::Reasoning(
+                "\n用户问有哪些未提交的改动。".into()
+            )]
         );
         let out = acc.finish();
         assert!(out.thinking_blocks[0].is_replayable());

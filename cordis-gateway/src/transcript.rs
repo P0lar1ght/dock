@@ -315,9 +315,7 @@ impl Transcript {
                 // 思考先于正文：一次采样里模型先想再答，推送顺序跟着走。
                 // 优先 thinking_blocks 摘要，并对旧会话缺开标签的 reasoning 残片再剥一次。
                 let reasoning = out.display_reasoning();
-                if let Some(delta) =
-                    stream_text_delta(&self.projector.last_reasoning, &reasoning)
-                {
+                if let Some(delta) = stream_text_delta(&self.projector.last_reasoning, &reasoning) {
                     self.push("item/reasoning_delta", json!({ "delta": delta }));
                 }
                 self.projector.last_reasoning = reasoning;
@@ -1547,7 +1545,9 @@ mod tests {
         let mut t = Transcript::new();
         t.ingest_log(LogEvent::User("hi".into()));
         t.ingest_log(LogEvent::LlmStream(LlmOutput {
-            reasoning: "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-</signature>\n\n用户问有哪些未提交的改动。".into(),
+            reasoning:
+                "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-</signature>\n\n用户问有哪些未提交的改动。"
+                    .into(),
             thinking_blocks: vec![ThinkingBlock::Thinking {
                 thinking: "用户问有哪些未提交的改动。".into(),
                 signature: "AQEAxY98byFUH9pW8-HCEzli3wAAAAAa3tDx-".into(),
@@ -1573,7 +1573,6 @@ mod tests {
         assert!(!got[0].1.contains("AQEA"), "{got:?}");
         assert!(!got[0].1.contains("signature"), "{got:?}");
     }
-
 
     #[test]
     fn llm_stream_rewrite_after_long_prefix_does_not_panic() {
