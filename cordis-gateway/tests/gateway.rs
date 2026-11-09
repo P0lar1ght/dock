@@ -754,7 +754,7 @@ impl Sampler for EchoLastUser {
             .iter()
             .rev()
             .find_map(|e| match e {
-                LogEvent::User(t) => Some(t.clone()),
+                LogEvent::User(t) => Some(t.text.clone()),
                 _ => None,
             })
             .unwrap_or_default();
@@ -1959,6 +1959,93 @@ async fn gateway_idle_until_start_listen() {
         }
     }
     assert!(down, "HTTP still serving {addr} after stop_listen");
+}
+
+/// 用户消息里的图：事件带内容摘要，客户端没有本地预览时按摘要取像素。
+/// （刷新 / 重开 Dock / 换机器之后，本地预览没了，全靠这条链路。）
+#[tokio::test]
+async fn user_message_images_are_listed_and_fetched_by_digest() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    rpc.call("initialize", json!({})).await;
+
+    let data = tiny_png();
+    let digest = sha256_hex(&data);
+    let put = rpc
+        .call(
+            "imageInputs/put",
+            json!({
+                "threadId": "live",
+                "workspaceId": "default",
+                "captureId": "cap-1",
+                "source": "upload",
+                "mimeType": "image/png",
+                "width": 1,
+                "height": 1,
+                "byteLength": data.len(),
+                "digest": digest,
+                "dataBase64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &data
+                )
+            }),
+        )
+        .await;
+    assert!(put.get("error").is_none(), "{put}");
+    let id = put["result"]["imageInputId"].as_str().unwrap().to_string();
+    let started = rpc
+        .call(
+            "turn/start",
+            json!({
+                "threadId": "live",
+                "message": "这张图是什么",
+                "imageInputs": [{ "id": id, "digest": digest }]
+            }),
+        )
+        .await;
+    assert!(started.get("error").is_none(), "{started}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 历史里的用户消息带附件：摘要 + 序号（没有像素）。
+    let history = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    let user = history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["method"] == "item/user_message")
+        .unwrap_or_else(|| panic!("{history}"))
+        .clone();
+    assert_eq!(user["payload"]["attachments"][0]["digest"], digest);
+    assert_eq!(user["payload"]["attachments"][0]["index"], 0);
+    assert!(user["payload"]["attachments"][0].get("data").is_none());
+
+    // 按摘要取像素。
+    let got = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": "live", "digest": digest }),
+        )
+        .await;
+    assert_eq!(
+        got["result"]["data"],
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data),
+        "{got}"
+    );
+    assert_eq!(got["result"]["width"], 1);
+    assert_eq!(got["result"]["mimeType"], "image/png");
+
+    // 摘要是会话级凭据：别的会话拿同一个摘要来要 —— 不给。
+    let other = rpc
+        .call(
+            "item/image",
+            json!({ "threadId": "another-thread", "digest": digest }),
+        )
+        .await;
+    assert!(!other["error"].is_null(), "{other}");
+    assert!(other["result"].is_null(), "{other}");
 }
 
 /// 回归：`live` 线程只投影第 1 页。TUI 开着多页时，第 2 页说的话以前也会混进来
@@ -4860,6 +4947,7 @@ async fn tool_images_are_listed_and_fetched_by_item() {
         0x99, 0x3D, 0x1D, 0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
     let image = |data: Vec<u8>| cordis_spine::UserImage {
+        digest: None,
         mime: "image/png".into(),
         data: data.into(),
         width: 1,

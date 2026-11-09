@@ -919,7 +919,7 @@ mod tests {
                 text: format!("answer {round}"),
                 ..LlmOutput::default()
             }));
-            history.push(LogEvent::User(format!("ask {round}")));
+            history.push(LogEvent::User(format!("ask {round}").into()));
 
             let now_off = serialize(&history, false);
             let same = common(&off, &now_off);

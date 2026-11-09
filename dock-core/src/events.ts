@@ -23,6 +23,19 @@ export interface ImageAttachment {
   byteLength: number;
 }
 
+/**
+ * 用户消息里的一张图：除了元数据还有内容摘要（sha256 十六进制）。
+ *
+ * 摘要用来取像素：`item/image { threadId, digest }`（客户端刷新后没有本地预览时用）。
+ * 老网关不带这个字段 → 拿不到像素，只显示尺寸。
+ */
+export interface UserImage extends ImageAttachment {
+  /** 在这条消息里的位置。 */
+  index: number;
+  /** 内容的 sha256（十六进制）。 */
+  digest: string;
+}
+
 /** 工具结果里的一张图（截图等）：只有元数据，像素用 `item/image { itemId, index }` 取。 */
 export interface ToolImage extends ImageAttachment {
   /** 在这次工具结果里的位置；空图不投影也不占号，所以不能按数组下标算。 */
@@ -302,7 +315,7 @@ export type DockEvent = EventBase &
     | {
         method: 'item/user_message';
         content: string;
-        attachments: ImageAttachment[];
+        attachments: UserImage[];
         /** 子代理的对话里：`parent` = 父级在它跑的时候发来的话。其余没有。 */
         origin?: 'parent';
         /** 插话：一轮进行中送达、并进那一轮的用户消息。 */
@@ -429,6 +442,8 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
           .filter((a) => a.type === 'image')
           .map((a) => ({
             type: 'image' as const,
+            index: num(a.index),
+            digest: str(a.digest),
             mimeType: str(a.mimeType),
             width: num(a.width),
             height: num(a.height),

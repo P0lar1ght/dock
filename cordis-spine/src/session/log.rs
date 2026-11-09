@@ -90,6 +90,23 @@ pub struct Sampling {
 /// [`LogEvent::Notice`] 和 [`LogEvent::TurnEnd`] 是**只给用户看**的：滚动区 / GUI
 /// 拿来渲染，但它们既不该占上下文，也不该让模型觉得需要回应。只滤这两类——
 /// [`Sessions::model_history`] 是采样看到的全部，漏在这里就等于漏进模型。
+/// 一条消息最多带多少张图（合并排队图时的上限）。
+const MAX_USER_IMAGES_PER_MESSAGE: usize = 8;
+
+/// 按事件顺序取出每条用户消息带的图：返回的第 N 行对应第 N 条用户消息。
+///
+/// 采样只读这个侧栏（`model_user_images`），所以恢复会话 / 应用压缩快照时
+/// 必须按事件重建 —— 留空行就等于「那些图在下一轮不见了」。
+fn user_image_rows(events: &[LogEvent]) -> Vec<Vec<cordis_base::types::UserImage>> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::User(msg) => Some(msg.images.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn model_visible(event: &LogEvent) -> bool {
     !matches!(event, LogEvent::Notice { .. } | LogEvent::TurnEnd(_))
 }
@@ -595,7 +612,7 @@ impl Sessions {
     pub fn append_steer(&self, steer: Steer) {
         self.append(LogEvent::SystemReminder(STEER_REMINDER.into()));
         let held = std::mem::replace(&mut *self.pending_images.lock().unwrap(), steer.images);
-        self.append(LogEvent::User(steer.text));
+        self.append(LogEvent::User(steer.text.into()));
         *self.pending_images.lock().unwrap() = held;
     }
 
@@ -742,23 +759,57 @@ impl Sessions {
 
     pub fn append(&self, event: LogEvent) {
         let is_user = matches!(event, LogEvent::User(_));
-        if is_user {
+        let event = if is_user {
             self.rewound.store(false, Ordering::Relaxed);
             self.steer_rewound.store(false, Ordering::Relaxed);
             let imgs = std::mem::take(&mut *self.pending_images.lock().unwrap());
-            self.user_images.lock().unwrap().push(imgs);
-        } else if self.rewound.load(Ordering::Relaxed) {
-            return;
-        }
+            // 消息自带图优先（事件里已经带了），否则用收件箱里排着的那些。
+            let event = match event {
+                LogEvent::User(mut msg) => {
+                    if msg.images.is_empty() {
+                        msg.images = imgs;
+                    } else if !imgs.is_empty() {
+                        // 消息自己带了图：收件箱里排队的那一份不能凭空丢掉，
+                        // 接到后面去（多出来的按上限截掉）。
+                        msg.images.extend(imgs);
+                        if msg.images.len() > MAX_USER_IMAGES_PER_MESSAGE {
+                            msg.images.truncate(MAX_USER_IMAGES_PER_MESSAGE);
+                            tracing::warn!(
+                                "一条消息里的图超过 {} 张，多余的丢掉",
+                                MAX_USER_IMAGES_PER_MESSAGE
+                            );
+                        }
+                    }
+                    // 摘要算一次就够：投影、取图、落盘都靠它定位同一张图。
+                    for img in msg.images.iter_mut() {
+                        if img.digest.is_none() {
+                            img.digest = Some(crate::session::attachments::digest_of(&img.data));
+                        }
+                    }
+                    LogEvent::User(msg)
+                }
+                other => other,
+            };
+            if let LogEvent::User(msg) = &event {
+                // 采样用的图槽和事件按序一一对应（`model_user_images` 靠这个对齐）。
+                self.user_images.lock().unwrap().push(msg.images.clone());
+            }
+            event
+        } else {
+            if self.rewound.load(Ordering::Relaxed) {
+                return;
+            }
+            event
+        };
         self.events.lock().unwrap().push(event.clone());
         self.times.lock().unwrap().push(SystemTime::now());
         self.bump_events_rev();
         self.emit_session(event.clone());
-        if let LogEvent::User(user_text) = &event {
+        if let LogEvent::User(user_msg) = &event {
             let addon = {
                 let mut q = self.pending_user_addons.lock().unwrap();
                 q.iter()
-                    .position(|(expected, _)| expected == user_text)
+                    .position(|(expected, _)| expected == &user_msg.text)
                     .map(|i| q.remove(i).unwrap().1)
             };
             if let Some(addon) = addon {
@@ -997,12 +1048,13 @@ impl Sessions {
     fn apply_compact_snapshot(&self, prefix: Option<Vec<LogEvent>>, from: usize) {
         let n = self.events.lock().unwrap().len();
         let from = from.min(n);
-        let image_n = prefix
-            .as_ref()
-            .map(|p| p.iter().filter(|e| matches!(e, LogEvent::User(_))).count())
-            .unwrap_or(0);
         *self.compact_from.lock().unwrap() = from;
-        *self.compact_images.lock().unwrap() = vec![Vec::new(); image_n];
+        // 压缩前缀里的用户消息也可能带图：按事件重建，别留空行
+        // （空行 = 那一轮的图在采样里消失了）。
+        *self.compact_images.lock().unwrap() = prefix
+            .as_ref()
+            .map(|p| user_image_rows(p))
+            .unwrap_or_default();
         *self.compact_prefix.lock().unwrap() = prefix;
     }
 
@@ -1276,7 +1328,7 @@ impl Sessions {
         self.bump_events_rev();
         self.emit_session(leftover.unwrap_or(LogEvent::PreStep));
         self.persist_live();
-        Some((text, images))
+        Some((text.text, images))
     }
 
     /// Drop the in-flight user turn when it has no model/tool output yet.
@@ -1329,7 +1381,7 @@ impl Sessions {
             self.emit_session(LogEvent::PreStep);
         }
         self.persist_live();
-        Some((text, images))
+        Some((text.text, images))
     }
 
     pub fn take_pending_images(&self) -> Vec<cordis_base::types::UserImage> {
@@ -1619,7 +1671,7 @@ impl Sessions {
             let users: Vec<String> = log
                 .iter()
                 .filter_map(|e| match e {
-                    LogEvent::User(t) => Some(t.clone()),
+                    LogEvent::User(t) => Some(t.text.clone()),
                     _ => None,
                 })
                 .collect();
@@ -1634,8 +1686,8 @@ impl Sessions {
                     .enumerate()
                     .find(|(i, u)| {
                         !used[*i]
-                            && (*u == text
-                                || text.as_str() == format!("<user_query>\n{u}\n</user_query>"))
+                            && (u.as_str() == text.text
+                                || text.text == format!("<user_query>\n{u}\n</user_query>"))
                     })
                     .map(|(i, _)| {
                         used[i] = true;
@@ -1730,15 +1782,13 @@ impl Sessions {
             return false;
         };
         let last = item.events.last().cloned();
-        let user_n = item
-            .events
-            .iter()
-            .filter(|e| matches!(e, LogEvent::User(_)))
-            .count();
         let title = item.title.clone();
+        // 图片槽按事件重建：恢复出来的会话，采样要看得见用户发过的图
+        // （槽是「第 N 条用户消息 ↔ 第 N 组图」，顺序和事件里的一致）。
+        let image_rows = user_image_rows(&item.events);
         *self.times.lock().unwrap() = item.times;
         *self.events.lock().unwrap() = item.events;
-        *self.user_images.lock().unwrap() = vec![Vec::new(); user_n];
+        *self.user_images.lock().unwrap() = image_rows;
         self.pending_images.lock().unwrap().clear();
         *self.pending_call.lock().unwrap() = None;
         self.rewound.store(false, Ordering::Relaxed);
@@ -2019,6 +2069,81 @@ mod tests {
         assert_eq!(out.reasoning_items[0]["id"], "rs_1");
     }
 
+    /// 1×1 PNG（当图片用够用了）。
+    fn tiny_image() -> cordis_base::types::UserImage {
+        let png = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, 0x05, 0xfe, 0x02, 0xfe, 0xa7, 0x35, 0x81,
+            0x84, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        cordis_base::types::UserImage {
+            mime: "image/png".into(),
+            data: std::sync::Arc::from(png.into_boxed_slice()),
+            width: 1,
+            height: 1,
+            digest: None,
+        }
+    }
+
+    fn user_message(text: &str, images: Vec<cordis_base::types::UserImage>) -> LogEvent {
+        LogEvent::User(cordis_base::types::UserMessage {
+            text: text.into(),
+            images,
+        })
+    }
+
+    /// 恢复会话后，采样要看得见用户发过的图。
+    ///
+    /// 采样只读 `user_images` 侧栏（`model_user_images`），事件里的图不算数 ——
+    /// 以前恢复时侧栏被填成空行，恢复出来的会话下一轮就把图忘了。
+    #[tokio::test]
+    async fn restored_session_keeps_user_images_for_sampling() {
+        let sessions = Sessions::new(Context::new());
+        let img = tiny_image();
+        sessions.append(user_message("看这张图", vec![img.clone()]));
+        let item = sessions.archive_current().expect("archive");
+        sessions.clear();
+        assert!(sessions.restore(&item.id));
+
+        let rows = sessions.model_user_images();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].len(), 1, "{rows:?}");
+        assert_eq!(rows[0][0].data.as_ref(), img.data.as_ref());
+    }
+
+    /// 压缩前缀里的图同样要在：压缩过的会话重开后，模型还得看得见那些图。
+    #[tokio::test]
+    async fn compact_snapshot_keeps_prefix_images() {
+        let sessions = Sessions::new(Context::new());
+        let img = tiny_image();
+        let prefix = vec![user_message("压缩前那张图", vec![img.clone()])];
+        sessions.apply_compact_snapshot(Some(prefix), 0);
+
+        let rows = sessions.model_user_images();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].len(), 1, "{rows:?}");
+        assert_eq!(rows[0][0].data.as_ref(), img.data.as_ref());
+    }
+
+    /// 消息自己带了图时，收件箱里排队的那一张要接上，不能凭空丢掉。
+    #[tokio::test]
+    async fn append_merges_queued_images_with_the_message_ones() {
+        let sessions = Sessions::new(Context::new());
+        let first = tiny_image();
+        let mut second = tiny_image();
+        second.mime = "image/jpeg".into();
+        sessions.queue_user_images(vec![second.clone()]);
+        sessions.append(user_message("两张图", vec![first.clone()]));
+
+        let rows = sessions.user_images();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 2, "{rows:?}");
+        assert_eq!(rows[0][0].data.as_ref(), first.data.as_ref());
+        assert_eq!(rows[0][1].data.as_ref(), second.data.as_ref());
+    }
+
     #[tokio::test]
     async fn archive_then_restore() {
         let ctx = Context::new();
@@ -2233,6 +2358,7 @@ mod tests {
     async fn rewind_to_user_truncates_from_that_message() {
         let sessions = Sessions::new(Context::new());
         sessions.queue_user_images(vec![cordis_base::types::UserImage {
+            digest: None,
             mime: "image/png".into(),
             data: std::sync::Arc::from(vec![1u8, 2, 3]),
             width: 1,

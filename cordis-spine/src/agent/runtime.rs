@@ -70,7 +70,7 @@ async fn grok_turn(ctx: &Context, prompt: String) -> Result<TurnOutcome> {
     agents.ensure("main");
     sessions.seal_incomplete_tool_calls();
     sessions.set_auto_compact_suppressed(false);
-    sessions.append(LogEvent::User(prompt.clone()));
+    sessions.append(LogEvent::User(prompt.clone().into()));
 
     let decision = {
         let step = PreStep::new(prompt.clone(), true, sessions.identity());

@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use cordis::Context;
 use cordis_spine::{
-    Ask, ChildLogEvent, LogEvent, Mcp, PageCompaction, PageLogEvent, Permissions, PlanMode,
-    Sessions, SubagentChanged, Subagents, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS,
+    Ask, ChildLogEvent, Mcp, PageCompaction, PageLogEvent, Permissions, PlanMode, Sessions,
+    SubagentChanged, Subagents, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS,
     PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, ROOT_IDENTITY, SESSIONS, SESSION_CHILD_EVENT,
     SESSION_COMPACTION, SESSION_PAGE_EVENT, SUBAGENTS, SUBAGENT_CHANGED, WORKFLOW_CHANGED,
 };
@@ -354,7 +354,7 @@ impl GatewayHandle {
             .unwrap_or_default();
         let (tx, _) = tokio::sync::broadcast::channel(1);
         let mut t = Transcript::for_child("", "", agent_id, tx);
-        t.replay(&events, &[], &[]);
+        t.replay(&events, &[]);
         t.history_since(0)
     }
 
@@ -482,13 +482,9 @@ fn listen_events(inner: &Arc<GatewayInner>) {
                 .into_iter()
                 .find(|p| p.identity == *tagged.page);
             let event = &*tagged.event;
-            let attachments = match (&page, event) {
-                (Some(page), LogEvent::User(_)) => last_user_attachments(&page.ctx),
-                _ => Vec::new(),
-            };
             let thread_id = page.as_ref().map(|p| p.thread_id());
             with_transcript(&for_session, &tagged.page, thread_id, |t| {
-                t.ingest_log_with(event.clone(), &attachments)
+                t.ingest_log_with(event.clone())
             });
         });
     listen_subagents(inner);
@@ -624,12 +620,12 @@ fn listen_subagents(inner: &Arc<GatewayInner>) {
                 // 续跑（`resume_from`）的孩子先灌了旧对话、没发事件：这条之前的都补上。
                 let events = sub.events(&snap.id);
                 if let Some(earlier) = events.len().checked_sub(1) {
-                    t.replay(&events[..earlier], &[], &[]);
+                    t.replay(&events[..earlier], &[]);
                 }
                 t
             });
             t.set_thread_id(page.thread_id());
-            t.ingest_log_with((*tagged.event).clone(), &[]);
+            t.ingest_log_with((*tagged.event).clone());
         });
     let for_changes = inner.clone();
     let _ = inner
@@ -720,12 +716,4 @@ fn listen_workflows(inner: &Arc<GatewayInner>) {
             });
         },
     );
-}
-
-fn last_user_attachments(ctx: &Context) -> Vec<serde_json::Value> {
-    let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
-        return Vec::new();
-    };
-    let rows = sessions.user_images();
-    crate::transcript::attachment_values(rows.last().map(Vec::as_slice).unwrap_or(&[]))
 }

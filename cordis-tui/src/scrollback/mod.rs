@@ -2711,7 +2711,7 @@ mod tests {
         let sessions = Sessions::new(root.clone());
         root.provide(SESSIONS, sessions.clone()).unwrap();
         for i in 0..40 {
-            sessions.append(LogEvent::User(format!("msg-{i}")));
+            sessions.append(LogEvent::User(format!("msg-{i}").into()));
             sessions.append(LogEvent::LlmStream(LlmOutput {
                 text: format!("reply-{i} {}", "more text for wrapping ".repeat(8)),
                 ..LlmOutput::default()
@@ -3282,7 +3282,7 @@ mod live_chrome_tests {
         let sessions = Sessions::new(root.clone());
         root.provide(SESSIONS, sessions.clone()).unwrap();
         for i in 0..40 {
-            sessions.append(LogEvent::User(format!("msg-{i}")));
+            sessions.append(LogEvent::User(format!("msg-{i}").into()));
             sessions.append(LogEvent::LlmStream(LlmOutput {
                 text: format!("reply-{i} {}", "more text for wrapping ".repeat(8)),
                 ..LlmOutput::default()

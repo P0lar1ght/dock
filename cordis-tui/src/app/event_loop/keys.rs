@@ -2166,6 +2166,7 @@ pub(super) fn take_send(ctx: &Context, send_now: bool) -> Action {
                 .images
                 .into_iter()
                 .map(|img| UserImage {
+                    digest: None,
                     mime: img.mime,
                     data: img.data,
                     width: img.width,

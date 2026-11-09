@@ -1152,7 +1152,7 @@ mod tests {
                     .iter()
                     .rev()
                     .find_map(|e| match e {
-                        LogEvent::User(t) => Some(t.clone()),
+                        LogEvent::User(t) => Some(t.text.clone()),
                         _ => None,
                     })
                     .unwrap_or_default();

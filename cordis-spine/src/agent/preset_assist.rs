@@ -184,7 +184,9 @@ pub async fn ask_preset(
     let mut events: Vec<LogEvent> = history[skip..]
         .iter()
         .filter_map(|turn| match turn {
-            AskTurn::User(t) if !t.trim().is_empty() => Some(LogEvent::User(clip(t, MAX_QUESTION))),
+            AskTurn::User(t) if !t.trim().is_empty() => {
+                Some(LogEvent::User(clip(t, MAX_QUESTION).into()))
+            }
             AskTurn::Assistant(t) if !t.trim().is_empty() => Some(LogEvent::LlmStream(LlmOutput {
                 text: clip(t, MAX_PERSONA),
                 ..LlmOutput::default()
@@ -192,7 +194,7 @@ pub async fn ask_preset(
             _ => None,
         })
         .collect();
-    events.push(LogEvent::User(question.to_string()));
+    events.push(LogEvent::User(question.to_string().into()));
     let out = ask_history(ctx, &system, events).await?;
     if out.trim().is_empty() {
         return Err("模型没回答，再问一次".into());
@@ -259,7 +261,7 @@ pub async fn rewrite_persona(
 }
 
 async fn ask(ctx: &Context, system: &str, user: String) -> Result<String, String> {
-    ask_history(ctx, system, vec![LogEvent::User(user)]).await
+    ask_history(ctx, system, vec![LogEvent::User(user.into())]).await
 }
 
 async fn ask_history(

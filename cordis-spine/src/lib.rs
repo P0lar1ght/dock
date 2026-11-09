@@ -114,6 +114,9 @@ pub use prompt::context_usage::{
     ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE, USER_FILE};
+pub use session::attachments::{
+    blob_path, digest_b64, digest_of, UserImageRef, MAX_USER_IMAGE_BYTES,
+};
 pub use session::commands::session_commands;
 pub use session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,

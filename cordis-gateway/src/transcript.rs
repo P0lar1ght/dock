@@ -204,11 +204,7 @@ impl Transcript {
     }
 
     pub fn reset_from_sessions(&mut self, sessions: &Sessions) {
-        self.replay(
-            &sessions.events(),
-            &sessions.times(),
-            &sessions.user_images(),
-        );
+        self.replay(&sessions.events(), &sessions.times());
     }
 
     /// 从落盘事件重建投影：重开会话（`reset_from_sessions`）和看关着的会话
@@ -216,11 +212,10 @@ impl Transcript {
     /// [`LogEvent::TurnEnd`] 收尾。更早的会话没有这一行，就在下一条用户消息前、
     /// 以及末尾按它最后一条事件的时间补一个（[`Self::close_legacy_turn`]）——重建
     /// 只发生在页空闲时（`thread/start` / restore 之后、关着的会话）。
-    pub fn replay(&mut self, events: &[LogEvent], times: &[SystemTime], images: &[Vec<UserImage>]) {
+    pub fn replay(&mut self, events: &[LogEvent], times: &[SystemTime]) {
         self.events.clear();
         self.projector = Projector::default();
         let ms = |i: usize| times.get(i).map(|t| unix_ms(*t));
-        let mut user_i = 0usize;
         for (i, event) in events.iter().enumerate() {
             // 插话不是新的一轮开头：前一轮由它自己收（带 `steered`），和实时一致。
             let steered = i > 0
@@ -230,14 +225,7 @@ impl Transcript {
                 self.close_legacy_turn();
             }
             self.clock = ms(i);
-            let attachments = if matches!(event, LogEvent::User(_)) {
-                let row = images.get(user_i).cloned().unwrap_or_default();
-                user_i += 1;
-                attachment_values(&row)
-            } else {
-                Vec::new()
-            };
-            self.ingest_log_with(event.clone(), &attachments);
+            self.ingest_log_with(event.clone());
         }
         self.clock = events.len().checked_sub(1).and_then(ms);
         self.close_legacy_turn();
@@ -246,12 +234,16 @@ impl Transcript {
 
     #[cfg(test)]
     pub fn ingest_log(&mut self, event: LogEvent) {
-        self.ingest_log_with(event, &[]);
+        self.ingest_log_with(event);
     }
 
-    pub fn ingest_log_with(&mut self, event: LogEvent, user_attachments: &[Value]) {
+    /// 收一条事件。用户消息带的图直接从事件里取（[`LogEvent::User`] 自带像素），
+    /// 实时推送和回放走同一条路。
+    pub fn ingest_log_with(&mut self, event: LogEvent) {
         match event {
-            LogEvent::User(text) => {
+            LogEvent::User(msg) => {
+                let text = msg.text.clone();
+                let user_attachments = user_attachment_values(&msg.images);
                 // 插话在一轮进行中送达：投影上仍从它开新的一轮（气泡排在它之前的
                 // 工作后面），前一段以 `steered` 收尾，客户端别把它当成真的结束。
                 let steered = std::mem::take(&mut self.projector.steer_note);
@@ -892,14 +884,21 @@ fn iso_now() -> String {
     format!("{ms}")
 }
 
-pub(crate) fn attachment_values(images: &[UserImage]) -> Vec<Value> {
+/// 用户消息里的图：形状同 [`tool_attachment_values`]，另带 `digest`（内容的 sha256
+/// 十六进制）—— 客户端没有本地预览时（刷新、重开、换机器）按它取像素。
+pub(crate) fn user_attachment_values(images: &[UserImage]) -> Vec<Value> {
     images
         .iter()
-        .filter(|img| matches!(img.mime.as_str(), "image/png" | "image/jpeg" | "image/webp"))
-        .filter(|img| img.width > 0 && img.height > 0 && !img.data.is_empty())
-        .map(|img| {
+        .enumerate()
+        .filter(|(_, img)| !img.data.is_empty())
+        .map(|(index, img)| {
             json!({
                 "type": "image",
+                "index": index,
+                "digest": img
+                    .digest
+                    .clone()
+                    .unwrap_or_else(|| cordis_spine::digest_of(&img.data)),
                 "mimeType": img.mime,
                 "width": img.width,
                 "height": img.height,
@@ -1054,7 +1053,7 @@ mod tests {
             .map(|i| UNIX_EPOCH + std::time::Duration::from_secs(100 + i))
             .collect();
         let mut replayed = Transcript::new();
-        replayed.replay(&events, &times, &[]);
+        replayed.replay(&events, &times);
         assert_eq!(summary(&replayed), want, "回放：{:?}", methods(&replayed));
     }
 
@@ -1108,7 +1107,7 @@ mod tests {
             .map(|i| UNIX_EPOCH + std::time::Duration::from_secs(100 + i))
             .collect();
         let mut replayed = Transcript::new();
-        replayed.replay(&events, &times, &[]);
+        replayed.replay(&events, &times);
         assert_eq!(summary(&replayed), want, "回放：{:?}", methods(&replayed));
     }
 
@@ -1702,7 +1701,7 @@ mod tests {
             at(302),
         ];
         let mut t = Transcript::new();
-        t.replay(&events, &times, &[]);
+        t.replay(&events, &times);
         let ends: Vec<_> = t
             .history_since(0)
             .into_iter()
@@ -1773,7 +1772,7 @@ mod tests {
         ];
         let times = vec![at(100), at(130), at(200), at(203)];
         let mut t = Transcript::new();
-        t.replay(&events, &times, &[]);
+        t.replay(&events, &times);
         let all = t.history_since(0);
         let ends: Vec<_> = all
             .iter()
@@ -1804,19 +1803,43 @@ mod tests {
         assert_eq!(deltas(&t), vec!["你".to_string(), "好".to_string()]);
     }
 
+    /// 回放（重开会话 / 看关着的会话）也要带上附件：客户端刷新后全靠它取像素。
+    #[test]
+    fn replayed_user_message_keeps_attachment_digest() {
+        let mut t = Transcript::new();
+        let events = vec![LogEvent::User(cordis_base::types::UserMessage {
+            text: "[Image #1] 这是什么".into(),
+            images: vec![cordis_base::types::UserImage {
+                digest: Some("ab".repeat(32)),
+                mime: "image/png".into(),
+                data: std::sync::Arc::from([7u8; 32].as_slice()),
+                width: 8,
+                height: 8,
+            }],
+        })];
+        t.replay(&events, &[]);
+        let user = t
+            .history_since(0)
+            .into_iter()
+            .find(|e| e.method == "item/user_message")
+            .expect("user message");
+        assert_eq!(user.payload["attachments"][0]["digest"], "ab".repeat(32));
+        assert_eq!(user.payload["attachments"][0]["index"], 0);
+    }
+
     #[test]
     fn user_message_includes_attachment_metadata() {
         let mut t = Transcript::new();
-        t.ingest_log_with(
-            LogEvent::User("[Image #1] 这是什么".into()),
-            &[json!({
-                "type": "image",
-                "mimeType": "image/png",
-                "width": 8,
-                "height": 8,
-                "byteLength": 32
-            })],
-        );
+        t.ingest_log_with(LogEvent::User(cordis_base::types::UserMessage {
+            text: "[Image #1] 这是什么".into(),
+            images: vec![cordis_base::types::UserImage {
+                digest: None,
+                mime: "image/png".into(),
+                data: std::sync::Arc::from([7u8; 32].as_slice()),
+                width: 8,
+                height: 8,
+            }],
+        }));
         let user = t
             .history_since(0)
             .into_iter()
@@ -1825,5 +1848,15 @@ mod tests {
         assert_eq!(user.payload["content"], "[Image #1] 这是什么");
         assert_eq!(user.payload["attachments"][0]["mimeType"], "image/png");
         assert!(user.payload["attachments"][0].get("data").is_none());
+        // 客户端没有本地预览时按摘要取像素：索引与摘要都要带上。
+        assert_eq!(user.payload["attachments"][0]["index"], 0);
+        assert_eq!(
+            user.payload["attachments"][0]["digest"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64,
+            "摘要应是 sha256 十六进制"
+        );
     }
 }

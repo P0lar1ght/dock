@@ -39,6 +39,7 @@ pub fn user_image_from_bytes(data: Vec<u8>, mime_hint: Option<&str>) -> Option<U
         data: Arc::from(data.into_boxed_slice()),
         width,
         height,
+        digest: None,
     })
 }
 

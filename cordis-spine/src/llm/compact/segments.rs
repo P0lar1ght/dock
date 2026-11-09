@@ -138,7 +138,8 @@ fn role_label(event: &LogEvent) -> &'static str {
 
 fn event_body(event: &LogEvent) -> String {
     match event {
-        LogEvent::User(t) | LogEvent::SystemReminder(t) | LogEvent::Prompt(t) => t.clone(),
+        LogEvent::User(t) => t.text.clone(),
+        LogEvent::SystemReminder(t) | LogEvent::Prompt(t) => t.clone(),
         LogEvent::LlmStream(out) => {
             let mut text = out.text.clone();
             if !out.tool_calls.is_empty() {

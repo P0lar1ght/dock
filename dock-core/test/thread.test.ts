@@ -41,6 +41,26 @@ test('一轮：用户消息、文字、工具、文字，按出现顺序', () =>
   assert.equal(isRunning(s), false);
 });
 
+test('用户消息带的图：附件带 index 与内容摘要（按它取像素）', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started', {}, 't1', 1000),
+    note('item/user_message', {
+      content: '[Image #1] 这是什么',
+      attachments: [
+        { type: 'image', index: 0, digest: 'ab12', mimeType: 'image/png', width: 2880, height: 1800, byteLength: 4096 },
+      ],
+    }),
+  );
+  const user = s.turns[0].items[0];
+  assert.equal(user.kind, 'user');
+  if (user.kind !== 'user') return;
+  assert.equal(user.attachments.length, 1);
+  assert.equal(user.attachments[0].digest, 'ab12');
+  assert.equal(user.attachments[0].index, 0);
+  assert.equal(user.attachments[0].width, 2880);
+});
+
 test('seq 不大于已处理的事件是重复，跳过（订阅与拉历史重叠）', () => {
   seq = 0;
   const a = note('turn/started');
