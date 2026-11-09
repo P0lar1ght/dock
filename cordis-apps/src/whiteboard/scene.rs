@@ -1017,7 +1017,7 @@ pub enum ReadScope {
     Overview,
     /// 只给这几个图形。
     Ids(Vec<String>),
-    /// 给这个图形和它相关的（容器、标签、箭头两端、同组）。
+    /// 给这个图形和它相关的（容器、标签、箭头两端、指向它的箭头、同组）。
     Related(String),
 }
 
@@ -1041,7 +1041,15 @@ pub fn read_scope(args: &Value) -> Result<ReadScope, String> {
     Ok(ReadScope::All)
 }
 
-/// 这个图形和谁有关系：容器、标签、箭头两端、同组。
+/// 箭头 / 线的一端：完整元素看绑定，骨架看 `start` / `end`。
+fn endpoint_id<'a>(e: &'a Value, binding: &str, skeleton: &str) -> Option<&'a str> {
+    e.pointer(&format!("/{binding}/elementId"))
+        .or_else(|| e.pointer(&format!("/{skeleton}/id")))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// 这个图形和谁有关系：容器、标签、箭头两端、指向它的箭头、同组。
 pub fn related_ids(scene: &Scene, id: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![id.to_string()];
     if let Some(e) = scene.shape(id) {
@@ -1073,10 +1081,34 @@ pub fn related_ids(scene: &Scene, id: &str) -> Vec<String> {
             }
         }
     }
-    for t in scene.live() {
+    for t in scene.live().chain(scene.pending.iter()) {
         if t.get("containerId").and_then(Value::as_str) == Some(id) {
             if let Some(tid) = id_of(t) {
                 out.push(tid.to_string());
+            }
+        }
+    }
+    for e in scene.live().chain(scene.pending.iter()) {
+        let kind = kind_of(e);
+        if kind != "arrow" && kind != "line" {
+            continue;
+        }
+        let points = endpoint_id(e, "startBinding", "start") == Some(id)
+            || endpoint_id(e, "endBinding", "end") == Some(id);
+        if points {
+            if let Some(aid) = id_of(e) {
+                out.push(aid.to_string());
+            }
+        }
+    }
+    // 刚带上的箭头，框里的字也算相关。
+    let seeds = out.clone();
+    for t in scene.live().chain(scene.pending.iter()) {
+        if let Some(c) = t.get("containerId").and_then(Value::as_str) {
+            if seeds.iter().any(|s| s == c) {
+                if let Some(tid) = id_of(t) {
+                    out.push(tid.to_string());
+                }
             }
         }
     }
@@ -1268,7 +1300,7 @@ pub fn apply_layer(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, Str
         }
     }
     let mut next = scene.clone();
-    // z 序由元素的 `index` 决定（Excalidraw 0.18），数组顺序不算数。
+    // Excalidraw 0.18 用 `index` 存 z 序，本界面重载时还按数组顺序画，两处一起改。
     // 缺 index 的先按数组顺序补一个（界面上也是这么分配的）。
     let mut last: Option<String> = None;
     for e in next.elements.iter_mut() {
@@ -1517,9 +1549,9 @@ fn gap_arg(args: &Value, key: &str, default: f64) -> Result<f64, String> {
 
 // ---- fractional index（Excalidraw 的 z 序键）----
 //
-// Excalidraw 0.18 起，z 序由元素的 `index` 字段决定（base62 分数索引），**数组顺序不算数**。
-// 这里照搬 npm 的 fractional-indexing（CC0）的 `generateKeyBetween`，保证键空间与界面一致：
-// 同一套算法生成的键，界面才认。
+// Excalidraw 0.18 用 `index`（base62 分数索引）存 z 序。本界面重载时还按数组顺序画，
+// 所以调图层、复制时 index 和数组顺序一起改。键的算法照搬 npm fractional-indexing
+// （CC0）的 `generateKeyBetween`，键空间与界面一致。
 
 const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -1746,6 +1778,11 @@ pub fn apply_distribute(scene: &mut Scene, args: &Value) -> Result<ArrangeReport
         let span = (last.0 + last.2) - first.0;
         let sizes: f64 = frames.iter().map(|f| f.1 .2).sum();
         let gap = (span - sizes) / (n as f64 - 1.0);
+        if gap < 0.0 {
+            return Err(format!(
+                "{dir} 均分放不下：图形总宽 {sizes} 大于两端跨度 {span}"
+            ));
+        }
         let mut cursor = first.0;
         for (i, (id, (_, y, w, _))) in frames.iter().enumerate() {
             if i == 0 {
@@ -1763,6 +1800,11 @@ pub fn apply_distribute(scene: &mut Scene, args: &Value) -> Result<ArrangeReport
         let span = (last.1 + last.3) - first.1;
         let sizes: f64 = frames.iter().map(|f| f.1 .3).sum();
         let gap = (span - sizes) / (n as f64 - 1.0);
+        if gap < 0.0 {
+            return Err(format!(
+                "{dir} 均分放不下：图形总高 {sizes} 大于两端跨度 {span}"
+            ));
+        }
         let mut cursor = first.1;
         for (i, (id, (x, _, _, h))) in frames.iter().enumerate() {
             if i == 0 {
@@ -1953,8 +1995,8 @@ pub struct FindReport {
 }
 
 /// `whiteboard_find`：`{ queries: [{ text?, type?, stroke?, fill?, near?, radius? }], limit? }`。
-/// 按语义找图形：写「写着 Sign Up 的按钮」「绿色的框」这类话，不用背 id。
-/// 一次可以给多个查询，各自独立排序、各自截断。
+/// 按文字、类型、颜色、距离找图形，不用背 id。不是向量语义。
+/// 一次可以给多个查询。每个查询先收齐，再按「整段相等 > 前缀 > 包含」、离 `near` 的距离排序，然后截断。
 pub fn apply_find(scene: &mut Scene, args: &Value) -> Result<FindReport, String> {
     let (queries, _) = take_array_field(args, "queries")?;
     if queries.is_empty() {
@@ -1983,7 +2025,11 @@ pub fn apply_find(scene: &mut Scene, args: &Value) -> Result<FindReport, String>
             .get("fill")
             .and_then(Value::as_str)
             .map(|s| s.to_lowercase());
-        let near = q.get("near").and_then(Value::as_str);
+        let near = q
+            .get("near")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let radius = opt_num(q, "radius").unwrap_or(300.0);
         if text.is_none() && kind.is_none() && stroke.is_none() && fill.is_none() && near.is_none()
         {
@@ -1992,29 +2038,48 @@ pub fn apply_find(scene: &mut Scene, args: &Value) -> Result<FindReport, String>
                 qi + 1
             ));
         }
-        let near_center = near.and_then(|n| {
-            scene.shape(n).map(|e| {
-                (
-                    num(e, "x") + num(e, "width") / 2.0,
-                    num(e, "y") + num(e, "height") / 2.0,
-                )
-            })
-        });
-        let mut hits: Vec<(String, Value)> = Vec::new();
+        let near_center = if let Some(n) = near {
+            let e = scene
+                .shape(n)
+                .ok_or_else(|| format!("没有图形「{n}」：near 要是板上已有的 id"))?;
+            Some((
+                num(e, "x") + num(e, "width") / 2.0,
+                num(e, "y") + num(e, "height") / 2.0,
+                n.to_string(),
+            ))
+        } else {
+            None
+        };
+        // (匹配档, 距离, id, 元素)。先收齐再排，limit 不能截在排序前面。
+        let mut hits: Vec<(i32, f64, String, Value)> = Vec::new();
         for e in scene.live().chain(scene.pending.iter()) {
             // 容器里的标签不单独列（跟着它的框走）。
             if e.get("containerId").and_then(Value::as_str).is_some() {
                 continue;
             }
             let id = id_of(e).unwrap_or_default().to_string();
-            if let Some(t) = &text {
+            if near_center
+                .as_ref()
+                .is_some_and(|(_, _, anchor)| anchor == &id)
+            {
+                continue;
+            }
+            let score = if let Some(t) = &text {
                 let label = shape_label_text(scene, e)
                     .unwrap_or_default()
                     .to_lowercase();
-                if !label.contains(t.as_str()) {
+                if label == *t {
+                    3
+                } else if label.starts_with(t.as_str()) {
+                    2
+                } else if label.contains(t.as_str()) {
+                    1
+                } else {
                     continue;
                 }
-            }
+            } else {
+                0
+            };
             if let Some(k) = kind {
                 if kind_of(e) != k {
                     continue;
@@ -2040,22 +2105,29 @@ pub fn apply_find(scene: &mut Scene, args: &Value) -> Result<FindReport, String>
                     continue;
                 }
             }
-            if let Some((cx, cy)) = near_center {
+            let dist = if let Some((cx, cy, _)) = near_center {
                 let (ex, ey) = (
                     num(e, "x") + num(e, "width") / 2.0,
                     num(e, "y") + num(e, "height") / 2.0,
                 );
-                if ((ex - cx).powi(2) + (ey - cy).powi(2)).sqrt() > radius {
+                let d = ((ex - cx).powi(2) + (ey - cy).powi(2)).sqrt();
+                if d > radius {
                     continue;
                 }
-            }
-            hits.push((id, e.clone()));
-            if hits.len() >= limit {
-                break;
-            }
+                d
+            } else {
+                0.0
+            };
+            hits.push((score, dist, id, e.clone()));
         }
+        hits.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        hits.truncate(limit);
         detail.push_str(&format!("查询 {}：{} 个\n", qi + 1, hits.len()));
-        for (id, e) in &hits {
+        for (_, _, id, e) in &hits {
             let label = shape_label_text(scene, e).unwrap_or_default();
             let line = describe(
                 kind_of(e),
@@ -2077,10 +2149,173 @@ pub fn apply_find(scene: &mut Scene, args: &Value) -> Result<FindReport, String>
     Ok(FindReport { found, detail })
 }
 
+/// 外框并集：`(min_x, min_y, max_x, max_y)`。宽高取绝对值。
+fn union_frame(acc: Option<(f64, f64, f64, f64)>, e: &Value) -> (f64, f64, f64, f64) {
+    let (x, y, w, h) = frame_xywh(e);
+    match acc {
+        None => (x, y, x + w, y + h),
+        Some((a, b, c, d)) => (a.min(x), b.min(y), c.max(x + w), d.max(y + h)),
+    }
+}
+
+/// 还在 pending、而且没有活着的完整元素：副本回到 pending。墓碑加骨架也算待画。
+fn stored_pending(scene: &Scene, id: &str) -> bool {
+    scene.pending_index(id).is_some() && !scene.live().any(|e| id_of(e) == Some(id))
+}
+
+fn max_index_key(scene: &Scene) -> Option<String> {
+    scene
+        .elements
+        .iter()
+        .chain(scene.pending.iter())
+        .filter_map(|e| e.get("index").and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .max()
+        .map(str::to_string)
+}
+
+/// 完整元素丢掉克隆来的 `index`，接到当前最大键之后；骨架不带 index。
+fn assign_z(copy: &mut Value, pending: bool, last: &mut Option<String>) {
+    if let Some(obj) = copy.as_object_mut() {
+        obj.remove("index");
+    }
+    if pending {
+        return;
+    }
+    let key = key_between(last.as_deref(), None).unwrap_or_else(|| "a0".into());
+    copy["index"] = json!(key);
+    *last = Some(key);
+}
+
+fn push_copy(scene: &mut Scene, copy: Value, pending: bool) {
+    if pending {
+        scene.pending.push(copy);
+    } else {
+        scene.elements.push(copy);
+    }
+}
+
+/// 只改嵌套字段（`startBinding.elementId`），不写出扁平键。
+fn retarget_nested(
+    copy: &mut Value,
+    key: &str,
+    field: &str,
+    map: &std::collections::HashMap<String, String>,
+) {
+    let old = copy
+        .get(key)
+        .and_then(|v| v.get(field))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let Some(old) = old else {
+        return;
+    };
+    let Some(new_id) = map.get(&old) else {
+        return;
+    };
+    if let Some(obj) = copy.get_mut(key).and_then(Value::as_object_mut) {
+        obj.insert(field.to_string(), json!(new_id));
+    }
+}
+
+fn retarget_bound(copy: &mut Value, map: &std::collections::HashMap<String, String>) {
+    let Some(bound) = copy.get_mut("boundElements").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for b in bound {
+        let Some(old) = b.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        if let Some(new_id) = map.get(&old) {
+            if let Some(obj) = b.as_object_mut() {
+                obj.insert("id".into(), json!(new_id));
+            }
+        }
+    }
+}
+
+fn retarget_container(copy: &mut Value, map: &std::collections::HashMap<String, String>) {
+    let Some(old) = copy
+        .get("containerId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if let Some(new_id) = map.get(&old) {
+        copy["containerId"] = json!(new_id);
+    }
+}
+
+fn remap_groups(copy: &mut Value, group_map: &mut std::collections::HashMap<String, String>) {
+    let Some(groups) = copy.get("groupIds").and_then(Value::as_array) else {
+        return;
+    };
+    let mapped: Vec<Value> = groups
+        .iter()
+        .filter_map(|g| g.as_str())
+        .map(|g| {
+            let ng = group_map
+                .entry(g.to_string())
+                .or_insert_with(|| format!("g{}", nonce()))
+                .clone();
+            json!(ng)
+        })
+        .collect();
+    copy["groupIds"] = json!(mapped);
+}
+
+fn apply_copy_text(copy: &mut Value, text: &str) {
+    if kind_of(copy) == "text" || copy.get("containerId").is_some() {
+        copy["text"] = json!(text);
+        copy["originalText"] = json!(text);
+    } else if let Some(label) = copy.get_mut("label") {
+        label["text"] = json!(text);
+    }
+}
+
+fn copy_id(
+    old_id: &str,
+    k: usize,
+    scene: &Scene,
+    used: &mut std::collections::HashSet<String>,
+) -> String {
+    let base = format!("{old_id}-copy");
+    let mut candidate = if k == 0 {
+        base.clone()
+    } else {
+        format!("{base}{}", k + 1)
+    };
+    let mut n = 2usize;
+    while scene.id_taken(&candidate) || used.contains(&candidate) {
+        candidate = format!("{base}{n}");
+        n += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
+fn label_copy_id(
+    container_new: &str,
+    scene: &Scene,
+    used: &mut std::collections::HashSet<String>,
+) -> String {
+    let base = format!("{container_new}-label");
+    let mut candidate = base.clone();
+    let mut n = 2usize;
+    while scene.id_taken(&candidate) || used.contains(&candidate) {
+        candidate = format!("{base}{n}");
+        n += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
 /// `whiteboard_duplicate`：`{ ids, count?, texts?, place?, dx?, dy? }`。
-/// 复制整棵：连标签、组、箭头绑定一起复制；`texts` 给每份一份新文案；
-/// `place` 相对原件放置（right|left|above|below），否则按 `dx`/`dy` 偏移。
-/// 返回新 id（按「份 → 源」的顺序，和 `ids` 一一对应）。
+/// 复制给出的图形。两端都在这批 id 里的箭头 / 线也复制（不再往外扩）；只连一端的留在原件上。
+/// 标签跟着容器走（容器在 pending，标签也进 pending）。`texts` 给每份一份新文案。
+/// `place` 按选区外框平移；给了 `dx` / `dy` 就按偏移（缺的那个当 0）；都没给就找空地。
+/// 返回的 id：每份先是请求的，再是自动带上的箭头。标签不在里面。
 pub fn apply_duplicate(scene: &mut Scene, args: &Value) -> Result<ArrangeReport, String> {
     let ids = require_ids(args)?;
     // texts 走能剥 `{"item": ...}` 的解析（模型常把数组包一层）。
@@ -2103,216 +2338,185 @@ pub fn apply_duplicate(scene: &mut Scene, args: &Value) -> Result<ArrangeReport,
     }
     let dx = opt_num(args, "dx");
     let dy = opt_num(args, "dy");
-    // 源：先收齐（含各自的标签）。
-    let mut sources: Vec<Value> = Vec::new();
-    let mut labels: Vec<(String, String, Value)> = Vec::new();
+    // 先收请求的 id（重复的只留第一次），再补两端都在这批 id 里的箭头 / 线。不把补上的再拿去扩。
+    let mut sources: Vec<String> = Vec::new();
+    let mut source_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     for id in &ids {
-        let Some(e) = scene.shape(id) else {
+        if scene.shape(id).is_none() {
             return Err(format!(
                 "没有图形「{id}」：先用 whiteboard_read / whiteboard_find 看现有的 id"
             ));
-        };
-        sources.push(e.clone());
-        if let Some(label) = scene.live().find(|t| {
-            !is_deleted(t) && t.get("containerId").and_then(Value::as_str) == Some(id.as_str())
-        }) {
-            labels.push((
-                id.clone(),
-                id_of(label).unwrap_or_default().to_string(),
-                label.clone(),
-            ));
+        }
+        if source_set.insert(id.clone()) {
+            sources.push(id.clone());
         }
     }
-    // 原件整体的外框：相对放置按它算。
-    let bbox = sources.iter().fold(None::<(f64, f64, f64, f64)>, |acc, e| {
-        let (x, y, w, h) = (
-            num(e, "x"),
-            num(e, "y"),
-            num(e, "width").abs(),
-            num(e, "height").abs(),
-        );
-        Some(match acc {
-            None => (x, y, x + w, y + h),
-            Some((a, b, c, d)) => (a.min(x), b.min(y), c.max(x + w), d.max(y + h)),
-        })
-    });
+    let requested = source_set.clone();
+    let mut extras: Vec<String> = Vec::new();
+    for e in scene.live().chain(scene.pending.iter()) {
+        let kind = kind_of(e);
+        if kind != "arrow" && kind != "line" {
+            continue;
+        }
+        let Some(id) = id_of(e) else {
+            continue;
+        };
+        if source_set.contains(id) {
+            continue;
+        }
+        let start = endpoint_id(e, "startBinding", "start");
+        let end = endpoint_id(e, "endBinding", "end");
+        if let (Some(start), Some(end)) = (start, end) {
+            if requested.contains(start) && requested.contains(end) {
+                extras.push(id.to_string());
+                source_set.insert(id.to_string());
+            }
+        }
+    }
+    sources.extend(extras.iter().cloned());
+    // 标签跟着容器走。已经在选区里的不再复制第二遍。
+    let mut labels: Vec<(String, Value)> = Vec::new();
+    for id in &sources {
+        for t in scene.live().chain(scene.pending.iter()) {
+            if t.get("containerId").and_then(Value::as_str) != Some(id.as_str()) {
+                continue;
+            }
+            let Some(lid) = id_of(t) else {
+                continue;
+            };
+            if source_set.contains(lid) || labels.iter().any(|(_, l)| id_of(l) == Some(lid)) {
+                continue;
+            }
+            labels.push((id.clone(), t.clone()));
+        }
+    }
+    let mut bbox: Option<(f64, f64, f64, f64)> = None;
+    for id in &sources {
+        let e = scene.shape(id).expect("上面刚确认过");
+        bbox = Some(union_frame(bbox, e));
+    }
+    for (_, label) in &labels {
+        bbox = Some(union_frame(bbox, label));
+    }
+    let (min_x, min_y, max_x, max_y) = bbox.ok_or("ids 不能为空：给出要操作的图形 id 数组")?;
+    let (bw, bh) = (max_x - min_x, max_y - min_y);
     let mut next = scene.clone();
     let mut ordered: Vec<String> = Vec::new();
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_key = max_index_key(&next);
+    let step = |k: usize| (k + 1) as f64;
     for k in 0..count {
         let text = if texts.is_empty() {
             None
         } else {
             Some(texts[k % texts.len()].clone())
         };
-        // 没指定放哪：找一块空地（多次调用副本不会叠在一起）。
-        let (ox, oy) = match (place, bbox) {
-            (Some("right"), Some((_, _, r, _))) => (r + GAP, 0.0),
-            (Some("left"), Some((l, _, _, _))) => (l - GAP - DEFAULT_W, 0.0),
-            (Some("above"), Some((_, t, _, _))) => (0.0, t - GAP - DEFAULT_H),
-            (Some("below"), Some((_, _, _, b))) => (0.0, b + GAP),
-            _ => match (dx, dy) {
-                (Some(dx), Some(dy)) => (dx, dy),
-                _ => {
-                    let (w, h) = bbox
-                        .map(|b| (b.2 - b.0, b.3 - b.1))
-                        .unwrap_or((DEFAULT_W, DEFAULT_H));
-                    let (fx, fy) = free_slot(&next, w, h);
-                    (fx - num(&sources[0], "x"), fy - num(&sources[0], "y"))
-                }
-            },
-        };
-        // 多份之间错开，别叠在一起。
-        let (ox, oy) = (
-            ox + k as f64 * (DEFAULT_W + GAP),
-            oy + k as f64 * (DEFAULT_H + GAP),
-        );
-        // 这一份里：原 id → 新 id（箭头绑定要跟着改）。
-        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for src in &sources {
-            let old_id = id_of(src).unwrap_or_default().to_string();
-            // 一族 id：<id>-copy、<id>-copy2、<id>-copy3…（族里第一个空着的）。
-            let base = format!("{old_id}-copy");
-            let mut candidate = if k == 0 {
-                base.clone()
-            } else {
-                format!("{base}{}", k + 1)
-            };
-            let mut n = 2;
-            while next.id_taken(&candidate) || used.contains(&candidate) {
-                candidate = format!("{base}{n}");
-                n += 1;
+        // place 按外框平移；dx/dy 缺一个当 0；都没给就把外框左上角放到空地上。
+        // 空地按已经放进去的副本算，不再额外加一份默认宽高。
+        let (dx_k, dy_k) = if let Some(p) = place {
+            match p {
+                "right" => ((bw + GAP) * step(k), 0.0),
+                "left" => (-(bw + GAP) * step(k), 0.0),
+                "below" => (0.0, (bh + GAP) * step(k)),
+                "above" => (0.0, -(bh + GAP) * step(k)),
+                _ => (0.0, 0.0),
             }
-            used.insert(candidate.clone());
-            map.insert(old_id, candidate);
+        } else if dx.is_some() || dy.is_some() {
+            (step(k) * dx.unwrap_or(0.0), step(k) * dy.unwrap_or(0.0))
+        } else {
+            let (fx, fy) = free_slot(&next, bw, bh);
+            (fx - min_x, fy - min_y)
+        };
+        // 这一份里：原 id → 新 id。标签的新 id 也先放进同一张表，再改绑定。
+        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for old_id in &sources {
+            map.insert(old_id.clone(), copy_id(old_id, k, &next, &mut used));
+        }
+        let copy_labels: Vec<(String, Value)> = labels
+            .iter()
+            .filter(|(container, _)| sources.iter().any(|id| id == container))
+            .map(|(container, label)| (container.clone(), label.clone()))
+            .collect();
+        for (container, label) in &copy_labels {
+            let Some(old_label) = id_of(label) else {
+                continue;
+            };
+            let Some(new_container) = map.get(container).cloned() else {
+                continue;
+            };
+            let new_label = label_copy_id(&new_container, &next, &mut used);
+            map.insert(old_label.to_string(), new_label);
         }
         let mut group_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for src in &sources {
-            let old_id = id_of(src).unwrap_or_default().to_string();
-            let new_id = map.get(&old_id).cloned().unwrap_or_default();
+        for old_id in &sources {
+            let Some(src) = scene.shape(old_id) else {
+                continue;
+            };
+            let new_id = map.get(old_id).cloned().unwrap_or_default();
+            let pending = stored_pending(scene, old_id);
             let mut copy = src.clone();
             copy["id"] = json!(new_id);
-            copy["x"] = json!(num(src, "x") + ox);
-            copy["y"] = json!(num(src, "y") + oy);
+            copy["x"] = json!(num(src, "x") + dx_k);
+            copy["y"] = json!(num(src, "y") + dy_k);
             copy["isDeleted"] = json!(false);
+            retarget_nested(&mut copy, "startBinding", "elementId", &map);
+            retarget_nested(&mut copy, "endBinding", "elementId", &map);
+            retarget_nested(&mut copy, "start", "id", &map);
+            retarget_nested(&mut copy, "end", "id", &map);
+            retarget_bound(&mut copy, &map);
+            retarget_container(&mut copy, &map);
+            remap_groups(&mut copy, &mut group_map);
+            if let Some(t) = &text {
+                apply_copy_text(&mut copy, t);
+            }
             if copy.get("version").is_some() {
                 bump(&mut copy);
             }
-            // 组：原组 → 新组（这一份里的同组共用一个）。
-            if let Some(groups) = copy.get("groupIds").and_then(Value::as_array).cloned() {
-                let mapped: Vec<Value> = groups
-                    .iter()
-                    .filter_map(|g| g.as_str())
-                    .map(|g| {
-                        let ng = group_map
-                            .entry(g.to_string())
-                            .or_insert_with(|| format!("g{}", nonce()))
-                            .clone();
-                        json!(ng)
-                    })
-                    .collect();
-                copy["groupIds"] = json!(mapped);
-            }
-            // 箭头两端：指向被复制的图形时改指这一份的新 id。
-            for (key, path) in [
-                ("startBinding", "/startBinding/elementId"),
-                ("endBinding", "/endBinding/elementId"),
-            ] {
-                if let Some(t) = copy
-                    .pointer(path)
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                {
-                    if let Some(n) = map.get(&t) {
-                        copy[format!("{key}.elementId")] = json!(n);
-                    }
-                }
-            }
-            for key in ["start", "end"] {
-                if let Some(t) = copy
-                    .pointer(&format!("/{key}/id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                {
-                    if let Some(n) = map.get(&t) {
-                        copy[format!("{key}.id")] = json!(n);
-                    }
-                }
-            }
-            // 文案覆盖。
-            if let Some(t) = &text {
-                if kind_of(&copy) == "text" {
-                    copy["text"] = json!(t);
-                    copy["originalText"] = json!(t);
-                } else if let Some(label) = copy.get_mut("label") {
-                    label["text"] = json!(t);
-                }
-            }
-            // 容器里的标签：跟着复制一份（id 定死 `<新 id>-label`）。
-            let old_label = labels
-                .iter()
-                .find(|(lid, _, _)| lid == &old_id)
-                .map(|(_, lid, _)| lid.clone());
-            let new_label_id = format!("{new_id}-label");
-            if let Some(old_label_id) = &old_label {
-                if let Some(label) = labels
-                    .iter()
-                    .find(|(lid, _, _)| lid == &old_id)
-                    .map(|(_, _, l)| l.clone())
-                {
-                    let mut l = label;
-                    l["id"] = json!(new_label_id);
-                    l["containerId"] = json!(new_id);
-                    l["x"] = json!(num(&l, "x") + ox);
-                    l["y"] = json!(num(&l, "y") + oy);
-                    l["isDeleted"] = json!(false);
-                    if l.get("version").is_some() {
-                        bump(&mut l);
-                    }
-                    if let Some(t) = &text {
-                        l["text"] = json!(t);
-                        l["originalText"] = json!(t);
-                    }
-                    next.elements.push(l);
-                    // 容器复制品上的 boundElements 指向新标签。
-                    if let Some(c) = next
-                        .elements
-                        .iter_mut()
-                        .find(|e| id_of(e) == Some(new_id.as_str()))
-                    {
-                        if let Some(bound) =
-                            c.get_mut("boundElements").and_then(|b| b.as_array_mut())
-                        {
-                            for b in bound.iter_mut() {
-                                if b.get("id").and_then(Value::as_str)
-                                    == Some(old_label_id.as_str())
-                                {
-                                    b["id"] = json!(new_label_id);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            let is_pending = next
-                .pending
-                .iter()
-                .any(|p| id_of(p) == Some(old_id.as_str()));
-            if is_pending {
-                next.pending.push(copy);
-            } else {
-                next.elements.push(copy);
-            }
+            assign_z(&mut copy, pending, &mut last_key);
+            push_copy(&mut next, copy, pending);
             ordered.push(new_id);
+        }
+        for (container, label) in &copy_labels {
+            let Some(old_label) = id_of(label).map(str::to_string) else {
+                continue;
+            };
+            let Some(new_id) = map.get(&old_label).cloned() else {
+                continue;
+            };
+            let Some(new_container) = map.get(container).cloned() else {
+                continue;
+            };
+            // 标签跟容器进同一个库：容器还是骨架，标签也进 pending。
+            let pending = stored_pending(scene, container);
+            let mut l = label.clone();
+            l["id"] = json!(new_id);
+            l["containerId"] = json!(new_container);
+            l["x"] = json!(num(label, "x") + dx_k);
+            l["y"] = json!(num(label, "y") + dy_k);
+            l["isDeleted"] = json!(false);
+            retarget_bound(&mut l, &map);
+            remap_groups(&mut l, &mut group_map);
+            if let Some(t) = &text {
+                apply_copy_text(&mut l, t);
+            }
+            if l.get("version").is_some() {
+                bump(&mut l);
+            }
+            assign_z(&mut l, pending, &mut last_key);
+            push_copy(&mut next, l, pending);
         }
     }
     next.rev = scene.rev + 1;
     *scene = next;
+    let extra_note = if extras.is_empty() {
+        String::new()
+    } else {
+        format!("，其中 {} 个是两端都在选区里的连线", extras.len())
+    };
     Ok(ArrangeReport {
         detail: format!(
-            "复制了 {} 份（{} 个图形）：{}",
-            count,
+            "复制了 {count} 份（{} 个图形{extra_note}）：{}",
             sources.len(),
             ordered.join("、")
         ),
@@ -2329,7 +2533,8 @@ pub struct GraphReport {
 }
 
 /// `whiteboard_graph`：`{ nodes, edges?, layout?, columns?, gap_x?, gap_y? }`。
-/// layout ∈ row|column|grid|layered；默认 layered。节点默认 200×80，间距 60/80。
+/// layout ∈ row|column|grid|layered；默认 layered（顺着前进边取最长路，回边不改层）。
+/// 节点按自己的宽高占位，默认 200×80，间距 60/80。
 pub fn apply_graph(scene: &mut Scene, args: &Value) -> Result<GraphReport, String> {
     let (nodes, u_n) = take_array_field(args, "nodes")?;
     let (edges, u_e) = match args.get("edges") {
@@ -2512,68 +2717,140 @@ fn graph_positions(
     edges: &[(String, String, String, Option<String>)],
     cfg: &GraphLayout,
 ) -> Vec<(f64, f64)> {
-    let layout = cfg.kind.as_str();
-    let (columns, gap_x, gap_y) = (cfg.columns, cfg.gap_x, cfg.gap_y);
-    let (origin_x, origin_y) = (cfg.origin_x, cfg.origin_y);
     let n = nodes.len();
-    let mut pos = vec![(origin_x, origin_y); n];
-    let idx: std::collections::HashMap<&str, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, (id, _, _, _, _))| (id.as_str(), i))
-        .collect();
-    match layout {
-        "row" => {
-            for (i, slot) in pos.iter_mut().enumerate() {
-                *slot = (origin_x + i as f64 * (GRAPH_W + gap_x), origin_y);
+    let mut pos = vec![(cfg.origin_x, cfg.origin_y); n];
+    if n == 0 {
+        return pos;
+    }
+    let sizes: Vec<(f64, f64)> = nodes.iter().map(|(_, _, _, w, h)| (*w, *h)).collect();
+    let (gap_x, gap_y) = (cfg.gap_x, cfg.gap_y);
+    let (origin_x, origin_y) = (cfg.origin_x, cfg.origin_y);
+    // 一行：按各自宽度横排，在这一行的最大高度里垂直居中。空隙只加在图形之间。
+    let pack_row = |indices: &[usize], y0: f64, pos: &mut Vec<(f64, f64)>| {
+        let row_h = indices.iter().map(|&i| sizes[i].1).fold(0.0, f64::max);
+        let mut x = origin_x;
+        for (slot, &i) in indices.iter().enumerate() {
+            let (w, h) = sizes[i];
+            pos[i] = (x, y0 + (row_h - h) / 2.0);
+            x += w;
+            if slot + 1 != indices.len() {
+                x += gap_x;
             }
         }
+    };
+    match cfg.kind.as_str() {
+        "row" => {
+            let all: Vec<usize> = (0..n).collect();
+            pack_row(&all, origin_y, &mut pos);
+        }
         "column" => {
-            for (i, slot) in pos.iter_mut().enumerate() {
-                *slot = (origin_x, origin_y + i as f64 * (GRAPH_H + gap_y));
+            let col_w = sizes.iter().map(|(w, _)| *w).fold(0.0, f64::max);
+            let mut y = origin_y;
+            for i in 0..n {
+                let (w, h) = sizes[i];
+                pos[i] = (origin_x + (col_w - w) / 2.0, y);
+                y += h;
+                if i + 1 != n {
+                    y += gap_y;
+                }
             }
         }
         "grid" => {
-            let cols = columns.max(1);
-            for (i, slot) in pos.iter_mut().enumerate() {
+            let cols = cfg.columns.max(1);
+            let rows = n.div_ceil(cols);
+            let mut col_w = vec![0.0f64; cols];
+            let mut row_h = vec![0.0f64; rows];
+            for (i, &(w, h)) in sizes.iter().enumerate() {
                 let c = i % cols;
                 let r = i / cols;
-                *slot = (
-                    origin_x + c as f64 * (GRAPH_W + gap_x),
-                    origin_y + r as f64 * (GRAPH_H + gap_y),
-                );
+                col_w[c] = col_w[c].max(w);
+                row_h[r] = row_h[r].max(h);
+            }
+            for i in 0..n {
+                let c = i % cols;
+                let r = i / cols;
+                let (w, h) = sizes[i];
+                let x = origin_x
+                    + col_w.iter().take(c).sum::<f64>()
+                    + gap_x * c as f64
+                    + (col_w[c] - w) / 2.0;
+                let y = origin_y
+                    + row_h.iter().take(r).sum::<f64>()
+                    + gap_y * r as f64
+                    + (row_h[r] - h) / 2.0;
+                pos[i] = (x, y);
             }
         }
         _ => {
-            let mut indeg = vec![0usize; n];
+            let idx: std::collections::HashMap<&str, usize> = nodes
+                .iter()
+                .enumerate()
+                .map(|(i, (id, _, _, _, _))| (id.as_str(), i))
+                .collect();
             let mut adj = vec![Vec::new(); n];
             for (_, from, to, _) in edges {
                 if let (Some(&a), Some(&b)) = (idx.get(from.as_str()), idx.get(to.as_str())) {
-                    adj[a].push(b);
-                    indeg[b] += 1;
+                    if a != b {
+                        adj[a].push(b);
+                    }
                 }
+            }
+            // 灰节点上的边是回边，不进分层；树边 / 前向边 / 交叉边留下，再取最长路。
+            let mut color = vec![0u8; n];
+            let mut forward: Vec<(usize, usize)> = Vec::new();
+            fn walk(
+                u: usize,
+                adj: &[Vec<usize>],
+                color: &mut [u8],
+                forward: &mut Vec<(usize, usize)>,
+            ) {
+                color[u] = 1;
+                for &v in &adj[u] {
+                    if color[v] == 1 {
+                        continue;
+                    }
+                    forward.push((u, v));
+                    if color[v] == 0 {
+                        walk(v, adj, color, forward);
+                    }
+                }
+                color[u] = 2;
+            }
+            for i in 0..n {
+                if color[i] == 0 {
+                    walk(i, &adj, &mut color, &mut forward);
+                }
+            }
+            let mut indeg = vec![0usize; n];
+            let mut out = vec![Vec::new(); n];
+            for (u, v) in forward {
+                out[u].push(v);
+                indeg[v] += 1;
             }
             let mut level = vec![0usize; n];
-            let mut queue: std::collections::VecDeque<usize> = indeg
-                .iter()
-                .enumerate()
-                .filter(|(_, d)| **d == 0)
-                .map(|(i, _)| i)
-                .collect();
-            if queue.is_empty() {
-                queue.extend(0..n);
-            }
-            let mut seen = vec![false; n];
-            while let Some(u) = queue.pop_front() {
-                if seen[u] {
-                    continue;
+            let mut queued = vec![false; n];
+            let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+            for i in 0..n {
+                if indeg[i] == 0 {
+                    queue.push_back(i);
+                    queued[i] = true;
                 }
-                seen[u] = true;
-                for &v in &adj[u] {
+            }
+            while let Some(u) = queue.pop_front() {
+                for &v in &out[u] {
                     level[v] = level[v].max(level[u] + 1);
                     indeg[v] = indeg[v].saturating_sub(1);
-                    if indeg[v] == 0 {
+                    if indeg[v] == 0 && !queued[v] {
+                        queued[v] = true;
                         queue.push_back(v);
+                    }
+                }
+            }
+            if queued.contains(&false) {
+                let extra = level.iter().copied().max().unwrap_or(0) + 1;
+                for i in 0..n {
+                    if !queued[i] {
+                        level[i] = extra;
                     }
                 }
             }
@@ -2582,13 +2859,14 @@ fn graph_positions(
             for (i, &l) in level.iter().enumerate() {
                 per_level[l].push(i);
             }
-            for (l, row) in per_level.iter().enumerate() {
-                for (c, &i) in row.iter().enumerate() {
-                    pos[i] = (
-                        origin_x + c as f64 * (GRAPH_W + gap_x),
-                        origin_y + l as f64 * (GRAPH_H + gap_y),
-                    );
+            let mut y = origin_y;
+            for row in &per_level {
+                if row.is_empty() {
+                    continue;
                 }
+                let row_h = row.iter().map(|&i| sizes[i].1).fold(0.0, f64::max);
+                pack_row(row, y, &mut pos);
+                y += row_h + gap_y;
             }
         }
     }
@@ -3375,10 +3653,9 @@ mod tests {
         assert_eq!(s.elements[0]["strokeColor"], "#ff0000");
         assert_eq!(s.elements[1]["backgroundColor"], "#00ff00");
 
-        let before_front = s.elements.iter().position(|e| e["id"] == "a").unwrap();
         let ly = apply_layer(&mut s, &json!({ "ids": ["a"], "to": "front" })).unwrap();
         assert!(ly.detail.contains("front"));
-        // z 序看 index（Excalidraw 0.18），数组顺序不动。
+        // index 和数组顺序一起改：front 之后 a 排在最后。
         let z = |id: &str| {
             s.elements.iter().find(|e| e["id"] == id).unwrap()["index"]
                 .as_str()
@@ -3386,7 +3663,8 @@ mod tests {
                 .to_string()
         };
         assert!(z("a") > z("b"), "a 要在最上：{} vs {}", z("a"), z("b"));
-        assert_eq!(before_front, 0, "数组顺序不动");
+        let pos_a = s.elements.iter().position(|e| e["id"] == "a").unwrap();
+        assert_eq!(pos_a, s.elements.len() - 1, "front 之后 a 在数组末尾");
 
         // fit_text on b: add a label first via update
         apply_edit(
@@ -3815,14 +4093,15 @@ mod tests {
         .unwrap();
         assert_eq!(r.touched.len(), 2, "{:?}", r.touched);
         let l1 = s
-            .elements
+            .pending
             .iter()
             .find(|e| e["id"] == "a-copy-label")
-            .expect("第一份的标签");
+            .expect("第一份的标签跟着待画的框进 pending");
         assert_eq!(l1["text"], "甲");
         assert_eq!(l1["containerId"], "a-copy");
+        assert!(l1.get("index").is_none(), "待画标签不带 index：{l1}");
         let l2 = s
-            .elements
+            .pending
             .iter()
             .find(|e| e["id"] == "a-copy2-label")
             .expect("第二份的标签");
@@ -3928,7 +4207,7 @@ mod tests {
         assert!(key_between(Some("a0"), Some("Zz")).is_none());
     }
 
-    /// layer 改的是元素的 `index`（Excalidraw 0.18 的 z 序），不是数组顺序。
+    /// layer 同时改 `index` 和数组顺序（界面按数组顺序画）。
     #[test]
     fn layer_rewrites_fractional_index() {
         let mut s = Scene::default();
@@ -3978,5 +4257,262 @@ mod tests {
         let text = lines_for(&s, &["a".to_string()]);
         assert!(text.contains("id=a"), "{text}");
         assert!(!text.contains("id=b"), "{text}");
+    }
+
+    fn shape_of<'a>(scene: &'a Scene, id: &str) -> &'a Value {
+        scene
+            .elements
+            .iter()
+            .chain(scene.pending.iter())
+            .find(|e| e["id"] == id)
+            .unwrap_or_else(|| panic!("没有 {id}"))
+    }
+
+    /// 复制完整元素：嵌套绑定指向副本，z 序键不重复，place 按外框平移且不斜移。
+    #[test]
+    fn duplicate_retargets_bindings_and_places_by_bbox() {
+        let mut a = full("a", "rectangle", 100.0, 1);
+        a["index"] = json!("a0");
+        a["boundElements"] = json!([{ "id": "a-label", "type": "text" }]);
+        let mut b = full("b", "rectangle", 400.0, 1);
+        b["index"] = json!("a1");
+        let mut edge = full("edge", "arrow", 110.0, 1);
+        edge["index"] = json!("a2");
+        edge["startBinding"] = json!({ "elementId": "a", "focus": 0, "gap": 8 });
+        edge["endBinding"] = json!({ "elementId": "b", "focus": 0, "gap": 8 });
+        let mut label = full("a-label", "text", 120.0, 1);
+        label["containerId"] = json!("a");
+        label["text"] = json!("原");
+        label["index"] = json!("a3");
+        let mut s = Scene {
+            elements: vec![a, b, edge, label],
+            ..Default::default()
+        };
+        let before = s.clone();
+        let r = apply_duplicate(
+            &mut s,
+            &json!({ "ids": ["a", "b", "edge"], "count": 2, "place": "right" }),
+        )
+        .unwrap();
+        assert_eq!(
+            r.touched,
+            vec![
+                "a-copy",
+                "b-copy",
+                "edge-copy",
+                "a-copy2",
+                "b-copy2",
+                "edge-copy2"
+            ]
+        );
+        let copy = shape_of(&s, "edge-copy");
+        assert_eq!(copy["startBinding"]["elementId"], "a-copy");
+        assert_eq!(copy["endBinding"]["elementId"], "b-copy");
+        assert!(copy.get("startBinding.elementId").is_none(), "{copy}");
+        assert!(copy.get("endBinding.elementId").is_none(), "{copy}");
+        let a_copy = shape_of(&s, "a-copy");
+        assert_eq!(a_copy["boundElements"][0]["id"], "a-copy-label");
+        assert_ne!(a_copy["index"], "a0");
+        assert!(
+            a_copy["index"].as_str().unwrap() > "a3",
+            "副本要排在原件之上：{}",
+            a_copy["index"]
+        );
+        // 选区 x=100..500，右移一份后左缘 = 500 + GAP(60)。
+        assert!(
+            (num(a_copy, "x") - 560.0).abs() < 1e-6,
+            "x={}",
+            num(a_copy, "x")
+        );
+        assert!((num(a_copy, "y") - 0.0).abs() < 1e-6, "y 不该跟着斜移");
+        let a2 = shape_of(&s, "a-copy2");
+        assert!((num(a2, "y") - 0.0).abs() < 1e-6, "第二份仍在同一行");
+        assert!(num(a2, "x") > num(a_copy, "x"));
+        assert_eq!(shape_of(&s, "a")["index"], before.elements[0]["index"]);
+    }
+
+    /// 两端都在选区里的箭头跟着复制；只有一端在选区里的留在原件上。
+    #[test]
+    fn duplicate_includes_internal_arrows_only() {
+        let mut edge = full("edge", "arrow", 200.0, 1);
+        edge["startBinding"] = json!({ "elementId": "a" });
+        edge["endBinding"] = json!({ "elementId": "b" });
+        let mut stray = full("stray", "arrow", 200.0, 1);
+        stray["startBinding"] = json!({ "elementId": "a" });
+        stray["endBinding"] = json!({ "elementId": "c" });
+        let mut s = Scene {
+            elements: vec![
+                full("a", "rectangle", 0.0, 1),
+                full("b", "rectangle", 300.0, 1),
+                full("c", "rectangle", 600.0, 1),
+                edge,
+                stray,
+            ],
+            ..Default::default()
+        };
+        let r = apply_duplicate(&mut s, &json!({ "ids": ["a", "b"], "place": "right" })).unwrap();
+        assert_eq!(r.touched, vec!["a-copy", "b-copy", "edge-copy"]);
+        assert!(s.shape("stray-copy").is_none(), "外连箭头不该复制");
+        let copy = shape_of(&s, "edge-copy");
+        assert_eq!(copy["startBinding"]["elementId"], "a-copy");
+        assert_eq!(copy["endBinding"]["elementId"], "b-copy");
+    }
+
+    /// 待画骨架的标签跟着进 pending，不另写一份完整元素。
+    #[test]
+    fn duplicate_pending_label_stays_pending() {
+        let mut s = Scene::default();
+        apply_edit(
+            &mut s,
+            &json!({ "add": [{ "type": "rectangle", "id": "a", "text": "原", "x": 10, "y": 20 }] }),
+        )
+        .unwrap();
+        apply_duplicate(&mut s, &json!({ "ids": ["a"], "place": "right" })).unwrap();
+        assert!(
+            s.elements.is_empty(),
+            "骨架副本不该进 elements：{:?}",
+            s.elements
+        );
+        let copy = s.pending.iter().find(|e| e["id"] == "a-copy").unwrap();
+        assert_eq!(copy["label"]["text"], "原");
+        assert!(copy.get("index").is_none(), "骨架不带 index：{copy}");
+    }
+
+    /// 回边不参与分层；超宽节点按真实宽度占位。
+    #[test]
+    fn graph_back_edge_and_wide_nodes_do_not_overlap() {
+        let mut s = Scene::default();
+        apply_graph(
+            &mut s,
+            &json!({
+                "nodes": [
+                    { "id": "A", "width": 400, "height": 80 },
+                    { "id": "B" },
+                    { "id": "C" }
+                ],
+                "edges": [
+                    { "from": "A", "to": "B" },
+                    { "from": "B", "to": "C" },
+                    { "from": "C", "to": "B" }
+                ]
+            }),
+        )
+        .unwrap();
+        let at = |id: &str| {
+            let e = s.pending.iter().find(|p| p["id"] == id).unwrap();
+            (num(e, "x"), num(e, "y"), num(e, "width"), num(e, "height"))
+        };
+        let (ax, ay, aw, ah) = at("A");
+        let (_, by, _, _) = at("B");
+        let (cx, cy, cw, ch) = at("C");
+        assert!(cy > by, "C 在 B 的下一层：B.y={by} C.y={cy}");
+        let overlap = ax < cx + cw && ax + aw > cx && ay < cy + ch && ay + ah > cy;
+        assert!(
+            !overlap,
+            "A 与 C 不该重叠：A=({ax},{ay},{aw},{ah}) C=({cx},{cy},{cw},{ch})"
+        );
+    }
+
+    /// 横排用节点自己的宽度，不按默认 200 挤在一起。
+    #[test]
+    fn graph_row_uses_actual_widths() {
+        let mut s = Scene::default();
+        apply_graph(
+            &mut s,
+            &json!({
+                "nodes": [
+                    { "id": "A", "width": 400, "height": 80 },
+                    { "id": "B", "width": 400, "height": 80 }
+                ],
+                "layout": "row",
+                "gap_x": 60
+            }),
+        )
+        .unwrap();
+        let ax = num(s.pending.iter().find(|p| p["id"] == "A").unwrap(), "x");
+        let bx = num(s.pending.iter().find(|p| p["id"] == "B").unwrap(), "x");
+        assert!(bx >= ax + 400.0 + 60.0, "B.x={bx} A.x={ax}");
+    }
+
+    /// 找不到的 near 报错；命中按整段相等优先，距离近的优先。
+    #[test]
+    fn find_rejects_unknown_near_and_ranks_matches() {
+        let mut s = Scene::default();
+        apply_edit(
+            &mut s,
+            &json!({ "add": [
+                { "type": "rectangle", "id": "long", "text": "Sign Up", "x": 0, "y": 0 },
+                { "type": "rectangle", "id": "exact", "text": "Sign", "x": 800, "y": 0 },
+                { "type": "rectangle", "id": "near", "text": "别的", "x": 40, "y": 0 },
+                { "type": "rectangle", "id": "far", "text": "别的", "x": 900, "y": 0 }
+            ] }),
+        )
+        .unwrap();
+        let err = apply_find(&mut s, &json!({ "queries": [{ "near": "missing" }] })).unwrap_err();
+        assert!(err.contains("missing"), "{err}");
+        assert!(err.contains("near"), "{err}");
+        let ranked = apply_find(&mut s, &json!({ "queries": [{ "text": "sign" }] })).unwrap();
+        assert_eq!(
+            ranked.found.first().map(String::as_str),
+            Some("exact"),
+            "{:?}",
+            ranked.found
+        );
+        let near = apply_find(
+            &mut s,
+            &json!({ "queries": [{ "near": "long", "radius": 2000 }] }),
+        )
+        .unwrap();
+        assert!(
+            !near.found.iter().any(|id| id == "long"),
+            "参照自己不算：{:?}",
+            near.found
+        );
+        assert_eq!(
+            near.found.first().map(String::as_str),
+            Some("near"),
+            "{:?}",
+            near.found
+        );
+    }
+
+    /// related 带上指向这个图形的箭头。
+    #[test]
+    fn related_includes_arrows_pointing_at_the_shape() {
+        let mut edge = full("edge", "arrow", 200.0, 1);
+        edge["startBinding"] = json!({ "elementId": "a" });
+        edge["endBinding"] = json!({ "elementId": "b" });
+        let s = Scene {
+            elements: vec![
+                full("a", "rectangle", 0.0, 1),
+                full("b", "rectangle", 300.0, 1),
+                edge,
+            ],
+            ..Default::default()
+        };
+        let ids = related_ids(&s, "a");
+        assert!(ids.iter().any(|id| id == "edge"), "{ids:?}");
+    }
+
+    /// 图形总宽超过两端跨度时不改坐标。
+    #[test]
+    fn distribute_rejects_when_sizes_exceed_span() {
+        let mut s = Scene {
+            elements: vec![
+                full("a", "rectangle", 0.0, 1),
+                full("b", "rectangle", 10.0, 1),
+                full("c", "rectangle", 50.0, 1),
+            ],
+            ..Default::default()
+        };
+        let err = apply_distribute(
+            &mut s,
+            &json!({ "ids": ["a", "b", "c"], "direction": "horizontal" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("放不下"), "{err}");
+        assert_eq!(num(&s.elements[0], "x"), 0.0);
+        assert_eq!(num(&s.elements[1], "x"), 10.0);
+        assert_eq!(num(&s.elements[2], "x"), 50.0);
     }
 }

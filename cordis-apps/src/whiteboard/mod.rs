@@ -28,7 +28,7 @@ const BOARD_HTML: &str = include_str!("../../assets/whiteboard.html");
 /// 中文手写字体（Xiaolai，12 MB）不打进界面：联网时从这里取，离线退回系统字体。
 const FONT_CDN: &str = "https://esm.sh";
 
-const READ_DESC: &str = "Read the project's whiteboard: every shape with id/type/label/position/size/colors/arrow endpoints, plus reusable `patches` you can copy into whiteboard_edit update/add. The board is shared with the user — read before editing.\n\nScope it on a big board: `overview` (just the totals and the board bounds), `ids` (only these shapes), `related` (this shape plus its container, label, arrow ends and group). Find shapes by meaning with whiteboard_find instead of guessing ids.\n\nTo SEE what the board actually looks like (the real rendering, not coordinates), use the app tool `app_whiteboard__snapshot` — calling any whiteboard tool opens the board panel, after which the snapshot tool is available.";
+const READ_DESC: &str = "Read the project's whiteboard: every shape with id/type/label/position/size/colors/arrow endpoints, plus reusable `patches` you can copy into whiteboard_edit update/add. The board is shared with the user — read before editing.\n\nScope it on a big board: `overview` (just the totals and the board bounds), `ids` (only these shapes), `related` (this shape plus its container, label, arrow ends, arrows pointing at it, and its group). Find shapes by meaning with whiteboard_find instead of guessing ids.\n\nTo SEE what the board actually looks like (the real rendering, not coordinates), use the app tool `app_whiteboard__snapshot` — calling any whiteboard tool opens the board panel, after which the snapshot tool is available.";
 
 const EDIT_DESC: &str = concat!(
     "Edit the project's whiteboard (Excalidraw; user sees it too). One call: `clear`?, `delete`? (id strings), ",
@@ -353,7 +353,14 @@ impl App for Whiteboard {
             json!({
                 "name": "whiteboard_read",
                 "description": READ_DESC,
-                "inputSchema": { "type": "object", "properties": {} },
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "overview": { "type": "boolean" },
+                        "ids": ids_schema(),
+                        "related": { "type": "string" }
+                    }
+                },
                 "annotations": { "readOnlyHint": true },
             }),
             json!({
@@ -481,7 +488,7 @@ impl App for Whiteboard {
             }),
             json!({
                 "name": "whiteboard_graph",
-                "description": "Draw a flowchart from nodes+edges without guessing coordinates. Args: `nodes` [{id, text?, type?}] (type default rectangle; also ellipse|diamond|text), `edges`? [{from, to, text?, id?}], `layout`? ∈ layered|row|column|grid (default layered = BFS levels), `columns`? (grid default 3), `gap_x`?/`gap_y`? (default 60/80). Boxes default 200×80. Atomic; unwraps exactly-one-key {item:[...]}. NOT {\"item\":...} wrappers for nodes/edges arrays.",
+                "description": "Draw a flowchart from nodes+edges without guessing coordinates. Args: `nodes` [{id, text?, type?}] (type default rectangle; also ellipse|diamond|text), `edges`? [{from, to, text?, id?}], `layout`? ∈ layered|row|column|grid (default layered: longest path on forward edges; a back edge is still drawn but does not change the level), `columns`? (grid default 3), `gap_x`?/`gap_y`? (default 60/80). Boxes default 200×80 and are packed at their real width and height. Atomic; unwraps exactly-one-key {item:[...]}. NOT {\"item\":...} wrappers for nodes/edges arrays.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -498,7 +505,7 @@ impl App for Whiteboard {
             }),
             json!({
                 "name": "whiteboard_find",
-                "description": "Find shapes by what they say or look like, not by id: `queries` [{text?, type?, stroke?, fill?, near?, radius?}] — several per call, each ranked on its own. text matches the label/text (case-insensitive), type ∈ rectangle|ellipse|diamond|text|arrow|line, stroke/fill are colors (#1e1e1e), near = id of a shape to search around (radius default 300). Returns id/type/label/position plus what each shape is related to (container, group, arrow ends).",
+                "description": "Find shapes by text, type, color, or distance — not vector search. `queries` [{text?, type?, stroke?, fill?, near?, radius?}] — several per call, each ranked and truncated on its own. text is case-insensitive and ranks exact match, then prefix, then contains. type ∈ rectangle|ellipse|diamond|text|arrow|line. stroke/fill are colors. near must be an existing shape id (the anchor itself is excluded); closer hits rank first after the text tier (radius default 300). An unknown near fails the whole call.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -510,7 +517,7 @@ impl App for Whiteboard {
             }),
             json!({
                 "name": "whiteboard_duplicate",
-                "description": "Copy shapes with their whole subtree (labels, group, arrow bindings). `ids` flat string array — the shapes to copy, copied together keeping their relative positions; `count`? copies (default 1, max 20); `texts`? one new label per copy (array, length = count or 1); `place`? ∈ right|left|above|below (beside the original) or `dx`/`dy` offset (default 40). Returns the new ids in copy order — use them directly, no re-read needed.",
+                "description": "Copy the given shapes together, keeping relative positions. Arrows or lines are also copied when both ends are in `ids` (one-ended arrows stay on the originals). Labels and groups come along; group ids are new per copy. `ids` is a flat string array. `count`? (default 1, max 20); `texts`? one new label per copy. `place`? ∈ right|left|above|below shifts by the selection's real bounding box; or pass `dx`/`dy` (the missing one is 0). Otherwise each copy lands in a free spot. Copies get new z-index keys. Returns new ids: requested shapes, then auto-copied arrows — labels are not listed.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

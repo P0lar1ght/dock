@@ -16,7 +16,7 @@
 
 | 工具 | 作用 |
 |---|---|
-| `whiteboard_read {}` | 每个图形一行：id、类型、标签、位置、尺寸、颜色、箭头两端；另给 `structuredContent.shapes` 与可复用的 `patches`（可直接拷进 edit 的 update/add）。`overview` 只给总数与画板范围，`ids` 只给这几个，`related` 给某个图形和它的容器/标签/箭头两端/同组 |
+| `whiteboard_read {}` | 每个图形一行：id、类型、标签、位置、尺寸、颜色、箭头两端；另给 `structuredContent.shapes` 与可复用的 `patches`（可直接拷进 edit 的 update/add）。`overview` 只给总数与画板范围，`ids` 只给这几个，`related` 给某个图形和它的容器/标签/箭头两端/指向它的箭头/同组 |
 | `whiteboard_edit { clear?, delete?, update?, add? }` | 先清空，再删、改、加；任何一条不合法整次不改 |
 | `whiteboard_group { ids, ungroup? }` | 把 ≥2 个图形合成一组，或 `ungroup: true` 取消分组 |
 | `whiteboard_align { ids, align }` | 对齐：`left` / `right` / `top` / `bottom` / `center_x` / `center_y` |
@@ -26,8 +26,8 @@
 | `whiteboard_distribute { ids, direction }` | ≥3 个图形两端固定、中间均分；`direction` ∈ `horizontal` / `vertical` |
 | `whiteboard_layout { ids, columns, gap_x?, gap_y? }` | 按网格重排现有图形（保留各自身高宽；默认间距 60/80） |
 | `whiteboard_place { id, ref, where, gap? }` | 把已有图形放到参照旁；`where` ∈ `left` / `right` / `above` / `below`（默认 gap 40） |
-| `whiteboard_find { queries, limit? }` | 按语义找图形：`queries` 一批（`text` / `type` / `stroke` / `fill` / `near` / `radius`），各自独立排序；不用背 id |
-| `whiteboard_duplicate { ids, count?, texts?, place?, dx?, dy? }` | 复制整棵（标签、组、箭头绑定一起复制）；`count` 复制几份，`texts` 每份一份新文案，`place` 相对原件放置；回新 id（按副本顺序） |
+| `whiteboard_find { queries, limit? }` | 按文字（整段相等、前缀、包含）、类型、颜色、距离排序，不是向量语义。`near` 必须是板上已有的 id，参照自己不算；找不到就整次失败。每个查询先收齐再排序截断 |
+| `whiteboard_duplicate { ids, count?, texts?, place?, dx?, dy? }` | 复制给出的图形；两端都在这批 id 里的箭头一并复制（只连一端的留在原件上）。`place` 按选区真实外框平移。副本用新的 z 序键。回新 id：先是请求的，再是自动带上的箭头（标签不在里面） |
 | `whiteboard_graph { nodes, edges?, layout?, … }` | 用 nodes+edges 画流程图，自动算坐标；`layout` ∈ `layered` / `row` / `column` / `grid`（默认 layered）；新图排在现有内容右边 |
 
 - 图形 `type`：`rectangle` `ellipse` `diamond` `text` `arrow` `line`。
@@ -45,7 +45,7 @@
 - 删掉的图形留墓碑；清空后可以用同样的 id 重画。
 - 挪了位置的图形：连在上面的箭头退回骨架重新连，**箭头 id 保持不变**（旧箭头留墓碑：界面把旧版本存回来时按版本比较，旧的赢不了，不会出现两个同 id 的箭头）。
 - 只改了尺寸（`fit_text`）不重连箭头；只有位置变了才重连。
-- `graph` 的节点默认 200×80（可给 `width`/`height`）；边的默认 id 是 `e-<from>-<to>`，同 from/to 的第二条边自动加序号。
+- `graph` 的节点默认 200×80（可给 `width`/`height`），横排、竖排、网格和分层都按各自真实宽高占位。分层顺着前进边取最长路，回边照样画但不改层。边的默认 id 是 `e-<from>-<to>`，同 from/to 的第二条边自动加序号。
 - 间距类参数（`gap` / `gap_x` / `gap_y`）不能为负。
 
 ### 界面工具（面板开着时）
