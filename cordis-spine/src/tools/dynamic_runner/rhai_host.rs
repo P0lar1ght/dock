@@ -123,7 +123,15 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     (
         "host.call_tool_ex",
         "Like host.call_tool but returns a structured result: ok / is_error (the tool's own verdict), text, images (count), tool (the tool that actually ran). Same caller identity, gates and unknown-tool error.",
-        &["host.call_tool_ex(name: String, args: Map | String) -> #{ ok: bool, is_error: bool, text: String, images: int, tool: String }"],
+        &[
+            "host.call_tool_ex(name: String, args: Map | String) -> #{ ok: bool, is_error: bool, text: String, images: int, tool: String }",
+            "host.call_tool_ex(name: String, args: Map | String, #{ timeout_ms: int }) -> same map; timing out gives is_error with \"timed out\"",
+        ],
+    ),
+    (
+        "host.call_tools_parallel",
+        "Run up to 16 tool calls concurrently (join_all) as the caller; results come back in input order as call_tool_ex maps. Each item #{ tool, args?, timeout_ms? }. Same gates; approval prompts still queue one at a time. Only batch calls that do not depend on each other (reads, searches, independent lookups); keep writes and desktop actions sequential. Stop cancels the ones still running.",
+        &["host.call_tools_parallel([#{ tool: String, args: Map, timeout_ms?: int }, ...]) -> [#{ ok, is_error, text, images, tool }, ...]"],
     ),
     (
         "host.list_tools",
@@ -381,6 +389,8 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
     engine.register_fn("call_tool_ex", Host::call_tool_ex);
+    engine.register_fn("call_tool_ex", Host::call_tool_ex_opts);
+    engine.register_fn("call_tools_parallel", Host::call_tools_parallel);
     engine.register_fn("list_tools", Host::list_tools);
     engine.register_fn("tool_schema", Host::tool_schema);
     engine.register_fn("cancelled", Host::cancelled);
@@ -761,7 +771,7 @@ impl Host {
             .ok_or_else(|| eval_err("tools is not mounted".into()))?;
         let call = self.tool_call(&name, &args)?;
         let exec = self.exec_ctx();
-        let result = block_on_tool(tools.as_ref(), &exec, call)?;
+        let result = block_on_tool(tools.as_ref(), &exec, call, None)?;
         Ok(result.content.into())
     }
 
@@ -774,7 +784,74 @@ impl Host {
         let tools = self.tools()?;
         let call = self.tool_call(&name, &args)?;
         let exec = self.exec_ctx();
-        Ok(result_map(block_on_tool(tools.as_ref(), &exec, call)?))
+        Ok(result_map(block_on_tool(
+            tools.as_ref(),
+            &exec,
+            call,
+            None,
+        )?))
+    }
+
+    /// `call_tool_ex` 加选项：`#{ timeout_ms }`（到点回 `is_error` 的超时结果，最多 10 分钟）。
+    fn call_tool_ex_opts(
+        &mut self,
+        name: ImmutableString,
+        args: Dynamic,
+        opts: Map,
+    ) -> Result<Map, Box<rhai::EvalAltResult>> {
+        let tools = self.tools()?;
+        let call = self.tool_call(&name, &args)?;
+        let timeout = timeout_of(&opts)?;
+        let exec = self.exec_ctx();
+        Ok(result_map(block_on_tool(
+            tools.as_ref(),
+            &exec,
+            call,
+            timeout,
+        )?))
+    }
+
+    /// 同时跑几颗工具（`join_all`），结果按传入顺序回成 `call_tool_ex` 那样的 map。每颗
+    /// `#{ tool, args?, timeout_ms? }`（也认 `name` / `arguments`）。同一个调用方身份、同一套
+    /// 门；要审批的照样进全局审批队列一个个问。最多 16 颗。
+    fn call_tools_parallel(&mut self, calls: Array) -> Result<Array, Box<rhai::EvalAltResult>> {
+        if calls.len() > MAX_PARALLEL_CALLS {
+            return err(format!(
+                "call_tools_parallel takes at most {MAX_PARALLEL_CALLS} calls, got {}",
+                calls.len()
+            ));
+        }
+        let tools = self.tools()?;
+        let mut planned = Vec::with_capacity(calls.len());
+        for (i, item) in calls.into_iter().enumerate() {
+            let Some(map) = item.try_cast::<Map>() else {
+                return err(format!(
+                    "call_tools_parallel[{i}] must be a map #{{ tool, args }}"
+                ));
+            };
+            let name = map_str(&map, "tool")
+                .or_else(|| map_str(&map, "name"))
+                .ok_or_else(|| eval_err(format!("call_tools_parallel[{i}] needs tool")))?;
+            let args = map
+                .get("args")
+                .or_else(|| map.get("arguments"))
+                .cloned()
+                .unwrap_or_else(|| Dynamic::from_map(Map::new()));
+            let mut call = self.tool_call(&name, &args)?;
+            call.id = format!("{}-{i}", call.id);
+            planned.push((call, timeout_of(&map)?));
+        }
+        let exec = self.exec_ctx();
+        let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
+        let runs = planned
+            .into_iter()
+            .map(|(call, timeout)| run_tool_limited(&tools, &exec, call, timeout));
+        let results =
+            tokio::task::block_in_place(|| handle.block_on(futures_util::future::join_all(runs)));
+        Ok(results
+            .into_iter()
+            .map(|r| Dynamic::from_map(result_map(r)))
+            .collect())
     }
 
     /// 调用方能调的工具：`[#{ name, description }]`（描述截到 200 字，全文看 `tool_schema`）。
@@ -1221,12 +1298,70 @@ fn block_on_tool(
     tools: &Tools,
     exec: &Context,
     call: ToolCall,
+    timeout: Option<std::time::Duration>,
 ) -> Result<cordis_base::types::ToolResult, Box<rhai::EvalAltResult>> {
     let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
     let tools = tools.clone();
     Ok(tokio::task::block_in_place(|| {
-        handle.block_on(run_tool(&tools, exec, call))
+        handle.block_on(run_tool_limited(&tools, exec, call, timeout))
     }))
+}
+
+const MAX_PARALLEL_CALLS: usize = 16;
+const MAX_TIMEOUT_MS: rhai::INT = 600_000;
+
+/// `#{ timeout_ms }` → 时限；没写 = 不限时（等审批的时间也算在里面，所以默认不设）。
+fn timeout_of(map: &Map) -> Result<Option<std::time::Duration>, Box<rhai::EvalAltResult>> {
+    let Some(v) = map.get("timeout_ms").filter(|v| !v.is_unit()) else {
+        return Ok(None);
+    };
+    match v.as_int() {
+        Ok(ms) if ms > 0 => Ok(Some(std::time::Duration::from_millis(
+            ms.min(MAX_TIMEOUT_MS) as u64,
+        ))),
+        _ => err("timeout_ms must be a positive integer"),
+    }
+}
+
+/// [`run_tool`]，再和调用方的停止、可选的时限赛跑：先到的那个说了算。输掉的工具 future
+/// 被丢弃（`bash` 自己也在看停止，会杀掉进程）。
+async fn run_tool_limited(
+    tools: &Tools,
+    exec: &Context,
+    call: ToolCall,
+    timeout: Option<std::time::Duration>,
+) -> cordis_base::types::ToolResult {
+    let fail = {
+        let (call_id, name) = (call.id.clone(), call.name.clone());
+        move |content: String| cordis_base::types::ToolResult {
+            call_id,
+            name,
+            content,
+            is_error: true,
+            ..Default::default()
+        }
+    };
+    let name = call.name.clone();
+    let stopped = async {
+        while !call_cancelled(exec) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+    let deadline = async {
+        match timeout {
+            Some(d) => tokio::time::sleep(d).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        biased;
+        result = run_tool(tools, exec, call) => result,
+        _ = stopped => fail("Error: cancelled: the user stopped this turn".into()),
+        _ = deadline => fail(format!(
+            "Error: `{name}` timed out after {} ms",
+            timeout.map(|d| d.as_millis()).unwrap_or_default()
+        )),
+    }
 }
 
 /// `host.call_tool_ex` 的返回：`#{ ok, is_error, text, images, tool }`（`images` 是张数，

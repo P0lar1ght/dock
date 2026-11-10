@@ -4136,3 +4136,52 @@ async fn plugin_lists_tools_and_reads_schemas() {
         "{out}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_call_tools_parallel_runs_concurrently_in_order() {
+    let (root, _h, _p) = boot_probe(
+        r#"let rs = host.call_tools_parallel([
+               #{ tool: "bash", args: #{ command: "sleep 1; echo one" } },
+               #{ tool: "bash", args: #{ command: "sleep 1; echo two" } },
+               #{ tool: "nope" },
+               #{ tool: "bash", args: #{ command: "sleep 5; echo late" }, timeout_ms: 300 }
+           ]);
+           #{ is_error: false, content: rs }"#,
+        "",
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let out = exec(&root, "probe", "{}").await;
+    let elapsed = started.elapsed();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v[0]["text"].as_str().unwrap().contains("one"), "{out}");
+    assert!(v[1]["text"].as_str().unwrap().contains("two"), "{out}");
+    assert_eq!(v[2]["text"], "Error: unknown tool `nope`");
+    assert_eq!(v[3]["is_error"], true);
+    assert!(
+        v[3]["text"].as_str().unwrap().contains("timed out"),
+        "{out}"
+    );
+    // 两颗 sleep 1 并行：远小于串行的 2s + 超时那颗。
+    assert!(
+        elapsed < std::time::Duration::from_millis(1900),
+        "{elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_call_tools_parallel_rejects_bad_input() {
+    let (root, _h, _p) = boot_probe(
+        r#"let many = [];
+           for i in 0..17 { many.push(#{ tool: "bash", args: #{ command: "true" } }); }
+           let a = ""; let b = "";
+           try { host.call_tools_parallel(many); } catch (e) { a = `${e}`; }
+           try { host.call_tools_parallel([#{ args: #{} }]); } catch (e) { b = `${e}`; }
+           a + "|" + b"#,
+        "",
+    )
+    .await;
+    let out = exec(&root, "probe", "{}").await;
+    assert!(out.contains("at most 16"), "{out}");
+    assert!(out.contains("needs tool"), "{out}");
+}
