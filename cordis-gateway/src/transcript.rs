@@ -99,6 +99,8 @@ struct Projector {
     /// 回放用（[`Transcript::close_legacy_turn`]）；新记录里 Dock 已经把它算进
     /// `TurnEnd` 的状态了。
     sample_error: Option<String>,
+    /// 上一条投过的系统提示：前缀字节稳定，没变就不重复投（省历史体积）。
+    last_prompt: Option<String>,
     perm_id: Option<String>,
     ask_id: Option<String>,
     plan_id: Option<String>,
@@ -429,6 +431,40 @@ impl Transcript {
                         json!({ "content": message, "origin": "parent" }),
                     );
                 }
+            }
+            // 系统提示（每轮 assemble 一次）：不是对话，但「这一轮模型到底被喂了什么」
+            // 要看得见它。前缀字节稳定，内容没变就不重复投（历史里不必每轮存一份）。
+            // 只投主会话：子代理的注入块在上面那支里不投，系统提示也不投，两边对称
+            // （也免得每轮把最长 20000 字经 `subagent/event` 推给父级的客户端）。
+            LogEvent::Prompt(text) if self.agent.is_none() => {
+                if self.projector.last_prompt.as_deref() != Some(text.as_str()) {
+                    self.projector.last_prompt = Some(text.clone());
+                    let (body, truncated) = clip_context(&text, MAX_CONTEXT_CHARS);
+                    self.push(
+                        "item/system_prompt",
+                        json!({
+                            "text": body,
+                            "truncated": truncated,
+                            "chars": text.chars().count(),
+                        }),
+                    );
+                }
+            }
+            // harness 注入块（规约副本、长期记忆索引、todo / 计划模式提醒…）：模型看得到、
+            // 界面藏起来（`LogEvent::SystemReminder` 的定位，见 `cordis-base::types`）。
+            // 这里给它一条只读的旁路，让想核对「模型被喂了什么」的客户端能看；它仍然不是
+            // 聊天消息，客户端按自己的看法渲染。子代理给父级的话不是注入（见
+            // [`is_agent_message`]），照旧不投影。
+            LogEvent::SystemReminder(text) if !is_agent_message(&text) => {
+                let (body, truncated) = clip_context(&text, MAX_CONTEXT_CHARS);
+                self.push(
+                    "item/system_reminder",
+                    json!({
+                        "text": body,
+                        "truncated": truncated,
+                        "chars": text.chars().count(),
+                    }),
+                );
             }
             // Notice 只给 TUI 用户看，不进 dock.1 投影，也不该变成一条聊天消息。
             LogEvent::PreStep
@@ -880,6 +916,34 @@ pub(crate) fn compaction_value(p: &CompactProgress) -> Value {
     v
 }
 
+/// 子代理给父级的话（`Agent <id> sent a message:`，见 `cordis-spine` 的
+/// `format::wrap_reminder`）：那是对话，不是 harness 注入 —— 不投成注入块，
+/// 也不投成聊天消息（主会话照旧看不见它）。
+fn is_agent_message(text: &str) -> bool {
+    let body = text
+        .split_once("<system-reminder>")
+        .and_then(|(_, rest)| rest.split_once("</system-reminder>"))
+        .map(|(body, _)| body.trim())
+        .unwrap_or_else(|| text.trim());
+    body.starts_with("Agent ") && body.contains(" sent a message:")
+}
+
+/// 投给客户端的上下文正文上限（字符）：再长也没必要全给 —— 客户端只是核对一眼。
+const MAX_CONTEXT_CHARS: usize = 20_000;
+
+/// 截到上限（按字符边界切）。返回（正文，是否截断）。
+fn clip_context(text: &str, max: usize) -> (String, bool) {
+    if text.chars().count() <= max {
+        return (text.to_string(), false);
+    }
+    let cut = text
+        .char_indices()
+        .nth(max)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    (text[..cut].to_string(), true)
+}
+
 fn unix_ms(t: SystemTime) -> u128 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
 }
@@ -1004,6 +1068,100 @@ mod tests {
         t.ingest_log(LogEvent::User("third".into()));
         assert_eq!(user_turn(&t), third);
         assert_eq!([first, second, third], ["t1", "t2", "t3"]);
+    }
+
+    /// harness 的系统提示与注入块：不是对话，但要有旁路让客户端核对「模型被喂了什么」。
+    /// 已经有自己投影的（插话提示、侧边笔记）不重复投；系统提示前缀字节稳定，
+    /// 内容没变就不重复投。
+    #[test]
+    fn system_prompt_and_reminder_are_projected_as_context_items() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("干活".into()));
+        t.ingest_log(LogEvent::Prompt("you are dock".into()));
+        t.ingest_log(LogEvent::SystemReminder(
+            "<system-reminder>规约</system-reminder>".into(),
+        ));
+        let seen = methods(&t);
+        assert!(seen.contains(&"item/system_prompt".to_string()), "{seen:?}");
+        assert!(
+            seen.contains(&"item/system_reminder".to_string()),
+            "{seen:?}"
+        );
+        // 载荷：正文、原长度、挂在当前这一轮上。
+        let history = t.history_since(0);
+        let turn_id = history
+            .iter()
+            .find(|e| e.method == "item/user_message")
+            .map(|e| e.turn_id.clone())
+            .expect("有用户消息");
+        assert!(!turn_id.is_empty());
+        let sp = history
+            .iter()
+            .find(|e| e.method == "item/system_prompt")
+            .unwrap();
+        assert_eq!(sp.payload["text"], "you are dock");
+        assert_eq!(sp.payload["chars"], 12);
+        assert_eq!(sp.payload["truncated"], false);
+        assert_eq!(sp.turn_id, turn_id);
+        let sr = history
+            .iter()
+            .find(|e| e.method == "item/system_reminder")
+            .unwrap();
+        assert_eq!(
+            sr.payload["text"],
+            "<system-reminder>规约</system-reminder>"
+        );
+        assert_eq!(sr.payload["chars"], 37);
+        assert_eq!(sr.payload["truncated"], false);
+        assert_eq!(sr.turn_id, turn_id);
+
+        // 同样的系统提示再来一次：不重复投。
+        t.ingest_log(LogEvent::Prompt("you are dock".into()));
+        let seen = methods(&t);
+        assert_eq!(
+            seen.iter().filter(|m| *m == "item/system_prompt").count(),
+            1,
+            "{seen:?}"
+        );
+        // 变了才投。
+        t.ingest_log(LogEvent::Prompt("you are dock, with skills".into()));
+        assert_eq!(
+            methods(&t)
+                .iter()
+                .filter(|m| *m == "item/system_prompt")
+                .count(),
+            2,
+            "{:?}",
+            methods(&t)
+        );
+
+        // 插话提示有自己的投影（`steered`），不重复投成注入块。
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::SystemReminder(STEER_REMINDER.into()));
+        assert!(
+            !methods(&t).contains(&"item/system_reminder".to_string()),
+            "{:?}",
+            methods(&t)
+        );
+    }
+
+    /// 上下文正文太长时截断，但标出原长度：客户端知道「还有更多」。
+    #[test]
+    fn long_context_is_clipped_and_marked() {
+        let mut t = Transcript::new();
+        let long = "规".repeat(MAX_CONTEXT_CHARS + 100);
+        t.ingest_log(LogEvent::SystemReminder(long.clone()));
+        let event = t
+            .history_since(0)
+            .into_iter()
+            .find(|e| e.method == "item/system_reminder")
+            .expect("投出了注入块");
+        assert_eq!(event.payload["truncated"], Value::Bool(true));
+        assert_eq!(event.payload["chars"], Value::from(long.chars().count()));
+        assert_eq!(
+            event.payload["text"].as_str().unwrap().chars().count(),
+            MAX_CONTEXT_CHARS
+        );
     }
 
     /// 插话：投影上从它开新的一轮，前一段以 `steered` 收尾（客户端别当成真的
@@ -1187,6 +1345,27 @@ mod tests {
             "<system-reminder>\nAgent kid sent a message:\nx\n</system-reminder>".into(),
         ));
         assert_eq!(methods(&main), ["turn/started", "item/user_message"]);
+    }
+
+    /// 子代理会话不投系统提示（和它不投注入块对称）。
+    #[test]
+    fn child_does_not_project_system_prompt() {
+        let (tx, _rx) = broadcast::channel(16);
+        let mut child = Transcript::for_child("main", "live", "kid-1", tx);
+        child.ingest_log(LogEvent::User("[explore] 看一眼\n\nhi".into()));
+        child.ingest_log(LogEvent::Prompt("you are a subagent".into()));
+        child.ingest_log(LogEvent::SystemReminder(
+            "<system-reminder>\n别的提醒\n</system-reminder>".into(),
+        ));
+        let seen = methods(&child);
+        assert!(
+            !seen.contains(&"item/system_prompt".to_string()),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.contains(&"item/system_reminder".to_string()),
+            "{seen:?}"
+        );
     }
 
     fn prompt(summary: &str) -> PermissionPrompt {

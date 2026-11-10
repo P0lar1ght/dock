@@ -10,6 +10,8 @@
 
 ### 新增
 
+- **核对模型上下文的旁路**：dock.1 新增 `item/system_prompt` / `item/system_reminder`，把每轮组装的系统提示和注入块投给客户端（不是聊天消息）。系统提示前缀没变就不重复投；正文超过 20000 字截断并标出原长度。子代理给父级的话、插话提示、侧边笔记不重复投。只投主会话（子代理会话两样都不投）。注入块里有长期记忆索引、工程规约副本，`thread/history` 和 `dock serve --remote` 的设备令牌客户端都能读到（见 `cordis-gateway/README.md`「harness 上下文」）。轨迹面板能看见这些记录，多一条「上下文」轨道。
+
 - **白板布局工具**：`whiteboard_group` / `align` / `style` / `layer` / `fit_text` / `distribute` / `layout` / `place` / `graph`（独立工具，避免塞进 edit 撑爆 schema）；`whiteboard_read` 多返回可复用的 `patches`。
   - `distribute`：≥3 个图形两端固定中间均分；`layout`：网格重排；`place`：相对参照放置；`graph`：nodes+edges 自动排版（layered/row/column/grid）。
   - 挪动连线端点时箭头 **复用原 id**，不再改成 `id~rev`。

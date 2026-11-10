@@ -762,6 +762,35 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 - `budget`：用户用 `/goal budget` 设的上限，`{ requests }` 或 `{ ms }`；不限为 `null`。
   到了预算、或模型空转（连续几次续跑都没动手）时目标自动转 `paused`，原因在 `progressSummary`。
 
+### harness 上下文（系统提示 / 注入块）
+
+每轮采样前组装的系统提示，和模型上下文里那些 `<system-reminder>` 注入块（工程规约副本、
+长期记忆索引、MCP 已连接提示、todo / 计划模式提醒…），本来只在模型看得到的那一侧
+（`LogEvent::Prompt` / `LogEvent::SystemReminder`）。它们不是对话，所以 dock.1 的对话流里
+一直不投；这里给它们一条只读的旁路，方便核对「这一轮模型被喂了什么」。
+
+| 事件 | 载荷 | 作用 |
+|---|---|---|
+| `item/system_prompt { text, chars, truncated? }` | 这一轮组装好的系统提示 | 进 `thread/history` 与实时推送 |
+| `item/system_reminder { text, chars, truncated? }` | 一条注入块 | 同上 |
+
+- **不是聊天消息**：客户端自己决定怎么渲染（轨迹面板画成「系统提示 / 注入」两类记录；
+  普通对话流该忽略）。
+- 系统提示前缀字节稳定：内容没变就不重复投（历史里只留一份，变了才多一条）。
+- 正文最长 20000 字符，超出截断、`truncated` 置真，`chars` 给原长度。
+- 已经各有投影的不重复投：插话提示（`turn/completed` 的 `steered`）、侧边笔记
+  （`item/side_note`）；子代理之间的消息在主会话里照旧不投（那是对话，不是注入）。
+- 与 `thread/context/get` 分工：那处给窗口的**分片统计**（规约 / 记忆只作 `includes`
+  列出），这里给**正文**。
+- **只投主会话**：子代理会话的注入块本来就不投（那一支只取父级发来的消息），系统提示也不投，
+  两边对称，也免得每轮经 `subagent/event` 推一份长正文。
+- **注入块不去重**：同一条注入块（比如用户 addon、todo 提醒）每轮都会再投一条，因为它确实
+  每轮都进了模型上下文；长会话的 `thread/history` 会随之变大。系统提示是稳定前缀，才按内容去重。
+- **能看到的数据变多了**：注入块里有长期记忆索引、工程规约副本，系统提示里也可能带用户自定义
+  内容。以前这些只在模型那一侧；现在凡是能读这个会话的 dock.1 连接（`thread/history`、实时推送，
+  包括 `dock serve --remote` 配对的设备令牌客户端）都能读到正文。鉴权模型没变（回环 + ticket /
+  设备令牌），但给远程设备配对前要知道这一点。
+
 ### 定时任务（能力 `schedules`，`handlers/schedule.rs`）
 
 任务落盘在 `$DOCK_HOME/schedules.json`，属于某个会话，跨重启继续跑。到点由 `cordis-app` 的
