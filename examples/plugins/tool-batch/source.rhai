@@ -440,7 +440,7 @@ fn tb_run(host, args) {
                 "- 调用：{ tool: 工具全名, args?: {...}, save_as?: 变量名, expect?: 结果必须包含的子串, when?: 表达式, transform?: 表达式, timeout_ms?: 毫秒, on_error?: \"stop\"(默认)|\"continue\" }\n" +
                 "- 并行分组：{ parallel: [调用, ...], on_error? }：组里互不依赖的调用同时跑（最多 16 颗），整组跑完再往下；组结果存为数组 stepN（stepN.0、stepN.1…），各颗也可 save_as。\n" +
                 "args 里的字符串可写 ${var} / ${var.a.b} / ${var.items.0}（-1 是最后一个）引用前面步骤的结果；整串只有一个引用时代入原值，否则拼成文本。每步结果也自动存为 step0、step1…；结果文本是 JSON 就解析后存。\n" +
-                "when：Rhai 表达式，前面存的变量直接当名字用（如 \"win.count > 0\"），false 就跳过这步（不算失败）。transform：对这步结果求值后再存，结果叫 result（如 \"result.items.len()\"）。\n" +
+                "when：Rhai 表达式，前面存的变量直接当名字用（如 \"win.count > 0\"），false 就跳过这步（不算失败）。transform：对这步结果求值后再存，结果叫 result（如 \"result.items.len()\"）。表达式里不能写闭包 |x| …：取字段用 result.items.pluck(\"id\")，按字段等值过滤用 filter_eq(result.items, \"state\", \"open\")。\n" +
                 "先拿 schema：每颗要用的工具先 search_tool 查一下（上下文里已有的会回 schema_in_context，不必重查），按它的 input_schema 写 args，再拼 steps；批次自己的预校验只是兜底，代替不了 search_tool。\n" +
                 "什么时候用：顺序已知的一串操作，或一次做多个只读查询再汇总（放进 parallel），尤其是跨工具组合。纯 cua 动作序列直接用 cua-driver 的 run_steps / run_script。只把互不依赖的调用放进 parallel；写文件、bash、桌面操作等有副作用的即使放进 parallel，宿主也会按顺序一颗颗跑。\n" +
                 "规则：调用前整批先校验（工具名、必填参数、形状），有错一步都不跑；失败按工具自己的 is_error 判；需审批的工具仍逐次弹审批；最多 50 次调用、总 120 秒（步与步之间检查，单步用 timeout_ms 限时）；用户停止时立刻中止；引用 / when 写错一律停；图片不回传；不能嵌套 tool_batch（经 use_tool 也不行）；超时只说明没等到结果，那颗调用可能已经执行、副作用可能已经发生。返回 JSON：{ ok, completed, skipped, failed_step, error, results, trace, elapsed_ms, stopped }；中途停下或被拒时这次调用标记为失败。",
@@ -458,7 +458,7 @@ fn tb_run(host, args) {
                                 save_as: #{ type: "string", description: "把结果存成这个变量名（不能含点）" },
                                 expect: #{ type: "string", description: "结果文本必须包含的子串，不含则算失败" },
                                 when: #{ type: "string", description: "表达式，false 时跳过这步，如 \"hits.len() > 0\"" },
-                                transform: #{ type: "string", description: "表达式，结果叫 result，求得的值代替结果存下，如 \"result.items[0].id\"" },
+                                transform: #{ type: "string", description: "表达式，结果叫 result，求得的值代替结果存下，如 \"result.items[0].id\"；不能写闭包，取一列字段用 pluck、按字段过滤用 filter_eq" },
                                 timeout_ms: #{ type: "integer", description: "这一步的时限（毫秒，最多 600000），到点算失败；含等审批的时间" },
                                 on_error: #{ type: "string", "enum": ["stop", "continue"], description: "失败时停（默认）还是继续" },
                                 parallel: #{ type: "array", items: #{ type: "object" }, description: "并行分组：一组互不依赖的调用（同上的字段，不含 parallel），同时跑" }

@@ -26,8 +26,8 @@ cp examples/plugins/tool-batch/SKILL.md ~/.dock/skills/tool-batch/SKILL.md
 同一轮里手动试可以用 `cordis_call`。
 
 `plugin.toml` 里的 `allow_eval = true` 只为 `when` / `transform`：表达式在单独的引擎里求值
-（只求单个表达式；没有 host、HTTP、文件；每次求值一份操作数预算）。只有启动时从插件目录装上的
-磁盘插件认这个键；在会话里用 `cordis_define` 定义的包，即使 `source_path` 旁边有这份 `plugin.toml`
+（只求单个表达式；不能写闭包或 `Fn`，取字段 / 过滤用原生 `pluck` / `filter_eq`；没有 host、HTTP、文件；
+每次求值一份操作数预算）。只有磁盘来源的插件（插件目录装上、设置里启用、审批过的 `cordis_promote`）认这个键；在会话里用 `cordis_define` 定义的包，即使 `source_path` 旁边有这份 `plugin.toml`
 也打不开。不需要这两个字段可以删掉这一行，
 其余功能不受影响，用到时会报错说明。
 
@@ -43,7 +43,7 @@ cp examples/plugins/tool-batch/SKILL.md ~/.dock/skills/tool-batch/SKILL.md
       "save_as": "可选，结果变量名（不能含点）",
       "expect": "可选，结果文本必须包含的子串，不含就算失败",
       "when": "可选，表达式；false 就跳过这步，如 \"win.count > 0\"",
-      "transform": "可选，表达式；结果叫 result，求得的值代替结果存下，如 \"result.items.map(|x| x.id)\"",
+      "transform": "可选，表达式；结果叫 result，求得的值代替结果存下。不能写闭包 |x| …：取字段用 pluck，如 result.items.pluck(\"id\")；按字段等值过滤用 filter_eq(xs, \"state\", \"open\")",
       "timeout_ms": 30000,
       "on_error": "stop（默认）| continue"
     },

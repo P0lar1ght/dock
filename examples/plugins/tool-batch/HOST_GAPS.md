@@ -107,23 +107,30 @@
 - 每次调用 1,000,000 ops、字符串 1MiB、map 16384 键。`allow_eval` 的表达式引擎用同样的上限，而且
   **每次 `eval_expr` 一份新的预算**（一个批里 50 步就是 50 份，再加脚本自己那份）。
 - **实测缺口**：Rhai 1.25 不给原生数组函数（`map` / `filter` / `reduce` …）回调里的闭包计操作数，
-  `on_progress` 也不触发——嵌套 `reduce` 能跑几百万步不被拦，停止也打断不了。`eval_expr` 已补上：
-  另按变量读取计数（`on_var`，同样 1,000,000 上限，每 4096 次查停止），测试
-  `plugin_eval_expr_hits_the_operation_limit`。**插件脚本本身的运行期引擎没补**（同样能被这种写法绕过），
-  建议单独评估给运行期引擎也挂同样的计数。
+  `on_progress` 也不触发——嵌套 `map` / `reduce` 能跑几百万步不被拦，停止也打断不了。只按变量读取计数
+  （`on_var`）不够：审查复现了七层嵌套、闭包体一个变量都不读的
+  `[0,…].map(|x| [0,…].map(|x1| … .map(|x6| 1).len() …).len())`，267 字节跑 24.6s，上限和停止都没用。
+- `eval_expr` 已修：表达式引擎 `set_allow_anonymous_fn(false)`，并关掉 `Fn` / `call` / `curry`
+  （否则 `Fn("map").curry(..)` 能拼出同样的嵌套），**表达式里没有函数值**，`|x| …` 解析时就拒；
+  取字段、过滤改用原生 O(n)、不回调脚本的 `pluck(xs, field)` / `filter_eq(xs, field, value)`。
+  `on_var` 计数留作兜底。测试 `plugin_eval_expr_rejects_function_values_at_parse`（就是那串嵌套，断言
+  解析时拒、不到 1s）、`expression_engine_stops_at_its_operation_budget`（小预算下的操作数上限）。
+- **插件脚本本身的运行期引擎没修**（插件作者 / 模型经 `cordis_define` 写的脚本同样能这么写）。跟进
+  issue：待建（复现与可选修法：模型写的上下文关匿名函数、按 AST 查闭包嵌套深度、把脚本放到能杀掉的线程 / 进程里跑）。
 - 建议：`plugin.toml` 可声明有上限的 `max_operations`。本轮按要求跳过（可配置上限）。
 
 ## 12. 已修（按插件 opt-in）：表达式求值
 
-- **启动时从插件目录装上的磁盘插件**（`PluginOrigin::Disk`），且 `plugin.toml` 写 `allow_eval = true`，
-  才有 `host.eval_expr(expr, vars?)`：只求单个表达式（不能写语句、定义函数，闭包体里也不能），跑在单独的
+- **磁盘来源的插件**（`PluginOrigin::Disk`：启动或打开项目时从插件目录装上、设置里启用、或经审批的
+  `cordis_promote` 落盘——都要用户动手或批准），且 `plugin.toml` 写 `allow_eval = true`，
+  才有 `host.eval_expr(expr, vars?)`：只求单个表达式（不能写语句、定义函数，也不能写闭包 / `Fn`），跑在单独的
   引擎里——每次一份操作数预算（见 11），只有 JSON 函数，没有 host / HTTP / 文件，停止时中止，最长 4096 字节。
 - 会话里 `cordis_define` 的包**永远打不开**：即使 `source_path` 指向 `.dock/plugins/<id>/`、旁边有一份
   模型自己写的 `allow_eval = true` 的 `plugin.toml`，也不读（`Plan.honor_eval` 只对 `PluginOrigin::Disk` 为 true）。
-  `cordis_promote` 写成磁盘插件、下次启动装上后才生效——那一步要走权限门。
+  `cordis_promote` 写成磁盘插件那一步要走权限门，而且 promote 写出的 `plugin.toml` 不带 `allow_eval`，要用户自己加。
 - 脚本自己的 `eval` 仍然禁用。
-- 测试：`plugin_eval_expr_is_opt_in_and_expression_only`（断言具体原因）、`plugin_eval_expr_hits_the_operation_limit`、
-  `plugin_eval_expr_stays_off_for_cordis_define_packages`、`example_tool_batch_when_transform_and_timeout`。
+- 测试：`plugin_eval_expr_is_opt_in_and_expression_only`（断言具体原因）、`plugin_eval_expr_rejects_function_values_at_parse`、
+  `expression_engine_stops_at_its_operation_budget`、`plugin_eval_expr_stays_off_for_cordis_define_packages`、`example_tool_batch_when_transform_and_timeout`。
 - `tool_batch` 的 `when` / `transform` 用它，所以本插件的 `plugin.toml` 开了 `allow_eval`。
 
 ## 13. 未修：bash / Python 里调不到 Dock 工具

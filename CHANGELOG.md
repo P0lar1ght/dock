@@ -20,7 +20,7 @@
   - 新增 `host.call_tool_ex`（结构化结果 `#{ ok, is_error, text, images, tool }`，可设 `timeout_ms`）、`host.call_tools_parallel`（最多 16 颗；相邻只读调用并发，写 / bash / 桌面动作按序）、`host.list_tools` / `host.tool_schema`、`host.cancelled`。
   - 插件工具的 `execute` 可回 `#{ is_error, content }` 明确报失败。
   - `parse_json` / `to_json` 支持任意 JSON 值并正确转义。
-  - 启动时装上的磁盘插件可在 `plugin.toml` 写 `allow_eval = true` 打开 `host.eval_expr`（只求表达式，单独的受限引擎，默认关；`cordis_define` 的会话包打不开）。
+  - 磁盘来源的插件（插件目录装上、设置启用、审批过的 `cordis_promote`）可在 `plugin.toml` 写 `allow_eval = true` 打开 `host.eval_expr`（只求表达式，不许闭包 / `Fn`、用原生 `pluck` / `filter_eq` 取字段过滤，单独的受限引擎，默认关；`cordis_define` 的会话包打不开）。
   - 插件 `timeout_ms` / Stop 丢掉调用时真正停下：bash 前台进程被杀，MCP stdio 发 `notifications/cancelled`；`timeout_ms` 超过 600000 报错。
 
 - **桌面 GUI 进仓库**：`dock-gui/`（Tauri 2 + React）的核心代码随源码提交（设计稿、文档不进仓库），见 `dock-gui/README.md`。独立工程（`src-tauri/` 自带 `[workspace]`，不进根 workspace），启动时拉起 `dock serve` 走 dock.1。还没签名，不带自动更新。供应商 / 模型目录不随应用打包：设置页第一次打开时经 Dock 从 models.dev 拉一份缓存起来，离线拉不到就是空目录，照样能手填自定义供应商。

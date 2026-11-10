@@ -146,7 +146,7 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.eval_expr",
-        "Evaluate one Rhai expression (no statements, no fn definitions) with vars as constants. Off unless this is a disk plugin loaded at startup whose plugin.toml sets allow_eval = true (session packages from cordis_define cannot turn it on, even with a plugin.toml next to source_path). Runs in a separate engine with the same per-call operation limit and no host / http / codecs (JSON only); Stop aborts it. For data-driven conditions and transforms, e.g. a tool argument like `when: \"prev.count > 0\"`.",
+        "Evaluate one Rhai expression (no statements, no fn definitions, no closures or Fn pointers: `|x| …` and `Fn(…)` are rejected at parse) with vars as constants. Use the native helpers instead: `xs.pluck(\"id\")` (field of every map) and `filter_eq(xs, \"state\", \"open\")` (maps whose field equals a value), plus len / keys / contains. Off unless the plugin has a disk origin (installed from a plugins dir at startup or project open, enabled in settings, or persisted by an approved cordis_promote — all a user action) and its plugin.toml sets allow_eval = true; session packages from cordis_define cannot turn it on, even with a plugin.toml next to source_path. Runs in a separate engine with the same per-call operation limit and no host / http / codecs (JSON only); Stop aborts it. For data-driven conditions and transforms, e.g. a tool argument like `when: \"prev.count > 0\"`.",
         &["host.eval_expr(expr: String, vars: Map) -> value", "host.eval_expr(expr: String) -> value"],
     ),
     (
@@ -338,10 +338,10 @@ fn apply_rhai(
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;
     let engine = Arc::new(engine);
-    // 只有启动时装上的磁盘插件（honor_eval）才读目录里的 allow_eval；
+    // 只有磁盘来源的插件（honor_eval：插件目录装上、设置里启用、审批过的 cordis_promote）才读目录里的 allow_eval；
     // cordis_define 的包即使 source_path 旁边有 plugin.toml 也打不开。
     let eval_engine = (honor_eval && plugin_dir.as_deref().is_some_and(allows_eval))
-        .then(|| Arc::new(expression_engine()));
+        .then(|| Arc::new(expression_engine(RUN_MAX_OPS)));
     let inner = Arc::new(HostInner {
         ctx: ctx.clone(),
         plugin_id: plugin_id.to_string(),
@@ -989,8 +989,8 @@ impl Host {
         current_call_ctx().unwrap_or_else(|| self.inner.ctx.clone())
     }
 
-    /// 求一个**表达式**（不能写语句、不能定义函数），`vars` 里的键当常量用。只在启动时
-    /// 装上的磁盘插件、且其 `plugin.toml` 写了 `allow_eval = true` 时有；`cordis_define`
+    /// 求一个**表达式**（不能写语句、定义函数、写闭包或 `Fn`），`vars` 里的键当常量用。只在
+    /// 磁盘来源的插件、且其 `plugin.toml` 写了 `allow_eval = true` 时有；`cordis_define`
     /// 的会话包打不开。引擎是单独的一份：没有 host、http、编解码，每次调用一份新的操作数
     /// 上限，停止时同样中止。
     fn eval_expr(
@@ -1000,7 +1000,7 @@ impl Host {
     ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
         let Some(engine) = self.inner.eval_engine.clone() else {
             return err(
-                "eval_expr is off for this plugin; only a disk plugin loaded at startup may set allow_eval = true in its plugin.toml (cordis_define packages cannot)",
+                "eval_expr is off for this plugin; only a disk-origin plugin (installed or promoted with user action) may set allow_eval = true in its plugin.toml (cordis_define packages cannot)",
             );
         };
         if expr.len() > MAX_EVAL_EXPR_BYTES {
@@ -1665,7 +1665,7 @@ fn register_json(engine: &mut Engine) {
 const MAX_EVAL_EXPR_BYTES: usize = 4096;
 
 /// 磁盘插件的 `plugin.toml` 有没有 `allow_eval = true`（默认没有）。
-/// 调用方还要先确认这是启动时装上的磁盘插件（见 `honor_eval`）。
+/// 调用方还要先确认这是磁盘来源的插件（见 `honor_eval`）。
 fn allows_eval(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("plugin.toml"))
         .ok()
@@ -1676,9 +1676,19 @@ fn allows_eval(dir: &Path) -> bool {
 
 /// `host.eval_expr` 的引擎：同运行期一样的沙箱与操作数上限，只多了 JSON；没有 host、
 /// http、编解码、文件。
-fn expression_engine() -> Engine {
-    let mut engine = sandboxed_engine(RUN_MAX_OPS);
+fn expression_engine(max_ops: u64) -> Engine {
+    let mut engine = sandboxed_engine(max_ops);
     register_json(&mut engine);
+    register_expr_helpers(&mut engine);
+    // Rhai 1.25 不给原生数组函数（map / filter / reduce …）回调里的闭包计操作数，
+    // 停止也打不断：`[..].map(|x| [..].map(|y| 1).len())` 套七层、一个变量都不读，
+    // 267 字节就能跑几十秒。所以表达式里**根本不许有函数值**：匿名函数在解析时就拒，
+    // `Fn` / `call` / `curry` 也关掉（否则 `Fn("map").curry(..)` 能拼出同样的嵌套）。
+    // 要取字段、过滤，用下面 `register_expr_helpers` 里的原生 O(n) 函数。
+    engine.set_allow_anonymous_fn(false);
+    for sym in ["Fn", "call", "curry"] {
+        engine.disable_symbol(sym);
+    }
     engine.on_progress(|ops| {
         if ops % 4096 == 0 && current_call_ctx().is_some_and(|c| call_cancelled(&c)) {
             Some("cancelled: the user stopped this turn".into())
@@ -1686,19 +1696,17 @@ fn expression_engine() -> Engine {
             None
         }
     });
-    // Rhai 1.25 不给原生数组函数（map / filter / reduce …）回调里的闭包计操作数，
-    // `xs.reduce(|a, x| a + ys.reduce(…))` 这种嵌套能跑几百万步不被拦、也停不下。
-    // 闭包体要读变量，变量读取每次都过 on_var：在这里另记一份预算，并查停止。
+    // 兜底：变量读取另记一份预算并查停止（没有函数值以后正常表达式远到不了）。
     #[allow(deprecated)] // on_var 是 Rhai 标的「易变 API」，不是真的弃用。
-    engine.on_var(|_, _, _| {
+    engine.on_var(move |_, _, _| {
         let n = EXPR_VAR_READS.with(|c| {
             let n = c.get() + 1;
             c.set(n);
             n
         });
-        if n > RUN_MAX_OPS {
+        if n > max_ops {
             return Err(eval_err(format!(
-                "eval_expr: too many operations (over {RUN_MAX_OPS} variable reads)"
+                "eval_expr: too many operations (over {max_ops} variable reads)"
             )));
         }
         if n.is_multiple_of(4096) && current_call_ctx().is_some_and(|c| call_cancelled(&c)) {
@@ -1707,6 +1715,42 @@ fn expression_engine() -> Engine {
         Ok(None)
     });
     engine
+}
+
+/// 表达式里代替 `map(|x| x.f)` / `filter(|x| x.f == v)` 的原生函数：一趟 O(n)，不回调脚本。
+/// `pluck(xs, "id")`：每个元素（须是 map）的 `id`，缺了给 `()`；非 map 元素报错。
+/// `filter_eq(xs, "state", "open")`：留下 `state` 等于给定值的 map 元素（按 JSON 值比较）。
+fn register_expr_helpers(engine: &mut Engine) {
+    engine.register_fn(
+        "pluck",
+        |xs: rhai::Array,
+         field: ImmutableString|
+         -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            xs.into_iter()
+                .map(|x| match x.try_cast::<Map>() {
+                    Some(m) => Ok(m.get(field.as_str()).cloned().unwrap_or(Dynamic::UNIT)),
+                    None => Err(eval_err("pluck: every element must be a map".into())),
+                })
+                .collect()
+        },
+    );
+    engine.register_fn(
+        "filter_eq",
+        |xs: rhai::Array,
+         field: ImmutableString,
+         value: Dynamic|
+         -> Result<rhai::Array, Box<rhai::EvalAltResult>> {
+            let want = dynamic_to_json(&value).map_err(eval_err)?;
+            Ok(xs
+                .into_iter()
+                .filter(|x| {
+                    x.read_lock::<Map>()
+                        .and_then(|m| m.get(field.as_str()).map(dynamic_to_json))
+                        .is_some_and(|got| got.as_ref() == Ok(&want))
+                })
+                .collect())
+        },
+    );
 }
 
 thread_local! {
@@ -1788,6 +1832,25 @@ mod tests {
     fn map_of(src: &str) -> Map {
         let engine = Engine::new();
         engine.eval::<Map>(src).unwrap()
+    }
+
+    #[test]
+    fn expression_engine_stops_at_its_operation_budget() {
+        // 常量会被编译期折叠，所以用变量读取来吃预算。
+        let engine = expression_engine(20);
+        EXPR_VAR_READS.with(|c| c.set(0));
+        let mut scope = rhai::Scope::new();
+        scope.push_constant("x", 1_i64);
+        let reads = vec!["x"; 60].join(" + ");
+        let e = engine
+            .eval_expression_with_scope::<Dynamic>(&mut scope, &reads)
+            .unwrap_err();
+        assert!(
+            e.to_string().to_lowercase().contains("too many operations"),
+            "{e}"
+        );
+        EXPR_VAR_READS.with(|c| c.set(0));
+        assert_eq!(engine.eval_expression::<i64>("1 + 1").unwrap(), 2);
     }
 
     #[test]

@@ -21,11 +21,12 @@ allow_eval = false  # 可选，默认 false；true 才有 host.eval_expr（见�
 ```
 
 `allow_eval = true`：给这个插件打开 `host.eval_expr(expr, vars)`，求**一个表达式**
-（不能写语句、不能定义函数），`vars` 的键当常量用。**只有启动时从插件目录装上的磁盘插件**
-认这个键。会话里 `cordis_define` 的包一直是关的——就算 `source_path` 指到
+（不能写语句、不能定义函数，也不能写闭包 `|x| …` 或 `Fn(…)`——解析时就拒），`vars` 的键当常量用。
+**只有磁盘来源的插件（`PluginOrigin::Disk`：启动或打开项目时从插件目录装上、在设置里启用、或经审批的 `cordis_promote` 落盘——都要用户动手或批准）**认这个键。会话里 `cordis_define` 的包一直是关的——就算 `source_path` 指到
 `.dock/plugins/<id>/`、旁边那份 `plugin.toml` 写了 `allow_eval = true` 也不读；要用就让用户
-`cordis_promote` 成磁盘插件（走权限门），下次启动装上后才生效。表达式跑在单独的引擎里：
-每次求值一份操作数预算（数组回调里的闭包也计数），只有 JSON 函数，没有 `host`、HTTP、
+`cordis_promote` 成磁盘插件（走权限门）；promote 写出的 `plugin.toml` 不带 `allow_eval`，要用户自己加上。
+表达式跑在单独的引擎里：每次求值一份操作数预算；取字段、过滤用原生的 `xs.pluck("id")`、
+`filter_eq(xs, "state", "open")`（一趟 O(n)，不回调脚本），只有这两个加 JSON 函数，没有 `host`、HTTP、
 编解码、文件；用户停止时一样中止；表达式最长 4096 字节。只在功能真的要「把条件 / 变换写在参数里」时开
 （比如批量调用里的 `when: "prev.count > 0"`），别为了省事开。
 

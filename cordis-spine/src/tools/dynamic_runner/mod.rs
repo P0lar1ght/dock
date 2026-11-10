@@ -789,7 +789,8 @@ struct Plan {
     source_path: Option<std::path::PathBuf>,
     /// `source_path` 的授权边界（磁盘插件是它自己的目录；`None` 走全局 roots）。
     source_dir: Option<std::path::PathBuf>,
-    /// 启动时装上的磁盘插件才读 `plugin.toml` 的 `allow_eval`；`cordis_define` 的会话包为 false。
+    /// 磁盘来源（`PluginOrigin::Disk`：插件目录装上、设置里启用、审批过的 `cordis_promote`）才读
+    /// `plugin.toml` 的 `allow_eval`；`cordis_define` 的会话包为 false。
     honor_eval: bool,
     inject: Vec<String>,
     provides: Vec<String>,

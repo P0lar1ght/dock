@@ -4649,27 +4649,38 @@ async fn plugin_eval_expr_is_opt_in_and_expression_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn plugin_eval_expr_hits_the_operation_limit() {
-    // 2000×2000 的嵌套 reduce：Rhai 自己不给原生数组函数回调里的闭包计数，宿主另按变量读取
-    // 记预算（1_000_000），撞上就停。每次 eval_expr 一份新的预算：小表达式随后照常能算。
-    let (root, _h, _p) = boot_probe(
-        r#"let xs = [];
-           for i in 0..2000 { xs.push(i); }
-           let r = "";
-           try {
-               r = `${host.eval_expr("xs.reduce(|a, x| a + ys.reduce(|b, y| b + y, 0), 0)", #{ xs: xs, ys: xs })}`;
-           } catch (e) { r = `${e}`; }
-           r + "|" + `${host.eval_expr("xs.len()", #{ xs: xs })}`"#,
-        "allow_eval = true",
-    )
-    .await;
-    let out = exec(&root, "probe", "{}").await;
-    let (first, second) = out.split_once('|').unwrap();
-    assert!(
-        first.contains("too many operations"),
-        "expected op-limit error, got {out}"
+async fn plugin_eval_expr_rejects_function_values_at_parse() {
+    // 审查复现：七层嵌套、一个变量都不读的闭包，267 字节跑 24.6s，操作数上限和停止都拦不住。
+    // 表达式引擎不许匿名函数、也关了 Fn / call / curry：解析时就拒，不会开始跑。
+    // 取字段、过滤用原生 pluck / filter_eq。操作数上限本身见 rhai_host 的单测。
+    let nested = "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(|x| [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(|x1| [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(|x2| [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(|x3| 1).len()).len()).len())";
+    let body = format!(
+        r#"let r = [];
+        for e in [{nested:?}, "[1].map(Fn(\"len\"))", "Fn(\"len\").curry(1)"] {{
+            let started = timestamp();
+            let s = "";
+            try {{ s = `${{host.eval_expr(e)}}`; }} catch (err) {{ s = "ERR " + `${{err}}`; }}
+            r.push(s + " @" + `${{started.elapsed}}`);
+        }}
+        let items = #{{ items: [#{{ id: 1, state: "open" }}, #{{ id: 2, state: "done" }}, #{{ id: 3, state: "open" }}] }};
+        r.push(`${{host.eval_expr("result.items.pluck(\"id\")", #{{ result: items }})}}`);
+        r.push(`${{host.eval_expr("filter_eq(result.items, \"state\", \"open\").pluck(\"id\")", #{{ result: items }})}}`);
+        r.reduce(|acc, v| acc + "\u0001" + v, "")"#
     );
-    assert_eq!(second, "2000", "{out}");
+    let (root, _h, _p) = boot_probe(&body, "allow_eval = true").await;
+    let out = exec(&root, "probe", "{}").await;
+    let parts: Vec<&str> = out.split('\u{1}').skip(1).collect();
+    assert_eq!(parts.len(), 5, "{out}");
+    for part in &parts[..3] {
+        assert!(part.starts_with("ERR "), "{out}");
+        assert!(part.contains("eval_expr:"), "{out}");
+        let secs: f64 = part.rsplit('@').next().unwrap().trim().parse().unwrap();
+        assert!(secs < 1.0, "rejected before running, took {secs}s: {out}");
+    }
+    assert!(parts[0].contains("Unexpected '|'"), "{out}");
+    assert!(parts[1].contains("'Fn' is disabled"), "{out}");
+    assert_eq!(parts[3], "[1, 2, 3]", "{out}");
+    assert_eq!(parts[4], "[1, 3]", "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4844,7 +4855,7 @@ async fn example_tool_batch_when_transform_and_timeout() {
         json!({
             "steps": [
                 {"tool": "bash", "args": {"command": "echo '{\"items\":[{\"id\":7},{\"id\":9}]}'"},
-                 "save_as": "ids", "transform": "result.items.map(|x| x.id)"},
+                 "save_as": "ids", "transform": "result.items.pluck(\"id\")"},
                 {"tool": "bash", "args": {"command": format!("touch {}", marker.display())},
                  "when": "ids.len() > 5"},
                 {"tool": "bash", "args": {"command": "echo last=${ids.-1}"}, "when": "ids[0] == 7",

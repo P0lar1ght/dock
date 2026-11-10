@@ -35,7 +35,7 @@
 | 并行时每颗调用照样过门，审批仍走全局队列一个个问 | S1、S3（只读不绕审批） |
 | 单步 `timeout_ms`、`host.cancelled()`、停止时中止脚本与进行中的调用；默认不设时限（等审批的时间也算在里面）。超时 / 停止时真的停下工作：bash 前台任务 Drop 时发取消信号杀进程，MCP stdio 的 rpc Drop 时发 `notifications/cancelled`；等审批的请求撤出队列。超时不代表没执行 | S1（超时、取消）、S7（资源上限） |
 | 中间结果留在插件变量表，只回 `return` 点名的几项并截断 | S6、S7、S8 |
-| `when` / `transform` 用 `host.eval_expr`：只有启动时装上的磁盘插件按 `allow_eval = true` 显式打开（`cordis_define` 的会话包永远打不开，模型不能自己给自己开）；只求单个表达式；单独的引擎，没有 host / http / 文件；每次求值一份操作数预算，另按变量读取计数以覆盖 Rhai 不计的数组回调闭包 | S6（opt-in）、S7（沙箱 + 资源上限）、S8（只有绑定） |
+| `when` / `transform` 用 `host.eval_expr`：只有磁盘来源的插件（插件目录装上 / 设置启用 / 审批过的 promote）按 `allow_eval = true` 显式打开（`cordis_define` 的会话包永远打不开，模型不能自己给自己开）；只求单个表达式；单独的引擎，没有 host / http / 文件；每次求值一份操作数预算；不许闭包 / `Fn`（Rhai 不给数组回调里的闭包计操作数，嵌套能绕开上限和停止），取字段 / 过滤用原生 O(n) 的 `pluck` / `filter_eq` | S6（opt-in）、S7（沙箱 + 资源上限）、S8（只有绑定） |
 | `${var}` 引用 + 每步自动 `stepN` 变量 | S10（占位符代入） |
 | 核心循环：`use_tool` 派发的 MCP 工具，`readOnlyHint: true` 才和别的只读调用一起并行；没标的、要审批的、写操作照旧串行 | S3、S4 |
 | `readOnlyHint` 只用来**排并发**，不用来跳过审批或放宽能力档位 | S2、S3 |
