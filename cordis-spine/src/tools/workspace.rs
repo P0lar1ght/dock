@@ -688,6 +688,7 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert!(!marker.exists(), "future 被丢掉后命令要被杀，不能接着跑完");
+        assert!(jobs.list().is_empty(), "被杀的前台记录要从 jobs 表摘掉");
     }
 
     /// 宽限期内跑完的命令照常带回结果，不为插话转后台。

@@ -268,7 +268,10 @@ impl KillOnDrop<'_> {
 impl Drop for KillOnDrop<'_> {
     fn drop(&mut self) {
         if self.armed {
+            // 发取消信号后直接摘掉：`run_job` 自己握着 `Arc<Job>`（取消信号的发送端也在里头），
+            // 摘表不影响它收到信号杀进程；不摘的话这条前台记录没人收尾，一直挂在 `job` 列表里。
             self.jobs.request_cancel(&self.id);
+            self.jobs.forget(&self.id);
         }
     }
 }
