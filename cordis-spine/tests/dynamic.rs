@@ -3472,6 +3472,21 @@ async fn bundled_skill_examples_define_run_and_work() {
 // 再经 Tools::execute 调 tool_batch。host.call_tool 用 block_in_place，必须多线程运行时。
 
 async fn boot_tool_batch() -> (Context, tempfile::TempDir, tempfile::TempDir) {
+    // 照 README 装：整个目录拷进插件根，启动时自动加载（plugin.toml enabled = true）。
+    let example =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/tool-batch");
+    let files: Vec<(&str, String)> = ["plugin.toml", "source.rhai"]
+        .into_iter()
+        .map(|f| (f, std::fs::read_to_string(example.join(f)).unwrap()))
+        .collect();
+    boot_disk_plugin("tool-batch", &files).await
+}
+
+/// 工作区工具 + 一个磁盘插件（`files` 写进插件根里的 `id/`），Allow 模式。
+async fn boot_disk_plugin(
+    id: &str,
+    files: &[(&str, String)],
+) -> (Context, tempfile::TempDir, tempfile::TempDir) {
     let home = tempfile::tempdir().unwrap();
     let root = Context::new();
     cordis_spine::install_core(&root).await.unwrap();
@@ -3504,14 +3519,11 @@ async fn boot_tool_batch() -> (Context, tempfile::TempDir, tempfile::TempDir) {
         .wait()
         .await
         .unwrap();
-    // 照 README 装：整个目录拷进插件根，启动时自动加载（plugin.toml enabled = true）。
     let plugins = tempfile::tempdir().unwrap();
-    let example =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/tool-batch");
-    let plug = plugins.path().join("tool-batch");
+    let plug = plugins.path().join(id);
     std::fs::create_dir_all(&plug).unwrap();
-    for f in ["plugin.toml", "source.rhai"] {
-        std::fs::copy(example.join(f), plug.join(f)).unwrap();
+    for (f, body) in files {
+        std::fs::write(plug.join(f), body).unwrap();
     }
     root.require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
         .unwrap()
@@ -4002,4 +4014,42 @@ async fn plugin_call_tool_runs_as_the_caller() {
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert!(out.starts_with("Error"), "{out}");
     assert!(!out.contains("never"), "{out}");
+}
+
+/// 一个只登记 `probe` 工具的磁盘插件：`probe` 把参数里的 `script` 当函数体跑不了（没有 eval），
+/// 所以每个用例自己写 execute 体。`toml_extra` 追加到 plugin.toml。
+async fn boot_probe(
+    execute_body: &str,
+    toml_extra: &str,
+) -> (Context, tempfile::TempDir, tempfile::TempDir) {
+    let toml = format!(
+        "name = \"probe\"\npurpose = \"host api probe\"\nfactory = \"rhai\"\nenabled = true\n{toml_extra}\n"
+    );
+    let source = format!(
+        r#"#{{
+    inject: ["tools"],
+    apply: |host| {{
+        host.register_tool(#{{
+            name: "probe",
+            description: "probe",
+            parameters: #{{ type: "object", properties: #{{}} }},
+            execute: |args| {{ {execute_body} }}
+        }});
+    }}
+}}"#
+    );
+    boot_disk_plugin("probe", &[("plugin.toml", toml), ("source.rhai", source)]).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_call_tool_rejects_unknown_tools() {
+    let (root, _h, _p) = boot_probe(
+        r#"host.call_tool("no_such_tool", #{ x: 1 }) + "|" + host.call_tool("bash", #{ command: "echo hi" })"#,
+        "",
+    )
+    .await;
+    let out = exec(&root, "probe", "{}").await;
+    let (unknown, known) = out.split_once('|').unwrap();
+    assert_eq!(unknown, "Error: unknown tool `no_such_tool`", "{out}");
+    assert!(known.contains("hi"), "{out}");
 }

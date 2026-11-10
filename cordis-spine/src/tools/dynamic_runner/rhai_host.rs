@@ -117,7 +117,7 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.call_tool",
-        "Execute a live model tool (permissions still apply). Inside a tool's execute it runs as the caller (that page / subagent): its approval tier, plan mode, read-only scene and Stop apply.",
+        "Execute a live model tool (permissions still apply). Inside a tool's execute it runs as the caller (that page / subagent): its approval tier, plan mode, read-only scene and Stop apply. An unknown tool name returns \"Error: unknown tool `name`\".",
         &["host.call_tool(name: String, args: Map | String) -> String"],
     ),
     (
@@ -1139,8 +1139,23 @@ fn block_on_tool(
 ) -> Result<String, Box<rhai::EvalAltResult>> {
     let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
     let tools = tools.clone();
-    let result = tokio::task::block_in_place(|| handle.block_on(tools.execute_on(exec, call)));
+    let result = tokio::task::block_in_place(|| handle.block_on(run_tool(&tools, exec, call)));
     Ok(result.content)
+}
+
+/// 插件经 host 调一颗工具。不认得的名字直接报错——`Tools` 兜底会把参数原样回显成
+/// 「成功」，插件会把一个拼错的工具名当成跑通了（MCP 规范：未知工具是错误）。
+async fn run_tool(tools: &Tools, exec: &Context, call: ToolCall) -> cordis_base::types::ToolResult {
+    if !tools.knows(&call.name) {
+        return cordis_base::types::ToolResult {
+            content: format!("Error: unknown tool `{}`", call.name),
+            call_id: call.id,
+            name: call.name,
+            is_error: true,
+            ..Default::default()
+        };
+    }
+    tools.execute_on(exec, call).await
 }
 
 thread_local! {

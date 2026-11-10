@@ -192,6 +192,21 @@ impl Tools {
             .is_some_and(|e| e.kind == ExtraKind::Dynamic)
     }
 
+    /// 有没有叫这个名字的工具（工作区内置或已登记的 extra）。不看允许名单、能力档位，
+    /// 那些仍由 `execute_on` 把关；这里只分「认得 / 不认得」。
+    pub fn knows(&self, name: &str) -> bool {
+        (self.workspace && workspace::handles(name))
+            || self.extra.lock().unwrap().contains_key(name)
+    }
+
+    /// 某个工具的 spec（名字、描述、参数 schema）；不认得是 `None`。
+    pub fn spec_of(&self, name: &str) -> Option<ToolSpec> {
+        if self.workspace && workspace::handles(name) {
+            return workspace::specs().into_iter().find(|s| s.name == name);
+        }
+        self.extra.lock().unwrap().get(name).map(|e| e.spec.clone())
+    }
+
     pub fn is_mcp(&self, name: &str) -> bool {
         self.extra
             .lock()
