@@ -434,7 +434,7 @@ impl DynamicRunner {
                 .as_ref()
                 .and_then(|p| p.canonicalize().ok())
                 .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-            rhai_host::build_rhai_limited(plugin_id, &source, limit, plugin_dir)?
+            rhai_host::build_rhai_limited(plugin_id, &source, limit, plugin_dir, plan.honor_eval)?
         } else {
             info.build(plugin_id, plan.contrib.as_ref())
         };
@@ -789,6 +789,8 @@ struct Plan {
     source_path: Option<std::path::PathBuf>,
     /// `source_path` 的授权边界（磁盘插件是它自己的目录；`None` 走全局 roots）。
     source_dir: Option<std::path::PathBuf>,
+    /// 启动时装上的磁盘插件才读 `plugin.toml` 的 `allow_eval`；`cordis_define` 的会话包为 false。
+    honor_eval: bool,
     inject: Vec<String>,
     provides: Vec<String>,
 }
@@ -847,6 +849,7 @@ fn resolve_plan(
         source: pkg.source.clone(),
         source_path: pkg.source_path.clone(),
         source_dir: persist::origin_source_dir(&rec.origin).map(|p| p.to_path_buf()),
+        honor_eval: matches!(rec.origin, PluginOrigin::Disk { .. }),
         inject: pkg.inject.clone(),
         provides: pkg.provides.clone(),
     })

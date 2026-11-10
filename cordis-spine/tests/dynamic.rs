@@ -1,11 +1,15 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use cordis::Context;
 use cordis_spine::{
     agent_loop, agent_presets, dynamic_runner, llm, permissions, settings, slash, tool_cordis,
     tool_todo, tools, tui_slots, AgentPresets, DynEcho, DynamicRunner, LlmConfig, LlmMode,
     LogEvent, LoopHandle, PermissionMode, PersistScope, PluginOrigin, PreStep, RhaiBag, RunMode,
-    Sessions, Slash, ToolCall, Tools, TurnOutcome, AGENT_LOOP, AGENT_PRESETS, CORDIS_PRESET_ID,
-    DYNAMIC_CORDIS_RUNNER, DYN_ECHO, DYN_ECHO_TOOL, PRE_STEP, SESSIONS, SETTINGS, SLASH, TOOLS,
-    TUI_SLOTS,
+    Sessions, Slash, ToolBody, ToolCall, ToolResult, ToolSpec, Tools, TurnOutcome, AGENT_LOOP,
+    AGENT_PRESETS, CORDIS_PRESET_ID, DYNAMIC_CORDIS_RUNNER, DYN_ECHO, DYN_ECHO_TOOL, PRE_STEP,
+    SESSIONS, SETTINGS, SLASH, TOOLS, TUI_SLOTS,
 };
 use serde_json::json;
 
@@ -3861,6 +3865,10 @@ async fn example_tool_batch_rejects_bad_batches_before_running() {
             "step 1: unknown tool \\\"no_such_tool\\\"",
         ),
         (
+            json!({"steps": [{"tool": "use_tool", "args": {"tool_name": "tool_batch"}}]}),
+            "cannot call itself",
+        ),
+        (
             json!({"steps": [touch.clone(), {"tool": "bash", "args": {}}]}),
             "step 1: bash needs argument \\\"command\\\"",
         ),
@@ -4081,6 +4089,48 @@ async fn boot_probe(
     boot_disk_plugin("probe", &[("plugin.toml", toml), ("source.rhai", source)]).await
 }
 
+/// 登记一颗按名字算只读的慢工具（`memory_search` / `memory_get` 是 `Class::Read`），
+/// 用来测 `call_tools_parallel` 的并发分批。`counters` = (正在跑, 峰值)，几颗工具共用一对。
+/// 返回的 Disposable 必须留着，否则会卸掉。
+fn register_slow_read(
+    root: &Context,
+    name: &str,
+    delay: Duration,
+    counters: &(Arc<AtomicUsize>, Arc<AtomicUsize>),
+    content: &str,
+) -> cordis::Disposable {
+    let (running, peak) = counters.clone();
+    let content = content.to_string();
+    let body: ToolBody = Arc::new(move |call| {
+        let peak = peak.clone();
+        let running = running.clone();
+        let delay = delay;
+        let content = content.clone();
+        Box::pin(async move {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(delay).await;
+            running.fetch_sub(1, Ordering::SeqCst);
+            ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content,
+                ..Default::default()
+            }
+        })
+    });
+    tools_of(root)
+        .register(
+            ToolSpec {
+                name: name.into(),
+                description: "slow read probe".into(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.into(),
+            },
+            body,
+        )
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_call_tool_rejects_unknown_tools() {
     let (root, _h, _p) = boot_probe(
@@ -4155,11 +4205,10 @@ async fn plugin_tool_can_return_is_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_lists_tools_and_reads_schemas() {
     let (root, _h, _p) = boot_probe(
-        r#"let names = host.list_tools().map(|t| t.name);
-           let s = host.tool_schema("bash");
+        r#"let s = host.tool_schema("bash");
+           let names = host.list_tools().map(|t| t.name);
            #{ is_error: false, content: #{
                has_bash: names.contains("bash"),
-               has_probe: names.contains("probe"),
                schema_name: s.name,
                requires_command: s.parameters.required.contains("command"),
                missing: host.tool_schema("nope") == ()
@@ -4171,20 +4220,110 @@ async fn plugin_lists_tools_and_reads_schemas() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(
         v,
-        json!({"has_bash": true, "has_probe": true, "schema_name": "bash",
-               "requires_command": true, "missing": true}),
+        json!({"has_bash": true, "schema_name": "bash", "requires_command": true, "missing": true}),
         "{out}"
     );
+
+    // 计划模式：计划门管的写工具标 plan_blocked（不剔掉——只读 bash、写计划文件仍放行）。
+    let (root2, _h2, _p3) = boot_probe(
+        r#"let write = host.tool_schema("write_file");
+           let read = host.tool_schema("read_file");
+           #{ is_error: false, content: #{
+               write_blocked: write.plan_blocked,
+               write_listed_blocked: host.list_tools().filter(|t| t.name == "write_file")[0].plan_blocked,
+               read_blocked: read.plan_blocked,
+               read_name: read.name
+           } }"#,
+        "",
+    )
+    .await;
+    // 用带计划模式的调用方 ctx 跑这颗 probe。
+    let tools = tools_of(&root2);
+    // 计划模式要挂在 execute 的调用方上；把同一套 plan 挂到 root2 对应的页再调。
+    let page2 = root2.isolate("sessions").isolate(cordis_spine::PLAN_MODE);
+    let _s2 = page2
+        .provide(
+            SESSIONS,
+            Sessions::isolated_as(page2.clone(), "schema-plan-2"),
+        )
+        .unwrap();
+    let plan2 = cordis_spine::PlanMode::new(page2.clone());
+    plan2.set(true);
+    let _pp = page2.provide(cordis_spine::PLAN_MODE, plan2).unwrap();
+    let out = tools
+        .execute_on(
+            &page2,
+            ToolCall {
+                id: "t".into(),
+                name: "probe".into(),
+                arguments: "{}".into(),
+            },
+        )
+        .await
+        .content;
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["write_blocked"], true, "{out}");
+    assert_eq!(v["write_listed_blocked"], true, "{out}");
+    assert_eq!(v["read_blocked"], false, "{out}");
+    assert_eq!(v["read_name"], "read_file", "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_call_tools_parallel_runs_concurrently_in_order() {
     let (root, _h, _p) = boot_probe(
         r#"let rs = host.call_tools_parallel([
-               #{ tool: "bash", args: #{ command: "sleep 1; echo one" } },
-               #{ tool: "bash", args: #{ command: "sleep 1; echo two" } },
+               #{ tool: "memory_search" },
+               #{ tool: "memory_get" },
                #{ tool: "nope" },
-               #{ tool: "bash", args: #{ command: "sleep 5; echo late" }, timeout_ms: 300 }
+               #{ tool: "memory_search", timeout_ms: 300 }
+           ]);
+           #{ is_error: false, content: rs }"#,
+        "",
+    )
+    .await;
+    let peak = Arc::new(AtomicUsize::new(0));
+    let counters = (Arc::new(AtomicUsize::new(0)), peak.clone());
+    let _k1 = register_slow_read(
+        &root,
+        "memory_search",
+        Duration::from_millis(1000),
+        &counters,
+        "slow-ok",
+    );
+    let _k2 = register_slow_read(
+        &root,
+        "memory_get",
+        Duration::from_millis(1000),
+        &counters,
+        "slow-ok",
+    );
+    let started = std::time::Instant::now();
+    let out = exec(&root, "probe", "{}").await;
+    let elapsed = started.elapsed();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v[0]["text"].as_str().unwrap().contains("slow-ok"), "{out}");
+    assert!(v[1]["text"].as_str().unwrap().contains("slow-ok"), "{out}");
+    assert_eq!(v[2]["text"], "Error: unknown tool `nope`");
+    assert_eq!(v[3]["is_error"], true);
+    assert!(
+        v[3]["text"].as_str().unwrap().contains("timed out"),
+        "{out}"
+    );
+    // 两颗只读慢工具并行：远小于串行的 2s；第 4 颗 300ms 超时。
+    assert!(elapsed < Duration::from_millis(1900), "{elapsed:?}");
+    assert!(
+        peak.load(Ordering::SeqCst) >= 2,
+        "相邻只读调用应该叠在一起跑，peak={}",
+        peak.load(Ordering::SeqCst)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_call_tools_parallel_serializes_unsafe_calls() {
+    let (root, _h, _p) = boot_probe(
+        r#"let rs = host.call_tools_parallel([
+               #{ tool: "bash", args: #{ command: "sleep 1; echo one" } },
+               #{ tool: "bash", args: #{ command: "sleep 1; echo two" } }
            ]);
            #{ is_error: false, content: rs }"#,
         "",
@@ -4196,17 +4335,216 @@ async fn plugin_call_tools_parallel_runs_concurrently_in_order() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v[0]["text"].as_str().unwrap().contains("one"), "{out}");
     assert!(v[1]["text"].as_str().unwrap().contains("two"), "{out}");
-    assert_eq!(v[2]["text"], "Error: unknown tool `nope`");
-    assert_eq!(v[3]["is_error"], true);
+    // sleep 不是只读命令：必须按顺序跑，不能把 write/click 这类和别的叠一起。
     assert!(
-        v[3]["text"].as_str().unwrap().contains("timed out"),
-        "{out}"
+        elapsed >= Duration::from_millis(1800),
+        "unsafe calls must run one at a time, got {elapsed:?}"
     );
-    // 两颗 sleep 1 并行：远小于串行的 2s + 超时那颗。
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_call_tools_parallel_stops_mid_batch() {
+    let (root, _h, _p) = boot_probe(
+        r#"let rs = host.call_tools_parallel([
+               #{ tool: "memory_search" },
+               #{ tool: "memory_get" }
+           ]);
+           #{ is_error: false, content: rs }"#,
+        "",
+    )
+    .await;
+    let peak = Arc::new(AtomicUsize::new(0));
+    let counters = (Arc::new(AtomicUsize::new(0)), peak.clone());
+    let _k1 = register_slow_read(
+        &root,
+        "memory_search",
+        Duration::from_secs(5),
+        &counters,
+        "late",
+    );
+    let _k2 = register_slow_read(
+        &root,
+        "memory_get",
+        Duration::from_secs(5),
+        &counters,
+        "late",
+    );
+    let page = root.isolate("sessions").isolate(cordis_spine::TURN);
+    let _s = page
+        .provide(SESSIONS, Sessions::isolated_as(page.clone(), "stop-par"))
+        .unwrap();
+    let _t = page
+        .provide(cordis_spine::TURN, cordis_spine::TurnControl::new())
+        .unwrap();
+    let tools = tools_of(&root);
+    let started = std::time::Instant::now();
+    let run = tokio::spawn({
+        let tools = tools.clone();
+        let page = page.clone();
+        async move {
+            tools
+                .execute_on(
+                    &page,
+                    ToolCall {
+                        id: "t".into(),
+                        name: "probe".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    page.get::<cordis_spine::TurnControl>(cordis_spine::TURN)
+        .unwrap()
+        .cancel();
+    let out = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("Stop should finish the parallel batch quickly")
+        .unwrap();
     assert!(
-        elapsed < std::time::Duration::from_millis(1900),
-        "{elapsed:?}"
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
     );
+    assert!(
+        out.content.contains("cancelled") || out.is_error,
+        "{}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("late"),
+        "stopped calls should not return their success body: {}",
+        out.content
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_timeout_or_stop_withdraws_a_pending_approval() {
+    let (root, home, _p) = boot_probe(
+        r#"host.call_tool_ex("write_file", #{ target_file: args.path, content: "x" }, #{ timeout_ms: 400 })"#,
+        "",
+    )
+    .await;
+    root.get::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Ask);
+    let perms = root
+        .require::<cordis_spine::Permissions>(cordis_spine::PERMISSIONS)
+        .unwrap();
+    let path = home.path().join("timeout-withdraw.txt");
+    let tools = tools_of(&root);
+    let run = tokio::spawn({
+        let tools = tools.clone();
+        let arguments = json!({"path": path}).to_string();
+        async move {
+            tools
+                .execute(ToolCall {
+                    id: "t".into(),
+                    name: "probe".into(),
+                    arguments,
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if perms.front().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("approval should be queued");
+    let out = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("timeout should return")
+        .unwrap();
+    assert!(
+        out.content.contains("timed out") || out.is_error,
+        "{}",
+        out.content
+    );
+    assert!(
+        perms.front().is_none(),
+        "timed-out approval must leave the queue, still have {:?}",
+        perms.front()
+    );
+    assert!(!path.exists(), "should not have written after timeout");
+
+    // Stop 丢掉正在等审批的调用，请求同样要撤出队列。
+    let (root, home, _p) = boot_probe(
+        r#"host.call_tool_ex("write_file", #{ target_file: args.path, content: "x" })"#,
+        "",
+    )
+    .await;
+    root.get::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Ask);
+    let perms = root
+        .require::<cordis_spine::Permissions>(cordis_spine::PERMISSIONS)
+        .unwrap();
+    let path = home.path().join("stop-withdraw.txt");
+    let page = root.isolate("sessions").isolate(cordis_spine::TURN);
+    let _s = page
+        .provide(SESSIONS, Sessions::isolated_as(page.clone(), "stop-w"))
+        .unwrap();
+    let _t = page
+        .provide(cordis_spine::TURN, cordis_spine::TurnControl::new())
+        .unwrap();
+    let tools = tools_of(&root);
+    let run = tokio::spawn({
+        let tools = tools.clone();
+        let page = page.clone();
+        let arguments = json!({"path": path}).to_string();
+        async move {
+            tools
+                .execute_on(
+                    &page,
+                    ToolCall {
+                        id: "t".into(),
+                        name: "probe".into(),
+                        arguments,
+                    },
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if perms.front().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("approval should be queued before Stop");
+    page.get::<cordis_spine::TurnControl>(cordis_spine::TURN)
+        .unwrap()
+        .cancel();
+    let out = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("Stop should drop the waiting call")
+        .unwrap();
+    assert!(
+        out.content.contains("cancelled") || out.is_error,
+        "{}",
+        out.content
+    );
+    // 等 Drop / Withdraw 跑完
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if perms.front().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stopped approval must leave the queue");
+    assert!(!path.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4217,13 +4555,16 @@ async fn plugin_call_tools_parallel_rejects_bad_input() {
            let a = ""; let b = "";
            try { host.call_tools_parallel(many); } catch (e) { a = `${e}`; }
            try { host.call_tools_parallel([#{ args: #{} }]); } catch (e) { b = `${e}`; }
-           a + "|" + b"#,
+           let c = "";
+           try { host.call_tool_ex("bash", #{ command: "true" }, #{ timeout_ms: 600001 }); } catch (e) { c = `${e}`; }
+           a + "|" + b + "|" + c"#,
         "",
     )
     .await;
     let out = exec(&root, "probe", "{}").await;
     assert!(out.contains("at most 16"), "{out}");
     assert!(out.contains("needs tool"), "{out}");
+    assert!(out.contains("at most 600000"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4278,30 +4619,149 @@ async fn plugin_eval_expr_is_opt_in_and_expression_only() {
     let parts: Vec<&str> = out.split('\u{1}').skip(1).collect();
     assert_eq!(parts[0], "true", "{out}");
     assert_eq!(parts[1], "6", "{out}");
-    // 语句、host、死循环、定义函数都过不去。
-    for p in &parts[2..] {
-        assert!(p.starts_with("ERR "), "{out}");
-    }
+    // 语句、host、死循环、定义函数都过不去，而且要报出对应的原因（不只是 ERR 前缀）。
     assert_eq!(parts.len(), 6, "{out}");
+    for (part, needle) in [
+        (parts[2], "let"),
+        (parts[3], "host"),
+        (parts[4], "loop"),
+        (parts[5], "fn"),
+    ] {
+        assert!(part.starts_with("ERR "), "{out}");
+        assert!(
+            part.to_lowercase().contains(needle),
+            "expected {needle:?} in {part:?} ({out})"
+        );
+    }
 
     let (root, _h, _p) = boot_probe(body, "").await;
     let out = exec(&root, "probe", "{}").await;
-    assert!(out.contains("allow_eval = true"), "{out}");
+    assert!(
+        out.contains("eval_expr is off") && out.contains("cordis_define"),
+        "{out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_eval_expr_hits_the_operation_limit() {
+    // 2000×2000 的嵌套 reduce：Rhai 自己不给原生数组函数回调里的闭包计数，宿主另按变量读取
+    // 记预算（1_000_000），撞上就停。每次 eval_expr 一份新的预算：小表达式随后照常能算。
+    let (root, _h, _p) = boot_probe(
+        r#"let xs = [];
+           for i in 0..2000 { xs.push(i); }
+           let r = "";
+           try {
+               r = `${host.eval_expr("xs.reduce(|a, x| a + ys.reduce(|b, y| b + y, 0), 0)", #{ xs: xs, ys: xs })}`;
+           } catch (e) { r = `${e}`; }
+           r + "|" + `${host.eval_expr("xs.len()", #{ xs: xs })}`"#,
+        "allow_eval = true",
+    )
+    .await;
+    let out = exec(&root, "probe", "{}").await;
+    let (first, second) = out.split_once('|').unwrap();
+    assert!(
+        first.contains("too many operations"),
+        "expected op-limit error, got {out}"
+    );
+    assert_eq!(second, "2000", "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_eval_expr_stays_off_for_cordis_define_packages() {
+    // 即使用 source_path 指到一份写了 allow_eval = true 的 plugin.toml，会话包也开不了。
+    let home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
+    let root = boot().await;
+    let plug = home.path().join("plugins/evalsneak");
+    std::fs::create_dir_all(&plug).unwrap();
+    std::fs::write(
+        plug.join("plugin.toml"),
+        "name = \"Sneak\"\npurpose = \"should not get eval\"\nfactory = \"rhai\"\nenabled = true\nallow_eval = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        plug.join("source.rhai"),
+        r#"#{
+            inject: ["tools"],
+            apply: |host| {
+                host.register_tool(#{
+                    name: "eval_sneak",
+                    description: "try eval",
+                    parameters: #{ type: "object", properties: #{} },
+                    execute: |args| {
+                        let r = "";
+                        try { r = `${host.eval_expr("1 + 1")}`; } catch (e) { r = `${e}`; }
+                        r
+                    }
+                });
+            }
+        }"#,
+    )
+    .unwrap();
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "esnk"},
+            "name": "Sneak",
+            "purpose": "should not get eval",
+            "factory": "rhai",
+            "source_path": plug.join("source.rhai").display().to_string()
+        }),
+    )
+    .await;
+    assert!(!defined.contains("Error"), "{defined}");
+    let ran = exec(
+        &root,
+        "cordis_run",
+        r#"{"pluginId":"esnk-1","packageId":"pkg-1","mode":"run"}"#,
+    )
+    .await;
+    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+    let out = exec(&root, "eval_sneak", "{}").await;
+    assert!(
+        out.contains("eval_expr is off") && out.contains("cordis_define"),
+        "{out}"
+    );
+    assert!(!out.trim().ends_with('2'), "{out}");
 }
 
 /// 并行分组：组里的调用同时跑，结果存成数组 stepN，各颗 save_as 也能被后面的步骤引用。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn example_tool_batch_parallel_group_runs_concurrently() {
     let (root, _home, _p) = boot_tool_batch().await;
+    let peak = Arc::new(AtomicUsize::new(0));
+    let counters = (Arc::new(AtomicUsize::new(0)), peak.clone());
+    let _k1 = register_slow_read(
+        &root,
+        "memory_search",
+        Duration::from_millis(1000),
+        &counters,
+        r#"{"n":1}"#,
+    );
+    let _k2 = register_slow_read(
+        &root,
+        "memory_get",
+        Duration::from_millis(1000),
+        &counters,
+        r#"{"n":2}"#,
+    );
+    let _k3 = register_slow_read(
+        &root,
+        "canvas_read",
+        Duration::from_millis(1000),
+        &counters,
+        "three",
+    );
     let started = std::time::Instant::now();
     let out = batch(
         &root,
         json!({
             "steps": [
                 {"parallel": [
-                    {"tool": "bash", "args": {"command": "sleep 1; echo '{\"n\":1}'"}, "save_as": "a"},
-                    {"tool": "bash", "args": {"command": "sleep 1; echo '{\"n\":2}'"}, "save_as": "b"},
-                    {"tool": "bash", "args": {"command": "sleep 1; echo three"}}
+                    {"tool": "memory_search", "save_as": "a"},
+                    {"tool": "memory_get", "save_as": "b"},
+                    {"tool": "canvas_read"}
                 ]},
                 {"tool": "bash", "args": {"command": "echo sum-${a.n}-${b.n}"}, "save_as": "sum", "expect": "sum-1-2"}
             ],
@@ -4329,12 +4789,14 @@ async fn example_tool_batch_parallel_group_runs_concurrently() {
         .iter()
         .map(|t| t.as_str().unwrap().to_string())
         .collect();
-    assert!(trace[0].starts_with("#0.0 bash ok"), "{trace:?}");
+    assert!(trace[0].starts_with("#0.0 memory_search ok"), "{trace:?}");
     assert_eq!(trace.len(), 4, "{trace:?}");
-    // 三颗 sleep 1 并行：远小于串行的 3s。
+    // 三颗只读慢工具并行：远小于串行的 3s。
+    assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
     assert!(
-        elapsed < std::time::Duration::from_millis(2500),
-        "{elapsed:?}"
+        peak.load(Ordering::SeqCst) >= 3,
+        "parallel group should run read-only tools together, peak={}",
+        peak.load(Ordering::SeqCst)
     );
 
     // 组里一颗失败：整组跑完，默认停在这一步，后面的不跑。

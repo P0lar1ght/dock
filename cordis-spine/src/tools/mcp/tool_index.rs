@@ -25,13 +25,17 @@ pub(super) struct IndexedTool {
     pub schema: Value,
 }
 
+/// `search_tool` 回给模型的 `input_schema`。`host.tool_schema` 也走这里，两边永远同一份。
+pub(crate) fn input_schema(spec: &ToolSpec) -> Value {
+    serde_json::from_str(&spec.parameters_json).unwrap_or_else(|_| json!({"type":"object"}))
+}
+
 impl IndexedTool {
     fn from_spec(spec: &ToolSpec, group: String) -> Self {
         let raw = split_mcp_public_name(&spec.name)
             .map(|(_, t)| t.to_string())
             .unwrap_or_else(|| spec.name.clone());
-        let schema: Value = serde_json::from_str(&spec.parameters_json)
-            .unwrap_or_else(|_| json!({"type":"object"}));
+        let schema = input_schema(spec);
         let parameters = parameter_names(&schema);
         Self {
             name: spec.name.clone(),

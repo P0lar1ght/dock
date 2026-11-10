@@ -18,6 +18,7 @@ mod protocol;
 mod sse;
 mod stdio;
 mod tool_index;
+pub(crate) use tool_index::input_schema;
 mod tools_list;
 
 use std::collections::{HashMap, HashSet};

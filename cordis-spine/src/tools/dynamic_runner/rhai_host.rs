@@ -16,9 +16,10 @@ use crate::host::status_items::{StatusItem, StatusItems, StatusToken};
 use crate::host::tool_views::{ToolViewFn, ToolViewInput, ToolViews};
 use crate::host::tui_slots::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots};
 use crate::names::{
-    PLUGIN_SETTINGS, RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS, TOOL_VIEWS,
-    TUI_SLOTS, TURN_END,
+    PLAN_MODE, PLUGIN_SETTINGS, RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS,
+    TOOL_VIEWS, TUI_SLOTS, TURN_END,
 };
+use crate::tools::plan_mode::PlanMode;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::plugin_settings::SettingsSchema;
 use cordis_base::types::{
@@ -125,27 +126,27 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         "Like host.call_tool but returns a structured result: ok / is_error (the tool's own verdict), text, images (count), tool (the tool that actually ran). Same caller identity, gates and unknown-tool error.",
         &[
             "host.call_tool_ex(name: String, args: Map | String) -> #{ ok: bool, is_error: bool, text: String, images: int, tool: String }",
-            "host.call_tool_ex(name: String, args: Map | String, #{ timeout_ms: int }) -> same map; timing out gives is_error with \"timed out\"",
+            "host.call_tool_ex(name: String, args: Map | String, #{ timeout_ms: int }) -> same map; timing out gives is_error with \"timed out\" (the call may already have run or had side effects; timeout_ms over 600000 is an error)",
         ],
     ),
     (
         "host.call_tools_parallel",
-        "Run up to 16 tool calls concurrently (join_all) as the caller; results come back in input order as call_tool_ex maps. Each item #{ tool, args?, timeout_ms? }. Same gates; approval prompts still queue one at a time. Only batch calls that do not depend on each other (reads, searches, independent lookups); keep writes and desktop actions sequential. Stop cancels the ones still running.",
+        "Run up to 16 independent tool calls as the caller; results come back in input order as call_tool_ex maps. Each item #{ tool, args?, timeout_ms? }. Scheduled like the agent loop: neighbouring read-only calls (reads, searches, MCP tools marked readOnlyHint, cua read-only tools) run concurrently; writes, bash, browser and desktop actions run one at a time in input order. Same gates; approval prompts still queue one at a time. Stop cancels the ones still running.",
         &["host.call_tools_parallel([#{ tool: String, args: Map, timeout_ms?: int }, ...]) -> [#{ ok, is_error, text, images, tool }, ...]"],
     ),
     (
         "host.list_tools",
-        "Tools the caller may call (its allowlist / capability tier applied), including MCP and plugin tools: [#{ name, description }] with descriptions cut to 200 chars.",
-        &["host.list_tools() -> [#{ name: String, description: String }]"],
+        "Tools the caller may call: [#{ name, description, plan_blocked }] (descriptions cut to 200 chars). Same registry and the same allowlist / capability filter as execute. plan_blocked is true when the caller is in plan mode and the plan gate covers that tool (read-only bash and edits to the plan file still pass). A plugin-side helper, not a model tool; the model discovers tools with search_tool.",
+        &["host.list_tools() -> [#{ name: String, description: String, plan_blocked: bool }]"],
     ),
     (
         "host.tool_schema",
-        "Full spec of one tool: #{ name, description, parameters } (parameters is the JSON-schema map). () when the tool is unknown or the caller may not call it.",
-        &["host.tool_schema(name: String) -> #{ name, description, parameters: Map } | ()"],
+        "One tool's spec from the same registry that backs search_tool / execute: #{ name, description, parameters, plan_blocked }. () when the tool is unknown or outside the caller's allowlist / capability.",
+        &["host.tool_schema(name: String) -> #{ name, description, parameters: Map, plan_blocked: bool } | ()"],
     ),
     (
         "host.eval_expr",
-        "Evaluate one Rhai expression (no statements, no fn definitions) with vars as constants. Off unless the disk plugin's plugin.toml sets allow_eval = true. Runs in a separate engine with the same operation limit and no host / http / codecs (JSON only); Stop aborts it. For data-driven conditions and transforms, e.g. a tool argument like `when: \"prev.count > 0\"`.",
+        "Evaluate one Rhai expression (no statements, no fn definitions) with vars as constants. Off unless this is a disk plugin loaded at startup whose plugin.toml sets allow_eval = true (session packages from cordis_define cannot turn it on, even with a plugin.toml next to source_path). Runs in a separate engine with the same per-call operation limit and no host / http / codecs (JSON only); Stop aborts it. For data-driven conditions and transforms, e.g. a tool argument like `when: \"prev.count > 0\"`.",
         &["host.eval_expr(expr: String, vars: Map) -> value", "host.eval_expr(expr: String) -> value"],
     ),
     (
@@ -284,6 +285,7 @@ pub fn build_rhai_limited(
     source: &str,
     max_bytes: usize,
     plugin_dir: Option<PathBuf>,
+    honor_eval: bool,
 ) -> Result<Plugin, String> {
     let meta = preflight_limited(source, max_bytes)?;
     let name = fiber_name.to_string();
@@ -294,7 +296,8 @@ pub fn build_rhai_limited(
         Inject::from(meta.inject.clone())
     };
     Ok(plugin(name.clone(), inject, move |ctx, _: &()| {
-        apply_rhai(ctx, &name, &source, plugin_dir.clone()).map_err(cordis::Error::plugin)?;
+        apply_rhai(ctx, &name, &source, plugin_dir.clone(), honor_eval)
+            .map_err(cordis::Error::plugin)?;
         Ok(None)
     }))
 }
@@ -304,6 +307,7 @@ fn apply_rhai(
     plugin_id: &str,
     source: &str,
     plugin_dir: Option<PathBuf>,
+    honor_eval: bool,
 ) -> Result<(), String> {
     let mut engine = sandboxed_engine(RUN_MAX_OPS);
     let tag = format!("[cordis:{plugin_id}]");
@@ -334,9 +338,9 @@ fn apply_rhai(
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;
     let engine = Arc::new(engine);
-    let eval_engine = plugin_dir
-        .as_deref()
-        .is_some_and(allows_eval)
+    // 只有启动时装上的磁盘插件（honor_eval）才读目录里的 allow_eval；
+    // cordis_define 的包即使 source_path 旁边有 plugin.toml 也打不开。
+    let eval_engine = (honor_eval && plugin_dir.as_deref().is_some_and(allows_eval))
         .then(|| Arc::new(expression_engine()));
     let inner = Arc::new(HostInner {
         ctx: ctx.clone(),
@@ -836,9 +840,13 @@ impl Host {
         )?))
     }
 
-    /// 同时跑几颗工具（`join_all`），结果按传入顺序回成 `call_tool_ex` 那样的 map。每颗
+    /// 跑几颗工具，结果按传入顺序回成 `call_tool_ex` 那样的 map。每颗
     /// `#{ tool, args?, timeout_ms? }`（也认 `name` / `arguments`）。同一个调用方身份、同一套
     /// 门；要审批的照样进全局审批队列一个个问。最多 16 颗。
+    ///
+    /// 和 agent 循环一样分批（[`parallel_safe_with`]）：相邻的只读调用一起跑（`join_all`），
+    /// 写文件、bash、cua 点按这类**一颗一颗按顺序**跑——否则插件就能绕过循环的串行规则，
+    /// 让 `write_file` 和 cua 点击同时发生。
     fn call_tools_parallel(&mut self, calls: Array) -> Result<Array, Box<rhai::EvalAltResult>> {
         if calls.len() > MAX_PARALLEL_CALLS {
             return err(format!(
@@ -868,19 +876,49 @@ impl Host {
         }
         let exec = self.exec_ctx();
         let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
-        let runs = planned
-            .into_iter()
-            .map(|(call, timeout)| run_tool_limited(&tools, &exec, call, timeout));
-        let results =
-            tokio::task::block_in_place(|| handle.block_on(futures_util::future::join_all(runs)));
+        let safe = |c: &ToolCall| {
+            crate::agent::capability::parallel_safe_with(&c.name, &c.arguments, &|n| {
+                tools.read_only_hint(n)
+            })
+        };
+        let mut batches: Vec<Vec<(ToolCall, Option<std::time::Duration>)>> = Vec::new();
+        for item in planned {
+            let joins = safe(&item.0)
+                && batches
+                    .last()
+                    .and_then(|b| b.last())
+                    .is_some_and(|(c, _)| safe(c));
+            match batches.last_mut() {
+                Some(batch) if joins => batch.push(item),
+                _ => batches.push(vec![item]),
+            }
+        }
+        let results = tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                let mut out = Vec::new();
+                for batch in batches {
+                    if call_cancelled(&exec) {
+                        out.extend(batch.into_iter().map(|(call, _)| {
+                            cancelled_result(&call, "Error: cancelled: the user stopped this turn")
+                        }));
+                        continue;
+                    }
+                    let runs = batch
+                        .into_iter()
+                        .map(|(call, timeout)| run_tool_limited(&tools, &exec, call, timeout));
+                    out.extend(futures_util::future::join_all(runs).await);
+                }
+                out
+            })
+        });
         Ok(results
             .into_iter()
             .map(|r| Dynamic::from_map(result_map(r)))
             .collect())
     }
 
-    /// 调用方能调的工具：`[#{ name, description }]`（描述截到 200 字，全文看 `tool_schema`）。
-    /// 允许名单、能力档位按调用方算；MCP 与插件工具也在里面。
+    /// 调用方能调的工具 `[#{ name, description, plan_blocked }]`：与 `execute_on` 同一个允许名单 /
+    /// 能力档位过滤（`outside_allowlist`），`plan_blocked` 标出此刻计划门会挡的。
     fn list_tools(&mut self) -> Result<Array, Box<rhai::EvalAltResult>> {
         let tools = self.tools()?;
         let exec = self.exec_ctx();
@@ -890,6 +928,10 @@ impl Host {
             .filter(|s| !tools.outside_allowlist(&exec, &s.name))
             .map(|s| {
                 let mut m = Map::new();
+                m.insert(
+                    "plan_blocked".into(),
+                    Dynamic::from_bool(plan_blocked(&exec, &s.name)),
+                );
                 m.insert("name".into(), Dynamic::from(s.name));
                 m.insert(
                     "description".into(),
@@ -900,24 +942,25 @@ impl Host {
             .collect())
     }
 
-    /// 一颗工具的 `#{ name, description, parameters }`（`parameters` 是 JSON Schema map）；
-    /// 不认得或调用方调不了 → `()`。
+    /// 一颗工具的 schema：与 `search_tool` 的 `input_schema` 同一来源、同一个函数（不是第二套目录）。
+    /// 不认得、调用方允许名单 / 能力档位不够 → `()`；`plan_blocked` 同 `list_tools`。
+    /// 要浏览或发现工具，调 `search_tool`。
     fn tool_schema(&mut self, name: ImmutableString) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
         let tools = self.tools()?;
         let exec = self.exec_ctx();
-        let Some(spec) = tools
-            .spec_of(&name)
-            .filter(|s| !tools.outside_allowlist(&exec, &s.name))
-        else {
+        let Some(spec) = schema_for_caller(&tools, &exec, &name) else {
             return Ok(Dynamic::UNIT);
         };
+        // 与 search_tool 的 input_schema 同一个函数。
+        let parameters = json_to_dynamic(&crate::tools::mcp::input_schema(&spec));
         let mut m = Map::new();
+        m.insert(
+            "plan_blocked".into(),
+            Dynamic::from_bool(plan_blocked(&exec, &spec.name)),
+        );
         m.insert("name".into(), Dynamic::from(spec.name));
         m.insert("description".into(), Dynamic::from(spec.description));
-        m.insert(
-            "parameters".into(),
-            json_str_to_dynamic(&spec.parameters_json),
-        );
+        m.insert("parameters".into(), parameters);
         Ok(Dynamic::from_map(m))
     }
 
@@ -946,9 +989,10 @@ impl Host {
         current_call_ctx().unwrap_or_else(|| self.inner.ctx.clone())
     }
 
-    /// 求一个**表达式**（不能写语句、不能定义函数），`vars` 里的键当常量用。只在磁盘插件
-    /// 的 `plugin.toml` 写了 `allow_eval = true` 时有；引擎是单独的一份：没有 host、http、
-    /// 编解码，同样的操作数上限，停止时同样中止。
+    /// 求一个**表达式**（不能写语句、不能定义函数），`vars` 里的键当常量用。只在启动时
+    /// 装上的磁盘插件、且其 `plugin.toml` 写了 `allow_eval = true` 时有；`cordis_define`
+    /// 的会话包打不开。引擎是单独的一份：没有 host、http、编解码，每次调用一份新的操作数
+    /// 上限，停止时同样中止。
     fn eval_expr(
         &mut self,
         expr: ImmutableString,
@@ -956,7 +1000,7 @@ impl Host {
     ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
         let Some(engine) = self.inner.eval_engine.clone() else {
             return err(
-                "eval_expr is off for this plugin; set allow_eval = true in its plugin.toml",
+                "eval_expr is off for this plugin; only a disk plugin loaded at startup may set allow_eval = true in its plugin.toml (cordis_define packages cannot)",
             );
         };
         if expr.len() > MAX_EVAL_EXPR_BYTES {
@@ -964,6 +1008,7 @@ impl Host {
                 "eval_expr: expression over {MAX_EVAL_EXPR_BYTES} bytes"
             ));
         }
+        EXPR_VAR_READS.with(|c| c.set(0));
         let mut scope = rhai::Scope::new();
         for (k, v) in vars {
             scope.push_constant_dynamic(k.to_string(), v);
@@ -1375,31 +1420,27 @@ fn timeout_of(map: &Map) -> Result<Option<std::time::Duration>, Box<rhai::EvalAl
         return Ok(None);
     };
     match v.as_int() {
-        Ok(ms) if ms > 0 => Ok(Some(std::time::Duration::from_millis(
-            ms.min(MAX_TIMEOUT_MS) as u64,
-        ))),
+        Ok(ms) if ms > MAX_TIMEOUT_MS => err(format!(
+            "timeout_ms must be at most {MAX_TIMEOUT_MS}, got {ms}"
+        )),
+        Ok(ms) if ms > 0 => Ok(Some(std::time::Duration::from_millis(ms as u64))),
         _ => err("timeout_ms must be a positive integer"),
     }
 }
 
-/// [`run_tool`]，再和调用方的停止、可选的时限赛跑：先到的那个说了算。输掉的工具 future
-/// 被丢弃（`bash` 自己也在看停止，会杀掉进程）。
+/// [`run_tool`]，再和调用方的停止、可选的时限赛跑：先到的那个说了算。
+/// 超时或停止时丢掉工具 future；`bash` 的前台任务在 Drop 时发取消信号杀掉进程，
+/// MCP stdio 的 rpc 在 Drop 时发 `notifications/cancelled`。超时并不等于「没执行」——
+/// 副作用可能已经发生。
 async fn run_tool_limited(
     tools: &Tools,
     exec: &Context,
     call: ToolCall,
     timeout: Option<std::time::Duration>,
 ) -> cordis_base::types::ToolResult {
-    let fail = {
-        let (call_id, name) = (call.id.clone(), call.name.clone());
-        move |content: String| cordis_base::types::ToolResult {
-            call_id,
-            name,
-            content,
-            is_error: true,
-            ..Default::default()
-        }
-    };
+    if call_cancelled(exec) {
+        return cancelled_result(&call, "Error: cancelled: the user stopped this turn");
+    }
     let name = call.name.clone();
     let stopped = async {
         while !call_cancelled(exec) {
@@ -1414,13 +1455,41 @@ async fn run_tool_limited(
     };
     tokio::select! {
         biased;
-        result = run_tool(tools, exec, call) => result,
-        _ = stopped => fail("Error: cancelled: the user stopped this turn".into()),
-        _ = deadline => fail(format!(
-            "Error: `{name}` timed out after {} ms",
-            timeout.map(|d| d.as_millis()).unwrap_or_default()
-        )),
+        result = run_tool(tools, exec, call.clone()) => result,
+        _ = stopped => cancelled_result(&call, "Error: cancelled: the user stopped this turn"),
+        _ = deadline => cancelled_result(
+            &call,
+            format!(
+                "Error: `{name}` timed out after {} ms",
+                timeout.map(|d| d.as_millis()).unwrap_or_default()
+            ),
+        ),
     }
+}
+
+fn cancelled_result(call: &ToolCall, content: impl Into<String>) -> cordis_base::types::ToolResult {
+    cordis_base::types::ToolResult {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        content: content.into(),
+        is_error: true,
+        ..Default::default()
+    }
+}
+
+/// 调用方现在能看到、能调的那份 schema（与 `execute_on` 同一套允许名单 / 计划门；
+/// 不是另一份目录）。计划模式下会被计划门挡住的工具当作看不见。
+fn schema_for_caller(tools: &Tools, exec: &Context, name: &str) -> Option<ToolSpec> {
+    (!tools.outside_allowlist(exec, name))
+        .then(|| tools.spec_of(name))
+        .flatten()
+}
+
+/// 调用方此刻处在计划模式，且这颗工具受计划门管（`acp::blocked_in_plan`，与 `execute_on`
+/// 同一判断）。不直接剔掉：只读 bash 和写计划文件在计划模式下仍然放行，按名字剔会误伤。
+fn plan_blocked(exec: &Context, name: &str) -> bool {
+    exec.get::<PlanMode>(PLAN_MODE)
+        .is_some_and(|p| p.gated() && cordis_base::acp::blocked_in_plan(name))
 }
 
 /// `host.call_tool_ex` 的返回：`#{ ok, is_error, text, images, tool }`（`images` 是张数，
@@ -1473,9 +1542,15 @@ thread_local! {
 
 fn with_call_ctx<R>(ctx: Option<Context>, f: impl FnOnce() -> R) -> R {
     let prev = CALL_CTX.with(|c| std::mem::replace(&mut *c.borrow_mut(), ctx));
-    let out = f();
-    CALL_CTX.with(|c| *c.borrow_mut() = prev);
-    out
+    struct Restore(Option<Context>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            CALL_CTX.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(prev);
+    f()
 }
 
 fn current_call_ctx() -> Option<Context> {
@@ -1590,6 +1665,7 @@ fn register_json(engine: &mut Engine) {
 const MAX_EVAL_EXPR_BYTES: usize = 4096;
 
 /// 磁盘插件的 `plugin.toml` 有没有 `allow_eval = true`（默认没有）。
+/// 调用方还要先确认这是启动时装上的磁盘插件（见 `honor_eval`）。
 fn allows_eval(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("plugin.toml"))
         .ok()
@@ -1610,7 +1686,32 @@ fn expression_engine() -> Engine {
             None
         }
     });
+    // Rhai 1.25 不给原生数组函数（map / filter / reduce …）回调里的闭包计操作数，
+    // `xs.reduce(|a, x| a + ys.reduce(…))` 这种嵌套能跑几百万步不被拦、也停不下。
+    // 闭包体要读变量，变量读取每次都过 on_var：在这里另记一份预算，并查停止。
+    #[allow(deprecated)] // on_var 是 Rhai 标的「易变 API」，不是真的弃用。
+    engine.on_var(|_, _, _| {
+        let n = EXPR_VAR_READS.with(|c| {
+            let n = c.get() + 1;
+            c.set(n);
+            n
+        });
+        if n > RUN_MAX_OPS {
+            return Err(eval_err(format!(
+                "eval_expr: too many operations (over {RUN_MAX_OPS} variable reads)"
+            )));
+        }
+        if n.is_multiple_of(4096) && current_call_ctx().is_some_and(|c| call_cancelled(&c)) {
+            return Err(eval_err("cancelled: the user stopped this turn".into()));
+        }
+        Ok(None)
+    });
     engine
+}
+
+thread_local! {
+    /// 这次 `host.eval_expr` 已读了几次变量（见 [`expression_engine`]）；每次求值前清零。
+    static EXPR_VAR_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn dynamic_to_json(value: &Dynamic) -> Result<Value, String> {
@@ -1730,7 +1831,7 @@ mod tests {
     #[test]
     fn build_rhai_limited_honors_inline_ceiling() {
         let oversized = "x".repeat(MAX_INLINE_SOURCE + 1);
-        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, None) {
+        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, None, false) {
             Err(err) => assert!(err.contains("128KiB"), "{err}"),
             Ok(_) => panic!("expected oversized inline source to fail"),
         }
