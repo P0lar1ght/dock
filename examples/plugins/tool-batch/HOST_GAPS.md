@@ -23,6 +23,11 @@
   没有子代理身份、没有页级计划模式 / 停止）过门——这是已知限制，没改。
 - 测试：`plugin_call_tool_runs_as_the_caller`（计划模式挡写、审批记在子代理名下、停止 10 秒内返回），
   旧代码上会失败。
+- 只传 `exec` 参数不够：`tools/pre-execute` / `tools/execute` 的订阅者和工作区工具的 cwd 读的是
+  task-local `EXEC_CTX`。`run_tool` 把整次 `execute_on` 用 `with_exec_ctx_async` 挂回调用方这页，
+  批里的 `write_file` / `search_replace` 因此记进这一轮的改动（能撤销、GUI 改动面板看得见），相对路径和
+  `bash` 起始目录按这页的 cwd 算（`dispatch_local` 另挂一层兜住其它调用方）。测试
+  `plugin_call_tool_uses_the_callers_cwd`、`plugin_call_tool_edits_land_in_turn_changes`，旧代码上都会失败。
 
 ## 2. 已修：结构化结果 `host.call_tool_ex`
 

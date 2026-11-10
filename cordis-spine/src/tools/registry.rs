@@ -645,8 +645,9 @@ impl Tools {
         if self.workspace && workspace::handles(&call.name) {
             let jobs = exec.get::<crate::tools::jobs::Jobs>(JOBS);
             // 相对路径、bash 的起始目录按 `current_cwd()` 取，读的是 `EXEC_CTX`。插件经
-            // host 调进来时跑在阻塞线程上，task-local 已经丢了，不挂这一层就会退回进程
-            // cwd（GUI 下是 App 数据目录，不是这页的项目目录）。
+            // host 调进来的路径已在 `rhai_host::run_tool` 把整次 `execute_on` 挂回调用方；
+            // 这里再挂一层兜住其它不在 scope 里的调用方，否则退回进程 cwd（GUI 下是 App
+            // 数据目录，不是这页的项目目录）。正常一轮里它本来就等于 `exec`。
             return EXEC_CTX
                 .scope(
                     exec.clone(),

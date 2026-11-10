@@ -1538,7 +1538,10 @@ async fn run_tool(tools: &Tools, exec: &Context, call: ToolCall) -> cordis_base:
             ..Default::default()
         };
     }
-    tools.execute_on(exec, call).await
+    // 插件经 host 调进来时跑在阻塞线程上，task-local 的 `EXEC_CTX` 已经丢了。整次
+    // `execute_on` 挂回调用方这页：`tools/pre-execute` / `tools/execute` 两个 waterfall 的
+    // 订阅者（每轮改动记录等）、工作区工具的 cwd 都靠 `exec_ctx()` 找这一页。
+    crate::tools::registry::with_exec_ctx_async(exec.clone(), tools.execute_on(exec, call)).await
 }
 
 thread_local! {

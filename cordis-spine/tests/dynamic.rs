@@ -4001,6 +4001,64 @@ async fn plugin_call_tool_uses_the_callers_cwd() {
     );
 }
 
+/// 批里的 `write_file` / `search_replace` 要记进这一轮的改动（能撤销、GUI 改动面板看得见）。
+/// 记录挂在 `tools/pre-execute` / `tools/execute` 上，靠 `exec_ctx()` 找到这一页；插件经 host
+/// 调进来时跑在阻塞线程上，以前那两处 waterfall 拿不到 ctx，直接跳过。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_call_tool_edits_land_in_turn_changes() {
+    let (root, _home, _p) = boot_tool_batch().await;
+    root.plugin(cordis_spine::turn_changes(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let tools = tools_of(&root);
+    let proj = tempfile::tempdir().unwrap();
+    let proj_path = proj.path().canonicalize().unwrap();
+    std::fs::write(proj_path.join("a.txt"), "one\ntwo\n").unwrap();
+    let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+    assert!(sessions.is_main());
+    sessions.pin_workspace_cwd(&proj_path);
+    sessions.append(LogEvent::User("改两个文件".into()));
+
+    let out = tools
+        .execute_on(
+            &root,
+            ToolCall {
+                id: "tb".into(),
+                name: "tool_batch".into(),
+                arguments: json!({
+                    "steps": [
+                        {"tool": "write_file", "args": {"target_file": "notes/new.md", "contents": "x\ny\n"}},
+                        {"tool": "search_replace", "args": {"file_path": "a.txt", "old_string": "two", "new_string": "TWO"}}
+                    ]
+                })
+                .to_string(),
+            },
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(proj_path.join("notes/new.md")).unwrap(),
+        "x\ny\n"
+    );
+
+    let changes = root
+        .require::<cordis_spine::TurnChanges>(cordis_spine::TURN_CHANGES)
+        .unwrap();
+    let turns = changes.list(&root);
+    assert_eq!(turns.len(), 1, "{turns:#?}");
+    let files: Vec<(&str, &str)> = turns[0]
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.status))
+        .collect();
+    assert_eq!(
+        files,
+        vec![("notes/new.md", "added"), ("a.txt", "modified")]
+    );
+}
+
 /// 插件工具里的 host.call_tool 以**调用方**身份执行：子代理调 tool_batch 时，批里的审批
 /// 记在子代理名下；调用方那一页开着计划模式时，批里的 bash 被计划门挡住；调用方这一轮
 /// 被停止时，正在跑的 bash 被打断。以前一律走插件的根 ctx，这三样都不认。

@@ -16,7 +16,7 @@
 - **一轮里的只读 MCP 调用并行执行**：模型一次回复里的多个调用，`use_tool` 按它派发的工具判断；MCP 工具在 `tools/list` 里标了 `readOnlyHint: true` 的，以及 cua-driver 的只读几颗（列应用 / 窗口、读窗口状态、校验状态等），和别的只读调用一起并发跑。注解只用来排并发，审批、计划模式、能力档位不变。系统提示与 `use_tool` 描述更明确地鼓励把互不依赖的调用放进同一次回复。
 
 - **Rhai 插件宿主能力**（插件开发技能 `host-api.md` / `package.md` / `http.md` 同步）：
-  - `host.call_tool` 在工具里以**调用方**身份执行：那一页 / 子代理的审批档位、计划模式、只读场景、停止都算数；调不存在的工具回错误，不再回显参数当成功。批里的 `read_file` 等相对路径、`bash` 起始目录按调用方那一页的工作目录算（GUI 下以前退回进程 cwd）。
+  - `host.call_tool` 在工具里以**调用方**身份执行：那一页 / 子代理的审批档位、计划模式、只读场景、停止都算数；调不存在的工具回错误，不再回显参数当成功。批里的 `read_file` 等相对路径、`bash` 起始目录按调用方那一页的工作目录算（GUI 下以前退回进程 cwd）；批里的 `write_file` / `search_replace` 记进这一轮的改动，能撤销、GUI 改动面板看得见。
   - 新增 `host.call_tool_ex`（结构化结果 `#{ ok, is_error, text, images, tool }`，可设 `timeout_ms`）、`host.call_tools_parallel`（最多 16 颗；相邻只读调用并发，写 / bash / 桌面动作按序）、`host.list_tools` / `host.tool_schema`、`host.cancelled`。
   - 插件工具的 `execute` 可回 `#{ is_error, content }` 明确报失败。
   - `parse_json` / `to_json` 支持任意 JSON 值并正确转义。
