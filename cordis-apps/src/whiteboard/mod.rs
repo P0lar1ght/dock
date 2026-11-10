@@ -517,7 +517,7 @@ impl App for Whiteboard {
             }),
             json!({
                 "name": "whiteboard_duplicate",
-                "description": "Copy the given shapes together, keeping relative positions. Arrows or lines are also copied when both ends are in `ids` (one-ended arrows stay on the originals). Labels and groups come along; group ids are new per copy. `ids` is a flat string array. `count`? (default 1, max 20); `texts`? one new label per copy. `place`? ∈ right|left|above|below shifts by the selection's real bounding box; or pass `dx`/`dy` (the missing one is 0). Otherwise each copy lands in a free spot. Copies get new z-index keys. Returns new ids: requested shapes, then auto-copied arrows — labels are not listed.",
+                "description": "Copy the given shapes together, keeping relative positions. Arrows or lines are also copied when both ends are in `ids` (one-ended arrows stay on the originals). Labels and groups come along; group ids are new per copy. `ids` is a flat string array. `count`? (default 1, max 20); `texts`? copy k uses texts[k] (cycled) as the label of every requested shape; auto-copied arrows keep their labels. `place`? ∈ right|left|above|below shifts by the selection's real bounding box; or pass `dx`/`dy` (the missing one is 0). Otherwise each copy lands in a free spot. Copies get new z-index keys. Returns new ids: requested shapes, then auto-copied arrows — labels are not listed.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

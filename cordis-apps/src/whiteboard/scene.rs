@@ -2218,10 +2218,23 @@ fn retarget_nested(
     }
 }
 
+/// 改写副本的 `boundElements`：映射表里有的换成新 id；没跟着复制的箭头 / 线
+/// （只连一端的外连箭头）直接去掉，它们并不绑在副本上。
 fn retarget_bound(copy: &mut Value, map: &std::collections::HashMap<String, String>) {
     let Some(bound) = copy.get_mut("boundElements").and_then(Value::as_array_mut) else {
         return;
     };
+    bound.retain(|b| {
+        let unmapped = b
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !map.contains_key(id));
+        let is_link = matches!(
+            b.get("type").and_then(Value::as_str),
+            Some("arrow") | Some("line")
+        );
+        !(unmapped && is_link)
+    });
     for b in bound {
         let Some(old) = b.get("id").and_then(Value::as_str).map(str::to_string) else {
             continue;
@@ -2467,7 +2480,8 @@ pub fn apply_duplicate(scene: &mut Scene, args: &Value) -> Result<ArrangeReport,
             retarget_bound(&mut copy, &map);
             retarget_container(&mut copy, &map);
             remap_groups(&mut copy, &mut group_map);
-            if let Some(t) = &text {
+            // texts 只改请求里的图形；自动带上的内部箭头保留原标签。
+            if let Some(t) = text.as_ref().filter(|_| requested.contains(old_id)) {
                 apply_copy_text(&mut copy, t);
             }
             if copy.get("version").is_some() {
@@ -2497,7 +2511,7 @@ pub fn apply_duplicate(scene: &mut Scene, args: &Value) -> Result<ArrangeReport,
             l["isDeleted"] = json!(false);
             retarget_bound(&mut l, &map);
             remap_groups(&mut l, &mut group_map);
-            if let Some(t) = &text {
+            if let Some(t) = text.as_ref().filter(|_| requested.contains(container)) {
                 apply_copy_text(&mut l, t);
             }
             if l.get("version").is_some() {
@@ -4356,6 +4370,92 @@ mod tests {
         let copy = shape_of(&s, "edge-copy");
         assert_eq!(copy["startBinding"]["elementId"], "a-copy");
         assert_eq!(copy["endBinding"]["elementId"], "b-copy");
+    }
+
+    /// texts 只改请求里的图形；自动带上的内部箭头（及其标签）保留原文案。
+    #[test]
+    fn duplicate_texts_skip_auto_copied_arrow_labels() {
+        let mut a = full("a", "rectangle", 0.0, 1);
+        a["boundElements"] = json!([{ "id": "a-label", "type": "text" }]);
+        let mut a_label = full("a-label", "text", 10.0, 1);
+        a_label["containerId"] = json!("a");
+        a_label["text"] = json!("原框");
+        let mut edge = full("edge", "arrow", 200.0, 1);
+        edge["startBinding"] = json!({ "elementId": "a" });
+        edge["endBinding"] = json!({ "elementId": "b" });
+        edge["boundElements"] = json!([{ "id": "edge-label", "type": "text" }]);
+        let mut edge_label = full("edge-label", "text", 210.0, 1);
+        edge_label["containerId"] = json!("edge");
+        edge_label["text"] = json!("连线");
+        let mut s = Scene {
+            elements: vec![
+                a,
+                full("b", "rectangle", 300.0, 1),
+                edge,
+                a_label,
+                edge_label,
+            ],
+            ..Default::default()
+        };
+        let r = apply_duplicate(
+            &mut s,
+            &json!({ "ids": ["a", "b"], "texts": ["新"], "place": "right" }),
+        )
+        .unwrap();
+        assert_eq!(r.touched, vec!["a-copy", "b-copy", "edge-copy"]);
+        assert_eq!(shape_of(&s, "a-copy-label")["text"], "新");
+        assert_eq!(
+            shape_of(&s, "edge-copy-label")["text"],
+            "连线",
+            "自动带上的箭头标签不该被 texts 改掉"
+        );
+        assert_eq!(shape_of(&s, "edge-copy-label")["containerId"], "edge-copy");
+    }
+
+    /// 副本的 boundElements 去掉没复制的外连箭头，保留映射过的内部箭头和标签。
+    #[test]
+    fn duplicate_drops_unmapped_bound_arrows() {
+        let mut a = full("a", "rectangle", 0.0, 1);
+        a["boundElements"] = json!([
+            { "id": "a-label", "type": "text" },
+            { "id": "edge", "type": "arrow" },
+            { "id": "stray", "type": "arrow" }
+        ]);
+        let mut a_label = full("a-label", "text", 10.0, 1);
+        a_label["containerId"] = json!("a");
+        a_label["text"] = json!("原");
+        let mut edge = full("edge", "arrow", 200.0, 1);
+        edge["startBinding"] = json!({ "elementId": "a" });
+        edge["endBinding"] = json!({ "elementId": "b" });
+        let mut stray = full("stray", "arrow", 200.0, 1);
+        stray["startBinding"] = json!({ "elementId": "a" });
+        stray["endBinding"] = json!({ "elementId": "c" });
+        let mut s = Scene {
+            elements: vec![
+                a,
+                full("b", "rectangle", 300.0, 1),
+                full("c", "rectangle", 600.0, 1),
+                edge,
+                stray,
+                a_label,
+            ],
+            ..Default::default()
+        };
+        apply_duplicate(&mut s, &json!({ "ids": ["a", "b"], "place": "right" })).unwrap();
+        let bound: Vec<&str> = shape_of(&s, "a-copy")["boundElements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b["id"].as_str())
+            .collect();
+        assert_eq!(bound, vec!["a-copy-label", "edge-copy"]);
+        let orig: Vec<&str> = shape_of(&s, "a")["boundElements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b["id"].as_str())
+            .collect();
+        assert_eq!(orig, vec!["a-label", "edge", "stray"], "原件不动");
     }
 
     /// 待画骨架的标签跟着进 pending，不另写一份完整元素。

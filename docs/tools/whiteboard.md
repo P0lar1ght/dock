@@ -27,7 +27,7 @@
 | `whiteboard_layout { ids, columns, gap_x?, gap_y? }` | 按网格重排现有图形（保留各自身高宽；默认间距 60/80） |
 | `whiteboard_place { id, ref, where, gap? }` | 把已有图形放到参照旁；`where` ∈ `left` / `right` / `above` / `below`（默认 gap 40） |
 | `whiteboard_find { queries, limit? }` | 按文字（整段相等、前缀、包含）、类型、颜色、距离排序，不是向量语义。`near` 必须是板上已有的 id，参照自己不算；找不到就整次失败。每个查询先收齐再排序截断 |
-| `whiteboard_duplicate { ids, count?, texts?, place?, dx?, dy? }` | 复制给出的图形；两端都在这批 id 里的箭头一并复制（只连一端的留在原件上）。`place` 按选区真实外框平移。副本用新的 z 序键。回新 id：先是请求的，再是自动带上的箭头（标签不在里面） |
+| `whiteboard_duplicate { ids, count?, texts?, place?, dx?, dy? }` | 复制给出的图形；两端都在这批 id 里的箭头一并复制（只连一端的留在原件上）。`place` 按选区真实外框平移。副本用新的 z 序键。`texts` 第 k 份用第 k 条（循环），只改请求里的图形，自动带上的箭头保留原标签；副本不再挂着没复制的外连箭头。回新 id：先是请求的，再是自动带上的箭头（标签不在里面） |
 | `whiteboard_graph { nodes, edges?, layout?, … }` | 用 nodes+edges 画流程图，自动算坐标；`layout` ∈ `layered` / `row` / `column` / `grid`（默认 layered）；新图排在现有内容右边 |
 
 - 图形 `type`：`rectangle` `ellipse` `diamond` `text` `arrow` `line`。
