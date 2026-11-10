@@ -4407,11 +4407,17 @@ async fn plugin_call_tools_parallel_stops_mid_batch() {
         "{:?}",
         started.elapsed()
     );
-    assert!(
-        out.content.contains("cancelled") || out.is_error,
-        "{}",
-        out.content
-    );
+    // probe 把 call_tools_parallel 的结果数组原样回出来：每一颗都得是被停掉的错误。
+    let results: Vec<serde_json::Value> = serde_json::from_str(&out.content).expect(&out.content);
+    assert!(!results.is_empty(), "{}", out.content);
+    for r in &results {
+        assert_eq!(r["is_error"], true, "{}", out.content);
+        assert!(
+            r["text"].as_str().unwrap_or_default().contains("cancelled"),
+            "{}",
+            out.content
+        );
+    }
     assert!(
         !out.content.contains("late"),
         "stopped calls should not return their success body: {}",
@@ -4529,7 +4535,7 @@ async fn plugin_timeout_or_stop_withdraws_a_pending_approval() {
         .expect("Stop should drop the waiting call")
         .unwrap();
     assert!(
-        out.content.contains("cancelled") || out.is_error,
+        out.content.contains("cancelled") && out.is_error,
         "{}",
         out.content
     );
