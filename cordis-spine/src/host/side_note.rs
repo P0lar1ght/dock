@@ -44,7 +44,7 @@ pub async fn draft_side_note(aside: &Context) -> Result<String, String> {
         .map(|t| t.specs_for_model_on(aside))
         .unwrap_or_default();
     let mut history = sessions.model_history();
-    history.push(LogEvent::User(draft_instruction()));
+    history.push(LogEvent::User(draft_instruction().into()));
     let iso = aside.isolate("sessions");
     let output = llm
         .stream_observed(

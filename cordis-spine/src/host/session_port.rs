@@ -8,6 +8,9 @@ use std::sync::Arc;
 pub struct QueuedItem {
     pub id: String,
     pub text: String,
+    /// 这条消息自己带的图。跟着队列项走 —— 排队期间不放在会话的「图片槽」里：
+    /// 那个槽只有一格，多条排队消息各自带图会互相顶掉。
+    pub images: Vec<cordis_base::types::UserImage>,
 }
 
 /// Queue a prompt / report whether a turn is in flight.
@@ -17,6 +20,17 @@ pub struct QueuedItem {
 /// 停止并发送（停掉这一轮，马上发这一条）。
 pub trait SessionPort: Send + Sync {
     fn submit(&self, text: String, send_now: bool);
+    /// 提交一条**带图**的消息。默认实现丢图（老的实现方不用改）；
+    /// 能带图的实现把图绑在这条消息上，一路带到送达。
+    fn submit_with_images(
+        &self,
+        text: String,
+        images: Vec<cordis_base::types::UserImage>,
+        send_now: bool,
+    ) {
+        let _ = images;
+        self.submit(text, send_now);
+    }
     /// 插话。空闲（或正在压缩、没有采样可并）时退化为排到最前的一条消息。
     fn steer(&self, text: String, images: Vec<cordis_base::types::UserImage>);
     /// 把一条排队的消息改成插话。`None` = 最早那条。
@@ -44,6 +58,15 @@ impl SessionRef {
 
     pub fn submit(&self, text: String, send_now: bool) {
         self.0.submit(text, send_now);
+    }
+
+    pub fn submit_with_images(
+        &self,
+        text: String,
+        images: Vec<cordis_base::types::UserImage>,
+        send_now: bool,
+    ) {
+        self.0.submit_with_images(text, images, send_now);
     }
 
     pub fn steer(&self, text: String, images: Vec<cordis_base::types::UserImage>) {

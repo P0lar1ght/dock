@@ -65,7 +65,7 @@ fn last_user(history: &[LogEvent]) -> String {
         .iter()
         .rev()
         .find_map(|e| match e {
-            LogEvent::User(text) => Some(text.clone()),
+            LogEvent::User(text) => Some(text.text.clone()),
             _ => None,
         })
         .unwrap_or_default()

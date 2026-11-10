@@ -41,6 +41,26 @@ test('一轮：用户消息、文字、工具、文字，按出现顺序', () =>
   assert.equal(isRunning(s), false);
 });
 
+test('用户消息带的图：附件带 index 与内容摘要（按它取像素）', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started', {}, 't1', 1000),
+    note('item/user_message', {
+      content: '[Image #1] 这是什么',
+      attachments: [
+        { type: 'image', index: 0, digest: 'ab12', mimeType: 'image/png', width: 2880, height: 1800, byteLength: 4096 },
+      ],
+    }),
+  );
+  const user = s.turns[0].items[0];
+  assert.equal(user.kind, 'user');
+  if (user.kind !== 'user') return;
+  assert.equal(user.attachments.length, 1);
+  assert.equal(user.attachments[0].digest, 'ab12');
+  assert.equal(user.attachments[0].index, 0);
+  assert.equal(user.attachments[0].width, 2880);
+});
+
 test('seq 不大于已处理的事件是重复，跳过（订阅与拉历史重叠）', () => {
   seq = 0;
   const a = note('turn/started');
@@ -85,7 +105,8 @@ test('交互：权限、提问、计划在等用户时进 pendingItems，resolve
   s = reduceThread(s, note('permission/resolved', { requestId: 'p1', decision: 'approve', always: false }));
   s = reduceThread(s, note('interaction/resolved', { interactionId: 'q1' }));
   assert.deepEqual(pendingItems(s), []);
-  assert.equal(isRunning(s), true);
+  assert.equal(s.turns[0].status, 'running', '轮还开着');
+  assert.equal(isRunning(s), false, '这一轮只有交互、没有任务在跑：不算运行中');
 });
 
 test('提问：多选题带 multiSelect，旧网关没这个字段时算单选', () => {
@@ -313,4 +334,41 @@ test('侧边聊天笔记：挂在它落下的那一轮上（已结束的轮不�
   assert.equal(isRunning(s), false);
   const again = reduceThread(s, { ...merged, seq: merged.seq + 1 });
   assert.equal(again.turns[0].items.length, 2, '同一张笔记不重复');
+});
+
+test('只有交互在等用户的那一轮不算「运行中」（网关给 MCP elicitation 单开一轮时）', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started', {}, 't1', 1000),
+    note(
+      'elicit/requested',
+      { elicitId: 'e1', server: 'sungods', message: 'Choose a PolarBytes generator', heading: 'Generator (1/1)' },
+      't1',
+      1001,
+    ),
+  );
+  assert.equal(s.turns[0].status, 'running', '网关给交互单开了一轮');
+  assert.equal(isRunning(s), false, '光有交互在等用户：agent 没有在跑，不该显示成运行中');
+  assert.equal(pendingItems(s).length, 1, '交互照旧在等用户回答');
+  assert.equal(pendingItems(s)[0].kind, 'elicit');
+});
+
+test('交互处理完了、这一轮没有别的动静：还是不算在跑', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started', {}, 't1', 1000),
+    note('permission/requested', { requestId: 'p1', toolName: 'mcp_sungods__x', summary: '装 JAR' }, 't1', 1001),
+    note('permission/resolved', { requestId: 'p1', decision: 'approve', always: false }, 't1', 1002),
+  );
+  assert.equal(isRunning(s), false, '只有一条已处理的权限请求：没有任务在跑');
+  assert.equal(pendingItems(s).length, 0);
+});
+
+test('这一轮有用户消息 / 正文 / 工具：照旧算在跑', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started', {}, 't1', 1000),
+    note('item/user_message', { content: '打开 MCP App' }, 't1', 1000),
+  );
+  assert.equal(isRunning(s), true, '用户刚发出去，这一轮在跑');
 });

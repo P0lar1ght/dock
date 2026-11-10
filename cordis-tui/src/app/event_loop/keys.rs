@@ -2160,21 +2160,19 @@ pub(super) fn take_send(ctx: &Context, send_now: bool) -> Action {
     // so we pass the string through Action/Effect and flash after clear_notice.
     let unbound_image_notice = prompt.unbound_image_notice();
     let taken = prompt.take_prompt();
-    if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
-        sessions.queue_user_images(
-            taken
-                .images
-                .into_iter()
-                .map(|img| UserImage {
-                    mime: img.mime,
-                    data: img.data,
-                    width: img.width,
-                    height: img.height,
-                })
-                .collect(),
-        );
-    }
-    let send = PromptSend::with_notice(taken.text, unbound_image_notice);
+    // 图绑在这条消息上（不放进会话的图片槽：排队期间别的消息送达会把槽顶掉）。
+    let images = taken
+        .images
+        .into_iter()
+        .map(|img| UserImage {
+            digest: None,
+            mime: img.mime,
+            data: img.data,
+            width: img.width,
+            height: img.height,
+        })
+        .collect();
+    let send = PromptSend::with_notice(taken.text, unbound_image_notice).with_images(images);
     if send_now {
         Action::SendPromptNow(send)
     } else {
@@ -2182,7 +2180,7 @@ pub(super) fn take_send(ctx: &Context, send_now: bool) -> Action {
     }
 }
 
-/// 生成中 Ctrl+Enter：和发送同样收走输入框（图片进图片槽），只是走插话。
+/// 生成中 Ctrl+Enter：和发送同样收走输入框（图片跟着这条走），只是走插话。
 pub(super) fn take_steer(ctx: &Context) -> Action {
     match take_send(ctx, false) {
         Action::SendPrompt(send) => Action::SteerPrompt(send),
@@ -3045,6 +3043,46 @@ mod tests {
             "{effects:?}"
         );
         assert!(prompt.text().is_empty(), "输入框要清空");
+    }
+
+    /// 发送时图绑在这条消息上一路带到 Effect，不放进会话的图片槽：槽只有一格，
+    /// 排队期间别的消息送达（actor 往槽里放它自己的图）会把它顶掉。
+    #[test]
+    fn take_send_binds_images_to_the_message() {
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx.clone());
+        let _s = ctx.provide(SESSIONS, sessions).unwrap();
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&32u32.to_be_bytes());
+        png.extend_from_slice(&32u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let image =
+            crate::app::clipboard::ClipboardImage::from_bytes(png, Some("image/png")).unwrap();
+        let prompt = PromptWidget::default();
+        prompt.insert_image(image).unwrap();
+        prompt.insert_str("看这张");
+        let _p = ctx.provide(TUI_PROMPT, prompt).unwrap();
+        let prompt = ctx.get::<PromptWidget>(TUI_PROMPT).unwrap();
+
+        let action = take_send(&ctx, false);
+        match &action {
+            Action::SendPrompt(p) => assert_eq!(p.images.len(), 1, "{p:?}"),
+            other => panic!("expected SendPrompt, got {other:?}"),
+        }
+        assert!(
+            ctx.get::<Sessions>(SESSIONS)
+                .unwrap()
+                .take_pending_images()
+                .is_empty(),
+            "图不该进会话的图片槽"
+        );
+        let effects = crate::app::dispatch::dispatch(action, &prompt);
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendPrompt { images, .. }] if images.len() == 1),
+            "{effects:?}"
+        );
     }
 
     /// A6 real-machine: bare `[Image #N]` Enter must flash after Effect::SendPrompt

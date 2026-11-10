@@ -555,6 +555,11 @@ fn strip_image_chips(message: &str, count: usize) -> String {
 /// （base64）。开着的页读内存，关着的读落盘（和 `thread/history` 同一套查找）。
 pub fn item_image(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let id = threads::thread_param(&params);
+    // 用户消息里的图：按内容摘要取。客户端没有本地预览时（刷新、重开、换机器）
+    // 就靠这个把像素拿回来。
+    if let Some(digest) = params.get("digest").and_then(Value::as_str) {
+        return user_image(gateway, &id, digest);
+    }
     let item = text(&params, "itemId")?;
     let index = params.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let events = match threads::resolve(gateway, &id) {
@@ -572,6 +577,44 @@ pub fn item_image(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
     Ok(json!({
         "itemId": item,
         "index": index,
+        "mimeType": image.mime,
+        "width": image.width,
+        "height": image.height,
+        "data": base64::engine::general_purpose::STANDARD.encode(&image.data),
+    }))
+}
+
+/// 用户消息里的图：按内容摘要取。
+///
+/// 摘要是**会话级凭据**：只有这个会话引用过的图才给 —— 已经落进历史的（图在
+/// 事件里），或者还没送达的（排队中 / 插话等待，这段时间客户端也要显示缩略图）。
+/// 别的会话拿同一个摘要来要 —— 不给。
+fn user_image(gateway: &GatewayHandle, thread_id: &str, digest: &str) -> Result<Value, RpcError> {
+    let (events, waiting) = match threads::resolve(gateway, thread_id) {
+        Ok(page) => {
+            let sessions = page.sessions()?;
+            let waiting = sessions.unpublished_image(digest);
+            (sessions.events(), waiting)
+        }
+        Err(_) => (closed_events(gateway, thread_id)?, None),
+    };
+    let image = events
+        .iter()
+        .find_map(|e| match e {
+            LogEvent::User(msg) => msg
+                .images
+                .iter()
+                .find(|img| img.digest.as_deref() == Some(digest))
+                .cloned(),
+            _ => None,
+        })
+        .or(waiting)
+        // 关着的会话里是懒加载的引用：这时才按摘要读像素。
+        .and_then(|img| cordis_spine::hydrate_user_image(&img))
+        .filter(|img| !img.data.is_empty())
+        .ok_or_else(|| RpcError::app("not_found", format!("这张图不属于这个会话：{digest}")))?;
+    Ok(json!({
+        "digest": digest,
         "mimeType": image.mime,
         "width": image.width,
         "height": image.height,
@@ -600,7 +643,7 @@ fn closed_events(gateway: &GatewayHandle, id: &str) -> Result<Vec<LogEvent>, Rpc
 fn replayed_events(id: &str, item: &ArchivedSession) -> Vec<Value> {
     let mut t = Transcript::new();
     t.set_thread_id(id);
-    t.replay(&item.events, &item.times, &[]);
+    t.replay(&item.events, &item.times);
     t.history_since(0)
         .into_iter()
         .map(|e| e.as_history_item_as(id))
@@ -769,7 +812,7 @@ fn messages_of(events: &[cordis_spine::LogEvent], thread_id: &str) -> Vec<Value>
                 "id": format!("u{i}"),
                 "threadId": thread_id,
                 "role": "user",
-                "content": content,
+                "content": content.text,
                 "createdAt": 0
             })),
             cordis_spine::LogEvent::LlmStream(out) if !out.text.is_empty() => Some(json!({

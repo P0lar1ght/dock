@@ -194,7 +194,7 @@ pub async fn run_dream(ctx: &Context) -> Result<String> {
             &iso,
             PromptRequest {
                 system: DREAM_SYSTEM_PROMPT.to_string(),
-                history: vec![LogEvent::User(msg.content)],
+                history: vec![LogEvent::User(msg.content.into())],
                 tools: Vec::new(),
             },
             |_delta: &StreamDelta| {},
@@ -301,7 +301,7 @@ async fn try_rewrite_remember(ctx: &Context, raw: &str) -> Option<String> {
             &iso,
             PromptRequest {
                 system: REMEMBER_REWRITE_SYSTEM_PROMPT.to_string(),
-                history: vec![LogEvent::User(rewrite_user_message(raw, ""))],
+                history: vec![LogEvent::User(rewrite_user_message(raw, "").into())],
                 tools: Vec::new(),
             },
             |_delta: &StreamDelta| {},

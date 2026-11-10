@@ -74,6 +74,7 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
         Action::OpenImage(path) => vec![Effect::OpenImage(path)],
         Action::SendPrompt(send) => {
             let unbound_image_notice = send.unbound_image_notice;
+            let images = send.images;
             let text = send.text.trim().to_string();
             prompt.clear();
             if text.is_empty() {
@@ -87,10 +88,12 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
                 text,
                 send_now: false,
                 unbound_image_notice,
+                images,
             }]
         }
         Action::SendPromptNow(send) => {
             let unbound_image_notice = send.unbound_image_notice;
+            let images = send.images;
             let text = send.text.trim().to_string();
             prompt.clear();
             if text.is_empty() {
@@ -100,10 +103,12 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
                 text,
                 send_now: true,
                 unbound_image_notice,
+                images,
             }]
         }
         Action::SteerPrompt(send) => {
             let unbound_image_notice = send.unbound_image_notice;
+            let images = send.images;
             let text = send.text.trim().to_string();
             prompt.clear();
             if text.is_empty() {
@@ -112,6 +117,7 @@ pub fn dispatch(action: Action, prompt: &PromptWidget) -> Vec<Effect> {
             vec![Effect::SteerPrompt {
                 text,
                 unbound_image_notice,
+                images,
             }]
         }
         Action::InsertChar(c) => {

@@ -124,6 +124,7 @@ impl Default for ImageInputStore {
 impl From<StoredImage> for UserImage {
     fn from(value: StoredImage) -> Self {
         UserImage {
+            digest: None,
             mime: value.mime,
             data: value.data,
             width: value.width,

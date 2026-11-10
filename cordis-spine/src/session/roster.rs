@@ -268,7 +268,7 @@ mod tests {
         let _env = cordis_base::test_env::scoped().home();
         let filler = "x".repeat(4_000);
         let mut events: Vec<LogEvent> = (0..40)
-            .map(|i| LogEvent::User(format!("{i}-{filler}")))
+            .map(|i| LogEvent::User(format!("{i}-{filler}").into()))
             .collect();
         events.push(LogEvent::User("最后一条".into()));
         let cwd = Path::new("/tmp/big-transcript");

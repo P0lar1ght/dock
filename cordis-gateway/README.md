@@ -274,10 +274,10 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 | 方法 / 推送 | 作用 |
 |---|---|
 | `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight?, crisp? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` / `tabs` / `headed` / `crisp`；见下 |
-| `browser/view/resize { viewId, width, height, deviceScaleFactor? }` | 面板大小变了：改页面视口（能力 `browserViewport`） |
+| `browser/view/resize { viewId, width, height, deviceScaleFactor? }` | 面板大小变了：改页面视口（能力 `browserViewport`）；**每个标签页各记各的**，切回去还是那个大小 |
 | `browser/view/input { viewId, event }` | 用户输入，回 `{ ok, select?, copied? }`；见下 |
 | `browser/view/focus { viewId }` | 有头浏览器：把它的窗口切到最前 |
-| `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` |
+| `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` / `hard_reload`（绕过缓存，能力 `browserHardReload`） |
 | `browser/view/tab { viewId, action, targetId?, url? }` | 标签栏：`switch` / `close`（带 `targetId`）/ `new`（`url` 可省，默认空白页）；能力 `browserTabs` |
 | `browser/view/close { viewId }` | 关视图（不关页）；连接断开时自动全关 |
 | 推送 `browser/view/frame` | 一帧：`data`（base64 JPEG）、`mime`、`width` / `height`（视口 CSS 像素）等 |
@@ -302,6 +302,8 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
   - 带了 `viewport` 而没给 `maxWidth` / `maxHeight`：流里的帧不再缩小（上限 4096）。
   - agent 整页截图会清掉覆盖、换标签页新页也没有：帧尺寸对不上就重设（至多 1.5s 一次）。
   - `resize` 和 `input` 排同一条队，连发时最后那次最后生效；改完补一张静止帧。
+  - 视口**按标签页记**：改过的那个页记住自己的尺寸，切回去时套回那个尺寸；没改过的页用最近
+    一次要的尺寸（网关自己记，客户端不用重发）。
 - 静止帧（帧里 `still: true`）：无头 screencast 只出 CSS 像素，页面不动时一帧不推（刚挂上也不推）。
   - 画面停下 150ms、刚挂上、换了标签页、改了视口：补一张 `captureScreenshot`（`clip.scale` 按 DPR）。
   - 截的时候先停流再接着推：放大栅格化的过渡帧不推；内容没变的重复帧也不推，不会来回补帧。
@@ -405,6 +407,19 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - 开着的会话读内存，关着的读落盘（和 `thread/history` 同一套查找）；找不到回 `not_found`。
 - 典型来源：cua-driver 的 `get_window_state` 截图；GUI 的 CUA 面板和工具卡用它。
 
+### 用户消息里的图（`handlers/thread.rs`、`handlers/turn.rs`）
+
+- 落盘：像素按内容寻址存进 `$DOCK_HOME/user-images/<摘要前两位>/<摘要>`，`chat_history.jsonl`
+  只写摘要和元数据（不写 base64、不写路径）。关着的会话读的是引用，要像素时才按摘要读文件。
+- `item/user_message` 带 `attachments`：每张图 `{ type, index, digest, mimeType, width, height, byteLength }`，
+  `digest` 是内容的 sha256（十六进制）。
+- 像素：`item/image { threadId, digest }` → `{ digest, mimeType, width, height, data }`（base64）。
+  - **会话级凭据**：只给这个会话引用过的摘要——已经落进历史的用户消息里的图，或者还没送达的
+    （排队中 / 插话等待，入队时就落了盘，这段时间客户端也要显示缩略图）。别的会话拿同一个摘要来要，
+    回 `not_found`。
+  - 摘要只认 64 位十六进制，读回的字节要和摘要对得上，否则回 `not_found`。
+- 带了 `digest` 就按用户图取，`itemId` / `index` 不看；工具结果那张图的老用法不变。
+
 ### 撤回消息（能力 `threadRewind`，`handlers/thread.rs`）
 
 `thread/rewind { threadId, turnId }` → `{ threadId, message, images[] }`：撤回 `turnId` 那条用户消息。
@@ -415,7 +430,8 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - `turnId` 要是用户消息开的那一轮（`item/user_message` 的 `turnId`）；不是或已不存在回 `not_found`。
 - 正在跑就先停（同 `turn/cancel`），等它停下最多 5 秒，停不下回 `busy`。还有排队的消息回 `queued`。
   等的期间别的连接又排进消息或开了新一轮，同样回 `queued` / `busy`，不撤。
-- 已经交给会话、还没随用户消息发出的图片（`queue_user_images`）一并清掉。
+- 会话图片槽里还没随用户消息发出的图一并清掉（排队消息的图跟着队列项走，只在送达那一刻才放进槽，
+  所以这里只可能是正在送达的那一条的）。
 - 撤回点早于最近一次压缩时，压缩作废，模型历史回到完整的显示日志。
 - **工具已经做过的事（写过的文件、跑过的命令）不会撤销**，日志只是不再记得它们。
 - 投影按截断后的会话重建，`seq` 重新编号：客户端整份重拉 `thread/history`。
@@ -438,6 +454,8 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - 正在压缩时没有可并的采样：插话排到最前，压缩完就发。
 - `turn/queue/list` 先列等着送达的插话（`kind: "steer"`、`status: "pending"`），再列排队的
   （`kind: "queue"`）；插话送达前可以 `turn/queue/remove` 撤回。
+  每项带 `images[{ digest, mimeType, width, height }]`：这条消息自己的图（没有就是空数组），
+  像素按 `item/image { threadId, digest }` 取。图绑在这条消息上，排队 / 改插话 / 送达都不换主人。
 - 投影：插话从它那条 `item/user_message { steered: true }` 开新的一轮（气泡排在它之前的工作后面），
   被它截开的前一段以 `turn/completed { status: "completed", steered: true }` 收尾——不是真的结束，
   客户端别据此提示「回复完成」。回放（`thread/history`、重开会话）一致。
@@ -759,6 +777,35 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 - `requests`：这个目标用掉的请求数（本页每次采样记一次，子代理的不算）。
 - `budget`：用户用 `/goal budget` 设的上限，`{ requests }` 或 `{ ms }`；不限为 `null`。
   到了预算、或模型空转（连续几次续跑都没动手）时目标自动转 `paused`，原因在 `progressSummary`。
+
+### harness 上下文（系统提示 / 注入块）
+
+每轮采样前组装的系统提示，和模型上下文里那些 `<system-reminder>` 注入块（工程规约副本、
+长期记忆索引、MCP 已连接提示、todo / 计划模式提醒…），本来只在模型看得到的那一侧
+（`LogEvent::Prompt` / `LogEvent::SystemReminder`）。它们不是对话，所以 dock.1 的对话流里
+一直不投；这里给它们一条只读的旁路，方便核对「这一轮模型被喂了什么」。
+
+| 事件 | 载荷 | 作用 |
+|---|---|---|
+| `item/system_prompt { text, chars, truncated? }` | 这一轮组装好的系统提示 | 进 `thread/history` 与实时推送 |
+| `item/system_reminder { text, chars, truncated? }` | 一条注入块 | 同上 |
+
+- **不是聊天消息**：客户端自己决定怎么渲染（轨迹面板画成「系统提示 / 注入」两类记录；
+  普通对话流该忽略）。
+- 系统提示前缀字节稳定：内容没变就不重复投（历史里只留一份，变了才多一条）。
+- 正文最长 20000 字符，超出截断、`truncated` 置真，`chars` 给原长度。
+- 已经各有投影的不重复投：插话提示（`turn/completed` 的 `steered`）、侧边笔记
+  （`item/side_note`）；子代理之间的消息在主会话里照旧不投（那是对话，不是注入）。
+- 与 `thread/context/get` 分工：那处给窗口的**分片统计**（规约 / 记忆只作 `includes`
+  列出），这里给**正文**。
+- **只投主会话**：子代理会话的注入块本来就不投（那一支只取父级发来的消息），系统提示也不投，
+  两边对称，也免得每轮经 `subagent/event` 推一份长正文。
+- **注入块不去重**：同一条注入块（比如用户 addon、todo 提醒）每轮都会再投一条，因为它确实
+  每轮都进了模型上下文；长会话的 `thread/history` 会随之变大。系统提示是稳定前缀，才按内容去重。
+- **能看到的数据变多了**：注入块里有长期记忆索引、工程规约副本，系统提示里也可能带用户自定义
+  内容。以前这些只在模型那一侧；现在凡是能读这个会话的 dock.1 连接（`thread/history`、实时推送，
+  包括 `dock serve --remote` 配对的设备令牌客户端）都能读到正文。鉴权模型没变（回环 + ticket /
+  设备令牌），但给远程设备配对前要知道这一点。
 
 ### 定时任务（能力 `schedules`，`handlers/schedule.rs`）
 

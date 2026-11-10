@@ -69,6 +69,10 @@ struct HistoryLine {
 enum WireEvent {
     User {
         text: String,
+        /// 用户消息带的图：内容寻址的引用（**不写路径，也不写 base64**）。
+        /// 旧会话没有这个字段，照旧读回来（只是没有图）。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::session::attachments::UserImageRef>,
     },
     PreStep,
     Prompt {
@@ -521,7 +525,7 @@ fn last_history_line(path: &Path) -> Option<HistoryLine> {
 /// 末条事件压成一行给名册用。
 fn wire_summary(event: &WireEvent) -> String {
     let raw = match event {
-        WireEvent::User { text } | WireEvent::Prompt { text } => text.as_str(),
+        WireEvent::User { text, .. } | WireEvent::Prompt { text } => text.as_str(),
         WireEvent::Notice { title, .. } => title.as_str(),
         WireEvent::SystemReminder { .. } | WireEvent::PreStep | WireEvent::TurnEnd { .. } => "",
         WireEvent::Llm {
@@ -677,7 +681,7 @@ fn first_user_text_on_disk(history: &Path) -> Option<String> {
         .map_while(Result::ok)
         .find_map(
             |line| match serde_json::from_str::<HistoryLine>(line.trim()).ok()?.event {
-                WireEvent::User { text } if !text.trim().is_empty() => Some(text),
+                WireEvent::User { text, .. } if !text.trim().is_empty() => Some(text),
                 _ => None,
             },
         )
@@ -824,7 +828,15 @@ fn load_tool_images(paths: &[String]) -> Vec<cordis_base::types::UserImage> {
 
 fn to_wire(event: &LogEvent) -> Option<WireEvent> {
     Some(match event {
-        LogEvent::User(text) => WireEvent::User { text: text.clone() },
+        LogEvent::User(msg) => WireEvent::User {
+            text: msg.text.clone(),
+            // 像素落进 blob 库，日志里只留摘要：同样的字节只存一份。
+            images: msg
+                .images
+                .iter()
+                .filter_map(crate::session::attachments::store)
+                .collect(),
+        },
         LogEvent::PreStep => WireEvent::PreStep,
         LogEvent::Prompt(text) => WireEvent::Prompt { text: text.clone() },
         LogEvent::SystemReminder(text) => WireEvent::SystemReminder { text: text.clone() },
@@ -879,7 +891,15 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
 
 fn from_wire(event: WireEvent) -> LogEvent {
     match event {
-        WireEvent::User { text } => LogEvent::User(text),
+        WireEvent::User { text, images } => LogEvent::User(cordis_base::types::UserMessage {
+            text,
+            // 只留引用（懒加载）：启动时读整个 cwd 的归档不读图、不算哈希。
+            // 恢复成活会话 / 取图时再按摘要读（`attachments::hydrate`）。
+            images: images
+                .iter()
+                .filter_map(crate::session::attachments::placeholder)
+                .collect(),
+        }),
         WireEvent::PreStep => LogEvent::PreStep,
         WireEvent::Prompt { text } => LogEvent::Prompt(text),
         WireEvent::SystemReminder { text } => LogEvent::SystemReminder(text),
@@ -1347,6 +1367,74 @@ mod tests {
         remove("tb1", cwd).unwrap();
     }
 
+    /// 用户消息里的图：落盘只留摘要（JSONL 里没有 base64、也没有路径），
+    /// 像素在 `$DOCK_HOME/user-images/` 里按内容寻址存着，读回来还在。
+    #[test]
+    fn roundtrip_user_message_images_bytes() {
+        use crate::tools::tool_images::user_image_from_bytes;
+        let _home = cordis_base::test_env::scoped().home();
+        let cwd = Path::new("/tmp/dock-persist-user-image-test");
+        let png = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, 0x05, 0xfe, 0x02, 0xfe, 0xa7, 0x35, 0x81,
+            0x84, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let img = user_image_from_bytes(png.clone(), Some("image/png")).expect("png");
+        let digest = crate::session::attachments::digest_of(&png);
+        let item = ArchivedSession {
+            id: "uimg1".into(),
+            title: "user image persist".into(),
+            events: vec![LogEvent::User(cordis_base::types::UserMessage {
+                text: "[Image #1] 这是什么".into(),
+                images: vec![img.clone()],
+            })],
+            times: vec![SystemTime::now()],
+            compact_prefix: None,
+            compact_from: 0,
+            preset_id: None,
+            sampling: None,
+        };
+        save(&item, cwd).unwrap();
+
+        // 像素在 blob 库里，按内容寻址。
+        let blob = cordis_base::config::dock_home()
+            .join("user-images")
+            .join(&digest[..2])
+            .join(&digest);
+        assert!(blob.is_file(), "{blob:?}");
+
+        // JSONL 里只有摘要：没有 base64、没有本机路径。
+        let history = std::fs::read_to_string(
+            cordis_base::config::dock_home()
+                .join("sessions")
+                .join(crate::session::persist::encode_cwd_dirname(cwd))
+                .join("uimg1")
+                .join("chat_history.jsonl"),
+        )
+        .unwrap();
+        assert!(history.contains(&digest), "{history}");
+        assert!(!history.contains("base64"), "{history}");
+        assert!(!history.contains("/user-images/"), "{history}");
+
+        // 读归档只留引用（懒加载：启动时不读图、不算哈希）；按摘要读回来像素还在。
+        let loaded = load_cwd(cwd);
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0].events[0] {
+            LogEvent::User(msg) => {
+                assert_eq!(msg.text, "[Image #1] 这是什么");
+                assert_eq!(msg.images.len(), 1, "{msg:?}");
+                assert!(msg.images[0].data.is_empty(), "归档里不该已经读了像素");
+                assert_eq!(msg.images[0].digest.as_deref(), Some(digest.as_str()));
+                let full = crate::session::attachments::hydrate(&msg.images[0]).expect("hydrate");
+                assert_eq!(full.data.as_ref(), png.as_slice());
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+        remove("uimg1", cwd).unwrap();
+    }
+
     #[test]
     fn roundtrip_tool_images_bytes() {
         use crate::tools::tool_images::user_image_from_bytes;
@@ -1580,7 +1668,7 @@ reasoning_effort = "medium"
             .events()
             .iter()
             .filter_map(|e| match e {
-                LogEvent::User(t) => Some(t.clone()),
+                LogEvent::User(t) => Some(t.text.clone()),
                 _ => None,
             })
             .collect();
@@ -1668,7 +1756,7 @@ reasoning_effort = "medium"
             .events()
             .iter()
             .filter_map(|e| match e {
-                LogEvent::User(t) => Some(t.clone()),
+                LogEvent::User(t) => Some(t.text.clone()),
                 _ => None,
             })
             .collect();

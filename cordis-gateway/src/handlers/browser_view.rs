@@ -118,7 +118,8 @@ struct ViewEntry {
     task: JoinHandle<()>,
     /// 这页的 ctx：以它的身份调浏览器 MCP（改视口）。
     page: Context,
-    wanted: Wanted,
+    /// 面板要的视口：每个标签页一份。
+    sizes: SizeStore,
     /// 改完视口叫推送任务补一张静止帧：从别的连接改视口，screencast 不一定出新帧。
     kick: Arc<Notify>,
     /// 有头浏览器：页面跟着真窗口走，不按面板改视口。
@@ -126,8 +127,48 @@ struct ViewEntry {
 }
 
 type Current = Arc<Mutex<Option<Arc<View>>>>;
-/// 面板要的视口；`None` = 没要求（老客户端），不碰页面尺寸。
-type Wanted = Arc<Mutex<Option<Viewport>>>;
+/// 面板要的视口（`Arc` 让请求和推送任务共用一份）。
+type SizeStore = Arc<Mutex<Sizes>>;
+
+/// 每个标签页记住自己的视口：面板按标签页分别定尺寸，切回去还是那个大小；
+/// 没定过的页用最近一次要的尺寸。
+#[derive(Default)]
+struct Sizes {
+    by_target: HashMap<String, Viewport>,
+    last: Option<Viewport>,
+}
+
+impl Sizes {
+    /// 记下这个标签页要的视口（它也是最近一次要的）。
+    fn set(&mut self, target: &str, viewport: Viewport) {
+        self.by_target.insert(target.to_string(), viewport);
+        self.last = Some(viewport);
+    }
+
+    /// 面板要了一个视口：有活动标签页就记在它名下；没有就只记成「最近一次要的」，
+    /// 不往 `by_target` 里塞空 key。
+    fn record(&mut self, target: Option<&str>, viewport: Viewport) {
+        match target {
+            Some(target) => self.set(target, viewport),
+            None => self.last = Some(viewport),
+        }
+    }
+
+    /// 关掉的标签页不再记尺寸：只留名册里还在的。
+    fn retain(&mut self, alive: &[String]) {
+        self.by_target.retain(|target, _| alive.contains(target));
+    }
+
+    /// 只记住这个标签页的尺寸（不改「最近一次要的」）。
+    fn remember(&mut self, target: &str, viewport: Viewport) {
+        self.by_target.insert(target.to_string(), viewport);
+    }
+
+    /// 这个标签页自己的视口；它没定过就用最近一次的。
+    fn get(&self, target: &str) -> Option<Viewport> {
+        self.by_target.get(target).copied().or(self.last)
+    }
+}
 
 /// 页面视口：CSS 像素 + 设备像素比。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,12 +200,23 @@ impl BrowserViews {
         view.ok_or_else(|| RpcError::app("browser_unavailable", "画面正在切换标签页，稍后再试"))
     }
 
-    fn entry_parts(&self, id: &str) -> Result<(Context, Wanted, Arc<Notify>, bool), RpcError> {
+    fn entry_parts(
+        &self,
+        id: &str,
+    ) -> Result<(Context, SizeStore, Arc<Notify>, bool, String), RpcError> {
         self.open
             .lock()
             .unwrap()
             .get(id)
-            .map(|e| (e.page.clone(), e.wanted.clone(), e.kick.clone(), e.headed))
+            .map(|e| {
+                (
+                    e.page.clone(),
+                    e.sizes.clone(),
+                    e.kick.clone(),
+                    e.headed,
+                    e.key.clone(),
+                )
+            })
             .ok_or_else(|| RpcError::app("not_found", format!("没有视图 {id}")))
     }
 
@@ -278,8 +330,10 @@ pub(crate) async fn dispatch(
             let id = view_id(&params)?;
             let viewport = parse_viewport(&params)?
                 .ok_or_else(|| RpcError::invalid_params("width and height are required"))?;
-            let (page, wanted, kick, headed) = views.entry_parts(id)?;
-            *wanted.lock().unwrap() = Some(viewport);
+            let (page, sizes, kick, headed, key) = views.entry_parts(id)?;
+            // 记住这个标签页自己的尺寸：切回它时还是这个大小。
+            let target = active_target(&key);
+            sizes.lock().unwrap().record(target.as_deref(), viewport);
             // 有头：页面跟着真窗口，不按面板改视口（静止帧也按原生像素截，见 `Pump::pump`）。
             if !headed {
                 apply_viewport(&page, viewport)
@@ -377,7 +431,10 @@ async fn open(
 
     let view_id = uuid::Uuid::new_v4().simple().to_string();
     let current: Current = Arc::new(Mutex::new(Some(Arc::new(view))));
-    let wanted: Wanted = Arc::new(Mutex::new(viewport));
+    let sizes: SizeStore = Arc::new(Mutex::new(Sizes::default()));
+    if let Some(viewport) = viewport {
+        sizes.lock().unwrap().set(&target, viewport);
+    }
     let kick = Arc::new(Notify::new());
     let pump = Pump {
         view_id: view_id.clone(),
@@ -390,7 +447,7 @@ async fn open(
         out: out.clone(),
         views: Arc::downgrade(views),
         page: page.ctx.clone(),
-        wanted: wanted.clone(),
+        sizes: sizes.clone(),
         healed_at: None,
         kick: kick.clone(),
         tabs: tabs.clone(),
@@ -424,7 +481,7 @@ async fn open(
                     current,
                     task,
                     page: page.ctx.clone(),
-                    wanted,
+                    sizes,
                     kick,
                     headed,
                 },
@@ -738,7 +795,8 @@ struct Pump {
     current: Current,
     out: OutTx,
     page: Context,
-    wanted: Wanted,
+    /// 面板要的视口（每个标签页一份）。
+    sizes: SizeStore,
     /// 上次因为尺寸对不上重设视口的时间。
     healed_at: Option<Instant>,
     /// 视口改了：补一张静止帧（见 [`ViewEntry::kick`]）。
@@ -840,7 +898,13 @@ impl Pump {
                     let scale = if self.headed {
                         None
                     } else {
-                        Some(self.wanted.lock().unwrap().map_or(1.0, |v| v.scale))
+                        Some(
+                            self.sizes
+                                .lock()
+                                .unwrap()
+                                .get(&self.target)
+                                .map_or(1.0, |v| v.scale),
+                        )
                     };
                     // 截的时候先停流：放大栅格化的过渡帧不推；截完接着推。
                     let still = match view {
@@ -939,7 +1003,8 @@ impl Pump {
         if self.headed {
             return;
         }
-        let Some(wanted) = *self.wanted.lock().unwrap() else {
+        // 按当前这个标签页自己的尺寸补（每个标签页分别定过）。
+        let Some(wanted) = self.sizes.lock().unwrap().get(&self.target) else {
             return;
         };
         let off = (width - wanted.width as f64).abs() > 2.0
@@ -957,11 +1022,20 @@ impl Pump {
         });
     }
 
-    /// agent 换了标签页（或画面流断了）：挂到新的那页上重新推。新页先套上面板的视口。
+    /// agent 换了标签页（或画面流断了）：挂到新的那页上重新推。新页先套上它自己的视口
+    /// （这个标签页定过的尺寸；没定过就用最近一次的）。
     async fn switch_to(&mut self, target: &str) -> Result<Frames, String> {
         let old = self.current.lock().unwrap().take();
         drop(old);
-        let wanted = *self.wanted.lock().unwrap();
+        let wanted = {
+            let mut sizes = self.sizes.lock().unwrap();
+            let wanted = sizes.get(target);
+            // 这个页第一次见：把它现在用的尺寸记成自己的（之后切回来还是这个大小）。
+            if let Some(w) = wanted {
+                sizes.remember(target, w);
+            }
+            wanted
+        };
         if let Some(wanted) = wanted {
             let _ = apply_viewport(&self.page, wanted).await;
         }
@@ -984,6 +1058,8 @@ impl Pump {
             return;
         };
         let (rows, unadopted) = tab_rows(&session, &targets);
+        // 关掉的标签页不再占着尺寸。
+        self.sizes.lock().unwrap().retain(&session.targets);
         if rows != self.tabs {
             self.tabs = rows;
             self.send(json!({
@@ -1068,5 +1144,65 @@ mod tests {
         targets.pop();
         targets.push(target("W", "service_worker", Some("B")));
         assert!(!tab_rows(&session, &targets).1);
+    }
+
+    /// 每个标签页记住自己的视口：切回去还是那个大小；没定过的页用最近一次要的。
+    #[test]
+    fn sizes_keep_one_viewport_per_tab() {
+        let mut sizes = Sizes::default();
+        let a = Viewport {
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+        };
+        let b = Viewport {
+            width: 390,
+            height: 844,
+            scale: 2.0,
+        };
+        // 还没定过：没有视口（老客户端：不碰页面尺寸）。
+        assert_eq!(sizes.get("A"), None);
+        sizes.set("A", a);
+        assert_eq!(sizes.get("A"), Some(a));
+        // 另一个标签页：还没定过 → 用最近一次要的。
+        assert_eq!(sizes.get("B"), Some(a));
+        sizes.set("B", b);
+        assert_eq!(sizes.get("B"), Some(b));
+        // A 自己的尺寸没被 B 改掉。
+        assert_eq!(sizes.get("A"), Some(a));
+        // 新开的页用最近一次要的（B）。
+        assert_eq!(sizes.get("C"), Some(b));
+        // 记住（不改「最近一次要的」）：新页还是用 B。
+        sizes.remember("C", a);
+        assert_eq!(sizes.get("C"), Some(a));
+        assert_eq!(sizes.get("D"), Some(b));
+    }
+
+    /// 没有活动标签页时只更新「最近一次要的」，不记在空 key 下；关掉的页剪掉。
+    #[test]
+    fn sizes_without_active_tab_only_update_last() {
+        let mut sizes = Sizes::default();
+        let a = Viewport {
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+        };
+        let narrow = Viewport {
+            width: 390,
+            height: 844,
+            scale: 2.0,
+        };
+        sizes.record(None, a);
+        assert!(sizes.by_target.is_empty(), "不该有空 key");
+        assert_eq!(sizes.get("A"), Some(a));
+        sizes.record(Some("A"), narrow);
+        sizes.record(Some("B"), a);
+        assert_eq!(sizes.get("A"), Some(narrow));
+        // B 关掉了：名册里只剩 A。
+        sizes.retain(&["A".to_string()]);
+        assert_eq!(sizes.by_target.len(), 1);
+        assert_eq!(sizes.get("A"), Some(narrow));
+        // B 的条目没了，回落到最近一次要的。
+        assert_eq!(sizes.get("B"), Some(a));
     }
 }

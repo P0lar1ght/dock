@@ -8,6 +8,7 @@
 //! [`resume_preset`] 是所有 resume 路径共用的 preset 回放；[`search`] 是
 //! 跨会话 FTS（title + 用户提示，重建索引）。[`commands`] 是会话本身的斜杠命令。
 
+pub mod attachments;
 pub mod commands;
 pub mod compaction;
 pub mod cwd;

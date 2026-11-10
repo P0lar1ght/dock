@@ -158,6 +158,7 @@ mod tests {
 
     fn img() -> UserImage {
         UserImage {
+            digest: None,
             mime: "image/png".into(),
             data: std::sync::Arc::from(vec![1u8, 2, 3].into_boxed_slice()),
             width: 1,
