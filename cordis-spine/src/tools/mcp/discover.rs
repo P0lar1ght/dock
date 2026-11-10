@@ -49,6 +49,8 @@ tool_input must match that tool's input_schema. \
 If the schema is already in this conversation you may call use_tool again without searching; \
 after a new session, subagent, or compaction, search again. Never guess parameter names. \
 Do not route first-class tools (bash, read_file, …) through use_tool — call them directly. \
+Independent read-only lookups (several MCP list/get/search calls) can go in the same reply as separate use_tool calls: \
+tools the server marks read-only run in parallel, the rest run one after another. \
 Output over 20KB is saved to a file; the result then holds a short preview, the file path, and the line to continue reading from.";
 
 const USE_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"tool_name":{"type":"string","description":"Name from search_tool (mcp_server__tool, a deferred local tool, or a tool from a running dynamic package)."},"tool_input":{"type":"object","description":"Arguments conforming to the tool's input_schema.","additionalProperties":true}},"required":["tool_name"]}"#;
@@ -400,7 +402,7 @@ fn builtin_description(server: &str) -> Option<&'static str> {
             "项目白板（Excalidraw，用户在桌面端右侧面板里同时看、同时改）：画流程图、架构图、原型草图、头脑风暴卡片，或接着用户画的往下改。改之前先 whiteboard_read，用户可能刚动过",
         ),
         cordis_base::cua::CUA_DRIVER_SERVER => {
-            Some("本机桌面操作：应用、窗口、点击、输入、截图（会动用户的电脑，用户要求时才用）")
+            Some("本机桌面操作：应用、窗口、点击、输入、截图（会动用户的电脑，用户要求时才用）。少来回：一串已知动作用 run_steps（加 observe 只回变化），有分支 / 循环 / 重试用 run_script；看窗口用 get_window_state 带 query 并设 include_screenshot:false，重读用 since；按 role / 名字定位元素，别靠坐标；互不依赖的只读查询（list_windows、不同窗口的 get_window_state）放在同一次回复里一起发")
         }
         _ => None,
     }

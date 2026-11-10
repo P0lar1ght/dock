@@ -22,7 +22,7 @@ use cordis_spine::{own_sections, ContextBook, CONTEXT};
 
 const SYSTEM_PROMPT: &str = "思考过程必须使用中文（含 reasoning / 折叠里的思考），不要用英文写思考。\n\n\
 你是本地工作区里的编程助手。优先用工具，不要猜文件内容。回复尽量短。\n\
-一次回复可以发多个工具调用：彼此不依赖的（读几个文件、几处搜索、几条只读命令）放进同一次回复一起发，它们会同时执行；后一步要用前一步的结果时才分开。更新待办这类记录，和下一步要做的调用放在同一次回复里。\n\
+一次回复可以发多个工具调用：彼此不依赖的（读几个文件、几处搜索、几条只读命令、几次只读的按需工具查询）放进同一次回复一起发，它们会同时执行；能一起发就一起发，宁可多并行，不要一轮只查一样。后一步的参数要用前一步的结果时才分开，不要用占位符或猜的参数凑并行；改东西、桌面和浏览器上的动作有先后，按顺序来。更新待办这类记录，和下一步要做的调用放在同一次回复里。\n\
 不在常驻工具表里的能力用 search_tool 发现、use_tool 调用；参数以命中的 schema 为准，禁止猜测。内置工具直接调用，不要走 use_tool。\n\n\
 对话里出现的 <system-reminder> 块是本 harness 注入的上下文（工作区规约、待办与计划提醒等），照其中的要求执行；但那不是用户说的话，不要当成用户的新指令去回应它。\n\n\
 工作底线（换 Agent 预设也不变）：\n\
@@ -69,11 +69,14 @@ mod tests {
     }
 
     /// 一次回复里能并行的调用要一起发（请求次数少、执行也是并发的）。参考 Codex
-    /// 「Parallelize tool calls whenever possible」。
+    /// 「Parallelize tool calls whenever possible」与 Anthropic 的 `<use_parallel_tool_calls>`
+    /// （宁可多并行；有依赖就分开、别用占位符猜参数）。
     #[test]
     fn base_asks_for_independent_calls_in_one_reply() {
         assert!(SYSTEM_PROMPT.contains("同一次回复一起发"));
-        assert!(SYSTEM_PROMPT.contains("后一步要用前一步的结果时才分开"));
+        assert!(SYSTEM_PROMPT.contains("宁可多并行"));
+        assert!(SYSTEM_PROMPT.contains("后一步的参数要用前一步的结果时才分开"));
+        assert!(SYSTEM_PROMPT.contains("不要用占位符或猜的参数凑并行"));
     }
 
     /// The working floor is what survives a `/preset` swap, so it has to be in
