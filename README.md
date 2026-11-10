@@ -3,7 +3,7 @@
 </p>
 <h1 align="center">Dock</h1>
 <p align="center">
-  <b>Grok 外形的本地 Agent TUI · 一切皆插件</b>
+  <b>通用的本地 Agent · 一切皆插件，三端同源</b>
 </p>
 <p align="center">
   <img src="assets/logo/lockup.png" width="360" alt="Dock">
@@ -20,6 +20,7 @@
   <a href="#快速开始">快速开始</a> •
   <a href="#特性">特性</a> •
   <a href="#架构概览">架构</a> •
+  <a href="#桌面端">桌面端</a> •
   <a href="#浏览器-companion">浏览器</a> •
   <a href="#仓库">仓库</a> •
   <a href="#文档">文档</a>
@@ -29,54 +30,76 @@
 
 ## 简介
 
-**Dock** 是跑在 [Cordis](https://github.com/cordiverse/cordis) 插件树上的本地 Agent：界面 chrome 对齐 Grok pager，数据面走 spine 的会话日志与一张 `"tools"` 表。和 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 一样，它**没有可以私自打补丁的内核**——新行为只能是再挂一颗插件，或接到已有 named service / waterfall 上。
+**Dock 是一个通用的智能 Agent —— 不只写代码。** 研究、写作、自动化、数据分析，或者只是把一件麻烦事办完。
 
-Cordis 设计见 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。本仓库是 Rust 实现（crate `cordis`），不是上游 JS `cordis/` 的 fork。
+它跑在你自己机器上，用你自己的模型和密钥；但真正让它与众不同的不是「本地」这件事，而是下面三点：
 
-当前主线已覆盖：
+- **通用的** —— 内置的工具面横跨文件、终端、网页、浏览器、本机桌面CUA与画布；MCP 让任何外部服务接进来，技能与工作流让成串的活交给它自己编排。
+- **智能的** —— 不是单轮问答。计划模式先想再动，子代理并行分工，目标模式自己认领目标并推进到完成，记忆让它跨会话记住你是谁、做过什么。
+- **高度自定义的** —— 没有一处是写死的。模型、人设、工具权限、提示词片段、快捷键、主题、MCP 服务器，全部落在你能读懂、能 diff 的文件里。
 
-- 全屏 TUI：思考折叠、工具卡片、计划 / 目标 / 子代理、斜杠与 overlay
-- Spine 五件套 + `agent-loop`：会话、采样、工具、系统提示、Agent 预设
-- 工作区读写跑、联网、MCP、计划模式、调度、动态 Cordis 插件
-- 浏览器与桌面驾驶舱：`/browser`（内置浏览器 MCP，`dock mcp browser`）与 `/computer`（cua-driver MCP，零配置接入）
-- 回环 Gateway：Origin 配对、`dock.1` 投影、斜杠 list/execute
-- 宿主页 SDK：一份 `dock-embed.js` 注入宠物和 Chat
+Dock 长在一棵 [Cordis](https://github.com/cordiverse/cordis) 插件树上，**没有一个可以私自打补丁的内核**：新能力不是改主干代码，而是挂一颗新插件；插件之间通过 named service 与 waterfall 相遇，你可以在采样前、工具执行前、提示词组装时的任意一环插手。
 
-工作只在这棵树里。不要改、不要 path-dep 外面的 `grok-build/`、`deepseek-harness/`、上游 `cordis/`。
+同一套内核，三个前端：终端里的全屏 TUI、桌面上的 Tauri GUI、以及一行 `<script>` 就能嵌进任意网页的浏览器端。桌面端不是另一套实现，它拉起同一个 Dock 进程，走同一套协议、共享同一份会话历史。
+
+模型端点你自己配（`responses` / `chat_completions` / `messages` 三条协议都支持），密钥走环境变量或 `secrets.json`，会话历史落在 `$DOCK_HOME`。Dock 不做账号、登录与计费。
+
+Cordis 的设计见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。本仓库是 Rust 实现（crate `cordis`），不是上游 JS `cordis/` 的 fork。
+
+---
 
 ## 特性
 
+### 🖥️ 终端与桌面，同一个 Dock
+
+- 终端 TUI：全屏、思考可折叠、工具卡片先输入后输出，计划 / 目标 / 子代理各有面板，斜杠命令带补全
+- 桌面 GUI（Tauri 2 + React）：侧栏会话树、每一轮改动的文件清单与逐行 diff、子代理独立面板、审查视图、浏览器面板
+- 桌面端启动即拉起一个无头 Dock 进程，走 dock.1 协议，ticket 只经 stdout 交接
+- 浏览器嵌入：一行 `<script>` 注入 `dock-embed.js`，任意页面变成对话入口；配对走一次性 ticket + 回环
+- 三端共享同一份会话历史：终端建的会话，桌面端接着聊，反之亦然
+
 ### 🔌 一切皆插件
 
-- 循环本身也是插件。换采样换 UI 换工具，不要焊进 `event_loop`
-- 一张 `"tools"` 表：`inject: ["tools"]` 后 `register`，MCP 也进同一张表
-- 扩展走七条 waterfall（`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/pre-execute`、`tools/execute`、`system-prompt/assemble`）
-- Named service **live-lookup**：调用点再 `ctx.get`，不要把 `Arc` 关进长生命周期闭包
+- 内核不写死任何行为：循环本身也是插件，换采样、换界面、换工具集都不动主干
+- 一张 `"tools"` 表：内置工具、MCP 工具、你写的插件工具走同一张表，模型看到的永远是一份统一名册
+- 七个扩展点：`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/pre-execute`、`tools/execute`、`system-prompt/assemble` —— 采样前改写、工具执行前拦截、提示词按段增删
+- 运行时热插：模型可以在对话里用 `cordis_define` / `cordis_run` 现场定义并加载插件，写成 `.dock/plugins` 即永久生效
+- 插件能带界面：注册的面板、状态项、工具卡视图在 TUI 和桌面端同时存在
 
-### 🖥️ Grok 外形 TUI
+### 🎛 高度自定义
 
-- 快捷键条 `Key:label`、思考折叠、工具卡先输入后输出
-- 用户可见文案中文；底栏短 hint 保持 `Enter:send` 无空格
-- `/preset` YAML 目录就是 Agent；项目 `.dock/presets/` 默认落点
-- 工作区根目录的 `AGENTS.md` 作为历史尾部提醒注入（`~/.dock/AGENTS.md` 是跨工作区的用户层，两层追加不覆盖；内容变了才重注，会话中途改文件不会作废提示前缀）
-  - `~/.dock/USER.md`（关于用户：背景、长期偏好）排在用户层后面，同一个提醒块；GUI 设置 › 个性化里编辑
-- Shift+Tab 在 **询问 / 始终允许** 之间切换；计划是独立模式，不是第三种权限
+- 模型目录是文件不是菜单：`config.toml` 描述端点、协议、上下文窗口、推理档、单价；密钥走 `env_key` 或 `secrets.json`，不落明文
+- 一个端点多条协议：`api_backends` 声明 `responses` / `chat_completions` / `messages`，`/protocol` 现场切换，不必为每条协议重复配一个模型
+- Agent 人设是 YAML 目录：`.dock/presets/<id>/agent.yml` 就是一个人格，包含它能用的工具白名单；`agents/<type>.yml` 定义子代理角色
+- 提示词可插：贡献插件向 `ContextBook` 登记 `set_base` / `section` / `replace_base`，一段一段拼，而不是替换整个系统提示
+- 规约分层：工作区根的 `AGENTS.md`、用户级 `~/.dock/AGENTS.md`、关于你的 `~/.dock/USER.md` —— 追加不覆盖，内容变了才重注
+- 快捷键、主题、权限档位、推理强度都能改：`/settings` 里改，或直接改配置
+- 记忆引擎可插：跨会话记忆默认关；开了以后按全局 / 工作区分层存储，FTS + 可选向量混合检索
 
 ### 🛠️ 工具与 MCP
 
-- 工作区七颗：`list_dir` `read_file` `grep` `search_replace` `bash` `glob` `write_file`
-- 计划 / 提问 / 后台任务 / 调度 / 子代理 / 目标 / 记忆 / LSP / workflow
-- 浏览器：内置 MCP `browser`（`mcp_browser__browser_*`，chromiumoxide CDP，按会话分标签页）+ `/browser` 驾驶舱；本机桌面走 `/computer` 与 cua-driver MCP
-- MCP 与不常用本地工具走 `search_tool` / `use_tool` 渐进披露；内部公名 `mcp_{server}__{tool}`，不能盖掉 `bash`
-- 动态包：`cordis_define` / `cordis_run` / `cordis_promote` 写成 `.dock/plugins`
+- 工作区七件套：`list_dir` `read_file` `grep` `search_replace` `bash` `glob` `write_file`
+- MCP 一等公民：stdio 与 Streamable HTTP 都接；工具经 `search_tool` / `use_tool` 渐进披露，不占采样工具表
+- 内置浏览器 MCP（chromiumoxide CDP，按会话分标签页，22 颗工具）与内置白板 MCP App（Excalidraw，你和 Agent 同画一张图）
+- MCP Apps：`io.modelcontextprotocol/ui` —— 服务器可以带自己的界面；服务器还能反过来向用户提问（elicitation），表单与链接模式都走 Dock 的弹窗
+- 桌面驾驶：cua-driver 接管本机键鼠，与 `bash` 同级权限门
+- 另有：计划模式、提问、后台任务、调度、子代理、目标、记忆、LSP、工作流、代码审查
 
-### 🌐 浏览器 companion
+### 🧠 会话编排
 
-- Gateway **默认挂插件但不监听**。TUI `/pair` 开启/关闭回环端口；首选 `127.0.0.1:18991`，占用则换下一个，同端口再试 `[::1]`
-- 远程连接：`dock serve --remote` + 设备令牌（`dock device add`），仍只绑回环、TLS 交给反向代理，见 [docs/REMOTE.md](docs/REMOTE.md)
-- 鉴权靠 TUI `/pair` + 一次性 ticket，不是 Origin 白名单
-- 斜杠走 Gateway；SDK 只解析、截图、把 `{ kind }` 画出来
-- `/view-plan` `/help` 等 notice 用命令输出卡片，不当错误粉字
+- 子代理：`task` 派活，`send_message` 插话，`interrupt_agent` 打断；对话独立落盘，关掉再回来能接着聊
+- 目标：模型自己认领目标并推进，直到 `update_goal(completed)`；可设时长与请求数预算
+- 调度：`/loop` 定时提问，任务落盘、跨重启继续跑
+- 工作流：Rhai 脚本编排多阶段多代理，内置 `/code-review`（五个角度并行审查）、`/deep-research`
+- 多会话同屏：`/dashboard` 并排盯多个会话，peek 面板直接给选中的会话派活
+- 插话分叉：`/btw` 开一条只读旁支问一句，答案不进主线上下文
+
+### 🔒 权限与计划门
+
+- 危险动作默认问一句，Shift+Tab 在「询问 / 始终允许」之间切
+- 计划是独立模式、不是第三档权限：计划态挡住 bash 与写文件，退出要你批
+- 改写也逃不出预设工具集：`tools/pre-execute` 改道后读的是改写后的名字，权限门按新名字判定
+- 每一轮的改动都记账：文件清单、逐行 diff、撤销回到该轮改完的样子（该轮之后文件没被再改过才生效）
 
 ---
 
@@ -146,7 +169,7 @@ flowchart TB
 
 ### 一轮怎么跑
 
-TUI 从不持有循环：按键变成 `SessionCommand` 交给 `session_actor` 管队列，actor 每次取一条调 `agent-loop` 的 `LoopHandle`。默认 driver `GrokStep` 跑一轮 Grok 形状的采样，安全上限 256 步；换 driver 只换 `agent-loop` 这颗插件，不动 actor。每一环都是 waterfall——监听必须把控制权交给下一环，不要悄悄吞掉链。
+TUI 从不持有循环：按键变成 `SessionCommand` 交给 `session_actor` 管队列，actor 每次取一条调 `agent-loop` 的 `LoopHandle`。默认 driver `GrokStep` 跑一轮采样，安全上限 256 步；换 driver 只换 `agent-loop` 这颗插件，不动 actor。每一环都是 waterfall——监听必须把控制权交给下一环，不要悄悄吞掉链。
 
 ```mermaid
 flowchart LR
@@ -216,12 +239,32 @@ Debian 13+ / Fedora 40+）；更老的发行版与 Windows 暂无可用产物，
 需要 **Rust 1.94+**（版本下限说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）和本机 API key，或在配置里写好端点。
 
 ```bash
+# 从源码
 cargo run -p cordis-app
 cargo run -p cordis-app -- --resume          # 恢复本 cwd 最近一次会话
 cargo run -p cordis-app -- --resume <id>     # 恢复指定会话
+
+# 已安装的二进制
+dock
+dock --resume
 ```
 
 首次启动会全屏接管终端。浏览器 companion 在 TUI 里 `/pair` → Enter 开启回环网关后再打开宿主页。模型目录读 `~/.dock/config.toml`，再读项目 `.dock/config.toml`（后者覆盖）。样例：[`config.toml.example`](config.toml.example)。
+
+最小配置长这样——密钥从环境变量取，不写进文件：
+
+```toml
+[models]
+default = "my-model"
+
+[model."my-model"]
+name = "我的模型"
+api_base_url = "https://<your-endpoint>/v1"
+api_backends = ["responses", "chat_completions"]
+api_model = "<上游真实模型名>"
+env_key = "MY_API_KEY"
+context_window = 200000
+```
 
 | 变量 | 作用 |
 |---|---|
@@ -240,6 +283,29 @@ cargo test -p cordis-spine --test round -- install_app_registers
 ```
 
 核对工具表是否还对，跑上面这条 `install_app_registers`。
+
+---
+
+## 桌面端
+
+`dock-gui/` 是 Dock 的 Tauri 2 + React 桌面端，与内核同仓库、独立工程。它启动时拉起一个无头 `dock serve`，ticket 经 stdout 交给 Tauri，前端经回环 WebSocket 走 dock.1 —— 一个 Dock 进程，跨目录列会话，每个会话用自己的 cwd。
+
+需要本机 **Rust 1.94+**、**Node ≥ 20.19**（Vite 8 的下限）与 Tauri 的系统依赖。先在仓库根构建二进制：
+
+```bash
+cargo build -p cordis-app
+
+cd dock-gui
+npm install
+npm run tauri dev      # 起窗口
+npm run build          # tsc + vite
+```
+
+开发构建默认用 `../target/debug/dock`，可用 `DOCK_BIN` 指定别的可执行文件、`DOCK_GUI_CWD` 指定启动目录。
+
+界面能力：侧栏会话树（跨项目）、子代理独立页与逐条对话、每轮改动卡（文件清单 + 逐行 diff + 撤销）、审查面板（工作区 git diff 或单轮改动，批注落行）、浏览器面板（页面渲染 + 截图）、白板（MCP App）、预设编辑器、模型与密钥设置、排程页。设计稿在 `dock-gui/wonder-ui/`（只读），进度在 `dock-gui/docs/PROGRESS.md`。
+
+> 桌面端目前**从源码构建**，发布产物暂不含 GUI 二进制。
 
 ---
 
@@ -273,7 +339,7 @@ npm run build
 
 ## 仓库
 
-第一方 crate 多为 `cordis-*`；`dock-memory` 与二进制 `dock` 用产品名。其余是入口、注入与冻结副本。
+第一方 crate 多为 `cordis-*`；`dock-memory`、`dock-core`、`dock-gui` 与二进制 `dock` 用产品名。其余是入口、注入与冻结副本。
 
 ```
 dock/
@@ -283,10 +349,15 @@ dock/
 ├── cordis-tui/           # 全屏终端 UI
 ├── cordis-gateway/       # 回环 HTTP/WS：配对与 dock.1 投影
 ├── cordis-app/           # 二进制入口
+├── cordis-browser/       # 内置浏览器 MCP 服务（chromiumoxide CDP）
+├── cordis-apps/          # 内置 MCP Apps 服务（白板：Excalidraw）
 ├── dock-memory/          # 跨会话记忆引擎（默认关）
 ├── dock-render/          # Markdown / Mermaid（crate 名暂仍 cordis-markdown / xai-grok-mermaid）
+├── dock-core/            # dock.1 协议核心（TS）：类型化线程事件 + reducer，无 DOM
+├── dock-gui/             # 桌面 GUI（Tauri 2 + React）
 ├── embed-sdk/            # 宿主页 JS 注入（dock-embed.js）
-├── vendor/               # 冻结副本：xai Grok 拷贝（mermaid 栈在 dock-render/third_party/）
+├── examples/             # 插件示例：activity / trajectory
+├── vendor/               # 冻结副本（mermaid 栈在 dock-render/third_party/）
 ├── skills/               # Agent skills（内置，Bundled scope）
 ├── .agents/skills/       # 仓库流程 skills（Agents scope）
 ├── docs/                 # 架构与开发细节
@@ -306,16 +377,33 @@ dock/
 | [AGENTS.md](AGENTS.md) | 根政策：命令、边界、提交约定；给写代码的 agent / 人（`CLAUDE.md` 指向它） |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 插件树目录地图、不变式、磁盘布局 |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 环境、命令、测试、调试、落点 |
+| [docs/REMOTE.md](docs/REMOTE.md) | 远程访问：设备令牌、反向代理 |
+| [docs/PLUGIN-VIEWS.md](docs/PLUGIN-VIEWS.md) | 插件视图树：跨端渲染协议 |
 | [TOOLS.md](TOOLS.md) | 模型工具索引、插件粒、缺口、明确不做（单颗细节在 [docs/tools/](docs/tools/)）|
 | [CLI.md](CLI.md) | 斜杠、快捷键、overlay、底栏 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 人类贡献流程 |
 | [SECURITY.md](SECURITY.md) | 漏洞上报与安全边界 |
 | [CHANGELOG.md](CHANGELOG.md) | 用户可见变更（Keep a Changelog 格式） |
 | [embed-sdk/README.md](embed-sdk/README.md) | 浏览器 SDK 属性、事件、配对 |
+| [dock-gui/README.md](dock-gui/README.md) | 桌面端结构与开发 |
 | [cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md](cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md) | 动态 Cordis 插件工作流（内置技能，references/ 按需读） |
 | [.agents/skills/](.agents/skills/) | 仓库流程 skills：git-commit、create-pr |
 
 Crate README 管该包的 API。产品面的权威清单：`TOOLS.md`（模型工具）、`CLI.md`（斜杠 / 快捷键 / overlay）；插件树与不变式见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+---
+
+## 致谢与溯源
+
+Dock 的实现过程中参考了这些开源项目：
+
+- [xai-org/grok-build](https://github.com/xai-org/grok-build)（Apache-2.0）—— 终端 Agent 的工具实现、采样协议与渲染栈有大量参考与拷贝
+- [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（MIT）—— 「一切皆插件」的插件模型与 host API 契约
+- [cordiverse/cordis](https://github.com/cordiverse/cordis)（MIT）—— 插件树的整体设计，见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)
+
+第三方拷贝清单见 [NOTICE](NOTICE)，冻结副本规则见 [vendor/README.md](vendor/README.md)。
+
+工作只在这棵树里：不改、不 path-dep 外部的 `grok-build/`、`deepseek-harness/`、上游 `cordis/`；要源码就复制进 `vendor/xai/` 或对应 crate。
 
 ---
 
