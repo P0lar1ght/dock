@@ -158,6 +158,16 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         ],
     ),
     (
+        "parse_json",
+        "Parse any JSON text (object, array, string, number, bool, null) into Rhai values; null becomes (). Throws on invalid JSON. Runtime only.",
+        &["parse_json(text: String) -> Map | Array | String | int | float | bool | ()"],
+    ),
+    (
+        "to_json",
+        "Encode any value (map, array, string, number, bool, ()) as compact JSON with proper escaping; () becomes null. Also callable as a method: value.to_json(). Runtime only.",
+        &["to_json(value) -> String", "value.to_json() -> String"],
+    ),
+    (
         "host.log",
         "Tagged host log, also used by print().",
         &["host.log(message: String)"],
@@ -304,6 +314,7 @@ fn apply_rhai(
     // Codecs + HMAC: pure, no perms — still runtime-only so define-time preflight cannot call them.
     super::rhai_codec::register(&mut engine);
     super::rhai_regex::register(&mut engine);
+    register_json(&mut engine);
     // Wall clock: SystemTime epoch helpers (timestamp() is Instant-only).
     super::rhai_time::register(&mut engine);
     // 用户停止这一轮时，正在跑的插件工具脚本在下一个检查点中止（每 4096 步查一次）。
@@ -1504,6 +1515,28 @@ fn map_str(map: &Map, key: &str) -> Option<String> {
         .and_then(|d| d.into_string().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// `parse_json` / `to_json` 换成 serde_json：Rhai 自带的（没开 `metadata`）只认顶层对象、
+/// 数组和标量的 `to_json` 走 Debug 格式，控制字符也转义不对。登记在引擎自己的全局模块里，
+/// 先于包里的同名函数命中。
+fn register_json(engine: &mut Engine) {
+    engine.register_fn(
+        "parse_json",
+        |text: &str| -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+            serde_json::from_str::<Value>(text)
+                .map(|v| json_to_dynamic(&v))
+                .map_err(|e| eval_err(format!("parse_json: {e}")))
+        },
+    );
+    fn encode(value: Dynamic) -> Result<String, Box<rhai::EvalAltResult>> {
+        dynamic_to_json(&value)
+            .map(|v| v.to_string())
+            .map_err(|e| eval_err(format!("to_json: {e}")))
+    }
+    engine.register_fn("to_json", |m: Map| encode(Dynamic::from_map(m)));
+    engine.register_fn("to_json", |a: Array| encode(Dynamic::from_array(a)));
+    engine.register_fn("to_json", encode);
 }
 
 fn dynamic_to_json(value: &Dynamic) -> Result<Value, String> {

@@ -4185,3 +4185,41 @@ async fn plugin_call_tools_parallel_rejects_bad_input() {
     assert!(out.contains("at most 16"), "{out}");
     assert!(out.contains("needs tool"), "{out}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_json_round_trips_any_value() {
+    let (root, _h, _p) = boot_probe(
+        r#"let arr = parse_json("[1, \"a\", {\"b\": [true, null]}]");
+           let num = parse_json("42");
+           let s = parse_json("\"x\\ny\"");
+           let out = [
+               arr[2].b[0],
+               num + 1,
+               s,
+               to_json([1, "a\tb", #{ k: "q\"uote" }]),
+               to_json("line\nbreak"),
+               to_json(3),
+               #{ m: [1, 2] }.to_json(),
+               [#{ z: () }].to_json()
+           ];
+           out.map(|v| `${v}`).reduce(|acc, v| acc + "\u0001" + v, "")"#,
+        "",
+    )
+    .await;
+    let out = exec(&root, "probe", "{}").await;
+    let parts: Vec<&str> = out.split('\u{1}').skip(1).collect();
+    assert_eq!(
+        parts,
+        vec![
+            "true",
+            "43",
+            "x\ny",
+            r#"[1,"a\tb",{"k":"q\"uote"}]"#,
+            r#""line\nbreak""#,
+            "3",
+            r#"{"m":[1,2]}"#,
+            r#"[{"z":null}]"#,
+        ],
+        "{out}"
+    );
+}

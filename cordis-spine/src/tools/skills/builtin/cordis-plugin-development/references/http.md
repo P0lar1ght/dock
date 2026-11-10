@@ -56,8 +56,10 @@ issue.title + "\n\n" + issue.body
 
 ## JSON
 
-- `parse_json(text)` → 可以下标访问的 map / 数组。
-- `value.to_json()` → 字符串，用作 `body`。
+- `parse_json(text)` → 任意 JSON：顶层是对象、数组、字符串、数字、布尔或 `null` 都行
+  （`null` → `()`）；不合法的 JSON 抛错。
+- `to_json(value)` / `value.to_json()` → 紧凑 JSON 字符串，map、数组、标量都行，
+  换行、引号等控制字符按 JSON 规则转义；`()` → `null`。用作 `body`。
 - 取不存在的键得到 `()`，用 `x ?? 默认值` 兜底。
 
 ## 正则
