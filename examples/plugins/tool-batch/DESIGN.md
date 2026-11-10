@@ -29,13 +29,13 @@
 | 决定 | 来源 |
 | --- | --- |
 | 插件里的 `host.call_tool` 以**调用方**身份执行（审批身份、子代理档位、计划模式、只读场景、停止） | S1（人在回路）、S7 / S8（编排层不能扩大权限） |
-| 不认得的工具名报错，不再回显参数当成功；`tool_batch` 跑之前用 `host.tool_schema` 校验工具名和必填参数 | S1（未知工具是错误）、S9（错误要清楚可修） |
+| 不认得的工具名报错，不再回显参数当成功；`tool_batch` 跑之前用 `host.tool_schema` 兜底校验工具名和必填参数。schema 与 `search_tool` 的 `input_schema` 同一个函数（`mcp::input_schema`），不维护第二份目录；模型仍先用 `search_tool` 拿 schema | S1（未知工具是错误）、S6（按需发现工具）、S9（错误要清楚可修） |
 | 结构化结果：`host.call_tool_ex` 回 `is_error`；插件工具可回 `#{ is_error, content }`；`tool_batch` 按工具自己的 `is_error` 判失败，不再猜 `Error:` 前缀 | S1（`isError`）、S4（`is_error`） |
-| `host.call_tools_parallel`（`join_all`）与 `tool_batch` 的 `parallel` 分组：只放互不依赖的调用；组里的引用只能指向前面的步骤 | S4、S5、S10 |
+| `host.call_tools_parallel` 与 `tool_batch` 的 `parallel` 分组：只放互不依赖的调用；组里的引用只能指向前面的步骤。宿主按 `parallel_safe_with` 分批（与核心循环同一规则）：相邻只读调用并发，写 / bash / 桌面动作按顺序一颗颗跑，插件绕不过串行规则 | S3、S4、S5、S10 |
 | 并行时每颗调用照样过门，审批仍走全局队列一个个问 | S1、S3（只读不绕审批） |
-| 单步 `timeout_ms`、`host.cancelled()`、停止时中止脚本与进行中的调用；默认不设时限（等审批的时间也算在里面） | S1（超时）、S7（资源上限） |
+| 单步 `timeout_ms`、`host.cancelled()`、停止时中止脚本与进行中的调用；默认不设时限（等审批的时间也算在里面）。超时 / 停止时真的停下工作：bash 前台任务 Drop 时发取消信号杀进程，MCP stdio 的 rpc Drop 时发 `notifications/cancelled`；等审批的请求撤出队列。超时不代表没执行 | S1（超时、取消）、S7（资源上限） |
 | 中间结果留在插件变量表，只回 `return` 点名的几项并截断 | S6、S7、S8 |
-| `when` / `transform` 用 `host.eval_expr`：按插件 `allow_eval = true` 显式打开；只求单个表达式；单独的引擎，没有 host / http / 文件，同样的操作数上限 | S6（opt-in）、S7（沙箱 + 资源上限）、S8（只有绑定） |
+| `when` / `transform` 用 `host.eval_expr`：只有启动时装上的磁盘插件按 `allow_eval = true` 显式打开（`cordis_define` 的会话包永远打不开，模型不能自己给自己开）；只求单个表达式；单独的引擎，没有 host / http / 文件；每次求值一份操作数预算，另按变量读取计数以覆盖 Rhai 不计的数组回调闭包 | S6（opt-in）、S7（沙箱 + 资源上限）、S8（只有绑定） |
 | `${var}` 引用 + 每步自动 `stepN` 变量 | S10（占位符代入） |
 | 核心循环：`use_tool` 派发的 MCP 工具，`readOnlyHint: true` 才和别的只读调用一起并行；没标的、要审批的、写操作照旧串行 | S3、S4 |
 | `readOnlyHint` 只用来**排并发**，不用来跳过审批或放宽能力档位 | S2、S3 |

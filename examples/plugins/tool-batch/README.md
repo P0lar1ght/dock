@@ -7,7 +7,7 @@
 
 用到的宿主能力（Rhai host，见内置技能 `cordis-plugin-development` 的 `host-api.md`）：
 `host.call_tool_ex` / `host.call_tools_parallel`（结构化结果、以调用方身份执行、时限、停止）、
-`host.tool_schema`（跑之前校验）、`host.eval_expr`（`when` / `transform`，`plugin.toml` 里
+`host.tool_schema`（跑之前兜底校验；与 `search_tool` 的 `input_schema` 同源）、`host.eval_expr`（`when` / `transform`，`plugin.toml` 里
 `allow_eval = true` 才有）、`host.cancelled`。不联网、不读写文件。
 设计依据与出处见 [`DESIGN.md`](DESIGN.md)，宿主还缺什么见 [`HOST_GAPS.md`](HOST_GAPS.md)。
 
@@ -26,7 +26,9 @@ cp examples/plugins/tool-batch/SKILL.md ~/.dock/skills/tool-batch/SKILL.md
 同一轮里手动试可以用 `cordis_call`。
 
 `plugin.toml` 里的 `allow_eval = true` 只为 `when` / `transform`：表达式在单独的引擎里求值
-（只求单个表达式；没有 host、HTTP、文件；同样的操作数上限）。不需要这两个字段可以删掉这一行，
+（只求单个表达式；没有 host、HTTP、文件；每次求值一份操作数预算）。只有启动时从插件目录装上的
+磁盘插件认这个键；在会话里用 `cordis_define` 定义的包，即使 `source_path` 旁边有这份 `plugin.toml`
+也打不开。不需要这两个字段可以删掉这一行，
 其余功能不受影响，用到时会报错说明。
 
 ## 输入
@@ -45,7 +47,7 @@ cp examples/plugins/tool-batch/SKILL.md ~/.dock/skills/tool-batch/SKILL.md
       "timeout_ms": 30000,
       "on_error": "stop（默认）| continue"
     },
-    // ……或者一个并行分组：组里的调用同时跑，整组跑完再往下。
+    // ……或者一个并行分组：组里相邻的只读调用同时跑，写 / bash / 桌面动作按顺序一颗颗跑；整组跑完再往下。
     { "parallel": [ { "tool": "...", "args": {}, "save_as": "a" }, { "tool": "...", "save_as": "b" } ],
       "on_error": "stop" }
   ],
@@ -65,9 +67,13 @@ cp examples/plugins/tool-batch/SKILL.md ~/.dock/skills/tool-batch/SKILL.md
 - 失败：按工具自己的 `is_error`（宿主给的结构化结果），或者 `expect` 不满足、`transform` 出错、
   超过 `timeout_ms`。`on_error: "continue"` 记下失败接着跑；并行分组看组上的 `on_error`。
 - 引用写错（变量没定义、字段不存在、下标越界）一律停，错误里点名第几步、哪个引用。
+- 模型应先用 `search_tool` 拿每颗工具的 `input_schema` 再拼 steps（已在上下文的回 `schema_in_context`）。
+  下面的预校验只是兜底，不代替 `search_tool`。
 - 跑之前整批校验：形状、`on_error` 拼写、工具在不在（`host.tool_schema`，按调用方可见的工具算）、
   必填参数有没有给、`timeout_ms` 范围、并行分组不嵌套且不超过 16 颗。有错整批拒绝，一步都不跑。
-- 上限：总共 50 次调用；总 120 秒（步与步之间检查；单步用 `timeout_ms` 限时，最多 600000）。
+- 上限：总共 50 次调用；总 120 秒（步与步之间检查；单步用 `timeout_ms` 限时，最多 600000，超出报错）。
+  超时只是没等到结果：bash 进程会被杀、MCP stdio 会发 `notifications/cancelled`，但调用可能已经执行、
+  副作用可能已经发生。
   用户点停止时，正在跑的调用被中止、后面的不再跑。
 
 ## 输出

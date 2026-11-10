@@ -21,11 +21,17 @@ description: 少来回地调工具：一轮里并行发多个独立调用、用 
 
 `tool_batch` 是动态工具：先 `search_tool` 搜 `tool_batch`，再 `use_tool` 调。
 
+**先拿 schema 再拼 steps**：批里要用的每颗工具，先用 `search_tool` 查到它的 `input_schema`
+（本会话里已经拿过的会回 `schema_in_context: true`，不用重查），照着写 `args`。`tool_batch`
+跑之前的校验只查工具名和必填参数，是兜底，不能代替 `search_tool`。
+
 ## tool_batch 要点
 
 - `steps[i]` 是一个调用 `{ tool, args?, save_as?, expect?, when?, transform?, timeout_ms?, on_error? }`，
   或者一个并行分组 `{ parallel: [调用, …], on_error? }`。工具名写全名（`mcp_cua-driver__click`）。
-- 互不依赖的读放进 `parallel`；写文件、桌面动作这类有先后的按顺序排。
+- 互不依赖的读放进 `parallel`；写文件、bash、桌面动作这类有先后的按顺序排（放进 `parallel`
+  宿主也会一颗颗按顺序跑，不会真并发）。
+- `timeout_ms` 到点只表示没等到结果：那颗调用可能已经执行了（写了文件、点了按钮），别直接重跑。
 - 前面的结果用 `${name}` / `${name.a.b}` / `${name.items.0}` 引用；每步也自动叫 `step0`、`step1`…。
 - `when: "hits.len() > 0"` 条件跳过；`transform: "result.items.map(|x| x.id)"` 只留要的部分。
 - 每步尽量写 `expect`（结果里必须出现的字），走偏了马上停。
