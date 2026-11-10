@@ -4652,11 +4652,12 @@ async fn plugin_eval_expr_is_opt_in_and_expression_only() {
 async fn plugin_eval_expr_rejects_function_values_at_parse() {
     // 审查复现：七层嵌套、一个变量都不读的闭包，267 字节跑 24.6s，操作数上限和停止都拦不住。
     // 表达式引擎不许匿名函数、也关了 Fn / call / curry：解析时就拒，不会开始跑。
-    // 取字段、过滤用原生 pluck / filter_eq。操作数上限本身见 rhai_host 的单测。
+    // 取字段、过滤用原生 pluck / filter_eq。`sleep` 与「字符串函数名回调」（大数组上）也要很快报错。
+    // 操作数上限本身见 rhai_host 的单测。
     let nested = "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(|x| [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(|x1| [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(|x2| [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15].map(|x3| 1).len()).len()).len())";
     let body = format!(
         r#"let r = [];
-        for e in [{nested:?}, "[1].map(Fn(\"len\"))", "Fn(\"len\").curry(1)"] {{
+        for e in [{nested:?}, "[1].map(Fn(\"len\"))", "Fn(\"len\").curry(1)", "sleep(1000000000)", "blob(16000000).to_array().map(\"is_even\").len()"] {{
             let started = timestamp();
             let s = "";
             try {{ s = `${{host.eval_expr(e)}}`; }} catch (err) {{ s = "ERR " + `${{err}}`; }}
@@ -4670,8 +4671,8 @@ async fn plugin_eval_expr_rejects_function_values_at_parse() {
     let (root, _h, _p) = boot_probe(&body, "allow_eval = true").await;
     let out = exec(&root, "probe", "{}").await;
     let parts: Vec<&str> = out.split('\u{1}').skip(1).collect();
-    assert_eq!(parts.len(), 5, "{out}");
-    for part in &parts[..3] {
+    assert_eq!(parts.len(), 7, "{out}");
+    for part in &parts[..5] {
         assert!(part.starts_with("ERR "), "{out}");
         assert!(part.contains("eval_expr:"), "{out}");
         let secs: f64 = part.rsplit('@').next().unwrap().trim().parse().unwrap();
@@ -4679,8 +4680,10 @@ async fn plugin_eval_expr_rejects_function_values_at_parse() {
     }
     assert!(parts[0].contains("Unexpected '|'"), "{out}");
     assert!(parts[1].contains("'Fn' is disabled"), "{out}");
-    assert_eq!(parts[3], "[1, 2, 3]", "{out}");
-    assert_eq!(parts[4], "[1, 3]", "{out}");
+    assert!(parts[3].contains("`sleep` is not available"), "{out}");
+    assert!(parts[4].to_lowercase().contains("too large"), "{out}");
+    assert_eq!(parts[5], "[1, 2, 3]", "{out}");
+    assert_eq!(parts[6], "[1, 3]", "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

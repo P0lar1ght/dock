@@ -26,7 +26,7 @@ cp examples/plugins/tool-batch/SKILL.md ~/.dock/skills/tool-batch/SKILL.md
 同一轮里手动试可以用 `cordis_call`。
 
 `plugin.toml` 里的 `allow_eval = true` 只为 `when` / `transform`：表达式在单独的引擎里求值
-（只求单个表达式；不能写闭包或 `Fn`，取字段 / 过滤用原生 `pluck` / `filter_eq`；没有 host、HTTP、文件；
+（只求单个表达式；不能写闭包、`Fn`、字符串函数名回调或 `sleep`，取字段 / 过滤用原生 `pluck` / `filter_eq`；数组最多 65536 个元素；没有 host、HTTP、文件；
 每次求值一份操作数预算）。只有磁盘来源的插件（插件目录装上、设置里启用、审批过的 `cordis_promote`）认这个键；在会话里用 `cordis_define` 定义的包，即使 `source_path` 旁边有这份 `plugin.toml`
 也打不开。不需要这两个字段可以删掉这一行，
 其余功能不受影响，用到时会报错说明。

@@ -104,7 +104,8 @@
 
 ## 11. 未修：运算预算是全局常量
 
-- 每次调用 1,000,000 ops、字符串 1MiB、map 16384 键。`allow_eval` 的表达式引擎用同样的上限，而且
+- 每次调用 1,000,000 ops、字符串 1MiB、map 16384 键。`allow_eval` 的表达式引擎用同样的上限（数组 / Blob
+  另降到 65536 个元素，见下），而且
   **每次 `eval_expr` 一份新的预算**（一个批里 50 步就是 50 份，再加脚本自己那份）。
 - **实测缺口**：Rhai 1.25 不给原生数组函数（`map` / `filter` / `reduce` …）回调里的闭包计操作数，
   `on_progress` 也不触发——嵌套 `map` / `reduce` 能跑几百万步不被拦，停止也打断不了。只按变量读取计数
@@ -115,8 +116,20 @@
   取字段、过滤改用原生 O(n)、不回调脚本的 `pluck(xs, field)` / `filter_eq(xs, field, value)`。
   `on_var` 计数留作兜底。测试 `plugin_eval_expr_rejects_function_values_at_parse`（就是那串嵌套，断言
   解析时拒、不到 1s）、`expression_engine_stops_at_its_operation_budget`（小预算下的操作数上限）。
+- 复审又找到两条不计数、停不下的路，`eval_expr` 已修：
+  - 标准包的 `sleep(n)`：`sleep(1e9)` 把阻塞线程永久占住（Stop / `timeout_ms` 只能丢 future）。
+    `disable_symbol("sleep")` 对函数名无效，改为同签名（INT / FLOAT）覆盖成报错。
+  - Rhai 旧版「字符串函数名当回调」的数组函数：`blob(16000000).to_array().map("is_even").len()`
+    46 字节跑 3.4s、临时分配约 256MB，不计数。`map` / `filter` / `index_of` / `some` / `all` / `dedup` /
+    `reduce` / `reduce_rev` / `sort` / `drain` / `retain` 第二个参数是字符串的那几版全部覆盖成报错；
+    另把表达式引擎的数组 / Blob 上限从 16MiB（给 `read_bytes` 用的）降到 65536。
+  - 测试 `expression_engine_blocks_uncounted_natives`（都在 1s 内报错，常用函数照常可用）、
+    `plugin_eval_expr_rejects_function_values_at_parse`（经 `host.eval_expr` 复现 sleep 与大数组）。
+- 所有沙箱引擎默认吞掉 `print` / `debug`（Rhai 默认写进程 stdout，TUI 下会把屏幕打花）；插件运行期引擎把
+  两者都接到 stderr 日志（`[cordis:<id>]`）。
 - **插件脚本本身的运行期引擎没修**（插件作者 / 模型经 `cordis_define` 写的脚本同样能这么写）。跟进
   issue：[#272](https://github.com/P0lar1ght/dock/issues/272)（复现与可选修法：模型写的上下文关匿名函数、按 AST 查闭包嵌套深度、把脚本放到能杀掉的线程 / 进程里跑）。
+  主引擎同样还能 `sleep` 和用字符串函数名回调（数组上限仍是 16MiB），一并归在 #272。
 - 建议：`plugin.toml` 可声明有上限的 `max_operations`。本轮按要求跳过（可配置上限）。
 
 ## 12. 已修（按插件 opt-in）：表达式求值

@@ -1695,6 +1695,10 @@ fn expression_engine(max_ops: u64) -> Engine {
     for sym in ["Fn", "call", "curry"] {
         engine.disable_symbol(sym);
     }
+    block_uncounted_natives(&mut engine);
+    // 表达式用不到 `read_bytes` 那么大的数组 / Blob（`sandboxed_engine` 的 16MiB）：
+    // `blob(16000000).to_array()` 一次就是几百 MB。字符串保留 1MiB，工具结果文本可能有这么长。
+    engine.set_max_array_size(EXPR_MAX_ARRAY);
     engine.on_progress(|ops| {
         if ops % 4096 == 0 && current_call_ctx().is_some_and(|c| call_cancelled(&c)) {
             Some("cancelled: the user stopped this turn".into())
@@ -1721,6 +1725,50 @@ fn expression_engine(max_ops: u64) -> Engine {
         Ok(None)
     });
     engine
+}
+
+/// 表达式里数组最多几个元素（Blob 用同一个旋钮）。
+const EXPR_MAX_ARRAY: usize = 65_536;
+
+/// 盖掉表达式里会在原生代码里长时间跑、却不计操作数也停不下的标准函数：
+/// - `sleep(n)`：阻塞线程，`disable_symbol("sleep")` 对函数名无效，只能用同名同签名覆盖；
+/// - 旧版「字符串函数名当回调」的数组函数（`xs.map("is_even")`、`sort("f")` …）：回调在原生
+///   代码里跑，和闭包一样不计数。
+///
+/// 后注册的同签名函数优先于标准包。只盖住第二个参数是字符串的那几版：`index_of(xs, 3)` 这种按值找
+/// 照常能用；在数组里找字符串元素用 `contains`（标准 Rhai 里 `xs.index_of("a")` 本来就当函数名）。
+fn block_uncounted_natives(engine: &mut Engine) {
+    type R = Result<Dynamic, Box<rhai::EvalAltResult>>;
+    fn no(name: &str) -> R {
+        Err(eval_err(format!(
+            "eval_expr: `{name}` is not available in expressions"
+        )))
+    }
+    engine.register_fn("sleep", |_: rhai::INT| no("sleep"));
+    engine.register_fn("sleep", |_: rhai::FLOAT| no("sleep"));
+    for name in [
+        "map",
+        "filter",
+        "index_of",
+        "some",
+        "all",
+        "dedup",
+        "reduce",
+        "reduce_rev",
+        "sort",
+        "drain",
+        "retain",
+    ] {
+        let msg = format!("{name}(\"fn_name\")");
+        let m = msg.clone();
+        engine.register_fn(name, move |_: &mut rhai::Array, _: &str| no(&m));
+        let m = msg.clone();
+        engine.register_fn(name, move |_: &mut rhai::Array, _: &str, _: Dynamic| no(&m));
+        let m = msg.clone();
+        engine.register_fn(name, move |_: &mut rhai::Array, _: &str, _: rhai::INT| {
+            no(&m)
+        });
+    }
 }
 
 /// 表达式里代替 `map(|x| x.f)` / `filter(|x| x.f == v)` 的原生函数：一趟 O(n)，不回调脚本。
@@ -1857,6 +1905,46 @@ mod tests {
         );
         EXPR_VAR_READS.with(|c| c.set(0));
         assert_eq!(engine.eval_expression::<i64>("1 + 1").unwrap(), 2);
+    }
+
+    #[test]
+    fn expression_engine_blocks_uncounted_natives() {
+        let engine = expression_engine(RUN_MAX_OPS);
+        let started = std::time::Instant::now();
+        for (src, needle) in [
+            ("sleep(1000000000)", "sleep"),
+            ("sleep(5.0)", "sleep"),
+            ("[1, 2].map(\"is_even\")", "map"),
+            ("[2, 1].sort(\"compare\")", "sort"),
+            ("[1, 2].reduce(\"add\", 0)", "reduce"),
+            ("[1, 2].index_of(\"is_even\", 0)", "index_of"),
+            (
+                "blob(16000000).to_array().map(\"is_even\").len()",
+                "too large",
+            ),
+            ("blob(70000).len()", "too large"),
+        ] {
+            let e = engine.eval_expression::<Dynamic>(src).unwrap_err();
+            assert!(e.to_string().to_lowercase().contains(needle), "{src}: {e}");
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        // 盖掉的只是「字符串函数名」那几版：常用的照常能用。
+        for (src, want) in [
+            ("[1, 2, 3].index_of(2)", "1"),
+            ("[3, 1, 2].len()", "3"),
+            ("[#{a: 1}, #{a: 2}].pluck(\"a\")", "[1, 2]"),
+            ("#{a: 1, b: 2}.keys().len()", "2"),
+            ("[\"x\", \"y\"].contains(\"y\")", "true"),
+            ("\"abc\".index_of(\"b\")", "1"),
+            ("blob(10).len()", "10"),
+        ] {
+            let v = engine.eval_expression::<Dynamic>(src).unwrap();
+            assert_eq!(v.to_string(), want, "{src}");
+        }
     }
 
     #[test]

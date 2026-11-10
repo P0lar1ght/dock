@@ -26,7 +26,7 @@ allow_eval = false  # 可选，默认 false；true 才有 host.eval_expr（见�
 `.dock/plugins/<id>/`、旁边那份 `plugin.toml` 写了 `allow_eval = true` 也不读；要用就让用户
 `cordis_promote` 成磁盘插件（走权限门）；promote 写出的 `plugin.toml` 不带 `allow_eval`，要用户自己加上。
 表达式跑在单独的引擎里：每次求值一份操作数预算；取字段、过滤用原生的 `xs.pluck("id")`、
-`filter_eq(xs, "state", "open")`（一趟 O(n)，不回调脚本），只有这两个加 JSON 函数，没有 `host`、HTTP、
+`filter_eq(xs, "state", "open")`（一趟 O(n)，不回调脚本）；`sleep`、字符串函数名回调（`xs.map("f")`）不可用，数组最多 65536 个元素，只有这两个加 JSON 函数，没有 `host`、HTTP、
 编解码、文件；用户停止时一样中止；表达式最长 4096 字节。只在功能真的要「把条件 / 变换写在参数里」时开
 （比如批量调用里的 `when: "prev.count > 0"`），别为了省事开。
 
