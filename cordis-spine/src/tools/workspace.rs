@@ -667,6 +667,29 @@ mod tests {
         assert!(tail.contains("after-yield"), "命令要接着跑完：{tail}");
     }
 
+    /// 等待前台命令的 future 被丢掉（插件 `timeout_ms`、Stop 丢弃 execute）时，进程要跟着
+    /// 被杀；以前任务留在 `tokio::spawn(run_job)` 里接着跑完，副作用照样发生。
+    #[tokio::test]
+    async fn bash_dropped_foreground_wait_kills_the_command() {
+        let _env = cordis_base::test_env::scoped().set(FOREGROUND_MS_ENV, "30000");
+        let jobs = Jobs::new();
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("should-not-exist");
+        let args = serde_json::json!({
+            "command": format!("sleep 1; touch {}", marker.display())
+        })
+        .to_string();
+        let run = bash::run_with_yield(&args, &|| false, &|| false, Some(&jobs));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), run)
+                .await
+                .is_err(),
+            "前提：200ms 内跑不完"
+        );
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!marker.exists(), "future 被丢掉后命令要被杀，不能接着跑完");
+    }
+
     /// 宽限期内跑完的命令照常带回结果，不为插话转后台。
     #[tokio::test]
     async fn bash_short_command_finishes_despite_a_steer() {

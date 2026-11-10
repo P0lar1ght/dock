@@ -192,7 +192,7 @@ fn value_is_framing_parse_error(v: &Value) -> bool {
         })
 }
 
-async fn handshake(s: &Shared, timeout: Duration) -> Result<(), String> {
+async fn handshake(s: &Arc<Shared>, timeout: Duration) -> Result<(), String> {
     let discover = tokio::time::timeout(
         timeout,
         rpc(s, "server/discover", with_meta(json!({}), PROTOCOL_LATEST)),
@@ -234,7 +234,7 @@ async fn handshake(s: &Shared, timeout: Duration) -> Result<(), String> {
     }
 }
 
-async fn initialize_legacy(s: &Shared, timeout: Duration) -> Result<(), String> {
+async fn initialize_legacy(s: &Arc<Shared>, timeout: Duration) -> Result<(), String> {
     s.modern.store(false, Ordering::Relaxed);
     {
         let mut proto = s.protocol.lock().unwrap();
@@ -272,7 +272,7 @@ async fn initialize_legacy(s: &Shared, timeout: Duration) -> Result<(), String> 
     Ok(())
 }
 
-async fn list_all(s: &Shared, server_name: &str) -> Result<Vec<protocol::ListedTool>, String> {
+async fn list_all(s: &Arc<Shared>, server_name: &str) -> Result<Vec<protocol::ListedTool>, String> {
     let modern = s.modern.load(Ordering::Relaxed);
     let protocol = s.protocol.lock().unwrap().clone();
     tools_list::list_all(server_name, |params| {
@@ -286,7 +286,7 @@ async fn list_all(s: &Shared, server_name: &str) -> Result<Vec<protocol::ListedT
     .await
 }
 
-async fn rpc(s: &Shared, method: &str, params: Value) -> Result<Value, String> {
+async fn rpc(s: &Arc<Shared>, method: &str, params: Value) -> Result<Value, String> {
     let id = s.next_id.fetch_add(1, Ordering::Relaxed);
     // stdio 是一条共享流，提问不一定带 related id。记下这次调用的页，
     // 只有一路在飞时归它；多路同时在飞时按发送顺序各领一题，不互相排队。
@@ -298,27 +298,68 @@ async fn rpc(s: &Shared, method: &str, params: Value) -> Result<Value, String> {
     });
     let (tx, rx) = oneshot::channel();
     s.pending.lock().unwrap().insert(id, tx);
+    // future 被丢掉（host 超时 / Stop）时发 `notifications/cancelled` 并摘掉 pending，
+    // 否则服务器那边的活会一直挂着，迟到的响应也没人收。
+    // 规范：`initialize` 不能被取消，只摘 pending。
+    let mut guard = CancelOnDrop {
+        shared: s.clone(),
+        id,
+        settled: false,
+        notify: method != "initialize",
+    };
     let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
     if let Err(e) = write_msg(s, &msg).await {
         s.pending.lock().unwrap().remove(&id);
+        guard.settled = true;
         return Err(e);
     }
-    let Some(budget) = protocol::call_timeout() else {
-        return rx.await.map_err(|_| "MCP stdio closed".to_string());
-    };
-    match tokio::time::timeout(budget, rx).await {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(_)) => Err("MCP stdio closed".to_string()),
-        Err(_) => {
-            s.pending.lock().unwrap().remove(&id);
-            // 告诉服务器别再算了，否则它那边的活会一直挂着。
-            let _ = write_msg(s, &protocol::cancelled_notification(id, "client timeout")).await;
-            Err(format!(
+    let result = match protocol::call_timeout() {
+        None => rx.await.map_err(|_| "MCP stdio closed".to_string()),
+        Some(budget) => match tokio::time::timeout(budget, rx).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(_)) => Err("MCP stdio closed".to_string()),
+            Err(_) => Err(format!(
                 "MCP {method} 超时（{}s 未响应）。调长或取消上限：{}=<秒数>（0 = 不限）",
                 budget.as_secs(),
                 protocol::CALL_TIMEOUT_ENV
-            ))
+            )),
+        },
+    };
+    if result.is_ok() {
+        guard.settled = true;
+    }
+    result
+}
+
+/// 未正常结束的 rpc：从 pending 摘掉，并异步通知服务器取消。
+struct CancelOnDrop {
+    shared: Arc<Shared>,
+    id: u64,
+    settled: bool,
+    notify: bool,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
         }
+        self.shared.pending.lock().unwrap().remove(&self.id);
+        if !self.notify {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let shared = self.shared.clone();
+        let id = self.id;
+        handle.spawn(async move {
+            let _ = write_msg(
+                &shared,
+                &protocol::cancelled_notification(id, "client cancelled"),
+            )
+            .await;
+        });
     }
 }
 

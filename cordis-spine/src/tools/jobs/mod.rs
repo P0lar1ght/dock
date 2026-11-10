@@ -586,18 +586,33 @@ impl Jobs {
     }
 
     pub async fn kill(&self, id: &str) -> String {
-        let job = self.inner.lock().unwrap().get(id).cloned();
-        let Some(job) = job else {
+        if !self.request_cancel(id) {
             return format!(
                 "Job {id} not found. Subagents are not jobs: use list_agents / interrupt_agent for them."
             );
-        };
-        if job.done.load(Ordering::Relaxed) {
+        }
+        let done = self
+            .inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|job| job.done.load(Ordering::Relaxed));
+        if done {
             return format!("{id} already finished");
         }
-        // 只发信号：run 任务自己 kill 并收尾。这样 kill 不会被运行中的 wait 挡住。
-        let _ = job.cancel.send(true);
         format!("killed {id}")
+    }
+
+    /// 同步发取消信号（不等收尾）。前台 `bash` 的 future 被丢掉时用它杀掉还在
+    /// `tokio::spawn` 里跑的进程；没有这个 id 或已经结束则返回 `false`。
+    pub fn request_cancel(&self, id: &str) -> bool {
+        let Some(job) = self.inner.lock().unwrap().get(id).cloned() else {
+            return false;
+        };
+        if !job.done.load(Ordering::Relaxed) {
+            let _ = job.cancel.send(true);
+        }
+        true
     }
 }
 

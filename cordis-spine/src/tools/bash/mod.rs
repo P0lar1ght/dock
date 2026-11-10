@@ -132,6 +132,14 @@ pub(crate) async fn run_with_yield(
         }
     };
     let id = jobs.start_foreground_ex(&command, description, workdir);
+    // 等待循环的 future 被丢掉时（host 超时、Stop 丢弃 execute），进程还在
+    // `tokio::spawn(run_job)` 里。这里在 Drop 时发取消信号，避免活任务泄漏。
+    // 正常收尾或转后台要先 `disarm`，不然会把刚转走的后台任务也杀掉。
+    let mut on_drop = KillOnDrop {
+        jobs,
+        id: id.clone(),
+        armed: true,
+    };
     let budget = call_budget(&v);
     let start = std::time::Instant::now();
     let mut yield_seen: Option<std::time::Instant> = None;
@@ -145,20 +153,26 @@ pub(crate) async fn run_with_yield(
                     .map(|s| s.output)
                     .unwrap_or_default();
                 jobs.forget(&id);
+                on_drop.disarm();
                 return out;
             }
             // 任务凭空消失：只有我们自己会 forget，正常不会走到。
-            None => return "(no output)".into(),
+            None => {
+                on_drop.disarm();
+                return "(no output)".into();
+            }
             Some(false) => {}
         }
         if is_cancelled() {
             // 用户停止了这一轮：杀掉（这是明确要它停），带回已产出的输出。
             let partial = finish_early(jobs, &id, String::new()).await;
+            on_drop.disarm();
             return cordis_base::types::interrupted_tool_result(start.elapsed(), &partial);
         }
         if collectable && should_yield() {
             let seen = *yield_seen.get_or_insert_with(std::time::Instant::now);
             if seen.elapsed() >= STEER_GRACE {
+                on_drop.disarm();
                 return detach_to_background(
                     jobs,
                     &id,
@@ -168,6 +182,7 @@ pub(crate) async fn run_with_yield(
         }
         if start.elapsed() >= budget {
             if collectable {
+                on_drop.disarm();
                 return detach_to_background(
                     jobs,
                     &id,
@@ -176,7 +191,7 @@ pub(crate) async fn run_with_yield(
             }
             // 没有可查的任务表：转后台就成了「还在跑，但你永远拿不到」。退回旧的
             // kill + 说明，宁可诚实地失败。
-            return finish_early(
+            let out = finish_early(
                 jobs,
                 &id,
                 format!(
@@ -186,6 +201,8 @@ pub(crate) async fn run_with_yield(
                 ),
             )
             .await;
+            on_drop.disarm();
+            return out;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -232,6 +249,27 @@ fn detach_to_background(jobs: &Jobs, id: &str, why: String) -> String {
         head
     } else {
         format!("{head}\n{out}")
+    }
+}
+
+/// 前台等待 future 被丢掉时，取消还在跑的 job。转后台或正常收尾前要 `disarm`。
+struct KillOnDrop<'a> {
+    jobs: &'a Jobs,
+    id: String,
+    armed: bool,
+}
+
+impl KillOnDrop<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for KillOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.jobs.request_cancel(&self.id);
+        }
     }
 }
 
