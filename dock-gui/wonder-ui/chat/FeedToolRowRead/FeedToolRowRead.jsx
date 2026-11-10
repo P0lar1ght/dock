@@ -1,6 +1,0 @@
-<div data-node-id="his.they" data-node-label="Tool Row Read" className="flex h-[30px] items-center bg-[#f0f0f2] border-t border-b border-l border-r rounded-lg px-2.5 py-0 gap-2 border-[#e8e8ec]">
-  <div data-node-id="his.nias" data-node-label="SVG" className="size-[13px] block shrink-0 text-[#636366]">
-    <svg stroke="rgb(99, 99, 102)" fill="none" strokeWidth="2" viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg" color="rgb(99, 99, 102)" width="100%" height="100%"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" color="rgb(99, 99, 102)" fill="none" stroke="rgb(99, 99, 102)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></path><polyline points="13 2 13 9 20 9" color="rgb(99, 99, 102)" fill="none" stroke="rgb(99, 99, 102)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></polyline></svg>
-  </div>
-  <div data-node-id="his.kate" data-node-label="Tool Row Read Text" className="w-fit min-w-0 min-h-0 text-[#3a3a3c] font-mono text-xs leading-normal text-left [white-space-collapse:collapse] [text-wrap-mode:nowrap] [text-overflow:ellipsis] block [overflow-wrap:normal] overflow-clip">read_file · crates/nova-gateway/src/session/cache.rs</div>
-</div>

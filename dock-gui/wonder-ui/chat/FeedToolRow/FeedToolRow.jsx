@@ -1,6 +1,0 @@
-<div data-node-id="his.gulp" data-node-label="Tool Row Bash" className="flex h-[30px] items-center bg-[#f0f0f2] border-t border-b border-l border-r rounded-lg px-2.5 py-0 gap-2 border-[#e8e8ec]">
-  <div data-node-id="his.morg" data-node-label="SVG" className="size-[13px] block shrink-0 text-[#636366]">
-    <svg stroke="rgb(99, 99, 102)" fill="none" strokeWidth="2" viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg" color="rgb(99, 99, 102)" width="100%" height="100%"><polyline points="4 17 10 11 4 5" color="rgb(99, 99, 102)" fill="none" stroke="rgb(99, 99, 102)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></polyline><line x1="12" y1="19" x2="20" y2="19" color="rgb(99, 99, 102)" fill="none" stroke="rgb(99, 99, 102)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></line></svg>
-  </div>
-  <div data-node-id="his.cnet" data-node-label="Tool Row Bash Text" className="w-fit min-w-0 min-h-0 text-[#3a3a3c] font-mono text-xs leading-normal text-left [white-space-collapse:collapse] [text-wrap-mode:nowrap] [text-overflow:ellipsis] block [overflow-wrap:normal] overflow-clip">已运行 set -euo pipefail · cargo test -p nova-gateway</div>
-</div>

@@ -10,7 +10,7 @@
 
 ### 新增
 
-- **桌面 GUI 进仓库**：`dock-gui/`（Tauri 2 + React）随源码提交，见 `dock-gui/README.md`。独立工程（`src-tauri/` 自带 `[workspace]`，不进根 workspace），启动时拉起 `dock serve` 走 dock.1。还没签名，不带自动更新。
+- **桌面 GUI 进仓库**：`dock-gui/`（Tauri 2 + React）的核心代码随源码提交（设计稿、文档不进仓库），见 `dock-gui/README.md`。独立工程（`src-tauri/` 自带 `[workspace]`，不进根 workspace），启动时拉起 `dock serve` 走 dock.1。还没签名，不带自动更新。
 
 - **聊天里发的图片落盘，刷新后照旧看得到**：用户消息里的图以前只活在本窗口的内存里（事件只带尺寸），刷新、重开 Dock、换机器连远程，全看不到原图。
   - 像素按内容寻址存进 `$DOCK_HOME/user-images/<摘要前两位>/<摘要>`，会话日志（`chat_history.jsonl`）只写摘要，不写 base64、也不写路径；关着的会话只读引用，恢复会话或取图时才按摘要读像素。

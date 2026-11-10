@@ -29,3 +29,12 @@ src-tauri/gen/schemas
 .env
 .env.*
 !.env.example
+
+# 只提交 GUI 核心代码：设计稿、文档、e2e 脚本留在本地不进仓库
+/wonder-ui/
+/docs/
+/AGENTS.md
+/.vscode/
+/scripts/mcp-apps-e2e/
+/scripts/tool-cards-e2e/
+/scripts/wonder-save.py

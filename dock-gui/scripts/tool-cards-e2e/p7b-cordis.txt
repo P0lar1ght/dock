@@ -1,4 +1,0 @@
-这是 GUI 工具卡渲染测试（Cordis 扩展）。这些工具已经在你的工具表里，直接调用，不要用 search_tool，严格按顺序：
-1. cordis_inspect 看当前插件树（不带参数或看根）
-2. cordis_run 运行 Rhai 脚本：let x = 1 + 2; x
-做完用一句话总结。
