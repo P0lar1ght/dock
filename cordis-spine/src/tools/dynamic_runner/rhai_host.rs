@@ -117,8 +117,13 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.call_tool",
-        "Execute a live model tool (permissions still apply).",
+        "Execute a live model tool (permissions still apply). Inside a tool's execute it runs as the caller (that page / subagent): its approval tier, plan mode, read-only scene and Stop apply.",
         &["host.call_tool(name: String, args: Map | String) -> String"],
+    ),
+    (
+        "host.cancelled",
+        "True once the user stopped the calling turn. Long loops in execute should check it between steps (the script is also aborted at the next checkpoint).",
+        &["host.cancelled() -> bool"],
     ),
     (
         "host.on",
@@ -278,6 +283,14 @@ fn apply_rhai(
     super::rhai_regex::register(&mut engine);
     // Wall clock: SystemTime epoch helpers (timestamp() is Instant-only).
     super::rhai_time::register(&mut engine);
+    // 用户停止这一轮时，正在跑的插件工具脚本在下一个检查点中止（每 4096 步查一次）。
+    engine.on_progress(|ops| {
+        if ops % 4096 == 0 && current_call_ctx().is_some_and(|c| call_cancelled(&c)) {
+            Some("cancelled: the user stopped this turn".into())
+        } else {
+            None
+        }
+    });
     let ast = engine
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;
@@ -352,6 +365,7 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("register_tool_view", Host::register_tool_view);
     engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
+    engine.register_fn("cancelled", Host::cancelled);
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
     engine.register_fn("secret", Host::secret);
@@ -435,8 +449,13 @@ impl Host {
             let execute = execute.clone();
             Box::pin(async move {
                 let arguments = call.arguments.clone();
+                // 调用方（这一页 / 这个子代理）的 ctx：`spawn_blocking` 会丢掉 task-local，
+                // 先取出来，在阻塞线程上挂成 `CALL_CTX`，`host.call_tool` 按它过门、判取消。
+                let caller = crate::tools::registry::exec_ctx();
                 let content = match tokio::task::spawn_blocking(move || {
-                    call_fnptr(&engine, &ast, &execute, json_str_to_dynamic(&arguments))
+                    with_call_ctx(caller, || {
+                        call_fnptr(&engine, &ast, &execute, json_str_to_dynamic(&arguments))
+                    })
                 })
                 .await
                 {
@@ -730,8 +749,19 @@ impl Host {
             name: name.to_string(),
             arguments,
         };
-        let text = block_on_tool(tools.as_ref(), call)?;
+        let exec = self.exec_ctx();
+        let text = block_on_tool(tools.as_ref(), &exec, call)?;
         Ok(text.into())
+    }
+
+    /// 这次 `execute` 的调用方 ctx；不在工具调用里（`apply`、`host.on` 回调）退回插件自己的 ctx。
+    fn exec_ctx(&self) -> Context {
+        current_call_ctx().unwrap_or_else(|| self.inner.ctx.clone())
+    }
+
+    /// 调用方这一轮被停止了吗（`TurnControl`）。循环里多步的插件每步前查一下。
+    fn cancelled(&mut self) -> bool {
+        call_cancelled(&self.exec_ctx())
     }
 
     fn on(
@@ -1102,11 +1132,36 @@ fn call_fnptr_raw(
     }
 }
 
-fn block_on_tool(tools: &Tools, call: ToolCall) -> Result<String, Box<rhai::EvalAltResult>> {
+fn block_on_tool(
+    tools: &Tools,
+    exec: &Context,
+    call: ToolCall,
+) -> Result<String, Box<rhai::EvalAltResult>> {
     let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
     let tools = tools.clone();
-    let result = tokio::task::block_in_place(|| handle.block_on(tools.execute(call)));
+    let result = tokio::task::block_in_place(|| handle.block_on(tools.execute_on(exec, call)));
     Ok(result.content)
+}
+
+thread_local! {
+    /// 当前阻塞线程上正在跑的那次插件工具调用的调用方 ctx（见 `register_tool`）。
+    static CALL_CTX: std::cell::RefCell<Option<Context>> = const { std::cell::RefCell::new(None) };
+}
+
+fn with_call_ctx<R>(ctx: Option<Context>, f: impl FnOnce() -> R) -> R {
+    let prev = CALL_CTX.with(|c| std::mem::replace(&mut *c.borrow_mut(), ctx));
+    let out = f();
+    CALL_CTX.with(|c| *c.borrow_mut() = prev);
+    out
+}
+
+fn current_call_ctx() -> Option<Context> {
+    CALL_CTX.with(|c| c.borrow().clone())
+}
+
+fn call_cancelled(ctx: &Context) -> bool {
+    ctx.get::<crate::agent::turn::TurnControl>(crate::names::TURN)
+        .is_some_and(|t| t.is_cancelled())
 }
 
 pub(crate) fn tool_parameters_json(spec: &Map) -> Result<String, String> {

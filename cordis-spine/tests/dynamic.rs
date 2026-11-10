@@ -3837,7 +3837,7 @@ async fn example_tool_batch_rejects_bad_batches_before_running() {
 }
 
 /// 批里的每一次调用照样单独过权限门：逐条入审批队列；拒绝（权限被拒绝）按失败处理、默认停。
-/// 记一笔宿主现状：请求方的 agent_id 是 None——插件走根 ctx，子代理调它也认成主会话。
+/// 这里从根 ctx 调，请求方就是主会话（agent_id None）；子代理身份见下一条。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn example_tool_batch_each_call_goes_through_the_permission_gate() {
     let (root, home, _p) = boot_tool_batch().await;
@@ -3898,4 +3898,108 @@ async fn example_tool_batch_each_call_goes_through_the_permission_gate() {
     assert!(out.contains("权限被拒绝"), "{out}");
     assert!(perms.front().is_none());
     assert!(!marker.exists(), "拒绝后第三步不该跑");
+}
+
+/// 插件工具里的 host.call_tool 以**调用方**身份执行：子代理调 tool_batch 时，批里的审批
+/// 记在子代理名下；调用方那一页开着计划模式时，批里的 bash 被计划门挡住；调用方这一轮
+/// 被停止时，正在跑的 bash 被打断。以前一律走插件的根 ctx，这三样都不认。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_call_tool_runs_as_the_caller() {
+    let (root, home, _p) = boot_tool_batch().await;
+    let tools = tools_of(&root);
+    let call = |args: serde_json::Value| ToolCall {
+        id: "tb".into(),
+        name: "tool_batch".into(),
+        arguments: args.to_string(),
+    };
+    let marker = home.path().join("plan-blocked");
+    let touch = json!({"steps": [{"tool": "bash", "args": {"command": format!("touch {}", marker.display())}}]});
+
+    // 计划模式挂在调用方那一页上（根上没有）：批里的写操作被挡。
+    let page = root.isolate("sessions").isolate(cordis_spine::PLAN_MODE);
+    let _s = page
+        .provide(SESSIONS, Sessions::isolated_as(page.clone(), "child-plan"))
+        .unwrap();
+    let plan = cordis_spine::PlanMode::new(page.clone());
+    plan.set(true);
+    let _p2 = page.provide(cordis_spine::PLAN_MODE, plan).unwrap();
+    let out = tools.execute_on(&page, call(touch.clone())).await.content;
+    assert!(
+        out.contains("计划模式已阻止") || out.contains("只读模式"),
+        "{out}"
+    );
+    assert!(!marker.exists());
+
+    // 子代理身份：审批请求记在 child-7 名下。
+    root.get::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Ask);
+    let perms = root
+        .require::<cordis_spine::Permissions>(cordis_spine::PERMISSIONS)
+        .unwrap();
+    let child = root.isolate("sessions");
+    let _c = child
+        .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-7"))
+        .unwrap();
+    let (t2, c2, a2) = (tools.clone(), child.clone(), call(touch.clone()));
+    let run = tokio::spawn(async move { t2.execute_on(&c2, a2).await.content });
+    let front = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(f) = perms.front() {
+                break f;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(front.agent_id.as_deref(), Some("child-7"), "{front:?}");
+    assert!(perms.resolve(cordis_base::acp::PermissionOptionKind::RejectOnce));
+    let out = run.await.unwrap();
+    assert!(out.contains("权限被拒绝"), "{out}");
+    root.get::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Allow);
+
+    // 停止：调用方这一轮的 TurnControl 取消后，批里正在跑的 bash 被打断。
+    let turn_page = root.isolate("sessions").isolate(cordis_spine::TURN);
+    let _s3 = turn_page
+        .provide(
+            SESSIONS,
+            Sessions::isolated_as(turn_page.clone(), "child-stop"),
+        )
+        .unwrap();
+    let _t = turn_page
+        .provide(cordis_spine::TURN, cordis_spine::TurnControl::new())
+        .unwrap();
+    let (t3, c3) = (tools.clone(), turn_page.clone());
+    let started = std::time::Instant::now();
+    let run = tokio::spawn(async move {
+        t3.execute_on(
+            &c3,
+            ToolCall {
+                id: "tb".into(),
+                name: "tool_batch".into(),
+                arguments: json!({"steps": [
+                    {"tool": "bash", "args": {"command": "sleep 20"}},
+                    {"tool": "bash", "args": {"command": "echo never"}}
+                ]})
+                .to_string(),
+            },
+        )
+        .await
+        .content
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    turn_page
+        .get::<cordis_spine::TurnControl>(cordis_spine::TURN)
+        .unwrap()
+        .cancel();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("停止后批次该很快返回")
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert!(out.starts_with("Error"), "{out}");
+    assert!(!out.contains("never"), "{out}");
 }
