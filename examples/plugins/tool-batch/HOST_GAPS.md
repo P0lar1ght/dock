@@ -116,7 +116,7 @@
   `on_var` 计数留作兜底。测试 `plugin_eval_expr_rejects_function_values_at_parse`（就是那串嵌套，断言
   解析时拒、不到 1s）、`expression_engine_stops_at_its_operation_budget`（小预算下的操作数上限）。
 - **插件脚本本身的运行期引擎没修**（插件作者 / 模型经 `cordis_define` 写的脚本同样能这么写）。跟进
-  issue：待建（复现与可选修法：模型写的上下文关匿名函数、按 AST 查闭包嵌套深度、把脚本放到能杀掉的线程 / 进程里跑）。
+  issue：[#272](https://github.com/P0lar1ght/dock/issues/272)（复现与可选修法：模型写的上下文关匿名函数、按 AST 查闭包嵌套深度、把脚本放到能杀掉的线程 / 进程里跑）。
 - 建议：`plugin.toml` 可声明有上限的 `max_operations`。本轮按要求跳过（可配置上限）。
 
 ## 12. 已修（按插件 opt-in）：表达式求值
