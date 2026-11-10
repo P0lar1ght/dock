@@ -87,6 +87,9 @@
 
 ### 改进
 
+- **浏览器面板按标签页记视口**：每个标签页记住自己的尺寸，切回去还是那个大小；没改过的页用最近一次要的尺寸。
+- **强制重新加载**：`browser/view/navigate` 支持 `action: "hard_reload"`（绕过缓存，和 Shift+刷新一样），能力 `browserHardReload`。
+
 - **CI 按路径跳过无关门禁**：只改文档 / 纯配置时不再跑完整 Rust 测试；`dock-core` 仅在 `dock-core/**` 有改动时跑。job 名仍是 `test` / `dock-core`（required checks），无相关改动时 echo 跳过仍报 success。Release 的 tag 门禁保持全量。
 
 - **发布产物不再包含 Intel Mac**（`x86_64-apple-darwin`）：只发 Apple Silicon（`aarch64-apple-darwin`，构建机 `macos-15`）与 Linux x86_64 / aarch64。`install.sh` / `dock upgrade` 在 Intel Mac 上会说明请自行从源码构建。

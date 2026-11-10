@@ -482,7 +482,7 @@ impl View {
             .map_err(|e| e.to_string())
     }
 
-    /// 地址栏 / 后退 / 前进 / 刷新。
+    /// 地址栏 / 后退 / 前进 / 刷新 / 强制重新加载（`hard_reload`：绕过缓存）。
     pub async fn navigate(&self, request: &Value) -> Result<(), String> {
         if let Some(url) = request.get("url").and_then(Value::as_str) {
             let url = address_bar_url(url)?;
@@ -502,7 +502,14 @@ impl View {
         match request.get("action").and_then(Value::as_str).unwrap_or("") {
             "reload" => self
                 .page
-                .execute(ReloadParams::default())
+                .execute(reload_params(false))
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            // 强制重新加载：绕过缓存（和 Shift+刷新一样）。
+            "hard_reload" => self
+                .page
+                .execute(reload_params(true))
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
@@ -531,7 +538,7 @@ impl View {
                     .map_err(|e| e.to_string())
             }
             other => Err(format!(
-                "navigate 需要 url 或 action（back / forward / reload）：{other}"
+                "navigate 需要 url 或 action（back / forward / reload / hard_reload）：{other}"
             )),
         }
     }
@@ -578,6 +585,15 @@ fn still_lock(target_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     let mut locks = LOCKS.lock().unwrap();
     locks.retain(|_, lock| Arc::strong_count(lock) > 1);
     locks.entry(target_id.to_string()).or_default().clone()
+}
+
+/// 刷新页面的 CDP 参数：`hard` = 强制重新加载（绕过缓存，和 Shift+刷新一样）。
+fn reload_params(hard: bool) -> ReloadParams {
+    if hard {
+        ReloadParams::builder().ignore_cache(true).build()
+    } else {
+        ReloadParams::default()
+    }
 }
 
 /// 地址栏：没写协议的补 `https://`；只放行 http / https / about / data / file。
@@ -972,5 +988,12 @@ mod tests {
         let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
         let err = View::attach("nope").await.err().unwrap();
         assert_eq!(err, "浏览器没有在运行");
+    }
+
+    /// 强制重新加载要绕过缓存（Shift+刷新）；普通刷新不动缓存。
+    #[test]
+    fn hard_reload_ignores_the_cache() {
+        assert_eq!(reload_params(false).ignore_cache, None);
+        assert_eq!(reload_params(true).ignore_cache, Some(true));
     }
 }
