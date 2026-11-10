@@ -19,7 +19,7 @@
   .mono { font-family: var(--dock-mono); }
 
   /* 计时总览：三条轨道，拖动选时间段。 */
-  .overview { position: relative; height: 58px; margin: 8px 12px 0; border: 1px solid var(--dock-line-soft); border-radius: 8px; background: var(--dock-surface); cursor: crosshair; user-select: none; overflow: hidden; flex-shrink: 0; }
+  .overview { position: relative; height: 94px; margin: 8px 12px 0; border: 1px solid var(--dock-line-soft); border-radius: 8px; background: var(--dock-surface); cursor: crosshair; user-select: none; overflow: hidden; flex-shrink: 0; }
   .lane { position: absolute; left: 0; right: 0; height: 12px; }
   .lane-label { position: absolute; left: 6px; font-size: 9px; color: var(--dock-ink-5); line-height: 12px; pointer-events: none; z-index: 1; }
   .track { position: absolute; left: 34px; right: 8px; top: 0; bottom: 0; }
@@ -30,6 +30,8 @@
   .seg.tool { background: #ff9f0aaa; }
   .seg.turn { background: #34c75955; }
   .seg.err { background: #ff3b30aa; }
+  .seg.user { background: #30b0c7aa; }
+  .seg.ctx { background: #34c75999; }
   .sel { position: absolute; top: 0; bottom: 0; background: #0a84ff1f; border-left: 1px solid var(--dock-accent); border-right: 1px solid var(--dock-accent); pointer-events: none; }
   .filter-note { margin: 4px 12px 0; font-size: 11px; color: var(--dock-ink-4); }
   .filter-note a { color: var(--dock-accent); cursor: pointer; }
@@ -55,6 +57,15 @@
   .kind.reasoning { color: #8e44ad; }
   .kind.tool { color: #b4690e; }
   .kind.error, .row .err { color: var(--dock-danger); }
+  .kind.note { color: var(--dock-ink-3); }
+  .kind.ask { color: #0a84ff; }
+  .kind.plan { color: #b4690e; }
+  .kind.elicit { color: #8e44ad; }
+  .kind.subagent { color: #00838f; }
+  .kind.workflow { color: #5e35b1; }
+  .kind.changes { color: #248a3d; }
+  .kind.system { color: #0b7285; }
+  .kind.reminder { color: #a15c07; }
   .text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tool-name { font-family: var(--dock-mono); }
   .dur { font-family: var(--dock-mono); font-size: 11px; color: var(--dock-ink-4); }
@@ -113,10 +124,50 @@
   };
 
   // ---- 事件 → 轨迹（轮次 → 记录） ----
+  const PLAN_DECISION = { approve: "已批准", revise: "要改", quit: "已放弃" };
+
+  const askText = (p) => {
+    const qs = p.questions || [];
+    if (!qs.length) return "（没有题目）";
+    const q = qs[0];
+    const head = q.header || q.question || "（空）";
+    return qs.length > 1 ? `${head}（共 ${qs.length} 题）` : head;
+  };
+  const compactText = (p) => {
+    const bits = [p.status, p.phase, p.trigger].filter(Boolean).join(" · ");
+    return bits ? `上下文压缩：${bits}` : "上下文压缩";
+  };
+  const subagentText = (a) => {
+    const who = a.role || a.subagentType || a.agentId || "子代理";
+    return `${who}${a.status ? " · " + a.status : ""}${a.description ? " · " + a.description : ""}`;
+  };
+  const workflowText = (r) => {
+    const who = r.name || r.runId || "工作流";
+    return `${who}${r.status ? " · " + r.status : ""}${r.currentPhase ? " · " + r.currentPhase : ""}`;
+  };
+  const changesText = (ch) => {
+    const files = ch.files || [];
+    if (!files.length) return "这一轮改了文件（已撤销）";
+    const names = files.slice(0, 3).map((f) => f.path).join("、");
+    return `${files.length} 个文件：${names}${files.length > 3 ? "…" : ""}`;
+  };
+
+  // 上下文正文的第一行（摘要用）：全文可能几万字。
+  const firstLine = (text) => {
+    const line = String(text || "").split("\n").map((s) => s.trim()).find(Boolean) || "";
+    return line.length > 80 ? line.slice(0, 80) + "…" : line;
+  };
+
   function build(events) {
     const turns = [];
     let turn = null, step = 0, cur = null, boundary = null;
     const tools = new Map();
+    const asks = new Map();
+    const plans = new Map();
+    const elicits = new Map();
+    // 「只推不记」的事件（压缩进展 / 子代理 / 工作流 / 文件改动）没有序号，同一条会
+    // 反复推：按 id 覆盖同一条记录，不追加。
+    const keyed = new Map();
     const ensureTurn = (e) => {
       if (turn && turn.id === e.turnId) return turn;
       turn = { id: e.turnId || `t${turns.length + 1}`, start: e.at, end: null, status: "running", error: "", records: [], steps: 0, tools: 0 };
@@ -124,6 +175,19 @@
       return turn;
     };
     const push = (r) => { turn.records.push(r); return r; };
+    // 同 id 覆盖：已有的只改内容（起止时间保留第一次的），没有的才新开一条。
+    const upsert = (key, make) => {
+      const hit = keyed.get(key);
+      if (hit) {
+        const patch = make();
+        delete patch.start;
+        Object.assign(hit, patch);
+        return hit;
+      }
+      const r = push(make());
+      keyed.set(key, r);
+      return r;
+    };
     for (const e of events) {
       const p = e.params;
       if (!e.turnId && e.method !== "turn/started") continue;
@@ -164,6 +228,76 @@
           boundary = e.at; break;
         }
         case "item/compaction": push({ kind: "compaction", text: "上下文压缩", start: e.at, end: e.at }); break;
+        // 侧边聊天写进来的笔记：不是模型说的话，单开一条。
+        case "item/side_note": push({ kind: "note", text: p.text || "", start: e.at, end: e.at }); break;
+        // harness 上下文：这一轮的系统提示与注入块（不是对话，是模型被喂的东西）。
+        case "item/system_prompt":
+          push({ kind: "system", text: p.text || "", chars: p.chars, truncated: p.truncated, data: p, start: e.at, end: e.at });
+          break;
+        case "item/system_reminder":
+          push({ kind: "reminder", text: p.text || "", chars: p.chars, truncated: p.truncated, data: p, start: e.at, end: e.at });
+          break;
+        // 向用户提问（ask_user_question / handoff_to_user）：等用户作答的那段时间。
+        case "interaction/requested": {
+          const r = push({ kind: "ask", id: p.interactionId, text: askText(p), data: p, start: e.at, end: null });
+          asks.set(p.interactionId, r);
+          boundary = e.at;
+          break;
+        }
+        case "interaction/resolved": {
+          const r = asks.get(p.interactionId);
+          if (r) { r.end = e.at; r.decision = p.ok ? "已作答" : "已取消"; }
+          boundary = e.at;
+          break;
+        }
+        // 计划审批：等用户批计划。
+        case "plan/requested": {
+          const r = push({ kind: "plan", id: p.planId, text: p.path || "", data: p, start: e.at, end: null });
+          plans.set(p.planId, r);
+          boundary = e.at;
+          break;
+        }
+        case "plan/resolved": {
+          const r = plans.get(p.planId);
+          if (r) { r.end = e.at; r.decision = PLAN_DECISION[p.decision] || p.decision || ""; }
+          boundary = e.at;
+          break;
+        }
+        // MCP 服务器向用户要输入（elicitation）。
+        case "elicit/requested": {
+          const r = push({ kind: "elicit", id: p.elicitId, text: p.heading || p.message || "", data: p, start: e.at, end: null });
+          elicits.set(p.elicitId, r);
+          boundary = e.at;
+          break;
+        }
+        case "elicit/resolved": {
+          const r = elicits.get(p.elicitId);
+          if (r) { r.end = e.at; r.decision = p.ok ? "已回应" : "已取消"; }
+          boundary = e.at;
+          break;
+        }
+        // 压缩进展：只推不记，同一轮覆盖同一条。
+        case "context/compacted":
+          upsert(`compact|${e.turnId}`, () => ({ kind: "compaction", text: compactText(p), data: p, start: e.at, end: e.at }));
+          break;
+        // 子代理状态：只推不记，同一个 agent 覆盖同一条。
+        case "subagent/updated": {
+          const a = p.agent || {};
+          upsert(`subagent|${a.agentId || ""}`, () => ({ kind: "subagent", text: subagentText(a), data: a, start: e.at, end: e.at }));
+          break;
+        }
+        // 工作流 run：只推不记，同一个 run 覆盖同一条。
+        case "workflow/updated": {
+          const run = p.run || {};
+          upsert(`workflow|${run.runId || ""}`, () => ({ kind: "workflow", text: workflowText(run), data: run, start: e.at, end: e.at }));
+          break;
+        }
+        // 一轮改了哪些文件：只推不记，同一轮覆盖同一条。
+        case "turn/changes/updated": {
+          const ch = p.changes || {};
+          upsert(`changes|${p.turnId || e.turnId}`, () => ({ kind: "changes", text: changesText(ch), data: ch, start: e.at, end: e.at }));
+          break;
+        }
         case "turn/completed": t.end = e.at; t.status = p.status || "completed"; t.error = p.error || ""; cur = null; break;
       }
     }
@@ -202,16 +336,36 @@
     if (!state.threadId) return;
     const h = await dock.call("threads.history", { threadId: state.threadId }).catch(() => null);
     if (!h) return;
-    const before = state.events.length;
-    for (const it of h.events || []) addEvent(it.method, { ...(it.payload || {}), seq: it.seq, timestamp: it.timestamp ?? (it.payload || {}).timestamp });
-    if (state.events.length !== before) rebuild(false);
+    // 「只推不记」的事件覆盖同一条：长度不变，但内容变了，所以看返回值而不是长度。
+    let changed = false;
+    for (const it of h.events || []) changed = addEvent(it.method, { ...(it.payload || {}), seq: it.seq, timestamp: it.timestamp ?? (it.payload || {}).timestamp }) || changed;
+    if (changed) rebuild(false);
   }
 
+  // 「只推不记」的事件（压缩进展 / 子代理 / 工作流 / 文件改动）没有序号：不进历史，
+  // 状态一变就推一次。同一条按 id 覆盖，别把事件流撑爆。
+  const VOLATILE = {
+    "context/compacted": (p) => `compact|${p.turnId || ""}`,
+    "subagent/updated": (p) => `subagent|${(p.agent || {}).agentId || ""}`,
+    "workflow/updated": (p) => `workflow|${(p.run || {}).runId || ""}`,
+    "turn/changes/updated": (p) => `changes|${p.turnId || ""}`,
+  };
+
   function addEvent(method, params) {
+    const volatile = VOLATILE[method];
+    if (volatile) {
+      const key = volatile(params);
+      const at = Number(params.timestamp) || Date.now();
+      const hit = state.events.find((e) => e.volatileKey === key);
+      if (hit) { hit.params = params; hit.at = at; return true; }
+      state.events.push({ method, params, turnId: params.turnId || "", at, volatileKey: key });
+      return true;
+    }
     const seq = Number(params.seq ?? params.transcriptSeq ?? 0);
     const key = seq ? `${params.turnId}|${seq}` : null;
-    if (key) { if (state.seen.has(key)) return; state.seen.add(key); }
+    if (key) { if (state.seen.has(key)) return false; state.seen.add(key); }
     state.events.push({ method, params, turnId: params.turnId || "", at: Number(params.timestamp) || Date.now() });
+    return true;
   }
 
   let frame = 0;
@@ -246,7 +400,7 @@
     const [lo, hi] = s, w = hi - lo;
     const x = (t) => ((t - lo) / w) * 100;
     const seg = (cls, a, b, top) => (a == null ? "" : `<div class="seg ${cls}" style="left:${x(a)}%;width:${Math.max(0, x(b ?? a) - x(a))}%;top:${top}px"></div>`);
-    let html = '<div class="lane-label" style="top:3px">轮次</div><div class="lane-label" style="top:21px">模型</div><div class="lane-label" style="top:39px">工具</div><div class="track">';
+    let html = '<div class="lane-label" style="top:3px">轮次</div><div class="lane-label" style="top:21px">模型</div><div class="lane-label" style="top:39px">工具</div><div class="lane-label" style="top:57px">等用户</div><div class="lane-label" style="top:75px">上下文</div><div class="track">';
     for (const t of state.turns) {
       html += seg(t.status === "failed" ? "err" : "turn", t.start, t.end || hi, 3);
       for (const r of t.records) {
@@ -256,6 +410,10 @@
         } else if (r.kind === "tool") {
           if (r.wait != null) html += seg("wait", r.start - r.wait, r.start, 21);
           html += seg(r.status === "failed" ? "err" : "tool", r.start, r.end || hi, 39);
+        } else if (r.kind === "ask" || r.kind === "plan" || r.kind === "elicit") {
+          html += seg("user", r.start, r.end || hi, 57);
+        } else if (r.kind === "system" || r.kind === "reminder") {
+          html += seg("ctx", r.start, r.start, 75);
         }
       }
     }
@@ -288,7 +446,7 @@
     });
   })();
 
-  const LABEL = { user: "你", assistant: "回复", reasoning: "思考", tool: "工具", permission: "审批", compaction: "压缩" };
+  const LABEL = { user: "你", assistant: "回复", reasoning: "思考", tool: "工具", permission: "审批", compaction: "压缩", note: "笔记", ask: "提问", plan: "计划", elicit: "MCP", subagent: "子代理", workflow: "工作流", changes: "改动", system: "系统提示", reminder: "注入" };
 
   function visible(r) {
     if (state.range) {
@@ -297,12 +455,20 @@
     }
     if (!state.query) return true;
     const q = state.query.toLowerCase();
-    return [r.text, r.name, r.output, r.args && JSON.stringify(r.args)].some((s) => s && String(s).toLowerCase().includes(q));
+    return [r.text, r.name, r.output, r.args && JSON.stringify(r.args), r.data && JSON.stringify(r.data)].some((s) => s && String(s).toLowerCase().includes(q));
   }
 
   function rowText(r) {
     if (r.kind === "tool") return `<span class="tool-name">${esc(r.name)}</span> <span class="muted">${esc(argSummary(r.args))}</span>`;
     if (r.kind === "permission") return `${esc(r.text)} <span class="muted">${r.decision ? (r.decision === "approve" ? "· 允许" : "· 拒绝") : "· 等待"}</span>`;
+    if (r.kind === "ask" || r.kind === "plan" || r.kind === "elicit") {
+      const tail = r.decision ? `· ${r.decision}` : r.end != null ? `· 等 ${fmt(r.end - r.start)}` : "· 等待";
+      return `${esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）")} <span class="muted">${esc(tail)}</span>`;
+    }
+    if (r.kind === "system" || r.kind === "reminder") {
+      const n = r.chars != null ? `${r.chars} 字` : "";
+      return `<span class="muted">${esc(n)}</span> ${esc(firstLine(r.text))}`;
+    }
     return esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）");
   }
 
@@ -366,17 +532,90 @@
     return t ? [t, t.records[Number(i)]] : [null, null];
   }
 
+  const askDetail = (p) => {
+    const qs = (p && p.questions) || [];
+    if (!qs.length) return '<div class="muted">没有题目</div>';
+    return qs.map((q, i) => {
+      const opts = (q.options || []).map((o) => (typeof o === "string" ? o : o.label)).filter(Boolean);
+      const head = `<div><b>${i + 1}. ${esc(q.header || q.question || "")}</b></div>`;
+      const body = q.question && q.question !== q.header ? `<div class="muted">${esc(q.question)}</div>` : "";
+      const opt = opts.length ? `<div class="muted">选项：${esc(opts.join("、"))}</div>` : "";
+      return head + body + opt;
+    }).join("");
+  };
+
+  const detailBlock = (r) => {
+    const d = r.data || {};
+    if (r.kind === "subagent") {
+      const rows = [
+        ["状态", d.status || "—"],
+        ["角色", d.role || d.subagentType || "—"],
+        ["工具调用", d.toolCalls ?? "—"],
+        ["用时", d.durationMs != null ? fmt(d.durationMs) : "—"],
+      ];
+      const kv = `<dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`).join("")}</dl>`;
+      return kv + (d.output ? `<pre>${esc(d.output)}</pre>` : "");
+    }
+    if (r.kind === "workflow") {
+      const phases = (d.phases || []).map((x) => `${x.title || ""}${x.detail ? " · " + x.detail : ""}`);
+      const agents = (d.agents || []).map((a) => `${a.label || a.agentId || ""} · ${a.status || ""}${a.phase ? " · " + a.phase : ""}`);
+      const logs = (d.logs || []).map((l) => (typeof l === "string" ? l : JSON.stringify(l)));
+      const parts = [];
+      if (phases.length) parts.push(`<div class="muted">阶段</div><pre>${esc(phases.join("\n"))}</pre>`);
+      if (agents.length) parts.push(`<div class="muted">子代理</div><pre>${esc(agents.join("\n"))}</pre>`);
+      if (logs.length) parts.push(`<div class="muted">日志</div><pre>${esc(logs.join("\n"))}</pre>`);
+      if (d.result) parts.push(`<div class="muted">结果</div><pre>${esc(d.result)}</pre>`);
+      if (d.error) parts.push(`<div class="muted">错误</div><pre>${esc(d.error)}</pre>`);
+      return parts.join("") || '<div class="muted">还没有内容</div>';
+    }
+    // elicit：MCP 服务器要的那点输入。
+    const rows = [
+      ["服务器", d.server || "—"],
+      ["标题", d.heading || "—"],
+      ["域名", d.urlDomain || "—"],
+    ];
+    const parts = [`<dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`).join("")}</dl>`];
+    if (d.message) parts.push(`<div class="prose">${esc(d.message)}</div>`);
+    if (d.url) parts.push(`<div class="mono">${esc(d.url)}</div>`);
+    if (d.urlWarning) parts.push(`<div class="muted">${esc(d.urlWarning)}</div>`);
+    return parts.join("");
+  };
+
+  const filesBlock = (ch) => {
+    const files = (ch && ch.files) || [];
+    if (!files.length) return '<div class="muted">这一轮没有文件改动</div>';
+    const rows = files.map((f) => `<div class="mono">${esc(f.path)} <span class="muted">${esc(f.status || "")} +${f.added ?? 0} −${f.removed ?? 0}</span></div>`).join("");
+    return rows + `<div class="muted">共 +${ch.added ?? 0} −${ch.removed ?? 0}${ch.reverted ? " · 已撤销" : ""}</div>`;
+  };
+
   function drawInspector() {
     const [t, r] = record(state.selected || "");
     const ins = $("inspector");
     if (!r) { ins.hidden = true; return; }
     ins.hidden = false;
     $("insTitle").textContent = `${LABEL[r.kind] || r.kind}${r.name ? " · " + r.name : ""}`;
-    const tabs = r.kind === "tool" ? ["参数", "结果", "计时"] : ["内容", "计时"];
+    const TABS = {
+      tool: ["参数", "结果", "计时"],
+      ask: ["题目", "计时"],
+      plan: ["计划", "计时"],
+      elicit: ["详情", "计时"],
+      subagent: ["详情", "计时"],
+      workflow: ["详情", "计时"],
+      changes: ["文件", "计时"],
+    };
+    const tabs = TABS[r.kind] || ["内容", "计时"];
     if (!tabs.includes(state.tab)) state.tab = tabs[0];
     $("tabs").innerHTML = tabs.map((x) => `<button class="tab ${x === state.tab ? "on" : ""}" data-tab="${x}">${x}</button>`).join("");
     let body = "";
-    if (state.tab === "内容") body = `<div class="prose">${esc(r.text || "（空）")}</div>`;
+    if (state.tab === "内容") {
+      body = (r.kind === "system" || r.kind === "reminder")
+        ? `<pre>${esc(r.text || "（空）")}</pre>${r.truncated ? `<div class="muted">已截断，原 ${r.chars} 字</div>` : ""}`
+        : `<div class="prose">${esc(r.text || "（空）")}</div>`;
+    }
+    else if (state.tab === "题目") body = askDetail(r.data);
+    else if (state.tab === "计划") body = `<pre>${esc((r.data && r.data.body) || "（计划是空的）")}</pre>`;
+    else if (state.tab === "详情") body = detailBlock(r);
+    else if (state.tab === "文件") body = filesBlock(r.data);
     else if (state.tab === "参数") body = `<pre>${esc(JSON.stringify(r.args ?? {}, null, 2))}</pre>`;
     else if (state.tab === "结果") body = r.output == null ? '<div class="muted">还没有结果</div>' : `<pre>${esc(prettyMaybe(r.output))}</pre>`;
     else {
