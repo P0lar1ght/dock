@@ -327,9 +327,31 @@ function withLastCompaction(state: ThreadState, progress: CompactionProgress): T
 
 // ---- 查询 ----
 
-/** 最后一轮还在跑。 */
+/**
+ * 这一轮有没有真在干活的痕迹：用户消息、正文、思考、工具。
+ *
+ * 光有交互（权限 / 提问 / 计划 / MCP elicitation）在等用户不算：那是模型停下来等用户，
+ * 不是在跑任务。网关在没有轮可挂时会给这类交互单开一轮（见 `elicit/requested`），
+ * 那一轮只有交互项 —— 拿它当「运行中」会让界面显示成 agent 正在忙。
+ *
+ * 这里用白名单列「干活类」kind：没列到的 kind 默认不算在干活（宁可少报忙碌，不误报）。
+ * 以后给 `TurnItem` 加新的干活类 kind（比如子代理活动）时，记得同步加到这里。
+ */
+export function turnHasActivity(turn: Turn | undefined): boolean {
+  if (!turn) return false;
+  return turn.items.some(
+    (i) => i.kind === 'user' || i.kind === 'text' || i.kind === 'reasoning' || i.kind === 'tool',
+  );
+}
+
+/**
+ * 最后一轮还在跑（真在干活，不是在等用户回答交互）。
+ *
+ * 交互在等用户时看 `pendingItems`：那一轮照样在 `running`，但 agent 并没有在做事。
+ */
 export function isRunning(state: ThreadState): boolean {
-  return state.turns[state.turns.length - 1]?.status === 'running';
+  const last = state.turns[state.turns.length - 1];
+  return last?.status === 'running' && turnHasActivity(last);
 }
 
 export type PendingItem = Extract<TurnItem, { kind: 'permission' | 'question' | 'plan' | 'elicit' }>;

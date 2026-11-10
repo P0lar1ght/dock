@@ -34,6 +34,8 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `browser/view/tabs`（会话的标签页列表推送）+ `browser/view/tab`（切换 / 新开 / 关闭）：
     // 面板的标签栏。和 agent 共用当前页。
     ("browserTabs", true),
+    // `browser/view/navigate` 的 `action: "hard_reload"`：强制重新加载（绕过缓存）。
+    ("browserHardReload", true),
     // `desktop/view/*`：桌面面板的实时画面（agent 操作的窗口，经 cua-driver 只截图）。
     ("desktopView", true),
     // `desktop/view/cursor` / `desktop/view/status`：agent 光标（画在实时画面上）和画面状态

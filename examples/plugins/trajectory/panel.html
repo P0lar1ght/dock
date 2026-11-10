@@ -18,8 +18,8 @@
   .muted { color: var(--dock-ink-4); }
   .mono { font-family: var(--dock-mono); }
 
-  /* 计时总览：三条轨道，拖动选时间段。 */
-  .overview { position: relative; height: 58px; margin: 8px 12px 0; border: 1px solid var(--dock-line-soft); border-radius: 8px; background: var(--dock-surface); cursor: crosshair; user-select: none; overflow: hidden; flex-shrink: 0; }
+  /* 计时总览：四条轨道，拖动选时间段。 */
+  .overview { position: relative; height: 76px; margin: 8px 12px 0; border: 1px solid var(--dock-line-soft); border-radius: 8px; background: var(--dock-surface); cursor: crosshair; user-select: none; overflow: hidden; flex-shrink: 0; }
   .lane { position: absolute; left: 0; right: 0; height: 12px; }
   .lane-label { position: absolute; left: 6px; font-size: 9px; color: var(--dock-ink-5); line-height: 12px; pointer-events: none; z-index: 1; }
   .track { position: absolute; left: 34px; right: 8px; top: 0; bottom: 0; }
@@ -30,6 +30,7 @@
   .seg.tool { background: #ff9f0aaa; }
   .seg.turn { background: #34c75955; }
   .seg.err { background: #ff3b30aa; }
+  .seg.ctx { background: #34c75999; }
   .sel { position: absolute; top: 0; bottom: 0; background: #0a84ff1f; border-left: 1px solid var(--dock-accent); border-right: 1px solid var(--dock-accent); pointer-events: none; }
   .filter-note { margin: 4px 12px 0; font-size: 11px; color: var(--dock-ink-4); }
   .filter-note a { color: var(--dock-accent); cursor: pointer; }
@@ -55,6 +56,8 @@
   .kind.reasoning { color: #8e44ad; }
   .kind.tool { color: #b4690e; }
   .kind.error, .row .err { color: var(--dock-danger); }
+  .kind.system { color: #0b7285; }
+  .kind.reminder { color: #a15c07; }
   .text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tool-name { font-family: var(--dock-mono); }
   .dur { font-family: var(--dock-mono); font-size: 11px; color: var(--dock-ink-4); }
@@ -113,6 +116,12 @@
   };
 
   // ---- 事件 → 轨迹（轮次 → 记录） ----
+  // 上下文正文的第一行（摘要用）：全文可能几万字。
+  const firstLine = (text) => {
+    const line = String(text || "").split("\n").map((s) => s.trim()).find(Boolean) || "";
+    return line.length > 80 ? line.slice(0, 80) + "…" : line;
+  };
+
   function build(events) {
     const turns = [];
     let turn = null, step = 0, cur = null, boundary = null;
@@ -164,6 +173,13 @@
           boundary = e.at; break;
         }
         case "item/compaction": push({ kind: "compaction", text: "上下文压缩", start: e.at, end: e.at }); break;
+        // harness 上下文：这一轮的系统提示与注入块（不是对话，是模型被喂的东西）。
+        case "item/system_prompt":
+          push({ kind: "system", text: p.text || "", chars: p.chars, truncated: p.truncated, start: e.at, end: e.at });
+          break;
+        case "item/system_reminder":
+          push({ kind: "reminder", text: p.text || "", chars: p.chars, truncated: p.truncated, start: e.at, end: e.at });
+          break;
         case "turn/completed": t.end = e.at; t.status = p.status || "completed"; t.error = p.error || ""; cur = null; break;
       }
     }
@@ -246,7 +262,7 @@
     const [lo, hi] = s, w = hi - lo;
     const x = (t) => ((t - lo) / w) * 100;
     const seg = (cls, a, b, top) => (a == null ? "" : `<div class="seg ${cls}" style="left:${x(a)}%;width:${Math.max(0, x(b ?? a) - x(a))}%;top:${top}px"></div>`);
-    let html = '<div class="lane-label" style="top:3px">轮次</div><div class="lane-label" style="top:21px">模型</div><div class="lane-label" style="top:39px">工具</div><div class="track">';
+    let html = '<div class="lane-label" style="top:3px">轮次</div><div class="lane-label" style="top:21px">模型</div><div class="lane-label" style="top:39px">工具</div><div class="lane-label" style="top:57px">上下文</div><div class="track">';
     for (const t of state.turns) {
       html += seg(t.status === "failed" ? "err" : "turn", t.start, t.end || hi, 3);
       for (const r of t.records) {
@@ -256,6 +272,8 @@
         } else if (r.kind === "tool") {
           if (r.wait != null) html += seg("wait", r.start - r.wait, r.start, 21);
           html += seg(r.status === "failed" ? "err" : "tool", r.start, r.end || hi, 39);
+        } else if (r.kind === "system" || r.kind === "reminder") {
+          html += seg("ctx", r.start, r.start, 57);
         }
       }
     }
@@ -288,7 +306,7 @@
     });
   })();
 
-  const LABEL = { user: "你", assistant: "回复", reasoning: "思考", tool: "工具", permission: "审批", compaction: "压缩" };
+  const LABEL = { user: "你", assistant: "回复", reasoning: "思考", tool: "工具", permission: "审批", compaction: "压缩", system: "系统提示", reminder: "注入" };
 
   function visible(r) {
     if (state.range) {
@@ -303,6 +321,10 @@
   function rowText(r) {
     if (r.kind === "tool") return `<span class="tool-name">${esc(r.name)}</span> <span class="muted">${esc(argSummary(r.args))}</span>`;
     if (r.kind === "permission") return `${esc(r.text)} <span class="muted">${r.decision ? (r.decision === "approve" ? "· 允许" : "· 拒绝") : "· 等待"}</span>`;
+    if (r.kind === "system" || r.kind === "reminder") {
+      const n = r.chars != null ? `${r.chars} 字` : "";
+      return `<span class="muted">${esc(n)}</span> ${esc(firstLine(r.text))}`;
+    }
     return esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）");
   }
 
@@ -376,7 +398,11 @@
     if (!tabs.includes(state.tab)) state.tab = tabs[0];
     $("tabs").innerHTML = tabs.map((x) => `<button class="tab ${x === state.tab ? "on" : ""}" data-tab="${x}">${x}</button>`).join("");
     let body = "";
-    if (state.tab === "内容") body = `<div class="prose">${esc(r.text || "（空）")}</div>`;
+    if (state.tab === "内容") {
+      body = (r.kind === "system" || r.kind === "reminder")
+        ? `<pre>${esc(r.text || "（空）")}</pre>${r.truncated ? `<div class="muted">已截断，原 ${r.chars} 字</div>` : ""}`
+        : `<div class="prose">${esc(r.text || "（空）")}</div>`;
+    }
     else if (state.tab === "参数") body = `<pre>${esc(JSON.stringify(r.args ?? {}, null, 2))}</pre>`;
     else if (state.tab === "结果") body = r.output == null ? '<div class="muted">还没有结果</div>' : `<pre>${esc(prettyMaybe(r.output))}</pre>`;
     else {

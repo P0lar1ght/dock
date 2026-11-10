@@ -544,6 +544,7 @@ async fn handshake_initialize_is_dock1() {
     assert_eq!(init["result"]["capabilities"]["hostTools"], false);
     assert_eq!(init["result"]["capabilities"]["imageInputs"], true);
     assert_eq!(init["result"]["capabilities"]["slash"], true);
+    assert_eq!(init["result"]["capabilities"]["browserHardReload"], true);
     assert_eq!(
         init["result"]["connection"]["companion"]["status"],
         "listening"
