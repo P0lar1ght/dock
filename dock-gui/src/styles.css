@@ -1,0 +1,1033 @@
+/* 只扫描 src/：wonder-ui/ 是设计参考，不参与构建。 */
+@import "tailwindcss" source(".");
+
+/* 浅色主题色板，取自 wonder-ui/DockShellLightGlass.tsx。 */
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
+  /* 对话正文字体：设置 › 外观可换（dock/prefs.ts 的 CHAT_FONTS）。 */
+  --font-chat: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+
+  --color-window: #f5f5f7;
+  --color-sidebar: #f7f7f8;
+  --color-pane: #fafafa;
+  --color-fill: #f0f0f2;
+  --color-selected: #e8e8ec;
+  --color-hover: #ededf0;
+
+  --color-line: #e8e8ec;
+  --color-line-soft: #ececf0;
+  --color-line-strong: #e5e5ea;
+
+  --color-ink: #1c1c1e;
+  --color-ink-2: #3a3a3c;
+  --color-ink-3: #636366;
+  --color-ink-4: #8e8e93;
+  --color-ink-5: #c7c7cc;
+
+  --color-accent: #0a84ff;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--color-window);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* 界面外壳默认不可选中；对话正文单独打开 select-text。 */
+  user-select: none;
+  cursor: default;
+}
+
+/* 拖分屏竖线时（SplitDivider）：iframe 不吞指针事件，整窗保持拖动光标。 */
+.split-dragging iframe {
+  pointer-events: none;
+}
+.split-dragging,
+.split-dragging * {
+  cursor: col-resize !important;
+}
+
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #d1d1d6 transparent;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.caret-blink {
+  animation: caret-blink 1s step-end infinite;
+}
+
+/* ---- 动效（docs/MOTION.md） ---- */
+:root {
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 240ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* 统一的过渡：只动颜色 / 透明度 / transform。 */
+.motion-colors {
+  transition: background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
+}
+
+@keyframes enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.enter-up {
+  animation: enter-up var(--dur-base) var(--ease-out) both;
+}
+
+/* 轻提示：淡入，停一会儿，2 秒时淡完（插件面板「已关闭面板」）。 */
+@keyframes toast-2s {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  8%,
+  80% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.toast-2s {
+  animation: toast-2s 2s var(--ease-out) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 全局把动画时长压成 0 会让它停在最后一帧（透明）：直接不动画，靠计时器收起。 */
+  .toast-2s {
+    animation: none;
+  }
+}
+
+@keyframes enter-fade {
+  from {
+    opacity: 0;
+  }
+}
+.enter-fade {
+  animation: enter-fade var(--dur-base) var(--ease-out) both;
+}
+
+/* 弹出层：从触发点轻微放大。 */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+.pop-in {
+  animation: pop-in var(--dur-fast) var(--ease-out) both;
+}
+
+/* 右侧抽屉（PR 详情）：从右边滑进来。 */
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+.slide-in-right {
+  animation: slide-in-right var(--dur-base) var(--ease-out) both;
+}
+
+/* 骨架屏：浅灰底上一截亮光缓慢扫过。 */
+@keyframes skeleton-sweep {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+.skeleton {
+  background: linear-gradient(90deg, #f2f2f7 25%, #fafafc 50%, #f2f2f7 75%) 0 0 / 200% 100%;
+  animation: skeleton-sweep 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .slide-in-right,
+  .skeleton {
+    animation: none;
+  }
+}
+
+/* 折叠 / 展开：grid 行高 0fr ↔ 1fr，不动 height。 */
+.fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows var(--dur-base) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out);
+}
+.fold[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.fold > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rotate-open {
+  transition: transform var(--dur-base) var(--ease-out);
+}
+.rotate-open[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+/* 子代理卡在跑时图标轻轻呼吸（设计 she 的注释）。 */
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.breathe {
+  animation: breathe 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .breathe {
+    animation: none;
+  }
+}
+
+/* 运行中脉冲点。 */
+@keyframes pulse-halo {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+.pulse-halo {
+  animation: pulse-halo 1.4s var(--ease-out) infinite;
+}
+
+/* 启动画面（LaunchSplash）：描线 0–700ms，填色 450–800ms，描线随后退掉，之后呼吸。
+   平面模式是不透的窗口底色；玻璃模式见下方 [data-material="glass"] .launch-splash。 */
+.launch-splash {
+  background-color: var(--color-window);
+  transition: opacity var(--dur-slow) var(--ease-out);
+}
+.launch-splash[data-leaving] {
+  opacity: 0;
+}
+.launch-mark {
+  width: 46px;
+  height: 50px;
+  color: var(--color-ink-3);
+  overflow: visible;
+  transition: transform var(--dur-slow) var(--ease-out);
+  animation:
+    launch-mark-in var(--dur-slow) var(--ease-out) backwards,
+    launch-breathe 2.4s ease-in-out 900ms infinite;
+}
+.launch-splash[data-leaving] .launch-mark {
+  transform: scale(1.04);
+}
+.launch-mark-fill {
+  fill: currentColor;
+  animation: launch-fill 350ms var(--ease-out) 450ms both;
+}
+.launch-mark-stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 14;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  animation:
+    launch-draw 700ms cubic-bezier(0.65, 0, 0.35, 1) both,
+    launch-stroke-out 200ms var(--ease-out) 700ms forwards;
+}
+.launch-caption {
+  animation: enter-fade var(--dur-slow) var(--ease-out) 1500ms both;
+}
+@keyframes launch-mark-in {
+  from {
+    transform: scale(0.96);
+  }
+}
+@keyframes launch-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes launch-fill {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes launch-stroke-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes launch-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 全局把时长压成 0 会让描线停在终点、呼吸停在首帧，正好是静止的实心标；这里只去掉延迟。 */
+  .launch-mark,
+  .launch-mark-fill,
+  .launch-mark-stroke,
+  .launch-caption {
+    animation-delay: 0ms;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    transition-duration: 0ms !important;
+  }
+}
+
+/* 鼠标点出来的焦点不画框；键盘 Tab 过来的（focus-visible）照常画。 */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* 「正在思考」：一道亮光从左扫到右（参考 TUI 的思考指示）。文字本身是灰的，亮的是扫过的那一截。 */
+@keyframes shimmer-text {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+.shimmer-text {
+  background: linear-gradient(
+      90deg,
+      var(--color-ink-4) 0%,
+      var(--color-ink-4) 40%,
+      var(--color-ink) 50%,
+      var(--color-ink-4) 60%,
+      var(--color-ink-4) 100%
+    )
+    0 0 / 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-text 1.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text {
+    animation: none;
+    color: var(--color-ink-4);
+    background: none;
+  }
+}
+
+/* 压缩卡的标题：正文色的字，一截浅色亮光扫过（shimmer-text 的反相）。 */
+.shimmer-title {
+  background: linear-gradient(
+      90deg,
+      var(--color-ink) 0%,
+      var(--color-ink) 40%,
+      #a1a1a6 50%,
+      var(--color-ink) 60%,
+      var(--color-ink) 100%
+    )
+    0 0 / 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-text 1.8s linear infinite;
+}
+
+/* 不确定的进度：一截亮条从左扫到右，循环。只动 transform。 */
+@keyframes sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+.sweep {
+  left: 0;
+  animation: sweep 1.4s var(--ease-out) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-title {
+    animation: none;
+    color: var(--color-ink);
+    background: none;
+  }
+  .sweep {
+    animation: none;
+    left: 33%;
+  }
+}
+
+/* 实时画面上的 agent 光标（AgentCursor.tsx）。设计：DesktopAgentCursorStates。
+   位置用容器查询单位：图层是 size 容器，光标 translate(x·100cqw, y·100cqh)。
+   滑行 420ms 带一点回弹；到点后按下 / 涟漪 / 影子落下都延后 420ms 开始。 */
+.agent-cursor-layer {
+  container-type: size;
+}
+.agent-cursor {
+  transition: transform 420ms cubic-bezier(0.34, 1.2, 0.64, 1);
+  will-change: transform;
+}
+.agent-cursor-arrow {
+  transform-origin: 0 0;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+.agent-cursor-press {
+  animation: agent-cursor-press 240ms var(--ease-out) 420ms both;
+}
+@keyframes agent-cursor-press {
+  40% {
+    transform: scale(0.86);
+  }
+}
+.agent-cursor-trail {
+  animation: agent-cursor-trail 720ms var(--ease-out) both;
+}
+@keyframes agent-cursor-trail {
+  60% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+/* 延迟期间不显示：基态透明，动画只往后填充。 */
+.agent-cursor-ripple {
+  opacity: 0;
+  animation: agent-cursor-ripple 480ms var(--ease-out) forwards;
+}
+@keyframes agent-cursor-ripple {
+  0% {
+    opacity: 0.9;
+    transform: scale(0.35);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+.agent-cursor-ghost {
+  transform: rotate(-6deg);
+  animation: agent-cursor-drop 200ms var(--ease-in) 420ms both;
+}
+@keyframes agent-cursor-drop {
+  from {
+    opacity: 0.9;
+    transform: rotate(-6deg) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: rotate(-6deg) scale(0.6);
+  }
+}
+.agent-cursor-nudge {
+  transform: rotate(var(--nudge-rot));
+  animation: agent-cursor-nudge 400ms var(--ease-out) both;
+}
+@keyframes agent-cursor-nudge {
+  50% {
+    transform: rotate(var(--nudge-rot)) translateY(6px);
+  }
+}
+.agent-cursor-keys {
+  animation: agent-cursor-keys 1100ms var(--ease-out) both;
+}
+@keyframes agent-cursor-keys {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+  15%,
+  82% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-cursor-trail,
+  .agent-cursor-ripple,
+  .agent-cursor-ghost {
+    display: none;
+  }
+}
+
+/* 浏览器标签栏：横向滚动不显示滚动条；页面新开的标签页从左滑进来、闪一下蓝边（900ms）。 */
+.tab-strip {
+  scrollbar-width: none;
+}
+.tab-strip::-webkit-scrollbar {
+  display: none;
+}
+@keyframes tab-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+}
+@keyframes tab-flash {
+  from {
+    box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.55);
+  }
+  to {
+    box-shadow: 0 0 0 2px rgba(10, 132, 255, 0);
+  }
+}
+.tab-enter {
+  animation: tab-enter var(--dur-slow) var(--ease-out) both;
+}
+.tab-enter::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9px 9px 0 0;
+  pointer-events: none;
+  animation: tab-flash 900ms var(--ease-out) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-enter,
+  .tab-enter::after {
+    animation: none;
+  }
+}
+
+/* ---- 对话正文（components/Markdown.tsx） ---- */
+
+/* 回复还在流：末尾一根闪烁的细竖线。代码块、表格、公式块后面不挂。 */
+.md-live > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
+.md-live > :is(ul, ol):last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 3px;
+  vertical-align: -0.17em;
+  border-radius: 1px;
+  background: var(--color-accent);
+  animation: md-caret 1s steps(1) infinite;
+}
+@keyframes md-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 块级公式太宽时横向滚，不撑破对话流。 */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
+/* Mermaid 图按容器宽度缩放，居中。 */
+.md-mermaid svg {
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .md-live > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
+  .md-live > :is(ul, ol):last-child > li:last-child::after {
+    animation: none;
+  }
+}
+
+/* 代码块正文的底色：高亮主题给的，CodeBlock.tsx 放在 --code-bg（玻璃材质下另调透明度）。 */
+.md-code {
+  background: var(--code-bg, #fbfbfc);
+}
+
+/* ---- 玻璃材质（设置 › 外观 › 材质；默认平面 = 设计稿原样） ----
+   手法取自 Solid Glass（MIT，github.com/deeplethe/solid-glass）：
+   - 质感只在边上：顶边一道高光、一圈细线、底下一层阴影；面上不铺渐变。
+   - 厚度即层级：侧栏最薄，菜单 / 弹层最厚、最不透。
+   - 一种状态：选中的行是一小块透明玻璃。
+   规则不进 @layer：要压过 Tailwind 的 bg-white/95、border、shadow 工具类。 */
+:root {
+  /* 白色层的强度：1 − 设置里的透明度（prefs.ts 写在 <html> 上）。下面各层白都按它缩放，0.5 = 默认观感。
+     弹层、对话框、输入框不跟它走：浮着的东西要一直读得清。 */
+  --glass-alpha: 0.5;
+  --glass-page: oklch(0.925 0.007 265);
+  /* 玻璃底下的三处光，淡到整页仍像一块平面。 */
+  --glass-light-1: oklch(0.68 0.13 165 / 7%);
+  --glass-light-2: oklch(0.75 0.08 240 / 11%);
+  --glass-light-3: oklch(0.68 0.13 165 / 4%);
+
+  --glass-sidebar: oklch(0.975 0.004 265 / calc(var(--glass-alpha) * 110%));
+  --glass-popover: oklch(0.985 0.003 265 / 84%);
+  --glass-popover-solid: oklch(0.985 0.003 265 / 97%);
+  --glass-blur: blur(26px) saturate(180%);
+
+  --glass-rim: oklch(1 0 0 / 90%);
+  --glass-inner: oklch(1 0 0 / 35%);
+  --glass-edge: oklch(0.38 0.03 265 / 12%);
+  --glass-popover-edge: oklch(0.38 0.03 265 / 22%);
+  --glass-popover-under: oklch(0.38 0.03 265 / 16%);
+  --glass-contact: oklch(0.25 0.03 265 / 6%);
+  --glass-shade: oklch(0.3 0.06 265 / 28%);
+  --glass-lift: oklch(0.25 0.03 265 / 14%);
+  --glass-state: oklch(1 0 0 / calc(var(--glass-alpha) * 100% + 18%));
+  /* 阅读面（会话区、终端）：最厚的一层，几乎是白的，只透一点底色。 */
+  --glass-pane: oklch(0.995 0.002 265 / calc(var(--glass-alpha) * 80% + 2%));
+}
+
+/* 窗口底：不透明的冷灰 + 三处光。fixed：工作台滚动时光不跟着走。 */
+[data-material="glass"] body,
+[data-material="glass"] .bg-window {
+  background-color: var(--glass-page);
+  background-image:
+    radial-gradient(62rem 42rem at 12% -6rem, var(--glass-light-1), transparent 62%),
+    radial-gradient(52rem 38rem at 92% 4rem, var(--glass-light-2), transparent 60%),
+    radial-gradient(64rem 46rem at 55% 110%, var(--glass-light-3), transparent 62%);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+/* 侧栏：最薄的一片，立着，朝页面那一侧有光。
+   背后只有窗口底（平滑的渐变），模糊了也一样：不加 backdrop-filter，省一层合成。 */
+[data-material="glass"] .glass-sidebar {
+  background-color: var(--glass-sidebar);
+  border-right-color: var(--glass-edge);
+  box-shadow:
+    inset -1px 0 0 var(--glass-inner),
+    inset 0 1px 0 var(--glass-inner);
+}
+
+/* 启动画面：和侧栏同一层白，糊住底下还没铺好的界面（Codex 那种磨砂整窗）。 */
+[data-material="glass"] .launch-splash {
+  background-color: var(--glass-sidebar);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* 选中的那一行：一小块透明玻璃，顶边亮、细线围一圈、轻轻落在侧栏上。 */
+[data-material="glass"] .glass-state {
+  background-color: var(--glass-state);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 0 0 1px var(--glass-edge),
+    0 1px 2px var(--glass-contact);
+}
+
+/* 阅读面：会话区、侧边聊天、子代理、终端。不是一块白板，是最厚的那层玻璃：
+   透一点底下的材质，和侧栏连成一块；字照样读得清。 */
+[data-material="glass"] .glass-pane {
+  background-color: var(--glass-pane);
+}
+/* 整页（Pull Request、定时任务、预设编辑器）盖在会话区上：玻璃是半透的，后面的兄弟节点（会话区、面板）藏起来，
+   不卸载、状态都在（同设置页的 settings-open）。 */
+[data-material="glass"] .glass-page ~ * {
+  visibility: hidden;
+}
+/* 工作台的格子：只画玻璃边 + 顶边一道光 + 落影（拖动时的强调色边照旧）。
+   玻璃那一层由里面的会话区（glass-pane）给，格子自己不铺底，不然叠两层，比壳内的会话区白一截。 */
+[data-material="glass"] .glass-sheet {
+  background-color: transparent;
+}
+[data-material="glass"] .glass-sheet:not(.border-accent) {
+  border-color: var(--glass-edge);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 1px 2px var(--glass-contact),
+    0 14px 34px -18px var(--glass-shade);
+}
+/* 终端底透明时，xterm.css 给 .xterm-viewport 的 #000 会露出来，整块变黑。 */
+[data-material="glass"] .glass-pane .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
+/* 会话里的东西（只在 glass-pane 里）：块是半透的白玻璃 + 玻璃边。
+   不加模糊：它们在滚动区里，模糊每帧都要重算，而背后只是阅读面那层玻璃。 */
+[data-material="glass"] .glass-pane .md-surface {
+  background-color: oklch(1 0 0 / calc(var(--glass-alpha) * 84% + 3%));
+  border-color: transparent;
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 0 0 1px var(--glass-edge),
+    0 1px 2px var(--glass-contact);
+}
+/* 块的头（代码块语言栏、表头、「展开」条）：一层很淡的烟灰。 */
+[data-material="glass"] .glass-pane .md-surface-head {
+  background-color: oklch(0.3 0.02 265 / 4%);
+}
+[data-material="glass"] .glass-pane .md-surface-fill {
+  background-color: oklch(1 0 0 / calc(var(--glass-alpha) * 70%));
+}
+[data-material="glass"] .glass-pane .md-quote {
+  background-color: oklch(0.3 0.02 265 / 5%);
+}
+[data-material="glass"] .glass-pane .md-inline-code {
+  background-color: oklch(0.3 0.02 265 / 7%);
+}
+/* 代码正文：浅色高亮主题调半透；深色主题留厚，浅色字才读得清。 */
+[data-material="glass"] .glass-pane .md-code {
+  background: color-mix(in srgb, var(--code-bg, #fbfbfc) 40%, transparent);
+}
+[data-material="glass"] .glass-pane .md-code[data-dark] {
+  background: color-mix(in srgb, var(--code-bg) 90%, transparent);
+}
+/* 折起的长内容（计划卡）：平面是盖一层白渐变；玻璃底是半透的，白渐变会成一道白带，改成正文自己往下淡出。 */
+[data-material="glass"] .glass-fade {
+  background-image: none;
+}
+[data-material="glass"] .glass-fold {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent);
+}
+/* 工具卡代码的行号栏：半透了还钉在左边，横向滚动时代码会从数字底下透出来；玻璃下跟着一起滚。 */
+[data-material="glass"] .glass-pane .md-code-gutter {
+  position: static;
+  background: transparent !important;
+}
+/* 你发的消息：一小块透明玻璃。 */
+[data-material="glass"] .glass-pane .glass-bubble {
+  background-color: oklch(1 0 0 / calc(var(--glass-alpha) * 120%));
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 0 0 1px var(--glass-edge),
+    0 1px 2px var(--glass-contact);
+}
+/* 阅读面里的分隔线：不透的 #e8e8ec 在玻璃上是一道亮痕，换成半透的深色细线。 */
+[data-material="glass"] .glass-pane .border-line-soft {
+  border-color: oklch(0.38 0.03 265 / 8%);
+}
+[data-material="glass"] .glass-pane .border-line {
+  border-color: oklch(0.38 0.03 265 / 11%);
+}
+[data-material="glass"] .glass-pane .border-line-strong {
+  border-color: oklch(0.38 0.03 265 / 15%);
+}
+[data-material="glass"] .glass-pane .bg-line {
+  background-color: oklch(0.38 0.03 265 / 11%);
+}
+/* 上面的线色规则和 .md-surface 一样具体、又写在后面：块自己的边框在这里再清掉一次，细线交给阴影画，免得两圈。 */
+[data-material="glass"] .glass-pane .md-surface {
+  border-color: transparent;
+}
+
+/* 玻璃面（阅读面 glass-pane、侧栏 glass-sidebar）里手写的浅色底：统一换成玻璃，不用一个个组件改类名。
+   白 → 半透白，灰 → 烟灰，浅色提示底（蓝红橙绿紫）→ 同色的半透；彩色实底（按钮、强调色、黑按钮）不动。
+   浮着的东西（absolute / fixed、弹层、对话框）、自带玻璃画法的类，
+   和 glass-keep（开关圆钮、PDF 页面、表格、画布这类「纸」）保持原样。新写的浅色底按色系加进对应一组。 */
+/* 白：半透白 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-white, .bg-pane, .bg-\[\#fafafa\], .bg-\[\#fafafb\], .bg-\[\#fbfbfb\], .bg-\[\#fbfbfd\], .bg-\[\#fcfcfd\]):not(.absolute, .fixed, .glass-pane, .glass-popover, .glass-dialog, .glass-card, .glass-tile, .glass-state, .glass-bubble, .md-surface, .md-surface-head, .md-surface-fill, .md-quote, .md-inline-code, .glass-keep) {
+  background-color: oklch(1 0 0 / calc(var(--glass-alpha) * 90% + 5%));
+}
+/* 浅灰：一层很淡的烟灰 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-window, .bg-sidebar, .bg-\[\#fafafc\], .bg-\[\#f5f5f7\], .bg-\[\#f7f7f8\], .bg-\[\#f6f6f8\], .bg-\[\#f3f3f5\]):not(.absolute, .fixed, .glass-pane, .glass-popover, .glass-dialog, .glass-card, .glass-tile, .glass-state, .glass-bubble, .md-surface, .md-surface-head, .md-surface-fill, .md-quote, .md-inline-code, .glass-keep) {
+  background-color: oklch(0.3 0.02 265 / 4%);
+}
+/* 填充（输入框、分段控件底、图标圆） */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-fill, .bg-\[\#f2f2f7\], .bg-\[\#f2f2f4\], .bg-\[\#f0f0f2\], .bg-\[\#f0f0f2e6\], .bg-\[\#f0f0f3\], .bg-\[\#efeff2\], .bg-\[\#eaeaee\], .bg-\[\#eaebee\], .bg-\[\#ececf0\]):not(.absolute, .fixed, .glass-pane, .glass-popover, .glass-dialog, .glass-card, .glass-tile, .glass-state, .glass-bubble, .md-surface, .md-surface-head, .md-surface-fill, .md-quote, .md-inline-code, .glass-keep) {
+  background-color: oklch(0.3 0.02 265 / 7%);
+}
+/* 选中 / 标签 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-selected, .bg-hover, .bg-\[\#e8e8ec\], .bg-\[\#e8e8ed\], .bg-\[\#e5e5ea\], .bg-\[\#e4e6ea\]):not(.absolute, .fixed, .glass-pane, .glass-popover, .glass-dialog, .glass-card, .glass-tile, .glass-state, .glass-bubble, .md-surface, .md-surface-head, .md-surface-fill, .md-quote, .md-inline-code, .glass-keep) {
+  background-color: oklch(0.3 0.02 265 / 9%);
+}
+/* 浅蓝 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#f0f7ff\], .bg-\[\#eaf3ff\], .bg-\[\#eef5ff\], .bg-\[\#f5f9ff\], .bg-\[\#f5f8ff\], .bg-\[\#e8f1ff\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, var(--color-accent) 9%, transparent);
+}
+/* 蓝 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#dbeafe\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+/* 浅红 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#fef2f2\], .bg-\[\#fff5f5\], .bg-\[\#fef6f6\], .bg-\[\#fff1f0\], .bg-\[\#fff0ef\], .bg-\[\#fff6f5\], .bg-\[\#fff8f7\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, #ff3b30 8%, transparent);
+}
+/* 红（删掉的行） */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#fdecec\], .bg-\[\#fee2e2\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, #ff3b30 13%, transparent);
+}
+/* 浅橙 / 浅黄 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#fff8e6\], .bg-\[\#fff4cc\], .bg-\[\#fff8eb\], .bg-\[\#fff4dc\], .bg-\[\#fff8e1\], .bg-\[\#fff8ec\], .bg-\[\#fffbea\], .bg-\[\#fffbeb\], .bg-\[\#fff7ed\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, #ff9f0a 11%, transparent);
+}
+/* 黄（标记） */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#fff1a8\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, #ffcc00 38%, transparent);
+}
+/* 浅绿 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#eaf8ee\], .bg-\[\#e8f7ee\], .bg-\[\#e9f7ee\], .bg-\[\#effaf3\], .bg-\[\#f0fdf4\], .bg-\[\#f3fbf6\], .bg-\[\#f6fdf8\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, #34c759 10%, transparent);
+}
+/* 绿（加的行） */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#b7e4c7\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, #34c759 30%, transparent);
+}
+/* 浅紫 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#f5f3ff\], .bg-\[\#faf5ff\], .bg-\[\#f3ecff\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, #af52de 8%, transparent);
+}
+/* 浅粉 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-\[\#fdf2f8\]):not(.absolute, .fixed, .glass-keep) {
+  background-color: color-mix(in srgb, #ff2d55 7%, transparent);
+}
+/* 悬停：不透的 #ededf0 在玻璃上像一块补丁，换半透烟灰。写得比上面具体，压过换过的底色。 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.hover\:bg-hover, .hover\:bg-\[\#ececf0\], .hover\:bg-\[\#f7f7f8\], .hover\:bg-\[\#fafafc\], .hover\:bg-\[\#f5f5f7\], .hover\:bg-\[\#fbfbfc\], .hover\:bg-\[\#e8e8ec\], .hover\:bg-\[\#dcdce0\]):hover:not(.glass-tile, .glass-popover, .glass-keep) {
+  background-color: oklch(0.3 0.02 265 / 9%);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.hover\:bg-\[\#d1d1d6\]):hover:not(.glass-tile, .glass-popover, .glass-keep) {
+  background-color: oklch(0.3 0.02 265 / 15%);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.hover\:bg-\[\#eef5ff\], .hover\:bg-\[\#e2eeff\], .hover\:bg-\[\#e4eefb\]):hover:not(.glass-tile, .glass-popover, .glass-keep) {
+  background-color: color-mix(in srgb, var(--color-accent) 13%, transparent);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.hover\:bg-\[\#fff5f5\]):hover:not(.glass-tile, .glass-popover, .glass-keep) {
+  background-color: color-mix(in srgb, #ff3b30 10%, transparent);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.hover\:bg-\[\#d8f0de\]):hover:not(.glass-tile, .glass-popover, .glass-keep) {
+  background-color: color-mix(in srgb, #34c759 16%, transparent);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.hover\:bg-\[\#fef3c7\], .hover\:bg-\[\#fffbeb\]):hover:not(.glass-tile, .glass-popover, .glass-keep) {
+  background-color: color-mix(in srgb, #ff9f0a 15%, transparent);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.enabled\:hover\:bg-hover, .enabled\:hover\:bg-\[\#f5f5f7\]):enabled:hover {
+  background-color: oklch(0.3 0.02 265 / 9%);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) .group:hover .group-hover\:bg-\[\#eef5ff\] {
+  background-color: color-mix(in srgb, var(--color-accent) 13%, transparent);
+}
+/* 停用的按钮（还不能提交）：浅灰实底换烟灰。 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.disabled\:bg-line-strong, .disabled\:bg-fill, .disabled\:bg-\[\#f2f2f7\]):disabled {
+  background-color: oklch(0.3 0.02 265 / 10%);
+}
+/* 菜单开着的按钮（aria-expanded）。 */
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.aria-expanded\:bg-selected, .aria-expanded\:bg-\[\#e8e8ec\])[aria-expanded="true"] {
+  background-color: oklch(0.3 0.02 265 / 10%);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) .aria-expanded\:bg-\[\#d1d1d6\][aria-expanded="true"] {
+  background-color: oklch(0.3 0.02 265 / 15%);
+}
+/* 分屏拖条那根线：不透的 #e5e5ea 在玻璃上是一道亮痕；悬停照旧变强调色。 */
+[data-material="glass"] .group:not(:hover) > .glass-hairline {
+  background-color: oklch(0.38 0.03 265 / 13%);
+}
+/* 手写色值的分隔线 / 细条同样换半透深色。 */
+[data-material="glass"] .glass-pane :is(.border-\[\#ececf0\], .border-\[\#e5e5ea\], .border-\[\#e8e8ec\]) {
+  border-color: oklch(0.38 0.03 265 / 11%);
+}
+[data-material="glass"] :is(.glass-pane, .glass-sidebar) :is(.bg-line-strong, .bg-line-soft) {
+  background-color: oklch(0.38 0.03 265 / 13%);
+}
+/* 侧栏里的输入框（设置页搜索）：一层淡烟灰。 */
+[data-material="glass"] .glass-field {
+  background-color: oklch(0.3 0.02 265 / 7%);
+}
+/* 侧栏里的分隔线同样换成半透细线。 */
+[data-material="glass"] .glass-sidebar :is(.border-line, .border-line-soft, .border-line-strong) {
+  border-color: oklch(0.38 0.03 265 / 11%);
+}
+[data-material="glass"] .glass-sidebar .bg-line {
+  background-color: oklch(0.38 0.03 265 / 11%);
+}
+
+/* 右侧工具面板：同一种立着的薄片，朝页面的是左边。 */
+[data-material="glass"] .glass-sidebar-right {
+  border-left-color: var(--glass-edge);
+  box-shadow:
+    inset 1px 0 0 var(--glass-inner),
+    inset 0 1px 0 var(--glass-inner);
+}
+
+/* 玻璃上的小块（工具面板的按钮）：一小块透明白玻璃；悬停厚一点。 */
+[data-material="glass"] .glass-tile {
+  background-color: oklch(1 0 0 / calc(var(--glass-alpha) * 110%));
+  border-color: transparent;
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 0 0 1px var(--glass-edge),
+    0 1px 2px var(--glass-contact);
+}
+[data-material="glass"] .glass-tile:hover {
+  background-color: oklch(1 0 0 / calc(var(--glass-alpha) * 110% + 23%));
+}
+/* 开着的那块（如终端）：按下去的烟灰玻璃，上沿压一道阴影。 */
+[data-material="glass"] .glass-tile.glass-tile-on {
+  background-color: oklch(0.3 0.02 265 / 9%);
+  box-shadow:
+    inset 0 1px 2px oklch(0.3 0.06 265 / 16%),
+    inset 0 -1px 0 oklch(1 0 0 / 50%),
+    0 0 0 1px var(--glass-edge);
+}
+
+/* 横条（终端标签栏）：薄片横着放，顶边一道光。 */
+[data-material="glass"] .glass-bar {
+  background-color: var(--glass-sidebar);
+  box-shadow: inset 0 1px 0 var(--glass-inner);
+}
+
+/* 输入框：浮在会话区上的一块卡片厚度的玻璃。底下不滚东西，不加模糊（零成本），质感全在边上。 */
+[data-material="glass"] .glass-card {
+  background-color: oklch(1 0 0 / 92%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 0 0 1px var(--glass-edge),
+    0 1px 2px var(--glass-contact),
+    0 14px 34px -16px var(--glass-shade);
+}
+[data-material="glass"] .glass-card:not(.border-accent) {
+  border-color: transparent;
+}
+/* 聚焦：细线收紧、影子拉长，像被拿起来一点（位移照旧由组件给）。 */
+[data-material="glass"] .glass-card:focus-within:not(.border-accent) {
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 0 0 1px var(--glass-popover-edge),
+    0 2px 4px var(--glass-contact),
+    0 22px 48px -18px var(--glass-shade);
+}
+/* 拖图片进来：留着强调色的边和外圈。 */
+[data-material="glass"] .glass-card.border-accent {
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-accent) 15%, transparent);
+}
+
+/* 对话框：最厚、几乎不透（里面要读要填），浮在遮罩上。 */
+[data-material="glass"] .glass-dialog {
+  background-color: oklch(0.99 0.002 265 / 92%);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    inset 0 -1px 0 var(--glass-popover-under),
+    0 0 0 1px var(--glass-popover-edge),
+    0 32px 80px -24px var(--glass-shade),
+    0 8px 20px -8px var(--glass-lift);
+}
+
+/* 对话框后面的那层磨砂（新建预设）：平面是 85% 的灰，玻璃下变薄，后面的材质还透得出来（模糊照旧）。 */
+[data-material="glass"] .glass-scrim {
+  background-color: oklch(0.97 0.003 265 / 35%);
+}
+
+/* 菜单 / 弹层：最厚的一片，浮得最高；背后的对话流在这里才真被模糊。
+   边框留着宽度（不让布局挪 1px），颜色让给细线阴影。 */
+[data-material="glass"] .glass-popover {
+  background-color: var(--glass-popover);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    inset 0 -1px 0 var(--glass-popover-under),
+    0 0 0 1px var(--glass-popover-edge),
+    0 24px 60px -18px var(--glass-shade),
+    0 6px 16px -6px var(--glass-lift);
+}
+
+/* 原生材质（Tauri 主窗口，prefs.ts 的 syncNativeGlass）：窗口底和侧栏透明，露出 macOS 侧栏材质。
+   会话区、设置页仍是不透的面，读字不受背景影响。 */
+[data-material="glass"][data-native-glass],
+[data-material="glass"][data-native-glass] body,
+[data-material="glass"][data-native-glass] #root,
+[data-material="glass"][data-native-glass] .glass-window {
+  background: transparent;
+}
+[data-material="glass"][data-native-glass] .glass-backdrop {
+  background: transparent;
+}
+/* 侧栏、终端栏：薄薄一层白，跟透明度走。Liquid Glass 透明款几乎无色，全透时字压在桌面上读不清。 */
+[data-material="glass"][data-native-glass] :is(.glass-sidebar, .glass-bar) {
+  background: oklch(0.985 0.003 265 / calc(var(--glass-alpha) * 60%));
+}
+/* 设置页盖在应用上：它的侧栏要透出原生材质，底下的应用先藏起来（visibility，不卸载、状态都在）。
+   预设编辑器（glass-page）是从设置页「编辑」打开的，盖在设置页上面，不能跟着藏——
+   以前它也被藏了，点「编辑」看起来没反应。编辑器开着时轮到设置页藏起来（编辑器是半透的）。 */
+[data-material="glass"][data-native-glass] .glass-window.settings-open > :not(.settings-layer, .glass-page) {
+  visibility: hidden;
+}
+[data-material="glass"][data-native-glass] .glass-window.settings-open > .settings-layer:has(~ .glass-page) {
+  visibility: hidden;
+}
+
+/* 弹层里吸底的一条（斜杠菜单的提示行）：几乎不透，滚到它底下的项不透出来。 */
+[data-material="glass"] .glass-popover-fill {
+  background-color: var(--glass-popover-solid);
+}
+
+/* 右侧面板叠放（components/PanelStack.tsx）：压在下面的页铺底 + 落影，摊开那页的底交给面板自己。 */
+
+/* 右侧面板堆叠：摊开那页是一张片，压在下面的页露出页边（见 components/PanelStack.tsx）。 */
+.stack-layer {
+  background-color: var(--color-pane);
+  box-shadow: 0 0 0 1px var(--color-line-soft);
+}
+.stack-layer-front {
+  box-shadow:
+    0 0 0 1px var(--color-line-soft),
+    -14px 0 30px -14px rgb(0 0 0 / 18%);
+}
+.stack-layer-peek {
+  background-color: var(--color-pane);
+  box-shadow:
+    0 0 0 1.5px var(--color-accent),
+    0 24px 60px -12px rgb(0 0 0 / 30%);
+}
+.stack-edge:hover {
+  background-color: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  color: var(--color-accent);
+}
+[data-material="glass"] .stack-layer {
+  background-color: var(--glass-sidebar);
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 0 0 1px var(--glass-edge),
+    -10px 0 26px -14px var(--glass-shade);
+}
+[data-material="glass"] .stack-layer-front {
+  background-color: transparent;
+  backdrop-filter: none;
+}
+[data-material="glass"] .stack-layer-peek {
+  background-color: var(--glass-popover);
+  box-shadow:
+    0 0 0 1.5px var(--color-accent),
+    0 24px 60px -12px var(--glass-shade);
+}

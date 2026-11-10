@@ -1,0 +1,40 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Tauri / 本地密钥
+src-tauri/target
+src-tauri/gen/schemas
+.env
+.env.*
+!.env.example
+
+# 只提交 GUI 核心代码：设计稿、文档、e2e 脚本留在本地不进仓库
+/wonder-ui/
+/docs/
+/AGENTS.md
+/.vscode/
+/scripts/mcp-apps-e2e/
+/scripts/tool-cards-e2e/
+/scripts/wonder-save.py
