@@ -4223,3 +4223,28 @@ async fn plugin_json_round_trips_any_value() {
         "{out}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_eval_expr_is_opt_in_and_expression_only() {
+    let body = r#"let r = [];
+        r.push(`${host.eval_expr("prev.count > 2 && name == \"x\"", #{ prev: #{ count: 3 }, name: "x" })}`);
+        r.push(`${host.eval_expr("[1, 2, 3].len() * 2")}`);
+        for e in ["let a = 1; a", "host.log(\"x\")", "loop { }", "fn f() { 1 }"] {
+            try { r.push(`${host.eval_expr(e)}`); } catch (err) { r.push("ERR " + `${err}`); }
+        }
+        r.reduce(|acc, v| acc + "\u0001" + v, "")"#;
+    let (root, _h, _p) = boot_probe(body, "allow_eval = true").await;
+    let out = exec(&root, "probe", "{}").await;
+    let parts: Vec<&str> = out.split('\u{1}').skip(1).collect();
+    assert_eq!(parts[0], "true", "{out}");
+    assert_eq!(parts[1], "6", "{out}");
+    // 语句、host、死循环、定义函数都过不去。
+    for p in &parts[2..] {
+        assert!(p.starts_with("ERR "), "{out}");
+    }
+    assert_eq!(parts.len(), 6, "{out}");
+
+    let (root, _h, _p) = boot_probe(body, "").await;
+    let out = exec(&root, "probe", "{}").await;
+    assert!(out.contains("allow_eval = true"), "{out}");
+}

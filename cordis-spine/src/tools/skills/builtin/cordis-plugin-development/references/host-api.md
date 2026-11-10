@@ -13,6 +13,7 @@ HTTP 与编解码见 `http.md`。
 | `host.call_tools_parallel([#{ tool, args?, timeout_ms? }, …])` | `tools` | 最多 16 颗**互不依赖**的调用同时跑（`join_all`），结果按传入顺序回成上面那种 map。身份、门同 `call_tool`；要审批的仍进全局队列一个个问；用户停止时没跑完的回 `cancelled`。只并行读、查这类无副作用的；写文件、桌面操作照旧一颗颗跑 |
 | `host.list_tools()` | `tools` | 调用方能调的工具 `[#{ name, description }]`（按调用方的允许名单、能力档位筛；含 MCP 与插件工具；描述截到 200 字） |
 | `host.tool_schema(name)` | `tools` | 一颗工具的 `#{ name, description, parameters }`，`parameters` 是 JSON Schema map；不认得或调用方调不了 → `()`。跑之前先查名字、核对必填参数用它 |
+| `host.eval_expr(expr, vars?)` | — | 求一个 Rhai 表达式，`vars` 的键当常量。**默认关**：磁盘插件 `plugin.toml` 写 `allow_eval = true` 才有（见 `package.md`）。单独的引擎：同样的操作数上限，只有 JSON 函数，没有 host / HTTP / 文件；最长 4096 字节 |
 | `host.cancelled()` | — | 调用方这一轮被用户停止了吗。多步循环每步前查一下；脚本也会在下一个检查点被中止 |
 | `host.provide(name, map)` | — | 把一张 map 挂成命名服务（RhaiBag）。重名失败；停包时撤掉 |
 | `host.get(name)` | — | bag → map 的拷贝；活着的非 bag 服务 → `true`；没有 → `()` |
@@ -76,5 +77,5 @@ if token == () {
 ## 边界
 
 - 求值器不是安全边界，信任级别与 `bash` 相同；同步步骤有操作数上限。
-- 脚本不能 `ctx.plugin`、不能加载磁盘模块、不能 `eval`。
+- 脚本不能 `ctx.plugin`、不能加载磁盘模块、不能 `eval`；要按参数求条件 / 变换时用 opt-in 的 `host.eval_expr`（只求表达式）。
 - 不要在 `apply` 外面做进程级副作用。

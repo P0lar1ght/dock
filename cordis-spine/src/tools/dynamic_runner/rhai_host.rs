@@ -144,6 +144,11 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         &["host.tool_schema(name: String) -> #{ name, description, parameters: Map } | ()"],
     ),
     (
+        "host.eval_expr",
+        "Evaluate one Rhai expression (no statements, no fn definitions) with vars as constants. Off unless the disk plugin's plugin.toml sets allow_eval = true. Runs in a separate engine with the same operation limit and no host / http / codecs (JSON only); Stop aborts it. For data-driven conditions and transforms, e.g. a tool argument like `when: \"prev.count > 0\"`.",
+        &["host.eval_expr(expr: String, vars: Map) -> value", "host.eval_expr(expr: String) -> value"],
+    ),
+    (
         "host.cancelled",
         "True once the user stopped the calling turn. Long loops in execute should check it between steps (the script is also aborted at the next checkpoint).",
         &["host.cancelled() -> bool"],
@@ -329,9 +334,14 @@ fn apply_rhai(
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;
     let engine = Arc::new(engine);
+    let eval_engine = plugin_dir
+        .as_deref()
+        .is_some_and(allows_eval)
+        .then(|| Arc::new(expression_engine()));
     let inner = Arc::new(HostInner {
         ctx: ctx.clone(),
         plugin_id: plugin_id.to_string(),
+        eval_engine,
         plugin_dir,
         engine: engine.clone(),
         ast: ast.clone(),
@@ -405,6 +415,8 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("list_tools", Host::list_tools);
     engine.register_fn("tool_schema", Host::tool_schema);
     engine.register_fn("cancelled", Host::cancelled);
+    engine.register_fn("eval_expr", Host::eval_expr);
+    engine.register_fn("eval_expr", Host::eval_expr_bare);
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
     engine.register_fn("secret", Host::secret);
@@ -422,6 +434,8 @@ struct HostInner {
     /// 磁盘插件（`source_path`）所在目录：`register_slot` 的 `web` 文件只能在这里面。
     plugin_dir: Option<PathBuf>,
     engine: Arc<Engine>,
+    /// `plugin.toml` 写了 `allow_eval = true` 才有：`host.eval_expr` 用的表达式引擎。
+    eval_engine: Option<Arc<Engine>>,
     ast: AST,
     disposers: Mutex<Vec<cordis::Disposable>>,
     /// 这个包登记的状态项 id → 凭据：只改 / 删自己的，别的包同 id 的碰不到。
@@ -930,6 +944,40 @@ impl Host {
     /// 这次 `execute` 的调用方 ctx；不在工具调用里（`apply`、`host.on` 回调）退回插件自己的 ctx。
     fn exec_ctx(&self) -> Context {
         current_call_ctx().unwrap_or_else(|| self.inner.ctx.clone())
+    }
+
+    /// 求一个**表达式**（不能写语句、不能定义函数），`vars` 里的键当常量用。只在磁盘插件
+    /// 的 `plugin.toml` 写了 `allow_eval = true` 时有；引擎是单独的一份：没有 host、http、
+    /// 编解码，同样的操作数上限，停止时同样中止。
+    fn eval_expr(
+        &mut self,
+        expr: ImmutableString,
+        vars: Map,
+    ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+        let Some(engine) = self.inner.eval_engine.clone() else {
+            return err(
+                "eval_expr is off for this plugin; set allow_eval = true in its plugin.toml",
+            );
+        };
+        if expr.len() > MAX_EVAL_EXPR_BYTES {
+            return err(format!(
+                "eval_expr: expression over {MAX_EVAL_EXPR_BYTES} bytes"
+            ));
+        }
+        let mut scope = rhai::Scope::new();
+        for (k, v) in vars {
+            scope.push_constant_dynamic(k.to_string(), v);
+        }
+        engine
+            .eval_expression_with_scope::<Dynamic>(&mut scope, &expr)
+            .map_err(|e| eval_err(format!("eval_expr: {e}")))
+    }
+
+    fn eval_expr_bare(
+        &mut self,
+        expr: ImmutableString,
+    ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+        self.eval_expr(expr, Map::new())
     }
 
     /// 调用方这一轮被停止了吗（`TurnControl`）。循环里多步的插件每步前查一下。
@@ -1537,6 +1585,32 @@ fn register_json(engine: &mut Engine) {
     engine.register_fn("to_json", |m: Map| encode(Dynamic::from_map(m)));
     engine.register_fn("to_json", |a: Array| encode(Dynamic::from_array(a)));
     engine.register_fn("to_json", encode);
+}
+
+const MAX_EVAL_EXPR_BYTES: usize = 4096;
+
+/// 磁盘插件的 `plugin.toml` 有没有 `allow_eval = true`（默认没有）。
+fn allows_eval(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("plugin.toml"))
+        .ok()
+        .and_then(|raw| raw.parse::<toml::Table>().ok())
+        .and_then(|t| t.get("allow_eval").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// `host.eval_expr` 的引擎：同运行期一样的沙箱与操作数上限，只多了 JSON；没有 host、
+/// http、编解码、文件。
+fn expression_engine() -> Engine {
+    let mut engine = sandboxed_engine(RUN_MAX_OPS);
+    register_json(&mut engine);
+    engine.on_progress(|ops| {
+        if ops % 4096 == 0 && current_call_ctx().is_some_and(|c| call_cancelled(&c)) {
+            Some("cancelled: the user stopped this turn".into())
+        } else {
+            None
+        }
+    });
+    engine
 }
 
 fn dynamic_to_json(value: &Dynamic) -> Result<Value, String> {

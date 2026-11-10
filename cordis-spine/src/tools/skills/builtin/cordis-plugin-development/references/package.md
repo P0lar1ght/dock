@@ -17,7 +17,15 @@ name = "便签"
 purpose = "会话里的一张便签"
 factory = "rhai"
 enabled = true      # false = 启动时不自动跑
+allow_eval = false  # 可选，默认 false；true 才有 host.eval_expr（见下）
 ```
+
+`allow_eval = true`：给这个插件打开 `host.eval_expr(expr, vars)`，求**一个表达式**
+（不能写语句、不能定义函数），`vars` 的键当常量用。只有磁盘插件能开（会话里
+`cordis_define` 的包没有 `plugin.toml`，一直是关的）。表达式跑在单独的引擎里：
+操作数上限与运行期相同，只有 JSON 函数，没有 `host`、HTTP、编解码、文件；用户停止
+时一样中止；表达式最长 4096 字节。只在功能真的要「把条件 / 变换写在参数里」时开
+（比如批量调用里的 `when: "prev.count > 0"`），别为了省事开。
 
 启动时自动加载，不弹权限确认（工作区信任）。`/cordis` 列出磁盘层和会话层。
 
