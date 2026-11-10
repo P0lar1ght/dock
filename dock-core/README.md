@@ -57,6 +57,9 @@ const event = parseEvent(note.method, note.params); // 实时推送；认不出�
 if (event) state = reduceThread(state, event);      // seq 去重，没变的轮次保持同一引用
 ```
 
+- `isRunning`：最后一轮在跑**且**这一轮真在干活（用户消息 / 正文 / 思考 / 工具）。网关在没有轮可挂时会给权限、提问、计划、MCP elicitation 这类交互单开一轮，那种轮只有交互项 —— agent 停着等用户回答，不算在跑；那种轮要等用户答的，看 `pendingItems`。
+- `turnHasActivity(turn)`：单独判断某一轮有没有干活的痕迹。
+
 ## 命令
 
 ```bash

@@ -15,6 +15,8 @@
   - 协议：用户消息的附件带 `index` 和 `digest`（sha256 十六进制）；`item/image` 支持 `item/image { threadId, digest }` 取用户图片（工具结果那张图的老用法不变）。
   - 旧会话照旧读（没有图就是没有图）。
 
+- **核对模型上下文的旁路**：dock.1 新增 `item/system_prompt` / `item/system_reminder`，把每轮组装的系统提示和注入块投给客户端（不是聊天消息）。系统提示前缀没变就不重复投；正文超过 20000 字截断并标出原长度。子代理给父级的话、插话提示、侧边笔记不重复投。只投主会话（子代理会话两样都不投）。注入块里有长期记忆索引、工程规约副本，`thread/history` 和 `dock serve --remote` 的设备令牌客户端都能读到（见 `cordis-gateway/README.md`「harness 上下文」）。轨迹面板能看见这些记录，多一条「上下文」轨道。
+
 - **白板布局工具**：`whiteboard_group` / `align` / `style` / `layer` / `fit_text` / `distribute` / `layout` / `place` / `graph`（独立工具，避免塞进 edit 撑爆 schema）；`whiteboard_read` 多返回可复用的 `patches`。
   - `distribute`：≥3 个图形两端固定中间均分；`layout`：网格重排；`place`：相对参照放置；`graph`：nodes+edges 自动排版（layered/row/column/grid）。
   - 挪动连线端点时箭头 **复用原 id**，不再改成 `id~rev`。
@@ -90,7 +92,11 @@
 - **嵌入页（embed-sdk）补齐要用户拍板的几处**：计划模式提交的计划（批准并执行 / 要求修改 / 退出计划）、
   MCP 服务的确认（接受 / 拒绝 / 取消）；会话菜单能重命名、归档、删除。`npm test` 跑 SDK 单测。
 
+- **浏览器面板强制重新加载**：`browser/view/navigate` 支持 `action: "hard_reload"`（绕过缓存，和 Shift+刷新一样），能力 `browserHardReload`。
+
 ### 改进
+
+- **浏览器面板按标签页记视口**：每个标签页记住自己的尺寸，切回去还是那个大小；没改过的页用最近一次要的尺寸。
 
 - **CI 按路径跳过无关门禁**：只改文档 / 纯配置时不再跑完整 Rust 测试；`dock-core` 仅在 `dock-core/**` 有改动时跑。job 名仍是 `test` / `dock-core`（required checks），无相关改动时 echo 跳过仍报 success。Release 的 tag 门禁保持全量。
 
@@ -122,6 +128,12 @@
 - **排队 / 插话时发的图跟着消息走**：入队 → 插话 → 送达 → 下一轮采样都带着同一张图。以前排队消息的图寄放在会话的「图片槽」里（只有一格），多条排队消息各自带图会互相顶掉，插话还会把图落下。
   - 网关：入队 / 插话时就把图按内容寻址落盘，`turn/queue/list` 每项带 `images[]`（图片摘要）；`item/image { threadId, digest }` 在送达之前也能取到像素，仍是会话级凭据。
   - TUI：发送 / 插话时图绑在这条消息上，不再先放进图片槽（排队期间别的消息送达会把它顶掉）。
+
+- **只有交互在等用户时，不再显示成「运行中 / 正在思考」**：Dock 在没有轮可挂时，会给 MCP elicitation、权限、提问、计划这类交互单开一轮；那一轮只有交互项，agent 其实停着等用户回答。`dock-core` 的 `isRunning` 收紧成「最后一轮在跑 **且** 这一轮真在干活（用户消息 / 正文 / 思考 / 工具）」，纯交互轮不再算运行中，基于 `dock-core` 的客户端（用 `isRunning` 判忙碌的会话头、侧栏、对话流等）也就不再说 agent 在忙。
+  - 交互卡片照旧显示在会话底部等用户回答；发新消息时那一轮会被正常停掉重开。
+  - `dock-core` 新增导出 `turnHasActivity(turn)`，客户端要自己判「这轮有没有在干活」时用它。
+
+- **白板复制、分层和查找**：`whiteboard_duplicate` 改的是嵌套绑定（不再写出扁平的 `startBinding.elementId`），副本用新的 z 序键，`place` 按选区外框平移；两端都在选区里的箭头跟着复制，`texts` 只改请求里的图形（自动带上的箭头保留原标签），副本的 `boundElements` 不再挂着没复制的外连箭头，待画图形的标签留在 pending。`whiteboard_graph` 的回边不再把下游拽回上层，节点按真实宽高占位。`whiteboard_find` 的 `near` 必须是已有 id，命中按整段相等 / 前缀 / 包含再按距离排。`distribute` 在图形总尺寸超过两端跨度时报错且不改坐标。`related` 带上指向该图形的箭头。
 
 - **白板箭头 id**：移动连线端点后重连仍复用原箭头 id（不再生成 `id~rev`）。
 

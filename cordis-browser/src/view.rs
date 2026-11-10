@@ -482,58 +482,58 @@ impl View {
             .map_err(|e| e.to_string())
     }
 
-    /// 地址栏 / 后退 / 前进 / 刷新。
+    /// 地址栏 / 后退 / 前进 / 刷新 / 强制重新加载（`hard_reload`：绕过缓存）。
     pub async fn navigate(&self, request: &Value) -> Result<(), String> {
-        if let Some(url) = request.get("url").and_then(Value::as_str) {
-            let url = address_bar_url(url)?;
-            // chromiumoxide 把 Page.navigate 挂到「页面加载完」才回，而这条旁路连接挂上的页
-            // 收不到它等的生命周期事件，会一直等到超时。地址栏不需要等加载完——用户在画面
-            // 里看得到——所以放到后台发出去就回。
-            let page = self.page.clone();
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    page.execute(NavigateParams::new(url)),
-                )
-                .await;
-            });
-            return Ok(());
-        }
-        match request.get("action").and_then(Value::as_str).unwrap_or("") {
-            "reload" => self
-                .page
-                .execute(ReloadParams::default())
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
-            action @ ("back" | "forward") => {
-                let history = self
+        let back = match nav_action(request)? {
+            NavAction::Url(url) => {
+                let url = address_bar_url(&url)?;
+                // chromiumoxide 把 Page.navigate 挂到「页面加载完」才回，而这条旁路连接挂上的页
+                // 收不到它等的生命周期事件，会一直等到超时。地址栏不需要等加载完——用户在画面
+                // 里看得到——所以放到后台发出去就回。
+                let page = self.page.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(30),
+                        page.execute(NavigateParams::new(url)),
+                    )
+                    .await;
+                });
+                return Ok(());
+            }
+            // hard = 强制重新加载：绕过缓存（和 Shift+刷新一样）。
+            NavAction::Reload { hard } => {
+                return self
                     .page
-                    .execute(GetNavigationHistoryParams::default())
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let step: i64 = if action == "back" { -1 } else { 1 };
-                let index = history.result.current_index + step;
-                let entry = usize::try_from(index)
-                    .ok()
-                    .and_then(|i| history.result.entries.get(i))
-                    .ok_or_else(|| {
-                        if action == "back" {
-                            "已经是第一页".to_string()
-                        } else {
-                            "已经是最后一页".to_string()
-                        }
-                    })?;
-                self.page
-                    .execute(NavigateToHistoryEntryParams::new(entry.id))
+                    .execute(reload_params(hard))
                     .await
                     .map(|_| ())
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string());
             }
-            other => Err(format!(
-                "navigate 需要 url 或 action（back / forward / reload）：{other}"
-            )),
-        }
+            NavAction::Back => true,
+            NavAction::Forward => false,
+        };
+        let history = self
+            .page
+            .execute(GetNavigationHistoryParams::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        let step: i64 = if back { -1 } else { 1 };
+        let index = history.result.current_index + step;
+        let entry = usize::try_from(index)
+            .ok()
+            .and_then(|i| history.result.entries.get(i))
+            .ok_or_else(|| {
+                if back {
+                    "已经是第一页".to_string()
+                } else {
+                    "已经是最后一页".to_string()
+                }
+            })?;
+        self.page
+            .execute(NavigateToHistoryEntryParams::new(entry.id))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     /// 停推画面、断开自己这条连接。页和浏览器都留着。
@@ -578,6 +578,40 @@ fn still_lock(target_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     let mut locks = LOCKS.lock().unwrap();
     locks.retain(|_, lock| Arc::strong_count(lock) > 1);
     locks.entry(target_id.to_string()).or_default().clone()
+}
+
+/// `navigate` 请求要做的事：地址栏 / 刷新（`hard` = 绕过缓存）/ 后退 / 前进。
+#[derive(Debug, PartialEq)]
+enum NavAction {
+    Url(String),
+    Reload { hard: bool },
+    Back,
+    Forward,
+}
+
+/// 解析 `navigate` 请求：有 `url` 走地址栏，否则按 `action` 分发。
+fn nav_action(request: &Value) -> Result<NavAction, String> {
+    if let Some(url) = request.get("url").and_then(Value::as_str) {
+        return Ok(NavAction::Url(url.to_string()));
+    }
+    match request.get("action").and_then(Value::as_str).unwrap_or("") {
+        "reload" => Ok(NavAction::Reload { hard: false }),
+        "hard_reload" => Ok(NavAction::Reload { hard: true }),
+        "back" => Ok(NavAction::Back),
+        "forward" => Ok(NavAction::Forward),
+        other => Err(format!(
+            "navigate 需要 url 或 action（back / forward / reload / hard_reload）：{other}"
+        )),
+    }
+}
+
+/// 刷新页面的 CDP 参数：`hard` = 强制重新加载（绕过缓存，和 Shift+刷新一样）。
+fn reload_params(hard: bool) -> ReloadParams {
+    if hard {
+        ReloadParams::builder().ignore_cache(true).build()
+    } else {
+        ReloadParams::default()
+    }
 }
 
 /// 地址栏：没写协议的补 `https://`；只放行 http / https / about / data / file。
@@ -972,5 +1006,35 @@ mod tests {
         let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
         let err = View::attach("nope").await.err().unwrap();
         assert_eq!(err, "浏览器没有在运行");
+    }
+
+    /// 强制重新加载要绕过缓存（Shift+刷新）；普通刷新不动缓存。
+    #[test]
+    fn hard_reload_ignores_the_cache() {
+        assert_eq!(reload_params(false).ignore_cache, None);
+        assert_eq!(reload_params(true).ignore_cache, Some(true));
+    }
+
+    /// navigate 的分发：`hard_reload` 走绕过缓存的刷新，不认识的 action 报错。
+    #[test]
+    fn navigate_dispatches_hard_reload() {
+        assert_eq!(
+            nav_action(&json!({ "action": "hard_reload" })),
+            Ok(NavAction::Reload { hard: true })
+        );
+        assert_eq!(
+            nav_action(&json!({ "action": "reload" })),
+            Ok(NavAction::Reload { hard: false })
+        );
+        assert_eq!(
+            nav_action(&json!({ "action": "back" })),
+            Ok(NavAction::Back)
+        );
+        assert_eq!(
+            nav_action(&json!({ "url": "example.com", "action": "hard_reload" })),
+            Ok(NavAction::Url("example.com".into()))
+        );
+        let err = nav_action(&json!({ "action": "shift_reload" })).unwrap_err();
+        assert!(err.contains("hard_reload"), "{err}");
     }
 }

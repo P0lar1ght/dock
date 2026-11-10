@@ -95,9 +95,20 @@ async fn whiteboard_speaks_mcp_apps_and_keeps_one_scene_per_project() {
         "whiteboard_layout",
         "whiteboard_place",
         "whiteboard_graph",
+        "whiteboard_find",
+        "whiteboard_duplicate",
     ] {
         assert!(tools.iter().any(|t| t["name"] == name), "缺工具 {name}");
     }
+    let read_props = &by("whiteboard_read")["inputSchema"]["properties"];
+    assert_eq!(read_props["overview"]["type"], "boolean");
+    assert_eq!(read_props["ids"]["type"], "array");
+    assert_eq!(read_props["ids"]["items"]["type"], "string");
+    assert!(
+        read_props["ids"].get("properties").is_none(),
+        "{read_props}"
+    );
+    assert_eq!(read_props["related"]["type"], "string");
     let nodes_items = &by("whiteboard_graph")["inputSchema"]["properties"]["nodes"]["items"];
     assert_eq!(nodes_items["additionalProperties"], true);
     assert!(nodes_items.get("properties").is_none(), "{nodes_items}");
@@ -352,4 +363,51 @@ async fn whiteboard_save_keeps_ui_array_order() {
         .await;
     assert_eq!(saved["isError"], false, "{saved}");
     assert_eq!(load_ids(&mut c, cwd).await, vec!["c", "a", "b"]);
+}
+
+/// 回归：复制时两端都在选区里的骨架箭头跟着走，绑定改到副本上，只沿放置方向平移。
+#[tokio::test]
+async fn whiteboard_duplicate_retargets_pending_arrow_and_shifts_by_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = start(dir.path().to_path_buf());
+    let cwd = "/work/dup";
+    let edited = c
+        .tool(
+            "whiteboard_edit",
+            json!({ "add": [
+                { "type": "rectangle", "id": "a", "x": 100, "y": 0 },
+                { "type": "rectangle", "id": "b", "x": 400, "y": 0 },
+                { "type": "arrow", "id": "edge", "from": "a", "to": "b" }
+            ] }),
+            cwd,
+        )
+        .await;
+    assert_eq!(edited["isError"], false, "{edited}");
+    let duplicated = c
+        .tool(
+            "whiteboard_duplicate",
+            json!({ "ids": ["a", "b"], "place": "right" }),
+            cwd,
+        )
+        .await;
+    assert_eq!(duplicated["isError"], false, "{duplicated}");
+    let loaded = c.tool("whiteboard_load", json!({}), cwd).await;
+    let pending = loaded["structuredContent"]["pending"].as_array().unwrap();
+    let find = |id: &str| {
+        pending
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap_or_else(|| panic!("没有 {id}：{pending:?}"))
+    };
+    let edge = find("edge-copy");
+    assert_eq!(edge["start"]["id"], "a-copy");
+    assert_eq!(edge["end"]["id"], "b-copy");
+    let a = find("a");
+    let a_copy = find("a-copy");
+    let ax = a["x"].as_f64().unwrap();
+    let ay = a["y"].as_f64().unwrap();
+    let cx = a_copy["x"].as_f64().unwrap();
+    let cy = a_copy["y"].as_f64().unwrap();
+    assert!(cx > ax + 100.0, "a-copy.x={cx} a.x={ax}");
+    assert!((cy - ay).abs() < 1e-6, "y 不变：{cy} vs {ay}");
 }
