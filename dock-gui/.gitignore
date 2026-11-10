@@ -33,8 +33,13 @@ src-tauri/gen/schemas
 # 只提交 GUI 核心代码：设计稿、文档、e2e 脚本留在本地不进仓库
 /wonder-ui/
 /docs/
-/AGENTS.md
 /.vscode/
 /scripts/mcp-apps-e2e/
 /scripts/tool-cards-e2e/
 /scripts/wonder-save.py
+
+# 本地才用：组件预览页、模型目录快照（目录运行时经 Dock 拉）
+/preview.html
+/src/preview/
+/src/dock/providerCatalog.snapshot.json
+/scripts/update-provider-catalog.mjs

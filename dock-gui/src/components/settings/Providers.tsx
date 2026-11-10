@@ -102,7 +102,7 @@ export function ProvidersTab({
           ) : catalogState?.fetchedAt ? (
             `供应商目录：models.dev，${new Date(catalogState.fetchedAt).toLocaleDateString()} 更新`
           ) : (
-            "供应商目录：models.dev（随应用打包的快照）"
+            "供应商目录：还没拉到（点「更新目录」经 Dock 从 models.dev 拉）"
           )}
         </span>
         <div className="flex shrink-0 items-center gap-2">
