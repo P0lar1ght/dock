@@ -274,10 +274,10 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 | 方法 / 推送 | 作用 |
 |---|---|
 | `browser/view/open { threadId?, url?, viewport?, quality?, maxWidth?, maxHeight?, crisp? }` | 挂到这个会话的活动标签页，回 `viewId` / `targetId` / `url` / `title` / `tabs` / `headed` / `crisp`；见下 |
-| `browser/view/resize { viewId, width, height, deviceScaleFactor? }` | 面板大小变了：改页面视口（能力 `browserViewport`） |
+| `browser/view/resize { viewId, width, height, deviceScaleFactor? }` | 面板大小变了：改页面视口（能力 `browserViewport`）；**每个标签页各记各的**，切回去还是那个大小 |
 | `browser/view/input { viewId, event }` | 用户输入，回 `{ ok, select?, copied? }`；见下 |
 | `browser/view/focus { viewId }` | 有头浏览器：把它的窗口切到最前 |
-| `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` |
+| `browser/view/navigate { viewId, url? \| action? }` | 地址栏；`action`：`back` / `forward` / `reload` / `hard_reload`（绕过缓存，能力 `browserHardReload`） |
 | `browser/view/tab { viewId, action, targetId?, url? }` | 标签栏：`switch` / `close`（带 `targetId`）/ `new`（`url` 可省，默认空白页）；能力 `browserTabs` |
 | `browser/view/close { viewId }` | 关视图（不关页）；连接断开时自动全关 |
 | 推送 `browser/view/frame` | 一帧：`data`（base64 JPEG）、`mime`、`width` / `height`（视口 CSS 像素）等 |
@@ -302,6 +302,8 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
   - 带了 `viewport` 而没给 `maxWidth` / `maxHeight`：流里的帧不再缩小（上限 4096）。
   - agent 整页截图会清掉覆盖、换标签页新页也没有：帧尺寸对不上就重设（至多 1.5s 一次）。
   - `resize` 和 `input` 排同一条队，连发时最后那次最后生效；改完补一张静止帧。
+  - 视口**按标签页记**：改过的那个页记住自己的尺寸，切回去时套回那个尺寸；没改过的页用最近
+    一次要的尺寸（网关自己记，客户端不用重发）。
 - 静止帧（帧里 `still: true`）：无头 screencast 只出 CSS 像素，页面不动时一帧不推（刚挂上也不推）。
   - 画面停下 150ms、刚挂上、换了标签页、改了视口：补一张 `captureScreenshot`（`clip.scale` 按 DPR）。
   - 截的时候先停流再接着推：放大栅格化的过渡帧不推；内容没变的重复帧也不推，不会来回补帧。
