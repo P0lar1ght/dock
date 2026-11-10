@@ -100,6 +100,59 @@ pub fn parallel_safe(tool: &str, arguments: &str) -> bool {
         || matches!(class_of(tool), Class::Read | Class::Search | Class::Inspect)
 }
 
+/// cua-driver 里只读的几颗：列应用 / 窗口、读窗口状态 / 无障碍树、校验状态、屏幕尺寸、
+/// 光标位置、读指南（名字见 <https://cua.ai/docs/cua-driver/reference/mcp-tools>）。点、输、
+/// 按键、拖拽这些动作照旧一颗颗跑——桌面动作有先后，参考 Anthropic 对 computer use 的要求
+/// （按顺序、遇错即停）。它们仍然过审批（`acp::is_cua_driver_mcp`），并行只是不用互相等。
+const CUA_READ_ONLY: &[&str] = &[
+    "list_apps",
+    "list_windows",
+    "get_window_state",
+    "get_accessibility_tree",
+    "verify_state",
+    "get_screen_size",
+    "get_cursor_position",
+    "get_guide",
+];
+
+/// [`parallel_safe`]，再加上要看工具表才知道的两种：
+/// - `use_tool`：按它派发的**内层**工具判断（内层再是 `use_tool` 的不算）。
+/// - MCP 工具：cua-driver 的只读几颗（[`CUA_READ_ONLY`]），或服务器在 `tools/list` 里标了
+///   `readOnlyHint: true`（`read_only_hint`）。参考 Codex：标了只读的 MCP 工具可以并行，
+///   没标的照旧串行。MCP 规范说注解只是提示、不可信，所以这里**只决定排不排在一起跑**，
+///   审批、计划模式、能力档位一样不少。内置浏览器的工具共用一个标签页，一律串行。
+pub fn parallel_safe_with(
+    tool: &str,
+    arguments: &str,
+    read_only_hint: &dyn Fn(&str) -> bool,
+) -> bool {
+    if tool == crate::tools::mcp::USE_TOOL_NAME {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) else {
+            return false;
+        };
+        let Some(inner) = v.get("tool_name").and_then(|n| n.as_str()) else {
+            return false;
+        };
+        if inner == crate::tools::mcp::USE_TOOL_NAME {
+            return false;
+        }
+        let input = v
+            .get("tool_input")
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "{}".into());
+        return parallel_safe_with(inner, &input, read_only_hint);
+    }
+    if let Some(raw) = tool.strip_prefix(cordis_base::acp::CUA_DRIVER_MCP_PREFIX) {
+        return CUA_READ_ONLY.contains(&raw);
+    }
+    if parallel_safe(tool, arguments) {
+        return true;
+    }
+    tool.starts_with("mcp_")
+        && !tool.starts_with(crate::tools::browser::BROWSER_MCP_PREFIX)
+        && read_only_hint(tool)
+}
+
 enum Class {
     Meta,
     Read,
@@ -210,6 +263,72 @@ mod tests {
             "bash",
             r#"{"command":"git status","is_background":true}"#
         ));
+    }
+
+    #[test]
+    fn use_tool_and_mcp_parallel_by_inner_tool_and_read_only_hint() {
+        let hinted = |name: &str| {
+            name == "mcp_linear__list_issues" || name == "mcp_browser__browser_snapshot"
+        };
+        let safe = |tool: &str, args: &str| parallel_safe_with(tool, args, &hinted);
+        // cua-driver：只读的几颗能并行（直接调或经 use_tool），动作一律串行。
+        for yes in [
+            "get_window_state",
+            "list_windows",
+            "list_apps",
+            "verify_state",
+            "get_guide",
+        ] {
+            let name = format!("mcp_cua-driver__{yes}");
+            assert!(safe(&name, "{}"), "{name}");
+            let via = serde_json::json!({"tool_name": name, "tool_input": {"pid": 1}}).to_string();
+            assert!(safe("use_tool", &via), "{via}");
+        }
+        for no in [
+            "click",
+            "type_text",
+            "press_key",
+            "run_steps",
+            "run_script",
+            "launch_app",
+        ] {
+            let name = format!("mcp_cua-driver__{no}");
+            assert!(!safe(&name, "{}"), "{name}");
+            let via = serde_json::json!({"tool_name": name}).to_string();
+            assert!(!safe("use_tool", &via), "{via}");
+        }
+        // 别的 MCP：标了 readOnlyHint 才并行；没标的串行；内置浏览器即使标了也串行。
+        assert!(safe("mcp_linear__list_issues", "{}"));
+        assert!(safe(
+            "use_tool",
+            r#"{"tool_name":"mcp_linear__list_issues","tool_input":{}}"#
+        ));
+        assert!(!safe("mcp_linear__save_issue", "{}"));
+        assert!(!safe(
+            "use_tool",
+            r#"{"tool_name":"mcp_linear__save_issue"}"#
+        ));
+        assert!(!safe("mcp_browser__browser_snapshot", "{}"));
+        // use_tool 派发本地工具：按内层判断（bash 照样看命令）。
+        assert!(safe(
+            "use_tool",
+            r#"{"tool_name":"bash","tool_input":{"command":"git status"}}"#
+        ));
+        assert!(!safe(
+            "use_tool",
+            r#"{"tool_name":"bash","tool_input":{"command":"rm -rf x"}}"#
+        ));
+        // 认不出来的、嵌套 use_tool、参数坏的：串行。
+        assert!(!safe("use_tool", "{}"));
+        assert!(!safe("use_tool", "not json"));
+        assert!(!safe(
+            "use_tool",
+            r#"{"tool_name":"use_tool","tool_input":{"tool_name":"read_file"}}"#
+        ));
+        assert!(!safe("use_tool", r#"{"tool_name":"some_plugin_tool"}"#));
+        // 没有工具表信息时，原来的判断不变。
+        assert!(safe("read_file", "{}"));
+        assert!(!safe("write_file", "{}"));
     }
 
     #[test]

@@ -44,6 +44,9 @@ pub struct ListedTool {
     /// `inputSchema` 的 JSON 文本。
     pub schema: String,
     pub ui: ToolUi,
+    /// `annotations.readOnlyHint == true`。只是服务器给的**提示**（MCP 规范：不可信），
+    /// 只拿来排并发（见 `agent::capability::parallel_safe_with`），不放宽审批与能力档位。
+    pub read_only_hint: bool,
 }
 
 /// MCP Apps（`io.modelcontextprotocol/ui`）挂在工具 `_meta.ui` 上的那部分。
@@ -449,6 +452,7 @@ pub fn tools_from_list(server_name: &str, listed: &Value) -> Vec<ListedTool> {
             description: desc.to_string(),
             schema: schema.to_string(),
             ui: tool_ui(&tool),
+            read_only_hint: tool.pointer("/annotations/readOnlyHint") == Some(&Value::Bool(true)),
         });
     }
     out
@@ -865,6 +869,22 @@ mod tests {
         assert!(!tools[1].ui.model_visible() && tools[1].ui.app_visible());
         assert!(tools[4].ui.model_visible() && tools[4].ui.app_visible());
         assert_eq!(tools[1].public, "mcp_s__save");
+    }
+
+    /// `annotations.readOnlyHint` 只有明确是 `true` 才算；缺省、`false`、写成字符串都不算。
+    #[test]
+    fn tools_list_reads_read_only_hint() {
+        let listed = json!({ "result": { "tools": [
+            { "name": "list", "annotations": { "readOnlyHint": true } },
+            { "name": "save", "annotations": { "readOnlyHint": false, "destructiveHint": true } },
+            { "name": "odd", "annotations": { "readOnlyHint": "true" } },
+            { "name": "plain" }
+        ] } });
+        let hints: Vec<bool> = tools_from_list("s", &listed)
+            .iter()
+            .map(|t| t.read_only_hint)
+            .collect();
+        assert_eq!(hints, [true, false, false, false]);
     }
 
     #[test]

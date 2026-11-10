@@ -29,6 +29,10 @@ struct Batch {
     calls: Vec<(&'static str, &'static str)>,
 }
 
+/// MCP 形状的探针：`mcp_s__list` 标了 `readOnlyHint`，`mcp_s__save` 没标。
+const HINTED: &str = "mcp_s__list";
+const UNHINTED: &str = "mcp_s__save";
+
 impl Sampler for Batch {
     fn sample<'a>(
         &'a self,
@@ -103,6 +107,21 @@ async fn run(calls: Vec<(&'static str, &'static str)>) -> (Arc<Probe>, Vec<Strin
     let tools = root.require::<Tools>(TOOLS).unwrap();
     // 测试环境里记忆默认关，这三颗没注册：借它们的名字（前两颗只读，后一颗改动）。
     let mut keep = Vec::new();
+    for name in [HINTED, UNHINTED] {
+        keep.push(
+            tools
+                .register_mcp(
+                    ToolSpec {
+                        name: name.into(),
+                        description: "probe".into(),
+                        parameters_json: r#"{"type":"object"}"#.into(),
+                    },
+                    probe_body(probe.clone()),
+                )
+                .unwrap(),
+        );
+    }
+    tools.set_read_only_hint(HINTED, true);
     for name in ["memory_search", "memory_get", "memory_write"] {
         keep.push(
             tools
@@ -181,4 +200,35 @@ async fn read_only_calls_in_one_reply_run_together() {
         "改动的要等前面的读跑完"
     );
     assert!(c3_start >= c2_end, "改动之后的读要等它跑完");
+}
+
+/// MCP 工具：服务器标了 `readOnlyHint` 的和相邻的只读调用一起跑；没标的单独跑。
+#[tokio::test]
+async fn read_only_hinted_mcp_calls_run_together() {
+    let (probe, order) = run(vec![
+        ("m0", HINTED),
+        ("m1", HINTED),
+        ("m2", "memory_search"),
+        ("m3", UNHINTED),
+        ("m4", UNHINTED),
+    ])
+    .await;
+    assert_eq!(order, ["m0", "m1", "m2", "m3", "m4"]);
+    assert_eq!(
+        probe.peak.load(Ordering::SeqCst),
+        3,
+        "m0、m1、m2 应该一起跑"
+    );
+    let spans = probe.spans.lock().unwrap().clone();
+    let span = |id: &str| {
+        spans
+            .iter()
+            .find(|(i, ..)| i == id)
+            .map(|(_, s, e)| (*s, *e))
+            .unwrap()
+    };
+    let (m3_start, m3_end) = span("m3");
+    let (m4_start, _) = span("m4");
+    assert!(m3_start >= span("m2").1, "没标只读的要等前面的读跑完");
+    assert!(m4_start >= m3_end, "没标只读的一颗一颗跑");
 }

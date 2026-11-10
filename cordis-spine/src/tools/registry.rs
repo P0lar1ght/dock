@@ -67,6 +67,8 @@ struct Entry {
     spec: ToolSpec,
     body: ToolBody,
     kind: ExtraKind,
+    /// MCP 服务器在 `tools/list` 里标了 `readOnlyHint: true`。只用来排并发。
+    read_only_hint: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,7 +156,15 @@ impl Tools {
             if extra.contains_key(&name) {
                 return Err(cordis::Error::plugin(format!("duplicate tool {name}")));
             }
-            extra.insert(name.clone(), Entry { spec, body, kind });
+            extra.insert(
+                name.clone(),
+                Entry {
+                    spec,
+                    body,
+                    kind,
+                    read_only_hint: false,
+                },
+            );
         }
         Ok(self.disposable_for(&name))
     }
@@ -190,6 +200,25 @@ impl Tools {
             .unwrap()
             .get(name)
             .is_some_and(|e| e.kind == ExtraKind::Dynamic)
+    }
+
+    /// 记下 MCP 工具的 `readOnlyHint`（`tools/list` 每次刷新都重设）。只对 MCP 工具生效。
+    pub fn set_read_only_hint(&self, name: &str, hint: bool) {
+        if let Some(e) = self.extra.lock().unwrap().get_mut(name) {
+            if e.kind == ExtraKind::Mcp {
+                e.read_only_hint = hint;
+            }
+        }
+    }
+
+    /// MCP 服务器把这颗工具标成只读了吗（`readOnlyHint`）。**提示而已**：只给
+    /// [`crate::agent::capability::parallel_safe_with`] 排并发用，审批、计划模式、能力档位照旧。
+    pub fn read_only_hint(&self, name: &str) -> bool {
+        self.extra
+            .lock()
+            .unwrap()
+            .get(name)
+            .is_some_and(|e| e.kind == ExtraKind::Mcp && e.read_only_hint)
     }
 
     /// 有没有叫这个名字的工具（工作区内置或已登记的 extra）。不看允许名单、能力档位，
@@ -1013,6 +1042,26 @@ mod tests {
             .take_while(|(a, b)| a == b)
             .count();
         assert_eq!(old_common, 1, "旧顺序下公共前缀只有一项：{by_name:?}");
+    }
+
+    /// `readOnlyHint` 只记在 MCP 工具上；别的种类设了也不算，patch 之后照样能重设。
+    #[test]
+    fn read_only_hint_is_mcp_only() {
+        let tools = Tools::echo(Context::new());
+        tools.register(spec("plain"), stub_body()).unwrap();
+        let _m = tools
+            .register_mcp(spec("mcp_s__list"), stub_body())
+            .unwrap();
+        assert!(!tools.read_only_hint("mcp_s__list"));
+        tools.set_read_only_hint("mcp_s__list", true);
+        tools.set_read_only_hint("plain", true);
+        tools.set_read_only_hint("missing", true);
+        assert!(tools.read_only_hint("mcp_s__list"));
+        assert!(!tools.read_only_hint("plain"));
+        assert!(!tools.read_only_hint("missing"));
+        let _p = tools.patch_mcp(spec("mcp_s__list"), stub_body()).unwrap();
+        tools.set_read_only_hint("mcp_s__list", false);
+        assert!(!tools.read_only_hint("mcp_s__list"));
     }
 
     #[test]

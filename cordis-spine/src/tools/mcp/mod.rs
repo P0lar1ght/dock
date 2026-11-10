@@ -1072,12 +1072,15 @@ fn upsert_one(slot: &mut Slot, tools: &Tools, public: &str) {
         description: listed.description.clone(),
         parameters_json: listed.schema.clone(),
     };
+    let read_only_hint = listed.read_only_hint;
     if let Some(d) = tools.patch_mcp(spec.clone(), body.clone()) {
+        tools.set_read_only_hint(public, read_only_hint);
         let _ = slot.registered.insert(public.to_string(), d);
         return;
     }
     match tools.register_mcp(spec, body) {
         Ok(d) => {
+            tools.set_read_only_hint(public, read_only_hint);
             slot.registered.insert(public.to_string(), d);
         }
         Err(e) => {
@@ -1577,6 +1580,7 @@ mod tests {
                 description: (*desc).to_string(),
                 schema: r#"{"type":"object"}"#.into(),
                 ui: protocol::ToolUi::default(),
+                read_only_hint: false,
             })
             .collect();
         let mut inner = mcp.inner.lock().unwrap();
@@ -1938,6 +1942,7 @@ startup_timeout_sec = 1
             description: raw.into(),
             schema: r#"{"type":"object"}"#.into(),
             ui,
+            read_only_hint: false,
         };
         attach_fake(mcp, "board", &[]);
         let mut inner = mcp.inner.lock().unwrap();
