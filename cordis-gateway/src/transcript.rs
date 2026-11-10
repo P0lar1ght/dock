@@ -434,7 +434,9 @@ impl Transcript {
             }
             // 系统提示（每轮 assemble 一次）：不是对话，但「这一轮模型到底被喂了什么」
             // 要看得见它。前缀字节稳定，内容没变就不重复投（历史里不必每轮存一份）。
-            LogEvent::Prompt(text) => {
+            // 只投主会话：子代理的注入块在上面那支里不投，系统提示也不投，两边对称
+            // （也免得每轮把最长 20000 字经 `subagent/event` 推给父级的客户端）。
+            LogEvent::Prompt(text) if self.agent.is_none() => {
                 if self.projector.last_prompt.as_deref() != Some(text.as_str()) {
                     self.projector.last_prompt = Some(text.clone());
                     let (body, truncated) = clip_context(&text, MAX_CONTEXT_CHARS);
@@ -465,7 +467,10 @@ impl Transcript {
                 );
             }
             // Notice 只给 TUI 用户看，不进 dock.1 投影，也不该变成一条聊天消息。
-            LogEvent::PreStep | LogEvent::SystemReminder(_) | LogEvent::Notice { .. } => {}
+            LogEvent::PreStep
+            | LogEvent::Prompt(_)
+            | LogEvent::SystemReminder(_)
+            | LogEvent::Notice { .. } => {}
         }
     }
 
@@ -1082,6 +1087,33 @@ mod tests {
             seen.contains(&"item/system_reminder".to_string()),
             "{seen:?}"
         );
+        // 载荷：正文、原长度、挂在当前这一轮上。
+        let history = t.history_since(0);
+        let turn_id = history
+            .iter()
+            .find(|e| e.method == "item/user_message")
+            .map(|e| e.turn_id.clone())
+            .expect("有用户消息");
+        assert!(!turn_id.is_empty());
+        let sp = history
+            .iter()
+            .find(|e| e.method == "item/system_prompt")
+            .unwrap();
+        assert_eq!(sp.payload["text"], "you are dock");
+        assert_eq!(sp.payload["chars"], 12);
+        assert_eq!(sp.payload["truncated"], false);
+        assert_eq!(sp.turn_id, turn_id);
+        let sr = history
+            .iter()
+            .find(|e| e.method == "item/system_reminder")
+            .unwrap();
+        assert_eq!(
+            sr.payload["text"],
+            "<system-reminder>规约</system-reminder>"
+        );
+        assert_eq!(sr.payload["chars"], 37);
+        assert_eq!(sr.payload["truncated"], false);
+        assert_eq!(sr.turn_id, turn_id);
 
         // 同样的系统提示再来一次：不重复投。
         t.ingest_log(LogEvent::Prompt("you are dock".into()));
@@ -1313,6 +1345,27 @@ mod tests {
             "<system-reminder>\nAgent kid sent a message:\nx\n</system-reminder>".into(),
         ));
         assert_eq!(methods(&main), ["turn/started", "item/user_message"]);
+    }
+
+    /// 子代理会话不投系统提示（和它不投注入块对称）。
+    #[test]
+    fn child_does_not_project_system_prompt() {
+        let (tx, _rx) = broadcast::channel(16);
+        let mut child = Transcript::for_child("main", "live", "kid-1", tx);
+        child.ingest_log(LogEvent::User("[explore] 看一眼\n\nhi".into()));
+        child.ingest_log(LogEvent::Prompt("you are a subagent".into()));
+        child.ingest_log(LogEvent::SystemReminder(
+            "<system-reminder>\n别的提醒\n</system-reminder>".into(),
+        ));
+        let seen = methods(&child);
+        assert!(
+            !seen.contains(&"item/system_prompt".to_string()),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.contains(&"item/system_reminder".to_string()),
+            "{seen:?}"
+        );
     }
 
     fn prompt(summary: &str) -> PermissionPrompt {
