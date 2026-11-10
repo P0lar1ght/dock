@@ -678,6 +678,9 @@ impl Sessions {
     /// 同 [`Self::seed`]，带上每条事件原来的时刻（复活子代理时从盘上读回来的）；条数对不上就
     /// 都算现在。
     pub fn seed_with_times(&self, events: Vec<LogEvent>, times: Vec<SystemTime>) {
+        // 从盘上读回来的用户图是懒加载的引用：活会话要像素。
+        let mut events = events;
+        crate::session::attachments::hydrate_events(&mut events);
         let n = events.len();
         let times = if times.len() == n {
             times
@@ -1816,6 +1819,12 @@ impl Sessions {
         else {
             return false;
         };
+        let mut item = item;
+        // 归档里的图是懒加载的引用：恢复成活会话时才读像素（采样、压缩要用）。
+        crate::session::attachments::hydrate_events(&mut item.events);
+        if let Some(prefix) = item.compact_prefix.as_mut() {
+            crate::session::attachments::hydrate_events(prefix);
+        }
         let last = item.events.last().cloned();
         let title = item.title.clone();
         // 图片槽按事件重建：恢复出来的会话，采样要看得见用户发过的图

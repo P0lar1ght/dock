@@ -115,7 +115,8 @@ pub use prompt::context_usage::{
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE, USER_FILE};
 pub use session::attachments::{
-    blob_path, digest_b64, digest_of, store as store_user_image, UserImageRef, MAX_USER_IMAGE_BYTES,
+    blob_path, digest_of, hydrate as hydrate_user_image, image_len as user_image_len,
+    store as store_user_image, UserImageRef, MAX_USER_IMAGE_BYTES,
 };
 pub use session::commands::session_commands;
 pub use session::compaction::{

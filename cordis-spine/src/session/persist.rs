@@ -893,10 +893,11 @@ fn from_wire(event: WireEvent) -> LogEvent {
     match event {
         WireEvent::User { text, images } => LogEvent::User(cordis_base::types::UserMessage {
             text,
-            // 像素按摘要找回来；文件没了就少那张图，消息本身照旧。
+            // 只留引用（懒加载）：启动时读整个 cwd 的归档不读图、不算哈希。
+            // 恢复成活会话 / 取图时再按摘要读（`attachments::hydrate`）。
             images: images
                 .iter()
-                .filter_map(crate::session::attachments::load)
+                .filter_map(crate::session::attachments::placeholder)
                 .collect(),
         }),
         WireEvent::PreStep => LogEvent::PreStep,
@@ -1417,14 +1418,17 @@ mod tests {
         assert!(!history.contains("base64"), "{history}");
         assert!(!history.contains("/user-images/"), "{history}");
 
-        // 读回来像素还在。
+        // 读归档只留引用（懒加载：启动时不读图、不算哈希）；按摘要读回来像素还在。
         let loaded = load_cwd(cwd);
         assert_eq!(loaded.len(), 1);
         match &loaded[0].events[0] {
             LogEvent::User(msg) => {
                 assert_eq!(msg.text, "[Image #1] 这是什么");
                 assert_eq!(msg.images.len(), 1, "{msg:?}");
-                assert_eq!(msg.images[0].data.as_ref(), png.as_slice());
+                assert!(msg.images[0].data.is_empty(), "归档里不该已经读了像素");
+                assert_eq!(msg.images[0].digest.as_deref(), Some(digest.as_str()));
+                let full = crate::session::attachments::hydrate(&msg.images[0]).expect("hydrate");
+                assert_eq!(full.data.as_ref(), png.as_slice());
             }
             other => panic!("expected User, got {other:?}"),
         }

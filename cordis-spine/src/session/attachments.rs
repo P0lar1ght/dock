@@ -8,9 +8,9 @@
 //! 同样的字节只存一份。摘要是内容的 sha256，既是文件名也是引用。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use base64::Engine;
 use cordis_base::config::dock_home;
 use cordis_base::types::UserImage;
 use serde::{Deserialize, Serialize};
@@ -51,13 +51,6 @@ pub fn digest_of(data: &[u8]) -> String {
     hex(&hasher.finalize())
 }
 
-/// 字节的 sha256（base64，给协议用；和 digest_of 是同一个内容的两种写法）。
-pub fn digest_b64(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
-}
-
 /// 合法的内容摘要：sha256 的 64 位十六进制。
 ///
 /// 摘要会拼进文件路径：不合法的摘要能拼出 blob 目录以外的地方，所以只认这一种形状。
@@ -70,6 +63,23 @@ fn is_digest(digest: &str) -> bool {
 /// 超限或写盘失败 → `None`（fail-open：这张图不进历史，消息本身照旧），
 /// 但**每一次放弃都留日志** —— 静默丢图只会表现为「刷新后图不见了」。
 pub fn store(img: &UserImage) -> Option<UserImageRef> {
+    // 还没读回像素的引用（归档会话懒加载，见 [`placeholder`]）：blob 早就在库里，
+    // 原样写回引用，不用读字节也不用重算摘要。
+    if img.data.is_empty() {
+        if let Some(digest) = img.digest.as_deref().filter(|d| is_digest(d)) {
+            if let Ok(meta) = std::fs::metadata(blob_path(digest)) {
+                return Some(UserImageRef {
+                    digest: digest.to_string(),
+                    mime: img.mime.clone(),
+                    width: img.width,
+                    height: img.height,
+                    bytes: meta.len() as usize,
+                });
+            }
+            tracing::warn!(digest, "用户图片的 blob 不见了，这张图不再入历史");
+            return None;
+        }
+    }
     if img.data.is_empty() || img.data.len() > MAX_USER_IMAGE_BYTES {
         tracing::warn!(
             bytes = img.data.len(),
@@ -78,7 +88,22 @@ pub fn store(img: &UserImage) -> Option<UserImageRef> {
         );
         return None;
     }
-    // 摘要一律按字节算：外面带来的摘要只用来对账，不拿来拼路径 ——
+    // 已经带着摘要、blob 也已经在库里（同样大小）：这张图早就存过了。摘要只由进程内
+    // 算出来（`append`、网关 `publish_images`、`load_by_digest` 校验过的），每次整份
+    // 重写 `chat_history.jsonl` 都不必再把几 MB 的图重新哈希一遍。
+    if let Some(digest) = img.digest.as_deref().filter(|d| is_digest(d)) {
+        let path = blob_path(digest);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() as usize == img.data.len()) {
+            return Some(UserImageRef {
+                digest: digest.to_string(),
+                mime: img.mime.clone(),
+                width: img.width,
+                height: img.height,
+                bytes: img.data.len(),
+            });
+        }
+    }
+    // 要写盘：摘要一律按字节算。带来的摘要只用来对账，不拿来拼路径 ——
     // 对不上就落到别的文件上，甚至写到 blob 目录外面去。
     let actual = digest_of(&img.data);
     let digest = match img.digest.as_deref() {
@@ -102,7 +127,13 @@ pub fn store(img: &UserImage) -> Option<UserImageRef> {
             }
         }
         // 先写临时文件再改名：会话日志引用到这个摘要时，文件一定已经完整。
-        let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+        // 临时名带进程号 + 计数：同一进程里两次 store 碰上同一摘要也不会抢同一个文件。
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         if let Err(e) = std::fs::write(&tmp, img.data.as_ref()) {
             let _ = std::fs::remove_file(&tmp);
             tracing::warn!(path = %path.display(), error = %e, "用户图片写不进临时文件，这张图不入历史");
@@ -110,6 +141,16 @@ pub fn store(img: &UserImage) -> Option<UserImageRef> {
         }
         if let Err(e) = std::fs::rename(&tmp, &path) {
             let _ = std::fs::remove_file(&tmp);
+            // 别人先一步写好了同一份内容（内容寻址，字节一样）：当成功。
+            if path.exists() {
+                return Some(UserImageRef {
+                    digest,
+                    mime: img.mime.clone(),
+                    width: img.width,
+                    height: img.height,
+                    bytes: img.data.len(),
+                });
+            }
             tracing::warn!(path = %path.display(), error = %e, "用户图片改不了名，这张图不入历史");
             return None;
         }
@@ -123,21 +164,62 @@ pub fn store(img: &UserImage) -> Option<UserImageRef> {
     })
 }
 
-/// 按引用读回像素。文件没了 / 读失败 → `None`（那张图就没了，消息还在）。
+/// 按引用造一张**还没读像素**的图（`data` 为空，带摘要和元数据）。
 ///
-/// 类型、宽高照引用里的来（写下去的时候就是它们），不重新猜。
-pub fn load(reference: &UserImageRef) -> Option<UserImage> {
-    let mut image = load_by_digest(&reference.digest)?;
-    if !reference.mime.is_empty() {
-        image.mime = reference.mime.clone();
+/// 读归档会话（启动时整个 cwd 的历史）只留引用：不读文件、不算哈希、不常驻内存。
+/// 真要像素时（恢复成活会话、`item/image` 取图）再 [`hydrate`]。摘要不合法 → `None`。
+pub fn placeholder(reference: &UserImageRef) -> Option<UserImage> {
+    if !is_digest(&reference.digest) {
+        return None;
     }
-    if reference.width > 0 {
-        image.width = reference.width;
+    Some(UserImage {
+        mime: reference.mime.clone(),
+        data: Arc::from(Vec::new().into_boxed_slice()),
+        width: reference.width,
+        height: reference.height,
+        digest: Some(reference.digest.clone()),
+    })
+}
+
+/// 把 [`placeholder`] 读成真图（已有像素的原样返回）。blob 没了 / 对不上 → `None`。
+pub fn hydrate(img: &UserImage) -> Option<UserImage> {
+    if !img.data.is_empty() {
+        return Some(img.clone());
     }
-    if reference.height > 0 {
-        image.height = reference.height;
+    let mut loaded = load_by_digest(img.digest.as_deref()?)?;
+    if !img.mime.is_empty() {
+        loaded.mime = img.mime.clone();
     }
-    Some(image)
+    if img.width > 0 {
+        loaded.width = img.width;
+    }
+    if img.height > 0 {
+        loaded.height = img.height;
+    }
+    Some(loaded)
+}
+
+/// 一张图的字节数：有像素按像素算；还没读的按 blob 文件大小（不读内容）。
+/// blob 没了 → `None`。
+pub fn image_len(img: &UserImage) -> Option<usize> {
+    if !img.data.is_empty() {
+        return Some(img.data.len());
+    }
+    let digest = img.digest.as_deref().filter(|d| is_digest(d))?;
+    std::fs::metadata(blob_path(digest))
+        .ok()
+        .map(|m| m.len() as usize)
+}
+
+/// 把事件里用户消息的图都读成真图（恢复成活会话前调：采样要像素）。读不回来的那张丢掉。
+pub fn hydrate_events(events: &mut [cordis_base::types::LogEvent]) {
+    for event in events.iter_mut() {
+        if let cordis_base::types::LogEvent::User(msg) = event {
+            if msg.images.iter().any(|img| img.data.is_empty()) {
+                msg.images = msg.images.iter().filter_map(hydrate).collect();
+            }
+        }
+    }
 }
 
 /// 按摘要读回像素。
@@ -261,7 +343,7 @@ mod tests {
         let _home = cordis_base::test_env::scoped().home();
         let img = tiny_image();
         let stored = store(&img).expect("stored");
-        let loaded = load(&stored).expect("loaded");
+        let loaded = hydrate(&placeholder(&stored).unwrap()).expect("loaded");
         assert_eq!(loaded.digest.as_deref(), Some(stored.digest.as_str()));
         assert_eq!(loaded.mime, "image/png");
         assert_eq!(loaded.width, 1);
@@ -276,6 +358,45 @@ mod tests {
             "合法形状但没这张图"
         );
         assert!(load_by_digest("../etc/passwd").is_none());
+    }
+
+    /// 已带摘要、blob 也在：不重算摘要（错摘要 + 大小对不上的照旧按字节重算）。
+    #[test]
+    fn store_reuses_a_known_digest_without_rehashing() {
+        let _home = cordis_base::test_env::scoped().home();
+        let img = tiny_image();
+        let first = store(&img).expect("stored");
+        let mut again = tiny_image();
+        again.digest = Some(first.digest.clone());
+        assert_eq!(store(&again), Some(first.clone()));
+        // 指着库里另一张（大小不同）的错摘要：不能信，按字节重算。
+        let other = UserImage {
+            data: Arc::from(b"not the same bytes".to_vec().into_boxed_slice()),
+            ..tiny_image()
+        };
+        let other_ref = store(&other).expect("stored other");
+        let mut wrong = tiny_image();
+        wrong.digest = Some(other_ref.digest.clone());
+        assert_eq!(store(&wrong).unwrap().digest, first.digest);
+    }
+
+    /// 懒加载：占位图不带像素，写回引用不丢图，要用时按摘要读回来。
+    #[test]
+    fn placeholder_round_trips_and_hydrates() {
+        let _home = cordis_base::test_env::scoped().home();
+        let stored = store(&tiny_image()).expect("stored");
+        let lazy = placeholder(&stored).expect("placeholder");
+        assert!(lazy.data.is_empty());
+        assert_eq!(image_len(&lazy), Some(stored.bytes));
+        assert_eq!(store(&lazy), Some(stored.clone()), "写回引用原样");
+        let full = hydrate(&lazy).expect("hydrated");
+        assert_eq!(full.data.as_ref(), tiny_png().as_slice());
+        assert_eq!(full.digest.as_deref(), Some(stored.digest.as_str()));
+        assert!(placeholder(&UserImageRef {
+            digest: "../etc/passwd".into(),
+            ..stored
+        })
+        .is_none());
     }
 
     #[test]

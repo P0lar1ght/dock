@@ -890,8 +890,9 @@ pub(crate) fn user_attachment_values(images: &[UserImage]) -> Vec<Value> {
     images
         .iter()
         .enumerate()
-        .filter(|(_, img)| !img.data.is_empty())
-        .map(|(index, img)| {
+        // 关着的会话里图是懒加载的引用（没读像素）：大小按 blob 文件算；blob 没了就不列。
+        .filter_map(|(index, img)| Some((index, img, cordis_spine::user_image_len(img)?)))
+        .map(|(index, img, byte_length)| {
             json!({
                 "type": "image",
                 "index": index,
@@ -902,7 +903,7 @@ pub(crate) fn user_attachment_values(images: &[UserImage]) -> Vec<Value> {
                 "mimeType": img.mime,
                 "width": img.width,
                 "height": img.height,
-                "byteLength": img.data.len()
+                "byteLength": byte_length
             })
         })
         .collect()

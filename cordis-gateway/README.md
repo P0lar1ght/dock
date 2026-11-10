@@ -405,6 +405,19 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - 开着的会话读内存，关着的读落盘（和 `thread/history` 同一套查找）；找不到回 `not_found`。
 - 典型来源：cua-driver 的 `get_window_state` 截图；GUI 的 CUA 面板和工具卡用它。
 
+### 用户消息里的图（`handlers/thread.rs`、`handlers/turn.rs`）
+
+- 落盘：像素按内容寻址存进 `$DOCK_HOME/user-images/<摘要前两位>/<摘要>`，`chat_history.jsonl`
+  只写摘要和元数据（不写 base64、不写路径）。关着的会话读的是引用，要像素时才按摘要读文件。
+- `item/user_message` 带 `attachments`：每张图 `{ type, index, digest, mimeType, width, height, byteLength }`，
+  `digest` 是内容的 sha256（十六进制）。
+- 像素：`item/image { threadId, digest }` → `{ digest, mimeType, width, height, data }`（base64）。
+  - **会话级凭据**：只给这个会话引用过的摘要——已经落进历史的用户消息里的图，或者还没送达的
+    （排队中 / 插话等待，入队时就落了盘，这段时间客户端也要显示缩略图）。别的会话拿同一个摘要来要，
+    回 `not_found`。
+  - 摘要只认 64 位十六进制，读回的字节要和摘要对得上，否则回 `not_found`。
+- 带了 `digest` 就按用户图取，`itemId` / `index` 不看；工具结果那张图的老用法不变。
+
 ### 撤回消息（能力 `threadRewind`，`handlers/thread.rs`）
 
 `thread/rewind { threadId, turnId }` → `{ threadId, message, images[] }`：撤回 `turnId` 那条用户消息。
@@ -415,7 +428,8 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - `turnId` 要是用户消息开的那一轮（`item/user_message` 的 `turnId`）；不是或已不存在回 `not_found`。
 - 正在跑就先停（同 `turn/cancel`），等它停下最多 5 秒，停不下回 `busy`。还有排队的消息回 `queued`。
   等的期间别的连接又排进消息或开了新一轮，同样回 `queued` / `busy`，不撤。
-- 已经交给会话、还没随用户消息发出的图片（`queue_user_images`）一并清掉。
+- 会话图片槽里还没随用户消息发出的图一并清掉（排队消息的图跟着队列项走，只在送达那一刻才放进槽，
+  所以这里只可能是正在送达的那一条的）。
 - 撤回点早于最近一次压缩时，压缩作废，模型历史回到完整的显示日志。
 - **工具已经做过的事（写过的文件、跑过的命令）不会撤销**，日志只是不再记得它们。
 - 投影按截断后的会话重建，`seq` 重新编号：客户端整份重拉 `thread/history`。
@@ -438,6 +452,8 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - 正在压缩时没有可并的采样：插话排到最前，压缩完就发。
 - `turn/queue/list` 先列等着送达的插话（`kind: "steer"`、`status: "pending"`），再列排队的
   （`kind: "queue"`）；插话送达前可以 `turn/queue/remove` 撤回。
+  每项带 `images[{ digest, mimeType, width, height }]`：这条消息自己的图（没有就是空数组），
+  像素按 `item/image { threadId, digest }` 取。图绑在这条消息上，排队 / 改插话 / 送达都不换主人。
 - 投影：插话从它那条 `item/user_message { steered: true }` 开新的一轮（气泡排在它之前的工作后面），
   被它截开的前一段以 `turn/completed { status: "completed", steered: true }` 收尾——不是真的结束，
   客户端别据此提示「回复完成」。回放（`thread/history`、重开会话）一致。

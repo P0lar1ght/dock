@@ -334,6 +334,7 @@ pub async fn run(root: Context) -> Result<()> {
                                     text,
                                     send_now,
                                     unbound_image_notice,
+                                    images,
                                 } => {
                                     if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
                                         status.clear_notice();
@@ -343,11 +344,15 @@ pub async fn run(root: Context) -> Result<()> {
                                     if let Some(notice) = unbound_image_notice {
                                         flash(&ctx, notice);
                                     }
-                                    if let Some(more) = intercept_goal_send(&ctx, &text) {
-                                        for extra in more.into_iter().rev() {
-                                            effects.push_front(extra);
+                                    let intercepted = intercept_goal_send(&ctx, &text)
+                                        .or_else(|| intercept_loop_send(&text));
+                                    if let Some(more) = intercepted {
+                                        // 改写成别的动作（/goal、/loop）：图照旧留给下一条用户消息。
+                                        if !images.is_empty() {
+                                            if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+                                                sessions.queue_user_images(images);
+                                            }
                                         }
-                                    } else if let Some(more) = intercept_loop_send(&text) {
                                         for extra in more.into_iter().rev() {
                                             effects.push_front(extra);
                                         }
@@ -357,12 +362,13 @@ pub async fn run(root: Context) -> Result<()> {
                                         if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
                                             prompt.note_sent(&text);
                                         }
-                                        session.submit(text, send_now);
+                                        session.submit_with_images(text, images, send_now);
                                     }
                                 }
                                 Effect::SteerPrompt {
                                     text,
                                     unbound_image_notice,
+                                    images,
                                 } => {
                                     if let Ok(status) = ctx.require::<StatusLine>(TUI_STATUS) {
                                         status.clear_notice();
@@ -374,10 +380,6 @@ pub async fn run(root: Context) -> Result<()> {
                                         if let Ok(prompt) = ctx.require::<PromptWidget>(TUI_PROMPT) {
                                             prompt.note_sent(&text);
                                         }
-                                        let images = ctx
-                                            .get::<Sessions>(SESSIONS)
-                                            .map(|s| s.take_pending_images())
-                                            .unwrap_or_default();
                                         session.steer(text, images);
                                     }
                                 }

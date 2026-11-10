@@ -609,6 +609,8 @@ fn user_image(gateway: &GatewayHandle, thread_id: &str, digest: &str) -> Result<
             _ => None,
         })
         .or(waiting)
+        // 关着的会话里是懒加载的引用：这时才按摘要读像素。
+        .and_then(|img| cordis_spine::hydrate_user_image(&img))
         .filter(|img| !img.data.is_empty())
         .ok_or_else(|| RpcError::app("not_found", format!("这张图不属于这个会话：{digest}")))?;
     Ok(json!({
