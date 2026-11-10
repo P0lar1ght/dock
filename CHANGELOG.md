@@ -10,6 +10,8 @@
 
 ### 新增
 
+- **示例插件 tool-batch**：`examples/plugins/tool-batch/`，Rhai 磁盘插件，注册 `tool_batch`，一次调用按顺序跑多个 Dock / MCP 工具（`save_as` + `${var.path}` 引用前面的结果、`expect` 断言、`on_error`），中间结果不进上下文，只回点名的几项。附技能说明（含 cua 少截图做法）和 `HOST_GAPS.md`（Rhai 宿主还缺的能力）。不改核心代码。
+
 - **桌面 GUI 进仓库**：`dock-gui/`（Tauri 2 + React）的核心代码随源码提交（设计稿、文档不进仓库），见 `dock-gui/README.md`。独立工程（`src-tauri/` 自带 `[workspace]`，不进根 workspace），启动时拉起 `dock serve` 走 dock.1。还没签名，不带自动更新。供应商 / 模型目录不随应用打包：设置页第一次打开时经 Dock 从 models.dev 拉一份缓存起来，离线拉不到就是空目录，照样能手填自定义供应商。
 
 - **聊天里发的图片落盘，刷新后照旧看得到**：用户消息里的图以前只活在本窗口的内存里（事件只带尺寸），刷新、重开 Dock、换机器连远程，全看不到原图。

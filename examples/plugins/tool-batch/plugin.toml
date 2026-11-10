@@ -1,0 +1,4 @@
+name = "批量调工具"
+purpose = "tool_batch：一次调用按顺序跑多个 Dock / MCP 工具，中间结果留在插件里，只回最终需要的几项，减少来回轮数"
+factory = "rhai"
+enabled = true

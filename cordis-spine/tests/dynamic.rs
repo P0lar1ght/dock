@@ -3466,3 +3466,436 @@ async fn bundled_skill_examples_define_run_and_work() {
     let out = exec(&root, "gh_issue", r#"{"repo":"o/r","n":1}"#).await;
     assert!(out.starts_with("未配置 GitHub Token"), "{out}");
 }
+
+// ---- examples/plugins/tool-batch ----------------------------------------------------------
+// 真跑：工作区工具（read_file / list_dir / grep / bash）+ 磁盘插件自动加载（boot_disk_from），
+// 再经 Tools::execute 调 tool_batch。host.call_tool 用 block_in_place，必须多线程运行时。
+
+async fn boot_tool_batch() -> (Context, tempfile::TempDir, tempfile::TempDir) {
+    let home = tempfile::tempdir().unwrap();
+    let root = Context::new();
+    cordis_spine::install_core(&root).await.unwrap();
+    root.plugin(settings(), ()).unwrap().wait().await.unwrap();
+    root.get::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Allow);
+    root.plugin(permissions(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(cordis_spine::workspace_tools(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(slash(), ()).unwrap().wait().await.unwrap();
+    root.plugin(tui_slots(), ()).unwrap().wait().await.unwrap();
+    for p in [cordis_spine::status_items(), cordis_spine::tool_views()] {
+        root.plugin(p, ()).unwrap().wait().await.unwrap();
+    }
+    root.plugin(dynamic_runner(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(tool_cordis(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    // 照 README 装：整个目录拷进插件根，启动时自动加载（plugin.toml enabled = true）。
+    let plugins = tempfile::tempdir().unwrap();
+    let example =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/tool-batch");
+    let plug = plugins.path().join("tool-batch");
+    std::fs::create_dir_all(&plug).unwrap();
+    for f in ["plugin.toml", "source.rhai"] {
+        std::fs::copy(example.join(f), plug.join(f)).unwrap();
+    }
+    root.require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap()
+        .boot_disk_from(&[(PersistScope::Project, plugins.path().to_path_buf())])
+        .await;
+    (root, home, plugins)
+}
+
+async fn batch(root: &Context, v: serde_json::Value) -> String {
+    exec(root, "tool_batch", &v.to_string()).await
+}
+
+/// 去掉中途停下时的 `Error: …` 首行，剩下的 JSON。
+fn batch_json(out: &str) -> serde_json::Value {
+    let body = match out.strip_prefix("Error: ") {
+        Some(rest) => rest.split_once('\n').map(|(_, j)| j).unwrap_or(rest),
+        None => out,
+    };
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("not JSON ({e}): {out}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_chains_with_save_as_and_paths() {
+    let (root, home, _p) = boot_tool_batch().await;
+    let f = home.path().join("data.json");
+    std::fs::write(
+        &f,
+        r#"{"name":"dock","items":[{"id":7,"tag":"a"},{"id":9,"tag":"b"}],"cmd":"echo whole-ref"}"#,
+    )
+    .unwrap();
+    let out = batch(
+        &root,
+        json!({
+            "steps": [
+                {"tool": "bash", "args": {"command": format!("cat {}", f.display())}, "save_as": "cfg"},
+                // 拼接引用：路径 + 数组下标（含负数）。
+                {"tool": "bash", "args": {"command": "echo ${cfg.name}-${cfg.items.1.id}-${cfg.items.-1.tag}"},
+                 "save_as": "label", "expect": "dock-9-b"},
+                // 整串引用：原值代入（这里是字符串命令本身）。
+                {"tool": "bash", "args": {"command": "${cfg.cmd}"}, "save_as": "whole"},
+                // 非字符串值拼进文本时是 JSON。
+                {"tool": "bash", "args": {"command": "echo '${cfg.items.0}'"}, "save_as": "item0"},
+                {"tool": "read_file", "args": {"target_file": f}, "expect": "\"dock\""},
+                {"tool": "list_dir", "args": {"target_directory": home.path()}, "expect": "data.json"},
+                {"tool": "grep", "args": {"pattern": "whole-ref", "path": home.path()}, "save_as": "hit"}
+            ],
+            "return": ["label", "whole", "item0", "cfg.items.-1", "hit", "step4"]
+        }),
+    )
+    .await;
+    assert!(!out.starts_with("Error"), "{out}");
+    let v = batch_json(&out);
+    assert_eq!(v["ok"], true, "{out}");
+    assert_eq!(v["completed"], 7, "{out}");
+    assert!(v["failed_step"].is_null(), "{out}");
+    let r = &v["results"];
+    assert!(r["label"].as_str().unwrap().contains("dock-9-b"), "{out}");
+    assert!(r["whole"].as_str().unwrap().contains("whole-ref"), "{out}");
+    assert!(
+        r["item0"]["id"] == 7 || r["item0"].as_str().is_some_and(|s| s.contains("\"id\":7")),
+        "{out}"
+    );
+    // 路径返回原值：对象原样回成 JSON 对象。
+    assert_eq!(r["cfg.items.-1"]["tag"], "b", "{out}");
+    assert!(r["hit"].as_str().unwrap().contains("data.json"), "{out}");
+    assert!(r["step4"].as_str().unwrap().contains("dock"), "{out}");
+    let trace = v["trace"].as_array().unwrap();
+    assert_eq!(trace.len(), 7, "{out}");
+    assert!(
+        trace.iter().all(|t| t.as_str().unwrap().contains(" ok ")),
+        "{out}"
+    );
+    println!("chain: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_expect_failure_stops() {
+    let (root, home, _p) = boot_tool_batch().await;
+    let marker = home.path().join("should-not-exist");
+    let out = batch(
+        &root,
+        json!({
+            "steps": [
+                {"tool": "bash", "args": {"command": "echo hello"}, "expect": "goodbye"},
+                {"tool": "bash", "args": {"command": format!("touch {}", marker.display())}}
+            ]
+        }),
+    )
+    .await;
+    assert!(
+        out.starts_with("Error: tool_batch stopped at step 0"),
+        "{out}"
+    );
+    let v = batch_json(&out);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["failed_step"], 0);
+    assert_eq!(v["completed"], 0);
+    assert_eq!(v["stopped"], true);
+    assert!(
+        v["error"].as_str().unwrap().contains("expect not found"),
+        "{out}"
+    );
+    assert_eq!(v["trace"].as_array().unwrap().len(), 1, "{out}");
+    assert!(!marker.exists(), "第二步不该跑");
+    // 默认返回最后跑过的那一步（失败那步）的结果。
+    assert!(
+        v["results"]["step0"].as_str().unwrap().contains("hello"),
+        "{out}"
+    );
+
+    // 工具自己报错（bash 非零退出）也算失败、默认停。
+    let out = batch(
+        &root,
+        json!({ "steps": [
+            {"tool": "bash", "args": {"command": "exit 3"}},
+            {"tool": "bash", "args": {"command": format!("touch {}", marker.display())}}
+        ]}),
+    )
+    .await;
+    assert!(
+        out.starts_with("Error: tool_batch stopped at step 0"),
+        "{out}"
+    );
+    assert!(
+        batch_json(&out)["error"].as_str().unwrap().contains("exit"),
+        "{out}"
+    );
+    assert!(!marker.exists());
+    println!("stop: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_on_error_continue() {
+    let (root, _home, _p) = boot_tool_batch().await;
+    let out = batch(
+        &root,
+        json!({
+            "steps": [
+                {"tool": "bash", "args": {"command": "exit 3"}, "on_error": "continue", "save_as": "bad"},
+                {"tool": "bash", "args": {"command": "echo hi"}, "expect": "nope", "on_error": "continue"},
+                {"tool": "bash", "args": {"command": "echo after"}, "save_as": "after"}
+            ],
+            "return": ["bad", "after"]
+        }),
+    )
+    .await;
+    // 没有停下：不带 Error 前缀，但 ok=false、failed_step 指向第一处失败。
+    assert!(!out.starts_with("Error"), "{out}");
+    let v = batch_json(&out);
+    assert_eq!(v["ok"], false, "{out}");
+    assert_eq!(v["stopped"], false, "{out}");
+    assert_eq!(v["failed_step"], 0, "{out}");
+    assert_eq!(v["completed"], 1, "{out}");
+    let trace: Vec<_> = v["trace"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(trace.len(), 3, "{out}");
+    assert!(
+        trace[0].contains(" fail ") && trace[1].contains(" fail ") && trace[2].contains(" ok "),
+        "{trace:?}"
+    );
+    assert!(
+        v["results"]["bad"].as_str().unwrap().contains("exit"),
+        "{out}"
+    );
+    assert!(
+        v["results"]["after"].as_str().unwrap().contains("after"),
+        "{out}"
+    );
+    println!("continue: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_missing_ref_names_the_step() {
+    let (root, home, _p) = boot_tool_batch().await;
+    let marker = home.path().join("should-not-exist");
+    let out = batch(
+        &root,
+        json!({
+            "steps": [
+                {"tool": "bash", "args": {"command": "echo '{\"a\":1}'"}, "save_as": "x"},
+                // on_error=continue 也不救引用错：批次本身写错了。
+                {"tool": "bash", "args": {"command": "echo ${nope.field}"}, "on_error": "continue"},
+                {"tool": "bash", "args": {"command": format!("touch {}", marker.display())}}
+            ]
+        }),
+    )
+    .await;
+    assert!(
+        out.starts_with("Error: tool_batch stopped at step 1"),
+        "{out}"
+    );
+    let v = batch_json(&out);
+    let err = v["error"].as_str().unwrap();
+    assert!(err.contains("step 1") && err.contains("\"nope\""), "{out}");
+    assert!(!marker.exists());
+
+    // 字段不存在、下标越界同样点名。
+    let out = batch(
+        &root,
+        json!({ "steps": [
+            {"tool": "bash", "args": {"command": "echo '{\"a\":[1]}'"}, "save_as": "x"},
+            {"tool": "bash", "args": {"command": "echo ${x.a.5}"}}
+        ]}),
+    )
+    .await;
+    assert!(
+        batch_json(&out)["error"]
+            .as_str()
+            .unwrap()
+            .contains("out of range"),
+        "{out}"
+    );
+    let out = batch(
+        &root,
+        json!({ "steps": [
+            {"tool": "bash", "args": {"command": "echo '{\"a\":[1]}'"}, "save_as": "x"},
+            {"tool": "bash", "args": {"command": "echo ${x.b}"}}
+        ]}),
+    )
+    .await;
+    assert!(
+        batch_json(&out)["error"]
+            .as_str()
+            .unwrap()
+            .contains("field \"b\" not found"),
+        "{out}"
+    );
+    println!("missing ref: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_truncates_results() {
+    let (root, _home, _p) = boot_tool_batch().await;
+    let out = batch(
+        &root,
+        json!({
+            "steps": [
+                {"tool": "bash", "args": {"command": "head -c 100 /dev/zero | tr '\\0' x"}, "save_as": "big"},
+                {"tool": "bash", "args": {"command": "echo '{\"list\":[\"aaaaaaaaaaaa\",\"bbbbbbbbbbbb\"]}'"}, "save_as": "obj"}
+            ],
+            "return": ["big", "obj"],
+            "max_chars": 10
+        }),
+    )
+    .await;
+    let v = batch_json(&out);
+    assert_eq!(v["ok"], true, "{out}");
+    assert_eq!(
+        v["results"]["big"], "xxxxxxxxxx…[truncated 90 chars]",
+        "{out}"
+    );
+    // 对象超长时转成 JSON 文本再截。
+    let obj = v["results"]["obj"].as_str().unwrap();
+    assert!(
+        obj.starts_with("{\"list\":[\"") && obj.contains("…[truncated"),
+        "{out}"
+    );
+    // 默认 4000：短结果原样。
+    let out = batch(
+        &root,
+        json!({"steps": [{"tool": "bash", "args": {"command": "echo short"}}]}),
+    )
+    .await;
+    assert!(
+        batch_json(&out)["results"]["step0"]
+            .as_str()
+            .unwrap()
+            .contains("short"),
+        "{out}"
+    );
+    println!("trunc: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_rejects_bad_batches_before_running() {
+    let (root, home, _p) = boot_tool_batch().await;
+    let marker = home.path().join("should-not-exist");
+    let touch = json!({"tool": "bash", "args": {"command": format!("touch {}", marker.display())}});
+    let steps: Vec<_> = (0..51).map(|_| touch.clone()).collect();
+    let out = batch(&root, json!({ "steps": steps })).await;
+    assert!(out.starts_with("Error: tool_batch rejected"), "{out}");
+    assert!(out.contains("too many steps: 51 > 50"), "{out}");
+    assert!(!marker.exists(), "一步都不该跑");
+
+    // 50 步正好放行。
+    let steps: Vec<_> = (0..50)
+        .map(|i| json!({"tool": "bash", "args": {"command": format!("echo {i}")}}))
+        .collect();
+    let out = batch(&root, json!({ "steps": steps })).await;
+    let v = batch_json(&out);
+    assert_eq!(v["completed"], 50, "{out}");
+
+    for (bad, want) in [
+        (json!({"steps": []}), "steps is empty"),
+        (json!({}), "steps must be an array"),
+        (json!({"steps": [{"args": {}}]}), "step 0: missing tool"),
+        (
+            json!({"steps": [touch.clone(), {"tool": "tool_batch", "args": {}}]}),
+            "cannot call itself",
+        ),
+        (
+            json!({"steps": [{"tool": "bash", "on_error": "retry"}]}),
+            "on_error must be",
+        ),
+        (
+            json!({"steps": [{"tool": "bash", "save_as": "a.b"}]}),
+            "save_as must be",
+        ),
+        (
+            json!({"steps": [touch.clone()], "max_chars": 0}),
+            "max_chars must be",
+        ),
+    ] {
+        let out = batch(&root, bad).await;
+        assert!(out.starts_with("Error: tool_batch rejected"), "{out}");
+        assert!(out.contains(want), "{want}: {out}");
+    }
+    assert!(!marker.exists(), "校验失败的批次一步都不该跑");
+}
+
+/// 批里的每一次调用照样单独过权限门：逐条入审批队列；拒绝（权限被拒绝）按失败处理、默认停。
+/// 记一笔宿主现状：请求方的 agent_id 是 None——插件走根 ctx，子代理调它也认成主会话。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_each_call_goes_through_the_permission_gate() {
+    let (root, home, _p) = boot_tool_batch().await;
+    root.get::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Ask);
+    let perms = root
+        .require::<cordis_spine::Permissions>(cordis_spine::PERMISSIONS)
+        .unwrap();
+    let marker = home.path().join("third");
+    let r2 = root.clone();
+    let m2 = marker.clone();
+    let run = tokio::spawn(async move {
+        batch(
+            &r2,
+            json!({ "steps": [
+                {"tool": "bash", "args": {"command": "echo one"}},
+                {"tool": "bash", "args": {"command": "echo two"}},
+                {"tool": "bash", "args": {"command": format!("touch {}", m2.display())}}
+            ]}),
+        )
+        .await
+    });
+    let mut prompts = Vec::new();
+    for kind in [
+        cordis_base::acp::PermissionOptionKind::AllowOnce,
+        cordis_base::acp::PermissionOptionKind::RejectOnce,
+    ] {
+        let front = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(f) = perms.front() {
+                    break f;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("批里的 bash 该排进审批队列");
+        prompts.push(front.clone());
+        assert!(perms.resolve(kind));
+    }
+    let out = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts
+            .iter()
+            .all(|p| p.tool == "bash" && p.agent_id.is_none()),
+        "{prompts:?}"
+    );
+    assert!(prompts[0].summary.contains("echo one"), "{prompts:?}");
+    assert!(
+        out.starts_with("Error: tool_batch stopped at step 1"),
+        "{out}"
+    );
+    assert!(out.contains("权限被拒绝"), "{out}");
+    assert!(perms.front().is_none());
+    assert!(!marker.exists(), "拒绝后第三步不该跑");
+}
