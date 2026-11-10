@@ -5,6 +5,7 @@ import type { ThreadLifecycleEvent, ThreadLifecycleListener } from '../client/Se
 import type { ThreadSummary } from '../protocol/responses.js';
 import type { AgentSession } from '../session/AgentSession.js';
 import type { SessionState } from '../session/SessionState.js';
+import { turnHasActivity } from '../session/TurnActivity.js';
 
 export type ThreadAttention = 'approval' | 'error' | 'completed';
 
@@ -532,8 +533,13 @@ function hasQueuedTurns(state: Readonly<SessionState>) {
   return state.turnQueue.length > 0;
 }
 
+/**
+ * 还有活在跑或排着：排队的轮，或者在跑 / 等授权、**且真在干活**的轮。
+ * 网关给交互单开的纯交互轮（只有权限 / 提问 / 计划 / elicitation）不算，见 `turnHasActivity`。
+ */
 export function hasPendingWork(state: Readonly<SessionState>) {
   return state.turnQueue.length > 0 || Object.values(state.turns).some((turn) =>
-    turn.status === 'running' || turn.status === 'queued' || turn.status === 'waiting_permission'
+    turn.status === 'queued'
+    || ((turn.status === 'running' || turn.status === 'waiting_permission') && turnHasActivity(state, turn.id))
   );
 }

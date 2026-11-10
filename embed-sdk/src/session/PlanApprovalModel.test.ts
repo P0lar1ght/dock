@@ -12,12 +12,13 @@ const play = (events: ReturnType<typeof note>[]) =>
 test('plan/requested waits for approval, plan/resolved records the decision', () => {
   const asked = play([
     note('turn/started', { turnId: 't1', status: 'running', seq: 1 }),
-    note('plan/requested', { turnId: 't1', planId: 'plan-2', body: '# 计划\n1. 改 README', path: '/x/plan.md', empty: false, seq: 2 })
+    note('item/user_message', { turnId: 't1', content: '改 README', seq: 2 }),
+    note('plan/requested', { turnId: 't1', planId: 'plan-2', body: '# 计划\n1. 改 README', path: '/x/plan.md', empty: false, seq: 3 })
   ]);
   assert.equal(asked.activity, 'approval');
   assert.deepEqual(asked.planApprovals.map((p) => [p.id, p.status, p.body]), [['plan-2', 'pending', '# 计划\n1. 改 README']]);
 
-  const approved = reduceSession(asked, note('plan/resolved', { turnId: 't1', planId: 'plan-2', decision: 'approve', seq: 3 }));
+  const approved = reduceSession(asked, note('plan/resolved', { turnId: 't1', planId: 'plan-2', decision: 'approve', seq: 4 }));
   assert.equal(approved.planApprovals[0]?.status, 'approved');
   assert.equal(approved.activity, 'working');
 });

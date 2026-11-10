@@ -20,6 +20,7 @@ import {
   type SessionPermissionRequest
 } from './PermissionModel.js';
 import { initialSessionState, type SessionState, type SessionTurnStatus } from './SessionState.js';
+import { turnHasActivity, turnHasPendingInteraction } from './TurnActivity.js';
 import {
   isPlanTaskTool,
   planActivityCompleted,
@@ -112,12 +113,15 @@ export function reduceSession(state: SessionState, notification: RuntimeNotifica
         );
       }
       break;
-    case 'permission/resolved':
-      next = withActivity(
-        withPermissionResolved(state, params, seq),
+    case 'permission/resolved': {
+      const resolved = withPermissionResolved(state, params, seq);
+      next = withActivity(resolved, activityAfterInteraction(
+        resolved,
+        interactionTurn(state.permissionRequests, text(params.requestId), turnId),
         text(params.decision) === 'approve' ? 'working' : 'thinking'
-      );
+      ));
       break;
+    }
     case 'permission/automatic':
       if (turnId) {
         next = withPermissionResolved(
@@ -136,9 +140,15 @@ export function reduceSession(state: SessionState, notification: RuntimeNotifica
         );
       }
       break;
-    case 'interaction/resolved':
-      next = withActivity(withUserInputResolved(state, params), 'working');
+    case 'interaction/resolved': {
+      const resolved = withUserInputResolved(state, params);
+      next = withActivity(resolved, activityAfterInteraction(
+        resolved,
+        interactionTurn(state.userInputRequests, text(params.interactionId), turnId),
+        'working'
+      ));
       break;
+    }
     case 'plan/requested':
       if (turnId) {
         const segmented = closeAssistantSegment(state, turnId);
@@ -157,15 +167,24 @@ export function reduceSession(state: SessionState, notification: RuntimeNotifica
         );
       }
       break;
-    case 'elicit/resolved':
-      next = withActivity(withElicitationResolved(state, params), 'working');
+    case 'elicit/resolved': {
+      const resolved = withElicitationResolved(state, params);
+      next = withActivity(resolved, activityAfterInteraction(
+        resolved,
+        interactionTurn(state.elicitations, text(params.elicitId), turnId),
+        'working'
+      ));
       break;
-    case 'plan/resolved':
-      next = withActivity(
-        withPlanResolved(state, params),
+    }
+    case 'plan/resolved': {
+      const resolved = withPlanResolved(state, params);
+      next = withActivity(resolved, activityAfterInteraction(
+        resolved,
+        interactionTurn(state.planApprovals, text(params.planId), turnId),
         text(params.decision) === 'approve' ? 'working' : 'thinking'
-      );
+      ));
       break;
+    }
     case 'subagent/waiting_permission':
       if (turnId) {
         const segmented = closeAssistantSegment(state, turnId);
@@ -530,6 +549,25 @@ function upsertSubagent(state: SessionState, activity: SessionSubagentActivity) 
 
 function withActivity(state: SessionState, activity: SessionState['activity']) {
   return state.activity === activity ? state : { ...state, activity, error: activity === 'error' ? state.error : undefined };
+}
+
+/**
+ * 交互回应之后的状态：这一轮真在干活，agent 接着跑（`resumed`）；
+ * 这一轮只有交互（网关单开的纯交互轮），回应完 agent 并没有在跑，回到空闲，
+ * 别一直显示「正在使用本地能力 / 正在思考」。同一轮还有别的交互没回应，就接着等。
+ */
+function activityAfterInteraction(
+  state: SessionState,
+  turnId: string,
+  resumed: SessionState['activity']
+): SessionState['activity'] {
+  if (!turnId || turnHasActivity(state, turnId)) return resumed;
+  if (turnHasPendingInteraction(state, turnId)) return state.activity;
+  return 'idle';
+}
+
+function interactionTurn(items: readonly { id: string; turnId: string }[], id: string, fallback: string) {
+  return items.find((item) => item.id === id)?.turnId || fallback;
 }
 
 function activityAfterTurn(state: SessionState, status: SessionTurnStatus) {
