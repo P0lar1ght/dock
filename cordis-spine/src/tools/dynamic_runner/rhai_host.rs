@@ -65,7 +65,7 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.register_tool",
-        "Register a model-facing tool. execute is |args| -> String. parameters is a JSON-schema map (not a string). Stop unregisters it. Dynamic tools bypass the Agent preset allowlist.",
+        "Register a model-facing tool. execute is |args| -> String, or #{ is_error: bool, content: String } to report failure explicitly (like MCP isError) without an \"Error:\" prefix. parameters is a JSON-schema map (not a string). Stop unregisters it. Dynamic tools bypass the Agent preset allowlist.",
         &[
             "host.register_tool(#{ name, description, parameters: #{ type: \"object\", properties: #{ ... }, required: [...] }, execute })",
         ],
@@ -119,6 +119,11 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         "host.call_tool",
         "Execute a live model tool (permissions still apply). Inside a tool's execute it runs as the caller (that page / subagent): its approval tier, plan mode, read-only scene and Stop apply. An unknown tool name returns \"Error: unknown tool `name`\".",
         &["host.call_tool(name: String, args: Map | String) -> String"],
+    ),
+    (
+        "host.call_tool_ex",
+        "Like host.call_tool but returns a structured result: ok / is_error (the tool's own verdict), text, images (count), tool (the tool that actually ran). Same caller identity, gates and unknown-tool error.",
+        &["host.call_tool_ex(name: String, args: Map | String) -> #{ ok: bool, is_error: bool, text: String, images: int, tool: String }"],
     ),
     (
         "host.cancelled",
@@ -365,6 +370,7 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("register_tool_view", Host::register_tool_view);
     engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
+    engine.register_fn("call_tool_ex", Host::call_tool_ex);
     engine.register_fn("cancelled", Host::cancelled);
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
@@ -452,18 +458,20 @@ impl Host {
                 // 调用方（这一页 / 这个子代理）的 ctx：`spawn_blocking` 会丢掉 task-local，
                 // 先取出来，在阻塞线程上挂成 `CALL_CTX`，`host.call_tool` 按它过门、判取消。
                 let caller = crate::tools::registry::exec_ctx();
-                let content = match tokio::task::spawn_blocking(move || {
+                let (content, is_error) = match tokio::task::spawn_blocking(move || {
                     with_call_ctx(caller, || {
-                        call_fnptr(&engine, &ast, &execute, json_str_to_dynamic(&arguments))
+                        call_fnptr_raw(&engine, &ast, &execute, json_str_to_dynamic(&arguments))
                     })
                 })
                 .await
                 {
-                    Ok(Ok(text)) => text,
-                    Ok(Err(e)) => format!("Error: {e}"),
-                    Err(e) => format!("Error: {e}"),
+                    Ok(Ok(value)) => structured_return(value),
+                    Ok(Err(e)) => (format!("Error: {e}"), true),
+                    Err(e) => (format!("Error: {e}"), true),
                 };
-                tool_result(call, content)
+                let mut result = tool_result(call, content);
+                result.is_error = is_error;
+                result
             })
         });
         let view = spec
@@ -739,19 +747,42 @@ impl Host {
             .ctx
             .get::<Tools>(TOOLS)
             .ok_or_else(|| eval_err("tools is not mounted".into()))?;
-        let arguments = match dynamic_to_json(&args) {
+        let call = self.tool_call(&name, &args)?;
+        let exec = self.exec_ctx();
+        let result = block_on_tool(tools.as_ref(), &exec, call)?;
+        Ok(result.content.into())
+    }
+
+    /// 结构化版 `call_tool`：`#{ ok, is_error, text, images, tool }`，不用再从文字里猜成败。
+    fn call_tool_ex(
+        &mut self,
+        name: ImmutableString,
+        args: Dynamic,
+    ) -> Result<Map, Box<rhai::EvalAltResult>> {
+        let tools = self.tools()?;
+        let call = self.tool_call(&name, &args)?;
+        let exec = self.exec_ctx();
+        Ok(result_map(block_on_tool(tools.as_ref(), &exec, call)?))
+    }
+
+    fn tools(&self) -> Result<Arc<Tools>, Box<rhai::EvalAltResult>> {
+        self.inner
+            .ctx
+            .get::<Tools>(TOOLS)
+            .ok_or_else(|| eval_err("tools is not mounted".into()))
+    }
+
+    fn tool_call(&self, name: &str, args: &Dynamic) -> Result<ToolCall, Box<rhai::EvalAltResult>> {
+        let arguments = match dynamic_to_json(args) {
             Ok(Value::String(s)) => s,
             Ok(v) => v.to_string(),
             Err(e) => return err(e),
         };
-        let call = ToolCall {
+        Ok(ToolCall {
             id: format!("rhai-{}", self.inner.plugin_id),
             name: name.to_string(),
             arguments,
-        };
-        let exec = self.exec_ctx();
-        let text = block_on_tool(tools.as_ref(), &exec, call)?;
-        Ok(text.into())
+        })
     }
 
     /// 这次 `execute` 的调用方 ctx；不在工具调用里（`apply`、`host.on` 回调）退回插件自己的 ctx。
@@ -1136,11 +1167,40 @@ fn block_on_tool(
     tools: &Tools,
     exec: &Context,
     call: ToolCall,
-) -> Result<String, Box<rhai::EvalAltResult>> {
+) -> Result<cordis_base::types::ToolResult, Box<rhai::EvalAltResult>> {
     let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
     let tools = tools.clone();
-    let result = tokio::task::block_in_place(|| handle.block_on(run_tool(&tools, exec, call)));
-    Ok(result.content)
+    Ok(tokio::task::block_in_place(|| {
+        handle.block_on(run_tool(&tools, exec, call))
+    }))
+}
+
+/// `host.call_tool_ex` 的返回：`#{ ok, is_error, text, images, tool }`（`images` 是张数，
+/// `tool` 是实际跑的那颗，被 `tools/pre-execute` 改道时是新名字）。
+fn result_map(result: cordis_base::types::ToolResult) -> Map {
+    let mut m = Map::new();
+    m.insert("ok".into(), Dynamic::from_bool(!result.is_error));
+    m.insert("is_error".into(), Dynamic::from_bool(result.is_error));
+    m.insert("text".into(), Dynamic::from(result.content));
+    m.insert(
+        "images".into(),
+        Dynamic::from_int(result.images.len() as rhai::INT),
+    );
+    m.insert("tool".into(), Dynamic::from(result.name));
+    m
+}
+
+/// `execute` 的返回值 → (内容, 是否失败)。`#{ is_error: bool, content | text }` 是结构化
+/// 结果（同 MCP 的 `isError`）；别的照旧按文字显示、成败交给 `tool_output_looks_failed` 兜底。
+fn structured_return(value: Dynamic) -> (String, bool) {
+    if let Some(map) = value.read_lock::<Map>() {
+        let flag = map.get("is_error").and_then(|f| f.as_bool().ok());
+        let body = map.get("content").or_else(|| map.get("text")).cloned();
+        if let (Some(is_error), Some(body)) = (flag, body) {
+            return (dynamic_to_display(body), is_error);
+        }
+    }
+    (dynamic_to_display(value), false)
 }
 
 /// 插件经 host 调一颗工具。不认得的名字直接报错——`Tools` 兜底会把参数原样回显成

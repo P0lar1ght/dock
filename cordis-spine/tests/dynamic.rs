@@ -4053,3 +4053,61 @@ async fn plugin_call_tool_rejects_unknown_tools() {
     assert_eq!(unknown, "Error: unknown tool `no_such_tool`", "{out}");
     assert!(known.contains("hi"), "{out}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_call_tool_ex_reports_structured_results() {
+    let (root, _h, _p) = boot_probe(
+        r#"let a = host.call_tool_ex("bash", #{ command: "echo ok" });
+           let b = host.call_tool_ex("bash", #{ command: "exit 3" });
+           let c = host.call_tool_ex("nope", #{});
+           #{ is_error: false, content: [a, b, c] }"#,
+        "",
+    )
+    .await;
+    let r = tools_of(&root)
+        .execute(ToolCall {
+            id: "t".into(),
+            name: "probe".into(),
+            arguments: "{}".into(),
+        })
+        .await;
+    assert!(!r.is_error, "{}", r.content);
+    let v: serde_json::Value = serde_json::from_str(&r.content).unwrap();
+    assert_eq!(v[0]["ok"], true, "{v}");
+    assert_eq!(v[0]["is_error"], false);
+    assert_eq!(v[0]["tool"], "bash");
+    assert_eq!(v[0]["images"], 0);
+    assert!(v[0]["text"].as_str().unwrap().contains("ok"));
+    assert_eq!(v[1]["is_error"], true, "{v}");
+    assert_eq!(v[2]["is_error"], true);
+    assert_eq!(v[2]["text"], "Error: unknown tool `nope`");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_tool_can_return_is_error() {
+    let (root, _h, _p) = boot_probe(
+        r#"if args.fail == true { #{ is_error: true, content: "boom" } } else { #{ x: 1 } }"#,
+        "",
+    )
+    .await;
+    let run = |args: &str| {
+        let tools = tools_of(&root);
+        let args = args.to_string();
+        async move {
+            tools
+                .execute(ToolCall {
+                    id: "t".into(),
+                    name: "probe".into(),
+                    arguments: args,
+                })
+                .await
+        }
+    };
+    let failed = run(r#"{"fail":true}"#).await;
+    assert!(failed.is_error);
+    assert_eq!(failed.content, "boom");
+    // 没有 is_error 键的 map 照旧当 JSON 文本、算成功（向后兼容）。
+    let plain = run("{}").await;
+    assert!(!plain.is_error);
+    assert_eq!(plain.content, r#"{"x":1}"#);
+}

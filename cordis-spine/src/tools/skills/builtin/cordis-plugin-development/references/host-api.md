@@ -8,6 +8,7 @@ HTTP 与编解码见 `http.md`。
 | --- | --- | --- |
 | `host.register_tool(#{ name, description, parameters, execute, view? })` | `tools` | 注册一颗模型工具，见下 |
 | `host.call_tool(name, args)` | `tools` | 调一颗活着的工具；`args` 是 map 或 JSON 字符串。bash 类工具照样弹权限。在 `execute` 里调时**以调用方身份**跑：那一页 / 那个子代理的审批档位、计划模式、只读场景、停止都算数。工具名不存在时回 `Error: unknown tool `x``（不会再把参数原样回显成成功） |
+| `host.call_tool_ex(name, args)` | `tools` | 同 `call_tool`（同样的身份、门、未知工具报错），但回结构化结果 `#{ ok, is_error, text, images, tool }`：`is_error` 是工具自己的判定，`images` 是图片张数，`tool` 是实际跑的那颗。要分支判成败时用它，别去猜 `Error:` 前缀 |
 | `host.cancelled()` | — | 调用方这一轮被用户停止了吗。多步循环每步前查一下；脚本也会在下一个检查点被中止 |
 | `host.provide(name, map)` | — | 把一张 map 挂成命名服务（RhaiBag）。重名失败；停包时撤掉 |
 | `host.get(name)` | — | bag → map 的拷贝；活着的非 bag 服务 → `true`；没有 → `()` |
@@ -33,7 +34,10 @@ host.register_tool(#{
   根 `type` 为 `"object"`；`required` 里的名字必须在 `properties` 里。省略 = 空对象。
 - `execute: |args|` 收到的是参数 map，返回字符串（别的类型会被转成字符串）。
   可选参数没传时取到的是 `()`，用 `args.x ?? 默认值`。
-- 抛错 = 工具结果是一条 `Error: …`。给用户能照着做的提示时，**返回**字符串，别抛。
+- 也可以返回 `#{ is_error: true, content: "…" }`（`content` 也可写成 `text`）：
+  明确告诉模型这次失败了（同 MCP 的 `isError`），不必在文字前面拼 `Error:`。
+  `is_error: false` 同理表示成功。缺这两个键的 map 照旧按 JSON 文本返回。
+- 抛错 = 工具结果是一条 `Error: …`（标记为失败）。给用户能照着做的提示时，**返回**字符串或上面的 map，别抛。
 - `view: |tc| #{ … }`：自定义这颗工具在终端和 GUI 的卡片，同 `register_tool_view`（见 `ui.md`）。
 
 ### 插件工具的可见性
