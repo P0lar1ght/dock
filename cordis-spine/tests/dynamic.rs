@@ -3960,6 +3960,47 @@ async fn example_tool_batch_each_call_goes_through_the_permission_gate() {
     assert!(!marker.exists(), "拒绝后第三步不该跑");
 }
 
+/// 批里的工作区工具按**调用方那一页**的工作目录解析相对路径、起 bash：GUI 一个进程挂多页，
+/// 进程 cwd 不是项目目录。以前插件经 host 调进来时丢了 `EXEC_CTX`，`read_file("x")` 读的是进程 cwd。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_call_tool_uses_the_callers_cwd() {
+    let (root, _home, _p) = boot_tool_batch().await;
+    let tools = tools_of(&root);
+    let proj = tempfile::tempdir().unwrap();
+    let proj_path = proj.path().canonicalize().unwrap();
+    std::fs::write(proj_path.join("only-here.txt"), "marker-7f3a").unwrap();
+    assert_ne!(std::env::current_dir().unwrap(), proj_path);
+
+    let page = root.isolate("sessions");
+    let sessions = Sessions::isolated_as(page.clone(), "page-cwd");
+    sessions.pin_workspace_cwd(&proj_path);
+    let _s = page.provide(SESSIONS, sessions).unwrap();
+    let out = tools
+        .execute_on(
+            &page,
+            ToolCall {
+                id: "tb".into(),
+                name: "tool_batch".into(),
+                arguments: json!({
+                    "steps": [{"parallel": [
+                        {"tool": "read_file", "args": {"target_file": "only-here.txt"}, "save_as": "f"},
+                        {"tool": "bash", "args": {"command": "pwd -P"}, "save_as": "d"}
+                    ]}],
+                    "return": ["f", "d"]
+                })
+                .to_string(),
+            },
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("marker-7f3a"), "{}", out.content);
+    assert!(
+        out.content.contains(&*proj_path.to_string_lossy()),
+        "{}",
+        out.content
+    );
+}
+
 /// 插件工具里的 host.call_tool 以**调用方**身份执行：子代理调 tool_batch 时，批里的审批
 /// 记在子代理名下；调用方那一页开着计划模式时，批里的 bash 被计划门挡住；调用方这一轮
 /// 被停止时，正在跑的 bash 被打断。以前一律走插件的根 ctx，这三样都不认。

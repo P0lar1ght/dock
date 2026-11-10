@@ -644,19 +644,26 @@ impl Tools {
     async fn dispatch_local(&self, exec: &Context, call: ToolCall) -> ToolResult {
         if self.workspace && workspace::handles(&call.name) {
             let jobs = exec.get::<crate::tools::jobs::Jobs>(JOBS);
-            return workspace::execute_with(
-                call,
-                || {
-                    exec.get::<TurnControl>(TURN)
-                        .is_some_and(|t| t.is_cancelled())
-                },
-                || {
-                    exec.get::<TurnControl>(TURN)
-                        .is_some_and(|t| t.yield_requested())
-                },
-                jobs.as_deref(),
-            )
-            .await;
+            // 相对路径、bash 的起始目录按 `current_cwd()` 取，读的是 `EXEC_CTX`。插件经
+            // host 调进来时跑在阻塞线程上，task-local 已经丢了，不挂这一层就会退回进程
+            // cwd（GUI 下是 App 数据目录，不是这页的项目目录）。
+            return EXEC_CTX
+                .scope(
+                    exec.clone(),
+                    workspace::execute_with(
+                        call,
+                        || {
+                            exec.get::<TurnControl>(TURN)
+                                .is_some_and(|t| t.is_cancelled())
+                        },
+                        || {
+                            exec.get::<TurnControl>(TURN)
+                                .is_some_and(|t| t.yield_requested())
+                        },
+                        jobs.as_deref(),
+                    ),
+                )
+                .await;
         }
         ToolResult {
             call_id: call.id,
