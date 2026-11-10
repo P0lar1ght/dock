@@ -160,6 +160,7 @@ mod tests {
         QueuedItem {
             id: id.into(),
             text: text.into(),
+            images: Vec::new(),
         }
     }
 

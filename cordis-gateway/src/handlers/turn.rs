@@ -26,6 +26,8 @@ pub fn steer(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> 
         .unwrap_or("")
         .to_string();
     let images = resolve_turn_images(gateway, &page, &params)?;
+    // 落盘 + 登记：等待送达的那段时间里客户端要按摘要取像素（`item/image`）。
+    let images = publish_images(&page, images);
     if !images.is_empty() {
         message = with_image_chips(&message, images.len());
     }
@@ -105,6 +107,7 @@ pub fn queue_list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
                 "message": s.text,
                 "kind": "steer",
                 "status": "pending",
+                "images": image_refs_json(&s.images),
                 "createdAt": 0,
                 "updatedAt": 0
             })
@@ -117,6 +120,7 @@ pub fn queue_list(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
             "message": q.text,
             "kind": "queue",
             "status": "queued",
+            "images": image_refs_json(&q.images),
             "createdAt": 0,
             "updatedAt": 0
         })
@@ -177,11 +181,10 @@ fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Valu
         .unwrap_or("")
         .to_string();
     let images = resolve_turn_images(gateway, &page, &params)?;
+    // 落盘 + 登记：等待送达的那段时间里客户端要按摘要取像素（`item/image`）。
+    let images = publish_images(&page, images);
     if !images.is_empty() {
         message = with_image_chips(&message, images.len());
-        if let Some(sessions) = page.ctx.get::<Sessions>(SESSIONS) {
-            sessions.queue_user_images(images);
-        }
     }
     if message.trim().is_empty() {
         return Err(RpcError::invalid_params("message is required"));
@@ -198,13 +201,60 @@ fn submit(gateway: &GatewayHandle, params: Value, send_now: bool) -> Result<Valu
         0
     };
     let turn_id = gateway.next_turn_id(&page.identity, ahead);
-    port.submit(message, send_now);
+    // 图绑在这条消息上：排队 / 插话 / 送达都不换主人（不再塞进会话的图片槽 ——
+    // 那个槽只有一格，多条排队消息各自带图会互相顶掉）。
+    port.submit_with_images(message, images, send_now);
     let status = if queued { "queued" } else { "running" };
     Ok(json!({
         "threadId": thread_id,
         "turnId": turn_id,
         "status": status
     }))
+}
+
+/// 入队 / 插话前把图落盘（内容寻址）并登记到会话的「未送达图」表。
+///
+/// 等待送达的那段时间里客户端要显示缩略图 —— 按摘要来取（`item/image`），
+/// 所以像素这时就得在 blob 库里。落进历史后这张表就不用管了（走会话内那条路）。
+fn publish_images(page: &Page, images: Vec<UserImage>) -> Vec<UserImage> {
+    if images.is_empty() {
+        return images;
+    }
+    let mut out = Vec::with_capacity(images.len());
+    for image in images {
+        let mut image = image;
+        if image.digest.is_none() {
+            image.digest = Some(cordis_spine::digest_of(&image.data));
+        }
+        // 落盘（写不进去也不拦：这张图这一轮照样能用，只是等待期间取不到像素）。
+        if let Some(reference) = cordis_spine::store_user_image(&image) {
+            image.digest = Some(reference.digest.clone());
+            image.mime = reference.mime.clone();
+            image.width = reference.width;
+            image.height = reference.height;
+        }
+        out.push(image);
+    }
+    if let Some(sessions) = page.ctx.get::<Sessions>(SESSIONS) {
+        sessions.publish_images(out.clone());
+    }
+    out
+}
+
+/// 队列项 / 插话项里的图摘要（客户端按它取像素）。
+fn image_refs_json(images: &[UserImage]) -> Vec<Value> {
+    images
+        .iter()
+        .filter_map(|img| {
+            let digest = img.digest.clone()?;
+            Some(json!({
+                "digest": digest,
+                "mimeType": img.mime,
+                "width": img.width,
+                "height": img.height,
+            }))
+        })
+        .collect()
 }
 
 fn resolve_turn_images(

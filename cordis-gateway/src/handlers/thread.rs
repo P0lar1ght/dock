@@ -586,13 +586,17 @@ pub fn item_image(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcEr
 
 /// 用户消息里的图：按内容摘要取。
 ///
-/// 摘要是**会话级凭据**：只有这个会话引用过的图才给（图在事件里：刚发的
-/// 还没落盘，历史会话的像素也已经从 blob 库读回来了）。别的会话拿同一个
-/// 摘要来要 —— 不给。
+/// 摘要是**会话级凭据**：只有这个会话引用过的图才给 —— 已经落进历史的（图在
+/// 事件里），或者还没送达的（排队中 / 插话等待，这段时间客户端也要显示缩略图）。
+/// 别的会话拿同一个摘要来要 —— 不给。
 fn user_image(gateway: &GatewayHandle, thread_id: &str, digest: &str) -> Result<Value, RpcError> {
-    let events = match threads::resolve(gateway, thread_id) {
-        Ok(page) => page.sessions()?.events(),
-        Err(_) => closed_events(gateway, thread_id)?,
+    let (events, waiting) = match threads::resolve(gateway, thread_id) {
+        Ok(page) => {
+            let sessions = page.sessions()?;
+            let waiting = sessions.unpublished_image(digest);
+            (sessions.events(), waiting)
+        }
+        Err(_) => (closed_events(gateway, thread_id)?, None),
     };
     let image = events
         .iter()
@@ -604,6 +608,7 @@ fn user_image(gateway: &GatewayHandle, thread_id: &str, digest: &str) -> Result<
                 .cloned(),
             _ => None,
         })
+        .or(waiting)
         .filter(|img| !img.data.is_empty())
         .ok_or_else(|| RpcError::app("not_found", format!("这张图不属于这个会话：{digest}")))?;
     Ok(json!({

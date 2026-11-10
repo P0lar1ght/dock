@@ -128,6 +128,10 @@ pub struct Sessions {
     context_anchor: Arc<Mutex<Option<ContextAnchor>>>,
     turn_started: Arc<Mutex<Option<Instant>>>,
     pending_images: Arc<Mutex<Vec<cordis_base::types::UserImage>>>,
+    /// 还没落进历史的图（排队中 / 插话等待送达）：摘要 → 像素。
+    /// 客户端要在这段时间显示缩略图，就按摘要来取（`item/image`）。
+    unpublished_images:
+        Arc<Mutex<std::collections::HashMap<String, cordis_base::types::UserImage>>>,
     user_images: Arc<Mutex<Vec<Vec<cordis_base::types::UserImage>>>>,
     /// Set by [`Self::rewind_inflight_user`] so a dying turn cannot append
     /// onto the previous assistant bubble (Grok cancel-rewind fence).
@@ -332,6 +336,7 @@ impl Sessions {
             context_anchor: Arc::new(Mutex::new(None)),
             turn_started: Arc::new(Mutex::new(None)),
             pending_images: Arc::new(Mutex::new(Vec::new())),
+            unpublished_images: Arc::new(Mutex::new(std::collections::HashMap::new())),
             user_images: Arc::new(Mutex::new(Vec::new())),
             rewound: Arc::new(AtomicBool::new(false)),
             steer_rewound: Arc::new(AtomicBool::new(false)),
@@ -793,6 +798,15 @@ impl Sessions {
             if let LogEvent::User(msg) = &event {
                 // 采样用的图槽和事件按序一一对应（`model_user_images` 靠这个对齐）。
                 self.user_images.lock().unwrap().push(msg.images.clone());
+                // 已经落进历史：不用再从「未送达」那张表里找了。
+                if !msg.images.is_empty() {
+                    let mut map = self.unpublished_images.lock().unwrap();
+                    for img in msg.images.iter() {
+                        if let Some(digest) = img.digest.as_deref() {
+                            map.remove(digest);
+                        }
+                    }
+                }
             }
             event
         } else {
@@ -962,6 +976,26 @@ impl Sessions {
 
     pub fn queue_user_images(&self, images: Vec<cordis_base::types::UserImage>) {
         *self.pending_images.lock().unwrap() = images;
+    }
+
+    /// 登记还没落进历史的图（排队中 / 插话等待送达）：按摘要能取到像素。
+    ///
+    /// 落进历史后 [`Self::append`] 会把它从这儿摘掉 —— 那时它已经是事件的一部分，
+    /// 走会话内的那条路取。
+    pub fn publish_images(&self, images: Vec<cordis_base::types::UserImage>) {
+        let mut map = self.unpublished_images.lock().unwrap();
+        for img in images {
+            let digest = match img.digest.clone() {
+                Some(d) => d,
+                None => continue,
+            };
+            map.insert(digest, img);
+        }
+    }
+
+    /// 还没落进历史的那张图（按摘要）。
+    pub fn unpublished_image(&self, digest: &str) -> Option<cordis_base::types::UserImage> {
+        self.unpublished_images.lock().unwrap().get(digest).cloned()
     }
 
     pub fn user_images(&self) -> Vec<Vec<cordis_base::types::UserImage>> {
@@ -1396,6 +1430,7 @@ impl Sessions {
         *self.turn_started.lock().unwrap() = None;
         self.pending_images.lock().unwrap().clear();
         self.user_images.lock().unwrap().clear();
+        self.unpublished_images.lock().unwrap().clear();
         *self.pending_call.lock().unwrap() = None;
         self.rewound.store(false, Ordering::Relaxed);
         self.auto_compact_suppressed.store(false, Ordering::Relaxed);

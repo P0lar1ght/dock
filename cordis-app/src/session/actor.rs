@@ -27,6 +27,8 @@ enum Job {
 struct Pending {
     prompt_id: String,
     job: Job,
+    /// 这条消息自己带的图。跟着消息走：排队期间不放在会话的图片槽里。
+    images: Vec<cordis_spine::UserImage>,
     respond_to: tokio::sync::oneshot::Sender<PromptTurnResult>,
 }
 
@@ -59,6 +61,13 @@ pub(super) async fn run_session(
             let prompt_id = pending.prompt_id.clone();
             match pending.job {
                 Job::Prompt(text) => {
+                    // 这条消息的图在这一刻交给历史（append 立刻取走）：
+                    // 排队期间图跟着队列项走，不占会话的图片槽。
+                    if !pending.images.is_empty() {
+                        if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
+                            sessions.queue_user_images(pending.images.clone());
+                        }
+                    }
                     let turn = run_turn(&ctx, text);
                     tokio::pin!(turn);
                     match drive_job(
@@ -246,6 +255,7 @@ fn sync_snaps(
             Job::Prompt(text) => Some(QueuedItem {
                 id: p.prompt_id.clone(),
                 text: text.clone(),
+                images: p.images.clone(),
             }),
             Job::Compact(_) | Job::GoalSummary => None,
         })
@@ -292,19 +302,13 @@ fn take_from_queue(queue: &mut VecDeque<Pending>, id: Option<&str>) -> Option<Pe
     queue.remove(idx)
 }
 
-/// 插话没有可并的采样：排到最前，作为下一条消息单独成一轮。图片放进图片槽，
-/// 由那一轮的 `User` 带走。
+/// 插话没有可并的采样：排到最前，作为下一条消息单独成一轮。图跟着这条消息走。
 fn queue_front_prompt(
     ctx: &Context,
     queue: &mut VecDeque<Pending>,
     text: String,
     images: Vec<cordis_spine::UserImage>,
 ) {
-    if !images.is_empty() {
-        if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
-            sessions.queue_user_images(images);
-        }
-    }
     let (respond_to, _) = oneshot::channel();
     queue.push_front(Pending {
         prompt_id: format!(
@@ -312,6 +316,7 @@ fn queue_front_prompt(
             STEER_FALLBACK_SEQ.fetch_add(1, Ordering::Relaxed)
         ),
         job: Job::Prompt(text),
+        images,
         respond_to,
     });
     open_subagent_admission(ctx);
@@ -348,17 +353,6 @@ fn requeue_stranded_steers(
         queue_front_prompt(ctx, queue, steer.text, steer.images);
     }
     sync_snaps(ctx, queue, queued, snaps);
-}
-
-/// 排队的消息改插话时带上它的图。排队时图片放在会话的图片槽里（只有一格），
-/// 正文里的 `[Image #N]` 标记说明这条消息带图。
-fn take_images_for(ctx: &Context, text: &str) -> Vec<cordis_spine::UserImage> {
-    if !text.contains("[Image #") {
-        return Vec::new();
-    }
-    ctx.get::<Sessions>(SESSIONS)
-        .map(|s| s.take_pending_images())
-        .unwrap_or_default()
 }
 
 fn request_cancel(ctx: &Context) {
@@ -407,12 +401,14 @@ fn apply_cmd(
         Some(SessionCommand::Prompt {
             prompt_id,
             text,
+            images,
             send_now,
             respond_to,
         }) => {
             let next = Pending {
                 prompt_id,
                 job: Job::Prompt(text),
+                images,
                 respond_to,
             };
             if send_now {
@@ -435,6 +431,7 @@ fn apply_cmd(
             queue.push_back(Pending {
                 prompt_id: "compact".into(),
                 job: Job::Compact(context),
+                images: Vec::new(),
                 respond_to,
             });
             sync_snaps(ctx, queue, queued, snaps);
@@ -466,11 +463,12 @@ fn apply_cmd(
                 let taken = queued_prompt_at(queue, id.as_deref()).and_then(|i| queue.remove(i));
                 if let Some(Pending {
                     job: Job::Prompt(text),
+                    images,
                     respond_to,
                     ..
                 }) = taken
                 {
-                    let images = take_images_for(ctx, &text);
+                    // 图跟着这条排队消息走：改成插话时一起带走。
                     cordis_spine::steer(ctx, text, images);
                     // 这条不再单独成一轮：它的结果并在正在跑的那一轮里。
                     let _ = respond_to.send(Ok(String::new()));
@@ -604,6 +602,7 @@ fn maybe_queue_goal_summary(
     queue.push_back(Pending {
         prompt_id: "goal-summary".into(),
         job: Job::GoalSummary,
+        images: Vec::new(),
         respond_to,
     });
     sync_snaps(ctx, queue, queued, snaps);
@@ -766,6 +765,108 @@ mod tests {
             !events[at..].iter().any(|e| matches!(e, LogEvent::PreStep)),
             "插话不是新的一轮：{events:?}"
         );
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 1×1 PNG（当图片用够用了）。
+    fn tiny_image(mime: &str) -> cordis_spine::UserImage {
+        let png = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, 0x05, 0xfe, 0x02, 0xfe, 0xa7, 0x35, 0x81,
+            0x84, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        cordis_spine::UserImage {
+            mime: mime.into(),
+            data: std::sync::Arc::from(png.into_boxed_slice()),
+            width: 1,
+            height: 1,
+            digest: None,
+        }
+    }
+
+    /// 两条排队消息各带各的图：图跟着队列项走，不共用会话的图片槽
+    /// （那个槽只有一格，第二条会把第一条的图顶掉）。
+    #[tokio::test]
+    async fn queued_prompts_keep_their_own_images() {
+        let (root, handle, started, release) = held_session().await;
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        let one = tiny_image("image/png");
+        let two = tiny_image("image/jpeg");
+        handle.submit_with_images("with-one", vec![one.clone()], false);
+        handle.submit_with_images("with-two", vec![two.clone()], false);
+        wait_until("排上队", || handle.queued_prompts().len() == 2).await;
+
+        let queued = handle.queued_prompts();
+        assert_eq!(queued[0].images.len(), 1);
+        assert_eq!(queued[0].images[0].data.as_ref(), one.data.as_ref());
+        assert_eq!(queued[1].images.len(), 1);
+        assert_eq!(queued[1].images[0].data.as_ref(), two.data.as_ref());
+
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        release.notify_waiters();
+        wait_until("两条消息都落进历史", || {
+            sessions
+                .events()
+                .iter()
+                .filter(|e| matches!(e, LogEvent::User(_)))
+                .count()
+                >= 3
+        })
+        .await;
+        let history = sessions.events();
+        let users: Vec<_> = history
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::User(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users[1].text, "with-one");
+        assert_eq!(users[1].images.len(), 1, "第一条要带自己的图");
+        assert_eq!(users[1].images[0].data.as_ref(), one.data.as_ref());
+        assert_eq!(users[2].text, "with-two");
+        assert_eq!(users[2].images.len(), 1, "第二条要带自己的图");
+        assert_eq!(users[2].images[0].data.as_ref(), two.data.as_ref());
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 带图的排队消息改成插话：图一起带走，送达时落在那条插话消息上。
+    #[tokio::test]
+    async fn a_queued_prompt_with_images_can_become_a_steer() {
+        let (root, handle, started, release) = held_session().await;
+        handle.submit("first", false);
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first turn should start sampling");
+        let img = tiny_image("image/png");
+        handle.submit_with_images("later", vec![img.clone()], false);
+        wait_until("排上队", || handle.queued_prompts().len() == 1).await;
+        let id = handle.queued_prompts()[0].id.clone();
+        handle.steer_queued(Some(id));
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        wait_until("改成插话", || sessions.has_steers()).await;
+        release.notify_waiters();
+        wait_until("这一轮收尾", || {
+            !turn_ends(&sessions.events()).is_empty()
+        })
+        .await;
+        let events = sessions.events();
+        let at = events
+            .iter()
+            .position(|e| matches!(e, LogEvent::User(t) if t == "later"))
+            .expect("插话要落进日志");
+        match &events[at] {
+            LogEvent::User(m) => {
+                assert_eq!(m.images.len(), 1, "插话要带自己的图：{events:?}");
+                assert_eq!(m.images[0].data.as_ref(), img.data.as_ref());
+            }
+            other => panic!("不该是 {other:?}"),
+        }
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
     }
 
@@ -1475,12 +1576,14 @@ mod tests {
         let mut queue = VecDeque::from([Pending {
             prompt_id: "a".into(),
             job: Job::Prompt("first".into()),
+            images: Vec::new(),
             respond_to: tx,
         }]);
         let (tx2, _rx2) = oneshot::channel();
         queue.push_back(Pending {
             prompt_id: "b".into(),
             job: Job::Prompt("second".into()),
+            images: Vec::new(),
             respond_to: tx2,
         });
         assert!(promote_in_queue(&mut queue, Some("b")));
