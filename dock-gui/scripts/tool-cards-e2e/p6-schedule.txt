@@ -1,0 +1,5 @@
+这是 GUI 工具卡渲染测试（定时任务），这些都是按需工具，先用 search_tool 找到再调用，严格按顺序、每个都要调用：
+1. scheduler_create 建一个每 10 分钟提醒「喝水」的循环任务
+2. scheduler_list 列出任务
+3. scheduler_delete 删掉刚建的任务（用 scheduler_create 返回的 id）
+做完用一句话总结。

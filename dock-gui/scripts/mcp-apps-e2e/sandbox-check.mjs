@@ -1,0 +1,15 @@
+import { chromium } from "/Users/polar/.npm/_npx/705bc6b22212b352/node_modules/playwright/index.mjs";
+import { readFileSync } from "node:fs";
+const html = readFileSync(process.argv[2], "utf8");
+const browser = await chromium.launch();
+const page = await browser.newPage();
+const errs = [];
+page.on("pageerror", (e) => errs.push(String(e).slice(0, 200)));
+page.on("console", (m) => m.type() === "error" && !/font|ERR_/.test(m.text()) && errs.push("console: " + m.text().slice(0, 200)));
+await page.setContent(`<iframe id=f sandbox="allow-scripts" style="width:800px;height:500px"></iframe>`);
+await page.evaluate((h) => (document.getElementById("f").srcdoc = h), html);
+await page.waitForTimeout(3000);
+const f = page.frames()[1];
+console.log("frame text:", await f.evaluate(() => document.body.innerText.slice(0, 100)));
+console.log("errors:", errs);
+await browser.close();

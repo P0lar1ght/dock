@@ -1,0 +1,6 @@
+这是 GUI 工具卡渲染测试（知识与代码智能），请严格按顺序各调用一次，不要并行：
+1. skill 读一个可用的技能（任选一个，比如 dock-guide）
+2. memory_search 搜 "工具卡"
+3. memory_get 读一条 memory_search 返回的记忆（没有结果就读 MEMORY.md）
+4. lsp 对 src/main.rs 做 document symbols（按需工具，先 search_tool 找；没有语言服务器也照样调用一次）
+做完用一句话总结。

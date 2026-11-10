@@ -1,0 +1,18 @@
+<div data-node-id="ind" data-node-label="Tool Snapshot Collapsed" data-component-x="800" data-component-y="5924" className="flex w-[720px] min-w-0 h-fit min-h-0 flex-col bg-[#f5f5f7] [line-height:normal] rounded-[10px] overflow-clip">
+  <div data-node-id="ind.roe" data-node-label="Card Header" className="flex flex-col shrink-0 pt-5 pb-3 px-6 gap-1">
+    <div data-node-id="ind.sax" data-node-label="Card Title" className="w-fit text-[#1c1c1e] font-sans text-[15px] font-semibold leading-none tracking-[-0.2px] text-left block [overflow-wrap:normal]">Tool · Snapshot · Collapsed</div>
+    <div data-node-id="ind.fot" data-node-label="Card Subtitle" className="w-fit text-[#8e8e93] font-sans text-xs leading-normal text-left block [overflow-wrap:normal]">TUI · Snapshot · API browser_snapshot</div>
+  </div>
+  <div data-node-id="ind.dye" data-node-label="Feed Panel" className="flex flex-col mt-0 mb-6 bg-white border-t border-b border-l border-r flex-1 rounded-[10px] px-4 py-3 mx-6 gap-2 border-[#e8e8ec]">
+    <div data-node-id="ind.mru" data-node-label="Panel Context Label" className="w-fit text-[#8e8e93] font-sans text-[10px] font-medium leading-normal tracking-[0.3px] text-left uppercase block [overflow-wrap:normal]">Session Activity</div>
+    <div data-node-id="ind.fad" data-node-label="Snapshot Collapsed Row" className="flex items-center px-0 py-1.5 gap-2">
+      <div data-node-id="ind.kua" data-node-label="SVG" className="size-3.5 block shrink-0 text-[#8e8e93]">
+        <svg stroke="rgb(142, 142, 147)" fill="none" strokeWidth="2" viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg" color="rgb(142, 142, 147)" width="100%" height="100%"><line x1="8" y1="6" x2="21" y2="6" color="rgb(142, 142, 147)" fill="none" stroke="rgb(142, 142, 147)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></line><line x1="8" y1="12" x2="21" y2="12" color="rgb(142, 142, 147)" fill="none" stroke="rgb(142, 142, 147)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></line><line x1="8" y1="18" x2="21" y2="18" color="rgb(142, 142, 147)" fill="none" stroke="rgb(142, 142, 147)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></line><line x1="3" y1="6" x2="3.01" y2="6" color="rgb(142, 142, 147)" fill="none" stroke="rgb(142, 142, 147)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></line><line x1="3" y1="12" x2="3.01" y2="12" color="rgb(142, 142, 147)" fill="none" stroke="rgb(142, 142, 147)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></line><line x1="3" y1="18" x2="3.01" y2="18" color="rgb(142, 142, 147)" fill="none" stroke="rgb(142, 142, 147)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2px"></line></svg>
+      </div>
+      <div data-node-id="ind.lop" data-node-label="Snapshot Verb" className="w-fit shrink-0 text-[#1c1c1e] font-sans text-[13px] font-semibold leading-normal text-left block [overflow-wrap:normal]">Snapshot</div>
+      <div data-node-id="ind.sye" data-node-label="Snapshot Title" className="w-fit min-w-0 text-[#636366] font-mono text-xs leading-[1.33333] text-left block [overflow-wrap:normal]">Login — Auth Target Lab</div>
+      <div data-node-id="ind.poe" data-node-label="Snapshot Count" className="w-fit shrink-0 text-[#8e8e93] font-sans text-xs leading-none text-left block [overflow-wrap:normal]">(24 nodes)</div>
+      <div data-node-id="ind.hup" data-node-label="Chevron Glyph" className="w-fit shrink-0 mr-0 ml-auto text-[#8e8e93] font-sans text-sm leading-none text-left block [overflow-wrap:normal] my-0">›</div>
+    </div>
+  </div>
+</div>

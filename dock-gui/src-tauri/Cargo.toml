@@ -1,0 +1,47 @@
+[package]
+name = "dock-gui"
+version = "0.1.0"
+description = "Dock 桌面 GUI（Tauri 2 外壳，经 dock.1 连本地 Dock）"
+authors = ["P0lar1ght"]
+license = "Apache-2.0"
+publish = false
+edition = "2021"
+
+# 独立 workspace：不进根 Cargo.toml 的 members，也不链接任何 cordis-* crate。
+[workspace]
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "dock_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# macos-private-api：透明窗口（玻璃材质的原生侧栏，见 src/dock/prefs.ts）。代价：不能上 Mac App Store。
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9.0"
+keyring = { version = "3", features = ["apple-native"] }
+
+# webkit.rs：建 webview 前关掉 60 帧封顶。三个都是 tauri / wry 已经在用的版本。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "WKPreferences", "WKWebViewConfiguration"] }
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

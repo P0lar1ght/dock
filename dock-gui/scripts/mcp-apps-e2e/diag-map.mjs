@@ -1,0 +1,20 @@
+// 在无头 Chrome 里跑 map App，抓 iframe 里的 CSP / 网络报错（真窗口 WKWebView 看不到控制台）。
+import { openGui } from "./harness.mjs";
+const { browser, page } = await openGui({ width: 1440, height: 1000 });
+const out = [];
+page.on("console", (m) => out.push(`[${m.type()}] ${m.text().slice(0, 300)}`));
+page.on("pageerror", (e) => out.push(`[pageerror] ${String(e.stack ?? e).slice(0, 900)}`));
+const reqs = [];
+page.on("request", (r) => /openstreetmap|cesium/.test(r.url()) && reqs.push(r.url().slice(0, 90)));
+page.on("response", (r) => /openstreetmap/.test(r.url()) && reqs.push(`<- ${r.status()} ${r.url().slice(0, 70)}`));
+page.on("requestfailed", (r) => out.push(`[reqfail] ${r.url().slice(0, 120)} ${r.failure()?.errorText}`));
+await page.waitForSelector('button:has-text("继续")', { timeout: 20000 });
+await page.click('button:has-text("继续")');
+const box = page.locator('textarea[placeholder^="随心输入"]').first();
+await box.fill('调用 mcp_map__show-map {"west":121.48,"south":31.225,"east":121.5,"north":31.255,"label":"外滩"}');
+await page.keyboard.press("Enter");
+await page.waitForTimeout(30000);
+await page.screenshot({ path: "/tmp/dock-e2e/shots/diag-map.png" });
+const i = out.findIndex((l) => /Received tool input/.test(l)); console.log(out.slice(Math.max(0, i - 3)).filter((l) => !/localStorage|GL Driver/.test(l)).slice(0, 40).join("\n"));
+console.log('--- requests ---\n' + reqs.slice(0, 25).join('\n'), '\ntotal', reqs.length);
+await browser.close();

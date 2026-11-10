@@ -1,0 +1,6 @@
+这是 GUI 工具卡渲染测试（桌面）。用 cua-driver 的工具（先 search_tool 找），只做只读调用：不要点击、不要输入、不要截图、不要启动或关闭应用。严格按顺序各调用一次：
+1. list_apps 列出正在运行的应用
+2. get_screen_size 取屏幕尺寸
+3. get_cursor_position 取鼠标位置
+4. list_windows 列出窗口
+做完用一句话总结。

@@ -1,0 +1,8 @@
+这是 GUI 工具卡渲染测试（计划与交互），请严格按顺序各调用一次，不要并行：
+1. todo_write 建一个 4 项的待办（第一项设为 in_progress，其余 pending）
+2. ask_user_question 问我一个单选题：喜欢哪种颜色，选项 红 / 绿 / 蓝
+3. todo_write 把第一项标为 completed、第二项 in_progress
+4. enter_plan_mode 进入计划模式
+5. 写一个三步的简短计划到计划文件，然后 exit_plan_mode 提交
+6. update_goal 设一个目标「完成工具卡渲染测试」（按需工具，先 search_tool 找）
+做完用一句话总结。

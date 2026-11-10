@@ -1,0 +1,6 @@
+这是 GUI 工具卡渲染测试（子代理），请按顺序：
+1. 用 task 派一个只读子代理（explore 一类的角色），让它 list_dir 看 src 目录并回报文件名；用后台方式派（不等它）
+2. list_agents 列出子代理（按需工具，先 search_tool 找）
+3. send_message 给这个子代理补一句：「顺便数一下每个文件的行数」
+4. 等它回报后，interrupt_agent 打断它（按需工具）
+做完用一句话总结。
