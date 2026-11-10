@@ -239,6 +239,10 @@ pub fn sandboxed_engine(max_ops: u64) -> Engine {
     engine.set_max_map_size(16_384);
     engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
     engine.disable_symbol("eval");
+    // Rhai 默认把 print / debug 写到进程 stdout，TUI 下会把屏幕打花。默认吞掉；
+    // 插件运行期引擎在 `apply_rhai` 里另外接到 stderr 日志。
+    engine.on_print(|_| {});
+    engine.on_debug(|_, _, _| {});
     engine
 }
 
@@ -311,7 +315,9 @@ fn apply_rhai(
 ) -> Result<(), String> {
     let mut engine = sandboxed_engine(RUN_MAX_OPS);
     let tag = format!("[cordis:{plugin_id}]");
+    let debug_tag = tag.clone();
     engine.on_print(move |s| eprintln!("{tag} {s}"));
+    engine.on_debug(move |s, _, pos| eprintln!("{debug_tag} debug {pos:?}: {s}"));
     register_host(&mut engine);
     // 只挂在**运行期**引擎上。define 期的 `preflight` 会 eval 源码顶层，挂上去
     // 等于 `cordis_define` 本身就能发请求——那是权限门够不着的时机。
