@@ -1,5 +1,6 @@
 // 供应商目录：models.dev（opencode 用的开源供应商 / 模型目录）。
-// 打包一份精简快照（scripts/update-provider-catalog.mjs 生成），设置页可经 Dock 拉新的，存在 localStorage。
+// 不随应用打包：设置页第一次用到时经 Dock 拉一份（精简后存 localStorage），之后点「更新目录」再拉新的。
+// 拉不到（离线、Dock 太旧）就是空目录：照样能手填「自定义供应商」。
 // 目录只用来「填表」：选了供应商带出地址 / 协议 / 密钥名，开了模型把能力和单价写进 [model.<id>]；
 // 之后以 config.toml 为准，Dock 不读这份目录。
 
@@ -35,7 +36,7 @@ const CACHE_KEY = "dock.providerCatalog";
 
 interface CatalogState {
   catalog: Catalog;
-  /** 拉新的时间；null = 用的是打包快照。 */
+  /** 拉到的时间；null = 还没拉到（空目录）。 */
   fetchedAt: number | null;
 }
 
@@ -59,16 +60,29 @@ async function load(): Promise<CatalogState> {
   loading ??= (async () => {
     const cached = readCache();
     if (cached) return cached;
-    // 快照只在设置页用：按需加载，不进启动包。
-    const snapshot = (await import("./providerCatalog.snapshot.json")).default as unknown as Catalog;
-    return { catalog: snapshot, fetchedAt: null };
+    try {
+      return await fetchCatalog();
+    } catch {
+      return { catalog: {}, fetchedAt: null };
+    }
   })();
-  state = await loading;
+  const loaded = await loading;
+  // 没拉到不记住：下次打开设置页再试（Dock 可能刚连上）。
+  if (loaded.fetchedAt === null) {
+    loading = null;
+    return loaded;
+  }
+  state = loaded;
   return state;
 }
 
 /** 经 Dock 拉 models.dev，成功就替换并缓存。失败抛出（文案给人看）。 */
 export async function refreshCatalog(): Promise<void> {
+  state = await fetchCatalog();
+  listeners.forEach((l) => l());
+}
+
+async function fetchCatalog(): Promise<CatalogState> {
   const { catalog } = await providerCatalogFetch();
   if (!catalog || typeof catalog !== "object") throw new Error("models.dev 回的不是目录");
   // 只留连得上的供应商和能用的模型：整份三四 MB，localStorage 放不下。
@@ -76,13 +90,13 @@ export async function refreshCatalog(): Promise<void> {
   for (const p of supportedProviders(catalog as Catalog)) {
     slim[p.id] = { ...p, models: Object.fromEntries(usableModels(p).map((m) => [m.id, m])) };
   }
-  state = { catalog: slim, fetchedAt: Date.now() };
+  const next = { catalog: slim, fetchedAt: Date.now() };
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(state));
+    localStorage.setItem(CACHE_KEY, JSON.stringify(next));
   } catch {
     // 存不下就只在这次打开里用。
   }
-  listeners.forEach((l) => l());
+  return next;
 }
 
 export function useCatalog(): CatalogState | null {
@@ -90,7 +104,7 @@ export function useCatalog(): CatalogState | null {
   useEffect(() => {
     const on = () => setS(state);
     listeners.add(on);
-    void load().then(on);
+    void load().then((loaded) => setS(state ?? loaded));
     return () => void listeners.delete(on);
   }, []);
   return s;
