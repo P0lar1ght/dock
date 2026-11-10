@@ -1,46 +1,27 @@
-// tool-batch：注册模型工具 `tool_batch`，一次调用按顺序跑一串工具（内置 / MCP / 其它插件），
-// 中间结果存在插件里的变量表，不进模型上下文；最后只回 `return` 点名的几项（截断到 max_chars）。
+// tool-batch：注册模型工具 `tool_batch`，一次调用跑一串工具（内置 / MCP / 其它插件），可以把互不
+// 依赖的几颗放进 `parallel` 分组同时跑。中间结果存在插件里的变量表，不进模型上下文；最后只回
+// `return` 点名的几项（截断到 max_chars）。
 //
-// 只用 host.call_tool；不联网（不碰 http_request）、不读写文件（不碰 host.read_bytes）、不用 eval。
-// 宿主的限制和绕法见同目录 HOST_GAPS.md。
+// 用到的宿主能力：host.call_tool_ex / call_tools_parallel（结构化结果、调用方身份、时限、停止）、
+// host.tool_schema（先校验工具名和必填参数）、host.eval_expr（when / transform，plugin.toml
+// 里 allow_eval = true 才有）、host.cancelled。不联网、不读写文件。设计依据见 DESIGN.md。
 //
 // 注意：Rhai 的 `fn` 看不见外层变量和顶层常量，所以上限写成函数、host 当参数传进去。
 
-fn tb_max_steps() { 50 }
+fn tb_max_calls() { 50 }
+fn tb_max_parallel() { 16 }
 fn tb_budget_secs() { 120.0 }
 fn tb_default_max_chars() { 4000 }
-
-// 任意值 → JSON 文本。宿主没给通用的 to_json（Rhai 只有 Map.to_json），包一层再剥掉。
-fn tb_json(v) {
-    let s = #{ v: v }.to_json();
-    s.sub_string(5, s.len() - 6)
-}
+fn tb_max_timeout_ms() { 600000 }
 
 // 工具结果文本 → 值：像 JSON 对象 / 数组就解析，否则原样当字符串。
-// Rhai 的 parse_json 只认对象（顶层必须是 `{`），数组包一层再取出来。
 fn tb_parse(text) {
     let t = text;
     t.trim();
-    if t.starts_with("{") {
+    if t.starts_with("{") || t.starts_with("[") {
         try { return parse_json(t); } catch (e) { }
-    } else if t.starts_with("[") {
-        try { return parse_json("{\"v\":" + t + "}").v; } catch (e) { }
     }
     text
-}
-
-// call_tool 只回 content、丢了 is_error，只能照着宿主的兜底规则（tool_output_looks_failed）
-// 和几条已知的拒绝 / 拦截文案猜。
-fn tb_failed(text) {
-    let t = text;
-    t.trim();
-    for p in [
-        "Error", "error", "exit ", "已中断。", "权限被拒绝", "计划模式已阻止", "只读模式：",
-        "MCP 工具未启用或已关闭", "当前 Agent 预设未包含此工具"
-    ] {
-        if t.starts_with(p) { return true; }
-    }
-    false
 }
 
 fn tb_first_line(text, max) {
@@ -103,7 +84,7 @@ fn tb_subst_str(s, vars) {
         out += rest.sub_string(0, i);
         let r = tb_resolve(rest.sub_string(i + 2, j - i - 2), vars);
         if !r.ok { return r; }
-        out += if type_of(r.value) == "string" { r.value } else { tb_json(r.value) };
+        out += if type_of(r.value) == "string" { r.value } else { to_json(r.value) };
         rest = rest.sub_string(j + 1);
     }
     #{ ok: true, value: out }
@@ -135,7 +116,7 @@ fn tb_subst(v, vars) {
 
 // 短的原样（map 仍是 map），超长的转成文本截断并注明砍掉多少。
 fn tb_trunc(v, max) {
-    let s = if type_of(v) == "string" { v } else { tb_json(v) };
+    let s = if type_of(v) == "string" { v } else { to_json(v) };
     if s.len() > max {
         s.sub_string(0, max) + "…[truncated " + (s.len() - max) + " chars]"
     } else {
@@ -148,48 +129,158 @@ fn tb_bad(out, msg) {
     out
 }
 
-// 先整体校验形状，一步都不跑；有错直接回，不会跑一半。
-fn tb_check(args) {
-    if type_of(args) != "map" { return "arguments must be a JSON object { steps: [...] }"; }
-    if !("steps" in args) || type_of(args.steps) != "array" { return "steps must be an array"; }
-    let n = args.steps.len();
-    if n == 0 { return "steps is empty"; }
-    if n > tb_max_steps() {
-        return "too many steps: " + n + " > " + tb_max_steps() + " (split the batch)";
+fn tb_has(m, k) { k in m && m[k] != () }
+
+// 一个调用步骤（顶层或 parallel 分组里的一颗）的形状 + 工具名 + 必填参数。
+fn tb_check_call(host, st, label, in_group) {
+    if type_of(st) != "map" { return label + ": must be an object"; }
+    if tb_has(st, "parallel") {
+        return label + ": " + (if in_group { "parallel groups cannot nest" } else { "a parallel step has no tool" });
     }
-    for i in 0..n {
-        let st = args.steps[i];
-        if type_of(st) != "map" { return "step " + i + ": must be an object"; }
-        if !("tool" in st) || type_of(st.tool) != "string" || st.tool == "" {
-            return "step " + i + ": missing tool (full tool name, e.g. read_file or mcp_cua-driver__click)";
-        }
-        if st.tool == "tool_batch" { return "step " + i + ": tool_batch cannot call itself"; }
-        if "on_error" in st && st.on_error != () && st.on_error != "stop" && st.on_error != "continue" {
-            return "step " + i + ": on_error must be \"stop\" or \"continue\"";
-        }
-        if "save_as" in st && st.save_as != () {
-            if type_of(st.save_as) != "string" || st.save_as == "" || st.save_as.contains(".") {
-                return "step " + i + ": save_as must be a non-empty name without dots";
+    if !("tool" in st) || type_of(st.tool) != "string" || st.tool == "" {
+        return label + ": missing tool (full tool name, e.g. read_file or mcp_cua-driver__click)";
+    }
+    if st.tool == "tool_batch" { return label + ": tool_batch cannot call itself"; }
+    let schema = host.tool_schema(st.tool);
+    if schema == () {
+        return label + ": unknown tool \"" + st.tool + "\" (not registered, or not callable here; MCP tools use their full name mcp_<server>__<tool>)";
+    }
+    let args = if tb_has(st, "args") { st.args } else { #{} };
+    if type_of(args) != "map" { return label + ": args must be an object"; }
+    let params = schema.parameters;
+    if type_of(params) == "map" && tb_has(params, "required") && type_of(params.required) == "array" {
+        for k in params.required {
+            if !(k in args) {
+                return label + ": " + st.tool + " needs argument \"" + k + "\"";
             }
         }
-        if "expect" in st && st.expect != () && type_of(st.expect) != "string" {
-            return "step " + i + ": expect must be a string";
+    }
+    if tb_has(st, "on_error") && st.on_error != "stop" && st.on_error != "continue" {
+        return label + ": on_error must be \"stop\" or \"continue\"";
+    }
+    if tb_has(st, "save_as") {
+        if type_of(st.save_as) != "string" || st.save_as == "" || st.save_as.contains(".") {
+            return label + ": save_as must be a non-empty name without dots";
         }
     }
-    if "return" in args && args["return"] != () {
-        if type_of(args["return"]) != "array" { return "return must be an array of variable names"; }
+    if tb_has(st, "expect") && type_of(st.expect) != "string" {
+        return label + ": expect must be a string";
+    }
+    for k in ["when", "transform"] {
+        if tb_has(st, k) && type_of(st[k]) != "string" {
+            return label + ": " + k + " must be an expression string";
+        }
+    }
+    if tb_has(st, "timeout_ms") {
+        let t = st.timeout_ms;
+        if type_of(t) == "f64" { t = t.to_int(); }
+        if type_of(t) != "i64" || t < 1 || t > tb_max_timeout_ms() {
+            return label + ": timeout_ms must be an integer 1.." + tb_max_timeout_ms();
+        }
     }
     ""
 }
 
+// 先整体校验，一步都不跑；有错直接回，不会跑一半。
+fn tb_check(host, args) {
+    if type_of(args) != "map" { return "arguments must be a JSON object { steps: [...] }"; }
+    if !("steps" in args) || type_of(args.steps) != "array" { return "steps must be an array"; }
+    let n = args.steps.len();
+    if n == 0 { return "steps is empty"; }
+    let calls = 0;
+    for i in 0..n {
+        let st = args.steps[i];
+        if type_of(st) == "map" && tb_has(st, "parallel") {
+            if "tool" in st { return "step " + i + ": a step is either { tool, ... } or { parallel: [...] }, not both"; }
+            if type_of(st.parallel) != "array" || st.parallel.len() == 0 {
+                return "step " + i + ": parallel must be a non-empty array of calls";
+            }
+            if st.parallel.len() > tb_max_parallel() {
+                return "step " + i + ": at most " + tb_max_parallel() + " calls in one parallel group";
+            }
+            if tb_has(st, "on_error") && st.on_error != "stop" && st.on_error != "continue" {
+                return "step " + i + ": on_error must be \"stop\" or \"continue\"";
+            }
+            for j in 0..st.parallel.len() {
+                let bad = tb_check_call(host, st.parallel[j], "step " + i + "." + j, true);
+                if bad != "" { return bad; }
+                calls += 1;
+            }
+        } else {
+            let bad = tb_check_call(host, st, "step " + i, false);
+            if bad != "" { return bad; }
+            calls += 1;
+        }
+    }
+    if calls > tb_max_calls() {
+        return "too many calls: " + calls + " > " + tb_max_calls() + " (split the batch)";
+    }
+    if tb_has(args, "return") && type_of(args["return"]) != "array" {
+        return "return must be an array of variable names";
+    }
+    ""
+}
+
+// when / transform 走 host.eval_expr；插件没开 allow_eval 时报错（不会默默跳过）。
+fn tb_eval(host, expr, vars) {
+    try {
+        return #{ ok: true, value: host.eval_expr(expr, vars) };
+    } catch (e) {
+        return #{ ok: false, err: "" + e };
+    }
+}
+
+// 跑之前：代入引用、算 when。→ #{ ok, skip, args, err }
+fn tb_prepare(host, st, vars) {
+    if tb_has(st, "when") {
+        let w = tb_eval(host, st.when, vars);
+        if !w.ok { return #{ ok: false, err: "when: " + w.err }; }
+        if type_of(w.value) != "bool" { return #{ ok: false, err: "when must evaluate to true/false, got " + type_of(w.value) }; }
+        if !w.value { return #{ ok: true, skip: true }; }
+    }
+    let raw = if tb_has(st, "args") { st.args } else { #{} };
+    let sub = tb_subst(raw, vars);
+    if !sub.ok { return #{ ok: false, err: sub.err }; }
+    #{ ok: true, skip: false, args: sub.value }
+}
+
+// 跑完之后：is_error / expect / transform → #{ failed, reason, value }
+fn tb_settle(host, st, r, vars) {
+    let failed = r.is_error;
+    let reason = if failed { tb_first_line(r.text, 300) } else { "" };
+    if !failed && tb_has(st, "expect") && !r.text.contains(st.expect) {
+        failed = true;
+        reason = "expect not found: \"" + st.expect + "\" (got: " + tb_first_line(r.text, 120) + ")";
+    }
+    let value = tb_parse(r.text);
+    if !failed && tb_has(st, "transform") {
+        let scope = vars;
+        scope.result = value;
+        let t = tb_eval(host, st.transform, scope);
+        if t.ok { value = t.value; } else { failed = true; reason = "transform: " + t.err; }
+    }
+    if r.images > 0 { reason += (if reason == "" { "" } else { "; " }) + r.images + " image(s) not kept"; }
+    #{ failed: failed, reason: reason, value: value }
+}
+
+fn tb_int(v) { if type_of(v) == "f64" { v.to_int() } else { v } }
+
+fn tb_opts(st) {
+    if tb_has(st, "timeout_ms") { #{ timeout_ms: tb_int(st.timeout_ms) } } else { #{} }
+}
+
+fn tb_trace(label, tool, failed, ms, reason) {
+    label + " " + tool + " " + (if failed { "fail" } else { "ok" }) + " " + ms + "ms" + (if reason != "" { " — " + reason } else { "" })
+}
+
 fn tb_run(host, args) {
     let started = timestamp();
-    let out = #{ ok: false, completed: 0, failed_step: (), error: (), results: #{}, trace: [], stopped: false, elapsed_ms: 0 };
-    let bad = tb_check(args);
+    let out = #{ ok: false, completed: 0, skipped: 0, failed_step: (), error: (), results: #{}, trace: [], stopped: false, elapsed_ms: 0 };
+    let bad = tb_check(host, args);
     if bad != "" { return tb_bad(out, bad); }
 
     let max = tb_default_max_chars();
-    if "max_chars" in args && args.max_chars != () {
+    if tb_has(args, "max_chars") {
         let m = args.max_chars;
         if type_of(m) == "f64" { m = m.to_int(); }
         if type_of(m) != "i64" || m < 1 { return tb_bad(out, "max_chars must be a positive integer"); }
@@ -198,72 +289,125 @@ fn tb_run(host, args) {
 
     let steps = args.steps;
     let n = steps.len();
+    let total = 0;
     let vars = #{};
     let last_key = ();
     let stopped = false;
     for i in 0..n {
         let st = steps[i];
+        if host.cancelled() {
+            out.failed_step = i;
+            out.error = "cancelled by the user before step " + i;
+            stopped = true;
+            break;
+        }
         if started.elapsed > tb_budget_secs() {
             out.failed_step = i;
             out.error = "time budget " + tb_budget_secs() + "s used up before step " + i;
             stopped = true;
             break;
         }
-        let on_error = if "on_error" in st && st.on_error != () { st.on_error } else { "stop" };
+        let on_error = if tb_has(st, "on_error") { st.on_error } else { "stop" };
         let t0 = timestamp();
-        let raw_args = if "args" in st && st.args != () { st.args } else { #{} };
-        let sub = tb_subst(raw_args, vars);
-        if !sub.ok {
-            // 引用错是批次本身写错了：不管 on_error，一律停。
-            out.trace.push("#" + i + " " + st.tool + " fail 0ms (bad reference)");
-            out.failed_step = i;
-            out.error = "step " + i + " (" + st.tool + "): " + sub.err;
-            stopped = true;
-            break;
-        }
-        let text = "";
-        let failed = false;
-        let reason = "";
-        try {
-            text = host.call_tool(st.tool, sub.value);
-        } catch (e) {
-            failed = true;
-            reason = "call_tool threw: " + e;
-            text = "Error: " + e;
-        }
-        if !failed && tb_failed(text) {
-            failed = true;
-            reason = tb_first_line(text, 300);
-        }
-        if !failed && "expect" in st && st.expect != () && !text.contains(st.expect) {
-            failed = true;
-            reason = "expect not found: \"" + st.expect + "\" (got: " + tb_first_line(text, 120) + ")";
-        }
-        let ms = (t0.elapsed * 1000.0).to_int();
-        let value = tb_parse(text);
-        let key = "step" + i;
-        vars[key] = value;
-        if "save_as" in st && st.save_as != () {
-            key = st.save_as;
-            vars[key] = value;
-        }
-        last_key = key;
-        out.trace.push("#" + i + " " + st.tool + " " + (if failed { "fail" } else { "ok" }) + " " + ms + "ms" + (if failed { " — " + reason } else { "" }));
-        if failed {
-            if out.failed_step == () {
-                out.failed_step = i;
-                out.error = "step " + i + " (" + st.tool + "): " + reason;
+        let step_failed = false;
+
+        if tb_has(st, "parallel") {
+            let group = st.parallel;
+            total += group.len();
+            // 组里每颗都只能引用前面步骤的结果：先全部代入，再一起跑。
+            let preps = [];
+            let calls = [];
+            let broken = "";
+            for j in 0..group.len() {
+                let p = tb_prepare(host, group[j], vars);
+                if !p.ok { broken = "step " + i + "." + j + " (" + group[j].tool + "): " + p.err; break; }
+                preps.push(p);
+                if !p.skip {
+                    let c = #{ tool: group[j].tool, args: p.args };
+                    if tb_has(group[j], "timeout_ms") { c.timeout_ms = tb_int(group[j].timeout_ms); }
+                    calls.push(c);
+                }
             }
-            if on_error == "stop" {
+            if broken != "" {
+                // 引用 / when 写错是批次本身写错了：不管 on_error，一律停。
+                out.trace.push("#" + i + " parallel fail 0ms (bad step)");
+                out.failed_step = i;
+                out.error = broken;
                 stopped = true;
                 break;
             }
+            let rs = host.call_tools_parallel(calls);
+            let ms = (t0.elapsed * 1000.0).to_int();
+            let values = [];
+            let k = 0;
+            for j in 0..group.len() {
+                let m = group[j];
+                if preps[j].skip {
+                    out.skipped += 1;
+                    values.push(());
+                    out.trace.push("#" + i + "." + j + " " + m.tool + " skip (when false)");
+                    continue;
+                }
+                let s = tb_settle(host, m, rs[k], vars);
+                k += 1;
+                values.push(s.value);
+                if tb_has(m, "save_as") { vars[m.save_as] = s.value; }
+                out.trace.push(tb_trace("#" + i + "." + j, m.tool, s.failed, ms, s.reason));
+                if s.failed {
+                    step_failed = true;
+                    if out.failed_step == () {
+                        out.failed_step = i;
+                        out.error = "step " + i + "." + j + " (" + m.tool + "): " + s.reason;
+                    }
+                } else {
+                    out.completed += 1;
+                }
+            }
+            vars["step" + i] = values;
+            last_key = "step" + i;
         } else {
-            out.completed += 1;
+            total += 1;
+            let p = tb_prepare(host, st, vars);
+            if !p.ok {
+                out.trace.push("#" + i + " " + st.tool + " fail 0ms (bad step)");
+                out.failed_step = i;
+                out.error = "step " + i + " (" + st.tool + "): " + p.err;
+                stopped = true;
+                break;
+            }
+            if p.skip {
+                out.skipped += 1;
+                out.trace.push("#" + i + " " + st.tool + " skip (when false)");
+                continue;
+            }
+            let r = host.call_tool_ex(st.tool, p.args, tb_opts(st));
+            let s = tb_settle(host, st, r, vars);
+            let ms = (t0.elapsed * 1000.0).to_int();
+            let key = "step" + i;
+            vars[key] = s.value;
+            if tb_has(st, "save_as") {
+                key = st.save_as;
+                vars[key] = s.value;
+            }
+            last_key = key;
+            out.trace.push(tb_trace("#" + i, st.tool, s.failed, ms, s.reason));
+            if s.failed {
+                step_failed = true;
+                if out.failed_step == () {
+                    out.failed_step = i;
+                    out.error = "step " + i + " (" + st.tool + "): " + s.reason;
+                }
+            } else {
+                out.completed += 1;
+            }
+        }
+        if step_failed && on_error == "stop" {
+            stopped = true;
+            break;
         }
     }
 
-    let names = if "return" in args && args["return"] != () { args["return"] } else if last_key != () { [last_key] } else { [] };
+    let names = if tb_has(args, "return") { args["return"] } else if last_key != () { [last_key] } else { [] };
     let unset = [];
     for name in names {
         let nm = if type_of(name) == "string" { name } else { name.to_string() };
@@ -276,7 +420,7 @@ fn tb_run(host, args) {
         }
     }
     if unset.len() > 0 { out.unset = unset; }
-    out.ok = out.failed_step == () && out.completed == n;
+    out.ok = out.failed_step == () && out.completed + out.skipped == total;
     out.elapsed_ms = (started.elapsed * 1000.0).to_int();
     out.stopped = stopped;
     out
@@ -287,16 +431,20 @@ fn tb_run(host, args) {
     apply: |host| {
         host.register_tool(#{
             name: "tool_batch",
-            description: "按顺序批量调用多个工具（Dock 内置、MCP 如 mcp_cua-driver__*、其它插件工具），一次调用顶十几轮。中间结果留在批里不进上下文，只回 `return` 点名的变量（默认最后一步），每项截断到 max_chars（默认 4000）。\n" +
-                "用法：steps[i] = { tool: 工具全名, args: {...}, save_as?: 变量名, expect?: 结果必须包含的子串, on_error?: \"stop\"(默认)|\"continue\" }。args 里的字符串可写 ${var} / ${var.a.b} / ${var.items.0}（数组下标，-1 是最后一个）引用前面步骤的结果；整串只有一个引用时代入原值（对象 / 数组 / 数字原样），否则拼成文本。每步结果也自动存为 step0、step1…。结果文本是 JSON 对象 / 数组就解析后存，否则存字符串。\n" +
-                "什么时候用：顺序已知的一串操作（定位→点击→输入→确认），或者一次做多个只读查询再汇总，尤其是跨工具组合（cua + 文件 + bash + 浏览器）。纯 cua 动作序列直接用 cua-driver 的 run_steps（带 wait_for/expect/observe，更快）；要分支 / 循环 / 按结果决定下一步，用 cua-driver 的 run_script 或分几次调用。\n" +
-                "限制：串行执行，不并发；拿不到截图 / 图片，也拿不到工具的 is_error 标记（按 Error/权限被拒绝 等开头判失败），确认界面状态请用 get_window_state（query + include_screenshot:false）的文本或 verify_state 配 expect；每个需审批的工具（bash、cua 等）仍会逐次弹审批；最多 50 步、总 120 秒（只在步与步之间检查，正在跑的一步不会被打断）；引用写错一律停；不能嵌套调用 tool_batch。返回 JSON：{ ok, completed, failed_step, error, results, trace, elapsed_ms, stopped }；中途停下时第一行以 Error: 开头。",
+            description: "一次调用跑多个工具（Dock 内置、MCP 如 mcp_cua-driver__*、其它插件工具），顶好几轮来回。中间结果留在批里不进上下文，只回 `return` 点名的变量（默认最后一步），每项截断到 max_chars（默认 4000）。\n" +
+                "steps[i] 二选一：\n" +
+                "- 调用：{ tool: 工具全名, args?: {...}, save_as?: 变量名, expect?: 结果必须包含的子串, when?: 表达式, transform?: 表达式, timeout_ms?: 毫秒, on_error?: \"stop\"(默认)|\"continue\" }\n" +
+                "- 并行分组：{ parallel: [调用, ...], on_error? }：组里互不依赖的调用同时跑（最多 16 颗），整组跑完再往下；组结果存为数组 stepN（stepN.0、stepN.1…），各颗也可 save_as。\n" +
+                "args 里的字符串可写 ${var} / ${var.a.b} / ${var.items.0}（-1 是最后一个）引用前面步骤的结果；整串只有一个引用时代入原值，否则拼成文本。每步结果也自动存为 step0、step1…；结果文本是 JSON 就解析后存。\n" +
+                "when：Rhai 表达式，前面存的变量直接当名字用（如 \"win.count > 0\"），false 就跳过这步（不算失败）。transform：对这步结果求值后再存，结果叫 result（如 \"result.items.len()\"）。\n" +
+                "什么时候用：顺序已知的一串操作，或一次做多个只读查询再汇总（放进 parallel），尤其是跨工具组合。纯 cua 动作序列直接用 cua-driver 的 run_steps / run_script。只把互不依赖的调用放进 parallel；写文件、桌面操作等有副作用的按顺序排。\n" +
+                "规则：调用前整批先校验（工具名、必填参数、形状），有错一步都不跑；失败按工具自己的 is_error 判；需审批的工具仍逐次弹审批；最多 50 次调用、总 120 秒（步与步之间检查，单步用 timeout_ms 限时）；用户停止时立刻中止；引用 / when 写错一律停；图片不回传；不能嵌套 tool_batch。返回 JSON：{ ok, completed, skipped, failed_step, error, results, trace, elapsed_ms, stopped }；中途停下或被拒时这次调用标记为失败。",
             parameters: #{
                 type: "object",
                 properties: #{
                     steps: #{
                         type: "array",
-                        description: "按顺序执行的步骤，最多 50 步",
+                        description: "按顺序执行的步骤；一步是一个调用，或 { parallel: [调用...] }。总共最多 50 次调用",
                         items: #{
                             type: "object",
                             properties: #{
@@ -304,9 +452,12 @@ fn tb_run(host, args) {
                                 args: #{ type: "object", description: "工具参数；字符串里可用 ${var} / ${var.path}" },
                                 save_as: #{ type: "string", description: "把结果存成这个变量名（不能含点）" },
                                 expect: #{ type: "string", description: "结果文本必须包含的子串，不含则算失败" },
-                                on_error: #{ type: "string", "enum": ["stop", "continue"], description: "失败时停（默认）还是继续" }
-                            },
-                            required: ["tool"]
+                                when: #{ type: "string", description: "表达式，false 时跳过这步，如 \"hits.len() > 0\"" },
+                                transform: #{ type: "string", description: "表达式，结果叫 result，求得的值代替结果存下，如 \"result.items[0].id\"" },
+                                timeout_ms: #{ type: "integer", description: "这一步的时限（毫秒，最多 600000），到点算失败；含等审批的时间" },
+                                on_error: #{ type: "string", "enum": ["stop", "continue"], description: "失败时停（默认）还是继续" },
+                                parallel: #{ type: "array", items: #{ type: "object" }, description: "并行分组：一组互不依赖的调用（同上的字段，不含 parallel），同时跑" }
+                            }
                         }
                     },
                     "return": #{ type: "array", items: #{ type: "string" }, description: "要返回的变量名或路径（如 win.title）；省略则只回最后一步" },
@@ -316,12 +467,7 @@ fn tb_run(host, args) {
             },
             execute: |args| {
                 let out = tb_run(host, args);
-                let json = out.to_json();
-                if out.stopped || (out.error != () && out.trace.len() == 0) {
-                    "Error: tool_batch " + (if out.failed_step != () { "stopped at step " + out.failed_step } else { "rejected" }) + ": " + out.error + "\n" + json
-                } else {
-                    json
-                }
+                #{ is_error: out.stopped || (out.error != () && out.trace.len() == 0), content: out.to_json() }
             }
         });
     }

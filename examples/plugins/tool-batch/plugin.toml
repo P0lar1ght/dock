@@ -1,4 +1,7 @@
 name = "批量调工具"
-purpose = "tool_batch：一次调用按顺序跑多个 Dock / MCP 工具，中间结果留在插件里，只回最终需要的几项，减少来回轮数"
+purpose = "tool_batch：一次调用跑多个 Dock / MCP 工具（顺序或并行分组），中间结果留在插件里，只回最终需要的几项，减少来回轮数"
 factory = "rhai"
 enabled = true
+# when / transform 是写在参数里的表达式，要 host.eval_expr。只求单个表达式，跑在没有 host /
+# http / 文件的单独引擎里，同样的操作数上限（见 DESIGN.md）。
+allow_eval = true

@@ -10,7 +10,17 @@
 
 ### 新增
 
-- **示例插件 tool-batch**：`examples/plugins/tool-batch/`，Rhai 磁盘插件，注册 `tool_batch`，一次调用按顺序跑多个 Dock / MCP 工具（`save_as` + `${var.path}` 引用前面的结果、`expect` 断言、`on_error`），中间结果不进上下文，只回点名的几项。附技能说明（含 cua 少截图做法）和 `HOST_GAPS.md`（Rhai 宿主还缺的能力）。不改核心代码。
+- **示例插件 tool-batch**：`examples/plugins/tool-batch/`，Rhai 磁盘插件，注册 `tool_batch`，一次调用按顺序跑多个 Dock / MCP 工具（`save_as` + `${var.path}` 引用前面的结果、`expect` 断言、`on_error`），中间结果不进上下文，只回点名的几项。附技能说明（含 cua 少截图做法）和 `HOST_GAPS.md`（Rhai 宿主还缺的能力）。
+  - 支持 `parallel` 并行分组、`when` / `transform` 表达式、单步 `timeout_ms`；跑之前按工具 schema 校验工具名和必填参数；停下或被拒时这次调用直接标记失败（不再在 JSON 前拼 `Error:`）。设计依据与出处见 `DESIGN.md`。
+
+- **一轮里的只读 MCP 调用并行执行**：模型一次回复里的多个调用，`use_tool` 按它派发的工具判断；MCP 工具在 `tools/list` 里标了 `readOnlyHint: true` 的，以及 cua-driver 的只读几颗（列应用 / 窗口、读窗口状态、校验状态等），和别的只读调用一起并发跑。注解只用来排并发，审批、计划模式、能力档位不变。系统提示与 `use_tool` 描述更明确地鼓励把互不依赖的调用放进同一次回复。
+
+- **Rhai 插件宿主能力**（插件开发技能 `host-api.md` / `package.md` / `http.md` 同步）：
+  - `host.call_tool` 在工具里以**调用方**身份执行：那一页 / 子代理的审批档位、计划模式、只读场景、停止都算数；调不存在的工具回错误，不再回显参数当成功。
+  - 新增 `host.call_tool_ex`（结构化结果 `#{ ok, is_error, text, images, tool }`，可设 `timeout_ms`）、`host.call_tools_parallel`（最多 16 颗并发）、`host.list_tools` / `host.tool_schema`、`host.cancelled`。
+  - 插件工具的 `execute` 可回 `#{ is_error, content }` 明确报失败。
+  - `parse_json` / `to_json` 支持任意 JSON 值并正确转义。
+  - 磁盘插件可在 `plugin.toml` 写 `allow_eval = true` 打开 `host.eval_expr`（只求表达式，单独的受限引擎，默认关）。
 
 - **桌面 GUI 进仓库**：`dock-gui/`（Tauri 2 + React）的核心代码随源码提交（设计稿、文档不进仓库），见 `dock-gui/README.md`。独立工程（`src-tauri/` 自带 `[workspace]`，不进根 workspace），启动时拉起 `dock serve` 走 dock.1。还没签名，不带自动更新。供应商 / 模型目录不随应用打包：设置页第一次打开时经 Dock 从 models.dev 拉一份缓存起来，离线拉不到就是空目录，照样能手填自定义供应商。
 

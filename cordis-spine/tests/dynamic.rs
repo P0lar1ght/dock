@@ -3532,8 +3532,27 @@ async fn boot_disk_plugin(
     (root, home, plugins)
 }
 
+/// 跑一次 `tool_batch`，回内容文本。插件把停下 / 被拒标成 `is_error`（内容只有 JSON）；
+/// 这里给 `is_error` 的结果补一行 `Error: tool_batch stopped at step N` / `rejected`，
+/// 断言时一眼看出是哪种失败。
 async fn batch(root: &Context, v: serde_json::Value) -> String {
-    exec(root, "tool_batch", &v.to_string()).await
+    let r = tools_of(root)
+        .execute(ToolCall {
+            id: "t".into(),
+            name: "tool_batch".into(),
+            arguments: v.to_string(),
+        })
+        .await;
+    if !r.is_error {
+        return r.content;
+    }
+    let v: serde_json::Value = serde_json::from_str(&r.content)
+        .unwrap_or_else(|e| panic!("not JSON ({e}): {}", r.content));
+    let how = match v["failed_step"].as_i64() {
+        Some(n) if v["stopped"] == true => format!("stopped at step {n}"),
+        _ => "rejected".to_string(),
+    };
+    format!("Error: tool_batch {how}: {}\n{}", v["error"], r.content)
 }
 
 /// 去掉中途停下时的 `Error: …` 首行，剩下的 JSON。
@@ -3809,7 +3828,7 @@ async fn example_tool_batch_rejects_bad_batches_before_running() {
     let steps: Vec<_> = (0..51).map(|_| touch.clone()).collect();
     let out = batch(&root, json!({ "steps": steps })).await;
     assert!(out.starts_with("Error: tool_batch rejected"), "{out}");
-    assert!(out.contains("too many steps: 51 > 50"), "{out}");
+    assert!(out.contains("too many calls: 51 > 50"), "{out}");
     assert!(!marker.exists(), "一步都不该跑");
 
     // 50 步正好放行。
@@ -3829,12 +3848,33 @@ async fn example_tool_batch_rejects_bad_batches_before_running() {
             "cannot call itself",
         ),
         (
-            json!({"steps": [{"tool": "bash", "on_error": "retry"}]}),
+            json!({"steps": [{"tool": "bash", "args": {"command": "true"}, "on_error": "retry"}]}),
             "on_error must be",
         ),
         (
-            json!({"steps": [{"tool": "bash", "save_as": "a.b"}]}),
+            json!({"steps": [{"tool": "bash", "args": {"command": "true"}, "save_as": "a.b"}]}),
             "save_as must be",
+        ),
+        // 跑之前就按 schema 校验：不存在的工具、缺必填参数。
+        (
+            json!({"steps": [touch.clone(), {"tool": "no_such_tool"}]}),
+            "step 1: unknown tool \\\"no_such_tool\\\"",
+        ),
+        (
+            json!({"steps": [touch.clone(), {"tool": "bash", "args": {}}]}),
+            "step 1: bash needs argument \\\"command\\\"",
+        ),
+        (
+            json!({"steps": [{"parallel": [touch.clone(), {"parallel": []}]}]}),
+            "parallel groups cannot nest",
+        ),
+        (
+            json!({"steps": [{"parallel": []}]}),
+            "parallel must be a non-empty array",
+        ),
+        (
+            json!({"steps": [{"tool": "bash", "args": {"command": "true"}, "timeout_ms": 0}]}),
+            "timeout_ms must be",
         ),
         (
             json!({"steps": [touch.clone()], "max_chars": 0}),
@@ -4000,7 +4040,6 @@ async fn plugin_call_tool_runs_as_the_caller() {
             },
         )
         .await
-        .content
     });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     turn_page
@@ -4012,12 +4051,13 @@ async fn plugin_call_tool_runs_as_the_caller() {
         .expect("停止后批次该很快返回")
         .unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
-    assert!(out.starts_with("Error"), "{out}");
-    assert!(!out.contains("never"), "{out}");
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("cancelled"), "{}", out.content);
+    assert!(!out.content.contains("never"), "{}", out.content);
 }
 
-/// 一个只登记 `probe` 工具的磁盘插件：`probe` 把参数里的 `script` 当函数体跑不了（没有 eval），
-/// 所以每个用例自己写 execute 体。`toml_extra` 追加到 plugin.toml。
+/// 只登记一颗 `probe` 工具的磁盘插件，`execute_body` 是它的 execute 体（`args` 是参数 map），
+/// 用来直接试 host 能力。`toml_extra` 追加到 plugin.toml（如 `allow_eval = true`）。
 async fn boot_probe(
     execute_body: &str,
     toml_extra: &str,
@@ -4247,4 +4287,139 @@ async fn plugin_eval_expr_is_opt_in_and_expression_only() {
     let (root, _h, _p) = boot_probe(body, "").await;
     let out = exec(&root, "probe", "{}").await;
     assert!(out.contains("allow_eval = true"), "{out}");
+}
+
+/// 并行分组：组里的调用同时跑，结果存成数组 stepN，各颗 save_as 也能被后面的步骤引用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_parallel_group_runs_concurrently() {
+    let (root, _home, _p) = boot_tool_batch().await;
+    let started = std::time::Instant::now();
+    let out = batch(
+        &root,
+        json!({
+            "steps": [
+                {"parallel": [
+                    {"tool": "bash", "args": {"command": "sleep 1; echo '{\"n\":1}'"}, "save_as": "a"},
+                    {"tool": "bash", "args": {"command": "sleep 1; echo '{\"n\":2}'"}, "save_as": "b"},
+                    {"tool": "bash", "args": {"command": "sleep 1; echo three"}}
+                ]},
+                {"tool": "bash", "args": {"command": "echo sum-${a.n}-${b.n}"}, "save_as": "sum", "expect": "sum-1-2"}
+            ],
+            "return": ["sum", "step0.2", "a"]
+        }),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(!out.starts_with("Error"), "{out}");
+    let v = batch_json(&out);
+    assert_eq!(v["ok"], true, "{out}");
+    assert_eq!(v["completed"], 4, "{out}");
+    assert!(
+        v["results"]["sum"].as_str().unwrap().contains("sum-1-2"),
+        "{out}"
+    );
+    assert!(
+        v["results"]["step0.2"].as_str().unwrap().contains("three"),
+        "{out}"
+    );
+    assert_eq!(v["results"]["a"]["n"], 1, "{out}");
+    let trace: Vec<String> = v["trace"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    assert!(trace[0].starts_with("#0.0 bash ok"), "{trace:?}");
+    assert_eq!(trace.len(), 4, "{trace:?}");
+    // 三颗 sleep 1 并行：远小于串行的 3s。
+    assert!(
+        elapsed < std::time::Duration::from_millis(2500),
+        "{elapsed:?}"
+    );
+
+    // 组里一颗失败：整组跑完，默认停在这一步，后面的不跑。
+    let out = batch(
+        &root,
+        json!({ "steps": [
+            {"parallel": [
+                {"tool": "bash", "args": {"command": "exit 3"}},
+                {"tool": "bash", "args": {"command": "echo fine"}, "save_as": "fine"}
+            ]},
+            {"tool": "bash", "args": {"command": "echo never"}}
+        ], "return": ["fine"]}),
+    )
+    .await;
+    assert!(
+        out.starts_with("Error: tool_batch stopped at step 0"),
+        "{out}"
+    );
+    let v = batch_json(&out);
+    assert!(
+        v["error"].as_str().unwrap().starts_with("step 0.0 (bash)"),
+        "{out}"
+    );
+    assert_eq!(v["completed"], 1, "{out}");
+    assert!(
+        v["results"]["fine"].as_str().unwrap().contains("fine"),
+        "{out}"
+    );
+    assert_eq!(v["trace"].as_array().unwrap().len(), 2, "{out}");
+}
+
+/// when / transform（plugin.toml 开了 allow_eval）与单步 timeout_ms。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn example_tool_batch_when_transform_and_timeout() {
+    let (root, home, _p) = boot_tool_batch().await;
+    let marker = home.path().join("skipped");
+    let out = batch(
+        &root,
+        json!({
+            "steps": [
+                {"tool": "bash", "args": {"command": "echo '{\"items\":[{\"id\":7},{\"id\":9}]}'"},
+                 "save_as": "ids", "transform": "result.items.map(|x| x.id)"},
+                {"tool": "bash", "args": {"command": format!("touch {}", marker.display())},
+                 "when": "ids.len() > 5"},
+                {"tool": "bash", "args": {"command": "echo last=${ids.-1}"}, "when": "ids[0] == 7",
+                 "save_as": "last"}
+            ],
+            "return": ["ids", "last"]
+        }),
+    )
+    .await;
+    let v = batch_json(&out);
+    assert_eq!(v["ok"], true, "{out}");
+    assert_eq!(v["completed"], 2, "{out}");
+    assert_eq!(v["skipped"], 1, "{out}");
+    assert_eq!(v["results"]["ids"], json!([7, 9]), "{out}");
+    assert!(
+        v["results"]["last"].as_str().unwrap().contains("last=9"),
+        "{out}"
+    );
+    assert!(!marker.exists(), "when 为 false 的步骤不该跑");
+
+    // when 不是布尔、表达式写错：批次本身写错了，停。
+    let out = batch(
+        &root,
+        json!({"steps": [{"tool": "bash", "args": {"command": "echo x"}, "when": "1 + 1"}]}),
+    )
+    .await;
+    assert!(
+        out.starts_with("Error: tool_batch stopped at step 0"),
+        "{out}"
+    );
+    assert!(out.contains("when must evaluate to true/false"), "{out}");
+
+    // 单步时限：到点算失败。
+    let started = std::time::Instant::now();
+    let out = batch(
+        &root,
+        json!({"steps": [{"tool": "bash", "args": {"command": "sleep 10"}, "timeout_ms": 300}]}),
+    )
+    .await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(
+        out.starts_with("Error: tool_batch stopped at step 0"),
+        "{out}"
+    );
+    assert!(out.contains("timed out"), "{out}");
 }
