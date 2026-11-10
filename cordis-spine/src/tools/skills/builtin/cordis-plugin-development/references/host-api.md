@@ -9,6 +9,8 @@ HTTP 与编解码见 `http.md`。
 | `host.register_tool(#{ name, description, parameters, execute, view? })` | `tools` | 注册一颗模型工具，见下 |
 | `host.call_tool(name, args)` | `tools` | 调一颗活着的工具；`args` 是 map 或 JSON 字符串。bash 类工具照样弹权限。在 `execute` 里调时**以调用方身份**跑：那一页 / 那个子代理的审批档位、计划模式、只读场景、停止都算数。工具名不存在时回 `Error: unknown tool `x``（不会再把参数原样回显成成功） |
 | `host.call_tool_ex(name, args)` | `tools` | 同 `call_tool`（同样的身份、门、未知工具报错），但回结构化结果 `#{ ok, is_error, text, images, tool }`：`is_error` 是工具自己的判定，`images` 是图片张数，`tool` 是实际跑的那颗。要分支判成败时用它，别去猜 `Error:` 前缀 |
+| `host.list_tools()` | `tools` | 调用方能调的工具 `[#{ name, description }]`（按调用方的允许名单、能力档位筛；含 MCP 与插件工具；描述截到 200 字） |
+| `host.tool_schema(name)` | `tools` | 一颗工具的 `#{ name, description, parameters }`，`parameters` 是 JSON Schema map；不认得或调用方调不了 → `()`。跑之前先查名字、核对必填参数用它 |
 | `host.cancelled()` | — | 调用方这一轮被用户停止了吗。多步循环每步前查一下；脚本也会在下一个检查点被中止 |
 | `host.provide(name, map)` | — | 把一张 map 挂成命名服务（RhaiBag）。重名失败；停包时撤掉 |
 | `host.get(name)` | — | bag → map 的拷贝；活着的非 bag 服务 → `true`；没有 → `()` |

@@ -4111,3 +4111,28 @@ async fn plugin_tool_can_return_is_error() {
     assert!(!plain.is_error);
     assert_eq!(plain.content, r#"{"x":1}"#);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_lists_tools_and_reads_schemas() {
+    let (root, _h, _p) = boot_probe(
+        r#"let names = host.list_tools().map(|t| t.name);
+           let s = host.tool_schema("bash");
+           #{ is_error: false, content: #{
+               has_bash: names.contains("bash"),
+               has_probe: names.contains("probe"),
+               schema_name: s.name,
+               requires_command: s.parameters.required.contains("command"),
+               missing: host.tool_schema("nope") == ()
+           } }"#,
+        "",
+    )
+    .await;
+    let out = exec(&root, "probe", "{}").await;
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v,
+        json!({"has_bash": true, "has_probe": true, "schema_name": "bash",
+               "requires_command": true, "missing": true}),
+        "{out}"
+    );
+}

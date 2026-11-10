@@ -126,6 +126,16 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
         &["host.call_tool_ex(name: String, args: Map | String) -> #{ ok: bool, is_error: bool, text: String, images: int, tool: String }"],
     ),
     (
+        "host.list_tools",
+        "Tools the caller may call (its allowlist / capability tier applied), including MCP and plugin tools: [#{ name, description }] with descriptions cut to 200 chars.",
+        &["host.list_tools() -> [#{ name: String, description: String }]"],
+    ),
+    (
+        "host.tool_schema",
+        "Full spec of one tool: #{ name, description, parameters } (parameters is the JSON-schema map). () when the tool is unknown or the caller may not call it.",
+        &["host.tool_schema(name: String) -> #{ name, description, parameters: Map } | ()"],
+    ),
+    (
         "host.cancelled",
         "True once the user stopped the calling turn. Long loops in execute should check it between steps (the script is also aborted at the next checkpoint).",
         &["host.cancelled() -> bool"],
@@ -371,6 +381,8 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
     engine.register_fn("call_tool_ex", Host::call_tool_ex);
+    engine.register_fn("list_tools", Host::list_tools);
+    engine.register_fn("tool_schema", Host::tool_schema);
     engine.register_fn("cancelled", Host::cancelled);
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
@@ -763,6 +775,48 @@ impl Host {
         let call = self.tool_call(&name, &args)?;
         let exec = self.exec_ctx();
         Ok(result_map(block_on_tool(tools.as_ref(), &exec, call)?))
+    }
+
+    /// 调用方能调的工具：`[#{ name, description }]`（描述截到 200 字，全文看 `tool_schema`）。
+    /// 允许名单、能力档位按调用方算；MCP 与插件工具也在里面。
+    fn list_tools(&mut self) -> Result<Array, Box<rhai::EvalAltResult>> {
+        let tools = self.tools()?;
+        let exec = self.exec_ctx();
+        Ok(tools
+            .specs()
+            .into_iter()
+            .filter(|s| !tools.outside_allowlist(&exec, &s.name))
+            .map(|s| {
+                let mut m = Map::new();
+                m.insert("name".into(), Dynamic::from(s.name));
+                m.insert(
+                    "description".into(),
+                    Dynamic::from(preview(&s.description, 200)),
+                );
+                Dynamic::from_map(m)
+            })
+            .collect())
+    }
+
+    /// 一颗工具的 `#{ name, description, parameters }`（`parameters` 是 JSON Schema map）；
+    /// 不认得或调用方调不了 → `()`。
+    fn tool_schema(&mut self, name: ImmutableString) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+        let tools = self.tools()?;
+        let exec = self.exec_ctx();
+        let Some(spec) = tools
+            .spec_of(&name)
+            .filter(|s| !tools.outside_allowlist(&exec, &s.name))
+        else {
+            return Ok(Dynamic::UNIT);
+        };
+        let mut m = Map::new();
+        m.insert("name".into(), Dynamic::from(spec.name));
+        m.insert("description".into(), Dynamic::from(spec.description));
+        m.insert(
+            "parameters".into(),
+            json_str_to_dynamic(&spec.parameters_json),
+        );
+        Ok(Dynamic::from_map(m))
     }
 
     fn tools(&self) -> Result<Arc<Tools>, Box<rhai::EvalAltResult>> {
