@@ -145,6 +145,20 @@ impl Sizes {
         self.last = Some(viewport);
     }
 
+    /// 面板要了一个视口：有活动标签页就记在它名下；没有就只记成「最近一次要的」，
+    /// 不往 `by_target` 里塞空 key。
+    fn record(&mut self, target: Option<&str>, viewport: Viewport) {
+        match target {
+            Some(target) => self.set(target, viewport),
+            None => self.last = Some(viewport),
+        }
+    }
+
+    /// 关掉的标签页不再记尺寸：只留名册里还在的。
+    fn retain(&mut self, alive: &[String]) {
+        self.by_target.retain(|target, _| alive.contains(target));
+    }
+
     /// 只记住这个标签页的尺寸（不改「最近一次要的」）。
     fn remember(&mut self, target: &str, viewport: Viewport) {
         self.by_target.insert(target.to_string(), viewport);
@@ -318,8 +332,8 @@ pub(crate) async fn dispatch(
                 .ok_or_else(|| RpcError::invalid_params("width and height are required"))?;
             let (page, sizes, kick, headed, key) = views.entry_parts(id)?;
             // 记住这个标签页自己的尺寸：切回它时还是这个大小。
-            let target = active_target(&key).unwrap_or_default();
-            sizes.lock().unwrap().set(&target, viewport);
+            let target = active_target(&key);
+            sizes.lock().unwrap().record(target.as_deref(), viewport);
             // 有头：页面跟着真窗口，不按面板改视口（静止帧也按原生像素截，见 `Pump::pump`）。
             if !headed {
                 apply_viewport(&page, viewport)
@@ -1044,6 +1058,8 @@ impl Pump {
             return;
         };
         let (rows, unadopted) = tab_rows(&session, &targets);
+        // 关掉的标签页不再占着尺寸。
+        self.sizes.lock().unwrap().retain(&session.targets);
         if rows != self.tabs {
             self.tabs = rows;
             self.send(json!({
@@ -1160,5 +1176,33 @@ mod tests {
         sizes.remember("C", a);
         assert_eq!(sizes.get("C"), Some(a));
         assert_eq!(sizes.get("D"), Some(b));
+    }
+
+    /// 没有活动标签页时只更新「最近一次要的」，不记在空 key 下；关掉的页剪掉。
+    #[test]
+    fn sizes_without_active_tab_only_update_last() {
+        let mut sizes = Sizes::default();
+        let a = Viewport {
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+        };
+        let narrow = Viewport {
+            width: 390,
+            height: 844,
+            scale: 2.0,
+        };
+        sizes.record(None, a);
+        assert!(sizes.by_target.is_empty(), "不该有空 key");
+        assert_eq!(sizes.get("A"), Some(a));
+        sizes.record(Some("A"), narrow);
+        sizes.record(Some("B"), a);
+        assert_eq!(sizes.get("A"), Some(narrow));
+        // B 关掉了：名册里只剩 A。
+        sizes.retain(&["A".to_string()]);
+        assert_eq!(sizes.by_target.len(), 1);
+        assert_eq!(sizes.get("A"), Some(narrow));
+        // B 的条目没了，回落到最近一次要的。
+        assert_eq!(sizes.get("B"), Some(a));
     }
 }
