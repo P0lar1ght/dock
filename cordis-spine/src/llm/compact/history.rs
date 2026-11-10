@@ -94,14 +94,14 @@ pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
 
 fn first_real_user(history: &[LogEvent]) -> Option<String> {
     history.iter().find_map(|e| match e {
-        LogEvent::User(t) if !t.trim().is_empty() => Some(t.clone()),
+        LogEvent::User(t) if !t.trim().is_empty() => Some(t.text.clone()),
         _ => None,
     })
 }
 
 fn last_real_user(history: &[LogEvent]) -> Option<String> {
     history.iter().rev().find_map(|e| match e {
-        LogEvent::User(t) if !t.trim().is_empty() => Some(t.clone()),
+        LogEvent::User(t) if !t.trim().is_empty() => Some(t.text.clone()),
         _ => None,
     })
 }
@@ -114,11 +114,11 @@ pub fn build_compacted_events(history: &[LogEvent], summary: &str) -> Vec<LogEve
     let last = last_real_user(history);
     let mut out = Vec::new();
     if let Some(first) = first.clone() {
-        out.push(LogEvent::User(first));
+        out.push(LogEvent::User(first.into()));
     }
     if let Some(last) = last {
         if first.as_deref() != Some(last.as_str()) {
-            out.push(LogEvent::User(wrap_user_query(last)));
+            out.push(LogEvent::User(wrap_user_query(last).into()));
         }
     }
     out.extend(extract_messages_since_last_user(history));
@@ -137,7 +137,8 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
     let mut n = estimate_text(system);
     for event in history {
         match event {
-            LogEvent::User(t) | LogEvent::SystemReminder(t) => n += estimate_text(t),
+            LogEvent::User(t) => n += estimate_text(&t.text),
+            LogEvent::SystemReminder(t) => n += estimate_text(t),
             LogEvent::LlmStream(out) => {
                 n += estimate_text(&out.text);
                 n += estimate_reasoning(out);

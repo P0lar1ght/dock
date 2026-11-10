@@ -1402,7 +1402,7 @@ mod tests {
         crate::bundle::install_fakes(&ctx).await.unwrap();
         let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
         sessions.set_window(1_000_000);
-        sessions.append(LogEvent::User("x".repeat(4_000)));
+        sessions.append(LogEvent::User("x".repeat(4_000).into()));
         let raw = snapshot_context(&ctx);
         sample_with_usage(&sessions, 50_000, 0);
         let snap = snapshot_context(&ctx);
@@ -1427,7 +1427,7 @@ mod tests {
         let ctx = Context::new();
         crate::bundle::install_fakes(&ctx).await.unwrap();
         let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
-        sessions.append(LogEvent::User("x".repeat(4_000)));
+        sessions.append(LogEvent::User("x".repeat(4_000).into()));
         let snap = snapshot_context(&ctx);
         assert!(snap.message_tokens >= 1_000, "{snap:?}");
         assert_eq!(

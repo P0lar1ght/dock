@@ -83,7 +83,7 @@ fn last_user(history: &[LogEvent]) -> String {
         .iter()
         .rev()
         .find_map(|e| match e {
-            LogEvent::User(text) => Some(text.clone()),
+            LogEvent::User(text) => Some(text.text.clone()),
             _ => None,
         })
         .unwrap_or_default()
@@ -839,7 +839,7 @@ async fn the_first_task_tells_the_child_whom_to_reply_to() {
     let first_user = events
         .iter()
         .find_map(|e| match e {
-            LogEvent::User(t) => Some(t.clone()),
+            LogEvent::User(t) => Some(t.text.clone()),
             _ => None,
         })
         .unwrap();

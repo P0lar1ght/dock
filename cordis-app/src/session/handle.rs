@@ -19,10 +19,21 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     pub fn submit(&self, text: impl Into<String>, send_now: bool) {
+        self.submit_with_images(text, Vec::new(), send_now);
+    }
+
+    /// 提交一条带图的消息：图绑在这条消息上，排队 / 插话 / 送达都不换主人。
+    pub fn submit_with_images(
+        &self,
+        text: impl Into<String>,
+        images: Vec<cordis_spine::UserImage>,
+        send_now: bool,
+    ) {
         let (respond_to, _) = oneshot::channel();
         let _ = self.cmd_tx.send(SessionCommand::Prompt {
             prompt_id: format!("prompt-{}", nanoid()),
             text: text.into(),
+            images,
             send_now,
             respond_to,
         });
@@ -51,6 +62,7 @@ impl SessionHandle {
             .send(SessionCommand::Prompt {
                 prompt_id: format!("prompt-{}", nanoid()),
                 text: text.into(),
+                images: Vec::new(),
                 send_now: false,
                 respond_to,
             })
@@ -109,6 +121,15 @@ impl SessionHandle {
 impl cordis_spine::SessionPort for SessionHandle {
     fn submit(&self, text: String, send_now: bool) {
         SessionHandle::submit(self, text, send_now);
+    }
+
+    fn submit_with_images(
+        &self,
+        text: String,
+        images: Vec<cordis_spine::UserImage>,
+        send_now: bool,
+    ) {
+        SessionHandle::submit_with_images(self, text, images, send_now);
     }
 
     fn steer(&self, text: String, images: Vec<cordis_spine::UserImage>) {

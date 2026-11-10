@@ -8,6 +8,8 @@ pub enum SessionCommand {
     Prompt {
         prompt_id: String,
         text: String,
+        /// 这条消息自己带的图（跟着消息走，排队期间也带着）。
+        images: Vec<UserImage>,
         send_now: bool,
         respond_to: oneshot::Sender<PromptTurnResult>,
     },

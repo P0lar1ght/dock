@@ -112,6 +112,85 @@ pub struct UserImage {
     pub data: std::sync::Arc<[u8]>,
     pub width: u32,
     pub height: u32,
+    /// 内容的 sha256（十六进制）。有它就不用每次重算摘要 —— 投影、取图、
+    /// 落盘都靠它定位同一张图。`None` = 还没算（落盘 / 投影时现算）。
+    pub digest: Option<String>,
+}
+
+/// 一条用户消息：正文 + 随这条消息带上来的图。
+///
+/// 图的像素跟着消息走（`UserImage::data` 是 `Arc`，和采样用的那份共享同一块字节）。
+/// 落盘时像素不进 JSONL，只写内容寻址的引用（见 `session/persist`），读回来再填上，
+/// 这样历史会话照样能看到用户发的图。
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct UserMessage {
+    pub text: String,
+    pub images: Vec<UserImage>,
+}
+
+impl UserMessage {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// 正文（`Deref` 到 `str` 的等价写法）。
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl From<String> for UserMessage {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for UserMessage {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
+/// 正文当字符串用（`msg == "喂"`、`msg.trim()`）。
+impl std::ops::Deref for UserMessage {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl PartialEq<str> for UserMessage {
+    fn eq(&self, other: &str) -> bool {
+        self.text == other
+    }
+}
+
+impl PartialEq<&str> for UserMessage {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
+impl PartialEq<UserMessage> for str {
+    fn eq(&self, other: &UserMessage) -> bool {
+        self == other.text
+    }
+}
+
+impl PartialEq<UserMessage> for &str {
+    fn eq(&self, other: &UserMessage) -> bool {
+        *self == other.text
+    }
+}
+
+impl fmt::Display for UserMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 /// [`LogEvent::Notice`] 的类别。落盘用 kebab-case 字符串，认不得的旧值读成
@@ -211,7 +290,8 @@ impl TurnEndStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LogEvent {
-    User(String),
+    /// 一条用户消息：正文 + 随消息带上来的图（`UserMessage`）。
+    User(UserMessage),
     PreStep,
     Prompt(String),
     /// Grok `PromptOrigin::GoalSummary`: hidden from the pager, sent as a

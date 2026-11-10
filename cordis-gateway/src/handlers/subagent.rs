@@ -143,7 +143,7 @@ fn persisted(
         .ok_or_else(|| RpcError::app("not_found", format!("这个线程没有子代理 {agent_id}")))?;
     let (tx, _) = tokio::sync::broadcast::channel(1);
     let mut t = crate::transcript::Transcript::for_child("", "", agent_id, tx);
-    t.replay(&events, &times, &[]);
+    t.replay(&events, &times);
     let events = t
         .history_since(0)
         .into_iter()

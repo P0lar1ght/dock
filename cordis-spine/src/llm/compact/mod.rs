@@ -176,10 +176,13 @@ async fn compact_session_locked(
     maybe_flush_before_compact(ctx).await;
     let llm = ctx.require::<Llm>(LLM)?;
     let mut request_history = prepare_conversation_for_summarization(&history);
-    request_history.push(LogEvent::User(build_summary_prompt_kind(
-        SummaryPromptKind::Structured,
-        extra.map(str::trim).filter(|s| !s.is_empty()),
-    )));
+    request_history.push(LogEvent::User(
+        build_summary_prompt_kind(
+            SummaryPromptKind::Structured,
+            extra.map(str::trim).filter(|s| !s.is_empty()),
+        )
+        .into(),
+    ));
     let iso = ctx.isolate("sessions");
     let mut last_err = Error::Compact("压缩失败：摘要为空。".into());
     for attempt in 0..cfg.max_attempts {
@@ -548,7 +551,7 @@ mod tests {
         let root = Context::new();
         let sessions = Sessions::new(root.clone());
         sessions.set_window(80);
-        sessions.append(LogEvent::User("x".repeat(400)));
+        sessions.append(LogEvent::User("x".repeat(400).into()));
         sessions.append(LogEvent::ToolExecute {
             id: "c1".into(),
             name: "read_file".into(),

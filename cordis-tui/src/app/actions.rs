@@ -19,6 +19,9 @@ use cordis_spine::{
 pub struct PromptSend {
     pub text: String,
     pub unbound_image_notice: Option<String>,
+    /// 输入框里贴的图：绑在这条消息上一路带到 `SessionRef::submit_with_images` /
+    /// `steer`，不经会话的图片槽（槽只有一格，会被别的消息送达时顶掉）。
+    pub images: Vec<cordis_spine::UserImage>,
 }
 
 impl PromptSend {
@@ -26,6 +29,7 @@ impl PromptSend {
         Self {
             text: text.into(),
             unbound_image_notice: None,
+            images: Vec::new(),
         }
     }
 
@@ -33,7 +37,14 @@ impl PromptSend {
         Self {
             text: text.into(),
             unbound_image_notice: notice,
+            images: Vec::new(),
         }
+    }
+
+    /// 带上这条消息自己的图。
+    pub fn with_images(mut self, images: Vec<cordis_spine::UserImage>) -> Self {
+        self.images = images;
+        self
     }
 }
 
@@ -236,12 +247,14 @@ pub enum Effect {
         send_now: bool,
         /// Captured before take_prompt; flashed after clear_notice.
         unbound_image_notice: Option<String>,
+        /// 这条消息自己的图（take_send 从输入框收走的）。
+        images: Vec<cordis_spine::UserImage>,
     },
-    /// 插话（`SessionRef::steer`）。图片在 take_send 时已放进图片槽，这里取回来
-    /// 跟着插话走。
+    /// 插话（`SessionRef::steer`）。图片跟着插话走。
     SteerPrompt {
         text: String,
         unbound_image_notice: Option<String>,
+        images: Vec<cordis_spine::UserImage>,
     },
     PromoteQueued {
         id: Option<String>,
@@ -606,6 +619,7 @@ pub fn effect_for_extra(entry: &SlashEntry, args: &str) -> Effect {
                     text,
                     send_now: true,
                     unbound_image_notice: None,
+                    images: Vec::new(),
                 }
             } else {
                 Effect::SetPrompt { text }

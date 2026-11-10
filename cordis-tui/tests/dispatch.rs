@@ -11,6 +11,7 @@ fn send_prompt_emits_effect() {
             text,
             send_now: false,
             unbound_image_notice: None,
+            ..
         }] if text == "hello"
     ));
     assert!(prompt.text().is_empty());
@@ -253,6 +254,7 @@ async fn extra_slash_prompt_sends_template() {
                 text,
                 send_now: true,
                 unbound_image_notice: None,
+                ..
             }] if text == "写站会：今日"
         ),
         "{effects:?}"

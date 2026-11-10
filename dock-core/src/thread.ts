@@ -6,10 +6,10 @@
 import type {
   CompactionProgress,
   DockEvent,
-  ImageAttachment,
   Question,
   ToolEndStatus,
   ToolImage,
+  UserImage,
   TurnEndStatus,
 } from './events.ts';
 import { parseHistoryItem } from './events.ts';
@@ -24,7 +24,7 @@ export type TurnItem =
       id: string;
       text: string;
       at: number;
-      attachments: ImageAttachment[];
+      attachments: UserImage[];
       /** 子代理的对话里父级在它跑的时候发来的话；其余没有。 */
       origin?: 'parent';
       /** 插话：一轮进行中送达、并进那一轮。 */

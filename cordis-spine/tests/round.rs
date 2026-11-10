@@ -137,7 +137,7 @@ impl Driver for PromptOnly {
             let system = ctx.require::<cordis_spine::SystemPrompt>(SYSTEM_PROMPT)?;
             let _tools = ctx.require::<cordis_spine::Tools>(TOOLS)?;
             let _agents = ctx.require::<Agents>(AGENTS)?;
-            sessions.append(cordis_spine::LogEvent::User(prompt));
+            sessions.append(cordis_spine::LogEvent::User(prompt.into()));
             let assembled = system.assemble();
             sessions.append(cordis_spine::LogEvent::Prompt(assembled.clone()));
             let out = llm

@@ -663,9 +663,8 @@ fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
     bump(&request.system, &mut ascii, &mut other);
     for event in &request.history {
         match event {
-            LogEvent::User(t) | LogEvent::Prompt(t) | LogEvent::SystemReminder(t) => {
-                bump(t, &mut ascii, &mut other)
-            }
+            LogEvent::User(t) => bump(&t.text, &mut ascii, &mut other),
+            LogEvent::Prompt(t) | LogEvent::SystemReminder(t) => bump(t, &mut ascii, &mut other),
             LogEvent::LlmStream(out) => bump(&out.text, &mut ascii, &mut other),
             LogEvent::ToolExecute { content, .. } => bump(content, &mut ascii, &mut other),
             LogEvent::PreStep | LogEvent::Notice { .. } | LogEvent::TurnEnd(_) => {}
@@ -1537,6 +1536,7 @@ mod tests {
             v
         };
         let img = UserImage {
+            digest: None,
             mime: "image/png".into(),
             data: Arc::from(png.into_boxed_slice()),
             width: 1,
@@ -1593,6 +1593,7 @@ mod tests {
             v
         };
         let img = UserImage {
+            digest: None,
             mime: "image/png".into(),
             data: Arc::from(png.into_boxed_slice()),
             width: 1,
@@ -1681,6 +1682,7 @@ mod tests {
     fn user_images_are_withheld_from_text_only_models() {
         use std::sync::Arc;
         let img = UserImage {
+            digest: None,
             mime: "image/png".into(),
             data: Arc::from(vec![1u8, 2, 3].into_boxed_slice()),
             width: 1,
@@ -1750,6 +1752,7 @@ mod tests {
         v.extend_from_slice(&[8, 2, 0, 0, 0]);
         v.extend(std::iter::repeat_n(0u8, 40));
         UserImage {
+            digest: None,
             mime: "image/png".into(),
             data: Arc::from(v.into_boxed_slice()),
             width: 1,
