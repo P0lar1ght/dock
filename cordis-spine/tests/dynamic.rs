@@ -3519,6 +3519,14 @@ const RHAI_DISK_RESULT: &str = r#"#{
     }
 }"#;
 
+/// 无条件替换结果内容：用来验证钩子到底有没有被调用（不挑工具名）。
+const RHAI_DISK_RESULT_ANY: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("tools/execute", |r| { "REPLACED" });
+    }
+}"#;
+
 const RHAI_DISK_PRE_STEP: &str = r#"#{
     inject: [],
     apply: |host| {
@@ -3631,6 +3639,39 @@ async fn disk_rhai_plugin_can_rewrite_the_llm_output() {
     );
 }
 
+/// 回归：`tools/execute` 上**别的监听者先注册**时，脚本钩子的改写不能被吞掉。
+/// 真实 dock 里 `turn-changes` 就挂在同一个事件上（它先注册，脚本后注册）。
+#[tokio::test]
+async fn disk_rhai_plugin_result_hook_survives_another_listener() {
+    let root = boot().await;
+    root.plugin(cordis_spine::turn_changes(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let _dir = boot_disk_rhai(&root, "hookres2", RHAI_DISK_RESULT).await;
+    let out = exec(&root, "cordis_inspect", r#"{"what":"services"}"#).await;
+    assert_eq!(out, "REPLACED");
+}
+
+/// 复现真实 dock 的环境：完整应用树（`install_app`）里，磁盘插件的
+/// `tools/execute` 钩子还能不能改写模型看到的结果。真实 dock 上它不生效。
+#[tokio::test]
+async fn disk_rhai_result_hook_works_in_the_full_app_tree() {
+    // 隔离 `$DOCK_HOME`：不把本机的用户插件带进这棵树。
+    let _env = cordis_base::test_env::scoped();
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("DOCK_HOME", home.path());
+    let root = Context::new();
+    cordis_spine::install_app(&root).await.unwrap();
+    root.get::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Allow);
+    let _dir = boot_disk_rhai(&root, "hookres3", RHAI_DISK_RESULT_ANY).await;
+    let out = exec(&root, "bash", r#"{"command":"echo hi"}"#).await;
+    assert_eq!(out, "REPLACED");
+}
+
 /// 权限分层：会话里 `cordis_define` 的包**不能**挂这五个钩子 —— 否则模型
 /// 能给自己开闸门、能改自己的系统提示。
 #[tokio::test]
@@ -3655,6 +3696,45 @@ async fn a_session_package_cannot_register_the_flow_hooks() {
         json!({"pluginId": "hooks-1", "packageId": "pkg-1", "mode": "run"}),
     )
     .await;
+    assert!(!ran.contains("\"status\":\"running\""), "{ran}");
+    assert!(ran.contains("disk plugins"), "{ran}");
+}
+
+/// 回归：会话里 define 的包**带 `source_path`** 也拿不到那五个钩子。
+/// 判据必须是「这个包是不是从磁盘加载的」，不是「它有没有传 `source_path`」——
+/// 否则模型在会话里 define + source_path 就能给自己开闸门（自我提权）。
+#[tokio::test]
+async fn a_session_package_with_source_path_cannot_register_the_flow_hooks() {
+    let root = boot().await;
+    let dir = std::env::current_dir()
+        .unwrap()
+        .join(".dock")
+        .join("plugins")
+        .join("hooks-srcpath-session");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("source.rhai");
+    std::fs::write(&path, RHAI_DISK_DENY).unwrap();
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "hooks"},
+            "name": "Hook",
+            "purpose": "hooks",
+            "factory": "rhai",
+            "source_path": path.to_string_lossy(),
+        }),
+    )
+    .await;
+    assert!(defined.contains("pkg-1"), "{defined}");
+    let ran = exec_json(
+        &root,
+        "cordis_run",
+        json!({"pluginId": "hooks-1", "packageId": "pkg-1", "mode": "run"}),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(!ran.contains("\"status\":\"running\""), "{ran}");
     assert!(ran.contains("disk plugins"), "{ran}");
 }

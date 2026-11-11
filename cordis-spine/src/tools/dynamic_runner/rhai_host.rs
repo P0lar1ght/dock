@@ -246,6 +246,7 @@ pub fn build_rhai_limited(
     source: &str,
     max_bytes: usize,
     plugin_dir: Option<PathBuf>,
+    disk_backed: bool,
 ) -> Result<Plugin, String> {
     let meta = preflight_limited(source, max_bytes)?;
     let name = fiber_name.to_string();
@@ -256,7 +257,8 @@ pub fn build_rhai_limited(
         Inject::from(meta.inject.clone())
     };
     Ok(plugin(name.clone(), inject, move |ctx, _: &()| {
-        apply_rhai(ctx, &name, &source, plugin_dir.clone()).map_err(cordis::Error::plugin)?;
+        apply_rhai(ctx, &name, &source, plugin_dir.clone(), disk_backed)
+            .map_err(cordis::Error::plugin)?;
         Ok(None)
     }))
 }
@@ -266,6 +268,7 @@ fn apply_rhai(
     plugin_id: &str,
     source: &str,
     plugin_dir: Option<PathBuf>,
+    disk_backed: bool,
 ) -> Result<(), String> {
     let mut engine = sandboxed_engine(RUN_MAX_OPS);
     let tag = format!("[cordis:{plugin_id}]");
@@ -291,6 +294,7 @@ fn apply_rhai(
         ctx: ctx.clone(),
         plugin_id: plugin_id.to_string(),
         plugin_dir,
+        disk_backed,
         engine: engine.clone(),
         ast: ast.clone(),
         disposers: Mutex::new(Vec::new()),
@@ -373,6 +377,10 @@ struct HostInner {
     plugin_id: String,
     /// 磁盘插件（`source_path`）所在目录：`register_slot` 的 `web` 文件只能在这里面。
     plugin_dir: Option<PathBuf>,
+    /// 这个包是不是从磁盘来的（插件目录装上 / 设置启用 / promote 落盘）。
+    /// 只有磁盘包能挂那五个能否决流程的钩子；判据是来源，不是 `source_path`
+    /// ——会话里 define 的包也能带 `source_path`。
+    disk_backed: bool,
     engine: Arc<Engine>,
     ast: AST,
     disposers: Mutex<Vec<cordis::Disposable>>,
@@ -754,11 +762,12 @@ impl Host {
                 // 只给磁盘来源的插件（插件目录装上 / 设置里启用 / 审批过的
                 // `cordis_promote` 落盘）。会话里 `cordis_define` 的包打不开：否则
                 // 模型能给自己开闸门、能改自己的系统提示 = 自我提权。
-                if self.inner.plugin_dir.is_none() {
+                if !self.inner.disk_backed {
                     return err(format!(
                         "host.on({name:?}) is only available to disk plugins (installed from a \
                          plugins dir, enabled in settings, or persisted by an approved \
-                         cordis_promote); a package defined in this session cannot register it"
+                         cordis_promote); a package defined in this session cannot register it \
+                         (passing source_path does not change that)"
                     ));
                 }
                 match name.as_str() {
@@ -1573,9 +1582,37 @@ mod tests {
     #[test]
     fn build_rhai_limited_honors_inline_ceiling() {
         let oversized = "x".repeat(MAX_INLINE_SOURCE + 1);
-        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, None) {
+        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, None, false) {
             Err(err) => assert!(err.contains("128KiB"), "{err}"),
             Ok(_) => panic!("expected oversized inline source to fail"),
         }
+    }
+
+    const FLOW_HOOK_SOURCE: &str =
+        r#"#{ inject: [], apply: |host| { host.on("tools/pre-execute", |c| { () }); } }"#;
+
+    /// 五个流程钩子只给**磁盘来源**的包：会话里 define 的包挂上去要报错 ——
+    /// 否则模型能给自己开闸门（拦自己的工具调用）、能改自己的系统提示。
+    #[tokio::test]
+    async fn flow_hooks_are_refused_for_a_session_package() {
+        let ctx = Context::new();
+        let plugin = build_rhai_limited("t", FLOW_HOOK_SOURCE, MAX_INLINE_SOURCE, None, false)
+            .expect("source compiles");
+        let err = ctx
+            .plugin(plugin, ())
+            .unwrap()
+            .wait()
+            .await
+            .expect_err("会话包不该挂上流程钩子");
+        assert!(err.to_string().contains("disk plugins"), "{err}");
+    }
+
+    /// 磁盘来源的包（插件目录装上 / 设置启用 / promote 落盘）挂得上。
+    #[tokio::test]
+    async fn flow_hooks_are_open_for_a_disk_package() {
+        let ctx = Context::new();
+        let plugin = build_rhai_limited("t", FLOW_HOOK_SOURCE, MAX_INLINE_SOURCE, None, true)
+            .expect("source compiles");
+        ctx.plugin(plugin, ()).unwrap().wait().await.unwrap();
     }
 }
