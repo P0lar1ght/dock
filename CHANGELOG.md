@@ -10,6 +10,15 @@
 
 ### 新增
 
+- **插件能拦流程了**：磁盘来源的 Cordis 插件（插件目录装上 / 设置里启用 / 审批过的 `cordis_promote` 落盘）可以在 `host.on` 上挂五个新钩子，把 agent loop 的关键位点接出来：
+  - `agent/pre-step`：拒绝一整轮，理由写进会话（模型看得见为什么没跑）；
+  - `system-prompt/assemble`：往系统提示加一段（固定槽位、按插件 id 排序 → 提示词字节稳定，前缀缓存不作废）；
+  - `tools/pre-execute`：在权限门**之前**拒绝一次工具调用，或改道到别的工具（拒绝是单调的，先拒的赢；改道后按新名字重过允许名单、计划门、权限门，改道绕不过门）；
+  - `tools/execute`：事后替换模型看到的结果内容（压缩、脱敏）；
+  - `llm/stream`：改写采样输出（只能改输出，改不了请求 —— 要改请求走 `system-prompt/assemble`）。
+
+  原来的三个事件（`session/event`、`agent/step-start`、`agent/turn-end`）任何插件都能挂，行为不变。**会话里 `cordis_define` 的包打不开这五个**：否则模型能给自己开闸门、能改自己的系统提示，那是自我提权。详见内置技能 `cordis-plugin-development` 的 `references/hooks.md`。
+
 - **桌面 GUI 进仓库**：`dock-gui/`（Tauri 2 + React）的核心代码随源码提交（设计稿、文档不进仓库），见 `dock-gui/README.md`。独立工程（`src-tauri/` 自带 `[workspace]`，不进根 workspace），启动时拉起 `dock serve` 走 dock.1。还没签名，不带自动更新。供应商 / 模型目录不随应用打包：设置页第一次打开时经 Dock 从 models.dev 拉一份缓存起来，离线拉不到就是空目录，照样能手填自定义供应商。
 
 - **聊天里发的图片落盘，刷新后照旧看得到**：用户消息里的图以前只活在本窗口的内存里（事件只带尺寸），刷新、重开 Dock、换机器连远程，全看不到原图。
