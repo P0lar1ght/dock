@@ -2681,6 +2681,10 @@ mod tests {
         assert!(assembled.contains("test agent"), "{assembled}");
         assert!(assembled.contains("<agent-preset>"));
         assert!(assembled.contains("极少的工具"), "{assembled}");
+        assert!(
+            !assembled.contains("同一次回复一起发"),
+            "并行调用只写在基座，人设不再重复: {assembled}"
+        );
     }
 
     #[test]
