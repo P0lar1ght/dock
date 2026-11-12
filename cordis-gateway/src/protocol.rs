@@ -42,7 +42,7 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // （没有窗口、截图失败）。
     ("desktopCursor", true),
     // `desktop/view/windows` / `pin` / `input`：钉住一个窗口，并把点击、滚动、打字送回去。
-    // 没这个能力的网关只能看画面。
+    // 只认受信连接。没这个能力的网关只能看画面。
     ("desktopControl", true),
     // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
     ("workspaceFiles", true),

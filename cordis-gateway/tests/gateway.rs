@@ -3588,9 +3588,11 @@ async fn desktop_view_errors_without_a_driver() {
         unknown["error"]["details"]["code"], "not_found",
         "{unknown}"
     );
+    // 配对来的网页可以申请看画面（没有驱动就是 driver_unavailable），
+    // 但不能列窗口、钉住或往本机打点击和按键。
     let windows = rpc.call("desktop/view/windows", json!({})).await;
     assert_eq!(
-        windows["error"]["details"]["code"], "driver_unavailable",
+        windows["error"]["details"]["code"], "forbidden",
         "{windows}"
     );
     let input = rpc
@@ -3599,11 +3601,11 @@ async fn desktop_view_errors_without_a_driver() {
             json!({ "viewId": "nope", "event": { "type": "click", "x": 1, "y": 1 } }),
         )
         .await;
-    assert_eq!(input["error"]["details"]["code"], "not_found", "{input}");
+    assert_eq!(input["error"]["details"]["code"], "forbidden", "{input}");
     let pin = rpc
         .call("desktop/view/pin", json!({ "viewId": "nope", "pid": 1 }))
         .await;
-    assert_eq!(pin["error"]["details"]["code"], "invalid_params", "{pin}");
+    assert_eq!(pin["error"]["details"]["code"], "forbidden", "{pin}");
 }
 
 /// 真 Chrome：agent（这里直接用浏览器 MCP 的 hub）给第 1 页开了标签页 → 客户端

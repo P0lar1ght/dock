@@ -402,7 +402,7 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - `window`：`pid` / `windowId`，解析得到时还有 `app` / `title` / `bounds` / `screenshotScale`。
 - 同一会话再 `open`：旧的推 `closed { reason: "replaced" }`。
 - 钉住（`source: "pin"`）之后不挑最前面的窗口。刷新只在打开时、agent 对这个窗口动手时、用户 `input` 之后。空闲时不再按秒推前台。截不到也留在这个窗口上。
-- `input` 的 `event.type`：`click`（`x` `y` `button?` `count?`）、`drag`（`x` `y` `toX` `toY`）、`scroll`（`x` `y` `dx` `dy`）、`text`（`text`，可带 `x` `y`）、`key`（`key` `modifiers?`）。以这页的身份调 cua-driver，不进对话流、不过权限门。同一视图的 `input` 按收到的顺序一个个做。预览帧是 `display_only` 的 JPEG，会话名 `dock-view`（驱动说这个名字已结束时换成 `dock-view-N` 再试一次）；操作前补一张 PNG。`post_action_wait` 为 `none`。后台被拒（窗口藏着）时这一下改 `delivery_mode: foreground` 再试一次。
+- `input` 的 `event.type`：`click`（`x` `y` `button?` `count?`）、`drag`（`x` `y` `toX` `toY`）、`scroll`（`x` `y` `dx` `dy`）、`text`（`text`，可带 `x` `y`）、`key`（`key` `modifiers?`）。以这页的身份调 cua-driver，不进对话流、不过权限门。同一视图的 `input` 按收到的顺序一个个做。预览帧是 `display_only` 的 JPEG，每个视图自己一个会话名 `dock-view-<viewId>`（驱动说这个名字已结束时再加序号）；操作前补一张 PNG。`capture_id` 只附在单击上。`post_action_wait` 为 `none`。后台被拒（窗口藏着）时这一下改 `delivery_mode: foreground` 再试一次。`windows` / `pin` / `input` 只认受信连接，配对来的网页回 `forbidden`；`open` / `close` 仍可看画面。
   - 事件可带它点的那一帧的 `pid` / `windowId` / `width` / `height`。和当前帧不一致回 `not_ready`（「画面已经换了」），不打到新窗口上。
   - 截图和这次操作共用一把锁：点击用的像素帧不会被截图中途换掉。
 

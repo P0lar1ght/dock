@@ -195,13 +195,20 @@ struct Shared {
     /// 最近一次定位 PNG：同一窗口、同一尺寸，滚动和按键可以接着用，不必每次再截。
     ground: Mutex<Option<GroundMark>>,
     driver: AsyncMutex<()>,
-    /// 预览和点击用的 cua 会话代号。`0` 是 [`VIEW_SESSION`]；驱动说这个名字已经结束
-    /// （Dock 重启后旧连接的会话不会复活）就加一，换成新名字。
+    /// 这个视图自己的会话名前缀。各视图不共用一个名字，免得互相把对方的快照冲掉。
+    session_stem: String,
+    /// `0` 用 [`Shared::session_stem`]；驱动说这个名字已经结束就加一。
     session_gen: AtomicU64,
 }
 
 impl Shared {
+    #[cfg(test)]
     fn new(pin: Option<(i64, i64)>) -> Arc<Self> {
+        Self::named(pin, VIEW_SESSION.to_string())
+    }
+
+    /// `stem` 是这一视图自己的会话名（打开时带上 viewId）。
+    fn named(pin: Option<(i64, i64)>, stem: String) -> Arc<Self> {
         Arc::new(Self {
             pin: Mutex::new(pin),
             wake: AtomicBool::new(false),
@@ -210,19 +217,25 @@ impl Shared {
             pixels: Mutex::new(None),
             ground: Mutex::new(None),
             driver: AsyncMutex::new(()),
+            session_stem: stem,
             session_gen: AtomicU64::new(0),
         })
     }
 
     /// 这一视图现在用的 cua 会话名。
     fn session_label(&self) -> String {
-        session_label(self.session_gen.load(Ordering::Acquire))
+        let gen = self.session_gen.load(Ordering::Acquire);
+        if gen == 0 {
+            self.session_stem.clone()
+        } else {
+            format!("{}-{gen}", self.session_stem)
+        }
     }
 
     /// 旧名字已经被驱动关掉：换下一个。回新名字。
     fn rotate_session(&self) -> String {
         let next = self.session_gen.fetch_add(1, Ordering::AcqRel) + 1;
-        session_label(next)
+        format!("{}-{next}", self.session_stem)
     }
 
     fn wake_up(&self) {
@@ -306,12 +319,10 @@ fn reuses_ground(tool: &str) -> bool {
     matches!(tool, "scroll" | "press_key" | "hotkey")
 }
 
-/// 只有指针类工具吃 `capture_id`。打字和按键带上这个字段会被拒。
+/// 这一版驱动只有 `click` 收 `capture_id`。`double_click`、`right_click`、`drag`、
+/// `scroll` 的参数表里没有它，带上会整次拒绝（`unknown argument capture_id`）。
 fn takes_capture_id(tool: &str) -> bool {
-    matches!(
-        tool,
-        "click" | "double_click" | "right_click" | "drag" | "scroll"
-    )
+    tool == "click"
 }
 
 /// 最近一帧的窗口和像素尺寸。
@@ -416,7 +427,7 @@ async fn open(
         .clamp(320, 4096);
     let pin = pin_param(&params)?;
     let view_id = uuid::Uuid::new_v4().simple().to_string();
-    let shared = Shared::new(pin);
+    let shared = Shared::named(pin, format!("{VIEW_SESSION}-{view_id}"));
     let pump = Pump {
         view_id: view_id.clone(),
         thread_id: thread_id.clone(),
@@ -528,7 +539,7 @@ async fn input(views: &DesktopViews, params: &Value) -> Result<Value, RpcError> 
                 .await
                 .map_err(|e| RpcError::app("action_failed", e))?;
             fit_pixels(&mut args, &frame, ground.width, ground.height);
-            // `type_text` / `press_key` / `hotkey` 不收 capture_id，带上会被驱动拒掉。
+            // 只有单击收 `capture_id`。双击、右键、拖动、滚动带上会被驱动拒掉。
             if takes_capture_id(&tool) {
                 if let Some(id) = ground.capture_id {
                     args["capture_id"] = json!(id);
@@ -1261,16 +1272,6 @@ impl Shot {
 const VIEW_SESSION: &str = "dock-view";
 /// 预览 JPEG 的质量。远程隧道上比 PNG 小一截，坐标空间不变。
 const JPEG_QUALITY: i64 = 70;
-
-/// `gen == 0` 用固定名；之后每次「会话已结束」加一。新名字是普通调用就能建的，
-/// 不必 `start_session`（旧名字结束之后，新连接也复活不了它）。
-fn session_label(gen: u64) -> String {
-    if gen == 0 {
-        VIEW_SESSION.to_string()
-    } else {
-        format!("{VIEW_SESSION}-{gen}")
-    }
-}
 
 /// 驱动拒绝已结束的具名会话。普通工具调用不会把它重新建起来。
 fn session_ended(content: &str) -> bool {
@@ -2027,7 +2028,10 @@ mod tests {
         assert!(!takes_capture_id("press_key"));
         assert!(!takes_capture_id("hotkey"));
         assert!(takes_capture_id("click"));
-        assert!(takes_capture_id("scroll"));
+        assert!(!takes_capture_id("double_click"));
+        assert!(!takes_capture_id("right_click"));
+        assert!(!takes_capture_id("drag"));
+        assert!(!takes_capture_id("scroll"));
     }
 
     #[test]
