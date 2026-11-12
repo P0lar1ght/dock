@@ -17,6 +17,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { McpAppTool } from "dock-core";
 import type { ToolStatus } from "dock-core";
 import { IN_TAURI } from "../../components/chrome";
+import { gatewayArg } from "../../dock/store";
 
 export const MCP_APP_PANEL = "mcp-app";
 
@@ -123,7 +124,7 @@ export function focusRemote(key: string, call: RoutedCall | null): boolean {
   const r = remote.get(key);
   if (!r) return false;
   if (call) route(key, call);
-  void invoke("open_panel_window", { panel: r.kind, sessionId: r.sessionId ?? "", x: 0, y: 0 }).catch(() => {});
+  void invoke("open_panel_window", { panel: r.kind, sessionId: r.sessionId ?? "", gateway: gatewayArg(), x: 0, y: 0 }).catch(() => {});
   return true;
 }
 

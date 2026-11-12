@@ -1,15 +1,15 @@
-// 网关页最上面的「连接」：GUI 连本机 Dock 还是某台远程 Dock（dock serve --remote）。
-// - 一行一个连接，当前的打勾；「使用」换过去后所有窗口重载。
+// 网关页最上面的「连接」：本机 Dock 一直开着，远程可以同时打开多条。
+// - 「打开」连上并切过去；「切换」只换主界面在看哪一台；「关闭」拆掉那条套接字和隧道。
+// - 切走不停任务、不重载页面。关掉的是 GUI 这边，远端的 dock serve 继续跑。
 // - 新建 / 编辑在弹框里：名字、连法（直连地址 / SSH 隧道）、设备令牌（只进钥匙串；编辑时空着 = 不换）。
 // - SSH 隧道由 GUI 自己开；远端 Dock 没在跑时按「启动命令」经 SSH 拉起来。
 // - 「测试连接」真的鉴权 + initialize 一次，回 Dock 版本。
 
 import { useState } from "react";
 import { Check, LoaderCircle } from "lucide-react";
-import { useApp } from "../../dock/store";
+import { closeGateway, focusGateway, openGateway, useApp, useGateways } from "../../dock/store";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  connectionUse,
   remoteDelete,
   remoteList,
   remoteSave,
@@ -39,15 +39,15 @@ import {
 
 export function ConnectionsSection() {
   const app = useApp();
+  const host = useGateways();
   const list = useLoad(remoteList);
   const [editing, setEditing] = useState<Remote | "new" | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
-  const active = list.data?.active ?? null;
+  const opened = new Set(host.entries.map((e) => e.id));
 
-  const use = async (id: string | null) => {
-    setSwitching(id ?? "local");
-    // 成功的话窗口马上重载，用不着复位。
-    if ((await autosave(() => connectionUse(id))) === null) setSwitching(null);
+  const run = async (label: string, fn: () => Promise<void> | void) => {
+    setSwitching(label);
+    if ((await autosave(async () => { await fn(); })) === null) setSwitching(null);
   };
 
   return (
@@ -68,9 +68,10 @@ export function ConnectionsSection() {
           <ConnectionRow
             label="本机 Dock"
             desc="GUI 自己拉起的 dock serve"
-            current={active === null}
+            current={host.id === "local"}
+            opened
             switching={switching === "local"}
-            onUse={() => use(null)}
+            onUse={() => run("local", () => focusGateway(null))}
           />
         )}
         {list.data?.remotes.map((r) => (
@@ -78,10 +79,12 @@ export function ConnectionsSection() {
             key={r.id}
             label={r.name}
             desc={<span className="font-mono">{remoteWhere(r)}</span>}
-            current={active === r.id}
-            failed={active === r.id && !!app.fatal}
-            switching={switching === r.id}
-            onUse={() => use(r.id)}
+            current={host.id === r.id}
+            opened={opened.has(r.id)}
+            failed={host.id === r.id && !!app.fatal}
+            switching={switching === r.id || switching === `close:${r.id}`}
+            onUse={() => run(r.id, () => (opened.has(r.id) ? focusGateway(r.id) : openGateway(r.id)))}
+            onClose={() => run(`close:${r.id}`, () => closeGateway(r.id))}
             onEdit={() => setEditing(r)}
             onDelete={async () => {
               if ((await autosave(() => remoteDelete(r.id))) !== null) list.reload();
@@ -114,18 +117,23 @@ function ConnectionRow({
   label,
   desc,
   current,
+  opened,
   failed,
   switching,
   onUse,
+  onClose,
   onEdit,
   onDelete,
 }: {
   label: string;
   desc: React.ReactNode;
   current: boolean;
+  /** 已经连着（本机永远是）。没打开的远程显示「打开」。 */
+  opened: boolean;
   failed?: boolean;
   switching: boolean;
   onUse: () => void;
+  onClose?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
 }) {
@@ -171,10 +179,15 @@ function ConnectionRow({
               删除
             </button>
           )}
+          {onClose && opened && (
+            <button type="button" disabled={switching} onClick={onClose} className={smallButton}>
+              关闭
+            </button>
+          )}
           {!current && (
             <button type="button" disabled={switching} onClick={onUse} className={smallButton}>
               {switching && <LoaderCircle size={12} className="animate-spin" />}
-              使用
+              {opened ? "切换" : "打开"}
             </button>
           )}
         </>

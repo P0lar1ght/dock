@@ -1,7 +1,8 @@
 //! 远程 Dock（`dock serve --remote`）的连接配置。
 //!
-//! - 名单和「当前用哪个」在 App 数据目录的 `remotes.json`：`{ active, remotes: [{ id, name, url, ssh? }] }`。
-//!   `active` 为空 = 用本机 Dock（GUI 自己拉起的 `dock serve`）。
+//! - 名单在 App 数据目录的 `remotes.json`：`{ opened, foreground, remotes: [{ id, name, url, ssh? }] }`。
+//!   `opened` 是同时连着的远程连接；`foreground` 空 = 主界面正在看本机 Dock。
+//!   旧文件里的 `active` 会在读的时候迁进 `opened` / `foreground`。
 //! - 两种连法：直连 `url`（反向代理 / Tailscale / 自己开的隧道），或 `ssh`：GUI 自己开 SSH 隧道
 //!   （见 tunnel.rs），远端 Dock 没在跑时还能经 SSH 跑一条启动命令。
 //! - 设备令牌只进 macOS 钥匙串（service `dock-gui`，account 是连接 id），不落盘、不进前端存储。
@@ -74,17 +75,43 @@ impl SshTarget {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Remotes {
+    /// 同时打开的远程连接（本机 Dock 不写在这里，它跟 GUI 同寿命）。
     #[serde(default)]
+    pub opened: Vec<String>,
+    /// 主界面正在看的远程连接。空 = 本机。
+    #[serde(default)]
+    pub foreground: Option<String>,
+    /// 旧字段：唯一的「当前连接」。读进来后迁走，不再写回。
+    #[serde(default, skip_serializing)]
     pub active: Option<String>,
     #[serde(default)]
     pub remotes: Vec<Remote>,
 }
 
-impl Remotes {
-    pub fn active_remote(&self) -> Option<&Remote> {
-        let id = self.active.as_deref()?;
-        self.remotes.iter().find(|r| r.id == id)
+/// 丢掉指着已经不存在的连接，并把旧的 `active` 迁成「打开且正在看」。
+pub fn normalize(mut remotes: Remotes) -> Remotes {
+    let known: std::collections::HashSet<String> =
+        remotes.remotes.iter().map(|r| r.id.clone()).collect();
+    if remotes.opened.is_empty() {
+        if let Some(id) = remotes.active.clone().filter(|id| known.contains(id)) {
+            remotes.opened.push(id.clone());
+            if remotes.foreground.is_none() {
+                remotes.foreground = Some(id);
+            }
+        }
     }
+    remotes.opened.retain(|id| known.contains(id));
+    let mut seen = std::collections::HashSet::new();
+    remotes.opened.retain(|id| seen.insert(id.clone()));
+    if remotes
+        .foreground
+        .as_deref()
+        .is_some_and(|id| !remotes.opened.iter().any(|x| x == id))
+    {
+        remotes.foreground = None;
+    }
+    remotes.active = None;
+    remotes
 }
 
 #[derive(Clone, Default)]
@@ -96,26 +123,30 @@ pub struct RemoteStore {
 
 impl RemoteStore {
     pub fn init(&self, app: &AppHandle) {
-        *self.inner.lock().unwrap() = app.path().app_data_dir().ok().map(|d| d.join("remotes.json"));
+        *self.inner.lock().unwrap() = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .map(|d| d.join("remotes.json"));
     }
 
     fn file(&self) -> Result<PathBuf, String> {
-        self.inner.lock().unwrap().clone().ok_or_else(|| "找不到 App 数据目录".into())
+        self.inner
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "找不到 App 数据目录".into())
     }
 
     /// 读名单。文件不在 = 没配过；坏了也当没配过（只是连接名单，不值得卡住启动）。
     pub fn load(&self) -> Remotes {
-        let Ok(file) = self.file() else { return Remotes::default() };
+        let Ok(file) = self.file() else {
+            return Remotes::default();
+        };
         std::fs::read_to_string(&file)
             .ok()
             .and_then(|s| serde_json::from_str::<Remotes>(&s).ok())
-            .map(|mut r| {
-                // 指着已经删掉的连接：退回本机。
-                if r.active_remote().is_none() {
-                    r.active = None;
-                }
-                r
-            })
+            .map(normalize)
             .unwrap_or_default()
     }
 
@@ -145,13 +176,23 @@ impl RemoteStore {
             return Err("名字不能为空".into());
         }
         let ssh = ssh.map(SshTarget::normalized).transpose()?;
-        let url = if ssh.is_some() { String::new() } else { url.trim().to_string() };
+        let url = if ssh.is_some() {
+            String::new()
+        } else {
+            url.trim().to_string()
+        };
         if ssh.is_none() {
             ws_url(&url)?;
         }
-        let token = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        let token = token
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
         let mut remotes = self.load();
-        if remotes.remotes.iter().any(|r| r.name == name && Some(&r.id) != id.as_ref()) {
+        if remotes
+            .remotes
+            .iter()
+            .any(|r| r.name == name && Some(&r.id) != id.as_ref())
+        {
             return Err(format!("已经有叫「{name}」的连接了"));
         }
         let remote = match id {
@@ -170,7 +211,12 @@ impl RemoteStore {
                 if token.is_none() {
                     return Err("要填设备令牌（在远端跑 dock device add 拿到）".into());
                 }
-                let remote = Remote { id: new_id(), name, url, ssh };
+                let remote = Remote {
+                    id: new_id(),
+                    name,
+                    url,
+                    ssh,
+                };
                 remotes.remotes.push(remote.clone());
                 remote
             }
@@ -185,33 +231,59 @@ impl RemoteStore {
         Ok(remote)
     }
 
-    /// 删一个连接，连同钥匙串里的令牌。删的是正在用的就退回本机，回 `true`。
+    /// 删一个连接，连同钥匙串里的令牌。它正打开着就从打开列表里拿掉，回 `true`。
     pub fn delete(&self, id: &str) -> Result<bool, String> {
         let mut remotes = self.load();
-        let was_active = remotes.active.as_deref() == Some(id);
+        let was_open = remotes.opened.iter().any(|x| x == id);
         remotes.remotes.retain(|r| r.id != id);
-        if was_active {
-            remotes.active = None;
+        remotes.opened.retain(|x| x != id);
+        if remotes.foreground.as_deref() == Some(id) {
+            remotes.foreground = None;
         }
         self.store(&remotes)?;
         self.tokens.lock().unwrap().remove(id);
         if let Ok(entry) = keychain(id) {
             let _ = entry.delete_credential();
         }
-        Ok(was_active)
+        Ok(was_open)
     }
 
-    /// 换当前连接：`None` 是本机。
-    pub fn set_active(&self, id: Option<String>) -> Result<Remotes, String> {
+    /// 把一条远程连接记成打开（主界面可以切过去）。已经打开过就不变。
+    pub fn open_id(&self, id: &str) -> Result<(), String> {
+        let mut remotes = self.load();
+        if !remotes.remotes.iter().any(|r| r.id == id) {
+            return Err("这个连接已经不在了".into());
+        }
+        if !remotes.opened.iter().any(|x| x == id) {
+            remotes.opened.push(id.to_string());
+            self.store(&remotes)?;
+        }
+        Ok(())
+    }
+
+    /// 从打开列表拿掉。正在看它就退回本机。回它是否曾经是前台。
+    pub fn close_id(&self, id: &str) -> Result<bool, String> {
+        let mut remotes = self.load();
+        let was_foreground = remotes.foreground.as_deref() == Some(id);
+        remotes.opened.retain(|x| x != id);
+        if was_foreground {
+            remotes.foreground = None;
+        }
+        self.store(&remotes)?;
+        Ok(was_foreground)
+    }
+
+    /// 主界面改看哪一台。`None` 是本机。远程的必须已经打开。
+    pub fn focus(&self, id: Option<String>) -> Result<(), String> {
         let mut remotes = self.load();
         if let Some(id) = &id {
-            if !remotes.remotes.iter().any(|r| &r.id == id) {
-                return Err("这个连接已经不在了".into());
+            if !remotes.opened.iter().any(|x| x == id) {
+                return Err("这个连接还没打开".into());
             }
         }
-        remotes.active = id;
+        remotes.foreground = id;
         self.store(&remotes)?;
-        Ok(remotes)
+        Ok(())
     }
 
     pub fn get(&self, id: &str) -> Result<Remote, String> {
@@ -227,13 +299,14 @@ impl RemoteStore {
         if let Some(token) = self.tokens.lock().unwrap().get(id) {
             return Ok(token.clone());
         }
-        let token = keychain(id)?
-            .get_password()
-            .map_err(|e| match e {
-                keyring::Error::NoEntry => format!("{FATAL}钥匙串里没有这个连接的令牌，重新填一次"),
-                e => format!("{FATAL}读钥匙串失败（{e}）"),
-            })?;
-        self.tokens.lock().unwrap().insert(id.to_string(), token.clone());
+        let token = keychain(id)?.get_password().map_err(|e| match e {
+            keyring::Error::NoEntry => format!("{FATAL}钥匙串里没有这个连接的令牌，重新填一次"),
+            e => format!("{FATAL}读钥匙串失败（{e}）"),
+        })?;
+        self.tokens
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), token.clone());
         Ok(token)
     }
 }
@@ -268,7 +341,9 @@ pub fn ws_url(raw: &str) -> Result<String, String> {
         return Err(format!("地址里没有主机名：{raw}"));
     }
     if !secure && !is_loopback(&host) {
-        return Err("远程地址要用 https://；http:// 只允许 127.0.0.1 / localhost（SSH 隧道）".into());
+        return Err(
+            "远程地址要用 https://；http:// 只允许 127.0.0.1 / localhost（SSH 隧道）".into(),
+        );
     }
     url.set_scheme(if secure { "wss" } else { "ws" })
         .map_err(|_| format!("看不懂的地址：{raw}"))?;
@@ -294,14 +369,71 @@ mod tests {
     use super::ws_url;
 
     #[test]
+    fn old_active_remote_becomes_opened_foreground() {
+        let raw = super::Remotes {
+            active: Some("abc".into()),
+            remotes: vec![super::Remote {
+                id: "abc".into(),
+                name: "办公室".into(),
+                url: "https://dock.example".into(),
+                ssh: None,
+            }],
+            ..super::Remotes::default()
+        };
+        let next = super::normalize(raw);
+        assert_eq!(next.opened, vec!["abc".to_string()]);
+        assert_eq!(next.foreground.as_deref(), Some("abc"));
+        assert!(next.active.is_none());
+    }
+
+    #[test]
+    fn foreground_must_be_one_of_the_opened() {
+        let raw = super::Remotes {
+            opened: vec!["abc".into()],
+            foreground: Some("gone".into()),
+            remotes: vec![super::Remote {
+                id: "abc".into(),
+                name: "办公室".into(),
+                url: String::new(),
+                ssh: None,
+            }],
+            ..super::Remotes::default()
+        };
+        let next = super::normalize(raw);
+        assert!(next.foreground.is_none());
+        assert_eq!(next.opened, vec!["abc".to_string()]);
+    }
+
+    #[test]
     fn ws_url_normalizes_and_guards_plain_http() {
-        assert_eq!(ws_url("https://dock.example.com").unwrap(), "wss://dock.example.com/api/ws");
-        assert_eq!(ws_url("https://dock.example.com/").unwrap(), "wss://dock.example.com/api/ws");
-        assert_eq!(ws_url("https://h.example.com/dock/").unwrap(), "wss://h.example.com/dock/api/ws");
-        assert_eq!(ws_url("wss://h.example.com/api/ws").unwrap(), "wss://h.example.com/api/ws");
-        assert_eq!(ws_url("http://127.0.0.1:18990").unwrap(), "ws://127.0.0.1:18990/api/ws");
-        assert_eq!(ws_url("http://localhost:18990").unwrap(), "ws://localhost:18990/api/ws");
-        assert_eq!(ws_url("http://[::1]:18990").unwrap(), "ws://[::1]:18990/api/ws");
+        assert_eq!(
+            ws_url("https://dock.example.com").unwrap(),
+            "wss://dock.example.com/api/ws"
+        );
+        assert_eq!(
+            ws_url("https://dock.example.com/").unwrap(),
+            "wss://dock.example.com/api/ws"
+        );
+        assert_eq!(
+            ws_url("https://h.example.com/dock/").unwrap(),
+            "wss://h.example.com/dock/api/ws"
+        );
+        assert_eq!(
+            ws_url("wss://h.example.com/api/ws").unwrap(),
+            "wss://h.example.com/api/ws"
+        );
+        assert_eq!(
+            ws_url("http://127.0.0.1:18990").unwrap(),
+            "ws://127.0.0.1:18990/api/ws"
+        );
+        assert_eq!(
+            ws_url("http://localhost:18990").unwrap(),
+            "ws://localhost:18990/api/ws"
+        );
+        assert_eq!(
+            ws_url("http://[::1]:18990").unwrap(),
+            "ws://[::1]:18990/api/ws"
+        );
         assert!(ws_url("http://dock.example.com").is_err());
         assert!(ws_url("ws://10.0.0.2:18990").is_err());
         assert!(ws_url("ftp://dock.example.com").is_err());

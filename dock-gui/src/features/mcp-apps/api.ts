@@ -13,7 +13,7 @@ import {
   type McpAppViewCall,
   type McpAppViewTool,
 } from "dock-core";
-import { dock, RpcError } from "../../dock/client";
+import { dock, onForegroundNotification, onForegroundState, RpcError } from "../../dock/client";
 import { bumpToolCards } from "../registry";
 
 export const supported = () => !!dock.capabilities.mcpApps;
@@ -73,15 +73,15 @@ export function handleViewCalls(viewId: string, fn: ViewHandler): () => void {
   };
 }
 
-// Dock 推来的调用：是本窗口的界面就交给它，结果（或一句原因）送回去。别的窗口的界面不管。
-dock.onNotification((n) => {
+// Dock 推来的调用：是本窗口的界面就交给它，结果送回收到这条推送的那台（切走之后别打到另一台）。
+onForegroundNotification((n, client) => {
   if (n.method !== "mcp/app/view/call") return;
   const call = parseViewCall(n.params);
   const fn = call && viewHandlers.get(call.viewId);
   if (!call || !fn) return;
   fn(call).then(
-    (result) => dock.call("mcp/app/view/result", { callId: call.callId, result }),
-    (e: unknown) => dock.call("mcp/app/view/result", { callId: call.callId, error: e instanceof Error ? e.message : String(e) }),
+    (result) => client.call("mcp/app/view/result", { callId: call.callId, result }),
+    (e: unknown) => client.call("mcp/app/view/result", { callId: call.callId, error: e instanceof Error ? e.message : String(e) }),
   ).catch(() => {});
 });
 
@@ -131,7 +131,7 @@ export function noticeTool(toolName: string, args: unknown) {
   void load();
 }
 
-// 重连之后重拉：Dock 可能重启过，服务器和工具表都换了。
-dock.onState((state) => {
+// 重连之后重拉：Dock 可能重启过，服务器和工具表都换了。跟着前台那台走。
+onForegroundState((state) => {
   if (state === "open" && loadedAt !== 0) void load();
 });

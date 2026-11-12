@@ -8,6 +8,7 @@ import { useState, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { GripVertical } from "lucide-react";
 import type { SessionSummary } from "../model";
+import { gatewayArg } from "../dock/store";
 import { SessionPane } from "./SessionPane";
 import { WindowControls, type SidebarProps } from "./Sidebar";
 
@@ -101,7 +102,7 @@ function Cell({
 
 /** 不拖、直接开成独立窗口（落在系统默认位置）。开不了回 false，格子留在工作台。 */
 function popOut(sessionId: string): Promise<boolean> {
-  return invoke("open_chat_window", { sessionId, x: 0, y: 0 }).then(
+  return invoke("open_chat_window", { sessionId, gateway: gatewayArg(), x: 0, y: 0 }).then(
     () => true,
     () => false,
   );
@@ -125,7 +126,7 @@ function PopOutHandle({
     e.preventDefault();
     onDragging(true);
     try {
-      if (await invoke<boolean>("pop_out_drag", { sessionId })) onPopOut();
+      if (await invoke<boolean>("pop_out_drag", { sessionId, gateway: gatewayArg() })) onPopOut();
     } catch {
       // 开窗失败就当没拖出去，格子留在工作台。
     } finally {

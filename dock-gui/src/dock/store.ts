@@ -11,7 +11,6 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useSyncExternalStore } from "react";
 import {
   EMPTY_SUBAGENTS,
   EMPTY_THREAD,
@@ -53,8 +52,8 @@ import type {
   SlashCommand,
   SlashResult,
 } from "../model";
-import { dock, RpcError, type ConnectionState } from "./client";
-import { remoteList, type Remote } from "./remote";
+import { RpcError, type ConnectionState, type DockClient } from "./client";
+import type { Remote } from "./remote";
 import { notify, prefs } from "./prefs";
 import { savePrReview } from "./prReviews";
 import { registerPresetIcons } from "../components/presetIcon";
@@ -242,34 +241,14 @@ const REMOVED_KEY = "dock-gui.projects.removed";
 
 /**
  * 项目名单按连接分开存：路径属于哪台机器就只在连那台时出现。本机沿用原来的 key，
- * 远程 Dock 加 `@<连接 id>` 后缀（启动时知道连的是哪台再换，见 `start`）。
+ * 远程 Dock 加 `@<连接 id>` 后缀。每份 DockStore 构造时定死，几台同时开着也不会互相覆盖。
  */
-let projectScope = "";
-const scoped = (key: string) => (projectScope ? `${key}@${projectScope}` : key);
-
-function loadIds(key: string): Set<string> {
-  try {
-    const raw = JSON.parse(localStorage.getItem(scoped(key)) ?? "[]");
-    return new Set(Array.isArray(raw) ? raw.filter((x) => typeof x === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
 
 /** 侧栏怎么摆项目：本地建的、置顶的、移除的。 */
 export interface ProjectPrefs {
   projects: LocalProject[];
   pinned: ReadonlySet<string>;
   removed: ReadonlySet<string>;
-}
-
-function loadProjects(): LocalProject[] {
-  try {
-    const raw = JSON.parse(localStorage.getItem(scoped(PROJECTS_KEY)) ?? "[]");
-    return Array.isArray(raw) ? raw.filter((p) => typeof p?.presetId === "string" && typeof p?.cwd === "string") : [];
-  } catch {
-    return [];
-  }
 }
 
 /** Dock 一个进程最多开几页（cordis-tui `MAX_TABS`，含 `dock serve` 起步的第 1 页）。 */
@@ -287,32 +266,86 @@ export const NO_ENV: ComposerSettings = {
   context: null,
 };
 
-class DockStore {
-  private app: AppState = {
-    connection: dock.state,
-    error: null,
-    presets: [],
-    defaultPreset: null,
-    sessions: [],
-    groups: [],
-    running: new Set(),
-    waiting: new Set(),
-    stopping: new Set(),
-    finished: new Map(),
-    queued: new Map(),
-    loadingIds: new Set(),
-    exited: null,
-    reconnects: 0,
-    remote: null,
-    fatal: null,
-    booted: false,
-    asides: new Map(),
-    asidesEnded: new Set(),
-  };
+export class DockStore {
+  /** 远程连接 id；本机是空串（localStorage 不加后缀）。 */
+  readonly scope: string;
+  private app: AppState;
   private wire: WireThread[] = [];
-  private projects: LocalProject[] = loadProjects();
-  private pinned = loadIds(PINNED_KEY);
-  private removed = loadIds(REMOVED_KEY);
+  private projects: LocalProject[];
+  private pinned: Set<string>;
+  private removed: Set<string>;
+  /** 没有界面订阅时也留着，后台网关才不会停掉 `start`。 */
+  private retained: (() => void) | null = null;
+
+  constructor(
+    readonly client: DockClient,
+    remote: Remote | null,
+  ) {
+    this.scope = remote?.id ?? "";
+    this.projects = this.readProjects();
+    this.pinned = this.readIds(PINNED_KEY);
+    this.removed = this.readIds(REMOVED_KEY);
+    this.app = {
+      connection: client.state,
+      error: null,
+      presets: [],
+      defaultPreset: null,
+      sessions: [],
+      groups: [],
+      running: new Set(),
+      waiting: new Set(),
+      stopping: new Set(),
+      finished: new Map(),
+      queued: new Map(),
+      loadingIds: new Set(),
+      exited: null,
+      reconnects: 0,
+      remote,
+      fatal: client.fatal,
+      booted: false,
+      asides: new Map(),
+      asidesEnded: new Set(),
+    };
+  }
+
+  /** 没有界面订阅也保持连接（后台网关）。 */
+  retain() {
+    if (!this.retained) this.retained = this.subscribe(() => {});
+  }
+
+  /** 关掉这条连接的套接字，并丢掉保活订阅。 */
+  release() {
+    this.retained?.();
+    this.retained = null;
+    this.client.close();
+  }
+
+  /** 名单里的名字晚到了（独立窗）：只更新显示，不换存储范围。 */
+  setRemote(remote: Remote | null) {
+    this.setApp({ remote });
+  }
+
+  private scoped(key: string) {
+    return this.scope ? `${key}@${this.scope}` : key;
+  }
+
+  private readIds(key: string): Set<string> {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.scoped(key)) ?? "[]");
+      return new Set(Array.isArray(raw) ? raw.filter((x) => typeof x === "string") : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  private readProjects(): LocalProject[] {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.scoped(PROJECTS_KEY)) ?? "[]");
+      return Array.isArray(raw) ? raw.filter((p) => typeof p?.presetId === "string" && typeof p?.cwd === "string") : [];
+    } catch {
+      return [];
+    }
+  }
   private threads = new Map<string, ThreadState>();
   private env = new Map<string, ComposerSettings>();
   private envTimers = new Map<string, number>();
@@ -456,10 +489,10 @@ class DockStore {
     if (this.started) return;
     this.started = true;
     let wasOpen = false;
-    dock.onState((s) => {
+    this.client.onState((s) => {
       if (s === "open") this.setApp({ connection: s, error: null, exited: null, reconnects: 0 });
-      else if (s === "closed" && wasOpen) this.setApp({ connection: s, reconnects: this.app.reconnects + 1, fatal: dock.fatal });
-      else this.setApp({ connection: s, fatal: dock.fatal });
+      else if (s === "closed" && wasOpen) this.setApp({ connection: s, reconnects: this.app.reconnects + 1, fatal: this.client.fatal });
+      else this.setApp({ connection: s, fatal: this.client.fatal });
       // 第一次连上（启动时没连上、后来重连成功的也算）：铺预设和会话列表。
       if (s === "open" && !wasOpen) this.initialLoad().catch(this.fail);
       // 断线重连：推送可能漏了，Dock 也可能重启过（seq 重新编号）——已加载的会话整份重拉。
@@ -468,13 +501,12 @@ class DockStore {
       if (s === "open" && wasOpen) this.reloadLoaded();
       if (s === "open") wasOpen = true;
     });
-    // Dock 进程本身退出 / 被重新拉起（Tauri 侧发的事件；浏览器预览里没有）。
-    // 连远程时本机没有 Dock 进程，这两个都不管。
-    listen<string>("dock://exit", (e) => !this.app.remote && this.setApp({ exited: e.payload || "未知" })).catch(() => {});
-    listen("dock://ready", () => this.setApp({ exited: null })).catch(() => {});
-    // 换了连接（本机 ↔ 远程）：整页重载，用新连接从头来（会话、订阅、缓存都不通用）。
-    listen("dock://connection", () => window.location.reload()).catch(() => {});
-    dock.onNotification((n) => {
+    // 本机 Dock 进程退出 / 被重新拉起。远程连接没有这个进程，也不听换连接的整页重载。
+    if (!this.client.gatewayId) {
+      listen<string>("dock://exit", (e) => this.setApp({ exited: e.payload || "未知" })).catch(() => {});
+      listen("dock://ready", () => this.setApp({ exited: null })).catch(() => {});
+    }
+    this.client.onNotification((n) => {
       const id = typeof n.params.threadId === "string" ? n.params.threadId : "";
       const event = id ? parseEvent(n.method, n.params) : null;
       if (!event) return;
@@ -510,27 +542,11 @@ class DockStore {
         this.refreshQueue(id);
       }
     });
-    // 先知道连的是本机还是远程（只在本机才有的功能按这个藏），再连。
-    remoteList()
-      .then((r) => {
-        const remote = r.remotes.find((x) => x.id === r.active) ?? null;
-        if (remote) {
-          // 连远程：换成这台的项目名单（构造时读的是本机的）。
-          projectScope = remote.id;
-          this.projects = loadProjects();
-          this.pinned = loadIds(PINNED_KEY);
-          this.removed = loadIds(REMOVED_KEY);
-        }
-        this.setApp({ remote });
-      })
-      .catch(() => {})
-      // 连接已经开着（热更新换了 store）时收不到 `open` 事件：连上后再补一次。
-      .finally(() =>
-        dock
-          .connect()
-          .then(() => this.initialLoad())
-          .catch(this.fail),
-      );
+    // 连接已经开着（热更新换了 store）时收不到 `open` 事件：连上后再补一次。
+    this.client
+      .connect()
+      .then(() => this.initialLoad())
+      .catch(this.fail);
   }
 
   private initialLoaded = false;
@@ -582,9 +598,9 @@ class DockStore {
 
   /** 开着的会话铺一次每轮的文件改动。旧 Dock 没有这个方法就当没有。 */
   private async loadTurnChanges(id: string) {
-    if (!dock.capabilities.turnChanges) return;
+    if (!this.client.capabilities.turnChanges) return;
     try {
-      const r = await dock.call<{ turns: Record<string, unknown>[] }>("turn/changes/list", { threadId: id });
+      const r = await this.client.call<{ turns: Record<string, unknown>[] }>("turn/changes/list", { threadId: id });
       this.turnChanges.set(id, seedTurnChanges(r.turns));
       this.emit();
     } catch {
@@ -594,11 +610,11 @@ class DockStore {
 
   /** 一轮改动的统一 diff。 */
   turnDiff = (threadId: string, turnId: string) =>
-    dock.call<{ diff: string }>("turn/changes/diff", { threadId, turnId }).then((r) => r.diff);
+    this.client.call<{ diff: string }>("turn/changes/diff", { threadId, turnId }).then((r) => r.diff);
 
   /** 项目 git 仓库相对 HEAD 的改动 + 未跟踪的新文件。不是 git 仓库时 `available: false`。 */
   worktreeDiff = (threadId: string) =>
-    dock.call<{ available: boolean; diff?: string; truncated?: boolean; root?: string; hint?: string; reason?: string; untrackedOmitted?: number }>(
+    this.client.call<{ available: boolean; diff?: string; truncated?: boolean; root?: string; hint?: string; reason?: string; untrackedOmitted?: number }>(
       "vcs/worktree/diff",
       { threadId },
     );
@@ -608,7 +624,7 @@ class DockStore {
    * `conflicts`）。成功后 Dock 推一条 `turn/changes/updated`；这里也按回包先改上。
    */
   revertTurn = async (threadId: string, turnId: string) => {
-    const r = await dock.call<{ restored: string[]; conflicts: { path: string; reason: string }[]; changes: Record<string, unknown> }>(
+    const r = await this.client.call<{ restored: string[]; conflicts: { path: string; reason: string }[]; changes: Record<string, unknown> }>(
       "turn/changes/revert",
       { threadId, turnId },
     );
@@ -623,9 +639,9 @@ class DockStore {
 
   /** 开着的会话铺一次工作流 run 的现状。旧 Dock 没有这个方法就当没有 run。 */
   private async loadWorkflows(id: string) {
-    if (!dock.capabilities.workflows) return;
+    if (!this.client.capabilities.workflows) return;
     try {
-      const r = await dock.call<{ runs: Record<string, unknown>[] }>("workflow/list", { threadId: id });
+      const r = await this.client.call<{ runs: Record<string, unknown>[] }>("workflow/list", { threadId: id });
       this.workflows.set(id, seedWorkflows(this.getWorkflows(id), r.runs));
       this.emit();
     } catch {
@@ -636,7 +652,7 @@ class DockStore {
   /** 开着的会话铺一次子代理的现状（推送只报变化）。旧 Dock 没有这个方法就当没有子代理。 */
   private async loadSubagents(id: string) {
     try {
-      const r = await dock.call<{ agents: Record<string, unknown>[] }>("subagent/list", { threadId: id });
+      const r = await this.client.call<{ agents: Record<string, unknown>[] }>("subagent/list", { threadId: id });
       this.subagents.set(id, seedSubagents(this.getSubagents(id), r.agents));
       this.emit();
     } catch {
@@ -712,7 +728,7 @@ class DockStore {
   // ---- 会话列表 ----
 
   private async refreshThreads() {
-    const r = await dock.call<{ threads: WireThread[] }>("thread/list", { scope: "all" });
+    const r = await this.client.call<{ threads: WireThread[] }>("thread/list", { scope: "all" });
     this.wire = r.threads;
     this.rebuildSessions();
   }
@@ -762,9 +778,9 @@ class DockStore {
     try {
       if (open && !this.subscribed.has(id)) {
         this.subscribed.add(id);
-        await dock.subscribe(id);
+        await this.client.subscribe(id);
       }
-      const h = await dock.call<{ events: Record<string, unknown>[] }>("thread/history", { threadId: id });
+      const h = await this.client.call<{ events: Record<string, unknown>[] }>("thread/history", { threadId: id });
       let state = replayHistory(h.events);
       for (const e of this.loading.get(id) ?? []) state = reduceThread(state, e);
       this.threads.set(id, state);
@@ -777,7 +793,7 @@ class DockStore {
   }
 
   private async loadEnv(id: string) {
-    const env = await dock.call<Environment>("thread/environment/get", { threadId: id });
+    const env = await this.client.call<Environment>("thread/environment/get", { threadId: id });
     this.env.set(id, {
       approval: env.approval?.mode ?? "ask",
       model: env.model?.label ?? env.model?.id ?? "",
@@ -862,13 +878,13 @@ class DockStore {
 
   startThread = async (cwd: string, presetId: string): Promise<string | null> => {
     try {
-      const r = await dock.call<{ thread: WireThread }>("thread/start", { cwd, presetId });
+      const r = await this.client.call<{ thread: WireThread }>("thread/start", { cwd, presetId });
       // 新对话默认值（常规 › 新对话）：和 Dock 默认一样的就不发。
       const p = prefs.get();
-      if (p.approval === "auto") await dock.call("thread/approval/set", { threadId: r.thread.id, mode: "auto" }).catch(() => {});
-      if (!p.thinking) await dock.call("thread/reasoning/set", { threadId: r.thread.id, effort: "none" }).catch(() => {});
+      if (p.approval === "auto") await this.client.call("thread/approval/set", { threadId: r.thread.id, mode: "auto" }).catch(() => {});
+      if (!p.thinking) await this.client.call("thread/reasoning/set", { threadId: r.thread.id, effort: "none" }).catch(() => {});
       // 在移除过的项目里开了新对话：项目回到侧栏，不然新会话看不见。
-      if (this.removed.delete(projectId(presetId, cwd))) localStorage.setItem(scoped(REMOVED_KEY), JSON.stringify([...this.removed]));
+      if (this.removed.delete(projectId(presetId, cwd))) localStorage.setItem(this.scoped(REMOVED_KEY), JSON.stringify([...this.removed]));
       await this.refreshThreads();
       await this.load(r.thread.id);
       return r.thread.id;
@@ -889,7 +905,7 @@ class DockStore {
     if (!p) {
       p = (async () => {
         await this.makeRoom();
-        await dock.call("thread/open", { threadId: id });
+        await this.client.call("thread/open", { threadId: id });
         await this.refreshThreads();
         // 开页后网关按落盘重建投影，seq 重新编号：旧状态作废，整份重拉。
         // 子代理只活在原来那一页的内存里，一起作废。
@@ -941,7 +957,7 @@ class DockStore {
   disconnect = (id: string) => this.closePage(id).catch(this.fail);
 
   private async closePage(id: string) {
-    await dock.call("thread/close", { threadId: id });
+    await this.client.call("thread/close", { threadId: id });
     this.forgetAside(id, true);
     this.subscribed.delete(id);
     await this.refreshThreads();
@@ -964,7 +980,7 @@ class DockStore {
       await this.ensureOpen(id);
       const imageInputs = [];
       for (const img of images) {
-        const r = await dock.call<{ imageInputId: string; digest: string }>("imageInputs/put", {
+        const r = await this.client.call<{ imageInputId: string; digest: string }>("imageInputs/put", {
           workspaceId: "default",
           threadId: id,
           mimeType: img.mimeType,
@@ -983,7 +999,7 @@ class DockStore {
         queue.push(images.map((i) => i.url));
         this.pendingPreviews.set(id, queue);
       }
-      const r = await dock.call<{ status?: string }>(method, {
+      const r = await this.client.call<{ status?: string }>(method, {
         threadId: id,
         message: text,
         ...(imageInputs.length ? { imageInputs } : {}),
@@ -1005,7 +1021,7 @@ class DockStore {
   /** 输入框下拉用的命令表（连上后拉一次）。只留这里能跑的，GUI 自己有入口的去掉。 */
   slashCommands = async (): Promise<SlashCommand[]> => {
     if (!this.slashCache) {
-      const r = await dock.call<{ commands: SlashCommand[] }>("slash/list");
+      const r = await this.client.call<{ commands: SlashCommand[] }>("slash/list");
       this.slashCache = r.commands.filter((c) => c.surface === "gateway" && !SLASH_HIDDEN.has(c.name));
     }
     return this.slashCache;
@@ -1018,7 +1034,7 @@ class DockStore {
   runSlash = async (id: string, text: string): Promise<SlashResult | null> => {
     try {
       await this.ensureOpen(id);
-      const r = await dock.call<{
+      const r = await this.client.call<{
         kind: string;
         fill?: string;
         menu?: string;
@@ -1049,7 +1065,7 @@ class DockStore {
   /** Dock 让客户端「打开某个菜单」：GUI 没有对应面板，就把那份信息写成一段提示。 */
   private async menuNotice(id: string, menu: string): Promise<SlashResult> {
     if (menu === "model") return { kind: "notice", title: "模型", body: "用输入框右下角的模型菜单切换。" };
-    const env = await dock.call<Environment>("thread/environment/get", { threadId: id });
+    const env = await this.client.call<Environment>("thread/environment/get", { threadId: id });
     if (menu === "context") {
       const c = env.context ?? {};
       const used = (c.estimatedTokens ?? 0).toLocaleString();
@@ -1088,7 +1104,7 @@ class DockStore {
   rewind = async (id: string, turnId: string): Promise<string | null> => {
     try {
       await this.ensureOpen(id);
-      const r = await dock.call<{ message: string; images: { mimeType: string; dataBase64: string }[] }>(
+      const r = await this.client.call<{ message: string; images: { mimeType: string; dataBase64: string }[] }>(
         "thread/rewind",
         { threadId: id, turnId },
       );
@@ -1132,7 +1148,7 @@ class DockStore {
 
   /** 上下文圆环点开的明细（`thread/context/get`）。 */
   contextBreakdown = async (id: string): Promise<ContextBreakdown> => {
-    const r = await dock.call<{
+    const r = await this.client.call<{
       model?: string;
       usedTokens?: number;
       maxContextTokens?: number;
@@ -1204,16 +1220,16 @@ class DockStore {
   };
 
   private saveProjects() {
-    localStorage.setItem(scoped(PROJECTS_KEY), JSON.stringify(this.projects));
-    localStorage.setItem(scoped(PINNED_KEY), JSON.stringify([...this.pinned]));
-    localStorage.setItem(scoped(REMOVED_KEY), JSON.stringify([...this.removed]));
+    localStorage.setItem(this.scoped(PROJECTS_KEY), JSON.stringify(this.projects));
+    localStorage.setItem(this.scoped(PINNED_KEY), JSON.stringify([...this.pinned]));
+    localStorage.setItem(this.scoped(REMOVED_KEY), JSON.stringify([...this.removed]));
     this.rebuildSessions();
   }
 
   // ---- 预设 ----
 
   private refreshPresets = async () => {
-    const p = await dock.call<{ presets: PresetOption[]; defaultId: string }>("preset/list");
+    const p = await this.client.call<{ presets: PresetOption[]; defaultId: string }>("preset/list");
     registerPresetIcons(p.presets);
     this.setApp({ presets: p.presets, defaultPreset: p.defaultId });
     this.rebuildSessions();
@@ -1221,14 +1237,14 @@ class DockStore {
 
   /** 在某个项目里能选的预设（多出它 `.dock/presets` 里的项目层）。 */
   presetsAt = async (cwd: string) => {
-    const p = await dock.call<{ presets: PresetOption[] }>("preset/list", { cwd });
+    const p = await this.client.call<{ presets: PresetOption[] }>("preset/list", { cwd });
     registerPresetIcons(p.presets);
     return p.presets;
   };
 
   /** 新建自定义预设（写 ~/.dock/presets）；回新预设的 id。 */
   createPreset = async (name: string, icon: string, basedOn: string | null): Promise<string> => {
-    const r = await dock.call<{ preset: PresetOption }>("preset/create", {
+    const r = await this.client.call<{ preset: PresetOption }>("preset/create", {
       name,
       icon,
       ...(basedOn ? { basedOn } : {}),
@@ -1238,61 +1254,61 @@ class DockStore {
   };
 
   /** 一个预设的整份定义（编辑器用）。 */
-  getPreset = async (id: string) => (await dock.call<{ preset: PresetDetail }>("preset/get", { id })).preset;
+  getPreset = async (id: string) => (await this.client.call<{ preset: PresetDetail }>("preset/get", { id })).preset;
 
   /** 整份写回；内置预设写成用户层覆盖。校验不过抛 Dock 给的原因。 */
   updatePreset = async (id: string, preset: PresetDraft) => {
     const agents = preset.agents.map(({ builtin: _b, fresh: _f, ...a }) => a);
-    await dock.call("preset/update", { id, preset: { ...preset, agents } });
+    await this.client.call("preset/update", { id, preset: { ...preset, agents } });
     await this.refreshPresets();
   };
 
   /** 预设能选的工具（不含 MCP）。 */
-  toolCatalog = async () => (await dock.call<{ tools: CatalogTool[] }>("tool/catalog")).tools;
+  toolCatalog = async () => (await this.client.call<{ tools: CatalogTool[] }>("tool/catalog")).tools;
 
   /** AI 起草整份预设（Dock 用默认模型采样一次，不写盘）。`icons` 是图标库，模型只能从里面选。 */
   draftPreset = async (description: string, icons: string[]) =>
-    (await dock.call<{ draft: AiPresetDraft }>("preset/draft", { description, icons })).draft;
+    (await this.client.call<{ draft: AiPresetDraft }>("preset/draft", { description, icons })).draft;
 
   /** AI 润色 / 扩写角色提示词。 */
   rewritePersona = async (persona: string, mode: "polish" | "expand", description: string) =>
-    (await dock.call<{ persona: string }>("preset/rewrite", { persona, mode, description })).persona;
+    (await this.client.call<{ persona: string }>("preset/rewrite", { persona, mode, description })).persona;
 
   /** AI 按描述推荐工具（都在 tool/catalog 里）。 */
   suggestTools = async (description: string, persona: string) =>
-    (await dock.call<{ tools: { name: string; reason: string }[] }>("preset/suggestTools", { description, persona }))
+    (await this.client.call<{ tools: { name: string; reason: string }[] }>("preset/suggestTools", { description, persona }))
       .tools;
 
   /** 预设编辑器旁的侧聊：带上之前的问答、当前草稿和所在步骤，回参考答案（不改草稿、不写盘）。 */
   askPreset = async (question: string, history: AskTurn[], draft: PresetDraft, step: string) =>
-    (await dock.call<{ answer: string }>("preset/ask", { question, history, draft, step })).answer;
+    (await this.client.call<{ answer: string }>("preset/ask", { question, history, draft, step })).answer;
 
   /** 删除自定义预设（内置的 Dock 会拒）。 */
   deletePreset = async (id: string) => {
-    await dock.call("preset/delete", { id });
+    await this.client.call("preset/delete", { id });
     await this.refreshPresets();
   };
 
   // ---- 设置页 ----
 
-  mcpList = async () => (await dock.call<{ servers: McpServerInfo[] }>("mcp/list")).servers;
+  mcpList = async () => (await this.client.call<{ servers: McpServerInfo[] }>("mcp/list")).servers;
 
   /** 重读配置里的 MCP 服务器；回一行摘要和新状态。 */
   mcpReload = async () => {
-    const r = await dock.call<{ summary: string; servers: McpServerInfo[] }>("mcp/reload");
+    const r = await this.client.call<{ summary: string; servers: McpServerInfo[] }>("mcp/reload");
     return { summary: r.summary, servers: r.servers };
   };
 
   /** 重连一台；连不上抛 Dock 给的原因。 */
-  mcpReconnect = (name: string) => dock.call("mcp/reconnect", { name });
+  mcpReconnect = (name: string) => this.client.call("mcp/reconnect", { name });
 
-  modelList = async () => (await dock.call<{ models: ModelInfo[] }>("model/list")).models;
+  modelList = async () => (await this.client.call<{ models: ModelInfo[] }>("model/list")).models;
 
-  serverInfo = () => dock.serverInfo;
+  serverInfo = () => this.client.serverInfo;
 
   /** 按标题和用户消息搜落盘会话（`thread/search`）：会话 id → 命中片段（只命中标题为 null）。 */
   search = async (query: string): Promise<Map<string, string | null>> => {
-    const r = await dock.call<{ hits?: { threadId: string; snippet?: string | null }[] }>("thread/search", {
+    const r = await this.client.call<{ hits?: { threadId: string; snippet?: string | null }[] }>("thread/search", {
       query,
       limit: 50,
     });
@@ -1301,7 +1317,7 @@ class DockStore {
 
   /** 改名：开着和关着的会话都行。 */
   rename = async (id: string, title: string) => {
-    await dock.call("thread/rename", { threadId: id, title }).catch(this.fail);
+    await this.client.call("thread/rename", { threadId: id, title }).catch(this.fail);
     await this.refreshThreads().catch(this.fail);
   };
 
@@ -1314,8 +1330,8 @@ class DockStore {
       // 没有对话内容的会话关掉时不落盘（Dock 的规则），关掉就等于删了。
       const open = this.isOpen(id);
       const empty = this.getThread(id).turns.length === 0;
-      if (open) await dock.call("thread/close", { threadId: id });
-      if (!(open && empty)) await dock.call("thread/delete", { threadId: id });
+      if (open) await this.client.call("thread/close", { threadId: id });
+      if (!(open && empty)) await this.client.call("thread/delete", { threadId: id });
     } catch (e) {
       this.fail(e);
       return false;
@@ -1335,9 +1351,9 @@ class DockStore {
   // ---- 侧边聊天 ----
 
   /** 网关认不认侧边聊天（`sideChat`）。 */
-  canSideChat = () => !!dock.capabilities.sideChat;
+  canSideChat = () => !!this.client.capabilities.sideChat;
   /** Dock 认 `vcs/worktree/diff`（右侧「审查」面板）。 */
-  canReview = () => !!dock.capabilities.worktreeDiff;
+  canReview = () => !!this.client.capabilities.worktreeDiff;
 
   /**
    * 开（或回到）主会话的侧边聊天：从主会话分叉的只读旁问，带着它的上下文，不打断它。
@@ -1346,7 +1362,7 @@ class DockStore {
   startAside = async (parentId: string): Promise<string | null> => {
     try {
       await this.ensureOpen(parentId);
-      const r = await dock.call<{ thread: WireThread }>("thread/aside/start", { threadId: parentId });
+      const r = await this.client.call<{ thread: WireThread }>("thread/aside/start", { threadId: parentId });
       const asideId = r.thread.id;
       this.asideParent.set(asideId, parentId);
       const asidesEnded = new Set(this.app.asidesEnded);
@@ -1369,7 +1385,7 @@ class DockStore {
   /** 结束主会话的侧边聊天（关掉那一页，内容不保存）。 */
   closeAside = async (parentId: string) => {
     const asideId = this.app.asides.get(parentId);
-    if (asideId) await dock.call("thread/close", { threadId: asideId }).catch(() => {});
+    if (asideId) await this.client.call("thread/close", { threadId: asideId }).catch(() => {});
     this.forgetAside(parentId, false);
   };
 
@@ -1383,11 +1399,11 @@ class DockStore {
 
   /** 侧边聊天整理一段写进主线的笔记（调一次模型，只起草不写）。失败抛出，面板自己显示。 */
   draftSideNote = async (asideId: string): Promise<string> =>
-    (await dock.call<{ note: string }>("thread/aside/handback", { threadId: asideId })).note;
+    (await this.client.call<{ note: string }>("thread/aside/handback", { threadId: asideId })).note;
 
   /** 把（用户确认 / 改过的）笔记写进主会话：在跑就下一步并入，闲着落进历史；不开新的一轮。 */
   mergeSideNote = async (parentId: string, note: string): Promise<"nextStep" | "history"> =>
-    (await dock.call<{ delivery: "nextStep" | "history" }>("thread/aside/merge", { threadId: parentId, note })).delivery;
+    (await this.client.call<{ delivery: "nextStep" | "history" }>("thread/aside/merge", { threadId: parentId, note })).delivery;
 
   /** 主会话的侧边聊天不在了（主会话关掉 / 删除、Dock 重启）：`ended` 让面板显示「已结束」。 */
   private forgetAside(parentId: string, ended: boolean) {
@@ -1419,7 +1435,7 @@ class DockStore {
   /** 拉一个子代理的完整对话（中途接入时不全）。拿不到就保持原样。 */
   loadSubagentHistory = async (threadId: string, agentId: string) => {
     try {
-      const h = await dock.call<{ agent: Record<string, unknown>; events: Record<string, unknown>[] }>("subagent/history", {
+      const h = await this.client.call<{ agent: Record<string, unknown>; events: Record<string, unknown>[] }>("subagent/history", {
         threadId,
         agentId,
       });
@@ -1449,7 +1465,7 @@ class DockStore {
     try {
       if (!this.isOpen(threadId)) await this.ensureOpen(threadId);
       this.sentToSubagent.set(agentId, [...(this.sentToSubagent.get(agentId) ?? []), text.trim()]);
-      await dock.call("subagent/send", { threadId, agentId, message: text });
+      await this.client.call("subagent/send", { threadId, agentId, message: text });
       return true;
     } catch (e) {
       this.fail(e);
@@ -1461,9 +1477,9 @@ class DockStore {
   sentByUser = (agentId: string, text: string) => this.sentToSubagent.get(agentId)?.includes(text.trim()) ?? false;
 
   interruptSubagent = (threadId: string, agentId: string) =>
-    dock.call("subagent/interrupt", { threadId, agentId }).catch(this.fail);
+    this.client.call("subagent/interrupt", { threadId, agentId }).catch(this.fail);
 
-  stopSubagent = (threadId: string, agentId: string) => dock.call("subagent/stop", { threadId, agentId }).catch(this.fail);
+  stopSubagent = (threadId: string, agentId: string) => this.client.call("subagent/stop", { threadId, agentId }).catch(this.fail);
 
   /**
    * 单独给一个子代理设审批档位（`inherit` 跟这一页 / `ask` / `auto`）。活着的 Dock 会推
@@ -1472,7 +1488,7 @@ class DockStore {
   setSubagentApproval = async (threadId: string, agentId: string, mode: SubagentApproval) => {
     try {
       if (!this.isOpen(threadId)) await this.ensureOpen(threadId);
-      const r = await dock.call<{ approval?: SubagentApproval }>("subagent/approval/set", { threadId, agentId, mode });
+      const r = await this.client.call<{ approval?: SubagentApproval }>("subagent/approval/set", { threadId, agentId, mode });
       const state = this.getSubagents(threadId);
       const sub = state.byId[agentId];
       if (sub && r.approval && sub.info.approval !== r.approval) {
@@ -1485,25 +1501,25 @@ class DockStore {
   };
 
   /** 停下一条在跑的工作流 run（连同它派的子代理）。 */
-  stopWorkflow = (threadId: string, runId: string) => dock.call("workflow/stop", { threadId, runId }).catch(this.fail);
+  stopWorkflow = (threadId: string, runId: string) => this.client.call("workflow/stop", { threadId, runId }).catch(this.fail);
 
   /** 网关认不认插话（`turnSteer`）：旧版 Dock 的 turn/steer 是停掉再发，不给「立即插话」。 */
-  canSteer = () => !!dock.capabilities.turnSteer;
+  canSteer = () => !!this.client.capabilities.turnSteer;
 
   /** 把一条排队的消息改成插话：Dock 在下一个步骤边界把它并进正在跑的这一轮。 */
   steerQueued = async (id: string, queueId: string) => {
-    await dock.call("turn/queue/steer", { threadId: id, queueId }).catch(this.ignoreClosed);
+    await this.client.call("turn/queue/steer", { threadId: id, queueId }).catch(this.ignoreClosed);
     await this.refreshQueue(id);
   };
 
   /** 取消一条排队的消息（或还没送达的插话）。 */
   unqueue = async (id: string, queueId: string) => {
-    await dock.call("turn/queue/remove", { threadId: id, queueId }).catch(this.ignoreClosed);
+    await this.client.call("turn/queue/remove", { threadId: id, queueId }).catch(this.ignoreClosed);
     await this.refreshQueue(id);
   };
 
   private refreshQueue = async (id: string) => {
-    const r = await dock
+    const r = await this.client
       .call<{ items?: { id: unknown; message?: string; kind?: string; images?: QueuedImage[] }[] }>(
         "turn/queue/list",
         { threadId: id },
@@ -1524,12 +1540,12 @@ class DockStore {
 
   /** 手动压缩（压缩卡失败时的「重试」）。进展经 `context/compacted` 推回来。 */
   compact = async (id: string) => {
-    await dock.call("thread/context/compact", { threadId: id }).catch(this.ignoreClosed);
+    await this.client.call("thread/context/compact", { threadId: id }).catch(this.ignoreClosed);
   };
 
   cancel = async (id: string) => {
     this.setApp({ stopping: new Set(this.app.stopping).add(id) });
-    await dock.call("turn/cancel", { threadId: id }).catch((e) => {
+    await this.client.call("turn/cancel", { threadId: id }).catch((e) => {
       const stopping = new Set(this.app.stopping);
       stopping.delete(id);
       this.setApp({ stopping });
@@ -1572,14 +1588,14 @@ class DockStore {
 
   private async act(id: string, method: string, params: Record<string, unknown>) {
     await this.ensureOpen(id)
-      .then(() => dock.call(method, { threadId: id, ...params }))
+      .then(() => this.client.call(method, { threadId: id, ...params }))
       .catch(this.fail);
   }
 
   private async setEnv(id: string, method: string, params: Record<string, unknown>) {
     try {
       await this.ensureOpen(id);
-      await dock.call(method, { threadId: id, ...params });
+      await this.client.call(method, { threadId: id, ...params });
       await this.loadEnv(id);
     } catch (e) {
       this.fail(e);
@@ -1599,31 +1615,26 @@ export interface CanvasState {
   errors: ReadonlyMap<string, CanvasRuntimeError>;
 }
 
-export const store = new DockStore();
+let bound: DockStore | null = null;
 
-export function useCanvas(): CanvasState {
-  return useSyncExternalStore(store.subscribe, store.getCanvas);
+/** 主界面当前这份 store。切换网关时由 host 换上。 */
+export function bindCurrentStore(next: DockStore) {
+  bound = next;
 }
 
-export function useApp(): AppState {
-  return useSyncExternalStore(store.subscribe, store.getApp);
+export function currentStore(): DockStore {
+  if (!bound) throw new Error("连接还没准备好");
+  return bound;
 }
 
-export function useThread(id: string | null): ThreadState {
-  return useSyncExternalStore(store.subscribe, () => store.getThread(id));
-}
-
-export function useSubagents(id: string | null): SubagentsState {
-  return useSyncExternalStore(store.subscribe, () => store.getSubagents(id));
-}
-
-export function useTurnChanges(id: string | null): TurnChangesState {
-  return useSyncExternalStore(store.subscribe, () => store.getTurnChanges(id));
-}
-
-export function useWorkflows(id: string | null): WorkflowsState {
-  return useSyncExternalStore(store.subscribe, () => store.getWorkflows(id));
-}
+/** 前台 store。方法绑到当时的那一份，切走之后旧闭包仍打在原来那台。 */
+export const store: DockStore = new Proxy({} as DockStore, {
+  get(_target, prop) {
+    const current = currentStore();
+    const value = Reflect.get(current, prop, current) as unknown;
+    return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(current) : value;
+  },
+});
 
 /** `preset/ask` 的一条历史。 */
 export interface AskTurn {
@@ -1631,9 +1642,27 @@ export interface AskTurn {
   text: string;
 }
 
-export function useEnv(id: string | null): ComposerSettings {
-  return useSyncExternalStore(store.subscribe, () => store.getEnv(id));
-}
+export {
+  useCanvas,
+  useApp,
+  useThread,
+  useSubagents,
+  useTurnChanges,
+  useWorkflows,
+  useEnv,
+  useGatewayId,
+  useGateways,
+  useForegroundStore,
+  foregroundStore,
+  subscribeHost,
+  focusGateway,
+  openGateway,
+  closeGateway,
+  gatewayArg,
+  presetKey,
+  lastSessionKey,
+} from "./gateways";
+export type { GatewayAttention, GatewayHost, GatewayView } from "./gateways";
 
 /** 预设 → 项目（cwd）→ 会话，会话按更新时间新到旧；预设顺序跟 `preset/list`。 */
 export function groupSessions(

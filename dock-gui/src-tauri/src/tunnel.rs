@@ -1,7 +1,7 @@
 //! GUI 自己开的 SSH 隧道：`ssh -N -L 127.0.0.1:<本机随机端口>:127.0.0.1:<远端端口> user@host`。
 //!
-//! - 当前连接一条（`ensure`），所有窗口共用；ssh 断了下次要连接时重开。
-//! - 「测试连接」另开临时的（`open_temp` / `close_temp`），不碰当前那条。
+//! - 每个已打开的远程连接一条（`ensure`），同一条连接的窗口共用；切换前台不拆别的。
+//! - 「测试连接」另开临时的（`open_temp` / `close_temp`），不碰已经打开的。
 //! - 隧道通了还要看远端 Dock 在不在：经隧道发一个 HTTP 请求，回 `HTTP/` 才算在。
 //!   不在、又填了启动命令，就经 SSH 跑一次（如 `systemctl start dock`），再等它起来。
 //! - 只用系统的 `ssh`：认证走 ssh-agent / 私钥文件 / ~/.ssh/config，`BatchMode` 不弹密码框。
@@ -32,39 +32,40 @@ struct Running {
 
 #[derive(Clone, Default)]
 pub struct Tunnels {
-    current: Arc<Mutex<Option<Running>>>,
+    /// 已打开的远程连接各一条。切换前台不拆别的隧道。
+    open: Arc<Mutex<HashMap<String, Running>>>,
     temps: Arc<Mutex<HashMap<u16, Running>>>,
 }
 
 impl Tunnels {
-    /// 当前连接的隧道：还活着、配置没变就复用，否则重开。回本机端口。
+    /// 这条连接的隧道：还活着、配置没变就复用，否则只重开这一条。回本机端口。
     pub fn ensure(&self, id: &str, ssh: &SshTarget) -> Result<u16, String> {
         let key = format!("{id}:{ssh:?}");
-        let mut current = self.current.lock().unwrap();
-        if let Some(running) = current.as_mut() {
+        let mut open = self.open.lock().unwrap();
+        if let Some(running) = open.get_mut(id) {
             let alive = matches!(running.child.try_wait(), Ok(None));
             if alive && running.key == key {
                 return Ok(running.port);
             }
             kill(running);
-            *current = None;
+            open.remove(id);
         }
-        let running = open(key, ssh)?;
+        let running = open_tunnel(key, ssh)?;
         let port = running.port;
-        *current = Some(running);
+        open.insert(id.to_string(), running);
         Ok(port)
     }
 
-    /// 换了连接 / 删了 / 退出：关掉当前那条。
-    pub fn stop(&self) {
-        if let Some(mut running) = self.current.lock().unwrap().take() {
+    /// 关掉这一条连接的隧道。别的连接不动。
+    pub fn stop_id(&self, id: &str) {
+        if let Some(mut running) = self.open.lock().unwrap().remove(id) {
             kill(&mut running);
         }
     }
 
     /// 「测试连接」用的临时隧道，回本机端口（也是关它用的 id）。
     pub fn open_temp(&self, ssh: &SshTarget) -> Result<u16, String> {
-        let running = open(String::new(), ssh)?;
+        let running = open_tunnel(String::new(), ssh)?;
         let port = running.port;
         self.temps.lock().unwrap().insert(port, running);
         Ok(port)
@@ -77,7 +78,9 @@ impl Tunnels {
     }
 
     pub fn stop_all(&self) {
-        self.stop();
+        for (_, mut running) in self.open.lock().unwrap().drain() {
+            kill(&mut running);
+        }
         for (_, mut running) in self.temps.lock().unwrap().drain() {
             kill(&mut running);
         }
@@ -90,16 +93,24 @@ fn kill(running: &mut Running) {
 }
 
 /// 开一条隧道并确认远端 Dock 在（不在就按启动命令拉起来）。
-fn open(key: String, ssh: &SshTarget) -> Result<Running, String> {
+fn open_tunnel(key: String, ssh: &SshTarget) -> Result<Running, String> {
     let port = free_port()?;
     let mut cmd = ssh_command(ssh);
-    cmd.args(["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"])
-        .arg("-L")
-        .arg(format!("127.0.0.1:{port}:127.0.0.1:{}", ssh.remote_port))
-        .arg(destination(ssh))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    cmd.args([
+        "-N",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+    ])
+    .arg("-L")
+    .arg(format!("127.0.0.1:{port}:127.0.0.1:{}", ssh.remote_port))
+    .arg(destination(ssh))
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("启动 ssh 失败：{e}"))?;
     let stderr = Arc::new(Mutex::new(String::new()));
     if let Some(mut pipe) = child.stderr.take() {
@@ -110,11 +121,18 @@ fn open(key: String, ssh: &SshTarget) -> Result<Running, String> {
                 if n == 0 {
                     break;
                 }
-                sink.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+                sink.lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&buf[..n]));
             }
         });
     }
-    let mut running = Running { key, child, port, stderr };
+    let mut running = Running {
+        key,
+        child,
+        port,
+        stderr,
+    };
 
     // 等本机端口能连上；ssh 先退出了就把它的报错带回去。
     let deadline = Instant::now() + TUNNEL_WAIT;
@@ -124,12 +142,18 @@ fn open(key: String, ssh: &SshTarget) -> Result<Running, String> {
             let said = running.stderr.lock().unwrap().clone();
             return Err(ssh_failure(&said, &status.to_string(), ssh));
         }
-        if TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(300)).is_ok() {
+        if TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(300))
+            .is_ok()
+        {
             break;
         }
         if Instant::now() > deadline {
             kill(&mut running);
-            return Err(format!("SSH 隧道 {} 秒没建起来（{}）", TUNNEL_WAIT.as_secs(), destination(ssh)));
+            return Err(format!(
+                "SSH 隧道 {} 秒没建起来（{}）",
+                TUNNEL_WAIT.as_secs(),
+                destination(ssh)
+            ));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -165,11 +189,14 @@ fn open(key: String, ssh: &SshTarget) -> Result<Running, String> {
 /// 经隧道问一下 `/api/ws`：网关在会回 HTTP 响应（400，因为没升级）；远端端口没人听时
 /// ssh 会直接关掉这条通道，读到 EOF。
 fn gateway_up(port: u16) -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2)) else {
+    let Ok(mut stream) =
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2))
+    else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let request = format!("GET /api/ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET /api/ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
@@ -196,7 +223,10 @@ fn run_remote(ssh: &SshTarget, command: &str) -> Result<(), String> {
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("启动命令跑了 {} 秒还没结束：{command}", COMMAND_WAIT.as_secs()));
+            return Err(format!(
+                "启动命令跑了 {} 秒还没结束：{command}",
+                COMMAND_WAIT.as_secs()
+            ));
         }
         std::thread::sleep(Duration::from_millis(200));
     };
@@ -210,18 +240,30 @@ fn run_remote(ssh: &SshTarget, command: &str) -> Result<(), String> {
     if let Some(mut o) = child.stdout.take() {
         let _ = o.read_to_string(&mut out);
     }
-    Err(format!("启动命令失败（{status}）：{}", last_line(&out).unwrap_or(command)))
+    Err(format!(
+        "启动命令失败（{status}）：{}",
+        last_line(&out).unwrap_or(command)
+    ))
 }
 
 /// 隧道和远端命令共用的 ssh 参数：不弹密码框、新主机自动记下指纹、连不上 10 秒放弃。
 fn ssh_command(ssh: &SshTarget) -> Command {
     let mut cmd = Command::new("ssh");
-    cmd.args(["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]);
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=10",
+    ]);
     if let Some(port) = ssh.port {
         cmd.arg("-p").arg(port.to_string());
     }
     if let Some(identity) = &ssh.identity {
-        cmd.arg("-i").arg(expand_home(identity)).args(["-o", "IdentitiesOnly=yes"]);
+        cmd.arg("-i")
+            .arg(expand_home(identity))
+            .args(["-o", "IdentitiesOnly=yes"]);
     }
     cmd
 }
@@ -240,7 +282,10 @@ fn expand_home(path: &str) -> String {
 /// 问系统要一个空闲端口再放掉给 ssh 用（中间被别人抢了的话 ssh 会 ExitOnForwardFailure）。
 fn free_port() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("找不到空闲端口：{e}"))?;
-    listener.local_addr().map(|a| a.port()).map_err(|e| e.to_string())
+    listener
+        .local_addr()
+        .map(|a| a.port())
+        .map_err(|e| e.to_string())
 }
 
 fn last_line(text: &str) -> Option<&str> {
@@ -250,9 +295,15 @@ fn last_line(text: &str) -> Option<&str> {
 /// ssh 退出了：认证 / 主机指纹 / 私钥问题再试也没用，标成 fatal；网络问题留给重连。
 fn ssh_failure(stderr: &str, status: &str, ssh: &SshTarget) -> String {
     let line = last_line(stderr).unwrap_or(status).to_string();
-    let fatal = ["Permission denied", "Host key verification failed", "Identity file", "no such identity", "Bad configuration"]
-        .iter()
-        .any(|needle| stderr.contains(needle));
+    let fatal = [
+        "Permission denied",
+        "Host key verification failed",
+        "Identity file",
+        "no such identity",
+        "Bad configuration",
+    ]
+    .iter()
+    .any(|needle| stderr.contains(needle));
     let message = format!("SSH 隧道建不起来（{}）：{line}", destination(ssh));
     if fatal {
         format!("{FATAL}{message}")
@@ -278,10 +329,18 @@ mod tests {
 
     #[test]
     fn auth_failures_are_fatal_network_ones_are_not() {
-        let denied = ssh_failure("root@h: Permission denied (publickey).\n", "exit status: 255", &target());
+        let denied = ssh_failure(
+            "root@h: Permission denied (publickey).\n",
+            "exit status: 255",
+            &target(),
+        );
         assert!(denied.starts_with(FATAL), "{denied}");
         assert!(denied.contains("Permission denied"), "{denied}");
-        let timeout = ssh_failure("ssh: connect to host h port 22: Operation timed out\n", "exit status: 255", &target());
+        let timeout = ssh_failure(
+            "ssh: connect to host h port 22: Operation timed out\n",
+            "exit status: 255",
+            &target(),
+        );
         assert!(!timeout.starts_with(FATAL), "{timeout}");
     }
 

@@ -29,7 +29,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import type { ThreadState } from "dock-core";
-import { dock, RpcError, type Notification } from "../dock/client";
+import { currentClient, dock, RpcError, type Notification } from "../dock/client";
 import { store, useApp, useThread } from "../dock/store";
 import { BrowserTabs, type BrowserTab } from "./BrowserTabs";
 import { BrowserMenu } from "./BrowserMenu";
@@ -239,6 +239,7 @@ export function BrowserPanel({
 
   // 开视图：换会话、重连、重试都走这里。
   useEffect(() => {
+    const client = currentClient();
     setControl(false);
     setHasFrame(false);
     setPicker(null);
@@ -247,22 +248,23 @@ export function BrowserPanel({
       setPhase({ kind: "idle" });
       return;
     }
-    if (!dock.capabilities.browserView) {
+    if (!client.capabilities.browserView) {
       setPhase({ kind: "unsupported" });
       return;
     }
     let alive = true;
     setPhase((p) => (p.kind === "no_tab" || p.kind === "exited" ? p : { kind: "connecting" }));
     const openView = () =>
-      dock
+      client
         .call<{ viewId: string; url: string; title: string; tabs?: BrowserTab[]; headed?: boolean }>(
           "browser/view/open",
           openParams(sessionId, follow ? viewport.current : null, pendingUrl.current),
         )
         .then(
           (r) => {
+            // 切到别的网关时别关：画面是这条连接上的，关掉只会停掉投屏。同一条连接上换会话仍要关。
             if (!alive) {
-              dock.call("browser/view/close", { viewId: r.viewId }).catch(() => {});
+              if (currentClient() === client) client.call("browser/view/close", { viewId: r.viewId }).catch(() => {});
               return;
             }
             pendingUrl.current = null;
@@ -293,7 +295,7 @@ export function BrowserPanel({
       window.clearTimeout(timer);
       const opened = view.current;
       view.current = null;
-      if (opened) dock.call("browser/view/close", { viewId: opened }).catch(() => {});
+      if (opened && currentClient() === client) client.call("browser/view/close", { viewId: opened }).catch(() => {});
     };
     // `follow` 只在连上 / 断开时变，跟 `connected` 一起重开；视口变了走 resize，不重开。
     // eslint-disable-next-line react-hooks/exhaustive-deps

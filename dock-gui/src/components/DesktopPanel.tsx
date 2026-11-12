@@ -7,8 +7,11 @@
 // 画面默认是实时的（网关 `desktop/view/*`，能力 `desktopView`）：agent 正在操作的窗口，约 4 帧/秒，
 // agent 还没碰过窗口时看最前面的窗口；最近的点击叠一个圈。点操作记录里某一步回看它当时的截图
 // （`item/image` 按需取）。老网关没有实时画面，只有 agent 自己截的图，面板上要说清楚。
+//
+// 网关有 `desktopControl` 时：可以钉住一个窗口（空闲不再跟着前台截），并在画面上点击、滚动、打字。
+// agent 正在跑时先点「接手」，避免和它抢同一个桌面。
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type WheelEvent } from "react";
 import {
   AppWindow,
   Camera,
@@ -31,7 +34,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { ThreadState } from "dock-core";
-import { dock, RpcError } from "../dock/client";
+import { currentClient, dock, RpcError } from "../dock/client";
+import { matches, SHORTCUTS } from "../dock/shortcuts";
 import { store, useApp, useThread, type McpServerInfo } from "../dock/store";
 import { usePrefs } from "../dock/prefs";
 import { AgentCursor, type CursorEvent } from "./AgentCursor";
@@ -66,9 +70,17 @@ interface Step {
 interface LiveFrame {
   width: number;
   height: number;
-  source: "agent" | "front";
+  source: "agent" | "front" | "pin";
+  pid: number | null;
   windowId: number | null;
   label: string;
+}
+
+interface DeskWin {
+  pid: number;
+  windowId: number;
+  app: string | null;
+  title: string | null;
 }
 
 type Driver = { kind: "loading" } | { kind: "missing" } | { kind: "server"; info: McpServerInfo };
@@ -209,7 +221,7 @@ export function DesktopPanel({
       ) : (
         <>
           {live && !replaying ? (
-            <LiveView sessionId={sessionId} steps={steps} acting={acting} />
+            <LiveView sessionId={sessionId} steps={steps} acting={acting} running={running} />
           ) : (
             <Viewer
               sessionId={sessionId}
@@ -223,7 +235,9 @@ export function DesktopPanel({
           ) : (
             <div className="flex h-[30px] shrink-0 items-center gap-2 border-t border-line-soft px-4">
               <span className="min-w-0 flex-1 truncate text-[11px] text-ink-4">
-                还没操作过桌面 · 现在看的是最前面的窗口，agent 一动手就跟到它操作的窗口
+                {dock.capabilities.desktopControl
+                  ? "还没操作过桌面 · 可以在上面钉住一个窗口，或等 agent 动手后跟上"
+                  : "还没操作过桌面 · 现在看的是最前面的窗口，agent 一动手就跟到它操作的窗口"}
               </span>
               <button
                 type="button"
@@ -410,7 +424,11 @@ function Timeline({
       </div>
       <div className="flex h-[30px] shrink-0 items-center border-t border-line-soft px-4">
         <span className="text-[11px] text-ink-4">
-          {live ? "只读 · 上面是实时画面，点带缩略图的步骤回看当时的截图" : "只读 · 画面是 agent 自己截的图，不是实时画面"}
+          {live
+            ? dock.capabilities.desktopControl
+              ? "点画面操作。打字写在画面下面的输入条里回车送出。钉住后空闲不跟着前台刷新；agent 在跑时先接手"
+              : "只读 · 上面是实时画面，点带缩略图的步骤回看当时的截图"
+            : "只读 · 画面是 agent 自己截的图，不是实时画面"}
         </span>
       </div>
     </div>
@@ -593,7 +611,17 @@ const STATE_TONE: Record<ViewState["kind"], { dot: string; text: string }> = {
  * agent 的光标叠在画面上（AgentCursor）：位置来自网关的 `desktop/view/cursor`；agent 正在做的
  * 像素点击先按参数滑过去，做完后网关给的真实位置再校准、播点击效果。
  */
-function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step[]; acting: Step | null }) {
+function LiveView({
+  sessionId,
+  steps,
+  acting,
+  running,
+}: {
+  sessionId: string;
+  steps: Step[];
+  acting: Step | null;
+  running: boolean;
+}) {
   const img = useRef<HTMLImageElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const [frame, setFrame] = useState<LiveFrame | null>(null);
@@ -604,6 +632,58 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
   const [attempt, setAttempt] = useState(0);
   const [cursor, setCursor] = useState<CursorEvent | null>(null);
   const seq = useRef(0);
+  const canControl = !!dock.capabilities.desktopControl;
+  const [taken, setTaken] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuBtn = useRef<HTMLButtonElement>(null);
+  const [wins, setWins] = useState<DeskWin[] | null>(null);
+  const [pinned, setPinned] = useState(false);
+  const [hint, setHint] = useState<string | null>(null);
+  const pin = useRef<{ pid: number; windowId: number } | null>(null);
+  const viewRef = useRef<string | null>(null);
+  const down = useRef<{ x: number; y: number } | null>(null);
+  const clickTimer = useRef<(() => void) | null>(null);
+  const scrollAcc = useRef<{ x: number; y: number; dx: number; dy: number; shot: Record<string, unknown> } | null>(null);
+  const scrollTimer = useRef(0);
+  const scrollBusy = useRef(false);
+  const frameRef = useRef<LiveFrame | null>(null);
+  const controlRef = useRef(false);
+  const tail = useRef(Promise.resolve());
+  const draftRef = useRef<HTMLInputElement>(null);
+  const [draft, setDraft] = useState("");
+  const lastPoint = useRef<{ x: number; y: number } | null>(null);
+  const asked = useRef(0);
+  useEffect(() => {
+    if (!running) setTaken(false);
+  }, [running]);
+  useEffect(
+    () => () => {
+      clickTimer.current?.();
+      clickTimer.current = null;
+      window.clearTimeout(scrollTimer.current);
+      scrollAcc.current = null;
+    },
+    [],
+  );
+  useEffect(() => {
+    pin.current = null;
+    setPinned(false);
+    setMenu(false);
+    setHint(null);
+    store.clearError();
+  }, [sessionId]);
+  useEffect(() => {
+    if (!menu) return;
+    const close = (e: globalThis.PointerEvent) => {
+      const t = e.target;
+      if (!(t instanceof Node)) return;
+      if (menuRef.current?.contains(t) || menuBtn.current?.contains(t)) return;
+      setMenu(false);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [menu]);
   // 画面在 <img> 里实际占的矩形：object-contain 会在窄高的窗口两边留白，光标层只能铺在
   // 画面本身上，否则相对坐标会被留白拉偏。每帧加载、显示区变大小时重算（没变不触发渲染）。
   const [content, setContent] = useState<ContentRect | null>(null);
@@ -624,6 +704,11 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
         ? prev
         : next,
     );
+    const need = pixelBudget(box.current);
+    if (asked.current > 0 && need > asked.current * 1.25) {
+      asked.current = need;
+      setAttempt((n) => n + 1);
+    }
   }, []);
   useEffect(() => {
     const el = box.current;
@@ -634,13 +719,14 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
   }, [measure]);
 
   useEffect(() => {
+    const client = currentClient();
     let alive = true;
     let viewId: string | null = null;
     let last = "";
     setState({ kind: "connecting" });
     setHasFrame(false);
     setCursor(null);
-    const off = dock.onNotification((n) => {
+    const off = client.onNotification((n) => {
       if (!n.method.startsWith("desktop/view/")) return;
       const p = n.params as Record<string, unknown>;
       // 首帧可能早于 open 的回包：先按会话收。
@@ -651,7 +737,8 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
         const next: LiveFrame = {
           width: Number(p.width) || 0,
           height: Number(p.height) || 0,
-          source: p.source === "agent" ? "agent" : "front",
+          source: p.source === "agent" ? "agent" : p.source === "pin" ? "pin" : "front",
+          pid: num(w.pid),
           windowId: num(w.windowId),
           // 应用名和窗口标题一样（「计算器 · 计算器」）只留一个。
           label: [...new Set([w.app, w.title].filter((x): x is string => typeof x === "string" && !!x))].join(" · "),
@@ -684,16 +771,22 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
         window.setTimeout(() => alive && setAttempt((a) => a + 1), 2000);
       }
     });
-    // 画面按显示区的实际像素要（Retina 上 2 倍），太小太大都夹住。
-    const shown = (box.current?.clientWidth ?? 800) * Math.min(2, window.devicePixelRatio || 1);
-    const maxDimension = Math.round(Math.min(1600, Math.max(640, shown)));
-    dock.call<{ viewId: string }>("desktop/view/open", { threadId: sessionId, maxDimension }).then(
+    // 按面板铺满后的实际像素要图（Retina 上最多 2 倍），避免小窗口被放大后发糊。
+    const maxDimension = pixelBudget(box.current);
+    asked.current = maxDimension;
+    const openArgs: Record<string, unknown> = { threadId: sessionId, maxDimension };
+    if (pin.current) {
+      openArgs.pid = pin.current.pid;
+      openArgs.windowId = pin.current.windowId;
+    }
+    client.call<{ viewId: string }>("desktop/view/open", openArgs).then(
       (r) => {
         if (!alive) {
-          dock.call("desktop/view/close", { viewId: r.viewId }).catch(() => {});
+          if (currentClient() === client) client.call("desktop/view/close", { viewId: r.viewId }).catch(() => {});
           return;
         }
         viewId = r.viewId;
+        viewRef.current = r.viewId;
       },
       (e) => {
         if (!alive) return;
@@ -706,7 +799,8 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
     return () => {
       alive = false;
       off();
-      if (viewId) dock.call("desktop/view/close", { viewId }).catch(() => {});
+      viewRef.current = null;
+      if (viewId && currentClient() === client) client.call("desktop/view/close", { viewId }).catch(() => {});
     };
   }, [sessionId, attempt]);
 
@@ -721,12 +815,210 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
 
   const live = state.kind === "live";
   const tone = STATE_TONE[state.kind];
+  const where = pinned || frame?.source === "pin" ? "钉住的窗口" : frame?.source === "agent" ? "Agent 操作的窗口" : "最前面的窗口";
   const note =
     state.kind === "live"
-      ? [frame?.label, frame?.source === "agent" ? "Agent 操作的窗口" : "最前面的窗口"].filter(Boolean).join(" · ")
+      ? [frame?.label, where].filter(Boolean).join(" · ")
       : state.kind === "connecting"
         ? "正在连接…"
         : state.message;
+  const control = canControl && live && hasFrame && (!running || taken);
+  frameRef.current = frame;
+  controlRef.current = control;
+
+  const enqueue = useCallback((job: () => Promise<void>) => {
+    tail.current = tail.current.then(job);
+  }, []);
+  const deliver = useCallback((event: Record<string, unknown>) => {
+    const id = viewRef.current;
+    if (!id) return Promise.resolve();
+    return currentClient()
+      .call("desktop/view/input", { viewId: id, event })
+      .then(
+        () => setHint(null),
+        (e) => setHint(driverHint(e)),
+      );
+  }, []);
+  const send = useCallback((event: Record<string, unknown>) => enqueue(() => deliver(event)), [deliver, enqueue]);
+
+  const at = (e: { clientX: number; clientY: number }) => {
+    const el = img.current;
+    const shot = frameRef.current;
+    if (!el || !shot?.width || !shot.height) return null;
+    return pointOnFrame(e, el, shot.width, shot.height);
+  };
+
+  // 一次滑动里的滚轮事件先加在一起。上一轮还没回来时继续累加，回来后再发一轮，避免一点一点地等。
+  const kickScroll = () => {
+    if (scrollBusy.current) return;
+    const acc = scrollAcc.current;
+    if (!acc || (!acc.dx && !acc.dy) || !controlRef.current) return;
+    scrollAcc.current = null;
+    scrollBusy.current = true;
+    void deliver({ type: "scroll", x: acc.x, y: acc.y, dx: acc.dx, dy: acc.dy, ...acc.shot }).then(() => {
+      scrollBusy.current = false;
+      kickScroll();
+    });
+  };
+  const flushScroll = () => {
+    window.clearTimeout(scrollTimer.current);
+    kickScroll();
+  };
+
+  const pointerDown = (e: PointerEvent<HTMLImageElement>) => {
+    if (!control) return;
+    clickTimer.current?.();
+    clickTimer.current = null;
+    const p = at(e);
+    if (!p) return;
+    down.current = p;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    if (e.button === 0 && !(e.ctrlKey && !e.metaKey)) draftRef.current?.focus();
+  };
+
+  const pointerUp = (e: PointerEvent<HTMLImageElement>) => {
+    if (!control) return;
+    flushScroll();
+    const start = down.current;
+    down.current = null;
+    const p = at(e) ?? start;
+    if (!start || !p) return;
+    const shot = frameFields(frameRef.current);
+    lastPoint.current = p;
+    const right = e.button === 2 || (e.button === 0 && e.ctrlKey && !e.metaKey);
+    if (right) {
+      send({ type: "click", ...p, button: "right", count: 1, ...shot });
+      return;
+    }
+    if (e.button !== 0) return;
+    if (Math.hypot(p.x - start.x, p.y - start.y) >= 8) {
+      clickTimer.current?.();
+      clickTimer.current = null;
+      send({ type: "drag", x: start.x, y: start.y, toX: p.x, toY: p.y, ...shot });
+      return;
+    }
+    if (e.detail >= 2) {
+      clickTimer.current?.();
+      clickTimer.current = null;
+      send({ type: "click", ...p, button: "left", count: 2, ...shot });
+      return;
+    }
+    // 单击先占住发送队列等 220ms：这段里的打字会排在点击后面，双击则改发双击。
+    enqueue(
+      () =>
+        new Promise<void>((resolve) => {
+          const timer = window.setTimeout(() => {
+            clickTimer.current = null;
+            if (!controlRef.current) {
+              resolve();
+              return;
+            }
+            void deliver({ type: "click", ...p, button: "left", count: 1, ...shot }).then(resolve);
+          }, 220);
+          clickTimer.current = () => {
+            window.clearTimeout(timer);
+            resolve();
+          };
+        }),
+    );
+  };
+
+  const wheel = (e: WheelEvent<HTMLImageElement>) => {
+    if (!control) return;
+    const p = at(e);
+    if (!p) return;
+    e.preventDefault();
+    // 行模式、页模式的 delta 比像素小很多，先换成大约相当的像素再累加。
+    const unit = e.deltaMode === 1 ? 32 : e.deltaMode === 2 ? 400 : 1;
+    const dx = e.deltaX * unit;
+    const dy = e.deltaY * unit;
+    if (!dx && !dy) return;
+    const acc = scrollAcc.current;
+    if (acc) {
+      acc.dx += dx;
+      acc.dy += dy;
+      acc.x = p.x;
+      acc.y = p.y;
+    } else {
+      scrollAcc.current = { x: p.x, y: p.y, dx, dy, shot: frameFields(frameRef.current) };
+    }
+    window.clearTimeout(scrollTimer.current);
+    scrollTimer.current = window.setTimeout(kickScroll, scrollBusy.current ? 0 : 40);
+  };
+
+  const submitText = () => {
+    const text = draft;
+    if (!text || !controlRef.current) return;
+    setDraft("");
+    const point = lastPoint.current;
+    flushScroll();
+    send({
+      type: "text",
+      text,
+      ...frameFields(frameRef.current),
+      ...(point ? { x: point.x, y: point.y } : {}),
+    });
+  };
+
+  const sendKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    flushScroll();
+    send({ type: "key", key: e.key, modifiers: keyMods(e), ...frameFields(frameRef.current) });
+  };
+
+  const onDraftKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.nativeEvent.isComposing || e.key === "Process") return;
+    if (["Meta", "Control", "Alt", "Shift"].includes(e.key)) return;
+    // 侧栏、设置这些留给应用。复制粘贴留在输入条里。
+    if (SHORTCUTS.some((s) => !s.fixed && matches(e.nativeEvent, s.id))) return;
+    const command = e.metaKey || e.ctrlKey;
+    if (command && !e.altKey && "acvxz".includes(e.key.toLowerCase())) return;
+    const combo = command || e.altKey || e.shiftKey;
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (!combo && draft !== "") submitText();
+      else sendKey(e);
+      return;
+    }
+    if ((command || e.altKey) && e.key.length > 0) {
+      e.preventDefault();
+      sendKey(e);
+      return;
+    }
+    // 输入条空着时，回车、方向键、功能键直接送给窗口。有字时留给输入条编辑。
+    if (draft !== "" || !windowKey(e.key)) return;
+    e.preventDefault();
+    sendKey(e);
+  };
+
+  const openMenu = () => {
+    setMenu(true);
+    setWins(null);
+    currentClient()
+      .call<{ windows: DeskWin[] }>("desktop/view/windows", { threadId: sessionId })
+      .then(
+        (r) => setWins(r.windows),
+        (e) => {
+          setHint(driverHint(e));
+          setWins([]);
+        },
+      );
+  };
+
+  const choose = (next: { pid: number; windowId: number } | null) => {
+    pin.current = next;
+    setPinned(!!next);
+    setMenu(false);
+    const id = viewRef.current;
+    if (!id) return;
+    const args: Record<string, unknown> = { viewId: id };
+    if (next) {
+      args.pid = next.pid;
+      args.windowId = next.windowId;
+    }
+    currentClient()
+      .call("desktop/view/pin", args)
+      .catch((e) => setHint(driverHint(e)));
+  };
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col gap-2.5 bg-[#f2f2f4] px-4 pb-4 pt-3">
@@ -735,22 +1027,93 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
           {live && <span className="pulse-halo absolute inset-0 rounded-full bg-[#34c759]" />}
           <span className={`motion-colors absolute inset-0 rounded-full ${tone.dot}`} />
         </span>
-        <span className="shrink-0 whitespace-nowrap text-xs font-medium text-ink-2">实时画面</span>
-        <span className={`min-w-0 truncate text-xs ${tone.text}`}>{note}</span>
+        <span className="shrink-0 whitespace-nowrap text-xs font-medium text-ink-2">{pinned || frame?.source === "pin" ? "钉住的画面" : "实时画面"}</span>
+        <span className={`min-w-0 flex-1 truncate text-xs ${hint ? "text-[#b25e00]" : tone.text}`}>{hint ?? note}</span>
+        {canControl && live && running && (
+          <button
+            type="button"
+            onClick={() => setTaken((v) => !v)}
+            className={`motion-colors flex h-6 shrink-0 items-center gap-1 rounded-full px-2 text-[11px] font-medium ${
+              taken ? "bg-accent text-white" : "bg-white text-ink-2 ring-1 ring-line-strong hover:bg-hover"
+            }`}
+          >
+            <Hand size={12} />
+            {taken ? "交还" : "接手"}
+          </button>
+        )}
+        {canControl && (
+          <button
+            ref={menuBtn}
+            type="button"
+            onClick={() => (menu ? setMenu(false) : openMenu())}
+            className="motion-colors flex h-6 shrink-0 items-center gap-1 rounded-full bg-white px-2 text-[11px] font-medium text-ink-2 ring-1 ring-line-strong hover:bg-hover"
+          >
+            <AppWindow size={12} />
+            {pinned ? "已钉住" : "钉住窗口"}
+          </button>
+        )}
       </div>
+      {menu && (
+        <div
+          ref={menuRef}
+          className="absolute right-4 top-10 z-20 flex max-h-80 w-72 flex-col overflow-hidden rounded-lg border border-line-strong bg-white py-1 shadow-[0px_8px_24px_rgba(0,0,0,0.12)]"
+        >
+          <button
+            type="button"
+            onClick={() => choose(null)}
+            className="px-3 py-1.5 text-left text-[12px] text-ink-2 hover:bg-hover"
+          >
+            跟随最前面的窗口
+          </button>
+          <div className="mx-2 my-1 h-px bg-line-soft" />
+          <div className="thin-scroll flex min-h-0 flex-col overflow-y-auto">
+            {wins === null ? (
+              <span className="px-3 py-2 text-[12px] text-ink-4">正在列出窗口…</span>
+            ) : wins.length === 0 ? (
+              <span className="px-3 py-2 text-[12px] text-ink-4">没有可钉的窗口</span>
+            ) : (
+              wins.map((w) => {
+                const on = pin.current?.pid === w.pid && pin.current.windowId === w.windowId;
+                const { app, title } = winParts(w);
+                return (
+                  <button
+                    key={`${w.pid}:${w.windowId}`}
+                    type="button"
+                    onClick={() => choose(w)}
+                    className={`flex w-full shrink-0 flex-col items-start gap-0.5 px-3 py-1.5 text-left hover:bg-hover ${
+                      on ? "bg-[#eef3ff]" : ""
+                    }`}
+                  >
+                    <span className={`w-full truncate text-[13px] font-medium leading-5 ${on ? "text-accent" : "text-[#1c1c1e]"}`}>
+                      {app}
+                    </span>
+                    {title && (
+                      <span className="w-full truncate text-[11px] leading-4 text-[#6e6e73]">{title}</span>
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
       <div
         ref={box}
-        className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-[10px] border border-line-strong bg-[#e4e6ea]"
+        className="relative min-h-0 flex-1 overflow-hidden rounded-[10px] border border-line-strong bg-[#e4e6ea]"
       >
-        <div className="relative flex max-h-full max-w-full">
+        <div className="absolute inset-0">
           <img
             ref={img}
             alt=""
             draggable={false}
             onLoad={measure}
-            className={`block max-h-full max-w-full select-none object-contain transition-[opacity,filter] duration-200 ${
+            onPointerDown={pointerDown}
+            onPointerUp={pointerUp}
+            onWheel={wheel}
+            onContextMenu={(e) => control && e.preventDefault()}
+            className={`absolute inset-0 h-full w-full select-none object-contain transition-[opacity,filter] duration-200 ${
               hasFrame ? "" : "invisible"
-            } ${hasFrame && !live ? "opacity-50 grayscale" : ""}`}
+            } ${hasFrame && !live ? "opacity-50 grayscale" : ""} ${control ? "cursor-default" : ""}`}
           />
           {showCursor && hasFrame && live && content && <AgentCursor event={cursor} rect={content} />}
         </div>
@@ -775,8 +1138,127 @@ function LiveView({ sessionId, steps, acting }: { sessionId: string; steps: Step
           </div>
         )}
       </div>
+      <form
+        className="flex shrink-0 items-center gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submitText();
+        }}
+      >
+        <input
+          ref={draftRef}
+          value={draft}
+          disabled={!control}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onDraftKey}
+          placeholder={
+            control ? "打字后回车送出。空着按回车或组合键，会直接送给窗口" : running ? "先点「接手」再打字" : "等画面出来后再打字"
+          }
+          aria-label="送到这个窗口的文字"
+          className="h-8 min-w-0 flex-1 rounded-lg border border-line-strong bg-white px-3 text-[13px] text-ink outline-none placeholder:text-ink-4 focus:border-accent disabled:bg-[#f4f4f5]"
+        />
+        <button
+          type="submit"
+          disabled={!control || draft.length === 0}
+          className="h-8 shrink-0 rounded-lg bg-ink px-3 text-[12px] font-medium text-white disabled:opacity-40"
+        >
+          发送
+        </button>
+      </form>
     </div>
   );
+}
+
+/** 空输入条上这些键送给窗口，不留在输入框里。 */
+function windowKey(key: string): boolean {
+  return (
+    key === "Enter" ||
+    key === "Escape" ||
+    key === "Tab" ||
+    key === "Backspace" ||
+    key === "Delete" ||
+    key === "Home" ||
+    key === "End" ||
+    key === "PageUp" ||
+    key === "PageDown" ||
+    key.startsWith("Arrow") ||
+    /^F\d{1,2}$/.test(key)
+  );
+}
+
+/** 面板铺满后，按较长边的设备像素向驱动要图。上限 2048，下限 640。 */
+function pixelBudget(el: HTMLElement | null): number {
+  const w = el?.clientWidth ?? 800;
+  const h = el?.clientHeight ?? 600;
+  const px = Math.max(w, h) * Math.min(2, window.devicePixelRatio || 1);
+  return Math.round(Math.min(2048, Math.max(640, px)));
+}
+
+/** 操作失败留在画面上，不写进侧栏的项目列表。驱动的长 JSON 收成一句。 */
+function driverHint(e: unknown): string {
+  let raw = e instanceof Error ? e.message : String(e);
+  raw = raw.replace(/^desktop\/view\/[a-z]+:\s*/i, "");
+  if (raw.includes("minimized_or_hidden_window")) return "这个窗口在后台或被最小化，后台点不到";
+  if (raw.includes("画面已经换了") || raw.includes("还没有画面")) return "画面刚换过，请再点一次";
+  const line = raw
+    .split("\n")
+    .map((s) => s.trim())
+    .find((s) => s && !s.startsWith("{"));
+  const text = line ?? "操作没送出去";
+  return text.length > 72 ? `${text.slice(0, 72)}…` : text;
+}
+
+/** 点下去时那一帧的身份。网关拿它和当前帧对，对不上就不点。 */
+function frameFields(frame: LiveFrame | null): Record<string, unknown> {
+  if (!frame) return {};
+  const out: Record<string, unknown> = { width: frame.width, height: frame.height };
+  if (frame.pid !== null) out.pid = frame.pid;
+  if (frame.windowId !== null) out.windowId = frame.windowId;
+  return out;
+}
+
+function cleanLabel(value: string | null): string {
+  if (!value) return "";
+  return value.replace(/\s+/g, " ").trim();
+}
+
+/** 应用名一行、窗口标题一行。标题和应用名一样就不重复。 */
+function winParts(w: { app: string | null; title: string | null }): { app: string; title: string } {
+  const app = cleanLabel(w.app);
+  const title = cleanLabel(w.title);
+  return {
+    app: app || title || "未命名窗口",
+    title: title && title !== app ? title : "",
+  };
+}
+
+/** 指针在画面上的位置，换成这一帧的像素。点在留白上就没有。 */
+function pointOnFrame(
+  e: { clientX: number; clientY: number },
+  el: HTMLImageElement,
+  width: number,
+  height: number,
+): { x: number; y: number } | null {
+  if (!el.naturalWidth || !el.naturalHeight) return null;
+  const rect = el.getBoundingClientRect();
+  const scale = Math.min(rect.width / el.naturalWidth, rect.height / el.naturalHeight);
+  const shownW = el.naturalWidth * scale;
+  const shownH = el.naturalHeight * scale;
+  const left = rect.left + (rect.width - shownW) / 2;
+  const top = rect.top + (rect.height - shownH) / 2;
+  const x = ((e.clientX - left) / shownW) * width;
+  const y = ((e.clientY - top) / shownH) * height;
+  if (x < 0 || y < 0 || x > width || y > height) return null;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+function keyMods(e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }): string[] {
+  const mods: string[] = [];
+  if (e.metaKey) mods.push("cmd");
+  if (e.ctrlKey) mods.push("ctrl");
+  if (e.altKey) mods.push("alt");
+  if (e.shiftKey) mods.push("shift");
+  return mods;
 }
 
 /**

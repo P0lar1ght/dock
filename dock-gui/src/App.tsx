@@ -2,12 +2,22 @@
 // 这里只订阅应用级快照（`useApp`）；会话内容由 SessionPane 自己订阅，流式增量
 // 不会让整个窗口重渲染。
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { IN_TAURI, IconButton } from "./components/chrome";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { FeatureHostContext, panelFor, type FeatureHost } from "./features/registry";
-import { projectId, store, useApp, useSubagents } from "./dock/store";
+import {
+  gatewayArg,
+  lastSessionKey,
+  presetKey,
+  projectId,
+  store,
+  useApp,
+  useForegroundStore,
+  useGatewayId,
+  useSubagents,
+} from "./dock/store";
 import { prefs, usePrefs } from "./dock/prefs";
 import { matches } from "./dock/shortcuts";
 import { pairingAccept } from "./dock/settingsApi";
@@ -54,12 +64,54 @@ const REVIEW = "changes:worktree";
 const DEFAULT_SIDE = 0.42;
 /** 右侧快捷面板（没开具体面板时那一列）的宽度。 */
 const TOOL_PANEL_WIDTH = 220;
-const PRESET_KEY = "dock-gui.newChatPreset";
-/** 上次在看的会话（常规 › 启动时恢复）。 */
-const LAST_SESSION_KEY = "dock-gui.lastSession";
+
+/** 切走时留下的工作区。终端、栏宽不在里面：那是这扇窗口的，不跟某台网关走。 */
+interface WorkspaceSnap {
+  history: { stack: (string | null)[]; index: number };
+  subagentView: SubagentTarget | null;
+  expanded: Set<string>;
+  searching: boolean;
+  navPage: NavPage | null;
+  bench: string[];
+  benchOpen: boolean;
+  split: string | null;
+  panes: { kinds: SidePanel[]; weights: number[] };
+  panelOpen: boolean;
+  finding: boolean;
+  canvasTarget: { canvasId: string | null; seq: number } | null;
+  fileTarget: (PathTarget & { threadId: string; seq: number }) | null;
+  subagentTarget: { agentId: string | null; seq: number } | null;
+  newChatSeed: { presetId: string; cwd: string; key: number } | null;
+  savedPreset: string | null;
+}
+
+const workspaceSnaps = new Map<string, WorkspaceSnap>();
+
+function freshWorkspace(gw: string): WorkspaceSnap {
+  return {
+    history: { stack: [null], index: 0 },
+    subagentView: null,
+    expanded: new Set(),
+    searching: false,
+    navPage: null,
+    bench: [],
+    benchOpen: false,
+    split: null,
+    panes: { kinds: [], weights: [] },
+    panelOpen: true,
+    finding: false,
+    canvasTarget: null,
+    fileTarget: null,
+    subagentTarget: null,
+    newChatSeed: null,
+    savedPreset: localStorage.getItem(presetKey(gw)),
+  };
+}
 
 export default function App() {
   const dock = useApp();
+  const gw = useGatewayId();
+  const fg = useForegroundStore();
 
   // 会话导航历史，给左上角的前进 / 后退用。`null` = 新对话页。
   const [history, setHistory] = useState<{ stack: (string | null)[]; index: number }>({ stack: [null], index: 0 });
@@ -171,12 +223,61 @@ export default function App() {
   const [deleting, setDeleting] = useState<string | null>(null);
 
   // 当前预设：GUI 自己记住（品牌行下拉），没选过就用 Dock 的默认。新对话用它，侧栏只列它的会话。
-  const [savedPreset, setSavedPreset] = useState(() => localStorage.getItem(PRESET_KEY));
+  // 每台网关一份 key，几台同时开着不会互相覆盖。
+  const [savedPreset, setSavedPreset] = useState(() => localStorage.getItem(presetKey(gw)));
+  // 网关一切，同一帧里换回那台的工作区（会话、面板、预设）。栏宽和终端留在这扇窗口上。
+  const [boundGw, setBoundGw] = useState(gw);
+  if (gw !== boundGw) {
+    workspaceSnaps.set(boundGw, {
+      history,
+      subagentView,
+      expanded: new Set(expanded),
+      searching,
+      navPage,
+      bench: [...bench],
+      benchOpen,
+      split,
+      panes,
+      panelOpen,
+      finding,
+      canvasTarget,
+      fileTarget,
+      subagentTarget,
+      newChatSeed,
+      savedPreset,
+    });
+    const next = workspaceSnaps.get(gw) ?? freshWorkspace(gw);
+    setHistory(next.history);
+    setSubagentView(next.subagentView);
+    setExpanded(next.expanded);
+    setSearching(next.searching);
+    setNavPage(next.navPage);
+    setBench(next.bench);
+    setBenchOpen(next.benchOpen);
+    setSplit(next.split);
+    setPanes(next.panes);
+    setPanelOpen(next.panelOpen);
+    setFinding(next.finding);
+    setCanvasTarget(next.canvasTarget);
+    setFileTarget(next.fileTarget);
+    setSubagentTarget(next.subagentTarget);
+    setNewChatSeed(next.newChatSeed);
+    setSavedPreset(next.savedPreset);
+    setSettings(null);
+    setPresetEditor(false);
+    setStudio(null);
+    setCreatingProject(false);
+    setRemovingProject(null);
+    setDeleting(null);
+    setPoppingPanel(null);
+    setStarting(false);
+    setBoundGw(gw);
+  }
   const newChatPreset =
     (savedPreset && dock.presets.some((p) => p.id === savedPreset && p.available) ? savedPreset : null) ??
     dock.defaultPreset;
   const pickNewChatPreset = (id: string) => {
-    localStorage.setItem(PRESET_KEY, id);
+    localStorage.setItem(presetKey(gw), id);
     setSavedPreset(id);
   };
   /** 切到会话 / 项目所在的预设（侧栏才看得到它）；没登记 / 不可用的预设不切。 */
@@ -194,7 +295,7 @@ export default function App() {
   const subagentState = useSubagents(activeSession?.id ?? null);
   const subagentsRunning = subagentState.order.filter((id) => subagentState.byId[id].info.status === "running").length;
   // 告诉 store 正在看哪个会话：它跑完不算通知，看了就从「刚完成」里移出。
-  useEffect(() => store.focus([activeSessionId, split]), [activeSessionId, split]);
+  useEffect(() => store.focus([activeSessionId, split]), [activeSessionId, split, gw]);
   // 最近看过的会话的目录：新对话页默认归到这里。
   const [lastCwdSeen, setLastCwd] = useState("");
   useEffect(() => {
@@ -212,21 +313,21 @@ export default function App() {
 
   // 记住在看的会话；启动拿到会话列表后按偏好回到它（只做一次）。
   useEffect(() => {
-    if (activeSessionId) localStorage.setItem(LAST_SESSION_KEY, activeSessionId);
-  }, [activeSessionId]);
-  const restored = useRef(false);
+    if (activeSessionId) localStorage.setItem(lastSessionKey(gw), activeSessionId);
+  }, [activeSessionId, gw]);
+  const restored = useRef(new Set<string>());
   useEffect(() => {
-    if (restored.current || dock.sessions.length === 0) return;
-    restored.current = true;
-    const last = localStorage.getItem(LAST_SESSION_KEY);
+    if (restored.current.has(gw) || dock.sessions.length === 0) return;
+    restored.current.add(gw);
+    const last = localStorage.getItem(lastSessionKey(gw));
     if (prefs.get().restoreSession && last && !activeSessionId && dock.sessions.some((x) => x.id === last)) navigate(last);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dock.sessions]);
+  }, [dock.sessions, gw]);
 
-  // 「网关与设备 › 允许网页连接」Dock 不落盘：每次连上按偏好再设一次。
+  // 「网关与设备 › 允许网页连接」只作用在本机 Dock：每次连上按偏好再设一次。
   useEffect(() => {
-    if (dock.connection === "open" && !prefs.get().acceptPairing) void pairingAccept(false).catch(() => {});
-  }, [dock.connection]);
+    if (gw === "local" && dock.connection === "open" && !prefs.get().acceptPairing) void pairingAccept(false).catch(() => {});
+  }, [dock.connection, gw]);
 
   // 选中的会话：切到它的预设、展开它的项目。放在 effect 里：新开的会话要等
   // `thread/list` 刷新后才出现在树里。只跟着换会话走，之后在下拉里换预设不会被拽回来。
@@ -263,7 +364,7 @@ export default function App() {
         setPanes((p) => frontPane(p, "canvas"));
         setCanvasTarget((t) => ({ canvasId, seq: (t?.seq ?? 0) + 1 }));
       }),
-    [navigate, showSide],
+    [navigate, showSide, gw],
   );
 
   // 对话流里点了行内代码里的文件路径：开文件面板，切到那个会话，打开那个文件。
@@ -276,14 +377,14 @@ export default function App() {
         setPanes((p) => frontPane(p, "files"));
         setFileTarget((t) => ({ ...target, threadId, seq: (t?.seq ?? 0) + 1 }));
       }),
-    [navigate, showSide],
+    [navigate, showSide, gw],
   );
 
   // Agent 请用户在浏览器里接手（handoff_to_user）：当前会话有还没答的接手请求就打开浏览器
   // 面板（它跟着这个会话的活动标签页）。实时推来的、切过去时历史里才加载出来的都算；
   // 别的会话发来的不抢焦点，侧栏照样标「等你回答」。用户关掉面板后不再自己弹回来。
-  const handoffPending = useSyncExternalStore(store.subscribe, () =>
-    activeSessionId ? store.pendingHandoff(activeSessionId) : false,
+  const handoffPending = useSyncExternalStore(fg.subscribe, () =>
+    activeSessionId ? fg.pendingHandoff(activeSessionId) : false,
   );
   useEffect(() => {
     if (handoffPending) setPanes((p) => frontPane(p, "browser"));
@@ -298,7 +399,7 @@ export default function App() {
         setPanes((p) => frontPane(p, "subagents"));
         setSubagentTarget((t) => ({ agentId, seq: (t?.seq ?? 0) + 1 }));
       }),
-    [navigate, showSide],
+    [navigate, showSide, gw],
   );
 
   /** ⌘ 点会话：在右侧分屏打开（已经在主面板的不重复开）。 */
@@ -410,7 +511,7 @@ export default function App() {
     // 插件面板已经开成独立窗：提到前面，别在右侧再开一份。
     openPanel: (kind) => {
       if (!IN_TAURI || !panelFor(kind)?.poppable) return addPanel(kind as SidePanel);
-      void invoke<boolean>("focus_panel_window", { panel: kind }).then(
+      void invoke<boolean>("focus_panel_window", { panel: kind, gateway: gatewayArg() }).then(
         (focused) => focused || addPanel(kind as SidePanel),
         () => addPanel(kind as SidePanel),
       );
@@ -568,7 +669,8 @@ export default function App() {
       else if (action === "detach") {
         store.select(id);
         detach(id);
-      } else if (action === "window") invoke("open_chat_window", { sessionId: id, x: 0, y: 0 }).catch(store.reportError);
+      } else if (action === "window")
+        invoke("open_chat_window", { sessionId: id, gateway: gatewayArg(), x: 0, y: 0 }).catch(store.reportError);
       else if (action === "copy-id") navigator.clipboard.writeText(id);
       else if (action === "finder") session && !dock.remote && openPath(session.cwd).catch(() => {});
       else if (action === "disconnect") store.disconnect(id);
@@ -699,6 +801,7 @@ export default function App() {
       )}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div ref={rowRef} className="relative flex min-h-0 min-w-0 flex-1">
+          <Fragment key={gw}>
           {presetEditor && (
             <PresetEditor
               presets={dock.presets}
@@ -879,6 +982,7 @@ export default function App() {
               )}
             </div>
           )}
+          </Fragment>
         </div>
         <TerminalDock
           open={terminalOpen && !dock.remote}

@@ -11,6 +11,7 @@ import { IconButton } from "./chrome";
 import { Popover } from "./Popover";
 import type { BuiltinPanel, SidePanel } from "./ToolPanel";
 import { usePanelMenuItems, useSplitGroups } from "../features/registry";
+import { gatewayArg } from "../dock/store";
 
 export const PANELS: { kind: BuiltinPanel; label: string; icon: LucideIcon; shortcut: string }[] = [
   { kind: "browser", label: "浏览器", icon: Globe, shortcut: "⌘T" },
@@ -22,7 +23,7 @@ export const PANELS: { kind: BuiltinPanel; label: string; icon: LucideIcon; shor
 
 /** 不拖、直接开成独立窗口（落在系统默认位置）。开不了回 false，面板留在原处。 */
 export function openPanelWindow(kind: SidePanel, sessionId: string): Promise<boolean> {
-  return invoke("open_panel_window", { panel: kind, sessionId, x: 0, y: 0 }).then(
+  return invoke("open_panel_window", { panel: kind, sessionId, gateway: gatewayArg(), x: 0, y: 0 }).then(
     () => true,
     () => false,
   );
@@ -45,7 +46,7 @@ export function PanelGrip({
     e.preventDefault();
     onDragging(true);
     try {
-      if (await invoke<boolean>("pop_out_drag", { sessionId, panel: kind })) onPopOut();
+      if (await invoke<boolean>("pop_out_drag", { sessionId, panel: kind, gateway: gatewayArg() })) onPopOut();
     } catch {
       // 开窗失败就当没拖出去，面板留在原处。
     } finally {

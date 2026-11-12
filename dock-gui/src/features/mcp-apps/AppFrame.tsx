@@ -17,7 +17,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import { IN_TAURI } from "../../components/chrome";
 import { store } from "../../dock/store";
-import { dock } from "../../dock/client";
+import { currentClient, dock } from "../../dock/client";
 import { appCall, appContext, appRead, appResource, appViewExpose, handleViewCalls, viewToolsSupported } from "./api";
 
 /** 交给界面的一次调用。`result` 到了才发 tool-result；`cancelled` 发 tool-cancelled。 */
@@ -256,13 +256,15 @@ export function AppFrame({ server, uri, threadId, tool, call, displayMode, onReq
       (e) => alive && setError(errText(e)),
     );
     bridge.current = b;
+    const client = currentClient();
     return () => {
       alive = false;
       setReady(false);
       setDoc(null);
       setSrc(null);
       bridge.current = null;
-      // 规范：卸下前给界面一次收尾的机会，不等它。
+      // 切走了就别收尾：桥上的调用会打到现在的前台。界面卸下，这条连接上的租约留着。
+      if (currentClient() !== client) return;
       void b.teardownResource({}).catch(() => {});
       void b.close().catch(() => {});
     };
@@ -294,12 +296,13 @@ export function AppFrame({ server, uri, threadId, tool, call, displayMode, onReq
     const offCalls = handleViewCalls(viewId, async (call) =>
       (await b.callTool({ name: call.name, arguments: call.arguments })) as Record<string, unknown>,
     );
-    const offState = dock.onState((s) => s === "open" && relist());
+    const client = currentClient();
+    const offState = client.onState((s) => s === "open" && relist());
     return () => {
       alive = false;
       offCalls();
       offState();
-      report(async () => null);
+      if (currentClient() === client) report(async () => null);
     };
   }, [ready, threadId, server, uri]);
 

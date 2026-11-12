@@ -16,7 +16,7 @@ import {
 } from "react";
 import { ArrowUp, ChevronDown, Goal, Hand, ListChecks, Mic, Plus, X } from "lucide-react";
 import type { ComposerSettings, ContextBreakdown, ImageInput, SlashCommand, SlashResult } from "../model";
-import { store, type SendMode } from "../dock/store";
+import { store, useGatewayId, type SendMode } from "../dock/store";
 import { COMING_SOON } from "./chrome";
 import { ContextRing } from "./ContextRing";
 import { useComposerItems } from "../features/registry";
@@ -65,6 +65,9 @@ interface Choice {
 
 const chip = "flex h-7 items-center gap-1 rounded-full bg-[#f5f5f7] px-2.5 text-xs font-medium text-ink-3 hover:bg-[#ececf0]";
 
+/** 切走再回来时留着没发出去的草稿（按网关 + 会话）。图不带走。 */
+const drafts = new Map<string, string>();
+
 export function Composer({
   threadId,
   settings,
@@ -73,7 +76,23 @@ export function Composer({
   ...on
 }: { threadId: string; settings: ComposerSettings; running: boolean; stopping: boolean } & ComposerActions) {
   const composerItems = useComposerItems();
-  const [text, setText] = useState("");
+  const gw = useGatewayId();
+  const draftId = `${gw}\n${threadId}`;
+  const [text, setText] = useState(() => drafts.get(draftId) ?? "");
+  const textRef = useRef(text);
+  textRef.current = text;
+  const draftKey = useRef(draftId);
+  if (draftKey.current !== draftId) {
+    drafts.set(draftKey.current, textRef.current);
+    draftKey.current = draftId;
+    setText(drafts.get(draftId) ?? "");
+  }
+  useEffect(
+    () => () => {
+      drafts.set(draftId, textRef.current);
+    },
+    [draftId],
+  );
   const [images, setImages] = useState<ImageInput[]>([]);
   const [focused, setFocused] = useState(false);
   const [dragging, setDragging] = useState(false);
