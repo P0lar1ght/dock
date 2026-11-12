@@ -1123,13 +1123,13 @@ impl Sessions {
         self.times.lock().unwrap().clone()
     }
 
-    /// Empty `llm/stream` slot the HTTP sampler fills via [`Self::apply_llm_delta`].
     /// 之后的采样正文不落进记录、不推给界面，直到再调一次 `false`。推理与工具调用
     /// 照常落。只给回合末的 todo 记账步用（见字段 `llm_text_muted`）。
     pub(crate) fn mute_llm_text(&self, muted: bool) {
         self.llm_text_muted.store(muted, Ordering::Relaxed);
     }
 
+    /// Empty `llm/stream` slot the HTTP sampler fills via [`Self::apply_llm_delta`].
     pub fn begin_llm(&self) {
         if self.rewound.load(Ordering::Relaxed) {
             return;
