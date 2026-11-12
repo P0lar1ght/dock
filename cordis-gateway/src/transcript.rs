@@ -110,6 +110,9 @@ struct Projector {
     ask_seq: Option<u64>,
     plan_seq: Option<u64>,
     elicit_seq: Option<u64>,
+    /// 正在收的这条事件是 [`Sessions::insert_preamble`] 插到首条用户消息之前的
+    /// （实时：[`cordis_spine::PageLogEvent::preamble`]；回放：按它在日志里的位置）。
+    preamble: bool,
 }
 
 /// 一页的投影。各页的 `Transcript` 共用网关的一条 broadcast，事件上带着页身份。
@@ -218,6 +221,10 @@ impl Transcript {
         self.events.clear();
         self.projector = Projector::default();
         let ms = |i: usize| times.get(i).map(|t| unix_ms(*t));
+        // `insert_preamble` 只在还没有任何模型输出时往首条用户消息前插：日志里排在
+        // 首条 `User` 之前、且前面没有 `LlmStream` 的注入块就是它插的。
+        let first_user = events.iter().position(|e| matches!(e, LogEvent::User(_)));
+        let mut sent = false;
         for (i, event) in events.iter().enumerate() {
             // 插话不是新的一轮开头：前一轮由它自己收（带 `steered`），和实时一致。
             let steered = i > 0
@@ -227,7 +234,11 @@ impl Transcript {
                 self.close_legacy_turn();
             }
             self.clock = ms(i);
-            self.ingest_log_with(event.clone());
+            sent |= matches!(event, LogEvent::LlmStream(_));
+            let preamble = !sent
+                && first_user.is_some_and(|u| i < u)
+                && matches!(event, LogEvent::SystemReminder(_));
+            self.ingest_page_event(event.clone(), preamble);
         }
         self.clock = events.len().checked_sub(1).and_then(ms);
         self.close_legacy_turn();
@@ -237,6 +248,14 @@ impl Transcript {
     #[cfg(test)]
     pub fn ingest_log(&mut self, event: LogEvent) {
         self.ingest_log_with(event);
+    }
+
+    /// 收一条带位置的会话事件（[`cordis_spine::PageLogEvent`]）：`preamble` 为真表示
+    /// 它在日志里排在首条用户消息之前，投成 `placement: "preamble"`。
+    pub fn ingest_page_event(&mut self, event: LogEvent, preamble: bool) {
+        self.projector.preamble = preamble;
+        self.ingest_log_with(event);
+        self.projector.preamble = false;
     }
 
     /// 收一条事件。用户消息带的图直接从事件里取（[`LogEvent::User`] 自带像素），
@@ -438,6 +457,8 @@ impl Transcript {
                             "text": body,
                             "truncated": truncated,
                             "chars": text.chars().count(),
+                            // 和左侧上下文面板同一口径，按原文全文估（不按截断后的正文）。
+                            "tokens": cordis_spine::estimate_text_tokens(&text),
                         }),
                     );
                 }
@@ -447,16 +468,28 @@ impl Transcript {
             // 这里给它一条只读的旁路，让想核对「模型被喂了什么」的客户端能看；它仍然不是
             // 聊天消息，客户端按自己的看法渲染。子代理给父级的话不是注入（见
             // [`is_agent_message`]），照旧不投影。
+            //
+            // `placement`：`preamble` = 插在首条用户消息之前（规约、记忆、目录、名册），
+            // 模型先看到它再看到用户的话；`tail` = 追加在尾部。回放时首条用户消息还没
+            // 开轮，前导块记在它即将开的那一轮上，和实时一致。
             LogEvent::SystemReminder(text) if !is_agent_message(&text) => {
+                let preamble = self.projector.preamble;
                 let (body, truncated) = clip_context(&text, MAX_CONTEXT_CHARS);
-                self.push(
-                    "item/system_reminder",
-                    json!({
-                        "text": body,
-                        "truncated": truncated,
-                        "chars": text.chars().count(),
-                    }),
-                );
+                let payload = json!({
+                    "text": body,
+                    "truncated": truncated,
+                    "chars": text.chars().count(),
+                    "tokens": cordis_spine::estimate_text_tokens(&text),
+                    "placement": if preamble { "preamble" } else { "tail" },
+                });
+                if preamble && !self.projector.turn_open {
+                    let upcoming = format!("t{}", self.projector.turn_n + 1);
+                    let current = std::mem::replace(&mut self.projector.turn_id, upcoming);
+                    self.push("item/system_reminder", payload);
+                    self.projector.turn_id = current;
+                } else {
+                    self.push("item/system_reminder", payload);
+                }
             }
             // Notice 只给 TUI 用户看，不进 dock.1 投影，也不该变成一条聊天消息。
             LogEvent::PreStep
@@ -1101,6 +1134,15 @@ mod tests {
             .unwrap();
         assert_eq!(sp.payload["text"], "you are dock");
         assert_eq!(sp.payload["chars"], 12);
+        assert_eq!(sp.payload["tokens"], 3);
+        assert_eq!(
+            sp.payload["tokens"],
+            cordis_spine::estimate_text_tokens("you are dock")
+        );
+        assert!(
+            sp.payload.get("placement").is_none(),
+            "系统提示不带 placement"
+        );
         assert_eq!(sp.payload["truncated"], false);
         assert_eq!(sp.turn_id, turn_id);
         let sr = history
@@ -1112,6 +1154,13 @@ mod tests {
             "<system-reminder>规约</system-reminder>"
         );
         assert_eq!(sr.payload["chars"], 37);
+        // 35 个 ASCII → 9，加 2 个汉字 → 11。
+        assert_eq!(sr.payload["tokens"], 11);
+        assert_eq!(
+            sr.payload["tokens"],
+            cordis_spine::estimate_text_tokens("<system-reminder>规约</system-reminder>")
+        );
+        assert_eq!(sr.payload["placement"], "tail");
         assert_eq!(sr.payload["truncated"], false);
         assert_eq!(sr.turn_id, turn_id);
 
@@ -1145,6 +1194,104 @@ mod tests {
         );
     }
 
+    /// 注入块各自的 (正文, placement, 轮次, chars, tokens)。
+    fn reminders(t: &Transcript) -> Vec<(String, String, String, u64, u64)> {
+        t.history_since(0)
+            .into_iter()
+            .filter(|e| e.method == "item/system_reminder")
+            .map(|e| {
+                (
+                    e.payload["text"].as_str().unwrap().to_string(),
+                    e.payload["placement"].as_str().unwrap().to_string(),
+                    e.turn_id.clone(),
+                    e.payload["chars"].as_u64().unwrap(),
+                    e.payload["tokens"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// 回放：`insert_preamble` 插在首条用户消息之前的块标 preamble，记在它即将开的
+    /// 那一轮上；追加在后面的（MCP 名单、发过请求之后的）标 tail。
+    #[test]
+    fn replay_marks_preamble_reminders_before_the_first_user_message() {
+        let mut t = Transcript::new();
+        let events = vec![
+            LogEvent::SystemReminder("rules".into()),
+            LogEvent::SystemReminder("记忆".into()),
+            LogEvent::User("hi".into()),
+            LogEvent::SystemReminder("mcp list".into()),
+            LogEvent::Prompt("you are dock".into()),
+            LogEvent::LlmStream(LlmOutput {
+                text: "ok".into(),
+                ..LlmOutput::default()
+            }),
+            LogEvent::TurnEnd(TurnEndStatus::Completed),
+            LogEvent::User("again".into()),
+            LogEvent::SystemReminder("rules v2".into()),
+        ];
+        t.replay(&events, &[]);
+        let s = |x: &str| x.to_string();
+        assert_eq!(
+            reminders(&t),
+            [
+                (s("rules"), s("preamble"), s("t1"), 5, 2),
+                (s("记忆"), s("preamble"), s("t1"), 2, 2),
+                (s("mcp list"), s("tail"), s("t1"), 8, 2),
+                (s("rules v2"), s("tail"), s("t2"), 8, 2),
+            ]
+        );
+        // 前导块排在 t1 开轮之前（日志顺序），但带的是 t1。
+        let order: Vec<String> = t
+            .history_since(0)
+            .into_iter()
+            .take(4)
+            .map(|e| format!("{}@{}", e.method, e.turn_id))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "item/system_reminder@t1",
+                "item/system_reminder@t1",
+                "turn/started@t1",
+                "item/user_message@t1",
+            ]
+        );
+    }
+
+    /// 实时：到达顺序是「你」在前，位置靠 `PageLogEvent::preamble` 带过来。
+    #[test]
+    fn live_page_events_carry_the_preamble_placement() {
+        let mut t = Transcript::new();
+        t.ingest_page_event(LogEvent::User("hi".into()), false);
+        t.ingest_page_event(LogEvent::SystemReminder("rules".into()), true);
+        t.ingest_page_event(LogEvent::SystemReminder("记忆".into()), true);
+        t.ingest_page_event(LogEvent::SystemReminder("mcp list".into()), false);
+        let s = |x: &str| x.to_string();
+        assert_eq!(
+            reminders(&t),
+            [
+                (s("rules"), s("preamble"), s("t1"), 5, 2),
+                (s("记忆"), s("preamble"), s("t1"), 2, 2),
+                (s("mcp list"), s("tail"), s("t1"), 8, 2),
+            ]
+        );
+        // 标记只管那一条：之后走老入口的仍是 tail。
+        t.ingest_log(LogEvent::SystemReminder("todo".into()));
+        assert_eq!(reminders(&t)[3].1, "tail");
+    }
+
+    /// 中英混排：「Hello 世界, dock!」13 个 ASCII → 4，加 2 个汉字 → 6。
+    #[test]
+    fn reminder_tokens_use_the_shared_estimator_on_mixed_text() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        t.ingest_log(LogEvent::SystemReminder("Hello 世界, dock!".into()));
+        let r = &reminders(&t)[0];
+        assert_eq!((r.3, r.4), (15, 6));
+        assert_eq!(r.4, cordis_spine::estimate_text_tokens("Hello 世界, dock!"));
+    }
+
     /// 上下文正文太长时截断，但标出原长度：客户端知道「还有更多」。
     #[test]
     fn long_context_is_clipped_and_marked() {
@@ -1158,6 +1305,15 @@ mod tests {
             .expect("投出了注入块");
         assert_eq!(event.payload["truncated"], Value::Bool(true));
         assert_eq!(event.payload["chars"], Value::from(long.chars().count()));
+        // token 按原文全文估，不按截断后的正文。
+        assert_eq!(
+            event.payload["tokens"],
+            Value::from(cordis_spine::estimate_text_tokens(&long))
+        );
+        assert_eq!(
+            event.payload["tokens"],
+            Value::from((MAX_CONTEXT_CHARS + 100) as u64)
+        );
         assert_eq!(
             event.payload["text"].as_str().unwrap().chars().count(),
             MAX_CONTEXT_CHARS

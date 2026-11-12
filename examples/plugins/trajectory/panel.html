@@ -232,10 +232,10 @@
         case "item/side_note": push({ kind: "note", text: p.text || "", start: e.at, end: e.at }); break;
         // harness 上下文：这一轮的系统提示与注入块（不是对话，是模型被喂的东西）。
         case "item/system_prompt":
-          push({ kind: "system", text: p.text || "", chars: p.chars, truncated: p.truncated, data: p, start: e.at, end: e.at });
+          push({ kind: "system", text: p.text || "", chars: p.chars, tokens: p.tokens, truncated: p.truncated, data: p, start: e.at, end: e.at });
           break;
         case "item/system_reminder":
-          push({ kind: "reminder", text: p.text || "", chars: p.chars, truncated: p.truncated, data: p, start: e.at, end: e.at });
+          push({ kind: "reminder", text: p.text || "", chars: p.chars, tokens: p.tokens, truncated: p.truncated, preamble: p.placement === "preamble", data: p, start: e.at, end: e.at });
           break;
         // 向用户提问（ask_user_question / handoff_to_user）：等用户作答的那段时间。
         case "interaction/requested": {
@@ -301,8 +301,22 @@
         case "turn/completed": t.end = e.at; t.status = p.status || "completed"; t.error = p.error || ""; cur = null; break;
       }
     }
+    for (const t of turns) t.records = contextFirst(t.records);
     return turns;
   }
+
+  // 按模型实际看到的顺序排一轮：系统提示最前，再是插在用户消息之前的注入块
+  // （placement = preamble，相互保持原顺序），然后才是其余（「你」、尾部注入…）。
+  // 没带 placement 的老数据当尾部，照到达顺序。
+  function contextFirst(records) {
+    const system = records.filter((r) => r.kind === "system");
+    const preamble = records.filter((r) => r.kind === "reminder" && r.preamble);
+    const rest = records.filter((r) => r.kind !== "system" && !(r.kind === "reminder" && r.preamble));
+    return [...system, ...preamble, ...rest];
+  }
+
+  // 上下文块的大小：按 token（和左侧上下文面板同一估算）；老数据没有 tokens 退回字数。
+  const sizeText = (r) => r.tokens != null ? `≈${r.tokens} tok` : r.chars != null ? `${r.chars} 字` : "";
 
   // ---- 数据 ----
   async function loadThreads() {
@@ -466,7 +480,7 @@
       return `${esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）")} <span class="muted">${esc(tail)}</span>`;
     }
     if (r.kind === "system" || r.kind === "reminder") {
-      const n = r.chars != null ? `${r.chars} 字` : "";
+      const n = sizeText(r);
       return `<span class="muted">${esc(n)}</span> ${esc(firstLine(r.text))}`;
     }
     return esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）");
@@ -624,7 +638,9 @@
       ];
       if (r.wait != null) rows.push(["等首个 token", fmt(r.wait)]);
       if (r.kind === "tool") rows.push(["状态", r.status || "进行中"], ["调用 id", r.id]);
-      if (r.text) rows.push(["字数", String(r.text.length)]);
+      if (r.tokens != null) rows.push(["token（估）", String(r.tokens)]);
+      if (r.chars != null) rows.push(["字数", String(r.chars)]);
+      else if (r.text) rows.push(["字数", String(r.text.length)]);
       body = `<dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>`;
     }
     $("insBody").innerHTML = body;

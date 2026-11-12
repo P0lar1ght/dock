@@ -16,6 +16,8 @@
 
 ### 修复
 
+- **轨迹面板按模型实际顺序排上下文**：开场插在首条用户消息之前的注入块（规约 / 记忆 / 技能 / 工作流 / 名册）原来显示在「你」之后。`item/system_reminder` 新增可选字段 `placement`（`"preamble"` / `"tail"`），实时与回放都给；面板每轮先排系统提示、再排 preamble 块，然后才是用户消息。
+- **轨迹面板与上下文面板同一口径**：`item/system_prompt` / `item/system_reminder` 新增可选字段 `tokens`（按原文全文估，`chars` 保留），面板显示 `≈N tok`。三份重复的文本 token 估算收成一个 `cordis_spine::estimate_text_tokens`；HTTP 后端在官方用量回来前的暂估改为逐段估再相加（与 `/context` 一致，每段最多多算 1）。
 - **`llm/stream` 的改写写回会话**：钩子换掉的助手文本会盖掉已经流进会话的原文，界面和下一轮历史看到的是改写后的那份。
 - **`agent/pre-step` 的拒绝理由写在开轮的那一页**：子代理或分页被拒时，不再把「这一轮没有开始」写进主会话。
 - **桌面操作只认受信连接**：配对来的网页仍可申请看画面；`desktop/view/windows`、`pin`、`input` 回 `forbidden`。

@@ -91,7 +91,8 @@ pub use host::turn_changes::{
 };
 pub use host::user_edits::{record_user_edit, user_edits, UserEdits};
 pub use llm::compact::{
-    compact, compact_command, exceeds_threshold, Compact, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+    compact, compact_command, estimate_text_tokens, exceeds_threshold, Compact,
+    DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
 };
 pub use llm::http::catalog::{fetch_models_dev, MODELS_DEV_URL};
 pub use llm::http::probe::{list_upstream_models, probe_model, UpstreamModel};
