@@ -1,4 +1,4 @@
-//! `<memory>` block body (Dock paths; Grok-aligned copy). Injected as an
+//! `<memory>` block body (Dock paths). Injected as an
 //! `agent/step-start` reminder, not a system-prompt section — see
 //! `render_reminder_body` in the parent module.
 
@@ -16,55 +16,42 @@ pub fn memory_section_body(root: &MemoryRoot) -> String {
     let mut body = String::new();
     body.push_str("<memory>\n");
     body.push_str(
-        "Memory is a user-controlled filesystem knowledge base of what earlier sessions learned. \
-The memory index injected below is each scope's generated `MEMORY.md`, so never read `MEMORY.md` itself. \
-Before starting work in an area, read the topic files whose titles cover it. Skip memory only for requests \
-with no plausible overlap with past work. The user's instructions in this conversation override memory; \
-a note marked as a past agent decision is a record, not a rule, so verify it against the current tree.\n\n",
+        "记忆是用户控制的文件系统，记以前会话里学到的东西。下面注入的是每个范围生成的 `MEMORY.md` 索引，不要自己去读 `MEMORY.md`。开始一块工作前，先读标题对得上的主题文件。只有和过去的工作明显无关时才跳过记忆。本轮对话里的用户指令压过记忆；标成过去代理决定的笔记是记录，不是规则，要对照当前代码树核对。\n\n",
     );
-    body.push_str("Prefer `memory_search` / `memory_get` for recall. Ordinary read/write tools may touch memory paths only within the allowed bounds below.\n\n");
-    body.push_str("Global memory, shared across workspaces:\n");
+    body.push_str("回忆优先用 `memory_search` / `memory_get`。普通读写工具只能在下面允许的路径里碰记忆文件。\n\n");
+    body.push_str("全局记忆，所有工作区共用：\n");
     body.push_str(&format!(
-        "- `{global_path}/topics/` — maintained Markdown notes\n"
+        "- `{global_path}/topics/` — 维护中的 Markdown 笔记\n"
     ));
     body.push_str(&format!(
-        "- `{global_path}/observations/_inbox/` — new Markdown observations\n"
+        "- `{global_path}/observations/_inbox/` — 新的 Markdown 观察\n"
     ));
     body.push_str(&format!(
-        "- `{global_path}/MEMORY.md` — generated index (read-only)\n\n"
+        "- `{global_path}/MEMORY.md` — 生成的索引（只读）\n\n"
     ));
-    body.push_str("Workspace memory, specific to this workspace:\n");
+    body.push_str("工作区记忆，只属于当前工作区：\n");
     body.push_str(&format!(
-        "- `{workspace_path}/topics/` — maintained Markdown notes\n"
-    ));
-    body.push_str(&format!(
-        "- `{workspace_path}/observations/_inbox/` — new Markdown observations\n"
+        "- `{workspace_path}/topics/` — 维护中的 Markdown 笔记\n"
     ));
     body.push_str(&format!(
-        "- `{workspace_path}/MEMORY.md` — generated index (read-only)\n\n"
+        "- `{workspace_path}/observations/_inbox/` — 新的 Markdown 观察\n"
+    ));
+    body.push_str(&format!(
+        "- `{workspace_path}/MEMORY.md` — 生成的索引（只读）\n\n"
     ));
     body.push_str(
-        "`topics/` holds durable preferences, conventions, architecture, decisions, recurring workflows, \
-and other facts worth reusing. `observations/_inbox/` holds new observations that may later be consolidated into topics. \
-`MEMORY.md` is a bounded generated index; it is already injected below, and you must NEVER edit it directly.\n\n",
+        "`topics/` 放可复用的稳定事实：偏好、约定、架构、决定、反复用的流程。`observations/_inbox/` 放以后可能整理进主题的新观察。`MEMORY.md` 是有长度上限的生成索引，下面已经注入，不要直接改。\n\n",
     );
     body.push_str(
-        "Writes are allowed only to `.md` files under `topics/` or `observations/_inbox/`; generated indexes, \
-archives, databases, and other internals are protected.\n\n",
+        "只允许写 `topics/` 或 `observations/_inbox/` 下的 `.md`。生成的索引、归档、数据库和其他内部文件是保护的。\n\n",
     );
     body.push_str(
-        "Treat memory as historical context, not current truth. Verify paths, commands, repository state, \
-external facts, and other changeable claims with live tools before relying on them.\n\n",
+        "把记忆当历史，不当成当前事实。路径、命令、仓库状态、外部事实和其他会变的说法，先用工具核对再依赖。\n\n",
     );
 
-    append_scope_manifest(&mut body, "Global", &root.global, MemoryScope::Global);
+    append_scope_manifest(&mut body, "全局", &root.global, MemoryScope::Global);
     body.push('\n');
-    append_scope_manifest(
-        &mut body,
-        "Workspace",
-        &root.workspace,
-        MemoryScope::Workspace,
-    );
+    append_scope_manifest(&mut body, "工作区", &root.workspace, MemoryScope::Workspace);
     body.push_str("</memory>");
     body
 }
@@ -76,19 +63,19 @@ fn append_scope_manifest(
     which: MemoryScope,
 ) {
     let path = manifest::memory_md_path(scope);
-    body.push_str(&format!("## {label} memory manifest\n"));
+    body.push_str(&format!("## {label}记忆索引\n"));
     body.push_str(&format!("**Scope root:** `{}`\n\n", scope.root.display()));
     match manifest::read_manifest_body(scope, MANIFEST_INJECT_CAP) {
         Some((text, truncated)) => {
             body.push_str(&text);
             if truncated {
-                body.push_str("\n\n…(truncated; open the file on disk for the full index)\n");
+                body.push_str("\n\n…（已截断；要看全文直接打开磁盘上的文件）\n");
             }
             body.push('\n');
         }
         None => {
             body.push_str(&format!(
-                "(no MEMORY.md yet at `{}` — index appears after remember/flush/dream or layout ensure)\n",
+                "（`{}` 还没有 MEMORY.md。记住、flush、dream 或建好目录之后才会有索引）\n",
                 path.display()
             ));
             let _ = which; // keep signature aligned for future scope-specific notes
@@ -112,7 +99,7 @@ mod tests {
         assert!(body.contains("memory_search"));
         assert!(body.contains("MEMORY.md"));
         assert!(body.contains("observations/_inbox"));
-        assert!(body.contains("Global memory manifest"));
-        assert!(body.contains("Workspace memory manifest"));
+        assert!(body.contains("全局记忆索引"));
+        assert!(body.contains("工作区记忆索引"));
     }
 }

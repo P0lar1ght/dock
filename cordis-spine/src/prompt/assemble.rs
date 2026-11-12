@@ -15,7 +15,7 @@ use crate::prompt::context_book::ContextBook;
 /// 这张表里**没有任何一段跟着 cwd 变**：`AGENTS.md` 与长期记忆搬去消息流之后，
 /// 整份系统提示只由预设决定，`/cd` 不再让前缀作废，主会话与子代理共享的头也更长。
 /// 技能 / 工作流两段是首帧冻结的 listing，会话中途不改写。
-pub const ORDER_CORDIS: i32 = 10;
+/// Cordis 的写法在技能 `cordis-plugin-development` 和 `cordis_*` 的描述里，不占这里的槽。
 pub const ORDER_PERSONA: i32 = 20;
 pub const ORDER_WORKFLOWS: i32 = 40;
 pub const ORDER_SKILLS: i32 = 41;
