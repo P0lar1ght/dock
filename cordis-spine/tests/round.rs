@@ -1608,23 +1608,23 @@ async fn todo_bookkeeping_does_not_cut_an_active_goal_short() {
             !first.contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL),
             "only the winning reminder is appended: {first}"
         );
-        let bookkeeping = continuations
+        // The script never calls a work tool, so the goal's stall guard pauses
+        // it after `STALL_LIMIT - 1` continuations (the check that would be the
+        // `STALL_LIMIT`-th idle nudge stops instead). Only then does the list
+        // get its one bookkeeping step, and that step ends the turn.
+        let kinds: Vec<&str> = continuations
             .iter()
-            .filter(|t| t.contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL))
-            .count();
-        assert!(
-            bookkeeping <= 1,
-            "todo_first={todo_first}: {continuations:?}"
-        );
-        if bookkeeping == 1 {
-            assert!(
-                continuations
-                    .last()
-                    .unwrap()
-                    .contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL),
-                "bookkeeping, if any, is the last thing the turn does: {continuations:?}"
-            );
-        }
+            .map(|t| {
+                if t.contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL) {
+                    "bookkeeping"
+                } else {
+                    "goal"
+                }
+            })
+            .collect();
+        let mut expected = vec!["goal"; cordis_spine::STALL_LIMIT as usize - 1];
+        expected.push("bookkeeping");
+        assert_eq!(kinds, expected, "todo_first={todo_first}");
     }
 }
 
