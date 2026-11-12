@@ -221,8 +221,9 @@ impl Transcript {
         self.events.clear();
         self.projector = Projector::default();
         let ms = |i: usize| times.get(i).map(|t| unix_ms(*t));
-        // `insert_preamble` 只在还没有任何模型输出时往首条用户消息前插：日志里排在
-        // 首条 `User` 之前、且前面没有 `LlmStream` 的注入块就是它插的。
+        // `insert_preamble` 只在还没有任何模型输出时往首条用户消息前插（还没有用户
+        // 消息时追加在尾部，也排在将来那条之前）：日志里排在首条 `User` 之前（没有
+        // `User` 就是全部）、且前面没有 `LlmStream` 的注入块就是它放的。
         let first_user = events.iter().position(|e| matches!(e, LogEvent::User(_)));
         let mut sent = false;
         for (i, event) in events.iter().enumerate() {
@@ -236,7 +237,7 @@ impl Transcript {
             self.clock = ms(i);
             sent |= matches!(event, LogEvent::LlmStream(_));
             let preamble = !sent
-                && first_user.is_some_and(|u| i < u)
+                && first_user.is_none_or(|u| i < u)
                 && matches!(event, LogEvent::SystemReminder(_));
             self.ingest_page_event(event.clone(), preamble);
         }
@@ -1279,6 +1280,51 @@ mod tests {
         // 标记只管那一条：之后走老入口的仍是 tail。
         t.ingest_log(LogEvent::SystemReminder("todo".into()));
         assert_eq!(reminders(&t)[3].1, "tail");
+    }
+
+    /// 还没有用户消息时到的前导块：实时（`Sessions` 真发出的 `session/page-event`）
+    /// 和回放（同一份日志重建）给出同样的 placement 与轮次——都是 preamble，记在
+    /// 即将开的那一轮上，刷新前后不变。
+    #[tokio::test]
+    async fn a_preamble_before_any_user_message_projects_the_same_live_and_replayed() {
+        let root = cordis::Context::new();
+        let live = std::sync::Arc::new(std::sync::Mutex::new(Transcript::new()));
+        let _sub = {
+            let live = live.clone();
+            root.on(
+                cordis_spine::SESSION_PAGE_EVENT,
+                move |e: &cordis_spine::PageLogEvent| {
+                    live.lock()
+                        .unwrap()
+                        .ingest_page_event((*e.event).clone(), e.preamble);
+                },
+            )
+            .unwrap()
+        };
+        let sessions = Sessions::new(root.clone());
+        sessions.insert_preamble(LogEvent::SystemReminder("boot".into()));
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.insert_preamble(LogEvent::SystemReminder("rules".into()));
+        sessions.append(LogEvent::SystemReminder("mcp list".into()));
+        sessions.append(LogEvent::LlmStream(LlmOutput {
+            text: "ok".into(),
+            ..LlmOutput::default()
+        }));
+        sessions.insert_preamble(LogEvent::SystemReminder("rules v2".into()));
+
+        let mut replayed = Transcript::new();
+        replayed.replay(&sessions.events(), &[]);
+        let live = reminders(&live.lock().unwrap());
+        let s = |x: &str| x.to_string();
+        let expected = [
+            (s("boot"), s("preamble"), s("t1"), 4, 1),
+            (s("rules"), s("preamble"), s("t1"), 5, 2),
+            (s("mcp list"), s("tail"), s("t1"), 8, 2),
+            (s("rules v2"), s("tail"), s("t1"), 8, 2),
+        ];
+        assert_eq!(live, expected);
+        // 回放按日志顺序：rules 被插到 hi 前面，排在 boot 之后。
+        assert_eq!(reminders(&replayed), expected);
     }
 
     /// 中英混排：「Hello 世界, dock!」13 个 ASCII → 4，加 2 个汉字 → 6。

@@ -248,8 +248,9 @@ pub struct PageTurnEnd {
 pub struct PageLogEvent {
     pub page: Arc<str>,
     pub event: Arc<LogEvent>,
-    /// [`Sessions::insert_preamble`] 真把它插到了首条用户消息**之前**（日志里的位置
-    /// 比它到达的时刻早）。其余事件都是追加在尾部的，为 `false`。投影据此标
+    /// [`Sessions::insert_preamble`] 把它放在了首条用户消息**之前**：插到已有的首条
+    /// 用户消息前面（日志里的位置比它到达的时刻早），或者日志里还没有用户消息、
+    /// 它排在将来那条之前。其余事件都是追加在尾部的，为 `false`。投影据此标
     /// `item/system_reminder.placement`，界面才能按模型实际看到的顺序排。
     pub preamble: bool,
 }
@@ -857,13 +858,21 @@ impl Sessions {
         }
         // 锁序与 `model_history` 一致：先压缩头，再事件表。
         let compacted = self.compact_prefix.lock().unwrap().is_some();
+        // 还没有用户消息时追加在尾部，位置本来就在（将来的）首条用户消息之前：
+        // 模型同样先看到它，也算前导（记在即将开的那一轮上）。回放按日志位置
+        // 判出的是同一个结论，刷新前后不变。
         let at = {
             let mut events = self.events.lock().unwrap();
             let sent = compacted || events.iter().any(|e| matches!(e, LogEvent::LlmStream(_)));
             let at = if sent {
                 None
             } else {
-                events.iter().position(|e| matches!(e, LogEvent::User(_)))
+                Some(
+                    events
+                        .iter()
+                        .position(|e| matches!(e, LogEvent::User(_)))
+                        .unwrap_or(events.len()),
+                )
             };
             if let Some(at) = at {
                 events.insert(at, event.clone());
@@ -2760,6 +2769,41 @@ mod tests {
             sessions.kinds()
         );
         assert_eq!(sessions.times().len(), sessions.events().len());
+    }
+
+    /// 还没有用户消息时：前导块追加在尾部，位置仍在将来那条用户消息之前，标
+    /// `preamble = true`；用户消息到了之后的再插，照样插到它前面。
+    #[tokio::test]
+    async fn a_preamble_before_any_user_message_is_still_marked_preamble() {
+        let root = Context::new();
+        let seen = Arc::new(Mutex::new(Vec::<(String, bool)>::new()));
+        let _sub = {
+            let seen = seen.clone();
+            root.on(SESSION_PAGE_EVENT, move |e: &PageLogEvent| {
+                if let LogEvent::SystemReminder(t) = &*e.event {
+                    seen.lock().unwrap().push((t.clone(), e.preamble));
+                }
+            })
+            .unwrap()
+        };
+        let sessions = Sessions::new(root.clone());
+        sessions.insert_preamble(LogEvent::SystemReminder("boot".into()));
+        sessions.append(LogEvent::User("hi".into()));
+        sessions.insert_preamble(LogEvent::SystemReminder("rules".into()));
+        assert_eq!(
+            sessions.kinds(),
+            ["system-reminder", "system-reminder", "user"]
+        );
+        assert!(matches!(
+            &sessions.events()[..2],
+            [LogEvent::SystemReminder(a), LogEvent::SystemReminder(b)]
+                if a == "boot" && b == "rules"
+        ));
+        assert_eq!(sessions.times().len(), sessions.events().len());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [("boot".to_string(), true), ("rules".to_string(), true)]
+        );
     }
 
     /// 真插到前面的那几条在 `session/page-event` 上带 `preamble = true`；发过之后

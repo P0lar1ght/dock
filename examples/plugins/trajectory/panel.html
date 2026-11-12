@@ -305,14 +305,18 @@
     return turns;
   }
 
-  // 按模型实际看到的顺序排一轮：系统提示最前，再是插在用户消息之前的注入块
-  // （placement = preamble，相互保持原顺序），然后才是其余（「你」、尾部注入…）。
-  // 没带 placement 的老数据当尾部，照到达顺序。
+  // 按模型实际看到的顺序排一轮：第一次采样用的系统提示最前，再是插在用户消息之前的
+  // 注入块（placement = preamble，相互保持原顺序），然后才是其余（「你」、尾部注入…）。
+  // 系统提示「变了才多一条」：本轮第一次模型输出（思考 / 正文 / 工具）之后才到的那份
+  // 是中途换的，留在到达位置，不提到「你」前面。没带 placement 的老数据当尾部。
+  const MODEL_OUTPUT = new Set(["reasoning", "assistant", "tool"]);
   function contextFirst(records) {
-    const system = records.filter((r) => r.kind === "system");
+    const firstOutput = records.findIndex((r) => MODEL_OUTPUT.has(r.kind));
+    const sampled = firstOutput < 0 ? records.length : firstOutput;
+    const lead = new Set(records.filter((r, i) => r.kind === "system" && i < sampled));
     const preamble = records.filter((r) => r.kind === "reminder" && r.preamble);
-    const rest = records.filter((r) => r.kind !== "system" && !(r.kind === "reminder" && r.preamble));
-    return [...system, ...preamble, ...rest];
+    const rest = records.filter((r) => !lead.has(r) && !(r.kind === "reminder" && r.preamble));
+    return [...lead, ...preamble, ...rest];
   }
 
   // 上下文块的大小：按 token（和左侧上下文面板同一估算）；老数据没有 tokens 退回字数。

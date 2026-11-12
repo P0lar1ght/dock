@@ -103,9 +103,12 @@ cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的�
 
 事件**不分 realm**（`ctx.emit` 不看 isolate），后台页的 `session/event` 照样能把
 前台叫醒重绘，标签栏上的 `●` 就是靠这个活的。反过来，`session/event` 的载荷也**不带**
-是哪一页发的；要按页区分的监听者订 `session/page-event`（`PageLogEvent { page, event }`，
+是哪一页发的；要按页区分的监听者订 `session/page-event`（`PageLogEvent { page, event, preamble }`，
 每条会话事件和老事件一起发、共用同一个 `LogEvent`）——网关的 `live` 线程就只收
-`page == "main"`，否则别的页说的话会混进浏览器那一侧。流式事件分不出哪段是最后一段，
+`page == "main"`，否则别的页说的话会混进浏览器那一侧。`preamble` 只在
+`Sessions::insert_preamble` 把这条放在首条用户消息**之前**时为真（插到已有的首条用户
+消息前面，或日志里还没有用户消息时追加——位置同样在将来那条之前）；其余追加在尾部的
+都是 `false`。网关据此给 `item/system_reminder` 标 `placement`，回放按日志位置推出同样的结论。流式事件分不出哪段是最后一段，
 一轮何时结束由 `LoopHandle` 每个入口结束时调的 `Sessions::end_turn` 说：成功 / 出错 / 取消都算，
 记一条 `LogEvent::TurnEnd(TurnEndStatus)`（随会话落盘成 `turn-end` 行，出错带文本；模型请求
 失败不是 `Err`，本轮最后一次采样带错误时也记成失败），再发 `session/turn-end`
