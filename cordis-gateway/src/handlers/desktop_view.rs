@@ -1,8 +1,20 @@
 //! `desktop/view/*`：桌面（CUA）面板的实时画面——agent 正在操作的那个窗口。
 //!
-//! - `desktop/view/open { threadId?, maxDimension? }` → `{ viewId, threadId }`。之后这条
-//!   连接收 `desktop/view/frame` / `cursor` / `status` / `closed` 推送。
+//! - `desktop/view/open { threadId?, maxDimension?, pid?, windowId? }` → `{ viewId, threadId }`。
+//!   之后这条连接收 `desktop/view/frame` / `cursor` / `status` / `closed` 推送。带了 `pid` 和
+//!   `windowId` 就从这一帧起钉住那个窗口。
+//! - `desktop/view/windows { threadId? }` → `{ windows: [{ pid, windowId, app, title, zIndex }] }`。
+//!   给面板上的窗口列表。跳过 Dock 自己和系统界面。
+//! - `desktop/view/pin { viewId, pid?, windowId? }`：钉住这个窗口；两个 id 都不给就是松开，
+//!   回到「agent 的窗口，否则最前面的窗口」。
+//! - `desktop/view/input { viewId, event }`：用户在画面上的操作，打到最近一帧的那个窗口。
+//!   `event` 是 `{ type: "click"|"drag"|"scroll"|"text"|"key", ... }`，坐标是这一帧的像素
+//!   （和推出去的 `width` / `height` 同一套）。带了这一帧的 `pid` / `windowId` / 宽高时，
+//!   和当前帧对不上就回 `not_ready`，不点。不过权限门：这是用户自己点的，不是 agent 的工具调用。
 //! - `desktop/view/close { viewId }`；连接断开时自动全关。
+//!
+//! 钉住期间不挑最前面的窗口，也不按空闲节奏连着截：打开时一张、agent 对这个窗口动手时一张、
+//! 用户操作之后一张。截不到就还盯着它，不退回前台。
 //!
 //! 看哪个窗口：这个会话最近一次 cua-driver 调用里带的 `pid` + `window_id`（agent 正在操作
 //! 的那个，`source: "agent"`）；还没有就取最前面的普通窗口（`list_windows` 里 `z_index`
@@ -26,7 +38,7 @@
 //! 视图是**连接级**的：不进会话、不落盘，只活在这条 WebSocket 上。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,7 +48,7 @@ use cordis_base::cua::CUA_DRIVER_SERVER;
 use cordis_base::types::LogEvent;
 use cordis_spine::{Mcp, Sessions, ToolResult, MCP, SESSIONS};
 use serde_json::{json, Value};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::handle::GatewayHandle;
@@ -91,25 +103,48 @@ pub(crate) struct DesktopViews {
     /// 每个会话最后收到的那次 `open` 的序号（见 [`DesktopViews::order`]）。
     latest_open: Mutex<HashMap<String, u64>>,
     next_open: AtomicU64,
+    /// 每个视图最后一个 `input` 的「做完了」信号，下一个先等它。
+    last_input: Mutex<HashMap<String, oneshot::Receiver<()>>>,
+}
+
+/// 请求在读循环里定下的先后（见 [`DesktopViews::order`]）。
+pub(crate) enum DesktopOrder {
+    None,
+    Open(u64),
+    Input {
+        prev: Option<oneshot::Receiver<()>>,
+        /// 这一个做完（或失败）时随 drop 通知下一个。
+        done: oneshot::Sender<()>,
+    },
 }
 
 impl DesktopViews {
     /// 在连接的读循环里、按收到的顺序同步调用（不能挪进各自的任务里：任务开跑的先后
-    /// 不保证）。`open` 记下序号并返回；别的方法回 0。
+    /// 不保证）。`open` 记下序号；`input` 排到同一视图上一个输入后面。
     ///
     /// 同一会话连发两次 `open`（React StrictMode 双挂载、快速重开面板）时，两个任务谁先
     /// 做完不一定：晚做完的旧 `open` 不能把新的顶掉——客户端早就不要它了，回头把它一关，
     /// 这个会话就一个视图都不剩，画面永远停在「正在连接」。
-    pub(crate) fn order(&self, method: &str, params: &Value) -> u64 {
-        if method != protocol::DESKTOP_VIEW_OPEN {
-            return 0;
+    pub(crate) fn order(&self, method: &str, params: &Value) -> DesktopOrder {
+        match method {
+            protocol::DESKTOP_VIEW_OPEN => {
+                let seq = self.next_open.fetch_add(1, Ordering::Relaxed) + 1;
+                self.latest_open
+                    .lock()
+                    .unwrap()
+                    .insert(threads::thread_param(params), seq);
+                DesktopOrder::Open(seq)
+            }
+            protocol::DESKTOP_VIEW_INPUT => {
+                let Ok(id) = view_id_param(params) else {
+                    return DesktopOrder::None;
+                };
+                let (done, next) = oneshot::channel();
+                let prev = self.last_input.lock().unwrap().insert(id.to_string(), next);
+                DesktopOrder::Input { prev, done }
+            }
+            _ => DesktopOrder::None,
         }
-        let seq = self.next_open.fetch_add(1, Ordering::Relaxed) + 1;
-        self.latest_open
-            .lock()
-            .unwrap()
-            .insert(threads::thread_param(params), seq);
-        seq
     }
 
     /// 这次 `open` 还是这个会话最后收到的那次（`seq` 为 0 = 没定序，算是）。
@@ -122,11 +157,181 @@ impl DesktopViews {
                 .get(thread_id)
                 .is_none_or(|&latest| latest == seq)
     }
+
+    fn view(&self, id: &str) -> Result<(Context, Arc<Shared>), RpcError> {
+        self.open
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|e| (e.page.clone(), e.shared.clone()))
+            .ok_or_else(|| RpcError::app("not_found", format!("没有视图 {id}")))
+    }
+
+    fn take(&self, id: &str) -> Option<Entry> {
+        self.last_input.lock().unwrap().remove(id);
+        self.open.lock().unwrap().remove(id)
+    }
 }
 
 struct Entry {
     thread_id: String,
     task: JoinHandle<()>,
+    page: Context,
+    shared: Arc<Shared>,
+}
+
+/// 泵和 `pin` / `input` 共用的状态。截图和用户操作共用 [`Shared::driver`]：
+/// `get_window_state` 会换成新的像素帧，记下 [`FrameInfo`] 之前不放锁，点击就读不到半截。
+struct Shared {
+    pin: Mutex<Option<(i64, i64)>>,
+    /// 用户点了、或换了钉。泵截的时候清掉。
+    wake: AtomicBool,
+    kick: Notify,
+    /// 最近一帧：用户操作打到这个窗口，坐标按它的像素算。
+    /// 和 [`Shared::pin`] 的加锁顺序：先 `pin`，再 `frame`，再 `pixels`。
+    frame: Mutex<Option<FrameInfo>>,
+    /// 上一张预览的像素哈希。一样就不往连接上再推。
+    pixels: Mutex<Option<(i64, i64, u64)>>,
+    /// 最近一次定位 PNG：同一窗口、同一尺寸，滚动和按键可以接着用，不必每次再截。
+    ground: Mutex<Option<GroundMark>>,
+    driver: AsyncMutex<()>,
+    /// 这个视图自己的会话名前缀。各视图不共用一个名字，免得互相把对方的快照冲掉。
+    session_stem: String,
+    /// `0` 用 [`Shared::session_stem`]；驱动说这个名字已经结束就加一。
+    session_gen: AtomicU64,
+}
+
+impl Shared {
+    #[cfg(test)]
+    fn new(pin: Option<(i64, i64)>) -> Arc<Self> {
+        Self::named(pin, VIEW_SESSION.to_string())
+    }
+
+    /// `stem` 是这一视图自己的会话名（打开时带上 viewId）。
+    fn named(pin: Option<(i64, i64)>, stem: String) -> Arc<Self> {
+        Arc::new(Self {
+            pin: Mutex::new(pin),
+            wake: AtomicBool::new(false),
+            kick: Notify::new(),
+            frame: Mutex::new(None),
+            pixels: Mutex::new(None),
+            ground: Mutex::new(None),
+            driver: AsyncMutex::new(()),
+            session_stem: stem,
+            session_gen: AtomicU64::new(0),
+        })
+    }
+
+    /// 这一视图现在用的 cua 会话名。
+    fn session_label(&self) -> String {
+        let gen = self.session_gen.load(Ordering::Acquire);
+        if gen == 0 {
+            self.session_stem.clone()
+        } else {
+            format!("{}-{gen}", self.session_stem)
+        }
+    }
+
+    /// 旧名字已经被驱动关掉：换下一个。回新名字。
+    fn rotate_session(&self) -> String {
+        let next = self.session_gen.fetch_add(1, Ordering::AcqRel) + 1;
+        format!("{}-{next}", self.session_stem)
+    }
+
+    fn wake_up(&self) {
+        self.wake.store(true, Ordering::Release);
+        self.kick.notify_one();
+    }
+
+    /// 换钉。窗口变了就丢掉上一帧，免得点击还打到旧窗口上。
+    fn set_pin(&self, next: Option<(i64, i64)>) {
+        let mut pin = self.pin.lock().unwrap();
+        if *pin != next {
+            *pin = next;
+            *self.frame.lock().unwrap() = None;
+            *self.pixels.lock().unwrap() = None;
+            *self.ground.lock().unwrap() = None;
+        }
+        drop(pin);
+        self.wake_up();
+    }
+
+    /// 这张像素和上一张是不是同一个窗口的同一份图。新的记下来，回 `true`。
+    fn note_pixels(&self, pid: i64, window_id: i64, data: &[u8]) -> bool {
+        let hash = pixel_hash(data);
+        let mut slot = self.pixels.lock().unwrap();
+        if slot
+            .as_ref()
+            .is_some_and(|seen| seen.0 == pid && seen.1 == window_id && seen.2 == hash)
+        {
+            return false;
+        }
+        *slot = Some((pid, window_id, hash));
+        true
+    }
+
+    /// 这帧和最近一次定位图是同一个窗口、同一尺寸，而且还没过期。
+    fn has_fresh_ground(&self, frame: &FrameInfo) -> bool {
+        self.ground.lock().unwrap().as_ref().is_some_and(|mark| {
+            mark.pid == frame.pid
+                && mark.window_id == frame.window_id
+                && mark.width == frame.width
+                && mark.height == frame.height
+                && mark.at.elapsed() < GROUND_FRESH
+        })
+    }
+
+    fn mark_ground(&self, frame: &FrameInfo, width: u32, height: u32) {
+        *self.ground.lock().unwrap() =
+            (width == frame.width && height == frame.height).then_some(GroundMark {
+                pid: frame.pid,
+                window_id: frame.window_id,
+                width,
+                height,
+                at: Instant::now(),
+            });
+    }
+
+    /// 截到一张，记下它的窗口和像素。钉已经换到别的窗口就丢掉，不把旧画面写回来。
+    fn remember(&self, info: FrameInfo) {
+        let pin = self.pin.lock().unwrap();
+        if pin.is_some_and(|p| p != (info.pid, info.window_id)) {
+            return;
+        }
+        *self.frame.lock().unwrap() = Some(info);
+    }
+}
+
+/// 最近一次能拿来点的 PNG。
+struct GroundMark {
+    pid: i64,
+    window_id: i64,
+    width: u32,
+    height: u32,
+    at: Instant,
+}
+
+/// 滚动和按键复用定位图的时限。过了就重新截一张。
+const GROUND_FRESH: Duration = Duration::from_secs(15);
+
+/// 滚动和按键可以复用刚才的定位图。点击、拖动、打字仍每次重新定位。
+fn reuses_ground(tool: &str) -> bool {
+    matches!(tool, "scroll" | "press_key" | "hotkey")
+}
+
+/// 这一版驱动只有 `click` 收 `capture_id`。`double_click`、`right_click`、`drag`、
+/// `scroll` 的参数表里没有它，带上会整次拒绝（`unknown argument capture_id`）。
+fn takes_capture_id(tool: &str) -> bool {
+    tool == "click"
+}
+
+/// 最近一帧的窗口和像素尺寸。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrameInfo {
+    pid: i64,
+    window_id: i64,
+    width: u32,
+    height: u32,
 }
 
 impl Drop for DesktopViews {
@@ -140,7 +345,11 @@ impl Drop for DesktopViews {
 pub(crate) fn is_desktop_view(method: &str) -> bool {
     matches!(
         method,
-        protocol::DESKTOP_VIEW_OPEN | protocol::DESKTOP_VIEW_CLOSE
+        protocol::DESKTOP_VIEW_OPEN
+            | protocol::DESKTOP_VIEW_CLOSE
+            | protocol::DESKTOP_VIEW_WINDOWS
+            | protocol::DESKTOP_VIEW_PIN
+            | protocol::DESKTOP_VIEW_INPUT
     )
 }
 
@@ -150,27 +359,52 @@ pub(crate) async fn dispatch(
     out: &OutTx,
     method: &str,
     params: Value,
-    seq: u64,
+    order: DesktopOrder,
 ) -> Result<Value, RpcError> {
     match method {
-        protocol::DESKTOP_VIEW_OPEN => open(gateway, views, out, params, seq).await,
+        protocol::DESKTOP_VIEW_OPEN => {
+            let seq = match order {
+                DesktopOrder::Open(seq) => seq,
+                _ => 0,
+            };
+            open(gateway, views, out, params, seq).await
+        }
         protocol::DESKTOP_VIEW_CLOSE => {
-            let id = params
-                .get("viewId")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| RpcError::invalid_params("viewId is required"))?;
+            let id = require_view_id(&params)?;
             let entry = views
-                .open
-                .lock()
-                .unwrap()
-                .remove(id)
+                .take(id)
                 .ok_or_else(|| RpcError::app("not_found", format!("没有视图 {id}")))?;
             entry.task.abort();
             Ok(json!({ "ok": true, "viewId": id }))
         }
+        protocol::DESKTOP_VIEW_WINDOWS => windows(gateway, &params).await,
+        protocol::DESKTOP_VIEW_PIN => pin_view(views, &params),
+        protocol::DESKTOP_VIEW_INPUT => {
+            let _done = match order {
+                DesktopOrder::Input { prev, done } => {
+                    if let Some(prev) = prev {
+                        let _ = prev.await;
+                    }
+                    Some(done)
+                }
+                _ => None,
+            };
+            input(views, &params).await
+        }
         _ => Err(RpcError::method_not_found(method)),
     }
+}
+
+fn require_view_id(params: &Value) -> Result<&str, RpcError> {
+    view_id_param(params).map_err(|_| RpcError::invalid_params("viewId is required"))
+}
+
+fn view_id_param(params: &Value) -> Result<&str, ()> {
+    params
+        .get("viewId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or(())
 }
 
 async fn open(
@@ -191,11 +425,13 @@ async fn open(
         .and_then(Value::as_i64)
         .unwrap_or(DEFAULT_MAX_DIMENSION)
         .clamp(320, 4096);
+    let pin = pin_param(&params)?;
     let view_id = uuid::Uuid::new_v4().simple().to_string();
+    let shared = Shared::named(pin, format!("{VIEW_SESSION}-{view_id}"));
     let pump = Pump {
         view_id: view_id.clone(),
         thread_id: thread_id.clone(),
-        page: page.ctx,
+        page: page.ctx.clone(),
         out: out.clone(),
         max_dimension,
         log: AgentLog::default(),
@@ -205,7 +441,9 @@ async fn open(
         agent_fails: 0,
         fails: 0,
         skip_agent: false,
+        pin_retry: false,
         active_until: None,
+        shared: shared.clone(),
     };
     // 同一条连接对同一个会话只留一个视图，留最后收到的那次 open：新的顶掉旧的，
     // 晚做完的旧 open 作废。查和装在同一把锁里。
@@ -233,10 +471,15 @@ async fn open(
             Entry {
                 thread_id: thread_id.clone(),
                 task,
+                page: page.ctx,
+                shared,
             },
         );
         stale
     };
+    for (id, _) in &stale {
+        views.last_input.lock().unwrap().remove(id);
+    }
     for (id, entry) in stale {
         entry.task.abort();
         send(
@@ -247,7 +490,86 @@ async fn open(
             }),
         );
     }
-    Ok(json!({ "viewId": view_id, "threadId": thread_id }))
+    Ok(json!({ "viewId": view_id, "threadId": thread_id, "pinned": pin.is_some() }))
+}
+
+/// 可钉的窗口，按前后顺序（最前面的在前）。
+async fn windows(gateway: &GatewayHandle, params: &Value) -> Result<Value, RpcError> {
+    let thread_id = threads::thread_param(params);
+    let page = threads::resolve(gateway, &thread_id)?;
+    let listed = driver_call(&page.ctx, "list_windows", json!({ "on_screen_only": true }))
+        .await
+        .map_err(|e| RpcError::app("driver_unavailable", e))?;
+    Ok(json!({ "windows": window_choices(&windows_in(&listed)) }))
+}
+
+/// 钉住或松开。窗口变了，下一帧才再接受点击。
+fn pin_view(views: &DesktopViews, params: &Value) -> Result<Value, RpcError> {
+    let id = require_view_id(params)?;
+    let pin = pin_param(params)?;
+    let (_, shared) = views.view(id)?;
+    shared.set_pin(pin);
+    Ok(json!({ "ok": true, "pinned": pin.is_some() }))
+}
+
+/// 用户的一次操作。坐标是最近一帧的像素；做完叫醒泵再截一张。
+/// 预览是 `display_only` 的 JPEG，不能拿来定位。先补一张同尺寸的 PNG，再操作。
+/// 后台被拒（窗口藏着）时，只把这一下改成前台重试一次。
+async fn input(views: &DesktopViews, params: &Value) -> Result<Value, RpcError> {
+    let id = require_view_id(params)?;
+    let (page, shared) = views.view(id)?;
+    let event = params
+        .get("event")
+        .filter(|e| e.is_object())
+        .ok_or_else(|| RpcError::invalid_params("event is required"))?;
+    {
+        let _guard = shared.driver.lock().await;
+        let frame = {
+            let _pin = shared.pin.lock().unwrap();
+            *shared.frame.lock().unwrap()
+        }
+        .ok_or_else(|| RpcError::app("not_ready", "还没有画面"))?;
+        if frame_changed(event, &frame) {
+            return Err(RpcError::app("not_ready", "画面已经换了，请再点一次"));
+        }
+        let (tool, mut args) = user_gesture(event, &frame).map_err(RpcError::invalid_params)?;
+        // 滚动和按键很密。同一窗口刚定位过就直接发，省掉每次一张 PNG。
+        if !(reuses_ground(&tool) && shared.has_fresh_ground(&frame)) {
+            let ground = ground_frame(&page, &shared, &frame)
+                .await
+                .map_err(|e| RpcError::app("action_failed", e))?;
+            fit_pixels(&mut args, &frame, ground.width, ground.height);
+            // 只有单击收 `capture_id`。双击、右键、拖动、滚动带上会被驱动拒掉。
+            if takes_capture_id(&tool) {
+                if let Some(id) = ground.capture_id {
+                    args["capture_id"] = json!(id);
+                }
+            }
+            shared.mark_ground(&frame, ground.width, ground.height);
+        }
+        if let Err(err) = view_driver_call(&page, &shared, &tool, args.clone()).await {
+            if !should_foreground(&err) {
+                return Err(RpcError::app("action_failed", err));
+            }
+            args["delivery_mode"] = json!("foreground");
+            view_driver_call(&page, &shared, &tool, args)
+                .await
+                .map_err(|e| RpcError::app("action_failed", e))?;
+        }
+    }
+    shared.wake_up();
+    Ok(json!({ "ok": true }))
+}
+
+/// `pid` 和 `windowId` 都有才钉住；都没有是不钉。只给一个是参数错误。
+fn pin_param(params: &Value) -> Result<Option<(i64, i64)>, RpcError> {
+    let pid = int_arg(params, "pid");
+    let window_id = int_arg(params, "windowId").or_else(|| int_arg(params, "window_id"));
+    match (pid, window_id) {
+        (Some(pid), Some(window_id)) => Ok(Some((pid, window_id))),
+        (None, None) => Ok(None),
+        _ => Err(RpcError::invalid_params("钉住窗口要同时给 pid 和 windowId")),
+    }
 }
 
 /// 一个要看的窗口。
@@ -471,7 +793,11 @@ impl Status {
 
 /// 截不到的原因（给人看的），按 cua-driver 回的错误猜最常见的几种。
 fn capture_reason(content: &str) -> &'static str {
-    if content.contains("window_id_not_found") || content.contains("window_owner_pid_mismatch") {
+    if session_ended(content) {
+        "预览会话断了"
+    } else if content.contains("window_id_not_found")
+        || content.contains("window_owner_pid_mismatch")
+    {
         "窗口已关闭"
     } else if content.contains("px_capture_unavailable") || content.contains("px_frame_mismatch") {
         "这个窗口现在截不到画面"
@@ -508,6 +834,16 @@ struct Pump {
     skip_agent: bool,
     /// agent 最近一次动桌面之后的「活跃」截止时间。
     active_until: Option<Instant>,
+    /// 钉住的窗口上一轮没截到：隔一会儿再试，不改去追前台。
+    pin_retry: bool,
+    shared: Arc<Shared>,
+}
+
+/// [`Pump::pinned_step`] 的下一步。
+enum Pinned {
+    Again,
+    Closed,
+    Stop(&'static str),
 }
 
 impl Pump {
@@ -523,7 +859,7 @@ impl Pump {
             );
         }
         if let Some(views) = views.upgrade() {
-            views.open.lock().unwrap().remove(&self.view_id);
+            views.take(&self.view_id);
         }
     }
 
@@ -534,6 +870,17 @@ impl Pump {
             if self.out.is_closed() {
                 return None;
             }
+            let pin = *self.shared.pin.lock().unwrap();
+            if let Some(pin) = pin {
+                match self.pinned_step(&mut seq, pin).await {
+                    Pinned::Closed => return None,
+                    Pinned::Stop(reason) => return Some(reason),
+                    Pinned::Again => continue,
+                }
+            }
+            // 松开钉：这一轮照旧跟着 agent / 前台。用户点过之后把「该截了」清掉，
+            // 下面的 wait 会因为这次点击提前醒来，下一轮就截。
+            self.shared.wake.store(false, Ordering::Release);
             let started = Instant::now();
             // agent 刚做完的动作（几个连着的只画最后一个）。还在原来那个窗口上就先推光标，
             // 再截这一下的画面；换了窗口就等新窗口截到、知道它在屏幕哪儿再推。
@@ -562,8 +909,10 @@ impl Pump {
                 Ok(Ok(shot)) => {
                     self.agent_fails = 0;
                     self.fails = 0;
-                    seq += 1;
-                    self.push_frame(seq, &target, shot).await?;
+                    if shot.fresh {
+                        seq += 1;
+                        self.push_frame(seq, &target, shot).await?;
+                    }
                     self.set_status(Status::Live);
                     let active = self.active_until.is_some_and(|t| Instant::now() < t);
                     if active {
@@ -602,14 +951,114 @@ impl Pump {
         }
     }
 
-    /// 等到 `until`；会话日志一变（agent 又动手了）就提前回去补一帧。
+    /// 钉住时的一轮：只截这个窗口。没有新动作、用户也没点，就一直等，不按秒刷新。
+    async fn pinned_step(&mut self, seq: &mut u64, pin: (i64, i64)) -> Pinned {
+        let started = Instant::now();
+        let action = self.log.poll(&self.page).pop();
+        // 没带窗口号的动作不算「对这个窗口动手」，不因此刷新。
+        let on_pin = action.as_ref().is_some_and(|a| a.window == Some(pin));
+        let mut pending = None;
+        if let Some(action) = action {
+            if self.on_shown_window(&action) {
+                self.cursor(&action).await;
+            } else if on_pin {
+                pending = Some(action);
+            }
+        }
+        let wake = self.shared.wake.swap(false, Ordering::AcqRel);
+        let switched = self.shown.as_ref().is_none_or(|s| s.window != pin);
+        let need = switched || on_pin || wake || self.pin_retry;
+        if !need {
+            self.wait_pinned().await;
+            return Pinned::Again;
+        }
+        let target = Target {
+            pid: pin.0,
+            window_id: pin.1,
+            source: "pin",
+        };
+        match self.capture(&target).await {
+            Ok(Ok(shot)) => {
+                self.fails = 0;
+                self.pin_retry = false;
+                if shot.fresh {
+                    *seq += 1;
+                    if self.push_frame(*seq, &target, shot).await.is_none() {
+                        return Pinned::Closed;
+                    }
+                }
+                self.set_status(Status::Live);
+                if let Some(action) = pending {
+                    self.cursor(&action).await;
+                }
+            }
+            Ok(Err(reason)) => {
+                self.pin_retry = true;
+                self.fails += 1;
+                if self.fails >= FAILS_BEFORE_REPORT {
+                    let app = self
+                        .shown
+                        .as_ref()
+                        .filter(|s| s.window == pin)
+                        .and_then(|s| s.app.clone());
+                    self.set_status(Status::CaptureFailed(failure_message(
+                        app.as_deref(),
+                        reason,
+                    )));
+                }
+                self.wait(started + IDLE_EVERY).await;
+            }
+            Err(Stop) => return Pinned::Stop("driver_unavailable"),
+        }
+        Pinned::Again
+    }
+
+    /// 等到用户点了、换了钉，或会话日志变了。不按时钟截下一帧。
+    async fn wait_pinned(&self) {
+        loop {
+            if self.out.is_closed()
+                || self.shared.wake.load(Ordering::Acquire)
+                || self.log.changed(&self.page)
+                || self.shared.pin.lock().unwrap().is_none()
+            {
+                return;
+            }
+            let notified = self.shared.kick.notified();
+            if self.shared.wake.load(Ordering::Acquire)
+                || self.log.changed(&self.page)
+                || self.shared.pin.lock().unwrap().is_none()
+            {
+                return;
+            }
+            tokio::select! {
+                _ = notified => return,
+                _ = tokio::time::sleep(WATCH_EVERY) => {}
+            }
+        }
+    }
+
+    /// 等到 `until`；会话日志一变、或用户点了画面，就提前回去补一帧。
     async fn wait(&self, until: Instant) {
         loop {
             let now = Instant::now();
-            if now >= until || self.log.changed(&self.page) {
+            if now >= until
+                || self.log.changed(&self.page)
+                || self.shared.wake.load(Ordering::Acquire)
+            {
                 return;
             }
-            tokio::time::sleep((until - now).min(WATCH_EVERY)).await;
+            let notified = self.shared.kick.notified();
+            let now = Instant::now();
+            if now >= until
+                || self.log.changed(&self.page)
+                || self.shared.wake.load(Ordering::Acquire)
+            {
+                return;
+            }
+            tokio::select! {
+                _ = notified => return,
+                _ = tokio::time::sleep((until - now).min(WATCH_EVERY)) => {}
+            }
         }
     }
 
@@ -648,17 +1097,15 @@ impl Pump {
         Ok(front)
     }
 
-    /// 只截图的 `get_window_state`。截不到回 `Ok(Err(原因))`。
+    /// 只给看的 JPEG：不走辅助功能树，也不登记成可点击的捕获（`display_only`），
+    /// 所以不会换掉 agent 的元素快照。像素没变就不往外推。
     async fn capture(&self, target: &Target) -> Result<Result<Shot, &'static str>, Stop> {
-        let out = match timed_call(
+        let _guard = self.shared.driver.lock().await;
+        let out = match view_call(
             &self.page,
+            &self.shared,
             "get_window_state",
-            json!({
-                "pid": target.pid,
-                "window_id": target.window_id,
-                "include_accessibility_tree": false,
-                "max_dimension": self.max_dimension,
-            }),
+            preview_args(target.pid, target.window_id, self.max_dimension),
         )
         .await
         {
@@ -672,17 +1119,38 @@ impl Pump {
         let Some(image) = out.images.first() else {
             return Ok(Err(capture_reason(&out.content)));
         };
-        Ok(Ok(Shot {
+        let info = FrameInfo {
+            pid: target.pid,
+            window_id: target.window_id,
+            width: image.width,
+            height: image.height,
+        };
+        if !self
+            .shared
+            .note_pixels(target.pid, target.window_id, &image.data)
+        {
+            self.shared.remember(info);
+            return Ok(Ok(Shot::unchanged(info.width, info.height)));
+        }
+        let shot = Shot {
             data: base64::engine::general_purpose::STANDARD.encode(&image.data),
-            mime: image.mime.clone(),
+            mime: image_mime(&image.mime, &image.data),
             width: image.width,
             height: image.height,
             window: window_meta(&out.content, target),
-        }))
+            fresh: true,
+        };
+        self.shared.remember(info);
+        Ok(Ok(shot))
     }
 
     /// 推一帧，写出去了才回；连接没了回 `None`。顺带记下画面上的窗口。
+    /// 钉已经换到别的窗口时，这张是旧的，不推（`Some(())`：连接还在）。
     async fn push_frame(&mut self, seq: u64, target: &Target, shot: Shot) -> Option<()> {
+        let pin = *self.shared.pin.lock().unwrap();
+        if pin.is_some_and(|p| p != (target.pid, target.window_id)) {
+            return Some(());
+        }
         self.shown = Some(Shown {
             window: (target.pid, target.window_id),
             bounds: bounds_of(&shot.window["bounds"]),
@@ -783,6 +1251,176 @@ struct Shot {
     width: u32,
     height: u32,
     window: Value,
+    /// 和上一张不一样，要推给客户端。
+    fresh: bool,
+}
+
+impl Shot {
+    fn unchanged(width: u32, height: u32) -> Self {
+        Self {
+            data: String::new(),
+            mime: String::new(),
+            width,
+            height,
+            window: Value::Null,
+            fresh: false,
+        }
+    }
+}
+
+/// 面板预览用的会话。和 agent 自己的 cua 会话分开，避免互相冲掉快照。
+const VIEW_SESSION: &str = "dock-view";
+/// 预览 JPEG 的质量。远程隧道上比 PNG 小一截，坐标空间不变。
+const JPEG_QUALITY: i64 = 70;
+
+/// 驱动拒绝已结束的具名会话。普通工具调用不会把它重新建起来。
+fn session_ended(content: &str) -> bool {
+    content.contains("session has ended")
+}
+
+/// 参数里带了 `session` 就换成这一视图现在的名字。
+fn stamp_session(shared: &Shared, args: &mut Value) {
+    if args.get("session").is_some() {
+        args["session"] = json!(shared.session_label());
+    }
+}
+
+/// 带会话名的 cua 调用。名字已被驱动关掉时换一个新的再试一次。
+async fn view_call(
+    page: &Context,
+    shared: &Shared,
+    tool: &str,
+    mut args: Value,
+) -> Result<Option<ToolResult>, String> {
+    stamp_session(shared, &mut args);
+    let out = timed_call(page, tool, args.clone()).await?;
+    if out.as_ref().is_some_and(|got| session_ended(&got.content)) {
+        shared.rotate_session();
+        stamp_session(shared, &mut args);
+        return timed_call(page, tool, args).await;
+    }
+    Ok(out)
+}
+
+/// 只显示的一帧。`display_only` 的图不能拿来点。
+fn preview_args(pid: i64, window_id: i64, max_dimension: i64) -> Value {
+    json!({
+        "pid": pid,
+        "window_id": window_id,
+        "include_accessibility_tree": false,
+        "display_only": true,
+        "screenshot_format": "jpeg",
+        "screenshot_quality": JPEG_QUALITY,
+        "max_dimension": max_dimension,
+        "session": VIEW_SESSION,
+    })
+}
+
+/// 操作前补的一张 PNG：同尺寸，能登记 `capture_id`。
+fn ground_args(frame: &FrameInfo) -> Value {
+    json!({
+        "pid": frame.pid,
+        "window_id": frame.window_id,
+        "include_accessibility_tree": false,
+        "screenshot_format": "png",
+        "max_dimension": i64::from(frame.width.max(frame.height)).max(1),
+        "session": VIEW_SESSION,
+    })
+}
+
+struct Ground {
+    capture_id: Option<String>,
+    width: u32,
+    height: u32,
+}
+
+/// 给这次点击补一张可定位的 PNG。
+async fn ground_frame(
+    page: &Context,
+    shared: &Shared,
+    frame: &FrameInfo,
+) -> Result<Ground, String> {
+    let out = view_call(page, shared, "get_window_state", ground_args(frame))
+        .await?
+        .ok_or_else(|| format!("cua-driver {} 秒没有响应", DRIVER_TIMEOUT.as_secs()))?;
+    if out.is_error {
+        return Err(out.content);
+    }
+    let image = out.images.first().ok_or("没有定位用的画面")?;
+    Ok(Ground {
+        capture_id: capture_id_in(&out.content),
+        width: image.width,
+        height: image.height,
+    })
+}
+
+/// 后台路由被拒：窗口最小化、藏着，或这套后台注入不可用。只该重试这一下。
+fn should_foreground(err: &str) -> bool {
+    err.contains("minimized_or_hidden_window")
+        || err.contains("background_unavailable")
+        || err.contains("routed pointer is refused")
+}
+
+fn capture_id_in(text: &str) -> Option<String> {
+    if let Some(id) = json_in(text)
+        .as_ref()
+        .and_then(|v| v.get("capture_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        return Some(id.to_string());
+    }
+    let rest = text.split("\"capture_id\"").nth(1)?;
+    let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    let rest = rest.strip_prefix('"')?;
+    let id = rest.split('"').next().unwrap_or("");
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// 定位用的 PNG 和用户看到的 JPEG 尺寸不一样时，把像素按比例挪过去。
+fn fit_pixels(args: &mut Value, frame: &FrameInfo, width: u32, height: u32) {
+    if width == 0 || height == 0 || (frame.width == width && frame.height == height) {
+        return;
+    }
+    for key in ["x", "y", "from_x", "from_y", "to_x", "to_y"] {
+        let Some(n) = args.get(key).and_then(Value::as_i64) else {
+            continue;
+        };
+        let (from, to) = if key.ends_with('x') {
+            (frame.width, width)
+        } else {
+            (frame.height, height)
+        };
+        args[key] = json!(scale_coord(n, from, to));
+    }
+}
+
+fn scale_coord(n: i64, from: u32, to: u32) -> i64 {
+    if from == 0 || from == to {
+        return n;
+    }
+    let scaled = (n as f64) * f64::from(to) / f64::from(from);
+    (scaled.round() as i64).clamp(0, i64::from(to) - 1)
+}
+
+fn pixel_hash(data: &[u8]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn image_mime(mime: &str, data: &[u8]) -> String {
+    if data.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg".to_string()
+    } else if data.starts_with(b"\x89PNG") {
+        "image/png".to_string()
+    } else if mime.starts_with("image/") {
+        mime.to_string()
+    } else {
+        "image/jpeg".to_string()
+    }
 }
 
 /// 以这页的身份调 cua-driver 的一颗工具，最多等 [`DRIVER_TIMEOUT`]。
@@ -800,6 +1438,22 @@ async fn timed_call(page: &Context, tool: &str, args: Value) -> Result<Option<To
         Ok(out) => out.map(Some),
         Err(_) => Ok(None),
     }
+}
+
+/// 和 [`driver_call`] 一样，但走 [`view_call`]：预览会话被关掉时先换名字再发。
+async fn view_driver_call(
+    page: &Context,
+    shared: &Shared,
+    tool: &str,
+    args: Value,
+) -> Result<String, String> {
+    let out = view_call(page, shared, tool, args)
+        .await?
+        .ok_or_else(|| format!("cua-driver {} 秒没有响应", DRIVER_TIMEOUT.as_secs()))?;
+    if out.is_error {
+        return Err(out.content);
+    }
+    Ok(out.content)
 }
 
 /// 以这页的身份调 cua-driver 的一颗工具，回工具文本（MCP 客户端会把 structuredContent
@@ -900,6 +1554,212 @@ fn front_window(windows: &[Value]) -> Option<Target> {
 
 fn send(out: &OutTx, note: Value) {
     let _ = out.send(Outgoing::Text(note.to_string()));
+}
+
+/// 窗口列表给面板挑：在屏、不是 Dock 自己 / 系统界面，最前面的排前面。
+fn window_choices(windows: &[Value]) -> Vec<Value> {
+    let mut rows: Vec<(i64, Value)> = windows
+        .iter()
+        .filter(|w| w.get("is_on_screen").and_then(Value::as_bool) != Some(false))
+        .filter(|w| w.get("layer").and_then(Value::as_i64).unwrap_or(0) == 0)
+        .filter(|w| {
+            let app = w.get("app_name").and_then(Value::as_str).unwrap_or("");
+            !SKIP_APPS.contains(&app)
+        })
+        .filter_map(|w| {
+            let pid = w.get("pid")?.as_i64()?;
+            let window_id = w.get("window_id")?.as_i64()?;
+            let z = w.get("z_index").and_then(Value::as_i64).unwrap_or(0);
+            let title = ["title", "window_title", "name"]
+                .iter()
+                .find_map(|k| w.get(*k).and_then(Value::as_str))
+                .filter(|s| !s.is_empty());
+            Some((
+                z,
+                json!({
+                    "pid": pid,
+                    "windowId": window_id,
+                    "app": w.get("app_name").cloned().unwrap_or(Value::Null),
+                    "title": title.map(|s| Value::String(s.to_string())).unwrap_or(Value::Null),
+                    "zIndex": z,
+                }),
+            ))
+        })
+        .collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
+/// 画面上的一次操作 → cua-driver 调用。坐标是这一帧的像素，不加成屏幕坐标。
+fn user_gesture(event: &Value, frame: &FrameInfo) -> Result<(String, Value), &'static str> {
+    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let mut args = json!({
+        "pid": frame.pid,
+        "window_id": frame.window_id,
+        "session": VIEW_SESSION,
+        "post_action_wait": "none",
+    });
+    match kind {
+        "click" => {
+            let (x, y) = frame_point(event, "x", "y", frame)?;
+            args["x"] = json!(x);
+            args["y"] = json!(y);
+            let button = event
+                .get("button")
+                .and_then(Value::as_str)
+                .unwrap_or("left");
+            let count = event.get("count").and_then(Value::as_i64).unwrap_or(1);
+            let tool = if button == "right" {
+                "right_click"
+            } else if count >= 2 {
+                "double_click"
+            } else {
+                "click"
+            };
+            Ok((tool.to_string(), args))
+        }
+        "drag" => {
+            let (x, y) = frame_point(event, "x", "y", frame)?;
+            let (to_x, to_y) = frame_point(event, "toX", "toY", frame)?;
+            args["from_x"] = json!(x);
+            args["from_y"] = json!(y);
+            args["to_x"] = json!(to_x);
+            args["to_y"] = json!(to_y);
+            Ok(("drag".to_string(), args))
+        }
+        "scroll" => {
+            let (x, y) = frame_point(event, "x", "y", frame)?;
+            let dx = event.get("dx").and_then(Value::as_f64).unwrap_or(0.0);
+            let dy = event.get("dy").and_then(Value::as_f64).unwrap_or(0.0);
+            if dx == 0.0 && dy == 0.0 {
+                return Err("滚动距离是 0");
+            }
+            let (direction, amount) = if dy.abs() >= dx.abs() {
+                (if dy > 0.0 { "down" } else { "up" }, notches(dy))
+            } else {
+                (if dx > 0.0 { "right" } else { "left" }, notches(dx))
+            };
+            args["x"] = json!(x);
+            args["y"] = json!(y);
+            args["direction"] = json!(direction);
+            args["amount"] = json!(amount);
+            Ok(("scroll".to_string(), args))
+        }
+        "text" => {
+            let text = event.get("text").and_then(Value::as_str).unwrap_or("");
+            if text.is_empty() {
+                return Err("没有要输入的文字");
+            }
+            if text.chars().count() > 4000 {
+                return Err("一次输入太长");
+            }
+            args["text"] = json!(text);
+            if event.get("x").is_some() || event.get("y").is_some() {
+                let (x, y) = frame_point(event, "x", "y", frame)?;
+                args["x"] = json!(x);
+                args["y"] = json!(y);
+            }
+            Ok(("type_text".to_string(), args))
+        }
+        "key" => {
+            let raw = event.get("key").and_then(Value::as_str).unwrap_or("");
+            let key = driver_key(raw).ok_or("不认识的按键")?;
+            let mods: Vec<String> = event
+                .get("modifiers")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(modifier_name)
+                .map(str::to_string)
+                .collect();
+            if mods.is_empty() {
+                args["key"] = json!(key);
+                Ok(("press_key".to_string(), args))
+            } else {
+                let mut keys = mods;
+                keys.push(key);
+                args["keys"] = json!(keys);
+                Ok(("hotkey".to_string(), args))
+            }
+        }
+        _ => Err("不认识的操作"),
+    }
+}
+
+fn frame_point(
+    event: &Value,
+    xkey: &str,
+    ykey: &str,
+    frame: &FrameInfo,
+) -> Result<(i64, i64), &'static str> {
+    let x = event.get(xkey).and_then(Value::as_f64).ok_or("坐标无效")?;
+    let y = event.get(ykey).and_then(Value::as_f64).ok_or("坐标无效")?;
+    let w = f64::from(frame.width);
+    let h = f64::from(frame.height);
+    if frame.width == 0 || frame.height == 0 || !(0.0..=w).contains(&x) || !(0.0..=h).contains(&y) {
+        return Err("坐标超出画面");
+    }
+    Ok((
+        (x.round() as i64).clamp(0, i64::from(frame.width) - 1),
+        (y.round() as i64).clamp(0, i64::from(frame.height) - 1),
+    ))
+}
+
+/// 触控板一次滑动的像素很多，并成一次滚动后再换算。格数太小会显得一点一点挪。
+fn notches(delta: f64) -> i64 {
+    ((delta.abs() / 16.0).round() as i64).clamp(1, 48)
+}
+
+fn function_key(key: &str) -> Option<String> {
+    let rest = key.strip_prefix('F').or_else(|| key.strip_prefix('f'))?;
+    let n: u8 = rest.parse().ok()?;
+    (1..=12).contains(&n).then(|| format!("f{n}"))
+}
+
+fn driver_key(key: &str) -> Option<String> {
+    if let Some(key) = function_key(key) {
+        return Some(key);
+    }
+    let mapped = match key {
+        "Enter" => "return",
+        "Backspace" => "backspace",
+        "Escape" => "escape",
+        "Tab" => "tab",
+        "ArrowUp" => "up",
+        "ArrowDown" => "down",
+        "ArrowLeft" => "left",
+        "ArrowRight" => "right",
+        "Delete" => "delete",
+        " " | "Space" => "space",
+        "Home" => "home",
+        "End" => "end",
+        "PageUp" => "pageup",
+        "PageDown" => "pagedown",
+        k if k.chars().count() == 1 => return Some(k.to_string()),
+        _ => return None,
+    };
+    Some(mapped.to_string())
+}
+
+/// 客户端带了它点的那一帧的窗口或尺寸，和现在这帧对不上就不该点。
+/// 没带（旧客户端）就照现在这帧做。
+fn frame_changed(event: &Value, frame: &FrameInfo) -> bool {
+    let differs = |key: &str, have: i64| int_arg(event, key).is_some_and(|v| v != have);
+    differs("pid", frame.pid)
+        || differs("windowId", frame.window_id)
+        || differs("width", i64::from(frame.width))
+        || differs("height", i64::from(frame.height))
+}
+
+fn modifier_name(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "cmd" | "command" | "meta" => Some("cmd"),
+        "ctrl" | "control" => Some("ctrl"),
+        "alt" | "option" => Some("alt"),
+        "shift" => Some("shift"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1025,6 +1885,11 @@ mod tests {
             "这个窗口现在截不到画面"
         );
         assert_eq!(capture_reason("boom"), "截图失败");
+        assert!(session_ended(
+            "session has ended; tool call 'get_window_state' was rejected. Call start_session with session 'dock-view'"
+        ));
+        assert!(!session_ended("window_id_not_found"));
+        assert_eq!(capture_reason("session has ended"), "预览会话断了");
         assert_eq!(
             failure_message(Some("Grok Bot"), "窗口已关闭"),
             "截不到「Grok Bot」：窗口已关闭 · 正在重试"
@@ -1043,14 +1908,244 @@ mod tests {
     fn only_the_last_received_open_counts() {
         let views = DesktopViews::default();
         let a = json!({ "threadId": "t1" });
-        let first = views.order(protocol::DESKTOP_VIEW_OPEN, &a);
-        let second = views.order(protocol::DESKTOP_VIEW_OPEN, &a);
+        let DesktopOrder::Open(first) = views.order(protocol::DESKTOP_VIEW_OPEN, &a) else {
+            panic!("open");
+        };
+        let DesktopOrder::Open(second) = views.order(protocol::DESKTOP_VIEW_OPEN, &a) else {
+            panic!("open");
+        };
         assert!(!views.is_latest("t1", first), "晚做完的旧 open 作废");
         assert!(views.is_latest("t1", second));
-        let other = views.order(protocol::DESKTOP_VIEW_OPEN, &json!({ "threadId": "t2" }));
+        let DesktopOrder::Open(other) =
+            views.order(protocol::DESKTOP_VIEW_OPEN, &json!({ "threadId": "t2" }))
+        else {
+            panic!("open");
+        };
         assert!(views.is_latest("t2", other) && views.is_latest("t1", second));
-        assert_eq!(views.order(protocol::DESKTOP_VIEW_CLOSE, &a), 0);
+        assert!(matches!(
+            views.order(protocol::DESKTOP_VIEW_CLOSE, &a),
+            DesktopOrder::None
+        ));
         assert!(views.is_latest("t1", 0), "没定序的照旧");
+    }
+
+    #[test]
+    fn pin_needs_both_ids() {
+        assert_eq!(pin_param(&json!({})).unwrap(), None);
+        assert_eq!(
+            pin_param(&json!({ "pid": 2, "windowId": 9 })).unwrap(),
+            Some((2, 9))
+        );
+        assert!(pin_param(&json!({ "pid": 2 })).is_err());
+    }
+
+    #[test]
+    fn window_choices_skip_dock_and_put_the_front_first() {
+        let listed = json!([
+            { "pid": 1, "window_id": 11, "app_name": "dock-gui", "title": "Dock", "z_index": 30, "is_on_screen": true, "layer": 0 },
+            { "pid": 2, "window_id": 22, "app_name": "Safari", "title": "文档", "z_index": 10, "is_on_screen": true, "layer": 0 },
+            { "pid": 3, "window_id": 33, "app_name": "Notes", "window_title": "明天", "z_index": 20, "is_on_screen": true, "layer": 0 }
+        ]);
+        let rows = window_choices(listed.as_array().unwrap());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["windowId"], 33, "z 大的在前");
+        assert_eq!(rows[0]["title"], "明天");
+        assert_eq!(rows[1]["app"], "Safari");
+    }
+
+    #[test]
+    fn user_gesture_maps_frame_pixels_onto_the_shown_window() {
+        let frame = FrameInfo {
+            pid: 4,
+            window_id: 8,
+            width: 200,
+            height: 100,
+        };
+        let (tool, args) = user_gesture(
+            &json!({ "type": "click", "x": 10.2, "y": 20.6, "count": 2 }),
+            &frame,
+        )
+        .unwrap();
+        assert_eq!(tool, "double_click");
+        assert_eq!(args["pid"], 4);
+        assert_eq!(args["window_id"], 8);
+        assert_eq!(args["x"], 10);
+        assert_eq!(args["y"], 21);
+        assert_eq!(args["session"], "dock-view");
+        assert_eq!(args["post_action_wait"], "none");
+
+        let (tool, _) = user_gesture(
+            &json!({ "type": "click", "x": 1, "y": 1, "button": "right" }),
+            &frame,
+        )
+        .unwrap();
+        assert_eq!(tool, "right_click");
+
+        assert!(user_gesture(&json!({ "type": "click", "x": 500, "y": 1 }), &frame).is_err());
+
+        let (_, drag) = user_gesture(
+            &json!({ "type": "drag", "x": 1, "y": 2, "toX": 30, "toY": 40 }),
+            &frame,
+        )
+        .unwrap();
+        assert_eq!(drag["from_x"], 1);
+        assert_eq!(drag["to_y"], 40);
+
+        let (_, scroll) = user_gesture(
+            &json!({ "type": "scroll", "x": 5, "y": 5, "dx": 0, "dy": 90 }),
+            &frame,
+        )
+        .unwrap();
+        assert_eq!(scroll["direction"], "down");
+        assert_eq!(scroll["amount"], 6);
+
+        let (_, typed) = user_gesture(&json!({ "type": "text", "text": "你好" }), &frame).unwrap();
+        assert_eq!(typed["text"], "你好");
+        assert!(typed.get("x").is_none(), "没点过就不带坐标");
+
+        let (tool, key) = user_gesture(
+            &json!({ "type": "key", "key": "Enter", "modifiers": ["meta", "shift"] }),
+            &frame,
+        )
+        .unwrap();
+        assert_eq!(tool, "hotkey");
+        assert_eq!(key["keys"], json!(["cmd", "shift", "return"]));
+
+        let (tool, key) = user_gesture(&json!({ "type": "key", "key": "a" }), &frame).unwrap();
+        assert_eq!(tool, "press_key");
+        assert_eq!(key["key"], "a");
+        let (tool, key) = user_gesture(&json!({ "type": "key", "key": "F5" }), &frame).unwrap();
+        assert_eq!(tool, "press_key");
+        assert_eq!(key["key"], "f5");
+        let (tool, key) = user_gesture(
+            &json!({ "type": "key", "key": "Enter", "modifiers": ["meta"] }),
+            &frame,
+        )
+        .unwrap();
+        assert_eq!(tool, "hotkey");
+        assert_eq!(key["keys"], json!(["cmd", "return"]));
+        assert!(!takes_capture_id("type_text"));
+        assert!(!takes_capture_id("press_key"));
+        assert!(!takes_capture_id("hotkey"));
+        assert!(takes_capture_id("click"));
+        assert!(!takes_capture_id("double_click"));
+        assert!(!takes_capture_id("right_click"));
+        assert!(!takes_capture_id("drag"));
+        assert!(!takes_capture_id("scroll"));
+    }
+
+    #[test]
+    fn a_click_for_another_frame_is_refused() {
+        let frame = FrameInfo {
+            pid: 4,
+            window_id: 8,
+            width: 200,
+            height: 100,
+        };
+        assert!(!frame_changed(
+            &json!({ "type": "click", "x": 1, "y": 1 }),
+            &frame
+        ));
+        assert!(!frame_changed(
+            &json!({ "pid": 4, "windowId": 8, "width": 200, "height": 100 }),
+            &frame
+        ));
+        assert!(frame_changed(&json!({ "pid": 5, "windowId": 8 }), &frame));
+        assert!(frame_changed(
+            &json!({ "width": 199, "height": 100 }),
+            &frame
+        ));
+    }
+
+    #[test]
+    fn remember_frame_drops_a_shot_of_the_window_we_left() {
+        let shared = Shared::new(Some((1, 2)));
+        shared.remember(FrameInfo {
+            pid: 9,
+            window_id: 9,
+            width: 10,
+            height: 10,
+        });
+        assert!(shared.frame.lock().unwrap().is_none(), "钉已经是别的窗口");
+        shared.remember(FrameInfo {
+            pid: 1,
+            window_id: 2,
+            width: 10,
+            height: 10,
+        });
+        assert_eq!(shared.frame.lock().unwrap().unwrap().pid, 1);
+        shared.set_pin(Some((3, 4)));
+        assert!(shared.frame.lock().unwrap().is_none(), "换钉丢掉上一帧");
+        shared.remember(FrameInfo {
+            pid: 1,
+            window_id: 2,
+            width: 10,
+            height: 10,
+        });
+        assert!(shared.frame.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn preview_is_a_display_only_jpeg_on_its_own_session() {
+        let mut args = preview_args(4, 8, 1280);
+        assert_eq!(args["display_only"], true);
+        assert_eq!(args["include_accessibility_tree"], false);
+        assert_eq!(args["screenshot_format"], "jpeg");
+        assert_eq!(args["session"], VIEW_SESSION);
+        assert_eq!(args["max_dimension"], 1280);
+        let shared = Shared::new(None);
+        assert_eq!(shared.session_label(), VIEW_SESSION);
+        assert_eq!(shared.rotate_session(), "dock-view-1");
+        stamp_session(&shared, &mut args);
+        assert_eq!(args["session"], "dock-view-1");
+        let ground = ground_args(&FrameInfo {
+            pid: 4,
+            window_id: 8,
+            width: 800,
+            height: 600,
+        });
+        assert_eq!(ground["screenshot_format"], "png");
+        assert!(ground.get("display_only").is_none());
+        assert_eq!(ground["max_dimension"], 800);
+    }
+
+    #[test]
+    fn capture_id_and_foreground_refusal_are_read_from_the_driver_text() {
+        assert_eq!(
+            capture_id_in("noise {\"capture_id\":\"cap-1\",\"ok\":true}"),
+            Some("cap-1".to_string())
+        );
+        assert_eq!(capture_id_in("no id here"), None);
+        assert!(should_foreground(
+            "Background input refused (minimized_or_hidden_window)"
+        ));
+        assert!(should_foreground("background_unavailable"));
+        assert!(!should_foreground("窗口已关闭"));
+    }
+
+    #[test]
+    fn pixels_are_scaled_onto_the_grounding_png_and_identical_frames_are_not_fresh() {
+        let frame = FrameInfo {
+            pid: 1,
+            window_id: 2,
+            width: 100,
+            height: 50,
+        };
+        let mut args = json!({ "x": 50, "y": 25, "to_x": 100, "to_y": 0 });
+        fit_pixels(&mut args, &frame, 200, 100);
+        assert_eq!(args["x"], 100);
+        assert_eq!(args["y"], 50);
+        assert_eq!(args["to_x"], 199);
+        assert_eq!(args["to_y"], 0);
+        fit_pixels(&mut args, &frame, 100, 50);
+        assert_eq!(args["x"], 100, "尺寸没变就不动");
+
+        let shared = Shared::new(None);
+        assert!(shared.note_pixels(1, 2, b"abc"));
+        assert!(!shared.note_pixels(1, 2, b"abc"));
+        assert!(shared.note_pixels(1, 2, b"abd"));
+        shared.set_pin(Some((9, 9)));
+        assert!(shared.note_pixels(1, 2, b"abd"), "换钉后同一张也要再推");
     }
 
     #[test]

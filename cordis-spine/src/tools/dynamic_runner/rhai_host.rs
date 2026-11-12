@@ -16,14 +16,16 @@ use crate::host::status_items::{StatusItem, StatusItems, StatusToken};
 use crate::host::tool_views::{ToolViewFn, ToolViewInput, ToolViews};
 use crate::host::tui_slots::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots};
 use crate::names::{
-    PLUGIN_SETTINGS, RHAI_BAGS, SESSION_EVENT, SLASH, STATUS_ITEMS, STEP_START, TOOLS, TOOL_VIEWS,
-    TUI_SLOTS, TURN_END,
+    LLM_STREAM, PLUGIN_SETTINGS, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS, SESSION_EVENT, SLASH,
+    STATUS_ITEMS, STEP_START, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TOOL_VIEWS, TUI_SLOTS,
+    TURN_END,
 };
+use crate::prompt::assemble::{PromptAssembly, ORDER_HOOKS};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::plugin_settings::SettingsSchema;
 use cordis_base::types::{
-    LogEvent, StepStart, ToolCall, ToolSpec, TurnEnd, ORDER_STEP_START_DYNAMIC,
-    ORDER_TURN_END_DYNAMIC,
+    LlmOutput, LogEvent, PreExecute, PreStep, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd,
+    ORDER_STEP_START_DYNAMIC, ORDER_TURN_END_DYNAMIC,
 };
 use cordis_base::view::ViewNode;
 
@@ -122,11 +124,13 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.on",
-        "Observe \"session/event\", or intercept the two scriptable waterfalls. session/event payload is a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…, handled after emit returns, one at a time in emit order. \"agent/step-start\" (#{ step, identity, main }) runs before every sample and \"agent/turn-end\" (#{ text, rounds, ended_with_text, queued_followups, identity, main }) runs when the turn wants to end; return a <system-reminder> string to inject / keep working, or () for no opinion. Those two run inline and block the turn, bounded by max_operations; a throw is treated as no opinion. Built-in slots outrank a script. The other waterfalls are not scriptable. Stop unregisters the listener.",
+        "Observe \"session/event\", or intercept the scriptable waterfalls. session/event payload is a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…, handled after emit returns, one at a time in emit order. \"agent/step-start\" (#{ step, identity, main }) runs before every sample and \"agent/turn-end\" (#{ text, rounds, ended_with_text, queued_followups, identity, main }) runs when the turn wants to end; return a <system-reminder> string to inject / keep working, or () for no opinion. Five more hooks are for **disk plugins only** (installed from a plugins dir, enabled in settings, or persisted by an approved cordis_promote — a package defined in this session cannot register them): \"agent/pre-step\" (#{ user, identity, main }) — return #{ deny: \"reason\" } to refuse the turn; \"system-prompt/assemble\" (#{ tools }) — return a string to add one section to the system prompt; \"tools/pre-execute\" (#{ called, name, arguments, identity, main }) — return #{ deny: \"reason\" } to refuse the call or #{ rewrite: #{ name, arguments } } to redirect it; \"tools/execute\" (#{ name, call_id, content, is_error }) — return a string to replace the content; \"llm/stream\" (#{ text, tool_calls }) — return a string to replace the assistant text. Hooks run inline and block the turn, bounded by max_operations; a throw is treated as no opinion. Built-in slots outrank a script. Stop unregisters the listener.",
         &[
             "host.on(\"session/event\", |line| { ... })",
             "host.on(\"agent/step-start\", |step| { ... })",
             "host.on(\"agent/turn-end\", |end| { ... })",
+            "host.on(\"tools/pre-execute\", |call| { if call.name == \"bash\" { #{ deny: \"no shell here\" } } else { () } })",
+            "host.on(\"system-prompt/assemble\", |ctx| { \"project rules…\" })",
         ],
     ),
     (
@@ -241,6 +245,7 @@ pub fn build_rhai_limited(
     source: &str,
     max_bytes: usize,
     plugin_dir: Option<PathBuf>,
+    disk_backed: bool,
 ) -> Result<Plugin, String> {
     let meta = preflight_limited(source, max_bytes)?;
     let name = fiber_name.to_string();
@@ -251,7 +256,8 @@ pub fn build_rhai_limited(
         Inject::from(meta.inject.clone())
     };
     Ok(plugin(name.clone(), inject, move |ctx, _: &()| {
-        apply_rhai(ctx, &name, &source, plugin_dir.clone()).map_err(cordis::Error::plugin)?;
+        apply_rhai(ctx, &name, &source, plugin_dir.clone(), disk_backed)
+            .map_err(cordis::Error::plugin)?;
         Ok(None)
     }))
 }
@@ -261,6 +267,7 @@ fn apply_rhai(
     plugin_id: &str,
     source: &str,
     plugin_dir: Option<PathBuf>,
+    disk_backed: bool,
 ) -> Result<(), String> {
     let mut engine = sandboxed_engine(RUN_MAX_OPS);
     let tag = format!("[cordis:{plugin_id}]");
@@ -286,6 +293,7 @@ fn apply_rhai(
         ctx: ctx.clone(),
         plugin_id: plugin_id.to_string(),
         plugin_dir,
+        disk_backed,
         engine: engine.clone(),
         ast: ast.clone(),
         disposers: Mutex::new(Vec::new()),
@@ -368,6 +376,10 @@ struct HostInner {
     plugin_id: String,
     /// 磁盘插件（`source_path`）所在目录：`register_slot` 的 `web` 文件只能在这里面。
     plugin_dir: Option<PathBuf>,
+    /// 这个包是不是从磁盘来的（插件目录装上 / 设置启用 / promote 落盘）。
+    /// 只有磁盘包能挂那五个能否决流程的钩子；判据是来源，不是 `source_path`
+    /// ——会话里 define 的包也能带 `source_path`。
+    disk_backed: bool,
     engine: Arc<Engine>,
     ast: AST,
     disposers: Mutex<Vec<cordis::Disposable>>,
@@ -744,9 +756,31 @@ impl Host {
             SESSION_EVENT => self.on_session_event(handler),
             STEP_START => self.on_step_start(handler),
             TURN_END => self.on_turn_end(handler),
+            PRE_STEP | PROMPT_ASSEMBLE | TOOLS_PRE_EXECUTE | TOOLS_EXECUTE | LLM_STREAM => {
+                // 这五个钩子能**否决**一次工具调用、能改系统提示、能拒掉一整轮 ——
+                // 只给磁盘来源的插件（插件目录装上 / 设置里启用 / 审批过的
+                // `cordis_promote` 落盘）。会话里 `cordis_define` 的包打不开：否则
+                // 模型能给自己开闸门、能改自己的系统提示 = 自我提权。
+                if !self.inner.disk_backed {
+                    return err(format!(
+                        "host.on({name:?}) is only available to disk plugins (installed from a \
+                         plugins dir, enabled in settings, or persisted by an approved \
+                         cordis_promote); a package defined in this session cannot register it \
+                         (passing source_path does not change that)"
+                    ));
+                }
+                match name.as_str() {
+                    PRE_STEP => self.on_pre_step(handler),
+                    PROMPT_ASSEMBLE => self.on_prompt(handler),
+                    TOOLS_PRE_EXECUTE => self.on_tool_call(handler),
+                    TOOLS_EXECUTE => self.on_tool_result(handler),
+                    _ => self.on_llm_output(handler),
+                }
+            }
             _ => err(format!(
-                "host.on supports {SESSION_EVENT:?}, {STEP_START:?} and {TURN_END:?} (got {name:?}); \
-                 the other waterfalls are not scriptable"
+                "host.on supports {SESSION_EVENT:?}, {STEP_START:?}, {TURN_END:?}, {PRE_STEP:?}, \
+                 {PROMPT_ASSEMBLE:?}, {TOOLS_PRE_EXECUTE:?}, {TOOLS_EXECUTE:?} and \
+                 {LLM_STREAM:?} (got {name:?})"
             )),
         }
     }
@@ -814,6 +848,174 @@ impl Host {
         Ok(())
     }
 
+    /// `agent/pre-step`: refuse the turn before it starts. Return
+    /// `#{ deny: "reason" }` (or a bare string) to refuse it, `()` for no
+    /// opinion. The hook only calls [`PreStep::deny`]; the loop appends the
+    /// reminder on the session that is starting, so a child turn does not
+    /// write it into the parent.
+    fn on_pre_step(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        let script = self.script_hook_raw(handler);
+        let ctx = self.inner.ctx.clone();
+        let d = ctx
+            .clone()
+            .on_waterfall(PRE_STEP, move |step: PreStep, args| {
+                let mut next = args.next::<PreStep>().unwrap_or(step);
+                let mut payload = Map::new();
+                payload.insert("user".into(), next.user.clone().into());
+                payload.insert("identity".into(), next.identity.clone().into());
+                payload.insert("main".into(), next.is_main_session().into());
+                if let Some(v) = script(payload) {
+                    if let Some(reason) = hook_deny(&v) {
+                        next.deny(reason);
+                    }
+                }
+                next
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)?;
+        Ok(())
+    }
+
+    /// `system-prompt/assemble`: return a string to add one section to the
+    /// assembled system prompt. The section lands in a fixed slot
+    /// ([`ORDER_HOOKS`]) under this plugin's own id, so the prompt stays
+    /// byte-stable no matter which plugin mounted first. `()` for no opinion.
+    fn on_prompt(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        let script = self.script_hook_raw(handler);
+        let ctx = self.inner.ctx.clone();
+        let plugin_id = self.inner.plugin_id.clone();
+        let d = ctx
+            .clone()
+            .on_waterfall(PROMPT_ASSEMBLE, move |assembly: PromptAssembly, args| {
+                let mut next = args.next::<PromptAssembly>().unwrap_or(assembly);
+                let mut payload = Map::new();
+                payload.insert("tools".into(), hook_tool_names(&ctx));
+                if let Some(v) = script(payload) {
+                    if let Ok(text) = v.into_string() {
+                        if !text.trim().is_empty() {
+                            next.section(ORDER_HOOKS, &format!("hook:{plugin_id}"), text);
+                        }
+                    }
+                }
+                next
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)?;
+        Ok(())
+    }
+
+    /// `tools/pre-execute`: intercept a tool call before it runs. Return
+    /// `#{ deny: "reason" }` to refuse it, `#{ rewrite: #{ name, arguments } }`
+    /// to redirect it, `()` for no opinion. Deny is monotonic (the first refusal
+    /// wins) and a rewrite after a refusal is ignored — the same rules the
+    /// Rust handlers live under. A redirected call still passes the allowlist,
+    /// the plan gate and the permission gate under its **new** name.
+    fn on_tool_call(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        let script = self.script_hook_raw(handler);
+        let plugin_id = self.inner.plugin_id.clone();
+        let d = self
+            .inner
+            .ctx
+            .on_waterfall(TOOLS_PRE_EXECUTE, move |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                let mut payload = Map::new();
+                payload.insert("called".into(), next.called.clone().into());
+                payload.insert("name".into(), next.name().into());
+                payload.insert("arguments".into(), next.arguments().into());
+                payload.insert("identity".into(), next.identity.clone().into());
+                payload.insert("main".into(), next.is_main_session().into());
+                if let Some(v) = script(payload) {
+                    if let Some(reason) = hook_deny(&v) {
+                        next.deny(reason);
+                    } else if let Some((name, arguments)) = hook_rewrite(&v) {
+                        next.rewrite(name, arguments);
+                    } else {
+                        eprintln!(
+                            "[cordis:{plugin_id}] host.on(tools/pre-execute): handler must return () | \
+                             #{{ deny }} | #{{ rewrite }}"
+                        );
+                    }
+                }
+                next
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)?;
+        Ok(())
+    }
+
+    /// `tools/execute`: post-process a finished tool result. Return a string to
+    /// replace the content the model sees (trim, redact, summarize); `()` for
+    /// no opinion. The result was already executed — this cannot stop it.
+    fn on_tool_result(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        let script = self.script_hook_raw(handler);
+        let plugin_id = self.inner.plugin_id.clone();
+        let d = self
+            .inner
+            .ctx
+            .on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
+                let mut next = args.next::<ToolResult>().unwrap_or(result);
+                let mut payload = Map::new();
+                payload.insert("name".into(), next.name.clone().into());
+                payload.insert("call_id".into(), next.call_id.clone().into());
+                payload.insert("content".into(), next.content.clone().into());
+                payload.insert("is_error".into(), next.is_error.into());
+                if let Some(v) = script(payload) {
+                    if let Ok(text) = v.into_string() {
+                        next.content = text;
+                    } else {
+                        eprintln!(
+                            "[cordis:{plugin_id}] host.on(tools/execute): handler must return a \
+                             string or ()"
+                        );
+                    }
+                }
+                next
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)?;
+        Ok(())
+    }
+
+    /// `llm/stream`: post-process the sampled output. Return a string to
+    /// replace the assistant text; `()` for no opinion. This is the output
+    /// side only — the request (system prompt, history, tool list) is not
+    /// reachable from here.
+    fn on_llm_output(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        let script = self.script_hook_raw(handler);
+        let plugin_id = self.inner.plugin_id.clone();
+        let d = self
+            .inner
+            .ctx
+            .on_waterfall(LLM_STREAM, move |output: LlmOutput, args| {
+                let mut next = args.next::<LlmOutput>().unwrap_or(output);
+                let mut payload = Map::new();
+                payload.insert("text".into(), next.text.clone().into());
+                payload.insert(
+                    "tool_calls".into(),
+                    Dynamic::from_array(
+                        next.tool_calls
+                            .iter()
+                            .map(|c| Dynamic::from(c.name.clone()))
+                            .collect(),
+                    ),
+                );
+                if let Some(v) = script(payload) {
+                    if let Ok(text) = v.into_string() {
+                        next.text = text;
+                    } else {
+                        eprintln!(
+                            "[cordis:{plugin_id}] host.on(llm/stream): handler must return a \
+                             string or ()"
+                        );
+                    }
+                }
+                next
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(d)?;
+        Ok(())
+    }
+
     /// Wrap a script callback as a synchronous `Map -> Option<String>`.
     ///
     /// Waterfalls run inline, so this blocks the turn while the script runs —
@@ -845,6 +1047,32 @@ impl Host {
                     None
                 }
             },
+            Err(e) => {
+                eprintln!("[cordis:{plugin_id}] host.on: {e}");
+                None
+            }
+        }
+    }
+
+    /// Wrap a script callback as a synchronous `Map -> Option<Dynamic>` for the
+    /// hooks that answer with more than a string (`#{ deny }`,
+    /// `#{ rewrite }`). `()` means "no opinion"; a throw is logged and treated
+    /// as no opinion (fail-open), like [`Host::script_hook`].
+    fn script_hook_raw(
+        &self,
+        handler: FnPtr,
+    ) -> impl Fn(Map) -> Option<Dynamic> + Send + Sync + 'static {
+        let engine = self.inner.engine.clone();
+        let ast = self.inner.ast.clone();
+        let plugin_id = self.inner.plugin_id.clone();
+        move |payload: Map| match call_fnptr_raw(
+            &engine,
+            &ast,
+            &handler,
+            Dynamic::from_map(payload),
+        ) {
+            Ok(v) if v.is_unit() => None,
+            Ok(v) => Some(v),
             Err(e) => {
                 eprintln!("[cordis:{plugin_id}] host.on: {e}");
                 None
@@ -1083,6 +1311,48 @@ fn preview(text: &str, max: usize) -> String {
     out
 }
 
+/// A hook's refusal reason: a bare string, or `#{ deny: "reason" }`.
+fn hook_deny(value: &Dynamic) -> Option<String> {
+    if let Ok(text) = value.clone().into_string() {
+        let trimmed = text.trim().to_string();
+        return (!trimmed.is_empty()).then_some(trimmed);
+    }
+    let map = value.clone().try_cast::<Map>()?;
+    let reason = map.get("deny")?.clone().into_string().ok()?;
+    let trimmed = reason.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// A hook's redirect: `#{ rewrite: #{ name, arguments } }`.
+fn hook_rewrite(value: &Dynamic) -> Option<(String, String)> {
+    let map = value.clone().try_cast::<Map>()?;
+    let rewrite = map.get("rewrite")?.clone().try_cast::<Map>()?;
+    let name = rewrite.get("name")?.clone().into_string().ok()?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    let arguments = match rewrite.get("arguments") {
+        Some(raw) => match raw.clone().into_string() {
+            Ok(text) => text,
+            Err(_) => dynamic_to_json(raw).ok()?.to_string(),
+        },
+        None => "{}".to_string(),
+    };
+    Some((name, arguments))
+}
+
+/// The registered tool names, for a prompt hook that renders its own SDK
+/// section. Sorted and deduped so the section stays byte-stable.
+fn hook_tool_names(ctx: &Context) -> Dynamic {
+    let mut names: Vec<String> = ctx
+        .get::<Tools>(TOOLS)
+        .map(|tools| tools.specs().into_iter().map(|spec| spec.name).collect())
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    Dynamic::from_array(names.into_iter().map(Dynamic::from).collect())
+}
+
 fn call_fnptr(engine: &Engine, ast: &AST, fnptr: &FnPtr, arg: Dynamic) -> Result<String, String> {
     Ok(dynamic_to_display(call_fnptr_raw(engine, ast, fnptr, arg)?))
 }
@@ -1304,9 +1574,37 @@ mod tests {
     #[test]
     fn build_rhai_limited_honors_inline_ceiling() {
         let oversized = "x".repeat(MAX_INLINE_SOURCE + 1);
-        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, None) {
+        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, None, false) {
             Err(err) => assert!(err.contains("128KiB"), "{err}"),
             Ok(_) => panic!("expected oversized inline source to fail"),
         }
+    }
+
+    const FLOW_HOOK_SOURCE: &str =
+        r#"#{ inject: [], apply: |host| { host.on("tools/pre-execute", |c| { () }); } }"#;
+
+    /// 五个流程钩子只给**磁盘来源**的包：会话里 define 的包挂上去要报错 ——
+    /// 否则模型能给自己开闸门（拦自己的工具调用）、能改自己的系统提示。
+    #[tokio::test]
+    async fn flow_hooks_are_refused_for_a_session_package() {
+        let ctx = Context::new();
+        let plugin = build_rhai_limited("t", FLOW_HOOK_SOURCE, MAX_INLINE_SOURCE, None, false)
+            .expect("source compiles");
+        let err = ctx
+            .plugin(plugin, ())
+            .unwrap()
+            .wait()
+            .await
+            .expect_err("会话包不该挂上流程钩子");
+        assert!(err.to_string().contains("disk plugins"), "{err}");
+    }
+
+    /// 磁盘来源的包（插件目录装上 / 设置启用 / promote 落盘）挂得上。
+    #[tokio::test]
+    async fn flow_hooks_are_open_for_a_disk_package() {
+        let ctx = Context::new();
+        let plugin = build_rhai_limited("t", FLOW_HOOK_SOURCE, MAX_INLINE_SOURCE, None, true)
+            .expect("source compiles");
+        ctx.plugin(plugin, ()).unwrap().wait().await.unwrap();
     }
 }

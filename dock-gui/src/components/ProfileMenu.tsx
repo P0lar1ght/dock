@@ -3,12 +3,12 @@
 // 去设置的某一页走 App 已有的 `dock:open-settings` 事件，不往侧栏加回调。
 
 import type { ReactNode } from "react";
-import { BookOpen, ChevronRight, CircleHelp, Cpu, ExternalLink, Keyboard, MessageSquareWarning, Settings, User, type LucideIcon } from "lucide-react";
+import { BookOpen, Check, ChevronRight, CircleHelp, Cpu, ExternalLink, Keyboard, MessageSquareWarning, Settings, User, type LucideIcon } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Avatar } from "./Avatar";
 import { Popover } from "./Popover";
 import { displayName, usePrefs } from "../dock/prefs";
-import { store, useApp } from "../dock/store";
+import { focusGateway, store, useApp, useGateways, type GatewayAttention } from "../dock/store";
 import type { SettingsSection } from "./settings";
 
 const REPO = "https://github.com/P0lar1ght/dock";
@@ -48,10 +48,17 @@ function Item({
 
 const Divider = () => <div className="mx-3 my-1 h-px bg-line-soft" />;
 
+function AttentionDot({ attention }: { attention: GatewayAttention | null }) {
+  if (!attention) return null;
+  const color = attention === "error" ? "bg-[#ff3b30]" : attention === "waiting" ? "bg-[#ff9f0a]" : "bg-[#34c759]";
+  return <span className={`size-1.5 shrink-0 rounded-full ${color}`} />;
+}
+
 /** 菜单内容（侧栏底部和紧凑头像入口共用）。 */
 function MenuBody({ close }: { close: () => void }) {
   const p = usePrefs();
   const remote = useApp().remote;
+  const { id, entries } = useGateways();
   const version = store.serverInfo().version;
   const go = (fn: () => void) => () => {
     close();
@@ -75,6 +82,27 @@ function MenuBody({ close }: { close: () => void }) {
         <ChevronRight size={14} className="shrink-0 text-ink-4" />
       </button>
       <Divider />
+      {entries.map((e) => (
+        <button
+          key={e.id}
+          type="button"
+          role="menuitem"
+          onClick={go(() => focusGateway(e.id === "local" ? null : e.id))}
+          className="motion-colors mx-1 flex h-8 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-ink hover:bg-hover"
+        >
+          <AttentionDot attention={e.attention} />
+          <span className="min-w-0 flex-1 truncate">{e.id === "local" ? "本机" : e.name}</span>
+          {e.id === id && <Check size={13} className="shrink-0 text-[#34c759]" />}
+        </button>
+      ))}
+      <button
+        type="button"
+        onClick={go(() => openSettings("gateway"))}
+        className="motion-colors mx-1 mb-1 flex h-8 items-center rounded-md px-2.5 text-left text-[12.5px] text-ink-3 hover:bg-hover"
+      >
+        管理连接
+      </button>
+      <Divider />
       <Item icon={User} label="个性化" onClick={go(() => openSettings("personalization"))} />
       <Item icon={Settings} label="设置" hint="⌘," onClick={go(() => openSettings("general"))} />
       <Item icon={Cpu} label="模型与密钥" onClick={go(() => openSettings("models"))} />
@@ -89,6 +117,8 @@ function MenuBody({ close }: { close: () => void }) {
 /** 展开侧栏底部：头像 + 名字，整行可点。 */
 export function ProfileButton() {
   const name = displayName(usePrefs());
+  const { id, entries } = useGateways();
+  const background = entries.find((e) => e.id !== id && e.attention)?.attention ?? null;
   return (
     <Popover
       title="个人资料与设置"
@@ -101,6 +131,7 @@ export function ProfileButton() {
         <>
           <Avatar size={22} />
           <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-ink">{name}</span>
+          <AttentionDot attention={background} />
         </>
       }
     >

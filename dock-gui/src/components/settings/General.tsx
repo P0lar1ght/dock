@@ -2,7 +2,7 @@
 // 只有数据目录是从 Dock 读的。
 
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useApp } from "../../dock/store";
+import { presetKey, useApp, useGatewayId } from "../../dock/store";
 import { prefs, usePrefs, type Prefs } from "../../dock/prefs";
 import { configStatus } from "../../dock/settingsApi";
 import { pickDirectory } from "../pickDirectory";
@@ -15,7 +15,8 @@ export function GeneralPane() {
   const p = usePrefs();
   const app = useApp();
   const status = useLoad(configStatus);
-  const saved = localStorage.getItem(NEW_CHAT_PRESET_KEY);
+  const presetStoreKey = presetKey(useGatewayId());
+  const saved = localStorage.getItem(presetStoreKey);
   const preset = saved && app.presets.some((x) => x.id === saved && x.available) ? saved : (app.defaultPreset ?? "");
   const set = <K extends keyof Prefs>(k: K, v: Prefs[K]) => {
     prefs.set(k, v);
@@ -32,7 +33,7 @@ export function GeneralPane() {
               value={preset}
               options={app.presets.filter((x) => x.available).map((x) => ({ value: x.id, label: x.label }))}
               onChange={(id) => {
-                localStorage.setItem(NEW_CHAT_PRESET_KEY, id);
+                localStorage.setItem(presetStoreKey, id);
                 window.dispatchEvent(new CustomEvent("dock:new-chat-preset", { detail: id }));
                 flashSaved();
               }}

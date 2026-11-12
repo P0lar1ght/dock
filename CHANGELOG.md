@@ -8,7 +8,25 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **`llm/stream` 的改写写回会话**：钩子换掉的助手文本会盖掉已经流进会话的原文，界面和下一轮历史看到的是改写后的那份。
+- **`agent/pre-step` 的拒绝理由写在开轮的那一页**：子代理或分页被拒时，不再把「这一轮没有开始」写进主会话。
+- **桌面操作只认受信连接**：配对来的网页仍可申请看画面；`desktop/view/windows`、`pin`、`input` 回 `forbidden`。
+- **插件的 `tools/execute` 钩子在完整应用树里不生效**：`tool-lsp` 挂在 `tools/execute` 上的监听没有把控制权交给下一环，链在它那儿断掉，排在它后面的监听者（包括插件脚本）全都拿不到这次结果 —— 插件想截断 / 脱敏工具输出，界面上看着像没挂上。已改成往下传，并补了回归测试（完整应用树里，磁盘插件的 `tools/execute` 钩子仍能替换结果）。
+
 ### 新增
+
+- **桌面画面可以操作**：`desktopControl` 能力，以及 `desktop/view/windows`、`pin`、`input`。钉住一个窗口后，点击、滚动、打字打到那一帧的像素上；预览是只显示的 JPEG，不替换 agent 的元素快照。操作只认桌面 GUI 和设备令牌。
+- **本机和多台远程可以同时开着**：`remotes.json` 的 `active` 迁成 `opened` 与 `foreground`（`null` 是本机）。切换只换前台连接，不关掉本机 Dock，也不重载页面。
+- **插件能拦流程了**：磁盘来源的 Cordis 插件（插件目录装上 / 设置里启用 / 审批过的 `cordis_promote` 落盘）可以在 `host.on` 上挂五个新钩子，把 agent loop 的关键位点接出来：
+  - `agent/pre-step`：拒绝一整轮，理由写进会话（模型看得见为什么没跑）；
+  - `system-prompt/assemble`：往系统提示加一段（固定槽位、按插件 id 排序 → 提示词字节稳定，前缀缓存不作废）；
+  - `tools/pre-execute`：在权限门**之前**拒绝一次工具调用，或改道到别的工具（拒绝是单调的，先拒的赢；改道后按新名字重过允许名单、计划门、权限门，改道绕不过门）；
+  - `tools/execute`：事后替换模型看到的结果内容（压缩、脱敏）；
+  - `llm/stream`：改写采样输出（只能改输出，改不了请求 —— 要改请求走 `system-prompt/assemble`）。
+
+  原来的三个事件（`session/event`、`agent/step-start`、`agent/turn-end`）任何插件都能挂，行为不变。**会话里 `cordis_define` 的包打不开这五个**：否则模型能给自己开闸门、能改自己的系统提示，那是自我提权。详见内置技能 `cordis-plugin-development` 的 `references/hooks.md`。
 
 - **桌面 GUI 进仓库**：`dock-gui/`（Tauri 2 + React）的核心代码随源码提交（设计稿、文档不进仓库），见 `dock-gui/README.md`。独立工程（`src-tauri/` 自带 `[workspace]`，不进根 workspace），启动时拉起 `dock serve` 走 dock.1。还没签名，不带自动更新。供应商 / 模型目录不随应用打包：设置页第一次打开时经 Dock 从 models.dev 拉一份缓存起来，离线拉不到就是空目录，照样能手填自定义供应商。
 

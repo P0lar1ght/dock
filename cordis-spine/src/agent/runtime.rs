@@ -78,6 +78,11 @@ async fn grok_turn(ctx: &Context, prompt: String) -> Result<TurnOutcome> {
         ctx.waterfall(PRE_STEP, step, move || seed)
     };
     if !decision.enter {
+        if let Some(reason) = decision.denial() {
+            sessions.append(LogEvent::SystemReminder(format!(
+                "这一轮没有开始：{reason}"
+            )));
+        }
         return Err(Error::PreStepRejected);
     }
     sessions.append(LogEvent::PreStep);

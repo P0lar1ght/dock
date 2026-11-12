@@ -78,10 +78,11 @@ enabled = true
 
 ## 实时画面（网关 `desktop/view/*`）
 
-- 客户端（GUI 的桌面面板）可以看 agent 正在操作的窗口，约 4 帧/秒。
-- 网关以会话的身份调 `get_window_state { include_accessibility_tree: false }`，只截图、不遍历 UI 树。
-- 不进对话流、不过权限门（只读）；agent 没碰过窗口时看最前面的窗口。
+- 客户端（GUI 的桌面面板）可以看 agent 正在操作的窗口。没钉住时，agent 最近动过桌面约 4 帧/秒，否则约 1 秒一帧；没碰过窗口就看最前面的窗口。
+- 钉住（能力 `desktopControl`）：`desktop/view/open` 或 `desktop/view/pin` 带 `pid` + `windowId`。窗口列表是 `desktop/view/windows`。钉住期间只截这个窗口，不追前台：打开时一张、agent 对这个窗口动手时一张、用户操作之后一张。
+- 操作（同一能力）：`desktop/view/input` 把点击、拖动、滚动、打字、按键送到最近一帧的那个窗口。坐标是这一帧的像素。事件带上这一帧的 `pid`、`windowId`、宽高；和当前帧对不上就回 `not_ready`，不点。以这页的身份调 cua-driver，不进对话流、不过 agent 的权限门——这是桌面 GUI 或设备令牌上的用户自己点的。配对来的网页调 `windows` / `pin` / `input` 回 `forbidden`。agent 自己的 `mcp_cua-driver__*` 仍走原来的权限门。
+- 网关以会话的身份调 `get_window_state`。预览是 `display_only` 的 JPEG（不遍历 UI 树，也不换掉 agent 的元素快照）；用户操作前另补一张同尺寸 PNG 来定位。`capture_id` 只附在单击上：这一版驱动的双击、右键、拖动、滚动不认这个参数，带上会整次拒绝。后台点不到时，只把这一下改成前台重试一次。每个视图用自己的会话名 `dock-view-<viewId>`；驱动说这个名字已经结束时再加序号，不把拒绝当成一句笼统的「截图失败」。
 - agent 光标：每次桌面动作后问 `get_agent_cursor_state`，画在实时画面上。
   - 窗口截图里没有 cua-driver 的光标浮层，所以客户端自己画。
-- 截不到时说原因（没有窗口 / 截图失败），不一直显示「正在连接」。
+- 截不到时说原因（没有窗口 / 截图失败），不一直显示「正在连接」。钉住的窗口截不到也不改去看前台。
 - 协议细节见 `cordis-gateway/README.md` 的「桌面画面」。

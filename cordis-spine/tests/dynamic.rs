@@ -3466,3 +3466,330 @@ async fn bundled_skill_examples_define_run_and_work() {
     let out = exec(&root, "gh_issue", r#"{"repo":"o/r","n":1}"#).await;
     assert!(out.starts_with("未配置 GitHub Token"), "{out}");
 }
+
+// ── 磁盘插件的五个流程钩子 ───────────────────────────────────────────────
+
+/// 装载一个磁盘 Rhai 插件（`plugin.toml` + `source.rhai`）。返回 TempDir，
+/// 调用方要留着它：磁盘插件每次运行都重读源文件。
+async fn boot_disk_rhai(root: &Context, id: &str, source: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_dir = dir.path().join(id);
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        format!("name = \"{id}\"\npurpose = \"hooks\"\nfactory = \"rhai\"\nenabled = true\n"),
+    )
+    .unwrap();
+    std::fs::write(plugin_dir.join("source.rhai"), source).unwrap();
+    let runner = root
+        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap();
+    runner
+        .boot_disk_from(&[(PersistScope::Project, dir.path().to_path_buf())])
+        .await;
+    dir
+}
+
+const RHAI_DISK_DENY: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("tools/pre-execute", |c| {
+            if c.name == "bash" { #{ deny: "脚本不让跑 shell" } } else { () }
+        });
+    }
+}"#;
+
+const RHAI_DISK_REWRITE: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("tools/pre-execute", |c| {
+            if c.name == "bash" {
+                #{ rewrite: #{ name: "cordis_inspect", arguments: #{ what: "services" } } }
+            } else { () }
+        });
+    }
+}"#;
+
+const RHAI_DISK_RESULT: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("tools/execute", |r| {
+            if r.name == "cordis_inspect" { "REPLACED" } else { () }
+        });
+    }
+}"#;
+
+/// 无条件替换结果内容：用来验证钩子到底有没有被调用（不挑工具名）。
+const RHAI_DISK_RESULT_ANY: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("tools/execute", |r| { "REPLACED" });
+    }
+}"#;
+
+const RHAI_DISK_PRE_STEP: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("agent/pre-step", |s| { #{ deny: "脚本拒了这一轮" } });
+    }
+}"#;
+
+const RHAI_DISK_PROMPT: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("system-prompt/assemble", |p| { "HOOK-SECTION" });
+    }
+}"#;
+
+const RHAI_DISK_LLM: &str = r#"#{
+    inject: [],
+    apply: |host| {
+        host.on("llm/stream", |o| { "REWRITTEN" });
+    }
+}"#;
+
+/// `tools/pre-execute` 的脚本钩子能**否决**一次调用：拒绝在权限门之前，
+/// 拒绝的理由原样回到模型。
+#[tokio::test]
+async fn disk_rhai_plugin_can_refuse_a_tool_call() {
+    let root = boot().await;
+    let _dir = boot_disk_rhai(&root, "hookdeny", RHAI_DISK_DENY).await;
+    let out = exec(&root, "bash", r#"{"command":"echo hi"}"#).await;
+    assert!(out.contains("脚本不让跑 shell"), "{out}");
+}
+
+/// 同一个钩子还能**改道**：模型要 bash，实际跑的是 `cordis_inspect`。改道之后
+/// 仍按新名字过允许名单与权限门。
+#[tokio::test]
+async fn disk_rhai_plugin_can_redirect_a_tool_call() {
+    let root = boot().await;
+    let _dir = boot_disk_rhai(&root, "hookrw", RHAI_DISK_REWRITE).await;
+    let out = exec(&root, "bash", r#"{"command":"echo ZQXJ_MARKER"}"#).await;
+    assert!(!out.contains("ZQXJ_MARKER"), "改道之后不该真跑 bash：{out}");
+    assert!(out.contains("services"), "改道后应真的换了工具：{out}");
+}
+
+/// `tools/execute` 的钩子能改写模型看到的结果内容。
+#[tokio::test]
+async fn disk_rhai_plugin_can_rewrite_a_tool_result() {
+    let root = boot().await;
+    let _dir = boot_disk_rhai(&root, "hookres", RHAI_DISK_RESULT).await;
+    let out = exec(&root, "cordis_inspect", r#"{"what":"services"}"#).await;
+    assert_eq!(out, "REPLACED");
+}
+
+/// `agent/pre-step` 的钩子能拒掉一整轮，拒绝理由进会话（模型看得见）。
+#[tokio::test]
+async fn disk_rhai_plugin_can_refuse_a_turn() {
+    let root = boot_with_loop().await;
+    let _dir = boot_disk_rhai(&root, "hookpre", RHAI_DISK_PRE_STEP).await;
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await;
+    assert!(out.is_err(), "这一轮应当被脚本拒掉：{out:?}");
+    assert!(
+        reminders(&root)
+            .iter()
+            .any(|t| t.contains("这一轮没有开始：脚本拒了这一轮")),
+        "{:?}",
+        reminders(&root)
+    );
+}
+
+/// 回归：子代理这一轮被拒时，理由写在子会话里，不进父会话。
+#[tokio::test]
+async fn a_child_turn_refusal_stays_out_of_the_parent_session() {
+    let root = boot_with_loop().await;
+    let _dir = boot_disk_rhai(&root, "hookpre2", RHAI_DISK_PRE_STEP).await;
+    let child = root.isolate("sessions");
+    child
+        .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+        .unwrap();
+    let err = LoopHandle::new(child.clone(), std::sync::Arc::new(cordis_spine::GrokStep))
+        .run("子任务")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, cordis_spine::Error::PreStepRejected),
+        "{err:?}"
+    );
+    let parent = reminders(&root);
+    assert!(
+        parent.iter().all(|t| !t.contains("这一轮没有开始")),
+        "父会话不该出现拒绝理由：{parent:?}"
+    );
+    let child_notes: Vec<String> = child
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::SystemReminder(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        child_notes
+            .iter()
+            .any(|t| t.contains("这一轮没有开始：脚本拒了这一轮")),
+        "{child_notes:?}"
+    );
+}
+
+/// `system-prompt/assemble` 的钩子能往系统提示里加一段（固定槽位，字节稳定）。
+#[tokio::test]
+async fn disk_rhai_plugin_can_add_a_system_prompt_section() {
+    let root = boot_with_loop().await;
+    let _dir = boot_disk_rhai(&root, "hookprompt", RHAI_DISK_PROMPT).await;
+    let _ = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    let prompt = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .find_map(|e| match e {
+            LogEvent::Prompt(text) => Some(text.clone()),
+            _ => None,
+        })
+        .expect("这一轮记下了系统提示");
+    assert!(prompt.contains("HOOK-SECTION"), "{prompt}");
+}
+
+/// `llm/stream` 的钩子能改写采样的输出文本（只能改输出，改不了请求）。
+#[tokio::test]
+async fn disk_rhai_plugin_can_rewrite_the_llm_output() {
+    let root = boot_with_loop().await;
+    let _dir = boot_disk_rhai(&root, "hookllm", RHAI_DISK_LLM).await;
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    assert!(
+        matches!(out, TurnOutcome::Text(ref text) if text == "REWRITTEN"),
+        "{out:?}"
+    );
+    let streamed: Vec<String> = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::LlmStream(output) => Some(output.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        streamed.iter().any(|t| t == "REWRITTEN"),
+        "改写后的文本要落进会话，不能只改 TurnOutcome：{streamed:?}"
+    );
+    assert!(
+        streamed.iter().all(|t| t == "REWRITTEN" || t.is_empty()),
+        "会话里不该留着改写前的原文：{streamed:?}"
+    );
+}
+
+/// 回归：`tools/execute` 上**别的监听者先注册**时，脚本钩子的改写不能被吞掉。
+/// 真实 dock 里 `turn-changes` 就挂在同一个事件上（它先注册，脚本后注册）。
+#[tokio::test]
+async fn disk_rhai_plugin_result_hook_survives_another_listener() {
+    let root = boot().await;
+    root.plugin(cordis_spine::turn_changes(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let _dir = boot_disk_rhai(&root, "hookres2", RHAI_DISK_RESULT).await;
+    let out = exec(&root, "cordis_inspect", r#"{"what":"services"}"#).await;
+    assert_eq!(out, "REPLACED");
+}
+
+/// 复现真实 dock 的环境：完整应用树（`install_app`）里，磁盘插件的
+/// `tools/execute` 钩子还能不能改写模型看到的结果。真实 dock 上它不生效。
+#[tokio::test]
+async fn disk_rhai_result_hook_works_in_the_full_app_tree() {
+    // 隔离 `$DOCK_HOME`：不把本机的用户插件带进这棵树。
+    let _env = cordis_base::test_env::scoped();
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("DOCK_HOME", home.path());
+    let root = Context::new();
+    cordis_spine::install_app(&root).await.unwrap();
+    root.get::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Allow);
+    let _dir = boot_disk_rhai(&root, "hookres3", RHAI_DISK_RESULT_ANY).await;
+    let out = exec(&root, "bash", r#"{"command":"echo hi"}"#).await;
+    assert_eq!(out, "REPLACED");
+}
+
+/// 权限分层：会话里 `cordis_define` 的包**不能**挂这五个钩子 —— 否则模型
+/// 能给自己开闸门、能改自己的系统提示。
+#[tokio::test]
+async fn a_session_package_cannot_register_the_flow_hooks() {
+    let root = boot().await;
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "hooks"},
+            "name": "Hook",
+            "purpose": "hooks",
+            "factory": "rhai",
+            "source": RHAI_DISK_DENY,
+        }),
+    )
+    .await;
+    assert!(defined.contains("pkg-1"), "{defined}");
+    let ran = exec_json(
+        &root,
+        "cordis_run",
+        json!({"pluginId": "hooks-1", "packageId": "pkg-1", "mode": "run"}),
+    )
+    .await;
+    assert!(!ran.contains("\"status\":\"running\""), "{ran}");
+    assert!(ran.contains("disk plugins"), "{ran}");
+}
+
+/// 回归：会话里 define 的包**带 `source_path`** 也拿不到那五个钩子。
+/// 判据必须是「这个包是不是从磁盘加载的」，不是「它有没有传 `source_path`」——
+/// 否则模型在会话里 define + source_path 就能给自己开闸门（自我提权）。
+#[tokio::test]
+async fn a_session_package_with_source_path_cannot_register_the_flow_hooks() {
+    let root = boot().await;
+    // 写到临时的用户插件根，不落在仓库的 `.dock/plugins/`（断言失败也会留下）。
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("DOCK_HOME", home.path());
+    let plugin = home.path().join("plugins").join("hooksrc");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let path = plugin.join("source.rhai");
+    std::fs::write(&path, RHAI_DISK_DENY).unwrap();
+    let defined = exec_json(
+        &root,
+        "cordis_define",
+        json!({
+            "plugin": {"kind": "new", "idPrefix": "hooks"},
+            "name": "Hook",
+            "purpose": "hooks",
+            "factory": "rhai",
+            "source_path": path.to_string_lossy(),
+        }),
+    )
+    .await;
+    assert!(defined.contains("pkg-1"), "{defined}");
+    let ran = exec_json(
+        &root,
+        "cordis_run",
+        json!({"pluginId": "hooks-1", "packageId": "pkg-1", "mode": "run"}),
+    )
+    .await;
+    assert!(!ran.contains("\"status\":\"running\""), "{ran}");
+    assert!(ran.contains("disk plugins"), "{ran}");
+}

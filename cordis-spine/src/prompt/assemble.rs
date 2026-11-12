@@ -19,6 +19,9 @@ pub const ORDER_CORDIS: i32 = 10;
 pub const ORDER_PERSONA: i32 = 20;
 pub const ORDER_WORKFLOWS: i32 = 40;
 pub const ORDER_SKILLS: i32 = 41;
+/// 磁盘插件的 `host.on("system-prompt/assemble")` 段。排在技能之后：技能是
+/// 宿主给的清单，这一段是插件自己加的上下文，晚一步。
+pub const ORDER_HOOKS: i32 = 45;
 
 /// Structured payload carried by the `system-prompt/assemble` waterfall.
 ///
@@ -138,10 +141,13 @@ impl PromptAssembly {
 
     /// Base (or replacement) followed by each section in order, joined by a
     /// blank line.
+    ///
+    /// 同 `order` 的段按 `id` 排：多个插件各挂一段时，顺序由 id 决定，不由
+    /// 插件挂载先后决定 —— 提示词要字节稳定（前缀缓存）。
     pub fn render(&self) -> String {
         let mut out = self.replace.clone().unwrap_or_else(|| self.base.clone());
         let mut secs: Vec<&PromptSection> = self.sections.iter().collect();
-        secs.sort_by_key(|s| s.order);
+        secs.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
         for s in secs {
             out.push_str("\n\n");
             out.push_str(&s.body);

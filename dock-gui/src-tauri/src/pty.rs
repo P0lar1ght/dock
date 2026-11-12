@@ -51,7 +51,14 @@ fn resolve_cwd(cwd: &str) -> PathBuf {
 }
 
 impl Terminals {
-    pub fn spawn(&self, owner: &str, cwd: &str, cols: u16, rows: u16, out: Channel) -> Result<u32, String> {
+    pub fn spawn(
+        &self,
+        owner: &str,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        out: Channel,
+    ) -> Result<u32, String> {
         let pair = native_pty_system()
             .openpty(size(cols, rows))
             .map_err(|e| format!("打开终端失败：{e}"))?;

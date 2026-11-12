@@ -71,6 +71,7 @@
 ## 状态层
 
 - `src/dock/store.ts`：`DockStore` 在 React 外。
+- 本机加每台打开的远程各一份 `DockClient` / `DockStore`（`src/dock/gateways.ts`）。`store` / `dock` 是前台代理。切走不关套接字、不拆别的隧道、不重载页面；本机 Dock 跟 GUI 同寿命。
 - 组件用 `useApp` / `useThread(id)` / `useEnv(id)` 订阅。
 - 流式增量只重渲染订阅那个会话的组件。
 - 会话级集合（running / waiting）只在翻转时换新。
@@ -147,8 +148,9 @@
 - 认工具项要用 toolCall.ts 的 calledTool：MCP 工具平时经 use_tool 调，本名在 tool_name 里。
 - 写文件的命令只有 save_text_file（Rust 侧弹存储对话框）：别加让前端指定路径的写盘命令。
 - 真机测试：cua-driver 后台点击走 AX，不产生 pointer 事件；点浏览器画面要 delivery_mode foreground。
-- 桌面面板实时画面走 desktop/view/*（网关经 cua-driver 只截图，约 4 帧/秒）；老网关只有 agent 截的图。
+- 桌面面板实时画面走 desktop/view/*（网关经 cua-driver 只截图）；老网关只有 agent 截的图。
 - 实时画面看 agent 最近操作的窗口，没有就看最前面的窗口；点击圈按 agent 截图的 size= 换算。
+- 网关有 desktopControl 时：desktop/view/windows 列窗口，pin 钉住（空闲不追前台），input 把点击、滚动、打字送回那一帧的窗口。打字走画面下的输入条，按上次点击的位置送出。画面铺满面板。agent 在跑时先接手。
 - 浏览器面板视口跟着面板走（browser/view/resize，拖分隔线时等松手）；空闲直接可操作，agent 跑时要「接手」。
 - 浏览器面板没标签页时地址栏能开页（browser/view/open 带 url，经浏览器 MCP，和 agent 共用）。
 

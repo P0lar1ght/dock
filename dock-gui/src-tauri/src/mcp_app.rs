@@ -117,9 +117,14 @@ pub fn protocol<R: Runtime>(
     request: Request<Vec<u8>>,
 ) -> Response<Cow<'static, [u8]>> {
     let key = request_key(request.uri());
-    let found = ctx.app_handle().state::<AppDocs>().docs.lock().unwrap().iter().find_map(|d| {
-        (d.key == key).then(|| (d.html.clone(), d.csp.clone()))
-    });
+    let found = ctx
+        .app_handle()
+        .state::<AppDocs>()
+        .docs
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|d| (d.key == key).then(|| (d.html.clone(), d.csp.clone())));
     match found {
         Some((html, csp)) => Response::builder()
             .status(StatusCode::OK)
@@ -160,7 +165,9 @@ mod tests {
     fn request_keys_cover_both_url_forms() {
         let mac: tauri::http::Uri = "mcpapp://board-12345678/abc".parse().unwrap();
         assert_eq!(request_key(&mac), "board-12345678/abc");
-        let win: tauri::http::Uri = "http://mcpapp.localhost/board-12345678/abc".parse().unwrap();
+        let win: tauri::http::Uri = "http://mcpapp.localhost/board-12345678/abc"
+            .parse()
+            .unwrap();
         assert_eq!(request_key(&win), "board-12345678/abc");
     }
 }

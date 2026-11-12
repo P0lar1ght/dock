@@ -744,14 +744,12 @@ pub struct PromptRequest {
 }
 
 /// `agent/pre-step` payload. Runs once per user prompt, before the first
-/// sample. Handlers may veto the turn by returning `enter: false`.
+/// sample. Handlers veto with [`PreStep::deny`]; the loop appends the reason
+/// on the session that is actually starting, not the one the plugin registered on.
 ///
-/// Unlike [`StepStart`] / [`TurnEnd`], pre-step handlers append their reminders
-/// themselves — and the `Sessions` they can reach is the one on the context
-/// they registered on, i.e. the **main** session. A subagent turn fires this
-/// waterfall too, so anything that appends to the session, consumes one-shot
-/// state, or advances the user's own state must check [`PreStep::identity`]
-/// first or it will do it to the parent.
+/// A subagent or tab turn fires this waterfall too. Handlers that consume
+/// one-shot state or touch the user's own session must check [`PreStep::identity`]
+/// first, or they will do it to the parent.
 #[derive(Clone, Debug)]
 pub struct PreStep {
     pub user: String,
@@ -759,6 +757,8 @@ pub struct PreStep {
     /// `Sessions::identity()` of the turn starting — see [`TurnEnd::identity`]
     /// for why it rides the payload.
     pub identity: String,
+    /// First refusal. The loop writes it; handlers must not append it themselves.
+    denial: Option<String>,
 }
 
 impl PreStep {
@@ -767,7 +767,26 @@ impl PreStep {
             user: user.into(),
             enter,
             identity: identity.into(),
+            denial: None,
         }
+    }
+
+    /// Refuse the turn. The first reason wins; a later handler cannot clear it.
+    pub fn deny(&mut self, reason: impl Into<String>) {
+        self.enter = false;
+        if self.denial.is_some() {
+            return;
+        }
+        let reason = reason.into();
+        let reason = reason.trim();
+        if !reason.is_empty() {
+            self.denial = Some(reason.to_string());
+        }
+    }
+
+    /// The reason from the first [`Self::deny`], if any.
+    pub fn denial(&self) -> Option<&str> {
+        self.denial.as_deref()
     }
 
     /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.

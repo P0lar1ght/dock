@@ -92,9 +92,9 @@ async fn pre_step_can_reject() {
     isolated_home();
     let root = Context::new();
     install_fakes(&root).await.unwrap();
-    root.on_waterfall(PRE_STEP, |step: PreStep, _| PreStep {
-        enter: false,
-        ..step
+    root.on_waterfall(PRE_STEP, |mut step: PreStep, _| {
+        step.deny("nope");
+        step
     })
     .unwrap();
     root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();

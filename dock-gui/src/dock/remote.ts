@@ -1,6 +1,6 @@
 // 远程 Dock 的连接名单（Tauri 侧 remote.rs 管；令牌只在钥匙串里，这里拿不到）。
-// `active` 空 = 本机 Dock。换连接后 Tauri 发 `dock://connection`，所有窗口整页重载。
-// 两种连法：直连 `url`，或 `ssh`——GUI 自己开 SSH 隧道（tunnel.rs），远端没在跑时可经 SSH 启动。
+// 本机 Dock 跟 GUI 同寿命。远程可以同时打开多条：`opened` 是打开着的，`foreground` 空 = 主界面在看本机。
+// 切换只换主界面看哪一台，不关进程、不重载页面。两种连法：直连 `url`，或 `ssh`（每条自己的隧道）。
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -24,7 +24,10 @@ export interface Remote {
 }
 
 export interface Remotes {
-  active: string | null;
+  /** 打开着的远程连接。本机不在这里。 */
+  opened: string[];
+  /** 主界面正在看的远程；空 = 本机。 */
+  foreground: string | null;
   remotes: Remote[];
 }
 
@@ -49,8 +52,14 @@ export const remoteSave = (r: { id?: string; name: string; url: string; ssh?: Ss
 
 export const remoteDelete = (id: string) => invoke<void>("remote_delete", { id });
 
-/** 换当前连接（`null` = 本机）。成功后各窗口会收到 `dock://connection` 重载。 */
-export const connectionUse = (id: string | null) => invoke<void>("connection_use", { id });
+/** 打开一条远程连接（记下来，隧道在这条连接自己要凭据时才开）。 */
+export const gatewayOpen = (id: string) => invoke<void>("gateway_open", { id });
+
+/** 关掉一条远程连接的套接字和隧道。远端的 dock serve 继续跑。本机关不掉。 */
+export const gatewayClose = (id: string) => invoke<void>("gateway_close", { id });
+
+/** 主界面改看哪一台（`null` = 本机）。不碰进程和隧道。 */
+export const gatewayFocus = (id: string | null) => invoke<void>("gateway_focus", { id });
 
 interface Conn {
   ws: string;

@@ -106,9 +106,12 @@ Requires file_path + line + character for position-based operations. line/charac
         ctx.provide(LSP, LspHub::default())?;
         let _ = ctx.on_waterfall(TOOLS_EXECUTE, {
             let ctx = ctx.clone();
-            move |result: ToolResult, _| {
+            move |result: ToolResult, args| {
+                // 编辑通知看工具自己的结果。后面的钩子可能改掉首行，路径就认不出来了。
                 notify_edit_if_needed(&ctx, &result);
-                result
+                // 链必须往下传：不调 `args.next()` 会掐断后面的监听者（脚本钩子
+                // 排在它后面就再也拿不到这次结果）。
+                args.next::<ToolResult>().unwrap_or(result)
             }
         })?;
         let tools = ctx.require::<Tools>(TOOLS)?;

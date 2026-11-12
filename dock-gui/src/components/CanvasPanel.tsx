@@ -28,7 +28,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { dock } from "../dock/client";
-import { store, useApp, useCanvas, useThread } from "../dock/store";
+import { currentStore, store, useApp, useCanvas, useThread } from "../dock/store";
 import type { SessionSummary } from "../model";
 import { IconButton } from "./chrome";
 import { Popover } from "./Popover";
@@ -167,8 +167,9 @@ export function CanvasPanel({
 
   const key = sessionId && currentId ? `${sessionId}#${currentId}` : null;
   useEffect(() => {
-    store.setCanvasShown(key);
-    return () => store.setCanvasShown(null);
+    const owner = currentStore();
+    owner.setCanvasShown(key);
+    return () => owner.setCanvasShown(null);
   }, [key]);
 
   const shown = loaded && loaded.meta.id === currentId ? loaded : null;

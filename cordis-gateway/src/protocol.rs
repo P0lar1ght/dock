@@ -41,6 +41,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `desktop/view/cursor` / `desktop/view/status`：agent 光标（画在实时画面上）和画面状态
     // （没有窗口、截图失败）。
     ("desktopCursor", true),
+    // `desktop/view/windows` / `pin` / `input`：钉住一个窗口，并把点击、滚动、打字送回去。
+    // 只认受信连接。没这个能力的网关只能看画面。
+    ("desktopControl", true),
     // `fs/list` / `fs/read` / `fs/find`：只读看会话工作区里的文件（文件面板）。
     ("workspaceFiles", true),
     // `fs/read { raw: true, offset?, length? }` → `kind:"bytes"`：分块原样读字节（表格 / 文档预览）。
@@ -309,9 +312,13 @@ pub const BROWSER_VIEW_TABS: &str = "browser/view/tabs";
 pub const BROWSER_VIEW_CLOSED: &str = "browser/view/closed";
 
 /// 桌面（CUA）面板的实时画面：agent 正在操作的窗口，经 cua-driver 只截图。
+/// `windows` / `pin` / `input` 能钉住一个窗口并操作它（能力 `desktopControl`）。
 pub const DESKTOP_VIEW_OPEN: &str = "desktop/view/open";
 pub const DESKTOP_VIEW_CLOSE: &str = "desktop/view/close";
-/// 推送：一帧画面（base64 PNG + 窗口信息 + `source`：`agent` / `front`）。
+pub const DESKTOP_VIEW_WINDOWS: &str = "desktop/view/windows";
+pub const DESKTOP_VIEW_PIN: &str = "desktop/view/pin";
+pub const DESKTOP_VIEW_INPUT: &str = "desktop/view/input";
+/// 推送：一帧画面（base64 PNG + 窗口信息 + `source`：`agent` / `front` / `pin`）。
 pub const DESKTOP_VIEW_FRAME: &str = "desktop/view/frame";
 /// 推送：视图结束了（`reason`：`driver_unavailable` / `replaced`）。
 pub const DESKTOP_VIEW_CLOSED: &str = "desktop/view/closed";

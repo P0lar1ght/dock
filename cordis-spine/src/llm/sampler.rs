@@ -139,11 +139,15 @@ impl Llm {
             }),
         );
         let output = SAMPLE_CTX.scope(ctx.clone(), sample).await;
+        // 先改写再收尾。流式 delta 已经把原文写进最后一条 `LlmStream`；
+        // `finish_llm` 用改写后的文本盖掉它，并再推一条更新。
+        let output = self
+            .ctx
+            .waterfall(LLM_STREAM, output.clone(), move || output);
         if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
             sessions.finish_llm(&output);
         }
-        self.ctx
-            .waterfall(LLM_STREAM, output.clone(), move || output)
+        output
     }
 }
 

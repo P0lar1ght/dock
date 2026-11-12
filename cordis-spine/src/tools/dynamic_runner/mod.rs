@@ -428,13 +428,13 @@ impl DynamicRunner {
             .ok_or_else(|| format!("factory {} is no longer registered", plan.factory))?;
         let built = if plan.factory == RHAI_FACTORY {
             let (source, limit) = resolve_plan_source(&plan)?;
-            // 磁盘插件的目录：web 面板的 HTML 只能放在这里面。
+            // 插件目录：web 面板的 HTML 只能放在这里面。
             let plugin_dir = plan
                 .source_path
                 .as_ref()
                 .and_then(|p| p.canonicalize().ok())
                 .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-            rhai_host::build_rhai_limited(plugin_id, &source, limit, plugin_dir)?
+            rhai_host::build_rhai_limited(plugin_id, &source, limit, plugin_dir, plan.disk_backed)?
         } else {
             info.build(plugin_id, plan.contrib.as_ref())
         };
@@ -789,6 +789,11 @@ struct Plan {
     source_path: Option<std::path::PathBuf>,
     /// `source_path` 的授权边界（磁盘插件是它自己的目录；`None` 走全局 roots）。
     source_dir: Option<std::path::PathBuf>,
+    /// 这个包是不是**从磁盘来的**（插件目录装上 / 设置里启用 / promote 落盘）。
+    /// 只有这样的包能挂那五个能否决流程的钩子 —— 判据是来源，不是它有没有
+    /// 传 `source_path`：会话里 define 的包也能带 `source_path`，拿它当判据
+    /// 等于让模型给自己开闸门。
+    disk_backed: bool,
     inject: Vec<String>,
     provides: Vec<String>,
 }
@@ -847,6 +852,7 @@ fn resolve_plan(
         source: pkg.source.clone(),
         source_path: pkg.source_path.clone(),
         source_dir: persist::origin_source_dir(&rec.origin).map(|p| p.to_path_buf()),
+        disk_backed: matches!(rec.origin, PluginOrigin::Disk { .. }),
         inject: pkg.inject.clone(),
         provides: pkg.provides.clone(),
     })

@@ -235,38 +235,8 @@ impl DockProcess {
         self.spawn(app);
     }
 
-    /// 切回本机：没在跑（GUI 是以远程模式起的，或被 [`stop`](Self::stop) 收掉了）就拉起来。
-    pub fn ensure_running(&self, app: AppHandle) {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            if inner.started && inner.dead.is_none() {
-                return;
-            }
-            inner.reset();
-        }
-        self.spawn(app);
-    }
-
-    /// 切到远程：收掉本机 Dock，不当成意外退出（不发 `dock://exit`）。
-    pub fn stop(&self) {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            if !inner.started {
-                return;
-            }
-            inner.started = false;
-            inner.dead = Some("已切到远程 Dock".into());
-            for w in inner.waiters.drain(..) {
-                let _ = w.send(Err("已切到远程 Dock".into()));
-            }
-            for w in inner.ready_waiters.drain(..) {
-                let _ = w.send(Err("已切到远程 Dock".into()));
-            }
-        }
-        self.shutdown();
-    }
-
     /// 关掉 stdin 让 Dock 自己收尾退出；给它一点时间，还不走再强杀。
+    /// 只在 GUI 退出时用。切到远程不收本机 Dock，开着的任务才不会被打断。
     pub fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.stdin = None;

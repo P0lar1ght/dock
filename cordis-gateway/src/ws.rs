@@ -97,7 +97,15 @@ fn settings_gate(
     gateway: &GatewayHandle,
     method: &str,
 ) -> Result<(), RpcError> {
-    if crate::methods::policy_of(gateway, method).trusted_only && !auth.is_some_and(Auth::trusted) {
+    // 桌面操作是核心方法，登记不进方法表，策略要在这里单独认。
+    // `open` / `close` 仍给配对页只读画面；列窗口、钉住、点击按键只认受信连接。
+    let desktop_control = matches!(
+        method,
+        protocol::DESKTOP_VIEW_WINDOWS | protocol::DESKTOP_VIEW_PIN | protocol::DESKTOP_VIEW_INPUT
+    );
+    if (desktop_control || crate::methods::policy_of(gateway, method).trusted_only)
+        && !auth.is_some_and(Auth::trusted)
+    {
         return Err(RpcError::app(
             "forbidden",
             "这个操作只对桌面 GUI 和设备令牌开放",
@@ -288,10 +296,10 @@ async fn detached(
     } else {
         browser_view::Order::None
     };
-    let desktop_seq = if desktop {
+    let desktop_order = if desktop {
         desktops.order(&method, &params)
     } else {
-        0
+        desktop_view::DesktopOrder::None
     };
     let ready = {
         let c = conn.lock().await;
@@ -315,7 +323,7 @@ async fn detached(
                 browser_view::dispatch(&gateway, &views, &out, &method, params, order).await
             }
             Ok(gateway) if desktop => {
-                desktop_view::dispatch(&gateway, &desktops, &out, &method, params, desktop_seq)
+                desktop_view::dispatch(&gateway, &desktops, &out, &method, params, desktop_order)
                     .await
             }
             Ok(gateway) => rpc::dispatch_detached(gateway, &method, params).await,

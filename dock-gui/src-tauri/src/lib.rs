@@ -1,5 +1,5 @@
-mod mcp_app;
 mod dock;
+mod mcp_app;
 mod pty;
 mod remote;
 mod tunnel;
@@ -31,41 +31,54 @@ fn tunnel_ws(port: u16) -> String {
     format!("ws://127.0.0.1:{port}/api/ws")
 }
 
-/// 前端每次建 WS 连接前调一次：本机拿 `ws` 地址和一张新 ticket，远程拿地址和令牌。
-/// 走 SSH 的远程连接先确保隧道开着（远端 Dock 没在跑会按启动命令拉起），地址是隧道的本机端口。
+/// 前端每次建 WS 连接前调一次。`id` 空 = 本机 Dock（一张新 ticket）；否则是那台远程
+/// （设备令牌，走 SSH 的先确保这条连接自己的隧道，不拆别的）。
 #[tauri::command]
 async fn dock_connection(
     dock: tauri::State<'_, DockProcess>,
     remotes: tauri::State<'_, RemoteStore>,
     tunnels: tauri::State<'_, Tunnels>,
+    id: Option<String>,
 ) -> Result<Connection, String> {
     let dock = dock.inner().clone();
     let remotes = remotes.inner().clone();
     let tunnels = tunnels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if let Some(remote) = remotes.load().active_remote() {
+        if let Some(id) = id.filter(|id| !id.is_empty()) {
+            let remote = remotes.get(&id)?;
             let token = remotes.token(&remote.id)?;
             let ws = match &remote.ssh {
                 Some(ssh) => tunnel_ws(tunnels.ensure(&remote.id, ssh)?),
                 None => remote::ws_url(&remote.url)?,
             };
-            return Ok(Connection { ws, ticket: None, token: Some(token), tunnel: None });
+            return Ok(Connection {
+                ws,
+                ticket: None,
+                token: Some(token),
+                tunnel: None,
+            });
         }
         let local = dock.connection()?;
-        Ok(Connection { ws: local.ws, ticket: Some(local.ticket), token: None, tunnel: None })
+        Ok(Connection {
+            ws: local.ws,
+            ticket: Some(local.ticket),
+            token: None,
+            tunnel: None,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// 连接名单（不含令牌）和当前用哪个（`active` 空 = 本机）。
+/// 连接名单（不含令牌）、打开了哪些、主界面正在看哪台（`foreground` 空 = 本机）。
 #[tauri::command]
 fn remote_list(remotes: tauri::State<'_, RemoteStore>) -> Remotes {
     remotes.load()
 }
 
 /// 新建 / 改一个远程连接。令牌只进钥匙串；改的时候 `token` 空着就保留原来的。
-/// 改的是正在用的那条（换了令牌 / 地址 / SSH）：关掉旧隧道，各窗口重载，用新配置重连。
+/// 改的是已经打开的那条（换了令牌 / 地址 / SSH）：只拆它自己的隧道，让那条连接重连。
+/// 本机 Dock 和别的远程连接不动，页面不重载。
 #[tauri::command]
 async fn remote_save(
     app: tauri::AppHandle,
@@ -80,37 +93,66 @@ async fn remote_save(
     let remotes = remotes.inner().clone();
     let saved = tauri::async_runtime::spawn_blocking(move || {
         let saved = remotes.save(id, name, url, ssh, token)?;
-        let active = remotes.load().active.as_deref() == Some(saved.id.as_str());
-        Ok::<_, String>((saved, active))
+        let opened = remotes.load().opened.iter().any(|x| x == &saved.id);
+        Ok::<_, String>((saved, opened))
     })
     .await
     .map_err(|e| e.to_string())??;
     if saved.1 {
-        tunnels.stop();
-        let _ = app.emit("dock://connection", ());
+        tunnels.stop_id(&saved.0.id);
+        let _ = app.emit("dock://gateway-reconnect", &saved.0.id);
     }
     Ok(saved.0)
 }
 
-/// 删一个远程连接。删的是正在用的就关隧道、切回本机。
+/// 删一个远程连接。它正打开着就拆掉它的隧道；本机 Dock 继续跑，页面不重载。
 #[tauri::command]
 async fn remote_delete(
     app: tauri::AppHandle,
-    dock: tauri::State<'_, DockProcess>,
     remotes: tauri::State<'_, RemoteStore>,
     tunnels: tauri::State<'_, Tunnels>,
     id: String,
 ) -> Result<(), String> {
     let store = remotes.inner().clone();
-    let was_active = tauri::async_runtime::spawn_blocking(move || store.delete(&id))
-        .await
-        .map_err(|e| e.to_string())??;
-    if was_active {
-        tunnels.stop();
-        dock.ensure_running(app.clone());
-        let _ = app.emit("dock://connection", ());
+    let was_open = {
+        let id = id.clone();
+        tauri::async_runtime::spawn_blocking(move || store.delete(&id))
+    }
+    .await
+    .map_err(|e| e.to_string())??;
+    if was_open {
+        tunnels.stop_id(&id);
+        let _ = app.emit("dock://gateway-closed", &id);
     }
     Ok(())
+}
+
+/// 打开一条远程连接：记下来，主界面可以切过去。不关本机 Dock，也不拆别的隧道。
+#[tauri::command]
+fn gateway_open(remotes: tauri::State<'_, RemoteStore>, id: String) -> Result<(), String> {
+    remotes.open_id(&id)
+}
+
+/// 关掉一条远程连接的 GUI 侧（套接字由前端关，这里拆隧道、从打开列表拿掉）。
+/// 远端的 `dock serve` 继续跑。
+#[tauri::command]
+fn gateway_close(
+    app: tauri::AppHandle,
+    remotes: tauri::State<'_, RemoteStore>,
+    tunnels: tauri::State<'_, Tunnels>,
+    id: String,
+) -> Result<(), String> {
+    remotes.close_id(&id)?;
+    tunnels.stop_id(&id);
+    // 独立窗是另一份页面：靠这个事件停掉自己的重连。主窗口先把 store 卸了，再收到也是空操作。
+    let _ = app.emit("dock://gateway-closed", &id);
+    Ok(())
+}
+
+/// 主界面改看哪一台（`id` 空 = 本机）。不碰进程和隧道。
+#[tauri::command]
+fn gateway_focus(remotes: tauri::State<'_, RemoteStore>, id: Option<String>) -> Result<(), String> {
+    remotes.focus(id.filter(|id| !id.is_empty()))
 }
 
 /// 「测试连接」：某个已存连接的地址和令牌（前端自己连一下试）。走 SSH 的开一条临时隧道。
@@ -132,7 +174,12 @@ async fn remote_connection(
             }
             None => (remote::ws_url(&remote.url)?, None),
         };
-        Ok(Connection { ws, ticket: None, token: Some(token), tunnel })
+        Ok(Connection {
+            ws,
+            ticket: None,
+            token: Some(token),
+            tunnel,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -140,11 +187,19 @@ async fn remote_connection(
 
 /// 「测试连接」还没存的 SSH 配置：开一条临时隧道，回地址和隧道 id。
 #[tauri::command]
-async fn remote_tunnel_open(tunnels: tauri::State<'_, Tunnels>, ssh: SshTarget) -> Result<Connection, String> {
+async fn remote_tunnel_open(
+    tunnels: tauri::State<'_, Tunnels>,
+    ssh: SshTarget,
+) -> Result<Connection, String> {
     let tunnels = tunnels.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let port = tunnels.open_temp(&ssh.normalized()?)?;
-        Ok(Connection { ws: tunnel_ws(port), ticket: None, token: None, tunnel: Some(port) })
+        Ok(Connection {
+            ws: tunnel_ws(port),
+            ticket: None,
+            token: None,
+            tunnel: Some(port),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -161,36 +216,31 @@ fn remote_ws_url(url: String) -> Result<String, String> {
     remote::ws_url(&url)
 }
 
-/// 换当前连接（`id` 空 = 本机）。切到远程收掉本机 Dock，切回本机再拉起；旧的 SSH 隧道一律关掉。
-/// 所有窗口收到 `dock://connection` 后整页重载，用新连接从头来。
-#[tauri::command]
-fn connection_use(
-    app: tauri::AppHandle,
-    dock: tauri::State<'_, DockProcess>,
-    remotes: tauri::State<'_, RemoteStore>,
-    tunnels: tauri::State<'_, Tunnels>,
-    id: Option<String>,
-) -> Result<(), String> {
-    let next = remotes.set_active(id)?;
-    tunnels.stop();
-    if next.active.is_some() {
-        dock.stop();
-    } else {
-        dock.ensure_running(app.clone());
-    }
-    let _ = app.emit("dock://connection", ());
-    Ok(())
+/// 独立窗 URL 带上它所属的网关（空 = 本机），这样这扇窗连同一台 Dock，而不是永远连本机。
+fn with_gateway(url: String, gateway: &Option<String>) -> String {
+    let Some(id) = gateway.as_deref().filter(|id| !id.is_empty()) else {
+        return url;
+    };
+    let join = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{join}gateway={}", url_component(id))
 }
 
 /// 导出一段文本（画布的 HTML / 数据）：弹「存储为」对话框，用户选了位置才写。
 /// 写到哪儿只由对话框决定，前端给不了路径——画布内容出自模型，不开任意写盘的口子。
 /// 回写下的路径；用户取消回 `None`。
 #[tauri::command]
-async fn save_text_file(app: tauri::AppHandle, name: String, contents: String) -> Result<Option<String>, String> {
+async fn save_text_file(
+    app: tauri::AppHandle,
+    name: String,
+    contents: String,
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let picked = tauri::async_runtime::spawn_blocking(move || {
         let mut dialog = app.dialog().file().set_file_name(&name);
-        if let Some(ext) = std::path::Path::new(&name).extension().and_then(|e| e.to_str()) {
+        if let Some(ext) = std::path::Path::new(&name)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
             dialog = dialog.add_filter(ext.to_uppercase(), &[ext]);
         }
         dialog.blocking_save_file()
@@ -209,9 +259,19 @@ async fn save_text_file(app: tauri::AppHandle, name: String, contents: String) -
 /// 复用不了），但连的是同一个 Dock 进程：两边订阅同一批线程，事件各推一份，
 /// 状态自然对齐。窗口 label 形如 `chat-<会话 id>`，已经开着就只是聚焦。
 #[tauri::command]
-async fn open_chat_window(app: tauri::AppHandle, session_id: String, x: f64, y: f64) -> Result<(), String> {
-    let label = format!("chat-{}", safe_label(&session_id));
-    let url = format!("index.html?session={session_id}");
+async fn open_chat_window(
+    app: tauri::AppHandle,
+    session_id: String,
+    gateway: Option<String>,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let gw = gateway.as_deref().filter(|id| !id.is_empty());
+    let label = match gw {
+        Some(id) => format!("chat-{}-{}", safe_label(id), safe_label(&session_id)),
+        None => format!("chat-{}", safe_label(&session_id)),
+    };
+    let url = with_gateway(format!("index.html?session={session_id}"), &gateway);
     open_detached(&app, &label, url, (760.0, 840.0), x, y)
 }
 
@@ -224,40 +284,87 @@ async fn open_chat_window(app: tauri::AppHandle, session_id: String, x: f64, y: 
 /// MCP App 常驻面板（`mcp-app:<server>:<uri>`，两段各自 encodeURIComponent）跟着拖出时的会话
 /// （项目也就定了）：label 是 `panel-mcpapp-<kind 的哈希>-<会话 id>`。kind 原样转进 URL 要再编码一层。
 #[tauri::command]
-async fn open_panel_window(app: tauri::AppHandle, panel: String, session_id: String, x: f64, y: f64) -> Result<(), String> {
+async fn open_panel_window(
+    app: tauri::AppHandle,
+    panel: String,
+    session_id: String,
+    gateway: Option<String>,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
     if panel.starts_with("mcp-app:") {
         if !valid_app_panel(&panel) {
             return Err(format!("MCP App 面板不合法：{panel}"));
         }
-        let label = format!("panel-mcpapp-{:08x}-{}", fnv32(&panel), safe_label(&session_id));
-        let url = format!("index.html?session={session_id}&panel={}", url_component(&panel));
+        let label = match gateway.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => format!(
+                "panel-mcpapp-{:08x}-{}-{}",
+                fnv32(&panel),
+                safe_label(id),
+                safe_label(&session_id)
+            ),
+            None => format!(
+                "panel-mcpapp-{:08x}-{}",
+                fnv32(&panel),
+                safe_label(&session_id)
+            ),
+        };
+        let url = with_gateway(
+            format!(
+                "index.html?session={session_id}&panel={}",
+                url_component(&panel)
+            ),
+            &gateway,
+        );
         return open_detached(&app, &label, url, (1000.0, 760.0), x, y);
     }
     if let Some(id) = panel.strip_prefix("plugin:") {
         if !valid_plugin_panel(id) {
             return Err(format!("插件面板 id 不合法：{id}"));
         }
-        let label = format!("panel-plugin-{}", safe_label(id));
-        let url = format!("index.html?panel=plugin:{id}");
+        let label = match gateway.as_deref().filter(|g| !g.is_empty()) {
+            Some(gw) => format!("panel-plugin-{}-{}", safe_label(gw), safe_label(id)),
+            None => format!("panel-plugin-{}", safe_label(id)),
+        };
+        let url = with_gateway(format!("index.html?panel=plugin:{id}"), &gateway);
         return open_detached(&app, &label, url, (440.0, 680.0), x, y);
     }
-    if !matches!(panel.as_str(), "browser" | "files" | "desktop" | "canvas" | "subagents") {
+    if !matches!(
+        panel.as_str(),
+        "browser" | "files" | "desktop" | "canvas" | "subagents"
+    ) {
         return Err(format!("未知面板：{panel}"));
     }
-    let label = format!("panel-{panel}-{}", safe_label(&session_id));
-    let url = format!("index.html?session={session_id}&panel={panel}");
+    let label = match gateway.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => format!(
+            "panel-{panel}-{}-{}",
+            safe_label(id),
+            safe_label(&session_id)
+        ),
+        None => format!("panel-{panel}-{}", safe_label(&session_id)),
+    };
+    let url = with_gateway(
+        format!("index.html?session={session_id}&panel={panel}"),
+        &gateway,
+    );
     open_detached(&app, &label, url, (900.0, 760.0), x, y)
 }
 
 /// 插件面板已经开成独立窗了就把它提到前面，回 `true`；没开回 `false`（调用方在主窗口右侧打开）。
 /// 点状态项时用：别在主窗口再开一份。
 #[tauri::command]
-fn focus_panel_window(app: tauri::AppHandle, panel: String) -> bool {
-    let Some(id) = panel.strip_prefix("plugin:") else { return false };
+fn focus_panel_window(app: tauri::AppHandle, panel: String, gateway: Option<String>) -> bool {
+    let Some(id) = panel.strip_prefix("plugin:") else {
+        return false;
+    };
     if !valid_plugin_panel(id) {
         return false;
     }
-    match app.get_webview_window(&format!("panel-plugin-{}", safe_label(id))) {
+    let label = match gateway.as_deref().filter(|g| !g.is_empty()) {
+        Some(gw) => format!("panel-plugin-{}-{}", safe_label(gw), safe_label(id)),
+        None => format!("panel-plugin-{}", safe_label(id)),
+    };
+    match app.get_webview_window(&label) {
         Some(win) => {
             let _ = win.unminimize();
             win.set_focus().is_ok()
@@ -268,13 +375,19 @@ fn focus_panel_window(app: tauri::AppHandle, panel: String) -> bool {
 
 /// `mcp-app:<server>:<uri>`：两段都是 encodeURIComponent 的输出（只有这些字符），冒号正好两个，最长 1024。
 fn valid_app_panel(kind: &str) -> bool {
-    let Some(rest) = kind.strip_prefix("mcp-app:") else { return false };
+    let Some(rest) = kind.strip_prefix("mcp-app:") else {
+        return false;
+    };
     kind.len() <= 1024
         && rest.split(':').count() == 2
         && rest.split(':').all(|part| !part.is_empty())
-        && rest
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' | '%' | ':'))
+        && rest.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' | '%' | ':'
+                )
+        })
 }
 
 /// 进 URL 查询串的一段：字母数字和 `-_.~` 以外都按字节转 `%XX`。
@@ -292,12 +405,18 @@ fn url_component(s: &str) -> String {
 
 /// FNV-1a 32 位：窗口 label 里给 MCP App 面板一个短而稳定的名字。
 fn fnv32(s: &str) -> u32 {
-    s.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
+    s.bytes().fold(0x811c9dc5u32, |h, b| {
+        (h ^ b as u32).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// 插件面板 id 进窗口 label 和 URL：只认字母数字和 `_` `-` `.`，最长 64。
 fn valid_plugin_panel(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// 窗口 label 只能是字母数字和 `-`。
@@ -306,7 +425,14 @@ fn safe_label(id: &str) -> String {
 }
 
 /// 开一扇独立窗（聊天 / 面板共用）；`x`、`y` 都是 0 = 系统默认位置。
-fn open_detached(app: &tauri::AppHandle, label: &str, url: String, size: (f64, f64), x: f64, y: f64) -> Result<(), String> {
+fn open_detached(
+    app: &tauri::AppHandle,
+    label: &str,
+    url: String,
+    size: (f64, f64),
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
     if let Some(win) = app.get_webview_window(label) {
         return win.set_focus().map_err(|e| e.to_string());
     }
@@ -352,10 +478,11 @@ fn detached_builder<'a>(
     (w, h): (f64, f64),
     pos: Option<(f64, f64)>,
 ) -> tauri::WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle> {
-    let mut builder = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
-        .title("Dock")
-        .inner_size(w, h)
-        .min_inner_size(420.0, 400.0);
+    let mut builder =
+        tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
+            .title("Dock")
+            .inner_size(w, h)
+            .min_inner_size(420.0, 400.0);
     #[cfg(target_os = "macos")]
     {
         // 透明窗口（同主窗口）：玻璃材质下网页放透明，露出 macOS 原生材质（prefs.ts 的 syncNativeGlass）；
@@ -384,6 +511,7 @@ async fn pop_out_drag(
     window: tauri::WebviewWindow,
     session_id: String,
     panel: Option<String>,
+    gateway: Option<String>,
 ) -> Result<bool, String> {
     let released = tauri::async_runtime::spawn_blocking(|| {
         let start = std::time::Instant::now();
@@ -419,8 +547,8 @@ async fn pop_out_drag(
     // 新窗口左上角稍微让开光标，松手处正好落在它的头栏上。
     let (x, y) = (cursor.x / sf - 40.0, cursor.y / sf - 16.0);
     match panel {
-        Some(panel) => open_panel_window(app, panel, session_id, x, y).await?,
-        None => open_chat_window(app, session_id, x, y).await?,
+        Some(panel) => open_panel_window(app, panel, session_id, gateway, x, y).await?,
+        None => open_chat_window(app, session_id, gateway, x, y).await?,
     }
     Ok(true)
 }
@@ -445,7 +573,10 @@ fn left_button_down() -> bool {
 #[tauri::command]
 fn dock_path() -> String {
     let bin = dock::dock_bin();
-    std::fs::canonicalize(&bin).unwrap_or(bin).display().to_string()
+    std::fs::canonicalize(&bin)
+        .unwrap_or(bin)
+        .display()
+        .to_string()
 }
 
 /// Dock 退出后，「重新启动」按钮调这个。
@@ -531,10 +662,8 @@ pub fn run() {
             builder.build()?;
             let remotes = app.state::<RemoteStore>();
             remotes.init(app.handle());
-            // 上次用的是远程 Dock：本机的不拉起。
-            if remotes.load().active.is_none() {
-                app.state::<DockProcess>().spawn(app.handle().clone());
-            }
+            // 本机 Dock 跟 GUI 同寿命。看远程的时候它也留着，上面的回合不会被停掉。
+            app.state::<DockProcess>().spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -546,7 +675,9 @@ pub fn run() {
             remote_tunnel_open,
             remote_tunnel_close,
             remote_ws_url,
-            connection_use,
+            gateway_open,
+            gateway_close,
+            gateway_focus,
             dock_restart,
             dock_path,
             open_chat_window,
@@ -597,7 +728,10 @@ mod tests {
         assert!(!valid_app_panel("mcp-app:a&session=x:b"), "& 会拆查询串");
         assert!(!valid_app_panel(&format!("mcp-app:a:{}", "b".repeat(1100))));
         // 再编码一层：前端 query.get("panel") 解一层，拿回原样的 kind。
-        assert_eq!(url_component(kind), "mcp-app%3Awhiteboard%3Aui%253A%252F%252Fwhiteboard%252Fboard.html");
+        assert_eq!(
+            url_component(kind),
+            "mcp-app%3Awhiteboard%3Aui%253A%252F%252Fwhiteboard%252Fboard.html"
+        );
         assert_ne!(fnv32(kind), fnv32("mcp-app:whiteboard:ui%3A%2F%2Fother"));
     }
 }
