@@ -3716,10 +3716,9 @@ async fn disk_rhai_plugin_result_hook_survives_another_listener() {
 /// `tools/execute` 钩子还能不能改写模型看到的结果。真实 dock 上它不生效。
 #[tokio::test]
 async fn disk_rhai_result_hook_works_in_the_full_app_tree() {
-    // 隔离 `$DOCK_HOME`：不把本机的用户插件带进这棵树。
-    let _env = cordis_base::test_env::scoped();
-    let home = tempfile::tempdir().unwrap();
-    std::env::set_var("DOCK_HOME", home.path());
+    // 隔离 `$DOCK_HOME`：不把本机的用户插件带进这棵树。走 scoped().home()，
+    // 结束时把变量还原，避免下一个用例还指着已经删掉的临时目录。
+    let _env = cordis_base::test_env::scoped().home();
     let root = Context::new();
     cordis_spine::install_app(&root).await.unwrap();
     root.get::<cordis_spine::AppSettings>(SETTINGS)
@@ -3764,10 +3763,12 @@ async fn a_session_package_cannot_register_the_flow_hooks() {
 #[tokio::test]
 async fn a_session_package_with_source_path_cannot_register_the_flow_hooks() {
     let root = boot().await;
-    // 写到临时的用户插件根，不落在仓库的 `.dock/plugins/`（断言失败也会留下）。
-    let home = tempfile::tempdir().unwrap();
-    std::env::set_var("DOCK_HOME", home.path());
-    let plugin = home.path().join("plugins").join("hooksrc");
+    // `DOCK_HOME` 是进程级的。必须拿 test_env 的锁再改，否则并行用例会把它改回去，
+    // source_path 就落不到插件根里（合并进 main 的 CI 就是这样红的）。
+    let _env = cordis_base::test_env::scoped().home();
+    let plugin = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap())
+        .join("plugins")
+        .join("hooksrc");
     std::fs::create_dir_all(&plugin).unwrap();
     let path = plugin.join("source.rhai");
     std::fs::write(&path, RHAI_DISK_DENY).unwrap();
