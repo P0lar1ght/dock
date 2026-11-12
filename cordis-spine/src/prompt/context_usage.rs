@@ -372,8 +372,6 @@ fn system_detail(assembly: &PromptAssembly, snap: &ContextSnapshot) -> Occupancy
 fn section_label(id: &str) -> String {
     match id {
         "base" => "基座".into(),
-        "skills" => "技能".into(),
-        "workflows" => "工作流".into(),
         "persona" | "persona-replace" => "人设".into(),
         "plan" => "计划".into(),
         "goal" => "目标".into(),
@@ -1008,45 +1006,35 @@ fn window_size(session_window: u64, ctx: &Context) -> u64 {
         .unwrap_or(128_000)
 }
 
-fn section_tokens(assembly: &PromptAssembly, id: &str) -> u64 {
-    assembly
-        .inspect()
-        .into_iter()
-        .find(|p| p.id == id)
-        .map(|p| estimate_text(&p.body))
-        .unwrap_or(0)
-}
-
-fn extra_categories(ctx: &Context, assembly: &PromptAssembly) -> Vec<ContextCategory> {
+fn extra_categories(ctx: &Context, _assembly: &PromptAssembly) -> Vec<ContextCategory> {
     let mut rows = Vec::new();
-    // Listings that already live in the system prompt come first so /context
-    // does not clip 技能 under MCP / 本地按需 / 工作流.
+    // 目录现在走消息流里的 reminder（`<system-reminder>`），单列一行并写明算在
+    // 消息里；本会话还没注入时按将要注入的那份估。
     let skills = ctx.get::<crate::tools::skills::Skills>(SKILLS);
     let skill_rows = skills
         .as_ref()
         .map(|s| s.occupancy_rows())
         .unwrap_or_default();
     let catalog_n = skills.as_ref().map(|s| s.catalog().len()).unwrap_or(0);
-    let skills_section = section_tokens(assembly, "skills");
-    if skills.is_some() || skills_section > 0 {
-        let tokens = if skills_section > 0 {
-            skills_section
-        } else {
-            skill_rows.iter().map(|(_, t, _)| *t).sum()
-        };
+    let skills_injected = crate::tools::skills::injected_copy(ctx);
+    if skills.is_some() || skills_injected.is_some() {
+        let tokens = skills_injected
+            .as_ref()
+            .map(|copy| estimate_text(copy))
+            .unwrap_or_else(|| skill_rows.iter().map(|(_, t, _)| *t).sum());
         let n = skill_rows.len().max(catalog_n);
+        let wanted = crate::prompt::listing::wants_listing(ctx, "skill");
+        let detail = match &skills_injected {
+            Some(_) if n > 0 => format!("{n} 个 · 已计入消息"),
+            Some(_) => "已计入消息".into(),
+            None if wanted && n > 0 => format!("{n} 个 · 待轮次注入消息"),
+            None if wanted => "待轮次注入消息".into(),
+            None => count_detail(n as u64, "个"),
+        };
         rows.push(ContextCategory {
             label: "技能".into(),
             tokens,
-            detail: Some(if tokens > 0 {
-                if n > 0 {
-                    format!("{n} 个 · 已计入系统提示")
-                } else {
-                    "已计入系统提示".into()
-                }
-            } else {
-                count_detail(n as u64, "个")
-            }),
+            detail: Some(detail),
         });
     }
     // 规约不在系统提示里（它是消息流里的 reminder），但用户问的是「我的
@@ -1082,28 +1070,32 @@ fn extra_categories(ctx: &Context, assembly: &PromptAssembly) -> Vec<ContextCate
         }
     }
     let workflows = crate::tools::workflow::catalog_listing();
-    let workflows_section = section_tokens(assembly, "workflows");
-    if !workflows.is_empty() || workflows_section > 0 {
-        let tokens = if workflows_section > 0 {
-            workflows_section
-        } else {
-            let mut text = String::new();
-            for (name, desc) in &workflows {
-                text.push_str(name);
-                text.push('\n');
-                text.push_str(desc);
-                text.push('\n');
-            }
-            estimate_text(&text)
+    let workflows_injected = crate::tools::workflow::injected_copy(ctx);
+    if !workflows.is_empty() || workflows_injected.is_some() {
+        let tokens = workflows_injected
+            .as_ref()
+            .map(|copy| estimate_text(copy))
+            .unwrap_or_else(|| {
+                let mut text = String::new();
+                for (name, desc) in &workflows {
+                    text.push_str(name);
+                    text.push('\n');
+                    text.push_str(desc);
+                    text.push('\n');
+                }
+                estimate_text(&text)
+            });
+        let wanted =
+            crate::prompt::listing::wants_listing(ctx, crate::tools::workflow::WORKFLOW_TOOL_NAME);
+        let detail = match &workflows_injected {
+            Some(_) => format!("{} 个 · 已计入消息", workflows.len().max(1)),
+            None if wanted => format!("{} 个 · 待轮次注入消息", workflows.len().max(1)),
+            None => count_detail(workflows.len() as u64, "个"),
         };
         rows.push(ContextCategory {
             label: "工作流".into(),
             tokens,
-            detail: Some(if tokens > 0 {
-                format!("{} 个 · 已计入系统提示", workflows.len().max(1))
-            } else {
-                count_detail(workflows.len() as u64, "个")
-            }),
+            detail: Some(detail),
         });
     }
     let (_, mcp_specs, deferred_specs) = partition_model_specs(ctx);

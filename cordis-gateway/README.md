@@ -772,7 +772,7 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
   - `id`：`system` / `tools` / `messages` / `overhead`（推理、图片、上游真账与估算之差；为 0 时不给）/ `free`；
   - `group`：`prefix`（每轮原样重发）/ `session`（随对话增长）/ `free`；
   - `label`、`tokens`、`note?`；
-  - `includes[{ label, tokens, note }]`：已算在这一片里的子项（技能 / 工作流在系统提示里，规约 / 记忆在消息里）；
+  - `includes[{ label, tokens, note }]`：已算在这一片里的子项（技能 / 工作流目录、规约 / 记忆都在消息里）；
   - `detail[{ heading, rows[{ label, tokens?, note? }] }]`：明细，每组最多 40 行，其余并成「其余 N 项」。
 - `onDemand[{ id, label, note, detail }]`：MCP / 本地按需工具，不进窗口（`id` 为 `mcp` / `deferred`）。
 - 关着的会话先开页再算。

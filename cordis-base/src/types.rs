@@ -809,6 +809,12 @@ pub const ORDER_STEP_START_USER_EDITS: i32 = 8;
 /// 改文件之后、待办之前。
 pub const ORDER_STEP_START_MCP_APPS: i32 = 9;
 pub const ORDER_STEP_START_TODO: i32 = 10;
+/// 技能目录（`<system-reminder>`，主会话 / `listings: true` 的子代理才有）。
+pub const ORDER_STEP_START_SKILLS: i32 = 11;
+/// 工作流目录。排在技能之后。
+pub const ORDER_STEP_START_WORKFLOWS: i32 = 12;
+/// 子代理名册。`task` 这一页叫得动时才发。
+pub const ORDER_STEP_START_ROSTER: i32 = 13;
 /// 目标模式的定期自查（每用掉一批请求提醒模型对照完成标准收尾）。
 pub const ORDER_STEP_START_GOAL: i32 = 20;
 /// Disk / dynamic Cordis plugins (`host.on("agent/step-start", ...)`). Behind

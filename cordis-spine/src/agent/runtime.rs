@@ -149,23 +149,9 @@ async fn grok_sample_loop(
             abort_if_cancelled(ctx, sessions)?;
             drain_parent_mailbox(ctx, sessions);
             drain_steers(ctx, sessions);
-            // `agent/step-start`: whoever wants to watch the turn as it runs
-            // (todo staleness today) gets a look before each sample. The loop
-            // counts steps and appends — the policy lives in the handlers.
-            // handler 要能看见**当前这个** agent 的会话（子代理是它自己的隔离
-            // ctx），而 waterfall 不传 ctx —— 挂成 task-local。
-            // 前导那一份（规约、记忆）在还没发过请求时排到首条用户消息之前，
-            // 见 `Sessions::insert_preamble`；其余一律追加在尾部。
-            let (preamble, tail) = crate::tools::registry::with_exec_ctx(ctx, || {
-                step_start_reminders(ctx, sessions, steps)
-            });
-            for reminder in preamble {
-                sessions.insert_preamble(LogEvent::SystemReminder(reminder));
-            }
-            for reminder in tail {
-                sessions.append(LogEvent::SystemReminder(reminder));
-            }
-            steps += 1;
+            // 自动压缩先做：它会重写历史，而提醒（规约、记忆、目录、名册）要按
+            // **压缩后**的历史判断该不该重注。反过来的话，刚注入的背景可能被这次
+            // 压缩吃掉，这一步的采样就少一份目录 / 规约。
             if let Some(compact) = ctx.get::<Compact>(COMPACT) {
                 match compact.maybe_auto(ctx).await {
                     Ok(_) => {}
@@ -184,6 +170,23 @@ async fn grok_sample_loop(
                     }
                 }
             }
+            // `agent/step-start`: whoever wants to watch the turn as it runs
+            // (todo staleness today) gets a look before each sample. The loop
+            // counts steps and appends — the policy lives in the handlers.
+            // handler 要能看见**当前这个** agent 的会话（子代理是它自己的隔离
+            // ctx），而 waterfall 不传 ctx —— 挂成 task-local。
+            // 前导那一份（规约、记忆、目录、名册）在还没发过请求时排到首条用户
+            // 消息之前，见 `Sessions::insert_preamble`；其余一律追加在尾部。
+            let (preamble, tail) = crate::tools::registry::with_exec_ctx(ctx, || {
+                step_start_reminders(ctx, sessions, steps)
+            });
+            for reminder in preamble {
+                sessions.insert_preamble(LogEvent::SystemReminder(reminder));
+            }
+            for reminder in tail {
+                sessions.append(LogEvent::SystemReminder(reminder));
+            }
+            steps += 1;
             let key = system_cache_key(ctx);
             if key != cache_key {
                 cache_key = key;

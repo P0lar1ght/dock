@@ -22,7 +22,7 @@ tools/workspace.rs          # 薄套件：specs / handles / execute_with（注�
 
 ## 设计前提
 
-**模型总是绕回 `bash`，很大程度上是因为内置工具真的更弱。** 所以先把工具修到值得用，再谈引导。引导只加厚了工具描述，**没有**往系统提示里加段（`system-prompt/assemble` 仍是 `ORDER_PERSONA/WORKFLOWS/SKILLS` 三个槽）。
+**模型总是绕回 `bash`，很大程度上是因为内置工具真的更弱。** 所以先把工具修到值得用，再谈引导。引导只加厚了工具描述，**没有**往系统提示里加段（`system-prompt/assemble` 只剩 `ORDER_PERSONA` 与 `ORDER_HOOKS`）。
 
 七颗的描述都是 Grok 那种 usage notes（不是一行字），且逐条点名对应的 shell 命令——`read_file` 之于 `cat`、`grep` 之于 `grep`/`rg`、`glob` 之于 `find`、`list_dir` 之于 `ls`、`search_replace` 之于 `sed -i`——并说明为什么用工具更划算：不过权限门、计划模式下仍可用、会回报自己截断了多少。`bash` 描述里同一份清单写在**第一条**，用的是否定式（「文件检索别走 bash」），并点明 shell 的 `grep` 不读 `.gitignore`、会连 `target/` 一起读（同一趟仓库检索：工具几十 ms，bash 分钟级）。
 

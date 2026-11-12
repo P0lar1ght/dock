@@ -12,28 +12,29 @@ use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
 use crate::host::settings::AppSettings;
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
-use crate::names::{CONTEXT, PRE_STEP, SESSIONS, SETTINGS, SKILLS, SLASH, TOOLS, TOOLS_EXECUTE};
-use crate::prompt::assemble::ORDER_SKILLS;
-use crate::prompt::context_book::{own_sections, ContextBook};
+use crate::names::{PRE_STEP, SESSIONS, SETTINGS, SKILLS, SLASH, STEP_START, TOOLS, TOOLS_EXECUTE};
 use crate::prompt::listing::wants_listing;
 use crate::session::log::Sessions;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
-use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{
+    LogEvent, PreStep, StepStart, ToolCall, ToolResult, ToolSpec, ORDER_STEP_START_SKILLS,
+};
 
 pub use discover::{
     apply_substitutions, extract_skill_body, scan_all_with_shadowed, SkillInfo, SkillScope,
 };
 pub use listing::{listable, listing_budget_chars, overlay_body, render_listing};
 
-const SKILL_TOOL_DESC: &str = "Load a skill's SKILL.md body into this turn. Prefer `/name` (user slash) when the user invoked it; use this tool when a listed skill matches the task. `name` is the skill id from the system listing. Optional `args` fill $ARGUMENTS.";
+const SKILL_TOOL_DESC: &str = "Load a skill's SKILL.md body into this turn. Prefer `/name` (user slash) when the user invoked it; use this tool when a listed skill matches the task. `name` is the skill id from the catalog. Optional `args` fill $ARGUMENTS.";
 const SKILL_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"name":{"type":"string","description":"Skill id (slash name)."},"args":{"type":"string","description":"Optional arguments substituted for $ARGUMENTS."}},"required":["name"]}"#;
 
 /// 一个项目目录看得到的技能：内置 + 用户级 + 这个目录的 `skills/` `.agents/skills/`
 /// `.dock/skills/`。桌面 GUI 每个会话一个项目，所以按目录各存一份。
 struct Catalog {
     skills: Vec<SkillInfo>,
-    /// First rendered listing, frozen so window/activation changes do not
-    /// rewrite the system-prompt prefix (Grok never mutates system for skills).
+    /// First rendered listing. A catalog reminder that re-rendered on every
+    /// window / activation change would append a new copy per step, so the
+    /// text stays stable; mid-session discoveries get their own one-liners.
     frozen_listing: Option<String>,
 }
 
@@ -50,8 +51,8 @@ struct SkillsInner {
     /// 项目目录 → 那里看得到的技能。启动目录那份在挂载时扫，其余第一次用到时扫。
     catalogs: std::collections::HashMap<PathBuf, Catalog>,
     announced: HashSet<String>,
-    /// 本会话**中途**发现的技能名。启动时就在目录里的不算——那些在冻结的
-    /// listing 段里，压缩不会让模型忘掉它们。
+    /// 本会话**中途**发现的技能名。启动时就在目录里的不算——那些在目录
+    /// reminder 里，压缩后还会重新注入。
     discovered: Vec<String>,
     activated: HashSet<String>,
     extras: Vec<Disposable>,
@@ -168,9 +169,9 @@ impl Skills {
 
     /// 压缩后重发的「中途发现」提示，没有中途发现就返回 `None`。
     ///
-    /// listing 段是冻结的（见 [`Self::occupancy_rows`] 的说明：系统提示从不
-    /// 重写技能段），所以这些技能只靠历史里那条 reminder 让模型知道；压缩抹掉
-    /// 它之后得再说一遍。
+    /// 目录在会话里冻结（见 [`Self::occupancy_rows`] 的说明：文案不随窗口 /
+    /// 激活变化重写），所以这些技能只靠历史里那条 reminder 让模型知道；压缩
+    /// 抹掉它之后得再说一遍。
     pub fn rediscovery_notice(&self) -> Option<String> {
         let found = self.inner.lock().unwrap().discovered.clone();
         if found.is_empty() {
@@ -184,9 +185,9 @@ impl Skills {
 
     /// Rows behind the `/context` 技能 slice.
     ///
-    /// Derived from the *frozen* listing when one exists: the system prompt
-    /// never rewrites its skills section, so re-running `listable` against the
-    /// live activation set would report skills the model was never told about.
+    /// Derived from the *frozen* listing when one exists: the catalog reminder
+    /// is not re-rendered as activations change, so re-running `listable`
+    /// against the live set would report skills the model was never told about.
     pub fn occupancy_rows(&self) -> Vec<(String, u64, String)> {
         let (catalog, frozen, activated) = self.with_catalog(&Self::cwd(), |c, activated| {
             (
@@ -524,26 +525,75 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
     names
 }
 
+/// 历史里那份技能目录的开头。结构化标记：会话里要认出「哪一条 reminder 是目录副本」
+/// 才谈得上判断该不该重注（压缩抹掉旧副本、`/resume` 回放旧版）。
+const LISTING_MARKER: &str = "<system-reminder>\n可用技能";
+/// 切换预设后旧目录还在历史里，补一句让它失效，免得模型照着调一颗已经不存在的工具。
+const RETRACT_MARKER: &str = "<system-reminder>\n技能目录不再适用";
+
+/// 历史里最近一条目录相关提醒：`Some(Some(copy))` 是目录副本，`Some(None)` 是
+/// 停用说明，`None` 是还没发过。
+fn latest_state(history: &[LogEvent]) -> Option<Option<String>> {
+    history.iter().rev().find_map(|e| match e {
+        LogEvent::SystemReminder(text) if text.starts_with(LISTING_MARKER) => {
+            Some(Some(text.clone()))
+        }
+        LogEvent::SystemReminder(text) if text.starts_with(RETRACT_MARKER) => Some(None),
+        _ => None,
+    })
+}
+
+fn latest_listing(history: &[LogEvent]) -> Option<String> {
+    latest_state(history).flatten()
+}
+
+/// 本会话实际注入的那份目录（`/context` 用它报「已计入消息」）。
+pub(crate) fn injected_copy(exec: &Context) -> Option<String> {
+    latest_listing(&exec.get::<Sessions>(SESSIONS)?.model_history())
+}
+
+/// 这一步该注入的目录。`None` = 预设调不动 `skill`、目录为空、或历史里最近一份
+/// 已经一致。目录内容首帧冻结；压缩抹掉旧副本后重新注入同一份。
+fn pending_listing(exec: &Context) -> Option<String> {
+    let state = exec
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| latest_state(&s.model_history()));
+    if !wants_listing(exec, "skill") {
+        return state.flatten().map(|_| {
+            format!(
+                "{RETRACT_MARKER}：当前预设调不动 `skill`，上面那份清单照着调会被拒绝。\n</system-reminder>"
+            )
+        });
+    }
+    let listing = exec
+        .get::<Skills>(SKILLS)?
+        .listing_text_at(&crate::session::cwd::session_cwd(exec));
+    if listing.trim().is_empty() {
+        return None;
+    }
+    let body = format!("<system-reminder>\n{listing}</system-reminder>");
+    (state != Some(Some(body.clone()))).then_some(body)
+}
+
 pub fn skills() -> Plugin {
-    plugin("skills", Inject::from([SLASH, CONTEXT]), |ctx, _: &()| {
+    plugin("skills", Inject::from([SLASH]), |ctx, _: &()| {
         let handle = Skills::discover(ctx.clone());
-        let book = ctx.require::<ContextBook>(CONTEXT)?;
-        own_sections(
-            ctx,
-            vec![book.section(ORDER_SKILLS, "skills", |exec| {
-                if !wants_listing(exec, "skill") {
-                    return None;
-                }
-                exec.get::<Skills>(SKILLS).and_then(|skills| {
-                    let listing = skills.listing_text_at(&crate::session::cwd::session_cwd(exec));
-                    if listing.trim().is_empty() {
-                        None
-                    } else {
-                        Some(listing)
-                    }
-                })
-            })?],
-        )?;
+        let ctx_step = ctx.clone();
+        let step = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
+            let mut next = args.next::<StepStart>().unwrap_or(start);
+            // 子代理跑在自己的隔离 ctx 上：目录要按它自己的项目与窗口渲染，历史
+            // 也认它自己那份。waterfall 拿不到调用方 ctx，走循环挂上的 task-local；
+            // 不在任何一轮里（测试、视图查询）就落回挂载时的这一页。
+            let exec = crate::tools::registry::exec_ctx().unwrap_or_else(|| ctx_step.clone());
+            if let Some(body) = pending_listing(&exec) {
+                next.remind_preamble(ORDER_STEP_START_SKILLS, body);
+            }
+            next
+        })?;
+        ctx.effect("skills.reminder", |scope| {
+            scope.own(step);
+            Ok(())
+        })?;
         let ctx_pre = ctx.clone();
         let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
             let next = args.next::<PreStep>().unwrap_or(step);
@@ -600,9 +650,9 @@ pub fn tool_skills() -> Plugin {
         };
         own_registered(
             ctx,
-            // On the sampler table, not deferred: the system-prompt listing
-            // names this tool, so it has to be callable without a
-            // `search_tool` round-trip first.
+            // On the sampler table, not deferred: the catalog reminder names
+            // this tool, so it has to be callable without a `search_tool`
+            // round-trip first.
             vec![tools.register(
                 ToolSpec {
                     name: "skill".into(),
@@ -689,7 +739,8 @@ fn run_skill_tool(ctx: &Context, call: ToolCall) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prompt::assemble::{SystemPrompt, ORDER_SKILLS};
+    use crate::names::AGENT_PRESETS;
+    use crate::prompt::assemble::SystemPrompt;
     use crate::prompt::context_usage::{occupancy_detail, snapshot_context, OccupancyKind};
     use cordis_base::types::PreStep;
 
@@ -713,10 +764,11 @@ mod tests {
         ctx.plugin(tool_skills(), ()).unwrap().wait().await.unwrap();
     }
 
+    /// 目录是整场对话的背景，排在记忆之后、目标自查之前。
     #[test]
-    fn order_skills_follows_roster() {
-        const { assert!(ORDER_SKILLS > crate::prompt::assemble::ORDER_PERSONA) };
-        const { assert!(ORDER_SKILLS > crate::prompt::assemble::ORDER_WORKFLOWS) };
+    fn catalog_reminder_sits_after_memory_before_goal() {
+        const { assert!(ORDER_STEP_START_SKILLS > cordis_base::types::ORDER_STEP_START_MEMORY) };
+        const { assert!(ORDER_STEP_START_SKILLS < cordis_base::types::ORDER_STEP_START_GOAL) };
     }
 
     #[tokio::test]
@@ -808,7 +860,7 @@ mod tests {
         );
     }
 
-    /// 那一页的系统提示列出它项目里的技能，`skill` 工具也加载得到。
+    /// 那一页的 `<system-reminder>` 目录列出它项目里的技能，`skill` 工具也加载得到。
     #[tokio::test]
     async fn listing_and_skill_tool_follow_the_pages_project() {
         let startup = tempfile::tempdir().unwrap();
@@ -828,17 +880,26 @@ mod tests {
         let root = cordis::Context::new();
         mount_skills(&root).await;
         let page = other_page(&root, project.path());
-        let system = root
-            .require::<SystemPrompt>(crate::names::SYSTEM_PROMPT)
-            .unwrap();
         let on_page = crate::tools::registry::with_exec_ctx_async(page.clone(), async {
-            system.assemble_on(&page)
+            let start = StepStart::new(0, "main#2");
+            let seed = start.clone();
+            page.waterfall(STEP_START, start, move || seed)
+                .into_reminders()
+                .join("\n")
         })
         .await;
+        assert!(on_page.contains("可用技能"), "{on_page}");
         assert!(on_page.contains("proj-skill"), "{on_page}");
+        let on_root = {
+            let start = StepStart::new(0, crate::session::log::ROOT_IDENTITY);
+            let seed = start.clone();
+            root.waterfall(STEP_START, start, move || seed)
+                .into_reminders()
+                .join("\n")
+        };
         assert!(
-            !system.assemble_on(&root).contains("proj-skill"),
-            "启动目录的页没有这个技能"
+            !on_root.contains("proj-skill"),
+            "启动目录的页没有这个技能：{on_root}"
         );
         let tools = root.require::<Tools>(TOOLS).unwrap();
         // agent 循环按页调 `execute_on`（工具体跑在那一页的 exec ctx 里）。
@@ -875,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assemble_lists_skills_and_occupancy_does_not_double_count() {
+    async fn catalog_rides_a_reminder_and_occupancy_counts_messages() {
         let dir = tempfile::tempdir().unwrap();
         write_skill(
             dir.path(),
@@ -889,8 +950,26 @@ mod tests {
             .get::<SystemPrompt>(crate::names::SYSTEM_PROMPT)
             .unwrap()
             .assemble();
-        assert!(assembled.contains("demo-skill"), "{assembled}");
-        assert!(assembled.contains("可用技能"), "{assembled}");
+        assert!(
+            !assembled.contains("可用技能"),
+            "目录走 reminder，不再进系统提示: {assembled}"
+        );
+        let start = StepStart::new(0, crate::session::log::ROOT_IDENTITY);
+        let seed = start.clone();
+        let reminders = ctx
+            .waterfall(STEP_START, start, move || seed)
+            .into_reminders();
+        let catalog = reminders
+            .iter()
+            .find(|t| t.contains("可用技能"))
+            .expect("技能目录 reminder")
+            .clone();
+        assert!(catalog.starts_with("<system-reminder>"), "{catalog}");
+        assert!(catalog.contains("demo-skill"), "{catalog}");
+        // 模拟循环把这条 reminder 写进历史；`/context` 报的是实际注入的这份。
+        ctx.require::<Sessions>(SESSIONS)
+            .unwrap()
+            .append(LogEvent::SystemReminder(catalog));
         let snap = snapshot_context(&ctx);
         let extra = snap
             .categories
@@ -902,7 +981,7 @@ mod tests {
             extra
                 .detail
                 .as_deref()
-                .is_some_and(|d| d.contains("已计入系统提示")),
+                .is_some_and(|d| d.contains("已计入消息")),
             "{extra:?}"
         );
         assert_eq!(
@@ -1123,9 +1202,118 @@ mod tests {
         );
     }
 
-    /// The system prompt freezes its skills section on first render, so the
-    /// `/context` breakdown must report that frozen set — not whatever the
-    /// live activation set has grown to since.
+    fn catalog_reminder(exec: &Context, identity: &str) -> Option<String> {
+        let start = StepStart::new(0, identity);
+        let seed = start.clone();
+        crate::tools::registry::with_exec_ctx(exec, || {
+            exec.waterfall(STEP_START, start, move || seed)
+                .into_reminders()
+                .into_iter()
+                .find(|text| text.starts_with(LISTING_MARKER) || text.starts_with(RETRACT_MARKER))
+        })
+    }
+
+    /// 目录 reminder 只发一次：历史里已经有一份就不再重注；压缩抹掉旧副本后重注。
+    #[tokio::test]
+    async fn catalog_injects_once_and_again_after_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(
+            dir.path(),
+            "demo-skill",
+            "---\nname: demo-skill\ndescription: Demo skill for the reminder test.\n---\n\nBody.\n",
+        );
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
+        let ctx = cordis::Context::new();
+        mount_skills(&ctx).await;
+        let first = catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).expect("first");
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::SystemReminder(first));
+        assert!(
+            catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).is_none(),
+            "历史里已有就不再注入"
+        );
+        sessions.replace_compacted(vec![LogEvent::SystemReminder("summary".into())]);
+        assert!(
+            catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).is_some(),
+            "压缩后要重注"
+        );
+    }
+
+    /// 子代理默认不带目录；`agents/<type>.yml` 开了 `listings: true` 才带。
+    #[tokio::test]
+    async fn child_catalog_is_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(
+            dir.path(),
+            "demo-skill",
+            "---\nname: demo-skill\ndescription: Demo skill for the child test.\n---\n\nBody.\n",
+        );
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
+        let root = cordis::Context::new();
+        mount_skills(&root).await;
+
+        let child = root.isolate("sessions").isolate("agentPresets");
+        child
+            .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+            .unwrap();
+        assert!(
+            catalog_reminder(&child, "child-1").is_none(),
+            "子代理默认不带目录"
+        );
+
+        let mut wide = crate::agent::presets::SubagentDef {
+            name: "通用".into(),
+            listings: true,
+            ..Default::default()
+        };
+        wide.tools = Some(vec!["skill".into()]);
+        child
+            .provide(
+                AGENT_PRESETS,
+                crate::agent::presets::AgentPresets::overlay(wide.to_preset("general-purpose")),
+            )
+            .unwrap();
+        assert!(
+            catalog_reminder(&child, "child-1").is_some(),
+            "listings: true 才带"
+        );
+    }
+
+    /// 切到调不动 `skill` 的预设：补一句「目录不再适用」，且只补一次。
+    #[tokio::test]
+    async fn preset_without_skill_retracts_the_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(
+            dir.path(),
+            "demo-skill",
+            "---\nname: demo-skill\ndescription: Demo skill for the retraction test.\n---\n\nBody.\n",
+        );
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
+        let ctx = cordis::Context::new();
+        mount_skills(&ctx).await;
+        let first = catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).expect("first");
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::SystemReminder(first));
+
+        let mut narrow = crate::agent::presets::AgentPreset::new("narrow");
+        narrow.tools = Some(vec!["read_file".into()]);
+        ctx.provide(
+            AGENT_PRESETS,
+            crate::agent::presets::AgentPresets::overlay(narrow),
+        )
+        .unwrap();
+
+        let retract =
+            catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).expect("retraction");
+        assert!(retract.contains("技能目录不再适用"), "{retract}");
+        sessions.append(LogEvent::SystemReminder(retract));
+        assert!(
+            catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).is_none(),
+            "停用说明只发一次"
+        );
+    }
+
+    /// `/context` 的明细按历史里实际注入的那份目录算。
     #[test]
     fn listed_names_parses_rendered_entries() {
         let listing =

@@ -2,8 +2,9 @@
 //!
 //! Hidden extras (MCP + infrequent local tools) stay registered for dispatch
 //! but are omitted from the sampler tools array (`Tools::specs_for_model`).
-//! Catalog changes for MCP are announced as server-level `<system-reminder>`
-//! deltas, not per-tool schema dumps.
+//! MCP tool names ride a `<system-reminder>` in the history — names only, no
+//! descriptions — because `search_tool`'s on-demand line never lists them.
+//! When the set changes the next sample gets a delta (added / removed names).
 
 use std::collections::HashSet;
 
@@ -359,126 +360,172 @@ pub async fn run_use_tool(tools: &Tools, exec: &cordis::Context, call: ToolCall)
     )
 }
 
-pub(super) struct ServerSummary {
+/// 一台已启用、已连上的服务器，以及它启用的工具公名（排序、去重）。
+pub(super) struct ServerTools {
     pub name: String,
-    pub description: Option<String>,
-    pub tool_count: usize,
-    pub tool_names: Vec<String>,
+    pub tools: Vec<String>,
 }
 
-pub(super) type ServerFingerprint = (usize, u64, u64);
+/// 每个会话已经知道的工具名，按服务器分组。增量按组比较。
+pub(super) type Announced = std::collections::BTreeMap<String, Vec<String>>;
 
-pub(super) fn summaries_from_status(list: &[McpStatus]) -> Vec<ServerSummary> {
+/// 单台服务器最多铺开几个名字。第三方服务器一次挂几百个工具时，第一轮只列
+/// 前 `MAX_NAMES_PER_SERVER` 个，其余按关键词走 `search_tool`，不刷屏。
+const MAX_NAMES_PER_SERVER: usize = 12;
+
+pub(super) fn visible_servers(list: &[McpStatus]) -> Vec<ServerTools> {
     list.iter()
         .filter(|s| s.enabled && s.ok)
         .map(|s| {
-            let mut tool_names: Vec<String> = s
+            let mut tools: Vec<String> = s
                 .tools
                 .iter()
                 .filter(|t| t.enabled)
                 .map(|t| t.public_name.clone())
                 .collect();
-            tool_names.sort();
-            ServerSummary {
+            tools.sort();
+            tools.dedup();
+            ServerTools {
                 name: s.name.clone(),
-                description: builtin_description(&s.name).map(str::to_string),
-                tool_count: tool_names.len(),
-                tool_names,
+                tools,
             }
         })
+        .filter(|s| !s.tools.is_empty())
         .collect()
 }
 
-/// 内置服务器写一句「什么时候用它」：模型只看得到「已连接 + 几个工具」时想不到去用
-/// （实测问实时库存，它只会搜网页、说查不了）。第三方服务器没有可靠的说明，不写。
-fn builtin_description(server: &str) -> Option<&'static str> {
+pub(super) fn snapshot_servers(servers: &[ServerTools]) -> Announced {
+    servers
+        .iter()
+        .map(|s| (s.name.clone(), s.tools.clone()))
+        .collect()
+}
+
+/// 内置服务器的用途一句话。名字之外只留这一行，第三方服务器不编说明。
+fn builtin_hint(server: &str) -> Option<&'static str> {
     match server {
         cordis_base::config::BROWSER_MCP_SERVER => Some(
-            "Dock 自带的 Chromium 浏览器：打开网页、点选、填表、读动态页面、截图。网页搜索 / 抓取拿不到的内容（要点选、要登录、实时变化的，比如官网选好型号才显示的库存和价格）用它；mcp_browser__browser_js 一次跑一段 Playwright 脚本，做好几步；登录 / 验证码这类要用户本人做的，用 handoff_to_user 请用户在浏览器面板里接手",
+            "Dock 自带的 Chromium 浏览器：打开网页、点选、填表、读动态页面、截图；要登录 / 验证码的请用户在浏览器面板接手。",
         ),
         cordis_base::config::WHITEBOARD_MCP_SERVER => Some(
-            "项目白板（Excalidraw，用户在桌面端右侧面板里同时看、同时改）：画流程图、架构图、原型草图、头脑风暴卡片，或接着用户画的往下改。改之前先 whiteboard_read，用户可能刚动过",
+            "项目白板（Excalidraw）：画流程图、架构图、原型草图；改之前先 whiteboard_read。",
         ),
         cordis_base::cua::CUA_DRIVER_SERVER => {
-            Some("本机桌面操作：应用、窗口、点击、输入、截图（会动用户的电脑，用户要求时才用）")
+            Some("本机桌面操作：会动用户的电脑，用户要求时才用。")
         }
         _ => None,
     }
 }
 
-pub(super) fn fingerprint_servers(
-    servers: &[ServerSummary],
-) -> std::collections::HashMap<String, ServerFingerprint> {
-    servers
-        .iter()
-        .map(|s| {
-            (
-                s.name.clone(),
-                (
-                    s.tool_count,
-                    hash_value(&s.description),
-                    hash_value(&s.tool_names),
-                ),
-            )
-        })
-        .collect()
+/// `server（N 个）：name、name…`，超过上限就截断。不含行首 `- `。
+fn server_body(server: &ServerTools) -> String {
+    let shown = server.tools.len().min(MAX_NAMES_PER_SERVER);
+    let mut body = format!(
+        "{}（{} 个）：{}",
+        server.name,
+        server.tools.len(),
+        server.tools[..shown].join("、")
+    );
+    if server.tools.len() > shown {
+        body.push_str("…（其余用 search_tool 搜）");
+    }
+    if let Some(hint) = builtin_hint(&server.name) {
+        body.push_str("\n  ");
+        body.push_str(hint);
+    }
+    body
 }
 
-pub(super) fn build_delta_reminder(
-    old: &std::collections::HashMap<String, ServerFingerprint>,
-    new_summaries: &[ServerSummary],
-) -> Option<String> {
-    let new_map = fingerprint_servers(new_summaries);
-    let added: Vec<&ServerSummary> = new_summaries
+fn section(text: &mut String, heading: &str, entries: &[String]) {
+    if entries.is_empty() {
+        return;
+    }
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(heading);
+    text.push_str("：\n");
+    for entry in entries {
+        text.push_str("- ");
+        text.push_str(entry);
+        text.push('\n');
+    }
+}
+
+/// 名字集合变了才发一条：第一次（旧集合为空）列全量，之后只列新增 / 移除；
+/// 单台服务器超过 [`MAX_NAMES_PER_SERVER`] 个工具时按服务器折叠。
+///
+/// schema 由 `search_tool` 按名字取，描述留在各工具自己的 spec 里；
+/// `search_tool` 的按需名单从不收录 MCP 名字，所以这里不存在重复。
+pub(super) fn build_delta_reminder(old: &Announced, new: &[ServerTools]) -> Option<String> {
+    if old.is_empty() {
+        if new.is_empty() {
+            return None;
+        }
+        let mut text = String::from("MCP 工具：\n");
+        for server in new {
+            text.push_str("- ");
+            text.push_str(&server_body(server));
+            text.push('\n');
+        }
+        return Some(text.trim_end().to_string());
+    }
+
+    let mut added: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let mut changed: Vec<String> = Vec::new();
+    let new_names: std::collections::HashMap<&str, &Vec<String>> =
+        new.iter().map(|s| (s.name.as_str(), &s.tools)).collect();
+    for server in new {
+        match old.get(&server.name) {
+            // 整台服务器是新的：连名字带服务器名和用途说明一起发。首轮之后才连上的
+            // 小服务器（浏览器、cua 常见）也要带 `builtin_hint`，不能拆成光秃秃的
+            // 单个工具名。
+            None => added.push(server_body(server)),
+            Some(prev) if prev != &server.tools => {
+                if prev.len() > MAX_NAMES_PER_SERVER || server.tools.len() > MAX_NAMES_PER_SERVER {
+                    changed.push(server_body(server));
+                } else {
+                    let before: std::collections::HashSet<&str> =
+                        prev.iter().map(String::as_str).collect();
+                    let now: std::collections::HashSet<&str> =
+                        server.tools.iter().map(String::as_str).collect();
+                    added.extend(
+                        server
+                            .tools
+                            .iter()
+                            .filter(|name| !before.contains(name.as_str()))
+                            .cloned(),
+                    );
+                    removed.extend(
+                        prev.iter()
+                            .filter(|name| !now.contains(name.as_str()))
+                            .cloned(),
+                    );
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    for (name, tools) in old
         .iter()
-        .filter(|s| !old.contains_key(&s.name))
-        .collect();
-    let updated: Vec<&ServerSummary> = new_summaries
-        .iter()
-        .filter(|s| {
-            old.get(&s.name)
-                .is_some_and(|old_fp| Some(old_fp) != new_map.get(&s.name))
-        })
-        .collect();
-    let removed: Vec<&String> = old
-        .keys()
-        .filter(|name| !new_map.contains_key(*name))
-        .collect();
-    if added.is_empty() && updated.is_empty() && removed.is_empty() {
+        .filter(|(name, _)| !new_names.contains_key(name.as_str()))
+    {
+        // 小服务器照名字报，大服务器折叠成一行，免得断开时再刷一遍几百条。
+        if tools.len() <= MAX_NAMES_PER_SERVER {
+            removed.extend(tools.iter().cloned());
+        } else {
+            removed.push(format!("{name}（整台服务器）"));
+        }
+    }
+    if added.is_empty() && removed.is_empty() && changed.is_empty() {
         return None;
     }
     let mut text = String::new();
-    if !added.is_empty() {
-        text.push_str("MCP 服务器已连接：\n");
-        for server in &added {
-            text.push_str(&format_server_line(server));
-        }
-    }
-    if !updated.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str("MCP 服务器已更新：\n");
-        for server in &updated {
-            text.push_str(&format_server_line(server));
-        }
-    }
-    if !removed.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        let mut names: Vec<&str> = removed.iter().map(|s| s.as_str()).collect();
-        names.sort_unstable();
-        text.push_str(&format!("MCP 服务器已断开：{}", names.join("、")));
-    }
-    Some(text)
-}
-
-fn format_server_line(server: &ServerSummary) -> String {
-    match server.description.as_deref().filter(|s| !s.is_empty()) {
-        Some(d) => format!("- {} ({} 个工具): {}\n", server.name, server.tool_count, d),
-        None => format!("- {} ({} 个工具)\n", server.name, server.tool_count),
-    }
+    section(&mut text, "MCP 工具新增", &added);
+    section(&mut text, "MCP 工具移除", &removed);
+    section(&mut text, "MCP 工具变动", &changed);
+    Some(text.trim_end().to_string())
 }
 
 fn catalog_group(tools: &Tools, name: &str) -> String {
@@ -600,25 +647,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
     let budget = max.saturating_sub(SUFFIX.chars().count());
     format!("{}{SUFFIX}", s.chars().take(budget).collect::<String>())
-}
-
-fn hash_value<H: std::hash::Hash>(val: &H) -> u64 {
-    use std::hash::Hasher;
-    struct Fnv1a(u64);
-    impl Hasher for Fnv1a {
-        fn finish(&self) -> u64 {
-            self.0
-        }
-        fn write(&mut self, bytes: &[u8]) {
-            for &b in bytes {
-                self.0 ^= b as u64;
-                self.0 = self.0.wrapping_mul(0x00000100000001B3);
-            }
-        }
-    }
-    let mut h = Fnv1a(0xcbf29ce484222325);
-    val.hash(&mut h);
-    h.finish()
 }
 
 #[cfg(test)]
@@ -940,24 +968,99 @@ mod tests {
         assert!(miss.contains("2 on-demand tools are registered"), "{miss}");
     }
 
-    #[test]
-    fn delta_reminder_is_server_level() {
-        let empty = std::collections::HashMap::new();
-        let added = vec![ServerSummary {
-            name: "probe".into(),
-            description: None,
-            tool_count: 2,
-            tool_names: vec!["mcp_probe__ping".into(), "mcp_probe__pong".into()],
-        }];
-        let text = build_delta_reminder(&empty, &added).unwrap();
-        assert!(text.contains("MCP 服务器已连接"), "{text}");
-        assert!(text.contains("probe"), "{text}");
-        assert!(text.contains("2 个工具"), "{text}");
-        assert!(!text.contains("mcp_probe__ping"), "{text}");
+    fn server(name: &str, tools: &[&str]) -> ServerTools {
+        ServerTools {
+            name: name.into(),
+            tools: tools.iter().map(|s| s.to_string()).collect(),
+        }
+    }
 
-        let old = fingerprint_servers(&added);
+    /// 第一次列全量名字；之后只发新增 / 移除；内置服务器留一句用途。
+    #[test]
+    fn delta_reminder_lists_names_and_keeps_builtin_hints() {
+        let empty = Announced::new();
+        let servers = vec![
+            server("browser", &["mcp_browser__browser_click"]),
+            server("probe", &["mcp_probe__ping", "mcp_probe__pong"]),
+        ];
+        let text = build_delta_reminder(&empty, &servers).unwrap();
+        assert!(text.contains("MCP 工具："), "{text}");
+        assert!(text.contains("mcp_probe__ping"), "{text}");
+        assert!(text.contains("mcp_browser__browser_click"), "{text}");
+        assert!(
+            text.contains("Dock 自带的 Chromium 浏览器"),
+            "内置服务器要留一句什么时候用：{text}"
+        );
+
+        // 首轮之后才连上的小服务器：整台是新的，服务器名和用途说明都要在。
+        let before = snapshot_servers(&[server("probe", &["mcp_probe__ping"])]);
+        let late = vec![
+            server("browser", &["mcp_browser__browser_click"]),
+            server("probe", &["mcp_probe__ping"]),
+        ];
+        let late_delta = build_delta_reminder(&before, &late).unwrap();
+        assert!(
+            late_delta.contains("browser（1 个）：mcp_browser__browser_click"),
+            "晚连上的服务器不能被拆成单个工具名：{late_delta}"
+        );
+        assert!(
+            late_delta.contains("Dock 自带的 Chromium 浏览器"),
+            "晚连上的内置服务器也要带用途说明：{late_delta}"
+        );
+
+        let old = snapshot_servers(&servers);
+        let changed = vec![
+            server("browser", &["mcp_browser__browser_click"]),
+            server("probe", &["mcp_probe__pong", "mcp_foo__bar"]),
+        ];
+        let delta = build_delta_reminder(&old, &changed).unwrap();
+        assert!(delta.contains("MCP 工具新增："), "{delta}");
+        assert!(delta.contains("mcp_foo__bar"), "{delta}");
+        assert!(delta.contains("MCP 工具移除："), "{delta}");
+        assert!(delta.contains("mcp_probe__ping"), "{delta}");
+        assert!(
+            !delta.contains("mcp_probe__pong"),
+            "没变的名字不进增量：{delta}"
+        );
+        assert!(
+            !delta.contains("browser"),
+            "没变的服务器整个不进增量：{delta}"
+        );
+
         let gone = build_delta_reminder(&old, &[]).unwrap();
-        assert!(gone.contains("MCP 服务器已断开：probe"), "{gone}");
+        assert!(gone.contains("MCP 工具移除："), "{gone}");
+        assert!(gone.contains("mcp_probe__ping"), "{gone}");
+        assert!(build_delta_reminder(&old, &servers).is_none());
+    }
+
+    /// 一台服务器挂几百个工具时，第一轮只铺前几个名字，其余按关键词搜。
+    #[test]
+    fn delta_reminder_folds_a_wide_server() {
+        let names: Vec<String> = (0..MAX_NAMES_PER_SERVER + 3)
+            .map(|i| format!("mcp_big__tool_{i:02}"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let servers = vec![server("big", &refs)];
+        let text = build_delta_reminder(&Announced::new(), &servers).unwrap();
+        assert!(
+            text.contains(&format!("big（{} 个）", names.len())),
+            "{text}"
+        );
+        assert!(text.contains("mcp_big__tool_00"), "{text}");
+        assert!(text.contains("其余用 search_tool 搜"), "{text}");
+        assert!(!text.contains("mcp_big__tool_12"), "{text}");
+
+        let old = snapshot_servers(&servers);
+        let mut more = names.clone();
+        more.push("mcp_big__zzz".into());
+        let more_refs: Vec<&str> = more.iter().map(String::as_str).collect();
+        let delta = build_delta_reminder(&old, &[server("big", &more_refs)]).unwrap();
+        assert!(delta.contains("MCP 工具变动："), "{delta}");
+        assert!(delta.contains("其余用 search_tool 搜"), "{delta}");
+        assert!(
+            !delta.contains("mcp_big__zzz"),
+            "折叠的服务器不逐条铺：{delta}"
+        );
     }
 
     #[tokio::test]

@@ -278,9 +278,9 @@ async fn compact_session_locked(
 
 /// 压缩之后把「中途发现的技能 / 工作流」再说一遍。
 ///
-/// 两边的 listing 段都是**冻结**的（系统提示不重写，为的是保住前缀缓存），所以
-/// 中途在磁盘上发现的技能 / 工作流只靠历史里那条 `SystemReminder` 让模型知道。
-/// 压缩把它抹掉之后，发现集合又认为"已经通知过了"，模型就永久失去了这些条目。
+/// 两边的目录文本都是**冻结**的（reminder 不随激活集合重写），所以中途在磁盘上
+/// 发现的技能 / 工作流只靠历史里那条 `SystemReminder` 让模型知道。压缩把它抹掉
+/// 之后，发现集合又认为"已经通知过了"，模型就永久失去了这些条目。
 fn re_announce_discoveries(ctx: &Context, sessions: &Sessions) {
     let mut lines = Vec::new();
     if let Some(skills) = ctx.get::<Skills>(SKILLS) {

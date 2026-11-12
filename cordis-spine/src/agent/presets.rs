@@ -143,7 +143,7 @@ pub struct SubagentDef {
     pub on_demand_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace_prompt: bool,
-    /// Carry the skills / workflows listings into this child's system prompt.
+    /// Carry the skills / workflows catalogs into this child's history.
     /// Off by default: a narrow child rarely loads a skill, and every
     /// concurrent child pays for the catalog again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -270,8 +270,8 @@ struct Inner {
     persist: bool,
 }
 
-/// Write-path hints for the system prompt. Workspace-relative so a `/cd`
-/// or different machine does not rewrite the prefix (provider prompt cache).
+/// Write-path hints for the roster reminder. Workspace-relative so a `/cd`
+/// or different machine does not rewrite the text (provider prompt cache).
 #[derive(Clone)]
 struct WriteHintSnap {
     mode: String,
@@ -1135,7 +1135,7 @@ impl AgentPresets {
             })
             .collect();
         format!(
-            " subagent_type is a role id from this mode's agents/: {}. After writing a new agents/<id>.yml, call with reload_roster true (no spawn) to refresh this enum. Write new roles under {}/. New Agent modes for the user: draft with propose_preset (they review and save it); only if it reports no reviewer, write {}/<id>/agent.yml (id [a-z0-9][a-z0-9-]*), then /preset apply; Han display-name dirs overlay a shipped mode and do not create one. Only ~/.dock/presets/ if the user asks to save globally.",
+            " subagent_type is a role id from this mode's agents/: {}. After writing a new agents/<id>.yml, call task with reload_roster true (no spawn) to refresh the subagent_type enum. Write new roles under {}/. New Agent modes for the user: draft with propose_preset (they review and save it); only if it reports no reviewer, write {}/<id>/agent.yml (id [a-z0-9][a-z0-9-]*), then /preset apply; Han display-name dirs overlay a shipped mode and do not create one. Only ~/.dock/presets/ if the user asks to save globally.",
             parts.join("; "),
             self.workspace_agents_dir(),
             self.workspace_presets_dir()
@@ -1215,13 +1215,13 @@ impl AgentPresets {
     }
 
     /// Close the `task` `subagent_type` to the live roster so the sampler
-    /// cannot fall back to a trained three-type enum, and append the roster
-    /// hint to its description.
+    /// cannot fall back to a trained three-type enum. The roster itself
+    /// (roles, descriptions, write paths) rides a history `<system-reminder>`
+    /// — see `task::roster_reminder` — so the tool description stays static.
     pub fn bind_spawn_schema(&self, spec: &mut ToolSpec) {
         if spec.name != SPAWN_TOOL_NAME {
             return;
         }
-        spec.description.push_str(&self.subagent_role_hint());
         let roster = self.current_roster();
         if roster.is_empty() {
             return;
@@ -2819,7 +2819,7 @@ mod tests {
         assert_eq!(assembled.matches(PERSONA_OPEN).count(), 1);
         assert!(assembled.contains("</agent-preset>"));
         assert!(assembled.contains("Dock编码模式"));
-        // 名册与写路径归 `task` 工具的 role hint，不再在系统提示里重写一遍。
+        // 名册与写路径归 `task` 的 reminder，不再在系统提示里重写一遍。
         assert!(!assembled.contains("send_message"), "{assembled}");
         assert!(!assembled.contains("reload_roster"), "{assembled}");
         assert_eq!(presets.role_label("explore").as_deref(), Some("探索"));
@@ -2906,7 +2906,7 @@ mod tests {
     }
 
     /// `listings: true` puts the skills / workflows catalogs into a child's
-    /// system prompt, and both headers name their loader (`skill` /
+    /// history, and both headers name their loader (`skill` /
     /// `workflow`). A role that advertises them without holding the tool burns
     /// a round: the sampler hides it, `search_tool` no longer lists it (those
     /// tools stopped being deferred), and `use_tool` hits the same allowlist.
@@ -3304,7 +3304,11 @@ mod tests {
         assert!(ids.contains(&"explore"), "{ids:?}");
         assert!(ids.contains(&"plan"), "{ids:?}");
         assert!(ids.contains(&"general-purpose"), "{ids:?}");
-        assert!(spec.description.contains("review"));
+        assert!(
+            !spec.description.contains("review"),
+            "名册走 reminder，工具描述保持静态: {}",
+            spec.description
+        );
     }
 
     #[test]
