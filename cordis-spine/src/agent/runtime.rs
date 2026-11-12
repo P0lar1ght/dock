@@ -21,7 +21,9 @@ use crate::session::log::{Sessions, TurnEndStatus};
 use crate::tools::goal::continuation_reminder as goal_continuation_reminder;
 use crate::tools::registry::{with_exec_ctx_async, Tools};
 use crate::tools::task::Subagents;
-use cordis_base::types::{LogEvent, PreStep, PromptRequest, StepStart, TurnEnd, TurnOutcome};
+use cordis_base::types::{
+    LogEvent, PreStep, PromptRequest, StepStart, TurnEnd, TurnEndRound, TurnOutcome,
+};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -251,7 +253,7 @@ async fn grok_sample_loop(
         // turn hands control back. The loop only counts rounds and appends the
         // winning reminder — the policy lives in the handlers.
         if rounds < MAX_TURN_END_ROUNDS {
-            if let Some(reminder) = turn_end_decision(
+            if let Some(round) = turn_end_decision(
                 ctx,
                 sessions,
                 if ended_with_text { &last_text } else { "" },
@@ -259,8 +261,16 @@ async fn grok_sample_loop(
                 ended_with_text,
             ) {
                 rounds += 1;
-                sessions.append(LogEvent::SystemReminder(reminder));
-                continue;
+                sessions.append(LogEvent::SystemReminder(round.reminder));
+                let Some(only) = round.only_tools else {
+                    continue;
+                };
+                // 记账：只再采一步、只给这几颗工具，然后不管结果如何都收尾。
+                // 回给调用方的仍是模型刚才那段正文——记账不是新的回复。
+                bookkeeping_step(ctx, sessions, llm, tools, &system, &only).await?;
+                if ended_with_text {
+                    return Ok(TurnOutcome::Text(last_text));
+                }
             }
         }
         if ended_with_text {
@@ -276,7 +286,82 @@ async fn grok_sample_loop(
     }
 }
 
-/// Run `agent/turn-end` and return the winning reminder, if any. No handlers
+/// One bookkeeping step ([`TurnEnd::bookkeep_with`]): sample once with only
+/// `only` offered, run the calls that are on that list, refuse the rest with
+/// an error result (the model can still emit a name it was not offered), and
+/// return. No step-start reminders: this step adds no context, it only lets
+/// the model settle what it already did.
+async fn bookkeeping_step(
+    ctx: &Context,
+    sessions: &Sessions,
+    llm: &Llm,
+    tools: &Tools,
+    system: &str,
+    only: &[String],
+) -> Result<()> {
+    let specs: Vec<_> = tools
+        .specs_for_model_on(ctx)
+        .into_iter()
+        .filter(|spec| only.contains(&spec.name))
+        .collect();
+    if specs.is_empty() {
+        return Ok(());
+    }
+    abort_if_cancelled(ctx, sessions)?;
+    let output = llm
+        .stream_on(
+            ctx,
+            PromptRequest {
+                system: system.to_string(),
+                history: sessions.model_history(),
+                tools: specs,
+            },
+        )
+        .await;
+    abort_if_cancelled(ctx, sessions)?;
+    for call in output.tool_calls {
+        let arguments = call.arguments.clone();
+        let result = if only.contains(&call.name) {
+            match execute_cancellable(ctx, tools, call).await {
+                Executed::Done(result) => result,
+                Executed::Stopped(result) => {
+                    sessions.append(LogEvent::ToolExecute {
+                        id: result.call_id,
+                        name: result.name,
+                        arguments,
+                        content: result.content,
+                        images: result.images,
+                        is_error: result.is_error,
+                    });
+                    sessions.seal_incomplete_tool_calls();
+                    return Err(Error::Cancelled);
+                }
+            }
+        } else {
+            cordis_base::types::ToolResult {
+                content: format!(
+                    "没有执行：这一步只做 todo 记账，只能调用 {}。",
+                    only.join(" / ")
+                ),
+                call_id: call.id,
+                name: call.name,
+                images: Vec::new(),
+                is_error: true,
+            }
+        };
+        sessions.append(LogEvent::ToolExecute {
+            id: result.call_id,
+            name: result.name,
+            arguments,
+            content: result.content,
+            images: result.images,
+            is_error: result.is_error,
+        });
+    }
+    Ok(())
+}
+
+/// Run `agent/turn-end` and return the winning vote, if any. No handlers
 /// (or no votes) means the turn may end — fail-open.
 fn turn_end_decision(
     ctx: &Context,
@@ -284,7 +369,7 @@ fn turn_end_decision(
     text: &str,
     rounds: usize,
     ended_with_text: bool,
-) -> Option<String> {
+) -> Option<TurnEndRound> {
     let end = TurnEnd::new(
         text,
         rounds,
@@ -293,7 +378,7 @@ fn turn_end_decision(
         sessions.identity(),
     );
     let seed = end.clone();
-    ctx.waterfall(TURN_END, end, move || seed).settle()
+    ctx.waterfall(TURN_END, end, move || seed).settle_round()
 }
 
 /// Run `agent/step-start` and collect what to inject before this sample as

@@ -946,6 +946,20 @@ struct Continuation {
     order: i32,
     reminder: String,
     on_win: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// `Some` = a bookkeeping vote ([`TurnEnd::bookkeep_with`]): one more step
+    /// that may only call these tools, then the turn ends.
+    only_tools: Option<Vec<String>>,
+}
+
+/// What the loop does with the winning `agent/turn-end` vote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnEndRound {
+    /// `<system-reminder>` body the loop appends before the extra step.
+    pub reminder: String,
+    /// `None` = keep working: the loop runs normal steps again.
+    /// `Some(tools)` = bookkeeping: exactly one more sample, offered **only**
+    /// these tools; whatever comes back, the turn then ends.
+    pub only_tools: Option<Vec<String>>,
 }
 
 impl fmt::Debug for Continuation {
@@ -954,6 +968,7 @@ impl fmt::Debug for Continuation {
             .field("order", &self.order)
             .field("reminder", &self.reminder)
             .field("on_win", &self.on_win.is_some())
+            .field("only_tools", &self.only_tools)
             .finish()
     }
 }
@@ -983,6 +998,7 @@ impl TurnEnd {
             order,
             reminder: reminder.into(),
             on_win: None,
+            only_tools: None,
         });
     }
 
@@ -1004,29 +1020,71 @@ impl TurnEnd {
             order,
             reminder: reminder.into(),
             on_win: Some(std::sync::Arc::new(on_win)),
+            only_tools: None,
         });
     }
 
-    /// The winning reminder (smallest order), or `None` to end the turn.
-    /// Read-only — the loop calls [`TurnEnd::settle`] instead.
+    /// Ask for one **bookkeeping** step instead of another round of work: the
+    /// loop appends `reminder`, samples once with only `only_tools` offered to
+    /// the model, runs those calls, and then ends the turn whatever came back.
+    ///
+    /// A bookkeeping vote never preempts a keep-working vote: ending the turn
+    /// after bookkeeping would silently drop someone else's legitimate "not
+    /// done yet" (an active goal, a plugin). Among bookkeeping votes the
+    /// smallest order wins as usual. `on_win` runs only if this vote wins.
+    pub fn bookkeep_with(
+        &mut self,
+        order: i32,
+        reminder: impl Into<String>,
+        only_tools: &[&str],
+        on_win: impl Fn() + Send + Sync + 'static,
+    ) {
+        self.continuations.push(Continuation {
+            order,
+            reminder: reminder.into(),
+            on_win: Some(std::sync::Arc::new(on_win)),
+            only_tools: Some(only_tools.iter().map(|t| t.to_string()).collect()),
+        });
+    }
+
+    /// The winning reminder, or `None` to end the turn.
+    /// Read-only — the loop calls [`TurnEnd::settle_round`] instead.
     pub fn decision(&self) -> Option<&str> {
         self.winner().map(|c| c.reminder.as_str())
+    }
+
+    /// The winning vote's tool restriction: `Some` when the winner is a
+    /// bookkeeping vote ([`TurnEnd::bookkeep_with`]).
+    pub fn decision_tools(&self) -> Option<&[String]> {
+        self.winner().and_then(|c| c.only_tools.as_deref())
     }
 
     /// [`TurnEnd::decision`], plus the winner's `on_win`. Consuming on purpose:
     /// `on_win` is a side effect, and the loop is the last reader anyway, so
     /// "settled twice, charged twice" is not a mistake anyone can make.
     pub fn settle(self) -> Option<String> {
+        self.settle_round().map(|r| r.reminder)
+    }
+
+    /// [`TurnEnd::settle`] with the winner's kind: keep working, or one
+    /// restricted bookkeeping step.
+    pub fn settle_round(self) -> Option<TurnEndRound> {
         let win = self.winner()?;
         if let Some(on_win) = &win.on_win {
             on_win();
         }
-        Some(win.reminder.clone())
+        Some(TurnEndRound {
+            reminder: win.reminder.clone(),
+            only_tools: win.only_tools.clone(),
+        })
     }
 
-    /// Smallest order wins; ties go to whoever voted first.
+    /// Keep-working votes beat bookkeeping votes; within a kind the smallest
+    /// order wins, ties go to whoever voted first.
     fn winner(&self) -> Option<&Continuation> {
-        self.continuations.iter().min_by_key(|c| c.order)
+        self.continuations
+            .iter()
+            .min_by_key(|c| (c.only_tools.is_some(), c.order))
     }
 
     /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
@@ -1051,6 +1109,46 @@ mod step_start_tests {
         assert_eq!(preamble, ["rules", "memory"]);
         assert_eq!(tail, ["todo"]);
         assert_eq!(step.into_reminders(), ["rules", "memory", "todo"]);
+    }
+}
+
+#[cfg(test)]
+mod turn_end_tests {
+    use super::*;
+
+    #[test]
+    fn a_keep_working_vote_beats_a_lower_slot_bookkeeping_vote() {
+        let mut end = TurnEnd::new("ok", 0, true, false, "main");
+        end.bookkeep_with(ORDER_TURN_END_TODO, "记账", &["todo_write"], || {});
+        end.keep_working(ORDER_TURN_END_GOAL, "继续目标");
+        assert_eq!(end.decision(), Some("继续目标"));
+        assert_eq!(end.decision_tools(), None);
+        assert_eq!(
+            end.settle_round(),
+            Some(TurnEndRound {
+                reminder: "继续目标".into(),
+                only_tools: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_lone_bookkeeping_vote_carries_its_tool_list() {
+        let charged = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut end = TurnEnd::new("ok", 0, true, false, "main");
+        let c = charged.clone();
+        end.bookkeep_with(ORDER_TURN_END_TODO, "记账", &["todo_write"], move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert_eq!(end.decision_tools(), Some(&["todo_write".to_string()][..]));
+        assert_eq!(
+            end.settle_round(),
+            Some(TurnEndRound {
+                reminder: "记账".into(),
+                only_tools: Some(vec!["todo_write".into()]),
+            })
+        );
+        assert_eq!(charged.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
 

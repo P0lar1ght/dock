@@ -1848,12 +1848,14 @@ async fn a_throwing_rhai_hook_does_not_break_the_turn() {
 }
 
 /// The host always calls `args.next()` for the script, so a script cannot drop
-/// the chain — and its slot (50) loses to the built-in gate (10).
+/// the chain: the built-in todo bookkeeping still gets its vote. A script's
+/// keep-working vote outranks bookkeeping (bookkeeping ends the turn and must
+/// not swallow someone else's "not done yet"), so bookkeeping comes after it.
 #[tokio::test]
-async fn a_rhai_hook_cannot_outrank_or_swallow_the_todo_gate() {
+async fn a_rhai_hook_cannot_swallow_the_todo_bookkeeping() {
     let root = boot_with_loop().await;
-    // Script first, so the built-in gate is *inside* it on the chain: if the
-    // host ever stopped calling `args.next()`, the gate's vote would vanish.
+    // Script first, so the built-in handler is *inside* it on the chain: if the
+    // host ever stopped calling `args.next()`, the bookkeeping vote would vanish.
     run_rhai(&root, "hook", RHAI_HOOKS).await;
     root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
     exec(
@@ -1870,11 +1872,18 @@ async fn a_rhai_hook_cannot_outrank_or_swallow_the_todo_gate() {
         .await
         .unwrap();
     let seen = reminders(&root);
-    let first = seen.first().expect("the gate must continue the turn");
-    assert!(
-        first.contains(cordis_spine::TODO_GATE_SENTINEL),
-        "the built-in gate outranks the script: {first}"
-    );
+    let script = seen
+        .iter()
+        .position(|r| r.contains("脚本续跑"))
+        .expect("the script's continuation ran");
+    let bookkeeping: Vec<usize> = seen
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(bookkeeping.len(), 1, "{seen:?}");
+    assert!(script < bookkeeping[0], "{seen:?}");
 }
 
 /// Returns a non-string, which must not be stringified into the transcript.

@@ -45,7 +45,7 @@
 | `tool-web` | → `"tools"` | `web_fetch` `web_search` | Grok SSRF / 同 host 重定向 / htmd。`web_search` 无 xAI 账号，走同一套 fetch 打公开 HTML 索引 | [web_fetch](docs/tools/web_fetch.md) |
 | `tool-browser` | `"browser"` | —（工具在内置 MCP `browser`，见下） | `/browser` 薄驾驶舱 | [browser](docs/tools/browser.md) |
 | `tool-computer` | `"computer"` | — | CUA C0 薄驾驶舱；桌面键鼠经 `cua-driver` MCP | [computer](docs/tools/computer.md) |
-| `tool-todo` | `"todos"` + `"tools"` | `todo_write` | Grok merge/replace + 两条续跑 / 提醒 waterfall | [todo](docs/tools/todo.md) |
+| `tool-todo` | `"todos"` + `"tools"` | `todo_write` | Grok merge/replace（同时最多一个 `in_progress`，新状态 `awaiting_user`）+ 回合末只记账 / 回合中与下一轮开头提醒 waterfall | [todo](docs/tools/todo.md) |
 | `tool-canvas` | → `"tools"` | `canvas_create` `canvas_edit` `canvas_data` `canvas_read`（按需） | 模型写 HTML，桌面端在会话旁渲染；按版本落在会话目录 | [canvas](docs/tools/canvas.md) |
 | `plan-mode` | `"planMode"` + `"tools"` | `enter_plan_mode` `exit_plan_mode` | 计划文件按会话划分（见下）；计划态挡住 bash / 写文件等 | — |
 | `tool-ask-user` | `"ask"` + `"tools"` | `ask_user_question`、`handoff_to_user`（请用户在浏览器面板里接手，按需） | 事件 `ask/pending` | [browser](docs/tools/browser.md) |

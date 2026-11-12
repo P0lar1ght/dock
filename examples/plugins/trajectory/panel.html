@@ -477,7 +477,7 @@
   }
 
   function rowText(r) {
-    if (r.kind === "tool") return `<span class="tool-name">${esc(r.name)}</span> <span class="muted">${esc(argSummary(r.args))}</span>`;
+    if (r.kind === "tool") return `<span class="tool-name">${esc(r.name)}</span> <span class="muted">${esc((r.name === "todo_write" && todoSummary(r.args)) || argSummary(r.args))}</span>`;
     if (r.kind === "permission") return `${esc(r.text)} <span class="muted">${r.decision ? (r.decision === "approve" ? "· 允许" : "· 拒绝") : "· 等待"}</span>`;
     if (r.kind === "ask" || r.kind === "plan" || r.kind === "elicit") {
       const tail = r.decision ? `· ${r.decision}` : r.end != null ? `· 等 ${fmt(r.end - r.start)}` : "· 等待";
@@ -488,6 +488,18 @@
       return `<span class="muted">${esc(n)}</span> ${esc(firstLine(r.text))}`;
     }
     return esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）");
+  }
+
+  // todo_write 这次写了哪些状态：「✓2 ▶1 □1 等用户1」。awaiting_user = 在等用户回答，
+  // 不算完成也不算模型欠的活。没有 todos 数组的退回通用参数摘要。
+  const TODO_MARKS = [["completed", "✓"], ["in_progress", "▶"], ["pending", "□"], ["awaiting_user", "等用户"], ["cancelled", "✗"]];
+  function todoSummary(a) {
+    if (typeof a === "string") { try { a = JSON.parse(a); } catch { return ""; } }
+    const rows = a && Array.isArray(a.todos) ? a.todos : null;
+    if (!rows) return "";
+    const n = {};
+    for (const t of rows) { const st = (t && t.status) || "pending"; n[st] = (n[st] || 0) + 1; }
+    return TODO_MARKS.filter(([st]) => n[st]).map(([st, m]) => `${m}${n[st]}`).join(" ");
   }
 
   function argSummary(a) {

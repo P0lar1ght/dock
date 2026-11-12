@@ -21,6 +21,8 @@ pub struct TodoPaneStyle {
     pub in_progress: TodoStatusStyle,
     pub completed: TodoStatusStyle,
     pub cancelled: TodoStatusStyle,
+    /// Parked on the user's answer: not the model's to do, not settled either.
+    pub awaiting_user: TodoStatusStyle,
 }
 
 impl Default for TodoPaneStyle {
@@ -47,6 +49,10 @@ impl Default for TodoPaneStyle {
                     .fg(theme.gray_bright)
                     .add_modifier(Modifier::CROSSED_OUT),
             },
+            awaiting_user: TodoStatusStyle {
+                icon_fg: theme.accent_plan,
+                text_style: Style::default().fg(theme.text_secondary),
+            },
         }
     }
 }
@@ -58,6 +64,7 @@ impl TodoPaneStyle {
             TodoStatus::InProgress => self.in_progress,
             TodoStatus::Completed => self.completed,
             TodoStatus::Cancelled => self.cancelled,
+            TodoStatus::AwaitingUser => self.awaiting_user,
         }
     }
 }
@@ -69,5 +76,6 @@ pub fn todo_icon(status: TodoStatus) -> &'static str {
         TodoStatus::InProgress => "▶",
         TodoStatus::Completed => glyphs::check_mark(),
         TodoStatus::Cancelled => glyphs::ballot_x(),
+        TodoStatus::AwaitingUser => glyphs::hollow_dot(),
     }
 }

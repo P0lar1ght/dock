@@ -1048,11 +1048,29 @@ const CLOSE_LIST: &str = r#"{"todos":[
     {"id":"a","status":"completed"},
     {"id":"b","status":"completed"}]}"#;
 
+fn sentinel_reminders(root: &Context) -> Vec<String> {
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            cordis_spine::LogEvent::SystemReminder(t)
+                if t.contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL) =>
+            {
+                Some(t.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Text with owed items gets one bookkeeping step — not another round of
+/// work — and the turn ends right after it.
 #[tokio::test]
-async fn open_todos_gate_the_turn_until_they_are_closed() {
+async fn open_todos_get_one_bookkeeping_step_then_the_turn_ends() {
     let samples = Arc::new(AtomicUsize::new(0));
-    // s0 opens the list, s1 answers with text (gate fires), s2 closes the
-    // list, s3 answers again and is allowed through.
+    // s0 opens the list, s1 answers with text, s2 is the bookkeeping step and
+    // closes the list. The turn ends there; s1's text is the reply.
     let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST), (2, CLOSE_LIST)]).await;
     let out = root
         .require::<LoopHandle>(AGENT_LOOP)
@@ -1060,26 +1078,30 @@ async fn open_todos_gate_the_turn_until_they_are_closed() {
         .run("干活")
         .await
         .unwrap();
-    assert_eq!(out, TurnOutcome::Text("round-3".into()));
+    assert_eq!(out, TurnOutcome::Text("round-1".into()));
+    assert_eq!(samples.load(Ordering::SeqCst), 3);
+    let reminders = sentinel_reminders(&root);
     assert_eq!(
-        samples.load(Ordering::SeqCst),
-        4,
-        "text with open todos must not end the turn"
+        reminders.len(),
+        1,
+        "one bookkeeping reminder: {reminders:?}"
     );
+    assert!(
+        reminders[0].contains("in_progress: 读代码"),
+        "{}",
+        reminders[0]
+    );
+    assert!(reminders[0].contains("pending: 改实现"), "{}", reminders[0]);
+    let todos = root
+        .get::<cordis_spine::Todos>(cordis_spine::TODOS)
+        .unwrap();
+    assert_eq!(todos.stats().completed, 2, "the bookkeeping write landed");
     let sessions = root.require::<Sessions>(SESSIONS).unwrap();
-    let reminders: Vec<String> = sessions
-        .events()
-        .iter()
-        .filter_map(|e| match e {
-            cordis_spine::LogEvent::SystemReminder(t) => Some(t.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(reminders.len(), 1, "one nudge, not one per remaining item");
-    assert!(reminders[0].contains(cordis_spine::TODO_GATE_SENTINEL));
-    assert!(reminders[0].contains("读代码"), "{}", reminders[0]);
     let users = sessions.kinds().iter().filter(|k| **k == "user").count();
-    assert_eq!(users, 1, "the gate is a hidden reminder, not a user bubble");
+    assert_eq!(
+        users, 1,
+        "bookkeeping is a hidden reminder, not a user bubble"
+    );
 }
 
 #[tokio::test]
@@ -1094,12 +1116,14 @@ async fn a_closed_list_lets_the_turn_end() {
         .unwrap();
     assert_eq!(out, TurnOutcome::Text("round-1".into()));
     assert_eq!(samples.load(Ordering::SeqCst), 2);
+    assert!(sentinel_reminders(&root).is_empty());
 }
 
+/// The model ignores the bookkeeping step (answers with text again): the turn
+/// still ends after that one step — no second round, no work.
 #[tokio::test]
-async fn the_gate_gives_up_after_two_nudges() {
+async fn bookkeeping_fires_at_most_once_and_then_ends_the_turn() {
     let samples = Arc::new(AtomicUsize::new(0));
-    // The model never closes the list; the turn must still end.
     let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST)]).await;
     let out = root
         .require::<LoopHandle>(AGENT_LOOP)
@@ -1107,11 +1131,23 @@ async fn the_gate_gives_up_after_two_nudges() {
         .run("干活")
         .await
         .unwrap();
-    assert_eq!(out, TurnOutcome::Text("round-3".into()));
+    assert_eq!(out, TurnOutcome::Text("round-1".into()));
     assert_eq!(
         samples.load(Ordering::SeqCst),
-        4,
-        "one tool round + text + two gated rounds"
+        3,
+        "one tool round + text + exactly one bookkeeping step"
+    );
+    assert_eq!(sentinel_reminders(&root).len(), 1);
+    let kinds = root.require::<Sessions>(SESSIONS).unwrap().kinds();
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "llm/stream").count(),
+        3,
+        "{kinds:?}"
+    );
+    assert_eq!(
+        kinds[kinds.len() - 3..],
+        ["system-reminder", "llm/stream", "turn-end"],
+        "the bookkeeping reminder, its one sample, then the turn ends: {kinds:?}"
     );
 }
 
@@ -1394,14 +1430,14 @@ async fn a_subagent_turn_does_not_eat_the_parent_goal_instruction() {
 }
 
 /// A handler cannot see the votes cast outside it, so its own self-limit has to
-/// be charged when it wins, not when it votes. A lower slot taking the round
-/// must not quietly spend the todo gate's two nudges.
+/// be charged when it wins, not when it votes. A keep-working vote taking the
+/// round must not quietly spend the todo bookkeeping quota.
 #[tokio::test]
 async fn a_lower_slot_winner_does_not_spend_the_todo_quota() {
     let samples = Arc::new(AtomicUsize::new(0));
-    // s0 opens the list; every later sample is text the gate would object to.
+    // s0 opens the list; every later sample is text the bookkeeping would object to.
     let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST)]).await;
-    // Outranks the gate for the first two endings, then falls silent.
+    // Takes the first two endings, then falls silent.
     let _hog = root
         .on_waterfall(TURN_END, |end: TurnEnd, args| {
             let mut next = args.next::<TurnEnd>().unwrap_or(end);
@@ -1421,34 +1457,36 @@ async fn a_lower_slot_winner_does_not_spend_the_todo_quota() {
         .run("干活")
         .await
         .unwrap();
-    // Two rounds taken by the hog, then the gate's own two, then the turn ends.
-    assert_eq!(out, TurnOutcome::Text("round-5".into()));
-    assert_eq!(samples.load(Ordering::SeqCst), 6);
-    let gate_nudges = root
-        .require::<Sessions>(SESSIONS)
-        .unwrap()
-        .events()
-        .iter()
-        .filter(|e| {
-            matches!(e, cordis_spine::LogEvent::SystemReminder(t)
-                if t.contains(cordis_spine::TODO_GATE_SENTINEL))
-        })
-        .count();
+    // Two rounds taken by the hog, then the bookkeeping step, then the turn ends.
+    assert_eq!(out, TurnOutcome::Text("round-3".into()));
+    assert_eq!(samples.load(Ordering::SeqCst), 5);
     assert_eq!(
-        gate_nudges, 2,
-        "the gate still gets its full quota after losing two rounds"
+        sentinel_reminders(&root).len(),
+        1,
+        "the bookkeeping step still happens after losing two rounds"
     );
 }
 
 /// `agent/step-start` is an extension point, not a loop private: a handler
 /// mounted from outside sees every step numbered from 0 — across turn-end
 /// continuations too — and the loop appends what it queues, in slot order.
+/// The bookkeeping step is not a work step and runs no step-start handlers.
 #[tokio::test]
 async fn a_plugin_can_inject_a_reminder_before_every_step() {
     let samples = Arc::new(AtomicUsize::new(0));
-    // s0 opens the list, s1..s3 answer with text; the gate continues the turn
-    // twice, so steps 2 and 3 are on the far side of an `agent/turn-end`.
+    // s0 opens the list, s1..s3 answer with text; a keep-working vote continues
+    // the turn twice, so steps 2 and 3 are on the far side of an
+    // `agent/turn-end`. s4 is the bookkeeping step.
     let root = boot_todo_loop(samples.clone(), vec![(0, OPEN_LIST)]).await;
+    let _continue = root
+        .on_waterfall(TURN_END, |end: TurnEnd, args| {
+            let mut next = args.next::<TurnEnd>().unwrap_or(end);
+            if next.rounds < 2 {
+                next.keep_working(90, "<system-reminder>再来</system-reminder>");
+            }
+            next
+        })
+        .unwrap();
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     // Registered low slot first, so the raw vote order is the reverse of the
     // expected append order — the slot sort is what puts it right.
@@ -1476,10 +1514,11 @@ async fn a_plugin_can_inject_a_reminder_before_every_step() {
         .await
         .unwrap();
     assert_eq!(out, TurnOutcome::Text("round-3".into()));
+    assert_eq!(samples.load(Ordering::SeqCst), 5);
     assert_eq!(
         *seen.lock().unwrap(),
         vec![0, 1, 2, 3],
-        "one call per sample, counting on across turn-end continuations"
+        "one call per work sample, counting on across turn-end continuations"
     );
     let injected: Vec<String> = root
         .require::<Sessions>(SESSIONS)
@@ -1500,9 +1539,10 @@ async fn a_plugin_can_inject_a_reminder_before_every_step() {
     }
 }
 
-/// Both `agent/turn-end` handlers want another round. The order slot decides,
-/// not the mount order: "advance the next todo" is more actionable than
-/// "keep pushing the goal", so todo (10) beats goal (20) either way.
+/// An active goal and an unfinished list both have a say at turn end. The
+/// goal wants more work (the user asked for it); the list only wants
+/// bookkeeping, which would end the turn. Keep-working beats bookkeeping
+/// regardless of order slot or mount order, so the goal is not cut short.
 async fn boot_goal_and_todo(samples: Arc<AtomicUsize>, todo_first: bool) -> Context {
     isolated_home();
     let root = Context::new();
@@ -1531,7 +1571,7 @@ async fn boot_goal_and_todo(samples: Arc<AtomicUsize>, todo_first: bool) -> Cont
 }
 
 #[tokio::test]
-async fn the_lowest_order_slot_wins_regardless_of_mount_order() {
+async fn todo_bookkeeping_does_not_cut_an_active_goal_short() {
     for todo_first in [true, false] {
         let samples = Arc::new(AtomicUsize::new(0));
         let root = boot_goal_and_todo(samples, todo_first).await;
@@ -1549,7 +1589,7 @@ async fn the_lowest_order_slot_wins_regardless_of_mount_order() {
             .iter()
             .filter_map(|e| match e {
                 cordis_spine::LogEvent::SystemReminder(t)
-                    if t.contains(cordis_spine::TODO_GATE_SENTINEL)
+                    if t.contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL)
                         || t.contains("<goal-state>") =>
                 {
                     Some(t.clone())
@@ -1561,14 +1601,583 @@ async fn the_lowest_order_slot_wins_regardless_of_mount_order() {
             .first()
             .expect("an open list plus an active goal must continue the turn");
         assert!(
-            first.contains(cordis_spine::TODO_GATE_SENTINEL),
-            "todo (order 10) must outrank goal (order 20), todo_first={todo_first}: {first}"
+            first.contains("<goal-state>"),
+            "the goal keeps working before any bookkeeping, todo_first={todo_first}: {first}"
         );
         assert!(
-            !first.contains("<goal-state>"),
+            !first.contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL),
             "only the winning reminder is appended: {first}"
         );
+        let bookkeeping = continuations
+            .iter()
+            .filter(|t| t.contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL))
+            .count();
+        assert!(
+            bookkeeping <= 1,
+            "todo_first={todo_first}: {continuations:?}"
+        );
+        if bookkeeping == 1 {
+            assert!(
+                continuations
+                    .last()
+                    .unwrap()
+                    .contains(cordis_spine::TODO_BOOKKEEPING_SENTINEL),
+                "bookkeeping, if any, is the last thing the turn does: {continuations:?}"
+            );
+        }
     }
+}
+
+/// Plays `script(i)` for sample `i` and records which tools each sample was
+/// offered.
+struct Recorded {
+    n: Arc<AtomicUsize>,
+    offered: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    script: Arc<dyn Fn(usize) -> LlmOutput + Send + Sync>,
+}
+
+impl Sampler for Recorded {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let mut names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+        names.sort();
+        self.offered.lock().unwrap().push(names);
+        let i = self.n.fetch_add(1, Ordering::SeqCst);
+        let out = (self.script)(i);
+        Box::pin(async move { out })
+    }
+}
+
+fn say(text: &str) -> LlmOutput {
+    LlmOutput {
+        text: text.into(),
+        ..LlmOutput::default()
+    }
+}
+
+fn call_tool(id: &str, name: &str, args: &str) -> LlmOutput {
+    LlmOutput {
+        tool_calls: vec![ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: args.into(),
+        }],
+        ..LlmOutput::default()
+    }
+}
+
+struct Booted {
+    root: Context,
+    samples: Arc<AtomicUsize>,
+    offered: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    _tools: Vec<cordis::Disposable>,
+}
+
+impl Booted {
+    async fn run(&self, prompt: &str) -> TurnOutcome {
+        self.root
+            .require::<LoopHandle>(AGENT_LOOP)
+            .unwrap()
+            .run(prompt)
+            .await
+            .unwrap()
+    }
+
+    fn samples(&self) -> usize {
+        self.samples.load(Ordering::SeqCst)
+    }
+
+    fn reminders(&self) -> Vec<String> {
+        self.root
+            .require::<Sessions>(SESSIONS)
+            .unwrap()
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                cordis_spine::LogEvent::SystemReminder(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn bookkeeping(&self) -> usize {
+        sentinel_reminders(&self.root).len()
+    }
+
+    /// `(name, content, is_error)` of every tool row in the log.
+    fn tool_rows(&self) -> Vec<(String, String, bool)> {
+        self.root
+            .require::<Sessions>(SESSIONS)
+            .unwrap()
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                cordis_spine::LogEvent::ToolExecute {
+                    name,
+                    content,
+                    is_error,
+                    ..
+                } => Some((name.clone(), content.clone(), *is_error)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn todos(&self) -> Arc<cordis_spine::Todos> {
+        self.root
+            .get::<cordis_spine::Todos>(cordis_spine::TODOS)
+            .unwrap()
+    }
+}
+
+/// A fake tool that answers with `reply`.
+fn fake_tool(root: &Context, name: &'static str, reply: &'static str) -> cordis::Disposable {
+    let body: cordis_spine::ToolBody = Arc::new(move |call: ToolCall| {
+        Box::pin(async move {
+            cordis_spine::ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content: reply.into(),
+                ..Default::default()
+            }
+        })
+    });
+    root.require::<cordis_spine::Tools>(TOOLS)
+        .unwrap()
+        .register(
+            cordis_spine::ToolSpec {
+                name: name.into(),
+                description: format!("fake {name}"),
+                parameters_json: r#"{"type":"object","properties":{}}"#.into(),
+            },
+            body,
+        )
+        .unwrap()
+}
+
+/// Todo plugin + loop + a recording sampler, plus a fake `ask_user_question`
+/// and a fake work tool (`edit_fake`) so a normal step offers more than
+/// `todo_write`.
+async fn boot_recorded(script: impl Fn(usize) -> LlmOutput + Send + Sync + 'static) -> Booted {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    let samples = Arc::new(AtomicUsize::new(0));
+    let offered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    root.provide(
+        LLM,
+        Llm::from_sampler(
+            root.clone(),
+            Arc::new(Recorded {
+                n: samples.clone(),
+                offered: offered.clone(),
+                script: Arc::new(script),
+            }),
+        ),
+    )
+    .unwrap();
+    let tools = vec![
+        fake_tool(&root, "ask_user_question", "用户答：先这样"),
+        fake_tool(&root, "edit_fake", "改好了"),
+    ];
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    Booted {
+        root,
+        samples,
+        offered,
+        _tools: tools,
+    }
+}
+
+const AWAITING_LIST: &str = r#"{"merge":false,"todos":[
+    {"id":"a","content":"读代码","status":"awaiting_user"},
+    {"id":"b","content":"改实现","status":"awaiting_user"}]}"#;
+
+#[tokio::test]
+async fn bookkeeping_step_only_exposes_todo_write() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => say("方案列好了"),
+        // The bookkeeping step tries to start work anyway: refused, not run.
+        2 => call_tool("c2", "edit_fake", "{}"),
+        _ => say("不该到这里"),
+    })
+    .await;
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("方案列好了".into()));
+    assert_eq!(b.samples(), 3);
+    let offered = b.offered.lock().unwrap().clone();
+    assert!(
+        offered[1].contains(&"edit_fake".to_string())
+            && offered[1].contains(&"todo_write".to_string()),
+        "a work step offers the whole table: {:?}",
+        offered[1]
+    );
+    assert_eq!(
+        offered[2],
+        ["todo_write"],
+        "the bookkeeping step offers only todo_write"
+    );
+    let rows = b.tool_rows();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1].0, "edit_fake");
+    assert_eq!(
+        rows[1].1, "没有执行：这一步只做 todo 记账，只能调用 todo_write。",
+        "{rows:?}"
+    );
+    assert!(rows[1].2, "the refused call is an error result");
+}
+
+#[tokio::test]
+async fn asking_the_user_this_turn_skips_the_todo_bookkeeping() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool("c1", "ask_user_question", "{}"),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("round-2".into()));
+    assert_eq!(b.samples(), 3, "no bookkeeping step after asking the user");
+    assert_eq!(b.bookkeeping(), 0, "{:?}", b.reminders());
+    assert_eq!(
+        b.todos().stats().open(),
+        2,
+        "the list is left as the model wrote it"
+    );
+}
+
+#[tokio::test]
+async fn the_ask_flag_rearms_on_the_next_prompt() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool("c1", "ask_user_question", "{}"),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("round-2".into()));
+    assert_eq!(b.bookkeeping(), 0);
+    // Next prompt: no ask this time, items still owed → one bookkeeping step.
+    assert_eq!(b.run("继续").await, TurnOutcome::Text("round-3".into()));
+    assert_eq!(b.samples(), 5, "s3 answers, s4 is the bookkeeping step");
+    assert_eq!(b.bookkeeping(), 1);
+    assert_eq!(b.offered.lock().unwrap()[4], ["todo_write"]);
+}
+
+#[tokio::test]
+async fn plan_mode_skips_the_todo_bookkeeping() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    let plan = cordis_spine::PlanMode::new(b.root.clone());
+    plan.enter_active();
+    b.root.provide(cordis_spine::PLAN_MODE, plan).unwrap();
+    assert_eq!(b.run("出个计划").await, TurnOutcome::Text("round-1".into()));
+    assert_eq!(b.samples(), 2, "plan mode: no bookkeeping step");
+    assert_eq!(b.bookkeeping(), 0, "{:?}", b.reminders());
+}
+
+#[tokio::test]
+async fn all_awaiting_user_skips_bookkeeping() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", AWAITING_LIST),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("round-1".into()));
+    assert_eq!(b.samples(), 2);
+    assert_eq!(b.bookkeeping(), 0, "{:?}", b.reminders());
+    assert!(
+        !b.reminders().iter().any(|r| r.contains("当前清单")),
+        "awaiting_user items are not 'current' or 'next': {:?}",
+        b.reminders()
+    );
+}
+
+/// `"todos"` is shared with subagents. A child calling `ask_user_question`
+/// inside the parent's turn is the child handing *its* turn back — the parent
+/// still owes its own bookkeeping.
+#[tokio::test]
+async fn a_child_ask_does_not_unlock_the_parent_gate() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool("c1", "run_child", "{}"),
+        // Child turn: asks the user, then answers.
+        2 => call_tool("c2", "ask_user_question", "{}"),
+        3 => say("child-done"),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    let child = b.root.isolate("sessions");
+    child
+        .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+        .unwrap();
+    let child_for_tool = child.clone();
+    let body: cordis_spine::ToolBody = Arc::new(move |call: ToolCall| {
+        let child = child_for_tool.clone();
+        Box::pin(async move {
+            let out = LoopHandle::new(child, Arc::new(cordis_spine::GrokStep))
+                .run("子任务")
+                .await;
+            cordis_spine::ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content: format!("{out:?}"),
+                ..Default::default()
+            }
+        })
+    });
+    let _runner = b
+        .root
+        .require::<cordis_spine::Tools>(TOOLS)
+        .unwrap()
+        .register(
+            cordis_spine::ToolSpec {
+                name: "run_child".into(),
+                description: "run a child turn".into(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.into(),
+            },
+            body,
+        )
+        .unwrap();
+
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("round-4".into()));
+    let child_kinds = child.require::<Sessions>(SESSIONS).unwrap().kinds();
+    assert!(
+        child_kinds.contains(&"tools/execute"),
+        "the child really ran ask_user_question: {child_kinds:?}"
+    );
+    assert_eq!(
+        b.samples(),
+        6,
+        "s4 is the parent's text, s5 its bookkeeping step"
+    );
+    assert_eq!(b.bookkeeping(), 1, "{:?}", b.reminders());
+    assert_eq!(b.offered.lock().unwrap()[5], ["todo_write"]);
+}
+
+#[tokio::test]
+async fn the_next_turn_reminds_about_items_the_last_turn_left_open() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    // s1 text, s2 bookkeeping (ignored): both items still owed.
+    b.run("干活").await;
+    assert!(
+        !b.reminders().iter().any(|r| r.contains("上轮清单")),
+        "the first turn has no previous list"
+    );
+    b.run("换个方向：先写文档").await;
+    let sessions = b.root.require::<Sessions>(SESSIONS).unwrap();
+    let events = sessions.events();
+    let second_user = events
+        .iter()
+        .rposition(|e| matches!(e, cordis_spine::LogEvent::User(_)))
+        .unwrap();
+    let carried: Vec<&String> = events[second_user..]
+        .iter()
+        .filter_map(|e| match e {
+            cordis_spine::LogEvent::SystemReminder(t) if t.contains("上轮清单") => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(carried.len(), 1, "{carried:?}");
+    let body = carried[0];
+    assert!(body.contains("上轮清单还剩 2 项未完成"), "{body}");
+    assert!(
+        body.contains("in_progress: 读代码\npending: 改实现\n"),
+        "{body}"
+    );
+    assert!(body.contains("用户的新消息优先"), "{body}");
+    assert!(body.contains("先用 todo_write 更新或清空清单"), "{body}");
+    // It lands before the second turn's first sample, not after it.
+    let first_sample = events[second_user..]
+        .iter()
+        .position(|e| matches!(e, cordis_spine::LogEvent::LlmStream(_)))
+        .unwrap();
+    let at = events[second_user..]
+        .iter()
+        .position(
+            |e| matches!(e, cordis_spine::LogEvent::SystemReminder(t) if t.contains("上轮清单")),
+        )
+        .unwrap();
+    assert!(at < first_sample, "{:?}", sessions.kinds());
+}
+
+#[tokio::test]
+async fn the_next_turn_stays_quiet_when_nothing_is_owed() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool("c1", "todo_write", CLOSE_LIST),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.run("干活").await;
+    assert_eq!(b.todos().stats().completed, 2);
+    b.run("再看看").await;
+    assert!(
+        !b.reminders()
+            .iter()
+            .any(|r| r.contains("上轮清单") || r.contains("awaiting_user")),
+        "{:?}",
+        b.reminders()
+    );
+}
+
+/// `awaiting_user` items are not "left open", but the user's next message may
+/// be the answer: the next turn says so instead of counting them.
+#[tokio::test]
+async fn the_next_turn_points_at_awaiting_user_items_without_counting_them() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", AWAITING_LIST),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.run("干活").await;
+    b.run("可以，按方案做").await;
+    let reminders = b.reminders();
+    let carried: Vec<&String> = reminders
+        .iter()
+        .filter(|r| r.contains("在等用户（awaiting_user）"))
+        .collect();
+    assert_eq!(carried.len(), 1, "{reminders:?}");
+    assert!(!carried[0].contains("上轮清单还剩"), "{}", carried[0]);
+    assert!(
+        carried[0].contains("「读代码」、「改实现」"),
+        "{}",
+        carried[0]
+    );
+    assert!(
+        carried[0].contains("改回 pending / in_progress"),
+        "{}",
+        carried[0]
+    );
+}
+
+/// The list just changed: the next step says where the model stands, as a
+/// suggestion.
+#[tokio::test]
+async fn a_list_change_is_followed_by_a_focus_reminder() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool("c1", "edit_fake", "{}"),
+        2 => call_tool(
+            "c2",
+            "todo_write",
+            r#"{"todos":[{"id":"a","status":"completed"},{"id":"b","status":"in_progress"}]}"#,
+        ),
+        3 => call_tool(
+            "c3",
+            "todo_write",
+            r#"{"todos":[{"id":"b","status":"completed"}]}"#,
+        ),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.run("干活").await;
+    let focus: Vec<String> = b
+        .reminders()
+        .into_iter()
+        .filter(|r| r.contains("当前清单"))
+        .collect();
+    assert_eq!(focus.len(), 2, "{focus:?}");
+    assert!(
+        focus[0].contains("正在做「读代码」；下一项「改实现」。"),
+        "{}",
+        focus[0]
+    );
+    assert!(
+        focus[1].contains("正在做「改实现」；这是最后一项。"),
+        "{}",
+        focus[1]
+    );
+    assert!(focus[0].contains("建议"), "{}", focus[0]);
+    assert_eq!(b.bookkeeping(), 0, "everything was closed before the text");
+}
+
+/// An item is `in_progress`, a test command just ran and the list did not move
+/// in that step: suggest ticking it off.
+#[tokio::test]
+async fn a_test_run_without_a_list_update_suggests_marking_it_done() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool(
+            "c1",
+            "bash",
+            r#"{"command":"cd dock && cargo test -p cordis-spine"}"#,
+        ),
+        2 => call_tool("c2", "todo_write", CLOSE_LIST),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.run("干活").await;
+    let nudges: Vec<String> = b
+        .reminders()
+        .into_iter()
+        .filter(|r| r.contains("刚跑完测试 / 构建"))
+        .collect();
+    assert_eq!(nudges.len(), 1, "{:?}", b.reminders());
+    assert!(
+        nudges[0]
+            .contains("（`cd dock && cargo test -p cordis-spine`），「读代码」还是 in_progress"),
+        "{}",
+        nudges[0]
+    );
+    assert!(nudges[0].contains("标 completed"), "{}", nudges[0]);
+}
+
+/// Reproduction of session 01a1d068: the model lists a plan and stops, the
+/// user says 「先讨论方案」. The old turn-end gate ("Todos NOT complete —
+/// continue working…") pushed the model into the work. Now the turn end only
+/// gets a bookkeeping step that cannot run anything but `todo_write`.
+#[tokio::test]
+async fn after_lets_discuss_the_plan_first_the_model_does_not_start_working() {
+    let b = boot_recorded(|i| match i {
+        // Turn 1: plan as a list, then text asking whether to start.
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => say("方案：先读代码，再改实现。要开始吗？"),
+        // Bookkeeping: the model ignores it.
+        2 => say("好的"),
+        // Turn 2, user: 「先讨论方案」. The model discusses.
+        3 => say("好，先讨论：读代码这步要看哪些模块？"),
+        // Bookkeeping again; the model tries to start editing anyway.
+        4 => call_tool("c4", "edit_fake", "{}"),
+        _ => say("不该到这里"),
+    })
+    .await;
+    b.run("帮我把 todo 提醒重做一下").await;
+    let out = b.run("先讨论方案").await;
+    assert_eq!(
+        out,
+        TurnOutcome::Text("好，先讨论：读代码这步要看哪些模块？".into())
+    );
+    assert_eq!(
+        b.samples(),
+        5,
+        "each turn: one text + one bookkeeping step, no work"
+    );
+    assert!(
+        !b.reminders()
+            .iter()
+            .any(|r| r.contains("continue working") || r.contains("别停在这里向用户汇报")),
+        "{:?}",
+        b.reminders()
+    );
+    let offered = b.offered.lock().unwrap().clone();
+    assert_eq!(offered[2], ["todo_write"]);
+    assert_eq!(offered[4], ["todo_write"]);
+    let worked: Vec<_> = b
+        .tool_rows()
+        .into_iter()
+        .filter(|(name, _, is_error)| name != "todo_write" && !is_error)
+        .collect();
+    assert!(worked.is_empty(), "no work tool ran: {worked:?}");
 }
 
 /// `"goal"` is not isolated per subagent either (`ChildRunner` isolates

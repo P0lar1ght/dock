@@ -53,8 +53,13 @@ impl TodoFold {
     }
 }
 
+/// Not settled: still shown in the active fold and not counted as done.
+/// `awaiting_user` belongs here — it waits on the user, but it is not done.
 fn is_open(status: TodoStatus) -> bool {
-    matches!(status, TodoStatus::Pending | TodoStatus::InProgress)
+    matches!(
+        status,
+        TodoStatus::Pending | TodoStatus::InProgress | TodoStatus::AwaitingUser
+    )
 }
 
 /// Rendered card. Empty when there is no list at all.
@@ -287,6 +292,7 @@ fn call_header(items: &[TodoItem], theme: &Theme, width: usize) -> Line<'static>
         TodoStatus::Completed,
         TodoStatus::InProgress,
         TodoStatus::Pending,
+        TodoStatus::AwaitingUser,
         TodoStatus::Cancelled,
     ] {
         let n = items.iter().filter(|t| t.status == status).count();
@@ -340,6 +346,7 @@ fn parse_status(raw: Option<&str>) -> TodoStatus {
         Some("in_progress") => TodoStatus::InProgress,
         Some("completed") => TodoStatus::Completed,
         Some("cancelled") => TodoStatus::Cancelled,
+        Some("awaiting_user") => TodoStatus::AwaitingUser,
         _ => TodoStatus::Pending,
     }
 }
@@ -406,6 +413,29 @@ mod tests {
             "completed rows stay folded: {text}"
         );
         assert!(text.contains("已完成 1 项"), "{text}");
+    }
+
+    /// `awaiting_user` stays visible in the active fold with its own icon, and
+    /// is not counted as done. Older builds wrote no such status; a call row
+    /// carrying it parses to the new status instead of falling back to pending.
+    #[test]
+    fn awaiting_user_rows_stay_visible_and_unsettled() {
+        let todos = vec![
+            item("读源码", TodoStatus::Completed),
+            item("等用户确认方案", TodoStatus::AwaitingUser),
+        ];
+        let text = plain(&lines(&todos, TodoFold::Active, &Theme::current(), 80));
+        assert!(
+            text.contains(&format!("{} 等用户确认方案", glyphs::hollow_dot())),
+            "{text}"
+        );
+        assert!(text.contains("1/2"), "{text}");
+        assert!(!text.contains("全部完成"), "{text}");
+        let parsed = parse_call(
+            r#"{"todos":[{"id":"a","content":"等用户","status":"awaiting_user"},{"id":"b","status":"in_progress"}]}"#,
+        );
+        let statuses: Vec<_> = parsed.iter().map(|t| t.status).collect();
+        assert_eq!(statuses, [TodoStatus::AwaitingUser, TodoStatus::InProgress]);
     }
 
     #[test]
