@@ -955,7 +955,9 @@ struct Continuation {
 }
 
 /// What the loop does with the winning `agent/turn-end` vote.
-#[derive(Clone)]
+///
+/// Not `Clone`: it may carry the bookkeeping winner's pending charge, and a
+/// copy must not be able to spend that quota a second time.
 pub struct TurnEndRound {
     /// `<system-reminder>` body the loop appends before the extra step.
     pub reminder: String,

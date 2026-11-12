@@ -617,6 +617,13 @@ async fn two_pages_keep_goal_todos_and_plan_apart() {
         "第 1 页未完成的待办不能逼第 2 页续跑: {:?}",
         out.decision()
     );
+    // 待办在回合末投的是记账票，`decision()` 对它本来就回 `None`；真正挡住
+    // 「第 1 页的清单让第 2 页记账」的是这一条。
+    assert!(
+        out.decision_tools().is_none(),
+        "第 1 页未完成的待办不能让第 2 页记账: {:?}",
+        out.decision_tools()
+    );
 
     let listed = tools
         .execute_on(
