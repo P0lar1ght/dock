@@ -2354,7 +2354,30 @@ async fn an_unchanged_list_is_not_bookkept_again() {
     );
 }
 
-/// …but once the list moves again, the next turn end may bookkeep again.
+/// The 「开始做」 case: the list did not move since the last bookkeeping step,
+/// but the model did work this turn without touching it — exactly the
+/// forgot-to-mark case bookkeeping exists for.
+#[tokio::test]
+async fn work_without_a_list_update_is_bookkept_again() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        // s1 text, s2 bookkeeping that ignores the list.
+        // Turn 2: edits, never touches the list, ends with text.
+        3 => call_tool("c3", "edit_fake", "{}"),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.run("先列个方案").await;
+    assert_eq!(b.bookkeeping(), 1);
+    let revision = b.todos().revision();
+    assert_eq!(b.run("开始做").await, TurnOutcome::Text("round-4".into()));
+    assert_eq!(b.todos().revision(), revision, "the list never moved");
+    assert_eq!(b.samples(), 6, "s5 is turn 2's bookkeeping step");
+    assert_eq!(b.bookkeeping(), 2, "{:?}", b.reminders());
+    assert_eq!(b.offered.lock().unwrap()[5], ["todo_write"]);
+}
+
+/// …and once the list moves again, the next turn end may bookkeep again.
 #[tokio::test]
 async fn a_changed_list_is_bookkept_again() {
     let b = boot_recorded(|i| match i {
@@ -2488,6 +2511,16 @@ async fn bookkeeping_is_skipped_at_the_compact_threshold() {
     assert_eq!(b.run("干活").await, TurnOutcome::Text("round-1".into()));
     assert_eq!(b.samples(), 2, "no bookkeeping sample");
     assert_eq!(b.bookkeeping(), 0, "{:?}", b.reminders());
+    // The skipped step charged nothing: once there is room again, the same
+    // unchanged list still gets its bookkeeping step.
+    b.root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .set_window(1_000_000);
+    assert_eq!(b.run("继续").await, TurnOutcome::Text("round-2".into()));
+    assert_eq!(b.samples(), 4, "s3 is the bookkeeping step");
+    assert_eq!(b.bookkeeping(), 1, "{:?}", b.reminders());
+    assert_eq!(b.offered.lock().unwrap()[3], ["todo_write"]);
 }
 
 /// An ask that failed never reached the user: the bookkeeping still runs.

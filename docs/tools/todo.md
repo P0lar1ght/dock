@@ -17,14 +17,14 @@
 
 ### 回合末：只记账（`agent/turn-end`，`ORDER_TURN_END_TODO = 10`）
 
-条件全部满足才投票：以文字收尾、用户没排队下一条、是本页自己的回合；还有 `pending` 或没有后台任务（live job / running subagent）托底的 `in_progress`；本条用户消息里还没记过账（`MAX_TODO_BOOKKEEPING_FIRES = 1`，`keep_working_with` 式的胜出才扣，`agent/pre-step` 清零）。以下情况跳过：
+条件全部满足才投票：以文字收尾、用户没排队下一条、是本页自己的回合；还有 `pending` 或没有后台任务（live job / running subagent）托底的 `in_progress`；本条用户消息里还没记过账（`MAX_TODO_BOOKKEEPING_FIRES = 1`，`agent/pre-step` 清零；只在这一步**真的要跑**时才扣——票输了、或下面说的跑不成而跳过，都不扣，也不算「记过账」）。以下情况跳过：
 
 - 本轮调过 `ask_user_question` 或 `handoff_to_user`（`tools/execute` 上置位一个 `AtomicBool`，只认执行 ctx 的会话身份等于本页的——子代理自己问用户不算父级的；结果 `is_error` 的不算，没问到用户；经 `use_tool` 转调的也算，`tools/execute` 报的是真实工具名；新的用户消息到 `agent/pre-step` 时复位）；
-- 清单自上次记账步之后没变过（`Todos::revision()` 和上次记账步**跑完后**的值相同；这个值在下一条用户消息的 `agent/pre-step` 读，因为记账步自己可能写清单）。模型没理会的清单不会每轮都记一次账——每次记账都换一张工具表采样，前缀缓存会作废；
+- 清单自上次记账步之后没变过，**并且**之后本页没跑过 `todo_write` 以外的任何工具（`Todos::revision()` 和上次记账步**跑完后**的值相同——这个值在下一条用户消息的 `agent/pre-step` 读，因为记账步自己可能写清单；本页 `tools/execute` 上任何别的工具都把它清掉）。模型没理会、这一轮也没干活的清单不会每轮都记一次账——每次记账都换一张工具表采样，前缀缓存会作废；而用户说「开始做」、模型改了文件却没动清单，照样记账（忘了标完成正是要抓的情况）；
 - 本页计划模式开着（`PlanMode::active()`）；
 - 未完成项全是 `awaiting_user`。
 
-投的是 `TurnEnd::bookkeep_with(…, ["todo_write"], …)`：循环追加提醒（以 `TODO_BOOKKEEPING_SENTINEL` 开头，列出欠着的项，要求按实际进度改状态、等用户的标 `awaiting_user`、不要开始新工作），**只再采一步**、这一步发给模型的工具表只有 `todo_write`（模型硬调别的工具会收到「没有执行：这一步只做 todo 记账…」的错误结果，不会真跑），这一步不跑 `agent/step-start`；跑完不管结果如何都结束这一轮，回给调用方的仍是模型上一段正文。这一步的正文**不落记录**（`Sessions::mute_llm_text`：不推给界面、`LlmStream.text` 留空，所以也不进下一轮 `model_history()`），推理和工具调用照常落——模型顺嘴的「好的」不是第二条回复。
+投的是 `TurnEnd::bookkeep_with(…, ["todo_write"], …)`：循环追加提醒（以 `TODO_BOOKKEEPING_SENTINEL` 开头，列出欠着的项，要求按实际进度改状态、等用户的标 `awaiting_user`、不要开始新工作），**只再采一步**、这一步发给模型的工具表只有 `todo_write`（模型硬调别的工具会收到「没有执行：这一步只做 todo 记账…」的错误结果，不会真跑），这一步不跑 `agent/step-start`；跑完不管结果如何都结束这一轮，回给调用方的仍是模型上一段正文。这一步的正文**不落记录**（`Sessions::mute_llm_text`：不推给界面、`LlmStream.text` 留空，所以也不进下一轮 `model_history()`），推理和工具调用照常落——模型顺嘴的「好的」不是第二条回复。记账步的原始正文不保留：落盘的 `chat_history.jsonl`、关着的会话回放、下一轮请求里都没有它。
 
 这一步跑之前先确认跑得成，否则直接收尾、不落提醒（免得留下没有下文的孤儿提醒）：本页的工具表里没有 `todo_write`（预设可以不给）、已经按了 Stop、或上下文已到自动压缩门槛（`at_auto_threshold`，和 `Compact::maybe_auto` 同一把尺，85%）。记账步**不自动压缩**：收尾时为一次可有可无的记账压缩一遍不值得，到门槛就不记，下一轮第一步照常压缩。记账步里按 Stop：已落的工具结果照常落、没跑完的封口，但这一轮早已答完，仍按完成收尾、回上一段正文，不记成取消。记账票输给任何「继续干活」的票（`keep_working`，如目标、磁盘插件）——记账会结束这一轮，不能把别人正当的「还没完」吞掉；记账票之间照常按槽位。
 
@@ -55,4 +55,4 @@ watchdog 在 `step == 0` 重置，每步最多说一件事，按顺序：
 | `TodoStatus` 新增 `AwaitingUser`（枚举不是 `#[non_exhaustive]`） | 穷尽 `match` 要补一支：它既不算完成也不算模型欠的活；没有单独展示的地方按 `Pending` 画即可（旧版就是这么读的）。 |
 | `TodoStats` 新增公有字段 `awaiting_user` | 结构体字面量补 `awaiting_user: 0` 或 `..Default::default()`。`total()` 含它，`open()` 不含，`settled()` 不含。 |
 | `stale_reminder(steps)` 改为 `stale_reminder(steps, &TodoState)`，不再从 `tools::todo_write` 重导出 | `tools` 模块在 crate 内私有，`cordis_spine` 从没导出过它，外部代码碰不到；crate 内改走 `Todos` 的方法。 |
-| `TurnEnd::settle()` / `decision()` 的胜者现在可能是记账票 | 只读正文的调用方会把记账当成「继续干活」。驱动自己的循环时改用 `settle_round()`，`only_tools` 为 `Some` 时只再采一步、只给这些工具、然后收尾；`decision_tools()` 是只读版本。新增的只有 API：`TurnEnd::bookkeep_with`、`TurnEndRound`。`Continuation` 是私有类型，不算。 |
+| `TurnEnd::settle()` 已 `#[deprecated]`；它和 `decision()` 遇到记账胜者都回 `None` | 两者只认「继续干活」票：胜者是记账票时回 `None`（`settle()` 也不扣它的 `on_win`）——只会「拿到正文就接着跑」的旧调用方于是正常收尾，而不是带着全部工具继续干活（那正是记账要防的旧毛病）。驱动自己的循环改用 `settle_round()`：`only_tools` 为 `Some` 时只再采一步、只给这些工具、然后收尾，并且在确定这一步会跑时调 `TurnEndRound::charge()`（记账胜者的 `on_win` 推迟到这里；继续干活的胜者在 `settle_round()` 里已经扣过）。`decision_tools()` 是只读版本。新增的只有 API：`TurnEnd::bookkeep_with`、`TurnEndRound`（`new` / `charge`）。`Continuation` 是私有类型，不算。 |

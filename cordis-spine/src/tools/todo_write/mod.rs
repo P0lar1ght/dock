@@ -269,14 +269,19 @@ fn wire_todo_waterfalls(ctx: &Context) {
         });
     }
     {
-        let (asked, ctx_exec) = (asked.clone(), ctx.clone());
+        let (asked, ctx_exec, bookkept_at) = (asked.clone(), ctx.clone(), bookkept_at.clone());
         let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
             let result = args.next::<ToolResult>().unwrap_or(result);
+            if result.name == "todo_write" || !call_is_this_page(&ctx_exec) {
+                return result;
+            }
+            // Any other tool on this page is work the list may now be behind
+            // on: the "unchanged since the last bookkeeping" skip no longer
+            // holds. (The bookkeeping step itself only runs todo_write;
+            // refused calls there never reach `tools/execute`.)
+            *bookkept_at.lock().unwrap() = None;
             // A refused / failed ask never reached the user.
-            if !result.is_error
-                && ASK_TOOLS.contains(&result.name.as_str())
-                && call_is_this_page(&ctx_exec)
-            {
+            if !result.is_error && ASK_TOOLS.contains(&result.name.as_str()) {
                 asked.store(true, Ordering::Relaxed);
             }
             result
@@ -324,14 +329,17 @@ fn wire_todo_waterfalls(ctx: &Context) {
         let Some(todos) = ctx_end.get::<Todos>(TODOS) else {
             return next;
         };
-        // Nothing changed since the last bookkeeping step: the model already
-        // had its chance to settle exactly this list.
+        // Nothing changed since the last bookkeeping step and no tool ran
+        // since (any non-todo_write call clears `bookkept_at`): the model
+        // already had its chance to settle exactly this list.
         if *bookkept_at.lock().unwrap() == Some(todos.revision()) {
             return next;
         }
         if let Some(body) = todos.bookkeeping_reminder(backing_tasks(&ctx_end)) {
-            // Charged on the win, not on the vote: a handler in a lower
-            // slot can take the round, and the user never saw this step.
+            // Charged only when the loop actually takes the step
+            // (`TurnEndRound::charge`): a handler in a lower slot can win the
+            // round, or the step can be skipped (no todo_write, Stop, compact
+            // threshold) — then neither the quota nor `bookkept` moves.
             let (spent, ran) = (fires.clone(), bookkept.clone());
             next.bookkeep_with(ORDER_TURN_END_TODO, body, BOOKKEEPING_TOOLS, move || {
                 spent.fetch_add(1, Ordering::Relaxed);

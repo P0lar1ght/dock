@@ -253,7 +253,7 @@ async fn grok_sample_loop(
         // turn hands control back. The loop only counts rounds and appends the
         // winning reminder — the policy lives in the handlers.
         if rounds < MAX_TURN_END_ROUNDS {
-            if let Some(round) = turn_end_decision(
+            if let Some(mut round) = turn_end_decision(
                 ctx,
                 sessions,
                 if ended_with_text { &last_text } else { "" },
@@ -261,7 +261,7 @@ async fn grok_sample_loop(
                 ended_with_text,
             ) {
                 rounds += 1;
-                let Some(only) = round.only_tools else {
+                let Some(only) = round.only_tools.clone() else {
                     sessions.append(LogEvent::SystemReminder(round.reminder));
                     continue;
                 };
@@ -274,6 +274,8 @@ async fn grok_sample_loop(
                     && !cancelled(ctx)
                     && !crate::llm::compact::at_auto_threshold(ctx, &system)
                 {
+                    // 到这里才算数：跳过的记账不扣配额、也不算「记过账」。
+                    round.charge();
                     sessions.append(LogEvent::SystemReminder(round.reminder));
                     match bookkeeping_step(ctx, sessions, llm, tools, &system, specs, &only).await {
                         Ok(()) => {}
