@@ -372,7 +372,6 @@ fn system_detail(assembly: &PromptAssembly, snap: &ContextSnapshot) -> Occupancy
 fn section_label(id: &str) -> String {
     match id {
         "base" => "基座".into(),
-        "cordis" => "Cordis".into(),
         "skills" => "技能".into(),
         "workflows" => "工作流".into(),
         "persona" | "persona-replace" => "人设".into(),

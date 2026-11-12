@@ -624,7 +624,13 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         !assembled.contains("# Dynamic Cordis Plugins"),
         "{assembled}"
     );
-    assert!(assembled.contains("search_tool 查 cordis"), "{assembled}");
+    assert!(
+        !assembled.contains("search_tool 查 cordis"),
+        "cordis 写法不进系统提示: {assembled}"
+    );
+    assert!(assembled.contains("<agent-preset>"), "{assembled}");
+    assert!(assembled.contains("当前是Dock编码模式"), "{assembled}");
+    assert!(!assembled.contains("# Agent 预设"), "{assembled}");
     assert!(!assembled.contains("update_goal(objective"), "{assembled}");
     assert!(root.get::<cordis_spine::Ask>(cordis_spine::ASK).is_some());
     assert!(root
@@ -1635,12 +1641,16 @@ async fn main_session_listings_follow_the_preset_allowlist() {
         ("warden", false),
     ] {
         presets.apply(mode).unwrap();
-        let ids: Vec<String> = book
-            .assemble()
-            .inspect()
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
+        let assembly = book.assemble();
+        let ids: Vec<String> = assembly.inspect().into_iter().map(|p| p.id).collect();
+        assert!(
+            !ids.iter().any(|id| id == "cordis"),
+            "mode {mode}: cordis 写法在技能里，不进系统提示: {ids:?}"
+        );
+        assert!(
+            !assembly.render().contains("动态 Host 扩展"),
+            "mode {mode} still injects the cordis system pointer"
+        );
         for (section, tool) in [("skills", "skill"), ("workflows", "workflow")] {
             let present = ids.iter().any(|id| id == section);
             assert_eq!(

@@ -28,7 +28,8 @@ const SPAWN_TOOL_NAME: &str = "task";
 pub const CORDIS_PRESET_ID: &str = "cordis";
 pub const WARDEN_PRESET_ID: &str = "warden";
 
-const PERSONA_MARK: &str = "# Agent 预设：";
+const PERSONA_OPEN: &str = "<agent-preset>\n";
+const PERSONA_CLOSE: &str = "\n</agent-preset>";
 const BLOCKED: &str = "当前 Agent 预设未包含此工具。用 /preset 调整工具集。";
 const ROSTER_FILE: &str = "roster.yml";
 const AGENT_FILE: &str = "agent.yml";
@@ -1060,7 +1061,7 @@ impl AgentPresets {
         if text.is_empty() {
             return None;
         }
-        Some(format!("{PERSONA_MARK}{}\n\n{text}", preset.name))
+        Some(format!("{PERSONA_OPEN}{text}{PERSONA_CLOSE}"))
     }
 
     pub fn merge_persona(&self, assembled: &mut String) {
@@ -1077,11 +1078,11 @@ impl AgentPresets {
             *assembled = text.to_string();
             return;
         }
-        if assembled.contains(PERSONA_MARK) {
+        if assembled.contains(PERSONA_OPEN) {
             return;
         }
         assembled.push_str("\n\n");
-        assembled.push_str(&format!("{PERSONA_MARK}{}\n\n{text}", preset.name));
+        assembled.push_str(&format!("{PERSONA_OPEN}{text}{PERSONA_CLOSE}"));
     }
 
     pub fn current_roster(&self) -> IndexMap<String, SubagentDef> {
@@ -2596,7 +2597,7 @@ mod tests {
         presets.delete(DEFAULT_PRESET_ID).unwrap();
         let restored = presets.get(DEFAULT_PRESET_ID).unwrap();
         assert_eq!(restored.origin, PresetOrigin::Shipped);
-        assert!(restored.persona.contains("编码助手"));
+        assert!(restored.persona.contains("Dock编码模式"));
         assert!(!dir.path().join("code").join(AGENT_FILE).is_file());
     }
 
@@ -2670,15 +2671,16 @@ mod tests {
     }
 
     #[test]
-    fn minimal_replaces_system_prompt() {
+    fn minimal_appends_persona_inside_agent_preset() {
         let dir = tempfile::tempdir().unwrap();
         let presets = AgentPresets::load(dir.path().to_path_buf());
         presets.apply(MINIMAL_PRESET_ID).unwrap();
-        assert!(presets.replaces_prompt());
+        assert!(!presets.replaces_prompt());
         let mut assembled = "You are a test agent.".into();
         presets.merge_persona(&mut assembled);
-        assert!(!assembled.contains("test agent"), "{assembled}");
-        assert!(assembled.contains("list_dir"), "{assembled}");
+        assert!(assembled.contains("test agent"), "{assembled}");
+        assert!(assembled.contains("<agent-preset>"));
+        assert!(assembled.contains("极少的工具"), "{assembled}");
     }
 
     #[test]
@@ -2810,8 +2812,9 @@ mod tests {
         let mut assembled = "You are a test agent.".into();
         presets.merge_persona(&mut assembled);
         presets.merge_persona(&mut assembled);
-        assert_eq!(assembled.matches(PERSONA_MARK).count(), 1);
-        assert!(assembled.contains("编码助手"));
+        assert_eq!(assembled.matches(PERSONA_OPEN).count(), 1);
+        assert!(assembled.contains("</agent-preset>"));
+        assert!(assembled.contains("Dock编码模式"));
         // 名册与写路径归 `task` 工具的 role hint，不再在系统提示里重写一遍。
         assert!(!assembled.contains("send_message"), "{assembled}");
         assert!(!assembled.contains("reload_roster"), "{assembled}");

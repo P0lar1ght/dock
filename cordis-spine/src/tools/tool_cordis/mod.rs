@@ -2,7 +2,6 @@
 //! Injects `"dynamicCordisRunner"` + `"tools"`; does not own the registry.
 
 mod inspect;
-mod prompt;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -12,9 +11,7 @@ use cordis::{plugin, Context, Inject, Plugin};
 use serde_json::Value;
 
 use crate::host::slash::{contrib_fields_present, slash_entry_from_define, Slash};
-use crate::names::{CONTEXT, DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, SLASH, TOOLS};
-use crate::prompt::assemble::ORDER_CORDIS;
-use crate::prompt::context_book::{own_sections, ContextBook};
+use crate::names::{DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, SLASH, TOOLS};
 use crate::session::log::Sessions;
 use crate::tools::dynamic_runner::{
     AttemptStatus, DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode, SourceInput,
@@ -23,7 +20,6 @@ use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
 use inspect::{render_inspect, render_plugin};
-use prompt::CORDIS_SYSTEM_PROMPT;
 
 type ExecFut = Pin<Box<dyn Future<Output = ToolResult> + Send + 'static>>;
 
@@ -80,15 +76,8 @@ const TOOL_NAMES: [&str; 6] = [
 pub fn tool_cordis() -> Plugin {
     plugin(
         "tool-cordis",
-        Inject::from([TOOLS, DYNAMIC_CORDIS_RUNNER, CONTEXT]),
+        Inject::from([TOOLS, DYNAMIC_CORDIS_RUNNER]),
         |ctx, _: &()| {
-            let book = ctx.require::<ContextBook>(CONTEXT)?;
-            own_sections(
-                ctx,
-                vec![book.section(ORDER_CORDIS, "cordis", |_| {
-                    Some(CORDIS_SYSTEM_PROMPT.to_string())
-                })?],
-            )?;
             let ctx_pre = ctx.clone();
             let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
                 let next = args.next::<PreStep>().unwrap_or(step);
@@ -635,7 +624,6 @@ mod tests {
                 "PROMOTE_SESSION_COLLISION_HINT",
                 crate::tools::dynamic_runner::PROMOTE_SESSION_COLLISION_HINT,
             ),
-            ("CORDIS_SYSTEM_PROMPT", CORDIS_SYSTEM_PROMPT),
         ];
         // Folded-away verbs, bare. The receipt that started this said "undefine
         // it", never "cordis_undefine", so prefixed-name matching alone would
@@ -658,8 +646,8 @@ mod tests {
                 );
             }
         }
-        // The Skill is what the system prompt tells the model to load before
-        // authoring, references and examples included: same two checks.
+        // The bundled skill is the authoring contract (tool descriptions point
+        // at it). References and examples get the same two checks.
         let skill_files: Vec<_> = crate::tools::skills::builtin::BUILTIN_FILES
             .iter()
             .filter(|(rel, _)| rel.starts_with("cordis-plugin-development/"))
