@@ -491,14 +491,20 @@
   }
 
   // todo_write 这次写了哪些状态：「✓2 ▶1 □1 等用户1」。awaiting_user = 在等用户回答，
-  // 不算完成也不算模型欠的活。没有 todos 数组的退回通用参数摘要。
-  const TODO_MARKS = [["completed", "✓"], ["in_progress", "▶"], ["pending", "□"], ["awaiting_user", "等用户"], ["cancelled", "✗"]];
+  // 不算完成也不算模型欠的活。合并模式（merge 缺省即 true）下不带 status 的项只是改
+  // 内容、状态不变，记成「改N」而不是 □；替换模式（merge:false）下不带 status 的新项
+  // 才是 pending。没有 todos 数组的退回通用参数摘要。
+  const TODO_MARKS = [["completed", "✓"], ["in_progress", "▶"], ["pending", "□"], ["awaiting_user", "等用户"], ["cancelled", "✗"], ["", "改"]];
   function todoSummary(a) {
     if (typeof a === "string") { try { a = JSON.parse(a); } catch { return ""; } }
     const rows = a && Array.isArray(a.todos) ? a.todos : null;
     if (!rows) return "";
+    const merge = a.merge !== false;
     const n = {};
-    for (const t of rows) { const st = (t && t.status) || "pending"; n[st] = (n[st] || 0) + 1; }
+    for (const t of rows) {
+      const st = (t && t.status) || (merge ? "" : "pending");
+      n[st] = (n[st] || 0) + 1;
+    }
     return TODO_MARKS.filter(([st]) => n[st]).map(([st, m]) => `${m}${n[st]}`).join(" ");
   }
 
