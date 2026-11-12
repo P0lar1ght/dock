@@ -110,7 +110,7 @@ impl ContextBook {
     /// Named section that survives a landed `replace_prompt` replacement.
     ///
     /// No production caller today: the subagent roster that needed it now
-    /// lives on the `task` tool description. Kept as the escape hatch for a
+    /// lives in a history `<system-reminder>`. Kept as the escape hatch for a
     /// section that has to outlive `replace_prompt` (a hard safety rule, say).
     pub fn section_always(
         &self,

@@ -37,7 +37,7 @@
 | `tool-monitor` | → `"tools"`（live `"jobs"`） | `monitor`（按需） | 长命令 stdout 盯梢 | [jobs](docs/tools/jobs.md) |
 | `slash` | `"slash"` | — | 斜杠命令表：各功能插件 `register_command` 登记命令（宿主无关的带 handler，TUI / 网关共用），附加命令不能盖掉它们。`kind`：`prompt` / `overlay` / `slot`（开已登记的 `tui.slots` id）/ `tool`（`text`=工具名，直接 `Tools::execute`，结果 Notice，权限门仍生效） | — |
 | `tui.slots` | `"tui.slots"` | — | 动态包登记的插槽（数据+回调，不是 ratatui widget），不分端：TUI 画成通用 `Overlay::Slot`，GUI 经网关 `surface/*` 拿正文与动作按钮；可交视图树（`docs/PLUGIN-VIEWS.md`），两端按视图画；动作点击即 `on_key(动作 id)`，增删 / 操作 / `host.slot_changed` 发 `tui.slots/changed` | — |
-| `skills` | `"skills"` | — | 发现 `SKILL.md`，登记 listing 段与 slash extras | [skills](docs/tools/skills.md) |
+| `skills` | `"skills"` | — | 发现 `SKILL.md`，登记目录 reminder 与 slash extras | [skills](docs/tools/skills.md) |
 | `tool-skills` | → `"tools"`（live `"skills"`） | `skill` | 按需读 `SKILL.md` 正文 | [skills](docs/tools/skills.md) |
 | `project-instructions` | → `agent/step-start` | — | `AGENTS.md` 进历史 reminder（新会话排在首条用户消息前），**不进系统提示** | [project-instructions](docs/tools/project-instructions.md) |
 | `agent-presets` | `"agentPresets"` | — | YAML 人设 + 工具允许名单；`task` 的 `subagent_type` enum 来源 | [agent-presets](docs/tools/agent-presets.md) |
@@ -54,7 +54,7 @@
 | `tool-memory` | `"memory"` + `"tools"`；`MEMORY.md` 注入挂 `agent/step-start`（order 7，不进系统提示） | `memory_search` `memory_get`（启用时常驻） | `$DOCK_HOME/memory/{global,workspace-<slug>}/{topics,observations}/` + FTS `search.sqlite` + 可选 sqlite-vec hybrid（crate `dock-memory`）。默认关；`[memory] enabled` / `DOCK_MEMORY=1`。启用时 `register` 进 sampler；关则从表移除。旧 `~/.dock/memory` 只读兼容 | `/flush` `/dream` `/memory` `/remember` |
 | `tool-goal` | `"goal"` + `"tools"` | `update_goal`（按需） | Grok oneshot ack + drain，带续跑 waterfall | [goal](docs/tools/goal.md) |
 | `tool-lsp` | `"lsp"` + `"tools"` | `lsp`（按需） | Grok `LspManager`/`dispatch`，没服务器时 fail-open | [lsp](docs/tools/lsp.md) |
-| `tool-workflow` | `"workflows"` + `"tools"` | `workflow`（按需） | Grok Rhai 引擎 + listing 段 | [workflow](docs/tools/workflow.md) |
+| `tool-workflow` | `"workflows"` + `"tools"` | `workflow`（按需） | Grok Rhai 引擎 + 目录 reminder | [workflow](docs/tools/workflow.md) |
 | `mcp-client` | `"mcp"` + `"tools"` | `search_tool` `use_tool` | stdio + Streamable HTTP；BM25 检索、schema 去重、20KB 预算；MCP Apps 界面 | [mcp](docs/tools/mcp.md) |
 | `dynamic-runner` | `"dynamicCordisRunner"` | — | 会话注册表 + 磁盘永久插件 | [cordis](docs/tools/cordis.md) |
 | `tool-cordis` | → `"tools"` | `cordis_*`（按需） | 预置工厂 + Rhai；热挂插件 | [cordis](docs/tools/cordis.md) |

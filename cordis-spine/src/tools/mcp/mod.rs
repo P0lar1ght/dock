@@ -407,9 +407,9 @@ pub struct Mcp {
     elicit: Elicitation,
     changed_tx: tokio::sync::mpsc::UnboundedSender<String>,
     dirty: Arc<AtomicBool>,
-    /// 每个会话（页号 + 落盘 id）已经知道的服务器。GUI 每个对话是另一页，页位还会
-    /// 换装别的对话，所以不能整个进程只记一份。
-    announced: Arc<Mutex<HashMap<String, HashMap<String, discover::ServerFingerprint>>>>,
+    /// 每个会话（页号 + 落盘 id）已经知道的 MCP 工具公名，按服务器分组。GUI 每个
+    /// 对话是另一页，页位还会换装别的对话，所以不能整个进程只记一份。
+    announced: Arc<Mutex<HashMap<String, discover::Announced>>>,
     reloading: Arc<AtomicBool>,
 }
 
@@ -517,9 +517,10 @@ impl Mcp {
         }
     }
 
-    /// 把这个会话还不知道的变化（新连上、更新、断开）写进它的历史。
+    /// 把这个会话还不知道的工具名变化（新连上、重连、断开、工具开关）写进它的
+    /// 历史。第一次列全量，之后只发新增 / 移除；模型在下一轮采样看到的就是这一条。
     fn announce_to(&self, sessions: &Sessions) {
-        let summaries = discover::summaries_from_status(&self.list());
+        let servers = discover::visible_servers(&self.list());
         let key = format!("{}|{}", sessions.identity(), sessions.live_session_id());
         let mut all = self.announced.lock().unwrap();
         // 关掉的页、换装掉的对话不会来清自己那条：长时间开着的 GUI 会慢慢攒。到上限就
@@ -528,10 +529,10 @@ impl Mcp {
             all.clear();
         }
         let known = all.entry(key).or_default();
-        let Some(text) = discover::build_delta_reminder(known, &summaries) else {
+        let Some(text) = discover::build_delta_reminder(known, &servers) else {
             return;
         };
-        *known = discover::fingerprint_servers(&summaries);
+        *known = discover::snapshot_servers(&servers);
         drop(all);
         sessions.append(LogEvent::SystemReminder(format!(
             "<system-reminder>\n{text}\n</system-reminder>"
@@ -1664,7 +1665,7 @@ startup_timeout_sec = 1
             .events()
             .iter()
             .filter_map(|e| match e {
-                LogEvent::SystemReminder(t) if t.contains("MCP 服务器") => Some(t.clone()),
+                LogEvent::SystemReminder(t) if t.contains("MCP 工具") => Some(t.clone()),
                 _ => None,
             })
             .collect()
@@ -1731,10 +1732,10 @@ startup_timeout_sec = 1
         assert!(slot.rpc.is_none() && slot.stop.is_none());
     }
 
-    /// 回归：「MCP 服务器已连接」以前整个进程只发一次、只写进第 1 页。GUI 的每个新对话
-    /// 都是另开的一页，模型在那里根本不知道有浏览器 / 桌面这些 MCP 工具（实测问「香港
-    /// 有没有 iPhone 现货」，它只会搜网页，说查不了实时库存）。现在每一页第一轮都告诉它，
-    /// 写进正在跑的那一页，之后有变化再补。
+    /// 回归：MCP 工具名以前整个进程只发一次、只写进第 1 页。GUI 的每个新对话都是另开
+    /// 的一页，模型在那里根本不知道有浏览器 / 桌面这些 MCP 工具（实测问「香港有没有
+    /// iPhone 现货」，它只会搜网页，说查不了实时库存）。现在每一页第一轮都收到名字
+    /// 清单，写进正在跑的那一页，之后有变化只补增量。
     #[tokio::test]
     async fn every_page_learns_the_mcp_servers_on_its_first_turn() {
         let (ctx, mcp, _tools) = boot().await;
@@ -2144,7 +2145,7 @@ startup_timeout_sec = 1
     }
 
     #[tokio::test]
-    async fn toggle_appends_server_delta_reminder_not_tool_names() {
+    async fn toggle_appends_name_delta_reminder() {
         let (ctx, mcp, tools) = boot().await;
         attach_fake(&mcp, "probe", &[("ping", "ping")]);
         mcp.maybe_inject_reminder();
@@ -2161,21 +2162,24 @@ startup_timeout_sec = 1
         assert!(
             reminders
                 .iter()
-                .any(|t| t.contains("MCP 服务器已连接") && t.contains("probe")),
+                .any(|t| t.contains("MCP 工具：") && t.contains("mcp_probe__ping")),
             "{reminders:?}"
         );
         assert!(
             reminders
                 .iter()
-                .any(|t| t.contains("MCP 服务器已断开：probe")),
-            "{reminders:?}"
-        );
-        assert!(
-            reminders.iter().all(|t| !t.contains("mcp_probe__ping")),
+                .any(|t| t.contains("MCP 工具移除：") && t.contains("mcp_probe__ping")),
             "{reminders:?}"
         );
         assert!(
             reminders.iter().all(|t| t.contains("<system-reminder>")),
+            "{reminders:?}"
+        );
+        // 名字之外不写描述 / 工具数。
+        assert!(
+            reminders
+                .iter()
+                .all(|t| !t.contains("个工具") && !t.contains("MCP 服务器")),
             "{reminders:?}"
         );
         assert!(!tools.is_mcp("mcp_probe__ping"));
@@ -2319,12 +2323,12 @@ startup_timeout_sec = 1
         assert!(
             reminders
                 .iter()
-                .any(|t| t.contains("MCP 服务器已断开：probe")),
-            "重载要复用目录 delta 通道告诉模型：{reminders:?}"
+                .any(|t| t.contains("MCP 工具移除：") && t.contains("mcp_probe__ping")),
+            "重载要复用名字 delta 通道告诉模型：{reminders:?}"
         );
         assert!(
-            reminders.iter().all(|t| !t.contains("mcp_probe__ping")),
-            "delta 只报服务器，不铺工具名：{reminders:?}"
+            reminders.iter().all(|t| !t.contains("MCP 服务器")),
+            "只报工具名，不报服务器说明：{reminders:?}"
         );
     }
 

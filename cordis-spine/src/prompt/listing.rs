@@ -1,7 +1,7 @@
-//! Shared budget-capped catalog listing for the system prompt.
+//! Shared budget-capped catalog listing for history reminders.
 //!
-//! Skills and workflows both advertise a name + one-line description in the
-//! system prompt and load the full body on demand. The rendering rules (budget,
+//! Skills and workflows both advertise a name + one-line description in a
+//! `<system-reminder>` and load the full body on demand. The rendering rules (budget,
 //! truncation, degraded second pass, overflow footer) are identical, so they
 //! live here once and each caller supplies only its header and path shape.
 //!
@@ -37,7 +37,7 @@ pub(crate) fn budget_chars(window_tokens: u64) -> usize {
     ((window as f64) * 4.0 * BUDGET_PERCENT) as usize
 }
 
-/// Whether this session should carry a catalog listing in its system prompt.
+/// Whether this session should carry a catalog listing in its history.
 ///
 /// `loader` is the tool the listing header tells the model to call (`skill`,
 /// `workflow`). Two independent gates:

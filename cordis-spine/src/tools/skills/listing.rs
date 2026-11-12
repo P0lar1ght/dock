@@ -1,4 +1,4 @@
-//! Skill listing for system-prompt / `/context`. Budget + rendering rules are
+//! Skill listing for the history reminder / `/context`. Budget + rendering rules are
 //! shared with workflows in [`crate::prompt::listing`]; this file only supplies the
 //! header and the skill-shaped row.
 

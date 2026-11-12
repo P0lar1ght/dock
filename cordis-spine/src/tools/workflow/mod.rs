@@ -18,14 +18,14 @@ use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use crate::host::settings::AppSettings;
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::names::{
-    CONTEXT, SESSIONS, SETTINGS, SLASH, TOOLS, TOOLS_EXECUTE, WORKFLOWS, WORKFLOW_CHANGED,
+    SESSIONS, SETTINGS, SLASH, STEP_START, TOOLS, TOOLS_EXECUTE, WORKFLOWS, WORKFLOW_CHANGED,
 };
-use crate::prompt::assemble::ORDER_WORKFLOWS;
-use crate::prompt::context_book::{own_sections, ContextBook};
 use crate::prompt::listing::wants_listing;
 use crate::session::log::Sessions;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
-use cordis_base::types::{LogEvent, ToolCall, ToolResult, ToolSpec};
+use cordis_base::types::{
+    LogEvent, StepStart, ToolCall, ToolResult, ToolSpec, ORDER_STEP_START_WORKFLOWS,
+};
 
 pub use args::{workflow_command_arguments, workflow_slash_arguments};
 pub use command::workflow_command;
@@ -80,8 +80,8 @@ pub struct Workflows {
     pub handle: WorkflowLaunchHandle,
     extras: Mutex<Vec<Disposable>>,
     announced: Mutex<HashSet<String>>,
-    /// 本会话**中途**发现的工作流名。启动时就在目录里的不算——那些在冻结的
-    /// listing 段里，压缩不会让模型忘掉它们。
+    /// 本会话**中途**发现的工作流名。启动时就在目录里的不算——那些在目录
+    /// reminder 里，压缩后还会重新注入。
     discovered: Mutex<Vec<String>>,
     frozen_listing: Mutex<Option<String>>,
 }
@@ -103,7 +103,7 @@ impl Workflows {
         self.state.cancel(&run_id).then_some(run_id)
     }
 
-    fn listing_text(&self) -> String {
+    pub(crate) fn listing_text(&self) -> String {
         if let Some(frozen) = self.frozen_listing.lock().unwrap().clone() {
             return frozen;
         }
@@ -156,7 +156,7 @@ impl Workflows {
 
     /// 压缩后重发的「中途发现」提示，没有中途发现就返回 `None`。
     ///
-    /// listing 段是冻结的（系统提示不重写），所以这些工作流只靠历史里那条
+    /// 目录在会话里冻结（不随磁盘扫描重写），所以这些工作流只靠历史里那条
     /// reminder 让模型知道；压缩抹掉它之后得再说一遍。
     pub fn rediscovery_notice(&self) -> Option<String> {
         let found = self.discovered.lock().unwrap().clone();
@@ -304,95 +304,133 @@ validate_only: true 只做冒烟检查（元数据、编译、一条 canned-host
 
 const PARAMS: &str = r#"{"type":"object","properties":{"source":{"description":"Exactly one workflow source.","oneOf":[{"type":"object","required":["type","name"],"properties":{"type":{"const":"name"},"name":{"type":"string"}}},{"type":"object","required":["type","script"],"properties":{"type":{"const":"script"},"script":{"type":"string"}}},{"type":"object","required":["type","script_path"],"properties":{"type":{"const":"script_path"},"script_path":{"type":"string"}}}]},"agent_budget":{"type":"integer","minimum":1,"maximum":1024},"args":{},"validate_only":{"type":"boolean"}},"required":[]}"#;
 
+/// 历史里那份工作流目录的开头。结构化标记：会话里要认出「哪一条 reminder 是
+/// 目录副本」才谈得上判断该不该重注（压缩抹掉旧副本、`/resume` 回放旧版）。
+const LISTING_MARKER: &str = "<system-reminder>\n可用工作流";
+/// 切换预设后旧目录还在历史里，补一句让它失效，免得模型照着调一颗已经不存在的工具。
+const RETRACT_MARKER: &str = "<system-reminder>\n工作流目录不再适用";
+
+/// 历史里最近一条目录相关提醒：`Some(Some(copy))` 是目录副本，`Some(None)` 是
+/// 停用说明，`None` 是还没发过。
+fn latest_state(history: &[LogEvent]) -> Option<Option<String>> {
+    history.iter().rev().find_map(|e| match e {
+        LogEvent::SystemReminder(text) if text.starts_with(LISTING_MARKER) => {
+            Some(Some(text.clone()))
+        }
+        LogEvent::SystemReminder(text) if text.starts_with(RETRACT_MARKER) => Some(None),
+        _ => None,
+    })
+}
+
+fn latest_listing(history: &[LogEvent]) -> Option<String> {
+    latest_state(history).flatten()
+}
+
+/// 本会话实际注入的那份目录（`/context` 用它报「已计入消息」）。
+pub(crate) fn injected_copy(exec: &Context) -> Option<String> {
+    latest_listing(&exec.get::<Sessions>(SESSIONS)?.model_history())
+}
+
+/// 这一步该注入的目录。`None` = 预设调不动 `workflow`、目录为空、或历史里最近
+/// 一份已经一致。目录内容首帧冻结；压缩抹掉旧副本后重新注入同一份。
+fn pending_listing(exec: &Context) -> Option<String> {
+    let state = exec
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| latest_state(&s.model_history()));
+    if !wants_listing(exec, WORKFLOW_TOOL_NAME) {
+        return state.flatten().map(|_| {
+            format!(
+                "{RETRACT_MARKER}：当前预设调不动 `workflow`，上面那份清单照着调会被拒绝。\n</system-reminder>"
+            )
+        });
+    }
+    let listing = exec.get::<Workflows>(WORKFLOWS)?.listing_text();
+    if listing.trim().is_empty() {
+        return None;
+    }
+    let body = format!("<system-reminder>\n{listing}</system-reminder>");
+    (state != Some(Some(body.clone()))).then_some(body)
+}
+
 pub fn tool_workflow() -> Plugin {
-    plugin(
-        "tool-workflow",
-        Inject::from([TOOLS, CONTEXT]),
-        |ctx, _: &()| {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let state = Arc::new(drain::WorkflowState::new());
-            {
-                let ctx = ctx.clone();
-                state.set_on_change(Arc::new(move |run_id: &str| {
-                    ctx.emit(
-                        WORKFLOW_CHANGED,
-                        WorkflowChanged {
-                            run_id: run_id.into(),
-                        },
-                    );
-                }));
+    plugin("tool-workflow", Inject::from([TOOLS]), |ctx, _: &()| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(drain::WorkflowState::new());
+        {
+            let ctx = ctx.clone();
+            state.set_on_change(Arc::new(move |run_id: &str| {
+                ctx.emit(
+                    WORKFLOW_CHANGED,
+                    WorkflowChanged {
+                        run_id: run_id.into(),
+                    },
+                );
+            }));
+        }
+        {
+            let state = state.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(drain::drain_loop_with_ctx(state, ctx, rx));
+        }
+        let catalog_names: HashSet<String> = scan_catalog().into_iter().map(|w| w.name).collect();
+        let handle = Workflows {
+            ctx: ctx.clone(),
+            state,
+            handle: WorkflowLaunchHandle(tx),
+            extras: Mutex::new(Vec::new()),
+            announced: Mutex::new(catalog_names),
+            discovered: Mutex::new(Vec::new()),
+            frozen_listing: Mutex::new(None),
+        };
+        handle.sync_slash();
+        let provided = ctx.provide(WORKFLOWS, handle)?;
+        let ctx_step = ctx.clone();
+        let step = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
+            let mut next = args.next::<StepStart>().unwrap_or(start);
+            let exec = crate::tools::registry::exec_ctx().unwrap_or_else(|| ctx_step.clone());
+            if let Some(body) = pending_listing(&exec) {
+                next.remind_preamble(ORDER_STEP_START_WORKFLOWS, body);
             }
-            {
-                let state = state.clone();
-                let ctx = ctx.clone();
-                tokio::spawn(drain::drain_loop_with_ctx(state, ctx, rx));
-            }
-            let catalog_names: HashSet<String> =
-                scan_catalog().into_iter().map(|w| w.name).collect();
-            let handle = Workflows {
-                ctx: ctx.clone(),
-                state,
-                handle: WorkflowLaunchHandle(tx),
-                extras: Mutex::new(Vec::new()),
-                announced: Mutex::new(catalog_names),
-                discovered: Mutex::new(Vec::new()),
-                frozen_listing: Mutex::new(None),
-            };
-            handle.sync_slash();
-            let provided = ctx.provide(WORKFLOWS, handle)?;
-            let book = ctx.require::<ContextBook>(CONTEXT)?;
-            own_sections(
-                ctx,
-                vec![book.section(ORDER_WORKFLOWS, "workflows", |exec| {
-                    if !wants_listing(exec, WORKFLOW_TOOL_NAME) {
-                        return None;
-                    }
-                    exec.get::<Workflows>(WORKFLOWS).and_then(|wf| {
-                        let listing = wf.listing_text();
-                        if listing.trim().is_empty() {
-                            None
-                        } else {
-                            Some(listing)
-                        }
-                    })
-                })?],
-            )?;
-            let ctx_exec = ctx.clone();
-            let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
-                let result = args.next::<ToolResult>().unwrap_or(result);
-                if let Some(wf) = ctx_exec.get::<Workflows>(WORKFLOWS) {
-                    let call_args = arguments_for(&ctx_exec, &result);
-                    let paths = extract_paths_from_tool(&result.name, &call_args, &result.content);
-                    if !paths.is_empty() {
-                        wf.notice_paths(&paths);
-                    }
+            next
+        })?;
+        let ctx_exec = ctx.clone();
+        let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
+            let result = args.next::<ToolResult>().unwrap_or(result);
+            if let Some(wf) = ctx_exec.get::<Workflows>(WORKFLOWS) {
+                let call_args = arguments_for(&ctx_exec, &result);
+                let paths = extract_paths_from_tool(&result.name, &call_args, &result.content);
+                if !paths.is_empty() {
+                    wf.notice_paths(&paths);
                 }
-                result
-            });
-            let tools = ctx.require::<Tools>(TOOLS)?;
-            let body: ToolBody = {
+            }
+            result
+        });
+        let tools = ctx.require::<Tools>(TOOLS)?;
+        let body: ToolBody = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move |call| {
                 let ctx = ctx.clone();
-                std::sync::Arc::new(move |call| {
-                    let ctx = ctx.clone();
-                    Box::pin(async move { run_workflow_tool(&ctx, call).await })
-                })
-            };
-            own_registered(
-                ctx,
-                // 内置预设把它设成按需（`on_demand_tools`）。listing 认 `use_tool` 可达，
-                // 见 `Tools::reachable_on`。
-                vec![tools.register(
+                Box::pin(async move { run_workflow_tool(&ctx, call).await })
+            })
+        };
+        own_registered(
+            ctx,
+            // 内置预设把它设成按需（`on_demand_tools`）。listing 认 `use_tool` 可达，
+            // 见 `Tools::reachable_on`。
+            vec![
+                step,
+                tools.register(
                     ToolSpec {
                         name: WORKFLOW_TOOL_NAME.into(),
                         description: DESC.into(),
                         parameters_json: PARAMS.into(),
                     },
                     body,
-                )?],
-            )?;
-            Ok(Some(provided))
-        },
-    )
+                )?,
+            ],
+        )?;
+        Ok(Some(provided))
+    })
 }
 
 /// Copied from Grok `WorkflowTool::run` (handle → oneshot ack → render).
@@ -495,7 +533,7 @@ mod tests {
         );
     }
 
-    use crate::prompt::assemble::{SystemPrompt, ORDER_SKILLS, ORDER_WORKFLOWS};
+    use crate::names::AGENT_PRESETS;
     use crate::prompt::context_usage::{occupancy_detail, snapshot_context, OccupancyKind};
     /// `DOCK_HOME` 指向临时目录 + 切 cwd，退出时还原（进程级状态由 test_env 串行化）。
     fn env_in(dir: &std::path::Path) -> cordis_base::test_env::EnvScope {
@@ -525,10 +563,11 @@ mod tests {
             .unwrap();
     }
 
+    /// 工作流目录排在技能之后、子代理名册之前。
     #[test]
-    fn order_workflows_follow_roster() {
-        const { assert!(ORDER_WORKFLOWS > crate::prompt::assemble::ORDER_PERSONA) };
-        const { assert!(ORDER_SKILLS > ORDER_WORKFLOWS) };
+    fn catalog_reminder_sits_after_skills_before_roster() {
+        const { assert!(ORDER_STEP_START_WORKFLOWS > cordis_base::types::ORDER_STEP_START_SKILLS) };
+        const { assert!(ORDER_STEP_START_WORKFLOWS < cordis_base::types::ORDER_STEP_START_ROSTER) };
     }
 
     #[tokio::test]
@@ -590,17 +629,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assemble_lists_workflows_and_occupancy_does_not_double_count() {
+    async fn catalog_rides_a_reminder_and_occupancy_counts_messages() {
         let dir = tempfile::tempdir().unwrap();
         let _env = env_in(dir.path());
         let ctx = cordis::Context::new();
         mount_workflows(&ctx).await;
         let assembled = ctx
-            .get::<SystemPrompt>(crate::names::SYSTEM_PROMPT)
+            .get::<crate::prompt::assemble::SystemPrompt>(crate::names::SYSTEM_PROMPT)
             .unwrap()
             .assemble();
-        assert!(assembled.contains("deep-research"), "{assembled}");
-        assert!(assembled.contains("可用工作流"), "{assembled}");
+        assert!(
+            !assembled.contains("可用工作流"),
+            "目录走 reminder，不再进系统提示: {assembled}"
+        );
+        let start = StepStart::new(0, crate::session::log::ROOT_IDENTITY);
+        let seed = start.clone();
+        let reminders = ctx
+            .waterfall(STEP_START, start, move || seed)
+            .into_reminders();
+        let catalog = reminders
+            .iter()
+            .find(|t| t.contains("可用工作流"))
+            .expect("工作流目录 reminder")
+            .clone();
+        assert!(catalog.starts_with("<system-reminder>"), "{catalog}");
+        assert!(catalog.contains("deep-research"), "{catalog}");
+        // 模拟循环把这条 reminder 写进历史；`/context` 报的是实际注入的这份。
+        ctx.require::<Sessions>(SESSIONS)
+            .unwrap()
+            .append(LogEvent::SystemReminder(catalog));
         let snap = snapshot_context(&ctx);
         let extra = snap
             .categories
@@ -608,6 +665,13 @@ mod tests {
             .find(|c| c.label == "工作流")
             .expect("工作流 legend");
         assert!(extra.tokens > 0);
+        assert!(
+            extra
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("已计入消息")),
+            "{extra:?}"
+        );
         assert_eq!(
             snap.used,
             snap.system_prompt_tokens
@@ -680,5 +744,101 @@ mod tests {
             send: false,
         };
         assert_eq!(extra_tool_slash_arguments(&other, "").unwrap(), "{}");
+    }
+
+    fn catalog_reminder(exec: &Context, identity: &str) -> Option<String> {
+        let start = StepStart::new(0, identity);
+        let seed = start.clone();
+        crate::tools::registry::with_exec_ctx(exec, || {
+            exec.waterfall(STEP_START, start, move || seed)
+                .into_reminders()
+                .into_iter()
+                .find(|text| text.starts_with(LISTING_MARKER) || text.starts_with(RETRACT_MARKER))
+        })
+    }
+
+    /// 目录 reminder 只发一次；压缩抹掉旧副本后重注。
+    #[tokio::test]
+    async fn catalog_injects_once_and_again_after_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = env_in(dir.path());
+        let ctx = cordis::Context::new();
+        mount_workflows(&ctx).await;
+        let first = catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).expect("first");
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::SystemReminder(first));
+        assert!(
+            catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).is_none(),
+            "历史里已有就不再注入"
+        );
+        sessions.replace_compacted(vec![LogEvent::SystemReminder("summary".into())]);
+        assert!(
+            catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).is_some(),
+            "压缩后要重注"
+        );
+    }
+
+    /// 子代理默认不带目录；`agents/<type>.yml` 开了 `listings: true` 才带。
+    #[tokio::test]
+    async fn child_catalog_is_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = env_in(dir.path());
+        let root = cordis::Context::new();
+        mount_workflows(&root).await;
+
+        let child = root.isolate("sessions").isolate("agentPresets");
+        child
+            .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+            .unwrap();
+        assert!(
+            catalog_reminder(&child, "child-1").is_none(),
+            "子代理默认不带目录"
+        );
+
+        let mut wide = crate::agent::presets::SubagentDef {
+            name: "通用".into(),
+            listings: true,
+            ..Default::default()
+        };
+        wide.tools = Some(vec![WORKFLOW_TOOL_NAME.into(), "use_tool".into()]);
+        child
+            .provide(
+                AGENT_PRESETS,
+                crate::agent::presets::AgentPresets::overlay(wide.to_preset("general-purpose")),
+            )
+            .unwrap();
+        assert!(
+            catalog_reminder(&child, "child-1").is_some(),
+            "listings: true 才带"
+        );
+    }
+
+    /// 切到调不动 `workflow` 的预设：补一句「目录不再适用」，且只补一次。
+    #[tokio::test]
+    async fn preset_without_workflow_retracts_the_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = env_in(dir.path());
+        let ctx = cordis::Context::new();
+        mount_workflows(&ctx).await;
+        let first = catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).expect("first");
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::SystemReminder(first));
+
+        let mut narrow = crate::agent::presets::AgentPreset::new("narrow");
+        narrow.tools = Some(vec!["read_file".into()]);
+        ctx.provide(
+            AGENT_PRESETS,
+            crate::agent::presets::AgentPresets::overlay(narrow),
+        )
+        .unwrap();
+
+        let retract =
+            catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).expect("retraction");
+        assert!(retract.contains("工作流目录不再适用"), "{retract}");
+        sessions.append(LogEvent::SystemReminder(retract));
+        assert!(
+            catalog_reminder(&ctx, crate::session::log::ROOT_IDENTITY).is_none(),
+            "停用说明只发一次"
+        );
     }
 }

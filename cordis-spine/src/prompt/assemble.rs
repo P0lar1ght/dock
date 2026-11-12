@@ -7,20 +7,17 @@ use crate::prompt::context_book::ContextBook;
 /// its own plugin handler that adds a section at a fixed order, so the assembled
 /// prompt is byte-stable no matter what order the plugins mount in.
 ///
-/// Stable identity first (prefix cache), then listings. Plan / goal, the
-/// workspace conventions (`AGENTS.md`) and long-term memory (`MEMORY.md`) stay
-/// out of this table — they are `<system-reminder>` messages in the history
-/// (Grok / DSH).
+/// Stable identity first (prefix cache), then persona. Plan / goal, the
+/// workspace conventions (`AGENTS.md`), long-term memory (`MEMORY.md`), the
+/// skill / workflow catalogs and the subagent roster stay out of this table —
+/// they are `<system-reminder>` messages in the history (Grok / DSH).
 ///
-/// 这张表里**没有任何一段跟着 cwd 变**：`AGENTS.md` 与长期记忆搬去消息流之后，
+/// 这张表里**没有任何一段跟着 cwd 变**：规约、记忆与两份目录都搬去消息流之后，
 /// 整份系统提示只由预设决定，`/cd` 不再让前缀作废，主会话与子代理共享的头也更长。
-/// 技能 / 工作流两段是首帧冻结的 listing，会话中途不改写。
 /// Cordis 的写法在技能 `cordis-plugin-development` 和 `cordis_*` 的描述里，不占这里的槽。
 pub const ORDER_PERSONA: i32 = 20;
-pub const ORDER_WORKFLOWS: i32 = 40;
-pub const ORDER_SKILLS: i32 = 41;
-/// 磁盘插件的 `host.on("system-prompt/assemble")` 段。排在技能之后：技能是
-/// 宿主给的清单，这一段是插件自己加的上下文，晚一步。
+/// 磁盘插件的 `host.on("system-prompt/assemble")` 段。排在人设之后：这一段是
+/// 插件自己加的上下文，晚一步。
 pub const ORDER_HOOKS: i32 = 45;
 
 /// Structured payload carried by the `system-prompt/assemble` waterfall.

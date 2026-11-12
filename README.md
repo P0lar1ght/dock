@@ -189,7 +189,7 @@ flowchart LR
 
 `llm/stream` 是枢纽：出工具调用就先过 `tools/pre-execute`（改写参数 / 改道 / 拒绝），再走计划门与权限门，工具体跑完经 `tools/execute` 回采样；出文本才结束。`agent/pre-step` 与 `system-prompt/assemble` 每轮各一次，不随工具轮次重跑。
 
-`system-prompt/assemble` 的载荷是 `PromptAssembly`。贡献插件 `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（对标 `"tools".register`，fiber dispose 注销）。`systemPrompt` 只做 facade：live-lookup `"context"` 求值，再跑 waterfall 供拦截。基座（`system-prompt.base`）只写身份与工作底线，不列工具名；persona 来自 `agent-presets`（写路径用 `.dock/presets`，不用绝对 `{cwd}`），listing 来自 `skills` / `tool-workflow`（同样用 `skills/`、`.dock/skills/`、`~/.dock/skills/` 这类通用路径）。计划 / 目标走历史尾部 `<system-reminder>`，不进系统提示。Cordis 写法在技能 `cordis-plugin-development`，不进系统提示。`/context` 与顶栏 live-lookup `ContextBook.window()`，系统提示按段看 token。加/改一段提示词就是在贡献插件里登记，不动 assembler。
+`system-prompt/assemble` 的载荷是 `PromptAssembly`。贡献插件 `inject: ["context"]` 后向 `ContextBook` 登记 `set_base` / `section` / `replace_base`（对标 `"tools".register`，fiber dispose 注销）。`systemPrompt` 只做 facade：live-lookup `"context"` 求值，再跑 waterfall 供拦截。基座（`system-prompt.base`）只写身份与工作底线，不列工具名；persona 来自 `agent-presets`（写路径用 `.dock/presets`，不用绝对 `{cwd}`）；技能 / 工作流目录与子代理名册来自 `skills` / `tool-workflow` / `tool-task`，走历史 `<system-reminder>`（同样用 `skills/`、`.dock/skills/`、`~/.dock/skills/` 这类通用路径）。计划 / 目标走历史尾部 `<system-reminder>`，不进系统提示。Cordis 写法在技能 `cordis-plugin-development`，不进系统提示。`/context` 与顶栏 live-lookup `ContextBook.window()`，系统提示按段看 token。加/改一段提示词就是在贡献插件里登记，不动 assembler。
 
 ---
 

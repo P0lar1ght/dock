@@ -1512,7 +1512,7 @@ mod tests {
         };
         let sessions = crate::session::log::Sessions::new(cordis::Context::new());
         sessions.attach_disk();
-        sessions.append(LogEvent::SystemReminder("MCP 服务器已连接".into()));
+        sessions.append(LogEvent::SystemReminder("MCP 工具：mcp_probe__ping".into()));
         sessions.append(LogEvent::PreStep);
         assert_eq!(saved(), 0, "只有后台提醒的会话不该落盘");
 

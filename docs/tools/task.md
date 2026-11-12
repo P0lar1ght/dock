@@ -7,7 +7,7 @@
 - **ctx**：`"subagents"` + `"tools"`
 - **模型工具**：`task` `send_message`；`list_agents` `interrupt_agent`（`code` / `cordis` 的 `on_demand_tools` 里按需；`warden` 不写，常驻）
 
-Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"sessions"`+`"turn"`+`"agentPresets"`。提供 named `"subagents"`。**只有一个 spawn 工具**：`task`。`subagent_type` = 当前模式 `agents/<id>.yml` 角色 id（模型侧参数 enum 即这份名册）。参数只有 prompt / description / subagent_type / run_in_background / resume_from / reload_roster；`cwd` / `isolation` / `model` 已删（dock 不实现，别再加回来当摆设）。子代理**每轮结束**都会 park idle 并把回合结束推到父级（`<system-reminder>`，本轮没给父级发过消息时带上回合正文）；前台 spawn 内联拿到结果时会消费掉自己那条通知。
+Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"sessions"`+`"turn"`+`"agentPresets"`。提供 named `"subagents"`。**只有一个 spawn 工具**：`task`。`subagent_type` = 当前模式 `agents/<id>.yml` 角色 id（模型侧参数 enum 即这份名册）。名册正文（角色 id、显示名、说明、写路径、`reload_roster` 用法）走 `agent/step-start` 的 `<system-reminder>`（槽位 `ORDER_STEP_START_ROSTER=13`），只在这一页叫得动 `task` 时发；工具 description 与 schema 保持静态（schema 只带 enum）。参数只有 prompt / description / subagent_type / run_in_background / resume_from / reload_roster；`cwd` / `isolation` / `model` 已删（dock 不实现，别再加回来当摆设）。子代理**每轮结束**都会 park idle 并把回合结束推到父级（`<system-reminder>`，本轮没给父级发过消息时带上回合正文）；前台 spawn 内联拿到结果时会消费掉自己那条通知。
 
 **子代理不是作业**：`job` / `kill_task` 只看后台命令，列不出、处置不了子代理。子代理只走 `send_message` / `list_agents` / `interrupt_agent`，结果靠回合结束通知送达，不轮询。整个撤掉一个子代理是用户的事（TUI `/tasks` 里 `x`，走 `Subagents::kill`），或随会话 Stop / 结束。
 

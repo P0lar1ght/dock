@@ -515,8 +515,8 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "sampler must hide MCP extras: {model:?}"
     );
     // 常驻的是高频工具，和按需拿不到的场景：只读子代理没有 `use_tool`，所以
-    // web_* 必须常驻；子代理回报父级靠 send_message；`skill` 由系统提示的技能
-    // listing 点名、几乎每次都用。低频工具只在 `search_tool` 的描述里留名字，
+    // web_* 必须常驻；子代理回报父级靠 send_message；`skill` 由技能目录
+    // reminder 点名、几乎每次都用。低频工具只在 `search_tool` 的描述里留名字，
     // 用时按精确名搜一次拿 schema（见 `search_tool_names_every_builtin_on_demand_tool`）。
     // `memory_search` / `memory_get` are sampler-resident when memory is enabled
     // and absent from the table when disabled (default in this install test).
@@ -1615,15 +1615,16 @@ async fn a_subagent_turn_is_not_gated_by_the_parent_goal() {
     );
 }
 
-/// A listing header names its loader (`skill` / `workflow`). Advertising it to
-/// a preset that cannot call it burns tokens and invites a guaranteed-failed
-/// call: the sampler filters it out, `search_tool` no longer indexes it (those
-/// tools stopped being deferred), and `use_tool` hits the same allowlist.
+/// A catalog reminder names its loader (`skill` / `workflow`). Sending it to
+/// a preset that cannot call the loader burns tokens and invites a
+/// guaranteed-failed call: the sampler filters it out, `search_tool` no longer
+/// indexes it (those tools stopped being deferred), and `use_tool` hits the
+/// same allowlist.
 ///
 /// Parent side of the invariant that `a_listing_role_holds_the_tools_its_
 /// listing_names` guards for child roles.
 #[tokio::test]
-async fn main_session_listings_follow_the_preset_allowlist() {
+async fn main_session_catalogs_follow_the_preset_allowlist() {
     isolated_home();
     let root = Context::new();
     cordis_spine::install_app(&root).await.unwrap();
@@ -1633,12 +1634,17 @@ async fn main_session_listings_follow_the_preset_allowlist() {
     let book = root
         .require::<cordis_spine::ContextBook>(cordis_spine::CONTEXT)
         .unwrap();
+    let identity = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .identity()
+        .to_string();
 
-    for (mode, want) in [
-        ("code", true),
-        ("cordis", true),
-        ("minimal", false),
-        ("warden", false),
+    for (mode, want, want_roster) in [
+        ("code", true, true),
+        ("cordis", true, true),
+        ("minimal", false, false),
+        ("warden", false, true),
     ] {
         presets.apply(mode).unwrap();
         let assembly = book.assemble();
@@ -1651,13 +1657,40 @@ async fn main_session_listings_follow_the_preset_allowlist() {
             !assembly.render().contains("动态 Host 扩展"),
             "mode {mode} still injects the cordis system pointer"
         );
-        for (section, tool) in [("skills", "skill"), ("workflows", "workflow")] {
-            let present = ids.iter().any(|id| id == section);
+        let start = StepStart::new(0, identity.clone());
+        let seed = start.clone();
+        let text = root
+            .waterfall(STEP_START, start, move || seed)
+            .into_reminders()
+            .join("\n");
+        for (listing, tool) in [("可用技能", "skill"), ("可用工作流", "workflow")] {
+            let present = text.contains(listing);
             assert_eq!(
                 present,
                 want && presets.allows(tool),
-                "mode {mode}: {section} section present={present} but allows({tool})={}: {ids:?}",
+                "mode {mode}: {listing} present={present} but allows({tool})={}: {text}",
                 presets.allows(tool)
+            );
+            assert!(
+                !assembly.render().contains(listing),
+                "mode {mode}: {listing} must not ride the system prompt"
+            );
+        }
+        assert_eq!(
+            text.contains("# 子代理名册"),
+            want_roster,
+            "mode {mode}: roster reminder must follow whether task is callable: {text}"
+        );
+        let task = root
+            .require::<cordis_spine::Tools>(cordis_spine::TOOLS)
+            .unwrap()
+            .specs_for_model_on(&root)
+            .into_iter()
+            .find(|s| s.name == "task");
+        if let Some(task) = task {
+            assert!(
+                !task.description.contains("subagent_type is a role id"),
+                "mode {mode}: roster must not ride the task description"
             );
         }
     }

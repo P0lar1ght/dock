@@ -28,13 +28,14 @@ pub mod types;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cordis::{plugin, Inject, Plugin};
+use cordis::{plugin, Context, Inject, Plugin};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::names::{SUBAGENTS, SUBAGENT_CHANGED, TOOLS};
-use crate::session::log::ROOT_IDENTITY;
+use crate::agent::presets::AgentPresets;
+use crate::names::{AGENT_PRESETS, SESSIONS, STEP_START, SUBAGENTS, SUBAGENT_CHANGED, TOOLS};
+use crate::session::log::{Sessions, ROOT_IDENTITY};
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
-use cordis_base::types::ToolCall;
+use cordis_base::types::{LogEvent, StepStart, ToolCall, ORDER_STEP_START_ROSTER};
 
 use admission::SubagentLimits;
 use backend::{ChannelBackend, SubagentBackend};
@@ -458,6 +459,37 @@ impl Subagents {
     }
 }
 
+/// 历史里那份子代理名册的开头。结构化标记：会话里要认出「哪一条 reminder 是
+/// 名册副本」才谈得上判断该不该重注（名册变了、压缩抹掉旧副本、`/resume`）。
+const ROSTER_MARKER: &str = "<system-reminder>\n# 子代理名册";
+
+fn latest_roster(history: &[LogEvent]) -> Option<String> {
+    history.iter().rev().find_map(|e| match e {
+        LogEvent::SystemReminder(text) if text.starts_with(ROSTER_MARKER) => Some(text.clone()),
+        _ => None,
+    })
+}
+
+/// 这一步该注入的名册。`task` 这一页叫不动就没有意义；名册（含角色说明与写路径）
+/// 与历史里最近一份一致时不重注。
+fn roster_reminder(exec: &Context) -> Option<String> {
+    let presets = exec.get::<AgentPresets>(AGENT_PRESETS)?;
+    let tools = exec.get::<Tools>(TOOLS)?;
+    if !tools.reachable_on(exec, "task") {
+        return None;
+    }
+    let hint = presets.subagent_role_hint();
+    let hint = hint.trim();
+    if hint.is_empty() {
+        return None;
+    }
+    let body = format!("{ROSTER_MARKER}\n{hint}\n</system-reminder>");
+    let latest = exec
+        .get::<Sessions>(SESSIONS)
+        .and_then(|s| latest_roster(&s.model_history()));
+    (latest.as_deref() != Some(body.as_str())).then_some(body)
+}
+
 pub fn tool_task() -> Plugin {
     plugin(
         "tool-task",
@@ -510,6 +542,15 @@ pub fn tool_task() -> Plugin {
                 },
             )?;
             let tools = ctx.require::<Tools>(TOOLS)?;
+            let ctx_step = ctx.clone();
+            let roster = ctx.on_waterfall(STEP_START, move |start: StepStart, args| {
+                let mut next = args.next::<StepStart>().unwrap_or(start);
+                let exec = crate::tools::registry::exec_ctx().unwrap_or_else(|| ctx_step.clone());
+                if let Some(body) = roster_reminder(&exec) {
+                    next.remind_preamble(ORDER_STEP_START_ROSTER, body);
+                }
+                next
+            })?;
 
             let task_body: ToolBody = {
                 let ctx = ctx.clone();
@@ -562,6 +603,7 @@ pub fn tool_task() -> Plugin {
             own_registered(
                 ctx,
                 vec![
+                    roster,
                     tools.register(execute::spec(), task_body)?,
                     tools.register(control::send_spec(), send_body)?,
                     // 后两颗在 code / cordis 的 `on_demand_tools` 里按需；warden 不写，
@@ -812,5 +854,64 @@ mod coordinator_spawn_tests {
                 .is_err(),
             "wf_2 的孩子不该被 wf_1 的取消波及"
         );
+    }
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    use super::*;
+    use crate::tools::registry::ToolBody;
+    use cordis_base::types::ToolSpec;
+    use std::sync::Arc;
+
+    fn register_task_tool(ctx: &Context) {
+        let tools = ctx.require::<Tools>(TOOLS).unwrap();
+        let body: ToolBody =
+            Arc::new(|call| Box::pin(async move { crate::tools::registry::tool_result(call, "") }));
+        tools
+            .register(
+                ToolSpec {
+                    name: "task".into(),
+                    description: "Delegate".into(),
+                    parameters_json:
+                        r#"{"type":"object","properties":{"subagent_type":{"type":"string"}}}"#
+                            .into(),
+                },
+                body,
+            )
+            .unwrap();
+    }
+
+    /// 名册 reminder 列真实角色、只发一次；压缩后重注。
+    #[tokio::test]
+    async fn roster_reminder_names_the_roles_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = cordis_base::test_env::scoped().home().cwd(dir.path());
+        let ctx = Context::new();
+        crate::install_without_llm(&ctx).await.unwrap();
+        register_task_tool(&ctx);
+
+        let mut general = crate::agent::presets::SubagentDef {
+            name: "通用".into(),
+            description: "通用子代理".into(),
+            ..Default::default()
+        };
+        general.tools = Some(vec!["read_file".into()]);
+        let mut preset = crate::agent::presets::AgentPreset::new("code");
+        preset.tools = Some(vec!["task".into()]);
+        preset.agents.insert("general-purpose".into(), general);
+        ctx.provide(AGENT_PRESETS, AgentPresets::overlay(preset))
+            .unwrap();
+
+        let first = roster_reminder(&ctx).expect("roster reminder");
+        assert!(first.starts_with(ROSTER_MARKER), "{first}");
+        assert!(first.contains("general-purpose"), "{first}");
+        assert!(first.contains("通用子代理"), "{first}");
+
+        let sessions = ctx.require::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::SystemReminder(first));
+        assert!(roster_reminder(&ctx).is_none(), "历史里已有就不再注入");
+        sessions.replace_compacted(vec![LogEvent::SystemReminder("summary".into())]);
+        assert!(roster_reminder(&ctx).is_some(), "压缩后要重注");
     }
 }
