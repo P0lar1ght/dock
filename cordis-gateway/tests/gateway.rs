@@ -3566,6 +3566,10 @@ async fn desktop_view_errors_without_a_driver() {
         init["result"]["capabilities"]["desktopView"], true,
         "{init}"
     );
+    assert_eq!(
+        init["result"]["capabilities"]["desktopControl"], true,
+        "{init}"
+    );
 
     let opened = rpc.call("desktop/view/open", json!({})).await;
     assert_eq!(
@@ -3584,6 +3588,22 @@ async fn desktop_view_errors_without_a_driver() {
         unknown["error"]["details"]["code"], "not_found",
         "{unknown}"
     );
+    let windows = rpc.call("desktop/view/windows", json!({})).await;
+    assert_eq!(
+        windows["error"]["details"]["code"], "driver_unavailable",
+        "{windows}"
+    );
+    let input = rpc
+        .call(
+            "desktop/view/input",
+            json!({ "viewId": "nope", "event": { "type": "click", "x": 1, "y": 1 } }),
+        )
+        .await;
+    assert_eq!(input["error"]["details"]["code"], "not_found", "{input}");
+    let pin = rpc
+        .call("desktop/view/pin", json!({ "viewId": "nope", "pid": 1 }))
+        .await;
+    assert_eq!(pin["error"]["details"]["code"], "invalid_params", "{pin}");
 }
 
 /// 真 Chrome：agent（这里直接用浏览器 MCP 的 hub）给第 1 页开了标签页 → 客户端

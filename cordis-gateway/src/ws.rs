@@ -288,10 +288,10 @@ async fn detached(
     } else {
         browser_view::Order::None
     };
-    let desktop_seq = if desktop {
+    let desktop_order = if desktop {
         desktops.order(&method, &params)
     } else {
-        0
+        desktop_view::DesktopOrder::None
     };
     let ready = {
         let c = conn.lock().await;
@@ -315,7 +315,7 @@ async fn detached(
                 browser_view::dispatch(&gateway, &views, &out, &method, params, order).await
             }
             Ok(gateway) if desktop => {
-                desktop_view::dispatch(&gateway, &desktops, &out, &method, params, desktop_seq)
+                desktop_view::dispatch(&gateway, &desktops, &out, &method, params, desktop_order)
                     .await
             }
             Ok(gateway) => rpc::dispatch_detached(gateway, &method, params).await,
