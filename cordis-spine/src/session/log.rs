@@ -139,6 +139,10 @@ pub struct Sessions {
     /// 最近一次撤回撤掉的只是一条插话：它并进的那一轮还在记录里，
     /// [`Self::end_turn`] 要照常给那一轮收尾（栅栏只拦被撤插话的残余输出）。
     steer_rewound: Arc<AtomicBool>,
+    /// 这次采样的正文不进记录（[`Self::mute_llm_text`]）：回合末的 todo 记账步。
+    /// 那一步只该留下 `todo_write`，模型顺嘴的「好的」不是给用户的第二条回复，
+    /// 也不该进下一轮的 `model_history()`。
+    llm_text_muted: Arc<AtomicBool>,
     /// Bumped on every log mutation so the TUI can invalidate layout caches
     /// without cloning the event vector.
     events_rev: Arc<AtomicU64>,
@@ -345,6 +349,7 @@ impl Sessions {
             user_images: Arc::new(Mutex::new(Vec::new())),
             rewound: Arc::new(AtomicBool::new(false)),
             steer_rewound: Arc::new(AtomicBool::new(false)),
+            llm_text_muted: Arc::new(AtomicBool::new(false)),
             events_rev: Arc::new(AtomicU64::new(0)),
             emit,
             identity: Arc::from(identity.into()),
@@ -1119,6 +1124,12 @@ impl Sessions {
     }
 
     /// Empty `llm/stream` slot the HTTP sampler fills via [`Self::apply_llm_delta`].
+    /// 之后的采样正文不落进记录、不推给界面，直到再调一次 `false`。推理与工具调用
+    /// 照常落。只给回合末的 todo 记账步用（见字段 `llm_text_muted`）。
+    pub(crate) fn mute_llm_text(&self, muted: bool) {
+        self.llm_text_muted.store(muted, Ordering::Relaxed);
+    }
+
     pub fn begin_llm(&self) {
         if self.rewound.load(Ordering::Relaxed) {
             return;
@@ -1139,7 +1150,7 @@ impl Sessions {
         }
         match delta {
             cordis_base::stream_acc::StreamDelta::Text(text) => {
-                if text.is_empty() {
+                if text.is_empty() || self.llm_text_muted.load(Ordering::Relaxed) {
                     return;
                 }
                 let mut events = self.events.lock().unwrap();
@@ -1222,7 +1233,9 @@ impl Sessions {
         // 流式 delta 先写下原文。调用方给出非空文本时以它为准，这样 `llm/stream`
         // 的改写能盖掉已经推给界面、也会进下一轮 `model_history()` 的那一份。
         // 空文本是「只收尾、不改已经流进来的字」（用量、只有工具调用）。
-        if !output.text.is_empty() {
+        if self.llm_text_muted.load(Ordering::Relaxed) {
+            out.text.clear();
+        } else if !output.text.is_empty() {
             out.text = output.text.clone();
         }
         // 流式 delta 可能在签名跨 chunk 时短暂拼进过密文残片；finish 时的

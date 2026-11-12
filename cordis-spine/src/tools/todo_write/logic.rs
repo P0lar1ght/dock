@@ -175,9 +175,13 @@ pub fn stats(state: &TodoState) -> TodoStats {
     s
 }
 
-/// Tool-result line for a list with nothing left: every item `completed`
-/// (or `cancelled`).
+/// Tool-result line for a list with nothing left and at least one item
+/// `completed` (the rest `cancelled`).
 pub const TODO_ALL_DONE: &str = "清单已全部完成。";
+
+/// Tool-result line for a list where every item was `cancelled`: nothing was
+/// done, so「完成」would be a lie.
+pub const TODO_ALL_CLOSED: &str = "清单已全部关闭。";
 
 /// The list plus a one-line directive about what the state implies. Returned
 /// verbatim as the `todo_write` result, so the model sees the discipline right
@@ -218,6 +222,9 @@ pub(crate) fn summarize_todo_state(state: &TodoState) -> String {
 /// as the statuses say so.
 fn state_hint(s: &TodoStats) -> Option<&'static str> {
     if s.total() > 0 && s.settled() == s.total() {
+        if s.completed == 0 {
+            return Some("清单已全部关闭。Every item was cancelled. Start a new list (merge:false) if new work comes up.");
+        }
         return Some("清单已全部完成。Do not re-open the list for work you already finished.");
     }
     if s.open() == 0 {
@@ -466,8 +473,8 @@ pub enum TodoPriority {
 /// On disk this is the `status` string inside `todo_write` arguments and the
 /// `[status]` tag in its result (both in `chat_history.jsonl`).
 /// `awaiting_user` is newer than the other four: files without it read as
-/// before; an older build that meets it reads it as `pending` (TUI card) or
-/// as an unknown, plain row (GUI card).
+/// before. 旧版显示成和 pending 一样（GUI 是空心圆，TUI 是 `□`）—— an older
+/// build parses an unknown status as `pending`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
@@ -756,6 +763,17 @@ mod tests {
         );
         assert!(summary.contains(TODO_ALL_DONE), "{summary}");
         assert!(summary.contains("清单已全部完成"), "{summary}");
+    }
+
+    #[test]
+    fn every_item_cancelled_says_the_list_is_closed_not_done() {
+        let mut state = seeded();
+        for id in ["explore", "ui", "docs"] {
+            apply_merge(&mut state, &[upd(id, None, Some(TodoStatus::Cancelled))]).unwrap();
+        }
+        let summary = summarize_todo_state(&state);
+        assert!(summary.contains(TODO_ALL_CLOSED), "{summary}");
+        assert!(!summary.contains(TODO_ALL_DONE), "{summary}");
     }
 
     #[test]

@@ -194,7 +194,7 @@ pub use tools::task::admission::SubagentLimits;
 pub use tools::task::{tool_task, SubagentChanged, SubagentSnap, Subagents, TaskConfig};
 pub use tools::todo_write::{
     todo_service, todo_tool_registration, tool_todo, TodoItem, TodoStats, TodoStatus, Todos,
-    TEST_BUILD_COMMANDS, TODO_ALL_DONE, TODO_BOOKKEEPING_SENTINEL,
+    TEST_BUILD_COMMANDS, TODO_ALL_CLOSED, TODO_ALL_DONE, TODO_BOOKKEEPING_SENTINEL,
 };
 pub use tools::tool_cordis::tool_cordis;
 pub use tools::tool_images::{

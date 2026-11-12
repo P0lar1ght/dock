@@ -113,6 +113,20 @@ impl Compact {
     }
 }
 
+/// 这一页的上下文是否已到自动压缩的门槛（[`Compact::maybe_auto`] 用的同一把尺）。
+/// 回合末的 todo 记账步不压缩，到了门槛就干脆不记账：记账可有可无，不值得为它
+/// 在收尾时压缩一次或撑爆窗口；下一轮第一步照常自动压缩。
+pub(crate) fn at_auto_threshold(ctx: &Context, system: &str) -> bool {
+    let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
+        return false;
+    };
+    exceeds_threshold(
+        context_tokens_used(ctx, system),
+        sessions.usage().window,
+        DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+    )
+}
+
 pub fn compact() -> Plugin {
     plugin("compact", Inject::from([SESSIONS, LLM]), |ctx, _: &()| {
         Ok(Some(ctx.provide(COMPACT, Compact)?))

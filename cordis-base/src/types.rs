@@ -898,12 +898,15 @@ fn ordered(mut slots: Vec<(i32, String)>) -> Vec<String> {
     slots.into_iter().map(|(_, body)| body).collect()
 }
 
-/// Order slots on the `agent/turn-end` waterfall. Two handlers can both want
-/// another round; the smaller order wins, so the outcome does not depend on
-/// plugin mount order (same reason [`crate::PromptAssembly`] uses slots).
+/// Order slots on the `agent/turn-end` waterfall. Among votes of the same
+/// kind the smaller order wins, so the outcome does not depend on plugin mount
+/// order (same reason [`crate::PromptAssembly`] uses slots).
 ///
-/// More specific beats more general — "do the next todo" is more actionable
-/// than "keep pushing the goal".
+/// The kind comes first: any keep-working vote ([`TurnEnd::keep_working`],
+/// e.g. the goal or a script) beats any bookkeeping vote
+/// ([`TurnEnd::bookkeep_with`], the todo list), whatever their slots —
+/// bookkeeping ends the turn and must not swallow a legitimate "not done yet".
+/// So `ORDER_TURN_END_TODO` only orders todo against other bookkeeping votes.
 pub const ORDER_TURN_END_TODO: i32 = 10;
 pub const ORDER_TURN_END_GOAL: i32 = 20;
 /// Disk / dynamic Cordis plugins — see [`ORDER_STEP_START_DYNAMIC`].

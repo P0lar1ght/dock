@@ -261,13 +261,27 @@ async fn grok_sample_loop(
                 ended_with_text,
             ) {
                 rounds += 1;
-                sessions.append(LogEvent::SystemReminder(round.reminder));
                 let Some(only) = round.only_tools else {
+                    sessions.append(LogEvent::SystemReminder(round.reminder));
                     continue;
                 };
                 // 记账：只再采一步、只给这几颗工具，然后不管结果如何都收尾。
                 // 回给调用方的仍是模型刚才那段正文——记账不是新的回复。
-                bookkeeping_step(ctx, sessions, llm, tools, &system, &only).await?;
+                let specs = bookkeeping_specs(ctx, tools, &only);
+                // 先确认这一步跑得成再落提醒：预设里没有这颗工具、已经按了 Stop、
+                // 上下文已到自动压缩门槛（这一步不压缩），都直接收尾，不留孤儿提醒。
+                if !specs.is_empty()
+                    && !cancelled(ctx)
+                    && !crate::llm::compact::at_auto_threshold(ctx, &system)
+                {
+                    sessions.append(LogEvent::SystemReminder(round.reminder));
+                    match bookkeeping_step(ctx, sessions, llm, tools, &system, specs, &only).await {
+                        Ok(()) => {}
+                        // 这一轮已经答完了：记账时按 Stop 只是不记了，不把它记成取消。
+                        Err(Error::Cancelled) if ended_with_text => {}
+                        Err(err) => return Err(err),
+                    }
+                }
                 if ended_with_text {
                     return Ok(TurnOutcome::Text(last_text));
                 }
@@ -286,30 +300,48 @@ async fn grok_sample_loop(
     }
 }
 
+/// The tools a bookkeeping step may offer: the ones on `only` that this
+/// page's model actually has (a preset can leave `todo_write` out).
+fn bookkeeping_specs(
+    ctx: &Context,
+    tools: &Tools,
+    only: &[String],
+) -> Vec<cordis_base::types::ToolSpec> {
+    tools
+        .specs_for_model_on(ctx)
+        .into_iter()
+        .filter(|spec| only.contains(&spec.name))
+        .collect()
+}
+
 /// One bookkeeping step ([`TurnEnd::bookkeep_with`]): sample once with only
-/// `only` offered, run the calls that are on that list, refuse the rest with
+/// `specs` offered, run the calls that are on `only`, refuse the rest with
 /// an error result (the model can still emit a name it was not offered), and
-/// return. No step-start reminders: this step adds no context, it only lets
-/// the model settle what it already did.
+/// return. No step-start reminders and no auto-compact: this step adds no
+/// context, it only lets the model settle what it already did (the caller
+/// skips it at the compact threshold). The step's text is muted — it is not a
+/// second reply, so it stays out of the transcript and the next turn's history.
 async fn bookkeeping_step(
     ctx: &Context,
     sessions: &Sessions,
     llm: &Llm,
     tools: &Tools,
     system: &str,
+    specs: Vec<cordis_base::types::ToolSpec>,
     only: &[String],
 ) -> Result<()> {
-    let specs: Vec<_> = tools
-        .specs_for_model_on(ctx)
-        .into_iter()
-        .filter(|spec| only.contains(&spec.name))
-        .collect();
-    if specs.is_empty() {
-        return Ok(());
-    }
     abort_if_cancelled(ctx, sessions)?;
-    let output = llm
-        .stream_on(
+    let output = {
+        // 回合被整个丢掉（future drop）时也要解除静音，否则下一轮的回复全丢。
+        struct Unmute<'a>(&'a Sessions);
+        impl Drop for Unmute<'_> {
+            fn drop(&mut self) {
+                self.0.mute_llm_text(false);
+            }
+        }
+        sessions.mute_llm_text(true);
+        let _unmute = Unmute(sessions);
+        llm.stream_on(
             ctx,
             PromptRequest {
                 system: system.to_string(),
@@ -317,7 +349,8 @@ async fn bookkeeping_step(
                 tools: specs,
             },
         )
-        .await;
+        .await
+    };
     abort_if_cancelled(ctx, sessions)?;
     for call in output.tool_calls {
         let arguments = call.arguments.clone();

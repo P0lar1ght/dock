@@ -24,7 +24,7 @@ use cordis_base::types::{
 /// Turn-end bookkeeping steps per user prompt. One: the bookkeeping step ends
 /// the turn, so a second one could only come from a later continuation of the
 /// same prompt (goal / mailbox) — and one honest pass is enough.
-const MAX_TODO_GATE_FIRES: usize = 1;
+const MAX_TODO_BOOKKEEPING_FIRES: usize = 1;
 /// Sampling steps without a `todo_write` before the mid-turn nudge fires
 /// (Grok `TodoNudgeConfig::turns_since_todo_write`, which ships unimplemented).
 const TODO_NUDGE_AFTER_STEPS: usize = 6;
@@ -40,7 +40,7 @@ const ASK_TOOLS: &[&str] = &["ask_user_question", "handoff_to_user"];
 
 pub use logic::{
     is_test_or_build_command, verified_reminder, TodoItem, TodoState, TodoStats, TodoStatus,
-    TodoWriteInput, TEST_BUILD_COMMANDS, TODO_ALL_DONE, TODO_BOOKKEEPING_SENTINEL,
+    TodoWriteInput, TEST_BUILD_COMMANDS, TODO_ALL_CLOSED, TODO_ALL_DONE, TODO_BOOKKEEPING_SENTINEL,
 };
 
 /// Named `"todos"` service. TUI live-looks the list; do not capture the Arc.
@@ -82,6 +82,16 @@ impl Todos {
     /// `backing_tasks` = live background jobs + running subagents.
     pub fn bookkeeping_reminder(&self, backing_tasks: usize) -> Option<String> {
         logic::bookkeeping_reminder(&self.state.lock().unwrap(), backing_tasks)
+    }
+
+    /// Old name of [`Todos::bookkeeping_reminder`]. The body is now a
+    /// bookkeeping request (starts with [`TODO_BOOKKEEPING_SENTINEL`]), not a
+    /// "continue working" gate.
+    #[deprecated(
+        note = "renamed to `bookkeeping_reminder`; the body no longer asks to continue working"
+    )]
+    pub fn gate_reminder(&self, backing_tasks: usize) -> Option<String> {
+        self.bookkeeping_reminder(backing_tasks)
     }
 
     /// Mid-turn "current / next item" line, or `None` when nothing is owed.
@@ -231,9 +241,17 @@ fn wire_todo_waterfalls(ctx: &Context) {
     // Start-of-turn reminder computed when the prompt arrives, injected on the
     // first step of that turn.
     let carried = Arc::new(Mutex::new(None::<String>));
+    // [`Todos::revision`] right after the last bookkeeping step, so a list the
+    // model left as it was does not get a bookkeeping step every turn (each one
+    // samples with a different tool list and breaks the prefix cache).
+    // `bookkept` marks "a bookkeeping step ran; read the revision once it is
+    // over" — the step itself may write, so the vote's on_win is too early.
+    let bookkept_at = Arc::new(Mutex::new(None::<u64>));
+    let bookkept = Arc::new(AtomicBool::new(false));
     {
         let (fires, asked, carried, ctx_pre) =
             (fires.clone(), asked.clone(), carried.clone(), ctx.clone());
+        let (bookkept_at, bookkept) = (bookkept_at.clone(), bookkept.clone());
         let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
             let next = args.next::<PreStep>().unwrap_or(step);
             // The quota belongs to this page's prompt. Another page, or a child,
@@ -241,9 +259,11 @@ fn wire_todo_waterfalls(ctx: &Context) {
             if next.enter && Sessions::turn_is_this_page(&ctx_pre, &next.identity) {
                 fires.store(0, Ordering::Relaxed);
                 asked.store(false, Ordering::Relaxed);
-                *carried.lock().unwrap() = ctx_pre
-                    .get::<Todos>(TODOS)
-                    .and_then(|t| t.next_turn_reminder());
+                let todos = ctx_pre.get::<Todos>(TODOS);
+                if bookkept.swap(false, Ordering::Relaxed) {
+                    *bookkept_at.lock().unwrap() = todos.as_ref().map(|t| t.revision());
+                }
+                *carried.lock().unwrap() = todos.and_then(|t| t.next_turn_reminder());
             }
             next
         });
@@ -252,7 +272,11 @@ fn wire_todo_waterfalls(ctx: &Context) {
         let (asked, ctx_exec) = (asked.clone(), ctx.clone());
         let _ = ctx.on_waterfall(TOOLS_EXECUTE, move |result: ToolResult, args| {
             let result = args.next::<ToolResult>().unwrap_or(result);
-            if ASK_TOOLS.contains(&result.name.as_str()) && call_is_this_page(&ctx_exec) {
+            // A refused / failed ask never reached the user.
+            if !result.is_error
+                && ASK_TOOLS.contains(&result.name.as_str())
+                && call_is_this_page(&ctx_exec)
+            {
                 asked.store(true, Ordering::Relaxed);
             }
             result
@@ -291,7 +315,7 @@ fn wire_todo_waterfalls(ctx: &Context) {
     let _ = ctx.on_waterfall(TURN_END, move |end: TurnEnd, args| {
         let mut next = args.next::<TurnEnd>().unwrap_or(end);
         if !gate_applies(&ctx_end, &next)
-            || fires.load(Ordering::Relaxed) >= MAX_TODO_GATE_FIRES
+            || fires.load(Ordering::Relaxed) >= MAX_TODO_BOOKKEEPING_FIRES
             || asked.load(Ordering::Relaxed)
             || in_plan_mode(&ctx_end)
         {
@@ -300,12 +324,18 @@ fn wire_todo_waterfalls(ctx: &Context) {
         let Some(todos) = ctx_end.get::<Todos>(TODOS) else {
             return next;
         };
+        // Nothing changed since the last bookkeeping step: the model already
+        // had its chance to settle exactly this list.
+        if *bookkept_at.lock().unwrap() == Some(todos.revision()) {
+            return next;
+        }
         if let Some(body) = todos.bookkeeping_reminder(backing_tasks(&ctx_end)) {
             // Charged on the win, not on the vote: a handler in a lower
             // slot can take the round, and the user never saw this step.
-            let spent = fires.clone();
+            let (spent, ran) = (fires.clone(), bookkept.clone());
             next.bookkeep_with(ORDER_TURN_END_TODO, body, BOOKKEEPING_TOOLS, move || {
                 spent.fetch_add(1, Ordering::Relaxed);
+                ran.store(true, Ordering::Relaxed);
             });
         }
         next

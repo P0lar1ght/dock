@@ -1633,6 +1633,7 @@ async fn todo_bookkeeping_does_not_cut_an_active_goal_short() {
 struct Recorded {
     n: Arc<AtomicUsize>,
     offered: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    histories: Arc<std::sync::Mutex<Vec<Vec<cordis_spine::LogEvent>>>>,
     script: Arc<dyn Fn(usize) -> LlmOutput + Send + Sync>,
 }
 
@@ -1640,13 +1641,18 @@ impl Sampler for Recorded {
     fn sample<'a>(
         &'a self,
         request: PromptRequest,
-        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
     ) -> BoxFuture<'a, LlmOutput> {
         let mut names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
         names.sort();
         self.offered.lock().unwrap().push(names);
+        self.histories.lock().unwrap().push(request.history.clone());
         let i = self.n.fetch_add(1, Ordering::SeqCst);
         let out = (self.script)(i);
+        // Stream the text like a real backend, so muting covers the deltas too.
+        if !out.text.is_empty() {
+            on_delta(StreamDelta::Text(out.text.clone()));
+        }
         Box::pin(async move { out })
     }
 }
@@ -1673,6 +1679,8 @@ struct Booted {
     root: Context,
     samples: Arc<AtomicUsize>,
     offered: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    /// `request.history` of every sample, in order.
+    histories: Arc<std::sync::Mutex<Vec<Vec<cordis_spine::LogEvent>>>>,
     _tools: Vec<cordis::Disposable>,
 }
 
@@ -1768,6 +1776,7 @@ async fn boot_recorded(script: impl Fn(usize) -> LlmOutput + Send + Sync + 'stat
     root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
     let samples = Arc::new(AtomicUsize::new(0));
     let offered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let histories = Arc::new(std::sync::Mutex::new(Vec::new()));
     root.provide(
         LLM,
         Llm::from_sampler(
@@ -1775,6 +1784,7 @@ async fn boot_recorded(script: impl Fn(usize) -> LlmOutput + Send + Sync + 'stat
             Arc::new(Recorded {
                 n: samples.clone(),
                 offered: offered.clone(),
+                histories: histories.clone(),
                 script: Arc::new(script),
             }),
         ),
@@ -1789,9 +1799,53 @@ async fn boot_recorded(script: impl Fn(usize) -> LlmOutput + Send + Sync + 'stat
         root,
         samples,
         offered,
+        histories,
         _tools: tools,
     }
 }
+
+/// Model texts (`LlmStream.text`, non-empty) in a log or a request history.
+fn model_texts(events: &[cordis_spine::LogEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            cordis_spine::LogEvent::LlmStream(out) if !out.text.is_empty() => {
+                Some(out.text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Like [`fake_tool`], but the result is an error.
+fn failing_tool(root: &Context, name: &'static str, reply: &'static str) -> cordis::Disposable {
+    let body: cordis_spine::ToolBody = Arc::new(move |call: ToolCall| {
+        Box::pin(async move {
+            cordis_spine::ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content: reply.into(),
+                is_error: true,
+                ..Default::default()
+            }
+        })
+    });
+    root.require::<cordis_spine::Tools>(TOOLS)
+        .unwrap()
+        .register(
+            cordis_spine::ToolSpec {
+                name: name.into(),
+                description: format!("fake {name}"),
+                parameters_json: r#"{"type":"object","properties":{}}"#.into(),
+            },
+            body,
+        )
+        .unwrap()
+}
+
+/// A slot the script can reach the booted root through (it is built before
+/// the root exists).
+type RootSlot = Arc<std::sync::Mutex<Option<Context>>>;
 
 const AWAITING_LIST: &str = r#"{"merge":false,"todos":[
     {"id":"a","content":"读代码","status":"awaiting_user"},
@@ -2135,23 +2189,45 @@ async fn a_test_run_without_a_list_update_suggests_marking_it_done() {
 /// Reproduction of session 01a1d068: the model lists a plan and stops, the
 /// user says 「先讨论方案」. The old turn-end gate ("Todos NOT complete —
 /// continue working…") pushed the model into the work. Now the turn end only
-/// gets a bookkeeping step that cannot run anything but `todo_write`.
+/// gets a bookkeeping step that cannot run anything but `todo_write`, its
+/// chatter never becomes a second reply, and the next turn opens with a soft
+/// reminder that the user's new message comes first.
 #[tokio::test]
 async fn after_lets_discuss_the_plan_first_the_model_does_not_start_working() {
     let b = boot_recorded(|i| match i {
         // Turn 1: plan as a list, then text asking whether to start.
         0 => call_tool("c0", "todo_write", OPEN_LIST),
         1 => say("方案：先读代码，再改实现。要开始吗？"),
-        // Bookkeeping: the model ignores it.
+        // Bookkeeping: the model only says "ok" and leaves the list alone.
         2 => say("好的"),
-        // Turn 2, user: 「先讨论方案」. The model discusses.
-        3 => say("好，先讨论：读代码这步要看哪些模块？"),
-        // Bookkeeping again; the model tries to start editing anyway.
-        4 => call_tool("c4", "edit_fake", "{}"),
+        // Turn 2, user: 「先讨论方案」. The model parks the first item on the
+        // user and discusses.
+        3 => call_tool(
+            "c3",
+            "todo_write",
+            r#"{"todos":[{"id":"a","status":"awaiting_user"}]}"#,
+        ),
+        4 => say("好，先讨论：读代码这步要看哪些模块？"),
+        // Bookkeeping again (the list changed); the model tries to start
+        // editing anyway.
+        5 => call_tool("c5", "edit_fake", "{}"),
         _ => say("不该到这里"),
     })
     .await;
-    b.run("帮我把 todo 提醒重做一下").await;
+    let first = b.run("帮我把 todo 提醒重做一下").await;
+    assert_eq!(
+        first,
+        TurnOutcome::Text("方案：先读代码，再改实现。要开始吗？".into())
+    );
+    // Where the bookkeeping step's 「好的」 went: nowhere. Its row is there
+    // (reasoning / tool calls would be kept) but the text is muted.
+    let sessions = b.root.require::<Sessions>(SESSIONS).unwrap();
+    assert_eq!(
+        model_texts(&sessions.events()),
+        ["方案：先读代码，再改实现。要开始吗？"],
+        "the bookkeeping text is not a second reply"
+    );
+
     let out = b.run("先讨论方案").await;
     assert_eq!(
         out,
@@ -2159,9 +2235,30 @@ async fn after_lets_discuss_the_plan_first_the_model_does_not_start_working() {
     );
     assert_eq!(
         b.samples(),
-        5,
-        "each turn: one text + one bookkeeping step, no work"
+        6,
+        "each turn: text + one bookkeeping step, no work"
     );
+    let histories = b.histories.lock().unwrap().clone();
+    assert!(
+        !model_texts(&histories[3]).iter().any(|t| t == "好的"),
+        "the next turn's history does not carry the bookkeeping text"
+    );
+    // Turn 2 opens with the soft reminder, before its first sample.
+    let events = sessions.events();
+    let second_user = events
+        .iter()
+        .rposition(|e| matches!(e, cordis_spine::LogEvent::User(_)))
+        .unwrap();
+    let opening = events[second_user..]
+        .iter()
+        .take_while(|e| !matches!(e, cordis_spine::LogEvent::LlmStream(_)))
+        .find_map(|e| match e {
+            cordis_spine::LogEvent::SystemReminder(t) if t.contains("上轮清单") => Some(t),
+            _ => None,
+        })
+        .expect("turn 2 opens with the left-over reminder");
+    assert!(opening.contains("上轮清单还剩 2 项未完成"), "{opening}");
+    assert!(opening.contains("用户的新消息优先"), "{opening}");
     assert!(
         !b.reminders()
             .iter()
@@ -2171,13 +2268,293 @@ async fn after_lets_discuss_the_plan_first_the_model_does_not_start_working() {
     );
     let offered = b.offered.lock().unwrap().clone();
     assert_eq!(offered[2], ["todo_write"]);
-    assert_eq!(offered[4], ["todo_write"]);
+    assert_eq!(offered[5], ["todo_write"]);
     let worked: Vec<_> = b
         .tool_rows()
         .into_iter()
         .filter(|(name, _, is_error)| name != "todo_write" && !is_error)
         .collect();
     assert!(worked.is_empty(), "no work tool ran: {worked:?}");
+    assert_eq!(b.todos().stats().awaiting_user, 1);
+}
+
+/// The bookkeeping step's text never reaches the transcript or the next
+/// turn's history; the turn still answers with the text before it.
+#[tokio::test]
+async fn the_bookkeeping_steps_text_is_not_a_second_reply() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => say("做到一半，先停在这"),
+        2 => LlmOutput {
+            text: "好的，我更新一下清单".into(),
+            tool_calls: vec![ToolCall {
+                id: "c2".into(),
+                name: "todo_write".into(),
+                arguments: r#"{"todos":[{"id":"a","status":"completed"}]}"#.into(),
+            }],
+            ..LlmOutput::default()
+        },
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    assert_eq!(
+        b.run("干活").await,
+        TurnOutcome::Text("做到一半，先停在这".into())
+    );
+    let sessions = b.root.require::<Sessions>(SESSIONS).unwrap();
+    let events = sessions.events();
+    assert_eq!(model_texts(&events), ["做到一半，先停在这"]);
+    // The step itself is kept: its tool call and result pair up.
+    let last_stream = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            cordis_spine::LogEvent::LlmStream(out) => Some(out.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(last_stream.text.is_empty(), "{last_stream:?}");
+    assert_eq!(last_stream.tool_calls.len(), 1);
+    assert_eq!(
+        b.todos().stats().completed,
+        1,
+        "the bookkeeping write landed"
+    );
+    assert!(
+        !model_texts(&sessions.model_history())
+            .iter()
+            .any(|t| t.contains("好的")),
+        "{:?}",
+        model_texts(&sessions.model_history())
+    );
+    // Muting ends with the step: the next turn's reply is recorded.
+    assert_eq!(b.run("继续").await, TurnOutcome::Text("round-3".into()));
+    assert!(model_texts(&sessions.events()).contains(&"round-3".to_string()));
+}
+
+/// A list the model left exactly as it was after a bookkeeping step does not
+/// get another one every turn (each would sample with a different tool list
+/// and throw away the prefix cache).
+#[tokio::test]
+async fn an_unchanged_list_is_not_bookkept_again() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        // s1 text, s2 bookkeeping that ignores the list.
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("round-1".into()));
+    assert_eq!(b.bookkeeping(), 1);
+    assert_eq!(b.run("继续").await, TurnOutcome::Text("round-3".into()));
+    assert_eq!(b.samples(), 4, "turn 2: one answer, no bookkeeping step");
+    assert_eq!(b.bookkeeping(), 1, "{:?}", b.reminders());
+    assert!(
+        b.offered.lock().unwrap()[3].contains(&"edit_fake".to_string()),
+        "turn 2 samples with the full table"
+    );
+}
+
+/// …but once the list moves again, the next turn end may bookkeep again.
+#[tokio::test]
+async fn a_changed_list_is_bookkept_again() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        // Turn 2: the model closes `a` and starts `b`, then stops.
+        3 => call_tool(
+            "c3",
+            "todo_write",
+            r#"{"todos":[{"id":"a","status":"completed"},{"id":"b","status":"in_progress"}]}"#,
+        ),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.run("干活").await;
+    assert_eq!(b.bookkeeping(), 1);
+    assert_eq!(b.run("继续").await, TurnOutcome::Text("round-4".into()));
+    assert_eq!(b.samples(), 6, "s5 is turn 2's bookkeeping step");
+    assert_eq!(b.bookkeeping(), 2, "{:?}", b.reminders());
+    assert_eq!(b.offered.lock().unwrap()[5], ["todo_write"]);
+}
+
+/// A preset without `todo_write` cannot bookkeep: the turn just ends, and no
+/// bookkeeping reminder is left behind with nothing after it.
+#[tokio::test]
+async fn a_preset_without_todo_write_leaves_no_orphan_reminder() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        // Turn 1 asks the user, so it has no bookkeeping step of its own.
+        1 => call_tool("c1", "ask_user_question", "{}"),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.run("干活").await;
+    assert_eq!(b.bookkeeping(), 0);
+    // Own presets home: `apply` persists the choice, and the shared test
+    // `DOCK_HOME` must not leave every other test on the minimal preset.
+    let presets_home = tempfile::tempdir().unwrap();
+    let presets = cordis_spine::AgentPresets::load(presets_home.path().to_path_buf());
+    presets.apply(cordis_spine::MINIMAL_PRESET_ID).unwrap();
+    b.root
+        .provide(cordis_spine::AGENT_PRESETS, presets)
+        .unwrap();
+    assert_eq!(b.run("继续").await, TurnOutcome::Text("round-3".into()));
+    assert!(
+        !b.offered.lock().unwrap()[3].contains(&"todo_write".to_string()),
+        "the minimal preset has no todo_write"
+    );
+    assert_eq!(b.samples(), 4, "no bookkeeping sample");
+    assert_eq!(
+        b.bookkeeping(),
+        0,
+        "no orphan reminder: {:?}",
+        b.reminders()
+    );
+    let kinds = b.root.require::<Sessions>(SESSIONS).unwrap().kinds();
+    assert_eq!(
+        &kinds[kinds.len() - 2..],
+        ["llm/stream", "turn-end"],
+        "{kinds:?}"
+    );
+}
+
+/// Stop pressed while the bookkeeping step samples: the turn was already
+/// answered, so it still completes with that answer.
+#[tokio::test]
+async fn stop_during_bookkeeping_keeps_the_answered_turn() {
+    let slot: RootSlot = Arc::default();
+    let script_slot = slot.clone();
+    let b = boot_recorded(move |i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => say("答完了"),
+        2 => {
+            let root = script_slot.lock().unwrap().clone().unwrap();
+            root.require::<TurnControl>(TURN).unwrap().cancel();
+            call_tool(
+                "c2",
+                "todo_write",
+                r#"{"todos":[{"id":"a","status":"completed"}]}"#,
+            )
+        }
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.root.plugin(turn(), ()).unwrap().wait().await.unwrap();
+    *slot.lock().unwrap() = Some(b.root.clone());
+    let out = b
+        .root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await;
+    assert_eq!(out.unwrap(), TurnOutcome::Text("答完了".into()));
+    assert_eq!(b.samples(), 3);
+    assert_eq!(b.bookkeeping(), 1);
+    let events = b.root.require::<Sessions>(SESSIONS).unwrap().events();
+    assert!(
+        matches!(
+            events.last(),
+            Some(cordis_spine::LogEvent::TurnEnd(
+                cordis_spine::TurnEndStatus::Completed
+            ))
+        ),
+        "{:?}",
+        events.last()
+    );
+    assert_eq!(
+        b.todos().stats().completed,
+        0,
+        "the stopped call did not run"
+    );
+}
+
+/// At the auto-compact threshold the bookkeeping step (which does not compact)
+/// is skipped instead of risking the window.
+#[tokio::test]
+async fn bookkeeping_is_skipped_at_the_compact_threshold() {
+    let slot: RootSlot = Arc::default();
+    let script_slot = slot.clone();
+    let b = boot_recorded(move |i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => {
+            // The window shrinks under the turn: the history now fills it.
+            let root = script_slot.lock().unwrap().clone().unwrap();
+            root.require::<Sessions>(SESSIONS).unwrap().set_window(16);
+            say("round-1")
+        }
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    *slot.lock().unwrap() = Some(b.root.clone());
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("round-1".into()));
+    assert_eq!(b.samples(), 2, "no bookkeeping sample");
+    assert_eq!(b.bookkeeping(), 0, "{:?}", b.reminders());
+}
+
+/// An ask that failed never reached the user: the bookkeeping still runs.
+#[tokio::test]
+async fn a_failed_ask_does_not_skip_the_bookkeeping() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool("c1", "handoff_to_user", "{}"),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    let _handoff = failing_tool(&b.root, "handoff_to_user", "Error: no user attached");
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("round-2".into()));
+    assert_eq!(b.samples(), 4, "s3 is the bookkeeping step");
+    assert_eq!(b.bookkeeping(), 1, "{:?}", b.reminders());
+}
+
+/// `handoff_to_user` reached through `use_tool` (an on-demand tool) still
+/// counts as asking: `tools/execute` sees the real tool name.
+#[tokio::test]
+async fn a_handoff_through_use_tool_skips_the_bookkeeping() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool(
+            "c1",
+            "use_tool",
+            r#"{"tool_name":"handoff_to_user","tool_input":{}}"#,
+        ),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    b.root
+        .plugin(cordis_spine::mcp_client(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let body: cordis_spine::ToolBody = Arc::new(|call: ToolCall| {
+        Box::pin(async move {
+            cordis_spine::ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content: "已交给用户".into(),
+                ..Default::default()
+            }
+        })
+    });
+    let _handoff = b
+        .root
+        .require::<cordis_spine::Tools>(TOOLS)
+        .unwrap()
+        .register_dynamic(
+            cordis_spine::ToolSpec {
+                name: "handoff_to_user".into(),
+                description: "fake handoff".into(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.into(),
+            },
+            body,
+        )
+        .unwrap();
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("round-2".into()));
+    let rows = b.tool_rows();
+    assert_eq!(rows[1].0, "use_tool", "{rows:?}");
+    assert!(!rows[1].2, "the handoff ran: {rows:?}");
+    assert!(rows[1].1.contains("已交给用户"), "{rows:?}");
+    assert_eq!(b.samples(), 3, "no bookkeeping step after the handoff");
+    assert_eq!(b.bookkeeping(), 0, "{:?}", b.reminders());
 }
 
 /// `"goal"` is not isolated per subagent either (`ChildRunner` isolates
