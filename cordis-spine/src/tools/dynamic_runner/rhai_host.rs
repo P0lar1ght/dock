@@ -16,12 +16,11 @@ use crate::host::status_items::{StatusItem, StatusItems, StatusToken};
 use crate::host::tool_views::{ToolViewFn, ToolViewInput, ToolViews};
 use crate::host::tui_slots::{SlotAction, SlotHandler, SlotKeyResult, TuiSlots};
 use crate::names::{
-    LLM_STREAM, PLUGIN_SETTINGS, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS, SESSIONS, SESSION_EVENT,
-    SLASH, STATUS_ITEMS, STEP_START, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TOOL_VIEWS,
-    TUI_SLOTS, TURN_END,
+    LLM_STREAM, PLUGIN_SETTINGS, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS, SESSION_EVENT, SLASH,
+    STATUS_ITEMS, STEP_START, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TOOL_VIEWS, TUI_SLOTS,
+    TURN_END,
 };
 use crate::prompt::assemble::{PromptAssembly, ORDER_HOOKS};
-use crate::session::log::Sessions;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::plugin_settings::SettingsSchema;
 use cordis_base::types::{
@@ -851,12 +850,12 @@ impl Host {
 
     /// `agent/pre-step`: refuse the turn before it starts. Return
     /// `#{ deny: "reason" }` (or a bare string) to refuse it, `()` for no
-    /// opinion. The reason lands in the session as a system reminder, so the
-    /// model can see why the turn did not start.
+    /// opinion. The hook only calls [`PreStep::deny`]; the loop appends the
+    /// reminder on the session that is starting, so a child turn does not
+    /// write it into the parent.
     fn on_pre_step(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
         let script = self.script_hook_raw(handler);
         let ctx = self.inner.ctx.clone();
-        let plugin_id = self.inner.plugin_id.clone();
         let d = ctx
             .clone()
             .on_waterfall(PRE_STEP, move |step: PreStep, args| {
@@ -867,14 +866,7 @@ impl Host {
                 payload.insert("main".into(), next.is_main_session().into());
                 if let Some(v) = script(payload) {
                     if let Some(reason) = hook_deny(&v) {
-                        next.enter = false;
-                        if let Some(sessions) = ctx.get::<Sessions>(SESSIONS) {
-                            sessions.append(LogEvent::SystemReminder(format!(
-                                "这一轮没有开始：{reason}"
-                            )));
-                        } else {
-                            eprintln!("[cordis:{plugin_id}] host.on(pre-step): {reason}");
-                        }
+                        next.deny(reason);
                     }
                 }
                 next
@@ -939,7 +931,7 @@ impl Host {
                         next.rewrite(name, arguments);
                     } else {
                         eprintln!(
-                            "[cordis:{plugin_id}] host.on(tool-call): handler must return () | \
+                            "[cordis:{plugin_id}] host.on(tools/pre-execute): handler must return () | \
                              #{{ deny }} | #{{ rewrite }}"
                         );
                     }
@@ -972,7 +964,7 @@ impl Host {
                         next.content = text;
                     } else {
                         eprintln!(
-                            "[cordis:{plugin_id}] host.on(tool-result): handler must return a \
+                            "[cordis:{plugin_id}] host.on(tools/execute): handler must return a \
                              string or ()"
                         );
                     }
@@ -1012,7 +1004,7 @@ impl Host {
                         next.text = text;
                     } else {
                         eprintln!(
-                            "[cordis:{plugin_id}] host.on(llm-output): handler must return a \
+                            "[cordis:{plugin_id}] host.on(llm/stream): handler must return a \
                              string or ()"
                         );
                     }

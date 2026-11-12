@@ -3558,7 +3558,7 @@ async fn disk_rhai_plugin_can_refuse_a_tool_call() {
     assert!(out.contains("脚本不让跑 shell"), "{out}");
 }
 
-/// 同一个钩子还能**改道**：模型要 bash，实际跑的是 read_file。改道之后
+/// 同一个钩子还能**改道**：模型要 bash，实际跑的是 `cordis_inspect`。改道之后
 /// 仍按新名字过允许名单与权限门。
 #[tokio::test]
 async fn disk_rhai_plugin_can_redirect_a_tool_call() {
@@ -3592,9 +3592,49 @@ async fn disk_rhai_plugin_can_refuse_a_turn() {
     assert!(
         reminders(&root)
             .iter()
-            .any(|t| t.contains("这一轮没有开始")),
+            .any(|t| t.contains("这一轮没有开始：脚本拒了这一轮")),
         "{:?}",
         reminders(&root)
+    );
+}
+
+/// 回归：子代理这一轮被拒时，理由写在子会话里，不进父会话。
+#[tokio::test]
+async fn a_child_turn_refusal_stays_out_of_the_parent_session() {
+    let root = boot_with_loop().await;
+    let _dir = boot_disk_rhai(&root, "hookpre2", RHAI_DISK_PRE_STEP).await;
+    let child = root.isolate("sessions");
+    child
+        .provide(SESSIONS, Sessions::isolated_as(child.clone(), "child-1"))
+        .unwrap();
+    let err = LoopHandle::new(child.clone(), std::sync::Arc::new(cordis_spine::GrokStep))
+        .run("子任务")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, cordis_spine::Error::PreStepRejected),
+        "{err:?}"
+    );
+    let parent = reminders(&root);
+    assert!(
+        parent.iter().all(|t| !t.contains("这一轮没有开始")),
+        "父会话不该出现拒绝理由：{parent:?}"
+    );
+    let child_notes: Vec<String> = child
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::SystemReminder(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        child_notes
+            .iter()
+            .any(|t| t.contains("这一轮没有开始：脚本拒了这一轮")),
+        "{child_notes:?}"
     );
 }
 
@@ -3636,6 +3676,24 @@ async fn disk_rhai_plugin_can_rewrite_the_llm_output() {
     assert!(
         matches!(out, TurnOutcome::Text(ref text) if text == "REWRITTEN"),
         "{out:?}"
+    );
+    let streamed: Vec<String> = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::LlmStream(output) => Some(output.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        streamed.iter().any(|t| t == "REWRITTEN"),
+        "改写后的文本要落进会话，不能只改 TurnOutcome：{streamed:?}"
+    );
+    assert!(
+        streamed.iter().all(|t| t == "REWRITTEN" || t.is_empty()),
+        "会话里不该留着改写前的原文：{streamed:?}"
     );
 }
 
@@ -3706,14 +3764,12 @@ async fn a_session_package_cannot_register_the_flow_hooks() {
 #[tokio::test]
 async fn a_session_package_with_source_path_cannot_register_the_flow_hooks() {
     let root = boot().await;
-    let dir = std::env::current_dir()
-        .unwrap()
-        .join(".dock")
-        .join("plugins")
-        .join("hooks-srcpath-session");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("source.rhai");
+    // 写到临时的用户插件根，不落在仓库的 `.dock/plugins/`（断言失败也会留下）。
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("DOCK_HOME", home.path());
+    let plugin = home.path().join("plugins").join("hooksrc");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let path = plugin.join("source.rhai");
     std::fs::write(&path, RHAI_DISK_DENY).unwrap();
     let defined = exec_json(
         &root,
@@ -3734,7 +3790,6 @@ async fn a_session_package_with_source_path_cannot_register_the_flow_hooks() {
         json!({"pluginId": "hooks-1", "packageId": "pkg-1", "mode": "run"}),
     )
     .await;
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(!ran.contains("\"status\":\"running\""), "{ran}");
     assert!(ran.contains("disk plugins"), "{ran}");
 }

@@ -1200,7 +1200,10 @@ impl Sessions {
             self.commit_pending_call();
             return;
         };
-        if out.text.is_empty() {
+        // 流式 delta 先写下原文。调用方给出非空文本时以它为准，这样 `llm/stream`
+        // 的改写能盖掉已经推给界面、也会进下一轮 `model_history()` 的那一份。
+        // 空文本是「只收尾、不改已经流进来的字」（用量、只有工具调用）。
+        if !output.text.is_empty() {
             out.text = output.text.clone();
         }
         // 流式 delta 可能在签名跨 chunk 时短暂拼进过密文残片；finish 时的
