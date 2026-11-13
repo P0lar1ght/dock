@@ -282,12 +282,25 @@ async fn run_dock_child(
             .map(|s| s.model())
             .filter(|m| !m.is_empty())
     });
-    let effort = over.as_ref().and_then(|o| o.effort.clone()).or_else(|| {
-        settings
-            .as_ref()
-            .map(|s| s.effort())
-            .filter(|e| !e.is_empty())
-    });
+    let effort = over
+        .as_ref()
+        .and_then(|o| o.effort.clone())
+        .or_else(|| {
+            settings
+                .as_ref()
+                .map(|s| s.effort())
+                .filter(|e| !e.is_empty())
+        })
+        .or_else(|| {
+            // 最后回退到模型自己的默认强度 —— 跟采样时选强度的那段同一个顺序
+            // （`llm/http` 的 `WireParams::resolve`），不然这里报的是「没设」，
+            // 而它实际用的是模型默认那一档。
+            model
+                .as_deref()
+                .and_then(cordis_base::config::lookup_model)
+                .map(|c| c.default_effort())
+                .filter(|e| !e.is_empty())
+        });
     store.set_model(&id, model, effort);
 
     let mut preset = def.to_preset(&typ);

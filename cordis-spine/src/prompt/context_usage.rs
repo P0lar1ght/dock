@@ -1405,6 +1405,22 @@ mod tests {
         assert_eq!(usage.compact_at, 170_000, "门槛是窗口的 85%");
     }
 
+    /// 有锚点时（上游真报了用量）占用照旧算得出来 —— 真实环境就是这样，
+    /// 假上游不报用量的测试环境不代表。
+    #[tokio::test]
+    async fn usage_from_works_with_an_upstream_anchor() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.set_window(200_000);
+        sessions.append(LogEvent::User("go".into()));
+        sample_with_usage(&sessions, 5_000, 1_000);
+        let base = base_of(&ctx);
+        let usage = usage_from(&base, Some(&sessions)).expect("有锚点也要算得出来");
+        assert_eq!(usage.used, 6_000, "锚点真账 + 之后的增量");
+        assert_eq!(usage.window, 200_000);
+    }
+
     /// 顶栏 / `/context` 显示的就是自动压缩判定用的那个数。
     #[tokio::test]
     async fn snapshot_shows_the_number_auto_compact_uses() {

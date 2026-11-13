@@ -273,6 +273,8 @@ export function SubagentGroup({ items, threadId }: { items: ToolItem[]; threadId
 function GroupRow({ item, sub, now, threadId }: { item: ToolItem; sub: Subagent | null; now: number; threadId: string }) {
   const status = sub?.info.status ?? (item.status === "running" ? "running" : "completed");
   const running = status === "running";
+  const usage = sub ? usageOf(sub.info) : null;
+  const over = usage !== null && usage.percent >= usage.triggerPercent;
   const dot = running ? "bg-[#34c759]" : status === "failed" ? "bg-[#ff3b30]" : "bg-[#8e8e93]";
   const right = sub
     ? running
@@ -293,7 +295,17 @@ function GroupRow({ item, sub, now, threadId }: { item: ToolItem; sub: Subagent 
         <RolePill text={sub?.info.role || String(item.arguments.subagent_type ?? "子代理")} />
         <span className="min-w-0 truncate text-[13px] text-[#3a3a3c]">{sub?.info.description || String(item.arguments.description ?? "")}</span>
       </span>
-      <span className={`shrink-0 text-[11px] ${status === "failed" ? "text-[#c0392b]" : "text-[#8e8e93]"}`}>{right}</span>
+      <span className="flex shrink-0 items-center gap-1.5">
+        {usage && (
+          <span
+            className={`tabular-nums ${over ? "text-[#ff9f0a]" : "text-[#8e8e93]"}`}
+            title={`已用 ${usage.used} / ${usage.total} tokens（${usage.percent}%）`}
+          >
+            {usage.percent}%
+          </span>
+        )}
+        <span className={`text-[11px] ${status === "failed" ? "text-[#c0392b]" : "text-[#8e8e93]"}`}>{right}</span>
+      </span>
     </button>
   );
 }
