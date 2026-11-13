@@ -158,7 +158,11 @@ async fn run_dock_child(
         .clone();
     // 角色表按页取（预设按页）：常驻标记也在那儿，回收时才知道该不该跳过。
     let parent_presets = parent.get::<AgentPresets>(AGENT_PRESETS);
-    let def = parent_presets.as_ref().and_then(|p| p.subagent(&typ));
+    // `current()` 而不是 `subagent()`：后者每次都 resync()（重读用户层与项目层、
+    // 重解析全部 YAML），孩子起跑这条热路径上没必要。
+    let def = parent_presets
+        .as_ref()
+        .and_then(|p| p.current().agents.get(&typ).cloned());
     let Some(def) = def else {
         return failed(
             &id,
@@ -168,7 +172,6 @@ async fn run_dock_child(
             false,
         );
     };
-    store.set_keep_alive(&id, def.keep_alive);
 
     let resume = run
         .request

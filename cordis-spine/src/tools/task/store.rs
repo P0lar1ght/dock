@@ -191,6 +191,21 @@ impl ChildStore {
     }
 
     /// 标记 / 清掉「这一轮是用户开的」。
+    /// 这一页还能再留几个常驻孩子。常驻孩子不参与回收清扫，得有个数上限：
+    /// 每派一个常驻角色就多一份常驻开销，不封顶会一直涨。
+    pub fn keep_alive_budget_left(&self, parent: &str) -> bool {
+        let map = self.inner.lock().unwrap();
+        let kept = map
+            .values()
+            .filter(|s| {
+                s.keep_alive.load(Ordering::Relaxed)
+                    && s.parent == parent
+                    && s.life() != super::SubagentLife::Done
+            })
+            .count();
+        kept < super::MAX_KEEP_ALIVE_PER_PARENT
+    }
+
     /// 槽位建好之后补常驻标记（角色名册要等槽位存在才知道该角色的定义）。
     pub fn set_keep_alive(&self, id: &str, on: bool) {
         if let Some(slot) = self.get(id) {

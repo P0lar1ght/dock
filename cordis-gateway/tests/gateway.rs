@@ -2756,6 +2756,41 @@ async fn preset_keep_alive_survives_old_clients() {
     let _ = rpc.call("preset/delete", json!({ "id": id })).await;
 }
 
+/// 用户层有一份**升级前落盘**的角色文件（那时还没有 `keep_alive` 键）→ 常驻标记
+/// 要沿用内置的 true，不能被整份替换抹掉。
+#[tokio::test]
+async fn an_old_user_layer_role_file_keeps_the_built_in_keep_alive() {
+    let _presets = presets_disk().await;
+    isolated_home();
+    let home = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap());
+    let dir = home.join("presets").join("warden").join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("观.yml"),
+        "name: 观\ndescription: 升级前落盘的一份角色文件\npersona: 旧人设\ntools:\n  - read_file\n",
+    )
+    .unwrap();
+
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let got = rpc.call("preset/get", json!({ "id": "warden" })).await;
+    let guan = got["result"]["preset"]["agents"]
+        .as_array()
+        .expect("warden agents")
+        .iter()
+        .find(|a| a["id"] == json!("观"))
+        .expect("warden has 观")
+        .clone();
+    assert_eq!(
+        guan["keepAlive"],
+        json!(true),
+        "旧的用户层角色文件不该抹掉内置的常驻标记: {got}"
+    );
+    std::fs::remove_dir_all(home.join("presets").join("warden")).ok();
+}
+
 /// AI 辅助写预设：走 `"llm"`，结果只回不写盘。测试装配的 echo 只回工具调用、没有正文，
 /// 三个方法都报 `draft_failed`（成功路径见 spine `tests/preset_assist.rs`）；参数错是
 /// `invalid_params`；另起任务回帧之后连接照常可用。

@@ -11,7 +11,7 @@ Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"session
 
 **子代理不是作业**：`job` / `kill_task` 只看后台命令，列不出、处置不了子代理。子代理只走 `send_message` / `list_agents` / `interrupt_agent`，结果靠回合结束通知送达，不轮询。整个撤掉一个子代理是用户的事（TUI `/tasks` 里 `x`，走 `Subagents::kill`），或随会话 Stop / 结束。
 
-**回收**：普通角色跑完一轮 park idle，**空闲满 15 分钟**就被回收——`list_agents` 不再列它，`send_message` 报 `is done; message was not delivered`，但对话还在盘上，`task`（`resume_from: "<agent_id>"`）能把它复活接着聊。要整场会话都留着的角色，在 `agents/<id>.yml` 写 `keep_alive: true`（内置 `warden` 的 `观` 默认开着，见 [agent-presets](agent-presets.md)「常驻角色」）。
+**回收**：普通角色跑完一轮 park idle，**空闲满 15 分钟**就被回收——`list_agents` 不再列它，`send_message` 报 `is done; message was not delivered`，但对话还在盘上，`task`（`resume_from: "<agent_id>"`）能把它复活接着聊。要整场会话都留着的角色，在 `agents/<id>.yml` 写 `keep_alive: true`（内置 `warden` 的 `观` 默认开着，见 [agent-presets](agent-presets.md)「常驻角色」）。常驻孩子不回收，所以**同一页最多 8 个**：超出的按普通孩子算。
 
 **校验用发起调用的那一页**：名册校验跑在协调器的后台 task 里，task-local 的执行 ctx 到不了那儿，所以校验请求带着**发起调用的那一页**的 ctx 过去——第 2 页切了模式，角色表就是第 2 页那份（`agent/presets.rs` 的 `AgentPresets` 每页一份），不是根上那份。
 

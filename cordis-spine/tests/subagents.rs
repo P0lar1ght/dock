@@ -292,6 +292,43 @@ async fn a_keep_alive_role_survives_the_idle_sweep() {
     assert!(!sub.snapshot(&id).unwrap().done);
 }
 
+/// 常驻孩子不回收，得有个数上限：同一页派太多常驻角色，超过上限的那个按普通孩子算
+/// （照常回收），别让一页堆成一片。
+#[tokio::test]
+async fn keep_alive_children_are_capped_per_parent() {
+    let h = boot(Arc::new(LastUser)).await;
+    let home = &h._home;
+    std::fs::create_dir_all(home.path().join("solo").join("agents")).unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agent.yml"),
+        "name: 独\ntools:\n  - task\n  - send_message\n  - list_agents\n  - interrupt_agent\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agents").join("obs.yml"),
+        "name: 观察\nkeep_alive: true\ntools:\n  - task\n",
+    )
+    .unwrap();
+    let presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap();
+    presets.resync();
+    presets.apply("solo").unwrap();
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..9 {
+        let id = spawn_bg(&tools, "hello child", "obs").await;
+        wait_idle(&sub, &id).await;
+        ids.push(id);
+    }
+    let swept = sub.sweep_idle(Duration::ZERO);
+    assert_eq!(
+        swept,
+        vec![ids[8].clone()],
+        "过了上限的那个按普通孩子回收，前八个常驻留着"
+    );
+}
+
 #[tokio::test]
 async fn empty_roster_with_task_allowed_errors() {
     let h = boot(Arc::new(LastUser)).await;

@@ -55,6 +55,12 @@ pub const MAX_SUBAGENT_DEPTH: u32 = 1;
 /// readable, so `resume_from` keeps working).
 const IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// How many `keep_alive` children one parent may keep. A keep-alive child is
+/// never swept, so without a cap a page could pile them up (every `task` call
+/// makes a new one) and grow without bound. Past the cap the new child is
+/// disposed like any other.
+const MAX_KEEP_ALIVE_PER_PARENT: usize = 8;
+
 /// How often the idle sweep runs.
 const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -185,10 +191,14 @@ pub struct WorkflowSpawn {
 
 /// 这个角色是不是常驻（`agents/<id>.yml` 的 `keep_alive: true`）？常驻角色空闲下来
 /// 也不参与回收清扫 —— 观察者要整场会话保持可继续。
+///
+/// 用 `current()` 而不是 `subagent()`：后者每次都 `resync()`（重读用户层与项目层、
+/// 重解析全部 YAML），派活这种热路径上没必要。新写的角色文件照旧要
+/// `task`（`reload_roster: true`）刷新。
 pub(super) fn keep_alive_of(ctx: &cordis::Context, subagent_type: &str) -> bool {
     ctx.get::<crate::agent::presets::AgentPresets>(crate::names::AGENT_PRESETS)
-        .and_then(|p| p.subagent(subagent_type))
-        .is_some_and(|def| def.keep_alive)
+        .and_then(|p| p.current().agents.get(subagent_type).cloned())
+        .is_some_and(|def| def.keep_alive.unwrap_or(false))
 }
 
 /// Named `"subagents"` service. Live-lookup; do not capture the Arc.
@@ -465,6 +475,8 @@ impl Subagents {
         parent: &str,
         keep_alive: bool,
     ) {
+        // 常驻孩子不回收：过了上限就按普通孩子算（照常回收），别让一页堆成一片。
+        let keep_alive = keep_alive && self.store.keep_alive_budget_left(parent);
         self.store
             .ensure_owned(id, description, subagent_type, owner, parent, keep_alive);
     }
