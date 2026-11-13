@@ -2678,6 +2678,84 @@ async fn preset_resident_tools_round_trip_and_survive_old_clients() {
     let _ = rpc.call("preset/delete", json!({ "id": id })).await;
 }
 
+/// `keepAlive` 缺省**沿用已有**：老客户端（没这个开关）整份写回不会把常驻标记抹掉，
+/// 显式传 `false` 才关掉。内置 `warden` 的「观」默认常驻，这条也守着。
+#[tokio::test]
+async fn preset_keep_alive_survives_old_clients() {
+    let _presets = presets_disk().await;
+    let h = Harness::boot_with_pages().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    // 内置 warden 的「观」是常驻角色。
+    let shipped = rpc.call("preset/get", json!({ "id": "warden" })).await;
+    let guan = shipped["result"]["preset"]["agents"]
+        .as_array()
+        .expect("warden agents")
+        .iter()
+        .find(|a| a["id"] == json!("观"))
+        .expect("warden has 观")
+        .clone();
+    assert_eq!(guan["keepAlive"], json!(true), "{shipped}");
+
+    let made = rpc
+        .call(
+            "preset/create",
+            json!({ "name": "通用", "basedOn": "minimal" }),
+        )
+        .await;
+    let id = made["result"]["preset"]["id"].as_str().unwrap().to_string();
+    let body = json!({
+        "name": "通用",
+        "tools": ["read_file"],
+        "agents": [
+            { "id": "obs", "name": "观察", "tools": ["read_file"], "keepAlive": true }
+        ]
+    });
+    let saved = rpc
+        .call("preset/update", json!({ "id": id, "preset": body }))
+        .await;
+    assert!(saved.get("error").is_none(), "{saved}");
+    let got = rpc.call("preset/get", json!({ "id": id })).await;
+    assert_eq!(
+        got["result"]["preset"]["agents"][0]["keepAlive"],
+        json!(true),
+        "{got}"
+    );
+
+    // 老客户端：整份写回但不带 keepAlive。
+    let mut old = got["result"]["preset"].clone();
+    for a in old["agents"].as_array_mut().unwrap() {
+        a.as_object_mut().unwrap().remove("keepAlive");
+    }
+    let saved = rpc
+        .call("preset/update", json!({ "id": id, "preset": old }))
+        .await;
+    assert!(saved.get("error").is_none(), "{saved}");
+    let kept = rpc.call("preset/get", json!({ "id": id })).await;
+    assert_eq!(
+        kept["result"]["preset"]["agents"][0]["keepAlive"],
+        json!(true),
+        "老客户端不该抹掉常驻标记: {kept}"
+    );
+
+    // 显式关掉才真的关。
+    let mut off = kept["result"]["preset"].clone();
+    off["agents"][0]["keepAlive"] = json!(false);
+    let saved = rpc
+        .call("preset/update", json!({ "id": id, "preset": off }))
+        .await;
+    assert!(saved.get("error").is_none(), "{saved}");
+    let after = rpc.call("preset/get", json!({ "id": id })).await;
+    assert_eq!(
+        after["result"]["preset"]["agents"][0]["keepAlive"],
+        json!(false),
+        "{after}"
+    );
+    let _ = rpc.call("preset/delete", json!({ "id": id })).await;
+}
+
 /// AI 辅助写预设：走 `"llm"`，结果只回不写盘。测试装配的 echo 只回工具调用、没有正文，
 /// 三个方法都报 `draft_failed`（成功路径见 spine `tests/preset_assist.rs`）；参数错是
 /// `invalid_params`；另起任务回帧之后连接照常可用。
