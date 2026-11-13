@@ -152,6 +152,9 @@ function placeholder(agentId: string): SubagentInfo {
     persisted: false,
     approval: 'inherit',
     readOnly: false,
+    context: null,
+    model: null,
+    effort: null,
   };
 }
 

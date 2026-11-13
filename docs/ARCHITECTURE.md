@@ -125,6 +125,8 @@ completed / cancelled / failed（failed 带 `error`）；更早的会话没有�
 - 子代理不记 `TurnEnd`，一轮的收尾看 `subagent/changed` 之后的快照（空闲 / 结束 / 失败）。
 - 网关把这两条投成父页上的 `subagent/event` / `subagent/updated`（见 `cordis-gateway/README.md`）。
 
+**子代理的上下文占用**：跟主会话同一套算法（`prompt::context_usage`）——有锚点时是上游 usage 真账加上锚点之后的本地估算，没锚点时全靠估算。差别只在「谁的账」：算法跑在**子代理自己的 `Context`** 里，锚点与历史都取它那个 `"sessions"`，所以读不到父会话的用量。每轮跑完算一次（压缩也发生在一轮里，这一算就是压缩后的数），占用变化不到上一次占用的 1% 就不推。固定前缀（系统提示 + 工具表 + 窗口）与会话历史分开存，于是占用能脱离 `Context` 重算 —— 面板上的数可以对着子代理的会话直接核。
+
 装一页要挂哪些插件由**组合根**决定（`cordis-app` 的 `tab_mount()`），TUI 只管开 /
 关 / 切：`"tabs"` 拿到的是一个建页插件工厂。关页 `dispose` 那一颗页 fiber，
 它下面的会话、循环、actor、视图一起走。

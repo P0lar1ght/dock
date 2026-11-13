@@ -156,3 +156,40 @@ test('子代理的审批档位：没给或认不出的都当跟这一页走', ()
     ['auto', 'ask', 'inherit', 'inherit'],
   );
 });
+
+test('子代理的上下文占用跟着推送走', () => {
+  const state = reduceSubagents(
+    EMPTY_SUBAGENTS,
+    updated('running', { context: { used: 1200, window: 128000, compactAt: 108800 } }),
+  );
+  const info = state.byId.kid.info;
+  assert.deepEqual(info.context, { used: 1200, window: 128000, compactAt: 108800 });
+});
+
+test('网关没带 context 时就是 null（老客户端不受影响）', () => {
+  const state = reduceSubagents(EMPTY_SUBAGENTS, updated('running'));
+  assert.equal(state.byId.kid.info.context, null);
+});
+
+test('window 为 0 的 context 当作没有', () => {
+  const state = reduceSubagents(
+    EMPTY_SUBAGENTS,
+    updated('running', { context: { used: 10, window: 0, compactAt: 0 } }),
+  );
+  assert.equal(state.byId.kid.info.context, null);
+});
+
+test('子代理的模型与推理强度跟着推送走', () => {
+  const state = reduceSubagents(
+    EMPTY_SUBAGENTS,
+    updated('running', { model: 'test-model', effort: 'high' }),
+  );
+  assert.equal(state.byId.kid.info.model, 'test-model');
+  assert.equal(state.byId.kid.info.effort, 'high');
+});
+
+test('没带模型时是 null', () => {
+  const state = reduceSubagents(EMPTY_SUBAGENTS, updated('running'));
+  assert.equal(state.byId.kid.info.model, null);
+  assert.equal(state.byId.kid.info.effort, null);
+});

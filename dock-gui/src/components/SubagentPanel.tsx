@@ -19,12 +19,13 @@ import {
   type TurnItem,
 } from "dock-core";
 import { store, useEnv, useSubagents, useThread } from "../dock/store";
+import { ContextArc } from "./ContextRing";
 import { IconButton } from "./chrome";
 import { Markdown } from "./Markdown";
 import { Reasoning } from "./Reasoning";
 import { PathLinkContext } from "./markdown/pathLink";
 import { usePathLinker } from "./markdown/usePathLinker";
-import { activityText, clock, RolePill, SETTLED_LABEL, useNow } from "./SubagentCard";
+import { activityText, clock, RolePill, SETTLED_LABEL, usageOf, useNow } from "./SubagentCard";
 import { ToolCard } from "./ToolCard";
 import { COMPOSER_WIDTH, READING_WIDTH } from "./Transcript";
 import { MenuButton } from "./Popover";
@@ -138,6 +139,8 @@ function List({
 function ListRow({ sub, now, onPick }: { sub: Subagent; now: number; onPick: (id: string) => void }) {
   const { info } = sub;
   const running = info.status === "running";
+  const usage = usageOf(info);
+  const over = usage !== null && usage.percent >= usage.triggerPercent;
   const meta = running
     ? `${clock(elapsedMs(sub, now))} · ${toolCallCount(sub)}`
     : info.status === "failed"
@@ -156,7 +159,17 @@ function ListRow({ sub, now, onPick }: { sub: Subagent; now: number; onPick: (id
           <RolePill text={info.role} small />
           <span className="min-w-0 truncate text-xs text-ink">{info.description}</span>
         </span>
-        <span className={`shrink-0 text-[10px] ${info.status === "failed" ? "text-[#c0392b]" : "text-[#8e8e93]"}`}>{meta}</span>
+        <span className="flex shrink-0 items-center gap-1.5">
+          {usage && (
+            <span
+              className={`text-[10px] tabular-nums ${over ? "text-[#ff9f0a]" : "text-[#8e8e93]"}`}
+              title={`已用 ${usage.used} / ${usage.total} tokens（${usage.percent}%）`}
+            >
+              {usage.percent}%
+            </span>
+          )}
+          <span className={`text-[10px] ${info.status === "failed" ? "text-[#c0392b]" : "text-[#8e8e93]"}`}>{meta}</span>
+        </span>
       </span>
       {running && <span className="truncate pl-0.5 text-[11px] text-[#8e8e93]">{activityText(currentActivity(sub))}</span>}
     </button>
@@ -436,6 +449,8 @@ export function Composer({
   const [focused, setFocused] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const sub = useSubagents(threadId).byId[agentId];
+  const info = sub?.info ?? null;
+  const usage = info ? usageOf(info) : null;
   const page = useEnv(threadId).approval === "auto" ? "自动批准" : "请求批准";
   const mode = sub?.info.approval ?? "inherit";
   const current = APPROVAL.find((a) => a.id === mode) ?? APPROVAL[0];
@@ -491,7 +506,7 @@ export function Composer({
           placeholder={ended ? "接着跟它说…（从它的对话接着来）" : "给子代理补充一句…"}
           className="thin-scroll min-w-0 resize-none bg-transparent text-[15px] leading-snug text-ink outline-none placeholder:text-ink-5 select-text"
         />
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
           <MenuButton
             title="审批模式（只改这个子代理）"
             align="left"
@@ -508,6 +523,24 @@ export function Composer({
               </>
             }
           />
+          {/* 占用 / 模型 / 推理强度：跟主会话底栏同一排，子代理自己的那份。 */}
+          <span className="flex min-w-0 flex-1 items-center gap-1.5">
+            {usage && <ContextArc usage={usage} />}
+            {info.model && (
+              <span
+                title={`模型 ${info.model}`}
+                className="max-w-[150px] truncate rounded-full bg-[#f5f5f7] px-2 py-0.5 text-[11px] text-ink-3"
+              >
+                {info.model}
+              </span>
+            )}
+            <span
+              title={`推理强度 ${info.effort || "默认"}`}
+              className="shrink-0 rounded-full bg-[#f5f5f7] px-2 py-0.5 text-[11px] text-ink-3"
+            >
+              推理 {info.effort || "默认"}
+            </span>
+          </span>
           <button
             type="button"
             aria-label="发送"

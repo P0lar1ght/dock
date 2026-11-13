@@ -99,6 +99,12 @@ pub struct SubagentSnap {
     pub settled_at: Option<Instant>,
     /// 第一次启动的墙钟时刻（同 id 复活后沿用原来的）。
     pub started_wall: std::time::SystemTime,
+    /// 上下文占用（`None` = 还没算出来：还没跑过一步，或这个会话没有模型配置）。
+    pub context: Option<crate::prompt::context_usage::ContextUsage>,
+    /// 它实际在用的模型（workflow 的 `agent(model:)` 覆写优先，否则父会话的）。
+    pub model: Option<String>,
+    /// 它实际在用的推理强度（同上）。
+    pub effort: Option<String>,
 }
 
 impl SubagentSnap {
@@ -223,6 +229,30 @@ impl Subagents {
         self.store.events(id)
     }
 
+    /// 这个孩子的上下文占用（`None` = 还没算出来）。
+    pub fn context_usage(&self, id: &str) -> Option<crate::prompt::context_usage::ContextUsage> {
+        self.snapshot(id).and_then(|s| s.context)
+    }
+
+    /// 这个孩子的固定前缀（系统提示 + 工具表 + 窗口）。
+    pub fn context_base(&self, id: &str) -> Option<crate::prompt::context_usage::ContextBase> {
+        self.store.context_base(id)
+    }
+
+    /// 重算这个孩子的上下文占用并按节流推一次。压缩之后、手动刷新之后用。
+    pub fn refresh_context(&self, id: &str) -> Option<crate::prompt::context_usage::ContextUsage> {
+        let base = self.store.context_base(id)?;
+        let sessions = self.store.sessions(id);
+        let usage = crate::prompt::context_usage::usage_from(&base, sessions.as_ref());
+        self.store.set_context(id, usage);
+        usage
+    }
+
+    /// 这个孩子自己的会话（锚点与历史都在里面）。
+    pub fn child_sessions(&self, id: &str) -> Option<crate::Sessions> {
+        self.store.sessions(id)
+    }
+
     pub async fn wait(&self, ids: &[String], timeout_ms: u64) -> Vec<SubagentSnap> {
         let deadline =
             tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1));
@@ -238,6 +268,9 @@ impl Subagents {
                             done: true,
                             idle: false,
                             cancelled: false,
+                            context: None,
+                            model: None,
+                            effort: None,
                             output: format!(
                                 "Task or subagent {id} not found. No background tasks or subagents exist in this session."
                             ),

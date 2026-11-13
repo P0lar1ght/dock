@@ -48,11 +48,22 @@ pub fn info(snap: &SubagentSnap, events: &[LogEvent], role: Option<String>) -> V
         "output": cap(snap.output.trim(), OUTPUT_CHARS),
         // 显式带上：和只在盘上的 `persisted: true` 对称，客户端不用靠「缺省即 false」。
         "persisted": false,
+        // 它实际在用的模型与推理强度（workflow 的 `agent(model:)` 覆写优先）。
+        "model": snap.model,
+        "effort": snap.effort,
     });
     if snap.running() {
         if let Some(activity) = activity(events) {
             v["activity"] = activity;
         }
+    }
+    // 上下文占用：还没算出来（没跑过一步 / 没有模型配置）就不带这个键，老客户端不受影响。
+    if let Some(c) = &snap.context {
+        v["context"] = json!({
+            "used": c.used,
+            "window": c.window,
+            "compactAt": c.compact_at,
+        });
     }
     if let Some(error) = (status(snap) == "failed")
         .then(|| error(snap, events))
@@ -230,4 +241,66 @@ fn unix_ms(t: SystemTime) -> u64 {
 
 fn duration_ms(d: Duration) -> u64 {
     d.as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cordis_spine::ContextUsage;
+
+    fn snap(context: Option<ContextUsage>) -> SubagentSnap {
+        SubagentSnap {
+            id: "kid".into(),
+            description: "看一眼".into(),
+            subagent_type: "explore".into(),
+            done: false,
+            idle: false,
+            cancelled: false,
+            output: String::new(),
+            started_at: std::time::Instant::now(),
+            parent: "main".into(),
+            tool_call_id: None,
+            failed: false,
+            settled_at: None,
+            started_wall: std::time::SystemTime::UNIX_EPOCH,
+            context,
+            model: None,
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn the_agent_carries_its_context_usage() {
+        let v = info(
+            &snap(Some(ContextUsage {
+                used: 1200,
+                window: 128_000,
+                compact_at: 108_800,
+            })),
+            &[],
+            None,
+        );
+        assert_eq!(v["context"]["used"], json!(1200));
+        assert_eq!(v["context"]["window"], json!(128_000));
+        assert_eq!(v["context"]["compactAt"], json!(108_800));
+    }
+
+    #[test]
+    fn the_agent_carries_its_model_and_effort() {
+        let mut snap = snap(None);
+        snap.model = Some("test-model".into());
+        snap.effort = Some("high".into());
+        let v = info(&snap, &[], None);
+        assert_eq!(v["model"], json!("test-model"));
+        assert_eq!(v["effort"], json!("high"));
+    }
+
+    #[test]
+    fn no_usage_means_no_key_at_all() {
+        let v = info(&snap(None), &[], None);
+        assert!(
+            v.get("context").is_none(),
+            "没算出来时整个键都不出现，老客户端不受影响：{v}"
+        );
+    }
 }

@@ -20,6 +20,7 @@ use crate::grok::glyphs;
 use crate::grok::picker::{render_divider, render_floating_frame, render_search_bar, PickerHits};
 use crate::grok::workflows::WorkflowRunSnapshot;
 use crate::theme::Theme;
+use crate::views::status::{blend_occupancy_color, fmt_pct5, occupancy_breakpoints};
 use cordis_spine::{AgentPresets, CronJob, JobSnapshot, SubagentSnap};
 
 /// Logical group a [`TaskEntry`] belongs to. Drives both the sort order (so
@@ -219,10 +220,22 @@ impl TaskEntry {
             Style::default().fg(theme.gray_bright)
         };
         let type_sep = if description.is_empty() { "" } else { " " };
-        let spans = vec![
+        let mut spans = vec![
             Span::styled(format!("{type_label}{type_sep}"), type_style),
             Span::styled(description.clone(), desc_style),
         ];
+        // 上下文占用：算出来了才有（`SubagentSnap::context`）。配色跟主线程状态栏
+        // 同一套断点 —— 85% 是自动压缩门槛。
+        if let Some(c) = &info.context {
+            if c.window > 0 {
+                let pct = (c.used as f64 / c.window as f64) * 100.0;
+                let color = blend_occupancy_color(pct, &occupancy_breakpoints(&theme));
+                spans.push(Span::styled(
+                    format!("  {}", fmt_pct5(pct)),
+                    Style::default().fg(color),
+                ));
+            }
+        }
         let label = if description.is_empty() {
             type_label.clone()
         } else {
@@ -878,6 +891,9 @@ mod tests {
             failed: false,
             settled_at: None,
             started_wall: std::time::SystemTime::now(),
+            context: None,
+            model: None,
+            effort: None,
         };
         let entry = TaskEntry::from_subagent(&snap, Some("岑"));
         match entry {
@@ -890,5 +906,71 @@ mod tests {
             }
             other => panic!("expected Agent, got {other:?}"),
         }
+    }
+
+    /// 子代理那行要带上它自己的上下文占用（跟主线程状态栏同一套百分比）。
+    #[test]
+    fn an_agent_row_shows_its_context_usage() {
+        let snap = SubagentSnap {
+            id: "k".into(),
+            description: "看一眼".into(),
+            subagent_type: "岑".into(),
+            done: false,
+            idle: true,
+            cancelled: false,
+            output: String::new(),
+            started_at: Instant::now(),
+            parent: String::new(),
+            tool_call_id: None,
+            failed: false,
+            settled_at: None,
+            started_wall: std::time::SystemTime::now(),
+            context: Some(cordis_spine::ContextUsage {
+                used: 64_000,
+                window: 128_000,
+                compact_at: 108_800,
+            }),
+            model: None,
+            effort: None,
+        };
+        let entry = TaskEntry::from_subagent(&snap, Some("岑"));
+        let text = entry
+            .styled()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("50.0%"), "行里要有占用百分比：{text}");
+    }
+
+    /// 还没算出来占用时（没跑过一步）不画百分比。
+    #[test]
+    fn an_agent_row_without_usage_has_no_percentage() {
+        let snap = SubagentSnap {
+            id: "k".into(),
+            description: "看一眼".into(),
+            subagent_type: "岑".into(),
+            done: false,
+            idle: true,
+            cancelled: false,
+            output: String::new(),
+            started_at: Instant::now(),
+            parent: String::new(),
+            tool_call_id: None,
+            failed: false,
+            settled_at: None,
+            started_wall: std::time::SystemTime::now(),
+            context: None,
+            model: None,
+            effort: None,
+        };
+        let entry = TaskEntry::from_subagent(&snap, Some("岑"));
+        let text = entry
+            .styled()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(!text.contains('%'), "没有占用就不画百分比：{text}");
     }
 }

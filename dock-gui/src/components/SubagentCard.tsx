@@ -17,6 +17,7 @@ import {
   type ThreadState,
   type TurnItem,
 } from "dock-core";
+import type { ContextUsage } from "../model";
 import { store, useSubagents } from "../dock/store";
 import { toolLine } from "./ToolCard";
 
@@ -87,6 +88,18 @@ function resultText(output: string): string {
   return (cut >= 0 ? output.slice(0, cut) : output).trim();
 }
 
+/** 子代理自己那份上下文占用 → 面板要画的形状。没算出来就是没有。 */
+export function usageOf(info: { context: { used: number; window: number; compactAt: number } | null }): ContextUsage | null {
+  const c = info.context;
+  if (!c || c.window <= 0) return null;
+  return {
+    used: c.used,
+    total: c.window,
+    percent: Math.round((c.used / c.window) * 100),
+    triggerPercent: c.compactAt > 0 ? Math.round((c.compactAt / c.window) * 100) : 85,
+  };
+}
+
 export function RolePill({ text, small = false }: { text: string; small?: boolean }) {
   return (
     <span
@@ -113,6 +126,8 @@ export function SubagentCard({ item, threadId }: { item: ToolItem; threadId: str
   const failed = status === "failed";
   const background = running && item.arguments.run_in_background === true;
   const summary = sub ? sub.info.output : resultText(item.output);
+  const usage = sub ? usageOf(sub.info) : null;
+  const over = usage !== null && usage.percent >= usage.triggerPercent;
   const steps = sub ? recentSteps(sub.thread) : [];
   const elapsed = sub ? elapsedMs(sub, now) : item.endedAt ? item.endedAt - item.startedAt : now - item.startedAt;
   const tools = sub ? toolCallCount(sub) : null;
@@ -169,6 +184,17 @@ export function SubagentCard({ item, threadId }: { item: ToolItem; threadId: str
           {tools !== null && status !== "cancelled" && (
             <>
               <span className="text-[#8e8e93]">{tools} 次工具</span>
+              <Dot />
+            </>
+          )}
+          {usage && (
+            <>
+              <span
+                className={`tabular-nums ${over ? "text-[#ff9f0a]" : "text-[#8e8e93]"}`}
+                title={`已用 ${usage.used} / ${usage.total} tokens（${usage.percent}%）`}
+              >
+                {usage.percent}%
+              </span>
               <Dot />
             </>
           )}
@@ -247,6 +273,8 @@ export function SubagentGroup({ items, threadId }: { items: ToolItem[]; threadId
 function GroupRow({ item, sub, now, threadId }: { item: ToolItem; sub: Subagent | null; now: number; threadId: string }) {
   const status = sub?.info.status ?? (item.status === "running" ? "running" : "completed");
   const running = status === "running";
+  const usage = sub ? usageOf(sub.info) : null;
+  const over = usage !== null && usage.percent >= usage.triggerPercent;
   const dot = running ? "bg-[#34c759]" : status === "failed" ? "bg-[#ff3b30]" : "bg-[#8e8e93]";
   const right = sub
     ? running
@@ -267,7 +295,17 @@ function GroupRow({ item, sub, now, threadId }: { item: ToolItem; sub: Subagent 
         <RolePill text={sub?.info.role || String(item.arguments.subagent_type ?? "子代理")} />
         <span className="min-w-0 truncate text-[13px] text-[#3a3a3c]">{sub?.info.description || String(item.arguments.description ?? "")}</span>
       </span>
-      <span className={`shrink-0 text-[11px] ${status === "failed" ? "text-[#c0392b]" : "text-[#8e8e93]"}`}>{right}</span>
+      <span className="flex shrink-0 items-center gap-1.5">
+        {usage && (
+          <span
+            className={`tabular-nums ${over ? "text-[#ff9f0a]" : "text-[#8e8e93]"}`}
+            title={`已用 ${usage.used} / ${usage.total} tokens（${usage.percent}%）`}
+          >
+            {usage.percent}%
+          </span>
+        )}
+        <span className={`text-[11px] ${status === "failed" ? "text-[#c0392b]" : "text-[#8e8e93]"}`}>{right}</span>
+      </span>
     </button>
   );
 }

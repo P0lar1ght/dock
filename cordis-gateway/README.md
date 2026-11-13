@@ -692,6 +692,11 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
   - `output`（最近一轮的回复，最多 4000 字）、`error?`（失败才有）；
   - `activity?`（在跑才有）：`{ kind: "tool", toolName, arguments }` / `{ kind: "replying" }` /
     `{ kind: "thinking" }`；
+  - `model` / `effort`：它实际在用的模型与推理强度（workflow 的 `agent(model:)` 覆写优先，
+    否则跟父会话）；拿不到时是 `null`；
+  - `context?`（算出来了才有）：`{ used, window, compactAt }` —— 这个子代理自己那份上下文
+    的占用、窗口和自动压缩门槛（`window × 85%`）。算法跟主会话同一套（上游 usage 锚点
+    加锚点之后的本地估算），所以面板上的数就是它真正触发压缩的那个数；
   - `approval`：`inherit`（跟这一页的档位）/ `ask` / `auto`，见下；
   - `readOnly`：它的角色在这一页预设里是不是只读（关着的线程一律 `false`）。
 - 子代理的事件：

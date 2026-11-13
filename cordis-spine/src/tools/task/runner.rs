@@ -272,6 +272,37 @@ async fn run_dock_child(
             }
         }
     }
+    // 它实际在用的模型与推理强度：采样覆写（workflow 的 `agent(model:)`）优先，
+    // 否则跟父会话走（见 `llm/http` 里选模型的那段）。
+    let over = child.get::<crate::host::settings::ModelOverride>(MODEL_OVERRIDE);
+    let settings = child.get::<crate::host::settings::AppSettings>(crate::names::SETTINGS);
+    let model = over.as_ref().and_then(|o| o.model.clone()).or_else(|| {
+        settings
+            .as_ref()
+            .map(|s| s.model())
+            .filter(|m| !m.is_empty())
+    });
+    let effort = over
+        .as_ref()
+        .and_then(|o| o.effort.clone())
+        .or_else(|| {
+            settings
+                .as_ref()
+                .map(|s| s.effort())
+                .filter(|e| !e.is_empty())
+        })
+        .or_else(|| {
+            // 最后回退到模型自己的默认强度 —— 跟采样时选强度的那段同一个顺序
+            // （`llm/http` 的 `WireParams::resolve`），不然这里报的是「没设」，
+            // 而它实际用的是模型默认那一档。
+            model
+                .as_deref()
+                .and_then(cordis_base::config::lookup_model)
+                .map(|c| c.default_effort())
+                .filter(|e| !e.is_empty())
+        });
+    store.set_model(&id, model, effort);
+
     let mut preset = def.to_preset(&typ);
     // 角色没写按需名单就继承所属预设的。
     if preset.on_demand_tools.is_none() {
@@ -415,6 +446,15 @@ async fn drive_child(
         if let Some(s) = child.get::<Sessions>(SESSIONS) {
             store.set_events(&id, s.events());
         }
+        // 一轮跑完算一次这个孩子的上下文占用：跟主会话同一套算法，锚点取它自己的
+        // 会话，所以读不到父会话的用量。压缩也发生在一轮里，这一算就是压缩后的数。
+        let base = crate::prompt::context_usage::base_of(&child);
+        store.set_context_base(&id, base);
+        let sessions = child.get::<Sessions>(SESSIONS);
+        store.set_context(
+            &id,
+            crate::prompt::context_usage::usage_from(&base, sessions.as_deref()),
+        );
         if let (Some(child_s), Some(parent_s)) = (
             child.get::<Sessions>(SESSIONS),
             parent.get::<Sessions>(SESSIONS),
