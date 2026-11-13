@@ -19,12 +19,13 @@ import {
   type TurnItem,
 } from "dock-core";
 import { store, useEnv, useSubagents, useThread } from "../dock/store";
+import { ContextArc } from "./ContextRing";
 import { IconButton } from "./chrome";
 import { Markdown } from "./Markdown";
 import { Reasoning } from "./Reasoning";
 import { PathLinkContext } from "./markdown/pathLink";
 import { usePathLinker } from "./markdown/usePathLinker";
-import { activityText, clock, RolePill, SETTLED_LABEL, useNow } from "./SubagentCard";
+import { activityText, clock, RolePill, SETTLED_LABEL, usageOf, useNow } from "./SubagentCard";
 import { ToolCard } from "./ToolCard";
 import { COMPOSER_WIDTH, READING_WIDTH } from "./Transcript";
 import { MenuButton } from "./Popover";
@@ -138,6 +139,8 @@ function List({
 function ListRow({ sub, now, onPick }: { sub: Subagent; now: number; onPick: (id: string) => void }) {
   const { info } = sub;
   const running = info.status === "running";
+  const usage = usageOf(info);
+  const over = usage !== null && usage.percent >= usage.triggerPercent;
   const meta = running
     ? `${clock(elapsedMs(sub, now))} · ${toolCallCount(sub)}`
     : info.status === "failed"
@@ -156,7 +159,17 @@ function ListRow({ sub, now, onPick }: { sub: Subagent; now: number; onPick: (id
           <RolePill text={info.role} small />
           <span className="min-w-0 truncate text-xs text-ink">{info.description}</span>
         </span>
-        <span className={`shrink-0 text-[10px] ${info.status === "failed" ? "text-[#c0392b]" : "text-[#8e8e93]"}`}>{meta}</span>
+        <span className="flex shrink-0 items-center gap-1.5">
+          {usage && (
+            <span
+              className={`text-[10px] tabular-nums ${over ? "text-[#ff9f0a]" : "text-[#8e8e93]"}`}
+              title={`已用 ${usage.used} / ${usage.total} tokens（${usage.percent}%）`}
+            >
+              {usage.percent}%
+            </span>
+          )}
+          <span className={`text-[10px] ${info.status === "failed" ? "text-[#c0392b]" : "text-[#8e8e93]"}`}>{meta}</span>
+        </span>
       </span>
       {running && <span className="truncate pl-0.5 text-[11px] text-[#8e8e93]">{activityText(currentActivity(sub))}</span>}
     </button>
@@ -204,6 +217,7 @@ function Detail({
   }, [threadId, info.agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const empty = sub.thread.turns.length === 0;
+  const usage = usageOf(info);
 
   return (
     <>
@@ -215,6 +229,7 @@ function Detail({
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink" title={info.description}>
             {info.description}
           </span>
+          {usage && <ContextArc usage={usage} />}
           {controls}
           <span className="mx-0.5 h-4 w-px bg-line" />
           {close}

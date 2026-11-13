@@ -305,7 +305,7 @@ pub fn fmt_pct5(pct: f64) -> String {
 }
 
 /// 占用率配色的断点。Grok `context_bar::default_breakpoints`。
-fn occupancy_breakpoints(theme: &Theme) -> [(f64, ratatui::style::Color); 6] {
+pub(crate) fn occupancy_breakpoints(theme: &Theme) -> [(f64, ratatui::style::Color); 6] {
     [
         (0.0, theme.text_primary),
         (50.0, theme.accent_user),
@@ -320,7 +320,7 @@ fn occupancy_breakpoints(theme: &Theme) -> [(f64, ratatui::style::Color); 6] {
 ///
 /// 原来是 70 / 85 两档硬跳：85% 是自动压缩阈值，可跳到那一档时已经没有预告了。
 /// 渐变让「快满了」这件事在撞线之前就看得出来。
-fn blend_occupancy_color(
+pub(crate) fn blend_occupancy_color(
     pct: f64,
     points: &[(f64, ratatui::style::Color)],
 ) -> ratatui::style::Color {

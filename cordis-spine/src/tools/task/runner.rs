@@ -415,6 +415,15 @@ async fn drive_child(
         if let Some(s) = child.get::<Sessions>(SESSIONS) {
             store.set_events(&id, s.events());
         }
+        // 一轮跑完算一次这个孩子的上下文占用：跟主会话同一套算法，锚点取它自己的
+        // 会话，所以读不到父会话的用量。压缩也发生在一轮里，这一算就是压缩后的数。
+        let base = crate::prompt::context_usage::base_of(&child);
+        store.set_context_base(&id, base);
+        let sessions = child.get::<Sessions>(SESSIONS);
+        store.set_context(
+            &id,
+            crate::prompt::context_usage::usage_from(&base, sessions.as_deref()),
+        );
         if let (Some(child_s), Some(parent_s)) = (
             child.get::<Sessions>(SESSIONS),
             parent.get::<Sessions>(SESSIONS),

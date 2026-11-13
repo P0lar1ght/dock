@@ -17,6 +17,7 @@ import {
   type ThreadState,
   type TurnItem,
 } from "dock-core";
+import type { ContextUsage } from "../model";
 import { store, useSubagents } from "../dock/store";
 import { toolLine } from "./ToolCard";
 
@@ -87,6 +88,18 @@ function resultText(output: string): string {
   return (cut >= 0 ? output.slice(0, cut) : output).trim();
 }
 
+/** 子代理自己那份上下文占用 → 面板要画的形状。没算出来就是没有。 */
+export function usageOf(info: { context: { used: number; window: number; compactAt: number } | null }): ContextUsage | null {
+  const c = info.context;
+  if (!c || c.window <= 0) return null;
+  return {
+    used: c.used,
+    total: c.window,
+    percent: Math.round((c.used / c.window) * 100),
+    triggerPercent: c.compactAt > 0 ? Math.round((c.compactAt / c.window) * 100) : 85,
+  };
+}
+
 export function RolePill({ text, small = false }: { text: string; small?: boolean }) {
   return (
     <span
@@ -113,6 +126,8 @@ export function SubagentCard({ item, threadId }: { item: ToolItem; threadId: str
   const failed = status === "failed";
   const background = running && item.arguments.run_in_background === true;
   const summary = sub ? sub.info.output : resultText(item.output);
+  const usage = sub ? usageOf(sub.info) : null;
+  const over = usage !== null && usage.percent >= usage.triggerPercent;
   const steps = sub ? recentSteps(sub.thread) : [];
   const elapsed = sub ? elapsedMs(sub, now) : item.endedAt ? item.endedAt - item.startedAt : now - item.startedAt;
   const tools = sub ? toolCallCount(sub) : null;
@@ -169,6 +184,17 @@ export function SubagentCard({ item, threadId }: { item: ToolItem; threadId: str
           {tools !== null && status !== "cancelled" && (
             <>
               <span className="text-[#8e8e93]">{tools} 次工具</span>
+              <Dot />
+            </>
+          )}
+          {usage && (
+            <>
+              <span
+                className={`tabular-nums ${over ? "text-[#ff9f0a]" : "text-[#8e8e93]"}`}
+                title={`已用 ${usage.used} / ${usage.total} tokens（${usage.percent}%）`}
+              >
+                {usage.percent}%
+              </span>
               <Dot />
             </>
           )}

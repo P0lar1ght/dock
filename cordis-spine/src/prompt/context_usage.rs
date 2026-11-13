@@ -116,6 +116,107 @@ impl ContextSnapshot {
     }
 }
 
+/// 上下文占用（子代理面板用）。`used` 与主会话同一套算法：有锚点时是上游真账加上
+/// 锚点之后的本地估算，没锚点时全靠估算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextUsage {
+    /// 已用 token。
+    pub used: u64,
+    /// 上下文窗口。
+    pub window: u64,
+    /// 自动压缩门槛（窗口 × 触发百分比）。
+    pub compact_at: u64,
+}
+
+/// 这一页的固定前缀：系统提示 + 工具表 + 图片的 token 数，以及上下文窗口。
+///
+/// 拆出来是为了让占用能脱离 `Context` 重算：每轮重发的那部分不变，变的只是会话
+/// 历史 —— 历史与锚点都在会话里，于是「固定前缀 + 会话」就能重算出同一个数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextBase {
+    /// 系统提示的 token 数。
+    pub system_tokens: u64,
+    /// 工具表的 token 数。
+    pub tools_tokens: u64,
+    /// 图片的 token 数。
+    pub images_tokens: u64,
+    /// 上下文窗口（会话报的，或模型配置里的）。
+    pub window: u64,
+}
+
+/// 这一页的固定前缀与窗口。
+pub fn base_of(ctx: &Context) -> ContextBase {
+    let parts = assembled_parts(ctx);
+    let system = parts.render();
+    let m = measure(ctx, &system);
+    let window = ctx
+        .get::<Sessions>(SESSIONS)
+        .map(|s| s.usage().window)
+        .unwrap_or(0);
+    ContextBase {
+        system_tokens: m.system,
+        tools_tokens: m.tools,
+        images_tokens: m.images,
+        window: window_size(window, ctx),
+    }
+}
+
+/// 这个会话的模型历史估算占多少 token（不含系统提示与工具表）。
+pub fn history_tokens(sessions: &Sessions) -> u64 {
+    crate::llm::compact::estimate_context_tokens("", &sessions.model_history())
+}
+
+/// 这个会话的锚点真账（上游报过的用量）。`None` = 上游没报过，这时占用全靠估算。
+pub fn anchor_tokens(sessions: &Sessions) -> Option<u64> {
+    sessions.context_anchor().map(|a| a.tokens)
+}
+
+/// 用固定前缀加会话算出占用。会话是 `None` 时按「只有前缀」算。
+///
+/// 有锚点时：上游真账（锚点，已经含了系统提示和工具表）加上锚点之后的本地估算；
+/// 没锚点时：前缀全量估算加历史估算。
+pub fn usage_from(base: &ContextBase, sessions: Option<&Sessions>) -> Option<ContextUsage> {
+    if base.window == 0 {
+        return None;
+    }
+    let (history, anchor) = match sessions {
+        Some(s) => (
+            crate::llm::compact::estimate_context_tokens("", &s.model_history()),
+            s.context_anchor(),
+        ),
+        None => (0, None),
+    };
+    let used = match anchor {
+        Some(anchor) => anchor
+            .tokens
+            .saturating_add(history.saturating_sub(anchor.history_estimate)),
+        None => base
+            .system_tokens
+            .saturating_add(history)
+            .saturating_add(base.tools_tokens)
+            .saturating_add(base.images_tokens),
+    }
+    .min(base.window.saturating_mul(4));
+    Some(ContextUsage {
+        used,
+        window: base.window,
+        compact_at: base
+            .window
+            .saturating_mul(DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT as u64)
+            .div_ceil(100),
+    })
+}
+
+/// 这个会话的上下文占用。窗口还看不出来（没配模型）时没有占用可言。
+///
+/// 在谁自己的 `Context` 里调用，就算谁的账 —— 锚点取的是那个上下文里的
+/// `"sessions"`，所以子代理算的是它自己那份，不会读到父会话的用量。
+pub fn context_usage(ctx: &Context) -> Option<ContextUsage> {
+    let base = base_of(ctx);
+    let sessions = ctx.get::<Sessions>(SESSIONS);
+    usage_from(&base, sessions.as_deref())
+}
+
 /// Assemble occupancy from live `"sessions"` / `"systemPrompt"` / `"tools"`.
 pub fn snapshot_context(ctx: &Context) -> ContextSnapshot {
     snapshot_with_parts(ctx, &assembled_parts(ctx))
@@ -1277,6 +1378,31 @@ mod tests {
         let grown = estimate_context_tokens("", std::slice::from_ref(&tool));
         sessions.append(tool);
         assert_eq!(context_tokens_used(&ctx, ""), 6_000 + grown);
+    }
+
+    /// 子代理那条路（`usage_from`）与主会话（`snapshot_context`）必须是同一个数：
+    /// 面板上的数和真正触发压缩的那个数要对得上。
+    #[tokio::test]
+    async fn usage_from_agrees_with_the_main_session_snapshot() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.set_window(200_000);
+        sessions.append(LogEvent::User("go".into()));
+        // 没锚点：两边都靠估算。
+        let snap = snapshot_context(&ctx);
+        let base = base_of(&ctx);
+        let usage = usage_from(&base, Some(&sessions)).unwrap();
+        assert_eq!(snap.used, usage.used, "没锚点时两边要一致");
+        assert_eq!(snap.total, usage.window);
+        // 有锚点：两边都以锚点为准。
+        sample_with_usage(&sessions, 5_000, 1_000);
+        let snap = snapshot_context(&ctx);
+        let base = base_of(&ctx);
+        let usage = usage_from(&base, Some(&sessions)).unwrap();
+        assert_eq!(snap.used, usage.used, "有锚点时两边要一致");
+        assert_eq!(snap.total, usage.window);
+        assert_eq!(usage.compact_at, 170_000, "门槛是窗口的 85%");
     }
 
     /// 顶栏 / `/context` 显示的就是自动压缩判定用的那个数。

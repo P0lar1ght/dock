@@ -11,8 +11,8 @@ use cordis_spine::{
     agent_loop, blocked_tool_message, install_without_llm, tool_task, turn, AgentPresets,
     BoxFuture, ChildLogEvent, Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions,
     StreamDelta, SubagentChanged, Subagents, TaskConfig, ToolCall, Tools, AGENT_LOOP,
-    AGENT_PRESETS, LLM, SESSIONS, SESSION_CHILD_EVENT, STEER_REMINDER, SUBAGENTS, SUBAGENT_CHANGED,
-    TOOLS,
+    AGENT_PRESETS, COMPACT, LLM, SESSIONS, SESSION_CHILD_EVENT, STEER_REMINDER, SUBAGENTS,
+    SUBAGENT_CHANGED, TOOLS,
 };
 use tokio::sync::Notify;
 
@@ -34,6 +34,33 @@ impl Sampler for LastUser {
             if !text.is_empty() {
                 on_delta(StreamDelta::Text(text.clone()));
             }
+            LlmOutput {
+                text,
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+/// 每轮回一长段（历史攒起来才有压缩的意义），压缩摘要回一段够门槛但更短的。
+struct ChattySummary;
+
+impl Sampler for ChattySummary {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        mut on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        Box::pin(async move {
+            let raw = last_user(&request.history);
+            // 摘要请求的最后一条用户消息是那段很长的摘要提示 ⇒ 回一段摘要（要够
+            // 500 字符的门槛，但比原文短 —— 真模型写出来的摘要就是这样）。
+            let text = if raw.len() > 200 {
+                "摘要".repeat(300)
+            } else {
+                "回".repeat(2000)
+            };
+            on_delta(StreamDelta::Text(text.clone()));
             LlmOutput {
                 text,
                 ..LlmOutput::default()
@@ -290,6 +317,117 @@ async fn a_keep_alive_role_survives_the_idle_sweep() {
     let swept = sub.sweep_idle(Duration::ZERO);
     assert!(swept.is_empty(), "keep_alive 角色不该被回收：{swept:?}");
     assert!(!sub.snapshot(&id).unwrap().done);
+}
+
+/// 子代理跑完一步之后，快照里的占用就是对它自己那份会话直接估算的结果 —— 面板上
+/// 的数和真正触发压缩的那个数必须是同一个。
+#[tokio::test]
+async fn a_child_reports_its_own_context_usage() {
+    let h = boot(Arc::new(LastUser)).await;
+    let home = &h._home;
+    std::fs::create_dir_all(home.path().join("solo").join("agents")).unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agent.yml"),
+        "name: 独\ntools:\n  - task\n  - send_message\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agents").join("obs.yml"),
+        "name: 观察\ntools:\n  - task\n",
+    )
+    .unwrap();
+    let presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap();
+    presets.resync();
+    presets.apply("solo").unwrap();
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "hello child", "obs").await;
+    wait_idle(&sub, &id).await;
+
+    let usage = sub.context_usage(&id).expect("跑完一步要算出占用");
+    let base = sub.context_base(&id).expect("固定前缀");
+    let sessions = sub.child_sessions(&id).expect("它自己的会话");
+    // 假上游不报用量 ⇒ 没有锚点 ⇒ 占用就是「固定前缀 + 历史估算」。这里手算，
+    // 不拿生产代码自己跟自己比。
+    assert_eq!(
+        cordis_spine::anchor_tokens(&sessions),
+        None,
+        "假上游不报用量"
+    );
+    let expected = base.system_tokens
+        + base.tools_tokens
+        + base.images_tokens
+        + cordis_spine::history_tokens(&sessions);
+    assert_eq!(usage.used, expected, "占用 = 固定前缀 + 历史估算");
+    assert_eq!(usage.window, 128_000, "窗口取模型配置的值");
+    assert_eq!(usage.compact_at, 108_800, "门槛是窗口的 85%");
+}
+
+/// 子代理压缩之后，占用确实变小，而且推了一次 `subagent/updated`。
+#[tokio::test]
+async fn a_compacted_child_reports_a_smaller_usage() {
+    let h = boot(Arc::new(ChattySummary)).await;
+    h.root
+        .plugin(cordis_spine::compact(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let home = &h._home;
+    std::fs::create_dir_all(home.path().join("solo").join("agents")).unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agent.yml"),
+        "name: 独\ntools:\n  - task\n  - send_message\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agents").join("obs.yml"),
+        "name: 观察\ntools:\n  - task\n",
+    )
+    .unwrap();
+    let presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap();
+    presets.resync();
+    presets.apply("solo").unwrap();
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let (changed, _child_events) = record_subagent_events(&h.root);
+    let id = spawn_bg(&tools, "hello child", "obs").await;
+    wait_idle(&sub, &id).await;
+    // 再聊两句：历史攒起来才有压缩的意义。
+    for n in 0..2 {
+        tools
+            .execute(ToolCall {
+                id: format!("m{n}"),
+                name: "send_message".into(),
+                arguments: serde_json::json!({ "agent_id": id, "message": "再说一句" }).to_string(),
+            })
+            .await;
+        wait_idle(&sub, &id).await;
+    }
+    let before = sub.context_usage(&id).expect("跑完一步要算出占用").used;
+
+    // 手动压缩它自己的会话（隔离一个 ctx，免得动到父会话）。
+    let sessions = sub.child_sessions(&id).expect("它自己的会话");
+    let ctx = h.root.isolate("sessions");
+    ctx.provide(SESSIONS, sessions.clone()).unwrap();
+    let compact = ctx.require::<cordis_spine::Compact>(COMPACT).unwrap();
+    compact.run_on(&ctx, None).await.unwrap();
+
+    // 压缩之后重算：占用变小，而且推了一次 `subagent/updated`。子代理这会儿是
+    // 停着的，状态没变 —— 这次推送只能来自占用变了。
+    let pushed_before = changed.lock().unwrap().len();
+    let usage = sub.refresh_context(&id).expect("能重算");
+    assert!(
+        usage.used < before,
+        "压缩后占用要变小：{before} -> {}",
+        usage.used
+    );
+    assert!(
+        changed.lock().unwrap().len() > pushed_before,
+        "压缩后要推一次 subagent/updated"
+    );
 }
 
 /// 常驻孩子不回收，得有个数上限：同一页派太多常驻角色，超过上限的那个按普通孩子算

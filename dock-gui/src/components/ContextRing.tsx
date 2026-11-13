@@ -43,6 +43,70 @@ function fmtShare(tokens: number, total: number): string {
   return p < 1 ? `${p.toFixed(1)}%` : `${Math.round(p)}%`;
 }
 
+/** 只画环：弧长 = 已用 / 窗口。 */
+export function RingSvg({
+  percent,
+  tone,
+  size = 18,
+}: {
+  percent: number;
+  tone: { arc: string; track: string };
+  size?: number;
+}) {
+  const C = 2 * Math.PI * 7;
+  const arc = Math.min(1, percent / 100) * C;
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden>
+      <circle cx="9" cy="9" r="7" fill="none" stroke={tone.track} strokeWidth="2.25" className="transition-[stroke] duration-300" />
+      <circle
+        cx="9"
+        cy="9"
+        r="7"
+        fill="none"
+        stroke={tone.arc}
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeDasharray={`${arc} ${C}`}
+        transform="rotate(-90 9 9)"
+        className="transition-[stroke-dasharray,stroke] duration-300 ease-[var(--ease-out)]"
+      />
+    </svg>
+  );
+}
+
+/** 子代理那套颜色：过了自动压缩门槛是橙的（主会话那边是红）。 */
+function arcTone(usage: ContextUsage): { arc: string; track: string } {
+  if (usage.percent >= usage.triggerPercent) return { arc: "#ff9f0a", track: "#e5e5ea" };
+  return { arc: "#636366", track: "#e5e5ea" };
+}
+
+/**
+ * 只读的一个小环 + 悬停提示：子代理面板用（点不开明细，也不能替它压缩）。
+ */
+export function ContextArc({ usage, className }: { usage: ContextUsage; className?: string }) {
+  const tone = arcTone(usage);
+  const left = Math.max(0, Math.round((usage.total * usage.triggerPercent) / 100) - usage.used);
+  const over = usage.percent >= usage.triggerPercent;
+  return (
+    <div className={`group/arc relative shrink-0 ${className ?? ""}`}>
+      <div
+        className="flex size-6 items-center justify-center"
+        aria-label={`上下文 ${usage.percent}%`}
+        title={`已用 ${fmtTokens(usage.used)} / ${fmtTokens(usage.total)} · 距压缩还剩 ${fmtTokens(left)}`}
+      >
+        <RingSvg percent={usage.percent} tone={tone} size={15} />
+      </div>
+      <div
+        role="tooltip"
+        className="pointer-events-none absolute bottom-[calc(100%+6px)] left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-ink px-2 py-1 text-[11px] text-white opacity-0 transition-opacity delay-0 duration-[var(--dur-fast)] group-hover/arc:opacity-100 group-hover/arc:delay-300"
+      >
+        已用 {fmtTokens(usage.used)} / {fmtTokens(usage.total)} ·{" "}
+        {over ? "已过自动压缩门槛，下一轮会先压缩" : `距压缩还剩 ${fmtTokens(left)}`}
+      </div>
+    </div>
+  );
+}
+
 export function ContextRing({
   usage,
   open,
@@ -94,9 +158,6 @@ export function ContextRing({
     usage.percent >= usage.triggerPercent
       ? "已过自动压缩阈值，下一轮会先压缩"
       : `距自动压缩 ${fmtTokens(left)}`;
-  const C = 2 * Math.PI * 7;
-  const arc = Math.min(1, usage.percent / 100) * C;
-
   return (
     <div ref={ref} className="group/ring relative shrink-0">
       <button
@@ -106,21 +167,7 @@ export function ContextRing({
         onClick={() => onOpenChange(!open)}
         className={`motion-colors flex size-7 items-center justify-center rounded-full hover:bg-[#f5f5f7] ${open ? "bg-[#ececf0]" : ""}`}
       >
-        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
-          <circle cx="9" cy="9" r="7" fill="none" stroke={tone.track} strokeWidth="2.25" className="transition-[stroke] duration-300" />
-          <circle
-            cx="9"
-            cy="9"
-            r="7"
-            fill="none"
-            stroke={tone.arc}
-            strokeWidth="2.25"
-            strokeLinecap="round"
-            strokeDasharray={`${arc} ${C}`}
-            transform="rotate(-90 9 9)"
-            className="transition-[stroke-dasharray,stroke] duration-300 ease-[var(--ease-out)]"
-          />
-        </svg>
+        <RingSvg percent={usage.percent} tone={tone} />
       </button>
       {!open && (
         <div

@@ -128,6 +128,18 @@ export interface SubagentInfo {
   approval: SubagentApproval;
   /** 它的角色是只读的（落在自动批准上时，会改东西的命令直接拒）。关着的线程一律 `false`。 */
   readOnly: boolean;
+  /** 它自己那份上下文的占用。没算出来（没跑过一步 / 没有模型配置）时是 `null`。 */
+  context: SubagentContext | null;
+}
+
+/** 一个子代理的上下文占用。算法跟主会话同一套。 */
+export interface SubagentContext {
+  /** 已用 token。 */
+  used: number;
+  /** 上下文窗口。 */
+  window: number;
+  /** 自动压缩门槛（窗口 × 85%）。 */
+  compactAt: number;
 }
 
 export type SubagentApproval = 'inherit' | 'ask' | 'auto';
@@ -137,6 +149,7 @@ export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null
   const agentId = str(raw.agentId);
   if (!agentId) return null;
   const a = obj(raw.activity);
+  const c = obj(raw.context);
   const kind = str(a.kind);
   const activity: SubagentActivity | null =
     kind === 'tool'
@@ -160,6 +173,10 @@ export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null
     persisted: raw.persisted === true,
     approval: oneOf(raw.approval, ['inherit', 'ask', 'auto'] as const, 'inherit'),
     readOnly: raw.readOnly === true,
+    context:
+      num(c.window) > 0
+        ? { used: num(c.used), window: num(c.window), compactAt: num(c.compactAt) }
+        : null,
   };
 }
 

@@ -53,6 +53,12 @@ pub(super) struct ChildSlot {
     /// 常驻角色（`agents/<id>.yml` 的 `keep_alive: true`）：不参与空闲清扫。
     /// 派活时定下，之后改预设不影响已经在跑的。
     pub keep_alive: AtomicBool,
+    /// 上下文占用：这个孩子自己的账（锚点取它自己的会话）。
+    pub context: Mutex<Option<crate::prompt::context_usage::ContextUsage>>,
+    /// 它的固定前缀（系统提示 + 工具表 + 窗口）：占用重算要靠它。
+    pub context_base: Mutex<Option<crate::prompt::context_usage::ContextBase>>,
+    /// 上次推给前端的占用（推送的节流基准）。
+    pub context_pushed: Mutex<Option<crate::prompt::context_usage::ContextUsage>>,
     /// 派出它的那次 `task` 调用（工具调用 id）。客户端靠它把卡片和子代理对上。
     pub tool_call_id: Mutex<Option<String>>,
     /// 落盘目录（`<父会话>/subagents/<id>/`）；父会话不落盘时没有。
@@ -185,9 +191,59 @@ impl ChildStore {
     /// 落盘的子代理顺手把抬头（状态、用时、回报）重写一份。
     fn changed(&self, id: &str) {
         self.write_meta(id);
+        self.notify_changed(id);
+    }
+
+    /// 只报一次「变了」，不重写落盘抬头（占用不进 meta，不用每次都写盘）。
+    fn notify_changed(&self, id: &str) {
         if let Some(hook) = self.on_change.get() {
             hook(id);
         }
+    }
+
+    /// 这个孩子的固定前缀（系统提示 + 工具表 + 窗口）。
+    pub fn context_base(&self, id: &str) -> Option<crate::prompt::context_usage::ContextBase> {
+        let slot = self.get(id)?;
+        let guard = slot.context_base.lock().unwrap();
+        *guard
+    }
+
+    /// 这个孩子自己的会话（锚点与历史都在里面）。
+    pub fn sessions(&self, id: &str) -> Option<Sessions> {
+        let slot = self.get(id)?;
+        let guard = slot.sessions.lock().unwrap();
+        guard.clone()
+    }
+
+    /// 记下这个孩子的固定前缀。
+    pub fn set_context_base(&self, id: &str, base: crate::prompt::context_usage::ContextBase) {
+        let Some(slot) = self.get(id) else {
+            return;
+        };
+        *slot.context_base.lock().unwrap() = Some(base);
+    }
+
+    /// 记一次上下文占用。变化不到上一次占用的 1% 就不推 —— 并行跑多个孩子时，
+    /// 每一步都推会把前端刷爆。
+    pub fn set_context(&self, id: &str, usage: Option<crate::prompt::context_usage::ContextUsage>) {
+        let Some(slot) = self.get(id) else {
+            return;
+        };
+        *slot.context.lock().unwrap() = usage;
+        let Some(new) = usage else {
+            return;
+        };
+        let mut pushed = slot.context_pushed.lock().unwrap();
+        let worth_pushing = match *pushed {
+            Some(old) => new.used.abs_diff(old.used).saturating_mul(100) >= old.used.max(1),
+            None => true,
+        };
+        if !worth_pushing {
+            return;
+        }
+        *pushed = Some(new);
+        drop(pushed);
+        self.notify_changed(id);
     }
 
     /// 标记 / 清掉「这一轮是用户开的」。
@@ -435,6 +491,9 @@ impl ChildStore {
             failed: AtomicBool::new(false),
             settled_at: Mutex::new(None),
             keep_alive: AtomicBool::new(keep_alive),
+            context: Mutex::new(None),
+            context_base: Mutex::new(None),
+            context_pushed: Mutex::new(None),
             tool_call_id: Mutex::new(None),
             transcript_dir: Mutex::new(None),
             started_wall: Mutex::new(std::time::SystemTime::now()),
@@ -907,6 +966,7 @@ pub(super) fn snap(id: &str, s: &ChildSlot) -> SubagentSnap {
         failed: s.failed.load(Ordering::Relaxed),
         settled_at: *s.settled_at.lock().unwrap(),
         started_wall: *s.started_wall.lock().unwrap(),
+        context: *s.context.lock().unwrap(),
     }
 }
 

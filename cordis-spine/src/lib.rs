@@ -112,8 +112,9 @@ pub use names::{
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
 pub use prompt::context_usage::{
-    occupancy_detail, skill_item_detail, snapshot_context, workflow_item_detail, ContextCategory,
-    ContextSnapshot, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
+    anchor_tokens, base_of, context_usage, history_tokens, occupancy_detail, skill_item_detail,
+    snapshot_context, usage_from, workflow_item_detail, ContextBase, ContextCategory,
+    ContextSnapshot, ContextUsage, DetailGroup, DetailRow, OccupancyDetail, OccupancyKind,
 };
 pub use prompt::project_instructions::{project_instructions, INSTRUCTIONS_FILE, USER_FILE};
 pub use session::attachments::{
