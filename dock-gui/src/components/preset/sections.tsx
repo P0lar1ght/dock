@@ -583,7 +583,8 @@ export function AgentEditor({
             <span className="text-[11px] text-ink-4">关着省上下文：窄职责的子代理很少用得上技能。</span>
           )}
         </div>
-        <div className="flex flex-col justify-between gap-2 rounded-xl border border-line-strong bg-white p-4 shadow-[0px_1px_0px_rgba(0,0,0,0.05)]">
+        {/* 两列栅格里的第三张卡：横跨整行，不留半格空白。 */}
+        <div className="col-span-2 flex flex-col justify-between gap-2 rounded-xl border border-line-strong bg-white p-4 shadow-[0px_1px_0px_rgba(0,0,0,0.05)]">
           <div className="flex items-center justify-between gap-3">
             <span className="flex flex-col">
               <span className="text-[13px] font-semibold text-ink">常驻角色</span>
