@@ -1271,7 +1271,7 @@ async fn a_stale_list_gets_a_mid_turn_nudge() {
             root.clone(),
             Arc::new(WriteThenGrind {
                 n: samples.clone(),
-                tool_rounds: 8,
+                tool_rounds: 12,
             }),
         ),
     )
@@ -1292,7 +1292,11 @@ async fn a_stale_list_gets_a_mid_turn_nudge() {
             |e| matches!(e, cordis_spine::LogEvent::SystemReminder(t) if t.contains("没有更新")),
         )
         .count();
-    assert_eq!(nudges, 1, "one stale-list nudge across 8 quiet tool rounds");
+    // 阈值 10：第 10 步触发一次，归零后剩下的 2 步够不到下一次。
+    assert_eq!(
+        nudges, 1,
+        "one stale-list nudge across 12 quiet tool rounds"
+    );
 }
 
 /// Grinds tool calls for `rounds` samples, then answers with text.
