@@ -11,6 +11,10 @@ Grok `ChannelBackend` + coordinator actor；dock `ChildRunner` isolate `"session
 
 **子代理不是作业**：`job` / `kill_task` 只看后台命令，列不出、处置不了子代理。子代理只走 `send_message` / `list_agents` / `interrupt_agent`，结果靠回合结束通知送达，不轮询。整个撤掉一个子代理是用户的事（TUI `/tasks` 里 `x`，走 `Subagents::kill`），或随会话 Stop / 结束。
 
+**回收**：普通角色跑完一轮 park idle，**空闲满 15 分钟**就被回收——`list_agents` 不再列它，`send_message` 报 `is done; message was not delivered`，但对话还在盘上，`task`（`resume_from: "<agent_id>"`）能把它复活接着聊。要整场会话都留着的角色，在 `agents/<id>.yml` 写 `keep_alive: true`（内置 `warden` 的 `观` 默认开着，见 [agent-presets](agent-presets.md)「常驻角色」）。
+
+**校验用发起调用的那一页**：名册校验跑在协调器的后台 task 里，task-local 的执行 ctx 到不了那儿，所以校验请求带着**发起调用的那一页**的 ctx 过去——第 2 页切了模式，角色表就是第 2 页那份（`agent/presets.rs` 的 `AgentPresets` 每页一份），不是根上那份。
+
 **`send_message({agent_id, message})` 方向中立**：父子拿同一份定义（`report` 已并入）。服务层按调用方会话身份（`Tools::execute_on` 递下来的 exec ctx）授权**相邻的一条边**：父（`main` / `main#2`）只能发给自己启动的直接子，子只能发给启动它的会话（槽位上记的 `parent`）；兄弟、别的分页、自己一律拒绝。没有优先级参数：目标在跑就在它下一步边界读到（`drain_parent_mailbox` 在子代理的每一步开头取走队列，包成 `Agent <parent> sent a message:`），idle 就开下一轮。子→父的消息进父信箱；workflow 的孩子进 run 自己的队列（见 [workflow](workflow.md)）。`list_agents` / `interrupt_agent` 同样只看调用方自己的孩子。父信箱按会话分账（见下「父信箱按页」）。旧参数名 `subagent_id` 继续收。TUI 框底输入 / 网关 `subagent/send` 是用户在说话，不走相邻授权，用 urgent：孩子在跑就作为**插话**进它自己会话的收件箱（`Sessions::push_steer`），在下一个步骤边界并进这一轮，不取消、不另起一轮，前台 bash 转后台让路（同主会话的插话）；这一轮收尾后才到的，作为下一轮的开头。idle 就开下一轮。
 
 `send_message` 在能力档位里归元工具（所有档位放行）：只读子代理也得能回话；受限子代理派不出孙代理，相邻授权又挡住了兄弟之间互发，所以放开是安全的。用户自己写的 `agents/<type>.yml` 里还列着 `report` 的，按 `send_message` 的别名放行。

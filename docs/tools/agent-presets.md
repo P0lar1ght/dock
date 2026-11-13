@@ -61,6 +61,21 @@
 - 代价：常驻的工具每轮都随工具表发送；MCP 连上 / 断开时工具表会变。
 - TUI `/preset` 画布暂不编辑它；改 yml 或走网关 `preset/update`。
 
+### 常驻角色（`keep_alive`）
+
+- 子代理 `agents/<id>.yml` 可以写：
+
+  ```yaml
+  keep_alive: true
+  ```
+
+- 作用：这个角色空闲下来也不参与回收清扫。普通角色跑完一轮 park idle，**空闲满 15 分钟**
+  就被回收（`list_agents` 不再列它，`send_message` 报 `is done`）；`keep_alive: true`
+  的角色整场会话都留着，可以一直接着聊。
+- 观察者一类的角色要的就是这个：内置 `warden` 的 `观` 默认开着。
+- 写错了也不要紧：被回收的角色还能用 `task`（`resume_from: "<agent_id>"`）从盘上的对话
+  接着聊——复活后这份 `keep_alive` 仍然生效。
+
 ### GUI 预设编辑器
 
 - 经网关 `preset/get` / `preset/update` / `tool/catalog` 编辑同一批文件。

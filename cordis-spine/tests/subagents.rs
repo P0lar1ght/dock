@@ -217,29 +217,79 @@ async fn spawn_validates_against_the_calling_pages_roster() {
     // 页面按**服务名**隔离（`Tabs::mount_page` 就是这么做的），于是它有自己那份
     // `agentPresets`：根是 code，页面是 warden。
     let page = h.root.isolate(AGENT_PRESETS);
-    let page_presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap().fork();
+    let page_presets = h
+        .root
+        .require::<AgentPresets>(AGENT_PRESETS)
+        .unwrap()
+        .fork();
     page_presets.pin("warden").unwrap();
     page.provide(AGENT_PRESETS, page_presets).unwrap();
 
     let tools = h.root.require::<Tools>(TOOLS).unwrap();
     let out = tools
-        .execute_on(&page, ToolCall {
-            id: "t0".into(),
-            name: "task".into(),
-            arguments: serde_json::json!({
-                "prompt": "观察",
-                "description": "观 观察",
-                "subagent_type": "观",
-                "run_in_background": true,
-            })
-            .to_string(),
-        })
+        .execute_on(
+            &page,
+            ToolCall {
+                id: "t0".into(),
+                name: "task".into(),
+                arguments: serde_json::json!({
+                    "prompt": "观察",
+                    "description": "观 观察",
+                    "subagent_type": "观",
+                    "run_in_background": true,
+                })
+                .to_string(),
+            },
+        )
         .await;
     assert!(
         !out.content.contains("Unknown subagent type"),
         "spawn must validate against the calling page's roster: {}",
         out.content
     );
+}
+
+/// 空闲满 TTL 的角色会被回收（`list_agents` 不再列它，`send_message` 报 is done），
+/// 对话留在盘上，可以 `resume_from` 复活。
+#[tokio::test]
+async fn an_idle_role_is_swept_after_the_ttl() {
+    let h = boot(Arc::new(LastUser)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "hello child", "explore").await;
+    wait_idle(&sub, &id).await;
+    let swept = sub.sweep_idle(Duration::ZERO);
+    assert_eq!(swept, vec![id.clone()], "普通角色空闲到期要回收");
+    assert!(sub.snapshot(&id).unwrap().done);
+}
+
+/// `keep_alive: true` 的角色不参与回收清扫：观察者要整场会话保持可继续。
+#[tokio::test]
+async fn a_keep_alive_role_survives_the_idle_sweep() {
+    let h = boot(Arc::new(LastUser)).await;
+    let home = &h._home;
+    std::fs::create_dir_all(home.path().join("solo").join("agents")).unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agent.yml"),
+        "name: 独\ntools:\n  - task\n  - send_message\n  - list_agents\n  - interrupt_agent\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agents").join("obs.yml"),
+        "name: 观察\nkeep_alive: true\ntools:\n  - task\n",
+    )
+    .unwrap();
+    let presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap();
+    presets.resync();
+    presets.apply("solo").unwrap();
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "hello child", "obs").await;
+    wait_idle(&sub, &id).await;
+    let swept = sub.sweep_idle(Duration::ZERO);
+    assert!(swept.is_empty(), "keep_alive 角色不该被回收：{swept:?}");
+    assert!(!sub.snapshot(&id).unwrap().done);
 }
 
 #[tokio::test]

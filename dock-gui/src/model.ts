@@ -60,6 +60,8 @@ export interface SubagentDraft {
   listings: boolean;
   /** 只读角色（explore / plan）：bash 只放行只读命令，别的问用户。编辑器不改它，原样写回。 */
   readOnly?: boolean;
+  /** 常驻角色：空闲下来也不参与 15 分钟回收清扫。观察者一类的角色要整场会话保持可继续。 */
+  keepAlive?: boolean;
   /** 内置预设自带的角色：删不掉、id 不能改。 */
   builtin: boolean;
   /** 这次编辑里新建的（id 还能改）。 */

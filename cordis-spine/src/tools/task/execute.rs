@@ -230,6 +230,7 @@ async fn spawn_child(
         subagent_type.clone(),
         SubagentOwner::Task,
         &parent_session_id,
+        super::keep_alive_of(caller_ctx, &subagent_type),
     );
     sub.note_spawn_call(&id, &call.id);
 

@@ -50,6 +50,8 @@ pub(super) struct ChildSlot {
     pub failed: AtomicBool,
     /// 停下（空闲或结束）的时刻；在跑时是 `None`。快照的用时算到这里为止。
     pub settled_at: Mutex<Option<Instant>>,
+    /// 常驻角色（`agents/<id>.yml` 的 `keep_alive: true`）：不参与空闲清扫。
+    pub keep_alive: bool,
     /// 派出它的那次 `task` 调用（工具调用 id）。客户端靠它把卡片和子代理对上。
     pub tool_call_id: Mutex<Option<String>>,
     /// 落盘目录（`<父会话>/subagents/<id>/`）；父会话不落盘时没有。
@@ -368,6 +370,7 @@ impl ChildStore {
             subagent_type,
             SubagentOwner::Task,
             crate::session::log::ROOT_IDENTITY,
+            false,
         )
     }
 
@@ -378,6 +381,7 @@ impl ChildStore {
         subagent_type: String,
         owner: SubagentOwner,
         parent: &str,
+        keep_alive: bool,
     ) -> Arc<ChildSlot> {
         let mut map = self.inner.lock().unwrap();
         if let Some(slot) = map.get(id) {
@@ -407,6 +411,7 @@ impl ChildStore {
             reported_this_turn: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             settled_at: Mutex::new(None),
+            keep_alive,
             tool_call_id: Mutex::new(None),
             transcript_dir: Mutex::new(None),
             started_wall: Mutex::new(std::time::SystemTime::now()),
@@ -815,6 +820,10 @@ impl ChildStore {
         let mut swept = Vec::new();
         for (id, slot) in self.inner.lock().unwrap().iter() {
             if slot.life() != SubagentLife::Idle || slot.disposed() {
+                continue;
+            }
+            // 常驻角色不等 TTL：观察者要整场会话保持可继续。
+            if slot.keep_alive {
                 continue;
             }
             let parked = *slot.parked_at.lock().unwrap();
