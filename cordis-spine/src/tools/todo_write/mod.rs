@@ -27,7 +27,7 @@ use cordis_base::types::{
 const MAX_TODO_BOOKKEEPING_FIRES: usize = 1;
 /// Sampling steps without a `todo_write` before the mid-turn nudge fires
 /// (Grok `TodoNudgeConfig::turns_since_todo_write`, which ships unimplemented).
-const TODO_NUDGE_AFTER_STEPS: usize = 6;
+const TODO_NUDGE_AFTER_STEPS: usize = 10;
 /// Stale / just-verified nudges per turn. Two reminders are a hint; five are noise.
 const MAX_TODO_NUDGES: usize = 3;
 /// The only tool the turn-end bookkeeping step offers.

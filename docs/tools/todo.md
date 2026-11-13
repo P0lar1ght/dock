@@ -33,11 +33,11 @@
 watchdog 在 `step == 0` 重置，每步最多说一件事，按顺序：
 
 1. **刚跑完测试 / 构建**：上一步的 `bash` 命令（取日志里最后一次模型输出之后的工具行）命中 `TEST_BUILD_COMMANDS`，有 `in_progress` 项，且同一步没写清单 → 「刚跑完测试 / 构建（`cmd`），「a」还是 in_progress。这项做完了就标 completed…」；
-2. **连续 `TODO_NUDGE_AFTER_STEPS = 6` 步没动清单** → 带当前清单的 stale 提醒。
+2. **连续 `TODO_NUDGE_AFTER_STEPS = 10` 步没动清单** → 带当前清单的 stale 提醒。
 
 1、2 合计每轮最多 `MAX_TODO_NUDGES = 3` 次。没有欠着的项（只剩 `awaiting_user` 或全关）时都不说。
 
-**清单刚变过时不说**：写入的结果本身已经逐项列了状态和计数，再插一条「正在做「a」；下一项「b」」只是把模型刚拿到的结果复述一遍，白占上下文。纪律（「清单只是记录，用户的话优先」）跟着写入走，放在 `todo_write` 的返回文本里。真正要复述现状的只有 stale 提醒——那已经是 6 步之后，模型确实忘了。
+**清单刚变过时不说**：写入的结果本身已经逐项列了状态和计数，再插一条「正在做「a」；下一项「b」」只是把模型刚拿到的结果复述一遍，白占上下文。纪律（「清单只是记录，用户的话优先」）跟着写入走，放在 `todo_write` 的返回文本里。真正要复述现状的只有 stale 提醒——那已经是 10 步之后，模型确实忘了。
 
 测试 / 构建识别（`is_test_or_build_command`）：命令按 `&&` `||` `;` `|` 换行切段，去掉段首的 `VAR=value`，段等于或以「词 + 空格」开头即算：`cargo test|nextest|build|check|clippy`、`npm test`、`npm run test|build`、`pnpm test|build`、`pnpm run test|build`、`yarn test|build`、`npx vitest|jest|tsc`、`vitest`、`jest`、`tsc`、`pytest`、`python(3) -m pytest`、`go test|build`、`make`、`cmake --build`、`ctest`、`mvn`、`gradle`、`./gradlew`、`swift build|test`、`xcodebuild`。
 

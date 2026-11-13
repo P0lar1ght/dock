@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn the_stale_reminder_restates_where_the_list_stands() {
         let state = seeded();
-        let reminder = stale_reminder(6, &state);
+        let reminder = stale_reminder(10, &state);
         assert!(
             reminder.contains("正在做「摸清 todo 现状」；下一项「折叠 + 美化」。"),
             "{reminder}"
