@@ -101,7 +101,7 @@ pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
                 "replacePrompt": def.replace_prompt,
                 "listings": def.listings,
                 "readOnly": def.read_only,
-                "keepAlive": def.keep_alive,
+                "keepAlive": def.keep_alive.unwrap_or(false),
                 "builtin": shipped_roles.iter().any(|r| r == role),
             })
         })
@@ -198,7 +198,7 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
     };
     // `keep_alive` 缺省**沿用已有的**：不带这个字段的请求（老客户端）老实传
     // `false` 会把内置 `warden` 的 `观` 的常驻标记抹掉。
-    let existing_keep_alive = |role: &str| -> Option<bool> {
+    let existing_keep_alive = |role: &str| -> Option<Option<bool>> {
         existing
             .as_ref()
             .and_then(|p| p.agents.get(role))
@@ -228,11 +228,11 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             replace_prompt: flag(a, "replacePrompt"),
             listings: flag(a, "listings"),
             read_only: flag(a, "readOnly"),
+            // `None` = 没写这一项：叠加时沿用下层（内置角色的常驻标记）。
             keep_alive: a
                 .get("keepAlive")
                 .and_then(Value::as_bool)
-                .or_else(|| existing_keep_alive(&role))
-                .unwrap_or(false),
+                .or_else(|| existing_keep_alive(&role).flatten()),
         };
         agents.push((role, def));
     }

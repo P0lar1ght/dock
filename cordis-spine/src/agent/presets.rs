@@ -155,8 +155,12 @@ pub struct SubagentDef {
     /// 常驻角色：空闲下来也不参与「跑完 15 分钟就回收」的清扫（见
     /// [`crate::tools::task`] 的 `IDLE_TTL`）。观察者一类的角色要整场会话保持
     /// 可继续 —— 被悄悄回收掉就接不上了。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub keep_alive: bool,
+    ///
+    /// `None` = 文件里没写这一项：叠加时沿用下层（内置模式被用户层覆盖时，
+    /// 一份升级前落盘的旧角色文件不该把常驻标记悄悄抹掉）。`Some(false)` =
+    /// 显式不要常驻。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<bool>,
 }
 
 impl SubagentDef {
@@ -1671,6 +1675,12 @@ fn absorb_mode_overlay(
             if id == WARDEN_PRESET_ID && warden_child_persona_is_pinyin_stale(&v.persona) {
                 continue;
             }
+            // 覆盖文件没写 `keep_alive` 就沿用下层：升级前落盘的角色文件不该
+            // 把内置角色的常驻标记悄悄抹掉（同 `on_demand_tools` 的处理）。
+            let mut v = v;
+            if v.keep_alive.is_none() {
+                v.keep_alive = base.agents.get(&key).and_then(|d| d.keep_alive);
+            }
             merged.insert(key, v);
         }
         overlay.agents = merged;
@@ -3039,7 +3049,7 @@ mod tests {
             replace_prompt: false,
             listings: true,
             read_only: false,
-            keep_alive: false,
+            keep_alive: None,
         };
         let edit = |agents: IndexMap<String, SubagentDef>| PresetEdit {
             agents: agents.into_iter().collect(),
