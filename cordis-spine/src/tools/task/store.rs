@@ -51,7 +51,8 @@ pub(super) struct ChildSlot {
     /// 停下（空闲或结束）的时刻；在跑时是 `None`。快照的用时算到这里为止。
     pub settled_at: Mutex<Option<Instant>>,
     /// 常驻角色（`agents/<id>.yml` 的 `keep_alive: true`）：不参与空闲清扫。
-    pub keep_alive: bool,
+    /// 派活时定下，之后改预设不影响已经在跑的。
+    pub keep_alive: AtomicBool,
     /// 派出它的那次 `task` 调用（工具调用 id）。客户端靠它把卡片和子代理对上。
     pub tool_call_id: Mutex<Option<String>>,
     /// 落盘目录（`<父会话>/subagents/<id>/`）；父会话不落盘时没有。
@@ -190,6 +191,13 @@ impl ChildStore {
     }
 
     /// 标记 / 清掉「这一轮是用户开的」。
+    /// 槽位建好之后补常驻标记（角色名册要等槽位存在才知道该角色的定义）。
+    pub fn set_keep_alive(&self, id: &str, on: bool) {
+        if let Some(slot) = self.get(id) {
+            slot.keep_alive.store(on, Ordering::Relaxed);
+        }
+    }
+
     pub fn set_user_turn(&self, id: &str, on: bool) {
         if let Some(slot) = self.get(id) {
             slot.user_turn.store(on, Ordering::Relaxed);
@@ -411,7 +419,7 @@ impl ChildStore {
             reported_this_turn: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             settled_at: Mutex::new(None),
-            keep_alive,
+            keep_alive: AtomicBool::new(keep_alive),
             tool_call_id: Mutex::new(None),
             transcript_dir: Mutex::new(None),
             started_wall: Mutex::new(std::time::SystemTime::now()),
@@ -823,7 +831,7 @@ impl ChildStore {
                 continue;
             }
             // 常驻角色不等 TTL：观察者要整场会话保持可继续。
-            if slot.keep_alive {
+            if slot.keep_alive.load(Ordering::Relaxed) {
                 continue;
             }
             let parked = *slot.parked_at.lock().unwrap();

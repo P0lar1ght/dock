@@ -196,7 +196,7 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             .map(|def| def.resident_tools.clone())
             .unwrap_or_default()
     };
-    // `keep_alive` 缺省**沿用已有的**：GUI 的角色表单还没这个开关，老实传
+    // `keep_alive` 缺省**沿用已有的**：不带这个字段的请求（老客户端）老实传
     // `false` 会把内置 `warden` 的 `观` 的常驻标记抹掉。
     let existing_keep_alive = |role: &str| -> Option<bool> {
         existing
