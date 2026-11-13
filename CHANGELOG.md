@@ -10,12 +10,12 @@
 
 ### 变更
 
-- **todo 回合末只记账、不再逼模型继续干活**：原来以文字收尾时还有未完成项，回合末的 todo 关卡会塞一条「Todos NOT complete — continue working…别停在这里向用户汇报」再续跑最多两轮——用户说「先讨论方案」之后模型也会被推着开工。现在改成**一步记账**：只把 `todo_write` 交给模型，提醒按实际进度改状态（做完的 `completed`、等用户的 `awaiting_user`），不开始新工作，记完这一轮就结束；每条用户消息最多一次。本轮问过用户（`ask_user_question` / `handoff_to_user`，子代理的不算）、计划模式开着、或剩下的全在等用户时不记账。目标或插件要求继续干活时，记账让路。
-  - 回合中：有进行中的项、刚跑完测试或构建命令却没更新清单时提示「做完了就标完成」；连续 10 步没动清单才提醒。清单刚变过时不再另插一条提醒——写入结果已经逐项列了状态，「清单只是记录，用户的话优先」这句纪律跟着写入走。
+- **todo 回合末只记账、不再逼模型继续干活**：原来以文字收尾时还有未完成项，回合末的 todo 关卡会塞一条「Todos NOT complete — continue working…别停在这里向用户汇报」再续跑最多两轮——用户说「先讨论方案」之后模型也会被推着开工。现在改成**一步记账**：只把 `todo_write` 交给模型，提醒按实际进度改状态（做完的 `completed`、等用户的 `awaiting_user`），不开始新工作，记完这一轮就结束；每条用户消息最多一次。本轮问过用户（`ask_user_question` / `handoff_to_user`，子代理的不算）、计划模式开着、或剩下的全在等用户时不记账。目标或插件要求继续干活时，记账让路。被后台任务托底的项也照记——记账只改状态，不推模型去干活，没有理由把它从欠账里豁免出去。
+  - 回合中：有进行中的项、刚跑完测试或构建命令却没更新清单时提示「做完了就标完成」（命令跑挂了不提醒——还没做完呢）；连续 10 步没动清单才提醒。清单刚变过时不再另插一条提醒——写入结果已经逐项列了状态，「清单只是记录，用户的话优先」这句纪律跟着写入走。
   - 记账那一步模型顺嘴说的话不算第二条回复：不显示、不进下一轮历史，这一轮回的仍是之前那段正文。清单自上次记账后没动过、这一轮也没干别的活，就不再记账；跳过的记账（见下）不算记过；当前预设没有 `todo_write`、上下文已到自动压缩门槛时也不记；记账时按停止，这一轮仍算完成。
   - 下一轮开头：上一轮还剩未完成项时提醒一句，用户的新消息优先，方向变了先更新或清空清单。
   - `todo_write` 同时只允许一个 `in_progress`，写出两个直接报错、清单不动；全部完成时结果写「清单已全部完成」，全部取消时写「清单已全部关闭」。工具描述不再要求「别带着未完成项结束回合」，改为要求如实记账。
-- **插件作者注意（破坏性）**：回合末 todo 提醒的开头从 `Todos NOT complete — continue working. Next step:`（`TODO_GATE_SENTINEL`）换成 `Todo bookkeeping only — update statuses, do not start new work.`（`TODO_BOOKKEEPING_SENTINEL`）。Rhai 钩子（`agent/turn-end`、`session/event`）里按旧开头匹配 todo 提醒的，改成匹配新开头；这条提醒现在只要求记账，不再表示「这一轮会继续干活」。Rust 侧的 API 变化与改法见 `docs/tools/todo.md`「API 变化」。
+- **插件作者注意（破坏性）**：回合末 todo 提醒的**第一行**从 `Todos NOT complete — continue working. Next step:`（`TODO_GATE_SENTINEL`）换成 `Todo bookkeeping only — update statuses.`（`TODO_BOOKKEEPING_SENTINEL`）。Rhai 钩子里按旧开头匹配 todo 提醒的，改成匹配新开头——哨兵排在 `<system-reminder>` 之后第一行，`session/event` 给的 80 字预览一定截得到。注意 **`agent/turn-end` 的载荷里没有提醒正文**（只有 `text` / `rounds` / `ended_with_text` / `queued_followups` / `identity` / `main`），想在回合末认出记账提醒只能从 `session/event` 的预览里认。这条提醒现在只要求记账，不再表示「这一轮会继续干活」。Rust 侧的 API 变化与改法见 `docs/tools/todo.md`「API 变化」。
 - **待办新状态 `awaiting_user`（在等用户）**：TUI 待办卡用 `○`、GUI 待办卡用问号气泡图标、轨迹面板的 `todo_write` 行显示「等用户N」。它不算完成，也不算模型欠的活。**落盘**：只出现在 `chat_history.jsonl` 里 `todo_write` 的参数与结果文本中；不含它的旧会话照常读。用更早的版本打开含它的会话：旧版显示成和 pending 一样（GUI 是空心圆，TUI 是 `□`）；模型侧的清单不从落盘恢复，不受影响。
 
 - **模型看到的目录改走消息提醒**：技能、工作流、子代理名册不再进系统提示 / `task` 描述，改在每一轮采样前以 `<system-reminder>` 注入；内容和历史里最近一份一致就只留一份，压缩后重注。切到调不动 loader 的预设时补一句「目录不再适用」。

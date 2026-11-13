@@ -8,22 +8,23 @@ use std::sync::{Arc, Mutex};
 use cordis::{plugin, Context, Inject, Plugin};
 
 use crate::names::{
-    JOBS, PLAN_MODE, PRE_STEP, SESSIONS, STEP_START, SUBAGENTS, TODOS, TOOLS, TOOLS_EXECUTE,
-    TURN_END,
+    PLAN_MODE, PRE_STEP, SESSIONS, STEP_START, TODOS, TOOLS, TOOLS_EXECUTE, TURN_END,
 };
 use crate::session::log::Sessions;
-use crate::tools::jobs::Jobs;
 use crate::tools::plan_mode::PlanMode;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
-use crate::tools::task::Subagents;
 use cordis_base::types::{
     LogEvent, PreStep, StepStart, ToolCall, ToolResult, ToolSpec, TurnEnd, ORDER_STEP_START_TODO,
     ORDER_TURN_END_TODO,
 };
 
-/// Turn-end bookkeeping steps per user prompt. One: the bookkeeping step ends
-/// the turn, so a second one could only come from a later continuation of the
-/// same prompt (goal / mailbox) — and one honest pass is enough.
+/// Turn-end bookkeeping steps per user prompt. One.
+///
+/// The bookkeeping step ends the turn, so within one loop there is never a
+/// second one. This counter stops the *next* loop: a goal or mailbox
+/// continuation is a separate loop that never goes through `agent/pre-step`,
+/// where the counter is reset — without it the same list would be booked
+/// again on every continuation.
 const MAX_TODO_BOOKKEEPING_FIRES: usize = 1;
 /// Sampling steps without a `todo_write` before the mid-turn nudge fires
 /// (Grok `TodoNudgeConfig::turns_since_todo_write`, which ships unimplemented).
@@ -77,9 +78,8 @@ impl Todos {
     }
 
     /// Turn-end bookkeeping body, or `None` when nothing is owed.
-    /// `backing_tasks` = live background jobs + running subagents.
-    pub fn bookkeeping_reminder(&self, backing_tasks: usize) -> Option<String> {
-        logic::bookkeeping_reminder(&self.state.lock().unwrap(), backing_tasks)
+    pub fn bookkeeping_reminder(&self) -> Option<String> {
+        logic::bookkeeping_reminder(&self.state.lock().unwrap())
     }
 
     /// Old name of [`Todos::bookkeeping_reminder`]. The body is now a
@@ -88,8 +88,8 @@ impl Todos {
     #[deprecated(
         note = "renamed to `bookkeeping_reminder`; the body no longer asks to continue working"
     )]
-    pub fn gate_reminder(&self, backing_tasks: usize) -> Option<String> {
-        self.bookkeeping_reminder(backing_tasks)
+    pub fn gate_reminder(&self) -> Option<String> {
+        self.bookkeeping_reminder()
     }
 
     /// Start-of-turn reminder about what the previous turn left behind.
@@ -328,7 +328,7 @@ fn wire_todo_waterfalls(ctx: &Context) {
         if *bookkept_at.lock().unwrap() == Some(todos.revision()) {
             return next;
         }
-        if let Some(body) = todos.bookkeeping_reminder(backing_tasks(&ctx_end)) {
+        if let Some(body) = todos.bookkeeping_reminder() {
             // Charged only when the loop actually takes the step
             // (`TurnEndRound::charge`): a handler in a lower slot can win the
             // round, or the step can be skipped (no todo_write, Stop, compact
@@ -364,8 +364,10 @@ fn in_plan_mode(ctx: &Context) -> bool {
 }
 
 /// The `bash` command of the step that just finished (the tool rows after the
-/// last model output), when it is a test / build ([`is_test_or_build_command`])
-/// and the same step did not also write the list.
+/// last model output), when it is a test / build ([`is_test_or_build_command`]),
+/// the same step did not also write the list, and the command actually
+/// succeeded. A failed run says nothing about whether the item is done — the
+/// model still has to fix it — so it does not earn the nudge.
 fn last_step_test_or_build(events: &[LogEvent]) -> Option<String> {
     let mut command = None;
     for event in events.iter().rev() {
@@ -373,8 +375,19 @@ fn last_step_test_or_build(events: &[LogEvent]) -> Option<String> {
             LogEvent::LlmStream(_) => break,
             LogEvent::ToolExecute { name, .. } if name == "todo_write" => return None,
             LogEvent::ToolExecute {
-                name, arguments, ..
+                name,
+                arguments,
+                is_error,
+                ..
             } if name == "bash" && command.is_none() => {
+                if *is_error {
+                    // `bash` marks a non-zero exit as an error (the exit note
+                    // leads the output and `tool_output_looks_failed` reads
+                    // it), so this is a run that failed, not one that passed.
+                    // It is also the most recent bash of the step — look no
+                    // further back for an earlier, successful one.
+                    return None;
+                }
                 let cmd = serde_json::from_str::<serde_json::Value>(arguments)
                     .ok()
                     .and_then(|v| v.get("command")?.as_str().map(str::to_string));
@@ -453,20 +466,6 @@ impl TodoWatch {
 ///   the payload because a waterfall handler cannot see the executing context.
 fn gate_applies(ctx: &Context, end: &TurnEnd) -> bool {
     end.ended_with_text && !end.queued_followups && Sessions::turn_is_this_page(ctx, &end.identity)
-}
-
-/// Live background work that can legitimately back an `in_progress` item —
-/// "kick off a job, report back" stays a valid way to end a turn.
-fn backing_tasks(ctx: &Context) -> usize {
-    let jobs = ctx
-        .get::<Jobs>(JOBS)
-        .map(|j| j.list().iter().filter(|j| !j.done).count())
-        .unwrap_or(0);
-    let agents = ctx
-        .get::<Subagents>(SUBAGENTS)
-        .map(|s| s.list().iter().filter(|a| a.running()).count())
-        .unwrap_or(0);
-    jobs + agents
 }
 
 fn write_todos(ctx: &cordis::Context, call: ToolCall) -> ToolResult {

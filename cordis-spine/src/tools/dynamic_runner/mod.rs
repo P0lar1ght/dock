@@ -24,6 +24,30 @@ use crate::host::tui_slots::TuiSlots;
 use crate::names::{DYNAMIC_CORDIS_RUNNER, RHAI_BAGS, SLASH, TOOLS, TUI_SLOTS};
 use crate::tools::registry::Tools;
 
+/// One line of a session event, for a Rhai hook: whitespace flattened, cut to
+/// `max` characters. `session/event` hands hooks a **preview**, not the whole
+/// text — the accounting reminder has to survive that cut, so its first line
+/// carries the sentinel.
+pub(crate) fn preview(text: &str, max: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let flat = flat.trim();
+    if flat.chars().count() <= max {
+        return flat.to_string();
+    }
+    let mut out = String::new();
+    for (i, c) in flat.chars().enumerate() {
+        if i >= max {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
 use factories::{list_factories, lookup_factory, DYN_HOLD_GATE};
 use lifecycle::{host_status, missing_services, start_host_half};
 use registry::{

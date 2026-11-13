@@ -10,6 +10,7 @@ use cordis::{plugin, Context, Inject, Plugin};
 use rhai::{Array, Dynamic, Engine, FnPtr, ImmutableString, Map, AST};
 use serde_json::Value;
 
+use super::preview;
 use crate::host::plugin_settings::PluginSettings;
 use crate::host::slash::{ExtraSlashKind, Slash, SlashEntry};
 use crate::host::status_items::{StatusItem, StatusItems, StatusToken};
@@ -1289,26 +1290,6 @@ fn event_line(ev: &LogEvent) -> Option<String> {
         LogEvent::TurnEnd(status) => format!("turn-end\t{}", status.as_str()),
     };
     Some(line)
-}
-
-fn preview(text: &str, max: usize) -> String {
-    let flat: String = text
-        .chars()
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .collect();
-    let flat = flat.trim();
-    if flat.chars().count() <= max {
-        return flat.to_string();
-    }
-    let mut out = String::new();
-    for (i, c) in flat.chars().enumerate() {
-        if i >= max {
-            break;
-        }
-        out.push(c);
-    }
-    out.push('…');
-    out
 }
 
 /// A hook's refusal reason: a bare string, or `#{ deny: "reason" }`.

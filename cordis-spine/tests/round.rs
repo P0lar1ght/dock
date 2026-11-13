@@ -7,7 +7,7 @@ use cordis_spine::{
     BoxFuture, Driver, Error, Goal, Llm, LlmOutput, LoopHandle, PreStep, PromptRequest, Sampler,
     Sessions, StepStart, StreamDelta, ToolCall, TurnControl, TurnEnd, TurnOutcome, AGENTS,
     AGENT_LOOP, GOAL, LLM, ORDER_TURN_END_TODO, PRE_STEP, SESSIONS, STEP_START, SYSTEM_PROMPT,
-    TOOLS, TURN, TURN_END,
+    TODOS, TOOLS, TURN, TURN_END,
 };
 
 /// 整个测试二进制共用一个隔离的 `DOCK_HOME`：第一次调用时建临时目录并设好，
@@ -1471,6 +1471,179 @@ async fn a_lower_slot_winner_does_not_spend_the_todo_quota() {
     );
 }
 
+/// The bookkeeping quota belongs to the user message, not to the loop: a
+/// second turn-end in the same message must not vote again.
+///
+/// The counter is charged by the loop once it knows the bookkeeping step will
+/// really run ([`TurnEndRound::charge`]), so the test charges it by hand.
+#[tokio::test]
+async fn the_bookkeeping_quota_stops_a_second_vote_in_the_same_message() {
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    let todos = root.require::<cordis_spine::Todos>(TODOS).unwrap();
+    todos
+        .apply(serde_json::from_str(OPEN_LIST).unwrap())
+        .unwrap();
+    let identity = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .identity()
+        .to_string();
+
+    let vote = || {
+        let end = TurnEnd::new("答完了", 0, true, false, identity.clone());
+        let seed = end.clone();
+        root.waterfall(TURN_END, end, move || seed).settle_round()
+    };
+
+    let mut first = vote().expect("the first ending asks for bookkeeping");
+    assert_eq!(
+        first.only_tools.as_deref(),
+        Some(&["todo_write".to_string()][..]),
+        "the bookkeeping step only offers todo_write"
+    );
+    first.charge();
+
+    let second = vote();
+    assert!(
+        second.as_ref().and_then(|r| r.only_tools.clone()).is_none(),
+        "the quota stops a second vote in the same message: {second:?}"
+    );
+}
+
+/// The user pressed Stop while the turn was ending: the bookkeeping step is
+/// skipped. No reminder lands, the quota is not spent, and the turn still
+/// returns the answer the model already gave.
+#[tokio::test]
+async fn a_stop_during_turn_end_skips_the_bookkeeping() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        _ => say("模型那段的正文"),
+    })
+    .await;
+    // A higher slot than the todo handler, so the cancel lands between the
+    // vote and the loop's own "may I take that step?" check.
+    let _turn = b.root.provide(TURN, TurnControl::new()).unwrap();
+    let stopper = b.root.clone();
+    let page = b.root.clone();
+    let _stop = page
+        .on_waterfall(TURN_END, move |end: TurnEnd, args| {
+            let next = args.next::<TurnEnd>().unwrap_or(end);
+            stopper.require::<TurnControl>(TURN).unwrap().cancel();
+            next
+        })
+        .unwrap();
+
+    let out = b.run("干活").await;
+    assert_eq!(out, TurnOutcome::Text("模型那段的正文".into()));
+    assert_eq!(b.bookkeeping(), 0, "no bookkeeping reminder landed");
+
+    // The quota was not spent either: a later ending in the same message may
+    // still ask for bookkeeping.
+    let identity = b
+        .root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .identity()
+        .to_string();
+    let end = TurnEnd::new("答完了", 0, true, false, identity);
+    let seed = end.clone();
+    let round = b
+        .root
+        .waterfall(TURN_END, end, move || seed)
+        .settle_round()
+        .expect("the quota was not spent by the skipped step");
+    assert_eq!(
+        round.only_tools.as_deref(),
+        Some(&["todo_write".to_string()][..])
+    );
+}
+
+/// The bookkeeping step mutes the model's text. If the turn is dropped while
+/// that step is running (the user pressed Stop, the caller gave up), the mute
+/// has to be lifted anyway — otherwise every later answer is swallowed too.
+#[tokio::test]
+async fn a_dropped_bookkeeping_step_does_not_mute_the_next_turn() {
+    struct Hang {
+        n: Arc<AtomicUsize>,
+    }
+    impl Sampler for Hang {
+        fn sample<'a>(
+            &'a self,
+            _request: PromptRequest,
+            _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+        ) -> BoxFuture<'a, LlmOutput> {
+            let n = self.n.clone();
+            Box::pin(async move {
+                let i = n.fetch_add(1, Ordering::SeqCst);
+                match i {
+                    0 => LlmOutput {
+                        tool_calls: vec![ToolCall {
+                            id: "c0".into(),
+                            name: "todo_write".into(),
+                            arguments: OPEN_LIST.into(),
+                        }],
+                        ..LlmOutput::default()
+                    },
+                    // The bookkeeping step: it never answers.
+                    1 => LlmOutput {
+                        text: "答完了".into(),
+                        ..LlmOutput::default()
+                    },
+                    2 => std::future::pending::<LlmOutput>().await,
+                    _ => LlmOutput {
+                        text: "这一轮的正文".into(),
+                        ..LlmOutput::default()
+                    },
+                }
+            })
+        }
+    }
+
+    isolated_home();
+    let root = Context::new();
+    install_without_llm(&root).await.unwrap();
+    root.plugin(tool_todo(), ()).unwrap().wait().await.unwrap();
+    let n = Arc::new(AtomicUsize::new(0));
+    root.provide(LLM, Llm::from_sampler(root.clone(), Arc::new(Hang { n })))
+        .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+
+    // The turn is dropped while the bookkeeping step is still sampling.
+    let timed_out = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        root.require::<LoopHandle>(AGENT_LOOP).unwrap().run("干活"),
+    )
+    .await;
+    assert!(timed_out.is_err(), "the bookkeeping step hangs on purpose");
+
+    // The next turn answers normally: its text reaches the log.
+    let out = root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("再来一轮")
+        .await
+        .unwrap();
+    assert_eq!(out, TurnOutcome::Text("这一轮的正文".into()));
+    let spoken = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            cordis_spine::LogEvent::LlmStream(out) => Some(out.text.clone()),
+            _ => None,
+        })
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>();
+    assert!(
+        spoken.iter().any(|t| t.contains("这一轮的正文")),
+        "the mute was lifted: {spoken:?}"
+    );
+}
+
 /// `agent/step-start` is an extension point, not a loop private: a handler
 /// mounted from outside sees every step numbered from 0 — across turn-end
 /// continuations too — and the loop appends what it queues, in slot order.
@@ -2165,8 +2338,8 @@ async fn a_list_change_does_not_repeat_itself() {
     assert_eq!(b.bookkeeping(), 0, "everything was closed before the text");
 }
 
-/// An item is `in_progress`, a test command just ran and the list did not move
-/// in that step: suggest ticking it off.
+/// An item is `in_progress`, a test command just ran (and succeeded) and the
+/// list did not move in that step: suggest ticking it off.
 #[tokio::test]
 async fn a_test_run_without_a_list_update_suggests_marking_it_done() {
     let b = boot_recorded(|i| match i {
@@ -2180,6 +2353,9 @@ async fn a_test_run_without_a_list_update_suggests_marking_it_done() {
         _ => say(&format!("round-{i}")),
     })
     .await;
+    // A real `bash` that succeeded. Without it the call is refused
+    // (`is_error`), and a failed run says nothing about the item being done.
+    let _bash = fake_tool(&b.root, "bash", "test result: ok");
     b.run("干活").await;
     let nudges: Vec<String> = b
         .reminders()
@@ -2194,6 +2370,31 @@ async fn a_test_run_without_a_list_update_suggests_marking_it_done() {
         nudges[0]
     );
     assert!(nudges[0].contains("标 completed"), "{}", nudges[0]);
+}
+
+/// The same shape, but the test command **failed**: the item is not done, so
+/// "mark it completed" would be wrong. No nudge.
+#[tokio::test]
+async fn a_failed_test_run_does_not_suggest_marking_it_done() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => call_tool(
+            "c1",
+            "bash",
+            r#"{"command":"cd dock && cargo test -p cordis-spine"}"#,
+        ),
+        2 => call_tool("c2", "todo_write", CLOSE_LIST),
+        _ => say(&format!("round-{i}")),
+    })
+    .await;
+    let _bash = failing_tool(&b.root, "bash", "exit status: 1\ntest result: FAILED");
+    b.run("干活").await;
+    let nudges: Vec<String> = b
+        .reminders()
+        .into_iter()
+        .filter(|r| r.contains("刚跑完测试 / 构建"))
+        .collect();
+    assert!(nudges.is_empty(), "a failed run proves nothing: {nudges:?}");
 }
 
 /// Reproduction of session 01a1d068: the model lists a plan and stops, the

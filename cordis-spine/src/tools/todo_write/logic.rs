@@ -247,14 +247,21 @@ fn state_hint(s: &TodoStats) -> Option<&'static str> {
 }
 
 /// Leads the turn-end bookkeeping reminder. Rhai hooks and tests look for it.
-pub const TODO_BOOKKEEPING_SENTINEL: &str =
-    "Todo bookkeeping only — update statuses, do not start new work.";
+///
+/// It sits on the **first line** of the reminder body, right after
+/// `<system-reminder>`, so a hook that only sees a truncated preview still
+/// gets it: the `session/event` preview keeps 80 characters, and this line
+/// starts at character 17. Keep the string short — every character here is
+/// budget the preview has to spend before the list itself.
+pub const TODO_BOOKKEEPING_SENTINEL: &str = "Todo bookkeeping only — update statuses.";
 
-/// `pending` / unbacked `in_progress` contents, in list order. `backing_tasks`
-/// = live background jobs + running subagents: the first that many
-/// `in_progress` items count as backed ("kick off a job, report back" is a
-/// legitimate way to end a turn). `awaiting_user` is never included.
-fn owed_items(state: &TodoState, backing_tasks: usize) -> (Vec<&str>, Vec<&str>) {
+/// `in_progress` / `pending` contents, in list order. `awaiting_user` is never
+/// included.
+///
+/// Everything still owed counts, `in_progress` included: bookkeeping only
+/// fixes the list's wording, it does not push the model back to work, so a
+/// background job backing an item is no reason to leave that item out.
+fn owed_items(state: &TodoState) -> (Vec<&str>, Vec<&str>) {
     let mut pending: Vec<&str> = Vec::new();
     let mut in_progress: Vec<&str> = Vec::new();
     for t in state.todo_items() {
@@ -264,8 +271,7 @@ fn owed_items(state: &TodoState, backing_tasks: usize) -> (Vec<&str>, Vec<&str>)
             TodoStatus::Completed | TodoStatus::Cancelled | TodoStatus::AwaitingUser => {}
         }
     }
-    let unbacked = in_progress.split_off(in_progress.len().min(backing_tasks));
-    (unbacked, pending)
+    (in_progress, pending)
 }
 
 fn todo_state_block(out: &mut String, in_progress: &[&str], pending: &[&str]) {
@@ -285,22 +291,23 @@ fn todo_state_block(out: &mut String, in_progress: &[&str], pending: &[&str]) {
 /// the model into work the user did not ask for (e.g. after "let's discuss
 /// the plan first").
 ///
-/// `None` means there is nothing to settle (empty list, everything closed,
-/// only `awaiting_user` left, or every `in_progress` backed by a live task).
-pub fn bookkeeping_reminder(state: &TodoState, backing_tasks: usize) -> Option<String> {
-    let (in_progress, pending) = owed_items(state, backing_tasks);
+/// `None` means there is nothing to settle (empty list, everything closed, or
+/// only `awaiting_user` left).
+pub fn bookkeeping_reminder(state: &TodoState) -> Option<String> {
+    let (in_progress, pending) = owed_items(state);
     if pending.is_empty() && in_progress.is_empty() {
         return None;
     }
+    // 哨兵在第一行：插件能只靠截断预览认出这条提醒（`session/event` 预览 80 字）。
     let mut body = String::from("<system-reminder>\n");
-    todo_state_block(&mut body, &in_progress, &pending);
-    body.push('\n');
     body.push_str(TODO_BOOKKEEPING_SENTINEL);
     body.push('\n');
+    todo_state_block(&mut body, &in_progress, &pending);
     body.push_str(
         "按实际进度更新上面这些项的状态：做完的标 completed，在等用户回复或确认的标 awaiting_user，\
          确定不做的标 cancelled，还没开始的保持 pending。这一步只能调用 todo_write：\
-         不要开始新的工作，也不用再回复用户；记完账这一轮就结束。\n</system-reminder>",
+         不要开始新的工作，也不用再回复用户；有后台任务在推进的项保持 in_progress，任务跑完再标 completed；\
+         记完账这一轮就结束。\n</system-reminder>",
     );
     Some(body)
 }
@@ -357,7 +364,7 @@ pub fn verified_reminder(command: &str, in_progress: &str) -> String {
 /// counting `awaiting_user`), and/or some are `awaiting_user` — the user's
 /// new message may be the answer. Soft: the new message wins.
 pub fn next_turn_reminder(state: &TodoState) -> Option<String> {
-    let (in_progress, pending) = owed_items(state, 0);
+    let (in_progress, pending) = owed_items(state);
     let awaiting: Vec<&str> = state
         .todo_items()
         .filter(|t| t.status == TodoStatus::AwaitingUser)
@@ -788,9 +795,12 @@ mod tests {
     #[test]
     fn bookkeeping_lists_owed_items_and_clears_when_done() {
         let mut state = seeded();
-        let reminder =
-            bookkeeping_reminder(&state, 0).expect("owed items must ask for bookkeeping");
+        let reminder = bookkeeping_reminder(&state).expect("owed items must ask for bookkeeping");
         assert!(reminder.contains(TODO_BOOKKEEPING_SENTINEL), "{reminder}");
+        assert!(
+            reminder.starts_with(&format!("<system-reminder>\n{TODO_BOOKKEEPING_SENTINEL}")),
+            "the sentinel leads the body, so a hook can match it: {reminder}"
+        );
         assert!(
             reminder.contains("in_progress: 摸清 todo 现状"),
             "{reminder}"
@@ -803,7 +813,22 @@ mod tests {
         for id in ["explore", "ui", "docs"] {
             apply_merge(&mut state, &[upd(id, None, Some(TodoStatus::Completed))]).unwrap();
         }
-        assert!(bookkeeping_reminder(&state, 0).is_none());
+        assert!(bookkeeping_reminder(&state).is_none());
+    }
+
+    /// A Rhai `session/event` hook only ever sees an 80-character preview of a
+    /// reminder. The sentinel has to survive that cut — otherwise the only way
+    /// to recognise the accounting reminder is to match the whole body, which
+    /// the preview never carries.
+    #[test]
+    fn the_sentinel_survives_the_hook_preview() {
+        let state = seeded();
+        let reminder = bookkeeping_reminder(&state).expect("owed items must ask for bookkeeping");
+        let preview = crate::tools::dynamic_runner::preview(&reminder, 80);
+        assert!(
+            preview.contains(TODO_BOOKKEEPING_SENTINEL),
+            "the preview cuts the reminder: {preview}"
+        );
     }
 
     #[test]
@@ -812,7 +837,7 @@ mod tests {
         for id in ["explore", "ui", "docs"] {
             apply_merge(&mut state, &[upd(id, None, Some(TodoStatus::AwaitingUser))]).unwrap();
         }
-        assert_eq!(bookkeeping_reminder(&state, 0), None);
+        assert_eq!(bookkeeping_reminder(&state), None);
         let s = stats(&state);
         assert_eq!(
             (s.awaiting_user, s.open(), s.settled(), s.total()),
@@ -833,10 +858,11 @@ mod tests {
         );
     }
 
-    /// Grok's backed/unbacked partition: an `in_progress` item covered by a
-    /// live background task is a legitimate reason to end the turn.
+    /// An `in_progress` item is owed like any other: bookkeeping only fixes
+    /// the list's wording, so a job backing the item is no reason to leave it
+    /// out of the reminder.
     #[test]
-    fn bookkeeping_ignores_in_progress_backed_by_a_live_task() {
+    fn an_in_progress_item_is_never_exempt() {
         let mut state = TodoState::default();
         apply_replace(
             &mut state,
@@ -847,13 +873,17 @@ mod tests {
             )],
         )
         .unwrap();
-        assert!(bookkeeping_reminder(&state, 1).is_none());
-        assert!(bookkeeping_reminder(&state, 0).is_some());
+        let reminder = bookkeeping_reminder(&state).expect("the item is still owed");
+        assert!(reminder.contains("in_progress: 等后台构建"), "{reminder}");
+        assert!(
+            reminder.contains("有后台任务在推进的项保持 in_progress"),
+            "{reminder}"
+        );
     }
 
     #[test]
     fn bookkeeping_stays_quiet_on_an_empty_list() {
-        assert!(bookkeeping_reminder(&TodoState::default(), 0).is_none());
+        assert!(bookkeeping_reminder(&TodoState::default()).is_none());
         assert!(next_turn_reminder(&TodoState::default()).is_none());
     }
 
