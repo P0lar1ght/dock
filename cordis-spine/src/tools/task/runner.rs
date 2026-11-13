@@ -141,6 +141,21 @@ async fn run_dock_child(
     let id = run.request.id.clone();
     let typ = run.request.subagent_type.clone();
     let desc = run.request.description.clone();
+    // 槽位先建：角色不认识时也要留下槽位与快照，`resume_from` 才有东西可读。
+    // 回报指令要写**记在册上的**父级（发起调用的那一页，如 `main#2`）：请求上的
+    // `parent_session_id` 被后端统一绑成了 `main`，照它写的话分页的孩子回话会被
+    // `send_message` 以「不是启动你的代理」挡回去。
+    let parent_id = store
+        .ensure_owned(
+            &id,
+            desc.clone(),
+            typ.clone(),
+            run.request.owner.clone(),
+            &run.request.parent_session_id,
+            false,
+        )
+        .parent
+        .clone();
     // 角色表按页取（预设按页）：常驻标记也在那儿，回收时才知道该不该跳过。
     let parent_presets = parent.get::<AgentPresets>(AGENT_PRESETS);
     let def = parent_presets.as_ref().and_then(|p| p.subagent(&typ));
@@ -153,20 +168,7 @@ async fn run_dock_child(
             false,
         );
     };
-    // 回报指令要写**记在册上的**父级（发起调用的那一页，如 `main#2`）：请求上的
-    // `parent_session_id` 被后端统一绑成了 `main`，照它写的话分页的孩子回话会被
-    // `send_message` 以「不是启动你的代理」挡回去。
-    let parent_id = store
-        .ensure_owned(
-            &id,
-            desc.clone(),
-            typ.clone(),
-            run.request.owner.clone(),
-            &run.request.parent_session_id,
-            def.keep_alive,
-        )
-        .parent
-        .clone();
+    store.set_keep_alive(&id, def.keep_alive);
 
     let resume = run
         .request
