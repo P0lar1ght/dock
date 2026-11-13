@@ -44,8 +44,8 @@ pub use cordis_base::config::{
 pub use cordis_base::stream_acc::StreamDelta;
 pub use cordis_base::types::{
     side_note_reminder, side_note_text, LlmOutput, LogEvent, NoticeKind, PreExecute, PreStep,
-    PromptRequest, StepStart, ThinkingBlock, ToolCall, ToolResult, ToolSpec, TurnEnd, TurnOutcome,
-    UserImage, AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
+    PromptRequest, StepStart, ThinkingBlock, ToolCall, ToolResult, ToolSpec, TurnEnd, TurnEndRound,
+    TurnOutcome, UserImage, AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
     ORDER_STEP_START_DYNAMIC, ORDER_STEP_START_INSTRUCTIONS, ORDER_STEP_START_MCP_APPS,
     ORDER_STEP_START_MEMORY, ORDER_STEP_START_ROSTER, ORDER_STEP_START_SKILLS,
     ORDER_STEP_START_TODO, ORDER_STEP_START_USER_EDITS, ORDER_STEP_START_WORKFLOWS,
@@ -194,7 +194,7 @@ pub use tools::task::admission::SubagentLimits;
 pub use tools::task::{tool_task, SubagentChanged, SubagentSnap, Subagents, TaskConfig};
 pub use tools::todo_write::{
     todo_service, todo_tool_registration, tool_todo, TodoItem, TodoStats, TodoStatus, Todos,
-    TODO_GATE_SENTINEL,
+    TEST_BUILD_COMMANDS, TODO_ALL_CLOSED, TODO_ALL_DONE, TODO_BOOKKEEPING_SENTINEL,
 };
 pub use tools::tool_cordis::tool_cordis;
 pub use tools::tool_images::{

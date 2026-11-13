@@ -898,12 +898,15 @@ fn ordered(mut slots: Vec<(i32, String)>) -> Vec<String> {
     slots.into_iter().map(|(_, body)| body).collect()
 }
 
-/// Order slots on the `agent/turn-end` waterfall. Two handlers can both want
-/// another round; the smaller order wins, so the outcome does not depend on
-/// plugin mount order (same reason [`crate::PromptAssembly`] uses slots).
+/// Order slots on the `agent/turn-end` waterfall. Among votes of the same
+/// kind the smaller order wins, so the outcome does not depend on plugin mount
+/// order (same reason [`crate::PromptAssembly`] uses slots).
 ///
-/// More specific beats more general — "do the next todo" is more actionable
-/// than "keep pushing the goal".
+/// The kind comes first: any keep-working vote ([`TurnEnd::keep_working`],
+/// e.g. the goal or a script) beats any bookkeeping vote
+/// ([`TurnEnd::bookkeep_with`], the todo list), whatever their slots —
+/// bookkeeping ends the turn and must not swallow a legitimate "not done yet".
+/// So `ORDER_TURN_END_TODO` only orders todo against other bookkeeping votes.
 pub const ORDER_TURN_END_TODO: i32 = 10;
 pub const ORDER_TURN_END_GOAL: i32 = 20;
 /// Disk / dynamic Cordis plugins — see [`ORDER_STEP_START_DYNAMIC`].
@@ -946,7 +949,68 @@ struct Continuation {
     order: i32,
     reminder: String,
     on_win: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// `Some` = a bookkeeping vote ([`TurnEnd::bookkeep_with`]): one more step
+    /// that may only call these tools, then the turn ends.
+    only_tools: Option<Vec<String>>,
 }
+
+/// What the loop does with the winning `agent/turn-end` vote.
+///
+/// Not `Clone`: it may carry the bookkeeping winner's pending charge, and a
+/// copy must not be able to spend that quota a second time.
+pub struct TurnEndRound {
+    /// `<system-reminder>` body the loop appends before the extra step.
+    pub reminder: String,
+    /// `None` = keep working: the loop runs normal steps again.
+    /// `Some(tools)` = bookkeeping: exactly one more sample, offered **only**
+    /// these tools; whatever comes back, the turn then ends.
+    pub only_tools: Option<Vec<String>>,
+    /// A bookkeeping winner's `on_win`, not run yet: the loop may still find
+    /// it cannot take the step (tool missing, Stop, compact threshold). See
+    /// [`TurnEndRound::charge`].
+    charge: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl TurnEndRound {
+    /// A round without a pending charge (tests, hand-built rounds).
+    pub fn new(reminder: impl Into<String>, only_tools: Option<Vec<String>>) -> Self {
+        Self {
+            reminder: reminder.into(),
+            only_tools,
+            charge: None,
+        }
+    }
+
+    /// Run the bookkeeping winner's `on_win`. The loop calls this only once it
+    /// is sure the bookkeeping step will actually run; a skipped step charges
+    /// nothing, so the handler's quota and "already bookkept" state stay as
+    /// they were. Runs at most once. Keep-working winners were charged in
+    /// [`TurnEnd::settle_round`] already, so this is a no-op for them.
+    pub fn charge(&mut self) {
+        if let Some(on_win) = self.charge.take() {
+            on_win();
+        }
+    }
+}
+
+impl fmt::Debug for TurnEndRound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TurnEndRound")
+            .field("reminder", &self.reminder)
+            .field("only_tools", &self.only_tools)
+            .field("charge_pending", &self.charge.is_some())
+            .finish()
+    }
+}
+
+/// Compares what the loop will do; a pending charge is not part of it.
+impl PartialEq for TurnEndRound {
+    fn eq(&self, other: &Self) -> bool {
+        self.reminder == other.reminder && self.only_tools == other.only_tools
+    }
+}
+
+impl Eq for TurnEndRound {}
 
 impl fmt::Debug for Continuation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -954,6 +1018,7 @@ impl fmt::Debug for Continuation {
             .field("order", &self.order)
             .field("reminder", &self.reminder)
             .field("on_win", &self.on_win.is_some())
+            .field("only_tools", &self.only_tools)
             .finish()
     }
 }
@@ -983,6 +1048,7 @@ impl TurnEnd {
             order,
             reminder: reminder.into(),
             on_win: None,
+            only_tools: None,
         });
     }
 
@@ -1004,29 +1070,92 @@ impl TurnEnd {
             order,
             reminder: reminder.into(),
             on_win: Some(std::sync::Arc::new(on_win)),
+            only_tools: None,
         });
     }
 
-    /// The winning reminder (smallest order), or `None` to end the turn.
-    /// Read-only — the loop calls [`TurnEnd::settle`] instead.
+    /// Ask for one **bookkeeping** step instead of another round of work: the
+    /// loop appends `reminder`, samples once with only `only_tools` offered to
+    /// the model, runs those calls, and then ends the turn whatever came back.
+    ///
+    /// A bookkeeping vote never preempts a keep-working vote: ending the turn
+    /// after bookkeeping would silently drop someone else's legitimate "not
+    /// done yet" (an active goal, a plugin). Among bookkeeping votes the
+    /// smallest order wins as usual. `on_win` runs only if this vote wins
+    /// **and** the loop then actually takes the step: [`TurnEnd::settle_round`]
+    /// hands it over as [`TurnEndRound::charge`], which the loop calls once it
+    /// knows the step is not skipped (tool missing, Stop, compact threshold).
+    pub fn bookkeep_with(
+        &mut self,
+        order: i32,
+        reminder: impl Into<String>,
+        only_tools: &[&str],
+        on_win: impl Fn() + Send + Sync + 'static,
+    ) {
+        self.continuations.push(Continuation {
+            order,
+            reminder: reminder.into(),
+            on_win: Some(std::sync::Arc::new(on_win)),
+            only_tools: Some(only_tools.iter().map(|t| t.to_string()).collect()),
+        });
+    }
+
+    /// The winning **keep-working** reminder, or `None` when the turn may end —
+    /// including when the winner is a bookkeeping vote (that one ends the
+    /// turn after a restricted step; read it with [`TurnEnd::decision_tools`]
+    /// / [`TurnEnd::settle_round`]). Read-only.
     pub fn decision(&self) -> Option<&str> {
-        self.winner().map(|c| c.reminder.as_str())
+        self.winner()
+            .filter(|c| c.only_tools.is_none())
+            .map(|c| c.reminder.as_str())
     }
 
-    /// [`TurnEnd::decision`], plus the winner's `on_win`. Consuming on purpose:
-    /// `on_win` is a side effect, and the loop is the last reader anyway, so
-    /// "settled twice, charged twice" is not a mistake anyone can make.
+    /// The winning vote's tool restriction: `Some` when the winner is a
+    /// bookkeeping vote ([`TurnEnd::bookkeep_with`]).
+    pub fn decision_tools(&self) -> Option<&[String]> {
+        self.winner().and_then(|c| c.only_tools.as_deref())
+    }
+
+    /// [`TurnEnd::decision`], plus the winner's `on_win`. Keep-working winners
+    /// only: a bookkeeping winner gives `None` and is not charged — a caller
+    /// that only knows "reminder, keep going" would otherwise continue with
+    /// every tool, which is exactly what bookkeeping exists to prevent.
+    #[deprecated(
+        note = "use `settle_round()`: it says whether the winner is a bookkeeping step (`only_tools`)"
+    )]
     pub fn settle(self) -> Option<String> {
-        let win = self.winner()?;
-        if let Some(on_win) = &win.on_win {
-            on_win();
-        }
-        Some(win.reminder.clone())
+        let round = self.settle_round()?;
+        round.only_tools.is_none().then_some(round.reminder)
     }
 
-    /// Smallest order wins; ties go to whoever voted first.
+    /// The winner and its kind: keep working, or one restricted bookkeeping
+    /// step. Consuming on purpose: `on_win` is a side effect, so "settled
+    /// twice, charged twice" cannot be written. A keep-working winner is
+    /// charged here; a bookkeeping winner's charge is handed to the caller
+    /// ([`TurnEndRound::charge`]) because the step may still be skipped.
+    pub fn settle_round(self) -> Option<TurnEndRound> {
+        let win = self.winner()?;
+        let charge = match (&win.only_tools, &win.on_win) {
+            (None, Some(on_win)) => {
+                on_win();
+                None
+            }
+            (Some(_), on_win) => on_win.clone(),
+            (None, None) => None,
+        };
+        Some(TurnEndRound {
+            reminder: win.reminder.clone(),
+            only_tools: win.only_tools.clone(),
+            charge,
+        })
+    }
+
+    /// Keep-working votes beat bookkeeping votes; within a kind the smallest
+    /// order wins, ties go to whoever voted first.
     fn winner(&self) -> Option<&Continuation> {
-        self.continuations.iter().min_by_key(|c| c.order)
+        self.continuations
+            .iter()
+            .min_by_key(|c| (c.only_tools.is_some(), c.order))
     }
 
     /// True for the user-facing session (root or any tab). Subagent turns are `child-*`.
@@ -1051,6 +1180,76 @@ mod step_start_tests {
         assert_eq!(preamble, ["rules", "memory"]);
         assert_eq!(tail, ["todo"]);
         assert_eq!(step.into_reminders(), ["rules", "memory", "todo"]);
+    }
+}
+
+#[cfg(test)]
+mod turn_end_tests {
+    use super::*;
+
+    #[test]
+    fn a_keep_working_vote_beats_a_lower_slot_bookkeeping_vote() {
+        let mut end = TurnEnd::new("ok", 0, true, false, "main");
+        end.bookkeep_with(ORDER_TURN_END_TODO, "记账", &["todo_write"], || {});
+        end.keep_working(ORDER_TURN_END_GOAL, "继续目标");
+        assert_eq!(end.decision(), Some("继续目标"));
+        assert_eq!(end.decision_tools(), None);
+        assert_eq!(
+            end.settle_round(),
+            Some(TurnEndRound::new("继续目标", None))
+        );
+    }
+
+    #[test]
+    fn a_lone_bookkeeping_vote_carries_its_tool_list() {
+        let charged = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut end = TurnEnd::new("ok", 0, true, false, "main");
+        let c = charged.clone();
+        end.bookkeep_with(ORDER_TURN_END_TODO, "记账", &["todo_write"], move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert_eq!(end.decision_tools(), Some(&["todo_write".to_string()][..]));
+        assert_eq!(end.decision(), None, "bookkeeping is not keep-working");
+        let mut round = end.settle_round().unwrap();
+        assert_eq!(
+            round,
+            TurnEndRound::new("记账", Some(vec!["todo_write".into()]))
+        );
+        assert_eq!(
+            charged.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "not charged until the loop knows the step runs"
+        );
+        round.charge();
+        round.charge();
+        assert_eq!(charged.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_keep_working_winner_is_charged_on_settle() {
+        let charged = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut end = TurnEnd::new("ok", 0, true, false, "main");
+        let c = charged.clone();
+        end.keep_working_with(ORDER_TURN_END_GOAL, "继续", move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let mut round = end.settle_round().unwrap();
+        assert_eq!(charged.load(std::sync::atomic::Ordering::SeqCst), 1);
+        round.charge();
+        assert_eq!(charged.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn the_old_settle_does_not_turn_bookkeeping_into_keep_working() {
+        let charged = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut end = TurnEnd::new("ok", 0, true, false, "main");
+        let c = charged.clone();
+        end.bookkeep_with(ORDER_TURN_END_TODO, "记账", &["todo_write"], move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert_eq!(end.settle(), None);
+        assert_eq!(charged.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
 

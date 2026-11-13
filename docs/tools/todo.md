@@ -7,4 +7,72 @@
 - **ctx**：`"todos"` + `"tools"`
 - **模型工具**：`todo_write`
 
-描述要求 `todo_write` 与下一步工作调用放在同一次回复，收尾前把做完的标 `completed`、堵住的标 `cancelled`。基座不写这条：极简等预设没有这颗工具。Grok merge/replace，含 Grok `effective_merge` 自动升级：`merge:false` 但每一项都只带已存在 id + status 时按合并处理，不会把 content 抹成 id。工具结果在列表后追加 `n/total done` 与状态提示（没有 in_progress / 多于一个 in_progress / 全部关闭）。`Todos` 另外暴露 `stats()`（TUI 折叠条）/ `revision()` / `gate_reminder()`。注册两条 waterfall：`agent/turn-end`（`ORDER_TURN_END_TODO = 10`）出文本收尾但还有未完成项时续跑一轮，每条用户消息最多 2 次（`keep_working_with` 只在真的胜出时扣），配额在主会话的 `agent/pre-step` 清零，被 live job / running subagent 托底的 `in_progress` 不算；`agent/step-start`（`ORDER_STEP_START_TODO = 10`）列表连续 6 步没动且仍有未完成项时中途提醒勾选 / 调整，每轮最多 3 次，watchdog 在 `step == 0` 重置。**注意 `"todos"` 不随子代理 isolate**，两条都靠载荷里的 `identity` 判断，只在主会话生效
+状态：`pending` / `in_progress` / `completed` / `cancelled` / `awaiting_user`。`awaiting_user` = 在等用户回答或确认：不算完成（不进 `n/total done` 的分子），也不算模型欠的活（`TodoStats::open()` 不含它），下面所有提醒都跳过它。落盘只体现在 `chat_history.jsonl` 里 `todo_write` 的参数（`"status":"awaiting_user"`）和结果（`[awaiting_user]`）上；不含它的旧文件照常读。更早的版本读到它：旧版显示成和 pending 一样（GUI 是空心圆，TUI 是 `□`）（见 CHANGELOG）。
+
+描述要求 `todo_write` 与下一步工作调用放在同一次回复；同时最多一个 `in_progress`；收尾前**如实记账**——做完的标 `completed`、等用户的标 `awaiting_user`、不做 / 堵住的标 `cancelled`，「还有未完成项」不是继续干活的理由（用户说先讨论、先看看，就停下来说清楚）。基座不写这条：极简等预设没有这颗工具。Grok merge/replace，含 Grok `effective_merge` 自动升级：`merge:false` 但每一项都只带已存在 id + status 时按合并处理，不会把 content 抹成 id。
+
+工具约束：一次写入之后会留下两个及以上 `in_progress` 的，整次拒绝（`Error: only one item may be in_progress…`，列表不动），提示先把前一项标 `completed` / `cancelled` / `awaiting_user`（同一次调用里一起交接就行）。工具结果在列表后追加 `n/total done (… in_progress, … pending[, … awaiting_user])` 与状态提示：全部 `completed` / `cancelled` 且至少一项 `completed` 时写「清单已全部完成。」（`TODO_ALL_DONE`），全部 `cancelled` 时写「清单已全部关闭。」（`TODO_ALL_CLOSED`）；只剩 `awaiting_user` 时提示等用户、用户答了再改回；没有 `in_progress` 时提示开工前再标，停下来汇报 / 讨论 / 等用户都可以，但状态要如实——**不再**要求「别带着 pending 回复用户」。每次写入的结果末尾都带一句纪律：「清单只是记录，用户的话优先：想停下来汇报、讨论或等用户都可以，状态如实标就行。」
+
+`Todos` 另外暴露 `stats()`（TUI 折叠条）/ `revision()` / `bookkeeping_reminder()` / `next_turn_reminder()`。**注意 `"todos"` 不随子代理 isolate**，下面的 waterfall 都靠载荷里的 `identity`（或 `tools/execute` 时执行 ctx 的会话身份）判断，只在本页主会话生效；分页各有一份清单。
+
+### 回合末：只记账（`agent/turn-end`，`ORDER_TURN_END_TODO = 10`）
+
+条件全部满足才投票：以文字收尾、用户没排队下一条、是本页自己的回合；还有 `pending` 或 `in_progress` 项（**有后台任务托底的项也算**——记账只改状态，不推模型去干活，没有理由把它从欠账里豁免出去）；本条用户消息里还没记过账（`MAX_TODO_BOOKKEEPING_FIRES = 1`，`agent/pre-step` 清零；只在这一步**真的要跑**时才扣——票输了、或下面说的跑不成而跳过，都不扣，也不算「记过账」）。这条配额拦的是**下一个循环**：记账步会结束这一轮，所以同一轮里不会有第二次； goal / mailbox 续跑是另一个循环，不经过 `agent/pre-step`（计数不重置），没有这道闸，同一份清单会被一轮一轮地重复记账。以下情况跳过：
+
+- 本轮调过 `ask_user_question` 或 `handoff_to_user`（`tools/execute` 上置位一个 `AtomicBool`，只认执行 ctx 的会话身份等于本页的——子代理自己问用户不算父级的；结果 `is_error` 的不算，没问到用户；经 `use_tool` 转调的也算，`tools/execute` 报的是真实工具名；新的用户消息到 `agent/pre-step` 时复位）；
+- 清单自上次记账步之后没变过，**并且**之后本页没跑过 `todo_write` 以外的任何工具（`Todos::revision()` 和上次记账步**跑完后**的值相同——这个值在下一条用户消息的 `agent/pre-step` 读，因为记账步自己可能写清单；本页 `tools/execute` 上任何别的工具都把它清掉）。模型没理会、这一轮也没干活的清单不会每轮都记一次账——每次记账都换一张工具表采样，前缀缓存会作废；而用户说「开始做」、模型改了文件却没动清单，照样记账（忘了标完成正是要抓的情况）；
+- 本页计划模式开着（`PlanMode::active()`）；
+- 未完成项全是 `awaiting_user`。
+
+投的是 `TurnEnd::bookkeep_with(…, ["todo_write"], …)`：循环追加提醒（**第一行就是 `TODO_BOOKKEEPING_SENTINEL`**，紧跟在 `<system-reminder>` 之后；后面才列欠着的项，要求按实际进度改状态、等用户的标 `awaiting_user`、不要开始新工作），**只再采一步**、这一步发给模型的工具表只有 `todo_write`（模型硬调别的工具会收到「没有执行：这一步只做 todo 记账…」的错误结果，不会真跑），这一步不跑 `agent/step-start`；跑完不管结果如何都结束这一轮，回给调用方的仍是模型上一段正文。这一步的正文**不落记录**（`Sessions::mute_llm_text`：不推给界面、`LlmStream.text` 留空，所以也不进下一轮 `model_history()`），推理和工具调用照常落——模型顺嘴的「好的」不是第二条回复。记账步的原始正文不保留：落盘的 `chat_history.jsonl`、关着的会话回放、下一轮请求里都没有它。
+
+这一步跑之前先确认跑得成，否则直接收尾、不落提醒（免得留下没有下文的孤儿提醒）：本页的工具表里没有 `todo_write`（预设可以不给）、已经按了 Stop、或上下文已到自动压缩门槛（`at_auto_threshold`，和 `Compact::maybe_auto` 同一把尺，85%）。记账步**不自动压缩**：收尾时为一次可有可无的记账压缩一遍不值得，到门槛就不记，下一轮第一步照常压缩。记账步里按 Stop：已落的工具结果照常落、没跑完的封口，但这一轮早已答完，仍按完成收尾、回上一段正文，不记成取消。记账票输给任何「继续干活」的票（`keep_working`，如目标、磁盘插件）——记账会结束这一轮，不能把别人正当的「还没完」吞掉；记账票之间照常按槽位。
+
+### 回合中提醒（`agent/step-start`，`ORDER_STEP_START_TODO = 10`）
+
+watchdog 在 `step == 0` 重置，每步最多说一件事，按顺序：
+
+1. **刚跑完测试 / 构建**：上一步的 `bash` 命令（取日志里最后一次模型输出之后的工具行）命中 `TEST_BUILD_COMMANDS`，**且这一次命令是成功的**（`is_error` 的不认——跑挂了说明还没做完，提醒「标 completed」是错的），有 `in_progress` 项，且同一步没写清单 → 「刚跑完测试 / 构建（`cmd`），「a」还是 in_progress。这项做完了就标 completed…」；
+2. **连续 `TODO_NUDGE_AFTER_STEPS = 10` 步没动清单** → 带当前清单的 stale 提醒。
+
+1、2 合计每轮最多 `MAX_TODO_NUDGES = 3` 次。没有欠着的项（只剩 `awaiting_user` 或全关）时都不说。
+
+**清单刚变过时不说**：写入的结果本身已经逐项列了状态和计数，再插一条「正在做「a」；下一项「b」」只是把模型刚拿到的结果复述一遍，白占上下文。纪律（「清单只是记录，用户的话优先」）跟着写入走，放在 `todo_write` 的返回文本里。真正要复述现状的只有 stale 提醒——那已经是 10 步之后，模型确实忘了。
+
+测试 / 构建识别（`is_test_or_build_command`）：命令按 `&&` `||` `;` `|` 换行切段，去掉段首的 `VAR=value`，段等于或以「词 + 空格」开头即算：`cargo test|nextest|build|check|clippy`、`npm test`、`npm run test|build`、`pnpm test|build`、`pnpm run test|build`、`yarn test|build`、`npx vitest|jest|tsc`、`vitest`、`jest`、`tsc`、`pytest`、`python(3) -m pytest`、`go test|build`、`make`、`cmake --build`、`ctest`、`mvn`、`gradle`、`./gradlew`、`swift build|test`、`xcodebuild`。
+
+### 下一轮开头（`agent/pre-step` → 第 0 步）
+
+用户发新消息时（本页、`enter`），若清单里还有 `pending` / `in_progress`，第 0 步追加软提醒「上轮清单还剩 N 项未完成」+ 列表，说明用户的新消息优先：改了方向就先用 `todo_write` 更新或清空（标 `cancelled`，或 `merge:false` 换新清单）。有 `awaiting_user` 项时同一条里点名它们，提醒看这条消息是否回答了——答了就改回 `pending` / `in_progress` 或直接 `completed`。清单为空或全部关闭时不说。
+
+### 插件怎么认出记账提醒
+
+记账提醒的正文第一行是 `TODO_BOOKKEEPING_SENTINEL`（`"Todo bookkeeping only — update statuses."`），紧跟在 `<system-reminder>` 之后：
+
+```
+<system-reminder>
+Todo bookkeeping only — update statuses.
+<todo-state>
+in_progress: 读代码
+pending: 改实现
+</todo-state>
+…
+```
+
+- **`session/event`**：给的是**预览**——空白折成空格、只留前 80 个字符。哨兵从第 17 个字符开始、整串 43 个字符，稳稳落在窗口里，所以按哨兵匹配得到。
+- **`agent/turn-end`**：载荷里**没有提醒正文**（只有 `text` / `rounds` / `ended_with_text` / `queued_followups` / `identity` / `main`）。想在回合末认出记账提醒，只能从 `session/event` 那条预览里认。
+
+### API 变化（相对引入记账之前的 main）
+
+`cordis-spine` / `cordis-base` 对外接口里不兼容的几处，及改法：
+
+| 变化 | 改法 |
+| --- | --- |
+| `cordis_spine::TODO_GATE_SENTINEL` 不再导出（回合末不再发「continue working」那条提醒） | 改用 `TODO_BOOKKEEPING_SENTINEL`（`"Todo bookkeeping only — update statuses."`）。含义也变了：它只要求记账、这一轮随后结束，不再代表「回合会继续」。它排在提醒正文**第一行**（紧跟 `<system-reminder>`），所以 Rhai 钩子能只靠 `session/event` 的 80 字预览认出它——见下面「插件怎么认出记账提醒」。 |
+| `Todos::gate_reminder` 改名 `Todos::bookkeeping_reminder` | 旧名保留为 `#[deprecated]`，转调新名，返回值是记账提醒正文。 |
+| `TodoStatus` 新增 `AwaitingUser`（枚举不是 `#[non_exhaustive]`） | 穷尽 `match` 要补一支：它既不算完成也不算模型欠的活；没有单独展示的地方按 `Pending` 画即可（旧版就是这么读的）。 |
+| `TodoStats` 新增公有字段 `awaiting_user` | 结构体字面量补 `awaiting_user: 0` 或 `..Default::default()`。`total()` 含它，`open()` 不含，`settled()` 不含。 |
+| `stale_reminder(steps)` 改为 `stale_reminder(steps, &TodoState)`，不再从 `tools::todo_write` 重导出 | `tools` 模块在 crate 内私有，`cordis_spine` 从没导出过它，外部代码碰不到；crate 内改走 `Todos` 的方法。 |
+| `Todos::bookkeeping_reminder()` / `Todos::gate_reminder()` 去掉了 `backing_tasks` 参数 | 记账不再豁免被后台任务托底的项（那套扣减是旧关卡留下的：旧语义是「有人托底就别催它干活」，新语义下变成「有人托底就不记它的账」）。调用方直接传空参即可。 |
+| `Todos::focus_reminder()` 移除 | 这条「正在做 / 下一项」的焦点提醒和 `todo_write` 自己的返回结果重复（结果里已逐项列了状态），改由写入结果承担；纪律句并进返回文本。 |
+| `TurnEnd::settle()` 已 `#[deprecated]`；它和 `decision()` 遇到记账胜者都回 `None` | 两者只认「继续干活」票：胜者是记账票时回 `None`（`settle()` 也不扣它的 `on_win`）——只会「拿到正文就接着跑」的旧调用方于是正常收尾，而不是带着全部工具继续干活（那正是记账要防的旧毛病）。驱动自己的循环改用 `settle_round()`：`only_tools` 为 `Some` 时只再采一步、只给这些工具、然后收尾，并且在确定这一步会跑时调 `TurnEndRound::charge()`（记账胜者的 `on_win` 推迟到这里；继续干活的胜者在 `settle_round()` 里已经扣过）。`decision_tools()` 是只读版本。新增的只有 API：`TurnEnd::bookkeep_with`、`TurnEndRound`（`new` / `charge`）。`Continuation` 是私有类型，不算。 |

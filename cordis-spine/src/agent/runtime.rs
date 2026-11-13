@@ -21,7 +21,9 @@ use crate::session::log::{Sessions, TurnEndStatus};
 use crate::tools::goal::continuation_reminder as goal_continuation_reminder;
 use crate::tools::registry::{with_exec_ctx_async, Tools};
 use crate::tools::task::Subagents;
-use cordis_base::types::{LogEvent, PreStep, PromptRequest, StepStart, TurnEnd, TurnOutcome};
+use cordis_base::types::{
+    LogEvent, PreStep, PromptRequest, StepStart, TurnEnd, TurnEndRound, TurnOutcome,
+};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -251,7 +253,7 @@ async fn grok_sample_loop(
         // turn hands control back. The loop only counts rounds and appends the
         // winning reminder — the policy lives in the handlers.
         if rounds < MAX_TURN_END_ROUNDS {
-            if let Some(reminder) = turn_end_decision(
+            if let Some(mut round) = turn_end_decision(
                 ctx,
                 sessions,
                 if ended_with_text { &last_text } else { "" },
@@ -259,8 +261,32 @@ async fn grok_sample_loop(
                 ended_with_text,
             ) {
                 rounds += 1;
-                sessions.append(LogEvent::SystemReminder(reminder));
-                continue;
+                let Some(only) = round.only_tools.clone() else {
+                    sessions.append(LogEvent::SystemReminder(round.reminder));
+                    continue;
+                };
+                // 记账：只再采一步、只给这几颗工具，然后不管结果如何都收尾。
+                // 回给调用方的仍是模型刚才那段正文——记账不是新的回复。
+                let specs = bookkeeping_specs(ctx, tools, &only);
+                // 先确认这一步跑得成再落提醒：预设里没有这颗工具、已经按了 Stop、
+                // 上下文已到自动压缩门槛（这一步不压缩），都直接收尾，不留孤儿提醒。
+                if !specs.is_empty()
+                    && !cancelled(ctx)
+                    && !crate::llm::compact::at_auto_threshold(ctx, &system)
+                {
+                    // 到这里才算数：跳过的记账不扣配额、也不算「记过账」。
+                    round.charge();
+                    sessions.append(LogEvent::SystemReminder(round.reminder));
+                    match bookkeeping_step(ctx, sessions, llm, tools, &system, specs, &only).await {
+                        Ok(()) => {}
+                        // 这一轮已经答完了：记账时按 Stop 只是不记了，不把它记成取消。
+                        Err(Error::Cancelled) if ended_with_text => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                if ended_with_text {
+                    return Ok(TurnOutcome::Text(last_text));
+                }
             }
         }
         if ended_with_text {
@@ -276,7 +302,101 @@ async fn grok_sample_loop(
     }
 }
 
-/// Run `agent/turn-end` and return the winning reminder, if any. No handlers
+/// The tools a bookkeeping step may offer: the ones on `only` that this
+/// page's model actually has (a preset can leave `todo_write` out).
+fn bookkeeping_specs(
+    ctx: &Context,
+    tools: &Tools,
+    only: &[String],
+) -> Vec<cordis_base::types::ToolSpec> {
+    tools
+        .specs_for_model_on(ctx)
+        .into_iter()
+        .filter(|spec| only.contains(&spec.name))
+        .collect()
+}
+
+/// One bookkeeping step ([`TurnEnd::bookkeep_with`]): sample once with only
+/// `specs` offered, run the calls that are on `only`, refuse the rest with
+/// an error result (the model can still emit a name it was not offered), and
+/// return. No step-start reminders and no auto-compact: this step adds no
+/// context, it only lets the model settle what it already did (the caller
+/// skips it at the compact threshold). The step's text is muted — it is not a
+/// second reply, so it stays out of the transcript and the next turn's history.
+async fn bookkeeping_step(
+    ctx: &Context,
+    sessions: &Sessions,
+    llm: &Llm,
+    tools: &Tools,
+    system: &str,
+    specs: Vec<cordis_base::types::ToolSpec>,
+    only: &[String],
+) -> Result<()> {
+    abort_if_cancelled(ctx, sessions)?;
+    let output = {
+        // 回合被整个丢掉（future drop）时也要解除静音，否则下一轮的回复全丢。
+        struct Unmute<'a>(&'a Sessions);
+        impl Drop for Unmute<'_> {
+            fn drop(&mut self) {
+                self.0.mute_llm_text(false);
+            }
+        }
+        sessions.mute_llm_text(true);
+        let _unmute = Unmute(sessions);
+        llm.stream_on(
+            ctx,
+            PromptRequest {
+                system: system.to_string(),
+                history: sessions.model_history(),
+                tools: specs,
+            },
+        )
+        .await
+    };
+    abort_if_cancelled(ctx, sessions)?;
+    for call in output.tool_calls {
+        let arguments = call.arguments.clone();
+        let result = if only.contains(&call.name) {
+            match execute_cancellable(ctx, tools, call).await {
+                Executed::Done(result) => result,
+                Executed::Stopped(result) => {
+                    sessions.append(LogEvent::ToolExecute {
+                        id: result.call_id,
+                        name: result.name,
+                        arguments,
+                        content: result.content,
+                        images: result.images,
+                        is_error: result.is_error,
+                    });
+                    sessions.seal_incomplete_tool_calls();
+                    return Err(Error::Cancelled);
+                }
+            }
+        } else {
+            cordis_base::types::ToolResult {
+                content: format!(
+                    "没有执行：这一步只做 todo 记账，只能调用 {}。",
+                    only.join(" / ")
+                ),
+                call_id: call.id,
+                name: call.name,
+                images: Vec::new(),
+                is_error: true,
+            }
+        };
+        sessions.append(LogEvent::ToolExecute {
+            id: result.call_id,
+            name: result.name,
+            arguments,
+            content: result.content,
+            images: result.images,
+            is_error: result.is_error,
+        });
+    }
+    Ok(())
+}
+
+/// Run `agent/turn-end` and return the winning vote, if any. No handlers
 /// (or no votes) means the turn may end — fail-open.
 fn turn_end_decision(
     ctx: &Context,
@@ -284,7 +404,7 @@ fn turn_end_decision(
     text: &str,
     rounds: usize,
     ended_with_text: bool,
-) -> Option<String> {
+) -> Option<TurnEndRound> {
     let end = TurnEnd::new(
         text,
         rounds,
@@ -293,7 +413,7 @@ fn turn_end_decision(
         sessions.identity(),
     );
     let seed = end.clone();
-    ctx.waterfall(TURN_END, end, move || seed).settle()
+    ctx.waterfall(TURN_END, end, move || seed).settle_round()
 }
 
 /// Run `agent/step-start` and collect what to inject before this sample as

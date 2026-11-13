@@ -1465,7 +1465,8 @@ function parseJson(s: string): unknown {
   }
 }
 
-type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
+/** `awaiting_user`：在等用户回答或确认（不算完成，也不是模型欠的活）。 */
+type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled" | "awaiting_user";
 
 /** todo_write 输出里的「- [状态] id: 内容」行；后面给模型的提示不要。 */
 function todoItems(output: string): { status: TodoStatus; text: string }[] {
@@ -1492,6 +1493,8 @@ function Todos({ items }: { items: { status: TodoStatus; text: string }[] }) {
               <CircleCheck size={14} className="shrink-0 text-[#34c759]" />
             ) : t.status === "in_progress" ? (
               <CircleDot size={14} className="shrink-0 text-accent" />
+            ) : t.status === "awaiting_user" ? (
+              <MessageCircleQuestion size={14} className="shrink-0 text-[#ff9f0a]" />
             ) : (
               <Circle size={14} className="shrink-0 text-ink-5" />
             )}
@@ -1501,7 +1504,9 @@ function Todos({ items }: { items: { status: TodoStatus; text: string }[] }) {
                   ? "text-ink-4 line-through"
                   : t.status === "in_progress"
                     ? "font-medium text-ink"
-                    : "text-ink-2"
+                    : t.status === "awaiting_user"
+                      ? "text-ink-3"
+                      : "text-ink-2"
               }
             >
               {t.text}
