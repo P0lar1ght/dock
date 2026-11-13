@@ -217,7 +217,6 @@ function Detail({
   }, [threadId, info.agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const empty = sub.thread.turns.length === 0;
-  const usage = usageOf(info);
 
   return (
     <>
@@ -228,25 +227,6 @@ function Detail({
           <RolePill text={info.role} />
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink" title={info.description}>
             {info.description}
-          </span>
-          <span className="flex shrink-0 items-center gap-1.5">
-            {usage && <ContextArc usage={usage} />}
-            {info.model && (
-              <span
-                title={`模型 ${info.model}`}
-                className="max-w-[180px] truncate rounded-full bg-[#f5f5f7] px-2 py-0.5 text-[11px] text-[#636366]"
-              >
-                {info.model}
-              </span>
-            )}
-            {info.effort && (
-              <span
-                title={`推理强度 ${info.effort}`}
-                className="shrink-0 rounded-full bg-[#f5f5f7] px-2 py-0.5 text-[11px] text-[#636366]"
-              >
-                推理 {info.effort}
-              </span>
-            )}
           </span>
           {controls}
           <span className="mx-0.5 h-4 w-px bg-line" />
@@ -469,6 +449,8 @@ export function Composer({
   const [focused, setFocused] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const sub = useSubagents(threadId).byId[agentId];
+  const info = sub?.info ?? null;
+  const usage = info ? usageOf(info) : null;
   const page = useEnv(threadId).approval === "auto" ? "自动批准" : "请求批准";
   const mode = sub?.info.approval ?? "inherit";
   const current = APPROVAL.find((a) => a.id === mode) ?? APPROVAL[0];
@@ -524,7 +506,7 @@ export function Composer({
           placeholder={ended ? "接着跟它说…（从它的对话接着来）" : "给子代理补充一句…"}
           className="thin-scroll min-w-0 resize-none bg-transparent text-[15px] leading-snug text-ink outline-none placeholder:text-ink-5 select-text"
         />
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
           <MenuButton
             title="审批模式（只改这个子代理）"
             align="left"
@@ -541,6 +523,24 @@ export function Composer({
               </>
             }
           />
+          {/* 占用 / 模型 / 推理强度：跟主会话底栏同一排，子代理自己的那份。 */}
+          <span className="flex min-w-0 flex-1 items-center gap-1.5">
+            {usage && <ContextArc usage={usage} />}
+            {info.model && (
+              <span
+                title={`模型 ${info.model}`}
+                className="max-w-[150px] truncate rounded-full bg-[#f5f5f7] px-2 py-0.5 text-[11px] text-ink-3"
+              >
+                {info.model}
+              </span>
+            )}
+            <span
+              title={`推理强度 ${info.effort || "默认"}`}
+              className="shrink-0 rounded-full bg-[#f5f5f7] px-2 py-0.5 text-[11px] text-ink-3"
+            >
+              推理 {info.effort || "默认"}
+            </span>
+          </span>
           <button
             type="button"
             aria-label="发送"
