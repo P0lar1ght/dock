@@ -39,6 +39,7 @@ pub trait SubagentBackend: Send + Sync + 'static {
         &self,
         subagent_type: &str,
         parent_session_id: &str,
+        caller_ctx: &cordis::Context,
     ) -> SubagentValidateTypeOutcome;
 }
 
@@ -243,6 +244,7 @@ impl SubagentBackend for ChannelBackend {
         &self,
         subagent_type: &str,
         parent_session_id: &str,
+        caller_ctx: &cordis::Context,
     ) -> SubagentValidateTypeOutcome {
         let parent_session_id = self
             .parent_session_id
@@ -254,6 +256,7 @@ impl SubagentBackend for ChannelBackend {
             .send(SubagentEvent::ValidateType(SubagentValidateTypeRequest {
                 subagent_type: subagent_type.to_string(),
                 parent_session_id: parent_session_id.to_string(),
+                caller_ctx: caller_ctx.clone(),
                 respond_to,
             }))
             .is_err()

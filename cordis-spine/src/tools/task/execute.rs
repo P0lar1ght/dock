@@ -148,6 +148,7 @@ pub(super) async fn run_task(ctx: &cordis::Context, sub: &Subagents, call: ToolC
     spawn_child(
         sub,
         call,
+        &caller,
         input.prompt,
         description,
         subagent_type,
@@ -177,6 +178,7 @@ fn caller_session_id() -> String {
 async fn spawn_child(
     sub: &Subagents,
     call: ToolCall,
+    caller_ctx: &cordis::Context,
     prompt: String,
     description: String,
     subagent_type: String,
@@ -187,7 +189,7 @@ async fn spawn_child(
     let parent_session_id = caller_session_id();
     match sub
         .backend()
-        .validate_type(&subagent_type, &parent_session_id)
+        .validate_type(&subagent_type, &parent_session_id, caller_ctx)
         .await
     {
         SubagentValidateTypeOutcome::Ok => {}

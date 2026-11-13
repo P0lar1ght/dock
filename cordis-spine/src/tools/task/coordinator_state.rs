@@ -58,6 +58,7 @@ pub trait ChildRunner: 'static {
         &self,
         subagent_type: String,
         parent_session_id: String,
+        caller_ctx: cordis::Context,
     ) -> Self::ValidateFuture;
 
     fn on_completed(&self, completion: ChildCompletion);
