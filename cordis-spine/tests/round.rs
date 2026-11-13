@@ -316,7 +316,7 @@ async fn cordis_inspect_services_covers_everything_install_app_mounts() {
     // 默认 code preset 不含 cordis_*，走工具执行会被允许名单挡掉。
     root.require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
         .unwrap()
-        .apply(cordis_spine::CORDIS_PRESET_ID)
+        .pin(cordis_spine::CORDIS_PRESET_ID)
         .unwrap();
     let services = root
         .require::<cordis_spine::Tools>(TOOLS)
@@ -379,6 +379,8 @@ async fn search_tool_names_every_builtin_on_demand_tool() {
     let presets = root
         .require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
         .unwrap();
+    // 这套测试共用一个 DOCK_HOME：别的测试切过预设，当前预设未必是默认那个。
+    presets.pin("code").unwrap();
     let sampler = tools.specs_for_model();
     let desc = &sampler
         .iter()
@@ -418,6 +420,11 @@ async fn warden_keeps_its_subagent_tools_resident() {
     let root = Context::new();
     cordis_spine::install_app(&root).await.unwrap();
     let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
+    // 同上：显式挑默认预设，不吃别的测试留下的残留（pin 不写盘）。
+    root.require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
+        .unwrap()
+        .pin("code")
+        .unwrap();
     let model = |tools: &cordis_spine::Tools| -> Vec<String> {
         tools
             .specs_for_model()
@@ -429,7 +436,7 @@ async fn warden_keeps_its_subagent_tools_resident() {
     assert!(!before.iter().any(|n| n == "list_agents"), "{before:?}");
     root.require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
         .unwrap()
-        .apply("warden")
+        .pin("warden")
         .unwrap();
     let after = model(&tools);
     for name in ["list_agents", "interrupt_agent"] {
@@ -448,6 +455,11 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
     let root = Context::new();
     cordis_spine::install_app(&root).await.unwrap();
     let tools = root.require::<cordis_spine::Tools>(TOOLS).unwrap();
+    // 同上：工具表按当前预设过滤，别吃别的测试留下的残留。
+    root.require::<cordis_spine::AgentPresets>(cordis_spine::AGENT_PRESETS)
+        .unwrap()
+        .pin("code")
+        .unwrap();
     let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
     for need in [
         "web_fetch",
@@ -2876,7 +2888,7 @@ async fn main_session_catalogs_follow_the_preset_allowlist() {
         ("minimal", false, false),
         ("warden", false, true),
     ] {
-        presets.apply(mode).unwrap();
+        presets.pin(mode).unwrap();
         let assembly = book.assemble();
         let ids: Vec<String> = assembly.inspect().into_iter().map(|p| p.id).collect();
         assert!(
