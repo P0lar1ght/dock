@@ -130,6 +130,10 @@ export interface SubagentInfo {
   readOnly: boolean;
   /** 它自己那份上下文的占用。没算出来（没跑过一步 / 没有模型配置）时是 `null`。 */
   context: SubagentContext | null;
+  /** 它实际在用的模型（workflow 的 `agent(model:)` 覆写优先，否则父会话的）。 */
+  model: string | null;
+  /** 它实际在用的推理强度。 */
+  effort: string | null;
 }
 
 /** 一个子代理的上下文占用。算法跟主会话同一套。 */
@@ -177,6 +181,8 @@ export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null
       num(c.window) > 0
         ? { used: num(c.used), window: num(c.window), compactAt: num(c.compactAt) }
         : null,
+    model: str(raw.model) || null,
+    effort: str(raw.effort) || null,
   };
 }
 

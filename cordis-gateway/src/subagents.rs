@@ -48,6 +48,9 @@ pub fn info(snap: &SubagentSnap, events: &[LogEvent], role: Option<String>) -> V
         "output": cap(snap.output.trim(), OUTPUT_CHARS),
         // 显式带上：和只在盘上的 `persisted: true` 对称，客户端不用靠「缺省即 false」。
         "persisted": false,
+        // 它实际在用的模型与推理强度（workflow 的 `agent(model:)` 覆写优先）。
+        "model": snap.model,
+        "effort": snap.effort,
     });
     if snap.running() {
         if let Some(activity) = activity(events) {
@@ -261,6 +264,8 @@ mod tests {
             settled_at: None,
             started_wall: std::time::SystemTime::UNIX_EPOCH,
             context,
+            model: None,
+            effort: None,
         }
     }
 
@@ -278,6 +283,16 @@ mod tests {
         assert_eq!(v["context"]["used"], json!(1200));
         assert_eq!(v["context"]["window"], json!(128_000));
         assert_eq!(v["context"]["compactAt"], json!(108_800));
+    }
+
+    #[test]
+    fn the_agent_carries_its_model_and_effort() {
+        let mut snap = snap(None);
+        snap.model = Some("test-model".into());
+        snap.effort = Some("high".into());
+        let v = info(&snap, &[], None);
+        assert_eq!(v["model"], json!("test-model"));
+        assert_eq!(v["effort"], json!("high"));
     }
 
     #[test]

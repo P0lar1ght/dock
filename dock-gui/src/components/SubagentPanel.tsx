@@ -229,7 +229,25 @@ function Detail({
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink" title={info.description}>
             {info.description}
           </span>
-          {usage && <ContextArc usage={usage} />}
+          <span className="flex shrink-0 items-center gap-1.5">
+            {usage && <ContextArc usage={usage} />}
+            {info.model && (
+              <span
+                title={`模型 ${info.model}`}
+                className="max-w-[180px] truncate rounded-full bg-[#f5f5f7] px-2 py-0.5 text-[11px] text-[#636366]"
+              >
+                {info.model}
+              </span>
+            )}
+            {info.effort && (
+              <span
+                title={`推理强度 ${info.effort}`}
+                className="shrink-0 rounded-full bg-[#f5f5f7] px-2 py-0.5 text-[11px] text-[#636366]"
+              >
+                推理 {info.effort}
+              </span>
+            )}
+          </span>
           {controls}
           <span className="mx-0.5 h-4 w-px bg-line" />
           {close}

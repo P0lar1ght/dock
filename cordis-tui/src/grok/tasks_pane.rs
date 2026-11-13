@@ -892,6 +892,8 @@ mod tests {
             settled_at: None,
             started_wall: std::time::SystemTime::now(),
             context: None,
+            model: None,
+            effort: None,
         };
         let entry = TaskEntry::from_subagent(&snap, Some("岑"));
         match entry {
@@ -928,6 +930,8 @@ mod tests {
                 window: 128_000,
                 compact_at: 108_800,
             }),
+            model: None,
+            effort: None,
         };
         let entry = TaskEntry::from_subagent(&snap, Some("岑"));
         let text = entry
@@ -957,6 +961,8 @@ mod tests {
             settled_at: None,
             started_wall: std::time::SystemTime::now(),
             context: None,
+            model: None,
+            effort: None,
         };
         let entry = TaskEntry::from_subagent(&snap, Some("岑"));
         let text = entry

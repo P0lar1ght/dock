@@ -57,6 +57,9 @@ pub(super) struct ChildSlot {
     pub context: Mutex<Option<crate::prompt::context_usage::ContextUsage>>,
     /// 它的固定前缀（系统提示 + 工具表 + 窗口）：占用重算要靠它。
     pub context_base: Mutex<Option<crate::prompt::context_usage::ContextBase>>,
+    /// 它实际在用的模型与推理强度。
+    pub model: Mutex<Option<String>>,
+    pub effort: Mutex<Option<String>>,
     /// 上次推给前端的占用（推送的节流基准）。
     pub context_pushed: Mutex<Option<crate::prompt::context_usage::ContextUsage>>,
     /// 派出它的那次 `task` 调用（工具调用 id）。客户端靠它把卡片和子代理对上。
@@ -213,6 +216,15 @@ impl ChildStore {
         let slot = self.get(id)?;
         let guard = slot.sessions.lock().unwrap();
         guard.clone()
+    }
+
+    /// 记下这个孩子实际在用的模型与推理强度。
+    pub fn set_model(&self, id: &str, model: Option<String>, effort: Option<String>) {
+        let Some(slot) = self.get(id) else {
+            return;
+        };
+        *slot.model.lock().unwrap() = model;
+        *slot.effort.lock().unwrap() = effort;
     }
 
     /// 记下这个孩子的固定前缀。
@@ -493,6 +505,8 @@ impl ChildStore {
             keep_alive: AtomicBool::new(keep_alive),
             context: Mutex::new(None),
             context_base: Mutex::new(None),
+            model: Mutex::new(None),
+            effort: Mutex::new(None),
             context_pushed: Mutex::new(None),
             tool_call_id: Mutex::new(None),
             transcript_dir: Mutex::new(None),
@@ -967,6 +981,8 @@ pub(super) fn snap(id: &str, s: &ChildSlot) -> SubagentSnap {
         settled_at: *s.settled_at.lock().unwrap(),
         started_wall: *s.started_wall.lock().unwrap(),
         context: *s.context.lock().unwrap(),
+        model: s.model.lock().unwrap().clone(),
+        effort: s.effort.lock().unwrap().clone(),
     }
 }
 

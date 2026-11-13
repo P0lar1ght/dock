@@ -11,8 +11,8 @@ use cordis_spine::{
     agent_loop, blocked_tool_message, install_without_llm, tool_task, turn, AgentPresets,
     BoxFuture, ChildLogEvent, Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions,
     StreamDelta, SubagentChanged, Subagents, TaskConfig, ToolCall, Tools, AGENT_LOOP,
-    AGENT_PRESETS, COMPACT, LLM, SESSIONS, SESSION_CHILD_EVENT, STEER_REMINDER, SUBAGENTS,
-    SUBAGENT_CHANGED, TOOLS,
+    AGENT_PRESETS, COMPACT, LLM, SESSIONS, SESSION_CHILD_EVENT, SETTINGS, STEER_REMINDER,
+    SUBAGENTS, SUBAGENT_CHANGED, TOOLS,
 };
 use tokio::sync::Notify;
 
@@ -362,6 +362,44 @@ async fn a_child_reports_its_own_context_usage() {
     assert_eq!(usage.used, expected, "占用 = 固定前缀 + 历史估算");
     assert_eq!(usage.window, 128_000, "窗口取模型配置的值");
     assert_eq!(usage.compact_at, 108_800, "门槛是窗口的 85%");
+}
+
+/// 子代理那行要带它实际在用的模型与推理强度：父会话的 settings，workflow 的
+/// `agent(model:)` 覆写优先。
+#[tokio::test]
+async fn a_child_reports_its_model_and_effort() {
+    let h = boot(Arc::new(LastUser)).await;
+    let settings = cordis_spine::AppSettings::new("test-model");
+    settings.set_effort("high");
+    h.root.provide(SETTINGS, settings).unwrap();
+    let home = &h._home;
+    std::fs::create_dir_all(home.path().join("solo").join("agents")).unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agent.yml"),
+        "name: 独\ntools:\n  - task\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("solo").join("agents").join("obs.yml"),
+        "name: 观察\ntools:\n  - task\n",
+    )
+    .unwrap();
+    let presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap();
+    presets.resync();
+    presets.apply("solo").unwrap();
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let id = spawn_bg(&tools, "hello child", "obs").await;
+    wait_idle(&sub, &id).await;
+
+    let snap = sub.snapshot(&id).unwrap();
+    assert_eq!(
+        snap.model.as_deref(),
+        Some("test-model"),
+        "跟着父会话的模型"
+    );
+    assert_eq!(snap.effort.as_deref(), Some("high"), "跟着父会话的推理强度");
 }
 
 /// 子代理压缩之后，占用确实变小，而且推了一次 `subagent/updated`。

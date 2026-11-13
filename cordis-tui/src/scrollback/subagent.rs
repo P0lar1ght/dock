@@ -136,6 +136,18 @@ pub fn lines(
             theme.muted()
         },
     ));
+    // 它实际在用的模型与推理强度（workflow 的 `agent(model:)` 覆写优先）。
+    if let Some(snap) = live.as_ref().and_then(|l| l.snap) {
+        if let Some(model) = snap.model.as_deref() {
+            spans.push(Span::styled(format!(" \u{00b7} {model}"), theme.muted()));
+        }
+        if let Some(effort) = snap.effort.as_deref() {
+            spans.push(Span::styled(
+                format!(" \u{00b7} 推理 {effort}"),
+                theme.muted(),
+            ));
+        }
+    }
     if let Some(act) = activity {
         spans.push(Span::styled(format!(" \u{00b7} {act}"), theme.muted()));
     }
@@ -312,6 +324,39 @@ mod tests {
         assert!(!opens_child_overlay("bash"));
     }
 
+    /// 子代理卡片抬头要带它实际在用的模型与推理强度。
+    #[test]
+    fn subagent_card_shows_its_model_and_effort() {
+        let theme = Theme::current();
+        let snap = SubagentSnap {
+            id: "k".into(),
+            description: "观察".into(),
+            subagent_type: "guan".into(),
+            done: false,
+            idle: true,
+            cancelled: false,
+            output: "结论".into(),
+            started_at: std::time::Instant::now(),
+            parent: String::new(),
+            tool_call_id: None,
+            failed: false,
+            settled_at: None,
+            started_wall: std::time::SystemTime::now(),
+            context: None,
+            model: Some("test-model".into()),
+            effort: Some("high".into()),
+        };
+        let live = CardLive {
+            snap: Some(&snap),
+            events: &[],
+            role: Some("观".into()),
+        };
+        let lines = lines("{}", "Subagent completed.\n", Some(live), &theme, 120);
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header.contains("test-model"), "抬头要有模型：{header}");
+        assert!(header.contains("high"), "抬头要有推理强度：{header}");
+    }
+
     #[test]
     fn subagent_idle_preview_is_plain_one_line() {
         let theme = Theme::current();
@@ -330,6 +375,8 @@ mod tests {
             settled_at: None,
             started_wall: std::time::SystemTime::now(),
             context: None,
+            model: None,
+            effort: None,
         };
         let live = CardLive {
             snap: Some(&snap),

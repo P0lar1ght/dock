@@ -101,6 +101,10 @@ pub struct SubagentSnap {
     pub started_wall: std::time::SystemTime,
     /// 上下文占用（`None` = 还没算出来：还没跑过一步，或这个会话没有模型配置）。
     pub context: Option<crate::prompt::context_usage::ContextUsage>,
+    /// 它实际在用的模型（workflow 的 `agent(model:)` 覆写优先，否则父会话的）。
+    pub model: Option<String>,
+    /// 它实际在用的推理强度（同上）。
+    pub effort: Option<String>,
 }
 
 impl SubagentSnap {
@@ -265,6 +269,8 @@ impl Subagents {
                             idle: false,
                             cancelled: false,
                             context: None,
+                            model: None,
+                            effort: None,
                             output: format!(
                                 "Task or subagent {id} not found. No background tasks or subagents exist in this session."
                             ),

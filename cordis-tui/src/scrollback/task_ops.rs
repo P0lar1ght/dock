@@ -412,6 +412,8 @@ mod tests {
             settled_at: None,
             started_wall: std::time::SystemTime::now(),
             context: None,
+            model: None,
+            effort: None,
         }
     }
 

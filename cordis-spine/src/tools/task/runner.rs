@@ -272,6 +272,24 @@ async fn run_dock_child(
             }
         }
     }
+    // 它实际在用的模型与推理强度：采样覆写（workflow 的 `agent(model:)`）优先，
+    // 否则跟父会话走（见 `llm/http` 里选模型的那段）。
+    let over = child.get::<crate::host::settings::ModelOverride>(MODEL_OVERRIDE);
+    let settings = child.get::<crate::host::settings::AppSettings>(crate::names::SETTINGS);
+    let model = over.as_ref().and_then(|o| o.model.clone()).or_else(|| {
+        settings
+            .as_ref()
+            .map(|s| s.model())
+            .filter(|m| !m.is_empty())
+    });
+    let effort = over.as_ref().and_then(|o| o.effort.clone()).or_else(|| {
+        settings
+            .as_ref()
+            .map(|s| s.effort())
+            .filter(|e| !e.is_empty())
+    });
+    store.set_model(&id, model, effort);
+
     let mut preset = def.to_preset(&typ);
     // 角色没写按需名单就继承所属预设的。
     if preset.on_demand_tools.is_none() {

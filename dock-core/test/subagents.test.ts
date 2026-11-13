@@ -178,3 +178,18 @@ test('window 为 0 的 context 当作没有', () => {
   );
   assert.equal(state.byId.kid.info.context, null);
 });
+
+test('子代理的模型与推理强度跟着推送走', () => {
+  const state = reduceSubagents(
+    EMPTY_SUBAGENTS,
+    updated('running', { model: 'test-model', effort: 'high' }),
+  );
+  assert.equal(state.byId.kid.info.model, 'test-model');
+  assert.equal(state.byId.kid.info.effort, 'high');
+});
+
+test('没带模型时是 null', () => {
+  const state = reduceSubagents(EMPTY_SUBAGENTS, updated('running'));
+  assert.equal(state.byId.kid.info.model, null);
+  assert.equal(state.byId.kid.info.effort, null);
+});
