@@ -649,28 +649,19 @@ fn missing_endpoint_error(model: &str, in_catalog: bool, backend: ApiBackend) ->
 }
 
 fn estimate_prompt_tokens(request: &PromptRequest) -> u64 {
-    let mut ascii = 0u64;
-    let mut other = 0u64;
-    let bump = |s: &str, ascii: &mut u64, other: &mut u64| {
-        for c in s.chars() {
-            if c.is_ascii() {
-                *ascii += 1;
-            } else {
-                *other += 1;
-            }
-        }
-    };
-    bump(&request.system, &mut ascii, &mut other);
+    // 与上下文面板同一口径：每段各自估再相加（见 `estimate_text_tokens`）。
+    let est = crate::llm::compact::estimate_text_tokens;
+    let mut n = est(&request.system);
     for event in &request.history {
-        match event {
-            LogEvent::User(t) => bump(&t.text, &mut ascii, &mut other),
-            LogEvent::Prompt(t) | LogEvent::SystemReminder(t) => bump(t, &mut ascii, &mut other),
-            LogEvent::LlmStream(out) => bump(&out.text, &mut ascii, &mut other),
-            LogEvent::ToolExecute { content, .. } => bump(content, &mut ascii, &mut other),
-            LogEvent::PreStep | LogEvent::Notice { .. } | LogEvent::TurnEnd(_) => {}
-        }
+        n += match event {
+            LogEvent::User(t) => est(&t.text),
+            LogEvent::Prompt(t) | LogEvent::SystemReminder(t) => est(t),
+            LogEvent::LlmStream(out) => est(&out.text),
+            LogEvent::ToolExecute { content, .. } => est(content),
+            LogEvent::PreStep | LogEvent::Notice { .. } | LogEvent::TurnEnd(_) => 0,
+        };
     }
-    other + ascii.saturating_add(3) / 4
+    n
 }
 
 fn messages(request: &PromptRequest, user_images: &[Vec<UserImage>], vision: bool) -> Vec<Value> {

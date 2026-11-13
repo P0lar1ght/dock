@@ -9,8 +9,8 @@ use cordis::Context;
 
 use crate::host::settings::AppSettings;
 use crate::llm::compact::{
-    estimate_context_tokens, estimate_reasoning, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
-    VISIBLE_NOTICE,
+    estimate_context_tokens, estimate_reasoning, estimate_text_tokens,
+    DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, VISIBLE_NOTICE,
 };
 use crate::names::{MEMORY, SESSIONS, SETTINGS, SKILLS, SYSTEM_PROMPT, TOOLS};
 use crate::prompt::assemble::{PromptAssembly, SystemPrompt};
@@ -212,7 +212,7 @@ struct Measure {
 }
 
 fn measure(ctx: &Context, system: &str) -> Measure {
-    let system_tokens = estimate_text(system);
+    let system_tokens = estimate_text_tokens(system);
     let sessions = ctx.get::<Sessions>(SESSIONS);
     let (history, reasoning, images, anchor) = match sessions.as_ref() {
         Some(sessions) => {
@@ -347,7 +347,7 @@ fn system_detail(assembly: &PromptAssembly, snap: &ContextSnapshot) -> Occupancy
         .into_iter()
         .map(|p| DetailRow {
             label: section_label(&p.id),
-            tokens: Some(estimate_text(&p.body)),
+            tokens: Some(estimate_text_tokens(&p.body)),
             note: None,
         })
         .collect();
@@ -399,7 +399,7 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
     for event in &history {
         match event {
             LogEvent::User(t) if !t.trim().is_empty() => {
-                let tok = estimate_text(t);
+                let tok = estimate_text_tokens(t);
                 user_n += 1;
                 user_tok += tok;
                 rows.push(DetailRow {
@@ -412,11 +412,11 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
                 if out.text.trim().is_empty() && out.tool_calls.is_empty() {
                     continue;
                 }
-                let mut tok = estimate_text(&out.text);
+                let mut tok = estimate_text_tokens(&out.text);
                 for call in &out.tool_calls {
                     tok = tok
-                        .saturating_add(estimate_text(&call.name))
-                        .saturating_add(estimate_text(&call.arguments));
+                        .saturating_add(estimate_text_tokens(&call.name))
+                        .saturating_add(estimate_text_tokens(&call.arguments));
                 }
                 asst_n += 1;
                 asst_tok += tok;
@@ -435,7 +435,7 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
             }
             // 工具结果只带 content 发给上游，参数已算在助手那条里（#176）。
             LogEvent::ToolExecute { name, content, .. } => {
-                let tok = estimate_text(content);
+                let tok = estimate_text_tokens(content);
                 tool_n += 1;
                 tool_tok += tok;
                 if name == crate::tools::mcp::SEARCH_TOOL_NAME {
@@ -449,7 +449,7 @@ fn messages_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
                 });
             }
             LogEvent::SystemReminder(t) => {
-                let tok = estimate_text(t);
+                let tok = estimate_text_tokens(t);
                 remind_n += 1;
                 remind_tok += tok;
                 rows.push(DetailRow {
@@ -595,9 +595,9 @@ fn tools_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
     let mut rows: Vec<DetailRow> = builtin_specs
         .into_iter()
         .map(|s| {
-            let tok = estimate_text(&s.name)
-                .saturating_add(estimate_text(&s.description))
-                .saturating_add(estimate_text(&s.parameters_json));
+            let tok = estimate_text_tokens(&s.name)
+                .saturating_add(estimate_text_tokens(&s.description))
+                .saturating_add(estimate_text_tokens(&s.parameters_json));
             DetailRow {
                 label: s.name,
                 tokens: Some(tok),
@@ -744,7 +744,7 @@ fn workflows_detail(snap: &ContextSnapshot) -> OccupancyDetail {
             text.push_str(desc);
             DetailRow {
                 label: name.clone(),
-                tokens: Some(estimate_text(&text)),
+                tokens: Some(estimate_text_tokens(&text)),
                 note: {
                     let d = desc.trim();
                     if d.is_empty() {
@@ -784,7 +784,7 @@ fn instructions_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail
             let raw = std::fs::read_to_string(&path).ok()?;
             (!raw.trim().is_empty()).then(|| DetailRow {
                 label: label.to_string(),
-                tokens: Some(estimate_text(&raw)),
+                tokens: Some(estimate_text_tokens(&raw)),
                 note: Some(path.display().to_string()),
             })
         })
@@ -816,7 +816,7 @@ fn memory_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         let global_manifest = root.global.root.join("MEMORY.md");
         let global_tokens = std::fs::read_to_string(&global_manifest)
             .ok()
-            .map(|s| estimate_text(&s));
+            .map(|s| estimate_text_tokens(&s));
         rows.push(DetailRow {
             label: "全局记忆 (Global)".into(),
             tokens: global_tokens,
@@ -826,7 +826,7 @@ fn memory_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
         let ws_manifest = root.workspace.root.join("MEMORY.md");
         let ws_tokens = std::fs::read_to_string(&ws_manifest)
             .ok()
-            .map(|s| estimate_text(&s));
+            .map(|s| estimate_text_tokens(&s));
         rows.push(DetailRow {
             label: "工作区记忆 (Workspace)".into(),
             tokens: ws_tokens,
@@ -891,7 +891,7 @@ pub fn skill_item_detail(ctx: &Context, name: &str) -> Option<OccupancyDetail> {
     let skills = ctx.get::<crate::tools::skills::Skills>(SKILLS)?;
     let skill = skills.get(name)?;
     let raw = std::fs::read_to_string(&skill.path).unwrap_or_default();
-    let tokens = estimate_text(&raw);
+    let tokens = estimate_text_tokens(&raw);
     let mut rows = vec![
         DetailRow {
             label: "来源".into(),
@@ -938,7 +938,7 @@ pub fn skill_item_detail(ctx: &Context, name: &str) -> Option<OccupancyDetail> {
 /// 单个工作流的下钻明细：来源、文件路径、Token 估计、以及 Rhai 脚本的正文全文。
 pub fn workflow_item_detail(_ctx: &Context, name: &str) -> Option<OccupancyDetail> {
     let (info, script) = crate::tools::workflow::workflow_detail(name)?;
-    let tokens = estimate_text(&script);
+    let tokens = estimate_text_tokens(&script);
     let mut rows = vec![DetailRow {
         label: "来源".into(),
         tokens: None,
@@ -1020,7 +1020,7 @@ fn extra_categories(ctx: &Context, _assembly: &PromptAssembly) -> Vec<ContextCat
     if skills.is_some() || skills_injected.is_some() {
         let tokens = skills_injected
             .as_ref()
-            .map(|copy| estimate_text(copy))
+            .map(|copy| estimate_text_tokens(copy))
             .unwrap_or_else(|| skill_rows.iter().map(|(_, t, _)| *t).sum());
         let n = skill_rows.len().max(catalog_n);
         let wanted = crate::prompt::listing::wants_listing(ctx, "skill");
@@ -1042,7 +1042,7 @@ fn extra_categories(ctx: &Context, _assembly: &PromptAssembly) -> Vec<ContextCat
     if let Some(copy) = crate::prompt::project_instructions::injected_copy(ctx) {
         rows.push(ContextCategory {
             label: OccupancyKind::Instructions.title().into(),
-            tokens: estimate_text(&copy),
+            tokens: estimate_text_tokens(&copy),
             detail: Some(format!(
                 "{} · 已计入消息",
                 crate::prompt::project_instructions::INSTRUCTIONS_FILE
@@ -1055,12 +1055,12 @@ fn extra_categories(ctx: &Context, _assembly: &PromptAssembly) -> Vec<ContextCat
         let injected = crate::tools::memory::injected_copy(ctx);
         if mem.enabled() || injected.is_some() {
             let (tokens, note) = if let Some(copy) = injected {
-                (estimate_text(&copy), "MEMORY.md · 已计入消息")
+                (estimate_text_tokens(&copy), "MEMORY.md · 已计入消息")
             } else {
                 let root = mem.root();
                 let _ = root.ensure_layout();
                 let body = crate::tools::memory::render_reminder_body(&root);
-                (estimate_text(&body), "MEMORY.md · 待轮次注入消息")
+                (estimate_text_tokens(&body), "MEMORY.md · 待轮次注入消息")
             };
             rows.push(ContextCategory {
                 label: OccupancyKind::Memory.title().into(),
@@ -1074,7 +1074,7 @@ fn extra_categories(ctx: &Context, _assembly: &PromptAssembly) -> Vec<ContextCat
     if !workflows.is_empty() || workflows_injected.is_some() {
         let tokens = workflows_injected
             .as_ref()
-            .map(|copy| estimate_text(copy))
+            .map(|copy| estimate_text_tokens(copy))
             .unwrap_or_else(|| {
                 let mut text = String::new();
                 for (name, desc) in &workflows {
@@ -1083,7 +1083,7 @@ fn extra_categories(ctx: &Context, _assembly: &PromptAssembly) -> Vec<ContextCat
                     text.push_str(desc);
                     text.push('\n');
                 }
-                estimate_text(&text)
+                estimate_text_tokens(&text)
             });
         let wanted =
             crate::prompt::listing::wants_listing(ctx, crate::tools::workflow::WORKFLOW_TOOL_NAME);
@@ -1140,9 +1140,9 @@ fn estimate_tool_definitions(specs: &[ToolSpec]) -> u64 {
     specs
         .iter()
         .map(|s| {
-            estimate_text(&s.name)
-                .saturating_add(estimate_text(&s.description))
-                .saturating_add(estimate_text(&s.parameters_json))
+            estimate_text_tokens(&s.name)
+                .saturating_add(estimate_text_tokens(&s.description))
+                .saturating_add(estimate_text_tokens(&s.parameters_json))
         })
         .sum()
 }
@@ -1167,19 +1167,6 @@ fn partition_model_specs(ctx: &Context) -> (Vec<ToolSpec>, Vec<ToolSpec>, Vec<To
         }
     }
     (builtin, mcp, deferred)
-}
-
-fn estimate_text(text: &str) -> u64 {
-    let mut ascii = 0u64;
-    let mut other = 0u64;
-    for c in text.chars() {
-        if c.is_ascii() {
-            ascii += 1;
-        } else {
-            other += 1;
-        }
-    }
-    other + ascii.saturating_add(3) / 4
 }
 
 fn model_label(ctx: &Context) -> String {
@@ -1219,10 +1206,13 @@ mod tests {
 
     #[test]
     fn ascii_and_cjk_estimates() {
-        assert_eq!(estimate_text(""), 0);
-        assert_eq!(estimate_text("abcd"), 1);
-        assert_eq!(estimate_text("中"), 1);
-        assert_eq!(estimate_text("中文ab"), 2 + 2u64.saturating_add(3) / 4);
+        assert_eq!(estimate_text_tokens(""), 0);
+        assert_eq!(estimate_text_tokens("abcd"), 1);
+        assert_eq!(estimate_text_tokens("中"), 1);
+        assert_eq!(
+            estimate_text_tokens("中文ab"),
+            2 + 2u64.saturating_add(3) / 4
+        );
     }
 
     #[test]

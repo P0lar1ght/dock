@@ -484,7 +484,7 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             let event = &*tagged.event;
             let thread_id = page.as_ref().map(|p| p.thread_id());
             with_transcript(&for_session, &tagged.page, thread_id, |t| {
-                t.ingest_log_with(event.clone())
+                t.ingest_page_event(event.clone(), tagged.preamble)
             });
         });
     listen_subagents(inner);

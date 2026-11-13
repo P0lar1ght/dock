@@ -36,6 +36,7 @@ use cordis_base::usage::TokenUsage;
 use crate::tools::memory::maybe_flush_before_compact;
 use history::{build_compacted_events, prepare_conversation_for_summarization};
 
+pub use history::estimate_text_tokens;
 pub(crate) use history::{estimate_context_tokens, estimate_reasoning, VISIBLE_NOTICE};
 use prompt::{build_summary_prompt_kind, SummaryPromptKind};
 use summary::is_degenerate_summary;

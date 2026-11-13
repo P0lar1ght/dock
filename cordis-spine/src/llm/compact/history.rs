@@ -134,24 +134,24 @@ pub fn build_compacted_events(history: &[LogEvent], summary: &str) -> Vec<LogEve
 }
 
 pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
-    let mut n = estimate_text(system);
+    let mut n = estimate_text_tokens(system);
     for event in history {
         match event {
-            LogEvent::User(t) => n += estimate_text(&t.text),
-            LogEvent::SystemReminder(t) => n += estimate_text(t),
+            LogEvent::User(t) => n += estimate_text_tokens(&t.text),
+            LogEvent::SystemReminder(t) => n += estimate_text_tokens(t),
             LogEvent::LlmStream(out) => {
-                n += estimate_text(&out.text);
+                n += estimate_text_tokens(&out.text);
                 n += estimate_reasoning(out);
                 for call in &out.tool_calls {
-                    n += estimate_text(&call.name);
-                    n += estimate_text(&call.arguments);
+                    n += estimate_text_tokens(&call.name);
+                    n += estimate_text_tokens(&call.arguments);
                 }
             }
             // 工具结果发给上游的只有 `tool_call_id` + content（Messages / Responses /
             // chat 都把名字和参数 `..` 掉了）；参数已在上面 assistant 的 tool_calls 里
             // 算过。原先这里再算一遍，写大文件的会话估算能虚高近一半（#176）。
             LogEvent::ToolExecute { content, .. } => {
-                n += estimate_text(content);
+                n += estimate_text_tokens(content);
             }
             LogEvent::PreStep
             | LogEvent::Prompt(_)
@@ -186,7 +186,7 @@ pub fn estimate_reasoning(out: &LlmOutput) -> u64 {
                     }
                 }
                 let encrypted = item["encrypted_content"].as_str().map_or(0, str::len) as u64;
-                estimate_text(&text).max(encrypted * 3 / 4 / 4)
+                estimate_text_tokens(&text).max(encrypted * 3 / 4 / 4)
             })
             .sum();
     }
@@ -198,7 +198,7 @@ pub fn estimate_reasoning(out: &LlmOutput) -> u64 {
                 ThinkingBlock::Thinking {
                     thinking,
                     signature,
-                } => estimate_text(thinking) + estimate_text(signature),
+                } => estimate_text_tokens(thinking) + estimate_text_tokens(signature),
                 ThinkingBlock::RedactedThinking { data } => {
                     // opaque / 近似 base64：同 Responses encrypted_content 口径。
                     (data.len() as u64) * 3 / 4 / 4
@@ -206,10 +206,15 @@ pub fn estimate_reasoning(out: &LlmOutput) -> u64 {
             })
             .sum();
     }
-    estimate_text(&out.reasoning)
+    estimate_text_tokens(&out.reasoning)
 }
 
-fn estimate_text(text: &str) -> u64 {
+/// 一段文本的 token 估算：ASCII 每 4 个字符算 1（向上取整），其余字符各算 1。
+///
+/// 上下文面板（`context/usage`）、压缩阈值、HTTP 后端在官方用量回来前的暂估、
+/// 网关投影的 `item/system_prompt` / `item/system_reminder.tokens` 都用这一个，
+/// 几处的数才对得上。
+pub fn estimate_text_tokens(text: &str) -> u64 {
     let mut ascii = 0u64;
     let mut other = 0u64;
     for c in text.chars() {
@@ -226,6 +231,16 @@ fn estimate_text(text: &str) -> u64 {
 mod tests {
     use super::*;
     use cordis_base::types::ToolCall;
+
+    /// ASCII 每 4 个向上取整，其余各 1：「Hello 世界, dock!」13 ASCII → 4，2 汉字 → 6。
+    #[test]
+    fn estimate_text_tokens_counts_ascii_by_four_and_the_rest_by_one() {
+        assert_eq!(estimate_text_tokens(""), 0);
+        assert_eq!(estimate_text_tokens("abcd"), 1);
+        assert_eq!(estimate_text_tokens("abcde"), 2);
+        assert_eq!(estimate_text_tokens("规约"), 2);
+        assert_eq!(estimate_text_tokens("Hello 世界, dock!"), 6);
+    }
 
     fn sample_history() -> Vec<LogEvent> {
         vec![
@@ -453,7 +468,9 @@ mod tests {
                 is_error: false,
             },
         ];
-        let once = estimate_text("write_file") + estimate_text(&args) + estimate_text("ok");
+        let once = estimate_text_tokens("write_file")
+            + estimate_text_tokens(&args)
+            + estimate_text_tokens("ok");
         assert_eq!(estimate_context_tokens("", &history), once);
     }
 

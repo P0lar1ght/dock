@@ -794,13 +794,23 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 
 | 事件 | 载荷 | 作用 |
 |---|---|---|
-| `item/system_prompt { text, chars, truncated? }` | 这一轮组装好的系统提示 | 进 `thread/history` 与实时推送 |
-| `item/system_reminder { text, chars, truncated? }` | 一条注入块 | 同上 |
+| `item/system_prompt { text, chars, tokens?, truncated? }` | 这一轮组装好的系统提示 | 进 `thread/history` 与实时推送 |
+| `item/system_reminder { text, chars, tokens?, placement?, truncated? }` | 一条注入块 | 同上 |
 
 - **不是聊天消息**：客户端自己决定怎么渲染（轨迹面板画成「系统提示 / 注入」两类记录；
   普通对话流该忽略）。
 - 系统提示前缀字节稳定：内容没变就不重复投（历史里只留一份，变了才多一条）。
 - 正文最长 20000 字符，超出截断、`truncated` 置真，`chars` 给原长度。
+- `tokens`（可选，新增）：按原文全文估的 token 数，和 `context/usage`（左侧上下文面板）同一个
+  估算（ASCII 每 4 字符 1 个、其余字符各 1 个，见 `cordis_spine::estimate_text_tokens`），
+  不按截断后的正文算。老网关不带，客户端退回 `chars`。
+- `placement`（可选，新增，只在 `item/system_reminder` 上）：`"preamble"` = 这块在模型历史里排在
+  本轮首条用户消息**之前**（还没发过请求时插进去的规约、记忆、目录、名册，见
+  `Sessions::insert_preamble`）；`"tail"` = 追加在尾部。实时推送里它到得比 `item/user_message`
+  晚，客户端要按模型顺序排就把同一轮的 `preamble` 块放到「用户消息」之前（相互保持顺序）；
+  回放里它带的就是即将开的那一轮的 `turnId`；还没有用户消息时就到的前导块（实时也一样）同样标
+  `preamble`、记在即将开的那一轮上，刷新前后不变。同一轮的 `item/system_prompt` 只有第一次模型
+  输出之前到的那份是开轮用的，中途变了才推的那份留在原位。没有这个字段的（老网关）按到达顺序、当尾部。
 - 已经各有投影的不重复投：插话提示（`turn/completed` 的 `steered`）、侧边笔记
   （`item/side_note`）；子代理之间的消息在主会话里照旧不投（那是对话，不是注入）。
 - 与 `thread/context/get` 分工：那处给窗口的**分片统计**（规约 / 记忆只作 `includes`
