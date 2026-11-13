@@ -216,10 +216,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             SubagentEvent::ValidateType(request) => {
                 self.validations.push(ReplyFuture {
-                    future: Box::pin(
-                        self.runner
-                            .validate_type(request.subagent_type, request.parent_session_id),
-                    ),
+                    future: Box::pin(self.runner.validate_type(
+                        request.subagent_type,
+                        request.parent_session_id,
+                        request.caller_ctx,
+                    )),
                     respond_to: Some(request.respond_to),
                 });
             }

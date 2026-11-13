@@ -257,6 +257,9 @@ pub enum SubagentValidateTypeOutcome {
 pub struct SubagentValidateTypeRequest {
     pub subagent_type: String,
     pub parent_session_id: String,
+    /// 发起这次调用的那一页。名册按页各一份，校验必须看它那份：协调器跑在
+    /// 自己的 task 里，task-local 的执行 ctx 传不过去，只能显式带过来。
+    pub caller_ctx: cordis::Context,
     pub respond_to: oneshot::Sender<SubagentValidateTypeOutcome>,
 }
 

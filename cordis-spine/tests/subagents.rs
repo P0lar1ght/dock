@@ -205,6 +205,43 @@ async fn unknown_type_lists_roster() {
     );
 }
 
+/// 页面用的是 warden（9 个汉字角色），根还是默认的 code —— 磁盘上没有
+/// `roster.yml` 时根就停在默认预设（`load_inner` 的 `current` 回落）。
+///
+/// `task` 的 enum 按**页面**给（`reload_roster` 也一样），但 spawn 的校验跑在
+/// 协调器的后台 task 里：tokio 的 task-local 传不进那个 task，于是退回根，
+/// 根的 code 只剩三个通用角色 —— 汉字角色一律 "Unknown subagent type"。
+#[tokio::test]
+async fn spawn_validates_against_the_calling_pages_roster() {
+    let h = boot(Arc::new(LastUser)).await;
+    // 页面按**服务名**隔离（`Tabs::mount_page` 就是这么做的），于是它有自己那份
+    // `agentPresets`：根是 code，页面是 warden。
+    let page = h.root.isolate(AGENT_PRESETS);
+    let page_presets = h.root.require::<AgentPresets>(AGENT_PRESETS).unwrap().fork();
+    page_presets.pin("warden").unwrap();
+    page.provide(AGENT_PRESETS, page_presets).unwrap();
+
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let out = tools
+        .execute_on(&page, ToolCall {
+            id: "t0".into(),
+            name: "task".into(),
+            arguments: serde_json::json!({
+                "prompt": "观察",
+                "description": "观 观察",
+                "subagent_type": "观",
+                "run_in_background": true,
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(
+        !out.content.contains("Unknown subagent type"),
+        "spawn must validate against the calling page's roster: {}",
+        out.content
+    );
+}
+
 #[tokio::test]
 async fn empty_roster_with_task_allowed_errors() {
     let h = boot(Arc::new(LastUser)).await;
