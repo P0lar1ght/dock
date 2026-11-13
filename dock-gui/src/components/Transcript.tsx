@@ -31,7 +31,7 @@ import {
   Undo2,
 } from "lucide-react";
 import type { ThreadState, Turn, TurnItem } from "dock-core";
-import { visibleReasoningText, turnHasActivity } from "dock-core";
+import { turnHasActivity } from "dock-core";
 import { prefs, usePrefs } from "../dock/prefs";
 import { store } from "../dock/store";
 import { stripImageChips } from "../dock/chips";
@@ -40,6 +40,7 @@ import { formatElapsed, formatTokens } from "./chrome";
 import { ImageViewer } from "./ImageViewer";
 import { describeImage } from "./imageInput";
 import { Markdown } from "./Markdown";
+import { Reasoning } from "./Reasoning";
 import { permissionParts } from "../dock/permission";
 import { ToolCard, formatSeconds } from "./ToolCard";
 import { toolCardFeatures, useToolCardRevision, useTurnFooters } from "../features/registry";
@@ -668,57 +669,6 @@ const PLAN_TEXT: Record<string, string> = {
   quit: "计划已退出",
   cancelled: "计划未处理，本轮已结束",
 };
-
-/**
- * 模型的思考。想的时候：流光「正在思考 · Ns」，下面滚动露最新几行；想完：折成「思考了 Ns ›」，
- * 点开看全文。思考是给人看的旁白，字比正文小一号、灰一档。
- */
-function Reasoning({ item }: { item: Extract<TurnItem, { kind: "reasoning" }> }) {
-  const live = item.endedAt === null;
-  // 设置 › 外观 › 默认展开思考过程。
-  const [open, setOpen] = useState(() => prefs.get().expandReasoning);
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!live) return;
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(t);
-  }, [live]);
-  const elapsed = formatElapsed((item.endedAt ?? now) - item.startedAt);
-  // 旧会话 / 跨 chunk 残片：item.text 里可能还带着 AQEA…</signature>，卡片只画摘要。
-  const text = visibleReasoningText(item.text).trim();
-  return (
-    <div className="enter-fade flex shrink-0 flex-col gap-1.5">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="group flex h-7 w-fit items-center gap-1 text-left text-[14px] text-ink-4 hover:text-ink-2"
-      >
-        {live ? (
-          <>
-            <span className="shimmer-text">正在思考</span>
-            <span className="text-ink-5">· {elapsed}</span>
-          </>
-        ) : (
-          <>思考了 {elapsed}</>
-        )}
-        <ChevronRight size={15} className="rotate-open" data-open={open} />
-      </button>
-      {open ? (
-        <div className="enter-fade whitespace-pre-wrap break-words border-l-2 border-line pl-3 text-[13px] leading-[1.6] text-ink-4">
-          {text}
-        </div>
-      ) : (
-        live &&
-        text && (
-          // 只露最新三行，上沿渐隐；新字进来底部对齐，像在往上滚。
-          <div className="flex max-h-[4.8em] flex-col justify-end overflow-hidden border-l-2 border-line pl-3 text-[13px] leading-[1.6] text-ink-4 [mask-image:linear-gradient(to_bottom,transparent,black_45%)]">
-            <div className="whitespace-pre-wrap break-words">{text}</div>
-          </div>
-        )
-      )}
-    </div>
-  );
-}
 
 /** 按顺序画条目；挨着的几个子代理调用（一步里并行派的）合成一张组卡。 */
 function Items({ items }: { items: TurnItem[] }) {

@@ -21,6 +21,7 @@ import {
 import { store, useEnv, useSubagents, useThread } from "../dock/store";
 import { IconButton } from "./chrome";
 import { Markdown } from "./Markdown";
+import { Reasoning } from "./Reasoning";
 import { PathLinkContext } from "./markdown/pathLink";
 import { usePathLinker } from "./markdown/usePathLinker";
 import { activityText, clock, RolePill, SETTLED_LABEL, useNow } from "./SubagentCard";
@@ -338,6 +339,8 @@ function Entry({ item, sub, task }: { item: TurnItem; sub: Subagent; task: boole
           <Markdown text={item.text} />
         </div>
       );
+    case "reasoning":
+      return <Reasoning item={item} compact />;
     case "tool":
       if (item.name === "send_message" && typeof item.arguments.message === "string") {
         return <ReportCard text={item.arguments.message} />;
@@ -353,7 +356,7 @@ function Entry({ item, sub, task }: { item: TurnItem; sub: Subagent; task: boole
         />
       );
     default:
-      // 思考过程、交互：子代理的面板不画（交互走主会话）。
+      // 交互：子代理的面板不画（交互走主会话）。
       return null;
   }
 }
