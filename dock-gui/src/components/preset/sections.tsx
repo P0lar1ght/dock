@@ -583,6 +583,27 @@ export function AgentEditor({
             <span className="text-[11px] text-ink-4">关着省上下文：窄职责的子代理很少用得上技能。</span>
           )}
         </div>
+        <div className="flex flex-col justify-between gap-2 rounded-xl border border-line-strong bg-white p-4 shadow-[0px_1px_0px_rgba(0,0,0,0.05)]">
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex flex-col">
+              <span className="text-[13px] font-semibold text-ink">常驻角色</span>
+              <span className="mt-0.5 text-[11.5px] text-ink-4">空闲下来也不回收：普通角色空闲 15 分钟后被收走，接不上了</span>
+            </span>
+            <Switch
+              color="green"
+              on={agent.keepAlive ?? false}
+              onChange={(v) => onChange({ keepAlive: v })}
+              label="常驻角色"
+            />
+          </div>
+          {agent.keepAlive ? (
+            <span className="enter-fade flex items-center gap-1 rounded-md border border-[#bbf7d0] bg-[#f0fdf4] px-2.5 py-1 text-[11px] text-[#15803d]">
+              <Check size={11} /> 已开启：观察者一类的角色要整场会话保持可继续
+            </span>
+          ) : (
+            <span className="text-[11px] text-ink-4">一次性角色不用开：回收后还能用 task 的 resume_from 复活接着聊。</span>
+          )}
+        </div>
       </div>
     </div>
   );

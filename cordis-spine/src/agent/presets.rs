@@ -152,6 +152,11 @@ pub struct SubagentDef {
     /// 自动批准也不算数。见 [`crate::tools::read_only`]。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
+    /// 常驻角色：空闲下来也不参与「跑完 15 分钟就回收」的清扫（见
+    /// [`crate::tools::task`] 的 `IDLE_TTL`）。观察者一类的角色要整场会话保持
+    /// 可继续 —— 被悄悄回收掉就接不上了。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_alive: bool,
 }
 
 impl SubagentDef {
@@ -3034,6 +3039,7 @@ mod tests {
             replace_prompt: false,
             listings: true,
             read_only: false,
+            keep_alive: false,
         };
         let edit = |agents: IndexMap<String, SubagentDef>| PresetEdit {
             agents: agents.into_iter().collect(),

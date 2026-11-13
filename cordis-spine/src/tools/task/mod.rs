@@ -183,6 +183,14 @@ pub struct WorkflowSpawn {
     pub page: cordis::Context,
 }
 
+/// 这个角色是不是常驻（`agents/<id>.yml` 的 `keep_alive: true`）？常驻角色空闲下来
+/// 也不参与回收清扫 —— 观察者要整场会话保持可继续。
+pub(super) fn keep_alive_of(ctx: &cordis::Context, subagent_type: &str) -> bool {
+    ctx.get::<crate::agent::presets::AgentPresets>(crate::names::AGENT_PRESETS)
+        .and_then(|p| p.subagent(subagent_type))
+        .is_some_and(|def| def.keep_alive)
+}
+
 /// Named `"subagents"` service. Live-lookup; do not capture the Arc.
 pub struct Subagents {
     backend: ChannelBackend,
@@ -395,6 +403,7 @@ impl Subagents {
             .map(|s| s.identity().to_string())
             .filter(|id| crate::session::log::is_main_identity(id))
             .unwrap_or_else(|| ROOT_IDENTITY.to_string());
+        let keep_alive = keep_alive_of(&spawn.page, &spawn.subagent_type);
         self.note_spawn_parent(&id, spawn.page);
         self.remember(
             &id,
@@ -402,6 +411,7 @@ impl Subagents {
             spawn.subagent_type.clone(),
             owner.clone(),
             &parent,
+            keep_alive,
         );
         let request = SubagentRequest {
             id: id.clone(),
@@ -453,9 +463,10 @@ impl Subagents {
         subagent_type: String,
         owner: SubagentOwner,
         parent: &str,
+        keep_alive: bool,
     ) {
         self.store
-            .ensure_owned(id, description, subagent_type, owner, parent);
+            .ensure_owned(id, description, subagent_type, owner, parent, keep_alive);
     }
 }
 
@@ -675,6 +686,7 @@ mod coordinator_spawn_tests {
             &self,
             _subagent_type: String,
             _parent_session_id: String,
+            _caller_ctx: cordis::Context,
         ) -> Self::ValidateFuture {
             Box::pin(async { SubagentValidateTypeOutcome::Ok })
         }
@@ -758,6 +770,7 @@ mod coordinator_spawn_tests {
             &self,
             _subagent_type: String,
             _parent_session_id: String,
+            _caller_ctx: cordis::Context,
         ) -> Self::ValidateFuture {
             Box::pin(async { SubagentValidateTypeOutcome::Ok })
         }

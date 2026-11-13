@@ -101,6 +101,7 @@ pub fn get(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
                 "replacePrompt": def.replace_prompt,
                 "listings": def.listings,
                 "readOnly": def.read_only,
+                "keepAlive": def.keep_alive,
                 "builtin": shipped_roles.iter().any(|r| r == role),
             })
         })
@@ -195,6 +196,14 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             .map(|def| def.resident_tools.clone())
             .unwrap_or_default()
     };
+    // `keep_alive` 缺省**沿用已有的**：GUI 的角色表单还没这个开关，老实传
+    // `false` 会把内置 `warden` 的 `观` 的常驻标记抹掉。
+    let existing_keep_alive = |role: &str| -> Option<bool> {
+        existing
+            .as_ref()
+            .and_then(|p| p.agents.get(role))
+            .map(|def| def.keep_alive)
+    };
     let mut agents: Vec<(String, SubagentDef)> = Vec::new();
     for a in body
         .get("agents")
@@ -219,6 +228,11 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             replace_prompt: flag(a, "replacePrompt"),
             listings: flag(a, "listings"),
             read_only: flag(a, "readOnly"),
+            keep_alive: a
+                .get("keepAlive")
+                .and_then(Value::as_bool)
+                .or_else(|| existing_keep_alive(&role))
+                .unwrap_or(false),
         };
         agents.push((role, def));
     }

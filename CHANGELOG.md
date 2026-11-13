@@ -18,6 +18,7 @@
 - **插件作者注意（破坏性）**：回合末 todo 提醒的**第一行**从 `Todos NOT complete — continue working. Next step:`（`TODO_GATE_SENTINEL`）换成 `Todo bookkeeping only — update statuses.`（`TODO_BOOKKEEPING_SENTINEL`）。Rhai 钩子里按旧开头匹配 todo 提醒的，改成匹配新开头——哨兵排在 `<system-reminder>` 之后第一行，`session/event` 给的 80 字预览一定截得到。注意 **`agent/turn-end` 的载荷里没有提醒正文**（只有 `text` / `rounds` / `ended_with_text` / `queued_followups` / `identity` / `main`），想在回合末认出记账提醒只能从 `session/event` 的预览里认。这条提醒现在只要求记账，不再表示「这一轮会继续干活」。Rust 侧的 API 变化与改法见 `docs/tools/todo.md`「API 变化」。
 - **待办新状态 `awaiting_user`（在等用户）**：TUI 待办卡用 `○`、GUI 待办卡用问号气泡图标、轨迹面板的 `todo_write` 行显示「等用户N」。它不算完成，也不算模型欠的活。**落盘**：只出现在 `chat_history.jsonl` 里 `todo_write` 的参数与结果文本中；不含它的旧会话照常读。用更早的版本打开含它的会话：旧版显示成和 pending 一样（GUI 是空心圆，TUI 是 `□`）；模型侧的清单不从落盘恢复，不受影响。
 
+- **常驻角色（`agents/<id>.yml` 的 `keep_alive: true`）**：普通子代理跑完一轮 park idle，**空闲满 15 分钟**就被回收——`list_agents` 不再列它，`send_message` 报 `is done; message was not delivered`。观察者一类的角色要整场会话保持可继续，被悄悄回收就接不上了。写 `keep_alive: true` 的角色不参与回收清扫；内置 `warden` 的 `观` 默认开着。GUI 的角色表单里也有「常驻角色」这一项。被回收的角色还能用 `task`（`resume_from: "<agent_id>"`）从盘上的对话复活接着聊，复活后这份 `keep_alive` 仍然生效。
 - **模型看到的目录改走消息提醒**：技能、工作流、子代理名册不再进系统提示 / `task` 描述，改在每一轮采样前以 `<system-reminder>` 注入；内容和历史里最近一份一致就只留一份，压缩后重注。切到调不动 loader 的预设时补一句「目录不再适用」。
   - MCP 工具名同样走提醒：第一次列全量，之后只发新增 / 移除；按服务器分组，单台服务器超过 12 个工具只铺前 12 个，其余用 `search_tool` 搜。内置 browser / whiteboard / cua-driver 各保留一句用途。
   - `/context` 的技能 / 工作流分类改标「已计入消息」；系统提示按段展开只剩基座 / 人设 / 插件钩子。

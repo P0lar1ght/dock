@@ -348,6 +348,7 @@ impl Subagents {
             subagent_type.clone(),
             SubagentOwner::Task,
             &parent_identity,
+            super::keep_alive_of(parent, &subagent_type),
         );
         self.store
             .restore_identity(agent_id, started_wall, tool_call_id, events, times);

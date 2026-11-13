@@ -314,7 +314,7 @@ export function PresetStudio({
   const addAgent = () => {
     const agents = [
       ...draft!.agents,
-      { id: "", name: "", description: "", persona: "", tools: null, replacePrompt: false, listings: false, builtin: false, fresh: true },
+      { id: "", name: "", description: "", persona: "", tools: null, replacePrompt: false, listings: false, keepAlive: false, builtin: false, fresh: true },
     ];
     patch({ agents });
     setEditing(agents.length - 1);

@@ -141,6 +141,18 @@ async fn run_dock_child(
     let id = run.request.id.clone();
     let typ = run.request.subagent_type.clone();
     let desc = run.request.description.clone();
+    // 角色表按页取（预设按页）：常驻标记也在那儿，回收时才知道该不该跳过。
+    let parent_presets = parent.get::<AgentPresets>(AGENT_PRESETS);
+    let def = parent_presets.as_ref().and_then(|p| p.subagent(&typ));
+    let Some(def) = def else {
+        return failed(
+            &id,
+            &store,
+            wall,
+            format!("unknown subagent type {typ}"),
+            false,
+        );
+    };
     // 回报指令要写**记在册上的**父级（发起调用的那一页，如 `main#2`）：请求上的
     // `parent_session_id` 被后端统一绑成了 `main`，照它写的话分页的孩子回话会被
     // `send_message` 以「不是启动你的代理」挡回去。
@@ -151,6 +163,7 @@ async fn run_dock_child(
             typ.clone(),
             run.request.owner.clone(),
             &run.request.parent_session_id,
+            def.keep_alive,
         )
         .parent
         .clone();
@@ -166,18 +179,6 @@ async fn run_dock_child(
         run.request.prompt.clone()
     } else {
         child_prompt(&typ, &desc, &run.request.prompt)
-    };
-
-    let parent_presets = parent.get::<AgentPresets>(AGENT_PRESETS);
-    let def = parent_presets.as_ref().and_then(|p| p.subagent(&typ));
-    let Some(def) = def else {
-        return failed(
-            &id,
-            &store,
-            wall,
-            format!("unknown subagent type {typ}"),
-            false,
-        );
     };
 
     let mut child = parent
@@ -752,6 +753,7 @@ mod inbox_tests {
             "t".into(),
             super::super::types::SubagentOwner::Task,
             "main#3",
+            false,
         );
         store.push_turn_end("kid", Some("late".into()), false);
         let wake = store.parent_wake("main#3");
