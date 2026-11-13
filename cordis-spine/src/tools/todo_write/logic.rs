@@ -213,6 +213,12 @@ pub(crate) fn summarize_todo_state(state: &TodoState) -> String {
         out.push_str(hint);
         out.push('\n');
     }
+    // 纪律跟着写入走，不另插一条提醒：刚写完清单就再说一遍「正在做 X；下一项 Y」
+    // 是把模型刚拿到的结果复述一遍（返回文本里已经逐项列了状态）。这里只留
+    // 清单本身不承载的那句——它是这次改动的核心主张，别处没有等价物。
+    out.push_str(
+        "清单只是记录，用户的话优先：想停下来汇报、讨论或等用户都可以，状态如实标就行。\n",
+    );
     out
 }
 
@@ -316,17 +322,6 @@ fn focus_line(state: &TodoState) -> Option<String> {
         (Some(c), None) => Some(format!("正在做「{c}」；这是最后一项。")),
         (None, Some(n)) => Some(format!("没有进行中的项；下一项「{n}」。")),
     }
-}
-
-/// Mid-turn, right after the list changed: where the model stands, worded as
-/// a suggestion. `None` when nothing is owed.
-pub fn focus_reminder(state: &TodoState) -> Option<String> {
-    let focus = focus_line(state)?;
-    Some(format!(
-        "<system-reminder>\n当前清单：{focus}\n\
-         （建议：开始一项前先标 in_progress，做完就标 completed。清单只是记录，用户的话优先。）\n\
-         </system-reminder>"
-    ))
 }
 
 /// Mid-turn nudge: the model has been running tools for a while without
@@ -818,7 +813,6 @@ mod tests {
             apply_merge(&mut state, &[upd(id, None, Some(TodoStatus::AwaitingUser))]).unwrap();
         }
         assert_eq!(bookkeeping_reminder(&state, 0), None);
-        assert_eq!(focus_reminder(&state), None);
         let s = stats(&state);
         assert_eq!(
             (s.awaiting_user, s.open(), s.settled(), s.total()),
@@ -863,14 +857,34 @@ mod tests {
         assert!(next_turn_reminder(&TodoState::default()).is_none());
     }
 
+    /// The write's own result is where the list is described — once. No second
+    /// "here is where you stand" reminder after every write: it would only
+    /// repeat the statuses the model just got back.
     #[test]
-    fn focus_names_the_current_and_the_next_item() {
+    fn the_write_result_already_lists_the_state() {
         let state = seeded();
-        assert_eq!(
-            focus_reminder(&state).unwrap(),
-            "<system-reminder>\n当前清单：正在做「摸清 todo 现状」；下一项「折叠 + 美化」。\n\
-             （建议：开始一项前先标 in_progress，做完就标 completed。清单只是记录，用户的话优先。）\n\
-             </system-reminder>"
+        let summary = summarize_todo_state(&state);
+        assert!(
+            summary.contains("- [in_progress] explore: 摸清 todo 现状"),
+            "{summary}"
+        );
+        assert!(summary.contains("- [pending] ui: 折叠 + 美化"), "{summary}");
+        assert!(summary.contains("清单只是记录，用户的话优先"), "{summary}");
+        assert!(
+            !summary.contains("正在做"),
+            "the result lists the items, it does not paraphrase them: {summary}"
+        );
+    }
+
+    /// The one place that still restates where the list stands: the stale
+    /// nudge, six steps later, when the model has genuinely lost track.
+    #[test]
+    fn the_stale_reminder_restates_where_the_list_stands() {
+        let state = seeded();
+        let reminder = stale_reminder(6, &state);
+        assert!(
+            reminder.contains("正在做「摸清 todo 现状」；下一项「折叠 + 美化」。"),
+            "{reminder}"
         );
     }
 

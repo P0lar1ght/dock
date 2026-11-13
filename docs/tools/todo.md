@@ -11,9 +11,9 @@
 
 描述要求 `todo_write` 与下一步工作调用放在同一次回复；同时最多一个 `in_progress`；收尾前**如实记账**——做完的标 `completed`、等用户的标 `awaiting_user`、不做 / 堵住的标 `cancelled`，「还有未完成项」不是继续干活的理由（用户说先讨论、先看看，就停下来说清楚）。基座不写这条：极简等预设没有这颗工具。Grok merge/replace，含 Grok `effective_merge` 自动升级：`merge:false` 但每一项都只带已存在 id + status 时按合并处理，不会把 content 抹成 id。
 
-工具约束：一次写入之后会留下两个及以上 `in_progress` 的，整次拒绝（`Error: only one item may be in_progress…`，列表不动），提示先把前一项标 `completed` / `cancelled` / `awaiting_user`（同一次调用里一起交接就行）。工具结果在列表后追加 `n/total done (… in_progress, … pending[, … awaiting_user])` 与状态提示：全部 `completed` / `cancelled` 且至少一项 `completed` 时写「清单已全部完成。」（`TODO_ALL_DONE`），全部 `cancelled` 时写「清单已全部关闭。」（`TODO_ALL_CLOSED`）；只剩 `awaiting_user` 时提示等用户、用户答了再改回；没有 `in_progress` 时提示开工前再标，停下来汇报 / 讨论 / 等用户都可以，但状态要如实——**不再**要求「别带着 pending 回复用户」。
+工具约束：一次写入之后会留下两个及以上 `in_progress` 的，整次拒绝（`Error: only one item may be in_progress…`，列表不动），提示先把前一项标 `completed` / `cancelled` / `awaiting_user`（同一次调用里一起交接就行）。工具结果在列表后追加 `n/total done (… in_progress, … pending[, … awaiting_user])` 与状态提示：全部 `completed` / `cancelled` 且至少一项 `completed` 时写「清单已全部完成。」（`TODO_ALL_DONE`），全部 `cancelled` 时写「清单已全部关闭。」（`TODO_ALL_CLOSED`）；只剩 `awaiting_user` 时提示等用户、用户答了再改回；没有 `in_progress` 时提示开工前再标，停下来汇报 / 讨论 / 等用户都可以，但状态要如实——**不再**要求「别带着 pending 回复用户」。每次写入的结果末尾都带一句纪律：「清单只是记录，用户的话优先：想停下来汇报、讨论或等用户都可以，状态如实标就行。」
 
-`Todos` 另外暴露 `stats()`（TUI 折叠条）/ `revision()` / `bookkeeping_reminder()` / `focus_reminder()` / `next_turn_reminder()`。**注意 `"todos"` 不随子代理 isolate**，下面的 waterfall 都靠载荷里的 `identity`（或 `tools/execute` 时执行 ctx 的会话身份）判断，只在本页主会话生效；分页各有一份清单。
+`Todos` 另外暴露 `stats()`（TUI 折叠条）/ `revision()` / `bookkeeping_reminder()` / `next_turn_reminder()`。**注意 `"todos"` 不随子代理 isolate**，下面的 waterfall 都靠载荷里的 `identity`（或 `tools/execute` 时执行 ctx 的会话身份）判断，只在本页主会话生效；分页各有一份清单。
 
 ### 回合末：只记账（`agent/turn-end`，`ORDER_TURN_END_TODO = 10`）
 
@@ -32,11 +32,12 @@
 
 watchdog 在 `step == 0` 重置，每步最多说一件事，按顺序：
 
-1. **清单刚变过**：上一步有过写入 → 追加一条「当前清单：正在做「a」；下一项「b」。（建议…）」，每轮最多 `MAX_TODO_FOCUS_REMINDERS = 4` 条；
-2. **刚跑完测试 / 构建**：上一步的 `bash` 命令（取日志里最后一次模型输出之后的工具行）命中 `TEST_BUILD_COMMANDS`，有 `in_progress` 项，且同一步没写清单 → 「刚跑完测试 / 构建（`cmd`），「a」还是 in_progress。这项做完了就标 completed…」；
-3. **连续 `TODO_NUDGE_AFTER_STEPS = 6` 步没动清单** → 带当前清单的 stale 提醒。
+1. **刚跑完测试 / 构建**：上一步的 `bash` 命令（取日志里最后一次模型输出之后的工具行）命中 `TEST_BUILD_COMMANDS`，有 `in_progress` 项，且同一步没写清单 → 「刚跑完测试 / 构建（`cmd`），「a」还是 in_progress。这项做完了就标 completed…」；
+2. **连续 `TODO_NUDGE_AFTER_STEPS = 6` 步没动清单** → 带当前清单的 stale 提醒。
 
-2、3 合计每轮最多 `MAX_TODO_NUDGES = 3` 次。没有欠着的项（只剩 `awaiting_user` 或全关）时都不说。
+1、2 合计每轮最多 `MAX_TODO_NUDGES = 3` 次。没有欠着的项（只剩 `awaiting_user` 或全关）时都不说。
+
+**清单刚变过时不说**：写入的结果本身已经逐项列了状态和计数，再插一条「正在做「a」；下一项「b」」只是把模型刚拿到的结果复述一遍，白占上下文。纪律（「清单只是记录，用户的话优先」）跟着写入走，放在 `todo_write` 的返回文本里。真正要复述现状的只有 stale 提醒——那已经是 6 步之后，模型确实忘了。
 
 测试 / 构建识别（`is_test_or_build_command`）：命令按 `&&` `||` `;` `|` 换行切段，去掉段首的 `VAR=value`，段等于或以「词 + 空格」开头即算：`cargo test|nextest|build|check|clippy`、`npm test`、`npm run test|build`、`pnpm test|build`、`pnpm run test|build`、`yarn test|build`、`npx vitest|jest|tsc`、`vitest`、`jest`、`tsc`、`pytest`、`python(3) -m pytest`、`go test|build`、`make`、`cmake --build`、`ctest`、`mvn`、`gradle`、`./gradlew`、`swift build|test`、`xcodebuild`。
 
@@ -55,4 +56,5 @@ watchdog 在 `step == 0` 重置，每步最多说一件事，按顺序：
 | `TodoStatus` 新增 `AwaitingUser`（枚举不是 `#[non_exhaustive]`） | 穷尽 `match` 要补一支：它既不算完成也不算模型欠的活；没有单独展示的地方按 `Pending` 画即可（旧版就是这么读的）。 |
 | `TodoStats` 新增公有字段 `awaiting_user` | 结构体字面量补 `awaiting_user: 0` 或 `..Default::default()`。`total()` 含它，`open()` 不含，`settled()` 不含。 |
 | `stale_reminder(steps)` 改为 `stale_reminder(steps, &TodoState)`，不再从 `tools::todo_write` 重导出 | `tools` 模块在 crate 内私有，`cordis_spine` 从没导出过它，外部代码碰不到；crate 内改走 `Todos` 的方法。 |
+| `Todos::focus_reminder()` 移除 | 这条「正在做 / 下一项」的焦点提醒和 `todo_write` 自己的返回结果重复（结果里已逐项列了状态），改由写入结果承担；纪律句并进返回文本。 |
 | `TurnEnd::settle()` 已 `#[deprecated]`；它和 `decision()` 遇到记账胜者都回 `None` | 两者只认「继续干活」票：胜者是记账票时回 `None`（`settle()` 也不扣它的 `on_win`）——只会「拿到正文就接着跑」的旧调用方于是正常收尾，而不是带着全部工具继续干活（那正是记账要防的旧毛病）。驱动自己的循环改用 `settle_round()`：`only_tools` 为 `Some` 时只再采一步、只给这些工具、然后收尾，并且在确定这一步会跑时调 `TurnEndRound::charge()`（记账胜者的 `on_win` 推迟到这里；继续干活的胜者在 `settle_round()` 里已经扣过）。`decision_tools()` 是只读版本。新增的只有 API：`TurnEnd::bookkeep_with`、`TurnEndRound`（`new` / `charge`）。`Continuation` 是私有类型，不算。 |

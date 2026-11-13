@@ -2114,10 +2114,11 @@ async fn the_next_turn_points_at_awaiting_user_items_without_counting_them() {
     );
 }
 
-/// The list just changed: the next step says where the model stands, as a
-/// suggestion.
+/// The list just changed. The write's own result already says where the model
+/// stands — a second "here is where you stand" reminder would only repeat the
+/// statuses the model just got back.
 #[tokio::test]
-async fn a_list_change_is_followed_by_a_focus_reminder() {
+async fn a_list_change_does_not_repeat_itself() {
     let b = boot_recorded(|i| match i {
         0 => call_tool("c0", "todo_write", OPEN_LIST),
         1 => call_tool("c1", "edit_fake", "{}"),
@@ -2140,18 +2141,23 @@ async fn a_list_change_is_followed_by_a_focus_reminder() {
         .into_iter()
         .filter(|r| r.contains("当前清单"))
         .collect();
-    assert_eq!(focus.len(), 2, "{focus:?}");
     assert!(
-        focus[0].contains("正在做「读代码」；下一项「改实现」。"),
-        "{}",
-        focus[0]
+        focus.is_empty(),
+        "the write result already lists every item: {focus:?}"
     );
+    let writes: Vec<String> = b
+        .tool_rows()
+        .into_iter()
+        .filter(|(name, _, _)| name == "todo_write")
+        .map(|(_, content, _)| content)
+        .collect();
+    assert!(writes.iter().any(|w| w.contains("读代码")), "{writes:?}");
     assert!(
-        focus[1].contains("正在做「改实现」；这是最后一项。"),
-        "{}",
-        focus[1]
+        writes
+            .iter()
+            .any(|w| w.contains("清单只是记录，用户的话优先")),
+        "the discipline line rides along with the write: {writes:?}"
     );
-    assert!(focus[0].contains("建议"), "{}", focus[0]);
     assert_eq!(b.bookkeeping(), 0, "everything was closed before the text");
 }
 

@@ -30,8 +30,6 @@ const MAX_TODO_BOOKKEEPING_FIRES: usize = 1;
 const TODO_NUDGE_AFTER_STEPS: usize = 6;
 /// Stale / just-verified nudges per turn. Two reminders are a hint; five are noise.
 const MAX_TODO_NUDGES: usize = 3;
-/// "Here is where you stand" reminders after the list changed, per turn.
-const MAX_TODO_FOCUS_REMINDERS: usize = 4;
 /// The only tool the turn-end bookkeeping step offers.
 const BOOKKEEPING_TOOLS: &[&str] = &["todo_write"];
 /// Tools that hand the turn to the user. Calling one this turn means the model
@@ -92,11 +90,6 @@ impl Todos {
     )]
     pub fn gate_reminder(&self, backing_tasks: usize) -> Option<String> {
         self.bookkeeping_reminder(backing_tasks)
-    }
-
-    /// Mid-turn "current / next item" line, or `None` when nothing is owed.
-    pub fn focus_reminder(&self) -> Option<String> {
-        logic::focus_reminder(&self.state.lock().unwrap())
     }
 
     /// Start-of-turn reminder about what the previous turn left behind.
@@ -397,21 +390,20 @@ fn last_step_test_or_build(events: &[LogEvent]) -> Option<String> {
 /// `agent/step-start` step 0 rearms it. Per step it says at most one thing, in
 /// this order:
 ///
-/// 1. the list just changed → where the model stands now ([`logic::focus_reminder`],
-///    at most [`MAX_TODO_FOCUS_REMINDERS`] per turn);
-/// 2. a test / build just ran with an item `in_progress` and no update in that
+/// 1. a test / build just ran with an item `in_progress` and no update in that
 ///    step → "mark it completed if it is done" ([`verified_reminder`]);
-/// 3. [`TODO_NUDGE_AFTER_STEPS`] steps without a write → [`logic::stale_reminder`].
+/// 2. [`TODO_NUDGE_AFTER_STEPS`] steps without a write → [`logic::stale_reminder`].
 ///
-/// 2 and 3 share [`MAX_TODO_NUDGES`]. Nothing fires while nothing is owed
-/// (`awaiting_user` does not count).
+/// 1 and 2 share [`MAX_TODO_NUDGES`]. Nothing fires while nothing is owed
+/// (`awaiting_user` does not count). A step that changed the list says
+/// nothing: the write's own result already lists every item and its status,
+/// so a reminder would only repeat it.
 #[derive(Default)]
 struct TodoWatch {
     /// [`Todos::revision`] as of the last step we looked.
     seen_revision: Option<u64>,
     steps_since_write: usize,
     nudges: usize,
-    focus: usize,
 }
 
 impl TodoWatch {
@@ -429,12 +421,7 @@ impl TodoWatch {
         if self.seen_revision != Some(revision) {
             self.seen_revision = Some(revision);
             self.steps_since_write = 0;
-            if self.focus >= MAX_TODO_FOCUS_REMINDERS {
-                return None;
-            }
-            let body = todos.focus_reminder()?;
-            self.focus += 1;
-            return Some(body);
+            return None;
         }
         self.steps_since_write += 1;
         if self.nudges >= MAX_TODO_NUDGES || todos.stats().open() == 0 {
