@@ -600,19 +600,26 @@ impl Tools {
     async fn dispatch_local(&self, exec: &Context, call: ToolCall) -> ToolResult {
         if self.workspace && workspace::handles(&call.name) {
             let jobs = exec.get::<crate::tools::jobs::Jobs>(JOBS);
-            return workspace::execute_with(
-                call,
-                || {
-                    exec.get::<TurnControl>(TURN)
-                        .is_some_and(|t| t.is_cancelled())
-                },
-                || {
-                    exec.get::<TurnControl>(TURN)
-                        .is_some_and(|t| t.yield_requested())
-                },
-                jobs.as_deref(),
-            )
-            .await;
+            // 挂上调用页：后台任务记下是哪一页起的（跑完通知送回那一页），相对路径和
+            // bash 的起始目录按那一页的 cwd 算。循环里本来就挂着同一个 ctx；不在循环里
+            // 直接 `execute_on`（插件经 host 调、测试）时，不挂这一层就退回进程级的默认。
+            return EXEC_CTX
+                .scope(
+                    exec.clone(),
+                    workspace::execute_with(
+                        call,
+                        || {
+                            exec.get::<TurnControl>(TURN)
+                                .is_some_and(|t| t.is_cancelled())
+                        },
+                        || {
+                            exec.get::<TurnControl>(TURN)
+                                .is_some_and(|t| t.yield_requested())
+                        },
+                        jobs.as_deref(),
+                    ),
+                )
+                .await;
         }
         ToolResult {
             call_id: call.id,

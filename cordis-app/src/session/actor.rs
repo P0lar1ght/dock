@@ -617,10 +617,10 @@ mod tests {
 
     use cordis::Context;
     use cordis_spine::{
-        agent_loop, install_without_llm, tool_goal, tool_task, turn, AgentPresets, BoxFuture, Goal,
-        Llm, LlmOutput, LogEvent, PromptRequest, Sampler, Sessions, StreamDelta, Subagents,
-        ToolCall, Tools, TurnControl, TurnEndStatus, AGENT_PRESETS, GOAL, LLM, SESSIONS, SUBAGENTS,
-        TOOLS, TURN,
+        agent_loop, install_core, install_without_llm, job_notify, jobs, tool_goal, tool_jobs,
+        tool_task, turn, workspace_tools, AgentPresets, BoxFuture, Goal, Llm, LlmOutput, LogEvent,
+        PromptRequest, Sampler, Sessions, StreamDelta, Subagents, ToolCall, Tools, TurnControl,
+        TurnEndStatus, AGENT_PRESETS, GOAL, LLM, SESSIONS, SUBAGENTS, TOOLS, TURN,
     };
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
@@ -1235,6 +1235,88 @@ mod tests {
         })
         .await
         .expect("the actor should wake on the child's turn-end notice and inject it");
+        handle.cancel();
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
+
+    /// 后台 bash 跑完：会话闲着也会被叫醒开一轮，把退出码和输出结尾交给模型——用户不发话、
+    /// 模型也不用 `job` 轮询。以前后台任务跑完没人知道，只能等模型自己去查。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_finished_background_job_wakes_the_idle_session() {
+        let root = Context::new();
+        install_core(&root).await.unwrap();
+        root.plugin(workspace_tools(), ())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        root.plugin(turn(), ()).unwrap().wait().await.unwrap();
+        let home = tempfile::tempdir().unwrap();
+        root.provide(AGENT_PRESETS, AgentPresets::load(home.path().to_path_buf()))
+            .unwrap();
+        root.plugin(tool_task(), cordis_spine::TaskConfig::default())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        root.plugin(jobs(), ()).unwrap().wait().await.unwrap();
+        root.plugin(tool_jobs(), ()).unwrap().wait().await.unwrap();
+        root.plugin(job_notify(), ()).unwrap().wait().await.unwrap();
+        root.provide(LLM, Llm::from_sampler(root.clone(), Arc::new(EchoLastUser)))
+            .unwrap();
+        root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let current_prompt_id = Arc::new(Mutex::new(None));
+        let queued = Arc::new(AtomicUsize::new(0));
+        let queued_prompts = Arc::new(Mutex::new(Vec::new()));
+        let handle = SessionHandle {
+            cmd_tx,
+            current_prompt_id: current_prompt_id.clone(),
+            queued: queued.clone(),
+            queued_prompts: queued_prompts.clone(),
+        };
+        tokio::spawn(run_session(
+            root.clone(),
+            cmd_rx,
+            current_prompt_id,
+            queued,
+            queued_prompts,
+        ));
+
+        let tools = root.require::<Tools>(TOOLS).unwrap();
+        let started = tools
+            .execute(ToolCall {
+                id: "bg".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({
+                    "command": "sleep 0.2; echo JOB_DONE_TEXT; exit 2",
+                    "is_background": true,
+                })
+                .to_string(),
+            })
+            .await;
+        assert!(
+            started.content.contains("moved to background"),
+            "{}",
+            started.content
+        );
+
+        let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let seen = sessions.events().iter().any(|e| {
+                    matches!(e, LogEvent::SystemReminder(t)
+                        if t.contains("exit 2") && t.contains("JOB_DONE_TEXT"))
+                });
+                if seen {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the actor should wake on the job's end and inject the notice");
         handle.cancel();
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
     }

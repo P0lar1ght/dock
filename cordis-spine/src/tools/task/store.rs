@@ -158,6 +158,9 @@ pub(super) enum ParentNotice {
         /// 这就是全部过程。
         dropped_reports: usize,
     },
+    /// 一条后台任务（后台 bash、转入后台的命令、monitor）跑完了。正文已经排好版
+    /// （`job-notify` 插件写的）；`job_id` 用来在模型先用 `job` 读到结果时撤掉它。
+    JobDone { job_id: String, text: String },
     /// One per finished child turn: the child is idle and can be continued.
     TurnEnd {
         id: String,
@@ -637,6 +640,8 @@ impl ChildStore {
         }
         slot.hold.lock().unwrap().clear();
         slot.wake.notify_waiters();
+        // 发给它自己的通知（它起的后台任务跑完了）没人取了，一起丢掉。
+        self.inbox.lock().unwrap().notices.retain(|q| q.to != id);
         self.changed(id);
     }
 
@@ -878,6 +883,22 @@ impl ChildStore {
                 && !slot.failed.load(Ordering::Relaxed));
         let parent = slot.parent.clone();
         self.enqueue(&parent, notice, !quiet);
+    }
+
+    /// 后台任务 `job_id` 跑完的通知，进起它的那一页 `page` 的信箱；`wakes` 才叫醒那一页。
+    pub fn push_job_done(&self, page: &str, job_id: &str, text: String, wakes: bool) {
+        let notice = ParentNotice::JobDone {
+            job_id: job_id.to_string(),
+            text,
+        };
+        self.enqueue(page, notice, wakes);
+    }
+
+    /// 撤掉还没送到的 `job_id` 跑完通知：模型已经用 `job` 读到了结果。
+    pub fn retract_job_done(&self, job_id: &str) {
+        self.inbox.lock().unwrap().notices.retain(
+            |q| !matches!(&q.notice, ParentNotice::JobDone { job_id: queued, .. } if queued == job_id),
+        );
     }
 
     /// 放进 `parent` 的信箱；`wakes` 才叫醒它。

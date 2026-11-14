@@ -116,7 +116,7 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
   - 权限弹窗：首行 `$ 完整命令`，描述另起一行（`permission_summary`）。
   - 描述是模型写的：只作补充，不替代命令；命令永远完整显示在前。
 
-**前台预算到点 = 转后台，不是 kill。** `Jobs::detach` 把 `foreground` 翻成 `false`，进程一点不动，返回已产出的输出 + `job_id`，模型用 `job` 工具接着收。
+**前台预算到点 = 转后台，不是 kill。** `Jobs::detach` 把 `foreground` 翻成 `false`，进程一点不动，返回已产出的输出 + `job_id`。它跑完会自动通知模型（退出码和输出结尾，见 [jobs](jobs.md) 的 `job-notify`），不用拿 `job` 干等；要看中途的输出再用 `job` 读。
 
 旧行为是 kill + 「需要跑完就用 `is_background: true` 重跑」，那是双重浪费：已经跑掉的几分钟扔了，重跑还要再花同样的时间，而且大概率**再超时一次**——`cargo build` 不会因为重跑就变快。命令已经过了权限门、进程还活着，留着它严格更优。
 

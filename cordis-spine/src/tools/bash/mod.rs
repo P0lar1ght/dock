@@ -9,12 +9,13 @@ use crate::tools::fs_common::{bool_field, int_field, parse_args, resolve, str_fi
 use crate::tools::jobs::Jobs;
 use cordis_base::types::ToolSpec;
 
-const BASH_PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The bash command to run."},"description":{"type":"string","description":"Clear, concise description of what this command does in active voice, 5-10 words (shown to the user in the permission prompt and the UI). Examples: \"git status\" -> \"Show working tree status\"; \"npm install\" -> \"Install package dependencies\"."},"workdir":{"type":"string","description":"Working directory for this command. Defaults to the session cwd; if you pass a relative workdir it resolves against the session cwd. Prefer this over a leading cd. Relative paths inside command then resolve against workdir: with workdir \"sub\", write \"src/file.txt\", not \"sub/src/file.txt\"."},"timeout_ms":{"type":"integer","description":"Foreground wait in ms. Default and cap 300000 (5 min)."},"is_background":{"type":"boolean","description":"Return a job id immediately instead of waiting (dev servers, long builds)."}},"required":["command"]}"#;
+const BASH_PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The bash command to run."},"description":{"type":"string","description":"Clear, concise description of what this command does in active voice, 5-10 words (shown to the user in the permission prompt and the UI). Examples: \"git status\" -> \"Show working tree status\"; \"npm install\" -> \"Install package dependencies\"."},"workdir":{"type":"string","description":"Working directory for this command. Defaults to the session cwd; if you pass a relative workdir it resolves against the session cwd. Prefer this over a leading cd. Relative paths inside command then resolve against workdir: with workdir \"sub\", write \"src/file.txt\", not \"sub/src/file.txt\"."},"timeout_ms":{"type":"integer","description":"Foreground wait in ms. Default and cap 300000 (5 min)."},"is_background":{"type":"boolean","description":"Return a job id immediately instead of waiting (dev servers, long builds). You are notified when it exits, so do not poll it."}},"required":["command"]}"#;
 
 const BASH_DESC: &str = "Run a bash command in the workspace and return its output.\n\
 - Do not use bash for file work: `cat`/`head`/`sed -n` → read_file, `grep`/`rg` → grep, `find` → glob, `ls` → list_dir, `sed -i` → search_replace. The dedicated tools are cheaper, are not gated behind a permission prompt, keep working in plan mode, and report what they truncated. Shell `grep` also reads everything on disk including build output (`target/`), so a repo-wide search the grep tool finishes in tens of milliseconds can take bash minutes.\n\
 - Each call runs in a fresh shell: cwd, variables and functions do not persist between calls. Pass workdir instead of using `cd`.\n\
-- A foreground command that outlives timeout_ms is not killed: it moves to the background and you get a job id plus the output so far. Never re-run it — collect it with the job tool; stop jobs with kill_task.\n\
+- A foreground command that outlives timeout_ms is not killed: it moves to the background and you get a job id plus the output so far. Never re-run it.\n\
+- A background job (is_background, or one moved there) notifies you with its exit status and the end of its output when it exits, even after your turn has ended. Do not poll or wait on it with the job tool just to find out: continue with other work or end your turn. Read its full output with the job tool; stop it with kill_task.\n\
 - Piping command output into `grep` (e.g. `cargo test 2>&1 | grep FAILED`) is what bash is for.\n\
 - Output over 20KB is saved to a file and you get only the first 2KB: the end (exit status, test summary, errors) is not shown. The notice gives the file path, its line count, and the read_file offsets to continue from or to read the last lines.";
 
@@ -73,7 +74,7 @@ fn resolve_workdir(v: &Value) -> Result<Option<PathBuf>, String> {
 
 /// 有插话在等（[`crate::TurnControl::request_yield`]）之后，前台命令再给这么久：
 /// 一两秒就完的命令照常带回结果，真正的长命令转后台，让插话尽快送达。
-const STEER_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const STEER_GRACE: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 pub(crate) async fn run(
@@ -111,8 +112,9 @@ pub(crate) async fn run_with_yield(
             return format!(
                 "[Command moved to background]\n\n\
                  job_id: {id}\n\n\
-                 The command is still running in the background. You can continue with other tasks.\n\
-                 Use the job tool with job_ids=[\"{id}\"] when you need the output."
+                 The command is still running in the background. You will be notified when it exits, \
+                 so do not poll it: continue with other tasks or end your turn.\n\
+                 Use the job tool with job_ids=[\"{id}\"] only if you need its output before then."
             );
         }
     }
@@ -212,20 +214,25 @@ fn human_budget(budget: Duration) -> String {
 ///
 /// 取消（用户按 Esc）仍然走 [`finish_early`] 杀掉——那是明确要它停。
 fn detach_to_background(jobs: &Jobs, id: &str, why: String) -> String {
+    // 转不动只有一种情况：这一瞬间它自己跑完了。那就当正常完成，别报超时——也
+    // 不会有跑完通知（它是在前台跑完的），所以这里必须把完整结果交回。
+    if !jobs.detach(id) {
+        let out = jobs
+            .model_snapshot(id)
+            .map(|s| s.output)
+            .unwrap_or_default();
+        jobs.forget(id);
+        return out;
+    }
     let out = jobs
         .model_snapshot(id)
         .map(|s| s.output)
         .unwrap_or_default();
-    // 转不动只有一种情况：这一瞬间它自己跑完了。那就当正常完成，别报超时。
-    if !jobs.detach(id) {
-        jobs.forget(id);
-        return out;
-    }
     let head = format!(
         "[命令仍在运行，已转入后台]（{why}）\n\n\
          job_id: {id}\n\n\
-         进程没有被终止，还在继续跑。不要重跑这条命令——用 job 工具配 \
-         job_ids=[\"{id}\"] 取后续输出，要停就用 kill_task。\n\
+         进程没有被终止，还在继续跑。不要重跑这条命令。它跑完会通知你（退出码和输出结尾），\
+         不用拿 job 工具干等：先做别的，或者结束这一轮。要停就用 kill_task。\n\
          下面是转入后台前已产出的输出。"
     );
     if out.trim().is_empty() || out.trim() == "(no output)" {

@@ -1,16 +1,23 @@
 //! Background jobs (`ctx.jobs`). Bash `is_background` and `tool-jobs` use this.
 
+mod notify;
+
+pub use notify::job_notify;
+
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use std::time::{Duration, SystemTime};
 
 use cordis::{plugin, Inject, Plugin};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::names::{JOBS, TOOLS};
+use crate::agent::turn::TurnControl;
+use crate::names::{JOBS, JOB_FINISHED, JOB_REPORTED, SESSIONS, TOOLS, TURN};
+use crate::session::log::Sessions;
+use crate::tools::bash::STEER_GRACE;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
@@ -227,6 +234,43 @@ impl OutputBuf {
         s
     }
 
+    /// 输出的结尾：至多 `max` 字节，从一行的开头起；第二个值说明这是不是全部输出。
+    ///
+    /// 后台任务跑完的通知带这一段：退出原因、测试汇总、报错几乎都在结尾。
+    pub(crate) fn ending(&self, max: usize) -> (String, bool) {
+        let dropped = self.total - self.head.len() - self.tail.len();
+        let mut bytes: Vec<u8> = Vec::with_capacity(self.head.len() + self.tail.len());
+        if dropped == 0 {
+            bytes.extend_from_slice(&self.head);
+        }
+        bytes.extend(self.tail.iter().copied());
+        let whole = dropped == 0 && bytes.len() <= max;
+        if whole {
+            return (
+                String::from_utf8_lossy(trim_trailing_partial(&bytes)).into_owned(),
+                true,
+            );
+        }
+        let window = &bytes[bytes.len().saturating_sub(max)..];
+        // 窗口的起点多半在一行中间（尾部缓冲也是按字节滚动的）：从下一行开始。
+        let window = match window.iter().position(|b| *b == b'\n') {
+            Some(i) if i + 1 < window.len() => &window[i + 1..],
+            _ => trim_leading_continuation(window),
+        };
+        (String::from_utf8_lossy(window).into_owned(), false)
+    }
+
+    /// 总行数，口径同 `read_file`（末尾没换行的残行也算一行）。
+    pub(crate) fn line_count(&self) -> usize {
+        let last = self.tail.back().or(self.head.last());
+        self.newlines + usize::from(last.is_some_and(|b| *b != b'\n'))
+    }
+
+    /// 完整输出的落盘路径（只有超出内存预算、而且写盘一直成功时才有）。
+    pub(crate) fn spill_path(&self) -> Option<String> {
+        self.spill.as_ref().map(|s| s.path.clone())
+    }
+
     /// 最后一行非空输出，用于主界面任务条的进度摘要。
     ///
     /// 不能用 `render()` 再取最后一行：任务条常驻、每 80ms 重绘一次，整份
@@ -339,12 +383,68 @@ struct Job {
     is_monitor: bool,
     foreground: AtomicBool,
     start_time: SystemTime,
+    /// 起它的那一页（`main` / `main#N`，子代理是它的 id）。跑完的通知送回那一页；
+    /// 不是在哪一页的一轮里起的（没有执行期 ctx）就是 `None`，跑完不通知。
+    owner: Option<String>,
+    /// 模型已经拿到结果了：`job` 读到它跑完，或者它自己用 `kill_task` 停的。
+    /// 跑完的通知看这一位，不再为同一个结果叫醒那一页。
+    reported: AtomicBool,
+    /// 收尾（`done` 置位时看「还在前台吗」）和转后台（看「跑完了吗」再翻 `foreground`）
+    /// 要互斥：两边交错时，一条刚转后台的命令会既不随调用交回、也不发跑完通知。
+    settle: Mutex<()>,
 }
+
+/// 一条后台任务是怎么结束的。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobEnd {
+    /// 自己退出了，带退出码。
+    Exited(i32),
+    /// 被信号结束（不是 [`Jobs::kill`] 发的），或者拿不到退出状态。
+    Signaled,
+    /// 被 [`Jobs::kill`] 停掉（`kill_task`、任务面板）。
+    Killed,
+    /// 没能启动。
+    SpawnFailed,
+}
+
+/// [`crate::JOB_FINISHED`] 的载荷：一条后台任务跑完了。
+#[derive(Clone, Debug)]
+pub struct JobFinished {
+    pub id: String,
+    /// 起它的那一页，见 `Job::owner`。
+    pub owner: Option<String>,
+    pub command: String,
+    pub description: Option<String>,
+    pub is_monitor: bool,
+    pub end: JobEnd,
+    pub elapsed: Duration,
+    /// 输出的结尾（至多 [`ENDING_BYTES`]，从一行的开头起）。
+    pub ending: String,
+    /// `ending` 就是全部输出。
+    pub ending_is_all: bool,
+    /// 总行数，口径同 `read_file`。
+    pub lines: usize,
+    /// 完整输出的落盘路径（输出超出内存预算时才有）。
+    pub spill: Option<String>,
+}
+
+/// [`crate::JOB_REPORTED`] 的载荷。
+#[derive(Clone, Debug)]
+pub struct JobReported {
+    pub id: String,
+}
+
+/// 跑完通知里带的输出结尾，同落盘预览的 2KB。
+pub const ENDING_BYTES: usize = PREVIEW_BYTES;
+
+type FinishHook = Arc<dyn Fn(JobFinished) + Send + Sync>;
 
 /// Named `"jobs"` service. Live-lookup; do not capture the Arc.
 pub struct Jobs {
     seq: AtomicU64,
     inner: Mutex<HashMap<String, Arc<Job>>>,
+    /// 后台任务跑完时调（[`jobs`] 插件把它接到 [`crate::JOB_FINISHED`] 上）。
+    on_finish: Arc<OnceLock<FinishHook>>,
 }
 
 impl Jobs {
@@ -352,7 +452,29 @@ impl Jobs {
         Self {
             seq: AtomicU64::new(1),
             inner: Mutex::new(HashMap::new()),
+            on_finish: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// 设「后台任务跑完了」的钩子（只认第一次）。前台命令照常跑完不调。
+    pub fn set_on_finish(&self, hook: Arc<dyn Fn(JobFinished) + Send + Sync>) {
+        let _ = self.on_finish.set(hook);
+    }
+
+    /// 模型已经拿到 `id` 的结果，跑完不必再通知它。
+    pub fn mark_reported(&self, id: &str) {
+        if let Some(job) = self.inner.lock().unwrap().get(id) {
+            job.reported.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// 见 [`Self::mark_reported`]。没有这个任务算已经交代过了。
+    pub fn is_reported(&self, id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_none_or(|job| job.reported.load(Ordering::Relaxed))
     }
 
     pub fn start(&self, command: impl Into<String>) -> String {
@@ -409,17 +531,22 @@ impl Jobs {
     /// 杀掉等于把那几分钟扔了、还逼模型原样重跑一次；转后台则是把它留在 `Jobs`
     /// 里，`job` 工具随时能收。
     ///
-    /// 返回 `false` = 没有这个 id（已经收尾并被 `forget` 掉了）。
+    /// 返回 `false` = 没有这个 id（已经收尾并被 `forget` 掉了），或者它这一瞬间
+    /// 自己跑完了：调用方照常把结果交回，不要说它转了后台。
     pub fn detach(&self, id: &str) -> bool {
-        match self.inner.lock().unwrap().get(id) {
-            Some(job) => {
-                // `foreground` 决定它算不算「挡着这一轮」：`live_count` 与 tasks
-                // pane 都看这一位。
-                job.foreground.store(false, Ordering::Relaxed);
-                true
-            }
-            None => false,
+        let Some(job) = self.inner.lock().unwrap().get(id).cloned() else {
+            return false;
+        };
+        // 和 `run_job` 收尾互斥：要么它在前台跑完（结果随这次调用交回），要么转了
+        // 后台（跑完发通知），不会两头落空。
+        let _settle = job.settle.lock().unwrap();
+        if job.done.load(Ordering::Relaxed) {
+            return false;
         }
+        // `foreground` 决定它算不算「挡着这一轮」：`live_count` 与 tasks
+        // pane 都看这一位。
+        job.foreground.store(false, Ordering::Relaxed);
+        true
     }
 
     fn spawn_job(
@@ -445,9 +572,16 @@ impl Jobs {
             is_monitor,
             foreground: AtomicBool::new(foreground),
             start_time: SystemTime::now(),
+            owner: calling_page(),
+            reported: AtomicBool::new(false),
+            settle: Mutex::new(()),
         });
         self.inner.lock().unwrap().insert(id.clone(), job.clone());
-        tokio::spawn(run_job(job, command, cancel_rx, cwd));
+        let finished = Finisher {
+            id: id.clone(),
+            hook: self.on_finish.clone(),
+        };
+        tokio::spawn(run_job(job, command, cancel_rx, cwd, finished));
         id
     }
 
@@ -613,11 +747,62 @@ async fn pump<R: AsyncRead + Unpin>(reader: Option<R>, job: Arc<Job>) {
     }
 }
 
+/// 起这条任务的那一页的会话身份。任务都是在工具调用里起的，执行期 ctx 就是调用页。
+fn calling_page() -> Option<String> {
+    crate::tools::registry::exec_ctx()
+        .and_then(|ctx| ctx.get::<Sessions>(SESSIONS))
+        .map(|s| s.identity().to_string())
+}
+
+/// `run_job` 收尾时报「跑完了」用的：任务 id 和 [`Jobs`] 上的钩子。
+struct Finisher {
+    id: String,
+    hook: Arc<OnceLock<FinishHook>>,
+}
+
+impl Finisher {
+    /// 置 `done`；这时已经不在前台（后台任务、或转入后台的前台命令）才调钩子。
+    ///
+    /// 还在前台的命令由等它的那次调用交回结果，不通知。
+    fn settle(self, job: &Job, end: JobEnd) {
+        let background = {
+            let _settle = job.settle.lock().unwrap();
+            job.done.store(true, Ordering::Relaxed);
+            !job.foreground.load(Ordering::Relaxed)
+        };
+        let Some(hook) = self.hook.get() else {
+            return;
+        };
+        if !background {
+            return;
+        }
+        let (ending, ending_is_all, lines, spill) = {
+            let buf = job.output.lock().unwrap();
+            let (ending, all) = buf.ending(ENDING_BYTES);
+            (ending, all, buf.line_count(), buf.spill_path())
+        };
+        hook(JobFinished {
+            id: self.id,
+            owner: job.owner.clone(),
+            command: job.command.clone(),
+            description: job.description.clone(),
+            is_monitor: job.is_monitor,
+            end,
+            elapsed: job.start_time.elapsed().unwrap_or_default(),
+            ending,
+            ending_is_all,
+            lines,
+            spill,
+        });
+    }
+}
+
 async fn run_job(
     job: Arc<Job>,
     command: String,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     cwd: Option<PathBuf>,
+    finished: Finisher,
 ) {
     let mut builder = tokio::process::Command::new("bash");
     builder
@@ -636,7 +821,7 @@ async fn run_job(
                 .lock()
                 .unwrap()
                 .push(format!("Error spawning bash: {e}").as_bytes());
-            job.done.store(true, Ordering::Relaxed);
+            finished.settle(&job, JobEnd::SpawnFailed);
             return;
         }
         Ok(child) => child,
@@ -677,7 +862,15 @@ async fn run_job(
     if job.output.lock().unwrap().total == 0 && job.exit_note.lock().unwrap().is_none() {
         job.output.lock().unwrap().push(b"(no output)");
     }
-    job.done.store(true, Ordering::Relaxed);
+    let end = if killed {
+        JobEnd::Killed
+    } else {
+        match status.and_then(|st| st.code()) {
+            Some(code) => JobEnd::Exited(code),
+            None => JobEnd::Signaled,
+        }
+    };
+    finished.settle(&job, end);
 }
 
 impl Default for Jobs {
@@ -688,11 +881,16 @@ impl Default for Jobs {
 
 pub fn jobs() -> Plugin {
     plugin("jobs", Inject::new(), |ctx, _: &()| {
-        Ok(Some(ctx.provide(JOBS, Jobs::new())?))
+        let jobs = Jobs::new();
+        let emit = ctx.clone();
+        jobs.set_on_finish(Arc::new(move |done: JobFinished| {
+            emit.emit(JOB_FINISHED, done);
+        }));
+        Ok(Some(ctx.provide(JOBS, jobs)?))
     })
 }
 
-const JOB_PARAMS: &str = r#"{"type":"object","properties":{"job_ids":{"type":"array","items":{"type":"string"},"description":"Job ids, as printed by the tool that started them (\"job-7\"). Omit to list every job in this session."},"timeout_ms":{"type":"integer","description":"Wait up to this many ms for the named jobs to finish; omit or 0 for an immediate snapshot."}}}"#;
+const JOB_PARAMS: &str = r#"{"type":"object","properties":{"job_ids":{"type":"array","items":{"type":"string"},"description":"Job ids, as printed by the tool that started them (\"job-7\"). Omit to list every job in this session."},"timeout_ms":{"type":"integer","description":"Wait up to this many ms for the named jobs to finish; omit or 0 for an immediate snapshot. Only wait when you cannot go on without the result: a finished job notifies you on its own."}}}"#;
 const KILL_PARAMS: &str =
     r#"{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}"#;
 
@@ -719,7 +917,7 @@ pub fn tool_jobs() -> Plugin {
                     tools.register(
                         ToolSpec {
                             name: "job".into(),
-                            description: "List background jobs, or read output and status from specific ones. Jobs are background terminal commands and monitors; subagents are not jobs (use list_agents).\n- Omit job_ids to list every job in this session: one line each with status, how long it has been running, and the command, without output bodies. Use this when you have lost track of what is still running, then kill_task the ones you no longer need.\n- Pass job_ids to read their output: ids come from is_background=true commands, from a command that outlived its foreground budget, or from monitor.\n- timeout_ms waits that long for the named jobs to finish; omit it or pass 0 for an immediate snapshot. Waiting never terminates a job — a timed-out wait returns the output so far and says so.".into(),
+                            description: "List background jobs, or read output and status from specific ones. Jobs are background terminal commands and monitors; subagents are not jobs (use list_agents).\n- When a background job exits you are notified with its exit status and the end of its output, even after your turn has ended. Do not poll or wait just to find out whether it finished: continue with other work, or end your turn.\n- Omit job_ids to list every job in this session: one line each with status, how long it has been running, and the command, without output bodies. Use this when you have lost track of what is still running, then kill_task the ones you no longer need.\n- Pass job_ids to read their output: ids come from is_background=true commands, from a command that outlived its foreground budget, or from monitor. Use this for the full output after a notification, or for progress so far.\n- timeout_ms waits that long for the named jobs to finish; omit it or pass 0 for an immediate snapshot. Wait only when you cannot continue without the result. Waiting never terminates a job — a wait that times out or is cut short by a new user message returns the output so far and says so.".into(),
                             parameters_json: JOB_PARAMS.into(),
                         },
                         output,
@@ -852,8 +1050,21 @@ async fn job_output(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         }
         return tool_result(call, parts.join("\n\n"));
     }
-    let body = collect_output(jobs.as_deref(), &ids, timeout).await;
-    tool_result(call, with_wait_note(body))
+    // 等待看的是**调用页**的这一轮：插话、停止都是那一页的。
+    let turn = crate::tools::registry::exec_ctx().and_then(|c| c.get::<TurnControl>(TURN));
+    let signals = WaitSignals {
+        cancelled: &|| turn.as_ref().is_some_and(|t| t.is_cancelled()),
+        steered: &|| turn.as_ref().is_some_and(|t| t.yield_requested()),
+    };
+    let collected = collect_output(jobs.as_deref(), &ids, timeout, &signals).await;
+    // 读到跑完的结果了：跑完通知就不必再为它叫醒这一页，还没送到的撤掉。
+    if let Some(jobs) = &jobs {
+        for id in &collected.finished {
+            jobs.mark_reported(id);
+            ctx.emit(JOB_REPORTED, JobReported { id: id.clone() });
+        }
+    }
+    tool_result(call, with_wait_note(collected.body, collected.end))
 }
 
 async fn kill_task(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
@@ -864,37 +1075,84 @@ async fn kill_task(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
     let Some(jobs) = ctx.get::<Jobs>(JOBS) else {
         return tool_result(call, "Error: jobs is not mounted");
     };
+    // 模型自己停的：它知道，停下来以后不再发「被停掉了」的通知。已经跑完的不算——
+    // 那条跑完的通知它还没看到，照常送。
+    if jobs.is_done(id) == Some(false) {
+        jobs.mark_reported(id);
+    }
     let msg = jobs.kill(id).await;
     tool_result(call, msg)
 }
 
-/// 等到点了任务还没跑完时补一句：上面是**快照**不是结论，任务仍在跑。
+/// `job` 的等待因为什么结束。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitEnd {
+    /// 都跑完了，或者本来就是不等待的即时快照。
+    Settled,
+    /// 到点了还有任务在跑。
+    TimedOut,
+    /// 用户发来了新消息（插话），先让路。
+    Steered,
+    /// 用户停止了这一轮。
+    Stopped,
+}
+
+/// 等待期间要看的两个信号（调用页这一轮的停止与插话）。
+struct WaitSignals<'a> {
+    cancelled: &'a (dyn Fn() -> bool + Send + Sync),
+    steered: &'a (dyn Fn() -> bool + Send + Sync),
+}
+
+/// 没跑完就提前结束时补一句：上面是**快照**不是结论，任务仍在跑、跑完会通知。
 ///
 /// 不加这句时，一个 `[running]` 快照很容易被当成最终结果读掉。
-fn with_wait_note((body, timed_out): (String, bool)) -> String {
-    if !timed_out {
-        return body;
-    }
+fn with_wait_note(body: String, end: WaitEnd) -> String {
+    let why = match end {
+        WaitEnd::Settled => return body,
+        WaitEnd::TimedOut => "Still running when the wait timed out.",
+        WaitEnd::Steered => "The user sent a new message, so the wait ended early.",
+        WaitEnd::Stopped => "The user stopped this turn, so the wait ended early.",
+    };
     format!(
-        "{body}\n\nStill running when the wait timed out. The snapshot above is the output so \
-         far, not a result — call again later."
+        "{body}\n\n{why} The snapshot above is the output so far, not a result. The job keeps \
+         running, and you are notified when it exits; do not wait on it again just to find out."
     )
 }
 
-/// 收集 `ids` 的输出，返回正文与这次等待是否到点仍有任务在跑。
+/// [`collect_output`] 的结果。
+struct Collected {
+    body: String,
+    end: WaitEnd,
+    /// 这次交回了跑完结果的任务。
+    finished: Vec<String>,
+}
+
+/// 收集 `ids` 的输出。
 ///
 /// `timeout_ms` 是**本次调用愿意等多久**，不是任务的生命周期：到点返回的是当前
-/// 快照（已产出输出 + `[running]`），任务照跑，下次调用接着查 —— 长任务不会因为
-/// 某次等待到期而丢结果。`timeout_ms == 0` 是不等待的即时快照。
-async fn collect_output(jobs: Option<&Jobs>, ids: &[String], timeout_ms: u64) -> (String, bool) {
+/// 快照（已产出输出 + `[running]`），任务照跑 —— 长任务不会因为某次等待到期而丢
+/// 结果。`timeout_ms == 0` 是不等待的即时快照。
+///
+/// 等着的时候用户插话了：和前台 bash 一样再给 [`STEER_GRACE`]，还没跑完就交回快照，
+/// 让插话尽快送达；用户停止了这一轮就立刻交回。
+async fn collect_output(
+    jobs: Option<&Jobs>,
+    ids: &[String],
+    timeout_ms: u64,
+    signals: &WaitSignals<'_>,
+) -> Collected {
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(if timeout_ms == 0 { 1 } else { timeout_ms });
+    let mut steered_at: Option<tokio::time::Instant> = None;
     loop {
         let mut parts = Vec::new();
+        let mut finished = Vec::new();
         let mut all_done = true;
         for id in ids {
             if let Some(j) = jobs.and_then(|j| j.model_snapshot(id)) {
-                if !j.done {
+                if j.done {
+                    finished.push(id.clone());
+                } else {
                     all_done = false;
                 }
                 parts.push(render_snap(&j));
@@ -905,8 +1163,28 @@ async fn collect_output(jobs: Option<&Jobs>, ids: &[String], timeout_ms: u64) ->
                 ));
             }
         }
-        if timeout_ms == 0 || all_done || tokio::time::Instant::now() >= deadline {
-            return (parts.join("\n\n"), timeout_ms > 0 && !all_done);
+        let end = if timeout_ms == 0 || all_done {
+            Some(WaitEnd::Settled)
+        } else if (signals.cancelled)() {
+            Some(WaitEnd::Stopped)
+        } else if (signals.steered)()
+            && steered_at
+                .get_or_insert_with(tokio::time::Instant::now)
+                .elapsed()
+                >= STEER_GRACE
+        {
+            Some(WaitEnd::Steered)
+        } else if tokio::time::Instant::now() >= deadline {
+            Some(WaitEnd::TimedOut)
+        } else {
+            None
+        };
+        if let Some(end) = end {
+            return Collected {
+                body: parts.join("\n\n"),
+                end,
+                finished,
+            };
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -1157,34 +1435,45 @@ mod tests {
             .exists());
     }
 
-    /// 到点仍有任务在跑：正文给 running 快照（任务没被中止），并补一句说明它不是结论。
+    /// 两个信号都不来的等待（大多数用例）。
+    const QUIET: WaitSignals<'static> = WaitSignals {
+        cancelled: &|| false,
+        steered: &|| false,
+    };
+
+    /// 到点仍有任务在跑：正文给 running 快照（任务没被中止），并补一句说明它不是结论、
+    /// 跑完会通知。
     ///
-    /// 后台 bash / monitor 不推回合结束通知，所以这句里不能出现 turn-end。
+    /// 这句不能写成子代理那种 turn end：后台任务没有「回合」。
     #[tokio::test]
     async fn collect_output_reports_when_the_wait_runs_out() {
         let jobs = Jobs::new();
         let id = jobs.start("sleep 5");
         let started = std::time::Instant::now();
-        let (body, timed_out) = collect_output(Some(&jobs), std::slice::from_ref(&id), 300).await;
+        let got = collect_output(Some(&jobs), std::slice::from_ref(&id), 300, &QUIET).await;
         // 先收进程再断言，免得中途失败漏一个 sleep 出去。
         assert!(jobs.kill(&id).await.contains("killed"), "收不掉测试进程");
 
-        assert!(timed_out, "300ms 到点时 sleep 5 还在跑：{body}");
+        assert_eq!(
+            got.end,
+            WaitEnd::TimedOut,
+            "300ms 到点时 sleep 5 还在跑：{}",
+            got.body
+        );
+        assert!(got.finished.is_empty(), "没跑完的不算交回了结果");
         // `[running` 而不是 `[running]`：状态后面还跟着已运行时长。
-        assert!(body.contains("[running"), "{body}");
+        assert!(got.body.contains("[running"), "{}", got.body);
         assert!(
             started.elapsed() < std::time::Duration::from_secs(4),
             "等待该按 timeout 返回，而不是挂到任务结束"
         );
-        let note = with_wait_note((body, timed_out));
+        let note = with_wait_note(got.body, got.end);
         assert!(note.contains("not a result"), "{note}");
-        assert!(
-            !note.contains("turn end"),
-            "bash job 没有 turn-end 通知：{note}"
-        );
+        assert!(note.contains("notified when it exits"), "{note}");
+        assert!(!note.contains("turn end"), "bash job 没有回合：{note}");
     }
 
-    /// 跑完的任务不报「等到点了」，也不加提示。
+    /// 跑完的任务不报「等到点了」，也不加提示；它算交回了结果。
     #[tokio::test]
     async fn completed_task_is_not_a_timed_out_wait() {
         let jobs = Jobs::new();
@@ -1195,13 +1484,176 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
 
-        let (body, timed_out) = collect_output(Some(&jobs), std::slice::from_ref(&id), 300).await;
-        assert!(!timed_out, "{body}");
-        assert!(body.contains("[done]"), "{body}");
+        let got = collect_output(Some(&jobs), std::slice::from_ref(&id), 300, &QUIET).await;
+        assert_eq!(got.end, WaitEnd::Settled, "{}", got.body);
+        assert!(got.body.contains("[done]"), "{}", got.body);
+        assert_eq!(got.finished, vec![id]);
         assert_eq!(
-            with_wait_note((body.clone(), timed_out)),
-            body,
+            with_wait_note(got.body.clone(), got.end),
+            got.body,
             "跑完了不该加提示"
         );
+    }
+
+    /// 等着的时候用户插话了：和前台 bash 一样只再等 [`STEER_GRACE`]，交回快照让插话
+    /// 送达，任务照跑。以前这里只看 timeout，插话要等满整段（实测中位数 4 分钟）。
+    #[tokio::test]
+    async fn a_new_user_message_cuts_the_wait_short() {
+        let jobs = Jobs::new();
+        let id = jobs.start("echo started; sleep 30");
+        let started = std::time::Instant::now();
+        let steered = WaitSignals {
+            cancelled: &|| false,
+            steered: &|| true,
+        };
+        let got = collect_output(Some(&jobs), std::slice::from_ref(&id), 60_000, &steered).await;
+        let waited = started.elapsed();
+        let still_running = jobs.is_done(&id) == Some(false);
+        assert!(jobs.kill(&id).await.contains("killed"), "收不掉测试进程");
+
+        assert_eq!(got.end, WaitEnd::Steered, "{}", got.body);
+        assert!(
+            waited >= STEER_GRACE && waited < STEER_GRACE + Duration::from_secs(3),
+            "插话后只该再等 {STEER_GRACE:?}，实际 {waited:?}"
+        );
+        assert!(still_running, "让路不能把任务停掉");
+        assert!(
+            with_wait_note(got.body, got.end).contains("new message"),
+            "要说明为什么提前交回"
+        );
+    }
+
+    /// 宽限期里跑完的照常交回结果：插话不该让一个马上就好的任务只交回半截。
+    #[tokio::test]
+    async fn a_job_finishing_within_the_grace_still_returns_its_result() {
+        let jobs = Jobs::new();
+        let id = jobs.start("sleep 0.5; echo finished-in-grace");
+        let steered = WaitSignals {
+            cancelled: &|| false,
+            steered: &|| true,
+        };
+        let got = collect_output(Some(&jobs), std::slice::from_ref(&id), 60_000, &steered).await;
+        assert_eq!(got.end, WaitEnd::Settled, "{}", got.body);
+        assert!(got.body.contains("finished-in-grace"), "{}", got.body);
+    }
+
+    /// 用户停止了这一轮：立刻交回，不等宽限期。
+    #[tokio::test]
+    async fn stopping_the_turn_ends_the_wait_at_once() {
+        let jobs = Jobs::new();
+        let id = jobs.start("sleep 30");
+        let started = std::time::Instant::now();
+        let stopped = WaitSignals {
+            cancelled: &|| true,
+            steered: &|| false,
+        };
+        let got = collect_output(Some(&jobs), std::slice::from_ref(&id), 60_000, &stopped).await;
+        let waited = started.elapsed();
+        assert!(jobs.kill(&id).await.contains("killed"), "收不掉测试进程");
+        assert_eq!(got.end, WaitEnd::Stopped, "{}", got.body);
+        assert!(
+            waited < Duration::from_secs(1),
+            "停止要立刻交回：{waited:?}"
+        );
+    }
+
+    /// 等钩子报出下一条跑完的任务。
+    async fn finish_of(rx: &mut tokio::sync::mpsc::UnboundedReceiver<JobFinished>) -> JobFinished {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("10s 内没有报跑完")
+            .expect("钩子通道断了")
+    }
+
+    fn hooked() -> (Jobs, tokio::sync::mpsc::UnboundedReceiver<JobFinished>) {
+        let jobs = Jobs::new();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        jobs.set_on_finish(Arc::new(move |done| {
+            let _ = tx.send(done);
+        }));
+        (jobs, rx)
+    }
+
+    /// 后台任务跑完报一次，带退出码、跑了多久和输出结尾。
+    #[tokio::test]
+    async fn a_background_job_reports_how_it_ended() {
+        let (jobs, mut rx) = hooked();
+        let id = jobs.start("echo first; echo last; exit 3");
+        let done = finish_of(&mut rx).await;
+        assert_eq!(done.id, id);
+        assert_eq!(done.end, JobEnd::Exited(3));
+        assert!(done.ending_is_all, "{done:?}");
+        assert!(done.ending.contains("first\nlast"), "{done:?}");
+        assert_eq!(done.lines, 2, "退出码不在输出里，不算一行：{done:?}");
+        assert_eq!(done.owner, None, "不在哪一页的一轮里起的，没有归属");
+    }
+
+    /// 前台命令照常跑完不报：结果随那次调用交回了。
+    #[tokio::test]
+    async fn a_foreground_command_that_finishes_is_not_reported() {
+        let (jobs, mut rx) = hooked();
+        let id = jobs.start_foreground("echo fg");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while jobs.is_done(&id) != Some(true) {
+            assert!(std::time::Instant::now() < deadline, "echo 没在 10s 内跑完");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err(), "前台命令不该报跑完");
+    }
+
+    /// 转入后台的前台命令跑完要报：模型拿到的只是转后台那一刻的半截输出。
+    #[tokio::test]
+    async fn a_detached_foreground_command_reports_when_it_ends() {
+        let (jobs, mut rx) = hooked();
+        let id = jobs.start_foreground("sleep 0.3; echo after-detach");
+        assert!(jobs.detach(&id), "还在跑，应当转得动");
+        let done = finish_of(&mut rx).await;
+        assert_eq!(done.id, id);
+        assert_eq!(done.end, JobEnd::Exited(0));
+        assert!(done.ending.contains("after-detach"), "{done:?}");
+    }
+
+    /// 已经跑完的前台命令转不了后台：调用方照常交回结果，不能说它转了后台（那样
+    /// 结果既不随调用交回、也不会有跑完通知）。
+    #[tokio::test]
+    async fn a_finished_command_cannot_be_detached() {
+        let (jobs, mut rx) = hooked();
+        let id = jobs.start_foreground("echo quick");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while jobs.is_done(&id) != Some(true) {
+            assert!(std::time::Instant::now() < deadline, "echo 没在 10s 内跑完");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!jobs.detach(&id), "跑完了就不该再转后台");
+        assert!(rx.try_recv().is_err(), "前台跑完的不报");
+    }
+
+    /// 被停掉的报 `Killed`，不报信号 9。
+    #[tokio::test]
+    async fn a_killed_job_reports_killed() {
+        let (jobs, mut rx) = hooked();
+        let id = jobs.start("sleep 30");
+        assert!(jobs.kill(&id).await.contains("killed"));
+        assert_eq!(finish_of(&mut rx).await.end, JobEnd::Killed);
+    }
+
+    /// 结尾从一行的开头起，至多给定字节；输出被截断过时不能自称是全部。
+    #[test]
+    fn the_ending_starts_at_a_line_and_knows_whether_it_is_all() {
+        let mut buf = OutputBuf::default();
+        let full: String = (1..=2000).map(|i| format!("line {i:05}\n")).collect();
+        buf.push(full.as_bytes());
+        let (ending, all) = buf.ending(100);
+        assert!(!all);
+        assert!(ending.starts_with("line "), "要从一行开头起：{ending:?}");
+        assert!(ending.ends_with("line 02000\n"), "{ending:?}");
+        assert!(ending.len() <= 100, "{}", ending.len());
+        assert_eq!(buf.line_count(), 2000);
+
+        let mut short = OutputBuf::default();
+        short.push(b"one\ntwo");
+        assert_eq!(short.ending(100), ("one\ntwo".to_string(), true));
+        assert_eq!(short.line_count(), 2, "末尾没换行的残行也算一行");
     }
 }
