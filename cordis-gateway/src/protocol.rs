@@ -225,6 +225,19 @@ pub const MCP_RELOAD: &str = "mcp/reload";
 pub const MCP_LIST: &str = "mcp/list";
 pub const MCP_RECONNECT: &str = "mcp/reconnect";
 pub const MODEL_LIST: &str = "model/list";
+/// 订阅通道的账号状态（`auth/status`，**只给受信连接**：里面有账号邮箱）。
+pub const AUTH_STATUS: &str = "auth/status";
+/// 订阅通道登录（`auth/login`）：后台开始登录，授权页地址立刻回给客户端。
+pub const AUTH_LOGIN: &str = "auth/login";
+/// 订阅通道登出（`auth/logout`）：撤销 refresh token、清本地 token（注册留着）。
+pub const AUTH_LOGOUT: &str = "auth/logout";
+/// 中断正在跑的订阅通道登录（`auth/cancel`）。
+pub const AUTH_CANCEL: &str = "auth/cancel";
+/// 重拉活动账号能用的模型并入模型目录（`auth/models`）。
+pub const AUTH_MODELS: &str = "auth/models";
+/// 连接级推送（只推受信连接）：订阅通道的账号或登录状态变了（`{ provider }`），
+/// 重拉 `auth/status`。
+pub const AUTH_CHANGED: &str = "auth/changed";
 
 // 设置页（只给受信连接，见 `handlers::settings::is_settings_method`）。
 pub const CONFIG_STATUS: &str = "config/status";

@@ -914,7 +914,10 @@ pub async fn run(root: Context) -> Result<()> {
                 )?;
             }
             _ = shimmer.tick() => {
-                if live_redraw(&ctx, &overlay) {
+                // 后台来的提示（订阅登录结果之类）也得自己冒出来：只靠事件驱动的话，
+                // 用户不动键盘它就一直不显示。
+                let notice = open_slash_notice_if_needed(&ctx, &mut overlay);
+                if notice || live_redraw(&ctx, &overlay) {
                     draw(
                         &ctx,
                         &mut terminal,

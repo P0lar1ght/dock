@@ -15,6 +15,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { ArrowUp, ChevronDown, Goal, Hand, ListChecks, Mic, Plus, X } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ComposerSettings, ContextBreakdown, ImageInput, SlashCommand, SlashResult } from "../model";
 import { store, useGatewayId, type SendMode } from "../dock/store";
 import { COMING_SOON } from "./chrome";
@@ -32,6 +33,11 @@ const APPROVAL = [
   { id: "auto", label: "自动批准", hint: "不再询问" },
 ];
 const EFFORT: Record<string, string> = { "": "默认", none: "关", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "极高" };
+
+/** 用量页（官方指定的「Manage usage」入口）。 */
+const USAGE_URL = "https://chatgpt.com/settings/usage";
+/** 订阅通道的 provider id → 标识上的名字（官方原文是「Using ChatGPT plan」）。 */
+const planName = (provider?: string | null) => (provider === "chatgpt" ? "ChatGPT" : (provider ?? ""));
 
 export interface ComposerActions {
   /** 成功回 true，输入框才清空（失败时文字和图都留着，改改再发）。 */
@@ -110,6 +116,8 @@ export function Composer({
   const [contextOpen, setContextOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // 当前模型是不是走订阅通道（`auth = "chatgpt"`）。是就标出「Using ChatGPT plan」（官方 UI 规范）。
+  const planModel = settings.models.find((m) => m.id === settings.modelId && m.authProvider);
 
   // 别的面板填进来的话（如浏览器面板的示例）：换掉当前草稿并聚焦，不发送。
   useEffect(
@@ -569,6 +577,18 @@ export function Composer({
                 </>
               }
             />
+          )}
+          {/* 走订阅通道的模型：官方要求标出「Using ChatGPT plan」，并给用量页入口（Manage usage）。 */}
+          {planModel && (
+            <button
+              type="button"
+              title={`请求用的是 ${planName(planModel.authProvider)} 套餐额度 · Manage usage`}
+              className="flex h-7 shrink-0 items-center gap-1 rounded-full bg-[#f5f5f7] px-2.5 text-xs font-medium text-ink-3 hover:bg-[#ececf0]"
+              onClick={() => void openUrl(USAGE_URL).catch(() => window.open(USAGE_URL, "_blank", "noopener"))}
+            >
+              <span className="hidden @[30rem]:inline">Using {planName(planModel.authProvider)} plan</span>
+              <span className="@[30rem]:hidden">套餐</span>
+            </button>
           )}
           {settings.reasoningOptions.length > 0 && (
             <MenuButton

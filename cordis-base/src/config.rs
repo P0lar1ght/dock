@@ -5,6 +5,7 @@
 //! `[models].catalog` sets the list; `[model.<id>]` adds/overrides. 没有配置文件
 //! 就没有模型——内置目录已经删掉，不再假装有可用端点。
 
+pub mod auth_models;
 pub mod edit;
 
 use std::collections::BTreeMap;
@@ -239,6 +240,15 @@ pub struct ModelChoice {
     /// `[model.<id>].provider`：连接（基址 / 协议 / 鉴权 / 密钥）继承自哪个
     /// `[provider.<id>]`。模型自己写了的键优先；继承已在读配置时展开到上面各字段。
     pub provider: Option<String>,
+    /// `[model.<id>].auth`：这条模型走**订阅通道**（Auth Manager），值是
+    /// provider id（`"chatgpt"`）。
+    ///
+    /// 写了它，密钥不再从 `api_key` / `env_key` / `secrets.json` 取，而是向
+    /// Auth Manager 要一份短期 access token；那条通道对请求体的硬约束
+    /// （`store: false`、`system` 走 `instructions`……）也一并套上。
+    ///
+    /// 不写 = 现在的老路径，行为一点不变。
+    pub auth: Option<String>,
 }
 
 /// `id` 在目录里给人看的名字（见 [`ModelChoice::display_label`]）；不在目录里就是 id。
@@ -282,6 +292,8 @@ impl ModelChoice {
                 .env_key
                 .as_deref()
                 .is_some_and(|s| !s.trim().is_empty())
+            // 走订阅通道的模型：地址和密钥都由鉴权 provider 给，config 里可以一个都不写。
+            || self.auth_provider().is_some()
     }
 
     /// 行内 `api_key` → 环境变量 `env_key` → `$DOCK_HOME/secrets.json` 里同名的那项
@@ -308,6 +320,40 @@ impl ModelChoice {
     /// 切到该模型时用哪条 wire：声明列表的第一条。
     pub fn default_backend(&self) -> ApiBackend {
         self.api_backends.first().copied().unwrap_or_default()
+    }
+
+    /// 这条模型走不走订阅通道。`None` = 没写 `auth`，走老路径。
+    pub fn auth_provider(&self) -> Option<&str> {
+        self.auth
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// `auth` 与 `api_key` / `env_key` 同时出现 = 配置错误。
+    ///
+    /// 订阅通道的密钥由 Auth Manager 发：同时写死一份密钥，两边到底用哪个
+    /// 谁也说不清——真用错了还是能跑，只是花的不是订阅额度。所以这里**报配置
+    /// 错误**，不静默挑一个。
+    pub fn auth_conflict(&self) -> Option<String> {
+        let provider = self.auth_provider()?;
+        let has_key = self
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+            || self
+                .env_key
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty());
+        has_key.then(|| {
+            format!(
+                "模型「{}」同时配了 auth = \"{provider}\" 和 api_key / env_key：\
+                 订阅通道的密钥由 Auth Manager 发，写死密钥算配置错误。",
+                self.id
+            )
+        })
     }
 
     /// `/protocol` 只允许切到声明过的协议——端点没开的那条切过去就是 404。
@@ -1423,6 +1469,9 @@ struct CatalogRow {
     supports_images: Option<bool>,
     #[serde(default)]
     pricing: Option<PricingRow>,
+    /// 走订阅通道（Auth Manager），值是 provider id。
+    #[serde(default)]
+    auth: Option<String>,
 }
 
 /// `[model.<id>.responses]` / `.chat_completions` / `.messages` 三个可选子表。
@@ -1491,6 +1540,9 @@ pub(crate) struct ModelOverride {
     supports_images: Option<bool>,
     #[serde(default)]
     pricing: Option<PricingRow>,
+    /// 走订阅通道（Auth Manager），值是 provider id。
+    #[serde(default)]
+    auth: Option<String>,
 }
 
 /// `[provider.<id>]`：同一家供应商的模型共用的连接。只收连接键；能力和单价是
@@ -1589,8 +1641,12 @@ pub fn catalog_paths() -> Vec<PathBuf> {
 }
 
 /// Live-read catalog. Do not cache the Vec on a long-lived Arc.
+///
+/// 配置文件里的模型 + 订阅通道自动发现的模型（`$DOCK_HOME/auth_models.json`，
+/// 见 [`auth_models`]）。
 pub fn load_catalog() -> Vec<ModelChoice> {
-    load_catalog_from(&catalog_paths())
+    let cache = auth_models::AuthModelCache::read(&auth_models::path());
+    load_catalog_with(&catalog_paths(), &auth_models::catalog_entries(&cache))
 }
 
 pub fn load_default_model() -> Option<String> {
@@ -1609,20 +1665,41 @@ pub fn catalog_has_http() -> bool {
 /// 以前这里塞过五条没有 api_base 也没有 key 的内置条目（grok-4 / gpt-4.1 / …），
 /// 选中它们只会得到一个连不上的模型——宁可空着，让 `/model` 直说去写 config。
 pub fn load_catalog_from(paths: &[PathBuf]) -> Vec<ModelChoice> {
+    load_catalog_with(paths, &[])
+}
+
+/// 配置文件 + `discovered`（订阅通道自动发现的模型）。
+///
+/// - 发现的模型**先放进来**，config 里同 id 的 `[model."chatgpt/…"]` 才能逐字段覆盖它
+///   （只写一个 `context_window` 也行）；`[[models.catalog]]` 换整张目录时它们留着——
+///   它们不属于哪个配置文件。
+/// - 最后**排在用户自己写的模型后面**：没配 `[models] default` 时「目录第一条」当默认，
+///   登录一下订阅不能把默认模型换掉。
+pub fn load_catalog_with(paths: &[PathBuf], discovered: &[ModelChoice]) -> Vec<ModelChoice> {
     let files: Vec<FileConfig> = paths.iter().filter_map(|p| read_file(p)).collect();
     // 供应商先合完：项目配置里的模型也能挂用户级的供应商（同名时后读的整条覆盖）。
     let mut providers = BTreeMap::new();
     for file in &files {
         providers.extend(file.provider.clone());
     }
-    let mut list: Vec<ModelChoice> = Vec::new();
+    let found = |id: &str| discovered.iter().any(|m| m.id == id);
+    let mut list: Vec<ModelChoice> = discovered.to_vec();
     for file in &files {
         if !file.models.catalog.is_empty() {
-            list = file.models.catalog.iter().map(choice_from_row).collect();
+            let mut rows: Vec<ModelChoice> =
+                file.models.catalog.iter().map(choice_from_row).collect();
+            let kept: Vec<ModelChoice> = list
+                .into_iter()
+                .filter(|m| found(&m.id) && !rows.iter().any(|r| r.id == m.id))
+                .collect();
+            rows.extend(kept);
+            list = rows;
         }
         merge_overrides(&mut list, &file.model, &providers);
     }
-    list
+    let (mut mine, theirs): (Vec<_>, Vec<_>) = list.into_iter().partition(|m| !found(&m.id));
+    mine.extend(theirs);
+    mine
 }
 
 /// 各配置文件里的 `[provider.<id>]`（同名时后读的整条覆盖）。
@@ -1753,6 +1830,7 @@ fn choice_from_row(row: &CatalogRow) -> ModelChoice {
         supports_images: row.supports_images,
         pricing: row.pricing.as_ref().and_then(PricingRow::parse),
         provider: None,
+        auth: nonempty(row.auth.clone()),
     }
 }
 
@@ -1812,6 +1890,9 @@ fn merge_overrides(
             if ov.pricing.is_some() {
                 existing.pricing = ov.pricing.as_ref().and_then(PricingRow::parse);
             }
+            if ov.auth.is_some() {
+                existing.auth = nonempty(ov.auth.clone());
+            }
             if provider.is_some() {
                 existing.provider = provider.clone();
             }
@@ -1839,6 +1920,7 @@ fn merge_overrides(
                 supports_images: ov.supports_images,
                 pricing: ov.pricing.as_ref().and_then(PricingRow::parse),
                 provider: provider.clone(),
+                auth: nonempty(ov.auth.clone()),
                 id,
             });
             if let (Some(row), Some(choice)) = (row, list.last_mut()) {
@@ -1855,7 +1937,9 @@ fn inherit_provider(choice: &mut ModelChoice, ov: &ModelOverride, row: &Provider
         choice.api_base_url = nonempty(row.api_base_url.clone());
     }
     // 密钥整对继承：模型写了任一个，就不再拿供应商的另一个（免得行内 key 配上别家的变量名）。
-    if ov.api_key.is_none() && ov.env_key.is_none() {
+    // 凭据来源三选一（`api_key` / `env_key` / `auth`）：模型走订阅通道时一个密钥都不拿——
+    // 否则挂在写了 `env_key` 的供应商下面，`auth_conflict` 会把它误判成配置错误。
+    if ov.api_key.is_none() && ov.env_key.is_none() && choice.auth_provider().is_none() {
         choice.api_key = nonempty(row.api_key.clone());
         choice.env_key = nonempty(row.env_key.clone());
     }
@@ -2033,6 +2117,172 @@ description = "ollama"
             load_default_model_from(&[path]).as_deref(),
             Some("local-llm")
         );
+    }
+
+    /// `auth` 走订阅通道：不写的老配置一点不变。
+    #[test]
+    fn auth_key_is_read_from_the_model_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model."plan"]
+api_base_url = "https://api.openai.com/v1"
+auth = "chatgpt"
+"#,
+        )
+        .unwrap();
+        let list = load_catalog_from(std::slice::from_ref(&path));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].auth_provider(), Some("chatgpt"));
+        // 没写 api_key / env_key = 不冲突。
+        assert!(list[0].auth_conflict().is_none());
+    }
+
+    /// 挂在写了 `env_key` 的供应商下面、自己走订阅通道的模型：**不继承密钥**。
+    ///
+    /// 继承了的话 `auth_conflict` 会把它判成「同时配了 auth 和 env_key」——可用户
+    /// 一个密钥都没给这条模型写。
+    fn discovered(slug: &str) -> ModelChoice {
+        let mut cache = auth_models::AuthModelCache::default();
+        cache.providers.insert(
+            "chatgpt".into(),
+            auth_models::ProviderModels {
+                display_name: "ChatGPT".into(),
+                account: "oaiapp_a".into(),
+                fetched_at: 1,
+                models: vec![crate::auth::RemoteModel {
+                    slug: slug.into(),
+                    context_window: Some(272_000),
+                    ..Default::default()
+                }],
+            },
+        );
+        auth_models::catalog_entries(&cache).remove(0)
+    }
+
+    /// 订阅通道发现的模型排在用户自己写的后面：没配默认模型时「目录第一条」
+    /// 当默认，登录一下订阅不能把它换掉。
+    #[test]
+    fn discovered_models_come_after_the_users_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[model.\"mine\"]\napi_base_url = \"http://x\"\n").unwrap();
+        let list = load_catalog_with(std::slice::from_ref(&path), &[discovered("gpt-6-luna")]);
+        let ids: Vec<&str> = list.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["mine", "chatgpt/gpt-6-luna"]);
+        // 没有配置文件也照样有它们。
+        let only = load_catalog_with(&[], &[discovered("gpt-6-luna")]);
+        assert_eq!(only.len(), 1);
+        // 纯配置的入口不掺发现的模型（测试与工具读的是文件本身）。
+        assert_eq!(load_catalog_from(std::slice::from_ref(&path)).len(), 1);
+    }
+
+    /// config 里同 id 的条目逐字段覆盖发现的模型，只写一个键也不丢订阅通道。
+    #[test]
+    fn config_overrides_a_discovered_model_field_by_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[model.\"chatgpt/gpt-6-luna\"]\nname = \"Luna\"\ncontext_window = 128000\n",
+        )
+        .unwrap();
+        let list = load_catalog_with(std::slice::from_ref(&path), &[discovered("gpt-6-luna")]);
+        assert_eq!(list.len(), 1, "{list:?}");
+        let luna = &list[0];
+        assert_eq!(luna.name, "Luna");
+        assert_eq!(luna.context_window, Some(128_000));
+        assert_eq!(luna.auth_provider(), Some("chatgpt"), "覆盖不丢通道");
+        assert_eq!(luna.api_model.as_deref(), Some("gpt-6-luna"));
+    }
+
+    /// `[[models.catalog]]` 换整张目录时，发现的模型留着（它们不属于哪个文件）。
+    #[test]
+    fn a_catalog_table_keeps_discovered_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[models.catalog]]\nid = \"row\"\n").unwrap();
+        let list = load_catalog_with(std::slice::from_ref(&path), &[discovered("gpt-6-luna")]);
+        let ids: Vec<&str> = list.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["row", "chatgpt/gpt-6-luna"]);
+    }
+
+    #[test]
+    fn a_subscription_model_does_not_inherit_its_providers_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[provider.openai]
+api_base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+
+[model."plan"]
+provider = "openai"
+auth = "chatgpt"
+
+[model."keyed"]
+provider = "openai"
+"#,
+        )
+        .unwrap();
+        let list = load_catalog_from(std::slice::from_ref(&path));
+        let plan = list.iter().find(|m| m.id == "plan").unwrap();
+        assert_eq!(plan.env_key, None, "{plan:?}");
+        assert!(plan.auth_conflict().is_none(), "{:?}", plan.auth_conflict());
+        // 连接的其余部分照常继承。
+        assert_eq!(
+            plan.api_base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        // 没走订阅通道的兄弟照旧拿供应商的密钥。
+        let keyed = list.iter().find(|m| m.id == "keyed").unwrap();
+        assert_eq!(keyed.env_key.as_deref(), Some("OPENAI_API_KEY"));
+    }
+
+    /// 只写了 `auth` 的模型（地址和密钥都由鉴权 provider 给）也算「配了端点」：
+    /// 否则目录里只有它时，采样器会退回 workspace 模式，这条模型根本发不出去。
+    #[test]
+    fn an_auth_only_model_counts_as_http() {
+        let mut choice = model_choice_for_tests("plan");
+        choice.api_base_url = None;
+        choice.api_key = None;
+        choice.env_key = None;
+        assert!(!choice.has_http());
+        choice.auth = Some("chatgpt".into());
+        assert!(choice.has_http());
+    }
+
+    /// 订阅通道的密钥由 Auth Manager 发：同时写死一份 = 配置错误。
+    #[test]
+    fn auth_with_a_static_key_is_a_config_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[model."plan"]
+api_base_url = "https://api.openai.com/v1"
+auth = "chatgpt"
+api_key = "sk-inline"
+"#,
+        )
+        .unwrap();
+        let list = load_catalog_from(std::slice::from_ref(&path));
+        let conflict = list[0].auth_conflict().expect("应当报配置错误");
+        assert!(conflict.contains("auth"), "{conflict}");
+        assert!(conflict.contains("api_key"), "{conflict}");
+    }
+
+    /// 没写 `auth` 的模型照旧走密钥那条路。
+    #[test]
+    fn models_without_auth_keep_the_old_path() {
+        let choice = model_choice_for_tests("m");
+        assert!(choice.auth_provider().is_none());
+        assert!(choice.auth_conflict().is_none());
     }
 
     #[test]

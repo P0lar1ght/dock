@@ -13,9 +13,12 @@ use url::Url;
 
 use cordis_base::config::dock_home;
 
+use crate::auth::oauth::write_private;
 use crate::tools::fs_perms::ensure_owner_only;
 
 const CREDENTIALS_FILENAME: &str = "mcp_credentials.json";
+/// 改 `mcp_credentials.json` 的跨进程锁（刷新、登录落盘都要拿）。
+const LOCK_FILENAME: &str = "mcp_credentials.lock";
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpCredentialError {
@@ -80,6 +83,12 @@ impl McpCredentialStore {
         dock_home().join(CREDENTIALS_FILENAME)
     }
 
+    /// 读改写整份文件时拿的锁：所有服务器的 token 在同一个文件里，两个进程各自
+    /// 读旧的、各写各的，后写的会把先写的那份刷新结果（轮换后的 refresh token）盖掉。
+    pub fn lock_path() -> PathBuf {
+        dock_home().join(LOCK_FILENAME)
+    }
+
     pub fn load_default() -> Result<Self> {
         Self::load_from(&Self::default_path())
     }
@@ -118,16 +127,11 @@ impl McpCredentialStore {
         self.save_to(&Self::default_path())
     }
 
+    /// 原子写，临时文件**创建时就是 0600**（先按默认权限写再 chmod 的话，中间那一瞬
+    /// 同机器上别的用户能读到 token）。
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let json = serde_json::to_string_pretty(self)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        ensure_owner_only(&tmp)?;
-        std::fs::rename(&tmp, path)?;
-        ensure_owner_only(path)?;
+        write_private(path, json.as_bytes())?;
         Ok(())
     }
 }

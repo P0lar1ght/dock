@@ -61,6 +61,8 @@ const TRUSTED_PREFIXES: &[&str] = &[
     "provider/",
     "profile/",
     "cua/",
+    // 订阅通道：登录 / 登出 = 能改本机凭据。
+    "auth/",
 ];
 const TRUSTED_NAMES: &[&str] = &[
     "browser/status",

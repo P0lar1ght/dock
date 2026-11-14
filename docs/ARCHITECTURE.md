@@ -67,7 +67,7 @@ config.toml.example      用户 / 项目模型目录样例
 |---|---|---|
 | Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
-| 其它 spine | `context` `settings` `turn` `permissions` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `status.items` `tool.views` `plugin.settings` `user.edits` `agentPresets` `dynamicCordisRunner` `compact` | 同名 |
+| 其它 spine | `context` `settings` `turn` `permissions` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `status.items` `tool.views` `plugin.settings` `user.edits` `agentPresets` `dynamicCordisRunner` `compact` `auth` | 同名 |
 | 斜杠命令 | `command-session` `command-settings` `command-goal` `command-plan` `command-loop` `command-workflow` `command-compact`（宿主无关，带 handler）；TUI 的 `tui.commands`（终端专属） | 向 `"slash"` `register_command`；命令体收调用页的 ctx，回 `SlashOutcome`，TUI / 网关各自呈现 |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
 | 宿主契约 | `session_actor` 提供 `session` / `session.port`（`SessionRef`）；`tabs` 提供 `Tabs` | 同名 |
@@ -77,6 +77,31 @@ config.toml.example      用户 / 项目模型目录样例
 `settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。子代理的对话落在父会话目录下 `subagents/<agent-id>/`（`chat_history.jsonl` + `subagent.json`），不是会话，不进名册和搜索。`meta.json` 记着这个会话的预设、模型、推理强度；恢复（`/resume`、`--resume`、开页）时 `Sessions::restore` live-lookup 这一页的 `settings` 把模型和强度切回去，模型已不在目录里就留着当前的。
 
 新东西往 `cordis-base` 还是 `cordis-spine` 放，判据是**有没有插件**：base 不 `provide` 任何 named service、不认识 ctx 键（所以 `names` 不在那儿）、也不依赖内核 crate `cordis`；它只有 wire 类型、`config.toml` 解析和纯引擎（ripgrep、cua 发现）。反过来，`settings` / `permissions` / `slash` / `cron` 虽然也不成环，但它们 provide 服务，留在 spine。这条线由编译器守着——base 反向依赖 spine 会直接编译失败，以前只能靠约定。
+
+订阅通道（`[model.<id>].auth = "chatgpt"`）走同一条线：类型与 trait 在
+`cordis-base/src/auth.rs`（`Lease` / `WirePolicy` / `AuthProvider`），服务本体在
+`cordis-spine/src/auth/`（named service `"auth"`）。provider 插件（`chatgpt-auth`）
+把自己注册进 `"auth"`，采样侧只经它拿短期 access token——**refresh token 不出
+provider**，子代理与 workflow 也拿不到。通道对请求体的硬约束（`store: false`、
+system 走 `instructions`、上游不收的字段）写成 `WirePolicy` 数据，由
+`responses.rs` 统一改写；没写 `auth` 的模型请求体与以前逐字节相同。
+
+凭据落在 `$DOCK_HOME/credentials/<provider>/<client_id>.json`（0600，目录 0700，
+同目录临时文件 → fsync → rename），本机 host id 单独存 `$DOCK_HOME/host_id`——
+**凭据复制到别的机器时 host id 不跟着走**，那台机器用它自己的 id 接管刷新。刷新
+全程持跨进程锁（refresh token 每次刷新都轮换，两边同时刷有一方会撞上
+`refresh_token_reused`）。`/auth` 命令组在 `cordis-spine/src/auth/commands.rs`。
+
+账号状态归 provider（每次读盘，多进程一致），`"auth"` 服务只管 provider 表、
+登录会话（每家同时一个、可取消）和学到的「通道不收的字段」，有变化发
+`auth/changed`。命令、网关、界面都经 `AuthProvider` trait（`accounts` /
+`active_account` / `set_active` / `import` / `info`）读写账号，不碰哪一家的凭据文件。
+OAuth 的共用原语（PKCE、只认回调路径的回环监听、创建即 0600 的原子写、文件锁）在
+`cordis-spine/src/auth/oauth.rs`，MCP 的 OAuth（`tools/mcp/oauth.rs`）也用它；浏览器
+回调页（`auth/callback_page.rs`）先发「正在连接」、换码出结果再把同一页切过去。
+登录 / 切账号 / 导入 / 登出之后，`AuthManager` 把活动账号能用的模型写进
+`$DOCK_HOME/auth_models.json`，`cordis_base::config::load_catalog` 读目录时并进来
+（`config/auth_models.rs`）——目录仍然只有一个入口，各宿主不用各自去问上游。
 
 `cordis-spine/src/tools/` 把注册表与全部工具实现收在一起，对齐 Grok 的 `xai-grok-tools`（那边同样是 `registry/` + `implementations/` 一个 crate）。注册表要问预设的允许名单、工具又要往注册表 register，这圈依赖是工具表这件事的固有形态，不是 dock 特有的耦合，所以不拆成两个 crate。**布局标准**：一能力一顶层目录（`ask_user/`、`browser/`、`read_file/`、`bash/`、`jobs/`…）；共享助手可以是旁边的 `*_common.rs`；工作区七颗由薄 `workspace.rs` 套件调度，**没有** `tools/workspace/` 伞目录。子会话委派档位（`CapabilityMode`）在 `agent/capability.rs`，不是模型工具，不进 `tools/`。
 

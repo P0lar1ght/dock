@@ -466,6 +466,8 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
                 }
             }
         }
+        // 订阅通道的命令体在 spine 里（宿主无关），这里只转发。
+        SlashCmd::Auth => run("auth", args),
         SlashCmd::Model => {
             if args.is_empty() {
                 Effect::ArgPicker {

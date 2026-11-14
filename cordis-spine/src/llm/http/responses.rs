@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
+use cordis_base::auth::WirePolicy;
 use cordis_base::stream_acc::StreamDelta;
 use cordis_base::types::{
     LlmOutput, LogEvent, PromptRequest, ToolCall, UserImage, INTERRUPTED_TOOL_RESULT,
@@ -17,10 +18,11 @@ pub fn body(
     request: &PromptRequest,
     user_images: &[Vec<UserImage>],
     params: &super::WireParams,
+    policy: Option<&WirePolicy>,
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "input": input_items(request, user_images, params.images),
+        "input": input_items(request, user_images, params.images, policy),
         "stream": true,
     });
     if let Some(max) = params.max_output_tokens {
@@ -62,10 +64,122 @@ pub fn body(
     body
 }
 
+/// 按通道策略改写请求体。
+///
+/// 订阅通道（ChatGPT 套餐那条）比普通 OpenAI 兼容端点严：多一个字段就是 400
+/// ——system 不许当消息发、`store` 必须是 false、`max_output_tokens` 之类的一律
+/// 不许带。约束写成数据（[`WirePolicy`），这里照着改。
+///
+/// 默认策略什么都不改：没走订阅通道的模型，请求体与以前逐字节相同。
+pub fn apply_policy(body: &mut Value, request: &PromptRequest, policy: &WirePolicy) {
+    // `include`：不留存的通道要把推理项的加密内容要回来（多轮回传靠它）。
+    if !policy.include_fields.is_empty() {
+        body["include"] = json!(policy.include_fields);
+    }
+    if policy.system_as_instructions {
+        system_to_instructions(body, &request.system);
+    }
+    if policy.force_store_false {
+        body["store"] = json!(false);
+    }
+    if policy.force_stream {
+        body["stream"] = json!(true);
+    }
+    if !policy.strip_fields.is_empty() {
+        if let Some(obj) = body.as_object_mut() {
+            for field in policy.strip_fields {
+                obj.remove(*field);
+            }
+        }
+    }
+}
+
+/// 按上游给的 `error.param`（`temperature`、`reasoning.summary`、`tools[2]`……）
+/// 从请求体里去掉那一项。回「真的去掉了东西」——没去掉就**不许重发**（官方：
+/// 绝不原样重发同一个被拒的请求体）。
+///
+/// 请求的骨架（`model` / `input` / `instructions` / `stream` / `store`）不动：
+/// 上游说它不收这些，去掉了也不是这次请求了。
+pub fn remove_param(body: &mut Value, param: &str) -> bool {
+    const SKELETON: &[&str] = &["model", "input", "instructions", "stream", "store"];
+    let mut steps: Vec<Step> = Vec::new();
+    for segment in param.split('.') {
+        let (name, rest) = segment.split_once('[').unwrap_or((segment, ""));
+        if !name.is_empty() {
+            steps.push(Step::Key(name.to_string()));
+        }
+        for idx in rest.split('[') {
+            let idx = idx.trim_end_matches(']');
+            if idx.is_empty() {
+                continue;
+            }
+            match idx.parse::<usize>() {
+                Ok(i) => steps.push(Step::Index(i)),
+                Err(_) => return false,
+            }
+        }
+    }
+    let Some((last, path)) = steps.split_last() else {
+        return false;
+    };
+    if let (true, Step::Key(k)) = (path.is_empty(), last) {
+        if SKELETON.contains(&k.as_str()) {
+            return false;
+        }
+    }
+    let mut cursor = body;
+    for step in path {
+        let next = match step {
+            Step::Key(k) => cursor.get_mut(k.as_str()),
+            Step::Index(i) => cursor.get_mut(*i),
+        };
+        match next {
+            Some(v) => cursor = v,
+            None => return false,
+        }
+    }
+    match last {
+        Step::Key(k) => cursor
+            .as_object_mut()
+            .is_some_and(|o| o.remove(k.as_str()).is_some()),
+        Step::Index(i) => match cursor.as_array_mut() {
+            Some(items) if *i < items.len() => {
+                items.remove(*i);
+                true
+            }
+            _ => false,
+        },
+    }
+}
+
+enum Step {
+    Key(String),
+    Index(usize),
+}
+
+/// `input` 里的 system 消息搬到顶层的 `instructions`。
+///
+/// 那条 system 消息是 [`input_items`] 自己造的（`role: "system"`），上游不收
+/// 这种角色——搬成 `instructions` 才对。搬完 `input` 里不留它。
+fn system_to_instructions(body: &mut Value, system: &str) {
+    if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
+        input.retain(|item| item["role"].as_str() != Some("system"));
+    }
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    if system.is_empty() {
+        obj.remove("instructions");
+    } else {
+        obj.insert("instructions".to_string(), json!(system));
+    }
+}
+
 pub fn input_items(
     request: &PromptRequest,
     user_images: &[Vec<UserImage>],
     vision: bool,
+    policy: Option<&WirePolicy>,
 ) -> Vec<Value> {
     let mut out = Vec::new();
     if !request.system.is_empty() {
@@ -87,7 +201,7 @@ pub fn input_items(
             }
             LogEvent::LlmStream(llm) if !llm.tool_calls.is_empty() => {
                 flush_unmatched(&mut out, &mut pending);
-                out.extend(replayable_reasoning(llm));
+                out.extend(replayable_reasoning(llm, policy));
                 if !llm.text.is_empty() {
                     out.push(easy_message("assistant", &llm.text, &[], vision));
                 }
@@ -103,7 +217,7 @@ pub fn input_items(
             }
             LogEvent::LlmStream(llm) if !llm.text.is_empty() => {
                 flush_unmatched(&mut out, &mut pending);
-                out.extend(replayable_reasoning(llm));
+                out.extend(replayable_reasoning(llm, policy));
                 out.push(easy_message("assistant", &llm.text, &[], vision));
             }
             LogEvent::ToolExecute {
@@ -137,17 +251,35 @@ pub fn input_items(
 ///
 /// 两处清洗照抄 Grok：`status` 是 output-only 字段，回传会被拒；`content[]` 的
 /// 元素要带 `type: "reasoning_text"` 判别符，缺了同样 400。
-fn replayable_reasoning(llm: &cordis_base::types::LlmOutput) -> Vec<Value> {
+fn replayable_reasoning(
+    llm: &cordis_base::types::LlmOutput,
+    policy: Option<&WirePolicy>,
+) -> Vec<Value> {
+    let store_false = policy.is_some_and(|p| p.force_store_false);
     llm.reasoning_items
         .iter()
         .filter(|item| item["type"] == "reasoning")
-        .map(|item| {
+        .filter_map(|item| {
+            // `store: false` 的通道：服务端没留存这些推理项，**光有 id 它不认**。
+            // 必须带加密内容（`include: ["reasoning.encrypted_content"]` 要回来
+            // 的那份）；没有加密内容的推理项只能丢掉——带着一个服务端不认识的
+            // id 回传，多半直接 400。
+            if store_false {
+                let encrypted = item["encrypted_content"].as_str().unwrap_or("");
+                if encrypted.is_empty() {
+                    return None;
+                }
+            }
             let mut item = item.clone();
             if let Some(obj) = item.as_object_mut() {
                 obj.remove("status");
+                if store_false {
+                    // 加密内容自己就是凭证，id 只在留存的那份对话里有效。
+                    obj.remove("id");
+                }
             }
             patch_reasoning_text_types(&mut item);
-            item
+            Some(item)
         })
         .collect()
 }
@@ -534,7 +666,8 @@ mod tests {
             ],
             tools: vec![],
         };
-        let json = serde_json::to_string(&body("m", &request, &[], &params_on("low"))).unwrap();
+        let json =
+            serde_json::to_string(&body("m", &request, &[], &params_on("low"), None)).unwrap();
         assert!(!json.contains("connection reset"), "{json}");
     }
 
@@ -577,6 +710,84 @@ mod tests {
         }
     }
 
+    /// 订阅通道的请求体：system 走 `instructions`、`input` 里不留 system
+    /// 消息、`store: false`、官方不收的字段一个都不许有。
+    #[test]
+    fn chatgpt_policy_rewrites_the_body() {
+        let request = req(vec![LogEvent::User("hi".into())]);
+        let params = crate::llm::http::WireParams {
+            max_output_tokens: Some(1024),
+            ..params_on("high")
+        };
+        let mut body = body("gpt-5.6-terra", &request, &[], &params, None);
+        // 策略动手之前：system 是 `input` 里的一条消息，还带着 max_output_tokens。
+        assert_eq!(body["input"][0]["role"], "system");
+        assert_eq!(body["max_output_tokens"], 1024);
+
+        apply_policy(&mut body, &request, &crate::auth::chatgpt_policy());
+
+        assert_eq!(body["instructions"], "s");
+        assert!(
+            body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["role"].as_str() != Some("system")),
+            "{body}"
+        );
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert!(
+            body.get("max_output_tokens").is_none(),
+            "max_output_tokens 不许发：{body}"
+        );
+        for field in crate::auth::chatgpt_policy().strip_fields {
+            assert!(body.get(*field).is_none(), "{field} 不许发：{body}");
+        }
+    }
+
+    /// `error.param` 指到哪就去掉哪：顶层、嵌套、数组下标都认；没有那一项、或是
+    /// 请求骨架，就回 false（调用方据此**不重发**）。
+    #[test]
+    fn remove_param_follows_the_upstream_path() {
+        let mut body = json!({
+            "model": "m",
+            "input": [],
+            "temperature": 0.2,
+            "reasoning": { "effort": "high", "summary": "concise" },
+            "tools": [{ "name": "a" }, { "name": "b" }],
+        });
+        assert!(remove_param(&mut body, "temperature"));
+        assert!(body.get("temperature").is_none());
+        assert!(remove_param(&mut body, "reasoning.summary"));
+        assert_eq!(body["reasoning"], json!({ "effort": "high" }));
+        assert!(remove_param(&mut body, "tools[0]"));
+        assert_eq!(body["tools"], json!([{ "name": "b" }]));
+
+        // 没有这一项 = 去不掉 = 不许重发。
+        assert!(!remove_param(&mut body, "temperature"));
+        assert!(!remove_param(&mut body, "tools[5]"));
+        assert!(!remove_param(&mut body, "nope.deeper"));
+        // 骨架不动。
+        assert!(!remove_param(&mut body, "model"));
+        assert!(!remove_param(&mut body, "input"));
+        assert_eq!(body["model"], "m");
+    }
+
+    /// 没走订阅通道的模型，请求体与以前逐字节相同。
+    #[test]
+    fn default_policy_leaves_the_body_untouched() {
+        let request = req(vec![LogEvent::User("hi".into())]);
+        let params = params_on("high");
+        let before = body("gpt", &request, &[], &params, None);
+        let mut after = before.clone();
+        apply_policy(&mut after, &request, &WirePolicy::default());
+        assert_eq!(
+            serde_json::to_string(&before).unwrap(),
+            serde_json::to_string(&after).unwrap()
+        );
+    }
+
     #[test]
     fn input_inserts_function_call_output_stubs() {
         let request = req(vec![
@@ -607,7 +818,7 @@ mod tests {
             },
             LogEvent::User("follow-up".into()),
         ]);
-        let items = input_items(&request, &[], true);
+        let items = input_items(&request, &[], true, None);
         assert_eq!(items[0]["role"], "system");
         assert_eq!(items[1]["role"], "user");
         assert_eq!(items[2]["type"], "function_call");
@@ -633,7 +844,7 @@ mod tests {
                 parameters_json: r#"{"type":"object"}"#.into(),
             }],
         };
-        let body = body("gpt", &request, &[], &params_on("high"));
+        let body = body("gpt", &request, &[], &params_on("high"), None);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "grep");
         assert!(body["tools"][0].get("function").is_none());
@@ -694,7 +905,7 @@ mod tests {
             reasoning: crate::llm::http::Reasoning::Unsupported,
             ..params_on("")
         };
-        let out = body("gpt", &request, &[], &params);
+        let out = body("gpt", &request, &[], &params, None);
         assert!(out.get("reasoning").is_none(), "{out}");
         assert!(out.get("max_output_tokens").is_none(), "{out}");
 
@@ -703,11 +914,11 @@ mod tests {
             ..params_on("")
         };
         assert_eq!(
-            body("gpt", &request, &[], &params)["reasoning"]["effort"],
+            body("gpt", &request, &[], &params, None)["reasoning"]["effort"],
             "none"
         );
 
-        let out = body("gpt", &request, &[], &params_on("high"));
+        let out = body("gpt", &request, &[], &params_on("high"), None);
         assert_eq!(out["reasoning"]["effort"], "high");
         assert_eq!(out["reasoning"]["summary"], "concise");
 
@@ -716,7 +927,7 @@ mod tests {
             ..params_on("")
         };
         assert_eq!(
-            body("gpt", &request, &[], &params)["max_output_tokens"],
+            body("gpt", &request, &[], &params, None)["max_output_tokens"],
             1024
         );
     }
@@ -786,7 +997,7 @@ mod tests {
                 is_error: false,
             },
         ]);
-        let items = input_items(&request, &[], true);
+        let items = input_items(&request, &[], true, None);
         let kinds: Vec<&str> = items
             .iter()
             .map(|i| {
@@ -825,7 +1036,7 @@ mod tests {
                 ..LlmOutput::default()
             }),
         ]);
-        let items = input_items(&request, &[], true);
+        let items = input_items(&request, &[], true, None);
         assert!(items.iter().all(|i| i["type"] != "reasoning"), "{items:#?}");
     }
 }

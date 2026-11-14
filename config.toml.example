@@ -60,6 +60,14 @@
 #                      cache_control 断点，长会话每轮省掉重复前缀的计费。自建
 #                      /v1/messages 代理不认这个字段时置 false。另两条 wire 的
 #                      前缀缓存由上游自动做，这个键对它们无效。
+#   auth               走**订阅通道**：值是鉴权 provider id（如 "chatgpt"）。
+#                      写了它，密钥不再从 api_key / env_key / secrets.json 取，
+#                      而是向 Auth Manager 要一份短期 access token；那条通道对
+#                      请求体的硬约束（store: false、system 走 instructions…）
+#                      也一并套上。**不能与 api_key / env_key 同时写**（那算配置
+#                      错误）；挂在 [provider] 下面时也不继承供应商的密钥。地址
+#                      由鉴权 provider 给，api_base_url 可以不写。没写 auth =
+#                      现在的老路径，行为一点不变。
 
 # 供应商 [provider."<id>"]——同一家的模型共用一份连接，模型写 provider = "<id>" 继承。
 # 只收连接键：api_base_url / api_backends（api_backend）/ auth_scheme / env_key / api_key，
