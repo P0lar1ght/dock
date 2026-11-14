@@ -562,6 +562,7 @@ impl ChatGptProvider {
         req: LoginRequest,
     ) -> Result<AccountKey, AuthError> {
         let host_id = load_or_create_host_id().map_err(|e| AuthError::Transport(e.to_string()))?;
+        self.store.remove_legacy_issued();
         let reg = registration_for(&self.store, &req.target)?;
         let mut issued = reg.client_id.clone();
 
@@ -1991,13 +1992,19 @@ mod tests {
             _ => (404, "{}".into()),
         })
         .await;
-        let provider = ChatGptProvider::new(store()).with_test_server(&idp.base);
+        let store = store();
+        // 老版本留下的全局 `issued` 记录：登录时顺手清掉（现在没人读它）。
+        let legacy = store.root().join("issued");
+        std::fs::create_dir_all(store.root()).unwrap();
+        std::fs::write(&legacy, r#"{"client_id":"oaiapp_old","email":null}"#).unwrap();
+        let provider = ChatGptProvider::new(store.clone()).with_test_server(&idp.base);
         let browser = FakeBrowser::default();
 
         let err = provider
             .login_impl(&browser, LoginRequest::default())
             .await
             .expect_err("两轮都被拒");
+        assert!(!legacy.exists(), "老的 issued 记录该清掉");
         assert_eq!(idp.hits("/token"), 2);
 
         let handles = std::mem::take(&mut *browser.pages.lock().unwrap());
@@ -2118,10 +2125,15 @@ mod tests {
             .find(|a| a.account.client_id == "oaiapp_loose")
             .expect("读不了的也要列出来");
         assert!(loose.active && !loose.signed_in && !loose.plan_usage);
-        let problem = loose.problem.as_deref().unwrap_or_default();
-        assert!(
-            problem.contains("0600") && problem.contains("chmod 600"),
-            "{problem}"
+        assert_eq!(
+            loose.problem.as_deref(),
+            Some(
+                format!(
+                    "凭据文件权限不对（应为 0600）：{p}（当前 644）；改回去：chmod 600 {p}",
+                    p = path.display()
+                )
+                .as_str()
+            )
         );
         // 读不了的内容一个字也不往外给。
         assert!(loose.email.is_none());

@@ -149,7 +149,10 @@ PKCE 只支持 S256 / ID token 只用 RS256 / 支持 refresh_token / 公开客�
 `reasoning.summary` 的 `concise` / `auto` / `detailed` 都收，简单步骤上游
 `reasoning_tokens: 0`、没有摘要是模型自己不想；refresh 轮换成功。
 **还没实测**：轮换后旧 refresh token 是否立即失效、撤销后刷新失败、VPS 导入后由
-远端接管刷新、多账号切换。
+远端接管刷新、多账号切换；一次登录两轮都失败之后**再登录**（正式 client id 只留给
+同一次登录，不落盘，下次重新动态注册）。按 Pi 的报告（earendil-works/pi#10670），
+同一账号同一台机器再走动态注册不会被拒，只是 ChatGPT 设置里多一条连接；之前记下的
+`invalid_client` 是**用动态 client id 换码**被拒，不是注册被拒。
 
 **已知未知**：官方对「哪些套餐能用额度」的说法不一致（2026-11-14 查）：
 

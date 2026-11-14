@@ -227,6 +227,12 @@ impl CredentialStore {
         Ok(out)
     }
 
+    /// 删掉老版本留下的全局「已注册未拿到 token」记录（`issued`）。现在正式 client id
+    /// 只留给同一次登录的第二轮，这个文件没人读了；登录时顺手清掉。
+    pub fn remove_legacy_issued(&self) {
+        let _ = std::fs::remove_file(self.root.join("issued"));
+    }
+
     /// 当前活动账号的 client_id。
     pub fn active(&self) -> Option<String> {
         let raw = std::fs::read_to_string(self.active_path()).ok()?;
