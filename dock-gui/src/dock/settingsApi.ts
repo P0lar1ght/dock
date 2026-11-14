@@ -96,6 +96,94 @@ export const modelSave = (model: ModelEntry, originalId: string | null, makeDefa
 export const modelDelete = (id: string) => dock.call<ModelListing>("model/delete", { id });
 export const modelDefault = (id: string) => dock.call<ModelListing>("model/default", { id });
 
+/** 订阅通道的账号状态（`auth/status`，只给受信连接）。老 Dock 没有这个方法，调用会失败。 */
+export interface AuthAccount {
+  clientId: string;
+  email: string | null;
+  /** 还登着。false = 登出了，但注册还在：「Continue with …」直接复用它。 */
+  signedIn: boolean;
+  /** 这份授权能不能拿套餐额度推理。 */
+  planUsage: boolean;
+  /** access token 过期时刻（unix 秒；登出了是 0）。 */
+  expiresAt: number;
+  active: boolean;
+}
+
+/** 最近一次登录的进度。 */
+export interface AuthLoginState {
+  state: "pending" | "failed" | "succeeded";
+  /** pending：授权页地址。 */
+  url?: string | null;
+  /** failed：给人看的那句话。 */
+  message?: string;
+  clientId?: string;
+}
+
+/** 订阅通道自动发现、已并入模型目录的一个模型（活动账号的）。 */
+export interface AuthModel {
+  /** 模型目录里的 id（`chatgpt/<slug>`），可以直接设成默认。 */
+  id: string;
+  slug: string;
+  label: string;
+  /** 上游给的一句介绍（英文原样）。 */
+  description: string | null;
+  contextWindow: number | null;
+  reasoningEfforts: string[] | null;
+  defaultReasoningEffort: string | null;
+  supportsImages: boolean | null;
+}
+
+export interface AuthProviderStatus {
+  id: string;
+  /** 给人看的名字（"ChatGPT"）。 */
+  displayName: string;
+  /** 用量页（「Manage usage」）。 */
+  usageUrl: string | null;
+  activeClientId: string | null;
+  accounts: AuthAccount[];
+  login: AuthLoginState | null;
+  /** 自动发现的模型；没拉过 / 用不了是空的。老 Dock 没有这个字段。 */
+  models?: AuthModel[];
+  /** 上面那份列表的拉取时间（unix 秒）。 */
+  modelsFetchedAt?: number | null;
+}
+
+export interface AuthStatus {
+  providers: AuthProviderStatus[];
+  /** 登出时远端撤销没确认。 */
+  warning?: string;
+}
+
+export const authStatus = () => dock.call<AuthStatus>("auth/status");
+
+/** 发起订阅通道登录。返回里带**授权页地址**——客户端自己开（Dock 那头在后台等）。
+ *  `account`：不给 = 活动账号；"new" = 再加一个账号；clientId = 那个账号重新登录。
+ *  `scope: "identity"` = 只要身份，不要套餐额度。结果经 `auth/changed` 推送 + `auth/status`。 */
+export const authLogin = (provider = "chatgpt", opts: { scope?: "identity"; account?: string } = {}) =>
+  dock.call<{ pending: boolean; url?: string | null; provider: string }>("auth/login", {
+    provider,
+    ...opts,
+  });
+
+/** 中断正在跑的登录。 */
+export const authCancel = (provider = "chatgpt") =>
+  dock.call<{ cancelled: boolean }>("auth/cancel", { provider });
+
+/** 撤销 refresh token、清本地 token（注册留着，下次登录复用）。 */
+export const authLogout = (provider = "chatgpt", clientId?: string) =>
+  dock.call<AuthStatus>("auth/logout", { provider, clientId });
+
+/** 重拉活动账号能用的模型并入模型目录。登出了 / 没开套餐额度会报错（那一家的模型随之拿掉）。 */
+export const authModels = (provider = "chatgpt") =>
+  dock.call<{ provider: string; models: AuthModel[] }>("auth/models", { provider });
+
+/** 订阅通道的账号 / 登录状态变了（任何一处：本页、终端 /auth、别的 Dock 进程的登录）。返回取消函数。 */
+export function onAuthChanged(fn: () => void): () => void {
+  return dock.onNotification((n) => {
+    if (n.method === "auth/changed") fn();
+  });
+}
+
 export type TestResult = { ok: true; ms: number; backend: string } | { ok: false; error: string; backend: string };
 
 /** 表单（可以没保存）发一次最小请求；只给 id 就测配置里那条。 */

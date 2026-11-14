@@ -6,22 +6,29 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use base64::Engine;
 use reqwest::header::{HeaderMap, WWW_AUTHENTICATE};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 use url::Url;
 
 use cordis_base::config::McpServer;
+
+#[cfg(test)]
+use crate::auth::oauth::parse_query;
+use crate::auth::oauth::{
+    accept_callback, pkce_challenge, pkce_verifier, random_urlsafe, FileLock, PageOutcome, Tone,
+};
 
 use super::credentials::{self, McpCredentialStore, StoredCredentials, TokenResponse};
 
 const CLIENT_NAME: &str = "Dock";
 const BROWSER_AUTH_TIMEOUT: Duration = Duration::from_secs(600);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// 回环回调的路径。
+const CALLBACK_PATH: &str = "/callback";
+/// 等 `mcp_credentials.json` 的锁最多多久。
+const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct AuthMetadata {
@@ -161,7 +168,7 @@ async fn browser_login_inner(server: &McpServer) -> Result<(), String> {
         .local_addr()
         .map_err(|e| format!("回调端口: {e}"))?
         .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
 
     let scopes = if server.oauth.scopes.is_empty() {
         meta.scopes_supported.clone()
@@ -204,44 +211,79 @@ async fn browser_login_inner(server: &McpServer) -> Result<(), String> {
         tracing::warn!(%e, url = %auth_url, "未能自动打开浏览器；请手动打开该地址");
     }
 
-    let callback = tokio::time::timeout(BROWSER_AUTH_TIMEOUT, accept_callback(listener))
-        .await
-        .map_err(|_| {
-            format!(
-                "OAuth 等待超时（{}s）。请打开: {auth_url}",
-                BROWSER_AUTH_TIMEOUT.as_secs()
-            )
-        })??;
-    if callback.state != state {
-        return Err("OAuth state mismatch".into());
+    let (callback, page) = tokio::time::timeout(
+        BROWSER_AUTH_TIMEOUT,
+        // 只认回调路径：浏览器的 favicon、扫端口的请求不会把这次登录吃掉。
+        // state 在解析时就校验：对不上，浏览器那页当场说明，不等换码。
+        accept_callback(listener, CALLBACK_PATH, &server.name, |p| {
+            let callback = parse_oauth_callback_params(p)?;
+            if callback.state != state {
+                return Err("OAuth state 对不上，已中止（这个回调不是这次登录发起的）".to_string());
+            }
+            Ok(callback)
+        }),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "OAuth 等待超时（{}s）。请打开: {auth_url}",
+            BROWSER_AUTH_TIMEOUT.as_secs()
+        )
+    })??;
+    // 换码、落盘出了结果，浏览器那一页跟着切过去。
+    let result = async {
+        let token = exchange_code(
+            &meta.token_endpoint,
+            &client_id,
+            client_secret.as_deref(),
+            &redirect_uri,
+            &callback.code,
+            &verifier,
+            &resource,
+        )
+        .await?;
+        let _lock = lock_store().await?;
+        persist(
+            server,
+            &resource,
+            client_id,
+            client_secret,
+            &meta.token_endpoint,
+            token,
+            scopes,
+        )
     }
-    let token = exchange_code(
-        &meta.token_endpoint,
-        &client_id,
-        client_secret.as_deref(),
-        &redirect_uri,
-        &callback.code,
-        &verifier,
-        &resource,
-    )
-    .await?;
-    persist(
-        server,
-        &resource,
-        client_id,
-        client_secret,
-        &meta.token_endpoint,
-        token,
-        scopes,
-    )
+    .await;
+    let outcome = match &result {
+        Ok(()) => PageOutcome::connected(&server.name)
+            .chip("MCP 服务器", Tone::Info)
+            .detail("令牌已保存，Dock 会用它连接这个服务器，过期了自动刷新。"),
+        Err(e) => PageOutcome::failed(&server.name, e.clone()),
+    };
+    page.finish(&outcome).await;
+    result
 }
 
+/// 拿 `mcp_credentials.json` 的跨进程锁。
+async fn lock_store() -> Result<FileLock, String> {
+    FileLock::acquire(&McpCredentialStore::lock_path(), LOCK_TIMEOUT)
+        .await
+        .map_err(|e| format!("MCP 凭据文件的锁：{e}"))
+}
+
+/// 用存着的 refresh token 换一份新的 access token。
+///
+/// **全程持锁、锁内重读**：轮换 refresh token 的服务器上，两个进程拿同一份旧
+/// refresh token 去换，后到的那个会把这份授权废掉。上游没给新的 refresh token
+/// （RFC 6749 §6 允许）就沿用旧的——早先直接存了响应，refresh token 就此丢了，
+/// 下一次过期只能重新登录。
 pub async fn refresh_stored(server: &McpServer) -> Result<String, String> {
     let url = match &server.transport {
         cordis_base::config::McpTransport::Http { url, .. } => url.clone(),
         _ => return Err("not HTTP".into()),
     };
     let parsed = Url::parse(&url).map_err(|e| e.to_string())?;
+    let _lock = lock_store().await?;
     let store = McpCredentialStore::load_default().map_err(|e| e.to_string())?;
     let Some(creds) = store.get(&server.name, &parsed).cloned() else {
         return Err("no stored credentials".into());
@@ -257,7 +299,7 @@ pub async fn refresh_stored(server: &McpServer) -> Result<String, String> {
         Some(ep) => ep,
         None => discover_metadata(&url).await?.token_endpoint,
     };
-    let token = refresh_token(
+    let mut token = refresh_token(
         &token_endpoint,
         &creds.client_id,
         creds.client_secret.as_deref(),
@@ -265,6 +307,9 @@ pub async fn refresh_stored(server: &McpServer) -> Result<String, String> {
         &url,
     )
     .await?;
+    if token.refresh_token.as_deref().is_none_or(str::is_empty) {
+        token.refresh_token = Some(refresh);
+    }
     let access = token.access_token.clone();
     persist(
         server,
@@ -569,81 +614,6 @@ async fn post_token(endpoint: &str, form: &[(&str, &str)]) -> Result<TokenRespon
     })
 }
 
-fn pkce_verifier() -> String {
-    random_urlsafe(32)
-}
-
-fn pkce_challenge(verifier: &str) -> String {
-    let digest = Sha256::digest(verifier.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
-}
-
-fn random_urlsafe(nbytes: usize) -> String {
-    let mut buf = vec![0u8; nbytes];
-    getrandom::getrandom(&mut buf).expect("getrandom");
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-async fn accept_callback(
-    listener: tokio::net::TcpListener,
-) -> Result<OAuthCallbackPayload, String> {
-    let (mut stream, _) = listener
-        .accept()
-        .await
-        .map_err(|e| format!("callback accept: {e}"))?;
-    let mut buf = vec![0u8; 8192];
-    let n = stream
-        .read(&mut buf)
-        .await
-        .map_err(|e| format!("callback read: {e}"))?;
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let path = req.lines().next().unwrap_or("");
-    let target = path.split_whitespace().nth(1).unwrap_or("/");
-    let qs = target.split_once('?').map(|(_, q)| q).unwrap_or("");
-    let params = parse_query(qs);
-    let parsed = parse_oauth_callback_params(&params);
-    let (status, body) = match &parsed {
-        Ok(_) => (
-            "200 OK",
-            "<!DOCTYPE html><html><head><meta charset=utf-8><title>授权完成</title></head>\
-             <body style=\"font-family:sans-serif;text-align:center;padding:50px\">\
-             <h1>授权完成</h1><p>可以关闭此窗口并回到终端。</p>\
-             <script>window.close();</script></body></html>"
-                .to_string(),
-        ),
-        Err(e) => {
-            let msg = html_escape(e);
-            (
-                "400 Bad Request",
-                format!(
-                    "<!DOCTYPE html><html><head><meta charset=utf-8><title>授权失败</title></head>\
-                     <body style=\"font-family:sans-serif;text-align:center;padding:50px\">\
-                     <h1>授权失败</h1><p>{msg}</p></body></html>"
-                ),
-            )
-        }
-    };
-    let resp = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(resp.as_bytes()).await;
-    parsed
-}
-
-fn parse_query(qs: &str) -> HashMap<String, String> {
-    url::form_urlencoded::parse(qs.as_bytes())
-        .into_owned()
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +686,73 @@ mod tests {
             as_well_known("https://auth.example.com"),
             "https://auth.example.com/.well-known/oauth-authorization-server"
         );
+    }
+
+    /// 刷新响应没带新的 refresh token（RFC 6749 允许，很多 MCP 服务器就这样）：
+    /// **沿用旧的**。早先直接把响应存下来，refresh token 就此丢了，下次过期只能
+    /// 重新登录。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refresh_without_a_new_refresh_token_keeps_the_old_one() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _env = cordis_base::test_env::scoped().home();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let token_endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let body = r#"{"access_token":"at-new","token_type":"bearer","expires_in":3600}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let url = "https://mcp.example.com/mcp";
+        let server = McpServer {
+            name: "linear".into(),
+            transport: cordis_base::config::McpTransport::Http {
+                url: url.into(),
+                headers: Default::default(),
+            },
+            startup_timeout_sec: 30,
+            enabled: true,
+            oauth: Default::default(),
+        };
+        let mut store = McpCredentialStore::default();
+        store
+            .insert_and_save(
+                "linear",
+                &Url::parse(url).unwrap(),
+                StoredCredentials {
+                    client_id: "c".into(),
+                    token_response: Some(TokenResponse {
+                        access_token: "at-old".into(),
+                        token_type: "bearer".into(),
+                        expires_in: Some(3600),
+                        refresh_token: Some("rt-keep".into()),
+                        scope: None,
+                    }),
+                    token_endpoint: Some(token_endpoint),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let access = refresh_stored(&server).await.expect("刷新");
+        assert_eq!(access, "at-new");
+        let reloaded = McpCredentialStore::load_default().unwrap();
+        let token = reloaded
+            .get("linear", &Url::parse(url).unwrap())
+            .unwrap()
+            .token_response
+            .clone()
+            .unwrap();
+        assert_eq!(token.access_token, "at-new");
+        assert_eq!(token.refresh_token.as_deref(), Some("rt-keep"));
     }
 
     #[test]

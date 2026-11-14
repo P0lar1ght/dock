@@ -132,6 +132,16 @@ fn servers(mcp: &Mcp) -> Vec<Value> {
 /// 用户配置里（设置页能改）；`keyEnv` / `keyEnvSet` = 读哪个环境变量、本进程里有没有。
 pub fn model_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     let editable = cordis_base::config::edit::user_model_ids();
+    // 订阅通道自动发现的模型（`auth_models.json`）：设置页把它们放在账号卡片里，
+    // 不和手写的模型混在一起。
+    let discovered: Vec<String> = {
+        use cordis_base::config::auth_models;
+        let cache = auth_models::AuthModelCache::read(&auth_models::path());
+        auth_models::catalog_entries(&cache)
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+    };
     let settings = gateway
         .ctx()
         .get::<AppSettings>(SETTINGS)
@@ -163,7 +173,11 @@ pub fn model_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
                         || cordis_base::config::stored_secret(k).is_some()
                 }),
                 "provider": m.provider,
+                // 走订阅通道的模型（`auth = "chatgpt"`）的鉴权 provider id。
+                // 老 Dock 没有这个字段，界面按缺省处理。
+                "authProvider": m.auth_provider(),
                 "editable": editable.contains(&m.id),
+                "discovered": discovered.contains(&m.id),
                 "default": m.id == current
             })
         })

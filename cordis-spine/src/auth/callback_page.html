@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<!--
+  浏览器授权回调页（ChatGPT 订阅登录、MCP 服务器 OAuth 共用）。
+  由 cordis-spine/src/auth/callback_page.rs 拼出来：这里只是**前半页**——收到回调
+  就先发出去（「正在连接…」）；换码有了结果，Rust 再补一段调用 settle(结果) 的脚本
+  并收尾 body / html，然后关连接。没等到 settle 连接就关了 = 登录被中断。
+  颜色 / 字体 / 缓动 / 玻璃参数取自 dock-gui/src/styles.css；品牌标与描线动效同
+  dock-gui 的启动画面（assets/markPath.ts、LaunchSplash）。
+  {{SERVICE}} 由 Rust 转义后填入。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="data:,">
+<title>正在连接 {{SERVICE}}…</title>
+<style>
+:root {
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+  --ink: #1c1c1e;
+  --ink-2: #3a3a3c;
+  --ink-3: #636366;
+  --ink-4: #8e8e93;
+  --page: oklch(0.925 0.007 265);
+  --glow-a: oklch(0.84 0.08 250 / 0.7);
+  --glow-b: oklch(0.88 0.06 305 / 0.6);
+  --card: oklch(0.995 0.002 265 / 0.58);
+  --card-solid: oklch(0.985 0.003 265);
+  --rim: oklch(1 0 0 / 0.9);
+  --edge: oklch(0.38 0.03 265 / 0.12);
+  --contact: oklch(0.25 0.03 265 / 0.06);
+  --shade: oklch(0.3 0.06 265 / 0.24);
+  --accent: #0a84ff;
+  --ok: #34c759;
+  --warn: #ff9500;
+  --fail: #ff3b30;
+  /* 浅色底上彩色字要压深一点才读得清。 */
+  --tone-shade: 24%;
+  --mono: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f5f5f7;
+    --ink-2: #d1d1d6;
+    --ink-3: #a1a1a6;
+    --ink-4: #7c7c80;
+    --page: oklch(0.19 0.01 265);
+    --glow-a: oklch(0.42 0.11 250 / 0.55);
+    --glow-b: oklch(0.38 0.09 305 / 0.5);
+    --card: oklch(0.27 0.008 265 / 0.55);
+    --card-solid: oklch(0.25 0.008 265);
+    --rim: oklch(1 0 0 / 0.12);
+    --edge: oklch(1 0 0 / 0.09);
+    --contact: oklch(0 0 0 / 0.25);
+    --shade: oklch(0 0 0 / 0.55);
+    --ok: #30d158;
+    --warn: #ff9f0a;
+    --fail: #ff453a;
+    --tone-shade: 0%;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  font-family: var(--font);
+  color: var(--ink);
+  background:
+    radial-gradient(38vmax 38vmax at 16% 10%, var(--glow-a), transparent 70%),
+    radial-gradient(44vmax 44vmax at 88% 92%, var(--glow-b), transparent 70%),
+    var(--page);
+  -webkit-font-smoothing: antialiased;
+}
+.card {
+  width: min(400px, 100%);
+  padding: 40px 32px 20px;
+  border-radius: 24px;
+  text-align: center;
+  background: var(--card);
+  -webkit-backdrop-filter: blur(26px) saturate(180%);
+  backdrop-filter: blur(26px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 var(--rim),
+    0 0 0 1px var(--edge),
+    0 1px 2px var(--contact),
+    0 32px 64px -28px var(--shade);
+  animation: rise 420ms var(--ease) both;
+}
+
+/* 品牌标：描线 → 填色；连接中轻轻呼吸。 */
+.emblem { position: relative; width: 56px; height: 61px; margin: 4px auto 26px; color: var(--ink); }
+.mark { display: block; width: 100%; height: 100%; overflow: visible; }
+.mark-fill { fill: currentColor; animation: fade-in 350ms var(--ease) 620ms both; }
+.mark-stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 14;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  animation:
+    draw 760ms cubic-bezier(0.65, 0, 0.35, 1) 100ms both,
+    fade-out 200ms var(--ease) 860ms forwards;
+}
+body[data-state="connecting"] .mark { animation: breathe 2.4s ease-in-out 1.2s infinite; }
+
+/* 状态徽标：挂在品牌标右下角。 */
+.badge {
+  position: absolute;
+  right: -14px;
+  bottom: -8px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--card-solid), 0 6px 14px -4px var(--shade);
+  transition: background-color 240ms var(--ease);
+}
+.badge svg { display: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+body[data-state="connecting"] .badge { color: var(--accent); background: var(--card-solid); }
+body[data-state="connecting"] .i-spin { display: block; width: 20px; height: 20px; animation: spin 900ms linear infinite; }
+body[data-state="ok"] .badge { background: var(--ok); }
+body[data-state="next"] .badge { background: var(--accent); }
+body[data-state="fail"] .badge { background: var(--fail); }
+body[data-state="ok"] .i-ok,
+body[data-state="next"] .i-next,
+body[data-state="fail"] .i-fail { display: block; animation: pop 360ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.i-ok path, .i-next path, .i-fail path { stroke-dasharray: 1; animation: draw 320ms var(--ease) 120ms both; }
+
+h1 { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; text-wrap: balance; }
+.account { margin: 8px 0 0; font-size: 14px; color: var(--ink-3); overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 14px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: color-mix(in oklab, var(--tone), #000 var(--tone-shade));
+  background: color-mix(in oklab, var(--tone) 14%, transparent);
+}
+.chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.chip[data-tone="ok"] { --tone: var(--ok); }
+.chip[data-tone="warn"] { --tone: var(--warn); }
+.chip[data-tone="info"] { --tone: var(--accent); }
+.detail { margin: 14px 0 0; font-size: 13.5px; line-height: 1.65; color: var(--ink-2); text-wrap: pretty; overflow-wrap: anywhere; }
+/* 「接下来可以」：左对齐的一小块，命令用等宽小胶囊、不折行。 */
+.next {
+  margin-top: 16px;
+  padding: 12px 14px 12px;
+  border-radius: 14px;
+  text-align: left;
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+.next-label { margin: 0 0 6px; font-size: 11.5px; font-weight: 600; color: var(--ink-4); }
+.steps { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.steps li { position: relative; padding-left: 14px; font-size: 13px; line-height: 1.6; color: var(--ink-2); overflow-wrap: anywhere; }
+.steps li::before { content: ""; position: absolute; left: 2px; top: 0.66em; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.9em;
+  color: var(--ink);
+  background: color-mix(in oklab, var(--ink) 8%, transparent);
+  white-space: nowrap;
+}
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 18px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  text-decoration: none;
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  transition: background-color 120ms var(--ease);
+}
+.link:hover { background: color-mix(in oklab, var(--accent) 20%, transparent); }
+.link::after { content: "↗"; font-size: 12px; }
+.foot { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--edge); font-size: 12px; color: var(--ink-4); }
+.swap { animation: swap 280ms var(--ease) both; }
+
+@keyframes rise { from { opacity: 0; transform: translateY(10px) scale(0.985); } }
+@keyframes draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pop { from { opacity: 0; transform: scale(0.4); } }
+@keyframes swap { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0ms !important; animation-delay: 0ms !important; transition-duration: 0ms !important; }
+  body[data-state="connecting"] .i-spin { animation: none; }
+}
+</style>
+</head>
+<body data-state="connecting">
+<main class="card" role="status" aria-live="polite">
+  <div class="emblem" aria-hidden="true">
+    <svg class="mark" viewBox="0 0 574.1 623.8">
+      <path class="mark-fill" d="M565.6 8 L532.3 32.1 L466.6 70.4 L367.6 122.3 L350.6 130.2 L343.6 132.7 L338.6 133.4 L323.6 133.2 L314.6 131.5 L301.6 126.9 L300.8 125.1 L316.6 116.9 L392.6 82.4 L399.6 78.3 L400 77.1 L388.6 69.4 L371 60.1 L339.6 47.7 L310 40.1 L290.6 36.9 L275.6 35.6 L59.6 35.2 L58 36.1 L57.6 401.1 L58.2 479.1 L59.6 479.2 L89.6 456.8 L115 440.1 L135.6 429.1 L181.6 407.3 L192.5 401.1 L203.6 392.1 L208.1 386.1 L208.4 385.1 L206.6 382 L182.6 347.8 L164.4 316.1 L150.6 287 L141.4 263.1 L135.4 244.1 L130.3 223.1 L127.2 204.1 L125.6 188.1 L125.4 174.1 L126.3 163.1 L127.6 158.4 L131.6 153.7 L137.6 150.6 L142.6 148.9 L158.6 146.3 L177.6 145.8 L197.6 147.5 L221.6 152.1 L246.6 159.7 L267.6 168.6 L285.6 178.1 L310.6 193.9 L325.6 205.7 L336.1 215.1 L350.2 230.1 L362.6 245.7 L374.9 265.1 L384.1 284.1 L390.1 302.1 L393.1 317.1 L394.4 330.1 L394.4 339.1 L391.7 360.1 L388.6 371.1 L382.4 386.1 L375.1 399.1 L367 410.1 L356.5 421.1 L345.5 430.1 L329.6 439.3 L325.6 441 L324.1 440.1 L324.2 423.1 L322.6 412.1 L316.9 396.1 L310.6 385.8 L302.3 376.1 L292.8 368.1 L283.6 363.5 L277.6 362.2 L273.6 363.8 L271.2 367.1 L269.5 393.1 L268 399.1 L264.6 406.9 L258.8 416.1 L255.6 419.6 L243.1 430.1 L235.6 434.5 L224.6 439.6 L211.6 444 L193.6 448.6 L167.6 453.7 L145.6 459.8 L124.6 469 L116.8 474.1 L55.4 520.1 L8.3 614.1 L8 615.1 L8.6 615.8 L19.6 607.7 L122.2 524.1 L269.6 523.8 L301.6 520.5 L322.6 516.1 L343.6 509.9 L360.6 503.5 L377.2 496.1 L391.5 488.1 L405.6 479.2 L418.2 470.1 L432.6 457.8 L449.6 441 L466.6 420.5 L477.2 405.1 L488.1 386.1 L496.1 368.1 L504.8 344.1 L509.6 325.9 L513 308.1 L515 285.1 L515.1 261.1 L513.1 240.1 L509.9 222.1 L505 204.1 L498.9 187.1 L486.6 161.4 L475.6 143.2 L460.3 122.1 L489.6 94.7 L538.6 45.9 L553.8 28.1 L564.6 11.7 L566.1 9.1Z"/>
+      <path class="mark-stroke" pathLength="1" d="M565.6 8 L532.3 32.1 L466.6 70.4 L367.6 122.3 L350.6 130.2 L343.6 132.7 L338.6 133.4 L323.6 133.2 L314.6 131.5 L301.6 126.9 L300.8 125.1 L316.6 116.9 L392.6 82.4 L399.6 78.3 L400 77.1 L388.6 69.4 L371 60.1 L339.6 47.7 L310 40.1 L290.6 36.9 L275.6 35.6 L59.6 35.2 L58 36.1 L57.6 401.1 L58.2 479.1 L59.6 479.2 L89.6 456.8 L115 440.1 L135.6 429.1 L181.6 407.3 L192.5 401.1 L203.6 392.1 L208.1 386.1 L208.4 385.1 L206.6 382 L182.6 347.8 L164.4 316.1 L150.6 287 L141.4 263.1 L135.4 244.1 L130.3 223.1 L127.2 204.1 L125.6 188.1 L125.4 174.1 L126.3 163.1 L127.6 158.4 L131.6 153.7 L137.6 150.6 L142.6 148.9 L158.6 146.3 L177.6 145.8 L197.6 147.5 L221.6 152.1 L246.6 159.7 L267.6 168.6 L285.6 178.1 L310.6 193.9 L325.6 205.7 L336.1 215.1 L350.2 230.1 L362.6 245.7 L374.9 265.1 L384.1 284.1 L390.1 302.1 L393.1 317.1 L394.4 330.1 L394.4 339.1 L391.7 360.1 L388.6 371.1 L382.4 386.1 L375.1 399.1 L367 410.1 L356.5 421.1 L345.5 430.1 L329.6 439.3 L325.6 441 L324.1 440.1 L324.2 423.1 L322.6 412.1 L316.9 396.1 L310.6 385.8 L302.3 376.1 L292.8 368.1 L283.6 363.5 L277.6 362.2 L273.6 363.8 L271.2 367.1 L269.5 393.1 L268 399.1 L264.6 406.9 L258.8 416.1 L255.6 419.6 L243.1 430.1 L235.6 434.5 L224.6 439.6 L211.6 444 L193.6 448.6 L167.6 453.7 L145.6 459.8 L124.6 469 L116.8 474.1 L55.4 520.1 L8.3 614.1 L8 615.1 L8.6 615.8 L19.6 607.7 L122.2 524.1 L269.6 523.8 L301.6 520.5 L322.6 516.1 L343.6 509.9 L360.6 503.5 L377.2 496.1 L391.5 488.1 L405.6 479.2 L418.2 470.1 L432.6 457.8 L449.6 441 L466.6 420.5 L477.2 405.1 L488.1 386.1 L496.1 368.1 L504.8 344.1 L509.6 325.9 L513 308.1 L515 285.1 L515.1 261.1 L513.1 240.1 L509.9 222.1 L505 204.1 L498.9 187.1 L486.6 161.4 L475.6 143.2 L460.3 122.1 L489.6 94.7 L538.6 45.9 L553.8 28.1 L564.6 11.7 L566.1 9.1Z"/>
+    </svg>
+    <span class="badge">
+      <svg class="i-spin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" stroke-dasharray="34 100" stroke-width="2.4"/></svg>
+      <svg class="i-ok" viewBox="0 0 24 24"><path pathLength="1" d="M5.5 12.5l4.2 4.2L18.5 7.8"/></svg>
+      <svg class="i-next" viewBox="0 0 24 24"><path pathLength="1" d="M5 12h13M12.5 6.5L18 12l-5.5 5.5"/></svg>
+      <svg class="i-fail" viewBox="0 0 24 24"><path pathLength="1" d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></svg>
+    </span>
+  </div>
+  <div id="content">
+    <h1 id="title">正在连接 {{SERVICE}}…</h1>
+    <p id="account" class="account" hidden></p>
+    <div id="chips" class="chips" hidden></div>
+    <p id="detail" class="detail">已收到授权，正在换取凭据，通常一两秒。</p>
+    <div id="next" class="next" hidden>
+      <p class="next-label">接下来可以</p>
+      <ul id="steps" class="steps"></ul>
+    </div>
+    <a id="link" class="link" target="_blank" rel="noreferrer noopener" hidden></a>
+    <p id="foot" class="foot">别关这一页，马上就好</p>
+  </div>
+</main>
+<script>
+// 授权码与 state 在地址栏里：换掉，免得留在历史记录、被截图带走。
+try { history.replaceState(null, "", location.pathname); } catch (e) {}
+var settled = false;
+// 反引号里的部分显示成命令胶囊；只建文本节点，不解析 HTML。
+function rich(el, text) {
+  el.textContent = "";
+  String(text || "").split("`").forEach(function (part, i) {
+    if (!part) return;
+    if (i % 2) {
+      var code = document.createElement("code");
+      code.textContent = part;
+      el.appendChild(code);
+    } else {
+      el.appendChild(document.createTextNode(part));
+    }
+  });
+}
+function settle(o) {
+  settled = true;
+  var $ = function (id) { return document.getElementById(id); };
+  document.body.setAttribute("data-state", o.state);
+  document.title = o.title;
+  $("title").textContent = o.title;
+  $("account").textContent = o.account || "";
+  $("account").hidden = !o.account;
+  var chips = $("chips");
+  chips.textContent = "";
+  (o.chips || []).forEach(function (c) {
+    var s = document.createElement("span");
+    s.className = "chip";
+    s.setAttribute("data-tone", c.tone);
+    s.textContent = c.text;
+    chips.appendChild(s);
+  });
+  chips.hidden = chips.childNodes.length === 0;
+  rich($("detail"), o.detail);
+  $("detail").hidden = !o.detail;
+  var steps = $("steps");
+  steps.textContent = "";
+  (o.steps || []).forEach(function (text) {
+    var li = document.createElement("li");
+    rich(li, text);
+    steps.appendChild(li);
+  });
+  $("next").hidden = steps.childNodes.length === 0;
+  var link = $("link");
+  if (o.link && /^https:\/\//.test(o.link.href)) {
+    link.href = o.link.href;
+    link.textContent = o.link.text;
+    link.hidden = false;
+  } else {
+    link.hidden = true;
+  }
+  $("foot").textContent = o.foot || "";
+  var content = $("content");
+  content.classList.remove("swap");
+  void content.offsetWidth;
+  content.classList.add("swap");
+}
+// 连接关了还没等到结果：Dock 那头中断了这次登录（取消、出错、进程退出）。
+window.addEventListener("load", function () {
+  if (!settled) {
+    settle({
+      state: "fail",
+      title: "这次登录中断了",
+      detail: "Dock 没有给出结果，可能是登录被取消了。回到 Dock 看看，需要的话重新登录。",
+      foot: "这一页可以关掉了"
+    });
+  }
+});
+</script>

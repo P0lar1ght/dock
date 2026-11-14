@@ -109,7 +109,8 @@ export interface ComposerSettings {
   model: string;
   modelId: string;
   /** 可选模型（`thread/environment/get` 的 `model.options`），按会话切换。 */
-  models: { id: string; label: string }[];
+  /** 走订阅通道的模型带 `authProvider`（老 Dock 没有这个字段）。 */
+  models: { id: string; label: string; authProvider?: string | null }[];
   /** 推理强度 id（none / low / medium / high）。 */
   reasoning: string;
   reasoningOptions: string[];

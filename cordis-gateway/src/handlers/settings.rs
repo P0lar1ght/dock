@@ -19,7 +19,7 @@ use crate::protocol::{self, RpcError};
 
 use cordis::{plugin, Inject, Plugin};
 
-use crate::methods::{method, register_methods, MethodPolicy, GATEWAY_METHODS};
+use crate::methods::{method, register_methods, GatewayMethods, MethodPolicy, GATEWAY_METHODS};
 
 fn text<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {
     params
@@ -534,6 +534,214 @@ pub async fn mcp_tool_enable(gateway: &GatewayHandle, params: Value) -> Result<V
         .await
         .map_err(write_failed)?;
     crate::handlers::connection::mcp_list(gateway)
+}
+
+fn auth_manager(
+    gateway: &GatewayHandle,
+) -> Result<std::sync::Arc<cordis_spine::AuthManager>, RpcError> {
+    gateway
+        .ctx()
+        .get::<cordis_spine::AuthManager>(cordis_spine::AUTH)
+        .ok_or_else(|| RpcError::app("unavailable", "鉴权服务没有挂载"))
+}
+
+fn auth_provider_param(params: &Value) -> String {
+    params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("chatgpt")
+        .to_string()
+}
+
+/// `auth/status {}`：订阅通道的 provider、账号表、最近一次登录的状态。
+///
+/// **只给受信连接**（账号邮箱不给配对来的网页看），也**不给任何 token**。
+/// 账号表每次都由 provider 读盘：另一个 Dock 进程刚登录 / 登出也看得到。
+pub fn auth_status(gateway: &GatewayHandle) -> Result<Value, RpcError> {
+    let manager = auth_manager(gateway)?;
+    let providers: Vec<Value> = manager
+        .provider_ids()
+        .into_iter()
+        .filter_map(|id| {
+            let provider = manager.provider(&id)?;
+            let info = provider.info();
+            let accounts: Vec<Value> = provider
+                .accounts()
+                .into_iter()
+                .map(|a| {
+                    serde_json::json!({
+                        "clientId": a.account.client_id,
+                        "email": a.email,
+                        // 登出了但注册还在：界面显示「重新登录」，不是「登出」。
+                        "signedIn": a.signed_in,
+                        // 这份授权能不能拿套餐额度推理。
+                        "planUsage": a.plan_usage,
+                        "expiresAt": a.expires_at,
+                        "active": a.active,
+                    })
+                })
+                .collect();
+            let login = manager.login_state(&id).map(|state| match state {
+                cordis_spine::LoginState::Pending { url } => {
+                    serde_json::json!({ "state": "pending", "url": url })
+                }
+                cordis_spine::LoginState::Failed { message } => {
+                    serde_json::json!({ "state": "failed", "message": message })
+                }
+                cordis_spine::LoginState::Succeeded { account } => {
+                    serde_json::json!({ "state": "succeeded", "clientId": account.client_id })
+                }
+            });
+            let cached = manager.cached_models(&id);
+            Some(serde_json::json!({
+                "id": id,
+                "displayName": info.display_name,
+                "usageUrl": info.usage_url,
+                "activeClientId": provider.active_account().map(|a| a.client_id),
+                "accounts": accounts,
+                "login": login,
+                // 自动发现、已并入模型目录的模型（活动账号的）。没拉过 / 用不了就是空的。
+                "models": cached
+                    .as_ref()
+                    .map(|c| auth_models_json(&id, &c.models))
+                    .unwrap_or_default(),
+                "modelsFetchedAt": cached.map(|c| c.fetched_at),
+            }))
+        })
+        .collect();
+    Ok(serde_json::json!({ "providers": providers }))
+}
+
+/// 自动发现的模型 → 界面要的样子（`id` 就是模型目录里的 id，可以直接设成默认）。
+fn auth_models_json(provider: &str, models: &[cordis_base::auth::RemoteModel]) -> Vec<Value> {
+    models
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": cordis_base::config::auth_models::model_id(provider, &m.slug),
+                "slug": m.slug,
+                "label": m.display_name.clone().unwrap_or_else(|| m.slug.clone()),
+                "description": m.description,
+                "contextWindow": m.context_window,
+                "reasoningEfforts": m.reasoning_efforts,
+                "defaultReasoningEffort": m.default_reasoning_effort,
+                "supportsImages": m.supports_images,
+            })
+        })
+        .collect()
+}
+
+/// `auth/models { provider? }`：重拉活动账号能用的模型，写进模型目录，回这份列表。
+///
+/// 登出了 / 没开套餐额度：那一家的模型从目录里拿掉，回错误。
+pub async fn auth_models(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let provider_id = auth_provider_param(&params);
+    let list = auth_manager(gateway)?
+        .refresh_models(&provider_id)
+        .await
+        .map_err(|e| RpcError::app("models_failed", e.message()))?;
+    Ok(serde_json::json!({
+        "provider": provider_id,
+        "models": auth_models_json(&provider_id, &list),
+    }))
+}
+
+/// `auth/login { provider?, scope?, account? }`：订阅通道登录。
+///
+/// 登录在后台跑（`"auth"` 服务管着，同一家同时一个，TUI 的 `/auth` 也走这里），
+/// **授权页地址立刻回给客户端**，客户端自己开浏览器。结果经 `auth/changed` 推送 +
+/// `auth/status` 的 `login` 字段拿到——不再只打一行 stderr。
+///
+/// - `scope: "identity"` = 只要身份，不要套餐额度；
+/// - `account: "new"` = 再加一个账号；`account: "<clientId>"` = 指定账号重新登录；
+///   不给 = 活动账号（登出了也复用原来的注册）。
+///
+/// 授权页的回环回调在**跑 Dock 的那台机器**上（官方：127.0.0.1 回调打到开浏览器的
+/// 那台机器）。远程 Dock 要按官方「Self-hosted VMs」那套：本机登录再 `/auth import`。
+pub async fn auth_login(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let provider_id = auth_provider_param(&params);
+    let manager = auth_manager(gateway)?;
+    let scope = match params.get("scope").and_then(|v| v.as_str()) {
+        Some("identity") | Some("id") => cordis_base::auth::ScopeMode::IdentityOnly,
+        _ => cordis_base::auth::ScopeMode::Default,
+    };
+    let target = match params.get("account").and_then(|v| v.as_str()) {
+        None | Some("") => cordis_base::auth::LoginTarget::Active,
+        Some("new") => cordis_base::auth::LoginTarget::New,
+        Some(id) => cordis_base::auth::LoginTarget::Account(id.to_string()),
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let ui = std::sync::Arc::new(CaptureUrlUi {
+        tx: std::sync::Mutex::new(Some(tx)),
+    });
+    manager
+        .start_login(
+            &provider_id,
+            cordis_base::auth::LoginRequest { scope, target },
+            ui,
+        )
+        .map_err(|e| RpcError::app("not_found", e.message()))?;
+    // 等授权页地址（起监听很快，通常不到一秒）。登录要是在那之前就失败了
+    // （比如指定的账号不存在），发送端随任务一起掉，这里拿到 None。
+    let url = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    if url.is_none() {
+        if let Some(cordis_spine::LoginState::Failed { message }) =
+            manager.login_state(&provider_id)
+        {
+            return Err(RpcError::app("login_failed", message));
+        }
+    }
+    Ok(serde_json::json!({
+        "pending": true,
+        "url": url,
+        "provider": provider_id,
+    }))
+}
+
+/// 登录用的界面：把授权页地址截下来交给客户端；进度提示不管（结果走 `auth/status`）。
+struct CaptureUrlUi {
+    tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
+}
+
+impl cordis_base::auth::LoginUi for CaptureUrlUi {
+    fn open_url(&self, url: &str) {
+        if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = tx.send(url.to_string());
+        }
+    }
+    fn status(&self, _message: &str) {}
+}
+
+/// `auth/cancel { provider? }`：中断正在跑的登录。
+///
+/// 中断 = 掐掉那个任务：授权页还没点完就算了，凭据不会写盘（写盘在换码成功
+/// 之后），不留半截状态。
+pub async fn auth_cancel(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let provider_id = auth_provider_param(&params);
+    let cancelled = auth_manager(gateway)?.cancel_login(&provider_id);
+    Ok(serde_json::json!({ "cancelled": cancelled, "provider": provider_id }))
+}
+
+/// `auth/logout { provider?, clientId? }`：撤销 refresh token、清本地 token（注册留着）。
+/// 回最新的 `auth/status`；远端撤销没确认时多一个 `warning`。
+pub async fn auth_logout(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let provider_id = auth_provider_param(&params);
+    let manager = auth_manager(gateway)?;
+    let client_id = params.get("clientId").and_then(|v| v.as_str());
+    let (_, outcome) = manager
+        .logout(&provider_id, client_id, true)
+        .await
+        .map_err(|e| RpcError::app("logout_failed", e.message()))?;
+    let mut status = auth_status(gateway)?;
+    if let cordis_base::auth::LogoutOutcome::LocalOnly { reason } = outcome {
+        status["warning"] = Value::String(format!(
+            "本地 token 已清，但远端撤销没确认（{reason}）。可以到 ChatGPT 设置里手动断开 Dock。"
+        ));
+    }
+    Ok(status)
 }
 
 /// `mcp/login { name }`：HTTP 服务器的浏览器 OAuth。开系统浏览器，等用户授权完回来。
@@ -1258,6 +1466,31 @@ pub fn gateway_settings() -> Plugin {
                         method(|gw, params| async move { mcp_login(&gw, params).await }),
                     ),
                     (
+                        protocol::AUTH_STATUS,
+                        TRUSTED,
+                        method(|gw, _| async move { auth_status(&gw) }),
+                    ),
+                    (
+                        protocol::AUTH_LOGIN,
+                        TRUSTED_DETACHED,
+                        method(|gw, params| async move { auth_login(&gw, params).await }),
+                    ),
+                    (
+                        protocol::AUTH_LOGOUT,
+                        TRUSTED_DETACHED,
+                        method(|gw, params| async move { auth_logout(&gw, params).await }),
+                    ),
+                    (
+                        protocol::AUTH_CANCEL,
+                        TRUSTED_DETACHED,
+                        method(|gw, params| async move { auth_cancel(&gw, params).await }),
+                    ),
+                    (
+                        protocol::AUTH_MODELS,
+                        TRUSTED_DETACHED,
+                        method(|gw, params| async move { auth_models(&gw, params).await }),
+                    ),
+                    (
                         protocol::PLUGIN_ENABLE,
                         TRUSTED_DETACHED,
                         method(|gw, params| async move { plugin_enable(&gw, params).await }),
@@ -1274,6 +1507,20 @@ pub fn gateway_settings() -> Plugin {
                     ),
                 ],
             )?;
+            // 订阅通道的账号 / 登录状态变了：推给受信连接（载荷只有 provider id）。
+            let live = ctx.clone();
+            let listener = ctx.on(cordis_spine::AUTH_CHANGED, move |provider: &String| {
+                if let Some(table) = live.get::<GatewayMethods>(GATEWAY_METHODS) {
+                    table.notify_trusted(
+                        protocol::AUTH_CHANGED,
+                        serde_json::json!({ "provider": provider }),
+                    );
+                }
+            })?;
+            ctx.effect("gateway.settings.authChanged", |scope| {
+                scope.own(listener);
+                Ok(())
+            })?;
             Ok(None)
         },
     )

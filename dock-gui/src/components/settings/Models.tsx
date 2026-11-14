@@ -1,14 +1,20 @@
 // 模型与密钥：列表（uta）/ 空（nab）/ 删除确认（tom）/ 配置解析失败（aes）/ 编辑（log、seo）。
 // 写 ~/.dock/config.toml 的 [model."<id>"]；密钥只进不出（model/get 只说有没有）。
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, FolderOpen, GripVertical, LoaderCircle, MoreHorizontal, Pencil, Plus } from "lucide-react";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { formatTokens } from "../chrome";
 import { Popover } from "../Popover";
 import { useApp, type ModelInfo } from "../../dock/store";
 import {
   EMPTY_MODEL,
+  authCancel,
+  authLogin,
+  authLogout,
+  authModels,
+  authStatus,
+  onAuthChanged,
   configEnv,
   configGet,
   configStatus,
@@ -19,6 +25,8 @@ import {
   modelListing,
   modelSave,
   modelTest,
+  type AuthModel,
+  type AuthProviderStatus,
   type ConfigStatus,
   type ModelEntry,
   type ModelListing,
@@ -150,8 +158,9 @@ function ModelList({
 
   const broken = status?.error ?? null;
   const all = listing?.models ?? [];
-  // 挂在供应商下的模型在「供应商」页签里管；这里只列自己写全连接的。
-  const models = all.filter((m) => !m.provider);
+  // 挂在供应商下的模型在「供应商」页签里管；订阅通道自动发现的在账号卡片里列；
+  // 这里只列自己写全连接的。
+  const models = all.filter((m) => !m.provider && !m.discovered);
   const [tab, setTab] = useState<"providers" | "custom">("providers");
   const startNew = (seed: Partial<ModelEntry> = {}) => onEdit({ entry: { ...EMPTY_MODEL, ...seed }, originalId: null });
   const edit = async (id: string) => {
@@ -281,6 +290,17 @@ function ModelList({
         </div>
       )}
       {!broken && (
+        <SubscriptionSection
+          remote={remote !== null}
+          defaultId={defaultId}
+          onDefault={async (id) => {
+            const next = await autosave(() => modelDefault(id));
+            if (next) onListing(next);
+          }}
+          onCatalogChanged={onReload}
+        />
+      )}
+      {!broken && (
         <Tabs
           value={tab}
           tabs={[
@@ -336,7 +356,311 @@ function ModelList({
   );
 }
 
+// ---- 订阅通道（auth/status） ----
+
+/** 打开外部链接：桌面端走系统浏览器，浏览器里退回 window.open。 */
+const openExternal = (url: string) =>
+  void openUrl(url).catch(() => window.open(url, "_blank", "noopener"));
+
+/** 订阅通道：各 provider 的账号、登录进度、登录 / 登出 / 加账号。
+ *  老 Dock 没有 `auth/status`（或没装鉴权插件）就整块不显示。变化跟着 `auth/changed` 推送重拉。 */
+function SubscriptionSection({
+  remote,
+  defaultId,
+  onDefault,
+  onCatalogChanged,
+}: {
+  remote: boolean;
+  defaultId: string;
+  onDefault: (id: string) => void;
+  /** 自动发现的模型变了（登录 / 登出 / 刷新）：模型目录要重拉，默认模型下拉才看得到。 */
+  onCatalogChanged: () => void;
+}) {
+  const auth = useLoad(authStatus);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // 回调每次渲染都是新的：经 ref 取最新那个，订阅只挂一次。
+  const reload = useRef(auth.reload);
+  reload.current = auth.reload;
+  const catalogChanged = useRef(onCatalogChanged);
+  catalogChanged.current = onCatalogChanged;
+  useEffect(
+    () =>
+      onAuthChanged(() => {
+        void reload.current();
+        catalogChanged.current();
+      }),
+    [],
+  );
+
+  const run = async (key: string, task: () => Promise<unknown>) => {
+    setBusy(key);
+    setError(null);
+    try {
+      await task();
+      await auth.reload();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  // 登录在 Dock 那头跑；授权页地址立刻回来，**客户端自己开**。
+  const login = (provider: string, account?: string) =>
+    run(`${provider}:login:${account ?? ""}`, async () => {
+      const res = await authLogin(provider, { account });
+      if (res?.url) openExternal(res.url);
+    });
+  const logout = (provider: string, clientId: string) =>
+    run(`${provider}:logout:${clientId}`, async () => {
+      const res = await authLogout(provider, clientId);
+      if (res?.warning) setError(res.warning);
+    });
+
+  const providers = auth.data?.providers ?? [];
+  if (providers.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[13px] font-medium text-ink">订阅通道</span>
+      {error && <ErrorLine>{error}</ErrorLine>}
+      {remote && (
+        <span className="text-xs text-ink-4">
+          连的是远程 Dock：授权回调落在远端那台机器上，浏览器在这边接不到。按官方的做法在本机登录，
+          再把凭据文件传过去，在远端执行 /auth import。
+        </span>
+      )}
+      {providers.map((p) => (
+        <ProviderAccounts
+          key={p.id}
+          provider={p}
+          busy={busy}
+          disabled={remote}
+          onLogin={login}
+          onLogout={logout}
+          onCancel={(id) => run(`${id}:cancel`, () => authCancel(id))}
+          defaultId={defaultId}
+          onDefault={onDefault}
+          onRefreshModels={(id) => run(`${id}:models`, () => authModels(id))}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ProviderAccounts({
+  provider: p,
+  busy,
+  disabled,
+  onLogin,
+  onLogout,
+  onCancel,
+  defaultId,
+  onDefault,
+  onRefreshModels,
+}: {
+  provider: AuthProviderStatus;
+  busy: string | null;
+  disabled: boolean;
+  onLogin: (provider: string, account?: string) => void;
+  onLogout: (provider: string, clientId: string) => void;
+  onCancel: (provider: string) => void;
+  defaultId: string;
+  onDefault: (id: string) => void;
+  onRefreshModels: (provider: string) => void;
+}) {
+  const name = p.displayName || p.id;
+  const pending = p.login?.state === "pending";
+  // 活动账号登着、开了套餐额度，才有可选的模型（否则 Dock 已经把它们从目录里拿掉了）。
+  const active = p.accounts.find((a) => a.active);
+  const canUseModels = !!active?.signedIn && active.planUsage;
+  const models = p.models ?? [];
+  const refreshing = busy === `${p.id}:models`;
+  // 官方 UI 规范：开始登录的那个按钮叫「Continue with ChatGPT」。
+  const continueLabel = `Continue with ${name}`;
+  return (
+    <div className="flex flex-col gap-1.5 text-xs text-ink-4">
+      <div className="flex items-center gap-2">
+        <span>
+          {name} · {p.accounts.length ? `${p.accounts.length} 个账号` : "还没登录"}
+        </span>
+        {p.accounts.length === 0 ? (
+          <button
+            type="button"
+            disabled={disabled || busy !== null}
+            onClick={() => onLogin(p.id)}
+            className={secondaryButton}
+          >
+            {continueLabel}
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={disabled || busy !== null}
+            onClick={() => onLogin(p.id, "new")}
+            className={smallButton}
+          >
+            添加账号
+          </button>
+        )}
+        {p.usageUrl && (
+          <button type="button" onClick={() => openExternal(p.usageUrl!)} className={smallButton}>
+            Manage usage
+          </button>
+        )}
+      </div>
+      {pending && (
+        <span className="flex items-center gap-2">
+          <LoaderCircle className="size-3.5 animate-spin" />
+          <span>在浏览器里完成授权（10 分钟内有效）</span>
+          {p.login?.url && (
+            <button type="button" onClick={() => openExternal(p.login!.url!)} className={smallButton}>
+              重新打开授权页
+            </button>
+          )}
+          <button type="button" onClick={() => onCancel(p.id)} className={smallButton}>
+            取消登录
+          </button>
+        </span>
+      )}
+      {p.login?.state === "failed" && p.login.message && <ErrorLine>{p.login.message}</ErrorLine>}
+      {p.accounts.map((a) => (
+        <span key={a.clientId} className="flex items-center gap-2">
+          {a.signedIn ? (
+            <Pill kind={a.planUsage ? undefined : "orange"}>{a.planUsage ? "套餐额度已开" : "套餐额度未开"}</Pill>
+          ) : (
+            <Pill kind="orange">已登出</Pill>
+          )}
+          <span>
+            {a.email ?? a.clientId}
+            {a.active ? " ·活动" : ""}
+          </span>
+          {a.signedIn ? (
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => onLogout(p.id, a.clientId)}
+              className={smallButton}
+            >
+              登出
+            </button>
+          ) : (
+            // 登出了注册还在：重新登录直接复用这个账号的注册。
+            <button
+              type="button"
+              disabled={disabled || busy !== null}
+              onClick={() => onLogin(p.id, a.clientId)}
+              className={smallButton}
+            >
+              {continueLabel}
+            </button>
+          )}
+        </span>
+      ))}
+      {canUseModels && (
+        <div className="mt-1.5 flex flex-col gap-1.5">
+          <div className="flex items-center gap-2">
+            <span className="text-[12.5px] font-medium text-ink-2">
+              可用模型{models.length ? ` · ${models.length}` : ""}
+            </span>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => onRefreshModels(p.id)}
+              className={`${smallButton} gap-1`}
+            >
+              {refreshing && <LoaderCircle className="size-3 animate-spin" />}
+              刷新
+            </button>
+            {p.modelsFetchedAt ? <span className="text-[11px] text-ink-5">{fetchedAgo(p.modelsFetchedAt)}</span> : null}
+          </div>
+          {models.length === 0 ? (
+            <span>还没拉到这个账号的模型列表，点「刷新」。</span>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {models.map((m) => (
+                <AuthModelRow
+                  key={m.id}
+                  model={m}
+                  isDefault={m.id === defaultId}
+                  disabled={busy !== null}
+                  onDefault={() => onDefault(m.id)}
+                />
+              ))}
+            </div>
+          )}
+          <span>已并入模型目录：输入框旁的模型菜单、终端 /model 都能直接选；用的是 {name} 套餐额度。</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 账号卡片里的一个可用模型：名字、目录 id、上下文 / 推理档位 / 图片，设为默认。 */
+function AuthModelRow({
+  model: m,
+  isDefault,
+  disabled,
+  onDefault,
+}: {
+  model: AuthModel;
+  isDefault: boolean;
+  disabled: boolean;
+  onDefault: () => void;
+}) {
+  const efforts = m.reasoningEfforts?.length
+    ? m.reasoningEfforts.length > 1
+      ? `${m.reasoningEfforts[0]}–${m.reasoningEfforts[m.reasoningEfforts.length - 1]}`
+      : m.reasoningEfforts[0]
+    : null;
+  const facts = [
+    m.contextWindow ? `${formatTokens(m.contextWindow)} 上下文` : null,
+    efforts ? `推理 ${efforts}${m.defaultReasoningEffort ? `（默认 ${m.defaultReasoningEffort}）` : ""}` : null,
+    m.supportsImages ? "可看图" : null,
+  ].filter((f): f is string => !!f);
+  return (
+    <div className="enter-fade flex items-center justify-between gap-3 rounded-xl border border-line-soft bg-white px-3.5 py-2.5 shadow-sm">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[13px] font-semibold text-ink">{m.label}</span>
+          <span className="font-mono text-[11px] text-ink-4">{m.id}</span>
+        </div>
+        {facts.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-ink-3">
+            {facts.map((f, i) => (
+              <span key={f} className="flex items-center gap-1.5">
+                {i > 0 && <span className="text-ink-5">·</span>}
+                {f}
+              </span>
+            ))}
+          </div>
+        )}
+        {m.description && <span className="text-[11.5px] text-ink-4">{m.description}</span>}
+      </div>
+      {isDefault ? (
+        <Pill>默认</Pill>
+      ) : (
+        <button type="button" disabled={disabled} onClick={onDefault} className={smallButton}>
+          设为默认
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** 「3 分钟前更新」之类。 */
+function fetchedAgo(unix: number): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - unix);
+  if (s < 60) return "刚刚更新";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前更新`;
+  if (s < 86_400) return `${Math.floor(s / 3600)} 小时前更新`;
+  return `${Math.floor(s / 86_400)} 天前更新`;
+}
+
 function KeyPill({ model }: { model: ModelInfo }) {
+  // 走订阅通道的模型：密钥不由 config 给，状态看鉴权那边。
+  if (model.authProvider) {
+    return <Pill title={`鉴权通道 ${model.authProvider}`}>订阅通道 {model.authProvider}</Pill>;
+  }
   if (model.auth === "key") return <Pill>已配置密钥</Pill>;
   if (model.auth === "env" && model.keyEnv) {
     return model.keyEnvSet ? (
