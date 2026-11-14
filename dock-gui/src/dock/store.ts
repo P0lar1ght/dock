@@ -83,7 +83,11 @@ interface WireThread {
 }
 
 interface Environment {
-  model?: { id?: string; label?: string; options?: { id: string; label: string; available?: boolean }[] };
+  model?: {
+    id?: string;
+    label?: string;
+    options?: { id: string; label: string; available?: boolean; authProvider?: string | null }[];
+  };
   approval?: { mode?: string };
   reasoning?: { effort?: string; options?: string[] };
   plan?: { enabled?: boolean };
@@ -199,6 +203,10 @@ export interface ModelInfo {
   default: boolean;
   /** 连接继承自哪个供应商（`[provider.<id>]`）；老 Dock 没有这个字段。 */
   provider?: string | null;
+  /** 走订阅通道的模型（`auth = "chatgpt"`）的 provider id；老 Dock 没有这个字段。 */
+  authProvider?: string | null;
+  /** 订阅通道自动发现的（登录后从上游拉的，不在 config 里）；老 Dock 没有这个字段。 */
+  discovered?: boolean;
 }
 
 /** 排队 / 插话消息带的图（还没送达：像素按摘要向 Dock 要）。 */
@@ -798,7 +806,9 @@ export class DockStore {
       approval: env.approval?.mode ?? "ask",
       model: env.model?.label ?? env.model?.id ?? "",
       modelId: env.model?.id ?? "",
-      models: (env.model?.options ?? []).filter((o) => o.available !== false).map(({ id, label }) => ({ id, label })),
+      models: (env.model?.options ?? [])
+        .filter((o) => o.available !== false)
+        .map(({ id, label, authProvider }) => ({ id, label, authProvider })),
       reasoning: env.reasoning?.effort ?? "none",
       reasoningOptions: env.reasoning?.options ?? ["none", "low", "medium", "high"],
       plan: env.plan?.enabled ?? false,

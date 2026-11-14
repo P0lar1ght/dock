@@ -327,6 +327,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_efforts: None,
             supports_images: None,
+            auth: None,
         };
         assert_eq!(choice.effort_choices(), config::DEFAULT_EFFORT_CHOICES);
 

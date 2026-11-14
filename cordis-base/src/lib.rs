@@ -12,6 +12,7 @@
 //! |---|---|
 //! | [`types`] | `LogEvent` / `ToolCall` / `ToolResult` 与会话身份原语 |
 //! | [`config`] | `config.toml` 的解析与模型目录 |
+//! | [`auth`] | 订阅鉴权的类型与 trait（`Lease` / `WirePolicy` / `AuthProvider`） |
 //! | [`usage`] | 每次调用与每个会话的 token / 费用账本 |
 //! | [`chat_chunk`] [`stream_acc`] | 三条 wire 的流式分片与累积 |
 //! | [`acp`] | ACP 权限选项种类 |
@@ -22,6 +23,7 @@
 //! | [`canvas`] | 画布落盘引擎：HTML 分版 + data.json |
 
 pub mod acp;
+pub mod auth;
 pub mod canvas;
 pub mod chat_chunk;
 pub mod config;

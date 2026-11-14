@@ -19,6 +19,8 @@ dock-memory = { path = "../dock-memory" }
 futures-util = "0.3"
 regex = "1"
 reqwest = { version = "0.12", default-features = true, features = ["json", "stream", "gzip", "brotli", "deflate", "multipart"] }
+# ID token 的 RS256 验签（JWKS）。ring 早就在树里（rustls 带的），这里只是提一条依赖边。
+ring = "0.17"
 htmd = "0.5.4"
 arc-swap = "1"
 serde = { version = "1", features = ["derive"] }
@@ -29,7 +31,7 @@ toml_edit = "0.22"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time", "process", "io-util", "net", "fs"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v7", "v4"] }
 url = "2"
 percent-encoding = "2.3"
 indexmap = { version = "2", features = ["serde"] }

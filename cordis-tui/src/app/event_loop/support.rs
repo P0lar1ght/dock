@@ -120,20 +120,23 @@ pub(super) fn open_slot_if_needed(ctx: &Context, overlay: &mut Overlay) {
     }
 }
 
-pub(super) fn open_slash_notice_if_needed(ctx: &Context, overlay: &mut Overlay) {
+/// 弹出待发的提示。返回「有没有真的弹出来」——调用方据此决定要不要重绘。
+pub(super) fn open_slash_notice_if_needed(ctx: &Context, overlay: &mut Overlay) -> bool {
     if overlay.is_open() {
-        return;
+        return false;
     }
     let Some(slash) = ctx.get::<Slash>(SLASH) else {
-        return;
+        return false;
     };
-    if let Some((title, body)) = slash.take_notice() {
-        *overlay = Overlay::Notice {
-            title,
-            body,
-            scroll: 0,
-        };
-    }
+    let Some((title, body)) = slash.take_notice() else {
+        return false;
+    };
+    *overlay = Overlay::Notice {
+        title,
+        body,
+        scroll: 0,
+    };
+    true
 }
 
 /// 把输入交给注册表里的浮层（`Overlay::View`）。不是这种浮层回 `false`。浮层说

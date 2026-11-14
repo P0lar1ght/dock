@@ -63,6 +63,17 @@ output = 0.42
 - `auth_scheme` 不写就跟着**当前协议**走：`messages` 用 `x-api-key`，另两条用
   Bearer。写了就对该模型的所有协议一律生效（OpenRouter 的 /messages 要显式
   写 `bearer`）。
+- 订阅通道（ChatGPT 套餐）登录后，活动账号能用的模型**自动出现在目录里**
+  （`chatgpt/<slug>`，不用写 config；`/auth models` 手动重拉）。要改其中一条的参数，
+  写同 id 的 `[model."chatgpt/<slug>"]` 逐字段覆盖。
+- `auth = "chatgpt"` 让一条手写的模型改走**订阅通道**：密钥不再从 `api_key` /
+  `env_key` / `secrets.json` 取，而是向鉴权服务要一份短期 access token，
+  请求体也按那条通道的硬约束改写（`store: false`、system 走 `instructions`…）。
+  **不能与 `api_key` / `env_key` 同时写**（算配置错误）；挂在 `[provider]` 下面
+  时也不继承供应商的密钥。地址由鉴权 provider 给，`api_base_url` 可以不写。
+  没写 `auth` 的模型行为一点不变。
+  登录用 `/auth`（= `/auth login`）；要自查这条通道跑得通，用仓库里的
+  `scripts/chatgpt-siwc-check.py`（详见 `docs/CHATGPT-SIWC.md`）。
 
 ## MCP server
 

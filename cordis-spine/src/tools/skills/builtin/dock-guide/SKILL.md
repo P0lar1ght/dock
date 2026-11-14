@@ -43,6 +43,13 @@ Dock 是跑在终端里的编码 agent。底部输入框发消息，`/` 唤出�
 `[model.<id>]`，配法见 `dock-config` 技能。`/effort` 调推理强度，
 `/timestamps` 开关时间戳，`/theme` 换配色。
 
+`/auth` 管订阅通道（ChatGPT 套餐）：`login` 打开官方授权页登录（`login new`
+再加一个账号），`status` 看当前账号与套餐授权，`list` 列已保存的账号，`use`
+切账号，`logout` 撤销并清本地 token（账号的注册留着，下次登录直接复用），
+`cancel` 中断等授权的登录，`models` 重拉可用模型。登录后活动账号能用的模型
+自动出现在 `/model` 里（`chatgpt/<slug>`），不用写 config；手写的模型条目写
+`auth = "chatgpt"` 也走这条通道，不写的照旧用 `api_key` / `env_key`，两者可以并存。
+
 ## 任务与子代理
 
 - 模型可以用 `task` 工具把活派给子代理（后台跑，完成后主动汇报）。

@@ -3,6 +3,11 @@
 pub const SESSIONS: &str = "sessions";
 pub const LLM: &str = "llm";
 pub const TOOLS: &str = "tools";
+/// 统一鉴权（Auth Manager）。provider 插件注册自己，采样侧经它拿 Lease。
+pub const AUTH: &str = "auth";
+/// 订阅通道的账号或登录状态变了（登录开始 / 结束、取消、登出、切账号、导入），
+/// 载荷是 provider id（`String`）。网关据此推 `auth/changed`。
+pub const AUTH_CHANGED: &str = "auth/changed";
 /// Session todo list. `tool-todo` provides it; TUI live-looks it.
 pub const TODOS: &str = "todos";
 /// Background jobs (`ctx.jobs`). Bash background + `tool-jobs` consume it.

@@ -5,6 +5,7 @@ use crate::agent::loop_plugin::agent_loop;
 use crate::agent::preset_propose::tool_propose_preset;
 use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
+use crate::auth::{auth_commands, auth_manager, chatgpt_auth};
 use crate::host::mcp_app_context::mcp_app_context;
 use crate::host::mcp_app_views::mcp_app_views;
 use crate::host::permissions::permissions;
@@ -114,12 +115,17 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     tokio::task::spawn_blocking(cordis_base::tool_output::gc_spill_dir);
     install_core(ctx).await?;
     ctx.plugin(settings(), ())?.wait().await?;
+    // 鉴权服务 + ChatGPT 订阅通道的 provider + `/auth` 命令组。
+    ctx.plugin(auth_manager(), ())?.wait().await?;
+    ctx.plugin(chatgpt_auth(), ())?.wait().await?;
     ctx.plugin(turn(), ())?.wait().await?;
     ctx.plugin(permissions(), ())?.wait().await?;
     ctx.plugin(cron(), ())?.wait().await?;
     ctx.plugin(roster(), ())?.wait().await?;
     ctx.plugin(jobs(), ())?.wait().await?;
     ctx.plugin(slash(), ())?.wait().await?;
+    // `/auth` 登记进 `"slash"`——要等 slash 服务在（它 inject 了 slash）。
+    ctx.plugin(auth_commands(), ())?.wait().await?;
     // 人用的斜杠命令跟着各自的功能登记进 `"slash"`；命令体在调用页上 live-lookup，
     // 所以这里不必等功能服务先挂好。
     ctx.plugin(session_commands(), ())?.wait().await?;

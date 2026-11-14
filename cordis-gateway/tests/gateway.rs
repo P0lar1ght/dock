@@ -6087,6 +6087,114 @@ async fn subagents_of_a_closed_thread_are_read_from_disk() {
     assert!(other.get("error").is_some(), "{other}");
 }
 
+/// `auth/status` 里有账号邮箱：**只给受信连接**。早先它是核心方法，不进方法表，
+/// 拿到的是默认策略（`trusted_only: false`）——配对来的网页也能读。`"auth/"` 前缀
+/// 只管「登记进方法表时必须受信」，管不到核心方法。
+#[tokio::test]
+async fn auth_status_is_for_the_trusted_gui_only() {
+    let root = harness_root().await;
+    root.plugin(cordis_spine::auth_manager(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(cordis_spine::chatgpt_auth(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    // 隔离的 DOCK_HOME 里摆一个已登录的账号。
+    let store = cordis_spine::CredentialStore::default_store();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    store
+        .save(&cordis_spine::Credential {
+            schema_version: 1,
+            generation: 1,
+            email: Some("someone@example.com".into()),
+            issuer: "https://auth.openai.com".into(),
+            subject: "sub-1".into(),
+            client_id: "oaiapp_gw".into(),
+            id_token: "id-SECRET".into(),
+            access_token: "at-SECRET".into(),
+            refresh_token: "rt-SECRET".into(),
+            expires_at: now + 3600,
+            scopes: vec!["openid".into(), "chatgpt.tokens.use.direct".into()],
+            saved_at: now,
+            ext_agent_host_id: "urn:uuid:test".into(),
+        })
+        .unwrap();
+    store.set_active("oaiapp_gw").unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+
+    let (mut gui, auth) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    assert_eq!(auth["result"]["ok"], true, "{auth}");
+    let _ = gui.call("initialize", json!({})).await;
+    let status = gui.call("auth/status", json!({})).await;
+    let provider = &status["result"]["providers"][0];
+    assert_eq!(provider["id"], "chatgpt", "{status}");
+    assert_eq!(provider["displayName"], "ChatGPT", "{status}");
+    assert_eq!(provider["activeClientId"], "oaiapp_gw", "{status}");
+    assert_eq!(provider["accounts"][0]["email"], "someone@example.com");
+    assert_eq!(provider["accounts"][0]["signedIn"], true);
+    assert_eq!(provider["accounts"][0]["planUsage"], true);
+    // 自动发现的模型：还没拉过就是空表（字段在，界面不用判断有没有）。
+    assert_eq!(provider["models"], json!([]), "{status}");
+    assert!(
+        !status.to_string().contains("SECRET"),
+        "不给任何 token：{status}"
+    );
+
+    // 配对来的网页：GUI 批准一次配对，拿网页的 ticket。
+    let http = reqwest::Client::new();
+    let created: Value = http
+        .post(format!("http://{addr}/v1/pairing/requests"))
+        .header("Origin", PAGE_ORIGIN)
+        .json(&json!({ "application": "page" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let request_id = created["pairingRequestId"].as_str().unwrap().to_string();
+    let approved = gui
+        .call(
+            "pairing/resolve",
+            json!({ "id": request_id, "approve": true }),
+        )
+        .await;
+    assert!(approved.get("error").is_none(), "{approved}");
+    let exchanged: Value = http
+        .post(format!("http://{addr}/v1/pairing/exchanges"))
+        .header("Origin", PAGE_ORIGIN)
+        .json(&json!({ "pairingRequestId": request_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let page_ticket = exchanged["ticket"].as_str().unwrap().to_string();
+    let mut page = Rpc::connect(addr, &page_ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    for method in [
+        "auth/status",
+        "auth/login",
+        "auth/logout",
+        "auth/cancel",
+        "auth/models",
+    ] {
+        let denied = page.call(method, json!({})).await;
+        assert_eq!(
+            denied["error"]["details"]["code"], "forbidden",
+            "{method} 不该对配对网页开放：{denied}"
+        );
+    }
+}
+
 /// 设置页方法只认 `dock serve` 交给父进程的 ticket：配对来的网页改不了配置
 /// （能写 MCP 启动命令 = 能在本机跑程序），受信连接能读写模型目录和白名单键。
 #[tokio::test]

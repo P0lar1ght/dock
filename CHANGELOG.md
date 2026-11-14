@@ -38,6 +38,15 @@
 
 ### 新增
 
+- **订阅通道（ChatGPT 套餐）**：按 OpenAI「Sign in with ChatGPT」开源通道的官方流程登录 ChatGPT，模型用套餐额度推理，不需要 API key（实测 Go 套餐可用；Free 账号授权页会显示「所需权限不可用」）。
+  - 登录：终端 `/auth`（不带参数 = 直接开始登录，打开官方授权页，在后台等，完成后弹提示）；子命令 `login [new|identity|<账号>]` / `logout` / `cancel` / `status` / `list` / `use` / `models` / `import`。桌面端在设置 › 模型 ›「订阅通道」，按官方 UI 规范有「Continue with ChatGPT」「添加账号」「Manage usage」；输入框旁标「Using ChatGPT plan」。
+  - **登录后就有模型**：活动账号能用的模型自动出现在 `/model` 和桌面端模型菜单里（`chatgpt/<slug>`，带上下文窗口、推理档位、能否收图），切账号重拉，登出或没开套餐额度就拿掉；config 里写同 id 的 `[model."chatgpt/<slug>"]` 可以逐字段覆盖。手写的模型条目写 `auth = "chatgpt"` 也走这条通道；**不写 `auth` 的模型行为不变**，与配 `api_key` 的模型可以并存。
+  - 登出只清 token、保留注册，下次登录直接复用；多个 Dock 进程共用凭据，刷新互不打架。浏览器回调页会显示真实结果（连上了哪个账号、套餐额度开没开、还差一步或没连上的原因与下一步）。
+  - VPS 场景：本机登录后 `/auth import` 把凭据交给远端，远端用自己的 host id 接管刷新。
+  - 凭据存 `$DOCK_HOME/credentials/chatgpt/<client_id>.json`（0600），可选模型缓存在 `$DOCK_HOME/auth_models.json`。`DOCK_CHATGPT_SUBSCRIPTION=off` 关掉整个通道（provider 不注册，自动发现的模型也不进目录）。
+  - 协议：新增 `auth/status|login|logout|cancel|models`（只给受信连接）与推送 `auth/changed`；`model/list` 新增 `authProvider`、`discovered`。
+  - MCP 服务器的 OAuth 登录一起修了：回调只认回调路径（无关请求不会废掉这次登录）、`mcp_credentials.json` 创建即 0600、刷新持跨进程锁、上游没给新 refresh token 时沿用旧的，浏览器那页同样显示真实结果。
+  - 自查脚本 `scripts/chatgpt-siwc-check.py`（公开端点 + 用活动账号的最小请求），详见 `docs/CHATGPT-SIWC.md`。
 - **桌面画面可以操作**：`desktopControl` 能力，以及 `desktop/view/windows`、`pin`、`input`。钉住一个窗口后，点击、滚动、打字打到那一帧的像素上；预览是只显示的 JPEG，不替换 agent 的元素快照。操作只认桌面 GUI 和设备令牌。
 - **本机和多台远程可以同时开着**：`remotes.json` 的 `active` 迁成 `opened` 与 `foreground`（`null` 是本机）。切换只换前台连接，不关掉本机 Dock，也不重载页面。
 - **插件能拦流程了**：磁盘来源的 Cordis 插件（插件目录装上 / 设置里启用 / 审批过的 `cordis_promote` 落盘）可以在 `host.on` 上挂五个新钩子，把 agent loop 的关键位点接出来：

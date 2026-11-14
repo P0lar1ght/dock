@@ -9,16 +9,20 @@ mod messages;
 pub mod probe;
 mod responses;
 mod tool_images;
+#[cfg(test)]
+mod wire_test;
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::agent::runtime::BoxFuture;
 use crate::agent::turn::TurnControl;
+use crate::auth::AuthManager;
 use crate::host::settings::{AppSettings, ModelOverride};
 use crate::llm::sampler::Sampler;
-use crate::names::{MODEL_OVERRIDE, SESSIONS, SETTINGS, TURN};
+use crate::names::{AUTH, MODEL_OVERRIDE, SESSIONS, SETTINGS, TURN};
 use crate::session::log::Sessions;
+use cordis_base::auth::WirePolicy;
 use cordis_base::chat_chunk::ChatCompletionChunk;
 use cordis_base::config::{self, ApiBackend, AuthScheme};
 use cordis_base::stream_acc::{take_sse_data, ChatStreamAcc, StreamDelta};
@@ -239,7 +243,7 @@ async fn sample_http(
                 .map(config::ModelChoice::default_backend)
                 .unwrap_or_default()
         });
-    let auth = choice
+    let mut auth = choice
         .as_ref()
         .map(|m| m.resolved_auth(backend))
         .unwrap_or_else(|| AuthScheme::default_for(backend));
@@ -247,7 +251,33 @@ async fn sample_http(
         .as_ref()
         .map(|m| m.wire_model_for(backend).to_string())
         .unwrap_or_else(|| model.clone());
-    let (api_base, api_key) = resolve_endpoint(sampler, &model, backend);
+    let (mut api_base, mut api_key) = resolve_endpoint(sampler, &model, backend);
+    // 订阅通道（模型条目写了 `auth = "..."`）：密钥向 Auth Manager 要，请求体
+    // 按那条通道的策略改写。**没写 auth 的模型走老路径，一行都不碰。**
+    let mut wire_policy: Option<WirePolicy> = None;
+    // 订阅通道那一份留着：401 时要拿 lease 去问 provider「换一份还是放弃」。
+    let mut subscription: Option<Subscription> = None;
+    if let Some(choice) = choice.as_ref() {
+        if let Some(provider_id) = choice.auth_provider() {
+            match resolve_subscription(&exec, choice, provider_id).await {
+                Ok(resolved) => {
+                    api_base = resolved.api_base.clone().unwrap_or(api_base);
+                    api_key = resolved.bearer.clone();
+                    // 订阅通道的 token 走 `Authorization: Bearer`，不跟模型自己
+                    // 声明的 `auth_scheme` 走。
+                    auth = AuthScheme::Bearer;
+                    wire_policy = Some(resolved.policy);
+                    subscription = Some(resolved);
+                }
+                Err(message) => {
+                    return LlmOutput {
+                        error: Some(message),
+                        ..LlmOutput::default()
+                    }
+                }
+            }
+        }
+    }
     // 没有地址就别发：拼出来的是相对路径，reqwest 只会报「relative URL without a
     // base」。最常见的原因是模型名写错（目录里查不到，又没有全局地址）。
     if api_base.trim().is_empty() {
@@ -278,9 +308,11 @@ async fn sample_http(
         .get::<Sessions>(SESSIONS)
         .map(|s| s.model_user_images())
         .unwrap_or_default();
-    let body = match backend {
+    let mut body = match backend {
         ApiBackend::ChatCompletions => chat_body(&wire, &request, &user_images, &params),
-        ApiBackend::Responses => responses::body(&wire, &request, &user_images, &params),
+        ApiBackend::Responses => {
+            responses::body(&wire, &request, &user_images, &params, wire_policy.as_ref())
+        }
         ApiBackend::Messages => {
             // Anthropic 的前缀缓存只在显式断点处写，缺省开；自建代理不认
             // `cache_control` 时 `[model.<id>].prompt_cache = false` 关掉。
@@ -291,6 +323,29 @@ async fn sample_http(
             messages::body(&wire, &request, &user_images, &params, prompt_cache)
         }
     };
+    // 订阅通道的请求体约束（`store: false`、system 走 `instructions`、去掉
+    // 上游不收的字段……）。只对 responses 生效——那几条 wire 的字段名不一样。
+    if let Some(policy) = wire_policy.as_ref() {
+        if backend != ApiBackend::Responses {
+            return LlmOutput {
+                error: Some(format!(
+                    "订阅通道只支持 responses 协议，当前协议是 {}：用 /protocol 切回去。",
+                    backend.name()
+                )),
+                ..LlmOutput::default()
+            };
+        }
+        responses::apply_policy(&mut body, &request, policy);
+    }
+    // 上游以前明确说过不收的字段（400 `…_unsupported_capability` 的 `error.param`）：
+    // 一开始就不发，免得每轮都先撞一次 400。
+    if let Some(sub) = subscription.as_ref() {
+        if let Some(manager) = exec.get::<AuthManager>(AUTH) {
+            for param in manager.unsupported_params(&sub.provider_id, &wire) {
+                responses::remove_param(&mut body, &param);
+            }
+        }
+    }
     // `DOCK_CACHE_DEBUG` 没设时是空转；设了就把这次请求的前缀与同一会话上一次
     // 的逐条比一遍，写进日志。子代理与主会话交替发请求，所以按身份分开比。
     cache_debug::record_request(
@@ -304,9 +359,15 @@ async fn sample_http(
     );
     let client = llm_client();
     let cancel = exec.get::<TurnControl>(TURN).map(|t| t.token());
-    let mut response = None;
-    let mut last_transport_error: Option<String> = None;
-    for attempt in 0..3u32 {
+    // 三种重试各有各的预算，互不挤占：
+    // - 传输失败 / 503：最多 3 次（`attempt`）；
+    // - 订阅通道 401：换一份 token 重发**一次**——换完还 401 就是账号本身的问题；
+    // - 订阅通道 400 `…_unsupported_capability`：按 `error.param` 去掉那一项再发
+    //   （官方：去掉再重试，但**绝不原样重发**），最多 [`MAX_STRIP_RETRIES`] 次。
+    let mut attempt = 0u32;
+    let mut auth_retried = false;
+    let mut stripped = 0u32;
+    let response = loop {
         let mut send = client
             .post(&url)
             .header(reqwest::header::ACCEPT, "text/event-stream")
@@ -334,8 +395,8 @@ async fn sample_http(
             // 旧实现在这里直接 return，而这恰好是最该重试的一类
             // （连接重置 / DNS / TLS 握手 / 连接超时）。
             Err(e) if is_retryable_transport(&e) && attempt < 2 => {
-                last_transport_error = Some(transport_detail(&e));
                 let wait = std::time::Duration::from_millis(800 * (attempt as u64 + 1));
+                attempt += 1;
                 if let Some(ref cancel) = cancel {
                     tokio::select! {
                         biased;
@@ -356,8 +417,38 @@ async fn sample_http(
                     ..LlmOutput::default()
                 };
             }
+            // 401：token 不好使了。问 provider「换一份还是放弃」——换到了就用新
+            // 的重发一次。
+            Ok(r) if r.status().as_u16() == 401 && !auth_retried && subscription.is_some() => {
+                auth_retried = true;
+                let Some(sub) = subscription.as_mut() else {
+                    break r;
+                };
+                let provider = exec
+                    .get::<AuthManager>(AUTH)
+                    .and_then(|m| m.provider(&sub.provider_id));
+                let Some(provider) = provider else {
+                    break r;
+                };
+                match provider.on_unauthorized(&sub.lease).await {
+                    Ok(cordis_base::auth::Retry::WithLease(fresh)) => {
+                        api_key = fresh.bearer.clone();
+                        sub.bearer = fresh.bearer.clone();
+                        sub.lease = fresh;
+                    }
+                    Ok(cordis_base::auth::Retry::GiveUp) => break r,
+                    // 刷新只是网络抖了：照实说，别叫用户重新登录。
+                    Err(e) => {
+                        return LlmOutput {
+                            error: Some(e.message()),
+                            ..LlmOutput::default()
+                        }
+                    }
+                }
+            }
             Ok(r) if r.status().as_u16() == 503 && attempt < 2 => {
                 let wait = std::time::Duration::from_millis(800 * (attempt as u64 + 1));
+                attempt += 1;
                 if let Some(ref cancel) = cancel {
                     tokio::select! {
                         biased;
@@ -368,22 +459,39 @@ async fn sample_http(
                     tokio::time::sleep(wait).await;
                 }
             }
-            Ok(r) => {
-                response = Some(r);
-                break;
+            Ok(r)
+                if r.status().as_u16() == 400
+                    && stripped < MAX_STRIP_RETRIES
+                    && subscription.is_some() =>
+            {
+                // 响应体读出来就没了：能去掉字段就重发，去不掉就在这里把错报完。
+                let status = r.status();
+                let request_id = response_request_id(r.headers());
+                let text = r.text().await.unwrap_or_default();
+                let sub = subscription.as_ref().expect("guarded above");
+                let manager = exec.get::<AuthManager>(AUTH);
+                let classified = manager
+                    .as_ref()
+                    .and_then(|m| m.classify(&sub.provider_id, 400, text.as_bytes()));
+                if let Some(cordis_base::auth::AuthError::Unsupported { param: Some(param) }) =
+                    &classified
+                {
+                    if responses::remove_param(&mut body, param) {
+                        stripped += 1;
+                        tracing::info!(param = param.as_str(), "订阅通道不收这个字段，去掉后重发");
+                        // 只记不带下标的字段：`tools[3]` 这种下一轮就不是同一个东西了。
+                        if !param.contains('[') {
+                            if let Some(m) = manager.as_ref() {
+                                m.remember_unsupported(&sub.provider_id, &wire, param);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                return http_error_output(status, request_id, &text, classified);
             }
+            Ok(r) => break r,
         }
-    }
-    let Some(response) = response else {
-        return LlmOutput {
-            error: Some(match last_transport_error {
-                // 重试用光了，最后一次仍是传输失败：把真实原因带上，
-                // 不要报成 503（那是另一回事）。
-                Some(detail) => format!("LLM 请求失败（已尝试 3 次）：{detail}"),
-                None => "LLM HTTP 503：服务端繁忙，已重试 3 次仍失败".into(),
-            }),
-            ..LlmOutput::default()
-        };
     };
     let status = response.status();
     if !status.is_success() {
@@ -391,13 +499,13 @@ async fn sample_http(
         // 是没有的，别在那边找。
         let request_id = response_request_id(response.headers());
         let text = response.text().await.unwrap_or_default();
-        let id = request_id
-            .map(|id| format!("，request-id: {id}"))
-            .unwrap_or_default();
-        return LlmOutput {
-            error: Some(format!("LLM HTTP {status}{id}\n{}", text.trim())),
-            ..LlmOutput::default()
-        };
+        // 订阅通道：把上游的状态码/body 归一成一句中文（额度用尽、没资格、
+        // 账号失效……）。**不接的话用户只看到一坨 JSON**。
+        let classified = subscription.as_ref().and_then(|sub| {
+            exec.get::<AuthManager>(AUTH)
+                .and_then(|m| m.classify(&sub.provider_id, status.as_u16(), text.as_bytes()))
+        });
+        return http_error_output(status, request_id, &text, classified);
     }
     let content_type = response
         .headers()
@@ -633,6 +741,104 @@ fn resolve_endpoint(sampler: &HttpSampler, model: &str, backend: ApiBackend) -> 
             }
         });
     (api_base, api_key)
+}
+
+/// 订阅通道解析出来的东西：Bearer、请求体策略、基址。
+#[derive(Clone)]
+struct Subscription {
+    bearer: String,
+    policy: WirePolicy,
+    api_base: Option<String>,
+    /// 这份 lease 是谁给的。401 时要拿它去问 provider「换一份还是放弃」。
+    lease: cordis_base::auth::Lease,
+    /// provider id（`"chatgpt"` 这样）。
+    provider_id: String,
+}
+
+/// 手写 `Debug`：Bearer 不进日志。
+impl std::fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subscription")
+            .field("bearer", &"<redacted>")
+            .field("policy", &self.policy)
+            .field("api_base", &self.api_base)
+            .finish()
+    }
+}
+
+/// 走订阅通道的模型（模型条目写了 `auth = "..."`）：向 Auth Manager 要一份
+/// 短期 access token，顺带拿那条通道的 wire 策略。
+///
+/// 拿不到就**在这里停**：订阅通道的请求消耗用户套餐里的额度，拿不到 token 还
+/// 硬发，只会换来一个看不懂的 401。
+async fn resolve_subscription(
+    exec: &Context,
+    choice: &config::ModelChoice,
+    provider_id: &str,
+) -> Result<Subscription, String> {
+    if let Some(conflict) = choice.auth_conflict() {
+        return Err(conflict);
+    }
+    let Some(manager) = exec.get::<AuthManager>(AUTH) else {
+        return Err("鉴权服务没挂上，这条模型走的是订阅通道。".into());
+    };
+    let Some(provider) = manager.provider(provider_id) else {
+        // 开关关掉是最常见的一种「没装」：给一句能照着做的提示。
+        if crate::auth::subscription_disabled() {
+            return Err(format!(
+                "订阅通道被开关关掉了（{} = off）：这条模型改用 api_key，或把开关放开。",
+                crate::auth::SUBSCRIPTION_ENV
+            ));
+        }
+        return Err(format!(
+            "没有装 {provider_id} 的鉴权插件，这条模型暂时用不了。"
+        ));
+    };
+    let lease = manager
+        .lease(provider_id, std::time::Duration::from_secs(120))
+        .await
+        .map_err(|e| e.message())?;
+    // 通道的请求体约束跟着 provider 走，**不给逐模型关掉**：官方要求这条通道上的
+    // 每个请求都 `store: false` + `stream: true`，关掉约束发出去只会是 400。
+    Ok(Subscription {
+        bearer: lease.bearer.clone(),
+        policy: *provider.wire_policy(),
+        api_base: provider.api_base().map(str::to_string),
+        lease,
+        provider_id: provider_id.to_string(),
+    })
+}
+
+/// 订阅通道上 400 `…_unsupported_capability` 时，「去掉那个字段再发」最多几次。
+/// 每次去掉的都是不同的字段（同一个去不掉就不重发），所以这只是个兜底上限。
+const MAX_STRIP_RETRIES: u32 = 3;
+
+/// 非 2xx 的响应 → 给用户的一句话。订阅通道的错误先归一成中文（额度、没资格、
+/// 账号失效……），request-id 一并带上（官方：留着它排查）。
+fn http_error_output(
+    status: reqwest::StatusCode,
+    request_id: Option<String>,
+    text: &str,
+    classified: Option<cordis_base::auth::AuthError>,
+) -> LlmOutput {
+    let id = request_id
+        .as_deref()
+        .map(|id| format!("，request-id: {id}"))
+        .unwrap_or_default();
+    let error = match classified {
+        Some(err) => {
+            let message = err.message();
+            match request_id.as_deref() {
+                Some(rid) if !message.contains(rid) => format!("{message}（request-id: {rid}）"),
+                _ => message,
+            }
+        }
+        None => format!("LLM HTTP {status}{id}\n{}", text.trim()),
+    };
+    LlmOutput {
+        error: Some(error),
+        ..LlmOutput::default()
+    }
 }
 
 fn missing_endpoint_error(model: &str, in_catalog: bool, backend: ApiBackend) -> String {
@@ -884,6 +1090,88 @@ fn reasoning_details_text(details: &Value) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// 订阅通道：配置冲突与「没装插件」都要在**发请求之前**报出来。
+    ///
+    /// 发出去就晚了——订阅通道的请求消耗用户套餐里的额度。
+    #[tokio::test]
+    async fn subscription_path_reports_problems_before_sending() {
+        let ctx = Context::new();
+        ctx.provide(AUTH, crate::auth::AuthManager::default())
+            .unwrap();
+
+        // 同时写死密钥 = 配置错误。
+        let mut choice = model("plan");
+        choice.auth = Some("chatgpt".into());
+        choice.api_key = Some("sk-inline".into());
+        let err = resolve_subscription(&ctx, &choice, "chatgpt")
+            .await
+            .unwrap_err();
+        assert!(err.contains("api_key"), "{err}");
+
+        // 没装那个插件 = 用不了，不是崩。
+        choice.api_key = None;
+        let err = resolve_subscription(&ctx, &choice, "chatgpt")
+            .await
+            .unwrap_err();
+        assert!(err.contains("没有装"), "{err}");
+    }
+
+    /// 订阅通道的请求体约束、基址、Bearer 都跟着 provider 走（用**真的** ChatGPT
+    /// provider + 临时凭据目录）。没登录要在发请求之前报出来。
+    ///
+    /// 约束**不能逐模型关掉**：早先有个 `plan_usage = false`，关掉后照样打官方
+    /// 地址、却不带 `store:false` / `stream:true`——官方要求每个请求都带，只会 400。
+    #[tokio::test]
+    async fn the_subscription_follows_the_provider_policy() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::auth::CredentialStore::new(dir.path().to_path_buf());
+        let ctx = Context::new();
+        let manager = crate::auth::AuthManager::default();
+        let _hold = manager.register(Arc::new(crate::auth::ChatGptProvider::new(store.clone())));
+        ctx.provide(AUTH, manager.clone()).unwrap();
+
+        let mut choice = model("plan");
+        choice.auth = Some("chatgpt".into());
+
+        // 装了插件但没登录 = 也要在发请求之前报出来。
+        let err = resolve_subscription(&ctx, &choice, "chatgpt")
+            .await
+            .unwrap_err();
+        assert!(err.contains("还没登录"), "{err}");
+
+        let now = crate::auth::credentials_now();
+        store
+            .save(&crate::auth::Credential {
+                schema_version: 1,
+                generation: 1,
+                email: Some("a@b.c".into()),
+                issuer: "https://auth.openai.com".into(),
+                subject: "sub".into(),
+                client_id: "oaiapp_x".into(),
+                id_token: "id".into(),
+                access_token: "lease-token".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now + 3600,
+                scopes: vec!["openid".into(), "chatgpt.tokens.use.direct".into()],
+                saved_at: now,
+                ext_agent_host_id: "urn:uuid:test".into(),
+            })
+            .unwrap();
+        store.set_active("oaiapp_x").unwrap();
+
+        let resolved = resolve_subscription(&ctx, &choice, "chatgpt")
+            .await
+            .expect("订阅通道可用");
+        assert_eq!(resolved.policy, crate::auth::chatgpt_policy());
+        assert_eq!(resolved.bearer, "lease-token");
+        assert_eq!(
+            resolved.api_base.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+    }
+
     /// 走**真正的集成点** `WireAcc::ingest`，不是只测 `chat_stream_error` 本身。
     ///
     /// 这是上一版漏掉的那一步：`ChatCompletionChunk` 的字段全是 `serde(default)`
@@ -953,9 +1241,14 @@ mod tests {
             true,
         ))
         .unwrap();
-        let resp =
-            serde_json::to_string(&responses::body("m", &request, &[], &WireParams::default()))
-                .unwrap();
+        let resp = serde_json::to_string(&responses::body(
+            "m",
+            &request,
+            &[],
+            &WireParams::default(),
+            None,
+        ))
+        .unwrap();
         for (name, json) in [("chat", &chat), ("messages", &msgs), ("responses", &resp)] {
             assert!(
                 !json.contains("llm stream failed"),
@@ -1063,6 +1356,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_efforts: None,
             supports_images: None,
+            auth: None,
         }
     }
 
@@ -1654,7 +1948,7 @@ mod tests {
             ),
             (
                 "responses",
-                serde_json::to_string(&responses::body("m", &req, &[], &params)).unwrap(),
+                serde_json::to_string(&responses::body("m", &req, &[], &params, None)).unwrap(),
             ),
         ] {
             assert!(body.contains("saved shot"), "{wire}：{body}");
@@ -1708,8 +2002,14 @@ mod tests {
                 ),
                 (
                     "responses",
-                    serde_json::to_string(&responses::body("m", &req, &rows, &params(vision)))
-                        .unwrap(),
+                    serde_json::to_string(&responses::body(
+                        "m",
+                        &req,
+                        &rows,
+                        &params(vision),
+                        None,
+                    ))
+                    .unwrap(),
                 ),
             ]
         };

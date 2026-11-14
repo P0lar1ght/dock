@@ -1077,6 +1077,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_efforts: None,
             supports_images: None,
+            auth: None,
         }
     }
 

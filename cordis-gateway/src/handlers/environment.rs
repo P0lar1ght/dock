@@ -224,7 +224,10 @@ fn environment_fields(ctx: &Context) -> Result<serde_json::Map<String, Value>, R
                 "id": m.id,
                 "label": if m.name.is_empty() { m.id.clone() } else { m.name.clone() },
                 "available": true,
-                "inputModalities": ["text", "image"]
+                "inputModalities": ["text", "image"],
+                // 走订阅通道的模型（`auth = "chatgpt"`）：界面据此显示
+                // 「Using ChatGPT plan」。老 Dock 没有这个字段，界面按缺省处理。
+                "authProvider": m.auth_provider(),
             })
         })
         .collect();
