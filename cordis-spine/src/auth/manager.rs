@@ -310,6 +310,12 @@ impl AuthManager {
             None => Err(AuthError::NeedsLogin {
                 reason: format!("{name} 还没登录：/auth login"),
             }),
+            Some(a) if a.problem.is_some() => Err(AuthError::NeedsLogin {
+                reason: format!(
+                    "{name} 的凭据读不了：{}",
+                    a.problem.as_deref().unwrap_or_default()
+                ),
+            }),
             Some(a) if !a.signed_in => Err(AuthError::NeedsLogin {
                 reason: format!("{name} 已经登出了：/auth login"),
             }),
@@ -630,6 +636,7 @@ mod tests {
                     plan_usage: *self.plan.lock().unwrap(),
                     expires_at: 0,
                     active: true,
+                    problem: None,
                 })
                 .collect()
         }

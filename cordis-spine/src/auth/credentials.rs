@@ -119,6 +119,9 @@ pub enum CredentialError {
     Io(#[from] std::io::Error),
 }
 
+/// 凭据目录里的一份：文件名里的 client id + 读出来的凭据（读不了就是原因）。
+pub type CredentialEntry = (String, Result<Credential, CredentialError>);
+
 /// 凭据目录。`root` 可以指到别处（测试用）。
 #[derive(Clone, Debug)]
 pub struct CredentialStore {
@@ -195,6 +198,17 @@ impl CredentialStore {
 
     /// 列出全部账号（按 client_id 排序）。
     pub fn list(&self) -> Result<Vec<Credential>, CredentialError> {
+        Ok(self
+            .entries()?
+            .into_iter()
+            .filter_map(|(_, cred)| cred.ok())
+            .collect())
+    }
+
+    /// 凭据目录里的每一份，**读不了的也列出来**（带原因）：权限被改松了、格式不对
+    /// 的账号不能在 `/auth list` 里悄悄消失——那样用户只看到「账号没了」，不知道
+    /// 该去 `chmod 600`。按 client id 排序。
+    pub fn entries(&self) -> Result<Vec<CredentialEntry>, CredentialError> {
         if !self.root.exists() {
             return Ok(Vec::new());
         }
@@ -207,60 +221,10 @@ impl CredentialStore {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            // 解析不出就跳过：一份坏文件不该让 `/auth list` 整个失败。
-            if let Ok(cred) = self.load(stem) {
-                out.push(cred);
-            }
+            out.push((stem.to_string(), self.load(stem)));
         }
-        out.sort_by(|a, b| a.client_id.cmp(&b.client_id));
+        out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
-    }
-
-    /// 已注册但**还没拿到 token** 的正式 client id 记在哪。
-    ///
-    /// 动态注册是**一次性**的：第一次回调给出 `oaiapp_…` 之后，再拿
-    /// `dynamic_agent_client` 去注册会被拒（`invalid_client`）。官方要求
-    /// 「Save it with the registration and reuse it for later sign-ins」——
-    /// 所以正式 client id 一拿到就得落盘，哪怕换码还没成功。
-    pub fn issued_path(&self) -> PathBuf {
-        self.root.join("issued")
-    }
-
-    /// 记住已注册的正式 client id。
-    pub fn remember_issued(
-        &self,
-        client_id: &str,
-        email: Option<&str>,
-    ) -> Result<(), CredentialError> {
-        self.ensure_root()?;
-        let record = serde_json::json!({ "client_id": client_id, "email": email });
-        write_private(&self.issued_path(), record.to_string().as_bytes())?;
-        Ok(())
-    }
-
-    /// 已注册的正式 client id（还没拿到 token 时用）。
-    pub fn issued(&self) -> Option<String> {
-        let raw = std::fs::read_to_string(self.issued_path()).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        v.get("client_id")
-            .and_then(|c| c.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    }
-
-    /// 记下的邮箱（重新授权时当 `login_hint`）。
-    pub fn issued_email(&self) -> Option<String> {
-        let raw = std::fs::read_to_string(self.issued_path()).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        v.get("email")
-            .and_then(|c| c.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    }
-
-    /// 凭据落盘后就不需要「已注册但未拿到 token」那条记录了。
-    pub fn clear_issued(&self) {
-        let _ = std::fs::remove_file(self.issued_path());
     }
 
     /// 当前活动账号的 client_id。

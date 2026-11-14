@@ -175,7 +175,9 @@ fn status(manager: &AuthManager) -> SlashOutcome {
                     .email
                     .clone()
                     .unwrap_or_else(|| a.account.client_id.clone());
-                let line = if !a.signed_in {
+                let line = if let Some(problem) = &a.problem {
+                    format!("{id}：{who}（凭据读不了：{problem}）")
+                } else if !a.signed_in {
                     format!("{id}：{who}（已登出，/auth login 重新登录）")
                 } else {
                     let plan = if a.plan_usage {
@@ -209,12 +211,14 @@ fn list(manager: &AuthManager) -> SlashOutcome {
     let mut lines = Vec::new();
     for id in manager.provider_ids() {
         for a in manager.accounts(&id) {
-            let state = if !a.signed_in {
-                "已登出"
+            let state = if let Some(problem) = &a.problem {
+                format!("读不了：{problem}")
+            } else if !a.signed_in {
+                "已登出".to_string()
             } else if a.plan_usage {
-                "套餐额度已开"
+                "套餐额度已开".to_string()
             } else {
-                "套餐额度未开"
+                "套餐额度未开".to_string()
             };
             let mark = if a.active { " ·活动" } else { "" };
             lines.push(format!(

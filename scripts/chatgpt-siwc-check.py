@@ -12,23 +12,16 @@
     # A 段：随便什么时候都能跑
     python3 scripts/chatgpt-siwc-check.py
 
-    # B 段：先 /auth login chatgpt 拿到凭据，再（token 从**环境变量**读）
-    DOCK_CHATGPT_ACCESS_TOKEN=... python3 scripts/chatgpt-siwc-check.py
-
-    # 或者让它自己从凭据目录里读（不用把 token 写进命令行）
+    # B 段：先在 Dock 里 /auth login 拿到凭据，再让脚本自己读**活动账号**的 token
+    # （`$DOCK_HOME/credentials/chatgpt/`，没设 DOCK_HOME 就是 ~/.dock）
     python3 scripts/chatgpt-siwc-check.py --from-credentials
 
-**token 不要走命令行参数**：命令行会进 shell 历史，也会出现在 `ps` 的输出里
-（同机器上别的用户看得见）。环境变量只留在本进程的环境里。
+    # 或者 token 从**环境变量**读（别处拿到的 token）
+    DOCK_CHATGPT_ACCESS_TOKEN=... python3 scripts/chatgpt-siwc-check.py
 
-从凭据目录取 token（放进环境变量，**不要打印到屏幕**）：
-    export DOCK_CHATGPT_ACCESS_TOKEN="$(python3 - <<'EOF'
-    import json, pathlib
-    p = pathlib.Path.home() / ".dock/credentials/chatgpt"
-    for f in p.glob("*.json"):
-        print(json.loads(f.read_text())["access_token"])
-    EOF
-    )"
+**token 不要走命令行参数**：命令行会进 shell 历史，也会出现在 `ps` 的输出里
+（同机器上别的用户看得见）。环境变量只留在本进程的环境里；`--from-credentials`
+只在进程内部读，不打印。
 
 每项的请求 id（x-request-id）都会打出来——官方文档说凭它找支持。
 
@@ -110,21 +103,29 @@ def _parse_sse(text):
     return out
 
 
-def token_from_credentials():
-    """从凭据目录里取 access token。
-
-    取**最近落盘**的那一份（mtime 最新的 json）。不打印——只进程序内部。
-    """
-    import glob
+def credentials_dir():
+    """`$DOCK_HOME/credentials/chatgpt`（没设 DOCK_HOME 就是 ~/.dock），与 Dock 一致。"""
     import pathlib
 
-    d = pathlib.Path.home() / ".dock/credentials/chatgpt"
-    files = [pathlib.Path(f) for f in glob.glob(str(d / "*.json"))]
-    if not files:
-        return None
-    newest = max(files, key=lambda p: p.stat().st_mtime)
+    home = os.environ.get("DOCK_HOME")
+    root = pathlib.Path(home) if home else pathlib.Path.home() / ".dock"
+    return root / "credentials" / "chatgpt"
+
+
+def token_from_credentials():
+    """取**活动账号**的 access token（`active` 文件指着的那份）。不打印——只进程序内部。
+
+    多个账号时不拼、不猜：没有活动账号就返回 None。
+    """
+    d = credentials_dir()
     try:
-        return json.loads(newest.read_text()).get("access_token")
+        client_id = (d / "active").read_text().strip()
+    except OSError:
+        return None
+    if not client_id or "/" in client_id or client_id.startswith("."):
+        return None
+    try:
+        return json.loads((d / f"{client_id}.json").read_text()).get("access_token") or None
     except (OSError, ValueError):
         return None
 
@@ -347,7 +348,7 @@ def main():
     ap.add_argument(
         "--from-credentials",
         action="store_true",
-        help="从 ~/.dock/credentials/chatgpt/ 读 access token（不走命令行传 token）",
+        help="读活动账号的 access token（$DOCK_HOME/credentials/chatgpt/，不走命令行传 token）",
     )
     ap.add_argument("--skip-a", action="store_true", help="跳过 A 段")
     args = ap.parse_args()
@@ -361,8 +362,8 @@ def main():
         phase_b(token)
     else:
         print("B 段跳过（没有 token）。登录后拿 token 再跑一次。")
-        print("  Dock 里：/auth login chatgpt")
-        print("  然后：export DOCK_CHATGPT_ACCESS_TOKEN=… 或加 --from-credentials")
+        print("  Dock 里：/auth login")
+        print("  然后加 --from-credentials 再跑（或设 DOCK_CHATGPT_ACCESS_TOKEN）")
     return 0
 
 

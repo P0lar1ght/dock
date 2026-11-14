@@ -2140,10 +2140,7 @@ auth = "chatgpt"
         assert!(list[0].auth_conflict().is_none());
     }
 
-    /// 挂在写了 `env_key` 的供应商下面、自己走订阅通道的模型：**不继承密钥**。
-    ///
-    /// 继承了的话 `auth_conflict` 会把它判成「同时配了 auth 和 env_key」——可用户
-    /// 一个密钥都没给这条模型写。
+    /// 一条自动发现的订阅模型（`chatgpt/<slug>`）。
     fn discovered(slug: &str) -> ModelChoice {
         let mut cache = auth_models::AuthModelCache::default();
         cache.providers.insert(
@@ -2159,6 +2156,8 @@ auth = "chatgpt"
                 }],
             },
         );
+        // 开关是环境变量：拿着环境锁读，别被同进程里改它的测试干扰。
+        let _env = crate::test_env::scoped().remove("DOCK_CHATGPT_SUBSCRIPTION");
         auth_models::catalog_entries(&cache).remove(0)
     }
 
@@ -2209,6 +2208,10 @@ auth = "chatgpt"
         assert_eq!(ids, ["row", "chatgpt/gpt-6-luna"]);
     }
 
+    /// 挂在写了 `env_key` 的供应商下面、自己走订阅通道的模型：**不继承密钥**。
+    ///
+    /// 继承了的话 `auth_conflict` 会把它判成「同时配了 auth 和 env_key」——可用户
+    /// 一个密钥都没给这条模型写。
     #[test]
     fn a_subscription_model_does_not_inherit_its_providers_key() {
         let dir = tempfile::tempdir().unwrap();

@@ -73,9 +73,15 @@ pub fn model_id(provider: &str, slug: &str) -> String {
 }
 
 /// 文件里的模型 → 目录条目（订阅通道：`/responses`、`auth = <provider>`）。
+///
+/// 被开关关掉的那一家（`DOCK_<PROVIDER>_SUBSCRIPTION=off`）不并：provider 没注册，
+/// 列出来也选不了。
 pub fn catalog_entries(cache: &AuthModelCache) -> Vec<ModelChoice> {
     let mut out = Vec::new();
     for (provider, entry) in &cache.providers {
+        if crate::auth::subscription_disabled(provider) {
+            continue;
+        }
         for model in &entry.models {
             if model.slug.trim().is_empty() {
                 continue;
@@ -160,6 +166,8 @@ mod tests {
 
     #[test]
     fn models_become_subscription_catalog_entries() {
+        // 开关是环境变量：拿着环境锁读，别被同进程里改它的测试干扰。
+        let _env = crate::test_env::scoped().remove("DOCK_CHATGPT_SUBSCRIPTION");
         let list = catalog_entries(&cache());
         assert_eq!(list.len(), 2);
         let luna = &list[0];
@@ -186,6 +194,17 @@ mod tests {
         assert_eq!(bare.name, "bare");
         assert_eq!(bare.reasoning, None);
         assert_eq!(bare.reasoning_efforts, None);
+    }
+
+    /// 订阅通道被开关关掉时，它自动发现的模型不进目录（审阅 #282 第 7 条）：
+    /// 早先 `/model` 里照样列着 `chatgpt/*`，选了才报错。
+    #[test]
+    fn a_disabled_subscription_contributes_no_models() {
+        let _env = crate::test_env::scoped().set("DOCK_CHATGPT_SUBSCRIPTION", "off");
+        assert!(catalog_entries(&cache()).is_empty());
+        drop(_env);
+        let _env = crate::test_env::scoped().remove("DOCK_CHATGPT_SUBSCRIPTION");
+        assert_eq!(catalog_entries(&cache()).len(), 2);
     }
 
     #[test]

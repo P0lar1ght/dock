@@ -134,7 +134,7 @@ SIWC 那条通道比普通 OpenAI 兼容端点严，多一个字段就是 400：
 
 ```bash
 python3 scripts/chatgpt-siwc-check.py                    # A 段：公开端点
-python3 scripts/chatgpt-siwc-check.py --token "$TOKEN"   # B 段：需要账号
+python3 scripts/chatgpt-siwc-check.py --from-credentials   # B 段：读活动账号的 token（不走命令行参数）
 ```
 
 每项只发一次短请求（回复一个词就够），请求 id 会打出来。
@@ -143,11 +143,13 @@ python3 scripts/chatgpt-siwc-check.py --token "$TOKEN"   # B 段：需要账号
 PKCE 只支持 S256 / ID token 只用 RS256 / 支持 refresh_token / 公开客户端
 （auth method `none`）/ JWKS 4 把 RSA-RS256 公钥 / 两条推理路由存在（无 token → 401）。
 
-**B 段（需要账号，尚未实测）**：Free 账号能不能首登拿到
-`chatgpt.tokens.use.direct`；`/v1/models` 的 slug 列表；最小请求能否拿到
-`response.completed`；工具调用（namespace 里的 function）的格式；reasoning
-effort / summary 收不收；refresh 轮换后旧 token 是否立即失效；撤销后刷新失败；
-VPS 导入后由远端接管刷新。
+**B 段（需要账号）**，2026-11-14 用 Go 套餐账号实测过的：Free 账号拿不到
+`chatgpt.tokens.use.direct`（同意页「所需权限不可用」），Go 能；`/v1/models` 给出
+可见模型与元数据（见下面实测）；最小请求拿到 `response.completed`；工具调用正常；
+`reasoning.summary` 的 `concise` / `auto` / `detailed` 都收，简单步骤上游
+`reasoning_tokens: 0`、没有摘要是模型自己不想；refresh 轮换成功。
+**还没实测**：轮换后旧 refresh token 是否立即失效、撤销后刷新失败、VPS 导入后由
+远端接管刷新、多账号切换。
 
 **已知未知**：官方对「哪些套餐能用额度」的说法不一致（2026-11-14 查）：
 

@@ -107,6 +107,8 @@ export interface AuthAccount {
   /** access token 过期时刻（unix 秒；登出了是 0）。 */
   expiresAt: number;
   active: boolean;
+  /** 本机这份凭据读不了的原因（权限被改松了之类，带修法）。老 Dock 没有这个字段。 */
+  problem?: string | null;
 }
 
 /** 最近一次登录的进度。 */

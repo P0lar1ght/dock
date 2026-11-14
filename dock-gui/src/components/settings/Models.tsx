@@ -523,39 +523,53 @@ function ProviderAccounts({
         </span>
       )}
       {p.login?.state === "failed" && p.login.message && <ErrorLine>{p.login.message}</ErrorLine>}
-      {p.accounts.map((a) => (
-        <span key={a.clientId} className="flex items-center gap-2">
-          {a.signedIn ? (
-            <Pill kind={a.planUsage ? undefined : "orange"}>{a.planUsage ? "套餐额度已开" : "套餐额度未开"}</Pill>
-          ) : (
-            <Pill kind="orange">已登出</Pill>
-          )}
-          <span>
-            {a.email ?? a.clientId}
-            {a.active ? " ·活动" : ""}
+      {p.accounts.map((a) =>
+        a.problem ? (
+          // 凭据读不了：列出来、说原因和修法，不给登录 / 登出按钮（先把文件修好）。
+          <span key={a.clientId} className="flex flex-col gap-0.5">
+            <span className="flex items-center gap-2">
+              <Pill kind="orange">凭据读不了</Pill>
+              <span>
+                {a.clientId}
+                {a.active ? " ·活动" : ""}
+              </span>
+            </span>
+            <span className="text-[#c0392b]">{a.problem}</span>
           </span>
-          {a.signedIn ? (
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={() => onLogout(p.id, a.clientId)}
-              className={smallButton}
-            >
-              登出
-            </button>
-          ) : (
-            // 登出了注册还在：重新登录直接复用这个账号的注册。
-            <button
-              type="button"
-              disabled={disabled || busy !== null}
-              onClick={() => onLogin(p.id, a.clientId)}
-              className={smallButton}
-            >
-              {continueLabel}
-            </button>
-          )}
-        </span>
-      ))}
+        ) : (
+          <span key={a.clientId} className="flex items-center gap-2">
+            {a.signedIn ? (
+              <Pill kind={a.planUsage ? undefined : "orange"}>{a.planUsage ? "套餐额度已开" : "套餐额度未开"}</Pill>
+            ) : (
+              <Pill kind="orange">已登出</Pill>
+            )}
+            <span>
+              {a.email ?? a.clientId}
+              {a.active ? " ·活动" : ""}
+            </span>
+            {a.signedIn ? (
+              <button
+                type="button"
+                disabled={busy !== null}
+                onClick={() => onLogout(p.id, a.clientId)}
+                className={smallButton}
+              >
+                登出
+              </button>
+            ) : (
+              // 登出了注册还在：重新登录直接复用这个账号的注册。
+              <button
+                type="button"
+                disabled={disabled || busy !== null}
+                onClick={() => onLogin(p.id, a.clientId)}
+                className={smallButton}
+              >
+                {continueLabel}
+              </button>
+            )}
+          </span>
+        ),
+      )}
       {canUseModels && (
         <div className="mt-1.5 flex flex-col gap-1.5">
           <div className="flex items-center gap-2">

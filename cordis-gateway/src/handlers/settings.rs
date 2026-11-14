@@ -578,6 +578,8 @@ pub fn auth_status(gateway: &GatewayHandle) -> Result<Value, RpcError> {
                         "planUsage": a.plan_usage,
                         "expiresAt": a.expires_at,
                         "active": a.active,
+                        // 本机这份凭据读不了的原因（权限被改松了之类），带修法。
+                        "problem": a.problem,
                     })
                 })
                 .collect();

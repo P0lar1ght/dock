@@ -92,6 +92,27 @@ pub struct WirePolicy {
     pub hosted_tools: &'static [&'static str],
 }
 
+/// 把某一家订阅通道整个关掉的环境变量：`DOCK_<PROVIDER>_SUBSCRIPTION`
+/// （`chatgpt` → `DOCK_CHATGPT_SUBSCRIPTION`）。
+pub fn subscription_env(provider: &str) -> String {
+    format!(
+        "DOCK_{}_SUBSCRIPTION",
+        provider.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// 那一家的订阅通道是不是被开关关掉了（`off` / `0` / `false` / `no`）。
+///
+/// 关掉 = provider 不注册、目录里也不并它自动发现的模型；没写 `auth` 的模型不受影响。
+pub fn subscription_disabled(provider: &str) -> bool {
+    std::env::var(subscription_env(provider)).is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        )
+    })
+}
+
 /// 统一的鉴权错误分类。上游的状态码与 body 由 provider 归一到这里。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthError {
@@ -242,6 +263,9 @@ pub struct AccountSummary {
     pub expires_at: u64,
     /// 是不是当前活动账号。
     pub active: bool,
+    /// 本机这份凭据**读不了**的原因（权限被改松了、格式不对……）。`Some` 时其余
+    /// 状态都不可信：列出来是为了让用户知道账号还在、该怎么修，而不是悄悄消失。
+    pub problem: Option<String>,
 }
 
 /// 登录要人看的那部分：打开授权 URL、报状态。TUI / GUI / headless 各自实现。

@@ -654,17 +654,10 @@ impl ChatGptProvider {
                     }
                 };
 
-                // 正式 client id 立刻落盘：官方要求「save it with the registration」，
-                // 换码还没成也得先记下——下一轮 / 下次登录用它。
-                if dynamic {
-                    if let Err(e) = self.store.remember_issued(&exchange_client_id, None) {
-                        return Err(AuthError::NeedsLogin {
-                            reason: format!(
-                                "已注册但记不住正式 client id（{e}）：检查凭据目录的权限。"
-                            ),
-                        });
-                    }
-                }
+                // 首轮换码被拒时，正式 client id **只留给这一次登录的第二轮**（官方：
+                // "with the issued client ID retained for this attempt"）。不落盘：
+                // 回调里没有身份信息，留到下一次 `/auth login new` 就可能被另一个
+                // 账号拿去用。注册完成（换到 token、认出是谁）才随凭据一起存。
 
                 let token = match self
                     .exchange_code(
@@ -779,7 +772,6 @@ impl ChatGptProvider {
         self.store
             .set_active(&client_id)
             .map_err(|e| AuthError::Transport(e.to_string()))?;
-        self.store.clear_issued();
 
         let who = cred.email.clone().unwrap_or_else(|| client_id.clone());
         if cred.has_plan_usage() {
@@ -820,18 +812,6 @@ impl Registration {
             granted: cred.scopes.clone(),
         }
     }
-
-    /// 新账号。首登回调拿到了正式 client id、但换码没成的那个注册还在，就接着用它。
-    fn new_account(store: &CredentialStore) -> Self {
-        match store.issued() {
-            Some(id) => Self {
-                client_id: Some(id),
-                email: store.issued_email(),
-                ..Self::default()
-            },
-            None => Self::default(),
-        }
-    }
 }
 
 /// 按登录目标挑注册。**登出了的账号也有注册**——那份文件里只是没了 token。
@@ -840,7 +820,8 @@ fn registration_for(
     target: &LoginTarget,
 ) -> Result<Registration, AuthError> {
     match target {
-        LoginTarget::New => Ok(Registration::new_account(store)),
+        // 新账号总是走首登（动态注册）：上一次没登完的注册认不出是谁的，不接着用。
+        LoginTarget::New => Ok(Registration::default()),
         LoginTarget::Account(id) => {
             store
                 .load(id)
@@ -850,10 +831,10 @@ fn registration_for(
                 })
         }
         LoginTarget::Active => match store.active() {
-            None => Ok(Registration::new_account(store)),
+            None => Ok(Registration::default()),
             Some(id) => match store.load(&id) {
                 Ok(cred) => Ok(Registration::of(&cred)),
-                Err(CredentialError::Missing) => Ok(Registration::new_account(store)),
+                Err(CredentialError::Missing) => Ok(Registration::default()),
                 // 读坏了（权限被改过之类）别悄悄当成新账号：那会再注册一个。
                 Err(e) => Err(AuthError::NeedsLogin {
                     reason: format!("活动账号的凭据读不了：{e}"),
@@ -894,16 +875,45 @@ impl AuthProvider for ChatGptProvider {
     fn accounts(&self) -> Vec<AccountSummary> {
         let active = self.store.active();
         self.store
-            .list()
+            .entries()
             .unwrap_or_default()
-            .iter()
-            .map(|c| AccountSummary {
-                account: key_of(c),
-                email: c.email.clone(),
-                signed_in: c.signed_in(),
-                plan_usage: c.signed_in() && c.has_plan_usage(),
-                expires_at: if c.signed_in() { c.expires_at } else { 0 },
-                active: active.as_deref() == Some(c.client_id.as_str()),
+            .into_iter()
+            .map(|(id, cred)| {
+                let is_active = active.as_deref() == Some(id.as_str());
+                match cred {
+                    Ok(c) => AccountSummary {
+                        account: key_of(&c),
+                        email: c.email.clone(),
+                        signed_in: c.signed_in(),
+                        plan_usage: c.signed_in() && c.has_plan_usage(),
+                        expires_at: if c.signed_in() { c.expires_at } else { 0 },
+                        active: is_active,
+                        problem: None,
+                    },
+                    // 读不了的也列出来，带原因和修法：不能让账号悄悄消失。
+                    Err(e) => {
+                        let fix = match &e {
+                            CredentialError::Permissions(_) => format!(
+                                "；改回去：chmod 600 {}",
+                                self.store.root().join(format!("{id}.json")).display()
+                            ),
+                            _ => String::new(),
+                        };
+                        AccountSummary {
+                            account: AccountKey {
+                                provider: PROVIDER_ID.to_string(),
+                                subject: String::new(),
+                                client_id: id,
+                            },
+                            email: None,
+                            signed_in: false,
+                            plan_usage: false,
+                            expires_at: 0,
+                            active: is_active,
+                            problem: Some(format!("{e}{fix}")),
+                        }
+                    }
+                }
             })
             .collect()
     }
@@ -1545,15 +1555,9 @@ pub fn classify(status: u16, body: &[u8]) -> Option<AuthError> {
 /// 按量计费（配 `api_key`）时用它。
 pub const SUBSCRIPTION_ENV: &str = "DOCK_CHATGPT_SUBSCRIPTION";
 
-/// 订阅通道是不是被开关关掉了。
+/// 订阅通道是不是被开关关掉了（判断在 `cordis_base::auth`，目录合并也用同一条）。
 pub fn subscription_disabled() -> bool {
-    match std::env::var(SUBSCRIPTION_ENV) {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            matches!(v.as_str(), "off" | "0" | "false" | "no")
-        }
-        Err(_) => false,
-    }
+    cordis_base::auth::subscription_disabled(PROVIDER_ID)
 }
 
 /// provider 插件：把自己注册进 `"auth"`。
@@ -1888,6 +1892,16 @@ mod tests {
         assert_eq!(terra.supports_images, None);
     }
 
+    /// 开关的名字和目录合并用的是同一条约定（`DOCK_<PROVIDER>_SUBSCRIPTION`）：
+    /// 关掉通道时 provider 不注册，自动发现的模型也不进目录。
+    #[test]
+    fn the_switch_name_follows_the_shared_convention() {
+        assert_eq!(
+            SUBSCRIPTION_ENV,
+            cordis_base::auth::subscription_env(PROVIDER_ID)
+        );
+    }
+
     /// 浏览器那一页最后停在哪：连上了（带账号、套餐额度开没开）、还差一步、没连上。
     #[test]
     fn the_page_says_what_the_round_ended_with() {
@@ -2054,9 +2068,12 @@ mod tests {
         assert!(accounts[0].active);
     }
 
-    /// 「新加一个账号」走首登；首登回调拿到了正式 client id 但换码没成的，接着用它。
+    /// 「新加一个账号」总是走首登。上一次没登完的注册（首轮拿到了正式 client id、
+    /// 换码没成）**不接着用**：回调里没有身份信息，认不出它是哪个账号的——早先
+    /// 存在全局唯一的 `issued` 里，下一次给**另一个**账号 `/auth login new` 就会
+    /// 拿它去授权（审阅 #282 第 8 条）。
     #[test]
-    fn a_new_account_registers_unless_a_registration_is_pending() {
+    fn a_new_account_always_registers_fresh() {
         let store = store();
         store.save(&credential("oaiapp_old", 3600)).unwrap();
         store.set_active("oaiapp_old").unwrap();
@@ -2064,16 +2081,55 @@ mod tests {
             registration_for(&store, &LoginTarget::New).unwrap(),
             Registration::default()
         );
-        store.remember_issued("oaiapp_pending", None).unwrap();
+        // 旧版本留下的「已注册未拿到 token」记录：不再读它。
+        std::fs::write(
+            store.root().join("issued"),
+            r#"{"client_id":"oaiapp_someone_elses","email":null}"#,
+        )
+        .unwrap();
         assert_eq!(
-            registration_for(&store, &LoginTarget::New)
-                .unwrap()
-                .client_id
-                .as_deref(),
-            Some("oaiapp_pending")
+            registration_for(&store, &LoginTarget::New).unwrap(),
+            Registration::default(),
+            "上一次没登完的注册不给下一个新账号用"
         );
         // 指定账号：本机没有就报错，不悄悄注册一个新的。
         assert!(registration_for(&store, &LoginTarget::Account("oaiapp_nope".into())).is_err());
+    }
+
+    /// 权限被改松（不是 0600）的凭据：不读它，但账号表里要列出来、带原因和修法。
+    /// 早先 `list()` 悄悄跳过读不了的文件，`/auth list` 和设置页里这个账号就没了
+    /// （审阅 #282 第 6 条）。
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_credential_is_listed_with_the_reason() {
+        use std::os::unix::fs::PermissionsExt;
+        let store = store();
+        store.save(&credential("oaiapp_loose", 3600)).unwrap();
+        store.save(&credential("oaiapp_fine", 3600)).unwrap();
+        store.set_active("oaiapp_loose").unwrap();
+        let path = store.root().join("oaiapp_loose.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let provider = ChatGptProvider::new(store.clone());
+        let accounts = provider.accounts();
+        assert_eq!(accounts.len(), 2, "{accounts:?}");
+        let loose = accounts
+            .iter()
+            .find(|a| a.account.client_id == "oaiapp_loose")
+            .expect("读不了的也要列出来");
+        assert!(loose.active && !loose.signed_in && !loose.plan_usage);
+        let problem = loose.problem.as_deref().unwrap_or_default();
+        assert!(
+            problem.contains("0600") && problem.contains("chmod 600"),
+            "{problem}"
+        );
+        // 读不了的内容一个字也不往外给。
+        assert!(loose.email.is_none());
+        let fine = accounts
+            .iter()
+            .find(|a| a.account.client_id == "oaiapp_fine")
+            .unwrap();
+        assert!(fine.problem.is_none() && fine.signed_in);
     }
 
     /// 活动账号**每次读盘**：另一个进程切了账号 / 登了新号，这边不用重启就看到。

@@ -229,6 +229,7 @@ impl AuthProvider for FakeProvider {
             plan_usage: true,
             expires_at: 0,
             active: true,
+            problem: None,
         }]
     }
 
@@ -577,6 +578,20 @@ async fn 去不掉的字段不重发() {
     assert!(err.contains("service_tier"), "{err}");
     assert!(!err.contains("已去掉"), "{err}");
     assert_eq!(upstream.captured().len(), 1, "同一个请求体不许再发");
+}
+
+/// 没走订阅通道的模型：503 重试 3 次仍失败，报错与重构前**逐字一致**——
+/// `LLM HTTP {status}` + 上游原文（审阅 #282 第 3 条问过这条路径变没变）。
+#[tokio::test(flavor = "multi_thread")]
+async fn 密钥那条连续_503_的报错不变() {
+    let (_env, _cwd) = isolated_env();
+    let upstream = FakeUpstream::start_with(503, "busy".into()).await;
+    write_catalog(&upstream.base());
+    let (ctx, _hold_settings, _hold_auth) = ctx_for("wire-key");
+
+    let err = ask(&ctx, "wire-key").await.error.expect("该报错");
+    assert_eq!(err, "LLM HTTP 503 Service Unavailable\nbusy");
+    assert_eq!(upstream.captured().len(), 3, "503 照旧最多发 3 次");
 }
 
 /// 同一模型上「订阅 + 密钥」同时写 = 配置错误，不是静默挑一个。
