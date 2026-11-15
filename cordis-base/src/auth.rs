@@ -90,6 +90,9 @@ pub struct WirePolicy {
     pub include_fields: &'static [&'static str],
     /// 这条通道准用的托管工具。
     pub hosted_tools: &'static [&'static str],
+    /// 带 `prompt_cache_key`（取会话 id）：上游按它把同一会话的请求路由到同一批
+    /// 机器，前缀缓存才有机会命中。只对认这个字段的通道开，别家多一个字段可能 400。
+    pub prompt_cache_key: bool,
 }
 
 /// 把某一家订阅通道整个关掉的环境变量：`DOCK_<PROVIDER>_SUBSCRIPTION`

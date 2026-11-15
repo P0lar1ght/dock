@@ -336,6 +336,11 @@ async fn sample_http(
             };
         }
         responses::apply_policy(&mut body, &request, policy);
+        let session_id = exec
+            .get::<Sessions>(SESSIONS)
+            .map(|s| s.live_session_id())
+            .unwrap_or_default();
+        responses::apply_cache_key(&mut body, policy, &session_id);
     }
     // 上游以前明确说过不收的字段（400 `…_unsupported_capability` 的 `error.param`）：
     // 一开始就不发，免得每轮都先撞一次 400。
