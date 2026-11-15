@@ -94,6 +94,16 @@ pub fn apply_policy(body: &mut Value, request: &PromptRequest, policy: &WirePoli
     }
 }
 
+/// 通道要 `prompt_cache_key` 时，用会话 id 当键：同一会话的请求带同一个键，
+/// 上游把它们路由到同一批机器，前缀缓存才有机会命中。
+///
+/// 还没落盘的会话 id 是空串：不发——空键等于所有这样的会话共用一个键。
+pub fn apply_cache_key(body: &mut Value, policy: &WirePolicy, session_id: &str) {
+    if policy.prompt_cache_key && !session_id.is_empty() {
+        body["prompt_cache_key"] = json!(session_id);
+    }
+}
+
 /// 按上游给的 `error.param`（`temperature`、`reasoning.summary`、`tools[2]`……）
 /// 从请求体里去掉那一项。回「真的去掉了东西」——没去掉就**不许重发**（官方：
 /// 绝不原样重发同一个被拒的请求体）。

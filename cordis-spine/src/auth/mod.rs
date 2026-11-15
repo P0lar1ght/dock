@@ -115,6 +115,9 @@ pub fn chatgpt_policy() -> WirePolicy {
         // `store: false` → 服务端不留存，推理项的 id 下次就不认了：必须把
         // 加密内容要回来（多轮回传靠它）。
         include_fields: &["reasoning.encrypted_content"],
+        // 不在禁发的 15 个字段里，实测上游收（200）。2026-11-15 实测这条通道的
+        // 前缀缓存很少命中（相同请求 30 秒后重发仍是 0），带上至少不吃亏。
+        prompt_cache_key: true,
     }
 }
 

@@ -6,7 +6,8 @@
 //! - 订阅那条：必须带 lease 给的 Bearer，请求体按 ChatGPT 的策略改过
 //!   （`store:false`、system 走 `instructions`、官方不收的字段一个都不许发）；
 //! - 密钥那条：必须带自己的 key，请求体跟以前逐字节一样；
-//! - 两个模型同进程并存：各自带各自的，互不串。
+//! - 两个模型同进程并存：各自带各自的，互不串；
+//! - 订阅那条按会话带 `prompt_cache_key`，同一会话同一个键。
 //!
 //! 另外用**真的** `ChatGptProvider` 验两条凭据规则：只有身份 scope 的凭据
 //! 不给 lease（没套餐额度就不许推理），带套餐 scope 的才给。
@@ -27,7 +28,8 @@ use crate::auth::{chatgpt_policy, AuthManager, ChatGptProvider, Credential, Cred
 use crate::host::settings::AppSettings;
 use crate::llm::http::HttpSampler;
 use crate::llm::sampler::Llm;
-use crate::names::{AUTH, SETTINGS};
+use crate::names::{AUTH, SESSIONS, SETTINGS};
+use crate::session::log::Sessions;
 
 /// 官方给套餐额度用的那条 scope（provider 内部常量没导出，这里按官方名字写）。
 const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
@@ -400,6 +402,58 @@ async fn 订阅那条带_lease_的_bearer_并按策略改请求体() {
     }
 }
 
+/// 订阅那条按会话带 `prompt_cache_key`：同一会话的请求同一个键（上游按它路由，
+/// 前缀缓存才有机会命中），换一个会话就换键；还没 id 的会话不发（空键会把这类
+/// 会话全捆到一个键上）。
+#[tokio::test(flavor = "multi_thread")]
+async fn 订阅那条按会话带_prompt_cache_key() {
+    let (_env, _cwd) = isolated_env();
+    let upstream = FakeUpstream::start().await;
+    write_catalog(&upstream.base());
+    let (ctx, _hold_settings, _hold_auth) = ctx_for("wire-oauth");
+    let sessions = Sessions::new(ctx.clone());
+    let _hold_sessions = ctx
+        .provide(SESSIONS, sessions.clone())
+        .expect("挂 sessions");
+
+    // 还没 id：不发。
+    assert!(ask(&ctx, "wire-oauth").await.error.is_none());
+    sessions.assign_ephemeral_id();
+    let first_id = sessions.live_session_id();
+    for _ in 0..2 {
+        assert!(ask(&ctx, "wire-oauth").await.error.is_none());
+    }
+    // 另一个会话（另一页 / 子代理各有自己的 `Sessions`）。
+    let (other_ctx, _hold_settings2, _hold_auth2) = ctx_for("wire-oauth");
+    let other = Sessions::new(other_ctx.clone());
+    other.assign_ephemeral_id();
+    let _hold_other = other_ctx
+        .provide(SESSIONS, other.clone())
+        .expect("挂另一个 sessions");
+    assert!(ask(&other_ctx, "wire-oauth").await.error.is_none());
+
+    let keys: Vec<Option<String>> = upstream
+        .captured()
+        .iter()
+        .map(|req| {
+            let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+            body.get("prompt_cache_key")
+                .map(|k| k.as_str().expect("键是字符串").to_string())
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            None,
+            Some(first_id.clone()),
+            Some(first_id.clone()),
+            Some(other.live_session_id()),
+        ],
+        "同一会话同一个键、换会话换键、没 id 不发"
+    );
+    assert_ne!(first_id, other.live_session_id());
+}
+
 /// 密钥那条：带自己的 key，请求体一个字节都不动。
 #[tokio::test(flavor = "multi_thread")]
 async fn 密钥那条带自己的_key_且请求体不动() {
@@ -407,6 +461,10 @@ async fn 密钥那条带自己的_key_且请求体不动() {
     let upstream = FakeUpstream::start().await;
     write_catalog(&upstream.base());
     let (ctx, _hold_settings, _hold_auth) = ctx_for("wire-key");
+    // 有会话 id 也不该带 `prompt_cache_key`：那是订阅通道策略里的开关。
+    let sessions = Sessions::new(ctx.clone());
+    sessions.assign_ephemeral_id();
+    let _hold_sessions = ctx.provide(SESSIONS, sessions).expect("挂 sessions");
 
     let out = ask(&ctx, "wire-key").await;
     assert!(out.error.is_none(), "请求失败：{out:?}");
@@ -428,6 +486,10 @@ async fn 密钥那条带自己的_key_且请求体不动() {
     assert!(
         body.get("instructions").is_none(),
         "system 不该被挪走：{body}"
+    );
+    assert!(
+        body.get("prompt_cache_key").is_none(),
+        "别家不一定认 prompt_cache_key，多一个字段可能 400：{body}"
     );
     assert!(
         body["input"]
