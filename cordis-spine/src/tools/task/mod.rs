@@ -400,6 +400,17 @@ impl Subagents {
         );
     }
 
+    /// 后台任务 `job_id` 跑完了：通知进起它的那一页 `page` 的信箱（`text` 是排好的正文），
+    /// `wakes` 才叫醒那一页开一轮。见 [`crate::job_notify`]。
+    pub fn notify_job_done(&self, page: &str, job_id: &str, text: String, wakes: bool) {
+        self.store.push_job_done(page, job_id, text, wakes);
+    }
+
+    /// 撤掉还没送到的 `job_id` 跑完通知：模型已经用 `job` 读到了结果。
+    pub fn retract_job_notice(&self, job_id: &str) {
+        self.store.retract_job_done(job_id);
+    }
+
     /// 会话 `parent`（`main#N`）关掉了：丢掉它的信箱唤醒和还没送到的通知。
     pub fn forget_parent(&self, parent: &str) {
         self.store.forget_parent(parent);

@@ -12,6 +12,12 @@ pub const AUTH_CHANGED: &str = "auth/changed";
 pub const TODOS: &str = "todos";
 /// Background jobs (`ctx.jobs`). Bash background + `tool-jobs` consume it.
 pub const JOBS: &str = "jobs";
+/// 一条后台任务（后台 bash、转入后台的前台命令、monitor）跑完了，载荷
+/// [`crate::JobFinished`]。前台命令照常跑完不发：结果已经随那次调用交回。
+pub const JOB_FINISHED: &str = "job/finished";
+/// 模型已经拿到某条后台任务的结果（`job` 读到它跑完、或自己 `kill_task` 停的），载荷
+/// [`crate::JobReported`]。跑完的通知还没送到就撤掉，免得同一个结果再叫醒一次。
+pub const JOB_REPORTED: &str = "job/reported";
 /// `ask_user_question` seam (`ctx.userQuestions`).
 pub const ASK: &str = "ask";
 /// Plan collaboration state (`ctx.planMode`).

@@ -9,7 +9,7 @@ use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
 const PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command or script. Each stdout line is an event; exit ends the watch."},"description":{"type":"string","description":"Short human-readable description of what you are monitoring."},"timeout_ms":{"type":"integer","description":"Kill after this many ms. Ignored when persistent is true. Default 36000000 (10h)."},"persistent":{"type":"boolean","description":"Run until kill_task or session end."}},"required":["command","description"]}"#;
 
-const DESC: &str = "Start a background monitor that streams events from a long-running script. Each stdout line is captured on the job; exit ends the watch.\n\n**Output volume**: Print only DONE/FAILED/CANCELLED. Use grep --line-buffered in pipes.\n\nSet persistent: true for session-length watches. Stop with kill_task.";
+const DESC: &str = "Start a background monitor that streams events from a long-running script. Each stdout line is captured on the job; exit ends the watch, and you are notified when it does.\n\n**Output volume**: Print only DONE/FAILED/CANCELLED. Use grep --line-buffered in pipes.\n\nSet persistent: true for session-length watches. Stop with kill_task.";
 
 pub fn tool_monitor() -> Plugin {
     plugin(
@@ -85,7 +85,8 @@ fn start_monitor(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
              description: {description}\n\
              timeout_ms: {timeout_ms}\n\
              persistent: {persistent}\n\n\
-             When you need its result, use the job tool with job_ids=[\"{id}\"] and a positive timeout_ms. Stop with kill_task."
+             You are notified when it exits (exit status and the end of its output), so do not wait on it. \
+             Read what it has printed so far with the job tool, job_ids=[\"{id}\"]. Stop with kill_task."
         ),
     )
 }

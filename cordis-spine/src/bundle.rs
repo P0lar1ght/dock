@@ -34,7 +34,7 @@ use crate::tools::computer::tool_computer;
 use crate::tools::cron::cron;
 use crate::tools::dynamic_runner::{dynamic_runner, DynamicRunner};
 use crate::tools::goal::{goal_command, goal_service, goal_tool_registration};
-use crate::tools::jobs::{jobs, tool_jobs};
+use crate::tools::jobs::{job_notify, jobs, tool_jobs};
 use crate::tools::lsp::tool_lsp;
 use crate::tools::mcp::mcp_client;
 use crate::tools::memory::tool_memory;
@@ -155,6 +155,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(todo_tool_registration(), ())?.wait().await?;
     ctx.plugin(tool_ask_user(), ())?.wait().await?;
     ctx.plugin(tool_jobs(), ())?.wait().await?;
+    // 后台任务跑完：通知进起它的那一页的信箱，闲着就叫醒那一页（复用子代理信箱）。
+    ctx.plugin(job_notify(), ())?.wait().await?;
     ctx.plugin(tool_scheduler(), ())?.wait().await?;
     ctx.plugin(loop_command(), ())?.wait().await?;
     ctx.plugin(tool_task(), TaskConfig::default())?

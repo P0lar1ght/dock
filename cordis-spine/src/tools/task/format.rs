@@ -104,6 +104,7 @@ pub(super) fn format_parent_notice(notice: &super::store::ParentNotice) -> Strin
             }
             text
         }
+        ParentNotice::JobDone { text, .. } => text.clone(),
         ParentNotice::TurnEnd {
             id,
             subagent_type,

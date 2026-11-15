@@ -441,7 +441,11 @@ fn drain_parent_mailbox(ctx: &Context, sessions: &Sessions) {
     let texts = if sessions.is_main() {
         sub.drain_parent_notices(sessions.identity())
     } else {
-        sub.drain_child_inbox(sessions.identity())
+        let mut texts = sub.drain_child_inbox(sessions.identity());
+        // 子代理自己起的后台任务跑完了：通知按它的身份进信箱，在这里送到（不叫醒它，
+        // 子代理只由父级叫醒；闲着时就等它下一轮开头）。
+        texts.extend(sub.drain_parent_notices(sessions.identity()));
+        texts
     };
     for text in texts {
         sessions.append(LogEvent::SystemReminder(text));
