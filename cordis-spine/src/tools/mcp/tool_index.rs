@@ -72,6 +72,13 @@ pub(super) enum Ranking {
     Ranked(Vec<(usize, f32)>),
 }
 
+/// 分数不到头名这个比例的命中不发。
+///
+/// 那多半是只沾上查询里一个常见词的工具：实测一次搜 `job`，头名 `kill_task`
+/// 48 分，后面跟着十几颗 cua-driver / Wonder / 白板工具（12–27 分），整段描述
+/// 加 schema 进了历史、之后每轮重发，模型却一颗也用不上。
+const MIN_SCORE_OF_TOP: f32 = 0.5;
+
 pub(super) fn rank(docs: &[IndexedTool], query: &str, limit: usize) -> Ranking {
     let q = query.trim().to_lowercase();
     if let Some(i) = docs
@@ -83,9 +90,16 @@ pub(super) fn rank(docs: &[IndexedTool], query: &str, limit: usize) -> Ranking {
     let limit = limit.max(1);
     let hits = bm25_hits(docs, &q, limit);
     if !hits.is_empty() {
-        return Ranking::Ranked(hits);
+        return Ranking::Ranked(close_to_top(hits));
     }
-    Ranking::Ranked(substring_hits(docs, &q, limit))
+    Ranking::Ranked(close_to_top(substring_hits(docs, &q, limit)))
+}
+
+/// 只留分数不低于头名 [`MIN_SCORE_OF_TOP`] 的命中（头名永远在）。
+fn close_to_top(mut hits: Vec<(usize, f32)>) -> Vec<(usize, f32)> {
+    let top = hits.iter().map(|(_, s)| *s).fold(0.0f32, f32::max);
+    hits.retain(|(_, s)| *s >= top * MIN_SCORE_OF_TOP);
+    hits
 }
 
 fn bm25_hits(docs: &[IndexedTool], query: &str, limit: usize) -> Vec<(usize, f32)> {
@@ -252,6 +266,47 @@ mod tests {
         let doc = tool("mcp_linear__create_issue", "linear", "Create an issue");
         assert_eq!(doc.parameters, vec!["issue_id".to_string()]);
         assert!(doc.to_document().contains("issue_id"));
+    }
+
+    /// 只沾上一个常见词的远房命中不发：搜 `job` 拿到 `kill_task` 就够了，
+    /// 描述里碰巧有 "job" 的桌面工具不该跟着进历史。
+    #[test]
+    fn hits_far_below_the_top_are_dropped() {
+        let docs = vec![
+            tool(
+                "kill_task",
+                "jobs",
+                "Terminate a running background job. Use job to list jobs.",
+            ),
+            tool(
+                "mcp_desk__replay",
+                "desk",
+                "Replay a recorded trajectory of desktop actions turn by turn, \
+                 re-invoking each recorded step through the same dispatch path a \
+                 live call uses. Element tokens are per snapshot and do not survive \
+                 across sessions, so pixel clicks and keyboard steps replay cleanly \
+                 while token clicks fail; failures are reported but do not stop the \
+                 job unless stop_on_error is set.",
+            ),
+        ];
+        let Ranking::Ranked(hits) = rank(&docs, "job", 10) else {
+            panic!("exact match not expected");
+        };
+        assert_eq!(
+            hits.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0],
+            "{hits:?}"
+        );
+
+        // 分数相近的都留着：limit 说了算。
+        let even = vec![
+            tool("mcp_linear__save_issue", "linear", "Save an issue"),
+            tool("mcp_linear__list_issues", "linear", "List issues"),
+        ];
+        let Ranking::Ranked(hits) = rank(&even, "linear issue", 10) else {
+            panic!("exact match not expected");
+        };
+        assert_eq!(hits.len(), 2, "{hits:?}");
     }
 
     #[test]

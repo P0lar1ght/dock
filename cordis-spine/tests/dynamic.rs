@@ -1065,7 +1065,7 @@ async fn dynamic_tools_bypass_agent_preset_allowlist() {
     let search_res = exec(&root, "search_tool", r#"{"query":"dynEcho"}"#).await;
     assert!(search_res.contains(DYN_ECHO_TOOL), "{search_res}");
     assert!(
-        search_res.contains("\"server\": \"dynamic\""),
+        search_res.contains("\"server\":\"dynamic\""),
         "动态包工具在目录里归 dynamic 组：{search_res}"
     );
 

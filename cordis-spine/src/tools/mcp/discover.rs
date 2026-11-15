@@ -24,10 +24,11 @@ pub const USE_TOOL_NAME: &str = "use_tool";
 const SEARCH_TOOL_DESC: &str = "Search on-demand tools by keyword and retrieve their input schemas. \
 Matches MCP integrations (the built-in browser is the MCP server `browser`, tools mcp_browser__browser_*), \
 dynamic packages, and the built-in on-demand tools listed below. \
+Tools already in your tool list (bash, read_file, …) are not in this catalog: call them directly. \
 Returns only hits, each with a full input_schema, capped by limit (default 5, max 255). \
 Unmatched tools stay hidden; total_hidden_tools is the catalog size. \
-A hit whose schema is already earlier in this conversation comes back as schema_in_context \
-instead of repeating the schema — call it with use_tool as-is. \
+A hit whose schema is already earlier in this conversation comes back as just its name with \
+schema_in_context — call it with use_tool as-is. \
 Searching an exact tool name always returns that tool's full schema. \
 If status is \"partial\", some MCP servers may still be connecting. \
 Call matched tools with use_tool. Do not guess parameter names.\n";
@@ -56,9 +57,10 @@ const USE_TOOL_PARAMS: &str = r#"{"type":"object","properties":{"tool_name":{"ty
 
 /// Grok `MCP_MAX_OUTPUT_BYTES`.
 pub const USE_TOOL_MAX_OUTPUT_BYTES: usize = 20_000;
-/// `search_tool` 输出预算。`limit` 上限保持 255（Grok parity），预算兜底：
-/// 整个目录灌不进历史。
-pub const SEARCH_MAX_OUTPUT_BYTES: usize = 20_000;
+/// `search_tool` 输出预算（紧凑 JSON 的字节数）。`limit` 上限保持 255（Grok
+/// parity），预算兜底：整个目录灌不进历史。以前按缩进 JSON 计 20KB，换成紧凑
+/// 输出后 15KB 装得下同样多的命中。
+pub const SEARCH_MAX_OUTPUT_BYTES: usize = 15_000;
 /// 预算里能花在 schema 上的部分。剩下的留给工具名——超出后的命中先降级成无
 /// schema 行（还认得出叫什么、能直接 use_tool），预算真的耗尽才整条不发。
 const SEARCH_MAX_SCHEMA_BYTES: usize = SEARCH_MAX_OUTPUT_BYTES * 3 / 5;
@@ -86,7 +88,7 @@ pub fn use_spec() -> ToolSpec {
 }
 
 /// `seen` 是 schema 已经在模型上下文里的工具名（见 [`schemas_in_context`]）：
-/// 命中它们时只回名字与描述，不重复 dump schema。
+/// 命中它们时只回名字，不重复 dump schema，也不重复描述。
 pub fn run_search(
     tools: &Tools,
     exec: &cordis::Context,
@@ -100,7 +102,7 @@ pub fn run_search(
     let docs = hidden_index(tools, exec);
     let total_hidden = docs.len();
     if query.is_empty() {
-        return pretty(json!({
+        return compact(json!({
             "results": [],
             "total_hidden_tools": total_hidden,
             "status": if ready { "ready" } else { "partial" },
@@ -108,7 +110,29 @@ pub fn run_search(
         }));
     }
     // 精确同名命中是重复搜索的逃生舱：永远回完整 schema，不看 `seen`、不看预算。
-    let (hits, exact) = match tool_index::rank(&docs, &query, limit) {
+    // 也压过下面的常驻提示：`mcp_fs__read_file` 点的是那颗 MCP 工具，不是常驻的
+    // `read_file`。
+    let ranking = tool_index::rank(&docs, &query, limit);
+    let resident = match ranking {
+        Ranking::Exact(_) => Vec::new(),
+        Ranking::Ranked(_) => resident_in_query(&query, &model_tool_names(tools, exec)),
+    };
+    // 查询**只**点了常驻工具（`job`、`jobs__job`）：模型要的就是它，只回提示，
+    // 不附带只沾上这个词的按需命中。还有别的词（`job terminate`）照常搜，配套
+    // 的按需工具（`kill_task`）可能正是它要的。
+    if query_only_names_resident(&query, &resident) {
+        let note = search_note(ready, total_hidden, false, false, &resident, 0, 0, 0);
+        let mut out = json!({
+            "results": [],
+            "total_hidden_tools": total_hidden,
+            "status": if ready { "ready" } else { "partial" },
+        });
+        if let Some(note) = note {
+            out["note"] = json!(note);
+        }
+        return compact(out);
+    }
+    let (hits, exact) = match ranking {
         Ranking::Exact(i) => (vec![(i, 1.0f32)], true),
         Ranking::Ranked(hits) => (hits, false),
     };
@@ -119,31 +143,29 @@ pub fn run_search(
     let mut groups: Vec<(String, f32, Vec<Value>)> = Vec::new();
     for (i, score) in hits {
         let Some(doc) = docs.get(i) else { continue };
-        let mut row = json!({
-            "tool_name": doc.name,
-            "description": truncate_description(&doc.description),
-            "score": score,
-        });
-        let degraded: Option<(&str, Value)> = if !exact && seen.contains(&doc.name) {
+        // 分数只用来排序，不发：模型拿它做不了任何事。
+        let row = if !exact && seen.contains(&doc.name) {
+            // schema 和描述都在更早那次搜索的结果里：名字就够 use_tool。
             in_context += 1;
-            Some(("schema_in_context", json!(true)))
+            json!({ "tool_name": doc.name, "schema_in_context": true })
         } else {
-            let mut with_schema = row.clone();
-            with_schema["input_schema"] = doc.schema.clone();
-            let len = row_bytes(&with_schema);
-            if !exact && used.saturating_add(len) > SEARCH_MAX_SCHEMA_BYTES {
+            let with_schema = json!({
+                "tool_name": doc.name,
+                "description": truncate_description(&doc.description),
+                "input_schema": doc.schema,
+            });
+            if !exact && used.saturating_add(row_bytes(&with_schema)) > SEARCH_MAX_SCHEMA_BYTES {
                 over_budget += 1;
-                Some(("schema_omitted", json!("budget")))
+                // 没发 schema 的行不值得再占一大段描述：名字才是 use_tool 要的。
+                json!({
+                    "tool_name": doc.name,
+                    "description": truncate_chars(&doc.description, DEGRADED_DESC_CHARS),
+                    "schema_omitted": "budget",
+                })
             } else {
-                row = with_schema;
-                None
+                with_schema
             }
         };
-        if let Some((key, marker)) = degraded {
-            // 没发 schema 的行不值得再占一大段描述：名字才是 use_tool 要的。
-            row["description"] = json!(truncate_chars(&doc.description, DEGRADED_DESC_CHARS));
-            row[key] = marker;
-        }
         // 降级行同样计进预算：`limit: 255` 灌不出一份超大输出。预算耗尽后连名字
         // 也不再加，note 会说清丢了几条。第一条永远发得出去。
         let bytes = row_bytes(&row);
@@ -170,16 +192,70 @@ pub fn run_search(
         total_hidden,
         result_groups.is_empty(),
         desktop_driver_missing(&query, mcp),
+        &resident,
         in_context,
         over_budget,
         dropped,
     );
-    pretty(json!({
+    let mut out = json!({
         "results": result_groups,
         "total_hidden_tools": total_hidden,
         "status": if ready { "ready" } else { "partial" },
-        "note": note,
-    }))
+    });
+    if let Some(note) = note {
+        out["note"] = json!(note);
+    }
+    compact(out)
+}
+
+/// 模型工具表里**已经有**的工具名（`search_tool` / `use_tool` 自己除外）：
+/// 和采样器发出去的是同一份（[`Tools::specs_for_model_on`]）。
+fn model_tool_names(tools: &Tools, exec: &cordis::Context) -> Vec<String> {
+    tools
+        .specs_for_model_on(exec)
+        .into_iter()
+        .map(|s| s.name)
+        .filter(|n| !is_meta(n))
+        .collect()
+}
+
+/// 查询里点名的、其实已经在工具表里的工具。
+///
+/// 按需目录只收藏起来的工具，常驻的搜不到——模型却常常拿常驻工具的名字来搜：
+/// 实测 gpt-6-luna 为了找常驻的 `job` 连搜五次（`job`、`jobs__job`……），每次
+/// 都只拿回不相干的命中。点名到的词直接告诉它「已经有了」。
+fn resident_in_query(query: &str, resident: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in query_tokens(query) {
+        if let Some(name) = resident_named(token, resident) {
+            if !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// 查询的每个词都是常驻工具名（[`resident_in_query`] 已经挑出来的那些）。
+fn query_only_names_resident(query: &str, resident: &[String]) -> bool {
+    let mut tokens = query_tokens(query).peekable();
+    tokens.peek().is_some() && tokens.all(|token| resident_named(token, resident).is_some())
+}
+
+fn query_tokens(query: &str) -> impl Iterator<Item = &str> {
+    query
+        .split(|c: char| c.is_whitespace() || ",;\"'`()[]{}".contains(c))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
+/// `token` 点的常驻工具。`jobs__job` 这种照 MCP 公名猜的写法取 `__` 之后那段
+/// 再比一次。
+fn resident_named<'a>(token: &str, resident: &'a [String]) -> Option<&'a String> {
+    let tail = token.rsplit("__").next().unwrap_or(token);
+    resident
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(token) || name.eq_ignore_ascii_case(tail))
 }
 
 /// 桌面类查询的关键词。搜不到东西**又**是这类词时，模型该被告知本机还没装
@@ -220,11 +296,19 @@ fn search_note(
     total_hidden: usize,
     empty: bool,
     desktop_driver_missing: bool,
+    resident: &[String],
     in_context: usize,
     over_budget: usize,
     dropped: usize,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
+    if !resident.is_empty() {
+        parts.push(format!(
+            "Already in your tool list, so not in this catalog: {}. Call it directly as its own \
+             tool call (not through use_tool) instead of searching for it.",
+            resident.join(", ")
+        ));
+    }
     if !ready {
         parts.push("Some MCP servers are still connecting. Results may be incomplete.".into());
     }
@@ -252,9 +336,9 @@ fn search_note(
     }
     if in_context > 0 {
         parts.push(format!(
-            "{in_context} result(s) already have their input_schema earlier in this conversation \
-             (schema_in_context) — call them with use_tool directly instead of re-reading the \
-             schema. Search the exact tool name if you must see it again."
+            "{in_context} result(s) already have their description and input_schema earlier in \
+             this conversation (schema_in_context) — call them with use_tool directly instead of \
+             searching again. Search the exact tool name if you must see the schema again."
         ));
     }
     if over_budget > 0 {
@@ -623,17 +707,16 @@ async fn cap_use_tool_output(call_id: &str, content: String) -> String {
     cordis_base::tool_output::cap_bytes(call_id, content, &budget).await
 }
 
-/// 预算按**实际发出去的**缩进 JSON 计（紧凑长度会低估近一倍）。算的是命中行
-/// 本身，分组外壳与嵌套缩进不计——所以整份输出会比预算略大一点，但拦得住
-/// "一次 `limit: 255` 把目录灌进历史"这件事。
+/// 预算按**实际发出去的**紧凑 JSON 计。算的是命中行本身，分组外壳不计——
+/// 所以整份输出会比预算略大一点，但拦得住"一次 `limit: 255` 把目录灌进历史"。
 fn row_bytes(row: &Value) -> usize {
-    serde_json::to_string_pretty(row)
-        .map(|s| s.len())
-        .unwrap_or_else(|_| row.to_string().len())
+    row.to_string().len()
 }
 
-fn pretty(v: Value) -> String {
-    serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
+/// 紧凑 JSON：结果留在历史里、之后每轮重发，缩进换行全是白花的 token（实测
+/// 一次搜索的缩进占了四分之一）。模型读紧凑 JSON 没有障碍。
+fn compact(v: Value) -> String {
+    v.to_string()
 }
 
 fn truncate_description(s: &str) -> String {
@@ -747,7 +830,7 @@ mod tests {
             &seen(),
             r#"{"query":"linear issue"}"#,
         );
-        assert!(ranked.contains("\"server\": \"linear\""), "{ranked}");
+        assert!(ranked.contains("\"server\":\"linear\""), "{ranked}");
         assert!(ranked.contains("total_hidden_tools"), "{ranked}");
     }
 
@@ -799,11 +882,11 @@ mod tests {
         let second = run_search(&tools, &cordis::Context::new(), None, &seen_after, args);
         let rows = |out: &str| serde_json::from_str::<Value>(out).unwrap()["results"].to_string();
         assert!(!rows(&second).contains("input_schema"), "{second}");
-        assert!(second.contains("\"schema_in_context\": true"), "{second}");
+        assert!(second.contains("\"schema_in_context\":true"), "{second}");
         // 名字还在，模型照样能 use_tool。
         assert!(second.contains("mcp_linear__save_issue"), "{second}");
         assert!(
-            second.contains("already have their input_schema"),
+            second.contains("already have their description and input_schema"),
             "{second}"
         );
         // 省下来的是 schema 那一坨，跟 note 的长短无关。
@@ -905,7 +988,7 @@ mod tests {
             "预算应挡住整份目录：{}",
             out.len()
         );
-        assert!(out.contains("\"schema_omitted\": \"budget\""), "{out}");
+        assert!(out.contains("\"schema_omitted\":\"budget\""), "{out}");
         assert!(out.contains("narrow the query"), "{out}");
         // 降级的只是 schema，工具名一条不少。
         let rows: usize = parsed["results"]
@@ -963,7 +1046,7 @@ mod tests {
             &seen(),
             r#"{"query":"定时任务"}"#,
         );
-        assert!(miss.contains("\"results\": []"), "{miss}");
+        assert!(miss.contains("\"results\":[]"), "{miss}");
         assert!(miss.contains("No tool matched"), "{miss}");
         assert!(miss.contains("2 on-demand tools are registered"), "{miss}");
     }
@@ -1109,6 +1192,211 @@ mod tests {
         assert!(native.content.contains("bash"), "{native:?}");
     }
 
+    /// 实测会话的目录：常驻 `job` / `bash`，按需 `kill_task`，外加几颗描述里碰巧
+    /// 带 "job" 的桌面 / 设计工具。
+    fn job_catalog(tools: &Tools) -> Vec<cordis::Disposable> {
+        let noise = "Replay a recorded trajectory of desktop actions turn by turn, \
+                     re-invoking each recorded step through the same dispatch path a live \
+                     call uses. Element tokens are per snapshot and do not survive across \
+                     sessions, so pixel clicks and keyboard steps replay cleanly while token \
+                     clicks fail; failures are reported but do not stop the job.";
+        let mut keep = vec![
+            tools
+                .register(
+                    spec("job", "List background jobs or read their output."),
+                    stub_body(),
+                )
+                .unwrap(),
+            tools
+                .register(spec("bash", "Run a shell command."), stub_body())
+                .unwrap(),
+            tools
+                .register_deferred(
+                    spec(
+                        "kill_task",
+                        "Terminate a running background job. Use job to list jobs.",
+                    ),
+                    stub_body(),
+                )
+                .unwrap(),
+        ];
+        for i in 0..6 {
+            keep.push(
+                tools
+                    .register_mcp(spec(&format!("mcp_desk__replay_{i}"), noise), stub_body())
+                    .unwrap(),
+            );
+        }
+        keep
+    }
+
+    fn hit_names(out: &str) -> Vec<String> {
+        let parsed: Value = serde_json::from_str(out).expect("JSON");
+        parsed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| g["tools"].as_array().unwrap().iter())
+            .map(|r| r["tool_name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// 回归（gpt-6-luna 实测会话）：模型拿常驻的 `job` 来搜，`job`、`jobs__job`、
+    /// 一长串关键词各搜一次，每次只拿回 `kill_task` 加一串不相干的桌面工具，连搜
+    /// 五次。现在点名到常驻工具时直接说「已经在你的工具表里」，远房命中也不再发。
+    #[test]
+    fn searching_for_a_resident_tool_says_it_is_already_there() {
+        let ctx = cordis::Context::new();
+        let tools = Tools::echo(ctx);
+        let _keep = job_catalog(&tools);
+        let exec = cordis::Context::new();
+
+        for query in ["job", "jobs__job"] {
+            let out = run_search(
+                &tools,
+                &exec,
+                None,
+                &seen(),
+                &json!({ "query": query, "limit": 20 }).to_string(),
+            );
+            let parsed: Value = serde_json::from_str(&out).unwrap();
+            let note = parsed["note"].as_str().unwrap_or_default();
+            assert!(note.contains("Already in your tool list"), "{query}: {out}");
+            assert!(note.contains("job"), "{query}: {out}");
+            assert!(hit_names(&out).is_empty(), "不要回远房命中：{out}");
+            assert!(!out.contains("input_schema"), "{out}");
+        }
+
+        // 含额外能力词的查询仍搜索隐藏目录，避免短路掉真正想找的配套工具。
+        let mixed = run_search(&tools, &exec, None, &seen(), r#"{"query":"job terminate"}"#);
+        assert!(
+            hit_names(&mixed).contains(&"kill_task".to_string()),
+            "{mixed}"
+        );
+
+        let long = run_search(
+            &tools,
+            &exec,
+            None,
+            &seen(),
+            r#"{"query":"Dock session bash background job job_ids","limit":20}"#,
+        );
+        let long_value = serde_json::from_str::<Value>(&long).unwrap();
+        let note = long_value["note"].as_str().unwrap_or_default();
+        assert!(note.contains("Already in your tool list"), "{long}");
+        assert!(note.contains("job"), "{long}");
+        assert!(
+            !hit_names(&long).iter().any(|n| n.starts_with("mcp_desk__")),
+            "只沾上一个 job 的桌面工具不该跟着发（{long}）"
+        );
+
+        let both = run_search(
+            &tools,
+            &exec,
+            None,
+            &seen(),
+            r#"{"query":"Dock session bash background job"}"#,
+        );
+        assert!(
+            both.contains("bash, job") || both.contains("job, bash"),
+            "{both}"
+        );
+
+        // 没点名常驻工具：不多这一句。
+        let plain = run_search(&tools, &exec, None, &seen(), r#"{"query":"terminate"}"#);
+        assert!(!plain.contains("Already in your tool list"), "{plain}");
+        // 照抄常驻工具描述里的词（"shell"）不算点名。
+        let word = run_search(&tools, &exec, None, &seen(), r#"{"query":"shell"}"#);
+        assert!(!word.contains("Already in your tool list"), "{word}");
+    }
+
+    /// 精确点名一颗隐藏工具时，逃生舱照旧：filesystem 那类 MCP 服务器常有同名的
+    /// `read_file`，搜 `mcp_fs__read_file` 要的是**那颗**的 schema，不能因为 `__`
+    /// 后面那段撞上常驻的 `read_file` 就短路成一句「已经有了」。
+    #[test]
+    fn an_exact_hidden_name_beats_a_resident_namesake() {
+        let ctx = cordis::Context::new();
+        let tools = Tools::echo(ctx);
+        let _resident = tools
+            .register(spec("read_file", "Read a workspace file."), stub_body())
+            .unwrap();
+        let _mcp = tools
+            .register_mcp(
+                spec("mcp_fs__read_file", "Read a file from the mounted share."),
+                stub_body(),
+            )
+            .unwrap();
+        let out = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &seen(),
+            r#"{"query":"mcp_fs__read_file"}"#,
+        );
+        assert_eq!(hit_names(&out), vec!["mcp_fs__read_file"], "{out}");
+        assert!(out.contains("input_schema"), "{out}");
+        assert!(!out.contains("Already in your tool list"), "{out}");
+    }
+
+    /// 预设没给的工具不能说「已经有了」：模型照着去调只会被拒。
+    #[test]
+    fn a_tool_outside_the_preset_is_not_called_resident() {
+        let ctx = cordis::Context::new();
+        let mut preset = crate::agent::presets::AgentPreset::new("probe");
+        preset.tools = Some(
+            ["bash", SEARCH_TOOL_NAME, USE_TOOL_NAME]
+                .map(String::from)
+                .to_vec(),
+        );
+        let _p = ctx
+            .provide(crate::AGENT_PRESETS, crate::AgentPresets::overlay(preset))
+            .unwrap();
+        let tools = Tools::echo(ctx.clone());
+        let _keep = job_catalog(&tools);
+        let out = run_search(&tools, &ctx, None, &seen(), r#"{"query":"bash job"}"#);
+        let note = serde_json::from_str::<Value>(&out).unwrap()["note"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            note.contains("tool list, so not in this catalog: bash."),
+            "{out}"
+        );
+        assert!(!note.contains("job"), "预设里没有 job：{out}");
+    }
+
+    /// 结果留在历史里、之后每轮重发：不缩进、不带分数；schema 已在上下文里的命中
+    /// 只剩名字（描述上次已经给过）。
+    #[test]
+    fn search_output_spends_nothing_on_layout_scores_or_repeats() {
+        let ctx = cordis::Context::new();
+        let tools = Tools::echo(ctx);
+        let _fat = fat_tools(&tools);
+        let args = r#"{"query":"issue"}"#;
+        let first = run_search(&tools, &cordis::Context::new(), None, &seen(), args);
+        assert!(!first.contains('\n'), "该是紧凑 JSON：{first}");
+        assert!(!first.contains("score"), "分数只用来排序：{first}");
+
+        let again = run_search(
+            &tools,
+            &cordis::Context::new(),
+            None,
+            &schemas_in_context(&[search_row(&first)]),
+            args,
+        );
+        let parsed: Value = serde_json::from_str(&again).unwrap();
+        for group in parsed["results"].as_array().unwrap() {
+            for row in group["tools"].as_array().unwrap() {
+                assert_eq!(
+                    row.as_object().unwrap().keys().collect::<Vec<_>>(),
+                    vec!["schema_in_context", "tool_name"],
+                    "{again}"
+                );
+            }
+        }
+        assert_eq!(hit_names(&again), hit_names(&first), "名字一个不少");
+    }
+
     #[test]
     fn search_includes_deferred_local_and_caps_limit() {
         let ctx = cordis::Context::new();
@@ -1130,8 +1418,8 @@ mod tests {
             r#"{"query":"scheduler"}"#,
         );
         assert!(found.contains("scheduler_create"), "{found}");
-        assert!(found.contains("\"server\": \"scheduler\""), "{found}");
-        assert!(found.contains("\"total_hidden_tools\": 2"), "{found}");
+        assert!(found.contains("\"server\":\"scheduler\""), "{found}");
+        assert!(found.contains("\"total_hidden_tools\":2"), "{found}");
         assert_eq!(parse_limit(r#"{"query":"x","limit":999}"#), 255);
         assert_eq!(parse_limit(r#"{"query":"x"}"#), 5);
         assert_eq!(parse_limit(r#"{"query":"x","limit":0}"#), 5);
@@ -1184,7 +1472,7 @@ mod tests {
         assert!(found.contains("canvas_create"), "{found}");
         assert!(found.contains("mcp_linear__create_issue"), "{found}");
         assert!(!found.contains("scheduler_create"), "{found}");
-        assert!(found.contains("\"total_hidden_tools\": 2"), "{found}");
+        assert!(found.contains("\"total_hidden_tools\":2"), "{found}");
     }
 
     #[test]
@@ -1210,7 +1498,7 @@ mod tests {
         );
         let n = limited.matches("probe_tool_").count();
         assert_eq!(n, 3, "{limited}");
-        assert!(limited.contains("\"total_hidden_tools\": 8"), "{limited}");
+        assert!(limited.contains("\"total_hidden_tools\":8"), "{limited}");
     }
 
     #[tokio::test]
